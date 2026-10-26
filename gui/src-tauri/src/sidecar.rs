@@ -684,19 +684,34 @@ pub(crate) fn terminate_process_tree(pid: u32) -> Result<(), String> {
 
 #[cfg(unix)]
 fn process_group_alive(pid: u32) -> bool {
-    let Ok(output) = sidecar_command("ps")
+    if let Ok(output) = sidecar_command("ps")
         .args(["-A", "-o", "pgid=,stat="])
+        .output()
+    {
+        if output.status.success() {
+            let group = pid.to_string();
+            return String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                fields.next() == Some(group.as_str())
+                    && fields.next().is_some_and(|stat| !stat.starts_with('Z'))
+            });
+        }
+    }
+    // 某些受限环境（GUI 沙箱、精简容器）不允许执行 `ps`；直接当作“组已退出”会让后台
+    // helper 继续持有 stdout/stderr 管道，reader 线程一直等到 helper 自然退出。`pgrep -g`
+    // 不读 ps 的进程表格式，能只按进程组判断还有没有活进程。
+    pgrep_group_alive(pid)
+}
+
+#[cfg(unix)]
+fn pgrep_group_alive(pid: u32) -> bool {
+    let Ok(output) = sidecar_command("pgrep")
+        .args(["-g", &pid.to_string()])
         .output()
     else {
         return false;
     };
-    let group = pid.to_string();
-    output.status.success()
-        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            fields.next() == Some(group.as_str())
-                && fields.next().is_some_and(|stat| !stat.starts_with('Z'))
-        })
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
 // 每个进程组终止要等约 300 ms 确认退出；批量停 90 个站点时同步命令会让窗口卡几十秒。

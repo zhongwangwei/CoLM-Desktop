@@ -112,17 +112,32 @@ fn sweep(dir: &Path, program: &str, alive: impl Fn(u32) -> Option<String>) -> Ve
 /// 这个 PID 仍是一个自成进程组的活进程时返回它的命令行。
 #[cfg(unix)]
 fn alive_colm_cli(pid: u32) -> Option<String> {
-    let output = crate::sidecar::sidecar_command("ps")
+    if let Ok(output) = crate::sidecar::sidecar_command("ps")
         .args(["-p", &pid.to_string(), "-o", "pgid=,stat=,command="])
         .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let line = text.lines().next()?.trim();
+            let mut fields = line.splitn(3, char::is_whitespace);
+            let group = fields.next()?;
+            let stat = fields.next()?.trim();
+            let command = fields.next().unwrap_or("").trim();
+            return (group == pid.to_string() && !stat.starts_with('Z'))
+                .then(|| command.to_owned());
+        }
+    }
+    // 与 `process_group_alive` 相同：沙箱里 `ps` 可能不可执行。`pgrep -g` 只用于
+    // 确认这个 PID 还是进程组 leader；`sweep` 仍会再核对命令行里有没有登记的程序名。
+    let output = crate::sidecar::sidecar_command("pgrep")
+        .args(["-fl", "-g", &pid.to_string()])
+        .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().next()?.trim();
-    let mut fields = line.splitn(3, char::is_whitespace);
-    let group = fields.next()?;
-    let stat = fields.next()?.trim();
-    let command = fields.next().unwrap_or("").trim();
-    (group == pid.to_string() && !stat.starts_with('Z')).then(|| command.to_owned())
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    text.lines().next().map(str::to_owned)
 }
 
 #[cfg(windows)]

@@ -37504,3 +37504,14 @@ job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry �
 - 新增 `dynamic lake label says it is a lake patch and not river routing`；
 - GUI `npm test` **890 通过 / 0 失败**；`config::` 后端测试 **158 通过 / 0 失败**；typecheck、lint、format、clippy、两套 fmt 均通过。
 - 完整 `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` 仍有 2 个与本改动无关的环境失败（sidecar 创建超时 / 崩溃窗口清理），已确认新测试与 config 测试全过。
+
+## 第 822 轮：GUI 进程组检查在受限沙箱下的兜底（2026-10-26）
+
+第 821 轮记录的两个 GUI Rust 测试失败（`creation_drains_both_pipes_and_reaps_leftover_children`、`a_run_left_by_a_crashed_window_is_stopped_on_the_next_start`）不是业务回归：当前运行环境禁止执行 `/bin/ps`（`Operation not permitted`），`process_group_alive`/`alive_colm_cli` 把“查不到”当成“进程组已退出”，后台 helper 继续持有 stdout/stderr 管道，capture 的 reader 线程等到 helper 自然退出；live-runs 则直接漏掉孤儿进程。
+
+**修复**：
+- `process_group_alive` 在 `ps` 不可执行或返回失败时用 `pgrep -g <pid>` 判活；
+- `alive_colm_cli` 在同样情况下用 `pgrep -fl -g <pid>` 拿进程组命令行，`sweep` 继续核对登记的程序名，不放松 PID 复用防护；
+- 两者都只在 `ps` 路径不可用时才走 `pgrep`，正常环境行为不变。
+
+**验证**：两个失败用例分别通过；完整 `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` **443 passed / 0 failed / 1 ignored**；GUI clippy、两套 fmt、前端 `npm test` 890 通过。
