@@ -37543,3 +37543,5 @@ job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry �
 - GUI Rust lib **444 passed / 0 failed / 1 ignored**；`colm-remote` **116 passed**；CLI `ssh_auth` **1 passed**；
 - GUI `npm test` **891 passed**；typecheck、lint、format、clippy、两套 fmt 通过；
 - 实际 tianhe config 模式 `remote-probe` 成功（临时 history DB，未写用户配置）。
+
+**同轮补充 UI 提示**：资源页 key 模式提示「带口令私钥先用 ssh-add 加入 ssh-agent，应用不保存口令」；password 模式提示「只支持 SSH password，不支持键盘交互/一次性动态口令，OTP 请用 SSH config」。前端 `npm test` **892 通过 / 0 失败**，typecheck/lint/format 通过。

@@ -1111,24 +1111,40 @@ export default function ResourcesPage() {
               />
             </div>
           )}
+          {editor.auth === 'key' && (
+            <Notice>
+              {t(
+                '带口令的私钥请先用 ssh-add 加入 ssh-agent；应用不接收、也不保存私钥口令。',
+                'For passphrase-protected keys, load the key into ssh-agent with ssh-add first; the app never asks for or stores the passphrase.',
+              )}
+            </Notice>
+          )}
           {editor.auth === 'password' && (
-            <Field label={t('密码（仅本次原生会话）', 'Password (native session only)')}>
-              <div className="browse-input">
-                <Input
-                  type="password"
-                  autoComplete="new-password"
-                  disabled={busy}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-                <Button
-                  disabled={busy || !password || !editor.host}
-                  onClick={() => run('credentials', registerPassword)}
-                >
-                  {t('登记密码', 'Register password')}
-                </Button>
-              </div>
-            </Field>
+            <>
+              <Field label={t('密码（仅本次原生会话）', 'Password (native session only)')}>
+                <div className="browse-input">
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    disabled={busy}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                  <Button
+                    disabled={busy || !password || !editor.host}
+                    onClick={() => run('credentials', registerPassword)}
+                  >
+                    {t('登记密码', 'Register password')}
+                  </Button>
+                </div>
+              </Field>
+              <Notice>
+                {t(
+                  '密码模式仅支持 SSH password 认证，不支持键盘交互或一次性动态口令；需要动态口令时请用 SSH config，并先在终端里建立连接。',
+                  'Password mode supports SSH password authentication only; it cannot answer keyboard-interactive or one-time-code prompts. For OTP, use SSH config with an existing terminal connection.',
+                )}
+              </Notice>
+            </>
           )}
           <div className="resource-identity">
             {field('resource-root')}

@@ -997,6 +997,15 @@ test('SSH aliases local and new remain server selections, and new servers expose
   assert.equal((contract.details as { selected: string }).selected, 'new');
   assert.ok(contract.fields.some((field) => field.id === 'resource-root'));
 });
+test('key and password modes explain agent and password-only constraints', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-auth', 'key');
+  assert.match(page.text(page.nodes()), /ssh-add/);
+  page.fill('resource-auth', 'password');
+  assert.match(page.text(page.nodes()), /一次性动态口令/);
+});
+
 test('leaving key authentication clears the hidden identity path', () => {
   const editor = {
     ...resource.newServer(),
