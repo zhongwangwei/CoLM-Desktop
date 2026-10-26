@@ -902,7 +902,7 @@ impl MonthlyLeafAreaIndex {
                     let path = directory
                         .join(format!("{year:04}"))
                         .join(format!("{stem}{month:02}_{block}.nc"));
-                    let file = colm_init::RestartFile::open(&path)
+                    let file = colm_init::RestartFile::open_cached(&path)
                         .with_context(|| format!("cannot open {}", path.display()))?;
                     file.floats(variable)?
                         .get(*patch)
@@ -1116,8 +1116,8 @@ pub fn assemble_standard_lct_snow_template(
 /// 一次，这里的作用是让调用方不必靠"先试无雪、报错了再试积雪"来猜 ——
 /// 那种写法会把真正的装配错误也当成"该走另一支"。
 pub fn restart_has_snow_column(files: &RestartStateFiles, patch: usize) -> Result<bool> {
-    let constant = RestartFile::open(&files.constant)?;
-    let time = RestartFile::open(&files.time)?;
+    let constant = RestartFile::open_cached(&files.constant)?;
+    let time = RestartFile::open_cached(&files.time)?;
     let soil_layers = constant.dimension("soil")?;
     let patches = constant.dimension("patch")?;
     ensure!(
@@ -1146,7 +1146,7 @@ fn assemble(
     patch: usize,
     physics: LandPhysicsParameters,
 ) -> Result<StandardLctRestartTemplate> {
-    let constant = RestartFile::open(&files.constant)?;
+    let constant = RestartFile::open_cached(&files.constant)?;
     // `wetwatmax`：上游运行期从常数重启读（`MOD_Vars_TimeInvariants.F90:602`），mkinidata 按
     // `DEF_TUNING_WETWATMAX` 写入。旧重启没有这个变量时沿用 namelist 的值。
     let mut physics = physics;
@@ -1155,7 +1155,7 @@ fn assemble(
             physics.wetland_water_capacity_mm = value;
         }
     }
-    let time = RestartFile::open(&files.time)?;
+    let time = RestartFile::open_cached(&files.time)?;
     let soil_layers = constant.dimension("soil")?;
     let patches = constant.dimension("patch")?;
     ensure!(
@@ -3586,9 +3586,9 @@ impl UrbanTemplate {
         };
         let constant_path = rename(&files.constant, "_restart_const_", "_restart_urb_const_")?;
         let time_path = rename(&files.time, "_restart_", "_restart_urban_")?;
-        let constant = RestartFile::open(&constant_path)
+        let constant = RestartFile::open_cached(&constant_path)
             .with_context(|| format!("cannot open {}", constant_path.display()))?;
-        let time = RestartFile::open(&time_path)
+        let time = RestartFile::open_cached(&time_path)
             .with_context(|| format!("cannot open {}", time_path.display()))?;
         // `landurban` 按 landpatch 里城市 patch 的顺序建（`urban2patch` 单调），
         // 所以本 patch 的城市单元号就是它前面城市 patch 的个数。

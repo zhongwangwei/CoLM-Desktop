@@ -87,6 +87,23 @@ pub enum RestartValueType {
 }
 
 impl RestartFile {
+    /// 只按路径查缓存，不 `stat` 文件。仅供**同一段只读装配**使用：调用方保证文件在
+    /// 这段装配期间不会被改写；否则会拿到旧的 `RestartFile`。
+    ///
+    /// 空间装配对同一块的 constant/time 重启每个 patch 都要 `open` 好几次。`open` 即使
+    /// 命中缓存也会先 `metadata` 取 mtime/len；5.7M patch 时这是数千万次 syscall，
+    /// 实测是启动装配的主要成本之一。
+    pub fn open_cached(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        {
+            let cache = RESTART_CACHE.lock().expect("restart cache lock");
+            if let Some((_, file)) = cache.iter().find(|(cached, _)| cached.0 == path) {
+                return Ok(file.clone());
+            }
+        }
+        Self::open(path)
+    }
+
     /// 读一份 restart。类型不在已知之列即报错 —— 那说明写出器换了格式，
     /// 静默跳过会让调用方拿着缺字段的状态跑下去。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

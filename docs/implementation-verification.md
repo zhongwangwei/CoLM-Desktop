@@ -37381,3 +37381,13 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - `initial_totals`（history 收支参考态）：同样按 patch 并行；每 patch 只读自己的 template/state，求和顺序不变。
 
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。
+
+## 第 814 轮：装配期只读 restart 缓存跳过每次 stat（本地）
+
+**问题**：`RestartFile::open` 即使命中内存缓存，也会先 `std::fs::metadata` 取 `(path, mtime, len)` 作为缓存键。空间装配对同一块 constant/time 重启每个 patch 要打开好几次；5.7M patch 时是数千万次 syscall，启动装配 70–76 s 里占主要部分。
+
+**改动**：新增 `RestartFile::open_cached`，只按路径查缓存；装配路径（`assembly.rs` 的 restart/LAI/urban 读取）改用 `open_cached`。调用方保证同一段只读装配内文件不被改写（装配不写输入 restart）。缓存未命中时仍回退到 `open` 的完整 metadata 键路径。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（214 通过 / 2 ignored）；`cargo test -p colm-init --lib`（189 通过 / 9 ignored）；clippy、fmt。
+
+**未做**：tianhe 启动装配 wall clock（本轮不连天河）。
