@@ -357,6 +357,36 @@ fn passwords_are_session_only_and_bound_to_the_connection() {
 }
 
 #[test]
+fn auth_payload_only_sends_an_identity_file_in_key_mode() {
+    let mut server: Server = serde_json::from_value(json!({
+        "host": "identity-mode-test",
+        "root": "/data/colm",
+        "auth": "config",
+        "identity_file": "/tmp/id_ed25519"
+    }))
+    .unwrap();
+    assert_eq!(auth_payload(&server).unwrap()["identity_file"], "");
+    server.auth = "key".into();
+    assert_eq!(
+        auth_payload(&server).unwrap()["identity_file"],
+        "/tmp/id_ed25519"
+    );
+    server.auth = "password".into();
+    remote_set_password(
+        server.host.clone(),
+        server.username.clone(),
+        server.port,
+        "identity-test-secret".into(),
+    )
+    .unwrap();
+    assert_eq!(auth_payload(&server).unwrap()["identity_file"], "");
+    passwords()
+        .lock()
+        .unwrap()
+        .remove(&(server.host, server.username, server.port));
+}
+
+#[test]
 fn connection_options_reject_invalid_modes_users_and_relative_keys() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     for user in ["-root", "alice@host", "alice bob", "alice\nroot"] {

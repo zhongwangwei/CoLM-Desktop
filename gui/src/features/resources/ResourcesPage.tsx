@@ -388,7 +388,13 @@ export default function ResourcesPage() {
   function editField(key: keyof Server, value: string) {
     if (key === 'auth' && value !== 'password') setPassword('');
     if (editor)
-      editServer({ ...editor, [key]: typeof editor[key] === 'number' ? Number(value) : value });
+      editServer({
+        ...editor,
+        [key]: typeof editor[key] === 'number' ? Number(value) : value,
+        // 密钥文件只在 key 认证下有意义；切走时清掉，否则后端会把它带进 CLI，
+        // CLI 的 Auth::validate 会以“非 key 模式不应有 identity_file”拒绝整条命令。
+        ...(key === 'auth' && value !== 'key' ? { identity_file: '' } : {}),
+      });
   }
   async function saveLocalData() {
     if (!configLoaded)

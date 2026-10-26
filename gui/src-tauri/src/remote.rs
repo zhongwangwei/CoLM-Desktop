@@ -629,9 +629,16 @@ fn auth_payload(server: &Server) -> Result<Value, String> {
     } else {
         None
     };
+    // 旧配置可能保留了切到 config/password 前选过的密钥路径；CLI 的 Auth::validate
+    // 只在 key 模式接受 identity_file，这里必须按当前认证方式重新决定是否发送。
+    let identity_file = if server.auth == "key" {
+        server.identity_file.as_str()
+    } else {
+        ""
+    };
     Ok(
         json!({"host": server.host, "username": server.username, "port": server.port,
-        "auth": server.auth, "identity_file": server.identity_file, "password": password}),
+        "auth": server.auth, "identity_file": identity_file, "password": password}),
     )
 }
 

@@ -997,6 +997,27 @@ test('SSH aliases local and new remain server selections, and new servers expose
   assert.equal((contract.details as { selected: string }).selected, 'new');
   assert.ok(contract.fields.some((field) => field.id === 'resource-root'));
 });
+test('leaving key authentication clears the hidden identity path', () => {
+  const editor = {
+    ...resource.newServer(),
+    auth: 'key',
+    identity_file: '/private/id_ed25519',
+  };
+  let password = 'secret',
+    next: unknown;
+  callback('editField', {
+    editor,
+    setPassword: (value: string) => {
+      password = value;
+    },
+    editServer: (server: unknown) => {
+      next = server;
+    },
+  })('auth', 'config');
+  assert.equal(password, '');
+  assert.deepEqual(next, { ...editor, auth: 'config', identity_file: '' });
+});
+
 test('leaving password authentication clears the hidden password draft', () => {
   const editor = { ...resource.newServer(), auth: 'password' };
   let password = 'secret',

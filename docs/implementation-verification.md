@@ -37515,3 +37515,31 @@ job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry �
 - 两者都只在 `ps` 路径不可用时才走 `pgrep`，正常环境行为不变。
 
 **验证**：两个失败用例分别通过；完整 `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` **443 passed / 0 failed / 1 ignored**；GUI clippy、两套 fmt、前端 `npm test` 890 通过。
+
+## 第 823 轮：远程 SSH 认证深查与 identity_file 修复（2026-10-26）
+
+**检查范围**：GUI 资源页的认证方式（SSH config / 密钥 / 密码）、密码登记与保存、密钥路径、主机密钥、ControlMaster、密码 broker、错误脱敏、作业记录绑定，以及 CLI 侧 `Auth`/`Ssh` 实现。
+
+**确认正常**：
+- 密码只存在 GUI 进程内存，按 `(host, username, port)` 绑定；`remote.json` 不写密码，作业记录只存非秘密 `ssh_auth`，错误信息会脱敏；
+- 密码经 GUI → CLI stdin JSON → 带 64 字节随机令牌的 loopback askpass broker 交给 `ssh`，不进命令行/环境变量；
+- 密码模式只启用 SSH `password` 认证，不复用已有 ControlMaster；密钥模式用 `-i/IdentitiesOnly`，config 模式保留用户的 `~/.ssh/config`、ProxyJump 与 ControlMaster；
+- 显式 key/password 模式强制 `StrictHostKeyChecking=yes`；config 模式沿用用户配置；
+- 实际用 config 模式对 tianhe 跑 `colm-cli remote-probe` 成功返回 hostname/分区/根目录；key 模式对 tianhe 因该别名配置了 `UserKnownHostsFile /dev/null` 被严格主机密钥检查拒绝，这是策略预期，不是连接实现错误。
+
+**发现并修复一个真实缺陷**：
+- 资源页从「密钥」切到「SSH config」或「密码」时只清空密码草稿，没有清空隐藏的 `identity_file`；后端 `validate_connection` 不拒绝 config/password + 非空 identity，而 CLI 的 `Auth::validate` 只在 key 模式接受 identity_file，于是**保存后每次探测/提交都会失败**。
+- 前端 `editField` 在切走 key 时清空 `identity_file`；
+- 后端 `auth_payload` 按当前认证方式决定是否发送 identity_file，兼容旧 `remote.json` 里遗留的路径；
+- 新增前端/后端测试覆盖切换认证与旧配置。
+
+**仍属已知限制（非本次改动引入）**：
+- 带口令的私钥依赖 ssh-agent，GUI 不接收私钥口令；
+- 密码模式只支持 SSH `password`，不支持键盘交互/一次性动态口令；动态口令需用 SSH config + 终端里已有的 ControlMaster；
+- Windows 自带 OpenSSH 的 ControlMaster/密码模式支持受限，文档建议 config/key；
+- 跳板机认证使用跳板机自己的 SSH 配置，密码模式的密码只给目标服务器。
+
+**验证**：
+- GUI Rust lib **444 passed / 0 failed / 1 ignored**；`colm-remote` **116 passed**；CLI `ssh_auth` **1 passed**；
+- GUI `npm test` **891 passed**；typecheck、lint、format、clippy、两套 fmt 通过；
+- 实际 tianhe config 模式 `remote-probe` 成功（临时 history DB，未写用户配置）。
