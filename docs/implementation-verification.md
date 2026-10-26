@@ -37354,3 +37354,16 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **未做**：tianhe 本轮按要求不连接；8 节点 wall clock、1 vs 2 node 字节对照、本地合成 bitwise 对照均未做。
 
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+## 第 811 轮：CellForcing 列搬移，去掉每步整列 clone（本地）
+
+`GriddedForcing::step` 原来把 `values[0..7]` 逐列 `clone` 进 `CellForcing`，JRA3Q 每步 8 列 × 约 20 万格。现在：
+
+- `t/q/solarin/frl/us/vs/hpbl` 用 `std::mem::take` 搬移；
+- `psrf/pbot` 同源，只保留一次 clone（原来两次）；
+- `prl/prc` 仍从同一列做两次比例计算，不做额外分配；
+- 数值、列序、后续 `out.solarin` 等读取路径不变。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。
+
+**未做**：tianhe wall clock、1 vs 2 node 字节对照（本轮按要求不连天河）。

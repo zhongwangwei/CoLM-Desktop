@@ -1137,16 +1137,21 @@ impl GriddedForcing {
         let skipped = (0..n).into_par_iter().map(missing_cell).collect::<Vec<_>>();
         metpreprocess(self.config.dataset.trim(), &mut values, n, &skipped)?;
         // 风：两支都有就各用各的；只有一支时那一支乘 `1/sqrt(2)` 给两支（`sca = 1/sqrt(2.0_r8)`）。
+        // 这些列在本步后面只通过 `out` 使用，直接搬移而不是整列 clone：JRA3Q 每步
+        // 8 个变量各 200k 个 f64，原来的 clone 是 10 MB/步级别的纯拷贝。
         let (us, vs) = match (
             self.config.variables[4].is_null(),
             self.config.variables[5].is_null(),
         ) {
-            (false, false) => (values[4].clone(), values[5].clone()),
+            (false, false) => (
+                std::mem::take(&mut values[4]),
+                std::mem::take(&mut values[5]),
+            ),
             (false, true) | (true, false) => {
                 let one = if self.config.variables[4].is_null() {
-                    &values[5]
+                    std::mem::take(&mut values[5])
                 } else {
-                    &values[4]
+                    std::mem::take(&mut values[4])
                 };
                 let scale = 1.0 / 2.0_f64.sqrt();
                 let wind = one.par_iter().map(|w| w * scale).collect::<Vec<_>>();
@@ -1155,18 +1160,19 @@ impl GriddedForcing {
             (true, true) => unreachable!("checked when the configuration was read"),
         };
         let mut out = CellForcing {
-            t: values[0].clone(),
-            q: values[1].clone(),
+            t: std::mem::take(&mut values[0]),
+            q: std::mem::take(&mut values[1]),
+            // psrf/pbot 同源：只克隆一份（原来两份都 clone）。
             psrf: values[2].clone(),
-            pbot: values[2].clone(),
+            pbot: std::mem::take(&mut values[2]),
             // `block_data_copy (forcn(4), forc_xy_prl, sca = 2/3._r8)`：比例先算。
             prl: values[3].par_iter().map(|p| p * (2.0 / 3.0)).collect(),
             prc: values[3].par_iter().map(|p| p * (1.0 / 3.0)).collect(),
-            solarin: values[6].clone(),
-            frl: values[7].clone(),
+            solarin: std::mem::take(&mut values[6]),
+            frl: std::mem::take(&mut values[7]),
             us,
             vs,
-            hpbl: values.get(8).cloned().unwrap_or_default(),
+            hpbl: values.get_mut(8).map(std::mem::take).unwrap_or_default(),
             ..CellForcing::default()
         };
         // 全波段短波拆分：QIAN 用 CLM4.5 的经验多项式（`MOD_Forcing.F90:568-591`），
