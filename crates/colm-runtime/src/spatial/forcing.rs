@@ -7,6 +7,7 @@
 //! 只读映射用到的那些格子；每个格子上的算式与上游在该格上的算式一一对应，所以只算一部分不影响逐位。
 
 use colm_numeric::Contract;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -1417,7 +1418,10 @@ pub fn map_to_patches(
     cells: &CellForcing,
 ) -> Vec<PatchForcing> {
     let heights = &forcing.config;
+    // 每个 patch 的映射只读该 set 的 parts；5.7M patch 串行映射是 forcing 阶段的大头之一。
+    // 逐 patch 结果与顺序无关，`into_par_iter` 保持 collect 后的 patch 顺序。
     (0..mapping.parts.len())
+        .into_par_iter()
         .map(|iset| {
             let map = |field: &[f64]| {
                 mapping.grid_to_set(iset, |ilon, ilat| field[forcing.cell_index(ilon, ilat)])
