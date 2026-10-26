@@ -297,3 +297,153 @@ fn qian_shortwave_split_keeps_each_half_band() {
     let dark = qian_shortwave(0.0);
     assert_eq!(dark.direct_visible_w_m2, 0.0);
 }
+
+/// `metpreprocess` 的 JRA3Q qcap 快路径按格并行；这里用串行参考逐位对照，
+/// 防止 split_at_mut 路径改动了比较/赋值顺序或 skipped 语义。
+#[test]
+fn jra3q_qcap_parallel_matches_serial_bitwise() {
+    let n = 997;
+    let mut t = Vec::with_capacity(n);
+    let mut q = Vec::with_capacity(n);
+    let mut p = Vec::with_capacity(n);
+    let mut skipped = Vec::with_capacity(n);
+    for i in 0..n {
+        // 覆盖低温/高温、近饱和/过饱和与零星缺测格。
+        t.push(230.0 + (i % 80) as f64 * 1.1);
+        q.push(0.001 + (i % 17) as f64 * 0.0007);
+        p.push(60_000.0 + (i % 31) as f64 * 250.0);
+        skipped.push(i % 23 == 0);
+    }
+    let mut parallel = vec![t.clone(), q.clone(), p.clone()];
+    metpreprocess("JRA3Q", &mut parallel, n, &skipped).unwrap();
+
+    let mut serial_q = q.clone();
+    for i in 0..n {
+        if skipped[i] {
+            continue;
+        }
+        let saturation = colm_core::saturation_specific_humidity(t[i], p[i]).unwrap();
+        if saturation.specific_humidity < serial_q[i] {
+            serial_q[i] = saturation.specific_humidity;
+        }
+    }
+    assert_eq!(parallel[0], t);
+    assert_eq!(parallel[2], p);
+    for i in 0..n {
+        assert_eq!(
+            parallel[1][i].to_bits(),
+            serial_q[i].to_bits(),
+            "qcap differs at cell {i}"
+        );
+    }
+}
+
+/// `map_to_patches` 的“单遍 parts”实现与逐量 `grid_to_set` 参考逐位对照。
+#[test]
+fn fused_patch_forcing_matches_grid_to_set_bitwise() {
+    use crate::spatial::mapping::AreaWeightedMapping;
+    use colm_init::spatial_mapping::MappingPart;
+
+    let config = jra3q();
+    let grid = super::super::grid::LatLonGrid {
+        lat_s: vec![0.0],
+        lat_n: vec![1.0],
+        lon_w: vec![0.0, 1.0],
+        lon_e: vec![1.0, 2.0],
+        yinc: 1,
+        rlon: vec![0.0, 1.0],
+        rlat: vec![0.5],
+    };
+    let forcing = GriddedForcing::new(config, grid, vec![(0, 0), (1, 0)], 1800).unwrap();
+    let mapping = AreaWeightedMapping {
+        parts: vec![vec![
+            MappingPart {
+                ilon: 0,
+                ilat: 0,
+                area: 0.3,
+            },
+            MappingPart {
+                ilon: 1,
+                ilat: 0,
+                area: 0.7,
+            },
+        ]],
+        area: vec![1.0],
+    };
+    let cell = CellForcing {
+        t: vec![280.5, 290.25],
+        q: vec![0.002, 0.003],
+        psrf: vec![101_000.0, 100_000.0],
+        pbot: vec![99_000.0, 98_000.0],
+        prl: vec![0.1, 0.2],
+        prc: vec![0.3, 0.4],
+        solarin: vec![500.0, 600.0],
+        frl: vec![300.0, 310.0],
+        us: vec![1.0, 2.0],
+        vs: vec![3.0, 4.0],
+        sols: vec![10.0, 11.0],
+        soll: vec![12.0, 13.0],
+        solsd: vec![14.0, 15.0],
+        solld: vec![16.0, 17.0],
+        pco2m: vec![0.0004, 0.0005],
+        po2m: vec![0.21, 0.22],
+        hpbl: vec![1000.0, 1100.0],
+    };
+    let actual = map_to_patches(&mapping, &forcing, &cell);
+    assert_eq!(actual.len(), 1);
+    let map =
+        |field: &[f64]| mapping.grid_to_set(0, |ilon, ilat| field[forcing.cell_index(ilon, ilat)]);
+    let constant = |value: f64| mapping.grid_to_set(0, |_, _| value);
+    let t = map(&cell.t).clamp(180.0, 326.0);
+    let q = map(&cell.q);
+    let pbot = map(&cell.pbot);
+    let expected = PatchForcing {
+        t,
+        q,
+        psrf: map(&cell.psrf),
+        pbot,
+        prc: map(&cell.prc),
+        prl: map(&cell.prl),
+        us: map(&cell.us),
+        vs: map(&cell.vs),
+        sols: map(&cell.sols),
+        soll: map(&cell.soll),
+        solsd: map(&cell.solsd),
+        solld: map(&cell.solld),
+        frl: map(&cell.frl),
+        rhoair: colm_core::air_density_kg_m3(pbot, q, t),
+        pco2m: map(&cell.pco2m),
+        po2m: map(&cell.po2m),
+        hgt_u: constant(forcing.config().height_wind_m),
+        hgt_t: constant(forcing.config().height_temperature_m),
+        hgt_q: constant(forcing.config().height_humidity_m),
+        solarin: map(&cell.solarin),
+        hpbl: Some(map(&cell.hpbl)),
+    };
+    let got = actual[0];
+    for (name, a, b) in [
+        ("t", got.t, expected.t),
+        ("q", got.q, expected.q),
+        ("psrf", got.psrf, expected.psrf),
+        ("pbot", got.pbot, expected.pbot),
+        ("prc", got.prc, expected.prc),
+        ("prl", got.prl, expected.prl),
+        ("us", got.us, expected.us),
+        ("vs", got.vs, expected.vs),
+        ("sols", got.sols, expected.sols),
+        ("soll", got.soll, expected.soll),
+        ("solsd", got.solsd, expected.solsd),
+        ("solld", got.solld, expected.solld),
+        ("frl", got.frl, expected.frl),
+        ("rhoair", got.rhoair, expected.rhoair),
+        ("pco2m", got.pco2m, expected.pco2m),
+        ("po2m", got.po2m, expected.po2m),
+        ("hgt_u", got.hgt_u, expected.hgt_u),
+        ("hgt_t", got.hgt_t, expected.hgt_t),
+        ("hgt_q", got.hgt_q, expected.hgt_q),
+        ("solarin", got.solarin, expected.solarin),
+        ("hpbl", got.hpbl.unwrap(), expected.hpbl.unwrap()),
+    ] {
+        assert_eq!(a.to_bits(), b.to_bits(), "{name} differs");
+    }
+}
