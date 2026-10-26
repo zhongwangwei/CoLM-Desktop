@@ -752,8 +752,9 @@ impl SpatialRuntime {
                         time_step_seconds,
                     )?;
                 }
+                // 只读视图，按 patch 并行；collect 保持顺序。
                 let views = outputs
-                    .iter()
+                    .par_iter()
                     .map(|output| output.as_ref().map(PatchOutput::view))
                     .collect::<Vec<_>>();
                 let cache = self.tracer_forcing.as_ref().map(|forcing| forcing.cache());
