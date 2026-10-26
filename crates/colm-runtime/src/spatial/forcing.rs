@@ -626,6 +626,36 @@ pub(super) fn metpreprocess(
             *w = 40.0 * *w / w.abs();
         }
     };
+    // JRA3Q/PRINCETON 等数据集在这一步只做 qcap；每格一次饱和比湿（含 exp）在大网格上
+    // 是纯 CPU。用 split_at_mut 把 t/q/p 三列拆开，按格并行，逐格算式与串行完全相同。
+    if matches!(
+        dataset,
+        "PRINCETON" | "WFDE5" | "WFDEI" | "CMFDv2" | "GDAS" | "IsoGSM" | "JRA3Q"
+    ) && values.len() > 2
+        && values[0].len() == n
+        && values[1].len() == n
+        && values[2].len() == n
+        && skipped.len() == n
+    {
+        let (head, rest) = values.split_at_mut(1);
+        let t = &head[0][..n];
+        let (q, p) = rest.split_at_mut(1);
+        let q = &mut q[0][..n];
+        let p = &p[0][..n];
+        q.par_iter_mut()
+            .enumerate()
+            .try_for_each(|(i, q_value)| -> Result<()> {
+                if skipped[i] {
+                    return Ok(());
+                }
+                let saturation = colm_core::saturation_specific_humidity(t[i], p[i])?;
+                if saturation.specific_humidity < *q_value {
+                    *q_value = saturation.specific_humidity;
+                }
+                Ok(())
+            })?;
+        return Ok(());
+    }
     for i in 0..n {
         if skipped[i] {
             continue;
@@ -1049,7 +1079,7 @@ impl GriddedForcing {
                         // GIMPLE（`block_data_linear_interp`）：`.FMA (from1, alp1, from2*alp2)`。
                         bracket
                             .lower
-                            .iter()
+                            .par_iter()
                             .zip(&bracket.upper)
                             .map(|(&a, &b)| a.contract(alp1, b * alp2))
                             .collect()
@@ -1078,6 +1108,7 @@ impl GriddedForcing {
                         &bracket.upper
                     };
                     (0..n)
+                        .into_par_iter()
                         .map(|i| {
                             let (ilon, ilat) = self.cells[i];
                             let cosz = colm_core::orbital_cosine_zenith(
@@ -1103,7 +1134,7 @@ impl GriddedForcing {
             self.missing
                 .is_some_and(|missing| self.brackets[0].upper[i] == missing)
         };
-        let skipped = (0..n).map(missing_cell).collect::<Vec<_>>();
+        let skipped = (0..n).into_par_iter().map(missing_cell).collect::<Vec<_>>();
         metpreprocess(self.config.dataset.trim(), &mut values, n, &skipped)?;
         // 风：两支都有就各用各的；只有一支时那一支乘 `1/sqrt(2)` 给两支（`sca = 1/sqrt(2.0_r8)`）。
         let (us, vs) = match (
@@ -1118,7 +1149,7 @@ impl GriddedForcing {
                     &values[4]
                 };
                 let scale = 1.0 / 2.0_f64.sqrt();
-                let wind = one.iter().map(|w| w * scale).collect::<Vec<_>>();
+                let wind = one.par_iter().map(|w| w * scale).collect::<Vec<_>>();
                 (wind.clone(), wind)
             }
             (true, true) => unreachable!("checked when the configuration was read"),
@@ -1129,8 +1160,8 @@ impl GriddedForcing {
             psrf: values[2].clone(),
             pbot: values[2].clone(),
             // `block_data_copy (forcn(4), forc_xy_prl, sca = 2/3._r8)`：比例先算。
-            prl: values[3].iter().map(|p| p * (2.0 / 3.0)).collect(),
-            prc: values[3].iter().map(|p| p * (1.0 / 3.0)).collect(),
+            prl: values[3].par_iter().map(|p| p * (2.0 / 3.0)).collect(),
+            prc: values[3].par_iter().map(|p| p * (1.0 / 3.0)).collect(),
             solarin: values[6].clone(),
             frl: values[7].clone(),
             us,
@@ -1141,30 +1172,26 @@ impl GriddedForcing {
         // 全波段短波拆分：QIAN 用 CLM4.5 的经验多项式（`MOD_Forcing.F90:568-591`），
         // 其余 `a = max(0, solarin)`，`sunang` 取格心、`calendarday(idate)`。
         let qian = self.config.dataset.trim() == "QIAN";
-        let mut split = Vec::with_capacity(n);
         // `i` 同时索引 `out`、`skipped`、`self.split` 与格心坐标。
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..n {
-            if qian {
-                split.push(qian_shortwave(out.solarin[i]));
-                continue;
-            }
-            // 缺测格 `CYCLE`：`forc_xy_sol*` 保留上一步的值。
-            if skipped[i] {
-                split.push(self.split[i]);
-                continue;
-            }
-            let (ilon, ilat) = self.cells[i];
-            let sun = colm_core::orbital_cosine_zenith(
-                calendar_now,
-                self.grid.rlon[ilon],
-                self.grid.rlat[ilat],
-            );
-            split.push(colm_core::split_broadband_shortwave(
-                0.0_f64.max(out.solarin[i]),
-                sun,
-            ));
-        }
+        let split = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if qian {
+                    return qian_shortwave(out.solarin[i]);
+                }
+                // 缺测格 `CYCLE`：`forc_xy_sol*` 保留上一步的值。
+                if skipped[i] {
+                    return self.split[i];
+                }
+                let (ilon, ilat) = self.cells[i];
+                let sun = colm_core::orbital_cosine_zenith(
+                    calendar_now,
+                    self.grid.rlon[ilon],
+                    self.grid.rlat[ilat],
+                );
+                colm_core::split_broadband_shortwave(0.0_f64.max(out.solarin[i]), sun)
+            })
+            .collect();
         self.split.clone_from(&split);
         let pick = |f: fn(&ShortwaveForcing) -> f64| split.iter().map(f).collect::<Vec<_>>();
         out.sols = pick(|s| s.direct_visible_w_m2);

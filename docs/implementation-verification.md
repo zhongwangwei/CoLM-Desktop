@@ -37343,3 +37343,14 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **未做**：tianhe 本轮按要求不连接，所以没有新的 8 节点 wall clock 或 1 vs 2 node 字节对照；`GriddedForcing::step` 的格点插值/`metpreprocess` 仍是串行，下一步可继续。
 
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+## 第 810 轮：forcing 格点插值与 JRA3Q qcap 并行（本地改动，未上 tianhe）
+
+**改动**：
+- `GriddedForcing::step` 的线性时间插值、`coszen` 短波插值、缺测掩膜、短波按波段拆分、风速缩放全部按格 `par_iter`；逐格算式和结果顺序不变。
+- `metpreprocess` 对 `PRINCETON/WFDE5/WFDEI/CMFDv2/GDAS/IsoGSM/JRA3Q` 这一组（只做 qcap）走并行快路径：用 `split_at_mut` 把 t/q/p 三列拆开，按格并行 `saturation_specific_humidity`，逐格仍先判 `skipped`、仍用原来的 `<` 比较和赋值。
+- 其它数据集分支保持串行；`qcap` 闭包仍服务串行路径。
+
+**未做**：tianhe 本轮按要求不连接；8 节点 wall clock、1 vs 2 node 字节对照、本地合成 bitwise 对照均未做。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
