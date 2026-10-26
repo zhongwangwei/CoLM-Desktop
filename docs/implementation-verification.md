@@ -37391,3 +37391,12 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（214 通过 / 2 ignored）；`cargo test -p colm-init --lib`（189 通过 / 9 ignored）；clippy、fmt。
 
 **未做**：tianhe 启动装配 wall clock（本轮不连天河）。
+
+## 第 815 轮：最新主循环优化上机后的逐字节复验（tianhe，2026-10-26）
+
+把本地所有 forcing/主循环优化（并行 `map_to_patches`、单遍 parts 融合、格点插值/qcap 并行、`CellForcing` 搬移、step 元数据并行）同步到 tianhe 并重建 `colm-rs` 后，重跑 hb64 河湖开 144 步：
+
+- 1 task 与 2 node 两个新输出都与**优化前的串行参考** `ref-2003-004` 逐字节相同；
+- **130/130 个 restart/旁车文件 `cmp` 全部通过**（64 主重启 + 64 旁车 + `.river` + unitcat 等）。
+
+这说明这批并行/融合改动没有改变 restart/旁车字节。8 节点 10 天 V3 的 timing 作业（8773503）已提交，但 `deimos` 当前 1314 个节点全部被其他作业占用，作业处于 `PENDING (Priority)`；等资源释放后补 timing。
