@@ -741,9 +741,9 @@ impl SpatialRuntime {
                         crate::refresh_lai(*step, template, state)?;
                     }
                 }
-                let forcings = steps.iter().map(|step| step.forcing).collect::<Vec<_>>();
                 if optimizer.is_some() {
                     // 入口已拒绝"优化 + 遮蔽"，这里每个 patch 都有输出。
+                    let forcings = steps.iter().map(|step| step.forcing).collect::<Vec<_>>();
                     let present = outputs.iter().flatten().collect::<Vec<_>>();
                     crate::optimize_baseflow(
                         optimizer.as_mut(),

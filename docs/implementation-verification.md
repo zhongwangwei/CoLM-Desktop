@@ -37435,3 +37435,21 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **其它已关闭的 Not-tested**：
 - 8 节点 10 天 V3 新墙钟 **23:51**（job 8773503），forcing 12.0 s / patches 822–841 s；
 - hb64 河湖开（history none）1 task vs 2 node **130/130** 逐字节相同。
+
+## 第 818 轮：restart 写线程数扫描与 optimizer 无关拷贝（tianhe，2026-10-26）
+
+**restart 写线程**：把 `write_block_restarts` 改成可配置的受控线程池（`COLM_RESTART_WRITERS`，默认 4），按块并行、collect 保持路径顺序。8 节点 1 天算例（final restart ~11 GB）：
+
+| writers | 墙钟 |
+|---:|---:|
+| 1（原串行） | 5:13 |
+| 2 | 5:10 |
+| **4** | **4:50** |
+| 8 | 4:56 |
+| 64（无限制，早先实验） | 更慢 |
+
+4 线程把 1 天 restart 尾巴从约 133 s 降到约 110 s；8 线程又开始回落，所以默认 4，保留 `COLM_RESTART_WRITERS=1` 可回串行。hb64 河湖开 + HOURLY history 的 1 task vs 2 node 在 4 线程下 **635/635 文件逐字节相同**。
+
+**optimizer 无关键**：`forcings` 的 715k 个 `PatchForcing` 拷贝原来每步无条件做；`baseflow_optimizer` 不在时直接跳过，V3 不再白付。
+
+**待补**：8 节点 10 天 + 4 写线程的 wall clock（job 8774754 运行中）。

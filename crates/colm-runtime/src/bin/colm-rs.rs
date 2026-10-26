@@ -52,6 +52,7 @@ use colm_runtime::baseflow_optimizer::{BaseflowOptimizer, BaseflowPatchInit};
 use colm_runtime::history::HistorySession;
 use colm_runtime::physics::land_physics_parameters;
 use colm_runtime::{read_point_runtime_config, PatchStepOutput, PointRuntime, PointRuntimeConfig};
+use rayon::prelude::*;
 
 fn main() -> ExitCode {
     match run() {
@@ -4367,38 +4368,70 @@ fn write_block_restarts(
     let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
     let river_required =
         river_history.is_some_and(|history| history.acctime.iter().any(|&t| t > 0.0));
-    let mut written = Vec::with_capacity(blocks.len());
-    for (((_, patches), files), periodic) in blocks.iter().zip(files).zip(periodic) {
-        let path = periodic.path(end_time);
-        write_evolved_restart(
-            &templates[patches.clone()],
-            &states[patches.clone()],
-            &snapshots[patches.clone()],
-            &files.time,
-            &path,
-        )?;
-        append_tracer_restart(
-            &templates[patches.clone()],
-            &states[patches.clone()],
-            &path,
-            tracer_cache
-                .map(|cache| cache.block(patches.clone()))
-                .as_ref(),
-        )?;
-        // 开了示踪物却没有输运示踪物（例如只有 CH4 provider）：patch 上不挂示踪物状态，
-        // 上游仍提交一份空的陆面示踪物事务。
-        if let Some(mixing) = empty_land_tracer {
-            colm_init::write_empty_land_tracer_transaction(&path, mixing)?;
-        }
-        mark_history_restart_with_river(
-            &path,
-            history,
-            Some(patches.clone()),
-            river_required,
-            sidecar_tracers(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
-        )?;
-        written.push(path);
-    }
+    let write_block =
+        |((_, patches), files): (&(String, std::ops::Range<usize>), &RestartStateFiles),
+         periodic: &PeriodicRestarts|
+         -> Result<PathBuf> {
+            let path = periodic.path(end_time);
+            write_evolved_restart(
+                &templates[patches.clone()],
+                &states[patches.clone()],
+                &snapshots[patches.clone()],
+                &files.time,
+                &path,
+            )?;
+            append_tracer_restart(
+                &templates[patches.clone()],
+                &states[patches.clone()],
+                &path,
+                tracer_cache
+                    .map(|cache| cache.block(patches.clone()))
+                    .as_ref(),
+            )?;
+            // 开了示踪物却没有输运示踪物（例如只有 CH4 provider）：patch 上不挂示踪物状态，
+            // 上游仍提交一份空的陆面示踪物事务。
+            if let Some(mixing) = empty_land_tracer {
+                colm_init::write_empty_land_tracer_transaction(&path, mixing)?;
+            }
+            mark_history_restart_with_river(
+                &path,
+                history,
+                Some(patches.clone()),
+                river_required,
+                sidecar_tracers(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
+            )?;
+            Ok(path)
+        };
+    // 无限制并行写（每 rank 64 线程）实测比串行更慢；但每 rank 4 个写线程在
+    // 1 天算例上把 restart 尾巴从约 133 s 降到 110 s，8 线程又回落。默认 4，
+    // 可用 `COLM_RESTART_WRITERS=1` 回到串行。
+    let writers = std::env::var("COLM_RESTART_WRITERS")
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok())
+        .filter(|&n| n > 1)
+        .unwrap_or(4);
+    let written = if writers > 1 {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(writers)
+            .thread_name(|i| format!("colm-restart-{i}"))
+            .build()
+            .context("cannot build the restart writer thread pool")?;
+        pool.install(|| {
+            blocks
+                .par_iter()
+                .zip(files.par_iter())
+                .zip(periodic.par_iter())
+                .map(|((block, files), periodic)| write_block((block, files), periodic))
+                .collect::<Result<Vec<_>>>()
+        })?
+    } else {
+        blocks
+            .iter()
+            .zip(files)
+            .zip(periodic)
+            .map(|((block, files), periodic)| write_block((block, files), periodic))
+            .collect::<Result<Vec<_>>>()?
+    };
     if let (Some(history), true, true) = (river_history, river_required, write_river_history) {
         // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
         let label = date_label(normalized_day_end(end_time));
