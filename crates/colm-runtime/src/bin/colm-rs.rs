@@ -2325,17 +2325,23 @@ fn run_spatial_segment(
     // 四个“会保持上一步值”的诊断量（`rst`/`rss`/`gs0sun`/`gs0sha`），到期时才建完整快照。
     let mut diagnostics_carry = vec![DiagnosticsCarry::default(); states.len()];
     startup_mark("runtime assembled");
+    // 诊断/对照时可以强制回旧路径（每步完整输出），用于比较 carry 优化前后的字节。
+    let force_patch_outputs =
+        std::env::var_os("COLM_PATCH_OUTPUTS_REQUIRED").is_some_and(|value| value != "0");
+    let patch_outputs_required = force_patch_outputs
+        || writes_history
+        || runtime.river().is_some()
+        || logical_field(document, "DEF_Optimize_Baseflow")?;
+    runtime = runtime.with_patch_outputs_required(patch_outputs_required);
     let steps = runtime.run(
         &templates,
         &mut states,
         history.as_mut(),
         history_writer.as_mut(),
         exchange,
-        |steps, states, outputs, river, tracer_cache, lateral| {
-            for (carry, output) in diagnostics_carry.iter_mut().zip(outputs) {
-                if let Some(output) = output {
-                    carry.update(*output);
-                }
+        |steps, states, outputs, carries, river, tracer_cache, lateral| {
+            for (carry, source) in diagnostics_carry.iter_mut().zip(carries) {
+                carry.merge(source);
             }
             let step = steps[0];
             let need_snapshots = step.clock.write_restart || step.clock.end_time == config.end;
@@ -5349,26 +5355,16 @@ struct DiagnosticsCarry {
 }
 
 impl DiagnosticsCarry {
-    fn update(&mut self, output: PatchStepOutput<'_>) {
-        match output {
-            PatchStepOutput::Soil(output) => {
-                let leaf = &output.energy.leaf;
-                self.stomatal_resistance = Some(leaf.canopy_stomatal_resistance_s_m);
-                self.soil_surface_resistance = Some(output.energy.soil_surface_resistance_s_m);
-                self.gs0sun = leaf
-                    .maximum_sunlit_leaf_conductance_umol_m2_s
-                    .or(self.gs0sun);
-                self.gs0sha = leaf
-                    .maximum_shaded_leaf_conductance_umol_m2_s
-                    .or(self.gs0sha);
-            }
-            PatchStepOutput::Urban(output) => {
-                self.stomatal_resistance = Some(output.thermal.rst);
-                self.soil_surface_resistance = Some(output.thermal.rss);
-            }
-            // 冰川/湖分支上游不碰这四个量，保持上一步值。
-            PatchStepOutput::Glacier(_) | PatchStepOutput::Lake(_) => {}
+    /// 从 runtime 的轻量 carry 合并；普通步不再保留完整 `PatchOutput`。
+    fn merge(&mut self, carry: &colm_runtime::PatchOutputCarry) {
+        if let Some(value) = carry.stomatal_resistance {
+            self.stomatal_resistance = Some(value);
         }
+        if let Some(value) = carry.soil_surface_resistance {
+            self.soil_surface_resistance = Some(value);
+        }
+        self.gs0sun = carry.gs0sun.or(self.gs0sun);
+        self.gs0sha = carry.gs0sha.or(self.gs0sha);
     }
 }
 

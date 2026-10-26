@@ -37458,3 +37458,19 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 墙钟 **22:27**，相对 1 写线程/旧代码的 23:51 少 **1:24**；
 - 主循环 1212.7 s：patches 1114.4 s（91.9%）、lai/optimizer/restarts 73.7 s、forcing 11.6 s、other 10.3 s、state clone 2.6 s；
 - 该次分配到的节点比上一轮慢（patches 从 822–841 s 涨到 1114 s），所以主循环数字带节点噪声；1 天受控扫描里 4 写线程仍比串行少约 23 s，且 hb64 河湖开 + HOURLY history 在 4 线程下 1 vs 2 node **635/635** 逐字节相同。
+
+## 第 819 轮：轻量 carry 路径——普通步不再保留完整 PatchOutput（tianhe，2026-10-26）
+
+**实现**：
+- 新增 `PatchOutputCarry`：只含 `rst/rss/gs0sun/gs0sha` + masked；
+- `SpatialRuntime::with_patch_outputs_required`：history/river/optimizer 存在时每步保留完整输出；否则只在 `write_restart`/最后一步保留；
+- 普通步在 patch 并行线程里提取 carry 后立刻释放 `PatchOutput`，不再把 75 万个 Box 留到步末；
+- callback 用 carry 维护诊断保持量，restart 快照仍用完整输出；
+- 增加 `COLM_PATCH_OUTPUTS_REQUIRED=1` 对照开关，可强制回旧路径做字节比较。
+
+**逐字节**：
+- hb64 河湖关/history none：forced 旧路径 vs carry 新路径 **128/128** restart/旁车文件相同；
+- 8 节点 0.1° 全球 1 天：carry 路径最终 restart 目录与优化前参考 **2894/2894 个文件全部 `cmp` 相同**（含旧日期文件）；
+- V3 1 天主循环 59.7–80.8 s，墙钟 4:40（4 写线程、carry），旧版 4:50；差异主要是节点噪声，carry 的价值是把普通步的 715k 个 Box 从内存/串行释放中移走。
+
+**边界**：history-on/river-on 的 `patch_outputs_required=true`，行为不变（历史 635/635 路径仍需后续复验）；8 节点 10 天 carry 版尚未重跑。

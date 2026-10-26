@@ -1031,6 +1031,51 @@ pub enum PatchOutput {
     Urban(Box<colm_core::UrbanStepOutput>),
 }
 
+/// 普通步仍需从 patch 输出里带出的诊断量（`rst/rss/gs0sun/gs0sha` 的“保持上一次赋值”）。
+///
+/// 完整 `PatchOutput` 只给 history/river/optimizer 或 restart/最后一步；其它步在 patch
+/// 并行线程里提取这个轻量 carry 后立刻释放输出，避免把 75 万个 Box 留到步末。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PatchOutputCarry {
+    pub stomatal_resistance: Option<f64>,
+    pub soil_surface_resistance: Option<f64>,
+    pub gs0sun: Option<f64>,
+    pub gs0sha: Option<f64>,
+    /// 强迫缺测遮蔽、整步跳过的 patch：没有输出，carry 保持上一步。
+    pub masked: bool,
+}
+
+impl PatchOutputCarry {
+    pub fn from_output(output: Option<PatchStepOutput<'_>>) -> Self {
+        let Some(output) = output else {
+            return Self {
+                masked: true,
+                ..Self::default()
+            };
+        };
+        match output {
+            PatchStepOutput::Soil(output) => {
+                let leaf = &output.energy.leaf;
+                Self {
+                    stomatal_resistance: Some(leaf.canopy_stomatal_resistance_s_m),
+                    soil_surface_resistance: Some(output.energy.soil_surface_resistance_s_m),
+                    gs0sun: leaf.maximum_sunlit_leaf_conductance_umol_m2_s,
+                    gs0sha: leaf.maximum_shaded_leaf_conductance_umol_m2_s,
+                    masked: false,
+                }
+            }
+            PatchStepOutput::Urban(output) => Self {
+                stomatal_resistance: Some(output.thermal.rst),
+                soil_surface_resistance: Some(output.thermal.rss),
+                gs0sun: None,
+                gs0sha: None,
+                masked: false,
+            },
+            PatchStepOutput::Glacier(_) | PatchStepOutput::Lake(_) => Self::default(),
+        }
+    }
+}
+
 impl PatchOutput {
     pub fn view(&self) -> PatchStepOutput<'_> {
         match self {

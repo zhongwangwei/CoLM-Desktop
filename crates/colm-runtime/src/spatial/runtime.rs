@@ -40,6 +40,8 @@ pub struct SpatialRuntime {
     catchment: Option<crate::catchment::runtime::CatchmentRuntime>,
     /// 多进程的非 root rank 不打印每步进度：进度归 root，避免 srun 日志里 N 份重复。
     quiet_progress: bool,
+    /// history/river/optimizer 每步都要完整 patch 输出；否则普通步只保留轻量 carry。
+    patch_outputs_required: bool,
 }
 
 impl SpatialRuntime {
@@ -82,7 +84,15 @@ impl SpatialRuntime {
             downscaling: None,
             catchment: None,
             quiet_progress: false,
+            patch_outputs_required: false,
         })
+    }
+
+    /// history/river/optimizer 存在时每步输出完整 `PatchOutput`；否则只在 restart/最后一步
+    /// 生成，普通步只保留 [`crate::PatchOutputCarry`]。
+    pub fn with_patch_outputs_required(mut self, required: bool) -> Self {
+        self.patch_outputs_required = required;
+        self
     }
 
     /// 非 root rank 静默运行：只关每步进度行，数值与 I/O 不变。
@@ -241,6 +251,7 @@ impl SpatialRuntime {
             &[PointRuntimeStep],
             &[StandardLctSnowSoilState],
             &[Option<PatchStepOutput<'_>>],
+            &[crate::PatchOutputCarry],
             Option<&crate::river::RiverModel>,
             Option<&crate::tracer::ForcingCache<'_>>,
             Option<&crate::catchment::runtime::CatchmentRuntime>,
@@ -356,14 +367,22 @@ impl SpatialRuntime {
                     })
                     .collect::<Vec<_>>();
                 timer.mark("forcing");
+                let last_step = next_clock.clone().next_step().is_none();
+                // history/river/optimizer 每步都要输出；否则普通步只保留轻量 carry，
+                // restart/最后一步才保留完整 `PatchOutput`。
+                let emit_outputs = self.patch_outputs_required || clock.write_restart || last_step;
                 // history 的水量收支参考态必须在 `states` 被 move 之前算；逐 patch 独立，
                 // 按 patch 并行。之前把它放在 `mem::take(states)` 之后，history 开启时拿到
                 // 的是空 Vec，第一 Step 就越界 panic（本轮 history-on 复验抓到的回归）。
-                let initial_totals = templates
-                    .par_iter()
-                    .zip(states.par_iter())
-                    .map(|(template, state)| crate::initial_total_water_mm(template, state))
-                    .collect::<Vec<_>>();
+                let initial_totals = if emit_outputs {
+                    templates
+                        .par_iter()
+                        .zip(states.par_iter())
+                        .map(|(template, state)| crate::initial_total_water_mm(template, state))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 // 每步都 clone 整份 patch 状态是 0.1° 全球的灾难：5.7M patch × ~81 KB，
                 // 单 rank 58 GB/步。patch 物理只改自己的状态；降尺度与 initial_totals 都在
                 // 这一行之前用完上一步的状态，所以直接 move 出来、步末放回。
@@ -380,70 +399,90 @@ impl SpatialRuntime {
                 let tracer_forcing = self.tracer_forcing.as_ref();
                 let scales = optimizer.as_ref();
                 // 被遮蔽的 patch 没有输出（`None`）。
-                let mut outputs: Vec<Option<PatchOutput>> = templates
-                    .par_iter()
-                    .zip(next_states.par_iter_mut())
-                    .zip(steps.par_iter())
-                    .enumerate()
-                    .map(
-                        |(index, ((template, state), step))| -> Result<Option<PatchOutput>> {
-                            if !forcing_mask[index] {
-                                // `update_ozone_data` 的 `grid2pset` 同样对整列 patch 做。
-                                template.update_ozone(step.clock.forcing_time, state)?;
-                                // `CoLM.F90:495-541` 的 BGC 数据更新（硝化 O2、闪电、氮沉降、人口密度）对整列
-                                // patch 做，被遮蔽的也一样：`update_lightning_data` 的 `grid2pset` 会把
-                                // `lnfm` 从分配时的 `spval` 换成数据值（第 541 轮）。
-                                if let Some(bgc) = &template.bgc {
-                                    let end = step.clock.end_time;
-                                    let idate = [
-                                        end.year,
-                                        i32::from(end.julian_day),
-                                        i32::try_from(end.seconds)?,
-                                    ];
-                                    bgc.update_non_soil(step.clock.forcing_time, idate, state)?;
+                let (mut outputs, carries): (Vec<Option<PatchOutput>>, Vec<crate::PatchOutputCarry>) =
+                    templates
+                        .par_iter()
+                        .zip(next_states.par_iter_mut())
+                        .zip(steps.par_iter())
+                        .enumerate()
+                        .map(
+                            |(index, ((template, state), step))| -> Result<(
+                                Option<PatchOutput>,
+                                crate::PatchOutputCarry,
+                            )> {
+                                if !forcing_mask[index] {
+                                    // `update_ozone_data` 的 `grid2pset` 同样对整列 patch 做。
+                                    template.update_ozone(step.clock.forcing_time, state)?;
+                                    // `CoLM.F90:495-541` 的 BGC 数据更新（硝化 O2、闪电、氮沉降、人口密度）对整列
+                                    // patch 做，被遮蔽的也一样：`update_lightning_data` 的 `grid2pset` 会把
+                                    // `lnfm` 从分配时的 `spval` 换成数据值（第 541 轮）。
+                                    if let Some(bgc) = &template.bgc {
+                                        let end = step.clock.end_time;
+                                        let idate = [
+                                            end.year,
+                                            i32::from(end.julian_day),
+                                            i32::try_from(end.seconds)?,
+                                        ];
+                                        bgc.update_non_soil(step.clock.forcing_time, idate, state)?;
+                                    }
+                                    return Ok((
+                                        None,
+                                        crate::PatchOutputCarry {
+                                            masked: true,
+                                            ..crate::PatchOutputCarry::default()
+                                        },
+                                    ));
                                 }
-                                return Ok(None);
-                            }
-                            let binding = StandardLctStepBinding {
-                                forcing: step.forcing,
-                                seconds_of_day,
-                                greenwich_time: true,
-                                longitude_radians: coordinates[index].0,
-                                co2_volume_fraction: co2,
-                                partial_pressures_pa: Some((
-                                    patch_forcing[index].pco2m,
-                                    patch_forcing[index].po2m,
-                                )),
-                                // 漫滩回馈只作用在土壤 patch 上（`patchtype == 0`）。
-                                flood: river
-                                    .and_then(|river| river.flood.as_ref())
-                                    .filter(|_| template.patch_type == 0)
-                                    .map(|flood| colm_core::flood_evaporation::FloodPatchInput {
-                                        depth_mm: flood.depth_mm[flood_offset + index],
-                                        fraction: flood.fraction[flood_offset + index],
-                                        infiltration_max_mm_day: flood.infiltration_max_mm_day,
-                                    }),
-                                tracer_ratios: tracer_forcing.map(|forcing| forcing.ratios(index)),
-                                flood_tracer: river
-                                    .and_then(|river| river.flood.as_ref())
-                                    .and_then(|flood| {
-                                        flood.tracer.as_ref().map(|tracer| {
-                                            (
-                                                flood.credit[flood_offset + index] * 1000.0,
-                                                tracer.credit_patch[flood_offset + index]
-                                                    .as_slice(),
-                                            )
-                                        })
-                                    }),
-                            };
-                            let scale = scales.map(|optimizer| optimizer.scale(index));
-                            Ok(Some(
-                                crate::advance_patch(*step, template, &binding, state, scale)
-                                    .with_context(|| format!("patch {index}"))?,
-                            ))
-                        },
-                    )
-                    .collect::<Result<Vec<_>>>()?;
+                                let binding = StandardLctStepBinding {
+                                    forcing: step.forcing,
+                                    seconds_of_day,
+                                    greenwich_time: true,
+                                    longitude_radians: coordinates[index].0,
+                                    co2_volume_fraction: co2,
+                                    partial_pressures_pa: Some((
+                                        patch_forcing[index].pco2m,
+                                        patch_forcing[index].po2m,
+                                    )),
+                                    // 漫滩回馈只作用在土壤 patch 上（`patchtype == 0`）。
+                                    flood: river
+                                        .and_then(|river| river.flood.as_ref())
+                                        .filter(|_| template.patch_type == 0)
+                                        .map(|flood| colm_core::flood_evaporation::FloodPatchInput {
+                                            depth_mm: flood.depth_mm[flood_offset + index],
+                                            fraction: flood.fraction[flood_offset + index],
+                                            infiltration_max_mm_day: flood.infiltration_max_mm_day,
+                                        }),
+                                    tracer_ratios: tracer_forcing.map(|forcing| forcing.ratios(index)),
+                                    flood_tracer: river
+                                        .and_then(|river| river.flood.as_ref())
+                                        .and_then(|flood| {
+                                            flood.tracer.as_ref().map(|tracer| {
+                                                (
+                                                    flood.credit[flood_offset + index] * 1000.0,
+                                                    tracer.credit_patch[flood_offset + index]
+                                                        .as_slice(),
+                                                )
+                                            })
+                                        }),
+                                };
+                                let scale = scales.map(|optimizer| optimizer.scale(index));
+                                let output = crate::advance_patch(
+                                    *step,
+                                    template,
+                                    &binding,
+                                    state,
+                                    scale,
+                                )
+                                .with_context(|| format!("patch {index}"))?;
+                                let carry =
+                                    crate::PatchOutputCarry::from_output(Some(output.view()));
+                                let stored = if emit_outputs { Some(output) } else { None };
+                                Ok((stored, carry))
+                            },
+                        )
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .unzip();
                 // （`CNFireArea` 原来对 `tsoi17` 整列赋值、需在此广播；upstream-bugs 第 61 条已修，各 patch 只写自己的。）
                 // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
                 crate::tracer::report_after_patches(templates)?;
@@ -650,11 +689,10 @@ impl SpatialRuntime {
                 }
                 if let Some(history) = history.as_deref_mut() {
                     // 续跑旁车的窗口快照只在要写续跑的步上更新：周期续跑，或这一段的最后一步。
-                    let last_step = next_clock.clone().next_step().is_none();
                     history
                         .session
                         .set_snapshot(clock.write_restart || last_step);
-                    if !clock.is_spinup {
+                    if !clock.is_spinup && emit_outputs {
                         push_history(
                             history,
                             templates,
@@ -764,6 +802,7 @@ impl SpatialRuntime {
                     &steps,
                     &next_states,
                     &views,
+                    &carries,
                     self.river.as_ref().map(|(river, _)| river),
                     cache.as_ref(),
                     self.catchment.as_ref(),
