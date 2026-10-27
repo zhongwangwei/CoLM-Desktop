@@ -37694,3 +37694,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase C 分汊簇 dt 接线第一步（2026-10-27）**：`bifurcation_substep` 改为接收分簇标签和逐簇剩余时间，内部用 `cluster_routing_dt` 归约，并把逐路径/逐单元 dt 传给 `calc_with_path_dt`；当前调用方仍只传一个组和标量剩余时间，因此数值行为不变。218 个 runtime 测试通过。
 
 **Phase C Rust 逐簇 dt 接线（2026-10-27）**：`route_system` 在分汊时维护逐簇 `dt_res_groups`，每子步从各簇剩余时间取 `dt_group`，单元 CFL/蓄量/动量限制写回所属簇；蓄量、动量、history、bifflw 都按单元/路径所属簇的 dt。无分汊路径仍走单组/标量分支。556 分汊算例 1 node vs 2 node：**1125/1125 文件逐字节一致**。
+
+**Phase C tracer/sed 回退（2026-10-27）**：Rust 逐簇 dt 只在 `bif.is_some() && tracer 关闭 && sediment 关闭` 时启用；带 tracer/sediment 的分汊仍走原来的全局同步 dt，避免未验证的示踪物/泥沙子步混用。556 算例无 tracer/sed，走簇路径。

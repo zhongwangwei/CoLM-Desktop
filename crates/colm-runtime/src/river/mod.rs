@@ -1088,8 +1088,11 @@ fn route_system<'a>(
 ) -> SystemResult<'a> {
     let cells = &system.cells;
     let n = cells.len();
-    // 分汊时按路径连通簇分组；非分汊路径全部分到 0 组，保持原全局同步。
-    let bif_groups = bif.as_ref().map(|run| run.bif.river_system_groups(net));
+    // 分汊时按路径连通簇分组；tracer/sediment 仍走原来的全局同步路径。
+    let cluster_enabled = bif.is_some() && !record && sed_in.is_none();
+    let bif_groups = cluster_enabled
+        .then(|| bif.as_ref().map(|run| run.bif.river_system_groups(net)))
+        .flatten();
     let groups = bif_groups.unwrap_or_else(|| vec![0usize; net.river_systems]);
     let n_groups = groups.iter().copied().max().map_or(1, |m| m + 1);
     let mut sed = sed_in.map(|sed_in| SedimentOut {
@@ -1253,7 +1256,7 @@ fn route_system<'a>(
     let mut sums = vec![(0.0, 0.0, 0.0); n];
     let mut dt_res = acctime;
     // 分汊：逐簇剩余时间；非分汊保持标量路径不变。
-    let mut dt_res_groups = bif.is_some().then(|| vec![acctime; n_groups]);
+    let mut dt_res_groups = cluster_enabled.then(|| vec![acctime; n_groups]);
     // 分汊：逐河系的子步长与这一子步的净分汊出流。
     let mut bif_sum = vec![0.0; if bif.is_some() { n } else { 0 }];
     // 堤防 + 分汊：第 2 层及以上（堤内一侧）的净分汊出流，以及堤内蓄量被扣穿时的报错。
