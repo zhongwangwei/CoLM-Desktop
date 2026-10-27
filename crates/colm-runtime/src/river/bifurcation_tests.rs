@@ -150,3 +150,13 @@ fn connected_river_system_groups_merge_pathways_and_keep_isolated_systems() {
     let groups = super::connected_river_system_groups(2, [(0, 9)]);
     assert_ne!(groups[0], groups[1]);
 }
+
+#[test]
+fn a_bifurcation_path_joins_the_two_river_system_groups() {
+    let network = network();
+    let bif = bifurcation();
+    let groups = bif.river_system_groups(&network);
+    assert_eq!(groups.len(), 2);
+    // 路径 0 -> 1 连接两个河系。
+    assert_eq!(groups[0], groups[1]);
+}
