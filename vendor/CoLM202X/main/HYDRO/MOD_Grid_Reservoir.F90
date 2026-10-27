@@ -72,7 +72,7 @@ CONTAINS
    real(r8), allocatable :: rcache (:)
    integer,  allocatable :: icache (:)
 
-   integer :: i, iloc, irsv, nresv, iworker, nresv_catalogue
+   integer :: i, j, iloc, irsv, nresv, iworker, nresv_catalogue, ndropped
    integer,  allocatable :: src_index(:), regional_index(:)
 
 
@@ -124,9 +124,40 @@ CONTAINS
 
       CALL quicksort (nresv_catalogue, dam_seq, order)
 
+      ! One reservoir per unit catchment: when several rows share a dam_seq, keep the
+      ! first row in the file and drop the others (their seq becomes -row, never matched).
+      ndropped = 0
       IF (nresv_catalogue > 1) THEN
-         IF (any(dam_seq(2:nresv_catalogue) == dam_seq(1:nresv_catalogue-1))) &
-            CALL CoLM_stop ('duplicate dam_seq entries in reservoir parameter file')
+         IF (any(dam_seq(2:nresv_catalogue) == dam_seq(1:nresv_catalogue-1))) THEN
+            allocate (icache (nresv_catalogue))
+            icache(order) = dam_seq
+            i = 1
+            DO WHILE (i < nresv_catalogue)
+               iloc = i
+               DO WHILE (iloc < nresv_catalogue)
+                  IF (dam_seq(iloc+1) /= dam_seq(i)) EXIT
+                  iloc = iloc + 1
+               ENDDO
+               IF (iloc > i) THEN
+                  irsv = minval(order(i:iloc))
+                  IF (p_is_master) write(*,'(A,I0,A,I0,A)') 'Warning: ', iloc-i+1, &
+                     ' dams share unit catchment ', dam_seq(i), ', only the first in the file is kept:'
+                  DO j = i, iloc
+                     IF (p_is_master) write(*,'(A,I0,A)') '   GRAND_ID ', dam_GRAND_ID(order(j)), &
+                        trim(merge(' (kept)   ', ' (dropped)', order(j) == irsv))
+                     IF (order(j) /= irsv) THEN
+                        icache(order(j)) = -order(j)
+                        ndropped = ndropped + 1
+                     ENDIF
+                  ENDDO
+               ENDIF
+               i = iloc + 1
+            ENDDO
+            dam_seq = icache
+            order   = (/(i, i = 1, nresv_catalogue)/)
+            CALL quicksort (nresv_catalogue, dam_seq, order)
+            deallocate (icache)
+         ENDIF
       ENDIF
 
       IF (p_is_worker) THEN
@@ -174,8 +205,8 @@ CONTAINS
                'ERROR: reservoir rows mapped to multiple active ucatch owners=', count(ordinal_count > 1)
             CALL CoLM_stop ('active reservoir ucatch IDs must map one-to-one to parameter rows')
          ENDIF
-         IF (p_is_master .and. any(ordinal_count == 0)) write(*,'(A,I0,A,I0)') &
-            'Reservoir catalogue rows outside active domain: ', count(ordinal_count == 0), &
+         IF (p_is_master .and. count(ordinal_count == 0) > ndropped) write(*,'(A,I0,A,I0)') &
+            'Reservoir catalogue rows outside active domain: ', count(ordinal_count == 0) - ndropped, &
             ' of ', nresv_catalogue
       ENDIF
 

@@ -132,6 +132,12 @@ CONTAINS
             CALL quicksort (num_me, ids_me_sorted, order_ids)
          ENDIF
 
+         ! A worker may own no element (num_me = 0) but still request some,
+         ! e.g. a worker without any bifurcation pathway.  Give the sorted
+         ! list a zero length so find_in_sorted_list1 sees an empty array
+         ! instead of an unallocated one.
+         IF (.not. allocated(ids_me_sorted)) allocate (ids_me_sorted (0), order_ids (0))
+
          pushdata%nself = 0
 
          IF (n_req_uniq > 0) THEN
@@ -314,6 +320,10 @@ CONTAINS
 
          pushdata%num_req_uniq = n_req_uniq
 
+         ! With no request ids_req_uniq is never allocated; the (1:0) section
+         ! of an unallocated array is invalid Fortran.
+         IF (.not. allocated(ids_req_uniq)) allocate (ids_req_uniq (0))
+
          CALL build_worker_pushdata_uniq ( &
             num_me, ids_me, n_req_uniq, ids_req_uniq(1:n_req_uniq), pushdata)
          pushdata%mapping_kind = WORKER_PUSH_MAPPING_SINGLE
@@ -364,6 +374,10 @@ CONTAINS
          ENDIF
 
          pushdata%num_req_uniq = n_req_uniq
+
+         ! With no request ids_req_uniq is never allocated; the (1:0) section
+         ! of an unallocated array is invalid Fortran.
+         IF (.not. allocated(ids_req_uniq)) allocate (ids_req_uniq (0))
 
          CALL build_worker_pushdata_uniq ( &
             num_me, ids_me, n_req_uniq, ids_req_uniq(1:n_req_uniq), pushdata)

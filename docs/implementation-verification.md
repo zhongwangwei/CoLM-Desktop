@@ -37631,3 +37631,8 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase B 区域网络 + LULCC 多年度（2026-10-27）**：`unitcatchment_regional::build` 增加 `merge_existing`；LULCC 下每个 `DEF_LC_YEAR` 的 mkinidata 先把已有区域文件 `seq_src_index` 对应的源 `inpmat` 格标成 touched，再重建并集，避免后一年覆盖掉前一年的河系。非 LULCC 不合并。运行期 `verify_coverage` 仍按当前年检查覆盖。
 
 **Block history 明确边界（2026-10-27）**：Rust 的河道 history 是 root 单文件 writer，PR 512 的 `DEF_HIST_mode='block'` 是 Fortran MPI 分片路径；`run_spatial` 现在对 `block` 直接报错并提示改用 `one` 或 Fortran 引擎，不再静默写单文件。GUI 原本已把该字段标为仅 Fortran。Fortran 分片实现留给 Phase D vendor 对齐。
+
+**Phase D 第一批 vendor 对齐（2026-10-27）**：
+- `MOD_Grid_Reservoir.F90` 重复 `dam_seq` 改为保留文件首行、warning 并记录 dropped 数；与 Rust/mkinidata 一致。
+- `MOD_WorkerPushData.F90` 补 worker 无元素/无请求时的零长度数组，避免未分配数组传给 `find_in_sorted_list1`。
+- `MOD_Vector_ReadWrite.F90` 的空向量保护本仓库 vendor 已有，无需改动。
