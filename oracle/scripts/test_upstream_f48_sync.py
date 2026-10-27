@@ -13,6 +13,7 @@ def main() -> None:
     reservoir = read("main/HYDRO/MOD_Grid_Reservoir.F90")
     bif = read("main/HYDRO/MOD_Grid_RiverLakeBifurcation.F90")
     flow = read("main/HYDRO/MOD_Grid_RiverLakeFlow.F90")
+    network = read("main/HYDRO/MOD_Grid_RiverLakeNetwork.F90")
     hist = read("main/HYDRO/MOD_Grid_RiverLakeHist.F90")
     leaf = read("main/MOD_LeafTemperature.F90")
     leaf_pc = read("main/MOD_LeafTemperaturePC.F90")
@@ -76,7 +77,12 @@ def main() -> None:
     # 告警、停机。这道守卫在并入 CoLM-SYSU-integration（df09a27b）时丢过一次，Rust 汇流同样实现。
     assert "IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &" in flow
     assert "CALL CoLM_stop('grid_riverlake_flow: adaptive routing dt collapsed')" in flow
-    assert "routing_last_global_dt = dt_global" in flow
+    # PR 512 replaced the global dt with per-cluster dt groups.
+    assert "routing_last_global_dt = dt_reduce(1)" in flow
+    assert "IF (k > 0) dt_all(i) = dt_reduce(1+k)" in flow
+    assert "irivsys_shared" in flow
+    assert "SUBROUTINE bifurcation_dt_groups" in network
+    assert "numrivsys_shared" in network
     # 8 个维度是运行时开关：上游新代码里的这些宏必须在同步时转换掉，不能漏进源码。
     import re
     converted = r"\b(TRACER|BGC|LULC_IGBP_PFT|LULC_IGBP_PC|LULCC|CoLMDEBUG|RangeCheck|SrfdataDiag|Campbell_SOIL_MODEL|vanGenuchten_Mualem_SOIL_MODEL)\b"
