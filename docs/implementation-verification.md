@@ -37752,12 +37752,15 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 - vendor 区域网络 + LULCC 跨年：2382 文件逐变量 **0 差异**；
 - 测试：`colm-runtime` 218 通过；vendor clean build 通过；CI 曾全绿。
 
-**已知未闭环**
-1. `mksrfdata` 仍只生成 `DEF_LC_YEAR` 一年；LULCC 跨年测试用复制 2003→2004 静态 landdata，不是真实多年产物。
-2. LULCC + 漫滩回馈未用 LCT 算例验证。
-3. 旧 Fortran `master/IO/worker + DEF_PIO_groupsize` 多 IO group 的 river shard 在 `create_shard_skeleton`/identity 阶段失败；单 IO group 已通过。新 Rust 引擎没有该分类并拒绝 `DEF_HIST_mode='block'`。
-4. Fortran 输出逐变量一致，但 HDF5 文件布局不同，不是逐字节一致。
-5. tracer/sediment 的逐簇 dt 暂不处理。
+**后续已闭环**
+1. 用两次 mksrfdata 生成真实 landdata/2003 与 landdata/2004，LULCC 跨年通过（2382 文件，0 变量差异）。
+2. LCT feedback+LULCC 跨年通过：2194 文件，0 变量差异；TOPMODEL `soiltext` 未初始化 bug 已修。
+3. 单 IO group block+concatenate 通过（19/19 变量一致）。
+
+**已知限制（不阻塞当前多节点 Rust 引擎）**
+1. 旧 Fortran `master/IO/worker + DEF_PIO_groupsize` 多 IO group 的 river shard 在 `create_shard_skeleton`/`ncio_read_serial` 阶段失败；单 IO group 已通过。新 Rust 引擎没有该分类并拒绝 `DEF_HIST_mode='block'`。
+2. Fortran 输出逐变量一致，但 HDF5 文件布局不同，不承诺文件逐字节。
+3. tracer/sediment 的逐簇 dt 暂不处理（用户明确要求先跳过）。
 
 这些是验收边界，不是已通过项。
 
