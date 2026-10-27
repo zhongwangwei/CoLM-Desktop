@@ -1314,29 +1314,42 @@ fn route_system<'a>(
                 face_of(net, system, &wdsrf, &veloc, k, faces[k].zgrad_dn)
             };
         }
-        // `push_ups2ucat`（sum，权重 1）：跳过 0 值，首项直接赋值。
+        // `push_ups2ucat`（sum，权重 1）：跳过 0 值，首项直接赋值。三个字段共用一次上游
+        // 遍历；每个字段的加法顺序不变，所以逐位与分开 push 相同。
         for k in 0..n {
-            let push = |value: fn(&Face) -> f64| {
-                let mut total = 0.0;
-                let ups = &system.upstream[system.upstream_start[k]..system.upstream_start[k + 1]];
-                for &u in ups {
-                    let value = value(&faces[u]);
-                    if value == 0.0 {
-                        continue;
-                    }
-                    total = if total == 0.0 {
-                        value * 1.0
+            let mut total_h = 0.0;
+            let mut total_m = 0.0;
+            let mut total_z = 0.0;
+            let ups = &system.upstream[system.upstream_start[k]..system.upstream_start[k + 1]];
+            for &u in ups {
+                let face = &faces[u];
+                if face.hflux != 0.0 {
+                    total_h = if total_h == 0.0 {
+                        face.hflux * 1.0
                     } else {
-                        total + value * 1.0
+                        total_h + face.hflux * 1.0
                     };
                 }
-                total
-            };
+                if face.mflux != 0.0 {
+                    total_m = if total_m == 0.0 {
+                        face.mflux * 1.0
+                    } else {
+                        total_m + face.mflux * 1.0
+                    };
+                }
+                if face.zgrad_dn != 0.0 {
+                    total_z = if total_z == 0.0 {
+                        face.zgrad_dn * 1.0
+                    } else {
+                        total_z + face.zgrad_dn * 1.0
+                    };
+                }
+            }
             let face = &faces[k];
             sums[k] = (
-                face.sum_hflux - push(|face| face.hflux),
-                face.sum_mflux - push(|face| face.mflux),
-                face.sum_zgrad - push(|face| face.zgrad_dn),
+                face.sum_hflux - total_h,
+                face.sum_mflux - total_m,
+                face.sum_zgrad - total_z,
             );
         }
         // 水库调度（`DEF_Reservoir_Method > 0`）：入流是净汇入，出流按调度方案；出流作为出口通量
