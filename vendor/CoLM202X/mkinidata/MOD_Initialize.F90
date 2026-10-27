@@ -438,7 +438,9 @@ ENDIF
 #ifdef CatchLateralFlow
       use_soiltext = .true.
 #else
-      use_soiltext = (DEF_Runoff_SCHEME == 3) ! only for Simple VIC
+      ! TOPMODEL (scheme 0) needs the USDA class for BVIC; previously only
+      ! scheme 3 read it, leaving soiltext uninitialised in the const restart.
+      use_soiltext = (DEF_Runoff_SCHEME == 3) .or. (DEF_Runoff_SCHEME == 0)
 #endif
       IF (use_soiltext) THEN
          CALL soiltext_readin (dir_landdata, lc_year)
