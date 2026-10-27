@@ -135,3 +135,16 @@
 - 新实验先写 `implementation-verification.md` 的轮次，再更新本文对应行的 job id / 提交号；
 - 新提交若改变验收判据，必须同时更新 §1 或 §4；
 - 原始日志/产物路径变化时更新 §3。
+
+## 6. PR 512（river-lake flow）当前验收状态
+
+| 阶段 | 已完成 | 仍未完成 |
+|---|---|---|
+| A 科学行为 | 累积漫滩曲线；级联水库 `qresv_ups_prev`（Rust + vendor）；storage dt limit；method 2 保留；重复 `dam_seq` 首行；单进程 Rust LULCC+feedback；vendor LULCC feedback 重建 | 真实多年 LULCC+feedback 算例 |
+| B 区域网络 / block history | 区域网络覆盖检查；LULCC 多年并集；vendor 区域网络/block shard/`RiverHistConcatenate`；Rust 对 `block` 明确拒绝 | Rust block history 完整路径；真实 shard 拼接回归 |
+| C 性能重构 | volume 缓存（Rust + vendor）；CSR 上游表；Rust 三字段上游求和；vendor 批量上游 Push | 分汊连通簇自适应 dt |
+| D vendor 对齐 | 新 Push/VectorIO 模块；worker 零元素；重复水库；级联水库；LULCC feedback；volume 缓存；批量 Push；编译期守卫；clean build；`mpirun` 注入防护运行验证 | 真实 Fortran N=1 vs N>1 restart/history 逐字节回归；Flow 剩余差异 |
+
+Rust 契约证据：hb64 河湖开 N=1 vs N=2 **634/634**（jobs 8788889/8788890）；history-on 此前 **633/633**。
+
+Fortran 数值回归的环境缺口：本机没有 hb64 算例依赖的 rawdata/runtime；tianhe 有算例数据但没有 `mpifort`/Fortran MPI 运行环境。需要可用的 Fortran MPI + 算例数据后才能关闭 Phase D 的最后一项。
