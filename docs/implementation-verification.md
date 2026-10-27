@@ -37782,3 +37782,5 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 **分汊 + DAILY history N=8（2026-10-27，tianhe）**：hb64 64-block 算例开 `DEF_USE_BIFURCATION=.true.`、`DEF_HIST_FREQ='DAILY'`；N=1（1408 patch）vs N=8（每 rank 8 block、176 patch）：**636/636 文件逐字节一致**，包含 `history/hb_hist_2003-01.nc` 与 `history/hb_hist_unitcat_2003-01.nc`。这把 history root gather、全局累加器和分汊簇同步一起覆盖到了 8 节点。
 
 **分汊 + history N=8 耗时（2026-10-27）**：tianhe hb64 1 天、分汊、DAILY history；N=1 6:14、MaxRSS 3.41 GB；N=8 6:54、MaxRSS 1.57 GB。小算例上 N=8 仍略慢，但每 rank 内存明显下降；正确性 636/636 逐字节一致。
+
+**556 10 天 N=4（2026-10-27，7920l）**：分汊 556 算例从 1 天扩到 10 天（480 step），N=1 vs N=4：**1125/1125 文件逐字节一致**。注意：同时启动 4 个 rank 时出现过 600s rendezvous 超时；先启动 rank0、等 10s 再启动 worker 后正常完成。这是手工启动器的时序问题，不是数值/路由回归。
