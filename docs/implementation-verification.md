@@ -37776,3 +37776,5 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 - 7920l 556 分汊算例：N=1 vs N=4，1125 个共享输出文件全部 `cmp` 一致（N=4 只额外有 `.colm-spmd/endpoint` 启动文件）；N=8 被拒绝，因为 556 只有 4 个 landpatch block（"4 landpatch blocks cannot be split over 8 processes"）。
 - tianhe hb64 64-block 探针：N=1 vs N=8，**634/634 文件逐字节一致**；N=8 每个 rank 8 个 block、176 patch，N=1 为 1408 patch。
 - 结论：Rust 多节点契约从 N=2 扩展到 N=8（hb64）和 N=4（556 分汊）。
+
+**分汊 64-block N=8（2026-10-27，tianhe）**：hb64 算例开 `DEF_USE_BIFURCATION=.true.`，N=1（1408 patch，16 CPU）vs N=8（每 rank 8 block、176 patch，8 CPU/rank）：**634/634 文件逐字节一致**。耗时 N=1 6:06、N=8 6:44；MaxRSS 约 3.34 GB vs 2.05 GB。小算例上 N=8 没有加速，属于通信/启动开销主导，不是回归。
