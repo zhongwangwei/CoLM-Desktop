@@ -612,7 +612,7 @@ PROGRAM CoLM
             IF (is_spinup) lulcc_in_spinup = .true.
 #ifdef GridRiverLakeFlow
             IF (DEF_USE_GridRiverLakeFlow) THEN
-               CALL grid_riverlake_flow_lulcc ()
+               CALL grid_riverlake_flow_lulcc (jdate(1), is_spinup)
             ELSE
                CALL allocate_flood_patch ()
             ENDIF
@@ -754,7 +754,7 @@ PROGRAM CoLM
                         rewind = .true.)
 #ifdef GridRiverLakeFlow
                      IF (DEF_USE_GridRiverLakeFlow) THEN
-                        CALL grid_riverlake_flow_lulcc ()
+                        CALL grid_riverlake_flow_lulcc (jdate(1), is_spinup)
                      ELSE
                         CALL allocate_flood_patch ()
                      ENDIF

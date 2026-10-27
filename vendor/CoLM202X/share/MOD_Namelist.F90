@@ -1821,9 +1821,6 @@ CONTAINS
          IF (DEF_GridRiverLake_FloodFeedback .or. DEF_USE_LEVEE) &
             CALL CoLM_Stop ('RiverLake features require GridRiverLakeFlow.')
 #endif
-      IF (DEF_USE_LULCC) THEN
-         IF (DEF_GridRiverLake_FloodFeedback) CALL CoLM_Stop ('Grid flood feedback does not support LULCC.')
-      ENDIF
          IF (.not. (DEF_GRIDBASED_ROUTING_MAX_DT > 0._r8 .and. DEF_GRIDBASED_ROUTING_MAX_DT < huge(1._r8))) &
             CALL CoLM_Stop ('DEF_GRIDBASED_ROUTING_MAX_DT must be finite and positive.')
 #ifndef CaMa_Flood

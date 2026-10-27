@@ -285,15 +285,74 @@ CONTAINS
    END SUBROUTINE rebuild_volwater_ucat
 
    ! ---------
-   SUBROUTINE grid_riverlake_flow_lulcc ()
+   SUBROUTINE init_flood_feedback ()
 
+   ! Rebuild the patch/grid arrays of grid flood feedback on the current land
+   ! patches and patch-to-grid mapping (start-up and after LULCC).
+
+   USE MOD_LandPatch, only: numpatch
    IMPLICIT NONE
+
+   real(r8), allocatable :: grid_area_local(:)
+
+      IF (.not. p_is_worker) RETURN
+
+      IF (allocated(flood_visible_uc)) deallocate(flood_visible_uc, flood_protected_uc, &
+         flood_credit_patch, flood_evap_acc, flood_infil_acc, flood_reservoir_uc, flood_grid_area)
+
+      allocate(flood_visible_uc(numucat), flood_protected_uc(numucat), &
+         flood_credit_patch(numpatch), flood_evap_acc(numpatch), flood_infil_acc(numpatch), &
+         flood_reservoir_uc(numucat), flood_grid_area(numinpm))
+      flood_evap_acc = 0._r8
+      flood_infil_acc = 0._r8
+      flood_evap_period = 0._r8
+      flood_infil_period = 0._r8
+
+      allocate(grid_area_local(numinpm))
+      grid_area_local = 0._r8
+      flood_credit_patch = 1._r8
+      IF (numpatch > 0) CALL worker_remap_data_pset2grid(remap_patch2inpm, &
+         flood_credit_patch, grid_area_local, fillvalue=0._r8, filter=flood_credit_patch>0._r8)
+      CALL worker_push_data(allreduce_inpm, grid_area_local, flood_grid_area, fillvalue=0._r8)
+      IF (numinpm > 0) flood_grid_area = max(flood_grid_area, push_ucat2inpm%sum_area)
+      deallocate(grid_area_local)
+
+   END SUBROUTINE init_flood_feedback
+
+   ! ---------
+   SUBROUTINE grid_riverlake_flow_lulcc (year, spinup)
+
+   ! After LULCC the patch-to-grid mapping, pushes and landpatch arrays have
+   ! been rebuilt.  Rebuild the module arrays on the new patches and publish the
+   ! flood state; during spin-up routing does not run, so withhold the credit.
+
+   USE MOD_LandPatch, only: numpatch
+   IMPLICIT NONE
+
+   integer, intent(in) :: year
+   logical, intent(in) :: spinup
+
+      IF (p_is_worker) THEN
+         IF (allocated(filter_rnof)) deallocate(filter_rnof)
+         allocate (filter_rnof (numpatch))
+         filter_rnof = .false.
+      ENDIF
 
       CALL allocate_flood_patch ()
       CALL rebuild_volwater_ucat ()
       IF (DEF_USE_BIFURCATION) THEN
          wdsrf_ucat_prev = wdsrf_ucat
          wdsrf_ucat_prev_valid = .true.
+      ENDIF
+
+      IF (DEF_GridRiverLake_FloodFeedback) THEN
+         CALL init_flood_feedback ()
+         CALL publish_flood_feedback (year)
+         IF (spinup .and. p_is_worker) THEN
+            flood_credit_patch = 0._r8
+            flood_depth_patch = 0._r8
+            flood_fraction_patch = 0._r8
+         ENDIF
       ENDIF
 
    END SUBROUTINE grid_riverlake_flow_lulcc
