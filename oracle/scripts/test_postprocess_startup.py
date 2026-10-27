@@ -101,6 +101,9 @@ def generated_program(master: bool, include_spmd_api: bool) -> str:
         support_modules(master=master, include_spmd_api=include_spmd_api)
         + startup_prefix()
         + "CONTAINS\n"
+        + "  subroutine reject_unquotable(path, what)\n"
+        + "    character(len=*), intent(in) :: path, what\n"
+        + "  end subroutine reject_unquotable\n"
         + "  subroutine scan_shards()\n    print '(A)', 'SCAN_SHARDS'\n  end subroutine scan_shards\n"
         + "  subroutine build_output()\n    print '(A)', 'BUILD_OUTPUT'\n  end subroutine build_output\n"
         + "  subroutine verify_and_promote()\n    print '(A)', 'VERIFY_AND_PROMOTE'\n  end subroutine verify_and_promote\n"
