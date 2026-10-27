@@ -55,6 +55,12 @@
 #if (defined CATCHMENT || defined SinglePoint)
 #undef GridRiverLakeFlow
 #endif
+#if (defined GridRiverLakeFlow && !defined USEMPI)
+#error GridRiverLakeFlow requires USEMPI
+#endif
+#ifdef GridRiverLakeSediment
+#error GridRiverLakeSediment is not coupled to this version yet
+#endif
 
 ! 7. BGC model: always compiled in now (every main/BGC/ module). DEF_USE_BGC
 !    (MOD_Namelist.F90, default .false.) picks whether it runs; the old

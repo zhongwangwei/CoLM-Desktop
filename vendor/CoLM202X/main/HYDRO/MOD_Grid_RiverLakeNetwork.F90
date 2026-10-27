@@ -1,6 +1,10 @@
 #include <define.h>
 
 #ifdef GridRiverLakeFlow
+#ifndef USEMPI
+! The serial path never builds the river-system labels (rivermouth) used below.
+#error "GridRiverLakeFlow requires USEMPI (see include/define.h)"
+#endif
 MODULE MOD_Grid_RiverLakeNetwork
 !--------------------------------------------------------------------------------
 ! DESCRIPTION:
