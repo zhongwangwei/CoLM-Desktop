@@ -37778,3 +37778,5 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 - 结论：Rust 多节点契约从 N=2 扩展到 N=8（hb64）和 N=4（556 分汊）。
 
 **分汊 64-block N=8（2026-10-27，tianhe）**：hb64 算例开 `DEF_USE_BIFURCATION=.true.`，N=1（1408 patch，16 CPU）vs N=8（每 rank 8 block、176 patch，8 CPU/rank）：**634/634 文件逐字节一致**。耗时 N=1 6:06、N=8 6:44；MaxRSS 约 3.34 GB vs 2.05 GB。小算例上 N=8 没有加速，属于通信/启动开销主导，不是回归。
+
+**分汊 + DAILY history N=8（2026-10-27，tianhe）**：hb64 64-block 算例开 `DEF_USE_BIFURCATION=.true.`、`DEF_HIST_FREQ='DAILY'`；N=1（1408 patch）vs N=8（每 rank 8 block、176 patch）：**636/636 文件逐字节一致**，包含 `history/hb_hist_2003-01.nc` 与 `history/hb_hist_unitcat_2003-01.nc`。这把 history root gather、全局累加器和分汊簇同步一起覆盖到了 8 节点。
