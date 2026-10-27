@@ -37640,3 +37640,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase A LULCC + 漫滩回馈（Rust 单进程，2026-10-27）**：移除 Rust/GUI 的 `FloodFeedback + DEF_USE_LULCC` 拒绝；每个 LULCC 新段会按新 patch 重建 feedback 数组并发布。多进程 LULCC 仍由入口拒绝（架构未支持）。vendor Fortran 仍保留旧的 feedback+LULCC stop，等 Phase D 补 `grid_riverlake_flow_lulcc` 的 feedback 重建后再放开。新增 GUI state 测试确认两者同开时字段可编辑。
 
 **Phase A vendor LULCC + 漫滩回馈（2026-10-27）**：vendor `MOD_Grid_RiverLakeFlow.F90` 增加 `init_flood_feedback`，`grid_riverlake_flow_lulcc(year, spinup)` 在新 patch 上重建 feedback 数组、重新发布，spin-up 时清零信用；`CoLM.F90` 两处调用补 `jdate(1), is_spinup`；`MOD_Namelist` 删除 feedback+LULCC 的 stop。Rust 侧此前已放开单进程限制。vendor Fortran 未在本机编译验证。
+
+**Phase D vendor 编译验证（2026-10-27）**：在当前 `include/define.h`（USEMPI + GridRiverLakeFlow）下执行 `make -j8`，vendor `CoLM202X` 全部对象和 `run/colm.x` 链接成功；包含本轮的 reservoir 重复行、worker 零长度数组、LULCC feedback 重建和 storage/cascade 改动。没有运行真实算例，不能替代 Phase D 的数值回归。
