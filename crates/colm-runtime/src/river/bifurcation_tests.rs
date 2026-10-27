@@ -175,3 +175,11 @@ fn cluster_routing_dt_reduces_per_cluster_and_respects_remaining_time() {
     let dt = super::cluster_routing_dt(&[0.0, 60.0, -1.0], &groups, &[30.0, 30.0]);
     assert_eq!(dt, vec![10.0, 10.0]);
 }
+
+#[test]
+fn connected_river_system_groups_compacts_labels_by_smallest_system() {
+    // systems 1 and 3 merge; 0 and 2 stay isolated. Labels follow the
+    // smallest system in each component: 0,1,2,1.
+    let groups = super::connected_river_system_groups(4, [(1, 3)]);
+    assert_eq!(groups, vec![0, 1, 2, 1]);
+}
