@@ -3020,7 +3020,7 @@ const runServer = {
   maps: [{ local: '/surface', remote: '/data/surface' }],
 };
 
-test('General setup selects run location before paths and preserves it while configuring resources', async () => {
+test('run environment and save location selects run location before paths and preserves it while configuring resources', async () => {
   const p = page('NewCasePage', { form, sites: [site], step: 1 }, [site], initialValues, {
     servers: [runServer],
   });
@@ -3064,7 +3064,7 @@ test('a removed run location blocks new creation instead of silently selecting l
   assert.equal(c.fields.find((field) => field.id === 'new-run-host')?.value, 'missing');
 });
 
-test('existing General setup saves the target and synchronizes the hidden run panel profile', async () => {
+test('existing run environment and save location saves the target and synchronizes the hidden run panel profile', async () => {
   const p = page('CasesPage', undefined, [site], initialValues, {
     profile: { run_host: 'compute' },
     servers: [runServer],
@@ -4704,4 +4704,144 @@ test('after a partly failed server batch, Back edits only the sites not yet crea
     drafts.map((draft) => draft.site),
     multiSites.filter((site) => site.name === 'CN-Cng').map((site) => site.site_file),
   );
+});
+
+// U-03：第 4 步改变模型方案后，第 3 步已核对的数据立即标记失效；补上新增必填项、重新检查后
+// 才能进"检查与运行"并创建算例。
+test('changing a model scheme marks the checked data step and blocks review until it is rechecked', async () => {
+  const p = page('NewCasePage', undefined, [site], initialValues, {
+    schema: [...schema, { ...field('DEF_USE_BGC', '生态与生地化', '.false.'), kind: 'Logical' }],
+  });
+  await p.mount();
+  p.set('new-engine', 'rust');
+  p.set('new-name', 'CN-Cng');
+  p.set('new-root', '/project');
+  await p.click('new-next');
+  p.set('new-kind', 'site');
+  await p.click('new-next');
+  // 第 3 步故意不填 Runtime：此时方案还没开 BGC，它不是必填。
+  for (const [key, value] of Object.entries(form))
+    if (key !== 'runtime' && p.render().fields.some((item) => item.id === `new-${key}`))
+      p.set(`new-${key}`, value);
+  await p.click('new-next');
+  assert.equal(p.render().details.step, 4);
+  // BGC 要求 PFT/PC 结构：先选 PFT，再打开 BGC。
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('PFT');
+  p.render();
+  // 打开 BGC：Runtime 目录成为第 3 步的新必填项，而那里核对时还没有它。
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_USE_BGC: '.true.',
+  });
+  let c = p.render();
+  const recheck = () =>
+    p.element('SimulationSteps').props.recheck as Partial<Record<number, string>>;
+  assert.match(String(recheck()[3]), /BGC/);
+  assert.match(String(recheck()[3]), /Runtime/);
+  assert.deepEqual(
+    (c.details.recheck as { step: number }[]).map((item) => item.step),
+    [3],
+  );
+  assert.match(JSON.stringify(p.elements), /第 3 步（数据与时段）的数据还没有重新检查/);
+  // 不能带着旧数据进检查与运行。
+  assert.equal(c.actions.find((action) => action.id === 'new-next')?.enabled, false);
+  // 从提示里的入口回到第 3 步：顶部有原因和"重新检查"。
+  await p.click('new-goto-recheck-3');
+  c = p.render();
+  assert.equal(c.details.step, 3);
+  assert.ok(c.actions.some((action) => action.id === 'new-recheck'));
+  // Runtime 还空着：重新检查失败并在界面报出来，失效标记保留。
+  await assert.rejects(p.click('new-recheck'), /Runtime/);
+  assert.match(JSON.stringify(p.elements), /Runtime 数据目录/);
+  assert.match(String(recheck()[3]), /BGC/);
+  // 补上缺的必填项后，第 3 步的数据重新成立，失效标记自动清除。
+  p.set('new-runtime', '/runtime');
+  c = p.render();
+  assert.equal(recheck()[3], undefined);
+  assert.equal(c.details.recheck, undefined);
+  // 之后才能进入检查与运行并成功创建。
+  await p.click('new-next');
+  await p.click('new-next');
+  c = p.render();
+  assert.equal(c.details.step, 5);
+  await p.click('new-create');
+  assert.ok(p.calls.some((call) => call.command === 'new_case'));
+});
+
+// U-03："立即标识失效的已填数据"：方案改成城市后，已选的非城市站点确实不再匹配，重检会报出来；
+// 换成匹配站点并重新检查后才放行。
+test('a station that no longer matches a changed scheme must be reselected and rechecked', async () => {
+  const urbanSite = {
+    ...site,
+    name: 'urban-site',
+    site_file: '/urban.nc',
+    met_file: '/urban-met.nc',
+    urban: true,
+  };
+  const p = page('NewCasePage', { form, sites: [site, urbanSite], step: 3 });
+  await p.mount();
+  await p.click('new-next'); // 3→4：记下第 3 步核对时的模型设置
+  assert.equal(p.render().details.step, 4);
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_URBAN_RUN: '.true.',
+  });
+  let c = p.render();
+  const recheck = () =>
+    p.element('SimulationSteps').props.recheck as Partial<Record<number, string>>;
+  assert.match(String(recheck()[3]), /CN-Cng/);
+  assert.match(String(recheck()[3]), /城市/);
+  assert.equal(c.actions.find((action) => action.id === 'new-next')?.enabled, false);
+  await p.click('new-goto-recheck-3');
+  // 旧站点确实不再匹配：重新检查明确报出城市配置不符，不会静默放过（测试里的双语取英文）。
+  await assert.rejects(p.click('new-recheck'), /Urban configuration mismatch/);
+  // 换一个与城市方案匹配的站点后，数据重新成立，失效标记清除。
+  await p.click('new-select-urban-site');
+  c = p.render();
+  assert.equal(recheck()[3], undefined);
+  assert.equal(c.details.recheck, undefined);
+  await p.click('new-next');
+  await p.click('new-next');
+  await p.click('new-create');
+  assert.ok(p.calls.some((call) => call.command === 'new_case'));
+});
+
+// U-03："引擎变化"影响范围与网格、检查与运行两步：范围步骤要重新看并行布局/编译配置，
+// 检查与运行要重新看线程、进程与 CPU；资源没重检前创建被挡住。
+test('an engine change flags range and review, and creation waits for the review recheck', async () => {
+  // 从第 2 步开始把 2、3、5 步都核对一遍，后退回第 1 步换引擎。
+  const p = page('NewCasePage', { form, sites: [site], step: 2 });
+  await p.mount();
+  await p.click('new-next'); // 2→3：记下范围与网格核对时的设置
+  await p.click('new-next'); // 3→4
+  await p.click('new-next'); // 4→5：记下检查与运行核对时的设置
+  assert.equal(p.render().details.step, 5);
+  await p.click('new-step-1');
+  p.set('new-engine', 'fortran');
+  let c = p.render();
+  const recheck = () =>
+    p.element('SimulationSteps').props.recheck as Partial<Record<number, string>>;
+  assert.match(String(recheck()[2]), /并行布局/);
+  assert.match(String(recheck()[5]), /线程、进程与 CPU/);
+  assert.equal(c.details.step, 1);
+  // 第 2 步正是要去重新检查的地方：允许前进。
+  assert.equal(c.actions.find((action) => action.id === 'new-next')?.enabled, true);
+  await p.click('new-next');
+  assert.equal(p.render().details.step, 2);
+  // 在当前失效步骤上直接点"下一步"等于重新检查：通过后放行。
+  await p.click('new-next');
+  assert.equal(p.render().details.step, 3);
+  assert.equal(recheck()[2], undefined);
+  // 走到检查与运行：换引擎后资源还没重检，创建按钮不可用。
+  await p.click('new-next');
+  await p.click('new-next');
+  c = p.render();
+  assert.equal(c.details.step, 5);
+  assert.match(String(recheck()[5]), /线程、进程与 CPU/);
+  assert.equal(c.actions.find((action) => action.id === 'new-create')?.enabled, false);
+  // 重新检查这一步后资源基线更新，可以创建，并且真的按新引擎提交。
+  await p.click('new-recheck');
+  c = p.render();
+  assert.equal(recheck()[5], undefined);
+  assert.equal(c.actions.find((action) => action.id === 'new-create')?.enabled, true);
+  await p.click('new-create');
+  assert.equal(p.calls.find((call) => call.command === 'new_case')?.args.engine, 'fortran');
 });

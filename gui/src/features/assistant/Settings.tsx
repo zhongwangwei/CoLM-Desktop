@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke, invokeJson, hasBackend } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { Button, Input, Select, Field, Advanced, Notice } from '../../components/ui';
+import { SaveBadge } from '../../components/SaveBadge';
 import {
   API_PROVIDERS,
   providerLabel,
@@ -17,15 +18,19 @@ import {
   type Settings,
   type ModelChoice,
 } from './model';
+import { draftSaveState, sendingSummary, settingsDraftDirty } from './settings-draft';
 
 export default function AssistantSettings({
   settings,
   onSave,
   disabled,
+  onDirtyChange,
 }: {
   settings: Settings;
   onSave: (next: Settings) => Promise<void>;
   disabled: boolean;
+  /** 把草稿是否有未保存修改报给面板：关闭/切走前据此决定要不要确认放弃（U-07）。 */
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const { state } = useApp();
   const t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
@@ -46,6 +51,8 @@ export default function AssistantSettings({
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  // 只用于保存请求在飞时显示"正在保存"；发现模型、登记 Key 等操作不算保存设置。
+  const [saving, setSaving] = useState(false);
   const request = useRef(0);
   useEffect(() => {
     setDraft(settings);
@@ -74,8 +81,21 @@ export default function AssistantSettings({
       sourceRequest.current++;
     };
   }, [draft.backend, draft.base_url]);
+  // 必须放在最后：草稿比较依赖 draft/options，改完才报给面板（U-07）。onDirtyChange 是 setState，稳定。
+  const dirty = settingsDraftDirty(settings, draft, options);
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
   function patch(value: Partial<Settings>) {
+    // 字段一改就清掉上一次"设置已保存"的成功提示，避免过时成功状态（U-05 / U-07）。
+    setStatus('');
     setDraft((old) => ({ ...old, ...value }));
+  }
+  /** 放弃草稿 = 把表单恢复成已保存设置；面板会据此清掉"有未保存修改"（U-07）。 */
+  function discardDraft() {
+    setDraft(settings);
+    setOptions(JSON.stringify(settings.api_options, null, 2));
+    setStatus(t('已放弃未保存的修改。', 'Unsaved changes discarded.'));
   }
   async function run(action: () => Promise<void>) {
     if (lock.current) return;
@@ -138,6 +158,8 @@ export default function AssistantSettings({
               ? ['low', 'medium', 'high']
               : ['low', 'medium', 'high', 'xhigh', 'max'])),
       ];
+  // "实际发送"按已保存设置算，不能用 draft：草稿换服务后、保存前发送仍走旧值（U-07）。
+  const sending = sendingSummary(settings, state.language);
   const customProvider = builtin && providerId(draft) === 'custom';
   const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
   const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
@@ -164,6 +186,25 @@ export default function AssistantSettings({
   );
   return (
     <section aria-label={t('助手设置', 'Assistant settings')} className="space-y-3">
+      {/* 草稿与已保存设置分开说清楚：徽标给状态，这一行给"现在真正发往哪里"（U-07）。 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <SaveBadge state={draftSaveState(dirty, saving)} t={t} />
+        <span className="text-xs text-muted-foreground">
+          {t('实际发送：', 'Sending as: ')}
+          {sending.service} / {sending.model}
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {dirty
+          ? t(
+              '下面的修改尚未保存；在点"保存设置"之前，发送仍使用上面这个服务与模型。',
+              'Changes below are not saved yet; messages keep going to the service and model above until you save.',
+            )
+          : t(
+              '发送使用上面这个服务与模型；下面的修改保存后生效。',
+              'Messages go to the service and model above; changes below take effect after saving.',
+            )}
+      </p>
       <fieldset disabled={disabled || busy || !hasBackend()} className="space-y-3">
         <Field label={t('运行后端', 'Backend')}>
           <Select
@@ -351,7 +392,11 @@ export default function AssistantSettings({
                   <option value="anthropic">Anthropic</option>
                 </Select>
               </Field>
-              <Field label={t('输出 token 上限', 'Maximum output tokens')}>
+              <Field
+                label={t('输出 token 上限', 'Maximum output tokens')}
+                unit={t('tokens', 'tokens')}
+                range={t('≥ 1 的整数', 'integer ≥ 1')}
+              >
                 <Input
                   type="number"
                   min={1}
@@ -359,7 +404,11 @@ export default function AssistantSettings({
                   onChange={(e) => patch({ max_output_tokens: Number(e.target.value) })}
                 />
               </Field>
-              <Field label={t('超时秒数', 'Timeout (seconds)')}>
+              <Field
+                label={t('超时秒数', 'Timeout (seconds)')}
+                unit={t('秒', 'seconds')}
+                range={t('≥ 1 的整数', 'integer ≥ 1')}
+              >
                 <Input
                   type="number"
                   min={1}
@@ -371,7 +420,10 @@ export default function AssistantSettings({
                 <textarea
                   aria-label={t('额外 API 选项', 'Additional API options')}
                   value={options}
-                  onChange={(e) => setOptions(e.target.value)}
+                  onChange={(e) => {
+                    setStatus('');
+                    setOptions(e.target.value);
+                  }}
                 />
               </Field>
               <label>
@@ -387,9 +439,10 @@ export default function AssistantSettings({
           <Field
             label={t('每会话最多轮数', 'Turns per conversation')}
             hint={t(
-              '0 = 不限；达到后开始新对话可继续。',
-              '0 = unlimited; start a new conversation to continue after the limit.',
+              '达到上限后开始新对话可继续。',
+              'After the limit, start a new conversation to continue.',
             )}
+            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
           >
             <Input
               type="number"
@@ -401,9 +454,11 @@ export default function AssistantSettings({
           <Field
             label={t('每会话最多 token', 'Tokens per conversation')}
             hint={t(
-              '0 = 不限；累计 prompt + completion。每次调用模型都会把整段对话和工具说明重新计入一遍（一次约 1–2 万），一轮带工具调用常有好几次。',
-              '0 = unlimited; cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
+              '累计 prompt + completion。每次调用模型都会把整段对话和工具说明重新计入一遍（一次约 1–2 万），一轮带工具调用常有好几次。',
+              'Cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
             )}
+            unit={t('tokens', 'tokens')}
+            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
           >
             <Input
               type="number"
@@ -424,41 +479,51 @@ export default function AssistantSettings({
             {t('检查外部后端状态', 'Check external backend status')}
           </Button>
         </Advanced>
-        <Button
-          onClick={() =>
-            void run(async () => {
-              if (key)
-                throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
-              if (
-                ![draft.max_output_tokens, draft.timeout_seconds].every(
-                  (n) => Number.isSafeInteger(n) && n > 0,
-                ) ||
-                ![draft.session_turn_limit, draft.session_token_limit].every(
-                  (n) => Number.isSafeInteger(n) && n >= 0,
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={() =>
+              void run(async () => {
+                if (key)
+                  throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
+                if (
+                  ![draft.max_output_tokens, draft.timeout_seconds].every(
+                    (n) => Number.isSafeInteger(n) && n > 0,
+                  ) ||
+                  ![draft.session_turn_limit, draft.session_token_limit].every(
+                    (n) => Number.isSafeInteger(n) && n >= 0,
+                  )
                 )
-              )
-                throw new Error(
+                  throw new Error(
+                    t(
+                      '输出上限和超时必须是正整数；会话上限必须是非负整数。',
+                      'Output limit and timeout must be positive integers; session limits must be non-negative integers.',
+                    ),
+                  );
+                const next = settingsForSave(
+                  rememberProfile({ ...draft, api_options: parseApiOptions(options) }),
+                  settings,
+                );
+                setSaving(true);
+                try {
+                  await onSave(next);
+                } finally {
+                  setSaving(false);
+                }
+                setStatus(
                   t(
-                    '输出上限和超时必须是正整数；会话上限必须是非负整数。',
-                    'Output limit and timeout must be positive integers; session limits must be non-negative integers.',
+                    '设置已保存，下次发送时生效。',
+                    'Settings saved; they apply to the next message.',
                   ),
                 );
-              const next = settingsForSave(
-                rememberProfile({ ...draft, api_options: parseApiOptions(options) }),
-                settings,
-              );
-              await onSave(next);
-              setStatus(
-                t(
-                  '设置已保存，下次发送时生效。',
-                  'Settings saved; they apply to the next message.',
-                ),
-              );
-            })
-          }
-        >
-          {t('保存设置', 'Save settings')}
-        </Button>
+              })
+            }
+          >
+            {t('保存设置', 'Save settings')}
+          </Button>
+          <Button variant="ghost" disabled={!dirty} onClick={discardDraft}>
+            {t('放弃修改', 'Discard changes')}
+          </Button>
+        </div>
       </fieldset>
       {status && (
         <Notice>

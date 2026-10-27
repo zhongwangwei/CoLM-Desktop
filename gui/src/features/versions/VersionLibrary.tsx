@@ -73,7 +73,7 @@ export function changeSummary(overlay: Overlay, ownCode: boolean, en: boolean): 
 
 /**
  * 版本库：整页宽的三张表——修改版（按派生关系缩进）、草稿、官方版本。原来是挤在左边的一栏
- * （2026-10-20 用户反映左右分栏浪费地方），信息只放得下名字。点名字打开版本；"设为模拟使用"
+ * （2026-10-20 用户反映左右分栏浪费地方），信息只放得下名字。点名字打开版本；"设为运行模型"
  * 单独一个按钮，打开查看不再顺手换掉模拟用的版本。
  */
 export default function VersionLibrary({
@@ -310,7 +310,7 @@ export default function VersionLibrary({
           {!used &&
             act(
               `version-use-${v.version.id}-${v.version.revision}`,
-              t('设为模拟使用', 'Use for simulations'),
+              t('设为运行模型', 'Set as run model'),
               () => onUse(v),
             )}
           {removable(use, chosen) && action(t('删除', 'Delete'), () => void remove([v]), true)}
@@ -363,8 +363,8 @@ export default function VersionLibrary({
         <Card
           title={t('草稿', 'Drafts')}
           description={t(
-            '还在改的版本。冻结为新版本后草稿自动删除。',
-            'Versions still being edited. A draft goes away once it is frozen as a version.',
+            '还在改的版本。创建模型修订（冻结）后草稿自动删除。',
+            'Versions still being edited. A draft goes away once a model revision is created from it (freeze).',
           )}
         >
           <div className="table-scroll">

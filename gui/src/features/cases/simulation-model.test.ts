@@ -17,6 +17,8 @@ import {
   simulationSteps,
   spinupProblem,
   validDate,
+  modelSetup,
+  setupRechecks,
 } from './simulation-model';
 import type { SchemaField, Site } from './case-model';
 const form = {
@@ -216,7 +218,7 @@ test('five steps expose data, model and output separately without dropping advan
   ];
   assert.deepEqual(
     simulationSteps.map((step) => step[0]),
-    ['总的设定', '范围与网格', '数据与时段', '模型结构与方案', '检查与运行'],
+    ['运行环境与保存位置', '范围与网格', '数据与时段', '模型结构与方案', '检查与运行'],
   );
   assert.deepEqual(simulationFields(schema, 1, false), []);
   assert.deepEqual(simulationFields(schema, 1, true), []);
@@ -344,4 +346,117 @@ test('a simulation folder with spaces is refused at the first step, in both lang
   assert.match(newCaseGeneralProblem(form) ?? '', /不能有空格/);
   assert.match(newCaseGeneralProblem(form, true) ?? '', /must not contain spaces/);
   assert.equal(newCaseGeneralProblem({ ...form, root: '/Users/me/projects' }), null);
+});
+
+// U-03：向导顺序把"数据与时段"放在"模型结构与方案"之前。方案一改，前面核对过的数据可能失效；
+// 这里验证"哪些改变真的会让哪一步需要重新检查"，避免正常的首次选方案也让人返工。
+test('model setup captures only the dimensions that can invalidate earlier wizard data', () => {
+  const plain = modelSetup({
+    engine: 'rust',
+    mode: 'pft',
+    classification: 'igbp',
+    revision: 'official#2',
+  });
+  assert.deepEqual(plain, {
+    engine: 'rust',
+    mode: 'PFT',
+    classification: 'IGBP',
+    crop: false,
+    urban: false,
+    bgc: false,
+    tracer: false,
+    revision: 'official#2',
+  });
+  const processes = modelSetup({
+    physics: {
+      DEF_TUNING_CROP_PLANTING_DAY: '120',
+      DEF_URBAN_RUN: '.TRUE.',
+      DEF_USE_BGC: 'true',
+      DEF_USE_TRACER: '1',
+    },
+  });
+  assert.deepEqual(
+    [processes.crop, processes.urban, processes.bgc, processes.tracer],
+    [true, true, true, true],
+  );
+});
+
+test('a scheme change flags the data step with the reason and the new required folder', () => {
+  const before = modelSetup({ engine: 'rust', mode: 'IGBP', classification: 'IGBP' });
+  const enriched = modelSetup({
+    engine: 'rust',
+    mode: 'PFT',
+    classification: 'IGBP',
+    physics: { DEF_USE_BGC: '.true.' },
+  });
+  const notices = setupRechecks(before, enriched, 3, { runtimeFilled: false });
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].step, 3);
+  assert.match(notices[0].text, /下垫面结构从 IGBP 改为 PFT/);
+  assert.match(notices[0].text, /BGC/);
+  assert.match(notices[0].text, /Runtime/);
+  assert.deepEqual(notices[0].fields, ['runtime'], 'the new required folder is named');
+  // 英文同样给出原因与必填项。
+  const english = setupRechecks(before, enriched, 3, { runtimeFilled: false }, true);
+  assert.match(english[0].text, /vegetation structure changed from IGBP to PFT/);
+  assert.match(english[0].text, /runtime data folder/);
+});
+
+test('a scheme change keeps the data step valid when nothing it depends on changed', () => {
+  const before = modelSetup({
+    engine: 'rust',
+    mode: 'PFT',
+    classification: 'IGBP',
+    physics: { DEF_USE_BGC: '.true.' },
+  });
+  // 只是关掉 BGC 并填好了 runtime：旧数据仍然可用，不需要重新检查。
+  const after = modelSetup({ engine: 'rust', mode: 'PFT', classification: 'IGBP' });
+  assert.deepEqual(setupRechecks(before, after, 3, { runtimeFilled: true }), []);
+  // 同样的模型设置、且 BGC 需要的目录也填好了，不提示。
+  assert.deepEqual(setupRechecks(before, before, 3, { runtimeFilled: true }), []);
+  // 还没核对过（没有基线）的步骤不提示。
+  assert.deepEqual(setupRechecks(null, after, 3, {}), []);
+});
+
+test('the first scheme selection is not treated as a change of already checked data', () => {
+  const empty = modelSetup({ engine: 'rust' });
+  const selected = modelSetup({ engine: 'rust', mode: 'IGBP', classification: 'IGBP' });
+  assert.deepEqual(setupRechecks(empty, selected, 3, { runtimeFilled: false }), []);
+});
+
+test('a station that no longer matches the crop or urban configuration is named', () => {
+  const before = modelSetup({ engine: 'rust', mode: 'IGBP' });
+  const urban = modelSetup({
+    engine: 'rust',
+    mode: 'IGBP',
+    physics: { DEF_URBAN_RUN: '.true.' },
+  });
+  const notices = setupRechecks(before, urban, 3, {
+    sites: [
+      { name: 'CN-Cng', crop: false, urban: false },
+      { name: 'urban-site', crop: false, urban: true },
+    ],
+    runtimeFilled: true,
+  });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].text, /CN-Cng/);
+  assert.match(notices[0].text, /城市/);
+  assert.doesNotMatch(notices[0].text, /urban-site/);
+});
+
+test('an engine change flags the range and review steps, never the data step', () => {
+  const before = modelSetup({ engine: 'rust', mode: 'IGBP' });
+  const fortran = modelSetup({ engine: 'fortran', mode: 'IGBP' });
+  const range = setupRechecks(before, fortran, 2, {});
+  assert.equal(range.length, 1);
+  assert.equal(range[0].step, 2);
+  assert.match(range[0].text, /并行布局/);
+  assert.match(range[0].text, /编译配置/);
+  const review = setupRechecks(before, fortran, 5, {});
+  assert.equal(review.length, 1);
+  assert.equal(review[0].step, 5);
+  assert.match(review[0].text, /线程、进程与 CPU/);
+  assert.deepEqual(setupRechecks(before, fortran, 3, {}), []);
+  // 切回同一个引擎不提示。
+  assert.deepEqual(setupRechecks(before, before, 2, {}), []);
 });

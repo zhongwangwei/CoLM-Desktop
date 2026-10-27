@@ -1071,7 +1071,7 @@ export default function CasesPage() {
           )}
           {step === 1 && (
             <Card
-              title={t('总的设定', 'General setup')}
+              title={t('运行环境与保存位置', 'Run environment and save location')}
               description={t(
                 '选择运行位置，核对计算引擎、算例保存路径与输出目录。',
                 'Choose the run location and review the engine, case directory and output directory.',

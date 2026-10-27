@@ -8,8 +8,10 @@ import {
   commonYears,
   comparisonDir,
   configInvalidation,
+  configSaveState,
   defaultGridRes,
   designFingerprint,
+  evaluationSummary,
   formatExtent,
   jobContacted,
   jobEnded,
@@ -24,6 +26,7 @@ import {
   validateSimulation,
   type BenchSimulation,
   type ComparisonDesign,
+  type EvaluationDesign,
   type HistoryInfo,
   type RemoteJobIdentity,
   type SimulationFormValues,
@@ -769,4 +772,190 @@ it('states in English that a failed fetch kept the previous local report', () =>
   // 同一比较并发取回被后端拒绝时的固定句。
   const [, busy] = benchErrorText('这个比较的报告正在取回中，等这次取回结束后再试。');
   assert.match(busy, /being fetched already/);
+});
+
+it('summarises exactly the design that is about to be submitted', () => {
+  // U-04：摘要里的机器/路径/年份/模拟/变量等必须能在真实生成的配置里逐项对上，证明摘要与提交同源。
+  const gba = {
+    label: 'GreaterBay 1km',
+    info: {
+      ...basin.info,
+      history_dir: '/p/gba/history',
+      prefix: 'gba_hist_',
+      extent: [111.0, 115.5, 21.5, 24.5] as [number, number, number, number],
+      resolution: 0.008333,
+    },
+  };
+  const design: EvaluationDesign = {
+    machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
+    name: 'versions vs flux',
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: ['ERA5LAND_LowRes', 'OpenBench_LH_Daily'], Sensible_Heat: 'FLUX' },
+    simulations: [gba, site],
+    projectDir: '/ob/projects/versions_vs_flux',
+    gridRes: 0.25,
+    weight: 'mass',
+    minYear: 0,
+    timeAlignment: 'per_pair',
+    numCores: 4,
+    metrics: ['bias', 'KGE'],
+    scores: ['Overall_Score'],
+  };
+  const summary = evaluationSummary(design);
+  const value = (label: string) => summary.find((item) => item.label[1] === label)?.value;
+  assert.equal(value('Machine'), 'server serverA');
+  assert.equal(value('OpenBench installed in'), '/ob');
+  assert.equal(value('Reference data root'), '/refs');
+  assert.equal(value('Comparison project folder'), '/ob/projects/versions_vs_flux');
+  assert.equal(value('Evaluation years'), '2002–2005');
+  assert.equal(value('Time scale'), 'Day');
+  const firstSimulation = value('Simulation 1')!;
+  for (const part of [
+    'GreaterBay 1km',
+    'gridded',
+    'gba_hist_',
+    '2002–2005',
+    'month',
+    '0.008333°',
+    '/p/gba/history',
+  ])
+    assert.ok(firstSimulation.includes(part), `${part} in ${firstSimulation}`);
+  const secondSimulation = value('Simulation 2')!;
+  assert.ok(secondSimulation.includes('AT-Neu (official)'));
+  assert.ok(secondSimulation.includes('station'));
+  assert.equal(
+    value('Region and target resolution'),
+    'target 0.25° · lat [21.5, 24.5] · lon [111, 115.5]',
+  );
+  assert.equal(
+    value('Variables and reference data'),
+    'Latent_Heat: ERA5LAND_LowRes, OpenBench_LH_Daily; Sensible_Heat: FLUX',
+  );
+  assert.equal(value('Metrics and scores'), 'metrics [bias, KGE] · scores [Overall_Score]');
+  assert.equal(
+    value('Advanced options'),
+    'weight=mass · min_year=0 · time_alignment=per_pair · num_cores=4',
+  );
+  // 同一份设计生成的配置里，摘要中的每一项都有对应内容（同源，不是另抄一份页面状态）。
+  const built = buildOpenbenchConfig(design);
+  for (const line of [
+    '  years: [2002, 2005]',
+    '  tim_res: Day',
+    '  grid_res: 0.25',
+    '  lat_range: [21.5, 24.5]',
+    '  lon_range: [111, 115.5]',
+    '    root_dir: "/p/gba/history"',
+    '    prefix: "gba_hist_"',
+    '  Latent_Heat:',
+    '    - "ERA5LAND_LowRes"',
+    '    - "OpenBench_LH_Daily"',
+    '  Sensible_Heat: "FLUX"',
+    '  weight: mass',
+    '  min_year_threshold: 0',
+    '  time_alignment: per_pair',
+    '  num_cores: 4',
+    'metrics: ["bias", "KGE"]',
+    'scores: ["Overall_Score"]',
+  ])
+    assert.ok(built.config.includes(line), line);
+  // 换了机器身份或输入后摘要随之变化（摘要不是静态文案）。
+  const moved = evaluationSummary({ ...design, machine: { ...design.machine, host: 'serverB' } });
+  assert.equal(moved.find((item) => item.label[1] === 'Machine')?.value, 'server serverB');
+  const changed = evaluationSummary({
+    ...design,
+    simulations: [{ ...gba, info: { ...gba.info, prefix: 'edited_hist_' } }, site],
+  });
+  assert.ok(
+    changed.find((item) => item.label[1] === 'Simulation 1')?.value.includes('edited_hist_'),
+  );
+});
+
+it('explains a missing region instead of pretending a default one', () => {
+  const noExtent: EvaluationDesign = {
+    machine: { host: '', openbenchRoot: '/ob', refRoot: '' },
+    name: 'comparison',
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5' },
+    simulations: [{ label: 'hb', info: { ...basin.info, extent: null } }],
+    projectDir: '/ob/projects/comparison',
+    gridRes: 0.25,
+  };
+  const summary = evaluationSummary(noExtent);
+  const region = summary.find((item) => item.label[1] === 'Region and target resolution')?.value;
+  assert.match(region ?? '', /target 0\.25°/);
+  assert.match(region ?? '', /region unknown/);
+  assert.match(region ?? '', /no region: hb/);
+  assert.equal(summary.find((item) => item.label[1] === 'Reference data root')?.value, 'not set');
+  assert.equal(summary.find((item) => item.label[1] === 'OpenBench installed in')?.value, '/ob');
+  assert.equal(summary.find((item) => item.label[1] === 'Machine')?.value, 'this computer');
+});
+
+it('maps the three evaluation-configuration save states used by SaveBadge', () => {
+  // U-05：没生成/设置变了 = dirty；提交时 = saving；与当前设计一致 = saved。
+  const current = {
+    yaml: 'project: x',
+    currentFingerprint: 'aaa',
+    generated: { fingerprint: 'aaa' },
+  };
+  assert.equal(configSaveState({ ...current, submitting: false }), 'saved');
+  // 手改过的配置仍算这一版设计已保存（文本是用户的有意内容）。
+  assert.equal(
+    configSaveState({ ...current, yaml: 'project: x # edit', submitting: false }),
+    'saved',
+  );
+  assert.equal(configSaveState({ ...current, submitting: true }), 'saving');
+  assert.equal(configSaveState({ ...current, yaml: '', submitting: false }), 'dirty');
+  assert.equal(configSaveState({ ...current, generated: null, submitting: false }), 'dirty');
+  assert.equal(
+    configSaveState({ ...current, currentFingerprint: 'bbb', submitting: false }),
+    'dirty',
+  );
+  assert.equal(
+    configSaveState({ ...current, currentFingerprint: 'bbb', submitting: true }),
+    'saving',
+  );
+});
+
+it('maps the server-side unfinished evaluation job rejection in both languages', () => {
+  // GUI-07 服务器侧：sidecar 拒绝"提交另一个评估"和"取回报告"时都以这句话开头。
+  // 真实服务端原文（remote_bench.rs 的 active_job_error）括号里是"作业号 <id>"，英文必须剥掉
+  // 这个中文前缀，否则英文界面出现"(作业号 bench-run-42)"的中英混排（交付审计实测）。
+  const suffix = '; confirm its final state or stop it before resubmitting.';
+  const [zh, en] = benchErrorText(
+    '这个比较还有未完成的评估作业（作业号 bench-run-42）；先核对终态或停止它，避免重复写同一个成果目录。',
+  );
+  assert.match(zh, /^这个比较还有未完成的评估作业（作业号 bench-run-42）/);
+  assert.equal(
+    en,
+    `This comparison already has an unfinished evaluation job (bench-run-42)${suffix}`,
+  );
+  assert.doesNotMatch(en, /[\u4e00-\u9fa5]/, 'no Chinese leaks into the English message');
+  assert.doesNotMatch(en, /作业号/, 'the Chinese job prefix is stripped');
+  // 没有作业号时也不夹中文。
+  assert.equal(
+    benchErrorText('这个比较还有未完成的评估作业')[1],
+    `This comparison already has an unfinished evaluation job${suffix}`,
+  );
+  // 两条路径的错误都经过 task → shown（去掉 Error: 前缀）再映射。
+  assert.equal(
+    benchErrorText('Error: 这个比较还有未完成的评估作业（job-1）：x')[1],
+    `This comparison already has an unfinished evaluation job (job-1)${suffix}`,
+  );
+  // 取回报告失败时后端会把原因包进"取回失败：…。本机旧报告未改动…"：里层这句也要翻成英文，
+  // 且服务器侧固定句子自带句号时外层不能再叠出".."。
+  const [, wrapped] = benchErrorText(
+    '取回失败：这个比较还有未完成的评估作业（作业号 job-2）。本机旧报告未改动，仍是上次成功版本。',
+  );
+  assert.equal(
+    wrapped,
+    `Fetch failed: This comparison already has an unfinished evaluation job (job-2)${suffix} The previous report on this computer is unchanged; it is still the last successful version.`,
+  );
+  assert.doesNotMatch(wrapped, /[\u4e00-\u9fa5]/);
+  // 半角括号（日志/包装层可能改写）同样识别。
+  assert.equal(
+    benchErrorText('这个比较还有未完成的评估作业(job-3)')[1],
+    `This comparison already has an unfinished evaluation job (job-3)${suffix}`,
+  );
 });

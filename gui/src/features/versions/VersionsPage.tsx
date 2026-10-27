@@ -32,7 +32,9 @@ import StudyImportDialog, { type StudyPreview } from './StudyImportDialog';
 import VersionChanges from './VersionChanges';
 import VersionLibrary from './VersionLibrary';
 import VersionHub from './VersionHub';
-import { hubMethods, type HubMethod } from './hub-methods';
+import { hubMethods, hubResearchEntry, studyResearchEntry, type HubMethod } from './hub-methods';
+import { SaveBadge } from '../../components/SaveBadge';
+import { saveStateText, type SaveState } from '../../lib/save-status';
 import ParameterDialog from './ParameterDialog';
 import { setupHandledKeys } from './scientific-setup';
 import { compatibleKernel } from '../runs/run-model';
@@ -83,6 +85,12 @@ export default function VersionsPage() {
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
     [dirty, setDirty] = useState(false),
+    // U-05：草稿保存的第三态。`busy` 是整页操作锁（冻结、读源码、读历史都在用），不能拿它当
+    // "正在保存"，否则读个历史记录也会把徽标翻成"正在保存"。
+    [saving, setSaving] = useState(false),
+    // 保存成功的说明留在页面上（不是只发一条会消失的通知），字段一改就清掉，免得"已保存"停在
+    // 已经改过的内容旁边（U-05）。
+    [savedNotice, setSavedNotice] = useState(''),
     [references, setReferences] = useState<HistoryOperation[]>([]),
     [assetRoot, setAssetRoot] = useState(''),
     [processPath, setProcessPath] = useState(''),
@@ -168,6 +176,8 @@ export default function VersionsPage() {
     setDraft(null);
     setAssetRoot('');
     setDirty(false);
+    setSaving(false);
+    setSavedNotice('');
     setBusy(false);
     setError('');
     Promise.all([
@@ -202,6 +212,8 @@ export default function VersionsPage() {
         setDraft(d);
         setAssetRoot('');
         setDirty(false);
+        setSaving(false);
+        setSavedNotice('');
         setViewKey(null);
         setTab('changes');
       })
@@ -320,18 +332,42 @@ export default function VersionsPage() {
     dirtyNow.current = true;
     setDraft(next);
     setDirty(true);
+    // 字段一改，前一次保存/导入的成功提示就过时了，不能留着让人以为改完还在盘上（U-05）。
+    setSavedNotice('');
+    setStudyNotice('');
   }
   async function save(target = draft) {
     if (!target) throw new Error(t('没有当前草稿', 'No current draft'));
-    const saved = await invokeJson<ModelDraft>('model_save_draft', {
-      draft: target,
-      expectedGeneration: target.generation,
-    });
-    setDraft(saved);
-    dirtyNow.current = false;
-    setDirty(false);
-    setDrafts(await invokeJson('model_drafts'));
-    return saved;
+    // 保存中也是显式状态：写入期间的失败要保住 dirty（成功才清），徽标不能直接跳回"已保存"。
+    setSaving(true);
+    setSavedNotice('');
+    try {
+      const saved = await invokeJson<ModelDraft>('model_save_draft', {
+        draft: target,
+        expectedGeneration: target.generation,
+      });
+      setDraft(saved);
+      dirtyNow.current = false;
+      setDirty(false);
+      setDrafts(await invokeJson('model_drafts'));
+      // 源码缓冲区还没保存时补一句：草稿（模型修订的配置）和源码文件是两种保存，别让"已保存草稿"
+      // 暗示源码也进去了（GUI-02）。提示留在页面上，字段一改就被 edit() 清掉。
+      const sourceUnsaved = sourceState.current?.dirty
+        ? t(
+            ' 注意：源码文件还有未保存的修改，那些改动不在这个草稿里；到「代码」页签保存它们。',
+            ' Note: source files still have unsaved edits; they are not in this draft. Save them under the Code tab.',
+          )
+        : '';
+      setSavedNotice(
+        t(
+          `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。${sourceUnsaved}`,
+          `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".${sourceUnsaved}`,
+        ),
+      );
+      return saved;
+    } finally {
+      setSaving(false);
+    }
   }
   /**
    * 需要磁盘上代码的动作（冻结、为研究冻结）前先处理源码缓冲区：保存 / 放弃 / 取消。
@@ -341,8 +377,16 @@ export default function VersionsPage() {
    * 用户取消返回 false，调用方保持原页面与原缓冲区。
    */
   const sourceReady = () => sourceChoice.ask(sourceState.current);
-  // finish：这是"冻结为新版本"，冻结后草稿删掉；为做研究而冻结时草稿留着，研究结果还要写回它。
-  async function freeze(target = draft, unsaved = dirtyNow.current, finish = true) {
+  // finish：普通冻结 true → 冻结后草稿删掉；为做研究而冻结时草稿留着，研究结果还要写回它。
+  // useForRuns：普通冻结沿用既有语义——新修订就是模拟接下来用的版本（保留模型修订/运行出处机制）；
+  // 研究来源的修订必须传 false：研究基线/研究结果不得悄悄换掉模拟正在用的版本（U-01），
+  // 之后由底部的「设为运行模型」显式生效。
+  async function freeze(
+    target = draft,
+    unsaved = dirtyNow.current,
+    finish = true,
+    useForRuns = true,
+  ) {
     // 用 ref 里的最新草稿：进冻结前处理源码缓冲区的保存会刷新 code.commit 与 generation，闭包里
     // 发起点击时那一份 target 可能已经旧了（拿旧 generation 保存会被后端拒绝）。
     const current = draftNow.current ?? target;
@@ -358,7 +402,8 @@ export default function VersionsPage() {
           `This configuration equals the existing version "${frozen.name}" r${frozen.version.revision}; it is used as is and no new version was created.`,
         ),
       );
-    update({ version: frozen, versionRef: frozen.version, chosenVersion: frozen.version });
+    if (useForRuns)
+      update({ version: frozen, versionRef: frozen.version, chosenVersion: frozen.version });
     setDraft(null);
     dirtyNow.current = false;
     setDirty(false);
@@ -377,9 +422,18 @@ export default function VersionsPage() {
     // 用最新的草稿：进研究前先处理源码缓冲区的保存会刷新 draft.code.commit，闭包里那份可能已经旧了。
     const current = draftNow.current;
     if (current) autoCreated.current.delete(current.id);
-    if (current) await freeze(current, dirtyNow.current, false);
-    else if (viewing) chooseForSimulation(viewing);
-    else if (!selected) throw new Error(t('请选择冻结版本', 'Select a frozen revision'));
+    let baseline: VersionRef;
+    if (current) {
+      // 为研究冻结出的修订只是研究基线，不是给模拟换版本（U-01）。
+      const frozen = await freeze(current, dirtyNow.current, false, false);
+      baseline = frozen.version;
+    } else {
+      // 从冻结版本的研究页签进来：拿正在看的版本当研究基线，同样不动模拟运行版本。
+      const base = viewing ?? selected;
+      if (!base) throw new Error(t('请选择冻结版本', 'Select a frozen revision'));
+      baseline = base.version;
+    }
+    update({ researchBaseline: baseline });
     lock.current = false;
     if (!navigate('research')) throw new Error(t('当前修改尚未保存', 'Current edits are unsaved'));
   }
@@ -390,7 +444,7 @@ export default function VersionsPage() {
     dirtyNow.current = false;
     setDirty(false);
   }
-  // 打开一个冻结版本看；不再顺手把它设为模拟使用的版本（2026-10-20 用户同意拆开）。
+  // 打开一个冻结版本看；不再顺手把它设为模拟运行使用的版本（2026-10-20 用户同意拆开）。
   async function select(v: FrozenRevision) {
     assertSourceSaved();
     if (dirty)
@@ -452,15 +506,17 @@ export default function VersionsPage() {
       setAssetRoot('');
       setDraft(d);
       setDirty(false);
+      setSaving(false);
+      setSavedNotice('');
       setViewKey(null);
       setTab(method === 'source' ? 'code' : 'changes');
       setDrafts(await invokeJson('model_drafts'));
       if (method === 'manual') openParameters('global');
       return d;
     }
-    if (!selected || keyOf(selected.version) !== keyOf(base.version)) chooseForSimulation(base);
-    // 从"新建修改版"开始的研究不绑定草稿：结果出来时再建一个以研究所用版本为父版本的草稿。
-    update({ researchMethod: method, researchTarget: null, researchSeed: null });
+    // 研究中止改全局运行版本（U-01）：用户在这里选的只是研究基线。之后的参数读取、建研究、为研究
+    // 冻结修订都以它为准；模拟正在用的版本/版本库里的"使用"标记保持不动。
+    update(hubResearchEntry(method, base.version));
     lock.current = false;
     if (!navigate('research')) throw new Error(t('当前修改尚未保存', 'Current edits are unsaved'));
     return null;
@@ -515,6 +571,8 @@ export default function VersionsPage() {
       setDraft(d);
       setAssetRoot('');
       setDirty(false);
+      setSaving(false);
+      setSavedNotice('');
       setViewKey(null);
       setTab('changes');
     }
@@ -816,10 +874,13 @@ export default function VersionsPage() {
         set: setProcess,
       });
   }
+  // U-05：页面保存状态统一三态。草稿的"保存"指把草稿写进版本库；冻结（创建模型修订）是另一个
+  // 动作，名字和它分开，避免用户以为冻结只是保存。
+  const saveState: SaveState = saving ? 'saving' : dirty ? 'dirty' : 'saved';
   usePageContract({
     title: t('模型版本', 'Model versions'),
     step: 'versions',
-    status: error || (dirty ? t('未保存', 'Unsaved') : ''),
+    status: error || (editable ? saveStateText(saveState, t) : ''),
     fields: guideFields.map((f) => ({ ...f, disabled: !!f.disabled || busy || codeBusy })),
     // 按钮自己登记（第 737 轮）。原来这里另写一份动作清单，清单和界面是两份：出过"助手能按、
     // 界面上没有"的幽灵按钮。现在助手只看到此刻真的显示着、不被对话框挡住的按钮。
@@ -963,8 +1024,8 @@ export default function VersionsPage() {
               <h1>{t('所有版本', 'All versions')}</h1>
               <p className="muted">
                 {t(
-                  '版本 = 官方代码 + 你的改动（参数、开关、AI 网络或代码本身）。打开一个版本查看或修改；模拟用哪个版本，用「设为模拟使用」选。',
-                  'A version is the official code plus your changes (parameters, switches, an AI network or the code itself). Open one to inspect or change it; choose which one simulations use with “Use for simulations”.',
+                  '版本 = 官方代码 + 你的改动（参数、开关、AI 网络或代码本身）。打开一个版本查看或修改；模拟用哪个版本，用「设为运行模型」选。',
+                  'A version is the official code plus your changes (parameters, switches, an AI network or the code itself). Open one to inspect or change it; choose which one simulations use with “Set as run model”.',
                 )}
               </p>
             </div>
@@ -1048,9 +1109,6 @@ export default function VersionsPage() {
                   <span className="badge versions-badge is-used">
                     {t('模拟正在使用', 'Used for simulations')}
                   </span>
-                )}
-                {draft && dirty && (
-                  <span className="badge versions-badge is-unsaved">{t('未保存', 'Unsaved')}</span>
                 )}
               </div>
             </div>
@@ -1653,14 +1711,14 @@ export default function VersionsPage() {
                       disabled={busy || codeBusy}
                       run={() => {
                         update({
-                          researchSeed: picks.length ? { parameters: picks } : null,
-                          researchMethod: m.id,
+                          ...studyResearchEntry(m.id, picks),
                           // 从草稿进去的研究，结果直接写回这个草稿，不用再回来选研究目录。
                           researchTarget: draft ? { draftId: draft.id, name: draft.name } : null,
                         });
-                        // 没去成研究页就把种子和方法清掉，免得以后在研究页莫名其妙地生效。
+                        // 没去成研究页就把种子、方法和基线清掉，免得以后在研究页莫名其妙地生效。
                         const clearSeed = () =>
                           update({
+                            researchBaseline: null,
                             researchSeed: null,
                             researchMethod: null,
                             researchTarget: null,
@@ -1777,18 +1835,25 @@ export default function VersionsPage() {
           <div className="versions-actionbar">
             {editable ? (
               <>
-                <span className={dirty ? 'versions-actionbar-dirty' : 'muted'}>
-                  {dirty
-                    ? t('有未保存的修改', 'Unsaved edits')
-                    : freezeCheck?.ready === false
+                <SaveBadge state={saveState} t={t} />
+                <span className={saveState === 'dirty' ? 'versions-actionbar-dirty' : 'muted'}>
+                  {saveState === 'saving'
+                    ? t('正在把草稿写进版本库…', 'Saving the draft into the version library…')
+                    : saveState === 'dirty'
                       ? t(
-                          '已保存；冻结前检查还没通过（见上方）',
-                          'Saved; checks before freezing not passed yet (above)',
+                          '有未保存的修改：改动只在本次页面，点「保存草稿」才写进版本库。',
+                          'Unsaved changes: they live on this page only until you save the draft.',
                         )
-                      : t(
-                          '已保存在版本库里：以后从"新建修改版"页的"继续之前的修改"再打开',
-                          'Saved in the version library: reopen it later under "Continue earlier work" on the New modified version page',
-                        )}
+                      : savedNotice ||
+                        (freezeCheck?.ready === false
+                          ? t(
+                              '已保存；冻结前检查还没通过（见上方）',
+                              'Saved; checks before creating a revision are not passed yet (above)',
+                            )
+                          : t(
+                              '已保存在版本库里：以后从"新建修改版"页的"继续之前的修改"再打开',
+                              'Saved in the version library: reopen it later under "Continue earlier work" on the New modified version page',
+                            ))}
                 </span>
                 <div className="button-row">
                   <Button
@@ -1813,52 +1878,41 @@ export default function VersionsPage() {
                     label={t('保存草稿', 'Save draft')}
                     kind="commit"
                     disabled={busy || codeBusy || !dirty}
-                    run={() =>
-                      run(async () => {
-                        const saved = await save();
-                        // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
-                        // 源码缓冲区还没保存时补一句：草稿（模型修订的配置）和源码文件是两种保存，别让
-                        // "已保存草稿"暗示源码也进去了（GUI-02）。
-                        const sourceUnsaved = sourceState.current?.dirty
-                          ? t(
-                              ' 注意：源码文件还有未保存的修改，那些改动不在这个草稿里；到「代码」页签保存它们。',
-                              ' Note: source files still have unsaved edits; they are not in this draft. Save them under the Code tab.',
-                            )
-                          : '';
-                        notify(
-                          t(
-                            `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。${sourceUnsaved}`,
-                            `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".${sourceUnsaved}`,
-                          ),
-                        );
-                        return saved;
-                      })
-                    }
+                    run={() => run(save)}
                   >
                     {t('保存草稿', 'Save draft')}
                   </ActionButton>
                   <ActionButton
                     action="version-freeze"
-                    label={t('冻结为新版本', 'Freeze as a version')}
+                    label={t('创建模型修订（冻结）', 'Create model revision (freeze)')}
                     kind="commit"
                     disabled={busy || codeBusy || freezeCheck?.ready === false}
                     variant="primary"
                     run={async () => {
+                      // 研究写回产生的草稿：冻结出的修订是研究结果，不能顺手变成模拟运行版本（U-01）；
+                      // 由底部显式的「设为运行模型」决定。
+                      const target = draftNow.current;
+                      const fromStudy = !!target && state.researchTarget?.draftId === target.id;
                       // 源码未保存时先问保存/放弃/取消；在拿页面锁之前问，保存才能在对话框里执行。
                       if (!(await sourceReady())) return;
                       run(async () => {
-                        const frozen = await freeze();
+                        const frozen = await freeze(target, dirtyNow.current, true, !fromStudy);
                         notify(
-                          t(
-                            `已冻结为"${frozen.name}" r${frozen.version.revision}，模拟已改用这个版本。接下来到"项目"里打开算例运行；要接着改，点底部的"基于它新建修改版"。`,
-                            `Frozen as "${frozen.name}" r${frozen.version.revision}; simulations now use it. Next, open a case under Project to run it; to change it further, use "Derive from it" at the bottom.`,
-                          ),
+                          fromStudy
+                            ? t(
+                                `已创建模型修订"${frozen.name}" r${frozen.version.revision}。研究基线和模拟运行版本都没有被改动；要拿它跑模拟，点底部的「设为运行模型」。`,
+                                `Created model revision "${frozen.name}" r${frozen.version.revision}. The study baseline and the simulations' version are unchanged; use "Set as run model" at the bottom to run with it.`,
+                              )
+                            : t(
+                                `已创建模型修订"${frozen.name}" r${frozen.version.revision}，模拟已改用这个修订。接下来到"项目"里打开算例运行；要接着改，点底部的"基于它新建修改版"。`,
+                                `Created model revision "${frozen.name}" r${frozen.version.revision}; simulations now use this revision. Next, open a case under Project to run it; to change it further, use "Derive from it" at the bottom.`,
+                              ),
                         );
                         return frozen;
                       });
                     }}
                   >
-                    {t('冻结为新版本', 'Freeze as a version')}
+                    {t('创建模型修订（冻结）', 'Create model revision (freeze)')}
                   </ActionButton>
                 </div>
               </>
@@ -1869,22 +1923,25 @@ export default function VersionsPage() {
                 <span className="muted">
                   {inUse
                     ? t(
-                        '模拟正在使用这个版本：到"项目"里打开算例运行；要接着改，基于它新建修改版。',
-                        'Simulations use this version: open a case under Project to run it; to change it further, derive a new modified version.',
+                        '模拟正在使用这个修订：到"项目"里打开算例运行；要接着改，基于它新建修改版。',
+                        'Simulations use this revision: open a case under Project to run it; to change it further, derive a new modified version.',
                       )
                     : isOfficial
                       ? t('官方基线，只读。', 'The official baseline, read-only.')
-                      : t('已冻结的版本，只读。', 'A frozen version, read-only.')}
+                      : t(
+                          '已冻结的版本，只读；模拟仍用原来的版本。要拿它跑模拟，点「设为运行模型」。',
+                          'A frozen version, read-only; simulations keep their current revision. Use "Set as run model" to run with it.',
+                        )}
                 </span>
                 <div className="button-row">
                   {!inUse && viewing && (
                     <ActionButton
                       action={`version-use-${viewing.version.id}-${viewing.version.revision}`}
-                      label={t('设为模拟使用', 'Use for simulations')}
+                      label={t('设为运行模型', 'Set as run model')}
                       disabled={busy || codeBusy}
                       run={() => chooseForSimulation(viewing)}
                     >
-                      {t('设为模拟使用', 'Use for simulations')}
+                      {t('设为运行模型', 'Set as run model')}
                     </ActionButton>
                   )}
                   <ActionButton

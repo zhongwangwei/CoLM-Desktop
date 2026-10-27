@@ -587,6 +587,8 @@ test('GUI-07: running a comparison refuses to resubmit while an unconfirmed job 
     afterWatch: async () => ({ state: 'succeeded' }),
     fetchReport: async () => {},
     setNotice: () => {},
+    setConfigSaving: () => {},
+    showRunNotice: () => {},
     t,
   });
   await assert.rejects(run(), /unconfirmed/);

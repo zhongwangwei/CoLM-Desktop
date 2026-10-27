@@ -37844,3 +37844,52 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
 4. **GUI-07 服务器侧活动任务保护**：目前"未核对终态不重复提交"在客户端实现；服务器侧未加运行目录锁，
    清 localStorage 或换客户端可绕过，后续如要强保证需在后端加。
 5. 任务书第 6 节 U-01～U-07（研究身份、向导依赖、比较页三块、保存语义、窄窗口、助手阅读体验）未在本轮实施。
+
+## GUI 审查第 3 轮：任务书第 6 节 U-01～U-07 + GUI-07 服务器侧（2026-10-28）
+
+第 2 轮已交付缺陷修复（GUI-01～GUI-19，提交 `68c248fa`）；本轮完成任务书"交付门 C：体验一致性"
+（第 6 节 U-01～U-07），并把 GUI-07 的"同名比较未确认终态不重复提交"从客户端保护补到服务器侧。
+任务书第 6 节明确 UX 重组与缺陷修复分开管理，因此本轮是独立提交、独立验收。
+
+### 逐项结果
+
+| 任务 | 结论 | 关键实现 | 验证/证据 | 剩余限制 |
+| --- | --- | --- | --- | --- |
+| U-01 | 达成 | `AppState.researchBaseline`（可选）；Hub/首页/草稿/冻结版本四个入口的研究身份统一由 `hub-methods.ts` 生成；`ResearchPage` 身份链 `研究自己记录的修订 ?? 研究基线 ?? 运行修订`，贯穿参数读取（GUI-14 缓存身份）、`model_case_context`、预检、实际运行、AI 拟合；研究来源修订冻结不换全局运行版本，底部显式「设为运行模型」才生效；页面只读摘要（项目/算例、研究基线、编辑草稿或运行修订、计算位置） | `hub-methods.test.ts`、`foundation-page.test.ts`（基线选择不改 version/versionRef/chosenVersion；研究修订冻结后全局不变、点击才变）、`research-home.test.ts`（摘要含项目/算例、基线、计算位置；运行中研究用记录修订且不被基线变化重读） | 基线只存本次会话内存（与原有 version 状态一致）；无原生端到端 |
+| U-02 | 达成 | 两条入口共用同一 6 方法定义与 `ResearchEntryState`，研究页仍是唯一向导，不复制第二套；方法×范围两个维度保持 | `hub-methods.test.ts`（两入口字段集合一致、清空/拷贝隔离）、`foundation-page.test.ts`（Hub 方法进入研究页） | 范围维度（格点/区域）研究页无页面级测试（既有缺口，本轮未扩大） |
+| U-03 | 达成 | `simulation-model.ts` 新增 `modelSetup()`＋`setupRechecks()`（引擎变化→第 2/5 步；结构/方案/修订变化→第 3 步并点名原因；BGC 开启→Runtime 必填）；步骤导航"!"+"需重检"、步骤顶部 Notice、"重新检查/去第 N 步"入口；当前步骤失效先重检、前面步骤失效挡住下一步、创建按钮与 `create()` 双重拒绝；"总的设定"→"运行环境与保存位置"（含 CasesPage/model-settings/测试） | `simulation-model.test.ts` 新增 6 项纯函数、`simulation-page.test.ts` 新增 3 项页面行为（含先点下一步被拒→补 Runtime 后放行）、`simulation-steps.test.ts` 3 项渲染 | 失效快照只存在当前页面组件内：离开向导去改模型再返回不保留上次核对基线（跨页面版本切换不产生失效提示） |
+| U-04 | 达成 | 比较页重排为三块（`data-compare-section`：环境状态→本次评估→任务与报告）；安装/重装/维护/日志折叠；"变量…"→"编辑模拟信息"（按钮/标题/弹窗/aria 同步）；运行前条件摘要由真实 `comparisonDesign()` 生成（机器、OpenBench/参考根、项目目录、模拟与参考、变量映射、年份/时间尺度、区域并集/分辨率、指标评分、高级项） | `compare-layout.test.ts` 9 项：三块顺序/折叠/改名/三态；摘要 === `evaluationSummary(真实设计)`，提交的 config/sites 与 `buildOpenbenchConfig(design)` 一致 | 无真实窗口视觉验收（静态渲染证据） |
+| U-05 | 达成（跨页一致） | 新增 `lib/save-status.ts` + `components/SaveBadge.tsx`（有未保存修改/正在保存/已保存）；VersionsPage 草稿、ComparePage 评估配置、助手设置、数据准备结果分别接入；动作名区分「保存草稿」「创建模型修订（冻结）」「设为运行模型」「保存评估配置」；字段改动清过时成功提示；PreparationPage 结果区优先显示状态/输出路径/缺测与未解决数/下一步，原始 JSON 进 `<details>` | `save-status.test.ts`、`foundation-page.test.ts`（Badge 三态/失败保留 dirty/改字段清旧提示）、`compare.test.ts`（配置三态）、`settings-draft.test.ts`、`preparation-page.test.ts` 10 项（5 种真实后端返回形状+Probe+未知形状；不补 0/不猜路径） | 评估配置"已过期"并入 dirty+警告，非独立徽标；比较页仍有静态渲染证据 |
+| U-06 | 达成 | 新增 `lib/shell-layout.ts` 纯函数（nav full/rail/hidden、assistant column/drawer/hidden、主区宽度、splitter）；960×640 开助手=覆盖抽屉（主区 752；收起导航 896），1240×820 分栏主区 712，1440×900 主区 888，专注=全宽，分栏助手列被夹到主区≥560；App 工具栏「收起导航」「专注视图」、抽屉遮罩+Escape、拆分条只分栏、aria 完整；不缩字体 | `shell-layout.test.ts` 12 项（尺寸×开关×专注矩阵、边界、列宽相加=窗口、Escape 分支、CSS 无 font-size、AppShell/ShellNavigation SSR） | 无真实浏览器截图；高度未进布局模型；深色仅 CSS 静态证据 |
+| U-07 | 达成 | ①滚动：`scroll.ts` 纯状态机（24px 容差），上滚暂停+「有新内容，回到底部」，回底恢复，切会话重置；②安全 Markdown：自研 AST（围栏代码/inline code/粗斜体/列表/标题/引用/表格；`safeHttpUrl` 只放行 http/https，链接 `target=_blank rel=noopener noreferrer`；无 `dangerouslySetInnerHTML`、无第三方库），代码块复制、来源链接；③设置草稿：`settings-draft.ts` 状态机，SaveBadge+「实际发送：服务/模型」（按已保存设置）、保存/放弃、关闭/新对话/切会话前未保存确认、发送只读已保存设置；④切会话清空用量并显示「用量待加载」，迟到 transcript 忽略；⑤Field 的 hint/unit/range 生成 id 并与控件 `aria-describedby` 合并关联 | `markdown.test.ts` 9 项（`<script>`/`onclick` 当文字、javascript:/data:/file: 不成链接、合法 https target+rel、表格/标题/列表/引用、复制内容、流式半截）、`scroll.test.ts`、`settings-draft.test.ts` 12 项、`assistant-panel.test.ts` +3（会话用量、Markdown 只用于 assistant）、`field.test.ts` +2 | 无真实 WebView：滚动与 Markdown 视觉为函数复现+`react-dom/server` 渲染；"assistant 用 Markdown、用户消息保持纯文本"的集成断言仍是源码级（MarkdownMessage 本身有渲染级安全测试） |
+| GUI-07 服务器侧 | 达成（脚本/决策层） | `crates/colm-cli/src/remote_bench.rs`：`<project>/.active-job` 用 `mkdir` 原子占位、写号后读回核对；作业体首行 `trap`（按作业号匹配才删）；提交前查占位作业状态：Queued/Running→固定错误拒绝，Finished/Lost→清陈旧占位重试，Unknown 按作业目录与一分钟宽限判定；提交失败释放占位；`remote-bench-fetch` 未终态拒绝取回；固定错误前缀 `这个比较还有未完成的评估作业（作业号 ` | `remote_bench_tests.rs` 18 项（含 `bash -n`、决策纯函数、以及在临时目录用真实 bash 跑 occupy/release/探针的磁盘执行测试）；前端 `benchErrorText` 中英映射（含真实服务端原文、`取回失败：…` 包装、半/全角括号） | 无真实 SSH，原子性/NFS 并发未实测；SIGKILL/宕机残留由下一次提交按陈旧判定兜底；"提交结果不确定"时按任务书要求释放占位（客户端作业身份核对仍在） |
+
+### 交付审计（独立只读）
+
+另起一名没有参与实现的审计者，对照任务书原文逐条读码与读测试，并独立重跑全量：发现 1 个必修问题
+（GUI-07 英文映射把「作业号」中文前缀漏进英文，实测输出 `(作业号 bench-run-42)`；原因是旧测试用不含
+"作业号"的合成句子）与若干可选测试增强点。已修复：映射剥掉中文前缀、用真实服务端原文补双语测试、
+`FetchStaging::failed` 去掉内层重复句号、拆分条 `aria-valuemax` 与 `shellLayout` 的 MIN_MAIN 夹法对齐、
+补 U-01 摘要字段断言、补 GUI-07 占位脚本在真实 bash 下的磁盘执行测试。其余审计点作为已知限制记入上表。
+
+### 验证命令与实际结果（2026-10-28，本机实测）
+
+- `cd gui && npm run typecheck && npm run lint && npm run format:check` → 全绿。
+- `cd gui && npm test` → **1120 项通过 / 0 失败**（第 2 轮基线 1026；本轮新增 94 项），含 check-gui 与
+  **250** 个注册命令契约；`npm run build` → exit 0。
+- `cargo test -p colm-cli --bins -- --test-threads=1` → **520 passed**（第 2 轮 510；本轮 +9：服务器侧占位、
+  真实磁盘执行、错误前缀等）。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **453 passed / 1 ignored**（第 2 轮同数；
+  本轮只改了 `bench_remote.rs` 的失败文案句号处理）。
+- `cargo fmt --all --check` 与 `cargo fmt --all --check --manifest-path gui/src-tauri/Cargo.toml` → clean。
+- `cargo clippy -p colm-cli --all-targets -- -D warnings`、`cargo clippy --manifest-path gui/src-tauri/Cargo.toml
+  --all-targets -- -D warnings` → 全过。
+
+### 未验证部分（沿用第 2 轮边界）
+
+1. **原生 Tauri 窗口/真实浏览器**：U-04/U-06/U-07 的视觉验收（960×640/1240×820/1440×900、中英、明暗、
+   滚动暂停、Markdown 版式、抽屉层次）只有纯函数 + 静态渲染/CSS 证据，没做原生窗口目视或键盘 Tab 顺序。
+2. **真实 SSH/服务器**：GUI-07 服务器侧占位的真实 NFS 原子性、并发提交、SIGKILL 残留清理未实测。
+3. **U-03 跨页失效**：向导内失效快照只在当前页面会话有效；离开向导去改模型再返回不会提示上次核对基线
+   （任务书只要求方案改变后立即标识，本轮按向导内范围交付）。
+4. U-01 研究基线只存在本次会话内存（与既有运行版本状态同生命周期），重启应用后回到当前运行修订。

@@ -456,6 +456,9 @@ impl FetchStaging {
     }
 
     fn failed(&self, detail: &str) -> String {
+        // 内层错误可能已经自带句号（例如服务器侧活动作业拒绝的固定句子），这里去掉再拼，
+        // 免得中文界面出现「。。」、英文映射多一个句点（GUI-07 服务器侧错误接入时实测）。
+        let detail = detail.trim_end_matches(['。', '.']);
         if self.had_previous {
             format!("取回失败：{detail}。本机旧报告未改动，仍是上次成功版本。")
         } else {

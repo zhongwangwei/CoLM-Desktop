@@ -20,6 +20,7 @@ import {
   networkSpec,
   networkDefaults,
   parameterSpec,
+  researchBaselineOf,
   studyPermissions,
   sensitivityRanking,
   sensitivityResponses,
@@ -721,4 +722,22 @@ it('reads the common preflight refusals and the missing-validation warning in bo
     studyWarningText('no independent validation window was configured')[0],
     /没有设独立的验证期/,
   );
+});
+
+describe('research baseline identity (U-01)', () => {
+  it('a chosen study baseline wins over the current run revision, an absent one falls back', () => {
+    assert.deepEqual(
+      researchBaselineOf({ id: 'soil', revision: 3 }, { id: 'official', revision: 1 }),
+      { id: 'soil', revision: 3 },
+    );
+    // undefined 与 null 都视同"没有显式基线"：研究首页新开的研究沿用当前运行修订。
+    assert.deepEqual(researchBaselineOf(null, { id: 'official', revision: 1 }), {
+      id: 'official',
+      revision: 1,
+    });
+    assert.deepEqual(researchBaselineOf(undefined, { id: 'official', revision: 2 }), {
+      id: 'official',
+      revision: 2,
+    });
+  });
 });

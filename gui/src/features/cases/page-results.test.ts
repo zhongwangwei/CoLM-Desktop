@@ -151,6 +151,9 @@ test('research inspection and saved-model callbacks return backend evidence even
     invoke: async () => evidence,
     invokeJson: async () => evidence,
     state: { versionRef: { id: 'soil', revision: 1 }, root: '/project' },
+    // U-01：研究页按“研究基线 / 已建研究记录的修订”读模型，不再直接读全局运行版本。
+    studyBaseline: { id: 'soil', revision: 1 },
+    studyModel: { id: 'soil', revision: 1 },
     kernel: '/kernel',
     preprocessors: 'rust',
     dir: '/case',

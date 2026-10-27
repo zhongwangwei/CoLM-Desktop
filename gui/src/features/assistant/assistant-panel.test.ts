@@ -445,6 +445,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     messages: [] as Message[],
     error: '',
     usage: '',
+    usagePending: false,
   };
   const refs = {
     running: { current: false },
@@ -477,6 +478,9 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
       ui.usage = value;
     },
     setSessionUsage: () => {},
+    setUsagePending: (value: boolean) => {
+      ui.usagePending = value;
+    },
     setLimitReached: () => {},
     setConsent: () => {},
     setApproval: () => {},
@@ -542,6 +546,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setApproval: updates.setApproval,
     setUsage: updates.setUsage,
     setSessionUsage: updates.setSessionUsage,
+    setUsagePending: updates.setUsagePending,
   });
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
     input: typed,
@@ -713,6 +718,107 @@ test('GUI-18: an IPC failure withdraws its own bubble, never an earlier one', as
   assert.equal(harness.ui.draft, 'hello');
   assert.match(harness.ui.error, /assistant process died/);
   assert.equal(harness.refs.running.current, false);
+});
+
+function sessionHarness(loadTranscript: () => Promise<Message[]>) {
+  const state = {
+    messages: [] as Message[],
+    contextUsage: null as unknown,
+    limitReached: true,
+    stepLimit: 3,
+    sessions: [{ id: 'other' }] as unknown,
+    attachNotice: 'stale notice',
+    usage: '5 + 5 tokens',
+    sessionUsage: { turns: 5, tokens: 10 },
+    usagePending: false,
+    followed: 0,
+  };
+  const refs = {
+    session: { current: null as string | null },
+    fresh: { current: true },
+    running: { current: false },
+    conversationRequest: { current: 0 },
+  };
+  const open = compileFunction<(item: { id: string }) => Promise<void>>('openSession', {
+    conversationRequest: refs.conversationRequest,
+    runningRef: refs.running,
+    invokeJson: loadTranscript,
+    session: refs.session,
+    fresh: refs.fresh,
+    setMessages: (value: Message[]) => {
+      state.messages = value;
+    },
+    setContextUsage: (value: unknown) => {
+      state.contextUsage = value;
+    },
+    setLimitReached: (value: boolean) => {
+      state.limitReached = value;
+    },
+    setStepLimit: (value: number) => {
+      state.stepLimit = value;
+    },
+    setSessions: (value: unknown) => {
+      state.sessions = value;
+    },
+    setAttachNotice: (value: string) => {
+      state.attachNotice = value;
+    },
+    setUsage: (value: string) => {
+      state.usage = value;
+    },
+    setSessionUsage: (value: { turns: number; tokens: number }) => {
+      state.sessionUsage = value;
+    },
+    setUsagePending: (value: boolean) => {
+      state.usagePending = value;
+    },
+    resetFollow: () => {
+      state.followed++;
+    },
+  });
+  return { state, refs, open };
+}
+
+test('U-07: switching to a stored conversation clears its usage until that conversation reports it', async () => {
+  const transcript = deferred<Message[]>();
+  const harness = sessionHarness(() => transcript.promise);
+  const opening = harness.open({ id: 'saved-session' });
+  transcript.resolve([{ kind: 'user', text: 'old question' }]);
+  await opening;
+  assert.equal(harness.state.messages.length, 1, 'transcript is shown');
+  assert.equal(harness.refs.session.current, 'saved-session');
+  assert.equal(harness.refs.fresh.current, false);
+  assert.equal(harness.state.usage, '', 'the previous conversation usage must not be reused');
+  assert.deepEqual(harness.state.sessionUsage, { turns: 0, tokens: 0 });
+  assert.equal(harness.state.usagePending, true, 'usage waits for this conversation');
+  assert.equal(harness.state.attachNotice, '');
+  assert.equal(harness.state.followed, 1, 'the new conversation starts following the bottom');
+
+  // 这一会话自己的 usage 事件到达后，"待加载"结束，显示的是它的数字。
+  const panel = sendHarness();
+  panel.ui.usagePending = true;
+  panel.handleEvent({ type: 'usage', prompt_tokens: 7, completion_tokens: 3, session_turns: 2 });
+  assert.equal(panel.ui.usagePending, false);
+  assert.equal(panel.ui.usage, '7 + 3 tokens');
+});
+
+test('U-07: a late transcript for a conversation the user already left is ignored', async () => {
+  const transcript = deferred<Message[]>();
+  const harness = sessionHarness(() => transcript.promise);
+  const opening = harness.open({ id: 'old-session' });
+  // 用户紧接着新建对话/打开别的会话：代次前进，旧 transcript 不能写入。
+  harness.refs.conversationRequest.current++;
+  transcript.resolve([{ kind: 'user', text: 'late' }]);
+  await opening;
+  assert.deepEqual(harness.state.messages, []);
+  assert.equal(harness.state.usagePending, false);
+  assert.equal(harness.state.usage, '5 + 5 tokens');
+});
+
+test('U-07: the panel renders the pending-usage state and keeps markdown for assistant replies only', () => {
+  assert.match(panelSource, /用量待加载/);
+  assert.match(panelSource, /item\.kind === 'assistant' \? \(\s*<Markdown/);
+  assert.match(panelSource, /<Markdown text=\{item\.text \|\| ''\} t=\{t\} \/>/);
 });
 
 test('the panel really sends through the extracted turn functions', () => {

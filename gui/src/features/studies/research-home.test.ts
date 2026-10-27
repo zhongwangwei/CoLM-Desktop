@@ -38,6 +38,7 @@ import {
   studyErrorText,
   suggestedRange,
   suggestedWindows,
+  researchBaselineOf,
 } from './study';
 import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
 import {
@@ -46,7 +47,7 @@ import {
   sameParameterContextIdentity,
   shouldStartParameterContextLoad,
 } from './parameter-context-cache';
-import { hubMethods } from '../versions/hub-methods';
+import { homeResearchEntry, hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import { REMOTE_CHECK_MS, compatibleKernel } from '../runs/run-model';
 import { withCatalogLabels } from '../../lib/param-presentation';
@@ -406,6 +407,8 @@ it('a server submission that recorded nothing can be submitted again', async () 
       remotePermissions: { exists: false },
       tr: (zh: string) => zh,
       jobs: '1',
+      // U-01：运行用的修订由“研究基线 + 研究自己记录的修订”决定，不再直接读全局运行版本。
+      studyBaseline: { id: 'official', revision: 1 },
       studyModelRevision: () => ({ id: 'official', revision: 1 }),
       state: { versionRef: { id: 'official', revision: 1 } },
       remoteRequest: { current: 0 },
@@ -549,6 +552,8 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     gridTargetDefaults,
     gridTargetSpec,
     hubMethods,
+    homeResearchEntry,
+    researchBaselineOf,
     IGBP,
     invoke,
     invokeJson: invoke,
@@ -1660,4 +1665,195 @@ it('without cases the home offers to open a project instead of methods that lead
   assert.equal(enabled('research-new-case'), true);
   page.press('research-open-project');
   assert.deepEqual(page.routes.at(-1), ['project', undefined]);
+});
+
+// U-01/U-02：从"新建修改版"进来的研究用自己的基线读参数、跑研究；两条入口共用 ResearchPage。
+// 页面上还要能看到只读的研究身份摘要（项目/算例、研究基线、运行修订/草稿、计算位置）。
+function pageText(page: ReturnType<typeof researchPage>): string {
+  const out: string[] = [];
+  const walk = (node: unknown) => {
+    if (typeof node === 'string') out.push(node);
+    else if (Array.isArray(node)) node.forEach(walk);
+    else if (node && typeof node === 'object') walk((node as Tree).children);
+  };
+  walk(page.nodes());
+  return out.join('|');
+}
+const studyVersions = [
+  { version: { id: 'official', revision: 1 }, name: 'Official CoLM' },
+  { version: { id: 'soil', revision: 3 }, name: 'Soil scheme' },
+  { version: { id: 'trace', revision: 7 }, name: 'Trace scheme' },
+];
+it('a study from 新建修改版 reads parameters on its baseline and keeps the run revision', async () => {
+  const page = researchPage({
+    versionRef: { id: 'official', revision: 1 },
+    researchBaseline: { id: 'soil', revision: 3 },
+    versions: studyVersions,
+    // Hub 入口同时带方法：研究页消费方法打开工作台，但基线必须留着。
+    researchMethod: 'tuning',
+  });
+  page.render();
+  assert.deepEqual(page.state.researchBaseline, { id: 'soil', revision: 3 });
+  assert.deepEqual(page.state.versionRef, { id: 'official', revision: 1 });
+  const summary = pageText(page);
+  assert.match(summary, /项目\/算例/);
+  assert.match(summary, /研究基线/);
+  assert.match(summary, /Soil scheme r3/, '摘要里的研究基线是用户选的版本');
+  assert.match(summary, /编辑草稿或运行修订/);
+  assert.match(summary, /计算位置/);
+  assert.match(summary, /本机/);
+  page.press('research-step-2');
+  await page.settle();
+  const loads = () => page.requests.filter((r) => r.command === 'model_case_context');
+  assert.equal(loads().length, 1);
+  assert.deepEqual(loads()[0]!.args.modelRevision, { id: 'soil', revision: 3 });
+  loads()[0]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  const reads = page.requests.filter((r) => r.command === 'study_parameter_contexts');
+  assert.equal(reads.length, 1);
+  reads[0]!.resolve([parameterRow()]);
+  await page.settle();
+  const box = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  (box!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  // 选参数与读算例都没有改写模拟运行版本。
+  assert.deepEqual(page.state.versionRef, { id: 'official', revision: 1 });
+});
+it('starting a method from the research home clears the previous target, seed and baseline', () => {
+  const page = researchPage({
+    researchBaseline: { id: 'soil', revision: 3 },
+    researchTarget: { draftId: 'd-model', name: 'Soil draft' },
+    researchSeed: { parameters: [] },
+  });
+  page.render();
+  page.press('research-method-tuning');
+  assert.equal(page.state.researchBaseline, null, '首页没有显式基线，退回当前运行修订');
+  assert.equal(page.state.researchTarget, null);
+  assert.equal(page.state.researchSeed, null);
+  assert.equal(page.state.researchMethod, null);
+});
+it('the parameter read identity follows the study baseline, not the run revision', async () => {
+  const page = researchPage({
+    versionRef: { id: 'official', revision: 1 },
+    researchBaseline: { id: 'soil', revision: 3 },
+    versions: studyVersions,
+    researchMethod: 'tuning',
+  });
+  page.render();
+  page.press('research-step-2');
+  await page.settle();
+  const loads = () => page.requests.filter((r) => r.command === 'model_case_context');
+  assert.equal(loads().length, 1);
+  assert.deepEqual(loads()[0]!.args.modelRevision, { id: 'soil', revision: 3 });
+  // 运行版本变了不是研究换了模型：不重读，旧请求照常算当前身份。
+  page.state.versionRef = { id: 'official', revision: 2 };
+  page.render();
+  await page.settle();
+  assert.equal(loads().length, 1, '运行版本变化不改变研究基线身份');
+  loads()[0]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  const reads = page.requests.filter((r) => r.command === 'study_parameter_contexts');
+  assert.equal(reads.length, 1);
+  reads[0]!.resolve([parameterRow()]);
+  await page.settle();
+  // 研究基线换了才是另一个研究：自动按新基线重读（GUI-14 的旧结果核对规则不变）。
+  page.state.researchBaseline = { id: 'soil', revision: 4 };
+  page.render();
+  await page.settle();
+  assert.equal(loads().length, 2, '换研究基线要重读参数');
+  assert.deepEqual(loads()[1]!.args.modelRevision, { id: 'soil', revision: 4 });
+});
+it('a running study keeps its recorded revision when the baseline and run revision change', async () => {
+  const page = researchPage({
+    versionRef: { id: 'official', revision: 1 },
+    researchBaseline: { id: 'soil', revision: 3 },
+    versions: studyVersions,
+    // 从"新建修改版"进来的研究：打开一个已有研究，基线仍在。
+    researchMethod: 'tuning',
+  });
+  page.render();
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-run');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-run',
+      spec: {
+        kind: 'tuning',
+        kernel_dir: '/kernels/default',
+        parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+      },
+    },
+    state: { status: 'Ready' },
+    results: [],
+    model_version: { model_revision: { version: { id: 'trace', revision: 7 } } },
+    remote: null,
+  });
+  await page.settle();
+  const confirm = page
+    .nodes()
+    .find(
+      (node) =>
+        node.type === 'label' && String(node.props.className ?? '').includes('study-confirm'),
+    )
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(confirm);
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('study-run');
+  assert.equal(page.requests.at(-1)!.command, 'study_run');
+  const submitted = page.requests.at(-1)!;
+  assert.deepEqual(
+    submitted.args.modelRevision,
+    { id: 'trace', revision: 7 },
+    '已建研究用它自己记下的冻结修订运行',
+  );
+  // 运行请求还在飞时换研究基线、换运行版本：这个研究保留自己的冻结修订和身份。
+  page.state.researchBaseline = { id: 'official', revision: 1 };
+  page.state.versionRef = { id: 'official', revision: 2 };
+  page.render();
+  await page.settle();
+  assert.ok(page.actions().some((action) => action.id === 'study-status' && action.enabled));
+  const summary = pageText(page);
+  assert.match(summary, /研究基线/, '摘要跟着入口状态更新');
+  assert.match(summary, /Official CoLM r1/);
+  assert.match(summary, /运行修订/, '摘要仍显示这个研究自己的运行修订');
+  assert.match(summary, /Trace scheme r7/);
+  assert.equal(
+    page.requests.filter((r) => r.command === 'model_case_context').length,
+    0,
+    '运行中的研究不因基线/运行版本变化重读参数',
+  );
+  submitted.resolve({});
+  await page.settle();
+  assert.ok(page.actions().some((action) => action.id === 'study-status' && action.enabled));
+});
+
+// 建研究和预检交给后端的模型修订必须来自研究基线（U-01）；这段逻辑在页面的 check() 里。
+it('study preflight and creation carry the study baseline, not the run version', async () => {
+  const calls: [string, Record<string, unknown>][] = [];
+  const check = pageCallback('check', {
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    spec: () => ({ specJson: '{"kind":"tuning"}' }),
+    invoke: async (command: string, args: Record<string, unknown>) => {
+      calls.push([command, args]);
+      return {};
+    },
+    studyBaseline: { id: 'soil', revision: 3 },
+    setPreflight: () => {},
+  }) as unknown as () => Promise<unknown>;
+  await check();
+  assert.deepEqual(
+    calls.map(([command]) => command),
+    ['study_preflight_json'],
+  );
+  assert.deepEqual(calls[0]![1].modelRevision, { id: 'soil', revision: 3 });
 });

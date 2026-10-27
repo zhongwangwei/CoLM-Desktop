@@ -210,16 +210,35 @@ export function Field({
   label,
   children,
   hint,
+  unit,
+  range,
 }: {
   label: ReactNode;
   children: ReactNode;
   hint?: ReactNode;
+  /** 单位（如秒、tokens）：和提示、范围一起进 aria-describedby，读屏能听到数字的含义。 */
+  unit?: ReactNode;
+  /** 允许范围（如 ≥ 1）：同上；不能只画在界面上而不让控件关联到它。 */
+  range?: ReactNode;
 }) {
   const generatedId = useId();
+  // 每个说明文字都有自己的 id；控件用 aria-describedby 按 hint → unit → range 顺序关联。
+  const hintId = hint ? `${generatedId}-hint` : undefined;
+  const unitId = unit ? `${generatedId}-unit` : undefined;
+  const rangeId = range ? `${generatedId}-range` : undefined;
+  const describedBy = [hintId, unitId, rangeId].filter(Boolean).join(' ') || undefined;
   let controlId: string | undefined;
   const associate = (nodes: ReactNode): ReactNode =>
     Children.map(nodes, (child) => {
-      if (controlId || !isValidElement<{ id?: string; type?: string; children?: ReactNode }>(child))
+      if (
+        controlId ||
+        !isValidElement<{
+          id?: string;
+          type?: string;
+          children?: ReactNode;
+          'aria-describedby'?: string;
+        }>(child)
+      )
         return child;
       const input = child.type === Input || child.type === DateInput || child.type === 'input';
       if (
@@ -230,7 +249,12 @@ export function Field({
         child.type === 'textarea'
       ) {
         controlId = child.props.id || generatedId;
-        return cloneElement(child, { id: controlId });
+        // 控件自己已有关联说明时保留并合并，避免 Field 覆盖调用方的 aria-describedby。
+        const described = [child.props['aria-describedby'], describedBy].filter(Boolean).join(' ');
+        return cloneElement(
+          child,
+          described ? { id: controlId, 'aria-describedby': described } : { id: controlId },
+        );
       }
       // Traverse layout wrappers, leaving independently labelled controls and components alone.
       if (
@@ -251,7 +275,21 @@ export function Field({
         <span className="field-label">{label}</span>
       )}
       {content}
-      {hint && <span className="field-hint">{hint}</span>}
+      {hint && (
+        <span className="field-hint" id={hintId}>
+          {hint}
+        </span>
+      )}
+      {unit && (
+        <span className="field-hint" id={unitId}>
+          {unit}
+        </span>
+      )}
+      {range && (
+        <span className="field-hint" id={rangeId}>
+          {range}
+        </span>
+      )}
     </div>
   );
 }

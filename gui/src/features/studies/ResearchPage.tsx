@@ -39,6 +39,7 @@ import {
   type ParameterContext,
   type SiteTiming,
   applyResearchSeed,
+  researchBaselineOf,
 } from './study';
 import {
   clearParameterContextMarker,
@@ -65,7 +66,7 @@ import {
   resultFileLabel,
   shownResultFiles,
 } from './research-home';
-import { hubMethods } from '../versions/hub-methods';
+import { homeResearchEntry, hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
 
@@ -250,8 +251,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const dir = state.selectedCase?.dir || '';
-  const versionId = state.versionRef.id;
-  const revision = state.versionRef.revision;
+  // U-01：研究用的基线。从"新建修改版"进来时是用户在其中选的那一版；没有显式基线（研究首页新开）
+  // 就退回当前运行修订，行为与改动前一致。选研究基线不改 `version/versionRef/chosenVersion`。
+  const studyBaseline = researchBaselineOf(state.researchBaseline, state.versionRef);
+  const versionId = studyBaseline.id;
+  const revision = studyBaseline.revision;
   const [workbench, setWorkbench] = useState(false);
   const [tab, setTab] = useState('tuning');
   const [engine, setEngine] = useState('rust');
@@ -338,6 +342,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [confirmed, setConfirmed] = useState(false);
   const [studyDir, setStudyDir] = useState('');
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
+  // 打开/跑过的研究自己记下的冻结修订（manifest 的 model_version）。研究页一律以它为准，不随之后的
+  // 研究基线或运行版本变化（U-01：已有运行中的研究保留自己的冻结修订与输入）。
+  const modelUsed = envelope?.model_version?.model_revision?.version;
+  // 研究读取参数、写回/冻结版本时用的模型身份：已有研究用它自己记下的修订，新研究用研究基线。
+  // 放在这里（而不是渲染中段）是因为参数缓存身份 `contextIdentity` 在 render 期间就要用到它。
+  const studyModel = modelUsed ?? studyBaseline;
   const [preflight, setPreflight] = useState('');
   const [resultPath, setResultPath] = useState('');
   const [result, setResult] = useState('');
@@ -397,8 +407,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const failedFor = useRef('');
   // 参数上下文读取身份：模型 ID+修订号，加上实际影响读参数结果的维度（站点及顺序、编译配置、
   // 格点类型）。请求带着它出去、返回时和当前身份核对，旧修订的迟到结果不写回当前页面（GUI-14）。
+  // 修订这里用 `studyModel`（研究基线，已建研究则是它自己记下的修订），和研究真正使用的模型一致。
   const contextIdentity: ParameterContextIdentity = {
-    version: state.versionRef,
+    version: studyModel,
     kernel,
     sites,
     spatial: spatialStudy,
@@ -1016,7 +1027,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const plan = spec(false);
       const value = await invoke('study_preflight_json', {
         ...plan,
-        modelRevision: state.versionRef,
+        modelRevision: studyBaseline,
       });
       if (current())
         setPreflight(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
@@ -1025,11 +1036,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const create = () =>
     task(async (current) => {
       const plan = spec(true);
-      await invoke('study_preflight_json', { ...plan, modelRevision: state.versionRef });
+      await invoke('study_preflight_json', { ...plan, modelRevision: studyBaseline });
       if (!current()) throw new Error('Context changed');
       const path = await invoke<string>('study_create_json', {
         ...plan,
-        modelRevision: state.versionRef,
+        modelRevision: studyBaseline,
       });
       if (current()) {
         setRemoteReply(null);
@@ -1070,7 +1081,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     const concurrency = Number(jobs);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
       throw new Error(tr('同时运行的模拟数要在 1–16 之间', 'Jobs must be 1–16'));
-    const modelRevision = studyModelRevision(state.versionRef, envelope.model_version);
+    // 已有研究用它记下的冻结修订跑，新研究用研究基线；两者都不受页面别的选择影响（U-01）。
+    const modelRevision = studyModelRevision(studyBaseline, envelope.model_version);
     runLock.current = true;
     remoteRequest.current++;
     setLaunching(true);
@@ -1454,7 +1466,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const inspectHybrid = () =>
     task(async (current) => {
       const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
-        case: await effectiveCase(aiCase, state.versionRef),
+        case: await effectiveCase(aiCase, studyModel),
       });
       if (current()) setHybridInfo(data);
       return data;
@@ -1470,7 +1482,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const data = await invokeJson('hybrid_check', {
         case: aiCase,
         kernelDir: kernel,
-        modelRevision: state.versionRef,
+        modelRevision: studyModel,
         preprocessors,
       });
       if (current()) setResult(JSON.stringify(data, null, 2));
@@ -1527,7 +1539,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           networkSpec: net,
           studyDirs: [...chosenStudies],
           sourceCase: aiCase,
-          parent: state.versionRef,
+          parent: studyModel,
         });
       return data;
     });
@@ -1585,7 +1597,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 打开的研究以它记下的版本为准（可能不是当前选给模拟用的那个）。
   const versionLabel = (v: VersionRef) =>
     `${state.versions.find((x) => x.version.id === v.id && x.version.revision === v.revision)?.name ?? v.id} r${v.revision}`;
-  const modelUsed = envelope?.model_version?.model_revision?.version;
   // 研究状态的中文说法；后端的状态名原样留给助手和日志。
   const statusText = (value: string) => {
     const key = value.replace(/_/g, '').toLowerCase();
@@ -1690,11 +1701,18 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     }
     setWorkbench(true);
   }
+  // 从研究首页开始一项新研究（U-02）：两个入口共用同一个 chooseMethod/ResearchPage 流程，只在
+  // 入口状态上不同——首页没有显式研究基线，清掉让研究页退回当前运行修订；草稿带来的写回目标与
+  // 参数种子也只属于从那个草稿进来的一次研究，一并清掉。
+  function startHomeMethod(value: string) {
+    setFromHub(false);
+    update(homeResearchEntry());
+    chooseMethod(value);
+  }
   // 手动改参数和修改源码不跑研究：到版本页直接建好草稿（和"新建修改版"点卡片一样），基于模拟正在用的版本。
   function startVersionMethod(method: 'manual' | 'source') {
     update({
-      researchTarget: null,
-      researchSeed: null,
+      ...homeResearchEntry(),
       versionsView: 'create',
       versionMethod: { method },
     });
@@ -1812,13 +1830,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   };
   useEffect(() => {
     // 率定和不确定性分析的预填不同（后者不留验证期），换了方法要重算。
-    const key = `${tuning}|${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
+    const key = `${tuning}|${sites.join('|')}#${studyModel.id}@${studyModel.revision}`;
     if (!workbench || step !== 3 || ai || !sites.length || prefilledFor.current === key) return;
     prefilledFor.current = key;
     let live = true;
     void invoke<Record<string, CaseProfile>>('model_case_profiles', {
       dirs: sites,
-      modelRevision: state.versionRef,
+      modelRevision: studyModel,
     })
       .then((profiles) => {
         if (!live) return;
@@ -1856,7 +1874,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workbench, step, ai, tuning, siteKey, state.versionRef.id, state.versionRef.revision]);
+  }, [workbench, step, ai, tuning, siteKey, studyModel.id, studyModel.revision]);
   // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
   // 任何研究都会写回那个草稿。但为那个草稿跑的研究本身仍该写回它：原来跑完从侧栏回来，
   // 写回悄悄从"写回草稿 X"变成"新建版本"（GUI 审查 B-05）。按研究目录记下它的草稿，
@@ -1873,7 +1891,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     }
     setFromHub(false);
     if (studyDir && state.researchTarget) studyTargets.current[studyDir] = state.researchTarget;
-    update({ researchTarget: null, researchSeed: null });
+    // 和研究首页方法卡片一样：回首页就清掉写回目标、参数种子与显式研究基线（U-02）。
+    update(homeResearchEntry());
     setWorkbench(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchHome]);
@@ -2462,7 +2481,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     value: '',
     type: 'choice',
     options: hubMethods.map((item) => ({ value: item.id, label: en ? item.en : item.zh })),
-    set: chooseMethod,
+    set: startHomeMethod,
     disabled: busy || launching || unresolvedRemote,
   };
   const hasStudy = !!studyDir && !!envelope;
@@ -2530,7 +2549,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     let current = true;
     invoke<{ profile: Parameters<typeof compatibleKernel>[1] }>('model_case_context', {
       dir: sites[0],
-      modelRevision: state.versionRef,
+      modelRevision: studyModel,
     })
       .then((context) => {
         if (current)
@@ -2877,6 +2896,46 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       />
     </div>
   );
+  // 研究身份的只读摘要（U-01）：项目/算例、研究基线、编辑草稿或运行修订、计算位置。
+  // 用户最容易被"选了基线是不是把模拟换版本了"搞混，所以把三个身份分开写出来：
+  // 研究基线 = 新研究会用的版本（没有显式基线时就是当前运行修订）；运行修订 = 已建研究自己记下的
+  // 冻结修订（它不受基线/运行版本变化影响）；编辑草稿 = 研究结果要写回的那份草稿。
+  const identitySummary = () => {
+    const root = state.root.replace(/[/\\]+$/, '');
+    const project = root ? root.split(/[/\\]/).pop()! : tr('未打开项目', 'No project');
+    const cases = sites.length
+      ? sites.map((path) => state.cases.find((c) => c.dir === path)?.name ?? path).join('、')
+      : state.selectedCase
+        ? state.selectedCase.name
+        : tr('未选算例', 'No cases selected');
+    const baseline = `${versionLabel(studyBaseline)}${
+      state.researchBaseline ? '' : tr('（当前运行版本）', ' (current run revision)')
+    }`;
+    const revision =
+      [
+        state.researchTarget
+          ? tr(`编辑草稿"${state.researchTarget.name}"`, `Draft "${state.researchTarget.name}"`)
+          : null,
+        modelUsed
+          ? tr(`运行修订 ${versionLabel(modelUsed)}`, `Run revision ${versionLabel(modelUsed)}`)
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') ||
+      tr('尚未形成修订（结果先写进新草稿）', 'No revision yet (results first go into a new draft)');
+    return (
+      <p className="study-context study-identity" aria-label={tr('研究身份摘要', 'Study identity')}>
+        <strong>{tr('项目/算例', 'Project/cases')}:</strong> {project} · {cases}
+        {' · '}
+        <strong>{tr('研究基线', 'Study baseline')}:</strong> {baseline}
+        {' · '}
+        <strong>{tr('编辑草稿或运行修订', 'Draft or run revision')}:</strong> {revision}
+        {' · '}
+        <strong>{tr('计算位置', 'Where it runs')}:</strong>{' '}
+        {host ? tr(`服务器 ${host}`, `Server ${host}`) : tr('本机', 'Local')}
+      </p>
+    );
+  };
   if (!workbench)
     return (
       <div className="research-home">
@@ -2903,6 +2962,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             </p>
           </div>
         </header>
+        {identitySummary()}
         {error && <Notice tone="error">{shownError}</Notice>}
         {/* 率定、不确定性和 AI 都在项目的算例上跑；还没打开项目时先说清楚，不让人选了方法才发现没算例。 */}
         {!state.cases.length && (
@@ -2929,13 +2989,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   ? tr('先打开项目或新建模拟', 'Open a project or create a simulation first')
                   : undefined
               }
-              run={() => {
-                // 研究首页新开的研究不写回之前的草稿。
-                setFromHub(false);
-                // 草稿页签带来的参数和要写回的草稿只属于从那里进来的那次研究。
-                update({ researchTarget: null, researchSeed: null });
-                chooseMethod(item.id);
-              }}
+              run={() => startHomeMethod(item.id)}
             >
               <span className="research-method-icon">
                 <svg
@@ -3694,6 +3748,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           {renderActions([backAction])}
         </div>
       </header>
+      {identitySummary()}
       <p className="study-context">
         {state.researchTarget ? (
           <>
@@ -3716,8 +3771,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           tr('这个研究没有记下所用的模型版本。', 'This study did not record its model version.')
         ) : (
           tr(
-            `研究用的模型版本：${versionLabel(modelUsed ?? state.versionRef)}。跑完可以把结果写进以它为基础的新版本草稿，审阅后冻结。`,
-            `Model version for the study: ${versionLabel(modelUsed ?? state.versionRef)}. Finished results can go into a new version draft based on it, which you review and freeze.`,
+            `研究用的模型版本：${versionLabel(studyModel)}。跑完可以把结果写进以它为基础的新版本草稿，审阅后冻结。`,
+            `Model version for the study: ${versionLabel(studyModel)}. Finished results can go into a new version draft based on it, which you review and freeze.`,
           )
         )}
       </p>
@@ -5217,7 +5272,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               {JSON.stringify(
                 {
                   modelRevision: modelUsed ?? null,
-                  selectedModelRevision: state.versionRef,
+                  selectedModelRevision: studyBaseline,
                   recordedVersion: envelope?.model_version,
                   manifest: envelope?.manifest,
                   tasks: envelope?.state?.tasks,
