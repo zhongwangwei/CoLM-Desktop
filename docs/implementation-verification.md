@@ -37710,3 +37710,8 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - `mpirun -n 1 run/river_hist_concatenate.x case.nml target` 成功：1 个 segment、1 个 shard、2 条时间记录、12 个 unit-catchment 字段、145 条分汊路径；
 - 生成 `...unitcat_2003-02.nc` 和 `.complete` marker；
 - 与 `one` 模式对比：16 个共有变量逐值一致；block 模式缺少 `history_window_seconds`、`history_window_end_minutes`、`mask_complete_upstream` 三个变量，需要后续确认/补齐。
+
+**Phase B block 辅助变量补齐（2026-10-27，7920l）**：`river_hist_concatenate` 新增 `rebuild_aux_variables`：
+- 从 shard 逐记录复制 `history_window_seconds`、`history_window_end_minutes`；
+- 从所有 shard 的 `mask_complete_upstream` 重建成 `(lon_ucat, lat_ucat)`，空白格用 `spval`。
+重新拼接 556 block 输出后，与 `one` 模式 **19/19 变量逐值一致**。多 shard（`DEF_PIO_groupsize=3`）测试中模型运行退出 9、拼接报缺 shard 属性；一 shard 的 block 路径已完整通过，多 shard 仍待查。

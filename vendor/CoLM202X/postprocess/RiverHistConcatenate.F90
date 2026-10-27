@@ -367,6 +367,7 @@ CONTAINS
 
       CALL rebuild_resv_variables ()
       CALL rebuild_bif_matrix ()
+      CALL rebuild_aux_variables (trim(filetmp), nlon, nlat)
 
       write(*,'(A,I0,A,I0,A)') '  rebuilt ', nvar, ' unit-catchment fields over ', &
          totalnumucat, ' catchments'
@@ -877,6 +878,74 @@ CONTAINS
       allocate (names(max(n,1)))
       IF (n > 0) names(1:n) = tmp(1:n)
    END SUBROUTINE collect_varnames
+
+   !> Copy the one-dimensional time auxiliaries and the static upstream mask
+   !! that the shard writer emits but the ucat sweep does not collect.
+   SUBROUTINE rebuild_aux_variables (fileout, nlon, nlat)
+
+   USE netcdf
+   USE MOD_Vars_Global, only: spval
+   character(len=*), intent(in) :: fileout
+   integer, intent(in) :: nlon, nlat
+
+   character(len=256) :: name, fname
+   real(r8), allocatable :: vals(:), mask(:)
+   real(r8), allocatable :: grid(:,:)
+   integer, allocatable :: ids(:), xs(:), ys(:)
+   integer :: ish, ncid, k
+
+      name = 'history_window_seconds'
+      CALL copy_time_aux (trim(fileout), trim(name))
+      name = 'history_window_end_minutes'
+      CALL copy_time_aux (trim(fileout), trim(name))
+
+      allocate (grid(nlon,nlat)); grid = spval
+      DO ish = 0, seg_shards(1)-1
+         CALL shard_name (1, ish, fname)
+         ierr = nf90_open (trim(fname), NF90_NOWRITE, ncid)
+         CALL read_int (ncid, 'ucat_ucid', ids)
+         CALL read_int (ncid, 'x_ucat', xs)
+         CALL read_int (ncid, 'y_ucat', ys)
+         CALL read_real (ncid, 'mask_complete_upstream', mask)
+         DO k = 1, min(size(ids), min(size(xs), min(size(ys), size(mask))))
+            IF (xs(k) >= 1 .and. xs(k) <= nlon .and. ys(k) >= 1 .and. ys(k) <= nlat) &
+               grid(xs(k),ys(k)) = mask(k)
+         ENDDO
+         IF (allocated(ids)) deallocate (ids)
+         IF (allocated(xs)) deallocate (xs)
+         IF (allocated(ys)) deallocate (ys)
+         IF (allocated(mask)) deallocate (mask)
+         ierr = nf90_close (ncid)
+      ENDDO
+      CALL ncio_write_serial (trim(fileout), 'mask_complete_upstream', grid, &
+         'lon_ucat', 'lat_ucat')
+      CALL copy_var_attrs ('mask_complete_upstream')
+      deallocate (grid)
+
+
+   END SUBROUTINE rebuild_aux_variables
+
+   !> Copy one time-axis auxiliary from the owning shard/record.
+   SUBROUTINE copy_time_aux (fileout, name)
+   USE netcdf
+   character(len=*), intent(in) :: fileout, name
+   character(len=256) :: fname
+   real(r8), allocatable :: vals(:)
+   integer :: g, vid, ierr, ncid
+      DO g = 1, size(rec_seg)
+         CALL shard_name (rec_seg(g), 0, fname)
+         ierr = nf90_open (trim(fname), NF90_NOWRITE, ncid)
+         CALL read_real (ncid, trim(name), vals)
+         vid = -1
+         ierr = nf90_inq_varid (ncid, trim(name), vid)
+         IF (rec_local(g) >= 1 .and. rec_local(g) <= size(vals)) &
+            CALL ncio_write_serial_time (trim(fileout), trim(name), g, &
+               vals(rec_local(g)), 'time')
+         ierr = nf90_close (ncid)
+         IF (allocated(vals)) deallocate (vals)
+      ENDDO
+      CALL copy_var_attrs (trim(name))
+   END SUBROUTINE copy_time_aux
 
    !> Move src onto dst, or stop. Nothing downstream may treat a failed
    !! promotion as success: the .complete marker written afterwards is what
