@@ -1252,6 +1252,8 @@ fn route_system<'a>(
     let mut faces = vec![Face::default(); n];
     let mut sums = vec![(0.0, 0.0, 0.0); n];
     let mut dt_res = acctime;
+    // 分汊：逐簇剩余时间；非分汊保持标量路径不变。
+    let mut dt_res_groups = bif.is_some().then(|| vec![acctime; n_groups]);
     // 分汊：逐河系的子步长与这一子步的净分汊出流。
     let mut bif_sum = vec![0.0; if bif.is_some() { n } else { 0 }];
     // 堤防 + 分汊：第 2 层及以上（堤内一侧）的净分汊出流，以及堤内蓄量被扣穿时的报错。
@@ -1265,7 +1267,10 @@ fn route_system<'a>(
     let mut collapsed = None;
     // 河系内部串行，不再按单元嵌套并行（第 696 轮）：子步内每段只有几十微秒的活，嵌套 `par_iter`
     // 在 240 线程的机器上让 128 个线程空转抢活，全球河网一天的汇流从 4 s 拖到 41 s。
-    while dt_res > 0.0 {
+    let any_active = |dt_res: f64, groups: Option<&Vec<f64>>| {
+        groups.map_or(dt_res > 0.0, |v| v.iter().any(|x| *x > 0.0))
+    };
+    while any_active(dt_res, dt_res_groups.as_ref()) {
         ntimestep += 1;
         // 开分汊时子步长是全局的，告警给全局子步长；否则给本河系定下子步长的单元流域。
         let dt_report = if bif.is_some() { last_dt } else { binding.dt };
@@ -1307,9 +1312,15 @@ fn route_system<'a>(
             ));
             break;
         }
-        let mut dt_all = dt_res.min(60.0);
-        // 所有河系的剩余时间相同（每个子步都同步成同一 `dt`），起始子步长也相同。
-        let mut dt_sys = bif.is_some().then(|| vec![dt_all; net.river_systems]);
+        let mut dt_group: Vec<f64> = match dt_res_groups.as_ref() {
+            Some(res) => res.iter().map(|r| r.min(60.0)).collect(),
+            None => vec![dt_res.min(60.0)],
+        };
+        let mut dt_sys: Option<Vec<f64>> = bif.is_some().then(|| {
+            (0..net.river_systems)
+                .map(|s| dt_group[groups[s]])
+                .collect()
+        });
         for k in 0..n {
             // 已建成的水库没有出口面通量（`zgrad_dn` 也清零）。
             faces[k] = if built[k].is_some() {
@@ -1412,9 +1423,10 @@ fn route_system<'a>(
         for k in 0..n {
             let i = cells[k];
             // 开分汊时每个河系从自己的子步长起算（`dt_this = dt_all(irivsys(i))`）。
+            let g = groups[net.river_system[i]];
             let mut dt_this = match dt_sys.as_ref() {
                 Some(dt_sys) => dt_sys[net.river_system[i]],
-                None => dt_all,
+                None => dt_group[g],
             };
             let (w, v) = (wdsrf[k], veloc[k]);
             if built[k].is_none() && (v != 0.0 || w > 0.0) {
@@ -1445,14 +1457,14 @@ fn route_system<'a>(
                     dt_this = dt_this.min(((momen[k] * net.rivare[i]) / gradient).abs());
                 }
             }
-            dt_all = dt_this.min(dt_all);
+            dt_group[g] = dt_this.min(dt_group[g]);
             if let Some(dt_sys) = dt_sys.as_mut() {
                 let s = net.river_system[i];
                 dt_sys[s] = dt_this.min(dt_sys[s]);
             }
             binding.note(dt_this, k);
         }
-        let dt = match (bif.as_mut(), dt_sys.as_mut()) {
+        let dt_group = match (bif.as_mut(), dt_sys.as_mut()) {
             (Some(run), Some(dt_sys)) => {
                 let dt_group = bifurcation_substep(
                     net,
@@ -1461,7 +1473,9 @@ fn route_system<'a>(
                     dt_sys,
                     &groups,
                     n_groups,
-                    &[dt_res],
+                    dt_res_groups
+                        .as_deref()
+                        .unwrap_or(std::slice::from_ref(&dt_res)),
                     &wdsrf,
                     &volwater_ucat,
                     &mut faces,
@@ -1487,15 +1501,17 @@ fn route_system<'a>(
                     }),
                     &mut bif_lev_sum,
                 );
-                dt_group[0]
+                dt_group
             }
-            _ => dt_all,
+            _ => dt_group,
         };
-        last_dt = dt;
+        let dt_global = dt_group.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let dt_for = |k: usize| dt_group[groups[net.river_system[cells[k]]]];
+        last_dt = dt_global;
         // `tracer_lifecycle_route_sediment_bif`：每条活动路径逐层限流后的毛水量。
         if let (Some(out), Some(run)) = (sed.as_mut(), bif.as_ref()) {
             if let Some(acc) = out.bif.as_mut() {
-                let result = acc.add(dt, &run.layer_flux, &run.layer_active);
+                let result = acc.add(dt_global, &run.layer_flux, &run.layer_active);
                 sed_note(&mut sed, result);
             }
         }
@@ -1540,14 +1556,14 @@ fn route_system<'a>(
             } else {
                 (sum_h, 0.0)
             };
-            let mut volwater = (-visible_hflux).contract(dt, start);
+            let mut volwater = (-visible_hflux).contract(dt_for(k), start);
             // `levee_apply_protected_flux`：堤内蓄量扣掉堤内一侧的分汊出流（不收缩，乘积与报错
             // 判断共用），扣穿超过容差就报错。无分汊时通量为 0，蓄量不变；它重算的 `levdph`
             // 随即被下面的重新分区覆盖。
             if leveed_bif {
                 if let Some(lev) = lev.as_mut() {
                     let levsto = lev[k].0;
-                    let taken = dt * protected_hflux;
+                    let taken = dt_for(k) * protected_hflux;
                     let mut raw = levsto - taken;
                     if raw < 0.0 {
                         let tol = levsto.abs().max(taken.abs().max(1.0)) * 1.0e-10;
@@ -1565,7 +1581,7 @@ fn route_system<'a>(
                 if let Some(cells_tape) = cells_tape.as_mut() {
                     cells_tape[k].overflow = Some((volwater, net.rivstomax[i]));
                 }
-                faces[k].hflux = (volwater - net.rivstomax[i]) / dt;
+                faces[k].hflux = (volwater - net.rivstomax[i]) / dt_for(k);
                 if let Some(j) = built[k] {
                     qresv[j].1 = faces[k].hflux;
                 }
@@ -1603,7 +1619,8 @@ fn route_system<'a>(
                 let manning = net.rivman[i];
                 let friction = (manning * manning * GRAV / w.lpow(7.0 / 3.0)) * momen[k].abs();
                 let gradient = (sum_m - sum_z) / net.rivare[i];
-                momen[k] = (-gradient).contract(dt, momen[k]) / dt.contract(friction, 1.0);
+                momen[k] =
+                    (-gradient).contract(dt_for(k), momen[k]) / dt_for(k).contract(friction, 1.0);
                 veloc[k] = momen[k] / w;
             } else {
                 momen[k] = 0.0;
@@ -1624,7 +1641,7 @@ fn route_system<'a>(
                 cells_tape[k].end =
                     cell_water(k, &wdsrf, &volwater_ucat, &lev, &built, &reservoirs);
             }
-            tape.substeps.push((dt, cells_tape));
+            tape.substeps.push((dt_global, cells_tape));
             if let Some(run) = bif.as_ref() {
                 tape.bif_hflux_lev.push(run.layer_flux.clone());
             }
@@ -1654,36 +1671,37 @@ fn route_system<'a>(
                     _ => above_bank,
                 },
             ];
+            let dt_cell = dt_for(k);
             let a = &mut hist[k];
-            a[0] += dt;
-            a[1] = w.contract(dt, a[1]);
-            a[2] = veloc[k].contract(dt, a[2]);
+            a[0] += dt_cell;
+            a[1] = w.contract(dt_cell, a[1]);
+            a[2] = veloc[k].contract(dt_cell, a[2]);
             // `a_discharge + hflux_fc*dt` 不融合：乘积与调试用的 `totaldis` 共用（`_7820`）。
-            a[3] += faces[k].hflux * dt;
-            a[4] = floodarea.contract(dt, a[4]);
-            a[5] = rivsto.contract(dt, a[5]);
-            a[6] = (volwater - rivsto).contract(dt, a[6]);
-            a[7] = (w - curve.rivhgt).max(0.0).contract(dt, a[7]);
+            a[3] += faces[k].hflux * dt_cell;
+            a[4] = floodarea.contract(dt_cell, a[4]);
+            a[5] = rivsto.contract(dt_cell, a[5]);
+            a[6] = (volwater - rivsto).contract(dt_cell, a[6]);
+            a[7] = (w - curve.rivhgt).max(0.0).contract(dt_cell, a[7]);
             match (levee, lev.as_mut()) {
                 (Some(levee), Some(lev)) if levee.has[i] => {
                     let l = &mut lev[k];
-                    a[8] = (volwater + l.0).contract(dt, a[8]);
-                    l.2 = l.0.contract(dt, l.2);
-                    l.3 = l.1.contract(dt, l.3);
+                    a[8] = (volwater + l.0).contract(dt_cell, a[8]);
+                    l.2 = l.0.contract(dt_cell, l.2);
+                    l.3 = l.1.contract(dt_cell, l.3);
                 }
-                _ => a[8] = volwater.contract(dt, a[8]),
+                _ => a[8] = volwater.contract(dt_cell, a[8]),
             }
-            a[9] = (net.rivelv[i] + w).contract(dt, a[9]);
+            a[9] = (net.rivelv[i] + w).contract(dt_cell, a[9]);
             if let Some(run) = bif.as_mut() {
-                run.bifout[k] = bif_sum[k].contract(dt, run.bifout[k]);
+                run.bifout[k] = bif_sum[k].contract(dt_cell, run.bifout[k]);
             }
             if let Some(j) = built[k] {
                 let (_, volresv, a) = &mut reservoirs[j];
                 let (qin, qout) = qresv[j];
-                a[0] += dt;
-                a[1] = volresv.contract(dt, a[1]);
-                a[2] = qin.contract(dt, a[2]);
-                a[3] = qout.contract(dt, a[3]);
+                a[0] += dt_cell;
+                a[1] = volresv.contract(dt_cell, a[1]);
+                a[2] = qin.contract(dt_cell, a[2]);
+                a[3] = qout.contract(dt_cell, a[3]);
             }
             // `tracer_lifecycle_route_diag_accumulate`：子步末的蓄量（水库取 `volresv`）、
             // 洼地溢流之后的出口通量与本子步的淹没面积。
@@ -1715,11 +1733,18 @@ fn route_system<'a>(
                     protected_end,
                     protected_area,
                 };
-                let result = out.acc[k].add(dt, veloc[k], w, water, faces[k].hflux, floodarea);
+                let result =
+                    out.acc[k].add(dt_for(k), veloc[k], w, water, faces[k].hflux, floodarea);
                 sed_note(&mut sed, result);
             }
         }
-        dt_res -= dt;
+        if let Some(res) = dt_res_groups.as_mut() {
+            for (g, dt) in res.iter_mut().enumerate() {
+                *dt -= dt_group[g];
+            }
+        } else {
+            dt_res -= dt_global;
+        }
     }
     SystemResult {
         wdsrf,
@@ -1870,7 +1895,6 @@ fn bifurcation_substep(
     for (i, dt) in dt_cells.iter_mut().enumerate() {
         *dt = dt_group[groups[net.river_system[i]]];
     }
-    let dt = dt_group.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let reservoir_volume: Vec<Option<f64>> = resv
         .built
         .iter()
@@ -1902,9 +1926,9 @@ fn bifurcation_substep(
             continue;
         }
         for k in p * levels..(p + 1) * levels {
-            run.bifflw_lev[k] = flux.hflux_lev[k].contract(dt, run.bifflw_lev[k]);
+            run.bifflw_lev[k] = flux.hflux_lev[k].contract(dt_paths[p], run.bifflw_lev[k]);
         }
-        run.bifflw_acctime[p] += dt;
+        run.bifflw_acctime[p] += dt_paths[p];
     }
     for k in 0..n {
         sums[k].0 += flux.hflux_sum[k];
