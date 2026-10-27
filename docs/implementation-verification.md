@@ -37704,3 +37704,9 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - 无分汊 556 算例：当前源码 vs 基线，1125/1125 文件逐字节一致——重构没有改变无分汊路径。
 - 有分汊 556 算例 N=1：当前 vs 基线 1122 个文件相同，3 个不同——逐簇 dt 确实改变了分汊时间离散，符合预期。
 - 当前源码有分汊 N=1 vs N=2 仍 1125/1125 逐字节一致。
+
+**Phase B block history 真实运行（2026-10-27，7920l）**：
+- 556 分汊算例加 `DEF_HIST_mode='block'`，3 rank 运行生成 `556_hist_unitcat_2003-02_seg..._shard00000.nc`；
+- `mpirun -n 1 run/river_hist_concatenate.x case.nml target` 成功：1 个 segment、1 个 shard、2 条时间记录、12 个 unit-catchment 字段、145 条分汊路径；
+- 生成 `...unitcat_2003-02.nc` 和 `.complete` marker；
+- 与 `one` 模式对比：16 个共有变量逐值一致；block 模式缺少 `history_window_seconds`、`history_window_end_minutes`、`mask_complete_upstream` 三个变量，需要后续确认/补齐。
