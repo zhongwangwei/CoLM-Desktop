@@ -590,9 +590,58 @@ pub fn build(
     landdata: &Path,
     year: i32,
     bifurcation: bool,
+    merge_existing: bool,
 ) -> Result<(usize, usize)> {
     let (nlon, nlat) = grid_size(unitcatchment_file)?;
-    let touched = touched_cells(landdata, year, nlon, nlat)?;
+    let mut touched = touched_cells(landdata, year, nlon, nlat)?;
+    // LULCC: each DEF_LC_YEAR contributes its own river systems.  A previously
+    // written regional file is merged by marking its selected source catchments'
+    // inpmat cells touched, then rebuilding the same union.
+    if merge_existing {
+        let regional = regional_file(landdata);
+        if regional.is_file() {
+            let src = netcdf::open(unitcatchment_file)
+                .with_context(|| format!("cannot open {}", unitcatchment_file.display()))?;
+            let dim = |name: &str| -> Result<usize> {
+                Ok(src
+                    .dimension(name)
+                    .with_context(|| {
+                        format!("{} has no dimension {name}", unitcatchment_file.display())
+                    })?
+                    .len())
+            };
+            let (nseq, inpn) = (dim("nseqmax")?, dim("inpn")?);
+            let inp_x: Vec<i32> = src
+                .variable("inpmat_x")
+                .with_context(|| format!("{} has no inpmat_x", unitcatchment_file.display()))?
+                .get_values(netcdf::Extents::All)?;
+            let inp_y: Vec<i32> = src
+                .variable("inpmat_y")
+                .with_context(|| format!("{} has no inpmat_y", unitcatchment_file.display()))?
+                .get_values(netcdf::Extents::All)?;
+            let old = netcdf::open(&regional)
+                .with_context(|| format!("cannot open {}", regional.display()))?;
+            let indices: Vec<i32> = old
+                .variable("seq_src_index")
+                .with_context(|| format!("{} has no seq_src_index", regional.display()))?
+                .get_values(netcdf::Extents::All)?;
+            for source_index in indices {
+                ensure!(
+                    source_index >= 1 && (source_index as usize) <= nseq,
+                    "{} has seq_src_index {} outside the source network",
+                    regional.display(),
+                    source_index
+                );
+                let row = source_index as usize - 1;
+                for k in 0..inpn {
+                    let (x, y) = (inp_x[row * inpn + k], inp_y[row * inpn + k]);
+                    if x >= 1 && x as usize <= nlon && y >= 1 && y as usize <= nlat {
+                        touched[(y as usize - 1) * nlon + (x as usize - 1)] = true;
+                    }
+                }
+            }
+        }
+    }
     subset_write(
         unitcatchment_file,
         &regional_file(landdata),

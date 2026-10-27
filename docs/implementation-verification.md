@@ -37627,3 +37627,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase B 区域网络覆盖检查（2026-10-27）**：新增 `unitcatchment_regional::verify_coverage`，运行期在 `unit_catchment_file` 里按当前 `DEF_LC_YEAR` 的 landpatch 求 touched 格子，再核对区域网络的 `seq_src_index → inpmat` 是否覆盖全部 touched 格；缺失时报出格数。对应 PR 512 的 `check_regional_coverage`。区域网络仍由 Rust 的 mkinidata 生成（与纯 Fortran 产物逐变量对照过），不改成 mksrfdata。
 
 **Phase C 第三项（2026-10-27）**：`push_ups2ucat` 把 hflux/mflux/zgrad 三个字段的“跳过 0、首项直接赋值”求和合并到同一次上游遍历；每个字段各自的加法顺序不变，逐位不变。hb64 河湖开 1 vs 2 node **634/634**。
+
+**Phase B 区域网络 + LULCC 多年度（2026-10-27）**：`unitcatchment_regional::build` 增加 `merge_existing`；LULCC 下每个 `DEF_LC_YEAR` 的 mkinidata 先把已有区域文件 `seq_src_index` 对应的源 `inpmat` 格标成 touched，再重建并集，避免后一年覆盖掉前一年的河系。非 LULCC 不合并。运行期 `verify_coverage` 仍按当前年检查覆盖。
