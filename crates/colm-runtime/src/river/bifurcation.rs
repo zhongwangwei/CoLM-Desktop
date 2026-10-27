@@ -134,7 +134,48 @@ pub fn connected_river_system_groups(
             parent[rb] = ra;
         }
     }
-    (0..river_systems).map(|i| find(&mut parent, i)).collect()
+    // Compact the union-find roots to 0..k-1 so the routing can allocate one
+    // dt per component. The label order follows the smallest system in each
+    // component, which is deterministic on every rank.
+    let mut root_label = vec![usize::MAX; river_systems];
+    let mut labels = Vec::with_capacity(river_systems);
+    let mut next = 0usize;
+    for i in 0..river_systems {
+        let root = find(&mut parent, i);
+        if root_label[root] == usize::MAX {
+            root_label[root] = next;
+            next += 1;
+        }
+        labels.push(root_label[root]);
+    }
+    labels
+}
+
+/// Per-cluster routing dt from per-river-system limits.
+///
+/// PR 512's `sync_global_routing_dt` reduces over the cluster instead of the
+/// whole domain: every system in one connected component uses the minimum of
+/// its own limits, a non-finite/zero limit falls back to `min(10, dt_res)`, and
+/// the result never exceeds the group's remaining time. This helper performs
+/// the reduction without touching the routing loop yet.
+pub fn cluster_routing_dt(dt_sys: &[f64], group_of_system: &[usize], dt_res: &[f64]) -> Vec<f64> {
+    assert_eq!(
+        dt_sys.len(),
+        group_of_system.len(),
+        "every river system needs a cluster label"
+    );
+    let mut dt_group = vec![f64::INFINITY; dt_res.len()];
+    for (&dt, &group) in dt_sys.iter().zip(group_of_system) {
+        assert!(group < dt_res.len(), "cluster label out of range");
+        dt_group[group] = dt_group[group].min(dt);
+    }
+    for (group, dt) in dt_group.iter_mut().enumerate() {
+        if !dt.is_finite() || *dt <= 0.0 {
+            *dt = 10.0f64.min(dt_res[group]);
+        }
+        *dt = dt.min(dt_res[group]);
+    }
+    dt_group
 }
 
 impl Bifurcation {

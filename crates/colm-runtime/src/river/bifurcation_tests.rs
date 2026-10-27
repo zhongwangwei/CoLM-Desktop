@@ -160,3 +160,18 @@ fn a_bifurcation_path_joins_the_two_river_system_groups() {
     // 路径 0 -> 1 连接两个河系。
     assert_eq!(groups[0], groups[1]);
 }
+
+#[test]
+fn cluster_routing_dt_reduces_per_cluster_and_respects_remaining_time() {
+    // systems 0/1 share cluster 0, system 2 is cluster 1
+    let groups = super::connected_river_system_groups(3, [(0, 1)]);
+    assert_eq!(groups, vec![0, 0, 1]);
+    let dt = super::cluster_routing_dt(&[60.0, 15.0, 5.0], &groups, &[100.0, 100.0]);
+    assert_eq!(dt, vec![15.0, 5.0]);
+    // remaining time caps the cluster dt
+    let dt = super::cluster_routing_dt(&[60.0, 15.0, 5.0], &groups, &[7.0, 1.0]);
+    assert_eq!(dt, vec![7.0, 1.0]);
+    // invalid per-system limits fall back to min(10, remaining)
+    let dt = super::cluster_routing_dt(&[0.0, 60.0, -1.0], &groups, &[30.0, 30.0]);
+    assert_eq!(dt, vec![10.0, 10.0]);
+}

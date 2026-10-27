@@ -37672,3 +37672,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - `kernel-filesystem` 的 `test_postprocess_startup.py` 只抽取主程序并替换内部过程，新增的 `reject_unquotable` 调用没有 stub，链接报 `undefined symbol: _reject_unquotable_`；在生成程序里补 stub（`dc3b2843`），本地脚本 PASS。
 - 最新完整 CI 运行 `40444152695`：rust/gui 的 ubuntu/macos/windows、kernel-filesystem、golden-status 全部 success。
 - 本机并行全量 `cargo test --workspace --lib --bins` 的 `colm-cli` NetCDF 失败是 Homebrew HDF5 并发问题；`--test-threads=1` 通过，CI 不受影响。
+
+**Phase C 簇 dt 归约（2026-10-27）**：`connected_river_system_groups` 现在把并查集根压成 0..k-1 的确定性标签；新增 `cluster_routing_dt`，按簇取逐河系限制最小值、无效值退回 `min(10, dt_res)`、并夹到该簇剩余时间。合成网络单测覆盖共享簇/独立簇/剩余时间/无效值。routing 主循环仍用全局 dt。
