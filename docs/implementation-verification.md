@@ -37721,3 +37721,12 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **多 shard block 失败定位（2026-10-27，strace）**：`DEF_PIO_groupsize=3`、9 rank 的 block 模式在写 history 末尾时，其中一个 IO rank 对 `556_hist_2003-02_e100_n35.nc` / `e100_n40.nc` 的 `H5Fopen(O_RDWR)` 曾返回 `ENOENT`，随后又成功；说明多 IO group 下 block 文件的创建/打开存在可见性/竞态，而不是 river shard 本身。单 IO group 的单 shard block 及拼接已通过。
 
 **旧 IO-group block bug 记录（2026-10-27）**：vendor Fortran 仍保留原版 `master/IO/worker + DEF_PIO_groupsize` 架构；在 `DEF_PIO_groupsize=3`、9 rank、`DEF_HIST_mode='block'` 时，多 IO group 的 land block history 在第 48 步打开别的 IO rank 的 block 文件失败。已确认 `pio` 映射和 `gblock%xblkme/yblkme` 本身不重叠，问题在旧 IO-group 的 block 文件写入路径；单 IO group 正常。**这是原版 Fortran 旧架构的问题，不是新多节点引擎路径**；新 Rust 引擎没有 master/IO/worker 分类，且明确拒绝 `DEF_HIST_mode='block'`，所以没有把旧架构的修补强加进新引擎。
+
+**旧 IO-group block bug 复现命令（2026-10-27）**：
+```text
+# 7920l, case-block9 是 556 + DEF_HIST_mode='block' + DEF_PIO_groupsize=3
+mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
+# 对照：删除 DEF_HIST_mode（one 模式）同一 9 rank 正常结束
+# 单 group：DEF_PIO_groupsize=12，3 rank block 正常，拼接后与 one 19/19 一致
+```
+`strace -f -e trace=openat` 可见先有 `O_RDWR` 的 `ENOENT`，之后才有 `O_CREAT|O_TRUNC`；`pio` 与 `xblkme/yblkme` 本身不重叠，故不是分块所有权表错误。
