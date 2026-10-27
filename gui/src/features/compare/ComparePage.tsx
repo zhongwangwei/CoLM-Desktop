@@ -5,6 +5,7 @@ import { invoke, invokeJson, listen } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
+import { SaveBadge } from '../../components/SaveBadge';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import {
   benchErrorText,
@@ -15,8 +16,10 @@ import {
   comparisonDir,
   comparisonName,
   configInvalidation,
+  configSaveState,
   defaultGridRes,
   designFingerprint,
+  evaluationSummary,
   jobContacted,
   jobEnded,
   jobUncertain,
@@ -202,6 +205,10 @@ export default function ComparePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // U-05：运行/保存评估配置后的成功提示记着"针对哪一版设计"，设置一改就清掉，避免旧的"评估完成"继续挂着。
+  const [runNotice, setRunNotice] = useState('');
+  // U-05：评估配置正在提交（后端写 openbench.yaml）时徽标显示"正在保存"。
+  const [configSaving, setConfigSaving] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [source, setSource] = useState<'pypi' | 'local'>('pypi');
   const [localSource, setLocalSource] = useState('');
@@ -286,6 +293,8 @@ export default function ComparePage() {
   const fetching = useRef<Set<string>>(new Set());
   // 生成配置时记下设计指纹与自动生成的文本、站点清单：运行前再核对，手改过的配置不被清掉（GUI-04）。
   const generated = useRef<{ fingerprint: string; config: string; sites: Site[] } | null>(null);
+  // 运行完成提示对应的设计指纹：设置一改提示就过期（U-05）。
+  const runNoticeFor = useRef('');
   const LEFT = 'compare page left';
   const remote = !!host;
   const jobKey = (machine: string) => `colm.benchJob@${machine}`;
@@ -922,10 +931,34 @@ export default function ComparePage() {
   // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
   const design = designFingerprint({ machine, ...comparisonDesign() });
+  // 页面最新一版设计的指纹：运行期间用户还能改字段，成功提示回来时据此判断它是不是已经过时（U-05）。
+  const latestDesign = useRef(design);
+  latestDesign.current = design;
   const generatedConfig = generated.current;
   // 配置属于旧设计：没手改过的自动作废、要求重新生成；手改过的原样留着，标记过期并禁止直接运行。
   const yamlStale = !!yaml && !!generatedConfig && generatedConfig.fingerprint !== design;
   const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.config;
+  // U-04：运行前条件摘要和实际提交用同一份 design（comparisonDesign + 机器/路径身份），不另读页面状态。
+  const conditionSummary = () => evaluationSummary({ machine, ...comparisonDesign() });
+  // U-05：评估配置三态（有未保存修改 / 正在保存 / 已保存）。
+  const configState = configSaveState({
+    yaml,
+    currentFingerprint: design,
+    generated: generated.current,
+    submitting: configSaving,
+  });
+  // 运行/保存成功提示只在同一版设计上有效；设置一改就清掉（U-05）。
+  const showRunNotice = (message: string) => {
+    // 运行期间设置已经改过：这次完成的是旧设计，不能给当前设置挂"评估完成"。
+    if (latestDesign.current !== design) return;
+    runNoticeFor.current = design;
+    setRunNotice(message);
+  };
+  const clearStaleEvaluationNotice = () => {
+    if (!runNotice || runNoticeFor.current === design) return;
+    runNoticeFor.current = '';
+    setRunNotice('');
+  };
   const invalidateGeneratedConfig = () => {
     if (
       configInvalidation({
@@ -942,6 +975,7 @@ export default function ComparePage() {
   };
   useEffect(() => {
     invalidateGeneratedConfig();
+    clearStaleEvaluationNotice();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [design]);
   const allVariables = comparableVariables(
@@ -982,7 +1016,7 @@ export default function ComparePage() {
           '重新生成会覆盖你在配置里改过的内容，继续？',
           'Regenerating replaces the edits you made to the configuration. Continue?',
         ),
-        { confirmLabel: t('重新生成', 'Regenerate') },
+        { confirmLabel: t('重新生成评估配置', 'Regenerate evaluation configuration') },
       );
       if (!proceed) return;
     }
@@ -995,36 +1029,42 @@ export default function ComparePage() {
       if (!generatedNow || generatedNow.fingerprint !== design)
         throw new Error(
           t(
-            '评估设置改过了，旧配置不能直接运行；请先重新生成配置。',
-            'The evaluation settings changed; generate the configuration again before running.',
+            '评估设置改过了，旧配置不能直接运行；请先重新生成评估配置。',
+            'The evaluation settings changed; generate the evaluation configuration again before running.',
           ),
         );
       const project = comparisonName(name);
-      if (!remote) {
-        const result = await invokeJson<{ report: string | null }>('bench_run', {
+      // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
+      setConfigSaving(true);
+      try {
+        if (!remote) {
+          const result = await invokeJson<{ report: string | null }>('bench_run', {
+            name: project,
+            config: yaml,
+            sites,
+            refRoot: scanDir || null,
+          });
+          if (result.report) await view(result.report);
+          showRunNotice(t('评估完成', 'Evaluation finished'));
+          return;
+        }
+        // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
+        const machine = host;
+        // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
+        assertNoUnresolvedJob(machine);
+        const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
+          host: machine,
           name: project,
           config: yaml,
           sites,
           refRoot: scanDir || null,
         });
-        if (result.report) await view(result.report);
-        setNotice(t('评估完成', 'Evaluation finished'));
-        return;
+        const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
+        await afterWatch(machine, outcome, () => fetchReport(machine, project));
+        if (outcome.state === 'succeeded') showRunNotice(t('评估完成', 'Evaluation finished'));
+      } finally {
+        setConfigSaving(false);
       }
-      // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
-      const machine = host;
-      // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
-      assertNoUnresolvedJob(machine);
-      const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
-        host: machine,
-        name: project,
-        config: yaml,
-        sites,
-        refRoot: scanDir || null,
-      });
-      const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
-      await afterWatch(machine, outcome, () => fetchReport(machine, project));
-      if (outcome.state === 'succeeded') setNotice(t('评估完成', 'Evaluation finished'));
     });
   // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。
   // GUI-08：同一比较取回期间不重复触发；失败时已显示的报告原样保留，后端错误会说明本机旧报告
@@ -1169,7 +1209,13 @@ export default function ComparePage() {
     details: {
       status,
       picks: picks.map((p) => ({ dir: p.dir, label: p.label, info: p.info })),
-      config: { stale: yamlStale, handEdited: yamlHandEdited, missingExtent },
+      config: {
+        stale: yamlStale,
+        handEdited: yamlHandEdited,
+        missingExtent,
+        saveState: configState,
+        summary: conditionSummary(),
+      },
     },
   });
 
@@ -1189,905 +1235,1001 @@ export default function ComparePage() {
       </header>
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
-      <Card
-        title={t('在哪里评估', 'Where to evaluate')}
-        description={t(
-          '选服务器时，环境、参考数据登记表、模拟的 history 和评估都在那台服务器上，日志实时显示，只把报告和指标取回本机。服务器在"计算资源"里配置；本机和服务器的登记表各管各的。',
-          'With a server, the environment, the reference registry, the simulations’ history and the evaluation all stay on that server; the log is shown live and only the report and metrics come back. Servers are set up under Compute resources; this computer and each server keep their own registry.',
-        )}
-      >
-        <Field label={t('运行位置', 'Machine')}>
-          <Select value={host} disabled={busy} onChange={(e) => setHostState(e.target.value)}>
-            <option value="">{t('本机', 'This computer')}</option>
-            {[...new Set([...servers, ...(host ? [host] : [])])].map((value) => (
-              <option key={value} value={value}>
-                {t(`服务器 ${value}`, `Server ${value}`)}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        {busy && (
-          <p className="muted study-hint">
-            {t(
-              '正在处理：操作结束（服务器作业确认终态）之前不能切换运行位置；浏览别的机器不影响已有作业的身份。',
-              'Working: the machine cannot be switched until this operation finishes (and the server job’s final state is settled); browsing other machines does not affect the tracked job.',
-            )}
-          </p>
-        )}
-        {activeJob && (
-          <p className="muted study-hint">
-            {t(
-              `正在等待服务器作业 ${activeJob.job}${activeJob.name ? `（比较 ${activeJob.name}）` : ''}…`,
-              `Waiting for server job ${activeJob.job}${activeJob.name ? ` (comparison ${activeJob.name})` : ''}…`,
-            )}
-          </p>
-        )}
-        {lastJob && !activeJob && !unsettled && (
-          <div className="button-row">
-            <p className="muted study-hint">
-              {t(
-                `上次远程作业 ${lastJob.job}（${lastJob.name ?? '安装环境'}）：${jobEndText(lastJob)}。`,
-                `Last remote job ${lastJob.job} (${lastJob.name ?? 'environment install'}): ${jobEndText(lastJob)}.`,
-              )}
-            </p>
-            {lastJob.end === 'succeeded' && lastJob.name && (
-              <Button disabled={busy} onClick={() => void fetchLastReport()}>
-                {t('再取回报告', 'Fetch report again')}
-              </Button>
-            )}
-          </div>
-        )}
-      </Card>
-      {remote && unsettled && (
-        <Card title={t('远程作业：暂时失联/待核对', 'Remote job: unreachable, awaiting check')}>
-          <Notice tone="warning">
-            {t(
-              `暂时联系不上服务器 ${host}：作业 ${unsettled.job.job}（${unsettled.job.name ?? '安装环境'}）的身份已经保留，远端可能仍在运行。`,
-              `Server ${host} cannot be reached right now; job ${unsettled.job.job} (${unsettled.job.name ?? 'environment install'}) is still tracked and may still be running.`,
-            )}
-          </Notice>
-          <p className="muted study-hint">
-            {t(
-              `提交时间：${unsettled.job.submittedAt ?? '未知'}；最后确认状态：${unsettled.job.lastState ?? '未知'}${unsettled.job.lastConfirmedAt ? `（${unsettled.job.lastConfirmedAt}）` : ''}。一次查询失败不等于作业失败，确认终态之前不会结束跟踪。`,
-              `Submitted: ${unsettled.job.submittedAt ?? 'unknown'}; last confirmed state: ${unsettled.job.lastState ?? 'unknown'}${unsettled.job.lastConfirmedAt ? ` (${unsettled.job.lastConfirmedAt})` : ''}. A failed query does not mean the job failed; tracking ends only once the final state is confirmed.`,
-            )}
-          </p>
-          {unsettled.reason && <p className="muted study-hint">{shown(unsettled.reason)}</p>}
-          <div className="button-row">
-            <Button disabled={busy} onClick={() => void reconnect()}>
-              {t('重连并继续等待', 'Reconnect and keep waiting')}
-            </Button>
-            <Button disabled={busy} onClick={() => void checkUnsettled()}>
-              {t('核对终态', 'Check final state')}
-            </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void stopUnsettled()}>
-              {t('停止作业', 'Stop job')}
-            </Button>
-          </div>
-        </Card>
-      )}
-      <Card
-        title={t('评估环境', 'Evaluation environment')}
-        description={t(
-          '用 OpenBench 评估。uv、Python、OpenBench 和它的登记表、缓存全部装在软件自己的数据目录里，不碰系统里的 Python，也不和你自己装的 OpenBench 混用：先装 uv（约 20 MB，校验后才用），再装专用 Python 3.12，最后装 OpenBench 和它的全部依赖（约 400 MB，需要联网）。',
-          'Evaluation uses OpenBench. uv, Python, OpenBench, its reference registry and caches all live in the app’s own data folder, apart from the system Python and any OpenBench you installed yourself: uv first (about 20 MB, verified before use), then a private Python 3.12, then OpenBench with all its dependencies (about 400 MB, needs the internet).',
-        )}
-      >
-        <ul className="compare-status">
-          {status?.root && (
-            <li>
-              {remote
-                ? t(`安装位置（服务器 ${host}）：`, `Installed in (server ${host}): `)
-                : t('安装位置：', 'Installed in: ')}
-              {status.root}{' '}
-              {!remote && (
-                <Button onClick={() => void invoke('open_path', { path: status.root })}>
-                  {t('打开', 'Open')}
-                </Button>
-              )}
-            </li>
-          )}
-          {/* 状态回来之前不说"未安装"：要起两次 Python，已装好的机器上首屏会误报（复验 C2-07）。 */}
-          {!status ? (
-            <li>{t('正在检查已经装了什么…', 'Checking what is installed…')}</li>
-          ) : (
-            <>
-              <li>
-                {t('uv：', 'uv: ')}
-                {status.uv
-                  ? `${status.uv_version ?? '?'} · ${status.uv}`
-                  : status.uv_version
-                    ? status.uv_version
-                    : t('未安装', 'not installed')}
-              </li>
-              {/* 服务器上下载 uv 要 curl（或 wget）和 sha256sum（或 shasum）；没有就提前说。 */}
-              {remote && !status.uv_version && (!status.downloader || !status.checksum) && (
-                <li>
-                  {t(
-                    '这台服务器缺 curl/wget 或 sha256sum/shasum，装不了 uv：请先让管理员装上。',
-                    'This server lacks curl/wget or sha256sum/shasum, so uv cannot be installed; ask the administrator to add them.',
-                  )}
-                </li>
-              )}
-              {remote && !status.platform && (
-                <li>
-                  {t(
-                    '没有给这台服务器的系统准备 uv（只支持 Linux 与 macOS 的 x86_64、aarch64）。',
-                    'No uv is prepared for this server’s system (only Linux and macOS on x86_64 and aarch64).',
-                  )}
-                </li>
-              )}
-              <li>
-                {t('专用 Python：', 'Private Python: ')}
-                {status.python ?? t('未安装', 'not installed')}
-              </li>
-              <li>
-                {t('OpenBench：', 'OpenBench: ')}
-                {status.openbench ?? t('未安装', 'not installed')}
-                {status.openbench &&
-                  status.openbench !== status.openbench_pinned &&
-                  t(
-                    `（软件验证过的是 ${status.openbench_pinned}；装的是别的版本或本地源码，评估结果以它为准）`,
-                    ` (the app was verified with ${status.openbench_pinned}; this is another version or a local source, so results follow it)`,
-                  )}
-              </li>
-            </>
-          )}
-        </ul>
-        <div className="form-grid">
-          <Field label={t('OpenBench 从哪装', 'Install OpenBench from')}>
-            <Select value={source} onChange={(e) => setSource(e.target.value as 'pypi' | 'local')}>
-              <option value="pypi">
-                {t(
-                  `PyPI 发布版（colm-openbench ${status?.openbench_pinned ?? ''}）`,
-                  `PyPI release (colm-openbench ${status?.openbench_pinned ?? ''})`,
-                )}
-              </option>
-              <option value="local">
-                {remote
-                  ? t(
-                      '服务器上的源码目录（可编辑安装）',
-                      'Source folder on the server (editable install)',
-                    )
-                  : t('本地源码目录（可编辑安装）', 'Local source folder (editable install)')}
-              </option>
-            </Select>
-          </Field>
-          {source === 'local' && (
-            <Field label={t('OpenBench 源码目录', 'OpenBench source folder')}>
-              <div className="study-path">
-                <Input value={localSource} onChange={(e) => setLocalSource(e.target.value)} />
-                {!remote && (
-                  <ActionButton
-                    action="compare-pick-source"
-                    label={t('选择…', 'Choose…')}
-                    run={async () => {
-                      const dir = await invoke<string | null>('pick_folder', {
-                        key: 'openbench-source',
-                      });
-                      if (dir) setLocalSource(dir);
-                    }}
-                  />
-                )}
-              </div>
-            </Field>
-          )}
-          {source === 'pypi' && (
-            <Field label={t('从哪个 PyPI 下载', 'Package index')}>
-              <Select value={index} onChange={(e) => setIndex(e.target.value)}>
-                {INDEXES.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {t(option.zh, option.en)}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
-        </div>
-        <div className="button-row">
-          <ActionButton
-            action="compare-install-all"
-            label={
-              !status
-                ? t('一键安装', 'Install everything')
-                : steps.length
-                  ? t(
-                      `一键安装（${steps.length} 步）`,
-                      `Install everything (${steps.length} steps)`,
-                    )
-                  : t('已全部装好', 'Everything is installed')
-            }
-            kind="commit"
-            variant="primary"
-            disabled={busy || !status || !steps.length || (source === 'local' && !localSource)}
-            run={() => install(steps)}
-          />
-          {ready && (
-            <ActionButton
-              action="compare-reinstall-openbench"
-              label={t('重装 OpenBench', 'Reinstall OpenBench')}
-              kind="commit"
-              disabled={busy || (source === 'local' && !localSource)}
-              run={() => install(['openbench'])}
-            />
-          )}
-          {busy && <Button onClick={stop}>{t('停止', 'Stop')}</Button>}
-          {(status?.python || ready) && (
-            <Button disabled={busy} onClick={() => void uninstall('env')}>
-              {t('删掉 OpenBench', 'Remove OpenBench')}
-            </Button>
-          )}
-          {(remote ? !!status?.uv_version : status?.uv_own) && (
-            <Button variant="danger" disabled={busy} onClick={() => void uninstall('all')}>
-              {t('全部删掉', 'Remove everything')}
-            </Button>
-          )}
-        </div>
-        {log.length > 0 && (
-          <pre className="compare-log">
-            {log
-              .slice(-80)
-              .map((line) => {
-                // 本机日志带"[阶段] "前缀；服务器作业的日志是原样的行。
-                const m = /^(\[[^\]]*\] )([\s\S]*)$/.exec(line);
-                if (!en) return line;
-                return m ? m[1] + benchLogText(m[2]!) : benchLogText(line);
-              })
-              .join('\n')}
-          </pre>
-        )}
-      </Card>
-
-      {ready && (
+      <div data-compare-section="environment">
         <Card
-          title={t('参考数据', 'Reference data')}
+          title={t('环境状态', 'Environment status')}
           description={t(
-            `OpenBench 登记表里有 ${references.length} 个参考数据集。自己的数据用下面的「注册参考数据…」登记；扫描能认出目录结构标准的数据集，一个文件里多个候选变量时在注册表单里写清楚。`,
-            `The OpenBench registry lists ${references.length} reference datasets. Register your own data with “Register reference data…” below; a scan recognises standard layouts, and the registration form names variables when a file has several candidates.`,
+            '这台机器上 OpenBench 的状态；安装、重装与维护收在下面的折叠区里。',
+            'The OpenBench state on this machine; install, reinstall and maintenance are folded below.',
           )}
         >
-          <div className="form-grid">
-            <Field label={t('参考数据根目录', 'Reference data root')}>
-              <div className="study-path">
-                <Input value={scanDir} onChange={(e) => setScanDir(e.target.value)} />
+          <Field label={t('运行位置', 'Machine')}>
+            <Select value={host} disabled={busy} onChange={(e) => setHostState(e.target.value)}>
+              <option value="">{t('本机', 'This computer')}</option>
+              {[...new Set([...servers, ...(host ? [host] : [])])].map((value) => (
+                <option key={value} value={value}>
+                  {t(`服务器 ${value}`, `Server ${value}`)}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {busy && (
+            <p className="muted study-hint">
+              {t(
+                '正在处理：操作结束（服务器作业确认终态）之前不能切换运行位置；浏览别的机器不影响已有作业的身份。',
+                'Working: the machine cannot be switched until this operation finishes (and the server job’s final state is settled); browsing other machines does not affect the tracked job.',
+              )}
+            </p>
+          )}
+          <p className="muted study-hint" data-compare-readiness>
+            {!status
+              ? t('正在检查已经装了什么…', 'Checking what is installed…')
+              : ready
+                ? t(
+                    `OpenBench 已就绪（${status.openbench}）。`,
+                    `OpenBench is ready (${status.openbench}).`,
+                  )
+                : t(
+                    'OpenBench 还没有装好：展开下面的「安装、重装与维护」安装环境。',
+                    'OpenBench is not installed yet: expand “Install, reinstall and maintenance” below to set it up.',
+                  )}
+          </p>
+          <Advanced title={t('安装、重装与维护', 'Install, reinstall and maintenance')}>
+            <p className="muted">
+              {t(
+                '用 OpenBench 评估。uv、Python、OpenBench 和它的登记表、缓存全部装在软件自己的数据目录里，不碰系统里的 Python，也不和你自己装的 OpenBench 混用：先装 uv（约 20 MB，校验后才用），再装专用 Python 3.12，最后装 OpenBench 和它的全部依赖（约 400 MB，需要联网）。',
+                'Evaluation uses OpenBench. uv, Python, OpenBench, its reference registry and caches all live in the app’s own data folder, apart from the system Python and any OpenBench you installed yourself: uv first (about 20 MB, verified before use), then a private Python 3.12, then OpenBench with all its dependencies (about 400 MB, needs the internet).',
+              )}
+            </p>
+            <ul className="compare-status">
+              {status?.root && (
+                <li>
+                  {remote
+                    ? t(`安装位置（服务器 ${host}）：`, `Installed in (server ${host}): `)
+                    : t('安装位置：', 'Installed in: ')}
+                  {status.root}{' '}
+                  {!remote && (
+                    <Button onClick={() => void invoke('open_path', { path: status.root })}>
+                      {t('打开', 'Open')}
+                    </Button>
+                  )}
+                </li>
+              )}
+              {/* 状态回来之前不说"未安装"：要起两次 Python，已装好的机器上首屏会误报（复验 C2-07）。 */}
+              {!status ? (
+                <li>{t('正在检查已经装了什么…', 'Checking what is installed…')}</li>
+              ) : (
+                <>
+                  <li>
+                    {t('uv：', 'uv: ')}
+                    {status.uv
+                      ? `${status.uv_version ?? '?'} · ${status.uv}`
+                      : status.uv_version
+                        ? status.uv_version
+                        : t('未安装', 'not installed')}
+                  </li>
+                  {/* 服务器上下载 uv 要 curl（或 wget）和 sha256sum（或 shasum）；没有就提前说。 */}
+                  {remote && !status.uv_version && (!status.downloader || !status.checksum) && (
+                    <li>
+                      {t(
+                        '这台服务器缺 curl/wget 或 sha256sum/shasum，装不了 uv：请先让管理员装上。',
+                        'This server lacks curl/wget or sha256sum/shasum, so uv cannot be installed; ask the administrator to add them.',
+                      )}
+                    </li>
+                  )}
+                  {remote && !status.platform && (
+                    <li>
+                      {t(
+                        '没有给这台服务器的系统准备 uv（只支持 Linux 与 macOS 的 x86_64、aarch64）。',
+                        'No uv is prepared for this server’s system (only Linux and macOS on x86_64 and aarch64).',
+                      )}
+                    </li>
+                  )}
+                  <li>
+                    {t('专用 Python：', 'Private Python: ')}
+                    {status.python ?? t('未安装', 'not installed')}
+                  </li>
+                  <li>
+                    {t('OpenBench：', 'OpenBench: ')}
+                    {status.openbench ?? t('未安装', 'not installed')}
+                    {status.openbench &&
+                      status.openbench !== status.openbench_pinned &&
+                      t(
+                        `（软件验证过的是 ${status.openbench_pinned}；装的是别的版本或本地源码，评估结果以它为准）`,
+                        ` (the app was verified with ${status.openbench_pinned}; this is another version or a local source, so results follow it)`,
+                      )}
+                  </li>
+                </>
+              )}
+            </ul>
+            <div className="form-grid">
+              <Field label={t('OpenBench 从哪装', 'Install OpenBench from')}>
+                <Select
+                  value={source}
+                  onChange={(e) => setSource(e.target.value as 'pypi' | 'local')}
+                >
+                  <option value="pypi">
+                    {t(
+                      `PyPI 发布版（colm-openbench ${status?.openbench_pinned ?? ''}）`,
+                      `PyPI release (colm-openbench ${status?.openbench_pinned ?? ''})`,
+                    )}
+                  </option>
+                  <option value="local">
+                    {remote
+                      ? t(
+                          '服务器上的源码目录（可编辑安装）',
+                          'Source folder on the server (editable install)',
+                        )
+                      : t('本地源码目录（可编辑安装）', 'Local source folder (editable install)')}
+                  </option>
+                </Select>
+              </Field>
+              {source === 'local' && (
+                <Field label={t('OpenBench 源码目录', 'OpenBench source folder')}>
+                  <div className="study-path">
+                    <Input value={localSource} onChange={(e) => setLocalSource(e.target.value)} />
+                    {!remote && (
+                      <ActionButton
+                        action="compare-pick-source"
+                        label={t('选择…', 'Choose…')}
+                        run={async () => {
+                          const dir = await invoke<string | null>('pick_folder', {
+                            key: 'openbench-source',
+                          });
+                          if (dir) setLocalSource(dir);
+                        }}
+                      />
+                    )}
+                  </div>
+                </Field>
+              )}
+              {source === 'pypi' && (
+                <Field label={t('从哪个 PyPI 下载', 'Package index')}>
+                  <Select value={index} onChange={(e) => setIndex(e.target.value)}>
+                    {INDEXES.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {t(option.zh, option.en)}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
+            </div>
+            <div className="button-row">
+              <ActionButton
+                action="compare-install-all"
+                label={
+                  !status
+                    ? t('一键安装', 'Install everything')
+                    : steps.length
+                      ? t(
+                          `一键安装（${steps.length} 步）`,
+                          `Install everything (${steps.length} steps)`,
+                        )
+                      : t('已全部装好', 'Everything is installed')
+                }
+                kind="commit"
+                variant="primary"
+                disabled={busy || !status || !steps.length || (source === 'local' && !localSource)}
+                run={() => install(steps)}
+              />
+              {ready && (
                 <ActionButton
-                  action="compare-pick-reference-root"
-                  label={t('选择…', 'Choose…')}
+                  action="compare-reinstall-openbench"
+                  label={t('重装 OpenBench', 'Reinstall OpenBench')}
+                  kind="commit"
+                  disabled={busy || (source === 'local' && !localSource)}
+                  run={() => install(['openbench'])}
+                />
+              )}
+              {busy && <Button onClick={stop}>{t('停止', 'Stop')}</Button>}
+              {(status?.python || ready) && (
+                <Button disabled={busy} onClick={() => void uninstall('env')}>
+                  {t('删掉 OpenBench', 'Remove OpenBench')}
+                </Button>
+              )}
+              {(remote ? !!status?.uv_version : status?.uv_own) && (
+                <Button variant="danger" disabled={busy} onClick={() => void uninstall('all')}>
+                  {t('全部删掉', 'Remove everything')}
+                </Button>
+              )}
+            </div>
+            {log.length > 0 && (
+              <pre className="compare-log">
+                {log
+                  .slice(-80)
+                  .map((line) => {
+                    // 本机日志带"[阶段] "前缀；服务器作业的日志是原样的行。
+                    const m = /^(\[[^\]]*\] )([\s\S]*)$/.exec(line);
+                    if (!en) return line;
+                    return m ? m[1] + benchLogText(m[2]!) : benchLogText(line);
+                  })
+                  .join('\n')}
+              </pre>
+            )}
+          </Advanced>
+        </Card>
+      </div>
+      <div data-compare-section="evaluation">
+        <Card
+          title={t('本次评估', 'This evaluation')}
+          description={t(
+            '模拟、参考数据、变量、时段、范围与指标；下面的运行前条件摘要来自将要提交的同一份设计。',
+            'Simulations, reference data, variables, period, region and metrics; the pre-run summary below comes from the very design that will be submitted.',
+          )}
+        >
+          {ready ? (
+            <>
+              <h3 className="study-subhead">{t('模拟', 'Simulations')}</h3>
+              {remote && (
+                <p className="muted study-hint">
+                  {t(
+                    `在服务器 ${host} 上挑算例目录或 history 目录：本机项目里的算例在服务器上读不到。`,
+                    `Choose case or history folders on server ${host}; cases in local projects cannot be read there.`,
+                  )}
+                </p>
+              )}
+              <div className="study-cases">
+                {(remote ? [] : caseDirs).map((c) => {
+                  const on = picks.some((p) => p.dir === c.dir);
+                  return (
+                    <label key={c.dir} className="param-check">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={busy}
+                        onChange={(e) =>
+                          e.target.checked
+                            ? void addPick(c.dir, c.name)
+                            : setPicks((old) => old.filter((p) => p.dir !== c.dir))
+                        }
+                      />
+                      {c.name}
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="button-row">
+                <ActionButton
+                  action="compare-add-folder"
+                  label={
+                    remote
+                      ? t(
+                          '加服务器上的算例或 history 目录…',
+                          'Add a case or history folder on the server…',
+                        )
+                      : t(
+                          '加一个别的项目的算例或 history 目录…',
+                          'Add a case or history folder from another project…',
+                        )
+                  }
+                  disabled={busy}
                   run={async () => {
-                    if (remote) return setBrowsing('ref');
+                    if (remote) return setBrowsing('sim');
                     const dir = await invoke<string | null>('pick_folder', {
-                      key: 'openbench-ref',
+                      key: 'openbench-sim',
                     });
-                    if (dir) setScanDir(dir);
+                    if (dir) await addPick(dir, pickLabel(dir));
                   }}
                 />
               </div>
-            </Field>
-          </div>
-          <div className="button-row">
-            <ActionButton
-              action="compare-scan-preview"
-              label={t('预览扫描（只读）', 'Preview scan (read-only)')}
-              disabled={busy || !scanDir}
-              run={() =>
-                task(async () =>
-                  setScanText(
-                    remote
-                      ? (
-                          await invokeJson<{ output: string }>('bench_remote_scan', {
-                            host,
-                            dir: scanDir,
-                          })
-                        ).output
-                      : await invoke<string>('bench_scan_preview', { dir: scanDir }),
-                  ),
-                )
-              }
-            />
-          </div>
-          <p className="muted study-hint">
-            {t(
-              '预览只调用 OpenBench 的扫描（dry run）：显示参考数据根目录里哪些目录符合标准结构、会被认成什么数据集，不写登记表、不改文件。用来看自己的数据布局能不能被识别；确认后再用「注册参考数据…」正式登记。',
-              'Preview only runs OpenBench’s scan in dry-run mode: it shows which folders under the reference root match the standard layout and what datasets they would become, without writing the registry or changing files. Use it to check a custom layout, then register it with “Register reference data…”.',
-            )}
-          </p>
-          {scanText && <pre className="compare-log">{scanText}</pre>}
-          <p className="muted study-hint">
-            {t(
-              '注册自己的参考数据用下面的「注册参考数据…」按钮；注册后会出现在下面的变量参考数据选择里。',
-              'Use “Register reference data…” below to add your own dataset; it becomes selectable under the variables below after registration.',
-            )}
-          </p>
-        </Card>
-      )}
-
-      {ready && (
-        <Card
-          title={t('注册 OpenBench 数据', 'Register OpenBench data')}
-          description={t(
-            '新模块模型变量、参考数据和非标准模拟数据都在这里登记；注册后即可在下面的本次比较里选择。本机和每台服务器各管各的登记表。',
-            'Register new-module model variables, reference data and non-standard simulations here; they become available to the comparison below. This computer and each server keep separate registries.',
-          )}
-        >
-          <div className="button-row">
-            <Button
-              disabled={busy || !ready}
-              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-              onClick={() => {
-                setError('');
-                setDialog('variable');
-              }}
-            >
-              {t('注册模型变量…', 'Register model variable…')}
-            </Button>
-            <Button
-              disabled={busy || !ready}
-              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-              onClick={() => {
-                setError('');
-                setDialog('reference');
-              }}
-            >
-              {t('注册参考数据…', 'Register reference data…')}
-            </Button>
-            <Button
-              disabled={busy || !ready}
-              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-              onClick={() => editSimulation()}
-            >
-              {t('注册模拟数据…', 'Register simulation data…')}
-            </Button>
-          </div>
-        </Card>
-      )}
-
-      {ready && (
-        <Card
-          title={t('新建比较', 'New comparison')}
-          description={t(
-            '选几个模拟（可以是不同项目、不同模型版本的算例，也可以加别的 history 目录），定变量和参考数据，生成 OpenBench 配置；配置可以先改再运行。单点算例会先把逐月的 history 并成一个站点文件。',
-            'Pick simulations (cases from different projects or model versions, or any history folder), choose variables and references, and generate the OpenBench configuration; edit it before running if needed. Single-point cases are first merged from monthly history into one station file.',
-          )}
-        >
-          <h3 className="study-subhead">{t('模拟', 'Simulations')}</h3>
-          {remote && (
-            <p className="muted study-hint">
-              {t(
-                `在服务器 ${host} 上挑算例目录或 history 目录：本机项目里的算例在服务器上读不到。`,
-                `Choose case or history folders on server ${host}; cases in local projects cannot be read there.`,
+              {picks.length > 0 && (
+                <div className="table-scroll">
+                  <table className="versions-table">
+                    <thead>
+                      <tr>
+                        <th>{t('报告里的名字', 'Name in report')}</th>
+                        <th>{t('种类', 'Kind')}</th>
+                        <th>{t('年份', 'Years')}</th>
+                        <th>{t('时间分辨率', 'Time step')}</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {picks.map((p) => (
+                        <tr key={p.dir}>
+                          <td>
+                            <Input
+                              value={p.label}
+                              onChange={(e) =>
+                                setPicks((old) =>
+                                  old.map((q) =>
+                                    q.dir === p.dir ? { ...q, label: e.target.value } : q,
+                                  ),
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            {p.error
+                              ? p.error
+                              : !p.info
+                                ? t('读取中…', 'Reading…')
+                                : p.info.spatial
+                                  ? t('格点', 'Gridded')
+                                  : t('单点（站点）', 'Single point (station)')}
+                          </td>
+                          <td>{p.info ? `${p.info.syear}–${p.info.eyear}` : '—'}</td>
+                          <td>{p.info?.tim_res ?? '—'}</td>
+                          <td>
+                            <div className="button-row">
+                              <Button
+                                disabled={busy}
+                                title={t(
+                                  '编辑这个模拟的目录、类型、时间、前缀和分组',
+                                  'Edit this simulation’s folder, kind, time, prefix and grouping',
+                                )}
+                                onClick={() => editSimulation(p)}
+                              >
+                                {t('编辑模拟信息', 'Edit simulation information')}
+                              </Button>
+                              <Button
+                                onClick={() =>
+                                  setPicks((old) => old.filter((q) => q.dir !== p.dir))
+                                }
+                              >
+                                {t('去掉', 'Remove')}
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
-            </p>
-          )}
-          <div className="study-cases">
-            {(remote ? [] : caseDirs).map((c) => {
-              const on = picks.some((p) => p.dir === c.dir);
-              return (
-                <label key={c.dir} className="param-check">
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={busy}
-                    onChange={(e) =>
-                      e.target.checked
-                        ? void addPick(c.dir, c.name)
-                        : setPicks((old) => old.filter((p) => p.dir !== c.dir))
-                    }
-                  />
-                  {c.name}
-                </label>
-              );
-            })}
-          </div>
-          <div className="button-row">
-            <ActionButton
-              action="compare-add-folder"
-              label={
-                remote
-                  ? t(
-                      '加服务器上的算例或 history 目录…',
-                      'Add a case or history folder on the server…',
+
+              <h3 className="study-subhead">{t('参考数据', 'Reference data')}</h3>
+              <p className="muted">
+                {t(
+                  `OpenBench 登记表里有 ${references.length} 个参考数据集；自己的数据可以在下面的进阶登记里加入。`,
+                  `The OpenBench registry lists ${references.length} reference datasets; add your own under the advanced registration below.`,
+                )}
+              </p>
+              <div className="form-grid">
+                <Field label={t('参考数据根目录', 'Reference data root')}>
+                  <div className="study-path">
+                    <Input value={scanDir} onChange={(e) => setScanDir(e.target.value)} />
+                    <ActionButton
+                      action="compare-pick-reference-root"
+                      label={t('选择…', 'Choose…')}
+                      run={async () => {
+                        if (remote) return setBrowsing('ref');
+                        const dir = await invoke<string | null>('pick_folder', {
+                          key: 'openbench-ref',
+                        });
+                        if (dir) setScanDir(dir);
+                      }}
+                    />
+                  </div>
+                </Field>
+              </div>
+              <div className="button-row">
+                <ActionButton
+                  action="compare-scan-preview"
+                  label={t('预览扫描（只读）', 'Preview scan (read-only)')}
+                  disabled={busy || !scanDir}
+                  run={() =>
+                    task(async () =>
+                      setScanText(
+                        remote
+                          ? (
+                              await invokeJson<{ output: string }>('bench_remote_scan', {
+                                host,
+                                dir: scanDir,
+                              })
+                            ).output
+                          : await invoke<string>('bench_scan_preview', { dir: scanDir }),
+                      ),
                     )
-                  : t(
-                      '加一个别的项目的算例或 history 目录…',
-                      'Add a case or history folder from another project…',
-                    )
-              }
-              disabled={busy}
-              run={async () => {
-                if (remote) return setBrowsing('sim');
-                const dir = await invoke<string | null>('pick_folder', { key: 'openbench-sim' });
-                if (dir) await addPick(dir, pickLabel(dir));
-              }}
-            />
-          </div>
-          {picks.length > 0 && (
-            <div className="table-scroll">
-              <table className="versions-table">
-                <thead>
-                  <tr>
-                    <th>{t('报告里的名字', 'Name in report')}</th>
-                    <th>{t('种类', 'Kind')}</th>
-                    <th>{t('年份', 'Years')}</th>
-                    <th>{t('时间分辨率', 'Time step')}</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {picks.map((p) => (
-                    <tr key={p.dir}>
-                      <td>
-                        <Input
-                          value={p.label}
-                          onChange={(e) =>
-                            setPicks((old) =>
-                              old.map((q) =>
-                                q.dir === p.dir ? { ...q, label: e.target.value } : q,
-                              ),
-                            )
-                          }
-                        />
-                      </td>
-                      <td>
-                        {p.error
-                          ? p.error
-                          : !p.info
-                            ? t('读取中…', 'Reading…')
-                            : p.info.spatial
-                              ? t('格点', 'Gridded')
-                              : t('单点（站点）', 'Single point (station)')}
-                      </td>
-                      <td>{p.info ? `${p.info.syear}–${p.info.eyear}` : '—'}</td>
-                      <td>{p.info?.tim_res ?? '—'}</td>
-                      <td>
-                        <div className="button-row">
-                          <Button disabled={busy} onClick={() => editSimulation(p)}>
-                            {t('变量…', 'Variables…')}
-                          </Button>
+                  }
+                />
+              </div>
+              <p className="muted study-hint">
+                {t(
+                  '预览只调用 OpenBench 的扫描（dry run）：显示参考数据根目录里哪些目录符合标准结构、会被认成什么数据集，不写登记表、不改文件。用来看自己的数据布局能不能被识别；确认后再用「注册参考数据…」正式登记。',
+                  'Preview only runs OpenBench’s scan in dry-run mode: it shows which folders under the reference root match the standard layout and what datasets they would become, without writing the registry or changing files. Use it to check a custom layout, then register it with “Register reference data…”.',
+                )}
+              </p>
+              {scanText && <pre className="compare-log">{scanText}</pre>}
+              <p className="muted study-hint">
+                {t(
+                  '注册自己的参考数据用下面的「注册参考数据…」按钮；注册后会出现在下面的变量参考数据选择里。',
+                  'Use “Register reference data…” below to add your own dataset; it becomes selectable under the variables below after registration.',
+                )}
+              </p>
+              <Advanced
+                title={t('登记 OpenBench 数据（进阶）', 'Register OpenBench data (advanced)')}
+              >
+                <p className="muted">
+                  {t(
+                    '新模块模型变量、参考数据和非标准模拟数据都在这里登记；登记后即可在上面的本次评估里选择。本机和每台服务器各管各的登记表。',
+                    'Register new-module model variables, reference data and non-standard simulations here; they become selectable in this evaluation above. This computer and each server keep separate registries.',
+                  )}
+                </p>
+                <div className="button-row">
+                  <Button
+                    disabled={busy || !ready}
+                    title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+                    onClick={() => {
+                      setError('');
+                      setDialog('variable');
+                    }}
+                  >
+                    {t('注册模型变量…', 'Register model variable…')}
+                  </Button>
+                  <Button
+                    disabled={busy || !ready}
+                    title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+                    onClick={() => {
+                      setError('');
+                      setDialog('reference');
+                    }}
+                  >
+                    {t('注册参考数据…', 'Register reference data…')}
+                  </Button>
+                  <Button
+                    disabled={busy || !ready}
+                    title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+                    onClick={() => editSimulation()}
+                  >
+                    {t('注册模拟数据…', 'Register simulation data…')}
+                  </Button>
+                </div>
+              </Advanced>
+              <div className="form-grid">
+                <Field label={t('比较名', 'Comparison name')}>
+                  <Input value={name} onChange={(e) => setName(e.target.value)} />
+                </Field>
+                <Field label={t('起始年', 'From year')}>
+                  <Input type="number" value={from} onChange={(e) => setFrom(e.target.value)} />
+                </Field>
+                <Field label={t('结束年', 'To year')}>
+                  <Input type="number" value={to} onChange={(e) => setTo(e.target.value)} />
+                </Field>
+                <Field
+                  label={t('比较的时间尺度', 'Time scale of the comparison')}
+                  hint={t(
+                    '气候态是多年平均的评估模式；OpenBench 另有年气候态、月气候态两种时间尺度。',
+                    'Climatology evaluates multi-year means; OpenBench also provides annual and monthly climatology scales.',
+                  )}
+                >
+                  <Select value={timRes} onChange={(e) => setTimRes(e.target.value)}>
+                    <option value="Hour">{t('逐时', 'Hourly')}</option>
+                    <option value="Day">{t('逐日', 'Daily')}</option>
+                    <option value="Month">{t('逐月', 'Monthly')}</option>
+                    <option value="climatology-year">{t('年气候态', 'Annual climatology')}</option>
+                    <option value="climatology-month">
+                      {t('月气候态', 'Monthly climatology')}
+                    </option>
+                  </Select>
+                </Field>
+                {ok.some((p) => p.info.spatial) && (
+                  <Field
+                    label={t(
+                      '比较的网格分辨率（度；范围按格点模拟覆盖的区域裁）',
+                      'Comparison grid resolution (degrees; the region follows the gridded simulations)',
+                    )}
+                  >
+                    <Input
+                      type="number"
+                      value={gridRes}
+                      onChange={(e) => setGridRes(e.target.value)}
+                    />
+                  </Field>
+                )}
+              </div>
+
+              <Advanced title={t('OpenBench 高级设置', 'OpenBench advanced settings')}>
+                <div className="form-grid">
+                  <Field
+                    label={t('聚合权重', 'Aggregation weight')}
+                    hint={t(
+                      '只影响聚合后的 Overall/分数；空=OpenBench 默认 area，通量变量常用 mass。',
+                      'Affects aggregated Overall/scores only; empty = OpenBench default area, flux variables often use mass.',
+                    )}
+                  >
+                    <Select value={weight} onChange={(e) => setWeight(e.target.value)}>
+                      <option value="">{t('默认（area）', 'Default (area)')}</option>
+                      <option value="area">area</option>
+                      <option value="mass">mass</option>
+                      <option value="none">{t('none（等权）', 'none (equal weight)')}</option>
+                    </Select>
+                  </Field>
+                  <Field
+                    label={t('最少有效年数', 'Minimum valid years')}
+                    hint={t(
+                      '有效数据不足这个年数的记录会被剔除，默认 1；留空则用 OpenBench 默认值。',
+                      'Records with fewer valid years are dropped; the default is 1. Empty uses the OpenBench default.',
+                    )}
+                  >
+                    <Input
+                      type="number"
+                      min={0}
+                      value={minYear}
+                      onChange={(e) => setMinYear(e.target.value)}
+                    />
+                  </Field>
+                  <Field
+                    label={t('时间对齐', 'Time alignment')}
+                    hint={t(
+                      '模拟与参考时段不一致时怎么取交集。',
+                      'How to align simulation and reference periods.',
+                    )}
+                  >
+                    <Select
+                      value={timeAlignment}
+                      onChange={(e) => setTimeAlignment(e.target.value)}
+                    >
+                      <option value="">
+                        {t('默认（intersection）', 'Default (intersection)')}
+                      </option>
+                      <option value="intersection">intersection</option>
+                      <option value="per_pair">per_pair</option>
+                      <option value="strict">strict</option>
+                    </Select>
+                  </Field>
+                  <Field
+                    label={t('并行核数', 'Parallel cores')}
+                    hint={t(
+                      '空=OpenBench 用全部 CPU；共享机器建议填。',
+                      'Empty = all CPUs; set this on shared machines.',
+                    )}
+                  >
+                    <Input
+                      type="number"
+                      min={0}
+                      value={numCores}
+                      onChange={(e) => setNumCores(e.target.value)}
+                    />
+                  </Field>
+                  <Field
+                    label={t('指标 metrics', 'Metrics')}
+                    hint={t(
+                      '从当前机器已安装的 OpenBench 读取；勾选要计算的指标，至少保留一个指标或评分。',
+                      'Read from the installed OpenBench on this machine; tick the metrics to compute. Keep at least one metric or score.',
+                    )}
+                  >
+                    <div className="metric-picker">
+                      <div className="button-row">
+                        <Button
+                          variant="ghost"
+                          onClick={() => setMetrics(metricOptions.map((option) => option.name))}
+                        >
+                          {t('全选', 'All')}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setMetrics([])}>
+                          {t('清空', 'Clear')}
+                        </Button>
+                      </div>
+                      <div className="metric-options">
+                        {metricOptions.map((option) => (
+                          <label key={option.name} className="param-check">
+                            <input
+                              type="checkbox"
+                              checked={metrics.includes(option.name)}
+                              onChange={(e) =>
+                                setMetrics((old) =>
+                                  e.target.checked
+                                    ? [...old, option.name]
+                                    : old.filter((name) => name !== option.name),
+                                )
+                              }
+                            />
+                            <span>{option.label}</span>
+                            <span className="muted">{option.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </Field>
+                  <Field
+                    label={t('评分 scores', 'Scores')}
+                    hint={t(
+                      'OpenBench 的归一化评分；与指标至少保留一个。',
+                      'OpenBench normalized scores; keep at least one metric or score.',
+                    )}
+                  >
+                    <div className="metric-picker">
+                      <div className="button-row">
+                        <Button
+                          variant="ghost"
+                          onClick={() => setScores(scoreOptions.map((option) => option.name))}
+                        >
+                          {t('全选', 'All')}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setScores([])}>
+                          {t('清空', 'Clear')}
+                        </Button>
+                      </div>
+                      <div className="metric-options">
+                        {scoreOptions.map((option) => (
+                          <label key={option.name} className="param-check">
+                            <input
+                              type="checkbox"
+                              checked={scores.includes(option.name)}
+                              onChange={(e) =>
+                                setScores((old) =>
+                                  e.target.checked
+                                    ? [...old, option.name]
+                                    : old.filter((name) => name !== option.name),
+                                )
+                              }
+                            />
+                            <span>{option.label}</span>
+                            <span className="muted">{option.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </Field>
+                </div>
+              </Advanced>
+
+              <h3 className="study-subhead">{t('变量和参考数据', 'Variables and references')}</h3>
+              {!ok.length ? (
+                <p className="muted study-hint">
+                  {t(
+                    '先在上面选模拟，再一个个加要评估的变量，给每个变量挑参考数据。',
+                    'Pick simulations above first, then add the variables to evaluate one by one and choose a reference for each.',
+                  )}
+                </p>
+              ) : (
+                <div className="form-grid">
+                  <Field label={t('筛选变量', 'Filter variables')}>
+                    <Input
+                      value={variableQuery}
+                      placeholder={t('如 Heat、Runoff', 'e.g. Heat, Runoff')}
+                      onChange={(e) => setVariableQuery(e.target.value)}
+                    />
+                  </Field>
+                  <Field label={t('加一个要评估的变量', 'Add a variable to evaluate')}>
+                    <Select
+                      value=""
+                      onChange={(e) => {
+                        const picked = allVariables.find((v) => v.variable === e.target.value);
+                        // 默认选第一份参考数据：同种（站点或格点）的排在前面。
+                        if (picked)
+                          setChosen((old) => ({
+                            ...old,
+                            [picked.variable]: picked.references[0]
+                              ? [picked.references[0].name]
+                              : [],
+                          }));
+                      }}
+                    >
+                      <option value="">
+                        {t(
+                          `选择（${variables.length} 个可选）`,
+                          `Choose (${variables.length} available)`,
+                        )}
+                      </option>
+                      {variables
+                        .filter((v) => !(v.variable in chosen))
+                        .map((v) => (
+                          <option key={v.variable} value={v.variable}>
+                            {v.variable}
+                          </option>
+                        ))}
+                    </Select>
+                  </Field>
+                </div>
+              )}
+              <div className="form-grid">
+                {Object.keys(chosen)
+                  .sort()
+                  .map((variable) => {
+                    const options =
+                      allVariables.find((v) => v.variable === variable)?.references ?? [];
+                    const selected = chosen[variable] ?? [];
+                    return (
+                      <Field key={variable} label={variable}>
+                        <div className="reference-picker">
+                          <div className="reference-options">
+                            {options.map((r) => {
+                              const on = selected.includes(r.name);
+                              return (
+                                <label key={r.name} className="param-check">
+                                  <input
+                                    type="checkbox"
+                                    checked={on}
+                                    onChange={(e) =>
+                                      setChosen((old) => {
+                                        const current = old[variable] ?? [];
+                                        const next = e.target.checked
+                                          ? [...current, r.name]
+                                          : current.filter((name) => name !== r.name);
+                                        return { ...old, [variable]: next };
+                                      })
+                                    }
+                                  />
+                                  {r.name}
+                                  {r.data_type ? ` · ${r.data_type}` : ''}
+                                  {r.tim_res ? ` · ${r.tim_res}` : ''}
+                                </label>
+                              );
+                            })}
+                          </div>
                           <Button
-                            onClick={() => setPicks((old) => old.filter((q) => q.dir !== p.dir))}
+                            onClick={() =>
+                              setChosen((old) => {
+                                const next = { ...old };
+                                delete next[variable];
+                                return next;
+                              })
+                            }
                           >
                             {t('去掉', 'Remove')}
                           </Button>
                         </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <div className="form-grid">
-            <Field label={t('比较名', 'Comparison name')}>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
-            </Field>
-            <Field label={t('起始年', 'From year')}>
-              <Input type="number" value={from} onChange={(e) => setFrom(e.target.value)} />
-            </Field>
-            <Field label={t('结束年', 'To year')}>
-              <Input type="number" value={to} onChange={(e) => setTo(e.target.value)} />
-            </Field>
-            <Field
-              label={t('比较的时间尺度', 'Time scale of the comparison')}
-              hint={t(
-                '气候态是多年平均的评估模式；OpenBench 另有年气候态、月气候态两种时间尺度。',
-                'Climatology evaluates multi-year means; OpenBench also provides annual and monthly climatology scales.',
-              )}
-            >
-              <Select value={timRes} onChange={(e) => setTimRes(e.target.value)}>
-                <option value="Hour">{t('逐时', 'Hourly')}</option>
-                <option value="Day">{t('逐日', 'Daily')}</option>
-                <option value="Month">{t('逐月', 'Monthly')}</option>
-                <option value="climatology-year">{t('年气候态', 'Annual climatology')}</option>
-                <option value="climatology-month">{t('月气候态', 'Monthly climatology')}</option>
-              </Select>
-            </Field>
-            {ok.some((p) => p.info.spatial) && (
-              <Field
-                label={t(
-                  '比较的网格分辨率（度；范围按格点模拟覆盖的区域裁）',
-                  'Comparison grid resolution (degrees; the region follows the gridded simulations)',
-                )}
-              >
-                <Input type="number" value={gridRes} onChange={(e) => setGridRes(e.target.value)} />
-              </Field>
-            )}
-          </div>
-          <Advanced title={t('OpenBench 高级设置', 'OpenBench advanced settings')}>
-            <div className="form-grid">
-              <Field
-                label={t('聚合权重', 'Aggregation weight')}
-                hint={t(
-                  '只影响聚合后的 Overall/分数；空=OpenBench 默认 area，通量变量常用 mass。',
-                  'Affects aggregated Overall/scores only; empty = OpenBench default area, flux variables often use mass.',
-                )}
-              >
-                <Select value={weight} onChange={(e) => setWeight(e.target.value)}>
-                  <option value="">{t('默认（area）', 'Default (area)')}</option>
-                  <option value="area">area</option>
-                  <option value="mass">mass</option>
-                  <option value="none">{t('none（等权）', 'none (equal weight)')}</option>
-                </Select>
-              </Field>
-              <Field
-                label={t('最少有效年数', 'Minimum valid years')}
-                hint={t(
-                  '有效数据不足这个年数的记录会被剔除，默认 1；留空则用 OpenBench 默认值。',
-                  'Records with fewer valid years are dropped; the default is 1. Empty uses the OpenBench default.',
-                )}
-              >
-                <Input
-                  type="number"
-                  min={0}
-                  value={minYear}
-                  onChange={(e) => setMinYear(e.target.value)}
-                />
-              </Field>
-              <Field
-                label={t('时间对齐', 'Time alignment')}
-                hint={t(
-                  '模拟与参考时段不一致时怎么取交集。',
-                  'How to align simulation and reference periods.',
-                )}
-              >
-                <Select value={timeAlignment} onChange={(e) => setTimeAlignment(e.target.value)}>
-                  <option value="">{t('默认（intersection）', 'Default (intersection)')}</option>
-                  <option value="intersection">intersection</option>
-                  <option value="per_pair">per_pair</option>
-                  <option value="strict">strict</option>
-                </Select>
-              </Field>
-              <Field
-                label={t('并行核数', 'Parallel cores')}
-                hint={t(
-                  '空=OpenBench 用全部 CPU；共享机器建议填。',
-                  'Empty = all CPUs; set this on shared machines.',
-                )}
-              >
-                <Input
-                  type="number"
-                  min={0}
-                  value={numCores}
-                  onChange={(e) => setNumCores(e.target.value)}
-                />
-              </Field>
-              <Field
-                label={t('指标 metrics', 'Metrics')}
-                hint={t(
-                  '从当前机器已安装的 OpenBench 读取；勾选要计算的指标，至少保留一个指标或评分。',
-                  'Read from the installed OpenBench on this machine; tick the metrics to compute. Keep at least one metric or score.',
-                )}
-              >
-                <div className="metric-picker">
-                  <div className="button-row">
-                    <Button
-                      variant="ghost"
-                      onClick={() => setMetrics(metricOptions.map((option) => option.name))}
-                    >
-                      {t('全选', 'All')}
-                    </Button>
-                    <Button variant="ghost" onClick={() => setMetrics([])}>
-                      {t('清空', 'Clear')}
-                    </Button>
-                  </div>
-                  <div className="metric-options">
-                    {metricOptions.map((option) => (
-                      <label key={option.name} className="param-check">
-                        <input
-                          type="checkbox"
-                          checked={metrics.includes(option.name)}
-                          onChange={(e) =>
-                            setMetrics((old) =>
-                              e.target.checked
-                                ? [...old, option.name]
-                                : old.filter((name) => name !== option.name),
-                            )
-                          }
-                        />
-                        <span>{option.label}</span>
-                        <span className="muted">{option.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </Field>
-              <Field
-                label={t('评分 scores', 'Scores')}
-                hint={t(
-                  'OpenBench 的归一化评分；与指标至少保留一个。',
-                  'OpenBench normalized scores; keep at least one metric or score.',
-                )}
-              >
-                <div className="metric-picker">
-                  <div className="button-row">
-                    <Button
-                      variant="ghost"
-                      onClick={() => setScores(scoreOptions.map((option) => option.name))}
-                    >
-                      {t('全选', 'All')}
-                    </Button>
-                    <Button variant="ghost" onClick={() => setScores([])}>
-                      {t('清空', 'Clear')}
-                    </Button>
-                  </div>
-                  <div className="metric-options">
-                    {scoreOptions.map((option) => (
-                      <label key={option.name} className="param-check">
-                        <input
-                          type="checkbox"
-                          checked={scores.includes(option.name)}
-                          onChange={(e) =>
-                            setScores((old) =>
-                              e.target.checked
-                                ? [...old, option.name]
-                                : old.filter((name) => name !== option.name),
-                            )
-                          }
-                        />
-                        <span>{option.label}</span>
-                        <span className="muted">{option.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </Field>
-            </div>
-          </Advanced>
-          <h3 className="study-subhead">{t('变量和参考数据', 'Variables and references')}</h3>
-          {!ok.length ? (
-            <p className="muted study-hint">
-              {t(
-                '先在上面选模拟，再一个个加要评估的变量，给每个变量挑参考数据。',
-                'Pick simulations above first, then add the variables to evaluate one by one and choose a reference for each.',
-              )}
-            </p>
-          ) : (
-            <div className="form-grid">
-              <Field label={t('筛选变量', 'Filter variables')}>
-                <Input
-                  value={variableQuery}
-                  placeholder={t('如 Heat、Runoff', 'e.g. Heat, Runoff')}
-                  onChange={(e) => setVariableQuery(e.target.value)}
-                />
-              </Field>
-              <Field label={t('加一个要评估的变量', 'Add a variable to evaluate')}>
-                <Select
-                  value=""
-                  onChange={(e) => {
-                    const picked = allVariables.find((v) => v.variable === e.target.value);
-                    // 默认选第一份参考数据：同种（站点或格点）的排在前面。
-                    if (picked)
-                      setChosen((old) => ({
-                        ...old,
-                        [picked.variable]: picked.references[0] ? [picked.references[0].name] : [],
-                      }));
-                  }}
-                >
-                  <option value="">
-                    {t(
-                      `选择（${variables.length} 个可选）`,
-                      `Choose (${variables.length} available)`,
-                    )}
-                  </option>
-                  {variables
-                    .filter((v) => !(v.variable in chosen))
-                    .map((v) => (
-                      <option key={v.variable} value={v.variable}>
-                        {v.variable}
-                      </option>
-                    ))}
-                </Select>
-              </Field>
-            </div>
-          )}
-          <div className="form-grid">
-            {Object.keys(chosen)
-              .sort()
-              .map((variable) => {
-                const options = allVariables.find((v) => v.variable === variable)?.references ?? [];
-                const selected = chosen[variable] ?? [];
-                return (
-                  <Field key={variable} label={variable}>
-                    <div className="reference-picker">
-                      <div className="reference-options">
-                        {options.map((r) => {
-                          const on = selected.includes(r.name);
-                          return (
-                            <label key={r.name} className="param-check">
-                              <input
-                                type="checkbox"
-                                checked={on}
-                                onChange={(e) =>
-                                  setChosen((old) => {
-                                    const current = old[variable] ?? [];
-                                    const next = e.target.checked
-                                      ? [...current, r.name]
-                                      : current.filter((name) => name !== r.name);
-                                    return { ...old, [variable]: next };
-                                  })
-                                }
-                              />
-                              {r.name}
-                              {r.data_type ? ` · ${r.data_type}` : ''}
-                              {r.tim_res ? ` · ${r.tim_res}` : ''}
-                            </label>
-                          );
-                        })}
-                      </div>
-                      <Button
-                        onClick={() =>
-                          setChosen((old) => {
-                            const next = { ...old };
-                            delete next[variable];
-                            return next;
-                          })
-                        }
-                      >
-                        {t('去掉', 'Remove')}
-                      </Button>
-                    </div>
-                  </Field>
-                );
-              })}
-          </div>
-          <div className="button-row">
-            <ActionButton
-              action="compare-generate"
-              label={t('生成配置', 'Generate configuration')}
-              disabled={busy || !ok.length}
-              // 手改过的配置不能被"再生成一次"静默覆盖：统一走会先确认的 regenerate（GUI-04）。
-              run={regenerate}
-            />
-          </div>
-          {yaml && (
-            <>
-              <Field
-                label={t(
-                  'OpenBench 配置（可以先改再运行）',
-                  'OpenBench configuration (edit before running if needed)',
-                )}
-              >
-                <textarea
-                  className="code-files-text"
-                  data-field="openbench-config"
-                  rows={16}
-                  spellCheck={false}
-                  value={yaml}
-                  onChange={(e) => setYaml(e.target.value)}
-                />
-              </Field>
-              {yamlStale && (
-                <Notice tone="warning">
-                  {t(
-                    '评估设置改过了，下面这份配置是旧设置下的，不能直接运行。你在配置里手改的内容还保留着；要让改动生效，请重新生成配置（会覆盖手改内容）或把设置改回去。',
-                    'The evaluation settings changed, so this configuration is out of date and cannot run as is. Your edits to it are kept; regenerate the configuration (this replaces the edits) or restore the old settings.',
-                  )}
-                </Notice>
-              )}
-              {missingExtent.length > 0 && (
-                <Notice tone="warning">
-                  {t(
-                    `这些格点模拟读不出区域范围：${missingExtent.join('、')}。配置里只写了目标分辨率，没有区域范围（OpenBench 会按默认的全球范围比较）；请换一个带坐标的 history 目录重新读数，或在编辑模拟里补上区域范围。`,
-                    `Could not read the region of: ${missingExtent.join(', ')}. The configuration sets only the target resolution, without a region (OpenBench then compares on the global grid); inspect a history folder that has coordinates, or fill in the region in the simulation dialog.`,
-                  )}
-                </Notice>
-              )}
-              <div className="button-row">
-                {!scanDir && (
-                  <p className="muted study-hint">
-                    {t(
-                      '还没填"参考数据根目录"：OpenBench 自带的参考数据都按这个目录找，不填只能用自己登记了完整路径的数据；填好后要重新生成配置。',
-                      'No reference data root yet: OpenBench’s built-in references are looked up under it; without it only references registered with full paths work. Regenerate the configuration after filling it in.',
-                    )}
-                  </p>
-                )}
-                {yamlStale && (
-                  <Button disabled={busy} onClick={() => void regenerate()}>
-                    {t('重新生成配置', 'Regenerate configuration')}
-                  </Button>
-                )}
-                <ActionButton
-                  action="compare-run"
-                  label={t('检查并运行', 'Check and run')}
-                  kind="commit"
-                  variant="primary"
-                  disabled={busy || yamlStale}
-                  title={
-                    yamlStale
-                      ? t(
-                          '设置改过了：先重新生成配置再运行',
-                          'The settings changed: regenerate the configuration before running',
-                        )
-                      : undefined
-                  }
-                  run={run}
-                />
+                      </Field>
+                    );
+                  })}
               </div>
-              {yamlHandEdited && !yamlStale && (
+
+              <h3 className="study-subhead">{t('运行前条件摘要', 'Pre-run condition summary')}</h3>
+              <p className="muted study-hint">
+                {t(
+                  '下面这些就是运行时会提交的评估条件：摘要、OpenBench 配置和站点清单都由同一份设计生成。',
+                  'These are the conditions that will be submitted: the summary, the OpenBench configuration and the station list all come from the same design.',
+                )}
+              </p>
+              <ul className="compare-status" data-compare-summary>
+                {conditionSummary().map((item) => (
+                  <li key={item.label[0]}>
+                    <strong>{t(item.label[0], item.label[1])}</strong>：{item.value}
+                  </li>
+                ))}
+              </ul>
+              <h3 className="study-subhead">{t('评估配置', 'Evaluation configuration')}</h3>
+              <div className="button-row">
+                <SaveBadge state={configState} t={t} />
                 <p className="muted study-hint">
                   {t(
-                    '这份配置有你手工改过的内容；运行时会按你改后的内容提交。',
-                    'This configuration contains edits you made; running submits it as edited.',
+                    '配置先只保存在本页（可以手工修改）；「保存评估配置」生成配置文本，运行时写入比较项目目录。',
+                    'The configuration first lives on this page (and can be edited); “Save evaluation configuration” generates the text and running writes it into the comparison project folder.',
                   )}
                 </p>
+                <ActionButton
+                  action="compare-generate"
+                  label={t('保存评估配置', 'Save evaluation configuration')}
+                  disabled={busy || !ok.length}
+                  run={regenerate}
+                />
+              </div>
+              {runNotice && <Notice tone="success">{runNotice}</Notice>}
+              {yaml && (
+                <>
+                  <Field
+                    label={t(
+                      'OpenBench 配置（可以先改再运行）',
+                      'OpenBench configuration (edit before running if needed)',
+                    )}
+                  >
+                    <textarea
+                      className="code-files-text"
+                      data-field="openbench-config"
+                      rows={16}
+                      spellCheck={false}
+                      value={yaml}
+                      onChange={(e) => setYaml(e.target.value)}
+                    />
+                  </Field>
+                  {yamlStale && (
+                    <Notice tone="warning">
+                      {t(
+                        '评估设置改过了，下面这份配置是旧设置下的，不能直接运行。你在配置里手改的内容还保留着；要让改动生效，请重新生成评估配置（会覆盖手改内容）或把设置改回去。',
+                        'The evaluation settings changed, so this configuration is out of date and cannot run as is. Your edits to it are kept; regenerate the evaluation configuration (this replaces the edits) or restore the old settings.',
+                      )}
+                    </Notice>
+                  )}
+                  {missingExtent.length > 0 && (
+                    <Notice tone="warning">
+                      {t(
+                        `这些格点模拟读不出区域范围：${missingExtent.join('、')}。配置里只写了目标分辨率，没有区域范围（OpenBench 会按默认的全球范围比较）；请换一个带坐标的 history 目录重新读数，或在编辑模拟里补上区域范围。`,
+                        `Could not read the region of: ${missingExtent.join(', ')}. The configuration sets only the target resolution, without a region (OpenBench then compares on the global grid); inspect a history folder that has coordinates, or fill in the region in the simulation dialog.`,
+                      )}
+                    </Notice>
+                  )}
+                  <div className="button-row">
+                    {!scanDir && (
+                      <p className="muted study-hint">
+                        {t(
+                          '还没填"参考数据根目录"：OpenBench 自带的参考数据都按这个目录找，不填只能用自己登记了完整路径的数据；填好后要重新生成评估配置。',
+                          'No reference data root yet: OpenBench’s built-in references are looked up under it; without it only references registered with full paths work. Regenerate the evaluation configuration after filling it in.',
+                        )}
+                      </p>
+                    )}
+                    {yamlStale && (
+                      <Button disabled={busy} onClick={() => void regenerate()}>
+                        {t('重新生成评估配置', 'Regenerate evaluation configuration')}
+                      </Button>
+                    )}
+                    <ActionButton
+                      action="compare-run"
+                      label={t('检查并运行', 'Check and run')}
+                      kind="commit"
+                      variant="primary"
+                      disabled={busy || yamlStale}
+                      title={
+                        yamlStale
+                          ? t(
+                              '设置改过了：先重新生成评估配置再运行',
+                              'The settings changed: regenerate the evaluation configuration before running',
+                            )
+                          : undefined
+                      }
+                      run={run}
+                    />
+                  </div>
+                  {yamlHandEdited && !yamlStale && (
+                    <p className="muted study-hint">
+                      {t(
+                        '这份配置有你手工改过的内容；运行时会按你改后的内容提交。',
+                        'This configuration contains edits you made; running submits it as edited.',
+                      )}
+                    </p>
+                  )}
+                </>
               )}
             </>
+          ) : (
+            <p className="muted study-hint">
+              {t(
+                '安装 OpenBench 之后，这里出现模拟、参考数据、变量、时段、范围和评估配置。',
+                'Once OpenBench is installed, the simulations, reference data, variables, period, region and evaluation configuration appear here.',
+              )}
+            </p>
           )}
         </Card>
-      )}
-
-      <Card
-        title={t('报告', 'Reports')}
-        description={t(
-          '这里跑过的比较和它们的报告；也能载入别处生成的 OpenBench 报告。',
-          'Comparisons run here and their reports; reports produced elsewhere can be loaded too.',
-        )}
-      >
-        {status?.projects.length ? (
-          <div className="table-scroll">
-            <table className="versions-table">
-              <tbody>
-                {status.projects.map((p) => (
-                  <tr key={p.dir ?? p.name}>
-                    <td>{p.name}</td>
-                    <td>
-                      {p.report ? t('有报告', 'has a report') : t('还没有报告', 'no report yet')}
-                    </td>
-                    <td>
-                      {/* 服务器上的报告先取回本机（报告、指标与配置），再在软件里看。 */}
-                      {p.report && remote && (
-                        <Button onClick={() => void task(() => fetchReport(host, p.name))}>
-                          {t('取回并查看', 'Fetch and view')}
-                        </Button>
-                      )}
-                      {p.report && !remote && (
-                        <>
-                          <Button onClick={() => void task(() => view(p.report!))}>
-                            {t('在软件里看', 'View here')}
-                          </Button>
-                          <Button onClick={() => void invoke('open_path', { path: p.report })}>
-                            {t('用浏览器打开', 'Open in browser')}
-                          </Button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="muted">{t('还没有比较。', 'No comparisons yet.')}</p>
-        )}
-        <div className="button-row">
-          <ActionButton
-            action="compare-load-report"
-            label={t('载入报告…', 'Load a report…')}
-            run={() =>
-              task(async () => {
-                // 选文件和读文件都在后端：前端不能拿一个任意路径去读（复验 D2-05）。
-                const picked = await invokeJson<{ path: string; html: string } | null>(
-                  'bench_pick_report',
-                );
-                if (picked) setReport(picked);
-              })
-            }
-          />
-        </div>
-        {report && (
-          <>
-            <p className="muted">{report.path}</p>
-            {/* 报告放进完全的沙箱：不跑脚本、不给同源权限。OpenBench 3.0.8 的报告里没有一个 <script>
+      </div>
+      <div data-compare-section="jobs">
+        <Card
+          title={t('任务与报告', 'Jobs and reports')}
+          description={t(
+            '运行进度、失败原因、远程作业身份、已有报告和后续操作都在这里。',
+            'Run progress, failure reasons, remote job identity, existing reports and follow-up actions are collected here.',
+          )}
+        >
+          {busy && <p className="muted study-hint">{t('正在处理…', 'Working…')}</p>}
+          {activeJob && (
+            <p className="muted study-hint">
+              {t(
+                `正在等待服务器作业 ${activeJob.job}${activeJob.name ? `（比较 ${activeJob.name}）` : ''}…`,
+                `Waiting for server job ${activeJob.job}${activeJob.name ? ` (comparison ${activeJob.name})` : ''}…`,
+              )}
+            </p>
+          )}
+          {lastJob && !activeJob && !unsettled && (
+            <div className="button-row">
+              <p className="muted study-hint">
+                {t(
+                  `上次远程作业 ${lastJob.job}（${lastJob.name ?? '安装环境'}）：${jobEndText(lastJob)}。`,
+                  `Last remote job ${lastJob.job} (${lastJob.name ?? 'environment install'}): ${jobEndText(lastJob)}.`,
+                )}
+              </p>
+              {lastJob.end === 'succeeded' && lastJob.name && (
+                <Button disabled={busy} onClick={() => void fetchLastReport()}>
+                  {t('再取回报告', 'Fetch report again')}
+                </Button>
+              )}
+            </div>
+          )}
+          {lastJob && !activeJob && !unsettled && lastJob.end === 'failed' && lastJob.lastError && (
+            <p className="muted study-hint">
+              {t('上次远程作业失败的原因：', 'Reason of the last remote job failure: ')}
+              {shown(lastJob.lastError)}
+            </p>
+          )}
+          {remote && unsettled && (
+            <div data-compare-subsection="unsettled">
+              <h3 className="study-subhead">
+                {t('远程作业：暂时失联/待核对', 'Remote job: unreachable, awaiting check')}
+              </h3>
+              <Notice tone="warning">
+                {t(
+                  `暂时联系不上服务器 ${host}：作业 ${unsettled.job.job}（${unsettled.job.name ?? '安装环境'}）的身份已经保留，远端可能仍在运行。`,
+                  `Server ${host} cannot be reached right now; job ${unsettled.job.job} (${unsettled.job.name ?? 'environment install'}) is still tracked and may still be running.`,
+                )}
+              </Notice>
+              <p className="muted study-hint">
+                {t(
+                  `提交时间：${unsettled.job.submittedAt ?? '未知'}；最后确认状态：${unsettled.job.lastState ?? '未知'}${unsettled.job.lastConfirmedAt ? `（${unsettled.job.lastConfirmedAt}）` : ''}。一次查询失败不等于作业失败，确认终态之前不会结束跟踪。`,
+                  `Submitted: ${unsettled.job.submittedAt ?? 'unknown'}; last confirmed state: ${unsettled.job.lastState ?? 'unknown'}${unsettled.job.lastConfirmedAt ? ` (${unsettled.job.lastConfirmedAt})` : ''}. A failed query does not mean the job failed; tracking ends only once the final state is confirmed.`,
+                )}
+              </p>
+              {unsettled.reason && <p className="muted study-hint">{shown(unsettled.reason)}</p>}
+              <div className="button-row">
+                <Button disabled={busy} onClick={() => void reconnect()}>
+                  {t('重连并继续等待', 'Reconnect and keep waiting')}
+                </Button>
+                <Button disabled={busy} onClick={() => void checkUnsettled()}>
+                  {t('核对终态', 'Check final state')}
+                </Button>
+                <Button variant="danger" disabled={busy} onClick={() => void stopUnsettled()}>
+                  {t('停止作业', 'Stop job')}
+                </Button>
+              </div>
+            </div>
+          )}
+          <div data-compare-subsection="reports">
+            <h3 className="study-subhead">{t('报告', 'Reports')}</h3>
+            <p className="muted">
+              {t(
+                '这里跑过的比较和它们的报告；也能载入别处生成的 OpenBench 报告。',
+                'Comparisons run here and their reports; reports produced elsewhere can be loaded too.',
+              )}
+            </p>
+            {status?.projects.length ? (
+              <div className="table-scroll">
+                <table className="versions-table">
+                  <tbody>
+                    {status.projects.map((p) => (
+                      <tr key={p.dir ?? p.name}>
+                        <td>{p.name}</td>
+                        <td>
+                          {p.report
+                            ? t('有报告', 'has a report')
+                            : t('还没有报告', 'no report yet')}
+                        </td>
+                        <td>
+                          {/* 服务器上的报告先取回本机（报告、指标与配置），再在软件里看。 */}
+                          {p.report && remote && (
+                            <Button onClick={() => void task(() => fetchReport(host, p.name))}>
+                              {t('取回并查看', 'Fetch and view')}
+                            </Button>
+                          )}
+                          {p.report && !remote && (
+                            <>
+                              <Button onClick={() => void task(() => view(p.report!))}>
+                                {t('在软件里看', 'View here')}
+                              </Button>
+                              <Button onClick={() => void invoke('open_path', { path: p.report })}>
+                                {t('用浏览器打开', 'Open in browser')}
+                              </Button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted">{t('还没有比较。', 'No comparisons yet.')}</p>
+            )}
+            <div className="button-row">
+              <ActionButton
+                action="compare-load-report"
+                label={t('载入报告…', 'Load a report…')}
+                run={() =>
+                  task(async () => {
+                    // 选文件和读文件都在后端：前端不能拿一个任意路径去读（复验 D2-05）。
+                    const picked = await invokeJson<{ path: string; html: string } | null>(
+                      'bench_pick_report',
+                    );
+                    if (picked) setReport(picked);
+                  })
+                }
+              />
+            </div>
+            {report && (
+              <>
+                <p className="muted">{report.path}</p>
+                {/* 报告放进完全的沙箱：不跑脚本、不给同源权限。OpenBench 3.0.8 的报告里没有一个 <script>
                 （实测两份都是 0 个），用不着脚本；Windows 上 wry 会往子框架注入 IPC 初始化脚本，
                 允许脚本就只剩 origin 校验一层兜底（复验 D2-04）。 */}
-            <iframe
-              className="compare-report"
-              title={t('OpenBench 报告', 'OpenBench report')}
-              sandbox=""
-              srcDoc={report.html}
-            />
-          </>
-        )}
-      </Card>
+                <iframe
+                  className="compare-report"
+                  title={t('OpenBench 报告', 'OpenBench report')}
+                  sandbox=""
+                  srcDoc={report.html}
+                />
+              </>
+            )}
+          </div>
+        </Card>
+      </div>
       <Dialog
         open={dialog === 'variable'}
         onOpenChange={(open) => !open && setDialog(null)}
@@ -2234,7 +2376,7 @@ export default function ComparePage() {
         onOpenChange={(open) => !open && setDialog(null)}
         title={
           simEditing
-            ? t('编辑模拟数据', 'Edit simulation data')
+            ? t('编辑模拟信息', 'Edit simulation information')
             : t('注册模拟数据', 'Register simulation data')
         }
         description={t(

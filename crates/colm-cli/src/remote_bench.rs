@@ -271,14 +271,270 @@ fn read_json<T: serde::de::DeserializeOwned>(opts: &Opts) -> Result<T> {
     Ok(serde_json::from_str(&text)?)
 }
 
+// ---- 同名比较的活动作业保护（GUI-07） ----
+//
+// 客户端已经按"本机记着的作业身份"阻止了重复提交，但身份只存在发起提交的那台电脑上：换一台电脑、
+// 手工清掉 localStorage、或两次提交交错时，服务器仍会被要求写同一个成果目录。这里在服务器侧的
+// 比较目录里放一个原子占位（`mkdir` 只有一个进程能成功），提交前必须先占住它。
+// 占位里的作业号由提交者先本地生成，所以占位写下的就是最终作业号；调用方据此向普通远程运行
+// 已有的 `job::status` 核对终态，不另造一套状态判定。
+
+/// 比较目录里的活动作业占位目录。
+const ACTIVE_JOB: &str = ".active-job";
+
+fn placeholder_path(project: &str) -> String {
+    format!("{project}/{ACTIVE_JOB}")
+}
+
+/// 固定错误原文：前端按"这个比较还有未完成的评估作业"前缀映射成双语提示，改字前先搜前端。
+fn active_job_error(id: &str) -> String {
+    format!(
+        "这个比较还有未完成的评估作业（作业号 {id}）；先核对终态或停止它，避免重复写同一个成果目录。"
+    )
+}
+
+/// 服务器上一个比较的目录：`<openbench>/projects/<名字>`。
+fn project_dir(root: &str, name: &str) -> Result<String> {
+    ensure!(
+        valid_name(name),
+        "a comparison name may only use letters, digits, - and _: {name:?}"
+    );
+    Ok(format!("{root}/projects/{name}"))
+}
+
+/// 原子占住比较目录：`mkdir` 成功才算占住。已有占位时输出 `busy <作业号>`，让调用方先核对它是否
+/// 真的还在跑；占位目录在、作业号迟迟写不进来（上个提交在 mkdir 与写号之间崩了）输出 `empty`。
+/// 写号后要读回核对：与"清陈旧占位"并发交错时，一方可能在另一方写号前把占位删掉，两边都以为自己
+/// 占住了 —— 读回验证能把这种窗口收掉，两方至多一方输出 acquired。
+fn acquire_script(project: &str, id: &str) -> String {
+    let placeholder = quote(&placeholder_path(project));
+    format!(
+        r#"mkdir -p {project} || {{ echo 'cannot create the comparison folder' >&2; exit 1; }}
+if mkdir {placeholder} 2>/dev/null; then
+  if printf '%s\n' {id} > {placeholder}/id 2>/dev/null && [ "$(cat {placeholder}/id 2>/dev/null)" = {id} ]; then
+    echo acquired
+  else
+    echo lost
+  fi
+  exit 0
+fi
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  existing=$(cat {placeholder}/id 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    printf 'busy %s\n' "$existing"
+    exit 0
+  fi
+  sleep 0.1
+done
+echo empty
+"#,
+        project = quote(project),
+        id = quote(id),
+    )
+}
+
+/// 只读查看占位（取回报告前用）：不创建、不删除任何东西。`none` 没有占位；`busy <作业号>` 有；
+/// `empty` 占位在但作业号没写成（崩溃残留，当作没有活动作业）。
+fn active_job_probe_script(project: &str) -> String {
+    let placeholder = quote(&placeholder_path(project));
+    format!(
+        r#"if [ ! -d {placeholder} ]; then
+  echo none
+  exit 0
+fi
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  existing=$(cat {placeholder}/id 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    printf 'busy %s\n' "$existing"
+    exit 0
+  fi
+  sleep 0.1
+done
+echo empty
+"#
+    )
+}
+
+/// 释放占位（作业名对得上才删）：作业体退出时和提交失败时共用同一条命令。作业体以 EXIT trap 调用它，
+/// 覆盖正常结束、失败退出和 SIGTERM 取消；SIGKILL/节点宕机不会跑 trap，那种残留由下一次提交按
+/// "占位里的作业已确认终态"清掉。先用 `cat` 核对作业号，避免作业收尾与清陈旧占位交错时删掉别人的占位。
+fn release_placeholder_command(project: &str, id: &str) -> String {
+    let placeholder = quote(&placeholder_path(project));
+    format!(
+        "if [ \"$(cat {placeholder}/id 2>/dev/null)\" = {id} ]; then rm -rf {placeholder}; fi",
+        id = quote(id)
+    )
+}
+
+fn release_script(project: &str, id: &str) -> String {
+    format!("{}\n", release_placeholder_command(project, id))
+}
+
+/// 作业体的第一行：作业退出时释放占位。整条清理命令再 `quote` 一次，因为 `trap '…'` 是单引号字符串，
+/// 里面的路径/作业号不能直接再套单引号。
+fn active_job_trap(project: &str, id: &str) -> String {
+    format!(
+        "trap {} EXIT\n",
+        quote(&release_placeholder_command(project, id))
+    )
+}
+
+/// 占位在但作业号没写成（崩溃残留）：清掉重试。调用方只在重试读号仍为空时才用，正常并发写号
+/// 只有几微秒，不会被误删。
+fn remove_placeholder_script(project: &str) -> String {
+    format!("rm -rf {}\n", quote(&placeholder_path(project)))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Slot {
+    /// 这次占住了。
+    Acquired,
+    /// 已被别人的作业占着，值是占位里记的作业号。
+    Busy(String),
+    /// 占位存在但作业号没写成（崩溃残留）。
+    Empty,
+}
+
+fn parse_slot(output: &str) -> Option<Slot> {
+    let line = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    if line == "acquired" {
+        Some(Slot::Acquired)
+    } else if line == "empty" {
+        Some(Slot::Empty)
+    } else {
+        line.strip_prefix("busy ")
+            .map(|id| Slot::Busy(id.trim().to_owned()))
+    }
+}
+
+/// 取回前的只读探针输出：`None` = 没有活动占位（或只剩崩溃残留的 `empty`），`Some(id)` = 有作业号。
+fn parse_probe(output: &str) -> Option<Option<String>> {
+    let line = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    if line == "none" || line == "empty" {
+        Some(None)
+    } else {
+        line.strip_prefix("busy ")
+            .map(|id| Some(id.trim().to_owned()))
+    }
+}
+
+/// 占位里的作业是否还没到确认终态。Queued/Running 一定是；Finished 与调度系统记下的 ended（Lost 里
+/// 的 CANCELLED/FAILED…）是终态（任务书 GUI-07 列的 succeeded/failed/cancelled/lost）；Unknown 不能
+/// 一律当终态 —— 作业目录还在时可能只是这次查不到，宁可拒绝也不能赌它已经结束。
+fn placeholder_unfinished(status: &job::Status, job_dir_exists: bool) -> bool {
+    match status.state {
+        job::State::Finished { .. } | job::State::Lost => false,
+        job::State::Queued | job::State::Running => true,
+        job::State::Unknown => job_dir_exists,
+    }
+}
+
+/// 提交/取回前的拒绝判定：`Some(固定错误原文)` 表示拒绝。
+fn active_job_refusal(id: &str, status: &job::Status, job_dir_exists: bool) -> Option<String> {
+    if placeholder_unfinished(status, job_dir_exists) {
+        Some(active_job_error(id))
+    } else {
+        None
+    }
+}
+
+fn job_dir_exists(ssh: &Ssh, base: &str, id: &str) -> Result<bool> {
+    job::check_id(id)?;
+    let script = format!(
+        "test -d {} && echo yes || echo no\n",
+        quote(&job::job_dir(base, id))
+    );
+    Ok(ssh.run_ok(&script)?.trim() == "yes")
+}
+
+/// 占位是否已经老到可以当"提交在 mkdir 与 submit 之间崩了"的残留。刚占住的占位在作业目录出现前
+/// 本来就没有作业可查（status=unknown），这时不能立刻清掉：并发的另一份提交可能刚占位、正在提交。
+/// 用占位目录的修改时间留一分钟宽限；超过仍没有作业目录，才清除。
+fn placeholder_expired_script(project: &str) -> String {
+    let placeholder = quote(&placeholder_path(project));
+    format!(
+        "if [ -d {placeholder} ] && find {placeholder} -maxdepth 0 -mmin +1 -print -quit 2>/dev/null | grep -q .; then echo stale; else echo fresh; fi\n"
+    )
+}
+
+/// 提交前占位：占住就返回；占位里是还在跑的作业就拒绝；占位里的作业已确认终态（但 trap 没跑）
+/// 就清掉陈旧占位后重试。最多循环几次：每次冲突都说明另一提交在推进状态，反复冲突时让用户稍后再试，
+/// 不无限等。
+fn claim_active_job(ssh: &Ssh, base: &str, project: &str, id: &str) -> Result<()> {
+    for _ in 0..3 {
+        let output = ssh.run_ok(&acquire_script(project, id))?;
+        match parse_slot(&output).context("活动作业占位的响应读不懂")? {
+            Slot::Acquired => return Ok(()),
+            Slot::Empty => {
+                ssh.run_ok(&remove_placeholder_script(project))?;
+            }
+            Slot::Busy(existing) => {
+                // 占位里的内容先按作业号校验，再拼进命令/错误信息。
+                if job::check_id(&existing).is_err() {
+                    ssh.run_ok(&remove_placeholder_script(project))?;
+                    continue;
+                }
+                let status = job::status(ssh, base, &existing, 5)?;
+                let dir_exists = if matches!(status.state, job::State::Unknown) {
+                    job_dir_exists(ssh, base, &existing)?
+                } else {
+                    false
+                };
+                if let Some(error) = active_job_refusal(&existing, &status, dir_exists) {
+                    bail!("{error}");
+                }
+                // 作业号在、作业目录不在、状态还查不出来：可能是并发的另一份提交刚占位、还没提交出去。
+                // 一分钟内不能清（否则两份提交都会提交成功、写同一个成果目录）；超时仍没有作业目录，
+                // 才当"提交在 mkdir 与 submit 之间崩了"的残留清掉。
+                if matches!(status.state, job::State::Unknown) && !dir_exists {
+                    let expired = ssh.run_ok(&placeholder_expired_script(project))?;
+                    if expired.trim() != "stale" {
+                        bail!("{}", active_job_error(&existing));
+                    }
+                }
+                ssh.run_ok(&release_script(project, &existing))?;
+            }
+        }
+    }
+    bail!("这个比较的活动作业占位一直在变化，请稍后再提交。")
+}
+
+/// 取回前读占位里的作业号（只读）。
+fn active_job_id(ssh: &Ssh, project: &str) -> Result<Option<String>> {
+    let output = ssh.run_ok(&active_job_probe_script(project))?;
+    let Some(id) = parse_probe(&output).context("活动作业占位的响应读不懂")? else {
+        return Ok(None);
+    };
+    // 写坏的占位不是真实作业号：当没有，不让一条坏数据挡住取回。
+    Ok(job::check_id(&id).ok().map(|()| id))
+}
+
 /// `remote-bench-run`：写下配置，把单点模拟并成站点文件，再 `openbench check`、`openbench run`。
 /// 作为服务器上的作业提交（按服务器的调度系统），返回作业号。
+///
+/// 提交前先在服务器上原子占住同名比较（GUI-07 服务器侧保护）：另一个作业还在跑就拒绝，避免两次
+/// 提交交错写同一个成果目录；占位由作业体 EXIT trap 释放，提交失败时在这里释放。
 pub(super) fn run(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let base = super::remote_cmd::root_of(opts)?;
     let root = bench_root(opts)?;
     let request: RunRequest = read_json(opts)?;
-    let body = run_body(&root, &request)?;
+    // 先校验并拼好作业体：名字/路径不合法时不占位，免得占位被一次不会提交的请求挡住。
+    let project = project_dir(&root, &request.name)?;
+    let id = unique_job("run")?;
+    let body = format!(
+        "{}{}",
+        active_job_trap(&project, &id),
+        run_body(&root, &request)?
+    );
     let scheduler = super::remote_cmd::parse_scheduler(opts, &ssh, &base)?;
     let resources = if scheduler == Scheduler::Bare {
         Resources {
@@ -294,14 +550,24 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
         resources,
         name: sched::job_name(&format!("bench-{}", request.name)),
     };
-    let id = unique_job("run")?;
-    let submitted = job::submit_plain(&ssh, &base, &id, &body, &spec)?;
+    claim_active_job(&ssh, &base, &project, &id)?;
+    let submitted = match job::submit_plain(&ssh, &base, &id, &body, &spec) {
+        Ok(submitted) => submitted,
+        Err(error) => {
+            // 提交失败：释放刚占的位，否则一次 SSH 抖动会让这个比较永远拒绝提交。释放失败时保留占位、
+            // 留给下一次提交按陈旧判定清理；不能用清理失败盖掉真正的提交失败原因。
+            if ssh.run_ok(&release_script(&project, &id)).is_err() {
+                eprintln!("warning: cannot release the comparison's active-job placeholder");
+            }
+            return Err(error);
+        }
+    };
     println!(
         "{}",
         json!({
             "job": id,
             "submitted": submitted,
-            "dir": format!("{root}/projects/{}", request.name),
+            "dir": project,
         })
     );
     Ok(())
@@ -309,15 +575,10 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
 
 fn run_body(root: &str, request: &RunRequest) -> Result<String> {
     ensure!(
-        valid_name(&request.name),
-        "a comparison name may only use letters, digits, - and _: {:?}",
-        request.name
-    );
-    ensure!(
         request.config.len() <= 512 * 1024,
         "the configuration exceeds 512 KiB"
     );
-    let project = format!("{root}/projects/{}", request.name);
+    let project = project_dir(root, &request.name)?;
     let mut body = format!(
         "{env}test -x {openbench} || {{ echo '先装 OpenBench' >&2; exit 1; }}\nmkdir -p {sim}\ncd {project_q}\n",
         env = program_env(root),
@@ -641,17 +902,31 @@ pub(super) fn scan(opts: &Opts) -> Result<()> {
 
 /// `remote-bench-fetch`：只取回报告、指标与配置（`output/<项目>/{reports,metrics,scores}` 与 `openbench.yaml`），
 /// 合并出来的站点文件和中间数据留在服务器上。
+///
+/// 同名比较还有未确认终态的活动作业时拒绝取回（GUI-07 服务器侧）：作业正在写成果目录，这时取回
+/// 只会拿到不完整的报告，还会让"本机旧报告仍是上次成功版本"的提示真假难分。
 pub(super) fn fetch(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let base = super::remote_cmd::root_of(opts)?;
     let root = bench_root(opts)?;
     let name = opts.need_str("--name")?;
-    ensure!(valid_name(&name), "bad comparison name {name:?}");
+    let project = project_dir(&root, &name)?;
     let out = std::path::PathBuf::from(opts.need_str("--out")?);
     ensure!(
         out.is_absolute(),
         "--out must be an absolute local directory"
     );
-    let project = format!("{root}/projects/{name}");
+    if let Some(active) = active_job_id(&ssh, &project)? {
+        let status = job::status(&ssh, &base, &active, 5)?;
+        let dir_exists = if matches!(status.state, job::State::Unknown) {
+            job_dir_exists(&ssh, &base, &active)?
+        } else {
+            false
+        };
+        if let Some(error) = active_job_refusal(&active, &status, dir_exists) {
+            bail!("{error}");
+        }
+    }
     let listing = ssh.run_ok(&format!(
         "cd {} && ls -d output/*/reports output/*/metrics output/*/scores openbench.yaml 2>/dev/null; true\n",
         quote(&project)

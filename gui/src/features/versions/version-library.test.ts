@@ -125,7 +125,7 @@ test('version and draft rows register their buttons while deletion stays manual'
       onDraftDeleted: async () => {},
     }),
   );
-  // 点版本名、行里的打开/设为模拟使用、草稿名和继续编辑，都是助手能按的动作。
+  // 点版本名、行里的打开/设为运行模型、草稿名和继续编辑，都是助手能按的动作。
   for (const action of [
     'version-select-official-101',
     'version-open-official-101',

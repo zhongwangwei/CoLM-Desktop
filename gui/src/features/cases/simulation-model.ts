@@ -1,7 +1,13 @@
 import { bilingual } from '../../lib/bilingual';
 import { validDate } from '../../lib/dates';
 export { validDate } from '../../lib/dates';
-import { caseDirectory, siteVersionMismatch, type SchemaField, type Site } from './case-model';
+import {
+  caseDirectory,
+  cropEnabled,
+  siteVersionMismatch,
+  type SchemaField,
+  type Site,
+} from './case-model';
 
 export type SimulationStep = 1 | 2 | 3 | 4 | 5;
 /**
@@ -68,12 +74,171 @@ export function elapsedLabel(ms: number, en = false): string {
 }
 
 export const simulationSteps = [
-  ['总的设定', 'General setup'],
+  ['运行环境与保存位置', 'Run environment and save location'],
   ['范围与网格', 'Range and grid'],
   ['数据与时段', 'Data and period'],
   ['模型结构与方案', 'Model structure and schemes'],
   ['检查与运行', 'Review and run'],
 ] as const;
+
+/**
+ * 模型结构/方案/引擎里会影响前面步骤已填数据的部分（U-03）。
+ *
+ * 向导顺序是"数据与时段"在"模型结构与方案"之前。第 4 步（以及第 1 步的引擎）一改，前面核对时
+ * 依据的模型身份就变了：已选站点可能不再匹配作物/城市配置，BGC 会新增 Runtime 必填目录，Fortran
+ * 的并行布局与资源也要重看。每一步核对时记下这个快照，之后比较即可知道哪一步需要重新检查。
+ * 只收真正影响数据要求的维度：普通模型参数微调不该让数据步骤显示"需重新检查"。
+ */
+export type ModelSetup = {
+  engine: string;
+  /** 下垫面结构方案：IGBP / USGS / PFT / PC（空 = 尚未选择）。 */
+  mode: string;
+  /** 地类分类：IGBP / USGS（空 = 尚未选择）。 */
+  classification: string;
+  crop: boolean;
+  urban: boolean;
+  bgc: boolean;
+  tracer: boolean;
+  /** 模型修订身份 `id#revision`：换修订会改变模型物理开关与所需数据。 */
+  revision: string;
+};
+
+export function modelSetup(input: {
+  engine?: string;
+  mode?: string;
+  classification?: string;
+  physics?: Record<string, string>;
+  revision?: string;
+}): ModelSetup {
+  const physics = input.physics ?? {};
+  const enabled = (name: string) => /^(true|\.true\.|1)$/i.test(physics[name] ?? '');
+  return {
+    engine: (input.engine ?? '').trim(),
+    mode: (input.mode ?? '').trim().toUpperCase(),
+    classification: (input.classification ?? '').trim().toUpperCase(),
+    crop: cropEnabled(physics),
+    urban: enabled('DEF_URBAN_RUN'),
+    bgc: enabled('DEF_USE_BGC'),
+    tracer: enabled('DEF_USE_TRACER'),
+    revision: (input.revision ?? '').trim(),
+  };
+}
+
+export type SetupRecheck = {
+  step: SimulationStep;
+  /** 为什么这一步要重新检查（已按当前语言格式化，可直接显示）。 */
+  text: string;
+  /** 需要用户补充的表单字段（如 `runtime`），界面据此点名新增的必填项。 */
+  fields: string[];
+};
+
+/**
+ * 比较某一步上次核对时的模型设置与当前值，给出该步的"需要重新检查"提示。
+ *
+ * 只在真的可能出现失效数据时提示：
+ * - 用户还没做过选择（空值 → 有值）不算变化，否则正常的首次选方案会让数据步骤无谓返工；
+ * - 单纯关掉一个过程不会让已填数据失效；
+ * - 数据与时段还要看当前站点是否真的与作物/城市配置不符、新的必填目录是否确实缺着。
+ */
+export function setupRechecks(
+  before: ModelSetup | null,
+  current: ModelSetup,
+  step: SimulationStep,
+  data: {
+    /** 数据步骤里已经选中的站点（单点、内置示例或批量草稿），用于核对作物/城市兼容性。 */
+    sites?: { name: string; crop: boolean; urban: boolean }[];
+    /** Runtime 数据目录是否已经填了。 */
+    runtimeFilled?: boolean;
+  } = {},
+  en = false,
+): SetupRecheck[] {
+  if (!before) return [];
+  const t = (zh: string, english: string) => (en ? english : zh);
+  // 引擎一换，范围与网格里的 Fortran 并行布局/匹配编译配置、检查与运行里的资源都要重看；
+  // 数据与站点的要求不变，所以不标第 3 步。
+  if (step === 2 || step === 5) {
+    if (!before.engine || !current.engine || before.engine === current.engine) return [];
+    const text =
+      step === 2
+        ? t(
+            `计算引擎从 ${before.engine} 改为 ${current.engine}：范围与网格里的并行布局、匹配的编译配置需要重新检查。`,
+            `The computation engine changed from ${before.engine} to ${current.engine}: review the parallel layout and matched build configuration in range and grid.`,
+          )
+        : t(
+            `计算引擎从 ${before.engine} 改为 ${current.engine}：检查与运行里的线程、进程与 CPU 资源需要重新检查。`,
+            `The computation engine changed from ${before.engine} to ${current.engine}: review threads, processes and CPU resources in review and run.`,
+          );
+    return [{ step, text, fields: [] }];
+  }
+  if (step !== 3) return [];
+  const reasons: string[] = [];
+  const fields: string[] = [];
+  if (before.mode && current.mode && before.mode !== current.mode)
+    reasons.push(
+      t(
+        `下垫面结构从 ${before.mode} 改为 ${current.mode}`,
+        `the vegetation structure changed from ${before.mode} to ${current.mode}`,
+      ),
+    );
+  if (
+    before.classification &&
+    current.classification &&
+    before.classification !== current.classification
+  )
+    reasons.push(
+      t(
+        `地类分类从 ${before.classification} 改为 ${current.classification}`,
+        `the land-cover classification changed from ${before.classification} to ${current.classification}`,
+      ),
+    );
+  if (before.revision && current.revision && before.revision !== current.revision)
+    reasons.push(
+      t(
+        `模型修订从 ${before.revision} 改为 ${current.revision}`,
+        `the model revision changed from ${before.revision} to ${current.revision}`,
+      ),
+    );
+  const incompatible = (data.sites ?? []).filter(
+    (site) => site.crop !== current.crop || site.urban !== current.urban,
+  );
+  if (incompatible.length)
+    reasons.push(
+      t(
+        `已选站点与当前配置不符：${incompatible
+          .map(
+            (site) =>
+              `${site.name}（作物 ${site.crop ? '有' : '无'} / 城市 ${site.urban ? '是' : '否'}）`,
+          )
+          .join('、')}`,
+        `selected stations do not match the current configuration: ${incompatible
+          .map(
+            (site) =>
+              `${site.name} (crop ${site.crop ? 'yes' : 'no'} / urban ${site.urban ? 'yes' : 'no'})`,
+          )
+          .join(', ')}`,
+      ),
+    );
+  if (current.bgc && !(data.runtimeFilled ?? false)) {
+    reasons.push(
+      t(
+        '当前方案启用了 BGC，需要 Runtime 数据目录',
+        'the current scheme enables BGC, which requires a runtime data folder',
+      ),
+    );
+    fields.push('runtime');
+  }
+  if (!reasons.length) return [];
+  return [
+    {
+      step: 3,
+      text: t(
+        `模型结构或方案已改变：${reasons.join('；')}。数据与时段里已填的站点、强迫场和时段需要重新核对。`,
+        `Model structure or schemes changed: ${reasons.join('; ')}. Review the stations, forcing and period filled in data and period.`,
+      ),
+      fields: [...new Set(fields)],
+    },
+  ];
+}
 export function caseDate(
   values: Record<string, string>,
   prefix: 'start' | 'end' | 'spinup',

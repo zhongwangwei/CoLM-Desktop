@@ -32,8 +32,11 @@ import {
   newCaseProblem,
   newCaseRangeProblem,
   newCaseGeneralProblem,
+  modelSetup,
   scannedForcing,
+  setupRechecks,
   simulationFields,
+  simulationSteps,
   isSiteConfiguration,
   isForcingScheme,
   elapsedLabel,
@@ -42,6 +45,8 @@ import {
   nodePlanText,
   kindPathPrefill,
   spinupProblem,
+  type ModelSetup,
+  type SetupRecheck,
   type SimulationStep,
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
@@ -522,6 +527,35 @@ export default function NewCasePage() {
       ...schemeFields,
     },
     selected = sites.find((s) => s.site_file === form.site);
+  // U-03：向导把"数据与时段"放在"模型结构与方案"之前，方案一改，前面核对过的数据就可能失效。
+  // 每一步核对通过时记下当时的模型设置；之后比较即可标出哪一步需要重新检查，而不是只改步骤标题。
+  const [checkedSetup, setCheckedSetup] = useState<Partial<Record<SimulationStep, ModelSetup>>>({});
+  const currentSetup = modelSetup({
+    engine: form.engine,
+    mode: mode ?? '',
+    classification: classification ?? '',
+    physics,
+    revision: `${state.versionRef.id}#${state.versionRef.revision}`,
+  });
+  // 数据步骤里"已选中的数据"：单点看当前站点，批量看草稿里的站点。用来判断方案改变后站点是否还兼容。
+  const checkedSites = (
+    multiSite
+      ? siteDrafts
+          .map((draft) => sites.find((item) => item.site_file === draft.site))
+          .filter((item): item is Site => !!item)
+      : selected
+        ? [selected]
+        : []
+  ).map((item) => ({ name: item.name, crop: item.crop, urban: item.urban }));
+  const staleNotices: SetupRecheck[] = ([2, 3, 5] as SimulationStep[]).flatMap((at) =>
+    setupRechecks(
+      checkedSetup[at] ?? null,
+      currentSetup,
+      at,
+      { sites: checkedSites, runtimeFilled: !!form.runtime.trim() },
+      en,
+    ),
+  );
   const bundledSite = !ownData && !multiSite && form.kind === 'site' ? selected : undefined;
   let projectDirectory = '',
     finalDirectory = '',
@@ -1378,12 +1412,35 @@ export default function NewCasePage() {
   }
 
   function next() {
+    // 当前步骤因模型方案改变而失效：先按现有校验重新检查，通过就更新基线。用户直接点"下一步"
+    // 等于在这里重新检查，不用再点一次"重新检查"（U-03）。
+    if (staleFor(step).length) {
+      const stale = problem(step);
+      if (stale) {
+        setError(stale);
+        throw new Error(stale);
+      }
+      recordChecked(step);
+    }
+    // 前面的步骤还有失效数据时不能跨过去进入检查与运行；先回对应步骤重新检查。
+    if (staleNotices.some((notice) => notice.step < step)) {
+      const message = recheckBlock();
+      setError(message);
+      throw new Error(message);
+    }
     const issue = problem(step);
     if (issue) {
       setError(issue);
       throw new Error(issue);
     }
     setError('');
+    // 记下这一步核对时的模型设置：之后方案变了就知道这一步的数据失效了（U-03）。
+    setCheckedSetup((old) => ({
+      ...old,
+      [step]: currentSetup,
+      // 进入"检查与运行"时记下当时的设置；之后换引擎/方案要在这里重看资源与提交。
+      ...(step === 4 && !old[5] ? { 5: currentSetup } : {}),
+    }));
     setStep((step + 1) as SimulationStep);
   }
   function openResources() {
@@ -1734,6 +1791,9 @@ export default function NewCasePage() {
 
   async function create() {
     return work(async () => {
+      // 模型结构/方案改变后，前面的数据没有重新检查过就不能创建（U-03）：旧数据生成的算例可能
+      // 与界面上选中的方案不一致。
+      if (staleNotices.length) throw new Error(recheckBlock());
       const issue = problem(5);
       if (issue) throw new Error(issue);
       if (
@@ -1925,6 +1985,52 @@ export default function NewCasePage() {
     spatial_forcingdir: t('强迫场数据路径', 'Forcing data path'),
     forcing_dataset: t('强迫场数据集', 'Forcing dataset'),
   };
+  // U-03：某一步的数据因模型方案改变而失效时，把原因（以及新缺的必填项）写成一句可显示的话。
+  function staleText(at: SimulationStep): string {
+    const notices = staleNotices.filter((notice) => notice.step === at);
+    if (!notices.length) return '';
+    const missing = [...new Set(notices.flatMap((notice) => notice.fields))].filter(
+      (key) => !form[key]?.trim(),
+    );
+    const reason = notices.map((notice) => notice.text).join(' ');
+    return missing.length
+      ? reason +
+          t(
+            ` 还需要补充：${missing.map((key) => labels[key] ?? key).join('、')}。`,
+            ` Still missing: ${missing.map((key) => labels[key] ?? key).join(', ')}.`,
+          )
+      : reason;
+  }
+  function staleFor(at: SimulationStep): SetupRecheck[] {
+    return staleNotices.filter((notice) => notice.step === at);
+  }
+  function recheckBlock(): string {
+    const steps = [...new Set(staleNotices.map((notice) => notice.step))].sort((a, b) => a - b);
+    const named = steps.map((at) =>
+      en
+        ? `step ${at} (${simulationSteps[at - 1][1]})`
+        : `第 ${at} 步（${simulationSteps[at - 1][0]}）`,
+    );
+    return en
+      ? `Model structure, schemes or engine changed; the data in ${named.join(', ')} has not been rechecked. Review those steps and recheck before reviewing, running or creating the case.`
+      : `模型结构、方案或计算引擎改变后，${named.join('、')}的数据还没有重新检查。请先回到这些步骤核对并点“重新检查”，再进入检查与运行或创建算例。`;
+  }
+  function recordChecked(at: SimulationStep) {
+    setCheckedSetup((old) => ({ ...old, [at]: currentSetup }));
+  }
+  function recheckStep() {
+    if (!staleFor(step).length) return;
+    const issue = problem(step);
+    if (issue) {
+      setError(issue);
+      throw new Error(issue);
+    }
+    setError('');
+    recordChecked(step);
+  }
+  // 步骤导航上的"需重检"标记与原因。
+  const recheckStepTitles: Partial<Record<SimulationStep, string>> = {};
+  for (const notice of staleNotices) recheckStepTitles[notice.step] = staleText(notice.step);
   const rangeKeys = [
     ...(form.kind === 'region' && form.grid === 'latlon' ? ['west', 'east', 'south', 'north'] : []),
     ...(form.kind && form.kind !== 'site' && form.grid
@@ -2258,6 +2364,10 @@ export default function NewCasePage() {
       step,
       model: state.versionRef,
       ...(blocker ? { blocker } : {}),
+      // 模型方案改变后哪些步骤的数据需要重新检查（U-03）：助手与测试据此确认没有带着旧数据前进。
+      ...(staleNotices.length
+        ? { recheck: staleNotices.map((notice) => ({ step: notice.step, text: notice.text })) }
+        : {}),
       engine: form.engine,
       run_host: form.host || null,
       ...(step >= 2
@@ -2395,12 +2505,44 @@ export default function NewCasePage() {
         en={en}
         disabled={!enabled}
         actionPrefix="new"
+        recheck={recheckStepTitles}
         onChange={(value) => {
           setError('');
           setStep(value);
         }}
       />
       {error && <Notice tone="error">{error}</Notice>}
+      {staleNotices.length > 0 && (
+        <Notice tone="warning">
+          {staleFor(step).length ? (
+            <>
+              <p>{staleText(step)}</p>
+              <ActionButton
+                action="new-recheck"
+                label={t('重新检查这一步', 'Recheck this step')}
+                run={recheckStep}
+              />
+            </>
+          ) : (
+            <>
+              <p>{recheckBlock()}</p>
+              <div className="button-row">
+                {[...new Set(staleNotices.map((notice) => notice.step))].map((at) => (
+                  <ActionButton
+                    key={at}
+                    action={`new-goto-recheck-${at}`}
+                    label={t(`去第 ${at} 步重新检查`, `Go to step ${at} and recheck`)}
+                    run={() => {
+                      setError('');
+                      setStep(at);
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </Notice>
+      )}
       {multiSite && multiResults.length > 0 && (
         <Card title={t('创建结果', 'Creation results')}>
           <p role="status">
@@ -2549,7 +2691,7 @@ export default function NewCasePage() {
       )}
       {step === 1 && (
         <Card
-          title={t('总的设定', 'General setup')}
+          title={t('运行环境与保存位置', 'Run environment and save location')}
           description={t(
             '先选择运行位置和计算引擎，再设置保存路径与模拟名称。',
             'Choose the run location and computation engine before setting paths and simulation name.',
@@ -3316,8 +3458,18 @@ export default function NewCasePage() {
             action="new-next"
             label={t('下一步', 'Next')}
             variant="primary"
-            disabled={!enabled || (step > 1 && !schemaReady) || !!blocker}
-            title={blocker ?? undefined}
+            // 当前步骤自身失效时仍可点"下一步"：它会先按现有校验重新检查。只有前面步骤还失效时
+            // 才不能往前走，免得带着旧数据进检查与运行（U-03）。
+            disabled={
+              !enabled ||
+              (step > 1 && !schemaReady) ||
+              !!blocker ||
+              staleNotices.some((notice) => notice.step < step)
+            }
+            title={
+              blocker ??
+              (staleNotices.some((notice) => notice.step < step) ? recheckBlock() : undefined)
+            }
             run={next}
           >
             {t('下一步', 'Next')} →
@@ -3328,8 +3480,10 @@ export default function NewCasePage() {
             kind="commit"
             label={t('创建算例', 'Create case')}
             variant="primary"
-            disabled={!enabled || !schemaReady || !state.version || !!blocker}
-            title={blocker ?? undefined}
+            disabled={
+              !enabled || !schemaReady || !state.version || !!blocker || staleNotices.length > 0
+            }
+            title={blocker ?? (staleNotices.length ? recheckBlock() : undefined)}
             run={create}
           >
             {multiSite && busy

@@ -95,3 +95,49 @@ test('date fields label the editable text and keep an independently named calend
   assert.match(markup, /aria-label="Choose start date"/);
   assert.match(markup, /type="date"/);
 });
+
+test('hint, unit and range descriptions are associated with the control via aria-describedby', () => {
+  const markup = renderToStaticMarkup(
+    h(Field, {
+      label: 'Timeout',
+      hint: 'Applies per call',
+      unit: 'seconds',
+      range: '≥ 1',
+      children: h(Input, { type: 'number' }),
+    }),
+  );
+  const control = markup.match(/<input\b[^>]*>/)?.[0];
+  assert.ok(control, 'the field must still own the control');
+  const controlId = control.match(/id="([^"]+)"/)?.[1];
+  assert.ok(controlId);
+  assert.match(markup, new RegExp(`<label class="field-label" for="${controlId}">Timeout</label>`));
+  const described = control.match(/aria-describedby="([^"]+)"/)?.[1];
+  assert.ok(described, 'descriptions must be announced with the control');
+  const ids = described.split(' ');
+  assert.equal(ids.length, 3, 'hint, unit and range each keep their own id');
+  for (const text of ['Applies per call', 'seconds', '≥ 1']) assert.ok(markup.includes(text), text);
+  // hint → unit → range 的顺序与读屏播报顺序一致。
+  assert.ok(markup.includes(`<span class="field-hint" id="${ids[0]}">Applies per call</span>`));
+  assert.ok(markup.includes(`<span class="field-hint" id="${ids[1]}">seconds</span>`));
+  assert.ok(markup.includes(`<span class="field-hint" id="${ids[2]}">≥ 1</span>`));
+});
+
+test('fields without descriptions add no aria-describedby; an existing one is merged', () => {
+  const bare = renderToStaticMarkup(h(Field, { label: 'Plain', children: h(Input) }));
+  assert.doesNotMatch(bare, /aria-describedby/);
+  assert.doesNotMatch(bare, /field-hint/);
+
+  const merged = renderToStaticMarkup(
+    h(Field, {
+      label: 'Name',
+      hint: 'Help',
+      children: h(Input, { 'aria-describedby': 'external-help' }),
+    }),
+  );
+  const control = merged.match(/<input\b[^>]*>/)?.[0];
+  assert.ok(control);
+  const described = control.match(/aria-describedby="([^"]+)"/)?.[1];
+  assert.ok(described);
+  assert.ok(described.startsWith('external-help '), described);
+  assert.equal(described.split(' ').length, 2);
+});

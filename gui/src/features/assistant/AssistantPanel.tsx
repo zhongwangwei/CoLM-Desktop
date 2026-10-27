@@ -5,6 +5,8 @@ import { askConfirm } from '../../lib/confirm';
 import { guideState, drive } from '../../lib/guide';
 import { Button, Select, Notice } from '../../components/ui';
 import AssistantSettings from './Settings';
+import { Markdown } from './MarkdownMessage';
+import { followAfterContent, followAfterJump, followAfterScroll } from './scroll';
 import {
   appendDelta,
   apiEfforts,
@@ -155,11 +157,15 @@ export default function AssistantPanel() {
   const [historyError, setHistoryError] = useState('');
   const [historyAttempt, setHistoryAttempt] = useState(0);
   const [sessions, setSessions] = useState<Session[] | null>(null);
+  // 设置对话框里的草稿是否改过：关闭/切走前要确认放弃（U-07）。草稿本身留在 Settings 内部。
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [approval, setApproval] = useState<AgentEvent | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
   const [sessionUsage, setSessionUsage] = useState({ turns: 0, tokens: 0 });
+  // 历史会话切换后，用量属于那个会话；在拿到它自己的 usage 事件之前不能沿用上一个会话的数字（U-07）。
+  const [usagePending, setUsagePending] = useState(false);
   const [contextUsage, setContextUsage] = useState<{
     tokens: number;
     window: number;
@@ -181,6 +187,10 @@ export default function AssistantPanel() {
   const historyIndex = useRef<number | null>(null);
   const historyDraft = useRef('');
   const log = useRef<HTMLDivElement>(null);
+  // 流式自动滚动：默认跟随底部；用户上滚后暂停并提示"有新内容"，回到底部再恢复（U-07）。
+  const stick = useRef(true);
+  const latestMessages = useRef(messages);
+  const [unread, setUnread] = useState(false);
   function currentApprovalSnapshot() {
     const page = app.current,
       view = guideState();
@@ -209,8 +219,18 @@ export default function AssistantPanel() {
     }
   }
   useEffect(() => {
-    if (messages.length) log.current?.scrollTo({ top: log.current.scrollHeight });
-  }, [messages, approval]);
+    if (!messages.length) {
+      latestMessages.current = messages;
+      return;
+    }
+    // approval 变化沿用原来"滚到底"的行为；只有消息内容变了才给暂停中的用户加"有新内容"。
+    const changed = latestMessages.current !== messages;
+    latestMessages.current = messages;
+    if (stick.current) {
+      log.current?.scrollTo({ top: log.current.scrollHeight });
+      setUnread(false);
+    } else if (changed) setUnread(followAfterContent({ stick: false, unread }).unread);
+  }, [messages, approval, unread]);
   useEffect(() => {
     if (!hasBackend()) return;
     let active = true;
@@ -315,6 +335,7 @@ export default function AssistantPanel() {
             turns: event.session_turns || 0,
             tokens: (event.session_prompt_tokens || 0) + (event.session_completion_tokens || 0),
           });
+          setUsagePending(false);
           break;
         case 'context':
           setContextUsage({
@@ -657,6 +678,79 @@ export default function AssistantPanel() {
       setDeciding(false);
     }
   }
+  /**
+   * 用户滚动后更新"是否跟随底部"：滚动位置只能在有 DOM 时读取，判定交给 scroll.ts 的纯函数。
+   */
+  function trackScroll() {
+    const element = log.current;
+    if (!element) return;
+    const next = followAfterScroll(
+      { stick: stick.current, unread },
+      {
+        scrollTop: element.scrollTop,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+      },
+    );
+    stick.current = next.stick;
+    setUnread(next.unread);
+  }
+  /** "有新内容"按钮：回到底部并恢复跟随。 */
+  function scrollToLatest() {
+    const next = followAfterJump();
+    stick.current = next.stick;
+    setUnread(next.unread);
+    log.current?.scrollTo({ top: log.current.scrollHeight });
+  }
+  /** 切换会话后重新从底部开始跟随；上一个会话的未读提示不能带过来。 */
+  function resetFollow() {
+    const next = followAfterJump();
+    stick.current = next.stick;
+    setUnread(next.unread);
+  }
+  /**
+   * 关闭设置对话框（也用于"新对话/会话历史"先收起设置）：有未保存草稿时先确认放弃（U-07）。
+   * 返回是否真的关闭了 —— 用户选择继续编辑时，调用方应中止后续切换。
+   */
+  async function closeSettings() {
+    if (!state.assistantSettingsOpen) return true;
+    if (settingsDirty) {
+      const discard = await askConfirm(
+        t(
+          '助手设置还有未保存的修改，放弃这些修改并关闭？',
+          'The assistant settings have unsaved changes. Discard them and close?',
+        ),
+        {
+          confirmLabel: t('放弃修改', 'Discard'),
+          cancelLabel: t('继续编辑', 'Keep editing'),
+          danger: true,
+        },
+      );
+      if (!discard) return false;
+    }
+    setSettingsDirty(false);
+    update({ assistantSettingsOpen: false });
+    return true;
+  }
+  /** 打开一个历史会话；请求带对话代次，迟到的 transcript 不写进当前会话（沿用 GUI-17 的代次约定）。 */
+  async function openSession(item: Session) {
+    const request = ++conversationRequest.current;
+    const transcript = await invokeJson<Message[]>('assistant_transcript', { id: item.id });
+    if (runningRef.current || request !== conversationRequest.current) return;
+    session.current = item.id;
+    fresh.current = false;
+    setMessages(transcript);
+    setContextUsage(null);
+    setLimitReached(false);
+    setStepLimit(0);
+    setSessions(null);
+    setAttachNotice('');
+    // 用量是会话自己的：先清空并标"待加载"，下一次 usage 事件到达后再显示（U-07）。
+    setUsage('');
+    setSessionUsage({ turns: 0, tokens: 0 });
+    setUsagePending(true);
+    resetFollow();
+  }
   const view = guideState();
   const builtin = settings.backend === 'builtin';
   const selectedModel = builtin ? settings.model : settings.external[settings.backend]?.model || '';
@@ -678,7 +772,13 @@ export default function AssistantPanel() {
         <strong>{t('AI 助手', 'AI assistant')}</strong>
         <Button
           variant="ghost"
-          onClick={() => update({ assistantSettingsOpen: !state.assistantSettingsOpen })}
+          onClick={() => {
+            if (state.assistantSettingsOpen) void closeSettings();
+            else {
+              setSettingsDirty(false);
+              update({ assistantSettingsOpen: true });
+            }
+          }}
         >
           {t('设置', 'Settings')}
         </Button>
@@ -687,24 +787,29 @@ export default function AssistantPanel() {
         <Button
           disabled={running}
           onClick={() => {
-            // 设置面板开着时它占住了对话区，点了看不出变化（2026-10-22 用户反馈"无反应"）：先收起设置。
-            if (state.assistantSettingsOpen) update({ assistantSettingsOpen: false });
-            conversationRequest.current++;
-            session.current = null;
-            fresh.current = true;
-            grant.current = null;
-            setMessages([]);
-            setApproval(null);
-            setInput('');
-            setAttachments([]);
-            setUsage('');
-            setSessionUsage({ turns: 0, tokens: 0 });
-            setContextUsage(null);
-            setLimitReached(false);
-            setStepLimit(0);
-            setError('');
-            setAttachNotice('');
-            historyIndex.current = null;
+            void (async () => {
+              // 设置面板开着时它占住了对话区，点了看不出变化（2026-10-22 用户反馈"无反应"）：先收起设置；
+              // 有未保存草稿时先确认，用户选择继续编辑就不切换（U-07）。
+              if (!(await closeSettings())) return;
+              conversationRequest.current++;
+              session.current = null;
+              fresh.current = true;
+              grant.current = null;
+              setMessages([]);
+              setApproval(null);
+              setInput('');
+              setAttachments([]);
+              setUsage('');
+              setSessionUsage({ turns: 0, tokens: 0 });
+              setUsagePending(false);
+              setContextUsage(null);
+              setLimitReached(false);
+              setStepLimit(0);
+              setError('');
+              setAttachNotice('');
+              historyIndex.current = null;
+              resetFollow();
+            })();
           }}
         >
           {t('新对话', 'New conversation')}
@@ -712,14 +817,16 @@ export default function AssistantPanel() {
         <Button
           disabled={!ready || running}
           onClick={() => {
-            if (state.assistantSettingsOpen) update({ assistantSettingsOpen: false });
-            void perform(async () =>
-              setSessions(
-                sessions && !state.assistantSettingsOpen
-                  ? null
-                  : await invokeJson<Session[]>('assistant_sessions', {}),
-              ),
-            );
+            void (async () => {
+              if (!(await closeSettings())) return;
+              await perform(async () =>
+                setSessions(
+                  sessions && !state.assistantSettingsOpen
+                    ? null
+                    : await invokeJson<Session[]>('assistant_sessions', {}),
+                ),
+              );
+            })();
           }}
         >
           {t('会话历史', 'Conversation history')}
@@ -773,26 +880,7 @@ export default function AssistantPanel() {
           {sessions.length === 0 && <p>{t('没有历史会话。', 'No saved conversations.')}</p>}
           {sessions.map((item) => (
             <div key={item.id} className="flex gap-2">
-              <Button
-                disabled={running}
-                onClick={() =>
-                  void perform(async () => {
-                    const request = ++conversationRequest.current;
-                    const transcript = await invokeJson<Message[]>('assistant_transcript', {
-                      id: item.id,
-                    });
-                    if (runningRef.current || request !== conversationRequest.current) return;
-                    session.current = item.id;
-                    fresh.current = false;
-                    setMessages(transcript);
-                    setContextUsage(null);
-                    setLimitReached(false);
-                    setStepLimit(0);
-                    setSessions(null);
-                    setAttachNotice('');
-                  })
-                }
-              >
+              <Button disabled={running} onClick={() => void perform(() => openSession(item))}>
                 {item.title} · {item.turns} {t('问', 'turns')}
               </Button>
               <Button
@@ -819,6 +907,8 @@ export default function AssistantPanel() {
                       setAttachNotice('');
                       setUsage('');
                       setSessionUsage({ turns: 0, tokens: 0 });
+                      setUsagePending(false);
+                      resetFollow();
                     }
                     const inputs = await invoke<string[]>('assistant_input_history').catch(
                       () => null,
@@ -835,7 +925,12 @@ export default function AssistantPanel() {
       )}
       {state.assistantSettingsOpen && (
         <div className="max-h-[55vh] overflow-auto">
-          <AssistantSettings settings={settings} onSave={save} disabled={running} />
+          <AssistantSettings
+            settings={settings}
+            onSave={save}
+            disabled={running}
+            onDirtyChange={setSettingsDirty}
+          />
         </div>
       )}
       <p className="text-xs text-muted-foreground">
@@ -843,91 +938,125 @@ export default function AssistantPanel() {
         {view.title} · {state.versionRef?.id}@{state.versionRef?.revision} ·{' '}
         {model || selectedModel || t('默认模型', 'Default model')}
       </p>
-      <div
-        ref={log}
-        role="log"
-        aria-label={t('助手对话', 'Assistant conversation')}
-        className="min-h-32 flex-1 space-y-3 overflow-auto"
-      >
-        {messages.length === 0 && (
-          <section className="space-y-2">
-            {hasBackend() && settings.backend === 'builtin' && hasKey === false && (
-              <Notice>
-                <p>
-                  {t(
-                    '这个服务还没有登记 API Key；登记后才能发送，联网搜索也需要 DeepSeek Key。',
-                    'No API key is registered for this service yet; register one before sending. Web search also needs a DeepSeek key.',
-                  )}
-                </p>
-                <Button onClick={() => update({ assistantSettingsOpen: true })}>
-                  {t('去设置登记 Key', 'Register a key in Settings')}
-                </Button>
-              </Notice>
-            )}
-            <p>
-              {t('有四个内置站点示例，要不要试试？', 'Try one of our four bundled site examples.')}
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              {EXAMPLE_STARTERS.map((example) => (
-                <Button
-                  key={example.id}
-                  title={state.language === 'en' ? example.en : example.zh}
-                  className="min-w-0 text-xs"
-                  disabled={running}
-                  onClick={() => {
-                    const prompt = examplePrompt(example.id, state.language);
-                    setInput((value) => (value.trim() ? `${value}\n${prompt}` : prompt));
-                    historyIndex.current = null;
-                  }}
-                >
-                  {example.id}
-                </Button>
-              ))}
-            </div>
-            <Button disabled={running} onClick={() => navigate('new-case')}>
-              {t('查看四个示例', 'Browse the four examples')}
-            </Button>
-            <p className="text-sm text-muted-foreground">
-              {t('点示例只填写问题，发送前可修改。', 'Examples draft an editable question.')}
-            </p>
-          </section>
-        )}
-        {messages.map((item, index) =>
-          item.kind === 'tool' ? (
-            <details key={index} className="rounded border p-2">
-              <summary>
-                {item.name} ·{' '}
-                {item.result == null
-                  ? item.text || t('未完成', 'Incomplete')
-                  : item.ok
-                    ? t('完成', 'Completed')
-                    : t('失败', 'Failed')}
-              </summary>
-              <pre className="whitespace-pre-wrap break-all text-xs">{item.arguments}</pre>
-              {item.result != null && (
-                <pre className="whitespace-pre-wrap break-all text-xs">{item.result}</pre>
+      <div className="relative flex min-h-32 flex-1 flex-col">
+        <div
+          ref={log}
+          role="log"
+          aria-label={t('助手对话', 'Assistant conversation')}
+          className="min-h-0 flex-1 space-y-3 overflow-auto"
+          onScroll={trackScroll}
+        >
+          {messages.length === 0 && (
+            <section className="space-y-2">
+              {hasBackend() && settings.backend === 'builtin' && hasKey === false && (
+                <Notice>
+                  <p>
+                    {t(
+                      '这个服务还没有登记 API Key；登记后才能发送，联网搜索也需要 DeepSeek Key。',
+                      'No API key is registered for this service yet; register one before sending. Web search also needs a DeepSeek key.',
+                    )}
+                  </p>
+                  <Button
+                    onClick={() => {
+                      setSettingsDirty(false);
+                      update({ assistantSettingsOpen: true });
+                    }}
+                  >
+                    {t('去设置登记 Key', 'Register a key in Settings')}
+                  </Button>
+                </Notice>
               )}
-            </details>
-          ) : item.kind === 'reasoning' ? (
-            <details key={index}>
-              <summary>{t('思考过程', 'Reasoning')}</summary>
-              <p className="whitespace-pre-wrap text-sm">{item.text}</p>
-            </details>
-          ) : item.kind === 'task' ? (
-            <p key={index} className="text-xs">
-              {String(item.task?.goal || '')} · {String(item.task?.phase || item.task?.state || '')}
-            </p>
-          ) : (
-            <article
-              key={index}
-              className={`whitespace-pre-wrap break-words rounded p-2 ${item.kind === 'user' ? 'bg-muted' : ''}`}
-            >
-              <span className="text-xs text-muted-foreground">
-                {item.kind === 'user' ? t('你', 'You') : t('助手', 'Assistant')}
-              </span>
-              <div>{item.text}</div>
-            </article>
-          ),
+              <p>
+                {t(
+                  '有四个内置站点示例，要不要试试？',
+                  'Try one of our four bundled site examples.',
+                )}
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {EXAMPLE_STARTERS.map((example) => (
+                  <Button
+                    key={example.id}
+                    title={state.language === 'en' ? example.en : example.zh}
+                    className="min-w-0 text-xs"
+                    disabled={running}
+                    onClick={() => {
+                      const prompt = examplePrompt(example.id, state.language);
+                      setInput((value) => (value.trim() ? `${value}\n${prompt}` : prompt));
+                      historyIndex.current = null;
+                    }}
+                  >
+                    {example.id}
+                  </Button>
+                ))}
+              </div>
+              <Button disabled={running} onClick={() => navigate('new-case')}>
+                {t('查看四个示例', 'Browse the four examples')}
+              </Button>
+              <p className="text-sm text-muted-foreground">
+                {t('点示例只填写问题，发送前可修改。', 'Examples draft an editable question.')}
+              </p>
+            </section>
+          )}
+          {messages.map((item, index) =>
+            item.kind === 'tool' ? (
+              <details key={index} className="rounded border p-2">
+                <summary>
+                  {item.name} ·{' '}
+                  {item.result == null
+                    ? item.text || t('未完成', 'Incomplete')
+                    : item.ok
+                      ? t('完成', 'Completed')
+                      : t('失败', 'Failed')}
+                </summary>
+                <pre className="whitespace-pre-wrap break-all text-xs">{item.arguments}</pre>
+                {item.result != null && (
+                  <pre className="whitespace-pre-wrap break-all text-xs">{item.result}</pre>
+                )}
+              </details>
+            ) : item.kind === 'reasoning' ? (
+              <details key={index}>
+                <summary>{t('思考过程', 'Reasoning')}</summary>
+                <p className="whitespace-pre-wrap text-sm">{item.text}</p>
+              </details>
+            ) : item.kind === 'task' ? (
+              <p key={index} className="text-xs">
+                {String(item.task?.goal || '')} ·{' '}
+                {String(item.task?.phase || item.task?.state || '')}
+              </p>
+            ) : (
+              <article
+                key={index}
+                className={`break-words rounded p-2 ${item.kind === 'user' ? 'whitespace-pre-wrap bg-muted' : ''}`}
+              >
+                <span className="text-xs text-muted-foreground">
+                  {item.kind === 'user' ? t('你', 'You') : t('助手', 'Assistant')}
+                </span>
+                {/* 用户消息里可能有附件的 <document> 原文，永远按纯文本显示；Markdown 只用于助手回复。 */}
+                <div>
+                  {item.kind === 'assistant' ? (
+                    <Markdown text={item.text || ''} t={t} />
+                  ) : (
+                    item.text
+                  )}
+                </div>
+              </article>
+            ),
+          )}
+        </div>
+        {/* 暂停跟随时把"有新内容"放在对话区底部，不抢走键盘焦点、也不重新排对话。 */}
+        {unread && (
+          <Button
+            variant="primary"
+            style={{
+              position: 'absolute',
+              bottom: 8,
+              left: '50%',
+              transform: 'translateX(-50%)',
+            }}
+            onClick={scrollToLatest}
+          >
+            {t('有新内容，回到底部', 'New content — jump to the latest')}
+          </Button>
         )}
       </div>
       {approval && (
@@ -1206,24 +1335,29 @@ export default function AssistantPanel() {
       <p className="text-xs text-muted-foreground" role="status">
         {running
           ? t('正在处理…', 'Working…')
-          : sessionUsage.turns || sessionUsage.tokens
-            ? `${t('本会话', 'This conversation')}: ${[
-                sessionUsage.turns && `${sessionUsage.turns} ${t('轮', 'turns')}`,
-                `${sessionUsage.tokens} tokens`,
-                settings.session_turn_limit || settings.session_token_limit
-                  ? [
-                      settings.session_turn_limit &&
-                        `${sessionUsage.turns}/${settings.session_turn_limit}`,
-                      settings.session_token_limit &&
-                        `${sessionUsage.tokens}/${settings.session_token_limit}`,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
-                  : '',
-              ]
-                .filter(Boolean)
-                .join(' · ')}`
-            : usage}
+          : usagePending
+            ? t(
+                '用量待加载；发送下一条后会显示本会话的用量。',
+                "Usage is loading; it will show this conversation's numbers after the next reply.",
+              )
+            : sessionUsage.turns || sessionUsage.tokens
+              ? `${t('本会话', 'This conversation')}: ${[
+                  sessionUsage.turns && `${sessionUsage.turns} ${t('轮', 'turns')}`,
+                  `${sessionUsage.tokens} tokens`,
+                  settings.session_turn_limit || settings.session_token_limit
+                    ? [
+                        settings.session_turn_limit &&
+                          `${sessionUsage.turns}/${settings.session_turn_limit}`,
+                        settings.session_token_limit &&
+                          `${sessionUsage.tokens}/${settings.session_token_limit}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}`
+              : usage}
         {contextUsage &&
           ` · ${t('上下文估算', 'Context estimate')}: ${tokenLabel(contextUsage.tokens)} / ${tokenLabel(contextUsage.window)} tokens`}
       </p>

@@ -47,12 +47,14 @@ function declaration(name: string): string {
 }
 
 function execute<T>(name: string, context: Record<string, unknown>): T {
-  // GUI-05 之后页面函数会核对机器代次（hostEpoch/stillCurrent），有的还会写提示（setNotice）；
-  // 不关心这些的用例给一个"始终属于当前上下文"的默认值，避免每个用例重复写。
+  // GUI-05 之后页面函数会核对机器代次（hostEpoch/stillCurrent），有的还会写提示（setNotice）、
+  // 标记评估配置的保存状态（U-05）；不关心这些的用例给一个"始终属于当前上下文"的默认值。
   const withDefaults = {
     hostEpoch: { current: 0 },
     stillCurrent: () => true,
     setNotice: () => {},
+    setConfigSaving: () => {},
+    showRunNotice: () => {},
     ...context,
   };
   const code = ts.transpileModule(`${declaration(name)}; return ${name};`, {
@@ -559,7 +561,7 @@ test('running a configuration generated for older settings is refused', async ()
     fetchReport: async () => {},
     view: async () => {},
   });
-  await assert.rejects(run(), /generate the configuration again/);
+  await assert.rejects(run(), /generate the evaluation configuration again/);
   assert.deepEqual(calls, [], 'nothing is sent to the backend for a stale design (GUI-04)');
 });
 

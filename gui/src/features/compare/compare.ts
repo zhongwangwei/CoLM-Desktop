@@ -1,4 +1,5 @@
 import { bilingual } from '../../lib/bilingual';
+import type { SaveState } from '../../lib/save-status';
 import { remoteEndStatus } from '../runs/run-model';
 
 /** `bench_inspect` 读出的一个 history 目录。 */
@@ -343,6 +344,26 @@ export function parseReferences(value: unknown): BenchReference[] {
 }
 
 /**
+ * 一组格点模拟覆盖范围的并集（西, 东, 南, 北；向外取到 0.01 度，免得边上的格子被截掉）。
+ * 没有可读范围时 null。配置里的 lat_range/lon_range 和运行前条件摘要共用这一个结果（U-04）。
+ */
+export function unionRegion(
+  simulations: BenchSimulation[],
+): [number, number, number, number] | null {
+  const extents = simulations
+    .filter((s) => s.info.spatial && s.info.extent)
+    .map((s) => s.info.extent!);
+  if (!extents.length) return null;
+  const round = (v: number, up: boolean) => (up ? Math.ceil(v * 100) : Math.floor(v * 100)) / 100;
+  return [
+    round(Math.max(-180, Math.min(...extents.map((e) => e[0]))), false),
+    round(Math.min(180, Math.max(...extents.map((e) => e[1]))), true),
+    round(Math.max(-90, Math.min(...extents.map((e) => e[2]))), false),
+    round(Math.min(90, Math.max(...extents.map((e) => e[3]))), true),
+  ];
+}
+
+/**
  * 有格点模拟时按它们覆盖的范围（并集）裁，按给定分辨率比。不写时 OpenBench 按全球 0.5 度比：2026-10-23 在 7920
  * 上实测 GreaterBay 1 km 对 ERA5-Land，全球格网里只有 4 个格子有值；裁到模拟范围、按 0.25 度比是 39 个陆地格子。
  * 范围向外取到 0.01 度，免得边上的格子被截掉。
@@ -351,17 +372,13 @@ export function parseReferences(value: unknown): BenchReference[] {
  * 页面另有提示说明哪些模拟缺范围。
  */
 function gridLines(simulations: BenchSimulation[], gridRes?: number | null): string[] {
-  const withExtent = simulations.filter((s) => s.info.spatial && s.info.extent);
-  const extents = withExtent.map((s) => s.info.extent!);
+  const region = unionRegion(simulations);
   const lines: string[] = [];
-  if (extents.length) {
-    const round = (v: number, up: boolean) => (up ? Math.ceil(v * 100) : Math.floor(v * 100)) / 100;
-    const west = round(Math.max(-180, Math.min(...extents.map((e) => e[0]))), false);
-    const east = round(Math.min(180, Math.max(...extents.map((e) => e[1]))), true);
-    const south = round(Math.max(-90, Math.min(...extents.map((e) => e[2]))), false);
-    const north = round(Math.min(90, Math.max(...extents.map((e) => e[3]))), true);
-    lines.push(`  lat_range: [${south}, ${north}]`, `  lon_range: [${west}, ${east}]`);
-  }
+  if (region)
+    lines.push(
+      `  lat_range: [${region[2]}, ${region[3]}]`,
+      `  lon_range: [${region[0]}, ${region[1]}]`,
+    );
   // 目标分辨率不依赖范围：只有单点模拟时才有意不写 grid_res。
   if (gridRes && gridRes > 0 && simulations.some((s) => s.info.spatial))
     lines.push(`  grid_res: ${gridRes}`);
@@ -575,6 +592,128 @@ export function configInvalidation(args: {
   return yaml === generated.config ? 'clear' : 'keep-edited';
 }
 
+/** 运行前条件摘要的一行：双语标签 + 数据值（路径、名字、数字；不带需要翻译的整句）。 */
+export interface EvaluationSummaryItem {
+  label: [string, string];
+  value: string;
+}
+
+/**
+ * U-04：运行前条件摘要。入参必须就是要提交的完整设计（页面用同一个 `comparisonDesign()` 加机器身份），
+ * 这里不读页面状态，摘要与实际生成的配置、站点清单因此不会各算一份。
+ */
+export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryItem[] {
+  const { machine } = design;
+  const items: EvaluationSummaryItem[] = [
+    {
+      label: ['运行位置', 'Machine'],
+      value: machine.host
+        ? bilingual(`服务器 ${machine.host}`, `server ${machine.host}`)
+        : bilingual('本机', 'this computer'),
+    },
+    {
+      label: ['OpenBench 安装位置', 'OpenBench installed in'],
+      value: machine.openbenchRoot || bilingual('未安装', 'not installed'),
+    },
+    {
+      label: ['参考数据根目录', 'Reference data root'],
+      value: machine.refRoot || bilingual('未设置', 'not set'),
+    },
+    { label: ['比较项目目录', 'Comparison project folder'], value: design.projectDir || '—' },
+    { label: ['评估年份', 'Evaluation years'], value: `${design.years[0]}–${design.years[1]}` },
+    { label: ['时间尺度', 'Time scale'], value: design.timRes },
+  ];
+  design.simulations.forEach((sim, index) => {
+    const kind = sim.info.spatial ? bilingual('格点', 'gridded') : bilingual('单点', 'station');
+    const groupby =
+      sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'month');
+    const native = sim.gridRes ?? sim.info.resolution;
+    items.push({
+      label: [`模拟 ${index + 1}`, `Simulation ${index + 1}`],
+      value: [
+        sim.label,
+        kind,
+        sim.info.prefix,
+        `${sim.info.syear}–${sim.info.eyear}`,
+        groupby,
+        ...(native != null && native > 0 ? [`${native}°`] : []),
+        ...(sim.info.lon != null && sim.info.lat != null
+          ? [`${sim.info.lat}°, ${sim.info.lon}°`]
+          : []),
+        sim.info.history_dir,
+      ].join(' · '),
+    });
+  });
+  const grid = design.simulations.filter((sim) => sim.info.spatial);
+  if (grid.length) {
+    const region = unionRegion(design.simulations);
+    const missing = grid.filter((sim) => !sim.info.extent).map((sim) => sim.label);
+    const target =
+      design.gridRes != null && design.gridRes > 0
+        ? `${design.gridRes}°`
+        : bilingual('默认', 'default');
+    items.push({
+      label: ['区域与目标分辨率', 'Region and target resolution'],
+      value: [
+        `${bilingual('目标分辨率', 'target')} ${target}`,
+        region
+          ? `lat [${region[2]}, ${region[3]}] · lon [${region[0]}, ${region[1]}]`
+          : bilingual('区域未知', 'region unknown'),
+        ...(missing.length ? [`${bilingual('缺范围', 'no region')}: ${missing.join(', ')}`] : []),
+      ].join(' · '),
+    });
+  } else {
+    items.push({
+      label: ['区域与目标分辨率', 'Region and target resolution'],
+      value: bilingual('只有单点模拟，不裁区域', 'stations only; no region crop'),
+    });
+  }
+  const variables = Object.entries(design.variables)
+    .map(
+      ([variable, refs]) =>
+        [variable, (Array.isArray(refs) ? refs : [refs]).filter(Boolean)] as const,
+    )
+    .filter(([, refs]) => refs.length)
+    .sort(([left], [right]) => left.localeCompare(right));
+  items.push({
+    label: ['变量与参考数据', 'Variables and reference data'],
+    value: variables.length
+      ? variables.map(([variable, refs]) => `${variable}: ${refs.join(', ')}`).join('; ')
+      : bilingual('未选', 'none'),
+  });
+  items.push({
+    label: ['指标与评分', 'Metrics and scores'],
+    value: `${bilingual('指标', 'metrics')} [${(design.metrics ?? []).join(', ')}] · ${bilingual('评分', 'scores')} [${(design.scores ?? []).join(', ')}]`,
+  });
+  const advanced = [
+    design.weight ? `weight=${design.weight}` : '',
+    design.minYear != null ? `min_year=${design.minYear}` : '',
+    design.timeAlignment ? `time_alignment=${design.timeAlignment}` : '',
+    design.numCores != null ? `num_cores=${design.numCores}` : '',
+  ].filter(Boolean);
+  items.push({
+    label: ['高级选项', 'Advanced options'],
+    value: advanced.length ? advanced.join(' · ') : bilingual('默认', 'defaults'),
+  });
+  return items;
+}
+
+/**
+ * U-05：评估配置的保存状态。配置先只在页面上，直到「保存评估配置」生成文本、运行开始时由后端写进
+ * 比较项目目录：还没保存或设置变了 = dirty；正在提交（写配置给 OpenBench）= saving；与当前设计一致 = saved。
+ */
+export function configSaveState(args: {
+  yaml: string;
+  currentFingerprint: string;
+  generated: { fingerprint: string } | null;
+  submitting: boolean;
+}): SaveState {
+  if (args.submitting && args.yaml) return 'saving';
+  if (!args.yaml || !args.generated || args.generated.fingerprint !== args.currentFingerprint)
+    return 'dirty';
+  return 'saved';
+}
+
 /** 选中的模拟共同覆盖的年份（评估年份的缺省）；没有交集时为 null。 */
 export function commonYears(simulations: BenchSimulation[]): [number, number] | null {
   if (!simulations.length) return null;
@@ -733,16 +872,30 @@ export function benchErrorText(error: string): [string, string] {
   };
   if (text in fixed) return [text, fixed[text]!];
   const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    // GUI-07 服务器侧：同名比较还有未确认终态的作业时，sidecar 拒绝提交/取回，作业号在括号里。
+    // 括号后的中文动作说明不逐句翻（服务端措辞会变）：英文固定给出"还有未完成作业（作业号）"这一可操作含义。
+    [
+      // 作业号的括号可能是全角也可能被日志/包装层换成半角，两种都认。
+      // 真实服务端原文括号里是"作业号 <id>"（例如「作业号 bench-run-42」）；英文界面只需要 <id>，
+      // 不摘掉这个中文前缀就会输出 "(作业号 bench-run-42)" 的中英混排（交付审计实测）。
+      /^这个比较还有未完成的评估作业(?:[（(]([^）)]*)[）)])?([\s\S]*)$/,
+      (m) => {
+        const job = m[1]?.replace(/^作业号[：:\s]*/, '').trim();
+        return `This comparison already has an unfinished evaluation job${job ? ` (${job})` : ''}; confirm its final state or stop it before resubmitting.`;
+      },
+    ],
     // GUI-08：取回失败时后端保证本机旧镜像没有动过；错误里那半句固定说明要一起翻，页面据此
     // 提示"旧报告仍是上次成功版本"，不能只显示英文界面里夹着的中文原句。
+    // 内层错误可能自己带句号（GUI-07 服务器侧固定句子），嵌套前去掉，拼接后才不会出现".."。
     [
       /^取回失败：([\s\S]*)。本机旧报告未改动，仍是上次成功版本。$/,
       (m) =>
-        `Fetch failed: ${m[1]}. The previous report on this computer is unchanged; it is still the last successful version.`,
+        `Fetch failed: ${benchErrorText(m[1]!)[1].replace(/[。.]$/, '')}. The previous report on this computer is unchanged; it is still the last successful version.`,
     ],
     [
       /^取回失败：([\s\S]*)。本机原先没有这个比较的报告。$/,
-      (m) => `Fetch failed: ${m[1]}. There was no previous report of this comparison here.`,
+      (m) =>
+        `Fetch failed: ${benchErrorText(m[1]!)[1].replace(/[。.]$/, '')}. There was no previous report of this comparison here.`,
     ],
     [
       /^没有给 (\S+) 准备 uv，请自行安装 Python 与 colm-openbench$/,

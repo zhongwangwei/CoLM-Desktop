@@ -123,14 +123,15 @@ a {
   color: var(--muted);
   letter-spacing: 0.08em;
 }
+/* 列宽来自 App 按 shell-layout.ts 算出的 CSS 变量：rail 64、完整 208/232、助手分栏宽度都会变。 */
 .desktop-shell {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 232px) minmax(0, 1fr);
   height: 100%;
   background: var(--background);
 }
-.desktop-shell.assistant-visible {
-  grid-template-columns: 232px minmax(0, 1fr) 320px;
+.desktop-shell.assistant-column {
+  grid-template-columns: var(--sidebar-width, 232px) minmax(0, 1fr) var(--assistant-width, 320px);
 }
 .sidebar {
   display: flex;
@@ -611,9 +612,6 @@ table input {
   overflow-wrap: anywhere;
 }
 @media (max-width: 1240px) {
-  .desktop-shell.assistant-visible {
-    grid-template-columns: 208px minmax(0, 1fr) 300px;
-  }
   .sidebar {
     padding-left: 12px;
     padding-right: 12px;
@@ -726,9 +724,6 @@ table input {
 .desktop-shell {
   grid-template-rows: 44px minmax(0, 1fr);
 }
-.desktop-shell.assistant-visible {
-  grid-template-columns: 232px minmax(0, 1fr) var(--assistant-width, 320px);
-}
 .sidebar {
   grid-column: 1;
   grid-row: 2;
@@ -787,6 +782,68 @@ table input {
   opacity: 0.55;
   outline: none;
 }
+/* U-06 桌面壳变体：只改列宽与显隐来适应窗口，不改字号（审查要求不靠持续缩小字体）。
+   类名由 App.tsx 的 AppShell 按 lib/shell-layout.ts 的结果挂上。 */
+.app-toolbar .toolbar-toggle[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--border);
+}
+.desktop-shell.shell-nav-rail .sidebar {
+  padding: 18px 8px;
+}
+/* rail 只有 64px：当前项目卡与版本号放不下，收进"项目"图标入口；导航文字换成 aria/title。 */
+.desktop-shell.shell-nav-rail .current-project,
+.desktop-shell.shell-nav-rail .app-version {
+  display: none;
+}
+.desktop-shell.shell-nav-rail .nav-button {
+  padding: 10px 0;
+  justify-content: center !important;
+}
+.desktop-shell.shell-nav-rail .nav-label {
+  display: none;
+}
+.desktop-shell.shell-nav-rail .nav-icon {
+  margin-right: 0;
+}
+/* 专注视图：导航与助手都不渲染列，主区拿满窗口；工具栏留着，随时能退出。 */
+.desktop-shell.shell-focus {
+  grid-template-columns: minmax(0, 1fr);
+}
+.desktop-shell.shell-focus .main-pane {
+  grid-column: 1;
+}
+/* 覆盖式抽屉：不占网格列，浮在主区右侧；点遮罩、按 Escape、按工具栏开关都能收起。 */
+.desktop-shell.assistant-drawer .assistant-pane {
+  position: fixed;
+  top: 44px;
+  right: 0;
+  bottom: 0;
+  width: min(var(--assistant-width, 320px), calc(100vw - 64px));
+  z-index: 20;
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 28px rgb(16 36 58 / 18%);
+}
+[data-theme='dark'] .desktop-shell.assistant-drawer .assistant-pane {
+  box-shadow: -10px 0 28px rgb(0 0 0 / 45%);
+}
+.assistant-pane[hidden] {
+  display: none;
+}
+.assistant-drawer-backdrop {
+  position: fixed;
+  inset: 44px 0 0;
+  z-index: 19;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgb(14 28 44 / 24%);
+  cursor: pointer;
+}
+[data-theme='dark'] .assistant-drawer-backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+/* --- U-06 桌面壳变体结束 --- */
 .assistant-attach-button {
   align-items: center;
   display: inline-flex;
@@ -812,11 +869,6 @@ table input {
 .assistant-choices select {
   font-size: 12px;
   padding-left: 7px;
-}
-@media (max-width: 1240px) {
-  .desktop-shell.assistant-visible {
-    grid-template-columns: 208px minmax(0, 1fr) var(--assistant-width, 320px);
-  }
 }
 .project-home {
   max-width: 1200px;

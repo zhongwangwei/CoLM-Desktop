@@ -7,7 +7,7 @@ import * as setup from './scientific-setup';
 import * as presentation from '../../lib/param-presentation';
 import { bilingual } from '../../lib/bilingual';
 import { researchVersion } from './research-version';
-import { hubMethods } from './hub-methods';
+import { homeResearchEntry, hubMethods, hubResearchEntry, studyResearchEntry } from './hub-methods';
 import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 import { schemeVersionName } from './version-tree';
 import { isContentConflict, workspaceErrorText } from './workspace-errors';
@@ -16,6 +16,8 @@ import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import type { UiAction, UiField } from '../../lib/guide';
+import { SaveBadge } from '../../components/SaveBadge';
+import { saveStateText } from '../../lib/save-status';
 
 // StudyPicks 用 localStorage 记住选过的研究参数；node 里没有，给个空的。
 Object.defineProperty(globalThis, 'localStorage', {
@@ -62,8 +64,93 @@ function page(
     applicability: { sites: [], land_classes: [] },
   };
   let failedCommand = '';
+  // 被 hold 的命令与它的放行者（U-05：验证"正在保存"三态）。
+  let heldCommand: string | null = null;
+  let heldResolver: (() => void) | null = null;
   let draft = { ...version, id: 'custom', generation: 1 };
   let folderPick: string | null = null;
+  async function respondJson(command: string, args: Record<string, unknown>): Promise<unknown> {
+    switch (command) {
+      case 'model_create':
+        return draft;
+      case 'model_save_draft':
+        draft = args.draft as typeof draft;
+        return { ...draft, generation: draft.generation + 1 };
+      case 'model_freeze':
+        return { ...draft, version: { id: draft.id, revision: 2 } };
+      case 'model_configuration':
+        return {
+          fields: [],
+          process_files: [],
+          pft_parameters: [],
+          warnings: [],
+          context_complete: false,
+        };
+      case 'parameter_catalog':
+        return [];
+      case 'model_fields':
+        return setup.setupHandledKeys.map((name) => ({
+          name,
+          kind: name === 'DEF_TUNING_CROP_PLANTING_DAY' ? 'integer' : 'logical',
+          values: [],
+          section: '',
+          derived: false,
+          default: '.false.',
+        }));
+      case 'model_drafts':
+        return [draft];
+      case 'history_list':
+        return { items: [] };
+      case 'model_draft':
+        return draft;
+      case 'model_freeze_check':
+        return {
+          ready: false,
+          items: [
+            { code: 'clean', ok: true, blocking: false, message: '源码干净' },
+            {
+              code: 'engine_built',
+              ok: false,
+              blocking: true,
+              message: '先在当前提交上编译 Rust 引擎',
+            },
+          ],
+        };
+      case 'model_usage':
+        return state.usage;
+      case 'model_code_files':
+      case 'workspace_files':
+        return { entries: [] };
+      case 'model_code_file':
+      case 'workspace_file':
+        return { path: '', size: 0, text: null };
+      case 'parameter_type_defaults':
+        return [];
+      case 'standard_process_parameters':
+        return [];
+      case 'workspace_status':
+        return { changed_files: [] };
+      case 'workspace_check':
+        return {};
+      case 'model_delete_draft':
+      case 'model_branch_code':
+      case 'model_refresh_code':
+        return {};
+      case 'pick_folder':
+        return folderPick;
+      case 'model_import_study':
+        if (args.preview)
+          return {
+            study: '/study',
+            member: 'm000001',
+            objective: 1.25,
+            records: parameters,
+          };
+        return { draft, member: 'm000001', parameters: (args.only as unknown[]).length };
+      default:
+        throw Error(command);
+    }
+  }
   const notices: string[] = [];
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     scrolls: unknown[] = [],
@@ -73,6 +160,13 @@ function page(
     version,
     versionRef: version.version,
     versions: [version],
+    // 模拟明确选过的版本（U-01：研究基线不得写它）。
+    chosenVersion: null as null | { id: string; revision: number },
+    // 研究入口状态（U-01/U-02）：从"新建修改版"带进研究页的基线等。
+    researchBaseline: null as null | { id: string; revision: number },
+    researchMethod: null as string | null,
+    researchSeed: null as null | { parameters: unknown[] },
+    researchTarget: null as null | { draftId: string; name: string },
     simulationReturn: (subgrid ? { route: 'new-case', step: 2, subgrid } : null) as {
       route: 'new-case' | 'case';
       step: 2;
@@ -164,6 +258,9 @@ function page(
     historyStatusLabel,
     researchVersion,
     hubMethods,
+    hubResearchEntry,
+    homeResearchEntry,
+    studyResearchEntry,
     appLocale,
     schemeVersionName,
     compatibleKernel,
@@ -243,86 +340,15 @@ function page(
     invokeJson: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
       if (command === failedCommand) throw new Error(command + ' failed');
-      switch (command) {
-        case 'model_create':
-          return draft;
-        case 'model_save_draft':
-          draft = args.draft as typeof draft;
-          return { ...draft, generation: draft.generation + 1 };
-        case 'model_freeze':
-          return { ...draft, version: { id: draft.id, revision: 2 } };
-        case 'model_configuration':
-          return {
-            fields: [],
-            process_files: [],
-            pft_parameters: [],
-            warnings: [],
-            context_complete: false,
-          };
-        case 'parameter_catalog':
-          return [];
-        case 'model_fields':
-          return setup.setupHandledKeys.map((name) => ({
-            name,
-            kind: name === 'DEF_TUNING_CROP_PLANTING_DAY' ? 'integer' : 'logical',
-            values: [],
-            section: '',
-            derived: false,
-            default: '.false.',
-          }));
-        case 'model_drafts':
-          return [draft];
-        case 'history_list':
-          return { items: [] };
-        case 'model_draft':
-          return draft;
-        case 'model_freeze_check':
-          return {
-            ready: false,
-            items: [
-              { code: 'clean', ok: true, blocking: false, message: '源码干净' },
-              {
-                code: 'engine_built',
-                ok: false,
-                blocking: true,
-                message: '先在当前提交上编译 Rust 引擎',
-              },
-            ],
-          };
-        case 'model_usage':
-          return state.usage;
-        case 'model_code_files':
-        case 'workspace_files':
-          return { entries: [] };
-        case 'model_code_file':
-        case 'workspace_file':
-          return { path: '', size: 0, text: null };
-        case 'parameter_type_defaults':
-          return [];
-        case 'standard_process_parameters':
-          return [];
-        case 'workspace_status':
-          return { changed_files: [] };
-        case 'workspace_check':
-          return {};
-        case 'model_delete_draft':
-        case 'model_branch_code':
-        case 'model_refresh_code':
-          return {};
-        case 'pick_folder':
-          return folderPick;
-        case 'model_import_study':
-          if (args.preview)
-            return {
-              study: '/study',
-              member: 'm000001',
-              objective: 1.25,
-              records: parameters,
-            };
-          return { draft, member: 'm000001', parameters: (args.only as unknown[]).length };
-        default:
-          throw Error(command);
+      // U-05 要验证"正在保存"这一态：hold 的命令先把结果算出来（含草稿的副作用），
+      // 再挂住直到用例 releaseHeld()，页面就能在请求回来的这段时间里显示 saving。
+      if (command === heldCommand) {
+        const result = await respondJson(command, args);
+        return await new Promise((resolve) => {
+          heldResolver = () => resolve(result);
+        });
       }
+      return respondJson(command, args);
     },
     invoke: async (command: string) => {
       calls.push({ command, args: {} });
@@ -334,6 +360,9 @@ function page(
     workspaceErrorText,
     isContentConflict,
     sourceGuardReason,
+    // U-05：页面用 Lead 提供的共享三态徽标与措辞；这里用真实实现，测试检查它收到的 state。
+    SaveBadge,
+    saveStateText,
     // 真实实现是 Radix 对话框（只在打开时挂载、按钮由真实 React 渲染）。这个假框架只验证页面流程，
     // 未保存源码时的三选一在 code-files.test / source-edits.test 里单独证明；这里让 ask 直接放行，
     // 保持已有页面行为用例不变。
@@ -577,6 +606,17 @@ function page(
     fail: (command: string) => {
       failedCommand = command;
     },
+    // 让一条命令挂住不返回，直到 releaseHeld：页面在这段时间里显示"正在保存"（U-05）。
+    hold: (command: string) => {
+      heldCommand = command;
+      heldResolver = null;
+    },
+    releaseHeld: () => {
+      const resolve = heldResolver;
+      heldCommand = null;
+      heldResolver = null;
+      resolve?.();
+    },
     actions: () => visibleActions(),
   };
 }
@@ -815,7 +855,7 @@ test('frozen versions keep their next steps in the bottom bar, and freezing says
   // The official version in use: derive from it at the bottom, nothing to freeze.
   assert.ok(bar());
   assert.ok(button('基于它新建修改版'));
-  assert.ok(!button('冻结为新版本'));
+  assert.ok(!button('创建模型修订（冻结）'));
   await c.actions.find((action) => action.id === 'version-derive')!.run();
   await p.settle();
   assert.ok(p.state.versionsView === 'create', 'deriving opens the six ways');
@@ -824,11 +864,15 @@ test('frozen versions keep their next steps in the bottom bar, and freezing says
   await q.openDraft('custom');
   await q.mount();
   const freeze = q.elements.find(
-    (e) => e.type === 'Button' && e.children.flat().includes('冻结为新版本'),
+    (e) => e.type === 'Button' && e.children.flat().includes('创建模型修订（冻结）'),
   )!;
   (freeze.props.onClick as () => void)();
   await q.settle();
-  assert.match(q.notices.at(-1) ?? '', /已冻结为.*模拟已改用这个版本/);
+  assert.match(
+    q.notices.at(-1) ?? '',
+    /已创建模型修订.*模拟已改用这个修订/,
+    '普通草稿冻结沿用既有语义：新修订就是模拟接着用的版本',
+  );
 });
 
 test('the version library registers open, use and draft buttons but never deletion', async () => {
@@ -852,7 +896,9 @@ test('the version library registers open, use and draft buttons but never deleti
   assert.ok(ids.includes('version-new'), '新建修改版');
   assert.ok(ids.includes('version-select-modified-1'), '点版本名打开');
   assert.ok(ids.includes('version-open-modified-1'), '行里的"打开"');
-  assert.ok(ids.includes('version-use-modified-1'), '设为模拟使用');
+  assert.ok(ids.includes('version-use-modified-1'), '设为运行模型');
+  const use = c.actions.find((action) => action.id === 'version-use-modified-1')!;
+  assert.equal(use.label, '设为运行模型', 'U-05：动作名明确说明它改的是模拟运行模型');
   assert.ok(ids.includes('version-draft-custom'), '草稿行');
   assert.ok(ids.includes('version-resume-custom'), '继续编辑');
   // 界面上确实有删除（修改版可删），但它是 D 级动作，不登记。
@@ -971,4 +1017,140 @@ test('a study button is visible on the research tab but adding a pick needs a ch
     c.actions.some((action) => action.id.includes('study-pick-remove')),
     false,
   );
+});
+
+// U-01：从"新建修改版"选研究基线不得换掉模拟正在用的版本。base 通过界面上"基于哪个版本"的
+// Select（VersionHub 的 onBase）选择，和用户点选一样。
+test('a research method from 新建修改版 records its own baseline and keeps the run version', async () => {
+  const p = page();
+  p.state.versions.push({
+    ...p.version,
+    name: 'Soil scheme',
+    version: { id: 'soil', revision: 2 },
+  });
+  await p.mountHub();
+  const hub = p.elements.find((element) => element.type === 'VersionHub')!;
+  (hub.props.onBase as (key: string) => void)('soil#2');
+  p.render();
+  const c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-method-tuning')!.run();
+  await p.settle();
+  assert.deepEqual(p.state.researchBaseline, { id: 'soil', revision: 2 });
+  assert.equal(p.state.researchMethod, 'tuning');
+  assert.deepEqual(
+    p.state.versionRef,
+    { id: 'official', revision: 1 },
+    '选择研究基线不改模拟运行版本',
+  );
+  assert.deepEqual(p.state.version.version, { id: 'official', revision: 1 });
+  assert.equal(p.state.chosenVersion, null, '研究基线不是用户明确选择的运行版本');
+  assert.equal(p.routes.at(-1), 'research');
+});
+
+// U-01：从草稿的"研究"页签进去会先把草稿冻结成研究修订；这个修订只是研究基线，不是运行版本。
+test('the research tab on a draft freezes a study baseline without switching the run version', async () => {
+  const p = page();
+  await p.mount();
+  await p.openDraft('custom');
+  await p.click('version-tab-research');
+  const c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-method-tuning')!.run();
+  await p.settle();
+  const freeze = p.calls.find((call) => call.command === 'model_freeze')!;
+  assert.equal(freeze.args.finish, false, '为研究冻结时草稿保留，研究结果还要写回它');
+  assert.deepEqual(p.state.researchBaseline, { id: 'custom', revision: 2 });
+  assert.deepEqual(p.state.versionRef, { id: 'official', revision: 1 });
+  assert.equal(p.state.chosenVersion, null);
+  assert.deepEqual(p.state.researchTarget, { draftId: 'custom', name: 'Official' });
+  assert.equal(p.routes.at(-1), 'research');
+});
+
+test('the research tab on a frozen revision records it as the baseline only', async () => {
+  const p = page();
+  await p.mount();
+  await p.click('version-tab-research');
+  const c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-method-uncertainty')!.run();
+  await p.settle();
+  assert.deepEqual(p.state.researchBaseline, { id: 'official', revision: 1 });
+  assert.deepEqual(p.state.versionRef, { id: 'official', revision: 1 });
+  assert.equal(p.state.chosenVersion, null, '用这个版本做研究，不等于把它设为运行模型');
+  assert.ok(!p.calls.some((call) => call.command === 'model_freeze'));
+});
+
+// U-01/U-05：研究结果形成的修订冻结后不改运行版本，必须点「设为运行模型」才生效。
+test('a revision frozen from study results becomes the run model only after 设为运行模型', async () => {
+  const p = page();
+  // 研究写回后版本页直接打开那个草稿：confirmWriteBack 会设 openDraft + researchTarget。
+  p.state.versions.push({ ...p.version, name: 'Official', version: { id: 'custom', revision: 2 } });
+  await p.mount();
+  await p.openDraft('custom');
+  Object.assign(p.state, { researchTarget: { draftId: 'custom', name: 'PFT study' } });
+  let c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-freeze')!.run();
+  c = await p.settle();
+  assert.deepEqual(
+    p.state.versionRef,
+    { id: 'official', revision: 1 },
+    '研究修订冻结后模拟仍用原来的版本',
+  );
+  assert.equal(p.state.chosenVersion, null);
+  assert.match(p.notices.at(-1) ?? '', /研究基线/, '提示里说清楚运行版本没有被改动');
+  const use = c.actions.find((action) => action.id === 'version-use-custom-2');
+  assert.ok(use, '冻结出研究修订后必须给显式的「设为运行模型」动作');
+  assert.equal(use.label, '设为运行模型');
+  await use.run();
+  await p.settle();
+  assert.deepEqual(p.state.versionRef, { id: 'custom', revision: 2 });
+  assert.deepEqual(p.state.chosenVersion, { id: 'custom', revision: 2 });
+});
+
+// U-05：草稿保存的三态 + 失败保留 dirty + 字段改动清掉过时的成功提示。
+test('draft saving reports dirty, saving and saved, and keeps edits when the save fails', async () => {
+  const p = page();
+  await p.mount();
+  await p.openDraft('custom');
+  await p.settle();
+  const badge = () =>
+    p.elements.find((element) => element.type === SaveBadge) as Element | undefined;
+  // 取真实字符串节点（JSON.stringify 会把提示里的引号转义，正则对不上）。
+  const texts = () => {
+    const out: string[] = [];
+    const walk = (node: unknown) => {
+      if (typeof node === 'string') out.push(node);
+      else if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === 'object') walk((node as Element).children);
+    };
+    walk(p.elements);
+    return out.join('\n');
+  };
+  assert.equal(badge()?.props.state, 'saved', '刚打开的草稿没有未保存修改');
+  let c = await p.settle();
+  c.fields.find((field) => field.id === 'draft-name')!.set('renamed');
+  c = await p.settle();
+  assert.equal(badge()?.props.state, 'dirty');
+  // 写盘请求还挂着：徽标是"正在保存"，旁边也说正在保存。
+  p.hold('model_save_draft');
+  void c.actions.find((action) => action.id === 'version-save')!.run();
+  p.render();
+  assert.equal(badge()?.props.state, 'saving');
+  assert.match(texts(), /正在把草稿写进版本库/);
+  // 让挂住的请求把放行者装好，再放行。
+  await p.settle();
+  p.releaseHeld();
+  c = await p.settle();
+  assert.equal(badge()?.props.state, 'saved');
+  assert.match(texts(), /已保存草稿"renamed"/);
+  // 再改字段：上一条"已保存草稿…"必须清掉，不能停在已经改过的内容旁边。
+  c.fields.find((field) => field.id === 'draft-name')!.set('renamed again');
+  c = await p.settle();
+  assert.equal(badge()?.props.state, 'dirty');
+  assert.doesNotMatch(texts(), /已保存草稿/);
+  // 保存失败：错误显示出来、dirty 保留，徽标绝不回到"已保存"。
+  p.fail('model_save_draft');
+  void c.actions.find((action) => action.id === 'version-save')!.run();
+  await p.settle();
+  assert.equal(badge()?.props.state, 'dirty', '保存失败保留未保存状态');
+  assert.doesNotMatch(texts(), /已保存草稿/);
+  assert.match(texts(), /model_save_draft failed/);
 });

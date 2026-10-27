@@ -1,5 +1,20 @@
 import { bilingual } from '../../lib/bilingual';
 import { utcSeconds } from '../../lib/dates';
+import type { VersionRef } from '../../lib/types';
+
+/**
+ * 一项研究“用哪个模型修订”的基线（U-01）。
+ *
+ * 从"新建修改版"启动研究时，用户选的那一版只是研究基线，不能顺手写成模拟正在用的版本，否则别的
+ * 算例会被静默换掉。研究首页没有显式基线（用户没选版本），退回当前运行修订，行为与改动前一致。
+ * 已建好的研究不用这里的结果：研究页以自己记录（manifest 的 model_version）的冻结修订为准。
+ */
+export function researchBaselineOf(
+  baseline: VersionRef | null | undefined,
+  runVersion: VersionRef,
+): VersionRef {
+  return baseline ?? runVersion;
+}
 export interface ParameterContext {
   name: string;
   id: string;

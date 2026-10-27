@@ -232,6 +232,13 @@ export type AppState = {
   } | null;
   /** 模型版本页显示哪一页：`create` 是"新建修改版"的 6 种方式，`library` 是全部版本。 */
   versionsView?: 'create' | 'library';
+  /**
+   * 研究的模型基线（U-01）：从"新建修改版"选中的那一版，研究读参数、建研究和冻结研究修订都用它。
+   * 它和 `version`/`versionRef`/`chosenVersion`（模拟正在用的运行版本）是两件事：选研究基线不得改
+   * 全局运行版本，已有研究则用它自己记下的冻结修订（研究页里优先于本字段）。没有显式基线时研究页
+   * 退回当前运行修订；离开研究入口或从研究首页重新开始时清掉。
+   */
+  researchBaseline?: VersionRef | null;
   /** 从"新建修改版"点进研究时要直接打开的方法（tuning、uncertainty…），研究页用完清掉。 */
   researchMethod?: string | null;
   /** 版本页选好的要研究的参数：研究页加载参数行之后据此勾选，用完清掉。 */

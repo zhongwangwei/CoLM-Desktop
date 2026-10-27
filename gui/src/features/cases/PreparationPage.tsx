@@ -3,7 +3,7 @@ import { invoke } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
-import { Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
+import { Button, Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import { requiredNumber, preparedDestination, casePreparationOptions } from './case-model';
 interface Slot {
@@ -50,6 +50,415 @@ interface Probe {
 }
 let currentLang = 'zh';
 const t = (zh: string, enText: string) => (currentLang === 'en' ? enText : zh);
+
+/**
+ * 数据准备结果的结构化摘要（U-05）。
+ *
+ * 这一页的后端返回值不止一种形状：转换强迫场/下载 ERA5 返回输出路径字符串；制作站点返回带
+ * readiness 的报告；修复缺测返回带 missing/unresolved 的报告；表格拆分与观测转换返回数组；
+ * 「检查输入」还会把探测结果当结果。原来一律 JSON.stringify，用户看不出成功还是缺数据。
+ *
+ * 这里只读后端**真实存在**的字段：字段没有就返回 null，界面显示"后端没有提供"而不是编一个 0。
+ * 做成纯函数是为了能直接单测（本文件被 page-results.test.ts 按源码抽取函数，不能随便加自由标识符）。
+ */
+type PreparationResultSummary = {
+  /** complete：产物已写出；partial：写出了但还需处理；checked：只是检查、没有写产物；unknown：结构不认识的完成结果。 */
+  state: 'complete' | 'partial' | 'checked' | 'unknown';
+  kind:
+    | 'forcing'
+    | 'era5'
+    | 'site'
+    | 'observations'
+    | 'table-split'
+    | 'gap-report'
+    | 'probe'
+    | 'unknown';
+  /** 后端明确给出的输出路径（没有就是 null；页面可以另用自己记录的成功写入路径兜底）。 */
+  output: string | null;
+  /** GapReport.missing：后端报的缺测总数。 */
+  missing: number | null;
+  /** GapReport.unresolved：处理后仍未解决的缺测数。 */
+  unresolved: number | null;
+  /** SiteReport.needs_external.length：运行时仍需 rawdata 提供的字段数。 */
+  needsExternal: number | null;
+  /** 表格拆分/观测转换里的条目数（后端数组长度）。 */
+  sites: number | null;
+  /** 观测转换的站数（ConvertedObservationSite 条目数）。 */
+  converted: number | null;
+  /** 后端原样给出的观测警告。 */
+  warnings: string[];
+  /** SiteReport.readiness 的三档。 */
+  readiness: 'self-contained' | 'needs-rawdata' | 'blocked' | null;
+  /** 输入检查里后端给出的槽位数（Probe.slots）。 */
+  slots: number | null;
+  /** 输入检查里后端给出的变量/列字段数。 */
+  fields: number | null;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const finiteNumber = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const stringField = (record: Record<string, unknown>, key: string): string | null => {
+  const value = record[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+};
+
+function emptySummary(
+  kind: PreparationResultSummary['kind'],
+  state: PreparationResultSummary['state'],
+): PreparationResultSummary {
+  return {
+    state,
+    kind,
+    output: null,
+    missing: null,
+    unresolved: null,
+    needsExternal: null,
+    sites: null,
+    converted: null,
+    warnings: [],
+    readiness: null,
+    slots: null,
+    fields: null,
+  };
+}
+
+/**
+ * `gapCheckOnly`：结果是不是只来自「检查缺测」（还没写产物）。缺测报告与修复报告的 JSON 结构相同，
+ * 只有页面知道刚点的是哪个按钮；不能从字段形状反推，否则会把一次检查说成"已修复"。
+ */
+function summarizePreparationResult(
+  result: unknown,
+  mode: string,
+  gapCheckOnly = false,
+): PreparationResultSummary | null {
+  if (result == null) return null;
+  if (typeof result === 'string') {
+    if (!result) return null;
+    // 生成强迫场与下载 ERA5 都只返回输出路径；两者靠页面当前任务区分。
+    return { ...emptySummary(mode === 'era5' ? 'era5' : 'forcing', 'complete'), output: result };
+  }
+  if (Array.isArray(result)) {
+    const items = result.filter(isRecord);
+    if (items.some((item) => stringField(item, 'staged_path'))) {
+      // 表格拆分只写暂存文件，最终强迫场还没落盘，所以不把 staged_path 当"输出路径"。
+      const staged = items.filter((item) => stringField(item, 'staged_path'));
+      return { ...emptySummary('table-split', 'partial'), sites: staged.length };
+    }
+    const converted = items.filter((item) => stringField(item, 'path'));
+    const warnings = converted.flatMap((item) =>
+      Array.isArray(item.warnings)
+        ? item.warnings.filter((warning): warning is string => typeof warning === 'string')
+        : [],
+    );
+    return {
+      ...emptySummary('observations', warnings.length ? 'partial' : 'complete'),
+      converted: items.length,
+      output: converted.length === 1 ? stringField(converted[0], 'path') : null,
+      warnings,
+    };
+  }
+  if (!isRecord(result)) return emptySummary('unknown', 'unknown');
+  // 制作站点：path + readiness；比缺测报告先判断（站点报告没有 missing/unresolved）。
+  if (stringField(result, 'path') && typeof result.readiness === 'string') {
+    const readiness =
+      result.readiness === 'self_contained'
+        ? 'self-contained'
+        : result.readiness === 'ready_with_rawdata'
+          ? 'needs-rawdata'
+          : result.readiness === 'blocked'
+            ? 'blocked'
+            : null;
+    return {
+      ...emptySummary('site', readiness === 'self-contained' ? 'complete' : 'partial'),
+      output: stringField(result, 'path'),
+      needsExternal: Array.isArray(result.needs_external) ? result.needs_external.length : null,
+      readiness,
+    };
+  }
+  // 缺测报告（检查缺测与修复缺测同构）。
+  if (
+    typeof result.missing === 'number' ||
+    typeof result.unresolved === 'number' ||
+    typeof result.needs_era5 === 'boolean'
+  ) {
+    const missing = finiteNumber(result.missing);
+    const unresolved = finiteNumber(result.unresolved);
+    const state = gapCheckOnly
+      ? 'checked'
+      : unresolved === 0 || (unresolved === null && missing === 0)
+        ? 'complete'
+        : 'partial';
+    return {
+      ...emptySummary('gap-report', state),
+      output: stringField(result, 'path'),
+      missing,
+      unresolved,
+    };
+  }
+  // 输入检查（Probe）：slots/variables/columns 是探测结果，没有写任何产物。
+  if (
+    Array.isArray(result.slots) ||
+    Array.isArray(result.variables) ||
+    Array.isArray(result.columns)
+  ) {
+    const slots = Array.isArray(result.slots) ? result.slots.length : null;
+    const variables = Array.isArray(result.variables) ? result.variables.length : 0;
+    const columns = Array.isArray(result.columns) ? result.columns.length : 0;
+    return {
+      ...emptySummary('probe', 'checked'),
+      slots,
+      fields:
+        Array.isArray(result.variables) || Array.isArray(result.columns)
+          ? variables + columns
+          : null,
+    };
+  }
+  // 结构不认识的完成结果：只显示后端真的给了一个 path 的情况，其余一律不猜。
+  return { ...emptySummary('unknown', 'unknown'), output: stringField(result, 'path') };
+}
+
+const kindText = (
+  kind: PreparationResultSummary['kind'],
+  t: (zh: string, en: string) => string,
+) => {
+  switch (kind) {
+    case 'forcing':
+      return t('强迫场文件', 'Forcing file');
+    case 'era5':
+      return t('ERA5-Land 文件', 'ERA5-Land file');
+    case 'site':
+      return t('站点文件', 'Site file');
+    case 'observations':
+      return t('观测转换', 'Converted observations');
+    case 'table-split':
+      return t('表格拆分', 'Split table');
+    case 'gap-report':
+      return t('缺测报告', 'Gap report');
+    case 'probe':
+      return t('输入检查', 'Input check');
+    case 'unknown':
+      return t('处理结果', 'Processing result');
+  }
+};
+
+const stateText = (
+  state: PreparationResultSummary['state'],
+  t: (zh: string, en: string) => string,
+) => {
+  switch (state) {
+    case 'complete':
+      return t('成功', 'Completed');
+    case 'partial':
+      return t('部分完成', 'Partially completed');
+    case 'checked':
+      return t('已检查，未写产物', 'Checked, nothing written');
+    case 'unknown':
+      return t('已完成', 'Finished');
+  }
+};
+
+const stateTone = (state: PreparationResultSummary['state']): 'success' | 'warning' | 'info' =>
+  state === 'complete' ? 'success' : state === 'partial' ? 'warning' : 'info';
+
+/**
+ * 结果区的展示组件（从页面里拆出来，静态渲染就能验证）。只渲染摘要与后端原始字段；不认识的形状
+ * 只给"已收到结果"和原始 JSON，不虚构状态、缺测数或下一步。
+ */
+function PreparationResultView({
+  result,
+  mode,
+  gapCheckOnly = false,
+  en,
+  hasSelectedCase = false,
+  /** 页面自己记录的成功写入路径（缺测修复的 GapReport 不带路径，但后端成功写到了用户给的 dst）。 */
+  fallbackOutput = null,
+  onOpenRuns,
+}: {
+  result: unknown;
+  mode: string;
+  gapCheckOnly?: boolean;
+  en: boolean;
+  hasSelectedCase?: boolean;
+  fallbackOutput?: string | null;
+  onOpenRuns?: () => void;
+}) {
+  const t = (zh: string, enText: string) => (en ? enText : zh);
+  const summary = summarizePreparationResult(result, mode, gapCheckOnly);
+  if (!summary) return null;
+  // 兜底路径只对"后端成功写了文件却没回路径"的缺测报告有意义；别的形状不能拿上一次生成的结果贴到
+  // 这一次的结果上（例如先转 netcdf、再拆表格，表格只是暂存，没有最终输出）。
+  const output = summary.output ?? (summary.kind === 'gap-report' ? fallbackOutput : null);
+  const tone = stateTone(summary.state);
+  const readiness =
+    summary.readiness === 'self-contained'
+      ? t('自带完整字段，可直接运行', 'Self-contained; ready to run')
+      : summary.readiness === 'needs-rawdata'
+        ? t('运行时仍需要 rawdata 提供部分字段', 'Some fields still come from rawdata at run time')
+        : summary.readiness === 'blocked'
+          ? t('缺 rawdata，暂时不能运行', 'Blocked until rawdata is available')
+          : null;
+  const steps: string[] = [];
+  if (summary.kind === 'table-split')
+    steps.push(
+      t(
+        '下方逐站点点「修复并完成」；需要站点文件时用「制作站点」。',
+        'Finalize each site below; choose “Create site” if site files are needed.',
+      ),
+    );
+  if (summary.kind === 'gap-report') {
+    if (summary.state === 'checked')
+      steps.push(
+        t(
+          '确认缺测处理方式后点「生成数据」写入产物；需要补齐时先在高级设置里选 ERA5 辅助文件。',
+          'Confirm how gaps should be handled, then click “Generate data”. Choose an ERA5 auxiliary file under advanced settings if gaps need filling.',
+        ),
+      );
+    else if (summary.state === 'partial')
+      steps.push(
+        t(
+          '仍有缺测未解决：提供 ERA5 辅助文件或调整设置后重新生成；当前产物不完整。',
+          'Some gaps remain: provide the ERA5 auxiliary file or adjust settings and generate again; the current output is incomplete.',
+        ),
+      );
+    else if (summary.output)
+      // 表格逐站"修复并完成"把最终路径和报告合在一起返回；这是这一站落盘的确认。
+      steps.push(
+        t(
+          '这一站的最终强迫场已写入；其余站点按下方列表继续。',
+          'This site’s final forcing was written; continue with the remaining sites listed below.',
+        ),
+      );
+    else
+      steps.push(
+        t(
+          '缺测已处理完，可在「项目」里打开算例运行，或点下方「用于新算例」。',
+          'Gaps are handled; open a case under Project to run it, or use “Use for new case” below.',
+        ),
+      );
+  }
+  if (summary.kind === 'site' && summary.state === 'partial')
+    steps.push(
+      t(
+        '运行前还需要 rawdata 目录提供缺的字段。',
+        'Running still needs the missing fields from a rawdata directory.',
+      ),
+    );
+  if (summary.kind === 'site' && summary.state === 'complete')
+    steps.push(
+      t(
+        '站点文件已生成，可点下方「用于新算例」带着它继续。',
+        'The site file is ready; use “Use for new case” below to continue with it.',
+      ),
+    );
+  if (summary.kind === 'forcing' || summary.kind === 'era5')
+    steps.push(
+      t(
+        '可在「项目」里打开算例运行，或点下方「用于新算例」带着这些文件继续。',
+        'Open a case under Project to run it, or use “Use for new case” below to continue with these files.',
+      ),
+    );
+  if (summary.kind === 'observations')
+    steps.push(
+      t(
+        '这些观测文件可用于比较与评估页的参考数据。',
+        'These observation files can be used as reference data on the Compare page.',
+      ),
+    );
+  if (summary.kind === 'probe')
+    steps.push(
+      t(
+        '确认变量与单位后点「生成数据」。',
+        'Confirm the variables and units, then click “Generate data”.',
+      ),
+    );
+  if (summary.kind === 'unknown')
+    steps.push(
+      t(
+        '后端没有提供可结构化的状态，完整数据见下方原始 JSON。',
+        'The backend returned no structured status; see the raw JSON below for the complete data.',
+      ),
+    );
+  if (
+    !hasSelectedCase &&
+    (summary.kind === 'forcing' || summary.kind === 'era5' || summary.state === 'complete')
+  )
+    steps.push(
+      t(
+        '还没有打开算例：先在「项目」里打开一个算例，再点「检查并运行」。',
+        'No case is open yet: open one under Project, then use “Review and run”.',
+      ),
+    );
+  return (
+    <Card title={t('处理结果', 'Processing result')}>
+      <Notice tone={tone}>
+        {stateText(summary.state, t)} · {kindText(summary.kind, t)}
+      </Notice>
+      {output && (
+        <p>
+          <strong>{t('输出路径', 'Output path')}</strong>
+          <br />
+          <code>{output}</code>
+        </p>
+      )}
+      {summary.missing !== null && (
+        <p>
+          {t(`缺测 ${summary.missing} 个`, `${summary.missing} missing value(s)`)}
+          {summary.unresolved !== null &&
+            summary.unresolved > 0 &&
+            t(
+              `；处理后仍有 ${summary.unresolved} 个未解决`,
+              `; ${summary.unresolved} still unresolved after processing`,
+            )}
+        </p>
+      )}
+      {summary.needsExternal !== null && summary.needsExternal > 0 && (
+        <p>
+          {t(
+            `运行时仍需外部 rawdata 提供 ${summary.needsExternal} 个字段`,
+            `${summary.needsExternal} field(s) still need external rawdata at run time`,
+          )}
+        </p>
+      )}
+      {readiness && <p>{readiness}</p>}
+      {summary.sites !== null && (
+        <p>{t(`拆分站点 ${summary.sites} 个`, `${summary.sites} site(s) split`)}</p>
+      )}
+      {summary.converted !== null && (
+        <p>{t(`已转换站点 ${summary.converted} 个`, `${summary.converted} site(s) converted`)}</p>
+      )}
+      {summary.slots !== null && (
+        <p>
+          {t(`识别到 ${summary.slots} 个强迫场槽位`, `${summary.slots} forcing slot(s) detected`)}
+          {summary.fields !== null &&
+            t(`、${summary.fields} 个字段`, `, ${summary.fields} column(s)`)}
+        </p>
+      )}
+      {summary.warnings.length > 0 && (
+        <Notice tone="warning">{summary.warnings.join(en ? '; ' : '；')}</Notice>
+      )}
+      {steps.map((step) => (
+        <p className="muted" key={step}>
+          {t('下一步：', 'Next: ')}
+          {step}
+        </p>
+      ))}
+      {hasSelectedCase && onOpenRuns && (
+        <div className="actions">
+          <Button onClick={onOpenRuns}>{t('去「检查并运行」', 'Go to “Review and run”')}</Button>
+        </div>
+      )}
+      {/* 原始 JSON 保留完整数据，默认折叠；结构化摘要丢掉的字段随时能查。 */}
+      <details>
+        <summary>{t('原始结果（JSON）', 'Raw result (JSON)')}</summary>
+        <pre>{JSON.stringify(result, null, 2)}</pre>
+      </details>
+    </Card>
+  );
+}
 export default function PreparationPage() {
   const { state, notify, navigate, update } = useApp();
   currentLang = state.language;
@@ -85,6 +494,8 @@ export default function PreparationPage() {
     [busy, setBusy] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
     [result, setResult] = useState<unknown>(null),
+    // 缺测检查与修复的报告 JSON 同构，只有这里知道刚才点的是哪个按钮：检查不该被说成"已修复"。
+    [gapCheckOnly, setGapCheckOnly] = useState(false),
     [error, setError] = useState(''),
     [declined, setDeclined] = useState(''),
     // 这一页做出来、能直接给新算例用的文件：站点文件、转换或修补好的强迫场。
@@ -100,6 +511,8 @@ export default function PreparationPage() {
   ];
   const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
   const set = (k: string, v: string) => {
+    // 字段一改，上一次的成功结果就过时了：先清掉，别让旧的"成功"挂在页面上（U-05）。
+    if (form[k] !== v) setResult(null);
     if (k === 'src' && v !== form.src) {
       setProbe(null);
       setSlots([]);
@@ -116,6 +529,8 @@ export default function PreparationPage() {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
+    // 新操作一开始就清掉旧结果：失败时页面上不能还挂着上一次的成功卡片。
+    setResult(null);
     setError('');
     setDeclined('');
     try {
@@ -633,7 +1048,17 @@ export default function PreparationPage() {
         )}
       </Notice>
       {/* 这一页原来只把失败放进 PageContract/全局通知；页面内没有落点，用户取消覆盖后看不到任何说明。 */}
-      {error && <Notice tone="error">{error}</Notice>}
+      {error && (
+        <>
+          <Notice tone="error">{error}</Notice>
+          <p className="muted">
+            {t(
+              '可以直接修改输入后再点「生成数据」重试；已经写出的文件不会被自动删除。',
+              'Adjust the inputs and click “Generate data” again to retry; files already written are not deleted automatically.',
+            )}
+          </p>
+        </>
+      )}
       {declined && <Notice>{declined}</Notice>}
       <Card>
         <div className="form-grid">
@@ -687,15 +1112,16 @@ export default function PreparationPage() {
               action="prep-gaps"
               label={t('检查缺测', 'Inspect gaps')}
               disabled={busy || !probe}
-              run={() =>
-                work(() =>
+              run={() => {
+                setGapCheckOnly(true);
+                return work(() =>
                   invoke('probe_forcing_gaps', {
                     src: form.src,
                     slots: choices(),
                     options: gapOptions(),
                   }),
-                )
-              }
+                );
+              }}
             >
               {t('检查缺测', 'Check gaps')}
             </ActionButton>
@@ -715,7 +1141,10 @@ export default function PreparationPage() {
                     ? t('先点"检查输入"核对字段', 'Click “Inspect input” to check the fields first')
                     : undefined
             }
-            run={execute}
+            run={() => {
+              setGapCheckOnly(false);
+              return execute();
+            }}
           />
           {busy && (
             <ActionButton
@@ -774,9 +1203,18 @@ export default function PreparationPage() {
         </Card>
       )}
       {result != null && (
-        <Card title={t('实际处理结果', 'Processing result')}>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
-        </Card>
+        <PreparationResultView
+          result={result}
+          mode={mode}
+          gapCheckOnly={gapCheckOnly}
+          en={state.language === 'en'}
+          hasSelectedCase={!!state.selectedCase}
+          // 缺测修复的 GapReport 不带路径，但页面知道后端成功写到了用户给的输出位置。
+          fallbackOutput={produced.met ?? produced.site ?? null}
+          onOpenRuns={() => {
+            navigate('case', 'runs');
+          }}
+        />
       )}
     </div>
   );

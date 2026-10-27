@@ -537,11 +537,14 @@ export function parameterLocation(
       'Data and period → managed with spin-up dates (not edited separately)',
     );
   if (parameter.raw_key === 'DEF_dir_output')
-    return t('总的设定 → 自动生成输出路径', 'General setup → generated output directory');
+    return t(
+      '运行环境与保存位置 → 自动生成输出路径',
+      'Run environment and save location → generated output directory',
+    );
   const field = { name: parameter.raw_key, section: parameter.section };
   const step = simulationOptionField(field) ? 4 : simulationFieldStep(field);
   const labels = [
-    t('总的设定', 'General setup'),
+    t('运行环境与保存位置', 'Run environment and save location'),
     t('范围与网格', 'Range and grid'),
     t('数据与时段', 'Data and period'),
     t('模型结构与方案', 'Model structure and schemes'),

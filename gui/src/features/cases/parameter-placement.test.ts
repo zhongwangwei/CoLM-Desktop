@@ -38,7 +38,7 @@ test('the full catalog covers every current schema variable and gives each recor
     const location = parameterLocation(parameter, modelFields);
     assert.match(
       location,
-      /^(总的设定|范围与网格|数据与时段|模型结构与方案|检查与运行|模型版本|只读上下文)/,
+      /^(运行环境与保存位置|范围与网格|数据与时段|模型结构与方案|检查与运行|模型版本|只读上下文)/,
       parameter.id,
     );
     if (parameter.scope !== 'case-scalar') assert.match(location, /模型版本/, parameter.id);
