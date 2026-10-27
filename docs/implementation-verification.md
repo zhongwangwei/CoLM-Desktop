@@ -37771,3 +37771,8 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 **LULCC + LCT feedback 的 soiltext 修复（2026-10-27，7920l）**：`mkinidata/MOD_Initialize.F90` 原来只在 `DEF_Runoff_SCHEME == 3` 或 `CatchLateralFlow` 时读 `soiltext`；TOPMODEL（scheme 0）下 `soiltext` 未初始化，LULCC 年界写的 const 重启含垃圾值，导致 N=1 vs N=7 的 `soiltext` 值差异。改为 scheme 0 也读 `soiltext`。重跑 LCT 2003/2004、开漫滩回馈与 LULCC：3 rank（1 worker）vs 9 rank（7 workers）**2194 个文件，value_diff=0**，27 个文件仅 HDF5 布局字节不同。
 
 **多 IO group shard skeleton 精确失败点（2026-10-27）**：`create_shard_skeleton` 中 `ncio_create_file`、`time` 维度、`ucat_ucid` 都成功；进入 `shard_coords` 后，两 IO rank 的 `get_unitcatchment_file()` 都指向 `landdata/riverlake/unitcatchment_regional.nc`，`INQUIRE` 均存在，`seq_x/seq_y` 变量也确实存在；随后在 `ncio_read_serial(seq_x/seq_y)` 处失败（Netcdf error: No such file or directory）。所以不是路径不存在，而是 IO rank 读取区域 unitcatchment 的 `ncio_read_serial` 路径本身有问题。
+
+**多节点 N=4/N=8 逐字节复验（2026-10-27）**：
+- 7920l 556 分汊算例：N=1 vs N=4，1125 个共享输出文件全部 `cmp` 一致（N=4 只额外有 `.colm-spmd/endpoint` 启动文件）；N=8 被拒绝，因为 556 只有 4 个 landpatch block（"4 landpatch blocks cannot be split over 8 processes"）。
+- tianhe hb64 64-block 探针：N=1 vs N=8，**634/634 文件逐字节一致**；N=8 每个 rank 8 个 block、176 patch，N=1 为 1408 patch。
+- 结论：Rust 多节点契约从 N=2 扩展到 N=8（hb64）和 N=4（556 分汊）。
