@@ -37621,3 +37621,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **未重跑**：全球河湖+history 组合；LULCC+feedback。
 
 **Phase C 首项（2026-10-27）**：PR 512 的 volume 缓存——无分汊/堤防时，子步起点与 history 累加的库容直接取 `volwater_ucat`，不再每个子步 `curve.volume(wdsrf)`。逐位不变；hb64 河湖开 1 task vs 2 node 复验 **634/634**。
+
+**Phase C 第二项（2026-10-27）**：`RiverSystem` 的上游表改成 CSR（`upstream_start` + 一维 `upstream`），去掉每单元一个 `Vec`；汇流内三处 push 循环按切片遍历。逐位不变；hb64 河湖开 1 vs 2 node **634/634**。

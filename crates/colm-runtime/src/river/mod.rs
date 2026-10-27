@@ -449,10 +449,18 @@ impl RiverModel {
         );
         let bifurcation = bifurcation.map(|bif| {
             // 全网当成一个河系：单元流域按全局序号，上下游关系不变。
+            let mut upstream_start = Vec::with_capacity(n + 1);
+            let mut upstream = Vec::new();
+            for ups in &network.upstream {
+                upstream_start.push(upstream.len());
+                upstream.extend_from_slice(ups);
+            }
+            upstream_start.push(upstream.len());
             let system = network::RiverSystem {
                 cells: (0..n).collect(),
                 next: network.next.clone(),
-                upstream: network.upstream.clone(),
+                upstream_start,
+                upstream,
             };
             (bif, system)
         });
@@ -1310,7 +1318,8 @@ fn route_system<'a>(
         for k in 0..n {
             let push = |value: fn(&Face) -> f64| {
                 let mut total = 0.0;
-                for &u in &system.upstream[k] {
+                let ups = &system.upstream[system.upstream_start[k]..system.upstream_start[k + 1]];
+                for &u in ups {
                     let value = value(&faces[u]);
                     if value == 0.0 {
                         continue;
@@ -1359,7 +1368,8 @@ fn route_system<'a>(
             }
             let push_resv = |k: usize, value: fn(&Face) -> f64| {
                 let mut total = 0.0;
-                for &u in &system.upstream[k] {
+                let ups = &system.upstream[system.upstream_start[k]..system.upstream_start[k + 1]];
+                for &u in ups {
                     let value = value(&resv_faces[u]);
                     if value == 0.0 {
                         continue;
@@ -1739,7 +1749,8 @@ fn bifurcation_substep(
     };
     let push = |faces: &[Face], k: usize, value: fn(&Face) -> f64| {
         let mut total = 0.0;
-        for &u in &system.upstream[k] {
+        let ups = &system.upstream[system.upstream_start[k]..system.upstream_start[k + 1]];
+        for &u in ups {
             let value = value(&faces[u]);
             if value == 0.0 {
                 continue;

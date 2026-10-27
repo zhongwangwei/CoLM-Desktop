@@ -140,7 +140,10 @@ impl FloodplainCurve {
 pub struct RiverSystem {
     pub cells: Vec<usize>,
     pub next: Vec<i32>,
-    pub upstream: Vec<Vec<usize>>,
+    /// CSR 上游表：`upstream[upstream_start[k]..upstream_start[k + 1]]` 是第 k 个局部单元的上游。
+    /// 河系内单元按全局序号递增，上游也按该顺序排列；展开成一维避免了每个单元一个 `Vec`。
+    pub upstream_start: Vec<usize>,
+    pub upstream: Vec<usize>,
 }
 
 /// 全球单元流域网络与区域 patch 到它的径流映射。
@@ -290,23 +293,30 @@ impl RiverNetwork {
         }
         let systems = system_cells
             .into_iter()
-            .map(|cells| RiverSystem {
-                next: cells
-                    .iter()
-                    .map(|&i| {
-                        let j = next[i];
-                        if j >= 0 {
-                            local[j as usize] as i32
-                        } else {
-                            j
-                        }
-                    })
-                    .collect(),
-                upstream: cells
-                    .iter()
-                    .map(|&i| upstream[i].iter().map(|&u| local[u]).collect())
-                    .collect(),
-                cells,
+            .map(|cells| {
+                let mut upstream_start = Vec::with_capacity(cells.len() + 1);
+                let mut upstream_flat = Vec::new();
+                for &i in &cells {
+                    upstream_start.push(upstream_flat.len());
+                    upstream_flat.extend(upstream[i].iter().map(|&u| local[u]));
+                }
+                upstream_start.push(upstream_flat.len());
+                RiverSystem {
+                    next: cells
+                        .iter()
+                        .map(|&i| {
+                            let j = next[i];
+                            if j >= 0 {
+                                local[j as usize] as i32
+                            } else {
+                                j
+                            }
+                        })
+                        .collect(),
+                    upstream_start,
+                    upstream: upstream_flat,
+                    cells,
+                }
             })
             .collect::<Vec<_>>();
         let curves = (0..n)
