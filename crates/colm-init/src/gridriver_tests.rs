@@ -530,3 +530,12 @@ fn reservoir_parameters_default_to_the_unit_catchment_file() {
         Path::new("/data/dams.nc")
     );
 }
+
+#[test]
+fn duplicate_dam_seq_rows_keep_the_first_catalogue_row() {
+    // PR 512: several rows in one unit catchment keep the first row from the file,
+    // not the smallest dam id and not a hard stop.
+    assert_eq!(super::first_dam_seq_rows(&[2, 1, 2, 3, 1]), vec![0, 1, 3]);
+    assert_eq!(super::first_dam_seq_rows(&[7]), vec![0]);
+    assert_eq!(super::first_dam_seq_rows(&[]), Vec::<usize>::new());
+}

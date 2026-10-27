@@ -80,22 +80,16 @@ impl Reservoir {
         if let Some(regional) = regional {
             colm_init::unitcatchment_regional::translate_dam_seq(&mut dam_seq_all, path, regional)?;
         }
-        let rows = dam_seq_all.len();
-        ensure!(
-            grand_id.len() == rows,
-            "reservoir dam_GRAND_ID and dam_seq lengths differ"
-        );
-        let mut sorted = dam_seq_all.clone();
-        sorted.sort_unstable();
-        ensure!(
-            sorted.windows(2).all(|pair| pair[0] != pair[1]),
-            "duplicate dam_seq entries in reservoir parameter file"
-        );
         let year = read::<i32>(&file, "dam_year", path)?;
         let total = read::<f64>(&file, "dam_TotalVol_mcm", path)?;
         let conservation = read::<f64>(&file, "dam_ConVol_mcm", path)?;
         let q_normal_all = read::<f64>(&file, "dam_Qn", path)?;
         let q_flood_all = read::<f64>(&file, "dam_Qf", path)?;
+        let rows = dam_seq_all.len();
+        ensure!(
+            grand_id.len() == rows,
+            "reservoir dam_GRAND_ID and dam_seq lengths differ"
+        );
         for (name, len) in [
             ("dam_year", year.len()),
             ("dam_TotalVol_mcm", total.len()),
@@ -105,6 +99,23 @@ impl Reservoir {
         ] {
             ensure!(len == rows, "reservoir {name} and dam_seq lengths differ");
         }
+        let keep = colm_init::gridriver::first_dam_seq_rows(&dam_seq_all);
+        if keep.len() < rows {
+            eprintln!(
+                "Warning: {} reservoir rows share a dam_seq with an earlier row; keeping the first in the file",
+                rows - keep.len()
+            );
+        }
+        let pick_i32 = |values: &[i32]| keep.iter().map(|&i| values[i]).collect::<Vec<_>>();
+        let pick_f64 = |values: &[f64]| keep.iter().map(|&i| values[i]).collect::<Vec<_>>();
+        let grand_id = pick_i32(&grand_id);
+        let dam_seq_all = pick_i32(&dam_seq_all);
+        let year = pick_i32(&year);
+        let total = pick_f64(&total);
+        let conservation = pick_f64(&conservation);
+        let q_normal_all = pick_f64(&q_normal_all);
+        let q_flood_all = pick_f64(&q_flood_all);
+        let rows = keep.len();
         let n = network.len();
         let mut of_catchment = vec![None; n];
         let mut reservoir = Self {

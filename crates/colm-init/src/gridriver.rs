@@ -440,6 +440,17 @@ fn write_bifurcation_cold_state(
     Ok(())
 }
 
+/// 重复 `dam_seq` 时保留参数表中第一次出现的行；PR 512 的 `reservoir_init` 同样
+/// 只保留首行并打印 warning，而不是停机。
+pub fn first_dam_seq_rows(dam_seq: &[i32]) -> Vec<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    dam_seq
+        .iter()
+        .enumerate()
+        .filter_map(|(row, &seq)| seen.insert(seq).then_some(row))
+        .collect()
+}
+
 fn read_reservoir_cold_state(
     parameters: &Path,
     catchments: usize,
@@ -472,16 +483,25 @@ fn read_reservoir_cold_state(
             && flood_outflow.len() == rows,
         "GridRiverLake reservoir parameter vectors must have the same length"
     );
-    let mut sorted_sequence = sequence.clone();
-    sorted_sequence.sort_unstable();
-    ensure!(
-        sorted_sequence.windows(2).all(|pair| pair[0] != pair[1]),
-        "GridRiverLake reservoir parameter file has duplicate dam_seq entries"
-    );
+    let keep = first_dam_seq_rows(&sequence);
+    if keep.len() < rows {
+        eprintln!(
+            "Warning: {} reservoir rows share a dam_seq with an earlier row; keeping the first in the file",
+            rows - keep.len()
+        );
+    }
+    let pick = |values: &[i32]| keep.iter().map(|&i| values[i]).collect::<Vec<_>>();
+    let pick_f64 = |values: &[f64]| keep.iter().map(|&i| values[i]).collect::<Vec<_>>();
+    let sequence = pick(&sequence);
+    let build_year = pick(&build_year);
+    let total_volume = pick_f64(&total_volume);
+    let conservation_volume = pick_f64(&conservation_volume);
+    let normal_outflow = pick_f64(&normal_outflow);
+    let flood_outflow = pick_f64(&flood_outflow);
 
     let mut identity = Vec::new();
     let mut volume = Vec::new();
-    for index in 0..rows {
+    for index in 0..keep.len() {
         if !(1..=catchments as i32).contains(&sequence[index]) {
             continue;
         }

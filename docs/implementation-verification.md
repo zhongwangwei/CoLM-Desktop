@@ -37609,9 +37609,10 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - hb64 河湖开 1 task vs 2 node：**634/634** 文件逐字节相同；
 - hb64 河湖关 + HOURLY history 1 vs 2 node：**633/633** 逐字节相同（新曲线下重新生成的两侧一致）。
 
+**重复 `dam_seq`**：Rust 与 mkinidata 冷启动现在保留参数表中第一次出现的行并打印 warning，不再停机；新增 `first_dam_seq_rows` 测试（`[2,1,2,3,1] → [0,1,3]`）。vendor 运行时仍保留旧的停机检查，留到 Phase D vendor 对齐。
+
 **尚未完成（Phase A 剩余）**：
 - 漫滩回馈 + LULCC（Rust 仍拒绝多进程 LULCC，vendor 仍拒绝反馈+LULCC）；
-- 重复 `dam_seq` 保留首行而不是停机；
 - worker 无元素/零长度维的 Fortran 修复（Rust 侧不适用）；
 - 这些完成前不声称与 PR 512 全量对齐；下一步按 PR 的 commits 继续。
 

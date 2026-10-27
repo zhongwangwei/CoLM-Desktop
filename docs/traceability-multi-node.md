@@ -61,7 +61,7 @@
 
 ### RQ3：河湖与 history
 
-**Phase A 第一批（2026-10-27）**：漫滩曲线改累积面积、`qresv_ups_prev` 级联水库、`DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`、`DEF_Reservoir_Method=2` 保留；提交 `4fb639f3`，8 节点全球 10 天复验 job 8784590（22:27）。详见 implementation-verification 第 826 轮。
+**Phase A 第一批（2026-10-27）**：漫滩曲线改累积面积、`qresv_ups_prev` 级联水库、`DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`、`DEF_Reservoir_Method=2` 保留；提交 `4fb639f3`、后续重复 dam_seq 修复，8 节点全球 10 天复验 job 8784590（22:27）。详见 implementation-verification 第 826 轮。
 
 - **源码**
   - `crates/colm-runtime/src/river/`：河网、路由、reservoir/levee/bifurcation/flood
