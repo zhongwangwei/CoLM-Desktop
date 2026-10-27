@@ -37698,3 +37698,9 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase C tracer/sed 回退（2026-10-27）**：Rust 逐簇 dt 只在 `bif.is_some() && tracer 关闭 && sediment 关闭` 时启用；带 tracer/sediment 的分汊仍走原来的全局同步 dt，避免未验证的示踪物/泥沙子步混用。556 算例无 tracer/sed，走簇路径。
 
 **Phase C Rust 簇 dt 复验（2026-10-27，7920l）**：加 tracer/sed 回退后重编当前源码，556 分汊算例 1 node vs 2 node 仍 **1125/1125 文件逐字节一致**。
+
+**Phase C Rust 簇 dt 对照（2026-10-27，7920l）**：
+- 用 `d0404a54` 源码在 7920l 重建无簇 dt 基线二进制。
+- 无分汊 556 算例：当前源码 vs 基线，1125/1125 文件逐字节一致——重构没有改变无分汊路径。
+- 有分汊 556 算例 N=1：当前 vs 基线 1122 个文件相同，3 个不同——逐簇 dt 确实改变了分汊时间离散，符合预期。
+- 当前源码有分汊 N=1 vs N=2 仍 1125/1125 逐字节一致。
