@@ -37680,3 +37680,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - 运行 `colm.x` 两份：3 rank（1 worker + 1 IO）与 9 rank（7 worker + 2 IO），算例开启 `DEF_USE_GridRiverLakeFlow=.true.`、`DEF_UnitCatchment_regional=.true.`，先跑无分汊再跑 `DEF_USE_BIFURCATION=.true.` 各 1 天。
 - 两种配置各 1125 个输出文件；逐变量对比（含 history/restart/unitcat/gridriver）**0 个数值差异**。其中 15 个文件字节不同，差异只在 NetCDF/HDF5 文件布局（chunk/元数据），变量值完全一致。
 - 结论：当前 vendor 的 N worker vs 7 worker 数值一致；Fortran 文件层不是逐字节一致，逐字节契约仍以 Rust 的 hb64 634/634 为准。
+
+**Phase D Rust 分汊 N=1 vs N=2（2026-10-27，7920l）**：同一 556 区域算例，开启 `DEF_USE_BIFURCATION=.true.`，用当前 Rust 引擎跑 1 node 与 2 node；输出 1125 个文件全部 `cmp` 一致（restart/history/land unitcat）。这是逐簇 dt 改动前的基线。
