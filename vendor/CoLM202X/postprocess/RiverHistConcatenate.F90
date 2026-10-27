@@ -74,6 +74,11 @@ PROGRAM river_hist_concatenate
          CALL CoLM_stop ('river_hist_concatenate: missing arguments')
       ENDIF
 
+      ! Scan_shards builds an ls command with the target single-quoted; a single
+      ! quote cannot be represented and must be rejected before any shell call.
+      CALL reject_unquotable (nlfile,     'namelist')
+      CALL reject_unquotable (filetarget, 'target')
+
       ! read_namelist contains MPI broadcasts; every rank must participate before
       ! non-master ranks leave the postprocess-only program.
       CALL read_namelist (nlfile)
@@ -99,6 +104,17 @@ PROGRAM river_hist_concatenate
 #endif
 
 CONTAINS
+
+   !> Reject paths that cannot be safely embedded in a single-quoted shell word.
+   SUBROUTINE reject_unquotable (path, what)
+   character(len=*), intent(in) :: path, what
+      IF (index(path, "'") > 0) THEN
+         write(*,'(4A)') 'ERROR: the ', trim(what), ' path contains a single quote, ', &
+            'which cannot be passed safely to the shell:'
+         write(*,'(2A)') '       ', trim(path)
+         CALL CoLM_stop ('river_hist_concatenate: unsupported path')
+      ENDIF
+   END SUBROUTINE reject_unquotable
 
    !> Discover every run segment of this period and check identity agreement.
    !!
