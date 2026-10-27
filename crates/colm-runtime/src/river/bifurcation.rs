@@ -345,6 +345,43 @@ impl Bifurcation {
         veloc: &mut [f64],
         momen: &mut [f64],
     ) -> BifurcationFlux {
+        // Common case: every pathway advances with the same substep.
+        let dt_paths = vec![dt; self.paths()];
+        let dt_cells = vec![dt; net.len()];
+        self.calc_with_path_dt(
+            net,
+            wdsrf,
+            wdsrf_prev,
+            volwater,
+            &dt_paths,
+            &dt_cells,
+            normal_outgoing,
+            reservoir,
+            levee,
+            veloc,
+            momen,
+        )
+    }
+
+    /// Same as [`calc`], but with one substep per bifurcation pathway. The
+    /// pathway's cluster dt is used for both its momentum update and its
+    /// storage/limiter bounds, so the two ends of a pathway always agree.
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_with_path_dt(
+        &self,
+        net: &RiverNetwork,
+        wdsrf: &[f64],
+        wdsrf_prev: &[f64],
+        volwater: &[f64],
+        dt_paths: &[f64],
+        dt_cells: &[f64],
+        normal_outgoing: &[f64],
+        reservoir: &[Option<f64>],
+        levee: Option<BifurcationLevee<'_>>,
+        veloc: &mut [f64],
+        momen: &mut [f64],
+    ) -> BifurcationFlux {
+        assert_eq!(dt_paths.len(), self.paths(), "one dt per pathway");
         let n = net.len();
         let levels = self.levels;
         let paths = self.paths();
@@ -418,6 +455,7 @@ impl Bifurcation {
 
         // Step 3：逐路径逐层的局部惯性更新与限流量。
         for p in 0..paths {
+            let dt = dt_paths[p];
             let i_up = self.upst[p];
             // 水库里的水静止：两端任一是已建成的水库都不走分汊。
             if is_reservoir(i_up) {
@@ -546,9 +584,11 @@ impl Bifurcation {
         // 堤内一侧的总出流限制。
         if use_protected {
             for i in 0..n {
-                if protected_outgoing[i] > 0.0 && dt > 0.0 {
-                    protected_rate[i] =
-                        limiter_fraction(protected[i].max(0.0), protected_outgoing[i] * dt);
+                if protected_outgoing[i] > 0.0 && dt_cells[i] > 0.0 {
+                    protected_rate[i] = limiter_fraction(
+                        protected[i].max(0.0),
+                        protected_outgoing[i] * dt_cells[i],
+                    );
                 }
             }
         }
@@ -557,8 +597,8 @@ impl Bifurcation {
             let reference = visible[i].max(0.0);
             let normal = normal_outgoing[i].max(0.0);
             let bif_outflow = outgoing[i];
-            if bif_outflow > 0.0 && dt > 0.0 {
-                let remaining = (reference / dt - normal).max(0.0);
+            if bif_outflow > 0.0 && dt_cells[i] > 0.0 {
+                let remaining = (reference / dt_cells[i] - normal).max(0.0);
                 if remaining < bif_outflow {
                     out_rate[i] = (remaining / bif_outflow).min(1.0);
                 }
@@ -570,6 +610,7 @@ impl Bifurcation {
             if !active[p] {
                 continue;
             }
+            let dt = dt_paths[p];
             let i_up = self.upst[p];
             let Some(i_dn) = self.down[p] else { continue };
             total[p] = 0.0;

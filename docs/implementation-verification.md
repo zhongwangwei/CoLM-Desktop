@@ -37688,3 +37688,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - `MOD_Grid_RiverLakeFlow` 的 `sync_global_routing_dt` 改为按簇归约；共享簇取各 worker 最小值，不再被全局最小压死。
 - 在 7920l 556 区域算例（`DEF_USE_BIFURCATION=.true.`）跑 3 rank（1 worker+1 IO）vs 9 rank（7 worker+2 IO）：日志显示 **79 个河系 → 76 个簇，N=9 时 4 个跨 worker 簇**；1125 个输出文件逐变量 **0 差异**（15 个文件仅 HDF5 布局字节不同）。
 - Rust 侧同一算例 N=1 vs N=2 是 1125/1125 **文件逐字节一致**；vendor 逐簇 dt 后仍需在 Rust 侧实现并复验。
+
+**Phase C 分汊逐路径 dt 基础（2026-10-27）**：`Bifurcation::calc` 保留为同 dt 包装，新增 `calc_with_path_dt`/`dt_cells`；路径动量、5% 端点蓄量、逐单元总出流都用所属路径/单元的 dt。现有 8 个 bifurcation 单测和全部 runtime 测试通过；主循环仍未接簇级 dt。
