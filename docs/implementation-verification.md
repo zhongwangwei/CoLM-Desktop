@@ -37674,3 +37674,9 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - 本机并行全量 `cargo test --workspace --lib --bins` 的 `colm-cli` NetCDF 失败是 Homebrew HDF5 并发问题；`--test-threads=1` 通过，CI 不受影响。
 
 **Phase C 簇 dt 归约（2026-10-27）**：`connected_river_system_groups` 现在把并查集根压成 0..k-1 的确定性标签；新增 `cluster_routing_dt`，按簇取逐河系限制最小值、无效值退回 `min(10, dt_res)`、并夹到该簇剩余时间。合成网络单测覆盖共享簇/独立簇/剩余时间/无效值。routing 主循环仍用全局 dt。
+
+**Phase D Fortran N=1 vs N>1 数值回归（2026-10-27，7920l）**：
+- 在 7920l 的 `/media/zhwei/data02/zhwei/colm-fortran-test`，用 conda MPICH/gfortran 15.2 + netCDF-Fortran 构建当前 `vendor/CoLM202X`；`mksrfdata`/`mkinidata` 用 9 rank 生成 556 区域算例初场。
+- 运行 `colm.x` 两份：3 rank（1 worker + 1 IO）与 9 rank（7 worker + 2 IO），算例开启 `DEF_USE_GridRiverLakeFlow=.true.`、`DEF_UnitCatchment_regional=.true.`，先跑无分汊再跑 `DEF_USE_BIFURCATION=.true.` 各 1 天。
+- 两种配置各 1125 个输出文件；逐变量对比（含 history/restart/unitcat/gridriver）**0 个数值差异**。其中 15 个文件字节不同，差异只在 NetCDF/HDF5 文件布局（chunk/元数据），变量值完全一致。
+- 结论：当前 vendor 的 N worker vs 7 worker 数值一致；Fortran 文件层不是逐字节一致，逐字节契约仍以 Rust 的 hb64 634/634 为准。
