@@ -37619,3 +37619,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **新曲线 8 节点全球复验**（job 8784590，480 步、河湖关、history none）：墙钟 **22:27**，主循环 1073.0–1158.6 s，patches 主导，`CoLM Execution Completed.`；最终 restart 正常写出。与旧曲线 21:55 的差异属于节点噪声和新积分曲线，未做旧/新曲线逐字节比较（结果本应改变）。
 
 **未重跑**：全球河湖+history 组合；LULCC+feedback。
+
+**Phase C 首项（2026-10-27）**：PR 512 的 volume 缓存——无分汊/堤防时，子步起点与 history 累加的库容直接取 `volwater_ucat`，不再每个子步 `curve.volume(wdsrf)`。逐位不变；hb64 河湖开 1 task vs 2 node 复验 **634/634**。

@@ -1483,12 +1483,12 @@ fn route_system<'a>(
             let curve = &net.curves[i];
             let (sum_h, sum_m, sum_z) = sums[k];
             // `volwater = FNMA(visible_hflux, dt, volwater)`。
+            // 无分汊/堤防时不需要由水深重算库容：`volwater_ucat` 就是初始化和每个子步
+            // 更新后的蓄量（PR 512 的 volume 缓存，逐位不变）。
             let start = if let Some(j) = built[k] {
                 reservoirs[j].1
-            } else if volume_state {
-                volwater_ucat[k]
             } else {
-                curve.volume(wdsrf[k])
+                volwater_ucat[k]
             };
             if !sed_start.is_empty() {
                 let protected = match (sed_levee, lev.as_ref()) {
@@ -1604,10 +1604,8 @@ fn route_system<'a>(
             let w = wdsrf[k];
             let volwater = if let Some(j) = built[k] {
                 reservoirs[j].1
-            } else if volume_state {
-                volwater_ucat[k]
             } else {
-                curve.volume(w)
+                volwater_ucat[k]
             };
             let rivsto = volwater.min(curve.rivstomax);
             let floodarea = if levee_floodarea[k] > 0.0 {
