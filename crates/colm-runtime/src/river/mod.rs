@@ -1088,6 +1088,10 @@ fn route_system<'a>(
 ) -> SystemResult<'a> {
     let cells = &system.cells;
     let n = cells.len();
+    // 分汊时按路径连通簇分组；非分汊路径全部分到 0 组，保持原全局同步。
+    let bif_groups = bif.as_ref().map(|run| run.bif.river_system_groups(net));
+    let groups = bif_groups.unwrap_or_else(|| vec![0usize; net.river_systems]);
+    let n_groups = groups.iter().copied().max().map_or(1, |m| m + 1);
     let mut sed = sed_in.map(|sed_in| SedimentOut {
         acc: cells.iter().map(|&i| sed_in.acc[i]).collect(),
         bif: sed_in.bif.cloned(),
@@ -1449,37 +1453,42 @@ fn route_system<'a>(
             binding.note(dt_this, k);
         }
         let dt = match (bif.as_mut(), dt_sys.as_mut()) {
-            (Some(run), Some(dt_sys)) => bifurcation_substep(
-                net,
-                system,
-                run,
-                dt_sys,
-                dt_res,
-                &wdsrf,
-                &volwater_ucat,
-                &mut faces,
-                &mut sums,
-                &mut bif_sum,
-                ReservoirView {
-                    built: &built,
-                    reservoirs: &reservoirs,
-                    q: &mut qresv,
-                },
-                MomentumLimit {
-                    on: momentum_limit,
-                    momen: &momen,
-                    veloc: &veloc,
-                    binding: &mut binding,
-                },
-                lev.as_ref().map(|lev| {
-                    (
-                        levee.expect("levee"),
-                        lev.iter().map(|l| l.0).collect::<Vec<_>>(),
-                        lev.iter().map(|l| l.1).collect::<Vec<_>>(),
-                    )
-                }),
-                &mut bif_lev_sum,
-            ),
+            (Some(run), Some(dt_sys)) => {
+                let dt_group = bifurcation_substep(
+                    net,
+                    system,
+                    run,
+                    dt_sys,
+                    &groups,
+                    n_groups,
+                    &[dt_res],
+                    &wdsrf,
+                    &volwater_ucat,
+                    &mut faces,
+                    &mut sums,
+                    &mut bif_sum,
+                    ReservoirView {
+                        built: &built,
+                        reservoirs: &reservoirs,
+                        q: &mut qresv,
+                    },
+                    MomentumLimit {
+                        on: momentum_limit,
+                        momen: &momen,
+                        veloc: &veloc,
+                        binding: &mut binding,
+                    },
+                    lev.as_ref().map(|lev| {
+                        (
+                            levee.expect("levee"),
+                            lev.iter().map(|l| l.0).collect::<Vec<_>>(),
+                            lev.iter().map(|l| l.1).collect::<Vec<_>>(),
+                        )
+                    }),
+                    &mut bif_lev_sum,
+                );
+                dt_group[0]
+            }
             _ => dt_all,
         };
         last_dt = dt;
@@ -1743,7 +1752,9 @@ fn bifurcation_substep(
     system: &network::RiverSystem,
     run: &mut BifurcationRun<'_>,
     dt_sys: &mut [f64],
-    dt_res: f64,
+    groups: &[usize],
+    n_groups: usize,
+    dt_res: &[f64],
     wdsrf: &[f64],
     volwater: &[f64],
     faces: &mut [Face],
@@ -1753,7 +1764,7 @@ fn bifurcation_substep(
     momentum: MomentumLimit<'_>,
     levee: Option<(&levee::Levee, Vec<f64>, Vec<f64>)>,
     lev_sum: &mut Vec<f64>,
-) -> f64 {
+) -> Vec<f64> {
     let n = faces.len();
     // 已建成的水库用库容代替河道蓄量。
     let volume = |k: usize| match resv.built[k] {
@@ -1846,24 +1857,32 @@ fn bifurcation_substep(
             }
         }
     }
-    // `sync_global_routing_dt`：无效的河系子步长退回 `min(10, dt_res)`，再取全局最小。
-    for dt in dt_sys.iter_mut() {
-        if !dt.is_finite() || *dt <= 0.0 {
-            *dt = 10.0f64.min(dt_res);
-        }
+    // `sync_global_routing_dt`：无效的河系子步长退回 `min(10, dt_res)`，再按簇取最小。
+    let dt_group = bifurcation::cluster_routing_dt(dt_sys, groups, dt_res);
+    assert_eq!(dt_group.len(), n_groups, "one dt per cluster");
+    // 每条路径/单元用所属簇的 dt；分汊两端在同一连通簇，必然同 dt。
+    let mut dt_paths = vec![0.0; run.bif.paths()];
+    for p in 0..run.bif.paths() {
+        let up = run.bif.upst[p];
+        dt_paths[p] = dt_group[groups[net.river_system[up]]];
     }
-    let dt = dt_sys.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let mut dt_cells = vec![0.0; net.len()];
+    for (i, dt) in dt_cells.iter_mut().enumerate() {
+        *dt = dt_group[groups[net.river_system[i]]];
+    }
+    let dt = dt_group.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let reservoir_volume: Vec<Option<f64>> = resv
         .built
         .iter()
         .map(|b| b.map(|j| resv.reservoirs[j].1))
         .collect();
-    let flux = run.bif.calc(
+    let flux = run.bif.calc_with_path_dt(
         net,
         wdsrf,
         &run.state.wdsrf_prev,
         volwater,
-        dt,
+        &dt_paths,
+        &dt_cells,
         &normal,
         &reservoir_volume,
         levee
@@ -1894,7 +1913,7 @@ fn bifurcation_substep(
     *lev_sum = flux.lev_hflux_sum;
     run.layer_flux = flux.hflux_lev;
     run.layer_active = flux.active;
-    dt
+    dt_group
 }
 
 /// 一个单元流域出口面本子步的通量与它自己的收支初值。

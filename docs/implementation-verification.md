@@ -37690,3 +37690,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - Rust 侧同一算例 N=1 vs N=2 是 1125/1125 **文件逐字节一致**；vendor 逐簇 dt 后仍需在 Rust 侧实现并复验。
 
 **Phase C 分汊逐路径 dt 基础（2026-10-27）**：`Bifurcation::calc` 保留为同 dt 包装，新增 `calc_with_path_dt`/`dt_cells`；路径动量、5% 端点蓄量、逐单元总出流都用所属路径/单元的 dt。现有 8 个 bifurcation 单测和全部 runtime 测试通过；主循环仍未接簇级 dt。
+
+**Phase C 分汊簇 dt 接线第一步（2026-10-27）**：`bifurcation_substep` 改为接收分簇标签和逐簇剩余时间，内部用 `cluster_routing_dt` 归约，并把逐路径/逐单元 dt 传给 `calc_with_path_dt`；当前调用方仍只传一个组和标量剩余时间，因此数值行为不变。218 个 runtime 测试通过。
