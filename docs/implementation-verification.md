@@ -37629,3 +37629,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase C 第三项（2026-10-27）**：`push_ups2ucat` 把 hflux/mflux/zgrad 三个字段的“跳过 0、首项直接赋值”求和合并到同一次上游遍历；每个字段各自的加法顺序不变，逐位不变。hb64 河湖开 1 vs 2 node **634/634**。
 
 **Phase B 区域网络 + LULCC 多年度（2026-10-27）**：`unitcatchment_regional::build` 增加 `merge_existing`；LULCC 下每个 `DEF_LC_YEAR` 的 mkinidata 先把已有区域文件 `seq_src_index` 对应的源 `inpmat` 格标成 touched，再重建并集，避免后一年覆盖掉前一年的河系。非 LULCC 不合并。运行期 `verify_coverage` 仍按当前年检查覆盖。
+
+**Block history 明确边界（2026-10-27）**：Rust 的河道 history 是 root 单文件 writer，PR 512 的 `DEF_HIST_mode='block'` 是 Fortran MPI 分片路径；`run_spatial` 现在对 `block` 直接报错并提示改用 `one` 或 Fortran 引擎，不再静默写单文件。GUI 原本已把该字段标为仅 Fortran。Fortran 分片实现留给 Phase D vendor 对齐。

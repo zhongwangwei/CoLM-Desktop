@@ -1455,6 +1455,14 @@ fn run_spatial_segment(
         templates = attached;
     }
     let grid = GriddedForcing::open_grid(&config.forcing, config.start)?;
+    // Rust 的河道 history 是 root 单文件 writer；PR 512 的 block 分片是 Fortran MPI
+    // 路径。这里明确拒绝，避免用户以为设置了 block 就会得到分片文件。
+    ensure!(
+        !string_field(document, "DEF_HIST_mode")?
+            .trim()
+            .eq_ignore_ascii_case("block"),
+        "DEF_HIST_mode='block' is a Fortran-engine river-history layout; the Rust engine writes one file per record (use DEF_HIST_mode='one' or the Fortran engine)"
+    );
     let writes_history = config.history_frequency != colm_hist::schedule::HistoryFrequency::None;
     let mut mapping = if let Some(domain) = config.bilinear {
         AreaWeightedMapping::build_bilinear(
