@@ -37654,3 +37654,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase C/D vendor volume 缓存（2026-10-27）**：vendor `MOD_Grid_RiverLakeFlow` 增加 `volwater_curve`，无分汊/堤防时初始化与每次水深更新后缓存库容，CFL/负水/收支/history 读同一缓存，不再重复查水位—库容表。`make -j8` 通过。
 
 **Phase B vendor `RiverHistConcatenate` 安全门（2026-10-27）**：在 `read_namelist` 之前对 namelist 路径和 target 路径调用 `reject_unquotable`，拒绝含单引号的路径，避免 `scan_shards` 的 `ls` 单引号拼命令被注入。`make -j8` 重新编译 `run/river_hist_concatenate.x` 成功。
+
+**Phase D storage-dt 警告（2026-10-27）**：vendor 在 `DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT=.false.` 且未开分汊时打印警告，说明 outgoing-flux limiter 不存在、蓄量限制仍生效；与 PR 512 一致。`make -j8` 通过。

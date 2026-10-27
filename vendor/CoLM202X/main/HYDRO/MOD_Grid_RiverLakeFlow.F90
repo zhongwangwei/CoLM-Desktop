@@ -99,6 +99,14 @@ CONTAINS
 
       acctime_rnof_max = DEF_GRIDBASED_ROUTING_MAX_DT
 
+      ! Without bifurcation there is no outgoing-flux limiter, so the storage
+      ! dt bound cannot be dropped safely.
+      IF (p_is_master .and. .not. DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT .and. &
+          .not. DEF_USE_BIFURCATION) THEN
+         write(*,'(A)') 'Warning: DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT = .false. needs ' // &
+            'DEF_USE_BIFURCATION; the storage dt bound stays on.'
+      ENDIF
+
       ! excluding (patchtype >= 99), virtual patches and those forcing missed
       IF (p_is_worker) THEN
          allocate (filter_rnof (numpatch))
