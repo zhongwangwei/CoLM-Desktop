@@ -37666,3 +37666,9 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **PR 512 后 hb64 逐字节复验（2026-10-27）**：当前 Rust 源码（含 volume 缓存、CSR、批量上游求和、区域覆盖、block 模式拒绝）重编后在 hb64 河湖开算例跑 1 node vs 2 node，restart/history/unitcat 共 **634/634** 文件 `cmp` 完全一致（job 8788889/8788890）。这是 Rust 侧 N=1 vs N=2 契约的最新证据；不是 Fortran N=1 vs N>1 证据。
 
 **Phase C 分汊簇 dt 基础（2026-10-27）**：新增 `bifurcation::connected_river_system_groups` 与 `Bifurcation::river_system_groups`，按分汊路径把河系并成确定性的连通簇；单元测试覆盖合并与越界忽略。当前只提供分组，尚未把子步循环改为逐簇 dt。
+
+**CI 两处失败复盘（2026-10-27）**：
+- Windows `windows-kernel` 在干净构建中先编 `MOD_Grid_RiverLakeNetwork`，找不到新增的 `mod_grid_riverlakepush.mod`；补 Makefile 依赖 `MOD_Grid_RiverLakeNetwork.o: MOD_Grid_RiverLakePush.o`（`fade2d70`），随后 `windows-kernel` success。
+- `kernel-filesystem` 的 `test_postprocess_startup.py` 只抽取主程序并替换内部过程，新增的 `reject_unquotable` 调用没有 stub，链接报 `undefined symbol: _reject_unquotable_`；在生成程序里补 stub（`dc3b2843`），本地脚本 PASS。
+- 最新完整 CI 运行 `40444152695`：rust/gui 的 ubuntu/macos/windows、kernel-filesystem、golden-status 全部 success。
+- 本机并行全量 `cargo test --workspace --lib --bins` 的 `colm-cli` NetCDF 失败是 Homebrew HDF5 并发问题；`--test-threads=1` 通过，CI 不受影响。
