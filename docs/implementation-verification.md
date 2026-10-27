@@ -37732,3 +37732,5 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 `strace -f -e trace=openat` 可见先有 `O_RDWR` 的 `ENOENT`，之后才有 `O_CREAT|O_TRUNC`；`pio` 与 `xblkme/yblkme` 本身不重叠，故不是分块所有权表错误。
 
 **多 shard block 进一步定位（2026-10-27）**：在 `MOD_HistGridded` 的 2D/3D writer 加 debug 后，land block 文件按 `pio` 所有权正确写入（rank0/rank4 各写自己的 block，最后到 `f_sensors` 3D）；随后在 river unitcat shard 阶段退出 9，两个 shard 只留下 `create_time`，缺 `river_hist_shard_schema_version`。因此先前“land block 文件竞态”的判断需要修正：land block 写入本身没有越权；失败更可能发生在 **PR 512 的 river shard identity / 多 IO group 写入**，需要继续查 `route_shard_write_identity`/`route_shard_layout_build` 的 `p_comm_group` 路径。
+
+**vendor tracer + block 的独立 bug（2026-10-27）**：`MOD_Hist.F90:327` 的 `DEF_USE_TRACER` 分支在调用 `hist_write_time` 后，由 `p_is_master` 把 `history_window_seconds` / `history_window_end_minutes` 写到单文件名 `file_hist`；而 `DEF_HIST_mode='block'` 只生成 per-block 文件，没有这个单文件目标，master 的 `ncio_write_serial_time` 会打不开。**这与本次 556 多 IO group block 失败不是同一现象**：556 case 的 `DEF_USE_TRACER` 默认 `.false.`，日志中也没有 tracer 分支；失败发生在 land 变量写完后的 river unitcat shard 阶段。
