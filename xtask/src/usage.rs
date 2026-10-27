@@ -87,7 +87,7 @@ const CURATED_VALUES: &[(&str, &[&str])] = &[
     ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
     ("DEF_TOPMOD_method", &["0", "1", "2"]),
     ("DEF_NDEP_FREQUENCY", &["1", "2"]),
-    ("DEF_Reservoir_Method", &["0", "1"]),
+    ("DEF_Reservoir_Method", &["0", "1", "2"]),
     (
         "DEF_wetland_finundation_scheme",
         &["1", "2", "3", "4", "5", "6", "7"],

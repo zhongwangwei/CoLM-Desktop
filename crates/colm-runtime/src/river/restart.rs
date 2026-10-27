@@ -117,6 +117,20 @@ pub fn read_river_state(
             None
         },
         levdph: None,
+        qresv_ups_prev: match reservoir {
+            Some(reservoir) if !reservoir.is_empty() => {
+                // 旧续跑没有这个变量时从 0 起；级联水库只在有上游水库的单元流域才有非零值。
+                match file.variable("qresv_ups_prev") {
+                    Some(variable) => {
+                        Some(variable.get_values::<f64, _>(..).with_context(|| {
+                            format!("cannot read qresv_ups_prev from {}", path.display())
+                        })?)
+                    }
+                    None => Some(vec![0.0; reservoir.len()]),
+                }
+            }
+            _ => None,
+        },
         // 标记为 1 时上一子步水深与路径状态都必须在；签名由构造模型时核对。
         volresv: match reservoir {
             Some(reservoir) if !reservoir.is_empty() => {
@@ -171,6 +185,13 @@ pub fn read_river_state(
         ensure!(
             levsto.iter().all(|v| v.is_finite() && *v >= 0.0),
             "levsto in {} contains a negative or non-finite value",
+            path.display()
+        );
+    }
+    if let Some(prev) = &state.qresv_ups_prev {
+        ensure!(
+            prev.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "qresv_ups_prev in {} contains a negative or non-finite value",
             path.display()
         );
     }
@@ -279,6 +300,9 @@ pub fn write_river_state(
                 false,
             )?;
             vector(&mut file, "volresv", &["reservoir"], volresv, true)?;
+            if let Some(prev) = &state.qresv_ups_prev {
+                vector(&mut file, "qresv_ups_prev", &["reservoir"], prev, true)?;
+            }
         }
     }
     vector(

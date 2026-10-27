@@ -61,6 +61,8 @@
 
 ### RQ3：河湖与 history
 
+**Phase A 第一批（2026-10-27）**：漫滩曲线改累积面积、`qresv_ups_prev` 级联水库、`DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`、`DEF_Reservoir_Method=2` 保留；提交待填。详见 implementation-verification 第 826 轮。
+
 - **源码**
   - `crates/colm-runtime/src/river/`：河网、路由、reservoir/levee/bifurcation/flood
   - `crates/colm-runtime/src/history.rs`：累加器、逐记录 writer、sidecar

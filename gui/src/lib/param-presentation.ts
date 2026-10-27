@@ -794,11 +794,11 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     '按动量方程限制汇流子步长',
     'Limit routing sub-step by momentum',
   ),
-  DEF_GridRiverLake_FloodFeedback: pair('漫滩回馈陆面', 'Floodplain feedback to land'),
-  DEF_GridRiverLake_FloodplainStorageFix: pair(
-    '修正漫滩蓄量曲线',
-    'Corrected floodplain-storage curve',
+  DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT: pair(
+    '按蓄量限制汇流子步长',
+    'Limit routing sub-step by storage',
   ),
+  DEF_GridRiverLake_FloodFeedback: pair('漫滩回馈陆面', 'Floodplain feedback to land'),
   DEF_GridRiverLake_FloodInfiltMax: pair(
     '漫滩最大入渗率（mm/天）',
     'Maximum floodplain infiltration (mm/day)',
@@ -991,6 +991,10 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   DEF_Reservoir_Method: {
     0: pair('关闭水库调度', 'Disable reservoir operation'),
     1: pair('河湖流改进水库调度', 'Improved river–lake reservoir operation'),
+    2: pair(
+      '保留方案（Hanazaki 等 2022，未实现）',
+      'Reserved scheme (Hanazaki et al. 2022, not implemented)',
+    ),
   },
   DEF_wetland_finundation_scheme: {
     1: pair('湿地类型 / wetwat', 'Wetland type / wetwat'),

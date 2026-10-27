@@ -3329,16 +3329,14 @@ fn catchment_lateral_flow_hides_the_runoff_schemes() {
 #[test]
 fn flood_feedback_is_offered_only_when_its_preconditions_hold() {
     let base = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_VariablySaturatedFlow = .true.\n";
-    let ready = format!(
-        "{base} DEF_GridRiverLake_FloodplainStorageFix = .true.\n DEF_Runoff_SCHEME = 0\n/\n"
-    );
+    let ready = format!("{base} DEF_Runoff_SCHEME = 0\n/\n");
     let states = runtime_states(&ready, LATLON_KERNEL);
     assert!(matches!(
         mode(&states, "DEF_GridRiverLake_FloodFeedback"),
         FieldMode::Editable
     ));
-    let missing_fix = format!("{base} DEF_Runoff_SCHEME = 0\n/\n");
-    let states = runtime_states(&missing_fix, LATLON_KERNEL);
+    let wrong_runoff = format!("{base} DEF_Runoff_SCHEME = 1\n/\n");
+    let states = runtime_states(&wrong_runoff, LATLON_KERNEL);
     assert!(matches!(
         mode(&states, "DEF_GridRiverLake_FloodFeedback"),
         FieldMode::Disabled
@@ -3356,8 +3354,9 @@ fn flood_feedback_is_offered_only_when_its_preconditions_hold() {
         FieldMode::Hidden
     ));
     // 没显式打开变饱和流，但用 van Genuchten（缺省）时上游会强制打开：同样可选。
-    let implicit_vsf = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_VariablySaturatedFlow = .false.\n \
-                        DEF_GridRiverLake_FloodplainStorageFix = .true.\n DEF_Runoff_SCHEME = 0\n/\n";
+    let implicit_vsf =
+        "&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_VariablySaturatedFlow = .false.\n \
+                        DEF_Runoff_SCHEME = 0\n/\n";
     let states = runtime_states(implicit_vsf, LATLON_KERNEL);
     assert!(matches!(
         mode(&states, "DEF_GridRiverLake_FloodFeedback"),
@@ -3736,13 +3735,9 @@ fn runtime_contract_mirrors_engine_entry_checks() {
     let err = check(" DEF_HIST_lon_res = 0.\n").unwrap_err();
     assert!(err.contains("DEF_HIST_lon_res"), "{err}");
     let err =
-        check(" DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 0\n").unwrap_err();
+        check(" DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 1\n").unwrap_err();
     assert!(err.contains("漫滩回馈"), "{err}");
-    check(
-        " DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 0\n \
-         DEF_GridRiverLake_FloodplainStorageFix = .true.\n",
-    )
-    .unwrap();
+    check(" DEF_GridRiverLake_FloodFeedback = .true.\n DEF_Runoff_SCHEME = 0\n").unwrap();
     let err =
         check(" DEF_USE_LULCC = .true.\n DEF_simulation_time%start_year = 1997\n").unwrap_err();
     assert!(err.contains("1997"), "{err}");

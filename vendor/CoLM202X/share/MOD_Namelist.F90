@@ -403,8 +403,11 @@ MODULE MOD_Namelist
    integer  :: DEF_Reservoir_Method         = 0
    real(r8) :: DEF_GRIDBASED_ROUTING_MAX_DT = 3600.
    logical  :: DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT = .false.
+   ! With bifurcation, .false. skips the storage bound (volume / net outflow);
+   ! the outgoing-flux limiter keeps storage non-negative.  Without
+   ! bifurcation there is no such limiter and the bound always applies.
+   logical  :: DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT = .true.
    logical  :: DEF_GridRiverLake_FloodFeedback = .false.
-   logical  :: DEF_GridRiverLake_FloodplainStorageFix = .false.
    real(r8) :: DEF_GridRiverLake_FloodInfiltMax = 5._r8
    logical  :: DEF_USE_LEVEE = .false.
    logical  :: DEF_USE_BIFURCATION = .false.
@@ -1638,8 +1641,8 @@ CONTAINS
       DEF_Reservoir_Method,                   &
       DEF_GRIDBASED_ROUTING_MAX_DT,           &
       DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT, &
+      DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT,  &
       DEF_GridRiverLake_FloodFeedback,        &
-      DEF_GridRiverLake_FloodplainStorageFix,  &
       DEF_GridRiverLake_FloodInfiltMax,        &
       DEF_USE_LEVEE,                          &
       DEF_USE_BIFURCATION,                    &
@@ -1815,12 +1818,9 @@ CONTAINS
             IF (DEF_USE_LULCC) CALL CoLM_Stop ('Regional unit catchment requires GridRiverLakeFlow without LULCC.')
          ENDIF
 #ifndef GridRiverLakeFlow
-         IF (DEF_GridRiverLake_FloodFeedback .or. DEF_GridRiverLake_FloodplainStorageFix .or. &
-             DEF_USE_LEVEE) &
+         IF (DEF_GridRiverLake_FloodFeedback .or. DEF_USE_LEVEE) &
             CALL CoLM_Stop ('RiverLake features require GridRiverLakeFlow.')
 #endif
-         IF (DEF_GridRiverLake_FloodFeedback .and. .not. DEF_GridRiverLake_FloodplainStorageFix) &
-            CALL CoLM_Stop ('Grid flood feedback requires DEF_GridRiverLake_FloodplainStorageFix.')
       IF (DEF_USE_LULCC) THEN
          IF (DEF_GridRiverLake_FloodFeedback) CALL CoLM_Stop ('Grid flood feedback does not support LULCC.')
       ENDIF
@@ -2844,8 +2844,8 @@ CONTAINS
       CALL mpi_bcast (DEF_Reservoir_Method                   ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_GRIDBASED_ROUTING_MAX_DT           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_GridRiverLake_FloodFeedback        ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_GridRiverLake_FloodplainStorageFix ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_GridRiverLake_FloodInfiltMax       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_LEVEE                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_BIFURCATION                    ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)

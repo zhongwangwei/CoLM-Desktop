@@ -664,19 +664,14 @@ fn run_spatial(
         missing.len(),
         missing.join("\n  - ")
     );
-    // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合，`FloodplainStorageFix` 两种曲线都行），其余选项还没移植。
-    // 漫滩回馈：上游自己要求修正漫滩曲线、不与 LULCC 同开，并把产流方案强制成 0；
-    // Rust 只接变饱和流、LCT 的那条路径。
+    // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合），其余选项还没移植。
+    // 漫滩回馈：上游不与 LULCC 同开，并把产流方案强制成 0；Rust 只接变饱和流、LCT 的那条路径。
     // `DEF_USE_GridRiverLakeFlow`：GRID 内核的河湖汇流运行时开关（关掉时陆面照常，河道不算）。
     let grid_river = !arguments.catchment && logical_field(&document, "DEF_USE_GridRiverLakeFlow")?;
     if logical_field(&document, "DEF_GridRiverLake_FloodFeedback")? {
         ensure!(
             grid_river,
             "Grid flood feedback requires DEF_USE_GridRiverLakeFlow (upstream stops too)"
-        );
-        ensure!(
-            logical_field(&document, "DEF_GridRiverLake_FloodplainStorageFix")?,
-            "Grid flood feedback requires DEF_GridRiverLake_FloodplainStorageFix (upstream stops too)"
         );
         ensure!(
             !logical_field(&document, "DEF_USE_LULCC")?,
@@ -693,8 +688,12 @@ fn run_spatial(
     }
     let reservoir_method = integer_field(&document, "DEF_Reservoir_Method")?;
     ensure!(
-        reservoir_method <= 1,
+        reservoir_method <= 2,
         "unsupported reservoir operation method {reservoir_method}"
+    );
+    ensure!(
+        reservoir_method != 2,
+        "reservoir operation method 2 (Hanazaki et al. 2022) is reserved but not implemented yet"
     );
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
@@ -1717,10 +1716,8 @@ fn run_spatial_segment(
         let mut runtime = runtime;
         // 多进程时每个 rank 持有一份全局河网与全局 runoff filter，同步跑同一个 step。
         let river_topology = global_topology.as_ref().unwrap_or(&topology);
-        let network = colm_runtime::river::network::RiverNetwork::read(
-            &unit_catchment_file(document, out)?,
-            logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
-        )?;
+        let network =
+            colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(document, out)?)?;
         let routing = colm_runtime::river::network::RunoffRouting::build(&network, river_topology)?;
         // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
         let runoff_filter = match (
@@ -1925,6 +1922,7 @@ fn run_spatial_segment(
         }
         river.momentum_dt_limit =
             logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
+        river.storage_dt_limit = logical_field(document, "DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT")?;
         // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
         // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
         if let Some(tracer) = tracer_runtime
@@ -4187,10 +4185,8 @@ fn lulcc_transition(
     }
     // 3. 河道：网络不变，状态接着用。
     let river = if let Some((mut state, river_tracers, sediment)) = river {
-        let network = colm_runtime::river::network::RiverNetwork::read(
-            &unit_catchment_file(document, out)?,
-            logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
-        )?;
+        let network =
+            colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(document, out)?)?;
         // `grid_riverlake_flow_lulcc`：河道时变量原样保留（上游 hold/restore），堤内蓄量与分汊
         // 路径状态在各自模块里本就不动；之后重建 `volwater_ucat`（有堤单元流域只补堤外可见那份），
         // 开分汊时上一子步水深取当前水深。漫滩回馈与 LULCC 同开上游自己就拒绝。

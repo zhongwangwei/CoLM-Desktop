@@ -82,6 +82,8 @@ CONTAINS
       IF ((trim(parafile) == 'null') .or. (len_trim(parafile) == 0)) &
          parafile = DEF_UnitCatchment_file
 
+      IF (DEF_Reservoir_Method == 2) &
+         CALL CoLM_stop ('reservoir operation method 2 (Hanazaki et al. 2022) is not implemented yet')
       IF (DEF_Reservoir_Method /= 1) &
          CALL CoLM_stop ('unsupported reservoir operation method')
 

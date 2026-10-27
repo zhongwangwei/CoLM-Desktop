@@ -1002,8 +1002,10 @@ CONTAINS
                   ! terminate.  This restores the guard the fork had before
                   ! the SYSU integration merge.  That limiter only runs with
                   ! bifurcation, so otherwise the bound always applies.
-                  IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &
-                     dt_this = min(dt_this, volwater / sum_hflux_riv(i))
+                  IF (.not. DEF_USE_BIFURCATION .or. DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT) THEN
+                     IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &
+                        dt_this = min(dt_this, volwater / sum_hflux_riv(i))
+                  ENDIF
 
                ENDIF
 

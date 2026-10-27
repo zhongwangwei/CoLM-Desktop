@@ -1817,18 +1817,15 @@ fn validate_runtime_contract_at(
         let ok = !single
             && kernel.is_none_or(|facts| facts.grid_river)
             && logical(doc, "DEF_USE_GridRiverLakeFlow")
-            && logical(doc, "DEF_GridRiverLake_FloodplainStorageFix")
             && !logical(doc, "DEF_USE_LULCC")
             && integer(doc, "DEF_Runoff_SCHEME") == 0
             && lct
             && !urban
             && vsf;
         if !ok {
-            return Err(
-                "漫滩回馈陆面需要：网格河湖汇流打开、FloodplainStorageFix、TOPMODEL 产流（0）、\
+            return Err("漫滩回馈陆面需要：网格河湖汇流打开、TOPMODEL 产流（0）、\
                         LCT 次网格、变饱和流，且不开 LULCC 与城市"
-                    .into(),
-            );
+                .into());
         }
     }
     if logical(doc, "DEF_USE_LULCC") {
@@ -2248,14 +2245,13 @@ fn field_runtime_state(
             return hidden("当前内核未编入 CaMa-Flood");
         }
     }
-    // 漫滩回馈：上游要求修正漫滩曲线、不与 LULCC 同开、产流方案为 0；Rust 只移植了
-    // LCT + 变饱和流且无城市的路径（`colm-rs` 入口逐条拒绝）。
+    // 漫滩回馈：上游不与 LULCC 同开、产流方案为 0；漫滩曲线现在总是用累积面积。
+    // Rust 只移植了 LCT + 变饱和流且无城市的路径（`colm-rs` 入口逐条拒绝）。
     if name == "DEF_GridRiverLake_FloodFeedback" {
         if !c.have.contains("GridRiverLakeFlow") {
             return hidden("当前内核未编入网格河湖汇流");
         }
-        let ready = logical(c.doc, "DEF_GridRiverLake_FloodplainStorageFix")
-            && !c.lulcc
+        let ready = !c.lulcc
             && c.runoff == 0
             && c.lct
             && !c.urban
@@ -2263,9 +2259,7 @@ fn field_runtime_state(
             && (logical(c.doc, "DEF_USE_VariablySaturatedFlow")
                 || !logical(c.doc, "DEF_USE_Campbell_SOIL_MODEL"));
         if !ready {
-            let reason =
-                "需要：开启漫滩曲线修正（FloodplainStorageFix）、TOPMODEL 产流（0）、LCT 次网格、\
-                          变饱和流，且不开 LULCC 与城市";
+            let reason = "需要：TOPMODEL 产流（0）、LCT 次网格、变饱和流，且不开 LULCC 与城市";
             return if logical(c.doc, name) {
                 (FieldMode::Editable, Some(reason), vec![".false."])
             } else {

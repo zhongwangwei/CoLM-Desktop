@@ -37590,3 +37590,29 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **结论**：全球 history 开启 10 天已跑通；“31.4 GB/记录”的 gather 仍是主瓶颈（77–82% 主循环），下一步要按变量/块分块流式收集，而不是继续 broadcast 或直接调大帧上限。历史记录本身压缩后只有约 94 MB/天。
 
 **边界**：河湖 + history 同时开启的全球 10 天尚未跑；history 多 writer/按天十年仍未设计。
+
+## 第 826 轮：Phase A 第一批——漫滩曲线、级联水库、蓄量子步开关、水库方案 2（2026-10-27）
+
+对应 [CoLM-SYSU/CoLM#512](https://github.com/CoLM-SYSU/CoLM/pull/512) 的第一批科学行为对齐。
+
+**已完成**：
+1. **漫滩蓄量曲线**：`flpstomax` 固定用累积面积 `flpaccare` 积分，与 `volume()/depth()/floodarea()` 一致；删除 `DEF_GridRiverLake_FloodplainStorageFix`（vendor、schema、Rust、GUI、parameter-audit 全部同步）。这是结果变化项：水位超过第一层漫滩后不再出现 `depth(volume(d)) /= d`。
+2. **级联水库**：`RiverState::qresv_ups_prev`（续跑变量 `qresv_ups_prev`，旧续跑缺变量时补 0）；调度入流 `qin = -sum_hflux + qresv_ups_prev`；每个子步把直接上游水库泄放写入该量。这样下游水库能看到上一子步上游泄放。
+3. **`DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`**（默认 `.true.`）：开分汊时 `.false.` 跳过蓄量子步限制，交给 outgoing-flux limiter；不开分汊时限制始终生效。vendor namelist/bcast、schema、Rust `RiverModel.storage_dt_limit`、路由条件均已接。
+4. **`DEF_Reservoir_Method=2`**：schema 可选值增加 2；Rust/vendor 明确报 `Hanazaki et al. (2022) ... not implemented yet`，不再误走 method 1。
+
+**验证**：
+- `cargo test -p colm-runtime --lib`：214 通过；
+- `cargo test -p colm-schema --test drift`、`colm-namelist --test roundtrip`：通过；
+- GUI Rust lib 444 通过 / 1 ignored；`config::` 158 通过；
+- GUI `npm test` 892 通过；typecheck/lint/format 通过；
+- hb64 河湖开 1 task vs 2 node：**634/634** 文件逐字节相同；
+- hb64 河湖关 + HOURLY history 1 vs 2 node：**633/633** 逐字节相同（新曲线下重新生成的两侧一致）。
+
+**尚未完成（Phase A 剩余）**：
+- 漫滩回馈 + LULCC（Rust 仍拒绝多进程 LULCC，vendor 仍拒绝反馈+LULCC）；
+- 重复 `dam_seq` 保留首行而不是停机；
+- worker 无元素/零长度维的 Fortran 修复（Rust 侧不适用）；
+- 这些完成前不声称与 PR 512 全量对齐；下一步按 PR 的 commits 继续。
+
+**未重跑**：8 节点全球 10 天在新漫滩曲线下的墙钟/逐字节；全球河湖+history 组合。

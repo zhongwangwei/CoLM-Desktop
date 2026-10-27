@@ -1187,16 +1187,14 @@ CONTAINS
                ENDDO
 
                floodplain_curve(i)%flpstomax(0) = 0.
+               ! Integrate with the cumulative flooded area, the same area used by
+               ! volume()/depth()/floodarea().  The old per-layer increment made the
+               ! storage curve non-monotonic at layer boundaries: depth(volume(d)) /= d
+               ! once water rose above the first floodplain layer.
                DO j = 1, floodplain_curve(i)%nlfp
-                  IF (DEF_GridRiverLake_FloodplainStorageFix) THEN
-                     floodplain_curve(i)%flpstomax(j) = floodplain_curve(i)%flpstomax(j-1)        &
-                        + 0.5 * (floodplain_curve(i)%flpaccare(j) + floodplain_curve(i)%flpaccare(j-1)) &
-                              * (floodplain_curve(i)%flphgt(j)  - floodplain_curve(i)%flphgt(j-1))
-                  ELSE
-                     floodplain_curve(i)%flpstomax(j) = floodplain_curve(i)%flpstomax(j-1)        &
-                        + 0.5 * (floodplain_curve(i)%flparea(j) + floodplain_curve(i)%flparea(j-1)) &
-                              * (floodplain_curve(i)%flphgt(j)  - floodplain_curve(i)%flphgt(j-1))
-                  ENDIF
+                  floodplain_curve(i)%flpstomax(j) = floodplain_curve(i)%flpstomax(j-1)        &
+                     + 0.5 * (floodplain_curve(i)%flpaccare(j) + floodplain_curve(i)%flpaccare(j-1)) &
+                           * (floodplain_curve(i)%flphgt(j)  - floodplain_curve(i)%flphgt(j-1))
                ENDDO
             ENDDO
 

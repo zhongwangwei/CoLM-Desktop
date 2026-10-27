@@ -66,6 +66,11 @@ impl Reservoir {
         method: i64,
         regional: Option<&Path>,
     ) -> Result<Self> {
+        if method == 2 {
+            bail!(
+                "reservoir operation method 2 (Hanazaki et al. 2022) is reserved but not implemented yet"
+            );
+        }
         if method != 1 {
             bail!("unsupported reservoir operation method {method}");
         }

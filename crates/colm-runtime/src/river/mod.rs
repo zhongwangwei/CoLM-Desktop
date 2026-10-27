@@ -116,6 +116,9 @@ pub struct RiverState {
     /// `DEF_Reservoir_Method > 0`：逐水库库容（m³，续跑里的 `volresv`，按参数表行序）；
     /// 尚未建成的是 `spval`。
     pub volresv: Option<Vec<f64>>,
+    /// 上一子步直接上游水库放到本水库的流量（m³/s，续跑里的 `qresv_ups_prev`）：
+    /// 级联水库的调度入流要看到它，否则下游水库永远看不到上游泄放。
+    pub qresv_ups_prev: Option<Vec<f64>>,
 }
 
 /// 分汊的续跑状态（`wdsrf_ucat_prev`、`pth_veloc`、`pth_momen`、`bif_path_signature`）。
@@ -270,6 +273,8 @@ pub struct RiverModel {
     pub reservoir: Option<reservoir::Reservoir>,
     /// `DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`：子步长再加一道「不让流向反转」的限制。
     pub momentum_dt_limit: bool,
+    /// `DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`：开分汊时是否保留蓄量限制（默认 true）。
+    pub storage_dt_limit: bool,
     /// `DEF_USE_TRACER`（有走通用输运的示踪物）：河湖示踪物（[`tracer`]）。
     pub tracers: Option<tracer::RiverTracers>,
     /// `SEDIMENT` provider 示踪物：河道泥沙（[`sediment`]）。
@@ -310,6 +315,14 @@ impl RiverModel {
         }
         if let (Some(_), None) = (&reservoir, &state.volresv) {
             state.volresv = Some(Vec::new());
+        }
+        if let (Some(reservoir), Some(prev)) = (&reservoir, &state.qresv_ups_prev) {
+            ensure!(
+                prev.len() == reservoir.len(),
+                "qresv_ups_prev does not match the reservoir table"
+            );
+        } else if reservoir.is_some() {
+            state.qresv_ups_prev = Some(vec![0.0; reservoir.as_ref().map_or(0, |r| r.len())]);
         }
         ensure!(
             state.wdsrf.len() == n
@@ -450,6 +463,7 @@ impl RiverModel {
             bifurcation,
             reservoir,
             momentum_dt_limit: false,
+            storage_dt_limit: true,
             network,
             routing,
             state,
@@ -701,6 +715,7 @@ impl RiverModel {
         let levee = self.levee.as_ref();
         let resv = self.reservoir.as_ref().map(|reservoir| (reservoir, year));
         let momentum_limit = self.momentum_dt_limit;
+        let storage_limit = self.storage_dt_limit;
         let acctime = state.acctime_rnof;
         let (warn, abort) = substep_limits(acctime, self.max_dt);
         let warned = std::sync::atomic::AtomicBool::new(false);
@@ -728,6 +743,7 @@ impl RiverModel {
                         resv,
                         Some(run),
                         momentum_limit,
+                        storage_limit,
                         acctime,
                         &guard,
                         record,
@@ -748,6 +764,7 @@ impl RiverModel {
                                 resv,
                                 None,
                                 momentum_limit,
+                                storage_limit,
                                 acctime,
                                 &guard,
                                 record,
@@ -775,6 +792,9 @@ impl RiverModel {
                 hist.volresv.as_mut().expect("reservoir history")[r] = a[1];
                 hist.qresv_in.as_mut().expect("reservoir history")[r] = a[2];
                 hist.qresv_out.as_mut().expect("reservoir history")[r] = a[3];
+            }
+            for &(r, prev) in &result.reservoir_prev {
+                self.state.qresv_ups_prev.as_mut().expect("reservoir state")[r] = prev;
             }
             if let Some(run) = result.bifurcation.take() {
                 bif_back = Some((run.state, run.bifout, run.bifflw_lev, run.bifflw_acctime));
@@ -971,6 +991,8 @@ struct SystemResult<'a> {
     bifurcation: Option<BifurcationRun<'a>>,
     /// 本河系里已建成的水库：`(水库号, volresv, [acctime, a_volresv, a_qresv_in, a_qresv_out])`。
     reservoirs: Vec<(usize, f64, [f64; 4])>,
+    /// 本河系里已建成水库在本次汇流后的 `qresv_ups_prev`（按水库号）。
+    reservoir_prev: Vec<(usize, f64)>,
     /// 堤内一侧的分汊出流扣穿了堤内蓄量（上游 `BIF protected-side limiter failed`）。
     protected_failed: bool,
     /// 子步数超过停机门限（上游 `adaptive routing dt collapsed`）。
@@ -1050,6 +1072,7 @@ fn route_system<'a>(
     resv: Option<(&reservoir::Reservoir, i32)>,
     mut bif: Option<BifurcationRun<'a>>,
     momentum_limit: bool,
+    storage_dt_limit: bool,
     acctime: f64,
     guard: &SubstepGuard<'_>,
     record: bool,
@@ -1112,6 +1135,7 @@ fn route_system<'a>(
     let mut built = vec![None; n];
     let mut reservoirs: Vec<(usize, f64, [f64; 4])> = Vec::new();
     let mut qresv = Vec::<(f64, f64)>::new();
+    let mut reservoir_prev = Vec::<(usize, f64)>::new();
     if let Some((table, year)) = resv {
         let volresv = state.volresv.as_ref().expect("reservoir state");
         for (k, &i) in cells.iter().enumerate() {
@@ -1313,7 +1337,9 @@ fn route_system<'a>(
             for k in 0..n {
                 let Some(j) = built[k] else { continue };
                 let (r, volresv, _) = reservoirs[j];
-                let qin = -sums[k].0;
+                // 级联：上一子步直接上游水库的泄放量也算入本水库的调度入流。
+                let upstream_prev = state.qresv_ups_prev.as_ref().map_or(0.0, |prev| prev[r]);
+                let qin = -sums[k].0 + upstream_prev;
                 if system.next[k] == INLAND_DEPRESSION {
                     qresv[j] = (qin, 0.0);
                     continue;
@@ -1331,24 +1357,27 @@ fn route_system<'a>(
                 resv_faces[k].hflux = faces[k].hflux;
                 resv_faces[k].mflux = faces[k].mflux;
             }
-            for k in 0..n {
-                let push = |value: fn(&Face) -> f64| {
-                    let mut total = 0.0;
-                    for &u in &system.upstream[k] {
-                        let value = value(&resv_faces[u]);
-                        if value == 0.0 {
-                            continue;
-                        }
-                        total = if total == 0.0 {
-                            value * 1.0
-                        } else {
-                            total + value * 1.0
-                        };
+            let push_resv = |k: usize, value: fn(&Face) -> f64| {
+                let mut total = 0.0;
+                for &u in &system.upstream[k] {
+                    let value = value(&resv_faces[u]);
+                    if value == 0.0 {
+                        continue;
                     }
-                    total
-                };
-                sums[k].0 -= push(|face| face.hflux);
-                sums[k].1 -= push(|face| face.mflux);
+                    total = if total == 0.0 {
+                        value * 1.0
+                    } else {
+                        total + value * 1.0
+                    };
+                }
+                total
+            };
+            for k in 0..n {
+                if let Some(j) = built[k] {
+                    reservoir_prev.push((reservoirs[j].0, push_resv(k, |face| face.hflux)));
+                }
+                sums[k].0 -= push_resv(k, |face| face.hflux);
+                sums[k].1 -= push_resv(k, |face| face.mflux);
             }
         }
         // 子步长：CFL 与蓄量两道限制，逐单元流域取最小。
@@ -1376,7 +1405,9 @@ fn route_system<'a>(
                 // 开分汊时几乎干涸、净出流为正的单元流域会把全局同步的子步长压向 0，子步循环
                 // 实际上停不下来；这样的单元流域交给普通出流限制与分汊限流（上游 PR #28）。
                 // 不开分汊时没有那道限流，蓄量限制照旧。
-                if volwater > ROUTING_STORAGE_DT_EPS || bif.is_none() {
+                if (bif.is_none() || storage_dt_limit)
+                    && (volwater > ROUTING_STORAGE_DT_EPS || bif.is_none())
+                {
                     dt_this = dt_this.min(volwater / sums[k].0);
                 }
             }
@@ -1669,6 +1700,7 @@ fn route_system<'a>(
         levee: lev,
         bifurcation: bif,
         reservoirs,
+        reservoir_prev,
         protected_failed,
         collapsed,
         tape,

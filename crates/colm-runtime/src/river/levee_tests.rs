@@ -9,7 +9,7 @@ fn network() -> RiverNetwork {
     let (rivwth, rivlen, area) = (50.0, 10_000.0, 2.0e7);
     let rivstomax = rivhgt * rivwth * rivlen;
     let fldhgt: Vec<f64> = (1..=10).map(|j| 0.5 * j as f64).collect();
-    let curve = FloodplainCurve::new(rivhgt, rivstomax, area, &fldhgt, true);
+    let curve = FloodplainCurve::new(rivhgt, rivstomax, area, &fldhgt);
     RiverNetwork {
         x: vec![1],
         y: vec![1],
