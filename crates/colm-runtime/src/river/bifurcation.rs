@@ -107,6 +107,48 @@ pub(super) fn accumulate(slot: &mut f64, term: f64) {
     };
 }
 
+/// Connected components of the river systems linked by bifurcation pathways.
+///
+/// PR 512 advances every component (cluster) with its own routing dt; this is
+/// the deterministic labelling shared by all ranks. The river systems are
+/// 0-based and `links` yields the (upstream, downstream) system pairs of each
+/// active pathway. Isolated systems get their own component.
+pub fn connected_river_system_groups(
+    river_systems: usize,
+    links: impl IntoIterator<Item = (usize, usize)>,
+) -> Vec<usize> {
+    let mut parent: Vec<usize> = (0..river_systems).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for (a, b) in links {
+        if a >= river_systems || b >= river_systems {
+            continue;
+        }
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+    (0..river_systems).map(|i| find(&mut parent, i)).collect()
+}
+
+impl Bifurcation {
+    /// Per-river-system cluster label; every system gets one, isolated or not.
+    pub fn river_system_groups(&self, network: &RiverNetwork) -> Vec<usize> {
+        connected_river_system_groups(
+            network.river_systems,
+            self.upst.iter().zip(&self.down).filter_map(|(&up, down)| {
+                down.map(|dn| (network.river_system[up], network.river_system[dn]))
+            }),
+        )
+    }
+}
+
 impl Bifurcation {
     /// `read_bifurcation_global_arrays` 加单进程的路径与入流表。
     pub fn read(path: &Path, network: &RiverNetwork) -> Result<Self> {

@@ -136,3 +136,17 @@ fn signature_rows_follow_the_restart_layout() {
         vec![1.0, 1.0, 2.0, 5_000.0, 0.0, 3.0, 20.0, 100.0, 0.03, 0.1]
     );
 }
+
+#[test]
+fn connected_river_system_groups_merge_pathways_and_keep_isolated_systems() {
+    // systems 0-2 connected by 0->1 and 1->2; system 3 isolated.
+    let groups = super::connected_river_system_groups(4, [(0, 1), (1, 2), (3, 3)]);
+    assert_eq!(groups[0], groups[1]);
+    assert_eq!(groups[1], groups[2]);
+    assert_ne!(groups[0], groups[3]);
+    assert_eq!(groups.len(), 4);
+
+    // out-of-range links are ignored rather than panicking.
+    let groups = super::connected_river_system_groups(2, [(0, 9)]);
+    assert_ne!(groups[0], groups[1]);
+}
