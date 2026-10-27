@@ -37662,3 +37662,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase B 运行期验证（2026-10-27）**：vendor 二进制是 USEMPI 构建，直接执行会因 MPI 初始化失败；用 `mpirun -n 1 run/river_hist_concatenate.x ...` 运行。对 target 传 `bad'; touch /tmp/colm-injected; #`，程序在 `read_namelist` 前报 `ERROR: the target path contains a single quote`，`/tmp/colm-injected` **未生成**，MPI_ABORT 退出。
 
 **Phase D vendor Push 第二批（2026-10-27）**：普通子步末尾的 hflux/mflux 上游求和也改走 `push_ups2ucat_sum`，两字段一次交换；`batch_exact` 为假仍回退逐字段。`make -j8` 通过。
+
+**PR 512 后 hb64 逐字节复验（2026-10-27）**：当前 Rust 源码（含 volume 缓存、CSR、批量上游求和、区域覆盖、block 模式拒绝）重编后在 hb64 河湖开算例跑 1 node vs 2 node，restart/history/unitcat 共 **634/634** 文件 `cmp` 完全一致（job 8788889/8788890）。这是 Rust 侧 N=1 vs N=2 契约的最新证据；不是 Fortran N=1 vs N>1 证据。
