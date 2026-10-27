@@ -37615,4 +37615,6 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - worker 无元素/零长度维的 Fortran 修复（Rust 侧不适用）；
 - 这些完成前不声称与 PR 512 全量对齐；下一步按 PR 的 commits 继续。
 
-**未重跑**：8 节点全球 10 天在新漫滩曲线下的墙钟/逐字节；全球河湖+history 组合。
+**新曲线 8 节点全球复验**（job 8784590，480 步、河湖关、history none）：墙钟 **22:27**，主循环 1073.0–1158.6 s，patches 主导，`CoLM Execution Completed.`；最终 restart 正常写出。与旧曲线 21:55 的差异属于节点噪声和新积分曲线，未做旧/新曲线逐字节比较（结果本应改变）。
+
+**未重跑**：全球河湖+history 组合；LULCC+feedback。
