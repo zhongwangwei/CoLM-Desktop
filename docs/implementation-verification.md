@@ -37648,3 +37648,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase D vendor Push 接入（2026-10-27）**：在 `MOD_Grid_RiverLakeNetwork` 构建 `push_ups2ucat` 的 CSR cache，`MOD_Grid_RiverLakeFlow` 新增 `push_ups2ucat_sum`，把 hflux/mflux/zgrad（以及水库 hflux/mflux）的上游求和按一次批量交换发送；`cache_ups2ucat%batch_exact` 为假时退回逐字段 `worker_push_data`，结果应逐位不变。新 Push 对象移入 `OBJS_SHARED` 以保证 mkinidata 也能链接。`make -j8` 全量编译/链接成功。
 
 **Phase D vendor 编译期守卫（2026-10-27）**：`GridRiverLakeFlow` 现在要求 `USEMPI`（`MOD_Grid_RiverLakeNetwork` 内 `#error`，`include/define.h` 也显式检查）；`GridRiverLakeSediment` 在本版本未耦合，定义即编译期停止。`make -j8` 通过。
+
+**Phase A/D vendor 级联水库（2026-10-27）**：`MOD_Grid_RiverLakeTimeVars` 增加 `qresv_ups_prev`（分配/续跑可选读取/写出/hold-restore），`MOD_Grid_RiverLakeFlow` 的调度入流加 `qresv_ups_prev`，并在水库 push 后记录上游水库泄放。续跑旧文件没有该变量时补 0。`make -j8` 通过。

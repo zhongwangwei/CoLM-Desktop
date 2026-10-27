@@ -1016,7 +1016,7 @@ CONTAINS
 
                   IF (ucat_next(i) == -10) THEN
                      IF (is_built_resv(i)) THEN
-                        qresv_in (ucat2resv(i)) = - sum_hflux_riv(i)
+                        qresv_in (ucat2resv(i)) = - sum_hflux_riv(i) + qresv_ups_prev(ucat2resv(i))
                         qresv_out(ucat2resv(i)) = 0.
                      ENDIF
                      CYCLE
@@ -1025,7 +1025,7 @@ CONTAINS
                   IF (is_built_resv(i)) THEN
 
                      irsv = ucat2resv(i)
-                     qresv_in(irsv) = - sum_hflux_riv(i)
+                     qresv_in(irsv) = - sum_hflux_riv(i) + qresv_ups_prev(irsv)
 
                      IF (volresv(irsv) > 1.e-4 * volresv_total(irsv)) THEN
                         CALL reservoir_operation (DEF_Reservoir_Method, &
@@ -1047,6 +1047,13 @@ CONTAINS
                ENDDO
 
                CALL push_ups2ucat_sum (hflux_resv, hflux_sumups, mflux_resv, mflux_sumups)
+
+               ! The release of every built reservoir becomes the next substep's
+               ! upstream term for a reservoir directly below it.
+               DO i = 1, numucat
+                  IF (ucatfilter(i) .and. is_built_resv(i)) &
+                     qresv_ups_prev(ucat2resv(i)) = hflux_sumups(i)
+               ENDDO
 
                IF (numucat > 0) THEN
                   WHERE (ucatfilter)
