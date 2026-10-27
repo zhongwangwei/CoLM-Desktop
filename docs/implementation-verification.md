@@ -37656,3 +37656,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase B vendor `RiverHistConcatenate` 安全门（2026-10-27）**：在 `read_namelist` 之前对 namelist 路径和 target 路径调用 `reject_unquotable`，拒绝含单引号的路径，避免 `scan_shards` 的 `ls` 单引号拼命令被注入。`make -j8` 重新编译 `run/river_hist_concatenate.x` 成功。
 
 **Phase D storage-dt 警告（2026-10-27）**：vendor 在 `DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT=.false.` 且未开分汊时打印警告，说明 outgoing-flux limiter 不存在、蓄量限制仍生效；与 PR 512 一致。`make -j8` 通过。
+
+**Phase D vendor 干净构建（2026-10-27）**：`make clean` 后 `make -j1` 从零编译全部对象、`run/colm.x`/`mkinidata.x`/`mksrfdata.x`/postprocess 和 `libcolm.a` 全部成功。补上 `MOD_Grid_RiverLakeNetwork.o: MOD_Grid_RiverLakePush.o` 依赖，否则干净串行构建会先编 Network 而找不到 Push 模块。`make -j8` 的并行 lib 目标仍会抢跑，干净构建用 `-j1`。

@@ -572,6 +572,7 @@ MOD_Vars_1DAccFluxes.o: MOD_Grid_RiverLakeHistState.o
 MOD_Grid_RiverLakeFlow.o: MOD_Grid_RiverLakeHist.o
 MOD_Grid_RiverLakePush.o: MOD_WorkerPushData.o
 MOD_Grid_RiverLakeVectorIO.o: MOD_NetCDFSerial.o MOD_DataType.o
+MOD_Grid_RiverLakeNetwork.o: MOD_Grid_RiverLakePush.o
 
 OBJS_MAIN_T = $(addprefix .bld/,${OBJS_MAIN})
 
