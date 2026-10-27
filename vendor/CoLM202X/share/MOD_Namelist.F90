@@ -1815,7 +1815,6 @@ CONTAINS
 #ifndef GridRiverLakeFlow
             CALL CoLM_Stop ('Regional unit catchment requires GridRiverLakeFlow without LULCC.')
 #endif
-            IF (DEF_USE_LULCC) CALL CoLM_Stop ('Regional unit catchment requires GridRiverLakeFlow without LULCC.')
          ENDIF
 #ifndef GridRiverLakeFlow
          IF (DEF_GridRiverLake_FloodFeedback .or. DEF_USE_LEVEE) &
