@@ -37717,3 +37717,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 重新拼接 556 block 输出后，与 `one` 模式 **19/19 变量逐值一致**。多 shard（`DEF_PIO_groupsize=3`）测试中模型运行退出 9、拼接报缺 shard 属性；一 shard 的 block 路径已完整通过，多 shard 仍待查。
 
 **Phase B 多 shard 定位（2026-10-27，7920l）**：`DEF_PIO_groupsize=3`、9 rank 时，`one` 模式正常；`block` 模式生成两个 shard，但模型在第 48 步退出 9，shard 只有 `create_time`，拼接器报缺少 `river_hist_shard_schema_version`。把 `DEF_HIST_FREQ='none'` 后 block 模式能结束但不再写 history。说明问题出在多 I/O group 的 land history（或 block 全局 history）写入，而不是 river shard 重建；单 shard block 已验证 19/19 变量一致。
+
+**多 shard block 失败定位（2026-10-27，strace）**：`DEF_PIO_groupsize=3`、9 rank 的 block 模式在写 history 末尾时，其中一个 IO rank 对 `556_hist_2003-02_e100_n35.nc` / `e100_n40.nc` 的 `H5Fopen(O_RDWR)` 曾返回 `ENOENT`，随后又成功；说明多 IO group 下 block 文件的创建/打开存在可见性/竞态，而不是 river shard 本身。单 IO group 的单 shard block 及拼接已通过。
