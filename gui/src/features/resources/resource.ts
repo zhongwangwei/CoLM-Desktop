@@ -1,7 +1,37 @@
 import { bilingual } from '../../lib/bilingual';
-import type { KindPaths, RunState, Server } from '../../lib/types';
+import type { DataDefaults, KindPaths, RunState, Server } from '../../lib/types';
 import { remoteStudyReply, remoteStudyPermissions } from '../studies/remote-study';
 export type { Server } from '../../lib/types';
+
+/** 本机默认数据路径里可以编辑的四个目录；`kind_paths` 由后端即时维护，不参与未保存判断。 */
+export const localPathKeys = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'] as const;
+export type LocalPathKey = (typeof localPathKeys)[number];
+/** 后端缺省时本机默认为空；加载与刷新都先用它补齐再套用配置里的值。 */
+export function localDefaults(local?: Partial<DataDefaults>): DataDefaults {
+  return {
+    project_dir: '',
+    rawdata_dir: '',
+    runtime_dir: '',
+    forcing_dir: '',
+    ...local,
+  };
+}
+/**
+ * 本机默认路径的未保存比较签名：保存时会 trim，所以比较也按 trim 后的值，只多敲空格不算改动；
+ * 按类型记住的 `kind_paths` 是后端即时写盘的，不参与签名。
+ */
+export function localPathSignature(local: Partial<DataDefaults>): string {
+  return JSON.stringify(localPathKeys.map((key) => (local[key] ?? '').trim()));
+}
+/** 放弃本机路径编辑时只还原这四个目录，保留已经即时保存的 `kind_paths` 等其它字段。 */
+export function localPathValues(local: Partial<DataDefaults>): Pick<DataDefaults, LocalPathKey> {
+  return {
+    project_dir: local.project_dir ?? '',
+    rawdata_dir: local.rawdata_dir ?? '',
+    runtime_dir: local.runtime_dir ?? '',
+    forcing_dir: local.forcing_dir ?? '',
+  };
+}
 export const newServer = (): Server => ({
   host: '',
   username: '',

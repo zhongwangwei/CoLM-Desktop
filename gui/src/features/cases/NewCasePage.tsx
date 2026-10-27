@@ -1681,8 +1681,30 @@ export default function NewCasePage() {
       : caseDirectory(form.root, form.name);
     if (!root)
       throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
-    const cases = await invoke<CaseEntry[]>('list_cases', { root });
-    await invoke('save_recent', { key: 'root', value: root });
+    // 项目已经创建成功是主事实：读取目录内容失败时明确说"项目已创建、只是没读到"，并指向
+    // "查看已创建的项目"重试——这个入口只重新读列表，不会再创建一遍站点（GUI-15）。
+    let cases: CaseEntry[];
+    try {
+      cases = await invoke<CaseEntry[]>('list_cases', { root });
+    } catch (error) {
+      throw new Error(
+        t(
+          `项目已经创建，但读取其中的算例失败：${error}。请用"查看已创建的项目"重试。`,
+          `The project was created, but reading its cases failed: ${error}. Retry with "View created project".`,
+        ),
+        { cause: error },
+      );
+    }
+    // 最近打开记录只是辅助：写不进去只提示，不能把已经成功创建的项目打开报成失败（GUI-15）。
+    // 原来这里直接 await，存储只读时用户会以为项目没创建成功，甚至重试创建站点。
+    await invoke('save_recent', { key: 'root', value: root }).catch((error: unknown) =>
+      notify(
+        t(
+          `最近打开记录未能更新：${error}。项目已创建，可以继续使用。`,
+          `The recent-project entry could not be updated: ${error}. The project was created and can still be used.`,
+        ),
+      ),
+    );
     if (!alive.current) return;
     update({
       root,

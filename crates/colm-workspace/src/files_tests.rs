@@ -20,19 +20,40 @@ fn a_file_is_listed_read_edited_and_committed() {
     let main = list(&ws, "vendor/CoLM202X/main").unwrap();
     assert_eq!(main[0].path, MODULE);
     let before = read(&ws, MODULE).unwrap();
+    let baseline = before
+        .hash
+        .clone()
+        .expect("editable text carries a content hash");
     let edited = before.text.unwrap().replace("k = 2.0", "k = 3.0");
-    let applied = write_text(&ws, MODULE, &edited, "k is 3").unwrap();
-    assert_eq!(applied.files, [MODULE]);
-    assert_eq!(read(&ws, MODULE).unwrap().text.unwrap(), edited);
+    let written = write_text(&ws, MODULE, &edited, "k is 3", Some(&baseline)).unwrap();
+    assert_eq!(written.applied.files, [MODULE]);
+    assert_eq!(ws.head().unwrap(), written.applied.commit);
+    let after = read(&ws, MODULE).unwrap();
+    assert_eq!(after.text.unwrap(), edited);
+    assert_eq!(
+        after.hash.unwrap(),
+        written.hash,
+        "the hash returned by the write is the new baseline of the file on disk"
+    );
     assert!(!git::is_dirty(&ws.src()).unwrap());
-    assert_eq!(ws.head().unwrap(), applied.commit);
+    // 序列化形状是前端契约的一部分：workspace_write_file 的结果带 hash（与 Applied 的字段平铺）。
+    let json = serde_json::to_value(&written).unwrap();
+    assert_eq!(json["hash"], written.hash, "{json}");
+    assert!(
+        json["commit"].is_string() && json["files"].is_array(),
+        "{json}"
+    );
+    // 连续保存：用上一次写入返回的哈希当基线，第二次保存不能被误判成冲突。
+    let second_text = edited.replace("k = 3.0", "k = 4.0");
+    let second = write_text(&ws, MODULE, &second_text, "k is 4", Some(&written.hash)).unwrap();
+    assert_eq!(read(&ws, MODULE).unwrap().hash.unwrap(), second.hash);
     // Writing the same text again changes nothing and is said so.
-    let error = write_text(&ws, MODULE, &edited, "again")
+    let error = write_text(&ws, MODULE, &second_text, "again", Some(&second.hash))
         .unwrap_err()
         .to_string();
     assert!(error.contains("nothing changed"), "{error}");
     // New files can be created in new folders.
-    write_text(
+    let created = create_text(
         &ws,
         "vendor/CoLM202X/new/MOD_New.F90",
         "MODULE MOD_New\nEND MODULE\n",
@@ -40,6 +61,193 @@ fn a_file_is_listed_read_edited_and_committed() {
     )
     .unwrap();
     assert!(ws.src().join("vendor/CoLM202X/new/MOD_New.F90").is_file());
+    assert_eq!(
+        read(&ws, "vendor/CoLM202X/new/MOD_New.F90")
+            .unwrap()
+            .hash
+            .unwrap(),
+        created.hash
+    );
+}
+
+#[test]
+fn creating_a_file_never_replaces_an_existing_one() {
+    let (_root, ws) = fresh("files-create");
+    let before = read(&ws, MODULE).unwrap();
+    let head = ws.head().unwrap();
+    // 重名新建：原内容、哈希、提交状态都不变。
+    let error = create_text(&ws, MODULE, "overwritten\n", "new")
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("already-exists:"), "{error}");
+    let after = read(&ws, MODULE).unwrap();
+    assert_eq!(after.text, before.text);
+    assert_eq!(after.hash, before.hash);
+    assert_eq!(ws.head().unwrap(), head);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+
+    let created = create_text(
+        &ws,
+        "vendor/CoLM202X/main/MOD_Second.F90",
+        "MODULE MOD_Second\nEND MODULE\n",
+        "second",
+    )
+    .unwrap();
+    assert_eq!(
+        created.applied.files,
+        ["vendor/CoLM202X/main/MOD_Second.F90"]
+    );
+    let head_after = ws.head().unwrap();
+    assert_ne!(head_after, head);
+    // 同名再建一次仍被拒；失败那次没有留下未提交内容。
+    assert!(create_text(&ws, "vendor/CoLM202X/main/MOD_Second.F90", "x\n", "again").is_err());
+    assert_eq!(ws.head().unwrap(), head_after);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+}
+
+#[test]
+fn concurrent_creates_of_the_same_file_have_at_most_one_winner() {
+    let (_root, ws) = fresh("files-create-race");
+    let head = ws.head().unwrap();
+    let path = "vendor/CoLM202X/main/MOD_Race.F90";
+    let barrier = std::sync::Barrier::new(2);
+    // 真并发：两条线程同时走"检查工作区干净 → create_new → 提交"。create_new 是内核保证的
+    // 原子"存在则失败"，所以最多一个成功；失败的那次既不覆盖内容也不留半成品。
+    let workspace = &ws;
+    let attempts = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for text in ["MODULE A\n", "MODULE B\n"] {
+            let barrier = &barrier;
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                create_text(workspace, path, text, "race")
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        attempts.iter().filter(|attempt| attempt.is_ok()).count(),
+        1,
+        "exactly one concurrent create wins: {attempts:?}"
+    );
+    assert_eq!(git::commits_since(&ws.src(), &head).unwrap().len(), 1);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let content = read(&ws, path).unwrap().text.unwrap();
+    assert!(
+        content == "MODULE A\n" || content == "MODULE B\n",
+        "{content:?}"
+    );
+}
+
+#[test]
+fn saving_never_overwrites_an_external_edit_even_after_a_snapshot_commit() {
+    let (_root, ws) = fresh("files-conflict");
+    let baseline = read(&ws, MODULE).unwrap().hash.unwrap();
+    // 外部编辑器改了它：窗口回到前台时快照已把外部改动记成一次提交——界面里的提交列表因此变了，
+    // 但文本框里还是旧内容。保存必须仍然被拒绝（GUI-03 的触发路径）。
+    let module = ws.src().join(MODULE);
+    let external = std::fs::read_to_string(&module)
+        .unwrap()
+        .replace("k = 2.0", "k = 9.0");
+    std::fs::write(&module, &external).unwrap();
+    let applied = snapshot_external(&ws).unwrap().unwrap();
+    assert_eq!(applied.files, [MODULE]);
+    let head_after_snapshot = ws.head().unwrap();
+    let error = write_text(
+        &ws,
+        MODULE,
+        "module edited in the GUI\n",
+        "gui edit",
+        Some(&baseline),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("content-conflict:"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&module).unwrap(),
+        external,
+        "a conflict writes nothing at all"
+    );
+    assert_eq!(
+        ws.head().unwrap(),
+        head_after_snapshot,
+        "a conflict creates no commit"
+    );
+    // 用重新读到的基线可以保存：冲突处理完（重载/明确覆盖）之后保存要能继续。
+    let fresh = read(&ws, MODULE).unwrap().hash.unwrap();
+    let written = write_text(
+        &ws,
+        MODULE,
+        "module edited in the GUI\n",
+        "gui edit",
+        Some(&fresh),
+    )
+    .unwrap();
+    assert_eq!(read(&ws, MODULE).unwrap().hash.unwrap(), written.hash);
+}
+
+#[test]
+fn an_external_delete_is_reported_and_recreating_is_explicit() {
+    let (_root, ws) = fresh("files-deleted");
+    let baseline = read(&ws, MODULE).unwrap().hash.unwrap();
+    std::fs::remove_file(ws.src().join(MODULE)).unwrap();
+    snapshot_external(&ws).unwrap();
+    let error = write_text(&ws, MODULE, "back\n", "recreate", Some(&baseline))
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("content-conflict:"), "{error}");
+    assert!(
+        !ws.src().join(MODULE).exists(),
+        "a save based on a deleted file does not silently resurrect it"
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    // 明确重建：不给基线才允许把文件建回来（界面上的"用我的文本重建"）。
+    let written = write_text(&ws, MODULE, "back\n", "recreate", None).unwrap();
+    assert_eq!(read(&ws, MODULE).unwrap().hash.unwrap(), written.hash);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+}
+
+#[test]
+fn adding_a_local_file_never_replaces_a_same_named_file() {
+    let (root, ws) = fresh("files-put-create");
+    let first = root.join("first.bin");
+    std::fs::write(&first, [1u8, 2, 3]).unwrap();
+    let second = root.join("second.bin");
+    std::fs::write(&second, [9u8, 9]).unwrap();
+    put_file(&ws, "vendor/CoLM202X/data/first.bin", &first, "add", true).unwrap();
+    let head = ws.head().unwrap();
+    let error = put_file(
+        &ws,
+        "vendor/CoLM202X/data/first.bin",
+        &second,
+        "add again",
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("already-exists:"), "{error}");
+    assert_eq!(
+        std::fs::read(ws.src().join("vendor/CoLM202X/data/first.bin")).unwrap(),
+        [1, 2, 3]
+    );
+    assert_eq!(ws.head().unwrap(), head);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    // 明确的"替换"仍然可用：二进制内容整个换掉。
+    put_file(
+        &ws,
+        "vendor/CoLM202X/data/first.bin",
+        &second,
+        "replace",
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(ws.src().join("vendor/CoLM202X/data/first.bin")).unwrap(),
+        [9, 9]
+    );
 }
 
 #[test]
@@ -52,6 +260,7 @@ fn whole_files_and_folders_are_replaced_and_binary_files_are_allowed() {
         "vendor/CoLM202X/data/lookup.nc",
         &table,
         "lookup table",
+        false,
     )
     .unwrap();
     let read_back = read(&ws, "vendor/CoLM202X/data/lookup.nc").unwrap();
@@ -88,10 +297,10 @@ fn protected_paths_links_and_dirty_trees_are_refused() {
         "../outside",
         "/etc/passwd",
     ] {
-        assert!(write_text(&ws, bad, "x", "bad").is_err(), "{bad}");
+        assert!(write_text(&ws, bad, "x", "bad", None).is_err(), "{bad}");
     }
     assert!(
-        write_text(&ws, MODULE, "x", "").is_err(),
+        write_text(&ws, MODULE, "x", "", None).is_err(),
         "a change needs a message"
     );
     #[cfg(unix)]
@@ -99,7 +308,7 @@ fn protected_paths_links_and_dirty_trees_are_refused() {
         std::os::unix::fs::symlink(&root, ws.src().join("outside")).unwrap();
         git::run(&ws.src(), &["add", "outside"]).unwrap();
         git::run(&ws.src(), &["commit", "-q", "-m", "link"]).unwrap();
-        let error = write_text(&ws, "outside/x.txt", "x", "through a link")
+        let error = write_text(&ws, "outside/x.txt", "x", "through a link", None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("symbolic link"), "{error}");
@@ -111,7 +320,7 @@ fn protected_paths_links_and_dirty_trees_are_refused() {
         assert!(put_dir(&ws, "vendor/x", &folder, "links").is_err());
     }
     std::fs::write(ws.src().join(MODULE), "uncommitted\n").unwrap();
-    let error = write_text(&ws, "other.txt", "x", "dirty")
+    let error = write_text(&ws, "other.txt", "x", "dirty", None)
         .unwrap_err()
         .to_string();
     assert!(error.contains("uncommitted"), "{error}");

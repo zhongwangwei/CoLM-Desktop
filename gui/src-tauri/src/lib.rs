@@ -354,6 +354,7 @@ pub fn run() {
             workspace::workspace_diff,
             workspace::workspace_files,
             workspace::workspace_file,
+            workspace::workspace_create_file,
             workspace::workspace_write_file,
             workspace::workspace_put,
             workspace::workspace_remove,

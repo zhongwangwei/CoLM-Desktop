@@ -158,6 +158,56 @@ export async function runRemoteBatch(options: {
 }
 
 /**
+ * 取这一轮要核对的站点：从上一轮最后核对的那个站点之后接着取，到末尾绕回开头，最多 `limit` 个。
+ *
+ * 为什么必须轮转：自动核对原来每 10 秒固定看列表前 8 个。前 8 个一直运行（或查询一直失败）时，
+ * 后面 12 个站点永远轮不到，服务器上早已结束的任务一直显示"运行中"（GUI-12）。每轮从上一轮
+ * 停下的位置往后走，⌈待核对数 / limit⌉ 轮内就能覆盖全部任务，且每轮并发不超过 limit。
+ *
+ * `lastChecked` 已经不在列表里（那个站点结束了）时从头开始，不会平白空转一轮。
+ */
+export function nextCheckBatch(
+  pending: string[],
+  lastChecked: string | null,
+  limit: number,
+): { batch: string[]; next: string | null } {
+  if (!pending.length) return { batch: [], next: null };
+  const size = Math.max(1, Math.floor(limit));
+  const after = lastChecked ? pending.indexOf(lastChecked) + 1 : 0;
+  const from = after >= pending.length ? 0 : after;
+  const batch = Array.from(
+    { length: Math.min(size, pending.length) },
+    (_, index) => pending[(from + index) % pending.length],
+  );
+  return { batch, next: batch.at(-1) ?? null };
+}
+
+/**
+ * 核对一批服务器任务：最多 `limit` 个并发（SSH 会话数有上限），单个任务失败只记录下来，
+ * 不影响其他任务继续核对。自动轮询和手动核对共用；手动核对用 `progress` 显示已核对数与总数。
+ */
+export async function checkInBatches<T>(options: {
+  targets: string[];
+  limit: number;
+  check: (dir: string) => Promise<T | null | undefined>;
+  progress?: (done: number, total: number) => void;
+}): Promise<{ results: T[]; errors: { dir: string; error: unknown }[] }> {
+  const results: T[] = [];
+  const errors: { dir: string; error: unknown }[] = [];
+  let done = 0;
+  await eachLimited(options.targets, Math.max(1, Math.floor(options.limit)), async (dir) => {
+    try {
+      const result = await options.check(dir);
+      if (result !== null && result !== undefined) results.push(result);
+    } catch (error) {
+      errors.push({ dir, error });
+    }
+    options.progress?.(++done, options.targets.length);
+  });
+  return { results, errors };
+}
+
+/**
  * Run `work` over `items`, at most `limit` at a time. Stopping a batch went station by station:
  * three SSH round trips each (identity check, cancel, status), so 40 queued land02 jobs took
  * minutes (2026-10-19). Five at a time stays under the ten sessions sshd allows, as submission does.

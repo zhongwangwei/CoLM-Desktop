@@ -266,7 +266,21 @@ test('declining the rebind leaves the case unopened with a plain explanation', a
   assert.equal((app.current.current as { route?: string }).route, undefined);
 });
 
-function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
+function booting(
+  prune: () => Promise<unknown>,
+  failOn = '',
+  timeoutOn = '',
+  options: {
+    /** 第 n 次（从 1 起）`model_list` 的返回值；默认直接给出三个官方修订。 */
+    modelList?: (call: number) => Promise<{ version: VersionRef }[]>;
+    /** 第 n 次（从 1 起）`list_kernels` 的返回值；默认空列表。 */
+    kernels?: (call: number) => Promise<unknown>;
+    /** 第 n 次（从 1 起）`backend_ready` 的返回值。 */
+    backendReady?: (call: number) => Promise<unknown>;
+    /** 只让前几次匹配 `timeoutOn` 的调用超时（默认每次匹配的都超时）。 */
+    timeouts?: number;
+  } = {},
+) {
   let failing = failOn;
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
@@ -291,21 +305,37 @@ function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
   const guard = (command: string) => {
     if (command === failing) throw new Error(`${command} is unreachable`);
   };
+  let modelListCalls = 0,
+    kernelCalls = 0,
+    backendCalls = 0;
   const invoke = async (command: string) => {
     calls.push(command);
     guard(command);
+    if (command === 'backend_ready') {
+      backendCalls++;
+      if (options.backendReady) return options.backendReady(backendCalls);
+      return undefined;
+    }
     if (command === 'load_recent') return { root: '/last/project' };
     if (command === 'list_cases') return [{ dir: '/last/project/a', name: 'a' }];
-    if (command === 'list_kernels') return [];
+    if (command === 'list_kernels') {
+      kernelCalls++;
+      return options.kernels ? options.kernels(kernelCalls) : [];
+    }
     return undefined;
   };
   const invokeJson = async (command: string) => {
     calls.push(command);
     guard(command);
-    if (command === 'model_list') return versions;
+    if (command === 'model_list') {
+      modelListCalls++;
+      return options.modelList ? options.modelList(modelListCalls) : versions;
+    }
     if (command === 'model_prune') return prune();
     throw new Error(`Unexpected command: ${command}`);
   };
+  let timedOut = 0;
+  const bootEpoch = { current: 0 };
   const context = {
     alive: true,
     update: (patch: object | ((old: Record<string, unknown>) => object)) =>
@@ -313,8 +343,11 @@ function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
     notify: (message: string) => notices.push(message),
     invoke,
     invokeJson,
+    bootEpoch,
     withTimeout: <T>(promise: Promise<T>, _ms: number, what: string) =>
-      what === timeoutOn ? Promise.reject(new Error(`${what} timed out`)) : promise,
+      what === timeoutOn && (options.timeouts === undefined || timedOut++ < options.timeouts)
+        ? Promise.reject(new Error(`${what} timed out`))
+        : promise,
     bilingual: (_zh: string, en: string) => en,
     errorText: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     tidyModelsAfterStartup,
@@ -332,6 +365,8 @@ function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
     calls,
     notices,
     state,
+    versions,
+    bootEpoch,
     setFailure: (command = '') => {
       failing = command;
     },
@@ -500,6 +535,173 @@ test('a startup call that answers after its timeout still completes the startup'
   assert.deepEqual(late.state.kernels, []);
   assert.ok(Array.isArray(late.state.versions));
   assert.notEqual((late.state.startup as { phase?: string } | undefined)?.phase, 'failed');
+});
+
+// GUI-06 复核证据：首次 model_list 超时但命令还在跑 → 重试成功 → 用户选修改版 → 旧请求迟到。
+// 修复前 `versionsCall.then` 无条件写 `version`/`versionRef` 为最新官方版，覆盖用户的选择。
+test('a late model list from a superseded startup cannot reset the revision or catalogue', async () => {
+  // 两次请求看到的是不同版本的目录：第一次出发时只有两个官方修订，重试时已经多出一个。
+  // 旧请求晚到若写回列表，就是把过期目录恢复出来（任务书 GUI-06 验收第 2 条）。
+  const oldCatalogue = [1, 2].map((revision) => ({ version: { id: 'official', revision } }));
+  const freshCatalogue = [1, 2, 3].map((revision) => ({
+    version: { id: 'official', revision },
+  }));
+  let releaseFirst!: (value: { version: VersionRef }[]) => void;
+  const firstList = new Promise<{ version: VersionRef }[]>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const app = booting(async () => ({ removed: [] }), '', 'the model versions', {
+    timeouts: 1, // 只有第一次读取超时，重试那一次正常返回
+    modelList: (call) => (call === 1 ? firstList : Promise.resolve(freshCatalogue)),
+  });
+  await app.boot();
+  await settle();
+  assert.equal((app.state.startup as { phase: string }).phase, 'failed');
+  const firstGeneration = app.bootEpoch.current;
+  await app.boot(); // 用户在失败封面上点"重试启动"
+  await settle();
+  assert.equal(app.state.startup, undefined, 'the retry finishes');
+  assert.deepEqual(
+    app.state.versionRef,
+    freshCatalogue[2].version,
+    'no choice yet: latest official',
+  );
+  // 用户在版本页选了修改版：三处语义一起写入（VersionsPage/ProjectPage 都是这样选的）。
+  const soil = { version: { id: 'soil', revision: 4 } };
+  Object.assign(app.state, {
+    version: soil,
+    versionRef: soil.version,
+    chosenVersion: soil.version,
+  });
+  releaseFirst(oldCatalogue); // 第一次请求现在才返回
+  for (let i = 0; i < 5; i++) await settle();
+  assert.equal(app.bootEpoch.current, firstGeneration + 1);
+  assert.deepEqual(
+    app.state.versionRef,
+    soil.version,
+    'the late result must not write official back',
+  );
+  assert.deepEqual(app.state.version, soil);
+  assert.deepEqual(app.state.chosenVersion, soil.version);
+  assert.deepEqual(
+    app.state.versions,
+    freshCatalogue,
+    'the stale catalogue is discarded, not restored',
+  );
+  assert.equal(app.state.startup, undefined);
+  assert.equal(app.calls.filter((command) => command === 'model_list').length, 2);
+});
+
+// GUI-06 验收："旧请求不能恢复已经过期的目录或失败封面"。
+test('a superseded startup cannot restore its kernel directory or hide the newer failure', async () => {
+  let releaseKernels!: (value: { preset: string; dir: string }[]) => void;
+  const firstKernels = new Promise<{ preset: string; dir: string }[]>((resolve) => {
+    releaseKernels = resolve;
+  });
+  const app = booting(async () => ({ removed: [] }), '', 'the model kernels', {
+    timeouts: 1,
+    kernels: (call) => (call === 1 ? firstKernels : Promise.resolve([])),
+  });
+  await app.boot();
+  await settle();
+  assert.equal((app.state.startup as { phase: string }).phase, 'failed');
+  // 重试这一次在连接后台时就失败：失败封面属于当前这一代。
+  app.setFailure('backend_ready');
+  await app.boot();
+  await settle();
+  assert.deepEqual(
+    [
+      (app.state.startup as { phase: string }).phase,
+      (app.state.startup as { stage: string }).stage,
+    ],
+    ['failed', 'backend'],
+  );
+  releaseKernels([{ preset: 'stale', dir: '/stale/kernel' }]);
+  for (let i = 0; i < 5; i++) await settle();
+  assert.equal(app.state.kernelDir, undefined, 'the stale kernel directory is not restored');
+  assert.equal(app.state.kernels, undefined);
+  assert.equal(
+    (app.state.startup as { stage: string }).stage,
+    'backend',
+    'the superseded attempt cannot clear the newer failure cover',
+  );
+});
+
+// GUI-06 验收："无用户选择的首次慢启动仍可以正确完成"。
+test('a first model list answering after its timeout completes startup with the latest official', async () => {
+  const official = [1, 2, 3].map((revision) => ({ version: { id: 'official', revision } }));
+  let release!: (value: { version: VersionRef }[]) => void;
+  const list = new Promise<{ version: VersionRef }[]>((resolve) => {
+    release = resolve;
+  });
+  const app = booting(async () => ({ removed: [] }), '', 'the model versions', {
+    modelList: () => list,
+  });
+  await app.boot();
+  await settle();
+  assert.equal((app.state.startup as { phase: string }).phase, 'failed');
+  release(official);
+  for (let i = 0; i < 5; i++) await settle();
+  assert.equal(app.state.startup, undefined, 'the late answer retires the failure cover');
+  assert.deepEqual(app.state.versionRef, official[2].version);
+  assert.deepEqual(app.state.version, official[2]);
+  assert.equal(app.state.starting, false);
+});
+
+// GUI-06："用户已选模型时，背景结果不得重新初始化为官方版"——同一次启动内也成立：
+// 用户先在失败封面上点"先进入应用"并选好修改版，迟到的首次模型列表不能再改回来。
+test('a late model list does not reset a revision chosen while that startup was still running', async () => {
+  const official = [1, 2, 3].map((revision) => ({ version: { id: 'official', revision } }));
+  let release!: (value: { version: VersionRef }[]) => void;
+  const list = new Promise<{ version: VersionRef }[]>((resolve) => {
+    release = resolve;
+  });
+  const app = booting(async () => ({ removed: [] }), '', 'the model versions', {
+    modelList: () => list,
+  });
+  await app.boot();
+  await settle();
+  const soil = { version: { id: 'soil', revision: 5 } };
+  Object.assign(app.state, {
+    startup: undefined, // "先进入应用（部分功能不可用）"
+    version: soil,
+    versionRef: soil.version,
+    chosenVersion: soil.version,
+  });
+  release([...official, soil]);
+  for (let i = 0; i < 5; i++) await settle();
+  assert.deepEqual(app.state.versionRef, soil.version);
+  assert.deepEqual(app.state.version, soil);
+  assert.deepEqual(app.state.chosenVersion, soil.version);
+  assert.equal(app.state.startup, undefined);
+  // 同一代次内迟到的列表仍然接上（超时只是不再干等，代次没有变）：只更新目录、不改选择。
+  assert.ok(
+    (app.state.versions as { version: VersionRef }[]).some((entry) => entry.version.id === 'soil'),
+    'a late list within the same startup still refreshes the catalogue',
+  );
+});
+
+// GUI-06："过期结果不能覆盖当前启动状态"——首次启动还卡在连接后台时又重试，旧的那次最后失败，
+// 不能把新一次已经收起的封面重新放出来，也不能把它标成还在启动。
+test('a slow first startup cannot overwrite the finished state of a newer retry', async () => {
+  let rejectBackend!: (error: unknown) => void;
+  const firstReady = new Promise<unknown>((_resolve, reject) => {
+    rejectBackend = reject;
+  });
+  const app = booting(async () => ({ removed: [] }), '', '', {
+    backendReady: (call) => (call === 1 ? firstReady : Promise.resolve(undefined)),
+  });
+  const first = app.boot();
+  await settle();
+  await app.boot();
+  await settle();
+  assert.equal(app.state.startup, undefined, 'the retry finishes');
+  rejectBackend(new Error('the first connection finally failed'));
+  await first;
+  await settle();
+  assert.equal(app.state.startup, undefined, 'the superseded failure does not put the cover back');
+  assert.equal(app.state.busy, false);
+  assert.equal(app.state.starting, false);
 });
 
 test('closing asks about unsaved edits once each and about local runs, never about remote jobs', () => {

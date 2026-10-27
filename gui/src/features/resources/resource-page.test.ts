@@ -26,6 +26,14 @@ function harness(
     before: (command: string, args?: Record<string, unknown>) => Promise<void>;
     studies?: Record<string, { dir: string }[]>;
   },
+  // 模拟 remote_config 里已经保存的本机默认路径（GUI-13 的基线来源）。
+  local?: {
+    project_dir?: string;
+    rawdata_dir?: string;
+    runtime_dir?: string;
+    forcing_dir?: string;
+    kind_paths?: Record<string, Record<string, string>>;
+  },
 ) {
   const source = readFileSync(new URL('./ResourcesPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
@@ -88,7 +96,7 @@ function harness(
     switch (command) {
       case 'remote_config':
         if (failures.config) throw new Error('Unreadable server configuration');
-        return { servers };
+        return { servers, ...(local ? { local } : {}) };
       case 'remote_save_config':
         if (failures.save) throw new Error('Cannot save connection settings');
         return null;
@@ -344,6 +352,10 @@ function harness(
     contract: () => contract,
     visible: visibleActions,
     nodes: () => walk(tree),
+    notices: () =>
+      walk(tree)
+        .filter((node) => node.type === 'Notice')
+        .map((node) => text(node)),
     text,
     failProbe: () => {
       failProbe = true;
@@ -975,6 +987,7 @@ test('busy operations block navigation even before React rerenders the busy stat
     busy: false,
     lock,
     dirty: false,
+    localDirty: false,
     t: (zh: string) => zh,
   });
   assert.match(reason(), /操作进行中/);
@@ -1182,4 +1195,142 @@ test('a saved server shows its live status panel with its partition', async () =
   const panel = page.liveLoads().at(-1);
   assert.equal(panel?.host, '7920land');
   assert.equal(panel?.partition, '');
+});
+
+const SAVED_LOCAL = {
+  project_dir: '/saved/projects',
+  rawdata_dir: '/saved/raw',
+  runtime_dir: '/saved/runtime',
+  forcing_dir: '/saved/forcing',
+};
+
+test('local default path edits join the unsaved guard and block switching, refreshing and adding servers', async () => {
+  const page = harness({}, undefined, {}, undefined, undefined, SAVED_LOCAL);
+  await page.ready();
+  assert.equal(page.guard(), null, 'loaded local defaults are not dirty');
+  let contract = await page.action('resource-select-local');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-project_dir')?.value,
+    '/saved/projects',
+    'the saved baseline is shown',
+  );
+  page.fill('resource-local-project_dir', '/edited/projects');
+  assert.match(page.guard()!, /本机默认路径/);
+  contract = page.contract();
+  assert.equal((contract.details as { localDirty: boolean }).localDirty, true);
+  assert.equal((contract.details as { dirty: boolean }).dirty, true);
+  for (const id of ['resource-select-server-7920land', 'resource-new', 'resource-refresh'])
+    assert.equal(contract.actions.find((action) => action.id === id)?.enabled, false, id);
+  assert.equal(
+    contract.actions.find((action) => action.id === 'resource-local-data-discard')?.enabled,
+    true,
+  );
+  // 放弃回到加载配置时的真实已保存值，而不是中间输入。
+  contract = await page.action('resource-local-data-discard');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-project_dir')?.value,
+    '/saved/projects',
+  );
+  assert.equal((contract.details as { localDirty: boolean }).localDirty, false);
+  assert.equal(page.guard(), null);
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-local-data-discard'));
+});
+
+test('unsaved local default paths block resource switching with their own reason', () => {
+  const reason = callback('navigationReason', {
+    deletingServer: null,
+    rootBrowser: null,
+    busy: false,
+    lock: { current: false },
+    dirty: false,
+    localDirty: true,
+    t: (zh: string) => zh,
+  });
+  assert.match(reason()!, /本机默认路径/);
+});
+
+test('saving local default paths writes the local block, advances the baseline and clears the old success on edit', async () => {
+  const page = harness({}, undefined, {}, undefined, undefined, SAVED_LOCAL);
+  await page.ready();
+  await page.action('resource-select-local');
+  page.fill('resource-local-rawdata_dir', ' /edited/raw ');
+  page.fill('resource-local-forcing_dir', '/edited/forcing');
+  let contract = await page.action('resource-local-data-save');
+  const saved = page.calls.filter((call) => call.command === 'remote_save_config').at(-1)!;
+  const config = saved.args!.config as {
+    servers: { host: string }[];
+    local: Record<string, string>;
+  };
+  assert.deepEqual(
+    config.servers.map((server) => server.host),
+    ['7920land', '7920mp'],
+  );
+  // NewCasePage 新建模拟时读取的就是 remote_config.local 这一块（simulation-page.test.ts 覆盖读取一侧）。
+  assert.deepEqual(config.local, {
+    project_dir: '/saved/projects',
+    rawdata_dir: '/edited/raw',
+    runtime_dir: '/saved/runtime',
+    forcing_dir: '/edited/forcing',
+  });
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-rawdata_dir')?.value,
+    '/edited/raw',
+    'saved paths are shown trimmed',
+  );
+  assert.equal(page.guard(), null);
+  assert.ok(page.notices().some((text) => text.includes('已保存本机默认数据路径')));
+  // 改值后上一次的保存成功提示必须消失。
+  page.fill('resource-local-runtime_dir', '/edited/runtime');
+  assert.ok(!page.notices().some((text) => text.includes('已保存本机默认数据路径')));
+  assert.match(page.guard()!, /本机默认路径/);
+  // 放弃回到最近一次真实保存的值，而不是加载时的 /saved/raw。
+  contract = await page.action('resource-local-data-discard');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-rawdata_dir')?.value,
+    '/edited/raw',
+  );
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-runtime_dir')?.value,
+    '/saved/runtime',
+  );
+  assert.equal(page.guard(), null);
+});
+
+test('a failed local default save keeps the edited input and does not report success', async () => {
+  const page = harness({}, undefined, { save: true }, undefined, undefined, SAVED_LOCAL);
+  await page.ready();
+  await page.action('resource-select-local');
+  page.fill('resource-local-project_dir', '/edited/projects');
+  await assert.rejects(page.action('resource-local-data-save'), /Cannot save connection settings/);
+  page.render();
+  const contract = page.contract();
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-project_dir')?.value,
+    '/edited/projects',
+    'failed saves never roll the input back',
+  );
+  assert.ok(!page.notices().some((text) => text.includes('已保存本机默认数据路径')));
+  assert.match(page.guard()!, /本机默认路径/);
+  assert.equal(
+    contract.actions.find((action) => action.id === 'resource-local-data-save')?.enabled,
+    true,
+    'the busy lock is released so saving can be retried',
+  );
+});
+
+test('a configuration refresh cannot overwrite unsaved local default paths', async () => {
+  const page = harness({}, undefined, {}, undefined, undefined, SAVED_LOCAL);
+  await page.ready();
+  await page.action('resource-select-local');
+  page.fill('resource-local-project_dir', '/edited/projects');
+  // 模拟返回模拟设置等场景让加载 effect 重跑（刷新按钮本身在脏状态下已禁用，这里守住内部路径）。
+  page.restartEffect();
+  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+  page.render();
+  const contract = page.contract();
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-local-project_dir')?.value,
+    '/edited/projects',
+  );
+  assert.match(page.guard()!, /本机默认路径/);
 });

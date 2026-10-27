@@ -2884,6 +2884,28 @@ export const commandContract = {
     "message": {
       "required": true,
       "rust_type": "String"
+    },
+    "expectedHash": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "workspace_create_file": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "text": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "message": {
+      "required": true,
+      "rust_type": "String"
     }
   },
   "workspace_put": {
@@ -2906,6 +2928,10 @@ export const commandContract = {
     "message": {
       "required": true,
       "rust_type": "String"
+    },
+    "createOnly": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "workspace_remove": {

@@ -464,6 +464,7 @@ dependencies = [
  "netcdf",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

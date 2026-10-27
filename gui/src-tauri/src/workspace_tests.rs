@@ -240,3 +240,110 @@ fn single_file_commands_validate_paths_and_messages() {
         assert!(file_args("demo", "x", Some(message)).is_err());
     }
 }
+
+#[test]
+fn text_saves_carry_a_content_baseline_and_creates_never_do() {
+    let hash = "a".repeat(64);
+    let save = write_file_args("demo", "vendor/a.F90", "  fix k  ", Some(&hash), false).unwrap();
+    assert_eq!(
+        save,
+        [
+            "ws-write",
+            "--name",
+            "demo",
+            "--path",
+            "vendor/a.F90",
+            "--message",
+            "fix k",
+            "--expect-sha256",
+            &hash
+        ]
+    );
+    assert!(!save.iter().any(|argument| argument == "--create-only"));
+    let create = write_file_args("demo", "vendor/b.F90", "add", None, true).unwrap();
+    assert_eq!(
+        create,
+        [
+            "ws-write",
+            "--name",
+            "demo",
+            "--path",
+            "vendor/b.F90",
+            "--message",
+            "add",
+            "--create-only",
+            "1"
+        ]
+    );
+    assert!(!create.iter().any(|argument| argument == "--expect-sha256"));
+    // 新建要求文件不存在，基线要求文件存在且没变：两者叠加没有意义，直接拒绝。
+    assert!(write_file_args("demo", "a.F90", "x", Some(&hash), true).is_err());
+    // 基线形状不对（不是 64 位十六进制）不进命令行；空白等于没给。
+    for bad in ["abc", &"g".repeat(64), &"a".repeat(63)] {
+        assert!(
+            write_file_args("demo", "a.F90", "x", Some(bad), false).is_err(),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        write_file_args("demo", "a.F90", "x", Some("   "), false)
+            .unwrap()
+            .len(),
+        7,
+        "空白基线等于没给；命令只有 ws-write 和那五个必填参数"
+    );
+    // 大写哈希规范化成小写，避免同一内容因为大小写被写入端判成冲突。
+    assert_eq!(
+        write_file_args("demo", "a.F90", "x", Some(&"A".repeat(64)), false)
+            .unwrap()
+            .last()
+            .unwrap(),
+        &hash
+    );
+    assert!(write_file_args("demo", "../a.F90", "x", None, true).is_err());
+    assert!(write_file_args("demo", "a.F90", "", None, true).is_err());
+}
+
+#[test]
+fn adding_local_files_can_refuse_to_replace_an_existing_name() {
+    let command = put_args(
+        "demo",
+        "vendor/table.nc",
+        "/tmp/table.nc",
+        false,
+        "add",
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        command,
+        [
+            "ws-put",
+            "--name",
+            "demo",
+            "--path",
+            "vendor/table.nc",
+            "--from",
+            "/tmp/table.nc",
+            "--message",
+            "add",
+            "--create-only",
+            "1"
+        ]
+    );
+    // 界面上的"替换"不带 create-only：保持整文件覆盖语义。
+    let replace = put_args(
+        "demo",
+        "vendor/table.nc",
+        "/tmp/table.nc",
+        false,
+        "fix",
+        false,
+    )
+    .unwrap();
+    assert!(!replace.iter().any(|argument| argument == "--create-only"));
+    // 文件夹替换没有新建语义。
+    assert!(put_args("demo", "vendor/main", "/tmp/main", true, "x", true).is_err());
+    assert!(put_args("demo", "../x", "/tmp/x", false, "x", false).is_err());
+    assert!(put_args("demo", "x", "/tmp/x", false, "", false).is_err());
+}

@@ -7,6 +7,8 @@ import { Button, Card, Field, Input, Notice, Select } from '../../components/ui'
 import { ActionButton } from '../../components/ActionButton';
 import CodeFiles from './CodeFiles';
 import { workspaceErrorText } from './workspace-errors';
+import type { SourceEditState } from './source-edits';
+import { useSourceChoicePrompt } from './source-guard';
 
 /** 选来打开源码的本地程序（VS Code、记事本……）；空着就用系统默认程序。每台机器各记各的。 */
 const EDITOR_KEY = 'colm.externalEditor';
@@ -124,11 +126,14 @@ export default function CodeWorkspace({
   name,
   onChanged,
   onPendingChange,
+  onSourceState,
   disabled = false,
 }: {
   name: string | null;
   onChanged: () => Promise<void>;
   onPendingChange?: (pending: boolean) => void;
+  /** 源码缓冲区的未保存/保存中状态上抛给版本页：离开、冻结时统一处理（GUI-02）。 */
+  onSourceState?: (state: SourceEditState | null) => void;
   disabled?: boolean;
 }) {
   const { state } = useApp(),
@@ -149,6 +154,25 @@ export default function CodeWorkspace({
     [snapshotNote, setSnapshotNote] = useState('');
   const lock = useRef(false),
     epoch = useRef({ active: false });
+  // 源码缓冲区状态：CodeFiles 是唯一持有者，这里只存只读视图（getter 读到的永远是最新值）并转发给
+  // 版本页。编译/检查必须用磁盘上的代码，所以点检查前要先处理未保存缓冲区（GUI-02）。
+  const sourceRef = useRef<SourceEditState | null>(null);
+  const [sourceBusy, setSourceBusy] = useState(false);
+  // 快照把"外部软件改过的文件"记成提交后 +1：让 CodeFiles 核对当前打开的文件（GUI-03）。
+  const [externalChangeToken, setExternalChangeToken] = useState(0);
+  const onPendingRef = useRef(onPendingChange),
+    onSourceStateRef = useRef(onSourceState);
+  onPendingRef.current = onPendingChange;
+  onSourceStateRef.current = onSourceState;
+  const sourceChoice = useSourceChoicePrompt(state.language === 'en');
+  const handleSourceState = (next: SourceEditState | null) => {
+    sourceRef.current = next;
+    onSourceStateRef.current?.(next);
+  };
+  const handleSourcePending = (pending: boolean) => {
+    setSourceBusy(pending);
+    onPendingRef.current?.(pending);
+  };
   useEffect(() => {
     const token = { active: true };
     epoch.current = token;
@@ -185,6 +209,9 @@ export default function CodeWorkspace({
           );
           setStatus(await invokeJson<Status>('workspace_status', { name }));
           await onChanged();
+          // 外部改动已记成提交：让打开中的文件核对内容哈希。干净缓冲区自动换成新内容，脏缓冲区
+          // 显示冲突并保留用户文本（GUI-03）。
+          setExternalChangeToken((token) => token + 1);
         })
         .catch((e) => {
           if (live) setError(t(...workspaceErrorText(String(e))));
@@ -198,6 +225,13 @@ export default function CodeWorkspace({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, disabled]);
+  useEffect(
+    () => () => {
+      // 组件卸载（切草稿/离开页面）时把上抛状态清掉，免得版本页拿着过期缓冲区做冻结保护。
+      onSourceStateRef.current?.(null);
+    },
+    [],
+  );
   async function chooseEditor() {
     const app = await invoke<string | null>('pick_file', { key: 'external-editor' });
     if (!app) return;
@@ -205,7 +239,8 @@ export default function CodeWorkspace({
     setEditor(app);
   }
   async function execute(fn: () => Promise<unknown>, refresh = true) {
-    if (lock.current || disabled) return;
+    // 文件写操作在飞时不许再起检查/编译：两边都改同一个工作区，提交会打架。
+    if (lock.current || disabled || sourceRef.current?.busy) return;
     lock.current = true;
     onPendingChange?.(true);
     setBusy(true);
@@ -252,7 +287,28 @@ export default function CodeWorkspace({
     ['parity', t('两版一致', 'Parity')],
   ] as const;
   const checkCase = caseDir || state.selectedCase?.entry.dir || '';
-  const checkDisabled = busy || disabled || (selectedCheck.needs === 'case' && !checkCase);
+  const checkDisabled =
+    busy || sourceBusy || disabled || (selectedCheck.needs === 'case' && !checkCase);
+  /**
+   * 运行检查：编译内核/引擎、测试、两版一致都读磁盘上的源码，未保存的缓冲区不会算进去。先让用户
+   * 保存/放弃/取消，再真正开始，免得编译的是旧代码却以为已经纳入（GUI-02）。
+   */
+  const runCheck = () => {
+    const check = selectedCheck;
+    const checkCaseDir = checkCase;
+    void sourceChoice.ask(sourceRef.current).then((proceed) => {
+      if (!proceed || !name) return;
+      void execute(() =>
+        invokeJson('workspace_check', {
+          name,
+          action: check.value,
+          preset,
+          package: pkg,
+          case: checkCaseDir || null,
+        }),
+      ).catch(() => {});
+    });
+  };
   const revertFile = async (path: string) => {
     if (!name || !message.trim()) return;
     if (
@@ -448,7 +504,7 @@ export default function CodeWorkspace({
     );
 
   return (
-    <fieldset disabled={disabled || busy} style={{ border: 0, padding: 0 }}>
+    <fieldset disabled={disabled || busy || sourceBusy} style={{ border: 0, padding: 0 }}>
       <div className="code-workspace-page">
         {error && <Notice tone="error">{error}</Notice>}
         <section className="workspace-hero">
@@ -535,11 +591,14 @@ export default function CodeWorkspace({
             editor={editor}
             message={message}
             en={state.language === 'en'}
-            disabled={busy || disabled}
+            disabled={busy || sourceBusy || disabled}
             onChanged={async () => {
               setStatus(await invokeJson<Status>('workspace_status', { name }));
               await onChanged();
             }}
+            onPendingChange={handleSourcePending}
+            onStateChange={handleSourceState}
+            externalChangeToken={externalChangeToken}
           />
         </section>
 
@@ -604,7 +663,11 @@ export default function CodeWorkspace({
                         )
                       : t('没有新的修改', 'No new changes'),
                   );
-                  if (result.applied) await onChanged();
+                  if (result.applied) {
+                    await onChanged();
+                    // 手动扫描也算"外部改动被记成提交"：让打开中的文件核对内容（GUI-03）。
+                    setExternalChangeToken((token) => token + 1);
+                  }
                   return result;
                 })
               }
@@ -811,17 +874,7 @@ export default function CodeWorkspace({
               kind="commit"
               variant="primary"
               disabled={checkDisabled}
-              run={() =>
-                run(() =>
-                  invokeJson('workspace_check', {
-                    name,
-                    action,
-                    preset,
-                    package: pkg,
-                    case: checkCase || null,
-                  }),
-                )
-              }
+              run={runCheck}
             >
               {t('运行检查', 'Run check')}
             </ActionButton>
@@ -858,6 +911,8 @@ export default function CodeWorkspace({
           </Button>
         </details>
       </div>
+      {/* 编译/测试前统一处理未保存源码：保存并继续 / 放弃并继续 / 取消。 */}
+      {sourceChoice.dialog}
     </fieldset>
   );
 }

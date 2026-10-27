@@ -501,6 +501,8 @@ test('opening a version only shows it; choosing it for simulations and freezing 
   await expression(
     'select',
     {
+      // 源码缓冲区守卫：这个用例没有打开的 CodeFiles，所以没有未保存源码。
+      assertSourceSaved: () => {},
       dirty: false,
       t: (zh: string) => zh,
       update: (patch: unknown) => updates.push(patch),
@@ -530,6 +532,8 @@ test('opening a version only shows it; choosing it for simulations and freezing 
       researchVersion: async () => model,
       // 草稿与已有版本等价：后端直接返回那个版本，界面说一句，不当成错误。
       draft: { id: 'draft-1' },
+      // freeze 用 ref 里的最新草稿（源码保存会刷新 code.commit/generation）；这个用例没有源码缓冲区。
+      draftNow: { current: { id: 'draft-1' } },
       t: (zh: string) => zh,
       notify: (message: string) => notices.push(message),
       dirtyNow: { current: false },

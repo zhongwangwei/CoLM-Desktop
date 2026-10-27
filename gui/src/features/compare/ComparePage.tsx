@@ -14,11 +14,25 @@ import {
   commonYears,
   comparisonDir,
   comparisonName,
+  configInvalidation,
   defaultGridRes,
+  designFingerprint,
+  jobContacted,
+  jobEnded,
+  jobUncertain,
   parseReferences,
+  parseRemoteJob,
+  remoteJobTerminal,
+  simulationFormForPick,
+  simulationInfoForSave,
+  validateSimulation,
   type BenchReference,
-  type BenchSimulation,
+  type ComparisonDesign,
   type HistoryInfo,
+  type RemoteJobIdentity,
+  type SimulationField,
+  type SimulationFormValues,
+  type SimulationIssue,
 } from './compare';
 
 type Project = { name: string; dir?: string; config?: string | null; report: string | null };
@@ -47,6 +61,18 @@ type Pick = {
   dataGroupby?: string | null;
   gridRes?: number | null;
 };
+/** 单点模拟要先并成的站点清单项（与后端 `bench_run` 的 `sites` 参数一致）。 */
+type Site = { id: string; station: string; history_dir: string; prefix: string };
+/**
+ * 登记/编辑模拟的表单。保存相关字段就是 `SimulationFormValues`；`probe` 保存完整探测结果，
+ * 保存时只覆盖用户明确编辑的字段（GUI-10），`probeDir` 记住它属于哪个目录。
+ */
+type SimForm = SimulationFormValues & {
+  label: string;
+  suffix: string;
+  probe: HistoryInfo | null;
+  probeDir: string;
+};
 type RegisterDialog = 'variable' | 'reference' | 'simulation' | null;
 type MetricOption = { name: string; label: string };
 type MetricOptions = { metrics: MetricOption[]; scores: MetricOption[] };
@@ -67,14 +93,26 @@ const FALLBACK_SCORES: MetricOption[] = [
   { name: 'nRMSEScore', label: 'Normalized RMSE Score (nRMSEScore)' },
   { name: 'nSpatialScore', label: 'Normalized Spatial Score (nSpatialScore)' },
 ];
-type SimVariableRow = { variable: string; varname: string; unit: string };
 type RemoteJob = {
   job: string;
   status: { state: string; exit_code?: number; log_tail: string; detail?: string | null };
   ended: string | null;
 };
-/** 正在服务器上跑的那个作业：记在本机，关掉页面、关掉应用再回来都能接着看。 */
-type ActiveJob = { job: string; kind: 'install' | 'run'; name?: string };
+/**
+ * 正在服务器上跑的那个作业：完整身份记在本机（主机、比较项目、提交时间、最后确认状态），
+ * 关掉页面、关掉应用再回来都能接着看；一次查询失败也不删它（GUI-07）。
+ */
+type ActiveJob = RemoteJobIdentity;
+/**
+ * 一次远程作业跟踪的结果。只有 `succeeded/failed/cancelled` 是确认过的终态；
+ * `uncertain` 是暂时联系不上（身份保留、等待核对），`detached` 表示用户换看了别的机器（身份仍在，
+ * 回到那台机器时再接着核对）。
+ */
+type WatchOutcome =
+  | { state: 'succeeded' | 'cancelled'; job: ActiveJob }
+  | { state: 'failed'; job: ActiveJob; error: string }
+  | { state: 'uncertain'; job: ActiveJob; reason: string }
+  | { state: 'detached' };
 
 /** 常用的 PyPI 镜像。国内服务器直连 PyPI 常常很慢（7920 实测十分钟装不完，清华镜像 85 秒）。 */
 const INDEXES = [
@@ -82,6 +120,40 @@ const INDEXES = [
   { value: 'https://pypi.tuna.tsinghua.edu.cn/simple', zh: '清华镜像', en: 'Tsinghua mirror' },
   { value: 'https://mirrors.aliyun.com/pypi/simple', zh: '阿里云镜像', en: 'Aliyun mirror' },
 ];
+
+/** 探测结果里只属于那个目录的字段：目录一改就得清空，不能把旧目录的前缀/年份/类型/范围写进新目录（GUI-10）。 */
+const CLEAR_PROBED_SIM_FIELDS = {
+  dataType: 'auto' as const,
+  prefix: '',
+  timRes: 'Day',
+  from: '',
+  to: '',
+  dataGroupby: '',
+  gridRes: '',
+  lon: '',
+  lat: '',
+  extent: '',
+};
+
+/** 新登记模拟的空表单（与编辑已有模拟共用同一套字段）。 */
+const emptySimForm = (): SimForm => ({
+  dir: '',
+  label: '',
+  dataType: 'auto',
+  prefix: '',
+  suffix: '',
+  timRes: 'Day',
+  from: '',
+  to: '',
+  dataGroupby: '',
+  gridRes: '',
+  lon: '',
+  lat: '',
+  extent: '',
+  variables: [],
+  probe: null,
+  probeDir: '',
+});
 
 const stored = (key: string) => {
   try {
@@ -161,23 +233,15 @@ export default function ComparePage() {
     unit: '',
     description: '',
   });
-  const [simForm, setSimForm] = useState({
-    dir: '',
-    label: '',
-    dataType: 'auto',
-    prefix: '',
-    suffix: '',
-    timRes: 'Day',
-    from: '',
-    to: '',
-    dataGroupby: '',
-    gridRes: '',
-    variables: [] as SimVariableRow[],
-  });
+  const [simForm, setSimForm] = useState<SimForm>(emptySimForm);
   const [simEditing, setSimEditing] = useState<string | null>(null);
-  const [sites, setSites] = useState<
-    { id: string; station: string; history_dir: string; prefix: string }[]
-  >([]);
+  // 模拟登记弹窗里的字段错误：同步抛出的错误原来只进控制台（GUI-11），现在弹窗里看得到并聚焦字段。
+  const [simError, setSimError] = useState<{ field: SimulationField; message: string } | null>(
+    null,
+  );
+  const [sites, setSites] = useState<Site[]>([]);
+  // 生成配置时读不出区域范围的格点模拟：只写目标分辨率，页面说明原因（GUI-10）。
+  const [missingExtent, setMissingExtent] = useState<string[]>([]);
   const [report, setReport] = useState<{ path: string; html: string } | null>(null);
   // 参考数据根目录：扫描用它，运行时作为 OPENBENCH_REF_ROOT 交给 OpenBench（内置登记表的路径都相对它）。
   // 按机器记住。
@@ -206,30 +270,64 @@ export default function ComparePage() {
   const stopping = useRef(false);
   // 页面关掉时停止轮询：作业记录留着，回到页面时由新的页面接着等（否则两个轮询同时跑、结果取两遍）。
   const alive = useRef(true);
+  // GUI-05：当前浏览的机器与请求代次。异步响应回来先核对，旧机器/旧代次的只丢弃，不写状态、登记表、
+  // 错误或忙碌标记。机器 ref 在渲染时同步，关闭页面/切换机器的窗口期里到达的响应也能被判为过期。
+  const hostRef = useRef(host);
+  hostRef.current = host;
+  const hostEpoch = useRef(0);
+  const stillCurrent = (machine: string, epoch: number) =>
+    hostRef.current === machine && hostEpoch.current === epoch;
+  // GUI-07：正在等待的作业、暂时失联/待核对的作业、已确认终态的历史作业。三者分开：
+  // 浏览别的机器不会打断正在跑的跟踪，失联也不会把作业身份从本机删掉。
+  const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
+  const [unsettled, setUnsettled] = useState<{ job: ActiveJob; reason: string } | null>(null);
+  const [lastJob, setLastJob] = useState<ActiveJob | null>(null);
+  // GUI-08：正在取回的报告（机器 + 比较名）；同一份取回期间不重复触发。
+  const fetching = useRef<Set<string>>(new Set());
+  // 生成配置时记下设计指纹与自动生成的文本、站点清单：运行前再核对，手改过的配置不被清掉（GUI-04）。
+  const generated = useRef<{ fingerprint: string; config: string; sites: Site[] } | null>(null);
   const LEFT = 'compare page left';
   const remote = !!host;
   const jobKey = (machine: string) => `colm.benchJob@${machine}`;
+  const jobHistoryKey = (machine: string) => `colm.benchLastJob@${machine}`;
 
-  const refresh = async (machine = host) => {
-    const next = await invokeJson<Status>(
-      machine ? 'bench_remote_status' : 'bench_status',
-      machine ? { host: machine } : undefined,
-    );
-    setStatus(next);
-    // 读不到登记表要说出来：原来吞掉错误、显示"0 个"，看不出是哪里坏了（2026-10-23 窗口实测）。
-    if (next.openbench)
-      setReferences(
-        parseReferences(
-          await invokeJson(
-            machine ? 'bench_remote_references' : 'bench_references',
-            machine ? { host: machine } : undefined,
-          ).catch((e) => {
-            setError(shown(e));
-            return [];
-          }),
-        ),
+  // 读当前机器的状态与登记表。`quiet` 用于任务结束后的后台刷新：失败不覆盖用户正在看的错误提示（GUI-05/08）。
+  const refresh = async (
+    machine = host,
+    epoch = hostEpoch.current,
+    quiet = false,
+  ): Promise<Status | null> => {
+    if (!stillCurrent(machine, epoch)) return null;
+    let next: Status;
+    try {
+      next = await invokeJson<Status>(
+        machine ? 'bench_remote_status' : 'bench_status',
+        machine ? { host: machine } : undefined,
       );
-    else setReferences([]);
+    } catch (e) {
+      if (!quiet && stillCurrent(machine, epoch)) setError(shown(e));
+      return null;
+    }
+    // 旧机器的响应回来时，页面已经换成别的机器了：状态、登记表、错误都不写。
+    if (!stillCurrent(machine, epoch)) return null;
+    setStatus(next);
+    if (!next.openbench) {
+      setReferences([]);
+      return next;
+    }
+    try {
+      const list = await invokeJson(
+        machine ? 'bench_remote_references' : 'bench_references',
+        machine ? { host: machine } : undefined,
+      );
+      if (stillCurrent(machine, epoch)) setReferences(parseReferences(list));
+    } catch (e) {
+      // 读不到登记表要说出来：原来吞掉错误、显示"0 个"，看不出是哪里坏了（2026-10-23 窗口实测）。
+      if (stillCurrent(machine, epoch)) {
+        setReferences([]);
+        if (!quiet) setError(shown(e));
+      }
+    }
     return next;
   };
   useEffect(() => {
@@ -261,88 +359,206 @@ export default function ComparePage() {
     } finally {
       lock.current = false;
       setBusy(false);
-      void refresh().catch(() => {});
+      // 后台刷新用 quiet：本次操作已经给出了错误/提示，不能被刷新失败盖掉（GUI-05/08）。
+      void refresh(host, hostEpoch.current, true);
     }
   };
+  // ---- 远程作业身份与恢复（GUI-07）：一次查询失败不等于作业失败 ----
+  // 写入本机的作业身份：主机、比较项目、提交时间、最后确认状态都在里面，重开页面/应用据此恢复核对。
+  const rememberJob = (machine: string, identity: ActiveJob) =>
+    store(jobKey(machine), JSON.stringify(identity));
+  // 确认终态后才结束活动跟踪；作业身份与结果留在历史记录里（历史仍保留身份，重开应用能看到上次结果）。
+  const settleJob = (
+    machine: string,
+    identity: ActiveJob,
+    end: 'succeeded' | 'failed' | 'cancelled',
+    reason = '',
+  ) => {
+    const history = jobEnded(identity, end, new Date().toISOString(), reason);
+    store(jobKey(machine), '');
+    store(jobHistoryKey(machine), JSON.stringify(history));
+    if (hostRef.current !== machine) return;
+    setUnsettled((old) => (old && old.job.job === identity.job ? null : old));
+    setLastJob(history);
+    setActiveJob(null);
+  };
+  // 通信失败：保留全部身份，只标记"终态未确认"，交给页面显示"暂时失联/待核对"（GUI-07 的核心）。
+  const markUncertain = (machine: string, identity: ActiveJob, error: string) => {
+    const reason = String(error);
+    const kept = jobUncertain(identity, reason);
+    rememberJob(machine, kept);
+    if (hostRef.current === machine) setUnsettled({ job: kept, reason });
+    return kept;
+  };
+  const jobFailureText = (reply: RemoteJob) => {
+    const exit = reply.status.exit_code;
+    if (exit != null)
+      return t(
+        `服务器上的作业失败（退出码 ${exit}），原因见下面的日志。`,
+        `The server job failed (exit code ${exit}); see the log below.`,
+      );
+    return t(
+      `服务器上的作业失败了（${reply.status.detail ?? '调度系统记录为失败'}）。`,
+      `The server job failed (${reply.status.detail ?? 'recorded as failed by the scheduler'}).`,
+    );
+  };
+  const uncertainText = (machine: string, identity: ActiveJob) =>
+    t(
+      `服务器 ${machine} 暂时联系不上：作业 ${identity.job}（${identity.name ?? '安装环境'}）的身份已经保留，远端可能仍在运行。可以重连继续等、核对终态，或停止它。`,
+      `Server ${machine} cannot be reached right now. Job ${identity.job} (${identity.name ?? 'environment install'}) is still tracked and may still be running; reconnect, check its final state, or stop it.`,
+    );
+  const jobEndText = (job: ActiveJob) =>
+    job.end === 'succeeded'
+      ? t('已成功', 'succeeded')
+      : job.end === 'failed'
+        ? t('失败', 'failed')
+        : job.end === 'cancelled'
+          ? t('已取消', 'cancelled')
+          : t('未知', 'unknown');
   // 等服务器上的作业结束：每 3 秒取一次日志末尾显示出来。作业号记在本机，页面关掉、应用关掉都不影响
   // 服务器上的作业，回来接着等。停止按钮结束的是服务器上的作业。
-  const watch = async (machine: string, active: ActiveJob) => {
-    job.current = active;
-    stopping.current = false;
-    store(jobKey(machine), JSON.stringify(active));
+  // GUI-07：只有服务器明确给出终态才清掉持久化身份；一次查询失败只标记"暂时无法确认"并保留身份。
+  const watch = async (machine: string, active: ActiveJob): Promise<WatchOutcome> => {
+    const epoch = hostEpoch.current;
+    let identity: ActiveJob = {
+      ...active,
+      host: machine,
+      submittedAt: active.submittedAt ?? new Date().toISOString(),
+      lastState: active.lastState ?? 'queued',
+      uncertain: false,
+      lastError: undefined,
+    };
+    job.current = identity;
+    setActiveJob(identity);
+    rememberJob(machine, identity);
     let unsure = 0;
     try {
       for (;;) {
         if (!alive.current) throw new Error(LEFT);
-        const reply = await invokeJson<RemoteJob>('bench_remote_job', {
-          host: machine,
-          job: active.job,
-          lines: 80,
-        });
-        setLog(reply.status.log_tail.split('\n').filter(Boolean));
-        const state = reply.status.state;
-        if (state === 'finished') {
-          if (reply.status.exit_code === 0) {
-            store(jobKey(machine), '');
-            return;
-          }
-          throw new Error(
-            t(
-              `服务器上的作业失败（退出码 ${reply.status.exit_code}），原因见下面的日志。`,
-              `The server job failed (exit code ${reply.status.exit_code}); see the log below.`,
-            ),
-          );
+        let reply: RemoteJob;
+        try {
+          reply = await invokeJson<RemoteJob>('bench_remote_job', {
+            host: machine,
+            job: identity.job,
+            lines: 80,
+          });
+        } catch (error) {
+          // SSH/网络暂时不通：不能当成作业失败，更不能删掉它的身份 —— 远端可能还在跑（旧行为就是这样丢的）。
+          const kept = markUncertain(machine, identity, String(error));
+          if (!stillCurrent(machine, epoch)) return { state: 'detached' };
+          return { state: 'uncertain', job: kept, reason: String(error) };
         }
-        if (reply.ended === 'cancelled' || (stopping.current && state !== 'running'))
-          throw new Error('已停止');
+        // 用户换去看别的机器了：日志不写进新页面；身份还持久化着，回来时接着核对。
+        if (!stillCurrent(machine, epoch)) return { state: 'detached' };
+        setLog(reply.status.log_tail.split('\n').filter(Boolean));
+        const end = remoteJobTerminal(reply);
+        if (end === 'succeeded') {
+          settleJob(machine, identity, 'succeeded');
+          return { state: 'succeeded', job: identity };
+        }
+        if (end === 'failed') {
+          const reason = jobFailureText(reply);
+          settleJob(machine, identity, 'failed', reason);
+          return { state: 'failed', job: identity, error: reason };
+        }
+        if (end === 'cancelled') {
+          settleJob(machine, identity, 'cancelled');
+          return { state: 'cancelled', job: identity };
+        }
+        // 点了停止：服务器上先结束进程、后写下"已取消"，中间那一下查到的是"找不到结果"，不能报成失败。
+        if (stopping.current && reply.status.state !== 'running') {
+          settleJob(machine, identity, 'cancelled');
+          return { state: 'cancelled', job: identity };
+        }
         // 进程没了、退出码还没写下：可能正在收尾，多看几次再下结论（2026-10-23 窗口实测停止时的竞态）。
         // 调度系统说已经结束（Slurm 的 COMPLETED）时多等一会儿：计算节点写下的退出码，登录节点经 NFS
         // 要过一阵才看得到（land02 实测：作业已不在队列、sacct 是 COMPLETED|0:0，exit_code 稍后才出现）。
         // 只凭 COMPLETED 不能算成功：作业脚本最后一行写退出码，评估失败时作业本身照样以 0 结束。
         const settling = /COMPLETED/i.test(reply.status.detail ?? '');
-        if ((state === 'lost' || state === 'unknown') && ++unsure > (settling ? 30 : 2))
-          throw new Error(
-            t(
-              `服务器上找不到这个作业的结果（${reply.status.detail ?? state}）。`,
-              `The server job ended without a result (${reply.status.detail ?? state}).`,
-            ),
+        const state = reply.status.state;
+        if ((state === 'lost' || state === 'unknown') && ++unsure > (settling ? 30 : 2)) {
+          const reason = t(
+            `服务器上找不到这个作业的结果（${reply.status.detail ?? state}）。`,
+            `The server job ended without a result (${reply.status.detail ?? state}).`,
           );
+          settleJob(machine, identity, 'failed', reason);
+          return { state: 'failed', job: identity, error: reason };
+        }
+        // 还在跑：记下最后确认状态，重开应用/回到页面后能显示这个作业到了哪一步。
+        identity = jobContacted(identity, state, new Date().toISOString());
+        rememberJob(machine, identity);
+        job.current = identity;
+        setActiveJob(identity);
         await sleep(3000);
       }
-    } catch (e) {
-      if (String(e).includes(LEFT)) throw e;
-      store(jobKey(machine), '');
-      throw e;
     } finally {
       job.current = null;
       stopping.current = false;
+      setActiveJob(null);
     }
   };
-  const install = (steps: ('uv' | 'python' | 'openbench')[]) =>
-    task(
-      async () => {
-        for (const step of steps) {
-          const from = step === 'openbench' && source === 'local' ? localSource : null;
-          const mirror = step === 'openbench' ? index || null : null;
-          if (!remote) {
-            await invoke('bench_install', { step, source: from, index: mirror });
-            continue;
-          }
-          const submitted = await invokeJson<{ job: string }>('bench_remote_install', {
-            host,
-            step,
-            source: from,
-            index: mirror,
-          });
-          await watch(host, { job: submitted.job, kind: 'install' });
-        }
-      },
-      t('装好了', 'Installed'),
+  // watch 的结果 → task 的错误/提示语义：失败与取消抛错（task 统一显示），失联只提示并保留身份（GUI-07）。
+  const afterWatch = async (
+    machine: string,
+    outcome: WatchOutcome,
+    onSuccess?: () => Promise<void>,
+  ) => {
+    if (outcome.state === 'detached') return outcome;
+    if (outcome.state === 'uncertain') {
+      setNotice(uncertainText(machine, outcome.job));
+      return outcome;
+    }
+    if (outcome.state === 'failed') throw new Error(outcome.error);
+    if (outcome.state === 'cancelled') throw new Error('已停止');
+    if (onSuccess) await onSuccess();
+    return outcome;
+  };
+  // 活动任务保护（GUI-07）：本机还记着一份没被确认终态的作业时，不提交新的服务器作业 ——
+  // 同名比较重复提交会写同一个服务器成果目录，终态不确定时不能赌上一个已经结束。
+  const assertNoUnresolvedJob = (machine: string) => {
+    const pending = parseRemoteJob(stored(jobKey(machine)));
+    if (!pending) return;
+    const what = pending.kind === 'run' && pending.name ? `比较 ${pending.name}` : '安装环境';
+    throw new Error(
+      t(
+        `服务器 ${machine} 上还有未确认终态的作业（${pending.job}，${what}）。先核对它的终态（或停止它），确认后才会提交新作业，避免重复写同一成果目录。`,
+        `Server ${machine} still has a job whose final state is unconfirmed (${pending.job}, ${what}). Check its final state (or stop it) first; nothing new is submitted until then, so the same output folder is never written twice.`,
+      ),
     );
+  };
+  const install = (steps: ('uv' | 'python' | 'openbench')[]) =>
+    task(async () => {
+      for (const step of steps) {
+        const from = step === 'openbench' && source === 'local' ? localSource : null;
+        const mirror = step === 'openbench' ? index || null : null;
+        if (!remote) {
+          await invoke('bench_install', { step, source: from, index: mirror });
+          continue;
+        }
+        const machine = host;
+        // 已有未核对终态的作业时先不提交第二次安装（GUI-07 的活动任务保护）。
+        assertNoUnresolvedJob(machine);
+        const submitted = await invokeJson<{ job: string }>('bench_remote_install', {
+          host: machine,
+          step,
+          source: from,
+          index: mirror,
+        });
+        await afterWatch(machine, await watch(machine, { job: submitted.job, kind: 'install' }));
+      }
+      setNotice(t('装好了', 'Installed'));
+    });
   const stop = () => {
-    if (remote && job.current) {
+    if (remote) {
+      // 服务器上没有正在等的作业时（例如正在取回报告）没有可取消的对象：不能误调本机 bench_cancel。
+      if (!job.current) return;
+      const machine = host;
       stopping.current = true;
-      void invoke('bench_remote_cancel', { host, job: job.current.job });
+      // 取消失败（比如同样断网）要说出来并让停止按钮恢复可用，不能悄悄停在一个永远等下去的状态。
+      void invoke('bench_remote_cancel', { host: machine, job: job.current.job }).catch((e) => {
+        stopping.current = false;
+        if (stillCurrent(machine, hostEpoch.current)) setError(shown(e));
+      });
     } else void invoke('bench_cancel');
   };
   const uninstall = async (what: 'env' | 'all') => {
@@ -446,13 +662,18 @@ export default function ComparePage() {
   const addPick = async (dir: string, label: string) => {
     if (picks.some((p) => p.dir === dir)) return;
     setPicks((old) => [...old, { dir, label, info: null }]);
+    const machine = host;
+    const epoch = hostEpoch.current;
     try {
       const info = await invokeJson<HistoryInfo>(
         remote ? 'bench_remote_inspect' : 'bench_inspect',
-        remote ? { host, dir } : { dir },
+        remote ? { host: machine, dir } : { dir },
       );
+      // 探测期间换了机器：结果属于旧机器，不能写进当前页面的模拟表（GUI-05）。
+      if (!stillCurrent(machine, epoch)) return;
       setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, info } : p)));
     } catch (e) {
+      if (!stillCurrent(machine, epoch)) return;
       setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: shown(e) } : p)));
     }
   };
@@ -510,132 +731,112 @@ export default function ComparePage() {
       },
       t('参考数据已登记', 'Reference dataset registered'),
     );
-  const resetSimulationForm = () =>
-    setSimForm({
-      dir: '',
-      label: '',
-      dataType: 'auto',
-      prefix: '',
-      suffix: '',
-      timRes: 'Day',
-      from: '',
-      to: '',
-      dataGroupby: '',
-      gridRes: '',
-      variables: [],
+  // ---- 模拟登记表单（GUI-09/10/11）：保存时把表单合并回完整探测对象，字段错误进弹窗并聚焦 ----
+  const changeSimulationDir = (dir: string) =>
+    setSimForm((old) => {
+      // 目录一改，上一处探测到的前缀/年份/分组/范围都属于旧目录，不能带进新目录（GUI-10）。
+      if (!old.probe || old.probeDir === dir.trim()) return { ...old, dir };
+      return { ...old, ...CLEAR_PROBED_SIM_FIELDS, dir, probe: null, probeDir: '' };
     });
+  const showSimulationIssue = (issue: SimulationIssue) => {
+    setSimError({ field: issue.field, message: t(issue.message[0], issue.message[1]) });
+    // 焦点放到第一个出错的字段：弹窗里字段多，键盘用户不用自己找（GUI-11）。
+    globalThis.document?.querySelector<HTMLElement>(`[data-sim-field="${issue.field}"]`)?.focus();
+  };
+  const simHint = (field: SimulationField, hint?: string) =>
+    simError?.field === field ? simError.message : hint;
   const editSimulation = (pick?: Pick) => {
     setSimEditing(pick?.dir ?? null);
+    setSimError(null);
     if (pick) {
-      setSimForm({
-        dir: pick.dir,
-        label: pick.label,
-        dataType: pick.info?.spatial ? 'grid' : pick.info ? 'stn' : 'auto',
-        prefix: pick.info?.prefix ?? '',
-        suffix: '',
-        timRes: pick.info?.tim_res ?? 'Day',
-        from: pick.info ? String(pick.info.syear) : '',
-        to: pick.info ? String(pick.info.eyear) : '',
-        dataGroupby: pick.dataGroupby ?? pick.info?.data_groupby ?? '',
-        gridRes:
-          pick.gridRes != null
-            ? String(pick.gridRes)
-            : pick.info?.resolution != null
-              ? String(pick.info.resolution)
-              : '',
-        variables: Object.entries(pick.variables ?? {}).map(([variable, mapping]) => ({
-          variable,
-          varname: mapping.varname,
-          unit: mapping.varunit,
-        })),
-      });
-    } else resetSimulationForm();
+      const fields = simulationFormForPick(pick);
+      setSimForm({ ...emptySimForm(), ...fields, probe: pick.info, probeDir: pick.dir });
+    } else setSimForm(emptySimForm());
     setError('');
     setDialog('simulation');
   };
   const inspectSimulation = () => {
     const dir = simForm.dir.trim();
-    if (!dir) throw new Error(t('请先填模拟目录。', 'Enter the simulation folder first.'));
+    if (!dir) {
+      showSimulationIssue({
+        field: 'dir',
+        message: ['请先填模拟目录。', 'Enter the simulation folder first.'],
+      });
+      return;
+    }
+    const machine = host;
+    const epoch = hostEpoch.current;
     return task(
       async () => {
         const info = await invokeJson<HistoryInfo>(
           remote ? 'bench_remote_inspect' : 'bench_inspect',
-          remote ? { host, dir } : { dir },
+          remote ? { host: machine, dir } : { dir },
         );
-        setSimForm((old) => ({
-          ...old,
-          label: old.label || pickLabel(dir),
-          dataType: info.spatial ? 'grid' : 'stn',
-          prefix: info.prefix,
-          timRes: info.tim_res,
-          from: String(info.syear),
-          to: String(info.eyear),
-          dataGroupby: info.data_groupby ?? '',
-          gridRes: info.resolution != null ? String(info.resolution) : old.gridRes,
-        }));
+        // 探测期间换了机器：这份概况属于旧机器，不能写进当前页面的表单（GUI-05）。
+        if (!stillCurrent(machine, epoch)) return;
+        setSimForm((old) => {
+          // 读取期间用户改了目录：这次探测属于旧目录，不能写进新目录的元数据（GUI-10）。
+          if (old.dir.trim() !== dir) return old;
+          const fields = simulationFormForPick({ dir, label: old.label || pickLabel(dir), info });
+          return {
+            ...old,
+            ...fields,
+            label: old.label || fields.label,
+            variables: old.variables.length ? old.variables : fields.variables,
+            probe: info,
+            probeDir: dir,
+          };
+        });
+        setSimError(null);
       },
       t('已读取目录概况', 'Folder inspected'),
     );
   };
   const saveSimulation = () => {
-    const dir = simForm.dir.trim();
-    if (!dir) throw new Error(t('请先填模拟目录。', 'Enter the simulation folder first.'));
-    const existing = picks.find((p) => p.dir === dir);
-    const spatial =
-      simForm.dataType === 'grid' ||
-      (simForm.dataType === 'auto' && (existing?.info?.spatial ?? false));
-    if (simForm.dataType === 'auto' && !existing?.info)
-      throw new Error(
-        t(
-          '先读取目录概况，或明确选择格点/站点。',
-          'Inspect the folder or choose grid/station first.',
-        ),
+    try {
+      const dir = simForm.dir.trim();
+      // 只沿用同一目录的完整探测结果；换了目录就不能拿旧目录的 extent/lon/lat/files 冒充新目录的。
+      const probe = simForm.probe && simForm.probeDir === dir ? simForm.probe : null;
+      const issue = validateSimulation(probe, simForm);
+      if (issue) {
+        showSimulationIssue(issue);
+        return;
+      }
+      const info = simulationInfoForSave(probe, simForm);
+      const variables = Object.fromEntries(
+        simForm.variables
+          .map((row) => ({
+            variable: row.variable.trim(),
+            varname: row.varname.trim(),
+            unit: row.unit.trim(),
+          }))
+          .filter((row) => row.variable && row.varname)
+          .map((row) => [row.variable, { varname: row.varname, varunit: row.unit }]),
       );
-    const num = (value: string) => (value.trim() === '' ? null : Number(value));
-    const info: HistoryInfo = existing?.info
-      ? {
-          ...existing.info,
-          prefix: simForm.prefix || existing.info.prefix,
-          tim_res: simForm.timRes,
-          syear: num(simForm.from) ?? existing.info.syear,
-          eyear: num(simForm.to) ?? existing.info.eyear,
-          data_groupby: simForm.dataGroupby || null,
-          resolution: num(simForm.gridRes),
-        }
-      : {
-          history_dir: dir,
-          prefix: simForm.prefix,
-          tim_res: simForm.timRes,
-          syear: num(simForm.from) ?? 0,
-          eyear: num(simForm.to) ?? 0,
-          spatial,
-          lon: null,
-          lat: null,
-          files: 0,
-          data_groupby: simForm.dataGroupby || null,
-          resolution: num(simForm.gridRes),
+      setPicks((old) => {
+        // 分组/原生分辨率已经并进 info；清掉旧的手动覆盖，免得它继续盖住用户在表单里改的值（GUI-09/10）。
+        const next = {
+          dir,
+          label: simForm.label.trim() || pickLabel(dir),
+          info,
+          variables,
+          dataGroupby: null,
+          gridRes: null,
         };
-    if (!info.syear || !info.eyear)
-      throw new Error(t('请填起止年份。', 'Enter start and end years.'));
-    const variables = Object.fromEntries(
-      simForm.variables
-        .map((row) => ({
-          variable: row.variable.trim(),
-          varname: row.varname.trim(),
-          unit: row.unit.trim(),
-        }))
-        .filter((row) => row.variable && row.varname)
-        .map((row) => [row.variable, { varname: row.varname, varunit: row.unit }]),
-    );
-    setPicks((old) => {
-      const next = { dir, label: simForm.label.trim() || pickLabel(dir), info, variables };
-      const at = old.findIndex((p) => p.dir === dir);
-      return at >= 0
-        ? old.map((p, i) => (i === at ? { ...p, ...next, error: undefined } : p))
-        : [...old, next];
-    });
-    setDialog(null);
-    setSimEditing(null);
+        const at = old.findIndex((p) => p.dir === dir);
+        return at >= 0
+          ? old.map((p, i) => (i === at ? { ...p, ...next, error: undefined } : p))
+          : [...old, next];
+      });
+      setDialog(null);
+      setSimEditing(null);
+      setSimError(null);
+      setError('');
+    } catch (e) {
+      // 兜底：程序异常也要在界面里说清楚，不能只留在控制台（GUI-11）。
+      setSimError(null);
+      setError(shown(e));
+    }
   };
   const ok = picks.filter((p): p is Pick & { info: HistoryInfo } => !!p.info);
   useEffect(() => {
@@ -649,32 +850,43 @@ export default function ComparePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ok.length]);
   // 换了评估的机器：状态、登记表、参考数据根目录都换成那台的；所选模拟的路径属于原来那台，清掉。
-  // 那台机器上还有没等完的作业（上次关了页面或应用），接着等。
+  // GUI-05：代次 +1，让切换前发出的状态/登记表/探测请求全部作废。
+  // GUI-07：那台机器上没等完的作业按"终态是否已确认"分开处理 —— 正常在跑就接着等（上次关了页面或
+  // 应用），上次是"暂时失联"就交给用户重连/核对/停止，不自动反复重试。
   useEffect(() => {
     store('colm.benchHost', host);
+    hostEpoch.current += 1;
+    const epoch = hostEpoch.current;
     setStatus(null);
     setReferences([]);
     setPicks([]);
     setChosen({});
     setYaml('');
     setSites([]);
+    setMissingExtent([]);
+    generated.current = null;
+    setSimError(null);
     setLog([]);
     setScanDirState(stored(refKey(host)));
-    void refresh(host).catch((e) => setError(shown(e)));
-    const pending = host ? stored(jobKey(host)) : '';
-    if (pending)
-      try {
-        const active = JSON.parse(pending) as ActiveJob;
-        void task(
-          async () => {
-            await watch(host, active);
-            if (active.kind === 'run' && active.name) await fetchReport(host, active.name);
-          },
-          t('服务器上的作业已结束', 'The server job has finished'),
-        );
-      } catch {
-        store(jobKey(host), '');
-      }
+    void refresh(host, epoch);
+    const history = parseRemoteJob(stored(jobHistoryKey(host)));
+    setLastJob(history?.end ? history : null);
+    const pending = host ? parseRemoteJob(stored(jobKey(host))) : null;
+    if (!pending) {
+      setUnsettled(null);
+      return;
+    }
+    if (pending.uncertain) {
+      setUnsettled({ job: pending, reason: pending.lastError ?? '' });
+      return;
+    }
+    setUnsettled(null);
+    void task(async () => {
+      const outcome = await watch(host, pending);
+      await afterWatch(host, outcome, async () => {
+        if (pending.kind === 'run' && pending.name) await fetchReport(host, pending.name);
+      });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
   useEffect(() => {
@@ -683,30 +895,53 @@ export default function ComparePage() {
       alive.current = false;
     };
   }, []);
-  // 生成配置之后又改了模拟、变量、名字、年份、时间尺度或分辨率：旧配置和旧站点清单已经不对，清掉，要求重新生成。
-  // 原来照样拿旧 YAML 去跑（GUI 审查 C-05）。手改 YAML 文本不在这里：那是用户有意改的。
-  const design = JSON.stringify([
-    picks.map((p) => [p.dir, p.label]),
-    chosen,
+  // ---- 评估设计绑定（GUI-04）：同一份设计既生成配置，也是运行前校验和配置失效的依据 ----
+  // GUI-04：生成配置与运行共用同一份完整评估设计（含机器/OpenBench/参考数据路径身份）。
+  const comparisonDesign = (): ComparisonDesign => ({
     name,
-    from,
-    to,
+    years: [Number(from), Number(to)],
     timRes,
-    gridRes,
-    weight,
-    minYear,
-    timeAlignment,
-    numCores,
+    variables: chosen,
+    simulations: ok.map((p) => ({
+      label: p.label,
+      info: p.info,
+      variables: p.variables,
+      dataGroupby: p.dataGroupby,
+      gridRes: p.gridRes,
+    })),
+    projectDir: comparisonDir(status?.root ?? '', name),
+    gridRes: Number(gridRes) || null,
+    weight: weight || null,
+    minYear: minYear.trim() === '' ? null : Number(minYear),
+    timeAlignment: timeAlignment || null,
+    numCores: numCores.trim() === '' ? null : Number(numCores),
     metrics,
     scores,
-    picks.map((p) => [p.variables, p.dataGroupby, p.gridRes]),
-  ]);
-  const generatedFor = useRef('');
+  });
+  const machine = { host, openbenchRoot: status?.root ?? '', refRoot: scanDir };
+  // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
+  // 只改目录名和显示名之外的东西也会变（GUI-04）。
+  const design = designFingerprint({ machine, ...comparisonDesign() });
+  const generatedConfig = generated.current;
+  // 配置属于旧设计：没手改过的自动作废、要求重新生成；手改过的原样留着，标记过期并禁止直接运行。
+  const yamlStale = !!yaml && !!generatedConfig && generatedConfig.fingerprint !== design;
+  const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.config;
+  const invalidateGeneratedConfig = () => {
+    if (
+      configInvalidation({
+        currentFingerprint: design,
+        generated: generated.current,
+        yaml,
+      }) !== 'clear'
+    )
+      return;
+    generated.current = null;
+    setYaml('');
+    setSites([]);
+    setMissingExtent([]);
+  };
   useEffect(() => {
-    if (yaml && generatedFor.current && generatedFor.current !== design) {
-      setYaml('');
-      setSites([]);
-    }
+    invalidateGeneratedConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [design]);
   const allVariables = comparableVariables(
@@ -718,76 +953,196 @@ export default function ComparePage() {
     ok.map((p) => p.info),
     variableQuery,
   );
+  const simSpatial =
+    simForm.dataType === 'grid' ||
+    (simForm.dataType === 'auto' && (simForm.probe?.spatial ?? false));
   const generate = () => {
     try {
-      const sims: BenchSimulation[] = ok.map((p) => ({
-        label: p.label,
-        info: p.info,
-        variables: p.variables,
-        dataGroupby: p.dataGroupby,
-        gridRes: p.gridRes,
-      }));
-      const built = buildOpenbenchConfig({
-        name,
-        years: [Number(from), Number(to)],
-        timRes,
-        variables: chosen,
-        simulations: sims,
-        projectDir: comparisonDir(status?.root ?? '', name),
-        gridRes: Number(gridRes) || null,
-        weight: weight || null,
-        minYear: minYear.trim() === '' ? null : Number(minYear),
-        timeAlignment: timeAlignment || null,
-        numCores: numCores.trim() === '' ? null : Number(numCores),
-        metrics,
-        scores,
-      });
+      const inputs = comparisonDesign();
+      const built = buildOpenbenchConfig(inputs);
+      // 配置文本与站点清单一起记下生成时的设计指纹；运行前再核对（GUI-04）。
+      generated.current = {
+        fingerprint: designFingerprint({ machine, ...inputs }),
+        config: built.config,
+        sites: built.sites,
+      };
       setYaml(built.config);
       setSites(built.sites);
-      generatedFor.current = design;
+      setMissingExtent(built.missingExtent);
       setError('');
     } catch (e) {
       setError(shown(e));
     }
   };
+  // 手改过的配置在覆盖前要问一声：这是用户改的内容，不能因为点了"重新生成"就静默丢掉（GUI-04）。
+  const regenerate = async () => {
+    if (yamlHandEdited) {
+      const proceed = await askConfirm(
+        t(
+          '重新生成会覆盖你在配置里改过的内容，继续？',
+          'Regenerating replaces the edits you made to the configuration. Continue?',
+        ),
+        { confirmLabel: t('重新生成', 'Regenerate') },
+      );
+      if (!proceed) return;
+    }
+    generate();
+  };
   const run = () =>
-    task(
-      async () => {
-        const project = comparisonName(name);
-        if (!remote) {
-          const result = await invokeJson<{ report: string | null }>('bench_run', {
-            name: project,
-            config: yaml,
-            sites,
-            refRoot: scanDir || null,
-          });
-          if (result.report) await view(result.report);
-          return;
-        }
-        const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
-          host,
+    task(async () => {
+      // 运行前再校验一次：只认按当前设计生成的配置和站点清单，旧配置不能直接运行（GUI-04）。
+      const generatedNow = generated.current;
+      if (!generatedNow || generatedNow.fingerprint !== design)
+        throw new Error(
+          t(
+            '评估设置改过了，旧配置不能直接运行；请先重新生成配置。',
+            'The evaluation settings changed; generate the configuration again before running.',
+          ),
+        );
+      const project = comparisonName(name);
+      if (!remote) {
+        const result = await invokeJson<{ report: string | null }>('bench_run', {
           name: project,
           config: yaml,
           sites,
           refRoot: scanDir || null,
         });
-        await watch(host, { job: submitted.job, kind: 'run', name: project });
-        await fetchReport(host, project);
-      },
-      t('评估完成', 'Evaluation finished'),
-    );
-  // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。
-  const fetchReport = async (machine: string, project: string) => {
-    const fetched = await invokeJson<{ report: string | null }>('bench_remote_fetch', {
-      host: machine,
-      name: project,
+        if (result.report) await view(result.report);
+        setNotice(t('评估完成', 'Evaluation finished'));
+        return;
+      }
+      // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
+      const machine = host;
+      // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
+      assertNoUnresolvedJob(machine);
+      const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
+        host: machine,
+        name: project,
+        config: yaml,
+        sites,
+        refRoot: scanDir || null,
+      });
+      const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
+      await afterWatch(machine, outcome, () => fetchReport(machine, project));
+      if (outcome.state === 'succeeded') setNotice(t('评估完成', 'Evaluation finished'));
     });
-    if (fetched.report) await view(fetched.report);
+  // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。
+  // GUI-08：同一比较取回期间不重复触发；失败时已显示的报告原样保留，后端错误会说明本机旧报告
+  // 仍是上次成功版本（`benchErrorText` 翻成当前语言给用户看）。
+  const fetchReport = async (machine: string, project: string) => {
+    const key = `${machine}\n${project}`;
+    if (fetching.current.has(key))
+      throw new Error(
+        t(
+          '这个比较的报告正在取回中，等这次取回结束后再试。',
+          'This comparison’s report is being fetched already; try again when that fetch finishes.',
+        ),
+      );
+    fetching.current.add(key);
+    const epoch = hostEpoch.current;
+    try {
+      const fetched = await invokeJson<{ report: string | null }>('bench_remote_fetch', {
+        host: machine,
+        name: project,
+      });
+      // 取回期间用户换看了别的机器：旧机器的报告不能显示到当前页面（GUI-05）。
+      if (!stillCurrent(machine, epoch)) return;
+      if (fetched.report) await view(fetched.report);
+    } finally {
+      fetching.current.delete(key);
+    }
   };
   const view = async (path: string) => {
     const html = await invoke<string>('bench_report', { path });
     setReport({ path, html });
   };
+  // 核对"暂时失联"作业的终态（GUI-07）：只查一次。仍在运行就更新最后确认状态、不结束跟踪；
+  // 查到终态才清活动记录（写进历史）；还是查不到就保留身份并把新的原因显示出来。
+  const checkUnsettled = () =>
+    task(async () => {
+      const current = unsettled;
+      if (!current) return;
+      const machine = current.job.host ?? host;
+      let reply: RemoteJob;
+      try {
+        reply = await invokeJson<RemoteJob>('bench_remote_job', {
+          host: machine,
+          job: current.job.job,
+          lines: 80,
+        });
+      } catch (error) {
+        markUncertain(machine, current.job, String(error));
+        throw error;
+      }
+      if (!stillCurrent(machine, hostEpoch.current)) return;
+      setLog(reply.status.log_tail.split('\n').filter(Boolean));
+      const end = remoteJobTerminal(reply);
+      if (!end) {
+        // 仍在跑：更新"最后确认状态"，但保持"待核对"（终态确认前不结束活动跟踪）。
+        const kept: ActiveJob = {
+          ...jobContacted(current.job, reply.status.state, new Date().toISOString()),
+          uncertain: true,
+        };
+        rememberJob(machine, kept);
+        setUnsettled({ job: kept, reason: '' });
+        setNotice(
+          t(
+            '作业仍在服务器上运行；确认终态之前不会结束跟踪。',
+            'The job is still running on the server; tracking ends only once its final state is confirmed.',
+          ),
+        );
+        return;
+      }
+      const reason = end === 'failed' ? jobFailureText(reply) : '';
+      settleJob(machine, current.job, end, reason);
+      if (end === 'failed') throw new Error(reason);
+      if (end === 'cancelled') {
+        setNotice(t('已确认作业已取消', 'The job was confirmed as cancelled'));
+        return;
+      }
+      if (current.job.kind === 'run' && current.job.name)
+        await fetchReport(machine, current.job.name);
+      setNotice(t('已确认作业成功结束', 'The job was confirmed as finished successfully'));
+    });
+  // 重连并继续等（GUI-07）：和正常跟踪同一条路径，成功后自动取回报告；再失联就仍回到"待核对"。
+  const reconnect = () =>
+    task(async () => {
+      const current = unsettled;
+      if (!current) return;
+      const machine = current.job.host ?? host;
+      const outcome = await watch(machine, current.job);
+      await afterWatch(machine, outcome, async () => {
+        if (current.job.kind === 'run' && current.job.name)
+          await fetchReport(machine, current.job.name);
+      });
+      if (outcome.state === 'succeeded')
+        setNotice(t('服务器上的作业已结束', 'The server job has finished'));
+    });
+  // 停止一个终态未知的作业（GUI-07）：取消请求发出后再确认"已取消"；仍联系不上就保留身份与原因。
+  const stopUnsettled = () =>
+    task(async () => {
+      const current = unsettled;
+      if (!current) return;
+      const machine = current.job.host ?? host;
+      stopping.current = true;
+      try {
+        await invoke('bench_remote_cancel', { host: machine, job: current.job.job });
+      } catch (error) {
+        stopping.current = false;
+        markUncertain(machine, current.job, String(error));
+        throw error;
+      }
+      const outcome = await watch(machine, current.job);
+      await afterWatch(machine, outcome);
+    });
+  // 历史里上次成功的作业：服务器上的报告还在，可以再取回一次（GUI-07 的"继续取回报告"）。
+  const fetchLastReport = () =>
+    task(async () => {
+      const history = lastJob;
+      if (!history?.name) return;
+      await fetchReport(history.host ?? host, history.name);
+      setNotice(t('已取回报告', 'Report fetched'));
+    });
 
   usePageContract({
     title: t('比较', 'Compare'),
@@ -811,7 +1166,11 @@ export default function ComparePage() {
       { id: 'compare-to', label: t('结束年', 'To year'), value: to, type: 'number', set: setTo },
     ],
     actions: [],
-    details: { status, picks: picks.map((p) => ({ dir: p.dir, label: p.label, info: p.info })) },
+    details: {
+      status,
+      picks: picks.map((p) => ({ dir: p.dir, label: p.label, info: p.info })),
+      config: { stale: yamlStale, handEdited: yamlHandEdited, missingExtent },
+    },
   });
 
   const caseDirs = state.cases ?? [];
@@ -847,7 +1206,66 @@ export default function ComparePage() {
             ))}
           </Select>
         </Field>
+        {busy && (
+          <p className="muted study-hint">
+            {t(
+              '正在处理：操作结束（服务器作业确认终态）之前不能切换运行位置；浏览别的机器不影响已有作业的身份。',
+              'Working: the machine cannot be switched until this operation finishes (and the server job’s final state is settled); browsing other machines does not affect the tracked job.',
+            )}
+          </p>
+        )}
+        {activeJob && (
+          <p className="muted study-hint">
+            {t(
+              `正在等待服务器作业 ${activeJob.job}${activeJob.name ? `（比较 ${activeJob.name}）` : ''}…`,
+              `Waiting for server job ${activeJob.job}${activeJob.name ? ` (comparison ${activeJob.name})` : ''}…`,
+            )}
+          </p>
+        )}
+        {lastJob && !activeJob && !unsettled && (
+          <div className="button-row">
+            <p className="muted study-hint">
+              {t(
+                `上次远程作业 ${lastJob.job}（${lastJob.name ?? '安装环境'}）：${jobEndText(lastJob)}。`,
+                `Last remote job ${lastJob.job} (${lastJob.name ?? 'environment install'}): ${jobEndText(lastJob)}.`,
+              )}
+            </p>
+            {lastJob.end === 'succeeded' && lastJob.name && (
+              <Button disabled={busy} onClick={() => void fetchLastReport()}>
+                {t('再取回报告', 'Fetch report again')}
+              </Button>
+            )}
+          </div>
+        )}
       </Card>
+      {remote && unsettled && (
+        <Card title={t('远程作业：暂时失联/待核对', 'Remote job: unreachable, awaiting check')}>
+          <Notice tone="warning">
+            {t(
+              `暂时联系不上服务器 ${host}：作业 ${unsettled.job.job}（${unsettled.job.name ?? '安装环境'}）的身份已经保留，远端可能仍在运行。`,
+              `Server ${host} cannot be reached right now; job ${unsettled.job.job} (${unsettled.job.name ?? 'environment install'}) is still tracked and may still be running.`,
+            )}
+          </Notice>
+          <p className="muted study-hint">
+            {t(
+              `提交时间：${unsettled.job.submittedAt ?? '未知'}；最后确认状态：${unsettled.job.lastState ?? '未知'}${unsettled.job.lastConfirmedAt ? `（${unsettled.job.lastConfirmedAt}）` : ''}。一次查询失败不等于作业失败，确认终态之前不会结束跟踪。`,
+              `Submitted: ${unsettled.job.submittedAt ?? 'unknown'}; last confirmed state: ${unsettled.job.lastState ?? 'unknown'}${unsettled.job.lastConfirmedAt ? ` (${unsettled.job.lastConfirmedAt})` : ''}. A failed query does not mean the job failed; tracking ends only once the final state is confirmed.`,
+            )}
+          </p>
+          {unsettled.reason && <p className="muted study-hint">{shown(unsettled.reason)}</p>}
+          <div className="button-row">
+            <Button disabled={busy} onClick={() => void reconnect()}>
+              {t('重连并继续等待', 'Reconnect and keep waiting')}
+            </Button>
+            <Button disabled={busy} onClick={() => void checkUnsettled()}>
+              {t('核对终态', 'Check final state')}
+            </Button>
+            <Button variant="danger" disabled={busy} onClick={() => void stopUnsettled()}>
+              {t('停止作业', 'Stop job')}
+            </Button>
+          </div>
+        </Card>
+      )}
       <Card
         title={t('评估环境', 'Evaluation environment')}
         description={t(
@@ -1516,7 +1934,8 @@ export default function ComparePage() {
               action="compare-generate"
               label={t('生成配置', 'Generate configuration')}
               disabled={busy || !ok.length}
-              run={generate}
+              // 手改过的配置不能被"再生成一次"静默覆盖：统一走会先确认的 regenerate（GUI-04）。
+              run={regenerate}
             />
           </div>
           {yaml && (
@@ -1529,30 +1948,68 @@ export default function ComparePage() {
               >
                 <textarea
                   className="code-files-text"
+                  data-field="openbench-config"
                   rows={16}
                   spellCheck={false}
                   value={yaml}
                   onChange={(e) => setYaml(e.target.value)}
                 />
               </Field>
+              {yamlStale && (
+                <Notice tone="warning">
+                  {t(
+                    '评估设置改过了，下面这份配置是旧设置下的，不能直接运行。你在配置里手改的内容还保留着；要让改动生效，请重新生成配置（会覆盖手改内容）或把设置改回去。',
+                    'The evaluation settings changed, so this configuration is out of date and cannot run as is. Your edits to it are kept; regenerate the configuration (this replaces the edits) or restore the old settings.',
+                  )}
+                </Notice>
+              )}
+              {missingExtent.length > 0 && (
+                <Notice tone="warning">
+                  {t(
+                    `这些格点模拟读不出区域范围：${missingExtent.join('、')}。配置里只写了目标分辨率，没有区域范围（OpenBench 会按默认的全球范围比较）；请换一个带坐标的 history 目录重新读数，或在编辑模拟里补上区域范围。`,
+                    `Could not read the region of: ${missingExtent.join(', ')}. The configuration sets only the target resolution, without a region (OpenBench then compares on the global grid); inspect a history folder that has coordinates, or fill in the region in the simulation dialog.`,
+                  )}
+                </Notice>
+              )}
               <div className="button-row">
                 {!scanDir && (
                   <p className="muted study-hint">
                     {t(
-                      '还没填"参考数据根目录"：OpenBench 自带的参考数据都按这个目录找，不填只能用自己登记了完整路径的数据。',
-                      'No reference data root yet: OpenBench’s built-in references are looked up under it; without it only references registered with full paths work.',
+                      '还没填"参考数据根目录"：OpenBench 自带的参考数据都按这个目录找，不填只能用自己登记了完整路径的数据；填好后要重新生成配置。',
+                      'No reference data root yet: OpenBench’s built-in references are looked up under it; without it only references registered with full paths work. Regenerate the configuration after filling it in.',
                     )}
                   </p>
+                )}
+                {yamlStale && (
+                  <Button disabled={busy} onClick={() => void regenerate()}>
+                    {t('重新生成配置', 'Regenerate configuration')}
+                  </Button>
                 )}
                 <ActionButton
                   action="compare-run"
                   label={t('检查并运行', 'Check and run')}
                   kind="commit"
                   variant="primary"
-                  disabled={busy}
+                  disabled={busy || yamlStale}
+                  title={
+                    yamlStale
+                      ? t(
+                          '设置改过了：先重新生成配置再运行',
+                          'The settings changed: regenerate the configuration before running',
+                        )
+                      : undefined
+                  }
                   run={run}
                 />
               </div>
+              {yamlHandEdited && !yamlStale && (
+                <p className="muted study-hint">
+                  {t(
+                    '这份配置有你手工改过的内容；运行时会按你改后的内容提交。',
+                    'This configuration contains edits you made; running submits it as edited.',
+                  )}
+                </p>
+              )}
             </>
           )}
         </Card>
@@ -1785,12 +2242,14 @@ export default function ComparePage() {
           'Add a history/case folder manually and register the new module’s variable names/units for this simulation; these overrides apply only to this comparison.',
         )}
       >
+        {simError && <Notice tone="error">{simError.message}</Notice>}
         <div className="form-grid">
-          <Field label={t('目录', 'Folder')}>
+          <Field label={t('目录', 'Folder')} hint={simHint('dir')}>
             <div className="study-path">
               <Input
+                data-sim-field="dir"
                 value={simForm.dir}
-                onChange={(e) => setSimForm((old) => ({ ...old, dir: e.target.value }))}
+                onChange={(e) => changeSimulationDir(e.target.value)}
               />
               <Button
                 disabled={busy}
@@ -1799,7 +2258,7 @@ export default function ComparePage() {
                   else
                     void invoke<string | null>('pick_folder', { key: 'openbench-sim' }).then(
                       (dir) => {
-                        if (dir) setSimForm((old) => ({ ...old, dir }));
+                        if (dir) changeSimulationDir(dir);
                       },
                     );
                 }}
@@ -1820,44 +2279,76 @@ export default function ComparePage() {
               onChange={(e) => setSimForm((old) => ({ ...old, label: e.target.value }))}
             />
           </Field>
-          <Field label={t('类型', 'Type')}>
+          <Field
+            label={t('类型', 'Type')}
+            hint={simHint(
+              'dataType',
+              t(
+                '格点/站点决定配置里的 data_type 和是否生成站点清单；改类型后旧配置会作废。',
+                'Grid or station decides data_type in the configuration and whether a station list is written; changing it invalidates the old configuration.',
+              ),
+            )}
+          >
             <Select
+              data-sim-field="dataType"
               value={simForm.dataType}
-              onChange={(e) => setSimForm((old) => ({ ...old, dataType: e.target.value }))}
+              onChange={(e) =>
+                setSimForm((old) => ({
+                  ...old,
+                  dataType: e.target.value as SimForm['dataType'],
+                }))
+              }
             >
               <option value="auto">{t('自动/按概况', 'Auto/inspected')}</option>
               <option value="grid">{t('格点', 'Grid')}</option>
               <option value="stn">{t('站点', 'Station')}</option>
             </Select>
           </Field>
-          <Field label={t('文件前缀', 'File prefix')}>
+          <Field
+            label={t('文件前缀', 'File prefix')}
+            hint={simHint(
+              'prefix',
+              t(
+                'history 文件名里 `_hist_` 之前的部分；留空沿用读取到的值。',
+                'The part before `_hist_` in the history file names; leave it empty to use the inspected one.',
+              ),
+            )}
+          >
             <Input
+              data-sim-field="prefix"
               value={simForm.prefix}
               onChange={(e) => setSimForm((old) => ({ ...old, prefix: e.target.value }))}
             />
           </Field>
-          <Field label={t('时间分辨率', 'Time resolution')}>
+          <Field label={t('时间分辨率', 'Time resolution')} hint={simHint('timRes')}>
             <Input
+              data-sim-field="timRes"
               value={simForm.timRes}
               onChange={(e) => setSimForm((old) => ({ ...old, timRes: e.target.value }))}
             />
           </Field>
-          <Field label={t('起始年', 'From year')}>
+          <Field label={t('起始年', 'From year')} hint={simHint('from')}>
             <Input
               type="number"
+              data-sim-field="from"
               value={simForm.from}
               onChange={(e) => setSimForm((old) => ({ ...old, from: e.target.value }))}
             />
           </Field>
-          <Field label={t('结束年', 'To year')}>
+          <Field label={t('结束年', 'To year')} hint={simHint('to')}>
             <Input
               type="number"
+              data-sim-field="to"
               value={simForm.to}
               onChange={(e) => setSimForm((old) => ({ ...old, to: e.target.value }))}
             />
           </Field>
-          <Field label={t('文件分组 data_groupby', 'File grouping (data_groupby)')}>
+          <Field
+            label={t('文件分组 data_groupby', 'File grouping (data_groupby)')}
+            hint={simHint('dataGroupby')}
+          >
             <Select
+              data-sim-field="dataGroupby"
               value={simForm.dataGroupby}
               onChange={(e) => setSimForm((old) => ({ ...old, dataGroupby: e.target.value }))}
             >
@@ -1869,13 +2360,61 @@ export default function ComparePage() {
               ))}
             </Select>
           </Field>
-          <Field label={t('原生网格分辨率（度）', 'Native grid resolution (degrees)')}>
+          <Field
+            label={t('原生网格分辨率（度）', 'Native grid resolution (degrees)')}
+            hint={simHint(
+              'gridRes',
+              t(
+                '读取概况一般会给出；留空沿用读到的值。比较用的目标分辨率在下面的「比较的网格分辨率」里另填。',
+                'The inspection usually provides it; leave it empty to use the inspected value. The target resolution for the comparison is set under “Comparison grid resolution” below.',
+              ),
+            )}
+          >
             <Input
               type="number"
+              data-sim-field="gridRes"
               value={simForm.gridRes}
               onChange={(e) => setSimForm((old) => ({ ...old, gridRes: e.target.value }))}
             />
           </Field>
+          {simSpatial ? (
+            <Field
+              label={t('区域范围（西,东,南,北；度）', 'Region (west, east, south, north; degrees)')}
+              hint={simHint(
+                'extent',
+                t(
+                  '读取概况给不出范围时留空；生成配置会说明缺范围，不会拿默认全球范围冒充已确认的区域。',
+                  'Leave it empty when the inspection gives no region; the generated configuration says the region is missing instead of posing the global default as confirmed.',
+                ),
+              )}
+            >
+              <Input
+                data-sim-field="extent"
+                value={simForm.extent}
+                placeholder="104,117.2,21.5,26.9"
+                onChange={(e) => setSimForm((old) => ({ ...old, extent: e.target.value }))}
+              />
+            </Field>
+          ) : (
+            <>
+              <Field label={t('经度（度）', 'Longitude (degrees)')} hint={simHint('lon')}>
+                <Input
+                  type="number"
+                  data-sim-field="lon"
+                  value={simForm.lon}
+                  onChange={(e) => setSimForm((old) => ({ ...old, lon: e.target.value }))}
+                />
+              </Field>
+              <Field label={t('纬度（度）', 'Latitude (degrees)')} hint={simHint('lat')}>
+                <Input
+                  type="number"
+                  data-sim-field="lat"
+                  value={simForm.lat}
+                  onChange={(e) => setSimForm((old) => ({ ...old, lat: e.target.value }))}
+                />
+              </Field>
+            </>
+          )}
         </div>
         <h3 className="study-subhead">
           {t('新模拟变量覆盖', 'New simulation variable overrides')}
@@ -1884,6 +2423,7 @@ export default function ComparePage() {
           <div className="form-grid" key={`${at}-${row.variable}`}>
             <Field label={t('标准变量', 'Standard variable')}>
               <Input
+                data-sim-field="variables"
                 value={row.variable}
                 onChange={(e) =>
                   setSimForm((old) => ({
@@ -1949,7 +2489,7 @@ export default function ComparePage() {
           >
             {t('加一个变量', 'Add variable')}
           </Button>
-          <Button disabled={busy} onClick={() => void saveSimulation()}>
+          <Button disabled={busy} onClick={saveSimulation}>
             {t('保存模拟', 'Save simulation')}
           </Button>
           <Button variant="ghost" disabled={busy} onClick={() => setDialog(null)}>
@@ -1978,7 +2518,7 @@ export default function ComparePage() {
             const target = browsing;
             setBrowsing(null);
             if (target === 'ref') setScanDir(path);
-            else if (target === 'simRegister') setSimForm((old) => ({ ...old, dir: path }));
+            else if (target === 'simRegister') changeSimulationDir(path);
             else if (target === 'refDataDir') setReg((old) => ({ ...old, rootDir: path }));
             else if (target === 'refList') setReg((old) => ({ ...old, fulllist: path }));
             else void addPick(path, pickLabel(path));

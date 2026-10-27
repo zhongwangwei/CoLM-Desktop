@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke, invokeJson, listen, hasBackend } from '../../lib/ipc';
+import { invoke, invokeJson, listen, hasBackend, withTimeout } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { askConfirm } from '../../lib/confirm';
 import { guideState, drive } from '../../lib/guide';
@@ -20,6 +20,7 @@ import {
   EXAMPLE_STARTERS,
   examplePrompt,
   rejectedBeforeTurn,
+  withoutLastUser,
   type AgentEvent,
   type Message,
   type Settings,
@@ -32,6 +33,15 @@ import {
   uiGrant,
   type UiGrant,
 } from './ui-request';
+import {
+  clearsDraftAfterAck,
+  newTurn,
+  turnDelivered,
+  turnFailed,
+  turnOutput,
+  turnPreTurnRejected,
+  type PendingTurn,
+} from './turn';
 
 interface Session {
   id: string;
@@ -58,6 +68,12 @@ interface DocumentAttachment {
  */
 const ATTACHMENT_CHARS_LIMIT = 200_000;
 const CONTEXT_WARN_RATIO = 0.8;
+/**
+ * 初始化两步的等待上限（GUI-16）。设置是本地小文件、历史要另起一个 colm-cli 子进程（冷启动可能很慢），
+ * 两者任何一个卡住都不能无限禁用整个助手：超时后进入明确的失败态并给出重试入口。
+ */
+const SETTINGS_TIMEOUT_MS = 10_000;
+const HISTORY_TIMEOUT_MS = 15_000;
 function tokenLabel(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
@@ -123,10 +139,21 @@ export default function AssistantPanel() {
   const runningRef = useRef(false);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<DocumentAttachment[]>([]);
-  // 刚发出、助手还没开始回应的那条消息：被拒绝时用来恢复输入框与附件（D-06）。
-  const pendingSend = useRef<{ typed: string; attachments: DocumentAttachment[] } | null>(null);
+  // 附件读取要按最新的附件列表算剩余字符数：异步读取期间旧渲染的闭包会漏掉刚加进来的文件。
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  // 刚发出、助手还没开始回应的那一轮：拒绝时用它恢复输入框与附件（D-06 / GUI-18）。
+  const outgoing = useRef<PendingTurn<DocumentAttachment> | null>(null);
+  const turnSeq = useRef(0);
   const [attaching, setAttaching] = useState(false);
+  const [attachNotice, setAttachNotice] = useState('');
   const [error, setError] = useState('');
+  // 初始化状态分开存：核心设置失败要显式重试；输入历史只是辅助记忆，失败不挡发送（GUI-16）。
+  const [initPhase, setInitPhase] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
+  const [initError, setInitError] = useState('');
+  const [initAttempt, setInitAttempt] = useState(0);
+  const [historyError, setHistoryError] = useState('');
+  const [historyAttempt, setHistoryAttempt] = useState(0);
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [approval, setApproval] = useState<AgentEvent | null>(null);
   const [deciding, setDeciding] = useState(false);
@@ -189,9 +216,14 @@ export default function AssistantPanel() {
     let active = true;
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
-      // 助手开始回应（任何输出）后，这条消息就算被接下了，不再恢复输入框。
-      if (event.type !== 'error' && event.type !== 'ready' && event.type !== 'exited')
-        pendingSend.current = null;
+      // 后端产出这一轮自己的事件 = 消息确实被模型接下了；IPC 确认只代表送达，不能代替（GUI-18）。
+      if (
+        outgoing.current &&
+        event.type !== 'error' &&
+        event.type !== 'ready' &&
+        event.type !== 'exited'
+      )
+        outgoing.current = turnOutput(outgoing.current);
       if (!active) return;
       switch (event.type) {
         case 'ready':
@@ -306,15 +338,17 @@ export default function AssistantPanel() {
           setApproval(null);
           // 助手在开始这一轮之前就拒绝了（会话到上限、上一条还在答、没有 Key）：这条消息没被记下，
           // 撤回刚显示的气泡，把输入和附件放回去，免得用户打的字和附件白白没了（GUI 审查 D-06）。
-          const sent = pendingSend.current;
-          pendingSend.current = null;
+          // 只有还没被模型接受的轮次能撤；已经被接受的轮次收到同样的文字只是运行错误（GUI-18）。
+          const sent = outgoing.current;
           if (sent && rejectedBeforeTurn(event.message || '')) {
-            setMessages((old) => {
-              const at = old.map((m) => m.kind).lastIndexOf('user');
-              return at >= 0 ? [...old.slice(0, at), ...old.slice(at + 1)] : old;
-            });
-            setInput((value) => value || sent.typed);
-            setAttachments((items) => (items.length ? items : sent.attachments));
+            const outcome = turnPreTurnRejected(sent);
+            outgoing.current = outcome.turn;
+            if (outcome.restore) {
+              setMessages(withoutLastUser);
+              // 只补空位：等待期间用户新打的字、新附上的文件不能被旧轮次覆盖（GUI-18）。
+              setInput((value) => value || sent.typed);
+              setAttachments((items) => (items.length ? items : sent.attachments));
+            }
           }
           setError(
             event.message === 'cancelled'
@@ -346,13 +380,6 @@ export default function AssistantPanel() {
           unlisten();
           return;
         }
-        const loaded = await invoke<Settings>('assistant_settings', {});
-        const inputs = await invoke<string[]>('assistant_input_history', {});
-        if (active) {
-          setSettings(loaded);
-          history.current = inputs;
-          setReady(true);
-        }
       } catch (e) {
         if (active) setError(String(e));
       }
@@ -364,6 +391,7 @@ export default function AssistantPanel() {
       if (runningRef.current) void invoke('assistant_cancel', {}).catch(() => {});
     };
     // 只在挂载时订阅一次；处理函数里的 t/errorText 读的是最新页面语言。
+    // 初始化（含重试）是后面单独的 effect：重试只重读数据，绝不会再订阅一次，也就不会重复回答（GUI-16）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // 设置对话框关闭后重新问一次 Key 状态（可能刚登记/删除过）。
@@ -387,7 +415,68 @@ export default function AssistantPanel() {
   // 已生成的错误/提示是当时语言的字符串，切换语言后清掉，避免中英混排。
   useEffect(() => {
     setError('');
+    setAttachNotice('');
   }, [state.language]);
+  /**
+   * 核心设置单独加载/重试（GUI-16）。原来它和输入历史串行 await，历史一失败就整个助手永久不可用；
+   * 现在设置失败只把 ready 留在 false 并给重试，历史失败（下一个 effect）不影响发送。
+   * 超时把"永远转圈"变成可见的失败态，重试是从零再来一次，不会碰事件订阅。
+   */
+  useEffect(() => {
+    if (!hasBackend()) return;
+    let active = true;
+    setInitPhase('loading');
+    setInitError('');
+    void (async () => {
+      try {
+        const loaded = await withTimeout(
+          invoke<Settings>('assistant_settings', {}),
+          SETTINGS_TIMEOUT_MS,
+          t('读取助手设置', 'loading assistant settings'),
+        );
+        if (!active) return;
+        setSettings(loaded);
+        setReady(true);
+        setInitPhase('ready');
+      } catch (e) {
+        if (!active) return;
+        setInitPhase('failed');
+        setInitError(errorText(String(e)));
+      }
+    })();
+    return () => {
+      active = false;
+    };
+    // 只在挂载和用户点"重试"时执行；t/errorText 读的是最新页面语言。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initAttempt]);
+  /**
+   * 输入历史是辅助数据（↑/↓ 记忆）：失败只给一条可重试的提示，不挡 ready、不占错误通道，
+   * 更不能让助手对话框因此禁用到重启应用（GUI-16）。单独超时，避免 colm-cli 子进程卡住初始化。
+   */
+  useEffect(() => {
+    if (!hasBackend()) return;
+    let active = true;
+    setHistoryError('');
+    void (async () => {
+      try {
+        const inputs = await withTimeout(
+          invoke<string[]>('assistant_input_history', {}),
+          HISTORY_TIMEOUT_MS,
+          t('读取输入历史', 'loading input history'),
+        );
+        if (!active) return;
+        history.current = inputs;
+      } catch (e) {
+        if (active) setHistoryError(errorText(String(e)));
+      }
+    })();
+    return () => {
+      active = false;
+    };
+    // 与核心设置分开重试；新增 attempt 只重读历史，不重新订阅事件。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyAttempt]);
   async function save(next: Settings) {
     if (runningRef.current)
       throw new Error(
@@ -399,14 +488,29 @@ export default function AssistantPanel() {
   }
   async function attachDocument() {
     if (runningRef.current || !ready) return;
+    // 记下这次读取属于哪个对话/草稿：读取期间可以切换对话，完成后必须核对身份（GUI-17）。
+    const request = conversationRequest.current;
     try {
       setAttaching(true);
+      setAttachNotice('');
       // 选文件和读文件都在后端：前端不能拿一个任意路径去读（例如存 Key 的 JSON）再发给模型。
       const picked = await invokeJson<DocumentAttachment | null>('assistant_pick_document');
+      // 用户取消选文件：什么都不改，读取中状态由 finally 复位。
       if (!picked) return;
+      if (request !== conversationRequest.current) {
+        // 结果不属于当前对话：丢掉，并明确告诉用户为什么文件没出现，而不是悄悄挂到新对话上。
+        setAttachNotice(
+          t(
+            '读取完成前对话已切换，这个文件没有加入当前对话；需要时请重新附加。',
+            'The conversation changed before the file finished reading, so it was not attached to the current conversation; attach it again if you need it.',
+          ),
+        );
+        return;
+      }
       if (!picked.text.trim())
         throw new Error(t('这个文件没有可读文字。', 'This file has no readable text.'));
-      const used = attachments.reduce((total, item) => total + item.text.length, 0);
+      // 用 ref 读最新附件：连续读取时旧渲染闭包里的 attachments 可能还没有上一个文件。
+      const used = attachmentsRef.current.reduce((total, item) => total + item.text.length, 0);
       const room = ATTACHMENT_CHARS_LIMIT - used;
       if (room <= 0)
         throw new Error(
@@ -425,10 +529,45 @@ export default function AssistantPanel() {
         },
       ]);
     } catch (e) {
-      setError(attachmentErrorText(String(e)));
+      // 对话已经切换时，这次读取的失败也不属于当前对话，不占用当前对话的错误提示。
+      if (request === conversationRequest.current) setError(attachmentErrorText(String(e)));
     } finally {
       setAttaching(false);
     }
+  }
+  /** 开始一轮发送：快照这一轮要发出的草稿，并分配轮次号（GUI-18）。 */
+  function beginSendTurn(typed: string, prompt: string) {
+    const record = newTurn(++turnSeq.current, typed, prompt, attachmentsRef.current);
+    outgoing.current = record;
+    return record;
+  }
+  /**
+   * 收尾一轮发送：IPC 确认送达、或发送本身失败。
+   * 用轮次号核对身份 —— 拒绝事件先到时用户可能已经开始了新一轮，旧轮次的确认不能清掉新草稿（GUI-18）。
+   */
+  function settleSendTurn(id: number, delivered: boolean, failure?: unknown) {
+    const sent = outgoing.current;
+    if (!sent || sent.id !== id) return;
+    if (delivered) {
+      const settled = turnDelivered(sent);
+      outgoing.current = settled;
+      // 轮次前拒绝的事件已经先到：气泡撤了、草稿恢复了；这里再清一次就会把用户的内容又抹掉。
+      if (!clearsDraftAfterAck(settled)) return;
+      // 只清还等于这次发出的内容：等待期间用户新打的字保留（GUI-18）。
+      setInput((value) => (value.trim() === settled.typed ? '' : value));
+      setAttachments([]);
+      const entry = settled.typed || settled.prompt;
+      if (entry && history.current.at(-1) !== entry)
+        history.current = [...history.current, entry].slice(-100);
+      historyIndex.current = null;
+      historyDraft.current = '';
+      return;
+    }
+    // 拒绝事件已经撤过气泡、恢复过草稿：不再重复处理，也别用更笼统的 IPC 错误覆盖它。
+    if (sent.phase === 'rejected') return;
+    outgoing.current = turnFailed(sent);
+    setMessages(withoutLastUser);
+    setError(errorText(String(failure)));
   }
   async function send(next?: string) {
     const typed = (next ?? input).trim();
@@ -461,6 +600,7 @@ export default function AssistantPanel() {
     busy(true);
     setError('');
     setLimitReached(false);
+    let sent: PendingTurn<DocumentAttachment> | null = null;
     try {
       const page = app.current;
       const identity = currentApprovalSnapshot();
@@ -487,27 +627,14 @@ export default function AssistantPanel() {
         ? `${prompt}\n\n${t('附件：', 'Attachments: ')}${attachments.map((item) => item.name).join('、')}`
         : prompt;
       setMessages((old) => [...old, { kind: 'user', text: shown }]);
-      pendingSend.current = { typed, attachments };
+      sent = beginSendTurn(typed, prompt);
       await invoke('assistant_send', { text, context: JSON.stringify(guideState()) });
-      setInput((value) => (value.trim() === typed ? '' : value));
-      setAttachments([]);
-      if (typed && history.current.at(-1) !== typed)
-        history.current = [...history.current, typed].slice(-100);
-      else if (!typed && history.current.at(-1) !== prompt)
-        history.current = [...history.current, prompt].slice(-100);
-      historyIndex.current = null;
-      historyDraft.current = '';
+      settleSendTurn(sent.id, true);
     } catch (e) {
       busy(false);
-      // 发送本身失败（例如后端拒绝）：刚显示的气泡撤回，输入与附件本来就还在。
-      if (pendingSend.current) {
-        pendingSend.current = null;
-        setMessages((old) => {
-          const at = old.map((m) => m.kind).lastIndexOf('user');
-          return at >= 0 ? [...old.slice(0, at), ...old.slice(at + 1)] : old;
-        });
-      }
-      setError(errorText(String(e)));
+      // 发送本身失败（例如后端拒绝）：刚显示的气泡撤回；草稿的去留由轮次状态决定（GUI-18）。
+      if (sent) settleSendTurn(sent.id, false, e);
+      else setError(errorText(String(e)));
     }
   }
   async function decide(approve: boolean, remember = false) {
@@ -576,6 +703,7 @@ export default function AssistantPanel() {
             setLimitReached(false);
             setStepLimit(0);
             setError('');
+            setAttachNotice('');
             historyIndex.current = null;
           }}
         >
@@ -605,6 +733,38 @@ export default function AssistantPanel() {
           )}
         </Notice>
       )}
+      {hasBackend() && initPhase === 'loading' && !ready && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {t('正在读取助手设置…', 'Reading assistant settings…')}
+        </p>
+      )}
+      {/* 设置读不出来时给出明确的重试入口，而不是让发送/附件按钮一直灰着（GUI-16）。 */}
+      {hasBackend() && initPhase === 'failed' && (
+        <Notice tone="error">
+          <p>
+            {t('助手设置没有读出来：', 'Could not read the assistant settings: ')}
+            {initError}
+          </p>
+          <Button disabled={running} onClick={() => setInitAttempt((value) => value + 1)}>
+            {t('重试读取设置', 'Retry loading settings')}
+          </Button>
+        </Notice>
+      )}
+      {/* 输入历史只是 ↑/↓ 记忆：读不到也照样能发送，只给一个可重试的警告（GUI-16）。 */}
+      {historyError && (
+        <Notice tone="warning">
+          <p>
+            {t(
+              '读取输入历史失败，↑/↓ 暂时没有历史记录。',
+              'Could not read the input history; ↑/↓ have no earlier inputs for now.',
+            )}{' '}
+            {historyError}
+          </p>
+          <Button disabled={running} onClick={() => setHistoryAttempt((value) => value + 1)}>
+            {t('重试读取输入历史', 'Retry reading input history')}
+          </Button>
+        </Notice>
+      )}
       {sessions && (
         <section
           aria-label={t('会话历史', 'Conversation history')}
@@ -629,6 +789,7 @@ export default function AssistantPanel() {
                     setLimitReached(false);
                     setStepLimit(0);
                     setSessions(null);
+                    setAttachNotice('');
                   })
                 }
               >
@@ -653,7 +814,9 @@ export default function AssistantPanel() {
                     if (session.current === item.id) {
                       session.current = null;
                       fresh.current = true;
+                      conversationRequest.current++;
                       setMessages([]);
+                      setAttachNotice('');
                       setUsage('');
                       setSessionUsage({ turns: 0, tokens: 0 });
                     }
@@ -831,6 +994,7 @@ export default function AssistantPanel() {
         </section>
       )}
       {error && <Notice tone="error">{error}</Notice>}
+      {attachNotice && <Notice tone="warning">{attachNotice}</Notice>}
       {attachments.length > 0 && (
         <div className="flex flex-col gap-1" aria-label={t('已附加的文档', 'Attached documents')}>
           {attachments.map((attachment, index) => (

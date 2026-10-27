@@ -13,6 +13,9 @@ anyhow.workspace = true
 colm-schema = { path = "../colm-schema" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# 文件内容身份（sha256）：界面打开的文件带着它当基线，保存时在写入端比对，防止旧缓冲区覆盖外部
+# 编辑。仓库里已经用它算源码树指纹（colm-cli 的 source_content_sha256），不再另引依赖。
+sha2.workspace = true
 # 对比两份 history 要读 NetCDF；与 colm-cli 一样静态链接。
 netcdf = { workspace = true, features = ["static"] }
 

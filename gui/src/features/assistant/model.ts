@@ -311,6 +311,14 @@ export function appendDelta(messages: Message[], kind: string, text: string): Me
     ? [...messages.slice(0, -1), { ...last, text: (last.text || '') + text }]
     : [...messages, { kind, text }];
 }
+/**
+ * 撤回最后一条用户气泡：这一轮在模型开始前就被拒绝（GUI-18）。没有用户消息时原样返回，
+ * 避免迟到的错误事件误删助手自己的输出。
+ */
+export function withoutLastUser(messages: Message[]): Message[] {
+  const at = messages.map((item) => item.kind).lastIndexOf('user');
+  return at >= 0 ? [...messages.slice(0, at), ...messages.slice(at + 1)] : messages;
+}
 export function historyInput(
   history: string[],
   index: number | null,

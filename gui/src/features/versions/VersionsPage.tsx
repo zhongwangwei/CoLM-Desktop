@@ -39,6 +39,8 @@ import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
+import { sourceGuardReason, type SourceEditState } from './source-edits';
+import { useSourceChoicePrompt } from './source-guard';
 import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions, notify } = useApp(),
@@ -128,16 +130,38 @@ export default function VersionsPage() {
     codeBusyNow.current = pending;
     setCodeBusy(pending);
   }
-  useNavigationGuard(() =>
-    dirtyNow.current
-      ? t(
-          '请先保存草稿或放弃本地修改后再离开',
-          'Save the draft or discard local edits before leaving',
-        )
-      : lock.current || codeBusyNow.current
-        ? t('版本操作进行中，请等待结果', 'A version operation is in progress; wait for its result')
-        : null,
-  );
+  // 源码缓冲区的未保存状态由 CodeFiles 上抛（只读版本浏览不注册）。用 getter 视图，用户点离开/冻结
+  // 那一刻读到的是最新值（GUI-02）。
+  const sourceState = useRef<SourceEditState | null>(null);
+  const sourceChoice = useSourceChoicePrompt(state.language === 'en');
+  function codeSourceState(next: SourceEditState | null) {
+    sourceState.current = next;
+  }
+  /** 切换版本/工作区前挡一下：未保存的源码缓冲区会随 CodeWorkspace 卸载一起丢（GUI-02）。 */
+  function assertSourceSaved() {
+    if (sourceState.current?.dirty)
+      throw new Error(
+        t(
+          '源码文件有未保存的修改，请先保存或放弃',
+          'Source files have unsaved edits; save or discard them first',
+        ),
+      );
+  }
+  useNavigationGuard(() => {
+    if (dirtyNow.current)
+      return t(
+        '请先保存草稿或放弃本地修改后再离开',
+        'Save the draft or discard local edits before leaving',
+      );
+    const source = sourceGuardReason(sourceState.current, t);
+    if (source) return source;
+    if (lock.current || codeBusyNow.current)
+      return t(
+        '版本操作进行中，请等待结果',
+        'A version operation is in progress; wait for its result',
+      );
+    return null;
+  });
   useEffect(() => {
     const token = { active: true };
     epoch.current = token;
@@ -309,14 +333,25 @@ export default function VersionsPage() {
     setDrafts(await invokeJson('model_drafts'));
     return saved;
   }
+  /**
+   * 需要磁盘上代码的动作（冻结、为研究冻结）前先处理源码缓冲区：保存 / 放弃 / 取消。
+   *
+   * 这一步必须在 `run` 拿到页面操作锁**之前**问：冻结时页面 busy 会让 CodeWorkspace 整个 disabled，
+   * 那时对话框里的"保存并继续"会被 CodeFiles 的 disabled 检查拒掉，用户永远选不了保存。
+   * 用户取消返回 false，调用方保持原页面与原缓冲区。
+   */
+  const sourceReady = () => sourceChoice.ask(sourceState.current);
   // finish：这是"冻结为新版本"，冻结后草稿删掉；为做研究而冻结时草稿留着，研究结果还要写回它。
   async function freeze(target = draft, unsaved = dirtyNow.current, finish = true) {
-    const frozen = await researchVersion(target, unsaved, viewing ?? selected, assetRoot, {
+    // 用 ref 里的最新草稿：进冻结前处理源码缓冲区的保存会刷新 code.commit 与 generation，闭包里
+    // 发起点击时那一份 target 可能已经旧了（拿旧 generation 保存会被后端拒绝）。
+    const current = draftNow.current ?? target;
+    const frozen = await researchVersion(current, unsaved, viewing ?? selected, assetRoot, {
       save,
       freeze: (id, root) =>
         invokeJson<FrozenRevision>('model_freeze', { id, assetRoot: root, finish }),
     });
-    if (target && frozen.version.id !== target.id)
+    if (current && frozen.version.id !== current.id)
       notify(
         t(
           `这份配置和已有的版本"${frozen.name}" r${frozen.version.revision} 一样，直接用它，没有另建新版本。`,
@@ -339,8 +374,10 @@ export default function VersionsPage() {
     return navigate(target.route, target.route === 'case' ? 'settings' : undefined);
   }
   async function openResearch() {
-    if (draft) autoCreated.current.delete(draft.id);
-    if (draft) await freeze(draft, dirtyNow.current, false);
+    // 用最新的草稿：进研究前先处理源码缓冲区的保存会刷新 draft.code.commit，闭包里那份可能已经旧了。
+    const current = draftNow.current;
+    if (current) autoCreated.current.delete(current.id);
+    if (current) await freeze(current, dirtyNow.current, false);
     else if (viewing) chooseForSimulation(viewing);
     else if (!selected) throw new Error(t('请选择冻结版本', 'Select a frozen revision'));
     lock.current = false;
@@ -355,6 +392,7 @@ export default function VersionsPage() {
   }
   // 打开一个冻结版本看；不再顺手把它设为模拟使用的版本（2026-10-20 用户同意拆开）。
   async function select(v: FrozenRevision) {
+    assertSourceSaved();
     if (dirty)
       throw new Error(
         t('请先保存草稿，或放弃本地修改', 'Save the draft or discard local changes first'),
@@ -367,6 +405,7 @@ export default function VersionsPage() {
     update({ version: v, versionRef: v.version, chosenVersion: v.version });
   }
   function backToLibrary() {
+    assertSourceSaved();
     if (dirtyNow.current)
       throw new Error(
         t('请先保存草稿，或放弃本地修改', 'Save the draft or discard local changes first'),
@@ -386,6 +425,7 @@ export default function VersionsPage() {
   // "新建修改版"的 6 种方式。手动改参数、修改源码直接建草稿（自动起名，之后在草稿里能改）；
   // 其余 4 种是研究：以所选版本为基础，直接打开研究页对应的方法。
   async function startMethod(method: HubMethod, base = parentVersion) {
+    assertSourceSaved();
     if (!base) throw new Error(t('请选择基于哪个版本', 'Choose the version to start from'));
     if (method === 'manual' || method === 'source') {
       const stamp = new Date().toLocaleString(appLocale(state.language === 'en'), {
@@ -463,6 +503,7 @@ export default function VersionsPage() {
     setCheckTick((value) => value + 1);
   }
   async function adoptWorkspace(name: string) {
+    assertSourceSaved();
     if (!draft || !name.trim()) return;
     await save({ ...draft, code: { ...draft.code, workspace: name.trim() } });
   }
@@ -1453,6 +1494,7 @@ export default function VersionsPage() {
                 name={shown.code.workspace}
                 onChanged={refreshCode}
                 onPendingChange={codePending}
+                onSourceState={codeSourceState}
               />
             ) : (
               <Card title={t('代码', 'Code')}>
@@ -1617,16 +1659,27 @@ export default function VersionsPage() {
                           researchTarget: draft ? { draftId: draft.id, name: draft.name } : null,
                         });
                         // 没去成研究页就把种子和方法清掉，免得以后在研究页莫名其妙地生效。
-                        run(() =>
-                          openResearch().catch((e) => {
-                            update({
-                              researchSeed: null,
-                              researchMethod: null,
-                              researchTarget: null,
-                            });
-                            throw e;
-                          }),
-                        );
+                        const clearSeed = () =>
+                          update({
+                            researchSeed: null,
+                            researchMethod: null,
+                            researchTarget: null,
+                          });
+                        void (async () => {
+                          // 源码未保存时先问保存/放弃/取消；这一刻还没拿页面锁，保存才能真的执行。
+                          if (!(await sourceReady())) {
+                            clearSeed();
+                            return;
+                          }
+                          run(async () => {
+                            try {
+                              await openResearch();
+                            } catch (e) {
+                              clearSeed();
+                              throw e;
+                            }
+                          });
+                        })();
                       }}
                     >
                       {state.language === 'en' ? m.en : m.zh}
@@ -1764,10 +1817,18 @@ export default function VersionsPage() {
                       run(async () => {
                         const saved = await save();
                         // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
+                        // 源码缓冲区还没保存时补一句：草稿（模型修订的配置）和源码文件是两种保存，别让
+                        // "已保存草稿"暗示源码也进去了（GUI-02）。
+                        const sourceUnsaved = sourceState.current?.dirty
+                          ? t(
+                              ' 注意：源码文件还有未保存的修改，那些改动不在这个草稿里；到「代码」页签保存它们。',
+                              ' Note: source files still have unsaved edits; they are not in this draft. Save them under the Code tab.',
+                            )
+                          : '';
                         notify(
                           t(
-                            `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。`,
-                            `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".`,
+                            `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。${sourceUnsaved}`,
+                            `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".${sourceUnsaved}`,
                           ),
                         );
                         return saved;
@@ -1782,7 +1843,9 @@ export default function VersionsPage() {
                     kind="commit"
                     disabled={busy || codeBusy || freezeCheck?.ready === false}
                     variant="primary"
-                    run={() =>
+                    run={async () => {
+                      // 源码未保存时先问保存/放弃/取消；在拿页面锁之前问，保存才能在对话框里执行。
+                      if (!(await sourceReady())) return;
                       run(async () => {
                         const frozen = await freeze();
                         notify(
@@ -1792,8 +1855,8 @@ export default function VersionsPage() {
                           ),
                         );
                         return frozen;
-                      })
-                    }
+                      });
+                    }}
                   >
                     {t('冻结为新版本', 'Freeze as a version')}
                   </ActionButton>
@@ -1874,6 +1937,8 @@ export default function VersionsPage() {
             initialParameter={paramsParameter}
             onImportProcessFile={editable ? () => void importConfigurationProcess() : undefined}
           />
+          {/* 冻结/为研究冻结前统一处理源码缓冲区的未保存状态：保存并继续 / 放弃并继续 / 取消。 */}
+          {sourceChoice.dialog}
         </>
       )}
     </div>
