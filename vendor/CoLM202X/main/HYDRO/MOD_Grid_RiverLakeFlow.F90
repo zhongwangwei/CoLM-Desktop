@@ -1191,8 +1191,7 @@ CONTAINS
                   mflux_fc(i) = mflux_fc(i) * dt_this
                   IF (is_built_resv(i)) qresv_out(ucat2resv(i)) = hflux_fc(i)
                ENDDO
-               CALL worker_push_data(push_ups2ucat, hflux_fc, hflux_sumups, fillvalue=0._r8, mode='sum')
-               CALL worker_push_data(push_ups2ucat, mflux_fc, mflux_sumups, fillvalue=0._r8, mode='sum')
+               CALL push_ups2ucat_sum (hflux_fc, hflux_sumups, mflux_fc, mflux_sumups)
                WHERE (ucatfilter)
                   sum_hflux_riv = hflux_fc - hflux_sumups
                   sum_mflux_riv = mflux_fc - mflux_sumups

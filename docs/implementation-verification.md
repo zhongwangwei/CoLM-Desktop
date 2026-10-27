@@ -37660,3 +37660,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase D vendor 干净构建（2026-10-27）**：`make clean` 后 `make -j1` 从零编译全部对象、`run/colm.x`/`mkinidata.x`/`mksrfdata.x`/postprocess 和 `libcolm.a` 全部成功。补上 `MOD_Grid_RiverLakeNetwork.o: MOD_Grid_RiverLakePush.o` 依赖，否则干净串行构建会先编 Network 而找不到 Push 模块。`make -j8` 的并行 lib 目标仍会抢跑，干净构建用 `-j1`。
 
 **Phase B 运行期验证（2026-10-27）**：vendor 二进制是 USEMPI 构建，直接执行会因 MPI 初始化失败；用 `mpirun -n 1 run/river_hist_concatenate.x ...` 运行。对 target 传 `bad'; touch /tmp/colm-injected; #`，程序在 `read_namelist` 前报 `ERROR: the target path contains a single quote`，`/tmp/colm-injected` **未生成**，MPI_ABORT 退出。
+
+**Phase D vendor Push 第二批（2026-10-27）**：普通子步末尾的 hflux/mflux 上游求和也改走 `push_ups2ucat_sum`，两字段一次交换；`batch_exact` 为假仍回退逐字段。`make -j8` 通过。
