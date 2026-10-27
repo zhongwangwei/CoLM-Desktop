@@ -1762,9 +1762,11 @@ CONTAINS
    real(r8), intent(in) :: dt_res(:)
    real(r8), intent(inout) :: dt_all(:)
    logical, intent(out) :: next_loop_active
-   real(r8) :: dt_reduce(2), dt_global, max_residual
+   ! dt_reduce(1): smallest dt of the active groups (-huge flags a non-finite
+   ! residual); dt_reduce(1+k): dt of shared group k
+   real(r8) :: dt_reduce(1+numrivsys_shared)
    logical :: pathological_mask(size(dt_res))
-   integer :: i
+   integer :: i, k
 
       pathological_mask = .false.
       DO i = 1, size(dt_res)
@@ -1788,16 +1790,22 @@ CONTAINS
          ENDIF
       ENDIF
 
-      dt_reduce = [huge(1._r8), 0._r8]
+      dt_reduce(:) = huge(1._r8)
       IF (any(.not. ieee_is_finite(dt_res))) THEN
          dt_reduce(1) = -huge(1._r8)
-      ELSEIF (any(dt_res > 0._r8)) THEN
-         dt_reduce(1) = minval(dt_all, mask=dt_res > 0._r8)
-         dt_reduce(2) = -maxval(dt_res, mask=dt_res > 0._r8)
+      ELSE
+         DO i = 1, size(dt_res)
+            IF (dt_res(i) > 0._r8) THEN
+               dt_reduce(1) = min(dt_reduce(1), dt_all(i))
+               k = irivsys_shared(i)
+               IF (k > 0) dt_reduce(1+k) = min(dt_reduce(1+k), dt_all(i))
+            ENDIF
+         ENDDO
       ENDIF
 
 #ifdef USEMPI
-      CALL mpi_allreduce (MPI_IN_PLACE, dt_reduce, 2, MPI_REAL8, MPI_MIN, p_comm_worker, p_err)
+      CALL mpi_allreduce (MPI_IN_PLACE, dt_reduce, size(dt_reduce), MPI_REAL8, MPI_MIN, &
+         p_comm_worker, p_err)
 #endif
 
       IF (.not. ieee_is_finite(dt_reduce(1))) &
@@ -1805,27 +1813,27 @@ CONTAINS
       IF (dt_reduce(1) <= -0.5_r8 * huge(1._r8)) &
          CALL CoLM_stop('grid_riverlake_flow: non-finite routing residual')
 
-      dt_global = dt_reduce(1)
-      routing_last_global_dt = dt_global
-      max_residual = -dt_reduce(2)
+      routing_last_global_dt = dt_reduce(1)
       next_loop_active = .false.
 
-      IF (dt_global < 0.5_r8 * huge(1._r8)) THEN
-         IF (.not. ieee_is_finite(max_residual)) &
-            CALL CoLM_stop('grid_riverlake_flow: invalid synchronized routing dt')
-         IF (dt_global <= 0._r8) &
-            CALL CoLM_stop('grid_riverlake_flow: non-positive synchronized routing dt')
-         IF (max_residual > 0._r8 .and. max_residual - dt_global >= max_residual) &
-            CALL CoLM_stop('grid_riverlake_flow: routing dt makes no numerical progress')
-         next_loop_active = max_residual - dt_global > 0._r8
-         WHERE (dt_res > 0._r8)
-            dt_all = dt_global
-         ELSEWHERE
-            dt_all = 0._r8
-         END WHERE
-      ELSE
-         dt_all = 0._r8
-      ENDIF
+      DO i = 1, size(dt_res)
+         IF (dt_res(i) > 0._r8) THEN
+            k = irivsys_shared(i)
+            IF (k > 0) dt_all(i) = dt_reduce(1+k)
+            IF (dt_all(i) <= 0._r8) &
+               CALL CoLM_stop('grid_riverlake_flow: non-positive synchronized routing dt')
+            IF (dt_res(i) - dt_all(i) >= dt_res(i)) &
+               CALL CoLM_stop('grid_riverlake_flow: routing dt makes no numerical progress')
+            IF (dt_res(i) - dt_all(i) > 0._r8) next_loop_active = .true.
+         ELSE
+            dt_all(i) = 0._r8
+         ENDIF
+      ENDDO
+
+#ifdef USEMPI
+      CALL mpi_allreduce (MPI_IN_PLACE, next_loop_active, 1, MPI_LOGICAL, MPI_LOR, &
+         p_comm_worker, p_err)
+#endif
 
    END SUBROUTINE sync_global_routing_dt
 

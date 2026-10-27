@@ -37682,3 +37682,9 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - 结论：当前 vendor 的 N worker vs 7 worker 数值一致；Fortran 文件层不是逐字节一致，逐字节契约仍以 Rust 的 hb64 634/634 为准。
 
 **Phase D Rust 分汊 N=1 vs N=2（2026-10-27，7920l）**：同一 556 区域算例，开启 `DEF_USE_BIFURCATION=.true.`，用当前 Rust 引擎跑 1 node 与 2 node；输出 1125 个文件全部 `cmp` 一致（restart/history/land unitcat）。这是逐簇 dt 改动前的基线。
+
+**Phase C/D vendor 逐簇 dt（2026-10-27）**：
+- `MOD_Grid_RiverLakeNetwork` 增加 `bifurcation_dt_groups`、`numrivsys_shared`、`irivsys_shared`；开分汊时把 `irivsys` 从单河系改成路径连通簇，并标记跨 worker 簇。
+- `MOD_Grid_RiverLakeFlow` 的 `sync_global_routing_dt` 改为按簇归约；共享簇取各 worker 最小值，不再被全局最小压死。
+- 在 7920l 556 区域算例（`DEF_USE_BIFURCATION=.true.`）跑 3 rank（1 worker+1 IO）vs 9 rank（7 worker+2 IO）：日志显示 **79 个河系 → 76 个簇，N=9 时 4 个跨 worker 簇**；1125 个输出文件逐变量 **0 差异**（15 个文件仅 HDF5 布局字节不同）。
+- Rust 侧同一算例 N=1 vs N=2 是 1125/1125 **文件逐字节一致**；vendor 逐簇 dt 后仍需在 Rust 侧实现并复验。
