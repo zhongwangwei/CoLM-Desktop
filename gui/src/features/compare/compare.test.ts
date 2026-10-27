@@ -7,10 +7,26 @@ import {
   comparableVariables,
   commonYears,
   comparisonDir,
+  configInvalidation,
   defaultGridRes,
+  designFingerprint,
+  formatExtent,
+  jobContacted,
+  jobEnded,
+  jobUncertain,
+  parseExtent,
   parseReferences,
+  parseRemoteJob,
+  remoteJobTerminal,
+  simulationFormForPick,
+  simulationInfoForSave,
   simulationKey,
+  validateSimulation,
   type BenchSimulation,
+  type ComparisonDesign,
+  type HistoryInfo,
+  type RemoteJobIdentity,
+  type SimulationFormValues,
 } from './compare';
 
 const site: BenchSimulation = {
@@ -273,4 +289,484 @@ it('writes an explicitly cleared metric list and refuses clearing both', () => {
     () => buildOpenbenchConfig({ ...base, metrics: [], scores: [] }),
     /at least one metric or score/,
   );
+});
+
+const probedGrid: HistoryInfo = {
+  history_dir: '/p/hb dir/out/hb/history',
+  prefix: 'hb_hist_',
+  tim_res: 'Day',
+  syear: 2002,
+  eyear: 2005,
+  spatial: true,
+  lon: null,
+  lat: null,
+  files: 48,
+  extent: [111, 115.5, 21.5, 24.5],
+  resolution: 0.008333,
+  data_groupby: 'Month',
+};
+const probedStation: HistoryInfo = {
+  history_dir: '/p/AT-Neu/out/AT-Neu/history',
+  prefix: 'AT-Neu_hist_',
+  tim_res: 'Hour',
+  syear: 2003,
+  eyear: 2006,
+  spatial: false,
+  lon: 11.3,
+  lat: 47.1,
+  files: 48,
+  extent: null,
+  resolution: null,
+  data_groupby: 'Month',
+};
+const simForm = (patch: Partial<SimulationFormValues> = {}): SimulationFormValues => ({
+  dir: '',
+  dataType: 'auto',
+  prefix: '',
+  timRes: 'Day',
+  from: '',
+  to: '',
+  dataGroupby: '',
+  gridRes: '',
+  lon: '',
+  lat: '',
+  extent: '',
+  variables: [],
+  ...patch,
+});
+
+it('says which field blocks saving a simulation instead of only throwing', () => {
+  // GUI-11：空目录、未确认类型、缺起止年份都要能定位到字段，页面据此提示并聚焦。
+  assert.equal(validateSimulation(null, simForm())?.field, 'dir');
+  const untyped = validateSimulation(null, simForm({ dir: '/d' }));
+  assert.equal(untyped?.field, 'dataType');
+  assert.match(untyped!.message[1], /Inspect the folder or choose grid\/station first/);
+  assert.match(untyped!.message[0], /读取目录概况/);
+  const noYears = validateSimulation(null, simForm({ dir: '/d', dataType: 'grid' }));
+  assert.equal(noYears?.field, 'from');
+  assert.match(noYears!.message[1], /start and end years/);
+  assert.equal(
+    validateSimulation(null, simForm({ dir: '/d', dataType: 'grid', from: '2003' }))?.field,
+    'from',
+    'only one year is not enough',
+  );
+  // 读到了概况时年份可以留空沿用；其余非法输入逐项定位。
+  assert.equal(validateSimulation(probedGrid, simForm({ dir: '/d' })), null);
+  assert.equal(validateSimulation(probedStation, simForm({ dir: '/d' })), null);
+  assert.equal(
+    validateSimulation(probedGrid, simForm({ dir: '/d', from: '2004', to: '2003' }))?.field,
+    'from',
+  );
+  assert.equal(
+    validateSimulation(probedGrid, simForm({ dir: '/d', gridRes: '-1' }))?.field,
+    'gridRes',
+  );
+  assert.equal(
+    validateSimulation(probedGrid, simForm({ dir: '/d', extent: '1,2,3' }))?.field,
+    'extent',
+  );
+  assert.equal(
+    validateSimulation(probedGrid, simForm({ dir: '/d', extent: '115,111,24,21' }))?.field,
+    'extent',
+    'west/east and south/north must run in order',
+  );
+  assert.equal(validateSimulation(probedStation, simForm({ dir: '/d', lon: '999' }))?.field, 'lon');
+  assert.equal(validateSimulation(probedStation, simForm({ dir: '/d', lat: '91' }))?.field, 'lat');
+  assert.equal(
+    validateSimulation(
+      probedStation,
+      simForm({ dir: '/d', variables: [{ variable: 'X', varname: '', unit: '' }] }),
+    )?.field,
+    'variables',
+  );
+});
+
+it('saves the whole inspected object and only overrides explicitly edited fields', () => {
+  // GUI-10：读取→保存后 extent/lon/lat/files/history_dir 都还在，不能被表单重新拼出来的 info 顶掉。
+  const info = simulationInfoForSave(
+    probedGrid,
+    simForm({
+      dir: probedGrid.history_dir,
+      dataType: 'grid',
+      prefix: 'edited_hist_',
+      from: '2004',
+      to: '2006',
+      gridRes: '0.05',
+      extent: '110,116,21,25',
+    }),
+  );
+  assert.deepEqual(info, {
+    ...probedGrid,
+    prefix: 'edited_hist_',
+    syear: 2004,
+    eyear: 2006,
+    resolution: 0.05,
+    extent: [110, 116, 21, 25],
+  });
+  // 留空的字段沿用探测值（表单"空白=自动"的语义）；打开表单时时间分辨率会预填探测值。
+  assert.deepEqual(
+    simulationInfoForSave(
+      probedStation,
+      simForm({ dir: probedStation.history_dir, dataType: 'stn', timRes: 'Hour' }),
+    ),
+    probedStation,
+  );
+  // 手工登记（没有探测结果）：只写表单里明确给出的元数据，files 从 0 起而不是编一个。
+  const manual = simulationInfoForSave(
+    null,
+    simForm({
+      dir: '/p/AT-Neu/out/AT-Neu/history',
+      dataType: 'stn',
+      timRes: 'Hour',
+      from: '2003',
+      to: '2004',
+      lon: '11.3',
+      lat: '47.1',
+    }),
+  );
+  assert.equal(manual.history_dir, '/p/AT-Neu/out/AT-Neu/history');
+  assert.equal(manual.spatial, false);
+  assert.equal(manual.files, 0);
+  assert.equal(manual.extent, null);
+  assert.equal(manual.data_groupby, null);
+  assert.equal(manual.resolution, null);
+  assert.equal(manual.lon, 11.3);
+  assert.equal(manual.lat, 47.1);
+});
+
+it('switching a saved simulation between grid and station really changes its type', () => {
+  // GUI-09：已有分支原来展开旧 info 时漏了 spatial，改类型不生效。
+  const station = simulationInfoForSave(
+    probedGrid,
+    simForm({ dir: probedGrid.history_dir, dataType: 'stn' }),
+  );
+  assert.equal(station.spatial, false);
+  assert.equal(
+    station.files,
+    probedGrid.files,
+    'the probed file count is not lost with the type change',
+  );
+  assert.equal(station.extent, null, 'a station has no grid region');
+  assert.equal(
+    simulationFormForPick({ dir: probedGrid.history_dir, label: 'hb', info: station }).dataType,
+    'stn',
+  );
+
+  const grid = simulationInfoForSave(
+    probedStation,
+    simForm({
+      dir: probedStation.history_dir,
+      dataType: 'grid',
+      extent: '110,116,21,25',
+      gridRes: '0.1',
+    }),
+  );
+  assert.equal(grid.spatial, true);
+  assert.deepEqual(grid.extent, [110, 116, 21, 25]);
+  assert.equal(grid.resolution, 0.1);
+  assert.equal(
+    simulationFormForPick({ dir: probedStation.history_dir, label: 'neu', info: grid }).dataType,
+    'grid',
+  );
+});
+
+it('editing form values round-trips the saved simulation including extent and coordinates', () => {
+  const form = simulationFormForPick({ dir: '/p/hb/history', label: 'hb', info: probedGrid });
+  assert.equal(form.dataType, 'grid');
+  assert.equal(form.extent, '111,115.5,21.5,24.5');
+  assert.equal(form.gridRes, '0.008333');
+  assert.equal(form.dataGroupby, 'Month');
+  assert.equal(form.from, '2002');
+  const station = simulationFormForPick({ dir: '/p/neu', label: 'neu', info: probedStation });
+  assert.equal(station.dataType, 'stn');
+  assert.equal(station.lon, '11.3');
+  assert.equal(station.lat, '47.1');
+  // 手动覆盖的分组/分辨率优先于 info 里的。
+  const overridden = simulationFormForPick({
+    dir: '/p/hb/history',
+    label: 'hb',
+    info: probedGrid,
+    dataGroupby: 'Day',
+    gridRes: 0.25,
+  });
+  assert.equal(overridden.dataGroupby, 'Day');
+  assert.equal(overridden.gridRes, '0.25');
+  // 还没读到概况时表单是自动类型，保存会要求先读数或明确选类型。
+  assert.equal(simulationFormForPick({ dir: '/d', label: 'd', info: null }).dataType, 'auto');
+});
+
+it('opening a saved simulation and saving it again changes nothing', () => {
+  // GUI-10 验收：读取→保存→生成，探测到的范围/经纬度/文件数等元数据原样保留。
+  const roundTrip = (info: HistoryInfo) =>
+    simulationInfoForSave(info, {
+      ...simForm(),
+      ...simulationFormForPick({ dir: info.history_dir, label: 'x', info }),
+    });
+  assert.deepEqual(roundTrip(probedGrid), probedGrid);
+  assert.deepEqual(roundTrip(probedStation), probedStation);
+});
+
+it('parses and formats a region in the order OpenBench expects', () => {
+  assert.deepEqual(parseExtent('111, 115.5, 21.5, 24.5'), [111, 115.5, 21.5, 24.5]);
+  assert.deepEqual(parseExtent('111，115.5，21.5，24.5'), [111, 115.5, 21.5, 24.5]);
+  assert.equal(parseExtent('111,115.5,21.5'), null);
+  assert.equal(parseExtent('111,115.5,24.5,21.5'), null);
+  assert.equal(parseExtent('111,115.5,21.5,95'), null);
+  assert.equal(formatExtent([111.0000001, 115.5, 21.5, 24.5]), '111,115.5,21.5,24.5');
+  assert.equal(formatExtent(null), '');
+});
+
+it('writes the target comparison resolution even when no region could be inspected', () => {
+  // GUI-10：没有 extent 时原来连显式 grid_res 都不输出；现在只省区域范围并说明原因。
+  const noRegion = {
+    label: 'GreaterBay 1km',
+    info: { ...basin.info, extent: null, resolution: 0.008333 },
+  };
+  const built = buildOpenbenchConfig({ ...base, simulations: [noRegion], gridRes: 0.1 });
+  assert.match(built.config, / {2}grid_res: 0\.1/);
+  assert.doesNotMatch(built.config, /lat_range|lon_range/);
+  assert.deepEqual(built.missingExtent, ['GreaterBay 1km']);
+  const known = {
+    ...noRegion,
+    info: {
+      ...noRegion.info,
+      extent: [111, 115.5, 21.5, 24.5] as [number, number, number, number],
+    },
+  };
+  const complete = buildOpenbenchConfig({ ...base, simulations: [known], gridRes: 0.1 });
+  assert.match(complete.config, /lat_range: \[21\.5, 24\.5\]/);
+  assert.deepEqual(complete.missingExtent, []);
+  // 只有单点模拟时不写网格分辨率（那是格点比较的设置）。
+  const stations = buildOpenbenchConfig({ ...base, simulations: [site], gridRes: 0.25 });
+  assert.doesNotMatch(stations.config, /grid_res/);
+});
+
+it('writes variables and per-simulation overrides in a stable order', () => {
+  const forward = buildOpenbenchConfig({
+    ...base,
+    variables: { Latent_Heat: 'L', Sensible_Heat: 'S' },
+    simulations: [
+      {
+        ...basin,
+        variables: {
+          Zeta: { varname: 'z', varunit: '1' },
+          Alpha: { varname: 'a', varunit: '1' },
+        },
+      },
+    ],
+  }).config;
+  const backward = buildOpenbenchConfig({
+    ...base,
+    variables: { Sensible_Heat: 'S', Latent_Heat: 'L' },
+    simulations: [
+      {
+        ...basin,
+        variables: {
+          Alpha: { varname: 'a', varunit: '1' },
+          Zeta: { varname: 'z', varunit: '1' },
+        },
+      },
+    ],
+  }).config;
+  assert.equal(forward, backward, 'selection order does not change the configuration text');
+  assert.ok(forward.indexOf('"Alpha"') < forward.indexOf('"Zeta"'), forward);
+  assert.ok(
+    forward.indexOf('reference:\n  Latent_Heat') < forward.indexOf('  Sensible_Heat'),
+    forward,
+  );
+});
+
+const machine = { host: '', openbenchRoot: '/ob', refRoot: '/refs' };
+const fingerprint = (
+  patch: Partial<ComparisonDesign> = {},
+  machinePatch: Partial<typeof machine> = {},
+) => designFingerprint({ machine: { ...machine, ...machinePatch }, ...base, ...patch });
+
+it('fingerprints capture every input that changes the generated configuration', () => {
+  const original = fingerprint();
+  const changes: [string, Partial<ComparisonDesign>][] = [
+    ['project name', { name: 'another comparison' }],
+    ['years', { years: [2003, 2006] }],
+    ['time scale', { timRes: 'Month' }],
+    ['reference selection', { variables: { Latent_Heat: 'ERA5LAND_LowRes' } }],
+    ['target resolution', { gridRes: 0.5 }],
+    ['weight', { weight: 'mass' }],
+    ['min years', { minYear: 2 }],
+    ['time alignment', { timeAlignment: 'per_pair' }],
+    ['cores', { numCores: 4 }],
+    ['metrics', { metrics: ['bias'] }],
+    ['scores', { scores: ['Overall_Score', 'nBiasScore'] }],
+    [
+      'simulation prefix (same folder and display name)',
+      { simulations: [{ ...site, info: { ...site.info, prefix: 'AT-Neu2_hist_' } }, basin] },
+    ],
+    [
+      'simulation type',
+      { simulations: [{ ...site, info: { ...site.info, spatial: true } }, basin] },
+    ],
+    [
+      'simulation time resolution',
+      { simulations: [site, { ...basin, info: { ...basin.info, tim_res: 'Day' } }] },
+    ],
+    [
+      'simulation years',
+      { simulations: [site, { ...basin, info: { ...basin.info, syear: 2001 } }] },
+    ],
+    [
+      'file grouping',
+      { simulations: [site, { ...basin, info: { ...basin.info, data_groupby: 'Day' } }] },
+    ],
+    [
+      'region',
+      { simulations: [site, { ...basin, info: { ...basin.info, extent: [110, 116, 20, 25] } }] },
+    ],
+    [
+      'native resolution',
+      { simulations: [site, { ...basin, info: { ...basin.info, resolution: 0.05 } }] },
+    ],
+    [
+      'file count (changes the inferred grouping)',
+      { simulations: [site, { ...basin, info: { ...basin.info, files: 1 } }] },
+    ],
+    [
+      'per-simulation variable mapping',
+      {
+        simulations: [
+          site,
+          { ...basin, variables: { Latent_Heat: { varname: 'lh', varunit: 'W m-2' } } },
+        ],
+      },
+    ],
+    [
+      'per-simulation group/resolution override',
+      { simulations: [site, { ...basin, dataGroupby: 'Day', gridRes: 0.25 }] },
+    ],
+  ];
+  for (const [what, patch] of changes)
+    assert.notEqual(fingerprint(patch), original, `a changed ${what} must change the fingerprint`);
+  // 机器/OpenBench/参考数据路径也是这次评估的身份。
+  for (const machinePatch of [
+    { host: '7920land' },
+    { openbenchRoot: '/other/ob' },
+    { refRoot: '/other/refs' },
+  ])
+    assert.notEqual(fingerprint({}, machinePatch), original);
+  // 同一份设计不管对象键顺序都得到同一个指纹。
+  assert.equal(
+    fingerprint({ variables: { Sensible_Heat: '', Latent_Heat: 'OpenBench_LH_Daily' } }),
+    fingerprint(),
+  );
+  assert.equal(fingerprint(), original);
+});
+
+it('decides whether a generated configuration is still valid', () => {
+  const generated = { fingerprint: 'aaaa', config: 'project:\n  name: x\n' };
+  assert.equal(
+    configInvalidation({ currentFingerprint: 'aaaa', generated, yaml: generated.config }),
+    'none',
+  );
+  assert.equal(
+    configInvalidation({ currentFingerprint: 'bbbb', generated: null, yaml: 'x' }),
+    'none',
+  );
+  assert.equal(configInvalidation({ currentFingerprint: 'bbbb', generated, yaml: '' }), 'none');
+  // 没手改过的自动配置随设置失效，直接作废。
+  assert.equal(
+    configInvalidation({ currentFingerprint: 'bbbb', generated, yaml: generated.config }),
+    'clear',
+  );
+  // 手改过的必须保留：页面只标记过期并给重新生成入口，不静默覆盖。
+  assert.equal(
+    configInvalidation({
+      currentFingerprint: 'bbbb',
+      generated,
+      yaml: `${generated.config}# mine`,
+    }),
+    'keep-edited',
+  );
+});
+
+it('persists a remote job identity through a failed query and keeps it in history after a terminal', () => {
+  // GUI-07：一次查询失败只把记录标成"待核对"，不能清掉；确认终态后活动记录删除、历史保留身份。
+  const stored: RemoteJobIdentity = {
+    job: 'bench-run-84692-1',
+    kind: 'run',
+    name: 'qfo_era5',
+    host: '7920ts',
+    submittedAt: '2026-10-27T20:00:00.000Z',
+    lastState: 'running',
+    lastConfirmedAt: '2026-10-27T20:01:00.000Z',
+  };
+  // 往返 localStorage 的 JSON 不丢字段（重开应用据此恢复核对）。
+  const parsed = parseRemoteJob(JSON.stringify(stored))!;
+  for (const key of [
+    'job',
+    'kind',
+    'name',
+    'host',
+    'submittedAt',
+    'lastState',
+    'lastConfirmedAt',
+  ] as const)
+    assert.equal(parsed[key], stored[key], key);
+  assert.equal(parsed.uncertain, false);
+  // 通信失败：身份与全部上下文都在，只标记待核对与原因。
+  const lost = jobUncertain(stored, 'ssh: connect to host 7920ts port 22: Connection timed out');
+  assert.equal(lost.job, stored.job);
+  assert.equal(lost.name, 'qfo_era5');
+  assert.equal(lost.host, '7920ts');
+  assert.equal(lost.uncertain, true);
+  assert.match(lost.lastError!, /Connection timed out/);
+  // 一次成功的查询清掉"不确定"并更新最后确认状态。
+  const contacted = jobContacted(lost, 'running', '2026-10-27T20:02:00.000Z');
+  assert.equal(contacted.uncertain, false);
+  assert.equal(contacted.lastState, 'running');
+  assert.equal(contacted.lastConfirmedAt, '2026-10-27T20:02:00.000Z');
+  // 终态写历史：保留作业身份，写上结果与时间（重开应用仍能看到上次作业）。
+  const ended = jobEnded(contacted, 'succeeded', '2026-10-27T20:10:00.000Z');
+  assert.equal(ended.job, stored.job);
+  assert.equal(ended.end, 'succeeded');
+  assert.equal(ended.uncertain, false);
+  assert.equal(ended.endedAt, '2026-10-27T20:10:00.000Z');
+  // 坏记录当没有，不能挡住后续提交。
+  for (const bad of ['', 'not json', '{}', '{"job":"x"}', '{"job":"x","kind":"other"}'])
+    assert.equal(parseRemoteJob(bad), null, bad);
+});
+
+it('treats only a server-confirmed final state as terminal', () => {
+  // GUI-07：还在跑、或这次查询没有终态信息时，不能误标成功/失败。
+  assert.equal(remoteJobTerminal({ status: { state: 'running' }, ended: null }), null);
+  assert.equal(remoteJobTerminal({ status: { state: 'queued' }, ended: null }), null);
+  assert.equal(remoteJobTerminal({ status: { state: 'unknown' }, ended: null }), null);
+  // finished 的退出码决定成功/失败。
+  assert.equal(
+    remoteJobTerminal({ status: { state: 'finished', exit_code: 0 }, ended: null }),
+    'succeeded',
+  );
+  assert.equal(
+    remoteJobTerminal({ status: { state: 'finished', exit_code: 2 }, ended: null }),
+    'failed',
+  );
+  // 调度系统记下的终态（没有退出码的 lost）也认：取消与失败是两回事，复用普通远程运行的判定。
+  assert.equal(remoteJobTerminal({ status: { state: 'lost' }, ended: 'cancelled' }), 'cancelled');
+  assert.equal(remoteJobTerminal({ status: { state: 'lost' }, ended: 'failed' }), 'failed');
+});
+
+it('states in English that a failed fetch kept the previous local report', () => {
+  // GUI-08：后端保证旧镜像没动；这句固定说明要在英文界面里说得清楚，不能夹中文。
+  const [zh, en] = benchErrorText(
+    'Error: 取回失败：ssh: connect to host 7920ts port 22: Connection timed out。本机旧报告未改动，仍是上次成功版本。',
+  );
+  assert.match(zh, /本机旧报告未改动/);
+  assert.match(en, /^Fetch failed: ssh: connect to host 7920ts port 22: Connection timed out\./);
+  assert.match(en, /previous report on this computer is unchanged/);
+  assert.match(en, /last successful version/);
+  // 本机原本没有旧报告时措辞不同，但同样说清楚没有旧版本可回退。
+  const [, none] = benchErrorText(
+    '取回失败：服务器上这次比较没有找到可显示的报告（output/<项目>/reports/ 下没有 HTML）。本机原先没有这个比较的报告。',
+  );
+  assert.match(none, /There was no previous report of this comparison here/);
+  // 同一比较并发取回被后端拒绝时的固定句。
+  const [, busy] = benchErrorText('这个比较的报告正在取回中，等这次取回结束后再试。');
+  assert.match(busy, /being fetched already/);
 });

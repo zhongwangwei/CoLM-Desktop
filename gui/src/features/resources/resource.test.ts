@@ -12,6 +12,9 @@ import {
   SERVER_PRESETS,
   applyServerPreset,
   recognisedPreset,
+  localDefaults,
+  localPathSignature,
+  localPathValues,
   type ResourceCheck,
 } from './resource';
 test('server edits preserve others and reject duplicate host', () => {
@@ -368,4 +371,42 @@ test('a checked server is recognised by its scheduler and partitions, not its ad
   assert.equal(recognisedPreset({ schedulers: ['slurm'], queues: ['normal', 'gpu'] }), null);
   assert.equal(recognisedPreset({ schedulers: ['slurm'], queues: ['first', 'second'] }), null);
   assert.equal(recognisedPreset(undefined), null);
+});
+
+test('local default path baseline compares trimmed folders and ignores remembered kind paths', () => {
+  assert.equal(localPathSignature(localDefaults()), localPathSignature({}));
+  assert.equal(
+    localPathSignature({ rawdata_dir: ' /Volumes/Data/CoLMrawdata ' }),
+    localPathSignature({ rawdata_dir: '/Volumes/Data/CoLMrawdata' }),
+  );
+  assert.notEqual(
+    localPathSignature({ rawdata_dir: '/Volumes/Data/CoLMrawdata' }),
+    localPathSignature({ rawdata_dir: '/Volumes/Data/Other' }),
+  );
+  // 各类型记住的路径由后端即时写盘，不是"未保存的默认路径"。
+  assert.equal(
+    localPathSignature({ kind_paths: { site: { sitedir: '/server/Sitedata' } } }),
+    localPathSignature({}),
+  );
+});
+
+test('discarding local path edits restores the four directories and keeps remembered kind paths', () => {
+  const saved = localDefaults({
+    project_dir: '/saved/projects',
+    rawdata_dir: '/saved/raw',
+    runtime_dir: '/saved/runtime',
+    forcing_dir: '/saved/forcing',
+    kind_paths: { watershed: { shapefile: '/basins/heihe.shp' } },
+  });
+  const restored = {
+    kind_paths: { site: { sitedir: '/server/Sitedata' } },
+    ...localPathValues(saved),
+  };
+  assert.deepEqual(restored, {
+    kind_paths: { site: { sitedir: '/server/Sitedata' } },
+    project_dir: '/saved/projects',
+    rawdata_dir: '/saved/raw',
+    runtime_dir: '/saved/runtime',
+    forcing_dir: '/saved/forcing',
+  });
 });

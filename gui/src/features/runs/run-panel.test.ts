@@ -57,6 +57,13 @@ function panel(
       ['action', 'patchRun', 'run', 'cancel', 'remoteAction'].includes(node.name.text)
     )
       functions.push(node.getText(source));
+    // `openBatchRuns` 是箭头函数常量：批量自动核对能看到哪些待核对站点由它决定（GUI-12）。
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === 'openBatchRuns' &&
+      node.initializer
+    )
+      functions.push(`const openBatchRuns = ${node.initializer.getText(source)};`);
     ts.forEachChild(node, visit);
   };
   visit(source);
@@ -161,13 +168,19 @@ function panel(
   }).outputText;
   const methods = new Function(
     ...Object.keys(context),
-    `let remote = null; const setRemote = value => {remote = value}; ${code};return {run,cancel,remoteAction};`,
+    `let remote = null; const setRemote = value => {remote = value}; ${code};return {run,cancel,remoteAction,openBatchRuns};`,
   )(...Object.values(context)) as {
     run: () => Promise<unknown>;
     cancel: () => Promise<unknown>;
-    remoteAction: (command: string, target?: string, quiet?: boolean) => Promise<unknown>;
+    remoteAction: (
+      command: string,
+      target?: string,
+      quiet?: boolean,
+      held?: boolean,
+    ) => Promise<unknown>;
+    openBatchRuns: () => string[];
   };
-  return { ...methods, state, calls, batchWorkers, alive: context.alive };
+  return { ...methods, state, calls, batchWorkers, latest, alive: context.alive };
 }
 
 test('one failed migration does not prevent healthy batch cases from running', async () => {
@@ -770,6 +783,74 @@ test('every station of a reopened batch claims its server job on the first statu
     assert.equal(p.state.running[dir].status, 'succeeded', dir);
     assert.equal(p.state.running[dir].running, false, dir);
   }
+});
+
+// GUI-12 复核证据：自动核对与手动核对都从 `openBatchRuns` 取目标，原来固定 `.slice(0, 8)`，
+// 前 8 个一直运行时其余站点永远得不到核对。
+test('a reopened batch watches every unfinished station, not just the first eight', () => {
+  const dirs = Array.from({ length: 20 }, (_, index) => `/s${index}`);
+  const p = panel({ remote: true, remoteBatch: true, targets: dirs });
+  for (const dir of dirs)
+    p.state.running[dir] = {
+      case: dir,
+      location: 'remote',
+      run_id: `batch-${dir}`,
+      status: 'running',
+      running: true,
+      logs: [],
+      stages: {},
+    };
+  assert.deepEqual(p.openBatchRuns(), dirs, 'all 20 open stations are targets');
+  // 已经结束的站点不再出现在待核对目标里。
+  p.state.running['/s3'].running = false;
+  assert.equal(p.openBatchRuns().includes('/s3'), false);
+  assert.equal(p.openBatchRuns().length, 19);
+});
+
+// GUI-12 验收："已结束任务不因迟到响应回到运行中"——两个核对响应乱序返回时，晚到的
+// "运行中"不能盖掉已经写入的终态。
+test('a late status response cannot put a finished server job back to running', async () => {
+  const job = {
+    host: 'server',
+    job: 'job-new',
+    provenance: { operation_id: 'submitted-operation' },
+  };
+  const terminal = { record: job, status: { state: 'finished', exit_code: 0 } };
+  const stillRunning = { record: job, status: { state: 'running' } };
+  let releaseSlow!: (value: unknown) => void;
+  const slow = new Promise<unknown>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const responses: Promise<unknown>[] = [slow, Promise.resolve(terminal)];
+  const p = panel({
+    remote: true,
+    single: true,
+    ipc: async (command) => {
+      if (command !== 'remote_status') return 0;
+      return responses.shift();
+    },
+  });
+  p.state.running['/good'] = {
+    case: '/good',
+    location: 'remote',
+    run_id: 'run-1',
+    operation_id: 'submitted-operation',
+    status: 'running',
+    running: true,
+    logs: [],
+    stages: {},
+    progress: { host: 'server', remote: stillRunning },
+  };
+  // 自动轮询与手动核对可以同时发出状态请求：先发的那次最后才返回。
+  const slowCheck = p.remoteAction('remote_status', '/good', true, true);
+  const fastCheck = p.remoteAction('remote_status', '/good', true, true);
+  await fastCheck;
+  assert.equal(p.state.running['/good'].status, 'succeeded');
+  assert.equal(p.state.running['/good'].running, false);
+  releaseSlow(stillRunning);
+  await slowCheck;
+  assert.equal(p.state.running['/good'].status, 'succeeded', 'the late running answer is ignored');
+  assert.equal(p.state.running['/good'].running, false);
 });
 
 test('a Rust server run requests its thread count as CPUs; Fortran keeps the CPUs per rank', async () => {

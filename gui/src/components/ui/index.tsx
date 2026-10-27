@@ -4,6 +4,7 @@ import {
   cloneElement,
   isValidElement,
   useId,
+  useLayoutEffect,
   useState,
   useRef,
   type ComponentProps,
@@ -17,6 +18,7 @@ import { useApp } from '../../lib/app-state';
 import { validDate } from '../../lib/dates';
 import { plainError } from '../../lib/bilingual';
 import { useRenderedAction } from '../../lib/guide';
+import { dialogOpenerTarget, restoreDialogFocus, type FocusTarget } from './dialog-focus';
 const buttonStyle = cva('button', {
   variants: {
     variant: {
@@ -336,6 +338,18 @@ export function Dialog({
   const { state } = useApp();
   const closeLabel = state.language === 'en' ? 'Close' : '关闭';
   const closeButton = useRef<HTMLButtonElement>(null);
+  // 关闭后要还回去的焦点入口：只在 open 由 false→true 的那一次记录。StrictMode 会把
+  // effect 再跑一遍，重复记录时焦点已经被 Radix 移进弹窗，会把入口覆盖成弹窗内部。
+  const opener = useRef<FocusTarget | null>(null);
+  const wasOpen = useRef(false);
+  useLayoutEffect(() => {
+    if (open && !wasOpen.current) opener.current = dialogOpenerTarget();
+    wasOpen.current = open;
+  }, [open]);
+  const handleCloseAutoFocus = (event: Event) => {
+    // 无 DOM（SSR/测试）或没有可用回退时不接管，保持 Radix 默认行为。
+    restoreDialogFocus(opener.current, event);
+  };
   useRenderedAction(
     closeAction && showClose
       ? { id: closeAction, label: closeLabel, kind: 'click', run: () => onOpenChange(false) }
@@ -349,6 +363,7 @@ export function Dialog({
         <RadixDialog.Content
           className={cn('dialog-content', className)}
           aria-describedby={description ? id : undefined}
+          onCloseAutoFocus={handleCloseAutoFocus}
         >
           <RadixDialog.Title>{title}</RadixDialog.Title>
           {description && <RadixDialog.Description id={id}>{description}</RadixDialog.Description>}

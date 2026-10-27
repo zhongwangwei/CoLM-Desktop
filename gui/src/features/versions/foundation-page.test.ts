@@ -10,7 +10,8 @@ import { researchVersion } from './research-version';
 import { hubMethods } from './hub-methods';
 import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 import { schemeVersionName } from './version-tree';
-import { workspaceErrorText } from './workspace-errors';
+import { isContentConflict, workspaceErrorText } from './workspace-errors';
+import { sourceGuardReason } from './source-edits';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
@@ -331,6 +332,12 @@ function page(
     },
     askConfirm: async () => false,
     workspaceErrorText,
+    isContentConflict,
+    sourceGuardReason,
+    // 真实实现是 Radix 对话框（只在打开时挂载、按钮由真实 React 渲染）。这个假框架只验证页面流程，
+    // 未保存源码时的三选一在 code-files.test / source-edits.test 里单独证明；这里让 ask 直接放行，
+    // 保持已有页面行为用例不变。
+    useSourceChoicePrompt: () => ({ ask: async () => true, dialog: null }),
     download: async () => {},
   };
   function compile(name: string, exported: string[] = []) {

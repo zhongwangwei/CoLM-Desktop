@@ -3,7 +3,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
-import { eachLimited, runRemoteBatch } from './remote-batch';
+import { checkInBatches, eachLimited, nextCheckBatch, runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
 import EngineProgress from '../cases/EngineProgress';
 import ServerLoadPanel from './ServerLoadPanel';
@@ -44,6 +44,9 @@ import {
 const stoppedBatches = new Set<string>();
 // Runs whose submission loop is alive in this window; the others are only watched.
 const drivenBatches = new Set<string>();
+// 每批最多同时核对几个站点：一次 `remote_status` 是一个 SSH 轮次，五个并发仍在 sshd 默认
+// 十个会话以内（与提交、停止批量时的并发一致）。
+const BATCH_CHECK_LIMIT = 5;
 
 export default function RunPanel({
   casePath,
@@ -185,7 +188,12 @@ export default function RunPanel({
     alive = useRef(true),
     latest = useRef(state.running),
     currentCase = useRef(casePath),
-    cancelledRun = useRef<string | null>(null);
+    cancelledRun = useRef<string | null>(null),
+    // 批量自动核对的轮转位置：上一轮最后核对的站点。下一轮从它后面接着取，保证前 8 个一直
+    // 运行/失败时其余站点也能轮到（GUI-12）。
+    batchRotation = useRef<string | null>(null),
+    // 上一轮自动核对还没跑完就不叠新的一轮：每批并发有上限，SSH 会话不能翻倍。
+    batchPolling = useRef(false);
   currentCase.current = casePath;
   latest.current = state.running;
   const persisted = state.running[casePath];
@@ -734,8 +742,13 @@ export default function RunPanel({
       if (command === 'remote_cancel' || command === 'remote_fetch')
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: target });
       const merged = reconcileRemoteRun(targetRemote, result);
-      if (alive.current && currentCase.current === target) setRemote(merged);
-      if (quiet && remoteRunPermissions(merged).terminal && !permissions.terminal)
+      // 迟到的核对响应可能是在作业结束之前发出的：已经知道结束（终态）的任务不能因旧响应回到
+      // 运行中。自动轮询和手动核对会同时发出状态请求，返回顺序不保证（GUI-12）。
+      const knownNow = latest.current[target]?.progress?.remote;
+      const regressed =
+        remoteRunPermissions(knownNow).terminal && !remoteRunPermissions(merged).terminal;
+      if (!regressed && alive.current && currentCase.current === target) setRemote(merged);
+      if (!regressed && quiet && remoteRunPermissions(merged).terminal && !permissions.terminal)
         notify(
           t('服务器作业已结束，可以取回结果。', 'The server job finished; results can be fetched.'),
         );
@@ -764,6 +777,9 @@ export default function RunPanel({
           previous?.run_id !== expectedRunId ||
           (!matchesRemoteRun(previous, result) && !discovered)
         )
+          return {};
+        // 用 apply 时的最新状态再挡一次：两次核对之间另一个响应可能已经写入了终态。
+        if (remoteRunPermissions(known).terminal && !remoteRunPermissions(merged).terminal)
           return {};
         const status = result.status as
           { state?: string; exit_code?: number; log_tail?: string } | undefined;
@@ -835,6 +851,8 @@ export default function RunPanel({
     !recovering &&
     !busy &&
     !monitor &&
+    // 面板被同页其他步骤藏起来时不轮询，回到运行页再恢复。
+    active &&
     !remoteRunPermissions(remote).terminal;
   useEffect(() => {
     if (!watchRemote) return;
@@ -844,27 +862,45 @@ export default function RunPanel({
   // Stations of a batch whose server job is still open but that no live submission loop follows
   // (the loop ended, or this is a reopened project) are checked every 10 seconds, a few at a time,
   // so jobs that finished on the server turn into "finished" without anyone pressing Check.
+  // 返回全部待核对站点；轮转只发生在取这一轮的位置，不再固定截断前 8 个（GUI-12）。
   const openBatchRuns = () =>
-    (batchCases ?? [])
-      .filter((dir) => {
-        const run = latest.current[dir];
-        return (
-          !!run &&
-          run.location === 'remote' &&
-          run.running &&
-          !(run.run_id && drivenBatches.has(run.run_id))
-        );
-      })
-      .slice(0, 8);
+    (batchCases ?? []).filter((dir) => {
+      const run = latest.current[dir];
+      return (
+        !!run &&
+        run.location === 'remote' &&
+        run.running &&
+        !(run.run_id && drivenBatches.has(run.run_id))
+      );
+    });
   const watchBatch = useRef(async () => {});
   watchBatch.current = async () => {
-    if (document.hidden) return;
-    for (const dir of openBatchRuns()) {
-      if (!alive.current) return;
-      await remoteAction('remote_status', dir, true).catch(() => {});
+    // 文档隐藏、面板正被提交/手动核对占着、或上一轮还没跑完时不叠加：每批并发有上限，SSH
+    // 会话不能翻倍。后台核对用 `held` 调用，不抢面板锁；单个站点失败只记录，其他站点照常核对。
+    if (document.hidden || lock.current || monitor || batchPolling.current) return;
+    // 每轮从上次停下的位置接着取，取到末尾绕回开头：前几个一直运行或查询失败时，
+    // 后面的站点也会在有限的 ⌈待核对数/每批上限⌉ 轮内被核对（GUI-12）。
+    const { batch, next } = nextCheckBatch(
+      openBatchRuns(),
+      batchRotation.current,
+      BATCH_CHECK_LIMIT,
+    );
+    batchRotation.current = next;
+    if (!batch.length) return;
+    batchPolling.current = true;
+    try {
+      await checkInBatches({
+        targets: batch,
+        limit: BATCH_CHECK_LIMIT,
+        check: (dir) =>
+          alive.current ? remoteAction('remote_status', dir, true, true) : Promise.resolve(null),
+      });
+    } finally {
+      batchPolling.current = false;
     }
   };
-  const watchingBatch = !!host && !!batchCases?.length && !recovering;
+  // 离开页面（同页其他步骤或别的路由）停止轮询；回到运行页时 effect 重新挂定时器并立刻补一轮。
+  const watchingBatch = !!host && !!batchCases?.length && !recovering && active;
   useEffect(() => {
     if (!watchingBatch) return;
     const timer = window.setInterval(() => void watchBatch.current(), REMOTE_CHECK_MS);
@@ -904,36 +940,44 @@ export default function RunPanel({
     }
     const open = batchCases ? openBatchRuns() : [];
     const targets = open.length ? open : [casePath];
-    const results: unknown[] = [];
-    const errors: string[] = [];
     // Five stations at a time under one lock: one by one, 40 stations took minutes.
+    // 手动核对覆盖全部待核对站点（不再只前 8 个），单个站点失败不阻断其他站点；每完成一个
+    // 就在按钮下方报告"已核对 n/总数"（GUI-12）。
     lock.current = true;
     setMonitor(true);
     try {
-      await eachLimited(targets, 5, async (dir) => {
-        try {
-          const merged = await remoteAction('remote_status', dir, true, true);
-          if (merged) results.push(merged);
-        } catch (error) {
-          errors.push(String(error));
-          notify(String(error), true);
-        }
+      const checked = await checkInBatches({
+        targets,
+        limit: BATCH_CHECK_LIMIT,
+        check: (dir) => remoteAction('remote_status', dir, true, true),
+        progress: (done, total) => {
+          if (alive.current && total > 1)
+            setLastCheck({
+              at: Date.now(),
+              text: t(
+                `正在核对服务器状态：${done}/${total} 个站点`,
+                `Checking server status: ${done}/${total} stations`,
+              ),
+            });
+        },
       });
+      const errors = checked.errors.map(({ error }) => String(error));
+      for (const error of errors) notify(error, true);
+      if (checked.results.length) say(await withLoad(remoteStatusSummary(checked.results, en)));
+      else if (errors.length) say(errors[0], true);
+      else
+        say(
+          await withLoad(
+            t(
+              '没有需要核对的服务器作业：这些站点都已结束，或还没有提交。',
+              'No server job needs checking: the stations have finished or were not submitted.',
+            ),
+          ),
+        );
     } finally {
       lock.current = false;
       if (alive.current) setMonitor(false);
     }
-    if (results.length) say(await withLoad(remoteStatusSummary(results, en)));
-    else if (errors.length) say(errors[0], true);
-    else
-      say(
-        await withLoad(
-          t(
-            '没有需要核对的服务器作业：这些站点都已结束，或还没有提交。',
-            'No server job needs checking: the stations have finished or were not submitted.',
-          ),
-        ),
-      );
   }
   async function cancel() {
     try {

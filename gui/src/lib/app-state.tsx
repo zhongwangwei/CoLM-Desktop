@@ -117,6 +117,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const recentQueue = useRef<Promise<void>>(Promise.resolve());
   // 启动流程放在 effect 里（事件监听也一起），重试按钮通过这个 ref 重新调用同一次 boot。
   const bootRef = useRef<(() => Promise<void>) | null>(null);
+  // 启动代次：每次 boot（首次或重试）自增，上一代迟到的结果不能再改写这一代的启动状态。
+  // 没有它时，首次模型列表超时但命令还在跑，重试成功后用户选了修改版，旧请求迟到会无条件写回
+  // 最新官方版，`versionRef` 与 `chosenVersion` 从此不一致（GUI-06）。
+  const bootEpoch = useRef(0);
   const update = useCallback(
     (patch: AppPatch) =>
       setState((old) => {
@@ -370,6 +374,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     async function boot() {
       if (!alive) return;
+      // 覆盖层上连点"重试启动"可能叠出两次启动；以后开始的那一代为准，旧的那次只剩目录数据可接。
+      const generation = ++bootEpoch.current;
       const startedAt = Date.now();
       let stage: NonNullable<AppState['startup']>['stage'] = 'backend';
       update({
@@ -385,11 +391,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
           15_000,
           bilingual('后台整理运行记录', 'the backend to load the run history'),
         );
-        if (!alive) return;
+        if (!alive || generation !== bootEpoch.current) return;
         // 上次崩溃/强退时还在跑的本机模拟：后端启动时已停掉，这里只是告诉用户（GUI 审查 B-12）。
         void invoke<string[]>('live_runs_swept')
           .then((keys) => {
-            if (!alive || !keys.length) return;
+            if (!alive || generation !== bootEpoch.current || !keys.length) return;
             const names = keys.map((key) =>
               key
                 .replace(/^study:/, '')
@@ -412,7 +418,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         let gotKernels = false,
           gotVersions = false;
         const settle = () => {
-          if (alive && gotKernels && gotVersions)
+          // 过期代次不能收起这一代的失败封面：重试后仍失败时，旧请求晚到的"成功"不能把错误藏掉。
+          if (alive && generation === bootEpoch.current && gotKernels && gotVersions)
             update((old) => (old.startup?.phase === 'failed' ? { startup: undefined } : {}));
         };
         const kernelsCall = invoke<KernelEntry[]>('list_kernels');
@@ -421,11 +428,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
           (kernels) => {
             if (!alive) return;
             gotKernels = true;
-            update({
-              kernels,
-              kernelDir:
-                kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
-            });
+            // 过期代次连内核目录也不能写回：重试后这一代可能已经选到别的内核目录，旧结果不该
+            // 把界面指回一个不再使用的目录。当前代次晚到的结果照常接上，慢盘首次启动靠它完成。
+            if (generation === bootEpoch.current)
+              update({
+                kernels,
+                kernelDir:
+                  kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
+              });
             settle();
           },
           () => {},
@@ -434,13 +444,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
           (versions) => {
             if (!alive) return;
             gotVersions = true;
-            const official = versions
-              .filter((v) => v.version.id === 'official')
-              .sort((a, b) => b.version.revision - a.version.revision)[0];
-            update({
-              versions,
-              version: official ?? null,
-              ...(official ? { versionRef: official.version } : {}),
+            // 这里把两件事分开（GUI-06）：读到的模型列表本身可以迟到——同一代次内超时后迟到的
+            // 结果只更新 `versions` 目录、不重置默认选择；而"默认选最新官方版"是初始化，只在用户
+            // 还没明确选过、并且仍属当前启动代次时做。过期代次整条丢弃：重试后的这一代可能已经
+            // 读到更新/更完整的列表（用户也可能已经基于它选过版本），旧列表写回去就是恢复过期目录。
+            update((old) => {
+              if (generation !== bootEpoch.current) return {};
+              if (old.chosenVersion) return { versions };
+              const official = versions
+                .filter((v) => v.version.id === 'official')
+                .sort((a, b) => b.version.revision - a.version.revision)[0];
+              return {
+                versions,
+                version: official ?? null,
+                ...(official ? { versionRef: official.version } : {}),
+              };
             });
             settle();
           },
@@ -450,7 +468,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           withTimeout(kernelsCall, 30_000, bilingual('读取模型内核', 'the model kernels')),
           withTimeout(versionsCall, 30_000, bilingual('读取模型版本', 'the model versions')),
         ]);
-        if (!alive) return;
+        // 这一代已经被更晚的启动取代：让位，别用旧结果写状态或盖掉新封面。
+        if (!alive || generation !== bootEpoch.current) return;
         const problems: string[] = [];
         if (kernelResult.status === 'rejected' && !gotKernels)
           problems.push(
@@ -470,7 +489,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         update({ startup: undefined });
         // 版本列表到手之后，在后台整理没人用的旧官方修订（运行或创建中时后端会拒绝，只记日志）。
         void tidyModelsAfterStartup(invokeJson).then((removed) => {
-          if (alive && removed.length)
+          if (alive && generation === bootEpoch.current && removed.length)
             update((old) => {
               const version = selectionAfterPrune(old.versions, removed, old.versionRef);
               return {
@@ -482,12 +501,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
       } catch (error) {
         // 失败留在封面上（含阶段和原因），并给"重试启动"；不再只发一条可被清掉的通知。
-        if (alive)
+        // 过期代次的失败同样不能盖掉重试后这一代的封面或忙碌状态。
+        if (alive && generation === bootEpoch.current)
           update({
             startup: { phase: 'failed', stage, startedAt, error: errorText(error) },
           });
       } finally {
-        if (alive) update({ busy: false, starting: false });
+        if (alive && generation === bootEpoch.current) update({ busy: false, starting: false });
       }
     }
     bootRef.current = boot;

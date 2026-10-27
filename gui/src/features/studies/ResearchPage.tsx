@@ -41,6 +41,13 @@ import {
   applyResearchSeed,
 } from './study';
 import {
+  clearParameterContextMarker,
+  parameterContextKey,
+  sameParameterContextIdentity,
+  shouldStartParameterContextLoad,
+  type ParameterContextIdentity,
+} from './parameter-context-cache';
+import {
   remoteStudyPermissions,
   remoteStudyReply,
   studyModelRevision,
@@ -261,6 +268,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const studyKernels = state.kernels.filter(
     (k) => k.macros.includes('SinglePoint') !== spatialStudy,
   );
+  // 站点内容键。换版本时 `setSites([dir])` 会造一个新数组，用内容键当依赖才不会把“换站点”
+  // 的 effect 误触发一次（那会把刚发起的参数读取又清掉、重复读一遍）。用 JSON 而不是分隔符
+  // 拼串：路径本身可能带任何分隔符，拼串会把两个不同的选择当成同一个。
+  const siteKey = JSON.stringify(sites);
   const [kernel, setKernel] = useState(
     () =>
       studyKernels.find((k) => k.dir === state.kernelDir)?.dir ??
@@ -380,6 +391,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 1 选算例与运行位置，2 选参数（AI：网络设计），3 目标与预算，4 运行与结果。
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const loadedFor = useRef('');
+  // 上一次读取失败的身份。失败后 busy 一定会翻回 false，而 busy 是自动读取 effect 的依赖：
+  // 只清 loadedFor 会让 effect 立刻再发一次，失败一次就变成无限重试；记下失败身份来挡住它，
+  // 换身份（版本/算例/配置/类型）或用户点“重新读取”时才再试（GUI-14）。
+  const failedFor = useRef('');
+  // 参数上下文读取身份：模型 ID+修订号，加上实际影响读参数结果的维度（站点及顺序、编译配置、
+  // 格点类型）。请求带着它出去、返回时和当前身份核对，旧修订的迟到结果不写回当前页面（GUI-14）。
+  const contextIdentity: ParameterContextIdentity = {
+    version: state.versionRef,
+    kernel,
+    sites,
+    spatial: spatialStudy,
+    types,
+  };
+  const contextIdentityRef = useRef<ParameterContextIdentity>(contextIdentity);
+  contextIdentityRef.current = contextIdentity;
   // 从"新建修改版"进来的（返回时回那里）；从草稿进来的看 state.researchTarget；都不是就是侧栏的研究首页。
   const [fromHub, setFromHub] = useState(false);
   // 研究结果正要写进的草稿与研究成员的参数（勾选对话框）；created 表示草稿是为这次写入新建的。
@@ -443,6 +469,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     }
     setContexts([]);
     setParameters({});
+    // 数据清空和“已读过”标记要同步清：只清数据、留着旧标记，换模型修订后缓存键若还是旧的
+    // 就不会再发读取请求，参数表一直空着（GUI-14）。
+    loadedFor.current = '';
+    failedFor.current = '';
     setPreflight('');
     setResult('');
     setError('');
@@ -456,10 +486,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       requestEpoch.current++;
     };
   }, [dir, versionId, revision]);
+  // 用站点内容键而不是数组引用：换版本时上面那个 effect 会 setSites 成同内容的新数组，
+  // 用数组引用会把这里再触发一次，把刚发起的参数读取清掉、同一身份读两遍。
   useEffect(() => {
     epoch.current++;
     setContexts([]);
     setParameters({});
+    loadedFor.current = '';
+    failedFor.current = '';
     setTypeChoices(null);
     setTypes([]);
     setPreflight('');
@@ -471,7 +505,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setConfirmed(false);
     }
     setFit(null);
-  }, [sites, kernel]);
+  }, [siteKey, kernel]);
   useEffect(() => {
     epoch.current++;
     setPreflight('');
@@ -635,34 +669,41 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       clearTimeout(timer);
     };
   }, [active, studyDir, busy, launching, remotePermissions.poll, readRemoteStatus]);
-  async function effectiveCase(path: string) {
+  async function effectiveCase(path: string, modelRevision: VersionRef) {
     const context = await invokeJson<{ entry: { dir: string } }>('model_case_context', {
       dir: path,
-      modelRevision: state.versionRef,
+      modelRevision,
     });
     return context.entry.dir;
   }
-  const loadContexts = () =>
-    task(async (current) => {
-      if (!sites.length || !kernel)
-        throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
-      // 被别的设计改动打断（epoch 变了）就清掉"已读过"的标记：这次任务结束时 busy 翻回 false，
-      // 自动读取的 effect 会按当前算例重读。原来标记留着，同一次更新里既换算例又进第 2 步时
-      //（敏感性"带入率定"）读取被丢弃、再也不读，参数表一直是空的（2026-10-23 真实窗口实测）。
+  // 读取一组算例的参数上下文。请求带着身份（模型修订、站点、编译配置、格点类型）出去，返回时再和
+  // 当前身份核对：旧修订/旧类型的迟到结果不写回当前页面（GUI-14）。失败时清掉加载标记并记下失败
+  // 身份，换身份或点“重新读取”可以再试，不会一次失败就永久跳过。
+  const loadContexts = (identity: ParameterContextIdentity) =>
+    task(async () => {
+      const key = parameterContextKey(identity);
+      // 数据能不能写回只看身份，不看 epoch：换版本时“清空参数”会连带触发别的 effect 自增 epoch，
+      // 若按 epoch 作废，刚按新版本发起的读取会被判成过期、白读一遍再重来。参数表只由这些身份
+      // 维度决定，改了别的设计（观测、方法……）同一身份读出的参数仍然有效。
+      const isCurrent = () => sameParameterContextIdentity(identity, contextIdentityRef.current);
+      // 身份已变：清掉"已读过"的标记，这次任务结束时 busy 翻回 false，自动读取的 effect 会按
+      // 当前身份重读。只清自己写下的标记，不能清新身份请求的标记。
       const superseded = () => {
-        loadedFor.current = '';
+        clearParameterContextMarker(loadedFor, key);
       };
+      if (!identity.sites.length || !identity.kernel)
+        throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
       const effective = [];
-      for (const path of sites) {
-        effective.push(await effectiveCase(path));
-        if (!current()) return superseded();
+      for (const path of identity.sites) {
+        effective.push(await effectiveCase(path, identity.version));
+        if (!isCurrent()) return superseded();
       }
       const rows = await invokeJson<ParameterContext[]>('study_parameter_contexts', {
         dirs: effective,
-        kernelDir: kernel,
-        types: spatialStudy ? types : null,
+        kernelDir: identity.kernel,
+        types: identity.spatial ? identity.types : null,
       });
-      if (current()) {
+      if (isCurrent()) {
         // 勾选按行号记；格点研究改勾地类后重新读出的行序会变（新类型的行插在中间），原来已勾的参数
         // 会悄悄落到别的参数上。按参数与作用域把已勾的搬到新行号上，读不到的丢掉。
         const keyOf = (row: ParameterContext) => `${row.id}|${JSON.stringify(row.scope_instance)}`;
@@ -690,9 +731,25 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           );
           update({ researchSeed: null });
         }
+        failedFor.current = '';
       } else superseded();
       return rows;
+    }).catch((error) => {
+      // 数据没读到，加载标记也不能留：否则同一身份一次失败就永久跳过。失败身份另记一份，免得
+      // busy 翻回 false 时自动读取把失败重试成死循环。
+      const key = parameterContextKey(identity);
+      clearParameterContextMarker(loadedFor, key);
+      if (sameParameterContextIdentity(identity, contextIdentityRef.current))
+        failedFor.current = key;
+      throw error;
     });
+  // 自动读取和按钮“重新读取”都从这里发起：手动重试要清掉失败记录，并先占住标记，
+  // 免得同一身份在请求期间被 effect 再触发一次。
+  const loadContextsNow = () => {
+    failedFor.current = '';
+    loadedFor.current = parameterContextKey(contextIdentity);
+    return loadContexts(contextIdentity);
+  };
   // 站点目标的权重与时间尺度（单点率定、带目标的不确定性分析、区域里的通量站共用）。
   function siteTargetExtras(variable: string) {
     const text = weights[variable]?.trim() ?? '';
@@ -1397,7 +1454,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const inspectHybrid = () =>
     task(async (current) => {
       const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
-        case: await effectiveCase(aiCase),
+        case: await effectiveCase(aiCase, state.versionRef),
       });
       if (current()) setHybridInfo(data);
       return data;
@@ -1753,7 +1810,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       ].join(''),
     ]);
   };
-  const siteKey = sites.join('|');
   useEffect(() => {
     // 率定和不确定性分析的预填不同（后者不留验证期），换了方法要重算。
     const key = `${tuning}|${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
@@ -2160,7 +2216,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     action(
       'load-parameter-contexts',
       tr('读取适用参数', 'Load applicable parameters'),
-      loadContexts,
+      loadContextsNow,
       !!kernel && sites.length > 0 && !launching && !unresolvedRemote,
     ),
     action(
@@ -2209,6 +2265,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       );
     }
     loadedFor.current = '';
+    failedFor.current = '';
     update({ researchSeed: { parameters: picks } });
     setStep(2);
   }
@@ -2521,16 +2578,28 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, spatialStudy, kernel, sites, typeChoices]);
-  // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）；同一组算例、同一组类型只读一次。
-  // 格点算例要先选了类型（不选也能读：只有整算例的系数）。
+  // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）。缓存身份含模型 ID 与修订号：
+  // 同一算例、同一编译配置换成别的修订也要自动重读（GUI-14）；旧修订的迟到结果由 loadContexts 核对挡掉。
+  // 格点算例要先读出类型（不选也能读：只有整算例的系数）。
   useEffect(() => {
-    const key = `${kernel}|${sites.join('|')}|${spatialStudy ? types.join(',') : ''}`;
-    if (step !== 2 || !kernel || !sites.length || busy || loadedFor.current === key) return;
-    if (spatialStudy && !typeChoices) return;
-    loadedFor.current = key;
-    execute(loadContexts);
+    // 失败记录只挡“同一个身份”的自动重试：身份换过（哪怕之后又换回来）就清掉，之后还能再读，
+    // 不会因为某个身份失败一次就永久跳过。
+    if (failedFor.current && failedFor.current !== parameterContextKey(contextIdentity))
+      failedFor.current = '';
+    if (
+      !shouldStartParameterContextLoad({
+        step,
+        identity: contextIdentity,
+        loadedFor: loadedFor.current,
+        failedFor: failedFor.current,
+        typeChoicesReady: !!typeChoices,
+        busy,
+      })
+    )
+      return;
+    execute(loadContextsNow);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, kernel, sites, busy, types, typeChoices, spatialStudy]);
+  }, [step, kernel, sites, busy, types, typeChoices, spatialStudy, versionId, revision]);
   // 建好或打开了一个研究：直接看运行与结果。
   useEffect(() => {
     if (studyDir) setStep(4);

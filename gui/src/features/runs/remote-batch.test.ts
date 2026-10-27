@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { eachLimited, runRemoteBatch } from './remote-batch';
+import { checkInBatches, eachLimited, nextCheckBatch, runRemoteBatch } from './remote-batch';
 
 const record = (dir: string) => ({ host: 'server', job: `job-${dir}` });
 const finished = (dir: string, exit_code = 0) => ({
@@ -326,4 +326,70 @@ test('stopping a batch cancels several stations at once, never more than the lim
   assert.deepEqual([...done].sort(), [...stations].sort());
   assert.equal(peak, 5, 'five at a time, not one by one');
   await eachLimited([], 5, async () => assert.fail('nothing to do'));
+});
+
+// GUI-12 复核证据：自动轮询原来固定 `.slice(0, 8)`。20 个站点里前 8 个一直运行（查询也一直
+// 失败，状态不会更新）时，后 12 个永远轮不到。轮转后每个站点在 ⌈20/5⌉=4 轮内都被核对一次。
+test('batch checks rotate over every pending station even when the first few stay running', async () => {
+  const stations = Array.from({ length: 20 }, (_, index) => `s${index}`);
+  const checked: string[] = [];
+  let last: string | null = null;
+  for (let round = 0; round < 4; round++) {
+    const { batch, next } = nextCheckBatch(stations, last, 5);
+    assert.ok(batch.length <= 5, 'each round stays under the per-batch limit');
+    last = next;
+    await checkInBatches({
+      targets: batch,
+      limit: 5,
+      check: async (dir) => {
+        checked.push(dir);
+        // 前 8 个一直运行、查询一直失败：它们的待核对状态不会因为核对而消失。
+        if (Number(dir.slice(1)) < 8) throw new Error('the server did not answer');
+        return { dir };
+      },
+    });
+  }
+  assert.equal(new Set(checked).size, stations.length, 'all 20 stations were checked');
+  assert.deepEqual([...new Set(checked)].sort(), [...stations].sort());
+});
+
+test('a batch check keeps one failing station from blocking the rest and reports progress', async () => {
+  const targets = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+  const progress: [number, number][] = [];
+  const checked: string[] = [];
+  let inFlight = 0;
+  let peak = 0;
+  const { results, errors } = await checkInBatches({
+    targets,
+    limit: 3,
+    check: async (dir) => {
+      checked.push(dir);
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight--;
+      if (dir === 'b' || dir === 'f') throw new Error(`lost ${dir}`);
+      return { dir };
+    },
+    progress: (done, total) => progress.push([done, total]),
+  });
+  assert.equal(peak, 3, 'at most three status checks at once');
+  assert.deepEqual([...checked].sort(), [...targets].sort(), 'failures do not skip stations');
+  assert.deepEqual(results.map((entry) => entry.dir).sort(), ['a', 'c', 'd', 'e', 'g']);
+  assert.deepEqual(errors.map((entry) => entry.dir).sort(), ['b', 'f']);
+  assert.equal(progress.length, targets.length, 'progress reported for every station');
+  assert.deepEqual(
+    progress.map(([done]) => done),
+    [1, 2, 3, 4, 5, 6, 7],
+  );
+  assert.ok(progress.every(([, total]) => total === targets.length));
+});
+
+test('rotation resumes after the last checked station and wraps at the end', () => {
+  assert.deepEqual(nextCheckBatch([], 'a', 5), { batch: [], next: null });
+  assert.deepEqual(nextCheckBatch(['a', 'b', 'c'], null, 2), { batch: ['a', 'b'], next: 'b' });
+  assert.deepEqual(nextCheckBatch(['a', 'b', 'c'], 'b', 2), { batch: ['c', 'a'], next: 'a' });
+  // 上一轮最后核对的站点已经结束、不在待核对列表里：从头开始，不空转一轮。
+  assert.deepEqual(nextCheckBatch(['a', 'b', 'c'], 'gone', 2), { batch: ['a', 'b'], next: 'b' });
+  // 站点数少于每批上限：一轮看完，下一轮仍从头开始。
+  assert.deepEqual(nextCheckBatch(['a', 'b'], 'b', 5), { batch: ['a', 'b'], next: 'b' });
 });

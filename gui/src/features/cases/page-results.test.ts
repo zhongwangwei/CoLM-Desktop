@@ -11,6 +11,11 @@ import {
 import { caseSimulationDomain } from './model-settings';
 import { chartVariables, readErrorText, variableOption } from '../results/variable-labels';
 import { withCatalogLabels } from '../../lib/param-presentation';
+import {
+  clearParameterContextMarker,
+  parameterContextKey,
+  sameParameterContextIdentity,
+} from '../studies/parameter-context-cache';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -170,9 +175,28 @@ test('research inspection and saved-model callbacks return backend evidence even
       `${name} retains actual response`,
     );
   const rows = [{ name: 'DEF_TEST', scope_instance: { kind: 'global' } }];
+  // 参数读取现在带着身份（模型修订/站点/编译配置/类型）出去再核对（GUI-14）：这里给两次读取
+  // 各一份与 common 一致的桩身份，测试语义不变——仍验证返回行与改类型后的勾选搬迁。
+  const contextIdentity = (spatial: boolean, types: number[]) => ({
+    version: { id: 'soil', revision: 1 },
+    kernel: '/kernel',
+    sites: ['/case'],
+    spatial,
+    types,
+  });
+  const loadContext = (identity: ReturnType<typeof contextIdentity>) => ({
+    ...common,
+    parameterContextKey,
+    sameParameterContextIdentity,
+    clearParameterContextMarker,
+    contextIdentityRef: { current: identity },
+    loadedFor: { current: '' },
+    failedFor: { current: '' },
+  });
+  const point = contextIdentity(false, []);
   assert.equal(
     await callback(research, 'loadContexts', {
-      ...common,
+      ...loadContext(point),
       sites: ['/case'],
       invokeJson: async () => rows,
       withCatalogLabels,
@@ -180,7 +204,7 @@ test('research inspection and saved-model callbacks return backend evidence even
       types: [],
       contextsRef: { current: [] },
       setParameters: ignored,
-    })(),
+    })(point),
     rows,
   );
   // 格点研究改勾类型后行序会变：已勾的参数按参数与作用域搬到新行号上，不留在旧行号指向别的参数。
@@ -190,8 +214,9 @@ test('research inspection and saved-model callbacks return backend evidence even
     scope_instance: { kind: 'land-cover-class', scheme: 'IGBP', index },
   });
   let ticks: Record<string, unknown> = { '0': { enabled: true, min: '4', max: '9' } };
+  const gridded = contextIdentity(true, [1, 10]);
   await callback(research, 'loadContexts', {
-    ...common,
+    ...loadContext(gridded),
     sites: ['/case'],
     invokeJson: async () => [at(1), at(10)],
     withCatalogLabels,
@@ -201,7 +226,7 @@ test('research inspection and saved-model callbacks return backend evidence even
     setParameters: (next: (old: typeof ticks) => typeof ticks) => {
       ticks = next(ticks);
     },
-  })();
+  })(gridded);
   assert.deepEqual(ticks, { '1': { enabled: true, min: '4', max: '9' } });
   const text = '[{"member":"m000001","validated":false}]';
   assert.equal(

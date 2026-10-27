@@ -40,6 +40,12 @@ import {
   suggestedWindows,
 } from './study';
 import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
+import {
+  clearParameterContextMarker,
+  parameterContextKey,
+  sameParameterContextIdentity,
+  shouldStartParameterContextLoad,
+} from './parameter-context-cache';
 import { hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import { REMOTE_CHECK_MS, compatibleKernel } from '../runs/run-model';
@@ -551,6 +557,10 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     networkDefaults,
     networkSpec,
     parameterSpec,
+    clearParameterContextMarker,
+    parameterContextKey,
+    sameParameterContextIdentity,
+    shouldStartParameterContextLoad,
     PFT,
     remoteStudyPermissions,
     remoteStudyReply,
@@ -573,6 +583,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     sensitivityResponses,
     studyDiagnostics,
     studyRunOutcome,
+    studyErrorText,
     suggestedWindows,
     USGS,
     withCatalogLabels,
@@ -984,6 +995,65 @@ it('step 4 lists the run-and-results buttons on screen and a write-back dialog b
   // 它里面的取消/写进草稿由它自己登记，不在这棵树里）。
   assert.deepEqual(page.actions(), []);
 });
+it('switching the model revision while a study runs keeps its frozen design and identity', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-run');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-run',
+      spec: {
+        kind: 'tuning',
+        kernel_dir: '/kernels/default',
+        parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+      },
+    },
+    state: { status: 'Ready' },
+    results: [],
+    model_version: { model_revision: { version: { id: 'official', revision: 1 } } },
+    remote: null,
+  });
+  await page.settle();
+  // 研究还没跑：勾上冻结预算的核对项，点“开始运行”（runLock 置位）。
+  const confirm = page
+    .nodes()
+    .find(
+      (node) =>
+        node.type === 'label' && String(node.props.className ?? '').includes('study-confirm'),
+    )
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(confirm);
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('study-run');
+  assert.equal(page.requests.at(-1)!.command, 'study_run');
+  // 运行请求还在飞时切模型版本：正在跑的研究要留着它冻结的输入（manifest/spec）和任务目录。
+  page.state.versionRef = { id: 'official', revision: 2 };
+  page.render();
+  await page.settle();
+  const stillOpen = () =>
+    page.actions().some((action) => action.id === 'study-status' && action.enabled);
+  assert.equal(stillOpen(), true, 'the running study is still open');
+  const texts = JSON.stringify(page.nodes().map((node) => node.children));
+  assert.match(texts, /DEF_TEST/, 'the frozen parameter design is still shown');
+  assert.equal(
+    page.requests.filter((r) => r.command === 'model_case_context').length,
+    0,
+    'a running study does not restart the parameter read',
+  );
+  page.requests.at(-1)!.resolve({});
+  await page.settle();
+  assert.equal(stillOpen(), true, 'the study identity survives the revision switch');
+});
 it('the home page lists one return-to-simulation action even though it shows two buttons', async () => {
   const page = await openCompletedStudy();
   page.press('research-home');
@@ -1124,6 +1194,7 @@ it('carrying sensitivity into calibration keeps the cases, observations and froz
     calls[name] = value;
   };
   const loadedFor = { current: 'old' };
+  const failedFor = { current: 'failed' };
   const carry = pageCallback('carryToCalibration', {
     frozenSpec: {
       kind: 'uncertainty',
@@ -1158,6 +1229,7 @@ it('carrying sensitivity into calibration keeps the cases, observations and froz
     setCorrected: set('corrected'),
     setObservations: set('observations'),
     loadedFor,
+    failedFor,
     update: set('update'),
     setStep: set('step'),
   }) as unknown as () => void;
@@ -1169,6 +1241,7 @@ it('carrying sensitivity into calibration keeps the cases, observations and froz
   assert.equal(calls.corrected, true);
   assert.equal(calls.observations, 'AT-Neu | /obs/AT-Neu_Flux.nc');
   assert.equal(loadedFor.current, '', 'step 2 reads the parameters again and applies the seed');
+  assert.equal(failedFor.current, '', 'a carried seed can retry a read that failed before');
   assert.deepEqual(
     (
       calls.update as { researchSeed: { parameters: { parameter_id: string; scale: string }[] } }
@@ -1239,17 +1312,161 @@ it('a finished uncertainty study shows its sensitivity ranking with the top para
   assert.deepEqual(ticked, ['DEF_A', 'DEF_D', 'DEF_C'], 'zero-impact DEF_B is left out');
 });
 it('a parameter read cut short by another design change lets step 2 read again', async () => {
-  const loadedFor = { current: '/kernel|/p/AT-Neu|' };
+  const requested = {
+    version: { id: 'official', revision: 1 },
+    kernel: '/kernel',
+    sites: ['/p/AT-Neu'],
+    spatial: false,
+    types: [],
+  };
+  // 敏感性“带入率定”会在同一次更新里换掉算例：请求发出时的身份已经不是当前身份。
+  const loadedFor = { current: parameterContextKey(requested) };
   const load = pageCallback('loadContexts', {
     task: async (fn: (current: () => boolean) => Promise<unknown>) => await fn(() => false),
-    sites: ['/p/AT-Neu'],
-    kernel: '/kernel',
-    tr: (zh: string) => zh,
-    effectiveCase: async (path: string) => path,
+    parameterContextKey,
+    sameParameterContextIdentity,
+    clearParameterContextMarker,
+    contextIdentityRef: { current: { ...requested, sites: ['/p/other'] } },
     loadedFor,
-  });
-  await load();
+    effectiveCase: async (path: string) => path,
+  }) as unknown as (identity: unknown) => Promise<unknown>;
+  await load(requested);
   assert.equal(loadedFor.current, '', 'the stale read clears the marker so the effect reads again');
+});
+it('a parameter read that finished under an older identity never reaches the page', async () => {
+  const requested = {
+    version: { id: 'official', revision: 1 },
+    kernel: '/kernel',
+    sites: ['/p/AT-Neu'],
+    spatial: true,
+    types: [1],
+  };
+  // 请求在飞的时候用户又勾了另一个地类：旧身份读出的行不能写进新选择。
+  const loadedFor = { current: parameterContextKey(requested) };
+  const load = pageCallback('loadContexts', {
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => await fn(() => true),
+    parameterContextKey,
+    sameParameterContextIdentity,
+    clearParameterContextMarker,
+    contextIdentityRef: { current: { ...requested, types: [2] } },
+    loadedFor,
+    effectiveCase: async (path: string) => `${path}@effective`,
+    invokeJson: async () => {
+      throw new Error('a stale identity must not reach the parameter read');
+    },
+  }) as unknown as (identity: unknown) => Promise<unknown>;
+  await load(requested);
+  assert.equal(loadedFor.current, '', 'the old identity releases its marker');
+});
+it('a failed parameter read is retried instead of being skipped forever', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  const loads = () => page.requests.filter((r) => r.command === 'model_case_context');
+  const reads = () => page.requests.filter((r) => r.command === 'study_parameter_contexts');
+  assert.equal(loads().length, 1);
+  loads()[0]!.reject(new Error('case.nml went missing'));
+  await page.settle();
+  // 失败后 busy 翻回 false 会再触发自动读取 effect；失败身份被记下，不能立刻重试成死循环。
+  assert.equal(loads().length, 1, 'a failed read is not retried in a loop');
+  const text = JSON.stringify(page.nodes().map((node) => node.children));
+  assert.match(text, /case\.nml went missing/, 'the failure stays visible');
+  assert.match(text, /重新读取|Load again/, 'the page offers a visible retry');
+  // 按钮“重新读取”真的能再试一次（同算例、同配置、同修订）。
+  page.press('load-parameter-contexts');
+  await page.settle();
+  assert.equal(loads().length, 2, 'the visible retry starts a new read');
+  assert.deepEqual(loads()[1]!.args.modelRevision, { id: 'official', revision: 1 });
+  loads()[1]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(reads().length, 1);
+  reads()[0]!.resolve([parameterRow()]);
+  await page.settle();
+  assert.ok(
+    page.nodes().some((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST'),
+  );
+});
+it('a parameter read from the previous revision never reaches the new revision', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  const loads = () => page.requests.filter((r) => r.command === 'model_case_context');
+  const reads = () => page.requests.filter((r) => r.command === 'study_parameter_contexts');
+  assert.equal(loads().length, 1);
+  assert.deepEqual(loads()[0]!.args.modelRevision, { id: 'official', revision: 1 });
+  // 旧修订的请求还在飞：换版本后，旧结果回来不能被当成新修订的参数读取。
+  page.state.versionRef = { id: 'official', revision: 2 };
+  page.render();
+  await page.settle();
+  assert.equal(loads().length, 1, 'the new revision waits for the in-flight read to finish');
+  loads()[0]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(reads().length, 0, 'the stale revision never reaches the parameter read');
+  assert.equal(loads().length, 2, 'the new revision is read once the stale read settles');
+  assert.deepEqual(loads()[1]!.args.modelRevision, { id: 'official', revision: 2 });
+  loads()[1]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(reads().length, 1);
+  reads()[0]!.resolve([parameterRow()]);
+  await page.settle();
+  assert.ok(
+    page.nodes().some((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST'),
+  );
+});
+it('switching the model revision under the same case and kernel reads the parameters again', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  const loads = () => page.requests.filter((r) => r.command === 'model_case_context');
+  const reads = () => page.requests.filter((r) => r.command === 'study_parameter_contexts');
+  assert.equal(loads().length, 1);
+  assert.deepEqual(loads()[0]!.args.modelRevision, { id: 'official', revision: 1 });
+  loads()[0]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(reads().length, 1);
+  reads()[0]!.resolve([parameterRow()]);
+  await page.settle();
+  const row = (name: string) =>
+    page.nodes().find((node) => node.type === 'input' && node.props['aria-label'] === name);
+  assert.ok(row('DEF_TEST'), 'revision 1 parameters are shown');
+  // 普通重绘不重复读取（模型没变，缓存命中）。
+  page.render();
+  page.render();
+  await page.settle();
+  assert.equal(loads().length, 1);
+  assert.equal(reads().length, 1);
+  // 同一算例、同一编译配置换模型修订：参数要自动重读，旧修订的行不能留。
+  page.state.versionRef = { id: 'official', revision: 2 };
+  page.state.versions = [{ version: { id: 'official', revision: 2 }, name: 'Official CoLM r2' }];
+  page.render();
+  await page.settle();
+  assert.equal(loads().length, 2, 'the new revision is read again automatically');
+  assert.deepEqual(loads()[1]!.args.modelRevision, { id: 'official', revision: 2 });
+  loads()[1]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(reads().length, 2);
+  assert.deepEqual(reads()[1]!.args, {
+    dirs: ['/p/site1'],
+    kernelDir: '/kernels/default',
+    types: null,
+  });
+  reads()[1]!.resolve([
+    {
+      ...parameterRow(),
+      name: 'DEF_TEST_R2',
+      label_en: 'Test parameter r2',
+      label_zh: '测试参数 r2',
+    },
+  ]);
+  await page.settle();
+  assert.ok(row('DEF_TEST_R2'), 'the parameters read under revision 2 replace the old rows');
+  assert.equal(row('DEF_TEST'), undefined, 'the old revision rows are gone');
 });
 it('an uncertainty analysis prefills the whole period after warm-up and sends it as the analysis window', async () => {
   const filled: Record<string, string> = { from: '', to: '', valFrom: '', valTo: '' };

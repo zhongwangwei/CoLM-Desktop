@@ -37784,3 +37784,63 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 **分汊 + history N=8 耗时（2026-10-27）**：tianhe hb64 1 天、分汊、DAILY history；N=1 6:14、MaxRSS 3.41 GB；N=8 6:54、MaxRSS 1.57 GB。小算例上 N=8 仍略慢，但每 rank 内存明显下降；正确性 636/636 逐字节一致。
 
 **556 10 天 N=4（2026-10-27，7920l）**：分汊 556 算例从 1 天扩到 10 天（480 step），N=1 vs N=4：**1125/1125 文件逐字节一致**。注意：同时启动 4 个 rank 时出现过 600s rendezvous 超时；先启动 rank0、等 10s 再启动 worker 后正常完成。这是手工启动器的时序问题，不是数值/路由回归。
+
+## GUI 审查第 2 轮：GUI-01～GUI-19（2026-10-28）
+
+依据外部《CoLM-Desktop GUI：下一轮修复与改进任务书》（审查基准 `47fb663`，界面版本 `0.3.0-beta.5`）。
+实施前复核：本机 HEAD `c0773d64` 是审查基准的后代，`git diff 47fb663..HEAD -- gui/` 为空（只有 docs 变化），
+因此任务书里的 19 项证据与行号对当前 GUI 源码仍然有效；逐项复核后 19 项均"仍存在"。
+
+本轮只做缺陷修复；任务书第 6 节 UX 重组（U-01～U-07）按任务书要求与缺陷修复分开，本轮未做（仍待排期）。
+证据等级沿用任务书定义：**后端测试**（Rust 写入端/报告替换等实际保护）、**函数复现**（执行当前源码的真实
+函数/Effect，用受控 promise 控制 IPC 返回顺序）、**代码确认**（调用链缺口，尚未原生复现）；本轮没有做原生
+Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
+
+### 逐项结果
+
+| 任务 | 复核时状态 | 关键修复 | 证据等级 | 实际结果 | 剩余限制 |
+| --- | --- | --- | --- | --- | --- |
+| GUI-01 | 仍存在 | `colm-cli ws-write --create-only` + `colm-workspace::files::create_text`（`OpenOptions::create_new`）；"从本机加入文件"用 `ws-put --create-only`；Tauri 新命令 `workspace_create_file`；重名稳定标记 `already-exists:` | 后端测试 + 函数复现 | 重名保留原文件；两线程并发 create 恰一次成功、1 次提交；契约重生成 250 命令 | 并发保护以单进程工作区为单位；跨进程同时提交仍按既有 git 冲突语义 |
+| GUI-02 | 仍存在 | CodeFiles 把未保存/保存中状态经 `onStateChange` 上抛；CodeWorkspace 编译前、VersionsPage 冻结/进研究/切版本前统一"保存并继续/放弃并继续/取消"（在页面锁之前问）；导航守卫加源码原因；保存提示区分"草稿"与"源码文件" | 函数复现 | 离开/切版本/切工作区/关窗不再静默丢文本；取消保留页面与文本；只读版本不提示；同页页签是 `hidden` 不卸载，缓冲区保留 | 关窗走既有"原因+确认"机制，未在关窗框内加保存按钮 |
+| GUI-03 | 仍存在 | 读文件返回 sha256 基线；`write_text(expected_hash)` 在写入端比对磁盘，changed/deleted 两类返回 `content-conflict:` 且零写入零提交；干净缓冲区按快照 token 自动重载、脏缓冲区显示冲突并保留双方文本 | 后端测试 + 函数复现 | 外部编辑后旧基线保存被拒；外部删除→重建是明确选择；快照记成提交后旧基线仍被拒；成功保存用返回的新哈希续存 | "比对-写入"不是 OS 级 CAS；并发保存靠界面 busy 锁，微秒级窗口写在注释 |
+| GUI-04 | 仍存在 | `EvaluationDesign` + `designFingerprint`（canonical JSON 覆盖目录/类型/前缀/时间/分组/范围/分辨率/变量映射/参考数据/指标评分/机器路径身份）；生成配置记指纹，运行前再校验；未手改配置随设置失效、手改 YAML 保留并标过期、覆盖前确认 | 函数复现 | 只改前缀/类型/分辨率等（目录与显示名不变）也判失效；旧指纹运行被拒（0 次后端调用）；手改 YAML 不被静默覆盖 | 指纹是 32 位 FNV-1a，用于界面失效判定而非加密身份 |
+| GUI-05 | 仍存在 | `hostEpoch` 机器代次；`refresh/quiet` 在状态与登记表两个 await 后逐个核对；addPick/inspect/取回/后台刷新全部核对；旧请求不写状态/登记表/错误/busy | 函数复现 | A 慢 B 快、A 快 B 慢、A 失败 B 成功三种乱序只显示当前机器；旧机器登记表失败被丢弃；后台刷新不覆盖刚显示的消息 | 真实 SSH 网络乱序未验证 |
+| GUI-06 | 仍存在 | `bootEpoch` 启动代次；过期代次不写失败封面/busy/内核目录/tidy；版本列表拆成"只更新目录"与"初始化官方默认"，过期整条丢弃、用户已选不重置 | 函数复现 | 首次超时→重试→选修改版→旧请求返回，`version/versionRef/chosenVersion` 不变；过期启动不恢复内核目录、不盖新失败封面；无用户选择的慢启动仍完成 | 无原生窗口端到端 |
+| GUI-07 | 仍存在 | 作业身份持久化为 `{host,name,submittedAt,lastState,lastConfirmedAt,uncertain,lastError}`；查询失败只标"暂时失联/待核对"并保留身份，只有确认终态才清活动记录并写历史；新增重连/核对终态/停止入口；未核对时拒绝重复提交 | 函数复现 + 代码确认 | 一次查询超时身份仍在、不误标成功/失败；重开页面恢复核对；stuck 3 次才判失败；未核对记录阻止 run/install | 活动任务保护目前在前端（本机记录）；清 localStorage 或另一台客户端可绕过，服务器侧未加锁 |
+| GUI-08 | 仍存在 | `bench_remote_fetch` 改"下载到同文件系统临时目录→校验有报告→rename 备份/安装/删除备份"；失败保留旧镜像并返回"本机旧报告未改动…"；同报告并发拒绝；前端按 (host,comparison) 去重、失败不替换已显示报告 | 后端测试 + 函数复现 | 连接/认证/下载中断旧镜像逐字节不变且仍可打开；成功替换无旧残余；无报告不安装；并发拒绝 | Windows 目录占用只在逻辑里处理（rename 重试 3 次），未在 Windows 实机跑；`.fetch` 崩溃残留不自动清扫 |
+| GUI-09 | 仍存在 | 新增/编辑共用 `simulationInfoForSave`/`simulationFormForPick`；类型以表单 spatial 为准、改类型清 extent；保存清掉 pick 级旧分组/分辨率覆盖 | 函数复现 | 格点↔站点互换保存后重开表单类型正确；生成配置随新类型；旧配置因指纹含 spatial 失效 | 无真实窗口点击 |
+| GUI-10 | 仍存在 | 保存完整探测对象（history_dir/prefix/extent/lon/lat/files/resolution）；表单只覆盖明确编辑字段；改目录清探测与派生字段、迟到探测丢弃；`gridLines` 目标分辨率不再依赖 extent，缺范围返回 `missingExtent` 由页面说明 | 函数复现 | 读取→保存→生成配置保留范围与经纬度；目标分辨率按用户设置写入；缺范围不再造默认范围；改目录不沿用旧探测 | 无 |
+| GUI-11 | 仍存在 | `validateSimulation` 返回字段级双语错误；保存/探测异常进弹窗 Notice、保留输入并聚焦 `[data-sim-field]`；读取概况失败可重试 | 函数复现 | 空目录/未确认类型/缺年份都在弹窗可见；异常不再只进控制台；禁用按钮不放松 | 无 |
+| GUI-12 | 仍存在 | `nextCheckBatch` 轮转取批（⌈n/limit⌉ 轮全覆盖）+ `checkInBatches`（≤5 并发、单失败不阻断、进度回调）；自动轮询去 `.slice(0,8)`；手动核对覆盖全部并显示"已核对 n/总数"；终态单调保护 | 函数复现 | 20 站点前 8 个一直失败仍 4 轮全覆盖；单失败不阻断；迟到 running 不覆盖 succeeded；离开步骤停轮询、返回补一轮 | 无 DOM 环境，"离开页面"以 effect cleanup/active 门做代码确认 |
+| GUI-13 | 仍存在 | 本机默认路径新增 `savedLocal` 基线、`localDirty` 并入导航守卫（离开/切资源/加服务器/返回/关窗）；改值清旧成功提示；保存成功才推进基线；放弃回真实已保存值；刷新不覆盖未保存输入 | 函数复现 | 脏路径阻止切资源/刷新/加服务器；保存写 `remote_config.local` 并推进基线；失败保留输入且不报成功 | 关窗依赖既有 guard/closeReasons，未原生端到端 |
+| GUI-14 | 仍存在 | 新增 `parameter-context-cache`（身份含模型 ID+修订、内核、站点及顺序、格点类型）；请求带身份、返回核对；清数据与清加载标记同步；失败记录可重试且不 busy 死循环；`[sites]` 改内容键 | 函数复现 | 同算例+内核切修订自动重读（修复前读取停在 1）；旧修订迟到不覆盖；普通重绘不重复；失败可重试；运行中研究保留冻结输入 | 本地参数读取为模拟 IPC |
+| GUI-15 | 仍存在 | `list_cases` 失败明确"项目已创建，但读取失败"并指向重试入口；`save_recent` 失败只警告后照常打开项目 | 函数复现 | 最近记录不可写仍进入真实项目；错误区分创建失败与记录未更新；重试不再创建站点 | 无 |
+| GUI-16 | 仍存在 | 初始化拆成核心设置（超时 10s、失败态+重试）与输入历史（超时 15s、失败只警告、可重试）；事件订阅只保留一个 effect | 函数复现 | 历史失败仍可用助手；设置失败有重试入口；重试不重复订阅（listen 只 1 次）、不重发回合；收起不中断回答 | 无原生窗口 |
+| GUI-17 | 仍存在 | 附件读取记录对话/草稿代次，切换后丢弃并给双语警告；取消静默、失败只报当前对话；用 ref 算最新字符上限；保留读取中禁止发送 | 函数复现 | 慢 PDF→新对话/历史会话都不串附件；取消/失败/连续读取状态清晰 | 无真实 PDF 慢读原生复现 |
+| GUI-18 | 仍存在 | 新增 `turn.ts` 发送轮次状态机（preparing/delivered/accepted/rejected/failed）；轮次号控制撤回气泡、恢复草稿、清空输入、history；等待期新输入不被旧轮次覆盖 | 函数复现 | 拒绝先到/ack 先到两种顺序草稿、附件、消息列表都正确；已接受后迟到拒绝只报错；正常接受不重复恢复/显示 | 无原生窗口 |
+| GUI-19 | 仍存在 | 共享 Dialog 在 open false→true 记录 activeElement，`onCloseAutoFocus` 恢复入口；入口不可用时回退"仍开的上层弹窗→main 首个可聚焦控件"；无 DOM 安全降级；Radix FocusScope 的 Tab 陷阱未改 | 函数复现 | Escape/关闭按钮/遮罩关闭都经同一路径恢复；连续/嵌套弹窗不抢焦点；入口卸载有回退 | 无 DOM 测试环境，未做真实键盘浏览器验证（无真实 WebView） |
+
+### 验证命令与实际结果（2026-10-28，本机实测）
+
+- `cd gui && npm run typecheck && npm run lint && npm run format:check` → 全绿。
+- `cd gui && npm test` → **1026 项通过 / 0 失败**（基线 892；本轮新增 134 项），含 check-gui 自检、
+  `250` 个注册命令契约与事件监听检查；`npm run contract` 已按新增/改签名的命令重新生成。
+- `cd gui && npm run build` → exit 0（含 check-gui + tsc + vite build）。
+- `cargo test -p colm-workspace --lib` → **80 passed**（基线 75）。
+- `cargo test -p colm-cli --bins -- --test-threads=1` → **510 passed**（该 crate 无 lib target）。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **453 passed / 1 ignored**（基线 444 / 1）。
+- `cargo fmt --all --check` 与 `cargo fmt --all --check --manifest-path gui/src-tauri/Cargo.toml` → clean。
+- `cargo clippy -p colm-workspace --all-targets -- -D warnings`、`cargo clippy -p colm-cli --all-targets -- -D warnings`、
+  `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` → 全过。
+- `git diff --check` 无空白错误；全部改动文件为 LF；四张生成表未动；`Cargo.lock` 只增加 `colm-workspace` 的 `sha2`。
+
+### 未验证部分
+
+1. **原生桌面端到端**：本机测试环境没有可交互 WebView / 原生窗口自动化；UI 行为是"函数复现 + 代码确认"，
+   未做任务书 8.3 要求的"打开项目→修改/保存→提交→查看状态→查看结果"原生流程。这是环境限制，不是产品缺陷。
+2. **真实 SSH / 远程服务器**：GUI-07 断连恢复、GUI-08 下载失败、GUI-05 网络乱序均用受控 IPC 与后端单测
+   模拟；没有连接真实 SSH 主机，也没有真实 OpenBench 评估。
+3. **Windows 专项**：GUI-08 的目录 rename 占用重试逻辑未在 Windows 实机验证。
+4. **GUI-07 服务器侧活动任务保护**：目前"未核对终态不重复提交"在客户端实现；服务器侧未加运行目录锁，
+   清 localStorage 或换客户端可绕过，后续如要强保证需在后端加。
+5. 任务书第 6 节 U-01～U-07（研究身份、向导依赖、比较页三块、保存语义、窄窗口、助手阅读体验）未在本轮实施。

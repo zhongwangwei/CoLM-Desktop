@@ -25,13 +25,17 @@ import {
   SERVER_PRESETS,
   applyServerPreset,
   recognisedPreset,
+  localDefaults,
+  localPathSignature,
+  localPathValues,
+  type LocalPathKey,
   type Partition,
   type Server,
   type ResourceCheck,
   kindPathRows,
 } from './resource';
 import type { DataDefaults } from '../../lib/types';
-type DataPathKey = Exclude<keyof DataDefaults, 'kind_paths'>;
+type DataPathKey = LocalPathKey;
 import NavIcon from '../../components/NavIcon';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import LiveServerLoad from '../runs/LiveServerLoad';
@@ -40,12 +44,9 @@ export default function ResourcesPage() {
   const { state, update, navigate } = useApp(),
     en = state.language === 'en',
     t = (a: string, b: string) => (en ? b : a);
-  const [localData, setLocalData] = useState<DataDefaults>({
-    project_dir: '',
-    rawdata_dir: '',
-    runtime_dir: '',
-    forcing_dir: '',
-  });
+  const [localData, setLocalData] = useState<DataDefaults>(localDefaults());
+  // 本机默认路径的"已保存基线"：加载成功和保存成功时才更新，放弃修改回到这里而不是回到上一次输入。
+  const [savedLocal, setSavedLocal] = useState<DataDefaults>(localDefaults());
   const [servers, setServers] = useState<Server[]>([]),
     [aliases, setAliases] = useState<string[]>([]),
     [editor, setEditor] = useState<Server | null>(null),
@@ -81,6 +82,12 @@ export default function ResourcesPage() {
     initialized = useRef(false),
     refreshQueue = useRef<Promise<void>>(Promise.resolve());
   const dirty = Boolean(editor && (JSON.stringify(editor) !== baseline || password));
+  // 本机默认路径原来只在组件状态里：切页/切资源/刷新会静默丢输入（GUI 审查 GUI-13）。
+  const localDirty = localPathSignature(localData) !== localPathSignature(savedLocal);
+  // refresh 在异步等待后还要知道"此刻"有没有未保存的本机路径；放进 deps 会让它换身份，
+  // 进而让加载 effect 重跑、把正在编辑的值重新覆盖掉，所以只读 ref。
+  const localDirtyRef = useRef(false);
+  localDirtyRef.current = localDirty;
   function navigationReason() {
     return deletingServer
       ? t('请先关闭删除确认窗口。', 'Close the deletion confirmation first.')
@@ -93,7 +100,12 @@ export default function ResourcesPage() {
                 '请先保存连接设置或放弃修改，再切换资源或离开。',
                 'Save the connection or discard edits before switching resources or leaving.',
               )
-            : null;
+            : localDirty
+              ? t(
+                  '请先保存本机默认路径或放弃修改，再切换资源或离开。',
+                  'Save the local default paths or discard edits before switching resources or leaving.',
+                )
+              : null;
   }
   useNavigationGuard(navigationReason);
   function clearFeedback() {
@@ -165,13 +177,12 @@ export default function ResourcesPage() {
         );
         if (!token.active || token !== epoch.current) return;
         setServers(config.servers);
-        setLocalData({
-          project_dir: '',
-          rawdata_dir: '',
-          runtime_dir: '',
-          forcing_dir: '',
-          ...config.local,
-        });
+        // 刷新只在没有未保存的本机路径时重设输入与基线：否则一次后台刷新会静默覆盖用户刚改的目录。
+        if (!localDirtyRef.current) {
+          const loadedLocal = localDefaults(config.local);
+          setLocalData(loadedLocal);
+          setSavedLocal(loadedLocal);
+        }
         setConfigLoaded(true);
         if (!initialized.current) {
           initialized.current = true;
@@ -396,6 +407,25 @@ export default function ResourcesPage() {
         ...(key === 'auth' && value !== 'key' ? { identity_file: '' } : {}),
       });
   }
+  /** 清除本机默认路径上一次保存成功的提示；一改值它就不再成立。 */
+  function clearLocalFeedback() {
+    setOutput((current) => {
+      const next = { ...current };
+      delete next['local-data'];
+      return next;
+    });
+  }
+  function editLocalData(key: DataPathKey, value: string) {
+    setLocalData((current) => ({ ...current, [key]: value }));
+    clearLocalFeedback();
+  }
+  /** 放弃本机路径编辑：回到真实已保存值（不是回到上一次 setLocalData 的中间状态）。 */
+  function discardLocalData() {
+    if (busy || lock.current) return;
+    setLocalData((current) => ({ ...current, ...localPathValues(savedLocal) }));
+    setError('');
+    clearLocalFeedback();
+  }
   async function saveLocalData() {
     if (!configLoaded)
       throw new Error(
@@ -413,12 +443,14 @@ export default function ResourcesPage() {
       ...(localData.kind_paths ? { kind_paths: localData.kind_paths } : {}),
     };
     await invoke('remote_save_config', { config: { servers, local } });
+    // 保存成功才把输入改写成 trim 后的值并推进基线：失败时保留原输入、不显示成功（execute 会清 key）。
     setLocalData(local);
+    setSavedLocal(local);
     return t('已保存本机默认数据路径', 'Saved local default data paths');
   }
   async function pickLocalData(key: DataPathKey) {
     const path = await invoke<string | null>('pick_folder', { key: `resource-${key}` });
-    if (path) setLocalData((current) => ({ ...current, [key]: path }));
+    if (path) editLocalData(key, path);
   }
   async function registerPassword() {
     if (!editor) return;
@@ -773,7 +805,7 @@ export default function ResourcesPage() {
         label,
         value: localData[key],
         type: 'text' as const,
-        set: (value: string) => setLocalData((current) => ({ ...current, [key]: value })),
+        set: (value: string) => editLocalData(key, value),
       })),
     );
   }
@@ -783,7 +815,9 @@ export default function ResourcesPage() {
     status: busy ? 'working' : error || 'ready',
     details: {
       selected,
-      dirty,
+      // 页面级的"有未保存修改"同时覆盖连接设置草稿与本机默认路径，截图/助手看到的是同一事实。
+      dirty: dirty || localDirty,
+      localDirty,
       check,
       schedulerDetection: advanced ? schedulerDetection : null,
       ...(checkDetails && checkEvidence ? { checkEvidence } : {}),
@@ -843,7 +877,7 @@ export default function ResourcesPage() {
           <ActionButton
             action="resource-back-simulation"
             label={t('返回模拟设置', 'Back to simulation setup')}
-            disabled={busy || dirty}
+            disabled={busy || dirty || localDirty}
             run={() =>
               navigate(
                 state.simulationReturn!.route === 'new-case' ? 'new-case' : 'case',
@@ -856,7 +890,7 @@ export default function ResourcesPage() {
           action="resource-new"
           label={t('添加服务器', 'Add server')}
           variant="primary"
-          disabled={!configLoaded || busy || dirty}
+          disabled={!configLoaded || busy || dirty || localDirty}
           run={addServer}
         />
       </header>
@@ -900,7 +934,7 @@ export default function ResourcesPage() {
           label={t('本机', 'Local')}
           className={`resource-choice ${selected === 'local' ? 'selected' : ''}`}
           aria-pressed={selected === 'local'}
-          disabled={busy || dirty}
+          disabled={busy || dirty || localDirty}
           run={() => selectResource(null)}
         >
           <span className="resource-device" aria-hidden="true">
@@ -937,7 +971,7 @@ export default function ResourcesPage() {
               label={server.host}
               className={`resource-choice ${selected === `server:${server.host}` ? 'selected' : ''}`}
               aria-pressed={selected === `server:${server.host}`}
-              disabled={busy || dirty}
+              disabled={busy || dirty || localDirty}
               run={() => selectResource(server)}
             >
               <span className="resource-device" aria-hidden="true">
@@ -1000,14 +1034,27 @@ export default function ResourcesPage() {
                 />
               </div>
             ))}
-            <ActionButton
-              action="resource-local-data-save"
-              label={t('保存默认数据路径', 'Save default data paths')}
-              kind="commit"
-              variant="primary"
-              disabled={busy || !configLoaded}
-              run={() => execute('local-data', saveLocalData)}
-            />
+            <div className="actions resource-local-data-actions">
+              <ActionButton
+                action="resource-local-data-save"
+                label={t('保存默认数据路径', 'Save default data paths')}
+                kind="commit"
+                variant="primary"
+                disabled={busy || !configLoaded}
+                run={() => execute('local-data', saveLocalData)}
+              />
+              {localDirty && (
+                <>
+                  <ActionButton
+                    action="resource-local-data-discard"
+                    label={t('放弃修改', 'Discard edits')}
+                    disabled={busy}
+                    run={discardLocalData}
+                  />
+                  <small>{t('有未保存的修改', 'Unsaved changes')}</small>
+                </>
+              )}
+            </div>
             {output['local-data'] != null && <Notice>{String(output['local-data'])}</Notice>}
           </section>
           {kindPathSection}
@@ -1568,7 +1615,7 @@ export default function ResourcesPage() {
         <ActionButton
           action="resource-refresh"
           label={t('刷新服务器配置', 'Refresh server settings')}
-          disabled={busy || dirty}
+          disabled={busy || dirty || localDirty}
           run={() => execute('refresh', refresh)}
         />
         <span>

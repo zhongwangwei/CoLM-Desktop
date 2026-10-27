@@ -10,9 +10,12 @@
 //! colm-cli ws-symbols  (--name N | --source DIR) --path P      # --source：应用自己的源码，只读，不建工作区
 //! colm-cli ws-patch    --name N --message M (--diff-file F | --diff TEXT)
 //! colm-cli ws-ls       --name N [--dir D]                    # 列出源码里的一个目录
-//! colm-cli ws-file     --name N --path P                     # 读一个文件（文本才给内容）
-//! colm-cli ws-write    --name N --path P --text-file F --message M   # 写文本文件并提交
-//! colm-cli ws-put      --name N --path P --from F --message M        # 用本机文件替换或新增（可二进制）
+//! colm-cli ws-file     --name N --path P                     # 读一个文件（文本才给内容，带 sha256）
+//! colm-cli ws-write    --name N --path P --text-file F --message M [--create-only 1] [--expect-sha256 H]
+//!                                            # 写文本文件并提交；create-only：已存在则拒绝；
+//!                                            # expect-sha256：磁盘内容与这个基线不符就整次拒绝（不写、不提交）
+//! colm-cli ws-put      --name N --path P --from F --message M [--create-only 1]
+//!                                            # 用本机文件替换或新增（可二进制）；create-only：已存在则拒绝
 //! colm-cli ws-put-dir  --name N --path P --from D --message M        # 用本机文件夹整个替换目录
 //! colm-cli ws-rm       --name N --path P --message M                 # 删除文件或目录并提交
 //! colm-cli ws-revert   --name N --commit HEX
@@ -261,18 +264,32 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             let file = opts.need_str("--text-file")?;
             let text =
                 std::fs::read_to_string(&file).with_context(|| format!("cannot read {file}"))?;
-            print(json!(files::write_text(
-                &open(opts)?,
-                &opts.need_str("--path")?,
-                &text,
-                &opts.need_str("--message")?
-            )?));
+            let workspace = open(opts)?;
+            let path = opts.need_str("--path")?;
+            let message = opts.need_str("--message")?;
+            // create-only 与 expect-sha256 是两种不同语义：前者是"新建"，后者是"基于某份内容保存"。
+            // 同时给没有意义，直接拒绝，免得调用方以为两者叠加会更安全。
+            if flag(opts, "--create-only") && opts.get("--expect-sha256").is_some() {
+                bail!("--create-only and --expect-sha256 are for different operations; give one");
+            }
+            let written = if flag(opts, "--create-only") {
+                files::create_text(&workspace, &path, &text, &message)?
+            } else {
+                match opts.get("--expect-sha256").filter(|hash| !hash.is_empty()) {
+                    Some(hash) => {
+                        files::write_text(&workspace, &path, &text, &message, Some(&hash))?
+                    }
+                    None => files::write_text(&workspace, &path, &text, &message, None)?,
+                }
+            };
+            print(json!(written));
         }
         "ws-put" => print(json!(files::put_file(
             &open(opts)?,
             &opts.need_str("--path")?,
             &PathBuf::from(opts.need_str("--from")?),
-            &opts.need_str("--message")?
+            &opts.need_str("--message")?,
+            flag(opts, "--create-only"),
         )?)),
         "ws-put-dir" => print(json!(files::put_dir(
             &open(opts)?,

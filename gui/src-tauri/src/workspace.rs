@@ -347,6 +347,73 @@ fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String
     Ok(command)
 }
 
+/// 内容基线：`colm-workspace` 的 `FileText.hash` 是 sha256 十六进制。这里只做形状校验，真正的比对
+/// 在写入端（`colm-workspace` 的 `write_text`）——界面传什么都不能绕过它。
+fn checked_hash(hash: Option<&str>) -> Result<Option<String>, String> {
+    let Some(hash) = hash.map(str::trim).filter(|hash| !hash.is_empty()) else {
+        return Ok(None);
+    };
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("内容哈希须为 64 位十六进制".into());
+    }
+    Ok(Some(hash.to_ascii_lowercase()))
+}
+
+/// 文本写入的参数：保存已有文件（可带基线）和新建共用 `ws-write`，用 `--create-only` 区分语义。
+/// `expected_hash` 与 `create_only` 互斥：一个要求文件已存在且内容没变，一个要求文件不存在。
+fn write_file_args(
+    name: &str,
+    path: &str,
+    message: &str,
+    expected_hash: Option<&str>,
+    create_only: bool,
+) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    checked_path(path)?;
+    let message = checked_message(message)?;
+    let expected = checked_hash(expected_hash)?;
+    if create_only && expected.is_some() {
+        return Err("新建与内容基线不能同时给出".into());
+    }
+    let mut command = args(
+        "ws-write",
+        &["--name", name, "--path", path, "--message", message],
+    );
+    if create_only {
+        command.extend(["--create-only".into(), "1".into()]);
+    }
+    if let Some(expected) = expected {
+        command.extend(["--expect-sha256".into(), expected]);
+    }
+    Ok(command)
+}
+
+/// 文本先落一个临时文件：几 MB 的源码放进命令行参数会超过系统上限。
+/// 名字带进程号、纳秒和自增序号：同一纳秒里并发两次也不会互相覆盖临时文件。
+fn temp_text_file(text: &str) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let file = std::env::temp_dir().join(format!(
+        "colm-ws-write-{}-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+async fn write_command(mut command: Vec<String>, temp: &std::path::Path) -> Result<Value, String> {
+    // 文本文件路径最后补：参数内容先按纯函数校验完，临时文件路径是运行时才知道的。
+    command.extend(["--text-file".into(), temp.to_string_lossy().into_owned()]);
+    let result = cli_json(command, None).await;
+    let _ = std::fs::remove_file(temp);
+    result
+}
+
 #[tauri::command]
 pub async fn workspace_diff(name: String, path: String) -> Result<Value, String> {
     cli_json(file_args(&name, &path, None)?, None).await
@@ -381,52 +448,77 @@ pub async fn workspace_file(name: String, path: String) -> Result<Value, String>
     cli_json(args("ws-file", &["--name", &name, "--path", &path]), None).await
 }
 
-/// 在界面里编辑后保存一个文本文件（新建或覆盖），成为一次改动提交。文本经临时文件传给 colm-cli：
-/// 几 MB 的源码放进命令行参数会超过系统上限。
+/// 在界面里编辑后保存一个文本文件（基于内容基线覆盖已有文件），成为一次改动提交。
+///
+/// `expected_hash` 是打开文件时后端返回的内容哈希：给了它，写入端会先比对磁盘，不一致就整次拒绝
+/// （GUI-03）。文本经临时文件传给 colm-cli：几 MB 的源码放进命令行参数会超过系统上限。
 #[tauri::command]
 pub async fn workspace_write_file(
     name: String,
     path: String,
     text: String,
     message: String,
+    expected_hash: Option<String>,
 ) -> Result<Value, String> {
-    valid_name(&name)?;
-    checked_path(&path)?;
-    let message = checked_message(&message)?.to_owned();
     if text.len() > 2 * 1024 * 1024 || text.contains('\0') {
         return Err("文本最多 2 MB，不能含空字符；更大的文件请用本机文件替换".into());
     }
-    let file = std::env::temp_dir().join(format!(
-        "colm-ws-write-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::write(&file, &text).map_err(|e| e.to_string())?;
-    let result = cli_json(
-        args(
-            "ws-write",
-            &[
-                "--name",
-                &name,
-                "--path",
-                &path,
-                "--text-file",
-                &file.to_string_lossy(),
-                "--message",
-                &message,
-            ],
-        ),
-        None,
-    )
-    .await;
-    let _ = std::fs::remove_file(&file);
-    result
+    let command = write_file_args(&name, &path, &message, expected_hash.as_deref(), false)?;
+    let file = temp_text_file(&text)?;
+    write_command(command, &file).await
 }
 
-/// 用本机的文件（可以是二进制）或文件夹（整个替换目录）替换或新增修改版里的路径。
+/// 在源码目录里原子新建一个文本文件（GUI-01）。目标已存在时后端拒绝（`OpenOptions::create_new`），
+/// 原文件一个字节都不动；前端列表只是提前提示，不能代替这里。
+#[tauri::command]
+pub async fn workspace_create_file(
+    name: String,
+    path: String,
+    text: String,
+    message: String,
+) -> Result<Value, String> {
+    if text.len() > 2 * 1024 * 1024 || text.contains('\0') {
+        return Err("文本最多 2 MB，不能含空字符".into());
+    }
+    let command = write_file_args(&name, &path, &message, None, true)?;
+    let file = temp_text_file(&text)?;
+    write_command(command, &file).await
+}
+
+/// 本机文件/文件夹替换的参数。`create_only` 只对文件有效：文件夹替换是"整个换掉"的语义，没有新增。
+fn put_args(
+    name: &str,
+    path: &str,
+    from: &str,
+    folder: bool,
+    message: &str,
+    create_only: bool,
+) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    checked_path(path)?;
+    let message = checked_message(message)?;
+    if folder && create_only {
+        return Err("文件夹替换没有新建语义".into());
+    }
+    let mut command = args(
+        if folder { "ws-put-dir" } else { "ws-put" },
+        &[
+            "--name",
+            name,
+            "--path",
+            path,
+            "--from",
+            from,
+            "--message",
+            message,
+        ],
+    );
+    if create_only {
+        command.extend(["--create-only".into(), "1".into()]);
+    }
+    Ok(command)
+}
+
 #[tauri::command]
 pub async fn workspace_put(
     name: String,
@@ -434,10 +526,8 @@ pub async fn workspace_put(
     from: String,
     folder: bool,
     message: String,
+    create_only: Option<bool>,
 ) -> Result<Value, String> {
-    valid_name(&name)?;
-    checked_path(&path)?;
-    let message = checked_message(&message)?;
     let source = PathBuf::from(&from);
     if from.contains('\0')
         || !source.is_absolute()
@@ -451,19 +541,14 @@ pub async fn workspace_put(
         });
     }
     cli_json(
-        args(
-            if folder { "ws-put-dir" } else { "ws-put" },
-            &[
-                "--name",
-                &name,
-                "--path",
-                &path,
-                "--from",
-                &from,
-                "--message",
-                message,
-            ],
-        ),
+        put_args(
+            &name,
+            &path,
+            &from,
+            folder,
+            &message,
+            create_only.unwrap_or(false),
+        )?,
         None,
     )
     .await
