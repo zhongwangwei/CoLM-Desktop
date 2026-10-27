@@ -37740,3 +37740,23 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 **vendor 区域网络 + LULCC 仍被拦住（2026-10-27，7920l）**：准备 556 跨年 LULCC 算例时，`MOD_Namelist.F90:1818` 仍执行 `DEF_UnitCatchment_regional + DEF_USE_LULCC` 的 stop（"Regional unit catchment requires GridRiverLakeFlow without LULCC."）。Rust 侧已支持区域网络多年并集，但 vendor Fortran 仍没有 PR 512 的 LULCC 后区域网络重建；因此 LULCC 真实多年在 vendor 路径上还没法跑通。
 
 **vendor 区域网络 + LULCC 跨年（2026-10-27，7920l）**：移除 `MOD_Namelist.F90` 中 `DEF_UnitCatchment_regional + DEF_USE_LULCC` 的旧 stop。556 区域算例设置 `DEF_USE_LULCC=.true.`、`DEF_LC_YEAR=2003`，跑 2003-12-31 → 2004-01-02，经过 LULCC 年界。当前 mksrfdata 只生成 landdata/2003，测试时把 2003 静态目录复制成 2004 才能进入 LULCC driver；**这不是真正的多年 mksrfdata 产物**。运行结果：3 rank（1 worker）vs 9 rank（7 workers）共 2382 个文件，逐变量 **0 差异**，39 个文件字节差异仅为 HDF5 布局。
+
+## PR 512 最终状态（2026-10-27，70 轮）
+
+**已满足**
+- Rust 分汊逐簇 dt：556 算例 N=1 vs N=2 **1125/1125 文件逐字节一致**；
+- Rust 无分汊 vs 重构前：**1125/1125 一致**；
+- vendor 逐簇 dt：3 rank（1 worker）vs 9 rank（7 workers），1125 文件逐变量 **0 差异**；
+- Fortran 区域算例 N=1/N>1：无分汊和分汊各一次，逐变量 **0 差异**；
+- 单 IO group block + `river_hist_concatenate`：与 one 模式 **19/19 变量一致**；
+- vendor 区域网络 + LULCC 跨年：2382 文件逐变量 **0 差异**；
+- 测试：`colm-runtime` 218 通过；vendor clean build 通过；CI 曾全绿。
+
+**已知未闭环**
+1. `mksrfdata` 仍只生成 `DEF_LC_YEAR` 一年；LULCC 跨年测试用复制 2003→2004 静态 landdata，不是真实多年产物。
+2. LULCC + 漫滩回馈未用 LCT 算例验证。
+3. 旧 Fortran `master/IO/worker + DEF_PIO_groupsize` 多 IO group 的 river shard 在 `create_shard_skeleton`/identity 阶段失败；单 IO group 已通过。新 Rust 引擎没有该分类并拒绝 `DEF_HIST_mode='block'`。
+4. Fortran 输出逐变量一致，但 HDF5 文件布局不同，不是逐字节一致。
+5. tracer/sediment 的逐簇 dt 暂不处理。
+
+这些是验收边界，不是已通过项。
