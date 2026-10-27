@@ -8,6 +8,8 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    USE MOD_Grid
    USE MOD_WorkerPushData
+   USE MOD_Grid_RiverLakePush, only: riverlake_pushcache_type, riverlake_pushcache_build, &
+      riverlake_pushcache_free_mem
    USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
 #ifdef USEMPI
    USE MOD_SPMD_Task, ONLY: MPI_COMM_NULL
@@ -64,6 +66,7 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    type(worker_pushdata_type) :: push_next2ucat
    type(worker_pushdata_type) :: push_ups2ucat
+   type(riverlake_pushcache_type) :: cache_ups2ucat
 
    ! ----- Part 3: river systems -----
    integer :: numrivsys
@@ -1044,6 +1047,7 @@ CONTAINS
 
       CALL build_worker_pushdata (numucat, ucat_ucid, numucat, ucat_next, push_next2ucat)
       CALL build_worker_pushdata (numucat, ucat_ucid, numucat, ucat_ups,  wts_ups, push_ups2ucat )
+      CALL riverlake_pushcache_build (push_ups2ucat, cache_ups2ucat)
 
       ! IF (p_is_worker) THEN
       !    write(*,'(A,I0,A,I0,A,I0,A)') 'worker ', p_iam_worker, ' has ', numucat, &
@@ -1635,6 +1639,7 @@ CONTAINS
       CALL worker_pushdata_free_mem (allreduce_inpm)
       CALL worker_pushdata_free_mem (push_next2ucat)
       CALL worker_pushdata_free_mem (push_ups2ucat)
+      CALL riverlake_pushcache_free_mem (cache_ups2ucat)
       CALL worker_pushdata_free_mem (push_bif_dn2pth)
       CALL worker_pushdata_free_mem (push_bif_influx)
       CALL worker_remapdata_free_mem (remap_patch2inpm)

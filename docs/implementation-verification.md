@@ -37644,3 +37644,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase D vendor 编译验证（2026-10-27）**：在当前 `include/define.h`（USEMPI + GridRiverLakeFlow）下执行 `make -j8`，vendor `CoLM202X` 全部对象和 `run/colm.x` 链接成功；包含本轮的 reservoir 重复行、worker 零长度数组、LULCC feedback 重建和 storage/cascade 改动。没有运行真实算例，不能替代 Phase D 的数值回归。
 
 **Phase D vendor 新增模块（2026-10-27）**：把 PR 512 的 `MOD_Grid_RiverLakePush.F90` 与 `MOD_Grid_RiverLakeVectorIO.F90` 加入 vendor，并登记到 Makefile 的对象/依赖；`make -j8` 重新编译、链接 `run/colm.x` 成功。当前 Flow 还未切换到新 Push/VectorIO 调用，属于源码层面对齐，不是性能收益。
+
+**Phase D vendor Push 接入（2026-10-27）**：在 `MOD_Grid_RiverLakeNetwork` 构建 `push_ups2ucat` 的 CSR cache，`MOD_Grid_RiverLakeFlow` 新增 `push_ups2ucat_sum`，把 hflux/mflux/zgrad（以及水库 hflux/mflux）的上游求和按一次批量交换发送；`cache_ups2ucat%batch_exact` 为假时退回逐字段 `worker_push_data`，结果应逐位不变。新 Push 对象移入 `OBJS_SHARED` 以保证 mkinidata 也能链接。`make -j8` 全量编译/链接成功。

@@ -284,6 +284,7 @@ OBJS_BASIC =    \
 				 MOD_Grid_RiverLakeNetwork.o    \
 				 MOD_Grid_Reservoir.o           \
 				 MOD_Grid_RiverLakeLevee.o      \
+				 MOD_Grid_RiverLakePush.o       \
 				 MOD_Grid_RiverLakeBifurcation.o \
 				 MOD_Grid_RiverLakeHistState.o  \
 				 MOD_Grid_RiverLakeHistShard.o  \
@@ -531,7 +532,6 @@ OBJS_MAIN = \
 				MOD_LightningData.o                       \
 				MOD_Catch_LateralFlow.o                   \
 				MOD_Grid_RiverLakeFlow.o                  \
-				MOD_Grid_RiverLakePush.o                  \
 				MOD_Grid_RiverLakeVectorIO.o              \
 				MOD_Urban_Longwave.o                      \
 				MOD_Urban_NetSolar.o                      \

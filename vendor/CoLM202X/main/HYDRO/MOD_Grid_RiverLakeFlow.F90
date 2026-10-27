@@ -320,6 +320,42 @@ CONTAINS
    END SUBROUTINE init_flood_feedback
 
    ! ---------
+   SUBROUTINE push_ups2ucat_sum (send1, recv1, send2, recv2, send3, recv3)
+
+   ! Sum one to three fields over upstream unit catchments in one batched
+   ! exchange when the compressed CSR cache reproduces worker_push_data.
+
+   USE MOD_Grid_RiverLakePush, only: riverlake_push_field_type, riverlake_push_batch
+   IMPLICIT NONE
+
+   real(r8), target :: send1(:), recv1(:)
+   real(r8), target, optional :: send2(:), recv2(:), send3(:), recv3(:)
+   type(riverlake_push_field_type) :: fields(3)
+   integer :: nfield
+
+      IF (cache_ups2ucat%batch_exact) THEN
+         fields(1)%send => send1; fields(1)%recv => recv1; fields(1)%fillvalue = 0._r8
+         nfield = 1
+         IF (present(send2)) THEN
+            fields(2)%send => send2; fields(2)%recv => recv2; fields(2)%fillvalue = 0._r8
+            nfield = 2
+         ENDIF
+         IF (present(send3)) THEN
+            fields(3)%send => send3; fields(3)%recv => recv3; fields(3)%fillvalue = 0._r8
+            nfield = 3
+         ENDIF
+         CALL riverlake_push_batch (push_ups2ucat, cache_ups2ucat, fields(1:nfield), mode = 'sum')
+      ELSE
+         CALL worker_push_data (push_ups2ucat, send1, recv1, fillvalue = 0., mode = 'sum')
+         IF (present(send2)) &
+            CALL worker_push_data (push_ups2ucat, send2, recv2, fillvalue = 0., mode = 'sum')
+         IF (present(send3)) &
+            CALL worker_push_data (push_ups2ucat, send3, recv3, fillvalue = 0., mode = 'sum')
+      ENDIF
+
+   END SUBROUTINE push_ups2ucat_sum
+
+   ! ---------
    SUBROUTINE grid_riverlake_flow_lulcc (year, spinup)
 
    ! After LULCC the patch-to-grid mapping, pushes and landpatch arrays have
@@ -957,9 +993,8 @@ CONTAINS
 
             ENDDO
 
-            CALL worker_push_data (push_ups2ucat, hflux_fc, hflux_sumups, fillvalue = 0., mode = 'sum')
-            CALL worker_push_data (push_ups2ucat, mflux_fc, mflux_sumups, fillvalue = 0., mode = 'sum')
-            CALL worker_push_data (push_ups2ucat, zgrad_dn, zgrad_sumups, fillvalue = 0., mode = 'sum')
+            CALL push_ups2ucat_sum (hflux_fc, hflux_sumups, mflux_fc, mflux_sumups, &
+               zgrad_dn, zgrad_sumups)
 
             IF (numucat > 0) THEN
                WHERE (ucatfilter)
@@ -1011,8 +1046,7 @@ CONTAINS
 
                ENDDO
 
-               CALL worker_push_data (push_ups2ucat, hflux_resv, hflux_sumups, fillvalue = 0., mode = 'sum')
-               CALL worker_push_data (push_ups2ucat, mflux_resv, mflux_sumups, fillvalue = 0., mode = 'sum')
+               CALL push_ups2ucat_sum (hflux_resv, hflux_sumups, mflux_resv, mflux_sumups)
 
                IF (numucat > 0) THEN
                   WHERE (ucatfilter)
