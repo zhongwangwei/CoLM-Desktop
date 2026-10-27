@@ -37719,3 +37719,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase B 多 shard 定位（2026-10-27，7920l）**：`DEF_PIO_groupsize=3`、9 rank 时，`one` 模式正常；`block` 模式生成两个 shard，但模型在第 48 步退出 9，shard 只有 `create_time`，拼接器报缺少 `river_hist_shard_schema_version`。把 `DEF_HIST_FREQ='none'` 后 block 模式能结束但不再写 history。说明问题出在多 I/O group 的 land history（或 block 全局 history）写入，而不是 river shard 重建；单 shard block 已验证 19/19 变量一致。
 
 **多 shard block 失败定位（2026-10-27，strace）**：`DEF_PIO_groupsize=3`、9 rank 的 block 模式在写 history 末尾时，其中一个 IO rank 对 `556_hist_2003-02_e100_n35.nc` / `e100_n40.nc` 的 `H5Fopen(O_RDWR)` 曾返回 `ENOENT`，随后又成功；说明多 IO group 下 block 文件的创建/打开存在可见性/竞态，而不是 river shard 本身。单 IO group 的单 shard block 及拼接已通过。
+
+**旧 IO-group block bug 记录（2026-10-27）**：vendor Fortran 仍保留原版 `master/IO/worker + DEF_PIO_groupsize` 架构；在 `DEF_PIO_groupsize=3`、9 rank、`DEF_HIST_mode='block'` 时，多 IO group 的 land block history 在第 48 步打开别的 IO rank 的 block 文件失败。已确认 `pio` 映射和 `gblock%xblkme/yblkme` 本身不重叠，问题在旧 IO-group 的 block 文件写入路径；单 IO group 正常。**这是原版 Fortran 旧架构的问题，不是新多节点引擎路径**；新 Rust 引擎没有 master/IO/worker 分类，且明确拒绝 `DEF_HIST_mode='block'`，所以没有把旧架构的修补强加进新引擎。
