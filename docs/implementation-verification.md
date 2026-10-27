@@ -37715,3 +37715,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 - 从 shard 逐记录复制 `history_window_seconds`、`history_window_end_minutes`；
 - 从所有 shard 的 `mask_complete_upstream` 重建成 `(lon_ucat, lat_ucat)`，空白格用 `spval`。
 重新拼接 556 block 输出后，与 `one` 模式 **19/19 变量逐值一致**。多 shard（`DEF_PIO_groupsize=3`）测试中模型运行退出 9、拼接报缺 shard 属性；一 shard 的 block 路径已完整通过，多 shard 仍待查。
+
+**Phase B 多 shard 定位（2026-10-27，7920l）**：`DEF_PIO_groupsize=3`、9 rank 时，`one` 模式正常；`block` 模式生成两个 shard，但模型在第 48 步退出 9，shard 只有 `create_time`，拼接器报缺少 `river_hist_shard_schema_version`。把 `DEF_HIST_FREQ='none'` 后 block 模式能结束但不再写 history。说明问题出在多 I/O group 的 land history（或 block 全局 history）写入，而不是 river shard 重建；单 shard block 已验证 19/19 变量一致。
