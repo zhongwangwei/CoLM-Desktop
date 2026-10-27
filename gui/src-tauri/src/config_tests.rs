@@ -3367,6 +3367,14 @@ fn flood_feedback_is_offered_only_when_its_preconditions_hold() {
         mode(&states, "DEF_GridRiverLake_FloodFeedback"),
         FieldMode::Hidden
     ));
+    // PR 512 allows feedback together with LULCC; the Rust engine supports it
+    // for single-process LULCC (multi-process LULCC is rejected elsewhere).
+    let with_lulcc = format!("{base} DEF_Runoff_SCHEME = 0\n DEF_USE_LULCC = .true.\n/\n");
+    let states = runtime_states(&with_lulcc, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_GridRiverLake_FloodFeedback"),
+        FieldMode::Editable
+    ));
 }
 
 #[test]

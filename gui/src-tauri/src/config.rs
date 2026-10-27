@@ -1817,14 +1817,13 @@ fn validate_runtime_contract_at(
         let ok = !single
             && kernel.is_none_or(|facts| facts.grid_river)
             && logical(doc, "DEF_USE_GridRiverLakeFlow")
-            && !logical(doc, "DEF_USE_LULCC")
             && integer(doc, "DEF_Runoff_SCHEME") == 0
             && lct
             && !urban
             && vsf;
         if !ok {
             return Err("漫滩回馈陆面需要：网格河湖汇流打开、TOPMODEL 产流（0）、\
-                        LCT 次网格、变饱和流，且不开 LULCC 与城市"
+                        LCT 次网格、变饱和流，且不开城市"
                 .into());
         }
     }
@@ -2251,8 +2250,7 @@ fn field_runtime_state(
         if !c.have.contains("GridRiverLakeFlow") {
             return hidden("当前内核未编入网格河湖汇流");
         }
-        let ready = !c.lulcc
-            && c.runoff == 0
+        let ready = c.runoff == 0
             && c.lct
             && !c.urban
             // 与 `colm-rs` 同一判定：选 van Genuchten（不用 Campbell）时上游强制打开变饱和流。

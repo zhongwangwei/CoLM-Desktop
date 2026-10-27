@@ -665,17 +665,14 @@ fn run_spatial(
         missing.join("\n  - ")
     );
     // GRID 内核总是编进 `GridRiverLakeFlow`：汇流默认路径（单向耦合），其余选项还没移植。
-    // 漫滩回馈：上游不与 LULCC 同开，并把产流方案强制成 0；Rust 只接变饱和流、LCT 的那条路径。
+    // 漫滩回馈：上游把产流方案强制成 0；Rust 只接变饱和流、LCT 的那条路径。
+    // LULCC 下每个新段会按新 patch 重建 feedback 数组（多进程 LULCC 仍不支持）。
     // `DEF_USE_GridRiverLakeFlow`：GRID 内核的河湖汇流运行时开关（关掉时陆面照常，河道不算）。
     let grid_river = !arguments.catchment && logical_field(&document, "DEF_USE_GridRiverLakeFlow")?;
     if logical_field(&document, "DEF_GridRiverLake_FloodFeedback")? {
         ensure!(
             grid_river,
             "Grid flood feedback requires DEF_USE_GridRiverLakeFlow (upstream stops too)"
-        );
-        ensure!(
-            !logical_field(&document, "DEF_USE_LULCC")?,
-            "Grid flood feedback does not support LULCC (upstream stops too)"
         );
         ensure!(
             integer_field(&document, "DEF_Runoff_SCHEME")? == 0,
