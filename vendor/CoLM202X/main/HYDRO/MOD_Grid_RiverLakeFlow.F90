@@ -452,6 +452,8 @@ CONTAINS
 
    real(r8), allocatable :: hflux_resv(:)
    real(r8), allocatable :: mflux_resv(:)
+   ! cached floodplain_curve(i)%volume(wdsrf_ucat(i)) for no-bifurcation/no-levee routing
+   real(r8), allocatable :: volwater_curve(:)
 
    real(r8), allocatable :: hflux_sumups(:)
    real(r8), allocatable :: mflux_sumups(:)
@@ -655,6 +657,7 @@ CONTAINS
 
          allocate (hflux_sumups  (numucat))
          allocate (mflux_sumups  (numucat))
+         allocate (volwater_curve(numucat))
          allocate (zgrad_sumups  (numucat))
 
          IF (DEF_Reservoir_Method > 0) THEN
@@ -726,7 +729,8 @@ CONTAINS
                IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE) THEN
                   volwater = volwater_ucat(i)
                ELSE
-                  volwater = floodplain_curve(i)%volume (wdsrf_ucat(i))
+                  volwater_curve(i) = floodplain_curve(i)%volume (wdsrf_ucat(i))
+                  volwater = volwater_curve(i)
                ENDIF
             ELSE
                ! water in reservoirs is assumued to be stationary.
@@ -756,6 +760,10 @@ CONTAINS
       ENDIF
                ELSE
                   wdsrf_ucat(i) = floodplain_curve(i)%depth (volwater)
+                  IF (.not. (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)) &
+                     volwater_curve(i) = floodplain_curve(i)%volume (wdsrf_ucat(i))
+                  IF (.not. (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE)) &
+                     volwater_curve(i) = floodplain_curve(i)%volume (wdsrf_ucat(i))
                ENDIF
                volwater_ucat(i) = volwater
                IF (wdsrf_ucat(i) > RIVERMIN) THEN
@@ -1087,7 +1095,7 @@ CONTAINS
                      IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE) THEN
                         volwater = volwater_ucat(i)
                      ELSE
-                        volwater = floodplain_curve(i)%volume (wdsrf_ucat(i))
+                        volwater = volwater_curve(i)
                      ENDIF
                   ELSE
                      ! for reservoir
@@ -1257,7 +1265,7 @@ CONTAINS
                   IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE) THEN
                      volwater = volwater_ucat(i)
                   ELSE
-                     volwater = floodplain_curve(i)%volume (wdsrf_ucat(i))
+                     volwater = volwater_curve(i)
                   ENDIF
                ELSE
                   volwater = volresv(ucat2resv(i))
@@ -1409,7 +1417,7 @@ CONTAINS
                      IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE) THEN
                         volwater = volwater_ucat(i)
                      ELSE
-                        volwater = floodplain_curve(i)%volume(wdsrf_ucat(i))
+                        volwater = volwater_curve(i)
                      ENDIF
                   ENDIF
                   rivsto_hist = min(volwater, floodplain_curve(i)%rivstomax)
@@ -1632,6 +1640,7 @@ CONTAINS
       IF (allocated(mflux_fc     )) deallocate(mflux_fc     )
       IF (allocated(zgrad_dn     )) deallocate(zgrad_dn     )
       IF (allocated(hflux_resv   )) deallocate(hflux_resv   )
+      IF (allocated(volwater_curve)) deallocate(volwater_curve)
       IF (allocated(mflux_resv   )) deallocate(mflux_resv   )
       IF (allocated(hflux_sumups )) deallocate(hflux_sumups )
       IF (allocated(mflux_sumups )) deallocate(mflux_sumups )

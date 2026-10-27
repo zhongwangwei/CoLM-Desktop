@@ -37650,3 +37650,5 @@ cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184
 **Phase D vendor 编译期守卫（2026-10-27）**：`GridRiverLakeFlow` 现在要求 `USEMPI`（`MOD_Grid_RiverLakeNetwork` 内 `#error`，`include/define.h` 也显式检查）；`GridRiverLakeSediment` 在本版本未耦合，定义即编译期停止。`make -j8` 通过。
 
 **Phase A/D vendor 级联水库（2026-10-27）**：`MOD_Grid_RiverLakeTimeVars` 增加 `qresv_ups_prev`（分配/续跑可选读取/写出/hold-restore），`MOD_Grid_RiverLakeFlow` 的调度入流加 `qresv_ups_prev`，并在水库 push 后记录上游水库泄放。续跑旧文件没有该变量时补 0。`make -j8` 通过。
+
+**Phase C/D vendor volume 缓存（2026-10-27）**：vendor `MOD_Grid_RiverLakeFlow` 增加 `volwater_curve`，无分汊/堤防时初始化与每次水深更新后缓存库容，CFL/负水/收支/history 读同一缓存，不再重复查水位—库容表。`make -j8` 通过。
