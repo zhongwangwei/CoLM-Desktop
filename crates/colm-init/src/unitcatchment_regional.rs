@@ -520,6 +520,67 @@ pub fn verify(regional: &Path, source: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `check_regional_coverage`（`MOD_Grid_RiverLakeNetwork.F90:1355-1385`）：区域网络保留的
+/// 单元流域必须覆盖所有 land patch 触及的汇流输入格；否则运行期会静默丢掉一部分径流。
+pub fn verify_coverage(landdata: &Path, year: i32, regional: &Path, source: &Path) -> Result<()> {
+    let src = netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
+    let dim = |name: &str| -> Result<usize> {
+        Ok(src
+            .dimension(name)
+            .with_context(|| format!("{} has no dimension {name}", source.display()))?
+            .len())
+    };
+    let (nlon, nlat, nseq, inpn) = (dim("nx")?, dim("ny")?, dim("nseqmax")?, dim("inpn")?);
+    let inp_x: Vec<i32> = src
+        .variable("inpmat_x")
+        .with_context(|| format!("{} has no inpmat_x", source.display()))?
+        .get_values(netcdf::Extents::All)?;
+    let inp_y: Vec<i32> = src
+        .variable("inpmat_y")
+        .with_context(|| format!("{} has no inpmat_y", source.display()))?
+        .get_values(netcdf::Extents::All)?;
+    ensure!(
+        inp_x.len() == nseq * inpn && inp_y.len() == nseq * inpn,
+        "{} inpmat does not match (nseqmax, inpn)",
+        source.display()
+    );
+    let reg =
+        netcdf::open(regional).with_context(|| format!("cannot open {}", regional.display()))?;
+    let src_index: Vec<i32> = reg
+        .variable("seq_src_index")
+        .with_context(|| format!("{} has no seq_src_index", regional.display()))?
+        .get_values(netcdf::Extents::All)?;
+    let touched = touched_cells(landdata, year, nlon, nlat)?;
+    let mut covered = vec![false; nlon * nlat];
+    for &source_index in &src_index {
+        ensure!(
+            source_index >= 1 && (source_index as usize) <= nseq,
+            "{} has seq_src_index {} outside the source network",
+            regional.display(),
+            source_index
+        );
+        let row = source_index as usize - 1;
+        for k in 0..inpn {
+            let (x, y) = (inp_x[row * inpn + k], inp_y[row * inpn + k]);
+            if x >= 1 && x as usize <= nlon && y >= 1 && y as usize <= nlat {
+                covered[(y as usize - 1) * nlon + (x as usize - 1)] = true;
+            }
+        }
+    }
+    let missing = touched
+        .iter()
+        .zip(&covered)
+        .filter(|(touched, covered)| **touched && !**covered)
+        .count();
+    ensure!(
+        missing == 0,
+        "the regional unit-catchment network {} does not cover {} land patch grid cell(s);          rerun mksrfdata/mkinidata with the current landpatch",
+        regional.display(),
+        missing
+    );
+    Ok(())
+}
+
 /// `unitcatchment_regional_build`：由 landpatch 求 `touched`，写区域网络（`bif_closure = .true.`）。
 /// `bifurcation`（`DEF_USE_BIFURCATION`）：只有分汊打开时才沿分汊通道做闭包。分汊关着时通道不参与
 /// 汇流，闭包只会顺着 CaMa 的跨河系通道把与区域无关的河系一串串拉进来（区域 96–104°E 的算例

@@ -1716,8 +1716,9 @@ fn run_spatial_segment(
         let mut runtime = runtime;
         // 多进程时每个 rank 持有一份全局河网与全局 runoff filter，同步跑同一个 step。
         let river_topology = global_topology.as_ref().unwrap_or(&topology);
-        let network =
-            colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(document, out)?)?;
+        let network = colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(
+            document, out, year_i32,
+        )?)?;
         let routing = colm_runtime::river::network::RunoffRouting::build(&network, river_topology)?;
         // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
         let runoff_filter = match (
@@ -1841,7 +1842,7 @@ fn run_spatial_segment(
                 |r| r.of_catchment.iter().map(Option::is_some).collect(),
             );
             Some(colm_runtime::river::levee::Levee::read(
-                &unit_catchment_file(document, out)?,
+                &unit_catchment_file(document, out, year_i32)?,
                 &network,
                 &reservoir_cells,
             )?)
@@ -1850,7 +1851,7 @@ fn run_spatial_segment(
         };
         let bifurcation = if logical_field(document, "DEF_USE_BIFURCATION")? {
             Some(colm_runtime::river::bifurcation::Bifurcation::read(
-                &unit_catchment_file(document, out)?,
+                &unit_catchment_file(document, out, year_i32)?,
                 &network,
             )?)
         } else {
@@ -2006,7 +2007,7 @@ fn run_spatial_segment(
                 )?;
                 let sediment = colm_runtime::river::sediment::Sediment::init(
                     &river.network,
-                    &unit_catchment_file(document, out)?,
+                    &unit_catchment_file(document, out, year_i32)?,
                     &param,
                 )?;
                 river = river.with_sediment(sediment)?;
@@ -2717,13 +2718,15 @@ fn regional_catchment(document: &Document, out: &Path) -> Result<Option<std::pat
 
 /// `get_unitcatchment_file`（`share/MOD_Namelist.F90:2884-2895`）：区域模式读 landdata 下裁好的区域网络，
 /// 否则读 `DEF_UnitCatchment_file`。区域模式下先核对区域网络属于当前的源网络（`verify_regional_network`）。
-fn unit_catchment_file(document: &Document, out: &Path) -> Result<std::path::PathBuf> {
+fn unit_catchment_file(document: &Document, out: &Path, year: i32) -> Result<std::path::PathBuf> {
     let source = std::path::PathBuf::from(string_field(document, "DEF_UnitCatchment_file")?);
     if !logical_field(document, "DEF_UnitCatchment_regional")? {
         return Ok(source);
     }
-    let regional = colm_init::unitcatchment_regional::regional_file(&out.join("landdata"));
+    let landdata = out.join("landdata");
+    let regional = colm_init::unitcatchment_regional::regional_file(&landdata);
     colm_init::unitcatchment_regional::verify(&regional, &source)?;
+    colm_init::unitcatchment_regional::verify_coverage(&landdata, year, &regional, &source)?;
     Ok(regional)
 }
 
@@ -4185,8 +4188,11 @@ fn lulcc_transition(
     }
     // 3. 河道：网络不变，状态接着用。
     let river = if let Some((mut state, river_tracers, sediment)) = river {
-        let network =
-            colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(document, out)?)?;
+        let network = colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(
+            document,
+            out,
+            i32::try_from(years.new)?,
+        )?)?;
         // `grid_riverlake_flow_lulcc`：河道时变量原样保留（上游 hold/restore），堤内蓄量与分汊
         // 路径状态在各自模块里本就不动；之后重建 `volwater_ucat`（有堤单元流域只补堤外可见那份），
         // 开分汊时上一子步水深取当前水深。漫滩回馈与 LULCC 同开上游自己就拒绝。
@@ -4211,7 +4217,7 @@ fn lulcc_transition(
                 |r| r.of_catchment.iter().map(Option::is_some).collect(),
             );
             Some(colm_runtime::river::levee::Levee::read(
-                &unit_catchment_file(document, out)?,
+                &unit_catchment_file(document, out, i32::try_from(years.new)?)?,
                 &network,
                 &reservoir_cells,
             )?)
