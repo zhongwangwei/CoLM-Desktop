@@ -37760,3 +37760,5 @@ mpirun -n 9 /media/.../vendor/CoLM202X/run/colm.x case-block9/case.nml
 5. tracer/sediment 的逐簇 dt 暂不处理。
 
 这些是验收边界，不是已通过项。
+
+**真实多年 landdata 的 LULCC 验证（2026-10-27，7920l）**：先以 `DEF_LC_YEAR=2003` 跑 mksrfdata，再以 `DEF_LC_YEAR=2004` 对同一输出目录跑第二次 mksrfdata，生成真实的 landdata/2003 与 landdata/2004（不再用复制目录）。556 区域算例从 2003-12-31 跨到 2004-01-02，3 rank（1 worker）vs 9 rank（7 workers）：2382 个文件，逐变量 **0 差异**，39 个文件仅 HDF5 布局字节不同。限制：这是两次 mksrfdata 调用，不是单个 mksrfdata 进程内的多年循环。
