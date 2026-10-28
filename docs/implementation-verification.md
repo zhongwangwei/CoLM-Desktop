@@ -38338,3 +38338,54 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 4. **GUI 端到端未目视**：设置页 managed 下拉/按钮/状态行、`assistant_start` 自动拉起、关窗 `stop_everything` 停节点都只有代码与单元测试，没有在原生窗口里逐按钮点验；也没有通过真实 GUI 走完“保存 managed 设置 → 发送自动启动 → 更新索引 → 关窗停止”。
 5. **打包/自动安装后置**：二进制不进仓库、不随安装包分发；用户需自行放置并指定路径（或放进 PATH/资源目录）。跨平台 sidecar 打包、签名、端口冲突治理与自动升级都未做。
 6. 自动升级**未实现**（见上）；Xerj 其它 release 的检索行为未验证；托管节点只服务文档检索，不改变云端模型的数据发送政策。
+
+## P-Xerj 追加：随安装包分发固定版本 Xerj sidecar（2026-10-28）
+
+用户选择 A 方案：把固定 release 的 Xerj 作为第 7 个 sidecar 打进各平台安装包，做到“装好即用”。仓库仍不提交二进制（约 122 MB/平台），由打包前的可复现步骤从固定 URL 取回、校验后暂存。
+
+### 固定清单与暂存步骤
+
+- 入库清单 `packaging/xerj/xerj-release.json`：`schema 1`、`project xerj`、`release v1.0.0-rc.100`、`license Apache-2.0`、4 个 release 矩阵 target 的 URL / sha256 / 归档类型 / 归档内 binary 与 LICENSE 路径：
+  | target | 资产 | sha256 |
+  |---|---|---|
+  | aarch64-apple-darwin | tar.gz | `c88fdcb99c4155d2f7260138c3a5898d0f3cf6b07cd208895137ff03c52b9d1a` |
+  | x86_64-apple-darwin | tar.gz | `30f6148c68c584ab990eeaa9bc9a05209c2ba2374a5ae90651be17f588edac91` |
+  | x86_64-unknown-linux-gnu | tar.gz | `25aec3e84b904c995bd2d58abe4f83badb8a6f9d1d56dbe2f22180bada9b00cc` |
+  | x86_64-pc-windows-msvc | zip | `a58f293c1002c4ce5ce1793afd6fa4d3e7a509916a34044c91a38d4a53937812` |
+  这些值来自官方 release 的 `.sha256` 资产，并且下载后由 xtask 重新计算核对；URL 前缀被清单校验限定在 `https://github.com/xerj-org/xerj/releases/download/`。
+- `cargo run -p xtask -- stage-xerj [--verify-only] [--offline] [--force]`（`xtask/src/xerj.rs`）：按 `rustc -vV` 的 host triple 选资产 → 下载到缓存（`COLM_XERJ_CACHE`，默认 `~/.cache/colm-xerj`）→ 逐字节 sha256 校验（失败删除缓存并报 expected/actual）→ 先列归档成员校验路径安全（拒绝绝对路径、`..`、反斜杠）→ 解压（unix `tar -xzf`；Windows zip 先 `tar -xf` 退 PowerShell `Expand-Archive`）→ 校验 binary/LICENSE 解压后仍在目录内 → 运行 `xerj --version` 断言输出含 `v1.0.0-rc.100` → 以临时文件+rename 落到 `gui/src-tauri/binaries/xerj-<triple>[.exe]`，同时写 `xerj-LICENSE` 与不含时间戳的 `xerj-release.json`（安装后用于核对）→ 最后 `--verify-only` 复验暂存结果。已暂存且清单一致时幂等跳过：`--offline` 缓存缺失直接失败、不联网。
+- `stage-sidecar` 末尾自动调用它；`COLM_SKIP_XERJ_SIDECAR=1` 只用于本地开发构建并会打印 `skipped (development build)`，打包流水线不设置。失败（网络/哈希/解压/路径/版本）都会让打包失败并给出可执行错误。
+- Tauri 打包配置 `gui/src-tauri/tauri.bundle.conf.json`：`externalBin` 增加 `binaries/xerj`；`resources` 增加 `binaries/xerj-release.json`（安装后 `xerj-release.json`）与 `binaries/xerj-LICENSE`（安装后 `xerj-LICENSE`）。
+- release 流水线（`.github/workflows/release.yml`）：打包前按 `matrix.label` 缓存 `.xerj-cache`（每个平台下载的是不同归档，key 必须带平台）；Bundle 步骤传 `COLM_XERJ_CACHE`；macOS 在安装包里断言 `Contents/MacOS/xerj` 存在、`--version` 含 `v1.0.0-rc.100`、两个资源文件存在。Tauri 的 `externalBin` 缺失本身也会让打包失败。
+- 运行时 `managed` 模式探测顺序保持“用户填写绝对路径 → `COLM_XERJ_BINARY` → 应用随身目录（macOS `Contents/MacOS`，Windows/Linux 可执行文件旁；`current_exe` 父目录）→ 资源目录 → PATH”，所以安装包里的 sidecar 自动优先于 PATH 上的同名程序；用户显式设置仍可覆盖。托管节点的数据目录改为 `应用数据目录/xerj/<固定版本>/`（`xerj_data_dir_name()` 只保留 `[A-Za-z0-9._-]`）：应用升级换随包 Xerj 版本时从空目录重建索引，不复用旧版本的存储格式。
+
+### 自动升级语义（与上一节一致）
+
+安装包里的 Xerj 版本由应用发布版本决定：**应用升级 = Xerj 升级**；应用不会独立下载/替换/升级 Xerj。升级后新版本使用新的数据目录并自动重建索引；旧版本目录不会被自动删除（已知限制，占空间但不会被读取，后续可加清理）。用户自己换二进制时仍只提示版本不符、不阻断。
+
+### 实测结果
+
+- 真实暂存验收（macOS arm64，源码 `stage-xerj --force`）：下载归档 **29,672,674 B**，sha256 `c88fdcb9…9d1a` 校验通过；解压后 `xerj --version` → `xerj v1.0.0-rc.100`；暂存 binary **127,914,400 B**（sha256 `75dd163a3a1df60e6d77a8b0ffccc97bf049f0d616e79070000762cbf523294d`，Mach-O arm64，mode 755）、`xerj-LICENSE` 11,357 B、`xerj-release.json` 372 B。缓存命中、`--force`、无 force 幂等、`--verify-only`、`--offline` 均实测；`stage-xerj --verify-only` 输出 `verified staged xerj v1.0.0-rc.100 ...`。
+- 用暂存出来的二进制跑 GUI 真实托管节点验收：`COLM_XERJ_MANAGED_BINARY=gui/src-tauri/binaries/xerj-aarch64-apple-darwin cargo test --lib xerj_manager -- --nocapture --test-threads=1` → **26 passed**；实测启动 1.56s、`v1.0.0-rc.100`、key 64 hex、停止 333ms；事后无 xerj 残留进程/端口。
+- 单测：`xtask/src/xerj_tests.rs` **22 个默认不联网测试**（清单契约与 4 个固定 sha、target 选择、URL 前缀、归档路径安全、sha expected/actual、缓存目录 unix/windows、用系统 tar 造假归档 + 预置缓存走离线暂存、可执行位、release.json 全字段与逐字节可复现、verify-only 失败、skip 纯函数）；`cargo test -p xtask --bins` → 37 passed；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2902 passed / 0 failed / 15 ignored**；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 均通过。
+- GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；带暂存二进制环境变量的 `cargo test --lib` → **493 passed / 1 ignored / 0 failed**。前端 `npm run contract`（257）、`typecheck`/`lint`/`format:check` 通过，`npm test` → **1141 passed**，`check-gui` → 257 registered / 219 called。
+
+### 未验证部分与限制
+
+1. **完整安装包构建未在本机跑**：本机没有 tauri-cli/签名证书，且完整 release 构建要编 17 套 Fortran 内核、耗时以小时计；`cargo tauri build` → 三个平台安装包里 sidecar 的实际布局/签名/公证只在流水线设计上保证，未在本机或 CI 实跑（本轮不推送，不会触发 CI）。
+2. **非 macOS 平台的真实下载/解压/暂存未跑**：Windows zip 的 `tar -xf`→PowerShell 兜底、Linux tar.gz 路径只有单测覆盖；对应 sidecar 也未经真实节点验收（首版真实运行只承诺 macOS arm64）。
+3. **签名/公证**：发布流水线当前未配置签名证书；Tauri 的 `externalBin` 会随主程序一起被签名，但启用 macOS 签名/公证后必须实测 `Contents/MacOS/xerj` 被 notarization 覆盖，否则 Gatekeeper 拒绝。
+4. **体积只按文件大小估算**：安装包实际增量 ≈ 每平台 +122 MB（压缩后取决于打包器），未实测各格式安装包差值。
+5. **旧版本数据目录不自动清理**：升级后旧 `<version>/` 目录保留（不会被读取），需要后续加清理策略。
+6. 上面“应用升级即 Xerj 升级”不是独立自动升级；Xerj 其它 release 的检索行为未验收，换版本必须重跑本记录的实测。
+
+### 附：开发检出模式下“模型版本读取失败”的排查（2026-10-28）
+
+不是模型数据或 API 问题，是源码身份一致性检查：`model-list` 会算当前官方源码哈希 → 复制源码到 model 缓存 → 再算复制品哈希，两次不一致就报 `official source changed while freezing`。实测到的两个独立原因：
+
+1. **dev GUI 的“官方源码”是当前仓库工作区**：`target/debug/colm-desktop-gui`（cwd 在仓库里）通过 `resolve_cli` 选用 `target/release/colm-cli`，`engine_source` 找不到安装包 tarball 时回退到 checkout。启动瞬间到复制完成之间任何对 `crates/`、`xtask/`、`oracle/`、`vendor/`、`scripts/`、`.github/`、`Cargo.toml`/`Cargo.lock` 的写入都会让复制品与哈希不同——本轮排查时正好有我方/子代理在改 `xtask/`、`.github/`，所以每次启动都报。安装包版把 `engine/colm-src.tar.gz` 解压到只读缓存，源码与二进制同版本，不受工作区编辑影响；实测 repo 里的 beta.4 bundle 直接跑 `colm-cli model-list` 正常输出 15 个版本、exit 0。
+2. **dev GUI 用了旧 release CLI 的构建戳**：工作区静下来后，`target/release/colm-cli`（10:03 编译，`target/release/colm-build-source.json` 的 source_sha256 是旧源码）实测报 `official programs were not built from the current source; rebuild before freezing this model`。dev 模式要么重新 `xtask stage-sidecar` 生成与当前源码匹配的 sidecar/构建戳，要么直接用安装包版，不能只靠删 model 缓存解决（失败发生在复制阶段）。
+
+因此：日常使用用安装包版；做 dev 调试时不要在 app 启动/冻结期间改上述源码路径，改完先重跑 `xtask stage-sidecar` 再重启。`gui/`、`docs/` 不在官方源码哈希范围（`docs` 只参与源码打包，不参与哈希）。
+
+**补记（同日，接上面排查第 2 条）**：已实跑 `xtask stage-sidecar`（`COLM_SKIP_XERJ_SIDECAR=1`，aarch64-apple-darwin）：6 个 Colm sidecar 与 engine 源包全部重建/暂存成功（colm-cli 22.8 MB、colm-rs 29.6 MB、colm-agent 8.8 MB、mksrfdata 8.3 MB、mkinidata 8.9 MB、colm-mcp 3.1 MB；engine tarball 17.0 MB、1514 文件），末行 `staged xerj: skipped (development build)`，exit 0；随后 `target/release/colm-cli model-list --model-root /tmp/colm-model-probe2` → exit 0，从 1 个 official 版本开始，证明 dev 构建戳已与当前源码匹配。注意：dev GUI 需重启后才会重新读取；`stage-sidecar` 里 Xerj 下载钩子的完整端到端仍未跑（直接 `stage-xerj` 已实跑，钩子逻辑有单测；本地开发用 skip 即可）。
