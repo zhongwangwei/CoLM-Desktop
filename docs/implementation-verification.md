@@ -37912,6 +37912,12 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
   搜索和「只看结果还在服务器上的」过滤（90 站时不用翻列表）；指标计算并发 4→6；比较结果加站间
   RMSE 条形图（同一变量、按本次最大 RMSE 归一化，可切换变量）。报告导出视图仍从界面隐藏、代码
   保留（可追溯报告有科学价值，暂不删除；需要时再决定放哪或彻底删）。
+- **开发构建的内核校验提速**：窗口启动列内核时 `Kernel::open` 要给 17 套内核的 51 个二进制
+  算 sha256（187 MB）。debug 版 sha2 实测从进程启动到 "17 preset(s)" 10.8 s（旧测量里单是
+  `Kernel::open` 就约 14 s）；给 `gui/src-tauri/Cargo.toml` 的 dev profile 只把哈希链依赖
+  （sha2、digest、block-buffer、crypto-common）开 opt-level = 3，同一测量降到 5.0 s，
+  单独 `Kernel::open` 17 套合计 0.39 s。发布构建本来就是 release，不受影响；仍待评估的是
+  是否给内核清单加按 mtime/size 的缓存（会动 Rust sidecar，进而改变引擎源码快照）。
 - **单点算例在建例前不再显示迷惑的站点身份默认值**：`model_configuration` 的可见性原来只看内核
   宏里的 `SinglePoint`；新建算例向导（`caseValues` 里只有 `SITE_fsitedata`、宏尚未确定）会把
   `SITE_landtype`/`USE_SITE_landtype` 当成可编辑字段，显示「地表覆盖类型 = -1」「从站点文件读取
