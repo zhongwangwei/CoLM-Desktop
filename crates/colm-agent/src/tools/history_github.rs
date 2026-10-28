@@ -9,9 +9,12 @@
 //! 关键取舍（都按任务书与 `COLM-Variable-History-Implementation-Prompt.txt` 第四.C、五节）：
 //! - **只信 GitHub 官方 commit→PR 接口**。commit message 里的 `#123` 只是线索，不是
 //!   已证实关联；squash/rebase/cherry-pick 后 API 返回零条时也不能自己“推断”出一条。
-//! - **缓存绑定 (owner, repo, full sha)**：路径 `<cache_root>/<owner>/<repo>/<sha>.json`。
-//!   两个仓库出现同一个 SHA、同一个 PR 编号是常态（fork / 导入），只按 SHA 或 PR 编号
-//!   做键会互相覆盖。缓存写临时文件再 rename，避免半截 JSON 被下一进程当成有效缓存。
+//! - **缓存绑定 (owner, repo, full sha)**：两个仓库出现同一个 SHA、同一个 PR 编号是常态
+//!   （fork / 导入），只按 SHA 或 PR 编号做键会互相覆盖。缓存写临时文件再 rename，避免
+//!   半截 JSON 被下一进程当成有效缓存。
+//! - **完整快照与不完整尝试分层**：`<sha>.json` 只保存 complete=true 的完整结果；
+//!   失败/部分读取写 `<sha>.partial.json` 供诊断与离线降级，绝不覆盖最后一次完整快照。
+//!   成功刷新才替换完整快照并删除 partial；失败刷新保留旧完整快照（离线仍可用）。
 //! - **offline 绝不发 HTTP**：包括 refresh 也一样；没有缓存时返回空 pulls + notice，
 //!   让工具层保留本地 Git 证据，并明确“未检查 GitHub”，而不是伪装成“没有 PR”。
 //! - **失败要分类**：401/403/限流/404/网络/坏响应分别进 `errors[].kind`；未找到关联是
@@ -25,7 +28,7 @@
 //! 同进程测试可以直接赋值。
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -146,6 +149,18 @@ impl GithubClient {
             if let Some(cached) = cached {
                 return cached_response(&cached, owner, repo, include_discussion, refresh, true);
             }
+            // 没有完整快照时允许读上一次不完整尝试：明确标 incomplete/older attempt，
+            // 不能把它伪装成完整结果，也不能因此发 HTTP。
+            if let Some(partial) = self.read_partial_cache(owner, repo, &sha) {
+                return partial_cached_response(
+                    &partial,
+                    owner,
+                    repo,
+                    include_discussion,
+                    refresh,
+                    true,
+                );
+            }
             let notice = format!(
                 "offline mode: no cached GitHub PR data for {owner}/{repo}@{sha}; GitHub was not contacted. Local Git evidence is reported separately."
             );
@@ -154,8 +169,8 @@ impl GithubClient {
         }
         if !refresh {
             if let Some(cached) = cached {
-                // 缓存里的数据要能满足这次请求：没要求讨论时可以复用；
-                // 要求讨论而缓存当初没读讨论时，在线状态下补一次请求。
+                // 完整快照要能满足这次请求：没要求讨论时可以复用；
+                // 要求讨论而快照当初没读讨论时，在线状态下补一次请求。
                 if !include_discussion || cached.include_discussion {
                     return cached_response(&cached, owner, repo, include_discussion, false, false);
                 }
@@ -201,6 +216,19 @@ impl GithubClient {
         if fetched && errors.is_empty() && pulls.is_empty() {
             notices.push("GitHub reports no pull requests associated with this commit. Association comes only from the GitHub API; #numbers in a commit message are not treated as evidence.".to_owned());
         }
+        // 失败/不完整的刷新不能摧毁最后一次完整快照：先把旧快照保留情况告诉调用方，
+        // 再决定写 partial（完整快照文件本身在整个流程里从未被这次失败写入）。
+        let previous_complete = if complete {
+            None
+        } else {
+            self.read_cache(owner, repo, &sha)
+        };
+        if let Some(previous) = &previous_complete {
+            notices.push(format!(
+                "this refresh returned incomplete GitHub data (complete=false); the previous complete snapshot fetched_at_unix_ms={} is kept unchanged and still available offline",
+                previous.fetched_at_unix_ms
+            ));
+        }
         let mut response = json!({
             "schema": SCHEMA_VERSION,
             "repository": repository_json(repository),
@@ -213,7 +241,10 @@ impl GithubClient {
             "notices": notices,
             "errors": errors_json(&errors),
         });
-        if fetched {
+        // 抓到至少一页（或至少有错误可诊断）才写缓存：完整结果进完整快照，
+        // 不完整结果只进 partial，绝不覆盖 last_success。
+        let should_cache = fetched || !errors.is_empty();
+        if should_cache {
             let cached_pulls = CachedPulls {
                 schema: CACHE_SCHEMA_VERSION,
                 owner: owner.to_owned(),
@@ -235,7 +266,12 @@ impl GithubClient {
                     .unwrap_or_default(),
                 errors: response["errors"].clone(),
             };
-            if let Some(notice) = self.write_cache(&cached_pulls) {
+            let notice = if complete {
+                self.write_complete_cache(&cached_pulls)
+            } else {
+                self.write_partial_cache(&cached_pulls)
+            };
+            if let Some(notice) = notice {
                 if let Some(list) = response["notices"].as_array_mut() {
                     list.push(Value::String(notice));
                 }
@@ -435,11 +471,16 @@ impl GithubClient {
         )
     }
 
-    /// 读缓存。任何损坏/不属于这个 (owner, repo, sha) 的文件都当未命中：缓存是加速手段，
-    /// 不是可信来源，宁可重查也不能把别的仓库的数据当成这次结果。
-    fn read_cache(&self, owner: &str, repo: &str, sha: &str) -> Option<CachedPulls> {
-        let path = cache_path(&self.cache_root, owner, repo, sha);
-        let text = std::fs::read_to_string(&path).ok()?;
+    /// 读一个缓存文件。任何损坏/不属于这个 (owner, repo, sha) 的文件都当未命中：
+    /// 缓存是加速手段，不是可信来源，宁可重查也不能把别的仓库的数据当成这次结果。
+    fn read_cache_file(
+        &self,
+        path: &Path,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+    ) -> Option<CachedPulls> {
+        let text = std::fs::read_to_string(path).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
         let cached = cached_from_value(&value)?;
         if cached.schema != CACHE_SCHEMA_VERSION
@@ -452,15 +493,31 @@ impl GithubClient {
         Some(cached)
     }
 
-    /// 写缓存（临时文件 + rename）。缓存失败只返回一条 notice，不影响本次结果：
+    /// 读完整快照：只认 complete=true。旧版本可能把不完整结果写进主文件，
+    /// 那不是“完整快照”，不能在被当作 last_success 使用（由 [`Self::read_partial_cache`] 降级读取）。
+    fn read_cache(&self, owner: &str, repo: &str, sha: &str) -> Option<CachedPulls> {
+        let path = cache_path(&self.cache_root, owner, repo, sha);
+        self.read_cache_file(&path, owner, repo, sha)
+            .filter(|cached| cached.complete)
+    }
+
+    /// 读不完整尝试：先看 `<sha>.partial.json`；兼容旧版本把不完整结果写进主文件的情况
+    /// （仅当 complete=false 时才降级当 partial，绝不冒充完整快照）。
+    fn read_partial_cache(&self, owner: &str, repo: &str, sha: &str) -> Option<CachedPulls> {
+        let partial = partial_cache_path(&self.cache_root, owner, repo, sha);
+        if let Some(cached) = self.read_cache_file(&partial, owner, repo, sha) {
+            if !cached.complete {
+                return Some(cached);
+            }
+        }
+        let legacy = cache_path(&self.cache_root, owner, repo, sha);
+        self.read_cache_file(&legacy, owner, repo, sha)
+            .filter(|cached| !cached.complete)
+    }
+
+    /// 写缓存文件（临时文件 + rename）。缓存失败只返回一条 notice，不影响本次结果：
     /// 查询本身是只读的，“这次没缓存上”不该让工具调用失败。
-    fn write_cache(&self, cached: &CachedPulls) -> Option<String> {
-        let path = cache_path(
-            &self.cache_root,
-            &cached.owner,
-            &cached.repo,
-            &cached.commit,
-        );
+    fn write_cache_file(&self, path: &Path, cached: &CachedPulls) -> Option<String> {
         let parent = path.parent()?;
         if let Err(error) = std::fs::create_dir_all(parent) {
             return Some(format!(
@@ -491,16 +548,46 @@ impl GithubClient {
             return Some(format!("could not write the GitHub cache file: {error}"));
         }
         // Unix 上 rename 原子覆盖；Windows 上目标已存在时 rename 会失败，退一步先删再改名。
-        if let Err(first) = std::fs::rename(&temp, &path) {
-            let retried = std::fs::remove_file(&path)
+        if let Err(first) = std::fs::rename(&temp, path) {
+            let retried = std::fs::remove_file(path)
                 .ok()
-                .and_then(|()| std::fs::rename(&temp, &path).ok());
+                .and_then(|()| std::fs::rename(&temp, path).ok());
             if retried.is_none() {
                 let _ = std::fs::remove_file(&temp);
                 return Some(format!("could not replace the GitHub cache file: {first}"));
             }
         }
         None
+    }
+
+    /// 写完整快照，并删除同一 SHA 的 partial（成功刷新后才清）。
+    fn write_complete_cache(&self, cached: &CachedPulls) -> Option<String> {
+        let path = cache_path(
+            &self.cache_root,
+            &cached.owner,
+            &cached.repo,
+            &cached.commit,
+        );
+        let notice = self.write_cache_file(&path, cached);
+        // partial 只是诊断/降级材料；完整快照成功后过期就删（删不掉也不影响完整数据）。
+        let _ = std::fs::remove_file(partial_cache_path(
+            &self.cache_root,
+            &cached.owner,
+            &cached.repo,
+            &cached.commit,
+        ));
+        notice
+    }
+
+    /// 写不完整尝试。绝不覆盖完整快照：完整快照在另一个文件里，只有成功刷新才替换。
+    fn write_partial_cache(&self, cached: &CachedPulls) -> Option<String> {
+        let path = partial_cache_path(
+            &self.cache_root,
+            &cached.owner,
+            &cached.repo,
+            &cached.commit,
+        );
+        self.write_cache_file(&path, cached)
     }
 
     /// 一次 GET + JSON 数组。HTTP 级错误映射成 [`ApiError`]；200 但内容不是数组同样算
@@ -746,6 +833,47 @@ fn cached_response(
     })
 }
 
+/// 命中“不完整尝试”时的返回（没有完整快照可用）。明确标 incomplete/older attempt，
+/// 保留原 fetched_at 与 errors/notices，让上层知道覆盖范围与旧快照时间。
+fn partial_cached_response(
+    cached: &CachedPulls,
+    owner: &str,
+    repo: &str,
+    include_discussion: bool,
+    refresh: bool,
+    offline: bool,
+) -> Value {
+    let mut notices = cached.notices.clone();
+    notices.push(format!(
+        "offline mode: no complete GitHub snapshot is cached for {owner}/{repo}@{}; returning an incomplete cached attempt (complete=false, fetched_at_unix_ms={}). Its PR list/discussion coverage is partial - do not treat it as the current complete answer.",
+        cached.commit, cached.fetched_at_unix_ms
+    ));
+    if include_discussion && !cached.include_discussion {
+        notices.push(
+            "that cached attempt was fetched without PR discussion; comment excerpts and discussion coverage are unavailable"
+                .to_owned(),
+        );
+    }
+    if refresh && offline {
+        notices.push(
+            "refresh was requested but the client is offline; the cached incomplete attempt was returned".to_owned(),
+        );
+    }
+    json!({
+        "schema": SCHEMA_VERSION,
+        "repository": repository_json(Repository { owner, repo }),
+        "commit": cached.commit,
+        "fetched_at_unix_ms": cached.fetched_at_unix_ms,
+        "offline": offline,
+        "from_cache": true,
+        "complete": false,
+        "partial": true,
+        "pulls": cached.pulls,
+        "notices": notices,
+        "errors": cached.errors,
+    })
+}
+
 /// 构造一个 PR 的稳定输出。只使用 API 返回的字段（标题里的 #数字不参与任何判断）。
 fn build_pull(repository: Repository<'_>, item: &Value, number: u64) -> Value {
     let body = item
@@ -912,6 +1040,14 @@ fn cache_path(cache_root: &std::path::Path, owner: &str, repo: &str, sha: &str) 
         .join(owner)
         .join(repo)
         .join(format!("{sha}.json"))
+}
+
+/// 不完整尝试的旁路缓存；与完整快照分开文件，失败刷新不能摧毁最后一次成功结果。
+fn partial_cache_path(cache_root: &std::path::Path, owner: &str, repo: &str, sha: &str) -> PathBuf {
+    cache_root
+        .join(owner)
+        .join(repo)
+        .join(format!("{sha}.partial.json"))
 }
 
 fn cached_from_value(value: &Value) -> Option<CachedPulls> {
