@@ -31,6 +31,11 @@
 //! colm-cli evaluation-plan <算例目录> --obs <Flux.nc> --kernel <目录>
 //! colm-cli history-catalog <算例目录>
 //! colm-cli history-map <算例目录> --var <变量> --index <时间步>
+//! colm-cli history-repos --history-root <目录> [--desktop-path P] [--upstream-path P]
+//! colm-cli history-sync --history-root <目录> --repository desktop|colm_upstream|both [--offline]
+//! colm-cli history-track --history-root <目录> --repository selected|desktop|colm_upstream|both --symbol <符号>
+//!                    [--source DIR] [--path P] [--ref REF] [--limit N] [--offset N] [--model-json JSON]
+//! colm-cli history-commit --history-root <目录> --repository desktop|colm_upstream --sha <40 hex> [--symbol S] [--path P]
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli study-parameters
 //! colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
@@ -67,6 +72,7 @@ mod fingerprint;
 mod flux_diagnostics;
 mod forcing_coverage;
 mod forcing_directory;
+mod history;
 mod history_cleanup;
 mod history_cmd;
 mod history_grid;
@@ -198,6 +204,17 @@ usage:
   colm-cli history-catalog <case-dir>
   colm-cli history-map <case-dir> --var <name> --index <step>
                    # 格点变量某一时间步的整张图（大网格隔行隔列抽稀）
+  colm-cli history-repos --history-root <dir> [--desktop-path P] [--upstream-path P]
+                   # 双仓库注册表：路径/身份/默认分支/同步记录/历史覆盖（只读本地 git）
+  colm-cli history-sync --history-root <dir> --repository desktop|colm_upstream|both [--offline]
+                   # 初始化/更新应用管理的历史缓存；--offline 绝不 fetch/clone
+  colm-cli history-track --history-root <dir> --repository selected|desktop|colm_upstream|both
+                   --symbol <symbol> [--source <dir>] [--path P] [--ref R] [--limit N] [--offset N]
+                   [--model-json JSON] [--desktop-path P] [--upstream-path P]
+                   # 变量定位 + 修改历史 + 未提交 diff + vendor/上游对应关系（只读本地 git）
+  colm-cli history-commit --history-root <dir> --repository desktop|colm_upstream --sha <40 hex>
+                   [--symbol S] [--path P] [--desktop-path P] [--upstream-path P]
+                   # 单个 commit 的详情与相关代码 diff
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
   colm-cli study-parameters
@@ -593,6 +610,9 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     .parse()
                     .context("--index must be a whole number")?,
             )?;
+        }
+        "history-repos" | "history-sync" | "history-track" | "history-commit" => {
+            history::dispatch(cmd, opts)?;
         }
         "study-params" | "study-parameters" => println!("{}", study::engine::parameters_json()?),
         "study-preflight" | "study-create" => {

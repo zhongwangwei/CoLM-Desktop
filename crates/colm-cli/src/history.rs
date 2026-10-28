@@ -1,0 +1,2729 @@
+//! 双仓库变量变更追踪的 Git/仓库层（HIST-1）。
+//!
+//! 为什么在 CLI：这里只做本机只读 Git 查询，agent 工具经 sidecar 调用，不需要图形界面；
+//! 也**不做任何网络 HTTP**（commit→PR 关联由另一个模块负责）。所有 git 调用都是固定参数、
+//! 关闭 stdin、`GIT_TERMINAL_PROMPT=0`，从不经过 shell，所以 symbol/path 不会被当成命令注入。
+//!
+//! 两个规范仓库（身份核验只认这两个，绝不改名冒充）：
+//! - desktop = `zhongwangwei/CoLM-Desktop`
+//! - colm_upstream = `CoLM-SYSU/CoLM`
+//!
+//! 契约（agent 工具依赖；`repos` 内层结构见各命令函数）：
+//! - `history-repos` → `{history_root, repos:{desktop:…, colm_upstream:…}}`
+//! - `history-sync`  → 同上 + `actions`
+//! - `history-track` → `{schema:1, query, repos, cross:{links}, limits, truncated, history_root}`
+//! - `history-commit`→ `{schema:1, repository, commit, reason, notes}`
+//!
+//! 几条不能妥协的判定（任务书要求，代码里按这些原则实现）：
+//! - 变量出现次数不变、只改赋值/公式：必须由 `git log -G`（patch 文本正则）找到，不能只靠 `-S`
+//!   （pickaxe 计数）或 blame。
+//! - 同名变量在多文件/多作用域：返回全部候选位置，不替用户选第一个；`--path` 才收敛。
+//! - 冻结模型：只用模型/源码记录的 commit 查历史，绝不回退应用 HEAD，也不引入之后的修改。
+//! - dirty：未提交 diff 单独列在 `uncommitted`，凭空没有作者/时间/commit。
+//! - vendor 在外层 Desktop 检出里时，Git 根是 Desktop：identity.root 必须报 Desktop、identity 标
+//!   unverified（对官方 spec 而言），并且**拒绝**把外层 Desktop 历史当作官方 CoLM 历史查询。
+//! - 跨仓库对应只在有路径/唯一 basename/blob 相等/import commit 证据时给 verified/candidate；
+//!   仅内容相同不编造引入时间或唯一出处，独立结果照常返回。
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Map, Value};
+
+use super::Opts;
+
+const SCHEMA: u64 = 1;
+/// 默认返回最近 5 条；上限 20，防止一次查询把聊天上下文灌满。
+const DEFAULT_LIMIT: usize = 5;
+const MAX_LIMIT: usize = 20;
+/// 单个仓库最多看的 symbol 位置数/文件数：本功能是“定位 + 最近历史”，不是全仓库静态分析。
+const MAX_LOCATIONS: usize = 200;
+const MAX_HISTORY_FILES: usize = 50;
+const MAX_COMMITS_INSPECTED: usize = 400;
+const MAX_FILES_PER_COMMIT: usize = 20;
+const MAX_HUNKS_PER_COMMIT: usize = 40;
+const MAX_HUNK_LINES: usize = 40;
+const MAX_LINE_CHARS: usize = 300;
+const MAX_MESSAGE_CHARS: usize = 1200;
+const MAX_DETAIL_CHARS: usize = 400;
+const MAX_CROSS_LINKS: usize = 50;
+const MAX_LATER_COMMITS: usize = 10;
+const MAX_BLAME_LOOKUPS: usize = 40;
+/// 只索引源码/头文件。vendor 里还有 NetCDF 等二进制，git grep 已用文本过滤，这里再限定扩展名。
+const SOURCE_GLOBS: [&str; 6] = ["*.rs", "*.f90", "*.F90", "*.f", "*.h", "*.c"];
+const VENDOR_PREFIX: &str = "vendor/CoLM202X/";
+
+// ---------------------------------------------------------------------------------------------
+// 规范仓库与选择
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepoSpec {
+    key: &'static str,
+    owner: &'static str,
+    repo: &'static str,
+    url: &'static str,
+}
+
+const DESKTOP: RepoSpec = RepoSpec {
+    key: "desktop",
+    owner: "zhongwangwei",
+    repo: "CoLM-Desktop",
+    url: "https://github.com/zhongwangwei/CoLM-Desktop",
+};
+const UPSTREAM: RepoSpec = RepoSpec {
+    key: "colm_upstream",
+    owner: "CoLM-SYSU",
+    repo: "CoLM",
+    url: "https://github.com/CoLM-SYSU/CoLM",
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoKey {
+    Desktop,
+    Upstream,
+}
+
+impl RepoKey {
+    fn spec(self) -> RepoSpec {
+        match self {
+            Self::Desktop => DESKTOP,
+            Self::Upstream => UPSTREAM,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        self.spec().key
+    }
+    fn parse(text: &str) -> Result<Self> {
+        match text {
+            "desktop" => Ok(Self::Desktop),
+            "colm_upstream" => Ok(Self::Upstream),
+            other => bail!("unknown repository {other:?}; expected desktop or colm_upstream"),
+        }
+    }
+}
+
+/// `--repository`：查询对象。`selected` 只用于 history-track。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    Selected,
+    Desktop,
+    Upstream,
+    Both,
+}
+
+impl Selection {
+    fn parse(text: &str) -> Result<Self> {
+        match text {
+            "selected" => Ok(Self::Selected),
+            "desktop" => Ok(Self::Desktop),
+            "colm_upstream" => Ok(Self::Upstream),
+            "both" => Ok(Self::Both),
+            other => bail!(
+                "unknown repository {other:?}; expected selected, desktop, colm_upstream or both"
+            ),
+        }
+    }
+    fn includes(self, key: RepoKey) -> bool {
+        matches!(
+            (self, key),
+            (Self::Both, _)
+                | (Self::Desktop, RepoKey::Desktop)
+                | (Self::Upstream, RepoKey::Upstream)
+        )
+    }
+}
+
+/// `history-sync --repository` 不接受 selected（同步的是注册仓库）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncSelection {
+    Desktop,
+    Upstream,
+    Both,
+}
+
+impl SyncSelection {
+    fn parse(text: &str) -> Result<Self> {
+        match text {
+            "desktop" => Ok(Self::Desktop),
+            "colm_upstream" => Ok(Self::Upstream),
+            "both" => Ok(Self::Both),
+            other => bail!("unknown repository {other:?}; expected desktop, colm_upstream or both"),
+        }
+    }
+    fn includes(self, key: RepoKey) -> bool {
+        matches!(
+            (self, key),
+            (Self::Both, _)
+                | (Self::Desktop, RepoKey::Desktop)
+                | (Self::Upstream, RepoKey::Upstream)
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 只读 git 调用
+// ---------------------------------------------------------------------------------------------
+
+/// 运行只读 git 命令，返回 `(成功, stdout, stderr)`。stdin 关闭、无交互提示、无分页器。
+fn git_capture(dir: &Path, args: &[&str]) -> Result<(bool, String, String)> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("cannot run git in {}", dir.display()))?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// 成功返回 stdout（去掉结尾换行），失败带上 stderr 报可读错误。
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let (ok, stdout, stderr) = git_capture(dir, args)?;
+    if !ok {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            truncate(stderr.trim(), MAX_DETAIL_CHARS)
+        );
+    }
+    Ok(stdout.trim_end_matches(['\n', '\r']).to_owned())
+}
+
+/// 失败返回 None（用于 `git grep` 无命中、`rev-parse --verify` 不存在这类正常分支）。
+fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
+    let (ok, stdout, _) = git_capture(dir, args).ok()?;
+    ok.then(|| stdout.trim_end_matches(['\n', '\r']).to_owned())
+}
+
+fn git_root(dir: &Path) -> Option<String> {
+    if !dir.is_dir() {
+        return None;
+    }
+    git_ok(dir, &["rev-parse", "--show-toplevel"]).filter(|root| !root.is_empty())
+}
+
+fn same_dir(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// 这个路径自己就是一个检出根（不是“位于某个更大仓库里的子目录”）。
+fn own_checkout(dir: &Path) -> Option<PathBuf> {
+    let root = PathBuf::from(git_root(dir)?);
+    same_dir(&root, dir).then_some(root)
+}
+
+fn remote_url(dir: &Path) -> Option<String> {
+    git_ok(dir, &["config", "--get", "remote.origin.url"])
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
+/// 解析 GitHub remote（https/ssh 两种常见写法）。非 GitHub 或本地文件 remote 返回 None。
+fn parse_github_remote(url: &str) -> Option<(String, String)> {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let prefixes = [
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ];
+    let rest = prefixes
+        .iter()
+        .find_map(|prefix| url.strip_prefix(prefix))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((owner.to_owned(), repo.to_owned()))
+}
+
+/// 仓库身份：state 只对传入的规范 spec 判 verified；拿不准时保留真实 remote 标 unverified。
+/// `spec = None` 用于“当前选中源码自己的仓库”：匹配任一规范仓库才算 verified。
+fn identity_for(path: &Path, spec: Option<RepoSpec>) -> Value {
+    if !path.is_dir() {
+        return json!({"state": "missing", "root": Value::Null, "remote": Value::Null});
+    }
+    let Some(root) = git_root(path) else {
+        return json!({"state": "missing", "root": Value::Null, "remote": Value::Null});
+    };
+    let url = remote_url(path);
+    let parsed = url.as_deref().and_then(parse_github_remote);
+    let matches = |owner: &str, repo: &str, spec: RepoSpec| {
+        owner.eq_ignore_ascii_case(spec.owner) && repo.eq_ignore_ascii_case(spec.repo)
+    };
+    let state = match (&parsed, spec) {
+        (Some((owner, repo)), Some(spec)) if matches(owner, repo, spec) => "verified",
+        (Some((owner, repo)), None)
+            if matches(owner, repo, DESKTOP) || matches(owner, repo, UPSTREAM) =>
+        {
+            "verified"
+        }
+        _ => "unverified",
+    };
+    let remote = match url {
+        Some(url) => {
+            let (owner, repo) = parsed
+                .map(|(owner, repo)| (Value::String(owner), Value::String(repo)))
+                .unwrap_or((Value::Null, Value::Null));
+            json!({"url": url, "owner": owner, "repo": repo})
+        }
+        None => Value::Null,
+    };
+    json!({"state": state, "root": root, "remote": remote})
+}
+
+// ---------------------------------------------------------------------------------------------
+// 注册仓库（路径解析、默认分支、覆盖范围）
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct Repo {
+    key: RepoKey,
+    path: PathBuf,
+    /// 路径来自 `--desktop-path`/env 而不是 history-root/repos：在线同步不会覆盖它。
+    external: bool,
+}
+
+/// 路径覆盖：显式 flag 优先，其次环境变量（测试与高级用户用），否则 history-root/repos/<key>。
+#[derive(Debug, Clone, Default)]
+struct PathOverrides {
+    desktop: Option<PathBuf>,
+    upstream: Option<PathBuf>,
+}
+
+impl PathOverrides {
+    fn from_opts(opts: &Opts) -> Self {
+        let from_env = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            desktop: opts
+                .get("--desktop-path")
+                .map(PathBuf::from)
+                .or_else(|| from_env("COLM_HISTORY_DESKTOP_PATH")),
+            upstream: opts
+                .get("--upstream-path")
+                .map(PathBuf::from)
+                .or_else(|| from_env("COLM_HISTORY_UPSTREAM_PATH")),
+        }
+    }
+
+    fn resolve(&self, root: &Path, key: RepoKey) -> Repo {
+        let override_path = match key {
+            RepoKey::Desktop => self.desktop.clone(),
+            RepoKey::Upstream => self.upstream.clone(),
+        };
+        match override_path {
+            Some(path) => Repo {
+                key,
+                path,
+                external: true,
+            },
+            None => Repo {
+                key,
+                path: root.join("repos").join(key.as_str()),
+                external: false,
+            },
+        }
+    }
+}
+
+impl Repo {
+    fn spec(&self) -> RepoSpec {
+        self.key.spec()
+    }
+
+    fn is_existing_checkout(&self) -> bool {
+        own_checkout(&self.path).is_some()
+    }
+
+    fn identity(&self) -> Value {
+        identity_for(&self.path, Some(self.spec()))
+    }
+
+    /// 默认分支：先看 origin/HEAD（clone 后存在），再退当前 HEAD 分支。detached 时返回 None。
+    /// 不能假定两个仓库都叫 main。
+    fn default_branch(&self) -> Option<String> {
+        if let Some(text) = git_ok(
+            &self.path,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        ) {
+            if let Some(branch) = text.trim().strip_prefix("origin/") {
+                return Some(branch.to_owned());
+            }
+        }
+        if let Some(text) = git_ok(&self.path, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+            let text = text.trim();
+            if let Some(branch) = text.strip_prefix("origin/") {
+                if !branch.is_empty() {
+                    return Some(branch.to_owned());
+                }
+            }
+        }
+        let head = git_ok(&self.path, &["symbolic-ref", "--short", "HEAD"])?;
+        (!head.is_empty() && head != "HEAD").then_some(head)
+    }
+
+    fn rev(&self, rev: &str) -> Option<String> {
+        if rev.trim().is_empty() {
+            return None;
+        }
+        git_ok(
+            &self.path,
+            &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")],
+        )
+        .map(|sha| sha.trim().to_owned())
+        .filter(|sha| sha.len() == 40)
+    }
+
+    /// 查询终点：显式 `--ref` 优先，否则默认分支的 remote ref，再退 HEAD。
+    fn endpoint(&self, requested: Option<&str>) -> Result<Endpoint> {
+        let ref_name = match requested.filter(|text| !text.trim().is_empty()) {
+            Some(requested) => requested.trim().to_owned(),
+            None => match self.default_branch() {
+                Some(branch) => {
+                    let remote = format!("origin/{branch}");
+                    if self.rev(&remote).is_some() {
+                        remote
+                    } else {
+                        branch
+                    }
+                }
+                None => "HEAD".to_owned(),
+            },
+        };
+        let sha = self
+            .rev(&ref_name)
+            .with_context(|| format!("cannot resolve {ref_name} in {}", self.path.display()))?;
+        Ok(Endpoint { ref_name, sha })
+    }
+
+    fn is_shallow(&self) -> bool {
+        git_ok(&self.path, &["rev-parse", "--is-shallow-repository"])
+            .map(|text| text.trim() == "true")
+            .unwrap_or(false)
+    }
+
+    fn commit_count(&self) -> u64 {
+        git_ok(&self.path, &["rev-list", "--count", "HEAD"])
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn coverage(&self) -> Value {
+        let shallow = self.is_shallow();
+        let commits = if self.is_existing_checkout() {
+            self.commit_count()
+        } else {
+            0
+        };
+        json!({
+            "shallow": shallow,
+            "commits": commits,
+            "complete_history": !shallow,
+            "truncated": false,
+        })
+    }
+
+    fn is_dirty(&self) -> bool {
+        git_ok(&self.path, &["status", "--porcelain"])
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    fn errors(&self) -> Vec<String> {
+        if !self.path.is_dir() {
+            return vec![format!(
+                "repository path {} does not exist",
+                self.path.display()
+            )];
+        }
+        if own_checkout(&self.path).is_none() {
+            return vec![format!(
+                "{} is not an independent git checkout (git root is not this directory)",
+                self.path.display()
+            )];
+        }
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Endpoint {
+    ref_name: String,
+    sha: String,
+}
+
+impl Endpoint {
+    fn json(&self) -> Value {
+        json!({"ref": self.ref_name, "sha": self.sha})
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 注册表输出
+// ---------------------------------------------------------------------------------------------
+
+fn config_path(root: &Path) -> PathBuf {
+    root.join("repos.json")
+}
+
+fn read_config(root: &Path) -> Value {
+    let Ok(text) = std::fs::read_to_string(config_path(root)) else {
+        return json!({"schema": SCHEMA, "repos": {}});
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) if value.is_object() => value,
+        _ => json!({"schema": SCHEMA, "repos": {}}),
+    }
+}
+
+fn write_config(root: &Path, value: &Value) -> Result<()> {
+    std::fs::create_dir_all(root).with_context(|| format!("cannot create {}", root.display()))?;
+    let text = serde_json::to_string_pretty(value)?;
+    std::fs::write(config_path(root), text)
+        .with_context(|| format!("cannot write {}", config_path(root).display()))
+}
+
+fn repo_json(repo: &Repo, config: &Value) -> Value {
+    let identity = repo.identity();
+    let errors = repo.errors();
+    let default_branch = if repo.is_existing_checkout() {
+        repo.default_branch()
+    } else {
+        None
+    };
+    let synced = {
+        let value = config["repos"][repo.key.as_str()]["synced"].clone();
+        if value.is_null() {
+            Value::Null
+        } else {
+            value
+        }
+    };
+    let coverage = if repo.is_existing_checkout() {
+        repo.coverage()
+    } else {
+        json!({"shallow": false, "commits": 0, "complete_history": false, "truncated": false})
+    };
+    json!({
+        "key": repo.spec().key,
+        "owner": repo.spec().owner,
+        "repo": repo.spec().repo,
+        "url": repo.spec().url,
+        "path": repo.path.display().to_string(),
+        "identity": identity,
+        "default_branch": default_branch,
+        "synced": synced,
+        "coverage": coverage,
+        "errors": errors,
+    })
+}
+
+fn repos_json(root: &Path, overrides: &PathOverrides, config: &Value) -> Value {
+    let mut repos = Map::new();
+    for key in [RepoKey::Desktop, RepoKey::Upstream] {
+        let repo = overrides.resolve(root, key);
+        repos.insert(key.as_str().to_owned(), repo_json(&repo, config));
+    }
+    Value::Object(repos)
+}
+
+fn command_repos(opts: &Opts) -> Result<Value> {
+    let root = opts.need("--history-root")?;
+    let overrides = PathOverrides::from_opts(opts);
+    let config = read_config(&root);
+    Ok(json!({
+        "history_root": root.display().to_string(),
+        "repos": repos_json(&root, &overrides, &config),
+    }))
+}
+
+// ---------------------------------------------------------------------------------------------
+// history-sync
+// ---------------------------------------------------------------------------------------------
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn command_sync(opts: &Opts) -> Result<Value> {
+    let root = opts.need("--history-root")?;
+    let selection = SyncSelection::parse(&opts.need_str("--repository")?)?;
+    let offline = opts.get("--offline").is_some();
+    let overrides = PathOverrides::from_opts(opts);
+    let mut config = read_config(&root);
+    if !config["repos"].is_object() {
+        config["repos"] = json!({});
+    }
+    let mut actions = Map::new();
+    for key in [RepoKey::Desktop, RepoKey::Upstream] {
+        if !selection.includes(key) {
+            actions.insert(key.as_str().to_owned(), json!("skipped"));
+            continue;
+        }
+        let action = sync_one(&root, &overrides, key, offline, &mut config);
+        actions.insert(key.as_str().to_owned(), json!(action));
+    }
+    // 写入同步记录（即使某个仓库失败，另一侧的成功同步也该落盘）。
+    write_config(&root, &config)?;
+    Ok(json!({
+        "history_root": root.display().to_string(),
+        "repos": repos_json(&root, &overrides, &config),
+        "actions": Value::Object(actions),
+    }))
+}
+
+/// 同步一个仓库。返回动作名；错误写进 config 的 per-repo `errors` 里（输出时读回）。
+/// offline 只做本地发现，绝不 fetch/clone；显式指定的外部路径永远不会被 clone 覆盖。
+fn sync_one(
+    root: &Path,
+    overrides: &PathOverrides,
+    key: RepoKey,
+    offline: bool,
+    config: &mut Value,
+) -> &'static str {
+    let repo = overrides.resolve(root, key);
+    let _ = root;
+    if repo.is_existing_checkout() {
+        if !offline {
+            // 只更新 remote-tracking ref，不动用户工作区/当前分支。显式路径的仓库也允许 fetch：
+            // fetch 不改变工作区内容，但失败只影响本仓库，不中断另一侧。
+            let fetched = git_ok(&repo.path, &["fetch", "--prune", "origin"]).is_some();
+            if fetched {
+                record_sync(config, &repo);
+                return "fetched";
+            }
+            record_error(config, &repo, "git fetch origin failed");
+            // 仍记录当前本地状态，避免整个命令只剩错误。
+            record_sync(config, &repo);
+            return "error";
+        }
+        record_sync(config, &repo);
+        return "offline";
+    }
+    if repo.path.is_dir() {
+        record_error(
+            config,
+            &repo,
+            "path exists but is not an independent git checkout",
+        );
+        return "error";
+    }
+    if offline {
+        record_error(
+            config,
+            &repo,
+            "repository is missing and --offline forbids cloning it",
+        );
+        return "offline";
+    }
+    if repo.external {
+        record_error(
+            config,
+            &repo,
+            "explicit repository path does not exist; refusing to clone over it",
+        );
+        return "error";
+    }
+    let parent = repo.path.parent().map(Path::to_path_buf);
+    if let Some(parent) = parent {
+        if let Err(error) = std::fs::create_dir_all(&parent) {
+            record_error(
+                config,
+                &repo,
+                &format!("cannot create {}: {error}", parent.display()),
+            );
+            return "error";
+        }
+    }
+    let cloned = git_ok(
+        root,
+        &["clone", repo.spec().url, &repo.path.display().to_string()],
+    );
+    match cloned {
+        Some(_) => {
+            record_sync(config, &repo);
+            "cloned"
+        }
+        None => {
+            record_error(
+                config,
+                &repo,
+                "git clone failed (network, credentials or remote unavailable)",
+            );
+            "error"
+        }
+    }
+}
+
+fn record_sync(config: &mut Value, repo: &Repo) {
+    let Some(endpoint) = repo.endpoint(None).ok() else {
+        record_error(config, repo, "cannot resolve a query endpoint after sync");
+        return;
+    };
+    let branch = repo.default_branch();
+    config["repos"][repo.key.as_str()] = json!({
+        "default_branch": branch,
+        "synced": {
+            "ref": endpoint.ref_name,
+            "sha": endpoint.sha,
+            "at_unix_ms": now_unix_ms(),
+        },
+        "errors": [],
+    });
+}
+
+fn record_error(config: &mut Value, repo: &Repo, message: &str) {
+    let entry = config["repos"][repo.key.as_str()].clone();
+    let mut errors = entry["errors"].as_array().cloned().unwrap_or_default();
+    errors.push(json!(truncate(message, MAX_DETAIL_CHARS)));
+    config["repos"][repo.key.as_str()]["errors"] = Value::Array(errors);
+}
+
+// ---------------------------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------------------------
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for character in text.chars().take(max_chars) {
+        out.push(character);
+    }
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn truncate_line(line: &str) -> String {
+    truncate(line, MAX_LINE_CHARS)
+}
+
+/// `-G` 用正则：把 symbol 当字面量，逐个转义正则元字符，避免 `$`/`.` 之类改变匹配语义。
+fn escape_regex(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() * 2);
+    for character in text.chars() {
+        if !character.is_ascii_alphanumeric() && character != '_' {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn validate_symbol(symbol: &str) -> Result<()> {
+    if symbol.trim().is_empty() {
+        bail!("--symbol must not be empty");
+    }
+    if symbol.chars().count() > 200 {
+        bail!("--symbol is longer than 200 characters");
+    }
+    if symbol
+        .chars()
+        .any(|character| character.is_control() || character == '\n')
+    {
+        bail!("--symbol must be a single printable line");
+    }
+    Ok(())
+}
+
+/// 只接受仓库内相对路径：绝对路径和 `..` 都会被 git pathspec 解释出仓库外，直接拒绝。
+fn sanitize_relative_path(path: &str) -> Result<String> {
+    let path = path.trim().trim_start_matches("./");
+    if path.is_empty() {
+        bail!("--path must not be empty");
+    }
+    let parsed = Path::new(path);
+    if parsed.is_absolute()
+        || parsed.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("--path must be a path inside the repository");
+    }
+    Ok(path.to_owned())
+}
+
+fn parse_sha(text: &str) -> Result<String> {
+    let sha = text.trim().to_ascii_lowercase();
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("--sha must be a full 40-hex commit SHA");
+    }
+    Ok(sha)
+}
+
+fn parse_limit(opts: &Opts, limits: &mut Vec<String>) -> Result<usize> {
+    let requested = match opts.get("--limit") {
+        None => DEFAULT_LIMIT,
+        Some(text) => text
+            .parse::<usize>()
+            .with_context(|| format!("--limit {text:?} is not a number"))?,
+    };
+    if requested > MAX_LIMIT {
+        limits.push(format!("limit clamped from {requested} to {MAX_LIMIT}"));
+        Ok(MAX_LIMIT)
+    } else if requested == 0 {
+        limits.push("limit 0 returns no commits".to_owned());
+        Ok(0)
+    } else {
+        Ok(requested)
+    }
+}
+
+fn parse_offset(opts: &Opts) -> Result<usize> {
+    match opts.get("--offset") {
+        None => Ok(0),
+        Some(text) => text
+            .parse::<usize>()
+            .with_context(|| format!("--offset {text:?} is not a number")),
+    }
+}
+
+fn push_limit(limits: &mut Vec<String>, note: impl Into<String>) {
+    let note = note.into();
+    if !limits.contains(&note) {
+        limits.push(note);
+    }
+}
+
+fn kind_for_path(path: &str) -> &'static str {
+    if path.ends_with(".rs") {
+        "rust"
+    } else {
+        "fortran"
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// diff / patch 解析（历史与 commit 详情共用）
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+struct Hunk {
+    old_start: usize,
+    old_lines: usize,
+    new_start: usize,
+    new_lines: usize,
+    old_code: Vec<String>,
+    new_code: Vec<String>,
+    truncated: bool,
+}
+
+impl Hunk {
+    fn touches(&self, symbol: &str) -> bool {
+        self.old_code.iter().any(|line| line.contains(symbol))
+            || self.new_code.iter().any(|line| line.contains(symbol))
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "old_start": self.old_start,
+            "old_lines": self.old_lines,
+            "new_start": self.new_start,
+            "new_lines": self.new_lines,
+            "old_code": self.old_code,
+            "new_code": self.new_code,
+            "truncated": self.truncated,
+        })
+    }
+}
+
+fn parse_hunk_position(text: &str) -> Option<(usize, usize)> {
+    // "a,b" 或 "a"；b 省略代表 1 行。
+    let mut parts = text.split(',');
+    let start = parts.next()?.parse().ok()?;
+    let lines = match parts.next() {
+        Some(lines) => lines.parse().ok()?,
+        None => 1,
+    };
+    Some((start, lines))
+}
+
+fn parse_hunk_header(line: &str) -> Option<Hunk> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    let (old_start, old_lines) = parse_hunk_position(old_part)?;
+    let (new_start, new_lines) = parse_hunk_position(new_part)?;
+    Some(Hunk {
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        ..Hunk::default()
+    })
+}
+
+/// 解析统一 diff：`diff --git` / `---` / `+++` / `@@`。只收 hunk 内的 +/- 行（-U0 没有上下文行）。
+/// 改名（`--- a/old` `+++ b/new`）按新路径记；删除文件（`+++ /dev/null`）按旧路径记。
+fn parse_patch(text: &str) -> Vec<(String, Vec<Hunk>)> {
+    let mut files: Vec<(String, Vec<Hunk>)> = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut pending_old: Option<String> = None;
+    let mut hunk: Option<Hunk> = None;
+    let mut flush_hunk = |hunk: &mut Option<Hunk>, current: &mut Option<String>| {
+        if let (Some(hunk), Some(path)) = (hunk.take(), current.clone()) {
+            if !hunk.old_code.is_empty() || !hunk.new_code.is_empty() {
+                match files.iter_mut().find(|(existing, _)| *existing == path) {
+                    Some((_, hunks)) => hunks.push(hunk),
+                    None => {
+                        let path_clone = path.clone();
+                        files.push((path_clone, vec![hunk]));
+                    }
+                }
+            }
+        }
+    };
+    for line in text.lines() {
+        if line.starts_with("diff --git ") {
+            flush_hunk(&mut hunk, &mut current_path);
+            current_path = None;
+            pending_old = None;
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            pending_old = rest.strip_prefix("a/").map(str::to_owned);
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            let new_path = rest.strip_prefix("b/").unwrap_or(rest);
+            if new_path == "/dev/null" {
+                current_path = pending_old.take();
+            } else {
+                current_path = Some(new_path.to_owned());
+            }
+        } else if line.starts_with("@@ ") {
+            flush_hunk(&mut hunk, &mut current_path);
+            hunk = parse_hunk_header(line);
+        } else if let Some(active) = hunk.as_mut() {
+            if let Some(code) = line.strip_prefix('+') {
+                if !line.starts_with("+++") && !code.starts_with("++") {
+                    active.new_code.push(truncate_line(code));
+                }
+            } else if let Some(code) = line.strip_prefix('-') {
+                if !line.starts_with("---") && !code.starts_with("--") {
+                    active.old_code.push(truncate_line(code));
+                }
+            }
+        }
+    }
+    flush_hunk(&mut hunk, &mut current_path);
+    files
+}
+
+/// 一个 hunk 的两侧各最多保留 40 行；长行已截断。返回是否发生了截断。
+fn cap_hunk(hunk: &mut Hunk) -> bool {
+    let mut truncated = false;
+    if hunk.old_code.len() > MAX_HUNK_LINES {
+        hunk.old_code.truncate(MAX_HUNK_LINES);
+        truncated = true;
+    }
+    if hunk.new_code.len() > MAX_HUNK_LINES {
+        hunk.new_code.truncate(MAX_HUNK_LINES);
+        truncated = true;
+    }
+    hunk.truncated |= truncated;
+    truncated
+}
+
+// ---------------------------------------------------------------------------------------------
+// 定位：git grep（仓库）或当前源码扫描（无 .git）
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct Location {
+    path: String,
+    line: usize,
+    scope: Option<String>,
+    kind: &'static str,
+}
+
+impl Location {
+    fn json(&self, commit: Option<&str>) -> Value {
+        json!({
+            "path": self.path,
+            "line": self.line,
+            "scope": self.scope,
+            "kind": self.kind,
+            "commit": commit,
+        })
+    }
+}
+
+/// 仓库内定位：`git grep --fixed-strings` 在整个 tree 上找字面 symbol，返回全部候选位置。
+fn grep_locations(
+    dir: &Path,
+    endpoint_sha: &str,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Vec<Location> {
+    let mut args = vec![
+        "grep",
+        "-n",
+        "--fixed-strings",
+        "--no-color",
+        "-e",
+        symbol,
+        endpoint_sha,
+        "--",
+    ];
+    match path_filter {
+        Some(path) => args.push(path),
+        None => args.extend(SOURCE_GLOBS),
+    }
+    let Some(output) = git_ok(dir, &args) else {
+        return Vec::new();
+    };
+    let mut locations = Vec::new();
+    let mut contents: HashMap<String, Vec<String>> = HashMap::new();
+    // `git grep <tree-ish>` 的输出会在每行前加 `<rev>:`；先剥掉，否则第一段会被当成路径。
+    let rev_prefix = format!("{endpoint_sha}:");
+    for line in output.lines() {
+        let line = line.strip_prefix(&rev_prefix).unwrap_or(line);
+        // 形如 path:line:content；路径含冒号在仓库相对路径里极少见，取前两个冒号分段即可。
+        let mut parts = line.splitn(3, ':');
+        let (Some(path), Some(number), Some(_content)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Ok(line_number) = number.parse::<usize>() else {
+            continue;
+        };
+        if locations.len() >= MAX_LOCATIONS {
+            push_limit(limits, format!("locations capped at {MAX_LOCATIONS}"));
+            break;
+        }
+        if path.starts_with(".git/") {
+            continue;
+        }
+        let scope = scope_for(dir, endpoint_sha, path, line_number, &mut contents);
+        locations.push(Location {
+            path: path.to_owned(),
+            line: line_number,
+            scope,
+            kind: kind_for_path(path),
+        });
+    }
+    locations
+}
+
+/// 附近作用域：从命中行往上找最近的 `fn`/`subroutine`/`function`/`module` 声明（文本推断，可 null）。
+fn scope_for(
+    dir: &Path,
+    rev: &str,
+    path: &str,
+    line: usize,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Option<String> {
+    let key = format!("{rev}:{path}");
+    let lines = match cache.get(&key) {
+        Some(lines) => lines.clone(),
+        None => {
+            let content = git_ok(dir, &["show", &key])?;
+            let lines: Vec<String> = content.lines().map(str::to_owned).collect();
+            cache.insert(key, lines.clone());
+            lines
+        }
+    };
+    if lines.is_empty() {
+        return None;
+    }
+    let scopes = scope_keywords(path);
+    let upper = line.min(lines.len());
+    for index in (0..upper).rev() {
+        let text = lines[index].trim();
+        if text.is_empty() {
+            continue;
+        }
+        for keyword in scopes {
+            if let Some(found) = extract_scope(text, keyword) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn scope_keywords(path: &str) -> &'static [&'static str] {
+    if path.ends_with(".rs") {
+        &["fn ", "mod ", "impl "]
+    } else {
+        &["subroutine ", "function ", "module "]
+    }
+}
+
+fn extract_scope(line: &str, keyword: &str) -> Option<String> {
+    // 只把“行首附近”的声明当作用域：注释里的 "fn foo" 不该当作用域。
+    let without_comment = if let Some((before, _)) = line.split_once("//") {
+        before
+    } else if line.trim_start().starts_with('!') {
+        return None;
+    } else {
+        line
+    };
+    let haystack = without_comment.to_ascii_lowercase();
+    let lowered = keyword.to_ascii_lowercase();
+    let position = haystack.find(&lowered)?;
+    // Rust 的 `fn ` 前面可能有 pub/async/const；允许这些前缀，但拒绝字符串/调用里的偶然命中
+    // （例如 `map(|fn f|` 这种不现实；这里只在行首 80 字符内取）。
+    if position > 80 {
+        return None;
+    }
+    let rest = &without_comment[position + keyword.len()..];
+    let name: String = rest
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || matches!(character, '_' | ':' | '<'))
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    Some(truncate(&format!("{} {}", keyword.trim_end(), name), 120))
+}
+
+/// `--source` 无 .git 时：直接扫当前源码目录（可读文件、不跟随符号链接，最多 2000 个文件）。
+fn scan_locations(
+    root: &Path,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Vec<Location> {
+    let mut files = Vec::new();
+    collect_source_files(root, &mut files, 0, 2000);
+    files.sort();
+    let mut locations = Vec::new();
+    for file in files {
+        let relative = file
+            .strip_prefix(root)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file.display().to_string());
+        if let Some(filter) = path_filter {
+            if relative != filter {
+                continue;
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains(symbol) {
+                continue;
+            }
+            if locations.len() >= MAX_LOCATIONS {
+                push_limit(limits, format!("locations capped at {MAX_LOCATIONS}"));
+                return locations;
+            }
+            let scope = nearby_scope_from_lines(&relative, &lines, index + 1);
+            locations.push(Location {
+                path: relative.clone(),
+                line: index + 1,
+                scope,
+                kind: kind_for_path(&relative),
+            });
+        }
+    }
+    locations
+}
+
+fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>, depth: usize, cap: usize) {
+    if depth > 8 || files.len() >= cap {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if files.len() >= cap {
+            return;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            collect_source_files(&path, files, depth + 1, cap);
+        } else if file_type.is_file() && is_source_path(&path) {
+            files.push(path);
+        }
+    }
+}
+
+fn is_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "rs" | "f90" | "F90" | "f" | "h" | "c"))
+}
+
+fn nearby_scope_from_lines(path: &str, lines: &[&str], line: usize) -> Option<String> {
+    let scopes = scope_keywords(path);
+    let upper = line.min(lines.len());
+    for index in (0..upper).rev() {
+        let text = lines[index].trim();
+        if text.is_empty() {
+            continue;
+        }
+        for keyword in scopes {
+            if let Some(found) = extract_scope(text, keyword) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------------------------
+// 修改历史：git log -G/-S（带 --follow）+ blame 补最后触摸
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+struct CandidateCommit {
+    sha: String,
+    author: String,
+    author_time: i64,
+    committer_time: i64,
+    summary: String,
+    relevance: BTreeSet<&'static str>,
+    files: BTreeMap<String, Vec<Hunk>>,
+    truncated: bool,
+}
+
+struct ParsedPatchCommit {
+    sha: String,
+    author: String,
+    author_time: i64,
+    committer_time: i64,
+    summary: String,
+    files: Vec<(String, Vec<Hunk>)>,
+}
+
+const LOG_FORMAT: &str = "--format=%x1e%H%x1f%an%x1f%at%x1f%ct%x1f%s";
+
+fn parse_log_patches(output: &str) -> Vec<ParsedPatchCommit> {
+    let mut commits = Vec::new();
+    for chunk in output.split('\u{1e}').skip(1) {
+        let mut lines = chunk.lines();
+        let Some(header) = lines.next() else {
+            continue;
+        };
+        let fields: Vec<&str> = header.split('\u{1f}').collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        let patch: String = lines.collect::<Vec<_>>().join("\n");
+        commits.push(ParsedPatchCommit {
+            sha: fields[0].to_owned(),
+            author: fields[1].to_owned(),
+            author_time: fields[2].parse().unwrap_or(0),
+            committer_time: fields[3].parse().unwrap_or(0),
+            summary: truncate(fields[4], MAX_DETAIL_CHARS),
+            files: parse_patch(&patch),
+        });
+    }
+    commits
+}
+
+fn merge_commit(
+    map: &mut BTreeMap<String, CandidateCommit>,
+    parsed: ParsedPatchCommit,
+    symbol: &str,
+    relevance: &'static str,
+) -> bool {
+    if map.len() >= MAX_COMMITS_INSPECTED {
+        return false;
+    }
+    let mut relevant_files = Vec::new();
+    for (path, mut hunks) in parsed.files {
+        hunks.retain(|hunk| hunk.touches(symbol));
+        if hunks.is_empty() {
+            continue;
+        }
+        let mut capped = Vec::new();
+        for mut hunk in hunks.into_iter().take(MAX_HUNKS_PER_COMMIT) {
+            cap_hunk(&mut hunk);
+            capped.push(hunk);
+        }
+        relevant_files.push((path, capped));
+    }
+    if relevant_files.is_empty() {
+        return false;
+    }
+    let entry = map
+        .entry(parsed.sha.clone())
+        .or_insert_with(|| CandidateCommit {
+            sha: parsed.sha,
+            author: parsed.author,
+            author_time: parsed.author_time,
+            committer_time: parsed.committer_time,
+            summary: parsed.summary,
+            ..CandidateCommit::default()
+        });
+    entry.relevance.insert(relevance);
+    for (path, hunks) in relevant_files {
+        entry.files.entry(path).or_default().extend(hunks);
+    }
+    true
+}
+
+/// 一个文件在终点上的候选修改 commit：-G 与 -S 的并集，再补 blame 命中的最后触摸。
+fn file_history(
+    dir: &Path,
+    endpoint_sha: &str,
+    path: &str,
+    symbol: &str,
+    limits: &mut Vec<String>,
+) -> BTreeMap<String, CandidateCommit> {
+    let mut map = BTreeMap::new();
+    let mut truncated = false;
+    for (pickaxe, relevance) in [
+        (format!("-G{}", escape_regex(symbol)), "pickaxe-G"),
+        (format!("-S{symbol}"), "pickaxe-S"),
+    ] {
+        let output = git_ok(
+            dir,
+            &[
+                "log",
+                "--follow",
+                &pickaxe,
+                "-p",
+                "-U0",
+                LOG_FORMAT,
+                endpoint_sha,
+                "--",
+                path,
+            ],
+        )
+        .unwrap_or_default();
+        for parsed in parse_log_patches(&output) {
+            if !merge_commit(&mut map, parsed, symbol, relevance) {
+                truncated = true;
+            }
+        }
+    }
+    if truncated {
+        push_limit(
+            limits,
+            format!("commits inspected capped at {MAX_COMMITS_INSPECTED}"),
+        );
+    }
+    map
+}
+
+/// 用 blame 补齐 -G/-S 漏掉的“最后一次触摸”，但只保留 diff 里真的含 symbol 的提交：
+/// blame 只能说某行最后一次由谁改，不能单独证明那次改的是这个变量。
+fn add_blame_commits(
+    dir: &Path,
+    endpoint_sha: &str,
+    locations: &[Location],
+    symbol: &str,
+    map: &mut BTreeMap<String, CandidateCommit>,
+    limits: &mut Vec<String>,
+) {
+    let mut shas: BTreeMap<String, String> = BTreeMap::new();
+    let mut looked_up = 0usize;
+    'outer: for location in locations {
+        for line in location.line..=location.line {
+            if looked_up >= MAX_BLAME_LOOKUPS {
+                push_limit(
+                    limits,
+                    format!("blame lookups capped at {MAX_BLAME_LOOKUPS}"),
+                );
+                break 'outer;
+            }
+            looked_up += 1;
+            let range = format!("{line},{line}");
+            let Some(output) = git_ok(
+                dir,
+                &[
+                    "blame",
+                    "--porcelain",
+                    "-L",
+                    &range,
+                    endpoint_sha,
+                    "--",
+                    &location.path,
+                ],
+            ) else {
+                continue;
+            };
+            let Some(first) = output.lines().next() else {
+                continue;
+            };
+            let Some(sha) = first.split_whitespace().next() else {
+                continue;
+            };
+            if sha.len() == 40 && !sha.bytes().all(|byte| byte == b'0') {
+                shas.entry(sha.to_owned())
+                    .or_insert_with(|| location.path.clone());
+            }
+        }
+    }
+    for (sha, path) in shas {
+        if map.contains_key(&sha) {
+            continue;
+        }
+        let output =
+            git_ok(dir, &["show", "-U0", "--format=", &sha, "--", &path]).unwrap_or_default();
+        let mut parsed =
+            parse_log_patches(&format!("\u{1e}{sha}\u{1f}blame\u{1f}0\u{1f}0\u{1f}blame",));
+        if let Some(commit) = parsed.pop() {
+            let mut commit = commit;
+            commit.files = parse_patch(&output);
+            if merge_commit(map, commit, symbol, "blame") {
+                continue;
+            }
+        }
+        // show 的输出没有匹配 symbol 的 hunk：不把仅有 blame 的记录当证据。
+        push_limit(
+            limits,
+            format!("blame commit {sha} has no symbol-bearing diff; not listed"),
+        );
+    }
+}
+
+fn commit_json(dir: &Path, commit: &CandidateCommit, files_capped: &mut bool) -> Value {
+    let message = git_ok(dir, &["show", "-s", "--format=%B", &commit.sha]).unwrap_or_default();
+    let reason = reason_for_message(&message);
+    let mut files = Vec::new();
+    for (path, hunks) in commit.files.iter().take(MAX_FILES_PER_COMMIT) {
+        files.push(json!({
+            "path": path,
+            "hunks": hunks.iter().map(Hunk::json).collect::<Vec<_>>(),
+        }));
+    }
+    if commit.files.len() > MAX_FILES_PER_COMMIT {
+        *files_capped = true;
+    }
+    let mut relevance: Vec<&str> = commit.relevance.iter().copied().collect();
+    relevance.sort_unstable();
+    json!({
+        "sha": commit.sha,
+        "author": commit.author,
+        "author_time_unix": commit.author_time,
+        "committer_time_unix": commit.committer_time,
+        "summary": commit.summary,
+        "reason": reason,
+        "files": files,
+        "relevance": relevance,
+        "uncommitted": false,
+        "truncated": commit.truncated || commit.files.len() > MAX_FILES_PER_COMMIT,
+    })
+}
+
+/// 理由只从提交说明读：有正文或主语足够像一句话算 documented，否则 not_recorded。
+/// 这里不做语义推断——推断属于上层（另外标记 inferred），CLI 只给可核验原文摘录。
+fn reason_for_message(message: &str) -> Value {
+    let message = message.trim();
+    let subject = message.lines().next().unwrap_or("");
+    let has_body = message.lines().skip(1).any(|line| !line.trim().is_empty());
+    let documented = has_body || subject.split_whitespace().count() >= 3;
+    json!({
+        "status": if documented { "documented" } else { "not_recorded" },
+        "basis": "commit_message",
+        "excerpt": truncate(message, MAX_MESSAGE_CHARS),
+    })
+}
+
+/// 未提交 diff：单独一组记录，没有 commit/作者/时间。`git diff HEAD` 同时覆盖暂存区与工作区。
+fn uncommitted_entries(
+    dir: &Path,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Vec<Value> {
+    let pickaxe = format!("-G{}", escape_regex(symbol));
+    let mut args = vec!["diff", "HEAD", "-U0", pickaxe.as_str(), "--"];
+    if let Some(path) = path_filter {
+        args.push(path);
+    }
+    let Some(output) = git_ok(dir, &args) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for (path, mut hunks) in parse_patch(&output) {
+        hunks.retain(|hunk| hunk.touches(symbol));
+        if hunks.is_empty() {
+            continue;
+        }
+        for hunk in &mut hunks {
+            cap_hunk(hunk);
+        }
+        entries.push(json!({
+            "path": path,
+            "uncommitted": true,
+            "hunks": hunks.iter().map(Hunk::json).collect::<Vec<_>>(),
+        }));
+        if entries.len() >= MAX_FILES_PER_COMMIT {
+            push_limit(
+                limits,
+                format!("uncommitted files capped at {MAX_FILES_PER_COMMIT}"),
+            );
+            break;
+        }
+    }
+    entries
+}
+
+// ---------------------------------------------------------------------------------------------
+// 一个查询目标（注册仓库或选中源码）的结果
+// ---------------------------------------------------------------------------------------------
+
+struct Target<'a> {
+    key: &'a str,
+    spec: Option<RepoSpec>,
+    dir: &'a Path,
+    endpoint: Endpoint,
+}
+
+struct TargetReport {
+    json: Value,
+    /// 返回的 commit 及其涉及文件：跨仓库映射只用“已返回的”上游文件，避免拿未展示的证据编结论。
+    commits: Vec<(String, Vec<String>)>,
+    files: Vec<String>,
+    endpoint_sha: String,
+    truncated: bool,
+}
+
+fn query_target(
+    target: &Target<'_>,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limit: usize,
+    offset: usize,
+    limits: &mut Vec<String>,
+) -> TargetReport {
+    let identity = identity_for(target.dir, target.spec);
+    let mut notes = Vec::new();
+    let shallow = git_ok(target.dir, &["rev-parse", "--is-shallow-repository"])
+        .map(|text| text.trim() == "true")
+        .unwrap_or(false);
+    if shallow {
+        push_limit(limits, "history is shallow; older commits may be missing");
+        notes.push("repository is a shallow clone; older history is unavailable".to_owned());
+    }
+    let locations = grep_locations(
+        target.dir,
+        &target.endpoint.sha,
+        symbol,
+        path_filter,
+        limits,
+    );
+    if locations.is_empty() {
+        notes.push(format!(
+            "symbol not found at {} ({})",
+            target.endpoint.ref_name, target.endpoint.sha
+        ));
+    }
+    let mut files: Vec<String> = locations
+        .iter()
+        .map(|location| location.path.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if files.len() > MAX_HISTORY_FILES {
+        push_limit(
+            limits,
+            format!("history files capped at {MAX_HISTORY_FILES}"),
+        );
+        files.truncate(MAX_HISTORY_FILES);
+    }
+    let mut map: BTreeMap<String, CandidateCommit> = BTreeMap::new();
+    for path in &files {
+        for (sha, commit) in file_history(target.dir, &target.endpoint.sha, path, symbol, limits) {
+            map.entry(sha).or_insert(commit);
+        }
+    }
+    add_blame_commits(
+        target.dir,
+        &target.endpoint.sha,
+        &locations,
+        symbol,
+        &mut map,
+        limits,
+    );
+    let mut commits: Vec<CandidateCommit> = map.into_values().collect();
+    commits.sort_by(|left, right| {
+        right
+            .committer_time
+            .cmp(&left.committer_time)
+            .then_with(|| left.sha.cmp(&right.sha))
+    });
+    let total = commits.len();
+    let start = offset.min(total);
+    let end = (offset + limit).min(total);
+    let truncated = total > end;
+    if truncated {
+        push_limit(
+            limits,
+            format!("{total} matching commits; returning {start}..{end}"),
+        );
+    }
+    let mut files_capped = false;
+    let commit_values: Vec<Value> = commits[start..end]
+        .iter()
+        .map(|commit| {
+            let mut capped = files_capped;
+            let value = {
+                let mut local_capped = capped;
+                let value = commit_json(target.dir, commit, &mut local_capped);
+                capped = local_capped;
+                value
+            };
+            files_capped = capped;
+            value
+        })
+        .collect();
+    if files_capped {
+        push_limit(
+            limits,
+            format!("commit files capped at {MAX_FILES_PER_COMMIT}"),
+        );
+    }
+    let uncommitted = uncommitted_entries(target.dir, symbol, path_filter, limits);
+    let commit_cross: Vec<(String, Vec<String>)> = commit_values
+        .iter()
+        .map(|value| {
+            let sha = value["sha"].as_str().unwrap_or_default().to_owned();
+            let files = value["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|file| file["path"].as_str().map(str::to_owned))
+                .collect();
+            (sha, files)
+        })
+        .collect();
+    let changed_files = commit_cross
+        .iter()
+        .flat_map(|(_, files)| files.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let json = json!({
+        "key": target.key,
+        "owner": target.spec.map(|spec| spec.owner).unwrap_or(""),
+        "repo": target.spec.map(|spec| spec.repo).unwrap_or(""),
+        "url": target.spec.map(|spec| spec.url),
+        "identity": identity,
+        "endpoint": target.endpoint.json(),
+        "history": "verified",
+        "locations": locations.iter().map(|location| location.json(Some(&target.endpoint.sha))).collect::<Vec<_>>(),
+        "commits": commit_values,
+        "uncommitted": uncommitted,
+        "notes": notes,
+        "errors": [],
+    });
+    TargetReport {
+        json,
+        commits: commit_cross,
+        files: changed_files,
+        endpoint_sha: target.endpoint.sha.clone(),
+        truncated,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 当前选中源码：解析、fingerprint、overlay、无历史时的降级结果
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct SourceInfo {
+    mode: String,
+    source_dir: Option<PathBuf>,
+    fingerprint: Option<String>,
+    dirty: bool,
+    commit: Option<String>,
+}
+
+impl SourceInfo {
+    fn json(&self) -> Value {
+        json!({
+            "mode": self.mode,
+            "source_dir": self.source_dir.as_ref().map(|path| path.display().to_string()),
+            "fingerprint": self.fingerprint,
+            "dirty": self.dirty,
+            "commit": self.commit,
+        })
+    }
+}
+
+/// 从 `--model-json` 里取稳定字段。接受两类形状（都已存在或即将被 agent 层使用）：
+/// 1) 扁平的 `{"mode","source_dir","commit","fingerprint"}`；
+/// 2) ModelContext 形状 `{"model":{…},"source_dir":…,"code":{"commit":…,"source_sha256":…}}`。
+fn model_commit(value: &Value) -> Option<String> {
+    [value["code"]["commit"].as_str(), value["commit"].as_str()]
+        .into_iter()
+        .flatten()
+        .find(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|sha| sha.to_ascii_lowercase())
+}
+
+fn model_fingerprint(value: &Value) -> Option<String> {
+    [
+        value["code"]["source_sha256"].as_str(),
+        value["fingerprint"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|fingerprint| fingerprint.len() == 64)
+    .map(str::to_owned)
+}
+
+fn source_mode(value: Option<&Value>) -> &'static str {
+    let Some(value) = value else {
+        return "app";
+    };
+    if let Some(mode) = value["mode"].as_str() {
+        return match mode {
+            "frozen_model" | "workspace" | "app" | "repository" => {
+                // 静态 str 匹配；下面的兜底保证只返回已知值。
+                match mode {
+                    "frozen_model" => "frozen_model",
+                    "workspace" => "workspace",
+                    "repository" => "repository",
+                    _ => "app",
+                }
+            }
+            _ => "app",
+        };
+    }
+    if value["model"].is_object() || value["model_id"].is_string() || value["revision"].is_number()
+    {
+        "frozen_model"
+    } else if value["workspace"].is_object() || value["workspace"].is_string() {
+        "workspace"
+    } else {
+        "app"
+    }
+}
+
+fn resolve_source(opts: &Opts, model_json: Option<&Value>) -> SourceInfo {
+    let source_dir = opts.get("--source").map(PathBuf::from).or_else(|| {
+        model_json
+            .and_then(|value| value["source_dir"].as_str())
+            .map(PathBuf::from)
+    });
+    let commit = model_json.and_then(model_commit);
+    let mode = source_mode(model_json).to_owned();
+    let mut info = SourceInfo {
+        mode,
+        source_dir: source_dir.clone(),
+        fingerprint: model_json.and_then(model_fingerprint),
+        dirty: false,
+        commit: commit.clone(),
+    };
+    if info.fingerprint.is_none() {
+        if let Some(dir) = &source_dir {
+            info.fingerprint = fingerprint_dir(dir);
+        }
+    }
+    if let Some(dir) = &source_dir {
+        if own_checkout(dir).is_some() {
+            info.dirty = git_ok(dir, &["status", "--porcelain"])
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false);
+        }
+    }
+    info
+}
+
+/// 源码内容指纹：排序后的 `相对路径\0sha256\n`（与文档快照同一思路：内容敏感、不含 mtime）。
+fn fingerprint_dir(root: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut files = Vec::new();
+    collect_source_files(root, &mut files, 0, 2000);
+    files.sort();
+    let mut hasher = Sha256::new();
+    for file in &files {
+        let relative = file
+            .strip_prefix(root)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file.display().to_string());
+        let Ok(bytes) = std::fs::read(file) else {
+            continue;
+        };
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        hasher.update(relative.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// 当前版本关系：只比较**可读字节**，绝不用 commit 祖先关系断言“这处修改仍生效”。
+fn overlay_for(
+    source: &SourceInfo,
+    dir: &Path,
+    endpoint_sha: &str,
+    locations: &[Location],
+) -> Value {
+    let Some(source_dir) = &source.source_dir else {
+        return json!({
+            "status": "not_checked",
+            "basis": [],
+            "notes": ["no --source directory was given; current source bytes were not compared"],
+        });
+    };
+    let paths: BTreeSet<&str> = locations
+        .iter()
+        .map(|location| location.path.as_str())
+        .collect();
+    if paths.is_empty() {
+        return json!({
+            "status": "unknown",
+            "basis": [],
+            "notes": ["the symbol was not located, so the current source cannot be compared"],
+        });
+    }
+    let mut compared = 0usize;
+    let mut mismatched = Vec::new();
+    for path in paths {
+        let Ok(local) = std::fs::read(source_dir.join(path)) else {
+            mismatched.push(format!(
+                "{path}: current source file is missing or unreadable"
+            ));
+            continue;
+        };
+        // 必须用未 trim 的原始 stdout：git_ok 会去掉结尾换行，拿它比字节会把“只差行尾”误判为不一致。
+        let (ok, blob, _) = match git_capture(dir, &["show", &format!("{endpoint_sha}:{path}")]) {
+            Ok(captured) => captured,
+            Err(_) => {
+                mismatched.push(format!("{path}: cannot read the queried commit"));
+                continue;
+            }
+        };
+        if !ok {
+            mismatched.push(format!("{path}: no file at the queried commit"));
+            continue;
+        }
+        compared += 1;
+        if local != blob.as_bytes() {
+            mismatched.push(format!(
+                "{path}: current bytes differ from the queried commit"
+            ));
+        }
+    }
+    if !mismatched.is_empty() {
+        return json!({
+            "status": "unknown",
+            "basis": ["content-compared"],
+            "notes": [
+                format!(
+                    "current source differs from the queried commit in {} of {} file(s): {}",
+                    mismatched.len(),
+                    compared.max(mismatched.len()),
+                    truncate(&mismatched.join("; "), MAX_DETAIL_CHARS)
+                ),
+                "a later revert or overlay cannot be inferred from commit ancestry alone".to_owned(),
+            ],
+        });
+    }
+    json!({
+        "status": "candidate",
+        "basis": ["content-compared"],
+        "notes": [
+            format!("current source bytes equal the queried commit for {compared} file(s)"),
+            "content equality is evidence of the current state, not proof of which commit is in force".to_owned(),
+        ],
+    })
+}
+
+/// 选中源码没有可信历史时的降级结果：只给位置与指纹，不编造 commit。
+fn no_history_report(
+    source: &SourceInfo,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Value {
+    let mut locations = Vec::new();
+    let mut notes = Vec::new();
+    if let Some(dir) = &source.source_dir {
+        locations = scan_locations(dir, symbol, path_filter, limits);
+        if locations.is_empty() {
+            notes.push(format!(
+                "symbol {symbol:?} was not found in the current source directory"
+            ));
+        }
+        notes.push(
+            "current source is readable but has no git checkout and no trusted model commit; \
+             history is unavailable rather than empty"
+                .to_owned(),
+        );
+    } else {
+        notes.push(
+            "no source directory or trusted model commit was given; nothing was read".to_owned(),
+        );
+    }
+    json!({
+        "key": "selected",
+        "owner": "",
+        "repo": "",
+        "url": Value::Null,
+        "identity": {"state": "missing", "root": Value::Null, "remote": Value::Null},
+        "endpoint": Value::Null,
+        "history": "unavailable",
+        "locations": locations.iter().map(|location| location.json(None)).collect::<Vec<_>>(),
+        "commits": [],
+        "uncommitted": [],
+        "notes": notes,
+        "errors": [],
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// 跨仓库映射（upstream → desktop vendor）
+// ---------------------------------------------------------------------------------------------
+
+fn blob_of(dir: &Path, rev: &str, path: &str) -> Option<String> {
+    git_ok(
+        dir,
+        &["rev-parse", "--verify", "-q", &format!("{rev}:{path}")],
+    )
+}
+
+fn path_exists_at(dir: &Path, rev: &str, path: &str) -> bool {
+    git_ok(dir, &["cat-file", "-e", &format!("{rev}:{path}")]).is_some()
+}
+
+fn vendor_candidate_paths(
+    desktop_dir: &Path,
+    endpoint_sha: &str,
+    upstream_path: &str,
+) -> (Vec<String>, Vec<&'static str>) {
+    let mut basis = Vec::new();
+    let exact = format!("{VENDOR_PREFIX}{upstream_path}");
+    if path_exists_at(desktop_dir, endpoint_sha, &exact) {
+        basis.push("path");
+        return (vec![exact], basis);
+    }
+    // 目录迁移：同 basename 唯一匹配只算 candidate 依据，不当作路径证据。
+    let basename = upstream_path.rsplit('/').next().unwrap_or(upstream_path);
+    let Some(output) = git_ok(
+        desktop_dir,
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            endpoint_sha,
+            "--",
+            VENDOR_PREFIX,
+        ],
+    ) else {
+        return (Vec::new(), basis);
+    };
+    let matches: Vec<String> = output
+        .lines()
+        .filter(|path| path.rsplit('/').next() == Some(basename))
+        .map(str::to_owned)
+        .collect();
+    if matches.len() == 1 {
+        basis.push("basename");
+        (matches, basis)
+    } else {
+        (Vec::new(), basis)
+    }
+}
+
+fn first_addition_commit(dir: &Path, endpoint_sha: &str, path: &str) -> Option<Value> {
+    let output = git_ok(
+        dir,
+        &[
+            "log",
+            "--follow",
+            "--diff-filter=A",
+            "--reverse",
+            "--format=%H%x1f%an%x1f%at%x1f%s",
+            endpoint_sha,
+            "--",
+            path,
+        ],
+    )?;
+    let first = output.lines().next()?;
+    let fields: Vec<&str> = first.split('\u{1f}').collect();
+    if fields.len() < 4 {
+        return None;
+    }
+    Some(json!({
+        "sha": fields[0],
+        "author": fields[1],
+        "at_unix_ms": fields[2].parse::<i64>().ok().map(|seconds| seconds.max(0) as u64 * 1000),
+        "summary": truncate(fields[3], MAX_DETAIL_CHARS),
+    }))
+}
+
+fn later_commits(dir: &Path, endpoint_sha: &str, path: &str, import: Option<&Value>) -> Vec<Value> {
+    let Some(output) = git_ok(
+        dir,
+        &[
+            "log",
+            "--format=%H%x1f%an%x1f%at%x1f%s",
+            "-n",
+            &(MAX_LATER_COMMITS + 1).to_string(),
+            endpoint_sha,
+            "--",
+            path,
+        ],
+    ) else {
+        return Vec::new();
+    };
+    let import_sha = import
+        .and_then(|value| value["sha"].as_str())
+        .unwrap_or_default();
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\u{1f}').collect();
+            if fields.len() < 4 || fields[0] == import_sha {
+                return None;
+            }
+            Some(json!({
+                "sha": fields[0],
+                "author": fields[1],
+                "at_unix_ms": fields[2].parse::<i64>().ok().map(|seconds| seconds.max(0) as u64 * 1000),
+                "summary": truncate(fields[3], MAX_DETAIL_CHARS),
+            }))
+        })
+        .take(MAX_LATER_COMMITS)
+        .collect()
+}
+
+fn cross_links(
+    upstream_dir: &Path,
+    upstream_endpoint_sha: &str,
+    upstream_report: &TargetReport,
+    desktop_dir: &Path,
+    desktop_endpoint_sha: &str,
+    desktop_report: &TargetReport,
+    limits: &mut Vec<String>,
+) -> Vec<Value> {
+    let mut links = Vec::new();
+    let mut referenced_desktop_paths = BTreeSet::new();
+    // upstream 侧每个出现修改的文件映射一次。同一文件可能出现在多个返回 commit 里；
+    // 不能只按“第一条”猜引入版本（提交时间可能相同，排序会按 SHA 打破平局），要挑出
+    // 与 Desktop import blob 相等的那条，找不到才退回最新一条并明确保持 candidate。
+    let mut upstream_files: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (sha, files) in &upstream_report.commits {
+        for file in files {
+            upstream_files
+                .entry(file.as_str())
+                .or_default()
+                .push(sha.as_str());
+        }
+    }
+    for (upstream_path, upstream_commits) in upstream_files {
+        let newest_commit = *upstream_commits
+            .first()
+            .expect("each upstream file comes from at least one commit");
+        let (candidates, mut basis) =
+            vendor_candidate_paths(desktop_dir, desktop_endpoint_sha, upstream_path);
+        if candidates.is_empty() {
+            let blob = blob_of(upstream_dir, newest_commit, upstream_path)
+                .or_else(|| blob_of(upstream_dir, upstream_endpoint_sha, upstream_path));
+            links.push(json!({
+                "state": "unmapped",
+                "basis": [],
+                "upstream": {
+                    "repository": "colm_upstream",
+                    "commit": newest_commit,
+                    "path": upstream_path,
+                    "blob": blob,
+                },
+                "desktop": Value::Null,
+                "notes": ["no vendor/CoLM202X path or unique basename matches this upstream file"],
+            }));
+            continue;
+        }
+        let desktop_path = &candidates[0];
+        referenced_desktop_paths.insert(desktop_path.clone());
+        let endpoint_blob = blob_of(desktop_dir, desktop_endpoint_sha, desktop_path);
+        let import = first_addition_commit(desktop_dir, desktop_endpoint_sha, desktop_path);
+        if import.is_some() {
+            basis.push("import-commit");
+        }
+        // 契约：比较 upstream commit 的文件 blob 与 desktop **import commit** 的文件 blob，
+        // 不比较两边当前 HEAD——import 之后 Desktop 自己的修改不该推翻引入关系。
+        let import_blob = import.as_ref().and_then(|import| {
+            let sha = import["sha"].as_str()?;
+            blob_of(desktop_dir, sha, desktop_path)
+        });
+        let upstream_commit = upstream_commits
+            .iter()
+            .copied()
+            .find(|sha| blob_of(upstream_dir, sha, upstream_path) == import_blob)
+            .unwrap_or(newest_commit);
+        let upstream_commit_blob = blob_of(upstream_dir, upstream_commit, upstream_path);
+        let upstream_blob = upstream_commit_blob
+            .clone()
+            .or_else(|| blob_of(upstream_dir, upstream_endpoint_sha, upstream_path));
+        if upstream_commit_blob.is_some() && upstream_commit_blob == import_blob {
+            basis.push("blob-equal");
+        }
+        let desktop_blob = import_blob.or(endpoint_blob);
+        let state = if basis.contains(&"path") && basis.contains(&"blob-equal") && import.is_some()
+        {
+            "verified"
+        } else {
+            "candidate"
+        };
+        let later = later_commits(
+            desktop_dir,
+            desktop_endpoint_sha,
+            desktop_path,
+            import.as_ref(),
+        );
+        links.push(json!({
+            "state": state,
+            "basis": basis,
+            "upstream": {
+                "repository": "colm_upstream",
+                "commit": upstream_commit,
+                "path": upstream_path,
+                "blob": upstream_blob,
+            },
+            "desktop": {
+                "repository": "desktop",
+                "vendor_path": desktop_path,
+                "import_commit": import,
+                "later_commits": later,
+                "blob": desktop_blob,
+            },
+            "notes": if state == "verified" {
+                json!([])
+            } else {
+                json!(["mapping has partial evidence only; not a verified introduction"])
+            },
+        }));
+        if links.len() >= MAX_CROSS_LINKS {
+            push_limit(limits, format!("cross links capped at {MAX_CROSS_LINKS}"));
+            break;
+        }
+    }
+    // Desktop 独立修改：vendor 文件有改动但本次上游结果没有映射到它 → unmapped，不强行归因。
+    for file in &desktop_report.files {
+        if links.len() >= MAX_CROSS_LINKS {
+            push_limit(limits, format!("cross links capped at {MAX_CROSS_LINKS}"));
+            break;
+        }
+        if !file.starts_with(VENDOR_PREFIX) || referenced_desktop_paths.contains(file) {
+            continue;
+        }
+        let commits: Vec<Value> = desktop_report
+            .commits
+            .iter()
+            .filter(|(_, files)| files.contains(file))
+            .map(|(sha, _)| json!(sha))
+            .collect();
+        links.push(json!({
+            "state": "unmapped",
+            "basis": [],
+            "upstream": Value::Null,
+            "desktop": {
+                "repository": "desktop",
+                "vendor_path": file,
+                "commits": commits,
+            },
+            "notes": ["desktop/vendor change has no corresponding upstream modification in this query"],
+        }));
+    }
+    links
+}
+
+// ---------------------------------------------------------------------------------------------
+// history-track
+// ---------------------------------------------------------------------------------------------
+
+fn command_track(opts: &Opts) -> Result<Value> {
+    let root = opts.need("--history-root")?;
+    let repository = opts.need_str("--repository")?;
+    let selection = Selection::parse(&repository)?;
+    let symbol = opts.need_str("--symbol")?;
+    validate_symbol(&symbol)?;
+    let path_filter = match opts.get("--path") {
+        Some(path) => Some(sanitize_relative_path(&path)?),
+        None => None,
+    };
+    let ref_arg = opts.get("--ref").filter(|value| !value.trim().is_empty());
+    if ref_arg
+        .as_deref()
+        .is_some_and(|value| value.chars().any(char::is_control))
+    {
+        bail!("--ref must be a single printable line");
+    }
+    let mut limits = Vec::new();
+    let limit = parse_limit(opts, &mut limits)?;
+    let offset = parse_offset(opts)?;
+    let model_json = match opts.get("--model-json") {
+        Some(text) => {
+            Some(serde_json::from_str::<Value>(&text).context("--model-json is not valid JSON")?)
+        }
+        None => None,
+    };
+    let overrides = PathOverrides::from_opts(opts);
+    let source = resolve_source(opts, model_json.as_ref());
+
+    let mut repos = Map::new();
+    let mut endpoints = Map::new();
+    let mut cross = Vec::new();
+    let mut truncated = false;
+
+    let mut desktop_report: Option<TargetReport> = None;
+    let mut upstream_report: Option<TargetReport> = None;
+    let mut desktop_repo: Option<Repo> = None;
+    let mut upstream_repo: Option<Repo> = None;
+
+    if selection == Selection::Selected {
+        match resolve_selected_target(&root, &overrides, &source, ref_arg.as_deref()) {
+            SelectedTarget::Git {
+                dir,
+                spec,
+                endpoint,
+            } => {
+                let target = Target {
+                    key: "selected",
+                    spec,
+                    dir: &dir,
+                    endpoint: endpoint.clone(),
+                };
+                let report = query_target(
+                    &target,
+                    &symbol,
+                    path_filter.as_deref(),
+                    limit,
+                    offset,
+                    &mut limits,
+                );
+                let overlay =
+                    overlay_for(&source, &dir, &report.endpoint_sha, &locations_of(&report));
+                let mut report = report;
+                let overlay_value = overlay;
+                report.json["overlay"] = overlay_value;
+                endpoints.insert("selected".to_owned(), endpoint.json());
+                truncated |= report.truncated;
+                repos.insert("selected".to_owned(), report.json.clone());
+            }
+            SelectedTarget::ModelCommit { repo, sha, dir } => {
+                let endpoint = Endpoint {
+                    ref_name: sha.clone(),
+                    sha: sha.clone(),
+                };
+                let target = Target {
+                    key: "selected",
+                    spec: Some(DESKTOP),
+                    dir: &repo.path,
+                    endpoint: endpoint.clone(),
+                };
+                let mut report = query_target(
+                    &target,
+                    &symbol,
+                    path_filter.as_deref(),
+                    limit,
+                    offset,
+                    &mut limits,
+                );
+                let overlay = match dir {
+                    Some(dir) => {
+                        let source = SourceInfo {
+                            source_dir: Some(dir),
+                            ..SourceInfo::default()
+                        };
+                        overlay_for(
+                            &source,
+                            &repo.path,
+                            &report.endpoint_sha,
+                            &locations_of(&report),
+                        )
+                    }
+                    None => json!({
+                        "status": "not_checked",
+                        "basis": [],
+                        "notes": ["no source directory was given to compare current bytes with the model commit"],
+                    }),
+                };
+                report.json["overlay"] = overlay;
+                if let Some(notes) = report.json["notes"].as_array_mut() {
+                    notes.push(json!("history endpoint is the model's recorded commit in the registered desktop repository"));
+                }
+                endpoints.insert(
+                    "selected".to_owned(),
+                    json!({"ref": sha, "sha": sha, "repository": "desktop", "via": "model_commit"}),
+                );
+                truncated |= report.truncated;
+                repos.insert("selected".to_owned(), report.json.clone());
+            }
+            SelectedTarget::Unavailable => {
+                let report =
+                    no_history_report(&source, &symbol, path_filter.as_deref(), &mut limits);
+                endpoints.insert("selected".to_owned(), Value::Null);
+                repos.insert("selected".to_owned(), report);
+            }
+        }
+    }
+    if selection.includes(RepoKey::Desktop) && selection != Selection::Selected {
+        let repo = overrides.resolve(&root, RepoKey::Desktop);
+        let report = registered_report(
+            &repo,
+            ref_arg.as_deref(),
+            &symbol,
+            path_filter.as_deref(),
+            limit,
+            offset,
+            &mut limits,
+        );
+        endpoints.insert("desktop".to_owned(), report.json["endpoint"].clone());
+        truncated |= report.truncated;
+        repos.insert("desktop".to_owned(), report.json.clone());
+        desktop_report = Some(report);
+        desktop_repo = Some(repo);
+    }
+    if selection.includes(RepoKey::Upstream) && selection != Selection::Selected {
+        let repo = overrides.resolve(&root, RepoKey::Upstream);
+        let report = registered_report(
+            &repo,
+            ref_arg.as_deref(),
+            &symbol,
+            path_filter.as_deref(),
+            limit,
+            offset,
+            &mut limits,
+        );
+        endpoints.insert("colm_upstream".to_owned(), report.json["endpoint"].clone());
+        truncated |= report.truncated;
+        repos.insert("colm_upstream".to_owned(), report.json.clone());
+        upstream_report = Some(report);
+        upstream_repo = Some(repo);
+    }
+    if let (Some(desktop), Some(upstream)) = (&desktop_report, &upstream_report) {
+        let desktop_path = desktop_repo.as_ref().map(|repo| repo.path.clone());
+        let upstream_path = upstream_repo.as_ref().map(|repo| repo.path.clone());
+        if let (Some(desktop_path), Some(upstream_path)) = (desktop_path, upstream_path) {
+            cross = cross_links(
+                &upstream_path,
+                &upstream.endpoint_sha,
+                upstream,
+                &desktop_path,
+                &desktop.endpoint_sha,
+                desktop,
+                &mut limits,
+            );
+            truncated |= cross.len() >= MAX_CROSS_LINKS;
+        }
+    }
+    Ok(json!({
+        "schema": SCHEMA,
+        "query": {
+            "symbol": symbol,
+            "repository": repository,
+            "path": path_filter,
+            "source": source.json(),
+            "endpoints": Value::Object(endpoints),
+        },
+        "repos": Value::Object(repos),
+        "cross": {"links": cross},
+        "limits": limits,
+        "truncated": truncated,
+        "history_root": root.display().to_string(),
+    }))
+}
+
+fn locations_of(report: &TargetReport) -> Vec<Location> {
+    report.json["locations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            Some(Location {
+                path: value["path"].as_str()?.to_owned(),
+                line: value["line"].as_u64()? as usize,
+                scope: value["scope"].as_str().map(str::to_owned),
+                kind: if value["kind"].as_str() == Some("rust") {
+                    "rust"
+                } else {
+                    "fortran"
+                },
+            })
+        })
+        .collect()
+}
+
+/// 注册仓库结果：路径缺失/非独立检出一律 `history: unavailable`，绝不拿外层 Desktop 根冒充上游。
+fn registered_report(
+    repo: &Repo,
+    requested_ref: Option<&str>,
+    symbol: &str,
+    path_filter: Option<&str>,
+    limit: usize,
+    offset: usize,
+    limits: &mut Vec<String>,
+) -> TargetReport {
+    let identity = repo.identity();
+    if !repo.is_existing_checkout() {
+        let mut errors = repo.errors();
+        if identity["state"] == "unverified" {
+            errors.push(
+                "path resolves to another repository root; refusing to present that history as this repository"
+                    .to_owned(),
+            );
+        }
+        return TargetReport {
+            json: json!({
+                "key": repo.key.as_str(),
+                "owner": repo.spec().owner,
+                "repo": repo.spec().repo,
+                "url": repo.spec().url,
+                "identity": identity,
+                "endpoint": Value::Null,
+                "history": "unavailable",
+                "locations": [],
+                "commits": [],
+                "uncommitted": [],
+                "notes": ["repository history is unavailable; no git checkout was used"],
+                "errors": errors,
+            }),
+            commits: Vec::new(),
+            files: Vec::new(),
+            endpoint_sha: String::new(),
+            truncated: false,
+        };
+    }
+    let endpoint = match repo.endpoint(requested_ref) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let mut notes = Vec::new();
+            notes.push(format!("cannot resolve the requested revision: {error:#}"));
+            return TargetReport {
+                json: json!({
+                    "key": repo.key.as_str(),
+                    "owner": repo.spec().owner,
+                    "repo": repo.spec().repo,
+                    "url": repo.spec().url,
+                    "identity": identity,
+                    "endpoint": Value::Null,
+                    "history": "unavailable",
+                    "locations": [],
+                    "commits": [],
+                    "uncommitted": [],
+                    "notes": notes,
+                    "errors": [format!("cannot resolve the requested revision: {error:#}")],
+                }),
+                commits: Vec::new(),
+                files: Vec::new(),
+                endpoint_sha: String::new(),
+                truncated: false,
+            };
+        }
+    };
+    let target = Target {
+        key: repo.key.as_str(),
+        spec: Some(repo.spec()),
+        dir: &repo.path,
+        endpoint,
+    };
+    let mut report = query_target(&target, symbol, path_filter, limit, offset, limits);
+    report.json["dirty"] = json!(repo.is_dirty());
+    if !report.json["identity"]["state"]
+        .as_str()
+        .is_some_and(|state| state == "verified")
+    {
+        if let Some(notes) = report.json["notes"].as_array_mut() {
+            notes.push(json!(
+                "local history is real but the remote identity is not the canonical repository"
+            ));
+        }
+    }
+    report
+}
+
+enum SelectedTarget {
+    Git {
+        dir: PathBuf,
+        spec: Option<RepoSpec>,
+        endpoint: Endpoint,
+    },
+    ModelCommit {
+        repo: Repo,
+        sha: String,
+        dir: Option<PathBuf>,
+    },
+    Unavailable,
+}
+
+fn resolve_selected_target(
+    root: &Path,
+    overrides: &PathOverrides,
+    source: &SourceInfo,
+    requested_ref: Option<&str>,
+) -> SelectedTarget {
+    if let Some(dir) = &source.source_dir {
+        if let Some(checkout) = own_checkout(dir) {
+            let spec = canonical_spec_for(&checkout);
+            let endpoint = match requested_ref {
+                Some(reference) => {
+                    let sha = git_ok(
+                        &checkout,
+                        &[
+                            "rev-parse",
+                            "--verify",
+                            "-q",
+                            &format!("{reference}^{{commit}}"),
+                        ],
+                    );
+                    sha.map(|sha| Endpoint {
+                        ref_name: reference.to_owned(),
+                        sha,
+                    })
+                }
+                None => git_ok(&checkout, &["rev-parse", "HEAD"]).map(|sha| Endpoint {
+                    ref_name: "HEAD".to_owned(),
+                    sha,
+                }),
+            };
+            if let Some(endpoint) = endpoint {
+                return SelectedTarget::Git {
+                    dir: checkout,
+                    spec,
+                    endpoint,
+                };
+            }
+        }
+    }
+    if let Some(commit) = &source.commit {
+        let repo = overrides.resolve(root, RepoKey::Desktop);
+        if repo.rev(commit).is_some() {
+            return SelectedTarget::ModelCommit {
+                repo,
+                sha: commit.clone(),
+                dir: source.source_dir.clone(),
+            };
+        }
+    }
+    SelectedTarget::Unavailable
+}
+
+/// 选中源码自己的仓库如果 remote 就是规范仓库之一，也按 verified 记录。
+fn canonical_spec_for(dir: &Path) -> Option<RepoSpec> {
+    let url = remote_url(dir)?;
+    let (owner, repo) = parse_github_remote(&url)?;
+    [DESKTOP, UPSTREAM]
+        .into_iter()
+        .find(|spec| owner.eq_ignore_ascii_case(spec.owner) && repo.eq_ignore_ascii_case(spec.repo))
+}
+
+// ---------------------------------------------------------------------------------------------
+// history-commit
+// ---------------------------------------------------------------------------------------------
+
+fn command_commit(opts: &Opts) -> Result<Value> {
+    let root = opts.need("--history-root")?;
+    let key = RepoKey::parse(&opts.need_str("--repository")?)?;
+    let sha = parse_sha(&opts.need_str("--sha")?)?;
+    let symbol = match opts.get("--symbol") {
+        Some(symbol) => {
+            validate_symbol(&symbol)?;
+            Some(symbol)
+        }
+        None => None,
+    };
+    let path_filter = match opts.get("--path") {
+        Some(path) => Some(sanitize_relative_path(&path)?),
+        None => None,
+    };
+    let overrides = PathOverrides::from_opts(opts);
+    let repo = overrides.resolve(&root, key);
+    if !repo.is_existing_checkout() {
+        let errors = repo.errors();
+        bail!(
+            "repository {} is not readable: {}",
+            key.as_str(),
+            errors.join("; ")
+        );
+    }
+    let commit_sha = repo
+        .rev(&sha)
+        .with_context(|| format!("commit {sha} is not readable in {}", repo.path.display()))?;
+    let identity = repo.identity();
+    let meta = git(
+        &repo.path,
+        &[
+            "show",
+            "-s",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%B",
+            &commit_sha,
+        ],
+    )?;
+    let fields: Vec<&str> = meta.splitn(8, '\u{1f}').collect();
+    if fields.len() < 8 {
+        bail!("cannot parse the commit metadata for {commit_sha}");
+    }
+    let parents: Vec<String> = fields[1].split_whitespace().map(str::to_owned).collect();
+    let message = fields[7].to_owned();
+    let compare_parent = parents.first().cloned();
+    let mut notes = Vec::new();
+    if parents.len() > 1 {
+        notes.push(format!(
+            "merge commit with {} parents; diff compares against the first parent {}",
+            parents.len(),
+            compare_parent.as_deref().unwrap_or("")
+        ));
+    }
+    if repo.is_shallow() {
+        notes.push("shallow repository: parent commits or older history may be missing".to_owned());
+    }
+    if identity["state"] != "verified" {
+        notes.push(
+            "remote identity is not verified; this commit belongs to the local checkout".to_owned(),
+        );
+    }
+    let mut limits = Vec::new();
+    let (files, truncated) = commit_diff(
+        &repo.path,
+        &commit_sha,
+        compare_parent.as_deref(),
+        symbol.as_deref(),
+        path_filter.as_deref(),
+        &mut limits,
+    )?;
+    Ok(json!({
+        "schema": SCHEMA,
+        "repository": {
+            "key": key.as_str(),
+            "owner": repo.spec().owner,
+            "repo": repo.spec().repo,
+            "url": repo.spec().url,
+            "path": repo.path.display().to_string(),
+            "identity": identity,
+        },
+        "commit": {
+            "sha": fields[0],
+            "parents": parents,
+            "author": fields[2],
+            "author_email": fields[3],
+            "author_time_unix": fields[4].parse::<i64>().unwrap_or(0),
+            "committer": fields[5],
+            "committer_time_unix": fields[6].parse::<i64>().unwrap_or(0),
+            "message": message,
+            "compare_parent": compare_parent,
+            "files": files,
+            "truncated": truncated,
+        },
+        "reason": reason_for_message(&message),
+        "notes": notes,
+    }))
+}
+
+fn commit_diff(
+    dir: &Path,
+    sha: &str,
+    parent: Option<&str>,
+    symbol: Option<&str>,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Result<(Vec<Value>, bool)> {
+    let output = if let Some(parent) = parent {
+        let mut args = vec!["diff", "-U0", parent, sha, "--"];
+        if let Some(path) = path_filter {
+            args.push(path);
+        }
+        git(dir, &args)?
+    } else {
+        let mut args = vec!["show", "-U0", "--format=", sha];
+        if let Some(path) = path_filter {
+            args.push("--");
+            args.push(path);
+        }
+        git(dir, &args)?
+    };
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for (path, mut hunks) in parse_patch(&output) {
+        if let Some(symbol) = symbol {
+            hunks.retain(|hunk| hunk.touches(symbol));
+        }
+        if hunks.is_empty() {
+            continue;
+        }
+        if files.len() >= MAX_FILES_PER_COMMIT {
+            truncated = true;
+            break;
+        }
+        let mut kept = Vec::new();
+        for mut hunk in hunks.into_iter().take(MAX_HUNKS_PER_COMMIT) {
+            if cap_hunk(&mut hunk) {
+                truncated = true;
+            }
+            kept.push(hunk.pretty_json());
+        }
+        if kept.is_empty() {
+            continue;
+        }
+        files.push(json!({"path": path, "hunks": kept}));
+    }
+    if truncated {
+        push_limit(
+            limits,
+            format!("commit diff capped at {MAX_FILES_PER_COMMIT} files / {MAX_HUNKS_PER_COMMIT} hunks per file"),
+        );
+    }
+    Ok((files, truncated))
+}
+
+impl Hunk {
+    fn pretty_json(&self) -> Value {
+        self.json()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------------------------
+
+pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
+    let value = run(command, opts)?;
+    println!("{}", serde_json::to_string(&value)?);
+    Ok(())
+}
+
+pub(crate) fn run(command: &str, opts: &Opts) -> Result<Value> {
+    match command {
+        "history-repos" => command_repos(opts),
+        "history-sync" => command_sync(opts),
+        "history-track" => command_track(opts),
+        "history-commit" => command_commit(opts),
+        other => bail!("unknown history command: {other}"),
+    }
+}
+
+#[cfg(test)]
+#[path = "history_repo_tests.rs"]
+mod history_repo_tests;
