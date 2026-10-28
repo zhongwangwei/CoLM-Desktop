@@ -38684,6 +38684,7 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - **Not-tested**：真实 TIMESTEP+PLUMBER2 组合没有现成观测文件（用合成用例验证相位；真实 AU-Preston 只验证了 Urban-PLUMBER 终点标签）；`flux_diagnostics` 未迁移到新区间配对；远程旧 sidecar 缺新字段时前端回退 model_clock/旧 QC 列；多站失败隔离、远程部分取回与流式读取属后续批次。
 
 
+
 ## 比较页第二批修复：comparison 阶段、层变量预检、频率元数据、远程 run 身份/占位锁/提交回执、本机取消（2026-10-28，复查报告 CoLM-Desktop_compare_recheck_19b2c2b）
 
 公开复查版本 19b2c2b 早于上一轮比较页修复提交 f6172fe6，所以它列出的"仍可复现"项里有一部分已在 f6172fe6 解决；本轮在 f6172fe6 之上把复查中真正未关闭的项修完，并把"跨模拟比较默认关闭"这一能力缺口接进默认工作流。只改比较页链路，未提交其他会话的工作区改动。
@@ -38830,34 +38831,36 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 前端：`npm run typecheck`/`lint`/`format:check` clean、`npm test` 1196 passed/0 failed；`cargo run -q -p xtask -- check-gui` 257 contracts。
 - 未运行：真实 SSH 服务器端到端、真实 Tauri 窗口点击、真实第三份冻结修订程序的完整创建+运行链路、真实科学算例。
 
-## GitHub 证据链 H07–H09：PR 分页/完整快照/同步语义（2026-10-29，审查报告后续批次）
+## 变量历史第二批 H07–H09（2026-10-29，复核报告 H07–H09）
 
-接 b3686b1 记录的 H01–H06。本批只改 history 证据链（`crates/colm-agent/src/tools/history*.rs`、`crates/colm-cli/src/history*.rs`、agent `prompt.md`），未改 GUI 与其他模块。
+在第一批 F01–F04 之后补齐 PR 长结果预算、缓存恢复与同步状态时间线；仍只改现有 Rust 工具/CLI，不扩到 S01–S02、GUI 首用入口。共享工作区同时有另一会话的在途改动，因此本组改动在 `19b2c2b0` 的独立 worktree 中应用补丁后跑门禁；提交前已 rebase 到并行的 `9d12b3b2`（该批只改文档与其它功能，未触及本组 7 个代码文件，故门禁结果仍对应本组代码）。
 
-### H07 commit_pull_requests 有界分页
+### H07 PR 长结果分页与按编号取回
 
-- 旧行为：一次把完整 PR 列表塞进结果，超过 registry 24k 截断线后"后面的 PR 永远看不到"；重复调用只能拿同样前缀。
-- 新行为：默认返回紧凑分页列表（最多 5 个 PR；正文摘录 800 字、理由摘录 300 字，按字符截断并标记省略），顶层 `page` 带 `next_cursor`；`pr_number` 指定时只返回那一个 PR 的完整对象。`next_cursor` 绑定 `(owner, repo, full sha)` 与列表指纹，列表变了就拒绝并要求从头再查。工具说明与 agent prompt 明确：不得声称一次调用读完了所有 PR 正文/讨论；失败刷新不清空最后一次完整快照，`partial:true`/`complete=false` 属不完整证据，不能当"没有 PR"或当前事实。
-- 回归：`commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand` 等。
+- 背景：每个 SHA 可关联多个长 PR，统一结果是 24k 字符截断，前缀预览之外的数据不可达，重复调用仍返回同一前缀。
+- 新行为：`commit_pull_requests` 增加 `cursor`（opaque，传上次 `page.next_cursor`）、`page_size`（默认 3，1..=5）、`pr_number`。默认返回有界紧凑分页：每项保留 number/owner_repo/url/title/state/merged_at/author/head_sha/base_ref/reason（status/basis/≤300 excerpt/coverage）/comments 完整性/evidence_id，另给 `body_excerpt`（≤800 字）+ `body_chars` + `body_truncated`；顶层 `page{offset,page_size,returned,total,has_more,next_cursor}` 与原有 repository/commit/complete/fetched_at/offline/from_cache/errors/notices 一起返回。`pr_number` 只返回该关联 PR 的完整对象（body≤8000、理由候选、讨论摘录），`page=null`；非关联编号、非法/越界 cursor、cursor+pr_number 组合、page_size 越界都明确报错，不静默从头。工具说明与 prompt 写明 `next_cursor` 继续、`pr_number` 取原文、不得声称一次读完全部 body/讨论。
+- 回归：`commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand`（4 个 8k body PR：默认 3 项序列化 <24k、next_cursor 取第 4 个、pr_number 完整正文/候选/讨论、page_size 1/5、非法 cursor/page_size/pr_number、离线同分页）；registry schema 断言新增三个参数。
+- 未覆盖：真实 GitHub 多 PR 分页/限流响应；客户端 5 页上限/body 8k 上限本身未改。
 
-### H08 缓存按仓库绑定 + 完整/不完整快照分层
+### H08 失败刷新保留最后完整缓存
 
-- 旧行为：缓存只按 SHA 或 PR 编号做键，fork/导入场景会互相覆盖；失败/不完整刷新可能覆盖上一次完整结果，之后离线看到的其实是半截数据。
-- 新行为：缓存键 `(owner, repo, full sha)`，写临时文件再 rename；完整结果只进 `<sha>.json`（只认 `complete=true`），失败/部分尝试写 `<sha>.partial.json`，**失败刷新绝不写完整快照**；离线且无完整快照时可降级读 partial，但明确标 incomplete/older attempt、保留原 `fetched_at` 与 errors；成功刷新才替换完整快照并删除 partial；损坏/不属于该 (owner,repo,sha) 的缓存一律当未命中。工具结果带 `complete/from_cache/fetched_at/notices/errors`。
-- 回归：`failed_refresh_keeps_the_last_complete_snapshot_and_success_replaces_it`、`partial_cache_is_readable_offline_when_no_complete_snapshot_exists`。
+- 背景：client 只要关联列表任一页成功就写缓存，评论失败/翻页失败也会覆盖完整快照；普通在线查询只看 include_discussion 标志，不检查 complete/errors，网络恢复后仍复用坏缓存。
+- 新行为：完整快照 `<sha>.json` 只在 complete=true 时写入/覆盖；失败/不完整结果写 `<sha>.partial.json`（含 fetched_at/complete=false/pulls/errors/notices/请求参数），不碰完整快照。在线 refresh=false 只复用完整快照；没有完整快照时离线可读 partial 并明确 incomplete/旧 fetched_at；refresh=true 成功 complete → 替换完整快照并删 partial；失败/不完整 → 保留旧完整快照并返回本次结果 + notice（说明旧完整快照 fetched_at 与“离线仍使用旧快照”），同时更新 partial；无旧完整快照时允许写 partial。兼容旧版本写进主文件的不完整缓存（只当 partial，不冒充完整）；schema 仍 v2、按 owner/repo/SHA 隔离、原子写、token 不落盘。
+- 回归：`failed_refresh_keeps_the_last_complete_snapshot_and_success_replaces_it`（完整快照→评论 500 refresh→旧快照 fetched_at 不变、offline 读旧完整、partial 存在且无 token；恢复后替换完整并清 partial）；`partial_cache_is_readable_offline_when_no_complete_snapshot_exists`；更新 `partial_page_two_failure_...`（不完整只写 partial、离线读 partial=true/incomplete）。
+- 未覆盖：真实 GitHub 评论 500/限流；缓存清理/版本迁移策略（旧主文件不完整缓存只读兼容）。
 
-### H09 同步成功时间与尝试语义分离
+### H09 同步状态时间线：失败/离线不刷新成功时间、不清错误
 
-- 旧行为：`repos.json` 只有一个 `synced`，一次失败的 fetch/offline 检查也会让它看起来"刚同步过"；同步错误只活在本次输出里，下一次 `history-repos` 就消失。
-- 新行为：`last_successful_sync`（仅 clone/fetch 真正成功时更新）与 `checked_at`/`last_attempt`（每次尝试都更新，含 offline/skipped/error）分开；失败把错误同时写进持久 `errors`，成功才清；旧格式只有 `synced` 时读成 last_successful_sync，`synced` 继续作为向后兼容别名输出；工具说明明确不能把 checked_at 当成功同步时间。
-- 回归：`sync_failure_and_offline_keep_last_successful_sync_and_persistent_errors`、`legacy_repos_json_synced_is_read_as_last_successful_sync`。
+- 背景：`sync_one` fetch 失败后 record_error 再被 record_sync 覆盖（更新时间、清 errors）；`history-repos` 不合并持久错误；offline 也写同一 synced 字段，导致旧 SHA 看起来像刚同步成功。
+- 新行为：持久状态拆分 `last_successful_sync {ref,sha,at_unix_ms}`（仅 clone/fetch 真正成功更新）、`last_attempt {action,at_unix_ms,error?}`（每次尝试，含 offline/skipped/error）、`checked_at_unix_ms`（本次检查）。失败只写 last_attempt.error + 持久 errors，不动成功时间；offline 只更新 checked_at/last_attempt(action=offline)，不改成功时间/不清 errors；成功 clone/fetch 才更新成功时间、清 last_attempt.error 与持久 errors。`history-repos` 合并 repo.errors + 持久 errors + last_attempt.error（去重），并输出 `sync_semantics` 说明 checked_at 不是成功同步时间；旧 `repos.json` 只有 `synced` 时回填为 last_successful_sync，`synced` 保留为向后兼容别名。
+- 回归：`sync_failure_and_offline_keep_last_successful_sync_and_persistent_errors`（成功 sync→改坏 remote 再失败的 last_successful_sync/时间不变、error 持久到 repos、offline 只更新 checked_at）；`legacy_repos_json_synced_is_read_as_last_successful_sync`；成功恢复后成功时间新 SHA、last_attempt.action=fetched、错误清除。
+- 未覆盖：真实网络 clone/fetch 失败类型（用本地 git 夹具模拟不可 fetch）；GUI 对 last_attempt/last_successful_sync 的展示属于 U01 后续。
 
 ### 本轮验证（真实执行）
 
-- `cargo test -p colm-cli --bin colm-cli -- --test-threads=1` → 685 passed（含 history 夹具测试）。
-- `cargo test -p colm-agent --lib --bins -- --test-threads=1` → 374 passed / 1 ignored + 9 passed。
-- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；`cargo fmt --all --check` → clean。
-- 未运行：真实 GitHub 网络/token 与真实 PR 分页（夹具/mock）、真实外部后端（Codex/Claude Code）进程内联网矩阵；Windows 路径与缓存损坏的真实文件系统场景。
+- 隔离 worktree（HEAD 19b2c2b0 + 本组补丁，共享已编译 target）：`cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3011 passed / 0 failed / 16 ignored**（`colm-cli` 569；`colm-agent` 374 passed + 1 ignored 的 live GitHub smoke）。
+- Tauri/GUI 本轮未改：沿用 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约。
+- 未运行：真实 GitHub 多 PR/限流、真实网络 clone/fetch 失败、真实模型端到端、GUI；S01–S02（checkpoint 明细/极端压缩身份）、U01–U05（首用仓库入口、证据卡、未知副作用核对）仍属后续批次。
 
 #### 本机 `target/` 过期工件造成的假失败（2026-10-29 复验）
 
@@ -38868,3 +38871,4 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` → 536 passed / 1 ignored；gui clippy/fmt clean。
 
 结论：那 5 个失败是构建缓存问题，不是代码回归。以后遇到"同一源码 `-p` 绿、`--workspace` 红"且报缺失符号，先按 crate 清理 `target` 再判断。
+
