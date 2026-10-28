@@ -5,6 +5,11 @@
 //! 真实原文、行段、文档 hash、scope 与知识新鲜度仍由调用方（`search_docs`）从本地资料重读并判定。
 //! 本模块只负责：枚举可信根目录下的顶层 Markdown、分块、建索引、维护内存清单、按 scope 查询候选。
 //!
+//! 块有两层身份，不能混用：逻辑 `chunk_id`（相对路径 + 文档 hash + 行段 + 切块版本）进 `_source`
+//! 并返回给工具层，跨代、跨 scope 稳定；物理 `_id` 还要加 scope 与构建身份（build_id），
+//! 让同一 scope 的新旧两代、以及跨 scope 的相同文档都落在互不覆盖的记录上。刷新失败只回收
+//! 本次构建的物理 id，旧 manifest 引用的旧代记录原样保留 —— 这是“刷新失败不破坏可用索引”的前提（R01）。
+//!
 //! 固定的服务端是 Xerj [`PINNED_XERJ_RELEASE`]。下面这些 HTTP 行为都按该 release 实测，不是照 main 文档猜的：
 //! - `PUT /{index}` 建索引带显式 mapping；索引已存在时返回 HTTP 409 + `resource_already_exists_exception`，
 //!   按错误类型判定为成功（ES 8 是 400，Xerj rc.100 是 409，所以只认 type 不认状态码）。
@@ -25,6 +30,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -61,6 +67,14 @@ const MAX_CHUNKS: usize = 4096;
 /// 固定分块：每块 40 行、无重叠。块 id 里带 `lines-40-v1`，换分块策略必须换版本号，否则旧块会被误认。
 const LINES_PER_CHUNK: usize = 40;
 const CHUNKING_VERSION: &str = "lines-40-v1";
+/// 逻辑 chunk 身份的公式版本。v2 起把文档相对路径纳入身份：两份字节完全相同的 Markdown
+/// 是不同的块，必须各有自己的身份；旧 v1 只含 (sha256, 行段, 切块版本)，它们会撞 id。
+/// 换公式必须换版本串，否则新旧公式的 id 无法区分，旧清单会被误认。
+const CHUNK_ID_VERSION: &str = "colm-chunk-v2";
+/// 物理 `_id` 的公式版本。v2 起 `_id` = scope + 构建身份 + 逻辑 chunk_id。
+/// 旧公式直接把逻辑 id 当物理 id：同一快照刷新时新代 bulk 原地覆盖旧代记录，随后的失败清理
+/// 又会删掉旧 manifest 仍在引用的同一条记录 —— “ready 但召回为空”的根源（审查 R01）。
+const PHYSICAL_ID_VERSION: &str = "colm-index-v2";
 /// bulk 每批最多 100 个文档：单批太大会让 2 MiB 响应上限和失败清理都变笨重。
 const BULK_BATCH: usize = 100;
 /// 宿主构造查询时 size 的硬上限。再大也只是给 `search_docs` 的本地重读加负担。
@@ -351,7 +365,31 @@ fn short_sha256(input: &str) -> String {
     sha256_hex(input.as_bytes())[..32].to_owned()
 }
 
+/// 索引里的物理 `_id`：scope + 构建身份 + 逻辑 chunk_id。
+/// 为什么三段都要：跨 scope 的同一份文档内容不能互相覆盖；同一 scope 的每一代也必须落在
+/// 不同物理记录上，否则刷新时新代 bulk 先覆盖旧代，随后失败清理再删掉这些 id，旧 manifest
+/// 仍指着它们却“ready 而召回为空”。
+fn physical_chunk_id(scope_key: &str, build_id: &str, chunk_id: &str) -> String {
+    short_sha256(&format!(
+        "{PHYSICAL_ID_VERSION}:{scope_key}:{build_id}:{chunk_id}"
+    ))
+}
+
+/// 一次构建的身份：跨进程唯一。unix 毫秒单独不够 —— 同一毫秒内的两次构建（刷新紧跟 ensure、
+/// 两个 scope 并行编译）会拿到同一个值，物理 id 又会撞车；再加 pid 与进程内自增计数。
+fn next_build_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{counter}", unix_millis(), std::process::id())
+}
+
 /// 一个待写入索引的块。字段就是 CoLM 自己的 ES schema；Xerj 不解释它们，过滤与校验都在宿主。
+///
+/// 两个身份必须分开：
+/// - `chunk_id` 是**逻辑**身份，进 `_source`、返回给工具层：同一份文档内容在任何 scope/任何一代
+///   构建里都是同一个逻辑块。
+/// - `physical_id` 是索引里的物理 `_id`，还要加 scope 与构建身份：跨 scope 的相同文档、
+///   同一 scope 的新旧两代都必须写到互不覆盖的记录上，失败清理才不会误删旧代。
 #[derive(Debug, Clone)]
 struct ChunkSpec {
     project_key: String,
@@ -359,6 +397,8 @@ struct ChunkSpec {
     source_identity: String,
     document_id: String,
     chunk_id: String,
+    /// 真实 `_id`；分块时还不知道 build_id，由 [`Inner::build_once`] 统一赋值。
+    physical_id: String,
     document_sha256: String,
     relative_path: String,
     line_start: usize,
@@ -429,16 +469,18 @@ fn chunk_snapshot(snapshot: &DocSnapshot) -> Result<Vec<ChunkSpec>, String> {
         for (index, block) in lines.chunks(LINES_PER_CHUNK).enumerate() {
             let line_start = index * LINES_PER_CHUNK + 1;
             let line_end = line_start + block.len() - 1;
+            // 逻辑身份 = 相对路径 + 文档 hash + 行段 + 切块版本，公式版本串 `CHUNK_ID_VERSION` 换新：
+            // 两份字节完全相同的 Markdown 是不同文档的不同块，旧公式（不含路径）会让它们撞 id。
             let chunk_id = short_sha256(&format!(
-                "{}:{line_start}:{line_end}:{CHUNKING_VERSION}",
+                "{CHUNK_ID_VERSION}:{relative_path}:{}:{line_start}:{line_end}:{CHUNKING_VERSION}",
                 document.sha256
             ));
-            // chunk_id 公式里没有 relative_path：两份字节完全相同的 Markdown 在同一行段会撞 id。
-            // 放任 bulk 覆盖会让本地清单少一个文档而状态仍显示 ready（静默丢证据）；宁可整份快照
-            // 失败、由调用方回退关键词路径，也不发布一份少文件的索引。
+            // 保留重复检查：DocSnapshot 是公开结构，调用方可以构造出重复 relative_path 的快照，
+            // 那种输入下逻辑 id 仍会重复。放任 bulk 覆盖会让本地清单少一个块而状态仍显示 ready
+            // （静默丢证据）；宁可整份快照失败、由调用方回退关键词路径。
             if !chunk_ids.insert(chunk_id.clone()) {
                 return Err(format!(
-                    "documents {relative_path:?} and another file share chunk id {chunk_id}; identical Markdown files at the same line ranges cannot be indexed separately"
+                    "documents {relative_path:?} and another file share chunk id {chunk_id}; the snapshot repeats a document path and cannot be indexed without overwriting chunks"
                 ));
             }
             chunks.push(ChunkSpec {
@@ -447,6 +489,7 @@ fn chunk_snapshot(snapshot: &DocSnapshot) -> Result<Vec<ChunkSpec>, String> {
                 source_identity: snapshot.source_identity.clone(),
                 document_id: document_id.clone(),
                 chunk_id,
+                physical_id: String::new(),
                 document_sha256: document.sha256.clone(),
                 relative_path: relative_path.clone(),
                 line_start,
@@ -744,10 +787,12 @@ impl SnapshotMeta {
     }
 }
 
-/// 本地清单的一条块记录。这是唯一可信的 chunk_id → 路径/行段/hash 映射；搜索命中的 `_source`
-/// 一律忽略，防止索引自报一个不存在的路径。
+/// 本地清单的一条块记录。这是唯一可信的物理 id → 逻辑 chunk_id/路径/行段/hash 映射；
+/// 搜索命中的 `_source` 一律忽略，防止索引自报一个不存在的路径。
 #[derive(Debug, Clone)]
 struct ChunkEntry {
+    /// 逻辑块身份：跨 scope、跨代不变，也是工具层拿到的 `chunk_id`。
+    chunk_id: String,
     document_id: String,
     relative_path: String,
     line_start: usize,
@@ -758,10 +803,13 @@ struct ChunkEntry {
 }
 
 /// 已发布的一代索引的本地清单。generation 是查询过滤键：旧代块即使还在索引里也检索不到。
+/// `entries` 以**物理** id 为键（搜索命中只给 `_id`），发布成功后按旧清单的物理 id 回收旧代。
 #[derive(Debug)]
 struct Manifest {
     snapshot_identity: String,
     scope_key: String,
+    /// 构建身份（进入物理 id）；记在清单里，旧代回收与诊断都不靠猜 id。
+    build_id: String,
     generation: u64,
     indexed_at_unix_ms: u64,
     documents: usize,
@@ -897,16 +945,17 @@ impl Inner {
         } else {
             phase_name(state.phase.unwrap_or(Phase::Pending))
         };
-        let (documents, chunks, generation, indexed_at_unix_ms) = match &state.manifest {
+        let (documents, chunks, generation, build_id, indexed_at_unix_ms) = match &state.manifest {
             Some(manifest) => (
                 manifest.documents,
                 manifest.entries.len(),
                 Some(manifest.generation),
+                Some(manifest.build_id.clone()),
                 Some(manifest.indexed_at_unix_ms),
             ),
             None => match &state.meta {
-                Some(meta) => (meta.documents, meta.chunks, None, None),
-                None => (0, 0, None, None),
+                Some(meta) => (meta.documents, meta.chunks, None, None, None),
+                None => (0, 0, None, None, None),
             },
         };
         let detail = if self.settings_error.is_some() {
@@ -925,6 +974,8 @@ impl Inner {
             "documents": documents,
             "chunks": chunks,
             "generation": generation,
+            // 物理 id 含 build_id：状态里报出它，才能解释“同一快照的两代为什么是不同记录”。
+            "build_id": build_id,
             "indexed_at_unix_ms": indexed_at_unix_ms,
             "detail": detail,
         })
@@ -1242,15 +1293,17 @@ impl Handle {
         })?;
         let mut candidates = Vec::with_capacity(hits.len());
         for hit in hits {
-            let Some(chunk_id) = hit["_id"].as_str() else {
+            let Some(physical_id) = hit["_id"].as_str() else {
                 continue;
             };
-            let Some(entry) = manifest.entries.get(chunk_id) else {
+            let Some(entry) = manifest.entries.get(physical_id) else {
                 // 跨 scope/旧 generation 的命中、伪造 id 都到这里：索引只能定位，不能自证。
                 continue;
             };
             candidates.push(Candidate {
-                chunk_id: chunk_id.to_owned(),
+                // 返回给工具层的是逻辑身份（跨代稳定、不含 scope/构建身份）；它只用于展示/去重，
+                // 路径与 hash 仍由下面的本地清单值决定。
+                chunk_id: entry.chunk_id.clone(),
                 document_id: entry.document_id.clone(),
                 relative_path: entry.relative_path.clone(),
                 line_start: entry.line_start,
@@ -1433,7 +1486,8 @@ impl Inner {
         }
     }
 
-    /// 一代索引的完整构建。任何一步失败都不发布：返回 Err，调用方保留旧 ready 清单（若可用）。
+    /// 一代索引的完整构建。顺序是：新代独立写入 → 只信新代物理 id 验证 → 调用方切本地清单 ready
+    /// → 发布后才回收旧代。任何一步失败都不发布：返回 Err，调用方保留旧 ready 清单（若可用）。
     fn build_once(
         &self,
         snapshot: &DocSnapshot,
@@ -1446,9 +1500,13 @@ impl Inner {
         self.check_health()?;
         self.ensure_mapping()?;
         let generation = self.next_generation();
+        // build_id 每代唯一（跨进程）；物理 id 一含它，这一代的所有写入就与旧代记录物理分离。
+        // 旧 manifest 引用的 id 在新代里不存在，失败清理按本次写入 id 删除时不可能碰到它们。
+        let build_id = next_build_id();
         let indexed_at_unix_ms = unix_millis();
         for chunk in &mut chunks {
             chunk.generation = generation;
+            chunk.physical_id = physical_chunk_id(&snapshot.scope_key, &build_id, &chunk.chunk_id);
         }
         let mut written = Vec::new();
         for batch in chunks.chunks(BULK_BATCH) {
@@ -1456,6 +1514,7 @@ impl Inner {
                 Ok(accepted) => written.extend(accepted),
                 Err(failure) => {
                     // 失败批次里已经写进去的块也要删：本代不发布，半成品不能留在索引里。
+                    // 这些 id 只属于本次构建（含 build_id），不会碰到旧代。
                     self.best_effort_delete(&failure.written);
                     self.best_effort_delete(&written);
                     return Err(failure.error);
@@ -1463,7 +1522,8 @@ impl Inner {
             }
         }
         if !chunks.is_empty() {
-            if let Err(error) = self.verify_index(snapshot, generation) {
+            if let Err(error) = self.verify_index(snapshot, generation, &written) {
+                // 只删本次新代物理 id；旧 manifest/旧代记录保持可检索。
                 self.best_effort_delete(&written);
                 return Err(error);
             }
@@ -1472,8 +1532,9 @@ impl Inner {
             .iter()
             .map(|chunk| {
                 (
-                    chunk.chunk_id.clone(),
+                    chunk.physical_id.clone(),
                     ChunkEntry {
+                        chunk_id: chunk.chunk_id.clone(),
                         document_id: chunk.document_id.clone(),
                         relative_path: chunk.relative_path.clone(),
                         line_start: chunk.line_start,
@@ -1485,8 +1546,9 @@ impl Inner {
                 )
             })
             .collect::<HashMap<_, _>>();
-        // 旧代里被新清单继续引用的 id 不能删：文档没变时 chunk_id 与上一代相同（id 不含 generation），
-        // bulk 只是原地覆盖；把这些 id 也删掉会把刚发布的块删没。
+        // 旧清单的物理 id 全部不再被新代引用：build_id 每代唯一，所以文档没变时逻辑 chunk_id
+        // 相同、物理 id 也不同（新代写的是新记录）。保留差集运算而不是“全删”，是为了即使将来
+        // 复用 id 也不会误删仍被引用的记录。
         let stale_ids = {
             let state = self.lock_state();
             state
@@ -1496,7 +1558,7 @@ impl Inner {
                     manifest
                         .entries
                         .keys()
-                        .filter(|chunk_id| !entries.contains_key(*chunk_id))
+                        .filter(|physical_id| !entries.contains_key(*physical_id))
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -1506,6 +1568,7 @@ impl Inner {
             manifest: Manifest {
                 snapshot_identity: snapshot.snapshot_identity.clone(),
                 scope_key: snapshot.scope_key.clone(),
+                build_id,
                 generation,
                 indexed_at_unix_ms,
                 documents: snapshot.documents.len(),
@@ -1598,7 +1661,7 @@ impl Inner {
         let mut body = Vec::new();
         let mut requested_ids = Vec::with_capacity(batch.len());
         for chunk in batch {
-            let action = json!({"index": {"_id": chunk.chunk_id}});
+            let action = json!({"index": {"_id": chunk.physical_id}});
             let action = serde_json::to_vec(&action).map_err(|error| {
                 BulkFailure::without_written(RetrievalError::Internal(
                     self.sanitize(&format!("cannot serialize a bulk action: {error}")),
@@ -1613,7 +1676,7 @@ impl Inner {
             })?;
             body.extend_from_slice(&document);
             body.push(b'\n');
-            requested_ids.push(chunk.chunk_id.clone());
+            requested_ids.push(chunk.physical_id.clone());
         }
         let response = self
             .send(
@@ -1690,11 +1753,18 @@ impl Inner {
         }
     }
 
-    /// 发布前的可检索性验证：新代必须能被 `scope_key + generation` 过滤到。空语料允许 0，跳过请求。
+    /// 发布前的可检索性验证：只信新代物理 id。
+    ///
+    /// 查询仍是 `scope_key + generation` 过滤（查询契约不变），但命中的 `_id` 必须落在本次实际
+    /// 写入的物理 id 集合里；非空语料零命中一律视为验证失败。为什么不能像旧实现那样只看
+    /// “总数 > 0”：旧实现把逻辑 id 当物理 id，新代 bulk 覆盖旧代后，任何残留命中都可能让验证
+    /// 通过而实际新代不可检索；这里把“新代自己的物理记录确实可查”作为发布条件。
+    /// 空语料（0 chunk）没有可验证的块，由调用方跳过请求并直接 ready。
     fn verify_index(
         &self,
         snapshot: &DocSnapshot,
         generation: u64,
+        written: &[String],
     ) -> std::result::Result<(), RetrievalError> {
         let body = json!({
             "size": 1,
@@ -1722,14 +1792,43 @@ impl Inner {
             )
         })?;
         match hits_total(&value) {
-            Some(total) if total > 0 => Ok(()),
-            Some(_) => Err(RetrievalError::InvalidResponse(self.sanitize(&format!(
-                "the newly written generation {generation} is not searchable yet"
-            )))),
-            None => Err(RetrievalError::InvalidResponse(
-                self.sanitize("verification response has no hits"),
-            )),
+            Some(total) if total > 0 => {}
+            Some(_) => {
+                return Err(RetrievalError::InvalidResponse(self.sanitize(&format!(
+                    "the newly written generation {generation} is not searchable yet"
+                ))))
+            }
+            None => {
+                return Err(RetrievalError::InvalidResponse(
+                    self.sanitize("verification response has no hits"),
+                ))
+            }
         }
+        let hits = value["hits"]["hits"].as_array().ok_or_else(|| {
+            RetrievalError::InvalidResponse(
+                self.sanitize("verification response has no hits array"),
+            )
+        })?;
+        // 总数 > 0 但一条具体命中都没有 = 响应自相矛盾，不能当“可检索”。
+        if hits.is_empty() {
+            return Err(RetrievalError::InvalidResponse(self.sanitize(&format!(
+                "the verification search for generation {generation} returned a positive total without any chunk"
+            ))));
+        }
+        for hit in hits {
+            let Some(id) = hit["_id"].as_str() else {
+                return Err(RetrievalError::InvalidResponse(self.sanitize(&format!(
+                    "a verification hit for generation {generation} has no _id"
+                ))));
+            };
+            // 命中必须是本次写进去的物理 id：旧代/别的 scope 的记录不能替新代“证明”可检索。
+            if !written.iter().any(|written_id| written_id == id) {
+                return Err(RetrievalError::InvalidResponse(self.sanitize(&format!(
+                    "the verification search for generation {generation} returned chunk {id}, which this build did not write"
+                ))));
+            }
+        }
+        Ok(())
     }
 
     fn best_effort_delete(&self, ids: &[String]) {

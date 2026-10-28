@@ -4,7 +4,7 @@
 //! 真机验收（真索引、真 key、真查询）由集成方另做。所有 fake 响应形状都抄自 rc.100 的实测输出
 //! （bulk 的 200+errors/items.status、409 resource_already_exists、DELETE 404 not_found 等）。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -130,6 +130,10 @@ struct Recorded {
 #[derive(Default)]
 struct FakeState {
     requests: Vec<Recorded>,
+    /// 物理 `_id` → 已提交的文档。fake 就是一个最小索引：bulk 真的写入/覆盖，DELETE 真的移除，
+    /// `_search` 按 scope/generation/文本过滤它。R01 的“旧代仍可检索”“跨 scope 不互相覆盖”
+    /// 必须由这份状态证明，不能靠预制一个“旧命中”响应。
+    documents: HashMap<String, Value>,
     health: Option<Reply>,
     create_index: Option<Reply>,
     bulk: VecDeque<Reply>,
@@ -139,6 +143,7 @@ struct FakeState {
     delete_index: Option<Reply>,
     failures: VecDeque<TransportError>,
     create_gate: Option<std::sync::mpsc::Receiver<()>>,
+    search_gate: Option<std::sync::mpsc::Receiver<()>>,
     panic_on_bulk: bool,
 }
 
@@ -200,6 +205,42 @@ impl FakeTransport {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.lock().create_gate = Some(receiver);
         sender
+    }
+
+    /// 让下一次搜索请求（发布前验证或候选查询）卡住，直到测试 `send`。
+    /// 用于在“新代已 bulk 写入、尚未发布”的窗口里断言旧代仍可查询。
+    fn gate_next_search(&self) -> std::sync::mpsc::Sender<()> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.lock().search_gate = Some(receiver);
+        sender
+    }
+
+    /// fake 索引里当前记录的物理 id（排序后，便于断言）。
+    fn stored_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.lock().documents.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    fn document(&self, id: &str) -> Option<Value> {
+        self.lock().documents.get(id).cloned()
+    }
+
+    fn document_count(&self) -> usize {
+        self.lock().documents.len()
+    }
+
+    /// fake 索引里出现过的 generation（排序去重）。用来确认新代 bulk 已落库但尚未发布。
+    fn stored_generations(&self) -> Vec<u64> {
+        let mut generations: Vec<u64> = self
+            .lock()
+            .documents
+            .values()
+            .filter_map(|document| document["generation"].as_u64())
+            .collect();
+        generations.sort_unstable();
+        generations.dedup();
+        generations
     }
 
     fn requests(&self) -> Vec<Recorded> {
@@ -359,6 +400,105 @@ fn bulk_reply(body: &[u8]) -> Reply {
     Reply::ok_json(json!({"took": 1, "errors": false, "items": items}))
 }
 
+/// 把一份 NDJSON bulk 请求拆成 (物理 id, 文档) 列表，顺序与请求一致。
+fn bulk_request_pairs(body: &[u8]) -> Vec<(String, Value)> {
+    let text = String::from_utf8_lossy(body).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut pairs = Vec::new();
+    for pair in lines.chunks(2) {
+        if pair.len() < 2 {
+            break;
+        }
+        let Ok(action) = serde_json::from_str::<Value>(pair[0]) else {
+            continue;
+        };
+        let Some(id) = action["index"]["_id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<Value>(pair[1]) else {
+            continue;
+        };
+        pairs.push((id, document));
+    }
+    pairs
+}
+
+/// 从预制 bulk 响应里取每个 item 的 status（按位置对应请求里的 id）。
+fn bulk_reply_statuses(reply: &Reply) -> Vec<u64> {
+    let Ok(value) = serde_json::from_slice::<Value>(&reply.body) else {
+        return Vec::new();
+    };
+    value["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| item["index"]["status"].as_u64().unwrap_or(500))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// fake 的 `_search` 实现：按 bool.filter 的 term（scope_key/generation）过滤记录，
+/// 再按 bool.must 的 match 子句做文本过滤。发布前验证查询没有 must，等价 match_all。
+/// 这样“旧代仍可检索”是索引状态算出来的，而不是测试预制的一个命中。
+fn search_fake_index(documents: &HashMap<String, Value>, request: &Value) -> Value {
+    let size = request["size"].as_u64().unwrap_or(10) as usize;
+    let mut terms: Vec<(String, Value)> = Vec::new();
+    if let Some(filters) = request["query"]["bool"]["filter"].as_array() {
+        for filter in filters {
+            if let Some(term) = filter["term"].as_object() {
+                for (field, value) in term {
+                    terms.push((field.clone(), value.clone()));
+                }
+            }
+        }
+    }
+    let mut must: Vec<Vec<(String, String)>> = Vec::new();
+    if let Some(clauses) = request["query"]["bool"]["must"].as_array() {
+        for clause in clauses {
+            let mut alternatives = Vec::new();
+            if let Some(should) = clause["bool"]["should"].as_array() {
+                for option in should {
+                    if let Some(matches) = option["match"].as_object() {
+                        for (field, value) in matches {
+                            if let Some(text) = value.as_str() {
+                                alternatives.push((field.clone(), text.to_lowercase()));
+                            }
+                        }
+                    }
+                }
+            }
+            must.push(alternatives);
+        }
+    }
+    let mut ids: Vec<&String> = documents
+        .iter()
+        .filter(|(_, document)| {
+            terms
+                .iter()
+                .all(|(field, value)| &document[field.as_str()] == value)
+                && must.iter().all(|alternatives| {
+                    alternatives.is_empty()
+                        || alternatives.iter().any(|(field, text)| {
+                            document[field.as_str()]
+                                .as_str()
+                                .is_some_and(|value| value.to_lowercase().contains(text))
+                        })
+                })
+        })
+        .map(|(id, _)| id)
+        .collect();
+    ids.sort();
+    let total = ids.len();
+    let hits: Vec<Value> = ids
+        .into_iter()
+        .take(size)
+        .map(|id| json!({"_id": id, "_score": 1.0}))
+        .collect();
+    json!({"took": 1, "hits": {"total": {"value": total, "relation": "eq"}, "hits": hits}})
+}
+
 impl Transport for FakeTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let HttpRequest {
@@ -381,11 +521,14 @@ impl Transport for FakeTransport {
                 body: body.clone(),
             });
             let is_bulk = method == HttpMethod::Post && path.ends_with("/_bulk");
+            let is_search = method == HttpMethod::Post && path.ends_with("/_search");
             let panic_bulk = is_bulk && std::mem::take(&mut state.panic_on_bulk);
             let is_create =
                 method == HttpMethod::Put && !path.trim_start_matches('/').contains('/');
             let gate = if is_create {
                 state.create_gate.take()
+            } else if is_search {
+                state.search_gate.take()
             } else {
                 None
             };
@@ -400,25 +543,56 @@ impl Transport for FakeTransport {
                     .clone()
                     .unwrap_or_else(|| Reply::ok_json(json!({"acknowledged": true})))
             } else if is_bulk {
-                state.bulk.pop_front().unwrap_or_else(|| bulk_reply(&body))
-            } else if method == HttpMethod::Post && path.ends_with("/_search") {
-                if contains_marker(&body, "track_total_hits") {
-                    state.verification_search.pop_front().unwrap_or_else(|| {
-                        Reply::ok_json(json!({
-                            "hits": {"total": {"value": 1, "relation": "eq"},
-                                     "hits": [{"_id": "verify", "_score": 1.0}]}
-                        }))
-                    })
-                } else {
-                    state.candidate_search.pop_front().unwrap_or_else(|| {
-                        Reply::ok_json(json!({"hits": {"total": {"value": 0}, "hits": []}}))
-                    })
+                let pairs = bulk_request_pairs(&body);
+                match state.bulk.pop_front() {
+                    Some(injected) => {
+                        // 故障注入响应按位置套用真实请求 id：只有 2xx 项真的落进 fake 索引，
+                        // 后续“删了哪些、还剩哪些”的断言才看到真实写入结果。
+                        for (index, (id, document)) in pairs.into_iter().enumerate() {
+                            let status = bulk_reply_statuses(&injected)
+                                .get(index)
+                                .copied()
+                                .unwrap_or(500);
+                            if status < 300 {
+                                state.documents.insert(id, document);
+                            }
+                        }
+                        injected
+                    }
+                    None => {
+                        for (id, document) in pairs {
+                            state.documents.insert(id, document);
+                        }
+                        bulk_reply(&body)
+                    }
                 }
+            } else if is_search {
+                let request_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                // 验证查询带 track_total_hits；候选查询不带。预制响应只在故障注入时使用。
+                let injected = if contains_marker(&body, "track_total_hits") {
+                    state.verification_search.pop_front()
+                } else {
+                    state.candidate_search.pop_front()
+                };
+                injected.unwrap_or_else(|| {
+                    Reply::ok_json(search_fake_index(&state.documents, &request_body))
+                })
             } else if method == HttpMethod::Delete && path.contains("/_doc/") {
-                state
-                    .delete_document
-                    .pop_front()
-                    .unwrap_or_else(|| Reply::ok_json(json!({"result": "deleted"})))
+                let id = path
+                    .rsplit_once("/_doc/")
+                    .map(|(_, id)| id.to_owned())
+                    .unwrap_or_default();
+                // 预制的删除响应是故障注入：不能真的删，否则无法模拟“清理失败、索引仍有残留”。
+                match state.delete_document.pop_front() {
+                    Some(injected) => injected,
+                    None => {
+                        if state.documents.remove(&id).is_some() {
+                            Reply::ok_json(json!({"result": "deleted"}))
+                        } else {
+                            Reply::status(404, json!({"result": "not_found"}))
+                        }
+                    }
+                }
             } else if method == HttpMethod::Delete {
                 state
                     .delete_index
@@ -834,6 +1008,10 @@ fn build_success_creates_mapping_streams_bulk_verifies_then_publishes() {
         .expect("ready needs a generation");
     assert!(generation > 0);
     assert!(status["indexed_at_unix_ms"].as_u64().unwrap_or(0) > 0);
+    let build_id = status["build_id"]
+        .as_str()
+        .expect("ready status must name the build identity");
+    assert!(!build_id.is_empty());
 
     // 顺序：health → PUT mapping → bulk → 验证 search。
     let requests = fake.requests();
@@ -885,7 +1063,14 @@ fn build_success_creates_mapping_streams_bulk_verifies_then_publishes() {
     let ids = fake.bulk_ids();
     assert_eq!(ids.len(), 3);
     let unique: std::collections::HashSet<&String> = ids.iter().collect();
-    assert_eq!(unique.len(), 3, "chunk ids must be distinct");
+    assert_eq!(unique.len(), 3, "physical chunk ids must be distinct");
+    // 物理 _id 不是文档里的逻辑 chunk_id：它含 scope 与构建身份，供索引定位与旧代回收。
+    for document in &sent {
+        assert!(
+            !ids.contains(&document["chunk_id"].as_str().unwrap().to_owned()),
+            "physical ids must include the build identity, not just the logical chunk id"
+        );
+    }
 
     let verification_body = fake.last_verification_body();
     let filters = &verification_body["query"]["bool"]["filter"];
@@ -907,7 +1092,9 @@ fn build_success_creates_mapping_streams_bulk_verifies_then_publishes() {
     })));
     let candidates = handle.candidates(&snapshot, "calibration", 10).unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].chunk_id, ids[0]);
+    // 工具层看到的 chunk_id 是逻辑身份（文档里的 chunk_id），不是索引物理 _id。
+    assert_eq!(candidates[0].chunk_id, hit_document["chunk_id"]);
+    assert_ne!(candidates[0].chunk_id, json!(ids[0]));
     assert_eq!(candidates[0].score, Some(3.5));
     assert_eq!(candidates[0].relative_path, hit_document["relative_path"]);
     assert_eq!(
@@ -1090,26 +1277,33 @@ fn rebuild_uses_a_new_generation_and_removes_only_stale_chunks() {
     let generation_a = status["generation"].as_u64().unwrap();
     let ids_a = fake.bulk_ids();
     assert_eq!(ids_a.len(), 3);
-    let keep_ids: Vec<String> = fake
-        .bulk_documents()
-        .into_iter()
-        .filter(|document| document["relative_path"] == "keep.md")
-        .map(|document| document["chunk_id"].as_str().unwrap().to_owned())
-        .collect();
-    let drop_ids: Vec<String> = fake
-        .bulk_documents()
-        .into_iter()
-        .filter(|document| document["relative_path"] == "drop.md")
-        .map(|document| document["chunk_id"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(keep_ids.len(), 2);
-    assert_eq!(drop_ids.len(), 1);
+    let pairs_a = fake.bulk_pairs();
+    let physical_for = |pairs: &[(Value, Value)], name: &str| -> Vec<String> {
+        pairs
+            .iter()
+            .filter(|(_, document)| document["relative_path"] == name)
+            .map(|(action, _)| action["index"]["_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let logical_for = |pairs: &[(Value, Value)], name: &str| -> Vec<String> {
+        pairs
+            .iter()
+            .filter(|(_, document)| document["relative_path"] == name)
+            .map(|(_, document)| document["chunk_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let old_keep_logical = logical_for(&pairs_a, "keep.md");
+    let old_keep_physical = physical_for(&pairs_a, "keep.md");
+    assert_eq!(old_keep_logical.len(), 2);
+    assert_eq!(old_keep_physical.len(), 2);
+    assert_eq!(physical_for(&pairs_a, "drop.md").len(), 1);
     assert!(
         fake.deleted_ids().is_empty(),
         "first build has no old generation to clean"
     );
 
-    // 删除一个文件 → 新快照；新 generation 必须与旧的不同，且只清理旧文件特有的 id。
+    // 删除一个文件 → 新快照。新 generation 必须与旧的不同；而且物理 id 也全新（含新 build_id），
+    // 所以旧代全部物理记录都成为可回收的 stale 记录，新代不会原地覆盖它们。
     fake.clear_requests();
     docs.remove("drop.md");
     let snapshot_b = collect_docs(docs.path());
@@ -1125,24 +1319,33 @@ fn rebuild_uses_a_new_generation_and_removes_only_stale_chunks() {
         fake.last_verification_body()["query"]["bool"]["filter"][1]["term"]["generation"],
         json!(generation_b)
     );
+    let pairs_b = fake.bulk_pairs();
+    let ids_b = fake.bulk_ids();
+    assert!(
+        ids_b.iter().all(|id| !ids_a.contains(id)),
+        "每个构建的物理 id 必须不同，新代才不会原地覆盖旧代"
+    );
     let deleted = fake.deleted_ids();
     assert!(
-        drop_ids.iter().all(|id| deleted.contains(id)),
-        "removed document chunks were not cleaned up: {deleted:?}"
+        ids_a.iter().all(|id| deleted.contains(id)),
+        "旧代物理记录（含被删文档与未变文档）应在发布后回收: {deleted:?}"
     );
-    // 内容没变的文档 chunk_id 相同、被新代原地覆盖；清理绝不能把它们删掉。
-    for id in &keep_ids {
-        assert!(
-            !deleted.contains(id),
-            "a chunk still referenced by the new generation was deleted: {id}"
-        );
-    }
+    assert!(
+        ids_b.iter().all(|id| !deleted.contains(id)),
+        "新代刚写入的物理记录被清理误删: {deleted:?}"
+    );
+    assert!(
+        ids_a.iter().all(|id| fake.document(id).is_none()),
+        "回收后 fake 索引里不应再有旧代记录"
+    );
+    // 内容没变的文档逻辑 chunk_id 不变，但物理记录换了：调用方拿到的逻辑身份保持稳定。
+    assert_eq!(logical_for(&pairs_b, "keep.md"), old_keep_logical);
     // 旧快照的候选查询现在是 stale，不能静默返回。
     let error = handle.candidates(&snapshot_a, "line", 5).unwrap_err();
     assert!(matches!(error, RetrievalError::Stale(_)), "{error:?}");
     assert_eq!(error.state(), "stale");
 
-    // 文档变短 → 内容 hash 变化 → 全部旧块失效并被清理。
+    // 文档变短 → 内容 hash 变化 → 旧块全部失效并被清理；新代只有 10 行内的块。
     fake.clear_requests();
     docs.write("keep.md", &numbered_lines(10));
     let snapshot_c = collect_docs(docs.path());
@@ -1153,17 +1356,16 @@ fn rebuild_uses_a_new_generation_and_removes_only_stale_chunks() {
     let generation_c = status["generation"].as_u64().unwrap();
     assert!(generation_c > generation_b);
     let deleted = fake.deleted_ids();
-    for id in &keep_ids {
-        assert!(
-            deleted.contains(id),
-            "shortened document chunk {id} was not cleaned up"
-        );
-    }
+    assert!(
+        ids_b.iter().all(|id| deleted.contains(id)),
+        "文档缩短后上一代物理记录应被回收"
+    );
     let new_ids: Vec<String> = fake.bulk_ids();
-    assert!(new_ids.iter().all(|id| !keep_ids.contains(id)));
+    assert!(new_ids.iter().all(|id| !ids_b.contains(id)));
     assert_eq!(fake.candidate_searches().len(), candidates_before);
     let candidates = handle.candidates(&snapshot_c, "line", 5).unwrap();
-    assert!(candidates.is_empty() || candidates.iter().all(|c| c.line_end <= 10));
+    assert!(!candidates.is_empty(), "新代应真实可检索");
+    assert!(candidates.iter().all(|c| c.line_end <= 10));
 }
 
 #[test]
@@ -1193,13 +1395,17 @@ fn failed_rebuild_keeps_the_previous_ready_manifest_usable() {
         .unwrap_or_default()
         .contains("bulk item 1"));
 
-    // 旧清单仍对应 snapshot A：A 的候选查询可用（filter 仍是旧 generation）。
+    // 旧清单仍对应 snapshot A：A 的候选查询可用（filter 仍是旧 generation），而且新代写入
+    // 失败/清理只碰新物理 id，不会删掉旧代记录。
+    let old_document = fake
+        .document(&ids_a[0])
+        .expect("the old generation record must survive a failed rebuild");
     fake.push_candidate(Reply::ok_json(
         json!({"hits": {"hits": [{"_id": ids_a[0], "_score": 2.0}]}}),
     ));
     let candidates = handle.candidates(&snapshot_a, "first", 5).unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].chunk_id, ids_a[0]);
+    assert_eq!(candidates[0].chunk_id, old_document["chunk_id"]);
     assert_eq!(
         fake.last_candidate_body()["query"]["bool"]["filter"][1]["term"]["generation"],
         json!(generation_a)
@@ -1212,6 +1418,295 @@ fn failed_rebuild_keeps_the_previous_ready_manifest_usable() {
     // 状态里仍报旧清单的规模，但 state=error 让 GUI 知道需要刷新。
     assert_eq!(status["documents"], 1);
     assert_eq!(status["generation"], json!(generation_a));
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5b. R01：逻辑 chunk 身份与物理 _id 分离
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn failed_verification_after_successful_bulk_keeps_the_old_generation_searchable() {
+    // R01 验收 a：同一快照强制刷新，bulk 真的写入成功，随后 validation 查询返回零命中。
+    // 旧实现里新代 bulk 用同一逻辑 id 原地覆盖旧代；失败清理再按这些 id 删除，旧 manifest
+    // 仍 ready 却查不到任何块。这里用维护真实索引状态的 fake 断言旧代记录原样可检索。
+    let docs = TempDocs::new("r01-verify-failed");
+    docs.write("overview.md", "# Overview\nfirst version\n");
+    let fake = FakeTransport::new();
+    let handle = build_handle(&fake, enabled_settings());
+    let snapshot = collect_docs(docs.path());
+    let _ = handle.ensure(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    let generation_a = status["generation"].as_u64().unwrap();
+    let old_ids = fake.bulk_ids();
+    assert_eq!(old_ids.len(), 1);
+    let old_document = fake
+        .document(&old_ids[0])
+        .expect("the first generation record must exist");
+    let old_logical = old_document["chunk_id"].as_str().unwrap().to_owned();
+    // 旧代在 fake 索引里真实可查（不是预制命中）。
+    let before = handle.candidates(&snapshot, "first", 5).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].chunk_id, old_logical);
+
+    // 同一快照强制刷新：bulk 成功，验证查询零命中。
+    fake.clear_requests();
+    fake.push_verification(Reply::ok_json(json!({
+        "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}
+    })));
+    let _ = handle.refresh(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "error", "{status}");
+    assert!(status["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not searchable"));
+
+    // 新代确实写进过 fake 索引，然后被失败清理按**本次构建**的物理 id 删除。
+    let new_ids = fake.bulk_ids();
+    assert_eq!(new_ids.len(), 1);
+    assert_ne!(new_ids[0], old_ids[0], "新代必须写在不同物理记录上");
+    let new_logical = fake
+        .bulk_documents()
+        .into_iter()
+        .map(|document| document["chunk_id"].as_str().unwrap().to_owned())
+        .next()
+        .unwrap();
+    assert_eq!(new_logical, old_logical, "同一份文档的逻辑身份跨代不变");
+    let deleted = fake.deleted_ids();
+    assert!(
+        deleted.contains(&new_ids[0]),
+        "失败清理应删除本次新代物理 id: {deleted:?}"
+    );
+    assert!(
+        !deleted.contains(&old_ids[0]),
+        "失败清理绝不能删掉旧 manifest 仍引用的物理 id: {deleted:?}"
+    );
+
+    // 旧 manifest 保留、旧代记录仍在 fake 索引里：候选查询真实命中旧块。
+    assert_eq!(
+        fake.stored_ids(),
+        old_ids,
+        "失败刷新后 fake 索引里应只剩旧代记录"
+    );
+    let candidates = handle.candidates(&snapshot, "first", 5).unwrap();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "ready 的旧清单必须仍能召回: {candidates:?}"
+    );
+    assert_eq!(candidates[0].chunk_id, old_logical);
+    assert_eq!(candidates[0].relative_path, "overview.md");
+    assert_eq!(
+        fake.last_candidate_body()["query"]["bool"]["filter"][1]["term"]["generation"],
+        json!(generation_a)
+    );
+    // 同快照的 ensure 不该重建（旧清单仍与快照一致），状态恢复 ready 且可检索。
+    let _ = handle.ensure(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    assert_eq!(status["generation"], json!(generation_a));
+    let candidates = handle.candidates(&snapshot, "first", 5).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].chunk_id, old_logical);
+}
+
+#[test]
+fn verification_rejects_foreign_or_inconsistent_hits() {
+    // “只信新代物理 id”的两道防线：命中的 _id 必须属于本次实际写入；总数 > 0 却给不出具体命中
+    // （或缺 _id）的响应是自相矛盾的，都不能当作“新代可检索”而发布。
+    let docs = TempDocs::new("r01-verify-foreign");
+    docs.write("a.md", "# A\nbody\n");
+    let fake = FakeTransport::new();
+    let handle = build_handle(&fake, enabled_settings());
+    let snapshot = collect_docs(docs.path());
+    let _ = handle.ensure(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    let old_ids = fake.bulk_ids();
+
+    // 服务端在“新代 generation”过滤下回了旧代物理 id：不能替新代证明可检索。
+    fake.clear_requests();
+    fake.push_verification(Reply::ok_json(json!({
+        "hits": {"total": {"value": 1, "relation": "eq"},
+                 "hits": [{"_id": old_ids[0], "_score": 1.0}]}
+    })));
+    let _ = handle.refresh(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "error", "{status}");
+    assert!(status["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("did not write"));
+    let new_id = fake.bulk_ids()[0].clone();
+    assert!(fake.deleted_ids().contains(&new_id));
+    assert!(!fake.deleted_ids().contains(&old_ids[0]));
+    let candidates = handle.candidates(&snapshot, "body", 5).unwrap();
+    assert_eq!(candidates.len(), 1);
+
+    // 正数总数但零条具体命中。
+    fake.push_verification(Reply::ok_json(json!({
+        "hits": {"total": {"value": 1, "relation": "eq"}, "hits": []}
+    })));
+    let _ = handle.refresh(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "error", "{status}");
+    assert!(status["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("without any chunk"));
+
+    // 命中没有 _id。
+    fake.push_verification(Reply::ok_json(json!({
+        "hits": {"total": {"value": 1, "relation": "eq"}, "hits": [{"_score": 1.0}]}
+    })));
+    let _ = handle.refresh(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "error", "{status}");
+    assert!(status["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("has no _id"));
+    // 三次失败都只清理本次新代 id，旧清单始终可检索。
+    assert!(fake.deleted_ids().iter().all(|id| id != &old_ids[0]));
+    let candidates = handle.candidates(&snapshot, "body", 5).unwrap();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+}
+
+#[test]
+fn old_generation_stays_searchable_while_the_next_generation_is_being_built() {
+    // R01 验收 b：新代 bulk 已写入 fake 索引、但还没发布（卡在验证搜索）时，
+    // 旧 manifest 的候选查询必须仍能查到原有块。
+    let docs = TempDocs::new("r01-build-window");
+    docs.write("overview.md", "# Overview\nfirst version\n");
+    let fake = FakeTransport::new();
+    let handle = build_handle(&fake, enabled_settings());
+    let snapshot_a = collect_docs(docs.path());
+    let _ = handle.ensure(snapshot_a.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    let generation_a = status["generation"].as_u64().unwrap();
+    let old_ids = fake.bulk_ids();
+    let old_logical = fake.document(&old_ids[0]).unwrap()["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    docs.write("overview.md", "# Overview\nsecond version\n");
+    let snapshot_b = collect_docs(docs.path());
+    fake.clear_requests();
+    let gate = fake.gate_next_search();
+    let _ = handle.ensure(snapshot_b.clone());
+    wait_until(
+        || !fake.verification_searches().is_empty(),
+        Duration::from_secs(5),
+        "the new generation to reach its verification search",
+    );
+    // 新代已真实落库（fake 索引里同时有两代 generation），但尚未发布。
+    assert_eq!(fake.stored_generations().len(), 2);
+    assert_eq!(handle.status()["state"], "building");
+
+    // 构建期间旧代仍可检索：用的还是旧 manifest 的 generation，fake 按状态过滤后真实命中。
+    let candidates = handle.candidates(&snapshot_a, "first", 5).unwrap();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].chunk_id, old_logical);
+    assert_eq!(
+        fake.last_candidate_body()["query"]["bool"]["filter"][1]["term"]["generation"],
+        json!(generation_a)
+    );
+    // 新快照此时还没有清单：stale，而不是拿旧代冒充。
+    assert!(matches!(
+        handle.candidates(&snapshot_b, "second", 5),
+        Err(RetrievalError::Stale(_))
+    ));
+
+    gate.send(()).unwrap();
+    let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    assert!(status["generation"].as_u64().unwrap() > generation_a);
+    // 发布成功后旧代物理 id 被回收，新代真实可检索。
+    let deleted = fake.deleted_ids();
+    assert!(
+        old_ids.iter().all(|id| deleted.contains(id)),
+        "旧代记录未被回收: {deleted:?}"
+    );
+    assert!(old_ids.iter().all(|id| fake.document(id).is_none()));
+    let candidates = handle.candidates(&snapshot_b, "second", 5).unwrap();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].relative_path, "overview.md");
+}
+
+#[test]
+fn identical_documents_in_two_scopes_do_not_overwrite_each_other() {
+    // R01 验收 c：两个 scope 的相同文档共用一个索引。旧实现物理 id 相同，后建的 scope 会覆盖
+    // 先建 scope 的记录；这里断言 fake 索引里两条记录同时存在，且各自 scope 的查询只命中自己。
+    let docs = TempDocs::new("r01-cross-scope");
+    docs.write("guide.md", "# Same\nidentical text\n");
+    let fake = FakeTransport::new();
+    let handle_a = build_handle(&fake, enabled_settings());
+    let handle_b = build_handle(&fake, enabled_settings());
+    let snapshot_a = collect_snapshot(
+        "app",
+        "scope-a",
+        &json!({"kind": "app", "name": "a"}),
+        docs.path(),
+        "source-a",
+    )
+    .unwrap();
+    let snapshot_b = collect_snapshot(
+        "app",
+        "scope-b",
+        &json!({"kind": "app", "name": "b"}),
+        docs.path(),
+        "source-a",
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_a.snapshot_identity, snapshot_b.snapshot_identity,
+        "两个 scope 的快照内容相同"
+    );
+
+    let _ = handle_a.ensure(snapshot_a.clone());
+    assert_eq!(
+        handle_a.wait_for_idle(Duration::from_secs(5))["state"],
+        "ready"
+    );
+    let ids_a = fake.bulk_ids();
+    assert_eq!(ids_a.len(), 1);
+    let _ = handle_b.ensure(snapshot_b.clone());
+    assert_eq!(
+        handle_b.wait_for_idle(Duration::from_secs(5))["state"],
+        "ready"
+    );
+    let ids_b: Vec<String> = fake
+        .bulk_ids()
+        .into_iter()
+        .filter(|id| !ids_a.contains(id))
+        .collect();
+    assert_eq!(ids_b.len(), 1);
+    assert_ne!(ids_a[0], ids_b[0], "跨 scope 的物理 id 必须不同");
+    assert_eq!(
+        fake.document_count(),
+        2,
+        "一个 scope 的构建覆盖了另一个 scope 的记录"
+    );
+
+    // 逻辑身份（内容身份）跨 scope 相同；物理记录各自带自己的 scope。
+    let old_document = fake.document(&ids_a[0]).unwrap();
+    let new_document = fake.document(&ids_b[0]).unwrap();
+    assert_eq!(old_document["chunk_id"], new_document["chunk_id"]);
+    assert_eq!(old_document["scope_key"], "scope-a");
+    assert_eq!(new_document["scope_key"], "scope-b");
+
+    // 各自查询只命中自己的记录（scope + generation 过滤；fake 用真实状态算命中）。
+    let candidates_a = handle_a.candidates(&snapshot_a, "identical", 5).unwrap();
+    assert_eq!(candidates_a.len(), 1, "{candidates_a:?}");
+    assert_eq!(candidates_a[0].relative_path, "guide.md");
+    assert_eq!(candidates_a[0].chunk_id, old_document["chunk_id"]);
+    let candidates_b = handle_b.candidates(&snapshot_b, "identical", 5).unwrap();
+    assert_eq!(candidates_b.len(), 1, "{candidates_b:?}");
+    assert_eq!(candidates_b[0].relative_path, "guide.md");
+    assert_eq!(candidates_b[0].chunk_id, new_document["chunk_id"]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1427,6 +1922,7 @@ fn chunks_split_every_40_lines_and_keep_the_original_text() {
     assert_eq!(eighty_chunks[1]["line_end"], 80);
 
     // chunk_id / document_id 公式必须与任务书逐字节一致。
+    // 逻辑 chunk 身份 v2 起含相对路径：两份内容相同的文档不再共用 id。
     let document = &forty_chunks[0];
     let expected_document_id = short_sha256(&format!(
         "colm-doc-v1:{}",
@@ -1434,13 +1930,17 @@ fn chunks_split_every_40_lines_and_keep_the_original_text() {
     ));
     assert_eq!(document["document_id"], expected_document_id);
     let expected_chunk_id = short_sha256(&format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}",
+        CHUNK_ID_VERSION,
+        document["relative_path"].as_str().unwrap(),
         document["document_sha256"].as_str().unwrap(),
         1,
         40,
         CHUNKING_VERSION
     ));
     assert_eq!(document["chunk_id"], expected_chunk_id);
+    // 同一行段、不同文档 identity 必须不同：这正是不再把两份相同 Markdown 判成撞 id 的依据。
+    assert_ne!(forty_chunks[0]["chunk_id"], forty_one_chunks[0]["chunk_id"]);
 }
 
 #[test]
@@ -1675,23 +2175,39 @@ fn refresh_forces_a_new_generation_for_the_same_snapshot() {
     let _ = handle.ensure(snapshot.clone());
     let first = handle.wait_for_idle(Duration::from_secs(5));
     let generation_a = first["generation"].as_u64().unwrap();
+    let build_a = first["build_id"].as_str().unwrap().to_owned();
     let ids_a = fake.bulk_ids();
+    let logical_a: Vec<String> = fake
+        .bulk_documents()
+        .into_iter()
+        .map(|document| document["chunk_id"].as_str().unwrap().to_owned())
+        .collect();
+    fake.clear_requests();
     let _ = handle.refresh(snapshot.clone());
     let status = handle.wait_for_idle(Duration::from_secs(5));
     assert_eq!(status["state"], "ready", "{status}");
     let generation_b = status["generation"].as_u64().unwrap();
     assert!(generation_b > generation_a);
-    assert_eq!(fake.bulk_requests().len(), 2);
+    assert_eq!(fake.bulk_requests().len(), 1);
     assert_eq!(
         fake.last_verification_body()["query"]["bool"]["filter"][1]["term"]["generation"],
         json!(generation_b)
     );
-    // 同一份文档，chunk_id 不变（被新代原地覆盖），所以不清理这些 id。
+    // 同一份快照强制刷新：逻辑身份不变，但物理 id 全新（build_id 变了），旧代记录在发布后回收。
+    // 绝不原地覆盖旧 id —— 否则验证失败后的清理会把旧 manifest 正在引用的记录删掉。
+    assert_ne!(status["build_id"].as_str().unwrap(), build_a);
     let ids_b = fake.bulk_ids();
-    for id in &ids_a {
-        assert!(ids_b.contains(id));
-        assert!(!fake.deleted_ids().contains(id));
-    }
+    assert!(ids_b.iter().all(|id| !ids_a.contains(id)));
+    assert!(fake.deleted_ids().iter().all(|id| ids_a.contains(id)));
+    assert!(ids_a.iter().all(|id| fake.document(id).is_none()));
+    let logical_b: Vec<String> = fake
+        .bulk_documents()
+        .into_iter()
+        .map(|document| document["chunk_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(logical_b, logical_a);
+    // 旧代已回收，新代真实可检索。
+    assert_eq!(fake.document_count(), ids_b.len());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1866,10 +2382,11 @@ fn stale_chunk_cleanup_failure_keeps_ready_and_reports_detail() {
 }
 
 #[test]
-fn duplicate_chunk_ids_fail_the_build_instead_of_silently_dropping_a_document() {
-    // chunk_id 只由 document_sha256 + 行段决定；两份字节完全相同的文件会撞 id。若不拦，
-    // bulk 会互相覆盖、本地清单少一份文档而状态仍 ready —— 这是静默丢证据。
-    let docs = TempDocs::new("duplicate-chunks");
+fn identical_documents_keep_distinct_logical_and_physical_identities() {
+    // 逻辑 chunk 身份 v2 含相对路径：两份字节完全相同的 Markdown 是不同的文档块。
+    // 旧公式（只由 document_sha256 + 行段决定）会让它们共用逻辑 id，进而共用物理 _id，
+    // 谁后写谁覆盖 —— 本地清单少一份文档而状态仍 ready，属于静默丢证据。
+    let docs = TempDocs::new("identical-documents");
     docs.write("a.md", "# Same\nidentical text\n");
     docs.write("b.md", "# Same\nidentical text\n");
     let fake = FakeTransport::new();
@@ -1877,12 +2394,55 @@ fn duplicate_chunk_ids_fail_the_build_instead_of_silently_dropping_a_document() 
     let snapshot = collect_docs(docs.path());
     let _ = handle.ensure(snapshot.clone());
     let status = handle.wait_for_idle(Duration::from_secs(5));
+    assert_eq!(status["state"], "ready", "{status}");
+    assert_eq!(status["documents"], 2);
+    assert_eq!(status["chunks"], 2);
+    let documents = fake.bulk_documents();
+    assert_eq!(documents.len(), 2);
+    let mut logical: Vec<&str> = documents
+        .iter()
+        .map(|document| document["chunk_id"].as_str().unwrap())
+        .collect();
+    logical.sort_unstable();
+    logical.dedup();
+    assert_eq!(
+        logical.len(),
+        2,
+        "identical bytes in different files must not share a logical chunk id"
+    );
+    let ids = fake.bulk_ids();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), 2);
+    assert_eq!(fake.document_count(), 2);
+    // 两份文档都能真实召回，且路径来自本地清单。
+    let candidates = handle.candidates(&snapshot, "identical", 10).unwrap();
+    assert_eq!(candidates.len(), 2);
+    let mut paths: Vec<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.relative_path.as_str())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["a.md", "b.md"]);
+}
+
+#[test]
+fn repeated_document_paths_are_rejected_instead_of_overwriting_chunks() {
+    // DocSnapshot 是公开结构：调用方可以喂进来两份 relative_path 相同的文档。逻辑 id 仍会撞，
+    // 若放任 bulk 覆盖，本地清单会少块而状态仍 ready；必须让整份快照失败并回退关键词路径。
+    let docs = TempDocs::new("repeated-paths");
+    docs.write("a.md", "# A\nbody\n");
+    let fake = FakeTransport::new();
+    let handle = build_handle(&fake, enabled_settings());
+    let mut snapshot = collect_docs(docs.path());
+    snapshot.documents.push(snapshot.documents[0].clone());
+    let _ = handle.ensure(snapshot.clone());
+    let status = handle.wait_for_idle(Duration::from_secs(5));
     assert_eq!(status["state"], "error", "{status}");
     let detail = status["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("share chunk id"), "{detail}");
     assert!(fake.bulk_requests().is_empty());
     assert!(matches!(
-        handle.candidates(&snapshot, "identical", 5),
+        handle.candidates(&snapshot, "body", 5),
         Err(RetrievalError::NotReady(_))
     ));
 }
