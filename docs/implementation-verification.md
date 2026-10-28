@@ -38294,3 +38294,47 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 说明：本机 `cargo test` 用每二进制单线程，是因为既有 NetCDF/HDF5 并发 flake（与本改动无关）；默认并行
   在其他机器/CI 上仍可运行，但本轮没有推送，未跑 CI。Windows/Linux、原生窗口目视、真实付费模型回放
   均未运行（见上节未验证项）；环境阻塞已如实记录，没有把未运行写成通过。
+
+## P-Xerj 追加：应用托管的 Xerj 节点（managed，2026-10-28）
+
+在第一阶段“连接用户自己运行的本机 Xerj（external）”之上，按用户确认的方向补了第二种接入方式：由窗口进程启动并托管应用自己的固定版本 Xerj。默认仍是 external，旧 `assistant.json` 缺字段按 external 加载。
+
+### 实现与生命周期
+
+- 新增 `gui/src-tauri/src/xerj_manager.rs`（约 1k 行，26 个测试）：`ManagedConfig`/`ManagedStatus`/`ManagedNode` 与 `resolve_binary`/`pick_base_port`/`probe_health`/`parse_version`。
+  - 二进制探测顺序：用户填写的绝对路径 → `COLM_XERJ_BINARY` → 资源目录/agent 可执行文件旁 → `PATH` 上的 `xerj`/`xerj.exe`。**不把 122 MB 二进制提交进仓库，也不自动下载**；首版由用户放置或指定路径，打包 sidecar 后置。
+  - 端口：Xerj `--port P` 会同时占用 P、P+1、P+2（native REST/gRPC），所以自动选连续 3 个空闲 127.0.0.1 端口；用户可指定首选端口。
+  - 数据目录：应用数据目录下的 `xerj/`；启动参数固定 `--port P --bind 127.0.0.1 --embed-mode lexical --disable-feedback --data-dir <app data>/xerj`，日志追加到 `<data_dir>/xerj.log`（错误时带日志尾部，不含 key）。
+  - 就绪：等 `<data_dir>/admin.key` 出现并读到 key，同时 `GET /_cluster/health` 通过；超时（20s）或子进程提前退出 → 终止自己启动的进程组并返回可读错误。
+  - key：应用自己生成的 `admin.key` 由窗口进程读取后经现有 `colm-agent --set-key`（stdin）写进助手 Key 文件，再随 configure 交给 agent；key 不经过 WebView、设置文件、日志或状态。
+  - 停止：只对 `toplevel_sidecar` 建的进程组（pgid==child id）发 TERM，等 ≤5s 再 KILL；`stop_everything`（关窗/退出）会停它；重复 stop 幂等。不碰用户已有节点或非本应用 PID。
+- Tauri 集成（`assistant.rs`、`lib.rs`）：`ManagedXerj` 状态 + `assistant_xerj_node(action:start|stop|status)` 命令；`assistant_start` 在 managed + enabled 时先确保节点就绪，把实际 endpoint 写进 configure（失败不阻断助手，agent 报 not_connected 并回退关键词）；managed 不要求用户手填 Key；external 模式行为完全不变。
+- 前端（`model.ts`、`Settings.tsx`）：接入方式下拉（external/managed）；managed 下显示二进制路径（可选）、端口（可选）、固定版本与“不自动升级”说明、节点状态行（运行/未运行/版本/是否匹配固定版本/endpoint/detail）、“启动节点/停止节点/刷新状态”按钮；managed 的 endpoint 与 Key 由应用管；索引刷新仍用 `assistant_docs_index`；所有文案中英双语。命令契约从 256 增至 257。
+
+### 自动升级策略（本期实现：不自动升级）
+
+- 固定版本 `v1.0.0-rc.100`（`gui/src-tauri/src/xerj_manager.rs::PINNED_XERJ_RELEASE` 与 `crates/colm-agent/src/retrieval.rs::PINNED_XERJ_RELEASE` 手动同步，两处注释写明）。启动时读取 `xerj --version`；与固定版本不符只在状态里提示“需人工替换为固定版本并重跑验收”，**不阻断、不自动下载、不自动替换/升级**。
+- 为什么不做静默升级：自动替换会同时打破“固定 release 的确定性”、用户数据目录与索引兼容、跨平台签名/校验边界；本期没有发布签名清单与升级器。
+- 后续若要自动升级，安全路径应是：发布签名清单 + sha256 → 用户明确确认 → 停旧节点（只停自己启动的）→ 替换二进制 → 重建索引 → 重跑固定 release 验收；仍不碰用户已有节点。本期明确不做。
+
+### 测试与真实验收
+
+- `cargo test --lib xerj_manager`（gui/src-tauri）→ **26 passed / 0 failed**：版本解析、二进制探测优先级、连续 3 端口选择、健康探测（200/401/500/超时/畸形/超大响应、key 脱敏）、admin.key 等待与超时、假二进制生命周期（不写 key/提前退出/被杀）、状态序列化不含 key、并发/幂等 stop 等。
+- 真实 rc.100 托管节点验收（env-gated，同一组测试）：
+  ```sh
+  COLM_XERJ_MANAGED_BINARY=/tmp/xerj-acceptance/xerj-1.0.0-rc.100-aarch64-apple-darwin/xerj \
+  cargo test --lib xerj_manager -- --nocapture --test-threads=1
+  ```
+  → **26 passed / 0 failed**；实测 `real xerj started in 1.67s: endpoint=http://127.0.0.1:9200 version=Some("v1.0.0-rc.100") key_len=64`，`stopped in 344ms`；stop 后 P/P+1/P+2 三个端口连接全部失败、重复 stop 幂等。验收后核对：无残留 xerj 进程、9200–9402 无监听、无临时目录残留、日志无 key 泄露。
+- 集成门禁（gui/src-tauri，最终代码）：`cargo fmt --all --check` → exit 0；`cargo clippy --all-targets -- -D warnings` → exit 0；带 `COLM_XERJ_MANAGED_BINARY` 的 `cargo test --lib`（全量 Tauri 库测试）→ **492 passed / 1 ignored / 0 failed**。
+- 前端：`npm run contract` → Generated 257；`npm run typecheck / lint / format:check` 通过；`npm test` → **1141 passed / 0 failed**；`cargo run -q -p xtask -- check-gui` → 257 registered / 219 called / 26 dynamic，事件均有 emitter/listener。
+- 本轮没有改 `crates/*`，所以此前 P-Xerj 第一阶段的 Rust 工作区全量测试（2880 passed）与真实检索验收（5 passed）仍然有效；本轮新增的真实验收是“托管节点进程生命周期”这一层。
+
+### 未验证部分与限制
+
+1. **非 macOS arm64 未实测**：Windows 的 taskkill/`xerj.exe` 探测、Linux 路径只经过编译，未运行；首版只承诺 macOS arm64 真实验收。
+2. **版本不符路径未用真实非 rc.100 二进制验收**（按要求不下载第二份 release）；`pinned_match=false` 只有逻辑/文案与单测。
+3. **首选端口**的真实节点启动未跑（真实验收走自动选路；`pick_base_port` 单测覆盖 preferred 被占/不连续的情况）。
+4. **GUI 端到端未目视**：设置页 managed 下拉/按钮/状态行、`assistant_start` 自动拉起、关窗 `stop_everything` 停节点都只有代码与单元测试，没有在原生窗口里逐按钮点验；也没有通过真实 GUI 走完“保存 managed 设置 → 发送自动启动 → 更新索引 → 关窗停止”。
+5. **打包/自动安装后置**：二进制不进仓库、不随安装包分发；用户需自行放置并指定路径（或放进 PATH/资源目录）。跨平台 sidecar 打包、签名、端口冲突治理与自动升级都未做。
+6. 自动升级**未实现**（见上）；Xerj 其它 release 的检索行为未验证；托管节点只服务文档检索，不改变云端模型的数据发送政策。
