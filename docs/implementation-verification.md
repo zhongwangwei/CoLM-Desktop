@@ -38269,8 +38269,10 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
    外部后端（Codex/Claude Code/OpenCode）共用同一组工具与检索实现，但没有做它们的真实端到端回放。
 5. **原生窗口/WebView**：GUI 设置、状态行、Key 登记与“更新文档索引”按钮只做了类型/静态渲染与事件测试，
    未在原生窗口目视点验；终端聊天目前没有检索设置的命令行入口（默认关闭）。
-6. **索引实现限制**：chunk_id 公式不含路径，字节完全相同的两个 `.md` 会撞 id —— 目前构建期硬失败并回退
-   关键词检索，而不是静默覆盖；更细的增量更新、并发平台化与索引体积治理后置。
+6. **索引实现限制**（审查 R01 后已修正）：旧 v1 chunk_id 公式不含路径，字节完全相同的两个 `.md` 会撞 id，
+   当时以构建期硬失败回退关键词检索；现在逻辑 `chunk_id`（v2）含相对路径、物理 `_id` 另含 scope_key 与构建
+   build_id，两份字节相同的文档不再互相覆盖。畸形快照里重复 relative_path 仍整份失败回退；更细的增量更新、
+   并发平台化与索引体积治理后置。
 7. **安全边界**：只允许 loopback http、禁止重定向、有超时与 2 MiB 响应上限；HTTP key 只从本地 secrets
    文件按 endpoint 读取，不进入提示词/工具结果/审计正文/普通配置导出。本机 Xerj 与云端模型是两段传输：
    Xerj 召回可完全本地，最终选入提示词的文档内容仍按现有模型服务数据发送政策发往云端模型。
@@ -38389,3 +38391,49 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 因此：日常使用用安装包版；做 dev 调试时不要在 app 启动/冻结期间改上述源码路径，改完先重跑 `xtask stage-sidecar` 再重启。`gui/`、`docs/` 不在官方源码哈希范围（`docs` 只参与源码打包，不参与哈希）。
 
 **补记（同日，接上面排查第 2 条）**：已实跑 `xtask stage-sidecar`（`COLM_SKIP_XERJ_SIDECAR=1`，aarch64-apple-darwin）：6 个 Colm sidecar 与 engine 源包全部重建/暂存成功（colm-cli 22.8 MB、colm-rs 29.6 MB、colm-agent 8.8 MB、mksrfdata 8.3 MB、mkinidata 8.9 MB、colm-mcp 3.1 MB；engine tarball 17.0 MB、1514 文件），末行 `staged xerj: skipped (development build)`，exit 0；随后 `target/release/colm-cli model-list --model-root /tmp/colm-model-probe2` → exit 0，从 1 个 official 版本开始，证明 dev 构建戳已与当前源码匹配。注意：dev GUI 需重启后才会重新读取；`stage-sidecar` 里 Xerj 下载钩子的完整端到端仍未跑（直接 `stage-xerj` 已实跑，钩子逻辑有单测；本地开发用 skip 即可）。
+
+## AI 可靠性修复 R01–R05（2026-10-28，审查报告 CoLM-AI-Review-2026-10-28）
+
+依据审查报告（审查提交 `10eeda30`，HEAD 已前进到 `e63b228b`）的第一批五项修复。每项都先核对问题在 HEAD 仍存在，再做最小改动并补窄范围确定性回归；没有迁移 Agent 框架、没有新增检索/模型服务、没有运行真实科学任务评测，也未连接模型 API/SSH。
+
+### R01 逻辑 chunk 身份与索引物理 ID 分离
+
+- 旧实现：逻辑 `chunk_id` 只含文档 hash/行段/切块版本，却被直接当物理 `_id`；同快照强制刷新时新代 bulk 会原地覆盖旧代记录，失败清理又按本次写入 ID 删除，可能删掉旧 manifest 仍引用的块 → `ready` 但召回为空；相同内容跨 scope 也互相覆盖。
+- 新实现：逻辑 `chunk_id = colm-chunk-v2:relative_path:document_sha256:line_start:line_end:lines-40-v1`；物理 `_id = colm-index-v2:scope_key:build_id:chunk_id`，`build_id` 由 unix ms + pid + 进程内计数器组成（跨进程唯一）。manifest 的 entries 改为“物理 id → `ChunkEntry`（含逻辑 id）”，`candidates` 仍只向工具层返回逻辑身份（`search_docs` 契约不变）。
+- 发布顺序：新代独立 bulk → 验证只认本次写入的物理 id（非空语料零命中、正 total 无具体命中、命中缺 `_id` 均判失败）→ 全部成功才切本地 manifest ready → worker 发布后才按旧 manifest 物理 id 差集回收旧代；失败只删本代 ID，旧 manifest/旧代保持可检索；空语料（0 chunk）仍直接 ready。
+- fake 升级为有状态小索引：真实处理 bulk 写入/覆盖、DELETE 移除、按 `scope_key`+`generation` 过滤和 `match` 算命中，并可卡在验证查询处观察“新代已落库未发布”窗口；不是预制旧命中响应。
+- 回归：同一快照刷新后验证失败旧代仍可检索；构建期间旧代可查、发布后旧 id 回收；两个 scope 相同文档不互相覆盖；相同字节文档拥有不同逻辑/物理身份；畸形重复 relative_path 仍整份失败；验证拒绝旧代/外来/无 id 命中。定向 `retrieval_tests` 36 通过、`read_tests` 20 通过。
+- 已知限制：进程崩溃/被杀时已写入但未发布的新代记录没有 manifest 可依，不会立即回收（查询不可见）；验证只要求新代命中存在且 `_id` 属于本次写入，不要求 total==写入块数（避免真实服务可见性抖动误报）。
+
+### R02 有副作用工具失败后的 effect_unknown 与恢复核对
+
+- 旧实现：`tool_result(ok=false)` 把动作一律设 failed，`turn_done` 把任务设 answered，`requires_reconciliation` 只看 unconfirmed，于是 tier=act 工具执行后失败（可能已部分执行）的约束在恢复上下文里丢失。
+- 新实现：`protocol.rs` 增加结构化 `ToolEffect { not_started, completed, failed_no_effect, effect_unknown }` 与事件 `tool_outcome`。执行器只按结构事实判定：成功→completed；只读失败→failed_no_effect；tier=Act/Code 执行后失败或 panic→effect_unknown；用户拒绝审批/执行前取消→not_started（并补 `tool_result` 关闭卡片）。`session_tasks` 载入时 `tool_call` 建动作、`tool_outcome` 定结局，旧日志/外部后端无 outcome 时保守回退（有副作用失败→effect_unknown、只读→failed_no_effect，不匹配错误文本）；`turn_done` 只置 answered、不清未知副作用；新任务继承全部 mutating+effect_unknown 动作；`recovery_context` 用 `effect_unknown_actions` 列出并保留“先检查现有运行/输出、不要自动重复”的提示。不改审批规则、不自动重试。
+- 回归：审查原始序列（task_start→tool_call(act)→失败→turn_done）恢复后仍列未知副作用；新问题/回答不清除；明确拒绝/执行前取消不产生待核对写；只读失败不产生；旧日志失败有副作用保守 unknown；工具结果文本与结构相反时以结构为准。`session_tasks` 测试 7 条、`agent_tests` 7 条。
+- 已知限制：参数校验失败/未知工具在发 `tool_call` 前结束不产生动作记录（不虚假未确认，但审计少一条 not_started）；等审批时进程被杀与“开始后失败”无法区分，保守 unknown；外部后端原生工具无 `tool_outcome` 只能按 tier+ok 保守回退；暂无 GUI“已核对”按钮，新会话会重置审计范围。
+
+### R03 率定/验证两期关系措辞
+
+- 旧实现把 `validation=lower_loss|equal` 合并成 “Both recorded periods improved”；率定 equal 落进 “relation is unclear”。
+- 新实现按率定×验证矩阵分别输出 improved/equal/worse/unknown：只有 lower/lower 才说两期改善；lower/equal 明确“率定降低但验证持平，不得说两期都改善”；lower/higher divergent；lower/unknown 区分验证期未配置与记录不可用；equal/* 明确“率定未改善”并给出验证关系；higher/* 与 unknown 各有明确表述。沿用引擎 `lower_loss/higher_loss/equal/unknown` 与 minimize 方向，不重算指标。
+- 回归覆盖 11 组组合（lower/lower、lower/equal、lower/higher、lower/unknown×2、equal/lower、equal/equal、equal/higher、equal/unknown、higher/lower、unknown/lower），断言状态与必含/禁用文案。
+
+### R04 诊断证据投影保留身份与未复核范围
+
+- 旧实现把完整 `study_summary.evidence` 换成只含分数/状态的小投影，丢失实际 model id/revision/source hash、当前选择身份、source_paths、`verification.reverified=false` 与核验范围；24k 兜底还会退化成一句 abbreviated。
+- 新实现：`read.rs` 新增 `study_evidence_core`（≤3000 字节）与 `bound_evidence_core`，保留 study 身份、model_identity（study_record/current_selection/comparison 的 version id+revision+source hash 或明确缺失原因）、verification（reverified + 核验范围）、source_paths、objective 方向、baseline/best、两期关系、缺失原因；压缩先删重复明细/长文本，身份与限制永不删，最后用 minimal/slim 兜底。`diagnostics.rs` 的单步证据 ≤4000 字节并带 provenance；`calibration_projection`/`dual_period`/`held_out`/22k 总预算兜底与 `study_summary` 24k 兜底都复用该核心。完整诊断与压缩后都能看到实际身份与 `reverified=false`，信息不足时保留具体 “does not record…” 原因，不变成肯定结论。纯读取已有证据，不触发 SSH/模拟/重型核验。
+- 回归：完整诊断三步都断言 version/revision/source hash/current_selection/comparison/reverified=false/scope/source_paths/两期 relation；大 warnings/targets/windows 触发预算缩减后仍保留；证据缺失时给出具体原因且不出现 “matches”:true；核心在文本拉满时仍 ≤3000 字节；单步压缩与 StudySummary 兜底都保留身份。
+
+### R05 Study 模型身份缺 pin 时不静默 official
+
+- 旧实现 `evidence_model_identity` 在本地无 `model-version.json`、pinned 为 None 时直接标 official；远程 workspace Study fetch 后无 pin 时会把修改版结果归因官方模型。
+- 新实现复用/抽出 `remote_study::recorded_model_version`（纯本地读，不 SSH、不初始化认证配置）：pin 最高优先；无 pin 时按 remote record `provenance.version` 解析——明确 official 才 official，workspace 输出 name/head/base_commit，无 record → unknown（明确说“无法确定 official/workspace”，legacy 或本地-only），坏/不完整 record → unknown + 具体原因；pin 文件损坏 → unknown 且不回退 record 猜身份。`comparison_version` 复用同一解析器（本地无 pin/record 的旧语义保留并注释差异）。
+- 回归：无 pin + workspace record → workspace name/head（即使认证配置带 password 也不影响本地身份解析）；坏 JSON/缺字段/未知 kind → unknown 且不出现 official；pin 优先于 record、坏 pin 不回退。另用真实 `colm-cli study-status` 对临时最小 Study 做了端到端验证。
+- 已知限制：严格按 `StudyRecord` 全字段解析，更老且缺顶层字段的记录会报 unknown（与 study-compare 严格度一致）；remote record 只有 name/head、无冻结 revision id/source hash，agent 侧与当前冻结选择比较仍为 unknown。
+
+### 本轮验证（真实执行）
+
+- `cargo fmt --all --check` → exit 0；`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2928 passed / 0 failed / 15 ignored**；其中 colm-agent 库 326（新增 R01/R02/R03/R04 回归）、colm-cli 535（含 R05 回归）、xtask 37。
+- GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib -- --test-threads=1` → **493 passed / 1 ignored / 0 failed**。
+- 未运行：真实 Xerj（R01 fake 为状态化本地实现，未新增真机验收）、真实 SSH/远程 Study、真实模型 API、GUI 原生窗口、科学任务评测；Windows/Linux 运行未在本机执行（CI 覆盖编译与测试）。审查报告中的 R06–R15 与第六、七节建议不在本次范围。

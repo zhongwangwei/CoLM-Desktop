@@ -57,7 +57,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - **工具的实现方式**：绝大多数调用现有 `colm-cli` 子命令，取它的 JSON 输出；代码类工具在工作区里调 git、ripgrep、cargo 和 `build_kernel.sh`，或者调 `run-7920`。
 - **GUI 与 `colm-agent` 之间**用 stdio JSONL：
   - GUI 发给 agent：`user_message`、`approval_decision`、`cancel`、`config`；
-  - agent 发给 GUI：`assistant_delta`、`reasoning_delta`、`tool_call`、`tool_result`、`approval_request`、`turn_done`、`error`、`usage`，以及每次请求前的 `context`（估算输入、有效窗口、可用输入预算、输出预留、安全余量与窗口来源）。
+  - agent 发给 GUI：`assistant_delta`、`reasoning_delta`、`tool_call`、`tool_outcome`、`tool_result`、`approval_request`、`turn_done`、`error`、`usage`，以及每次请求前的 `context`（估算输入、有效窗口、可用输入预算、输出预留、安全余量与窗口来源）。`tool_outcome` 是结构化执行结局（not_started/completed/failed_no_effect/effect_unknown），有副作用的工具执行后失败或中断时保留 effect_unknown，恢复上下文要求先核对实际状态而不是自动重试；GUI 目前忽略该事件，恢复提示在任务快照里。
   - Tauri 侧只做转发和存放 API Key。
 
 ## 3. 模型与后端
@@ -190,7 +190,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 `search_docs` 保留原有 `query` / `name` 两个参数和来源选择语义（选中冻结模型、显式命名工作区、无模型时的应用源码文档）；本机 Xerj 只是可选的候选召回后端，不新增 `xerj_search` 之类工具，也不让 LLM 控制索引名、URL、认证或写入。
 
 - **服务形态**：连接用户已在运行的本机 Xerj 的 ES-compatible HTTP 面（默认 `http://127.0.0.1:9200`，可在助手设置里改 endpoint；首版只接受 `http` + `127.0.0.1`/`localhost`/`[::1]` + 显式端口，拒绝其它地址、重定向、userinfo/path/query；请求有超时与响应字节上限）。验收固定 release **v1.0.0-rc.100**；自动下载安装、进程托管与跨平台打包后置。
-- **索引是派生缓存，来源仍在 CoLM**：由 CoLM 枚举当前 scope 允许的文档（首版只处理现有允许的 Markdown 快照，范围与 `search_docs` 一致），按 40 行/块写入应用自有索引 `colm-docs-v1`。字段是 CoLM 自己的 schema：`project_key/scope_key/source_identity/document_id/chunk_id/document_sha256/relative_path/line_start/line_end/chunking_version/generation/title/body`，scope/id/hash/type 用 keyword、title/body 用 text。冻结模型 scope 绑定 id/revision、实际源码内容身份与资料快照身份；同名 workspace 改了代码会得到不同 scope key，旧缓存不能当作新证据。索引丢失可重建，不改写知识绑定、源码或冻结快照。
+- **索引是派生缓存，来源仍在 CoLM**：由 CoLM 枚举当前 scope 允许的文档（首版只处理现有允许的 Markdown 快照，范围与 `search_docs` 一致），按 40 行/块写入应用自有索引 `colm-docs-v1`。字段是 CoLM 自己的 schema：`project_key/scope_key/source_identity/document_id/chunk_id/document_sha256/relative_path/line_start/line_end/chunking_version/generation/title/body`，scope/id/hash/type 用 keyword、title/body 用 text。逻辑 `chunk_id` 由公式版本/相对路径/文档 hash/行段/切块版本生成；物理 `_id` 另含 scope_key 与构建唯一 build_id。新代写入不会原地覆盖旧代，失败只清理本次新代，发布成功后才回收旧代记录。冻结模型 scope 绑定 id/revision、实际源码内容身份与资料快照身份；同名 workspace 改了代码会得到不同 scope key，旧缓存不能当作新证据。索引丢失可重建，不改写知识绑定、源码或冻结快照。
 - **检索后的校验顺序不变**：`selected_context` 刷新 → `documentation_provenance` 解析来源 → 冻结文档缺失仍直接返回 missing（绝不拿 app 当前资料补齐）→ 宿主强制注入 `scope_key`+当前 `generation` 过滤向 Xerj 查询 → 候选 ID 必须在本地清单里（不信任索引返回的路径/hash/行段）→ 从允许的当前资料重读真实字节、核对文件 hash 与 chunk 范围（文档变过则旧行段不可用，回退或重建索引）→ 运行原有 `Bindings.check`（源码变化/绑定失效继续 withheld）→ 从重读原文生成片段与出处，保留 `knowledge_status` / `may_support_current_answer` / `knowledge_checks` / scope / provenance。索引自报相同 hash、status=current 也不能直接返回它的 snippet；排名只影响相关性顺序，不决定科学正确性或知识资格；未绑定文档不自动升级为已审核知识，AI 草稿仍走 `knowledge_drafts`。
 - **状态与回退**：关闭、未连接、超时、索引未就绪/过期/服务故障都回退原关键词检索，`search_docs` 结果新增 `retrieval` 诊断字段（backend/state/generation/candidates/rejected_candidates/fallback_reason 等），错误不会伪装成“没有资料”。首次启用、显式“更新文档索引”或当前文档快照变化时后台重建对应 scope 的索引；检索请求不等全库重建。bulk 响应逐项检查（HTTP 200 不等于整批成功），全部写入并确认可检索后才发布本地清单；失败/中断不发布半成品，旧 generation 仅在不使用后清理。
 - **质量边界**：首版是 BM25 与原有精确匹配的共同检索路径，保留参数名、变量名、错误码的准确命中；默认 lexical embedding 不是神经语义理解，不引用其他项目的 speed/token 数字当成本项目实测。约 10 个真实文档问题的前后对比记录在 `docs/implementation-verification.md`，只报告实际结果，不为展示成功扩大来源或放宽知识检查。
