@@ -551,6 +551,20 @@ const FIXTURE_BINARY: &str = "#!/bin/sh\necho \"xerj v1.0.0-rc.100\"\n";
 #[cfg(unix)]
 const FIXTURE_LICENSE: &str = "Apache License 2.0 — fixture\n";
 
+/// 用“临时文件 + chmod + rename”替换一个可执行测试文件。
+///
+/// 直接 `fs::write` 后立刻 exec 在 Linux 上偶发 `ETXTBSY`（Text file busy），
+/// 并行测试时更明显；rename 换的是 inode，exec 不会看到正在写的文件。
+#[cfg(unix)]
+fn replace_executable(path: &Path, bytes: &[u8]) {
+    let staging = path.with_extension(format!("new-{}", std::process::id()));
+    fs::write(&staging, bytes).unwrap();
+    let mut permissions = fs::metadata(&staging).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&staging, permissions).unwrap();
+    fs::rename(&staging, path).unwrap();
+}
+
 /// 用系统 `tar` 造一个与真实资产同布局的假归档：根目录 `<release>-<target>/`，
 /// 里面是可执行的 shell 脚本 `xerj` 与 `LICENSE`；再按真实 sha 生成清单并预置缓存。
 #[cfg(unix)]
@@ -770,10 +784,7 @@ fn verify_only_rejects_missing_or_inconsistent_staged_files() {
         error.contains("binary") && error.contains("missing"),
         "{error}"
     );
-    fs::write(fixture.binary_path(), &saved_binary).unwrap();
-    let mut permissions = fs::metadata(fixture.binary_path()).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(fixture.binary_path(), permissions).unwrap();
+    replace_executable(&fixture.binary_path(), &saved_binary);
 
     // 2. 清单里的 sha256 与固定清单不一致。
     let mut value: serde_json::Value =
@@ -791,10 +802,7 @@ fn verify_only_rejects_missing_or_inconsistent_staged_files() {
     assert!(error.contains("not staged"), "{error}");
 
     // 4. 版本不符：binary 换成打印别的版本的脚本。
-    fs::write(fixture.binary_path(), "#!/bin/sh\necho \"xerj v0.0.1\"\n").unwrap();
-    let mut permissions = fs::metadata(fixture.binary_path()).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(fixture.binary_path(), permissions).unwrap();
+    replace_executable(&fixture.binary_path(), b"#!/bin/sh\necho \"xerj v0.0.1\"\n");
     fixture.rewrite_metadata();
     let error = verify(&fixture);
     assert!(error.contains(FIXTURE_RELEASE), "{error}");
