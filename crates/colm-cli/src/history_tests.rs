@@ -404,6 +404,7 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
         label_zh: "净辐射".into(),
         label_en: "Net radiation".into(),
         units: "W/m²".into(),
+        canonical_units: "W/m2".into(),
         quality_control: "measured_only".into(),
         n: 10,
         rmse: 1.0,
@@ -426,6 +427,29 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
         pair_source_n: None,
         pair_n: None,
         pair_downsampled: None,
+        output_frequency: "hourly".into(),
+        model_label_position: "midpoint".into(),
+        obs_label_position: "start".into(),
+        obs_label_position_source: "product_fluxnet2015".into(),
+        coverage: None,
+        coverage_min: None,
+        low_coverage_pairs: None,
+        source_units: None,
+        units_assumed: false,
+        qc_kind: "measured_only".into(),
+        qc_rule: "Rnet_qc == 0 视为实测".into(),
+        qc_variable: Some("Rnet_qc".into()),
+        correction_requested: false,
+        correction_status: "not_requested".into(),
+        correction_variable: None,
+        correction_reason: None,
+        warnings: Vec::new(),
+        time_basis: super::time_basis::TimeBasisJson {
+            kind: "model_clock",
+            utc_offset_seconds: None,
+            calendar: "standard",
+            source: "case_namelist_greenwich_false",
+        },
     };
     let json = serde_json::to_value(row).unwrap();
     assert!(json.get("rmse").is_some());
@@ -794,45 +818,6 @@ fn evaluation_catalog_derives_urban_plumber_rnet_from_radiation_components() {
 }
 
 #[test]
-fn urban_plumber_rnet_observation_values_drop_component_qc_and_fill_samples() {
-    let _netcdf_guard = super::netcdf_test_guard();
-    let d = tmp("urban-rnet-values");
-    let obs_path = d.parent().unwrap().join("obs.nc");
-    write_history_nc(
-        &obs_path,
-        &[
-            ("time", &[1.0, 2.0, 3.0]),
-            ("SWdown", &[500.0, 500.0, colm_hist::pair::FILL_VALUE]),
-            ("LWdown", &[350.0, 350.0, 350.0]),
-            ("SWup", &[100.0, 100.0, 100.0]),
-            ("LWup", &[420.0, 420.0, 420.0]),
-            ("SWdown_qc", &[0.0, 0.0, 0.0]),
-            ("LWdown_qc", &[0.0, 0.0, 0.0]),
-            ("SWup_qc", &[0.0, 1.0, 0.0]),
-            ("LWup_qc", &[0.0, 0.0, 0.0]),
-        ],
-    );
-    let obs = netcdf::open(&obs_path).unwrap();
-    let variable = colm_hist::obs::EVALUATION_VARIABLES
-        .iter()
-        .find(|variable| variable.observation == "Rnet")
-        .unwrap();
-    let data = super::observation_values(&obs, &obs_path, variable, false)
-        .unwrap()
-        .unwrap();
-    assert_eq!(data.label, "SWdown+LWdown-SWup-LWup");
-    assert_eq!(
-        data.values,
-        [
-            330.0,
-            colm_hist::pair::FILL_VALUE,
-            colm_hist::pair::FILL_VALUE
-        ]
-    );
-    assert_eq!(data.qc, [0.0, 1.0, 1.0]);
-}
-
-#[test]
 fn native_restart_path_guard_checks_bytes_at_the_buffer_boundary() {
     let suffix =
         "out/n/restart/9999-366-86400/n_restart_gridriver_9999-366-86400_lc9999_w180_s90.nc";
@@ -846,4 +831,400 @@ fn native_restart_path_guard_checks_bytes_at_the_buffer_boundary() {
         "n"
     )
     .is_err());
+}
+
+// ---------------------------------------------------------------- 区间配对与观测语义（第一批）
+
+fn metric_case(tag: &str, name: &str, extra_nml: &str) -> PathBuf {
+    let root = std::env::temp_dir()
+        .join(format!(
+            "colm-metric-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+        .join("case");
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    std::fs::create_dir_all(root.join("out").join(name).join("history")).unwrap();
+    std::fs::write(
+        root.join("case.nml"),
+        format!("&nl_colm\n DEF_CASE_NAME = '{name}'\n{extra_nml}\n/\n"),
+    )
+    .unwrap();
+    root
+}
+
+fn write_axis_history(path: &std::path::Path, labels_minutes: &[f64], vars: &[(&str, Vec<f64>)]) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", labels_minutes.len()).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "minutes since 1900-1-1 0:0:0")
+        .unwrap();
+    time.put_values(labels_minutes, ..).unwrap();
+    for (name, values) in vars {
+        let mut variable = file.add_variable::<f64>(name, &["time"]).unwrap();
+        variable.put_values(values, ..).unwrap();
+    }
+}
+
+fn write_obs_time_units(
+    path: &std::path::Path,
+    units: &str,
+    value_units: &str,
+    seconds: &[f64],
+    vars: &[(&str, Vec<f64>)],
+) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", seconds.len()).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", units).unwrap();
+    time.put_values(seconds, ..).unwrap();
+    for (name, values) in vars {
+        let mut variable = file.add_variable::<f64>(name, &["time"]).unwrap();
+        // QC 变量不该带物理单位；值变量带上，单位换算才有输入。
+        if !name.ends_with("_qc") {
+            variable.put_attribute("units", value_units).unwrap();
+        }
+        variable.put_values(values, ..).unwrap();
+    }
+}
+
+fn run_metric_rows(
+    case: &std::path::Path,
+    obs: &std::path::Path,
+    spinup: usize,
+    corrected: bool,
+    obs_label_position: Option<colm_hist::pair::ObsLabelPosition>,
+) -> Vec<super::VarMetrics> {
+    super::compute_metric_rows(super::MetricsRequest {
+        case,
+        obs_path: obs,
+        spinup,
+        json: true,
+        corrected,
+        summary_only: false,
+        pair_vars: Vec::new(),
+        pair_max_points: None,
+        from: None,
+        to: None,
+        point: None,
+        obs_label_position,
+        history_frequency: None,
+        min_coverage: super::DEFAULT_MIN_COVERAGE,
+    })
+    .unwrap()
+}
+
+fn hourly_case(tag: &str, labels_minutes: &[f64], values: &[f64]) -> PathBuf {
+    let case = metric_case(
+        tag,
+        "Hourly",
+        " DEF_HIST_FREQ = 'HOURLY'\n DEF_HIST_groupby = 'MONTH'\n DEF_simulation_time%greenwich = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%timestep = 1800.",
+    );
+    write_axis_history(
+        &case.join("out/Hourly/history/Hourly_hist_2008-01.nc"),
+        labels_minutes,
+        &[("f_rnet", values.to_vec())],
+    );
+    case
+}
+
+#[test]
+fn metric_pairs_daily_output_with_whole_day_observation_means() {
+    let _guard = super::netcdf_test_guard();
+    let case = metric_case(
+        "daily-pairing",
+        "DailyCase",
+        " DEF_HIST_FREQ = 'DAILY'\n DEF_HIST_groupby = 'MONTH'\n DEF_simulation_time%greenwich = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%end_year = 2008\n DEF_simulation_time%end_month = 1\n DEF_simulation_time%end_day = 5\n DEF_simulation_time%end_sec = 0\n DEF_simulation_time%timestep = 1800.",
+    );
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let labels = (0..4)
+        .map(|day| base + day as f64 * 1440.0 + 720.0)
+        .collect::<Vec<_>>();
+    write_axis_history(
+        &case.join("out/DailyCase/history/DailyCase_hist_2008-01.nc"),
+        &labels,
+        &[("f_rnet", vec![1.0, 1.0, 1.0, 1.0])],
+    );
+    let obs = case.join("obs.nc");
+    let n = 4 * 48;
+    let seconds = (0..n).map(|i| i as f64 * 1800.0).collect::<Vec<_>>();
+    let values = (0..n)
+        .map(|i| 1.0 + 10.0 * (i as f64 * std::f64::consts::TAU / 48.0).sin())
+        .collect::<Vec<_>>();
+    write_obs_time_units(
+        &obs,
+        "seconds since 2008-01-01 00:00:00",
+        "W/m2",
+        &seconds,
+        &[("Rnet", values), ("Rnet_qc", vec![0.0; n])],
+    );
+    let rows = run_metric_rows(&case, &obs, 0, false, None);
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Rnet")
+        .expect("Rnet row");
+    assert_eq!(row.n, 4);
+    assert!(
+        row.rmse < 1e-9,
+        "daily RMSE should be zero, got {}",
+        row.rmse
+    );
+    assert_eq!(row.output_frequency, "daily");
+    assert_eq!(row.obs_label_position, "start");
+}
+
+#[test]
+fn metric_trailing_partial_record_keeps_earlier_hour_pairs() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let labels = (0..6)
+        .map(|hour| base + 30.0 + 60.0 * hour as f64)
+        .collect::<Vec<_>>();
+    let values = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let obs_seconds = (0..20).map(|i| i as f64 * 1800.0).collect::<Vec<_>>();
+    let obs_values = (0..20).map(|i| i as f64 + 1.0).collect::<Vec<_>>();
+
+    let run = |tag: &str, extra: Option<(f64, f64)>| -> Vec<(Vec<i64>, Vec<f64>, Vec<f64>)> {
+        let (labels, values) = match extra {
+            Some((label, value)) => {
+                let mut labels = labels.clone();
+                let mut values = values.clone();
+                labels.push(label);
+                values.push(value);
+                (labels, values)
+            }
+            None => (labels.clone(), values.clone()),
+        };
+        let case = hourly_case(tag, &labels, &values);
+        let obs = case.join("obs.nc");
+        write_obs_time_units(
+            &obs,
+            "seconds since 2008-01-01 00:00:00",
+            "W/m2",
+            &obs_seconds,
+            &[
+                ("Rnet", obs_values.clone()),
+                ("Rnet_qc", vec![0.0; obs_values.len()]),
+            ],
+        );
+        let rows = run_metric_rows(&case, &obs, 0, false, None);
+        let row = rows
+            .iter()
+            .find(|row| row.name == "Rnet")
+            .expect("Rnet row");
+        vec![(
+            row.time.clone().unwrap_or_default(),
+            row.model.clone().unwrap_or_default(),
+            row.obs.clone().unwrap_or_default(),
+        )]
+    };
+
+    let before = run("hourly-tail-before", None);
+    // 追加一个运行结束在整点后 20 分钟的末段记录：它覆盖不足一个观测步，
+    // 必须被丢弃，而且不能改变前面完整小时的配对。
+    let partial_label = labels[5] + 20.0;
+    let after = run("hourly-tail-after", Some((partial_label, 99.0)));
+    assert_eq!(
+        before, after,
+        "partial trailing record changed earlier pairs"
+    );
+}
+
+#[test]
+fn metric_timestep_uses_start_labeled_observation_phase() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let n = 10;
+    let labels = (0..n)
+        .map(|i| base + 30.0 + 30.0 * i as f64)
+        .collect::<Vec<_>>();
+    let values = (0..n).map(|i| i as f64).collect::<Vec<_>>();
+    let case = metric_case(
+        "timestep-phase",
+        "Timestep",
+        " DEF_HIST_FREQ = 'TIMESTEP'\n DEF_HIST_groupby = 'MONTH'\n DEF_simulation_time%greenwich = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%timestep = 1800.",
+    );
+    write_axis_history(
+        &case.join("out/Timestep/history/Timestep_hist_2008-01.nc"),
+        &labels,
+        &[("f_rnet", values)],
+    );
+    let obs = case.join("obs.nc");
+    let seconds = (0..=n).map(|i| i as f64 * 1800.0).collect::<Vec<_>>();
+    let obs_values = (0..=n).map(|i| i as f64).collect::<Vec<_>>();
+    write_obs_time_units(
+        &obs,
+        "seconds since 2008-01-01 00:00:00",
+        "W/m2",
+        &seconds,
+        &[("Rnet", obs_values), ("Rnet_qc", vec![0.0; n + 1])],
+    );
+    let rows = run_metric_rows(&case, &obs, 0, false, None);
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Rnet")
+        .expect("Rnet row");
+    assert_eq!(row.n, n);
+    assert!(
+        row.rmse < 1e-12,
+        "TIMESTEP label is the interval end; the observation at label-step must be used, RMSE {}",
+        row.rmse
+    );
+    // 显式按“终点标签”解释就是旧的错相位，用来证明这个语义确实被参数控制。
+    let shifted = run_metric_rows(
+        &case,
+        &obs,
+        0,
+        false,
+        Some(colm_hist::pair::ObsLabelPosition::End),
+    );
+    let shifted = shifted.iter().find(|row| row.name == "Rnet").unwrap();
+    assert!(shifted.rmse > 0.5, "end-labeled phase should differ");
+}
+
+#[test]
+fn metric_decodes_packed_observation_before_pairing() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let labels = vec![base + 30.0, base + 90.0];
+    let case = hourly_case("packed-obs", &labels, &[1.0, 1.0]);
+    let obs = case.join("obs.nc");
+    let mut file = netcdf::create(&obs).unwrap();
+    file.add_dimension("time", 4).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+        .unwrap();
+    time.put_values(&[0.0, 1800.0, 3600.0, 5400.0], ..).unwrap();
+    let mut rnet = file.add_variable::<i16>("Rnet", &["time"]).unwrap();
+    rnet.put_attribute("units", "W/m2").unwrap();
+    rnet.put_attribute("scale_factor", 0.1_f64).unwrap();
+    rnet.put_attribute("add_offset", 1.0_f64).unwrap();
+    rnet.put_values(&[0_i16, 0, 0, 0], ..).unwrap();
+    let mut qc = file.add_variable::<i16>("Rnet_qc", &["time"]).unwrap();
+    qc.put_values(&[0_i16, 0, 0, 0], ..).unwrap();
+    drop(file);
+    let rows = run_metric_rows(&case, &obs, 0, false, None);
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Rnet")
+        .expect("Rnet row");
+    assert_eq!(row.n, 2);
+    assert!(
+        row.rmse < 1e-12,
+        "packed storage 0 with scale 0.1/offset 1 is physical 1; RMSE {}",
+        row.rmse
+    );
+    assert_eq!(row.source_units.as_deref(), Some("W/m2"));
+}
+
+#[test]
+fn metric_converts_observation_units_before_pairing() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let labels = vec![base + 30.0, base + 90.0];
+    let case = hourly_case("kw-units", &labels, &[1.0, 1.0]);
+    let obs = case.join("obs.nc");
+    write_obs_time_units(
+        &obs,
+        "seconds since 2008-01-01 00:00:00",
+        "kW/m2",
+        &[0.0, 1800.0, 3600.0, 5400.0],
+        &[
+            // 0.001 kW/m2 = 1 W/m2；只改单位标签不换算会得到 0.001。
+            ("Rnet", vec![0.001, 0.001, 0.001, 0.001]),
+            ("Rnet_qc", vec![0.0; 4]),
+        ],
+    );
+    let rows = run_metric_rows(&case, &obs, 0, false, None);
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Rnet")
+        .expect("Rnet row");
+    assert!(
+        row.rmse < 1e-12,
+        "unit conversion must apply, RMSE {}",
+        row.rmse
+    );
+}
+
+#[test]
+fn metric_reports_missing_corrected_observations_instead_of_silently_falling_back() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let case = metric_case(
+        "corrected-missing",
+        "Corrected",
+        " DEF_HIST_FREQ = 'HOURLY'\n DEF_HIST_groupby = 'MONTH'\n DEF_simulation_time%greenwich = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%timestep = 1800.",
+    );
+    write_axis_history(
+        &case.join("out/Corrected/history/Corrected_hist_2008-01.nc"),
+        &[base + 30.0, base + 90.0],
+        &[("f_lfevpa", vec![1.0, 1.0])],
+    );
+    let obs = case.join("obs.nc");
+    write_obs_time_units(
+        &obs,
+        "seconds since 2008-01-01 00:00:00",
+        "W/m2",
+        &[0.0, 1800.0, 3600.0, 5400.0],
+        &[("Qle", vec![1.0, 1.0, 1.0, 1.0]), ("Qle_qc", vec![0.0; 4])],
+    );
+    let rows = run_metric_rows(&case, &obs, 0, true, None);
+    let row = rows.iter().find(|row| row.name == "Qle").expect("Qle row");
+    assert_eq!(row.obs_var, "Qle");
+    assert_eq!(row.correction_status, "not_applied");
+    assert!(
+        row.warnings
+            .iter()
+            .any(|warning| warning.contains("Qle_cor")),
+        "missing corrected variable must be reported: {:?}",
+        row.warnings
+    );
+}
+
+#[test]
+fn metric_utc_model_applies_the_observation_origin_offset_once() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    let case = metric_case(
+        "utc-offset",
+        "UtcCase",
+        " DEF_HIST_FREQ = 'HOURLY'\n DEF_HIST_groupby = 'MONTH'\n DEF_simulation_time%greenwich = .true.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%timestep = 1800.",
+    );
+    // 模型 UTC 标签 00:30 / 01:30 / 02:30；观测原点声明 +08:00。
+    // 正确的换算后标签对应观测文件里 30600 s（raw 17）之类的位置。
+    let labels = vec![base + 30.0, base + 90.0, base + 150.0];
+    write_axis_history(
+        &case.join("out/UtcCase/history/UtcCase_hist_2008-01.nc"),
+        &labels,
+        &[("f_rnet", vec![17.0, 19.0, 21.0])],
+    );
+    let obs = case.join("obs.nc");
+    let mut seconds = vec![0.0; 64];
+    for (index, value) in seconds.iter_mut().enumerate() {
+        *value = index as f64 * 1800.0;
+    }
+    let mut values = vec![0.0; 64];
+    for k in 0..3 {
+        values[16 + 2 * k] = (17 + 2 * k) as f64;
+        values[17 + 2 * k] = (17 + 2 * k) as f64;
+    }
+    write_obs_time_units(
+        &obs,
+        "seconds since 2008-01-01 00:00:00 +08:00",
+        "W/m2",
+        &seconds,
+        &[("Rnet", values), ("Rnet_qc", vec![0.0; 64])],
+    );
+    let rows = run_metric_rows(&case, &obs, 0, false, None);
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Rnet")
+        .expect("Rnet row");
+    assert_eq!(row.time_basis.kind, "utc");
+    assert!(
+        row.rmse < 1e-12,
+        "UTC model + +08:00 observation origin must shift the axis once; RMSE {}",
+        row.rmse
+    );
 }

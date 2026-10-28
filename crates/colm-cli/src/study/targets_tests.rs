@@ -98,7 +98,48 @@ fn calendar_helpers_round_trip_and_cut_periods() {
         Some(JAN1 + DAY + 6 * 3_600)
     );
     assert!(parse_timestamp("date").is_none());
-    assert!(cf_unix_seconds(&[0.0], "months since 2003-01-01").is_none());
+    assert!(cf_unix_seconds(&[0.0], "months since 2003-01-01").is_err());
+}
+
+#[test]
+fn observation_time_units_with_an_offset_are_converted_to_true_utc() {
+    // 2008-01-01T00:00:00Z 的 Unix 秒。
+    const JAN1_2008: i64 = 1_199_145_600;
+    for units in [
+        "seconds since 2008-01-01 00:00:00 +08:00",
+        "seconds since 2008-01-01T00:00:00+08:00",
+        "seconds since 2008-01-01 00:00:00+0800",
+    ] {
+        // 原点钟面写的是 +08:00 的 00:00，绝对时刻比 UTC 原点早 8 小时。
+        assert_eq!(
+            cf_unix_seconds(&[0.0, 1_800.0], units).unwrap(),
+            [JAN1_2008 - 8 * 3_600, JAN1_2008 - 8 * 3_600 + 1_800],
+            "{units}"
+        );
+    }
+    // Z / UTC 是零偏移，与不写时区等价。
+    for units in [
+        "seconds since 2008-01-01T00:00:00Z",
+        "seconds since 2008-01-01 00:00:00 UTC",
+    ] {
+        assert_eq!(
+            cf_unix_seconds(&[0.0], units).unwrap(),
+            [JAN1_2008],
+            "{units}"
+        );
+    }
+    // 非秒单位：1 天 = 86400 秒。
+    assert_eq!(
+        cf_unix_seconds(&[2.0], "days since 2008-01-01").unwrap(),
+        [JAN1_2008 + 2 * DAY]
+    );
+    // 命名时区没有时区数据库可查，必须响亮失败而不是当 UTC。
+    assert!(cf_unix_seconds(&[0.0], "seconds since 2008-01-01 00:00:00 EST").is_err());
+    // 文本时间同样按偏移归一到 UTC：+08:00 的 06:00 = 前一日 22:00Z。
+    assert_eq!(
+        parse_timestamp("2003/01/02 06:00+08:00"),
+        Some(JAN1 + DAY + 6 * 3_600 - 8 * 3_600)
+    );
 }
 
 /// 观测比模型细（0.5°）：每个模型格子取落在里面的四个观测格的平均；没有陆地的格子不比。

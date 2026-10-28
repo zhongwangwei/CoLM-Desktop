@@ -27,6 +27,8 @@
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
 //!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
+//!                    [--obs-label-position start|end] [--history-freq HOURLY|...]
+//!                    [--min-coverage 0.5]
 //! colm-cli evaluation-catalog <算例目录> --obs <Flux.nc>
 //! colm-cli evaluation-plan <算例目录> --obs <Flux.nc> --kernel <目录>
 //! colm-cli history-catalog <算例目录>
@@ -80,6 +82,7 @@ mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
 mod model_version;
+mod observation_input;
 mod observation_table;
 mod provenance;
 mod remote_bench;
@@ -88,6 +91,7 @@ mod remote_files;
 mod remote_workspace_cmd;
 mod study;
 mod study_version;
+mod time_basis;
 mod version_changes;
 mod version_code;
 mod ws_cmd;
@@ -168,6 +172,9 @@ usage:
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
                    --summary-only: 只返回指标，不携带绘图用配对点
+                   --obs-label-position: 观测标签=区间起点还是终点（缺省按文件属性识别）
+                   --history-freq: 只作交叉核对；实际输出频率由 history 标签反推，不符时按 history 并告警
+                   --min-coverage: 日/月/年聚合要求的最小有效观测覆盖率（缺省 0.5）
                    --pairs-var: 只评估指定观测变量；可重复给出
                    --max-points: 配对点保极值降采样上限（指标仍用完整样本）
   colm-cli hybrid-install <case-dir> --model <x.onnx|x.mlp.json> --slot pft|land_class
@@ -364,20 +371,24 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
     }
     match cmd {
         "help" | "-h" | "--help" => print!("{USAGE}"),
-        "energy-summary" => println!(
-            "{}",
-            serde_json::to_string(&energy_summary::run(
-                &opts.positional_case()?,
-                opts.get("--from")
-                    .map(|v| v.parse::<i64>())
-                    .transpose()
-                    .context("invalid energy summary start")?,
-                opts.get("--to")
-                    .map(|v| v.parse::<i64>())
-                    .transpose()
-                    .context("invalid energy summary end")?
-            )?)?
-        ),
+        "energy-summary" => {
+            let case = opts.positional_case()?;
+            let from = opts
+                .get("--from")
+                .map(|v| v.parse::<i64>())
+                .transpose()
+                .context("invalid energy summary start")?;
+            let to = opts
+                .get("--to")
+                .map(|v| v.parse::<i64>())
+                .transpose()
+                .context("invalid energy summary end")?;
+            let mut value = energy_summary::run(&case, from, to)?;
+            // 诊断窗口与序列的时刻同样是模型钟；这里补上与其它时间载荷一致的基准。
+            let (basis, source) = time_basis::resolve(&case)?;
+            value["time_basis"] = serde_json::to_value(time_basis::json(basis, source))?;
+            println!("{}", serde_json::to_string(&value)?);
+        }
         "fingerprint-policy" => println!("{{\"forcing_content_policy\":\"excluded-v1\"}}"),
         "full-input-identity" => println!(
             "{}",
@@ -515,6 +526,19 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 from: opts.get("--from").map(|v| v.parse()).transpose()?,
                 to: opts.get("--to").map(|v| v.parse()).transpose()?,
                 point: None,
+                obs_label_position: opts
+                    .get("--obs-label-position")
+                    .map(|value| parse_obs_label_position(&value))
+                    .transpose()?,
+                history_frequency: opts
+                    .get("--history-freq")
+                    .map(|value| colm_hist::schedule::HistoryFrequency::parse(&value))
+                    .transpose()?,
+                min_coverage: opts
+                    .get("--min-coverage")
+                    .map(|value| value.parse::<f64>())
+                    .transpose()?
+                    .unwrap_or(DEFAULT_MIN_COVERAGE),
             })?;
         }
         "hybrid-install" => hybrid_cmd::cmd_hybrid_install(opts)?,
@@ -905,6 +929,9 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     from: None,
                     to: None,
                     point: None,
+                    obs_label_position: None,
+                    history_frequency: None,
+                    min_coverage: DEFAULT_MIN_COVERAGE,
                 })?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
@@ -4261,6 +4288,8 @@ struct VarMetrics {
     label_zh: String,
     label_en: String,
     units: String,
+    /// 解码后的规范单位（纯 ASCII，比较/换算用）；`units` 是给人看的显示单位。
+    canonical_units: String,
     /// `measured_only` 表示使用 qc==0；`finite_only` 表示源文件没有 QC。
     quality_control: String,
     n: usize,
@@ -4293,6 +4322,41 @@ struct VarMetrics {
     pair_n: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pair_downsampled: Option<bool>,
+    /// history 实际输出频率（由标签反推，不是 nml 声明值）。
+    output_frequency: String,
+    /// 模型标签在区间里的位置（TIMESTEP/末条=end，其余=midpoint）。
+    model_label_position: String,
+    /// 观测标签在区间里的位置（start/end），以及依据。
+    obs_label_position: String,
+    obs_label_position_source: String,
+    /// 日/月/年聚合的实际覆盖率（均值/最小/低于阈值的区间数）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    low_coverage_pairs: Option<usize>,
+    /// 观测值在源文件里的单位（CSV 导入前的原始单位）与解码单位。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_units: Option<String>,
+    /// 源文件没有 `units` 属性，规范单位是假定的。
+    units_assumed: bool,
+    /// QC 来源种类：source / imported_generated / absent，以及人可读规则。
+    qc_kind: String,
+    qc_rule: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qc_variable: Option<String>,
+    /// 是否请求订正、实际用没用上（not_requested / applied / not_applied）。
+    correction_requested: bool,
+    correction_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    correction_variable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    correction_reason: Option<String>,
+    /// 需要让用户看见的口径警告（频率与 nml 不符、标签位置是假设的、覆盖不足…）。
+    warnings: Vec<String>,
+    /// 这些时刻数字属于哪个钟（与 series/catalog/map 同一契约）。
+    time_basis: time_basis::TimeBasisJson,
 }
 
 struct MetricsRequest<'a> {
@@ -4308,7 +4372,23 @@ struct MetricsRequest<'a> {
     to: Option<i64>,
     /// 格点算例里的通量站：取站点所在那一格的模拟；单点算例是 `None`。
     point: Option<StationPoint>,
+    /// 观测时间标签表示区间起点还是终点。`None` 时按文件属性自动识别。
+    obs_label_position: Option<colm_hist::pair::ObsLabelPosition>,
+    /// 只作交叉核对的 `DEF_HIST_FREQ` 声明值：运行结束后 nml 可能被改，
+    /// 真正的输出频率由 history 标签反推。
+    history_frequency: Option<colm_hist::schedule::HistoryFrequency>,
+    /// 日/月/年聚合要求的最小有效观测覆盖率（0..=1）。
+    min_coverage: f64,
 }
+
+/// 日/月/年聚合的最小有效观测覆盖率。
+///
+/// 0.5 沿用 study 的 `AGGREGATE_MIN_COVERAGE` 先例：低于一半的观测不足以
+/// 代表整段均值，但 FLUXNET 的 `qc == 0` 样本本身就有缺口，要求 100%
+/// 会让日尺度几乎无对可用。结果行会回传实际覆盖率，界面据此标“低支持”。
+const DEFAULT_MIN_COVERAGE: f64 = 0.5;
+/// 覆盖率低于这个值时在界面标“低支持”（但配对仍然保留）。
+const LOW_COVERAGE_NOTICE: f64 = 0.9;
 
 /// 区域里的通量站。格点算例按世界时（UTC）跑，PLUMBER2 的观测是当地标准时：配对前观测时间减去
 /// `utc_offset_hours`（中国的站是 8）。单点算例本身就按当地时间跑，不用这一项。
@@ -4701,72 +4781,6 @@ fn model_values(
     }
 }
 
-struct ObservationData {
-    label: String,
-    values: Vec<f64>,
-    qc: Vec<f64>,
-}
-
-fn observation_values(
-    obs_file: &netcdf::File,
-    obs_path: &Path,
-    variable: &colm_hist::obs::EvaluationVariable,
-    corrected: bool,
-) -> Result<Option<ObservationData>> {
-    let o_name = variable.observation;
-    let direct = corrected
-        .then(|| colm_hist::obs::corrected(o_name))
-        .flatten()
-        .filter(|candidate| obs_file.variable(candidate).is_some())
-        .unwrap_or(o_name);
-    if obs_file.variable(direct).is_some()
-        && variable.qc.is_none_or(|qc| obs_file.variable(qc).is_some())
-    {
-        let values = read_file_1d(obs_file, obs_path, direct)?;
-        let qc = match variable.qc {
-            Some(qc) => read_file_1d(obs_file, obs_path, qc)?,
-            None => vec![colm_hist::pair::QC_MEASURED; values.len()],
-        };
-        return Ok(Some(ObservationData {
-            label: direct.to_string(),
-            values,
-            qc,
-        }));
-    }
-    let Some(components) = colm_hist::obs::derived_observation_components(o_name) else {
-        return Ok(None);
-    };
-    let Some(qc_names) = colm_hist::obs::derived_observation_qc(o_name) else {
-        return Ok(None);
-    };
-    if !components
-        .iter()
-        .chain(qc_names.iter())
-        .all(|name| obs_file.variable(name).is_some())
-    {
-        return Ok(None);
-    }
-    let swdown = read_file_1d(obs_file, obs_path, components[0])?;
-    let lwdown = read_file_1d(obs_file, obs_path, components[1])?;
-    let swup = read_file_1d(obs_file, obs_path, components[2])?;
-    let lwup = read_file_1d(obs_file, obs_path, components[3])?;
-    let swdown_qc = read_file_1d(obs_file, obs_path, qc_names[0])?;
-    let lwdown_qc = read_file_1d(obs_file, obs_path, qc_names[1])?;
-    let swup_qc = read_file_1d(obs_file, obs_path, qc_names[2])?;
-    let lwup_qc = read_file_1d(obs_file, obs_path, qc_names[3])?;
-    let (values, qc) = colm_hist::obs::derive_urban_rnet(
-        [&swdown, &lwdown, &swup, &lwup],
-        [&swdown_qc, &lwdown_qc, &swup_qc, &lwup_qc],
-    )?;
-    Ok(Some(ObservationData {
-        label: colm_hist::obs::derived_observation_label(o_name)
-            .unwrap_or(o_name)
-            .to_string(),
-        values,
-        qc,
-    }))
-}
-
 fn normalized_metric_window(
     model_minutes: &[f64],
     normalized_seconds: &[f64],
@@ -4789,6 +4803,315 @@ fn normalized_metric_window(
         from: from.map_or(f64::NEG_INFINITY, |value| value as f64 - offset),
         to: to.map_or(f64::INFINITY, |value| value as f64 - offset),
     }))
+}
+
+fn parse_obs_label_position(value: &str) -> Result<colm_hist::pair::ObsLabelPosition> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "start" => Ok(colm_hist::pair::ObsLabelPosition::Start),
+        "end" => Ok(colm_hist::pair::ObsLabelPosition::End),
+        other => bail!("--obs-label-position must be start or end, got {other:?}"),
+    }
+}
+
+fn obs_label_position_name(position: colm_hist::pair::ObsLabelPosition) -> &'static str {
+    match position {
+        colm_hist::pair::ObsLabelPosition::Start => "start",
+        colm_hist::pair::ObsLabelPosition::End => "end",
+    }
+}
+
+fn history_frequency_name(frequency: colm_hist::schedule::HistoryFrequency) -> &'static str {
+    use colm_hist::schedule::HistoryFrequency;
+    match frequency {
+        HistoryFrequency::None => "none",
+        HistoryFrequency::Timestep => "timestep",
+        HistoryFrequency::Hourly => "hourly",
+        HistoryFrequency::Daily => "daily",
+        HistoryFrequency::Monthly => "monthly",
+        HistoryFrequency::Yearly => "yearly",
+    }
+}
+
+fn history_pair_mode(
+    frequency: colm_hist::schedule::HistoryFrequency,
+) -> colm_hist::pair::PairMode {
+    use colm_hist::schedule::HistoryFrequency;
+    match frequency {
+        HistoryFrequency::None | HistoryFrequency::Timestep => colm_hist::pair::PairMode::Timestep,
+        HistoryFrequency::Hourly => colm_hist::pair::PairMode::Hourly,
+        HistoryFrequency::Daily => colm_hist::pair::PairMode::Daily,
+        HistoryFrequency::Monthly => colm_hist::pair::PairMode::Monthly,
+        HistoryFrequency::Yearly => colm_hist::pair::PairMode::Yearly,
+    }
+}
+
+fn model_label_position_name(frequency: colm_hist::schedule::HistoryFrequency) -> &'static str {
+    match colm_hist::timeline::frequency_label_position(frequency) {
+        colm_hist::timeline::ModelLabelPosition::Start => "start",
+        colm_hist::timeline::ModelLabelPosition::Mid => "midpoint",
+        colm_hist::timeline::ModelLabelPosition::End => "end",
+    }
+}
+
+/// history 的时间标签必须是整分钟（`minutes since 1900-1-1 0:0:0`）。
+fn history_labels_minutes(time: &[f64]) -> Result<Vec<i64>> {
+    time.iter()
+        .map(|value| {
+            ensure!(
+                value.is_finite(),
+                "history time axis has a non-finite label"
+            );
+            let rounded = value.round();
+            ensure!(
+                (value - rounded).abs() < 1e-6,
+                "history time label {value} is not a whole minute"
+            );
+            Ok(rounded as i64)
+        })
+        .collect()
+}
+
+/// `case.nml` 里能给区间重建用的东西：时间步长与 history 起点。
+///
+/// **不拿 nml 的频率/窗口当权威**：运行结束后用户可能改过算例配置，
+/// 输出频率由 history 标签反推；窗口起点只用于钳制首条记录，并对明显
+/// 不一致的情况给出警告，而不是悄悄按错误的 nml 截断区间。
+struct HistorySchedule {
+    timestep_seconds: Option<i64>,
+    history_start_tick: Option<i64>,
+    declared_frequency: Option<colm_hist::schedule::HistoryFrequency>,
+    warnings: Vec<String>,
+}
+
+fn history_schedule(case: &Path) -> Result<HistorySchedule> {
+    let mut out = HistorySchedule {
+        timestep_seconds: None,
+        history_start_tick: None,
+        declared_frequency: None,
+        warnings: Vec::new(),
+    };
+    let path = Layout::new(case).case_nml();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            out.warnings.push(format!(
+                "读不到 {}（{error}）；history 区间起点按名义边界推断",
+                path.display()
+            ));
+            return Ok(out);
+        }
+    };
+    let document =
+        colm_namelist::parse(&text).with_context(|| format!("cannot parse {}", path.display()))?;
+    if let Some(colm_namelist::Value::Str(value)) = document.get("DEF_HIST_FREQ") {
+        match colm_hist::schedule::HistoryFrequency::parse(value) {
+            Ok(colm_hist::schedule::HistoryFrequency::None) => {}
+            Ok(frequency) => out.declared_frequency = Some(frequency),
+            Err(error) => out.warnings.push(format!(
+                "DEF_HIST_FREQ 无法识别（{error}）；输出频率改由 history 标签判断"
+            )),
+        }
+    }
+    let number = |field: &str| document.get(field).and_then(colm_namelist::Value::as_f64);
+    let whole = |field: &str| number(field).map(|value| value.round() as i64);
+    let date = |prefix: &str| -> Option<(i32, usize, usize, i32)> {
+        Some((
+            i32::try_from(whole(&format!("{prefix}_year"))?).ok()?,
+            usize::try_from(whole(&format!("{prefix}_month"))?).ok()?,
+            usize::try_from(whole(&format!("{prefix}_day"))?).ok()?,
+            i32::try_from(whole(&format!("{prefix}_sec"))?).ok()?,
+        ))
+    };
+    if let Some(timestep) = number("DEF_simulation_time%timestep") {
+        if timestep.is_finite()
+            && timestep > 0.0
+            && timestep.fract() == 0.0
+            && timestep <= i64::MAX as f64
+        {
+            out.timestep_seconds = Some(timestep as i64);
+        } else {
+            out.warnings.push(format!(
+                "DEF_simulation_time%timestep = {timestep} 不能当作 history 输出步长；TIMESTEP 频率将用标签间隔推断"
+            ));
+        }
+    }
+    let Some(start) = date("DEF_simulation_time%start") else {
+        return Ok(out);
+    };
+    let start_tick =
+        match colm_hist::timeline::civil_tick_seconds(start.0, start.1, start.2, start.3) {
+            Ok(tick) => tick,
+            Err(error) => {
+                out.warnings.push(format!(
+                    "case.nml 的模拟起点不可用（{error}）；history 区间起点按名义边界推断"
+                ));
+                return Ok(out);
+            }
+        };
+    // 预热期不写 history（`itstamp <= ptstamp` 只清累加器）：history 首条记录
+    // 的真实区间从预热截止时刻开始。
+    let spinup_year = whole("DEF_simulation_time%spinup_year").unwrap_or(0);
+    out.history_start_tick = if spinup_year > 0 {
+        let spinup = (
+            i32::try_from(spinup_year).unwrap_or(0),
+            usize::try_from(whole("DEF_simulation_time%spinup_month").unwrap_or(1)).unwrap_or(1),
+            usize::try_from(whole("DEF_simulation_time%spinup_day").unwrap_or(1)).unwrap_or(1),
+            i32::try_from(whole("DEF_simulation_time%spinup_sec").unwrap_or(0)).unwrap_or(0),
+        );
+        match colm_hist::timeline::civil_tick_seconds(spinup.0, spinup.1, spinup.2, spinup.3) {
+            Ok(tick) => Some(tick.max(start_tick)),
+            Err(error) => {
+                out.warnings.push(format!(
+                    "case.nml 的预热截止时刻不可用（{error}）；history 区间起点按模拟起点处理"
+                ));
+                Some(start_tick)
+            }
+        }
+    } else {
+        Some(start_tick)
+    };
+    Ok(out)
+}
+
+/// 观测时间轴必须是严格递增的规则网格；聚合按整步取样，所以步长还要整除一小时。
+fn observation_step_seconds(seconds: &[f64]) -> Result<f64> {
+    ensure!(
+        seconds.len() >= 2,
+        "observation time axis needs at least two records"
+    );
+    ensure!(
+        seconds.iter().all(|value| value.is_finite()),
+        "observation time axis has non-finite timestamps"
+    );
+    ensure!(
+        seconds.windows(2).all(|pair| pair[0] < pair[1]),
+        "observation time axis must be strictly increasing; reorder the observation file or its declared time offset"
+    );
+    let step = seconds
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .fold(f64::INFINITY, f64::min);
+    ensure!(
+        (1.0..=3600.0).contains(&step),
+        "observation step {step} s is outside the supported 1..=3600 s range"
+    );
+    for window in seconds.windows(2) {
+        let gap = window[1] - window[0];
+        let whole = gap / step;
+        ensure!(
+            (whole - whole.round()).abs() < 1e-6,
+            "observation time axis has a {gap} s gap that is not a multiple of the {step} s step"
+        );
+    }
+    let per_hour = 3600.0 / step;
+    ensure!(
+        (per_hour - per_hour.round()).abs() < 1e-9,
+        "observation step {step} s does not divide an hour; interval pairing needs a regular sub-hourly grid"
+    );
+    Ok(step)
+}
+
+/// 观测时间标签表示区间起点还是终点。
+///
+/// 这是**数据产品语义**，不能由模型输出频率推出来：FLUXNET2015/PLUMBER2 的
+/// 半小时标签是区间起点（CN-Cng 小时输出取 (t−1800,t) 才复现 design.md §2.8
+/// 的 R²=0.985）；Urban-PLUMBER 的标签是区间终点（AU-Preston TIMESTEP 运行
+/// 同标签 Rnet r=0.999，±30 分钟掉到 0.93）。识别不了时按 FLUXNET 约定取
+/// 起点并在结果里带 warning，绝不静默。
+fn detect_obs_label_position(
+    file: &netcdf::File,
+) -> (colm_hist::pair::ObsLabelPosition, &'static str) {
+    use colm_hist::pair::ObsLabelPosition;
+    let text = |name: &str| -> Option<String> {
+        match file.attribute(name)?.value().ok()? {
+            netcdf::AttributeValue::Str(value) => Some(value),
+            _ => None,
+        }
+    };
+    if let Some(declared) = text("obs_time_label_position") {
+        match declared.trim().to_ascii_lowercase().as_str() {
+            "start" => return (ObsLabelPosition::Start, "file_attribute"),
+            "end" => return (ObsLabelPosition::End, "file_attribute"),
+            _ => {}
+        }
+    }
+    let description = ["project", "title", "summary", "source"]
+        .into_iter()
+        .filter_map(text)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if description.contains("urban-plumber") || description.contains("urban plumber") {
+        return (ObsLabelPosition::End, "product_urban_plumber");
+    }
+    if description.contains("plumber2")
+        || description.contains("fluxnet2015")
+        || file.attribute("Fluxnet_dataset_version").is_some()
+    {
+        return (ObsLabelPosition::Start, "product_fluxnet2015");
+    }
+    (ObsLabelPosition::Start, "assumed_start_unknown_product")
+}
+
+/// 把解码层的 QC/订正状态翻成指标行可直接显示的稳定字符串。
+///
+/// `qc_rule`/`correction_reason` 是给人看的说明（界面 tooltip、报告 CSV），
+/// 状态码保持 ASCII 稳定串，前端再翻中英。
+fn observation_semantics(
+    decoded: &observation_input::DecodedObs,
+) -> (String, String, Option<String>, Option<String>) {
+    let qc_rule = match &decoded.qc_provenance {
+        observation_input::QcProvenance::Source { variable } => {
+            format!("{variable} == 0 视为实测")
+        }
+        observation_input::QcProvenance::ImportedGenerated { variable, rule } => {
+            format!("{variable}: {rule}")
+        }
+        observation_input::QcProvenance::Absent => "文件没有 QC，全部有限值参与".to_string(),
+    };
+    match &decoded.correction {
+        observation_input::CorrectionStatus::NotRequested => {
+            (qc_rule, "not_requested".to_string(), None, None)
+        }
+        observation_input::CorrectionStatus::Applied { variable } => {
+            (qc_rule, "applied".to_string(), Some(variable.clone()), None)
+        }
+        observation_input::CorrectionStatus::NotApplied { requested, reason } => (
+            qc_rule,
+            "not_applied".to_string(),
+            None,
+            Some(format!("{requested}: {reason}")),
+        ),
+    }
+}
+
+/// history 的 time 轴必须是我们认识的模型钟（`minutes since 1900-1-1 0:0:0`）。
+///
+/// 读成别的单位（或带非公历 calendar）会把整条轴平移/缩放，而界面上什么都
+/// 看不出来 —— 这是配对前必须拦住的一类静默错误。
+fn ensure_history_time_units(hists: &[PathBuf]) -> Result<()> {
+    let primary = primary_history_files(hists);
+    let first = primary.first().with_context(|| "no history files")?;
+    let file = netcdf::open(first).with_context(|| format!("cannot open {}", first.display()))?;
+    let units = variable_units(&file, "time")
+        .with_context(|| format!("time:units in {} is not a string", first.display()))?;
+    let normalized = units.trim().to_ascii_lowercase();
+    ensure!(
+        normalized.starts_with("minutes since 1900-1-1")
+            || normalized.starts_with("minutes since 1900-01-01"),
+        "history time units {units:?} are not the CoLM `minutes since 1900-1-1 0:0:0` model clock; interval pairing needs the model clock"
+    );
+    if let Some(calendar) = file
+        .variable("time")
+        .and_then(|variable| variable.attribute_value("calendar"))
+        .and_then(|value| value.ok())
+    {
+        ensure!(
+            matches!(calendar, netcdf::AttributeValue::Str(ref value) if matches!(value.as_str(), "standard" | "gregorian" | "proleptic_gregorian")),
+            "history time axis declares an unsupported calendar"
+        );
+    }
+    Ok(())
 }
 
 fn ensure_metric_pair_lengths(
@@ -4824,11 +5147,19 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         from,
         to,
         point,
+        obs_label_position,
+        history_frequency: declared_frequency,
+        min_coverage,
     } = request;
+    ensure!(
+        (0.0..=1.0).contains(&min_coverage),
+        "--min-coverage must be within 0..=1, got {min_coverage}"
+    );
     validate_pair_vars(&pair_vars)?;
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
+    ensure_history_time_units(&hists)?;
 
     // Open every NetCDF file once. The previous implementation reopened every one
     // of 132 monthly history files for each flux, turning an AT-Neu evaluation into
@@ -4836,11 +5167,6 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     let obs_file =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
     let mut o_t = read_file_1d(&obs_file, obs_path, "time")?;
-    if let Some(point) = point {
-        for t in &mut o_t {
-            *t -= point.utc_offset_hours * 3600.0;
-        }
-    }
     let selected = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
         .filter(|variable| {
@@ -4873,8 +5199,96 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     // 必须按完整日期时间换算；只取年份会把序列错配几个月。
     let units = variable_units(&obs_file, "time")
         .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
-    let m_sec = colm_hist::time::model_seconds_from_units(&m_t, &units)
+    let basis = time_basis::resolve(case)?;
+    let obs_units = colm_hist::time::parse_time_units(&units)
         .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    // 观测 time 值的存储单位（seconds/minutes/hours/days）先统一成秒；配对、
+    // 覆盖率与图轴都在秒域里算，单位因子只在这里出现一次。
+    if obs_units.unit_seconds != 1.0 {
+        for value in &mut o_t {
+            *value *= obs_units.unit_seconds;
+        }
+    }
+    // 格点算例里通量站按当地标准时观测、模型按 UTC：把观测钟面读数移到与模型同一钟面。
+    if let Some(point) = point {
+        for value in &mut o_t {
+            *value -= point.utc_offset_hours * 3600.0;
+        }
+    }
+    // 观测原点自带的 UTC 偏移与模型基准一起进入换算；模型是地方时且偏移未知时，
+    // 带非零偏移的原点会在这里明确报错，不再静默丢掉偏移。
+    let m_sec = colm_hist::time::model_seconds_from_basis(&m_t, &obs_units, basis.0)
+        .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    let basis_json = time_basis::json(basis.0, basis.1);
+    // 观测时间轴与标签位置是配对的输入语义：步长用来核覆盖率，标签位置
+    // 决定每个样本覆盖 [t, t+step) 还是 [t−step, t)。
+    let obs_step = observation_step_seconds(&o_t)?;
+    let (obs_label_position, obs_label_position_source) = match obs_label_position {
+        Some(position) => (position, "explicit"),
+        None => detect_obs_label_position(&obs_file),
+    };
+    // 输出频率由 history 标签反推（nml 只作交叉核对/步长与起点来源），
+    // 这样运行结束后被改过的 case.nml 不会把区间配错。
+    let schedule = history_schedule(case)?;
+    let mut metric_warnings = schedule.warnings.clone();
+    let labels = history_labels_minutes(&m_t)?;
+    let resolution = colm_hist::timeline::classify_frequency(
+        &labels,
+        declared_frequency.or(schedule.declared_frequency),
+        schedule.timestep_seconds,
+    )?;
+    if let Some(declared) = resolution.declared {
+        if declared != resolution.frequency {
+            metric_warnings.push(format!(
+                "case.nml 声明 DEF_HIST_FREQ = {}，history 标签显示是 {}；按 history 为准",
+                history_frequency_name(declared),
+                history_frequency_name(resolution.frequency)
+            ));
+        }
+    }
+    let mut intervals = colm_hist::timeline::record_intervals(
+        &labels,
+        resolution.frequency,
+        schedule.timestep_seconds,
+        schedule.history_start_tick,
+    )?;
+    if let (Some(start), Some(first)) = (schedule.history_start_tick, intervals.first()) {
+        if start > first.end_tick_seconds {
+            // nml 的起点晚于首条 history 记录：这份 nml 不是产生这份 history 的那次配置。
+            metric_warnings.push(
+                "case.nml 的模拟起点晚于首条 history 记录（配置被改过？）；区间起点改按名义边界推断"
+                    .to_string(),
+            );
+            intervals = colm_hist::timeline::record_intervals(
+                &labels,
+                resolution.frequency,
+                schedule.timestep_seconds,
+                None,
+            )?;
+        }
+    }
+    if intervals.len() != m_t.len() {
+        bail!(
+            "history 标签重建出 {} 个输出区间，但时间轴有 {} 条记录",
+            intervals.len(),
+            m_t.len()
+        );
+    }
+    // 区间端点是 1900 起秒；观测配对用「相对观测原点的秒」，两者只差一个平移。
+    // 这个平移取自现有时间轴换算的第一个点，C3 引入 time basis 后仍然成立。
+    let origin_seconds = m_t
+        .first()
+        .zip(m_sec.first())
+        .map(|(minutes, seconds)| *minutes * 60.0 - *seconds)
+        .unwrap_or(0.0);
+    let records = intervals
+        .iter()
+        .map(|interval| colm_hist::pair::IntervalRecord {
+            label_seconds: interval.label_minutes as f64 * 60.0 - origin_seconds,
+            begin_seconds: interval.begin_tick_seconds as f64 - origin_seconds,
+            end_seconds: interval.end_tick_seconds as f64 - origin_seconds,
+        })
+        .collect::<Vec<_>>();
     let unix = colm_hist::time::unix_seconds(&m_t);
     let metric_window = normalized_metric_window(&m_t, &m_sec, from, to)?;
     let by_sec = if json && !summary_only {
@@ -4898,8 +5312,24 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     let mut rows: Vec<VarMetrics> = Vec::new();
     for (variable, source) in selected {
         let o_name = variable.observation;
-        let Ok(Some(obs_data)) = observation_values(&obs_file, obs_path, &variable, corrected)
-        else {
+        // 值/单位/QC/订正走同一个解码入口：packing 在原始域解、单位不支持就拒绝、
+        // 生成的 QC 掩码不再冒充实测质量、订正变量缺失不再静默回退。
+        let decoded = observation_input::decode(
+            &obs_file,
+            obs_path,
+            &variable,
+            &observation_input::ObsDecodeRequest {
+                corrected,
+                label_position: obs_label_position,
+            },
+        )
+        .with_context(|| {
+            format!(
+                "observation target {o_name} cannot be decoded from {}",
+                obs_path.display()
+            )
+        })?;
+        let Some(obs_data) = decoded else {
             continue;
         };
         let m_v = model_values(source, &model_data).ok_or_else(|| {
@@ -4917,13 +5347,50 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
             obs_data.values.len(),
             obs_data.qc.len(),
         )?;
-        let s = colm_hist::pair::Series {
+        let s = colm_hist::pair::ObsSeries {
             seconds: &o_t,
             values: &obs_data.values,
             qc: &obs_data.qc,
+            label_position: obs_label_position,
+            step_seconds: obs_step,
         };
-        let with_time =
-            colm_hist::pair::pair_with_time_in_window(&m_sec, &m_v, &s, spinup, metric_window);
+        // 配对以每条模型记录的真实输出区间为准：小时/日内聚合、末段部分区间、
+        // DAILY/MONTHLY/YEARLY 的整段均值都在这里统一处理。
+        let pairing = colm_hist::pair::pair_intervals(
+            &records,
+            &m_v,
+            &s,
+            &colm_hist::pair::PairOptions {
+                spinup,
+                window: metric_window,
+                min_coverage,
+                mode: history_pair_mode(resolution.frequency),
+            },
+        )?;
+        let mut row_warnings = metric_warnings.clone();
+        row_warnings.extend(obs_data.warnings.iter().cloned());
+        if pairing.coverage.below_min > 0 {
+            row_warnings.push(format!(
+                "{} 个输出区间因观测覆盖不足未参与配对（阈值 {:.0}%）",
+                pairing.coverage.below_min,
+                min_coverage * 100.0
+            ));
+        }
+        if matches!(
+            resolution.frequency,
+            colm_hist::schedule::HistoryFrequency::Daily
+                | colm_hist::schedule::HistoryFrequency::Monthly
+                | colm_hist::schedule::HistoryFrequency::Yearly
+        ) && pairing.coverage.mean < LOW_COVERAGE_NOTICE
+            && !pairing.pairs.is_empty()
+        {
+            row_warnings.push(format!(
+                "观测覆盖率均值 {:.0}% 偏低（<{:.0}%），整段均值代表的是部分时段",
+                pairing.coverage.mean * 100.0,
+                LOW_COVERAGE_NOTICE * 100.0
+            ));
+        }
+        let with_time = pairing.pairs;
         let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
         let Some(m) = colm_hist::metric::compute(&pairs) else {
             continue;
@@ -4980,6 +5447,9 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                         .collect::<Vec<_>>()
                 })
             };
+            let qc_label = observation_input::qc_label(&obs_data.qc_provenance);
+            let (qc_rule, correction_status, correction_variable, correction_reason) =
+                observation_semantics(&obs_data);
             rows.push(VarMetrics {
                 name: o_name.to_string(),
                 obs_var: obs_data.label.clone(),
@@ -4987,14 +5457,19 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                 label_zh: variable.label_zh.to_string(),
                 label_en: variable.label_en.to_string(),
                 units: variable.units.to_string(),
-                quality_control: if variable.qc.is_some()
-                    || colm_hist::obs::derived_observation_qc(o_name).is_some()
-                {
-                    "measured_only"
-                } else {
-                    "finite_only"
-                }
-                .to_string(),
+                canonical_units: obs_data.units.clone(),
+                // 质量口径由实际读到的 QC 来源决定，不再按静态变量表猜：
+                // 导入时生成的有效性掩码不能标成实测质量。
+                quality_control: qc_label.to_string(),
+                source_units: obs_data.source_units.clone(),
+                units_assumed: obs_data.units_assumed,
+                qc_kind: qc_label.to_string(),
+                qc_rule,
+                qc_variable: obs_data.qc_variable.clone(),
+                correction_requested: corrected,
+                correction_status,
+                correction_variable,
+                correction_reason,
                 n: m.n,
                 rmse: m.rmse,
                 mae: m.mae,
@@ -5027,6 +5502,15 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                 pair_downsampled: pair_indexes
                     .as_ref()
                     .map(|indexes| indexes.len() < pair_source_n),
+                output_frequency: history_frequency_name(resolution.frequency).to_string(),
+                model_label_position: model_label_position_name(resolution.frequency).to_string(),
+                obs_label_position: obs_label_position_name(obs_label_position).to_string(),
+                obs_label_position_source: obs_label_position_source.to_string(),
+                coverage: Some(pairing.coverage.mean),
+                coverage_min: Some(pairing.coverage.min),
+                low_coverage_pairs: Some(pairing.coverage.below_min),
+                warnings: row_warnings,
+                time_basis: basis_json,
             });
             continue;
         }
@@ -5093,18 +5577,35 @@ pub(crate) fn observation_usable_times(
         .iter()
         .find(|variable| variable.observation.eq_ignore_ascii_case(variable_name))
         .with_context(|| format!("unknown evaluation target {variable_name}"))?;
-    let Some(obs_data) = observation_values(&obs_file, obs_path, variable, false)? else {
+    let (obs_label_position, _) = detect_obs_label_position(&obs_file);
+    let Some(obs_data) = observation_input::decode(
+        &obs_file,
+        obs_path,
+        variable,
+        &observation_input::ObsDecodeRequest {
+            corrected: false,
+            label_position: obs_label_position,
+        },
+    )?
+    else {
         bail!(
             "observation target {variable_name} is unavailable in {}",
             obs_path.display()
         );
     };
-    let obs_time = read_file_1d(&obs_file, obs_path, "time")?;
+    let mut obs_time = read_file_1d(&obs_file, obs_path, "time")?;
+    let units = variable_units(&obs_file, "time")
+        .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
+    let parsed_units = colm_hist::time::parse_time_units(&units)
+        .with_context(|| format!("unsupported observation time units {units:?}"))?;
+    if parsed_units.unit_seconds != 1.0 {
+        for value in &mut obs_time {
+            *value *= parsed_units.unit_seconds;
+        }
+    }
     if obs_time.len() != obs_data.values.len() || obs_data.qc.len() != obs_data.values.len() {
         bail!("observation target {variable_name} has inconsistent time/value/QC lengths");
     }
-    let units = variable_units(&obs_file, "time")
-        .with_context(|| format!("time:units in {} is not a string", obs_path.display()))?;
     let epoch_minutes = colm_hist::time::minutes_from_1900(1970) as f64;
     let epoch_in_obs_seconds = colm_hist::time::model_seconds_from_units(&[epoch_minutes], &units)
         .and_then(|values| values.into_iter().next())
@@ -5119,7 +5620,6 @@ pub(crate) fn observation_usable_times(
                 && unix < to as f64
                 && **qc == colm_hist::pair::QC_MEASURED
                 && value.is_finite()
-                && **value > colm_hist::pair::FILL_VALUE + 1.0
         })
         .map(|(seconds, _)| (origin_unix + seconds).round() as i64)
         .collect())
@@ -5143,6 +5643,8 @@ struct HistoryCatalog {
     start: i64,
     end: i64,
     variables: Vec<HistoryVariable>,
+    /// `start`/`end` 与后续 series 的时刻属于哪个钟。
+    time_basis: time_basis::TimeBasisJson,
 }
 
 #[derive(serde::Serialize)]
@@ -5248,16 +5750,19 @@ fn cmd_history_catalog(case: &Path) -> Result<()> {
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
+    ensure_history_time_units(&hists)?;
     let time = read_history(&hists, "time")?;
     let unix = colm_hist::time::unix_seconds(&time);
     let variables = history_variables(&hists)?;
     ensure_usable_history_catalog(&time, &variables)?;
+    let basis = time_basis::resolve(case)?;
     let catalog = HistoryCatalog {
         files: hists.len(),
         steps: unix.len(),
         start: unix.first().copied().unwrap_or_default(),
         end: unix.last().copied().unwrap_or_default(),
         variables,
+        time_basis: time_basis::json(basis.0, basis.1),
     };
     println!("{}", serde_json::to_string(&catalog)?);
     Ok(())
@@ -5274,6 +5779,8 @@ struct SeriesBody {
     downsampled: bool,
     time: Vec<i64>,
     vars: std::collections::BTreeMap<String, Vec<Option<f64>>>,
+    /// `time` 数组属于哪个钟（局部时/UTC 的区分不能靠前端猜）。
+    time_basis: time_basis::TimeBasisJson,
 }
 
 #[cfg(test)]
@@ -5367,6 +5874,7 @@ fn cmd_series(
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let hists = history_files(&layout.out().join(&name))?;
+    ensure_history_time_units(&hists)?;
 
     let mut names: Vec<&str> = vars
         .split(',')
@@ -5418,6 +5926,7 @@ fn cmd_series(
         .filter(|time| from.is_none_or(|start| **time >= start))
         .filter(|time| to.is_none_or(|end| **time <= end))
         .count();
+    let basis = time_basis::resolve(case)?;
     let body = SeriesBody {
         area_mean,
         files: hists.len(),
@@ -5435,6 +5944,7 @@ fn cmd_series(
                 (name, selected)
             })
             .collect(),
+        time_basis: time_basis::json(basis.0, basis.1),
     };
     let json = serde_json::to_string(&body)? + "\n";
 

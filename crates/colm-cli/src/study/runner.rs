@@ -3314,6 +3314,9 @@ fn target_result(
         from: Some(from),
         to: Some(to),
         point,
+        obs_label_position: None,
+        history_frequency: None,
+        min_coverage: crate::DEFAULT_MIN_COVERAGE,
     })?;
     let row = rows
         .into_iter()

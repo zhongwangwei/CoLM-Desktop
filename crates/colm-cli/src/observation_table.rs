@@ -264,6 +264,10 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
                 "time_basis",
                 "source clock labels preserved; must match paired forcing",
             )?;
+            // 导入表格的时间列一律按**区间起点**解释（FLUXNET2015 的
+            // TIMESTAMP_START 约定）。这个口径必须写进产物：评估侧据此决定
+            // 模型区间与观测样本怎么对齐；不写就是让人猜。
+            file.add_attribute("obs_time_label_position", "start")?;
             file.add_dimension("time", rows.len())?;
             let mut time = file.add_variable::<f64>("time", &["time"])?;
             time.put_attribute(
@@ -279,14 +283,62 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
                 ..,
             )?;
             for (choice, eval, value_idx, qc_idx) in &mapped {
-                let values = rows
+                let source_units = table.headers[*value_idx].units.clone();
+                let raw_values = rows
                     .iter()
                     .map(|(_, row)| parse_value(row.get(*value_idx)))
                     .collect::<Vec<_>>();
+                // **换算要真的乘上去，不能只改标签。** 以前这里把原始值原样
+                // 写进文件、再贴上规范单位，于是 `Qle [kW/m2]` 的 0.1 就变成
+                // 0.1 W/m² —— 差 1000 倍而界面完全正常。不认识的单位直接拒绝
+                // 并点名列名：静默放行等于产出一份量纲错误的观测。
+                let values = match source_units
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|units| !units.is_empty())
+                {
+                    Some(units) => {
+                        let mut converted =
+                            colm_forcing::units::convert_units(units, eval.canonical_units, &raw_values)
+                                .with_context(|| {
+                                    format!(
+                                        "column {:?} of {} declares units {units:?}, which cannot be converted to {:?}",
+                                        choice.column,
+                                        src.display(),
+                                        eval.canonical_units
+                                    )
+                                })?;
+                        // FILL 是缺测标记而不是数值，不能被换算成别的数。
+                        for (converted, raw) in converted.iter_mut().zip(&raw_values) {
+                            if *raw == FILL {
+                                *converted = FILL;
+                            }
+                        }
+                        converted
+                    }
+                    None => {
+                        warnings.push(format!(
+                            "{} 的列 {} 没有声明单位，已按规范单位 {} 使用（量纲未经校验）",
+                            eval.observation, choice.column, eval.canonical_units
+                        ));
+                        raw_values
+                    }
+                };
                 let mut var = file.add_variable::<f64>(eval.observation, &["time"])?;
-                var.put_attribute("units", eval.units)?;
-                var.put_attribute("_FillValue", FILL)?;
+                // 规范单位是纯 ASCII；显示用的 `W/m²` / `nmol CH₄/...`
+                // 留在界面上，不写进文件（换算表按精确字符串匹配）。
+                var.put_attribute("units", eval.canonical_units)?;
+                // `put_attribute("_FillValue", …)` 在 netcdf-4 的 define 之后
+                // 可能被静默丢弃（本仓库实测过同类问题）；用声明的 fill API。
+                var.set_fill_value(FILL)?;
                 var.put_attribute("source_column", choice.column.as_str())?;
+                if let Some(units) = source_units
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|units| !units.is_empty())
+                {
+                    var.put_attribute("source_units", units)?;
+                }
                 var.put_values(&values, ..)?;
                 if let Some(qc_name) = eval.qc {
                     let qc = match qc_idx {
@@ -305,15 +357,28 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
                                 .collect()
                         }
                     };
+                    let generated = qc_idx.is_none();
                     let mut q = file.add_variable::<f64>(qc_name, &["time"])?;
+                    // `source` 保留人类可读说明；`qc_kind` 是给评估侧做
+                    // 机器判断的：生成的有效性掩码不是实测质量，指标表
+                    // 必须把它与 measured_only 区分开。
                     q.put_attribute(
                         "source",
-                        if qc_idx.is_some() {
-                            "from source QC column"
-                        } else {
+                        if generated {
                             "generated: finite value=0, missing=1"
+                        } else {
+                            "from source QC column"
                         },
                     )?;
+                    q.put_attribute(
+                        "qc_kind",
+                        if generated {
+                            "generated_validity"
+                        } else {
+                            "source"
+                        },
+                    )?;
+                    q.set_fill_value(FILL)?;
                     q.put_values(&qc, ..)?;
                 }
             }
@@ -670,6 +735,153 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("both map to output"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 只做转换，不在这里拿 netcdf 测试锁 —— 调用方要一直持有到读完文件，
+    /// 否则中途别的测试可能插进来。`tag` 用来隔离临时目录。
+    fn convert_one(tag: &str, csv: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "colm_obs_{tag}_{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("obs.csv");
+        fs::write(&src, csv).unwrap();
+        convert(
+            &src,
+            &dir.join("Observation"),
+            &ConvertOptions {
+                time_column: "time".into(),
+                site_column: Some("site".into()),
+                site_name: None,
+                variables: vec![],
+            },
+        )
+        .unwrap();
+        dir
+    }
+
+    fn text_attr(f: &netcdf::File, variable: &str, attribute: &str) -> Option<String> {
+        match f.variable(variable)?.attribute_value(attribute)?.ok()? {
+            netcdf::AttributeValue::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn global_text_attr(f: &netcdf::File, attribute: &str) -> Option<String> {
+        match f.attribute(attribute)?.value().ok()? {
+            netcdf::AttributeValue::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn converts_declared_units_and_records_the_source_units() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        // `Qle [kW/m2]` 的 0.1 是 100 W/m²。只改箭头不换数会让指标差 1000 倍，
+        // 而文件本身完全合法 —— 这是导入路径最危险的一类错误。
+        let dir = convert_one(
+            "units",
+            "time,site,Qle [kW/m2],Qle_qc\n\
+             2020-01-01 00:00:00,A,0.1,0\n\
+             2020-01-01 00:30:00,A,,0\n",
+        );
+        let path = dir.join("Observation/A_Flux.nc");
+        let f = netcdf::open(&path).unwrap();
+        assert_eq!(
+            text_attr(&f, "Qle", "units").as_deref(),
+            Some("W/m2"),
+            "文件里必须写规范单位"
+        );
+        assert_eq!(
+            text_attr(&f, "Qle", "source_units").as_deref(),
+            Some("kW/m2"),
+            "原始单位要留在文件里，导出与排错都靠它"
+        );
+        assert_eq!(
+            text_attr(&f, "Qle_qc", "qc_kind").as_deref(),
+            Some("source"),
+            "列头带 QC 列时来源是 source"
+        );
+        assert_eq!(
+            text_attr(&f, "Qle", "source_column").as_deref(),
+            Some("Qle")
+        );
+        assert_eq!(
+            f.variable("Qle").unwrap().get_values::<f64, _>(..).unwrap(),
+            vec![100.0, FILL],
+            "缺测要被保留为 FILL，不能参与换算"
+        );
+        assert_eq!(
+            f.variable("Qle").unwrap().fill_value::<f64>().unwrap(),
+            Some(FILL),
+            "fill 值要通过声明的 fill API 写入并能读回"
+        );
+        assert_eq!(
+            global_text_attr(&f, "obs_time_label_position").as_deref(),
+            Some("start"),
+            "导入表格的时间列按区间起点解释，口径要写进文件"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_units_it_cannot_convert_and_names_the_column() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let dir = std::env::temp_dir().join(format!(
+            "colm_obs_bad_units_{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("obs.csv");
+        fs::write(&src, "time,site,Qle [furlongs]\n2020-01-01 00:00:00,A,1\n").unwrap();
+        let error = convert(
+            &src,
+            &dir.join("Observation"),
+            &ConvertOptions {
+                time_column: "time".into(),
+                site_column: Some("site".into()),
+                site_name: None,
+                variables: vec![],
+            },
+        )
+        .expect_err("未知单位必须拒绝，不能只改标签");
+        let message = format!("{error:#}");
+        assert!(message.contains("furlongs"), "{message}");
+        assert!(message.contains("Qle"), "报错要点名列与变量：{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generated_qc_is_marked_as_a_validity_mask() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        // 没有 QC 列时生成的是「值在不在」的掩码，不是仪器质量。
+        // 评估侧据此写 generated_validity，而不是 measured_only。
+        let dir = convert_one(
+            "generated_qc",
+            "time,site,Qle\n2020-01-01 00:00:00,A,10\n2020-01-01 00:30:00,A,\n",
+        );
+        let f = netcdf::open(dir.join("Observation/A_Flux.nc")).unwrap();
+        assert_eq!(
+            text_attr(&f, "Qle_qc", "qc_kind").as_deref(),
+            Some("generated_validity")
+        );
+        assert!(
+            text_attr(&f, "Qle_qc", "source").is_some_and(|source| source.starts_with("generated")),
+            "旧的 source 说明要保留"
+        );
+        assert_eq!(
+            f.variable("Qle_qc")
+                .unwrap()
+                .get_values::<f64, _>(..)
+                .unwrap(),
+            vec![0.0, 1.0]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
