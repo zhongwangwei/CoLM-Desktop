@@ -38548,3 +38548,45 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - GUI/Tauri 本轮未改：沿用上一轮 `gui/src-tauri` 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约（本轮无 GUI 代码变更）。
 - 真实 CLI/夹具 smoke：H02 无引用→candidate+候选、引用完整 SHA→verified（夹具数据）；H03 真实 commit reason unchecked+evidence_candidates；H05 selected selected_source+unchecked；H06 由工具层 Builtin/外部矩阵与 bin 构造测试覆盖。
 - 未运行：真实 GitHub/TLS/token、真实 Codex/Claude Code 后端、真实 SSH/模拟/模型 API；H07–H09（PR 分页/缓存恢复/首用 UI）、S01–S02、U01–U05 不在本轮范围。审查报告明确这些属后续批次。
+
+## 变量历史证据链复核补丁 F01–F04（2026-10-28，复核报告 CoLM-AI-Recheck-b3686b1）
+
+按复核报告补齐第一批的四处残留，并顺手修正 GitHub 评论覆盖字段；只改现有 Rust 工具/CLI/提示，不扩到 H07–H09、S01–S02 或 GUI 首用入口。共享工作区当时还有其它并行改动，因此本组补丁在 `b3686b13` 的独立 worktree 中应用后跑门禁，避免把无关在途修改算进结果。
+
+### F01 统一冻结模型历史对象解析（track/details 共用）
+
+- 背景：Official/Checkout 冻结流程会复制源码后 `git init + git add`，源码副本只有索引、没有 recorded commit 对象；旧实现发现源码对象库缺 A 就提前 unavailable，跳过了注册 Desktop 里同一 SHA 的合法回退。
+- 新行为：共享 `resolve_history_object`：先查源码对象库 `cat-file -e <A>^{commit}`，没有再查允许的注册 Desktop 历史库（显式 `--desktop-path`/env 或 managed `history-root/repos/desktop`）的**同一完整 SHA**；endpoint 始终是 recorded A，绝不换成 HEAD/默认分支/其他 ref。track 的 `query.source.history_object={kind:"source_object_store"|"registered_desktop", path, sha}`（无历史为 null），并说明源码字节位置与历史读取位置不同。details 的 repository 增加 `source_path/history_path/history_object/history_resolution`（旧 `path` 保留为 source_path）；identity 取实际历史库。无 .git 快照现在也能从注册库读同一 commit。
+- 回归：索引型冻结源+注册库 A（track endpoint=A、registered_desktop、不混 future；details 同 A；ref=B 仍拒绝）、无 .git 快照 details、完整 Git 源优先 source_object_store、全部库缺 A→unavailable+notes。
+- 真实 CLI smoke：selected 详情输出 `history_resolution=source_object_store`、`source_path==history_path`、identity verified。
+
+### F02 跨库 verified 只认明确结构化导入记录
+
+- 背景：上一版只要正文出现完整 SHA 就 `.find()` 第一条 blob 相等候选并 verified；多 SHA 或 “reviewed C but did not adopt” 会误选 C。
+- 新行为：普通正文 SHA 只是 `mentioned_in_message` 证据，绝不单独升级。自动 verified 只接受独立 trailer 行 `Upstream-Commit: <40 位小写 hex>`（键大小写不敏感、可多行），且该 SHA 在候选里、blob 与 Desktop import blob 相等；basis 增加 `structured-upstream-commit`，link 带 `structured_reference:{sha,excerpt}`。多个结构化值/结构化值不在候选/blob 不等/否定比较不清 → candidate、`upstream.commit=null`、候选列出 `blob_equal/mentioned_in_message/structured/listed` 依据；不再按遍历顺序任选。
+- 回归：A→B→revert A + 正文写 A 与 “reviewed C but did not adopt” → candidate、不选 C；同一正文双普通 SHA → candidate；`upstream-commit: A` + 普通提及 C → verified A；两个结构化 SHA → candidate；唯一结构化记录保持 verified（含时间戳平局用例）。
+- 真实 CLI 夹具 smoke：结构化 `Upstream-Commit: A` + 否定提及 C → `verified`、basis 含 structured-upstream-commit、候选列出 A/C 的 blob_equal 与 mentioned 依据。夹具数据，不是本仓库真实 PR。
+
+### F03 显式 workspace 来源 descriptor 连续查询
+
+- 背景：source_history(selected, source=workspace) 能找到未推送 SHA，但 commit_details 无模型固定 `--source app`，无法续读同一来源。
+- 新行为：ToolContext 增加宿主维护的 `history_sources: Arc<Mutex<BTreeMap<handle, HistorySource>>>`（不序列化、不含凭据、克隆共享）。source_history(selected) 先 `selected_context()` 刷新可信 UI 选择，再绑定 frozen_model / 显式 workspace（绝对路径 + canonicalize）/ app 三种 descriptor；CLI 成功后用 `query.source` 校正目录/commit/fingerprint，返回 `source_handle`/`source_context.handle/canonical_root`。commit_details 新增可选 `source_handle`（无任何路径参数）：凭 handle 只按 descriptor 的 canonical source 调 CLI，未知/过期 handle 明确报错且不退化；无 handle 的旧路径（刷新选择→冻结 source 或 app）保留。`source_context` 增加 `handle/canonical_root/identity/resolution`；PR 工具对 selected 本地提交仍明确 PR unavailable。
+- 回归：同一 ToolContext 克隆两工具连续调用——workspace 有 X、app 源报 “not readable”，track 返回 handle，details 实际 `--source <workspace canonical root>` 且透出 X；已绑定 handle 在上下文更换模型时仍不换源、不调用 model-source-context；未知 handle 拒绝且零 CLI；旧 app 路径如实报错；schema 断言 commit_details 只有 source_handle、不接受 source 路径。
+- 真实 CLI smoke（CLI 半边）：独立 workspace 未推送 commit X → history-track selected source 找到 X、history-commit selected source 读同一 X（source_object_store、files=1）；Agent 两工具链路由 fake CLI 覆盖。
+
+### F04 OpenCode 有效网络权限一致
+
+- 背景：Configure 的 `github_network` 用原始 `web_search`，而 Settings.web_search/模型说明用 `raw && backend != Opencode`；OpenCode + 隐藏保留的 raw=true 会出现“说明关闭但 PR 工具联网”。
+- 新行为：新增 `effective_web_search(raw, backend)`，Configure 只算一次并同时用于 `Settings.web_search`（外部后端说明/模型提示）与 `ToolContext.github_network`；OpenCode 按现行产品规则统一关闭，其它后端行为不变。
+- 回归：真实构造 helper 覆盖全部后端 × 开关；opencode+raw true → 有效 false、github_network false；Builtin/Codex/Claude × false → false；保留关闭时 refresh 零 HTTP 矩阵。
+
+### 轻量：discussion_read 覆盖字段
+
+`fetch_pull_comments` 记录第一页是否成功读取；`coverage.discussion_read` 只在至少读到第一页时为 true，`discussion_complete` 仍要求完整读取。第一页直接失败→`discussion_read=false`；第一页成功后失败→`read=true/complete=false`。reason status 逻辑不变。
+
+### 本轮验证（真实执行）
+
+- 隔离 worktree（HEAD b3686b13 + 本组补丁）：`cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3006 passed / 0 failed / 16 ignored**（`colm-cli` 567（32 个 history 夹具）、`colm-agent` 371 passed + 1 ignored；ignored 仍为 live GitHub smoke）。
+- Tauri/GUI 本轮未改：沿用 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约。
+- 真实 CLI/夹具 smoke：F01 selected 详情 source/object store 分离；F02 结构化 Upstream-Commit verified + 否定提及不误选；F03 workspace 未推送 commit 的 track→details 同源（CLI 半边）。
+- 未运行：真实索引型官方冻结包（用同形态 git init+add 夹具覆盖）、真实 Agent 模型端到端、真实 GitHub/TLS/token、真实 OpenCode/Codex/Claude Code 进程、GUI；复核报告 F01–F04 之外仍留 H07–H09、S01–S02、U01–U05 后续批次。
