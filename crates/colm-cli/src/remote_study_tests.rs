@@ -823,15 +823,13 @@ fn uncertainty_fixture(method: &str) -> UncertaintyFixture {
     let remote_root = "/srv/colm/s/abc/.colm/studies/s-remote".to_owned();
     let mut provenance = study::spec::ManifestProvenance {
         samples_sha256: colm_kernel::sha256_hex(csv.as_bytes()),
-        outputs_sha256: "history-outputs-fingerprint".into(),
+        // 写回版本前会过 `verify_frozen_inputs`：输出哈希必须是 spec 的真实哈希（空值会被跳过）。
+        outputs_sha256: colm_kernel::sha256_hex(&serde_json::to_vec(&spec.outputs).unwrap()),
         ..Default::default()
     };
     provenance
         .observation_sha256
         .insert("site".into(), colm_kernel::sha256_hex(obs_bytes));
-    provenance
-        .base_case_fingerprints
-        .insert("site".into(), "base-case-fingerprint".into());
     let manifest = study::spec::Manifest {
         schema_version: 1,
         id: "s-local".into(),
@@ -1057,4 +1055,387 @@ fn old_server_evidence_missing_the_new_identities_is_rejected_explicitly() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("manifest"), "{error}");
     std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+// ---- P1-7c：取回的研究写回版本（统一本地/远端成员核验） ----
+
+fn copy_tree_into(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree_into(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// 假服务器：只回答成员写回核验要问的问题（身份、作业状态、研究目录、study-status、
+/// 率定比较证据、小样本文件），不连 SSH。真实 SSH 端到端不跑。
+struct FakeStudyRemote {
+    unreachable: bool,
+    exit_code: Option<i32>,
+    root: Option<String>,
+    study_status: Value,
+    comparison_evidence: Option<Value>,
+    files: std::collections::BTreeMap<String, String>,
+    reads: std::cell::RefCell<Vec<String>>,
+}
+
+impl StudyRemote for FakeStudyRemote {
+    fn verify_identity(&self, _record: &StudyRecord) -> Result<()> {
+        if self.unreachable {
+            bail!("ssh: connect to host: Connection refused");
+        }
+        Ok(())
+    }
+
+    fn job_status(&self, _record: &StudyRecord) -> Result<job::Status> {
+        Ok(job::Status {
+            state: match self.exit_code {
+                None => job::State::Running,
+                Some(exit_code) => job::State::Finished { exit_code },
+            },
+            phase: None,
+            detail: None,
+            log_tail: String::new(),
+        })
+    }
+
+    fn study_root(&self, _record: &StudyRecord) -> Result<Option<String>> {
+        Ok(self.root.clone())
+    }
+
+    fn study_status(&self, _record: &StudyRecord, _study_root: &str) -> Result<Value> {
+        Ok(self.study_status.clone())
+    }
+
+    fn comparison_evidence(&self, _record: &StudyRecord, _study_root: &str) -> Result<Value> {
+        self.comparison_evidence
+            .clone()
+            .context("the fake server has no comparison evidence")
+    }
+
+    fn read_text_file(&self, path: &str) -> Result<String> {
+        self.reads.borrow_mut().push(path.to_owned());
+        self.files
+            .get(path)
+            .cloned()
+            .with_context(|| format!("no file {path} on the fake server"))
+    }
+}
+
+struct RemoteStudyFixture {
+    root: PathBuf,
+    manifest: study::spec::Manifest,
+    local: PathBuf,
+    fake: FakeStudyRemote,
+}
+
+/// 把一次 P1-7b fixture 摆成"已取回"的样子：本机研究目录有 manifest/checkpoint/样本/结果树/
+/// 取回证据/远程记录，假服务器持有同一份服务器状态。
+fn remote_fetched_study(method: &str) -> RemoteStudyFixture {
+    let fixture = uncertainty_fixture(method);
+    let local = PathBuf::from(&fixture.manifest.root)
+        .canonicalize()
+        .unwrap();
+    std::fs::write(
+        local.join("manifest.json"),
+        serde_json::to_vec_pretty(&fixture.manifest).unwrap(),
+    )
+    .unwrap();
+    copy_tree_into(&fixture.staged.join("samples"), &local.join("samples"));
+    copy_tree_into(&fixture.staged.join("results"), &local.join("results"));
+    std::fs::create_dir_all(local.join("checkpoints/state")).unwrap();
+    study::checkpoint::write_next(&local.join("checkpoints/state"), &fixture.installed).unwrap();
+    // 与 remote-study-fetch 一样，核验通过时写下取回证据。
+    let evidence = uncertainty_fetch_evidence(
+        &fixture.manifest,
+        &fixture.remote_root,
+        &fixture.remote,
+        &fixture.staged,
+        &fixture.installed,
+    )
+    .unwrap();
+    std::fs::write(
+        local.join(EVIDENCE),
+        serde_json::to_vec_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+    let record = StudyRecord {
+        ssh_auth: None,
+        host: "server".into(),
+        root: "/srv/colm".into(),
+        job: "study-1".into(),
+        remote_project: "/srv/colm/s/abc".into(),
+        engine: "0123456789abcdef".into(),
+        submitted_at: 1,
+        scheduler: "bare".into(),
+        scheduler_id: None,
+        provenance: json!({"schema": 1, "model_revision": null}),
+        fetched_at: Some(1),
+    };
+    std::fs::write(
+        local.join(RECORD),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        format!("{}/samples/design.csv", fixture.remote_root),
+        String::from_utf8(std::fs::read(local.join("samples/design.csv")).unwrap()).unwrap(),
+    );
+    let fake = FakeStudyRemote {
+        unreachable: false,
+        exit_code: Some(0),
+        root: Some(fixture.remote_root.clone()),
+        study_status: fixture.remote.clone(),
+        comparison_evidence: None,
+        files,
+        reads: std::cell::RefCell::new(Vec::new()),
+    };
+    RemoteStudyFixture {
+        root: fixture.root,
+        manifest: fixture.manifest,
+        local,
+        fake,
+    }
+}
+
+#[test]
+fn remote_fetched_members_are_verified_on_the_server() {
+    let fixture = remote_fetched_study("lhs");
+    let verified =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap();
+    assert_eq!(verified.member.id, "m000001");
+    assert_eq!(verified.evidence["location"]["kind"], "server");
+    assert_eq!(verified.evidence["location"]["host"], "server");
+    assert_eq!(verified.evidence["location"]["job"], "study-1");
+    assert_eq!(verified.evidence["member"]["id"], "m000001");
+    assert_eq!(verified.evidence["tasks"]["site"]["status"], "succeeded");
+    assert_eq!(
+        verified.evidence["results"]["site"]["task"]["path"],
+        "tasks/m000001/site.json"
+    );
+    assert_eq!(
+        verified.evidence["results"]["site"]["task"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(verified.evidence["stored_evidence"], "matched");
+    assert_eq!(
+        verified.evidence["results_tree_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    // 成员参数核对只读服务器上的小样本文件，不拉 history。
+    assert!(
+        fixture
+            .fake
+            .reads
+            .borrow()
+            .iter()
+            .any(|path| path.ends_with("/samples/design.csv")),
+        "reads: {:?}",
+        fixture.fake.reads.borrow()
+    );
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn remote_members_still_verify_without_the_stored_fetch_evidence() {
+    let fixture = remote_fetched_study("oat");
+    std::fs::remove_file(fixture.local.join(EVIDENCE)).unwrap();
+    let verified =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap();
+    assert_eq!(verified.evidence["stored_evidence"], "absent");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn tampered_remote_member_result_is_rejected() {
+    let fixture = remote_fetched_study("lhs");
+    let result = fixture.local.join("results/tasks/m000001/site.json");
+    let original = std::fs::read_to_string(&result).unwrap();
+    // 同样长度的替换：结果文件清单（大小）对得上，只有内容哈希能发现。
+    let tampered = original.replace("\"W/m2\"", "\"W/m3\"");
+    assert_ne!(original, tampered);
+    std::fs::write(&result, tampered).unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("evaluation result"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn tampered_fetch_evidence_is_rejected() {
+    let fixture = remote_fetched_study("lhs");
+    let path = fixture.local.join(EVIDENCE);
+    let mut evidence: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    evidence["results_tree_sha256"] = json!("tampered");
+    std::fs::write(&path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("evidence"), "{text}");
+    assert!(text.contains("fetch"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn tampered_local_member_parameters_are_rejected() {
+    let fixture = remote_fetched_study("morris");
+    let samples = fixture.local.join("samples/design.csv");
+    let original = std::fs::read_to_string(&samples).unwrap();
+    let tampered = original.replacen(",0.51", ",0.52", 1);
+    assert_ne!(original, tampered);
+    std::fs::write(&samples, tampered).unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("sample"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn an_unreachable_server_is_reported_actionably() {
+    let mut fixture = remote_fetched_study("lhs");
+    fixture.fake.unreachable = true;
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("unreachable"), "{text}");
+    assert!(text.contains("server"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_failed_server_job_cannot_be_written_back() {
+    let mut fixture = remote_fetched_study("lhs");
+    fixture.fake.exit_code = Some(2);
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("failed with exit code 2"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_missing_server_study_root_is_reported() {
+    let mut fixture = remote_fetched_study("lhs");
+    fixture.fake.root = None;
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("did not create the Study"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_missing_remote_record_is_reported_instead_of_falling_back_to_local_outputs() {
+    let fixture = remote_fetched_study("lhs");
+    std::fs::remove_file(fixture.local.join(RECORD)).unwrap();
+    let error = verified_study_member(&fixture.local, "m000001").unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("remote submission record"), "{text}");
+    assert!(text.contains("fetch the Study again"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_missing_remote_member_output_is_reported() {
+    let fixture = remote_fetched_study("lhs");
+    let member = study::generation::load_members(&fixture.manifest)
+        .unwrap()
+        .into_iter()
+        .find(|member| member.id == "m000001")
+        .unwrap();
+    let error = member_result_files(
+        &fixture.manifest,
+        &member,
+        &fixture.local,
+        &std::collections::BTreeMap::new(),
+        true,
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("missing on the server"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+// ---- P2-10：远程研究资源预算 = 每候选线程 × 并发 ----
+
+fn resource_opts(flags: &[(&str, &str)]) -> crate::Opts {
+    crate::Opts {
+        flags: flags
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        positional: Vec::new(),
+    }
+}
+
+#[test]
+fn study_resources_default_to_one_candidate_threads_times_concurrency() {
+    let opts = resource_opts(&[]);
+    let resources = study_resources(&opts, 8, 4).unwrap();
+    // 4 个成员同时跑、每个 8 线程：申请 32 核，而不是原来只按 max(8,4)=8 核（会被集群限核/OOM）。
+    assert_eq!(resources.resources.cpus, 32);
+    assert_eq!(resources.threads, 8);
+    assert_eq!(resources.jobs, 4);
+    let report = resources_report(&resources.resources, resources.threads, resources.jobs);
+    assert_eq!(report["cpus"], 32);
+    assert_eq!(report["cores_per_candidate"], 8);
+    assert_eq!(report["concurrent_candidates"], 4);
+}
+
+#[test]
+fn one_concurrent_candidate_requests_only_its_own_threads() {
+    let opts = resource_opts(&[]);
+    assert_eq!(study_resources(&opts, 8, 1).unwrap().resources.cpus, 8);
+}
+
+#[test]
+fn explicit_cpus_win_but_must_fit_one_candidate() {
+    let sixteen = resource_opts(&[("--cpus", "16")]);
+    let resources = study_resources(&sixteen, 8, 4).unwrap();
+    assert_eq!(resources.resources.cpus, 16);
+    let too_few = resource_opts(&[("--cpus", "4")]);
+    let error = study_resources(&too_few, 8, 4).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("--cpus"), "{text}");
+    assert!(text.contains("--threads"), "{text}");
+}
+
+#[test]
+fn threads_and_jobs_must_be_positive() {
+    let opts = resource_opts(&[]);
+    assert!(study_resources(&opts, 0, 4).is_err(), "threads=0");
+    assert!(study_resources(&opts, 8, 0).is_err(), "jobs=0");
+}
+
+#[test]
+fn the_dry_run_report_names_the_resource_budget_and_threads() {
+    let opts = resource_opts(&[]);
+    let resources = study_resources(&opts, 8, 4).unwrap();
+    let report = dry_run_report(
+        "job script".into(),
+        "/srv/colm/s/abc",
+        "engine",
+        &json!({"kind": "tuning"}),
+        &resources,
+    );
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["threads"], 8);
+    assert_eq!(report["jobs"], 4);
+    assert_eq!(report["resources"]["cpus"], 32);
+    assert_eq!(report["resources"]["cores_per_candidate"], 8);
+    assert_eq!(report["resources"]["concurrent_candidates"], 4);
 }

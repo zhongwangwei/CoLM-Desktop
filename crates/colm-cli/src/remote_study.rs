@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_remote::job::{self, Spec};
-use colm_remote::sched;
+use colm_remote::sched::{self, Resources};
 use colm_remote::ssh::{quote, Ssh};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -532,6 +532,82 @@ fn stage_study_assets_inner(
     })
 }
 
+/// 远程研究一次申请的资源与它的三个量：总核数、每个候选的线程数、同时跑几个候选。
+///
+/// `resources_from` 只负责调度器字段；总核数必须由研究这边算：每个成员各有 `threads` 个线程，
+/// 同时最多跑 `jobs` 个成员，所以默认要 `threads × jobs` 核。沿用 `max(threads, jobs)` 会在
+/// jobs > 1 时只申请一个成员的核数，其余成员超配、在集群上被 OOM/限核打掉（审计 P2-10）。
+#[derive(Debug)]
+struct StudyResources {
+    resources: Resources,
+    threads: u32,
+    jobs: usize,
+}
+
+fn study_resources(opts: &Opts, threads: u32, jobs: usize) -> Result<StudyResources> {
+    ensure!(
+        threads >= 1,
+        "--threads must be at least 1 (every Study member runs at least one thread)"
+    );
+    ensure!(
+        jobs >= 1,
+        "--jobs must be at least 1 (a Study runs at least one candidate at a time)"
+    );
+    let jobs_u32 =
+        u32::try_from(jobs).context("--jobs is too large for a scheduler resource request")?;
+    let cpus = threads
+        .checked_mul(jobs_u32)
+        .context("remote Study resource request overflows the scheduler core count")?;
+    let resources = resources_from(opts, cpus, 1, 0)?;
+    // 显式 --cpus 以用户为准，但少于一个成员的线程数时那个成员本身就跑不满。
+    ensure!(
+        resources.cpus >= threads,
+        "--cpus ({}) must be at least --threads ({threads}): one Study member needs {threads} cores",
+        resources.cpus
+    );
+    Ok(StudyResources {
+        resources,
+        threads,
+        jobs,
+    })
+}
+
+/// 提交/预演报告里的 `resources` 段：写清总核、每候选线程与并发，以及调度器要的其他字段。
+fn resources_report(resources: &Resources, threads: u32, jobs: usize) -> Value {
+    json!({
+        "cpus": resources.cpus,
+        "cores_per_candidate": threads,
+        "concurrent_candidates": jobs,
+        "ranks": resources.ranks,
+        "nodes": resources.nodes,
+        "cores_per_node": resources.cores_per_node,
+        "memory_gb": resources.memory_gb,
+        "walltime": resources.walltime,
+        "partition": resources.partition,
+        "account": resources.account,
+    })
+}
+
+/// `--dry-run 1` 的报告；抽出来让测试能核对资源/线程/并发确实写进了给人看的输出。
+fn dry_run_report(
+    job_script: String,
+    remote_project: &str,
+    engine_id: &str,
+    spec: &Value,
+    resources: &StudyResources,
+) -> Value {
+    json!({
+        "dry_run": true,
+        "job_script": job_script,
+        "remote_project": remote_project,
+        "engine": engine_id,
+        "spec": spec,
+        "threads": resources.threads,
+        "jobs": resources.jobs,
+        "resources": resources_report(&resources.resources, resources.threads, resources.jobs),
+    })
+}
+
 /// `remote-study-run`：在服务器上重建并运行这个研究。
 pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
@@ -578,7 +654,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         .transpose()?
         .unwrap_or(manifest.spec.budget.jobs.max(1));
     let scheduler = parse_scheduler(opts, &ssh, &root)?;
-    let resources = resources_from(opts, threads.max(jobs as u32), 1, 0)?;
+    // 总核数默认 = 每候选线程 × 并发；显式 --cpus 由用户决定，但不能少于一个候选的线程数。
+    let resources = study_resources(opts, threads, jobs)?;
     // 路径尽量短：成员的重启文件路径要在 CoLM 的 256 字节以内（`<项目>/.colm/studies/<编号>/members/…`）。
     let remote_project = format!(
         "{root}/s/{}",
@@ -650,21 +727,19 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     }
     let job_spec = Spec {
         scheduler,
-        resources,
+        resources: resources.resources.clone(),
         name: sched::job_name(&format!("study-{}", manifest.id)),
     };
     if dry_run {
         discard_staging(&staging);
-        println!(
-            "{}",
-            json!({
-                "dry_run": true,
-                "job_script": job::job_script(&root, "JOBID", &body, &job_spec)?,
-                "remote_project": remote_project,
-                "engine": engine.id(),
-                "spec": spec,
-            })
+        let report = dry_run_report(
+            job::job_script(&root, "JOBID", &body, &job_spec)?,
+            &remote_project,
+            engine.id(),
+            &spec,
+            &resources,
         );
+        println!("{}", report);
         return Ok(());
     }
 
@@ -785,6 +860,9 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             "engine_uploaded": engine_uploaded,
             "bytes": bytes,
             "remote_inputs": remote_inputs,
+            "threads": resources.threads,
+            "jobs": resources.jobs,
+            "resources": resources_report(&resources.resources, resources.threads, resources.jobs),
         })
     );
     Ok(())
@@ -1537,11 +1615,54 @@ fn verify_result_tree(root: &Path, expected: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Reverify raw server outputs for every comparison, using the recorded job's fixed CLI.
+/// 服务器侧核验用到的 SSH 操作。
 ///
-/// 按研究类型分流：率定仍要服务器现场比较最优成员与基线（`study-verify-comparison`）；不确定性研究
-/// 没有最优成员，那条命令按设计会拒绝，改用服务器 `study-status` 报告的清单与本机下载树核对集合证据。
-pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+/// 抽成 trait 是为了让"远程取回的研究写回版本"这条路径能用假实现单测（现有测试没有 SSH mock）；
+/// 生产实现 [`Ssh`] 只做转发，行为与原先 `verified_comparison` 里直接调用完全一致。
+pub(crate) trait StudyRemote {
+    /// 核对作业目录里的研究/引擎身份。
+    fn verify_identity(&self, record: &StudyRecord) -> Result<()>;
+    fn job_status(&self, record: &StudyRecord) -> Result<job::Status>;
+    /// 服务器上研究目录（作业建好研究之后才有）。
+    fn study_root(&self, record: &StudyRecord) -> Result<Option<String>>;
+    fn study_status(&self, record: &StudyRecord, study_root: &str) -> Result<Value>;
+    /// 率定的服务器现场比较证据；不确定性研究没有这条命令。
+    fn comparison_evidence(&self, record: &StudyRecord, study_root: &str) -> Result<Value>;
+    /// 读服务器上的小文本文件（只用于核对样本/成员参数，不拉 history）。
+    fn read_text_file(&self, path: &str) -> Result<String>;
+}
+
+impl StudyRemote for Ssh {
+    fn verify_identity(&self, record: &StudyRecord) -> Result<()> {
+        self.run_ok(&cancel_identity_script(record)?).map(|_| ())
+    }
+
+    fn job_status(&self, record: &StudyRecord) -> Result<job::Status> {
+        job::status(self, &record.root, &record.job, 20)
+    }
+
+    fn study_root(&self, record: &StudyRecord) -> Result<Option<String>> {
+        remote_study_root(self, record)
+    }
+
+    fn study_status(&self, record: &StudyRecord, study_root: &str) -> Result<Value> {
+        remote_study_status(self, record, study_root)
+    }
+
+    fn comparison_evidence(&self, record: &StudyRecord, study_root: &str) -> Result<Value> {
+        server_comparison_evidence(self, record, study_root)
+    }
+
+    fn read_text_file(&self, path: &str) -> Result<String> {
+        self.run_ok(&format!("cat -- {}", quote(path)))
+            .with_context(|| format!("cannot read {path} on {}", self.host))
+    }
+}
+
+/// 复核一个远程研究需要先读的本机材料。
+fn verified_comparison_inputs(
+    study_dir: &Path,
+) -> Result<(study::spec::Manifest, StudyRecord, study::state::StudyState)> {
     let manifest = study::engine::status(study_dir)?;
     study::engine::verify_frozen_inputs(&manifest)?;
     let record = read_record(study_dir)?;
@@ -1549,41 +1670,527 @@ pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::Stud
         record.fetched_at.is_some(),
         "remote Study has not been fetched"
     );
-    let ssh = Ssh::new(&record.host)?;
-    ssh.run_ok(&cancel_identity_script(&record)?)?;
-    let status = job::status(&ssh, &record.root, &record.job, 1)?;
-    ensure!(
-        matches!(status.state, job::State::Finished { exit_code: 0 }),
-        "remote Study job did not finish successfully"
-    );
-    let remote_root = remote_study_root(&ssh, &record)?.context("remote job has no Study root")?;
     let state = study::checkpoint::load_latest::<study::state::StudyState>(
         &study_dir.join("checkpoints/state"),
     )?
     .context("Study has no fetched checkpoint")?
     .payload;
+    Ok((manifest, record, state))
+}
+
+/// 一次服务器侧核验的结论：服务器证据、服务器状态（已移植成本机路径）与可用的输入身份。
+struct RemoteVerification {
+    /// 率定比较时顺带算出的完整输入身份；不确定性走本机 `verified_inputs`，这里为空。
+    identity: Option<study::model::StudyInputIdentity>,
+    /// 服务器给出的证据（率定是 `study-verify-comparison` 的 schema 1，不确定性是取回同款 schema 2）。
+    evidence: Value,
+    /// 服务器状态；率定来自证据里的 `state`，不确定性来自本机检查点（已由证据核对与服务器一致）。
+    state: study::state::StudyState,
+    remote_root: String,
+}
+
+impl RemoteVerification {
+    /// 调用方要比较用的输入身份：率定已经算过，不确定性按本机冻结输入算。
+    fn input_identity(
+        &self,
+        manifest: &study::spec::Manifest,
+    ) -> Result<study::model::StudyInputIdentity> {
+        match &self.identity {
+            Some(identity) => Ok(identity.clone()),
+            None => study::model::verified_inputs(manifest),
+        }
+    }
+}
+
+/// 在原始输出所在的服务器上核验研究：作业成功、研究身份、成员集合/冻结输入、证据与结果树哈希。
+/// 不下载 history；失败按"服务器不可达 / 作业没成功 / 研究没建出来 / 证据不符"给可行动错误。
+fn remote_study_verification(
+    manifest: &study::spec::Manifest,
+    record: &StudyRecord,
+    state: &study::state::StudyState,
+    remote: &dyn StudyRemote,
+) -> Result<RemoteVerification> {
+    remote.verify_identity(record).with_context(|| {
+        format!(
+            "server {} is unreachable or its recorded job identity cannot be verified; \
+             check the connection and the remote Study record",
+            record.host
+        )
+    })?;
+    let status = remote.job_status(record).with_context(|| {
+        format!(
+            "cannot read the recorded job status on {}; check the connection before writing \
+             the Study member into a model version",
+            record.host
+        )
+    })?;
+    match status.state {
+        job::State::Finished { exit_code: 0 } => {}
+        job::State::Finished { exit_code } => bail!(
+            "the server job failed with exit code {exit_code}; its outputs cannot be written into \
+             a model version"
+        ),
+        _ => bail!(
+            "the server job has not finished; write its result into a model version only after it ends"
+        ),
+    }
+    let remote_root = remote.study_root(record)?.context(
+        "the server job did not create the Study (its log says why); there is nothing to write \
+         into a model version",
+    )?;
+    ensure!(
+        study_under_project(&remote_root, std::slice::from_ref(&record.remote_project)),
+        "remote Study root differs from its submitted project"
+    );
     match manifest.spec.kind {
         study::spec::StudyKind::Tuning => {
-            let evidence = server_comparison_evidence(&ssh, &record, &remote_root)?;
-            let identity = verified_evidence(&manifest, &record, &remote_root, &state, &evidence)?;
-            verify_result_tree(&study_dir.join("results"), &evidence["results_sha256"])?;
-            Ok(identity)
+            let evidence = remote
+                .comparison_evidence(record, &remote_root)
+                .context("cannot verify the original member outputs on the server")?;
+            let identity = verified_evidence(manifest, record, &remote_root, state, &evidence)?;
+            verify_result_tree(
+                &Path::new(&manifest.root).join("results"),
+                &evidence["results_sha256"],
+            )?;
+            let server_state: study::state::StudyState = serde_json::from_value(transplant_state(
+                evidence["state"].clone(),
+                &manifest.id,
+                &remote_root,
+                Path::new(&manifest.root),
+            ))
+            .context("the server Study state is not readable here")?;
+            Ok(RemoteVerification {
+                identity: Some(identity),
+                evidence,
+                state: server_state,
+                remote_root,
+            })
         }
         study::spec::StudyKind::Uncertainty => {
-            let remote = remote_study_status(&ssh, &record, &remote_root)?;
-            // 与本机检查点绑定的模型身份：取回时记的是服务器作业的修订，服务器上的研究不能换版本。
+            let server = remote
+                .study_status(record, &remote_root)
+                .context("cannot read the server Study status to verify the original outputs")?;
             let local_model = serde_json::to_value(
-                crate::study_version::pinned(study_dir)?.and_then(|pin| pin.model_revision),
+                crate::study_version::pinned(Path::new(&manifest.root))?
+                    .and_then(|pin| pin.model_revision),
             )?;
             ensure_model_identity(
                 &local_model,
                 &record.provenance["model_revision"],
-                &remote["model_version"]["model_revision"],
+                &server["model_version"]["model_revision"],
             )?;
-            uncertainty_fetch_evidence(&manifest, &remote_root, &remote, study_dir, &state)?;
-            study::model::verified_inputs(&manifest)
+            let evidence = uncertainty_fetch_evidence(
+                manifest,
+                &remote_root,
+                &server,
+                Path::new(&manifest.root),
+                state,
+            )?;
+            Ok(RemoteVerification {
+                identity: None,
+                evidence,
+                state: state.clone(),
+                remote_root,
+            })
         }
     }
+}
+
+/// Reverify raw server outputs for every comparison, using the recorded job's fixed CLI.
+///
+/// 按研究类型分流：率定仍要服务器现场比较最优成员与基线（`study-verify-comparison`）；不确定性研究
+/// 没有最优成员，那条命令按设计会拒绝，改用服务器 `study-status` 报告的清单与本机下载树核对集合证据。
+pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+    let (manifest, record, state) = verified_comparison_inputs(study_dir)?;
+    let ssh = Ssh::new(&record.host)?;
+    let verified = remote_study_verification(&manifest, &record, &state, &ssh)?;
+    verified.input_identity(&manifest)
+}
+
+/// 写回版本前的成员核验结果。
+///
+/// `lock` 是研究锁：本地分支持到写回结束（与原先 `verified_member` 的语义一致），远程分支也持有，
+/// 防止核验期间本机又启动一次研究运行。`evidence` 是可追溯证据（成员、站点、结果文件哈希、
+/// 结果树哈希、状态哈希、job id 与服务器）。
+pub(crate) struct VerifiedStudyMember {
+    pub(crate) manifest: study::spec::Manifest,
+    pub(crate) member: study::spec::MemberPlan,
+    pub(crate) objective: Option<f64>,
+    pub(crate) evidence: Value,
+    pub(crate) lock: Option<study::runner::StudyRunLock>,
+}
+
+// 研究锁不实现 Debug（里面有心跳线程句柄）；错误路径的 unwrap_err/assert 需要这个类型可打印。
+impl std::fmt::Debug for VerifiedStudyMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedStudyMember")
+            .field("manifest", &self.manifest)
+            .field("member", &self.member)
+            .field("objective", &self.objective)
+            .field("evidence", &self.evidence)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 统一的本机/远端成员核验入口：研究目录里有 `.colm-remote-study.json` 就走服务器核验，
+/// 否则走现有本地 `verified_member`（要求本机成员目录里有原始输出与评估证据）。
+///
+/// 远程分支绝不"本地目录不存在就跳过核验"：本机没有原始输出时只能以服务器记录为准，记录缺失或
+/// 不可读都明确报错。
+pub(crate) fn verified_study_member(
+    study_dir: &Path,
+    member_id: &str,
+) -> Result<VerifiedStudyMember> {
+    verified_study_member_with(study_dir, member_id, None)
+}
+
+pub(crate) fn verified_study_member_with(
+    study_dir: &Path,
+    member_id: &str,
+    injected: Option<&dyn StudyRemote>,
+) -> Result<VerifiedStudyMember> {
+    let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    if !study_dir.join(RECORD).is_file() {
+        return verified_study_member_local(&study_dir, member_id);
+    }
+    let record = read_record(&study_dir)
+        .context("cannot read this Study's remote submission record; fetch the Study again before writing its member into a model version")?;
+    match injected {
+        Some(remote) => verified_study_member_remote(&study_dir, member_id, &record, remote),
+        None => {
+            let ssh = Ssh::new(&record.host)
+                .with_context(|| format!("cannot connect to the server {}", record.host))?;
+            verified_study_member_remote(&study_dir, member_id, &record, &ssh)
+        }
+    }
+}
+
+fn verified_study_member_local(study_dir: &Path, member_id: &str) -> Result<VerifiedStudyMember> {
+    match verified_study_member_local_inner(study_dir, member_id) {
+        Ok(verified) => Ok(verified),
+        Err(error) if study_dir.join(EVIDENCE).is_file() => Err(error.context(
+            "this Study's original outputs are on a server, but its remote submission record \
+             (.colm-remote-study.json) is missing; fetch the Study again (or restore the record) \
+             before writing its member into a model version",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn verified_study_member_local_inner(
+    study_dir: &Path,
+    member_id: &str,
+) -> Result<VerifiedStudyMember> {
+    // 本地分支原样复用 runner::verified_member：研究锁、冻结输入、成员资格与原始输出证据都由它核对。
+    let (lock, manifest, member) = study::runner::verified_member(study_dir, member_id)?;
+    let state =
+        study::runner::status_state(study_dir)?.context("Study has no evaluated member state")?;
+    let objective = state
+        .candidates
+        .get(&member.id)
+        .and_then(|candidate| candidate.calibration);
+    let results_sha256 = crate::study_version::comparison_results_sha256(study_dir)?;
+    let (tasks, results) =
+        member_result_files(&manifest, &member, study_dir, &results_sha256, false)?;
+    let evidence = json!({
+        "schema": 1,
+        "location": {"kind": "local", "root": manifest.root},
+        "study_id": manifest.id,
+        "study_kind": manifest.spec.kind,
+        "member": {"id": member.id, "generation": member.generation, "baseline": member.baseline},
+        "sites": manifest.spec.base_cases,
+        "tasks": tasks,
+        "results": results,
+        "results_tree_sha256": tree_digest(&results_sha256),
+        "state_sha256": colm_kernel::sha256_hex(&serde_json::to_vec(&state)?),
+        "model_revision": serde_json::to_value(
+            crate::study_version::pinned(study_dir)?.and_then(|pin| pin.model_revision),
+        )?,
+    });
+    Ok(VerifiedStudyMember {
+        manifest,
+        member,
+        objective,
+        evidence,
+        lock: Some(lock),
+    })
+}
+
+fn verified_study_member_remote(
+    study_dir: &Path,
+    member_id: &str,
+    record: &StudyRecord,
+    remote: &dyn StudyRemote,
+) -> Result<VerifiedStudyMember> {
+    let lock = study::runner::StudyRunLock::acquire(study_dir)
+        .context("cannot lock the Study while verifying its member for writing back")?;
+    let manifest = study::engine::status(study_dir)?;
+    study::engine::verify_frozen_inputs(&manifest)?;
+    let member = study::runner::resolve_apply_member(study_dir, &manifest, member_id)?;
+    let state =
+        study::runner::status_state(study_dir)?.context("Study has no evaluated member state")?;
+    let server = remote_study_verification(&manifest, record, &state, remote)?;
+    // 服务器状态（已核对与本机检查点一致）里这个成员的任务必须全部成功；否则没有可写回的原始输出。
+    for site in &manifest.spec.base_cases {
+        let task = server
+            .state
+            .tasks
+            .get(&study::state::task_id(&member.id, site))
+            .with_context(|| {
+                format!(
+                    "the server Study has no task for member {} / {site}; its output is missing \
+                     on the server",
+                    member.id
+                )
+            })?;
+        ensure!(
+            task.status == study::state::TaskStatus::Succeeded,
+            "Study member {} did not succeed for {site} on the server ({}); its output cannot be \
+             written into a model version",
+            member.id,
+            task.reason.as_deref().unwrap_or("no reason recorded")
+        );
+    }
+    let objective = server
+        .state
+        .candidates
+        .get(&member.id)
+        .and_then(|candidate| candidate.calibration);
+    let hashes = member_result_hashes(&server.evidence, &manifest.spec.kind, &member.id)?;
+    let (tasks, results) = member_result_files(&manifest, &member, study_dir, &hashes, true)?;
+    verify_remote_member_parameters(&manifest, &member, &server.remote_root, remote)?;
+    let stored_evidence = stored_evidence_cross_check(study_dir, &server.evidence)?;
+    let local_model = serde_json::to_value(
+        crate::study_version::pinned(study_dir)?.and_then(|pin| pin.model_revision),
+    )?;
+    let results_tree_sha256 = match server.evidence["schema"].as_u64() {
+        Some(1) => {
+            let hashes: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(server.evidence["results_sha256"].clone())?;
+            json!(tree_digest(&hashes))
+        }
+        _ => server.evidence["results_tree_sha256"].clone(),
+    };
+    let basis = if manifest.spec.kind == study::spec::StudyKind::Tuning {
+        "server-study-verify-comparison"
+    } else {
+        "server-study-status+fetch-evidence"
+    };
+    let evidence = json!({
+        "schema": 1,
+        "location": {
+            "kind": "server",
+            "host": record.host,
+            "root": record.root,
+            "remote_project": record.remote_project,
+            "job": record.job,
+            "scheduler": record.scheduler,
+        },
+        "study_id": manifest.id,
+        "study_kind": manifest.spec.kind,
+        "member": {"id": member.id, "generation": member.generation, "baseline": member.baseline},
+        "sites": manifest.spec.base_cases,
+        "tasks": tasks,
+        "results": results,
+        "results_tree_sha256": results_tree_sha256,
+        "state_sha256": server.evidence["state_sha256"],
+        "model_revision": local_model,
+        "stored_evidence": stored_evidence,
+        "verification": {"basis": basis},
+    });
+    Ok(VerifiedStudyMember {
+        manifest,
+        member,
+        objective,
+        evidence,
+        lock: Some(lock),
+    })
+}
+
+/// 服务器证据里这个成员的结果文件内容哈希。率定证据覆盖整棵结果树；不确定性证据只按成员记。
+fn member_result_hashes(
+    evidence: &Value,
+    kind: &study::spec::StudyKind,
+    member_id: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let value = match kind {
+        study::spec::StudyKind::Tuning => evidence.get("results_sha256").cloned(),
+        study::spec::StudyKind::Uncertainty => evidence
+            .get("member_results")
+            .and_then(|members| members.get(member_id))
+            .and_then(|entry| entry.get("files"))
+            .cloned(),
+    };
+    let value = value.with_context(|| {
+        format!(
+            "the server evidence contains no verified result files for Study member {member_id}"
+        )
+    })?;
+    let hashes: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(value).context("the server result file hashes are not readable")?;
+    ensure!(
+        !hashes.is_empty(),
+        "the server evidence contains no verified result files for Study member {member_id}; \
+         the member output is missing on the server"
+    );
+    Ok(hashes)
+}
+
+/// 核对成员在本机下载的结果树：任务结果与评估身份都在证据里，且本机字节与证据哈希一致。
+/// 返回证据里可追溯的 `tasks`/`results` 片段。
+fn member_result_files(
+    manifest: &study::spec::Manifest,
+    member: &study::spec::MemberPlan,
+    study_dir: &Path,
+    hashes: &std::collections::BTreeMap<String, String>,
+    remote: bool,
+) -> Result<(Value, Value)> {
+    let mut tasks = serde_json::Map::new();
+    let mut results = serde_json::Map::new();
+    let results_root = study_dir.join("results");
+    for site in &manifest.spec.base_cases {
+        let task_rel = format!("tasks/{}/{site}.json", member.id);
+        let proof_rel = format!("provenance/{}/{site}.json", member.id);
+        let missing = || {
+            if remote {
+                format!(
+                    "the server evidence has no evaluation result for Study member {} / {site}; \
+                     the member output is missing on the server (fetch the Study again)",
+                    member.id
+                )
+            } else {
+                format!(
+                    "the Study has no evaluation result for member {} / {site}",
+                    member.id
+                )
+            }
+        };
+        let (task_sha, proof_sha) = match (hashes.get(&task_rel), hashes.get(&proof_rel)) {
+            (Some(task_sha), Some(proof_sha)) => (task_sha, proof_sha),
+            _ => bail!("{}", missing()),
+        };
+        let task_path = results_root.join(&task_rel);
+        let local_task_sha = crate::fingerprint::sha256_file(&task_path).with_context(|| {
+            format!(
+                "cannot read the fetched evaluation result {}; fetch the Study again",
+                task_path.display()
+            )
+        })?;
+        ensure!(
+            local_task_sha == *task_sha,
+            "the fetched evaluation result for member {} / {site} differs from the verified \
+             server bytes; fetch the Study again before writing the member into a model version",
+            member.id
+        );
+        let proof_path = results_root.join(&proof_rel);
+        let local_proof_sha = crate::fingerprint::sha256_file(&proof_path).with_context(|| {
+            format!(
+                "cannot read the fetched evaluation identity {}; fetch the Study again",
+                proof_path.display()
+            )
+        })?;
+        ensure!(
+            local_proof_sha == *proof_sha,
+            "the fetched evaluation identity for member {} / {site} differs from the verified \
+             server bytes; fetch the Study again before writing the member into a model version",
+            member.id
+        );
+        let proof: Value = serde_json::from_slice(&std::fs::read(&proof_path)?)
+            .with_context(|| format!("cannot parse the fetched evaluation identity {proof_rel}"))?;
+        ensure!(
+            proof["schema"] == 1,
+            "unsupported fetched evaluation identity schema"
+        );
+        ensure!(
+            proof["result"]["sha256"].as_str() == Some(task_sha.as_str()),
+            "the evaluation identity of member {} / {site} does not match its result file",
+            member.id
+        );
+        tasks.insert(site.clone(), json!({"status": "succeeded"}));
+        results.insert(
+            site.clone(),
+            json!({
+                "task": {"path": task_rel, "sha256": task_sha},
+                "proof": {"path": proof_rel, "sha256": proof_sha},
+            }),
+        );
+    }
+    Ok((Value::Object(tasks), Value::Object(results)))
+}
+
+/// 成员的参数必须与服务器评估时用的样本文件逐字节一致（只读一个小 CSV，不碰 history）。
+fn verify_remote_member_parameters(
+    manifest: &study::spec::Manifest,
+    member: &study::spec::MemberPlan,
+    remote_root: &str,
+    remote: &dyn StudyRemote,
+) -> Result<()> {
+    let file = member_sample_file(&manifest.spec, member);
+    let local_path = Path::new(&manifest.root).join("samples").join(&file);
+    let local = std::fs::read(&local_path).with_context(|| {
+        format!(
+            "cannot read the frozen sample file {}; fetch the Study again",
+            local_path.display()
+        )
+    })?;
+    let remote_path = format!("{remote_root}/samples/{file}");
+    let remote_text = remote.read_text_file(&remote_path).with_context(|| {
+        format!("cannot read the server's sample file {file} to compare the member parameters")
+    })?;
+    ensure!(
+        remote_text.as_bytes() == local.as_slice(),
+        "the member parameters in this Study's samples differ from the sample file the server \
+         evaluated; fetch the Study again before writing the member into a model version"
+    );
+    Ok(())
+}
+
+/// 成员参数所在的样本文件。DE 的初代在 `g000000.csv`，后续代在 `g%06d.csv`；其它方法是 `design.csv`。
+fn member_sample_file(spec: &study::spec::StudySpec, member: &study::spec::MemberPlan) -> String {
+    if member.generation > 0 {
+        format!("g{:06}.csv", member.generation)
+    } else if spec.method == study::spec::StudyMethod::DifferentialEvolution {
+        "g000000.csv".into()
+    } else {
+        "design.csv".into()
+    }
+}
+
+/// 与取回时写下的证据交叉核对：服务器研究在上次取回后不能变过，否则本机结果不是它现在的输出。
+fn stored_evidence_cross_check(study_dir: &Path, fresh: &Value) -> Result<&'static str> {
+    let path = study_dir.join(EVIDENCE);
+    if !path.is_file() {
+        return Ok("absent");
+    }
+    let stored: Value = serde_json::from_slice(&std::fs::read(&path)?)
+        .context("cannot parse the recorded remote Study evidence; fetch the Study again")?;
+    ensure!(
+        stored["schema"] == fresh["schema"],
+        "the recorded fetch evidence has a different format from the server's current evidence; \
+         fetch the Study again before writing its member into a model version"
+    );
+    for key in ["root", "state_sha256"] {
+        ensure!(
+            stored[key] == fresh[key],
+            "the recorded fetch evidence differs from the server's current evidence ({key}); \
+             the Study changed since it was fetched — fetch it again before writing its member \
+             into a model version"
+        );
+    }
+    match fresh["schema"].as_u64() {
+        Some(1) => ensure!(
+            stored["results_sha256"] == fresh["results_sha256"],
+            "the recorded fetch evidence's result tree differs from the server's current verified \
+             results; fetch the Study again before writing its member into a model version"
+        ),
+        Some(2) => ensure!(
+            stored["results_tree_sha256"] == fresh["results_tree_sha256"],
+            "the recorded fetch evidence's result tree differs from the server's current verified \
+             results; fetch the Study again before writing its member into a model version"
+        ),
+        _ => bail!("unsupported remote Study evidence schema"),
+    }
+    Ok("matched")
 }
 
 /// `remote-study-status`：作业状态，加上服务器上研究的进度（建好之后）。

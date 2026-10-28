@@ -2381,6 +2381,15 @@ struct StudyMemberImport<'a> {
 /// `--preview 1`：只给出这个成员会带进来的产物与它的目标函数值，不改草稿（版本页先列出来让人勾选）。
 /// `--only`：只导入勾选的那些参数，JSON 数组，每项 `[parameter_id, scheme 或 null, index 或 null]`。
 fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
+    import_study_with(store, opts, None)
+}
+
+/// `import_study` 的可注入版本：远程取回的研究要经 SSH 核验原始输出，测试用假 `StudyRemote` 注入。
+fn import_study_with(
+    store: &Registry,
+    opts: &Opts,
+    remote: Option<&dyn crate::remote_cmd::remote_study::StudyRemote>,
+) -> Result<serde_json::Value> {
     let draft = store.draft(&opts.need_str("--model-id")?)?;
     let preview = opts.get("--preview").is_some_and(|v| v == "1");
     let expected = if preview {
@@ -2398,23 +2407,62 @@ fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
         .get("--only")
         .map(|text| serde_json::from_str(&text).context("--only must be a JSON array"))
         .transpose()?;
-    let (manifest, member, objective) = {
-        // 与研究页"存成新版本"同一组校验：输入没被改过、成员确实算完且有结果证据。
-        let (_lock, manifest, member) = crate::study::runner::verified_member(&study, &member_id)?;
-        let objective = crate::study::runner::status_state(&study)?
-            .and_then(|state| state.candidates.get(&member.id).and_then(|c| c.calibration));
-        (manifest, member, objective)
-    };
+    // 与研究页"存成新版本"同一组校验：输入没被改过、成员确实算完且有结果证据。本地研究走本机成员目录，
+    // 远程取回的研究在原始输出所在的服务器上核验（不拉 history）。
+    let verified = match remote {
+        Some(remote) => crate::remote_cmd::remote_study::verified_study_member_with(
+            &study,
+            &member_id,
+            Some(remote),
+        ),
+        None => crate::remote_cmd::remote_study::verified_study_member(&study, &member_id),
+    }
+    .with_context(|| {
+        format!(
+            "cannot verify the Study member for writing it into the model: {}",
+            study.display()
+        )
+    })?;
+    import_study_verified(
+        store,
+        draft,
+        &study,
+        verified,
+        preview,
+        expected,
+        only.as_deref(),
+    )
+}
+
+/// 已经通过成员核验后的写入：参数/网络/联合都走这里。测试可注入一个核验结果，不必复刻整个研究目录。
+fn import_study_verified(
+    store: &Registry,
+    draft: ModelDraft,
+    study: &Path,
+    verified: crate::remote_cmd::remote_study::VerifiedStudyMember,
+    preview: bool,
+    expected: u64,
+    only: Option<&[ChosenParameter]>,
+) -> Result<serde_json::Value> {
+    let crate::remote_cmd::remote_study::VerifiedStudyMember {
+        manifest,
+        member,
+        objective,
+        evidence: _evidence,
+        lock,
+    } = verified;
+    // 研究锁要拿住到草稿保存完成：核验与写入之间本机不能再启动一次研究运行。
+    let _lock = lock;
     import_study_member(
         store,
         draft,
         &StudyMemberImport {
-            study: &study,
+            study,
             manifest: &manifest,
             member: &member,
             objective,
             preview,
-            only: only.as_deref(),
+            only,
             expected_generation: expected,
         },
     )
@@ -4390,6 +4438,40 @@ mod study_import_tests {
             !staging.exists() || std::fs::read_dir(&staging).unwrap().next().is_none(),
             "a failed import must remove its staging directory"
         );
+        assert!(!fixture.study.join("run.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 远程取回的研究走统一成员核验后，CLI 的写入层（参数记录、草稿保存）照常工作。
+    /// 核验本身（服务器/本机分流、证据不符）在 remote_study_tests 里用假 SSH 覆盖，这里只注入核验结果。
+    #[test]
+    fn a_verified_remote_member_is_written_into_the_draft() {
+        let root = std::env::temp_dir().join(unique_id());
+        let fixture = ImportFixture::new(&root, study_spec(vec![sampled_parameter()], None));
+        let verified = crate::remote_cmd::remote_study::VerifiedStudyMember {
+            manifest: fixture.manifest.clone(),
+            member: member(BTreeMap::from([("DEF_TUNING_CNFAC".to_owned(), 0.5)])),
+            objective: Some(0.42),
+            evidence: serde_json::json!({
+                "location": {"kind": "server", "host": "server", "job": "study-1"}
+            }),
+            lock: None,
+        };
+        let value = import_study_verified(
+            &fixture.store,
+            fixture.draft.clone(),
+            &fixture.study,
+            verified,
+            false,
+            fixture.draft.generation,
+            None,
+        )
+        .unwrap();
+        assert_eq!(value["kind"], "parameters");
+        assert_eq!(value["parameters"], 1);
+        assert_eq!(value["member"], "m000001");
+        let draft = fixture.store.draft("custom").unwrap();
+        assert_eq!(draft.overlay.parameters.len(), 1);
         assert!(!fixture.study.join("run.lock").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
