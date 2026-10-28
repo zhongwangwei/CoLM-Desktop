@@ -283,6 +283,8 @@ fn assistant_ui_event(
                     | "result-fetch"
                     | "resource-build"
                     | "resource-save"
+                    | "resource-save-case"
+                    | "resource-delete-case"
                     | "resource-local-data-save"
                     | "resource-workspace-submit"
                     | "resource-workspace-fetch"

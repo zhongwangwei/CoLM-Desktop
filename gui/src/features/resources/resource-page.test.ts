@@ -104,6 +104,17 @@ function harness(
         return true;
       case 'remote_ssh_hosts':
         return ['7920land', '7920mp'];
+      case 'remote_cases':
+        return [];
+      case 'remote_case_save':
+        return {
+          id: 'case-1',
+          name: String(args?.name),
+          server: args?.server,
+          saved_at: 1,
+        };
+      case 'remote_case_delete':
+        return true;
       case 'remote_job_record':
         return records[String(args?.case)] ?? null;
       case 'case_runs':
@@ -825,6 +836,7 @@ test('only visible configuration fields and selected maintenance actions enter t
   assert.deepEqual(
     contract.fields.map((field) => field.id),
     [
+      'resource-name',
       'resource-host',
       'resource-username',
       'resource-root',
@@ -1333,4 +1345,21 @@ test('a configuration refresh cannot overwrite unsaved local default paths', asy
     '/edited/projects',
   );
   assert.match(page.guard()!, /本机默认路径/);
+});
+
+test('a server can be stored inside the app as a reusable case', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-name', '摆渡船');
+  const contract = await page.action('resource-save-case');
+  const saved = page.calls.find((call) => call.command === 'remote_case_save');
+  assert.equal(saved?.args?.name, '摆渡船');
+  assert.equal((saved?.args?.server as resource.Server).host, '7920land');
+  const preset = contract.fields.find((field) => field.id === 'resource-preset');
+  assert.ok(
+    preset?.options?.some((option) => String(option.label).includes('案例：摆渡船')),
+    'the saved case appears in the cluster preset list',
+  );
+  // 保存结果与案例下拉项都已出现；案例不带本机凭据（后端负责清掉，这里核对请求没带密码字段）。
+  assert.ok(!JSON.stringify(saved?.args).includes('password'));
 });

@@ -11,6 +11,9 @@ import {
   partitionLabel,
   SERVER_PRESETS,
   applyServerPreset,
+  applyServerCase,
+  presetForServer,
+  serverDisplayName,
   recognisedPreset,
   localDefaults,
   localPathSignature,
@@ -409,4 +412,52 @@ test('discarding local path edits restores the four directories and keeps rememb
     runtime_dir: '/saved/runtime',
     forcing_dir: '/saved/forcing',
   });
+});
+
+test('servers without a display name take their cluster preset name, not the host alias', () => {
+  // bd / tianhe 这类 SSH 别名看不出是哪台机器；按存下来的调度设置认出集群，用预设名显示。
+  const bd = {
+    ...newServer(),
+    host: 'bd',
+    scheduler: 'lsf',
+    partition: 'normal',
+    cores_per_node: 48,
+  };
+  assert.equal(presetForServer(bd)?.id, 'baiduchuan');
+  assert.equal(serverDisplayName(bd), '摆渡船（LSF）');
+  assert.equal(serverDisplayName(bd, true), 'Baiduchuan (LSF)');
+  const tianhe = {
+    ...newServer(),
+    host: 'tianhe',
+    scheduler: 'slurm',
+    partition: 'deimos',
+    cores_per_node: 64,
+  };
+  assert.equal(presetForServer(tianhe)?.id, 'tianhe-xingyi');
+  assert.equal(serverDisplayName(tianhe), '天河·星逸（Slurm）');
+  // 用户自己填的显示名称优先；认不出的服务器退回 host。
+  assert.equal(serverDisplayName({ ...bd, name: ' 摆渡船 ' }), '摆渡船');
+  assert.equal(serverDisplayName({ ...newServer(), host: 'other' }), 'other');
+});
+
+test('a saved case brings non-sensitive settings but keeps local credentials', () => {
+  const current = { ...newServer(), host: 'new', auth: 'password', identity_file: '/key' };
+  const saved = {
+    ...newServer(),
+    host: 'bd',
+    username: 'zhwei',
+    root: '/tera11/zhwei/CoLM',
+    scheduler: 'lsf',
+    partition: 'normal',
+    cores_per_node: 48,
+    auth: 'config',
+    identity_file: '',
+  };
+  const applied = applyServerCase(current, saved);
+  assert.equal(applied.host, 'bd');
+  assert.equal(applied.root, '/tera11/zhwei/CoLM');
+  assert.equal(applied.scheduler, 'lsf');
+  // 案例里没有本机凭据：认证方式与私钥路径保留当前值。
+  assert.equal(applied.auth, 'password');
+  assert.equal(applied.identity_file, '/key');
 });

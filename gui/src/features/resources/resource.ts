@@ -3,6 +3,14 @@ import type { DataDefaults, KindPaths, RunState, Server } from '../../lib/types'
 import { remoteStudyReply, remoteStudyPermissions } from '../studies/remote-study';
 export type { Server } from '../../lib/types';
 
+/** 软件里保存的服务器配置案例：默认只含非敏感配置（认证方式与私钥路径由后端清空）。 */
+export type ServerCase = {
+  id: string;
+  name: string;
+  server: Server;
+  saved_at: number;
+};
+
 /** 本机默认数据路径里可以编辑的四个目录；`kind_paths` 由后端即时维护，不参与未保存判断。 */
 export const localPathKeys = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'] as const;
 export type LocalPathKey = (typeof localPathKeys)[number];
@@ -34,6 +42,7 @@ export function localPathValues(local: Partial<DataDefaults>): Pick<DataDefaults
 }
 export const newServer = (): Server => ({
   host: '',
+  name: '',
   username: '',
   port: 0,
   auth: 'config',
@@ -162,6 +171,41 @@ export function recognisedPreset(probe: ResourceCheck['probe'] | undefined): Ser
         preset.match.queues.every((queue) => queues.has(queue)),
     ) ?? null
   );
+}
+
+/**
+ * 按保存下来的调度设置认出集群预设：只看调度系统、分区和每节点核数，不看地址。
+ * 用来给没填显示名称的服务器一个有意义的名字（bd、tianhe → 摆渡船（LSF）、天河·星逸（Slurm））。
+ */
+export function presetForServer(
+  server: Pick<Server, 'scheduler' | 'partition' | 'cores_per_node'>,
+): ServerPreset | null {
+  return (
+    SERVER_PRESETS.find((preset) => {
+      const fields = preset.fields;
+      if (fields.scheduler !== server.scheduler || !fields.partition) return false;
+      if (fields.partition !== server.partition) return false;
+      return !fields.cores_per_node || fields.cores_per_node === server.cores_per_node;
+    }) ?? null
+  );
+}
+
+/** 服务器在界面上的名字：用户填的显示名称 → 认出的集群预设名 → host。 */
+export function serverDisplayName(
+  server: Pick<Server, 'host' | 'name' | 'scheduler' | 'partition' | 'cores_per_node'>,
+  en = false,
+): string {
+  const name = server.name?.trim();
+  if (name) return name;
+  const preset = presetForServer(server);
+  return preset ? (en ? preset.en : preset.zh) : server.host;
+}
+
+/**
+ * 套用保存的案例：非敏感配置整套带过来，认证方式与私钥路径保留本机当前的（案例里没有凭据）。
+ */
+export function applyServerCase(server: Server, saved: Server): Server {
+  return { ...server, ...saved, auth: server.auth, identity_file: server.identity_file };
 }
 
 const PRESET_DATA_KEYS = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'] as const;
