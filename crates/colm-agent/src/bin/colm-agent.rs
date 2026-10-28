@@ -319,6 +319,19 @@ fn session_limit_error(
     None
 }
 
+/// Configure 建立的可信网络上下文：GitHub 网络权限来自用户“联网”设置
+/// （[`Inbound::Configure::web_search`]），Builtin 与外部后端走同一路径。
+///
+/// 注意这里**不**设置 `web`：DeepSeek 搜索客户端只为内置后端按轮挂载；外部后端
+/// （Codex/Claude Code）用自带搜索，`web` 恒为 None。历史工具的离线判断只能看
+/// `github_network`，否则外部后端的 PR 查询会被误判成离线。
+fn configure_network(web_search: bool) -> ToolContext {
+    ToolContext {
+        github_network: web_search,
+        ..ToolContext::default()
+    }
+}
+
 /// 面板头部显示的模型名：外部后端显示后端名，选了模型时再加上模型名。
 fn display_model(backend: BackendKind, builtin: &str, external: &ExternalChoice) -> String {
     let name = match backend {
@@ -838,6 +851,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             .map(|root| root.join("history"))
                             .unwrap_or_default(),
                         github_token,
+                        ..configure_network(web_search)
                     },
                     approval,
                     web_search: web_search && backend != BackendKind::Opencode,
@@ -1550,6 +1564,18 @@ mod tests {
             .unwrap()
             .contains("200000 of 200000"));
         assert!(session_limit_error(10_000, 10_000_000, 0, 0).is_none());
+    }
+
+    #[test]
+    fn github_network_permission_follows_the_configure_web_setting_for_every_backend() {
+        // Configure 的真实构造路径用 configure_network 填这个字段：外部后端没有 WebAccess，
+        // 但用户联网设置必须同样生效；关闭时的零 HTTP 行为由工具层的 Builtin/外部矩阵测试覆盖。
+        let external_like = configure_network(true);
+        assert!(external_like.github_network);
+        assert!(external_like.web.is_none());
+        let offline = configure_network(false);
+        assert!(!offline.github_network);
+        assert!(offline.web.is_none());
     }
 
     #[test]

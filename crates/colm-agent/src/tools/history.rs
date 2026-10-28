@@ -136,6 +136,12 @@ fn source_context(repository: &str, model: Option<&ModelContext>, source: Option
         });
     }
     match source {
+        // `--source app` 是 CLI 的别名：解析到可核验的应用检出，不是模型给的任意路径。
+        Some("app") => json!({
+            "kind": "app",
+            "source": "app",
+            "note": "the CLI resolved --source app to the verifiable application checkout",
+        }),
         Some(source) => json!({"kind":"workspace","source":source,"selected_model_applies":false}),
         None => json!({
             "kind": "app",
@@ -152,7 +158,7 @@ impl Tool for SourceHistory {
         "source_history"
     }
     fn description(&self) -> &'static str {
-        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
+        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory; without a selected model the application source is resolved by the CLI), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -214,6 +220,11 @@ impl Tool for SourceHistory {
                     .context("frozen model source path is not UTF-8")?
                     .to_owned(),
             );
+        } else if repository == "selected" && source.is_none() {
+            // 没有冻结模型时 selected 指应用自身源码。显式给 CLI 的 `app` 别名（由 CLI 解析成
+            // 可核验检出），这样 source_history 找到的本地提交能由 commit_details(selected)
+            // 从同一来源继续读取（审查 H05 的完整链路），而不是两边各自猜来源。
+            source = Some("app".to_owned());
         }
 
         let mut cli: Vec<String> = vec![
@@ -274,13 +285,13 @@ impl Tool for CommitDetails {
         "commit_details"
     }
     fn description(&self) -> &'static str {
-        "Show one commit of a verified repository (desktop or colm_upstream): full 40-hex SHA, parents, author and committer with their Git times (not local edit times), the complete message, and the commit-vs-parent diff with old/new code around a symbol or path (truncated honestly). A merge commit says which parent it compares with. The selected frozen model is a source, not a repository: use source_history to find its commits, then query the repository those commits belong to. A commit message is 'documented' motivation only where it explicitly gives one; otherwise it is not_recorded, and code analysis is only an inference."
+        "Show one commit: full 40-hex SHA, parents, author and committer with their Git times (not local edit times), the complete message, and the commit-vs-parent diff with old/new code around a symbol or path (truncated honestly). A merge commit says which parent it compares with. repository=selected reads the current selected source: the verified frozen model's source directory (its local/not-yet-pushed commits are readable here) or, without a selected model, the application source. The source path is never taken from model input. repository=desktop|colm_upstream must match the repository the SHA belongs to; a SHA that only exists in a local selected source has no public GitHub PR association. A commit message is only a candidate for motivation; 'documented' requires an explicit reason sentence with its source, and code analysis is only an inference."
     }
     fn parameters(&self) -> Value {
         object(json!({
             "repository": repository_arg(
                 &["desktop", "colm_upstream", "selected"],
-                "verified repository the SHA belongs to; selected is rejected because a frozen model source is not a repository identity",
+                "where to read the commit: desktop or colm_upstream (verified registered repository) or selected (the current selected source, frozen model/workspace or application source; the path comes from trusted configuration, not input)",
             ),
             "sha": string("full 40-character lowercase hexadecimal commit SHA"),
             "symbol": nullable("string", "variable/function to keep in the diff hunks, or null for the whole commit"),
@@ -293,13 +304,6 @@ impl Tool for CommitDetails {
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
         let history_root = history_root(ctx)?;
         let repository = req_str(args, "repository")?;
-        let repository = match repository {
-            "desktop" | "colm_upstream" => repository,
-            "selected" => bail!(
-                "commit_details needs a verified repository: use source_history to find the selected model's commits, then query desktop or colm_upstream"
-            ),
-            other => bail!("unknown repository {other}: expected desktop or colm_upstream"),
-        };
         let sha = full_sha("sha", req_str(args, "sha")?)?;
         let symbol = opt_str(args, "symbol")
             .map(|value| checked("symbol", value))
@@ -313,9 +317,32 @@ impl Tool for CommitDetails {
             history_root.into(),
             "--repository".into(),
             repository.into(),
-            "--sha".into(),
-            sha,
         ];
+        // selected 的真实来源只能来自宿主 Configure：模型输入里没有 source 目录参数，
+        // 避免模型把任意路径冒充“当前模型源码”。无模型时交给 CLI 用应用源码（`app`）。
+        let selected_source = match repository {
+            "desktop" | "colm_upstream" => None,
+            "selected" => {
+                let (source, model) = match &ctx.model_context {
+                    Some(model) => {
+                        model.verify_source(ctx)?;
+                        let source = model
+                            .source_dir
+                            .to_str()
+                            .context("frozen model source path is not UTF-8")?
+                            .to_owned();
+                        (source, Some(model))
+                    }
+                    None => ("app".to_owned(), None),
+                };
+                cli.extend(["--source".to_owned(), source.clone()]);
+                Some((source, model))
+            }
+            other => {
+                bail!("unknown repository {other}: expected desktop, colm_upstream or selected")
+            }
+        };
+        cli.extend(["--sha".to_owned(), sha]);
         if let Some(symbol) = symbol {
             cli.extend(["--symbol".to_owned(), symbol]);
         }
@@ -323,7 +350,23 @@ impl Tool for CommitDetails {
             cli.extend(["--path".to_owned(), path]);
         }
         let refs: Vec<&str> = cli.iter().map(String::as_str).collect();
-        ctx.cli_json(&refs)
+        let mut value = ctx.cli_json(&refs)?;
+        if let Some((source, model)) = selected_source {
+            if !value.is_object() {
+                bail!("colm-cli history-commit did not return a JSON object");
+            }
+            // 可信块写明这次 selected 详情读的是哪个来源；冻结模型另附记录身份，
+            // 便于上层把“本地提交详情”和“当前模型”绑在一起，而不是看模型自述。
+            value["source_context"] = match model {
+                Some(model) => json!({
+                    "kind": "selected_source",
+                    "source": source,
+                    "model": {"version": model.model["version"], "code": model.model["code"]},
+                }),
+                None => json!({"kind": "selected_source", "source": source}),
+            };
+        }
+        Ok(value)
     }
 }
 
@@ -335,7 +378,7 @@ impl Tool for CommitPullRequests {
         "commit_pull_requests"
     }
     fn description(&self) -> &'static str {
-        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time, reason evidence (documented from the body/discussion, else not_recorded, unavailable when GitHub could not be read) and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input. With networking off it reads the offline cache only and never sends HTTP; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. Call commit_details first for the local Git evidence."
+        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. reason is NOT a motivation verdict: status=unchecked means raw evidence_candidates (pull body / discussion excerpts with author, URL and coverage) exist and the upper layer must quote an explicit sentence before calling a reason documented; not_recorded means the requested scope was read completely and contains no candidate; unavailable means the discussion was not read, failed or was truncated. Template bodies and bot/courtesy comments are candidates only. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input; a selected local-only commit has no verified GitHub repository here. GitHub networking follows the user's network setting (independent of the backend's search client): when it is off the tool reads the offline cache only and never sends HTTP, even with refresh=true; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. Call commit_details first for the local Git evidence."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -358,13 +401,18 @@ impl Tool for CommitPullRequests {
         let (owner, repo) = match repository {
             "desktop" => (DESKTOP_OWNER, DESKTOP_REPO),
             "colm_upstream" => (UPSTREAM_OWNER, UPSTREAM_REPO),
+            "selected" => bail!(
+                "commit_pull_requests needs a verified GitHub repository: a selected local commit has no owner/repo here, so its GitHub PR association is unavailable unless the same commit belongs to desktop or colm_upstream; use commit_details repository=selected for the local Git evidence"
+            ),
             other => bail!("unknown repository {other}: expected desktop or colm_upstream"),
         };
         let sha = full_sha("sha", req_str(args, "sha")?)?;
         let refresh = optional_bool(args, "refresh")?;
         let include_discussion = optional_bool(args, "include_discussion")?;
-        // 联网设置关掉时只读缓存；不允许工具悄悄 fetch 或走网络补齐历史。
-        let offline = ctx.web.is_none();
+        // GitHub 网络权限是宿主可信开关（用户联网设置），不能用 ctx.web 判断：外部后端
+        // （Codex/Claude Code）没有 DeepSeek WebAccess，但联网设置同样要生效。
+        // 关闭时只读缓存，refresh=true 也不发 HTTP。
+        let offline = !ctx.github_network;
         let client = GithubClient::new(
             ctx.history_root.join("github"),
             ctx.github_token.clone(),
@@ -380,7 +428,7 @@ impl Tool for CommitPullRequests {
             "url": format!("https://github.com/{owner}/{repo}"),
         });
         value["network"] = json!({
-            "enabled": !offline,
+            "enabled": ctx.github_network,
             "offline": offline,
             "token_present": ctx.github_token.as_deref().is_some_and(|token| !token.trim().is_empty()),
         });

@@ -2,7 +2,8 @@
 //!
 //! 为什么单独一层：`commit_details` 能从本地 Git 拿到“改了什么、作者/提交时间”，但
 //! “为什么改”只在 GitHub 的 PR 正文与讨论里。这里只做一件事——把**已核验的
-//! owner/repo + commit SHA** 换成带着出处的 PR 列表与理由摘录，并把结果按仓库/SHA
+//! owner/repo + commit SHA** 换成带着出处的 PR 列表与理由原文候选（是否 documented
+//! 由上层在引用明确原因句时判定），并把结果按仓库/SHA
 //! 缓存下来供离线使用。检索、变体追踪、跨仓库引入判断都不在这里。
 //!
 //! 关键取舍（都按任务书与 `COLM-Variable-History-Implementation-Prompt.txt` 第四.C、五节）：
@@ -31,7 +32,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 /// 结果 JSON 的 schema 版本。字段变化必须升版本，工具层/缓存都按它判读。
-const SCHEMA_VERSION: u64 = 1;
+/// v2：`reason` 从“自动 documented 的结论”改为原文候选 + 覆盖范围（审查 H03）。
+const SCHEMA_VERSION: u64 = 2;
 
 /// 生产环境的 GitHub REST API 根。
 const DEFAULT_API_BASE: &str = "https://api.github.com";
@@ -62,8 +64,9 @@ const MAX_PR_BODY_CHARS: usize = 8_000;
 const MAX_REASON_EXCERPT_CHARS: usize = 500;
 /// 单条评论摘录上限（字符）。任务书要求 ≤1000。
 const MAX_COMMENT_BODY_CHARS: usize = 1_000;
-/// 缓存内部 JSON 的 schema 版本。
-const CACHE_SCHEMA_VERSION: u64 = 1;
+/// 缓存内部 JSON 的 schema 版本。v2 起缓存里的 `reason` 是新候选结构；
+/// 旧缓存（自动 documented 语义）必须当作未命中重查，不能把旧结论当证据返回。
+const CACHE_SCHEMA_VERSION: u64 = 2;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -315,10 +318,11 @@ impl GithubClient {
         }
         let mut comments_complete = true;
         if !include_discussion {
-            // 不读讨论也要给理由三态：PR 正文本身就是 documented 的证据，
-            // 不能因为没请求 discussion 就把“有正文”也标成 not_recorded。
+            // 不读讨论：正文有文字只给 unchecked 候选；正文为空时 unavailable
+            // （原因可能就在没读的讨论里，不能写 not_recorded）。
             for pull in pulls.iter_mut() {
-                let reason = build_reason(pull, false, None, true);
+                // 没请求讨论：discussion_requested/read/complete 都是 false。
+                let reason = build_reason(pull, false, None, false);
                 pull["reason"] = reason;
             }
         }
@@ -759,6 +763,8 @@ fn build_pull(repository: Repository<'_>, item: &Value, number: u64) -> Value {
         "owner_repo": repository.slug(),
         "url": url,
         "title": item.get("title").and_then(Value::as_str).unwrap_or_default(),
+        // PR 作者是原文候选证据的一部分（`reason.evidence_candidates[].author`）。
+        "author": item.pointer("/user/login").and_then(Value::as_str),
         "state": state,
         "merged_at_unix_ms": item
             .get("merged_at")
@@ -768,17 +774,40 @@ fn build_pull(repository: Repository<'_>, item: &Value, number: u64) -> Value {
         "head_sha": item.pointer("/head/sha").and_then(Value::as_str),
         "base_ref": item.pointer("/base/ref").and_then(Value::as_str),
         "comments": {"complete": false, "excerpts": []},
-        "reason": {"status": "not_recorded", "basis": Value::Null, "excerpt": Value::Null},
+        // 真实理由在 assemble_pulls 里按 include_discussion 覆盖；这里先给出合法骨架。
+        "reason": empty_reason(),
         "evidence_id": format!("github:{}#{number}", repository.slug()),
     })
 }
 
-/// 理由三态（任务书第五节）：
-/// 1. `documented`：PR 正文或具体讨论里有作者写下的话，附摘录与 basis；
-/// 2. `not_recorded`：读到了对应资料，但里面没有原因；
-/// 3. `unavailable`：讨论没读（未请求/失败/超上限），不能断言“没有记录原因”。
+/// PR 原因的**原文候选**，不是动机结论（审查 H03）。
 ///
-/// commit message 不在本模块的候选范围内（它是 `commit_details` 的证据，不属于 PR 理由）。
+/// 为什么不再自动 documented：非空正文、第一条评论只说明“有文字”，模板 checklist、
+/// 机器人“CI passed”、礼貌“Thanks!”都能满足；把这种结构标签当作者动机，会让上层模型
+/// 复述一个没有证据的因果。这里只保留带出处的原文（正文/讨论片段 + 作者/URL/范围）与
+/// 覆盖范围，由上层在引用明确原因句时才可称 documented。
+///
+/// status：
+/// - `unchecked`：有原文候选，但没有判定（本层不做字数/关键词式的动机判断）；
+/// - `not_recorded`：请求范围完整读完且没有任何原文候选；
+/// - `unavailable`：讨论未请求/读取失败/截断，不能断言“没有记录原因”。
+///
+/// 中文原文按字符截断保留，不做翻译或摘要。
+fn empty_reason() -> Value {
+    json!({
+        "status": "unavailable",
+        "basis": Value::Null,
+        "excerpt": Value::Null,
+        "evidence_candidates": [],
+        "coverage": {
+            "body_read": false,
+            "discussion_requested": false,
+            "discussion_read": false,
+            "discussion_complete": false,
+        },
+    })
+}
+
 fn build_reason(
     pull: &Value,
     include_discussion: bool,
@@ -786,39 +815,73 @@ fn build_reason(
     discussion_complete: bool,
 ) -> Value {
     let body = pull["body"].as_str().unwrap_or_default().trim();
+    let mut candidates = Vec::new();
     if !body.is_empty() {
-        return json!({
-            "status": "documented",
-            "basis": "pull_body",
+        candidates.push(json!({
+            "source": "pull_body",
+            "author": pull.get("author"),
+            "url": pull.get("url"),
+            "scope": "body",
             "excerpt": truncate_chars(body, MAX_REASON_EXCERPT_CHARS),
-        });
+        }));
     }
-    if !include_discussion {
-        return json!({"status": "not_recorded", "basis": Value::Null, "excerpt": Value::Null});
-    }
-    let first_comment = comments
+    if let Some(excerpts) = comments
         .and_then(|comments| comments.get("excerpts"))
         .and_then(Value::as_array)
-        .and_then(|excerpts| {
-            excerpts
-                .iter()
-                .find_map(|excerpt| excerpt.get("body").and_then(Value::as_str))
-        })
-        .map(str::trim)
-        .filter(|body| !body.is_empty());
-    match first_comment {
-        Some(comment) => json!({
-            "status": "documented",
-            "basis": "pull_discussion",
-            "excerpt": truncate_chars(comment, MAX_REASON_EXCERPT_CHARS),
-        }),
-        None if discussion_complete => {
-            json!({"status": "not_recorded", "basis": Value::Null, "excerpt": Value::Null})
-        }
-        None => {
-            json!({"status": "unavailable", "basis": Value::Null, "excerpt": Value::Null})
+    {
+        for excerpt in excerpts {
+            let Some(text) = excerpt
+                .get("body")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            else {
+                continue;
+            };
+            candidates.push(json!({
+                "source": "pull_discussion",
+                "author": excerpt.get("author"),
+                "url": excerpt.get("url"),
+                "scope": "comment",
+                "excerpt": truncate_chars(text, MAX_REASON_EXCERPT_CHARS),
+            }));
         }
     }
+    let discussion_read = include_discussion && comments.is_some();
+    let coverage = json!({
+        "body_read": true,
+        "discussion_requested": include_discussion,
+        "discussion_read": discussion_read,
+        "discussion_complete": discussion_read && discussion_complete,
+    });
+    let (status, basis, excerpt) = if !body.is_empty() {
+        // 正文有文字只算候选；不算作者确认了动机。
+        (
+            "unchecked",
+            json!("pull_body"),
+            candidates[0]["excerpt"].clone(),
+        )
+    } else if !candidates.is_empty() {
+        (
+            "unchecked",
+            json!("pull_discussion"),
+            candidates[0]["excerpt"].clone(),
+        )
+    } else if !include_discussion {
+        // 正文为空且没读讨论：原因可能就在没读的讨论里，不能写 not_recorded。
+        ("unavailable", Value::Null, Value::Null)
+    } else if discussion_read && discussion_complete {
+        ("not_recorded", Value::Null, Value::Null)
+    } else {
+        ("unavailable", Value::Null, Value::Null)
+    };
+    json!({
+        "status": status,
+        "basis": basis,
+        "excerpt": excerpt,
+        "evidence_candidates": candidates,
+        "coverage": coverage,
+    })
 }
 
 fn pulls_url(api_base: &str, repository: Repository<'_>, sha: &str, page: u64) -> String {

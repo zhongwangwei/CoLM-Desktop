@@ -272,6 +272,7 @@ fn pull_json(
         "html_url": format!("https://github.com/{owner}/{repo}/pull/{number}"),
         "head": {"sha": "b".repeat(40), "ref": "feature"},
         "base": {"ref": "main"},
+        "user": {"login": "pull-author"},
     })
 }
 
@@ -422,7 +423,7 @@ fn zero_pull_requests_returns_notice_not_error() {
     let root = temp("zero");
     let client = client_for(&server, &root);
     let result = client.pulls(OWNER, REPO, SHA, false, false);
-    assert_eq!(result["schema"], 1);
+    assert_eq!(result["schema"], 2);
     assert_eq!(result["commit"], SHA);
     assert_eq!(result["pulls"], json!([]));
     assert!(errors(&result).is_empty());
@@ -485,12 +486,30 @@ fn single_pull_request_parses_fields_and_body_reason() {
     assert_eq!(pull["base_ref"], "main");
     assert_eq!(pull["evidence_id"], "github:zhongwangwei/CoLM-Desktop#12");
     assert!(pull["body"].as_str().unwrap().contains("Qle default"));
-    assert_eq!(pull["reason"]["status"], "documented");
+    // 正文有文字只产生原文候选：status 不是 documented，由上层决定怎么引用。
+    assert_eq!(pull["reason"]["status"], "unchecked");
     assert_eq!(pull["reason"]["basis"], "pull_body");
     assert!(pull["reason"]["excerpt"]
         .as_str()
         .unwrap()
         .contains("Qle default"));
+    assert_eq!(
+        pull["reason"]["evidence_candidates"][0]["source"],
+        "pull_body"
+    );
+    assert_eq!(
+        pull["reason"]["evidence_candidates"][0]["author"],
+        "pull-author"
+    );
+    assert_eq!(pull["reason"]["evidence_candidates"][0]["scope"], "body");
+    assert!(pull["reason"]["evidence_candidates"][0]["url"]
+        .as_str()
+        .unwrap()
+        .ends_with("/pull/12"));
+    assert_eq!(pull["reason"]["coverage"]["body_read"], true);
+    assert_eq!(pull["reason"]["coverage"]["discussion_requested"], false);
+    assert_eq!(pull["reason"]["coverage"]["discussion_read"], false);
+    assert_eq!(pull["reason"]["coverage"]["discussion_complete"], false);
     // 没请求讨论时不发评论请求，comments 明确标“未读”。
     assert_eq!(pull["comments"]["complete"], false);
     assert_eq!(pull["comments"]["excerpts"], json!([]));
@@ -552,11 +571,11 @@ fn multiple_pull_requests_follow_link_pagination() {
 }
 
 // ---------------------------------------------------------------------------
-// 理由三态：无正文 → not_recorded；读了讨论 → documented
+// 理由候选：正文为空且未读讨论 → unavailable；读了讨论 → 原文候选 unchecked
 // ---------------------------------------------------------------------------
 
 #[test]
-fn empty_body_is_not_recorded_then_discussion_documents_reason() {
+fn empty_body_without_discussion_is_unavailable_then_discussion_yields_candidates() {
     let _env = super::test_env_lock();
     let server = mock_github(|request| {
         let path = request.path().to_owned();
@@ -582,21 +601,39 @@ fn empty_body_is_not_recorded_then_discussion_documents_reason() {
     let client = client_for(&server, &root);
     let without_discussion = client.pulls(OWNER, REPO, SHA, false, false);
     let pull = &without_discussion["pulls"][0];
-    assert_eq!(pull["reason"]["status"], "not_recorded");
+    // 未读讨论：原因可能就在讨论里，不能写 not_recorded。
+    assert_eq!(pull["reason"]["status"], "unavailable");
     assert_eq!(pull["reason"]["basis"], Value::Null);
     assert_eq!(pull["reason"]["excerpt"], Value::Null);
+    assert_eq!(pull["reason"]["evidence_candidates"], json!([]));
+    assert_eq!(pull["reason"]["coverage"]["discussion_requested"], false);
+    assert_eq!(pull["reason"]["coverage"]["discussion_read"], false);
     assert_eq!(pull["comments"]["complete"], false);
     assert_eq!(server.request_count(), 1);
 
     // 在线命中缓存但缓存当初没读讨论：要求讨论时必须补请求，而不是把缓存当完整结果。
     let with_discussion = client.pulls(OWNER, REPO, SHA, false, true);
     let pull = &with_discussion["pulls"][0];
-    assert_eq!(pull["reason"]["status"], "documented");
+    // 讨论里的原话只是候选：本层不做“这是不是动机”的语义判断。
+    assert_eq!(pull["reason"]["status"], "unchecked");
     assert_eq!(pull["reason"]["basis"], "pull_discussion");
     assert!(pull["reason"]["excerpt"]
         .as_str()
         .unwrap()
         .contains("physically wrong"));
+    assert_eq!(
+        pull["reason"]["evidence_candidates"][0]["source"],
+        "pull_discussion"
+    );
+    assert_eq!(pull["reason"]["evidence_candidates"][0]["author"], "alice");
+    assert_eq!(pull["reason"]["evidence_candidates"][0]["scope"], "comment");
+    assert!(pull["reason"]["evidence_candidates"][0]["excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("physically wrong"));
+    assert_eq!(pull["reason"]["coverage"]["discussion_requested"], true);
+    assert_eq!(pull["reason"]["coverage"]["discussion_read"], true);
+    assert_eq!(pull["reason"]["coverage"]["discussion_complete"], true);
     assert_eq!(pull["comments"]["complete"], true);
     assert_eq!(pull["comments"]["excerpts"][0]["author"], "alice");
     assert!(pull["comments"]["excerpts"][0]["body"]
@@ -611,6 +648,145 @@ fn empty_body_is_not_recorded_then_discussion_documents_reason() {
         .expect("must fetch comments");
     assert!(comment_request.query().contains("per_page=100"));
     assert_eq!(with_discussion["from_cache"], false);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_three_word_template_body_is_a_candidate_not_a_documented_reason() {
+    let _env = super::test_env_lock();
+    // 审查 H03 的反例：三个英文词也满足旧规则，但没有说明为什么改。
+    let server = mock_github(|request| {
+        if request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
+            MockResponse::json(
+                200,
+                json!([pull_json(
+                    OWNER,
+                    REPO,
+                    21,
+                    "template body",
+                    json!("Update variable t_soisno"),
+                    None,
+                )]),
+            )
+        } else {
+            MockResponse::json(404, json!({"message": "unexpected path"}))
+        }
+    });
+    let root = temp("template-body");
+    let client = client_for(&server, &root);
+    let result = client.pulls(OWNER, REPO, SHA, false, false);
+    let reason = &result["pulls"][0]["reason"];
+    assert_eq!(reason["status"], "unchecked");
+    assert_eq!(reason["basis"], "pull_body");
+    assert_ne!(reason["status"], "documented");
+    let candidate = &reason["evidence_candidates"][0];
+    assert_eq!(candidate["source"], "pull_body");
+    assert_eq!(candidate["excerpt"], "Update variable t_soisno");
+    assert_eq!(reason["coverage"]["discussion_requested"], false);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn bot_and_courtesy_comments_are_candidates_not_documented_motivation() {
+    let _env = super::test_env_lock();
+    // 审查 H03 的反例：第一条非空评论是机器人 CI/礼貌用语，旧规则会直接 documented。
+    let server = mock_github(|request| {
+        let path = request.path().to_owned();
+        if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+            MockResponse::json(
+                200,
+                json!([pull_json(OWNER, REPO, 22, "no body", Value::Null, None)]),
+            )
+        } else if path.ends_with("/issues/22/comments") {
+            MockResponse::json(
+                200,
+                json!([
+                    comment_json("ci-bot", "CI passed", 22),
+                    comment_json("reviewer", "Thanks!", 22),
+                ]),
+            )
+        } else {
+            MockResponse::json(404, json!({"message": "unexpected path"}))
+        }
+    });
+    let root = temp("bot-comments");
+    let client = client_for(&server, &root);
+    let result = client.pulls(OWNER, REPO, SHA, false, true);
+    let reason = &result["pulls"][0]["reason"];
+    assert_eq!(reason["status"], "unchecked");
+    let candidates = reason["evidence_candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2, "{reason}");
+    for (index, expected) in ["CI passed", "Thanks!"].iter().enumerate() {
+        assert_eq!(candidates[index]["source"], "pull_discussion");
+        assert_eq!(candidates[index]["excerpt"], *expected);
+        assert_eq!(candidates[index]["scope"], "comment");
+    }
+    assert_eq!(candidates[0]["author"], "ci-bot");
+    assert_eq!(reason["coverage"]["discussion_complete"], true);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_explicit_chinese_reason_stays_verbatim_as_a_candidate() {
+    let _env = super::test_env_lock();
+    let original = "因为旧方案在夜间会把土壤温度冻结，所以改为用表层温度做加权，避免相变项失真。";
+    let server = mock_github(move |request| {
+        let path = request.path().to_owned();
+        if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+            MockResponse::json(
+                200,
+                json!([pull_json(OWNER, REPO, 23, "no body", Value::Null, None)]),
+            )
+        } else if path.ends_with("/issues/23/comments") {
+            MockResponse::json(200, json!([comment_json("作者", original, 23)]))
+        } else {
+            MockResponse::json(404, json!({"message": "unexpected path"}))
+        }
+    });
+    let root = temp("chinese-reason");
+    let client = client_for(&server, &root);
+    let result = client.pulls(OWNER, REPO, SHA, false, true);
+    let reason = &result["pulls"][0]["reason"];
+    // 语义判断留给上层；这里必须原样保留中文句子和出处。
+    assert_eq!(reason["status"], "unchecked");
+    let candidate = &reason["evidence_candidates"][0];
+    assert_eq!(candidate["excerpt"], original);
+    assert_eq!(candidate["author"], "作者");
+    assert!(candidate["url"].as_str().unwrap().contains("/pull/23"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_truncated_discussion_with_candidates_is_unchecked_but_incomplete() {
+    let _env = super::test_env_lock();
+    let server = mock_github(|request| {
+        let path = request.path().to_owned();
+        if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+            MockResponse::json(
+                200,
+                json!([pull_json(OWNER, REPO, 24, "no body", Value::Null, None)]),
+            )
+        } else if path.ends_with("/issues/24/comments") && request.query_value("page") == Some("1")
+        {
+            // 满页触发下一页；第二页失败 → 讨论没读完，但第一页候选仍可引用。
+            let comments: Vec<Value> = (0..PER_PAGE)
+                .map(|index| comment_json("alice", &format!("comment {index}"), 24))
+                .collect();
+            MockResponse::json(200, json!(comments))
+        } else {
+            MockResponse::json(500, json!({"message": "page two exploded"}))
+        }
+    });
+    let root = temp("truncated-candidates");
+    let client = client_for(&server, &root);
+    let result = client.pulls(OWNER, REPO, SHA, false, true);
+    let reason = &result["pulls"][0]["reason"];
+    assert_eq!(reason["status"], "unchecked");
+    assert_eq!(reason["coverage"]["discussion_requested"], true);
+    assert_eq!(reason["coverage"]["discussion_read"], true);
+    assert_eq!(reason["coverage"]["discussion_complete"], false);
+    assert!(!reason["evidence_candidates"].as_array().unwrap().is_empty());
+    assert_eq!(result["complete"], false);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -781,7 +957,7 @@ fn pagination_stops_at_the_page_limit_and_marks_incomplete() {
 }
 
 #[test]
-fn long_bodies_are_truncated_to_the_documented_limits() {
+fn long_bodies_and_comments_are_truncated_to_the_limits() {
     let _env = super::test_env_lock();
     let long_body = "中".repeat(MAX_PR_BODY_CHARS + 500);
     let long_comment = "文".repeat(MAX_COMMENT_BODY_CHARS + 500);
@@ -811,12 +987,17 @@ fn long_bodies_are_truncated_to_the_documented_limits() {
     let body = pull["body"].as_str().unwrap();
     assert_eq!(body.chars().count(), MAX_PR_BODY_CHARS);
     assert!(body.ends_with('…'));
-    // 正文被截断后理由 basis 仍是 pull_body，excerpt 的 500 字上限另算。
-    assert_eq!(pull["reason"]["status"], "documented");
+    // 正文被截断后候选仍标 pull_body；excerpt 的 500 字上限另算。
+    assert_eq!(pull["reason"]["status"], "unchecked");
     assert_eq!(pull["reason"]["basis"], "pull_body");
     let excerpt = pull["reason"]["excerpt"].as_str().unwrap();
     assert_eq!(excerpt.chars().count(), MAX_REASON_EXCERPT_CHARS);
     assert!(excerpt.ends_with('…'));
+    let candidate = pull["reason"]["evidence_candidates"][0]["excerpt"]
+        .as_str()
+        .unwrap();
+    assert_eq!(candidate.chars().count(), MAX_REASON_EXCERPT_CHARS);
+    assert!(candidate.ends_with('…'));
     let comment_body = pull["comments"]["excerpts"][0]["body"].as_str().unwrap();
     assert_eq!(comment_body.chars().count(), MAX_COMMENT_BODY_CHARS);
     assert!(comment_body.ends_with('…'));
@@ -891,6 +1072,9 @@ fn comment_failure_marks_reason_unavailable() {
     let pull = &result["pulls"][0];
     assert_eq!(pull["reason"]["status"], "unavailable");
     assert_eq!(pull["reason"]["basis"], Value::Null);
+    assert_eq!(pull["reason"]["evidence_candidates"], json!([]));
+    assert_eq!(pull["reason"]["coverage"]["discussion_requested"], true);
+    assert_eq!(pull["reason"]["coverage"]["discussion_complete"], false);
     assert_eq!(pull["comments"]["complete"], false);
     assert_eq!(result["complete"], false);
     assert_eq!(first_error(&result)["status"], 500);

@@ -78,6 +78,12 @@ pub struct ToolContext {
     pub history_root: PathBuf,
     /// 仅 GitHub 历史查询使用的专用凭据；绝不与模型 API Key 共用。
     pub github_token: Option<String>,
+    /// 宿主可信的“允许 GitHub 网络”开关，来自用户联网设置（Configure.web_search）。
+    ///
+    /// 与 [`Self::web`] 解耦：`web` 只是内置后端可用的搜索客户端能力，外部后端
+    /// （Codex/Claude Code）根本没有它；若用 `web.is_none()` 判断 GitHub 离线，会把
+    /// 外部后端打开联网的用户误判成离线。默认关闭（没有可信配置时宁可只读缓存）。
+    pub github_network: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

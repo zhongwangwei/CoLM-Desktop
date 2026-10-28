@@ -402,6 +402,50 @@ fn source_history_routes_both_repositories_with_the_default_limit() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn source_history_selected_without_a_model_resolves_the_application_source() {
+    let root = temp_dir("source-app");
+    let fake = FakeCli::new(&root);
+    fake.set_track(&json!({
+        "schema": 1,
+        "query": {"symbol": "t_soisno", "repository": "selected"},
+        "repos": {"selected": {"key": "selected", "history": {"mode": "app"}}},
+        "cross": {"links": []},
+        "limits": [],
+        "truncated": false,
+        "history_root": "/history",
+    }));
+    let ctx = context(&fake.cli, &root);
+    let value = SourceHistory
+        .call(&source_args("selected", "t_soisno"), &ctx)
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0].contains("--repository selected --symbol t_soisno --limit 5 --source app"),
+        "{}",
+        calls[0]
+    );
+    assert_eq!(value["source_context"]["kind"], "app");
+    assert_eq!(value["source_context"]["source"], "app");
+
+    // 显式 source 目录仍然优先（workspace/独立检出查询），不被 app 别名覆盖。
+    let mut args = source_args("selected", "t_soisno");
+    args["source"] = json!("/tmp/some-workspace");
+    let value = SourceHistory.call(&args, &ctx).unwrap();
+    let calls = fake.calls();
+    assert!(
+        calls
+            .last()
+            .unwrap()
+            .contains("--source /tmp/some-workspace"),
+        "{calls:?}"
+    );
+    assert_eq!(value["source_context"]["kind"], "workspace");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn commit_details_only_accepts_a_verified_repository_and_a_full_lowercase_sha() {
     let root = temp_dir("commit-validation");
@@ -428,11 +472,8 @@ fn commit_details_only_accepts_a_verified_repository_and_a_full_lowercase_sha() 
             "{invalid}: {error:#}"
         );
     }
-    let error = call("selected", &"a".repeat(40)).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("use source_history to find the selected model's commits"),
-        "{error:#}"
-    );
+    // selected 现在是合法来源（由可信 model_context 决定；没有模型时用应用源码），
+    // 但仍不接受 unknown 仓库名。
     assert!(
         format!("{:#}", call("both", &"a".repeat(40)).unwrap_err()).contains("unknown repository")
     );
@@ -513,6 +554,154 @@ fn commit_details_keeps_the_cli_error_when_the_commit_cannot_be_read() {
     assert!(
         format!("{error:#}").contains("fatal: bad object"),
         "{error:#}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_details_selected_reads_the_verified_frozen_source_and_labels_it() {
+    let root = temp_dir("commit-selected");
+    let fake = FakeCli::new(&root);
+    let model = model_context(&root);
+    fake.set_model_source(&json!({
+        "model": model.model,
+        "source_dir": model.source_dir,
+        "docs_dir": null,
+    }));
+    let sha = "d".repeat(40);
+    // 本地未推送提交：CLI 只读同一个 source checkout，notes 明确它不是公共历史。
+    fake.set_commit(&json!({
+        "schema": 1,
+        "repository": {"identity": {"state": "verified", "root": model.source_dir, "remote": null}},
+        "commit": {
+            "sha": sha,
+            "parents": ["e".repeat(40)],
+            "author": "Local Author",
+            "author_time_unix": 1_700_000_000,
+            "committer_time_unix": 1_700_000_050,
+            "message": "Local fix not pushed yet",
+            "files": [],
+            "truncated": false,
+        },
+        "reason": {"status": "documented", "basis": "commit_message", "excerpt": "Local fix not pushed yet"},
+        "notes": ["the commit exists only in the local selected source checkout"],
+    }));
+    let mut ctx = context(&fake.cli, &root);
+    ctx.model_context = Some(model.clone());
+    let value = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": "t_soisno",
+                "path": "main/MOD_Soil.F90",
+            }),
+            &ctx,
+        )
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0].starts_with("model-source-context"), "{calls:?}");
+    let commit = &calls[1];
+    assert!(
+        commit.starts_with("history-commit --history-root "),
+        "{commit}"
+    );
+    assert!(commit.contains("--repository selected"), "{commit}");
+    assert!(
+        commit.contains(&format!("--source {}", model.source_dir.display())),
+        "{commit}"
+    );
+    assert!(commit.contains(&format!("--sha {sha}")), "{commit}");
+    assert!(
+        commit.contains("--symbol t_soisno --path main/MOD_Soil.F90"),
+        "{commit}"
+    );
+    // 详情来自同一本地 Git 对象；可信块声明来源与冻结模型身份。
+    assert_eq!(value["commit"]["author"], "Local Author");
+    assert_eq!(value["source_context"]["kind"], "selected_source");
+    assert_eq!(
+        value["source_context"]["source"],
+        json!(model.source_dir.display().to_string())
+    );
+    assert_eq!(value["source_context"]["model"]["version"]["revision"], 3);
+    assert_eq!(
+        value["notes"][0],
+        "the commit exists only in the local selected source checkout"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_details_selected_without_a_model_uses_the_application_source() {
+    let root = temp_dir("commit-selected-app");
+    let fake = FakeCli::new(&root);
+    fake.set_commit(&json!({
+        "schema": 1,
+        "repository": {"identity": {"state": "verified", "root": "/application/source"}},
+        "commit": {"sha": "a".repeat(40), "parents": [], "files": [], "truncated": false},
+        "reason": {"status": "not_recorded", "basis": null, "excerpt": null},
+        "notes": [],
+    }));
+    // 没有 model_context：可信来源是应用源码，由 CLI 用 `--source app` 解析。
+    let ctx = context(&fake.cli, &root);
+    let value = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": "a".repeat(40),
+                "symbol": null,
+                "path": null,
+            }),
+            &ctx,
+        )
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].contains("--repository selected"), "{}", calls[0]);
+    assert!(calls[0].contains("--source app"), "{}", calls[0]);
+    assert_eq!(value["source_context"]["kind"], "selected_source");
+    assert_eq!(value["source_context"]["source"], "app");
+    assert!(value["source_context"].get("model").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_details_selected_refuses_a_changed_frozen_source() {
+    let root = temp_dir("commit-selected-changed");
+    let fake = FakeCli::new(&root);
+    let model = model_context(&root);
+    let mut changed = model.model.clone();
+    changed["version"]["revision"] = json!(9);
+    fake.set_model_source(&json!({
+        "model": changed,
+        "source_dir": model.source_dir,
+        "docs_dir": null,
+    }));
+    let mut ctx = context(&fake.cli, &root);
+    ctx.model_context = Some(model);
+    let error = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": "a".repeat(40),
+                "symbol": null,
+                "path": null,
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("selected frozen model source identity changed"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fake.calls().len(),
+        1,
+        "no history-commit after a failed source check"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -674,18 +863,37 @@ impl Drop for GithubApiEnv {
     }
 }
 
-fn online_context(root: &Path, token: Option<&str>) -> ToolContext {
-    let access = crate::tools::web::WebAccess::deepseek(
-        String::new(),
-        Arc::new(Mutex::new(std::collections::BTreeSet::new())),
-    );
+/// 历史工具的上下文：GitHub 网络权限来自 `github_network`，`web` 只模拟搜索客户端能力。
+fn pull_context(
+    root: &Path,
+    token: Option<&str>,
+    web_online: bool,
+    github_network: bool,
+) -> ToolContext {
+    let web = web_online.then(|| {
+        crate::tools::web::WebAccess::deepseek(
+            String::new(),
+            Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        )
+    });
     ToolContext {
         history_root: root.join("history"),
         project_root: root.to_owned(),
-        web: Some(access),
+        web,
         github_token: token.map(str::to_owned),
+        github_network,
         ..ToolContext::default()
     }
+}
+
+/// 外部后端（Codex/Claude Code）真实形状：没有 DeepSeek WebAccess，联网设置另存。
+fn online_context(root: &Path, token: Option<&str>) -> ToolContext {
+    pull_context(root, token, false, true)
+}
+
+/// 内置后端（Builtin）真实形状：搜索客户端存在，联网设置另存。
+fn builtin_online_context(root: &Path) -> ToolContext {
+    pull_context(root, None, true, true)
 }
 
 fn pull_request_fixture(number: u64) -> Value {
@@ -739,12 +947,12 @@ fn commit_pull_requests_maps_each_registry_repository_and_marks_the_network_mode
         json!(["desktop"]),
         "repository-mode source_context keeps an explicit repositories list"
     );
-    assert_eq!(desktop["schema"], 1);
+    assert_eq!(desktop["schema"], 2);
 
     let upstream = CommitPullRequests
         .call(
             &pr_args("colm_upstream", &sha, false, false),
-            &online_context(&root, Some("ghp_test_token")),
+            &builtin_online_context(&root),
         )
         .unwrap();
     assert_eq!(upstream["source_context"]["owner"], "CoLM-SYSU");
@@ -818,9 +1026,9 @@ fn commit_pull_requests_reads_only_the_offline_cache_when_networking_is_off() {
     // 清掉 warm-up 的请求记录：后面的 request_count 只代表“离线后新增的请求”。
     let _ = mock.requests();
 
-    // 同一 SHA 离线再查：命中缓存，零网络请求，保留第一次的 fetched_at。
-    let mut offline_ctx = online_context(&root, None);
-    offline_ctx.web = None;
+    // 同一 SHA 关闭联网再查：Builtin 形状（有搜索客户端）也必须离线——
+    // 网络权限是 github_network，不是 WebAccess。零网络请求，保留第一次的 fetched_at。
+    let offline_ctx = pull_context(&root, None, true, false);
     let cached = CommitPullRequests
         .call(&pr_args("desktop", &sha, false, false), &offline_ctx)
         .unwrap();
@@ -832,6 +1040,29 @@ fn commit_pull_requests_reads_only_the_offline_cache_when_networking_is_off() {
         "offline cache must keep the original fetch time"
     );
     assert_eq!(mock.request_count(), 0, "offline must not send HTTP");
+
+    // 关闭联网时 refresh=true 也不得绕过：仍用缓存并说明 refresh 未执行。
+    let refreshed_offline = CommitPullRequests
+        .call(&pr_args("desktop", &sha, true, false), &offline_ctx)
+        .unwrap();
+    assert_eq!(refreshed_offline["from_cache"], true);
+    assert_eq!(refreshed_offline["network"]["enabled"], false);
+    assert!(
+        refreshed_offline["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice
+                .as_str()
+                .unwrap_or_default()
+                .contains("refresh was requested but the client is offline")),
+        "{refreshed_offline}"
+    );
+    assert_eq!(
+        mock.request_count(),
+        0,
+        "refresh must not bypass disabled networking"
+    );
 
     // 离线且无缓存：不联网，空 PR + notice，不是“没有 PR”。
     let missing_sha = "e".repeat(40);
@@ -961,5 +1192,60 @@ fn commit_pull_requests_reads_discussion_only_when_asked_and_rejects_non_boolean
         "{error:#}"
     );
     assert_eq!(mock.request_count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn github_network_permission_is_independent_of_the_search_client() {
+    let root = temp_dir("pulls-network-matrix");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    mock.set_response(pull_request_fixture(31));
+    let sha = "9".repeat(40);
+
+    // Builtin-like：搜索客户端存在（web=Some），但用户关掉联网 → 离线，refresh=true 也零 HTTP。
+    let builtin_off = pull_context(&root, None, true, false);
+    let offline = CommitPullRequests
+        .call(&pr_args("desktop", &sha, true, false), &builtin_off)
+        .unwrap();
+    assert_eq!(offline["network"]["enabled"], false);
+    assert_eq!(offline["network"]["offline"], true);
+    assert_eq!(mock.request_count(), 0);
+
+    // External-like：Codex/Claude Code 没有 WebAccess（web=None），但联网开启 → 用 mock 在线。
+    let external_on = online_context(&root, None);
+    let online = CommitPullRequests
+        .call(&pr_args("desktop", &sha, false, false), &external_on)
+        .unwrap();
+    assert_eq!(online["network"]["enabled"], true);
+    assert_eq!(online["network"]["offline"], false);
+    assert_eq!(online["from_cache"], false);
+    assert!(
+        mock.request_count() >= 1,
+        "external online must contact GitHub"
+    );
+    let _ = mock.requests();
+    // 清掉 warm-up 请求后，外部后端关闭联网：缓存命中且零新增 HTTP（refresh=true 也不行）。
+    let external_off = pull_context(&root, None, false, false);
+    let cached = CommitPullRequests
+        .call(&pr_args("desktop", &sha, true, false), &external_off)
+        .unwrap();
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["network"]["enabled"], false);
+    assert_eq!(mock.request_count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_reports_selected_local_commits_as_having_no_github_repository() {
+    let root = temp_dir("pulls-selected");
+    let ctx = pull_context(&root, None, false, true);
+    let error = CommitPullRequests
+        .call(&pr_args("selected", &"a".repeat(40), false, false), &ctx)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("selected local commit has no owner/repo"),
+        "{error:#}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
