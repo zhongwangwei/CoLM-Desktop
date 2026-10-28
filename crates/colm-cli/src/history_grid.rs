@@ -133,6 +133,8 @@ struct MapBody {
     values: Vec<Vec<Option<f64>>>,
     min: Option<f64>,
     max: Option<f64>,
+    /// `time` 属于哪个钟；前端不能再把它一律标成 UTC。
+    time_basis: crate::time_basis::TimeBasisJson,
 }
 
 /// 结果页一张图最多画这么多格子；更大的网格隔行隔列抽稀（全球 0.25° 是 104 万格）。
@@ -224,6 +226,7 @@ fn history_map(case: &Path, var: &str, index: usize) -> Result<MapBody> {
                 .collect()
         })
         .collect();
+    let basis = crate::time_basis::resolve(case)?;
     let body = MapBody {
         var: var.to_owned(),
         units: crate::variable_units(&file, var),
@@ -237,6 +240,7 @@ fn history_map(case: &Path, var: &str, index: usize) -> Result<MapBody> {
         values: grid,
         min: min.is_finite().then_some(min),
         max: max.is_finite().then_some(max),
+        time_basis: crate::time_basis::json(basis.0, basis.1),
     };
     Ok(body)
 }

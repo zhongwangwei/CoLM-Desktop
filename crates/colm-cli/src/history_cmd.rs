@@ -1230,6 +1230,9 @@ fn compare(history: &History, flags: &Flags) -> Result<Value> {
                 from,
                 to,
                 point: None,
+                obs_label_position: None,
+                history_frequency: None,
+                min_coverage: crate::DEFAULT_MIN_COVERAGE,
             })
         };
         let am = metrics(&ar.run_case)?;
@@ -1275,7 +1278,7 @@ fn compare(history: &History, flags: &Flags) -> Result<Value> {
         };
         Ok(
             json!({"a":a_id,"b":b_id,"same_design":true,"better":better,"variables":scores,
-            "metrics_a":am,"metrics_b":bm,"evaluation":{"obs":observation,"obs_sha256":obs_hash,"spinup":spinup,"from":from,"to":to,"corrected":corrected},
+            "metrics_a":am,"metrics_b":bm,"evaluation":{"obs":observation,"obs_sha256":obs_hash,"spinup":spinup,"from":from,"to":to,"corrected":corrected,"window_time_basis":"model_clock"},
             "notes":if variable.is_none(){vec!["Select --variable to request a single RMSE ranking; no aggregate objective is assumed."]}else{vec![]}}),
         )
     })();

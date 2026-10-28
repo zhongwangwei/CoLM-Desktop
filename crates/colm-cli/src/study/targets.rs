@@ -675,41 +675,34 @@ fn read_gauge_text(path: &Path) -> Result<(Vec<i64>, Vec<f64>)> {
     Ok((time, values))
 }
 
-/// `YYYY-MM-DD`、`YYYY/MM/DD`，可带 ` HH:MM[:SS]` 或 `THH:MM[:SS]`。
+/// `YYYY-MM-DD`、`YYYY/MM/DD`，可带 ` HH:MM[:SS]` 或 `THH:MM[:SS]`、可带时区后缀。
+///
+/// 复用 `colm_hist::time::parse_civil_minutes`：水文站文本时间与 NetCDF 的
+/// `time:units` 必须共用同一套日期/时区规则，否则两边会在 `/`、秒小数、
+/// 紧贴偏移这些写法上慢慢分叉。
 fn parse_timestamp(text: &str) -> Option<i64> {
-    let text = text.replace('T', " ").replace('/', "-");
-    let mut parts = text.split_whitespace();
-    let mut date = parts.next()?.split('-');
-    let year: i64 = date.next()?.parse().ok()?;
-    let month: u32 = date.next()?.parse().ok()?;
-    let day: u32 = date.next()?.parse().ok()?;
-    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let mut clock = parts.next().unwrap_or("00:00").split(':');
-    let hour: i64 = clock.next()?.parse().ok()?;
-    let minute: i64 = clock.next().unwrap_or("0").parse().ok()?;
-    let second: f64 = clock.next().unwrap_or("0").parse().ok()?;
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second as i64)
+    let normalized = text.trim().replace('/', "-");
+    let (minutes, offset_seconds) = colm_hist::time::parse_civil_minutes(&normalized).ok()?;
+    let epoch_minutes = colm_hist::time::minutes_from_1900(1970) as f64;
+    // civil_minutes 是钟面读数；带偏移的文本要减去偏移才是真 UTC。
+    Some(((minutes - epoch_minutes) * 60.0 - f64::from(offset_seconds)) as i64)
 }
 
-/// CF 时间（`days|hours|minutes|seconds since YYYY-MM-DD[ HH:MM:SS]`，标准历法）→ Unix 秒。
-pub(super) fn cf_unix_seconds(values: &[f64], units: &str) -> Option<Vec<i64>> {
-    let (unit, origin) = units.split_once("since")?;
-    let seconds = match unit.trim().to_ascii_lowercase().as_str() {
-        "days" | "day" | "d" => 86_400.0,
-        "hours" | "hour" | "h" => 3_600.0,
-        "minutes" | "minute" | "min" => 60.0,
-        "seconds" | "second" | "s" => 1.0,
-        _ => return None,
-    };
-    let origin = parse_timestamp(origin.trim().trim_end_matches('Z').trim_end_matches(" UTC"))?;
-    Some(
-        values
-            .iter()
-            .map(|value| origin + (value * seconds).round() as i64)
-            .collect(),
-    )
+/// CF 时间（`days|hours|minutes|seconds since ...`，标准历法）→ Unix 秒。
+///
+/// 解析统一走 `colm_hist::time::parse_time_units`：带偏移的原点必须按 UTC
+/// 真换算（`seconds since 2008-01-01 00:00:00 +08:00` 的原点比 UTC 原点早
+/// 8 小时）；命名时区/依赖日历的单位明确报错，不再静默忽略尾巴。
+pub(super) fn cf_unix_seconds(values: &[f64], units: &str) -> Result<Vec<i64>> {
+    let parsed = colm_hist::time::parse_time_units(units)
+        .with_context(|| format!("unsupported time units {units:?}"))?;
+    let epoch_minutes = colm_hist::time::minutes_from_1900(1970) as f64;
+    let origin_unix =
+        (parsed.civil_minutes - epoch_minutes) * 60.0 - f64::from(parsed.utc_offset_seconds);
+    Ok(values
+        .iter()
+        .map(|value| (origin_unix + value * parsed.unit_seconds).round() as i64)
+        .collect())
 }
 
 /// 公历日期 → 1970-01-01 起的天数（Howard Hinnant 的 `days_from_civil`）。
