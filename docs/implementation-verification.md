@@ -38125,3 +38125,172 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
    仅由 PR CI 覆盖。
 6. **GUI 视觉**未做原生窗口目视验收；动态上下文显示只到类型/静态渲染与事件测试层面。
 7. 未实机验证“未知窗口 → 提示填写 → 保存后重发”的完整 GUI 手势（Rust 侧错误与前端映射各有测试）。
+
+## P-Xerj：可选本机 Xerj 文档召回（2026-10-28）
+
+目标：保留现有 `search_docs`，可选地通过本机 Xerj 的 ES-compatible HTTP 面召回文档候选；最终给模型的原文、来源、版本与知识新鲜度仍由 CoLM Rust 代码读取和判定。默认关闭；Xerj 关闭、未连接、超时、索引未就绪或返回无效候选时，原有关键词检索照常可用。首版只处理现有允许的 Markdown 文档快照，不改 Agent/Provider、不新增第二套记忆库、不向 LLM 暴露 `xerj_search`/索引管理工具。
+
+### 固定的真实服务与版本
+
+- 验收固定 release **`v1.0.0-rc.100`**（GitHub `xerj-org/xerj`）；macOS arm64 包
+  `xerj-1.0.0-rc.100-aarch64-apple-darwin.tar.gz`，实测 sha256
+  `c88fdcb99c4155d2f7260138c3a5898d0f3cf6b07cd208895137ff03c52b9d1a`。
+- 真机验收节点（仅本机回环，测试数据目录在 /tmp，不随仓库分发）：
+  ```sh
+  # 认证节点（默认 auth ON；admin.key 为 0600）
+  xerj --port 9300 --disable-feedback --data-dir /tmp/xerj-acceptance/data-auth
+  # 手工 API 探针另外用过 --insecure 节点（127.0.0.1:9200）
+  ```
+  验收只创建、查询、删除本次运行生成的唯一索引 `colm-docs-accept-*`；结束时删除并用
+  `GET /{index}` 确认 404；未触碰节点上的其它索引或用户数据。自动下载安装、签名、跨平台打包与
+  进程托管**未实现**（按任务边界后置）。
+- 对 rc.100 实测的接口行为（写进 `retrieval.rs` 模块文档与测试，不混用其它版本语义）：
+  - `PUT /{index}` 已存在时 HTTP **409** + `resource_already_exists_exception`（按已存在处理）；
+  - `DELETE /{index}/_doc/{id}` 不存在时 HTTP **404**（按幂等清理处理）；`DELETE /{index}` 不存在时同样 404；
+  - `multi_match` 对中文查询在 rc.100 返回 0 命中（default analyzer 逐字 unigram，实测
+    `match` 正常）；候选查询因此用 `bool.filter(term scope_key, term generation)` +
+    `must:[{bool:{should:[match body, match title]}}]`，中文与中英混合实测可召回；
+  - filter-only 的验证 search（等价 match_all）、`_source:false`、`size`/`track_total_hits`、
+    mapping keyword/text/integer/long、bulk `200 + errors + items[].status` 均实测可用。
+
+### 实现结构
+
+- 新增 `crates/colm-agent/src/retrieval.rs`（约 1.8k 行）：`RetrievalSettings`（enabled/endpoint/index/timeout_ms，
+  默认关闭、`http://127.0.0.1:9200`、`colm-docs-v1`、1500ms）、loopback-only 校验（http + 127.0.0.1/localhost/[::1]
+  + 显式端口；无 userinfo/path/query/fragment；索引名安全字符、1..=64）、`collect_snapshot`（只枚举 docs 根目录
+  顶层 `*.md`，不递归/不跟随符号链接；单文件 ≤8 MiB、文档 ≤512、chunk ≤4096；snapshot_identity 为内容哈希）、
+  40 行/块分块、Handle 状态机与后台构建、ES-compatible HTTP 客户端（ureq 同步；timeout、2 MiB 响应上限、
+  禁止重定向、失败脱敏）、bulk 逐项校验、filter 验证后才发布、旧 generation 尽力清理、候选只信本地清单。
+- 协议（`protocol.rs`、`bin/colm-agent.rs`）：`configure` 新增 `retrieval` 设置；GUI 控制消息
+  `{"type":"docs_index","action":"status"|"refresh"}`；新事件 `docs_index_status`（backend/enabled/state/
+  scope/endpoint/index/documents/chunks/generation/indexed_at_unix_ms/detail，绝不包含 HTTP key）。agent
+  从现有本地 Key 文件按 endpoint 读取 Xerj key（不套用 `COLM_AGENT_API_KEY` 模型 Key 环境变量，避免串用）。
+- `search_docs`（`tools/read.rs`）：在原有 provenance/scope/docs root 解析之后、原关键词扫描的同时构造当前
+  快照并请求候选；候选的 `relative_path/document_sha256/line_start/line_end` 只从本地清单取，随后对真实
+  文件重读、核对 hash 与行段，再过原有 `Bindings.check`；新增 `retrieval` 诊断字段（backend/state/generation/
+  candidates/rejected_candidates/candidate_hits/fallback_reason 等）。冻结文档缺失时仍在检索前直接返回
+  `documentation_status:"missing"`，不会拿 app 当前资料补齐；原有 60 条命中上限、24k 字符裁剪、64 KiB 单文件
+  读取上限与倒排草稿路径不变。状态/刷新入口由 agent 侧 `tools::selection_docs_snapshot` 枚举当前选择。
+- GUI（`gui/src-tauri/src/assistant.rs`、`gui/src/features/assistant/{model.ts,Settings.tsx,AssistantPanel.tsx}`）：
+  助手设置 → 高级设置新增“文档检索（Xerj，可选）”：启用开关、服务地址、索引名、超时、Xerj Key 登记/删除、
+  索引状态行、“更新文档索引”“查询状态”按钮；默认关闭；旧 `assistant.json` 缺字段按关闭加载；设置校验与
+  Rust 侧一致；新增命令 `assistant_docs_index` 并重新生成命令契约。
+
+### 校验顺序（每次检索）
+
+`selected_context` 刷新 → `documentation_provenance` 解析准确来源 → 冻结文档缺失即 missing → 宿主强制注入
+scope_key+generation 过滤向 Xerj 查询 → 候选 ID 必须属于本地清单（不信任索引返回的路径/hash/行段）→ 从允许
+的当前资料重读真实字节、核对文件 hash 与 chunk 范围（文档变过则旧行段不用，回退或重建）→ 原有
+`Bindings.check`（源码变化/绑定失效继续 withheld）→ 从重读原文生成片段和出处，保留 knowledge_status /
+may_support_current_answer / knowledge_checks / scope / provenance。索引自报相同 hash、status=current 也不能
+直接返回它的 snippet；排名只影响相关性顺序，不决定科学正确性或知识资格；未绑定文档不自动升级为已审核知识。
+
+### 索引建立与自动更新
+
+- ensure 非阻塞：检索时发现当前快照身份与已发布清单不同，后台建新 generation；本次检索回退原关键词路径，
+  下一次检索使用新索引（不等待全库重建）。
+- 同一 scope 单 worker；构建期间的新快照排队；同快照失败不自动反复重试（明确 refresh 或新快照才重试）；
+  `refresh` 强制新 generation。发布顺序：health → PUT mapping → bulk 逐项 status → filter 验证 → 切本地清单
+  ready → 异步尽力删除旧代 id（失败只写 detail，不把 ready 回退）。bulk 部分失败/中断不发布半成品。
+- 旧 generation 只对旧快照可见，调用方每次重新枚举快照；进程重启后旧 generation 块不会再被返回，但**不会
+  自动删除**（靠 scope_key+generation 过滤不可见，索引体积会缓慢增长，已列为已知限制）。
+- 本期**没有**接 `xerj autoindex --watch`（它不知道 CoLM 的冻结版本与知识资格），也没有文件监听；所以文档改动
+  不会实时重建，要等下一次 `search_docs`、点“更新文档索引”或重新保存配置。Xerj 自身也不自动升级（固定
+  验收版本，不自动下载安装）。
+
+### 配置与手工验收步骤
+
+1. 用户自行运行本机 Xerj rc.100（默认端口 9200；若启用 auth，key 在 `<data-dir>/admin.key`）。
+2. 在 GUI 助手设置 → 高级设置 → 文档检索：勾选启用、填 loopback 地址与索引名；若节点要求认证，用同一
+   表单对 Xerj endpoint 登记 Key（沿用现有 secrets 文件，不进入提示词/工具结果/配置导出）。
+3. 保存设置（下次发送生效）→ 点“更新文档索引”，状态从 pending/building 到 ready，显示 documents/chunks/
+   generation；失败时显示 error 与原因，`search_docs` 自动回退关键词检索。
+4. 命令行验收（本次实际执行）：
+   ```sh
+   COLM_XERJ_ACCEPTANCE_ENDPOINT=http://127.0.0.1:9300 \
+   COLM_XERJ_ACCEPTANCE_KEY_FILE=/tmp/xerj-acceptance/data-auth/admin.key \
+   cargo test -p colm-agent --test xerj_acceptance -- --nocapture --test-threads=1
+   ```
+
+### 测试与实测结果
+
+**离线确定性测试（默认不联网）**
+
+- `cargo test -p colm-agent --lib` → **302 passed / 0 failed**（含新增 31 个 retrieval fake-transport 测试与
+  6 个 `search_docs` 假 Xerj HTTP 集成测试；覆盖任务书第九节 1–9 项：关闭/连接失败/超时/畸形与超大响应
+  回退、冻结快照缺失不拿 app 资料、scope/会话隔离、伪造 metadata/未知 chunk/旧 snippet 拒用、文档变化与
+  同长度改动/绑定损坏、文件变短/删除/重新分块后旧 chunk 不可用、bulk 部分失败/中断不发布、两条路径同一
+  可信度规则、结果预算不丢 scope/provenance/过期限制、旧配置兼容；中文与中英混合 body 的 chunk/请求体、
+  并发 ensure 单构建、refresh 新 generation、错误/状态/Debug 不含 key 均有断言）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → Finished；`cargo fmt --all --check` → 无 diff。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → 结果见文末“本轮全量验证”。
+- GUI：`npm run typecheck / lint / format:check` 通过；`npm test` → **1140 passed / 0 failed**；
+  `cargo run -q -p xtask -- check-gui` → **256** 个命令契约，218 个被前端调用，事件均有 emitter/listener。
+- GUI 窗口进程：`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`（结果见文末全量验证）。
+
+**真实 HTTP 集成验收（固定 release rc.100，本机回环，认证节点）**
+
+`cargo test -p colm-agent --test xerj_acceptance -- --nocapture --test-threads=1` → **5 passed / 0 failed**
+（1 个按设计的跳过项 `COLM_XERJ_ACCEPTANCE_LEFTOVER_INDEX` 未设置）。覆盖：建索引、入库、查询（英文与
+中文）、修改后旧快照查询被拒并重建、新内容可查、删除文件后旧内容不再返回、模拟重连后重建、错误 key 回退
+且状态不含 key、正确 key 可建索引、cluster health、清理测试索引并用 `GET /{index}` 确认为 404。
+
+**约 10 个真实 CoLM 文档问题的前后对比（同一批问题，关键词 vs Xerj）**
+
+索引 27 个真实 `docs/*.md` 文档、1102 个块；下表是实测输出（毫秒为单次本机测量；“前 3 条”指文件级）：
+
+| # | 问题（截断） | 预期来源 | 关键词前 3 | Xerj 前 3 | 关键词 ms | Xerj ms | 候选数 | 候选字节 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | reasoning_content 为什么每轮回传 | design-ai-assistant.md | 命中 | 命中 | 23 | 61 | 4 | 1365 |
+| 2 | 目标函数怎么合成 loss | uncertainty-and-tuning.md | 命中 | 命中 | 25 | 202 | 10 | 3676 |
+| 3 | 多节点 history 分块拼接 | design-multi-node.md | 命中 | 未中 | 1 | 71 | 10 | 3623 |
+| 4 | 无外网服务器引擎依赖 | remote-toolchain.md | 命中 | 命中 | 29 | 66 | 10 | 3541 |
+| 5 | 统一参数目录默认值保留 | parameter-catalog.md | 命中 | 未中 | 30 | 87 | 10 | 3425 |
+| 6 | hybrid.toml 插槽配置 | design-hybrid.md | 命中 | 命中 | 23 | 65 | 10 | 3529 |
+| 7 | 内核校验/黄金回归容差层级 | design.md | 未中 | 命中 | 1 | 181 | 10 | 3615 |
+| 8 | 上下文预算折叠旧工具结果 | design-ai-assistant.md | 命中 | 未中 | 28 | 200 | 10 | 3263 |
+| 9 | 远程作业身份核对后继续 | design-ai-assistant.md | 命中 | 命中 | 26 | 63 | 5 | 1759 |
+| 10 | f_xerr 与 f_zerr 检查什么 | design-ai-assistant.md | 命中 | 命中 | 1 | 66 | 10 | 3440 |
+
+汇总：**关键词前 3 = 9/10，Xerj 前 3 = 7/10，Xerj 有候选 = 10/10**；候选体积 1.3–3.7 KB，单次耗时约
+61–204 ms（关键词路径 1–30 ms）。结论如实报告：**在这 10 个短查询上没有看到召回提升，Xerj 反而多了一次
+HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精确。Xerj 的候选路径适合词被拆分在多行、
+中英混合或精确子串不命中的问题，但本期没有收集到能证明提升的样本，因此不宣称改善，也没有为展示成功
+放宽来源或知识检查。上述数字只代表一次本机、固定 release、27 文档的小语料测量，不是普遍性能结论。
+
+### 未验证部分与已知限制
+
+1. **Xerj 版本/平台**：只在 macOS arm64 + v1.0.0-rc.100 上做过真实 HTTP 验收；Linux/Windows 的 Xerj 包、
+   in-process TLS、其它 release 的兼容性未验证（升级后需重跑验收）。
+2. **自动安装/进程托管/打包**：按任务边界未实现；应用只连接用户已运行的本机节点，不启动/关闭/升级它。
+3. **无文件监听**：文档改动不会实时重建（下一次检索/手动刷新/保存配置时惰性更新）；没有接
+   `autoindex --watch`。进程重启后旧 generation 块不会自动删除（过滤不可见，索引体积缓慢增长）。
+4. **真实 LLM 端到端**：未跑付费模型；离线测试与文档召回验收不能证明真实模型一定会引用正确来源。
+   外部后端（Codex/Claude Code/OpenCode）共用同一组工具与检索实现，但没有做它们的真实端到端回放。
+5. **原生窗口/WebView**：GUI 设置、状态行、Key 登记与“更新文档索引”按钮只做了类型/静态渲染与事件测试，
+   未在原生窗口目视点验；终端聊天目前没有检索设置的命令行入口（默认关闭）。
+6. **索引实现限制**：chunk_id 公式不含路径，字节完全相同的两个 `.md` 会撞 id —— 目前构建期硬失败并回退
+   关键词检索，而不是静默覆盖；更细的增量更新、并发平台化与索引体积治理后置。
+7. **安全边界**：只允许 loopback http、禁止重定向、有超时与 2 MiB 响应上限；HTTP key 只从本地 secrets
+   文件按 endpoint 读取，不进入提示词/工具结果/审计正文/普通配置导出。本机 Xerj 与云端模型是两段传输：
+   Xerj 召回可完全本地，最终选入提示词的文档内容仍按现有模型服务数据发送政策发往云端模型。
+
+### 本轮全量验证（2026-10-28，最终状态；本机 macOS）
+
+- `cargo fmt --all --check` → 通过（exit 0，0 diff）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → Finished，exit 0。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2880 passed / 0 failed /
+  15 ignored，exit 0**。其中 `colm-agent` 库 302 passed（含 31 个 retrieval 测试与 6 个 search_docs 假 Xerj
+  集成测试）；`colm-cli` bins 533 passed。
+- `cargo test -p colm-agent --lib` → **302 passed / 0 failed**；`cargo test -p colm-agent --lib --bins` 里
+  colm-agent 可执行文件 8 passed。
+- 真实 Xerj rc.100 验收：`cargo test -p colm-agent --test xerj_acceptance -- --nocapture --test-threads=1`
+  → **5 passed / 0 failed**（1 个按设计跳过）。
+- GUI 窗口进程（`gui/src-tauri`）：`cargo fmt --all --check` 通过；`cargo clippy --all-targets -- -D warnings`
+  → Finished；`cargo test --lib` → **463 passed / 1 ignored / 0 failed**。
+- 前端（`gui/`）：`npm run typecheck`、`npm run lint`、`npm run format:check` 全通过；`npm test` →
+  **1140 passed / 0 failed**；`cargo run -q -p xtask -- check-gui` → **256** 个注册命令、218 个被调用、
+  26 个动态名；每个声明事件都有 emitter/listener。
+- 说明：本机 `cargo test` 用每二进制单线程，是因为既有 NetCDF/HDF5 并发 flake（与本改动无关）；默认并行
+  在其他机器/CI 上仍可运行，但本轮没有推送，未跑 CI。Windows/Linux、原生窗口目视、真实付费模型回放
+  均未运行（见上节未验证项）；环境阻塞已如实记录，没有把未运行写成通过。
