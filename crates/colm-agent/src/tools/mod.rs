@@ -8,6 +8,8 @@ mod code;
 mod diagnostics;
 mod experience;
 mod fs;
+mod history;
+mod history_github;
 mod knowledge_drafts;
 pub(crate) mod read;
 mod remote_workspace;
@@ -72,6 +74,10 @@ pub struct ToolContext {
     pub retrieval: Option<crate::retrieval::Handle>,
     /// Trusted by Configure, never inferred from conversational UI JSON.
     pub model_context: Option<ModelContext>,
+    /// 只读历史查询的仓库注册表与缓存根目录（由 Configure 的可信路径给出）。
+    pub history_root: PathBuf,
+    /// 仅 GitHub 历史查询使用的专用凭据；绝不与模型 API Key 共用。
+    pub github_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -462,6 +468,7 @@ impl Registry {
         tools.extend(diagnostics::tools());
         tools.extend(experience::tools());
         tools.extend(knowledge_drafts::tools());
+        tools.extend(history::tools());
         Self { tools }
     }
 

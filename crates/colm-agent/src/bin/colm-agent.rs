@@ -805,6 +805,17 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 let retrieval_status = retrieval_handle
                     .as_ref()
                     .map(colm_agent::retrieval::Handle::status);
+                // 只读历史追踪：仓库注册/缓存放在数据目录下；GitHub 只用专用凭据
+                // （COLM_GITHUB_TOKEN 或 Key 文件里 api.github.com 一条），绝不借用模型 API Key。
+                let github_token = std::env::var("COLM_GITHUB_TOKEN")
+                    .ok()
+                    .map(|token| token.trim().to_owned())
+                    .filter(|token| !token.is_empty())
+                    .or_else(|| {
+                        colm_agent::secrets::get_stored(&key_file, "https://api.github.com")
+                            .ok()
+                            .flatten()
+                    });
                 let model = display_model(backend, &provider.model, &choice);
                 *settings.lock().unwrap() = Some(Settings {
                     provider: *provider,
@@ -822,6 +833,11 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         knowledge_root: data_dir.as_ref().map(|root| root.join("knowledge")),
                         retrieval: retrieval_handle.clone(),
                         model_context: model_context.map(|context| *context),
+                        history_root: data_dir
+                            .as_ref()
+                            .map(|root| root.join("history"))
+                            .unwrap_or_default(),
+                        github_token,
                     },
                     approval,
                     web_search: web_search && backend != BackendKind::Opencode,
