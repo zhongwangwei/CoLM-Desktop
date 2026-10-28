@@ -38055,6 +38055,9 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
 - PR #65（此前 16 个本地提交 + Windows 测试路径修复）CI：ci 工作流 rust/gui 在 ubuntu、macOS、
   Windows 全绿，kernel-filesystem 绿，windows-kernel 的 `A real case, end to end` 32m50s 绿；
   已按用户要求以 rebase 方式合并到 main。
+- PR #66（本期 A/B/GUI 四个提交）CI：rust/gui 在 ubuntu、macOS、Windows 全绿，kernel-filesystem 绿，
+  windows-kernel 33m10s 绿；Windows rust 曾因 unix-only 测试夹具在 -D warnings 下报 dead_code 失败一次，
+  已补 `#[cfg(unix)]` 并复跑全绿，随后以 rebase 方式合并到 main。
 
 **新增测试覆盖（摘要）**
 
