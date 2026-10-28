@@ -202,6 +202,301 @@ pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// 创建/预检研究时该由哪份程序写 manifest 与 provenance。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreationExecutor {
+    Local,
+    Delegate(PathBuf),
+}
+
+/// workspace 型修订运行研究时会换成它自己的 `colm-cli`（[`delegate`]），创建/预检也必须由同一份程序
+/// 做：`verify_frozen_inputs` 用程序内嵌的参数目录与来源文件重算 provenance 哈希，两份不同代码算出的
+/// 值对不上，研究就会建得成却跑不起来（P1-8）。官方修订不换程序；当前程序自己就是那份修订的 CLI
+/// （例如由它自己转交回来）时再转交只会绕圈，也按本地处理。
+pub(crate) fn creation_executor(
+    code: &colm_model::CodeRef,
+    current_exe: &Path,
+    revision_cli: &Path,
+) -> CreationExecutor {
+    if code.workspace.is_none() || revision_cli == current_exe {
+        CreationExecutor::Local
+    } else {
+        CreationExecutor::Delegate(revision_cli.to_owned())
+    }
+}
+
+/// 转交给修订 CLI 的参数：子命令、**原始**算例目录（不是 prepare_create 的临时冻结输入目录）、原样
+/// 透传的 flags，以及研究设定。设定原本是位置参数时补成 `--spec`；已经是 flag 时不要写两遍。
+pub(crate) fn creation_delegate_args(
+    command: &str,
+    case_root: &Path,
+    spec_file: &Path,
+    flags: &[(String, String)],
+) -> Vec<String> {
+    let mut args = vec![command.to_owned(), case_root.to_string_lossy().into_owned()];
+    for (flag, value) in flags {
+        args.extend([flag.clone(), value.clone()]);
+    }
+    if !flags.iter().any(|(flag, _)| flag == "--spec") {
+        args.extend([
+            "--spec".to_owned(),
+            spec_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    args
+}
+
+/// 把创建/预检整条命令交给将来运行这份研究的那份 `colm-cli`。成功返回它的 stdout 交给调用方原样
+/// 打印（`study-create` 打印的是研究目录）；`None` 表示这不是 workspace 型修订、或当前程序就是那份
+/// 程序，按现有路径继续。快照 CLI 自己的 `study-create` 会做它版本的 prepare/pin/capture，当前程序
+/// 只负责转交、核对输出与退出码。
+pub(crate) fn delegate_creation(
+    command: &str,
+    opts: &crate::Opts,
+    case_root: &Path,
+    spec_file: &Path,
+) -> Result<Option<String>> {
+    // 已经由父进程交出来的程序不再转交：它自己就是那份修订的 colm-cli。
+    if std::env::var_os(DELEGATED_ENV).is_some() {
+        return Ok(None);
+    }
+    let Some(version) = crate::model_version::selected(opts)? else {
+        return Ok(None);
+    };
+    let store = crate::model_version::registry(opts)?;
+    let revision = store.get(&version)?;
+    if revision.code.workspace.is_some() {
+        // revision_cli 只从代码缓存里认修订的程序；缓存不在时它会退到工作区现在编的那份（可能已经
+        // 改过），所以先把这份修订的代码缓存核对/补齐，再问该用哪个 colm-cli。
+        crate::model_version::verify_code(opts, &revision.code)?;
+        crate::model_version::cache_code(opts, &revision.code)?;
+    }
+    let (cli, _) = revision_cli(opts, &revision)?;
+    let current =
+        std::env::current_exe().context("cannot locate the running colm-cli executable")?;
+    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    match creation_executor(&revision.code, &resolved(&current), &resolved(&cli)) {
+        CreationExecutor::Local => Ok(None),
+        CreationExecutor::Delegate(_) => Ok(Some(create_with_revision_cli(
+            command,
+            &revision,
+            &cli,
+            case_root,
+            spec_file,
+            &opts.flags,
+        )?)),
+    }
+}
+
+struct CreationRun {
+    success: bool,
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_creation_cli(cli: &Path, args: &[String]) -> Result<CreationRun> {
+    let output = std::process::Command::new(cli)
+        .args(args)
+        .env(DELEGATED_ENV, "1")
+        .env("COLM_AUDIT_BY_PARENT", "1")
+        .output()
+        .with_context(|| {
+            format!(
+                "cannot start the model version's colm-cli at {}; rebuild this version, or create the Study with the official version",
+                cli.display()
+            )
+        })?;
+    Ok(CreationRun {
+        success: output.status.success(),
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// 用修订自己的 `colm-cli` 建/预检研究。只有一种失败可以在本地兼容：旧修订不认 GUI 自动加的
+/// `include_baseline`（与 [`ensure_revision_reads_spec`] 同一处置），去掉这个增强重试一次——改的是
+/// 临时副本，绝不重写用户给的设定文件。其余失败原样带回并补上修订身份与可行动的方向。
+fn create_with_revision_cli(
+    command: &str,
+    revision: &colm_model::FrozenRevision,
+    cli: &Path,
+    case_root: &Path,
+    spec_file: &Path,
+    flags: &[(String, String)],
+) -> Result<String> {
+    let args = creation_delegate_args(command, case_root, spec_file, flags);
+    let (run, retry_spec) = (|| -> Result<(CreationRun, Option<PathBuf>)> {
+        let run = run_creation_cli(cli, &args)?;
+        if !run.success && run.stderr.contains("unknown field `include_baseline`") {
+            let copy = spec_without_include_baseline(spec_file)?;
+            let mut retry = args.clone();
+            set_spec_argument(&mut retry, &copy);
+            return match run_creation_cli(cli, &retry) {
+                Ok(run) => Ok((run, Some(copy))),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&copy);
+                    Err(error)
+                }
+            };
+        }
+        Ok((run, None))
+    })()?;
+    let result = finish_creation(command, revision, case_root, run);
+    if let Some(copy) = retry_spec {
+        let _ = std::fs::remove_file(&copy);
+    }
+    result
+}
+
+fn finish_creation(
+    command: &str,
+    revision: &colm_model::FrozenRevision,
+    case_root: &Path,
+    run: CreationRun,
+) -> Result<String> {
+    if !run.success {
+        return Err(creation_failure(command, revision, &run));
+    }
+    // 修订程序的警告照常出现在父进程的 stderr 上，不吞掉。
+    if !run.stderr.is_empty() {
+        eprint!("{}", run.stderr);
+    }
+    if command == "study-create" {
+        let Some(root) = study_root_from_stdout(&run.stdout) else {
+            return Err(anyhow::anyhow!(
+                "model version {} r{} reported a created Study but printed no Study directory; create the Study with the official version, or rebuild this version on the current code",
+                revision.version.id,
+                revision.version.revision
+            ));
+        };
+        if let Err(error) = bound_revision(Path::new(root), revision) {
+            discard_unusable_study(Path::new(root), case_root);
+            return Err(anyhow::anyhow!(
+                "model version {} r{} was built from older code that did not bind the Study it created at {root} to this revision ({error:#}); create the Study with the official version, or rebuild this version on the current code",
+                revision.version.id,
+                revision.version.revision
+            ));
+        }
+    }
+    Ok(run.stdout)
+}
+
+fn creation_failure(
+    command: &str,
+    revision: &colm_model::FrozenRevision,
+    run: &CreationRun,
+) -> anyhow::Error {
+    let verb = if command == "study-create" {
+        "create"
+    } else {
+        "preflight"
+    };
+    let detail = stderr_tail(&run.stderr);
+    if outdated_code(&run.stderr) {
+        return anyhow::anyhow!(
+            "model version {} r{} was built from older code that cannot {verb} this Study ({detail}); create the Study with the official version, or rebuild this version on the current code",
+            revision.version.id,
+            revision.version.revision
+        );
+    }
+    let status = run
+        .code
+        .map_or_else(String::new, |code| format!(" (exit status {code})"));
+    anyhow::anyhow!(
+        "model version {} r{} could not {verb} this Study{status}: {detail}",
+        revision.version.id,
+        revision.version.revision
+    )
+}
+
+/// 修订程序报的错是不是"这份代码比这个功能老"。`unknown command` 说明它连 `study-create` 都还没有。
+fn outdated_code(stderr: &str) -> bool {
+    [
+        "unknown field",
+        "unknown variant",
+        "unexpected argument",
+        "unknown command",
+    ]
+    .iter()
+    .any(|marker| stderr.contains(marker))
+}
+
+fn stderr_tail(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return "no error output".to_owned();
+    }
+    let lines: Vec<&str> = trimmed.lines().rev().take(12).collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+fn study_root_from_stdout(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
+/// 研究目录里有没有这份修订的 `model-version.json`。还不会在创建时绑定修订的旧程序会跳过这一步，
+/// 于是研究建得成、第一次运行才知道没有它——在这里就拦下并说清怎么办。
+fn bound_revision(study_root: &Path, revision: &colm_model::FrozenRevision) -> Result<()> {
+    let path = study_root.join(FILE);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let pin: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
+    let version = &pin["model_revision"]["version"];
+    anyhow::ensure!(
+        version["id"].as_str() == Some(revision.version.id.as_str())
+            && version["revision"].as_u64() == Some(revision.version.revision),
+        "the Study does not record this revision"
+    );
+    Ok(())
+}
+
+/// 只删刚被那个子进程建出来、却绑定不了修订的研究：位置必须正好在 `<原始算例>/.colm/studies` 下
+/// 且有 manifest，子进程输出被误读时绝不能删到用户别的目录。
+fn discard_unusable_study(study_root: &Path, case_root: &Path) {
+    let (Ok(root), Ok(case)) = (
+        colm_kernel::manifest::absolute(study_root),
+        colm_kernel::manifest::absolute(case_root),
+    ) else {
+        return;
+    };
+    let studies = case.join(".colm/studies");
+    if root.parent() == Some(studies.as_path()) && root.join("manifest.json").is_file() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// 旧修订读得了当前设定的大部分内容、只是不认 `include_baseline` 时，按同一份设定去掉这个增强写成
+/// 临时副本；用户给的文件保持原样。
+fn spec_without_include_baseline(spec_file: &Path) -> Result<PathBuf> {
+    let mut spec = study::spec::read_spec(spec_file)?;
+    spec.budget.include_baseline = false;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "colm-study-delegated-{}-{nanos}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, serde_json::to_vec_pretty(&spec)?)?;
+    Ok(path)
+}
+
+fn set_spec_argument(args: &mut [String], spec_file: &Path) {
+    if let Some(index) = args.iter().position(|arg| arg == "--spec") {
+        if let Some(value) = args.get_mut(index + 1) {
+            *value = spec_file.to_string_lossy().into_owned();
+        }
+    }
+}
+
 /// 两个研究里最优成员的成绩（`study-compare`，“比较两个版本”）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Side {

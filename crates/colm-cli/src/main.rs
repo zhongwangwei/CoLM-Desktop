@@ -645,6 +645,15 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 Some(path) => PathBuf::from(path),
                 None => opts.positional_at(1, "a Study spec file")?,
             };
+            // 绑定 workspace 型冻结修订的研究，第一次运行会换成那份修订自己的 colm-cli；manifest 里的
+            // provenance 哈希必须由同一份程序算，否则运行时的 verify_frozen_inputs 会认为参数来源变了
+            // （研究建得成却跑不起来，P1-8）。所以创建/预检整条命令交给它，当前程序只转发输出与退出码。
+            if let Some(stdout) =
+                study_version::delegate_creation(cmd, opts, &case_root, &spec_file)?
+            {
+                print!("{stdout}");
+                return Ok(());
+            }
             let prepared = study::model::prepare_create(opts, &case_root, &spec_file)?;
             let (input_root, input_spec) = prepared
                 .as_ref()

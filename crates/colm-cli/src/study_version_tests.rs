@@ -527,3 +527,410 @@ fn the_first_run_freezes_engine_and_preprocessors_for_later_runs() {
     assert_eq!(run_options(&root).unwrap(), Some(first));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------- 创建/预检交给运行研究的程序
+//
+// P1-8：研究由当前程序创建、由冻结修订自己的 colm-cli 运行时，manifest 里的参数来源哈希是当前程序
+// 算的，修订程序用自己内嵌的参数目录重算就对不上——研究建得成却跑不起来。所以 workspace 型修订的
+// `study-create`/`study-preflight` 整条命令交给 `revision_cli` 指的那份程序（见
+// [`delegate_creation`]），由它写 manifest 与 provenance；官方修订和当前程序自己就是那份程序时保持
+// 本地路径。
+
+fn revision_code(workspace: Option<&str>) -> colm_model::CodeRef {
+    colm_model::CodeRef {
+        kind: if workspace.is_some() {
+            colm_model::CodeKind::Workspace
+        } else {
+            colm_model::CodeKind::Official
+        },
+        workspace: workspace.map(str::to_owned),
+        commit: Some("0".repeat(40)),
+        source_sha256: "a".repeat(64),
+    }
+}
+
+fn workspace_revision(id: &str, revision: u64) -> colm_model::FrozenRevision {
+    serde_json::from_value(serde_json::json!({
+        "schema": colm_model::SCHEMA,
+        "version": {"id": id, "revision": revision},
+        "name": id,
+        "note": "",
+        "parent": null,
+        "code": {"kind": "workspace", "workspace": "ws", "commit": "0".repeat(40), "source_sha256": "a".repeat(64)},
+        "overlay": {},
+        "overlay_sha256": "",
+        "fingerprint": "",
+        "created_unix": 0,
+        "applicability": {}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn creation_executor_follows_the_program_that_will_run_the_study() {
+    let current = Path::new("/app/bin/colm-cli");
+    let cached = Path::new("/models/sources/abc/workspaces/ws/bin/colm-cli");
+    // workspace 修订运行时会换成缓存里的 colm-cli：创建也得用它，否则 provenance 哈希口径不同。
+    assert_eq!(
+        creation_executor(&revision_code(Some("ws")), current, cached),
+        CreationExecutor::Delegate(cached.to_path_buf())
+    );
+    // 官方修订不换程序：保持当前路径。
+    assert_eq!(
+        creation_executor(&revision_code(None), current, cached),
+        CreationExecutor::Local
+    );
+    // 当前程序就是那份修订的 CLI（例如由它转交回来）：不能再转交一次。
+    assert_eq!(
+        creation_executor(&revision_code(Some("ws")), current, current),
+        CreationExecutor::Local
+    );
+}
+
+#[test]
+fn creation_delegate_args_forward_the_original_case_and_spec() {
+    let flags: Vec<(String, String)> = vec![
+        ("--model-root".into(), "/models".into()),
+        ("--model-id".into(), "ws".into()),
+        ("--model-revision".into(), "2".into()),
+        ("--history-db".into(), "/history.db".into()),
+    ];
+    assert_eq!(
+        creation_delegate_args(
+            "study-create",
+            Path::new("/case"),
+            Path::new("/tmp/spec.json"),
+            &flags
+        ),
+        vec![
+            "study-create",
+            "/case",
+            "--model-root",
+            "/models",
+            "--model-id",
+            "ws",
+            "--model-revision",
+            "2",
+            "--history-db",
+            "/history.db",
+            "--spec",
+            "/tmp/spec.json",
+        ]
+    );
+    // 设定是位置参数（老命令行用法）时补成 --spec；已经是 --spec 时不要写两遍。
+    assert_eq!(
+        creation_delegate_args(
+            "study-preflight",
+            Path::new("/case"),
+            Path::new("/design.json"),
+            &[]
+        ),
+        vec!["study-preflight", "/case", "--spec", "/design.json"]
+    );
+    let flags: Vec<(String, String)> = vec![("--spec".into(), "/design.json".into())];
+    assert_eq!(
+        creation_delegate_args(
+            "study-create",
+            Path::new("/case"),
+            Path::new("/design.json"),
+            &flags
+        ),
+        vec!["study-create", "/case", "--spec", "/design.json"]
+    );
+}
+
+#[test]
+fn a_study_without_a_frozen_revision_stays_local() {
+    let opts = crate::Opts {
+        flags: Vec::new(),
+        positional: vec!["/case".into()],
+    };
+    assert!(delegate_creation(
+        "study-create",
+        &opts,
+        Path::new("/case"),
+        Path::new("/spec.json")
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
+fn an_official_revision_keeps_the_local_create_path() {
+    let root = temp("delegate-official");
+    let models = root.join("models");
+    let store = colm_model::Registry::open(&models).unwrap();
+    let official = store.install_official(revision_code(None)).unwrap();
+    let case = root.join("case");
+    std::fs::create_dir_all(&case).unwrap();
+    let opts = crate::Opts {
+        flags: vec![
+            ("--model-root".into(), models.to_string_lossy().into_owned()),
+            ("--model-id".into(), "official".into()),
+            (
+                "--model-revision".into(),
+                official.version.revision.to_string(),
+            ),
+        ],
+        positional: vec![case.to_string_lossy().into_owned()],
+    };
+    // 官方修订运行时不换程序，创建仍在当前程序里做。
+    assert!(
+        delegate_creation("study-create", &opts, &case, &root.join("spec.json"))
+            .unwrap()
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+fn fake_cli(root: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let cli = root.join("revision-colm-cli");
+    std::fs::write(&cli, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cli
+}
+
+/// 能通过 `read_spec` 的最小设定；`include_baseline` 是 GUI 自动加的增强（见
+/// `ensure_revision_reads_spec`）。
+#[cfg(unix)]
+fn valid_spec(root: &Path, include_baseline: bool) -> PathBuf {
+    let path = root.join("spec.json");
+    let value = serde_json::json!({
+        "kind": "uncertainty",
+        "method": "oat",
+        "base_cases": ["site"],
+        "observations": {"site": "obs.nc"},
+        "parameters": [],
+        "targets": [{"key": "Qle", "variable": "Qle", "from": 0, "to": 10}],
+        "budget": {"population": 4, "generations": 1, "include_baseline": include_baseline},
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    path
+}
+
+/// 假 CLI 建研究的方式：把测试准备好的模板目录复制成研究目录，并打印它的路径。
+#[cfg(unix)]
+fn student_template(root: &Path, pin: Option<serde_json::Value>) -> PathBuf {
+    let template = root.join("template");
+    std::fs::create_dir_all(&template).unwrap();
+    std::fs::write(template.join("manifest.json"), b"{}").unwrap();
+    if let Some(pin) = pin {
+        std::fs::write(
+            template.join("model-version.json"),
+            serde_json::to_vec_pretty(&pin).unwrap(),
+        )
+        .unwrap();
+    }
+    template
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_revision_study_is_created_by_its_own_cli() {
+    let root = temp("delegate-create");
+    let case_root = root.join("case");
+    std::fs::create_dir_all(&case_root).unwrap();
+    let spec = valid_spec(&root, false);
+    let revision = workspace_revision("ws", 2);
+    let study = case_root.join(".colm/studies/created");
+    let template = student_template(
+        &root,
+        Some(serde_json::json!({"model_revision":{"version":{"id":"ws","revision":2}}})),
+    );
+    let log = root.join("args.log");
+    let env_log = root.join("env.log");
+    let script = format!(
+        "printf '%s\\n' \"$@\" > '{log}'\n\
+         printf '%s %s\\n' \"$COLM_STUDY_BY_PARENT\" \"$COLM_AUDIT_BY_PARENT\" > '{env_log}'\n\
+         mkdir -p '{studies}'\n\
+         cp -R '{template}' '{study}'\n\
+         printf '%s\\n' '{study}'\n",
+        log = log.display(),
+        env_log = env_log.display(),
+        studies = study.parent().unwrap().display(),
+        template = template.display(),
+        study = study.display(),
+    );
+    let cli = fake_cli(&root, &script);
+    let flags: Vec<(String, String)> = vec![
+        ("--model-root".into(), "/models".into()),
+        ("--model-id".into(), "ws".into()),
+        ("--model-revision".into(), "2".into()),
+        ("--history-db".into(), "/history.db".into()),
+    ];
+    let stdout =
+        create_with_revision_cli("study-create", &revision, &cli, &case_root, &spec, &flags)
+            .unwrap();
+    // 研究目录原样交回给 GUI（父程序不解析、不改写）。
+    assert_eq!(stdout, format!("{}\n", study.display()));
+    // 转交的是原始算例目录与原始设定，不是 prepare_create 的临时冻结输入目录。
+    let args: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            "study-create",
+            case_root.to_str().unwrap(),
+            "--model-root",
+            "/models",
+            "--model-id",
+            "ws",
+            "--model-revision",
+            "2",
+            "--history-db",
+            "/history.db",
+            "--spec",
+            spec.to_str().unwrap(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&env_log).unwrap().trim(),
+        "1 1",
+        "子进程要标明由父进程转交，避免它再转交一次"
+    );
+    assert!(study.join("model-version.json").is_file());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec() {
+    let root = temp("delegate-baseline");
+    let spec = valid_spec(&root, true);
+    let before = std::fs::read(&spec).unwrap();
+    let log = root.join("specs.log");
+    let script = format!(
+        "spec=''\nprev=''\n\
+         for arg in \"$@\"; do\n\
+           if [ \"$prev\" = \"--spec\" ]; then spec=\"$arg\"; fi\n\
+           prev=\"$arg\"\n\
+         done\n\
+         has=0\n\
+         if grep -q '\"include_baseline\": true' \"$spec\"; then has=1; fi\n\
+         printf '%s %s\\n' \"$spec\" \"$has\" >> '{log}'\n\
+         if [ \"$has\" = \"1\" ]; then\n\
+           echo 'Error: unknown field `include_baseline`, expected one of `jobs`' >&2\n\
+           exit 1\n\
+         fi\n\
+         echo ok\n",
+        log = log.display(),
+    );
+    let cli = fake_cli(&root, &script);
+    let revision = workspace_revision("ws", 2);
+    let stdout = create_with_revision_cli(
+        "study-preflight",
+        &revision,
+        &cli,
+        &root,
+        &spec,
+        &Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(stdout.trim(), "ok");
+    // 只认不得 include_baseline 时去掉它重试；用户给的设定文件绝不改写。
+    assert_eq!(std::fs::read(&spec).unwrap(), before);
+    let attempts: Vec<(PathBuf, bool)> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (path, has) = line.rsplit_once(' ').unwrap();
+            (PathBuf::from(path), has == "1")
+        })
+        .collect();
+    assert_eq!(attempts.len(), 2, "先按原设定试一次，去掉增强后再试一次");
+    assert_eq!(attempts[0], (spec.clone(), true));
+    assert_ne!(attempts[1].0, spec);
+    assert!(!attempts[1].1, "重试的设定里不再有 include_baseline");
+    assert!(!attempts[1].0.exists(), "重试用的临时副本事后要删掉");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_revision_that_cannot_read_the_design_reports_an_actionable_error() {
+    let root = temp("delegate-old");
+    let spec = valid_spec(&root, false);
+    let cli = fake_cli(
+        &root,
+        "echo 'Error: unknown field `morris`, expected one of `oat`' >&2\nexit 3\n",
+    );
+    let revision = workspace_revision("ws", 2);
+    let error =
+        create_with_revision_cli("study-create", &revision, &cli, &root, &spec, &Vec::new())
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("model version ws r2"), "{error}");
+    assert!(error.contains("older code"), "{error}");
+    assert!(error.contains("unknown field `morris`"), "{error}");
+    assert!(error.contains("official version"), "{error}");
+    assert!(
+        error.contains("rebuild this version on the current code"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_ordinary_failure_still_reports_the_revision_and_its_own_message() {
+    let root = temp("delegate-ordinary");
+    let spec = valid_spec(&root, false);
+    let cli = fake_cli(
+        &root,
+        "echo 'Error: kernel_dir does not exist: /k' >&2\nexit 2\n",
+    );
+    let revision = workspace_revision("ws", 2);
+    let error =
+        create_with_revision_cli("study-create", &revision, &cli, &root, &spec, &Vec::new())
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("model version ws r2"), "{error}");
+    assert!(error.contains("could not create this Study"), "{error}");
+    assert!(error.contains("kernel_dir does not exist"), "{error}");
+    // 普通失败不能归咎于旧代码。
+    assert!(!error.contains("older code"), "{error}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_revision_cli_that_ignores_the_revision_cannot_leave_a_broken_study() {
+    let root = temp("delegate-unbound");
+    let case_root = root.join("case");
+    std::fs::create_dir_all(&case_root).unwrap();
+    let spec = valid_spec(&root, false);
+    let revision = workspace_revision("ws", 2);
+    let study = case_root.join(".colm/studies/orphan");
+    // 只建研究、不写 model-version.json：这是还不会在创建时绑定修订的旧程序的行为。
+    let template = student_template(&root, None);
+    let script = format!(
+        "mkdir -p '{studies}'\ncp -R '{template}' '{study}'\nprintf '%s\\n' '{study}'\n",
+        studies = study.parent().unwrap().display(),
+        template = template.display(),
+        study = study.display(),
+    );
+    let cli = fake_cli(&root, &script);
+    let error = create_with_revision_cli(
+        "study-create",
+        &revision,
+        &cli,
+        &case_root,
+        &spec,
+        &Vec::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("model version ws r2"), "{error}");
+    assert!(error.contains("did not bind"), "{error}");
+    assert!(error.contains("official version"), "{error}");
+    assert!(
+        !study.exists(),
+        "绑定不了修订的研究只会建得成跑不起来，不能留给用户"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
