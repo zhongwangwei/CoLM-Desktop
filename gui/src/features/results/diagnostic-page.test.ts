@@ -79,6 +79,18 @@ function harness(
           ...(options.remoteRun ? { server: 'server', outputs_local: false } : {}),
         },
       ];
+    if (command === 'model_project_runs')
+      return [
+        {
+          run_case: '/case/.colm/runs/a',
+          case_dir: '/case',
+          case_name: 'case',
+          version: { id: 'official', revision: 2 },
+          status: 'succeeded',
+          finished_ms: 1,
+          outputs_local: true,
+        },
+      ];
     if (command === 'history_catalog')
       return {
         files: 1,
@@ -587,7 +599,13 @@ test('评估、比较与数据目录页签只登记该页签真实的按钮', as
   assert.deepEqual(actionIds(h), ['evaluate-observations', 'result-overview', 'result-runs']);
   assert.equal(actionById(h, 'evaluate-observations')?.enabled, false, '没有观测文件');
   await h.tab('comparison');
-  assert.deepEqual(actionIds(h), ['compare-sites', 'result-overview', 'result-runs']);
+  assert.deepEqual(actionIds(h), [
+    'compare-sites',
+    'comparison-apply-observation',
+    'export-comparison-csv',
+    'result-overview',
+    'result-runs',
+  ]);
   assert.equal(actionById(h, 'compare-sites')?.enabled, false, '还没有比较输入');
   await h.tab('catalog');
   assert.deepEqual(actionIds(h), ['result-overview', 'result-runs']);
@@ -690,3 +708,65 @@ function cellError(h: { tree: () => unknown }): boolean {
   };
   return walk(h.tree());
 }
+
+test('multi-station comparison loads project runs once and builds rows from ticks', async () => {
+  const h = harness(true);
+  await h.render();
+  const stationScans = () =>
+    h.requests.filter((request) => request.command === 'model_case_runs').length;
+  const before = stationScans();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  // 一次项目级查询，不再为每个站点各调一次 model_case_runs。
+  assert.equal(h.requests.filter((request) => request.command === 'model_project_runs').length, 1);
+  assert.equal(stationScans(), before, 'the comparison list does not scan every station');
+  const inputs = (node: unknown): { props: Record<string, unknown> }[] => {
+    if (Array.isArray(node)) return node.flatMap(inputs);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    return [
+      ...(element.type === 'input' ? [{ props: element.props }] : []),
+      ...inputs(element.props?.children),
+    ];
+  };
+  // 关着的对话框子树也在渲染树里（真实 Radix 不挂载内容），按处理函数认出运行勾选框。
+  const checkbox = inputs(h.tree()).find(
+    (input) =>
+      input.props.type === 'checkbox' &&
+      String(input.props.onChange).includes('toggleComparisonRun'),
+  );
+  assert.ok(checkbox, 'project runs are offered as checkboxes');
+  (checkbox.props.onChange as () => void)();
+  await h.render();
+  assert.match(
+    String(h.field('comparison-sources')?.value),
+    /\/case\/\.colm\/runs\/a/,
+    'ticking a run adds it to the comparison rows',
+  );
+  // 共用观测：填一次，点「应用到所有行」。
+  h.field('result-observation')!.set!('/obs/compare.nc');
+  await h.render();
+  await h.action('comparison-apply-observation');
+  assert.equal(h.field('comparison-sources')!.value, '/case/.colm/runs/a | /obs/compare.nc');
+  await h.action('comparison-remove-0');
+  assert.equal(h.field('comparison-sources')!.value, '');
+});
+
+test('multi-station comparison exports the metrics with their conditions', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  h.field('comparison-sources')!.set!('/case/.colm/runs/a | /obs/compare.nc');
+  await h.render();
+  await h.action('compare-sites');
+  await h.action('export-comparison-csv');
+  const csv = h.exports.at(-1)!;
+  assert.match(csv, /^site,run_case,status,version,observation,/);
+  assert.match(csv, /\/case\/\.colm\/runs\/a/);
+  assert.match(csv, /f_lfevpa/);
+  assert.match(csv, /\/obs\/compare\.nc/);
+});

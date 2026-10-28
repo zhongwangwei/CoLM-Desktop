@@ -439,3 +439,101 @@
     font-size: 10px;
   }
 }
+/* 多站点比较的选择器：按站点分组的运行多选列表 + 已选行（每行一个观测文件）。 */
+.results-comparison-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.comparison-run-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.comparison-run-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  background: var(--background);
+}
+.comparison-run-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.comparison-run-group h3 small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.comparison-run-group ul,
+.comparison-selected ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.comparison-run-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+.comparison-run-option input {
+  margin-top: 3px;
+}
+.comparison-run-option span,
+.comparison-selected li span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.comparison-run-option small,
+.comparison-selected li small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.comparison-selected {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+.comparison-selected h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.comparison-selected li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.comparison-selected li span {
+  flex: 1;
+  min-width: 220px;
+}
+.comparison-selected li .input {
+  flex: 1;
+  min-width: 180px;
+}
+.results-comparison-conditions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.results-comparison-conditions p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}

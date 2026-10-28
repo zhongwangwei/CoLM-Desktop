@@ -62,6 +62,15 @@ type Run = RecordedRun & {
   outputs_local?: boolean;
   [key: string]: unknown;
 };
+/** `model_project_runs` 返回的一条可比较运行（带所属站点，供多站点比较选择器分组）。 */
+type ProjectRun = Run & {
+  run_case: string;
+  case_dir: string;
+  case_name: string;
+  finished_ms?: number | null;
+};
+/** 多站点比较的一行：一个运行副本 + 它的观测文件。 */
+type ComparisonEntry = { run: ProjectRun; obs: string };
 type BaselineComparison = {
   same_design: boolean;
   better?: string | null;
@@ -72,6 +81,8 @@ type BaselineComparison = {
 };
 type Metric = ResultMetric & {
   provenance?: Run;
+  /** Multi-station comparison: the observation file that produced this row. */
+  comparison_obs?: string;
   time?: number[];
   model?: (number | null)[];
   obs?: (number | null)[];
@@ -261,7 +272,17 @@ export default function ResultsPage({
   const [series, setSeries] = useState<SeriesData | null>(null);
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [diagnostic, setDiagnostic] = useState<EnergyDiagnostic | null>(null);
-  const [comparison, setComparison] = useState('');
+  // 多站点比较：选中运行（有序，每行一个观测文件）+ 项目里可比较的运行清单（一次 IPC 查完）。
+  const [comparisonEntries, setComparisonEntries] = useState<ComparisonEntry[]>([]);
+  const [projectRuns, setProjectRuns] = useState<ProjectRun[]>([]);
+  const [projectRunsLoading, setProjectRunsLoading] = useState(false);
+  const [projectRunsError, setProjectRunsError] = useState('');
+  const [comparisonProgress, setComparisonProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  // 站点清单按内容做依赖：`state.cases` 每次渲染都可能是新数组，直接放进 effect 依赖会无限重查。
+  const caseDirsKey = state.cases.map((entry) => entry.dir).join('\n');
   const [evaluation, setEvaluation] = useState<
     {
       name: string;
@@ -297,7 +318,7 @@ export default function ResultsPage({
     setTo('');
     setSpinup('0');
     setCorrected(false);
-    setComparison('');
+    setComparisonEntries([]);
     setError('');
     let cancelled = false;
     if (!caseDir) return;
@@ -383,7 +404,7 @@ export default function ResultsPage({
     setMetrics([]);
     setDiagnostic(null);
     setSingleEvaluation(null);
-  }, [from, to, obs, spinup, corrected, comparison]);
+  }, [from, to, obs, spinup, corrected, comparisonEntries]);
   useEffect(() => {
     setSeries(null);
     setSeriesKey('');
@@ -459,6 +480,29 @@ export default function ResultsPage({
       clearTimeout(timer);
     };
   }, [runs, source, obs, spinup, from, to, corrected, variable, caseDir]);
+  // 多站点比较：项目里所有站点的成功运行一次查完（原来的实现要逐站点调 model_case_runs，90 个站点
+  // 就是 90 次 IPC + 台账扫描）。进入多站点范围时加载一次，失败也不挡住其他视图。
+  useEffect(() => {
+    if (!multiStation) return;
+    const dirs = (caseDirsKey ? caseDirsKey.split('\n') : [caseDir]).filter(Boolean);
+    if (!dirs.length) return;
+    let cancelled = false;
+    setProjectRunsLoading(true);
+    setProjectRunsError('');
+    invokeJson<ProjectRun[]>('model_project_runs', { dirs })
+      .then((rows) => {
+        if (!cancelled) setProjectRuns(Array.isArray(rows) ? rows : []);
+      })
+      .catch((failure) => {
+        if (!cancelled) setProjectRunsError(String(failure));
+      })
+      .finally(() => {
+        if (!cancelled) setProjectRunsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [multiStation, caseDirsKey, caseDir]);
   async function task<T>(fn: (current: () => boolean) => Promise<T>): Promise<T> {
     if (lock.current) throw new Error('Operation in progress');
     lock.current = true;
@@ -625,36 +669,36 @@ export default function ResultsPage({
     task(async (current) => {
       if (!Number.isInteger(Number(spinup)) || Number(spinup) < 0)
         throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
-      const entries = comparison
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => line.split('|').map((v) => v.trim()));
-      if (
-        !entries.length ||
-        entries.length > 20 ||
-        entries.some((x) => x.length !== 2 || !x[0] || !x[1])
-      )
+      const entries = comparisonEntries;
+      if (!entries.length || entries.length > 20)
+        throw new Error(bilingual('要选 1–20 个运行再比较', 'Select 1–20 runs to compare'));
+      if (entries.some((entry) => !entry.obs.trim()))
         throw new Error(
           bilingual(
-            '要填 1–20 行，每行"运行目录 | 观测文件"',
-            'Use 1–20 lines: run_case | observation',
+            '每个运行都要有观测文件；可以先在上面填一个共用观测再点「应用到所有行」',
+            'Every run needs an observation file; fill the shared one and apply it to all rows',
           ),
         );
-      const inventories = await boundedMap(
-        [...new Set([caseDir, ...state.cases.map((c) => c.dir)].filter(Boolean))],
-        2,
-        (path) => invokeJson<Run[]>('model_case_runs', { dir: path }),
-      );
-      if (!current()) return;
-      const sources = inventories.flat();
-      for (const [path] of entries) {
-        if (!sources.some((r) => r.run_case === path))
-          throw new Error(`Not a recorded run copy: ${path}`);
+      // 项目运行清单已经一次查回来了就直接核对；直接手填路径（助手/契约）且清单不可用时才退回逐站点清单。
+      let sources: Run[] = projectRuns;
+      if (!sources.length) {
+        const inventories = await boundedMap(
+          [...new Set([caseDir, ...state.cases.map((c) => c.dir)].filter(Boolean))],
+          2,
+          (path) => invokeJson<Run[]>('model_case_runs', { dir: path }),
+        );
+        if (!current()) return;
+        sources = inventories.flat();
       }
-      const rows = await boundedMap(entries, 2, async ([path, observation]) => {
+      for (const entry of entries) {
+        if (!sources.some((r) => r.run_case === entry.run.run_case))
+          throw new Error(`Not a recorded run copy: ${entry.run.run_case}`);
+      }
+      setComparisonProgress({ done: 0, total: entries.length });
+      const rows = await boundedMap(entries, 2, async (entry) => {
         const values = await invokeJson<Metric[]>('metrics', {
-          case: path,
-          obs: observation,
+          case: entry.run.run_case,
+          obs: entry.obs.trim(),
           spinup: Number(spinup),
           corrected,
           summaryOnly: true,
@@ -662,12 +706,17 @@ export default function ResultsPage({
           maxPoints: 2400,
           ...windowArgs(),
         });
+        setComparisonProgress((previous) =>
+          previous ? { ...previous, done: previous.done + 1 } : previous,
+        );
         return values.map((v) => ({
           ...v,
-          site: path,
-          provenance: sources.find((r) => r.run_case === path),
+          site: entry.run.run_case,
+          comparison_obs: entry.obs.trim(),
+          provenance: sources.find((r) => r.run_case === entry.run.run_case) ?? entry.run,
         }));
       });
+      setComparisonProgress(null);
       if (current()) setMetrics(rows.flat());
     });
   function exportMessage(result: Awaited<ReturnType<typeof download>>) {
@@ -713,7 +762,14 @@ export default function ResultsPage({
       diagnostic,
       baseline,
       baselineNote,
-      conditions: { obs, from, to, spinup, corrected, comparisonSources: comparison },
+      conditions: {
+        obs,
+        from,
+        to,
+        spinup,
+        corrected,
+        comparisonSources: comparisonText(comparisonEntries),
+      },
       notice: 'No automatic ranking across unequal inputs or evaluation conditions',
     };
   }
@@ -788,6 +844,155 @@ export default function ResultsPage({
     setSource(path);
     setRunChooser(false);
   }
+  /** 多站点比较的契约文本：每行"运行目录 | 观测文件"，界面用结构化列表维护。 */
+  function comparisonText(entries: ComparisonEntry[]) {
+    return entries.map((entry) => `${entry.run.run_case} | ${entry.obs}`).join('\n');
+  }
+  function applyComparisonText(value: string) {
+    const lines = value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    setComparisonEntries(
+      lines
+        .map((line) => {
+          const [runCase, observation = ''] = line.split('|').map((part) => part.trim());
+          const run =
+            projectRuns.find((item) => item.run_case === runCase) ??
+            ({ run_case: runCase, case_dir: '', case_name: '', status: 'recorded' } as ProjectRun);
+          return { run, obs: observation };
+        })
+        .filter((entry) => entry.run.run_case),
+    );
+  }
+  function comparisonRunFact(run: ProjectRun) {
+    const parts = [overviewRunStatus(run, en)];
+    parts.push(
+      run.version
+        ? `${run.version.id}@${run.version.revision}`
+        : en
+          ? 'version unknown'
+          : '版本身份未知',
+    );
+    if (run.server)
+      parts.push(
+        run.outputs_local === false
+          ? en
+            ? 'outputs on server'
+            : '结果在服务器上'
+          : en
+            ? 'outputs fetched locally'
+            : '结果已取回本机',
+      );
+    if (run.finished_ms)
+      parts.push(new Date(run.finished_ms).toLocaleString(en ? 'en-US' : 'zh-CN'));
+    return parts.join(' · ');
+  }
+  /** 按站点分组（保持后端返回的最近优先顺序），供多选列表使用。 */
+  function groupedProjectRuns(runs: ProjectRun[]) {
+    const groups = new Map<string, { caseName: string; runs: ProjectRun[] }>();
+    for (const run of runs) {
+      const key = run.case_dir || run.case_name || run.run_case;
+      const group: { caseName: string; runs: ProjectRun[] } = groups.get(key) ?? {
+        caseName: run.case_name || key.split(/[\\/]/).at(-1) || key,
+        runs: [] as ProjectRun[],
+      };
+      group.runs.push(run);
+      groups.set(key, group);
+    }
+    return [...groups.entries()].map(([dir, group]) => ({ dir, ...group }));
+  }
+  function toggleComparisonRun(run: ProjectRun) {
+    setComparisonEntries((current) =>
+      current.some((entry) => entry.run.run_case === run.run_case)
+        ? current.filter((entry) => entry.run.run_case !== run.run_case)
+        : [...current, { run, obs: obs.trim() }],
+    );
+  }
+  function removeComparisonEntry(index: number) {
+    setComparisonEntries((current) => current.filter((_, item) => item !== index));
+  }
+  function setComparisonEntryObs(index: number, value: string) {
+    setComparisonEntries((current) =>
+      current.map((entry, item) => (item === index ? { ...entry, obs: value } : entry)),
+    );
+  }
+  function applySharedObservation() {
+    setComparisonEntries((current) => current.map((entry) => ({ ...entry, obs: obs.trim() })));
+  }
+  const exportComparison = () =>
+    task(async (current) => {
+      setExportNotice('');
+      if (!metrics.length)
+        throw new Error(
+          tr('先运行比较，再导出指标', 'Run the comparison before exporting metrics'),
+        );
+      const escape = (value: unknown) => {
+        const text = value == null ? '' : String(value);
+        return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+      };
+      const header = [
+        'site',
+        'run_case',
+        'status',
+        'version',
+        'observation',
+        'from',
+        'to',
+        'spinup',
+        'corrected',
+        'variable',
+        'units',
+        'n',
+        'rmse',
+        'mae',
+        'bias',
+        'r2',
+        'r',
+        'nse',
+        'kge',
+      ];
+      const lines = [header.join(',')];
+      for (const metric of metrics) {
+        const run =
+          (metric.provenance as ProjectRun | undefined) ??
+          comparisonEntries.find((entry) => entry.run.run_case === metric.site)?.run;
+        lines.push(
+          [
+            run
+              ? `${run.case_name || run.case_dir} · ${String(metric.site).split(/[\\/]/).at(-1)}`
+              : metric.site,
+            metric.site,
+            run?.status ?? '',
+            run?.version ? `${run.version.id}@${run.version.revision}` : '',
+            metric.comparison_obs ?? '',
+            from,
+            to,
+            spinup,
+            corrected ? '1' : '0',
+            metric.name,
+            metric.units,
+            metric.n,
+            metric.rmse,
+            metric.mae,
+            metric.bias,
+            metric.r2,
+            metric.correlation,
+            metric.nse,
+            metric.kge,
+          ]
+            .map(escape)
+            .join(','),
+        );
+      }
+      const result = await download(
+        'multi-station-metrics.csv',
+        lines.join('\n'),
+        'text/csv;charset=utf-8',
+      );
+      if (current()) setExportNotice(exportMessage(result));
+      return result;
+    });
   function changeSettings(open: boolean) {
     if (!lock.current) setSettingsOpen(open);
   }
@@ -912,10 +1117,10 @@ export default function ResultsPage({
     fields.push({
       id: 'comparison-sources',
       label: 'Run paths | observations',
-      value: comparison,
+      value: comparisonText(comparisonEntries),
       type: 'text',
       disabled: busy,
-      set: setComparison,
+      set: applyComparisonText,
     });
   if (!runChooser && ((settingsOpen && advanced) || tab === 'evaluation' || tab === 'comparison'))
     fields.push(
@@ -1020,13 +1225,13 @@ export default function ResultsPage({
         </div>
         <ActionButton
           action="result-runs"
-          label={tr('比较其他运行', 'Compare other runs')}
+          label={tr('切换运行记录', 'Switch recorded run')}
           kind="click"
           disabled={busy || !runs.some((item) => item.run_case)}
           run={() => changeRunChooser(true)}
         >
           <NavIcon name="results" />
-          {tr('比较其他运行', 'Compare other runs')}
+          {tr('切换运行记录', 'Switch recorded run')}
         </ActionButton>
       </header>
       {/* 分析范围（单站点/多站点）放在站点选择旁边：多站点不是页签，而是看整个项目的多站比较页。 */}
@@ -1392,10 +1597,10 @@ export default function ResultsPage({
         </section>
       )}
       <Dialog
-        title={tr('选择运行', 'Choose a run')}
+        title={tr('切换运行记录', 'Switch recorded run')}
         description={tr(
-          '选择真实运行记录查看结果，或进入多运行比较。',
-          'Select a recorded run or open multi-run comparison.',
+          '选一条运行记录看它的结果。要比较多条运行，请进入"多站点"范围后勾选。',
+          'Choose which recorded run the page shows. To compare several runs, switch the scope to "Multiple stations" and tick them.',
         )}
         open={runChooser}
         onOpenChange={changeRunChooser}
@@ -1421,7 +1626,7 @@ export default function ResultsPage({
         </div>
         <ActionButton
           action="result-run-comparison"
-          label={tr('进入多运行比较', 'Open multi-run comparison')}
+          label={tr('比较多条运行', 'Compare several runs')}
           kind="click"
           disabled={busy}
           run={() => {
@@ -1429,7 +1634,7 @@ export default function ResultsPage({
             setTab('comparison');
           }}
         >
-          {tr('进入多运行比较', 'Open multi-run comparison')}
+          {tr('比较多条运行', 'Compare several runs')}
         </ActionButton>
       </Dialog>
       <Dialog
@@ -1652,6 +1857,150 @@ export default function ResultsPage({
           </table>
         </Card>
       )}
+      {multiStation && (
+        <Card>
+          <div className="results-comparison-picker">
+            <div>
+              <h2>{tr('选择要比较的运行', 'Choose runs to compare')}</h2>
+              <p className="muted">
+                {tr(
+                  '按站点分组列出项目里成功的运行；勾选后可以逐个改观测文件，也可先填一个共用观测再应用到所有行。',
+                  'Successful runs in this project, grouped by station. Tick the runs, then edit each observation or fill one shared one and apply it to all rows.',
+                )}
+              </p>
+            </div>
+            {projectRunsLoading && (
+              <p role="status">{tr('正在读取项目里的运行记录…', 'Reading recorded runs…')}</p>
+            )}
+            {projectRunsError && <Notice tone="error">{projectRunsError}</Notice>}
+            {!projectRunsLoading && !projectRunsError && !projectRuns.length && (
+              <Notice>
+                {tr(
+                  '项目里还没有成功的运行记录：先跑完至少一个站点再来比较。',
+                  'No successful run in this project yet; finish at least one station first.',
+                )}
+              </Notice>
+            )}
+            {!projectRunsLoading && !!projectRuns.length && (
+              <div className="comparison-run-groups">
+                {groupedProjectRuns(projectRuns).map((group) => (
+                  <section key={group.dir} className="comparison-run-group">
+                    <h3>
+                      {group.caseName}
+                      <small>{group.dir}</small>
+                    </h3>
+                    <ul>
+                      {group.runs.map((run) => {
+                        const checked = comparisonEntries.some(
+                          (entry) => entry.run.run_case === run.run_case,
+                        );
+                        return (
+                          <li key={run.run_case}>
+                            <label className="comparison-run-option">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={busy}
+                                onChange={() => toggleComparisonRun(run)}
+                              />
+                              <span>
+                                <strong>{overviewRunLabel(run, en)}</strong>
+                                <small>{comparisonRunFact(run)}</small>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            )}
+            <Field
+              label={tr(
+                '共用观测文件（选一次可应用到所有行；服务器项目的观测填服务器路径）',
+                'Shared observation file (choose once, apply to all rows; server projects need a server path)',
+              )}
+            >
+              <div className="browse-input">
+                <Input
+                  value={obs}
+                  disabled={busy}
+                  onChange={(e) => {
+                    epoch.current++;
+                    setMetrics([]);
+                    chooseObservation(e.target.value);
+                  }}
+                />
+                <ActionButton
+                  action="comparison-apply-observation"
+                  label={tr('应用到所有行', 'Apply to all rows')}
+                  disabled={!comparisonEntries.length || !obs.trim() || busy}
+                  run={applySharedObservation}
+                />
+              </div>
+            </Field>
+            {!!comparisonEntries.length && (
+              <div className="comparison-selected">
+                <h3>
+                  {tr(
+                    `已选 ${comparisonEntries.length} 个运行`,
+                    `${comparisonEntries.length} run(s) selected`,
+                  )}
+                </h3>
+                <ul>
+                  {comparisonEntries.map((entry, index) => (
+                    <li key={entry.run.run_case}>
+                      <span>
+                        <strong>{overviewRunLabel(entry.run, en)}</strong>
+                        <small>{entry.run.case_name || entry.run.case_dir}</small>
+                      </span>
+                      <Input
+                        aria-label={tr('观测文件', 'Observation file')}
+                        value={entry.obs}
+                        disabled={busy}
+                        onChange={(e) => setComparisonEntryObs(index, e.target.value)}
+                      />
+                      <ActionButton
+                        action={`comparison-remove-${index}`}
+                        label={tr('移除', 'Remove')}
+                        disabled={busy}
+                        run={() => removeComparisonEntry(index)}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <Notice>
+              {tr(
+                '相同时段和评估设置下展示指标；不同输入不解释版本优劣。',
+                'Metrics use the selected evaluation window; different inputs do not establish version superiority.',
+              )}
+            </Notice>
+            {comparisonProgress && (
+              <p role="status">
+                {tr(
+                  `正在计算指标 ${comparisonProgress.done}/${comparisonProgress.total}…`,
+                  `Computing metrics ${comparisonProgress.done}/${comparisonProgress.total}…`,
+                )}
+              </p>
+            )}
+            <ActionButton
+              action="compare-sites"
+              label={tr('比较多选运行', 'Compare selected runs')}
+              kind="click"
+              disabled={!comparisonEntries.length || busy}
+              run={compare}
+            >
+              {tr(
+                `比较选中的 ${comparisonEntries.length} 个运行`,
+                `Compare ${comparisonEntries.length} selected run(s)`,
+              )}
+            </ActionButton>
+          </div>
+        </Card>
+      )}
       {['series', 'evaluation', 'comparison', 'diagnostics'].includes(tab) && (
         <Card>
           <div className="grid gap-3 md:grid-cols-2">
@@ -1699,7 +2048,7 @@ export default function ResultsPage({
               </Select>
             </Field>
           )}
-          {(tab === 'evaluation' || tab === 'comparison') && (
+          {tab === 'evaluation' && (
             <Field
               label={tr(
                 '来源版本比较使用的观测文件',
@@ -1715,29 +2064,6 @@ export default function ResultsPage({
                 }}
               />
             </Field>
-          )}
-          {tab === 'comparison' && (
-            <>
-              <Field
-                label={tr(
-                  '要比较的运行与观测（每行一个站点："运行目录 | 观测文件"）',
-                  'Runs and observations to compare (one station per line: "run folder | observation file")',
-                )}
-              >
-                <textarea
-                  className="w-full"
-                  rows={4}
-                  value={comparison}
-                  onChange={(e) => setComparison(e.target.value)}
-                />
-              </Field>
-              <Notice>
-                {tr(
-                  '相同时段和评估设置下展示指标；输入不同不解释版本优劣。',
-                  'Metrics use the selected evaluation window; different inputs do not establish version superiority.',
-                )}
-              </Notice>
-            </>
           )}
           {(tab === 'evaluation' || tab === 'comparison') && (
             <div className="flex gap-4">
@@ -1790,17 +2116,6 @@ export default function ResultsPage({
               run={evaluate}
             >
               {tr('评估观测', 'Evaluate observations')}
-            </ActionButton>
-          )}
-          {tab === 'comparison' && (
-            <ActionButton
-              action="compare-sites"
-              label={tr('比较站点', 'Compare sites')}
-              kind="click"
-              disabled={!comparison || busy}
-              run={compare}
-            >
-              {tr('比较站点', 'Compare sites')}
             </ActionButton>
           )}
           {tab === 'diagnostics' && (
@@ -1888,11 +2203,31 @@ export default function ResultsPage({
       )}
       {(tab === 'evaluation' || tab === 'comparison') && (
         <Card title={tr('有效配对指标', 'Paired metrics')}>
+          {tab === 'comparison' && (
+            <div className="results-comparison-conditions">
+              <p>
+                {tr(
+                  `比较 ${comparisonEntries.length} 个运行；评估时段 ${from || '全部'} — ${to || '全部'}，跳过 ${spinup} 条记录，观测闭合订正：${corrected ? '是' : '否'}。`,
+                  `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'}, skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
+                )}
+              </p>
+              <ActionButton
+                action="export-comparison-csv"
+                label={tr('导出比较指标 CSV', 'Export comparison metrics as CSV')}
+                kind="commit"
+                disabled={!metrics.length || busy}
+                run={exportComparison}
+              >
+                {tr('导出比较指标 CSV', 'Export comparison CSV')}
+              </ActionButton>
+            </div>
+          )}
           <table>
             <thead>
               <tr>
                 {[
                   tr('站点', 'Site'),
+                  ...(tab === 'comparison' ? [tr('观测文件', 'Observation')] : []),
                   tr('变量', 'Variable'),
                   tr('配对数', 'n'),
                   'RMSE',
@@ -1912,6 +2247,11 @@ export default function ResultsPage({
                 <tr key={i}>
                   {/* 多运行比较的站点是运行目录（<算例>/runs/<编号>），整条路径占满一列：显示算例名和编号前 8 位。 */}
                   <td title={m.site || source}>{runLabel(m.site || source)}</td>
+                  {tab === 'comparison' && (
+                    <td title={m.comparison_obs}>
+                      {m.comparison_obs?.split(/[\\/]/).at(-1) || '—'}
+                    </td>
+                  )}
                   <td>{m.name}</td>
                   <td>{m.n}</td>
                   {[m.rmse, m.mae, m.bias, m.r2, m.correlation, m.nse, m.kge].map((v, j) => (
