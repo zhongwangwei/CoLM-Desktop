@@ -38590,3 +38590,45 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - Tauri/GUI 本轮未改：沿用 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约。
 - 真实 CLI/夹具 smoke：F01 selected 详情 source/object store 分离；F02 结构化 Upstream-Commit verified + 否定提及不误选；F03 workspace 未推送 commit 的 track→details 同源（CLI 半边）。
 - 未运行：真实索引型官方冻结包（用同形态 git init+add 夹具覆盖）、真实 Agent 模型端到端、真实 GitHub/TLS/token、真实 OpenCode/Codex/Claude Code 进程、GUI；复核报告 F01–F04 之外仍留 H07–H09、S01–S02、U01–U05 后续批次。
+## 结果页第一批修复：区间配对、观测语义、时间基准与结果归属（2026 年，实测）
+
+基于对结果页的审计（基线提交 `6322d828`，核对时 HEAD `b3686b13`，这些路径在两者之间无改动），本轮修四组 P1。出发点是一条共同的缺口：图表、指标、诊断与导出引用的不是同一份「带条件的结果快照」，且外部观测/时间轴的含义只有部分环节在管。以下只记实测结论与踩过的坑，不重复代码在做什么。
+
+### 1 配对必须以每条记录的真实输出区间为准（`crates/colm-hist/src/{timeline,pair,schedule}.rs`）
+
+- 旧实现（`pair.rs`）用**全序列最短相邻间隔**决定全局规则：≤1801 s 取同标签一条观测，否则取 `t−1800` 与 `t` 两条平均。日/月/年输出的间隔都远大于 1801 s，于是每一个日/月/年记录都被配上「标签附近的两条半小时观测」；运行结束后那条不满整周期的末段记录又会把最短间隔改小，**回头改变前面所有小时记录的配对**。审计里的三个复现全部核对成立。
+- 新实现是 `timeline.rs`：输出频率**从 history 标签反推**——对候选频率检查「标签 + 固定位移」是否落在该频率的自然边界上（除末条外），再用相邻写点间隔消歧（YEARLY 的 1 月 1 日写点也满足 DAILY 的午夜边界，不加这层会把年输出误判成日输出）。`DEF_HIST_FREQ` 只作交叉核对：运行结束后 nml 可能被改，不一致时按 history 为准并回传 warning。推断不出唯一频率时明确报错，不猜。
+- 每条记录的区间：`end = (label + shift) × 60`；`begin` = 上一个自然边界（TIMESTEP 是 `end − step`）。末段不在自然边界上也能由标签精确恢复 end；首条用 `case.nml` 的模拟起点/预热截止钳制，拿不到窗口时按名义边界并把 `begin_assumed` 交给界面。
+- 配对按区间聚合：样本自身覆盖的区间必须**完全落在**记录区间内；完整小时的「至少一个 `qc==0` 取均值」与旧规则逐位一致；日/月/年要求 `expected ≥ 2` 且有效率 ≥ `--min-coverage`（默认 0.5，沿用 study 的 `AGGREGATE_MIN_COVERAGE` 先例），并回传实际覆盖率。窗口对日/月/年要求整段落在 `[from,to)` 内，避免拿半段模型均值比整段观测。
+- **观测标签位置是数据产品语义，不是模型频率的附属物**。实测：`oracle/golden/CN-Cng_hist_2008-01.nc` 的小时输出配 PLUMBER2 观测，只有取 `(t−1800, t)` 才逐项复现 design.md §2.8（Rnet n=256 / RMSE 19.84 / R² 0.985；改成 `(t, t+1800)` 掉到 RMSE 28.18 / R² 0.922）⇒ FLUXNET2015/PLUMBER2 的标签是**区间起点**。仓库内 `AU-Preston/` 的 TIMESTEP 运行配 Urban-PLUMBER 观测（两者都按 UTC）：同标签 Rnet **r=0.999**、±30 min 掉到 0.927/0.934 ⇒ 该产品标签是**区间终点**。旧代码恰好让两个已验证组合都对（HOURLY+起点、TIMESTEP+终点），交叉组合则系统性错半个步长。
+- 因此新 API 把模型标签位置（TIMESTEP=end、其余=名义中点）与观测标签位置（start/end）分开建模。产品识别按全局属性（`obs_time_label_position`、`project`/标题里的 Urban-PLUMBER、`Fluxnet_dataset_version` 等）；识别不了按起点并在结果里带 warning；`metrics --obs-label-position start|end` 可显式覆盖。**本轮实测的相位变化**：TIMESTEP 输出配起点标签观测时，现在取 `label−step` 那个样本（正确相位）；显式按终点解释会回到旧的错相位（合成用例 RMSE 0 对 1）。
+- `flux_diagnostics` 仍走旧的显式间隔 API（它自己有 alignment/offset 契约），未在本轮改动；`history_compare`、study 的站点目标经由 `compute_metric_rows` 自动继承新配对。
+- 否决的方案：把最短间隔阈值调大（仍是全局判据，月份长度还会打脸）；只靠相邻间隔聚类（TIMESTEP-3600 与 HOURLY 在某些相位不可分）；只信 nml（运行后可改）；把模型重采样到半小时（造数据）。
+
+### 2 外部观测的数值、单位、QC 与订正走同一套解码（`crates/colm-cli/src/observation_input.rs`）
+
+- 旧路径三处口径不同：`metrics` 直读只按 `_FillValue`/`missing_value` 标缺测、不解 packing、从不校验值单位；CSV 导入识别列头单位却只改标签；能量诊断又会拒绝非恒等 packing。实测确认 netcdf 0.12.1 与捆绑的 netcdf-c 4.10.1 的 typed getter **不再自动应用** `scale_factor`/`add_offset`（两处源码都核对过），所以漏解包会把 1000 当 100 用。
+- 新解码层的固定顺序：原始存储域标缺测（`_FillValue`/`missing_value` + `variable.fill_value()` 兜底）→ 校验并应用 scale/offset（恒等逐位原样）→ 换规范单位（`EvaluationVariable::canonical_units`，纯 ASCII；不认识的单位拒绝并点名变量，缺 `units` 属性则告警+假定）→ QC 来源分类 → 订正状态。`values` 统一 NaN=缺测，QC 仍是 0=实测。
+- QC 现在区分 `measured_only`（源 QC）、`generated_validity`（CSV 导入生成的有效性掩码）与 `finite_only`（没有 QC）。生成的掩码不再冒充实测质量。CSV 导入真实换算单位（`Qle [kW/m2]` 的 0.1 → 100 W/m²，未知单位点名列拒绝），写 `source_units`、`qc_kind` 与全局 `obs_time_label_position="start"`；`_FillValue` 改用 `set_fill_value` 并测试 `fill_value()` 读回（旧的 `put_attribute` 写法在本仓库被实测过会静默丢）。
+- 订正版观测请求缺变量时不再静默回退：`CorrectionStatus::NotApplied{requested,reason}` + warning，界面显示「未应用订正」；研究预检仍保持硬失败（那等于换了目标）。指标行回传实际观测变量、QC 变量/规则、源单位、订正状态与 warnings。
+- 否决：直接改公共 `read_file_1d`（35 个调用点覆盖 model/history/time，语义不同）；把解码放 GUI（窗口进程不链接 NetCDF）；只改单位标签（会把 kW/m² 当 W/m²）。
+
+### 3 时间基准显式出现在 API 与导出里（`crates/colm-hist/src/time.rs`、`crates/colm-cli/src/time_basis.rs`）
+
+- 所有 `unix_seconds` 数字其实是「把模型钟读数编码成 epoch 秒」；参考程序把完整时序 CSV 标成 `time_utc` 并附 `Z`，对非零偏移站点会误导下游。新 API 在 series/catalog/map/energy/metrics/history-compare 的载荷里带 `time_basis:{kind,utc_offset_seconds,calendar,source}`：`utc` / `local_standard_time{offset}` / `model_clock`。`case.nml` 的 `DEF_simulation_time%greenwich` 是唯一可靠来源：true→UTC，false/缺失→model_clock（schema 没有时区字段，历史文件也不落偏移；**不从经度推**——中国/印度都是反例）。
+- 观测 `time:units` 严格解析 `seconds/minutes/hours/days since ... [Z|UTC|GMT|±HH:MM|±HHMM]`；空格与紧贴后缀都处理，命名时区与非公历明确拒绝。配对换算用 `((label−model_offset)−(civil−obs_offset))×60`：模型 UTC + 观测 `+08:00` 时 00:30 标签得 30600 s（旧实现 1800 s）；模型本地 +8 与观测 `+08:00` 则相互抵消（旧行为「碰巧对」的原因）。观测原始 time 值先按单位因子换成秒，单位因子只出现一次。
+- 前端（`gui/src/features/results/{time-basis,series,time-ticks}.ts`、`GridMap.tsx`、`ResultsPage.tsx`）：只有 UTC 基准导出 `time_utc`+Z；`local_standard_time` 导出 `model_time`（无 Z），偏移已知时另给换算后的 `time_utc`；`model_clock` 只出 `model_time` 且列里写明 `time_basis`，绝不出现 Z。坐标轴/窗口标题按基准显示「UTC / UTC+8 / 模型钟（本地标准时，偏移未知）」。
+- 未做（需要用户提供偏移）：结果页的显式时区偏移输入。本轮单点运行仍是 model_clock；网格/UTC 运行的观测偏移已能正确进入配对。
+
+### 4 单站与多站各自持有结果快照（`gui/src/features/results/{analysis-state,ResultsPage}.tsx`）
+
+- 旧页面 `evaluate()` 与 `compare()` 共用同一个 `metrics`：单站评估后切到多站会比较表里显示单站指标并能导出空站点列 CSV；多站结果切回单站仍显示比较行；多站里改「跳过模型记录数」会触发自动单站评估覆盖比较结果。审计三个复现全部核对成立。
+- 新 `analysis-state.ts`（纯函数+测试）定义 `SingleResult`/`ComparisonResult`（各带 scope/key/完整 request/完成时间）与 `fresh`/`exportGate`/`comparisonCsv`；页面每个请求发布自己的快照，渲染由 `multiStation` 派生；自动单站评估加 `!multiStation` 门；请求 token 按 scope 分开（切 scope 不 bump 页面 epoch 也隔离旧响应）；比较 CSV 与报告只在「当前条件对应的已完成快照」上放行，否则双语禁用原因；指标表补单位、QC 来源、订正状态与覆盖率列，warnings 单独展示。
+- 多站单行失败隔离/逐行重试、进度按任务 ID 绑定仍属第二批（`ComparisonResult.failures` 字段已留）。
+
+### 本轮验证（真实执行）
+
+- `cargo test -p colm-hist --lib` → 79 passed；`cargo test -p colm-forcing --lib` → 156 passed；`cargo test -p colm-cli --bins -- --test-threads=1` → **622 passed / 0 failed**（含新增 7 条结果页端到端回归：日均 RMSE=0、末段记录不改变既有小时配对、TIMESTEP 相位、packed 解码、kW/m² 换算、缺订正变量显式上报、UTC 模型 + `+08:00` 原点只平移一次）。
+- 真实数据：CN-Cng 黄金小时输出 + PLUMBER2 观测经新路径复现 design.md §2.8 三行（Rnet/Qh/Qle 的 n 与 RMSE/bias/R² 逐项一致）；`PLUMBER2_ROOT=/Volumes/Data/Data/PLUMBER2s cargo test -p oracle --test metrics` → 4 passed（旧 `pair` API 的金标准未漂移）。
+- 前端：`node ../scripts/check-gui.mjs --self-test`、`check-gui` 通过；`node ../scripts/test-react.mjs` → **1176 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全通过。
+- **Not-tested**：真实 TIMESTEP+PLUMBER2 组合没有现成观测文件（用合成用例验证相位；真实 AU-Preston 只验证了 Urban-PLUMBER 终点标签）；`flux_diagnostics` 未迁移到新区间配对；远程旧 sidecar 缺新字段时前端回退 model_clock/旧 QC 列；多站失败隔离、远程部分取回与流式读取属后续批次。
