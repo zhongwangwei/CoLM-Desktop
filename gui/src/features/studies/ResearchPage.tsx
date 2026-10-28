@@ -1585,17 +1585,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     task(async (current) => {
       if (!fit || typeof fit.model !== 'string' || !fit.networkSpec)
         throw new Error(tr('请先完成拟合', 'Complete a fit first'));
-      if (fitValidation(fit.report) === false)
+      const validation = fitValidation(fit.report);
+      if (validation === false)
         throw new Error(tr('交叉验证没通过，不能存成版本', 'Cross-validation gate failed'));
+      // 审计 P2-11：没有交叉验证（null）以前也能冻结，但只记成 validation:null，版本看起来和验证过的一样。
+      // 现在允许保存——探索是合法用法——但名字与说明里持续标"未验证实验"，不冒充已验证结论。
+      const unvalidated = validation === null;
       const net = fit.networkSpec as ReturnType<typeof networkSpec>;
       const draft = await invokeJson<{ id: string }>('model_create', {
-        name,
+        name: unvalidated ? `${name}${tr('（未验证实验）', ' (unvalidated experiment)')}` : name,
         note: JSON.stringify({
           kind: 'hybrid-fit',
           report: fit.report_file,
           network: fit.network,
           studies: fit.studyDirs,
-          validation: fitValidation(fit.report),
+          validation,
+          unvalidated,
         }),
         parent: fit.parent,
       });
@@ -1622,7 +1627,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         );
         await refreshVersions();
         notify(
-          `${tr('已保存 AI 模型版本', 'Saved AI model version')}: ${version.version.id}@${version.version.revision}`,
+          unvalidated
+            ? `${tr('已保存为未验证实验版本', 'Saved as an unvalidated experimental version')}: ${version.version.id}@${version.version.revision}${tr('（没有做留一研究交叉验证，不能当作已验证结论）', ' (no leave-one-study-out validation, so treat it as unverified)')}`
+            : `${tr('已保存 AI 模型版本', 'Saved AI model version')}: ${version.version.id}@${version.version.revision}`,
         );
         if (current()) setFit({ ...fit, savedVersion: version.version });
         return version;
@@ -2504,7 +2511,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         ),
         action(
           'hybrid-save-version',
-          tr('保存 AI 为新模型版本', 'Save AI as a new model version'),
+          fitValidation(fit?.report) === null
+            ? tr('保存为未验证实验版本', 'Save as an unvalidated experimental version')
+            : tr('保存 AI 为新模型版本', 'Save AI as a new model version'),
           saveFitVersion,
           !!fit && !fit.savedVersion && fitValidation(fit.report) !== false,
           true,
@@ -4990,6 +4999,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                       {tr(
                         `目标函数在最优值 ${Math.round(near.margin * 100)}% 以内的有 ${near.count} 组参数。各参数在这些组里取值的范围：`,
                         `${near.count} parameter sets score within ${Math.round(near.margin * 100)}% of the best. The range each parameter takes across them:`,
+                      )}{' '}
+                      {tr(
+                        '这些只是**本次搜索**的近优成员：优化器局部收敛也会让范围变窄，所以窄范围不能单独当作"参数可辨识"的证据。要判断可辨识性需要多起点/重复搜索，或更严格的辨识性分析。',
+                        'These are the near-optimal members of this search only: local convergence also narrows the ranges, so a narrow range alone does not prove the parameter is identifiable. Judging identifiability needs multiple starts or repeated searches, or a stricter identifiability analysis.',
                       )}
                       {near.tooFew &&
                         tr(
@@ -5023,12 +5036,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                                 {row.pinned === 'few'
                                   ? tr('组数太少，判断不了', 'too few sets to judge')
                                   : row.pinned === 'tight'
-                                    ? tr('定得住', 'well pinned')
+                                    ? tr(
+                                        '本次搜索的近优范围较窄（需多起点复核）',
+                                        'narrow in this search (needs multiple starts to confirm)',
+                                      )
                                     : row.pinned === 'loose'
-                                      ? tr('大致定得住', 'loosely pinned')
+                                      ? tr('本次搜索的近优范围中等', 'moderate in this search')
                                       : tr(
-                                          '定不住：这份观测分不出它的取值',
-                                          'not pinned: these observations cannot tell its value',
+                                          '本次搜索的近优范围宽：这份观测没把它约束住',
+                                          'wide in this search: these observations do not constrain it',
                                         )}
                               </td>
                             </tr>

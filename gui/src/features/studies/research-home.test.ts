@@ -349,6 +349,194 @@ it('refuses a new version for a study without a recorded version and cleans up f
   assert.equal(failing.written.length, 0);
 });
 
+// 审计 P1-5：DE 训练出的网络以前没有写回通道（后端拒绝含网络权重的成员）。现在按产物类型
+// 分流，确认后把网络资产目录交给版本页，冻结时发布进新版本。
+const soilNetwork = {
+  slot: 'soil_stress',
+  features: ['beta_physics', 'root_saturation'],
+  outputs: ['beta'],
+  hidden: [4],
+  normalize: true,
+  weights: 13,
+};
+function confirmContext(reply: Record<string, unknown>, writing: Record<string, unknown>) {
+  const calls: [string, Record<string, unknown>][] = [];
+  const patches: Record<string, unknown>[] = [];
+  const notices: string[] = [];
+  const run = pageCallback('confirmWriteBack', {
+    writing,
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      calls.push([command, args]);
+      return reply;
+    },
+    setWriting: () => {},
+    notify: (message: string) => notices.push(message),
+    update: (patch: Record<string, unknown>) => patches.push(patch),
+    navigate: () => true,
+    tr: (zh: string) => zh,
+    en: false,
+  }) as unknown as (chosen: [string, string | null, number | null][]) => Promise<unknown>;
+  return { run, calls, patches, notices };
+}
+it('a network trained by a study previews as a network artifact', async () => {
+  const { context, written } = writeBackContext({
+    importReply: { kind: 'network', member: 'm000003', records: [], network: soilNetwork },
+  });
+  await pageCallback('writeBack', context)();
+  const preview = written[0] as {
+    kind?: string;
+    network?: { slot: string; weights: number } | null;
+    records: unknown[];
+  };
+  assert.equal(preview.kind, 'network');
+  assert.equal(preview.network?.slot, 'soil_stress');
+  assert.equal(preview.network?.weights, 13);
+  assert.deepEqual(preview.records, []);
+});
+it('confirming a network import passes no parameter filter and hands its asset root to the versions page', async () => {
+  const { run, calls, patches, notices } = confirmContext(
+    {
+      draft: { id: 'model-9', name: 'PFT', generation: 3 },
+      member: 'm000003',
+      kind: 'network',
+      parameters: 0,
+      asset_root: '/assets/model-9/7',
+      network: soilNetwork,
+    },
+    {
+      study: '/p/.colm/studies/s-1',
+      member: 'm000003',
+      objective: 0.4,
+      records: [],
+      kind: 'network',
+      network: soilNetwork,
+      draft: { id: 'model-9', name: 'PFT', generation: 2, overlay: {} },
+      created: false,
+    },
+  );
+  await run([]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], 'model_import_study');
+  // 网络没有可勾选的参数：传空数组会被后端当成"勾选结果为空"而拒绝。
+  assert.equal(calls[0]![1].only, null);
+  assert.equal(patches.at(-1)!.openDraft, 'model-9');
+  assert.equal(patches.at(-1)!.openDraftAssets, '/assets/model-9/7');
+  assert.match(notices.at(-1)!, /soil_stress|网络/);
+});
+it('confirming a joint import filters only the ticked parameters and still carries the network', async () => {
+  const { run, calls, patches } = confirmContext(
+    {
+      draft: { id: 'model-9', name: 'PFT', generation: 3 },
+      member: 'm000003',
+      kind: 'joint',
+      parameters: 2,
+      asset_root: '/assets/model-9/7',
+      network: soilNetwork,
+    },
+    {
+      study: '/p/.colm/studies/s-1',
+      member: 'm000003',
+      objective: 0.4,
+      records: [],
+      kind: 'joint',
+      network: soilNetwork,
+      draft: { id: 'model-9', name: 'PFT', generation: 2, overlay: {} },
+      created: false,
+    },
+  );
+  const chosen: [string, string | null, number | null][] = [['case:DEF_TUNING_CNFAC', null, null]];
+  await run(chosen);
+  assert.deepEqual(calls[0]![1].only, chosen);
+  assert.equal(patches.at(-1)!.openDraftAssets, '/assets/model-9/7');
+});
+it('confirming a parameter import keeps the old request and carries no asset root', async () => {
+  const { run, calls, patches } = confirmContext(
+    {
+      draft: { id: 'model-9', name: 'PFT', generation: 3 },
+      member: 'm000001',
+      kind: 'parameters',
+      parameters: 1,
+      asset_root: null,
+      network: null,
+    },
+    {
+      study: '/p/.colm/studies/s-1',
+      member: 'm000001',
+      objective: 0.5,
+      records: [],
+      kind: 'parameters',
+      network: null,
+      draft: { id: 'model-9', name: 'PFT', generation: 2, overlay: {} },
+      created: false,
+    },
+  );
+  const chosen: [string, string | null, number | null][] = [['case:DEF_TUNING_CNFAC', null, null]];
+  await run(chosen);
+  assert.deepEqual(calls[0]![1].only, chosen);
+  assert.equal(patches.at(-1)!.openDraftAssets, null);
+});
+// 审计 P2-11：没有交叉验证的拟合以前也能冻结（validation:null 直接放行），存出来的版本
+// 和验证过的看起来一样。现在允许保存（探索是合法用法），但名字/说明持续标"未验证实验"。
+function saveFitContext(report: unknown) {
+  const calls: [string, Record<string, unknown>][] = [];
+  const notices: string[] = [];
+  const run = pageCallback('saveFitVersion', {
+    fit: {
+      model: '/out/study.mlp.json',
+      normalize: '/out/study.norm.json',
+      network: 'study.mlp.json',
+      networkSpec: {
+        slot: 'pft',
+        features: ['clim_tair'],
+        outputs: [
+          { name: 'DEF_PFT_VMAX25', range: [0.5, 2], transform: 'sigmoid', relative: true },
+        ],
+        hidden: [],
+      },
+      studyDirs: ['/p/.colm/studies/s-1'],
+      sourceCase: '/p/site1',
+      parent: { id: 'official', revision: 1 },
+      report: { validation: report },
+      report_file: '/out/report.json',
+    },
+    name: 'net',
+    en: false,
+    tr: (zh: string) => zh,
+    fitValidation,
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      calls.push([command, args]);
+      if (command === 'model_create') return { id: 'model-9' };
+      if (command === 'model_attach_network')
+        return { draft: { id: 'model-9' }, assetRoot: '/assets/9' };
+      return { version: { id: 'model-9', revision: 1 } };
+    },
+    refreshVersions: async () => {},
+    notify: (message: string) => notices.push(message),
+    setFit: () => {},
+  }) as unknown as () => Promise<unknown>;
+  return { run, calls, notices };
+}
+it('a fit without cross-validation is saved as an explicitly unvalidated experiment', async () => {
+  const { run, calls, notices } = saveFitContext(null);
+  await run();
+  const create = calls.find(([command]) => command === 'model_create')!;
+  assert.match(String(create[1].name), /未验证/);
+  const note = JSON.parse(String(create[1].note)) as { validation: unknown; unvalidated: boolean };
+  assert.equal(note.validation, null);
+  assert.equal(note.unvalidated, true);
+  assert.match(notices.at(-1)!, /未验证|不能当作已验证结论/);
+});
+it('a failed cross-validation still blocks saving a fit', async () => {
+  const { run, calls } = saveFitContext({ passed: false });
+  await assert.rejects(run(), /交叉验证没通过/);
+  assert.equal(
+    calls.some(([command]) => command === 'model_create'),
+    false,
+  );
+});
+
 // 不确定性分析没有最优成员：下拉框显示的和写入的都是第一个样本成员，不是空值（后端当 best 拒绝）。
 it('the member written by default is the one the member list shows', () => {
   const pick = (state: unknown) => pageCallback('defaultMember', { envelope: { state } })();
