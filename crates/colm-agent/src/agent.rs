@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 
 use crate::message::{Message, Usage};
-use crate::protocol::Outbound;
+use crate::protocol::{Outbound, ToolEffect};
 use crate::provider::{Provider, StreamEvent};
 use crate::tools::{result_text, Registry, Tier, ToolContext};
 
@@ -301,6 +301,8 @@ pub fn execute_tool(
 ) -> String {
     let Some(tool) = registry.find(&call.name) else {
         context.note_failure(&call.name, &call.id, "unknown_tool");
+        // 参数解析失败和未知工具都在发 `tool_call` 之前结束：审计日志里不会出现这个动作，
+        // 恢复逻辑也就不会把它记成"未确认的写操作"。它们确定没有开始执行。
         return format!("error: there is no tool named {}", call.name);
     };
     let args: Value = match serde_json::from_str(&call.arguments) {
@@ -328,7 +330,11 @@ pub fn execute_tool(
         preapproved,
     });
     if cancel.load(Ordering::SeqCst) {
-        return "error: cancelled before execution; inspect existing state before retrying".into();
+        return finish_not_started(
+            call,
+            "error: cancelled before execution; inspect existing state before retrying",
+            emit,
+        );
     }
     if tier.needs_approval() && !preapproved {
         let request = Outbound::ApprovalRequest {
@@ -343,7 +349,7 @@ pub fn execute_tool(
         };
         emit(request.clone());
         if cancel.load(Ordering::SeqCst) {
-            return "error: cancelled before approval".into();
+            return finish_not_started(call, "error: cancelled before approval", emit);
         }
         let decision = approver.decide(&request);
         if decision == Decision::ApproveForSession
@@ -357,18 +363,11 @@ pub fn execute_tool(
                 Some(note) => format!("the user declined this action: {note}"),
                 None => "the user declined this action".to_owned(),
             };
-            emit(Outbound::ToolResult {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                ok: false,
-                result: text.clone(),
-                elapsed_ms: 0,
-            });
-            return text;
+            return finish_not_started(call, &text, emit);
         }
     }
     if cancel.load(Ordering::SeqCst) {
-        return "error: cancelled".to_owned();
+        return finish_not_started(call, "error: cancelled", emit);
     }
     let started = Instant::now();
     // 一个工具 panic 不能让整个助手进程卡死：捕获后变成一条错误结果，本轮继续。
@@ -382,6 +381,21 @@ pub fn execute_tool(
             "error: internal tool failure (the tool panicked); its effects may be incomplete; inspect the state before retrying".to_owned(),
         ),
     };
+    // 副作用结局只由结构事实决定（工具是否真的被调用、tier 是否只读、返回是否成功），
+    // 不从结果文本推断。只读工具失败不会改任何状态；有副作用工具在开始执行后失败，
+    // 失败前可能已经做了一半，只能保守记为 effect_unknown，等恢复时先核对。
+    let effect = match (ok, tier) {
+        (true, _) => ToolEffect::Completed,
+        (false, Tier::Read) => ToolEffect::FailedNoEffect,
+        (false, _) => ToolEffect::EffectUnknown,
+    };
+    // 先发结构化的结局，再发给人看的 `tool_result`：进程在这两条之间中断时，
+    // 恢复逻辑已经知道该不该要求核对，而不是只看到一条没有语义的失败结果。
+    emit(Outbound::ToolOutcome {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        effect,
+    });
     emit(Outbound::ToolResult {
         id: call.id.clone(),
         name: call.name.clone(),
@@ -393,6 +407,30 @@ pub fn execute_tool(
         context.note_failure(&call.name, &call.id, "tool_failed");
     }
     text
+}
+
+/// 执行前就结束（取消/拒绝）：发结构化的 `not_started` 结局并关闭工具卡片。
+///
+/// 为什么必须显式发：只留下 `tool_call` 事件的话，恢复逻辑只能把它当成"没有结果的写操作"
+/// （即可能已经执行），制造一个并不存在的待核对项。拒绝和取消前工具确实没被调用。
+fn finish_not_started(
+    call: &crate::message::ToolCall,
+    text: &str,
+    emit: &mut dyn FnMut(Outbound),
+) -> String {
+    emit(Outbound::ToolOutcome {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        effect: ToolEffect::NotStarted,
+    });
+    emit(Outbound::ToolResult {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        ok: false,
+        result: text.to_owned(),
+        elapsed_ms: 0,
+    });
+    text.to_owned()
 }
 
 #[cfg(test)]

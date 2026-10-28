@@ -71,12 +71,17 @@ impl Tool for Echo {
     }
 }
 
-/// 故意 panic 的工具：验证工具 panic 不会让整轮/助手进程卡死。
-struct Panics;
+/// 故意 panic 的工具：验证工具 panic 不会让整轮/助手进程卡死，也验证 panic 按工具 tier
+/// 的结构事实记录副作用结局（只读 = 没有副作用；有副作用 = effect_unknown）。
+struct Panics(Tier);
 
 impl Tool for Panics {
     fn name(&self) -> &'static str {
-        "panic_tool"
+        if self.0 == Tier::Read {
+            "panic_tool"
+        } else {
+            "panic_act"
+        }
     }
     fn description(&self) -> &'static str {
         "test tool that panics"
@@ -85,7 +90,7 @@ impl Tool for Panics {
         object(serde_json::json!({}))
     }
     fn tier(&self) -> Tier {
-        Tier::Read
+        self.0
     }
     fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<Value> {
         panic!("boom from a tool")
@@ -192,7 +197,7 @@ fn a_panicking_tool_becomes_an_error_result_and_the_turn_continues() {
         tool_turn(vec![call("a", "panic_tool", "{}")]),
         answer("recovered from the tool panic"),
     ]);
-    let registry = Registry::with(vec![Box::new(Panics)]);
+    let registry = Registry::with(vec![Box::new(Panics(Tier::Read))]);
     let mut history = vec![Message::User {
         content: "go".into(),
     }];
@@ -1633,4 +1638,162 @@ fn legacy_context_events_without_budget_fields_still_deserialize() {
     };
     let round: Outbound = serde_json::from_str(&serde_json::to_string(&budgeted).unwrap()).unwrap();
     assert_eq!(round, budgeted);
+}
+
+/// 跑一个工具调用（再加一次总结），收集本轮的协议事件。
+fn run_single_tool(
+    registry: &Registry,
+    call: crate::message::ToolCall,
+    decisions: Vec<Decision>,
+) -> Vec<Outbound> {
+    let provider = Scripted::new(vec![tool_turn(vec![call]), answer("done")]);
+    let mut history = vec![Message::User {
+        content: "go".into(),
+    }];
+    let mut events = Vec::new();
+    let mut approver = Answers(decisions, 0);
+    agent(&provider, registry)
+        .run_turn(
+            &mut history,
+            &mut |event| events.push(event),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    events
+}
+
+fn outcome_for(events: &[Outbound], id: &str) -> ToolEffect {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Outbound::ToolOutcome {
+                id: call, effect, ..
+            } if call == id => Some(*effect),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a structured tool outcome for {id} must be emitted"))
+}
+
+#[test]
+fn a_successful_tool_is_recorded_as_completed() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
+    let events = run_single_tool(&registry, call("a", "echo", r#"{"x":2}"#), Vec::new());
+    assert_eq!(outcome_for(&events, "a"), ToolEffect::Completed);
+}
+
+#[test]
+fn a_failed_read_tool_is_recorded_as_failed_no_effect() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
+    let events = run_single_tool(&registry, call("a", "echo", r#"{"x":-1}"#), Vec::new());
+    assert_eq!(outcome_for(&events, "a"), ToolEffect::FailedNoEffect);
+}
+
+#[test]
+fn a_failed_act_tool_is_recorded_as_effect_unknown_in_structured_event_order() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let events = run_single_tool(
+        &registry,
+        call("a", "act", r#"{"x":-1}"#),
+        vec![Decision::Approve],
+    );
+    assert_eq!(outcome_for(&events, "a"), ToolEffect::EffectUnknown);
+    // 结局事件必须夹在 tool_call 与 tool_result 之间：进程在中间中断时恢复逻辑仍有结构依据。
+    let order: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Outbound::ToolCall { id, .. } if id == "a" => Some("call"),
+            Outbound::ToolOutcome { id, .. } if id == "a" => Some("outcome"),
+            Outbound::ToolResult { id, .. } if id == "a" => Some("result"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["call", "outcome", "result"]);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Outbound::ToolResult { id, ok: false, .. } if id == "a")));
+}
+
+#[test]
+fn a_panicking_act_tool_is_recorded_as_effect_unknown() {
+    let registry = Registry::with(vec![Box::new(Panics(Tier::Act))]);
+    let events = run_single_tool(
+        &registry,
+        call("a", "panic_act", "{}"),
+        vec![Decision::Approve],
+    );
+    assert_eq!(outcome_for(&events, "a"), ToolEffect::EffectUnknown);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Outbound::ToolResult { id, ok: false, .. } if id == "a")));
+}
+
+#[test]
+fn a_denied_approval_is_recorded_as_not_started() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let events = run_single_tool(
+        &registry,
+        call("a", "act", r#"{"x":1}"#),
+        vec![Decision::Deny(Some("not now".into()))],
+    );
+    assert_eq!(outcome_for(&events, "a"), ToolEffect::NotStarted);
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Outbound::ToolOutcome {
+            effect: ToolEffect::EffectUnknown,
+            ..
+        }
+    )));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Outbound::ToolResult { id, ok: false, .. } if id == "a")));
+}
+
+#[test]
+fn cancelling_before_execution_is_recorded_as_not_started() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let cancel = AtomicBool::new(false);
+    let mut events = Vec::new();
+    let mut approver = Answers(Vec::new(), 0);
+    let result = execute_tool(
+        &registry,
+        &ToolContext::default(),
+        &call("x", "act", r#"{"x":1}"#),
+        &mut |event| {
+            if matches!(event, Outbound::ToolCall { .. }) {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            events.push(event);
+        },
+        &mut approver,
+        &cancel,
+    );
+    assert!(result.contains("cancelled before execution"), "{result}");
+    assert_eq!(outcome_for(&events, "x"), ToolEffect::NotStarted);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Outbound::ToolResult { id, ok: false, .. } if id == "x")));
+}
+
+#[test]
+fn tool_outcomes_use_structured_audit_values() {
+    for (effect, expected) in [
+        (ToolEffect::NotStarted, "not_started"),
+        (ToolEffect::Completed, "completed"),
+        (ToolEffect::FailedNoEffect, "failed_no_effect"),
+        (ToolEffect::EffectUnknown, "effect_unknown"),
+    ] {
+        let event = Outbound::ToolOutcome {
+            id: "call".into(),
+            name: "run_case".into(),
+            effect,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "tool_outcome");
+        assert_eq!(value["id"], "call");
+        assert_eq!(value["name"], "run_case");
+        assert_eq!(value["effect"], expected);
+        let round: Outbound = serde_json::from_value(value).unwrap();
+        assert_eq!(round, event);
+    }
 }

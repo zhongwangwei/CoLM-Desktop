@@ -649,6 +649,8 @@ fn chat(
                 Outbound::ReasoningDelta { .. }
                 | Outbound::Usage { .. }
                 | Outbound::Context { .. }
+                // 副作用结局是给审计与恢复用的结构信息；终端里已有 ok/failed 卡片，不重复显示。
+                | Outbound::ToolOutcome { .. }
                 | Outbound::DocsIndexStatus { .. }
                 | Outbound::TaskState { .. } => {}
             },

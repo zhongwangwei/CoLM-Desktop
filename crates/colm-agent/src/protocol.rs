@@ -5,6 +5,34 @@ use serde::{Deserialize, Serialize};
 use crate::provider::ProviderConfig;
 use crate::tools::Tier;
 
+/// 一个工具调用执行到哪一步、副作用是什么结局。
+///
+/// 为什么不从 `ok=false` 或错误文本推断：同一个“失败”既可能是审批被拒（什么都没做），也可能是
+/// 远程任务已经提交、只是回执解析失败（可能已部分执行）。恢复时把后者当“没执行”会导致误重试，
+/// 把前者当“可能执行”会制造虚假的待核对写。执行器在结束调用时知道的结构事实（是否通过审批、
+/// 是否真的调用了工具、工具 tier）足以决定这个枚举，不需要看文案。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// 执行前就结束：用户拒绝审批、等审批时取消、执行前取消。确定没有任何副作用。
+    NotStarted,
+    /// 工具正常返回（返回里说运行失败也算正常返回：动作已经执行完，结局已知）。
+    Completed,
+    /// 工具失败，但 tier 是只读（A 类）——不可能改动状态，因此确定没有副作用。
+    FailedNoEffect,
+    /// 有副作用的工具开始执行后失败/panic，或进程中断没来得及记结果：副作用可能不完整。
+    /// 保守默认值取它：宁可多核对一次实际状态，不能假设“没执行”。
+    #[default]
+    EffectUnknown,
+}
+
+impl ToolEffect {
+    /// 是否需要在恢复/继续时先核对实际状态。只对会改状态的动作有意义。
+    pub fn needs_reconciliation(self) -> bool {
+        matches!(self, Self::EffectUnknown)
+    }
+}
+
 /// 运行操作（B 类工具）怎么审批。代码操作（C 类）不受影响，始终逐次审批。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +156,16 @@ pub enum Outbound {
         ok: bool,
         result: String,
         elapsed_ms: u64,
+    },
+    /// 工具执行的副作用结局（审计与恢复用；界面可以不显示）。
+    ///
+    /// 它和 `tool_result` 是两条独立事件：`tool_result.ok` 只说明“成功/失败”，这条说明“这次失败
+    /// 是否留下了副作用”。恢复逻辑用这里的结构值决定是否要求先核对实际状态，不再按 `ok` 或
+    /// 错误文案猜。
+    ToolOutcome {
+        id: String,
+        name: String,
+        effect: ToolEffect,
     },
     ApprovalRequest {
         id: String,
