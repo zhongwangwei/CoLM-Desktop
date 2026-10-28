@@ -1468,10 +1468,11 @@ export default function RunPanel({
           phase="building"
           waited={elapsedLabel(serverBuild.now - serverBuild.since, en)}
           progress={serverBuild.progress}
+          engineId={serverBuild.progress.engine ?? null}
           en={en}
           hint={t(
-            '编好后自动开始提交；同一批的其余站点会等它编完，不会重复编。',
-            'Submission starts once it is built; the other stations wait for this build instead of repeating it.',
+            '编好后自动开始提交；同一批的其余站点会等它编完，不会重复编。同一源码快照编好后，后续运行会复用它。',
+            'Submission starts once it is built; the other stations wait for this build instead of repeating it. Later runs reuse the built snapshot.',
           )}
         />
       )}

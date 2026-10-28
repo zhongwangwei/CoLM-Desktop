@@ -37864,6 +37864,17 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
 | U-07 | 达成 | ①滚动：`scroll.ts` 纯状态机（24px 容差），上滚暂停+「有新内容，回到底部」，回底恢复，切会话重置；②安全 Markdown：自研 AST（围栏代码/inline code/粗斜体/列表/标题/引用/表格；`safeHttpUrl` 只放行 http/https，链接 `target=_blank rel=noopener noreferrer`；无 `dangerouslySetInnerHTML`、无第三方库），代码块复制、来源链接；③设置草稿：`settings-draft.ts` 状态机，SaveBadge+「实际发送：服务/模型」（按已保存设置）、保存/放弃、关闭/新对话/切会话前未保存确认、发送只读已保存设置；④切会话清空用量并显示「用量待加载」，迟到 transcript 忽略；⑤Field 的 hint/unit/range 生成 id 并与控件 `aria-describedby` 合并关联 | `markdown.test.ts` 9 项（`<script>`/`onclick` 当文字、javascript:/data:/file: 不成链接、合法 https target+rel、表格/标题/列表/引用、复制内容、流式半截）、`scroll.test.ts`、`settings-draft.test.ts` 12 项、`assistant-panel.test.ts` +3（会话用量、Markdown 只用于 assistant）、`field.test.ts` +2 | 无真实 WebView：滚动与 Markdown 视觉为函数复现+`react-dom/server` 渲染；"assistant 用 Markdown、用户消息保持纯文本"的集成断言仍是源码级（MarkdownMessage 本身有渲染级安全测试） |
 | GUI-07 服务器侧 | 达成（脚本/决策层） | `crates/colm-cli/src/remote_bench.rs`：`<project>/.active-job` 用 `mkdir` 原子占位、写号后读回核对；作业体首行 `trap`（按作业号匹配才删）；提交前查占位作业状态：Queued/Running→固定错误拒绝，Finished/Lost→清陈旧占位重试，Unknown 按作业目录与一分钟宽限判定；提交失败释放占位；`remote-bench-fetch` 未终态拒绝取回；固定错误前缀 `这个比较还有未完成的评估作业（作业号 ` | `remote_bench_tests.rs` 18 项（含 `bash -n`、决策纯函数、以及在临时目录用真实 bash 跑 occupy/release/探针的磁盘执行测试）；前端 `benchErrorText` 中英映射（含真实服务端原文、`取回失败：…` 包装、半/全角括号） | 无真实 SSH，原子性/NFS 并发未实测；SIGKILL/宕机残留由下一次提交按陈旧判定兜底；"提交结果不确定"时按任务书要求释放占位（客户端作业身份核对仍在） |
 
+### 交付后易用性跟进（2026-10-28）
+
+- **移除「专注视图」**：与「收起导航 + 关助手」重叠，工具栏只保留「收起导航」一个视图开关（见 U-06 行）。
+- **引擎准备卡片说明为什么编、是否复用**：用户实测反馈"刚编过又显示在准备引擎"。排查确认引擎按
+  源码快照缓存（`engine/<快照id>/`，只有源码/依赖快照变了才重编），不是每次运行都编译。为此：
+  `remote-engine-prepare` 现在返回 `{ready, engine:{id, cached}}`（`cached` 由"这次没有上传源码、
+  也没有真的编译"判定，不额外加 SSH 往返）；`EngineProgress` 在核对阶段说明"有就复用、只有快照变了
+  才重编"，在编译阶段写清"服务器上还没有这个源码快照，所以编这一次，编好后复用"，并显示快照 id 前 8 位；
+  新建模拟页在准备完成后短暂显示"复用已有引擎 / 已为新快照编好"的明确结论。新增 Rust 单测
+  `prepare_reply_names_the_engine_snapshot_and_whether_it_was_reused`、前端组件与页面级行为测试。
+
 ### 交付审计（独立只读）
 
 另起一名没有参与实现的审计者，对照任务书原文逐条读码与读测试，并独立重跑全量：发现 1 个必修问题

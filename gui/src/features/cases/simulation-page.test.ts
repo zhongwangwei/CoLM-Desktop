@@ -3187,6 +3187,7 @@ test('choosing a server prepares its engine in the background and says when it i
     },
   );
   assert.equal((card().progress as { done: number }).done, 312);
+  assert.equal(card().engineId, 'abc', 'the engine snapshot id reaches the progress card');
   const polls = p.calls.filter((call) => call.command === 'remote_engine_progress').length;
   t.mock.timers.tick(125_000);
   await p.settle();
@@ -3204,13 +3205,53 @@ test('choosing a server prepares its engine in the background and says when it i
   assert.equal(reading().waited, '已用 3 秒');
   assert.ok(!notices(p).some((text) => text.includes('正在处理，请稍候')));
 
-  ready({ ready: true });
+  // 准备完成：不再显示进度卡，改显示一句"复用还是新编"的解释（8 秒后收起）。
+  ready({ ready: true, engine: { id: 'snap-abcdef1234567890', cached: true } });
   await p.settle();
   assert.ok(!p.elements.some((element) => element.type === 'EngineProgress'));
+  const readyText = JSON.stringify(p.elements);
+  assert.match(readyText, /snap-abc/, 'the ready note names the source snapshot');
+  assert.match(readyText, /复用服务器上为源码快照/, 'cached=true is reported as a reuse');
+  assert.match(readyText, /没有重新编译/);
   assert.equal(reading().step, 1);
   assert.match(String(reading().detail), /正在从 compute 读取站点与强迫场覆盖时段/);
   await p.remount();
   assert.equal(p.calls.filter((call) => call.command === 'remote_prepare_engine').length, 1);
+});
+
+test('a newly built engine snapshot is reported as a one-time build', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let resolvePrepare: (value: unknown) => void = () => {};
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '/server/sites' },
+      ownData: true,
+      sites: [site],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [runServer],
+      prepare: () => new Promise((resolve) => (resolvePrepare = resolve)),
+    },
+  );
+  await p.mount();
+  resolvePrepare({
+    ready: true,
+    engine: { id: 'snap-bbbbbbbbbbbbbbbb', cached: false },
+  });
+  await p.settle();
+  const built = JSON.stringify(p.elements);
+  assert.match(built, /snap-bbb/, 'the snapshot id is shown as its first 8 chars');
+  assert.match(built, /编好计算引擎/, 'cached=false is reported as a build, not a reuse');
+  assert.match(built, /不会重复编/);
+  assert.doesNotMatch(built, /没有重新编译/);
+  // 提示只占位 8 秒，之后从界面上收起。
+  t.mock.timers.tick(8000);
+  await p.settle();
+  assert.doesNotMatch(JSON.stringify(p.elements), /snap-bbb/);
 });
 
 test('a failed engine preparation is shown and reading sites names the server', async () => {
