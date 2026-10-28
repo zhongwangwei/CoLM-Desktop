@@ -288,6 +288,12 @@ fn write_obs(path: &Path, good_pairs: usize) {
     write_obs_with_offset(path, good_pairs, 0.0);
 }
 
+/// 合成观测的标签位置：golden history 的 `time` 是模型记录区间的中点（HOURLY 输出），
+/// 而真实通量产品（FLUXNET2015/PLUMBER2）的标签是区间**起点**。区间配对按产品语义把观测
+/// 映射到模型区间，所以这里把从 history 抄来的时间整体前移半个步长，写成"区间起点"标签。
+/// 历史代码按时间戳逐点相等配对，旧 fixture 直接用模型标签；改成区间语义后必须显式对齐。
+const OBS_LABEL_SHIFT_SECONDS: f64 = 1_800.0;
+
 fn write_obs_with_offset(path: &Path, good_pairs: usize, offset: f64) {
     let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../oracle/golden/CN-Cng_hist_2008-01.nc")
@@ -304,7 +310,7 @@ fn write_obs_with_offset(path: &Path, good_pairs: usize, offset: f64) {
         .unwrap();
     let seconds = time
         .iter()
-        .map(|v| *v as f64 * 60.0 + offset)
+        .map(|v| *v as f64 * 60.0 + offset - OBS_LABEL_SHIFT_SECONDS)
         .collect::<Vec<_>>();
     t.put_values(&seconds, ..).unwrap();
     file.add_variable::<f64>("Qle", &["time"])
@@ -330,10 +336,13 @@ fn write_simple_history(path: &Path, values: &[f64]) {
     let n = values.len();
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("time", n).unwrap();
-    file.add_variable::<i32>("time", &["time"])
-        .unwrap()
-        .put_values(&time[..n], ..)
+    let mut clock = file.add_variable::<i32>("time", &["time"]).unwrap();
+    // 真实 CoLM history 的 time 一定带 `minutes since 1900-01-01` 单位；研究评估现在按
+    // 真实记录区间重建时间轴，缺单位的合成文件会被明确拒绝（结果页批次的时间语义）。
+    clock
+        .put_attribute("units", "minutes since 1900-01-01 00:00:00")
         .unwrap();
+    clock.put_values(&time[..n], ..).unwrap();
     file.add_variable::<f64>("f_lfevpa", &["time"])
         .unwrap()
         .put_values(values, ..)
@@ -355,7 +364,7 @@ fn write_obs_values(path: &Path, values: &[f64]) {
         .unwrap();
     let seconds = time[..n]
         .iter()
-        .map(|v| *v as f64 * 60.0)
+        .map(|v| *v as f64 * 60.0 - OBS_LABEL_SHIFT_SECONDS)
         .collect::<Vec<_>>();
     t.put_values(&seconds, ..).unwrap();
     file.add_variable::<f64>("Qle", &["time"])
