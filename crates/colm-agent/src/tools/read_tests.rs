@@ -471,6 +471,8 @@ fn fake_study_cli(root: &Path, status: &Value) -> PathBuf {
     script
 }
 
+// 只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试。
+#[cfg(unix)]
 fn study_evidence(study_record: Value, dims: Value, best_values: Value, warnings: Value) -> Value {
     json!({
         "schema": 1,
