@@ -37910,6 +37910,13 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
   后续（C）：比较的指标计算并发 2→4；核对运行记录时不再扫全项目——直接按运行目录反推所属算例，
   只查缺的那几个算例；多站点选择器新增「从其它项目添加运行」，因此可以跨项目比较。仍待做：
   比较结果的图/保存、更高并发（6）。
+- **单点算例在建例前不再显示迷惑的站点身份默认值**：`model_configuration` 的可见性原来只看内核
+  宏里的 `SinglePoint`；新建算例向导（`caseValues` 里只有 `SITE_fsitedata`、宏尚未确定）会把
+  `SITE_landtype`/`USE_SITE_landtype` 当成可编辑字段，显示「地表覆盖类型 = -1」「从站点文件读取
+  地表类型 = 关」，与建例后的实际值相反（自然站取站点文件的 IGBP_classification/USGS_classification，
+  城市站 13/1）。现在文档里有 `SITE_fsitedata` 也按单点处理，这些字段统一隐藏并保留原因「由选择
+  站点并建算例按站点自动确定」；模型方案页加了一条说明写清楚地类来源与城市回落值。新增 Rust
+  测试 `a_site_file_alone_marks_the_case_as_single_point_for_field_visibility`。
 
 ### 交付审计（独立只读）
 

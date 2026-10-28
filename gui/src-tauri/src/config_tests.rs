@@ -1621,6 +1621,39 @@ fn runtime_state_mut<'a>(states: &'a mut [FieldState], name: &str) -> &'a mut Fi
 }
 
 #[test]
+fn a_site_file_alone_marks_the_case_as_single_point_for_field_visibility() {
+    // 新建算例向导和未选内核的草稿只有 caseValues 里的 SITE_fsitedata、没有 SinglePoint 宏。
+    // 这时站点身份字段必须仍按单点隐藏，否则界面会显示 SITE_landtype=-1、
+    // USE_SITE_landtype=.false. 这种与建例结果相反的默认值。
+    let states = runtime_states(
+        "&nl_colm\n\
+         SITE_fsitedata = 'site.nc'\n\
+         DEF_USE_LCT = .true.\n\
+         DEF_USE_PFT = .false.\n\
+         DEF_USE_PC = .false.\n\
+         DEF_USE_BGC = .false.\n\
+         DEF_URBAN_RUN = .false.\n/
+",
+        &["LULC_IGBP"],
+    );
+    for name in [
+        "SITE_fsitedata",
+        "SITE_lon_location",
+        "SITE_lat_location",
+        "SITE_landtype",
+        "USE_SITE_landtype",
+    ] {
+        assert_eq!(*mode(&states, name), FieldMode::Hidden, "{name}");
+        assert!(
+            runtime_state(&states, name)
+                .reason
+                .is_some_and(|reason| reason.contains("由选择站点并建算例按站点自动确定")),
+            "{name} keeps the explanation"
+        );
+    }
+}
+
+#[test]
 fn natural_lct_singlepoint_hides_unreachable_and_overwritten_fields() {
     let states = runtime_states(
         "&nl_colm\n\
