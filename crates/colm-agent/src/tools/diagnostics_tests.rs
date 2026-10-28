@@ -303,6 +303,9 @@ fn fake_study_cli(ctx: &mut ToolContext, status: Value) {
     ctx.cli = script;
 }
 
+// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
+// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
+#[cfg(unix)]
 fn calibration_study_status(evidence: Value) -> Value {
     json!({
         "manifest": {
@@ -327,6 +330,9 @@ fn calibration_study_status(evidence: Value) -> Value {
     })
 }
 
+// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
+// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
+#[cfg(unix)]
 fn calibration_validation(status: &str, configured: bool, reasons: Value) -> Value {
     json!({
         "configured": configured,
@@ -336,6 +342,9 @@ fn calibration_validation(status: &str, configured: bool, reasons: Value) -> Val
     })
 }
 
+// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
+// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
+#[cfg(unix)]
 fn calibration_evidence(
     kind: &str,
     calibration_relation: &str,
@@ -387,6 +396,9 @@ fn calibration_evidence(
     })
 }
 
+// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
+// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
+#[cfg(unix)]
 fn calibration_request() -> Value {
     let mut request = args("calibration");
     request["study"] = json!("study");
