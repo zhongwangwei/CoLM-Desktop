@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "project": "xerj",
+  "release": "v1.0.0-rc.100",
+  "license": "Apache-2.0",
+  "assets": {
+    "aarch64-apple-darwin": {
+      "url": "https://github.com/xerj-org/xerj/releases/download/v1.0.0-rc.100/xerj-1.0.0-rc.100-aarch64-apple-darwin.tar.gz",
+      "sha256": "c88fdcb99c4155d2f7260138c3a5898d0f3cf6b07cd208895137ff03c52b9d1a",
+      "archive": "tar.gz",
+      "binary": "xerj-1.0.0-rc.100-aarch64-apple-darwin/xerj",
+      "license": "xerj-1.0.0-rc.100-aarch64-apple-darwin/LICENSE"
+    },
+    "x86_64-apple-darwin": {
+      "url": "https://github.com/xerj-org/xerj/releases/download/v1.0.0-rc.100/xerj-1.0.0-rc.100-x86_64-apple-darwin.tar.gz",
+      "sha256": "30f6148c68c584ab990eeaa9bc9a05209c2ba2374a5ae90651be17f588edac91",
+      "archive": "tar.gz",
+      "binary": "xerj-1.0.0-rc.100-x86_64-apple-darwin/xerj",
+      "license": "xerj-1.0.0-rc.100-x86_64-apple-darwin/LICENSE"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "url": "https://github.com/xerj-org/xerj/releases/download/v1.0.0-rc.100/xerj-1.0.0-rc.100-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "25aec3e84b904c995bd2d58abe4f83badb8a6f9d1d56dbe2f22180bada9b00cc",
+      "archive": "tar.gz",
+      "binary": "xerj-1.0.0-rc.100-x86_64-unknown-linux-gnu/xerj",
+      "license": "xerj-1.0.0-rc.100-x86_64-unknown-linux-gnu/LICENSE"
+    },
+    "x86_64-pc-windows-msvc": {
+      "url": "https://github.com/xerj-org/xerj/releases/download/v1.0.0-rc.100/xerj-1.0.0-rc.100-x86_64-pc-windows-msvc.zip",
+      "sha256": "a58f293c1002c4ce5ce1793afd6fa4d3e7a509916a34044c91a38d4a53937812",
+      "archive": "zip",
+      "binary": "xerj-1.0.0-rc.100-x86_64-pc-windows-msvc/xerj.exe",
+      "license": "xerj-1.0.0-rc.100-x86_64-pc-windows-msvc/LICENSE"
+    }
+  }
+}

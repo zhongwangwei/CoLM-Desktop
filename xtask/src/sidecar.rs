@@ -59,6 +59,8 @@ pub fn stage(root: &Path) -> Result<()> {
     if colm_remote::engine::source_content_sha256(root)? != source_before {
         bail!("engine source changed during staging; rebuild before packaging");
     }
+    // Xerj 是第 7 个 sidecar，但不由本文件编译：它来自固定的公开 release（见 xerj.rs）。
+    crate::xerj::stage_sidecar(root)?;
     Ok(())
 }
 
@@ -220,8 +222,8 @@ fn stage_snapshot_docs(archive: &Path) -> Result<()> {
     result
 }
 
-/// `rustc -vV` 报的 host 三元组。
-fn host_triple() -> Result<String> {
+/// `rustc -vV` 报的 host 三元组。`xerj` 暂存也用同一个规则选资产。
+pub(crate) fn host_triple() -> Result<String> {
     let out = Command::new("rustc")
         .arg("-vV")
         .output()

@@ -17,6 +17,7 @@ mod hist;
 mod landcover;
 mod sidecar;
 mod usage;
+mod xerj;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,8 +36,9 @@ fn main() -> Result<()> {
         "check-gui" => gui::check(&gui::source_root(&std::env::current_dir()?)?),
         "parameter-audit" => parameter_audit(),
         "stage-sidecar" => sidecar::stage(&repo_root()?),
+        "stage-xerj" => xerj::command(&repo_root()?),
         _ => bail!(
-            "usage: cargo run -p xtask -- <gen-schema|gen-histmap|gen-landcover|gen-co2mlo|check-gui|parameter-audit|stage-sidecar>"
+            "usage: cargo run -p xtask -- <gen-schema|gen-histmap|gen-landcover|gen-co2mlo|check-gui|parameter-audit|stage-sidecar|stage-xerj>"
         ),
     }
 }
