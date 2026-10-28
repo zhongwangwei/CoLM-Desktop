@@ -38461,14 +38461,14 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 ### 实测（真实执行）
 
 - `cargo fmt --all --check` → exit 0；`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
-- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2978 passed / 0 failed / 15 ignored**。其中 `colm-cli` **552**（新增 16 个真实 git 夹具历史测试 + 1 个时间戳平局回归）、`colm-agent` **359**（新增 14 个工具测试 + 19 个 GitHub mock 测试）。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2979 passed / 0 failed / 15 ignored**。其中 `colm-cli` **552**（新增 16 个真实 git 夹具历史测试 + 1 个时间戳平局回归）、`colm-agent` **360**（新增 14 个工具测试 + 20 个 GitHub mock 测试，含传输层重试回归）。
 - GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib -- --test-threads=1` → **494 passed / 1 ignored / 0 failed**（本功能未新增 Tauri 命令，契约不变）。
 - **真实 Desktop 仓库只读 smoke**（`cargo run -p colm-cli -- ...`）：
   - `history-repos --desktop-path .` → desktop identity=verified（remote `git@github.com:zhongwangwei/CoLM-Desktop.git`）、default_branch=main、coverage commits=2283/complete_history=true；上游 missing 并有明确错误，不伪造。
   - `history-track --repository desktop --symbol PINNED_XERJ_RELEASE --limit 2` → endpoint origin/main@`4302a30c`，18 个真实 location，返回真实提交 `33293c67`、`ddb2b34d`（relevance 同时含 pickaxe-G/S），reason=documented 且带提交说明摘录，limits 明确 “4 matching commits; returning 0..2”、truncated=true。
   - `history-track --limit 1` 的真实 hunk 给出该提交的 old/new 代码（`xerj_data_dir_name` 整段新增）。
 - **真实跨仓映射 smoke**（两个临时真实 git 仓库，测试数据，不是本仓库真实 PR）：upstream 先改 `alpha` 公式提交 `fa05824d`，desktop 后 import 同一 blob（`4e3f2aa3`），另有 Desktop 独立后续提交；`history-track --repository both --symbol alpha` → cross state=**verified**、basis=`path,import-commit,blob-equal`、upstream commit 正确为 `fa05824d`、两侧时间与 later_commits 齐全。修复前同一夹具会因两个上游提交时间相同而按 SHA 选中旧的 `e0d165f7`（candidate），已加回归。
-- **真实 GitHub API 只读 smoke**（curl，仅验证公开端点语义，不是客户端测试）：`CoLM-SYSU/CoLM` HEAD `f9ea408e` 是 merge PR **#512**，`/commits/<sha>/pulls` 返回 PR 512（HTTP 200）；`zhongwangwei/CoLM-Desktop` 提交 `4302a30c` 返回 `[]`（直接推送，无关联 PR）。GitHub 客户端本身全部用本地 mock HTTP 测试（19 项），未用真实 token/TLS 调用。
+- **真实 GitHub API 只读 smoke**（curl，仅验证公开端点语义，不是客户端测试）：`CoLM-SYSU/CoLM` HEAD `f9ea408e` 是 merge PR **#512**，`/commits/<sha>/pulls` 返回 PR 512（HTTP 200）；`zhongwangwei/CoLM-Desktop` 提交 `4302a30c` 返回 `[]`（直接推送，无关联 PR）。GitHub 客户端本身全部用本地 mock HTTP 测试（20 项），未用真实 token/TLS 调用；客户端对幂等 GET 的瞬时传输失败只重试一次（HTTP 语义错误不重试），并有专门回归。Windows runner 对关闭的回环端口可能返回超时而非 refused，两者都映射为 network，测试只强制 network 类型。
 - 新测试覆盖任务书 12 类验收：公式改而出现次数不变（`-G`）、同名变量 Rust/Fortran 不串历史、冻结旧 commit 不混未来修改与 overlay 不能凭 ancestry、rename/删除、dirty 单独 uncommitted、无 .git/浅克隆/截断降级、0/多 PR/无理由/401/403/429/网络/离线缓存/缓存隔离、工具注册与调用链、双仓同名变量与不同 PR 不串用、官方先改 Desktop 后引入 verified、官方 PR 未合并/Desktop 独立修改分开、仅内容相似不编造出处。
 - 示例输出（测试夹具，非本仓库真实 PR）：`source_history` 返回 `{"query":{"symbol":"alpha","repository":"both","endpoints":{...}},"repos":{"colm_upstream":{"commits":[{"sha":"fa05824d…","reason":{"status":"documented","basis":"commit_message","excerpt":"Change alpha update formula…"}}]},"desktop":{"commits":[…]}},"cross":{"links":[{"state":"verified","basis":["path","import-commit","blob-equal"],…}]},"limits":[],"truncated":false}`；`commit_pull_requests` 对 mock 返回 `{"pulls":[{"number":512,"owner_repo":"CoLM-SYSU/CoLM","reason":{"status":"documented","basis":"pull_body",…},"evidence_id":"github:CoLM-SYSU/CoLM#512"}],"complete":true,"offline":false}`。
 
