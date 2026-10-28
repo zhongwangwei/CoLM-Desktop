@@ -829,3 +829,82 @@ test('a run from another project joins the comparison without scanning the proje
   };
   assert.ok(cells(h.tree()).includes('f_lfevpa'), 'the external run produced metrics');
 });
+
+test('multi-station run list can be searched and filtered', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  const nodes = (
+    node: unknown,
+  ): { type: unknown; props: Record<string, unknown> & { children?: unknown[] } }[] => {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    return [element, ...nodes(element.props?.children)];
+  };
+  const checkboxes = () =>
+    nodes(h.tree()).filter(
+      (element) =>
+        element.type === 'input' &&
+        element.props.type === 'checkbox' &&
+        String(element.props.onChange).includes('toggleComparisonRun'),
+    );
+  assert.equal(checkboxes().length, 1);
+  const search = nodes(h.tree()).find(
+    (element) => element.type === 'Input' && element.props['aria-label'] === 'Search runs',
+  );
+  assert.ok(search, 'the run list has a search box');
+  (search.props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: 'no-such-station' },
+  });
+  await h.render();
+  assert.equal(checkboxes().length, 0, 'searching hides non-matching runs');
+  (search.props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '' },
+  });
+  await h.render();
+  assert.equal(checkboxes().length, 1);
+  // 结果已在本机的运行在"只看服务器上的"过滤下也隐藏。
+  const serverOnly = nodes(h.tree()).find(
+    (element) =>
+      element.type === 'input' &&
+      element.props.type === 'checkbox' &&
+      String(element.props.onChange).includes('setComparisonServerOnly'),
+  );
+  assert.ok(serverOnly, 'the server-only filter exists');
+  (serverOnly.props.onChange as (event: { target: { checked: boolean } }) => void)({
+    target: { checked: true },
+  });
+  await h.render();
+  assert.equal(checkboxes().length, 0);
+});
+
+test('the comparison shows a per-station RMSE bar chart', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  h.field('comparison-sources')!.set!('/case/.colm/runs/a | /obs/compare.nc');
+  await h.render();
+  await h.action('compare-sites');
+  const nodes = (
+    node: unknown,
+  ): { type: unknown; props: Record<string, unknown> & { children?: unknown[] } }[] => {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    return [element, ...nodes(element.props?.children)];
+  };
+  const bars = nodes(h.tree()).filter(
+    (element) => element.props?.className === 'comparison-bar-fill',
+  );
+  assert.equal(bars.length, 1, 'one bar per compared run');
+  assert.ok(String((bars[0].props.style as { width?: string }).width).endsWith('%'));
+});
