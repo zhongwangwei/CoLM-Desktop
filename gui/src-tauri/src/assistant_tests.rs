@@ -582,6 +582,7 @@ fn legacy_settings_without_retrieval_load_as_disabled_with_the_shared_defaults()
             endpoint: "http://127.0.0.1:9200".into(),
             index: "colm-docs-v1".into(),
             timeout_ms: 1500,
+            ..RetrievalSettings::default()
         }
     );
     assert!(validate_settings(&old).is_ok());
@@ -601,6 +602,7 @@ fn legacy_settings_without_retrieval_load_as_disabled_with_the_shared_defaults()
             endpoint: "http://localhost:9200".into(),
             index: "docs-v2".into(),
             timeout_ms: 2000,
+            ..RetrievalSettings::default()
         },
         ..AssistantSettings::default()
     };
@@ -622,6 +624,7 @@ fn retrieval_validation_rejects_unsafe_xerj_targets_even_when_disabled() {
             endpoint: endpoint.into(),
             index: index.into(),
             timeout_ms,
+            ..RetrievalSettings::default()
         };
     // 默认（关闭）合法；合法的本机回环地址（含末尾斜杠与 IPv6）。
     assert!(validate_settings(&AssistantSettings::default()).is_ok());
@@ -738,6 +741,7 @@ fn configure_messages_always_carry_retrieval_and_the_agent_can_read_it() {
             endpoint: "http://127.0.0.1:9200".into(),
             index: "colm-docs-v1".into(),
             timeout_ms: 2000,
+            ..RetrievalSettings::default()
         },
         ..AssistantSettings::default()
     };
@@ -1093,4 +1097,95 @@ fn session_limits_default_to_a_finite_budget_and_allow_unlimited_zero() {
         ..AssistantSettings::default()
     };
     assert!(validate_settings(&unlimited).is_ok());
+}
+
+#[test]
+fn retrieval_managed_settings_load_old_files_and_validate_the_new_fields() {
+    // 旧 assistant.json 没有 retrieval：默认关闭且接入方式是 external。
+    let old: AssistantSettings =
+        serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
+            .unwrap();
+    assert!(!old.retrieval.enabled);
+    assert_eq!(old.retrieval.mode, "external");
+    assert_eq!(old.retrieval.binary_path, None);
+    assert_eq!(old.retrieval.port, None);
+    assert!(validate_settings(&AssistantSettings::default()).is_ok());
+
+    let mut settings = AssistantSettings::default();
+    settings.retrieval.enabled = true;
+    settings.retrieval.mode = "managed".into();
+    settings.retrieval.binary_path = Some("/opt/homebrew/bin/xerj".into());
+    settings.retrieval.port = Some(9_310);
+    assert!(validate_settings(&settings).is_ok());
+    // configure 给 agent 的仍是它认识的四个字段；mode/binary_path/port 只由窗口进程使用。
+    let message = configure_message(&settings, "/p", None, None, None);
+    for key in ["enabled", "endpoint", "index", "timeout_ms"] {
+        assert!(message["retrieval"].get(key).is_some(), "{key}");
+    }
+    assert!(message["retrieval"].get("mode").is_none());
+
+    // 不允许拼错的接入方式；managed 的二进制路径必须是绝对路径；端口必须有意义。
+    settings.retrieval.mode = "local".into();
+    assert!(validate_settings(&settings).is_err());
+    settings.retrieval.mode = "managed".into();
+    settings.retrieval.binary_path = Some("xerj".into());
+    assert!(validate_settings(&settings).is_err());
+    settings.retrieval.binary_path = None;
+    settings.retrieval.port = Some(80);
+    assert!(validate_settings(&settings).is_err());
+    settings.retrieval.port = None;
+    assert!(validate_settings(&settings).is_ok());
+}
+
+#[test]
+fn xerj_node_actions_are_whitelisted() {
+    for action in ["status", "start", "stop"] {
+        assert!(validate_xerj_node_action(action).is_ok(), "{action}");
+    }
+    for action in ["", "restart", "download", "START", "start "] {
+        assert!(validate_xerj_node_action(action).is_err(), "{action}");
+    }
+}
+
+#[test]
+fn managed_xerj_settings_round_trip_and_status_is_explicit_without_a_key() {
+    let mut settings = AssistantSettings::default();
+    settings.retrieval.enabled = true;
+    settings.retrieval.mode = "managed".into();
+    settings.retrieval.binary_path = Some("/opt/homebrew/bin/xerj".into());
+    settings.retrieval.port = Some(9_320);
+    let round: AssistantSettings =
+        serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+    assert_eq!(round.retrieval.mode, "managed");
+    assert_eq!(
+        round.retrieval.binary_path.as_deref(),
+        Some("/opt/homebrew/bin/xerj")
+    );
+    assert_eq!(round.retrieval.port, Some(9_320));
+
+    // external 模式：不探测、不启动用户节点，说明里写清楚。
+    let managed = ManagedXerj::default();
+    let external = managed.status_value(&AssistantSettings::default());
+    assert_eq!(external["mode"], "external");
+    assert_eq!(external["running"], false);
+    assert!(external["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("应用不启动也不停止它")));
+
+    // managed 且尚未启动：状态是明确的“未启动”，并给出固定版本线索；任何状态都不含 key。
+    let managed_status = managed.status_value(&settings);
+    assert_eq!(managed_status["mode"], "managed");
+    assert_eq!(managed_status["running"], false);
+    assert_eq!(
+        managed_status["pinned_version"],
+        crate::xerj_manager::PINNED_XERJ_RELEASE
+    );
+    assert!(managed_status["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("节点未启动")));
+    assert!(managed_status.get("api_key").is_none());
+    assert!(!managed_status.to_string().contains("admin.key\""));
+    // 没有节点时 stop 也必须幂等、不 panic。
+    managed.stop();
+    managed.stop();
 }

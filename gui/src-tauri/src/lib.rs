@@ -33,6 +33,7 @@ mod simulation_draft;
 mod sitedata;
 mod sites;
 mod workspace;
+mod xerj_manager;
 
 use assistant::*;
 use config::*;
@@ -75,6 +76,8 @@ pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
         eprintln!("failed to stop remote submissions and data preparation while {when}: {error}");
     }
     app.state::<AssistantProcess>().stop();
+    // 应用托管的 Xerj 节点：只停自己启动的进程组；用户已有节点走 external 模式，不在这里。
+    app.state::<ManagedXerj>().stop();
 }
 
 pub fn run() {
@@ -140,6 +143,7 @@ pub fn run() {
         .manage(CaseCreations::default())
         .manage(remote_cases::RemoteCreationBatches::default())
         .manage(AssistantProcess::default())
+        .manage(ManagedXerj::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
         // 因为"改一个字段"与"改这一批的一个字段"必须是同一件事。
@@ -281,6 +285,7 @@ pub fn run() {
             assistant_pick_document,
             assistant_backend_status,
             assistant_docs_index,
+            assistant_xerj_node,
             assistant::assistant_codex_models,
             assistant::assistant_opencode_models,
             assistant::assistant_api_models,

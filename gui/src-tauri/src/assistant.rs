@@ -123,30 +123,218 @@ impl AssistantProcess {
     }
 }
 
+/// 应用托管的本机 Xerj 节点。只存在窗口进程内：
+/// - 只有用户显式选择 managed 且启用检索时才启动；绝不自动下载/升级二进制；
+/// - 数据目录、端口与 `admin.key` 都属于应用自己，退出/停止时只结束自己启动的进程组；
+/// - 用户已有的节点走 external 模式，这里不探测也不碰。
+#[derive(Default, Clone)]
+pub struct ManagedXerj {
+    inner: Arc<Mutex<Option<crate::xerj_manager::ManagedNode>>>,
+    /// 最近一次启动/停止/版本不符的原因，供设置面板解释；绝不含 key。
+    detail: Arc<Mutex<Option<String>>>,
+}
+
+impl ManagedXerj {
+    /// 当前设置对应的节点状态（设置面板轮询/按钮显示）。external 模式不发起网络探测。
+    pub fn status_value(&self, settings: &AssistantSettings) -> Value {
+        let pinned = crate::xerj_manager::PINNED_XERJ_RELEASE;
+        if settings.retrieval.mode != "managed" {
+            return json!({
+                "mode": "external",
+                "running": false,
+                "endpoint": settings.retrieval.endpoint,
+                "port": Value::Null,
+                "version": Value::Null,
+                "pinned_version": pinned,
+                "pinned_match": Value::Null,
+                "binary": Value::Null,
+                "data_dir": Value::Null,
+                "detail": "使用用户自行运行的 Xerj 节点；应用不启动也不停止它",
+            });
+        }
+        let status = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|node| node.status()));
+        match status {
+            Some(status) => {
+                let mut value = serde_json::to_value(status).unwrap_or_default();
+                value["mode"] = json!("managed");
+                value["pinned_version"] = json!(pinned);
+                value
+            }
+            None => json!({
+                "mode": "managed",
+                "running": false,
+                "endpoint": Value::Null,
+                "port": Value::Null,
+                "version": Value::Null,
+                "pinned_version": pinned,
+                "pinned_match": Value::Null,
+                "binary": Value::Null,
+                "data_dir": Value::Null,
+                "detail": self
+                    .detail
+                    .lock()
+                    .ok()
+                    .and_then(|detail| detail.clone())
+                    .unwrap_or_else(|| "节点未启动；首次发送、保存设置或点「启动节点」时应用会启动它".into()),
+            }),
+        }
+    }
+
+    /// 确保 managed 节点就绪并返回实际 endpoint（external 模式直接返回配置值）。
+    /// 同步阻塞（最多 ready_timeout），调用方放在 spawn_blocking 里。启动失败不阻断助手：
+    /// 调用方保留 retrieval enabled，让 agent 报 not_connected 并回退关键词检索。
+    pub(crate) fn ensure_started(
+        &self,
+        app: &tauri::AppHandle,
+        settings: &AssistantSettings,
+    ) -> Result<String, String> {
+        if settings.retrieval.mode != "managed" {
+            return Ok(settings.retrieval.endpoint.clone());
+        }
+        {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| "Xerj 节点状态锁失效".to_string())?;
+            if let Some(node) = guard.as_ref() {
+                return Ok(node.endpoint());
+            }
+        }
+        let starts: Vec<PathBuf> = [
+            app.path().resource_dir().ok(),
+            agent_path().parent().map(PathBuf::from),
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(PathBuf::from)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let config = crate::xerj_manager::ManagedConfig {
+            binary_path: settings.retrieval.binary_path.clone(),
+            data_dir: data_dir(app)?.join("xerj"),
+            preferred_port: settings.retrieval.port,
+            extra_binary_dirs: starts,
+            ready_timeout: crate::xerj_manager::DEFAULT_READY_TIMEOUT,
+        };
+        let node = crate::xerj_manager::ManagedNode::start(config).inspect_err(|error| {
+            if let Ok(mut detail) = self.detail.lock() {
+                *detail = Some(error.clone());
+            }
+        })?;
+        let endpoint = node.endpoint();
+        // 应用自己数据目录里的 admin.key 交给 agent 的现有 secrets（按 endpoint 存），
+        // key 值只经 stdin，不经过 WebView、设置文件或日志。
+        store_retrieval_key(app, &endpoint, &node.api_key())?;
+        if let Ok(mut detail) = self.detail.lock() {
+            *detail = if node.pinned_match() == Some(false) {
+                Some(format!(
+                    "节点版本 {} 与验收固定版本 {} 不同：可继续使用，但需人工替换为固定版本并重跑验收；应用不会自动升级",
+                    node.version().unwrap_or_else(|| "unknown".into()),
+                    crate::xerj_manager::PINNED_XERJ_RELEASE,
+                ))
+            } else {
+                None
+            };
+        }
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(node);
+        }
+        Ok(endpoint)
+    }
+
+    pub(crate) fn stop(&self) {
+        let node = self.inner.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(mut node) = node {
+            if let Err(error) = node.stop() {
+                if let Ok(mut detail) = self.detail.lock() {
+                    *detail = Some(error);
+                }
+            }
+        }
+    }
+
+    /// 供 `spawn_blocking` 使用的独立句柄（与 Tauri state 共享同一个节点与该节点内的 Arc）。
+    pub(crate) fn handle(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            detail: Arc::clone(&self.detail),
+        }
+    }
+}
+
+/// 把应用托管的 Xerj key 交给 `colm-agent` 写进本地 Key 文件（与 assistant_set_key 同一条路径）。
+fn store_retrieval_key(app: &tauri::AppHandle, endpoint: &str, key: &str) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("托管 Xerj 节点没有生成 API key".into());
+    }
+    let mut command = key_command(app, "--set-key", endpoint)?;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(format!("{}\n", key.trim()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
+}
+
 /// Xerj 文档检索设置（应用级，不随 API 服务商 profile 切换）。默认关闭；字段与
-/// `crates/colm-agent/src/retrieval.rs` 的 `RetrievalSettings` 一一对应，旧 `assistant.json`
-/// 没有这个对象时整份按默认关闭加载。Key 不在这里：沿用 `assistant-keys.json`，按 endpoint 登记。
+/// `crates/colm-agent/src/retrieval.rs` 的 `RetrievalSettings` 一一对应（mode/binary_path/port
+/// 只由窗口进程使用，不传给 agent），旧 `assistant.json` 没有这个对象时整份按默认关闭加载。
+/// Key 不在这里：external 模式沿用 `assistant-keys.json` 按 endpoint 登记；managed 模式由应用
+/// 自己读取应用数据目录里的 `admin.key` 并登记，不需要用户输入。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalSettings {
     #[serde(default)]
     pub enabled: bool,
+    /// "external"（默认，使用用户自己运行的节点）或 "managed"（应用启动并托管自己的 Xerj）。
+    #[serde(default = "default_retrieval_mode")]
+    pub mode: String,
     #[serde(default = "default_retrieval_endpoint")]
     pub endpoint: String,
     #[serde(default = "default_retrieval_index")]
     pub index: String,
     #[serde(default = "default_retrieval_timeout_ms")]
     pub timeout_ms: u64,
+    /// managed 模式的可选 Xerj 二进制路径；空 = 依次探测 COLM_XERJ_BINARY、资源目录、PATH。
+    #[serde(default)]
+    pub binary_path: Option<String>,
+    /// managed 模式的首选端口；空 = 自动选连续 3 个空闲 loopback 端口（Xerj 还会占用 +1/+2）。
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 impl Default for RetrievalSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: default_retrieval_mode(),
             endpoint: default_retrieval_endpoint(),
             index: default_retrieval_index(),
             timeout_ms: default_retrieval_timeout_ms(),
+            binary_path: None,
+            port: None,
         }
     }
+}
+
+fn default_retrieval_mode() -> String {
+    "external".into()
 }
 
 fn default_retrieval_endpoint() -> String {
@@ -715,6 +903,23 @@ fn validate_retrieval(settings: &RetrievalSettings) -> Result<(), String> {
     if !(100..=10_000).contains(&settings.timeout_ms) {
         return Err("Xerj 检索超时须为 100–10000 毫秒".into());
     }
+    if !matches!(settings.mode.as_str(), "external" | "managed") {
+        return Err("Xerj 接入方式只能是「使用已运行的本机节点」或「由应用启动并管理节点」".into());
+    }
+    if let Some(path) = settings.binary_path.as_deref() {
+        let path = path.trim();
+        if path.is_empty() || path.chars().count() > 4096 || path.chars().any(char::is_control) {
+            return Err("Xerj 二进制路径不能为空、不能含控制字符（最多 4096 字符）".into());
+        }
+        if !std::path::Path::new(path).is_absolute() {
+            return Err("Xerj 二进制路径须为绝对路径；留空则由应用自动探测".into());
+        }
+    }
+    if let Some(port) = settings.port {
+        if !(1024..=65_000).contains(&port) {
+            return Err("Xerj 首选端口须为 1024–65000 的整数；留空则自动选择".into());
+        }
+    }
     Ok(())
 }
 
@@ -988,6 +1193,57 @@ pub fn assistant_docs_index(
     let event = crate::history::start("assistant_docs_index", None, json!({"action": &action}))?;
     let result = send(&process, &docs_index_message(&action));
     finish_assistant_action(&event, result)
+}
+
+/// 托管节点操作只有三种：查状态、启动、停止。拼错或旧调用方直接拒绝，不静默当成 status。
+fn validate_xerj_node_action(action: &str) -> Result<(), String> {
+    if matches!(action, "status" | "start" | "stop") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Xerj 节点操作只能是 start、stop 或 status，收到 {action:?}"
+        ))
+    }
+}
+
+/// 应用托管的 Xerj 节点：查询状态、启动、停止。managed 模式由窗口进程启动固定版本二进制并
+/// 自己保管 `admin.key`；版本不符只提示不阻断，绝不自动下载/替换/升级。external 模式不探测用户节点。
+#[tauri::command]
+pub async fn assistant_xerj_node(
+    app: tauri::AppHandle,
+    managed: tauri::State<'_, ManagedXerj>,
+    action: String,
+) -> Result<Value, String> {
+    validate_xerj_node_action(&action)?;
+    let settings = assistant_settings(app.clone());
+    match action.as_str() {
+        "status" => Ok(managed.status_value(&settings)),
+        "start" => {
+            if settings.retrieval.mode != "managed" {
+                return Err(
+                    "当前接入方式是「使用已运行的本机节点」；先选择「由应用启动并管理节点」再启动"
+                        .into(),
+                );
+            }
+            let node = managed.handle();
+            let settings_for_start = settings.clone();
+            let app_for_start = app.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                node.ensure_started(&app_for_start, &settings_for_start)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            result?;
+            Ok(managed.status_value(&assistant_settings(app)))
+        }
+        "stop" => {
+            managed.stop();
+            Ok(managed.status_value(&settings))
+        }
+        other => Err(format!(
+            "Xerj 节点操作只能是 start、stop 或 status，收到 {other:?}"
+        )),
+    }
 }
 
 /// 本机 Codex 可用的模型与各自支持的思考强度（`colm-agent --codex-models` 问 Codex 自己）。
@@ -1283,9 +1539,25 @@ pub async fn assistant_start(
     case_dir: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
 ) -> Result<(), String> {
-    let settings = assistant_settings(app.clone());
+    let mut settings = assistant_settings(app.clone());
     validate_settings(&settings)?;
     require_egress_acknowledged(&settings)?;
+    // managed 模式：先把应用自己的 Xerj 节点拉起来、把应用自管的 key 交给 agent，再把实际
+    // endpoint 写进 configure。失败不阻断助手：保留 enabled，让 agent 报 not_connected 并回退。
+    if settings.retrieval.enabled && settings.retrieval.mode == "managed" {
+        let node = app.state::<ManagedXerj>().handle();
+        let settings_for_start = settings.clone();
+        let app_for_start = app.clone();
+        let started = tauri::async_runtime::spawn_blocking(move || {
+            node.ensure_started(&app_for_start, &settings_for_start)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        match started {
+            Ok(endpoint) => settings.retrieval.endpoint = endpoint,
+            Err(error) => eprintln!("managed Xerj node is unavailable: {error}"),
+        }
+    }
     let model_context = match model_revision {
         Some(version) => Some(crate::model::assistant_context(version, case_dir.as_deref()).await?),
         None => None,
