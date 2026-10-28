@@ -11,6 +11,8 @@ import {
   historyInput,
   parseApiOptions,
   rememberProfile,
+  retrievalSettingsProblem,
+  retrievalStateText,
   selectProvider,
   settingsForSave,
   thinkSettings,
@@ -343,4 +345,88 @@ it('refusals before a turn starts are recognised so the input can be restored', 
   assert.equal(rejectedBeforeTurn('Error: still answering the previous message'), true);
   assert.equal(rejectedBeforeTurn('no API key is stored for this service; set it'), true);
   assert.equal(rejectedBeforeTurn('HTTP 500 from the model'), false);
+});
+
+it('defaults Xerj retrieval off and keeps it out of provider profiles', () => {
+  assert.deepEqual(defaultSettings.retrieval, {
+    enabled: false,
+    endpoint: 'http://127.0.0.1:9200',
+    index: 'colm-docs-v1',
+    timeout_ms: 1500,
+  });
+  const saved = rememberProfile({
+    ...defaultSettings,
+    retrieval: {
+      enabled: true,
+      endpoint: 'http://localhost:9200',
+      index: 'docs-v2',
+      timeout_ms: 2000,
+    },
+  });
+  // 检索是应用级设置：不能进服务商 profile，否则切服务商会被旧 profile 覆盖。
+  assert.equal('retrieval' in (saved.api_profiles.deepseek as object), false);
+  // 切服务商不丢检索设置；保存（含 profile 归一）也原样保留。
+  const switched = selectProvider(saved, 'openai');
+  assert.deepEqual(switched.retrieval, saved.retrieval);
+  const forSave = settingsForSave(
+    { ...switched, retrieval: { ...switched.retrieval, index: 'docs-v3' } },
+    saved,
+  );
+  assert.deepEqual(forSave.retrieval, {
+    enabled: true,
+    endpoint: 'http://localhost:9200',
+    index: 'docs-v3',
+    timeout_ms: 2000,
+  });
+});
+
+it('validates Xerj retrieval settings with bilingual messages even when disabled', () => {
+  const base = defaultSettings.retrieval;
+  assert.equal(retrievalSettingsProblem(base, 'zh'), null);
+  // 关闭时也校验：关着存进非法值、等打开才报错就晚了。
+  for (const endpoint of [
+    'https://127.0.0.1:9200',
+    'http://192.168.1.10:9200',
+    'http://docs.example.com:9200',
+    'http://127.0.0.1:9200/v1',
+    'http://127.0.0.1:9200?key=secret',
+    'http://127.0.0.1:9200#fragment',
+    'http://user:pass@127.0.0.1:9200',
+    'http://127.0.0.1',
+    'not a url',
+  ])
+    assert.ok(retrievalSettingsProblem({ ...base, endpoint }, 'zh'), endpoint);
+  for (const index of ['', '-docs', '_docs', 'Docs', 'docs v1', 'docs/v1', 'a'.repeat(65), '文档'])
+    assert.ok(retrievalSettingsProblem({ ...base, index }, 'en'), index);
+  for (const timeout_ms of [0, 99, 10_001, 1.5, Number.NaN])
+    assert.ok(retrievalSettingsProblem({ ...base, timeout_ms }, 'en'), String(timeout_ms));
+  // 合法值（含末尾斜杠、localhost 与 64 字节索引名）都能通过。
+  for (const patch of [
+    { endpoint: 'http://localhost:9200/' },
+    { index: 'a' },
+    { index: 'a'.repeat(64) },
+    { timeout_ms: 100 },
+    { timeout_ms: 10_000 },
+  ])
+    assert.equal(
+      retrievalSettingsProblem({ ...base, ...patch }, 'en'),
+      null,
+      JSON.stringify(patch),
+    );
+  assert.match(retrievalSettingsProblem({ ...base, index: 'Docs' }, 'zh')!, /索引名/);
+  assert.match(retrievalSettingsProblem({ ...base, index: 'Docs' }, 'en')!, /index name/i);
+});
+
+it('translates known Xerj index states and leaves unknown states untouched', () => {
+  assert.equal(retrievalStateText('ready', 'zh'), '索引就绪');
+  assert.equal(retrievalStateText('ready', 'en'), 'Index ready');
+  assert.equal(retrievalStateText('disabled', 'zh'), '未启用');
+  assert.equal(retrievalStateText('building', 'en'), 'Building index');
+  assert.equal(retrievalStateText('stale', 'en'), 'Index stale');
+  // 后端将来新增的状态原样显示，不能悄悄变成空白或"就绪"。
+  assert.equal(
+    retrievalStateText('rejected_by_future_backend', 'en'),
+    'rejected_by_future_backend',
+  );
+  assert.equal(retrievalStateText('', 'zh'), '');
 });

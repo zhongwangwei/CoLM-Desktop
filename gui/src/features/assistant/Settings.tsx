@@ -9,6 +9,8 @@ import {
   apiEfforts,
   parseApiOptions,
   providerId,
+  retrievalSettingsProblem,
+  retrievalStateText,
   selectProvider,
   rememberProfile,
   settingsForSave,
@@ -16,8 +18,10 @@ import {
   thinkSettings,
   withChoice,
   withContextWindowCleared,
+  type AgentEvent,
   type Settings,
   type ModelChoice,
+  type RetrievalSettings,
 } from './model';
 import { draftSaveState, sendingSummary, settingsDraftDirty } from './settings-draft';
 
@@ -26,12 +30,15 @@ export default function AssistantSettings({
   onSave,
   disabled,
   onDirtyChange,
+  docsIndex,
 }: {
   settings: Settings;
   onSave: (next: Settings) => Promise<void>;
   disabled: boolean;
   /** 把草稿是否有未保存修改报给面板：关闭/切走前据此决定要不要确认放弃（U-07）。 */
   onDirtyChange: (dirty: boolean) => void;
+  /** 当前 Xerj 索引状态（应用级，不随对话切换）；null/缺省 = 还没收到状态事件。 */
+  docsIndex?: AgentEvent | null;
 }) {
   const { state } = useApp();
   const t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
@@ -42,6 +49,12 @@ export default function AssistantSettings({
         '这个服务还没有登记 API Key；先登记 Key 再刷新模型或保存。',
         'No API key is registered for this service; register one before refreshing models or saving.',
       );
+    // 索引请求要经过正在运行的助手进程；还没启动时给一句能照做的提示，而不是中文原文。
+    if (text.includes('助手还没有启动'))
+      return t(
+        '助手还没有启动；先发送一条消息启动助手，再更新或查询文档索引。',
+        'The assistant is not running yet; send a message first, then update or check the document index.',
+      );
     return text;
   }
   const lock = useRef(false);
@@ -49,6 +62,9 @@ export default function AssistantSettings({
   const [options, setOptions] = useState(JSON.stringify(settings.api_options, null, 2));
   const [key, setKey] = useState('');
   const [hasKey, setHasKey] = useState<boolean | null>(null);
+  // Xerj 的 Key 按检索 endpoint 另存一条，和模型服务不是同一个条目，不能复用上面的 key/hasKey。
+  const [retrievalKey, setRetrievalKey] = useState('');
+  const [retrievalHasKey, setRetrievalHasKey] = useState<boolean | null>(null);
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -87,10 +103,32 @@ export default function AssistantSettings({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+  // Xerj 的 Key 按 endpoint 单独登记（与模型服务的 Key 不是同一条），改动地址后重新问一次。
+  // 新 effect 放在已有 effect 之后，避免打乱按出现顺序抽取的页面状态。
+  useEffect(() => {
+    let active = true;
+    setRetrievalHasKey(null);
+    if (hasBackend())
+      invoke<boolean>('assistant_has_key', { baseUrl: draft.retrieval.endpoint })
+        .then((value) => {
+          if (active) setRetrievalHasKey(value);
+        })
+        .catch(() => {
+          // 地址可能正改到一半：Key 状态按"尚未确认"显示，报错留给保存校验。
+          if (active) setRetrievalHasKey(null);
+        });
+    return () => {
+      active = false;
+    };
+  }, [draft.retrieval.endpoint]);
   function patch(value: Partial<Settings>) {
     // 字段一改就清掉上一次"设置已保存"的成功提示，避免过时成功状态（U-05 / U-07）。
     setStatus('');
     setDraft((old) => ({ ...old, ...value }));
+  }
+  function patchRetrieval(value: Partial<RetrievalSettings>) {
+    setStatus('');
+    setDraft((old) => ({ ...old, retrieval: { ...old.retrieval, ...value } }));
   }
   /** 放弃草稿 = 把表单恢复成已保存设置；面板会据此清掉"有未保存修改"（U-07）。 */
   function discardDraft() {
@@ -494,6 +532,167 @@ export default function AssistantSettings({
               onChange={(e) => patch({ session_token_limit: Number(e.target.value) })}
             />
           </Field>
+          <div className="space-y-2 border-t pt-3">
+            <strong>{t('文档检索（Xerj，可选）', 'Document search (Xerj, optional)')}</strong>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                '应用级设置，与上面选的后端无关：回答可以引用本机 Xerj 里索引的文档。关闭时完全不访问 Xerj。',
+                'An application-level setting independent of the backend above: answers may cite documents indexed in a local Xerj. Nothing is sent to Xerj while this is off.',
+              )}
+            </p>
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.retrieval.enabled}
+                onChange={(e) => patchRetrieval({ enabled: e.target.checked })}
+              />{' '}
+              {t('启用文档检索', 'Enable document search')}
+            </label>
+            <Field
+              label={t('Xerj 服务地址', 'Xerj service URL')}
+              hint={t(
+                '只接受本机回环 http，且必须写明端口；例如 http://127.0.0.1:9200。',
+                'Only loopback http with an explicit port, for example http://127.0.0.1:9200.',
+              )}
+            >
+              <Input
+                value={draft.retrieval.endpoint}
+                onChange={(e) => {
+                  if (retrievalKey) {
+                    setStatus(
+                      t(
+                        '请先登记或清空 Xerj Key 再修改服务地址。',
+                        'Register or clear the Xerj key before changing the service URL.',
+                      ),
+                    );
+                    return;
+                  }
+                  patchRetrieval({ endpoint: e.target.value });
+                }}
+              />
+            </Field>
+            <Field
+              label={t('索引名', 'Index name')}
+              hint={t(
+                '小写字母、数字、下划线或连字符，1–64 字节，以字母或数字开头。',
+                'Lowercase letters, digits, underscores or hyphens, 1–64 bytes, starting with a letter or digit.',
+              )}
+            >
+              <Input
+                value={draft.retrieval.index}
+                onChange={(e) => patchRetrieval({ index: e.target.value })}
+              />
+            </Field>
+            <Field
+              label={t('检索超时（毫秒）', 'Retrieval timeout (ms)')}
+              unit={t('毫秒', 'ms')}
+              range={t('100–10000 的整数', 'integer 100–10000')}
+            >
+              <Input
+                type="number"
+                min={100}
+                max={10_000}
+                value={draft.retrieval.timeout_ms}
+                onChange={(e) => patchRetrieval({ timeout_ms: Number(e.target.value) })}
+              />
+            </Field>
+            <Field
+              label={t('Xerj API Key', 'Xerj API key')}
+              hint={
+                retrievalHasKey === null
+                  ? t('Key 状态尚未确认', 'Key status is not yet confirmed')
+                  : retrievalHasKey
+                    ? t(
+                        '已在本机登记，前端不读取已保存 Key',
+                        'Registered locally; the saved key is never read by this form',
+                      )
+                    : t(
+                        '尚未登记 Key（无认证的 Xerj 节点可留空）',
+                        'No key registered (leave empty for an unauthenticated Xerj node)',
+                      )
+              }
+            >
+              <Input
+                type="password"
+                autoComplete="off"
+                value={retrievalKey}
+                onChange={(e) => setRetrievalKey(e.target.value)}
+              />
+            </Field>
+            <div className="flex gap-2">
+              <Button
+                disabled={!retrievalKey.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    await invoke('assistant_set_key', {
+                      baseUrl: draft.retrieval.endpoint,
+                      key: retrievalKey,
+                    });
+                    setRetrievalKey('');
+                    setRetrievalHasKey(true);
+                    setStatus(t('Xerj Key 已登记', 'Xerj key registered'));
+                  })
+                }
+              >
+                {t('登记 Key', 'Register key')}
+              </Button>
+              <Button
+                disabled={!retrievalHasKey}
+                onClick={() =>
+                  void run(async () => {
+                    await invoke('assistant_delete_key', { baseUrl: draft.retrieval.endpoint });
+                    setRetrievalHasKey(false);
+                  })
+                }
+              >
+                {t('删除 Key', 'Delete key')}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t('索引状态：', 'Index status: ')}
+              {docsIndex ? (
+                <>
+                  {retrievalStateText(docsIndex.state || '', state.language)}
+                  {typeof docsIndex.documents === 'number' &&
+                    ` · ${t('文档', 'documents')} ${docsIndex.documents}`}
+                  {typeof docsIndex.chunks === 'number' &&
+                    ` · ${t('分块', 'chunks')} ${docsIndex.chunks}`}
+                  {typeof docsIndex.generation === 'number' &&
+                    ` · ${t('索引代次', 'generation')} ${docsIndex.generation}`}
+                  {docsIndex.detail ? ` · ${docsIndex.detail}` : ''}
+                </>
+              ) : (
+                t('还没收到状态；点“查询状态”获取。', 'No status yet; use "Check status".')
+              )}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() =>
+                  void run(async () => {
+                    await invoke('assistant_docs_index', { action: 'refresh' });
+                    setStatus(
+                      t(
+                        '已请求更新文档索引；状态见上方。',
+                        'Document index update requested; see the status above.',
+                      ),
+                    );
+                  })
+                }
+              >
+                {t('更新文档索引', 'Update document index')}
+              </Button>
+              <Button
+                onClick={() =>
+                  void run(async () => {
+                    await invoke('assistant_docs_index', { action: 'status' });
+                    setStatus(t('已请求索引状态。', 'Index status requested.'));
+                  })
+                }
+              >
+                {t('查询状态', 'Check status')}
+              </Button>
+            </div>
+          </div>
           <Button
             onClick={() =>
               void run(async () =>
@@ -512,6 +711,11 @@ export default function AssistantSettings({
               void run(async () => {
                 if (key)
                   throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
+                // Xerj 的 Key 也是"输入框里有内容"= 还没登记；保存会重启助手，先让用户登记或清空。
+                if (retrievalKey)
+                  throw new Error(
+                    t('请先登记或清空 Xerj Key。', 'Register or clear the Xerj key first.'),
+                  );
                 if (
                   ![draft.max_output_tokens, draft.timeout_seconds].every(
                     (n) => Number.isSafeInteger(n) && n > 0,
@@ -532,6 +736,9 @@ export default function AssistantSettings({
                       'Output limit and timeout must be positive integers; the context window must be an integer between 1024 and 10000000 or blank; session limits must be non-negative integers.',
                     ),
                   );
+                // 检索关闭也校验格式：开/关之间切换不应因为存了非法值才发现。
+                const retrievalProblem = retrievalSettingsProblem(draft.retrieval, state.language);
+                if (retrievalProblem) throw new Error(retrievalProblem);
                 const next = settingsForSave(
                   rememberProfile({ ...draft, api_options: parseApiOptions(options) }),
                   settings,

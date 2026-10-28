@@ -8,6 +8,7 @@ import {
   egressTarget,
   rejectedBeforeTurn,
   withoutLastUser,
+  type AgentEvent,
   type Message,
   type Settings,
 } from './model';
@@ -447,6 +448,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     usage: '',
     usagePending: false,
     contextUsage: null as Record<string, unknown> | null,
+    docsIndex: null as AgentEvent | null,
   };
   const refs = {
     running: { current: false },
@@ -488,6 +490,9 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setLimitReached: () => {},
     setConsent: () => {},
     setApproval: () => {},
+    setDocsIndex: (value: AgentEvent) => {
+      ui.docsIndex = value;
+    },
   };
   const errorText = (message: string) => String(message).replace(/^Error: /, '');
   const t = (_zh: string, en: string) => en;
@@ -552,6 +557,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setSessionUsage: updates.setSessionUsage,
     setUsagePending: updates.setUsagePending,
     setContextUsage: updates.setContextUsage,
+    setDocsIndex: updates.setDocsIndex,
   });
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
     input: typed,
@@ -866,6 +872,41 @@ test('the context event carries the dynamic window, available input and the esti
     safety: 0,
     source: null,
   });
+});
+
+test('the docs_index_status event keeps the application-level Xerj index state', async () => {
+  const harness = sendHarness();
+  const event = {
+    type: 'docs_index_status',
+    backend: 'xerj',
+    enabled: true,
+    state: 'ready',
+    scope: { kind: 'app', name: 'docs' },
+    endpoint: 'http://127.0.0.1:9200',
+    index: 'colm-docs-v1',
+    documents: 12,
+    chunks: 340,
+    generation: 1_730_000_000_000,
+    indexed_at_unix_ms: 1_730_000_000_123,
+    detail: 'published generation 1730000000000',
+  };
+  harness.handleEvent(event);
+  assert.deepEqual(harness.ui.docsIndex, event);
+  // 应用级设置：索引状态不属于某个对话，设置对话框直接从面板拿最近一次状态。
+  assert.match(panelSource, /case 'docs_index_status':/);
+  assert.match(panelSource, /docsIndex=\{docsIndex\}/);
+  // 未知 state 不能被页面丢掉（后端升级后前端仍要原样显示）。
+  harness.handleEvent({ type: 'docs_index_status', state: 'future_state' });
+  assert.equal(harness.ui.docsIndex?.state, 'future_state');
+
+  // 后台索引事件不是"模型已接下这一轮"的证据：它不能阻止拒绝时撤回气泡、恢复草稿。
+  const pending = sendHarness();
+  const sending = pending.send();
+  await settle();
+  pending.handleEvent({ type: 'docs_index_status', state: 'building' });
+  assert.equal(pending.refs.outgoing.current?.phase, 'preparing');
+  pending.resolveAck();
+  await sending;
 });
 
 test('a leftover built-in context estimate is never shown for an external backend', () => {

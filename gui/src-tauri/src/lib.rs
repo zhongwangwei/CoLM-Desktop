@@ -280,6 +280,7 @@ pub fn run() {
             assistant_ui_result,
             assistant_pick_document,
             assistant_backend_status,
+            assistant_docs_index,
             assistant::assistant_codex_models,
             assistant::assistant_opencode_models,
             assistant::assistant_api_models,

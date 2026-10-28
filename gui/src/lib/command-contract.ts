@@ -9,6 +9,12 @@ export const commandContract = {
   },
   "assistant_pick_document": {},
   "assistant_backend_status": {},
+  "assistant_docs_index": {
+    "action": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "assistant_codex_models": {},
   "assistant_opencode_models": {},
   "assistant_sessions": {},

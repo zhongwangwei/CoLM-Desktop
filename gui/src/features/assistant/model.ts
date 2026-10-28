@@ -12,6 +12,13 @@ export interface ApiProfile {
   reasoning_effort: string | null;
   strict: boolean;
 }
+/** Xerj 文档检索设置：应用级，不随服务商 profile 切换；默认关闭。 */
+export interface RetrievalSettings {
+  enabled: boolean;
+  endpoint: string;
+  index: string;
+  timeout_ms: number;
+}
 export interface Settings extends ApiProfile {
   provider_id: string;
   api_profiles: Record<string, ApiProfile>;
@@ -22,6 +29,8 @@ export interface Settings extends ApiProfile {
   /** 每个会话累计 prompt+completion token 上限；0 = 不限。 */
   session_token_limit: number;
   backend: string;
+  /** Xerj 文档检索（可选，应用级）：关闭时不访问本机 Xerj。 */
+  retrieval: RetrievalSettings;
   egress_acknowledged: string | null;
   external: Record<string, { model: string | null; effort: string | null }>;
 }
@@ -43,6 +52,12 @@ export const defaultSettings: Settings = {
   session_turn_limit: 100,
   session_token_limit: 5_000_000,
   backend: 'builtin',
+  retrieval: {
+    enabled: false,
+    endpoint: 'http://127.0.0.1:9200',
+    index: 'colm-docs-v1',
+    timeout_ms: 1500,
+  },
   egress_acknowledged: null,
   external: {},
 };
@@ -306,6 +321,19 @@ export interface AgentEvent {
   window_source?: string | null;
   limit_reached?: boolean;
   step_limit?: number;
+  /** `docs_index_status`：Xerj 文档索引的应用级状态（不随会话切换）。 */
+  backend?: string;
+  /** 索引状态：disabled|invalid|not_connected|timeout|invalid_response|pending|building|ready|stale|error；
+   * 后端将来新增的状态前端原样显示，别吞掉。 */
+  state?: string;
+  scope?: Record<string, unknown> | null;
+  endpoint?: string;
+  index?: string;
+  documents?: number;
+  chunks?: number;
+  generation?: number | null;
+  indexed_at_unix_ms?: number | null;
+  detail?: string | null;
 }
 export interface Message {
   kind: string;
@@ -415,4 +443,76 @@ export function rejectedBeforeTurn(message: string) {
     text.includes('no API key is stored') ||
     text.includes('no API key is configured')
   );
+}
+
+// Xerj 文档检索由 colm-agent 维护；这些状态经 docs_index_status 事件到达。只翻译已知状态，
+// 后端新增取值原样显示（总比显示空白或误报"就绪"好）。
+const RETRIEVAL_STATES: Record<string, { zh: string; en: string }> = {
+  disabled: { zh: '未启用', en: 'Disabled' },
+  invalid: { zh: '设置无效', en: 'Invalid settings' },
+  not_connected: { zh: '无法连接 Xerj', en: 'Cannot reach Xerj' },
+  timeout: { zh: '连接 Xerj 超时', en: 'Xerj request timed out' },
+  invalid_response: { zh: 'Xerj 响应无法解析', en: 'Unreadable Xerj response' },
+  pending: { zh: '索引待构建', en: 'Index pending' },
+  building: { zh: '正在构建索引', en: 'Building index' },
+  ready: { zh: '索引就绪', en: 'Index ready' },
+  stale: { zh: '索引已过期', en: 'Index stale' },
+  error: { zh: '索引出错', en: 'Index error' },
+};
+
+/** `docs_index_status.state` 的中英文字；未知状态原样返回。 */
+export function retrievalStateText(state: string, language: string) {
+  const text = RETRIEVAL_STATES[state];
+  if (!text) return state;
+  return language === 'en' ? text.en : text.zh;
+}
+
+/**
+ * 前端按后端 validate_retrieval 的同一套规则先校验 Xerj 设置（关闭也要校验）：
+ * 只接受本机回环 http + 显式端口，索引名安全，超时 100–10000 ms。合法返回 null。
+ */
+export function retrievalSettingsProblem(
+  settings: RetrievalSettings,
+  language: string,
+): string | null {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  let url: URL;
+  try {
+    url = new URL(settings.endpoint.trim());
+  } catch {
+    return t('Xerj 服务地址不是有效的网址。', 'The Xerj service URL is not a valid URL.');
+  }
+  // URL.hostname 对 IPv6 通常带方括号（"[::1]"）；个别实现会去掉，两种写法都接受。
+  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
+  if (url.protocol !== 'http:' || !loopback)
+    return t(
+      'Xerj 服务地址只能是本机回环的 http://127.0.0.1、http://localhost 或 http://[::1]。',
+      'The Xerj service URL must be loopback http://127.0.0.1, http://localhost or http://[::1].',
+    );
+  // URL 的 port 为空串表示没有显式端口（http 的默认 80 会被规范化掉，Xerj 也不用 80）。
+  if (!url.port)
+    return t(
+      'Xerj 服务地址必须写明端口，例如 http://127.0.0.1:9200。',
+      'The Xerj service URL must include an explicit port, for example http://127.0.0.1:9200.',
+    );
+  if (url.username || url.password || url.pathname !== '/' || url.search || url.hash)
+    return t(
+      'Xerj 服务地址不能含用户名、密码、路径、查询参数或片段（可带末尾斜杠）。',
+      'The Xerj service URL must not contain credentials, a path, query parameters or a fragment (a trailing slash is allowed).',
+    );
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(settings.index))
+    return t(
+      'Xerj 索引名只能含小写字母、数字、下划线或连字符，1–64 字节，且以字母或数字开头。',
+      'The Xerj index name may only contain lowercase letters, digits, underscores or hyphens, 1–64 bytes, and must start with a letter or digit.',
+    );
+  if (
+    !Number.isSafeInteger(settings.timeout_ms) ||
+    settings.timeout_ms < 100 ||
+    settings.timeout_ms > 10_000
+  )
+    return t(
+      'Xerj 检索超时须为 100–10000 毫秒的整数。',
+      'The Xerj retrieval timeout must be an integer between 100 and 10000 milliseconds.',
+    );
+  return null;
 }

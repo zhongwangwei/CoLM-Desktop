@@ -170,6 +170,8 @@ export default function AssistantPanel() {
   // 设置对话框里的草稿是否改过：关闭/切走前要确认放弃（U-07）。草稿本身留在 Settings 内部。
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [approval, setApproval] = useState<AgentEvent | null>(null);
+  // Xerj 文档索引状态是应用级的，不随对话切换；设置对话框打开时直接显示最近一次状态。
+  const [docsIndex, setDocsIndex] = useState<AgentEvent | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
@@ -253,11 +255,13 @@ export default function AssistantPanel() {
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
       // 后端产出这一轮自己的事件 = 消息确实被模型接下了；IPC 确认只代表送达，不能代替（GUI-18）。
+      // docs_index_status 是应用级后台事件（索引构建可能还在跑），不能当成"这一轮被接受"的证据。
       if (
         outgoing.current &&
         event.type !== 'error' &&
         event.type !== 'ready' &&
-        event.type !== 'exited'
+        event.type !== 'exited' &&
+        event.type !== 'docs_index_status'
       )
         outgoing.current = turnOutput(outgoing.current);
       if (!active) return;
@@ -366,6 +370,10 @@ export default function AssistantPanel() {
             safety: event.safety_margin_tokens || 0,
             source: event.window_source || null,
           });
+          break;
+        case 'docs_index_status':
+          // 应用级索引状态；state 里的未知取值留给设置对话框原样显示。
+          setDocsIndex(event as AgentEvent);
           break;
         case 'turn_done':
           if (!streamed.current && event.content)
@@ -964,6 +972,7 @@ export default function AssistantPanel() {
             onSave={save}
             disabled={running}
             onDirtyChange={setSettingsDirty}
+            docsIndex={docsIndex}
           />
         </div>
       )}

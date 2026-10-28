@@ -569,13 +569,324 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
     ));
 }
 
-/// GUI 不链接 colm-agent（窗口进程不需要 HTTP 客户端），这里照抄协议里 `configure` 的形状做对照。
+#[test]
+fn legacy_settings_without_retrieval_load_as_disabled_with_the_shared_defaults() {
+    // 旧 assistant.json 没有 retrieval 对象：整份设置照常读出，检索默认关闭。
+    let old: AssistantSettings =
+        serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
+            .unwrap();
+    assert_eq!(
+        old.retrieval,
+        RetrievalSettings {
+            enabled: false,
+            endpoint: "http://127.0.0.1:9200".into(),
+            index: "colm-docs-v1".into(),
+            timeout_ms: 1500,
+        }
+    );
+    assert!(validate_settings(&old).is_ok());
+    // retrieval 对象本身缺字段也只补默认值（与 crates 侧 serde(default) 一致）。
+    let partial: AssistantSettings = serde_json::from_str(
+        r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash","retrieval":{"enabled":true}}"#,
+    )
+    .unwrap();
+    assert!(partial.retrieval.enabled);
+    assert_eq!(partial.retrieval.endpoint, "http://127.0.0.1:9200");
+    assert_eq!(partial.retrieval.index, "colm-docs-v1");
+    assert_eq!(partial.retrieval.timeout_ms, 1500);
+    // 保存后往返不丢检索设置，也不把它塞进服务商 profile。
+    let saved = AssistantSettings {
+        retrieval: RetrievalSettings {
+            enabled: true,
+            endpoint: "http://localhost:9200".into(),
+            index: "docs-v2".into(),
+            timeout_ms: 2000,
+        },
+        ..AssistantSettings::default()
+    };
+    let round: AssistantSettings =
+        serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+    assert_eq!(round.retrieval, saved.retrieval);
+    assert!(round.api_profiles.is_empty());
+}
+
+#[test]
+fn retrieval_validation_rejects_unsafe_xerj_targets_even_when_disabled() {
+    let with = |retrieval: RetrievalSettings| AssistantSettings {
+        retrieval,
+        ..AssistantSettings::default()
+    };
+    let retrieval =
+        |enabled: bool, endpoint: &str, index: &str, timeout_ms: u64| RetrievalSettings {
+            enabled,
+            endpoint: endpoint.into(),
+            index: index.into(),
+            timeout_ms,
+        };
+    // 默认（关闭）合法；合法的本机回环地址（含末尾斜杠与 IPv6）。
+    assert!(validate_settings(&AssistantSettings::default()).is_ok());
+    for endpoint in [
+        "http://127.0.0.1:9200",
+        "http://127.0.0.1:9200/",
+        "http://localhost:9200",
+        "http://[::1]:9200",
+    ] {
+        assert!(
+            validate_settings(&with(retrieval(false, endpoint, "colm-docs-v1", 1500))).is_ok(),
+            "{endpoint}"
+        );
+    }
+    for endpoint in [
+        "https://127.0.0.1:9200",
+        "http://192.168.1.10:9200",
+        "http://docs.example.com:9200",
+        "http://127.0.0.1:9200/v1",
+        "http://127.0.0.1:9200?key=secret",
+        "http://127.0.0.1:9200#fragment",
+        "http://user:pass@127.0.0.1:9200",
+        "http://127.0.0.1",
+        "127.0.0.1:9200",
+        "",
+    ] {
+        assert!(
+            validate_settings(&with(retrieval(false, endpoint, "colm-docs-v1", 1500))).is_err(),
+            "{endpoint}"
+        );
+    }
+    let long_index = "a".repeat(64);
+    for index in ["colm-docs-v1", "a", "docs_2024", long_index.as_str()] {
+        assert!(
+            validate_settings(&with(retrieval(true, "http://127.0.0.1:9200", index, 1500))).is_ok(),
+            "{index}"
+        );
+    }
+    let too_long_index = "a".repeat(65);
+    for index in [
+        "",
+        "-docs",
+        "_docs",
+        "Docs",
+        "docs v1",
+        "docs/v1",
+        too_long_index.as_str(),
+        "文档",
+    ] {
+        assert!(
+            validate_settings(&with(retrieval(
+                false,
+                "http://127.0.0.1:9200",
+                index,
+                1500
+            )))
+            .is_err(),
+            "{index}"
+        );
+    }
+    for timeout_ms in [100, 1500, 10_000] {
+        assert!(
+            validate_settings(&with(retrieval(
+                false,
+                "http://127.0.0.1:9200",
+                "colm-docs-v1",
+                timeout_ms
+            )))
+            .is_ok(),
+            "{timeout_ms}"
+        );
+    }
+    for timeout_ms in [0, 99, 10_001, u64::MAX] {
+        assert!(
+            validate_settings(&with(retrieval(
+                false,
+                "http://127.0.0.1:9200",
+                "colm-docs-v1",
+                timeout_ms
+            )))
+            .is_err(),
+            "{timeout_ms}"
+        );
+    }
+    // 关闭时也校验格式：关着把非法值存进设置，打开时才报错就太晚了。
+    assert!(validate_settings(&with(retrieval(
+        false,
+        "https://127.0.0.1:9200",
+        "colm-docs-v1",
+        1500
+    )))
+    .is_err());
+    assert!(validate_settings(&with(retrieval(
+        false,
+        "http://127.0.0.1:9200",
+        "Docs",
+        1500
+    )))
+    .is_err());
+    assert!(validate_settings(&with(retrieval(
+        false,
+        "http://127.0.0.1:9200",
+        "colm-docs-v1",
+        50
+    )))
+    .is_err());
+}
+
+#[test]
+fn configure_messages_always_carry_retrieval_and_the_agent_can_read_it() {
+    let settings = AssistantSettings {
+        retrieval: RetrievalSettings {
+            enabled: true,
+            endpoint: "http://127.0.0.1:9200".into(),
+            index: "colm-docs-v1".into(),
+            timeout_ms: 2000,
+        },
+        ..AssistantSettings::default()
+    };
+    let message = configure_message(&settings, "/p", None, None, None);
+    assert_eq!(message["retrieval"]["enabled"], true);
+    assert_eq!(message["retrieval"]["endpoint"], "http://127.0.0.1:9200");
+    assert_eq!(message["retrieval"]["index"], "colm-docs-v1");
+    assert_eq!(message["retrieval"]["timeout_ms"], 2000);
+    // 关闭时也下发；agent 侧用 enabled=false 表示完全不检索。
+    let off = configure_message(&AssistantSettings::default(), "/p", None, None, None);
+    assert_eq!(off["retrieval"]["enabled"], false);
+    assert_eq!(off["retrieval"]["endpoint"], "http://127.0.0.1:9200");
+    assert_eq!(off["retrieval"]["index"], "colm-docs-v1");
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
+    match parsed {
+        colm_agent_protocol::Inbound::Configure { retrieval, .. } => {
+            assert!(retrieval.enabled);
+            assert_eq!(retrieval.endpoint, "http://127.0.0.1:9200");
+            assert_eq!(retrieval.index, "colm-docs-v1");
+            assert_eq!(retrieval.timeout_ms, 2000);
+        }
+        _ => panic!("configure message must parse as Inbound::Configure"),
+    }
+    // 旧 GUI 下发的 configure 没有 retrieval：镜像协议按默认关闭读入，不拒绝整条消息。
+    let legacy: colm_agent_protocol::Inbound = serde_json::from_value(json!({
+        "type":"configure",
+        "provider":{"base_url":"https://api.deepseek.com","model":"deepseek-flash"},
+        "project_root":"/p"
+    }))
+    .unwrap();
+    match legacy {
+        colm_agent_protocol::Inbound::Configure { retrieval, .. } => {
+            assert!(!retrieval.enabled);
+            assert_eq!(retrieval.endpoint, "http://127.0.0.1:9200");
+        }
+        _ => panic!("legacy configure message must still parse"),
+    }
+}
+
+#[test]
+fn docs_index_requests_only_forward_status_or_refresh() {
+    for action in ["status", "refresh"] {
+        assert!(validate_docs_index_action(action).is_ok(), "{action}");
+        let parsed: colm_agent_protocol::Inbound =
+            serde_json::from_value(docs_index_message(action)).unwrap();
+        match parsed {
+            colm_agent_protocol::Inbound::DocsIndex { action: parsed } => assert_eq!(
+                parsed,
+                if action == "refresh" {
+                    colm_agent_protocol::DocsIndexAction::Refresh
+                } else {
+                    colm_agent_protocol::DocsIndexAction::Status
+                }
+            ),
+            _ => panic!("docs_index message must parse as Inbound::DocsIndex"),
+        }
+    }
+    for invalid in ["", "build", "Refresh", "status; refresh", "--refresh"] {
+        assert!(validate_docs_index_action(invalid).is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
+fn docs_index_status_events_match_the_agent_outbound_shape() {
+    // 事件经 assistant://event 原样转发；这里镜像 agent 的 Outbound 校验字段名与类型。
+    let full = json!({
+        "type":"docs_index_status",
+        "backend":"xerj",
+        "enabled":true,
+        "state":"ready",
+        "scope":{"kind":"app","name":"docs"},
+        "endpoint":"http://127.0.0.1:9200",
+        "index":"colm-docs-v1",
+        "documents":12,
+        "chunks":340,
+        "generation":1_730_000_000_000u64,
+        "indexed_at_unix_ms":1_730_000_000_123u64,
+        "detail":"published generation 1730000000000"
+    });
+    let parsed: colm_agent_protocol::Outbound = serde_json::from_value(full).unwrap();
+    match parsed {
+        colm_agent_protocol::Outbound::DocsIndexStatus {
+            backend,
+            enabled,
+            state,
+            scope,
+            endpoint,
+            index,
+            documents,
+            chunks,
+            generation,
+            indexed_at_unix_ms,
+            detail,
+        } => {
+            assert_eq!(backend, "xerj");
+            assert!(enabled);
+            assert_eq!(state, "ready");
+            assert_eq!(scope, Some(json!({"kind":"app","name":"docs"})));
+            assert_eq!(endpoint, "http://127.0.0.1:9200");
+            assert_eq!(index, "colm-docs-v1");
+            assert_eq!((documents, chunks), (12, 340));
+            assert_eq!(generation, Some(1_730_000_000_000));
+            assert_eq!(indexed_at_unix_ms, Some(1_730_000_000_123));
+            assert_eq!(
+                detail.as_deref(),
+                Some("published generation 1730000000000")
+            );
+        }
+    }
+    // 最小事件：scope/generation/indexed_at/detail 都可缺省（disabled、旧事件都没有这些）。
+    let minimal: colm_agent_protocol::Outbound = serde_json::from_value(json!({
+        "type":"docs_index_status",
+        "backend":"xerj",
+        "enabled":false,
+        "state":"disabled",
+        "endpoint":"http://127.0.0.1:9200",
+        "index":"colm-docs-v1",
+        "documents":0,
+        "chunks":0
+    }))
+    .unwrap();
+    match minimal {
+        colm_agent_protocol::Outbound::DocsIndexStatus {
+            scope,
+            generation,
+            indexed_at_unix_ms,
+            detail,
+            state,
+            ..
+        } => {
+            assert_eq!(state, "disabled");
+            assert_eq!(scope, None);
+            assert_eq!(generation, None);
+            assert_eq!(indexed_at_unix_ms, None);
+            assert_eq!(detail, None);
+        }
+    }
+}
+
+/// GUI 不链接 colm-agent（窗口进程不需要 HTTP 客户端），这里照抄协议里 `configure`、
+/// `docs_index` 与 `docs_index_status` 的形状做对照：字段名拼错、类型漂移都能在这里红。
 mod colm_agent_protocol {
     use serde::Deserialize;
 
     #[derive(Deserialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     #[allow(dead_code)]
+    // 测试镜像按真实协议逐字段照抄（真实协议用 Box 收敛大小）；这里 box 会破坏"照抄形状"的意图。
+    #[allow(clippy::large_enum_variant)]
     pub enum Inbound {
         Configure {
             provider: Provider,
@@ -594,6 +905,62 @@ mod colm_agent_protocol {
             backend: Option<String>,
             #[serde(default)]
             external: Choice,
+            #[serde(default)]
+            retrieval: Retrieval,
+        },
+        DocsIndex {
+            action: DocsIndexAction,
+        },
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    pub struct Retrieval {
+        pub enabled: bool,
+        pub endpoint: String,
+        pub index: String,
+        pub timeout_ms: u64,
+    }
+
+    impl Default for Retrieval {
+        fn default() -> Self {
+            Self {
+                enabled: false,
+                endpoint: "http://127.0.0.1:9200".into(),
+                index: "colm-docs-v1".into(),
+                timeout_ms: 1500,
+            }
+        }
+    }
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub enum DocsIndexAction {
+        Status,
+        Refresh,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub enum Outbound {
+        DocsIndexStatus {
+            backend: String,
+            enabled: bool,
+            state: String,
+            #[serde(default)]
+            scope: Option<serde_json::Value>,
+            endpoint: String,
+            index: String,
+            documents: u64,
+            chunks: u64,
+            #[serde(default)]
+            generation: Option<u64>,
+            #[serde(default)]
+            indexed_at_unix_ms: Option<u64>,
+            #[serde(default)]
+            detail: Option<String>,
         },
     }
 
@@ -675,7 +1042,9 @@ fn selected_model_configure_carries_native_identity_without_rebinding_to_app_doc
         serde_json::Value::Null
     );
     let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
-    let colm_agent_protocol::Inbound::Configure { model_context, .. } = parsed;
+    let colm_agent_protocol::Inbound::Configure { model_context, .. } = parsed else {
+        panic!("configure message must parse as Inbound::Configure");
+    };
     assert_eq!(model_context, Some(context));
 }
 

@@ -123,6 +123,44 @@ impl AssistantProcess {
     }
 }
 
+/// Xerj 文档检索设置（应用级，不随 API 服务商 profile 切换）。默认关闭；字段与
+/// `crates/colm-agent/src/retrieval.rs` 的 `RetrievalSettings` 一一对应，旧 `assistant.json`
+/// 没有这个对象时整份按默认关闭加载。Key 不在这里：沿用 `assistant-keys.json`，按 endpoint 登记。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_retrieval_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_retrieval_index")]
+    pub index: String,
+    #[serde(default = "default_retrieval_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for RetrievalSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_retrieval_endpoint(),
+            index: default_retrieval_index(),
+            timeout_ms: default_retrieval_timeout_ms(),
+        }
+    }
+}
+
+fn default_retrieval_endpoint() -> String {
+    "http://127.0.0.1:9200".into()
+}
+
+fn default_retrieval_index() -> String {
+    "colm-docs-v1".into()
+}
+
+fn default_retrieval_timeout_ms() -> u64 {
+    1500
+}
+
 /// 助手设置（不含 Key），存在配置目录的 `assistant.json`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantSettings {
@@ -166,6 +204,9 @@ pub struct AssistantSettings {
     /// 后端：API 服务或用户本机配置的 Codex、Claude Code、OpenCode。
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Xerj 文档检索（可选，应用级）：关闭时完全不访问本机 Xerj。
+    #[serde(default)]
+    pub retrieval: RetrievalSettings,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -257,6 +298,7 @@ impl Default for AssistantSettings {
             session_turn_limit: default_session_turn_limit(),
             session_token_limit: default_session_token_limit(),
             backend: default_backend(),
+            retrieval: RetrievalSettings::default(),
             egress_acknowledged: None,
             external: Default::default(),
         }
@@ -627,6 +669,55 @@ pub(crate) fn require_egress_acknowledged(settings: &AssistantSettings) -> Resul
     Ok(())
 }
 
+/// Xerj 文档检索的格式校验（与 `crates/colm-agent/src/retrieval.rs` 的 `validate` 同一套规则）。
+/// 只连本机回环的 http，且必须写明端口：9200 不是 http 的默认端口，漏写端口会打到别的服务上。
+/// 即使当前关闭也校验 —— 关着时存进非法值、等到打开才发现就太晚了。
+fn validate_retrieval(settings: &RetrievalSettings) -> Result<(), String> {
+    let url =
+        tauri::Url::parse(settings.endpoint.trim()).map_err(|_| "Xerj 服务地址不是有效的网址")?;
+    if url.scheme() != "http"
+        || !matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+        )
+    {
+        return Err(
+            "Xerj 服务地址只能是本机回环的 http://127.0.0.1、http://localhost 或 http://[::1]"
+                .into(),
+        );
+    }
+    if url.port().is_none() {
+        return Err("Xerj 服务地址必须写明端口，例如 http://127.0.0.1:9200".into());
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err("Xerj 服务地址不能含用户名、密码、路径、查询参数或片段（可带末尾斜杠）".into());
+    }
+    // 索引名会被拼进 URL 和 ES 索引，只允许 ES 安全字符；首字符不能是 -/_（避免被当成选项或特殊名）。
+    let index = settings.index.as_str();
+    let index_valid = index.len() <= 64
+        && index
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && index.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        });
+    if !index_valid {
+        return Err(
+            "Xerj 索引名只能含小写字母、数字、下划线或连字符，1–64 字节，且以字母或数字开头".into(),
+        );
+    }
+    if !(100..=10_000).contains(&settings.timeout_ms) {
+        return Err("Xerj 检索超时须为 100–10000 毫秒".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), String> {
     validate_api_profile(&settings.api_profile())?;
     if !settings.provider_id.is_empty() && !PROVIDERS.contains(&settings.provider_id.as_str()) {
@@ -650,6 +741,7 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     if settings.session_turn_limit > 100_000 || settings.session_token_limit > 1_000_000_000 {
         return Err("会话上限过大".into());
     }
+    validate_retrieval(&settings.retrieval)?;
     for (backend, choice) in &settings.external {
         if !matches!(backend.as_str(), "codex" | "claude_code" | "opencode") {
             return Err(format!("没有这个外部后端：{backend}"));
@@ -867,6 +959,35 @@ pub async fn assistant_backend_status(app: tauri::AppHandle) -> Result<Value, St
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 文档索引操作只有两种：查状态、强制重建。其它值来自前端拼错或旧调用方，直接拒绝，
+/// 不要把它们当成"未知命令"悄悄发给 agent。
+fn validate_docs_index_action(action: &str) -> Result<(), String> {
+    if matches!(action, "status" | "refresh") {
+        Ok(())
+    } else {
+        Err(format!(
+            "文档索引操作只能是 status 或 refresh，收到 {action:?}"
+        ))
+    }
+}
+
+fn docs_index_message(action: &str) -> Value {
+    json!({ "type": "docs_index", "action": action })
+}
+
+/// 让助手查询/重建 Xerj 文档索引。GUI 只发请求，构建与 HTTP 都在 `colm-agent` 里；
+/// 结果经 `assistant://event` 的 `docs_index_status` 回来，前端不轮询。
+#[tauri::command]
+pub fn assistant_docs_index(
+    process: tauri::State<'_, AssistantProcess>,
+    action: String,
+) -> Result<(), String> {
+    validate_docs_index_action(&action)?;
+    let event = crate::history::start("assistant_docs_index", None, json!({"action": &action}))?;
+    let result = send(&process, &docs_index_message(&action));
+    finish_assistant_action(&event, result)
 }
 
 /// 本机 Codex 可用的模型与各自支持的思考强度（`colm-agent --codex-models` 问 Codex 自己）。
@@ -1135,6 +1256,13 @@ pub(crate) fn configure_message(
         "session_token_limit": settings.session_token_limit,
         "backend": settings.backend,
         "external": settings.external.get(&settings.backend).cloned().unwrap_or_default(),
+        // 检索是应用级设置，与用哪个后端回答无关；关闭时也照常下发，agent 用 enabled=false 跳过。
+        "retrieval": {
+            "enabled": settings.retrieval.enabled,
+            "endpoint": settings.retrieval.endpoint.trim(),
+            "index": settings.retrieval.index,
+            "timeout_ms": settings.retrieval.timeout_ms,
+        },
         // 窗口能被助手驱动（引导模式）。
         "ui": true,
         "project_root": project_root,
