@@ -4915,3 +4915,42 @@ fn option_combinations_agree_with_the_shared_cases() {
         );
     }
 }
+
+#[test]
+fn case_land_cover_reports_what_creation_wrote() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-gui-landcover-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("case.nml"),
+        "&nl_colm\n SITE_fsitedata = 'site.nc'\n SITE_landtype = 10\n USE_SITE_landtype = .true.\n/\n",
+    )
+    .unwrap();
+    assert_eq!(
+        super::case_land_cover(root.to_str().unwrap().to_string()).unwrap(),
+        super::CaseLandCover {
+            landtype: Some(10),
+            use_site_landtype: true
+        }
+    );
+    // 没写过地类的算例（含上游默认 -1 的旧文件）不能把 -1 当真实地类显示。
+    std::fs::write(
+        root.join("case.nml"),
+        "&nl_colm\n SITE_fsitedata = 'site.nc'\n SITE_landtype = -1\n USE_SITE_landtype = .false.\n/\n",
+    )
+    .unwrap();
+    assert_eq!(
+        super::case_land_cover(root.to_str().unwrap().to_string()).unwrap(),
+        super::CaseLandCover {
+            landtype: None,
+            use_site_landtype: false
+        }
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

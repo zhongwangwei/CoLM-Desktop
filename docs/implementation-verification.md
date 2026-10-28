@@ -37915,8 +37915,12 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
   `SITE_landtype`/`USE_SITE_landtype` 当成可编辑字段，显示「地表覆盖类型 = -1」「从站点文件读取
   地表类型 = 关」，与建例后的实际值相反（自然站取站点文件的 IGBP_classification/USGS_classification，
   城市站 13/1）。现在文档里有 `SITE_fsitedata` 也按单点处理，这些字段统一隐藏并保留原因「由选择
-  站点并建算例按站点自动确定」；模型方案页加了一条说明写清楚地类来源与城市回落值。新增 Rust
-  测试 `a_site_file_alone_marks_the_case_as_single_point_for_field_visibility`。
+  站点并建算例按站点自动确定」；模型方案页加了一条说明写清楚地类来源与城市回落值，并显示只读的
+  「地表覆盖类型：10（建例时从站点文件的 IGBP_classification 写入）」。只读值来自新命令
+  `case_land_cover`（读 case.nml，`SITE_landtype=-1` 按未写入显示并提示会回落到站点分类或
+  rawdata 栅格），单点建立前则提示"将在建例时读取"。新增 Rust 测试
+  `a_site_file_alone_marks_the_case_as_single_point_for_field_visibility`、
+  `case_land_cover_reports_what_creation_wrote`。
 
 ### 交付审计（独立只读）
 
