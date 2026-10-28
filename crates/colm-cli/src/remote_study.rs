@@ -148,6 +148,72 @@ pub(crate) struct StudyRecord {
     pub fetched_at: Option<u64>,
 }
 
+/// 远程 Study 记录里写下的模型版本身份。
+///
+/// `fetch` 只搬回状态与结果，不保证带回 `model-version.json`；修改版 Study 从服务器跑完取回后，
+/// 本机记录里唯一的版本身份就是提交时写下的 `provenance.version`。本地证据（`study-status`）
+/// 必须能从它还原真实身份，否则修改版结果会被错误归因成官方版。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecordedModelVersion {
+    /// 记录明确声明用官方版。只有 `kind == "official"` 才算，缺记录不算。
+    Official,
+    /// 修改版工作区：记录里有名字与提交，但没有冻结修订 id/source hash（那些不在远程记录里）。
+    Workspace {
+        name: String,
+        head: String,
+        base_commit: Option<String>,
+    },
+}
+
+impl RecordedModelVersion {
+    /// 解析 `provenance.version`（与 `produced-by.json` 同形）。缺字段、未知 kind、
+    /// 名字/提交为空都报错，由调用方转成明确的 unknown，绝不静默当成官方版。
+    fn from_provenance(provenance: &Value) -> Result<Self> {
+        let version = provenance
+            .get("version")
+            .filter(|version| version.is_object())
+            .context("captured remote Study record has no provenance.version")?;
+        match version["kind"].as_str() {
+            Some("official") => Ok(Self::Official),
+            Some("workspace") => {
+                let name = version["name"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .context("captured remote workspace version has no name")?;
+                let head = version["head"]
+                    .as_str()
+                    .filter(|head| !head.trim().is_empty())
+                    .context("captured remote workspace version has no commit")?;
+                Ok(Self::Workspace {
+                    name: name.into(),
+                    head: head.into(),
+                    base_commit: version["base_commit"].as_str().map(str::to_owned),
+                })
+            }
+            _ => bail!("captured remote Study version has no supported kind"),
+        }
+    }
+}
+
+/// 从本机研究目录的 remote record 还原版本身份；没有记录时 `Ok(None)`。
+///
+/// 与 `study-compare` 的版本身份解析同一套逻辑：只读本地文件，不校验/初始化 SSH 凭据，
+/// 不连服务器。坏 JSON、缺字段、不支持的 kind 都返回错误，让调用方明确报 unknown。
+pub(crate) fn recorded_model_version(study_dir: &Path) -> Result<Option<RecordedModelVersion>> {
+    let path = study_dir.join(RECORD);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot inspect captured remote Study version"),
+    }
+    // 记录里可能记着 password 认证设置；读身份不是 SSH 操作，不能因此要求凭据。
+    let record: StudyRecord = serde_json::from_str(
+        &std::fs::read_to_string(&path).context("cannot read captured remote Study version")?,
+    )
+    .context("cannot parse captured remote Study version")?;
+    RecordedModelVersion::from_provenance(&record.provenance).map(Some)
+}
+
 pub(crate) fn read_record(study_dir: &Path) -> Result<StudyRecord> {
     let path = study_dir.join(RECORD);
     let text = std::fs::read_to_string(&path).with_context(|| {

@@ -217,39 +217,18 @@ pub(crate) struct Side {
 }
 
 fn comparison_version(study_dir: &Path) -> Result<(String, Option<String>)> {
+    use crate::remote_cmd::remote_study::{recorded_model_version, RecordedModelVersion};
+
     if let Some(version) = pinned(study_dir)? {
         return Ok((version.name, Some(version.head)));
     }
-    let record_path = study_dir.join(crate::remote_cmd::remote_study::RECORD);
-    match std::fs::symlink_metadata(&record_path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(("official".into(), None));
-        }
-        Err(error) => return Err(error).context("cannot inspect captured remote Study version"),
-    }
-    // Comparison is a local metadata read, not an SSH operation: recorded
-    // password settings must not require credentials or initialize global auth.
-    let record: crate::remote_cmd::remote_study::StudyRecord = serde_json::from_str(
-        &std::fs::read_to_string(&record_path)
-            .context("cannot read captured remote Study version")?,
-    )
-    .context("cannot parse captured remote Study version")?;
-    let version = &record.provenance["version"];
-    match version["kind"].as_str() {
-        Some("official") => Ok(("official".into(), None)),
-        Some("workspace") => {
-            let name = version["name"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .context("captured remote workspace version has no name")?;
-            let head = version["head"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .context("captured remote workspace version has no commit")?;
-            Ok((name.into(), Some(head.into())))
-        }
-        _ => bail!("captured remote Study version has no supported kind"),
+    match recorded_model_version(study_dir)? {
+        Some(RecordedModelVersion::Official) => Ok(("official".into(), None)),
+        Some(RecordedModelVersion::Workspace { name, head, .. }) => Ok((name, Some(head))),
+        // 没有 pin 也没有远程记录：本地 Study 只在 `--model-version` 时才写 pin，所以
+        // 比较页仍按官方版处理（旧语义）。证据页面对同一情形报 unknown：见
+        // `study::runner::evidence_model_identity`，不能把"没有记录"当成官方记录。
+        None => Ok(("official".into(), None)),
     }
 }
 

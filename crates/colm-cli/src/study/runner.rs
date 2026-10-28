@@ -1459,11 +1459,14 @@ fn parameter_side(
 }
 
 fn evidence_model_identity(study_dir: &Path) -> serde_json::Value {
+    use crate::remote_cmd::remote_study::{recorded_model_version, RecordedModelVersion};
+
     let study_record = match crate::study_version::pinned(study_dir) {
         Ok(Some(pinned)) => {
             let revision = pinned.model_revision.as_ref();
             json!({
                 "status": "pinned",
+                "source": "model_version_file",
                 "name": pinned.name,
                 "head": pinned.head,
                 "base_commit": pinned.base_commit,
@@ -1475,12 +1478,48 @@ fn evidence_model_identity(study_dir: &Path) -> serde_json::Value {
                 "revision_recorded": revision.is_some(),
             })
         }
-        Ok(None) => json!({
-            "status": "official",
-            "reason": "no model-version.json records a frozen model; the Study runs the official version",
-        }),
+        // 没有本地 pin 不等于官方版：远程 Study 取回后 pin 可能没跟着回来，但提交记录里
+        // 留下了真实身份。先读 remote record.provenance.version；只有它明确写 official
+        // 才判官方版，缺失/损坏一律 unknown，不能把修改版历史结果归因给官方模型。
+        Ok(None) => match recorded_model_version(study_dir) {
+            Ok(Some(RecordedModelVersion::Official)) => json!({
+                "status": "official",
+                "source": "remote_record",
+                "reason": "the local model-version.json pin is absent; the captured remote Study record declares the official version",
+            }),
+            Ok(Some(RecordedModelVersion::Workspace {
+                name,
+                head,
+                base_commit,
+            })) => json!({
+                "status": "workspace",
+                "source": "remote_record",
+                "name": name,
+                "head": head,
+                "base_commit": base_commit,
+                "version": null,
+                "code_source_sha256": null,
+                "reason": "the local model-version.json pin is absent; identity comes from the captured remote Study record, which records the workspace name and commit but no frozen revision id or source hash",
+            }),
+            Ok(None) => json!({
+                "status": "unknown",
+                "source": "none",
+                "reason": "no model-version.json pin and no captured remote Study record; official versus workspace cannot be established (legacy or local-only Study)",
+            }),
+            Err(error) => json!({
+                "status": "unknown",
+                "source": "remote_record",
+                "reason": compact_evidence_text(
+                    &format!(
+                        "the captured remote Study record cannot establish the model version: {error:#}"
+                    ),
+                    EVIDENCE_TEXT_LIMIT,
+                ),
+            }),
+        },
         Err(error) => json!({
             "status": "unknown",
+            "source": "model_version_file",
             "reason": compact_evidence_text(&format!("{error:#}"), EVIDENCE_TEXT_LIMIT),
         }),
     };
@@ -9105,10 +9144,8 @@ esac
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// 研究身份只用记录文件（pinned/official/unknown）；远程记录也只读文件，不建 SSH。
-    #[test]
-    fn evidence_identity_is_read_from_records_without_contacting_a_server() {
-        let root = evidence_root("identity");
+    fn evidence_identity_fixture(label: &str) -> (PathBuf, Manifest, StudyState) {
+        let root = evidence_root(label);
         let manifest = evidence_manifest(&root);
         write_evidence_sample_file(
             &manifest,
@@ -9122,19 +9159,12 @@ esac
             &[("m000000", Some(0.8), None)],
             None,
         );
-        let official = study_evidence(&root, &manifest, Some(&state)).unwrap();
-        assert_eq!(
-            official["model_identity"]["study_record"]["status"],
-            "official"
-        );
-        assert_eq!(official["remote"]["status"], "none");
-        assert!(official["model_identity"]["study_record"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("official"));
+        (root, manifest, state)
+    }
 
+    fn write_evidence_remote_record(study: &Path, provenance: serde_json::Value) {
         fs::write(
-            root.join(".colm-remote-study.json"),
+            study.join(".colm-remote-study.json"),
             json!({
                 "host": "server",
                 "root": "/data/colm",
@@ -9143,16 +9173,14 @@ esac
                 "engine": "engine-1",
                 "submitted_at": 5,
                 "scheduler": "bare",
-                "provenance": {},
+                "provenance": provenance,
             })
             .to_string(),
         )
         .unwrap();
-        let recorded = study_evidence(&root, &manifest, Some(&state)).unwrap();
-        assert_eq!(recorded["remote"]["status"], "recorded");
-        assert_eq!(recorded["remote"]["host"], "server");
-        assert_eq!(recorded["remote"]["fetched"], false);
+    }
 
+    fn write_evidence_pinned(study: &Path) {
         let pinned = json!({
             "name": "modified",
             "head": "abc123",
@@ -9160,8 +9188,8 @@ esac
             "note": "",
             "based_on": null,
             "touches": {"engine": true, "kernel": false},
-            "cli": root.join("version/bin/colm-cli"),
-            "kernel": root.join("version/kernel"),
+            "cli": study.join("version/bin/colm-cli"),
+            "kernel": study.join("version/kernel"),
             "pinned_unix": 0,
             "model_revision": {
                 "schema": 1,
@@ -9183,30 +9211,163 @@ esac
                 "derived_from": null,
             },
         });
-        fs::write(root.join("model-version.json"), pinned.to_string()).unwrap();
+        fs::write(study.join("model-version.json"), pinned.to_string()).unwrap();
+    }
+
+    /// R05：没有 model-version.json 不能直接判官方版。
+    /// 无记录 → unknown；远程记录明确 official → official；远程记录写明 workspace → 用其 name/head。
+    #[test]
+    fn evidence_identity_without_a_pin_uses_the_remote_record_not_official() {
+        let (root, manifest, state) = evidence_identity_fixture("identity-remote");
+
+        // 1) 既没有 pin 也没有远程记录：无法区分官方版与修改版，明确 unknown。
+        let unknown = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            unknown["model_identity"]["study_record"]["status"],
+            "unknown"
+        );
+        assert_eq!(unknown["model_identity"]["study_record"]["source"], "none");
+        assert!(unknown["model_identity"]["study_record"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be established"));
+        assert_eq!(unknown["remote"]["status"], "none");
+        assert!(!unknown.to_string().contains("\"official\""));
+
+        // 2) 远程记录明确写 official 才算官方版。
+        write_evidence_remote_record(
+            &root,
+            json!({"version": {"kind": "official", "label": "官方版"}}),
+        );
+        let official = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            official["model_identity"]["study_record"]["status"],
+            "official"
+        );
+        assert_eq!(
+            official["model_identity"]["study_record"]["source"],
+            "remote_record"
+        );
+        assert!(official["model_identity"]["study_record"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("declares the official version"));
+        assert_eq!(official["remote"]["status"], "recorded");
+
+        // 3) 远程记录写明 workspace：回退出真实 name/head，不能归因官方模型。
+        //    记录里带 password SSH 设置：读身份是本地元数据，不要求凭据、不初始化全局认证。
+        fs::write(
+            root.join(".colm-remote-study.json"),
+            json!({
+                "host": "server",
+                "root": "/data/colm",
+                "job": "job-1",
+                "remote_project": "/data/colm/s/proj",
+                "engine": "engine-1",
+                "submitted_at": 5,
+                "scheduler": "bare",
+                "ssh_auth": {
+                    "host": "server", "username": "researcher", "port": 22,
+                    "auth": "password", "identity_file": ""
+                },
+                "provenance": {"version": {
+                    "kind": "workspace", "name": "snow", "label": "snow",
+                    "head": "0123456789abcdef", "base_commit": "base-1",
+                }},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let workspace = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let record = &workspace["model_identity"]["study_record"];
+        assert_eq!(record["status"], "workspace");
+        assert_eq!(record["source"], "remote_record");
+        assert_eq!(record["name"], "snow");
+        assert_eq!(record["head"], "0123456789abcdef");
+        assert_eq!(record["base_commit"], "base-1");
+        assert!(record["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no frozen revision id"));
+        assert!(
+            !workspace.to_string().contains("\"status\":\"official\""),
+            "{workspace}"
+        );
+        // 凭据设置不影响本地身份解析；远程记录校验失败只影响 remote 段。
+        assert_ne!(workspace["remote"]["status"], "recorded");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// R05：坏/不完整 remote record 必须明确 unknown，不能静默官方化。
+    #[test]
+    fn evidence_identity_bad_remote_record_is_unknown_not_official() {
+        let (root, manifest, state) = evidence_identity_fixture("identity-broken");
+
+        fs::write(root.join(".colm-remote-study.json"), "broken json").unwrap();
+        let broken = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let record = &broken["model_identity"]["study_record"];
+        assert_eq!(record["status"], "unknown");
+        assert_eq!(record["source"], "remote_record");
+        assert!(record["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot parse captured remote Study version"));
+        assert_ne!(record["status"], "official");
+
+        for (provenance, expected) in [
+            (json!({}), "no provenance.version"),
+            (
+                json!({"version": {"kind": "workspace", "name": "snow"}}),
+                "no commit",
+            ),
+            (json!({"version": {"kind": "unknown"}}), "no supported kind"),
+        ] {
+            write_evidence_remote_record(&root, provenance);
+            let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+            let record = &evidence["model_identity"]["study_record"];
+            assert_eq!(record["status"], "unknown", "{evidence}");
+            assert_eq!(record["source"], "remote_record");
+            assert!(
+                record["reason"].as_str().unwrap().contains(expected),
+                "{evidence}"
+            );
+            assert_ne!(record["status"], "official");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 有 model-version.json 时仍用 pinned 身份，且优先于 remote record。
+    #[test]
+    fn evidence_identity_prefers_the_pinned_file_over_the_remote_record() {
+        let (root, manifest, state) = evidence_identity_fixture("identity-pinned");
+        write_evidence_remote_record(
+            &root,
+            json!({"version": {"kind": "workspace", "name": "snow", "head": "0123456789abcdef"}}),
+        );
+        write_evidence_pinned(&root);
         let frozen = study_evidence(&root, &manifest, Some(&state)).unwrap();
-        assert_eq!(frozen["model_identity"]["study_record"]["status"], "pinned");
-        assert_eq!(
-            frozen["model_identity"]["study_record"]["version"]["id"],
-            "workspace-x"
-        );
-        assert_eq!(
-            frozen["model_identity"]["study_record"]["version"]["revision"],
-            3
-        );
-        assert_eq!(
-            frozen["model_identity"]["study_record"]["code_source_sha256"],
-            "a".repeat(64)
-        );
+        let record = &frozen["model_identity"]["study_record"];
+        assert_eq!(record["status"], "pinned");
+        assert_eq!(record["source"], "model_version_file");
+        assert_eq!(record["name"], "modified");
+        assert_eq!(record["version"]["id"], "workspace-x");
+        assert_eq!(record["version"]["revision"], 3);
+        assert_eq!(record["code_source_sha256"], "a".repeat(64));
         // 当前选择留给助手补；CLI 不自称知道界面选了什么。
         assert!(frozen["model_identity"]["current_selection"].is_null());
         assert_eq!(frozen["model_identity"]["comparison"]["status"], "unknown");
 
+        // 坏的 pin：明确 unknown，不退回 remote record 猜身份。
         fs::write(root.join("model-version.json"), "not json").unwrap();
         let unknown = study_evidence(&root, &manifest, Some(&state)).unwrap();
         assert_eq!(
             unknown["model_identity"]["study_record"]["status"],
             "unknown"
+        );
+        assert_eq!(
+            unknown["model_identity"]["study_record"]["source"],
+            "model_version_file"
         );
         assert!(!unknown["model_identity"]["study_record"]["reason"]
             .as_str()
