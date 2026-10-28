@@ -345,6 +345,31 @@ test('remote reconciliation restores preprocessing stage before showing results'
   assert.equal(page.state.running['/case'].requested_stage, 'mkinidata');
   assert.deepEqual(page.routes, []);
   assert.equal(render(page.state.running['/case']).next, undefined);
+  // 预处理阶段没有模拟结果：点「查看结果」要说话，不能静默不动（2026-10-28 用户反馈）。
+  assert.match(page.errors.join('\n'), /只到预处理阶段/);
+});
+
+test('a completed remote result without a confirmed job state explains why results are blocked', () => {
+  // Reopened project: the ledger says the station finished, but its server record has not been
+  // reconciled yet, so fetching would be premature. The button stays disabled and says why.
+  const page = render(
+    {
+      ...success,
+      location: 'remote',
+      run_case: undefined,
+      progress: { host: 'server' },
+    },
+    [],
+    undefined,
+    {},
+    ['/case', '/other'],
+  );
+  assert.ok(page.next);
+  assert.equal(page.next.props.disabled, true);
+  assert.match(String(page.next.props.title), /核对服务器任务/);
+  // 即使有入口直接调用，也要有一句可见提示而不是静默返回。
+  (page.next.props.onClick as () => void)();
+  assert.match(page.errors.join('\n'), /核对服务器任务/);
 });
 
 test('Stop remains visible when the primary batch case failed but another member is running', () => {
