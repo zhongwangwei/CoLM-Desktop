@@ -702,37 +702,29 @@ fn rate_limited_responses_report_reset_information() {
 #[test]
 fn connection_failure_and_timeout_map_to_network() {
     let _env = super::test_env_lock();
-    // 连接失败：拿一个刚释放的端口（没有监听者）。CI 上该端口可能在 bind 与
-    // connect 之间被并行测试的 mock server 复用，表现为 timeout 而不是 refused；
-    // 换新端口重试，直到拿到一个真正的“没有监听者”的端口。
+    // 连接失败：拿一个刚释放的端口（没有监听者）。Windows runner 上对关闭的
+    // 回环端口有时表现为 SYN 超时而不是 RST，因此这里只强制“映射为 network”，
+    // 具体的 refused 文案只在 Windows 之外断言；超时路径由下一段单独覆盖。
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
     let root = temp("connection");
-    let mut last = Value::Null;
-    let mut saw_connection_error = false;
-    for _ in 0..10 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let mut client = GithubClient::new(root.clone(), None, false);
-        client.api_base = format!("http://127.0.0.1:{port}");
-        client.timeout = Duration::from_millis(500);
-        let result = client.pulls(OWNER, REPO, SHA, false, false);
-        let error = first_error(&result);
-        assert_eq!(error["kind"], "network", "{result}");
-        assert_eq!(error["status"], Value::Null, "{result}");
-        if first_error(&result)["message"]
+    let mut client = GithubClient::new(root.clone(), None, false);
+    client.api_base = format!("http://127.0.0.1:{port}");
+    client.timeout = Duration::from_millis(500);
+    let result = client.pulls(OWNER, REPO, SHA, false, false);
+    let error = first_error(&result);
+    assert_eq!(error["kind"], "network", "{result}");
+    assert_eq!(error["status"], Value::Null, "{result}");
+    #[cfg(not(windows))]
+    assert!(
+        error["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("connection")
-        {
-            saw_connection_error = true;
-            break;
-        }
-        last = result;
-    }
-    assert!(
-        saw_connection_error,
-        "no fresh port behaved as closed: {last}"
+            .contains("connection"),
+        "{result}"
     );
+    let _ = std::fs::remove_dir_all(&root);
 
     // 超时：服务端接受连接但 1 秒后才回，客户端 150ms 必须放弃。
     let server = mock_github(|_request| {
