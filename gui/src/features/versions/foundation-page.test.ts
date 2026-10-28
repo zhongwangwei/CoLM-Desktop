@@ -1105,6 +1105,28 @@ test('a revision frozen from study results becomes the run model only after 设�
   assert.deepEqual(p.state.chosenVersion, { id: 'custom', revision: 2 });
 });
 
+// 审计 P1-5：研究页把 DE 训练出的网络写回草稿时，网络文件在草稿暂存目录里；版本页冻结必须
+// 把那个 asset_root 一起交给 model_freeze，否则冻结出来的版本没有网络文件。
+test('a network written back from a study is frozen with the asset root it carries', async () => {
+  const p = page();
+  // harness 的 state 类型只列了页面用到的键；这里模拟研究页导航前写进共享状态的两个字段。
+  const app = p.state as Record<string, unknown>;
+  app.openDraft = 'custom';
+  app.openDraftAssets = '/assets/model-custom/7';
+  await p.mount(false);
+  // 研究页带过来的资产目录被消费一次，不同草稿之间不串用。
+  assert.equal(app.openDraft, null);
+  assert.equal(app.openDraftAssets, null);
+  const c = p.render();
+  const freeze = c.actions.find((action) => action.id === 'version-freeze');
+  assert.ok(freeze, '打开草稿后应能冻结');
+  await freeze!.run();
+  await p.settle();
+  const call = p.calls.find((call) => call.command === 'model_freeze');
+  assert.ok(call, '冻结应调用 model_freeze');
+  assert.equal(call!.args.assetRoot, '/assets/model-custom/7');
+});
+
 // U-05：草稿保存的三态 + 失败保留 dirty + 字段改动清掉过时的成功提示。
 test('draft saving reports dirty, saving and saved, and keeps edits when the save fails', async () => {
   const p = page();

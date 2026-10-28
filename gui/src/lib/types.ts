@@ -257,6 +257,12 @@ export type AppState = {
   versionMethod?: { method: 'manual' | 'source' } | null;
   /** 版本页进来时直接打开的草稿（研究结果写进去之后去审阅、冻结），版本页用完清掉。 */
   openDraft?: string | null;
+  /**
+   * 研究结果写回草稿时一起带过去的网络资产暂存目录（`model_import_study` 返回的 `asset_root`）。
+   * 版本页冻结这份草稿时把它传给 `model_freeze --asset-root`，否则 DE 训练出的网络文件不会发布进
+   * 冻结版本。只对这次打开的草稿有效；版本页消费一次就清掉，不同草稿之间不串用。
+   */
+  openDraftAssets?: string | null;
   /** 版本页进来时直接打开查看的冻结版本（历史记录的"打开版本"），只看不改模拟所用的版本，用完清掉。 */
   openVersion?: VersionRef | null;
   expert: boolean;

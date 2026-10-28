@@ -58,7 +58,10 @@ import {
   type RemoteStudyReply,
 } from './remote-study';
 import type { CaseProfile, ModelDraft, VersionRef } from '../../lib/types';
-import StudyImportDialog, { type StudyPreview } from '../versions/StudyImportDialog';
+import StudyImportDialog, {
+  type StudyPreview,
+  type StudyNetworkSummary,
+} from '../versions/StudyImportDialog';
 import { REMOTE_CHECK_MS, compatibleKernel } from '../runs/run-model';
 import LiveServerLoad from '../runs/LiveServerLoad';
 import {
@@ -1451,27 +1454,46 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const confirmWriteBack = async (chosen: [string, string | null, number | null][]) => {
     const w = writing;
     if (!w) return null;
+    // 纯参数成员没有可勾选的网络；网络成员没有可勾选的参数。网络整体导入，`only` 传 null，
+    // 否则后端会把"没勾参数"当成"勾选结果为空"而拒绝联合导入。
+    const kind = w.kind ?? 'parameters';
     const result = await task(() =>
-      invokeJson<{ draft: ModelDraft; member: string; parameters: number }>('model_import_study', {
+      invokeJson<{
+        draft: ModelDraft;
+        member: string;
+        kind?: 'parameters' | 'network' | 'joint';
+        parameters: number;
+        asset_root?: string | null;
+        network?: StudyNetworkSummary | null;
+      }>('model_import_study', {
         id: w.draft.id,
         studyDir: w.study,
         member: w.member,
         expectedGeneration: w.draft.generation,
         preview: null,
-        only: chosen,
+        only: kind === 'network' ? null : chosen,
       }),
     );
     setWriting(null);
+    const imported = result.kind ?? kind;
+    const network = result.network ?? w.network ?? null;
     notify(
-      tr(
-        `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进草稿"${w.draft.name}"，审阅后冻结成新版本。`,
-        `Wrote ${result.parameters} parameters of study member ${result.member} into draft "${w.draft.name}"; review it and freeze a new version.`,
-      ),
+      imported === 'parameters'
+        ? tr(
+            `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进草稿"${w.draft.name}"，审阅后冻结成新版本。`,
+            `Wrote ${result.parameters} parameters of study member ${result.member} into draft "${w.draft.name}"; review it and freeze a new version.`,
+          )
+        : tr(
+            `已把研究成员 ${result.member} 的${network ? `${network.slot} 网络（${network.weights} 个权重）` : ' AI 网络'}${result.parameters ? `和 ${result.parameters} 个参数` : ''}写进草稿"${w.draft.name}"，审阅后冻结成新版本。`,
+            `Wrote the ${network ? `${network.slot} network (${network.weights} weights)` : 'AI network'}${result.parameters ? ` and ${result.parameters} parameters` : ''} of study member ${result.member} into draft "${w.draft.name}"; review it and freeze a new version.`,
+          ),
     );
     // 这个研究以后再写也进同一个草稿；导航放在 task 之外，task 持锁时导航守卫会拦下。
     update({
       researchTarget: { draftId: w.draft.id, name: w.draft.name },
       openDraft: w.draft.id,
+      // 网络/联合导入把资产放在草稿暂存目录里：版本页冻结时要用它把网络文件发布进冻结版本。
+      openDraftAssets: result.asset_root ?? null,
     });
     navigate('versions');
     return result;
@@ -1921,9 +1943,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     // 没用上的参数种子不留到下一次研究。
     update({ researchSeed: null });
     if (target) {
-      update({ openDraft: target.draftId });
+      update({ openDraft: target.draftId, openDraftAssets: null });
       if (navigate('versions')) return;
-      update({ openDraft: null });
+      update({ openDraft: null, openDraftAssets: null });
     } else if (fromHub) {
       update({ versionsView: 'create' });
       if (navigate('versions')) return;

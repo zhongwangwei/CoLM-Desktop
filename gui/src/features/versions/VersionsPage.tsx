@@ -208,9 +208,12 @@ export default function VersionsPage() {
     invokeJson<ModelDraft>('model_draft', { id })
       .then((d) => {
         if (!live) return;
-        update({ openDraft: null });
+        // 研究页把 DE 训练出的网络写回草稿时，资产暂存目录也一起带过来：冻结要用它发布网络文件。
+        // 只消费一次，免得之后打开别的草稿还拿着上一个草稿的资产目录。
+        const assets = state.openDraftAssets ?? '';
+        update({ openDraft: null, openDraftAssets: null });
         setDraft(d);
-        setAssetRoot('');
+        setAssetRoot(assets);
         setDirty(false);
         setSaving(false);
         setSavedNotice('');
@@ -219,14 +222,14 @@ export default function VersionsPage() {
       })
       .catch((e) => {
         if (!live) return;
-        update({ openDraft: null });
+        update({ openDraft: null, openDraftAssets: null });
         setError(String(e));
       });
     return () => {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.openDraft]);
+  }, [state.openDraft, state.openDraftAssets]);
   // 历史记录点"打开版本"：直接打开那个冻结版本看。
   useEffect(() => {
     const ref = state.openVersion;

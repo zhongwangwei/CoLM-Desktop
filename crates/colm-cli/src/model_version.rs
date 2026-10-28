@@ -114,14 +114,18 @@ fn prune(store: &Registry, input: Prune, current: &CodeRef) -> Result<colm_model
     );
     store.prune_official(&keep, input.dry_run)
 }
+/// 会话内唯一的名字（草稿 id、各种暂存目录）。只靠时钟纳秒不够：同一进程里并行的调用会在同一时钟刻度
+/// 拿到同一个值（实测 10 个并行测试里 5 个撞了根目录、互相删文件），加一个进程内计数保证互不相同。
 fn unique_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(
-        "model-{}-{}",
+        "model-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
 }
 pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
@@ -2169,16 +2173,215 @@ fn study_parameter_records(
     Ok(records)
 }
 
-/// 把一次率定（或敏感性）研究里某个成员（默认最优）的参数值写进草稿的参数改值。原来率定结果只能
-/// "应用到一个新算例"，进不了版本（2026-10-20 梳理）。研究里的参数都在参数目录里登记过，按目录身份
-/// 写成和手工改值完全一样的记录；土层参数没有版本里的改值形式，AI 网络走"挂网络"那条路，都明确拒绝。
-/// 勾选导入的一个研究参数：`[parameter_id, scheme, index]`。
+/// 研究结果写回版本（`model-import-study`）的一个参数改值勾选：`[parameter_id, scheme, index]`。
 type ChosenParameter = (String, Option<String>, Option<u8>);
 
-/// `--preview 1`：只给出这个成员会带进来的参数和它的目标函数值，不改草稿（版本页先列出来让人勾选）。
-/// `--only`：只导入勾选的那些，JSON 数组，每项 `[parameter_id, scheme 或 null, index 或 null]`。
+/// 研究成果的产物类型。DE 混合训练把网络权重作为决策变量，成员样本里可能同时有采样参数与网络权重，
+/// 所以按 kind 分流：parameters（旧行为）、network、joint。`--only` 只筛参数：网络没有可勾选的维度，
+/// 任何情况下都不能因此丢网络。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StudyArtifactKind {
+    Parameters,
+    Network,
+    Joint,
+}
+
+impl StudyArtifactKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Parameters => "parameters",
+            Self::Network => "network",
+            Self::Joint => "joint",
+        }
+    }
+    fn has_parameters(self) -> bool {
+        matches!(self, Self::Parameters | Self::Joint)
+    }
+    fn has_network(self) -> bool {
+        matches!(self, Self::Network | Self::Joint)
+    }
+}
+
+/// 成员产物类型。采样参数看研究冻结的 spec 而不是成员里有没有额外的键：`study_parameter_records`
+/// 也只认 spec.parameters，两者必须一致。有权重但 spec.hybrid 缺失说明 manifest 不完整（正常训练写不出
+/// 这种成员），网络重建不出来，只能明确报错。
+fn study_artifact_kind(
+    spec: &crate::study::spec::StudySpec,
+    member: &crate::study::spec::MemberPlan,
+) -> Result<StudyArtifactKind> {
+    if !member
+        .parameters
+        .keys()
+        .any(|key| crate::study::hybrid::is_weight_key(key))
+    {
+        return Ok(StudyArtifactKind::Parameters);
+    }
+    ensure!(
+        spec.hybrid.is_some(),
+        "study member {} has hybrid network weights, but its Study spec has no frozen network definition (spec.hybrid); the trained network cannot be rebuilt — recreate the Study",
+        member.id
+    );
+    Ok(if spec.parameters.is_empty() {
+        StudyArtifactKind::Network
+    } else {
+        StudyArtifactKind::Joint
+    })
+}
+
+/// 成员里的网络权重，按序号；序号必须从 0 连续。
+///
+/// 规则与 `study::hybrid` 写文件时的私有函数相同，这里必须自己有一份：preview 要在不落盘的前提下先
+/// 校验（那个函数会直接把网络文件写进成员目录）。真正落盘仍走它，权重个数与网络形状由
+/// `HybridStudySpec::mlp` 校验。
+fn study_network_weights(member: &crate::study::spec::MemberPlan) -> Result<Vec<f64>> {
+    member
+        .parameters
+        .iter()
+        .filter(|(key, _)| crate::study::hybrid::is_weight_key(key))
+        .enumerate()
+        .map(|(index, (key, value))| {
+            ensure!(
+                *key == crate::study::hybrid::weight_key(index),
+                "hybrid weight {key} is out of sequence"
+            );
+            Ok(*value)
+        })
+        .collect()
+}
+
+/// 成员权重对应的冻结网络定义，同时把重建的前提一次查清；preview 与提交共用这一组可行动错误。
+fn study_network_spec<'a>(
+    spec: &'a crate::study::spec::StudySpec,
+    member: &crate::study::spec::MemberPlan,
+) -> Result<&'a crate::study::spec::HybridStudySpec> {
+    let hybrid = spec.hybrid.as_ref().with_context(|| {
+        format!(
+            "study member {} has hybrid network weights, but its Study spec has no frozen network definition (spec.hybrid); the trained network cannot be rebuilt — recreate the Study",
+            member.id
+        )
+    })?;
+    let weights = study_network_weights(member)?;
+    ensure!(
+        hybrid.normalize.is_some(),
+        "the Study's hybrid feature normalization was never frozen; the trained network cannot be rebuilt"
+    );
+    hybrid.mlp(&weights).with_context(|| {
+        format!(
+            "study member {} does not hold a complete network",
+            member.id
+        )
+    })?;
+    Ok(hybrid)
+}
+
+/// 网络摘要：版本页据此说明带进来的是哪个插槽、几个特征/输出/权重；preview 与提交返回同一份。
+fn study_network_summary(
+    hybrid: &crate::study::spec::HybridStudySpec,
+    member: &crate::study::spec::MemberPlan,
+) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "slot": hybrid.slot,
+        "features": hybrid.features,
+        "outputs": hybrid.outputs.iter().map(|output| output.name.clone()).collect::<Vec<_>>(),
+        "hidden": hybrid.hidden,
+        "normalize": hybrid.normalize.is_some(),
+        "weights": study_network_weights(member)?.len(),
+    }))
+}
+
+/// 把成员训练出的网络写进资产暂存目录并校验，返回要记进 `draft.overlay.hybrid` 的 bundle。
+///
+/// 不从成员的物化算例目录复制 `hybrid.toml`/`models/`：`write_member_files` 正是 DE 物化成员时写这些
+/// 文件的同一个函数，由冻结的 spec.hybrid 与成员权重重建是确定性的；复制要在多站点成员目录里挑一份，
+/// 还会接受可能过期或被改过的文件 —— 研究证据只覆盖 case.nml 与数据输入，`fingerprint::full_inputs`
+/// 并不列这几个网络文件。
+fn stage_study_network(
+    destination: &Path,
+    spec: &crate::study::spec::StudySpec,
+    member: &crate::study::spec::MemberPlan,
+) -> Result<colm_model::HybridBundle> {
+    study_network_spec(spec, member)?;
+    crate::study::hybrid::write_member_files(destination, spec, &member.parameters).with_context(
+        || {
+            format!(
+                "cannot export the network trained by study member {}",
+                member.id
+            )
+        },
+    )?;
+    let config_path = destination.join("hybrid.toml");
+    let config = colm_hybrid::HybridConfig::load(&config_path)?;
+    let mut assets = std::collections::BTreeMap::new();
+    for slot in &config.slots {
+        for path in slot.model.iter().chain(slot.normalize.iter()) {
+            let relative = path
+                .strip_prefix(destination)
+                .context("network artifact escaped staging")?
+                .to_path_buf();
+            assets.insert(relative, colm_kernel::sha256_hex(&std::fs::read(path)?));
+        }
+    }
+    ensure!(
+        !assets.is_empty(),
+        "the trained network has no model file to stage"
+    );
+    Ok(colm_model::HybridBundle {
+        config: std::fs::read_to_string(&config_path)?,
+        assets: assets
+            .into_iter()
+            .map(|(relative_path, sha256)| colm_model::Asset {
+                relative_path: relative_path.to_string_lossy().into_owned(),
+                sha256,
+            })
+            .collect(),
+    })
+}
+
+/// 研究参数改值并进草稿：研究定下的值替换草稿里同一个参数原来的改值；一个案例标量同时也是物理开关时，
+/// 以研究的值为准（沿用旧导入的行为）。
+fn apply_study_parameters(draft: &mut ModelDraft, records: &[colm_model::ParameterOverrideRecord]) {
+    let same = |a: &colm_model::ParameterOverrideRecord,
+                b: &colm_model::ParameterOverrideRecord| {
+        a.parameter_id == b.parameter_id
+            && a.scope_instance.scheme == b.scope_instance.scheme
+            && a.scope_instance.index == b.scope_instance.index
+            && a.scope_instance.process_file == b.scope_instance.process_file
+    };
+    for record in records {
+        draft
+            .overlay
+            .parameters
+            .retain(|prior| !same(prior, record));
+        if record.scope_instance.kind == "case-scalar" {
+            draft
+                .overlay
+                .physics
+                .retain(|key, _| !key.eq_ignore_ascii_case(&record.raw_key));
+        }
+        draft.overlay.parameters.push(record.clone());
+    }
+}
+
+/// 一次成员写回的全部输入。生产由 `verified_member` 取得（含研究锁与证据校验）；测试注入固定的
+/// Manifest+MemberPlan，不必复刻整个研究目录。
+struct StudyMemberImport<'a> {
+    study: &'a Path,
+    manifest: &'a crate::study::spec::Manifest,
+    member: &'a crate::study::spec::MemberPlan,
+    objective: Option<f64>,
+    preview: bool,
+    only: Option<&'a [ChosenParameter]>,
+    expected_generation: u64,
+}
+
+/// 把一次率定（或敏感性）研究里某个成员（默认最优）写进草稿：率定参数进参数改值，DE 混合训练出的
+/// 网络进 `overlay.hybrid`。原来网络只能从研究页"挂网络"（两步拟合），DE 直接训练出的网络没有写回
+/// 通道（审计 P1-5）。土层参数没有版本里的改值形式，明确拒绝。
+///
+/// `--preview 1`：只给出这个成员会带进来的产物与它的目标函数值，不改草稿（版本页先列出来让人勾选）。
+/// `--only`：只导入勾选的那些参数，JSON 数组，每项 `[parameter_id, scheme 或 null, index 或 null]`。
 fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
-    let mut draft = store.draft(&opts.need_str("--model-id")?)?;
+    let draft = store.draft(&opts.need_str("--model-id")?)?;
     let preview = opts.get("--preview").is_some_and(|v| v == "1");
     let expected = if preview {
         draft.generation
@@ -2195,27 +2398,56 @@ fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
         .get("--only")
         .map(|text| serde_json::from_str(&text).context("--only must be a JSON array"))
         .transpose()?;
-    let (mut records, member, objective) = {
+    let (manifest, member, objective) = {
         // 与研究页"存成新版本"同一组校验：输入没被改过、成员确实算完且有结果证据。
         let (_lock, manifest, member) = crate::study::runner::verified_member(&study, &member_id)?;
-        ensure!(
-            !member
-                .parameters
-                .keys()
-                .any(|key| crate::study::hybrid::is_weight_key(key)),
-            "this study trained an AI network; attach the network from the research page instead"
-        );
-        let records = study_parameter_records(&manifest.spec.parameters, &member)?;
         let objective = crate::study::runner::status_state(&study)?
             .and_then(|state| state.candidates.get(&member.id).and_then(|c| c.calibration));
-        (records, member.id.clone(), objective)
+        (manifest, member, objective)
     };
-    if let Some(only) = &only {
-        records.retain(|r| {
+    import_study_member(
+        store,
+        draft,
+        &StudyMemberImport {
+            study: &study,
+            manifest: &manifest,
+            member: &member,
+            objective,
+            preview,
+            only: only.as_deref(),
+            expected_generation: expected,
+        },
+    )
+}
+
+/// 写入本身：preview 只读；提交先在草稿资产暂存目录里备好网络（并复制草稿原有资产），再改 overlay、
+/// 记出处、保存。错误路径删掉暂存目录；`save_draft` 失败时磁盘上仍是旧草稿。纯参数导入不建暂存目录，
+/// 保持旧行为。
+fn import_study_member(
+    store: &Registry,
+    mut draft: ModelDraft,
+    import: &StudyMemberImport<'_>,
+) -> Result<serde_json::Value> {
+    let kind = study_artifact_kind(&import.manifest.spec, import.member)?;
+    let mut records = if kind.has_parameters() {
+        study_parameter_records(&import.manifest.spec.parameters, import.member)?
+    } else {
+        Vec::new()
+    };
+    let network = kind
+        .has_network()
+        .then(|| {
+            study_network_spec(&import.manifest.spec, import.member)
+                .and_then(|hybrid| study_network_summary(hybrid, import.member))
+        })
+        .transpose()?;
+    // `--only` 只作用于参数；纯网络成员没有可勾选的参数，勾选结果为空也不能拦住网络导入。
+    if let Some(only) = import.only.filter(|_| kind.has_parameters()) {
+        records.retain(|record| {
             only.iter().any(|(id, scheme, index)| {
-                *id == r.parameter_id
-                    && *scheme == r.scope_instance.scheme
-                    && *index == r.scope_instance.index
+                *id == record.parameter_id
+                    && *scheme == record.scope_instance.scheme
+                    && *index == record.scope_instance.index
             })
         });
         ensure!(
@@ -2223,33 +2455,61 @@ fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
             "none of the chosen parameters is in this study member"
         );
     }
-    if preview {
-        return Ok(serde_json::json!({"member":member,"objective":objective,"records":records}));
+    if import.preview {
+        return Ok(serde_json::json!({
+            "kind": kind.as_str(),
+            "member": import.member.id,
+            "objective": import.objective,
+            "records": records,
+            "network": network,
+        }));
     }
-    let same = |a: &colm_model::ParameterOverrideRecord,
-                b: &colm_model::ParameterOverrideRecord| {
-        a.parameter_id == b.parameter_id
-            && a.scope_instance.scheme == b.scope_instance.scheme
-            && a.scope_instance.index == b.scope_instance.index
-            && a.scope_instance.process_file == b.scope_instance.process_file
-    };
-    for record in &records {
-        // 研究定下的值替换草稿里同一个参数原来的改值；一个案例标量同时也是物理开关时，以研究的值为准。
-        draft
-            .overlay
-            .parameters
-            .retain(|prior| !same(prior, record));
-        if record.scope_instance.kind == "case-scalar" {
-            draft
-                .overlay
-                .physics
-                .retain(|key, _| !key.eq_ignore_ascii_case(&record.raw_key));
+    let staging = kind
+        .has_network()
+        .then(|| -> Result<PathBuf> {
+            let staging = store
+                .root()
+                .join("draft-assets")
+                .join(&draft.id)
+                .join(unique_id());
+            std::fs::create_dir_all(&staging)?;
+            Ok(staging)
+        })
+        .transpose()?;
+    let result = (|| -> Result<serde_json::Value> {
+        if let Some(staging) = &staging {
+            copy_draft_assets(store, &draft, staging)?;
+            draft.overlay.hybrid = Some(stage_study_network(
+                staging,
+                &import.manifest.spec,
+                import.member,
+            )?);
         }
-        draft.overlay.parameters.push(record.clone());
+        apply_study_parameters(&mut draft, &records);
+        let studies = [import.study.to_path_buf()];
+        // 联合训练两者都记：purpose 是去重键，同一份研究的 network 与 parameters 各一条。
+        if kind.has_network() {
+            declare_studies(&mut draft, &studies, "network")?;
+        }
+        if kind.has_parameters() {
+            declare_studies(&mut draft, &studies, "parameters")?;
+        }
+        let draft = store.save_draft(draft, import.expected_generation)?;
+        Ok(serde_json::json!({
+            "draft": draft,
+            "member": import.member.id,
+            "kind": kind.as_str(),
+            "parameters": records.len(),
+            "asset_root": staging,
+            "network": network,
+        }))
+    })();
+    if result.is_err() {
+        if let Some(staging) = &staging {
+            let _ = std::fs::remove_dir_all(staging);
+        }
     }
-    declare_studies(&mut draft, std::slice::from_ref(&study), "parameters")?;
-    let draft = store.save_draft(draft, expected)?;
-    Ok(serde_json::json!({"draft":draft,"member":member,"parameters":records.len()}))
+    result
 }
 
 pub(crate) fn recorded_run_case(
@@ -3604,6 +3864,533 @@ mod verified_cache_tests {
             Err(error) => error.to_string(),
         };
         assert!(error.contains("frozen program content changed"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod study_import_tests {
+    use super::*;
+    use crate::study::spec::{Manifest, MemberPlan, StudySpec};
+    use std::collections::BTreeMap;
+
+    const STUDY_ID: &str = "study-a";
+    /// 2 特征 → 3 隐藏 → 1 输出：(2×3 + 3) + (3×1 + 1)。
+    const PFT_WEIGHTS: usize = 13;
+
+    fn pft_network() -> serde_json::Value {
+        serde_json::json!({
+            "slot": "pft",
+            "features": ["pftclass", "pftfrac"],
+            "outputs": [{"name": "DEF_PFT_VMAX25", "range": [10.0, 80.0]}],
+            "hidden": [3],
+            "normalize": {"mean": [5.0, 0.5], "std": [2.0, 1.0]},
+        })
+    }
+
+    fn study_spec(
+        parameters: Vec<serde_json::Value>,
+        hybrid: Option<serde_json::Value>,
+    ) -> StudySpec {
+        let mut value = serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "base_cases": ["site"],
+            "observations": {"site": "obs.nc"},
+            "parameters": parameters,
+            "targets": [{"key": "qle", "variable": "Qle", "from": 0, "to": 86400}],
+            "budget": {"population": 8, "generations": 2},
+        });
+        if let Some(hybrid) = hybrid {
+            value["hybrid"] = hybrid;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn sampled_parameter() -> serde_json::Value {
+        serde_json::json!({"name": "DEF_TUNING_CNFAC", "sample_min": 0.1, "sample_max": 0.9})
+    }
+
+    fn weights(count: usize) -> BTreeMap<String, f64> {
+        (0..count)
+            .map(|index| {
+                (
+                    crate::study::hybrid::weight_key(index),
+                    (index as f64 - 6.0) / 7.0,
+                )
+            })
+            .collect()
+    }
+
+    fn member(parameters: BTreeMap<String, f64>) -> MemberPlan {
+        MemberPlan {
+            id: "m000001".into(),
+            generation: 1,
+            candidate_index: 1,
+            baseline: false,
+            parameters,
+        }
+    }
+
+    fn registry_with_draft(root: &Path) -> (Registry, ModelDraft) {
+        let store = Registry::open(root).unwrap();
+        let code = CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        };
+        let parent = store.install_official(code.clone()).unwrap();
+        let draft = store
+            .create_draft(ModelDraft {
+                id: "custom".into(),
+                name: "Custom".into(),
+                note: "Study import".into(),
+                parent: parent.version,
+                code,
+                overlay: Default::default(),
+                applicability: Default::default(),
+                generation: 0,
+                derived_from: None,
+                created_unix: 0,
+            })
+            .unwrap();
+        (store, draft)
+    }
+
+    /// `declare_studies` 能读的最小研究目录：manifest 与 DE 初始样本设计。输入冻结哈希留空即不比对
+    /// （`engine::verify_frozen_inputs` 对空期望值跳过），所以不需要真实算例与观测文件。
+    fn study_fixture(root: &Path, spec: StudySpec) -> (PathBuf, Manifest) {
+        let study = root.join(STUDY_ID);
+        std::fs::create_dir_all(study.join("samples")).unwrap();
+        let study = study.canonicalize().unwrap();
+        std::fs::write(
+            study.join("samples/g000000.csv"),
+            "member,baseline,generation,candidate\n",
+        )
+        .unwrap();
+        let manifest = Manifest {
+            schema_version: 1,
+            id: STUDY_ID.into(),
+            root: study.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec,
+            members: Vec::new(),
+            provenance: Default::default(),
+        };
+        std::fs::write(
+            study.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        (study, manifest)
+    }
+
+    /// 一套草稿+研究夹具；`run` 走真实的 `import_study_member`（只跳过 `verified_member` 的重型证据目录）。
+    struct ImportFixture {
+        store: Registry,
+        draft: ModelDraft,
+        study: PathBuf,
+        manifest: Manifest,
+    }
+
+    impl ImportFixture {
+        fn new(root: &Path, spec: StudySpec) -> Self {
+            let (store, draft) = registry_with_draft(&root.join("registry"));
+            let (study, manifest) = study_fixture(root, spec);
+            Self {
+                store,
+                draft,
+                study,
+                manifest,
+            }
+        }
+
+        fn run(
+            &self,
+            member: &MemberPlan,
+            preview: bool,
+            only: Option<&[ChosenParameter]>,
+        ) -> Result<serde_json::Value> {
+            import_study_member(
+                &self.store,
+                self.draft.clone(),
+                &StudyMemberImport {
+                    study: &self.study,
+                    manifest: &self.manifest,
+                    member,
+                    objective: Some(0.42),
+                    preview,
+                    only,
+                    expected_generation: self.draft.generation,
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn artifact_kind_routes_parameters_networks_and_joint_members() {
+        let sampled = member(BTreeMap::from([("DEF_TUNING_CNFAC".to_owned(), 0.5)]));
+        let network = member(weights(PFT_WEIGHTS));
+        let mut joint_parameters = weights(PFT_WEIGHTS);
+        joint_parameters.insert("DEF_TUNING_CNFAC".into(), 0.5);
+        let joint = member(joint_parameters);
+        assert_eq!(
+            study_artifact_kind(&study_spec(vec![sampled_parameter()], None), &sampled).unwrap(),
+            StudyArtifactKind::Parameters
+        );
+        // 基线成员没有权重：研究本身训练网络，也不把基线成员当网络导入。
+        assert_eq!(
+            study_artifact_kind(
+                &study_spec(vec![sampled_parameter()], Some(pft_network())),
+                &sampled
+            )
+            .unwrap(),
+            StudyArtifactKind::Parameters
+        );
+        assert_eq!(
+            study_artifact_kind(&study_spec(vec![], Some(pft_network())), &network).unwrap(),
+            StudyArtifactKind::Network
+        );
+        assert_eq!(
+            study_artifact_kind(
+                &study_spec(vec![sampled_parameter()], Some(pft_network())),
+                &joint
+            )
+            .unwrap(),
+            StudyArtifactKind::Joint
+        );
+        // 有权重却没有冻结的网络定义：明确报错，不能退化成纯参数导入把权重悄悄丢掉。
+        let error = study_artifact_kind(&study_spec(vec![sampled_parameter()], None), &network)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("spec.hybrid"), "{error}");
+        assert!(error.contains("cannot be rebuilt"), "{error}");
+    }
+
+    #[test]
+    fn staged_network_bundle_matches_the_files_it_writes() {
+        let root = std::env::temp_dir().join(unique_id());
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let spec = study_spec(vec![], Some(pft_network()));
+        let member = member(weights(PFT_WEIGHTS));
+        let bundle = stage_study_network(&staging, &spec, &member).unwrap();
+        assert_eq!(
+            bundle.config,
+            std::fs::read_to_string(staging.join("hybrid.toml")).unwrap()
+        );
+        let mut paths = bundle
+            .assets
+            .iter()
+            .map(|asset| asset.relative_path.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(paths, ["models/study.mlp.json", "models/study.norm.json"]);
+        for asset in &bundle.assets {
+            assert_eq!(
+                asset.sha256,
+                colm_kernel::sha256_hex(
+                    &std::fs::read(staging.join(&asset.relative_path)).unwrap()
+                )
+            );
+        }
+        let loaded = colm_hybrid::HybridConfig::load(&staging.join("hybrid.toml")).unwrap();
+        assert_eq!(loaded.slots[0].name, "pft");
+        assert_eq!(loaded.slots[0].features, ["pftclass", "pftfrac"]);
+        let saved = colm_hybrid::Mlp::load(&staging.join("models/study.mlp.json")).unwrap();
+        assert_eq!(
+            saved,
+            spec.hybrid
+                .as_ref()
+                .unwrap()
+                .mlp(&study_network_weights(&member).unwrap())
+                .unwrap()
+        );
+        let summary =
+            study_network_summary(study_network_spec(&spec, &member).unwrap(), &member).unwrap();
+        assert_eq!(summary["slot"], "pft");
+        assert_eq!(
+            summary["features"],
+            serde_json::json!(["pftclass", "pftfrac"])
+        );
+        assert_eq!(summary["outputs"], serde_json::json!(["DEF_PFT_VMAX25"]));
+        assert_eq!(summary["normalize"], true);
+        assert_eq!(summary["weights"], PFT_WEIGHTS);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staging_reports_networks_that_cannot_be_rebuilt() {
+        let root = std::env::temp_dir().join(unique_id());
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let spec = study_spec(vec![], Some(pft_network()));
+        let mut gap = weights(PFT_WEIGHTS);
+        gap.remove(&crate::study::hybrid::weight_key(3));
+        let error = format!(
+            "{:#}",
+            stage_study_network(&staging, &spec, &member(gap)).unwrap_err()
+        );
+        assert!(error.contains("out of sequence"), "{error}");
+
+        let mut without_normalize = spec.clone();
+        without_normalize.hybrid.as_mut().unwrap().normalize = None;
+        let error = format!(
+            "{:#}",
+            stage_study_network(&staging, &without_normalize, &member(weights(PFT_WEIGHTS)))
+                .unwrap_err()
+        );
+        assert!(error.contains("normalization was never frozen"), "{error}");
+
+        let mut without_definition = spec.clone();
+        without_definition.hybrid = None;
+        let error = format!(
+            "{:#}",
+            stage_study_network(&staging, &without_definition, &member(weights(PFT_WEIGHTS)))
+                .unwrap_err()
+        );
+        assert!(error.contains("spec.hybrid"), "{error}");
+
+        let error = format!(
+            "{:#}",
+            stage_study_network(&staging, &spec, &member(weights(PFT_WEIGHTS - 1))).unwrap_err()
+        );
+        assert!(error.contains("needs 13 weights, got 12"), "{error}");
+        assert!(
+            std::fs::read_dir(&staging).unwrap().next().is_none(),
+            "failed validation must not write into the staging directory"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_reports_the_trained_network_without_touching_the_draft() {
+        let root = std::env::temp_dir().join(unique_id());
+        let fixture = ImportFixture::new(&root, study_spec(vec![], Some(pft_network())));
+        let store = fixture.store.clone();
+        let before = fixture.draft.generation;
+        let value = fixture
+            .run(&member(weights(PFT_WEIGHTS)), true, None)
+            .unwrap();
+        assert_eq!(value["kind"], "network");
+        assert_eq!(value["member"], "m000001");
+        assert_eq!(value["objective"], 0.42);
+        assert_eq!(value["records"], serde_json::json!([]));
+        assert_eq!(value["network"]["slot"], "pft");
+        assert_eq!(value["network"]["normalize"], true);
+        let after = store.draft("custom").unwrap();
+        assert_eq!(after.generation, before);
+        assert!(after.overlay.hybrid.is_none());
+        assert!(
+            !store.root().join("draft-assets/custom").exists(),
+            "preview must not stage network assets"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commit_stages_the_trained_network_and_records_the_study() {
+        let root = std::env::temp_dir().join(unique_id());
+        let fixture = ImportFixture::new(&root, study_spec(vec![], Some(pft_network())));
+        let store = fixture.store.clone();
+        let study = fixture.study.clone();
+        let before = fixture.draft.generation;
+        let value = fixture
+            .run(&member(weights(PFT_WEIGHTS)), false, None)
+            .unwrap();
+        assert_eq!(value["kind"], "network");
+        assert_eq!(value["parameters"], 0);
+        assert_eq!(value["network"]["weights"], PFT_WEIGHTS);
+        let saved: ModelDraft = serde_json::from_value(value["draft"].clone()).unwrap();
+        assert_eq!(saved.generation, before + 1);
+        let hybrid = saved.overlay.hybrid.as_ref().expect("network written");
+        let staging = PathBuf::from(value["asset_root"].as_str().expect("asset_root"));
+        assert!(staging.starts_with(store.root().join("draft-assets/custom")));
+        assert_eq!(
+            hybrid.config,
+            std::fs::read_to_string(staging.join("hybrid.toml")).unwrap()
+        );
+        for asset in &hybrid.assets {
+            assert_eq!(
+                asset.sha256,
+                colm_kernel::sha256_hex(
+                    &std::fs::read(staging.join(&asset.relative_path)).unwrap()
+                )
+            );
+        }
+        let reloaded = store.draft("custom").unwrap();
+        assert_eq!(reloaded.overlay.hybrid, saved.overlay.hybrid);
+        assert!(reloaded.overlay.parameters.is_empty());
+        let derived: serde_json::Value =
+            serde_json::from_str(reloaded.derived_from.as_deref().unwrap()).unwrap();
+        let entries = derived["declared_training_studies"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["use"], "network");
+        assert_eq!(entries[0]["study"], serde_json::json!(study));
+        assert!(!study.join("run.lock").exists(), "study lock released");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn joint_import_writes_parameters_and_network_with_two_provenance_uses() {
+        let root = std::env::temp_dir().join(unique_id());
+        let fixture = ImportFixture::new(
+            &root,
+            study_spec(vec![sampled_parameter()], Some(pft_network())),
+        );
+        let store = fixture.store.clone();
+        let mut parameters = weights(PFT_WEIGHTS);
+        parameters.insert("DEF_TUNING_CNFAC".into(), 0.55);
+        let value = fixture.run(&member(parameters), false, None).unwrap();
+        assert_eq!(value["kind"], "joint");
+        assert_eq!(value["parameters"], 1);
+        let saved: ModelDraft = serde_json::from_value(value["draft"].clone()).unwrap();
+        assert!(saved.overlay.hybrid.is_some());
+        assert_eq!(saved.overlay.parameters.len(), 1);
+        let record = &saved.overlay.parameters[0];
+        assert_eq!(record.raw_key, "DEF_TUNING_CNFAC");
+        assert_eq!(record.value, "0.55");
+        assert_eq!(record.scope_instance.kind, "case-scalar");
+        let reloaded = store.draft("custom").unwrap();
+        let derived: serde_json::Value =
+            serde_json::from_str(reloaded.derived_from.as_deref().unwrap()).unwrap();
+        let uses = derived["declared_training_studies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["use"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(uses, ["network", "parameters"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_selects_parameters_and_never_drops_the_network() {
+        let root = std::env::temp_dir().join(unique_id());
+        // 纯网络成员：版本页可能把（空的）参数勾选原样传下来，网络不能因此被跳过。
+        let fixture = ImportFixture::new(&root, study_spec(vec![], Some(pft_network())));
+        let store = fixture.store.clone();
+        let empty: Vec<ChosenParameter> = Vec::new();
+        let value = fixture
+            .run(&member(weights(PFT_WEIGHTS)), true, Some(&empty))
+            .unwrap();
+        assert_eq!(value["kind"], "network");
+        assert_eq!(value["network"]["slot"], "pft");
+        assert!(store.draft("custom").unwrap().overlay.hybrid.is_none());
+
+        // 联合成员：勾中的采样参数照旧过滤；一个都没勾中仍是旧的明确错误。
+        let fixture = ImportFixture::new(
+            &root.join("joint"),
+            study_spec(vec![sampled_parameter()], Some(pft_network())),
+        );
+        let mut parameters = weights(PFT_WEIGHTS);
+        parameters.insert("DEF_TUNING_CNFAC".into(), 0.55);
+        let member = member(parameters);
+        // `--only` 认的是参数目录身份（preview 里 records 的 parameter_id），不是原始键名。
+        let preview = fixture.run(&member, true, None).unwrap();
+        let chosen: Vec<ChosenParameter> = vec![(
+            preview["records"][0]["parameter_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            None,
+            None,
+        )];
+        let value = fixture.run(&member, true, Some(&chosen)).unwrap();
+        assert_eq!(value["kind"], "joint");
+        assert_eq!(value["records"].as_array().unwrap().len(), 1);
+        let dropped: Vec<ChosenParameter> = Vec::new();
+        let error = fixture.run(&member, true, Some(&dropped)).unwrap_err();
+        assert!(
+            error.to_string().contains("none of the chosen parameters"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parameter_members_keep_the_old_import_and_response() {
+        let root = std::env::temp_dir().join(unique_id());
+        let member = member(BTreeMap::from([("DEF_TUNING_CNFAC".to_owned(), 0.5)]));
+        let fixture = ImportFixture::new(&root, study_spec(vec![sampled_parameter()], None));
+        let store = fixture.store.clone();
+        let before = fixture.draft.generation;
+        let preview = fixture.run(&member, true, None).unwrap();
+        assert_eq!(preview["kind"], "parameters");
+        assert_eq!(preview["records"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["network"], serde_json::Value::Null);
+        assert!(store.draft("custom").unwrap().overlay.parameters.is_empty());
+        assert_eq!(store.draft("custom").unwrap().generation, before);
+
+        let fixture = ImportFixture::new(
+            &root.join("commit"),
+            study_spec(vec![sampled_parameter()], None),
+        );
+        let store = fixture.store.clone();
+        let value = fixture.run(&member, false, None).unwrap();
+        assert_eq!(value["kind"], "parameters");
+        assert_eq!(value["parameters"], 1);
+        assert_eq!(value["asset_root"], serde_json::Value::Null);
+        assert_eq!(value["network"], serde_json::Value::Null);
+        let saved: ModelDraft = serde_json::from_value(value["draft"].clone()).unwrap();
+        assert!(saved.overlay.hybrid.is_none());
+        assert_eq!(saved.overlay.parameters.len(), 1);
+        assert_eq!(saved.overlay.parameters[0].raw_key, "DEF_TUNING_CNFAC");
+        assert!(
+            !store.root().join("draft-assets/custom").exists(),
+            "parameter imports stage no assets"
+        );
+        let derived: serde_json::Value =
+            serde_json::from_str(saved.derived_from.as_deref().unwrap()).unwrap();
+        let entries = derived["declared_training_studies"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["use"], "parameters");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unbuildable_network_never_touches_the_draft() {
+        let root = std::env::temp_dir().join(unique_id());
+        let fixture = ImportFixture::new(&root, study_spec(vec![sampled_parameter()], None));
+        let store = fixture.store.clone();
+        let before = store.draft("custom").unwrap();
+        let error = fixture
+            .run(&member(weights(PFT_WEIGHTS)), false, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("spec.hybrid"), "{error}");
+        let after = store.draft("custom").unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert!(after.overlay.parameters.is_empty());
+        assert!(after.overlay.hybrid.is_none());
+        assert!(!store.root().join("draft-assets/custom").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_removes_the_staging_directory() {
+        let root = std::env::temp_dir().join(unique_id());
+        let mut fixture = ImportFixture::new(&root, study_spec(vec![], Some(pft_network())));
+        let store = fixture.store.clone();
+        // 期望代次对不上：暂存好网络后 `save_draft` 拒绝，暂存目录要清掉、草稿保持原样。
+        fixture.draft.generation += 5;
+        let error = fixture
+            .run(&member(weights(PFT_WEIGHTS)), false, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("draft changed since it was loaded"),
+            "{error}"
+        );
+        let after = store.draft("custom").unwrap();
+        assert!(after.overlay.hybrid.is_none());
+        let staging = store.root().join("draft-assets/custom");
+        assert!(
+            !staging.exists() || std::fs::read_dir(&staging).unwrap().next().is_none(),
+            "a failed import must remove its staging directory"
+        );
+        assert!(!fixture.study.join("run.lock").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

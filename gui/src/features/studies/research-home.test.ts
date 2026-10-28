@@ -265,6 +265,8 @@ it('legacy research provenance does not inherit the currently selected frozen re
 function writeBackContext(overrides: Record<string, unknown>) {
   const calls: [string, Record<string, unknown>][] = [];
   const written: unknown[] = [];
+  // 预览的产物类型由后端按成员识别；测试可以直接换掉这次预览的返回。
+  const importReply = overrides.importReply as Record<string, unknown> | undefined;
   const context = {
     task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
     studyDir: '/p/.colm/studies/s-1',
@@ -282,7 +284,16 @@ function writeBackContext(overrides: Record<string, unknown>) {
       calls.push([command, args]);
       if (command === 'model_create' || command === 'model_draft')
         return { id: (args.id as string) ?? 'model-new', generation: 4, overlay: {} };
-      if (command === 'model_import_study') return { member: 'm000001', objective: 1, records: [] };
+      if (command === 'model_import_study')
+        return {
+          member: 'm000001',
+          objective: 1,
+          records: [],
+          kind: 'parameters',
+          asset_root: null,
+          network: null,
+          ...importReply,
+        };
       return null;
     },
     ...overrides,
