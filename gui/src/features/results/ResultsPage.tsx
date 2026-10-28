@@ -283,6 +283,11 @@ export default function ResultsPage({
   } | null>(null);
   // 跨项目比较：手填一个运行目录（不在当前项目的清单里）。
   const [externalRun, setExternalRun] = useState('');
+  // 90 个站点时运行列表很长：按站点/运行/版本搜索，并可只看结果还在服务器上的运行。
+  const [comparisonQuery, setComparisonQuery] = useState('');
+  const [comparisonServerOnly, setComparisonServerOnly] = useState(false);
+  // 站间指标对比图：同一变量、同一指标（RMSE）按站点横向条形，长度按本次最大值归一化。
+  const [comparisonVariable, setComparisonVariable] = useState('');
   // 站点清单按内容做依赖：`state.cases` 每次渲染都可能是新数组，直接放进 effect 依赖会无限重查。
   const caseDirsKey = state.cases.map((entry) => entry.dir).join('\n');
   const [evaluation, setEvaluation] = useState<
@@ -706,7 +711,8 @@ export default function ResultsPage({
           throw new Error(`Not a recorded run copy: ${entry.run.run_case}`);
       }
       setComparisonProgress({ done: 0, total: entries.length });
-      const rows = await boundedMap(entries, 4, async (entry) => {
+      // 远程每行一次 SSH；10 个会话的上限内 6 路并行，90 个站点时比 4 路更快。
+      const rows = await boundedMap(entries, 6, async (entry) => {
         const values = await invokeJson<Metric[]>('metrics', {
           case: entry.run.run_case,
           obs: entry.obs.trim(),
@@ -898,6 +904,18 @@ export default function ResultsPage({
     if (run.finished_ms)
       parts.push(new Date(run.finished_ms).toLocaleString(en ? 'en-US' : 'zh-CN'));
     return parts.join(' · ');
+  }
+  /** 搜索框与"只看结果在服务器上"过滤后的运行；分组展示前先过滤。 */
+  function visibleProjectRuns(runs: ProjectRun[]) {
+    const query = comparisonQuery.trim().toLowerCase();
+    return runs.filter((run) => {
+      if (comparisonServerOnly && !(run.server && run.outputs_local === false)) return false;
+      if (!query) return true;
+      const version = run.version ? `${run.version.id}@${run.version.revision}` : '';
+      return [run.case_name, run.case_dir, run.run_case, run.operation_id, version, run.status]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+    });
   }
   /** 按站点分组（保持后端返回的最近优先顺序），供多选列表使用。 */
   function groupedProjectRuns(runs: ProjectRun[]) {
@@ -1229,6 +1247,12 @@ export default function ResultsPage({
   const validPairs = !!selectedMetric && selectedMetric.n > 0;
   const noSharedVariables =
     singleEvaluation?.key === selectionKey && !singleEvaluation.rows.length && !!obs;
+  const comparisonVariables = [...new Set(metrics.map((metric) => metric.name))];
+  const comparisonMetricName = comparisonVariables.includes(comparisonVariable)
+    ? comparisonVariable
+    : (comparisonVariables[0] ?? '');
+  const comparisonRows = metrics.filter((metric) => metric.name === comparisonMetricName);
+  const comparisonMax = Math.max(...comparisonRows.map((metric) => Math.abs(metric.rmse ?? 0)), 0);
   return (
     <div className="page-stack results-page">
       <header className="results-heading">
@@ -1920,8 +1944,37 @@ export default function ResultsPage({
               </Notice>
             )}
             {!projectRunsLoading && !!projectRuns.length && (
+              <div className="comparison-run-filters">
+                <Input
+                  aria-label={tr('搜索运行', 'Search runs')}
+                  placeholder={tr(
+                    '搜索站点 / 运行编号 / 版本…',
+                    'Search station, run id or version…',
+                  )}
+                  value={comparisonQuery}
+                  disabled={busy}
+                  onChange={(event) => setComparisonQuery(event.target.value)}
+                />
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={comparisonServerOnly}
+                    disabled={busy}
+                    onChange={(event) => setComparisonServerOnly(event.target.checked)}
+                  />
+                  {tr('只看结果还在服务器上的', 'Only runs whose outputs are still on the server')}
+                </label>
+                <small>
+                  {tr(
+                    `显示 ${visibleProjectRuns(projectRuns).length} / ${projectRuns.length} 条运行`,
+                    `${visibleProjectRuns(projectRuns).length} of ${projectRuns.length} runs shown`,
+                  )}
+                </small>
+              </div>
+            )}
+            {!projectRunsLoading && !!projectRuns.length && (
               <div className="comparison-run-groups">
-                {groupedProjectRuns(projectRuns).map((group) => (
+                {groupedProjectRuns(visibleProjectRuns(projectRuns)).map((group) => (
                   <section key={group.dir} className="comparison-run-group">
                     <h3>
                       {group.caseName}
@@ -2356,6 +2409,51 @@ export default function ResultsPage({
                   theme={state.theme}
                 />
               ))}
+        </Card>
+      )}
+      {tab === 'comparison' && !!comparisonRows.length && (
+        <Card title={tr('站间指标对比', 'Metrics across stations')}>
+          <p className="muted">
+            {tr(
+              '同一变量、同一 RMSE 按站点并排；条形长度按本次比较里的最大 RMSE 归一化（数值越小越好）。不同输入不解释版本优劣。',
+              'The same variable and RMSE side by side per station; bars are scaled to the largest RMSE in this comparison (lower is better). Different inputs do not establish version superiority.',
+            )}
+          </p>
+          <Field label={tr('对比变量', 'Variable to compare')}>
+            <Select
+              value={comparisonMetricName}
+              disabled={busy}
+              onChange={(event) => setComparisonVariable(event.target.value)}
+            >
+              {comparisonVariables.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <div
+            className="comparison-bars"
+            role="img"
+            aria-label={tr('各站点 RMSE 对比', 'RMSE by station')}
+          >
+            {comparisonRows.map((metric) => {
+              const width = comparisonMax
+                ? Math.max(1, Math.round((Math.abs(metric.rmse ?? 0) / comparisonMax) * 100))
+                : 0;
+              return (
+                <div key={metric.site} className="comparison-bar-row">
+                  <span className="comparison-bar-label" title={metric.site}>
+                    {runLabel(metric.site || '')}
+                  </span>
+                  <div className="comparison-bar-track">
+                    <div className="comparison-bar-fill" style={{ width: `${width}%` }} />
+                  </div>
+                  <span className="comparison-bar-value">{number(metric.rmse)}</span>
+                </div>
+              );
+            })}
+          </div>
         </Card>
       )}
       {tab === 'report' && (

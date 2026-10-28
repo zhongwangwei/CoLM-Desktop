@@ -537,3 +537,47 @@
   color: var(--muted);
   font-size: 12px;
 }
+/* 多站点比较的运行过滤条与站间指标条形图。 */
+.comparison-run-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.comparison-run-filters .input {
+  max-width: 320px;
+}
+.comparison-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+.comparison-bar-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.comparison-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.comparison-bar-track {
+  height: 12px;
+  border-radius: 999px;
+  background: var(--elevated);
+  overflow: hidden;
+}
+.comparison-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.comparison-bar-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+  text-align: right;
+}
