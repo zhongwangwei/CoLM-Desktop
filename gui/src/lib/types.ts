@@ -320,6 +320,8 @@ export type HistoryOperation = {
 
 export type Server = {
   host: string;
+  /** 界面显示名称（例如"摆渡船"）；空时按集群预设或 host 显示。 */
+  name?: string;
   username: string;
   port: number;
   auth: string;

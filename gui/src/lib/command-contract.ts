@@ -1491,6 +1491,23 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "remote_cases": {},
+  "remote_case_save": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "server": {
+      "required": true,
+      "rust_type": "Server"
+    }
+  },
+  "remote_case_delete": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "remote_config": {},
   "remote_save_config": {
     "config": {

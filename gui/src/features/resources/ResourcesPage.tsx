@@ -24,6 +24,8 @@ import {
   partitionLabel,
   SERVER_PRESETS,
   applyServerPreset,
+  applyServerCase,
+  serverDisplayName,
   recognisedPreset,
   localDefaults,
   localPathSignature,
@@ -31,6 +33,7 @@ import {
   type LocalPathKey,
   type Partition,
   type Server,
+  type ServerCase,
   type ResourceCheck,
   kindPathRows,
 } from './resource';
@@ -63,7 +66,9 @@ export default function ResourcesPage() {
     [configLoaded, setConfigLoaded] = useState(false),
     [output, setOutput] = useState<Record<string, unknown>>({});
   const [rootBrowser, setRootBrowser] = useState<Server | null>(null),
-    [deletingServer, setDeletingServer] = useState<Server | null>(null);
+    [deletingServer, setDeletingServer] = useState<Server | null>(null),
+    // 软件里保存的服务器配置案例（非敏感配置），和集群预设一起出现在下拉里。
+    [serverCases, setServerCases] = useState<ServerCase[]>([]);
   const [preset, setPreset] = useState('default'),
     [snapshot, setSnapshot] = useState(''),
     [workspace, setWorkspace] = useState(''),
@@ -177,6 +182,8 @@ export default function ResourcesPage() {
         );
         if (!token.active || token !== epoch.current) return;
         setServers(config.servers);
+        const cases = await invokeJson<ServerCase[]>('remote_cases').catch(() => []);
+        setServerCases(Array.isArray(cases) ? cases : []);
         // 刷新只在没有未保存的本机路径时重设输入与基线：否则一次后台刷新会静默覆盖用户刚改的目录。
         if (!localDirtyRef.current) {
           const loadedLocal = localDefaults(config.local);
@@ -392,9 +399,32 @@ export default function ResourcesPage() {
       setPartitionsByHost((current) => ({ ...current, [host]: partitions }));
   }
   function applyPreset(id: string) {
-    const preset = SERVER_PRESETS.find((item) => item.id === id);
     setAppliedPreset(id);
-    if (editor && preset) editServer(applyServerPreset(editor, preset));
+    if (!editor) return;
+    if (id.startsWith('case:')) {
+      const saved = serverCases.find((item) => item.id === id.slice('case:'.length));
+      if (saved) editServer(applyServerCase(editor, saved.server));
+      return;
+    }
+    const preset = SERVER_PRESETS.find((item) => item.id === id);
+    if (preset) editServer(applyServerPreset(editor, preset));
+  }
+  /** 把当前编辑的服务器配置存成软件内的案例；默认只排除认证方式与私钥路径（后端负责清掉）。 */
+  async function saveServerCase() {
+    if (!editor) return;
+    const name = editor.name?.trim() || serverDisplayName(editor, en);
+    const saved = await invokeJson<ServerCase>('remote_case_save', { name, server: editor });
+    setServerCases((current) => [...current.filter((item) => item.name !== saved.name), saved]);
+    return t(
+      `已保存为案例：${saved.name}（已排除密码与私钥路径）`,
+      `Saved as case: ${saved.name} (password and key path excluded)`,
+    );
+  }
+  async function removeServerCase(id: string) {
+    await invokeJson('remote_case_delete', { id });
+    setServerCases((current) => current.filter((item) => item.id !== id));
+    setAppliedPreset('');
+    return t('案例已删除', 'Case deleted');
   }
   function editField(key: keyof Server, value: string) {
     if (key === 'auth' && value !== 'password') setPassword('');
@@ -495,6 +525,10 @@ export default function ResourcesPage() {
         }
       : null;
   const basicFields: [keyof Server, string][] = [
+    [
+      'name',
+      t('显示名称（留空按集群预设或地址显示）', 'Display name (empty: cluster preset or address)'),
+    ],
     ['host', t('服务器地址 / SSH 别名', 'Server address / SSH alias')],
     ['username', t('登录账号', 'Username')],
   ];
@@ -598,6 +632,10 @@ export default function ResourcesPage() {
         ...SERVER_PRESETS.map((preset) => ({
           value: preset.id,
           label: en ? preset.en : preset.zh,
+        })),
+        ...serverCases.map((item) => ({
+          value: `case:${item.id}`,
+          label: t(`案例：${item.name}`, `Case: ${item.name}`),
         })),
       ],
       set: (value) => applyPreset(value),
@@ -978,8 +1016,9 @@ export default function ResourcesPage() {
                 <NavIcon name="resources" />
               </span>
               <span>
-                <strong>{server.host}</strong>
+                <strong>{serverDisplayName(server, en)}</strong>
                 <small>
+                  {serverDisplayName(server, en) === server.host ? '' : `${server.host} · `}
                   {
                     resourceCheckSummary(
                       server,
@@ -1077,10 +1116,18 @@ export default function ResourcesPage() {
       {editor && (
         <Card
           className="resource-configuration"
-          title={`${original ?? t('新服务器', 'New server')} ${t('服务器配置', 'configuration')}`}
+          title={`${
+            original
+              ? (() => {
+                  const saved = servers.find((server) => server.host === original);
+                  return saved ? serverDisplayName(saved, en) : original;
+                })()
+              : t('新服务器', 'New server')
+          } ${t('服务器配置', 'configuration')}`}
         >
           <div className="resource-connection-grid">
             {field('resource-preset')}
+            {field('resource-name')}
             {field('resource-host')}
             <div className="field">
               <span className="field-label">{t('认证方式', 'Authentication')}</span>
@@ -1114,6 +1161,7 @@ export default function ResourcesPage() {
           </datalist>
           {(() => {
             const applied = SERVER_PRESETS.find((preset) => preset.id === appliedPreset);
+            const appliedCase = serverCases.find((item) => `case:${item.id}` === appliedPreset);
             const recognised = SERVER_PRESETS.find(
               (preset) => preset.id === recognisedByHost[editor.host],
             );
@@ -1141,6 +1189,24 @@ export default function ResourcesPage() {
                         <li key={zh}>{en ? english : zh}</li>
                       ))}
                     </ul>
+                  </Notice>
+                )}
+                {appliedCase && (
+                  <Notice>
+                    <strong>{t(`案例：${appliedCase.name}`, `Case: ${appliedCase.name}`)}</strong>
+                    <span className="muted">
+                      {t(
+                        ' 已套用非敏感配置（不含密码与私钥路径）。',
+                        ' Non-sensitive settings applied (no password or key path).',
+                      )}
+                    </span>{' '}
+                    <ActionButton
+                      action="resource-delete-case"
+                      label={t('删除这个案例', 'Delete this case')}
+                      kind="commit"
+                      disabled={busy}
+                      run={() => run('case', () => removeServerCase(appliedCase.id))}
+                    />
                   </Notice>
                 )}
               </>
@@ -1264,6 +1330,13 @@ export default function ResourcesPage() {
                 disabled={busy || !editor.host}
                 run={() => execute(`check:${selected}`, checkConnection)}
               />
+              <ActionButton
+                action="resource-save-case"
+                label={t('保存为案例', 'Save as case')}
+                kind="commit"
+                disabled={busy || !editor.host || !!password}
+                run={() => execute('case', saveServerCase)}
+              />
               {dirty && (
                 <>
                   <ActionButton
@@ -1283,7 +1356,7 @@ export default function ResourcesPage() {
                   <small>{t('有未保存的修改', 'Unsaved changes')}</small>
                 </>
               )}
-              {['save', 'credentials']
+              {['save', 'credentials', 'case']
                 .filter((key) => output[key] != null)
                 .map((key) => (
                   <small key={key}>{String(output[key])}</small>

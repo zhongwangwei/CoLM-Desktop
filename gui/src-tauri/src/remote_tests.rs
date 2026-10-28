@@ -39,6 +39,7 @@ fn ssh_aliases_are_read_without_wildcards_or_duplicates() {
 fn server_settings_are_validated() {
     let server = |host: &str, root: &str| Server {
         host: host.into(),
+        name: String::new(),
         root: root.into(),
         username: String::new(),
         port: 0,
@@ -1248,5 +1249,92 @@ fn evaluation_runs_where_both_the_results_and_the_observation_are() {
     std::fs::write(dir.join("out/US-MMS/history/h.nc"), "").unwrap();
     assert_eq!(evaluation_server(case, local_obs.to_str().unwrap()), None);
     assert_eq!(evaluation_server(case, server_obs).as_deref(), Some("7920"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn server_cases_keep_non_sensitive_configuration_and_drop_credentials() {
+    let server: Server = serde_json::from_value(json!({
+        "host":"bd",
+        "root":"/tera11/zhwei/CoLM",
+        "username":"zhwei",
+        "auth":"key",
+        "identity_file":"/home/zhwei/.ssh/id_ed25519",
+        "scheduler":"lsf",
+        "partition":"normal",
+        "cores_per_node":48,
+        "project_dir":"/tera11/zhwei/projects",
+        "kind_paths":{"site":{"sitedir":"/tera11/zhwei/sites"}}
+    }))
+    .unwrap();
+    let saved = case_from_server(server, "  摆渡船（LSF） ").unwrap();
+    // 认证方式与私钥属于本机凭据，不能进案例；其余配置默认带上去。
+    assert_eq!(saved.auth, "config");
+    assert_eq!(saved.identity_file, "");
+    assert_eq!(saved.host, "bd");
+    assert_eq!(saved.username, "zhwei");
+    assert_eq!(saved.scheduler, "lsf");
+    assert_eq!(saved.partition, "normal");
+    assert_eq!(saved.cores_per_node, 48);
+    assert_eq!(saved.project_dir, "/tera11/zhwei/projects");
+    assert!(saved.kind_paths.is_empty());
+    assert!(case_from_server(saved, "  ").is_err());
+}
+
+#[test]
+fn server_cases_file_roundtrips_and_updates_by_name() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-gui-cases-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-cases.json");
+    assert!(read_server_cases(&path).unwrap().cases.is_empty());
+    let server: Server =
+        serde_json::from_value(json!({"host":"tms17l","root":"/tera11/zhwei/Personal/CoLM"}))
+            .unwrap();
+    let mut file = ServerCaseFile::default();
+    upsert_case(
+        &mut file,
+        ServerCase {
+            id: "case-1".into(),
+            name: "天河".into(),
+            server: server.clone(),
+            saved_at: 1,
+        },
+    );
+    upsert_case(
+        &mut file,
+        ServerCase {
+            id: "case-2".into(),
+            name: "摆渡船".into(),
+            server: server.clone(),
+            saved_at: 2,
+        },
+    );
+    upsert_case(
+        &mut file,
+        ServerCase {
+            id: "case-3".into(),
+            name: "天河".into(),
+            server: server.clone(),
+            saved_at: 3,
+        },
+    );
+    assert_eq!(
+        file.cases.len(),
+        2,
+        "same name replaces instead of piling up"
+    );
+    assert_eq!(
+        file.cases.iter().find(|c| c.name == "天河").unwrap().id,
+        "case-3"
+    );
+    write_server_cases(&path, &file).unwrap();
+    assert_eq!(read_server_cases(&path).unwrap().cases, file.cases);
     std::fs::remove_dir_all(&dir).unwrap();
 }

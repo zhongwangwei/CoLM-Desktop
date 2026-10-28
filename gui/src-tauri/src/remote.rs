@@ -23,6 +23,9 @@ pub struct PathMap {
 pub struct Server {
     /// ssh 配置里的别名（或 `user@host`）。
     pub host: String,
+    /// 界面显示名称（例如"摆渡船"）；空时界面按集群预设或 host 显示。
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub username: String,
     /// 0 means use the SSH configuration or default port.
@@ -183,13 +186,125 @@ pub struct RemoteConfig {
     pub local: Option<DataDefaults>,
 }
 
-fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("找不到配置目录：{e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir.join("remote.json"))
+    Ok(dir)
+}
+
+fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(config_dir(app)?.join("remote.json"))
+}
+
+fn cases_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(config_dir(app)?.join("server-cases.json"))
+}
+
+/// 服务器配置"案例"：把一台服务器的非敏感配置存进软件，之后从"集群预设"里重新套用。
+/// 密码本来就不在配置文件里；认证方式与私钥路径属于本机凭据，保存时清空（用户要求默认只带
+/// 非敏感配置）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCase {
+    pub id: String,
+    /// 案例名称，默认用服务器的显示名称。
+    pub name: String,
+    pub server: Server,
+    /// 保存时间（毫秒，UTC）。
+    pub saved_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ServerCaseFile {
+    #[serde(default)]
+    cases: Vec<ServerCase>,
+}
+
+fn read_server_cases(path: &std::path::Path) -> Result<ServerCaseFile, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ServerCaseFile::default())
+        }
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn write_server_cases(path: &std::path::Path, file: &ServerCaseFile) -> Result<(), String> {
+    crate::config::write_export_text_atomic(
+        path,
+        serde_json::to_string_pretty(file).map_err(|error| error.to_string())?,
+    )
+}
+
+/// 把服务器配置变成可保存的案例：只排除本机凭据（认证方式、私钥路径），其余按默认带上去。
+pub(crate) fn case_from_server(mut server: Server, name: &str) -> Result<Server, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.contains(['\n', '\r']) {
+        return Err("案例名称要填 1–80 个字符".into());
+    }
+    server.auth = "config".into();
+    server.identity_file.clear();
+    server.kind_paths.clear();
+    Ok(server)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 软件里保存的服务器案例（非敏感配置），给"集群预设"下拉复用。
+#[tauri::command]
+pub fn remote_cases(app: tauri::AppHandle) -> Result<Vec<ServerCase>, String> {
+    Ok(read_server_cases(&cases_path(&app)?)?.cases)
+}
+
+/// 案例按名称去重：同一个名字再保存就更新，不堆重复项。
+fn upsert_case(file: &mut ServerCaseFile, record: ServerCase) {
+    match file.cases.iter_mut().find(|item| item.name == record.name) {
+        Some(existing) => *existing = record,
+        None => file.cases.push(record),
+    }
+}
+
+/// 把一台服务器的配置保存为案例：同名覆盖，默认只排除认证方式与私钥路径。
+#[tauri::command]
+pub fn remote_case_save(
+    app: tauri::AppHandle,
+    name: String,
+    server: Server,
+) -> Result<ServerCase, String> {
+    let server = case_from_server(server, &name)?;
+    let path = cases_path(&app)?;
+    let mut file = read_server_cases(&path)?;
+    let saved_at = now_millis();
+    let record = ServerCase {
+        id: format!("case-{saved_at}-{}", file.cases.len()),
+        name: name.trim().to_owned(),
+        server,
+        saved_at,
+    };
+    upsert_case(&mut file, record.clone());
+    write_server_cases(&path, &file)?;
+    Ok(record)
+}
+
+#[tauri::command]
+pub fn remote_case_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let path = cases_path(&app)?;
+    let mut file = read_server_cases(&path)?;
+    let before = file.cases.len();
+    file.cases.retain(|item| item.id != id);
+    if file.cases.len() == before {
+        return Err("案例不存在".into());
+    }
+    write_server_cases(&path, &file)
 }
 
 pub(crate) fn validate_connection(server: &Server) -> Result<(), String> {
