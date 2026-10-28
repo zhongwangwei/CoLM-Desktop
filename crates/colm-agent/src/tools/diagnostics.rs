@@ -217,7 +217,10 @@ impl Tool for DiagnosticPlan {
                 }
             }
             "calibration" => {
+                let mut study_path = String::new();
+                let mut study_data: Option<Value> = None;
                 if let Some(study) = opt_str(args, "study") {
+                    study_path = study.to_owned();
                     let (mut step, data) = collect(
                         "study",
                         "Collect Study baseline, objective and parameter ranges",
@@ -225,19 +228,52 @@ impl Tool for DiagnosticPlan {
                         json!({"study":study}),
                         ctx,
                     );
-                    if data.as_ref().is_some_and(|v| {
-                        v["baseline_objective"].is_null() || v["best_objective"].is_null()
-                    }) {
-                        step["status"] = json!("missing");
-                        step["missing"] = json!(["Baseline and best objectives are both required; Study data are incomplete."]);
+                    let evidence = data.as_ref().and_then(study_evidence_object).cloned();
+                    study_data = evidence.clone();
+                    match evidence.as_ref() {
+                        Some(evidence) => {
+                            let missing = calibration_study_missing(evidence);
+                            step["evidence"] = calibration_projection(evidence);
+                            step["status"] = json!(if missing.is_empty() {
+                                "collected"
+                            } else {
+                                "partial"
+                            });
+                            step["missing"] = json!(missing);
+                        }
+                        None => {
+                            // 保留 collect 写下的 CLI/工具错误（例如 "cannot start …"），
+                            // 只追加"为什么不能做双期比较"，不能让真实错误消失。
+                            step["status"] = json!("missing");
+                            step["evidence"] = Value::Null;
+                            let mut missing =
+                                step["missing"].as_array().cloned().unwrap_or_default();
+                            missing.push(json!(
+                                "Structured Study evidence is unavailable (older CLI, remote engine snapshot or unreadable Study); baseline and best objectives cannot be verified."
+                            ));
+                            step["missing"] = Value::Array(missing);
+                        }
                     }
                     steps.push(step);
+                    steps.push(calibration_dual_period_step(&study_path, evidence.as_ref()));
                 } else {
                     steps.push(pending("study", "checkdata", "Identify the Study", "Study directory is required to inspect objectives and bounds.", json!({"tool":"study_summary","arguments":{"study":null},"requires":["study"]})));
                 }
                 steps.push(pending("bounds", "localise", "Check parameter bounds, identifiability and objective tradeoffs", "Verify the Study includes this case and each parameter is active in its mode/build. A boundary hit is not proof of compensation or causality; inspect repeated candidates, sensitivity, baseline and other target variables.", Value::Null));
-                steps.push(pending("held_out", "validate", "Verify held-out time/site performance and physical closure", "Independent validation, observation alignment and closure evidence are required before adopting tuned parameters.", Value::Null));
+                if study_data.is_some() {
+                    steps.push(calibration_held_out_step(&study_path, study_data.as_ref()));
+                } else {
+                    steps.push(pending("held_out", "validate", "Verify held-out time/site performance and physical closure", "Independent validation, observation alignment and closure evidence are required before adopting tuned parameters.", Value::Null));
+                }
                 hypotheses.push(json!({"status":"unverified","candidate":"Weak identifiability or compensating parameters","basis":"Bounds or improved calibration fit alone cannot verify this candidate."}));
+                if let Some(evidence) = study_data.as_ref() {
+                    if let Some(hypothesis) = calibration_divergence_hypothesis(evidence) {
+                        hypotheses.push(hypothesis);
+                    }
+                    if let Some(hypothesis) = calibration_identity_hypothesis(evidence) {
+                        hypotheses.push(hypothesis);
+                    }
+                }
                 experiment = "Propose one bounded sensitivity perturbation against the physics baseline and held-out observations; never auto-adopt a best member.";
             }
             "parity" => {
@@ -366,8 +402,317 @@ impl Tool for DiagnosticPlan {
                 result["flux_evidence"]["experiment"] = json!({"status":"unverified","cause_verified":false,"missing":["Detailed experimental evidence omitted; no validation or causal claim is established."]});
             }
         }
+        // calibration 的 Study 证据也走同一条有界输出路径；这里只是最后一道保险。
+        if result.to_string().len() > 22000 {
+            if let Some(steps) = result["steps"].as_array_mut() {
+                for step in steps {
+                    if matches!(
+                        step["id"].as_str(),
+                        Some("study" | "dual_period" | "held_out")
+                    ) {
+                        step["evidence"] = json!({
+                            "status": "abbreviated",
+                            "notice": "Evidence exceeded the diagnostic response budget; call study_summary for the compact projection.",
+                        });
+                    }
+                }
+            }
+        }
         Ok(result)
     }
+}
+
+fn first_items(value: &Value, limit: usize) -> Value {
+    value.as_array().map_or_else(
+        || value.clone(),
+        |items| Value::Array(items.iter().take(limit).cloned().collect()),
+    )
+}
+
+fn short(text: &str, limit: usize) -> String {
+    let mut out = text.chars().take(limit).collect::<String>();
+    if text.chars().count() > limit {
+        out.push('…');
+    }
+    out
+}
+
+/// `study_summary` 结果里的结构化证据；旧 CLI / 远端引擎快照没有 `evidence` 时返回 None。
+fn study_evidence_object(value: &Value) -> Option<&Value> {
+    value
+        .get("evidence")
+        .filter(|evidence| evidence.is_object() && evidence["status"] != "missing")
+}
+
+/// 率定检查用的紧凑投影：两期分数分开、选择规则与验证状态、身份对比、缺失原因都保留。
+fn calibration_projection(evidence: &Value) -> Value {
+    let at_bound = evidence["parameters"]["best"]["values"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|value| value["at_bound"].as_bool() == Some(true))
+        .filter_map(|value| value["key"].as_str())
+        .collect::<Vec<_>>();
+    json!({
+        "status": evidence["study"]["status"],
+        "kind": evidence["study"]["kind"],
+        "generation": evidence["study"]["generation"],
+        "selection": {
+            "best_member": evidence["selection"]["best_member"],
+            "best_objective": evidence["selection"]["best_objective"],
+            "provisional": evidence["selection"]["provisional"],
+            "no_best_reason": evidence["selection"]["no_best_reason"],
+        },
+        "calibration": {
+            "baseline_score": evidence["comparison"]["baseline"]["calibration"]["score"],
+            "best_score": evidence["comparison"]["best"]["calibration"]["score"],
+            "relation": evidence["comparison"]["relation"]["calibration"],
+        },
+        "validation": {
+            "configured": evidence["validation"]["configured"],
+            "status": evidence["validation"]["status"],
+            "windows": first_items(&evidence["validation"]["windows"], 3),
+            "reasons": first_items(&evidence["validation"]["reasons"], 3),
+            "baseline_score": evidence["comparison"]["baseline"]["validation"]["score"],
+            "best_score": evidence["comparison"]["best"]["validation"]["score"],
+            "relation": evidence["comparison"]["relation"]["validation"],
+        },
+        "identity": {
+            "study_record": evidence["model_identity"]["study_record"]["status"],
+            "comparison": evidence["model_identity"]["comparison"]["status"],
+            "basis": evidence["model_identity"]["comparison"]["basis"],
+        },
+        "parameters": {
+            "dimension_count": evidence["parameters"]["dimension_count"],
+            "hybrid_weight_count": evidence["parameters"]["hybrid_weight_count"],
+            "best_at_bound": at_bound,
+        },
+        "warnings": first_items(&evidence["warnings"], 3),
+        "missing": first_items(&evidence["missing"], 3),
+    })
+}
+
+/// Study 证据本身缺什么：无最优、验证未配置/不可用、身份冲突都要分开说，不能当成"通过"。
+fn calibration_study_missing(evidence: &Value) -> Vec<String> {
+    let mut missing = Vec::new();
+    if evidence["selection"]["best_member"].is_null() {
+        let code = evidence["selection"]["no_best_reason"]["code"]
+            .as_str()
+            .unwrap_or("unknown");
+        let detail = evidence["selection"]["no_best_reason"]["detail"]
+            .as_str()
+            .unwrap_or("");
+        missing.push(short(
+            &format!("No best member is recorded ({code}): {detail}"),
+            240,
+        ));
+    }
+    if evidence["validation"]["configured"].as_bool() == Some(false) {
+        missing.push("Validation windows are not configured in the Study spec: calibration improvement is in-sample fit only; generalisation was not checked.".into());
+    } else if evidence["validation"]["status"].as_str() != Some("available") {
+        missing.push(short(
+            &format!(
+                "Validation evidence is incomplete ({}): {}",
+                evidence["validation"]["status"]
+                    .as_str()
+                    .unwrap_or("unknown"),
+                evidence["validation"]["reasons"]
+            ),
+            240,
+        ));
+    }
+    if evidence["model_identity"]["comparison"]["status"].as_str() == Some("mismatch") {
+        missing.push("The Study's recorded model identity does not match the current selection; its scores do not describe the currently selected model.".into());
+    }
+    if evidence["comparison"]["relation"]["calibration"]
+        .as_str()
+        .is_some_and(|relation| relation != "lower_loss")
+    {
+        missing.push("The recorded best member does not have a lower calibration loss than the baseline; it is not an improvement.".into());
+    }
+    missing.truncate(6);
+    missing
+}
+
+/// 双期比较的独立检查：有分数不等于通过，必须明确"率定改善但验证变差/缺失"的分歧。
+fn calibration_dual_period_step(study: &str, evidence: Option<&Value>) -> Value {
+    let next_tool = next("study_summary", json!({"study": study}));
+    let Some(evidence) = evidence else {
+        return json!({"id":"dual_period","phase":"localise",
+            "title":"Compare calibration and held-out validation losses",
+            "status":"missing","evidence":null,
+            "missing":["Structured Study evidence is unavailable; calibration improvement cannot be compared with validation."],
+            "next_tool":next_tool});
+    };
+    let kind = evidence["study"]["kind"].as_str().unwrap_or("unknown");
+    let execution = evidence["execution"]["state"].as_str().unwrap_or("unknown");
+    let relation = &evidence["comparison"]["relation"];
+    let calibration = relation["calibration"].as_str().unwrap_or("unknown");
+    let validation = relation["validation"].as_str().unwrap_or("unknown");
+    let configured = evidence["validation"]["configured"]
+        .as_bool()
+        .unwrap_or(false);
+    let (status, missing) = if kind != "tuning" {
+        ("missing", vec!["Uncertainty analysis has no best member; it does not select or rank a best parameter set.".to_owned()])
+    } else if evidence["selection"]["best_member"].is_null() {
+        let detail = evidence["selection"]["no_best_reason"]["detail"]
+            .as_str()
+            .unwrap_or("no best member");
+        (
+            "missing",
+            vec![short(
+                &format!("No best member is recorded ({execution}): {detail}; no dual-period comparison exists."),
+                240,
+            )],
+        )
+    } else if calibration == "unknown" {
+        (
+            "missing",
+            vec!["Calibration scores are unavailable; no calibration-versus-validation comparison was made.".to_owned()],
+        )
+    } else if calibration == "lower_loss" && validation == "higher_loss" {
+        (
+            "divergent",
+            vec!["Calibration loss fell while held-out validation loss rose. Report this as an explicit divergence: do not claim improved generalisation and do not diagnose overfitting from this evidence alone.".to_owned()],
+        )
+    } else if calibration == "lower_loss" && (!configured || validation == "unknown") {
+        (
+            "missing",
+            vec!["Calibration loss fell but validation was not configured or recorded; fit improved, generalisation was not checked.".to_owned()],
+        )
+    } else if calibration == "lower_loss" && matches!(validation, "lower_loss" | "equal") {
+        (
+            "collected",
+            vec!["Both recorded periods improved; the claim is limited to this Study, its targets and these windows, and independent validation is still required.".to_owned()],
+        )
+    } else if calibration == "higher_loss" {
+        (
+            "divergent",
+            vec!["The recorded best member has a higher calibration loss than the baseline; do not present it as an improvement even if validation improved.".to_owned()],
+        )
+    } else {
+        (
+            "missing",
+            vec![format!("Calibration/validation relation is unclear (calibration={calibration}, validation={validation}); no improvement claim is supported.")],
+        )
+    };
+    json!({"id":"dual_period","phase":"localise",
+        "title":"Compare calibration and held-out validation losses",
+        "status":status,
+        "evidence":bounded(json!({
+            "calibration": {
+                "baseline": evidence["comparison"]["baseline"]["calibration"]["score"],
+                "best": evidence["comparison"]["best"]["calibration"]["score"],
+                "relation": calibration,
+            },
+            "validation": {
+                "configured": configured,
+                "status": evidence["validation"]["status"],
+                "baseline": evidence["comparison"]["baseline"]["validation"]["score"],
+                "best": evidence["comparison"]["best"]["validation"]["score"],
+                "relation": validation,
+            },
+            "selection": {
+                "best_member": evidence["selection"]["best_member"],
+                "provisional": evidence["selection"]["provisional"],
+            },
+        })),
+        "missing":missing,
+        "next_tool":next_tool})
+}
+
+/// held_out 检查真实消费验证状态：未配置与已配置但不可用给不同缺失原因。
+fn calibration_held_out_step(study: &str, evidence: Option<&Value>) -> Value {
+    let title = "Verify held-out time/site performance and physical closure";
+    let next_tool = next("study_summary", json!({"study": study}));
+    let Some(evidence) = evidence else {
+        return pending(
+            "held_out",
+            "validate",
+            title,
+            "Independent validation, observation alignment and closure evidence are required before adopting tuned parameters.",
+            next_tool,
+        );
+    };
+    let configured = evidence["validation"]["configured"]
+        .as_bool()
+        .unwrap_or(false);
+    let status = evidence["validation"]["status"]
+        .as_str()
+        .unwrap_or("unknown");
+    if !configured {
+        return json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
+            "evidence":bounded(json!({
+                "validation": {"configured": false, "status": "not_configured"},
+                "calibration": {
+                    "baseline": evidence["comparison"]["baseline"]["calibration"]["score"],
+                    "best": evidence["comparison"]["best"]["calibration"]["score"],
+                },
+            })),
+            "missing":["The Study spec has no validation windows; held-out performance was never measured, so generalisation is unverified."],
+            "next_tool":next_tool});
+    }
+    if status == "available" {
+        return json!({"id":"held_out","phase":"validate","title":title,"status":"partial",
+            "evidence":bounded(json!({
+                "validation": {
+                    "configured": true,
+                    "status": "available",
+                    "windows": evidence["validation"]["windows"],
+                    "baseline": evidence["comparison"]["baseline"]["validation"]["score"],
+                    "best": evidence["comparison"]["best"]["validation"]["score"],
+                    "relation": evidence["comparison"]["relation"]["validation"],
+                },
+            })),
+            "missing":["Recorded Study validation windows are the only held-out evidence; physical closure, observation alignment and an independent period/site are still required before adopting tuned parameters."],
+            "next_tool":next_tool});
+    }
+    json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
+        "evidence":bounded(json!({
+            "validation": {
+                "configured": true,
+                "status": status,
+                "reasons": evidence["validation"]["reasons"],
+            },
+        })),
+        "missing":[short(&format!(
+            "Validation windows are configured but recorded validation losses are unavailable ({status}): {}",
+            evidence["validation"]["reasons"]
+        ), 320)],
+        "next_tool":next_tool})
+}
+
+/// 率定改善但验证变差/缺失：只能作为未验证假设，不能当诊断结论。
+fn calibration_divergence_hypothesis(evidence: &Value) -> Option<Value> {
+    if evidence["study"]["kind"].as_str() != Some("tuning") {
+        return None;
+    }
+    let relation = &evidence["comparison"]["relation"];
+    let calibration = relation["calibration"].as_str().unwrap_or("unknown");
+    let validation = relation["validation"].as_str().unwrap_or("unknown");
+    if calibration == "lower_loss" && validation == "higher_loss" {
+        return Some(
+            json!({"status":"unverified","candidate":"Overfitting or compensating parameter bias",
+            "basis":"Calibration loss fell while held-out validation loss rose. This is an explicit divergence, not a confirmed cause: do not claim improved generalisation and do not diagnose overfitting from this evidence alone."}),
+        );
+    }
+    if calibration == "lower_loss" && validation == "unknown" {
+        return Some(
+            json!({"status":"unverified","candidate":"In-sample fit improvement beyond the recorded evidence",
+            "basis":"Calibration improved but validation was not configured or recorded; generalisation is unverified."}),
+        );
+    }
+    None
+}
+
+fn calibration_identity_hypothesis(evidence: &Value) -> Option<Value> {
+    if evidence["model_identity"]["comparison"]["status"].as_str() != Some("mismatch") {
+        return None;
+    }
+    Some(
+        json!({"status":"unverified","candidate":"Model-identity mismatch between the Study record and the current selection",
+        "basis":"The Study's frozen revision identity (version id, revision and code.source_sha256) differs from the current selection; its recorded scores describe the Study's model, not the one currently selected."}),
+    )
 }
 
 #[cfg(test)]

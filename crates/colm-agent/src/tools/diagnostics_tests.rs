@@ -282,3 +282,326 @@ fn annual_flux_and_experiment_evidence_remain_parseable_under_transport_budget()
     }
     std::fs::remove_dir_all(ctx.project_root).unwrap();
 }
+
+// ---- P1-A：calibration 工作流真实消费 Study evidence ----
+
+#[cfg(unix)]
+fn fake_study_cli(ctx: &mut ToolContext, status: Value) {
+    use std::os::unix::fs::PermissionsExt;
+    let status_path = ctx.project_root.join("study-status.json");
+    std::fs::write(&status_path, status.to_string()).unwrap();
+    let script = ctx.project_root.join("fake-study-cli");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = study-status ] || exit 9\ncat '{}'\n",
+            status_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ctx.cli = script;
+}
+
+fn calibration_study_status(evidence: Value) -> Value {
+    json!({
+        "manifest": {
+            "spec": {
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "base_cases": ["case"],
+                "parameters": [{"name": "DEF_TUNING_CNFAC", "sample_min": 0.1, "sample_max": 0.9}],
+                "targets": [{"key": "Qle", "variable": "Qle", "from": 0, "to": 10, "validation_from": 10, "validation_to": 20}],
+            },
+            "members": [],
+        },
+        "state": {
+            "status": "completed",
+            "generation": 1,
+            "best_member": "m000001",
+            "best_objective": 0.3,
+            "candidates": {"m000000": {"calibration": 0.8}},
+            "warnings": [],
+        },
+        "evidence": evidence,
+    })
+}
+
+fn calibration_validation(status: &str, configured: bool, reasons: Value) -> Value {
+    json!({
+        "configured": configured,
+        "status": status,
+        "windows": if configured { json!([{"target": "Qle", "from": 10, "to": 20}]) } else { json!([]) },
+        "reasons": reasons,
+    })
+}
+
+fn calibration_evidence(
+    kind: &str,
+    calibration_relation: &str,
+    validation_relation: &str,
+    validation: Value,
+) -> Value {
+    json!({
+        "schema": 1,
+        "study": {"kind": kind, "method": "differential-evolution", "status": "completed", "generation": 1},
+        "execution": {"state": "completed", "tasks": {"total": 2}, "partial_failures": false, "failed_tasks": []},
+        "selection": {
+            "best_member": "m000001",
+            "best_objective": 0.3,
+            "provisional": false,
+            "no_best_reason": null,
+        },
+        "objective": {"direction": "minimize", "loss": "weighted mean of per-target losses", "targets": [{"key": "Qle"}]},
+        "comparison": {
+            "basis": "same period only",
+            "baseline": {"member": "m000000",
+                "calibration": {"status": "recorded", "score": 0.8, "targets": [{"key": "Qle", "loss": 0.8}]},
+                "validation": {"status": "recorded", "score": 0.6, "targets": [{"key": "Qle", "loss": 0.6}]}},
+            "best": {"member": "m000001",
+                "calibration": {"status": "recorded", "score": 0.3, "targets": [{"key": "Qle", "loss": 0.3}]},
+                "validation": {"status": "recorded", "score": 0.9, "targets": [{"key": "Qle", "loss": 0.9}]}},
+            "relation": {"calibration": calibration_relation, "validation": validation_relation},
+        },
+        "validation": validation,
+        "parameters": {
+            "status": "recorded",
+            "dimension_count": 1,
+            "hybrid_weight_count": 0,
+            "dims": [{"key": "DEF_TUNING_CNFAC", "range": [0.1, 0.9], "scale": "linear"}],
+            "baseline": {"status": "recorded", "values": []},
+            "best": {"status": "recorded", "values": [
+                {"key": "DEF_TUNING_CNFAC", "value": 0.895, "position": 0.99, "position_scale": "linear", "at_bound": true}
+            ]},
+        },
+        "model_identity": {
+            "study_record": {"status": "official", "reason": "official version"},
+            "current_selection": null,
+            "comparison": {"status": "unknown", "matches": null, "basis": "no selection"},
+        },
+        "verification": {"recorded_result_files": 2, "reverified": false},
+        "remote": {"status": "none"},
+        "source_paths": {"root": "/study"},
+        "warnings": [],
+        "missing": [],
+    })
+}
+
+fn calibration_request() -> Value {
+    let mut request = args("calibration");
+    request["study"] = json!("study");
+    request
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_consumes_dual_period_evidence_and_reports_divergence() {
+    let mut ctx = fixture("calibration-dual");
+    fake_study_cli(
+        &mut ctx,
+        calibration_study_status(calibration_evidence(
+            "tuning",
+            "lower_loss",
+            "higher_loss",
+            calibration_validation("available", true, json!([])),
+        )),
+    );
+    let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(result["status"], "incomplete");
+    let study = step(&result, "study");
+    assert_eq!(study["status"], "collected");
+    assert_eq!(
+        study["evidence"]["calibration"]["baseline_score"].as_f64(),
+        Some(0.8)
+    );
+    assert_eq!(
+        study["evidence"]["calibration"]["best_score"].as_f64(),
+        Some(0.3)
+    );
+    assert_eq!(study["evidence"]["validation"]["status"], "available");
+    assert_eq!(study["evidence"]["selection"]["best_member"], "m000001");
+    assert_eq!(
+        study["evidence"]["parameters"]["best_at_bound"],
+        json!(["DEF_TUNING_CNFAC"])
+    );
+    // 有分数不等于通过：率定改善 + 验证变差必须作为显式分歧。
+    let dual = step(&result, "dual_period");
+    assert_eq!(dual["status"], "divergent");
+    assert_eq!(dual["evidence"]["validation"]["relation"], "higher_loss");
+    assert!(dual["missing"]
+        .to_string()
+        .contains("do not claim improved generalisation"));
+    assert!(result["hypotheses"].to_string().contains("Overfitting"));
+    assert!(result["hypotheses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|hypothesis| hypothesis["status"] == "unverified"));
+    assert!(!result["confirmed_facts"]
+        .to_string()
+        .contains("confirmed cause"));
+    // 原有的未完成检查保留。
+    for id in ["bounds", "held_out", "minimal_validation", "report"] {
+        assert!(result["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == id));
+    }
+    assert_eq!(step(&result, "minimal_validation")["status"], "pending");
+    assert_eq!(step(&result, "report")["status"], "pending");
+    assert_eq!(step(&result, "held_out")["status"], "partial");
+    assert!(step(&result, "held_out")["missing"]
+        .to_string()
+        .contains("physical closure"));
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_keeps_validation_unconfigured_and_unavailable_distinct() {
+    let mut ctx = fixture("calibration-validation");
+    fake_study_cli(
+        &mut ctx,
+        calibration_study_status(calibration_evidence(
+            "tuning",
+            "lower_loss",
+            "unknown",
+            calibration_validation(
+                "not_configured",
+                false,
+                json!(["The Study spec has no validation windows; only in-sample calibration fit is recorded."]),
+            ),
+        )),
+    );
+    let unconfigured = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(step(&unconfigured, "study")["status"], "partial");
+    assert!(step(&unconfigured, "study")["missing"]
+        .to_string()
+        .contains("generalisation was not checked"));
+    assert_eq!(step(&unconfigured, "dual_period")["status"], "missing");
+    assert!(step(&unconfigured, "dual_period")["missing"]
+        .to_string()
+        .contains("fit improved, generalisation was not checked"));
+    assert_eq!(step(&unconfigured, "held_out")["status"], "missing");
+    assert!(step(&unconfigured, "held_out")["missing"]
+        .to_string()
+        .contains("no validation windows"));
+
+    fake_study_cli(
+        &mut ctx,
+        calibration_study_status(calibration_evidence(
+            "tuning",
+            "lower_loss",
+            "unknown",
+            calibration_validation(
+                "unavailable",
+                true,
+                json!(["validation target Qle unavailable: window has no paired values"]),
+            ),
+        )),
+    );
+    let unavailable = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(step(&unavailable, "held_out")["status"], "missing");
+    assert!(step(&unavailable, "held_out")["missing"]
+        .to_string()
+        .contains("configured but recorded validation losses are unavailable"));
+    assert!(step(&unavailable, "held_out")["missing"]
+        .to_string()
+        .contains("no paired values"));
+    assert!(step(&unavailable, "dual_period")["missing"]
+        .to_string()
+        .contains("not configured or recorded"));
+    assert!(unavailable["hypotheses"]
+        .to_string()
+        .contains("In-sample fit improvement"));
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_limits_both_periods_and_never_ranks_uncertainty() {
+    let mut ctx = fixture("calibration-scope");
+    let mut improved = calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "lower_loss",
+        calibration_validation("available", true, json!([])),
+    );
+    improved["comparison"]["best"]["validation"]["score"] = json!(0.2);
+    fake_study_cli(&mut ctx, calibration_study_status(improved));
+    let improved = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(step(&improved, "dual_period")["status"], "collected");
+    assert!(step(&improved, "dual_period")["missing"]
+        .to_string()
+        .contains("limited to this Study"));
+
+    let mut uncertainty = calibration_evidence(
+        "uncertainty",
+        "unknown",
+        "unknown",
+        calibration_validation("not_configured", false, json!([])),
+    );
+    uncertainty["selection"]["best_member"] = Value::Null;
+    uncertainty["selection"]["no_best_reason"] = json!({"code": "uncertainty", "detail": "an uncertainty analysis ranks parameter effects; it has no best member"});
+    fake_study_cli(&mut ctx, calibration_study_status(uncertainty));
+    let uncertainty = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(step(&uncertainty, "dual_period")["status"], "missing");
+    assert!(step(&uncertainty, "dual_period")["missing"]
+        .to_string()
+        .contains("Uncertainty analysis has no best member"));
+    assert!(!uncertainty["hypotheses"]
+        .to_string()
+        .contains("Overfitting"));
+    assert_eq!(uncertainty["status"], "incomplete");
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_evidence_output_stays_valid_json_within_budget() {
+    let mut ctx = fixture("calibration-budget");
+    let mut evidence = calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "higher_loss",
+        calibration_validation(
+            "partial",
+            true,
+            json!(["one validation target could not be scored; the aggregate validation score is not comparable"]),
+        ),
+    );
+    evidence["warnings"] = Value::Array(
+        (0..40)
+            .map(|index| json!(format!("warning {index}: {}", "x".repeat(2000))))
+            .collect(),
+    );
+    evidence["objective"]["targets"] = Value::Array(
+        (0..30)
+            .map(|index| json!({"key": format!("target_{index:02}"), "variable": "Qle"}))
+            .collect(),
+    );
+    evidence["validation"]["windows"] = Value::Array(
+        (0..25)
+            .map(|index| json!({"target": format!("target_{index:02}"), "from": 10, "to": 20}))
+            .collect(),
+    );
+    evidence["comparison"]["best"]["validation"]["targets"] = Value::Array(
+        (0..30)
+            .map(|index| json!({"key": format!("target_{index:02}"), "loss": 0.5}))
+            .collect(),
+    );
+    fake_study_cli(&mut ctx, calibration_study_status(evidence));
+    let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    assert_eq!(result["status"], "incomplete");
+    let serialized = super::super::result_text(&result);
+    assert!(
+        serialized.chars().count() <= super::super::MAX_RESULT_CHARS,
+        "{}",
+        serialized.chars().count()
+    );
+    let decoded: Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(decoded["status"], "incomplete");
+    assert_eq!(step(&decoded, "study")["status"], "partial");
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}

@@ -703,50 +703,332 @@ impl Tool for StudySummary {
         let dir = ctx.resolve(req_str(args, "study")?);
         let dir_s = dir.display().to_string();
         let status = ctx.cli_json(&["study-status", &dir_s])?;
-        let spec = &status["manifest"]["spec"];
-        let state = &status["state"];
+        let spec = status["manifest"]["spec"].clone();
+        let state = status["state"].clone();
         let best = state["best_member"].as_str();
-        let baseline = state["candidates"]["m000000"]["calibration"].as_f64();
         let members = status["manifest"]["members"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let best_params = best.and_then(|id| {
-            members
-                .iter()
-                .find(|m| m["id"] == id)
-                .map(|m| m["parameters"].clone())
-        });
-        // 最优值在搜索区间里的位置：0 下界，1 上界。
-        let mut positions = Vec::new();
-        if let Some(params) = best_params.as_ref().and_then(Value::as_object) {
-            for p in spec["parameters"].as_array().into_iter().flatten() {
-                let (lo, hi) = (p["sample_min"].as_f64(), p["sample_max"].as_f64());
-                let name = p["name"].as_str().unwrap_or_default();
-                let key = params
-                    .keys()
-                    .find(|k| k.starts_with(name))
-                    .cloned()
-                    .unwrap_or_else(|| name.to_owned());
-                if let (Some(lo), Some(hi), Some(v)) =
-                    (lo, hi, params.get(&key).and_then(Value::as_f64))
-                {
-                    let at = (v - lo) / (hi - lo);
-                    positions.push(json!({
-                        "parameter": key, "value": v, "range": [lo, hi], "position": at,
-                        "at_bound": !(0.02..=0.98).contains(&at),
-                    }));
-                }
-            }
-        }
-        Ok(json!({
+        // 当前应用的选择只有界面桥知道；CLI 的 evidence 里 current_selection 永远是空。
+        // 刷新失败时仍返回 Study 数据，只把身份对比标成 unknown。
+        let selected = ctx.selected_context();
+        let selection_error = selected.as_ref().err().map(|error| format!("{error:#}"));
+        let evidence =
+            merge_study_evidence(&status, selected.as_ref().ok(), selection_error.as_deref());
+        // 旧兼容字段 baseline_objective 优先用 evidence 里按 baseline 标记定位的成绩：
+        // evidence 存在但 baseline 不可用时保持 null，不退回按 m000000 猜分数；
+        // 只有旧 CLI 完全没有 evidence 时才走旧的 candidates 读取。
+        let baseline = if evidence["status"] == "missing" {
+            state["candidates"]["m000000"]["calibration"].as_f64()
+        } else {
+            evidence["comparison"]["baseline"]["calibration"]["score"].as_f64()
+        };
+        // 最优参数优先由证据供数（读全部样本代、按 Log 尺度与带索引的键算位置）；
+        // 旧引擎快照没有 evidence 时退回 manifest.members 快照。
+        let positions = evidence_study_parameters(&evidence)
+            .unwrap_or_else(|| legacy_best_parameters(&spec, best, &members));
+        let mut result = json!({
             "study": dir_s, "kind": spec["kind"], "method": spec["method"],
             "status": state["status"], "generation": state["generation"],
             "base_cases": spec["base_cases"], "targets": spec["targets"],
             "best_member": best, "best_objective": state["best_objective"],
             "baseline_objective": baseline, "best_parameters": positions,
             "hybrid": spec.get("hybrid"), "warnings": state["warnings"],
-        }))
+            "evidence": evidence,
+        });
+        fit_study_summary(&mut result);
+        Ok(result)
+    }
+}
+
+/// 旧 CLI（没有 `evidence`）时的最优参数：manifest.members 只是建研究时的快照，
+/// 后续代成员不在里面，线性位置对 Log 尺度也不对 —— 所以只作为 fallback。
+fn legacy_best_parameters(spec: &Value, best: Option<&str>, members: &[Value]) -> Value {
+    let best_params = best.and_then(|id| {
+        members
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| m["parameters"].clone())
+    });
+    let mut positions = Vec::new();
+    if let Some(params) = best_params.as_ref().and_then(Value::as_object) {
+        for p in spec["parameters"].as_array().into_iter().flatten() {
+            let (lo, hi) = (p["sample_min"].as_f64(), p["sample_max"].as_f64());
+            let name = p["name"].as_str().unwrap_or_default();
+            let key = params
+                .keys()
+                .find(|k| k.starts_with(name))
+                .cloned()
+                .unwrap_or_else(|| name.to_owned());
+            if let (Some(lo), Some(hi), Some(v)) =
+                (lo, hi, params.get(&key).and_then(Value::as_f64))
+            {
+                let at = (v - lo) / (hi - lo);
+                positions.push(json!({
+                    "parameter": key, "value": v, "range": [lo, hi], "position": at,
+                    "at_bound": !(0.02..=0.98).contains(&at),
+                }));
+            }
+        }
+    }
+    json!(positions)
+}
+
+/// 把 CLI evidence 合并成助手读的形状：补当前选择、身份对比；evidence 缺失时给显式原因。
+fn merge_study_evidence(
+    status: &Value,
+    selected: Option<&ToolContext>,
+    selection_error: Option<&str>,
+) -> Value {
+    let Some(evidence) = status.get("evidence").filter(|value| value.is_object()) else {
+        return json!({
+            "status": "missing",
+            "reason": "colm-cli study-status returned no evidence (older CLI or remote engine snapshot); best_parameters fall back to the manifest.members snapshot",
+        });
+    };
+    let mut evidence = evidence.clone();
+    let current_selection = study_current_selection(selected, selection_error);
+    let comparison = compare_study_identity(
+        &evidence["model_identity"]["study_record"],
+        &current_selection,
+    );
+    evidence["model_identity"]["current_selection"] = current_selection;
+    evidence["model_identity"]["comparison"] = comparison;
+    evidence
+}
+
+/// 当前界面选择：没有冻结模型上下文时应用跑的是官方版，身份未知而不是"匹配"。
+fn study_current_selection(selected: Option<&ToolContext>, selection_error: Option<&str>) -> Value {
+    let Some(error) = selection_error else {
+        let Some(ctx) = selected else {
+            return json!({
+                "status": "unknown",
+                "reason": "the application selection is unavailable in this context",
+            });
+        };
+        let Some(model) = ctx.model_context.as_ref() else {
+            return json!({
+                "status": "unknown",
+                "reason": "no frozen model is selected in the application (the official version is in use); the Study's frozen identity cannot be compared",
+            });
+        };
+        let version = &model.model["version"];
+        let id = version["id"].as_str();
+        let revision = version["revision"].as_u64();
+        let code = model.model["code"]["source_sha256"].as_str();
+        return match (id, revision, code) {
+            (Some(id), Some(revision), Some(code)) => json!({
+                "status": "frozen",
+                "version": {"id": id, "revision": revision},
+                "code_source_sha256": code,
+            }),
+            _ => json!({
+                "status": "unknown",
+                "reason": "the selected model context has no complete version id, revision and source hash",
+            }),
+        };
+    };
+    json!({
+        "status": "unknown",
+        "reason": format!(
+            "cannot refresh the application selection: {}",
+            error.chars().take(240).collect::<String>()
+        ),
+    })
+}
+
+/// 研究身份只能用研究记录里冻结的版本；同名不算匹配，必须 id + revision + code.source_sha256 全等。
+fn compare_study_identity(record: &Value, current: &Value) -> Value {
+    if current["status"].as_str() != Some("frozen") {
+        return json!({
+            "status": "unknown",
+            "matches": null,
+            "basis": "no comparable current frozen selection",
+            "reason": current["reason"],
+        });
+    }
+    if record["status"].as_str() != Some("pinned") {
+        return json!({
+            "status": "unknown",
+            "matches": null,
+            "basis": "the Study record has no frozen revision identity (official version or unreadable record)",
+            "reason": record["reason"],
+        });
+    }
+    let study_version = &record["version"];
+    if !study_version.is_object() {
+        return json!({
+            "status": "unknown",
+            "matches": null,
+            "basis": "the pinned Study record was written before the frozen revision identity was recorded",
+            "reason": "the Study record has a model name and head but no version identity",
+        });
+    }
+    let current_version = &current["version"];
+    let study_id = study_version["id"].as_str();
+    let current_id = current_version["id"].as_str();
+    let version_matches = study_id.is_some()
+        && study_id == current_id
+        && study_version["revision"].as_u64().is_some()
+        && study_version["revision"].as_u64() == current_version["revision"].as_u64();
+    let code_matches = record["code_source_sha256"]
+        .as_str()
+        .zip(current["code_source_sha256"].as_str())
+        .is_some_and(|(study, current)| study == current);
+    let matches = version_matches && code_matches;
+    json!({
+        "status": if matches { "matches" } else { "mismatch" },
+        "matches": matches,
+        "basis": "compared the frozen version id, revision and code.source_sha256; an equal display name alone is not a match",
+        "study_version": {"id": study_version["id"], "revision": study_version["revision"]},
+        "current_version": {"id": current_version["id"], "revision": current_version["revision"]},
+    })
+}
+
+/// 证据里的最优参数：每个维度带 range/position/position_scale/at_bound。
+/// 没有证据（旧 CLI）或没有最优成员时返回 None，让调用方用旧 fallback。
+fn evidence_study_parameters(evidence: &Value) -> Option<Value> {
+    let parameters = &evidence["parameters"];
+    let values = parameters["best"]["values"].as_array()?;
+    let dims = parameters["dims"].as_array()?;
+    let range = |key: &str| {
+        dims.iter().find(|dim| dim["key"] == key).and_then(|dim| {
+            let low = dim["range"][0].as_f64()?;
+            let high = dim["range"][1].as_f64()?;
+            Some((low, high))
+        })
+    };
+    let positions = values
+        .iter()
+        .filter_map(|value| {
+            let key = value["key"].as_str()?;
+            let number = value["value"].as_f64()?;
+            let (low, high) = range(key)?;
+            Some(json!({
+                "parameter": key,
+                "value": number,
+                "range": [low, high],
+                "position": value["position"],
+                "at_bound": value["at_bound"],
+                "position_scale": value["position_scale"],
+            }))
+        })
+        .collect::<Vec<_>>();
+    (!positions.is_empty()).then(|| json!(positions))
+}
+
+fn truncate_json_array(value: &mut Value, path: &[&str], keep: usize) -> bool {
+    let mut current = value;
+    for key in path {
+        let Some(next) = current.get_mut(*key) else {
+            return false;
+        };
+        current = next;
+    }
+    let Some(array) = current.as_array_mut() else {
+        return false;
+    };
+    if array.len() <= keep {
+        return false;
+    }
+    array.truncate(keep);
+    true
+}
+
+fn compact_study_targets(targets: &Value) -> Value {
+    let Some(targets) = targets.as_array() else {
+        return targets.clone();
+    };
+    Value::Array(
+        targets
+            .iter()
+            .map(|target| {
+                json!({
+                    "key": target["key"],
+                    "variable": target["variable"],
+                    "metric": target["metric"],
+                    "weight": target["weight"],
+                    "from": target["from"],
+                    "to": target["to"],
+                    "validation_from": target["validation_from"],
+                    "validation_to": target["validation_to"],
+                })
+            })
+            .collect(),
+    )
+}
+
+/// 24k 传输上限内的合法 JSON：先裁证据列表，最后才把完整 spec 目标换成紧凑投影。
+fn fit_study_summary(result: &mut Value) {
+    fn text_len(value: &Value) -> usize {
+        serde_json::to_string(value).map_or(usize::MAX, |text| text.chars().count())
+    }
+    if text_len(result) <= MAX_RESULT_CHARS {
+        return;
+    }
+    result["truncated"] = json!(true);
+    let trims: &[(&[&str], usize)] = &[
+        (&["evidence", "warnings"], 3),
+        (&["evidence", "missing"], 3),
+        (&["evidence", "execution", "failed_tasks"], 2),
+        (
+            &[
+                "evidence",
+                "comparison",
+                "baseline",
+                "calibration",
+                "targets",
+            ],
+            2,
+        ),
+        (
+            &[
+                "evidence",
+                "comparison",
+                "baseline",
+                "validation",
+                "targets",
+            ],
+            2,
+        ),
+        (
+            &["evidence", "comparison", "best", "calibration", "targets"],
+            2,
+        ),
+        (
+            &["evidence", "comparison", "best", "validation", "targets"],
+            2,
+        ),
+        (&["evidence", "parameters", "dims"], 8),
+        (&["evidence", "parameters", "baseline", "values"], 8),
+        (&["evidence", "parameters", "best", "values"], 8),
+        (&["evidence", "objective", "targets"], 4),
+        (&["warnings"], 4),
+        (&["evidence", "parameters", "dims"], 4),
+        (&["evidence", "parameters", "baseline", "values"], 4),
+        (&["evidence", "parameters", "best", "values"], 4),
+        (&["targets"], 8),
+        (&["best_parameters"], 8),
+    ];
+    for (path, keep) in trims {
+        if text_len(result) <= MAX_RESULT_CHARS {
+            break;
+        }
+        truncate_json_array(result, path, *keep);
+    }
+    if text_len(result) > MAX_RESULT_CHARS {
+        result["targets"] = compact_study_targets(&result["targets"]);
+        truncate_json_array(result, &["targets"], 8);
+    }
+    if text_len(result) > MAX_RESULT_CHARS {
+        result["evidence"] = json!({
+            "status": "abbreviated",
+            "reason": "the Study evidence exceeded the tool result budget; inspect the Study directory or ask for one aspect (calibration vs validation, parameters, identity)",
+        });
+        result["targets"] = compact_study_targets(&result["targets"]);
+        truncate_json_array(result, &["targets"], 4);
+        truncate_json_array(result, &["warnings"], 2);
     }
 }
 
