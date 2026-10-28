@@ -51,6 +51,8 @@ const MAX_MESSAGE_CHARS: usize = 1200;
 const MAX_DETAIL_CHARS: usize = 400;
 const MAX_CROSS_LINKS: usize = 50;
 const MAX_LATER_COMMITS: usize = 10;
+/// 一个上游文件最多列出多少个候选提交；超出只记 limits，不假装全查过。
+const MAX_CROSS_CANDIDATES: usize = 10;
 const MAX_BLAME_LOOKUPS: usize = 40;
 /// 只索引源码/头文件。vendor 里还有 NetCDF 等二进制，git grep 已用文本过滤，这里再限定扩展名。
 const SOURCE_GLOBS: [&str; 6] = ["*.rs", "*.f90", "*.F90", "*.f", "*.h", "*.c"];
@@ -1269,12 +1271,7 @@ fn merge_commit(
         if hunks.is_empty() {
             continue;
         }
-        let mut capped = Vec::new();
-        for mut hunk in hunks.into_iter().take(MAX_HUNKS_PER_COMMIT) {
-            cap_hunk(&mut hunk);
-            capped.push(hunk);
-        }
-        relevant_files.push((path, capped));
+        relevant_files.push((path, hunks));
     }
     if relevant_files.is_empty() {
         return false;
@@ -1290,10 +1287,76 @@ fn merge_commit(
             ..CandidateCommit::default()
         });
     entry.relevance.insert(relevance);
+    // 同一 commit 可能被多个文件、-G 与 -S 分别发现：按 SHA 合并而不是 or_insert，
+    // 同一 hunk 重复出现要去重，否则“出现次数不变+公式改”的证据会被算两遍，
+    // 且同一 commit 只改一个文件时后到的文件会被整体丢掉。
     for (path, hunks) in relevant_files {
-        entry.files.entry(path).or_default().extend(hunks);
+        push_unique_hunks(entry.files.entry(path).or_default(), hunks);
     }
     true
+}
+
+fn same_hunk(left: &Hunk, right: &Hunk) -> bool {
+    left.old_start == right.old_start
+        && left.old_lines == right.old_lines
+        && left.new_start == right.new_start
+        && left.new_lines == right.new_lines
+        && left.old_code == right.old_code
+        && left.new_code == right.new_code
+}
+
+fn push_unique_hunks(existing: &mut Vec<Hunk>, incoming: Vec<Hunk>) {
+    for hunk in incoming {
+        if !existing.iter().any(|candidate| same_hunk(candidate, &hunk)) {
+            existing.push(hunk);
+        }
+    }
+}
+
+/// 把 file_history 的单文件结果按 SHA 并进总表；调用方已按文件逐个收集，
+/// 这里不能 or_insert 覆盖，否则同一 commit 的其它文件与 -G/-S 证据会丢。
+fn merge_candidate_commit(map: &mut BTreeMap<String, CandidateCommit>, incoming: CandidateCommit) {
+    match map.entry(incoming.sha.clone()) {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(incoming);
+        }
+        std::collections::btree_map::Entry::Occupied(mut slot) => {
+            let existing = slot.get_mut();
+            existing.relevance.extend(incoming.relevance);
+            for (path, hunks) in incoming.files {
+                push_unique_hunks(existing.files.entry(path).or_default(), hunks);
+            }
+        }
+    }
+}
+
+/// 合并完成后统一应用预算：文件数、每文件 hunk 数、每 hunk 行数与行宽。
+/// 全部证据先合并再截断，避免“先到先得”把另一个文件挤掉。
+fn enforce_commit_budget(commit: &mut CandidateCommit) -> bool {
+    let mut truncated = false;
+    if commit.files.len() > MAX_FILES_PER_COMMIT {
+        let kept: BTreeMap<String, Vec<Hunk>> = commit
+            .files
+            .iter()
+            .take(MAX_FILES_PER_COMMIT)
+            .map(|(path, hunks)| (path.clone(), hunks.clone()))
+            .collect();
+        commit.files = kept;
+        truncated = true;
+    }
+    for hunks in commit.files.values_mut() {
+        if hunks.len() > MAX_HUNKS_PER_COMMIT {
+            hunks.truncate(MAX_HUNKS_PER_COMMIT);
+            truncated = true;
+        }
+        for hunk in hunks.iter_mut() {
+            if cap_hunk(hunk) {
+                truncated = true;
+            }
+        }
+    }
+    commit.truncated |= truncated;
+    truncated
 }
 
 /// 一个文件在终点上的候选修改 commit：-G 与 -S 的并集，再补 blame 命中的最后触摸。
@@ -1390,7 +1453,9 @@ fn add_blame_commits(
         }
     }
     for (sha, path) in shas {
-        if map.contains_key(&sha) {
+        if let Some(existing) = map.get_mut(&sha) {
+            // 该 commit 已被 -G/-S 找到：blame 只能补“最后触摸”这一依据，文件不能凭空补。
+            existing.relevance.insert("blame");
             continue;
         }
         let output =
@@ -1441,17 +1506,34 @@ fn commit_json(dir: &Path, commit: &CandidateCommit, files_capped: &mut bool) ->
     })
 }
 
-/// 理由只从提交说明读：有正文或主语足够像一句话算 documented，否则 not_recorded。
-/// 这里不做语义推断——推断属于上层（另外标记 inferred），CLI 只给可核验原文摘录。
+/// 理由：CLI 只给“原文候选”，不替作者断言动机。
+///
+/// 为什么不再按“有正文/标题≥3 词”判 documented：普通提交说明（"Update variable X"、
+/// checklist、"Thanks!"）并不等于写清了修改原因，把它标成 documented 会让模型把
+/// 普通文字当成已证实的作者动机。CLI 只区分：提交说明非空 → unchecked（原文在 excerpt
+/// 与 evidence_candidates 里，交给上层/模型引用原句判断）；空说明 → not_recorded。
 fn reason_for_message(message: &str) -> Value {
-    let message = message.trim();
-    let subject = message.lines().next().unwrap_or("");
-    let has_body = message.lines().skip(1).any(|line| !line.trim().is_empty());
-    let documented = has_body || subject.split_whitespace().count() >= 3;
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return json!({
+            "status": "not_recorded",
+            "basis": "commit_message",
+            "excerpt": "",
+            "evidence_candidates": [],
+        });
+    }
+    let excerpt = truncate(trimmed, MAX_MESSAGE_CHARS);
     json!({
-        "status": if documented { "documented" } else { "not_recorded" },
+        "status": "unchecked",
         "basis": "commit_message",
-        "excerpt": truncate(message, MAX_MESSAGE_CHARS),
+        "excerpt": excerpt.clone(),
+        "evidence_candidates": [{
+            "source": "commit_message",
+            "author": Value::Null,
+            "url": Value::Null,
+            "scope": "commit_message",
+            "excerpt": excerpt,
+        }],
     })
 }
 
@@ -1560,8 +1642,8 @@ fn query_target(
     }
     let mut map: BTreeMap<String, CandidateCommit> = BTreeMap::new();
     for path in &files {
-        for (sha, commit) in file_history(target.dir, &target.endpoint.sha, path, symbol, limits) {
-            map.entry(sha).or_insert(commit);
+        for (_sha, commit) in file_history(target.dir, &target.endpoint.sha, path, symbol, limits) {
+            merge_candidate_commit(&mut map, commit);
         }
     }
     add_blame_commits(
@@ -1573,6 +1655,20 @@ fn query_target(
         limits,
     );
     let mut commits: Vec<CandidateCommit> = map.into_values().collect();
+    let mut budget_truncated = false;
+    for commit in &mut commits {
+        if enforce_commit_budget(commit) {
+            budget_truncated = true;
+        }
+    }
+    if budget_truncated {
+        push_limit(
+            limits,
+            format!(
+                "commit evidence capped at {MAX_FILES_PER_COMMIT} files x {MAX_HUNKS_PER_COMMIT} hunks"
+            ),
+        );
+    }
     commits.sort_by(|left, right| {
         right
             .committer_time
@@ -1582,7 +1678,7 @@ fn query_target(
     let total = commits.len();
     let start = offset.min(total);
     let end = (offset + limit).min(total);
-    let truncated = total > end;
+    let mut truncated = total > end || budget_truncated;
     if truncated {
         push_limit(
             limits,
@@ -1609,6 +1705,7 @@ fn query_target(
             limits,
             format!("commit files capped at {MAX_FILES_PER_COMMIT}"),
         );
+        truncated = true;
     }
     let uncommitted = uncommitted_entries(target.dir, symbol, path_filter, limits);
     let commit_cross: Vec<(String, Vec<String>)> = commit_values
@@ -1728,12 +1825,56 @@ fn source_mode(value: Option<&Value>) -> &'static str {
     }
 }
 
-fn resolve_source(opts: &Opts, model_json: Option<&Value>) -> SourceInfo {
-    let source_dir = opts.get("--source").map(PathBuf::from).or_else(|| {
-        model_json
-            .and_then(|value| value["source_dir"].as_str())
-            .map(PathBuf::from)
-    });
+/// `--source app`：把“应用自身源码”解析到一个可核验的 Desktop 检出。
+///
+/// 为什么要有这个别名：没有 model pin 时 agent 侧只有“应用源码”这个语义，没有可信路径；
+/// CLI 自己按固定顺序找可核验的检出，绝不把任意路径当官方仓库。顺序：
+/// 显式 `--desktop-path`/env → `history-root/repos/desktop`（与 repository=desktop 的缓存同一份，
+/// 保证“无 model pin 的 app 查询”和 commit 详情读的是同一来源）→ 当前工作目录（若本身是独立检出）。
+/// 输出仍标 `kind:"selected_source"`，不冒充 desktop/colm_upstream 的远程查询。
+fn resolve_app_source(root: &Path, overrides: &PathOverrides) -> Result<PathBuf> {
+    if let Some(explicit) = &overrides.desktop {
+        return own_checkout(explicit).with_context(|| {
+            format!(
+                "--source app: --desktop-path {} is not an independent git checkout",
+                explicit.display()
+            )
+        });
+    }
+    let managed = overrides.resolve(root, RepoKey::Desktop).path;
+    if let Some(checkout) = own_checkout(&managed) {
+        return Ok(checkout);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(checkout) = own_checkout(&cwd) {
+            return Ok(checkout);
+        }
+    }
+    bail!(
+        "--source app could not be resolved to an application Git checkout (tried {} and the \
+         current directory); pass an explicit --source <directory>",
+        managed.display()
+    )
+}
+
+fn resolve_source(
+    opts: &Opts,
+    model_json: Option<&Value>,
+    root: &Path,
+    overrides: &PathOverrides,
+) -> SourceInfo {
+    let app_alias = opts
+        .get("--source")
+        .is_some_and(|source| source.trim() == "app");
+    let source_dir = if app_alias {
+        resolve_app_source(root, overrides).ok()
+    } else {
+        opts.get("--source").map(PathBuf::from).or_else(|| {
+            model_json
+                .and_then(|value| value["source_dir"].as_str())
+                .map(PathBuf::from)
+        })
+    };
     let commit = model_json.and_then(model_commit);
     let mode = source_mode(model_json).to_owned();
     let mut info = SourceInfo {
@@ -2030,16 +2171,15 @@ fn cross_links(
 ) -> Vec<Value> {
     let mut links = Vec::new();
     let mut referenced_desktop_paths = BTreeSet::new();
-    // upstream 侧每个出现修改的文件映射一次。同一文件可能出现在多个返回 commit 里；
-    // 不能只按“第一条”猜引入版本（提交时间可能相同，排序会按 SHA 打破平局），要挑出
-    // 与 Desktop import blob 相等的那条，找不到才退回最新一条并明确保持 candidate。
+    // upstream 侧每个出现修改的文件映射一次；同一文件可能出现在多个返回 commit 里，
+    // 全部保留为候选，不能只取一条就声称唯一来源。
     let mut upstream_files: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (sha, files) in &upstream_report.commits {
         for file in files {
-            upstream_files
-                .entry(file.as_str())
-                .or_default()
-                .push(sha.as_str());
+            let commits = upstream_files.entry(file.as_str()).or_default();
+            if !commits.contains(&sha.as_str()) {
+                commits.push(sha.as_str());
+            }
         }
     }
     for (upstream_path, upstream_commits) in upstream_files {
@@ -2061,6 +2201,7 @@ fn cross_links(
                     "blob": blob,
                 },
                 "desktop": Value::Null,
+                "candidates": [],
                 "notes": ["no vendor/CoLM202X path or unique basename matches this upstream file"],
             }));
             continue;
@@ -2078,25 +2219,107 @@ fn cross_links(
             let sha = import["sha"].as_str()?;
             blob_of(desktop_dir, sha, desktop_path)
         });
-        let upstream_commit = upstream_commits
-            .iter()
-            .copied()
-            .find(|sha| blob_of(upstream_dir, sha, upstream_path) == import_blob)
-            .unwrap_or(newest_commit);
-        let upstream_commit_blob = blob_of(upstream_dir, upstream_commit, upstream_path);
-        let upstream_blob = upstream_commit_blob
-            .clone()
-            .or_else(|| blob_of(upstream_dir, upstream_endpoint_sha, upstream_path));
-        if upstream_commit_blob.is_some() && upstream_commit_blob == import_blob {
+        // 内容相同只说明“可能对应”，不能说明唯一上游 revision 或传播方向：同一文件在 A→B→revert A
+        // 的历史里可以多次拥有相同 blob。全部返回候选，blob_equal 单独标出依据。
+        let mut candidate_values: Vec<Value> = Vec::new();
+        let mut blob_equal: Vec<String> = Vec::new();
+        for sha in &upstream_commits {
+            if candidate_values.len() >= MAX_CROSS_CANDIDATES {
+                push_limit(
+                    limits,
+                    format!("cross candidates capped at {MAX_CROSS_CANDIDATES}"),
+                );
+                break;
+            }
+            let blob = blob_of(upstream_dir, sha, upstream_path);
+            let equal = import_blob.is_some() && blob == import_blob;
+            if equal {
+                blob_equal.push((*sha).to_owned());
+            }
+            let (author, at_unix_ms, summary) = commit_meta(upstream_dir, sha);
+            candidate_values.push(json!({
+                "sha": sha,
+                "author": author,
+                "at_unix_ms": at_unix_ms,
+                "summary": summary,
+                "blob_equal": equal,
+                "blob": blob,
+            }));
+        }
+        if !blob_equal.is_empty() {
             basis.push("blob-equal");
         }
-        let desktop_blob = import_blob.or(endpoint_blob);
-        let state = if basis.contains(&"path") && basis.contains(&"blob-equal") && import.is_some()
-        {
-            "verified"
+        // 最小可核验关联：Desktop import commit 的提交说明里出现上游候选的**完整 40 hex SHA**，
+        // 且该候选内容与 import blob 相等。不从 PR 标题/短 SHA/时间猜来源。
+        let import_message = import
+            .as_ref()
+            .and_then(|import| import["sha"].as_str())
+            .map(|sha| commit_message(desktop_dir, sha))
+            .unwrap_or_default();
+        let referenced = candidate_values.iter().find(|candidate| {
+            candidate["blob_equal"].as_bool() == Some(true)
+                && candidate["sha"]
+                    .as_str()
+                    .is_some_and(|sha| message_references_sha(&import_message, sha))
+        });
+        let mismatched_reference = candidate_values.iter().find(|candidate| {
+            candidate["blob_equal"].as_bool() == Some(false)
+                && candidate["sha"]
+                    .as_str()
+                    .is_some_and(|sha| message_references_sha(&import_message, sha))
+        });
+        let (state, upstream_commit, notes) = if let Some(referenced) = referenced {
+            basis.push("import-message-sha");
+            ("verified", Some(referenced["sha"].clone()), Vec::new())
         } else {
-            "candidate"
+            let ambiguous = blob_equal.len() > 1;
+            let unique = if blob_equal.len() == 1 {
+                Some(json!(blob_equal[0]))
+            } else {
+                None
+            };
+            let commit = unique.or_else(|| {
+                if blob_equal.is_empty() {
+                    Some(json!(newest_commit))
+                } else {
+                    None
+                }
+            });
+            let mut notes: Vec<String> = Vec::new();
+            if ambiguous {
+                notes.push(format!(
+                    "{} upstream commits carry the same file content; without an explicit import reference no unique source is claimed",
+                    blob_equal.len()
+                ));
+                push_limit(
+                    limits,
+                    "multiple upstream commits share the imported blob; source is ambiguous",
+                );
+            } else if blob_equal.is_empty() {
+                notes.push(
+                    "path mapping only; the imported content matches no returned upstream commit"
+                        .to_owned(),
+                );
+            } else {
+                notes.push(
+                    "path and content match only; the import commit message does not name the upstream revision"
+                        .to_owned(),
+                );
+            }
+            if let Some(mismatched) = mismatched_reference {
+                notes.push(format!(
+                    "the import commit message names {} but that upstream blob differs from the imported file",
+                    mismatched["sha"].as_str().unwrap_or_default()
+                ));
+            }
+            ("candidate", commit, notes)
         };
+        let upstream_blob = upstream_commit
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(|sha| blob_of(upstream_dir, sha, upstream_path))
+            .or_else(|| blob_of(upstream_dir, upstream_endpoint_sha, upstream_path));
+        let desktop_blob = import_blob.or(endpoint_blob);
         let later = later_commits(
             desktop_dir,
             desktop_endpoint_sha,
@@ -2119,11 +2342,8 @@ fn cross_links(
                 "later_commits": later,
                 "blob": desktop_blob,
             },
-            "notes": if state == "verified" {
-                json!([])
-            } else {
-                json!(["mapping has partial evidence only; not a verified introduction"])
-            },
+            "candidates": candidate_values,
+            "notes": notes,
         }));
         if links.len() >= MAX_CROSS_LINKS {
             push_limit(limits, format!("cross links capped at {MAX_CROSS_LINKS}"));
@@ -2154,10 +2374,58 @@ fn cross_links(
                 "vendor_path": file,
                 "commits": commits,
             },
+            "candidates": [],
             "notes": ["desktop/vendor change has no corresponding upstream modification in this query"],
         }));
     }
     links
+}
+
+/// 一次 commit 的完整提交说明（理由原文只用它，不解析 PR 标题/评论）。
+fn commit_message(dir: &Path, sha: &str) -> String {
+    git_ok(dir, &["show", "-s", "--format=%B", sha]).unwrap_or_default()
+}
+
+/// 候选提交的展示元数据：作者、作者时间（ms）、标题。取不到时给空值而不是猜。
+fn commit_meta(dir: &Path, sha: &str) -> (String, u64, String) {
+    let Some(output) = git_ok(dir, &["show", "-s", "--format=%an%x1f%at%x1f%s", sha]) else {
+        return (String::new(), 0, String::new());
+    };
+    let fields: Vec<&str> = output.split('\u{1f}').collect();
+    if fields.len() < 3 {
+        return (String::new(), 0, String::new());
+    }
+    let at_unix_ms = fields[1]
+        .parse::<i64>()
+        .ok()
+        .map(|seconds| seconds.max(0) as u64 * 1000)
+        .unwrap_or(0);
+    (
+        fields[0].to_owned(),
+        at_unix_ms,
+        truncate(fields[2], MAX_DETAIL_CHARS),
+    )
+}
+
+/// 提交说明里是否出现某个**完整 40 hex SHA**（前后不能紧邻其它 hex 字符，避免匹配到更长串）。
+fn message_references_sha(message: &str, sha: &str) -> bool {
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let haystack = message.to_ascii_lowercase();
+    let needle = sha.to_ascii_lowercase();
+    let mut offset = 0usize;
+    while let Some(position) = haystack[offset..].find(&needle) {
+        let start = offset + position;
+        let before_ok = start == 0 || !haystack.as_bytes()[start - 1].is_ascii_hexdigit();
+        let end = start + needle.len();
+        let after_ok = end >= haystack.len() || !haystack.as_bytes()[end].is_ascii_hexdigit();
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2191,7 +2459,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
         None => None,
     };
     let overrides = PathOverrides::from_opts(opts);
-    let source = resolve_source(opts, model_json.as_ref());
+    let source = resolve_source(opts, model_json.as_ref(), &root, &overrides);
 
     let mut repos = Map::new();
     let mut endpoints = Map::new();
@@ -2204,7 +2472,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
     let mut upstream_repo: Option<Repo> = None;
 
     if selection == Selection::Selected {
-        match resolve_selected_target(&root, &overrides, &source, ref_arg.as_deref()) {
+        match resolve_selected_target(&root, &overrides, &source, ref_arg.as_deref())? {
             SelectedTarget::Git {
                 dir,
                 spec,
@@ -2282,9 +2550,14 @@ fn command_track(opts: &Opts) -> Result<Value> {
                 truncated |= report.truncated;
                 repos.insert("selected".to_owned(), report.json.clone());
             }
-            SelectedTarget::Unavailable => {
-                let report =
+            SelectedTarget::Unavailable { notes } => {
+                let mut report =
                     no_history_report(&source, &symbol, path_filter.as_deref(), &mut limits);
+                if let Some(array) = report["notes"].as_array_mut() {
+                    for note in notes {
+                        array.push(json!(note));
+                    }
+                }
                 endpoints.insert("selected".to_owned(), Value::Null);
                 repos.insert("selected".to_owned(), report);
             }
@@ -2476,7 +2749,12 @@ enum SelectedTarget {
         sha: String,
         dir: Option<PathBuf>,
     },
-    Unavailable,
+    /// 选中源码没有可核验的历史终点：只给 notes 说明原因，绝不回退应用 HEAD。
+    Unavailable { notes: Vec<String> },
+}
+
+fn commit_object_exists(dir: &Path, sha: &str) -> bool {
+    git_ok(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some()
 }
 
 fn resolve_selected_target(
@@ -2484,10 +2762,58 @@ fn resolve_selected_target(
     overrides: &PathOverrides,
     source: &SourceInfo,
     requested_ref: Option<&str>,
-) -> SelectedTarget {
+) -> Result<SelectedTarget> {
     if let Some(dir) = &source.source_dir {
         if let Some(checkout) = own_checkout(dir) {
             let spec = canonical_spec_for(&checkout);
+            if source.mode == "frozen_model" {
+                // 冻结模型：历史终点必须是模型记录的 commit，而不是克隆里的 HEAD 或调用方给的 ref。
+                // 否则 `ref=origin/future` 就能把别的分支说成“当前冻结模型的历史”（H01）。
+                let Some(recorded) = source.commit.as_deref() else {
+                    return Ok(SelectedTarget::Unavailable {
+                        notes: vec![
+                            "the frozen model source has no recorded commit; refusing to use its                              current HEAD as the frozen model's history"
+                                .to_owned(),
+                        ],
+                    });
+                };
+                if !commit_object_exists(&checkout, recorded) {
+                    return Ok(SelectedTarget::Unavailable {
+                        notes: vec![format!(
+                            "the frozen model records commit {recorded}, but that object is not                              readable in {}; refusing to fall back to HEAD",
+                            checkout.display()
+                        )],
+                    });
+                }
+                if let Some(reference) = requested_ref {
+                    match git_ok(
+                        &checkout,
+                        &[
+                            "rev-parse",
+                            "--verify",
+                            "-q",
+                            &format!("{reference}^{{commit}}"),
+                        ],
+                    ) {
+                        Some(sha) if sha == recorded => {}
+                        Some(sha) => bail!(
+                            "requested ref {reference} resolves to {sha}, but the frozen model                              records commit {recorded}; refusing to attribute another commit to                              the frozen model (query an independent repository/ref explicitly for                              other commits)"
+                        ),
+                        None => bail!(
+                            "requested ref {reference} is not readable in the frozen model                              source {}; it cannot be verified against the recorded commit {recorded}",
+                            checkout.display()
+                        ),
+                    }
+                }
+                return Ok(SelectedTarget::Git {
+                    dir: checkout,
+                    spec,
+                    endpoint: Endpoint {
+                        ref_name: recorded.to_owned(),
+                        sha: recorded.to_owned(),
+                    },
+                });
+            }
             let endpoint = match requested_ref {
                 Some(reference) => {
                     let sha = git_ok(
@@ -2510,25 +2836,32 @@ fn resolve_selected_target(
                 }),
             };
             if let Some(endpoint) = endpoint {
-                return SelectedTarget::Git {
+                return Ok(SelectedTarget::Git {
                     dir: checkout,
                     spec,
                     endpoint,
-                };
+                });
             }
         }
     }
     if let Some(commit) = &source.commit {
         let repo = overrides.resolve(root, RepoKey::Desktop);
         if repo.rev(commit).is_some() {
-            return SelectedTarget::ModelCommit {
+            return Ok(SelectedTarget::ModelCommit {
                 repo,
                 sha: commit.clone(),
                 dir: source.source_dir.clone(),
-            };
+            });
+        }
+        if source.mode == "frozen_model" {
+            return Ok(SelectedTarget::Unavailable {
+                notes: vec![format!(
+                    "the frozen model records commit {commit}, but it is not readable in the                      registered desktop repository either; no history source was substituted"
+                )],
+            });
         }
     }
-    SelectedTarget::Unavailable
+    Ok(SelectedTarget::Unavailable { notes: vec![] })
 }
 
 /// 选中源码自己的仓库如果 remote 就是规范仓库之一，也按 verified 记录。
@@ -2544,10 +2877,114 @@ fn canonical_spec_for(dir: &Path) -> Option<RepoSpec> {
 // history-commit
 // ---------------------------------------------------------------------------------------------
 
+/// 解析并读取一个 commit 的元数据与（限定到 symbol/path 的）真实 diff。
+/// 只读该 Git 对象库，不拼当前工作区；registered 与 selected-source 两条路共用。
+struct CommitFields {
+    sha: String,
+    parents: Vec<String>,
+    author: String,
+    author_email: String,
+    author_time_unix: i64,
+    committer: String,
+    committer_time_unix: i64,
+    message: String,
+    files: Vec<Value>,
+    truncated: bool,
+}
+
+impl CommitFields {
+    fn json(&self) -> Value {
+        json!({
+            "sha": self.sha,
+            "parents": self.parents,
+            "author": self.author,
+            "author_email": self.author_email,
+            "author_time_unix": self.author_time_unix,
+            "committer": self.committer,
+            "committer_time_unix": self.committer_time_unix,
+            "message": self.message,
+            "compare_parent": self.parents.first(),
+            "files": self.files,
+            "truncated": self.truncated,
+        })
+    }
+}
+
+fn parse_lowercase_sha(text: &str) -> Result<String> {
+    let sha = text.trim();
+    if sha.len() != 40
+        || !sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("--sha must be a full 40-character lowercase hexadecimal commit SHA");
+    }
+    Ok(sha.to_owned())
+}
+
+fn read_commit_fields(
+    dir: &Path,
+    requested_sha: &str,
+    symbol: Option<&str>,
+    path_filter: Option<&str>,
+    limits: &mut Vec<String>,
+) -> Result<CommitFields> {
+    let sha = git_ok(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{requested_sha}^{{commit}}"),
+        ],
+    )
+    .with_context(|| {
+        format!(
+            "commit {requested_sha} is not readable in {}",
+            dir.display()
+        )
+    })?;
+    let meta = git(
+        dir,
+        &[
+            "show",
+            "-s",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%B",
+            &sha,
+        ],
+    )?;
+    let fields: Vec<&str> = meta.splitn(8, '\u{1f}').collect();
+    if fields.len() < 8 {
+        bail!("cannot parse the commit metadata for {sha}");
+    }
+    let parents: Vec<String> = fields[1].split_whitespace().map(str::to_owned).collect();
+    let message = fields[7].to_owned();
+    let (files, truncated) = commit_diff(
+        dir,
+        &sha,
+        parents.first().map(String::as_str),
+        symbol,
+        path_filter,
+        limits,
+    )?;
+    Ok(CommitFields {
+        sha: fields[0].to_owned(),
+        parents,
+        author: fields[2].to_owned(),
+        author_email: fields[3].to_owned(),
+        author_time_unix: fields[4].parse::<i64>().unwrap_or(0),
+        committer: fields[5].to_owned(),
+        committer_time_unix: fields[6].parse::<i64>().unwrap_or(0),
+        message,
+        files,
+        truncated,
+    })
+}
+
 fn command_commit(opts: &Opts) -> Result<Value> {
-    let root = opts.need("--history-root")?;
-    let key = RepoKey::parse(&opts.need_str("--repository")?)?;
-    let sha = parse_sha(&opts.need_str("--sha")?)?;
+    let history_root = opts.need("--history-root")?;
+    let repository = opts.need_str("--repository")?;
+    let sha_text = opts.need_str("--sha")?;
     let symbol = match opts.get("--symbol") {
         Some(symbol) => {
             validate_symbol(&symbol)?;
@@ -2559,8 +2996,19 @@ fn command_commit(opts: &Opts) -> Result<Value> {
         Some(path) => Some(sanitize_relative_path(&path)?),
         None => None,
     };
+    if repository == "selected" {
+        return commit_details_selected(
+            opts,
+            &history_root,
+            &sha_text,
+            symbol.as_deref(),
+            path_filter.as_deref(),
+        );
+    }
+    let key = RepoKey::parse(&repository)?;
+    let sha = parse_sha(&sha_text)?;
     let overrides = PathOverrides::from_opts(opts);
-    let repo = overrides.resolve(&root, key);
+    let repo = overrides.resolve(&history_root, key);
     if !repo.is_existing_checkout() {
         let errors = repo.errors();
         bail!(
@@ -2569,32 +3017,21 @@ fn command_commit(opts: &Opts) -> Result<Value> {
             errors.join("; ")
         );
     }
-    let commit_sha = repo
-        .rev(&sha)
-        .with_context(|| format!("commit {sha} is not readable in {}", repo.path.display()))?;
     let identity = repo.identity();
-    let meta = git(
-        &repo.path,
-        &[
-            "show",
-            "-s",
-            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%B",
-            &commit_sha,
-        ],
-    )?;
-    let fields: Vec<&str> = meta.splitn(8, '\u{1f}').collect();
-    if fields.len() < 8 {
-        bail!("cannot parse the commit metadata for {commit_sha}");
-    }
-    let parents: Vec<String> = fields[1].split_whitespace().map(str::to_owned).collect();
-    let message = fields[7].to_owned();
-    let compare_parent = parents.first().cloned();
     let mut notes = Vec::new();
-    if parents.len() > 1 {
+    let mut limits = Vec::new();
+    let fields = read_commit_fields(
+        &repo.path,
+        &sha,
+        symbol.as_deref(),
+        path_filter.as_deref(),
+        &mut limits,
+    )?;
+    if fields.parents.len() > 1 {
         notes.push(format!(
             "merge commit with {} parents; diff compares against the first parent {}",
-            parents.len(),
-            compare_parent.as_deref().unwrap_or("")
+            fields.parents.len(),
+            fields.parents.first().map(String::as_str).unwrap_or("")
         ));
     }
     if repo.is_shallow() {
@@ -2605,15 +3042,6 @@ fn command_commit(opts: &Opts) -> Result<Value> {
             "remote identity is not verified; this commit belongs to the local checkout".to_owned(),
         );
     }
-    let mut limits = Vec::new();
-    let (files, truncated) = commit_diff(
-        &repo.path,
-        &commit_sha,
-        compare_parent.as_deref(),
-        symbol.as_deref(),
-        path_filter.as_deref(),
-        &mut limits,
-    )?;
     Ok(json!({
         "schema": SCHEMA,
         "repository": {
@@ -2624,20 +3052,84 @@ fn command_commit(opts: &Opts) -> Result<Value> {
             "path": repo.path.display().to_string(),
             "identity": identity,
         },
-        "commit": {
-            "sha": fields[0],
-            "parents": parents,
-            "author": fields[2],
-            "author_email": fields[3],
-            "author_time_unix": fields[4].parse::<i64>().unwrap_or(0),
-            "committer": fields[5],
-            "committer_time_unix": fields[6].parse::<i64>().unwrap_or(0),
-            "message": message,
-            "compare_parent": compare_parent,
-            "files": files,
-            "truncated": truncated,
+        "commit": fields.json(),
+        "reason": reason_for_message(&fields.message),
+        "notes": notes,
+    }))
+}
+
+/// H05：显式 `--source` 的本地源码仓库，读取可以是**未推送**的 commit。
+/// 只按调用方给的 source 读本地 Git 对象；输出 kind=selected_source，不伪装成
+/// desktop/colm_upstream，也不 push/fetch。
+fn commit_details_selected(
+    opts: &Opts,
+    history_root: &Path,
+    sha_text: &str,
+    symbol: Option<&str>,
+    path_filter: Option<&str>,
+) -> Result<Value> {
+    let source = opts
+        .get("--source")
+        .context("--repository selected requires --source <directory|app>")?;
+    let overrides = PathOverrides::from_opts(opts);
+    let app_alias = source.trim() == "app";
+    let root = if app_alias {
+        resolve_app_source(history_root, &overrides)?
+    } else {
+        let source_path = PathBuf::from(&source);
+        if !source_path.exists() {
+            bail!("--source {} does not exist", source_path.display());
+        }
+        PathBuf::from(
+            git_root(&source_path)
+                .with_context(|| format!("--source {source} is not a readable git checkout"))?,
+        )
+    };
+    let sha = parse_lowercase_sha(sha_text)?;
+    let identity = identity_for(&root, None);
+    let mut notes = vec![
+        "commit read from the explicitly supplied local source; it is not a registered \
+         desktop/colm_upstream repository and was not pushed or fetched"
+            .to_owned(),
+    ];
+    if app_alias {
+        notes.insert(
+            0,
+            format!(
+                "--source app resolved to the application source checkout at {}",
+                root.display()
+            ),
+        );
+    }
+    if identity["state"] != "verified" {
+        notes.push("remote identity of the supplied source is not verified".to_owned());
+    }
+    if git_ok(&root, &["rev-parse", "--is-shallow-repository"])
+        .map(|text| text.trim() == "true")
+        .unwrap_or(false)
+    {
+        notes.push("shallow repository: parent commits or older history may be missing".to_owned());
+    }
+    let mut limits = Vec::new();
+    let fields = read_commit_fields(&root, &sha, symbol, path_filter, &mut limits)?;
+    if fields.parents.len() > 1 {
+        notes.push(format!(
+            "merge commit with {} parents; diff compares against the first parent {}",
+            fields.parents.len(),
+            fields.parents.first().map(String::as_str).unwrap_or("")
+        ));
+    }
+    notes.push("a locally created commit has no pushed/PR evidence; PR lookup must report that gap instead of guessing".to_owned());
+    Ok(json!({
+        "schema": SCHEMA,
+        "repository": {
+            "kind": "selected_source",
+            "key": "selected",
+            "path": root.display().to_string(),
+            "identity": identity,
         },
-        "reason": reason_for_message(&message),
+        "commit": fields.json(),
+        "reason": reason_for_message(&fields.message),
         "notes": notes,
     }))
 }
@@ -2692,7 +3184,9 @@ fn commit_diff(
     if truncated {
         push_limit(
             limits,
-            format!("commit diff capped at {MAX_FILES_PER_COMMIT} files / {MAX_HUNKS_PER_COMMIT} hunks per file"),
+            format!(
+                "commit diff capped at {MAX_FILES_PER_COMMIT} files / {MAX_HUNKS_PER_COMMIT} hunks per file"
+            ),
         );
     }
     Ok((files, truncated))

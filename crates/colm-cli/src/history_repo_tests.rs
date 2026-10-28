@@ -148,6 +148,29 @@ impl RepoFixture {
         self.commit_at(seconds, message)
     }
 
+    /// 空提交说明（`--allow-empty-message`）：H03 要验证只有“没有原文”才是 not_recorded。
+    fn commit_empty(&self) -> String {
+        let seconds = self.clock.get();
+        self.clock.set(seconds + 1);
+        let date = format!(
+            "2026-01-01T00:{:02}:{:02} +0000",
+            seconds / 60,
+            seconds % 60
+        );
+        self.git(&["add", "-A"]);
+        let (ok, _, stderr) = run_program(
+            &self.path,
+            "git",
+            &["commit", "-q", "--allow-empty-message", "-m", ""],
+            &[
+                ("GIT_AUTHOR_DATE", date.as_str()),
+                ("GIT_COMMITTER_DATE", date.as_str()),
+            ],
+        );
+        assert!(ok, "git commit failed: {}", stderr.trim());
+        self.head()
+    }
+
     /// 固定时间戳提交；允许复用同一秒，测试提交时间相同（只能按 SHA 打破平局）的路径。
     fn commit_at(&self, seconds: u64, message: &str) -> String {
         let date = format!(
@@ -193,6 +216,13 @@ fn run_ok(command: &str, flags: &[(&str, &str)]) -> Value {
     run(command, &opts(flags)).unwrap_or_else(|error| panic!("{command} failed: {error:#}"))
 }
 
+fn run_fail(command: &str, flags: &[(&str, &str)]) -> anyhow::Error {
+    match run(command, &opts(flags)) {
+        Ok(value) => panic!("{command} unexpectedly succeeded: {value}"),
+        Err(error) => error,
+    }
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().expect("temporary paths are UTF-8")
 }
@@ -204,6 +234,35 @@ fn track(root: &TempDir, extra: &[(&str, String)]) -> Value {
         flags.push((name, value.as_str()));
     }
     run_ok("history-track", &flags)
+}
+
+fn track_fail(root: &TempDir, extra: &[(&str, String)]) -> anyhow::Error {
+    let root_text = root.path().display().to_string();
+    let mut flags: Vec<(&str, &str)> = vec![("--history-root", root_text.as_str())];
+    for (name, value) in extra {
+        flags.push((name, value.as_str()));
+    }
+    run_fail("history-track", &flags)
+}
+
+fn history_commit_selected(
+    root: &TempDir,
+    source: &Path,
+    sha: &str,
+    symbol: Option<&str>,
+) -> Result<Value, anyhow::Error> {
+    let root_text = root.path().display().to_string();
+    let source_text = source.display().to_string();
+    let mut flags: Vec<(&str, &str)> = vec![
+        ("--history-root", root_text.as_str()),
+        ("--repository", "selected"),
+        ("--sha", sha),
+        ("--source", source_text.as_str()),
+    ];
+    if let Some(symbol) = symbol {
+        flags.push(("--symbol", symbol));
+    }
+    run("history-commit", &opts(&flags))
 }
 
 fn history_repos(root: &TempDir) -> Value {
@@ -856,7 +915,10 @@ fn cross_maps_upstream_change_to_verified_desktop_import() {
     desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
     let imported = upstream.raw_file_at(&upstream_change, "main/MOD_X.F90");
     desktop.write("vendor/CoLM202X/main/MOD_X.F90", &imported);
-    let import_commit = desktop.commit("Import upstream CoLM202X snapshot");
+    // H02：verified 需要可核验的来源关联；import 说明写明上游完整 40 hex SHA。
+    let import_commit = desktop.commit(&format!(
+        "Import upstream CoLM202X snapshot at {upstream_change}"
+    ));
     desktop.write(
         "vendor/CoLM202X/main/MOD_X.F90",
         "SUBROUTINE x\n  omega = 2.0 ! desktop tweak\nEND\n",
@@ -895,6 +957,10 @@ fn cross_maps_upstream_change_to_verified_desktop_import() {
     assert!(basis.contains(&"path"), "{basis:?}");
     assert!(basis.contains(&"blob-equal"), "{basis:?}");
     assert!(basis.contains(&"import-commit"), "{basis:?}");
+    assert!(
+        basis.contains(&"import-message-sha"),
+        "verified needs the full upstream SHA written in the import message: {basis:?}"
+    );
     assert_eq!(link["upstream"]["commit"], json!(upstream_change));
     assert_eq!(
         link["desktop"]["import_commit"]["sha"],
@@ -930,7 +996,7 @@ fn cross_picks_the_commit_whose_blob_matches_the_desktop_import_on_a_timestamp_t
     desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
     let imported = upstream.raw_file_at(&imported_change, "main/MOD_TIE.F90");
     desktop.write("vendor/CoLM202X/main/MOD_TIE.F90", &imported);
-    desktop.commit_at(0, "Import upstream snapshot");
+    desktop.commit_at(0, &format!("Import upstream snapshot at {imported_change}"));
 
     let result = track(
         &root,
@@ -1269,8 +1335,16 @@ fn history_commit_returns_metadata_diff_and_parent_information() {
         .as_str()
         .unwrap()
         .contains("old default was wrong"));
-    assert_eq!(value["reason"]["status"], "documented");
+    // H03：CLI 只给原文候选；有提交说明就是 unchecked，不再自动 documented。
+    assert_eq!(value["reason"]["status"], "unchecked");
     assert_eq!(value["reason"]["basis"], "commit_message");
+    let evidence = value["reason"]["evidence_candidates"].as_array().unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["source"], "commit_message");
+    assert!(evidence[0]["excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("old default was wrong"));
     let files = value["commit"]["files"].as_array().unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0]["path"], "src/lib.rs");
@@ -1401,7 +1475,7 @@ fn commands_emit_the_documented_contract_keys() {
     ] {
         assert!(commit["commit"].get(key).is_some(), "commit.{key} missing");
     }
-    for key in ["status", "basis", "excerpt"] {
+    for key in ["status", "basis", "excerpt", "evidence_candidates"] {
         assert!(commit["reason"].get(key).is_some(), "reason.{key} missing");
     }
     assert!(commit.get("notes").is_some());
@@ -1428,4 +1502,518 @@ fn offline_sync_flag_accepts_its_bare_documented_form() {
     assert_eq!(explicit.positional, vec!["positional".to_string()]);
     // 其它 flag 仍然必须有值，不能被下一个 flag 静默吞掉。
     assert!(crate::Opts::parse(&["--history-root".into()]).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// H01：冻结模型的 endpoint 必须绑定 recorded commit；ref 指向另一提交要拒绝
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn frozen_model_ref_cannot_switch_to_another_commit() {
+    clean_history_env();
+    let root = TempDir::new("h01-ref");
+    let source = RepoFixture::init(&root.join("frozen-src"));
+    source.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    let frozen = source.commit("Frozen A");
+    // 冻结模型另有可达分支 origin/future=B（真实冻结 workspace 用 clone --local 保留 Git 历史）。
+    source.git(&["checkout", "-q", "-b", "future"]);
+    source.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let future = source.commit("Future B");
+    source.git(&["checkout", "-q", "main"]);
+    let freeze = root.join("freeze");
+    let (ok, _, stderr) = run_program(
+        root.path(),
+        "git",
+        &[
+            "clone",
+            "-q",
+            "--local",
+            "--no-hardlinks",
+            text(source.path()),
+            text(&freeze),
+        ],
+        &[],
+    );
+    assert!(ok, "local clone failed: {stderr}");
+    let freeze_head = {
+        let (ok, stdout, stderr) = run_program(&freeze, "git", &["rev-parse", "HEAD"], &[]);
+        assert!(ok, "git rev-parse failed: {stderr}");
+        stdout.trim().to_owned()
+    };
+    assert_eq!(freeze_head, frozen);
+
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(&freeze),
+        "commit": frozen,
+        "fingerprint": "a".repeat(64),
+    })
+    .to_string();
+    let base_extra = |reference: Option<String>| -> Vec<(&'static str, String)> {
+        let mut extra = vec![
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(&freeze).to_owned()),
+            ("--model-json", model_json.clone()),
+        ];
+        if let Some(reference) = reference {
+            extra.push(("--ref", reference));
+        }
+        extra
+    };
+
+    // ref=B（SHA 或 origin/future 名字）都必须拒绝：不能把别的分支说成冻结模型历史。
+    for reference in [future.clone(), "origin/future".to_owned()] {
+        let error = track_fail(&root, &base_extra(Some(reference.clone())));
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("frozen model") && detail.contains("records commit"),
+            "ref {reference} must be refused: {detail}"
+        );
+    }
+
+    // 合法路径：不显式给 ref 或用 recorded commit 自己，终点都必须停在 A。
+    for reference in [None, Some(frozen.clone())] {
+        let result = track(&root, &base_extra(reference));
+        assert_eq!(
+            result["query"]["endpoints"]["selected"]["sha"],
+            json!(frozen)
+        );
+        let commits = result["repos"]["selected"]["commits"].as_array().unwrap();
+        assert!(
+            !commits.iter().any(|commit| commit["sha"] == json!(future)),
+            "a legal frozen query must not include the other branch: {commits:#?}"
+        );
+        assert!(commits.iter().any(|commit| commit["sha"] == json!(frozen)));
+    }
+
+    // recorded commit 不可读：明确 unavailable + note，不回退克隆 HEAD。
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(&freeze),
+        "commit": "f".repeat(40),
+    })
+    .to_string();
+    let missing = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(&freeze).to_owned()),
+            ("--model-json", model_json),
+        ],
+    );
+    let report = &missing["repos"]["selected"];
+    assert_eq!(report["history"], "unavailable", "{report:#?}");
+    assert_eq!(report["endpoint"], Value::Null);
+    assert!(report["commits"].as_array().unwrap().is_empty());
+    assert!(
+        report["notes"].to_string().contains("records commit"),
+        "the refusal must name the unreadable recorded commit: {report:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// H02：A→B→revert A 的相同 blob 只能给候选，不能断言唯一来源
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn cross_revert_scenario_lists_ambiguous_candidates_without_a_unique_source() {
+    clean_history_env();
+    let root = TempDir::new("h02-revert");
+    let upstream = RepoFixture::init(&root.join("repos/colm_upstream"));
+    upstream.add_origin("https://github.com/CoLM-SYSU/CoLM");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+    let commit_a = upstream.commit("Add omega 1");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 2.0\nEND\n");
+    let commit_b = upstream.commit("Change omega 2");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+    let commit_c = upstream.commit("Revert omega to 1");
+
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
+    let imported = upstream.raw_file_at(&commit_a, "main/MOD_R.F90");
+    desktop.write("vendor/CoLM202X/main/MOD_R.F90", &imported);
+    desktop.commit("Import vendor snapshot without naming a revision");
+
+    let result = track(
+        &root,
+        &[
+            ("--repository", "both".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--limit", "10".to_owned()),
+        ],
+    );
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file must map by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "two content-equal commits must not be collapsed into one source: {link:#?}"
+    );
+    let candidates = link["candidates"].as_array().unwrap();
+    let by_sha = |sha: &str| -> &Value {
+        candidates
+            .iter()
+            .find(|candidate| candidate["sha"] == json!(sha))
+            .unwrap_or_else(|| panic!("candidate {sha} missing: {candidates:#?}"))
+    };
+    assert_eq!(by_sha(&commit_a)["blob_equal"], true);
+    assert_eq!(by_sha(&commit_c)["blob_equal"], true);
+    assert_eq!(by_sha(&commit_b)["blob_equal"], false);
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate["summary"].as_str().is_some()));
+    let basis: Vec<&str> = link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect();
+    assert!(basis.contains(&"path"));
+    assert!(basis.contains(&"blob-equal"));
+    assert!(basis.contains(&"import-commit"));
+    assert!(!basis.contains(&"import-message-sha"));
+    assert!(!link["notes"].as_array().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// H04：同一 commit 的两个文件与 -G/-S 证据都必须保留、去重、合并成一条
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn one_commit_changing_two_files_keeps_both_files_and_dedupes_hunks() {
+    clean_history_env();
+    let root = TempDir::new("h04-merge");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write(
+        "crates/app/src/dual.rs",
+        "pub fn dual() -> f64 {\n    let dual_var = 1.0;\n    dual_var\n}\n",
+    );
+    desktop.write(
+        "vendor/CoLM202X/main/MOD_DUAL.F90",
+        "SUBROUTINE dual\n  dual_var = 1.0\nEND\n",
+    );
+    let commit = desktop.commit("Change dual_var in rust and fortran");
+
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "dual_var".to_owned()),
+            ("--limit", "10".to_owned()),
+        ],
+    );
+    let commits = result["repos"]["desktop"]["commits"].as_array().unwrap();
+    assert_eq!(
+        commits.len(),
+        1,
+        "one commit, not one per file: {commits:#?}"
+    );
+    assert_eq!(commits[0]["sha"], json!(commit));
+    let files = commits[0]["files"].as_array().unwrap();
+    let paths: std::collections::BTreeSet<&str> = files
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths.len(), 2, "both files must survive: {files:#?}");
+    assert!(paths.contains("crates/app/src/dual.rs"));
+    assert!(paths.contains("vendor/CoLM202X/main/MOD_DUAL.F90"));
+    for file in files {
+        let hunks = file["hunks"].as_array().unwrap();
+        assert_eq!(
+            hunks.len(),
+            1,
+            "the same -G/-S hunk must be deduplicated: {file:#?}"
+        );
+        assert!(
+            hunks[0]["new_code"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|line| line.as_str().unwrap_or_default().contains("dual_var")),
+            "{file:#?}"
+        );
+    }
+    let relevance: Vec<&str> = commits[0]["relevance"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(relevance.contains(&"pickaxe-G"), "{relevance:?}");
+    assert!(relevance.contains(&"pickaxe-S"), "{relevance:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// H03：提交说明是“原文候选”，有文字不等于 documented；空说明才是 not_recorded
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn commit_message_is_unchecked_evidence_not_documented() {
+    clean_history_env();
+    let root = TempDir::new("h03-reason");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write(
+        "src/lib.rs",
+        "pub fn reason() -> f64 {\n    let reason_var = 1.0;\n    reason_var\n}\n",
+    );
+    desktop.commit("Add reason_var");
+    desktop.write(
+        "src/lib.rs",
+        "pub fn reason() -> f64 {\n    let reason_var = 2.0;\n    reason_var\n}\n",
+    );
+    let short_english = desktop.commit("Update variable X");
+    desktop.write(
+        "src/lib.rs",
+        "pub fn reason() -> f64 {\n    let reason_var = 3.0;\n    reason_var\n}\n",
+    );
+    let chinese = desktop.commit("把 reason_var 默认值改成 3.0，因为观测校准要求更大数值");
+    desktop.write(
+        "src/lib.rs",
+        "pub fn reason() -> f64 {\n    let reason_var = 4.0;\n    reason_var\n}\n",
+    );
+    let empty = desktop.commit_empty();
+
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "reason_var".to_owned()),
+            ("--limit", "10".to_owned()),
+        ],
+    );
+    let commits = result["repos"]["desktop"]["commits"].as_array().unwrap();
+    for sha in [&short_english, &chinese] {
+        let commit = commits
+            .iter()
+            .find(|commit| commit["sha"] == json!(sha))
+            .unwrap_or_else(|| panic!("commit {sha} missing"));
+        let reason = &commit["reason"];
+        assert_ne!(
+            reason["status"], "documented",
+            "a commit message is evidence, not a verified motive: {reason:#?}"
+        );
+        assert_eq!(reason["status"], "unchecked", "{reason:#?}");
+        assert_eq!(reason["basis"], "commit_message");
+        let evidence = reason["evidence_candidates"].as_array().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["source"], "commit_message");
+        assert!(evidence[0]["author"].is_null());
+        assert!(evidence[0]["url"].is_null());
+        assert_eq!(evidence[0]["scope"], "commit_message");
+    }
+    let chinese_commit = commits
+        .iter()
+        .find(|commit| commit["sha"] == json!(chinese))
+        .unwrap();
+    assert!(
+        chinese_commit["reason"]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("观测校准"),
+        "{chinese_commit:#?}"
+    );
+
+    // 空提交说明：not_recorded；没有原文候选。
+    let empty_detail = history_commit(
+        &root,
+        "desktop",
+        &empty,
+        Some("reason_var"),
+        Some(&desktop),
+        None,
+    )
+    .expect("empty-message commit detail");
+    assert_eq!(empty_detail["reason"]["status"], "not_recorded");
+    assert_eq!(empty_detail["reason"]["excerpt"], "");
+    assert!(empty_detail["reason"]["evidence_candidates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // 短英文说明在 commit 详情里也不是 documented。
+    let short_detail = history_commit(&root, "desktop", &short_english, None, Some(&desktop), None)
+        .expect("short-message commit detail");
+    assert_eq!(short_detail["reason"]["status"], "unchecked");
+    assert_ne!(short_detail["reason"]["status"], "documented");
+}
+
+// ---------------------------------------------------------------------------------------------
+// H05：selected 的本地未推送 commit 可由 history-commit 继续读取详情
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn history_commit_selected_reads_an_unpushed_local_commit() {
+    clean_history_env();
+    let root = TempDir::new("h05-selected");
+    let source = TempDir::new("h05-source");
+    let repo = RepoFixture::init(source.path());
+    repo.write(
+        "src/lib.rs",
+        "pub fn local() -> f64 {\n    let local_var = 1.0;\n    local_var\n}\n",
+    );
+    let first = repo.commit("Add local_var");
+    repo.write(
+        "src/lib.rs",
+        "pub fn local() -> f64 {\n    let local_var = 2.0;\n    local_var\n}\n",
+    );
+    let second = repo.commit("Change local_var");
+    // 没有任何 remote：该 commit 必然是本地、未推送的对象。
+
+    let value = history_commit_selected(&root, source.path(), &second, Some("local_var"))
+        .expect("unpushed commit detail");
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["repository"]["kind"], "selected_source");
+    assert_eq!(value["repository"]["key"], "selected");
+    assert_eq!(
+        Path::new(value["repository"]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        source.path().canonicalize().unwrap()
+    );
+    assert_eq!(value["repository"]["identity"]["state"], "unverified");
+    assert_eq!(value["commit"]["sha"], json!(second));
+    assert_eq!(value["commit"]["parents"], json!([first]));
+    assert_eq!(value["commit"]["compare_parent"], json!(first));
+    let files = value["commit"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "src/lib.rs");
+    let hunks = files[0]["hunks"].as_array().unwrap();
+    assert!(hunks.iter().any(|hunk| hunk["old_code"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("1.0"))));
+    assert!(hunks.iter().any(|hunk| hunk["new_code"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("2.0"))));
+    assert!(
+        value["notes"].to_string().contains("not pushed"),
+        "the output must say the commit was not pushed: {value:#?}"
+    );
+
+    // 详情只接受完整 40 位小写 hex 且对象必须存在。
+    let short = history_commit_selected(&root, source.path(), "abc", None).unwrap_err();
+    assert!(
+        format!("{short:#}").contains("40-character lowercase"),
+        "{short:#}"
+    );
+    let upper = history_commit_selected(&root, source.path(), &"A".repeat(40), None).unwrap_err();
+    assert!(
+        format!("{upper:#}").contains("40-character lowercase"),
+        "{upper:#}"
+    );
+    let missing = history_commit_selected(&root, source.path(), &"0".repeat(40), None).unwrap_err();
+    assert!(
+        format!("{missing:#}").contains("not readable"),
+        "{missing:#}"
+    );
+    // 缺 --source 时明确报错，不退回注册仓库。
+    let root_text = root.path().display().to_string();
+    let error = run_fail(
+        "history-commit",
+        &[
+            ("--history-root", root_text.as_str()),
+            ("--repository", "selected"),
+            ("--sha", second.as_str()),
+        ],
+    );
+    assert!(format!("{error:#}").contains("--source"), "{error:#}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// H05 补充：`--source app` 别名解析到可核验的应用源码检出
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn selected_source_app_alias_resolves_the_application_checkout() {
+    clean_history_env();
+    let root = TempDir::new("h05-app");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write(
+        "src/lib.rs",
+        "pub fn app_source() -> f64 {\n    let app_var = 1.0;\n    app_var\n}\n",
+    );
+    let commit = desktop.commit("Add app var");
+
+    let root_text = root.path().display().to_string();
+    let value = run(
+        "history-commit",
+        &opts(&[
+            ("--history-root", root_text.as_str()),
+            ("--repository", "selected"),
+            ("--sha", commit.as_str()),
+            ("--source", "app"),
+        ]),
+    )
+    .expect("--source app must resolve the managed application checkout");
+    assert_eq!(value["repository"]["kind"], "selected_source");
+    assert_eq!(
+        Path::new(value["repository"]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        desktop.path().canonicalize().unwrap()
+    );
+    assert!(value["notes"]
+        .to_string()
+        .contains("--source app resolved to the application source checkout"));
+
+    // 显式 --desktop-path 优先于 managed 缓存。
+    let external = RepoFixture::init(&root.join("external-desktop"));
+    external.write(
+        "src/lib.rs",
+        "pub fn app_source() -> f64 {\n    let app_var = 2.0;\n    app_var\n}\n",
+    );
+    let external_commit = external.commit("External app var");
+    let value = run(
+        "history-commit",
+        &opts(&[
+            ("--history-root", root_text.as_str()),
+            ("--repository", "selected"),
+            ("--sha", external_commit.as_str()),
+            ("--source", "app"),
+            ("--desktop-path", text(external.path())),
+        ]),
+    )
+    .expect("--desktop-path wins for --source app");
+    assert_eq!(
+        Path::new(value["repository"]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        external.path().canonicalize().unwrap()
+    );
+
+    // 解析不到应用检出时明确报错，不猜路径。
+    let empty = TempDir::new("h05-app-empty");
+    let empty_text = empty.path().display().to_string();
+    let error = run_fail(
+        "history-commit",
+        &[
+            ("--history-root", empty_text.as_str()),
+            ("--repository", "selected"),
+            ("--sha", commit.as_str()),
+            ("--source", "app"),
+        ],
+    );
+    assert!(format!("{error:#}").contains("--source app"), "{error:#}");
+
+    // selected 的 history-track 也接受同一个别名，并停在应用检出的 HEAD。
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "app_var".to_owned()),
+            ("--source", "app".to_owned()),
+        ],
+    );
+    assert_eq!(
+        result["query"]["endpoints"]["selected"]["sha"],
+        json!(commit)
+    );
+    assert!(!result["repos"]["selected"]["locations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
