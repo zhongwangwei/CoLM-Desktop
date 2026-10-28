@@ -522,3 +522,539 @@ fn the_job_probe_tells_a_lost_submission_from_one_on_the_server() {
     assert_eq!(parse_job_probe("Welcome\n"), None);
     assert_eq!(parse_job_probe(""), None);
 }
+
+// ---- P1-7a：研究资产清单覆盖所有观测源 ----
+
+fn temporary_dir(tag: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "colm-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+/// 一份手工研究清单：一个基础算例、一条站点观测、两个同名不同目录的格点目标观测。
+/// 不跑 `study-create`（那要完整空间算例）；staging 只依赖清单与基础算例目录，手工构造更直接。
+fn observation_staging_fixture() -> (PathBuf, study::spec::Manifest) {
+    let root = temporary_dir("staging");
+    std::fs::create_dir_all(root.join("cases/site")).unwrap();
+    std::fs::write(
+        root.join("cases/site/case.nml"),
+        "&nl_colm\n DEF_CASE_NAME='site'\n DEF_dir_output='out'\n DEF_forcing_namelist='forcing.nml'\n DEF_TUNING_CNFAC=0.5\n/\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("cases/site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    let obs = root.join("obs");
+    std::fs::create_dir_all(obs.join("a")).unwrap();
+    std::fs::create_dir_all(obs.join("b")).unwrap();
+    std::fs::write(obs.join("site.nc"), b"site observation bytes").unwrap();
+    std::fs::write(obs.join("a/Pool.nc"), b"grid product a").unwrap();
+    std::fs::write(obs.join("b/Pool.nc"), b"grid product b").unwrap();
+    let study_dir = root.join("study");
+    std::fs::create_dir_all(&study_dir).unwrap();
+    // `study::model::base_case` 从研究目录里的 `model-inputs.json` 找基础算例；放错一层会回退到
+    // `<project>/.colm/studies` 的父链，最后拿到一个不存在的路径。
+    std::fs::write(
+        study_dir.join("model-inputs.json"),
+        json!({"base_root": root.join("cases")}).to_string(),
+    )
+    .unwrap();
+    let spec: study::spec::StudySpec = serde_json::from_value(json!({
+        "kind": "tuning",
+        "method": "differential-evolution",
+        "base_cases": ["site"],
+        "observations": {"site": obs.join("site.nc")},
+        "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+        "targets": [
+            {"key":"Qle","variable":"Qle","from":0,"to":3600,"min_pairs":2},
+            {"key":"Gpp","variable":"GPP","from":0,"to":3600,"min_pairs":2,
+             "source":{"kind":"grid","path":obs.join("a/Pool.nc"),"variable":"GPP"}},
+            {"key":"Nee","variable":"NEE","from":0,"to":3600,"min_pairs":2,
+             "source":{"kind":"grid","path":obs.join("b/Pool.nc"),"variable":"NEE"}}
+        ],
+        "budget": {"population":4,"generations":1}
+    }))
+    .unwrap();
+    let manifest = study::spec::Manifest {
+        schema_version: 1,
+        id: "s-staging".into(),
+        root: study_dir.to_string_lossy().into_owned(),
+        created_unix: 0,
+        spec,
+        members: Vec::new(),
+        provenance: Default::default(),
+    };
+    (root, manifest)
+}
+
+#[test]
+fn every_local_observation_source_is_staged_under_a_unique_name() {
+    let (root, manifest) = observation_staging_fixture();
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap();
+    // 站点观测与两个目标观测都上传；两个目标的文件都叫 Pool.nc，不能相撞。
+    let names = std::fs::read_dir(staging.join("obs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&"site-site.nc".to_owned()),
+        "staged observations: {names:?}"
+    );
+    let grid_names = names
+        .iter()
+        .filter(|name| name.ends_with("-Pool.nc"))
+        .collect::<Vec<_>>();
+    assert_eq!(grid_names.len(), 2, "staged observations: {names:?}");
+    assert_ne!(grid_names[0], grid_names[1]);
+    for name in &grid_names {
+        assert_eq!(
+            std::fs::read(staging.join("obs").join(name)).unwrap().len(),
+            if *name == "target-2-Gpp-Pool.nc" {
+                b"grid product a".len()
+            } else {
+                b"grid product b".len()
+            }
+        );
+    }
+    let staged_spec = serde_json::to_value(&staged.spec).unwrap();
+    assert_eq!(
+        staged_spec["observations"]["site"],
+        json!("/srv/colm/s/abc/obs/site-site.nc")
+    );
+    assert_eq!(
+        staged_spec["targets"][1]["source"]["path"],
+        json!("/srv/colm/s/abc/obs/target-2-Gpp-Pool.nc")
+    );
+    assert_eq!(
+        staged_spec["targets"][2]["source"]["path"],
+        json!("/srv/colm/s/abc/obs/target-3-Nee-Pool.nc")
+    );
+    // bytes 报的是整份研究随之上传的字节：基础算例复制时的文件大小 + 三份观测。
+    // 算例里的路径改写是随后原地写的，不计入 bytes（与 remote-run 的既有口径一致）。
+    let case_bytes = std::fs::metadata(root.join("cases/site/case.nml"))
+        .unwrap()
+        .len()
+        + std::fs::metadata(root.join("cases/site/forcing.nml"))
+            .unwrap()
+            .len();
+    let observation_bytes = (b"site observation bytes".len()
+        + b"grid product a".len()
+        + b"grid product b".len()) as u64;
+    assert_eq!(staged.bytes, case_bytes + observation_bytes);
+    assert!(staged.remote_inputs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mapped_observation_sources_keep_the_server_path_and_are_not_copied() {
+    let (root, manifest) = observation_staging_fixture();
+    let maps = vec![parse_mapping(&format!("{}=/srv/shared", root.join("obs").display())).unwrap()];
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &maps, false).unwrap();
+    let staged_spec = serde_json::to_value(&staged.spec).unwrap();
+    // 映射命中的观测保留服务器路径，不上传；目标源同一条规则。
+    assert_eq!(
+        staged_spec["observations"]["site"],
+        json!("/srv/shared/site.nc")
+    );
+    assert_eq!(
+        staged_spec["targets"][1]["source"]["path"],
+        json!("/srv/shared/a/Pool.nc")
+    );
+    assert_eq!(
+        staged_spec["targets"][2]["source"]["path"],
+        json!("/srv/shared/b/Pool.nc")
+    );
+    assert!(!staging.join("obs/site-site.nc").exists());
+    // 基础算例文件照常复制并计入 bytes；观测文件一个都没传。
+    assert!(staged.bytes > 0);
+    assert!(
+        staging.join("obs").read_dir().unwrap().next().is_none(),
+        "no observation file should be copied when every source is mapped"
+    );
+    assert_eq!(
+        staged.remote_inputs,
+        vec![
+            "/srv/shared/a/Pool.nc".to_owned(),
+            "/srv/shared/b/Pool.nc".to_owned(),
+            "/srv/shared/site.nc".to_owned(),
+        ]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_missing_local_observation_source_says_what_to_do_instead() {
+    let (root, mut manifest) = observation_staging_fixture();
+    let missing = root.join("obs/nowhere.nc");
+    manifest.spec.targets[1]
+        .source
+        .as_mut()
+        .unwrap()
+        .set_path(missing.to_string_lossy().into_owned());
+    let staging = root.join("staging");
+    let error = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("nowhere.nc"), "{text}");
+    assert!(text.contains("--map"), "{text}");
+    // 失败路径也要把暂存目录清掉，别把本机文件副本留在临时目录。
+    assert!(!staging.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dry_run_discards_staged_observation_copies() {
+    let (root, manifest) = observation_staging_fixture();
+    let staging = staging_dir(&manifest.id, std::process::id());
+    let _ = std::fs::remove_dir_all(&staging);
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap();
+    assert!(staged.bytes > 0);
+    assert!(staging.join("obs").read_dir().unwrap().next().is_some());
+    // dry-run 与任何失败路径共用同一个清理函数：本机观测副本不能留在 /tmp。
+    discard_staging(&staging);
+    assert!(!staging.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---- P1-7b：按研究类型核验取回 ----
+
+struct UncertaintyFixture {
+    root: PathBuf,
+    manifest: study::spec::Manifest,
+    staged: PathBuf,
+    remote_root: String,
+    remote: Value,
+    installed: study::state::StudyState,
+}
+
+fn uncertainty_member_ids(method: &str) -> Vec<String> {
+    let count = match method {
+        "oat" => 2,
+        "morris" => 4,
+        "lhs" => 4,
+        other => panic!("unknown method {other}"),
+    };
+    (0..=count).map(|index| format!("m{index:06}")).collect()
+}
+
+fn write_uncertainty_results(staged: &Path, remote_root: &str, ids: &[String]) {
+    for id in ids {
+        let task = json!({
+            "member": id, "site": "site",
+            "outputs": [{"variable":"f_qle","units":"W/m2","count":3,"mean":1.5,"min":1.0,"max":2.0}],
+            "calibration": [], "validation": [], "validation_errors": []
+        });
+        let bytes = serde_json::to_vec_pretty(&task).unwrap();
+        let relative = format!("tasks/{id}/site.json");
+        let path = staged.join("results").join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let proof = json!({
+            "schema": 1,
+            "execution": {"complete": true},
+            "outputs": {},
+            "result": {
+                "path": format!("{remote_root}/results/{relative}"),
+                "sha256": colm_kernel::sha256_hex(&bytes),
+                "bytes": bytes.len(),
+                "category": "evaluation"
+            }
+        });
+        let proof_path = staged.join("results/provenance").join(id).join("site.json");
+        std::fs::create_dir_all(proof_path.parent().unwrap()).unwrap();
+        std::fs::write(proof_path, serde_json::to_vec_pretty(&proof).unwrap()).unwrap();
+    }
+}
+
+fn result_inventory_json(staged: &Path) -> Vec<Value> {
+    let root = staged.join("results");
+    // `regular_tree_files` 的 BTreeMap 键本身有序，顺序也与服务器的 `study-status.results` 无关。
+    super::regular_tree_files(&root, false)
+        .unwrap()
+        .into_keys()
+        .map(|relative| {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let bytes = std::fs::metadata(root.join(&relative)).unwrap().len();
+            json!({"path": relative, "bytes": bytes})
+        })
+        .collect()
+}
+
+fn uncertainty_fixture(method: &str) -> UncertaintyFixture {
+    let root = temporary_dir("uncertainty");
+    let local = root.join("proj/.colm/studies/s-local");
+    std::fs::create_dir_all(local.join("samples")).unwrap();
+    let obs = root.join("obs.nc");
+    let obs_bytes = b"uncertainty observation bytes";
+    std::fs::write(&obs, obs_bytes).unwrap();
+    let ids = uncertainty_member_ids(method);
+    let mut csv = String::from("member,baseline,generation,candidate,DEF_TUNING_CNFAC\n");
+    let mut members = Vec::new();
+    for (index, id) in ids.iter().enumerate() {
+        let value = 0.5 + index as f64 * 0.01;
+        csv.push_str(&format!("{id},{},0,{index},{value}\n", index == 0));
+        members.push(study::spec::MemberPlan {
+            id: id.clone(),
+            generation: 0,
+            candidate_index: index,
+            baseline: index == 0,
+            parameters: [("DEF_TUNING_CNFAC".to_owned(), value)]
+                .into_iter()
+                .collect(),
+        });
+    }
+    std::fs::write(local.join("samples/design.csv"), &csv).unwrap();
+    let spec: study::spec::StudySpec = serde_json::from_value(json!({
+        "kind": "uncertainty",
+        "method": method,
+        "base_cases": ["site"],
+        "observations": {"site": obs},
+        "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+        "outputs": ["f_qle"],
+        "budget": {"jobs": 1}
+    }))
+    .unwrap();
+    let remote_root = "/srv/colm/s/abc/.colm/studies/s-remote".to_owned();
+    let mut provenance = study::spec::ManifestProvenance {
+        samples_sha256: colm_kernel::sha256_hex(csv.as_bytes()),
+        outputs_sha256: "history-outputs-fingerprint".into(),
+        ..Default::default()
+    };
+    provenance
+        .observation_sha256
+        .insert("site".into(), colm_kernel::sha256_hex(obs_bytes));
+    provenance
+        .base_case_fingerprints
+        .insert("site".into(), "base-case-fingerprint".into());
+    let manifest = study::spec::Manifest {
+        schema_version: 1,
+        id: "s-local".into(),
+        root: local.to_string_lossy().into_owned(),
+        created_unix: 0,
+        spec,
+        members,
+        provenance: provenance.clone(),
+    };
+    // 服务器上的清单：同一份设计，路径换成服务器路径；状态属于服务器研究编号。
+    let mut remote_spec = serde_json::to_value(&manifest.spec).unwrap();
+    remote_spec["observations"]["site"] = json!("/srv/colm/s/abc/obs/site-obs.nc");
+    let mut remote_manifest = serde_json::to_value(&manifest).unwrap();
+    remote_manifest["id"] = json!("s-remote");
+    remote_manifest["root"] = json!(remote_root);
+    remote_manifest["spec"] = remote_spec;
+    let mut tasks = serde_json::Map::new();
+    let mut candidates = serde_json::Map::new();
+    for member in &manifest.members {
+        tasks.insert(
+            format!("{}/site", member.id),
+            json!({
+                "member": member.id,
+                "site": "site",
+                "case_dir": format!("{remote_root}/members/{}/site", member.id),
+                "status": "succeeded"
+            }),
+        );
+        candidates.insert(
+            member.id.clone(),
+            json!({"generation": 0, "feasible": true, "calibration": null, "validation": null, "reason": null}),
+        );
+    }
+    let state = json!({
+        "schema_version": 1,
+        "study_id": "s-remote",
+        "status": "completed",
+        "generation": 0,
+        "tasks": tasks,
+        "best_member": null,
+        "best_objective": null,
+        "completed_candidates": manifest.members.len() - 1,
+        "population": [],
+        "candidates": candidates,
+        "no_improvement_generations": 0,
+        "warnings": []
+    });
+    // 下载暂存：样本与结果树都从服务器搬下来的字节。
+    let staged = root.join("staged");
+    std::fs::create_dir_all(staged.join("samples")).unwrap();
+    std::fs::write(staged.join("samples/design.csv"), &csv).unwrap();
+    write_uncertainty_results(&staged, &remote_root, &ids);
+    std::fs::create_dir_all(staged.join("results/envelopes/site")).unwrap();
+    std::fs::write(
+        staged.join("results/envelopes/site/f_qle.json"),
+        br#"{"site":"site","variable":"f_qle","time":[0],"p05":[1.0]}"#,
+    )
+    .unwrap();
+    let inventory = result_inventory_json(&staged);
+    let remote = json!({
+        "manifest": remote_manifest,
+        "state": state,
+        "results": inventory,
+        "model_version": {"model_revision": null}
+    });
+    let transplanted = transplant_state(state, &manifest.id, &remote_root, &local);
+    let installed = serde_json::from_value(transplanted).unwrap();
+    UncertaintyFixture {
+        root,
+        manifest,
+        staged,
+        remote_root,
+        remote,
+        installed,
+    }
+}
+
+#[test]
+fn uncertainty_fetch_verification_accepts_oat_lhs_and_morris_without_a_best_member() {
+    for method in ["oat", "lhs", "morris"] {
+        let fixture = uncertainty_fixture(method);
+        let evidence = uncertainty_fetch_evidence(
+            &fixture.manifest,
+            &fixture.remote_root,
+            &fixture.remote,
+            &fixture.staged,
+            &fixture.installed,
+        )
+        .unwrap_or_else(|error| panic!("{method}: {error:#}"));
+        assert_eq!(evidence["schema"], 2, "{method}");
+        assert_eq!(evidence["kind"], "uncertainty", "{method}");
+        assert_eq!(evidence["method"], method, "{method}");
+        // 不确定性研究按设计没有最优成员：证据里不出现也不声称最优成员。
+        assert!(evidence.get("best_member").is_none(), "{method}");
+        assert!(
+            evidence["selection"].get("best_member").is_none(),
+            "{method}"
+        );
+        let member_results = evidence["member_results"].as_object().unwrap();
+        assert_eq!(member_results.len(), fixture.manifest.members.len());
+        for member in &fixture.manifest.members {
+            let entry = member_results
+                .get(&member.id)
+                .unwrap_or_else(|| panic!("{method}: missing {}", member.id));
+            assert!(entry["tree_sha256"].as_str().unwrap().len() == 64);
+        }
+        std::fs::remove_dir_all(fixture.root).unwrap();
+    }
+}
+
+#[test]
+fn tampered_uncertainty_member_results_are_rejected() {
+    let fixture = uncertainty_fixture("lhs");
+    let result = fixture.staged.join("results/tasks/m000001/site.json");
+    let original = std::fs::read(&result).unwrap();
+    // 改成同样长度的字节：文件清单（路径+大小）对得上，只有内容身份能发现篡改。
+    let tampered = String::from_utf8(original)
+        .unwrap()
+        .replace("\"W/m2\"", "\"W/m3\"");
+    assert_ne!(
+        String::from_utf8(std::fs::read(&result).unwrap()).unwrap(),
+        tampered
+    );
+    std::fs::write(&result, tampered.as_bytes()).unwrap();
+    let error = uncertainty_fetch_evidence(
+        &fixture.manifest,
+        &fixture.remote_root,
+        &fixture.remote,
+        &fixture.staged,
+        &fixture.installed,
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("evaluation result"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn tuning_evidence_still_binds_the_best_member_and_rejects_a_tampered_state() {
+    let state = json!({
+        "schema_version": 1,
+        "study_id": "s-local",
+        "status": "completed",
+        "generation": 1,
+        "tasks": {
+            "m000001/site": {
+                "member": "m000001", "site": "site",
+                "case_dir": "/srv/colm/s/abc/.colm/studies/s-remote/members/m000001/site",
+                "status": "succeeded"
+            }
+        },
+        "best_member": "m000001",
+        "best_objective": 0.5
+    });
+    let typed: study::state::StudyState = serde_json::from_value(state.clone()).unwrap();
+    let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&typed).unwrap());
+    let evidence = json!({
+        "schema": 1,
+        "root": "/srv/colm/s/abc/.colm/studies/s-remote",
+        "study_id": "s-local",
+        "state": state,
+        "state_sha256": state_sha256,
+        "best_member": "m000001"
+    });
+    evidence_state(&evidence, "/srv/colm/s/abc/.colm/studies/s-remote").unwrap();
+    let mut wrong_best = evidence.clone();
+    wrong_best["best_member"] = json!("m000002");
+    let error = evidence_state(&wrong_best, "/srv/colm/s/abc/.colm/studies/s-remote").unwrap_err();
+    assert!(format!("{error}").contains("member identity"), "{error}");
+    let mut tampered = evidence.clone();
+    tampered["state"]["tasks"]["m000001/site"]["case_dir"] = json!("/elsewhere");
+    let error = evidence_state(&tampered, "/srv/colm/s/abc/.colm/studies/s-remote").unwrap_err();
+    assert!(format!("{error}").contains("state hash"), "{error}");
+    // 旧比较证据（schema 1）没有 kind 字段：仍按率定接收；明确写错类型才拒绝。
+    ensure_evidence_kind(&evidence, study::spec::StudyKind::Tuning).unwrap();
+    let mut declared = evidence.clone();
+    declared["kind"] = json!("uncertainty");
+    assert!(ensure_evidence_kind(&declared, study::spec::StudyKind::Tuning).is_err());
+}
+
+#[test]
+fn old_server_evidence_missing_the_new_identities_is_rejected_explicitly() {
+    let mut fixture = uncertainty_fixture("lhs");
+    // 服务器清单没带目标观测身份：本机有格点目标观测时无法核对，必须明确拒绝而不是悄悄跳过。
+    // fixture 的 provenance 本来就不序列化空的 target_source_sha256，这里显式去掉以覆盖"旧证据"。
+    let _ = fixture.remote["manifest"]["provenance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("target_source_sha256");
+    let mut spec = serde_json::to_value(&fixture.manifest.spec).unwrap();
+    spec["targets"] = json!([{
+        "key": "Gpp", "variable": "GPP", "from": 0, "to": 3600, "min_pairs": 2,
+        "source": {"kind": "grid", "path": "/local/GPP.nc", "variable": "GPP"}
+    }]);
+    fixture.manifest.spec = serde_json::from_value(spec).unwrap();
+    fixture
+        .manifest
+        .provenance
+        .target_source_sha256
+        .insert("Gpp".into(), "local-target-observation-sha256".into());
+    let error = uncertainty_fetch_evidence(
+        &fixture.manifest,
+        &fixture.remote_root,
+        &fixture.remote,
+        &fixture.staged,
+        &fixture.installed,
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("target observation"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+
+    // 连服务器清单都没有（更旧的 status 输出）：同样明确拒绝。
+    let mut fixture = uncertainty_fixture("oat");
+    let _ = fixture.remote.as_object_mut().unwrap().remove("manifest");
+    let error = uncertainty_fetch_evidence(
+        &fixture.manifest,
+        &fixture.remote_root,
+        &fixture.remote,
+        &fixture.staged,
+        &fixture.installed,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("manifest"), "{error}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}

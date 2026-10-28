@@ -36,6 +36,9 @@ use crate::Opts;
 /// 本机研究目录里的提交记录。
 pub(crate) const RECORD: &str = ".colm-remote-study.json";
 pub(crate) const PENDING: &str = ".colm-remote-study-pending.json";
+/// 取回核验证据。研究目录里单独一份：记录（`RECORD`）每次状态轮询都要经 SSH 搬回，把每个成员的结果树
+/// 哈希塞进记录会把它撑大；证据是审计材料，放旁边文件，旧记录没有它也不影响任何读取路径。
+pub(crate) const EVIDENCE: &str = ".colm-remote-study-evidence.json";
 
 /// Submission intent survives an interrupted SSH response. Only status reads may use it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,11 +272,147 @@ fn not_started(study_dir: &Path) -> Result<()> {
 
 /// 观测文件在服务器上的名字：站点名加原文件名（不同站点的同名文件不会撞）。
 pub(crate) fn remote_observation_name(site: &str, path: &str) -> String {
-    let file = Path::new(path)
+    let file = file_name_of(path);
+    format!("{site}-{file}")
+}
+
+/// 目标观测在服务器上的名字。目标键可以由用户随便写（可能带空格或路径分隔符），不能直接拼进文件名；
+/// 用序号做唯一前缀，再带上消过毒的目标键方便在服务器上认出来源。两个目标都叫 `Pool.nc` 时不会相撞。
+pub(crate) fn remote_target_source_name(index: usize, key: &str, path: &str) -> String {
+    let label: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let label = label.trim_matches('_');
+    let label = if label.is_empty() { "target" } else { label };
+    format!("target-{}-{label}-{}", index + 1, file_name_of(path))
+}
+
+fn file_name_of(path: &str) -> String {
+    Path::new(path)
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "obs.nc".into());
-    format!("{site}-{file}")
+        .unwrap_or_else(|| "obs.nc".into())
+}
+
+/// `--map` 命中的服务器路径；与 `remote_cmd::place` 同一套语义：按路径分量比前缀（`/a/bc` 不在 `/a/b`
+/// 之下），嵌套映射里最具体的那条优先。映射是目录时保留剩下的相对路径。
+fn mapped_server_path(raw: &str, maps: &[super::Mapping]) -> Option<String> {
+    let local = PathBuf::from(raw).to_string_lossy().replace('\\', "/");
+    let local = local.trim_end_matches('/');
+    let mut maps: Vec<&super::Mapping> = maps.iter().collect();
+    maps.sort_by_key(|map| std::cmp::Reverse(map.local.len()));
+    maps.into_iter().find_map(|map| {
+        let rest = super::under(local, &map.local)?;
+        Some(format!("{}{rest}", map.remote))
+    })
+}
+
+/// 一次提交在服务器 `obs/` 里放好的观测文件。
+struct StagedObservations {
+    bytes: u64,
+    /// 命中 `--map`、留给服务器上既有文件的路径：提交前要确认它们真的在服务器上。
+    remote_inputs: Vec<String>,
+}
+
+/// 把所有观测源搬成服务器路径：站点观测（`spec.observations`）和每个目标自己的观测文件
+/// （格点产品、区域通量站、水文站）走同一条规则。
+///
+/// 为什么必须上传而不是按项目前缀推导服务器路径：观测文件在这台电脑上的绝对路径（`/Users/.../GLEAM.nc`）
+/// 服务器根本没有；`study-create`/预检会读观测算哈希，读不到就整个研究建不起来。观测文件都不大，复制进
+/// 项目的 `obs/` 比要求用户为每个目标配映射可靠。已经有 `--map` 对应的路径保留服务器路径、不复制
+/// （共享观测目录在服务器上已有一份时不该再传一遍）。
+///
+/// `spec.observations` 原来的行为是无论有没有映射都上传；现在按同一规则处理：只有映射命中才不复制，
+/// 没命中照样上传——它们不受 `--upload-unmapped` 约束（那是基础算例里大文件的开关）。
+fn stage_observation_sources(
+    spec: &mut study::spec::StudySpec,
+    staging: &Path,
+    remote_project: &str,
+    maps: &[super::Mapping],
+) -> Result<StagedObservations> {
+    std::fs::create_dir_all(staging.join("obs"))?;
+    let mut staged = StagedObservations {
+        bytes: 0,
+        remote_inputs: Vec::new(),
+    };
+    let mut used = std::collections::BTreeSet::new();
+    for (site, path) in spec.observations.iter_mut() {
+        let name = remote_observation_name(site, path.as_str());
+        stage_one_observation(
+            &mut staged,
+            path,
+            name,
+            &format!("site {site}"),
+            staging,
+            remote_project,
+            maps,
+            &mut used,
+        )?;
+    }
+    for (index, target) in spec.targets.iter_mut().enumerate() {
+        if let Some(source) = &mut target.source {
+            let path = source.path().to_owned();
+            let name = remote_target_source_name(index, &target.key, &path);
+            let mut rewritten = path;
+            stage_one_observation(
+                &mut staged,
+                &mut rewritten,
+                name,
+                &format!("target {}", target.key),
+                staging,
+                remote_project,
+                maps,
+                &mut used,
+            )?;
+            source.set_path(rewritten);
+        }
+    }
+    staged.remote_inputs.sort();
+    staged.remote_inputs.dedup();
+    Ok(staged)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_one_observation(
+    staged: &mut StagedObservations,
+    path: &mut String,
+    name: String,
+    label: &str,
+    staging: &Path,
+    remote_project: &str,
+    maps: &[super::Mapping],
+    used: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if let Some(remote) = mapped_server_path(path, maps) {
+        staged.remote_inputs.push(remote.clone());
+        *path = remote;
+        return Ok(());
+    }
+    let local = Path::new(path.as_str());
+    ensure!(
+        local.is_file(),
+        "observation file for {label} does not exist: {path}; put a copy on the server and add a --map \
+         mapping for it, or restore the file here so it can be uploaded with the Study"
+    );
+    // 同名文件的唯一化：正常情况下序号/站点前缀已经唯一，这里只是兜底，保证改写后的路径不会互相覆盖。
+    let mut unique = name.clone();
+    let mut suffix = 2;
+    while !used.insert(unique.clone()) {
+        unique = format!("{name}-{suffix}");
+        suffix += 1;
+    }
+    let destination = staging.join("obs").join(&unique);
+    staged.bytes += std::fs::copy(local, &destination)
+        .with_context(|| format!("cannot copy the observation file for {label} from {path}"))?;
+    *path = format!("{remote_project}/obs/{unique}");
+    Ok(())
 }
 
 /// 作业体：确保引擎编好，在服务器上建研究，然后跑。研究目录写进作业目录的 `study_root`，查状态与取回时用。
@@ -304,6 +443,93 @@ pub(crate) fn study_job_body(
         spec = quote(&format!("{remote_project}/spec.json")),
         kernel = quote(remote_kernel),
     )
+}
+
+/// 提交前在本机暂存的整份研究资产（基础算例、观测、设定）。
+#[derive(Debug)]
+pub(crate) struct StagedStudy {
+    pub(crate) spec: Value,
+    pub(crate) remote_inputs: Vec<String>,
+    pub(crate) bytes: u64,
+}
+
+/// 暂存目录名。`dry-run` 与任何失败路径都要把它整个删掉：里面是本机观测文件的副本，
+/// 服务器没收到、本机也没人要，留在 `/tmp` 只是泄漏数据。
+pub(crate) fn staging_dir(study_id: &str, pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("colm-remote-study-{study_id}-{pid}"))
+}
+
+pub(crate) fn discard_staging(staging: &Path) {
+    let _ = std::fs::remove_dir_all(staging);
+}
+
+/// 把研究搬到服务器上的路径空间：基础算例按 `remote-run` 的规则改写，观测源统一上传/映射，
+/// 最后产出一份服务器能直接 `study-create` 的设定。任何失败都自己清掉暂存目录：里面是本机
+/// 观测文件的副本，服务器没收到、本机也不要，留在 `/tmp` 只是泄漏。
+fn stage_study_assets(
+    manifest: &study::spec::Manifest,
+    staging: &Path,
+    remote_project: &str,
+    maps: &[super::Mapping],
+    upload_unmapped: bool,
+) -> Result<StagedStudy> {
+    match stage_study_assets_inner(manifest, staging, remote_project, maps, upload_unmapped) {
+        Ok(staged) => Ok(staged),
+        Err(error) => {
+            discard_staging(staging);
+            Err(error)
+        }
+    }
+}
+
+fn stage_study_assets_inner(
+    manifest: &study::spec::Manifest,
+    staging: &Path,
+    remote_project: &str,
+    maps: &[super::Mapping],
+    upload_unmapped: bool,
+) -> Result<StagedStudy> {
+    let mut unmapped = Vec::new();
+    let mut remote_inputs = Vec::new();
+    let mut bytes = 0;
+    for base in &manifest.spec.base_cases {
+        let staged = stage_case(
+            &study::model::base_case(manifest, base)?,
+            &staging.join(base),
+            &format!("{remote_project}/{base}"),
+            maps,
+            upload_unmapped,
+        )?;
+        let run_file = staging.join(base).join(colm_model::RUN_MANIFEST);
+        if run_file.is_file() {
+            let mut run: colm_model::MaterializedRun =
+                serde_json::from_slice(&std::fs::read(&run_file)?)?;
+            run.run_case = PathBuf::from(format!("{remote_project}/{base}"));
+            std::fs::write(run_file, serde_json::to_vec_pretty(&run)?)?;
+        }
+        unmapped.extend(staged.unmapped);
+        remote_inputs.extend(staged.remote_inputs);
+        bytes += staged.bytes;
+    }
+    if !unmapped.is_empty() {
+        let list: Vec<String> = unmapped.iter().map(|p| p.display().to_string()).collect();
+        bail!(
+            "these inputs are on this computer but have no server path; add a path mapping for them \
+             (or allow uploading the files): {}",
+            list.join(", ")
+        );
+    }
+    let mut spec = manifest.spec.clone();
+    let observations = stage_observation_sources(&mut spec, staging, remote_project, maps)?;
+    remote_inputs.extend(observations.remote_inputs);
+    remote_inputs.sort();
+    remote_inputs.dedup();
+    bytes += observations.bytes;
+    Ok(StagedStudy {
+        spec: serde_json::to_value(spec)?,
+        remote_inputs,
+        bytes,
+    })
 }
 
 /// `remote-study-run`：在服务器上重建并运行这个研究。
@@ -359,61 +585,23 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         short_hash(&format!("{}|{}", manifest.id, study_dir.display()))
     );
 
-    // 1. 基础算例：改写路径后暂存；观测文件随研究上传。
-    let staging = std::env::temp_dir().join(format!(
-        "colm-remote-study-{}-{}",
-        manifest.id,
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    let result = (|| -> Result<(Value, Vec<String>, u64)> {
-        let mut unmapped = Vec::new();
-        let mut remote_inputs = Vec::new();
-        let mut bytes = 0;
-        for base in &manifest.spec.base_cases {
-            let staged = stage_case(
-                &study::model::base_case(&manifest, base)?,
-                &staging.join(base),
-                &format!("{remote_project}/{base}"),
-                &maps,
-                upload_unmapped,
-            )?;
-            let run_file = staging.join(base).join(colm_model::RUN_MANIFEST);
-            if run_file.is_file() {
-                let mut run: colm_model::MaterializedRun =
-                    serde_json::from_slice(&std::fs::read(&run_file)?)?;
-                run.run_case = PathBuf::from(format!("{remote_project}/{base}"));
-                std::fs::write(run_file, serde_json::to_vec_pretty(&run)?)?;
+    // 1. 基础算例：改写路径后暂存；所有观测源（站点观测与目标自己的观测文件）随后统一上传或按 --map 保留。
+    let staging = staging_dir(&manifest.id, std::process::id());
+    discard_staging(&staging);
+    let staged =
+        match stage_study_assets(&manifest, &staging, &remote_project, &maps, upload_unmapped) {
+            Ok(staged) => staged,
+            Err(error) => {
+                // 失败时也不能把本机观测副本留在临时目录（helper 已经写了一半）。
+                discard_staging(&staging);
+                return Err(error);
             }
-            unmapped.extend(staged.unmapped);
-            remote_inputs.extend(staged.remote_inputs);
-            bytes += staged.bytes;
-        }
-        if !unmapped.is_empty() {
-            let list: Vec<String> = unmapped.iter().map(|p| p.display().to_string()).collect();
-            bail!(
-                "these inputs are on this computer but have no server path; add a path mapping for them \
-                 (or allow uploading the files): {}",
-                list.join(", ")
-            );
-        }
-        let mut spec = manifest.spec.clone();
-        std::fs::create_dir_all(staging.join("obs"))?;
-        for (site, path) in spec.observations.iter_mut() {
-            let name = remote_observation_name(site, path);
-            bytes += std::fs::copy(&*path, staging.join("obs").join(&name))
-                .with_context(|| format!("cannot copy the observations {path}"))?;
-            *path = format!("{remote_project}/obs/{name}");
-        }
-        Ok((serde_json::to_value(spec)?, remote_inputs, bytes))
-    })();
-    let (mut spec, remote_inputs, bytes) = match result {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-    };
+        };
+    let StagedStudy {
+        mut spec,
+        remote_inputs,
+        bytes,
+    } = staged;
 
     // 2. 引擎与内核。
     let engine = choose_engine(opts, &ssh, &root, version.as_ref())?;
@@ -466,7 +654,7 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         name: sched::job_name(&format!("study-{}", manifest.id)),
     };
     if dry_run {
-        let _ = std::fs::remove_dir_all(&staging);
+        discard_staging(&staging);
         println!(
             "{}",
             json!({
@@ -488,7 +676,7 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             .collect();
         let missing = ssh.run_ok(&checks.join("\n"))?;
         if !missing.trim().is_empty() {
-            let _ = std::fs::remove_dir_all(&staging);
+            discard_staging(&staging);
             bail!(
                 "these inputs are missing on {}: {}",
                 ssh.host,
@@ -531,7 +719,7 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect();
         ssh.upload(&staging, &entries, &remote_project)?;
-        let _ = std::fs::remove_dir_all(&staging);
+        discard_staging(&staging);
         let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
         Ok((engine_uploaded, id.clone(), submitted))
     })?;
@@ -755,13 +943,10 @@ fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str)
     scoped_comparison_evidence(&cli, &command, |command| ssh.run_ok(command))
 }
 
-fn verified_evidence(
-    manifest: &study::spec::Manifest,
-    record: &StudyRecord,
-    remote_root: &str,
-    local_state: &study::state::StudyState,
-    evidence: &Value,
-) -> Result<study::model::StudyInputIdentity> {
+/// 服务器比较证据（schema 1）里与本机检查点绑定的部分：状态本身、状态哈希、研究编号与最优成员。
+///
+/// 为什么单独成函数：率定取回/复核要求 `best_member`，不确定性研究按设计没有最优成员，不能走这里。
+fn evidence_state(evidence: &Value, remote_root: &str) -> Result<study::state::StudyState> {
     ensure!(
         evidence["schema"] == 1,
         "unsupported remote comparison evidence schema"
@@ -781,6 +966,121 @@ fn verified_evidence(
             && evidence["best_member"] == serde_json::to_value(&remote_state.best_member)?,
         "remote comparison member identity differs from its checkpoint"
     );
+    Ok(remote_state)
+}
+
+/// 服务器比较证据的 schema 1 是率定专用的：里面只有最优成员与基线的比较，没有 `kind`。
+/// 分流后旧证据（缺 `kind`）仍按率定接收——schema 1 唯一可能的含义就是率定比较；明确带了
+/// `kind` 却与本机研究类型不符的拒绝，免得以后类型化的证据被放进错的分支。
+fn ensure_evidence_kind(evidence: &Value, kind: study::spec::StudyKind) -> Result<()> {
+    match evidence.get("kind").and_then(Value::as_str) {
+        None => Ok(()),
+        Some(declared) => {
+            let expected = match kind {
+                study::spec::StudyKind::Tuning => "tuning",
+                study::spec::StudyKind::Uncertainty => "uncertainty",
+            };
+            ensure!(
+                declared == expected,
+                "server comparison evidence is for a {declared} Study; this is a {expected} Study"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// 目标观测的绝对路径在各机器上都不同：比较设计前把服务器清单里的目标源路径换成本机清单里同键目标的
+/// 路径，观测内容另外按服务器 manifest 记录的 SHA 核对。键集合或结构不同仍由 `same_design` 报出来。
+fn relocate_target_source_paths(
+    remote: &mut study::spec::StudySpec,
+    local: &study::spec::StudySpec,
+) {
+    for target in &mut remote.targets {
+        let Some(local_target) = local.targets.iter().find(|t| t.key == target.key) else {
+            continue;
+        };
+        if let (Some(source), Some(local_source)) = (&mut target.source, &local_target.source) {
+            source.set_path(local_source.path().to_owned());
+        }
+    }
+}
+
+/// 设计是否一致：服务器设定里的观测路径（站点观测与目标观测）都是服务器端的绝对路径，不能直接比。
+fn same_study_design(
+    local: &study::spec::StudySpec,
+    remote: &study::spec::StudySpec,
+) -> Result<bool> {
+    let mut remote = remote.clone();
+    relocate_target_source_paths(&mut remote, local);
+    crate::study_version::same_design(local, &remote)
+}
+
+/// 服务器建研究时冻结的观测内容与本机一致。`study-create` 在服务器上当场算这些 SHA；两边都从同一份
+/// 上传字节算出，所以内容相同、路径不同也应当相等。这是 P1-7a 上传目标观测之后能核对的部分。
+///
+/// 不比较基础算例指纹：`fingerprint::compute` 把 namelist 里的路径字符串也算进去，服务器上的算例
+/// 路径已改写，指纹必然不同；输入身份在另一条路径上核对。
+fn ensure_remote_frozen_inputs(
+    local: &study::spec::Manifest,
+    remote: &study::spec::Manifest,
+) -> Result<()> {
+    let local_provenance = &local.provenance;
+    let remote_provenance = &remote.provenance;
+    ensure!(
+        !local_provenance.samples_sha256.is_empty(),
+        "this Study did not freeze its sample design identity; create a new Study"
+    );
+    ensure!(
+        !remote_provenance.samples_sha256.is_empty(),
+        "the server Study did not record its sample design identity; \
+         its server-side CLI is too old to verify an uncertainty Study"
+    );
+    ensure!(
+        local_provenance.samples_sha256 == remote_provenance.samples_sha256,
+        "the server Study froze a different sample design from this Study"
+    );
+    ensure!(
+        !remote_provenance.outputs_sha256.is_empty(),
+        "the server Study did not record its history outputs identity; \
+         its server-side CLI is too old to verify an uncertainty Study"
+    );
+    ensure!(
+        local_provenance.outputs_sha256 == remote_provenance.outputs_sha256,
+        "the server Study recorded different history outputs from this Study"
+    );
+    for (site, expected) in &local_provenance.observation_sha256 {
+        ensure!(
+            remote_provenance.observation_sha256.get(site) == Some(expected),
+            "observation {site} differs between this Study and the one on the server"
+        );
+    }
+    // 目标源列表：本机有、服务器没记录（旧版 CLI 建的服务器研究）时不能悄悄跳过——那正是上传目标观测
+    // 要保证的东西。缺这个新字段就明确拒绝，让用户知道这份服务器证据不能核对。
+    for (key, expected) in &local_provenance.target_source_sha256 {
+        let recorded = remote_provenance.target_source_sha256.get(key);
+        ensure!(
+            recorded.is_some(),
+            "the server Study did not record the identity of target observation {key}; \
+             its server-side CLI predates target observation uploads, so the fetched results cannot \
+             be verified against this Study"
+        );
+        ensure!(
+            recorded == Some(expected),
+            "target observation {key} differs between this Study and the one on the server"
+        );
+    }
+    Ok(())
+}
+
+fn verified_evidence(
+    manifest: &study::spec::Manifest,
+    record: &StudyRecord,
+    remote_root: &str,
+    local_state: &study::state::StudyState,
+    evidence: &Value,
+) -> Result<study::model::StudyInputIdentity> {
+    ensure_evidence_kind(evidence, manifest.spec.kind.clone())?;
+    evidence_state(evidence, remote_root)?;
     // Compare as typed states: the transplant drops server-only fields (`process`), which the
     // local checkpoint serializes as null.
     let fetched: study::state::StudyState = serde_json::from_value(transplant_state(
@@ -803,7 +1103,7 @@ fn verified_evidence(
     )?;
     let remote_spec: study::spec::StudySpec = serde_json::from_value(evidence["spec"].clone())?;
     ensure!(
-        crate::study_version::same_design(&manifest.spec, &remote_spec)?,
+        same_study_design(&manifest.spec, &remote_spec)?,
         "server comparison design differs from the frozen local Study"
     );
     let local = study::model::verified_inputs(manifest)?;
@@ -827,6 +1127,399 @@ fn verified_evidence(
     Ok(local)
 }
 
+/// 服务器结果树清单（`study-status` 的 `results`）：相对 `results/` 的路径与字节数。
+/// 服务器只报清单不报内容哈希，内容身份在下面逐个成员按评估身份核对。
+fn remote_result_tree_inventory(remote: &Value) -> Result<std::collections::BTreeMap<String, u64>> {
+    let entries = remote["results"].as_array().with_context(|| {
+        "the server Study status does not report its result tree; \
+         its server-side CLI is too old to verify an uncertainty Study"
+    })?;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in entries {
+        let path = entry["path"]
+            .as_str()
+            .context("the server result tree has an entry without a path")?;
+        let bytes = entry["bytes"]
+            .as_u64()
+            .context("the server result tree has an entry without a size")?;
+        ensure!(
+            !path.is_empty()
+                && Path::new(path)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "the server result tree contains an unsafe path: {path}"
+        );
+        files.insert(path.to_owned(), bytes);
+    }
+    Ok(files)
+}
+
+/// 下载/本机结果树里普通文件的相对路径与大小。拒绝链接与特殊文件：服务器控制的树在安装前先查一遍。
+fn result_tree_inventory(root: &Path) -> Result<std::collections::BTreeMap<String, u64>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        files: &mut std::collections::BTreeMap<String, u64>,
+    ) -> Result<()> {
+        ensure!(
+            std::fs::symlink_metadata(dir)?.file_type().is_dir(),
+            "not a regular directory: {}",
+            dir.display()
+        );
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                visit(root, &entry.path(), files)?;
+            } else {
+                ensure!(
+                    kind.is_file(),
+                    "non-regular fetched result: {}",
+                    entry.path().display()
+                );
+                files.insert(
+                    entry
+                        .path()
+                        .strip_prefix(root)?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    entry.metadata()?.len(),
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
+}
+
+/// 有序的「相对路径 + 内容哈希」摘要；每个成员的结果树和整棵结果树都用它。
+fn tree_digest(files: &std::collections::BTreeMap<String, String>) -> String {
+    let mut text = String::new();
+    for (path, sha256) in files {
+        text.push_str(path);
+        text.push('\0');
+        text.push_str(sha256);
+        text.push('\n');
+    }
+    colm_kernel::sha256_hex(text.as_bytes())
+}
+
+fn ensure_same_result_tree(
+    server: &std::collections::BTreeMap<String, u64>,
+    fetched: &std::collections::BTreeMap<String, u64>,
+) -> Result<()> {
+    let missing = server
+        .keys()
+        .filter(|path| !fetched.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra = fetched
+        .keys()
+        .filter(|path| !server.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        missing.is_empty() && extra.is_empty(),
+        "the fetched result tree differs from the one the server reported \
+         (missing: [{}], unexpected: [{}])",
+        missing.join(", "),
+        extra.join(", ")
+    );
+    let changed = server
+        .iter()
+        .filter(|(path, bytes)| fetched.get(*path) != Some(*bytes))
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    ensure!(
+        changed.is_empty(),
+        "fetched result files differ in size from the server's recorded tree: {}",
+        changed.join(", ")
+    );
+    Ok(())
+}
+
+/// 逐个成员核对结果树：成功的任务必须有评估结果与评估身份，结果文件的字节身份必须与评估时记录的一致
+/// （内容被替换、长度不变也能发现）。返回证据里的逐成员树哈希与整棵树的哈希。
+fn verify_uncertainty_result_trees(
+    manifest: &study::spec::Manifest,
+    state: &study::state::StudyState,
+    results_root: &Path,
+    inventory: &std::collections::BTreeMap<String, u64>,
+) -> Result<(std::collections::BTreeMap<String, Value>, String)> {
+    let mut member_results = std::collections::BTreeMap::new();
+    for member in &manifest.members {
+        let mut files = std::collections::BTreeMap::new();
+        for site in &manifest.spec.base_cases {
+            let task = state
+                .tasks
+                .get(&study::state::task_id(&member.id, site))
+                .with_context(|| {
+                    format!(
+                        "the server Study state has no task for {} / {site}",
+                        member.id
+                    )
+                })?;
+            let task_rel = format!("tasks/{}/{site}.json", member.id);
+            let proof_rel = format!("provenance/{}/{site}.json", member.id);
+            let present = inventory.contains_key(&task_rel);
+            if task.status != study::state::TaskStatus::Succeeded {
+                // 没成功的任务不该有评估结果；有就说明下载树与服务端状态对不上。
+                ensure!(
+                    !present,
+                    "the fetched result tree contains an evaluation for {} / {site}, \
+                     but its server task did not succeed",
+                    member.id
+                );
+                continue;
+            }
+            ensure!(
+                present && inventory.contains_key(&proof_rel),
+                "the succeeded Study task {} / {site} has no evaluation result and identity \
+                 in the fetched tree",
+                member.id
+            );
+            let task_path = results_root.join(&task_rel);
+            let bytes = std::fs::read(&task_path)?;
+            let parsed: Value = serde_json::from_slice(&bytes).with_context(|| {
+                format!("cannot parse the fetched evaluation result {task_rel}")
+            })?;
+            ensure!(
+                parsed["member"].as_str() == Some(member.id.as_str())
+                    && parsed["site"].as_str() == Some(site.as_str()),
+                "the fetched evaluation result {task_rel} belongs to another member or site"
+            );
+            let sha256 = colm_kernel::sha256_hex(&bytes);
+            let proof_path = results_root.join(&proof_rel);
+            let proof: Value =
+                serde_json::from_slice(&std::fs::read(&proof_path)?).with_context(|| {
+                    format!("cannot parse the fetched evaluation identity {proof_rel}")
+                })?;
+            ensure!(
+                proof["schema"] == 1,
+                "unsupported fetched evaluation identity schema"
+            );
+            ensure!(
+                proof["result"]["sha256"].as_str() == Some(sha256.as_str())
+                    && proof["result"]["bytes"].as_u64() == Some(bytes.len() as u64),
+                "the fetched evaluation result {task_rel} differs from the identity recorded \
+                 when it was computed"
+            );
+            files.insert(task_rel, sha256);
+            files.insert(proof_rel, crate::fingerprint::sha256_file(&proof_path)?);
+        }
+        member_results.insert(
+            member.id.clone(),
+            json!({
+                "generation": member.generation,
+                "tree_sha256": tree_digest(&files),
+                "files": files,
+            }),
+        );
+    }
+    // 整棵树的内容哈希：服务器只给文件清单，内容由上面逐个文件算出来。审计时能拿它与下载树对照。
+    let mut all = std::collections::BTreeMap::new();
+    for relative in inventory.keys() {
+        all.insert(
+            relative.clone(),
+            crate::fingerprint::sha256_file(&results_root.join(relative))?,
+        );
+    }
+    Ok((member_results, tree_digest(&all)))
+}
+
+/// 状态候选表：任务覆盖全部成员/站点、候选的成员与代数对得上、有分数的候选必须每个站点都成功。
+/// 不确定性研究按设计不写最优成员，这里不读、也不要求 `best_member`。
+fn verify_uncertainty_candidates(
+    manifest: &study::spec::Manifest,
+    state: &study::state::StudyState,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            state.status,
+            study::state::StudyStatus::Completed | study::state::StudyStatus::CompletedWithFailures
+        ),
+        "the server Study is not in a finished state"
+    );
+    ensure!(
+        state.tasks.len() == manifest.members.len() * manifest.spec.base_cases.len(),
+        "the server Study state tasks do not cover every sampled member and site"
+    );
+    let members = manifest
+        .members
+        .iter()
+        .map(|member| (member.id.as_str(), member))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (id, task) in &state.tasks {
+        let member = members.get(task.member.as_str()).with_context(|| {
+            format!(
+                "the server Study state references unknown member {}",
+                task.member
+            )
+        })?;
+        ensure!(
+            manifest.spec.base_cases.contains(&task.site),
+            "the server Study state references unknown site {}",
+            task.site
+        );
+        ensure!(
+            *id == study::state::task_id(&member.id, &task.site),
+            "the server Study state task identity differs from its content"
+        );
+    }
+    for (id, candidate) in &state.candidates {
+        let member = members.get(id.as_str()).with_context(|| {
+            format!("the server Study state has a candidate for unknown member {id}")
+        })?;
+        ensure!(
+            candidate.generation == member.generation,
+            "the server Study candidate {id} has a different generation from its sample"
+        );
+        if candidate.feasible && !manifest.spec.targets.is_empty() {
+            ensure!(
+                candidate.calibration.is_some(),
+                "the server Study candidate {id} is feasible without a recorded objective"
+            );
+        }
+        if candidate.calibration.is_some() || candidate.validation.is_some() {
+            for site in &manifest.spec.base_cases {
+                let task = state
+                    .tasks
+                    .get(&study::state::task_id(id, site))
+                    .with_context(|| format!("the server Study has no task for {id} / {site}"))?;
+                ensure!(
+                    task.status == study::state::TaskStatus::Succeeded,
+                    "the server Study candidate {id} recorded an objective but its {site} task \
+                     did not succeed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 不确定性研究的取回证据：样本 SHA、成员集合/顺序、每个成员的结果树、状态候选表。
+///
+/// 为什么不能走率定的比较核验：不确定性研究按设计没有最优成员，`study-verify-comparison` 要求
+/// `best_member` 与基线比较，绑定模型修订的取回会被它整体拒绝。这里按同一份服务器状态与下载字节
+/// 核对集合证据，不读 `best_member`，证据里也不声称最优。原始 history 留在服务器上，所以不重算
+/// 分数、不假装复核了原始输出——只核对下载内容与服务器记录的评估身份、结果树清单一致。
+fn uncertainty_fetch_evidence(
+    manifest: &study::spec::Manifest,
+    remote_root: &str,
+    remote: &Value,
+    study_root: &Path,
+    installed_state: &study::state::StudyState,
+) -> Result<Value> {
+    ensure!(
+        manifest.spec.kind == study::spec::StudyKind::Uncertainty,
+        "uncertainty fetch evidence is only for uncertainty Studies"
+    );
+    let remote_manifest_value = remote
+        .get("manifest")
+        .filter(|value| value.is_object())
+        .context(
+            "the server Study status does not report its manifest; its server-side CLI is too old \
+             to verify an uncertainty Study",
+        )?;
+    let remote_manifest: study::spec::Manifest =
+        serde_json::from_value(remote_manifest_value.clone())
+            .context("the server Study manifest is not readable here")?;
+    ensure!(
+        remote_manifest.spec.kind == manifest.spec.kind,
+        "the server Study is a different kind of Study"
+    );
+    ensure_remote_frozen_inputs(manifest, &remote_manifest)?;
+    ensure!(
+        same_study_design(&manifest.spec, &remote_manifest.spec)?,
+        "server Study design differs from the frozen local Study"
+    );
+    let remote_state_value = remote
+        .get("state")
+        .filter(|state| !state.is_null())
+        .cloned()
+        .context("the server Study has no state yet")?;
+    let remote_state: study::state::StudyState = serde_json::from_value(remote_state_value.clone())
+        .context("the server Study state is not readable here")?;
+    ensure!(
+        remote_state.schema_version == 1 && remote_state.study_id == remote_manifest.id,
+        "the server Study state identity differs from its manifest"
+    );
+    let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&remote_state)?);
+    let transplanted: study::state::StudyState = serde_json::from_value(transplant_state(
+        remote_state_value,
+        &manifest.id,
+        remote_root,
+        Path::new(&manifest.root),
+    ))?;
+    ensure!(
+        serde_json::to_value(installed_state)? == serde_json::to_value(&transplanted)?,
+        "remote Study state changed since fetch; fetch the verified results before comparing"
+    );
+    // 样本设计：初始样本文件的 SHA 与成员顺序。成员集合/参数已由 `validate_fetched_samples` 建研究时核对，
+    // 这里再用服务器证据核对一次，取回与复核两条路径都走同一段。
+    let initial = if manifest.spec.method == study::spec::StudyMethod::DifferentialEvolution {
+        "g000000.csv"
+    } else {
+        "design.csv"
+    };
+    let sample_path = study_root.join("samples").join(initial);
+    let sample_bytes = std::fs::read(&sample_path).with_context(|| {
+        format!(
+            "the fetched Study has no initial samples {}",
+            sample_path.display()
+        )
+    })?;
+    let samples_sha256 = colm_kernel::sha256_hex(&sample_bytes);
+    ensure!(
+        !manifest.provenance.samples_sha256.is_empty()
+            && samples_sha256 == manifest.provenance.samples_sha256,
+        "fetched initial samples differ from the frozen local samples"
+    );
+    let sample_members = study::generation::read_sample_file(&sample_path)?;
+    ensure!(
+        serde_json::to_value(&sample_members)? == serde_json::to_value(&manifest.members)?,
+        "the fetched sample members differ from the frozen Study (members or their order changed)"
+    );
+    let results_root = study_root.join("results");
+    let server_inventory = remote_result_tree_inventory(remote)?;
+    let fetched_inventory = result_tree_inventory(&results_root)?;
+    ensure_same_result_tree(&server_inventory, &fetched_inventory)?;
+    let (member_results, results_tree_sha256) = verify_uncertainty_result_trees(
+        manifest,
+        installed_state,
+        &results_root,
+        &fetched_inventory,
+    )?;
+    verify_uncertainty_candidates(manifest, installed_state)?;
+    Ok(json!({
+        "schema": 2,
+        "kind": "uncertainty",
+        "method": manifest.spec.method,
+        "root": remote_root,
+        "study_id": manifest.id,
+        "state_sha256": state_sha256,
+        "samples": {"initial": initial, "sha256": samples_sha256},
+        "members": manifest.members.iter().map(|member| &member.id).collect::<Vec<_>>(),
+        "members_sha256": colm_kernel::sha256_hex(&serde_json::to_vec(&manifest.members)?),
+        "member_results": member_results,
+        "results_tree_sha256": results_tree_sha256,
+        "candidates": {
+            "recorded": installed_state.candidates.len(),
+            "succeeded_tasks": installed_state
+                .tasks
+                .values()
+                .filter(|task| task.status == study::state::TaskStatus::Succeeded)
+                .count(),
+        },
+        // 明确写清证据的边界：不确定性分析排的是参数影响，不产生最优成员，也不重算原始输出的分数。
+        "selection": {
+            "basis": "an uncertainty analysis ranks parameter effects; it does not select a best member",
+        },
+    }))
+}
+
 fn verify_result_tree(root: &Path, expected: &Value) -> Result<()> {
     let expected: std::collections::BTreeMap<String, String> =
         serde_json::from_value(expected.clone())?;
@@ -845,6 +1538,9 @@ fn verify_result_tree(root: &Path, expected: &Value) -> Result<()> {
 }
 
 /// Reverify raw server outputs for every comparison, using the recorded job's fixed CLI.
+///
+/// 按研究类型分流：率定仍要服务器现场比较最优成员与基线（`study-verify-comparison`）；不确定性研究
+/// 没有最优成员，那条命令按设计会拒绝，改用服务器 `study-status` 报告的清单与本机下载树核对集合证据。
 pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
     let manifest = study::engine::status(study_dir)?;
     study::engine::verify_frozen_inputs(&manifest)?;
@@ -861,15 +1557,33 @@ pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::Stud
         "remote Study job did not finish successfully"
     );
     let remote_root = remote_study_root(&ssh, &record)?.context("remote job has no Study root")?;
-    let evidence = server_comparison_evidence(&ssh, &record, &remote_root)?;
     let state = study::checkpoint::load_latest::<study::state::StudyState>(
         &study_dir.join("checkpoints/state"),
     )?
     .context("Study has no fetched checkpoint")?
     .payload;
-    let identity = verified_evidence(&manifest, &record, &remote_root, &state, &evidence)?;
-    verify_result_tree(&study_dir.join("results"), &evidence["results_sha256"])?;
-    Ok(identity)
+    match manifest.spec.kind {
+        study::spec::StudyKind::Tuning => {
+            let evidence = server_comparison_evidence(&ssh, &record, &remote_root)?;
+            let identity = verified_evidence(&manifest, &record, &remote_root, &state, &evidence)?;
+            verify_result_tree(&study_dir.join("results"), &evidence["results_sha256"])?;
+            Ok(identity)
+        }
+        study::spec::StudyKind::Uncertainty => {
+            let remote = remote_study_status(&ssh, &record, &remote_root)?;
+            // 与本机检查点绑定的模型身份：取回时记的是服务器作业的修订，服务器上的研究不能换版本。
+            let local_model = serde_json::to_value(
+                crate::study_version::pinned(study_dir)?.and_then(|pin| pin.model_revision),
+            )?;
+            ensure_model_identity(
+                &local_model,
+                &record.provenance["model_revision"],
+                &remote["model_version"]["model_revision"],
+            )?;
+            uncertainty_fetch_evidence(&manifest, &remote_root, &remote, study_dir, &state)?;
+            study::model::verified_inputs(&manifest)
+        }
+    }
 }
 
 /// `remote-study-status`：作业状态，加上服务器上研究的进度（建好之后）。
@@ -1525,7 +2239,11 @@ fn ensure_fetch_boundary(study_dir: &Path) -> Result<()> {
 
 fn install_fetched_study(study_dir: &Path, staged: &Path) -> Result<()> {
     ensure_fetch_boundary(study_dir)?;
-    let entries = ["results", "samples", "checkpoints/state", RECORD];
+    let mut entries = vec!["results", "samples", "checkpoints/state", RECORD];
+    // 证据文件是核验通过后新写的审计材料：旧暂存目录没有它时安装行为与以前完全一样。
+    if staged.join(EVIDENCE).is_file() {
+        entries.push(EVIDENCE);
+    }
     let mut changed = Vec::new();
     let result = (|| {
         for (index, entry) in entries.iter().enumerate() {
@@ -1628,29 +2346,47 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
         regular_tree_files(&study_dir.join("results"), false)?;
     }
     // Verification runs on the recorded server against raw outputs, never on downloaded metrics alone.
-    let comparison = if exit_code == 0 {
-        server_comparison_evidence(&ssh, &record, &remote_root).and_then(|evidence| {
-            verified_evidence(&manifest, &record, &remote_root, &typed, &evidence)?;
-            verify_result_tree(&tmp.join("results"), &evidence["results_sha256"])?;
-            Ok(evidence)
-        })
+    // 按研究类型分流：率定让服务器 CLI 现场比较最优成员与基线；不确定性研究按设计没有最优成员，
+    // 那条命令会整体拒绝，改按服务器 `study-status` 报告与本机下载树核对集合证据。
+    let verification = if exit_code == 0 {
+        match manifest.spec.kind {
+            study::spec::StudyKind::Tuning => {
+                server_comparison_evidence(&ssh, &record, &remote_root).and_then(|evidence| {
+                    verified_evidence(&manifest, &record, &remote_root, &typed, &evidence)?;
+                    verify_result_tree(&tmp.join("results"), &evidence["results_sha256"])?;
+                    Ok(evidence)
+                })
+            }
+            study::spec::StudyKind::Uncertainty => {
+                uncertainty_fetch_evidence(&manifest, &remote_root, &remote, &tmp, &typed)
+            }
+        }
     } else {
         Err(anyhow::anyhow!(
             "server job failed with exit code {exit_code}; only diagnostic results were fetched"
         ))
     };
     if exit_code == 0 && !local_model.is_null() {
-        comparison.as_ref().map_err(|error| {
+        verification.as_ref().map_err(|error| {
             anyhow::anyhow!(
                 "remote scientific outputs were not verified; nothing was installed: {error:#}"
             )
         })?;
     }
-    let scope_verified = comparison.is_ok();
-    let scientific_verified = comparison
+    let scope_verified = verification.is_ok();
+    // 不确定性证据没有"强迫内容已核对"的概念（原始输出留在服务器上）：与率定的 scoped 证据一样，
+    // 只声称非强迫输入/观测与结果身份这一层被核对过，不冒充全内容核对。
+    let scientific_verified = verification
         .as_ref()
         .is_ok_and(|evidence| evidence["forcing_contents_verified"] == true);
-    let verification_error = comparison.as_ref().err().map(|error| format!("{error:#}"));
+    let verification_error = verification
+        .as_ref()
+        .err()
+        .map(|error| format!("{error:#}"));
+    let verification_kind = match manifest.spec.kind {
+        study::spec::StudyKind::Tuning => "tuning",
+        study::spec::StudyKind::Uncertainty => "uncertainty",
+    };
     for (name, bytes) in regular_tree_files(&study_dir.join("checkpoints/state"), true)? {
         let path = tmp.join("checkpoints/state").join(name);
         std::fs::create_dir_all(path.parent().context("checkpoint has no parent")?)?;
@@ -1660,32 +2396,41 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     record.fetched_at = Some(now());
     record.provenance["ok"] = json!(exit_code == 0 && scope_verified);
     record.provenance["exit_code"] = json!(exit_code);
+    record.provenance["verification_kind"] = json!(verification_kind);
     record.provenance["scientific_verified"] = json!(scientific_verified);
     record.provenance["nonforcing_inputs_verified"] = json!(scope_verified);
     record.provenance["forcing_contents_verified"] = json!(scientific_verified);
     record.provenance["input_scope"] = json!("sha256-nonforcing-v1");
     record.provenance["verification_error"] = json!(verification_error);
     record.provenance["finished"] = json!(now());
+    // 核验通过时把证据本身也记下来（每个成员的结果树哈希等），取回后的比较/审计还能拿它对照。
+    // 核验失败时没有可记录的证据，`verification_error` 已经把原因写进记录。
+    if let Ok(evidence) = &verification {
+        std::fs::write(tmp.join(EVIDENCE), serde_json::to_vec_pretty(evidence)?)?;
+        record.provenance["evidence"] = json!(EVIDENCE);
+    }
     std::fs::write(tmp.join(RECORD), serde_json::to_string_pretty(&record)?)?;
     install_fetched_study(&study_dir, &tmp)?;
     let _ = std::fs::remove_dir_all(&tmp);
     let outcome = json!({"job":record.job,"outcome":"observed","terminal":true,"status":status});
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
-    println!(
-        "{}",
-        json!({
-            "fetched": true,
-            "exit_code": exit_code,
-            "scientific_verified": scientific_verified,
-            "nonforcing_inputs_verified": scope_verified,
-            "forcing_contents_verified": scientific_verified,
-            "input_scope": "sha256-nonforcing-v1",
-            "verification_error": verification_error,
-            "status": typed.status,
-            "best_member": typed.best_member,
-            "remote_study": remote_root,
-        })
-    );
+    let mut output = json!({
+        "fetched": true,
+        "exit_code": exit_code,
+        "verification_kind": verification_kind,
+        "scientific_verified": scientific_verified,
+        "nonforcing_inputs_verified": scope_verified,
+        "forcing_contents_verified": scientific_verified,
+        "input_scope": "sha256-nonforcing-v1",
+        "verification_error": verification_error,
+        "status": typed.status,
+        "remote_study": remote_root,
+    });
+    // 只有率定有最优成员；不确定性结果不能带一个会被读成"最优"的字段。
+    if verification_kind == "tuning" {
+        output["best_member"] = json!(typed.best_member);
+    }
+    println!("{}", output);
     Ok(())
 }
 
