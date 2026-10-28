@@ -524,29 +524,19 @@ test('每个结果 tab 的动作跟着该 tab 上真实的按钮走', async () =
   const h = harness();
   await h.render();
   await h.tab('report');
-  assert.deepEqual(actionIds(h), [
-    'export-report',
-    'result-improve',
-    'result-overview',
-    'result-runs',
-  ]);
+  // 模型改进只留在结果总览的"下一步"卡片里，不再和其他页签的"返回总览"并列。
+  assert.deepEqual(actionIds(h), ['export-report', 'result-overview', 'result-runs']);
   assert.equal(actionById(h, 'export-report')?.kind, 'commit');
   await h.tab('series');
   assert.deepEqual(actionIds(h), [
     'export-full-series-csv',
     'export-series-data',
     'plot-series',
-    'result-improve',
     'result-overview',
     'result-runs',
   ]);
   await h.tab('diagnostics');
-  assert.deepEqual(actionIds(h), [
-    'diagnose-closure',
-    'result-improve',
-    'result-overview',
-    'result-runs',
-  ]);
+  assert.deepEqual(actionIds(h), ['diagnose-closure', 'result-overview', 'result-runs']);
   await h.action('diagnose-closure');
   assert.ok(actionIds(h).includes('export-series-data'));
 });
@@ -577,23 +567,13 @@ test('评估、比较与数据目录页签只登记该页签真实的按钮', as
   const h = harness();
   await h.render();
   await h.tab('evaluation');
-  assert.deepEqual(actionIds(h), [
-    'evaluate-observations',
-    'result-improve',
-    'result-overview',
-    'result-runs',
-  ]);
+  assert.deepEqual(actionIds(h), ['evaluate-observations', 'result-overview', 'result-runs']);
   assert.equal(actionById(h, 'evaluate-observations')?.enabled, false, '没有观测文件');
   await h.tab('comparison');
-  assert.deepEqual(actionIds(h), [
-    'compare-sites',
-    'result-improve',
-    'result-overview',
-    'result-runs',
-  ]);
+  assert.deepEqual(actionIds(h), ['compare-sites', 'result-overview', 'result-runs']);
   assert.equal(actionById(h, 'compare-sites')?.enabled, false, '还没有比较输入');
   await h.tab('catalog');
-  assert.deepEqual(actionIds(h), ['result-improve', 'result-overview', 'result-runs']);
+  assert.deepEqual(actionIds(h), ['result-overview', 'result-runs']);
 });
 
 test('导出按钮的 kind 与高级评估折叠的展开动作', async () => {
