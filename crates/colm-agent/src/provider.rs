@@ -11,10 +11,15 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::context::{safety_margin, BudgetLimits, WindowSource, CONTEXT_WINDOW_TOKENS};
 use crate::message::{Message, ToolCall, Usage};
 
 /// DeepSeek 官方服务地址（OpenAI 兼容）。
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+
+/// 用户填写的上下文窗口允许范围（token）：太小必然是配置错误，太大则是手滑多打了零。
+pub const MIN_CONTEXT_WINDOW_TOKENS: u64 = 1024;
+pub const MAX_CONTEXT_WINDOW_TOKENS: u64 = 10_000_000;
 
 /// 模型服务的配置。Key 不在这里持久化，由调用方从本地 Key 文件取出后填入。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -27,6 +32,10 @@ pub struct ProviderConfig {
     pub api_options: Value,
     #[serde(default = "default_max_tokens")]
     pub max_output_tokens: u32,
+    /// 当前端点/模型/协议的上下文窗口（token）。None = 用文档确认的服务商预设；
+    /// 未知模型在发送前报错要求填写，不猜窗口（旧配置没有这个字段，必须能照常加载）。
+    #[serde(default)]
+    pub context_window: Option<u64>,
     pub base_url: String,
     pub model: String,
     #[serde(skip)]
@@ -71,6 +80,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_format", &self.api_format)
             .field("api_options", &self.api_options)
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("context_window", &self.context_window)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field(
@@ -93,6 +103,7 @@ impl ProviderConfig {
             api_format: ApiFormat::ChatCompletions,
             api_options: empty_options(),
             max_output_tokens: default_max_tokens(),
+            context_window: None,
             base_url: DEEPSEEK_BASE_URL.into(),
             model: model.into(),
             api_key,
@@ -101,6 +112,30 @@ impl ProviderConfig {
             strict: false,
             timeout_seconds: default_timeout(),
         }
+    }
+
+    /// 这个配置的上下文窗口与来源：用户显式填写优先（校验范围）；
+    /// 否则只认文档确认的 DeepSeek V4 预设。其它模型/地址/协议没有可靠值 → 报错要求填写，
+    /// 不猜一个窗口然后发超窗请求（docs/design-ai-assistant.md §3.1）。
+    pub fn effective_context_window(&self) -> Result<(u64, WindowSource)> {
+        if let Some(window) = self.context_window {
+            if !(MIN_CONTEXT_WINDOW_TOKENS..=MAX_CONTEXT_WINDOW_TOKENS).contains(&window) {
+                bail!(
+                    "the configured context window must be between {MIN_CONTEXT_WINDOW_TOKENS} and {MAX_CONTEXT_WINDOW_TOKENS} tokens (got {window})"
+                );
+            }
+            return Ok((window, WindowSource::User));
+        }
+        let documented = adapters::provider_id(self) == "deepseek"
+            && adapters::service_host(self) == "api.deepseek.com"
+            && self.api_format == ApiFormat::ChatCompletions
+            && matches!(self.model.as_str(), "deepseek-flash" | "deepseek-v4-pro");
+        if documented {
+            return Ok((CONTEXT_WINDOW_TOKENS, WindowSource::Preset));
+        }
+        bail!(
+            "the context window for this model endpoint is unknown; set the context window (in tokens) in the assistant model settings, or use a documented DeepSeek model (deepseek-flash / deepseek-v4-pro) on the official endpoint"
+        )
     }
 }
 
@@ -153,6 +188,104 @@ pub trait Provider: Send + Sync {
     ) -> Result<Turn> {
         self.complete(messages, tools, on_event)
     }
+    /// 这次请求的上下文预算。None = 不启用窗口预算，沿用固定阈值折叠（脚本化测试 Provider、
+    /// 不声明窗口的旧配置）；Some 时发送前必须满足估算输入 + 输出预留 + 安全余量 ≤ 窗口。
+    fn budget_limits(&self) -> Result<Option<BudgetLimits>> {
+        Ok(None)
+    }
+    /// 实际会发送的请求体（已合并 api_options）。预算估算与发送必须共用同一构造；
+    /// None = 该 Provider 不暴露请求体，声明预算时无法估算（会当作配置错误在发送前报错）。
+    fn request_body(&self, _messages: &[Message], _tools: &[Value]) -> Result<Option<Value>> {
+        Ok(None)
+    }
+}
+
+/// 构造真正要发送的请求体：Chat Completions 用兼容体，Responses / Anthropic 用原生体，
+/// 并做与以前 `complete_http` 相同的推理参数校验。预算估算（`Provider::request_body`）与
+/// 实际发送（`complete_http`）都走这里，保证估算/预留/发送是同一份请求。
+pub fn build_request(
+    config: &ProviderConfig,
+    messages: &[Message],
+    tools: &[Value],
+) -> Result<Value> {
+    let body = match config.api_format {
+        ApiFormat::ChatCompletions => request_body(config, messages, tools),
+        ApiFormat::Responses | ApiFormat::Anthropic => {
+            adapters::native_body(config, messages, tools)?
+        }
+    };
+    adapters::validate_reasoning(config, &body)?;
+    Ok(body)
+}
+
+/// 最终请求体里真正生效的输出 token 上限，并顺带校验 `api_options` 对输出键的覆盖自洽。
+/// 预算预留必须等于服务商眼中的输出上限：估算预留一套、发送另一套会让窗口判断失真，
+/// 所以冲突（协议不认的键、两键并存但值不同、非正数）在发送前就报错。
+pub fn effective_max_output(body: &Value, format: ApiFormat) -> Result<u64> {
+    let forbidden: &[&str] = match format {
+        ApiFormat::ChatCompletions => &[],
+        ApiFormat::Responses => &["max_tokens", "max_completion_tokens"],
+        ApiFormat::Anthropic => &["max_output_tokens", "max_completion_tokens"],
+    };
+    for key in forbidden {
+        if body.get(*key).is_some() {
+            let allowed = match format {
+                ApiFormat::ChatCompletions => "max_tokens or max_completion_tokens",
+                ApiFormat::Responses => "max_output_tokens",
+                ApiFormat::Anthropic => "max_tokens",
+            };
+            bail!(
+                "api_options sets {key}, which this API format does not use as its output token limit; use {allowed} instead"
+            );
+        }
+    }
+    let key = match format {
+        ApiFormat::ChatCompletions => {
+            let max_tokens = output_tokens(body, "max_tokens")?;
+            let max_completion = output_tokens(body, "max_completion_tokens")?;
+            return match (max_tokens, max_completion) {
+                (Some(first), Some(second)) if first != second => bail!(
+                    "the request sets both max_tokens ({first}) and max_completion_tokens ({second}) to different values; keep only one so the context budget reserves the output limit that is actually sent"
+                ),
+                (Some(value), _) | (_, Some(value)) => {
+                    anyhow::ensure!(
+                        value > 0,
+                        "the output token limit must be greater than zero (got {value})"
+                    );
+                    Ok(value)
+                }
+                (None, None) => bail!(
+                    "the request body has no output token limit; set max_tokens or max_completion_tokens in the assistant model settings"
+                ),
+            };
+        }
+        ApiFormat::Responses => "max_output_tokens",
+        ApiFormat::Anthropic => "max_tokens",
+    };
+    let value = output_tokens(body, key)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "the request body has no output token limit; the context budget cannot reserve space for a reply"
+        )
+    })?;
+    anyhow::ensure!(
+        value > 0,
+        "the output token limit must be greater than zero (got {value})"
+    );
+    Ok(value)
+}
+
+/// 读一个输出 token 字段；不存在返回 None，存在但不是正整数 token 数就报错（非数字、0、负数、小数）。
+fn output_tokens(body: &Value, key: &str) -> Result<Option<u64>> {
+    let Some(value) = body.get(key) else {
+        return Ok(None);
+    };
+    let Some(tokens) = value.as_u64() else {
+        bail!("{key} must be a positive integer number of tokens (got {value})");
+    };
+    if tokens == 0 {
+        bail!("{key} must be a positive integer number of tokens (got 0)");
+    }
+    Ok(Some(tokens))
 }
 
 fn qwen_38(config: &ProviderConfig) -> bool {
@@ -381,6 +514,23 @@ impl Provider for OpenAiCompatible {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<Turn> {
         complete_http(&self.config, &self.agent, messages, tools, on_event, cancel)
+    }
+    fn budget_limits(&self) -> Result<Option<BudgetLimits>> {
+        let (window_tokens, source) = self.config.effective_context_window()?;
+        // 输出 token 键与对话内容无关：空历史也能构造出与最终发送一致的 body,
+        // 于是 api_options 的输出键冲突会在这里（任何 HTTP 请求之前）暴露。
+        let body = build_request(&self.config, &[], &[])?;
+        let output_tokens = effective_max_output(&body, self.config.api_format)?;
+        Ok(Some(BudgetLimits {
+            window_tokens,
+            output_tokens,
+            safety_tokens: safety_margin(window_tokens),
+            source,
+        }))
+    }
+    fn request_body(&self, messages: &[Message], tools: &[Value]) -> Result<Option<Value>> {
+        // 与 complete_http 同一个构造，估算口径不会和实际发送分叉。
+        build_request(&self.config, messages, tools).map(Some)
     }
 }
 

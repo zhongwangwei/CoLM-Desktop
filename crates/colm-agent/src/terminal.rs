@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const HELP: &str = "CoLM terminal assistant\n\n  colm-agent chat [OPTIONS]\n  colm-agent config [OPTIONS]\n  colm-agent --data-dir PATH --cli PATH --key-file PATH  (JSONL service)\n\nOptions (saved without API keys):\n  --data-dir PATH  --config PATH  --cli PATH  --key-file PATH\n  --project-root PATH  --docs-root PATH  --kernel-dir PATH  --servers PATH\n  --backend builtin|codex|claude_code|opencode\n  --base-url URL  --provider-id ID  --model MODEL\n  --api-format chat_completions|responses|anthropic\n  --thinking true|false  --reasoning-effort VALUE\nChat only: --message TEXT (one turn; approvals denied), --resume SESSION\n\nStore API keys using stdin:\n  colm-agent --key-file ~/.colm-agent/keys.json --set-key https://api.deepseek.com\n\nChat commands: /help /new /sessions /resume ID /cancel /exit\nWrites and runs require explicit approval. Type y or n at the approval prompt.\n";
+const HELP: &str = "CoLM terminal assistant\n\n  colm-agent chat [OPTIONS]\n  colm-agent config [OPTIONS]\n  colm-agent --data-dir PATH --cli PATH --key-file PATH  (JSONL service)\n\nOptions (saved without API keys):\n  --data-dir PATH  --config PATH  --cli PATH  --key-file PATH\n  --project-root PATH  --docs-root PATH  --kernel-dir PATH  --servers PATH\n  --backend builtin|codex|claude_code|opencode\n  --base-url URL  --provider-id ID  --model MODEL\n  --api-format chat_completions|responses|anthropic\n  --context-window TOKENS  (model context window; required for models without a documented preset)\n  --thinking true|false  --reasoning-effort VALUE\nChat only: --message TEXT (one turn; approvals denied), --resume SESSION\n\nStore API keys using stdin:\n  colm-agent --key-file ~/.colm-agent/keys.json --set-key https://api.deepseek.com\n\nChat commands: /help /new /sessions /resume ID /cancel /exit\nWrites and runs require explicit approval. Type y or n at the approval prompt.\n";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +39,9 @@ struct Config {
 impl Config {
     fn new() -> Result<Self> {
         Ok(Self {
-            provider: ProviderConfig::deepseek("deepseek-chat", String::new()),
+            // deepseek-chat 已停用，而且新逻辑只对文档确认的 deepseek-flash / deepseek-v4-pro
+            // 用预设窗口；默认选前者，免得开箱即报“未知窗口”。
+            provider: ProviderConfig::deepseek("deepseek-flash", String::new()),
             backend: BackendKind::Builtin,
             external: ExternalChoice::default(),
             project_root: std::env::current_dir()?,
@@ -183,6 +185,7 @@ fn options(args: &[String]) -> Result<std::collections::BTreeMap<String, String>
         "--provider-id",
         "--model",
         "--api-format",
+        "--context-window",
         "--thinking",
         "--reasoning-effort",
         "--message",
@@ -222,6 +225,7 @@ fn apply(c: &mut Config, o: &std::collections::BTreeMap<String, String>) -> Resu
                 c.external.model = Some(v.clone());
             }
             "--api-format" => c.provider.api_format = serde_json::from_value(json!(v))?,
+            "--context-window" => c.provider.context_window = Some(parse_context_window(v)?),
             "--thinking" => {
                 c.provider.thinking = Some(v.parse().context("thinking must be true or false")?)
             }
@@ -248,6 +252,23 @@ fn apply(c: &mut Config, o: &std::collections::BTreeMap<String, String>) -> Resu
         bail!("base URL must be HTTP(S) without credentials, query or fragment");
     }
     Ok(())
+}
+/// `--context-window`：只接受合理范围的整数 token；非法值在写配置前报错。
+fn parse_context_window(value: &str) -> Result<u64> {
+    let window = value
+        .trim()
+        .parse::<u64>()
+        .context("context window must be a whole number of tokens")?;
+    if !(crate::provider::MIN_CONTEXT_WINDOW_TOKENS..=crate::provider::MAX_CONTEXT_WINDOW_TOKENS)
+        .contains(&window)
+    {
+        bail!(
+            "context window must be between {} and {} tokens",
+            crate::provider::MIN_CONTEXT_WINDOW_TOKENS,
+            crate::provider::MAX_CONTEXT_WINDOW_TOKENS
+        );
+    }
+    Ok(window)
 }
 fn absolute(value: &str) -> Result<PathBuf> {
     let p = PathBuf::from(value);
@@ -1027,5 +1048,73 @@ finally:
             .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(status.success());
+    }
+    #[test]
+    fn default_model_uses_the_documented_deepseek_preset() {
+        let config = Config::new().unwrap();
+        assert_eq!(config.provider.model, "deepseek-flash");
+        assert_eq!(config.provider.context_window, None);
+        assert!(HELP.contains("--context-window"));
+    }
+    #[test]
+    fn context_window_flag_is_bounded_and_persisted() {
+        let mut config = Config::new().unwrap();
+        let opts = options(&["--context-window", "200000"].map(String::from)).unwrap();
+        apply(&mut config, &opts).unwrap();
+        assert_eq!(config.provider.context_window, Some(200_000));
+        // configure 消息经 JSON 交给 Agent 进程：窗口必须原样到达 ProviderConfig。
+        let provider: crate::provider::ProviderConfig =
+            serde_json::from_value(config.configure()["provider"].clone()).unwrap();
+        assert_eq!(provider.context_window, Some(200_000));
+        assert!(options(&["--context-window", "1024"].map(String::from)).is_ok());
+        for invalid in ["0", "1023", "10000001", "many", "-1"] {
+            let mut config = Config::new().unwrap();
+            let opts = options(&["--context-window", invalid].map(String::from)).unwrap();
+            let error = apply(&mut config, &opts).unwrap_err().to_string();
+            assert!(
+                error.contains("context window") || error.contains("context"),
+                "{invalid}: {error}"
+            );
+            assert_eq!(
+                config.provider.context_window, None,
+                "an invalid flag must not be persisted: {invalid}"
+            );
+        }
+        // 未知模型可以靠显式窗口使用：预算解析走用户值。
+        let mut custom = Config::new().unwrap();
+        let opts = options(
+            &[
+                "--base-url",
+                "https://custom.example/v1",
+                "--model",
+                "local",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        apply(&mut custom, &opts).unwrap();
+        assert!(custom.provider.effective_context_window().is_err());
+        let opts = options(&["--context-window", "32768"].map(String::from)).unwrap();
+        apply(&mut custom, &opts).unwrap();
+        assert_eq!(
+            custom.provider.effective_context_window().unwrap(),
+            (32_768, crate::context::WindowSource::User)
+        );
+    }
+    #[test]
+    fn old_config_files_without_a_context_window_still_load() {
+        let legacy = r#"{
+            "provider": {"base_url": "https://api.deepseek.com", "model": "deepseek-flash"},
+            "project_root": "."
+        }"#;
+        let config: Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.provider.context_window, None);
+        assert_eq!(
+            config.provider.effective_context_window().unwrap(),
+            (
+                crate::context::CONTEXT_WINDOW_TOKENS,
+                crate::context::WindowSource::Preset
+            )
+        );
     }
 }

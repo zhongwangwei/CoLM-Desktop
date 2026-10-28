@@ -106,7 +106,9 @@ impl Agent<'_> {
                 );
             }
             let mut summary_history;
-            let messages = if finalizing {
+            // 总结请求发空工具集；这里固定一个空切片，避免 `&[]` 临时值跨语句借用的麻烦。
+            let empty_tools: [Value; 0] = [];
+            let (messages, send_tools): (&[Message], &[Value]) = if finalizing {
                 // 运行控制提示只用于本次请求，不伪装成用户保存的消息。
                 summary_history = history.clone();
                 let reason = if repeated_reads >= 3 {
@@ -117,34 +119,76 @@ impl Agent<'_> {
                 summary_history.push(Message::User {
                     content: format!("[Turn execution limit] {reason} Tools are unavailable for this response. Give a concise final answer in the user's language using the evidence already collected: confirmed progress, unresolved work, and the next useful step. Do not claim completion or scientific validation without evidence. If a job is still running, report its last observed status; do not pretend to keep monitoring after this reply."),
                 });
-                &summary_history
+                (&summary_history, &empty_tools)
             } else {
-                &*history
+                (&*history, &tools)
             };
-            // 只压缩发给模型的副本；history/会话记录保持原文。接近 90% 窗口时才折叠旧工具结果，
-            // 每次仍把估算和折叠数量告诉 GUI，80% 起用户就能看到提示。
-            let prepared = crate::context::prepare(messages);
-            let (request_messages, estimated_tokens, compressed_tools) = match prepared {
-                Some(prepared) => (
-                    prepared.messages,
-                    prepared.estimated_tokens,
-                    prepared.compressed_tools,
-                ),
-                None => (
-                    messages.to_vec(),
-                    crate::context::estimate_tokens(messages),
-                    0,
-                ),
+            // 每步发送前解析窗口预算。解析失败（未知窗口、api_options 输出键冲突）必须在这里
+            // 结束本轮：不在解析失败后调用模型，也不继续派生新的工具调用。
+            let budget = self.provider.budget_limits()?;
+            let request_messages = match budget {
+                Some(limits) => {
+                    // 估算用 Provider 实际会发送的请求体（与 complete_* 同一个 build_request），
+                    // 折叠只改发送副本，history/会话记录保持原文。
+                    let build = |messages: &[Message], tools: &[Value]| {
+                        self.provider.request_body(messages, tools)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "the model provider declares a context budget but does not expose the request body used to estimate it; enable the context window only for providers that can be estimated"
+                            )
+                        })
+                    };
+                    let prepared = crate::context::prepare_within_budget(
+                        messages, send_tools, &limits, build,
+                    )?;
+                    emit(Outbound::Context {
+                        estimated_tokens: prepared.estimated_tokens,
+                        window_tokens: limits.window_tokens,
+                        compressed_tools: prepared.compressed_tools,
+                        available_input_tokens: Some(
+                            limits
+                                .window_tokens
+                                .saturating_sub(prepared.estimated_tokens)
+                                .saturating_sub(limits.output_tokens)
+                                .saturating_sub(limits.safety_tokens),
+                        ),
+                        output_reserve_tokens: limits.output_tokens,
+                        safety_margin_tokens: limits.safety_tokens,
+                        window_source: Some(limits.source.as_str().to_owned()),
+                    });
+                    prepared.messages
+                }
+                None => {
+                    // 没有声明窗口的 Provider（脚本化测试 Provider、旧配置）保持原来的固定阈值折叠，
+                    // 事件里 available_input_tokens/window_source 为 None 表示未启用预算。
+                    let prepared = crate::context::prepare(messages);
+                    let (request_messages, estimated_tokens, compressed_tools) = match prepared {
+                        Some(prepared) => (
+                            prepared.messages,
+                            prepared.estimated_tokens,
+                            prepared.compressed_tools,
+                        ),
+                        None => (
+                            messages.to_vec(),
+                            crate::context::estimate_tokens(messages),
+                            0,
+                        ),
+                    };
+                    emit(Outbound::Context {
+                        estimated_tokens,
+                        window_tokens: crate::context::CONTEXT_WINDOW_TOKENS,
+                        compressed_tools,
+                        available_input_tokens: None,
+                        output_reserve_tokens: 0,
+                        safety_margin_tokens: 0,
+                        window_source: None,
+                    });
+                    request_messages
+                }
             };
-            emit(Outbound::Context {
-                estimated_tokens,
-                window_tokens: crate::context::CONTEXT_WINDOW_TOKENS,
-                compressed_tools,
-            });
             let mut final_events = Vec::new();
             let mut turn = self.provider.complete_cancellable(
                 &request_messages,
-                if finalizing { &[] } else { &tools },
+                send_tools,
                 &mut |event| {
                     if finalizing {
                         final_events.push(event);

@@ -1,6 +1,6 @@
 use super::*;
 
-fn service_host(c: &ProviderConfig) -> &str {
+pub(super) fn service_host(c: &ProviderConfig) -> &str {
     c.base_url
         .split_once("://")
         .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
@@ -211,7 +211,7 @@ pub(super) fn native_body(
     Ok(body)
 }
 
-fn validate_reasoning(c: &ProviderConfig, body: &Value) -> Result<()> {
+pub(super) fn validate_reasoning(c: &ProviderConfig, body: &Value) -> Result<()> {
     let provider = provider_id(c);
     let sol = provider == "openai" && c.model == "gpt-6.1-sol";
     let sonnet = provider == "anthropic" && c.model == "claude-sonnet-5-5";
@@ -422,12 +422,8 @@ pub(super) fn complete_http(
     } else {
         request = request.header("Authorization", &format!("Bearer {}", c.api_key));
     }
-    let body = if c.api_format == ApiFormat::ChatCompletions {
-        request_body(c, messages, tools)
-    } else {
-        native_body(c, messages, tools)?
-    };
-    validate_reasoning(c, &body)?;
+    // 与预算估算共用同一个请求构造（provider::build_request）：估算的字符数就是这里要发的 JSON。
+    let body = build_request(c, messages, tools)?;
     let response = request.send_json(body).map_err(transport_error)?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {

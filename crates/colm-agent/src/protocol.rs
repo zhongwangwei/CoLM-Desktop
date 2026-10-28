@@ -149,6 +149,19 @@ pub enum Outbound {
         estimated_tokens: u64,
         window_tokens: u64,
         compressed_tools: usize,
+        /// 窗口减去估算输入、输出预留与安全余量后还能容纳的输入估算；None = 未启用预算
+        /// （脚本化测试 Provider、外部后端）。
+        #[serde(default)]
+        available_input_tokens: Option<u64>,
+        /// 预算为最终请求体预留的输出 token（与 body 里的有效输出上限一致）；未启用预算时为 0。
+        #[serde(default)]
+        output_reserve_tokens: u64,
+        /// 协议/估算误差的安全余量；未启用预算时为 0。
+        #[serde(default)]
+        safety_margin_tokens: u64,
+        /// "user"（用户填写）| "preset"（文档确认的服务商预设）；未启用预算时 None。
+        #[serde(default)]
+        window_source: Option<String>,
     },
     TurnDone {
         content: String,
