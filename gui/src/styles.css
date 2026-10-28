@@ -806,13 +806,6 @@ table input {
 .desktop-shell.shell-nav-rail .nav-icon {
   margin-right: 0;
 }
-/* 专注视图：导航与助手都不渲染列，主区拿满窗口；工具栏留着，随时能退出。 */
-.desktop-shell.shell-focus {
-  grid-template-columns: minmax(0, 1fr);
-}
-.desktop-shell.shell-focus .main-pane {
-  grid-column: 1;
-}
 /* 覆盖式抽屉：不占网格列，浮在主区右侧；点遮罩、按 Escape、按工具栏开关都能收起。 */
 .desktop-shell.assistant-drawer .assistant-pane {
   position: fixed;

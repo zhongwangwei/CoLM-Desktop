@@ -59,18 +59,6 @@ test('960 / 1240 / 1440 wide windows decide assistant column, drawer and main wi
       assert.equal(open.mainWidth, width - open.sidebarWidth - 320, label);
       assert.ok(open.mainWidth >= MIN_MAIN_WIDTH, `${label} main keeps its minimum width`);
     }
-
-    const focus = at(width, { assistantOpen: true, focusMode: true });
-    assert.deepEqual(
-      {
-        nav: focus.nav,
-        assistant: focus.assistant,
-        main: focus.mainWidth,
-        splitter: focus.splitter,
-      },
-      { nav: 'hidden', assistant: 'hidden', main: width, splitter: false },
-      `${label} focus view gives the whole window to the workspace`,
-    );
   }
   // 三个基准点原样写出来，方便和审查数字对照：1240 展开助手时主区 712，1440 时 888。
   assert.equal(at(1240, { assistantOpen: true }).mainWidth, 712);
@@ -105,7 +93,7 @@ test('the assistant drawer starts at 1100px and a column never leaves the main a
   assert.equal(at(1240, { assistantOpen: true, assistantWidth: 600 }).mainWidth, MIN_MAIN_WIDTH);
 });
 
-test('navigation rail keeps the main area and hides itself only in focus view', () => {
+test('navigation rail keeps the main area on both narrow and wide windows', () => {
   const rail = at(960, { assistantOpen: true, navCollapsed: true });
   assert.equal(rail.nav, 'rail');
   assert.equal(rail.sidebarWidth, NAV_WIDTH_RAIL);
@@ -113,12 +101,6 @@ test('navigation rail keeps the main area and hides itself only in focus view', 
   const railColumn = at(1240, { assistantOpen: true, navCollapsed: true });
   assert.equal(railColumn.nav, 'rail');
   assert.equal(railColumn.mainWidth, 1240 - NAV_WIDTH_RAIL - 320);
-  // 专注视图优先于用户收起状态：导航与助手都不在网格里。
-  assert.equal(at(960, { navCollapsed: true, focusMode: true }).nav, 'hidden');
-  assert.equal(
-    at(960, { assistantOpen: true, navCollapsed: true, focusMode: true }).assistant,
-    'hidden',
-  );
 });
 
 test('assistant width inputs are clamped and invalid sizes do not produce negative layout', () => {
@@ -143,8 +125,9 @@ test('below 232/208px the full navigation stays selected while the column math s
   for (const width of [960, 1024, 1100, 1101, 1240, 1280, 1440, 1920]) {
     const closed = at(width);
     assert.equal(closed.sidebarWidth + closed.mainWidth, width);
-    const focused = at(width, { focusMode: true });
-    assert.equal(focused.mainWidth, width);
+    const rail = at(width, { navCollapsed: true });
+    assert.equal(rail.sidebarWidth, NAV_WIDTH_RAIL);
+    assert.equal(rail.sidebarWidth + rail.mainWidth, width);
   }
 });
 
@@ -168,7 +151,8 @@ test('styles.css exposes the U-06 classes without shrinking fonts', () => {
   );
   assert.match(css, /\.assistant-drawer-backdrop\s*\{[^}]*position:\s*fixed/);
   assert.match(css, /\.desktop-shell\.shell-nav-rail\s+\.nav-label\s*\{[^}]*display:\s*none/);
-  assert.match(css, /\.desktop-shell\.shell-focus\s+\.main-pane\s*\{[^}]*grid-column:\s*1/);
+  // 没有独立的"专注视图"：布局只由导航收起与助手开关两个状态决定。
+  assert.doesNotMatch(css, /shell-focus/);
   // 主区自身必须允许内部滚动/收缩，否则固定宽列的页面内容会让整个窗口横向溢出。
   assert.match(css, /\.main-pane\s*\{[^}]*min-width:\s*0/);
   assert.match(css, /\.main-pane\s*\{[^}]*overflow:\s*auto/);
@@ -187,7 +171,6 @@ function renderShell(
   options: {
     width?: number;
     assistantOpen?: boolean;
-    focusMode?: boolean;
     navCollapsed?: boolean;
     language?: 'zh' | 'en';
     assistantWidth?: number;
@@ -197,7 +180,6 @@ function renderShell(
   const computed = shellLayout({
     viewportWidth,
     assistantOpen: options.assistantOpen ?? false,
-    focusMode: options.focusMode ?? false,
     navCollapsed: options.navCollapsed ?? false,
     assistantWidth: options.assistantWidth ?? 320,
   });
@@ -207,13 +189,11 @@ function renderShell(
       language: options.language ?? 'zh',
       assistantOpen: options.assistantOpen ?? false,
       navCollapsed: options.navCollapsed ?? false,
-      focusMode: options.focusMode ?? false,
       sidebar: h('div', { className: 'sidebar-content' }, 'sidebar'),
       main: h('div', { className: 'main-content' }, 'main'),
       splitter: h('div', { className: 'assistant-splitter', role: 'separator' }),
       assistant: h('div', { className: 'assistant-content' }, 'assistant'),
       onToggleNav: () => {},
-      onToggleFocus: () => {},
       onToggleAssistant: () => {},
       onToggleLanguage: () => {},
       onCloseAssistant: () => {},
@@ -234,10 +214,7 @@ test('AppShell renders the computed mode classes, CSS variables and toolbar togg
     wide,
     /<button[^>]*class="button button-ghost toolbar-toggle"[^>]*>收起导航<\/button>/,
   );
-  assert.match(
-    wide,
-    /<button[^>]*class="button button-ghost toolbar-toggle"[^>]*>专注视图<\/button>/,
-  );
+  assert.doesNotMatch(wide, />专注视图<\/button>/, 'only one workspace-width switch');
   assert.match(wide, /aria-pressed="true"[^>]*>AI 助手<\/button>/);
 
   const narrow = renderShell({ width: 960, assistantOpen: true });
@@ -261,22 +238,6 @@ test('AppShell hides the splitter and shows the drawer only for overlay layouts'
   assert.doesNotMatch(wideColumn, /assistant-drawer-backdrop/);
 });
 
-test('focus view hides navigation and assistant but keeps a labelled exit in the toolbar', () => {
-  const markup = renderShell({ width: 1240, assistantOpen: true, focusMode: true });
-  assert.match(markup, /class="desktop-shell shell-nav-hidden shell-focus"/);
-  assert.doesNotMatch(markup, /id="app-sidebar"/);
-  assert.match(markup, /id="assistant-pane"[^>]*hidden/, 'assistant stays hidden');
-  assert.match(markup, />退出专注视图<\/button>/);
-  assert.match(markup, /aria-pressed="true"[^>]*>退出专注视图<\/button>/);
-  // 导航开关在专注视图里不可用；侧栏不在 DOM 里，所以也不再 aria-controls 一个不存在的节点。
-  assert.match(
-    markup,
-    /class="button button-ghost toolbar-toggle"[^>]*aria-pressed="false"[^>]*aria-expanded="false"[^>]*disabled/,
-  );
-  assert.doesNotMatch(markup, /aria-controls="app-sidebar"/);
-  assert.doesNotMatch(markup, /assistant-splitter/);
-});
-
 test('navigation rail marks the shell, keeps keyboard names and exposes bilingual labels', () => {
   const zh = renderShell({ width: 960, assistantOpen: true, navCollapsed: true });
   assert.match(zh, /class="desktop-shell shell-nav-rail assistant-drawer"/);
@@ -284,7 +245,6 @@ test('navigation rail marks the shell, keeps keyboard names and exposes bilingua
   assert.match(zh, /aria-controls="app-sidebar"[^>]*aria-expanded="false"/);
   const en = renderShell({ width: 1240, language: 'en', navCollapsed: true });
   assert.match(en, />Expand navigation<\/button>/);
-  assert.match(en, />Focus view<\/button>/);
   assert.match(en, />AI assistant<\/button>/);
   assert.match(en, /aria-label="Main navigation"/);
 });

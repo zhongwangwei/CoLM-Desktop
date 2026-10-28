@@ -5,32 +5,33 @@
  * 1240px 窗口主区约 712px。这里把"侧栏 full/rail、助手分栏/覆盖抽屉、主区宽度"算成纯数据，
  * App 只负责套类名和 CSS 变量，测试可以在没有真实浏览器的情况下覆盖各尺寸组合。
  *
- * 三条规则：
+ * 两条规则：
  * 1. 窄窗口（≤ 1100px）助手改成覆盖式抽屉，不占网格列——主区立刻多出 280–600px；
  * 2. 分栏模式下助手宽度最多让主区保持 MIN_MAIN_WIDTH，拖动条只在分栏时存在（宽度会被夹住，
- *    不会出现"越拖主区越窄"）；
- * 3. 专注视图隐藏导航与助手，主区拿满窗口；仍由工具栏提供退出入口。
+ *    不会出现"越拖主区越窄"）。
+ *
+ * 只有"收起导航"一个视图开关：它保留导航、仍可点；想再腾地方时把助手一起关掉即可（工具栏已有
+ * AI 助手开关），不再额外提供"专注视图"这个和前者重叠的开关。
  */
-export type ShellNav = 'full' | 'rail' | 'hidden';
+export type ShellNav = 'full' | 'rail';
 export type ShellAssistant = 'column' | 'drawer' | 'hidden';
 
 export type ShellLayout = {
   nav: ShellNav;
   assistant: ShellAssistant;
-  /** 侧栏实际占的网格宽度（rail 64、full 232/208、hidden 0）。 */
+  /** 侧栏实际占的网格宽度（rail 64、full 232/208）。 */
   sidebarWidth: number;
   /** 助手实际占的宽度：分栏是网格列宽，抽屉是覆盖层宽度，隐藏为 0。 */
   assistantWidth: number;
-  /** 主工作区可用宽度；分栏、抽屉、专注都由它证明"主区没有被挤没"。 */
+  /** 主工作区可用宽度；分栏、抽屉都由它证明"主区没有被挤没"。 */
   mainWidth: number;
-  /** 拆分条只在分栏模式显示；抽屉与专注视图没有可拖的列。 */
+  /** 拆分条只在分栏模式显示；抽屉没有可拖的列。 */
   splitter: boolean;
 };
 
 export type ShellLayoutInput = {
   viewportWidth: number;
   assistantOpen: boolean;
-  focusMode?: boolean;
   navCollapsed?: boolean;
   assistantWidth?: number;
 };
@@ -56,15 +57,6 @@ export function shellLayout(input: ShellLayoutInput): ShellLayout {
   const viewport = Number.isFinite(input.viewportWidth)
     ? Math.max(0, Math.round(input.viewportWidth))
     : 0;
-  if (input.focusMode === true)
-    return {
-      nav: 'hidden',
-      assistant: 'hidden',
-      sidebarWidth: 0,
-      assistantWidth: 0,
-      mainWidth: viewport,
-      splitter: false,
-    };
   const nav: ShellNav = input.navCollapsed === true ? 'rail' : 'full';
   const sidebarWidth =
     nav === 'rail'
