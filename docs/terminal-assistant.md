@@ -17,11 +17,12 @@
 ```sh
 colm-agent config --project-root /你的项目目录 \
   --base-url https://你的服务地址/v1 --provider-id custom \
-  --model 你的模型名称 --api-format chat_completions
+  --model 你的模型名称 --api-format chat_completions \
+  --context-window 200000
 colm-agent chat
 ```
 
-`--api-format` 支持 `chat_completions`、`responses`、`anthropic`。`--thinking true|false` 与 `--reasoning-effort 值` 会交给现有服务商适配器；不同模型支持的取值不同，配置成功不表示服务商接受该组合。也可以编辑配置中的 `provider.api_options`、`max_output_tokens` 与 `timeout_seconds`。
+`--api-format` 支持 `chat_completions`、`responses`、`anthropic`。`--thinking true|false` 与 `--reasoning-effort 值` 会交给现有服务商适配器；不同模型支持的取值不同，配置成功不表示服务商接受该组合。也可以编辑配置中的 `provider.api_options`、`provider.context_window`、`max_output_tokens` 与 `timeout_seconds`。`--context-window` 是当前端点/模型/API 格式的上下文窗口（1024–10000000 token）；只有文档确认的 DeepSeek V4 模型在官方地址上留空才自动取 1M，其它模型必须填写，否则发送前会明确要求填写而不是猜一个窗口。内置 API 后端按这个窗口预留输入、输出与安全余量。
 
 API Key 不写入模型配置或聊天。交互式保存时使用隐藏输入：
 

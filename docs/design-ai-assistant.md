@@ -57,7 +57,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - **工具的实现方式**：绝大多数调用现有 `colm-cli` 子命令，取它的 JSON 输出；代码类工具在工作区里调 git、ripgrep、cargo 和 `build_kernel.sh`，或者调 `run-7920`。
 - **GUI 与 `colm-agent` 之间**用 stdio JSONL：
   - GUI 发给 agent：`user_message`、`approval_decision`、`cancel`、`config`；
-  - agent 发给 GUI：`assistant_delta`、`reasoning_delta`、`tool_call`、`tool_result`、`approval_request`、`turn_done`、`error`、`usage`。
+  - agent 发给 GUI：`assistant_delta`、`reasoning_delta`、`tool_call`、`tool_result`、`approval_request`、`turn_done`、`error`、`usage`，以及每次请求前的 `context`（估算输入、有效窗口、可用输入预算、输出预留、安全余量与窗口来源）。
   - Tauri 侧只做转发和存放 API Key。
 
 ## 3. 模型与后端
@@ -82,7 +82,9 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 
 内置 API 后端每轮最多生成 40 次，最后一次预留给无工具的进度总结。连续三轮调用同一组只读工具及相同 JSON 参数时，提前转入总结；改变查询参数或执行操作后重新计数。总结只引用已有证据，区分已确认进度与未完成工作，不把答复结束当成计算或验收完成。控制提示不写成用户历史；总结请求忽略强制选工具配置，模型仍返回工具调用或空答复时不执行新操作，显示未确认完成的提示。取消与 API 错误仍按原有机制处理。外部 Codex、Claude Code、OpenCode 的执行循环由各自后端管理。
 
-单次请求的上下文预算按 DeepSeek V4 的 1M token 窗口估算（字符数保守估计）。达到 80% 时 GUI 提示接近窗口；达到 90% 时 agent 自动把较早的工具结果折叠成短摘要，保留最近 8 条工具结果、随后按 4/2 条继续折叠，工具调用 id、助手消息和对话骨架不变。折叠只作用于发给模型的副本，转录仍完整保存在本机会话文件；GUI 显示折叠了多少条。会话累计预算保持 5M token（0 = 不限），达到 80% 只提示，不压缩已花费 token。
+单次请求的上下文预算按**当前配置的有效窗口**计算，不再固定用 DeepSeek V4 的 1M。窗口与端点、模型和 API 格式绑定：用户在助手设置的“高级设置 → 上下文窗口”显式填写的值优先（1024–10000000 token）；留空时只对文档确认的模型（官方 `https://api.deepseek.com` + Chat Completions + `deepseek-flash` / `deepseek-v4-pro`）取 1M 预设，其它模型/地址/协议留空会在发送前报错要求填写，不猜窗口。直接修改模型、地址或协议会清空上一配置的窗口；切换服务商时恢复该服务自己的已保存 profile（含窗口）；旧设置文件缺这个字段时按“留空”加载。终端用 `--context-window TOKENS` 或配置里的 `provider.context_window` 设置。
+
+预算与实际发送共用同一个请求构造：按消息、工具 schema、实际回传的 reasoning/provider_state、协议开销、`api_options` 覆盖后真正生效的输出上限，再加安全余量（窗口的 2%，1k–16k）估算；估算用实际请求体的字符数作保守上界，GUI 明确标注为估算而不是精确 token。达到 80% 时提示接近窗口；超出预算时只折叠发往模型的副本（保留最近 8/4/2/0 条工具结果逐级折叠，工具调用 id、配对、顺序、助手消息、reasoning 与 provider_state、签名和工具参数 JSON 都不改），每级重建请求体重新估算；仍超限则停止发送并说明如何缩短输入、调大窗口或调低输出上限——不调用服务商、不无限重试，也不重复已经完成的工具副作用。最后一次无工具的总结同样按实际空工具集与收尾提示估算。折叠只作用于发给模型的副本，转录仍完整保存在本机会话文件；GUI 显示折叠了多少条与可用输入估算。会话累计预算保持 5M token（0 = 不限）、40 次生成上限也继续独立；外部 Codex、Claude Code、OpenCode 后端自行管理上下文，切到外部后端后 GUI 不再显示内置 API 的估算。
 
 长任务用专门的状态工具确认进度，仍在运行就报告最近状态并结束当前答复，不靠重复列目录等待，也不宣称已注册后台监控。内置示例按向导、元数据、算例配置和环境检查完成设置；只有具体疑点需要源码检索。
 
