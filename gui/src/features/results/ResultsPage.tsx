@@ -35,6 +35,19 @@ import {
   overviewRunLocation,
 } from './result-overview';
 import {
+  comparisonCsv,
+  comparisonKey,
+  exportGate,
+  fresh,
+  singleKey,
+  type ComparisonRequest,
+  type ComparisonResult,
+  type EvaluationAvailability,
+  type SingleRequest,
+  type SingleResult,
+} from './analysis-state';
+import { timeBasisLabel, timeBasisOf, type TimeBasis } from './time-basis';
+import {
   chartVariables,
   isGridCatalog,
   readErrorText,
@@ -87,6 +100,29 @@ type Metric = ResultMetric & {
   model?: (number | null)[];
   obs?: (number | null)[];
   units?: string;
+  /** 旧后端字段：`measured_only` / `finite_only`；新后端由 `qc_kind` 取代。 */
+  quality_control?: string;
+  /**
+   * 后端第一批新增的观测语义字段。旧 sidecar / 远程旧二进制没有这些字段，页面按旧行为显示
+   * （单位取 `units`、QC 取 `quality_control`、订正与覆盖率显示 —）。
+   */
+  output_frequency?: string;
+  model_label_position?: string;
+  obs_label_position?: string;
+  obs_label_position_source?: string;
+  coverage?: number | null;
+  coverage_min?: number | null;
+  low_coverage_pairs?: number | null;
+  warnings?: string[];
+  source_units?: string | null;
+  units_assumed?: boolean;
+  qc_kind?: string;
+  qc_variable?: string | null;
+  qc_rule?: string | null;
+  correction_status?: string;
+  correction_variable?: string | null;
+  correction_reason?: string | null;
+  time_basis?: TimeBasis;
 };
 const tabs = [
   'overview',
@@ -198,6 +234,68 @@ function runLabel(path: string) {
 }
 const number = (v: unknown, digits = 3) =>
   typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '—';
+/**
+ * 指标行的观测语义列：QC 来源、能量闭合订正、有效覆盖率。
+ * 后端第一批字段缺失时（旧 sidecar / 远程旧二进制）退回旧行为：QC 用 `quality_control`，
+ * 订正与覆盖率显示 —，不猜。
+ */
+function metricQcLabel(metric: Metric, en: boolean): string {
+  const kind = metric.qc_kind ?? metric.quality_control;
+  if (!kind) return '—';
+  if (kind === 'measured_only') return en ? 'Measured QC' : '实测 QC';
+  if (kind === 'generated_validity') return en ? 'Generated validity mask' : '生成有效性掩码';
+  if (kind === 'finite_only') return en ? 'Finite values only' : '仅有限值';
+  return kind;
+}
+function metricQcTitle(metric: Metric): string | undefined {
+  const parts = [metric.qc_variable, metric.qc_rule].filter(
+    (value): value is string => !!value && String(value).trim() !== '',
+  );
+  return parts.length ? parts.join(' · ') : undefined;
+}
+function metricCorrectionLabel(metric: Metric, en: boolean): string {
+  const status = metric.correction_status;
+  if (!status) return '—';
+  if (status === 'applied') return en ? 'Applied' : '已应用';
+  if (status === 'not_applied') return en ? 'Not applied' : '未应用';
+  if (status === 'not_requested') return en ? 'Not requested' : '未请求';
+  return status;
+}
+function metricCorrectionTitle(metric: Metric): string | undefined {
+  const parts = [metric.correction_variable, metric.correction_reason].filter(
+    (value): value is string => !!value && String(value).trim() !== '',
+  );
+  return parts.length ? parts.join(' · ') : undefined;
+}
+function metricCoverageText(metric: Metric): string {
+  const value = metric.coverage;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  // 后端给 0..1 的比例；也容忍已经乘过 100 的旧写法。
+  const percent = value <= 1 ? value * 100 : value;
+  return `${percent >= 10 ? Math.round(percent) : percent.toFixed(1)}%`;
+}
+/** 变量列的悬停说明：输出频率与两侧标签位置。没有这些字段的旧后端返回 undefined。 */
+function metricFrequencyTitle(metric: Metric, en: boolean): string | undefined {
+  const parts = [
+    metric.output_frequency &&
+      `${en ? 'Output frequency' : '输出频率'}: ${metric.output_frequency}`,
+    metric.model_label_position &&
+      `${en ? 'Model label' : '模型标签'}: ${metric.model_label_position}`,
+    metric.obs_label_position && `${en ? 'Obs label' : '观测标签'}: ${metric.obs_label_position}`,
+    metric.obs_label_position_source && `(${metric.obs_label_position_source})`,
+  ].filter((value): value is string => !!value && String(value).trim() !== '');
+  return parts.length ? parts.join(' · ') : undefined;
+}
+function metricCoverageTitle(metric: Metric): string | undefined {
+  const parts: string[] = [];
+  if (typeof metric.coverage_min === 'number' && Number.isFinite(metric.coverage_min))
+    parts.push(
+      `min ${Math.round((metric.coverage_min <= 1 ? metric.coverage_min * 100 : metric.coverage_min) * 10) / 10}%`,
+    );
+  if (typeof metric.low_coverage_pairs === 'number' && metric.low_coverage_pairs > 0)
+    parts.push(`${metric.low_coverage_pairs} pair(s) below coverage`);
+  return parts.length ? parts.join(' · ') : undefined;
+}
 export default function ResultsPage({
   casePath,
   onBack,
@@ -222,16 +320,16 @@ export default function ResultsPage({
   const [stationError, setStationError] = useState('');
   useEffect(() => setStationError(''), [caseDir]);
   const lock = useRef(false);
+  // 单站评估与多站比较各有自己的请求序号：页面的 epoch 只管"换站点/换运行/换条件"，
+  // 而切分析范围不会 bump 它，所以在途请求要靠这里各自作废，晚返回才不能写进新范围。
+  const requestSeq = useRef({ single: 0, multi: 0 });
   const cache = useRef(new Map<string, unknown>());
   const [seriesKey, setSeriesKey] = useState('');
   const [advanced, setAdvanced] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false),
     [runChooser, setRunChooser] = useState(false);
   const [catalogKey, setCatalogKey] = useState('');
-  const [singleEvaluation, setSingleEvaluation] = useState<{ key: string; rows: Metric[] } | null>(
-    null,
-  );
-  const evaluationKey = JSON.stringify({ caseDir, sourceVersion: versionId, revision });
+  const [singleResult, setSingleResult] = useState<SingleResult<Metric> | null>(null);
   const [baseline, setBaseline] = useState<BaselineComparison | null>(null);
   const [baselineNote, setBaselineNote] = useState('');
   const [reportFormat, setReportFormat] = useState<ReportFormat>('json');
@@ -270,10 +368,11 @@ export default function ResultsPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [series, setSeries] = useState<SeriesData | null>(null);
-  const [metrics, setMetrics] = useState<Metric[]>([]);
   const [diagnostic, setDiagnostic] = useState<EnergyDiagnostic | null>(null);
   // 多站点比较：选中运行（有序，每行一个观测文件）+ 项目里可比较的运行清单（一次 IPC 查完）。
   const [comparisonEntries, setComparisonEntries] = useState<ComparisonEntry[]>([]);
+  // 比较结果同样带条件快照；与单站结果完全分开，切换范围不再互相顶替。
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResult<Metric> | null>(null);
   const [projectRuns, setProjectRuns] = useState<ProjectRun[]>([]);
   const [projectRunsLoading, setProjectRunsLoading] = useState(false);
   const [projectRunsError, setProjectRunsError] = useState('');
@@ -290,32 +389,55 @@ export default function ResultsPage({
   const [comparisonVariable, setComparisonVariable] = useState('');
   // 站点清单按内容做依赖：`state.cases` 每次渲染都可能是新数组，直接放进 effect 依赖会无限重查。
   const caseDirsKey = state.cases.map((entry) => entry.dir).join('\n');
-  const [evaluation, setEvaluation] = useState<
-    {
-      name: string;
-      available: boolean;
-      reason?: string;
-      missing_model?: string[];
-      missing_observation?: string[];
-    }[]
-  >([]);
-  const selectionKey = JSON.stringify({ evaluationKey, source, obs, from, to, spinup, corrected });
+  // 两份结果都是「条件快照」：渲染与导出只读快照，不再共用一个 metrics 数组。
+  const evaluation: EvaluationAvailability[] = singleResult?.evaluation ?? [];
+  const singleRequest: SingleRequest = {
+    caseDir,
+    versionId,
+    revision,
+    source,
+    obs,
+    from,
+    to,
+    spinup,
+    corrected,
+  };
+  const selectionKey = singleKey(singleRequest);
+  const comparisonRequest: ComparisonRequest = {
+    entries: comparisonEntries.map((entry) => ({
+      runCase: entry.run.run_case,
+      obs: entry.obs.trim(),
+    })),
+    from,
+    to,
+    spinup,
+    corrected,
+  };
+  const comparisonFreshKey = comparisonKey(comparisonRequest);
+  const singleRows = singleResult?.rows ?? [];
+  const comparisonMetrics = comparisonResult?.rows ?? [];
+  const metrics = multiStation ? comparisonMetrics : singleRows;
+  const singleFresh = singleResult !== null && fresh(singleResult, selectionKey);
+  const comparisonFresh = comparisonResult !== null && fresh(comparisonResult, comparisonFreshKey);
+  const singleExportGate = exportGate(singleResult, selectionKey);
+  const comparisonExportGate = exportGate(comparisonResult, comparisonFreshKey);
+  const timeBasisText = timeBasisLabel(timeBasisOf(catalog ?? series), en);
   const selectedSeriesKey = JSON.stringify({ source, variable, from, to });
-  const selectedMetric =
-    singleEvaluation?.key === selectionKey
-      ? overviewMetric(singleEvaluation.rows, variable)
-      : undefined;
+  const selectedMetric = singleFresh ? overviewMetric(singleRows, variable) : undefined;
   const selectedRun = runs.find((r) => r.run_case === source);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
+    requestSeq.current.single++;
+    requestSeq.current.multi++;
     stationTarget.current = caseDir;
     cache.current.clear();
     setRuns([]);
     setSource('');
     setCatalog(null);
     setSeries(null);
-    setMetrics([]);
+    setSingleResult(null);
+    setComparisonResult(null);
     setDiagnostic(null);
     setObs('');
     observationEdited.current = false;
@@ -385,9 +507,9 @@ export default function ResultsPage({
     setError('');
     setCatalog(null);
     setSeries(null);
-    setMetrics([]);
+    setSingleResult(null);
+    setComparisonResult(null);
     setDiagnostic(null);
-    setEvaluation([]);
     setCatalogKey('');
     if (!source) return;
     void invokeJson<Catalog>('history_catalog', { case: source })
@@ -406,12 +528,20 @@ export default function ResultsPage({
       requestEpoch.current++;
     };
   }, [source, caseDir, versionId, revision]);
+  // 单站评估的输入条件变化：作废在途的单站请求并清掉旧快照（旧结果不能冒充新条件下的结果）。
   useEffect(() => {
     epoch.current++;
-    setMetrics([]);
+    requestSeq.current.single++;
+    setSingleResult(null);
     setDiagnostic(null);
-    setSingleEvaluation(null);
-  }, [from, to, obs, spinup, corrected, comparisonEntries]);
+  }, [source, obs, from, to, spinup, corrected]);
+  // 多站比较的条件是"有序运行清单 + 窗口 + spinup + 订正"：改任一项都作废旧比较快照；
+  // 编辑比较清单不应再清掉单站结果（旧实现共用 metrics 时正是这样串掉的）。
+  useEffect(() => {
+    requestSeq.current.multi++;
+    setComparisonResult(null);
+    setComparisonProgress(null);
+  }, [from, to, spinup, corrected, comparisonEntries]);
   useEffect(() => {
     setSeries(null);
     setSeriesKey('');
@@ -608,37 +738,57 @@ export default function ResultsPage({
     });
   const evaluate = () =>
     task(async (current) => {
-      if (!obs.trim()) throw new Error(tr('请填写真实观测文件路径', 'Provide an observation file'));
-      const days = Number(spinup);
+      // 请求条件在发起时定死；之后界面再改条件，这份结果也不会被当成新条件的结果。
+      const request = singleRequest;
+      const key = selectionKey;
+      requestSeq.current.single++;
+      const token = requestSeq.current.single;
+      const live = () => current() && requestSeq.current.single === token;
+      if (!request.obs.trim())
+        throw new Error(tr('请填写真实观测文件路径', 'Provide an observation file'));
+      const days = Number(request.spinup);
       if (!Number.isInteger(days) || days < 0)
         throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
-      const available = await invokeJson<typeof evaluation>('evaluation_catalog', {
-        case: source,
-        obs,
+      const available = await invokeJson<EvaluationAvailability[]>('evaluation_catalog', {
+        case: request.source,
+        obs: request.obs,
       });
-      if (!current()) return;
-      setEvaluation(available);
+      if (!live()) return [];
       const names = available.filter((v) => v.available).map((v) => v.name);
       if (!names.length) {
         const rows: Metric[] = [];
-        setMetrics(rows);
-        setSingleEvaluation({ key: selectionKey, rows });
-        setSettingsOpen(false);
+        if (live()) {
+          setSingleResult({
+            scope: 'single',
+            key,
+            request,
+            rows,
+            evaluation: available,
+            completedAt: Date.now(),
+          });
+          setSettingsOpen(false);
+        }
         return rows;
       }
       const rows = await invokeJson<Metric[]>('metrics', {
-        case: source,
-        obs,
+        case: request.source,
+        obs: request.obs,
         spinup: days,
-        corrected,
+        corrected: request.corrected,
         summaryOnly: false,
         pairVars: names,
         maxPoints: 2400,
         ...windowArgs(),
       });
-      if (current()) {
-        setMetrics(rows);
-        setSingleEvaluation({ key: selectionKey, rows });
+      if (live()) {
+        setSingleResult({
+          scope: 'single',
+          key,
+          request,
+          rows,
+          evaluation: available,
+          completedAt: Date.now(),
+        });
         setSettingsOpen(false);
       }
       return rows;
@@ -646,6 +796,7 @@ export default function ResultsPage({
   automaticEvaluator.current = () => run(evaluate);
   useEffect(() => {
     if (
+      multiStation ||
       busy ||
       !source ||
       catalogKey !== source ||
@@ -657,7 +808,7 @@ export default function ResultsPage({
       return;
     automaticEvaluation.current = selectionKey;
     automaticEvaluator.current();
-  }, [busy, source, catalogKey, obs, selectionKey]);
+  }, [busy, source, catalogKey, obs, selectionKey, multiStation]);
   const diagnose = () =>
     task(async (current) => {
       setDiagnostic(null);
@@ -674,9 +825,20 @@ export default function ResultsPage({
     });
   const compare = () =>
     task(async (current) => {
-      if (!Number.isInteger(Number(spinup)) || Number(spinup) < 0)
-        throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
       const entries = comparisonEntries;
+      // 比较条件在发起时定死：CSV 的条件列只读这份快照，不读导出时界面上的输入。
+      const request: ComparisonRequest = {
+        entries: entries.map((entry) => ({ runCase: entry.run.run_case, obs: entry.obs.trim() })),
+        from,
+        to,
+        spinup,
+        corrected,
+      };
+      requestSeq.current.multi++;
+      const token = requestSeq.current.multi;
+      const live = () => current() && requestSeq.current.multi === token;
+      if (!Number.isInteger(Number(request.spinup)) || Number(request.spinup) < 0)
+        throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
       if (!entries.length || entries.length > 20)
         throw new Error(bilingual('要选 1–20 个运行再比较', 'Select 1–20 runs to compare'));
       if (entries.some((entry) => !entry.obs.trim()))
@@ -703,7 +865,7 @@ export default function ResultsPage({
         const inventories = await boundedMap(dirs, 2, (dir) =>
           invokeJson<Run[]>('model_case_runs', { dir }).catch(() => []),
         );
-        if (!current()) return;
+        if (!live()) return [];
         sources = [...sources, ...inventories.flat()];
       }
       for (const entry of entries) {
@@ -712,29 +874,44 @@ export default function ResultsPage({
       }
       setComparisonProgress({ done: 0, total: entries.length });
       // 远程每行一次 SSH；10 个会话的上限内 6 路并行，90 个站点时比 4 路更快。
-      const rows = await boundedMap(entries, 6, async (entry) => {
-        const values = await invokeJson<Metric[]>('metrics', {
-          case: entry.run.run_case,
-          obs: entry.obs.trim(),
-          spinup: Number(spinup),
-          corrected,
-          summaryOnly: true,
-          pairVars: null,
-          maxPoints: 2400,
-          ...windowArgs(),
+      try {
+        const rows = await boundedMap(entries, 6, async (entry) => {
+          const values = await invokeJson<Metric[]>('metrics', {
+            case: entry.run.run_case,
+            obs: entry.obs.trim(),
+            spinup: Number(request.spinup),
+            corrected: request.corrected,
+            summaryOnly: true,
+            pairVars: null,
+            maxPoints: 2400,
+            ...windowArgs(),
+          });
+          if (live())
+            setComparisonProgress((previous) =>
+              previous ? { ...previous, done: previous.done + 1 } : previous,
+            );
+          return values.map((v) => ({
+            ...v,
+            site: entry.run.run_case,
+            comparison_obs: entry.obs.trim(),
+            provenance: sources.find((r) => r.run_case === entry.run.run_case) ?? entry.run,
+          }));
         });
-        setComparisonProgress((previous) =>
-          previous ? { ...previous, done: previous.done + 1 } : previous,
-        );
-        return values.map((v) => ({
-          ...v,
-          site: entry.run.run_case,
-          comparison_obs: entry.obs.trim(),
-          provenance: sources.find((r) => r.run_case === entry.run.run_case) ?? entry.run,
-        }));
-      });
-      setComparisonProgress(null);
-      if (current()) setMetrics(rows.flat());
+        if (live()) {
+          setComparisonResult({
+            scope: 'multi',
+            id: comparisonKey(request),
+            request,
+            rows: rows.flat(),
+            failures: [],
+            completedAt: Date.now(),
+          });
+        }
+        return rows.flat();
+      } finally {
+        // 与进度绑定：旧任务失败/晚返回不能在页面上留下"计算中"。
+        if (live()) setComparisonProgress(null);
+      }
     });
   function exportMessage(result: Awaited<ReturnType<typeof download>>) {
     if (result.status === 'cancelled') return tr('已取消导出。', 'Export cancelled.');
@@ -763,13 +940,17 @@ export default function ResultsPage({
       return { ...result, n: data.n, source_n: data.source_n, downsampled: false };
     });
   function reportData(): ResultReport {
+    // 报告只描述一份结果：单站评估快照。条件与变量可用性都取自快照，而不是当前界面输入。
+    const snapshot = singleResult;
+    const rows = snapshot?.rows ?? [];
+    const request = snapshot?.request;
     return {
       generated_at: new Date().toISOString(),
       source,
       provenance: runs.find((r) => r.run_case === source) || null,
       catalog,
-      evaluation,
-      metrics: metrics.map((metric) => {
+      evaluation: snapshot?.evaluation ?? [],
+      metrics: rows.map((metric) => {
         const summary = { ...metric };
         delete summary.time;
         delete summary.model;
@@ -780,11 +961,11 @@ export default function ResultsPage({
       baseline,
       baselineNote,
       conditions: {
-        obs,
-        from,
-        to,
-        spinup,
-        corrected,
+        obs: request?.obs ?? obs,
+        from: request?.from ?? from,
+        to: request?.to ?? to,
+        spinup: request?.spinup ?? spinup,
+        corrected: request?.corrected ?? corrected,
         comparisonSources: comparisonText(comparisonEntries),
       },
       notice: 'No automatic ranking across unequal inputs or evaluation conditions',
@@ -796,6 +977,19 @@ export default function ResultsPage({
       if (!catalog)
         throw new Error(
           bilingual('请先读出一次运行的结果再导出', 'Load a recorded result before exporting'),
+        );
+      // 报告带条件列，只允许导出与当前条件一致的已完成评估；否则下游会拿旧结果当新条件的报告。
+      if (!singleExportGate.ok)
+        throw new Error(
+          singleExportGate.reason === 'none'
+            ? bilingual(
+                '请先完成一次观测评估再导出报告',
+                'Run an observation evaluation before exporting the report',
+              )
+            : bilingual(
+                '评估条件已改，请重新评估后再导出报告',
+                'Evaluation conditions changed; re-run the evaluation before exporting the report',
+              ),
         );
       const data = reportData();
       if (reportFormat === 'pdf') {
@@ -823,6 +1017,8 @@ export default function ResultsPage({
     if (!state.cases.some((entry) => entry.dir === dir))
       throw new Error(tr('该站点不在当前项目中', 'This station is not in the current project'));
     epoch.current++;
+    requestSeq.current.single++;
+    requestSeq.current.multi++;
     stationTarget.current = dir;
     setStationError('');
     await task(async () => {
@@ -833,12 +1029,11 @@ export default function ResultsPage({
       setCatalogKey('');
       setSeries(null);
       setSeriesKey('');
-      setSingleEvaluation(null);
-      setMetrics([]);
+      setSingleResult(null);
+      setComparisonResult(null);
       setDiagnostic(null);
       setBaseline(null);
       setBaselineNote('');
-      setEvaluation([]);
       setRunChooser(false);
       try {
         // 没有结果 = 被后来的页面切换或打开取代了：不算切换失败、不报错，但还在本页时把原来的站点读回来。
@@ -979,71 +1174,20 @@ export default function ResultsPage({
   const exportComparison = () =>
     task(async (current) => {
       setExportNotice('');
-      if (!metrics.length)
+      // 只导出与当前条件一致的已完成比较快照；条件列取自快照 request，不读当前界面输入。
+      const gate = comparisonExportGate;
+      if (!gate.ok)
         throw new Error(
-          tr('先运行比较，再导出指标', 'Run the comparison before exporting metrics'),
+          gate.reason === 'none'
+            ? tr('先运行比较，再导出指标', 'Run the comparison before exporting metrics')
+            : tr(
+                '比较条件已改，请重新运行比较后再导出',
+                'Comparison conditions changed; run the comparison again before exporting',
+              ),
         );
-      const escape = (value: unknown) => {
-        const text = value == null ? '' : String(value);
-        return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-      };
-      const header = [
-        'site',
-        'run_case',
-        'status',
-        'version',
-        'observation',
-        'from',
-        'to',
-        'spinup',
-        'corrected',
-        'variable',
-        'units',
-        'n',
-        'rmse',
-        'mae',
-        'bias',
-        'r2',
-        'r',
-        'nse',
-        'kge',
-      ];
-      const lines = [header.join(',')];
-      for (const metric of metrics) {
-        const run =
-          (metric.provenance as ProjectRun | undefined) ??
-          comparisonEntries.find((entry) => entry.run.run_case === metric.site)?.run;
-        lines.push(
-          [
-            run
-              ? `${run.case_name || run.case_dir} · ${String(metric.site).split(/[\\/]/).at(-1)}`
-              : metric.site,
-            metric.site,
-            run?.status ?? '',
-            run?.version ? `${run.version.id}@${run.version.revision}` : '',
-            metric.comparison_obs ?? '',
-            from,
-            to,
-            spinup,
-            corrected ? '1' : '0',
-            metric.name,
-            metric.units,
-            metric.n,
-            metric.rmse,
-            metric.mae,
-            metric.bias,
-            metric.r2,
-            metric.correlation,
-            metric.nse,
-            metric.kge,
-          ]
-            .map(escape)
-            .join(','),
-        );
-      }
       const result = await download(
         'multi-station-metrics.csv',
-        lines.join('\n'),
+        comparisonCsv(comparisonResult!),
         'text/csv;charset=utf-8',
       );
       if (current()) setExportNotice(exportMessage(result));
@@ -1140,11 +1284,16 @@ export default function ResultsPage({
       ...[
         {
           id: 'result-from',
-          label: tr('开始时间（UTC）', 'Start (UTC)'),
+          label: tr(`开始时间（${timeBasisText}）`, `Start (${timeBasisText})`),
           value: from,
           set: setFrom,
         },
-        { id: 'result-to', label: tr('结束时间（UTC）', 'End (UTC)'), value: to, set: setTo },
+        {
+          id: 'result-to',
+          label: tr(`结束时间（${timeBasisText}）`, `End (${timeBasisText})`),
+          value: to,
+          set: setTo,
+        },
       ].map((f) => ({ ...f, type: 'text' as const, disabled: busy })),
     );
   if (!runChooser && !settingsOpen && (tab === 'series' || tab === 'overview'))
@@ -1245,9 +1394,8 @@ export default function ResultsPage({
   const variableInfo = catalog?.variables.find((item) => item.name === variable);
   const finding = overviewFinding(selectedMetric, variable, en);
   const validPairs = !!selectedMetric && selectedMetric.n > 0;
-  const noSharedVariables =
-    singleEvaluation?.key === selectionKey && !singleEvaluation.rows.length && !!obs;
-  const comparisonVariables = [...new Set(metrics.map((metric) => metric.name))];
+  const noSharedVariables = singleFresh && !singleRows.length && !!obs;
+  const comparisonVariables = [...new Set(comparisonMetrics.map((metric) => metric.name))];
   const comparisonMetricName = comparisonVariables.includes(comparisonVariable)
     ? comparisonVariable
     : (comparisonVariables[0] ?? '');
@@ -1261,7 +1409,7 @@ export default function ResultsPage({
           <p>
             {caseDir.split(/[\\/]/).at(-1) || tr('未选择算例', 'No case selected')}
             {catalog
-              ? ` · ${new Date(catalog.start * 1000).toISOString().slice(0, 10)} — ${new Date(catalog.end * 1000).toISOString().slice(0, 10)}`
+              ? ` · ${new Date(catalog.start * 1000).toISOString().slice(0, 10)} — ${new Date(catalog.end * 1000).toISOString().slice(0, 10)} · ${timeBasisText}`
               : ''}
           </p>
           <div className="results-badges">
@@ -1538,6 +1686,8 @@ export default function ResultsPage({
                       ' · area mean (latitude-weighted, missing cells skipped)',
                     )
                   : ''}
+                {' · '}
+                {tr('时间基准', 'Time basis')}: {timeBasisText}
               </span>
               <div className="results-legend">
                 {validPairs && <span className="observed">{tr('观测', 'Observation')}</span>}
@@ -1760,7 +1910,7 @@ export default function ResultsPage({
           onOpenChange={setAdvanced}
         >
           <div className="form-grid">
-            <Field label={tr('开始时间（UTC）', 'Start (UTC)')}>
+            <Field label={tr(`开始时间（${timeBasisText}）`, `Start (${timeBasisText})`)}>
               <Input
                 type="datetime-local"
                 value={from}
@@ -1768,7 +1918,7 @@ export default function ResultsPage({
                 onChange={(event) => setFrom(event.target.value)}
               />
             </Field>
-            <Field label={tr('结束时间（UTC）', 'End (UTC)')}>
+            <Field label={tr(`结束时间（${timeBasisText}）`, `End (${timeBasisText})`)}>
               <Input
                 type="datetime-local"
                 value={to}
@@ -1895,7 +2045,7 @@ export default function ResultsPage({
               `${catalog.files} files · ${catalog.steps} steps`,
             )}{' '}
             · {new Date(catalog.start * 1000).toISOString()} —{' '}
-            {new Date(catalog.end * 1000).toISOString()}
+            {new Date(catalog.end * 1000).toISOString()} · {timeBasisText}
           </p>
           <table>
             <thead>
@@ -2040,7 +2190,7 @@ export default function ResultsPage({
                   disabled={busy}
                   onChange={(e) => {
                     epoch.current++;
-                    setMetrics([]);
+                    requestSeq.current.single++;
                     chooseObservation(e.target.value);
                   }}
                 />
@@ -2116,26 +2266,30 @@ export default function ResultsPage({
       {['series', 'evaluation', 'comparison', 'diagnostics'].includes(tab) && (
         <Card>
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label={tr('开始时间（UTC）', 'Start (UTC)')}>
+            <Field label={tr(`开始时间（${timeBasisText}）`, `Start (${timeBasisText})`)}>
               <Input
                 type="datetime-local"
                 value={from}
                 onChange={(e) => {
                   epoch.current++;
+                  requestSeq.current.single++;
+                  requestSeq.current.multi++;
                   setSeries(null);
-                  setMetrics([]);
+                  setComparisonProgress(null);
                   setFrom(e.target.value);
                 }}
               />
             </Field>
-            <Field label={tr('结束时间（UTC）', 'End (UTC)')}>
+            <Field label={tr(`结束时间（${timeBasisText}）`, `End (${timeBasisText})`)}>
               <Input
                 type="datetime-local"
                 value={to}
                 onChange={(e) => {
                   epoch.current++;
+                  requestSeq.current.single++;
+                  requestSeq.current.multi++;
                   setSeries(null);
-                  setMetrics([]);
+                  setComparisonProgress(null);
                   setTo(e.target.value);
                 }}
               />
@@ -2171,7 +2325,7 @@ export default function ResultsPage({
                 value={obs}
                 onChange={(e) => {
                   epoch.current++;
-                  setMetrics([]);
+                  requestSeq.current.single++;
                   chooseObservation(e.target.value);
                 }}
               />
@@ -2307,7 +2461,8 @@ export default function ResultsPage({
                 {tr(
                   `${displayedSeries!.n}/${displayedSeries!.source_n} 个点${displayedSeries!.downsampled ? '（已抽样）' : ''}`,
                   `${displayedSeries!.n}/${displayedSeries!.source_n} points${displayedSeries!.downsampled ? ' (sampled)' : ''}`,
-                )}
+                )}{' '}
+                · {tr('时间基准', 'Time basis')}: {timeBasisLabel(timeBasisOf(displayedSeries), en)}
               </p>
             </>
           )}
@@ -2319,15 +2474,23 @@ export default function ResultsPage({
             <div className="results-comparison-conditions">
               <p>
                 {tr(
-                  `比较 ${comparisonEntries.length} 个运行；评估时段 ${from || '全部'} — ${to || '全部'}，跳过 ${spinup} 条记录，观测闭合订正：${corrected ? '是' : '否'}。`,
-                  `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'}, skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
+                  `比较 ${comparisonEntries.length} 个运行；评估时段 ${from || '全部'} — ${to || '全部'}（${timeBasisText}），跳过 ${spinup} 条记录，观测闭合订正：${corrected ? '是' : '否'}。`,
+                  `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'} (${timeBasisText}), skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
                 )}
               </p>
+              {comparisonResult && !comparisonFresh && (
+                <Notice tone="warning">
+                  {tr(
+                    '显示的是上一次比较结果；条件已改，重新运行比较后才能导出。',
+                    'Showing the previous comparison; conditions changed, re-run the comparison before exporting.',
+                  )}
+                </Notice>
+              )}
               <ActionButton
                 action="export-comparison-csv"
                 label={tr('导出比较指标 CSV', 'Export comparison metrics as CSV')}
                 kind="commit"
-                disabled={!metrics.length || busy}
+                disabled={!comparisonExportGate.ok || busy}
                 run={exportComparison}
               >
                 {tr('导出比较指标 CSV', 'Export comparison CSV')}
@@ -2341,6 +2504,7 @@ export default function ResultsPage({
                   tr('站点', 'Site'),
                   ...(tab === 'comparison' ? [tr('观测文件', 'Observation')] : []),
                   tr('变量', 'Variable'),
+                  tr('单位', 'Units'),
                   tr('配对数', 'n'),
                   'RMSE',
                   'MAE',
@@ -2349,6 +2513,9 @@ export default function ResultsPage({
                   'r',
                   'NSE',
                   'KGE',
+                  tr('QC 来源', 'QC source'),
+                  tr('订正', 'Correction'),
+                  tr('覆盖率', 'Coverage'),
                 ].map((s) => (
                   <th key={s}>{s}</th>
                 ))}
@@ -2364,11 +2531,26 @@ export default function ResultsPage({
                       {m.comparison_obs?.split(/[\\/]/).at(-1) || '—'}
                     </td>
                   )}
-                  <td>{m.name}</td>
+                  <td title={metricFrequencyTitle(m, en)}>{m.name}</td>
+                  <td
+                    title={
+                      m.units_assumed
+                        ? tr('未声明单位，按规范单位处理', 'No declared units; assumed canonical')
+                        : m.source_units && m.source_units !== m.units
+                          ? tr('源单位：', 'Source units: ') + m.source_units
+                          : undefined
+                    }
+                  >
+                    {m.units || '—'}
+                    {m.units_assumed ? '*' : ''}
+                  </td>
                   <td>{m.n}</td>
                   {[m.rmse, m.mae, m.bias, m.r2, m.correlation, m.nse, m.kge].map((v, j) => (
                     <td key={j}>{number(v)}</td>
                   ))}
+                  <td title={metricQcTitle(m)}>{metricQcLabel(m, en)}</td>
+                  <td title={metricCorrectionTitle(m)}>{metricCorrectionLabel(m, en)}</td>
+                  <td title={metricCoverageTitle(m)}>{metricCoverageText(m)}</td>
                 </tr>
               ))}
             </tbody>
@@ -2376,10 +2558,17 @@ export default function ResultsPage({
           {metrics
             .filter((m) => m.beta_warning)
             .map((m, i) => (
-              <Notice key={i} tone="warning">
+              <Notice key={`beta-${i}`} tone="warning">
                 {m.name}: {String(m.beta_warning)}
               </Notice>
             ))}
+          {metrics.flatMap((m, i) =>
+            (m.warnings ?? []).map((warning, j) => (
+              <Notice key={`warning-${i}-${j}`} tone="warning">
+                {m.name}: {String(warning)}
+              </Notice>
+            )),
+          )}
           {!metrics.length && (
             <p>
               {tr(
@@ -2388,16 +2577,17 @@ export default function ResultsPage({
               )}
             </p>
           )}
-          {evaluation
-            .filter((v) => !v.available)
-            .map((v) => (
-              <p key={v.name}>
-                {v.name}:{' '}
-                {v.reason ||
-                  [...(v.missing_model || []), ...(v.missing_observation || [])].join(', ') ||
-                  tr('不可配对', 'Unavailable')}
-              </p>
-            ))}
+          {!multiStation &&
+            evaluation
+              .filter((v) => !v.available)
+              .map((v) => (
+                <p key={v.name}>
+                  {v.name}:{' '}
+                  {v.reason ||
+                    [...(v.missing_model || []), ...(v.missing_observation || [])].join(', ') ||
+                    tr('不可配对', 'Unavailable')}
+                </p>
+              ))}
           {tab === 'evaluation' &&
             metrics
               .filter((m) => m.time?.length && m.model && m.obs)
@@ -2487,7 +2677,7 @@ export default function ResultsPage({
                 : tr('导出报告', 'Export report')
             }
             kind="commit"
-            disabled={!catalog || busy}
+            disabled={!catalog || busy || !singleExportGate.ok}
             run={report}
           >
             {reportFormat === 'pdf'

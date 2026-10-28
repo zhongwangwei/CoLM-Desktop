@@ -41,6 +41,7 @@ function initialization() {
   const noop = () => {};
   const context = {
     epoch: { current: 0 },
+    requestSeq: { current: { single: 0, multi: 0 } },
     stationTarget: { current: '/case' },
     stationRetry: { attempt: 0, error: '' },
     cache: { current: new Map() },
@@ -58,7 +59,8 @@ function initialization() {
     setSource: noop,
     setCatalog: noop,
     setSeries: noop,
-    setMetrics: noop,
+    setSingleResult: noop,
+    setComparisonResult: noop,
     setDiagnostic: noop,
     setFrom: noop,
     setTo: noop,
@@ -108,6 +110,8 @@ test('default observation uses the existing evaluator once its run catalog is re
     catalogKey: '/run',
     obs: '/default.nc',
     selectionKey: 'run/default',
+    // 自动评估只属于单站范围；多站比较里改 spinup 不能触发单站评估顶掉比较结果。
+    multiStation: false,
     observationEdited: { current: false },
     automaticObservation: { current: '/default.nc' },
     automaticEvaluation: { current: '' },
@@ -117,6 +121,7 @@ test('default observation uses the existing evaluator once its run catalog is re
   };
   execute(body, { ...context, catalogKey: '' })();
   execute(body, { ...context, busy: true })();
+  execute(body, { ...context, multiStation: true })();
   assert.equal(evaluations, 0);
   execute(body, context)();
   execute(body, context)();
@@ -196,9 +201,9 @@ test('a server run is read in place, and fetching takes only that run', async ()
     setError: noop,
     setCatalog: noop,
     setSeries: noop,
-    setMetrics: noop,
+    setSingleResult: noop,
+    setComparisonResult: noop,
     setDiagnostic: noop,
-    setEvaluation: noop,
     setCatalogKey: noop,
     setVariable: noop,
   });

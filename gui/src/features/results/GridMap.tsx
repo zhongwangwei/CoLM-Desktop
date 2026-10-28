@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { plainError } from '../../lib/bilingual';
 import { invokeJson } from '../../lib/ipc';
+import { timeBasisLabel, timeBasisOf } from './time-basis';
+import { formatModelClock } from './time-ticks';
 import { readErrorText } from './variable-labels';
 
 /** What `history_map` returns (`colm-cli history-map`). */
@@ -16,6 +18,8 @@ type MapData = {
   values: (number | null)[][];
   min?: number | null;
   max?: number | null;
+  /** 后端给出的时间基准；旧版 sidecar 没有时按模型钟处理。 */
+  time_basis?: unknown;
 };
 
 // viridis 的 9 个色标：明暗单调，色盲与灰度打印下也分得清高低。
@@ -135,14 +139,18 @@ export default function GridMap({
       }`,
     );
   }
-  const when = data ? new Date(data.time * 1000).toISOString().slice(0, 16).replace('T', ' ') : '';
+  // 地图只读某一时刻：钟面照模型钟显示，基准（UTC / UTC+08:00 / 模型钟）跟着数据走，
+  // 不再硬编码 “UTC”。
+  const basis = timeBasisOf(data);
+  const basisLabel = timeBasisLabel(basis, en);
+  const when = data ? formatModelClock(data.time) : '';
   return (
     <section className="grid-map" aria-label={t('空间分布', 'Spatial distribution')}>
       <div className="grid-map-head">
         <h2>{t('空间分布', 'Spatial distribution')}</h2>
         <span className="muted">
           {title}
-          {when ? ` · ${when} UTC` : ''}
+          {when ? ` · ${when} ${basisLabel}` : ''}
         </span>
       </div>
       <div className="grid-map-time">
@@ -170,7 +178,7 @@ export default function GridMap({
               ref={canvas}
               onMouseMove={readCell}
               onMouseLeave={() => setHover('')}
-              aria-label={`${title} ${when}`}
+              aria-label={`${title} ${when} ${when ? basisLabel : ''}`}
             />
           ) : (
             <p className="muted">{t('正在读取这一时刻的格点图…', 'Reading this time step…')}</p>

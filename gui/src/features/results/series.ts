@@ -1,11 +1,18 @@
 import { bilingual } from '../../lib/bilingual';
 import { download as exportText } from '../../lib/utils';
+import { timeBasisOf, type TimeBasis } from './time-basis';
+import { modelClockIso } from './time-ticks';
 export interface SeriesData {
   time: number[];
   vars: Record<string, (number | null)[]>;
   source_n: number;
   n: number;
   downsampled: boolean;
+  /**
+   * 时间数值的基准。旧版 sidecar 的响应没有这个字段，此时按模型钟处理，
+   * 导出不会把它们冒称成 UTC。
+   */
+  time_basis?: TimeBasis;
 }
 export interface EnergyDiagnostic {
   schema: 1;
@@ -157,16 +164,39 @@ export function fullSeriesCsv(data: SeriesData, variable: string) {
     throw new Error(
       'The full-series export requires every selected-window record; sampled data cannot be exported as complete',
     );
+  // 导出必须如实：只有 utc 基准才写 time_utc/Z；地方标准时写钟面 model_time，
+  // 偏移已记录时才额外换算一列真实 UTC；模型钟永远没有 time_utc。
+  const basis = timeBasisOf(data);
+  const offset =
+    basis.kind === 'local_standard_time'
+      ? basis.utc_offset_seconds
+      : basis.kind === 'utc'
+        ? 0
+        : null;
   const rows = data.time.map((time, index) => {
-    const date = new Date(time * 1000);
-    if (!Number.isFinite(time) || !Number.isFinite(date.getTime()))
+    if (!Number.isFinite(time) || !Number.isFinite(new Date(time * 1000).getTime()))
       throw new Error('Invalid full-series record time');
     const value = data.vars[variable][index];
     if (value !== null && (typeof value !== 'number' || !Number.isFinite(value)))
       throw new Error('Invalid full-series record value');
-    return { time_utc: date.toISOString(), unix_seconds: time, variable, value };
+    const row: Record<string, unknown> = {
+      unix_seconds: time,
+      variable,
+      value,
+      time_basis: basis.kind,
+    };
+    // 模型钟面（无 Z）：它只是钟面读数，不是 UTC 瞬间。
+    if (basis.kind !== 'utc') row.model_time = modelClockIso(time);
+    if (offset !== null) row.time_utc = new Date((time - offset) * 1000).toISOString();
+    return row;
   });
-  return csvRows(rows, ['time_utc', 'unix_seconds', 'variable', 'value']);
+  const columns =
+    basis.kind === 'utc'
+      ? (['time_utc', 'unix_seconds', 'variable', 'value', 'time_basis'] as const)
+      : offset !== null
+        ? (['model_time', 'time_utc', 'unix_seconds', 'variable', 'value', 'time_basis'] as const)
+        : (['model_time', 'unix_seconds', 'variable', 'value', 'time_basis'] as const);
+  return csvRows(rows, columns);
 }
 function html(value: unknown) {
   return String(value ?? '—')

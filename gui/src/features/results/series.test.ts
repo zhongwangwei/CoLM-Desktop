@@ -10,6 +10,7 @@ import {
   type EnergyDiagnostic,
   type ResultReport,
 } from './series';
+import type { TimeBasis } from './time-basis';
 describe('result scientific integrity', () => {
   it('uses backend full-record statistics rather than extrema-sampled means', () => {
     const report: EnergyDiagnostic = {
@@ -95,7 +96,7 @@ it('selects only successful exact parent revisions for comparison', () => {
   assert.deepEqual(parentRuns(runs, null), []);
 });
 
-it('exports every full-series record while preserving missing and negative numeric values', () => {
+it('exports every full-series record with a truthful model-clock default', () => {
   const data = {
     time: [0, 60, 120],
     vars: { '=variable': [1, null, -2] },
@@ -104,15 +105,91 @@ it('exports every full-series record while preserving missing and negative numer
     downsampled: false,
   };
   const text = fullSeriesCsv(data, '=variable');
+  assert.equal(
+    text.split('\r\n')[0],
+    '"model_time","unix_seconds","variable","value","time_basis"',
+  );
   assert.equal(text.split('\r\n').filter(Boolean).length, 4);
-  assert.ok(text.includes('"1970-01-01T00:01:00.000Z","60","\'=variable",""'));
+  // 没有基准声明时只能写模型钟面：无 Z、无 time_utc。
+  assert.ok(text.includes('"1970-01-01T00:01:00.000","60","\'=variable","","model_clock"'));
   assert.ok(text.includes('"120","\'=variable","-2"'));
+  assert.ok(!text.includes('time_utc'));
+  assert.ok(!text.includes('Z'));
   assert.throws(() => fullSeriesCsv({ ...data, downsampled: true }, '=variable'), /sampled/);
   assert.throws(() => fullSeriesCsv({ ...data, source_n: 100 }, '=variable'), /every/);
   assert.throws(
     () => fullSeriesCsv({ ...data, vars: { '=variable': [1, NaN, -2] } }, '=variable'),
     /value/,
   );
+});
+
+it('only claims UTC when the payload declares the utc basis', () => {
+  const utcBasis: TimeBasis = {
+    kind: 'utc',
+    utc_offset_seconds: 0,
+    calendar: 'standard',
+    source: 'grid',
+  };
+  const data = {
+    time: [0, 60],
+    vars: { GPP: [1, 2] },
+    source_n: 2,
+    n: 2,
+    downsampled: false,
+    time_basis: utcBasis,
+  };
+  const text = fullSeriesCsv(data, 'GPP');
+  assert.equal(text.split('\r\n')[0], '"time_utc","unix_seconds","variable","value","time_basis"');
+  assert.ok(text.includes('"1970-01-01T00:01:00.000Z"'));
+  assert.ok(text.includes('"utc"'));
+  assert.ok(!text.includes('model_time'));
+});
+
+it('keeps the model clock for local standard time and adds true UTC only when the offset is recorded', () => {
+  const base = {
+    time: [0, 3600],
+    vars: { Qle: [1, 2] },
+    source_n: 2,
+    n: 2,
+    downsampled: false,
+  };
+  const shifted = fullSeriesCsv(
+    {
+      ...base,
+      time_basis: {
+        kind: 'local_standard_time',
+        utc_offset_seconds: 28800,
+        calendar: 'standard',
+        source: 'case.nml',
+      },
+    },
+    'Qle',
+  );
+  assert.equal(
+    shifted.split('\r\n')[0],
+    '"model_time","time_utc","unix_seconds","variable","value","time_basis"',
+  );
+  assert.ok(shifted.includes('"1970-01-01T00:00:00.000"'));
+  assert.ok(shifted.includes('"1969-12-31T16:00:00.000Z"'));
+  assert.ok(shifted.includes('"local_standard_time"'));
+  const unknownOffset = fullSeriesCsv(
+    {
+      ...base,
+      time_basis: {
+        kind: 'local_standard_time',
+        utc_offset_seconds: null,
+        calendar: 'standard',
+        source: 'observation',
+      },
+    },
+    'Qle',
+  );
+  assert.equal(
+    unknownOffset.split('\r\n')[0],
+    '"model_time","unix_seconds","variable","value","time_basis"',
+  );
+  assert.ok(!unknownOffset.includes('time_utc'));
+  assert.ok(!unknownOffset.includes('Z'));
 });
 
 const exportFixture: ResultReport = {
