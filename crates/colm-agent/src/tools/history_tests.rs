@@ -16,6 +16,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn model_context(root: &Path) -> ModelContext {
     ModelContext {
         model: json!({
@@ -29,6 +30,7 @@ fn model_context(root: &Path) -> ModelContext {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn history_source_fixture() -> Value {
     json!({
         "schema": 1,
