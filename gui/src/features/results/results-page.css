@@ -236,34 +236,45 @@
   height: 16px;
   margin: 0;
 }
+/* 结果页底部的分析/导航动作条：原来 11px 的"小字按钮"很难注意到（2026-10-28 用户反馈
+   "返回结果总览/模型改进/更多分析与导出/返回模拟 太小"）。改成正常控件尺寸并用分隔线把它
+   从内容里分出来；返回类动作靠右，避免和"下一步"混在一起。 */
 .results-secondary {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 11px;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
   flex-wrap: wrap;
 }
 .results-secondary .field {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   margin: 0;
 }
 .results-secondary .field-label {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 13px;
+  color: var(--foreground);
+  font-weight: 600;
 }
 .results-secondary .input {
-  font-size: 11px;
+  font-size: 13px;
   width: auto;
-  min-height: 28px;
-  padding: 4px 7px;
+  min-height: 34px;
+  padding: 6px 10px;
 }
 .results-secondary .button {
-  font-size: 11px;
-  min-height: 28px;
-  padding: 4px 7px;
+  font-size: 13px;
+  min-height: 34px;
+  padding: 6px 12px;
+}
+/* 返回类动作放右边，和"模型改进/更多分析"这类前行动作分开。 */
+.results-secondary [data-action='result-back'] {
+  margin-left: auto;
 }
 .results-controls {
   display: flex;
