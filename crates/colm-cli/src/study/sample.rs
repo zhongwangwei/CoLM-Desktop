@@ -305,6 +305,7 @@ mod tests {
                 ..Default::default()
             },
             hybrid: None,
+            parent_study: None,
         }
     }
 
@@ -396,6 +397,7 @@ mod tests {
                 ..Default::default()
             },
             hybrid: None,
+            parent_study: None,
         };
         let baseline = BTreeMap::from([("DEF_TUNING_CNFAC".into(), 0.5)]);
         let a = design(&spec, &baseline).unwrap();
@@ -462,6 +464,7 @@ mod tests {
             targets: vec![],
             budget: StudyBudget::default(),
             hybrid: None,
+            parent_study: None,
         };
         spec.parameters = [1, 2]
             .into_iter()

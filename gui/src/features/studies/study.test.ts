@@ -7,6 +7,7 @@ import {
   candidateBudget,
   convergenceRows,
   crossValidationRows,
+  deriveStudyDesign,
   fitValidation,
   frozenDesign,
   frozenParameterKey,
@@ -739,5 +740,218 @@ describe('research baseline identity (U-01)', () => {
       id: 'official',
       revision: 2,
     });
+  });
+});
+
+describe('the frozen design reviewed before creating a study', () => {
+  it('names the source study and its model revision for a derived design', () => {
+    const design = frozenDesign({
+      method: 'differential-evolution',
+      seed: 1,
+      budget: { population: 8, generations: 2, jobs: 1 },
+      parameters: [],
+      parent_study: {
+        study: '/p/.colm/studies/s-sensitivity',
+        spec_sha256: 'a'.repeat(64),
+        model_revision: { id: 'trace', revision: 7 },
+      },
+    });
+    const line = design.budget.find(([zh]) => zh.includes('派生自研究'));
+    assert.ok(line, JSON.stringify(design.budget));
+    assert.match(line![0], /s-sensitivity/);
+    assert.match(line![0], /trace r7/);
+    assert.match(line![1], /Derived from study/);
+  });
+});
+
+describe('deriving a new study design from a finished one', () => {
+  const revision = { id: 'trace', revision: 7 };
+  const singleSite = {
+    kind: 'uncertainty',
+    method: 'morris',
+    seed: 3,
+    kernel_dir: '/kernels/grid',
+    base_cases: ['AT-Neu', 'CH-Lae'],
+    observations: { 'AT-Neu': '/obs/AT-Neu_Flux.nc', 'CH-Lae': '/obs/CH-Lae_Flux.nc' },
+    site_mode: 'shared',
+    targets: [
+      {
+        key: 'Qle@AT-Neu',
+        site: 'AT-Neu',
+        variable: 'Qle',
+        metric: 'kge',
+        weight: 2,
+        from: 1_104_537_600,
+        to: 1_136_073_600,
+        validation_from: 1_136_073_600,
+        validation_to: 1_167_609_600,
+        min_pairs: 12,
+        aggregate: 'monthly',
+        corrected: true,
+      },
+      {
+        key: 'Qle@CH-Lae',
+        site: 'CH-Lae',
+        variable: 'Qle',
+        metric: 'kge',
+        weight: 2,
+        from: 1_104_537_600,
+        to: 1_136_073_600,
+        validation_from: 1_136_073_600,
+        validation_to: 1_167_609_600,
+        min_pairs: 12,
+        aggregate: 'monthly',
+        corrected: true,
+      },
+    ],
+  };
+  const options = {
+    study: '/p/.colm/studies/s-sensitivity',
+    specSha256: 'a'.repeat(64),
+    modelRevision: revision,
+    projectRoot: '/p',
+  };
+  it('inherits cases, observations, targets, weights, aggregation and windows', () => {
+    const derived = deriveStudyDesign(singleSite, options);
+    assert.deepEqual(derived.ui.sites, ['/p/AT-Neu', '/p/CH-Lae']);
+    assert.equal(derived.ui.variables, 'Qle');
+    assert.equal(derived.ui.metric, 'kge');
+    assert.equal(derived.ui.minPairs, '12');
+    assert.equal(derived.ui.aggregate, 'monthly');
+    assert.deepEqual(derived.ui.weights, { Qle: '2' });
+    assert.equal(
+      derived.ui.observations,
+      'AT-Neu | /obs/AT-Neu_Flux.nc\nCH-Lae | /obs/CH-Lae_Flux.nc',
+    );
+    assert.equal(derived.ui.from, '2005-01-01T00:00');
+    assert.equal(derived.ui.to, '2006-01-01T00:00');
+    assert.equal(derived.ui.valFrom, '2006-01-01T00:00');
+    assert.equal(derived.ui.valTo, '2007-01-01T00:00');
+    assert.equal(derived.ui.seed, '3');
+    assert.equal(derived.ui.kernelDir, '/kernels/grid');
+    // 派生来源：父研究、父研究冻结设计的哈希、父研究实际用的模型修订。
+    // 写进规格的键是后端的 snake_case；camelCase 只存在于调用参数里。
+    assert.deepEqual(derived.parent, {
+      study: options.study,
+      spec_sha256: options.specSha256,
+      model_revision: revision,
+    });
+    assert.ok(derived.notes.length > 0);
+  });
+  it('refuses to derive when the source did not record its model revision', () => {
+    assert.throws(
+      () => deriveStudyDesign(singleSite, { ...options, modelRevision: null }),
+      /没有记录|did not record/,
+    );
+  });
+  it('refuses to derive from a study that trained a network', () => {
+    assert.throws(
+      () => deriveStudyDesign({ ...singleSite, hybrid: { slot: 'pft' } }, options),
+      /AI 网络|network/,
+    );
+  });
+  it('refuses windows, metrics or weights the page cannot represent per target', () => {
+    const differingWindow = {
+      ...singleSite,
+      targets: [singleSite.targets[0], { ...singleSite.targets[1], to: 1_167_609_600 }],
+    };
+    assert.throws(() => deriveStudyDesign(differingWindow, options), /时间窗|windows/);
+    const differingMetric = {
+      ...singleSite,
+      targets: [singleSite.targets[0], { ...singleSite.targets[1], metric: 'nse' }],
+    };
+    assert.throws(() => deriveStudyDesign(differingMetric, options), /指标|metric/);
+    const differingWeight = {
+      ...singleSite,
+      targets: [singleSite.targets[0], { ...singleSite.targets[1], weight: 1 }],
+    };
+    assert.throws(() => deriveStudyDesign(differingWeight, options), /权重|weight/);
+  });
+  it('inherits gridded targets with per-target metric, period and station aggregation', () => {
+    const spatial = {
+      kind: 'uncertainty',
+      method: 'lhs',
+      base_cases: ['region'],
+      site_mode: 'shared',
+      observations: {},
+      targets: [
+        {
+          key: 'f_lfevpa@grid1',
+          variable: 'f_lfevpa',
+          metric: 'nrmse',
+          weight: 1,
+          from: 1_104_537_600,
+          to: 1_136_073_600,
+          min_pairs: 20,
+          source: {
+            kind: 'grid',
+            path: '/obs/gleam.nc',
+            variable: 'E',
+            scale: 0.0864,
+            period: 'monthly',
+          },
+        },
+        {
+          key: 'Qle@station2',
+          variable: 'Qle',
+          metric: 'kge',
+          weight: 3,
+          from: 1_104_537_600,
+          to: 1_136_073_600,
+          min_pairs: 20,
+          aggregate: 'monthly',
+          corrected: true,
+          source: {
+            kind: 'station',
+            path: '/obs/AT-Neu_Flux.nc',
+            lon: 11.2,
+            lat: 47.1,
+            utc_offset: 8,
+          },
+        },
+      ],
+    };
+    const derived = deriveStudyDesign(spatial, options);
+    assert.equal(derived.ui.gridTargets?.length, 2);
+    const [grid, station] = derived.ui.gridTargets!;
+    assert.equal(grid.kind, 'grid');
+    assert.equal(grid.obsVariable, 'E');
+    assert.equal(grid.period, 'monthly');
+    assert.equal(grid.scale, '0.0864');
+    assert.equal(station.kind, 'station');
+    assert.equal(station.metric, 'kge');
+    assert.equal(station.weight, '3');
+    assert.equal(station.lon, '11.2');
+    assert.equal(station.utcOffset, '8');
+    // 区域通量站的月均聚合在页面上是研究级设置：派生必须是 monthly，不能退回""。
+    assert.equal(derived.ui.aggregate, 'monthly');
+    assert.equal(derived.ui.corrected, true);
+  });
+  it('refuses disagreeing station aggregation instead of silently picking one', () => {
+    const spatial = {
+      kind: 'uncertainty',
+      method: 'lhs',
+      base_cases: ['region'],
+      site_mode: 'shared',
+      observations: {},
+      targets: [
+        {
+          key: 'Qle@a',
+          variable: 'Qle',
+          from: 1,
+          to: 2,
+          source: { kind: 'station', path: '/a.nc', lon: 0, lat: 0 },
+          aggregate: 'monthly',
+        },
+        {
+          key: 'Qle@b',
+          variable: 'Qle',
+          from: 1,
+          to: 2,
+          source: { kind: 'station', path: '/b.nc', lon: 1, lat: 1 },
+        },
+      ],
+    };
+    assert.throws(() => deriveStudyDesign(spatial, options), /聚合|aggregat/);
   });
 });

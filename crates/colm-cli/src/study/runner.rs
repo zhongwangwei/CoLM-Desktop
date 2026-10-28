@@ -5962,6 +5962,7 @@ mod tests {
                 }],
                 budget: Default::default(),
                 hybrid: None,
+                parent_study: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -6289,6 +6290,7 @@ mod tests {
                 targets: Vec::new(),
                 budget: Default::default(),
                 hybrid: None,
+                parent_study: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -6726,6 +6728,7 @@ mod tests {
                 targets: Vec::new(),
                 budget: Default::default(),
                 hybrid: None,
+                parent_study: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -7898,6 +7901,7 @@ mod tests {
                 }],
                 budget: Default::default(),
                 hybrid: None,
+                parent_study: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -8305,6 +8309,7 @@ esac
                 ..Default::default()
             },
             hybrid: None,
+            parent_study: None,
         };
         std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
         let manifest = super::super::engine::create(&root, &spec_path).unwrap();

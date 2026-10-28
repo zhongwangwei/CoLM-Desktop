@@ -23,6 +23,7 @@ import {
   parameterSpec,
   studyPermissions,
   calibrationSeed,
+  deriveStudyDesign,
   frozenDesign,
   plannedCandidates,
   networkWeightCount,
@@ -576,6 +577,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     studyModelRevision,
     studyPermissions,
     calibrationSeed,
+    deriveStudyDesign,
     frozenDesign,
     plannedCandidates,
     networkWeightCount,
@@ -1193,19 +1195,37 @@ it('cancelling a study asks first and does nothing when declined', async () => {
     } else assert.deepEqual(calls.slice(0, 1), ['study_cancel']);
   }
 });
-it('carrying sensitivity into calibration keeps the cases, observations and frozen ranges', () => {
+it('carrying sensitivity into calibration pins the source study identity and inherits its design', () => {
   const calls: Record<string, unknown> = {};
   const set = (name: string) => (value: unknown) => {
     calls[name] = value;
   };
   const loadedFor = { current: 'old' };
   const failedFor = { current: 'failed' };
-  const carry = pageCallback('carryToCalibration', {
+  const revision = { id: 'trace', revision: 7 };
+  const specSha256 = 'a'.repeat(64);
+  const context = (overrides: Record<string, unknown> = {}) => ({
     frozenSpec: {
       kind: 'uncertainty',
+      method: 'morris',
       base_cases: ['AT-Neu'],
       observations: { 'AT-Neu': '/obs/AT-Neu_Flux.nc' },
-      targets: [{ variable: 'Qle', metric: 'kge', corrected: true }],
+      targets: [
+        {
+          key: 'Qle@AT-Neu',
+          site: 'AT-Neu',
+          variable: 'Qle',
+          metric: 'kge',
+          weight: 2,
+          from: 1_104_537_600,
+          to: 1_136_073_600,
+          validation_from: 1_136_073_600,
+          validation_to: 1_167_609_600,
+          min_pairs: 12,
+          aggregate: 'monthly',
+          corrected: true,
+        },
+      ],
       parameters: [
         {
           name: 'DEF_TUNING_TRSMX0',
@@ -1225,36 +1245,113 @@ it('carrying sensitivity into calibration keeps the cases, observations and froz
     },
     carryKeys: ['DEF_TUNING_TRSMX0'],
     studyDir: '/p/.colm/studies/s-abc',
+    envelope: {
+      manifest: { provenance: { spec_sha256: specSha256 } },
+      model_version: { model_revision: { version: revision } },
+    },
+    modelUsed: revision,
+    state: { kernels: [{ dir: '/kernels/default' }] },
     calibrationSeed,
+    deriveStudyDesign,
     tr: (zh: string) => zh,
     chooseMethod: set('method'),
     setSites: set('sites'),
     setVariables: set('variables'),
     setMetric: set('metric'),
+    setMinPairs: set('minPairs'),
     setCorrected: set('corrected'),
+    setAggregate: set('aggregate'),
+    setWeights: set('weights'),
     setObservations: set('observations'),
+    setFrom: set('from'),
+    setTo: set('to'),
+    setValFrom: set('valFrom'),
+    setValTo: set('valTo'),
+    setGridTargets: set('gridTargets'),
+    setSeed: set('seed'),
+    setKernel: set('kernel'),
+    setDerivedDesign: set('derived'),
     loadedFor,
     failedFor,
     update: set('update'),
     setStep: set('step'),
-  }) as unknown as () => void;
+    ...overrides,
+  });
+  const carry = pageCallback('carryToCalibration', context()) as unknown as () => void;
   carry();
   assert.equal(calls.method, 'tuning');
   assert.deepEqual(calls.sites, ['/p/AT-Neu']);
   assert.equal(calls.variables, 'Qle');
   assert.equal(calls.metric, 'kge');
+  assert.equal(calls.minPairs, '12');
   assert.equal(calls.corrected, true);
+  assert.equal(calls.aggregate, 'monthly', '月均聚合必须从来源研究继承');
+  assert.deepEqual(calls.weights, { Qle: '2' });
   assert.equal(calls.observations, 'AT-Neu | /obs/AT-Neu_Flux.nc');
+  assert.equal(calls.from, '2005-01-01T00:00');
+  assert.equal(calls.to, '2006-01-01T00:00');
   assert.equal(loadedFor.current, '', 'step 2 reads the parameters again and applies the seed');
   assert.equal(failedFor.current, '', 'a carried seed can retry a read that failed before');
+  const update = calls.update as {
+    researchSeed: { parameters: { parameter_id: string; scale: string }[] };
+    researchBaseline: { id: string; revision: number };
+  };
+  // 模型修订钉在来源研究实际用的那一版：原来这里回落成全局当前版本（审计复现 trace r7 → official r1）。
+  assert.deepEqual(update.researchBaseline, revision);
   assert.deepEqual(
-    (
-      calls.update as { researchSeed: { parameters: { parameter_id: string; scale: string }[] } }
-    ).researchSeed.parameters.map((p) => [p.parameter_id, p.scale]),
+    update.researchSeed.parameters.map((p) => [p.parameter_id, p.scale]),
     [['case:DEF_TUNING_TRSMX0', 'log']],
   );
+  const derived = calls.derived as { parent: { study: string; spec_sha256: string } };
+  assert.equal(derived.parent.study, '/p/.colm/studies/s-abc');
+  assert.equal(derived.parent.spec_sha256, specSha256);
   assert.equal(calls.step, 2);
 });
+it('carrying refuses a source study whose model revision or design hash was never recorded', () => {
+  const failedFor = { current: '' };
+  const carry = pageCallback('carryToCalibration', {
+    frozenSpec: {
+      kind: 'uncertainty',
+      base_cases: ['AT-Neu'],
+      observations: { 'AT-Neu': '/obs/AT-Neu_Flux.nc' },
+      targets: [],
+      parameters: [{ name: 'P', parameter_id: 'p', sample_min: 0, sample_max: 1, scale: 'linear' }],
+    },
+    carryKeys: ['P'],
+    studyDir: '/p/.colm/studies/s-abc',
+    envelope: { manifest: {} },
+    modelUsed: null,
+    state: { kernels: [] },
+    calibrationSeed,
+    deriveStudyDesign,
+    tr: (zh: string) => zh,
+    chooseMethod: () => {
+      throw new Error('must not switch method before the derivation is valid');
+    },
+    setSites: () => {},
+    setVariables: () => {},
+    setMetric: () => {},
+    setMinPairs: () => {},
+    setCorrected: () => {},
+    setAggregate: () => {},
+    setWeights: () => {},
+    setObservations: () => {},
+    setFrom: () => {},
+    setTo: () => {},
+    setValFrom: () => {},
+    setValTo: () => {},
+    setGridTargets: () => {},
+    setSeed: () => {},
+    setKernel: () => {},
+    setDerivedDesign: () => {},
+    loadedFor: { current: '' },
+    failedFor,
+    update: () => {},
+    setStep: () => {},
+  }) as unknown as () => void;
+  assert.throws(carry, /模型修订|model revision/);
+});
+
 it('a finished uncertainty study shows its sensitivity ranking with the top parameters ticked', async () => {
   const page = researchPage();
   page.render();
@@ -1316,6 +1413,71 @@ it('a finished uncertainty study shows its sensitivity ranking with the top para
     .map((n) => n.props['aria-label']);
   assert.deepEqual(ticked, ['DEF_A', 'DEF_D', 'DEF_C'], 'zero-impact DEF_B is left out');
 });
+it('an uncertainty study keeps the time aggregation of gridded station targets', () => {
+  // 审计复现：同一组"区域通量站 + 月均"在率定分支传了 aggregate，在不确定性分支没传，
+  // 于是界面选月均、冻结规格里却是逐时比较——目标函数被悄悄换掉。
+  const build = pageCallback('spec', {
+    sites: ['/p/region'],
+    kernel: '/kernels/grid',
+    confirmed: true,
+    tr: (zh: string) => zh,
+    contexts: [parameterRow()],
+    parameters: { 0: { enabled: true, min: '0', max: '1', scale: 'linear' } },
+    parameterSpec,
+    ai: false,
+    trainNetwork: false,
+    tab: 'uncertainty',
+    tuning: false,
+    candidateBudget,
+    method: 'lhs',
+    count: '8',
+    population: '8',
+    generations: '2',
+    jobs: '1',
+    seed: '1',
+    variables: 'Qle',
+    outputs: 'f_lfevpa',
+    spatialStudy: true,
+    gridTargets: [
+      {
+        kind: 'station',
+        variable: 'Qle',
+        path: '/obs/AT-Neu_Flux.nc',
+        obsVariable: '',
+        lon: '11.2',
+        lat: '47.1',
+        scale: '1',
+        utcOffset: '8',
+        period: '',
+        metric: 'kge',
+        weight: '1',
+      },
+    ],
+    corrected: true,
+    fluxCorrected: (variable: string) => ['qle', 'qh'].includes(variable.trim().toLowerCase()),
+    aggregate: 'monthly',
+    scoreObjective: true,
+    calibrationWindows,
+    from: '2003-01-01T00:00',
+    to: '2004-01-01T00:00',
+    minPairs: '12',
+    metric: 'nrmse',
+    gridTargetSpec,
+    network: () => ({}),
+    derivedDesign: null,
+  }) as unknown as (forCreate: boolean) => { specJson: string };
+  const plan = build(false);
+  const spec = JSON.parse(plan.specJson) as {
+    kind: string;
+    targets: { variable: string; metric: string; aggregate?: string; corrected?: boolean }[];
+  };
+  assert.equal(spec.kind, 'uncertainty');
+  assert.equal(spec.targets.length, 1);
+  assert.equal(spec.targets[0]!.aggregate, 'monthly', '不确定性目标也要带 aggregate');
+  assert.equal(spec.targets[0]!.corrected, true);
+  assert.equal(spec.targets[0]!.metric, 'kge');
+});
+
 it('a parameter read cut short by another design change lets step 2 read again', async () => {
   const requested = {
     version: { id: 'official', revision: 1 },

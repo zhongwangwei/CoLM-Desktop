@@ -366,6 +366,7 @@ mod tests {
                 targets: vec![],
                 budget: StudyBudget::default(),
                 hybrid: None,
+                parent_study: None,
             },
             members: Vec::new(),
             provenance: Default::default(),
@@ -853,6 +854,7 @@ mod tests {
                     ..Default::default()
                 },
                 hybrid: None,
+                parent_study: None,
             })
             .unwrap(),
         )

@@ -40,6 +40,8 @@ import {
   type SiteTiming,
   applyResearchSeed,
   researchBaselineOf,
+  deriveStudyDesign,
+  type ParentStudyRef,
 } from './study';
 import {
   clearParameterContextMarker,
@@ -95,7 +97,12 @@ type Envelope = {
     tasks?: Record<string, unknown>;
     warnings?: string[];
   };
-  manifest?: { id?: string; spec?: unknown };
+  manifest?: {
+    id?: string;
+    spec?: unknown;
+    /** 创建时冻结的设计哈希；派生研究把它写进 `parent_study.spec_sha256`。 */
+    provenance?: { spec_sha256?: string } | null;
+  };
   results?: (string | { path: string })[];
   model_version?: { model_revision?: { version?: VersionRef } | null } | null;
   /** 第一次运行时记下的引擎与前处理（`run-options.json`）；之后的运行都用它。 */
@@ -342,6 +349,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [confirmed, setConfirmed] = useState(false);
   const [studyDir, setStudyDir] = useState('');
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
+  // 派生设计（审计 P1-4）：来源研究与继承了什么。创建研究时写进 spec.parent_study；
+  // 界面用它说明"这项研究从哪来、哪些设置是按来源研究继承的"。
+  const [derivedDesign, setDerivedDesign] = useState<{
+    parent: ParentStudyRef;
+    notes: [string, string][];
+  } | null>(null);
   // 打开/跑过的研究自己记下的冻结修订（manifest 的 model_version）。研究页一律以它为准，不随之后的
   // 研究基线或运行版本变化（U-01：已有运行中的研究保留自己的冻结修订与输入）。
   const modelUsed = envelope?.model_version?.model_revision?.version;
@@ -896,6 +909,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             ...uncertainty,
             targets: gridTargets.map((t, i) => ({
               ...gridTargetSpec(t, i, window, metric, pairs),
+              ...(t.kind === 'station' && aggregate ? { aggregate } : {}),
               ...(corrected && t.kind === 'station' && fluxCorrected(t.variable)
                 ? { corrected: true }
                 : {}),
@@ -986,6 +1000,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             include_baseline: true,
             patience: stopAfter,
           },
+          ...(derivedDesign ? { parent_study: derivedDesign.parent } : {}),
           ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
         }),
       };
@@ -1018,6 +1033,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           include_baseline: true,
           patience: stopAfter,
         },
+        ...(derivedDesign ? { parent_study: derivedDesign.parent } : {}),
         ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
       }),
     };
@@ -1692,6 +1708,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setConfirmed(false);
       setResult('');
       setFit(null);
+      setDerivedDesign(null);
       setStudyDir('');
       setEnvelope(null);
       setRemoteReply(null);
@@ -2254,38 +2271,58 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   ];
   // 敏感性"带入率定"：换到参数率定，算例、对照的观测与变量、指标照这个不确定性研究，勾上选中的参数
   // （范围与尺度用它冻结的）。参数靠研究种子在第 2 步读出参数后勾上，和版本页带参数进来是同一条路。
+  // 敏感性"带入率定"（审计 P1-4）：从已有研究派生新的率定设计。模型修订、算例、观测、目标
+  // （含权重、逐目标指标、时间聚合）与时间窗都按来源研究继承；界面表达不了的组合由
+  // deriveStudyDesign 明确拒绝。原来只抄了算例/变量/观测，模型版本会回落到全局当前版本，
+  // 空间目标的 aggregate 也会丢——那是两次静默改变目标函数。
   function carryToCalibration() {
-    const spec = frozenSpec;
-    const picks = calibrationSeed(spec, carryKeys);
-    if (!spec || !picks.length)
+    const parentSpec = frozenSpec;
+    const picks = calibrationSeed(parentSpec, carryKeys);
+    if (!parentSpec || !picks.length)
       throw new Error(
         tr('请先勾选要带去率定的参数', 'Tick the parameters to carry into calibration'),
       );
-    const root = studyDir.replace(/[/\\]\.colm[/\\]studies[/\\][^/\\]+[/\\]?$/, '');
-    const sep = studyDir.includes('/') ? '/' : '\\';
-    const names = Array.isArray(spec.base_cases) ? spec.base_cases.map(String) : [];
-    const targets = (Array.isArray(spec.targets) ? spec.targets : []) as {
-      variable?: unknown;
-      metric?: unknown;
-      corrected?: unknown;
-      source?: unknown;
-    }[];
-    const observed = (spec.observations ?? {}) as Record<string, unknown>;
-    chooseMethod('tuning');
-    setSites(names.map((name) => `${root}${sep}${name}`));
-    if (targets.length && targets.every((t) => !t.source)) {
-      setVariables([...new Set(targets.map((t) => String(t.variable)))].join(', '));
-      if (typeof targets[0]!.metric === 'string') setMetric(targets[0]!.metric);
-      setCorrected(targets.some((t) => t.corrected === true));
-      setObservations(
-        Object.entries(observed)
-          .map(([site, path]) => `${site} | ${String(path)}`)
-          .join('\n'),
+    const specSha256 = envelope?.manifest?.provenance?.spec_sha256 ?? '';
+    const revision = modelUsed ?? null;
+    if (!specSha256 || !revision)
+      throw new Error(
+        tr(
+          '这个研究没有记下冻结设计或模型修订，派生会悄悄换模型；请从有记录的研究派生，或取消后手工新建。',
+          'This study did not record its frozen design or model revision; deriving would silently switch models. Derive from a study that recorded them, or start fresh.',
+        ),
       );
-    }
+    const root = studyDir.replace(/[/\\]\.colm[/\\]studies[/\\][^/\\]+[/\\]?$/, '');
+    const derived = deriveStudyDesign(parentSpec, {
+      study: studyDir,
+      specSha256,
+      modelRevision: revision,
+      projectRoot: root,
+    });
+    chooseMethod('tuning');
+    setSites(derived.ui.sites);
+    if (derived.ui.variables) setVariables(derived.ui.variables);
+    setMetric(derived.ui.metric);
+    setMinPairs(derived.ui.minPairs);
+    setCorrected(derived.ui.corrected);
+    setAggregate(derived.ui.aggregate);
+    setWeights(derived.ui.weights);
+    setObservations(derived.ui.observations);
+    setFrom(derived.ui.from);
+    setTo(derived.ui.to);
+    setValFrom(derived.ui.valFrom);
+    setValTo(derived.ui.valTo);
+    if (derived.ui.gridTargets) setGridTargets(derived.ui.gridTargets);
+    setSeed(derived.ui.seed);
+    if (derived.ui.kernelDir && state.kernels.some((k) => k.dir === derived.ui.kernelDir))
+      setKernel(derived.ui.kernelDir);
     loadedFor.current = '';
     failedFor.current = '';
-    update({ researchSeed: { parameters: picks } });
+    // 研究基线必须钉在来源研究实际用的修订上：新研究要跑在同一个冻结模型上，不能回落到当前运行版本。
+    update({
+      researchSeed: { parameters: picks },
+      researchBaseline: derived.parent.model_revision,
+    });
+    setDerivedDesign({ parent: derived.parent, notes: derived.notes });
     setStep(2);
   }
   const writeMember = member || defaultMember();
@@ -2621,7 +2658,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   }, [step, kernel, sites, busy, types, typeChoices, spatialStudy, versionId, revision]);
   // 建好或打开了一个研究：直接看运行与结果。
   useEffect(() => {
-    if (studyDir) setStep(4);
+    if (studyDir) {
+      setStep(4);
+      setDerivedDesign(null);
+    }
   }, [studyDir]);
   useEffect(() => {
     setTargetChoices(null);
@@ -4053,6 +4093,29 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 )
           }
         >
+          {derivedDesign && (
+            <Notice>
+              <p>
+                {tr(
+                  '这项研究派生自已有研究：模型修订、算例、观测、目标（含权重、指标、时间聚合）与时间窗按来源研究继承。改方法与预算后创建，来源研究会记进新研究的规格里。',
+                  'This study is derived from an existing one: model revision, cases, observations, targets (with weights, metrics and time aggregation) and time windows are inherited. Adjust the method and budget, then create; the source study is recorded in the new study spec.',
+                )}
+              </p>
+              <ul>
+                {derivedDesign.notes.map(([zh, english], index) => (
+                  <li key={index}>{en ? english : zh}</li>
+                ))}
+              </ul>
+              <ActionButton
+                action="research-derived-cancel"
+                label={tr(
+                  '取消派生，按普通新研究来做',
+                  'Cancel derivation and design a fresh study',
+                )}
+                run={() => setDerivedDesign(null)}
+              />
+            </Notice>
+          )}
           {ai && (
             <>
               <label className="param-check">

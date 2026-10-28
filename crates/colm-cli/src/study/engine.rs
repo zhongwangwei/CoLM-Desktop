@@ -1547,6 +1547,7 @@ mod tests {
                 ..Default::default()
             },
             hybrid: None,
+            parent_study: None,
         };
         fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
         path

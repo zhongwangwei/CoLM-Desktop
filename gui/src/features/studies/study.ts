@@ -350,6 +350,15 @@ export interface GridTargetDraft {
   period: '' | 'daily' | 'monthly';
   /** 这个目标单独用的比较指标；空着沿用研究的总体指标。 */
   metric?: string;
+  /**
+   * 后端 `weight`。界面上没有单独的权重输入框（单点目标按变量给权重），但从已有研究派生设计时
+   * 必须原样继承：丢了权重就等于换了一个目标函数，而界面看不出来。缺省 1。
+   */
+  weight?: string;
+  /** 后端 `key`。派生时继承来源研究的键，结果表与证据支持的列名才对得上。空着按变量+序号生成。 */
+  key?: string;
+  /** `grid` 目标的观测偏移（后端 `offset`，默认 0）。界面没有输入框；派生时继承，丢了会整体平移观测。 */
+  offset?: string;
 }
 
 export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft> = {
@@ -436,11 +445,20 @@ export function gridTargetSpec(
           `Target ${index + 1} cannot have a zero unit scale`,
         ),
       );
+    const offset = draft.offset?.trim() ? Number(draft.offset) : 0;
+    if (!Number.isFinite(offset))
+      throw new Error(
+        bilingual(
+          `第 ${index + 1} 个目标的偏移量不是数`,
+          `Target ${index + 1} has a non-numeric offset`,
+        ),
+      );
     source = {
       kind: 'grid',
       path,
       variable: draft.obsVariable.trim(),
       scale,
+      ...(offset ? { offset } : {}),
       ...(draft.period ? { period: draft.period } : {}),
     };
   } else {
@@ -461,11 +479,21 @@ export function gridTargetSpec(
             ...(draft.period ? { period: draft.period } : {}),
           };
   }
+  // 权重与键在校验里也要拦住坏值：它们直接进目标函数与结果列名，坏了比缺参数更难发现。
+  const weight = draft.weight?.trim() ? Number(draft.weight) : 1;
+  if (!Number.isFinite(weight) || weight <= 0)
+    throw new Error(
+      bilingual(
+        `第 ${index + 1} 个目标的权重要是正数`,
+        `Target ${index + 1} needs a positive weight`,
+      ),
+    );
+  const key = draft.key?.trim() || `${variable}@${draft.kind}${index + 1}`;
   return {
-    key: `${variable}@${draft.kind}${index + 1}`,
+    key,
     variable,
     metric: draft.metric || metric,
-    weight: 1,
+    weight,
     min_pairs: minPairs,
     ...windows,
     source,
@@ -808,6 +836,25 @@ export function frozenDesign(spec: Record<string, unknown> | null) {
   if (n(budget.jobs) != null)
     lines.push([`每个研究同时 ${budget.jobs} 个模拟`, `${budget.jobs} simulations at a time`]);
   if (n(spec?.seed) != null) lines.push([`随机种子 ${spec!.seed}`, `seed ${spec!.seed}`]);
+  // 派生研究（审计 P1-4）：第 4 步核对冻结设计时要能看见"这份设计从哪来"，
+  // 否则用户核对的是预算，却不知道目标与观测是按另一项研究继承的。
+  const parent = spec?.parent_study as
+    { study?: unknown; model_revision?: { id?: unknown; revision?: unknown } | null } | undefined;
+  if (parent && typeof parent.study === 'string' && parent.study) {
+    const name = parent.study.split(/[/\\]/).filter(Boolean).pop() ?? parent.study;
+    const revision = parent.model_revision;
+    const revisionText =
+      revision && typeof revision.id === 'string' && typeof revision.revision === 'number'
+        ? [
+            `（模型修订 ${revision.id} r${revision.revision}）`,
+            ` (model revision ${revision.id} r${revision.revision})`,
+          ]
+        : ['', ''];
+    lines.push([
+      `派生自研究 ${name}${revisionText[0]}：目标、观测与时间窗按来源研究继承`,
+      `Derived from study ${name}${revisionText[1]}: targets, observations and time windows inherited from the source`,
+    ]);
+  }
   return { parameters, budget: lines };
 }
 
@@ -1093,4 +1140,366 @@ export function crossValidationRows(value: unknown) {
       better: heldOut != null && baseline != null ? heldOut < baseline : null,
     };
   });
+}
+
+/** 派生研究记录的来源，与后端 `study::spec::ParentStudy` 同形，写进新研究的 `spec.parent_study`。 */
+export interface ParentStudyRef {
+  study: string;
+  spec_sha256: string;
+  model_revision: VersionRef | null;
+}
+
+/** 从来源研究继承下来、要套回研究页控件上的设计。 */
+export interface DerivedStudyUi {
+  sites: string[];
+  variables: string;
+  metric: string;
+  minPairs: string;
+  corrected: boolean;
+  aggregate: '' | 'daily' | 'monthly';
+  weights: Record<string, string>;
+  observations: string;
+  from: string;
+  to: string;
+  valFrom: string;
+  valTo: string;
+  /** 格点算例的目标；单点研究为 null（目标由站点×变量重新生成）。 */
+  gridTargets: GridTargetDraft[] | null;
+  seed: string;
+  kernelDir: string | null;
+}
+
+export interface DerivedStudyDesign {
+  parent: ParentStudyRef;
+  ui: DerivedStudyUi;
+  /** 从来源研究继承了什么（中英各一句），调用方显示给用户核对。 */
+  notes: [string, string][];
+}
+
+/** 后端目标规格的宽松读取；这里只认派生要用的字段，别的原样留在来源研究里。 */
+type RawTarget = {
+  key?: unknown;
+  site?: unknown;
+  variable?: unknown;
+  metric?: unknown;
+  weight?: unknown;
+  from?: unknown;
+  to?: unknown;
+  validation_from?: unknown;
+  validation_to?: unknown;
+  min_pairs?: unknown;
+  corrected?: unknown;
+  aggregate?: unknown;
+  source?: unknown;
+};
+
+const refusal = (zh: string, en: string): Error => new Error(bilingual(zh, en));
+
+const inputWindow = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16);
+
+/** 单点算例里目标按变量给权重、按研究给指标；同一变量在不同站点权重不同就无法用界面无损表达。 */
+function singleSiteWeightMap(targets: RawTarget[]): Record<string, string> {
+  const weights: Record<string, string> = {};
+  for (const target of targets) {
+    const variable = String(target.variable ?? '');
+    const weight =
+      typeof target.weight === 'number' && Number.isFinite(target.weight) ? target.weight : 1;
+    const known = weights[variable];
+    if (known != null && Number(known) !== weight)
+      throw refusal(
+        `来源研究里 ${variable} 在不同站点的权重不一样（${known} / ${weight}），研究页按变量给权重，无法无损继承；请取消派生后手工新建。`,
+        `The source study weights ${variable} differently per site (${known} / ${weight}); this page sets weights per variable, so the design cannot be carried without loss. Start a fresh study instead.`,
+      );
+    if (weight !== 1) weights[variable] = String(weight);
+  }
+  return weights;
+}
+
+function singleSiteTargets(targets: RawTarget[], baseCases: string[]) {
+  const windows = new Set(
+    targets.map(
+      (t) =>
+        `${String(t.from)}|${String(t.to)}|${String(t.validation_from ?? '')}|${String(t.validation_to ?? '')}`,
+    ),
+  );
+  if (windows.size > 1)
+    throw refusal(
+      '来源研究各目标的率定期/验证期不一致，研究页按整项研究给时间窗，无法无损继承；请取消派生后手工新建。',
+      'The source study uses different calibration/validation windows per target; this page sets one window for the study, so the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  const minPairs = new Set(targets.map((t) => String(t.min_pairs ?? 30)));
+  if (minPairs.size > 1)
+    throw refusal(
+      '来源研究各目标的最少观测配对数不一致，研究页只有一个设置，无法无损继承；请取消派生后手工新建。',
+      'The source study uses different minimum pair counts per target; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  const metrics = new Set(targets.map((t) => String(t.metric ?? 'nrmse')));
+  if (metrics.size > 1)
+    throw refusal(
+      '来源研究各目标用了不同的比较指标，研究页只有一个指标设置，无法无损继承；请取消派生后手工新建。',
+      'The source study uses different metrics per target; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  const aggregates = new Set(targets.map((t) => String(t.aggregate ?? '')));
+  if (aggregates.size > 1)
+    throw refusal(
+      '来源研究各目标的时间聚合不一致，研究页只有一个设置，无法无损继承；请取消派生后手工新建。',
+      'The source study aggregates targets differently in time; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  const sites = new Set(targets.map((t) => String(t.site ?? '')).filter(Boolean));
+  for (const site of sites)
+    if (!baseCases.includes(site))
+      throw refusal(
+        `来源研究的目标引用了不在算例列表里的站点 ${site}，无法无损继承；请取消派生后手工新建。`,
+        `A source-study target references ${site}, which is not one of its cases; the design cannot be carried without loss. Start a fresh study instead.`,
+      );
+  return {
+    observed: [...sites],
+    metric: [...metrics][0] ?? 'nrmse',
+    minPairs: [...minPairs][0] ?? '20',
+    aggregate: ([...aggregates][0] ?? '') as '' | 'daily' | 'monthly',
+  };
+}
+
+/** 派生设计里"按变量做能量闭合订正"只有一个开关；来源研究逐目标不一致时拒绝而不是悄悄改。 */
+function carriedCorrected(targets: RawTarget[], spatial: boolean) {
+  const flux = (variable: string) => ['qle', 'qh'].includes(variable.trim().toLowerCase());
+  const any = targets.some((t) => t.corrected === true);
+  if (!any) return false;
+  const consistent = targets.every((target) => {
+    const expected = flux(String(target.variable ?? ''));
+    // 格点产品/水文站目标没有订正版观测；只有站点含义的目标（单点或区域通量站）才可比。
+    const stationLike = !target.source || (target.source as { kind?: unknown }).kind === 'station';
+    return Boolean(target.corrected) === (stationLike && expected);
+  });
+  if (!consistent)
+    throw refusal(
+      '来源研究只给部分目标用了能量闭合订正（或订正了非湍流通量目标），研究页只有整项研究的开关，无法无损继承；请取消派生后手工新建。',
+      'The source study corrects only some targets with the energy-balance closure (or corrects non-flux targets); this page has one study-wide switch, so the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  if (spatial) return true;
+  return true;
+}
+
+function gridTargetDraftFromTarget(target: RawTarget): GridTargetDraft {
+  const source = (target.source ?? {}) as Record<string, unknown>;
+  const kind = String(source.kind ?? '');
+  if (kind !== 'grid' && kind !== 'station' && kind !== 'gauge')
+    throw refusal(
+      `来源研究的目标 ${String(target.key ?? '')} 种类不认识（${kind || '没有种类'}），无法无损继承；请取消派生后手工新建。`,
+      `The source-study target ${String(target.key ?? '')} has an unknown kind (${kind || 'none'}), so the design cannot be carried without loss. Start a fresh study instead.`,
+    );
+  const path = String(source.path ?? '');
+  const number = (value: unknown, fallback = '') =>
+    typeof value === 'number' && Number.isFinite(value) ? String(value) : fallback;
+  const draft: GridTargetDraft = {
+    ...gridTargetDefaults[kind as GridTargetDraft['kind']],
+    variable: String(target.variable ?? ''),
+    path,
+    metric: typeof target.metric === 'string' ? target.metric : undefined,
+    ...(typeof target.weight === 'number' && target.weight !== 1
+      ? { weight: String(target.weight) }
+      : {}),
+    ...(typeof target.key === 'string' ? { key: target.key } : {}),
+  };
+  if (kind === 'grid') {
+    draft.obsVariable = String(source.variable ?? '');
+    draft.scale = number(source.scale, '1') || '1';
+    // 界面没有偏移输入框：非零偏移必须继承，否则派生研究的观测整体平移。
+    if (typeof source.offset === 'number' && source.offset !== 0)
+      draft.offset = String(source.offset);
+    if (source.period === 'daily' || source.period === 'monthly') draft.period = source.period;
+  } else {
+    draft.lon = number(source.lon);
+    draft.lat = number(source.lat);
+    if (kind === 'station') {
+      const offset = typeof source.utc_offset === 'number' ? source.utc_offset : 0;
+      draft.utcOffset = offset ? String(offset) : '';
+    } else {
+      draft.obsVariable = typeof source.variable === 'string' ? source.variable : '';
+      if (source.period === 'daily' || source.period === 'monthly') draft.period = source.period;
+    }
+  }
+  return draft;
+}
+
+/**
+ * 从一项已完成的研究派生新研究的设计（审计 P1-4）。
+ *
+ * 派生只换方法、参数子集与预算；算例、观测、目标（含权重、时间聚合、逐目标指标）、
+ * 时间窗和模型修订都按来源研究继承。界面表达不了的组合（逐目标权重/指标/时段不同等）
+ * 明确拒绝而不是悄悄丢掉——这正是审计复现的"月均目标变成逐时"那类静默变化。
+ */
+export function deriveStudyDesign(
+  parentSpec: Record<string, unknown> | null,
+  options: {
+    study: string;
+    specSha256: string;
+    modelRevision: VersionRef | null;
+    projectRoot: string;
+  },
+): DerivedStudyDesign {
+  if (!parentSpec)
+    throw refusal(
+      '这个研究没有可读的冻结设计，不能派生。',
+      'The study has no readable frozen design to derive from.',
+    );
+  if (!options.modelRevision)
+    throw refusal(
+      '这个研究没有记录所用的模型修订，派生会悄悄换模型；请从有模型修订的研究派生，或手工新建。',
+      'This study did not record its model revision; deriving would silently switch models. Derive from a study with a recorded revision, or start fresh.',
+    );
+  if (parentSpec.hybrid)
+    throw refusal(
+      '来源研究训练了 AI 网络；当前"带入率定"只派生纯参数率定，网络会丢。请取消派生后手工新建。',
+      'The source study trained an AI network; this carry only derives plain parameter calibration and would drop the network. Start a fresh study instead.',
+    );
+  if (String(parentSpec.site_mode ?? 'shared') !== 'shared')
+    throw refusal(
+      '来源研究是独立站点模式，研究页派生只支持共享参数。请取消派生后手工新建。',
+      'The source study uses independent sites; derivation on this page only supports shared parameters. Start a fresh study instead.',
+    );
+  const baseCases = (Array.isArray(parentSpec.base_cases) ? parentSpec.base_cases : []).map(String);
+  if (!baseCases.length)
+    throw refusal('来源研究没有算例，不能派生。', 'The source study has no cases to derive from.');
+  const rawTargets = Array.isArray(parentSpec.targets) ? (parentSpec.targets as RawTarget[]) : [];
+  const spatial = rawTargets.some((target) => target.source);
+  const separator = options.projectRoot.includes('/') ? '/' : '\\';
+  const sites = baseCases.map((name) => `${options.projectRoot}${separator}${name}`);
+  // 写进研究规格的键名是后端的 snake_case（`spec_sha256` / `model_revision`），不能把选项名原样透传。
+  const parent: ParentStudyRef = {
+    study: options.study,
+    spec_sha256: options.specSha256,
+    model_revision: options.modelRevision,
+  };
+  const corrected = carriedCorrected(rawTargets, spatial);
+  const notes: [string, string][] = [];
+
+  if (spatial) {
+    const drafts = rawTargets.map(gridTargetDraftFromTarget);
+    const stationAggregates = new Set(
+      rawTargets
+        .filter((target) => (target.source as { kind?: unknown } | undefined)?.kind === 'station')
+        .map((target) => String(target.aggregate ?? '')),
+    );
+    if (stationAggregates.size > 1)
+      throw refusal(
+        '来源研究各通量站目标的时间聚合不一致，研究页只有一个设置，无法无损继承；请取消派生后手工新建。',
+        'The source study aggregates flux-station targets differently in time; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
+      );
+    if (
+      rawTargets.some(
+        (target) =>
+          target.aggregate && (target.source as { kind?: unknown } | undefined)?.kind !== 'station',
+      )
+    )
+      throw refusal(
+        '来源研究给格点产品或水文站目标写了时间聚合，研究页把它放在观测自身的时间分辨率里，无法无损继承；请取消派生后手工新建。',
+        'The source study sets a time aggregation on gridded or gauge targets, which this page stores in the observation period instead; it cannot be carried without loss. Start a fresh study instead.',
+      );
+    const minPairs = new Set(rawTargets.map((t) => String(t.min_pairs ?? 30)));
+    if (minPairs.size > 1)
+      throw refusal(
+        '来源研究各目标的最少观测配对数不一致，研究页只有一个设置，无法无损继承；请取消派生后手工新建。',
+        'The source study uses different minimum pair counts per target; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
+      );
+    const aggregate = ([...stationAggregates][0] ?? '') as '' | 'daily' | 'monthly';
+    notes.push([
+      `派生自研究 ${options.study.split(/[/\\]/).pop()}：${sites.length} 个格点算例、${drafts.length} 个目标按来源研究继承（含权重、逐目标指标与聚合）。`,
+      `Derived from study ${options.study.split(/[/\\]/).pop()}: ${sites.length} gridded cases and ${drafts.length} targets are inherited from the source (weights, per-target metrics and aggregation included).`,
+    ]);
+    return {
+      parent,
+      notes,
+      ui: {
+        sites,
+        variables: '',
+        metric: typeof rawTargets[0]?.metric === 'string' ? rawTargets[0].metric : 'nrmse',
+        minPairs: [...minPairs][0] ?? '20',
+        corrected,
+        aggregate,
+        weights: {},
+        observations: '',
+        from: '',
+        to: '',
+        valFrom: '',
+        valTo: '',
+        gridTargets: drafts,
+        seed: String(parentSpec.seed ?? 1),
+        kernelDir:
+          typeof parentSpec.kernel_dir === 'string' && parentSpec.kernel_dir
+            ? parentSpec.kernel_dir
+            : null,
+      },
+    };
+  }
+
+  if (
+    rawTargets.length &&
+    rawTargets.some((target) => !target.site || typeof target.site !== 'string')
+  )
+    throw refusal(
+      '来源研究有些目标没有站点归属，无法无损继承；请取消派生后手工新建。',
+      'The source study has gridded targets but some lack a site; the design cannot be carried without loss. Start a fresh study instead.',
+    );
+  const plan = singleSiteTargets(rawTargets, baseCases);
+  const targetSites = plan.observed.length ? plan.observed : baseCases;
+  // 单点目标要能按站点×变量重新生成：每个目标站点都得有观测文件，否则派生后会缺观测。
+  const observations = (parentSpec.observations ?? {}) as Record<string, unknown>;
+  const missing = targetSites.filter((site) => typeof observations[site] !== 'string');
+  if (rawTargets.length && missing.length)
+    throw refusal(
+      `来源研究的站点 ${missing.join('、')} 没有记下观测文件，无法无损继承；请取消派生后手工新建。`,
+      `The source study did not record observation files for ${missing.join(', ')}; the design cannot be carried without loss. Start a fresh study instead.`,
+    );
+  const variables = [
+    ...new Set(rawTargets.map((target) => String(target.variable ?? '')).filter(Boolean)),
+  ];
+  const observationsText = targetSites
+    .filter((site) => typeof observations[site] === 'string')
+    .map((site) => `${site} | ${String(observations[site])}`)
+    .join('\n');
+  const first = rawTargets[0];
+  const from = typeof first?.from === 'number' ? first.from : null;
+  const to = typeof first?.to === 'number' ? first.to : null;
+  const valFrom = typeof first?.validation_from === 'number' ? first.validation_from : null;
+  const valTo = typeof first?.validation_to === 'number' ? first.validation_to : null;
+  const weights = singleSiteWeightMap(rawTargets);
+  if (from != null && to != null)
+    notes.push([
+      `率定期按来源研究继承：${inputWindow(from)} 至 ${inputWindow(to)}${valFrom != null && valTo != null ? `；验证期 ${inputWindow(valFrom)} 至 ${inputWindow(valTo)}` : '（没有独立验证期）'}。`,
+      `Calibration window inherited from the source: ${inputWindow(from)} to ${inputWindow(to)}${valFrom != null && valTo != null ? `; validation ${inputWindow(valFrom)} to ${inputWindow(valTo)}` : ' (no separate validation period)'}.`,
+    ]);
+  if (Object.keys(weights).length)
+    notes.push([
+      `目标权重按来源研究继承：${Object.entries(weights)
+        .map(([variable, weight]) => `${variable} × ${weight}`)
+        .join('、')}。`,
+      `Target weights inherited from the source: ${Object.entries(weights)
+        .map(([variable, weight]) => `${variable} × ${weight}`)
+        .join(', ')}.`,
+    ]);
+  return {
+    parent,
+    notes,
+    ui: {
+      sites,
+      variables: variables.join(', '),
+      metric: plan.metric,
+      minPairs: plan.minPairs,
+      corrected,
+      aggregate: plan.aggregate,
+      weights,
+      observations: observationsText,
+      from: from != null && to != null ? inputWindow(from) : '',
+      to: from != null && to != null ? inputWindow(to) : '',
+      valFrom: valFrom != null ? inputWindow(valFrom) : '',
+      valTo: valTo != null ? inputWindow(valTo) : '',
+      gridTargets: null,
+      seed: String(parentSpec.seed ?? 1),
+      kernelDir:
+        typeof parentSpec.kernel_dir === 'string' && parentSpec.kernel_dir
+          ? parentSpec.kernel_dir
+          : null,
+    },
+  };
 }

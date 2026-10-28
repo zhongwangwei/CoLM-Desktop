@@ -448,6 +448,27 @@ pub struct StudySpec {
     /// 训练一个混合模型插槽（docs/design-hybrid.md 第 12 节）：网络权重是 DE 的决策变量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hybrid: Option<HybridStudySpec>,
+    /// 这份设计从哪个研究派生而来（敏感性分析"带入率定"、从率定继续做研究）。
+    ///
+    /// 只记来源，不在创建时回读父研究：研究可能被删、或从另一台机器上的项目派生，
+    /// 硬校验会把合法操作挡住。审计要的证据（父研究目录、冻结规格哈希、父研究实际用的
+    /// 模型修订）足够在结果页与导出报告里说清"这份设计从哪来、换了什么"。
+    /// 不写时不序列化：旧研究的 `spec_sha256` 是对不含这个键的 JSON 算的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_study: Option<ParentStudy>,
+}
+
+/// 派生研究记录的来源。`spec_sha256` 是创建父研究时写进 `manifest.provenance` 的那一份，
+/// 用来核对"派生时读到的确实是这份设计"，而不是同目录下后来重建的另一个研究。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentStudy {
+    /// 父研究目录（创建父研究时记录的绝对路径）。
+    pub study: String,
+    pub spec_sha256: String,
+    /// 父研究冻结的模型修订；U-01 之前的老研究没有记录，派生时只能记 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<colm_model::VersionRef>,
 }
 
 /// Study 里训练的小网络：`features` → `hidden` 隐藏层 → 每个输出经 `transform` 落到 `range`。
@@ -1122,6 +1143,7 @@ mod tests {
                 ..Default::default()
             },
             hybrid: None,
+            parent_study: None,
         }
     }
 
@@ -1416,3 +1438,7 @@ mod tests {
         validate_target_site_coverage(&spec, &["A".into(), "B".into()]).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "spec_tests.rs"]
+mod spec_tests;
