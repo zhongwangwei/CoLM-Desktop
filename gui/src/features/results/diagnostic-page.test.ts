@@ -89,6 +89,23 @@ function harness(
       };
     if (command === 'series') return delayedSeries ?? normal;
     if (command === 'energy_summary') return diagnostic;
+    // 多站点比较：每个"运行副本 | 观测"条目调一次 metrics；只在比较测试用的观测路径上返回一行指标，
+    // 其他路径照旧抛错，免得把自动评估等用例的结果喂假装数据。
+    if (command === 'metrics' && args.obs === '/obs/compare.nc')
+      return [
+        {
+          name: 'f_lfevpa',
+          n: 2,
+          rmse: 1,
+          mae: 1,
+          bias: 0,
+          r2: 1,
+          correlation: 1,
+          nse: 1,
+          kge: 1,
+          units: 'W/m²',
+        },
+      ];
     throw Error(command);
   };
   const env: Record<string, unknown> = {
@@ -613,3 +630,63 @@ test('a server run picks its observation on the server, not with the local file 
     'closed after choosing',
   );
 });
+
+test('analysis scope switches between one station and the multi-station comparison', async () => {
+  const h = harness(true);
+  await h.render();
+  assert.equal(h.field('result-scope')?.value, 'single');
+  assert.ok(h.station(), 'single-station scope keeps the station selector');
+  assert.ok(
+    !h.field('result-tab')?.options?.some((option) => option.value === 'report'),
+    'the report-export view is no longer offered in the analysis view choices',
+  );
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  assert.equal(h.field('result-scope')?.value, 'multi');
+  assert.equal(h.field('result-tab')?.value, 'comparison');
+  assert.equal(h.station(), undefined, 'multi-station comparison is not tied to one station');
+  assert.ok(actionIds(h).includes('compare-sites'));
+  h.field('result-scope')!.set!('single');
+  await h.render();
+  assert.equal(h.field('result-tab')?.value, 'overview');
+  assert.ok(h.station(), 'the station selector comes back');
+});
+
+test('the multi-station comparison asks for run copies and shows paired metrics per site', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  // 比较输入是"运行副本 | 观测文件"的平面列表：这里直接用契约字段填入一行，验证整条调用链。
+  h.field('comparison-sources')!.set!('/case/.colm/runs/a | /obs/compare.nc');
+  await h.render();
+  await h.action('compare-sites');
+  const text = (node: unknown): string[] => {
+    if (Array.isArray(node)) return node.flatMap(text);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    if (element.type === 'td')
+      return [String((element.props.children ?? []).filter((x) => x != null).join(''))];
+    return text(element.props?.children);
+  };
+  const cells = text(h.tree());
+  assert.ok(cells.includes('f_lfevpa'), 'the paired metric row is rendered');
+  assert.ok(cells.includes('.colm · a'), 'the site column identifies the compared run copy');
+  assert.ok(!cellError(h), 'no error notice after a valid comparison');
+});
+function cellError(h: { tree: () => unknown }): boolean {
+  const walk = (node: unknown): boolean => {
+    if (Array.isArray(node)) return node.some(walk);
+    if (!node || typeof node !== 'object') return false;
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    if (element.type === 'Notice' && element.props.tone === 'error') return true;
+    return walk(element.props?.children);
+  };
+  return walk(h.tree());
+}
