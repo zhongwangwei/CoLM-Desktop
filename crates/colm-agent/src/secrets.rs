@@ -72,6 +72,15 @@ pub fn has(path: &Path, base_url: &str) -> Result<bool> {
     Ok(load(path)?.contains_key(&normalized(base_url)))
 }
 
+/// 只读本地 Key 文件里的这个服务，不套用 `COLM_AGENT_API_KEY` 环境变量。
+/// 本机 Xerj 的 key 与模型服务是两回事：环境变量是给某次会话覆盖模型 Key 用的，
+/// 拿它去连文档检索节点会把模型 Key 发给另一个本机服务。
+pub fn get_stored(path: &Path, base_url: &str) -> Result<Option<String>> {
+    Ok(load(path)?
+        .remove(&normalized(base_url))
+        .filter(|key| !key.is_empty()))
+}
+
 pub fn set(path: &Path, base_url: &str, key: &str) -> Result<()> {
     let mut keys = load(path)?;
     keys.insert(normalized(base_url), key.trim().to_owned());

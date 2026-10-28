@@ -759,3 +759,626 @@ fn study_summary_missing_evidence_falls_back_and_stays_within_the_transport_budg
     assert!(serde_json::from_str::<Value>(&serialized).is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ---- 可选 Xerj 召回：search_docs 集成（假 HTTP 服务；真实 Xerj 验收在 tests/xerj_acceptance.rs） ----
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, PartialEq)]
+enum FakeXerjMode {
+    Normal,
+    UnknownIds,
+    Oversize,
+    SearchFailure,
+}
+
+struct FakeXerjState {
+    docs: HashMap<String, Value>,
+    mode: FakeXerjMode,
+    requests: usize,
+}
+
+struct FakeXerj {
+    endpoint: String,
+    state: Arc<Mutex<FakeXerjState>>,
+}
+
+impl FakeXerj {
+    fn set_mode(&self, mode: FakeXerjMode) {
+        self.state.lock().unwrap().mode = mode;
+    }
+    fn requests(&self) -> usize {
+        self.state.lock().unwrap().requests
+    }
+}
+
+fn fake_bytes_contain(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// 从 fake 收到的 ES 查询里取文本条件：生产候选查询是 must.bool.should 的两个 match，
+/// 发布前验证查询则没有文本条件（等价 match_all）。
+fn fake_match_text(item: &Value) -> Option<&str> {
+    item["match"]["body"]
+        .as_str()
+        .or_else(|| item["match"]["title"].as_str())
+}
+
+fn fake_http_respond(stream: &mut TcpStream, status: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+fn fake_xerj_spawn() -> FakeXerj {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = Arc::new(Mutex::new(FakeXerjState {
+        docs: HashMap::new(),
+        mode: FakeXerjMode::Normal,
+        requests: 0,
+    }));
+    let shared = Arc::clone(&state);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let _ = fake_xerj_handle(stream, shared);
+            });
+        }
+    });
+    FakeXerj { endpoint, state }
+}
+
+fn fake_xerj_handle(
+    mut stream: TcpStream,
+    state: Arc<Mutex<FakeXerjState>>,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let header_end = loop {
+        if let Some(position) = fake_bytes_contain(&buffer, b"\r\n\r\n") {
+            break position + 4;
+        }
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > 16 * 1024 * 1024 {
+            return Ok(());
+        }
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    let mut lines = head.lines();
+    let request = lines.next().unwrap_or_default();
+    let mut parts = request.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let path = parts.next().unwrap_or_default().to_owned();
+    let length = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while buffer.len() < header_end + length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let end = (header_end + length).min(buffer.len());
+    let body = String::from_utf8_lossy(&buffer[header_end..end]).into_owned();
+    state.lock().unwrap().requests += 1;
+    fake_xerj_route(&mut stream, &method, &path, &body, &state)
+}
+
+fn fake_xerj_route(
+    stream: &mut TcpStream,
+    method: &str,
+    path: &str,
+    body: &str,
+    state: &Arc<Mutex<FakeXerjState>>,
+) -> std::io::Result<()> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if method == "GET" && path == "/_cluster/health" {
+        fake_http_respond(
+            stream,
+            "200 OK",
+            r#"{"cluster_name":"fake","status":"green","number_of_nodes":1}"#,
+        );
+        return Ok(());
+    }
+    if method == "PUT" && segments.len() == 1 {
+        fake_http_respond(stream, "200 OK", r#"{"acknowledged":true}"#);
+        return Ok(());
+    }
+    if method == "DELETE" && segments.len() == 1 {
+        state.lock().unwrap().docs.clear();
+        fake_http_respond(stream, "200 OK", r#"{"acknowledged":true}"#);
+        return Ok(());
+    }
+    if method == "DELETE" && segments.len() == 3 && segments[1] == "_doc" {
+        let removed = state.lock().unwrap().docs.remove(segments[2]).is_some();
+        fake_http_respond(
+            stream,
+            "200 OK",
+            &format!(
+                r#"{{"result":"{}"}}"#,
+                if removed { "deleted" } else { "not_found" }
+            ),
+        );
+        return Ok(());
+    }
+    if method == "POST" && segments.last() == Some(&"_bulk") {
+        let mut locked = state.lock().unwrap();
+        let index = segments.first().copied().unwrap_or("docs");
+        let mut items = Vec::new();
+        let mut errors = false;
+        let lines: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        for pair in lines.chunks(2) {
+            if pair.len() < 2 {
+                break;
+            }
+            let Ok(action) = serde_json::from_str::<Value>(pair[0]) else {
+                continue;
+            };
+            let Some(id) = action["index"]["_id"].as_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(doc) = serde_json::from_str::<Value>(pair[1]) else {
+                continue;
+            };
+            if doc["body"]
+                .as_str()
+                .is_some_and(|body| body.contains("__fail"))
+            {
+                errors = true;
+                items.push(json!({"index":{"_index":index,"_id":id,"status":400,
+                    "error":{"type":"document_parsing_exception","reason":"fake partial failure"}}}));
+            } else {
+                locked.docs.insert(id.clone(), doc);
+                items.push(json!({"index":{"_index":index,"_id":id,"status":201}}));
+            }
+        }
+        drop(locked);
+        fake_http_respond(
+            stream,
+            "200 OK",
+            &json!({"took":1,"errors":errors,"items":items}).to_string(),
+        );
+        return Ok(());
+    }
+    if method == "POST" && segments.last() == Some(&"_search") {
+        let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let (mode, docs) = {
+            let locked = state.lock().unwrap();
+            (locked.mode, locked.docs.clone())
+        };
+        match mode {
+            FakeXerjMode::SearchFailure => fake_http_respond(
+                stream,
+                "500 Internal Server Error",
+                r#"{"error":{"type":"internal_server_error","reason":"fake search failure"}}"#,
+            ),
+            FakeXerjMode::Oversize => {
+                let body = format!(
+                    r#"{{"hits":{{"total":{{"value":1,"relation":"eq"}},"max_score":1.0,"hits":[{{"_id":"big","_score":1.0,"_source":{{"body":"{}"}}}}]}}}}"#,
+                    "x".repeat(3_000_000)
+                );
+                fake_http_respond(stream, "200 OK", &body);
+            }
+            FakeXerjMode::UnknownIds => fake_http_respond(
+                stream,
+                "200 OK",
+                &json!({
+                    "took":1,
+                    "hits":{"total":{"value":1,"relation":"eq"},"max_score":1.0,
+                        "hits":[{"_index":"fake","_id":"unknown-chunk-xyz","_score":1.0,
+                            "_source":{"relative_path":"../../forged.md",
+                                "document_sha256":"0".repeat(64),"line_start":1,"line_end":999999}}]}
+                })
+                .to_string(),
+            ),
+            FakeXerjMode::Normal => {
+                let filters = request["query"]["bool"]["filter"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut scope_key = None;
+                let mut generation = None;
+                for filter in &filters {
+                    if let Some(value) = filter["term"]["scope_key"].as_str() {
+                        scope_key = Some(value.to_owned());
+                    }
+                    if let Some(value) = filter["term"]["generation"].as_u64() {
+                        generation = Some(value);
+                    }
+                }
+                // 生产查询是 must:[{bool:{should:[match body, match title]}}]；验证查询没有 must。
+                // 两种都支持，否则要么中文候选取不到，要么发布前的 match_all 验证永远返回 0。
+                let query_text = request["query"]["bool"]["must"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(|item| {
+                        fake_match_text(item).or_else(|| {
+                            item["bool"]["should"].as_array().and_then(|should| {
+                                should.iter().find_map(|clause| fake_match_text(clause))
+                            })
+                        })
+                    })
+                    .unwrap_or_default()
+                    .to_lowercase();
+                // 发布前的验证查询只有 scope/generation filter、没有文本查询（相当于 match_all）：
+                // 真实 Xerj 会返回该代全部文档，fake 也必须这样，否则索引永远发布不出去。
+                let match_all = query_text.trim().is_empty();
+                let tokens = query_text.split_whitespace().collect::<Vec<_>>();
+                let size = request["size"].as_u64().unwrap_or(5).min(40) as usize;
+                let mut scored = docs
+                    .into_iter()
+                    .filter_map(|(id, doc)| {
+                        if scope_key.as_deref() != doc["scope_key"].as_str() {
+                            return None;
+                        }
+                        if generation != doc["generation"].as_u64() {
+                            return None;
+                        }
+                        if match_all {
+                            return Some((1.0, id));
+                        }
+                        let haystack = format!(
+                            "{} {}",
+                            doc["title"].as_str().unwrap_or_default(),
+                            doc["body"].as_str().unwrap_or_default()
+                        )
+                        .to_lowercase();
+                        let score = tokens
+                            .iter()
+                            .filter(|token| !token.is_empty() && haystack.contains(**token))
+                            .count() as f64;
+                        (score > 0.0).then_some((score, id))
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|left, right| {
+                    right
+                        .0
+                        .partial_cmp(&left.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| left.1.cmp(&right.1))
+                });
+                let hits: Vec<Value> = scored
+                    .into_iter()
+                    .take(size)
+                    .map(|(score, id)| {
+                        json!({"_index":"fake","_id":id,"_score":score,
+                            // 故意伪造：应用必须只信本地清单，不信 _source。
+                            "_source":{"relative_path":"../../forged.md",
+                                "document_sha256":"0".repeat(64),"line_start":1,"line_end":999999}})
+                    })
+                    .collect();
+                fake_http_respond(
+                    stream,
+                    "200 OK",
+                    &json!({"took":1,"timed_out":false,
+                        "hits":{"total":{"value":hits.len(),"relation":"eq"},"max_score":1.0,"hits":hits}})
+                    .to_string(),
+                );
+            }
+        }
+        return Ok(());
+    }
+    fake_http_respond(stream, "404 Not Found", r#"{"error":"no route"}"#);
+    Ok(())
+}
+
+fn wait_xerj_ready(handle: &crate::retrieval::Handle, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = handle.status();
+        if matches!(
+            status["state"].as_str(),
+            Some("ready" | "error" | "invalid")
+        ) {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn xerj_fake_cli(root: &Path, source: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = root.join("fake-xerj-cli");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = ws-source-info ] || exit 9\nprintf '%s\\n' '{{\"source\":\"{}\",\"revision\":\"abc123\",\"tag\":null,\"dirty\":false,\"content_sha256\":\"{}\",\"version_status\":\"identified\"}}'\n",
+            source.display(),
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    script
+}
+
+fn xerj_context(
+    label: &str,
+    enabled: bool,
+    endpoint: String,
+    docs_source: Option<&Path>,
+) -> (PathBuf, ToolContext) {
+    let root = temp(label);
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(
+        docs.join("a.md"),
+        "# A\n\nenergy closure is checked in this document.\nsecond line\n",
+    )
+    .unwrap();
+    std::fs::write(
+        docs.join("b.md"),
+        "# B\n\nclosure appears without the full phrase here.\nupdatedtoken line\n",
+    )
+    .unwrap();
+    let source = docs_source
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.clone());
+    let cli = xerj_fake_cli(&root, &source);
+    let handle = crate::retrieval::Handle::new(
+        crate::retrieval::RetrievalSettings {
+            enabled,
+            endpoint,
+            index: "colm-docs-integration".into(),
+            timeout_ms: 800,
+        },
+        String::new(),
+        None,
+    );
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        cli,
+        docs_root: Some(docs),
+        retrieval: Some(handle),
+        ..ToolContext::default()
+    };
+    (root, ctx)
+}
+
+#[cfg(unix)]
+#[test]
+fn search_docs_merges_xerj_chunks_and_ignores_forged_index_metadata() {
+    let fake = fake_xerj_spawn();
+    let (root, ctx) = xerj_context("xerj-merge", true, fake.endpoint.clone(), None);
+    let handle = ctx.retrieval.as_ref().unwrap().clone();
+    let request = json!({"query":"energy closure","name":null});
+    let _ = super::SearchDocs.call(&request, &ctx).unwrap();
+    let status = wait_xerj_ready(&handle, Duration::from_secs(10));
+    assert_eq!(status["state"], "ready", "{status}");
+    let result = super::SearchDocs.call(&request, &ctx).unwrap();
+    assert_eq!(result["retrieval"]["backend"], "xerj");
+    assert!(
+        result["retrieval"]["candidates"].as_u64().unwrap_or(0) >= 1,
+        "{result}"
+    );
+    let matches = result["matches"].as_array().unwrap();
+    assert!(matches
+        .iter()
+        .any(|hit| hit["match"] == "exact" && hit["file"] == "a.md"));
+    let candidate = matches
+        .iter()
+        .find(|hit| hit["match"] == "candidate")
+        .expect("a BM25-only chunk from b.md must be returned");
+    assert_eq!(candidate["file"], "b.md");
+    // 索引里伪造成 ../../forged.md 和假 hash/行段：输出必须来自本地清单与真实重读。
+    assert!(!candidate["path"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("forged"));
+    assert!(Path::new(candidate["path"].as_str().unwrap()).starts_with(root.join("docs")));
+    assert!(candidate["line"].as_u64().unwrap_or(0) >= 1);
+    assert!(candidate["knowledge_status"].is_string());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn search_docs_falls_back_with_a_reason_when_the_backend_is_down() {
+    let (root, ctx) = xerj_context("xerj-down", true, "http://127.0.0.1:1".into(), None);
+    let handle = ctx.retrieval.as_ref().unwrap().clone();
+    let request = json!({"query":"energy closure","name":null});
+    let first = super::SearchDocs.call(&request, &ctx).unwrap();
+    assert_eq!(first["retrieval"]["backend"], "keyword");
+    assert!(!first["matches"].as_array().unwrap().is_empty());
+    let status = wait_xerj_ready(&handle, Duration::from_secs(5));
+    assert_ne!(status["state"], "ready");
+    let result = super::SearchDocs.call(&request, &ctx).unwrap();
+    assert_eq!(result["retrieval"]["backend"], "keyword");
+    assert!(result["documentation_status"].is_null());
+    assert!(
+        result["retrieval"]["fallback_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{result}"
+    );
+    assert!(result["retrieval"]["state"] != "ready");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn search_docs_rejects_unknown_oversized_and_failed_candidates_without_faking_evidence() {
+    let fake = fake_xerj_spawn();
+    let (root, ctx) = xerj_context("xerj-bad", true, fake.endpoint.clone(), None);
+    let handle = ctx.retrieval.as_ref().unwrap().clone();
+    let request = json!({"query":"energy closure","name":null});
+    let _ = super::SearchDocs.call(&request, &ctx).unwrap();
+    assert_eq!(
+        wait_xerj_ready(&handle, Duration::from_secs(10))["state"],
+        "ready"
+    );
+    for mode in [
+        FakeXerjMode::UnknownIds,
+        FakeXerjMode::Oversize,
+        FakeXerjMode::SearchFailure,
+    ] {
+        fake.set_mode(mode);
+        let result = super::SearchDocs.call(&request, &ctx).unwrap();
+        assert_eq!(result["retrieval"]["backend"], "keyword");
+        assert!(
+            result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["match"] != "candidate"),
+            "untrusted index responses must not enter the model context"
+        );
+        assert!(
+            result["retrieval"]["fallback_reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "{result}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn search_docs_reenumerates_after_a_document_change_and_drops_old_chunks() {
+    let fake = fake_xerj_spawn();
+    let (root, ctx) = xerj_context("xerj-change", true, fake.endpoint.clone(), None);
+    let handle = ctx.retrieval.as_ref().unwrap().clone();
+    let _ = super::SearchDocs
+        .call(&json!({"query":"energy closure","name":null}), &ctx)
+        .unwrap();
+    assert_eq!(
+        wait_xerj_ready(&handle, Duration::from_secs(10))["state"],
+        "ready"
+    );
+    // 文件内容改变（长度也变）：旧清单与旧行段不能继续当证据。
+    std::fs::write(
+        root.join("docs/b.md"),
+        "# B\n\nthe old phrase is gone; only the updatedtoken remains.\n",
+    )
+    .unwrap();
+    let changed = super::SearchDocs
+        .call(&json!({"query":"energy closure","name":null}), &ctx)
+        .unwrap();
+    assert_eq!(changed["retrieval"]["backend"], "keyword");
+    assert!(
+        changed["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["match"] != "candidate"),
+        "{changed}"
+    );
+    assert!(
+        changed["retrieval"]["fallback_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{changed}"
+    );
+    let status = wait_xerj_ready(&handle, Duration::from_secs(10));
+    assert_eq!(status["state"], "ready", "{status}");
+    let refreshed = super::SearchDocs
+        .call(&json!({"query":"updatedtoken","name":null}), &ctx)
+        .unwrap();
+    assert_eq!(refreshed["retrieval"]["backend"], "xerj");
+    // 新词本身就在原文同一行，关键词精确路径已经命中，因此这里不要求 candidate 类型；
+    // 但要证明重建后的索引确实返回了该块（candidates>0），且结果来自新原文。
+    assert!(
+        refreshed["retrieval"]["candidates"].as_u64().unwrap_or(0) >= 1,
+        "{refreshed}"
+    );
+    let updated = refreshed["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["file"] == "b.md")
+        .expect("the rebuilt index must return the updated document");
+    assert!(
+        updated["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("updatedtoken"),
+        "{updated}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn disabled_retrieval_never_contacts_the_local_backend() {
+    let fake = fake_xerj_spawn();
+    let (root, ctx) = xerj_context("xerj-disabled", false, fake.endpoint.clone(), None);
+    let result = super::SearchDocs
+        .call(&json!({"query":"energy closure","name":null}), &ctx)
+        .unwrap();
+    assert_eq!(result["retrieval"]["backend"], "keyword");
+    assert_eq!(result["retrieval"]["enabled"], false);
+    assert_eq!(result["retrieval"]["state"], "disabled");
+    assert!(!result["matches"].as_array().unwrap().is_empty());
+    assert_eq!(fake.requests(), 0, "disabled retrieval must not touch HTTP");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_workspace_docs_do_not_fall_back_to_app_documents_even_with_retrieval_on() {
+    let fake = fake_xerj_spawn();
+    let root = temp("xerj-frozen-missing");
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("app.md"), "# App\n\nenergy closure in app docs\n").unwrap();
+    let workspace_source = root.join("workspace-src");
+    std::fs::create_dir_all(&workspace_source).unwrap();
+    let cli = xerj_fake_cli(&root, &workspace_source);
+    let handle = crate::retrieval::Handle::new(
+        crate::retrieval::RetrievalSettings {
+            enabled: true,
+            endpoint: fake.endpoint.clone(),
+            index: "colm-docs-integration".into(),
+            timeout_ms: 800,
+        },
+        String::new(),
+        None,
+    );
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        cli,
+        docs_root: Some(docs),
+        retrieval: Some(handle),
+        ..ToolContext::default()
+    };
+    let result = super::SearchDocs
+        .call(&json!({"query":"energy closure","name":"ws"}), &ctx)
+        .unwrap();
+    assert_eq!(result["documentation_status"], "missing");
+    assert!(result["matches"].as_array().unwrap().is_empty());
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Current application documents are not evidence")),
+        "{result}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

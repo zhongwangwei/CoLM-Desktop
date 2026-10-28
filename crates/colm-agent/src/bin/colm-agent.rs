@@ -49,7 +49,7 @@ impl Drop for BusyReset {
         self.0.store(false, Ordering::SeqCst);
     }
 }
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn main() {
     if let Err(error) = run() {
@@ -330,6 +330,26 @@ fn display_model(backend: BackendKind, builtin: &str, external: &ExternalChoice)
     match external.cleaned().model {
         Some(model) => format!("{name} · {model}"),
         None => name.to_owned(),
+    }
+}
+
+/// 把检索状态 JSON 转成协议事件。字段只来自宿主统计，绝不包含 HTTP key。
+fn docs_index_event(status: &serde_json::Value) -> Outbound {
+    Outbound::DocsIndexStatus {
+        backend: status["backend"].as_str().unwrap_or("xerj").to_owned(),
+        enabled: status["enabled"].as_bool().unwrap_or(false),
+        state: status["state"].as_str().unwrap_or("error").to_owned(),
+        scope: status
+            .get("scope")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        endpoint: status["endpoint"].as_str().unwrap_or_default().to_owned(),
+        index: status["index"].as_str().unwrap_or_default().to_owned(),
+        documents: status["documents"].as_u64().unwrap_or(0),
+        chunks: status["chunks"].as_u64().unwrap_or(0),
+        generation: status["generation"].as_u64(),
+        indexed_at_unix_ms: status["indexed_at_unix_ms"].as_u64(),
+        detail: status["detail"].as_str().map(str::to_owned),
     }
 }
 
@@ -724,6 +744,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 external: choice,
                 session_turn_limit,
                 session_token_limit,
+                retrieval,
             } => {
                 if let Some(error) = model_context
                     .as_ref()
@@ -734,6 +755,56 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 }
+                // 可选文档检索：配置无效时只发状态事件并回退原关键词检索，不让它阻断助手。
+                let retrieval_handle = match retrieval {
+                    Some(retrieval_settings) => {
+                        if let Err(error) = retrieval_settings.validate() {
+                            emitter.emit(docs_index_event(&json!({
+                                "backend":"xerj",
+                                "enabled":retrieval_settings.enabled,
+                                "state":"invalid",
+                                "endpoint":retrieval_settings.endpoint,
+                                "index":retrieval_settings.index,
+                                "documents":0,
+                                "chunks":0,
+                                "detail":error,
+                            })));
+                            None
+                        } else {
+                            let api_key = if retrieval_settings.enabled {
+                                match colm_agent::secrets::get_stored(
+                                    &key_file,
+                                    &retrieval_settings.endpoint,
+                                ) {
+                                    Ok(key) => key.unwrap_or_default(),
+                                    Err(error) => {
+                                        eprintln!(
+                                            "colm-agent: cannot read the Xerj key file: {error:#}"
+                                        );
+                                        String::new()
+                                    }
+                                }
+                            } else {
+                                String::new()
+                            };
+                            let sink_emitter = emitter.clone();
+                            let sink: Option<
+                                std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+                            > = Some(std::sync::Arc::new(move |status: serde_json::Value| {
+                                sink_emitter.emit(docs_index_event(&status));
+                            }));
+                            Some(colm_agent::retrieval::Handle::new(
+                                retrieval_settings,
+                                api_key,
+                                sink,
+                            ))
+                        }
+                    }
+                    None => None,
+                };
+                let retrieval_status = retrieval_handle
+                    .as_ref()
+                    .map(colm_agent::retrieval::Handle::status);
                 let model = display_model(backend, &provider.model, &choice);
                 *settings.lock().unwrap() = Some(Settings {
                     provider: *provider,
@@ -749,6 +820,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         workspace_root: None,
                         experience: None,
                         knowledge_root: data_dir.as_ref().map(|root| root.join("knowledge")),
+                        retrieval: retrieval_handle.clone(),
                         model_context: model_context.map(|context| *context),
                     },
                     approval,
@@ -760,6 +832,29 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     session_turn_limit,
                     session_token_limit,
                 });
+                if let Some(status) = retrieval_status {
+                    emitter.emit(docs_index_event(&status));
+                }
+                // 首次启用时后台建立当前选择的索引；检索请求不等全库重建，失败只回退。
+                if let Some(handle) = retrieval_handle.filter(|handle| handle.settings().enabled) {
+                    let build_context = settings
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|settings| settings.context.clone());
+                    if let Some(build_context) = build_context {
+                        std::thread::spawn(move || {
+                            match colm_agent::tools::selection_docs_snapshot(&build_context) {
+                                Ok(snapshot) => {
+                                    handle.ensure(snapshot);
+                                }
+                                Err(error) => eprintln!(
+                                    "colm-agent: cannot build the document index for the current selection: {error:#}"
+                                ),
+                            }
+                        });
+                    }
+                }
                 // 换了后端就丢掉旧的外部会话（Codex 的进程随之结束）。
                 if external
                     .lock()
@@ -851,6 +946,68 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
             }
             Inbound::UiResult { id, ok, result } => {
                 let _ = ui_tx.send((id, ok, result));
+            }
+            Inbound::DocsIndex { action } => {
+                let current =
+                    settings.lock().unwrap().as_ref().map(|settings| {
+                        (settings.context.clone(), settings.context.retrieval.clone())
+                    });
+                let Some((context, handle)) = current else {
+                    emitter.emit(Outbound::Error {
+                        message: "the assistant is not configured yet".into(),
+                    });
+                    continue;
+                };
+                match action.as_str() {
+                    "status" => {
+                        let Some(handle) = handle else {
+                            emitter.emit(docs_index_event(&json!({
+                                "backend":"xerj","enabled":false,"state":"disabled",
+                                "endpoint":"","index":"","documents":0,"chunks":0,
+                            })));
+                            continue;
+                        };
+                        let emitter = emitter.clone();
+                        std::thread::spawn(move || {
+                            let mut status = handle.status();
+                            if handle.settings().enabled {
+                                if let Err(error) = handle.probe() {
+                                    status["state"] = json!(error.state());
+                                    status["detail"] = json!(error.reason());
+                                }
+                            }
+                            emitter.emit(docs_index_event(&status));
+                        });
+                    }
+                    "refresh" => {
+                        let Some(handle) = handle.filter(|handle| handle.settings().enabled) else {
+                            emitter.emit(docs_index_event(&json!({
+                                "backend":"xerj","enabled":false,"state":"disabled",
+                                "endpoint":"","index":"","documents":0,"chunks":0,
+                            })));
+                            continue;
+                        };
+                        let emitter = emitter.clone();
+                        std::thread::spawn(
+                            move || match colm_agent::tools::selection_docs_snapshot(&context) {
+                                Ok(snapshot) => {
+                                    handle.refresh(snapshot);
+                                }
+                                Err(error) => {
+                                    let mut status = handle.status();
+                                    status["state"] = json!("invalid");
+                                    status["detail"] = json!(format!(
+                                        "cannot enumerate documentation snapshot: {error:#}"
+                                    ));
+                                    emitter.emit(docs_index_event(&status));
+                                }
+                            },
+                        );
+                    }
+                    other => emitter.emit(Outbound::Error {
+                        message: format!("unknown document index action: {other}"),
+                    }),
+                }
             }
             Inbound::Cancel => {
                 cancel.store(true, Ordering::SeqCst);

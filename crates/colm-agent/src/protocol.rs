@@ -53,6 +53,10 @@ pub enum Inbound {
         /// 每个会话累计 prompt+completion token 上限；0 = 不限。
         #[serde(default = "default_session_token_limit")]
         session_token_limit: u64,
+        /// 可选的 Xerj 文档检索后端；缺省/None = 关闭（旧配置兼容）。http key 不经这里传，
+        /// agent 自己从本地 Key 文件按 endpoint 取出。
+        #[serde(default)]
+        retrieval: Option<crate::retrieval::RetrievalSettings>,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {
@@ -83,6 +87,11 @@ pub enum Inbound {
     /// 续接一个存过的会话（读回历史，接着聊）。已经是当前会话或没存过时留在当前会话；
     /// 都以 `ready`（带当前会话号）回复。
     ResumeSession { id: String },
+    /// 查询或刷新文档检索索引状态（只在应用设置里触发，不暴露给 LLM）。
+    DocsIndex {
+        /// "status" | "refresh"；其它值由 agent 报可读错误。
+        action: String,
+    },
 }
 
 /// agent → GUI。
@@ -172,6 +181,28 @@ pub enum Outbound {
         /// 本轮的生成步数上限；旧事件没有时按 0 处理。
         #[serde(default)]
         step_limit: usize,
+    },
+    /// 可选文档检索后端的索引状态；GUI 在助手设置里显示。不包含服务地址的 key。
+    DocsIndexStatus {
+        /// 固定 "xerj"。
+        backend: String,
+        enabled: bool,
+        /// disabled|invalid|not_connected|timeout|invalid_response|pending|building|ready|stale|error
+        state: String,
+        #[serde(default)]
+        scope: Option<serde_json::Value>,
+        endpoint: String,
+        index: String,
+        #[serde(default)]
+        documents: u64,
+        #[serde(default)]
+        chunks: u64,
+        #[serde(default)]
+        generation: Option<u64>,
+        #[serde(default)]
+        indexed_at_unix_ms: Option<u64>,
+        #[serde(default)]
+        detail: Option<String>,
     },
     Error {
         message: String,

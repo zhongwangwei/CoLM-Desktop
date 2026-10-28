@@ -68,6 +68,8 @@ pub struct ToolContext {
     pub experience: Option<crate::experience::Store>,
     /// Version-scoped generated knowledge, separate from installed reviewed documents.
     pub knowledge_root: Option<PathBuf>,
+    /// 可选的本机 Xerj 文档检索后端（默认关闭）。None 或 enabled=false 时 search_docs 走原关键词路径。
+    pub retrieval: Option<crate::retrieval::Handle>,
     /// Trusted by Configure, never inferred from conversational UI JSON.
     pub model_context: Option<ModelContext>,
 }
@@ -559,6 +561,12 @@ pub(crate) fn opt_str<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
 
 pub(crate) fn req_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     opt_str(args, name).with_context(|| format!("argument {name} is required"))
+}
+
+/// 当前应用选择的文档快照（只读枚举）。`colm-agent` 服务进程在 GUI 触发“更新文档索引”
+/// 或“查询状态”时用；不经过 LLM，也不扩大 search_docs 原有的文件访问范围。
+pub fn selection_docs_snapshot(ctx: &ToolContext) -> Result<crate::retrieval::DocSnapshot> {
+    read::selection_docs_snapshot(ctx)
 }
 
 #[cfg(test)]

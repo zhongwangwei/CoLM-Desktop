@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use super::{object, opt_str, req_str, Tier, Tool, ToolContext, MAX_RESULT_CHARS};
+use crate::retrieval;
 
 #[path = "knowledge.rs"]
 pub(crate) mod knowledge;
@@ -1149,13 +1150,30 @@ impl Tool for SearchDocs {
             Vec::new()
         };
         let Some(root) = root.filter(|root| root.is_dir()) else {
-            return Ok(
-                json!({"query":query,"matches":[],"knowledge_checks":{},"drafts":drafts,"scope":scope,"provenance":provenance,"documentation_status":"missing","reason":"No documentation snapshot is available for this selected source. Current application documents are not evidence for this frozen model; inspect its source with search_code/read_file."}),
-            );
+            return Ok(json!({
+                "query":query,"matches":[],"knowledge_checks":{},"drafts":drafts,"scope":scope,"provenance":provenance,
+                "retrieval": retrieval_keyword_diagnostic(ctx),
+                "documentation_status":"missing",
+                "reason":"No documentation snapshot is available for this selected source. Current application documents are not evidence for this frozen model; inspect its source with search_code/read_file."
+            }));
         };
         let bindings = knowledge::Bindings::load(&root, &provenance["knowledge_source"]);
+        // 可选的 Xerj 召回：候选只决定“先看哪些块”。路径、行段、文件 hash 与知识资格仍由下面的
+        // 本地重读与 Bindings.check 决定；Xerj 返回的 _source 不能自证正确。
+        let (mut retrieval, candidate_chunks) =
+            retrieval_candidates(ctx, &provenance, &scope, &root, &query);
+        let mut candidate_chunks_by_file: BTreeMap<String, Vec<retrieval::Candidate>> =
+            BTreeMap::new();
+        for (candidate, file) in candidate_chunks {
+            candidate_chunks_by_file
+                .entry(file)
+                .or_default()
+                .push(candidate);
+        }
         let mut knowledge_checks = BTreeMap::new();
         let mut hits = Vec::new();
+        let mut rejected_candidates = 0usize;
+        let mut candidate_hits = 0usize;
         let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
             .with_context(|| format!("cannot read {}", root.display()))?
             .flatten()
@@ -1166,20 +1184,22 @@ impl Tool for SearchDocs {
         'outer: for file in files {
             let text = std::fs::read_to_string(&file).unwrap_or_default();
             let lines: Vec<_> = text.lines().collect();
+            let file_name = file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let mut exact_lines = Vec::new();
             for (index, line) in lines.iter().enumerate() {
                 if line.to_lowercase().contains(&query) {
-                    let name = file
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
+                    exact_lines.push(index + 1);
                     let check = knowledge_checks
-                        .entry(name.clone())
-                        .or_insert_with(|| bindings.check(&name, &text, &query));
+                        .entry(file_name.clone())
+                        .or_insert_with(|| bindings.check(&file_name, &text, &query));
                     let stale = check["status"] == "needs_review"
-                        || (check["status"] == "unknown" && bindings.is_bound(&name));
+                        || (check["status"] == "unknown" && bindings.is_bound(&file_name));
                     hits.push(json!({
-                        "file": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "file": file_name,
                         "path": file.display().to_string(),
                         "line": index + 1,
                         "context_start_line": index.saturating_sub(3) + 1,
@@ -1189,13 +1209,70 @@ impl Tool for SearchDocs {
                         "text": if stale { "Stored assertion requires review".to_owned() } else {line.chars().take(400).collect::<String>()},
                         "knowledge_status":check["status"],
                         "may_support_current_answer":check["may_support_current_answer"],
+                        "match":"exact",
                     }));
                     if hits.len() >= 60 {
                         break 'outer;
                     }
                 }
             }
+            let Some(chunks) = candidate_chunks_by_file.remove(&file_name) else {
+                continue;
+            };
+            // 文档在索引后可能被改过：重读的真实字节必须仍与候选清单里的 hash 一致，
+            // 且行段仍落在文件内；否则旧行段不可用，只能丢弃候选（不回退成伪造出处）。
+            let digest = knowledge::digest(text.as_bytes());
+            for candidate in chunks {
+                let range_ok = candidate.line_start >= 1
+                    && candidate.line_end >= candidate.line_start
+                    && candidate.line_end <= lines.len();
+                let unchanged = candidate.document_sha256 == digest;
+                let already_exact = exact_lines
+                    .iter()
+                    .any(|line| (candidate.line_start..=candidate.line_end).contains(line));
+                if !range_ok || !unchanged || already_exact {
+                    rejected_candidates += 1;
+                    continue;
+                }
+                let check = knowledge_checks
+                    .entry(file_name.clone())
+                    .or_insert_with(|| bindings.check(&file_name, &text, &query));
+                let stale = check["status"] == "needs_review"
+                    || (check["status"] == "unknown" && bindings.is_bound(&file_name));
+                let start = candidate.line_start - 1;
+                // BM25 可能靠块内别的词命中；块内找不到原查询时从块首给 8 行，并明确这一条是候选块。
+                let anchor = (start..candidate.line_end).find(|index| {
+                    lines
+                        .get(*index)
+                        .is_some_and(|line| line.to_lowercase().contains(&query))
+                });
+                let (context_start, line_number) = match anchor {
+                    Some(index) => (index.saturating_sub(3), index + 1),
+                    None => (start, candidate.line_start),
+                };
+                let context_end = context_start.saturating_add(8).min(lines.len());
+                hits.push(json!({
+                    "file": file_name,
+                    "path": file.display().to_string(),
+                    "line": line_number,
+                    "context_start_line": context_start + 1,
+                    "context": if stale { vec!["Stored knowledge withheld: source/document changed or cannot be verified. Use knowledge_checks fresh_source_evidence and inspect relevant current code before answering.".to_owned()] } else { lines[context_start..context_end]
+                        .iter().map(|s| s.chars().take(400).collect::<String>()).collect::<Vec<_>>()
+                    },
+                    "text": if stale { "Stored assertion requires review".to_owned() } else { lines.get(line_number.saturating_sub(1)).map(|line| line.chars().take(400).collect::<String>()).unwrap_or_default() },
+                    "knowledge_status":check["status"],
+                    "may_support_current_answer":check["may_support_current_answer"],
+                    "match":"candidate",
+                    "chunk_id": candidate.chunk_id,
+                }));
+                candidate_hits += 1;
+                if hits.len() >= 60 {
+                    break 'outer;
+                }
+            }
         }
+        retrieval["rejected_candidates"] = json!(rejected_candidates);
+        retrieval["candidate_hits"] = json!(candidate_hits);
         for check in knowledge_checks.values_mut() {
             for source in check["source_checks"].as_array_mut().into_iter().flatten() {
                 if !source["next_tool"].is_null() {
@@ -1204,7 +1281,7 @@ impl Tool for SearchDocs {
             }
         }
         let mut result = json!({ "query": query, "matches": hits, "provenance": provenance, "knowledge_checks":knowledge_checks,
-            "drafts":drafts,"scope":scope,
+            "drafts":drafts,"scope":scope,"retrieval":retrieval,
             "refresh_instruction":"On changed or uncovered topics, inspect current source and automatically rewrite a concise card with knowledge_update, exact source hashes and this scope. Keep units, switches, formulas, output effects and validation limits. Do not certify drafts or replace the reviewed baseline.",
             "truncated": hits.len() >= 60 });
         while serde_json::to_string(&result)?.chars().count() > MAX_RESULT_CHARS
@@ -1306,6 +1383,134 @@ impl Tool for EnvironmentDoctor {
             "remote_runner_run_7920": runner.is_file(),
         }))
     }
+}
+
+/// 检索身份：把可信 provenance 里的来源身份与 scope 拼成稳定 key。不同 id/revision、
+/// 不同源码内容、不同 workspace 名字得到不同 key；资料集合变化另由 snapshot_identity 判断
+/// （同一 scope 内触发重建新 generation，旧块不复用）。
+pub(crate) fn retrieval_identity(provenance: &Value) -> (String, String, String) {
+    let scope = &provenance["scope"];
+    let kind = scope["kind"].as_str().unwrap_or("unknown");
+    let name = scope["name"].as_str().unwrap_or("");
+    let project_key = if name.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind}:{name}")
+    };
+    let source = &provenance["knowledge_source"];
+    // 只取稳定身份字段；不把 checked_at 一类易变字段混进 scope key。
+    let identity = json!({
+        "schema": "colm-docs-source-identity-v1",
+        "scope_kind": kind,
+        "scope_name": name,
+        "source": source["source"],
+        "content_sha256": source["content_sha256"],
+        "revision": source["revision"],
+        "tag": source["tag"],
+        "dirty": source["dirty"],
+        "version_status": source["version_status"],
+        "selected_model": provenance["selected_model"],
+    });
+    let source_identity = knowledge::digest(identity.to_string().as_bytes());
+    let scope_key = knowledge::digest(
+        format!("colm-docs-scope-v1\0{project_key}\0{source_identity}").as_bytes(),
+    );
+    (project_key, source_identity, scope_key)
+}
+
+/// 检索关闭或不可用时的诊断字段：原关键词路径照常工作，不能让错误伪装成“没有资料”。
+fn retrieval_keyword_diagnostic(ctx: &ToolContext) -> Value {
+    let enabled = ctx
+        .retrieval
+        .as_ref()
+        .is_some_and(|handle| handle.settings().enabled);
+    json!({"backend":"keyword","enabled":enabled,"state":if enabled {"not_ready"} else {"disabled"}})
+}
+
+/// 向 Xerj 要候选块；任何失败都返回诊断并回退关键词路径，不中断 search_docs。
+fn retrieval_candidates(
+    ctx: &ToolContext,
+    provenance: &Value,
+    scope: &Value,
+    root: &Path,
+    query: &str,
+) -> (Value, Vec<(retrieval::Candidate, String)>) {
+    let Some(handle) = ctx
+        .retrieval
+        .as_ref()
+        .filter(|handle| handle.settings().enabled)
+    else {
+        return (retrieval_keyword_diagnostic(ctx), Vec::new());
+    };
+    let settings = handle.settings();
+    let (project_key, source_identity, scope_key) = retrieval_identity(provenance);
+    let mut diagnostic = json!({
+        "backend":"xerj",
+        "enabled":true,
+        "state":"pending",
+        "endpoint":settings.endpoint,
+        "index":settings.index,
+        "project":project_key,
+    });
+    let snapshot = match retrieval::collect_snapshot(
+        &project_key,
+        &scope_key,
+        scope,
+        root,
+        &source_identity,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            diagnostic["state"] = json!("invalid");
+            diagnostic["backend"] = json!("keyword");
+            diagnostic["fallback_reason"] = json!(format!(
+                "cannot enumerate documentation snapshot: {error:#}"
+            ));
+            return (diagnostic, Vec::new());
+        }
+    };
+    let status = handle.ensure(snapshot.clone());
+    diagnostic["state"] = status["state"].clone();
+    diagnostic["generation"] = status["generation"].clone();
+    match handle.candidates(&snapshot, query, 20) {
+        Ok(candidates) => {
+            diagnostic["candidates"] = json!(candidates.len());
+            let files = candidates
+                .into_iter()
+                .map(|candidate| {
+                    let file = candidate.relative_path.clone();
+                    (candidate, file)
+                })
+                .collect();
+            (diagnostic, files)
+        }
+        Err(error) => {
+            // 候选不可用时仍回退原关键词路径：backend 必须切回 keyword，state/reason 说明原因，
+            // 不能让人误以为结果来自索引。
+            diagnostic["backend"] = json!("keyword");
+            diagnostic["state"] = json!(error.state());
+            diagnostic["fallback_reason"] = json!(error.reason());
+            (diagnostic, Vec::new())
+        }
+    }
+}
+
+/// 当前应用选择（frozen model 或 app）的文档快照，供 GUI 的“更新文档索引/查询状态”
+/// 在没有工具调用时建索引。只枚举当前允许的 docs 目录，不扩大文件访问范围。
+pub(crate) fn selection_docs_snapshot(ctx: &ToolContext) -> Result<retrieval::DocSnapshot> {
+    let provenance = documentation_provenance(ctx, None)?;
+    let scope = provenance["scope"].clone();
+    let root = match &ctx.model_context {
+        Some(model) => model.docs_dir.clone(),
+        None => ctx.docs_root.clone(),
+    }
+    .context("no documentation snapshot is available for the current source")?;
+    if !root.is_dir() {
+        bail!("documentation snapshot directory does not exist for the current source");
+    }
+    let (project_key, source_identity, scope_key) = retrieval_identity(&provenance);
+    retrieval::collect_snapshot(&project_key, &scope_key, &scope, &root, &source_identity)
+        .map_err(|error| anyhow::anyhow!("cannot enumerate documentation snapshot: {error:#}"))
 }
 
 #[cfg(test)]

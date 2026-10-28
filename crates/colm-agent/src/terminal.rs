@@ -649,6 +649,7 @@ fn chat(
                 Outbound::ReasoningDelta { .. }
                 | Outbound::Usage { .. }
                 | Outbound::Context { .. }
+                | Outbound::DocsIndexStatus { .. }
                 | Outbound::TaskState { .. } => {}
             },
         }
