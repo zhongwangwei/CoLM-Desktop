@@ -428,6 +428,8 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
         pair_n: None,
         pair_downsampled: None,
         output_frequency: "hourly".into(),
+        model_step_seconds: 3_600,
+        obs_step_seconds: 3_600,
         model_label_position: "midpoint".into(),
         obs_label_position: "start".into(),
         obs_label_position_source: "product_fluxnet2015".into(),

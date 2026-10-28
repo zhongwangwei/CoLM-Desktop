@@ -19,6 +19,12 @@ pub(super) struct Paired {
     pub support: Vec<i64>,
     pub model: Vec<f64>,
     pub obs: Vec<f64>,
+    /// 每个被接受时段的有效观测覆盖率 `valid / expected`，与 `support` 等长。
+    pub coverage: Vec<f64>,
+    /// 因覆盖率不足被丢掉的时段数。
+    pub dropped: usize,
+    /// 格点产品目标里"模型格子里有观测"的比例；单点/水文站目标为 `None`。
+    pub space_coverage: Option<f64>,
 }
 
 impl Paired {
@@ -37,25 +43,29 @@ const AGGREGATE_MIN_COVERAGE: f64 = 0.5;
 
 /// 站点目标的逐时配对按日或按月平均：模型和观测在**同一组**配上对的时刻上平均，覆盖不足的时段丢掉。
 /// 半小时尺度的误差主要是日变化，看不出季节与水分限制；按日比更接近率定想调的东西。
+///
+/// `expected_interval` 是"一个理论样本代表多少秒"：模型输出间隔与观测采样间隔取较粗者（配对只可能
+/// 出现在共同的时间格点上）。它**必须由调用方给出**，不能再从 `time` 的相邻间隔反推——`time` 已经
+/// 过 QC/缺测过滤，逐时观测每天只剩一个正午有效值时，相邻可用值隔一天，反推出来的"原始分辨率"就成了
+/// 每天一个样本，日覆盖率于是永远 100%（审计 P1-1 的复现）。
 pub(super) fn aggregate_pairs(
     time: &[i64],
     model: &[f64],
     obs: &[f64],
     period: TargetPeriod,
+    expected_interval: i64,
 ) -> Result<Paired> {
     anyhow::ensure!(
         time.len() == model.len() && time.len() == obs.len(),
         "paired time, model and observation lengths differ"
     );
-    let mut steps = time
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
-        .filter(|step| *step > 0)
-        .collect::<Vec<_>>();
-    steps.sort_unstable();
-    let Some(&step) = steps.get(steps.len() / 2) else {
+    anyhow::ensure!(
+        expected_interval > 0,
+        "the expected sample interval must be a positive number of seconds"
+    );
+    if time.is_empty() {
         return Ok(Paired::default());
-    };
+    }
     let mut sums: std::collections::BTreeMap<i64, (f64, f64, usize)> = Default::default();
     for ((&t, &m), &o) in time.iter().zip(model).zip(obs) {
         if m.is_finite() && o.is_finite() {
@@ -79,15 +89,53 @@ pub(super) fn aggregate_pairs(
                 days_from_civil(next_year, next_month, 1) * 86_400 - start
             }
         };
-        let expected = length as f64 / step as f64;
+        // 一个时段的理论样本数：时段长度除以理论采样间隔。月长按实际天数。
+        let expected = (length as f64 / expected_interval as f64).max(1.0);
         if (count as f64) < AGGREGATE_MIN_COVERAGE * expected {
+            out.dropped += 1;
             continue;
         }
         out.support.push(start);
         out.model.push(model_sum / count as f64);
         out.obs.push(obs_sum / count as f64);
+        out.coverage.push(count as f64 / expected);
     }
     Ok(out)
+}
+
+/// 观测文件**完整时间轴**的采样步长（秒）：日/月聚合覆盖率的分母。
+///
+/// 不能用 QC/缺测过滤后的可用时刻反推（同上）。预检时还没有模型 history，只能取观测文件的
+/// 完整时间轴；运行时以模型输出间隔与它的较粗者为准。
+pub(super) fn observation_axis_step(path: &Path) -> Result<i64> {
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let units = crate::variable_units(&file, "time")
+        .with_context(|| format!("time in {} has no units", path.display()))?;
+    let times =
+        cf_unix_seconds(&crate::read_file_1d(&file, path, "time")?, &units).with_context(|| {
+            format!(
+                "unsupported observation time units {units:?} in {}",
+                path.display()
+            )
+        })?;
+    let mut gaps = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|gap| *gap > 0)
+        .collect::<Vec<_>>();
+    gaps.sort_unstable();
+    let step = gaps.get(gaps.len() / 2).copied().with_context(|| {
+        format!(
+            "{} needs at least two distinct observation times to estimate its sampling step",
+            path.display()
+        )
+    })?;
+    ensure!(
+        (1..=86_400).contains(&step),
+        "observation step {step} s in {} is outside the supported 1 s..=1 day range",
+        path.display()
+    );
+    Ok(step)
 }
 
 /// 时间窗 `[from, to)`（Unix 秒）。
@@ -110,17 +158,33 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
     let obs = GridObservation::open(Path::new(path), variable)?;
     let period = period.unwrap_or_else(|| obs.natural_period());
     let model = ModelGrid::read(case, &target.variable, period, window)?;
-    let cells = model.cells_with_observations(&obs)?;
-    let obs_means = obs.period_means(&cells, period, window, *scale, *offset)?;
-    let mut paired = Paired::default();
+    let (cells, space_coverage) = model.cells_with_observations(&obs)?;
+    ensure!(
+        !cells.is_empty(),
+        "target {}: no model cell contains an observation from {}; the observation product does not overlap the model grid, so nothing can be compared",
+        target.key,
+        path
+    );
+    let model_index = cells.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+    let obs_cells = cells
+        .iter()
+        .map(|(_, matched)| matched.clone())
+        .collect::<Vec<_>>();
+    let obs_means = obs.period_means(&obs_cells, period, window, *scale, *offset)?;
+    let mut paired = Paired {
+        space_coverage: Some(space_coverage),
+        ..Default::default()
+    };
     for (start, model_cells) in &model.means {
         let Some(obs_cells) = obs_means.get(start) else {
             continue;
         };
-        for (cell, (model_value, obs_value)) in model_cells.iter().zip(obs_cells).enumerate() {
+        for (slot, obs_value) in obs_cells.iter().enumerate() {
+            let cell = model_index[slot];
+            let model_value = model_cells[cell];
             if model_value.is_finite() && obs_value.is_finite() {
                 paired.support.push(support_key(*start, cell));
-                paired.model.push(*model_value);
+                paired.model.push(model_value);
                 paired.obs.push(*obs_value);
             }
         }
@@ -308,6 +372,9 @@ fn period_means_1d(
         .collect()
 }
 
+/// 有观测覆盖的模型格子：`(模型格子下标, 落在这个格子里的观测格 (行, 列))`。
+type CoveredCells = (usize, Vec<(usize, usize)>);
+
 /// 模型的格点场按时段平均：`means[时段起点][格子]`，只含有陆地面积的格子（顺序同 `cells`）。
 struct ModelGrid {
     /// 有陆地的格子：`(纬向下标, 经向下标)`。
@@ -412,12 +479,15 @@ impl ModelGrid {
         })
     }
 
-    /// 每个模型格子对应的观测格子：观测格心落在模型格子里的都算（观测比模型细时求平均）；一个都没有
-    /// （观测比模型粗）时取离模型格心最近的那个观测格子。
-    fn cells_with_observations(&self, obs: &GridObservation) -> Result<Vec<Vec<(usize, usize)>>> {
+    /// 每个模型格子对应的观测格子：只认观测格心落在模型格子里的（观测比模型细时求平均）。
+    ///
+    /// 审计 P1-2：原来一个都没有时无条件取最近邻，模型在华南、观测只覆盖欧洲也会"配上"，
+    /// 指标看起来正常却没有任何意义。现在没有格内观测的模型格直接排除，并返回
+    /// "有观测的模型格 / 全部陆地格"的比例，供结果与预检报告覆盖情况。
+    fn cells_with_observations(&self, obs: &GridObservation) -> Result<(Vec<CoveredCells>, f64)> {
         let wrap = |value: f64| (value + 180.0).rem_euclid(360.0) - 180.0;
         let mut out = Vec::with_capacity(self.cells.len());
-        for &(row, column) in &self.cells {
+        for (index, &(row, column)) in self.cells.iter().enumerate() {
             let (south, north) = self.lat_bounds[row];
             let (west, east) = self.lon_bounds[column];
             let (south, north) = (south.min(north), south.max(north));
@@ -436,33 +506,22 @@ impl ModelGrid {
                 .filter(|(_, lon)| (wrap(**lon) - wrap(west)).rem_euclid(360.0) < width)
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
-            let mut matched = rows
+            let matched = rows
                 .iter()
                 .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
                 .collect::<Vec<_>>();
-            if matched.is_empty() {
-                let center_lat = 0.5 * (south + north);
-                let center_lon = wrap(west + 0.5 * width);
-                matched.push((
-                    nearest(&obs.lat, center_lat, |a, b| (a - b).abs()),
-                    nearest(&obs.lon, center_lon, |a, b| {
-                        let gap = (wrap(a) - b).abs();
-                        gap.min(360.0 - gap)
-                    }),
-                ));
+            // 只保留格内有观测的格子；空出来就是"这片模型区域没有观测"，不拿最近邻顶上。
+            if !matched.is_empty() {
+                out.push((index, matched));
             }
-            out.push(matched);
         }
-        Ok(out)
+        let coverage = if self.cells.is_empty() {
+            0.0
+        } else {
+            out.len() as f64 / self.cells.len() as f64
+        };
+        Ok((out, coverage))
     }
-}
-
-fn nearest(values: &[f64], target: f64, distance: impl Fn(f64, f64) -> f64) -> usize {
-    values
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| distance(**a, target).total_cmp(&distance(**b, target)))
-        .map_or(0, |(index, _)| index)
 }
 
 /// 格点观测产品：`time × lat × lon` 的一个变量。只读要用到的纬度带，逐个时刻读，全球产品也不整个载入。

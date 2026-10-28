@@ -256,15 +256,185 @@ fn site_pairs_average_over_the_same_valid_steps_and_drop_thin_days() {
         model.push(if i == 0 { f64::NAN } else { 4.0 });
         obs.push(if i == 0 { 999.0 } else { 3.0 });
     }
-    let paired = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily).unwrap();
+    let paired = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily, 1800).unwrap();
     assert_eq!(paired.support, vec![0, 2 * 86_400]);
     assert_eq!(paired.model, vec![2.0, 4.0]);
     // 模型缺测的那一刻观测也不进平均（999 不会混进来）。
     assert_eq!(paired.obs, vec![1.0, 3.0]);
-    let monthly = aggregate_pairs(&time, &model, &obs, TargetPeriod::Monthly).unwrap();
+    let monthly = aggregate_pairs(&time, &model, &obs, TargetPeriod::Monthly, 1800).unwrap();
     assert!(
         monthly.support.is_empty(),
         "three days cannot cover half a month"
     );
-    assert!(aggregate_pairs(&[0], &[1.0, 2.0], &[1.0], TargetPeriod::Daily).is_err());
+    assert!(aggregate_pairs(&[0], &[1.0, 2.0], &[1.0], TargetPeriod::Daily, 1800).is_err());
+}
+
+/// 审计 P1-1 的复现：原始观测逐小时，但每天只有正午一个有效值。
+/// 覆盖率分母必须来自"每小时一个理论样本"，不能从 QC 后剩下的可用时刻反推成"每天一个样本"。
+#[test]
+fn a_single_valid_hour_per_day_does_not_pass_the_daily_coverage_gate() {
+    let mut time = Vec::new();
+    let mut model = Vec::new();
+    let mut obs = Vec::new();
+    for day in 0..5 {
+        time.push(day * DAY + 12 * 3_600);
+        model.push(2.0);
+        obs.push(1.0);
+    }
+    // 模型逐小时 output、观测逐小时采样：理论样本间隔 3600 s，一天应有 24 个。
+    let paired = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily, 3_600).unwrap();
+    assert!(paired.support.is_empty(), "{:?}", paired.support);
+    assert_eq!(paired.dropped, 5, "5 个日均都因覆盖率不足被丢掉");
+    assert!(paired.coverage.is_empty());
+
+    // 同一批数据如果模型本来就是逐日输出（间隔 86400 s），一天一个样本就是完整覆盖；
+    // 这正是调用方要取"模型与观测较粗者"的原因。
+    let daily = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily, 86_400).unwrap();
+    assert_eq!(daily.support.len(), 5);
+    assert!(daily
+        .coverage
+        .iter()
+        .all(|value| (value - 1.0).abs() < 1e-12));
+}
+
+/// 逐时覆盖完整时通过门槛，并把每个时段的覆盖率留在结果里（审计要的"有效数/理论数/覆盖率"）。
+#[test]
+fn full_hourly_coverage_passes_and_is_recorded_per_period() {
+    let mut time = Vec::new();
+    let mut model = Vec::new();
+    let mut obs = Vec::new();
+    for day in 0..2 {
+        for hour in 0..24 {
+            time.push(day * DAY + hour * 3_600);
+            model.push(2.0);
+            obs.push(1.0);
+        }
+    }
+    // 第 2 天只有 12 个小时（正好一半），仍然通过。
+    time.retain(|t| *t < DAY || (*t - DAY) / 3_600 < 12);
+    model.truncate(time.len());
+    obs.truncate(time.len());
+    let paired = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily, 3_600).unwrap();
+    assert_eq!(paired.support, vec![0, DAY]);
+    assert_eq!(paired.dropped, 0);
+    assert!((paired.coverage[0] - 1.0).abs() < 1e-12);
+    assert!((paired.coverage[1] - 0.5).abs() < 1e-12);
+
+    // 月均：两天远不到半个月，整段丢掉并记下。
+    let monthly = aggregate_pairs(&time, &model, &obs, TargetPeriod::Monthly, 3_600).unwrap();
+    assert!(monthly.support.is_empty());
+    assert_eq!(monthly.dropped, 1);
+}
+
+/// 审计 P1-2：观测完全在模型域外时不能"最近邻配上"，必须明确拒绝。
+#[test]
+fn observations_outside_the_model_domain_are_rejected() {
+    let root = scratch("outside");
+    let case = gridded_case(&root, |day, row, column| {
+        (day * 100 + 2 * row + column) as f64
+    });
+    let obs = root.join("obs-outside.nc");
+    {
+        let mut file = netcdf::create(&obs).unwrap();
+        file.add_dimension("time", 3).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 2).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2003-01-01")
+            .unwrap();
+        time.put_values(&[0.5, 1.5, 2.5], ..).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[0.5, 1.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[0.5, 1.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("E", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0; 12], ..)
+            .unwrap();
+    }
+    let target: TargetSpec = serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "grid", "path": obs, "variable": "E"}
+    }))
+    .unwrap();
+    let error = grid_pairs(&case, &target, (JAN1, JAN1 + 3 * DAY)).unwrap_err();
+    assert!(error.to_string().contains("does not overlap"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 只覆盖部分模型格子：只比有观测的格子，并报告空间覆盖比例。
+#[test]
+fn partial_spatial_coverage_pairs_only_covered_cells_and_reports_the_ratio() {
+    let root = scratch("partial");
+    let case = gridded_case(&root, |day, row, column| {
+        (10 * day + 2 * row + column) as f64
+    });
+    let obs = root.join("obs-partial.nc");
+    {
+        let mut file = netcdf::create(&obs).unwrap();
+        file.add_dimension("time", 3).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2003-01-01")
+            .unwrap();
+        time.put_values(&[0.5, 1.5, 2.5], ..).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[10.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[100.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("E", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0, 2.0, 3.0], ..)
+            .unwrap();
+    }
+    let target: TargetSpec = serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "grid", "path": obs, "variable": "E"}
+    }))
+    .unwrap();
+    let paired = grid_pairs(&case, &target, (JAN1, JAN1 + 3 * DAY)).unwrap();
+    // 只有西南格（0,0）有观测：三天三个值。
+    assert_eq!(paired.model, [0.0, 10.0, 20.0]);
+    assert_eq!(paired.obs, [1.0, 2.0, 3.0]);
+    // 3 个陆地格子里只覆盖了 1 个。
+    assert!((paired.space_coverage.unwrap() - 1.0 / 3.0).abs() < 1e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 覆盖率分母来自观测文件完整时间轴：观测文件自己声明的是逐时，即使绝大多数时刻后面会被 QC 丢掉。
+#[test]
+fn the_expected_step_comes_from_the_full_observation_axis() {
+    let root = scratch("obs-axis");
+    let path = root.join("obs.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("time", 4).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "hours since 2003-01-01 00:00:00")
+            .unwrap();
+        time.put_values(&[0.0, 1.0, 2.0, 3.0], ..).unwrap();
+    }
+    assert_eq!(observation_axis_step(&path).unwrap(), 3_600);
+
+    // 天尺度的产品按天算，不会被"只剩几个白天点"影响。
+    let daily = root.join("daily.nc");
+    {
+        let mut file = netcdf::create(&daily).unwrap();
+        file.add_dimension("time", 3).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2003-01-01")
+            .unwrap();
+        time.put_values(&[0.0, 1.0, 2.0], ..).unwrap();
+    }
+    assert_eq!(observation_axis_step(&daily).unwrap(), DAY);
+    std::fs::remove_dir_all(root).unwrap();
 }

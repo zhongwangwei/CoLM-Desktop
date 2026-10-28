@@ -4324,6 +4324,13 @@ struct VarMetrics {
     pair_downsampled: Option<bool>,
     /// history 实际输出频率（由标签反推，不是 nml 声明值）。
     output_frequency: String,
+    /// 每条 history 记录代表的秒数（TIMESTEP 用算例步长，日/月/年用名义长度）。
+    ///
+    /// 研究把逐时/逐 step 的配对再按日/月平均时，覆盖率的分母由它和观测步长共同决定；
+    /// 不能拿 QC 之后剩下的配对时刻反推（审计 P1-1）。
+    model_step_seconds: i64,
+    /// 观测文件**完整时间轴**的采样步长（秒），不是 QC 后可用时刻的间隔。
+    obs_step_seconds: i64,
     /// 模型标签在区间里的位置（TIMESTEP/末条=end，其余=midpoint）。
     model_label_position: String,
     /// 观测标签在区间里的位置（start/end），以及依据。
@@ -4829,6 +4836,22 @@ fn history_frequency_name(frequency: colm_hist::schedule::HistoryFrequency) -> &
         HistoryFrequency::Daily => "daily",
         HistoryFrequency::Monthly => "monthly",
         HistoryFrequency::Yearly => "yearly",
+    }
+}
+
+/// 每条 history 记录代表的秒数。日/月/年只是覆盖率分母用的名义长度；
+/// TIMESTEP 用算例步长，取不到时按半小时（CoLM 的默认 timestep）。
+fn history_step_seconds(
+    frequency: colm_hist::schedule::HistoryFrequency,
+    timestep_seconds: Option<i64>,
+) -> i64 {
+    use colm_hist::schedule::HistoryFrequency;
+    match frequency {
+        HistoryFrequency::None | HistoryFrequency::Timestep => timestep_seconds.unwrap_or(1800),
+        HistoryFrequency::Hourly => 3600,
+        HistoryFrequency::Daily => 86_400,
+        HistoryFrequency::Monthly => 30 * 86_400,
+        HistoryFrequency::Yearly => 365 * 86_400,
     }
 }
 
@@ -5503,6 +5526,11 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                     .as_ref()
                     .map(|indexes| indexes.len() < pair_source_n),
                 output_frequency: history_frequency_name(resolution.frequency).to_string(),
+                model_step_seconds: history_step_seconds(
+                    resolution.frequency,
+                    schedule.timestep_seconds,
+                ),
+                obs_step_seconds: obs_step.round() as i64,
                 model_label_position: model_label_position_name(resolution.frequency).to_string(),
                 obs_label_position: obs_label_position_name(obs_label_position).to_string(),
                 obs_label_position_source: obs_label_position_source.to_string(),

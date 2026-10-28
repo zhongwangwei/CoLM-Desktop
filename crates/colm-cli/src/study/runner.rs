@@ -209,6 +209,17 @@ struct TargetResult {
     observation_mean: f64,
     #[serde(default)]
     support_hash: String,
+    /// 日/月聚合时段的有效观测覆盖率统计；不做聚合的目标没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coverage_mean: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coverage_min: Option<f64>,
+    /// 覆盖率不足被丢掉的时段数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    periods_dropped: Option<usize>,
+    /// 格点产品目标：模型陆地格子里有观测的比例。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    space_coverage: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -262,6 +273,17 @@ struct ObjectiveMetricRow {
     observation_mean: f64,
     #[serde(default)]
     support_hash: String,
+    /// 日/月聚合时段的有效观测覆盖率统计；不做聚合的目标没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coverage_mean: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coverage_min: Option<f64>,
+    /// 覆盖率不足被丢掉的时段数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    periods_dropped: Option<usize>,
+    /// 格点产品目标：模型陆地格子里有观测的比例。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    space_coverage: Option<f64>,
 }
 
 enum WorkerEvent {
@@ -2305,9 +2327,19 @@ fn preflight_observation_window(
         return Ok(());
     };
     let zeros = vec![0.0; times.len()];
-    let count = super::targets::aggregate_pairs(&times, &zeros, &zeros, aggregate)?
-        .support
-        .len();
+    // 覆盖率的分母取观测文件完整时间轴的步长。用 QC/缺测过滤后的可用时刻反推会把"每天一个正午
+    // 有效值"当成每天一个样本，日覆盖率永远 100%（审计 P1-1）；预检时还没有 history，
+    // 只能取观测轴；运行时再与模型输出间隔取较粗者。
+    let expected_interval = super::targets::observation_axis_step(observation)?;
+    let count = super::targets::aggregate_pairs(
+        &times,
+        &zeros,
+        &zeros,
+        aggregate,
+        expected_interval,
+    )?
+    .support
+    .len();
     if count < target.min_pairs {
         let unit = match aggregate {
             TargetPeriod::Daily => "daily",
@@ -3361,19 +3393,35 @@ fn target_result(
             row.n
         );
     }
+    // 聚合覆盖率的理论样本间隔：模型输出间隔与观测采样间隔取较粗者（配对只在共同时间格点上存在）。
+    // 不能再从已配对时刻反推——那正是审计 P1-1 里日覆盖率被缺测绕过的地方。
+    let coverage_interval = row.model_step_seconds.max(row.obs_step_seconds).max(1);
     // 要按日或按月比时，把逐时配对平均成时段再算指标（支持集也换成时段）。
-    let (support_hash, pairs, value, observation_sd, model_mean, observation_mean) = if let Some(
-        aggregate,
-    ) =
-        target.aggregate
-    {
+    let (
+        support_hash,
+        pairs,
+        value,
+        observation_sd,
+        model_mean,
+        observation_mean,
+        coverage,
+    ) = if let Some(aggregate) = target.aggregate {
         let model = row.model.as_ref().with_context(|| {
             format!(
                 "target {} ({}) did not return full paired model values",
                 target.key, target.variable
             )
         })?;
-        let paired = super::targets::aggregate_pairs(time, model, obs, aggregate)?;
+        let paired = super::targets::aggregate_pairs(time, model, obs, aggregate, coverage_interval)?;
+        let coverage = Some((
+            paired.coverage.iter().sum::<f64>() / paired.coverage.len().max(1) as f64,
+            paired
+                .coverage
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min),
+            paired.dropped,
+        ));
         let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
                 format!(
                     "target {} ({}) has fewer than two {aggregate:?} means with enough data for {site} in the {period} window",
@@ -3396,6 +3444,7 @@ fn target_result(
             metrics.obs_sd,
             metrics.model_mean,
             metrics.obs_mean,
+            coverage,
         )
     } else {
         (
@@ -3405,7 +3454,12 @@ fn target_result(
             row.obs_sd,
             row.model_mean,
             row.obs_mean,
+            None,
         )
+    };
+    let (coverage_mean, coverage_min, periods_dropped) = match coverage {
+        Some((mean, min, dropped)) if min.is_finite() => (Some(mean), Some(min), Some(dropped)),
+        _ => (None, None, None),
     };
     let weight = if target.site.is_none() {
         target.weight / site_count.max(1) as f64
@@ -3436,6 +3490,10 @@ fn target_result(
         model_mean,
         observation_mean,
         support_hash,
+        coverage_mean,
+        coverage_min,
+        periods_dropped,
+        space_coverage: None,
     })
 }
 
@@ -3507,6 +3565,10 @@ fn paired_target_result(
         model_mean: metrics.model_mean,
         observation_mean: metrics.obs_mean,
         support_hash: pair_support_hash(&paired.support, &paired.obs),
+        coverage_mean: None,
+        coverage_min: None,
+        periods_dropped: None,
+        space_coverage: paired.space_coverage,
     })
 }
 
@@ -4696,7 +4758,7 @@ pub(super) fn write_objective_tables_to(
         ));
     }
     write_bytes(&results.join("objectives.csv"), objectives.as_bytes())?;
-    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean\n");
+    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage\n");
     let mut metric_rows = Vec::new();
     for task in state
         .tasks
@@ -4710,8 +4772,11 @@ pub(super) fn write_objective_tables_to(
             )
         })?;
         for row in result.calibration.iter().chain(&result.validation) {
+            let number = |value: Option<f64>| {
+                value.map(|value| format!("{value:.6}")).unwrap_or_default()
+            };
             metrics.push_str(&format!(
-                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&task.member),
                 csv_cell(&row.site),
                 csv_cell(&row.period),
@@ -4727,7 +4792,13 @@ pub(super) fn write_objective_tables_to(
                     .unwrap_or_default(),
                 row.loss,
                 row.model_mean,
-                row.observation_mean
+                row.observation_mean,
+                number(row.coverage_mean),
+                number(row.coverage_min),
+                row.periods_dropped
+                    .map(|count| count.to_string())
+                    .unwrap_or_default(),
+                number(row.space_coverage),
             ));
             metric_rows.push(ObjectiveMetricRow {
                 member: task.member.clone(),
@@ -4745,6 +4816,10 @@ pub(super) fn write_objective_tables_to(
                 model_mean: row.model_mean,
                 observation_mean: row.observation_mean,
                 support_hash: row.support_hash.clone(),
+                coverage_mean: row.coverage_mean,
+                coverage_min: row.coverage_min,
+                periods_dropped: row.periods_dropped,
+                space_coverage: row.space_coverage,
             });
         }
     }
@@ -5996,6 +6071,10 @@ mod tests {
             model_mean: 5.0,
             observation_mean: 4.5,
             support_hash: pair_support_hash(&support, &obs),
+            coverage_mean: None,
+            coverage_min: None,
+            periods_dropped: None,
+            space_coverage: None,
         }
     }
 
@@ -7958,6 +8037,10 @@ mod tests {
                         &(0..12).collect::<Vec<_>>(),
                         &(0..12).map(|v| v as f64).collect::<Vec<_>>(),
                     ),
+                    coverage_mean: None,
+                    coverage_min: None,
+                    periods_dropped: None,
+                    space_coverage: None,
                 }],
                 validation: Vec::new(),
                 validation_errors: Vec::new(),
