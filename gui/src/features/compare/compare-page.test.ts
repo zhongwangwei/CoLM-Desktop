@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as compareConfig from './config';
+import type { CompareSnapshot } from './config';
 import {
   buildOpenbenchConfig,
   configInvalidation,
@@ -80,16 +81,6 @@ type Pick = {
   gridRes?: number | null;
   error?: string;
 };
-type Site = {
-  id: string;
-  station: string;
-  history_dir: string;
-  prefix: string;
-  lon: number | null;
-  lat: number | null;
-};
-type Generated = { fingerprint: string; config: string; sites: Site[] };
-
 const probedGrid: HistoryInfo = {
   history_dir: '/p/hb/out/hb/history',
   prefix: 'hb_hist_',
@@ -137,6 +128,11 @@ function evaluate<T>(name: string): T {
 const pagePickLabel = evaluate<(dir: string) => string>('pickLabel');
 const pageClearProbe = evaluate<Record<string, string>>('CLEAR_PROBED_SIM_FIELDS');
 const t = (_zh: string, english: string) => english;
+
+/** 与页面 generate() 同一条路径生成的冻结快照；测试用它模拟"已生成、尚未改动"的状态。 */
+function snapshotFor(design: EvaluationDesign): CompareSnapshot {
+  return compareConfig.freezeCompareSnapshot(design, buildOpenbenchConfig(design));
+}
 
 /** 跑真实的 saveSimulation，收集它给出的字段问题与最终写入的 pick。 */
 function saveSimulationRun(form: Form, existing: Pick[] = []) {
@@ -445,7 +441,7 @@ test('saving with only an edited prefix keeps extent, coordinates and file count
   assert.match(built.config, /grid_res: 0\.25/);
 });
 
-test('generating records the fingerprint, text and station list of the exact design used', () => {
+test('generating freezes the design, text, station list and fingerprint into one snapshot', () => {
   const design: ComparisonDesign = {
     name: 'comparison',
     years: [2002, 2005],
@@ -456,29 +452,26 @@ test('generating records the fingerprint, text and station list of the exact des
     gridRes: 0.25,
   };
   const machine = { host: '', openbenchRoot: '/ob', refRoot: '/refs' };
-  let generatedValue: Generated | null = null;
+  const formDesign: EvaluationDesign = { machine, ...design };
+  let generatedValue: CompareSnapshot | null = null;
   let yaml = '';
-  let sites: Site[] = [];
   let missingExtent: string[] = [];
   const errors: string[] = [];
   const generate = execute<() => void>('generate', {
     comparisonDesign: () => design,
     buildOpenbenchConfig,
-    designFingerprint,
     machine,
+    freezeCompareSnapshot: compareConfig.freezeCompareSnapshot,
     generated: {
       get current() {
         return generatedValue;
       },
-      set current(value: Generated | null) {
+      set current(value: CompareSnapshot | null) {
         generatedValue = value;
       },
     },
     setYaml: (value: string) => {
       yaml = value;
-    },
-    setSites: (value: Site[]) => {
-      sites = value;
     },
     setMissingExtent: (value: string[]) => {
       missingExtent = value;
@@ -492,20 +485,25 @@ test('generating records the fingerprint, text and station list of the exact des
     'generating a valid design reports no error',
   );
   const built = buildOpenbenchConfig(design);
+  // 配置文本、站点清单、设计指纹和一个有效指纹是同一份快照（R01）。
+  assert.equal(generatedValue!.generatedText, built.config);
+  assert.deepEqual(generatedValue!.sites, built.sites);
+  assert.equal(generatedValue!.designFingerprint, designFingerprint(formDesign));
   assert.equal(
     generatedValue!.fingerprint,
-    designFingerprint({ machine, ...design }),
-    'the fingerprint is recorded together with the generated text',
+    compareConfig.configFingerprint(
+      formDesign,
+      compareConfig.parseOpenbenchConfig(built.config).config!,
+      built.sites,
+    ),
+    'the fingerprint is recorded together with the text and station list it came from',
   );
-  assert.equal(generatedValue!.config, built.config);
   assert.equal(yaml, built.config);
-  assert.deepEqual(sites, built.sites);
   assert.deepEqual(missingExtent, built.missingExtent);
-  assert.deepEqual(generatedValue!.sites, built.sites);
-  // 设置一变，同一份记录的指纹就对不上当前设计 → 旧配置失效（GUI-04）。
-  assert.notEqual(
-    designFingerprint({ machine, ...design, timRes: 'Hour' }),
-    generatedValue!.fingerprint,
+  // 设置一变，同一份记录就对不上当前设计 → 快照过期（GUI-04/R01）。
+  assert.equal(
+    compareConfig.snapshotStale(generatedValue!, { ...formDesign, timRes: 'Hour' }),
+    true,
   );
 });
 
@@ -553,33 +551,45 @@ test('an edited per-simulation grouping or resolution override really reaches th
   assert.match(built.config, /grid_res: 0\.25/);
 });
 
-test('running refuses a configuration that cannot be parsed or does not match the page', async () => {
+test('running refuses a missing/stale snapshot and configurations that cannot run', async () => {
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
-  const runWith = (yaml: string) =>
+  const machine = { host: '', openbenchRoot: '/ob', refRoot: '/refs' };
+  const simulation = {
+    label: 'AT-Neu',
+    info: {
+      ...probedGrid,
+      history_dir: '/p/AT-Neu/history',
+      prefix: 'AT-Neu_hist_',
+      tim_res: 'Hour',
+      spatial: false,
+      extent: null,
+      lon: 11.3,
+      lat: 47.1,
+    },
+  };
+  const baseDesign: ComparisonDesign = {
+    name: 'comparison',
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5' },
+    simulations: [simulation],
+    projectDir: '/ob/projects/comparison',
+  };
+  const formDesign: EvaluationDesign = { machine, ...baseDesign };
+  const built = buildOpenbenchConfig(baseDesign);
+  const snapshot = snapshotFor(formDesign);
+  assert.deepEqual(snapshot.sites, built.sites);
+  const runWith = (args: {
+    yaml?: string;
+    snapshot?: CompareSnapshot | null;
+    form?: EvaluationDesign;
+  }) =>
     execute<() => Promise<unknown>>('run', {
       task: async (fn: () => Promise<unknown>) => fn(),
-      generated: { current: { fingerprint: 'old-design', config: yaml, sites: [] } },
-      formDesign: {
-        machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
-        name: 'comparison',
-        years: [2002, 2005],
-        timRes: 'Day',
-        variables: { Latent_Heat: 'ERA5' },
-        projectDir: '/ob/projects/comparison',
-        simulations: [
-          {
-            label: 'AT-Neu',
-            info: {
-              ...probedGrid,
-              spatial: false,
-              extent: null,
-              lon: 11.3,
-              lat: 47.1,
-              prefix: 'AT-Neu_hist_',
-            },
-          },
-        ],
-      },
+      generated: { current: args.snapshot === undefined ? snapshot : args.snapshot },
+      formDesign: args.form ?? formDesign,
+      designFingerprint,
+      snapshotStale: compareConfig.snapshotStale,
       parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
       structuralProblems: compareConfig.structuralProblems,
       configFingerprint: compareConfig.configFingerprint,
@@ -587,11 +597,11 @@ test('running refuses a configuration that cannot be parsed or does not match th
       t,
       comparisonName: (comparison: string) => comparison,
       remote: false,
-      invokeJson: async (command: string, args: Record<string, unknown>) => {
-        calls.push({ command, args });
+      invokeJson: async (command: string, args2: Record<string, unknown>) => {
+        calls.push({ command, args: args2 });
         return { report: null };
       },
-      yaml,
+      yaml: args.yaml ?? built.config,
       sites: [],
       scanDir: '/refs',
       host: '',
@@ -600,38 +610,55 @@ test('running refuses a configuration that cannot be parsed or does not match th
       view: async () => {},
       setLastRun: () => {},
       setConfigSaving: () => {},
+      showRunNotice: () => {},
     });
-  // 手改出语法错误：明确拒绝，且一个后端调用都不发。
-  await assert.rejects(runWith('project:\n  name: [unclosed\n'), /cannot run/);
-  // 手改删掉/改了单点站点清单路径：文件是后端按页面目录准备的，运行前就拒绝。
-  const station = buildOpenbenchConfig({
-    name: 'comparison',
-    years: [2002, 2005],
-    timRes: 'Day',
-    variables: { Latent_Heat: 'ERA5' },
-    projectDir: '/ob/projects/comparison',
+  // 没有生成配置就没有可信的站点清单：明确拒绝，不发后端调用。
+  await assert.rejects(runWith({ snapshot: null }), /No evaluation configuration yet/);
+  // 生成之后改了站点目录（表单变化）→ 快照过期，明确阻断（R01 的 f0059ee 操作链）。
+  const moved = {
+    ...formDesign,
     simulations: [
-      {
-        label: 'AT-Neu',
-        info: {
-          ...probedGrid,
-          spatial: false,
-          extent: null,
-          lon: 11.3,
-          lat: 47.1,
-          prefix: 'AT-Neu_hist_',
-        },
-      },
+      { ...simulation, info: { ...simulation.info, history_dir: '/p/elsewhere/history' } },
     ],
-  }).config.replace(
+  };
+  await assert.rejects(
+    runWith({ form: moved }),
+    /settings changed after the configuration was generated/,
+  );
+  // 手改出语法错误：明确拒绝。
+  await assert.rejects(runWith({ yaml: 'project:\n  name: [unclosed\n' }), /cannot run/);
+  // 手改删掉/改了单点站点清单路径：文件是后端按页面目录准备的，运行前就拒绝。
+  const station = built.config.replace(
     'fulllist: "/ob/projects/comparison/sim/AT_Neu.csv"',
     'fulllist: "/tmp/stale.csv"',
   );
-  await assert.rejects(runWith(station), /station list path of simulation/);
+  await assert.rejects(runWith({ yaml: station }), /station list path of simulation/);
+  // R07 剩余缺口：手改 YAML 把 varname 换成层/类别维度变量 → 按有效配置在运行前拒绝。
+  const layerSimulation = {
+    ...simulation,
+    variables: { Latent_Heat: { varname: 'Qle', varunit: 'W/m2' } },
+    info: {
+      ...simulation.info,
+      unsupported_variables: [
+        { name: 'f_wliq_soisno', dims: ['soil_layer'], reason: 'layer dimension' },
+      ],
+    },
+  };
+  const layerDesign: ComparisonDesign = { ...baseDesign, simulations: [layerSimulation] };
+  const layerBuilt = buildOpenbenchConfig(layerDesign);
+  const layerForm: EvaluationDesign = { machine, ...layerDesign };
+  await assert.rejects(
+    runWith({
+      form: layerForm,
+      snapshot: snapshotFor(layerForm),
+      yaml: layerBuilt.config.replace('varname: "Qle"', 'varname: "f_wliq_soisno"'),
+    }),
+    /beyond a station\/surface evaluation/,
+  );
   assert.deepEqual(calls, [], 'nothing is sent to the backend for a configuration that cannot run');
 });
 
-test('a current configuration runs with exactly the effective config and station list', async () => {
+test('a current configuration runs with exactly the effective config, frozen site list and fingerprint', async () => {
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const simulation = {
     label: 'AT-Neu',
@@ -659,18 +686,15 @@ test('a current configuration runs with exactly the effective config and station
     machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
     ...baseDesign,
   };
+  const snapshot = snapshotFor(formDesign);
   const notices: string[] = [];
   const runs: unknown[] = [];
   const run = execute<() => Promise<unknown>>('run', {
     task: async (fn: () => Promise<unknown>) => fn(),
-    generated: {
-      current: {
-        fingerprint: designFingerprint(formDesign),
-        config: built.config,
-        sites: built.sites,
-      },
-    },
+    generated: { current: snapshot },
     formDesign,
+    designFingerprint,
+    snapshotStale: compareConfig.snapshotStale,
     parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
     structuralProblems: compareConfig.structuralProblems,
     configFingerprint: compareConfig.configFingerprint,
@@ -684,7 +708,7 @@ test('a current configuration runs with exactly the effective config and station
       return { report: null, run_id: 'run-42', config_sha: 'abc123', state: 'succeeded' };
     },
     yaml: built.config,
-    sites: built.sites,
+    sites: [],
     scanDir: '/refs',
     host: '',
     view: async () => {},
@@ -696,10 +720,11 @@ test('a current configuration runs with exactly the effective config and station
   });
   await run();
   assert.equal(calls.length, 1);
+  // 提交的是快照冻结的站点清单 + 当前配置文本（这里 == 生成文本）；二者一起进指纹。
   assert.deepEqual(calls[0]!.args, {
     name: 'comparison',
     config: built.config,
-    sites: built.sites,
+    sites: snapshot.sites,
     refRoot: '/refs',
   });
   const frozen = runs[0] as {
@@ -710,41 +735,58 @@ test('a current configuration runs with exactly the effective config and station
   };
   assert.equal(frozen.runId, 'run-42');
   assert.equal(frozen.configSha, 'abc123');
-  assert.match(frozen.fingerprint, /^[0-9a-f]{8}$/);
+  assert.equal(
+    frozen.fingerprint,
+    compareConfig.configFingerprint(
+      formDesign,
+      compareConfig.parseOpenbenchConfig(built.config).config!,
+      snapshot.sites,
+    ),
+    'the recorded fingerprint covers the configuration and the frozen station list',
+  );
   assert.equal(frozen.report, null);
   assert.match(notices[0] ?? '', /Evaluation finished \(run run-42\)/);
 });
 
 test('a changed setting clears an untouched configuration but keeps a hand-edited one', () => {
-  const invalidate = (generatedValue: Generated | null, yaml: string, design: string) => {
+  const placeholderSnapshot = (fingerprint: string, generatedText: string): CompareSnapshot => ({
+    design: {
+      machine: { host: '', openbenchRoot: '', refRoot: '' },
+      name: 'x',
+      years: [2000, 2001],
+      timRes: 'Day',
+      variables: {},
+      simulations: [],
+      projectDir: '/p',
+    },
+    designFingerprint: fingerprint,
+    sites: [],
+    generatedText,
+    fingerprint: 'effective',
+  });
+  const invalidate = (generatedValue: CompareSnapshot | null, yaml: string, design: string) => {
     const cleared: string[] = [];
     const clear = execute<() => void>('invalidateGeneratedConfig', {
       configInvalidation,
       design,
       generated: { current: generatedValue },
+      generatedConfig: generatedValue,
       yaml,
       setYaml: (value: string) => cleared.push(value),
-      setSites: () => {},
       setMissingExtent: () => {},
     });
     clear();
     return cleared;
   };
   // 没手改过的自动配置：随设置变化作废，要求重新生成。
+  assert.deepEqual(invalidate(placeholderSnapshot('a', 'generated'), 'generated', 'b'), ['']);
+  // 手改过的：原样保留（页面显示"已过期、不能运行"与重新生成入口）。
   assert.deepEqual(
-    invalidate({ fingerprint: 'a', config: 'generated', sites: [] }, 'generated', 'b'),
-    [''],
-  );
-  // 手改过的：原样保留，等用户自己决定（页面显示过期提示与重新生成入口）。
-  assert.deepEqual(
-    invalidate({ fingerprint: 'a', config: 'generated', sites: [] }, 'generated + my edit', 'b'),
+    invalidate(placeholderSnapshot('a', 'generated'), 'generated + my edit', 'b'),
     [],
   );
   // 设计没变：什么都不动。
-  assert.deepEqual(
-    invalidate({ fingerprint: 'a', config: 'generated', sites: [] }, 'generated', 'a'),
-    [],
-  );
+  assert.deepEqual(invalidate(placeholderSnapshot('a', 'generated'), 'generated', 'a'), []);
   // 记录不在（例如换了机器）时不误清用户输入。
   assert.deepEqual(invalidate(null, 'manual text', 'b'), []);
 });

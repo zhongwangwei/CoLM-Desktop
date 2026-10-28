@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as compare from './compare';
 import * as compareConfig from './config';
+import type { CompareSnapshot } from './config';
 import {
   benchErrorText,
   buildOpenbenchConfig,
@@ -558,7 +559,7 @@ test('U-05: a run that finishes after the settings changed does not claim the ne
   assert.equal(page.badgeState(), 'dirty', 'the new settings need their own configuration');
 });
 
-test('U-05: hand-edited configuration survives until the user explicitly regenerates it', async () => {
+test('U-05/R01: hand-edited configuration survives but expires once the page settings change', async () => {
   const page = pageHarness();
   await page.mount();
   await page.press('compare-add-folder');
@@ -571,17 +572,23 @@ test('U-05: hand-edited configuration survives until the user explicitly regener
   });
   await page.settle();
   await page.setField('compare-name', 'another comparison');
-  // 手改过的配置不被背景清掉；表单改动没有进入这份文本，页面要明确说出来。运行按手改后的文本
-  // （有效配置即文本本身），所以不再用"表单指纹变了"把它一刀切判成不可运行。
+  // 手改过的配置不被背景清掉；但表单改动后冻结的站点清单/模拟输入与这份配置不再来自同一次生成，
+  // 快照过期：页面明确提示并禁止运行，不能"摘要读表单、提交读旧站点"（R01；原 U-05 的"仍可运行"被收紧）。
   const kept = page.configTextarea();
   assert.ok(kept, 'the edited configuration is kept');
   assert.match(String(kept.props.value), /# mine/);
   assert.match(text(page.nodes()), /You changed the evaluation settings after generating/);
   assert.equal(
     page.actions().find((action) => action.id === 'compare-run')?.enabled,
-    true,
-    'a hand-edited configuration is the effective one and can run',
+    false,
+    'a configuration generated before the settings changed cannot run',
   );
+  assert.equal(
+    (page.contract().details?.config as { stale?: boolean } | undefined)?.stale,
+    true,
+    'the page reports the snapshot as expired, not merely edited',
+  );
+  assert.match(page.summaryText(), /Expired/, 'the summary starts with the expiry note');
   // 不确认就不覆盖手改内容；确认后才重新生成。
   page.setConfirm(false);
   await page.pressLabel('Regenerate evaluation configuration');
@@ -594,8 +601,166 @@ test('U-05: hand-edited configuration survives until the user explicitly regener
   assert.equal(page.badgeState(), 'saved');
 });
 
-test('U-04: the condition summary is computed from the very comparisonDesign the run submits', async () => {
-  // 直接执行页面真实函数：comparisonDesign / conditionSummary / generate / run 共享同一份上下文。
+/**
+ * 打开"编辑模拟信息"弹窗，按 `data-sim-field` 改字段后保存：走页面真实的"编辑站点目录/坐标"路径，
+ * 不是直接改内部 picks（R01 的复现链必须经过用户实际操作）。
+ */
+async function editSimulation(
+  page: ReturnType<typeof pageHarness>,
+  values: Record<string, string>,
+) {
+  await page.pressLabel('Edit simulation information');
+  for (const [field, value] of Object.entries(values)) {
+    const control = page
+      .nodes()
+      .find(
+        (node) =>
+          (node.type === 'Input' || node.type === 'Select') &&
+          node.props['data-sim-field'] === field,
+      );
+    assert.ok(control, `dialog field ${field}`);
+    (control.props.onChange as (event: unknown) => void)({ target: { value } });
+    await page.settle();
+  }
+  await page.pressLabel('Save simulation');
+}
+
+/** 把一个格点模拟改成站点并填上页面确认的坐标：这样生成配置时会带上要传给后端的站点清单。 */
+async function makeStationSimulation(
+  page: ReturnType<typeof pageHarness>,
+  lon: string,
+  lat: string,
+) {
+  await editSimulation(page, { dataType: 'stn', lon, lat });
+}
+
+test('R01: hand-edited text alone still runs with the current parsed config and the frozen station list', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.addVariable();
+  await makeStationSimulation(page, '11.3', '47.1');
+  await page.press('compare-generate');
+  const original = String(page.configTextarea()!.props.value);
+  assert.match(original, /data_type: stn/);
+  const fingerprintText = () =>
+    text(page.nodes().find((node) => node.props['data-compare-effective'] === true) ?? '');
+  const before = fingerprintText();
+  assert.match(before, /Effective input fingerprint [0-9a-f]{8}/);
+
+  // 只改文本（表单不动）：快照仍有效，运行按"当前文本解析出的配置 + 冻结站点清单"提交（U-05 意图保留）。
+  const edited = original
+    .replace('years: [2002, 2005]', 'years: [2003, 2004]')
+    .replace('tim_res: Day', 'tim_res: Month');
+  assert.notEqual(edited, original);
+  (page.configTextarea()!.props.onChange as (event: unknown) => void)({
+    target: { value: edited },
+  });
+  await page.settle();
+  assert.equal(
+    page.actions().find((action) => action.id === 'compare-run')?.enabled,
+    true,
+    'a text-only edit is still runnable',
+  );
+  assert.equal(
+    (page.contract().details?.config as { stale?: boolean } | undefined)?.stale,
+    false,
+    'a text-only edit does not expire the snapshot',
+  );
+  // 摘要 = 当前配置（年份/时间尺度）+ 冻结站点清单（history 目录/坐标），与实际提交一致。
+  const summary = page.summaryText();
+  assert.match(summary, /2003–2004/);
+  assert.match(summary, /Month/);
+  assert.match(summary, /\/p\/hb\/out\/hb\/history/);
+  assert.match(summary, /47\.1°, 11\.3°/);
+  assert.notEqual(fingerprintText(), before, 'the fingerprint follows the edited configuration');
+
+  // 显示的指纹必须就是"当前文本解析出的配置 + 冻结站点清单"一起算出的那个，不能另算一套。
+  const stationSite = {
+    id: 'hb',
+    station: 'hb',
+    history_dir: probedGrid.history_dir,
+    prefix: probedGrid.prefix,
+    lon: 11.3,
+    lat: 47.1,
+  };
+  const expectedFingerprint = compareConfig.configFingerprint(
+    {
+      machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+      name: 'comparison',
+      years: [2002, 2005],
+      timRes: 'Day',
+      variables: {},
+      simulations: [],
+      projectDir: '/ob/projects/comparison',
+    },
+    compareConfig.parseOpenbenchConfig(edited).config!,
+    [stationSite],
+  );
+  assert.match(
+    fingerprintText(),
+    new RegExp(`Effective input fingerprint ${expectedFingerprint}`),
+    'the shown fingerprint covers exactly the submitted config and frozen sites',
+  );
+
+  await page.press('compare-run');
+  const sent = page.calls.find((call) => call.command === 'bench_run');
+  assert.ok(sent, 'the run reaches the backend');
+  assert.equal(sent.args?.config, edited, 'the edited text is what gets submitted');
+  assert.deepEqual(sent.args?.sites, [stationSite]);
+});
+
+test('R01: f0059ee chain — editing the station coordinates after generating expires the snapshot and blocks the run', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.addVariable();
+  await makeStationSimulation(page, '11.3', '47.1');
+  await page.press('compare-generate');
+  const generatedText = String(page.configTextarea()!.props.value);
+
+  // 1) 手改 YAML 年份/时间尺度（表单没变）：仍可运行。
+  const edited = generatedText
+    .replace('years: [2002, 2005]', 'years: [2004, 2004]')
+    .replace('tim_res: Day', 'tim_res: Month');
+  (page.configTextarea()!.props.onChange as (event: unknown) => void)({
+    target: { value: edited },
+  });
+  await page.settle();
+  assert.equal(page.actions().find((action) => action.id === 'compare-run')?.enabled, true);
+
+  // 2) 再编辑站点坐标：冻结的站点清单与这份配置不再是同一次生成 → 快照过期。
+  await editSimulation(page, { lon: '12.5', lat: '48.5' });
+  assert.equal(
+    page.actions().find((action) => action.id === 'compare-run')?.enabled,
+    false,
+    'the stale snapshot blocks the run button',
+  );
+  assert.equal((page.contract().details?.config as { stale?: boolean } | undefined)?.stale, true);
+  const pageText = text(page.nodes());
+  assert.match(pageText, /You changed the evaluation settings after generating/);
+  assert.match(pageText, /Regenerate the evaluation configuration/);
+  assert.match(page.summaryText(), /Expired/, 'the summary says the snapshot expired');
+
+  // 3) 绕过界面直接调用 run：内部也必须拒绝，且一个后端调用都不发。
+  const run = page.actions().find((action) => action.id === 'compare-run')!
+    .run as () => Promise<unknown>;
+  await run();
+  await page.settle();
+  assert.deepEqual(
+    page.calls.filter((call) => call.command === 'bench_run'),
+    [],
+    'a stale snapshot never reaches the backend',
+  );
+  assert.match(
+    text(page.nodes()),
+    /settings changed after the configuration was generated/,
+    'the page explains why the run was refused',
+  );
+});
+
+test('U-04: summary, frozen station list and the run submission all come from one snapshot', async () => {
+  const t = (_zh: string, english: string) => english;
   const probed: HistoryInfo = {
     ...probedGrid,
     spatial: false,
@@ -628,40 +793,44 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
   const machine = { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' };
   const design = comparisonDesign();
   const machineDesign = { machine, ...design };
-  // 摘要现在的来源是"有效配置"（解析后的提交文本）；没有文本时才退回表单设计。
+  const byLabelOf = (summary: ReturnType<typeof evaluationSummary>, label: string) =>
+    summary.find((item) => item.label[1] === label)?.value;
+  // 还没生成配置：摘要退回表单设计（旧路径）。
   const formSummary = execute<() => ReturnType<typeof evaluationSummary>>('conditionSummary', {
+    generatedConfig: null,
+    staleSnapshot: false,
     effectiveConfig: null,
     formDesign: machineDesign,
     effectiveSummary: compareConfig.effectiveSummary,
     evaluationSummary,
+    t,
   });
   assert.deepEqual(formSummary(), evaluationSummary(machineDesign));
-  const byLabelOf = (summary: ReturnType<typeof evaluationSummary>, label: string) =>
-    summary.find((item) => item.label[1] === label)?.value;
   assert.equal(byLabelOf(formSummary(), 'Machine'), 'server serverA');
-  assert.equal(byLabelOf(formSummary(), 'Comparison project folder'), design.projectDir);
-  assert.equal(byLabelOf(formSummary(), 'Reference data root'), '/refs');
+  assert.equal(byLabelOf(formSummary(), 'Machine'), 'server serverA');
   assert.match(byLabelOf(formSummary(), 'Simulation 1') ?? '', /AT-Neu_hist_/);
   assert.match(byLabelOf(formSummary(), 'Simulation 1') ?? '', /47\.1°, 11\.3°/);
 
-  // 用同一份 design 生成配置；再用 run 提交。比对 summary ↔ config ↔ sites ↔ 实际 IPC 参数。
-  const yamlRef: { current: string } = { current: '' };
-  const sitesRef: { current: unknown[] } = { current: [] };
-  const generated: { current: { fingerprint: string; config: string; sites: unknown[] } | null } = {
-    current: null,
+  // 用同一份 design 生成快照；摘要、指纹和 run 提交都读它。
+  let generatedValue: CompareSnapshot | null = null;
+  const generated = {
+    get current() {
+      return generatedValue;
+    },
+    set current(value: CompareSnapshot | null) {
+      generatedValue = value;
+    },
   };
+  const yamlRef: { current: string } = { current: '' };
   const errors: string[] = [];
   const generate = execute<() => void>('generate', {
     comparisonDesign,
     buildOpenbenchConfig,
-    designFingerprint,
     machine,
+    freezeCompareSnapshot: compareConfig.freezeCompareSnapshot,
     generated,
     setYaml: (value: string) => {
       yamlRef.current = value;
-    },
-    setSites: (value: unknown[]) => {
-      sitesRef.current = value;
     },
     setMissingExtent: () => {},
     setError: (value: string) => errors.push(value),
@@ -674,32 +843,40 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
   );
   const built = buildOpenbenchConfig(design);
   assert.equal(yamlRef.current, built.config);
-  assert.deepEqual(sitesRef.current, built.sites);
-  assert.equal(generated.current?.fingerprint, designFingerprint({ machine, ...design }));
+  assert.equal(generatedValue!.generatedText, built.config);
+  assert.deepEqual(generatedValue!.sites, built.sites);
+  assert.equal(generatedValue!.designFingerprint, designFingerprint(machineDesign));
+  assert.equal(
+    generatedValue!.fingerprint,
+    compareConfig.configFingerprint(
+      machineDesign,
+      compareConfig.parseOpenbenchConfig(built.config).config!,
+      built.sites,
+    ),
+  );
 
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const notices: string[] = [];
   const parsed = compareConfig.parseOpenbenchConfig(yamlRef.current);
   assert.deepEqual(parsed.problems, []);
-  const parseOpenbenchConfig = compareConfig.parseOpenbenchConfig;
-  const structuralProblems = compareConfig.structuralProblems;
-  const configFingerprint = compareConfig.configFingerprint;
   const run = execute<() => Promise<unknown>>('run', {
     task: async (fn: () => Promise<unknown>) => fn(),
     generated,
     formDesign: machineDesign,
+    designFingerprint,
+    snapshotStale: compareConfig.snapshotStale,
     name: 'versions vs flux',
     comparisonName,
     remote: false,
-    parseOpenbenchConfig,
-    structuralProblems,
-    configFingerprint,
+    parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+    structuralProblems: compareConfig.structuralProblems,
+    configFingerprint: compareConfig.configFingerprint,
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       calls.push({ command, args });
       return { report: null };
     },
     yaml: yamlRef.current,
-    sites: sitesRef.current,
+    sites: [],
     scanDir: '/refs',
     host: '',
     view: async () => {},
@@ -708,14 +885,17 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
     setConfigSaving: () => {},
     setLastRun: () => {},
     showRunNotice: (value: string) => notices.push(value),
-    t: (_zh: string, english: string) => english,
+    t,
   });
-  // 摘要从有效配置解析：与表单设计同一份条件，数值一致。
+  // 摘要 = 冻结站点清单（站点部分）+ 当前配置文本解析（其余条件）。
   const effectiveSummary = execute<() => ReturnType<typeof evaluationSummary>>('conditionSummary', {
+    generatedConfig: generatedValue,
+    staleSnapshot: false,
     effectiveConfig: parsed.config,
     formDesign: machineDesign,
     effectiveSummary: compareConfig.effectiveSummary,
     evaluationSummary,
+    t,
   });
   const byLabel = (label: string) => byLabelOf(effectiveSummary(), label);
   assert.equal(byLabel('Evaluation years'), '2003–2005');
@@ -724,13 +904,14 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
   const submitted = calls.find((call) => call.command === 'bench_run');
   assert.ok(submitted);
   assert.equal(submitted.args?.config, built.config);
-  assert.deepEqual(submitted.args?.sites, built.sites);
+  assert.deepEqual(submitted.args?.sites, generatedValue!.sites);
   assert.equal(submitted.args?.refRoot, '/refs');
   assert.deepEqual(notices, ['Evaluation finished']);
-  // 摘要里的模拟 history、站点清单、变量和指标都来自这份被提交的设计。
+  // 摘要里的模拟 history、坐标、站点清单和提交的站点清单是同一份冻结输入。
   assert.ok(String(byLabel('Simulation 1')).includes(probed.history_dir));
+  assert.ok(String(byLabel('Simulation 1')).includes('47.1°, 11.3°'));
   assert.deepEqual(
-    built.sites.map((site) => site.history_dir),
+    generatedValue!.sites.map((site) => site.history_dir),
     [probed.history_dir],
   );
   assert.deepEqual(submitted.args?.sites, built.sites);
@@ -800,19 +981,25 @@ test('GUI-07: submission errors carry the sidecar unfinished-job message into th
     simulations: [{ label: 'hb', info: gridInfo }],
     projectDir: '/ob/projects/qfo_era5',
   }).config;
-  const generated = { current: { fingerprint: 'same', config: yaml, sites: [] } };
+  const qfoDesign = {
+    machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
+    name: 'qfo era5',
+    years: [2002, 2005] as [number, number],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [{ label: 'hb', info: gridInfo }],
+    projectDir: '/ob/projects/qfo_era5',
+  };
+  // 运行必须绑定生成时冻结的快照（R01）；这里模拟"刚生成、未改动"的状态。
+  const generated = {
+    current: compareConfig.freezeCompareSnapshot(qfoDesign, { config: yaml, sites: [] }),
+  };
   const run = execute<() => Promise<unknown>>('run', {
     task,
     generated,
-    formDesign: {
-      machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
-      name: 'qfo era5',
-      years: [2002, 2005],
-      timRes: 'Day',
-      variables: { Latent_Heat: 'ERA5LAND_LowRes' },
-      simulations: [{ label: 'hb', info: gridInfo }],
-      projectDir: '/ob/projects/qfo_era5',
-    },
+    formDesign: qfoDesign,
+    designFingerprint,
+    snapshotStale: compareConfig.snapshotStale,
     parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
     structuralProblems: compareConfig.structuralProblems,
     configFingerprint: compareConfig.configFingerprint,

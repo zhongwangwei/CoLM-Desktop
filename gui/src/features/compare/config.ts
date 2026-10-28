@@ -13,9 +13,11 @@
 
 import { bilingual } from '../../lib/bilingual';
 import {
+  designFingerprint,
   layerVariableProblems,
   simulationKey,
   VALID_COMPARISON_ITEMS,
+  type BenchSite,
   type EvaluationDesign,
   type EvaluationSummaryItem,
 } from './compare';
@@ -118,26 +120,85 @@ function isMap(value: Yaml | undefined): value is { [key: string]: Yaml } {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** YAML 的 `#` 注释：引号内的 `#` 不算（路径里带 `#` 的字符串由生成器写成 JSON 引号）。 */
+/**
+ * YAML 的 `#` 注释：只有引号外、前面是空白（或行首）的 `#` 才是注释。单引号和双引号都要认，
+ * 否则 `'/history/old # keep'` 会被读成 "# 之前" 的残路径——OpenBench 读到的是完整路径，
+ * 摘要/提交就会和它不一致（审查报告 R10）。
+ *
+ * 引号只在 YAML 允许开始标量的位置生效（行首、`- ` 之后、`键: ` 之后、`[`/`,` 之后）：
+ * 普通标量中间的撇号（don't）不是引号开始，否则后面的真注释会被吞掉。
+ */
 function stripComment(line: string): string {
-  let quoted = false;
-  let escaped = false;
+  let double = false;
+  let single = false;
+  // 当前是否处在"可以开始一个标量"的位置（下一个引号才是引号字符串的开始）。
+  let nodeStart = true;
+  // 行内列表/映射的嵌套层数：只有流内逗号才是分隔符。
+  let flow = 0;
   for (let index = 0; index < line.length; index++) {
     const char = line[index]!;
-    if (escaped) {
-      escaped = false;
+    if (double) {
+      if (char === '\\') index += 1;
+      else if (char === '"') {
+        double = false;
+        nodeStart = false;
+      }
       continue;
     }
-    if (quoted && char === '\\') {
-      escaped = true;
+    if (single) {
+      if (char === "'") {
+        if (line[index + 1] === "'") index += 1;
+        else {
+          single = false;
+          nodeStart = false;
+        }
+      }
       continue;
     }
-    if (char === '"') {
-      quoted = !quoted;
+    if (char === '#' && (index === 0 || /\s/.test(line[index - 1]!))) return line.slice(0, index);
+    if (nodeStart) {
+      if (char === ' ' || char === '\t') continue;
+      // `- ` 序列标记（`-1` 是负数标量，不能当标记吃掉）。
+      if (char === '-' && (index + 1 >= line.length || /\s/.test(line[index + 1]!))) continue;
+      if (char === '"') {
+        double = true;
+        continue;
+      }
+      if (char === "'") {
+        single = true;
+        continue;
+      }
+      if (char === '[' || char === '{') {
+        flow += 1;
+        continue;
+      }
+      if (char === ']' || char === '}') {
+        flow = Math.max(0, flow - 1);
+        nodeStart = false;
+        continue;
+      }
+      // 普通标量的第一个字符：这个标量里出现的引号都只是字符。
+      nodeStart = false;
       continue;
     }
-    if (!quoted && char === '#' && (index === 0 || /\s/.test(line[index - 1]!)))
-      return line.slice(0, index);
+    // `键: 值` 的映射分隔只在冒号后跟空白/行尾时成立（YAML 的 plain scalar 里可以有 `a:b`）。
+    if (char === ':' && (index + 1 >= line.length || /\s/.test(line[index + 1]!))) {
+      nodeStart = true;
+      continue;
+    }
+    if (flow > 0 && char === ',') {
+      nodeStart = true;
+      continue;
+    }
+    if (flow > 0 && (char === '[' || char === '{')) {
+      flow += 1;
+      nodeStart = true;
+      continue;
+    }
+    if (flow > 0 && (char === ']' || char === '}')) {
+      flow = Math.max(0, flow - 1);
+      nodeStart = false;
+    }
   }
   return line;
 }
@@ -216,6 +277,39 @@ function splitKey(
   return null;
 }
 
+/**
+ * YAML 单引号标量：`''` 表示一个单引号，其余字符原样（反斜杠不是转义）。标量必须在闭合引号处结束；
+ * 没闭合或引号后还有内容时明确报错——静默读成残路径正是审查报告 R10 的问题。
+ */
+function parseSingleQuoted(text: string, problems: Problem[], line: SourceLine): string | null {
+  let value = '';
+  for (let index = 1; index < text.length; index++) {
+    const char = text[index]!;
+    if (char !== "'") {
+      value += char;
+      continue;
+    }
+    if (text[index + 1] === "'") {
+      value += "'";
+      index += 1;
+      continue;
+    }
+    if (index !== text.length - 1) {
+      problems.push([
+        `第 ${line.number} 行的单引号字符串后面还有内容：${text}`,
+        `Line ${line.number} has content after the closing single quote: ${text}`,
+      ]);
+      return null;
+    }
+    return value;
+  }
+  problems.push([
+    `第 ${line.number} 行的单引号字符串没有结束：${text}`,
+    `Line ${line.number} has an unclosed single-quoted string: ${text}`,
+  ]);
+  return null;
+}
+
 function parseScalar(text: string, problems: Problem[], line: SourceLine): Yaml {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -232,10 +326,7 @@ function parseScalar(text: string, problems: Problem[], line: SourceLine): Yaml 
       return null;
     }
   }
-  if (trimmed.startsWith("'"))
-    return trimmed.length >= 2 && trimmed.endsWith("'")
-      ? trimmed.slice(1, -1).replaceAll("''", "'")
-      : trimmed;
+  if (trimmed.startsWith("'")) return parseSingleQuoted(trimmed, problems, line);
   if (trimmed.startsWith('[')) {
     if (!trimmed.endsWith(']')) {
       problems.push([
@@ -248,25 +339,40 @@ function parseScalar(text: string, problems: Problem[], line: SourceLine): Yaml 
     if (!inner) return [];
     const parts: string[] = [];
     let current = '';
-    let quoted = false;
+    // 单引号和双引号都保护内部的逗号（YAML 的流式列表按引号外的逗号切分）。
+    let doubleQuoted = false;
+    let singleQuoted = false;
     let escaped = false;
-    for (const char of inner) {
-      if (escaped) {
+    for (let index = 0; index < inner.length; index++) {
+      const char = inner[index]!;
+      if (doubleQuoted) {
         current += char;
-        escaped = false;
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') doubleQuoted = false;
         continue;
       }
-      if (quoted && char === '\\') {
+      if (singleQuoted) {
         current += char;
-        escaped = true;
+        if (char === "'") {
+          if (inner[index + 1] === "'") {
+            current += "'";
+            index += 1;
+          } else singleQuoted = false;
+        }
         continue;
       }
       if (char === '"') {
-        quoted = !quoted;
+        doubleQuoted = true;
         current += char;
         continue;
       }
-      if (!quoted && char === ',') {
+      if (char === "'") {
+        singleQuoted = true;
+        current += char;
+        continue;
+      }
+      if (char === ',') {
         parts.push(current);
         current = '';
         continue;
@@ -598,23 +704,22 @@ function validateSimulation(
       ]);
     } else
       for (const [variable, mapping] of Object.entries(value.variables)) {
+        const mappingPath = `${path}.variables.${variable}`;
         if (!isMap(mapping)) {
-          problems.push([
-            `${path}.variables.${variable} 应该是一个配置块。`,
-            `${path}.variables.${variable} should be a block.`,
-          ]);
+          problems.push([`${mappingPath} 应该是一个配置块。`, `${mappingPath} should be a block.`]);
           continue;
         }
-        const varname = stringField(
-          mapping.varname,
-          `${path}.variables.${variable}.varname`,
-          problems,
-        );
-        const varunit = stringField(
-          mapping.varunit,
-          `${path}.variables.${variable}.varunit`,
-          problems,
-        );
+        // 变量映射只支持 varname/varunit：像 OpenBench 的 `convert: "value * 2"` 这类字段会改实际计算，
+        // 但页面既写不进有效配置也不算进指纹，接收后忽略就会"计算变了、指纹没变"（审查报告 R02）。
+        // 与顶层/模拟层一样，不认识的字段明确拒绝，不静默丢。
+        for (const field of Object.keys(mapping))
+          if (field !== 'varname' && field !== 'varunit')
+            problems.push([
+              `${mappingPath} 里的「${field}」暂不支持：变量映射只会写 varname/varunit，${field} 不会进入有效配置与指纹，但 OpenBench 仍可能按它改变计算。请删掉它，或等页面支持后再用。`,
+              `${mappingPath} has “${field}”, which this page does not support: a variable mapping only carries varname/varunit, so ${field} would not enter the effective configuration or its fingerprint while OpenBench could still compute differently. Remove it or wait until the page supports it.`,
+            ]);
+        const varname = stringField(mapping.varname, `${mappingPath}.varname`, problems);
+        const varunit = stringField(mapping.varunit, `${mappingPath}.varunit`, problems);
         if (varname && varunit) variables[variable] = { varname, varunit };
       }
   }
@@ -632,6 +737,39 @@ function validateSimulation(
     fulllist,
     variables,
   };
+}
+
+/**
+ * `project.output_dir` 必须是运行目录内的相对路径（复查 R03）。OpenBench 在本次 run 的工作目录里解析它，
+ * 绝对路径/`../shared` 会把不同 run 的结果写到同一处（互相覆盖、报告归属错乱），甚至写到运行目录之外。
+ * 允许 `output`、`./custom-output`、`a/../out` 这类归一后仍在内部的写法；拒绝绝对路径、盘符、`~`、
+ * 归一后逃到上级的路径，以及归一后正好是运行目录本身（`.`、`sim/..`：OpenBench 会把结果散进 run 根）。
+ */
+function unsafeOutputDir(value: string): Problem | null {
+  const normalized = value.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.startsWith('~'))
+    return [
+      `project.output_dir 必须是运行目录内的相对路径，不能是绝对路径或 ~（现在是「${value}」）。`,
+      `project.output_dir must be a relative path inside the run directory, not an absolute path or ~ (currently “${value}”).`,
+    ];
+  let depth = 0;
+  for (const part of normalized.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      depth -= 1;
+      if (depth < 0)
+        return [
+          `project.output_dir 不能跳出运行目录（现在是「${value}」）；多个运行共用输出目录会让结果互相覆盖。`,
+          `project.output_dir must not escape the run directory (currently “${value}”); a shared output folder lets runs overwrite each other.`,
+        ];
+    } else depth += 1;
+  }
+  if (depth === 0)
+    return [
+      `project.output_dir 不能指向运行目录本身（现在是「${value}」）；请给它一个子目录，例如 output。`,
+      `project.output_dir must name a subdirectory of the run directory (currently “${value}”); use e.g. output.`,
+    ];
+  return null;
 }
 
 function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): EffectiveConfig | null {
@@ -664,6 +802,13 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
     project.output_dir == null
       ? null
       : stringField(project.output_dir, 'project.output_dir', problems);
+  if (outputDir != null) {
+    // 输出目录会写进 OpenBench 配置：绝对路径/../ 会让两个 run 共用同一成果目录、或写到运行目录之外，
+    // 报告发现（按本次 run 的记录找）就找不到本次结果（复查 R03）。这里只接受"归一到运行目录内部"的
+    // 相对路径；后端在运行前还会按同一规则再校验一次，两边口径一致才不会被手改绕过。
+    const unsafe = unsafeOutputDir(outputDir);
+    if (unsafe) problems.push(unsafe);
+  }
   const timRes = stringField(project.tim_res, 'project.tim_res', problems);
   if (!timRes || !(TIM_RES_VALUES as readonly string[]).includes(timRes))
     problems.push([
@@ -880,6 +1025,24 @@ export function structuralProblems(design: EvaluationDesign, config: EffectiveCo
     ]);
     return problems;
   }
+  // R07 剩余缺口：上面的 `layerVariableProblems` 只看表单 `design.simulations[].variables`，
+  // 手改 YAML 把 varname 换成层/类别维度变量仍能启动，制备阶段只会把它跳过。这里按有效配置再查一遍：
+  // 被评估变量的 varname 命中同名模拟的 `unsupported_variables` 就在运行前拒绝（生成路径的检查保持不变）。
+  const designByKey = new Map(design.simulations.map((sim) => [simulationKey(sim.label), sim]));
+  for (const simulation of config.simulations) {
+    const unsupported = designByKey.get(simulation.key)?.info.unsupported_variables;
+    if (!unsupported?.length) continue;
+    for (const [variable, mapping] of Object.entries(simulation.variables)) {
+      if (!config.variables.includes(variable)) continue;
+      const hit = unsupported.find((item) => item.name === mapping.varname);
+      if (!hit) continue;
+      const dims = hit.dims.join(', ');
+      problems.push([
+        `配置里模拟 ${simulation.key} 把变量 ${variable} 映射到 ${mapping.varname}（维度 ${dims}），超出站点/地表评估维度，制备站点文件时会被跳过。手改 YAML 不能绕过生成前的检查；请把 varname 改回去，或重新生成评估配置。`,
+        `The configuration maps variable ${variable} in simulation ${simulation.key} to ${mapping.varname} (dims ${dims}), beyond a station/surface evaluation; preparing the station file would skip it. A hand edit cannot bypass the check done at generation; restore the varname or regenerate the evaluation configuration.`,
+      ]);
+    }
+  }
   const sep = separatorFor(design.projectDir);
   const simDir = `${design.projectDir}${sep}sim`;
   for (const simulation of config.simulations) {
@@ -895,21 +1058,91 @@ export function structuralProblems(design: EvaluationDesign, config: EffectiveCo
 }
 
 /**
- * 有效配置的指纹：包含机器/项目目录身份与解析后的全部配置字段。页面用它判断"完成提示/已保存徽标"
- * 是不是针对当前这份实际要运行的配置（手改 YAML 也算改设计）。
+ * 有效输入指纹：机器/项目目录身份 + 解析后的全部配置字段 + 实际站点清单。
+ *
+ * 站点清单（单点模拟的 history 目录、文件前缀、页面确认的坐标）不在生成的 YAML 里，但实际计算读的
+ * 就是它；旧的指纹只算配置，改了站点目录/坐标指纹不变，摘要还读当前表单 → 摘要/指纹/提交三者分叉
+ * （审查报告 R01）。站点按 id 排序后进指纹：清单顺序只是生成时的模拟顺序，不改变实际输入。
  */
-export function configFingerprint(design: EvaluationDesign, config: EffectiveConfig): string {
-  return fingerprintOf({ machine: design.machine, projectDir: design.projectDir, config });
+export function configFingerprint(
+  design: EvaluationDesign,
+  config: EffectiveConfig,
+  sites: BenchSite[] = [],
+): string {
+  // 用码点比较而不是 localeCompare：指纹不能随运行环境的语言/ICU 变化。
+  const sortedSites = [...sites].sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+  );
+  return fingerprintOf({
+    machine: design.machine,
+    projectDir: design.projectDir,
+    config,
+    sites: sortedSites,
+  });
 }
 
 /**
- * 运行前条件摘要：与 `evaluationSummary` 同样的行，但数值全部来自解析后的有效配置。
- * 显示名（模拟名、站点坐标）来自页面记录，其余（年份/时间尺度/数据源/变量/指标/高级项）来自配置，
- * 因此手改 YAML 后摘要立即反映真正的运行条件。
+ * 生成配置时冻结的输入快照（审查报告 R01）：配置文本本身不冻结（用户可以手改、运行前重新解析，
+ * 解析失败/结构校验不过就明确阻断），但表单设计（每个单点模拟的目录/前缀/坐标/年份与模拟集合）
+ * 和实际站点清单必须冻结成同一份。摘要的站点部分、有效指纹和运行提交都读它，表单之后再改就过期，
+ * 不会再出现"摘要读当前表单、提交读生成时站点"的分叉。
+ *
+ * 手改文本不能改变冻结的站点输入：生成的 YAML 里没有 sites 段，单点模拟的 history 目录/前缀/坐标
+ * 只在这份清单里（后端按它合并站点文件）；手改 stn 的 root_dir/fulllist 会被 `structuralProblems`
+ * 按"必须等于页面准备的路径"拒绝。格点模拟的 root_dir/prefix 属于配置输入（不是站点清单），
+ * 手改后随有效配置正常进摘要、指纹与提交。这就是"手改 sites 不生效"的明确处理方式。
+ */
+export interface CompareSnapshot {
+  /** 生成时的完整设计：摘要里的模拟名、年份、机器身份和结构校验都读它。 */
+  design: EvaluationDesign;
+  /** 生成时的设计指纹：与当前表单比对，判断快照是否过期。 */
+  designFingerprint: string;
+  /** 生成时的站点清单：单点模拟的 history 目录/前缀/坐标，运行原样提交给后端。 */
+  sites: BenchSite[];
+  /** 生成时的配置文本：只用来判断文本是否被手改（保存徽标/提示），运行时不用它。 */
+  generatedText: string;
+  /** 生成时的有效输入指纹（配置 + 站点清单）。 */
+  fingerprint: string;
+}
+
+/** 生成配置后把设计、站点清单、文本和指纹绑成同一个快照；生成的文本必须自己能解析（否则是程序错误）。 */
+export function freezeCompareSnapshot(
+  design: EvaluationDesign,
+  built: { config: string; sites: BenchSite[] },
+): CompareSnapshot {
+  const parsed = parseOpenbenchConfig(built.config);
+  if (!parsed.config)
+    throw new Error(
+      bilingual(
+        `生成的配置无法解析（这是程序错误，不是用户输入问题）：${parsed.problems.map(([zh]) => zh).join('；')}`,
+        `The generated configuration cannot be parsed (a program bug, not user input): ${parsed.problems.map(([, en]) => en).join('; ')}`,
+      ),
+    );
+  return {
+    design,
+    designFingerprint: designFingerprint(design),
+    sites: built.sites,
+    generatedText: built.config,
+    fingerprint: configFingerprint(design, parsed.config, built.sites),
+  };
+}
+
+/** 快照是否过期：生成配置之后页面表单（站点目录/前缀/坐标、模拟集合、年份等）又改过。 */
+export function snapshotStale(snapshot: CompareSnapshot, design: EvaluationDesign): boolean {
+  return snapshot.designFingerprint !== designFingerprint(design);
+}
+
+/**
+ * 运行前条件摘要：与 `evaluationSummary` 同样的行，但两类输入各读各的快照来源——
+ * - 配置部分（年份/时间尺度/数据源/变量/指标/高级项）来自当前文本解析出的有效配置，手改 YAML 立即跟着变；
+ * - 单点模拟的站点输入（history 目录、前缀、页面确认的坐标）来自生成配置时冻结的站点清单 `sites`。
+ * 运行时提交的正是"当前配置 + 冻结站点清单"，摘要读同样两部分，才不会出现摘要=实际提交的分叉（R01）。
+ * 不传 `sites` 时退回页面记录（没有快照可读的旧路径）。
  */
 export function effectiveSummary(
   design: EvaluationDesign,
   config: EffectiveConfig,
+  sites: BenchSite[] = [],
 ): EvaluationSummaryItem[] {
   const { machine } = design;
   const sep = separatorFor(design.projectDir);
@@ -940,8 +1173,13 @@ export function effectiveSummary(
     { label: ['时间尺度', 'Time scale'], value: config.project.timRes },
   ];
   const labels = new Map(design.simulations.map((sim) => [simulationKey(sim.label), sim]));
+  // 单点模拟的站点输入以冻结清单为准：那才是提交给后端准备站点文件的 history 目录/前缀/坐标。
+  const siteById = new Map(sites.map((site) => [site.id, site]));
   config.simulations.forEach((simulation, index) => {
     const recorded = labels.get(simulation.key);
+    const site = simulation.dataType === 'stn' ? siteById.get(simulation.key) : undefined;
+    const lon = site ? site.lon : recorded?.info.lon;
+    const lat = site ? site.lat : recorded?.info.lat;
     const kind =
       simulation.dataType === 'grid' ? bilingual('格点', 'gridded') : bilingual('单点', 'station');
     items.push({
@@ -950,19 +1188,20 @@ export function effectiveSummary(
         recorded?.label ?? simulation.key,
         kind,
         simulation.model,
-        simulation.prefix ?? recorded?.info.prefix ?? '',
+        site?.prefix ?? simulation.prefix ?? recorded?.info.prefix ?? '',
         ...(recorded ? [`${recorded.info.syear}–${recorded.info.eyear}`] : []),
         simulation.dataGroupby,
         simulation.timRes,
         ...(simulation.gridRes != null ? [`${simulation.gridRes}°`] : []),
-        ...(recorded &&
-        !recorded.info.spatial &&
-        recorded.info.lon != null &&
-        recorded.info.lat != null
-          ? [`${recorded.info.lat}°, ${recorded.info.lon}°`]
+        ...(lat != null && lon != null && (site || (recorded && !recorded.info.spatial))
+          ? [`${lat}°, ${lon}°`]
           : []),
-        // 单点的数据源是页面探测到的 history 目录（后端按它合并站点文件）；配置里的 fulllist 是合并结果。
-        ...(recorded && simulation.dataType === 'stn' ? [recorded.info.history_dir] : []),
+        // 单点的数据源是页面确认的那份 history 目录（后端按它合并站点文件）；配置里的 fulllist 是合并结果。
+        ...(site
+          ? [site.history_dir]
+          : recorded && simulation.dataType === 'stn'
+            ? [recorded.info.history_dir]
+            : []),
         simulation.dataType === 'stn' ? (simulation.fulllist ?? '') : simulation.rootDir,
       ]
         .filter(Boolean)

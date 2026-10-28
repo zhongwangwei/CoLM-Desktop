@@ -7,6 +7,7 @@ import {
   benchErrorText,
   buildOpenbenchConfig,
   comparisonName,
+  designFingerprint,
   jobContacted,
   jobEnded,
   jobUncertain,
@@ -414,6 +415,7 @@ function watchHarness(seed: Record<string, string> = {}) {
     ) => Promise<
       | { state: 'succeeded' | 'cancelled'; job: RemoteJobIdentity }
       | { state: 'failed'; job: RemoteJobIdentity; error: string }
+      | { state: 'unknown'; job: RemoteJobIdentity; reason: string }
       | { state: 'uncertain'; job: RemoteJobIdentity; reason: string }
       | { state: 'detached' }
     >
@@ -668,13 +670,20 @@ test('GUI-07: running a comparison refuses to resubmit while an unconfirmed job 
     projectDir: '/ob/projects/qfo_era5',
   };
   const yaml = buildOpenbenchConfig(baseDesign).config;
+  const formDesign = {
+    machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
+    ...baseDesign,
+  };
+  // 运行必须绑定生成时冻结的快照（R01）：这里模拟"刚生成、未改动"的状态。
+  const generated = {
+    current: compareConfig.freezeCompareSnapshot(formDesign, { config: yaml, sites: [] }),
+  };
   const run = execute<() => Promise<unknown>>('run', {
     task: (fn: () => Promise<unknown>) => fn(),
-    generated: { current: { fingerprint: 'same', config: yaml, sites: [] } },
-    formDesign: {
-      machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
-      ...baseDesign,
-    },
+    generated,
+    formDesign,
+    designFingerprint,
+    snapshotStale: compareConfig.snapshotStale,
     parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
     structuralProblems: compareConfig.structuralProblems,
     configFingerprint: compareConfig.configFingerprint,
@@ -1057,4 +1066,73 @@ test('GUI-05: a folder probe from the old machine is not written after switching
   });
   await call;
   assert.deepEqual(picks, [{ dir: '/p/old/history', label: 'old', info: null }]);
+});
+
+test('R09: a bare job that vanished without an exit code settles as result-unknown and releases the host', async () => {
+  const h = watchHarness();
+  const pending = h.watch('serverA', { job: 'bench-run-1', kind: 'run', name: 'qfo_era5' });
+  const request = await h.ipc.wait(0);
+  request.resolve({
+    job: 'bench-run-1',
+    status: { state: 'lost', exit_code: null, log_tail: '' },
+    ended: 'unknown',
+    terminal: true,
+    result_unknown: true,
+  });
+  const outcome = await pending;
+  assert.equal(outcome.state, 'unknown');
+  // 终态身份被清掉（历史里留一份），否则这台服务器会被一条已终止的记录永远挡住。
+  assert.equal(h.storage.values['colm.benchJob@serverA'], undefined);
+  const history = parseRemoteJob(h.storage.values['colm.benchLastJob@serverA']);
+  assert.equal(history?.end, 'unknown');
+  assert.equal(history?.uncertain, false);
+  assert.equal(outcome.state, 'unknown');
+  assert.match(outcome.state === 'unknown' ? outcome.reason : '', /result unknown/);
+  // 清掉之后重提不再被"未确认终态"的作业挡住。
+  const jobKey = execute<(machine: string) => string>('jobKey', {});
+  const guard = execute<(machine: string) => void>('assertNoUnresolvedJob', {
+    stored: h.storage.stored,
+    jobKey,
+    parseRemoteJob,
+    t,
+  });
+  assert.doesNotThrow(() => guard('serverA'));
+});
+
+test('R09: result-unknown is a distinct terminal state, never success/failure', () => {
+  assert.equal(
+    remoteJobTerminal({
+      status: { state: 'lost', exit_code: null },
+      ended: 'unknown',
+      terminal: true,
+    }),
+    'unknown',
+  );
+  assert.equal(
+    remoteJobTerminal({
+      status: { state: 'lost', exit_code: null },
+      ended: null,
+      terminal: true,
+      result_unknown: true,
+    }),
+    'unknown',
+  );
+  // 旧契约：调度器说结束、退出码还在 NFS 上 → 仍然不是终态（不能当 unknown）。
+  assert.equal(
+    remoteJobTerminal({
+      status: { state: 'lost', exit_code: null },
+      ended: null,
+      terminal: true,
+    }),
+    null,
+  );
+  const ended = jobEnded(
+    { job: 'bench-run-2', kind: 'run', name: 'x' },
+    'unknown',
+    '2026-01-01T00:00:00.000Z',
+    'gone',
+  );
+  assert.equal(ended.end, 'unknown');
+  assert.equal(ended.uncertain, false);
+  assert.equal(parseRemoteJob(JSON.stringify(ended))?.end, 'unknown');
 });

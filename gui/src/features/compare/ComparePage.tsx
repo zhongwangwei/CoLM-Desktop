@@ -10,8 +10,11 @@ import RemotePathBrowser from '../../components/RemotePathBrowser';
 import {
   configFingerprint,
   effectiveSummary,
+  freezeCompareSnapshot,
   parseOpenbenchConfig,
+  snapshotStale,
   structuralProblems,
+  type CompareSnapshot,
 } from './config';
 import {
   benchErrorText,
@@ -43,6 +46,7 @@ import {
   type BenchReference,
   type ComparisonDesign,
   type EvaluationDesign,
+  type EvaluationSummaryItem,
   type HistoryInfo,
   type RemoteJobIdentity,
   type SimulationField,
@@ -101,16 +105,6 @@ type Pick = {
   dataGroupby?: string | null;
   gridRes?: number | null;
 };
-/** 单点模拟要先并成的站点清单项（与后端 `bench_run` 的 `sites` 参数一致）。 */
-type Site = {
-  id: string;
-  station: string;
-  history_dir: string;
-  prefix: string;
-  /** 页面确认的站点坐标；合并站点文件时用它，缺省才回退到文件里的值。 */
-  lon: number | null;
-  lat: number | null;
-};
 /**
  * 登记/编辑模拟的表单。保存相关字段就是 `SimulationFormValues`；`probe` 保存完整探测结果，
  * 保存时只覆盖用户明确编辑的字段（GUI-10），`probeDir` 记住它属于哪个目录。
@@ -149,6 +143,8 @@ type RemoteJob = {
   terminal?: boolean;
   /** 已向调度器发出取消且它收下了，但作业可能仍 queued/running。 */
   cancel_requested?: boolean;
+  /** 进程/队列已不在且没有退出码：确认终止但结果未知。 */
+  result_unknown?: boolean;
 };
 /**
  * 正在服务器上跑的那个作业：完整身份记在本机（主机、比较项目、提交时间、最后确认状态），
@@ -163,6 +159,8 @@ type ActiveJob = RemoteJobIdentity;
 type WatchOutcome =
   | { state: 'succeeded' | 'cancelled'; job: ActiveJob }
   | { state: 'failed'; job: ActiveJob; error: string }
+  /** 确认已终止，但没有退出码/结果：不能继续等，也不能当成功/失败；允许关闭并重新提交。 */
+  | { state: 'unknown'; job: ActiveJob; reason: string }
   | { state: 'uncertain'; job: ActiveJob; reason: string }
   | { state: 'detached' };
 
@@ -298,7 +296,6 @@ export default function ComparePage() {
   const [simError, setSimError] = useState<{ field: SimulationField; message: string } | null>(
     null,
   );
-  const [sites, setSites] = useState<Site[]>([]);
   // 本机最近一次运行的身份（后端 run 快照）：完成提示与报告显示都绑定它，而不是"目录里有一份报告"。
   const [lastRun, setLastRun] = useState<{
     runId: string;
@@ -351,8 +348,9 @@ export default function ComparePage() {
   const [lastJob, setLastJob] = useState<ActiveJob | null>(null);
   // GUI-08：正在取回的报告（机器 + 比较名）；同一份取回期间不重复触发。
   const fetching = useRef<Set<string>>(new Set());
-  // 生成配置时记下设计指纹与自动生成的文本、站点清单：运行前再核对，手改过的配置不被清掉（GUI-04）。
-  const generated = useRef<{ fingerprint: string; config: string; sites: Site[] } | null>(null);
+  // 生成配置时冻结"设计 + 站点清单 + 文本 + 指纹"成同一份快照；摘要/指纹/运行都读它。
+  // 配置文本本身不冻结（手改后运行时重新解析），但站点清单与设计不能再读当前表单（审查报告 R01）。
+  const generated = useRef<CompareSnapshot | null>(null);
   // 运行完成提示对应的有效配置指纹：设置或配置文本一改提示就过期（U-05）。
   const runNoticeFor = useRef('');
   // 上一次自动预填的网格分辨率：只有输入框还是这个值（或空着）时才允许被新的默认值覆盖，
@@ -443,7 +441,7 @@ export default function ComparePage() {
   const settleJob = (
     machine: string,
     identity: ActiveJob,
-    end: 'succeeded' | 'failed' | 'cancelled',
+    end: 'succeeded' | 'failed' | 'cancelled' | 'unknown',
     reason = '',
   ) => {
     const history = jobEnded(identity, end, new Date().toISOString(), reason);
@@ -486,7 +484,9 @@ export default function ComparePage() {
         ? t('失败', 'failed')
         : job.end === 'cancelled'
           ? t('已取消', 'cancelled')
-          : t('未知', 'unknown');
+          : job.end === 'unknown'
+            ? t('已终止，结果未知', 'ended, result unknown')
+            : t('未知', 'unknown');
   // 等服务器上的作业结束：每 3 秒取一次日志末尾显示出来。作业号记在本机，页面关掉、应用关掉都不影响
   // 服务器上的作业，回来接着等。停止按钮结束的是服务器上的作业。
   // GUI-07：只有服务器明确给出终态才清掉持久化身份；一次查询失败只标记"暂时无法确认"并保留身份。
@@ -536,6 +536,14 @@ export default function ComparePage() {
           settleJob(machine, identity, 'cancelled');
           return { state: 'cancelled', job: identity };
         }
+        if (end === 'unknown') {
+          const reason = t(
+            '服务器确认这个作业已经终止，但没有留下退出码/结果（结果未知）。可以关闭这条记录后重新提交。',
+            'The server confirms this job has terminated but left no exit code or result (result unknown). Close this record and submit again.',
+          );
+          settleJob(machine, identity, 'unknown', reason);
+          return { state: 'unknown', job: identity, reason };
+        }
         // 调度系统已确认作业不会再写，但退出码/结果还没经 NFS 可见（terminal=true、state 不是 finished）：
         // 继续轮询等结果，不能凭"已经结束"或轮询次数判成功/失败（审查报告第 6 条契约）。
         if (reply.terminal === true) {
@@ -577,6 +585,10 @@ export default function ComparePage() {
     if (outcome.state === 'detached') return outcome;
     if (outcome.state === 'uncertain') {
       setNotice(uncertainText(machine, outcome.job));
+      return outcome;
+    }
+    if (outcome.state === 'unknown') {
+      setNotice(outcome.reason);
       return outcome;
     }
     if (outcome.state === 'failed') throw new Error(outcome.error);
@@ -995,7 +1007,6 @@ export default function ComparePage() {
     setPicks([]);
     setChosen({});
     setYaml('');
-    setSites([]);
     setMissingExtent([]);
     generated.current = null;
     setSimError(null);
@@ -1060,31 +1071,60 @@ export default function ComparePage() {
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
   const design = designFingerprint(formDesign);
   const generatedConfig = generated.current;
-  // 有效评估配置：用户可以在文本框里直接改 YAML，提交给后端的也是这段文本。摘要、指纹、运行校验
-  // 一律以解析后的文本为准，不再只读表单（审查报告 P1：手改 YAML 后摘要/完成提示与真实运行不一致）。
+  // 有效评估配置：用户可以在文本框里直接改 YAML，提交给后端的也是这段文本。配置部分（年份/时间尺度/
+  // 数据源/变量/指标）以解析后的文本为准（审查报告 P1）；站点部分读生成时冻结的站点清单（R01）。
   const parsedConfig = useMemo(() => (yaml ? parseOpenbenchConfig(yaml) : null), [yaml]);
   const effectiveConfig = parsedConfig?.config ?? null;
   const configProblems = parsedConfig?.problems ?? [];
-  // 手改不能增删模拟或改单点站点清单路径：那些文件由后端按页面选中的目录准备。
-  const structureProblems = effectiveConfig ? structuralProblems(formDesign, effectiveConfig) : [];
-  const effectiveFingerprint = effectiveConfig
-    ? configFingerprint(formDesign, effectiveConfig)
-    : design;
+  // 生成配置之后页面表单（站点目录/前缀/坐标、模拟条目、年份等）又改过：快照过期，不能运行。
+  // 手改文本不算过期：文本没有被冻结，运行时重新解析；只有快照里的设计与站点清单是冻结的。
+  const staleSnapshot = generatedConfig ? snapshotStale(generatedConfig, formDesign) : false;
+  // 手改不能增删模拟或改单点站点清单路径：那些文件由后端按（冻结的）设计准备。
+  const structureProblems = effectiveConfig
+    ? structuralProblems(generatedConfig?.design ?? formDesign, effectiveConfig)
+    : [];
+  // 有效输入指纹 = 快照冻结的站点清单 + 当前文本解析出的完整配置。手改配置换指纹；改站点输入因快照
+  // 过期而退回表单指纹，让完成提示/保存徽标也随改动失效。
+  const effectiveFingerprint = staleSnapshot
+    ? design
+    : generatedConfig && effectiveConfig
+      ? configFingerprint(generatedConfig.design, effectiveConfig, generatedConfig.sites)
+      : design;
   // 运行期间用户还能改字段/改文本，完成提示回来时据此判断它是不是已经过时（U-05）。
   const latestEffective = useRef(effectiveFingerprint);
   latestEffective.current = effectiveFingerprint;
-  const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.config;
-  // 生成配置之后表单又改过（但用户手写的内容还留着）：提示表单改动没有进入这份配置。
-  const formChanged = !!yaml && !!generatedConfig && generatedConfig.fingerprint !== design;
-  // U-04：运行前条件摘要直接来自有效配置；没有生成配置时仍按表单设计显示（还没提交过任何文本）。
-  const conditionSummary = () =>
-    effectiveConfig ? effectiveSummary(formDesign, effectiveConfig) : evaluationSummary(formDesign);
+  const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.generatedText;
+  // 生成配置之后表单又改过（但用户手写的内容还留着）：提示表单改动没有进入这份快照。
+  const formChanged = staleSnapshot;
+  // U-04：运行前条件摘要 = 冻结站点清单（站点输入）+ 当前解析出的有效配置（其余条件）；
+  // 没有生成配置时仍按表单设计显示（还没提交过任何文本）。过期时首行明确说"已过期、需重新生成"。
+  const conditionSummary = (): EvaluationSummaryItem[] => {
+    const items =
+      generatedConfig && effectiveConfig
+        ? effectiveSummary(generatedConfig.design, effectiveConfig, generatedConfig.sites)
+        : effectiveConfig
+          ? effectiveSummary(formDesign, effectiveConfig)
+          : evaluationSummary(formDesign);
+    if (!staleSnapshot) return items;
+    return [
+      {
+        label: ['输入快照', 'Input snapshot'],
+        value: t(
+          '已过期：生成配置后页面设置（站点目录/坐标、模拟条目、年份等）又改过。这份摘要里的站点输入是生成时冻结的那份，不能按现在的页面运行；重新生成评估配置后才会用上这些改动。',
+          'Expired: the page settings changed after the configuration was generated (station folders/coordinates, simulation entries, years, ...). The station inputs in this summary are the frozen ones, so the current page cannot run; regenerate the evaluation configuration to use the changes.',
+        ),
+      },
+      ...items,
+    ];
+  };
   // U-05：评估配置三态（有未保存修改 / 正在保存 / 已保存）。手改后的文本还没有写进比较项目目录，
   // 因此显示"未保存"而不是"saved"（审查报告已复现的误导）。
   const configState = configSaveState({
     yaml,
     currentFingerprint: design,
-    generated: generated.current,
+    generated: generatedConfig
+      ? { fingerprint: generatedConfig.designFingerprint, config: generatedConfig.generatedText }
+      : null,
     submitting: configSaving,
   });
   // 运行/保存成功提示只在同一份有效配置上有效；设置或文本一改就清掉（U-05）。
@@ -1103,14 +1143,18 @@ export default function ComparePage() {
     if (
       configInvalidation({
         currentFingerprint: design,
-        generated: generated.current,
+        generated: generatedConfig
+          ? {
+              fingerprint: generatedConfig.designFingerprint,
+              config: generatedConfig.generatedText,
+            }
+          : null,
         yaml,
       }) !== 'clear'
     )
       return;
     generated.current = null;
     setYaml('');
-    setSites([]);
     setMissingExtent([]);
   };
   useEffect(() => {
@@ -1134,14 +1178,9 @@ export default function ComparePage() {
     try {
       const inputs = comparisonDesign();
       const built = buildOpenbenchConfig(inputs);
-      // 配置文本与站点清单一起记下生成时的设计指纹；运行前再核对（GUI-04）。
-      generated.current = {
-        fingerprint: designFingerprint({ machine, ...inputs }),
-        config: built.config,
-        sites: built.sites,
-      };
+      // 设计、站点清单、配置文本和一个有效指纹绑成同一份快照；摘要的站点部分、指纹和运行都读它。
+      generated.current = freezeCompareSnapshot({ machine, ...inputs }, built);
       setYaml(built.config);
-      setSites(built.sites);
       setMissingExtent(built.missingExtent);
       setError('');
     } catch (e) {
@@ -1164,8 +1203,24 @@ export default function ComparePage() {
   };
   const run = () =>
     task(async () => {
-      // 运行前只认页面当前这份有效配置：解析、结构校验、冻结，全部以即将提交的文本为准。
-      // 光看表单或"生成时的指纹"会让手改过的 YAML 绕过校验（审查报告 P1 的复现路径）。
+      // 运行前只认生成时冻结的那份输入：没有快照就没有可信的站点清单/模拟集合；表单在生成后又改过时
+      // 快照过期，这里明确阻断并让用户重新生成，而不是"摘要读表单、提交读旧站点"。
+      const snapshot = generated.current;
+      if (!snapshot)
+        throw new Error(
+          t(
+            '还没有生成评估配置：先点「保存评估配置」，摘要、指纹和提交都绑定那一份快照。',
+            'No evaluation configuration yet: save one first; the summary, fingerprint and submission all bind to that snapshot.',
+          ),
+        );
+      if (snapshotStale(snapshot, formDesign))
+        throw new Error(
+          t(
+            '生成配置之后页面设置又改过（站点目录/坐标、模拟条目、年份等）：冻结的站点清单和这份配置已经不是同一份输入，不能运行。请重新生成评估配置后再运行。',
+            'The page settings changed after the configuration was generated (station folders/coordinates, simulation entries, years, ...): the frozen station list and this configuration are no longer the same inputs, so it cannot run. Regenerate the evaluation configuration first.',
+          ),
+        );
+      // 文本没有被冻结：按当前文本重新解析；解析失败或结构校验不过都明确阻断（审查报告 P1）。
       const parsedNow = parseOpenbenchConfig(yaml);
       if (!parsedNow.config)
         throw new Error(
@@ -1175,17 +1230,17 @@ export default function ComparePage() {
           ),
         );
       const frozenConfig = parsedNow.config;
-      const mismatched = structuralProblems(formDesign, frozenConfig);
+      const mismatched = structuralProblems(snapshot.design, frozenConfig);
       if (mismatched.length)
         throw new Error(
           t(mismatched.map(([zh]) => zh).join('；'), mismatched.map(([, en]) => en).join('; ')),
         );
-      // 冻结这次运行的实际条件（配置文本、站点清单、指纹）：完成提示与报告身份都绑定这份快照，
-      // 运行期间再改页面也不会把"上一次的结果"说成当前配置的结果。
+      // 冻结这次运行的实际条件（当前配置文本、快照里的站点清单、两者一起算的指纹）：完成提示与报告
+      // 身份都绑定这份输入，运行期间再改页面也不会把"上一次的结果"说成当前配置的结果。
       const frozen = {
         config: yaml,
-        sites: generated.current?.sites ?? sites,
-        fingerprint: configFingerprint(formDesign, frozenConfig),
+        sites: snapshot.sites,
+        fingerprint: configFingerprint(snapshot.design, frozenConfig, snapshot.sites),
         at: new Date().toISOString(),
       };
       const project = comparisonName(name);
@@ -1358,6 +1413,15 @@ export default function ComparePage() {
         );
         return;
       }
+      if (end === 'unknown') {
+        const reason = t(
+          '服务器确认这个作业已经终止，但没有留下退出码/结果（结果未知）。可以关闭这条记录后重新提交。',
+          'The server confirms this job has terminated but left no exit code or result (result unknown). Close this record and submit again.',
+        );
+        settleJob(machine, current.job, 'unknown', reason);
+        setNotice(reason);
+        return;
+      }
       const reason = end === 'failed' ? jobFailureText(reply) : '';
       settleJob(machine, current.job, end, reason);
       if (end === 'failed') throw new Error(reason);
@@ -1436,6 +1500,7 @@ export default function ComparePage() {
       picks: picks.map((p) => ({ dir: p.dir, label: p.label, info: p.info })),
       config: {
         formChanged,
+        stale: staleSnapshot,
         handEdited: yamlHandEdited,
         problems: [...configProblems, ...structureProblems],
         fingerprint: effectiveFingerprint,
@@ -2244,8 +2309,8 @@ export default function ComparePage() {
               <h3 className="study-subhead">{t('运行前条件摘要', 'Pre-run condition summary')}</h3>
               <p className="muted study-hint">
                 {t(
-                  '下面这些就是运行时会提交的评估条件：有了配置文本后，摘要直接从这段配置解析；手改配置，摘要跟着变。',
-                  'These are the conditions that will be submitted: once the configuration text exists, the summary is parsed from it, so hand edits show up here immediately.',
+                  '下面这些就是运行时会提交的评估条件：配置部分从当前文本解析（手改配置，摘要跟着变），单点模拟的站点目录/前缀/坐标来自生成配置时冻结的站点清单。',
+                  'These are the conditions that will be submitted: the configuration part is parsed from the current text (hand edits show up immediately), and the station folders/prefixes/coordinates of station simulations come from the station list frozen when the configuration was generated.',
                 )}
               </p>
               <ul className="compare-status" data-compare-summary>
@@ -2289,11 +2354,12 @@ export default function ComparePage() {
                       onChange={(e) => setYaml(e.target.value)}
                     />
                   </Field>
-                  {effectiveConfig && (
+                  {/* 过期快照下指纹退回表单身份（完成提示要失效），那段值不代表会被提交的输入，不显示。 */}
+                  {effectiveConfig && !staleSnapshot && (
                     <p className="muted study-hint" data-compare-effective>
                       {t(
-                        `当前有效配置指纹 ${effectiveFingerprint}：摘要按这段配置解析，运行时会冻结它并绑定报告。`,
-                        `Effective configuration fingerprint ${effectiveFingerprint}: the summary is parsed from this text; running freezes it and binds the report to it.`,
+                        `当前有效输入指纹 ${effectiveFingerprint}：配置从这段文本解析、站点清单用生成配置时冻结的那份；运行时提交这两部分并绑定报告。`,
+                        `Effective input fingerprint ${effectiveFingerprint}: the configuration is parsed from this text and the station list is the one frozen when it was generated; running submits both and binds the report to them.`,
                       )}
                     </p>
                   )}
@@ -2324,11 +2390,11 @@ export default function ComparePage() {
                       </ul>
                     </Notice>
                   )}
-                  {formChanged && yamlHandEdited && (
-                    <Notice tone="warning">
+                  {staleSnapshot && (
+                    <Notice tone="error">
                       {t(
-                        '生成配置之后你又在上面改过评估设置，但下面这份配置按你手改后的内容运行。要让表单里的改动生效并进入配置，请重新生成评估配置（会覆盖手改内容）。',
-                        'You changed the evaluation settings after generating the configuration, but the configuration below runs exactly as you edited it. Regenerate the evaluation configuration to apply the form changes (this replaces your edits).',
+                        '生成配置之后你又在上面改过评估设置：页面冻结的站点清单/模拟输入还是生成时的，和下面这份配置不是同一份输入，所以不能运行。请重新生成评估配置（会覆盖手改内容）后再运行。',
+                        'You changed the evaluation settings after generating the configuration: the station list and simulation inputs frozen at generation no longer match the configuration below, so it cannot run. Regenerate the evaluation configuration (this replaces your edits) before running.',
                       )}
                     </Notice>
                   )}
@@ -2391,22 +2457,34 @@ export default function ComparePage() {
                       variant="primary"
                       disabled={
                         busy ||
+                        !generatedConfig ||
+                        staleSnapshot ||
                         !effectiveConfig ||
                         configProblems.length > 0 ||
                         structureProblems.length > 0
                       }
                       title={
-                        !effectiveConfig || configProblems.length > 0
+                        !generatedConfig
                           ? t(
-                              '配置还不能运行：先修正上面的问题',
-                              'The configuration cannot run yet: fix the problems above first',
+                              '还没有生成评估配置：先点「保存评估配置」',
+                              'No evaluation configuration yet: save one first',
                             )
-                          : structureProblems.length > 0
+                          : staleSnapshot
                             ? t(
-                                '配置与页面的模拟对不上：先重新生成评估配置',
-                                'The configuration does not match the page simulations: regenerate it first',
+                                '生成配置之后页面设置又改过：先重新生成评估配置',
+                                'The page settings changed after the configuration was generated: regenerate it first',
                               )
-                            : undefined
+                            : !effectiveConfig || configProblems.length > 0
+                              ? t(
+                                  '配置还不能运行：先修正上面的问题',
+                                  'The configuration cannot run yet: fix the problems above first',
+                                )
+                              : structureProblems.length > 0
+                                ? t(
+                                    '配置与页面的模拟对不上：先重新生成评估配置',
+                                    'The configuration does not match the page simulations: regenerate it first',
+                                  )
+                                : undefined
                       }
                       run={run}
                     />
@@ -2414,8 +2492,8 @@ export default function ComparePage() {
                   {yamlHandEdited && (
                     <p className="muted study-hint">
                       {t(
-                        '这份配置有你手工改过的内容；运行时会按你改后的内容提交，摘要与指纹以上面的有效配置为准。',
-                        'This configuration contains edits you made; running submits it exactly as edited, and the summary and fingerprint above follow it.',
+                        '这份配置有你手工改过的内容：运行时提交的是「生成配置时冻结的站点清单 + 你改后的配置文本」，摘要与指纹按这两部分算。',
+                        'This configuration contains edits you made: running submits the station list frozen when it was generated plus your edited configuration text, and the summary and fingerprint follow both.',
                       )}
                     </p>
                   )}

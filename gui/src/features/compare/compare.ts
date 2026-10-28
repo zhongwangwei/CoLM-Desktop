@@ -62,6 +62,20 @@ export interface BenchSimulation {
   gridRes?: number | null;
 }
 
+/**
+ * 单点模拟要先并成站点文件的一条输入（与后端 `bench_run` 的 `sites` 参数一致）。
+ * 站点目录、前缀和页面确认的坐标只在这份清单里，不在生成的 YAML 中：实际读哪份 history、
+ * 用哪个坐标合并站点文件由它决定，所以它必须和配置一起冻结、一起进有效指纹（审查报告 R01）。
+ */
+export interface BenchSite {
+  id: string;
+  station: string;
+  history_dir: string;
+  prefix: string;
+  lon: number | null;
+  lat: number | null;
+}
+
 /** OpenBench 登记表里的一个参考数据集（`ref list --format json` 的一项，只取用得上的字段）。 */
 export interface BenchReference {
   name: string;
@@ -773,15 +787,7 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     }
   }
   lines.push('simulation:');
-  const sites: {
-    id: string;
-    station: string;
-    history_dir: string;
-    prefix: string;
-    /** 页面确认的站点坐标（度）：后端合并站点文件时传给准备脚本，缺省时才回退到文件里的值。 */
-    lon: number | null;
-    lat: number | null;
-  }[] = [];
+  const sites: BenchSite[] = [];
   design.simulations.forEach((sim, i) => {
     const key = keys[i]!;
     lines.push(`  ${key}:`, '    model: CoLM2024');
@@ -1025,14 +1031,28 @@ export function comparisonDir(root: string, name: string): string {
   return `${root}${sep}projects${sep}${comparisonName(name)}`;
 }
 
+/** 后端 `valid_name` 的规则：字母、数字、`-`、`_`，1–60 个字符。 */
+const VALID_COMPARISON_NAME = /^[A-Za-z0-9_-]{1,60}$/;
+
 /**
- * 比较名在后端只认字母、数字、- 和 _（`valid_name`）。
- * 中文比较名按字符清洗后都会变成 `_`，不同比较共用一个目录、报告互相覆盖；非 ASCII 名追加显示名
- * 指纹，得到稳定且互不相同的目录名。ASCII 名保持原样（已有比较目录不迁移）。长度按后端上限 60 截断。
+ * 比较名在后端只认字母、数字、- 和 _（`valid_name`），并当目录名用。
+ *
+ * 已经是合法名字的 ASCII 名原样保留：旧实现把首尾下划线剥掉，`_experiment_` 会和 `experiment`
+ * 共用 `projects/experiment` 目录、报告互相覆盖（审查报告 R11）；后端允许首尾下划线，所以不需要清洗，
+ * 已有 ASCII 比较目录也不迁移。只有含空格/点号等非法字符的 ASCII 名才按旧规则清洗（映射不变）。
+ * 超长名（后端上限 60）截断后接显示名指纹，避免两个长名折成同一个目录或被后端拒绝。
+ * 非 ASCII 名保留旧算法（按字符清洗后塌成同一个 `_`，所以追加指纹）：已有中文比较目录不迁移。
  */
 export function comparisonName(name: string): string {
+  if (!hasNonAscii(name)) {
+    if (VALID_COMPARISON_NAME.test(name)) return name;
+    const slug = name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+    const base = slug || 'comparison';
+    if (base.length <= 60) return base;
+    const suffix = fingerprintOf(name).slice(0, 8);
+    return `${base.slice(0, 60 - suffix.length - 1)}-${suffix}`;
+  }
   const slug = name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
-  if (!hasNonAscii(name)) return slug || 'comparison';
   const base = slug || 'comparison';
   const suffix = fingerprintOf(name).slice(0, 8);
   return `${base.slice(0, 60 - suffix.length - 1)}-${suffix}`;
@@ -1058,8 +1078,8 @@ export interface RemoteJobIdentity {
   uncertain?: boolean;
   /** 最近一次失败原因原文（通信或作业错误），展示前过 `benchErrorText`。 */
   lastError?: string;
-  /** 只有确认终态后才写：历史记录里的结果。 */
-  end?: 'succeeded' | 'failed' | 'cancelled';
+  /** 只有确认终态后才写：历史记录里的结果（`unknown` = 确认已终止但没有退出码/结果）。 */
+  end?: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
   endedAt?: string;
 }
 
@@ -1080,7 +1100,10 @@ export function parseRemoteJob(text: string | null | undefined): RemoteJobIdenti
   const textField = (key: string) =>
     typeof data[key] === 'string' ? (data[key] as string) : undefined;
   const end =
-    data.end === 'succeeded' || data.end === 'failed' || data.end === 'cancelled'
+    data.end === 'succeeded' ||
+    data.end === 'failed' ||
+    data.end === 'cancelled' ||
+    data.end === 'unknown'
       ? data.end
       : undefined;
   return {
@@ -1108,8 +1131,13 @@ export function remoteJobTerminal(reply: {
   ended?: string | null;
   /** 调度系统明确确认作业不会再写（但退出码/结果经 NFS 可能还没可见）。 */
   terminal?: boolean;
-}): 'succeeded' | 'failed' | 'cancelled' | null {
+  /** 作业进程已不在、也没有退出码：确认终止但结果未知（`ended:"unknown"` 的布尔别名）。 */
+  result_unknown?: boolean;
+}): 'succeeded' | 'failed' | 'cancelled' | 'unknown' | null {
   const state = reply.status?.state;
+  // 进程/队列已不在且没有退出码：调度器确认"已终止、结果未知"。这是终态（否则页面会永远每 3 秒
+  // 轮询、身份一直挡着新提交），但不能当成功或失败，单独返回 `unknown` 让页面给出可行动说明。
+  if (reply.result_unknown === true || reply.ended === 'unknown') return 'unknown';
   // 调度系统记下的取消/失败是明确终态（没有退出码也认）。
   if (reply.ended === 'cancelled' || reply.ended === 'failed') return remoteEndStatus(reply);
   if (state !== 'finished') return null;
@@ -1142,7 +1170,7 @@ export function jobUncertain(identity: RemoteJobIdentity, error: string): Remote
 /** 确认终态后的历史记录：保留作业身份，写上结果与时间；活动记录由页面删除。 */
 export function jobEnded(
   identity: RemoteJobIdentity,
-  end: 'succeeded' | 'failed' | 'cancelled',
+  end: 'succeeded' | 'failed' | 'cancelled' | 'unknown',
   now: string,
   reason = '',
 ): RemoteJobIdentity {

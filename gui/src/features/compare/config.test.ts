@@ -2,6 +2,7 @@ import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildOpenbenchConfig,
+  comparisonDir,
   comparisonName,
   designFingerprint,
   simulationKey,
@@ -12,7 +13,9 @@ import {
 import {
   configFingerprint,
   effectiveSummary,
+  freezeCompareSnapshot,
   parseOpenbenchConfig,
+  snapshotStale,
   structuralProblems,
 } from './config';
 
@@ -260,5 +263,260 @@ it('accepts the full OpenBench 3.0.8 tim_res value set', () => {
     parseOpenbenchConfig(generated({ timRes: '5Day' })).config,
     null,
     'an unsupported tim_res is refused rather than guessed',
+  );
+});
+
+// ---- R02/R10/R11：复查报告里仍可复现的三项（HEAD 61182d6e） ----
+
+/** 带 per-simulation 变量覆盖的设计：生成器写 varname/varunit，解析器要完整保留。 */
+const mappedSite: BenchSimulation = {
+  ...site,
+  variables: { Latent_Heat: { varname: 'Qle', varunit: 'W/m2' } },
+};
+const mappedDesign: ComparisonDesign = { ...base, simulations: [mappedSite] };
+
+it('R02: refuses variable-mapping fields the page cannot carry into the config or its fingerprint', () => {
+  const text = buildOpenbenchConfig(mappedDesign).config;
+  const parsed = parseOpenbenchConfig(text);
+  assert.deepEqual(parsed.problems, []);
+  // 支持的字段全部进入有效配置（因此也进指纹）。
+  assert.deepEqual(parsed.config!.simulations[0]!.variables, {
+    Latent_Heat: { varname: 'Qle', varunit: 'W/m2' },
+  });
+  const changedUnit = parseOpenbenchConfig(
+    text.replace('varunit: "W/m2"', 'varunit: "mm/day"'),
+  ).config!;
+  assert.notEqual(
+    configFingerprint(design, changedUnit),
+    configFingerprint(design, parsed.config!),
+  );
+
+  // `convert` 会改实际计算，但页面不进有效配置也不进指纹：必须明确拒绝，不能接收后丢弃。
+  const withConvert = text.replace(
+    '        varunit: "W/m2"',
+    '        varunit: "W/m2"\n        convert: "value * 2"',
+  );
+  const refused = parseOpenbenchConfig(withConvert);
+  assert.equal(refused.config, null);
+  assert.ok(
+    refused.problems.some(([zh, en]) => zh.includes('convert') && en.includes('convert')),
+    JSON.stringify(refused.problems),
+  );
+});
+
+it('R10: reads single-quoted YAML scalars like OpenBench, including # and doubled quotes', () => {
+  const stationFile = '/data/openbench/projects/versions_vs_flux/sim/AT_Neu_official.csv';
+  const line = `    fulllist: "${stationFile}"`;
+  // 单引号里 # 不是注释：OpenBench 读到完整路径，页面不能读成 "# 之前" 的残路径。
+  const quoted = parseOpenbenchConfig(
+    generated().replace(line, `    fulllist: '${stationFile} # keep'`),
+  );
+  assert.deepEqual(quoted.problems, []);
+  assert.equal(quoted.config!.simulations[0]!.fulllist, `${stationFile} # keep`);
+
+  // YAML 单引号里的 '' 是一个单引号。
+  const escaped = parseOpenbenchConfig(
+    generated().replace(line, "    fulllist: '/data/it''s/history # x.csv'"),
+  );
+  assert.deepEqual(escaped.problems, []);
+  assert.equal(escaped.config!.simulations[0]!.fulllist, "/data/it's/history # x.csv");
+
+  // 块列表项也按同样的引号语义读（参考数据名里带 #）。
+  const listed = parseOpenbenchConfig(
+    generated({ variables: { Latent_Heat: ['ref # one', 'ref,two'] } }).replace(
+      '    - "ref # one"',
+      "    - 'ref # one'",
+    ),
+  );
+  assert.deepEqual(listed.problems, []);
+  assert.deepEqual(listed.config!.reference.Latent_Heat, ['ref # one', 'ref,two']);
+
+  // 行内列表里的单引号同样保护内部的逗号与 #（手改指标列表时不会把一项拆成两项）。
+  const inline = parseOpenbenchConfig(
+    generated({ metrics: ['bias', 'RMSE'] }).replace(
+      'metrics: ["bias", "RMSE"]',
+      "metrics: ['bias', 'RMSE']",
+    ),
+  );
+  assert.deepEqual(inline.problems, []);
+  assert.deepEqual(inline.config!.metrics, ['bias', 'RMSE']);
+
+  // 不回归：引号外、前面是空白的 # 仍是注释；普通标量里的撇号不开启引号（don't 后注释照常去掉）。
+  const commented = parseOpenbenchConfig(
+    generated().replace(line, '    fulllist: manually # a real comment'),
+  );
+  assert.deepEqual(commented.problems, []);
+  assert.equal(commented.config!.simulations[0]!.fulllist, 'manually');
+  const apostrophe = parseOpenbenchConfig(
+    generated({ weight: "don't" }).replace("  weight: don't", "  weight: don't # a real comment"),
+  );
+  assert.deepEqual(apostrophe.problems, []);
+  assert.equal(apostrophe.config!.project.weight, "don't");
+
+  // 没配对的单引号不能静默读成残缺路径。
+  const unclosed = parseOpenbenchConfig(
+    generated().replace(line, "    fulllist: '/data/has # space"),
+  );
+  assert.equal(unclosed.config, null);
+  assert.ok(unclosed.problems.length > 0);
+});
+
+it('R07: refuses a hand-edited YAML variable mapping that hits a layer/category variable', () => {
+  // 生成路径的 layerVariableProblems 只检查表单 design 里的映射；手改 YAML 换 varname 必须同样在运行前拒绝。
+  const layerSimulation: BenchSimulation = {
+    ...site,
+    variables: { Latent_Heat: { varname: 'Qle', varunit: 'W/m2' } },
+    info: {
+      ...site.info,
+      unsupported_variables: [
+        { name: 'f_wliq_soisno', dims: ['soil_layer'], reason: 'layer dimension' },
+      ],
+    },
+  };
+  const layerDesign: EvaluationDesign = { machine, ...base, simulations: [layerSimulation] };
+  const text = buildOpenbenchConfig({ ...base, simulations: [layerSimulation] }).config;
+  const pristine = parseOpenbenchConfig(text).config!;
+  assert.deepEqual(structuralProblems(layerDesign, pristine), []);
+  const handEdited = parseOpenbenchConfig(
+    text.replace('varname: "Qle"', 'varname: "f_wliq_soisno"'),
+  ).config!;
+  const problems = structuralProblems(layerDesign, handEdited);
+  assert.ok(problems.length, 'the hand-edited layer mapping is refused before running');
+  assert.ok(
+    problems.some(([zh, en]) => zh.includes('f_wliq_soisno') && en.includes('f_wliq_soisno')),
+    JSON.stringify(problems),
+  );
+  assert.ok(
+    problems.some(([zh, en]) => zh.includes('soil_layer') && en.includes('soil_layer')),
+    'the bilingual problem names the dimension',
+  );
+});
+
+it('R11: keeps ASCII comparison ids exactly, so _experiment_ cannot merge with experiment', () => {
+  assert.equal(comparisonName('experiment'), 'experiment');
+  assert.equal(comparisonName('_experiment_'), '_experiment_');
+  assert.notEqual(
+    comparisonDir('/data/openbench', '_experiment_'),
+    comparisonDir('/data/openbench', 'experiment'),
+  );
+  // ASCII 原名映射不变：已有比较目录不迁移。
+  assert.equal(comparisonName('versions vs flux'), 'versions_vs_flux');
+  assert.equal(comparisonName('AT-Neu_vs_draft2'), 'AT-Neu_vs_draft2');
+  // 后端 valid_name 最多 60 字符：超长 ASCII 名要截断后加稳定指纹，不能生成被后端拒绝的名字。
+  const long = 'a'.repeat(70);
+  const longId = comparisonName(long);
+  assert.ok(longId.length <= 60, longId);
+  assert.match(longId, /^[A-Za-z0-9_-]+$/);
+  assert.notEqual(comparisonName(`${long}b`), longId);
+  // 非 ASCII 行为不回归。
+  const chineseA = comparisonName('基准方案');
+  const chineseB = comparisonName('改进方案');
+  assert.notEqual(chineseA, chineseB);
+  assert.match(chineseA, /^[A-Za-z0-9_-]{1,60}$/);
+});
+
+// ---- R01：生成时冻结的输入快照：摘要/指纹/运行提交都读同一份输入 ----
+
+/** 只用于计算指纹的生成→解析往返：与页面 generate() 里冻结快照的步骤一致。 */
+function generatedConfigFor(target: ComparisonDesign) {
+  const built = buildOpenbenchConfig(target);
+  const parsed = parseOpenbenchConfig(built.config);
+  assert.deepEqual(parsed.problems, []);
+  return { built, config: parsed.config! };
+}
+
+it('R01: freezes the generated text, the actual site list and one fingerprint of both', () => {
+  const oneStation: ComparisonDesign = { ...base, simulations: [site] };
+  const { built, config } = generatedConfigFor(oneStation);
+  const snapshot = freezeCompareSnapshot(design, built);
+  assert.equal(snapshot.generatedText, built.config);
+  assert.deepEqual(snapshot.sites, built.sites);
+  assert.equal(snapshot.designFingerprint, designFingerprint(design));
+  assert.equal(snapshot.fingerprint, configFingerprint(design, config, built.sites));
+  // 配置文本本身进指纹（手改配置会换指纹），站点清单一并进指纹。
+  const editedConfig = parseOpenbenchConfig(
+    built.config.replace('years: [2003, 2005]', 'years: [2004, 2004]'),
+  ).config!;
+  assert.notEqual(snapshot.fingerprint, configFingerprint(design, editedConfig, built.sites));
+  // 表单没变：快照有效。
+  assert.equal(snapshotStale(snapshot, design), false);
+});
+
+it('R01: site folders/prefixes/coordinates are part of the effective fingerprint even though the YAML cannot show them', () => {
+  const movedSite: BenchSimulation = {
+    ...site,
+    info: {
+      ...site.info,
+      history_dir: '/p/AT-Neu-v2/history',
+      prefix: 'AT-Neu-v2_hist_',
+      lon: 12.4,
+    },
+  };
+  const first = generatedConfigFor({ ...base, simulations: [site] });
+  const moved = generatedConfigFor({ ...base, simulations: [movedSite] });
+  // 单点模拟的 history 目录/前缀/坐标不在生成的 YAML 里：两份配置文本相同。
+  assert.equal(first.built.config, moved.built.config);
+  assert.notDeepEqual(first.built.sites, moved.built.sites);
+  // 但有效指纹必须不同，否则"改了站点输入、指纹没变"（审查报告 R01）。
+  assert.notEqual(
+    configFingerprint(design, first.config, first.built.sites),
+    configFingerprint(design, moved.config, moved.built.sites),
+  );
+  // 摘要的站点部分读冻结的站点清单，不读当前页面记录。
+  const summary = effectiveSummary(design, first.config, first.built.sites);
+  const stationRow = summary.find((item) => item.label[1] === 'Simulation 1')!.value;
+  assert.match(stationRow, /\/p\/AT-Neu\/out\/AT-Neu\/history/);
+  assert.match(stationRow, /47\.1°, 11\.3°/);
+  assert.doesNotMatch(stationRow, /AT-Neu-v2/);
+});
+
+it('R01: the snapshot expires when the form changes, and stays valid for text-only edits', () => {
+  const oneStation: ComparisonDesign = { ...base, simulations: [site] };
+  const oneDesign: EvaluationDesign = { machine, ...oneStation };
+  const { built } = generatedConfigFor(oneStation);
+  const snapshot = freezeCompareSnapshot(oneDesign, built);
+  // 编辑站点目录/坐标 → 表单设计变了 → 快照过期（运行前据此阻断）。
+  const editedForm: EvaluationDesign = {
+    ...oneDesign,
+    simulations: [
+      { ...site, info: { ...site.info, history_dir: '/p/elsewhere/history', lon: 12.4 } },
+    ],
+  };
+  assert.equal(snapshotStale(snapshot, editedForm), true);
+  // 只改文本（表单不动）：快照仍有效，运行用"冻结站点 + 当前文本解析结果"，摘要也读这两部分。
+  const editedText = built.config.replace('years: [2003, 2005]', 'years: [2004, 2004]');
+  assert.equal(snapshotStale(snapshot, oneDesign), false);
+  const editedConfig = parseOpenbenchConfig(editedText).config!;
+  assert.deepEqual(structuralProblems(oneDesign, editedConfig), []);
+  const summary = effectiveSummary(oneDesign, editedConfig, snapshot.sites);
+  const byLabel = (label: string) => summary.find((item) => item.label[1] === label)?.value;
+  assert.equal(byLabel('Evaluation years'), '2004–2004');
+  assert.match(byLabel('Simulation 1') ?? '', /\/p\/AT-Neu\/out\/AT-Neu\/history/);
+  assert.match(byLabel('Simulation 1') ?? '', /47\.1°, 11\.3°/);
+});
+
+it('R03: refuses output directories that are absolute, escape the run directory or name it itself', () => {
+  const pristine = generated();
+  for (const bad of ['/tmp/out', '../shared', '~', '.', 'sim/..', 'C:\\tmp']) {
+    const parsed = parseOpenbenchConfig(
+      pristine.replace('  output_dir: ./output', `  output_dir: "${bad.replace(/\\/g, '\\\\')}"`),
+    );
+    assert.equal(parsed.config, null, bad);
+    assert.ok(
+      parsed.problems.some(([zh, en]) => zh.includes('output_dir') && en.includes('output_dir')),
+      `${bad}: ${JSON.stringify(parsed.problems)}`,
+    );
+  }
+  // 运行目录内的相对路径（含可归一化的写法）仍然接受，并进入有效配置/指纹。
+  const custom = parseOpenbenchConfig(
+    pristine.replace('  output_dir: ./output', '  output_dir: a/../custom-output'),
+  );
+  assert.deepEqual(custom.problems, []);
+  assert.equal(custom.config!.project.outputDir, 'a/../custom-output');
+  assert.deepEqual(structuralProblems(design, custom.config!), []);
+  assert.notEqual(
+    configFingerprint(design, custom.config!),
+    configFingerprint(design, parseOpenbenchConfig(pristine).config!),
+    'a different output directory is a different effective input',
   );
 });
