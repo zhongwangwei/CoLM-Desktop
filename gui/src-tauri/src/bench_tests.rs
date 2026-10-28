@@ -270,3 +270,166 @@ fn projects_list_new_style_runs_by_their_creation_time() {
     assert_eq!(list[0]["modified"].as_u64(), Some(1_700_000_100));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- 比较页取消代次（比较页复查 C21）----
+
+/// 取消代次是进程级全局状态，这几个测试会推进它，必须串行跑：cargo test 默认并行，
+/// 不锁的话一个测试的 cancel 会让另一个测试的 check 失败。
+fn epoch_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn an_uncancelled_epoch_lets_the_run_continue() {
+    let _lock = epoch_lock();
+    let epoch = CancelEpoch::begin();
+    epoch.check().unwrap();
+    // 没有取消就没有失效：再取一次快照还是同一代。
+    CancelEpoch::begin().check().unwrap();
+    epoch.check().unwrap();
+}
+
+#[test]
+fn cancelling_the_epoch_stops_runs_that_started_before_it() {
+    let _lock = epoch_lock();
+    let epoch = CancelEpoch::begin();
+    epoch.check().unwrap();
+    advance_cancel_epoch();
+    assert_eq!(epoch.check().unwrap_err(), STOPPED);
+    // 连续取消仍是同一条固定文字（前端按它识别 Stopped）。
+    advance_cancel_epoch();
+    assert_eq!(epoch.check().unwrap_err(), STOPPED);
+}
+
+#[test]
+fn a_run_started_after_the_cancel_is_not_affected_by_the_old_epoch() {
+    let _lock = epoch_lock();
+    let old = CancelEpoch::begin();
+    advance_cancel_epoch();
+    assert!(old.check().is_err());
+    // 新一轮运行在取消之后开始：取到新代次，上一轮的取消管不到它。
+    let fresh = CancelEpoch::begin();
+    fresh.check().unwrap();
+    assert_eq!(old.check().unwrap_err(), STOPPED);
+}
+
+#[test]
+fn a_cancelled_epoch_does_not_start_a_new_process() {
+    let _lock = epoch_lock();
+    let dir = temp("cancelled-spawn");
+    let marker = dir.join("ran");
+    let epoch = CancelEpoch::begin();
+    advance_cancel_epoch();
+    let mut command = Command::new("sh");
+    command.args(["-c", &format!("echo ran > {}", marker.display())]);
+    // spawn 之前核对代次：连进程都不该起，痕迹文件自然不该出现。
+    assert_eq!(output(epoch, command).unwrap_err(), STOPPED);
+    assert!(!marker.exists(), "取消后仍然启动了子进程");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stages_after_the_cancel_are_never_entered() {
+    let _lock = epoch_lock();
+    // 没取消：每个阶段都进。
+    let epoch = CancelEpoch::begin();
+    let mut entered = Vec::new();
+    for_each_stage(epoch, &["prepare", "check", "run"], |stage| {
+        entered.push(*stage);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(entered, ["prepare", "check", "run"]);
+
+    // 在 prepare 阶段里点了停止：check/run 一个都不进 —— C21 漏的就是这两个阶段。
+    let epoch = CancelEpoch::begin();
+    let mut entered = Vec::new();
+    let error = for_each_stage(epoch, &["prepare", "check", "run"], |stage| {
+        entered.push(*stage);
+        if *stage == "prepare" {
+            advance_cancel_epoch();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(error, STOPPED);
+    assert_eq!(entered, ["prepare"]);
+
+    // 循环开始前就已经取消：执行器一次都不调用。
+    let epoch = CancelEpoch::begin();
+    advance_cancel_epoch();
+    let mut calls = 0;
+    let error = for_each_stage(epoch, &["check", "run"], |_| {
+        calls += 1;
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(error, STOPPED);
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn ordinary_stage_failures_keep_their_own_text() {
+    let _lock = epoch_lock();
+    let epoch = CancelEpoch::begin();
+    let error = for_each_stage(epoch, &["check"], |_| {
+        Err("check 失败（exit status: 1）：\nboom".into())
+    })
+    .unwrap_err();
+    // 普通失败不经过取消路径，格式原样带回（前端报错与运行记录都靠它）。
+    assert_eq!(error, "check 失败（exit status: 1）：\nboom");
+}
+
+/// 真实子进程：`sh -c 'sleep 5'` 经 [`output`] 登记后点停止，子进程要被终止、`output` 返回"已停止"。
+/// 不取消的话这条命令会睡满 5 秒 —— 用返回时间上界与进程是否还在证明它是被杀掉的，不是自然结束。
+#[cfg(unix)]
+#[test]
+fn cancelling_kills_the_registered_child_and_reports_stopped() {
+    let _lock = epoch_lock();
+    let dir = temp("cancel-child");
+    let pid_file = dir.join("pid");
+    let epoch = CancelEpoch::begin();
+    let mut command = Command::new("sh");
+    command.args(["-c", &format!("echo $$ > {}; sleep 5", pid_file.display())]);
+    let started = std::time::Instant::now();
+    let worker = std::thread::spawn(move || output(epoch, command));
+    // 等它起来：pid 文件在 exec 之后、sleep 之前写出；登记发生在 spawn 返回之后，再给登记表
+    // 一点时间，免得取消落在"进程已起、还没登记"的缝里（那样就测成了取消漏杀）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !pid_file.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "子进程没能在 3 秒内起来"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    // 真正的停止按钮：先推进取消代次，再终止已登记的子进程。
+    let stopped = bench_cancel().unwrap();
+    assert!(stopped >= 1, "登记表里应该有一个比较页子进程");
+    assert_eq!(worker.join().unwrap().unwrap_err(), STOPPED);
+    // 被杀掉而不是睡满：整条命令 4 秒内返回，登记的进程也没了。
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "取消没生效，子进程跑完了：{:?}",
+        started.elapsed()
+    );
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    assert!(!process_exists(pid.trim()), "子进程 {} 还活着", pid.trim());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", pid, "-o", "stat="])
+        .output()
+        .map(|output| {
+            let stat = String::from_utf8_lossy(&output.stdout);
+            let stat = stat.trim();
+            // 僵尸进程已经死了（只是暂时没人回收），不算"还活着"。
+            output.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        })
+        .unwrap_or(false)
+}

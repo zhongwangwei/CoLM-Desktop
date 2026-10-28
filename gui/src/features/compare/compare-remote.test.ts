@@ -225,21 +225,32 @@ function fetchHarness() {
     hostRef,
     hostEpoch,
   });
-  const fetchReport = execute<(machine: string, project: string) => Promise<void>>('fetchReport', {
-    fetching: { current: new Set<string>() },
-    hostEpoch,
-    stillCurrent,
-    t,
-    invokeJson: ipc.invokeJson,
-    view: async (path: string) => {
-      fetched.push(path);
+  const runs: unknown[] = [];
+  const fetchReport = execute<(machine: string, project: string, runId?: string) => Promise<void>>(
+    'fetchReport',
+    {
+      fetching: { current: new Set<string>() },
+      hostEpoch,
+      stillCurrent,
+      t,
+      invokeJson: ipc.invokeJson,
+      // 页面的 setLastRun 支持函数式更新（取回后按服务器返回的 run 身份补记）。
+      setLastRun: (value: unknown) => {
+        const previous = runs.at(-1) ?? null;
+        runs.push(
+          typeof value === 'function' ? (value as (old: unknown) => unknown)(previous) : value,
+        );
+      },
+      view: async (path: string) => {
+        fetched.push(path);
+      },
     },
-  });
+  );
   const switchTo = (machine: string) => {
     hostRef.current = machine;
     hostEpoch.current += 1;
   };
-  return { ipc, fetched, fetchReport, switchTo };
+  return { ipc, fetched, fetchReport, switchTo, runs };
 }
 
 test('GUI-08: fetching the same comparison twice at once is refused with one backend call', async () => {
@@ -256,6 +267,30 @@ test('GUI-08: fetching the same comparison twice at once is refused with one bac
   await h.ipc.answer(1, { report: '/local/report.html' });
   await again;
   assert.deepEqual(h.fetched, ['/local/report.html', '/local/report.html']);
+});
+
+test('GUI-08: fetching a specific run passes runId and records the returned run identity', async () => {
+  const h = fetchHarness();
+  const call = h.fetchReport('A', 'cmp', 'bench-run-77');
+  await h.ipc.wait(0);
+  assert.deepEqual(h.ipc.requests[0]!.args, {
+    host: 'A',
+    name: 'cmp',
+    runId: 'bench-run-77',
+  });
+  await h.ipc.answer(0, {
+    report: '/local/report.html',
+    run_id: 'bench-run-77',
+    config_sha: 'a'.repeat(64),
+    state: 'succeeded',
+    legacy: false,
+  });
+  await call;
+  assert.deepEqual(h.fetched, ['/local/report.html']);
+  const recorded = h.runs.at(-1) as { runId: string; configSha: string; report: string | null };
+  assert.equal(recorded.runId, 'bench-run-77');
+  assert.equal(recorded.configSha, 'a'.repeat(64));
+  assert.equal(recorded.report, '/local/report.html');
 });
 
 test('GUI-08: a failed fetch replaces no report and the old-version message is bilingual', async () => {

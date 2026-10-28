@@ -12,14 +12,33 @@
  */
 
 import { bilingual } from '../../lib/bilingual';
-import { simulationKey, type EvaluationDesign, type EvaluationSummaryItem } from './compare';
+import {
+  layerVariableProblems,
+  simulationKey,
+  VALID_COMPARISON_ITEMS,
+  type EvaluationDesign,
+  type EvaluationSummaryItem,
+} from './compare';
 import { fingerprintOf } from './fingerprint';
 
 /** 一条双语问题：页面按当前语言取一半。 */
 export type Problem = [string, string];
 
-/** OpenBench 配置里允许的时间分辨率（与后端探测脚本输出的值一致）。 */
-export const TIM_RES_VALUES = ['Hour', '3Hour', 'Day', 'Month', 'Year'] as const;
+/**
+ * OpenBench 3.0.8 的合法 tim_res（v3.0.8 `config/loader.py` 的 VALID_TIM_RES_VALUES）。
+ * 比较页只直接生成常规档位，但手改/探测可能给出 6Hour/8Day/climatology-*，解析器要能接受。
+ */
+export const TIM_RES_VALUES = [
+  'Hour',
+  '3Hour',
+  '6Hour',
+  '8Day',
+  'Day',
+  'Month',
+  'Year',
+  'climatology-month',
+  'climatology-year',
+] as const;
 /** `data_groupby`：history 文件按什么切分。 */
 export const DATA_GROUPBY_VALUES = ['Year', 'Month', 'Day', 'single'] as const;
 
@@ -68,6 +87,8 @@ export interface EffectiveConfig {
   /** 勾选的指标/评分；`null` 表示配置里没写（OpenBench 用默认值）。 */
   metrics: string[] | null;
   scores: string[] | null;
+  /** 跨模拟比较（`comparison` 段）。配置没写这一段时 enabled=false、items=null（OpenBench 默认关闭）。 */
+  comparison: { enabled: boolean; items: string[] | null };
 }
 
 export interface ParsedConfig {
@@ -90,6 +111,7 @@ const TOP_LEVEL_KEYS = new Set([
   'simulation',
   'metrics',
   'scores',
+  'comparison',
 ]);
 
 function isMap(value: Yaml | undefined): value is { [key: string]: Yaml } {
@@ -762,6 +784,37 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
 
   const metrics = root.metrics == null ? null : stringListField(root.metrics, 'metrics', problems);
   const scores = root.scores == null ? null : stringListField(root.scores, 'scores', problems);
+  // comparison 段：不写 = 关闭（OpenBench 默认 enabled=false）。只接受生成器的
+  // enabled/items 两个键与 3.0.8 的合法图表名；写错就明确拒绝，摘要才不会与实际配置不符。
+  let comparison: EffectiveConfig['comparison'] = { enabled: false, items: null };
+  if (root.comparison != null) {
+    if (!isMap(root.comparison))
+      problems.push(['comparison 应该是一个配置块。', 'comparison should be a block.']);
+    else {
+      rejectUnknownKeys(root.comparison, new Set(['enabled', 'items']), 'comparison', problems);
+      if (root.comparison.enabled != null && typeof root.comparison.enabled !== 'boolean')
+        problems.push([
+          'comparison.enabled 应该是 true 或 false。',
+          'comparison.enabled should be true or false.',
+        ]);
+      const items =
+        root.comparison.items == null
+          ? null
+          : stringListField(root.comparison.items, 'comparison.items', problems);
+      if (root.comparison.enabled === true && items && items.length === 0)
+        problems.push([
+          'comparison.enabled 为 true 但 items 是空的；一个图表都不选就把整段删掉。',
+          'comparison.enabled is true but comparison.items is empty; drop the whole block when no chart is selected.',
+        ]);
+      for (const item of items ?? [])
+        if (!VALID_COMPARISON_ITEMS.has(item))
+          problems.push([
+            `不是 OpenBench 3.0.8 支持的比较图表：${item}`,
+            `OpenBench 3.0.8 does not support the comparison item ${item}`,
+          ]);
+      comparison = { enabled: root.comparison.enabled === true, items };
+    }
+  }
   if (problems.length) return null;
   if (!name || !timRes || !years || !variables) return null;
   return {
@@ -783,6 +836,7 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
     simulations,
     metrics,
     scores,
+    comparison,
   };
 }
 
@@ -810,6 +864,8 @@ const separatorFor = (path: string) => (path.includes('\\') && !path.includes('/
  */
 export function structuralProblems(design: EvaluationDesign, config: EffectiveConfig): Problem[] {
   const problems: Problem[] = [];
+  // 页面选的变量若映射到制备会跳过的层/类别维度变量，运行前明确拒绝（C05）。
+  for (const [zh, en] of layerVariableProblems(design)) problems.push([zh, en]);
   const expected = design.simulations.map((sim) => simulationKey(sim.label));
   const actual = config.simulations.map((sim) => sim.key);
   const missing = expected.filter((key) => !actual.includes(key));
@@ -943,6 +999,16 @@ export function effectiveSummary(
   items.push({
     label: ['指标与评分', 'Metrics and scores'],
     value: `${bilingual('指标', 'metrics')} [${(config.metrics ?? []).join(', ')}]${config.metrics ? '' : bilingual('（默认）', ' (defaults)')} · ${bilingual('评分', 'scores')} [${(config.scores ?? []).join(', ')}]${config.scores ? '' : bilingual('（默认）', ' (defaults)')}`,
+  });
+  items.push({
+    label: ['跨模拟比较', 'Cross-simulation comparison'],
+    value: config.comparison.enabled
+      ? `${bilingual('已启用', 'enabled')} · ${bilingual('图表', 'items')} [${
+          config.comparison.items
+            ? config.comparison.items.join(', ')
+            : bilingual('默认 Taylor_Diagram, HeatMap', 'defaults Taylor_Diagram, HeatMap')
+        }]`
+      : bilingual('未启用（comparison.enabled=false）', 'disabled (comparison.enabled=false)'),
   });
   const advanced = [
     config.project.weight ? `weight=${config.project.weight}` : '',

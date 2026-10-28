@@ -56,15 +56,30 @@ fn leftovers(base: &Path) -> Vec<String> {
 
 #[test]
 fn fetched_results_land_in_a_folder_named_after_comparison_and_server() {
+    // 普通 ASCII 别名保持旧名字：已有镜像不用搬家。
     assert_eq!(
         mirror_name("qfo_era5", "7920ts").unwrap(),
         "qfo_era5@7920ts"
     );
-    // 服务器名里的点、@ 之类换掉，不会多出一层目录。
     assert_eq!(
-        mirror_name("a", "user@host.example/x").unwrap(),
-        "a@user_host_example_x"
+        mirror_name("qfo_era5", "user-name_1").unwrap(),
+        "qfo_era5@user-name_1"
     );
+    // C10：清洗会改动 host 时追加原始 host 的稳定短哈希，两个被压成同一形状的 host 不再共用镜像。
+    let at = mirror_name("a", "user@h.example").unwrap();
+    let underscore = mirror_name("a", "user_h_example").unwrap();
+    assert_ne!(at, underscore, "两个服务器不能再撞成一个镜像目录");
+    assert!(at.starts_with("a@user_h_example."), "{at}");
+    assert_eq!(at.split('.').next_back().unwrap().len(), 8, "{at}");
+    // 同一 host 每次算出来一样（不能用进程随机种子）。
+    assert_eq!(at, mirror_name("a", "user@h.example").unwrap());
+    // 旧格式（host 里没有 `.`）与带哈希的新名字永远不会撞在一起。
+    let literal = mirror_name("a", &at["a@".len()..].replace('.', "_")).unwrap();
+    assert!(literal.starts_with("a@") && !literal.contains('.'));
+    // 超长/带路径分隔符的 host 也有界且不会多出一层目录。
+    let long = mirror_name("a", &format!("user@{}/host", "x".repeat(200))).unwrap();
+    assert!(long.len() < 60 + 1 + 48 + 1 + 8 + 1, "{long}");
+    assert!(!long.contains('/'), "{long}");
     assert!(mirror_name("../a", "h").is_err());
     assert!(mirror_name("a", "").is_err());
 }
@@ -72,11 +87,30 @@ fn fetched_results_land_in_a_folder_named_after_comparison_and_server() {
 #[test]
 fn only_this_pages_jobs_can_be_watched_or_cancelled() {
     check_job("bench-run-84692-1792749735388362000").unwrap();
+    check_run("bench-run-84692-1792749735388362000").unwrap();
     for bad in ["run-123", "bench-../../x", "bench-a b", ""] {
         assert!(check_job(bad).is_err(), "{bad:?}");
+        assert!(check_run(bad).is_err(), "{bad:?}");
     }
     assert!(server_dir("/data/x").is_ok());
     assert!(server_dir("data/x").is_err());
+}
+
+/// C07：`bench_remote_fetch` 的 `--run` 只在调用方指定运行号时出现；不传就取 latest-success。
+#[test]
+fn fetching_a_specific_run_adds_the_run_argument_only_when_asked() {
+    let plain = fetch_extra("cmp", "/tmp/out", None);
+    assert!(plain
+        .iter()
+        .any(|(flag, value)| *flag == "--name" && value == "cmp"));
+    assert!(plain
+        .iter()
+        .any(|(flag, value)| *flag == "--out" && value == "/tmp/out"));
+    assert!(!plain.iter().any(|(flag, _)| *flag == "--run"));
+    let run = fetch_extra("cmp", "/tmp/out", Some("bench-run-1-2"));
+    assert!(run
+        .iter()
+        .any(|(flag, value)| *flag == "--run" && value == "bench-run-1-2"));
 }
 
 #[test]
@@ -204,6 +238,38 @@ fn the_first_fetch_creates_the_mirror_when_there_is_nothing_to_preserve() {
         .as_str()
         .unwrap()
         .starts_with(local.to_string_lossy().as_ref()));
+    // 旧式项目没有 run 身份：字段存在但为空/true，前端据此不显示"来自成功运行"。
+    assert!(result["run_id"].is_null());
+    assert!(result["config_sha"].is_null());
+    assert_eq!(result["legacy"], true);
+    assert!(leftovers(&base).is_empty(), "{:?}", leftovers(&base));
+}
+
+/// C07：取回的是哪一次运行要原样带回给前端（报告身份显示不能只靠内存里的 watch 结果）。
+#[test]
+fn a_fetched_run_returns_its_identity_and_config_hash() {
+    let base = temp("identity");
+    let local = mirror(&base);
+    let staging = FetchStaging::begin(&local).unwrap();
+    staged_report(staging.dir(), "only", "<p>only</p>");
+    std::fs::write(staging.dir().join("openbench.yaml"), "frozen").unwrap();
+    std::fs::write(staging.dir().join("meta.json"), "{}").unwrap();
+    let result = staging
+        .finish(Ok(json!({
+            "entries": ["output/only/reports"],
+            "run_id": "bench-run-1-2",
+            "config_sha": "abc123",
+            "state": "succeeded",
+            "legacy": false,
+        })))
+        .unwrap();
+    assert_eq!(result["run_id"], "bench-run-1-2");
+    assert_eq!(result["config_sha"], "abc123");
+    assert_eq!(result["state"], "succeeded");
+    assert_eq!(result["legacy"], false);
+    // 冻结的配置与运行记录也进了本机镜像，事后能看出报告对应哪份配置。
+    assert_eq!(read(local.join("openbench.yaml")), "frozen");
+    assert_eq!(read(local.join("meta.json")), "{}");
     assert!(leftovers(&base).is_empty(), "{:?}", leftovers(&base));
 }
 

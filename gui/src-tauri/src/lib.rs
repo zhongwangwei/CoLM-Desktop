@@ -73,6 +73,9 @@ pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
         eprintln!("failed to stop case creation while {when}: {error}");
     }
     // 远程提交/编引擎与数据准备不在 RunProcesses 里，但同样要停，否则界面承诺不成立。
+    // 比较页先推进取消代次再停子进程：否则关窗那一瞬间卡在 prepare/check/run 之间的评估
+    // 会在子进程被杀掉之后接着开下一阶段（比较页复查 C21）。
+    crate::bench::advance_cancel_epoch();
     if let Err(error) = crate::sidecar::cancel_detached_children() {
         eprintln!("failed to stop remote submissions and data preparation while {when}: {error}");
     }

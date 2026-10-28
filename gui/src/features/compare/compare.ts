@@ -31,8 +31,13 @@ export interface HistoryInfo {
   spatial_type?: 'station' | 'patch' | 'grid' | 'unstructured' | 'unknown' | null;
   /** 每格 patch 数；>1 时单点比较不支持。 */
   patch?: number | null;
-  /** tim_res 是实测时间轴还是文件名推断（单时刻数据只能推断，界面要说明）。 */
-  tim_res_source?: 'time' | 'filename' | null;
+  /**
+   * tim_res 从哪来：time=实测时间轴；metadata=单时刻时用文件里的频率元数据；
+   * filename=单时刻且没有元数据时按文件名推断（界面要说明后两种不是实测）。
+   */
+  tim_res_source?: 'time' | 'metadata' | 'filename' | null;
+  /** 文件里的频率元数据解析出的 tim_res（与实测冲突时也照实给出，界面提示以实测为准）。 */
+  tim_res_metadata?: string | null;
   /** 格点跨日界线：OpenBench 的 [西, 东] 表示不了，探测会拒绝给范围。 */
   crosses_dateline?: boolean;
   /** 这个目录能不能进比较；不能时 blockers/reason 说明原因。 */
@@ -340,6 +345,26 @@ export function inspectBlockerText(info: {
 export function inspectWarningText(info: { warnings?: string[] }): [string, string] | null {
   const warning = info.warnings?.[0];
   if (!warning) return null;
+  if (warning.includes('finer than 1 h'))
+    return [
+      '这个 history 的输出比 1 小时更细，OpenBench 没有亚小时档位；按支持的最细档 Hour 比较，重采样到小时。',
+      'This history is finer than 1 hour and OpenBench has no sub-hourly resolution; it is compared at Hour, the finest supported resolution, after resampling.',
+    ];
+  if (warning.includes('ignored frequency metadata'))
+    return [
+      '文件里的频率元数据不是 OpenBench 支持的档位，已忽略；时间分辨率按实测时间轴/文件名判断。',
+      'The frequency metadata in the files is not an OpenBench tim_res and was ignored; the resolution follows the sampled time axis or the file names.',
+    ];
+  if (warning.includes('frequency metadata says'))
+    return [
+      '频率元数据与实测时间轴不一致；以实测时间轴为准（OpenBench 实际读文件，不读元数据）。',
+      'The frequency metadata disagrees with the sampled time axis; the sampled axis wins because OpenBench reads the files, not the metadata.',
+    ];
+  if (warning.includes('single time step') && warning.includes('frequency metadata'))
+    return [
+      '这个 history 只有一个时刻，时间分辨率取自文件里的频率元数据。',
+      'This history has a single time step; the time resolution was taken from the frequency metadata.',
+    ];
   if (warning.includes('single time step'))
     return [
       '这个 history 只有一个时刻，时间分辨率是按文件名推断的。',
@@ -545,6 +570,77 @@ export function defaultGridRes(simulations: { spatial: boolean; resolution?: num
 const quote = (value: string) => JSON.stringify(value);
 
 /**
+ * OpenBench 3.0.8 的 `comparison.items` 合法图表名（v3.0.8 源码 figlib.yaml 的 comparison_nml
+ * 加 check.py 的 _BASIC_ANALYSIS_ITEMS）。写进配置前在本地校验名字，避免把拼错的名字交给
+ * OpenBench check 才发现。`needs` 只标注能确定输出依赖的两类：Taylor 用 metrics、HeatMap 用 scores
+ * （v3.0.8 `_comparison_heatmap.py` 有显式校验）；其余图表缺数据时由 OpenBench check 明确报错。
+ */
+export interface ComparisonItemChoice {
+  name: string;
+  needs: 'metrics' | 'scores' | null;
+}
+export const COMPARISON_ITEMS: ComparisonItemChoice[] = [
+  { name: 'Taylor_Diagram', needs: 'metrics' },
+  { name: 'HeatMap', needs: 'scores' },
+  { name: 'Target_Diagram', needs: null },
+  { name: 'Kernel_Density_Estimate', needs: null },
+  { name: 'Whisker_Plot', needs: null },
+  { name: 'Parallel_Coordinates', needs: null },
+  { name: 'Portrait_Plot_seasonal', needs: null },
+  { name: 'Single_Model_Performance_Index', needs: null },
+  { name: 'Relative_Score', needs: null },
+  { name: 'Ridgeline_Plot', needs: null },
+  { name: 'Diff_Plot', needs: null },
+  { name: 'RadarMap', needs: null },
+  { name: 'Mann_Kendall_Trend_Test', needs: null },
+  { name: 'Correlation', needs: null },
+  { name: 'Standard_Deviation', needs: null },
+  { name: 'Functional_Response', needs: null },
+  { name: 'Basic', needs: null },
+  { name: 'Mean', needs: null },
+  { name: 'Median', needs: null },
+  { name: 'Min', needs: null },
+  { name: 'Max', needs: null },
+  { name: 'Sum', needs: null },
+];
+export const VALID_COMPARISON_ITEMS = new Set(COMPARISON_ITEMS.map((item) => item.name));
+/** 页面默认勾选的两个（OpenBench 自己的默认值）；一个都不勾 = 不写 comparison 段。 */
+export const DEFAULT_COMPARISON_ITEMS = ['Taylor_Diagram', 'HeatMap'];
+/** 界面上实际给出的选项：只放图表类，分析量（Mean/Median/…）不让用户误以为是图。 */
+export const COMPARISON_ITEM_CHOICES = COMPARISON_ITEMS.filter(
+  (item) => !['Basic', 'Mean', 'Median', 'Min', 'Max', 'Sum'].includes(item.name),
+);
+
+/**
+ * 层/类别维度变量预检：模拟的变量覆盖把标准变量映射到了 `unsupported_variables` 里的 NetCDF 变量时，
+ * 制备站点文件会跳过它（不是静默丢，但运行到 check 才发现太晚）。运行/生成前明确拒绝，并指出是哪个
+ * 模拟的哪个变量、什么维度（审查报告 C05：预检时明确拒绝，而不是制备成功但变量没了）。
+ */
+export function layerVariableProblems(design: ComparisonDesign): [string, string][] {
+  const problems: [string, string][] = [];
+  for (const simulation of design.simulations) {
+    const unsupported = new Map(
+      (simulation.info.unsupported_variables ?? []).map((variable) => [
+        variable.name,
+        variable.dims,
+      ]),
+    );
+    if (!unsupported.size) continue;
+    for (const [variable, mapping] of Object.entries(simulation.variables ?? {})) {
+      if (!(variable in design.variables)) continue;
+      const varname = mapping.varname?.trim();
+      if (!varname || !unsupported.has(varname)) continue;
+      const dims = (unsupported.get(varname) ?? []).join(', ');
+      problems.push([
+        `变量 ${variable} 在模拟「${simulation.label}」里是 ${varname}（维度 ${dims}），超出站点/地表评估维度，制备时会被跳过。请先换一个变量，或等支持层维度选择后再比较。`,
+        `Variable ${variable} maps to ${varname} in simulation “${simulation.label}” (dims ${dims}), beyond a station/surface evaluation; preparing the station file would skip it. Pick another variable or wait for layer selection support.`,
+      ]);
+    }
+  }
+  return problems;
+}
+
+/**
  * 生成 `openbench.yaml` 与站点清单所需的全部输入。`MachineIdentity` 之外的字段全进配置文本；
  * 同一份比较输入换机器/换参考数据根后就是另一次评估，指纹（`designFingerprint`）因此分开算。
  */
@@ -565,6 +661,8 @@ export interface ComparisonDesign {
   numCores?: number | null;
   metrics?: string[];
   scores?: string[];
+  /** 跨模拟比较（OpenBench comparison 阶段）要生成的图表；空/不传 = 不写这一段（默认关闭）。 */
+  comparisonItems?: string[];
 }
 
 /** 评估发生在哪台机器、哪个 OpenBench 安装、哪个参考数据根下。 */
@@ -608,6 +706,41 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
   // OpenBench 把缺省和空列表分开：不写用默认，写 [] 表示一个都不要，两者都 [] 直接报错。
   if (design.metrics?.length === 0 && design.scores?.length === 0)
     throw new Error(bilingual('指标和评分至少勾一个', 'Tick at least one metric or score'));
+  const comparisonItems = [...new Set((design.comparisonItems ?? []).filter(Boolean))];
+  for (const name of comparisonItems)
+    if (!VALID_COMPARISON_ITEMS.has(name))
+      throw new Error(
+        bilingual(
+          `不是 OpenBench 3.0.8 支持的比较图表：${name}`,
+          `OpenBench 3.0.8 does not support the comparison item ${name}`,
+        ),
+      );
+  for (const item of design.simulations.length >= 2 ? COMPARISON_ITEMS : []) {
+    if (!comparisonItems.includes(item.name)) continue;
+    if (item.needs === 'metrics' && !design.metrics?.length)
+      throw new Error(
+        bilingual(
+          `${item.name} 至少需要一个指标；先在指标里勾选。`,
+          `${item.name} needs at least one metric; tick a metric first.`,
+        ),
+      );
+    if (item.needs === 'scores' && !design.scores?.length)
+      throw new Error(
+        bilingual(
+          `${item.name} 至少需要一个评分；先在评分里勾选。`,
+          `${item.name} needs at least one score; tick a score first.`,
+        ),
+      );
+  }
+  // 层维度变量在生成配置前就拒绝：制备阶段只会跳过它们，等到 check 失败太晚（C05）。
+  const layerIssues = layerVariableProblems(design);
+  if (layerIssues.length)
+    throw new Error(
+      bilingual(
+        layerIssues.map(([zh]) => zh).join('；'),
+        layerIssues.map(([, en]) => en).join('; '),
+      ),
+    );
   const keys = design.simulations.map((sim) => simulationKey(sim.label));
   if (new Set(keys).size !== keys.length)
     throw new Error(bilingual('模拟的名字不能重复', 'Simulation names must be unique'));
@@ -706,6 +839,14 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
   // 勾选结果原样写出：用户全部取消勾选指标、只要评分时，省掉这一行会让 OpenBench 改跑默认指标。
   if (design.metrics) lines.push(`metrics: [${design.metrics.map(quote).join(', ')}]`);
   if (design.scores) lines.push(`scores: [${design.scores.map(quote).join(', ')}]`);
+  // 跨模拟比较：至少两个模拟才有意义；一个图表都不勾就不写这一段（OpenBench 默认 enabled=false）。
+  // 写 enabled: true 而不是省略 items：页面明确选中的图表要进配置，不能靠 OpenBench 的缺省值。
+  if (design.simulations.length >= 2 && comparisonItems.length)
+    lines.push(
+      'comparison:',
+      '  enabled: true',
+      `  items: [${comparisonItems.map(quote).join(', ')}]`,
+    );
   return { config: `${lines.join('\n')}\n`, sites, missingExtent };
 }
 
@@ -825,6 +966,18 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
   items.push({
     label: ['指标与评分', 'Metrics and scores'],
     value: `${bilingual('指标', 'metrics')} [${(design.metrics ?? []).join(', ')}] · ${bilingual('评分', 'scores')} [${(design.scores ?? []).join(', ')}]`,
+  });
+  // 跨模拟比较（comparison 阶段）：页面把选中的图表写进配置；一个都不选就是关闭。
+  const comparisonChosen = [...new Set((design.comparisonItems ?? []).filter(Boolean))];
+  items.push({
+    label: ['跨模拟比较', 'Cross-simulation comparison'],
+    value:
+      design.simulations.length >= 2 && comparisonChosen.length
+        ? `${bilingual('已启用', 'enabled')} [${comparisonChosen.join(', ')}]`
+        : bilingual(
+            '未启用（一个图表都没选，或模拟少于两个）',
+            'disabled (no chart selected, or fewer than two simulations)',
+          ),
   });
   const advanced = [
     design.weight ? `weight=${design.weight}` : '',
@@ -1027,9 +1180,29 @@ export function benchErrorText(error: string): [string, string] {
     // GUI-08：同一比较已有一份报告在取回中，后端明确拒绝并发取回。
     '这个比较的报告正在取回中，等这次取回结束后再试。':
       'This comparison’s report is being fetched already; try again when that fetch finishes.',
+    // 复查 C07/C09：远程 run 级快照、提交意图与取回目标的固定句（Tauri/CLI 侧原文）。
+    这个比较的活动作业锁一直被占用:
+      "The comparison's active-job lock is still held; try again shortly.",
+    这个比较还没有成功过的运行: 'This comparison has no successful run yet.',
+    服务器上还没有可显示的评估报告: 'The server has no report to show yet.',
+    服务器上的运行记录读不懂: 'The run record on the server cannot be read.',
   };
   if (text in fixed) return [text, fixed[text]!];
   const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    // 远程 run 级身份：指定了服务器上不存在的 run，或运行记录解析失败。
+    [
+      /^这次运行没有成功，没有可显示的评估报告（运行 ([^，]+)，状态 ([^）]+)）$/,
+      (m) =>
+        `That run did not succeed, so there is no report to show (run ${m[1]}, state ${m[2]}).`,
+    ],
+    [
+      /^服务器上没有这次运行的快照：([\s\S]*)$/,
+      (m) => `The server has no snapshot for run ${m[1]}.`,
+    ],
+    [
+      /^服务器上的运行记录读不懂：([\s\S]*)$/,
+      (m) => `The run record on the server cannot be read: ${m[1]}`,
+    ],
     // 审查报告第 6 条：调度器不可用/查询命令执行失败（不是"作业丢了"）。
     [
       /^查询作业状态失败：([\s\S]*)$/,

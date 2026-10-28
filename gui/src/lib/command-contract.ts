@@ -434,6 +434,10 @@ export const commandContract = {
     "name": {
       "required": true,
       "rust_type": "String"
+    },
+    "runId": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "case_namelist_preview": {

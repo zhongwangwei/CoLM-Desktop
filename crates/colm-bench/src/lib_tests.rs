@@ -114,11 +114,15 @@ fn embedded_bench_scripts_stay_plain_lf_python() {
         assert!(!script.contains('\r'), "{name} must stay LF-only");
     }
     // 这些 JSON 字段与参数位置是窗口进程/CLI 与脚本之间的契约，改名要两侧一起改。
+    // tim_res_source 现在可能是 time/metadata/filename，tim_res_metadata 是新增的元数据值：
+    // 前端按这两个字段提示"分辨率来源"和"元数据与实测冲突"，缺一个就退化成静默。
     for field in [
         "spatial_type",
         "unsupported_variables",
         "crosses_dateline",
         "families",
+        "tim_res_source",
+        "tim_res_metadata",
     ] {
         assert!(
             INSPECT_SCRIPT.contains(&format!("\"{field}\"")),

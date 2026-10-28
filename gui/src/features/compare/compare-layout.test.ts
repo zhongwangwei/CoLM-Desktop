@@ -622,6 +622,7 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
     numCores: '',
     metrics: ['bias'],
     scores: ['Overall_Score'],
+    comparisonItems: [],
     comparisonDir: compare.comparisonDir,
   });
   const machine = { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' };
@@ -886,4 +887,35 @@ test('GUI-07: fetching a report also surfaces the sidecar unfinished-job message
     'This comparison already has an unfinished evaluation job (bench-run-88); confirm its final state or stop it before resubmitting.',
     'the fetch path shows the mapped English message',
   );
+});
+
+test('U-05: editing a variable row in the simulation dialog keeps the row identity (focus is not lost)', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.pressLabel('Edit simulation information');
+  await page.pressLabel('Add variable');
+  const rows = () =>
+    page.nodes().filter((node) => node.props['data-sim-variable-row'] !== undefined);
+  const keysBefore = rows().map((row) => String(row.props.key));
+  assert.equal(
+    keysBefore.length,
+    1,
+    'the empty form starts without variable rows, Add creates one',
+  );
+  assert.deepEqual(keysBefore, ['0'], 'row keys are the row positions');
+  // 逐字符输入不能改变行的 key：key 变了 React 会重建行、输入框丢焦点（审查报告 C12）。
+  const input = page
+    .nodes()
+    .find((node) => node.type === 'Input' && node.props['data-sim-field'] === 'variables');
+  assert.ok(input, 'the first variable row input');
+  (input.props.onChange as (event: unknown) => void)({ target: { value: 'Latent_Heat' } });
+  await page.settle();
+  const keysAfter = rows().map((row) => String(row.props.key));
+  assert.deepEqual(keysAfter, keysBefore, 'row keys follow position, not the edited text');
+  assert.equal(rows()[0]!.props['data-sim-variable-row'], 0);
+  const edited = page
+    .nodes()
+    .find((node) => node.type === 'Input' && node.props['data-sim-field'] === 'variables');
+  assert.equal(edited?.props.value, 'Latent_Heat');
 });

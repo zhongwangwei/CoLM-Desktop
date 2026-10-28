@@ -45,9 +45,17 @@ async fn call(
 }
 
 /// 取回结果在本机的目录名：比较名加服务器名（只留字母、数字、`-`、`_`）。
+///
+/// C10：服务器名清洗会把 `user@host.example` 与本来就写成 `user_host_example` 的别名压成同一个
+/// 镜像名；两台不同的机器就共用一个目录，后取回的会顶掉先取回的。清洗没有改动 host（普通 ASCII
+/// 别名）时保持旧名字不变，兼容已有镜像；清洗改动过 host 时追加原始 host 的稳定 FNV-1a 短哈希
+/// （自己实现，不用 `DefaultHasher`：它的算法与进程随机种子都不能当持久目录名的一部分）。
+///
+/// 分隔符用 `.`：清洗后的 host 只可能含字母/数字/`-`/`_`（旧格式的 host 因此不可能带 `.`），
+/// 所以"旧名字"与"带哈希的新名字"永远不会撞在一起；旧名字继续用 `@`，已有镜像不用搬家。
 pub(crate) fn mirror_name(name: &str, host: &str) -> Result<String, String> {
     crate::bench::valid_project(name)?;
-    let host = host
+    let sanitized = host
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -57,10 +65,30 @@ pub(crate) fn mirror_name(name: &str, host: &str) -> Result<String, String> {
             }
         })
         .collect::<String>();
-    if host.is_empty() {
+    if sanitized.is_empty() {
         return Err("服务器名不能为空".into());
     }
-    Ok(format!("{name}@{host}"))
+    if sanitized == host {
+        return Ok(format!("{name}@{host}"));
+    }
+    // 清洗后的 host 全是 ASCII（其余字符都换成了 `_`），截断不会切坏 UTF-8；限长是为了目录名
+    // 不被一个超长主机名撑爆（valid_project 的 60 字节限制只管比较名那一半）。
+    let host_part = &sanitized[..sanitized.len().min(MIRROR_HOST_LIMIT)];
+    Ok(format!("{name}@{host_part}.{}", fnv1a_8(host)))
+}
+
+/// 清洗过的 host 在镜像名里最多留这么多字符；再加 `@`、`.`、8 位哈希与比较名（≤60）。
+const MIRROR_HOST_LIMIT: usize = 48;
+
+/// 原始 host 的稳定 32 位 FNV-1a 哈希，8 位十六进制。选 FNV-1a 是因为实现只有两行、跨平台逐位
+/// 一致，足够把两个被清洗成同名的 host 分开；不是加密用途。
+fn fnv1a_8(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", hash & 0xffff_ffff)
 }
 
 /// 服务器上的环境装到了哪一步、有哪些比较。
@@ -101,6 +129,20 @@ fn check_job(job: &str) -> Result<(), String> {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     ok.then_some(())
         .ok_or_else(|| format!("不是比较页的作业：{job}"))
+}
+
+/// 远程 run 的身份就是提交时本地生成的作业号（`<服务器比较目录>/runs/<作业号>/`）。
+fn check_run(run: &str) -> Result<(), String> {
+    check_job(run).map_err(|_| format!("不是一次评估运行：{run}"))
+}
+
+/// `remote-bench-fetch` 的参数：比较名、本机临时目录，以及可选的运行号（不传 = latest-success）。
+fn fetch_extra(name: &str, out: &str, run_id: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut extra = vec![("--name", name.to_owned()), ("--out", out.to_owned())];
+    if let Some(run_id) = run_id {
+        extra.push(("--run", run_id.to_owned()));
+    }
+    extra
 }
 
 /// 删掉服务器上的环境：`env` 只删虚拟环境，`all` 连 uv、专用 Python 和下载缓存；登记表与比较留着。
@@ -463,6 +505,11 @@ impl FetchStaging {
             "dir": self.local,
             "report": crate::bench::find_report(&self.local.join("output")),
             "entries": fetched["entries"],
+            // C07：取回的是哪一次运行。旧式项目没有 run 身份，三个字段是 null/true。
+            "run_id": fetched.get("run_id").cloned().unwrap_or(Value::Null),
+            "config_sha": fetched.get("config_sha").cloned().unwrap_or(Value::Null),
+            "state": fetched.get("state").cloned().unwrap_or(Value::Null),
+            "legacy": fetched.get("legacy").cloned().unwrap_or(Value::Bool(true)),
         }))
     }
 
@@ -490,18 +537,27 @@ impl Drop for FetchStaging {
 /// 下载到同文件系统的临时目录，确认有报告后才整体替换本机旧镜像：连接、认证、下载或校验
 /// 任何一步失败，本机旧报告都原样保留（错误里会说明它仍是上次成功版本），服务器上的原始
 /// 报告不受影响。
+///
+/// 不传 `run_id` 时取回服务器 `latest-success.json` 指向的那次成功运行；传了则取回指定运行
+/// （C07：每次运行一个冻结目录，报告只从这次运行的 output 里发现）。
 #[tauri::command]
 pub async fn bench_remote_fetch(
     app: tauri::AppHandle,
     host: String,
     name: String,
+    run_id: Option<String>,
 ) -> Result<Value, String> {
+    let run_id = run_id.filter(|run| !run.trim().is_empty());
+    if let Some(run) = &run_id {
+        check_run(run)?;
+    }
     let local = crate::bench::root()?
         .join("projects")
         .join(mirror_name(&name, &host)?);
     let staging = FetchStaging::begin(&local)?;
     let out = staging.dir().to_string_lossy().into_owned();
-    let fetched = call(app, &host, "fetch", &[("--name", name), ("--out", out)]).await;
+    let extra = fetch_extra(&name, &out, run_id.as_deref());
+    let fetched = call(app, &host, "fetch", &extra).await;
     staging.finish(fetched)
 }
 

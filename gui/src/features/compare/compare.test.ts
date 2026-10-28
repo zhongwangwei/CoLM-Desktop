@@ -16,6 +16,7 @@ import {
   jobContacted,
   jobEnded,
   jobUncertain,
+  layerVariableProblems,
   parseExtent,
   parseReferences,
   parseRemoteJob,
@@ -1002,4 +1003,105 @@ it('maps the server-side unfinished evaluation job rejection in both languages',
     benchErrorText('这个比较还有未完成的评估作业(job-3)')[1],
     `This comparison already has an unfinished evaluation job (job-3)${suffix}`,
   );
+});
+
+it('writes the cross-simulation comparison phase only with two or more simulations', () => {
+  const built = buildOpenbenchConfig({
+    ...base,
+    metrics: ['bias'],
+    scores: ['Overall_Score'],
+    comparisonItems: ['Taylor_Diagram', 'HeatMap'],
+  });
+  assert.ok(
+    built.config.includes('comparison:\n  enabled: true\n  items: ["Taylor_Diagram", "HeatMap"]'),
+    built.config,
+  );
+  // 单个模拟没有跨模拟比较；一个图表都不勾 = 不写这一段（OpenBench 默认关闭）。
+  assert.doesNotMatch(
+    buildOpenbenchConfig({ ...base, simulations: [site], comparisonItems: ['Taylor_Diagram'] })
+      .config,
+    /comparison:/,
+  );
+  assert.doesNotMatch(buildOpenbenchConfig({ ...base, comparisonItems: [] }).config, /comparison:/);
+  // 拼错的名字、缺少所需输出都在本地拒绝，不留给 OpenBench check。
+  assert.throws(
+    () => buildOpenbenchConfig({ ...base, comparisonItems: ['Taylor_Diagrm'] }),
+    /OpenBench 3\.0\.8/,
+  );
+  assert.throws(
+    () =>
+      buildOpenbenchConfig({
+        ...base,
+        metrics: [],
+        scores: ['Overall_Score'],
+        comparisonItems: ['Taylor_Diagram'],
+      }),
+    /metric|指标/,
+  );
+  assert.throws(
+    () =>
+      buildOpenbenchConfig({
+        ...base,
+        metrics: ['bias'],
+        scores: [],
+        comparisonItems: ['HeatMap'],
+      }),
+    /score|评分/,
+  );
+});
+
+it('summarises the cross-simulation comparison selection', () => {
+  const machineDesign: EvaluationDesign = {
+    machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+    ...base,
+  };
+  const summary = evaluationSummary({ ...machineDesign, comparisonItems: ['Taylor_Diagram'] });
+  const row = summary.find((item) => item.label[1] === 'Cross-simulation comparison');
+  assert.match(row?.value ?? '', /Taylor_Diagram/);
+  const off = evaluationSummary({ ...machineDesign, comparisonItems: [] });
+  assert.match(
+    off.find((item) => item.label[1] === 'Cross-simulation comparison')?.value ?? '',
+    /disabled/,
+  );
+});
+
+it('blocks a selected variable that the station preparation would drop', () => {
+  const layered: BenchSimulation = {
+    label: 'hb layered',
+    info: {
+      ...basin.info,
+      unsupported_variables: [
+        { name: 'f_wliq_soisno', dims: ['time', 'patch', 'soilsnow'], reason: 'soil layers' },
+      ],
+    },
+    variables: { Latent_Heat: { varname: 'f_wliq_soisno', varunit: 'kg m-2' } },
+  };
+  const layerDesign: ComparisonDesign = {
+    ...base,
+    variables: { Latent_Heat: 'ERA5' },
+    simulations: [layered, site],
+  };
+  const problems = layerVariableProblems(layerDesign);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0]![0], /f_wliq_soisno/);
+  assert.match(problems[0]![1], /station\/surface evaluation/);
+  assert.throws(() => buildOpenbenchConfig(layerDesign), /f_wliq_soisno/);
+});
+
+it('maps the remote run-identity errors into English', () => {
+  for (const [chinese, expected] of [
+    ['这个比较的活动作业锁一直被占用', /active-job lock/],
+    ['这个比较还没有成功过的运行', /no successful run yet/],
+    ['服务器上还没有可显示的评估报告', /no report to show yet/],
+    [
+      '这次运行没有成功，没有可显示的评估报告（运行 r-1，状态 failed）',
+      /did not succeed.*run r-1, state failed/,
+    ],
+  ] as const)
+    assert.match(benchErrorText(chinese)[1], expected);
+  assert.match(
+    benchErrorText('服务器上没有这次运行的快照：bench-run-9')[1],
+    /no snapshot for run bench-run-9/,
+  );
+  assert.match(benchErrorText('服务器上的运行记录读不懂：bad json')[1], /cannot be read: bad json/);
 });

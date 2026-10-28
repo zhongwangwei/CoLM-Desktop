@@ -38682,3 +38682,63 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 真实数据：CN-Cng 黄金小时输出 + PLUMBER2 观测经新路径复现 design.md §2.8 三行（Rnet/Qh/Qle 的 n 与 RMSE/bias/R² 逐项一致）；`PLUMBER2_ROOT=/Volumes/Data/Data/PLUMBER2s cargo test -p oracle --test metrics` → 4 passed（旧 `pair` API 的金标准未漂移）。
 - 前端：`node ../scripts/check-gui.mjs --self-test`、`check-gui` 通过；`node ../scripts/test-react.mjs` → **1176 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全通过。
 - **Not-tested**：真实 TIMESTEP+PLUMBER2 组合没有现成观测文件（用合成用例验证相位；真实 AU-Preston 只验证了 Urban-PLUMBER 终点标签）；`flux_diagnostics` 未迁移到新区间配对；远程旧 sidecar 缺新字段时前端回退 model_clock/旧 QC 列；多站失败隔离、远程部分取回与流式读取属后续批次。
+
+
+## 比较页第二批修复：comparison 阶段、层变量预检、频率元数据、远程 run 身份/占位锁/提交回执、本机取消（2026-10-28，复查报告 CoLM-Desktop_compare_recheck_19b2c2b）
+
+公开复查版本 19b2c2b 早于上一轮比较页修复提交 f6172fe6，所以它列出的"仍可复现"项里有一部分已在 f6172fe6 解决；本轮在 f6172fe6 之上把复查中真正未关闭的项修完，并把"跨模拟比较默认关闭"这一能力缺口接进默认工作流。只改比较页链路，未提交其他会话的工作区改动。
+
+### 1 跨模拟比较阶段写进配置（comparison.enabled）
+
+- 旧行为：生成的配置没有 `comparison` 段，OpenBench 加载后 `comparison.enabled=false`，只做各模拟对参考数据的评估。
+- 新行为：比较页多了"跨模拟比较图表"多选（默认 OpenBench 自己的 Taylor_Diagram + HeatMap，可全选/清空）；至少两个模拟且有勾选时，配置写
+  `comparison: {enabled: true, items: [...]}`。图表名按 OpenBench 3.0.8 源码（figlib.yaml 的 comparison_nml + check.py 的 _BASIC_ANALYSIS_ITEMS）在本地校验；能确定输出依赖的两类图提前校验（Taylor 需 metrics、HeatMap 需 scores，3.0.8 `_comparison_heatmap.py` 有显式校验，其他图缺数据由 OpenBench check 报错）。
+- 有效配置解析器接受 `comparison.enabled/items`，摘要/指纹/手改后的完成提示都跟着它走；启用但 items 为空、未知图表名明确拒绝。
+
+### 2 层/类别维度变量运行前硬拒绝（C05 剩余部分）
+
+- 旧行为：INSPECT 已列出 `unsupported_variables`，但页面只提示；用户若把标准变量映射到 `f_wliq_soisno` 这类带层维度的变量，制备阶段会跳过它，直到 check 才失败。
+- 新行为：`layerVariableProblems()` 在生成配置/运行前检查"已选变量 × 每模拟变量覆盖 × unsupported_variables"：命中即拒绝并指出模拟、变量名与维度；生成与运行两条路都拦（运行前的配置解析路径也走同一检查）。
+
+### 3 数据探测的频率判定（C04）
+
+- 读取 dataset/time 变量上的频率元数据（tim_res/time_res/frequency/time_frequency/cell_methods 等，大小写不敏感，支持 hourly/1h/3600/3-hourly/daily/monthly/yearly/annual 与 CF `interval: N hours`），新增 `tim_res_metadata`，`tim_res_source` 扩展为 `time | metadata | filename`。
+- 策略（注释里写了理由）：采样能得到步长 → 以实测为准（元数据一致只作佐证；冲突时两个值都输出并在 warnings 明说，因为 OpenBench 重采样的是文件时间轴）；只有整份数据一个时刻 → 用元数据（source=metadata）；都没有 → 保留文件名推断/明确报错。
+- `tim_res` 值域对齐 OpenBench 3.0.8 `VALID_TIM_RES_VALUES` 中"步长能解释"的七档：Hour/3Hour/6Hour/Day/8Day/Month/Year（climatology-* 与 Nmonth 是比较语义/日历步长不固定，不自动推断，只能用户显式选）。无法归类的步长（2h/5d/7d/9d 等）明确报错。
+- 实测依据：本仓库 AU-Preston 等 17 个真实 CoLM history 中位步长 1800 s（DEF_HIST_FREQ=TIMESTEP 默认）。若按"无法归类就报错"，最常见的输出会完全无法进比较，因此 <1h 实测步长显式粗化为 Hour 并写 warning（"输出比 1 小时细，OpenBench 没有亚小时档"），不静默；`oracle/golden` 的 3600 s 案例仍为 Hour、单时刻案例仍走文件名兜底。前端 `TIM_RES_VALUES` 与告警文案同步（含 6Hour/8Day/climatology-*）。
+
+### 4 远程 run 级身份与按 run 取回（C07 远程部分）
+
+- 作业体在 `<project>/runs/<job_id>/` 冻结本次 `openbench.yaml`、`sites.json`、`inputs.json`、`meta.json`（含 config_sha），check/run 在该目录内执行；成功才原子更新 `latest-success.json`，失败只写自己 meta，上次成功指针不动。
+- `remote-bench-fetch` 支持 `--run <id>`（默认取 latest-success 指向的运行，旧式无 runs/ 项目回退旧 output 路径）；返回 run_id/config_sha/state/legacy。Tauri `bench_remote_fetch` 增加可选 `runId`（contract 已重生成，check-gui 0），前端取回后把 run 身份记进报告归属；报告表与"再取回"都带作业号，避免"B 失败后取回 A 的报告"混淆。
+
+### 5 提交回执丢失（C09）与占位锁释放竞态（C16）
+
+- 占位 acquire/陈旧清理/失败释放/作业体 EXIT trap 全部走同一个 `mkdir` 自旋锁（`.active-job.lock`，带 token、陈旧回收，不依赖 flock），锁内"核对所有权再删"；旧实现"cat id 后 rm"可删掉并发新占位的 TOCTOU 关闭。
+- 提交前先写 `intent`（预生成作业号 + unix 时间 + config_sha）。提交命令报错后按作业号有界重查：明确已接受/查询失败 → 返回 Ok `submitted:"unconfirmed"` + job/run_id/config_sha，前端照常按作业号 watcher 跟踪；连续明确查无记录才在锁内释放占位并返回原错误。提交失败不再直接释放可能导致"远端已接受但失去跟踪"的占位。
+
+### 6 服务器镜像名碰撞（C10 后端部分）
+
+- `mirror_name()` 原来把 `user@h.example` 与 `user_h_example` 都压成 `user_h_example`；现在只在清洗改动了 host 时追加原始 host 的稳定 FNV-1a 短哈希（普通 ASCII host 名字保持兼容），测试两种 host 不再碰撞。
+
+### 7 本机取消贯穿整次运行（C21）
+
+- `bench` 模块加运行级取消代次 `CancelEpoch`：`bench_cancel` 先推进代次再终止已登记子进程；`stream`/`output` spawn 前核对，`for_each_stage` 在每个阶段开始时核对（阶段间不再起新进程）；`bench_run`/`bench_install` 入口取快照，排队期间取消直接按"已停止"返回、不建运行记录；关窗路径 `stop_everything` 先推进代次再停子进程，覆盖"关窗瞬间卡在阶段之间"。
+- 语义保持：取消精确返回"已停止"（前端识别不变），普通失败文本不变；最后阶段结束后不再核对，避免"run 刚成功、恰好点停止"把已完成运行判失败。
+
+### 本轮验证（真实执行）
+
+- 前端（lead 复跑）：`check-gui.mjs --self-test` 0、`check-gui.mjs` 0（257 命令/219 调用）；`test-react.mjs` **1185 passed / 0 failed**；`tsc --noEmit` 0 error；`eslint src/features/compare`、`prettier --check src/features/compare src/lib/command-contract.ts` 干净。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **517 passed / 1 ignored**；`cargo clippy ... --all-targets -- -D warnings` 干净；bench 过滤 36 passed（含真实 `sh -c 'sleep 5'` 取消集成测试）；新增 7 个取消测试 + 远程 fetch/status 测试。
+- 数据探测：`python3 scripts/test-bench-scripts.py` → **29 passed / 0 failed**（原 21 例 + 8 个元数据/6Hour/8Day/亚小时/冲突用例）；`cargo test -p colm-bench --lib` 7 passed；clippy/fmt 干净。
+- 远程比较：`cargo test -p colm-cli --bin colm-cli remote_bench` → **39 passed / 0 failed**（锁互斥、提交回执三分、run 快照/指针、fetch --run、镜像名、坐标 argv）；`cargo test -p colm-remote --lib` 126 passed；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib bench_remote` 随 GUI 全量覆盖。
+- rustfmt：本任务改动的 Rust 文件 `rustfmt --edition 2021 --check` 干净；`git diff --check` 干净。
+- 未运行：真实 OpenBench 运行（本机没有可用环境，`comparison` 段只用 3.0.8 源码 schema 核对，没实际生成过 comparison 图）；真实 SSH/Slurm/PBS/LSF 故障注入；真实带频率属性的 CoLM 文件（CoLM 自己不写该类属性，元数据用例为合成）；Windows 分支取消集成测试。
+
+### 未覆盖/后续
+
+1. 层维度仍只做"预检拒绝"，未支持深度选择/聚合；跨日界线仍明确拒绝；无亚小时档位（按 Hour 粗化并提示）。
+2. 远程 status 还没有 `latest_run` 失败诊断（只有 latest_success）；旧式镜像项目没有 run 身份，取回仍按旧路径。
+3. `comparison` 图表需要真实完成一次评估验收（含 HeatMap 的评分依赖、图表数量/类型与 OpenBench 3.0.8 一致）；统计阶段（statistics）仍未接入。
+4. 占位锁的陈旧回收在极端崩溃交错下仍有理论窗口（锁内只做毫秒级操作、超时回收），未做真实 NFS 故障注入。
+5. 数据探测的"亚小时粗化为 Hour"是对 CoLM TIMESTEP 输出的产品决定，需在真实评估里确认重采样没有引入系统性偏差。

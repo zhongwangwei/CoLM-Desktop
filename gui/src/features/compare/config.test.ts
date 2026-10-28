@@ -128,11 +128,12 @@ it('refuses edits the page cannot honestly summarize', () => {
   assert.equal(reversed.config, null);
   assert.ok(reversed.problems.length);
 
+  // comparison 现在受支持；真正超出页面格式的顶层键（如 statistics）仍然拒绝。
   const unknownTop = parseOpenbenchConfig(
-    generated().replace('evaluation:', 'comparison:\n  enabled: true\nevaluation:'),
+    generated().replace('evaluation:', 'statistics:\n  enabled: true\nevaluation:'),
   );
   assert.equal(unknownTop.config, null);
-  assert.match(unknownTop.problems[0]![0], /comparison/);
+  assert.match(unknownTop.problems[0]![0], /statistics/);
 
   const unknownSim = parseOpenbenchConfig(
     generated().replace('    tim_res: Hour', '    tim_res: Hour\n    grid_res: 0.5'),
@@ -213,4 +214,51 @@ it('does not silently fix an impossible region into a backwards range', () => {
   assert.doesNotMatch(config, /lon_range/);
   assert.equal(sites.length, 1);
   assert.equal(designFingerprint({ machine, ...base }), designFingerprint({ machine, ...base }));
+});
+
+it('parses and summarises the cross-simulation comparison section', () => {
+  const text = generated({
+    comparisonItems: ['Taylor_Diagram', 'HeatMap'],
+    metrics: ['bias'],
+    scores: ['Overall_Score'],
+  });
+  const parsed = parseOpenbenchConfig(text);
+  assert.deepEqual(parsed.problems, []);
+  assert.deepEqual(parsed.config!.comparison, {
+    enabled: true,
+    items: ['Taylor_Diagram', 'HeatMap'],
+  });
+  const row =
+    effectiveSummary(design, parsed.config!).find(
+      (item) => item.label[1] === 'Cross-simulation comparison',
+    )?.value ?? '';
+  assert.match(row, /Taylor_Diagram/);
+
+  // 不写 comparison = 关闭（OpenBench 默认）；摘要如实说未启用。
+  const off = parseOpenbenchConfig(generated()).config!;
+  assert.deepEqual(off.comparison, { enabled: false, items: null });
+  assert.match(
+    effectiveSummary(design, off).find((item) => item.label[1] === 'Cross-simulation comparison')
+      ?.value ?? '',
+    /disabled/,
+  );
+
+  // 手改成未知图表 / enabled 配空 items：明确拒绝，不给"看起来对"的配置。
+  const unknown = text.replace('items: ["Taylor_Diagram", "HeatMap"]', 'items: ["Not_A_Chart"]');
+  assert.equal(parseOpenbenchConfig(unknown).config, null);
+  const empty = text.replace('items: ["Taylor_Diagram", "HeatMap"]', 'items: []');
+  assert.equal(parseOpenbenchConfig(empty).config, null);
+});
+
+it('accepts the full OpenBench 3.0.8 tim_res value set', () => {
+  for (const timRes of ['6Hour', '8Day', 'climatology-month', 'climatology-year']) {
+    const parsed = parseOpenbenchConfig(generated({ timRes }));
+    assert.deepEqual(parsed.problems, [], timRes);
+    assert.equal(parsed.config!.project.timRes, timRes);
+  }
+  assert.equal(
+    parseOpenbenchConfig(generated({ timRes: '5Day' })).config,
+    null,
+    'an unsupported tim_res is refused rather than guessed',
+  );
 });

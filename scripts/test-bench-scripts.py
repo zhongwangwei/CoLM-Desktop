@@ -7,10 +7,12 @@ stdout 的 JSON / stderr 的错误 / 并出来的 NetCDF 与站点清单：
 
     python3 scripts/test-bench-scripts.py
 
-每类用例对应比较页审查报告第 2、4 条里的一个现状缺陷：
+每类用例对应比较页审查报告里的一个现状缺陷：
 主 history 与 tracer 同目录、每天一个文件、逐年文件、patch=2、单格 lat×lon 网格、
 element 向量、土层变量、同目录混前缀、0–360 经度、跨日界线、缺坐标 + 经纬度覆盖、
-站点名/路径带逗号、跨文件重复时刻按变量合并。
+站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：单时刻读频率元数据
+（source=metadata）、元数据与实测冲突以实测为准、亚小时输出粗化成 Hour、6 小时/8 天档位、
+以及落不到任何档位的步长明确报错。
 """
 
 import csv
@@ -128,6 +130,14 @@ def variable_names(dataset):
     return [name for name in dataset.data_vars]
 
 
+def show_tim_res(info):
+    """打印 C04 新增的字段：跑门禁时能直接看到判定来源、实测值与元数据值。"""
+    print(
+        f"    tim_res={info['tim_res']!r} source={info['tim_res_source']!r} "
+        f"metadata={info['tim_res_metadata']!r}"
+    )
+
+
 # ---------------------------------------------------------------- 造 NetCDF
 
 def times(start, count, step_minutes):
@@ -136,8 +146,20 @@ def times(start, count, step_minutes):
     return base + np.arange(count) * np.timedelta64(step_minutes, "m")
 
 
-def write_station(path, time_values, variables, patch=1, coordinate=(20.5, 110.25), extra_sizes=None):
-    """站点文件：patch 维 + 0 维 lat/lon（与 CoLM 的写出方式一致），变量维度是 time/patch/层。"""
+def write_station(
+    path,
+    time_values,
+    variables,
+    patch=1,
+    coordinate=(20.5, 110.25),
+    extra_sizes=None,
+    attrs=None,
+    time_attrs=None,
+):
+    """站点文件：patch 维 + 0 维 lat/lon（与 CoLM 的写出方式一致），变量维度是 time/patch/层。
+
+    attrs / time_attrs 用来在 dataset 全局属性或 time 变量属性上造频率元数据（C04 用例）。
+    """
     sizes = {"time": np.asarray(time_values).size}
     if patch is not None:
         sizes["patch"] = patch
@@ -148,6 +170,10 @@ def write_station(path, time_values, variables, patch=1, coordinate=(20.5, 110.2
         shape = tuple(sizes[dim] for dim in dims)
         data[name] = (dims, np.arange(max(1, int(np.prod(shape))), dtype=float).reshape(shape))
     dataset = xr.Dataset(data, coords={"time": np.asarray(time_values)})
+    if attrs:
+        dataset.attrs.update(attrs)
+    if time_attrs:
+        dataset["time"].attrs.update(time_attrs)
     if patch is not None and coordinate is not None:
         dataset["lat"] = np.float64(coordinate[0])
         dataset["lon"] = np.float64(coordinate[1])
@@ -309,6 +335,176 @@ def single_record_resolution_comes_from_filename(workdir):
     assert info["tim_res"] == "Month", info["tim_res"]
     assert info["tim_res_source"] == "filename", info["tim_res_source"]
     assert any("inferred" in warning for warning in info["warnings"]), info["warnings"]
+    assert info["tim_res_metadata"] is None, info["tim_res_metadata"]
+
+
+@test
+def single_time_step_metadata_beats_filename(workdir):
+    """单时刻 + 明确频率元数据：用元数据（source=metadata），不再按文件名后缀猜。"""
+    folder = os.path.join(workdir, "history")
+    # 文件名后缀 2000-01 按旧逻辑会猜 Month；dataset 属性明确写 daily，必须优先用元数据。
+    write_station(
+        os.path.join(folder, "MetaSolo_hist_2000-01.nc"),
+        times("2000-01-16T00:00", 1, 60),
+        {"f_xy_t": ("time", "patch")},
+        attrs={"frequency": "daily"},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["files"] == 1 and info["data_groupby"] == "single", info
+    assert info["tim_res"] == "Day", info["tim_res"]
+    assert info["tim_res_source"] == "metadata", info["tim_res_source"]
+    assert info["tim_res_metadata"] == "Day", info["tim_res_metadata"]
+    # 单时刻只剩元数据一条证据：warnings 要讲清来源，让界面提示用户确认。
+    assert any("frequency metadata" in warning for warning in info["warnings"]), info["warnings"]
+    assert not any("inferred from the file name" in warning for warning in info["warnings"]), info[
+        "warnings"
+    ]
+
+
+@test
+def frequency_metadata_spellings_are_understood(workdir):
+    """常见频率写法（大小写不敏感、含 CF cell_methods interval）都要落到正确档位。"""
+    cases = [
+        ({"frequency": "hourly"}, None, "Hour"),
+        ({"frequency": "1h"}, None, "Hour"),
+        ({"tim_res": "3600"}, None, "Hour"),
+        ({"frequency": 3600}, None, "Hour"),
+        ({"Frequency": "DAILY"}, None, "Day"),
+        ({"frequency": "1d"}, None, "Day"),
+        ({"frequency": "3-hourly"}, None, "3Hour"),
+        ({"frequency": "3Hour"}, None, "3Hour"),
+        (None, {"cell_methods": "time: mean (interval: 6 hours)"}, "6Hour"),
+        ({"frequency": "8-day"}, None, "8Day"),
+        ({"frequency": "monthly"}, None, "Month"),
+        ({"frequency": "mon"}, None, "Month"),
+        ({"frequency": "yearly"}, None, "Year"),
+        ({"frequency": "annual"}, None, "Year"),
+    ]
+    for index, (attrs, time_attrs, expected) in enumerate(cases):
+        folder = os.path.join(workdir, f"history-{index}")
+        write_station(
+            os.path.join(folder, "Spelling_hist_2000-01.nc"),
+            times("2000-01-16T00:00", 1, 60),
+            {"f_xy_t": ("time", "patch")},
+            attrs=attrs,
+            time_attrs=time_attrs,
+        )
+        info = inspect(folder)
+        show_tim_res(info)
+        assert info["tim_res"] == expected, (attrs, time_attrs, expected, info["tim_res"])
+        assert info["tim_res_source"] == "metadata", (attrs, time_attrs, info["tim_res_source"])
+        assert info["tim_res_metadata"] == expected, (attrs, time_attrs, info["tim_res_metadata"])
+
+
+@test
+def unusable_frequency_metadata_falls_back_to_filename(workdir):
+    """元数据写的频率落不到 OpenBench 档位：不硬映射，退回文件名推断并说明忽略了元数据。"""
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "Fine_hist_2000-01.nc"),
+        times("2000-01-16T00:00", 1, 60),
+        {"f_xy_t": ("time", "patch")},
+        attrs={"frequency": "30 minutes"},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "Month", info["tim_res"]  # 文件名后缀 2000-01
+    assert info["tim_res_source"] == "filename", info["tim_res_source"]
+    assert info["tim_res_metadata"] is None, info["tim_res_metadata"]
+    assert any("ignored frequency metadata" in warning for warning in info["warnings"]), info["warnings"]
+    assert any("inferred from the file name" in warning for warning in info["warnings"]), info["warnings"]
+
+
+@test
+def metadata_conflict_uses_measured_time_axis(workdir):
+    """采样与元数据冲突：以实测时间轴为准（source=time），两个值都输出并在 warnings 说明冲突。"""
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "Conflict_hist_2000-01.nc"),
+        times("2000-01-01T00:00", 4, 60),  # 实测每小时
+        {"f_xy_t": ("time", "patch")},
+        time_attrs={"cell_methods": "time: mean (interval: 6 hours)"},  # 文件自述 6 小时
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "Hour", info["tim_res"]
+    assert info["tim_res_source"] == "time", info["tim_res_source"]
+    assert info["tim_res_metadata"] == "6Hour", info["tim_res_metadata"]
+    conflict = [warning for warning in info["warnings"] if "frequency metadata says" in warning]
+    assert conflict, info["warnings"]
+    assert "6Hour" in conflict[0] and "sampled time axis is Hour" in conflict[0], conflict[0]
+
+
+@test
+def sub_hourly_output_is_coarsened_to_hour_with_warning(workdir):
+    """亚小时输出（CoLM DEF_HIST_FREQ=TIMESTEP 默认 1800 s）没有 OpenBench 档位：报 Hour 并警告。
+
+    本仓库 AU-Preston 等真实历史文件实测就是 1800 s；这里锁住"不因无法归类而整体报错"的行为，
+    同时保证它不是静默的（warnings 明确说输出比 1 小时更细）。
+    """
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "HalfHourly_hist_2000-01.nc"),
+        times("2000-01-01T00:00", 4, 30),
+        {"f_xy_t": ("time", "patch")},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "Hour", info["tim_res"]
+    assert info["tim_res_source"] == "time", info["tim_res_source"]
+    assert any("finer than 1 h" in warning for warning in info["warnings"]), info["warnings"]
+
+
+@test
+def six_hourly_history_maps_to_6hour(workdir):
+    """6 小时步长 -> OpenBench 3.0.8 的 6Hour；元数据一致时只作佐证（source 仍是 time）。"""
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "SixHourly_hist_2000-01.nc"),
+        times("2000-01-01T00:00", 4, 6 * 60),
+        {"f_xy_t": ("time", "patch")},
+        attrs={"frequency": "6-hourly"},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "6Hour", info["tim_res"]
+    assert info["tim_res_source"] == "time", info["tim_res_source"]
+    assert info["tim_res_metadata"] == "6Hour", info["tim_res_metadata"]
+    assert not any("frequency metadata says" in warning for warning in info["warnings"]), info["warnings"]
+
+
+@test
+def eight_day_history_maps_to_8day(workdir):
+    """8 天步长 -> OpenBench 3.0.8 的 8Day（旧实现的档位表里没有它）。"""
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "EightDay_hist_2000.nc"),
+        times("2000-01-01T00:00", 4, 8 * 24 * 60),
+        {"f_xy_t": ("time", "patch")},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "8Day", info["tim_res"]
+    assert info["tim_res_source"] == "time", info["tim_res_source"]
+    assert info["tim_res_metadata"] is None, info["tim_res_metadata"]
+
+
+@test
+def unmappable_step_is_an_explicit_error(workdir):
+    """5 天步长不对应任何 OpenBench tim_res：明确报错，不许猜成相邻档位。"""
+    folder = os.path.join(workdir, "history")
+    write_station(
+        os.path.join(folder, "FiveDay_hist_2000-01.nc"),
+        times("2000-01-01T00:00", 3, 5 * 24 * 60),
+        {"f_xy_t": ("time", "patch")},
+    )
+    stderr = inspect_stderr(folder)
+    assert "cannot map" in stderr, stderr
+    assert "432000" in stderr, stderr
+    # 报错要列出支持的档位，用户知道该手填什么。
+    for supported in ("3Hour", "6Hour", "8Day", "Month", "Year"):
+        assert supported in stderr, (supported, stderr)
 
 
 @test

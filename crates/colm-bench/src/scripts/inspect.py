@@ -16,6 +16,11 @@
   主变量一半 NaN。文件名里 `_hist_` 之后紧跟日期（YYYY/YYYY-MM/YYYY-MM-DD）的才是主 history。
 - 时间分辨率不能只看第一个文件的前两条记录：每天一个文件时每文件只有一条记录，旧逻辑落到默认
   月级；逐年数据也会被误判 Month。这里把主族所有文件的 time 采样出来排序取中位步长。
+- 频率判定先看实测时间轴，再看文件自述：dataset/time 属性里的 tim_res/time_res/frequency/
+  time_frequency/cell_methods 等是"元数据"，而 OpenBench 重采样的是文件里的时间轴。所以采样
+  得到步长时用实测（元数据一致只作佐证，冲突以实测为准并在 warnings 里给出两个值——静默采用
+  冲突元数据会让 OpenBench 按错误周期重采样）；只有整份数据只有一个时刻、采不出步长时才用明确
+  元数据（source=metadata，界面据此提示用户确认）；两者都没有才退回文件名后缀推断。
 - `data_groupby` 必须与 OpenBench 找文件的方式一致，只能按文件名后缀判；旧实现看第一个文件的
   尾部，同目录换一种分组就错。
 - 空间类型要显式分类：单格 lat×lon 网格也是 `grid`（旧逻辑「某维长度>1」把它当单点），
@@ -67,6 +72,73 @@ SUPPORTED_DIMS = {
 
 # 只归一化经度用；纬度不绕圈。
 DAY_SECONDS = 86400.0
+
+# 能从时间轴/频率元数据推断出来的 OpenBench 3.0.8 tim_res 档位。v3.0.8 的 config/loader.py 里
+# VALID_TIM_RES_VALUES 还含 climatology-month/climatology-year 与正则 Nmonth（如 2month），但那
+# 三者分别描述比较语义/不固定的日历步长，不能从一条时间轴可靠反推（理由见 classify_tim_res），
+# 所以这里只收"步长能解释"的七个档位。
+# 区间用显式 (下限秒, 上限秒, tim_res)：
+# - 要容得下真实日历抖动（月 28–31 天、年 365/366 天，闰日都算）；
+# - 又不能把相邻档位吞进来：7/9 天不落 8Day，2/4 小时不落 3Hour/6Hour，5 天不落任何档；
+# - Hour 的区间是 54–66 分钟。比它还细的输出（CoLM DEF_HIST_FREQ=TIMESTEP 默认 1800 s）没有
+#   任何 OpenBench 档位可选，由 decide_tim_res 显式粗化成 Hour 并写 warning，不在这里静默匹配。
+TIM_RES_STEP_RANGES = (
+    (3600.0 * 0.9, 3600.0 * 1.1, "Hour"),
+    (3.0 * 3600.0 * 0.9, 3.0 * 3600.0 * 1.1, "3Hour"),
+    (6.0 * 3600.0 * 0.9, 6.0 * 3600.0 * 1.1, "6Hour"),
+    (DAY_SECONDS * 0.9, DAY_SECONDS * 1.1, "Day"),
+    # 8 天合成产物通常是整 8 天；按 ±0.5 天留容差（而不是按比例放大），7 天/9 天不是 OpenBench 的 8Day。
+    (7.5 * DAY_SECONDS, 8.5 * DAY_SECONDS, "8Day"),
+    (27.0 * DAY_SECONDS, 32.0 * DAY_SECONDS, "Month"),
+    (350.0 * DAY_SECONDS, 380.0 * DAY_SECONDS, "Year"),
+)
+
+# 频率元数据可能落在 dataset 全局属性或 time 变量属性上，不同后处理工具写法不一；属性名按小写
+# 匹配（NetCDF 属性名大小写敏感，后处理工具常写成 Frequency/Time_Frequency）。
+# 顺序即同一来源内的优先顺序：更专门的 tim_res/time_res 先于泛化的 frequency，cell_methods 最后。
+FREQUENCY_ATTR_NAMES = (
+    "tim_res",
+    "tim_resolution",
+    "time_res",
+    "time_resolution",
+    "temporal_resolution",
+    "time_frequency",
+    "time_freq",
+    "frequency",
+    "freq",
+    "cell_methods",
+    "cell_method",
+)
+
+# 固定长度的频率单位（供 "1h"/"3-hourly"/"daily" 这类文字解析）。月/年单独判断：它们的步长随日历
+# 变化，不能折成固定秒数再分档（2 月与 8 月的"一个月"不是同一长度）。
+FREQUENCY_FIXED_UNITS = {
+    "s": 1.0,
+    "sec": 1.0,
+    "secs": 1.0,
+    "second": 1.0,
+    "seconds": 1.0,
+    "min": 60.0,
+    "mins": 60.0,
+    "minute": 60.0,
+    "minutes": 60.0,
+    "h": 3600.0,
+    "hr": 3600.0,
+    "hrs": 3600.0,
+    "hour": 3600.0,
+    "hours": 3600.0,
+    "hourly": 3600.0,
+    "d": DAY_SECONDS,
+    "day": DAY_SECONDS,
+    "days": DAY_SECONDS,
+    "daily": DAY_SECONDS,
+    "w": 7.0 * DAY_SECONDS,
+    "week": 7.0 * DAY_SECONDS,
+    "weeks": 7.0 * DAY_SECONDS,
+    "weekly": 7.0 * DAY_SECONDS,
+}
+FREQUENCY_MONTH_UNITS = ("mon", "mons", "month", "months", "monthly")
+FREQUENCY_YEAR_UNITS = ("y", "yr", "yrs", "year", "years", "yearly", "annual", "annually")
 
 
 def normalize_lon(value):
@@ -157,7 +229,7 @@ def collect_times(paths):
 
 
 def median_step_seconds(times):
-    """相邻记录的中位步长；只有一个时刻时返回 None（交给文件名兜底）。"""
+    """相邻记录的中位步长；只有一个时刻时返回 None（调用方再试频率元数据/文件名）。"""
     unique = np.unique(times)
     if unique.size < 2:
         return None
@@ -165,28 +237,176 @@ def median_step_seconds(times):
     return float(np.median(seconds))
 
 
-def classify_tim_res(seconds):
-    """中位步长 -> OpenBench 的 tim_res。
+def frequency_text(raw):
+    """频率属性值 -> 小写、空白折叠后的文本；读不出来给空串。"""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    return " ".join(str(raw).strip().lower().split())
 
-    OpenBench 3.0.8 只接受 Month/Day/Hour/Year/3Hour/6Hour/8Day（config/loader.py 的
-    VALID_TIM_RES_VALUES）；CoLM 的 DEF_HIST_FREQ 只会出 hourly/3 小时/日/月/年这几档。
-    月与年按日历步长给容差（闰年、28/31 天），落不到任何一档的步长（例如 5 天）明确报错，
-    不能猜成 Month 让它悄悄算错。
+
+def classify_seconds(seconds):
+    """步长秒数 -> 可推断的 tim_res；落不到任何档位返回 None（元数据解析用，不抛异常）。"""
+    for low, high, name in TIM_RES_STEP_RANGES:
+        if low <= seconds <= high:
+            return name
+    return None
+
+
+def classify_tim_res(seconds):
+    """实测中位步长 -> OpenBench 的 tim_res。
+
+    OpenBench 3.0.8（config/loader.py 的 VALID_TIM_RES_VALUES）接受
+    Month/Day/Hour/Year/3Hour/6Hour/8Day/climatology-month/climatology-year，外加 Nmonth（如
+    2month）。这里只返回"一条时间轴能解释"的档位：climatology-* 描述的是比较语义（同一份月气候
+    态文件的时间轴步长仍是 1 个月，但气候态语义不能从一个步长推出来），Nmonth 的日历步长不固定
+    （28–31 天 × N），按中位步长反推 N 会静默给错重采样周期——这些只能由用户显式选。落不到任何
+    档位（例如 5 天、2 小时、30 分钟）明确报错，不猜成相邻档位让它悄悄算错。
     """
-    if seconds <= 3600:
-        return "Hour"
-    if seconds <= 3 * 3600:
-        return "3Hour"
-    if seconds <= DAY_SECONDS:
-        return "Day"
-    if 27 * DAY_SECONDS <= seconds <= 32 * DAY_SECONDS:
-        return "Month"
-    if 350 * DAY_SECONDS <= seconds <= 380 * DAY_SECONDS:
-        return "Year"
+    tim_res = classify_seconds(seconds)
+    if tim_res is not None:
+        return tim_res
+    supported = "/".join(name for _, _, name in TIM_RES_STEP_RANGES)
     raise SystemExit(
-        f"cannot map a median history step of {seconds:.0f} s onto an OpenBench tim_res "
-        "(supported: Hour/3Hour/Day/Month/Year)"
+        f"cannot map the median history step of {seconds:.0f} s onto an OpenBench tim_res "
+        f"(supported: {supported}); OpenBench resamples the file's own time axis, so fix the "
+        "output frequency or enter tim_res manually"
     )
+
+
+def parse_frequency_text(raw):
+    """频率元数据原文 -> 规范 tim_res（Hour/3Hour/6Hour/Day/8Day/Month/Year）或 None。
+
+    认识的写法：hourly/1h/1hour/3600（纯数字按秒）、3-hourly/3 hourly、6-hourly、daily/1d/
+    1day、8-day/8d、monthly/mon/1month、yearly/annual/1yr，以及 CF cell_methods 里的
+    `interval: 6 hours`。只认能落到上面档位的写法；认不出返回 None（由调用方决定提示还是忽略），
+    绝不在这里硬映射——例如 30 分钟不能当成 Hour 猜，那会让 OpenBench 按错误周期重采样。
+    """
+    text = frequency_text(raw)
+    if not text:
+        return None
+    # 纯数字按秒："frequency: 3600"。
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text):
+        return classify_seconds(float(text))
+    # CF cell_methods 的 interval 最明确、最无歧义："time: mean (interval: 6 hours)"。
+    match = re.search(r"interval\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)", text)
+    if match is None:
+        # CF 的 "mean within days"/"mean over years" 是气候态聚合语义，不是固定输出步长，不猜。
+        if "within" in text or "over" in text or "climatolog" in text:
+            return None
+        # 折平 "3-hourly"/"6_hourly" 这类分隔写法；带多余词的（"daily mean"）整体视为不认识。
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)?\s*([a-z]+)", re.sub(r"[-_]+", " ", text))
+        if match is None:
+            return None
+    amount_text, unit = match.group(1), match.group(2)
+    if unit in FREQUENCY_FIXED_UNITS:
+        amount = float(amount_text) if amount_text is not None else 1.0
+        return classify_seconds(amount * FREQUENCY_FIXED_UNITS[unit])
+    # 月/年只接受 1 个：Nmonth 是 OpenBench 合法值但日历步长不固定，不能从文字里的 N 静默反推。
+    if unit in FREQUENCY_MONTH_UNITS and (amount_text is None or float(amount_text) == 1.0):
+        return "Month"
+    if unit in FREQUENCY_YEAR_UNITS and (amount_text is None or float(amount_text) == 1.0):
+        return "Year"
+    return None
+
+
+def frequency_metadata(dataset):
+    """dataset 与 time 变量上的频率元数据：[(来源, 属性名, 原始值, 规范 tim_res 或 None)]。
+
+    都收集而不是只取第一个：同一个文件里 dataset 与 time 自相矛盾时要能报出来（文件自述都打架
+    就更不能静默挑一个）。time 变量上的属性比 dataset 全局属性更具体，排在前面当首选。
+    """
+    found = []
+    for source, attrs in (("time", dataset["time"].attrs), ("dataset", dataset.attrs)):
+        lowered = {}
+        for key in attrs:
+            lowered.setdefault(str(key).lower(), key)
+        for name in FREQUENCY_ATTR_NAMES:
+            if name in lowered:
+                raw = attrs[lowered[name]]
+                found.append((source, name, raw, parse_frequency_text(raw)))
+    return found
+
+
+def decide_tim_res(step, metadata, suffixes):
+    """判定 tim_res -> (tim_res, source, metadata_tim_res, warnings)。
+
+    策略与理由：
+    1. 时间轴采样得到中位步长 -> 用实测，source=time。OpenBench 重采样的是文件里的时间轴，元数据
+       只是文件自述；一致时元数据只作佐证（source 仍是 time），冲突时必须以实测为准并把两个值都
+       写进 warnings —— 静默采用冲突元数据会让 OpenBench 按错误周期重采样却看不出任何异常，这比
+       明确报冲突更糟。
+    2. 采不到步长（整份数据只有一个时刻）但元数据明确 -> 用元数据，source=metadata。这是
+       "信息不足时要求确认"的落点：只剩文件自述一条证据，必须在 warnings 与 source 里讲清楚，
+       界面据此提示用户确认。
+    3. 都没有 -> 保留旧行为：按文件名日期后缀推断（source=filename，明确标注是推断）；文件名也
+       说不清就明确报错，不猜。
+    """
+    usable = [item for item in metadata if item[3] is not None]
+    distinct = []
+    for item in usable:
+        if item[3] not in distinct:
+            distinct.append(item[3])
+    inconsistent = []
+    if len(distinct) > 1:
+        detail = ", ".join(f"{item[1]}={item[2]!r}->{item[3]}" for item in usable)
+        inconsistent.append(
+            f"frequency metadata is inconsistent ({detail}); using "
+            f"{usable[0][1]}={usable[0][2]!r} as the declared frequency"
+        )
+    metadata_tim_res = usable[0][3] if usable else None
+
+    if step is not None:
+        warnings = list(inconsistent)
+        if step < TIM_RES_STEP_RANGES[0][0]:
+            # OpenBench 最细的档位只有 Hour，而 CoLM 的 DEF_HIST_FREQ=TIMESTEP 默认按 1800 s 写
+            # history（本仓库 AU-Preston 等 17 个历史文件实测中位步长 1800 s）。按 Hour 报是
+            # "只能这么报"的粗化，不是猜周期：对比目标恒为小时或更粗，重采样均值不因采样更密而错；
+            # 若硬报错，这类最常见的时间步输出就完全进不了比较。用 warnings 明说，别让用户以为
+            # 文件真是逐时的。
+            measured = "Hour"
+            warnings.append(
+                f"the history output is finer than 1 h (median step {step:.0f} s) but OpenBench has "
+                "no sub-hourly tim_res; reporting Hour, the finest supported resolution"
+            )
+        else:
+            measured = classify_tim_res(step)
+        if metadata_tim_res is not None and metadata_tim_res != measured:
+            warnings.append(
+                f"frequency metadata says {metadata_tim_res} "
+                f"({usable[0][1]}={usable[0][2]!r}) but the sampled time axis is {measured} "
+                f"(median step {step:.0f} s); using the sampled time axis because OpenBench reads "
+                "the files, not the metadata"
+            )
+        return measured, "time", metadata_tim_res, warnings
+
+    if usable:
+        warnings = [
+            "the history has a single time step; tim_res was taken from the frequency metadata "
+            f"({usable[0][1]}={usable[0][2]!r}) because there is no time axis to sample; "
+            "confirm it before running"
+        ]
+        warnings.extend(inconsistent)
+        return metadata_tim_res, "metadata", metadata_tim_res, warnings
+
+    ignored = [item for item in metadata if item[3] is None]
+    ignored_detail = ""
+    if ignored:
+        ignored_detail = "; frequency metadata " + ", ".join(
+            f"{item[1]}={item[2]!r}" for item in ignored
+        ) + " is not an OpenBench tim_res"
+    fallback = {suffix: classify_suffix(suffix) for suffix in suffixes}
+    guesses = {value for value in fallback.values() if value}
+    if len(guesses) != 1:
+        # 单时刻、元数据不可用、文件名也说不清：三条证据都没有，只能明确报错让用户手填。
+        raise SystemExit(
+            "the history has a single time step and the file name does not tell the resolution; "
+            "cannot infer tim_res" + ignored_detail
+        )
+    warnings = ["the history has a single time step; tim_res was inferred from the file name"]
+    if ignored:
+        detail = ", ".join(f"{item[1]}={item[2]!r}" for item in ignored)
+        warnings.append(f"ignored frequency metadata that is not an OpenBench tim_res ({detail})")
+    return guesses.pop(), "filename", None, warnings
 
 
 def classify_suffix(suffix):
@@ -466,23 +686,10 @@ def inspect(folder, prefix_argument):
     end = int(str(times.max())[:4])
 
     step = median_step_seconds(times)
-    tim_res_source = "time"
-    if step is None:
-        # 真的只有一个时刻（一个文件一条记录）：没有时间轴可采样，只能按文件名后缀猜一次，
-        # 并明确标出来源，界面/上层可以把它当提示而不是实测结论。
-        tim_res_source = "filename"
-        fallback = {suffix: classify_suffix(suffix) for suffix in suffixes}
-        guesses = {value for value in fallback.values() if value}
-        if len(guesses) != 1:
-            raise SystemExit(
-                "the history has a single time step and the file name does not tell the resolution; "
-                "cannot infer tim_res"
-            )
-        tim_res = guesses.pop()
-    else:
-        tim_res = classify_tim_res(step)
 
     with xr.open_dataset(main_paths[0]) as first:
+        # 频率判定需要 dataset/time 属性，和下面的空间/变量探测共用这一次打开。
+        metadata = frequency_metadata(first)
         spatial_type = spatial_type_of(first)
         patch = int(first.sizes["patch"]) if "patch" in first.sizes else None
         variables = []
@@ -515,6 +722,11 @@ def inspect(folder, prefix_argument):
             if lon_value is not None and lat_value is not None:
                 lon = normalize_lon(lon_value)
                 lat = lat_value
+
+    # 时间分辨率：实测时间轴优先，单时刻才用明确元数据，再退文件名推断（理由见 decide_tim_res）。
+    tim_res, tim_res_source, tim_res_metadata, tim_res_warnings = decide_tim_res(
+        step, metadata, suffixes
+    )
 
     blockers = []
     if spatial_type == "patch":
@@ -550,9 +762,7 @@ def inspect(folder, prefix_argument):
             }
         )
 
-    warnings = []
-    if tim_res_source == "filename":
-        warnings.append("the history has a single time step; tim_res was inferred from the file name")
+    warnings = list(tim_res_warnings)
     if spatial_type in ("station", "patch") and lon is None:
         warnings.append(
             "the history files have no coordinates; pass lon/lat when preparing a station file"
@@ -574,6 +784,9 @@ def inspect(folder, prefix_argument):
         "eyear": end,
         "tim_res": tim_res,
         "tim_res_source": tim_res_source,
+        # 文件自述的频率（规范化成 OpenBench tim_res），null 表示没有可用元数据；与 tim_res 不同
+        # 即为"元数据冲突、以实测为准"，界面可据此提示，两个值都在 JSON 里。
+        "tim_res_metadata": tim_res_metadata,
         "data_groupby": data_groupby,
         "extent": extent,
         "resolution": resolution,

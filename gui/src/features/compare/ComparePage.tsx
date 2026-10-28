@@ -17,6 +17,8 @@ import {
   benchErrorText,
   benchLogText,
   buildOpenbenchConfig,
+  COMPARISON_ITEM_CHOICES,
+  DEFAULT_COMPARISON_ITEMS,
   comparableVariables,
   commonYears,
   comparisonDir,
@@ -277,6 +279,9 @@ export default function ComparePage() {
   const [numCores, setNumCores] = useState('');
   const [metrics, setMetrics] = useState<string[]>(['bias', 'RMSE', 'correlation']);
   const [scores, setScores] = useState<string[]>(['Overall_Score']);
+  // OpenBench 的跨模拟比较阶段（comparison.enabled）：默认用 OpenBench 自己的两个默认图表；
+  // 一个都不勾表示不启用。写进配置后由 OpenBench 生成 comparisons/ 下的图。
+  const [comparisonItems, setComparisonItems] = useState<string[]>([...DEFAULT_COMPARISON_ITEMS]);
   const [metricOptions, setMetricOptions] = useState<MetricOption[]>(FALLBACK_METRICS);
   const [scoreOptions, setScoreOptions] = useState<MetricOption[]>(FALLBACK_SCORES);
   const [dialog, setDialog] = useState<RegisterDialog>(null);
@@ -1012,7 +1017,8 @@ export default function ComparePage() {
     void task(async () => {
       const outcome = await watch(host, pending);
       await afterWatch(host, outcome, async () => {
-        if (pending.kind === 'run' && pending.name) await fetchReport(host, pending.name);
+        if (pending.kind === 'run' && pending.name)
+          await fetchReport(host, pending.name, pending.job);
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1045,6 +1051,7 @@ export default function ComparePage() {
     numCores: numCores.trim() === '' ? null : Number(numCores),
     metrics,
     scores,
+    comparisonItems,
   });
   const machine = { host, openbenchRoot: status?.root ?? '', refRoot: scanDir };
   // 表单设计：`保存评估配置` 生成配置与站点清单时用它（GUI-04）。
@@ -1218,19 +1225,35 @@ export default function ComparePage() {
         const machine = host;
         // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
         assertNoUnresolvedJob(machine);
-        const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
+        const submitted = await invokeJson<{
+          job: string;
+          /** 正常是调度系统的提交结果；提交回执丢失但按作业号有界重查确认已接受/无法判断时是字符串 "unconfirmed"。 */
+          submitted?: unknown;
+          /** 远程 run 身份 == 作业号：服务器在 <project>/runs/<id>/ 冻结这次运行的配置。 */
+          run_id?: string;
+          config_sha?: string;
+        }>('bench_remote_run', {
           host: machine,
           name: project,
           config: frozen.config,
           sites: frozen.sites,
           refRoot: scanDir || null,
         });
+        // 回执丢了不等于提交失败：后端已按作业号确认/继续跟踪，这里照常 watch（不能报错或重复提交）。
+        if (submitted.submitted === 'unconfirmed')
+          setNotice(
+            t(
+              '服务器没有确认收到提交回执，已按作业号继续跟踪；若一直查不到记录，稍后再提交。',
+              'The server did not confirm receiving the submission; tracking continues by job id. If no record ever appears, submit again later.',
+            ),
+          );
+        const runId = submitted.run_id ?? submitted.job;
         const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
-        await afterWatch(machine, outcome, () => fetchReport(machine, project));
+        await afterWatch(machine, outcome, () => fetchReport(machine, project, runId));
         if (outcome.state === 'succeeded') {
           setLastRun({
-            runId: submitted.job,
-            configSha: '',
+            runId,
+            configSha: submitted.config_sha ?? '',
             fingerprint: frozen.fingerprint,
             at: frozen.at,
             report: null,
@@ -1244,8 +1267,9 @@ export default function ComparePage() {
   // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。
   // GUI-08：同一比较取回期间不重复触发；失败时已显示的报告原样保留，后端错误会说明本机旧报告
   // 仍是上次成功版本（`benchErrorText` 翻成当前语言给用户看）。
-  const fetchReport = async (machine: string, project: string) => {
-    const key = `${machine}\n${project}`;
+  const fetchReport = async (machine: string, project: string, runId?: string) => {
+    // 同一比较的不同 run 可以各自取回（报告与冻结配置按 run 绑定），所以去重键带上 run。
+    const key = `${machine}\n${project}\n${runId ?? ''}`;
     if (fetching.current.has(key))
       throw new Error(
         t(
@@ -1256,12 +1280,28 @@ export default function ComparePage() {
     fetching.current.add(key);
     const epoch = hostEpoch.current;
     try {
-      const fetched = await invokeJson<{ report: string | null }>('bench_remote_fetch', {
+      const fetched = await invokeJson<{
+        report: string | null;
+        run_id?: string | null;
+        config_sha?: string | null;
+        state?: string | null;
+        legacy?: boolean;
+      }>('bench_remote_fetch', {
         host: machine,
         name: project,
+        ...(runId ? { runId } : {}),
       });
       // 取回期间用户换看了别的机器：旧机器的报告不能显示到当前页面（GUI-05）。
       if (!stillCurrent(machine, epoch)) return;
+      // 服务器随报告一起回来的 run 身份：页面在重载前也能说明"这份报告属于哪次运行"。
+      if (fetched.run_id)
+        setLastRun((old) => ({
+          runId: fetched.run_id!,
+          configSha: fetched.config_sha ?? '',
+          fingerprint: old?.fingerprint ?? '',
+          at: new Date().toISOString(),
+          report: fetched.report,
+        }));
       if (fetched.report) await view(fetched.report);
     } finally {
       fetching.current.delete(key);
@@ -1326,7 +1366,7 @@ export default function ComparePage() {
         return;
       }
       if (current.job.kind === 'run' && current.job.name)
-        await fetchReport(machine, current.job.name);
+        await fetchReport(machine, current.job.name, current.job.job);
       setNotice(t('已确认作业成功结束', 'The job was confirmed as finished successfully'));
     });
   // 重连并继续等（GUI-07）：和正常跟踪同一条路径，成功后自动取回报告；再失联就仍回到"待核对"。
@@ -1338,7 +1378,7 @@ export default function ComparePage() {
       const outcome = await watch(machine, current.job);
       await afterWatch(machine, outcome, async () => {
         if (current.job.kind === 'run' && current.job.name)
-          await fetchReport(machine, current.job.name);
+          await fetchReport(machine, current.job.name, current.job.job);
       });
       if (outcome.state === 'succeeded')
         setNotice(t('服务器上的作业已结束', 'The server job has finished'));
@@ -1365,7 +1405,7 @@ export default function ComparePage() {
     task(async () => {
       const history = lastJob;
       if (!history?.name) return;
-      await fetchReport(history.host ?? host, history.name);
+      await fetchReport(history.host ?? host, history.name, history.job);
       setNotice(t('已取回报告', 'Report fetched'));
     });
 
@@ -2051,6 +2091,52 @@ export default function ComparePage() {
                       </div>
                     </div>
                   </Field>
+                  <Field
+                    label={t('跨模拟比较图表', 'Cross-simulation comparison charts')}
+                    hint={t(
+                      '勾选的图表写入配置的 comparison.items；一个都不勾表示不启用跨模拟比较，且至少两个模拟才会写入。HeatMap 至少需要一个评分、Taylor_Diagram 至少需要一个指标；其它图表缺数据时 OpenBench check 会明确报错。',
+                      'Ticked charts are written to comparison.items; ticking none disables the comparison phase, and it is only emitted with at least two simulations. HeatMap needs a score and Taylor_Diagram a metric; other charts fail loudly in openbench check when their inputs are missing.',
+                    )}
+                  >
+                    <div className="button-row">
+                      <Button
+                        variant="ghost"
+                        onClick={() =>
+                          setComparisonItems(COMPARISON_ITEM_CHOICES.map((item) => item.name))
+                        }
+                      >
+                        {t('全选', 'All')}
+                      </Button>
+                      <Button variant="ghost" onClick={() => setComparisonItems([])}>
+                        {t('清空（不启用）', 'Clear (disable)')}
+                      </Button>
+                    </div>
+                    <div className="metric-options">
+                      {COMPARISON_ITEM_CHOICES.map((item) => (
+                        <label key={item.name} className="param-check">
+                          <input
+                            type="checkbox"
+                            checked={comparisonItems.includes(item.name)}
+                            onChange={(e) =>
+                              setComparisonItems((old) =>
+                                e.target.checked
+                                  ? [...old, item.name]
+                                  : old.filter((name) => name !== item.name),
+                              )
+                            }
+                          />
+                          <span>{item.name}</span>
+                          {item.needs && (
+                            <span className="muted">
+                              {item.needs === 'metrics'
+                                ? t('需要指标', 'needs a metric')
+                                : t('需要评分', 'needs a score')}
+                            </span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  </Field>
                 </div>
               </Advanced>
 
@@ -2466,7 +2552,13 @@ export default function ComparePage() {
                         <td>
                           {/* 服务器上的报告先取回本机（报告、指标与配置），再在软件里看。 */}
                           {p.report && remote && (
-                            <Button onClick={() => void task(() => fetchReport(host, p.name))}>
+                            <Button
+                              onClick={() =>
+                                void task(() =>
+                                  fetchReport(host, p.name, p.latest_success?.run_id ?? undefined),
+                                )
+                              }
+                            >
                               {t('取回并查看', 'Fetch and view')}
                             </Button>
                           )}
@@ -2646,7 +2738,7 @@ export default function ComparePage() {
               value={reg.timRes}
               onChange={(e) => setReg((old) => ({ ...old, timRes: e.target.value }))}
             >
-              {['Hour', '3Hour', 'Day', 'Month', 'Year'].map((v) => (
+              {['Hour', '3Hour', '6Hour', '8Day', 'Day', 'Month', 'Year'].map((v) => (
                 <option key={v} value={v}>
                   {v}
                 </option>
@@ -2874,7 +2966,7 @@ export default function ComparePage() {
         {simForm.variables.map((row, at) => (
           // 行的身份只用位置：key 里带 row.variable 时每敲一个字都会重建这一行，输入框失去焦点
           // （审查报告：标准变量输入框逐字符失焦，React+jsdom 已复现）。
-          <div className="form-grid" key={at}>
+          <div className="form-grid" data-sim-variable-row={at} key={at}>
             <Field label={t('标准变量', 'Standard variable')}>
               <Input
                 data-sim-field="variables"
