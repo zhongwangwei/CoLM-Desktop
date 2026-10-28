@@ -38858,3 +38858,13 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `cargo test -p colm-agent --lib --bins -- --test-threads=1` → 374 passed / 1 ignored + 9 passed。
 - `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；`cargo fmt --all --check` → clean。
 - 未运行：真实 GitHub 网络/token 与真实 PR 分页（夹具/mock）、真实外部后端（Codex/Claude Code）进程内联网矩阵；Windows 路径与缓存损坏的真实文件系统场景。
+
+#### 本机 `target/` 过期工件造成的假失败（2026-10-29 复验）
+
+首次用 `cargo test --workspace` 复验时 colm-cli 报 5 个 `kW/m2 → W/m2` 转换失败，而同一份源码用 `cargo test -p colm-cli` 全绿。原因是本机 `target/debug/deps` 里混有**比源码 mtime 更新的旧 rlib**（`libcolm_forcing-3d52797…`、`libcolm_hist-360043e…` 等，实测其中没有 `kW/m2`/`ObsLabelPosition` 符号）：cargo 以 mtime 判新鲜，于是 workspace 构型链接到了过期工件。`cargo clean -p` 相关 crate（最终执行 `cargo clean`，清掉 47.7 GiB 过期工件）后重跑：
+
+- `cargo test --workspace --lib --bins -- --test-threads=1` → 全部 test target ok（colm-cli 685 passed、其余 crate 无失败）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；`cargo fmt --all --check` → clean。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` → 536 passed / 1 ignored；gui clippy/fmt clean。
+
+结论：那 5 个失败是构建缓存问题，不是代码回归。以后遇到"同一源码 `-p` 绿、`--workspace` 红"且报缺失符号，先按 crate 清理 `target` 再判断。
