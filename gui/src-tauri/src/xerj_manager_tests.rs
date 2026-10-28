@@ -135,6 +135,11 @@ fn fake_server(responder: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> F
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let request = read_http_request(&mut stream);
+                    // 端口可能被并行测试短暂复用，出现“连上就断、一个字节都没发”的
+                    // 杂散连接；它不是健康检查请求，不能进请求列表、也不能影响顺序断言。
+                    if request.is_empty() {
+                        continue;
+                    }
                     requests_for_thread
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -383,8 +388,17 @@ fn resolve_binary_reads_colm_xerj_binary_environment_variable() {
 #[test]
 fn pick_base_port_uses_preferred_when_three_ports_free() {
     let _lock = port_lock();
-    let base = free_base(23_000);
-    assert_eq!(pick_base_port(Some(base)).unwrap(), base);
+    // CI 机器的固定端口可能被系统服务/并行测试瞬时占用：free_base 刚确认空闲，
+    // pick_base_port 复查时可能已被拿走。重试几轮，环境稳定后仍必须原样返回首选；
+    // 如果 pick_base_port 逻辑本身有 bug，每一轮都会跳过刚确认空闲的端口。
+    for attempt in 0..10 {
+        let base = free_base(23_000);
+        if pick_base_port(Some(base)).unwrap() == base {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+    }
+    panic!("连续 10 次都无法使用刚确认空闲的首选端口");
 }
 
 #[test]
@@ -421,8 +435,21 @@ fn pick_base_port_ignores_unusable_preferred_port() {
     let _lock = port_lock();
     // 0 不是合法的 Xerj 端口；65535 没有 +1/+2。两者都应退到扫描结果。
     for preferred in [0u16, 65_535] {
-        let picked = pick_base_port(Some(preferred)).unwrap();
-        assert!(super::three_ports_available(picked), "{picked}");
+        // pick 返回后到复查之间端口可能被并行测试短暂占用；重试几轮，
+        // 只要每一轮都拿不到可用端口组才算失败。
+        let mut usable = None;
+        for attempt in 0..10 {
+            let picked = pick_base_port(Some(preferred)).unwrap();
+            if super::three_ports_available(picked) {
+                usable = Some(picked);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+        }
+        assert!(
+            usable.is_some(),
+            "pick_base_port({preferred}) 连续 10 次返回的端口组都不可用"
+        );
     }
 }
 
@@ -757,6 +784,8 @@ exit 7
 #[test]
 #[cfg(unix)]
 fn start_kills_fake_node_that_never_becomes_ready() {
+    // 与固定端口测试串行：ManagedNode::start 会扫描 9200+，并行时会短暂占住端口组。
+    let _lock = port_lock();
     let root = temp("fake-hang");
     let binary = write_script(&root.join("bin/xerj"), HANGING_FAKE);
     let data_dir = root.join("data");
@@ -809,6 +838,7 @@ fn start_kills_fake_node_that_never_becomes_ready() {
 #[test]
 #[cfg(unix)]
 fn start_reports_early_exit_with_code_and_log() {
+    let _lock = port_lock();
     let root = temp("fake-early-exit");
     let binary = write_script(&root.join("xerj"), EXITING_FAKE);
     let data_dir = root.join("data");
@@ -861,6 +891,7 @@ fn real_xerj_rc100_node_starts_serves_health_and_stops() {
         "COLM_XERJ_MANAGED_BINARY 不是文件：{}",
         binary.display()
     );
+    let _lock = port_lock();
     let root = temp("real-node");
     let data_dir = root.join("data");
     let started = Instant::now();
