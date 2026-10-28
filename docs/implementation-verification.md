@@ -38492,3 +38492,59 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 6. 跨仓库映射只在**本次已返回**的上游提交范围内做，并受 limit/cross cap 截断；路径迁移只做唯一 basename candidate；vendor 中 Desktop 自有改动标 unmapped；不遍历 fork、不解析完整传播链。
 7. GitHub 讨论只取 PR body + 有界 comments（分页上限），未读完时 `complete=false`；作者动机只来自这些原文，代码推断由回答方明确标注。
 8. 本轮没有调用真实模型 API，因此“模型实际按新工具回答”的端到端未跑；工具调用链由 14 个 fake-CLI/mock-HTTP 工具测试与真实 CLI 契约 smoke 覆盖。未运行 SSH、科学模拟或大型评测。
+
+## 变量历史证据链修复 H01–H06（2026-10-28，审查报告 CoLM-AI-Review-6322d82）
+
+按审查报告第一批（H01–H06）修复变量历史/PR 证据链的正确性与后端一致性；只做现有 Rust 工具与提示词，不迁移 Agent 框架、不加 H07–H09/S01–S02 的 UI/预算/科研证据工作。先确认六项在当前 HEAD 仍存在，再各做最小修改与窄范围夹具回归。
+
+### H01 冻结模型 endpoint 不能被子仓库 ref 切换到别的提交
+
+- 旧行为：Git-backed 冻结源先采用传入 ref/HEAD，模型记录的 commit 只是 fallback；冻结 A 的仓库里另有 future=B 时，`selected + ref=B` 会把 B 当 A 的历史。
+- 新行为：frozen_model 先验证并绑定记录的 commit（`git cat-file -e <sha>^{commit}`）；`--ref` 解析到不同 SHA 直接拒绝（错误说明需独立仓库查询），解析不到也拒绝；recorded commit 不可读 → `history:"unavailable"` + notes，绝不回退 HEAD/当前分支。无 .git 快照按既有 model-commit→Desktop 历史 fallback 保留。
+- 回归：`frozen_model_ref_cannot_switch_to_another_commit`（本地 clone --local --no-hardlinks，A + origin/future=B；ref SHA 与名字都拒绝，合法 A/无 ref 停在 A，recorded 不可读 unavailable）。
+- 未覆盖：recorded commit 与冻结文件内容一致性仍由模型冻结流程/内容 hash 负责，本工具只验证 Git 对象与端点绑定。
+
+### H02 跨仓库 verified 只认“明确可核验关联”，同 blob 多候选不猜唯一来源
+
+- 旧行为：路径一致 + 上游提交 blob 与 Desktop 首次添加 blob 相等即标 verified；上游 A→B→revert A 时可能选到未来才发生的 C，把更早的导入归给 C。
+- 新行为：路径/basename、相同 blob、Desktop 首次添加只构成 candidate；verified 额外要求 **Desktop import commit 的提交说明出现某候选的完整 40 hex SHA**（basis `import-message-sha`）且该候选 blob == import blob。同一文件多个 blob 相等的返回提交会全部列入 `candidates`（sha/author/时间/summary/blob_equal/blob，上限 10），歧义时 `state=candidate`、`upstream.commit=null`，notes 明说不声称唯一来源/传播方向。
+- 回归：`cross_revert_scenario_lists_ambiguous_candidates_without_a_unique_source`（A→B→revert A，Desktop 中间 import A：candidate、upstream.commit=null、candidates 含 A/C blob_equal=true 与 B false）；`cross_maps_upstream_change_to_verified_desktop_import` 等改为 import 说明写完整 SHA 后 verified。
+- 真实 CLI 夹具 smoke：无引用时输出 `state=candidate`、`upstream.commit=null`、候选含 A/C（blob_equal=true）与 B；import 说明写入 A 完整 SHA 后输出 `verified`、`basis=[path,import-commit,blob-equal,import-message-sha]`、upstream.commit=A。均为测试夹具数据。
+- 未覆盖：verified 只认提交说明完整 SHA，不解析 PR 标题/短 SHA/merge 记录；provenance 记录级关联可后续扩展。
+
+### H03 修改理由：只返回原文候选，不自动判定 documented
+
+- 旧行为：CLI 把“有正文/标题≥3 词”当 documented；GitHub 把非空 PR body 或第一条非空评论当 documented，空 body 未读讨论写 not_recorded。
+- 新行为：CLI `reason_for_message` 与 Agent GitHub `build_reason` 都输出原文候选：`status` 仅 `unchecked`（有原文候选，未判定）/`not_recorded`（所读范围完整且无候选）/`unavailable`（讨论未读、失败或截断），附 `evidence_candidates[{source,author,url,scope,excerpt}]` 与 `coverage{body_read,discussion_requested,discussion_read,discussion_complete}`。PR body/评论、中文原文保留；模板正文、三个英文单词、机器人 CI、礼貌评论都只算候选。GitHub 缓存 schema v2，旧缓存按未命中重查，旧 documented 结论不返回。工具说明与 prompt 同步：documented 只能由上层引用明确原因句+出处，inferred 仅代码推断。
+- 回归：CLI `commit_message_is_unchecked_evidence_not_documented`（短英文 unchecked、中文原因保留 excerpt、空说明 not_recorded）；Agent 新增 `a_three_word_template_body_is_a_candidate_not_a_documented_reason`、`bot_and_courtesy_comments_are_candidates_not_documented_motivation`、`an_explicit_chinese_reason_stays_verbatim_as_a_candidate`、`a_truncated_discussion_with_candidates_is_unchecked_but_incomplete`，并更新既有单 PR/空正文/截断/失败断言。
+- 真实 CLI smoke：`history-commit` 的 reason 为 `status=unchecked`、`evidence_candidates` 1 条（完整提交说明摘录）、`files=4`。
+- 未覆盖：Rust 不做“是否明确原因句”的语义判断（按审查要求留给上层模型引用）；`unchecked` 不等于无原因。
+
+### H04 同一 commit 的多文件/hunk 证据不再被丢弃
+
+- 旧行为：`map.entry(sha).or_insert(commit)` 只保留同一 SHA 第一次出现的文件；blame 遇到已有 SHA 直接跳过，后续文件证据丢失。
+- 新行为：按 SHA 合并 `files`（按 path）、hunk 去重（相同 old/new 位置与代码视为同一证据）、relevance 取并集（blame 对已有 SHA 补 relevance），保留首次发现的 author/time/summary；合并后统一应用 commit 文件数/hunk 数/行数/字符预算，并把截断计入 commit.truncated 与顶层 limits。
+- 回归：`one_commit_changing_two_files_keeps_both_files_and_dedupes_hunks`（单 commit 同时改 Rust+Fortran 同名变量：1 commit、2 files、各 1 个去重 hunk、relevance 含 pickaxe-G/S）。
+
+### H05 本地未推送 commit 可继续读取详情
+
+- 旧行为：source_history(selected) 能列出本地未推送 SHA，但 commit_details 只接受 desktop/colm_upstream，显式拒绝 selected。
+- 新行为：`history-commit` 支持 `--repository selected --source DIR`，在显式受验证本地源码仓库读取完整 40 位小写 SHA 的 commit（可读未推送对象），输出 `repository{kind:"selected_source", key:"selected", path, identity{state,root,remote}}`，不伪装 desktop/colm_upstream、不 push/fetch。Agent `commit_details` 接受 `repository=selected`：有冻结模型时经 `verify_source` 用其 source_dir，无模型时用 `--source app`（CLI 解析顺序：显式/环境 → managed Desktop → 当前检出，失败明确报错）；模型不能提供任意路径。`source_history(selected)` 无模型时也发 `--source app`，保证 track→commit 同一来源。`commit_pull_requests` 仍只允许两个规范仓库，selected 本地提交明确报“无 GitHub 仓库/PR unavailable”。
+- 回归：CLI `history_commit_selected_reads_an_unpushed_local_commit`、`selected_source_app_alias_resolves_the_application_checkout`；Agent `commit_details_selected_reads_the_verified_frozen_source_and_labels_it`、`commit_details_selected_without_a_model_uses_the_application_source`、`commit_details_selected_refuses_a_changed_frozen_source`、`source_history_selected_without_a_model_resolves_the_application_source`、`commit_pull_requests_reports_selected_local_commits_as_having_no_github_repository`。
+- 真实 CLI smoke：`history-commit --repository selected --source <repo> --sha HEAD` → kind=selected_source、identity verified、parents=1、reason unchecked；临时仓库里未推送 commit 也可读，notes 明说未 push 无 PR 证据。
+- 未覆盖：可变 workspace 的受信任 source descriptor 仍未建模（无模型时只能走 app 检出）；无 .git 冻结源且 SHA 只在原工作区时仍按 unavailable 表达。
+
+### H06 GitHub 网络权限与搜索客户端解耦
+
+- 旧行为：`commit_pull_requests` 用 `ctx.web.is_none()` 判断离线；外部后端（Codex/Claude Code）没有 WebAccess，用户打开联网仍被误判离线，refresh 也不联网。
+- 新行为：`ToolContext` 新增可信 `github_network: bool`（默认 false，失败/未配置时宁可只读缓存）；工具离线判断改为 `!github_network`，`network.enabled` 反映它。`Configure` 用纯 helper `configure_network(web_search)` 设置该字段，Builtin 与外部后端同一路径，取用户联网设置；WebAccess 只表示内置后端搜索客户端能力。关闭时 refresh=true 也零 HTTP；仍使用 GitHub 专用 token 与 owner/repo 常量。
+- 回归：工具层 Builtin-like（web=Some + github_network=false）→ 离线零 HTTP 且 refresh 也零；外部后端-like（web=None + github_network=true）→ mock HTTP 在线；开关关闭时只读缓存。bin 测试 `github_network_permission_follows_the_configure_web_setting_for_every_backend` 验证真实 Configure 构造来源而非手工 web=Some。
+- 未覆盖：真实外部后端（Codex/Claude Code）进程内联网矩阵未跑；其 MCP bridge 使用同一 ToolContext 字段，由本测试与构造路径覆盖。
+
+### 本轮验证（真实执行）
+
+- `cargo fmt --all --check` → exit 0；`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2996 passed / 0 failed / 16 ignored**；其中 `colm-cli` **559**（24 个 history 夹具测试）、`colm-agent` **370 passed + 1 ignored**（14+ 工具测试、20+ GitHub mock、历史证据/H06 新增回归；ignored 为 live GitHub smoke）；`xtask` 37。
+- GUI/Tauri 本轮未改：沿用上一轮 `gui/src-tauri` 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约（本轮无 GUI 代码变更）。
+- 真实 CLI/夹具 smoke：H02 无引用→candidate+候选、引用完整 SHA→verified（夹具数据）；H03 真实 commit reason unchecked+evidence_candidates；H05 selected selected_source+unchecked；H06 由工具层 Builtin/外部矩阵与 bin 构造测试覆盖。
+- 未运行：真实 GitHub/TLS/token、真实 Codex/Claude Code 后端、真实 SSH/模拟/模型 API；H07–H09（PR 分页/缓存恢复/首用 UI）、S01–S02、U01–U05 不在本轮范围。审查报告明确这些属后续批次。
