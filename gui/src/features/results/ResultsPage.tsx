@@ -281,6 +281,8 @@ export default function ResultsPage({
     done: number;
     total: number;
   } | null>(null);
+  // 跨项目比较：手填一个运行目录（不在当前项目的清单里）。
+  const [externalRun, setExternalRun] = useState('');
   // 站点清单按内容做依赖：`state.cases` 每次渲染都可能是新数组，直接放进 effect 依赖会无限重查。
   const caseDirsKey = state.cases.map((entry) => entry.dir).join('\n');
   const [evaluation, setEvaluation] = useState<
@@ -679,23 +681,32 @@ export default function ResultsPage({
             'Every run needs an observation file; fill the shared one and apply it to all rows',
           ),
         );
-      // 项目运行清单已经一次查回来了就直接核对；直接手填路径（助手/契约）且清单不可用时才退回逐站点清单。
+      // 项目运行清单已经一次查回来了就直接核对；不在清单里的（跨项目/手填路径）只按运行目录反推
+      // 所属算例、查那一个算例，不再扫全项目。
       let sources: Run[] = projectRuns;
-      if (!sources.length) {
-        const inventories = await boundedMap(
-          [...new Set([caseDir, ...state.cases.map((c) => c.dir)].filter(Boolean))],
-          2,
-          (path) => invokeJson<Run[]>('model_case_runs', { dir: path }),
+      const unknown = entries.filter(
+        (entry) => !sources.some((run) => run.run_case === entry.run.run_case),
+      );
+      if (unknown.length) {
+        const dirs = [
+          ...new Set(
+            unknown
+              .map((entry) => caseDirOfRunPath(entry.run.run_case))
+              .filter((dir): dir is string => !!dir),
+          ),
+        ];
+        const inventories = await boundedMap(dirs, 2, (dir) =>
+          invokeJson<Run[]>('model_case_runs', { dir }).catch(() => []),
         );
         if (!current()) return;
-        sources = inventories.flat();
+        sources = [...sources, ...inventories.flat()];
       }
       for (const entry of entries) {
         if (!sources.some((r) => r.run_case === entry.run.run_case))
           throw new Error(`Not a recorded run copy: ${entry.run.run_case}`);
       }
       setComparisonProgress({ done: 0, total: entries.length });
-      const rows = await boundedMap(entries, 2, async (entry) => {
+      const rows = await boundedMap(entries, 4, async (entry) => {
         const values = await invokeJson<Metric[]>('metrics', {
           case: entry.run.run_case,
           obs: entry.obs.trim(),
@@ -901,6 +912,33 @@ export default function ResultsPage({
       groups.set(key, group);
     }
     return [...groups.entries()].map(([dir, group]) => ({ dir, ...group }));
+  }
+  /** 运行目录 `<算例>/runs/<编号>` 的所属算例：比较时只查这些算例，不再扫全项目。 */
+  function caseDirOfRunPath(runCase: string) {
+    const parts = runCase.replace(/[\\/]+$/, '').split(/[\\/]/);
+    const at = parts.lastIndexOf('runs');
+    return at > 0 ? parts.slice(0, at).join('/') : null;
+  }
+  function addExternalComparisonRun() {
+    const path = externalRun.trim();
+    if (!path) return;
+    setComparisonEntries((current) =>
+      current.some((entry) => entry.run.run_case === path)
+        ? current
+        : [
+            ...current,
+            {
+              run: {
+                run_case: path,
+                case_dir: caseDirOfRunPath(path) ?? '',
+                case_name: caseDirOfRunPath(path)?.split(/[\\/]/).at(-1) ?? path,
+                status: 'recorded',
+              } as ProjectRun,
+              obs: obs.trim(),
+            },
+          ],
+    );
+    setExternalRun('');
   }
   function toggleComparisonRun(run: ProjectRun) {
     setComparisonEntries((current) =>
@@ -1626,7 +1664,7 @@ export default function ResultsPage({
         </div>
         <ActionButton
           action="result-run-comparison"
-          label={tr('比较多条运行', 'Compare several runs')}
+          label={tr('比较多选运行', 'Compare selected runs')}
           kind="click"
           disabled={busy}
           run={() => {
@@ -1634,7 +1672,7 @@ export default function ResultsPage({
             setTab('comparison');
           }}
         >
-          {tr('比较多条运行', 'Compare several runs')}
+          {tr('比较多选运行', 'Compare selected runs')}
         </ActionButton>
       </Dialog>
       <Dialog
@@ -1916,6 +1954,27 @@ export default function ResultsPage({
                 ))}
               </div>
             )}
+            <Field
+              label={tr(
+                '从其它项目添加运行（填运行目录，如 /path/站点/runs/<编号>；按目录反推算例，不扫描项目）',
+                'Add a run from another project (run folder, e.g. /path/station/runs/<id>; the case is inferred from the path)',
+              )}
+            >
+              <div className="browse-input">
+                <Input
+                  value={externalRun}
+                  disabled={busy}
+                  placeholder={tr('运行目录', 'Run folder')}
+                  onChange={(e) => setExternalRun(e.target.value)}
+                />
+                <ActionButton
+                  action="comparison-add-external"
+                  label={tr('添加', 'Add')}
+                  disabled={!externalRun.trim() || busy}
+                  run={addExternalComparisonRun}
+                />
+              </div>
+            </Field>
             <Field
               label={tr(
                 '共用观测文件（选一次可应用到所有行；服务器项目的观测填服务器路径）',

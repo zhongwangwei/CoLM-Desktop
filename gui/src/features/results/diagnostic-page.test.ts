@@ -68,6 +68,14 @@ function harness(
   const invokeJson = async (command: string, args: Record<string, unknown>) => {
     requests.push({ command, args });
     if (command === 'model_case_runs' && args.dir === '/empty') return [];
+    if (command === 'model_case_runs' && args.dir === '/othercase')
+      return [
+        {
+          run_case: '/othercase/runs/b',
+          version: { id: 'official', revision: 3 },
+          status: 'succeeded',
+        },
+      ];
     if (command === 'model_case_runs')
       return [
         // The ledger's imported placeholder comes first and has no output of its own.
@@ -601,6 +609,7 @@ test('评估、比较与数据目录页签只登记该页签真实的按钮', as
   await h.tab('comparison');
   assert.deepEqual(actionIds(h), [
     'compare-sites',
+    'comparison-add-external',
     'comparison-apply-observation',
     'export-comparison-csv',
     'result-overview',
@@ -769,4 +778,54 @@ test('multi-station comparison exports the metrics with their conditions', async
   assert.match(csv, /\/case\/\.colm\/runs\/a/);
   assert.match(csv, /f_lfevpa/);
   assert.match(csv, /\/obs\/compare\.nc/);
+});
+
+test('a run from another project joins the comparison without scanning the project', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  const inputs = (node: unknown): { props: Record<string, unknown> }[] => {
+    if (Array.isArray(node)) return node.flatMap(inputs);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    return [
+      ...(element.type === 'Input' ? [{ props: element.props }] : []),
+      ...inputs(element.props?.children),
+    ];
+  };
+  const external = inputs(h.tree()).find((input) => input.props.placeholder === 'Run folder');
+  assert.ok(external, 'an external run folder can be entered');
+  (external.props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '/othercase/runs/b' },
+  });
+  await h.render();
+  await h.action('comparison-add-external');
+  h.field('result-observation')!.set!('/obs/compare.nc');
+  await h.render();
+  await h.action('comparison-apply-observation');
+  const scans = () => h.requests.filter((request) => request.command === 'model_case_runs');
+  const before = scans().length;
+  await h.action('compare-sites');
+  const added = scans().slice(before);
+  // 只按运行目录反推的算例查一次，不扫整个项目。
+  assert.deepEqual(
+    added.map((request) => request.args?.dir),
+    ['/othercase'],
+  );
+  const cells = (node: unknown): string[] => {
+    if (Array.isArray(node)) return node.flatMap(cells);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    if (element.type === 'td')
+      return [String((element.props.children ?? []).filter((x) => x != null).join(''))];
+    return cells(element.props?.children);
+  };
+  assert.ok(cells(h.tree()).includes('f_lfevpa'), 'the external run produced metrics');
 });
