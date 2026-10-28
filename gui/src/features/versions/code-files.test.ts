@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { isContentConflict, workspaceErrorText } from './workspace-errors';
 Object.defineProperty(globalThis, 'localStorage', {
@@ -42,10 +43,11 @@ test('writing files registers commit actions while deletion and discarding stay 
 });
 
 function pageSource(): ts.SourceFile {
-  const path = new URL('./CodeFiles.tsx', import.meta.url);
+  // Windows 上 URL.pathname 是 "/D:/..."，直接交给 readFileSync 会拼成 "D:\D:\..."。
+  const path = fileURLToPath(new URL('./CodeFiles.tsx', import.meta.url));
   return ts.createSourceFile(
-    path.pathname,
-    readFileSync(path.pathname, 'utf8'),
+    path,
+    readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TSX,

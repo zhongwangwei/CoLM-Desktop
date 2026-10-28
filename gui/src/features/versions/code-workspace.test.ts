@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 type Call = { command: string; args: Record<string, unknown> };
 
 /** 从页面源码里抽出一个函数/箭头函数声明的真实函数体（仓库惯例：别用源码字符串断言代替行为）。 */
 function bodyOf(file: string, name: string): string {
-  const path = new URL(file, import.meta.url);
+  // Windows 上 URL.pathname 是 "/D:/..."，直接交给 readFileSync 会拼成 "D:\D:\..."。
+  const path = fileURLToPath(new URL(file, import.meta.url));
   const source = ts.createSourceFile(
-    path.pathname,
-    readFileSync(path.pathname, 'utf8'),
+    path,
+    readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TSX,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { Button, Card, Notice } from '../../components/ui';
 Object.defineProperty(globalThis, 'localStorage', {
@@ -44,10 +45,10 @@ const RESULT_PIECES = [
 ] as const;
 
 function pagePieces() {
-  const path = new URL('./PreparationPage.tsx', import.meta.url);
+  const path = fileURLToPath(new URL('./PreparationPage.tsx', import.meta.url));
   const source = ts.createSourceFile(
-    path.pathname,
-    readFileSync(path.pathname, 'utf8'),
+    path,
+    readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TSX,
@@ -345,10 +346,10 @@ test('a split table points at the per-site finalize step instead of a non-existe
 
 /** 从页面源码抽真实函数/箭头函数执行（与 page-results.test.ts 同一套做法）。 */
 function pageCallback(name: string, context: Record<string, unknown>) {
-  const path = new URL('./PreparationPage.tsx', import.meta.url);
+  const path = fileURLToPath(new URL('./PreparationPage.tsx', import.meta.url));
   const source = ts.createSourceFile(
-    path.pathname,
-    readFileSync(path.pathname, 'utf8'),
+    path,
+    readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TSX,
