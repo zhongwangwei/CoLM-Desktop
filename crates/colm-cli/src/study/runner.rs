@@ -32,9 +32,38 @@ pub struct RunOptions<'a> {
 
 pub(crate) struct StudyRunLock {
     path: PathBuf,
-    identity: ProcessIdentity,
+    record: RunLockRecord,
     stop: mpsc::Sender<()>,
     heartbeat: Option<std::thread::JoinHandle<()>>,
+}
+
+/// GUI 为“一次本地运行”生成的 ID 经这个环境变量传给 CLI。
+///
+/// 冻结模型修订时 GUI 只启动外层 CLI，真正调度的是它委托出来的内层 CLI（见
+/// `crate::study_version::delegate`）：研究锁记的是内层 PID，GUI 手里却只有外层 PID。
+/// 进程树停掉后，收尾接口拿外层 PID 去核对锁必然对不上，于是出现“进程已停、锁还在、
+/// 取消状态没落盘”。运行 ID 与 PID 无关，启动与收尾两次调用由 GUI 传同一个值：它能证明
+/// “这把锁是这次运行写的”，而别的运行的锁没有这个 ID，仍然会被拒绝。
+pub(crate) const RUN_ID_ENV: &str = "COLM_STUDY_RUN_ID";
+
+/// `run.lock` 的内容。
+///
+/// 旧版本写的是裸 [`ProcessIdentity`]；`flatten` 让那种记录仍能反序列化，否则升级后第一次
+/// 收尾会把所有在跑的旧研究当成“调度器变了”。`run_id` 缺省表示这把锁不是本次运行写的
+/// （旧 CLI、手工启动、或根本不是 GUI 的运行），调用方必须继续用 PID 核对。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RunLockRecord {
+    #[serde(flatten)]
+    owner: ProcessIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+}
+
+fn run_id_from_env() -> Option<String> {
+    std::env::var(RUN_ID_ENV)
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty() && id.len() <= 128)
 }
 
 const RUN_LOCK_HEARTBEAT_SECONDS: u64 = 10;
@@ -65,35 +94,39 @@ impl StudyRunLock {
             }
         };
         let identity = supervisor_identity();
-        if let Err(error) = write_run_lock_identity(&path, &mut file, &identity) {
+        let record = RunLockRecord {
+            owner: identity,
+            run_id: run_id_from_env(),
+        };
+        if let Err(error) = write_run_lock_record(&path, &mut file, &record) {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
         let heartbeat_path = path.clone();
-        let owner = identity.clone();
+        let heartbeat_record = record.clone();
         let (stop, stopped) = mpsc::channel();
         // ponytail: MSRV 1.85 has no portable std file lock; this short lease
         // prevents confirmed crash recovery from deleting a live scheduler lock.
         let heartbeat = std::thread::spawn(move || {
-            let mut identity = identity;
+            let mut record = heartbeat_record;
             while matches!(
                 stopped.recv_timeout(std::time::Duration::from_secs(RUN_LOCK_HEARTBEAT_SECONDS)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
                 // A lock that now names another scheduler (ours was judged stale and
                 // cleared) is not ours to refresh.
-                if !owns_run_lock(&heartbeat_path, &identity) {
+                if !owns_run_lock(&heartbeat_path, &record) {
                     break;
                 }
-                identity.heartbeat_unix = unix_now();
-                if replace_run_lock(&heartbeat_path, &identity).is_err() {
+                record.owner.heartbeat_unix = unix_now();
+                if replace_run_lock(&heartbeat_path, &record).is_err() {
                     break;
                 }
             }
         });
         Ok(Self {
             path,
-            identity: owner,
+            record,
             stop,
             heartbeat: Some(heartbeat),
         })
@@ -107,25 +140,25 @@ impl Drop for StudyRunLock {
             let _ = heartbeat.join();
         }
         // Remove only our own lock, never one a replacement scheduler created after ours.
-        if owns_run_lock(&self.path, &self.identity) {
+        if owns_run_lock(&self.path, &self.record) {
             let _ = fs::remove_file(&self.path);
         }
     }
 }
 
-fn owns_run_lock(path: &Path, identity: &ProcessIdentity) -> bool {
-    run_lock_owner(path).ok().flatten().is_some_and(|owner| {
-        owner.pid == identity.pid
-            && owner.started_unix == identity.started_unix
-            && owner.argv_sha256 == identity.argv_sha256
+fn owns_run_lock(path: &Path, record: &RunLockRecord) -> bool {
+    run_lock_record(path).ok().flatten().is_some_and(|owner| {
+        owner.owner.pid == record.owner.pid
+            && owner.owner.started_unix == record.owner.started_unix
+            && owner.owner.argv_sha256 == record.owner.argv_sha256
     })
 }
 
 /// Rewrite the lease through a sibling file and a rename, so readers never see half a record.
-fn replace_run_lock(path: &Path, identity: &ProcessIdentity) -> Result<()> {
+fn replace_run_lock(path: &Path, record: &RunLockRecord) -> Result<()> {
     let staged = path.with_extension(format!("lock.{}", std::process::id()));
     let mut file = fs::File::create(&staged)?;
-    write_run_lock_identity(&staged, &mut file, identity)?;
+    write_run_lock_record(&staged, &mut file, record)?;
     drop(file);
     fs::rename(&staged, path).inspect_err(|_| {
         let _ = fs::remove_file(&staged);
@@ -133,19 +166,15 @@ fn replace_run_lock(path: &Path, identity: &ProcessIdentity) -> Result<()> {
     Ok(())
 }
 
-fn write_run_lock_identity(
-    path: &Path,
-    file: &mut fs::File,
-    identity: &ProcessIdentity,
-) -> Result<()> {
-    file.write_all(&serde_json::to_vec(identity)?)?;
+fn write_run_lock_record(path: &Path, file: &mut fs::File, record: &RunLockRecord) -> Result<()> {
+    file.write_all(&serde_json::to_vec(record)?)?;
     file.sync_all()
         .with_context(|| format!("cannot sync {}", path.display()))
 }
 
 fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
     let path = study_dir.join("run.lock");
-    let Some(owner) = run_lock_owner(&path)? else {
+    let Some(owner) = run_lock_record(&path)?.map(|record| record.owner) else {
         return Ok(());
     };
     if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
@@ -156,7 +185,7 @@ fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
     fs::remove_file(&path).with_context(|| format!("cannot remove stale {}", path.display()))
 }
 
-fn run_lock_owner(path: &Path) -> Result<Option<ProcessIdentity>> {
+fn run_lock_record(path: &Path) -> Result<Option<RunLockRecord>> {
     let mut last = Vec::new();
     for attempt in 0..2 {
         let bytes = match fs::read(path) {
@@ -2036,10 +2065,10 @@ pub fn status_state(study_dir: &Path) -> Result<Option<StudyState>> {
 }
 
 fn scheduler_is_live(study_dir: &Path) -> Result<bool> {
-    let Some(owner) = run_lock_owner(&study_dir.join("run.lock"))? else {
+    let Some(record) = run_lock_record(&study_dir.join("run.lock"))? else {
         return Ok(false);
     };
-    scheduler_owner_live(&owner)
+    scheduler_owner_live(&record.owner)
 }
 
 /// The lock owner may still write checkpoints: its heartbeat is fresh, or its PID is alive and
@@ -2140,35 +2169,56 @@ fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
     Ok(changed)
 }
 
-/// GUI 已确认对应进程树退出后再落盘；PID 必须对上，避免迟到的取消请求
-/// 误关掉后来启动的调度器。
+/// GUI 已确认对应进程树退出后再落盘。
+///
+/// 认领这把锁的证据有两种，缺一不可地防住“迟到的取消请求误关后来启动的调度器”：
+/// - 与启动时同一个 [`RUN_ID_ENV`] 值：冻结模型修订的研究由内层 CLI 持锁，GUI 只有外层
+///   PID，这是唯一跨进程对得上的身份；
+/// - 没有运行 ID 时退回到 `expected_pid == 锁里的 PID`（旧 CLI、非委托运行）。
+///
+/// 两种都对不上就拒绝，绝不因为“进程已经停了”就清掉别人的锁。
 pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState> {
-    finalize_cancel_impl(study_dir, Some(expected_pid))
+    finalize_cancel_impl(study_dir, Some(expected_pid), run_id_from_env().as_deref())
 }
 
 pub fn finalize_idle_cancel(study_dir: &Path) -> Result<StudyState> {
-    finalize_cancel_impl(study_dir, None)
+    finalize_cancel_impl(study_dir, None, None)
 }
 
-fn finalize_cancel_impl(study_dir: &Path, expected_pid: Option<u32>) -> Result<StudyState> {
+fn finalize_cancel_impl(
+    study_dir: &Path,
+    expected_pid: Option<u32>,
+    expected_run_id: Option<&str>,
+) -> Result<StudyState> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
     let lock_path = study_dir.join("run.lock");
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
         .map(|loaded| loaded.payload)
         .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
-    let had_lock = match run_lock_owner(&lock_path)? {
-        Some(owner) => {
-            if let Some(expected_pid) = expected_pid {
-                if owner.pid != expected_pid {
-                    bail!(
-                        "Study scheduler changed while cancelling: expected PID {expected_pid}, found {}",
-                        owner.pid
-                    );
-                }
+    let had_lock = match run_lock_record(&lock_path)? {
+        Some(record) => {
+            // 带运行 ID 时严格按运行 ID 认锁。若两个都带上却只比 PID：冻结修订的运行里
+            // 内层 PID 不可能等于外层 PID；而 PID 复用之后，另一个运行的调度器可能恰好
+            // 拿到同一个号，迟到的取消就会把它误杀。
+            let claimed = match (expected_pid, expected_run_id) {
+                // 空闲收尾（GUI 没有登记到进程）只用于“调度器已确认停止”的收尾，
+                // 它本来就不带启动身份，不能因此把任何在跑的锁都当自己的。
+                (None, None) => true,
+                (_, Some(expected)) => record.run_id.as_deref() == Some(expected),
+                (Some(pid), None) => record.owner.pid == pid,
+            };
+            if !claimed {
+                bail!(
+                    "Study scheduler changed while cancelling: expected PID {}, found {}",
+                    expected_pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "none".into()),
+                    record.owner.pid
+                );
             }
-            if scheduler_process_alive(owner.pid)? {
-                bail!("Study scheduler PID {} is still running", owner.pid);
+            if scheduler_process_alive(record.owner.pid)? {
+                bail!("Study scheduler PID {} is still running", record.owner.pid);
             }
             true
         }
@@ -5540,8 +5590,14 @@ pub(crate) fn save_version(
     opts: &crate::Opts,
 ) -> Result<colm_model::FrozenRevision> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
-    let (_lock, manifest, member) = verified_member(&study_dir, member_id)?;
-    let input_identity = super::model::verified_inputs(&manifest)?;
+    // 远程取回的研究原始输出留在服务器上，本地 `verified_member` 会因成员目录不存在而失败。
+    // 统一入口按研究记录分流：本地仍走 `verified_member`，远程经 SSH 现场核验成员输出与证据；
+    // 返回的锁要一直活到写回结束（`verified` 不能提前解构丢弃），否则核验完到落盘之间
+    // 本机可以再启动一次研究运行。
+    let verified = crate::remote_cmd::remote_study::verified_study_member(&study_dir, member_id)?;
+    let manifest = &verified.manifest;
+    let member = &verified.member;
+    let input_identity = super::model::verified_inputs(manifest)?;
     let store = crate::model_version::registry(opts)?;
     let pin = crate::study_version::pinned(&study_dir)?;
     if pin.as_ref().is_some_and(|p| p.model_revision.is_none()) {
@@ -5577,7 +5633,7 @@ pub(crate) fn save_version(
     let values = manifest.spec.member_namelist_values(&member.parameters);
     let result = (|| -> Result<colm_model::FrozenRevision> {
         super::materialize::member_case(
-            &super::model::base_case(&manifest, first)?,
+            &super::model::base_case(manifest, first)?,
             &staging,
             "model-export",
             "calibrated",
@@ -7021,6 +7077,124 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// 冻结模型修订时持锁的是委托出来的内层 CLI：GUI 手里只有外层 PID，锁里记的是内层 PID。
+    /// 收尾必须能凭“一次运行 ID”认领自己的锁，否则进程停了、锁还在、取消状态永远落不了盘。
+    #[test]
+    fn a_delegated_run_cancel_claims_its_lock_by_run_id_not_by_the_outer_pid() {
+        let exited_pid = exited_child_pid();
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-delegated-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let mut running = crate::study::state::TaskState {
+            member: "m000001".into(),
+            site: "site".into(),
+            case_dir: "/case".into(),
+            status: TaskStatus::Running,
+            stage: Some("colm".into()),
+            reason: None,
+            objective: None,
+            validation_objective: None,
+            process: Some(supervisor_identity()),
+        };
+        let mut queued = running.clone();
+        queued.member = "m000002".into();
+        queued.status = TaskStatus::Queued;
+        running.process.as_mut().unwrap().pid = exited_pid;
+        let state = StudyState::new("s".into(), [running, queued]).unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        // 内层 CLI（exited_pid）已经随进程组退出，锁里记它的 PID 与这次运行的 ID。
+        let inner = RunLockRecord {
+            owner: ProcessIdentity {
+                pid: exited_pid,
+                ..supervisor_identity()
+            },
+            run_id: Some("run-outer-to-inner".into()),
+        };
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&inner).unwrap()).unwrap();
+        // 外层 PID 是 GUI 登记的那个，和锁里的内层 PID 必然不同。
+        let outer_pid = std::process::id().wrapping_add(1);
+
+        // 只给外层 PID、不给运行 ID：认不出锁，拒绝（不能因为进程停了就清别人的锁）。
+        let error = finalize_cancel_impl(&dir, Some(outer_pid), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Study scheduler changed while cancelling"),
+            "{error}"
+        );
+        assert!(dir.join("run.lock").is_file());
+
+        // 带上这次运行的 ID：锁就是这次运行托管的，可以收尾。
+        let cancelled =
+            finalize_cancel_impl(&dir, Some(outer_pid), Some("run-outer-to-inner")).unwrap();
+        assert_eq!(cancelled.status, StudyStatus::Cancelled);
+        assert!(cancelled.tasks.values().all(|task| {
+            task.status == TaskStatus::Cancelled && task.stage.is_none() && task.process.is_none()
+        }));
+        assert!(!dir.join("run.lock").exists());
+        // 收尾之后马上能重新拿锁开跑：没有留下僵尸锁，也不会被另一个调度器误认。
+        let lock = StudyRunLock::acquire(&dir).unwrap();
+        drop(lock);
+        assert!(!dir.join("run.lock").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 迟到的取消不能拿另一个运行的 ID 去关掉现在这把锁。
+    #[test]
+    fn a_stale_cancel_with_another_runs_id_leaves_the_new_lock_alone() {
+        let exited_pid = exited_child_pid();
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-stale-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Queued,
+                stage: None,
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let record = RunLockRecord {
+            owner: ProcessIdentity {
+                pid: exited_pid,
+                ..supervisor_identity()
+            },
+            run_id: Some("run-new".into()),
+        };
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = finalize_cancel_impl(&dir, Some(12345), Some("run-old"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Study scheduler changed while cancelling"),
+            "{error}"
+        );
+        assert!(dir.join("run.lock").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn status_marks_exited_running_tasks_for_review_when_no_scheduler_is_live() {
         let exited_pid = exited_child_pid();
@@ -7141,24 +7315,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lock = StudyRunLock::acquire(&dir).unwrap();
         let path = dir.join("run.lock");
-        assert!(owns_run_lock(&path, &lock.identity));
-        replace_run_lock(&path, &lock.identity).unwrap();
+        assert!(owns_run_lock(&path, &lock.record));
+        replace_run_lock(&path, &lock.record).unwrap();
         assert!(
-            owns_run_lock(&path, &lock.identity),
+            owns_run_lock(&path, &lock.record),
             "atomic rewrite keeps a valid record"
         );
         // A replacement scheduler takes over after ours was judged stale.
-        let mut successor = lock.identity.clone();
-        successor.pid = lock.identity.pid.wrapping_add(1);
-        successor.started_unix += 1;
+        let mut successor = lock.record.clone();
+        successor.owner.pid = lock.record.owner.pid.wrapping_add(1);
+        successor.owner.started_unix += 1;
         std::fs::write(&path, serde_json::to_vec(&successor).unwrap()).unwrap();
         drop(lock);
         assert!(
             path.is_file(),
             "the old owner left the successor's lock alone"
         );
-        let owner = run_lock_owner(&path).unwrap().unwrap();
-        assert_eq!(owner.pid, successor.pid);
+        let owner = run_lock_record(&path).unwrap().unwrap();
+        assert_eq!(owner.owner.pid, successor.owner.pid);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

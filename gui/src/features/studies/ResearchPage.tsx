@@ -1090,7 +1090,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'Open a study, choose a build configuration and confirm the frozen ranges and budget',
         ),
       );
-    if (remotePermissions.exists)
+    // 已确认失败的服务器记录允许“修复后重提”：后端会先归档旧记录再提交（P1-9 B）。
+    // 后端分类说服务器上已经没有记录（submit）时也放行：本机 envelope 可能还留着上一轮读到的
+    // record 副本，不能让它把已经归档掉的记录又当成“有服务器提交”。
+    if (remotePermissions.exists && !remotePermissions.resubmit && !remotePermissions.submit)
       throw new Error(
         tr(
           '这个研究已经提交到服务器，请核对或取回服务器上的结果，不要再开一次运行',
@@ -1277,18 +1280,35 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       remoteRequest.current++;
       const answer = remoteStudyReply(await invokeJson('remote_study_cancel', { studyDir }));
       if (current()) setRemoteReply(answer);
+      // 取消请求被受理/被拒绝都要重新读一次分类：下一步提示与关闭条件按最新状态给。
+      if (current()) await readRemoteStatus();
       return answer;
     });
   const closeRemote = async () => {
-    // 丢失的服务器作业不会有退出码；关闭只清本机远程记录，结果不可能再取回（R25）。
+    // 关闭动作随状态不同：已取回/已失败结束是“归档”（结果要么已在本机、要么本来就没有），
+    // 丢失/无法核对才是“确认丢失”。文案和按钮标签保持一致，避免用户以为还能取回。
+    const archive = remotePermissions.fetched
+      ? tr(
+          '服务器结果已经取回。归档后这条远程记录改名留档，这个本机研究可以重新提交或在本机运行。',
+          'The server results were fetched. Archiving renames the remote record for the audit trail and lets this local study be submitted or run again.',
+        )
+      : remotePermissions.resubmit || remotePermissions.terminal
+        ? tr(
+            '服务器作业已经结束但失败或没有可取的完整结果。归档后这条远程记录改名留档，可以修正后重新提交或在本机运行。',
+            'The server job ended but failed (or has no complete fetchable result). Archiving renames the remote record for the audit trail; fix the settings and submit again, or run locally.',
+          )
+        : tr(
+            '确认服务器作业已经丢失？关闭后不能取回结果，这条本机研究可以重新提交或在本机运行；远端记录会改名留档。',
+            'Confirm the server job is lost? After closing, its results cannot be fetched; this local study can be submitted or run locally again. The remote record is archived.',
+          );
     if (
-      !(await askConfirm(
-        tr(
-          '确认服务器作业已经丢失？关闭后不能取回结果，这条本机研究可以重新提交或在本机运行；远端记录会改名留档。',
-          'Confirm the server job is lost? After closing, its results cannot be fetched; this local study can be submitted or run locally again. The remote record is archived.',
-        ),
-        { confirmLabel: tr('确认丢失并关闭', 'Confirm lost and close') },
-      ))
+      !(await askConfirm(archive, {
+        confirmLabel: remotePermissions.fetched
+          ? tr('归档记录', 'Archive record')
+          : remotePermissions.resubmit || remotePermissions.terminal
+            ? tr('归档失败的记录', 'Archive failed record')
+            : tr('确认丢失并关闭', 'Confirm lost and close'),
+      }))
     )
       return null;
     return task(async (current) => {
@@ -1338,6 +1358,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           ],
         }));
         await readStatus();
+        // 取回后分类里的 fetched 会变，按钮（再取回/归档）必须按新状态重算。
+        await readRemoteStatus();
         notify(
           tr(
             '服务器研究结果已取回；科学证据另行核对',
@@ -2380,7 +2402,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           setError(String(e));
           throw e;
         }),
-      permissions.run && !!runKernel && confirmed && !launching && !remotePermissions.exists,
+      permissions.run &&
+        !!runKernel &&
+        confirmed &&
+        !launching &&
+        (!remotePermissions.exists || remotePermissions.resubmit || remotePermissions.submit),
       true,
     ),
     ...(!remotePermissions.exists
@@ -2438,7 +2464,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           ),
           action(
             'remote-study-close',
-            tr('确认服务器作业已丢失…', 'Mark the server job as lost…'),
+            remotePermissions.closeLabel
+              ? tr(remotePermissions.closeLabel.zh, remotePermissions.closeLabel.en)
+              : tr('确认服务器作业已丢失…', 'Mark the server job as lost…'),
             closeRemote,
             remotePermissions.close && !launching,
             true,
@@ -3520,7 +3548,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 运行、恢复原来只在可用时才渲染：打开一个待运行的研究，"开始运行"整颗不存在，勾了核对才凭空出现
   //（GUI 审查 C-29）。这两个按状态该出现就出现，不可用时灰着并说明原因；其余仍只在可用时出现。
   const shownWhenDisabled: Record<string, boolean> = {
-    'study-run': permissions.run && !remotePermissions.exists,
+    'study-run':
+      permissions.run &&
+      (!remotePermissions.exists || remotePermissions.resubmit || remotePermissions.submit),
     'study-resume': permissions.resume && !remotePermissions.exists,
   };
   const controls = lifecycleActions.filter(
@@ -4752,20 +4782,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </p>
             )}
             {/* 打开的已有研究还没核对过：原来勾选框只在第 3 步，这一步的"开始运行""恢复"一直不出现。 */}
-            {!confirmed && !remotePermissions.exists && (permissions.run || permissions.resume) && (
-              <label className="param-check study-confirm">
-                <input
-                  type="checkbox"
-                  checked={confirmed}
-                  disabled={busy || launching}
-                  onChange={(e) => setConfirmed(e.target.checked)}
-                />
-                {tr(
-                  '我已核对这个研究冻结的参数范围和预算（运行会真的跑这么多次模拟）',
-                  "I reviewed this study's frozen ranges and budget (running really performs this many simulations)",
-                )}
-              </label>
-            )}
+            {!confirmed &&
+              (!remotePermissions.exists || remotePermissions.resubmit) &&
+              (permissions.run || permissions.resume) && (
+                <label className="param-check study-confirm">
+                  <input
+                    type="checkbox"
+                    checked={confirmed}
+                    disabled={busy || launching}
+                    onChange={(e) => setConfirmed(e.target.checked)}
+                  />
+                  {tr(
+                    '我已核对这个研究冻结的参数范围和预算（运行会真的跑这么多次模拟）',
+                    "I reviewed this study's frozen ranges and budget (running really performs this many simulations)",
+                  )}
+                </label>
+              )}
             <div className="button-row">
               {renderActions(controls)}
               {renderActions([byId('study-status')!].filter((a) => a.enabled))}
@@ -4802,7 +4834,24 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                     )}
                   </Notice>
                 )}
-                {remotePermissions.fetch && (
+                {remotePermissions.nextStep && (
+                  <Notice
+                    tone={
+                      remotePermissions.outcome === 'succeeded' ||
+                      remotePermissions.outcome === 'running'
+                        ? undefined
+                        : 'warning'
+                    }
+                  >
+                    {tr(remotePermissions.nextStep.zh, remotePermissions.nextStep.en)}
+                  </Notice>
+                )}
+                {remotePermissions.fetchNote && (
+                  <Notice tone="warning">
+                    {tr(remotePermissions.fetchNote.zh, remotePermissions.fetchNote.en)}
+                  </Notice>
+                )}
+                {remotePermissions.fetch && !remotePermissions.fetchNote && (
                   <Notice>
                     {tr(
                       `服务器已退出（退出码 ${remoteReply?.status?.exit_code ?? '—'}）。取回时会核对研究身份和各成员，再读结果。`,

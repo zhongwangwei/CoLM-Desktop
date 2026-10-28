@@ -2048,6 +2048,476 @@ pub async fn remote_fetch(
 #[path = "remote_tests.rs"]
 mod remote_tests;
 
+// ---- 远程研究的失败阶段与可执行下一步（P1-9 B）----------------------------------------------
+//
+// 构建/创建研究失败时作业非零退出、服务器上没有研究目录。旧组合里：原记录阻止重提、界面允许
+// 取回、取回却要求研究目录存在（报一句 no such directory 就结束）、关闭记录又拒绝所有已结束
+// 作业 —— 用户没有任何出口。这里只在 GUI 侧读 CLI 已经公开的字段做分类，不改命令行接口。
+//
+// 只读的字段（`remote-study-status` 的回复）：`record`/`pending` 是否存在、作业
+// `status.state` / `exit_code` / `phase` / `detail`、服务器上有没有研究会话目录（`study` 非 null）。
+// 限制：`phase` 是作业脚本写的三个英文阶段名（preparing the engine / creating the Study /
+// running the Study），旧作业或缺阶段标记时只能按“有没有研究目录”粗分；更细的原因要到日志尾部看。
+
+/// 服务器作业停在哪个阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemoteStudyOutcome {
+    /// 提交从未到达服务器：没有作业，也没有研究目录。
+    NotSubmitted,
+    /// 作业存在，但在写第一个阶段标记前就退出：提交/启动阶段失败。
+    StartFailed,
+    /// 阶段停在 `preparing the engine`：服务器构建引擎失败。
+    BuildFailed,
+    /// 阶段停在 `creating the Study`：研究创建失败，服务器上没有研究目录。
+    StudyCreateFailed,
+    /// 阶段已到 `running the Study`：研究建好、成员运行失败（可以取回诊断结果）。
+    MemberRunFailed,
+    Succeeded,
+    Cancelled,
+    Lost,
+    Running,
+    Unknown,
+}
+
+/// 界面上按钮的放行矩阵。存档条件在 [`remote_study_recovery`] 里按状态算好，界面只照着开关。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RemoteStudyPermissions {
+    /// 没有服务器记录，可以直接提交。
+    pub submit: bool,
+    /// 有“已确认失败”的终态记录：GUI 先归档旧记录再重新提交（修复后重提）。
+    pub resubmit: bool,
+    pub cancel: bool,
+    /// 已确认结束且没有取回过：成功结果或失败诊断都从这里取回。
+    pub fetch: bool,
+    /// 可以归档关闭记录（不改服务器，只把本机记录改名留档）。
+    pub close: bool,
+    pub poll: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct RemoteStudyRecovery {
+    pub outcome: RemoteStudyOutcome,
+    /// 作业已确认结束（有退出码）；`lost`/`unknown` 不算确认。
+    pub terminal: bool,
+    /// 作业状态是 `finished`（有退出码）。归档时用它区分“CLI close 会拒绝的已结束作业”。
+    pub finished: bool,
+    /// 服务器上已经有研究会话目录（取回的前提）。
+    pub study_created: bool,
+    pub fetched: bool,
+    pub exit_code: Option<i32>,
+    pub phase: Option<String>,
+    pub job: Option<String>,
+    pub permissions: RemoteStudyPermissions,
+    pub next_zh: String,
+    pub next_en: String,
+    /// 取回会被拒绝时的可行动说明（没有研究目录、作业还在跑等）；能取回时为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetch_error_zh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetch_error_en: Option<String>,
+}
+
+fn object_at<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value.get(key).filter(|value| value.is_object())
+}
+
+fn job_state(status: Option<&Value>) -> Option<&str> {
+    status
+        .and_then(|status| status.get("state"))
+        .and_then(Value::as_str)
+}
+
+/// 分类结果给日志/拒绝文案用的中文名。
+fn study_outcome_zh(outcome: RemoteStudyOutcome) -> &'static str {
+    match outcome {
+        RemoteStudyOutcome::NotSubmitted => "从未提交",
+        RemoteStudyOutcome::StartFailed => "启动失败",
+        RemoteStudyOutcome::BuildFailed => "构建失败",
+        RemoteStudyOutcome::StudyCreateFailed => "研究创建失败",
+        RemoteStudyOutcome::MemberRunFailed => "成员运行失败",
+        RemoteStudyOutcome::Succeeded => "成功结束",
+        RemoteStudyOutcome::Cancelled => "已取消",
+        RemoteStudyOutcome::Lost => "已丢失",
+        RemoteStudyOutcome::Running => "运行中",
+        RemoteStudyOutcome::Unknown => "无法核对",
+    }
+}
+
+fn study_outcome_en(outcome: RemoteStudyOutcome) -> &'static str {
+    match outcome {
+        RemoteStudyOutcome::NotSubmitted => "never submitted",
+        RemoteStudyOutcome::StartFailed => "startup failed",
+        RemoteStudyOutcome::BuildFailed => "build failed",
+        RemoteStudyOutcome::StudyCreateFailed => "Study creation failed",
+        RemoteStudyOutcome::MemberRunFailed => "member run failed",
+        RemoteStudyOutcome::Succeeded => "finished",
+        RemoteStudyOutcome::Cancelled => "cancelled",
+        RemoteStudyOutcome::Lost => "lost",
+        RemoteStudyOutcome::Running => "running",
+        RemoteStudyOutcome::Unknown => "unconfirmed",
+    }
+}
+
+/// 失败阶段：先认作业脚本写的阶段标记，认不出时按“服务器上有没有研究目录”粗分。
+fn study_failure_stage(phase: Option<&str>, study_created: bool) -> RemoteStudyOutcome {
+    match phase {
+        Some("preparing the engine") => RemoteStudyOutcome::BuildFailed,
+        Some("creating the Study") => RemoteStudyOutcome::StudyCreateFailed,
+        Some("running the Study") => RemoteStudyOutcome::MemberRunFailed,
+        // 作业体只写这三个阶段；不认识的状态（旧作业、脚本中途死掉）按有没有研究目录归类：
+        // 没有目录说明还没走到成员运行，属于创建/启动前的失败。
+        _ if study_created => RemoteStudyOutcome::MemberRunFailed,
+        _ => RemoteStudyOutcome::StartFailed,
+    }
+}
+
+/// 把 `remote-study-status` 的回复分类成“到了哪一步、下一步能做什么”。
+pub(crate) fn remote_study_recovery(reply: &Value) -> RemoteStudyRecovery {
+    let record = object_at(reply, "record");
+    let pending = object_at(reply, "pending");
+    let status = object_at(reply, "status");
+    let state = job_state(status);
+    let exit_code = status
+        .and_then(|status| status.get("exit_code"))
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let phase = status
+        .and_then(|status| status.get("phase"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|phase| !phase.is_empty())
+        .map(str::to_owned);
+    let detail = status
+        .and_then(|status| status.get("detail"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let study_created = reply.get("study").is_some_and(Value::is_object);
+    let fetched = record
+        .and_then(|record| record.get("fetched_at"))
+        .is_some_and(|fetched| !fetched.is_null());
+    let job = record
+        .and_then(|record| record.get("job"))
+        .or_else(|| pending.and_then(|pending| pending.get("job")))
+        .and_then(Value::as_str)
+        .filter(|job| !job.is_empty())
+        .map(str::to_owned);
+    let exists = record.is_some() || pending.is_some();
+    let finished = state == Some("finished");
+    let terminal = finished && exit_code.is_some();
+    let cancelled = detail.to_ascii_uppercase().contains("CANCELLED");
+    let outcome = if reply.get("outcome").and_then(Value::as_str) == Some("never_submitted") {
+        RemoteStudyOutcome::NotSubmitted
+    } else if matches!(state, Some("queued" | "running")) {
+        RemoteStudyOutcome::Running
+    } else if finished {
+        match exit_code {
+            Some(0) => RemoteStudyOutcome::Succeeded,
+            _ => study_failure_stage(phase.as_deref(), study_created),
+        }
+    } else if state == Some("lost") && cancelled {
+        RemoteStudyOutcome::Cancelled
+    } else if state == Some("lost") {
+        RemoteStudyOutcome::Lost
+    } else {
+        RemoteStudyOutcome::Unknown
+    };
+    let failed = matches!(
+        outcome,
+        RemoteStudyOutcome::StartFailed
+            | RemoteStudyOutcome::BuildFailed
+            | RemoteStudyOutcome::StudyCreateFailed
+            | RemoteStudyOutcome::MemberRunFailed
+    );
+    let permissions = RemoteStudyPermissions {
+        submit: !exists,
+        resubmit: record.is_some() && failed,
+        cancel: record.is_some() && matches!(outcome, RemoteStudyOutcome::Running) && !fetched,
+        fetch: terminal && !fetched,
+        close: if fetched {
+            exists
+        } else {
+            match outcome {
+                // 成功结束必须先取回：关闭本地记录是学生研究结果的唯一入口，不能先丢。
+                RemoteStudyOutcome::Succeeded => false,
+                RemoteStudyOutcome::Running | RemoteStudyOutcome::NotSubmitted => false,
+                // 已结束但失败、已取消、已丢失、状态无法核对：用户确认后可以归档留档。
+                RemoteStudyOutcome::StartFailed
+                | RemoteStudyOutcome::BuildFailed
+                | RemoteStudyOutcome::StudyCreateFailed
+                | RemoteStudyOutcome::MemberRunFailed
+                | RemoteStudyOutcome::Cancelled
+                | RemoteStudyOutcome::Lost
+                | RemoteStudyOutcome::Unknown => exists,
+            }
+        },
+        poll: exists
+            && !fetched
+            && !terminal
+            && !matches!(
+                outcome,
+                RemoteStudyOutcome::Lost | RemoteStudyOutcome::Cancelled
+            ),
+    };
+    let (next_zh, next_en) = study_next_step(outcome);
+    let fetch_error = study_fetch_error(outcome, exit_code);
+    RemoteStudyRecovery {
+        outcome,
+        terminal,
+        finished,
+        study_created,
+        fetched,
+        exit_code,
+        phase,
+        job,
+        permissions,
+        next_zh,
+        next_en,
+        fetch_error_zh: fetch_error.as_ref().map(|(zh, _)| zh.clone()),
+        fetch_error_en: fetch_error.map(|(_, en)| en),
+    }
+}
+
+/// 每种状态给一步可执行动作：重提、看日志、取回诊断、归档关闭或重新核对。
+fn study_next_step(outcome: RemoteStudyOutcome) -> (String, String) {
+    match outcome {
+        RemoteStudyOutcome::NotSubmitted => (
+            "提交没有到达服务器：服务器上没有这次提交的作业。修正设置后可以直接重新提交。".into(),
+            "The submission never reached the server: there is no such job. Fix the settings and submit again.".into(),
+        ),
+        RemoteStudyOutcome::StartFailed => (
+            "作业在开始构建前就退出了（构建/启动阶段失败），服务器上没有研究目录。看下方日志尾部定位原因；修正后归档关闭这条记录并重新提交。".into(),
+            "The job exited before the build started (startup failed), so no Study directory exists. Check the log tail below; after fixing, close this record and submit again.".into(),
+        ),
+        RemoteStudyOutcome::BuildFailed => (
+            "服务器在构建引擎阶段失败，没有创建研究目录。看下方日志尾部定位原因；修正后归档关闭这条记录并重新提交。".into(),
+            "The server failed while building the engine, so no Study directory was created. Check the log tail below; after fixing, close this record and submit again.".into(),
+        ),
+        RemoteStudyOutcome::StudyCreateFailed => (
+            "服务器在创建研究阶段失败，没有创建研究目录。看下方日志尾部定位原因；修正后归档关闭这条记录并重新提交。".into(),
+            "The server failed while creating the Study, so no Study directory was created. Check the log tail below; after fixing, close this record and submit again.".into(),
+        ),
+        RemoteStudyOutcome::MemberRunFailed => (
+            "研究已在服务器上建好，但成员运行失败。可以取回诊断结果，或归档关闭这条记录后修正重提。".into(),
+            "The Study was created on the server but its members failed. Fetch the diagnostic results, or close this record and resubmit after fixing.".into(),
+        ),
+        RemoteStudyOutcome::Succeeded => (
+            "服务器研究成功结束。取回结果；取回后可以归档关闭这条远程记录。".into(),
+            "The server Study finished successfully. Fetch its results; after fetching, this remote record can be archived.".into(),
+        ),
+        RemoteStudyOutcome::Cancelled => (
+            "服务器作业已取消并退出，没有可核验的研究结果。可以归档关闭这条记录后重新提交。".into(),
+            "The server job was cancelled and exited; there are no verified results. Close this record and submit again if needed.".into(),
+        ),
+        RemoteStudyOutcome::Lost => (
+            "服务器上已经查不到这个作业（或没有退出码），结果无法再取回。确认作业丢失后归档关闭记录。".into(),
+            "The server can no longer find this job (or has no exit code), so its results cannot be fetched. Confirm it is lost and close the record.".into(),
+        ),
+        RemoteStudyOutcome::Running => (
+            "服务器作业还在排队或运行。等它结束再取回；要停止请先请求取消，确认退出后才能关闭记录。".into(),
+            "The server job is still queued or running. Fetch after it ends; to stop it, request cancellation and close the record only after it exits.".into(),
+        ),
+        RemoteStudyOutcome::Unknown => (
+            "服务器状态还无法核对，不能当作完成、失败或已取消。先重新核对状态；确认作业已经丢失后才能归档关闭。".into(),
+            "The server state is unconfirmed, so it is not treated as finished, failed or cancelled. Check the status again; close the record only once the job is confirmed lost.".into(),
+        ),
+    }
+}
+
+/// 取回会被拒绝时的可行动说明。成功结束/成员运行失败可以取回，不会走到这里。
+fn study_fetch_error(
+    outcome: RemoteStudyOutcome,
+    exit_code: Option<i32>,
+) -> Option<(String, String)> {
+    let code = exit_code.unwrap_or(-1);
+    match outcome {
+        // 构建/创建阶段失败：服务器上没有研究目录，CLI 取回只会报“没有创建研究”，
+        // 用户看不出下一步。这里直接说清可看的日志与可做的动作。
+        RemoteStudyOutcome::StartFailed => Some((
+            format!(
+                "服务器上没有研究目录（启动/构建准备阶段失败，退出码 {code}），没有结果可取回。可查看下方作业日志尾部；或归档关闭这条记录后修正重提。"
+            ),
+            format!(
+                "The server has no Study directory (startup failed, exit code {code}), so there is nothing to fetch. Check the job log tail below, or close this record and retry after fixing."
+            ),
+        )),
+        RemoteStudyOutcome::BuildFailed => Some((
+            format!(
+                "服务器上没有研究目录（构建引擎阶段失败，退出码 {code}），没有结果可取回。可查看下方作业日志尾部；或归档关闭这条记录后修正重提。"
+            ),
+            format!(
+                "The server has no Study directory (engine build failed, exit code {code}), so there is nothing to fetch. Check the job log tail below, or close this record and retry after fixing."
+            ),
+        )),
+        RemoteStudyOutcome::StudyCreateFailed => Some((
+            format!(
+                "服务器上没有研究目录（创建研究阶段失败，退出码 {code}），没有结果可取回。可查看下方作业日志尾部；或归档关闭这条记录后修正重提。"
+            ),
+            format!(
+                "The server has no Study directory (Study creation failed, exit code {code}), so there is nothing to fetch. Check the job log tail below, or close this record and retry after fixing."
+            ),
+        )),
+        RemoteStudyOutcome::Running => Some((
+            "服务器作业还没结束，取回要等它退出。可以继续核对状态，或先请求取消。".into(),
+            "The server job has not ended yet; fetch only after it exits. Check the status again, or request cancellation first.".into(),
+        )),
+        RemoteStudyOutcome::Lost | RemoteStudyOutcome::Cancelled => Some((
+            "服务器作业没有正常退出（已取消或已丢失），没有可核验的退出码与结果。需要重新运行请先归档关闭这条记录。".into(),
+            "The server job did not exit normally (cancelled or lost), so there is no verified exit code or result to fetch. Close this record before running it again.".into(),
+        )),
+        RemoteStudyOutcome::Succeeded | RemoteStudyOutcome::NotSubmitted => Some((
+            "这次取回不需要或已经完成：提交从未到达服务器时没有结果可取回；已取回过的结果不用重复取回。".into(),
+            "There is nothing to fetch here: a submission that never reached the server has no results, and results already fetched need not be fetched again.".into(),
+        )),
+        RemoteStudyOutcome::Unknown => Some((
+            "服务器状态还无法核对，不能确认作业已经结束。先重新核对状态，确认后再取回。".into(),
+            "The server state is unconfirmed, so the job's completion cannot be trusted. Check the status again before fetching.".into(),
+        )),
+        RemoteStudyOutcome::MemberRunFailed => None,
+    }
+}
+
+/// 把分类结果写进 `remote-study-status` 的回复（前端按公开字段渲染，后端不用再算一遍）。
+pub(crate) fn attach_study_recovery(reply: &mut Value) -> RemoteStudyRecovery {
+    let recovery = remote_study_recovery(reply);
+    if let Some(object) = reply.as_object_mut() {
+        object.insert(
+            "recovery".into(),
+            serde_json::to_value(&recovery).unwrap_or(Value::Null),
+        );
+    }
+    recovery
+}
+
+/// 取回之前先分类：没有研究目录/作业没结束时直接给可行动说明，不再落到 CLI 的
+/// “the server job did not create the Study; see its log”。成功结束与成员运行失败照常取回。
+///
+/// 注意这是“拒绝并解释”，不是“权限矩阵里的 fetch=false”：构建/创建失败的按钮仍然可点
+/// （矩阵里 fetch=true），点了正好看到“没有研究目录 + 看日志/归档关闭/重提”的说明，
+/// 否则用户只会看到一个灰按钮，不知道为什么。
+fn fetch_blocked_message(recovery: &RemoteStudyRecovery) -> Option<String> {
+    if let (Some(zh), Some(en)) = (&recovery.fetch_error_zh, &recovery.fetch_error_en) {
+        return Some(format!("{zh} {en}"));
+    }
+    if recovery.permissions.fetch {
+        return None;
+    }
+    Some("现在不能取回。 Nothing can be fetched now.".into())
+}
+
+/// 关闭被拒绝时的说明：说清必须先做什么，而不是只说“不能关闭”。
+fn close_blocked_message(recovery: &RemoteStudyRecovery) -> String {
+    let (zh, en) = match recovery.outcome {
+        RemoteStudyOutcome::Running => (
+            "服务器作业还在排队或运行：先请求取消，等它确认退出后再归档关闭记录。",
+            "The server job is still queued or running: request cancellation first, then archive the record after it exits.",
+        ),
+        RemoteStudyOutcome::Succeeded if !recovery.fetched => (
+            "服务器研究已成功结束：先取回结果再归档关闭，否则唯一一次取回机会就没了。",
+            "The server Study finished successfully: fetch its results before archiving, otherwise the only chance to fetch them is lost.",
+        ),
+        RemoteStudyOutcome::NotSubmitted => (
+            "这次提交从未到达服务器，没有需要关闭的服务器作业；可以直接重新提交。",
+            "This submission never reached the server, so there is no server job to close; submit again directly.",
+        ),
+        _ => (
+            "现在不能归档关闭这条记录；先重新核对状态。",
+            "This record cannot be archived now; check the server status again first.",
+        ),
+    };
+    format!("{zh} {en}")
+}
+
+/// 本机记录与刚核验过的服务器状态必须指向同一个作业：归档是不可逆的本地动作，不能凭
+/// 过期/别的记录里的 job 字段动手。`remote-study-status` 已经让 CLI 核对了作业身份
+/// （`cancel_identity_script`），这里只再对齐本机记录里的 job 与工作目录。
+fn verify_local_record_matches_status(study_dir: &str, status: &Value) -> Result<(), String> {
+    let path = PathBuf::from(study_dir).join(".colm-remote-study.json");
+    let text =
+        std::fs::read_to_string(&path).map_err(|_| "这个研究没有服务器提交记录".to_string())?;
+    let local: Value =
+        serde_json::from_str(&text).map_err(|_| "服务器研究记录不合法".to_string())?;
+    let local_job = local.get("job").and_then(Value::as_str);
+    let local_root = local.get("root").and_then(Value::as_str);
+    let verified = status.get("record");
+    let verified_job = verified
+        .and_then(|record| record.get("job"))
+        .and_then(Value::as_str);
+    let verified_root = verified
+        .and_then(|record| record.get("root"))
+        .and_then(Value::as_str);
+    if local_job.is_none()
+        || local_job != verified_job
+        || local_root.is_none()
+        || local_root != verified_root
+    {
+        return Err(format!(
+            "服务器状态与本机记录对不上（本机作业 {}，服务器核对的是 {}）；先重新核对状态，未归档。",
+            local_job.unwrap_or("—"),
+            verified_job.unwrap_or("—")
+        ));
+    }
+    Ok(())
+}
+
+/// 归档本机远程研究记录：改名留档，不删数据。命名与 CLI `remote-study-close` 一致
+/// （`.colm-remote-study-closed-<stamp>.json`、`.colm-remote-study-pending-closed-<stamp>.json`），
+/// 两个工具留下的留档文件可以互认。
+fn archive_study_record(study_dir: &str) -> Result<Vec<String>, String> {
+    let directory = PathBuf::from(study_dir);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut archived = Vec::new();
+    for (name, suffix) in [
+        (".colm-remote-study.json", ""),
+        (".colm-remote-study-pending.json", "-pending"),
+    ] {
+        let path = directory.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let target = directory.join(format!(".colm-remote-study{suffix}-closed-{stamp}.json"));
+        std::fs::rename(&path, &target)
+            .map_err(|error| format!("无法归档服务器研究记录 {}: {error}", path.display()))?;
+        archived.push(target.to_string_lossy().into_owned());
+    }
+    Ok(archived)
+}
+
+/// 重新提交之前：已有“已确认失败”的终态记录就先归档，让 CLI 的“已有服务器提交”检查通过。
+/// 只对确认失败（有退出码、非零）这么做；排队/运行中/未确认丢失的记录一律拒绝重复提交。
+async fn archive_failed_remote_study_before_submit(
+    study_dir: &str,
+    server: &Server,
+) -> Result<(), String> {
+    if !PathBuf::from(study_dir)
+        .join(".colm-remote-study.json")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let mut status = ssh_cli_json(
+        vec!["remote-study-status".into(), study_dir.to_string()],
+        None,
+        Some(server),
+    )
+    .await?;
+    let recovery = attach_study_recovery(&mut status);
+    if recovery.permissions.resubmit {
+        verify_local_record_matches_status(study_dir, &status)?;
+        archive_study_record(study_dir)?;
+        return Ok(());
+    }
+    let (next_zh, next_en) = study_next_step(recovery.outcome);
+    Err(format!(
+        "{next_zh} {next_en}（服务器状态 / server state: {}/{}）",
+        study_outcome_zh(recovery.outcome),
+        study_outcome_en(recovery.outcome)
+    ))
+}
+
 // ---- 在服务器上跑研究（`remote-study-*`）-----------------------------------------------------
 
 /// `remote-study-run` 的参数：服务器设置（目录对应、调度、资源）与 `remote-run` 相同；研究成员各用一个进程。
@@ -2132,6 +2602,9 @@ pub async fn remote_study_run(
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
+    // 原记录会让 CLI 拒绝再次提交；已确认失败（有非零退出码）的终态记录先归档再提交，
+    // 这是“修复后重提”的唯一出口。排队/运行中/未确认丢失的记录仍然拒绝，不能重复提交。
+    archive_failed_remote_study_before_submit(&study_dir, &server).await?;
     let engine = Engine {
         engine,
         ranks: None,
@@ -2151,12 +2624,15 @@ pub async fn remote_study_status(
 ) -> Result<Value, String> {
     absolute_study(&study_dir)?;
     let server = study_server(&remote_config(app)?, &study_dir)?;
-    ssh_cli_json(
+    let mut reply = ssh_cli_json(
         vec!["remote-study-status".into(), study_dir],
         None,
         Some(&server),
     )
-    .await
+    .await?;
+    // 阶段/权限/下一步放在回复里一次算好：前端不需要再解析英文阶段名，也不会两处逻辑分叉。
+    attach_study_recovery(&mut reply);
+    Ok(reply)
 }
 
 /// 跑完后取回：核对成员一致，把状态与结果移植进本机研究。
@@ -2164,6 +2640,18 @@ pub async fn remote_study_status(
 pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Result<Value, String> {
     absolute_study(&study_dir)?;
     let server = study_server(&remote_config(app)?, &study_dir)?;
+    // 先分类再取回：构建/创建研究失败时服务器上没有研究目录，CLI 只会报一句
+    // “did not create the Study”，界面拿不到“看日志/归档关闭/重试”的下一步。
+    let mut status = ssh_cli_json(
+        vec!["remote-study-status".into(), study_dir.clone()],
+        None,
+        Some(&server),
+    )
+    .await?;
+    let recovery = attach_study_recovery(&mut status);
+    if let Some(message) = fetch_blocked_message(&recovery) {
+        return Err(message);
+    }
     ssh_cli_json(
         vec!["remote-study-fetch".into(), study_dir],
         None,
@@ -2172,11 +2660,40 @@ pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Res
     .await
 }
 
-/// Close a lost/unknown remote Study record after the user confirms (R25).
+/// 关闭/归档本机远程研究记录。
+///
+/// 旧实现把关闭委托给 CLI，而 CLI 只允许 Lost/Unknown：已结束但失败的作业（构建/创建/成员失败）
+/// 和已取回的成功结果都永远关不掉，记录一直挡着重提。这里先读一次状态并分类：
+/// - 已取回，或已确认结束但失败：CLI 会拒绝，GUI 在核对过作业身份后直接归档本机记录
+///   （改名留档、不删数据，命名与 CLI 一致）；
+/// - 丢失/无法核对：仍走 CLI close，保留它对服务器作业身份的核对语义。
 #[tauri::command]
 pub async fn remote_study_close(app: tauri::AppHandle, study_dir: String) -> Result<Value, String> {
     absolute_study(&study_dir)?;
     let server = study_server(&remote_config(app)?, &study_dir)?;
+    let mut status = ssh_cli_json(
+        vec!["remote-study-status".into(), study_dir.clone()],
+        None,
+        Some(&server),
+    )
+    .await?;
+    let recovery = attach_study_recovery(&mut status);
+    if !recovery.permissions.close {
+        return Err(close_blocked_message(&recovery));
+    }
+    if recovery.fetched || recovery.finished || recovery.permissions.resubmit {
+        // 归档是不可逆的本地动作：只用刚读到、且 CLI 已核对过作业身份的 status 来确认
+        // 本机记录指向同一个作业；不接受用本地记录里的旧 job 字段单独决定。
+        verify_local_record_matches_status(&study_dir, &status)?;
+        let archived = archive_study_record(&study_dir)?;
+        return Ok(json!({
+            "outcome": "closed",
+            "job": recovery.job,
+            "previous_state": status.get("status").cloned().unwrap_or(Value::Null),
+            "archived": archived,
+            "archived_by": "gui",
+        }));
+    }
     ssh_cli_json(
         vec!["remote-study-close".into(), study_dir],
         None,

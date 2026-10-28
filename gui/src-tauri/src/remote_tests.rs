@@ -1338,3 +1338,398 @@ fn server_cases_file_roundtrips_and_updates_by_name() {
     assert_eq!(read_server_cases(&path).unwrap().cases, file.cases);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ---- P1-9 B: 远程研究失败状态机与可执行下一步 ------------------------------------------------
+
+fn remote_record(fetched: bool) -> Value {
+    json!({
+        "host": "server",
+        "root": "/data/colm",
+        "job": "study-1",
+        "remote_project": "/data/colm/s/abc",
+        "fetched_at": if fetched { json!(1_700_000_000u64) } else { Value::Null },
+    })
+}
+
+fn study_status_reply(record: Value, status: Value, study: Value) -> Value {
+    json!({"record": record, "status": status, "study": study})
+}
+
+fn finished(exit_code: i32, phase: Value) -> Value {
+    json!({"state": "finished", "exit_code": exit_code, "phase": phase, "log_tail": "log"})
+}
+
+#[test]
+fn a_build_failure_without_a_study_directory_points_at_the_log_and_close() {
+    let reply = study_status_reply(
+        remote_record(false),
+        finished(1, json!("preparing the engine")),
+        Value::Null,
+    );
+    let recovery = remote_study_recovery(&reply);
+    assert_eq!(recovery.outcome, RemoteStudyOutcome::BuildFailed);
+    assert!(recovery.terminal && recovery.finished && !recovery.study_created);
+    // 构建失败：可以看日志、归档关闭、修复后重提；取回仍然允许点击，但会直接给可行动说明。
+    assert!(recovery.permissions.fetch);
+    assert!(recovery.permissions.close);
+    assert!(recovery.permissions.resubmit);
+    assert!(!recovery.permissions.submit);
+    assert!(!recovery.permissions.cancel);
+    let message = fetch_blocked_message(&recovery).expect("fetch explains why it cannot work");
+    assert!(message.contains("没有研究目录"), "{message}");
+    assert!(message.contains("no Study directory"), "{message}");
+    assert!(
+        message.contains("日志") && message.contains("log tail"),
+        "{message}"
+    );
+    assert!(message.contains("归档关闭"), "{message}");
+    assert!(recovery.next_zh.contains("构建") && recovery.next_en.contains("build"));
+}
+
+#[test]
+fn early_failures_are_split_by_the_phase_the_job_reached() {
+    let creation = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(2, json!("creating the Study")),
+        Value::Null,
+    ));
+    assert_eq!(creation.outcome, RemoteStudyOutcome::StudyCreateFailed);
+    assert!(!creation.study_created);
+
+    // 阶段标记都没写：作业体在写第一个标记前就退出，属于启动/构建准备阶段。
+    let startup = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(127, Value::Null),
+        Value::Null,
+    ));
+    assert_eq!(startup.outcome, RemoteStudyOutcome::StartFailed);
+    assert!(fetch_blocked_message(&startup).unwrap().contains("启动"));
+
+    // 成员运行失败时研究目录已经存在：取回是有意义的诊断动作，不能再给“没有研究目录”。
+    let run = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(3, json!("running the Study")),
+        json!({"status": "running"}),
+    ));
+    assert_eq!(run.outcome, RemoteStudyOutcome::MemberRunFailed);
+    assert!(run.study_created);
+    assert!(run.permissions.fetch && run.permissions.close && run.permissions.resubmit);
+    assert!(fetch_blocked_message(&run).is_none());
+
+    // 旧作业没有 phase：有研究目录按成员失败，没有目录按启动前的失败。
+    let legacy_with_study = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(1, Value::Null),
+        json!({"status": "failed"}),
+    ));
+    assert_eq!(
+        legacy_with_study.outcome,
+        RemoteStudyOutcome::MemberRunFailed
+    );
+    let legacy_without_study = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(1, Value::Null),
+        Value::Null,
+    ));
+    assert_eq!(
+        legacy_without_study.outcome,
+        RemoteStudyOutcome::StartFailed
+    );
+}
+
+#[test]
+fn a_successful_run_must_be_fetched_before_its_record_can_be_archived() {
+    let reply = study_status_reply(
+        remote_record(false),
+        finished(0, json!("running the Study")),
+        json!({"status": "completed"}),
+    );
+    let recovery = remote_study_recovery(&reply);
+    assert_eq!(recovery.outcome, RemoteStudyOutcome::Succeeded);
+    assert!(recovery.terminal && recovery.study_created);
+    assert!(recovery.permissions.fetch);
+    assert!(
+        !recovery.permissions.close,
+        "successful results must be fetched first"
+    );
+    assert!(!recovery.permissions.resubmit);
+    assert!(close_blocked_message(&recovery).contains("先取回结果"));
+
+    // 取回之后记录才可以归档。
+    let fetched = remote_study_recovery(&study_status_reply(
+        remote_record(true),
+        finished(0, json!("running the Study")),
+        json!({"status": "completed"}),
+    ));
+    assert!(fetched.permissions.close);
+    assert!(!fetched.permissions.fetch);
+}
+
+#[test]
+fn cancelled_and_lost_terminals_stay_archivable() {
+    let cancelled = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        json!({"state":"lost","detail":"CANCELLED by request (exit 1)","phase":"running the Study","log_tail":""}),
+        Value::Null,
+    ));
+    assert_eq!(cancelled.outcome, RemoteStudyOutcome::Cancelled);
+    assert!(!cancelled.terminal);
+    assert!(cancelled.permissions.close);
+    assert!(!cancelled.permissions.fetch && !cancelled.permissions.poll);
+    assert!(
+        !cancelled.permissions.resubmit,
+        "cancelled must be closed explicitly"
+    );
+
+    let lost = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        json!({"state":"lost","phase":"running the Study","log_tail":""}),
+        Value::Null,
+    ));
+    assert_eq!(lost.outcome, RemoteStudyOutcome::Lost);
+    assert!(lost.permissions.close);
+    assert!(!lost.permissions.poll);
+
+    let unknown = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        json!({"state":"unknown","log_tail":""}),
+        Value::Null,
+    ));
+    assert_eq!(unknown.outcome, RemoteStudyOutcome::Unknown);
+    assert!(unknown.permissions.close);
+    assert!(
+        unknown.permissions.poll,
+        "an unconfirmed state keeps polling"
+    );
+}
+
+#[test]
+fn a_live_server_job_can_neither_be_archived_nor_resubmitted() {
+    for state in ["queued", "running"] {
+        let reply = study_status_reply(
+            remote_record(false),
+            json!({"state": state, "phase": "running the Study", "log_tail": ""}),
+            Value::Null,
+        );
+        let recovery = remote_study_recovery(&reply);
+        assert_eq!(recovery.outcome, RemoteStudyOutcome::Running);
+        assert!(!recovery.permissions.close, "{state} must not be archived");
+        assert!(
+            !recovery.permissions.resubmit,
+            "{state} must not be resubmitted"
+        );
+        assert!(!recovery.permissions.submit);
+        assert!(recovery.permissions.cancel, "{state} can be cancelled");
+        assert!(recovery.permissions.poll);
+        assert!(close_blocked_message(&recovery).contains("取消"));
+    }
+    // 提交意图还在、作业查不到：不能重提（可能重复提交），但用户确认后可以关闭。
+    let pending = json!({"record": Value::Null, "pending": {"host":"server","root":"/data/colm","job":"study-1"}, "status": {"state":"unknown","log_tail":""}, "study": Value::Null});
+    let recovery = remote_study_recovery(&pending);
+    assert_eq!(recovery.outcome, RemoteStudyOutcome::Unknown);
+    assert!(!recovery.permissions.submit && !recovery.permissions.resubmit);
+    assert!(recovery.permissions.close);
+}
+
+#[test]
+fn a_never_submitted_study_can_be_submitted_again() {
+    let reply = json!({"record": Value::Null, "pending": Value::Null, "outcome": "never_submitted", "status": {"state":"unknown"}, "study": Value::Null});
+    let recovery = remote_study_recovery(&reply);
+    assert_eq!(recovery.outcome, RemoteStudyOutcome::NotSubmitted);
+    assert!(recovery.permissions.submit);
+    assert!(!recovery.permissions.close && !recovery.permissions.fetch);
+    assert!(recovery.next_en.contains("submit"));
+}
+
+#[test]
+fn every_outcome_has_a_bilingual_next_step() {
+    let cases = [
+        json!({"record": Value::Null, "pending": Value::Null, "outcome":"never_submitted", "status": {"state":"unknown"}, "study": Value::Null}),
+        study_status_reply(remote_record(false), finished(1, Value::Null), Value::Null),
+        study_status_reply(
+            remote_record(false),
+            finished(1, json!("preparing the engine")),
+            Value::Null,
+        ),
+        study_status_reply(
+            remote_record(false),
+            finished(1, json!("creating the Study")),
+            Value::Null,
+        ),
+        study_status_reply(
+            remote_record(false),
+            finished(1, json!("running the Study")),
+            json!({"status":"failed"}),
+        ),
+        study_status_reply(
+            remote_record(false),
+            finished(0, json!("running the Study")),
+            json!({"status":"completed"}),
+        ),
+        study_status_reply(
+            remote_record(false),
+            json!({"state":"lost","detail":"CANCELLED by request (exit 1)"}),
+            Value::Null,
+        ),
+        study_status_reply(remote_record(false), json!({"state":"lost"}), Value::Null),
+        study_status_reply(
+            remote_record(false),
+            json!({"state":"running"}),
+            Value::Null,
+        ),
+        study_status_reply(
+            remote_record(false),
+            json!({"state":"unknown"}),
+            Value::Null,
+        ),
+    ];
+    for reply in cases {
+        let recovery = remote_study_recovery(&reply);
+        assert!(
+            !recovery.next_zh.trim().is_empty(),
+            "{:?}",
+            recovery.outcome
+        );
+        assert!(
+            !recovery.next_en.trim().is_empty(),
+            "{:?}",
+            recovery.outcome
+        );
+        assert!(recovery.next_en.is_ascii(), "{:?}", recovery.outcome);
+    }
+}
+
+#[test]
+fn status_replies_carry_the_recovery_classification() {
+    let mut reply = study_status_reply(
+        remote_record(false),
+        finished(1, json!("creating the Study")),
+        Value::Null,
+    );
+    let recovery = attach_study_recovery(&mut reply);
+    assert_eq!(reply["recovery"]["outcome"], "study_create_failed");
+    assert_eq!(reply["recovery"]["permissions"]["resubmit"], true);
+    assert_eq!(reply["recovery"]["permissions"]["close"], true);
+    assert_eq!(
+        reply["recovery"]["fetch_error_zh"],
+        serde_json::to_value(&recovery.fetch_error_zh).unwrap()
+    );
+}
+
+#[test]
+fn archiving_a_confirmed_failed_record_renames_it_without_losing_data() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-remote-archive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let local = remote_record(false);
+    std::fs::write(
+        dir.join(".colm-remote-study.json"),
+        serde_json::to_vec_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let mut status = study_status_reply(
+        remote_record(false),
+        finished(1, json!("creating the Study")),
+        Value::Null,
+    );
+    attach_study_recovery(&mut status);
+
+    verify_local_record_matches_status(dir.to_str().unwrap(), &status).unwrap();
+    let archived = archive_study_record(dir.to_str().unwrap()).unwrap();
+    assert_eq!(archived.len(), 1);
+    assert!(!dir.join(".colm-remote-study.json").exists());
+    let target = std::path::Path::new(&archived[0]);
+    assert!(target.is_file());
+    let name = target.file_name().unwrap().to_string_lossy();
+    // 与 CLI `remote-study-close` 的留档命名一致，两个工具留下的文件可以互认。
+    assert!(
+        name.starts_with(".colm-remote-study-closed-") && name.ends_with(".json"),
+        "{name}"
+    );
+    let kept: Value = serde_json::from_slice(&std::fs::read(target).unwrap()).unwrap();
+    assert_eq!(kept["job"], local["job"]);
+    assert_eq!(kept["root"], local["root"]);
+
+    // 归档后记录不再挡路：从未提交的状态可以直接重新提交。
+    let recovery = remote_study_recovery(
+        &json!({"record": Value::Null, "pending": Value::Null, "outcome": "never_submitted", "status": {"state":"unknown"}, "study": Value::Null}),
+    );
+    assert!(recovery.permissions.submit);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn archiving_refuses_a_status_that_verifies_another_job() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-remote-archive-mismatch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(
+        dir.join(".colm-remote-study.json"),
+        serde_json::to_vec_pretty(&remote_record(false)).unwrap(),
+    )
+    .unwrap();
+    let mut other = remote_record(false);
+    other["job"] = json!("study-2");
+    let status = study_status_reply(other, finished(1, json!("creating the Study")), Value::Null);
+    let error = verify_local_record_matches_status(dir.to_str().unwrap(), &status).unwrap_err();
+    assert!(error.contains("对不上"), "{error}");
+    assert!(
+        dir.join(".colm-remote-study.json").is_file(),
+        "nothing was archived"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 正常率定/不确定性研究（运行中、排队、成功）的旧权限矩阵不能因为失败状态机而收紧。
+#[test]
+fn the_permission_matrix_for_normal_studies_is_unchanged() {
+    let running = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        json!({"state":"running"}),
+        json!({"status":"running"}),
+    ));
+    assert!(running.permissions.cancel && running.permissions.poll);
+    assert!(!running.permissions.fetch && !running.permissions.close);
+
+    let queued = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        json!({"state":"queued"}),
+        Value::Null,
+    ));
+    assert!(queued.permissions.cancel);
+
+    let succeeded = remote_study_recovery(&study_status_reply(
+        remote_record(false),
+        finished(0, json!("running the Study")),
+        json!({"status":"completed"}),
+    ));
+    assert!(
+        succeeded.permissions.fetch && !succeeded.permissions.cancel && !succeeded.permissions.poll
+    );
+
+    let fetched = remote_study_recovery(&study_status_reply(
+        remote_record(true),
+        finished(0, json!("running the Study")),
+        json!({"status":"completed"}),
+    ));
+    assert!(!fetched.permissions.fetch && fetched.permissions.close);
+
+    // 没有远程记录时 submit 照旧放行。
+    let local_only = remote_study_recovery(
+        &json!({"record": Value::Null, "pending": Value::Null, "status": Value::Null, "study": Value::Null}),
+    );
+    assert!(local_only.permissions.submit);
+    assert!(!local_only.permissions.fetch);
+}

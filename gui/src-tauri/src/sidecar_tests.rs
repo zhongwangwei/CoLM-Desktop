@@ -1746,3 +1746,231 @@ fn many_process_groups_stop_together_not_one_after_another() {
         assert!(!child.wait().unwrap().success());
     }
 }
+
+/// 一个仍在运行的子进程，自己是一个进程组（模拟 GUI 启动的外层 CLI）。
+#[cfg(unix)]
+fn grouped_sleeper() -> std::process::Child {
+    // `&& wait` 让 sh 本身留在进程里（单条命令时 sh 会 exec 掉 sleep，进程名会变成
+    // sleep，锁文件里记录的可执行文件对不上，反倒测不到补杀路径）。
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 30 & wait"]);
+    colm_kernel::run::top_level_sidecar(&mut command);
+    command.spawn().unwrap()
+}
+
+/// 已经退出、只留 PID 的子进程（模拟随进程组退出的内层 CLI）。
+#[cfg(unix)]
+fn exited_child_id() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    assert!(child.wait().unwrap().success());
+    pid
+}
+
+fn temporary_study_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_run_lock(dir: &std::path::Path, pid: u32, run_id: Option<&str>) {
+    write_run_lock_for(dir, pid, run_id, "/bin/sh");
+}
+
+fn write_run_lock_for(dir: &std::path::Path, pid: u32, run_id: Option<&str>, executable: &str) {
+    let mut value = serde_json::json!({
+        "pid": pid,
+        "executable": executable,
+        "argv_sha256": "sha",
+        "started_unix": 1,
+        "heartbeat_unix": 1,
+    });
+    if let Some(run_id) = run_id {
+        value["run_id"] = serde_json::Value::String(run_id.into());
+    }
+    std::fs::write(dir.join("run.lock"), serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+#[test]
+fn a_study_run_keeps_its_run_id_until_cancellation_finishes() {
+    let processes = RunProcesses::default();
+    let key = "study:/tmp/locked-study";
+    processes.prepare_study_run(key, "run-1").unwrap();
+    assert_eq!(processes.running_identity(key).unwrap(), None);
+    // 取消可以在 spawn 与 PID 登记之间到达：那时只有运行 ID 能说明“这次运行还没启动”。
+    processes.cancel(Some(vec![key.into()])).unwrap();
+    assert!(!processes.remember(key, 4242).unwrap());
+    let identity = processes.running_identity(key).unwrap();
+    assert_eq!(
+        identity, None,
+        "a cancelled run never exposes a live identity"
+    );
+    processes.forget(key).unwrap();
+    assert_eq!(processes.running_identity(key).unwrap(), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_study_run_reports_both_the_outer_pid_and_the_run_id() {
+    let mut child = grouped_sleeper();
+    let processes = RunProcesses::default();
+    let key = "study:/tmp/locked-study";
+    processes.prepare_study_run(key, "run-outer-inner").unwrap();
+    assert!(processes.remember(key, child.id()).unwrap());
+    let identity = processes.running_identity(key).unwrap().unwrap();
+    assert_eq!(identity.pid, child.id());
+    assert_eq!(identity.run_id.as_deref(), Some("run-outer-inner"));
+    processes.forget(key).unwrap();
+    assert_eq!(processes.running_identity(key).unwrap(), None);
+    terminate_process_tree(child.id()).unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn study_lock_owner_pid_only_reads_a_usable_process_id() {
+    let dir = temporary_study_dir("study-lock-pid");
+    let study = dir.to_string_lossy().to_string();
+    assert_eq!(study_lock_owner_pid(&study), None);
+    write_run_lock(&dir, 4242, Some("run-1"));
+    assert_eq!(study_lock_owner_pid(&study), Some(4242));
+    std::fs::write(dir.join("run.lock"), b"{broken").unwrap();
+    assert_eq!(study_lock_owner_pid(&study), None);
+    std::fs::write(dir.join("run.lock"), br#"{"pid":"4242"}"#).unwrap();
+    assert_eq!(study_lock_owner_pid(&study), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_finalize_cancel_call_carries_the_run_id_in_the_cli_environment() {
+    let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"));
+    assert_eq!(args[0], "study-finalize-cancel");
+    assert_eq!(args[1], "/tmp/study");
+    assert_eq!(&args[2..], ["--pid", "99"]);
+    assert_eq!(
+        env,
+        vec![(STUDY_RUN_ID_ENV.to_string(), "run-1".to_string())]
+    );
+    // 没有运行 ID（旧路径/手工运行）时不能凭空造一个，CLI 会退回按 PID 认锁。
+    assert!(finalize_cancel_invocation("/tmp/study", 99, None)
+        .1
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_a_delegated_study_claims_the_lock_by_run_id_and_stops_the_tree() {
+    let dir = temporary_study_dir("delegated-cancel");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    processes
+        .prepare_study_run(&key, "run-outer-inner")
+        .unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    // 锁里是内层 CLI 的 PID（已随进程组退出），和 GUI 登记的外层 PID 不同。
+    write_run_lock(&dir, exited_child_id(), Some("run-outer-inner"));
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    let out = cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap();
+    assert_eq!(out, "cancelled");
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0[0], "study-cancel");
+    assert!(calls[0].1.is_empty());
+    let (finalize, env) = &calls[1];
+    assert_eq!(finalize[0], "study-finalize-cancel");
+    assert_eq!(finalize[1], study);
+    assert_eq!(&finalize[2..], ["--pid", &outer.id().to_string()]);
+    assert_eq!(
+        env,
+        &vec![(STUDY_RUN_ID_ENV.to_string(), "run-outer-inner".into())]
+    );
+    // 进程组被终止：外层 CLI 与它启动的成员一起退出。
+    assert!(!outer.wait().unwrap().success());
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_kills_the_inner_scheduler_even_outside_the_terminated_group() {
+    let dir = temporary_study_dir("escaped-inner");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-1").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    // 内层 CLI 理论上随外层进程组退出；万一它跑到别的进程组里，锁文件里的 PID 是唯一线索。
+    let mut escaped = grouped_sleeper();
+    let escaped_pid = escaped.id();
+    // 锁里记的可执行文件必须与这个 PID 真正在跑的程序一致，补杀才允许动手。
+    let image = process_image_name(escaped_pid).expect("the escaped process has a known image");
+    write_run_lock_for(&dir, escaped_pid, Some("run-1"), &image);
+    assert!(process_alive(escaped_pid));
+
+    cancel_study_run_with(&processes, &study, |_, _| Ok("cancelled".into())).unwrap();
+    assert!(
+        !process_alive(escaped_pid),
+        "the lock owner must be stopped"
+    );
+    assert!(!escaped.wait().unwrap().success());
+    assert!(!outer.wait().unwrap().success());
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reused_pid_with_another_program_is_not_killed_from_the_lock_file() {
+    let dir = temporary_study_dir("reused-lock-pid");
+    let study = dir.to_string_lossy().to_string();
+    // 记录的调度器已经不在了，PID 被一个无关程序复用：锁里写的可执行文件对不上，
+    // 补杀必须放弃（否则会误杀别的进程），让 CLI 收尾自己拒绝。
+    let mut reused = grouped_sleeper();
+    let reused_pid = reused.id();
+    write_run_lock_for(&dir, reused_pid, Some("run-1"), "/usr/local/bin/colm-cli");
+    terminate_study_lock_owner(&study).unwrap();
+    assert!(process_alive(reused_pid), "a reused pid must not be killed");
+    terminate_process_tree(reused_pid).unwrap();
+    let _ = reused.wait();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_without_a_registered_process_finalizes_idle_state_only() {
+    let dir = temporary_study_dir("idle-cancel");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let calls = std::sync::Mutex::new(Vec::new());
+    cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok(String::new())
+    })
+    .unwrap();
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0[0], "study-cancel");
+    assert_eq!(
+        calls[1].0,
+        vec!["study-finalize-idle-cancel".to_string(), study.clone()]
+    );
+    assert!(calls[1].1.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}

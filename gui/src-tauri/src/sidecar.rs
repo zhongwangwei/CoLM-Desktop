@@ -339,6 +339,21 @@ struct RunProcessState {
     pids: HashMap<String, u32>,
     pending: HashSet<String>,
     cancelled: HashSet<String>,
+    /// 研究运行（`study:` 键）这一次的“运行 ID”。
+    ///
+    /// 为什么不能只记 PID：冻结模型修订的研究由外层 CLI 委托给快照里的内层 CLI 运行，
+    /// 持研究锁的是内层 CLI，GUI 启动的却是外层 CLI。停掉进程树后，收尾接口拿外层 PID
+    /// 去核对锁里的内层 PID 必然对不上，于是进程已停、锁还在、取消状态没落盘。运行 ID
+    /// 由 GUI 每次运行新生成，启动与收尾两次调用都传给 CLI（CLI 写进 `run.lock`），
+    /// 与 PID 无关地证明“这把锁是这次运行写的”。
+    study_run_ids: HashMap<String, String>,
+}
+
+/// GUI 侧登记的一次运行身份：外层 PID 用于终止进程组，运行 ID 用于认领研究锁。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunningIdentity {
+    pub pid: u32,
+    pub run_id: Option<String>,
 }
 
 impl RunProcesses {
@@ -372,6 +387,10 @@ impl RunProcesses {
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
+        Self::reserve(&mut state, keys)
+    }
+
+    fn reserve(state: &mut RunProcessState, keys: &[String]) -> Result<(), String> {
         let mut unique = HashSet::with_capacity(keys.len());
         if let Some(key) = keys.iter().find(|key| !unique.insert(key.as_str())) {
             return Err(format!("duplicate case in one run request: {key}"));
@@ -383,6 +402,19 @@ impl RunProcesses {
             return Err(format!("{key} is already running"));
         }
         state.pending.extend(keys.iter().cloned());
+        Ok(())
+    }
+
+    /// Register a Study run together with the ID that will claim its `run.lock` on cancellation.
+    fn prepare_study_run(&self, key: &str, run_id: &str) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| "run process registry poisoned")?;
+        Self::reserve(&mut state, std::slice::from_ref(&key.to_string()))?;
+        state
+            .study_run_ids
+            .insert(key.to_string(), run_id.to_string());
         Ok(())
     }
 
@@ -426,14 +458,31 @@ impl RunProcesses {
             crate::live_runs::clear(pid);
         }
         state.pending.remove(key);
+        state.study_run_ids.remove(key);
         Ok(state.cancelled.remove(key))
     }
 
+    /// 只给测试用的事后检查（生产路径一律走 [`RunProcesses::running_identity`]，它保证 PID
+    /// 与运行 ID 在同一把锁下取出）。
+    #[cfg(test)]
     fn running_pid(&self, key: &str) -> Result<Option<u32>, String> {
         self.inner
             .lock()
             .map_err(|_| "run process registry poisoned".to_string())
             .map(|state| state.pids.get(key).copied())
+    }
+
+    /// PID 与运行 ID 一起取出来：取消收尾要用 PID 终止进程组、用运行 ID 认领研究锁。
+    /// 两者必须在同一把锁下读取，否则中途 `forget` 会把它们拆成不匹配的两半。
+    fn running_identity(&self, key: &str) -> Result<Option<RunningIdentity>, String> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| "run process registry poisoned".to_string())?;
+        Ok(state.pids.get(key).copied().map(|pid| RunningIdentity {
+            pid,
+            run_id: state.study_run_ids.get(key).cloned(),
+        }))
     }
 
     pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
@@ -453,8 +502,8 @@ impl RunProcesses {
         let mut failures = Vec::new();
         for key in active.iter().filter(|key| key.starts_with("study:")) {
             let study_dir = key.trim_start_matches("study:").to_string();
-            let pid = match self.running_pid(key) {
-                Ok(pid) => pid,
+            let identity = match self.running_identity(key) {
+                Ok(identity) => identity,
                 Err(error) => {
                     failures.push(format!("{key}: {error}"));
                     continue;
@@ -464,13 +513,18 @@ impl RunProcesses {
             match self.cancel(Some(vec![key.clone()])) {
                 Ok(count) => {
                     cancelled += count;
-                    if let Some(pid) = pid {
-                        if let Err(error) = capture(&[
-                            "study-finalize-cancel".into(),
-                            study_dir,
-                            "--pid".into(),
-                            pid.to_string(),
-                        ]) {
+                    if let Some(identity) = identity {
+                        // 进程组杀掉之后再确认锁文件的持有者（内层 CLI）也停了，否则
+                        // 收尾接口会以“调度器还在运行”拒绝，留下进程已停、锁还在的状态。
+                        if let Err(error) = terminate_study_lock_owner(&study_dir) {
+                            failures.push(format!("{key}: {error}"));
+                            continue;
+                        }
+                        if let Err(error) = finalize_study_cancel(
+                            &study_dir,
+                            identity.pid,
+                            identity.run_id.as_deref(),
+                        ) {
                             failures.push(format!("{key}: {error}"));
                         }
                     }
@@ -680,6 +734,238 @@ pub(crate) fn terminate_process_tree(pid: u32) -> Result<(), String> {
     } else {
         Err(format!("kill failed for pid {pid}: {status}"))
     }
+}
+
+/// 只杀一个进程（不按进程组）。用于研究锁里的内层 CLI：它可能不在 GUI 停掉的进程组里，
+/// 按自己的进程组编号发信号会落空，最后剩下“进程组已杀、锁持有者还在”的状态。
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    if !process_alive(pid) {
+        return Ok(());
+    }
+    let term = sidecar_command("kill")
+        .args(["-TERM", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot signal process {pid}: {e}"))?;
+    if !term.success() && process_alive(pid) {
+        return Err(format!("cannot terminate process {pid}: {term}"));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    if process_alive(pid) {
+        let kill = sidecar_command("kill")
+            .args(["-KILL", "--", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("cannot kill process {pid}: {e}"))?;
+        std::thread::sleep(Duration::from_millis(50));
+        if !kill.success() || process_alive(pid) {
+            return Err(format!("cannot kill process {pid}: {kill}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    if !process_alive(pid) {
+        return Ok(());
+    }
+    let status = sidecar_command("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run taskkill: {e}"))?;
+    if status.success() || !process_alive(pid) {
+        Ok(())
+    } else {
+        Err(format!("taskkill failed for pid {pid}: {status}"))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    terminate_process_tree(pid)
+}
+
+/// 这个 PID 是否还是一个活进程（僵尸不算：已退出、只等父进程收尸）。
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    if let Ok(output) = sidecar_command("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    {
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|status| !status.trim_start().starts_with('Z'));
+        }
+    }
+    // `ps` 不可用的受限环境：`kill -0` 至少能排除“进程已不存在”。
+    sidecar_command("kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    sidecar_command("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(pid: u32) -> bool {
+    sidecar_command("kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// 停掉研究锁记录的调度器（冻结模型修订时是内层 CLI）。
+///
+/// GUI 停的是自己启动的进程组（外层 CLI 及其子进程）；正常情况下内层 CLI 就在这个组里，
+/// 组杀已经带走它。但锁文件里的 PID 是唯一能证明“这次运行的调度器是谁”的线索：万一它
+/// 不在那个组里（进程组被重新安排、外层 CLI 提前退出后内层被重新挂载），这里补一刀，
+/// 否则 CLI 收尾会以“调度器还在运行”拒绝，留下进程已停、锁还在的状态。
+///
+/// **不能只看 PID 就杀**：锁可能是上一个调度器留下的，PID 已被无关程序复用。只有这个
+/// PID 现在跑的可执行文件与锁里记录的一致才动手；认不出来就不杀，让 CLI 收尾按它自己
+/// 的身份校验拒绝（用户看到“调度器还在运行”，不会误杀别的进程）。
+fn terminate_study_lock_owner(study_dir: &str) -> Result<(), String> {
+    let Some(pid) = study_lock_owner_pid(study_dir) else {
+        return Ok(());
+    };
+    if !process_alive(pid) {
+        return Ok(());
+    }
+    let expected = study_lock_owner_executable(study_dir);
+    let matches_recorded = expected.as_deref().is_some_and(|expected| {
+        process_image_name(pid).is_some_and(|image| {
+            std::path::Path::new(expected).file_name() == Some(OsStr::new(&image))
+        })
+    });
+    if !matches_recorded {
+        return Ok(());
+    }
+    terminate_process_tree(pid)?;
+    if process_alive(pid) {
+        terminate_process(pid)?;
+    }
+    Ok(())
+}
+
+/// 这个 PID 现在运行的可执行文件名，平台说不出来时为 `None`。
+#[cfg(unix)]
+fn process_image_name(pid: u32) -> Option<String> {
+    let output = sidecar_command("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(
+        std::path::Path::new(line)
+            .file_name()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[cfg(windows)]
+fn process_image_name(pid: u32) -> Option<String> {
+    let output = sidecar_command("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let image = text
+        .lines()
+        .next()?
+        .split(',')
+        .next()?
+        .trim()
+        .trim_matches('"');
+    (!image.is_empty()).then(|| image.to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_image_name(_pid: u32) -> Option<String> {
+    None
+}
+
+/// 锁文件里记的调度器可执行文件路径。旧记录没有/为空时返回 `None`，调用方就不补杀。
+fn study_lock_owner_executable(study_dir: &str) -> Option<String> {
+    let bytes = std::fs::read(PathBuf::from(study_dir).join("run.lock")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("executable")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|executable| !executable.is_empty())
+        .map(str::to_owned)
+}
+
+/// `run.lock` 里记的调度器 PID。坏记录/读不到都当没有：真正的身份校验在 CLI 收尾里做，
+/// GUI 只用它补杀进程组之外的锁持有者，不能凭它做任何放行判断。
+fn study_lock_owner_pid(study_dir: &str) -> Option<u32> {
+    let bytes = std::fs::read(PathBuf::from(study_dir).join("run.lock")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("pid")?
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
+/// 收尾：`--pid` 只是旧路径的身份；真正的认领靠环境变量里的运行 ID（见 [`STUDY_RUN_ID_ENV`]），
+/// 因为冻结修订时锁里是内层 PID，和 GUI 登记的外层 PID 不是同一个进程。
+fn finalize_study_cancel(
+    study_dir: &str,
+    outer_pid: u32,
+    run_id: Option<&str>,
+) -> Result<String, String> {
+    let (args, env) = finalize_cancel_invocation(study_dir, outer_pid, run_id);
+    capture_with_env(&args, &env)
+}
+
+/// `--pid` 仍然是 GUI 登记的进程组首进程（终止用）；运行 ID 走环境变量，因为冻结修订的
+/// 研究锁里是内层 CLI 的 PID，收尾接口的 `--pid` 比对只在旧路径上成立。
+fn finalize_cancel_invocation(
+    study_dir: &str,
+    outer_pid: u32,
+    run_id: Option<&str>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let args = vec![
+        "study-finalize-cancel".to_string(),
+        study_dir.to_string(),
+        "--pid".into(),
+        outer_pid.to_string(),
+    ];
+    let env: Vec<(String, String)> = run_id
+        .map(|run_id| vec![(STUDY_RUN_ID_ENV.to_string(), run_id.to_string())])
+        .unwrap_or_default();
+    (args, env)
 }
 
 #[cfg(unix)]
@@ -918,6 +1204,26 @@ fn capture_preparation(args: &[String]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 与 `colm-cli` 的 `study::runner::RUN_ID_ENV` 必须同名。GUI 不依赖 CLI crate（窗口进程要
+/// 挡掉 NetCDF/HDF5），只能各自重写常量；改一边必须同时改另一边。
+const STUDY_RUN_ID_ENV: &str = "COLM_STUDY_RUN_ID";
+
+/// 每次本地研究运行生成一个新 ID：进程号 + 纳秒时间 + 进程内计数器，够区分本机先后两次运行。
+/// 不用随机数是因为不引入依赖；它的用途只是身份比对，不是安全令牌。
+fn new_study_run_id() -> String {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "study-{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn study_process_key(study_dir: &str) -> String {
@@ -3642,9 +3948,12 @@ pub async fn study_run(
         args.extend(["--model-version".into(), version]);
     }
     crate::model::options(&mut args, model_revision.as_ref())?;
-    processes.prepare(std::slice::from_ref(&key))?;
+    // 运行 ID 在启动前就登记：取消可能发生在 spawn 与 PID 登记之间，那时收尾没有 PID 可
+    // 依赖，运行 ID 至少能让迟到的收尾认出“这次运行还没有锁”，而不是去动后来者的锁。
+    let run_id = new_study_run_id();
+    processes.prepare_study_run(&key, &run_id)?;
     let processes = processes.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || study_run_blocking(app, processes, args))
+    tauri::async_runtime::spawn_blocking(move || study_run_blocking(app, processes, args, run_id))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -3716,6 +4025,7 @@ fn study_run_blocking(
     app: tauri::AppHandle,
     processes: RunProcesses,
     args: Vec<String>,
+    run_id: String,
 ) -> Result<String, String> {
     let mut args = args;
     let event = crate::history::command_start(&args).inspect_err(|_| {
@@ -3726,7 +4036,7 @@ fn study_run_blocking(
     if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
-    let result = study_run_untracked(app, processes, args);
+    let result = study_run_untracked(app, processes, args, &run_id);
     let status = result
         .as_deref()
         .map(study_run_status)
@@ -3751,11 +4061,15 @@ fn study_run_untracked(
     app: tauri::AppHandle,
     processes: RunProcesses,
     args: Vec<String>,
+    run_id: &str,
 ) -> Result<String, String> {
     let cli = resolve_cli();
     let study_dir = args.get(1).cloned().unwrap_or_default();
     let study_key = study_process_key(&study_dir);
     let mut cmd = sidecar_command(&cli);
+    // 外层 CLI 会把这个变量原样传给委托出来的内层 CLI（std 子进程继承环境），所以冻结
+    // 模型修订时持有研究锁的内层 CLI 写进 `run.lock` 的就是这个 ID。
+    cmd.env(STUDY_RUN_ID_ENV, run_id);
     let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -3833,20 +4147,51 @@ pub async fn study_cancel(
     processes: tauri::State<'_, RunProcesses>,
     study_dir: String,
 ) -> Result<String, String> {
-    let out = capture_async(vec!["study-cancel".to_string(), study_dir.clone()]).await?;
-    let key = study_process_key(&study_dir);
-    let pid = processes.running_pid(&key)?;
+    let processes = processes.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || cancel_study_run(&processes, &study_dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 停止一次本地研究运行并落盘取消状态。
+///
+/// 顺序有原因：先写 `cancel.request` 让 CLI 在阶段边界自己停；再按进程组终止（外层 CLI 与
+/// 它启动的 Fortran/内层 CLI 都在这个组里）；然后按锁文件补杀一次（冻结修订时真正持锁的是
+/// 内层 CLI，PID 与 GUI 登记的外层不同）；最后用运行 ID 认领 `run.lock` 并落盘取消状态。
+/// 少了最后一步就会留下“进程已停、锁还在、状态没落盘”，下一次运行再也起不来。
+pub(crate) fn cancel_study_run(
+    processes: &RunProcesses,
+    study_dir: &str,
+) -> Result<String, String> {
+    cancel_study_run_with(processes, study_dir, |args, env| {
+        capture_with_env(args, env)
+    })
+}
+
+/// 收尾步骤抽成可注入的 `run`：本机没有真实 CLI 的测试也能断言调用顺序、`--pid` 和环境
+/// 变量里的运行 ID，而不是只测 `resolve_cli` 找不找得到程序。
+fn cancel_study_run_with(
+    processes: &RunProcesses,
+    study_dir: &str,
+    run: impl Fn(&[String], &[(String, String)]) -> Result<String, String>,
+) -> Result<String, String> {
+    let out = run(&["study-cancel".to_string(), study_dir.to_string()], &[])?;
+    let key = study_process_key(study_dir);
+    let identity = processes.running_identity(&key)?;
     processes.cancel(Some(vec![key]))?;
-    if let Some(pid) = pid {
-        capture_async(vec![
-            "study-finalize-cancel".to_string(),
-            study_dir,
-            "--pid".into(),
-            pid.to_string(),
-        ])
-        .await?;
+    if let Some(identity) = identity {
+        terminate_study_lock_owner(study_dir)?;
+        let (args, env) =
+            finalize_cancel_invocation(study_dir, identity.pid, identity.run_id.as_deref());
+        run(&args, &env)?;
     } else {
-        capture_async(vec!["study-finalize-idle-cancel".to_string(), study_dir]).await?;
+        run(
+            &[
+                "study-finalize-idle-cancel".to_string(),
+                study_dir.to_string(),
+            ],
+            &[],
+        )?;
     }
     Ok(out)
 }
@@ -4201,6 +4546,12 @@ pub(crate) fn capture(args: &[String]) -> Result<String, String> {
     capture_with(args, capture_untracked)
 }
 
+/// [`capture`] 加上给子进程的环境变量。研究取消收尾要带 [`STUDY_RUN_ID_ENV`]：CLI 用它
+/// 认出 `run.lock` 是这次运行的，而不是后来另一个调度器的。
+fn capture_with_env(args: &[String], env: &[(String, String)]) -> Result<String, String> {
+    capture_with(args, |args| capture_untracked_with_env(args, env))
+}
+
 fn capture_with(
     args: &[String],
     execute: impl FnOnce(&[String]) -> Result<String, String>,
@@ -4218,8 +4569,15 @@ fn capture_with(
     crate::history::command_finish(event.as_ref(), result, status)
 }
 fn capture_untracked(args: &[String]) -> Result<String, String> {
+    capture_untracked_with_env(args, &[])
+}
+
+fn capture_untracked_with_env(args: &[String], env: &[(String, String)]) -> Result<String, String> {
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
+    if !env.is_empty() {
+        cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    }
     let out = cmd
         .args(args)
         .output()
