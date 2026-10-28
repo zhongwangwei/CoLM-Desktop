@@ -960,6 +960,389 @@ fn compact_study_targets(targets: &Value) -> Value {
     )
 }
 
+// ---- 共同证据核心：Study 摘要、诊断投影与预算缩减共用 ----
+
+/// 证据核心的大小上限（紧凑 JSON 字节数）。它要同时放进 Study 摘要与诊断结果的多个步骤，
+/// 而工具结果只有 24k 字符的传输上限，所以核心不能随目标数、参数数或警告数增长。
+pub(crate) const EVIDENCE_CORE_MAX_BYTES: usize = 3_000;
+
+/// 核验范围说明：记录的成绩来自已保存的结果文件，这次状态读取没有重新核验原始输出。
+const VERIFICATION_SCOPE: &str = "scores and losses come from recorded task-result files; this status read did not re-verify them against history output, observations or the frozen kernel";
+
+/// 诊断/摘要共用的证据核心：压缩时先删重复明细，但始终保留 Study 与模型的实际身份
+/// （version id、revision、code.source_sha256）、当前选择与身份比较、来源路径、目标方向、
+/// baseline/best、率定/验证关系、缺失原因，以及 verification.reverified 与核验范围。
+/// 信息不足时写入具体原因（例如“证据没有记录是否重新核验”），不会把缺失变成肯定结论。
+pub(crate) fn study_evidence_core(evidence: &Value) -> Value {
+    let core = json!({
+        "schema": 1,
+        "study": study_identity_core(&evidence["study"]),
+        "execution": {"state": evidence["execution"]["state"]},
+        "selection": selection_core(&evidence["selection"]),
+        "objective": objective_core(&evidence["objective"]),
+        "comparison": comparison_core(&evidence["comparison"]),
+        "validation": validation_core(&evidence["validation"]),
+        "model_identity": model_identity_core(&evidence["model_identity"]),
+        "verification": verification_core(&evidence["verification"]),
+        "source_paths": source_paths_core(&evidence["source_paths"]),
+        "warnings": core_text_list(&evidence["warnings"], 2, 240),
+        "warnings_count": evidence["warnings_count"],
+        "missing": core_text_list(&evidence["missing"], 3, 240),
+    });
+    bound_evidence_core(core)
+}
+
+/// 证据文本：只留前 `limit` 个字符；缺失（null）保持 null，绝不当成肯定值。
+fn core_text(value: &Value, limit: usize) -> Value {
+    match value.as_str() {
+        Some(text) => {
+            let mut out = text.chars().take(limit).collect::<String>();
+            if text.chars().count() > limit {
+                out.push('…');
+            }
+            json!(out)
+        }
+        None => value.clone(),
+    }
+}
+
+fn core_text_list(value: &Value, keep: usize, limit: usize) -> Value {
+    value.as_array().map_or_else(
+        || json!([]),
+        |items| {
+            Value::Array(
+                items
+                    .iter()
+                    .take(keep)
+                    .map(|item| core_text(item, limit))
+                    .collect(),
+            )
+        },
+    )
+}
+
+fn study_identity_core(study: &Value) -> Value {
+    if !study.is_object() {
+        return json!({"status":"unknown","reason":"the Study evidence does not record the Study identity"});
+    }
+    json!({
+        "id": core_text(&study["id"], 120),
+        "kind": study["kind"],
+        "method": core_text(&study["method"], 80),
+        "status": study["status"],
+        "generation": study["generation"],
+    })
+}
+
+fn selection_core(selection: &Value) -> Value {
+    if !selection.is_object() {
+        return json!({"status":"unknown","reason":"the Study evidence does not record how the best member was selected"});
+    }
+    json!({
+        "rule": core_text(&selection["rule"], 240),
+        "best_member": selection["best_member"],
+        "best_objective": selection["best_objective"],
+        "provisional": selection["provisional"],
+        "no_best_reason": if selection["no_best_reason"].is_object() {
+            json!({
+                "code": core_text(&selection["no_best_reason"]["code"], 80),
+                "detail": core_text(&selection["no_best_reason"]["detail"], 240),
+            })
+        } else {
+            Value::Null
+        },
+    })
+}
+
+fn objective_core(objective: &Value) -> Value {
+    if !objective.is_object() {
+        return json!({"direction":"unknown","reason":"the Study evidence does not record the objective direction"});
+    }
+    json!({
+        "direction": objective["direction"].as_str().unwrap_or("unknown"),
+        "loss": core_text(&objective["loss"], 240),
+        "target_count": objective["target_count"],
+    })
+}
+
+fn comparison_core(comparison: &Value) -> Value {
+    if !comparison.is_object() {
+        return json!({
+            "relation": {"calibration":"unknown","validation":"unknown"},
+            "reason": "the Study evidence does not record a baseline/best comparison",
+        });
+    }
+    json!({
+        "basis": core_text(&comparison["basis"], 240),
+        "baseline": comparison_side_core(&comparison["baseline"]),
+        "best": comparison_side_core(&comparison["best"]),
+        "relation": {
+            "calibration": relation_core(&comparison["relation"]["calibration"]),
+            "validation": relation_core(&comparison["relation"]["validation"]),
+        },
+    })
+}
+
+fn comparison_side_core(side: &Value) -> Value {
+    if !side.is_object() {
+        return json!({"status":"unavailable","reason":"this comparison side is not recorded in the Study evidence"});
+    }
+    json!({
+        "member": core_text(&side["member"], 120),
+        "status": side["status"],
+        "calibration": {"status": side["calibration"]["status"], "score": side["calibration"]["score"]},
+        "validation": {"status": side["validation"]["status"], "score": side["validation"]["score"]},
+        "reason": core_text(&side["reason"], 240),
+    })
+}
+
+fn relation_core(relation: &Value) -> Value {
+    match relation.as_str() {
+        Some(value) => json!(value),
+        None => json!("unknown"),
+    }
+}
+
+fn validation_core(validation: &Value) -> Value {
+    if !validation.is_object() {
+        return json!({
+            "configured": Value::Null,
+            "status": "unknown",
+            "reasons": ["the Study evidence does not record validation configuration or status"],
+        });
+    }
+    json!({
+        "configured": validation["configured"],
+        "status": validation["status"].as_str().unwrap_or("unknown"),
+        "windows": validation_windows_core(&validation["windows"]),
+        "reasons": core_text_list(&validation["reasons"], 2, 240),
+    })
+}
+
+fn validation_windows_core(windows: &Value) -> Value {
+    windows.as_array().map_or_else(
+        || json!([]),
+        |items| {
+            json!(items
+                .iter()
+                .take(2)
+                .map(|window| json!({
+                    "target": core_text(&window["target"], 120),
+                    "from": window["from"],
+                    "to": window["to"],
+                }))
+                .collect::<Vec<_>>())
+        },
+    )
+}
+
+fn model_identity_core(identity: &Value) -> Value {
+    if !identity.is_object() {
+        return json!({
+            "status": "unknown",
+            "reason": "the Study evidence does not record the model identity or the current selection",
+        });
+    }
+    json!({
+        "study_record": model_version_core(
+            &identity["study_record"],
+            "the Study evidence does not record the frozen model version used for its results",
+        ),
+        "current_selection": model_version_core(
+            &identity["current_selection"],
+            "the Study evidence does not record the current application selection",
+        ),
+        "comparison": comparison_identity_core(&identity["comparison"]),
+    })
+}
+
+fn model_version_core(value: &Value, missing_reason: &str) -> Value {
+    if !value.is_object() {
+        return json!({"status":"unknown","reason":missing_reason});
+    }
+    let version = &value["version"];
+    json!({
+        "status": value["status"].as_str().unwrap_or("unknown"),
+        "name": core_text(&value["name"], 120),
+        "head": core_text(&value["head"], 80),
+        "base_commit": core_text(&value["base_commit"], 80),
+        "version": if version.is_object() {
+            json!({"id": core_text(&version["id"], 120), "revision": version["revision"]})
+        } else {
+            Value::Null
+        },
+        "code_source_sha256": core_text(&value["code_source_sha256"], 96),
+        "revision_recorded": value["revision_recorded"],
+        "reason": core_text(&value["reason"], 240),
+    })
+}
+
+fn comparison_identity_core(comparison: &Value) -> Value {
+    if !comparison.is_object() {
+        return json!({"status":"unknown","reason":"the Study evidence does not compare the recorded model identity with the current selection"});
+    }
+    json!({
+        "status": comparison["status"].as_str().unwrap_or("unknown"),
+        "matches": comparison["matches"],
+        "basis": core_text(&comparison["basis"], 240),
+        "reason": core_text(&comparison["reason"], 240),
+    })
+}
+
+fn verification_core(verification: &Value) -> Value {
+    if !verification.is_object() {
+        return json!({
+            "reverified": Value::Null,
+            "status": "unknown",
+            "scope": VERIFICATION_SCOPE,
+            "reason": "the Study evidence does not record whether the recorded results were re-verified; treat the scores as recorded, not independently re-verified",
+        });
+    }
+    let reverified = verification["reverified"].as_bool();
+    json!({
+        "reverified": reverified.map_or(Value::Null, |value| json!(value)),
+        "recorded_result_files": verification["recorded_result_files"],
+        "succeeded_tasks": verification["succeeded_tasks"],
+        "scope": if verification["note"].is_string() {
+            core_text(&verification["note"], 320)
+        } else {
+            json!(VERIFICATION_SCOPE)
+        },
+        "reason": if reverified.is_none() {
+            json!("the Study evidence does not record a reverified flag; do not present the scores as re-verified")
+        } else {
+            Value::Null
+        },
+    })
+}
+
+fn source_paths_core(paths: &Value) -> Value {
+    if !paths.is_object() {
+        return json!({"status":"unknown","reason":"the Study evidence does not record where its manifest and result files live"});
+    }
+    json!({
+        "root": core_text(&paths["root"], 240),
+        "manifest": core_text(&paths["manifest"], 120),
+        "samples": core_text(&paths["samples"], 120),
+        "state": core_text(&paths["state"], 120),
+        "results": core_text(&paths["results"], 120),
+    })
+}
+
+fn core_bytes(core: &Value) -> usize {
+    serde_json::to_string(core).map_or(usize::MAX, |text| text.len())
+}
+
+/// 先把可删的重复明细逐级删掉；身份、来源、关系、缺失原因与未复核标志不在裁剪列表里。
+fn bound_evidence_core(mut core: Value) -> Value {
+    if core_bytes(&core) <= EVIDENCE_CORE_MAX_BYTES {
+        return core;
+    }
+    core["truncated"] = json!(true);
+    let trims: &[(&[&str], usize)] = &[
+        (&["warnings"], 1),
+        (&["validation", "reasons"], 1),
+        (&["missing"], 2),
+        (&["validation", "windows"], 1),
+        (&["warnings"], 0),
+        (&["validation", "windows"], 0),
+        (&["missing"], 1),
+    ];
+    for (path, keep) in trims {
+        if core_bytes(&core) <= EVIDENCE_CORE_MAX_BYTES {
+            return core;
+        }
+        truncate_json_array(&mut core, path, *keep);
+    }
+    if core_bytes(&core) <= EVIDENCE_CORE_MAX_BYTES {
+        return core;
+    }
+    // 再删解释性长文本；身份、来源、关系、缺失原因、未复核标志一个都不删。
+    core["objective"]["loss"] = Value::Null;
+    core["comparison"]["basis"] = Value::Null;
+    core["selection"]["rule"] = Value::Null;
+    core["study"]["method"] = Value::Null;
+    if core_bytes(&core) <= EVIDENCE_CORE_MAX_BYTES {
+        return core;
+    }
+    minimal_evidence_core(&core)
+}
+
+/// 极端情况下的最小核心：只留判断“成绩对应哪个版本、是否重新核验、两期关系如何”所需的结构。
+fn minimal_evidence_core(core: &Value) -> Value {
+    let identity = slim_identity(&core["model_identity"]);
+    let minimal = json!({
+        "schema": 1,
+        "truncated": true,
+        "study": {"id": core["study"]["id"], "kind": core["study"]["kind"], "status": core["study"]["status"]},
+        "selection": {
+            "best_member": core["selection"]["best_member"],
+            "best_objective": core["selection"]["best_objective"],
+            "provisional": core["selection"]["provisional"],
+        },
+        "objective": {"direction": core["objective"]["direction"]},
+        "comparison": {
+            "relation": core["comparison"]["relation"],
+            "baseline": core["comparison"]["baseline"],
+            "best": core["comparison"]["best"],
+        },
+        "validation": {
+            "configured": core["validation"]["configured"],
+            "status": core["validation"]["status"],
+            "reasons": core_text_list(&core["validation"]["reasons"], 1, 200),
+        },
+        "model_identity": identity,
+        "verification": core["verification"],
+        "source_paths": core["source_paths"],
+        "missing": core_text_list(&core["missing"], 1, 200),
+        "notice": "Detailed Study evidence was omitted to fit its budget; model identity, period relations, missing reasons and the not-re-verified scope are preserved.",
+    });
+    if core_bytes(&minimal) <= EVIDENCE_CORE_MAX_BYTES {
+        return minimal;
+    }
+    // 最后兜底：只留实际 version id/revision/source hash 与关系，仍说明未重新核验。
+    json!({
+        "schema": 1,
+        "truncated": true,
+        "notice": "Most Study evidence was omitted to fit its budget; only the recorded model identity, period relations, missing reasons and the not-re-verified flag are kept.",
+        "study": {"id": core["study"]["id"], "kind": core["study"]["kind"]},
+        "selection": {"best_member": core["selection"]["best_member"], "best_objective": core["selection"]["best_objective"]},
+        "objective": {"direction": core["objective"]["direction"]},
+        "comparison": {"relation": core["comparison"]["relation"]},
+        "model_identity": slim_identity(&core["model_identity"]),
+        "verification": {
+            "reverified": core["verification"]["reverified"],
+            "scope": core["verification"]["scope"],
+            "reason": core["verification"]["reason"],
+        },
+        "source_paths": {"root": core["source_paths"]["root"]},
+        "missing": core_text_list(&core["missing"], 1, 160),
+    })
+}
+
+fn slim_identity(identity: &Value) -> Value {
+    json!({
+        "study_record": {
+            "status": identity["study_record"]["status"],
+            "version": identity["study_record"]["version"],
+            "code_source_sha256": identity["study_record"]["code_source_sha256"],
+            "reason": identity["study_record"]["reason"],
+        },
+        "current_selection": {
+            "status": identity["current_selection"]["status"],
+            "version": identity["current_selection"]["version"],
+            "code_source_sha256": identity["current_selection"]["code_source_sha256"],
+            "reason": identity["current_selection"]["reason"],
+        },
+        "comparison": {
+            "status": identity["comparison"]["status"],
+            "matches": identity["comparison"]["matches"],
+            "basis": identity["comparison"]["basis"],
+            "reason": identity["comparison"]["reason"],
+        },
+    })
+}
+
 /// 24k 传输上限内的合法 JSON：先裁证据列表，最后才把完整 spec 目标换成紧凑投影。
 fn fit_study_summary(result: &mut Value) {
     fn text_len(value: &Value) -> usize {
@@ -1023,10 +1406,15 @@ fn fit_study_summary(result: &mut Value) {
         truncate_json_array(result, &["targets"], 8);
     }
     if text_len(result) > MAX_RESULT_CHARS {
-        result["evidence"] = json!({
-            "status": "abbreviated",
-            "reason": "the Study evidence exceeded the tool result budget; inspect the Study directory or ask for one aspect (calibration vs validation, parameters, identity)",
-        });
+        // 即使缩到最小也要保留身份与“未重新核验”的限制：助手必须能说清成绩对应哪个版本，
+        // 以及这次只是读取记录还是重新核验过原始输出。
+        let evidence = &result["evidence"];
+        if evidence.is_object() && evidence["status"] != "missing" {
+            let mut core = study_evidence_core(&result["evidence"]);
+            core["truncated"] = json!(true);
+            core["notice"] = json!("Detailed Study evidence was omitted to fit the tool result budget; Study/model identity, period relations, missing reasons and the not-re-verified scope are preserved in the evidence core.");
+            result["evidence"] = core;
+        }
         result["targets"] = compact_study_targets(&result["targets"]);
         truncate_json_array(result, &["targets"], 4);
         truncate_json_array(result, &["warnings"], 2);

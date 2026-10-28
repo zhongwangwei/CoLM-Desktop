@@ -2,6 +2,7 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
+use super::read::study_evidence_core;
 use super::{object, opt_str, req_str, Tier, Tool, ToolContext};
 
 pub(super) fn tools() -> Vec<Box<dyn Tool>> {
@@ -29,6 +30,62 @@ fn bounded(value: Value) -> Value {
             "preview": text.chars().take(240).collect::<String>(),
             "notice": "Evidence abbreviated; call the source tool for details."})
     }
+}
+
+/// 每步证据的传输上限：共同证据核心（身份/来源/未复核范围）+ 该检查自己的分数。
+const STEP_EVIDENCE_MAX_BYTES: usize = 4_000;
+
+/// 任何一步证据超限时只留共同证据核心的说明；身份与限制不能被压缩掉。
+const CORE_ONLY_NOTICE: &str = "Diagnostic detail was omitted to fit the response budget; Study/model identity, period relations, missing reasons and the not-re-verified scope are preserved in the evidence core.";
+
+fn evidence_bytes(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |text| text.len())
+}
+
+/// 双期/留出检查也带上共同证据核心里的来源：成绩对应哪个模型版本、这次是否重新核验。
+fn provenance_core(core: &Value) -> Value {
+    json!({
+        "study": core["study"],
+        "objective": core["objective"],
+        "comparison": core["comparison"],
+        "model_identity": core["model_identity"],
+        "verification": core["verification"],
+        "source_paths": core["source_paths"],
+        "missing": core["missing"],
+    })
+}
+
+fn with_provenance(mut value: Value, core: &Value) -> Value {
+    let provenance = provenance_core(core);
+    if let (Some(value), Some(provenance)) = (value.as_object_mut(), provenance.as_object()) {
+        for (key, field) in provenance {
+            value.insert(key.clone(), field.clone());
+        }
+    }
+    value
+}
+
+/// 超限时只留共同证据核心：可以删明细，但身份、两期关系、缺失原因与
+/// `verification.reverified`/核验范围必须还在。
+fn bounded_step_evidence(value: Value, core: &Value) -> Value {
+    if evidence_bytes(&value) <= STEP_EVIDENCE_MAX_BYTES {
+        return value;
+    }
+    json!({
+        "status": "abbreviated",
+        "notice": CORE_ONLY_NOTICE,
+        "study": core["study"],
+        "execution": core["execution"],
+        "selection": core["selection"],
+        "objective": core["objective"],
+        "comparison": core["comparison"],
+        "validation": core["validation"],
+        "model_identity": core["model_identity"],
+        "verification": core["verification"],
+        "source_paths": core["source_paths"],
+        "warnings": core["warnings"],
+        "missing": core["missing"],
+    })
 }
 
 fn collect(
@@ -143,6 +200,8 @@ impl Tool for DiagnosticPlan {
         );
         let mut hypotheses = Vec::new();
         let experiment;
+        // calibration 的共同证据核心：最后的总预算保险也要用它保留身份与未复核范围。
+        let mut study_core: Option<Value> = None;
         match workflow {
             "startup" => {
                 steps.push(pending("inputs", "checkdata", "Verify forcing, surface and restart inputs", "Configuration paths alone do not prove files exist, cover the requested time, or match the case.", next("read_case_config",json!({"case":case,"names":null,"filter":"DEF_"}))));
@@ -232,14 +291,20 @@ impl Tool for DiagnosticPlan {
                     study_data = evidence.clone();
                     match evidence.as_ref() {
                         Some(evidence) => {
+                            let core = study_evidence_core(evidence);
                             let missing = calibration_study_missing(evidence);
-                            step["evidence"] = calibration_projection(evidence);
+                            // 完整诊断与预算缩减都要能交代身份与未复核范围：证据核心不可丢。
+                            step["evidence"] = bounded_step_evidence(
+                                calibration_projection(evidence, &core),
+                                &core,
+                            );
                             step["status"] = json!(if missing.is_empty() {
                                 "collected"
                             } else {
                                 "partial"
                             });
                             step["missing"] = json!(missing);
+                            study_core = Some(core);
                         }
                         None => {
                             // 保留 collect 写下的 CLI/工具错误（例如 "cannot start …"），
@@ -255,13 +320,21 @@ impl Tool for DiagnosticPlan {
                         }
                     }
                     steps.push(step);
-                    steps.push(calibration_dual_period_step(&study_path, evidence.as_ref()));
+                    steps.push(calibration_dual_period_step(
+                        &study_path,
+                        evidence.as_ref(),
+                        study_core.as_ref(),
+                    ));
                 } else {
                     steps.push(pending("study", "checkdata", "Identify the Study", "Study directory is required to inspect objectives and bounds.", json!({"tool":"study_summary","arguments":{"study":null},"requires":["study"]})));
                 }
                 steps.push(pending("bounds", "localise", "Check parameter bounds, identifiability and objective tradeoffs", "Verify the Study includes this case and each parameter is active in its mode/build. A boundary hit is not proof of compensation or causality; inspect repeated candidates, sensitivity, baseline and other target variables.", Value::Null));
                 if study_data.is_some() {
-                    steps.push(calibration_held_out_step(&study_path, study_data.as_ref()));
+                    steps.push(calibration_held_out_step(
+                        &study_path,
+                        study_data.as_ref(),
+                        study_core.as_ref(),
+                    ));
                 } else {
                     steps.push(pending("held_out", "validate", "Verify held-out time/site performance and physical closure", "Independent validation, observation alignment and closure evidence are required before adopting tuned parameters.", Value::Null));
                 }
@@ -403,30 +476,35 @@ impl Tool for DiagnosticPlan {
             }
         }
         // calibration 的 Study 证据也走同一条有界输出路径；这里只是最后一道保险。
+        // 即使总结果超限，也保留共同证据核心里的身份、两期关系与未复核范围。
         if result.to_string().len() > 22000 {
-            if let Some(steps) = result["steps"].as_array_mut() {
-                for step in steps {
-                    if matches!(
-                        step["id"].as_str(),
-                        Some("study" | "dual_period" | "held_out")
-                    ) {
-                        step["evidence"] = json!({
-                            "status": "abbreviated",
-                            "notice": "Evidence exceeded the diagnostic response budget; call study_summary for the compact projection.",
-                        });
+            if let Some(core) = study_core.as_ref() {
+                if let Some(steps) = result["steps"].as_array_mut() {
+                    for step in steps {
+                        if matches!(
+                            step["id"].as_str(),
+                            Some("study" | "dual_period" | "held_out")
+                        ) {
+                            step["evidence"] = json!({
+                                "status": "abbreviated",
+                                "notice": "Evidence exceeded the diagnostic response budget; the shared evidence core keeps Study/model identity, period relations, missing reasons and the not-re-verified scope.",
+                                "study": core["study"],
+                                "selection": core["selection"],
+                                "objective": core["objective"],
+                                "comparison": core["comparison"],
+                                "validation": core["validation"],
+                                "model_identity": core["model_identity"],
+                                "verification": core["verification"],
+                                "source_paths": core["source_paths"],
+                                "missing": core["missing"],
+                            });
+                        }
                     }
                 }
             }
         }
         Ok(result)
     }
-}
-
-fn first_items(value: &Value, limit: usize) -> Value {
-    value.as_array().map_or_else(
-        || value.clone(),
-        |items| Value::Array(items.iter().take(limit).cloned().collect()),
-    )
 }
 
 fn short(text: &str, limit: usize) -> String {
@@ -444,8 +522,9 @@ fn study_evidence_object(value: &Value) -> Option<&Value> {
         .filter(|evidence| evidence.is_object() && evidence["status"] != "missing")
 }
 
-/// 率定检查用的紧凑投影：两期分数分开、选择规则与验证状态、身份对比、缺失原因都保留。
-fn calibration_projection(evidence: &Value) -> Value {
+/// 率定检查用的紧凑投影：在共同证据核心之上补两期分数、目标覆盖与参数位置。
+/// 身份、来源、目标方向、baseline/best、缺失原因与未复核范围由证据核心保留，不再只留状态。
+fn calibration_projection(evidence: &Value, core: &Value) -> Value {
     let at_bound = evidence["parameters"]["best"]["values"]
         .as_array()
         .into_iter()
@@ -453,43 +532,24 @@ fn calibration_projection(evidence: &Value) -> Value {
         .filter(|value| value["at_bound"].as_bool() == Some(true))
         .filter_map(|value| value["key"].as_str())
         .collect::<Vec<_>>();
-    json!({
-        "status": evidence["study"]["status"],
-        "kind": evidence["study"]["kind"],
-        "generation": evidence["study"]["generation"],
-        "selection": {
-            "best_member": evidence["selection"]["best_member"],
-            "best_objective": evidence["selection"]["best_objective"],
-            "provisional": evidence["selection"]["provisional"],
-            "no_best_reason": evidence["selection"]["no_best_reason"],
-        },
-        "calibration": {
-            "baseline_score": evidence["comparison"]["baseline"]["calibration"]["score"],
-            "best_score": evidence["comparison"]["best"]["calibration"]["score"],
-            "relation": evidence["comparison"]["relation"]["calibration"],
-        },
-        "validation": {
-            "configured": evidence["validation"]["configured"],
-            "status": evidence["validation"]["status"],
-            "windows": first_items(&evidence["validation"]["windows"], 3),
-            "reasons": first_items(&evidence["validation"]["reasons"], 3),
-            "baseline_score": evidence["comparison"]["baseline"]["validation"]["score"],
-            "best_score": evidence["comparison"]["best"]["validation"]["score"],
-            "relation": evidence["comparison"]["relation"]["validation"],
-        },
-        "identity": {
-            "study_record": evidence["model_identity"]["study_record"]["status"],
-            "comparison": evidence["model_identity"]["comparison"]["status"],
-            "basis": evidence["model_identity"]["comparison"]["basis"],
-        },
-        "parameters": {
-            "dimension_count": evidence["parameters"]["dimension_count"],
-            "hybrid_weight_count": evidence["parameters"]["hybrid_weight_count"],
-            "best_at_bound": at_bound,
-        },
-        "warnings": first_items(&evidence["warnings"], 3),
-        "missing": first_items(&evidence["missing"], 3),
-    })
+    let mut projection = core.clone();
+    projection["status"] = evidence["study"]["status"].clone();
+    projection["calibration"] = json!({
+        "baseline_score": evidence["comparison"]["baseline"]["calibration"]["score"],
+        "best_score": evidence["comparison"]["best"]["calibration"]["score"],
+        "relation": evidence["comparison"]["relation"]["calibration"],
+    });
+    projection["validation"]["baseline_score"] =
+        evidence["comparison"]["baseline"]["validation"]["score"].clone();
+    projection["validation"]["best_score"] =
+        evidence["comparison"]["best"]["validation"]["score"].clone();
+    projection["validation"]["relation"] = evidence["comparison"]["relation"]["validation"].clone();
+    projection["parameters"] = json!({
+        "dimension_count": evidence["parameters"]["dimension_count"],
+        "hybrid_weight_count": evidence["parameters"]["hybrid_weight_count"],
+        "best_at_bound": at_bound,
+    });
+    projection
 }
 
 /// Study 证据本身缺什么：无最优、验证未配置/不可用、身份冲突都要分开说，不能当成"通过"。
@@ -524,20 +584,35 @@ fn calibration_study_missing(evidence: &Value) -> Vec<String> {
     if evidence["model_identity"]["comparison"]["status"].as_str() == Some("mismatch") {
         missing.push("The Study's recorded model identity does not match the current selection; its scores do not describe the currently selected model.".into());
     }
-    if evidence["comparison"]["relation"]["calibration"]
+    match evidence["comparison"]["relation"]["calibration"]
         .as_str()
-        .is_some_and(|relation| relation != "lower_loss")
+        .unwrap_or("unknown")
     {
-        missing.push("The recorded best member does not have a lower calibration loss than the baseline; it is not an improvement.".into());
+        "lower_loss" => {}
+        "equal" => missing.push(
+            "The recorded best member's calibration loss is unchanged from the baseline (equal); it is not a calibration improvement.".into(),
+        ),
+        "higher_loss" => missing.push(
+            "The recorded best member has a higher calibration loss than the baseline; it is not an improvement.".into(),
+        ),
+        _ => missing.push(
+            "The calibration-loss relation between the best member and the baseline is unknown; whether calibration improved cannot be established.".into(),
+        ),
     }
     missing.truncate(6);
     missing
 }
 
-/// 双期比较的独立检查：有分数不等于通过，必须明确"率定改善但验证变差/缺失"的分歧。
-fn calibration_dual_period_step(study: &str, evidence: Option<&Value>) -> Value {
+/// 双期比较的独立检查：率定×验证分别按 improved/equal/worse/unknown 处理。
+/// 只有两期都 lower_loss 才说两期改善；验证持平必须明确说持平，率定持平/变差/未知各有表述。
+/// 证据里同时带上共同证据核心，助手能交代成绩对应哪个模型版本、这次是否重新核验。
+fn calibration_dual_period_step(
+    study: &str,
+    evidence: Option<&Value>,
+    core: Option<&Value>,
+) -> Value {
     let next_tool = next("study_summary", json!({"study": study}));
-    let Some(evidence) = evidence else {
+    let (Some(evidence), Some(core)) = (evidence, core) else {
         return json!({"id":"dual_period","phase":"localise",
             "title":"Compare calibration and held-out validation losses",
             "status":"missing","evidence":null,
@@ -565,41 +640,66 @@ fn calibration_dual_period_step(study: &str, evidence: Option<&Value>) -> Value 
                 240,
             )],
         )
-    } else if calibration == "unknown" {
-        (
-            "missing",
-            vec!["Calibration scores are unavailable; no calibration-versus-validation comparison was made.".to_owned()],
-        )
-    } else if calibration == "lower_loss" && validation == "higher_loss" {
-        (
-            "divergent",
-            vec!["Calibration loss fell while held-out validation loss rose. Report this as an explicit divergence: do not claim improved generalisation and do not diagnose overfitting from this evidence alone.".to_owned()],
-        )
-    } else if calibration == "lower_loss" && (!configured || validation == "unknown") {
-        (
-            "missing",
-            vec!["Calibration loss fell but validation was not configured or recorded; fit improved, generalisation was not checked.".to_owned()],
-        )
-    } else if calibration == "lower_loss" && matches!(validation, "lower_loss" | "equal") {
-        (
-            "collected",
-            vec!["Both recorded periods improved; the claim is limited to this Study, its targets and these windows, and independent validation is still required.".to_owned()],
-        )
-    } else if calibration == "higher_loss" {
-        (
-            "divergent",
-            vec!["The recorded best member has a higher calibration loss than the baseline; do not present it as an improvement even if validation improved.".to_owned()],
-        )
     } else {
-        (
-            "missing",
-            vec![format!("Calibration/validation relation is unclear (calibration={calibration}, validation={validation}); no improvement claim is supported.")],
-        )
+        // 两期各自判断；任何分支都不把"率定改善"或"验证改善"单独说成两期改善。
+        match calibration {
+            "unknown" => (
+                "missing",
+                vec!["Calibration scores are unavailable; no calibration-versus-validation comparison was made.".to_owned()],
+            ),
+            "higher_loss" => (
+                "divergent",
+                vec!["The recorded best member has a higher calibration loss than the baseline; do not present it as an improvement even if validation improved.".to_owned()],
+            ),
+            "equal" => (
+                "missing",
+                vec![format!(
+                    "Calibration loss was unchanged (equal) between the recorded best member and the baseline; the best member is not a calibration improvement, so no calibration-versus-validation improvement claim is supported. Held-out validation relation: {validation}."
+                )],
+            ),
+            "lower_loss" => match validation {
+                "lower_loss" => (
+                    "collected",
+                    vec!["Both recorded periods improved: calibration and held-out validation losses were lower for the best member than for the baseline. The claim is limited to this Study, its targets and these windows, and independent validation is still required.".to_owned()],
+                ),
+                "equal" => (
+                    "partial",
+                    vec!["Calibration loss was lower while held-out validation loss was unchanged (equal); in-sample fit improved, but held-out generalisation did not improve. Do not state that both periods improved.".to_owned()],
+                ),
+                "higher_loss" => (
+                    "divergent",
+                    vec!["Calibration loss fell while held-out validation loss rose. Report this as an explicit divergence: do not claim improved generalisation and do not diagnose overfitting from this evidence alone.".to_owned()],
+                ),
+                "unknown" if configured => (
+                    "missing",
+                    vec![short(
+                        &format!(
+                            "Calibration loss fell but recorded validation losses are unavailable (validation status: {}): {}; fit improved, generalisation was not checked.",
+                            evidence["validation"]["status"]
+                                .as_str()
+                                .unwrap_or("unknown"),
+                            evidence["validation"]["reasons"]
+                        ),
+                        320,
+                    )],
+                ),
+                "unknown" => (
+                    "missing",
+                    vec!["Calibration loss fell but validation windows are not configured in the Study spec; fit improved, generalisation was not checked.".to_owned()],
+                ),
+                other => (
+                    "missing",
+                    vec![format!("Unrecognised validation relation {other:?}; no calibration-versus-validation improvement claim is supported.")],
+                ),
+            },
+            other => (
+                "missing",
+                vec![format!("Unrecognised calibration relation {other:?}; no calibration improvement claim is supported.")],
+            ),
+        }
     };
-    json!({"id":"dual_period","phase":"localise",
-        "title":"Compare calibration and held-out validation losses",
-        "status":status,
-        "evidence":bounded(json!({
+    let evidence_out = with_provenance(
+        json!({
             "calibration": {
                 "baseline": evidence["comparison"]["baseline"]["calibration"]["score"],
                 "best": evidence["comparison"]["best"]["calibration"]["score"],
@@ -616,16 +716,23 @@ fn calibration_dual_period_step(study: &str, evidence: Option<&Value>) -> Value 
                 "best_member": evidence["selection"]["best_member"],
                 "provisional": evidence["selection"]["provisional"],
             },
-        })),
+        }),
+        core,
+    );
+    json!({"id":"dual_period","phase":"localise",
+        "title":"Compare calibration and held-out validation losses",
+        "status":status,
+        "evidence":bounded_step_evidence(evidence_out, core),
         "missing":missing,
         "next_tool":next_tool})
 }
 
-/// held_out 检查真实消费验证状态：未配置与已配置但不可用给不同缺失原因。
-fn calibration_held_out_step(study: &str, evidence: Option<&Value>) -> Value {
+/// held_out 检查真实消费验证状态：未配置与已配置但不可用给不同缺失原因；
+/// 证据里同样带上共同证据核心，保留身份、来源与"未重新核验"的范围。
+fn calibration_held_out_step(study: &str, evidence: Option<&Value>, core: Option<&Value>) -> Value {
     let title = "Verify held-out time/site performance and physical closure";
     let next_tool = next("study_summary", json!({"study": study}));
-    let Some(evidence) = evidence else {
+    let (Some(evidence), Some(core)) = (evidence, core) else {
         return pending(
             "held_out",
             "validate",
@@ -641,20 +748,24 @@ fn calibration_held_out_step(study: &str, evidence: Option<&Value>) -> Value {
         .as_str()
         .unwrap_or("unknown");
     if !configured {
-        return json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
-            "evidence":bounded(json!({
+        let evidence_out = with_provenance(
+            json!({
                 "validation": {"configured": false, "status": "not_configured"},
                 "calibration": {
                     "baseline": evidence["comparison"]["baseline"]["calibration"]["score"],
                     "best": evidence["comparison"]["best"]["calibration"]["score"],
                 },
-            })),
+            }),
+            core,
+        );
+        return json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
+            "evidence":bounded_step_evidence(evidence_out, core),
             "missing":["The Study spec has no validation windows; held-out performance was never measured, so generalisation is unverified."],
             "next_tool":next_tool});
     }
     if status == "available" {
-        return json!({"id":"held_out","phase":"validate","title":title,"status":"partial",
-            "evidence":bounded(json!({
+        let evidence_out = with_provenance(
+            json!({
                 "validation": {
                     "configured": true,
                     "status": "available",
@@ -663,18 +774,26 @@ fn calibration_held_out_step(study: &str, evidence: Option<&Value>) -> Value {
                     "best": evidence["comparison"]["best"]["validation"]["score"],
                     "relation": evidence["comparison"]["relation"]["validation"],
                 },
-            })),
+            }),
+            core,
+        );
+        return json!({"id":"held_out","phase":"validate","title":title,"status":"partial",
+            "evidence":bounded_step_evidence(evidence_out, core),
             "missing":["Recorded Study validation windows are the only held-out evidence; physical closure, observation alignment and an independent period/site are still required before adopting tuned parameters."],
             "next_tool":next_tool});
     }
-    json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
-        "evidence":bounded(json!({
+    let evidence_out = with_provenance(
+        json!({
             "validation": {
                 "configured": true,
                 "status": status,
                 "reasons": evidence["validation"]["reasons"],
             },
-        })),
+        }),
+        core,
+    );
+    json!({"id":"held_out","phase":"validate","title":title,"status":"missing",
+        "evidence":bounded_step_evidence(evidence_out, core),
         "missing":[short(&format!(
             "Validation windows are configured but recorded validation losses are unavailable ({status}): {}",
             evidence["validation"]["reasons"]
@@ -694,6 +813,12 @@ fn calibration_divergence_hypothesis(evidence: &Value) -> Option<Value> {
         return Some(
             json!({"status":"unverified","candidate":"Overfitting or compensating parameter bias",
             "basis":"Calibration loss fell while held-out validation loss rose. This is an explicit divergence, not a confirmed cause: do not claim improved generalisation and do not diagnose overfitting from this evidence alone."}),
+        );
+    }
+    if calibration == "lower_loss" && validation == "equal" {
+        return Some(
+            json!({"status":"unverified","candidate":"In-sample fit improvement without a held-out improvement",
+            "basis":"Calibration loss fell while held-out validation loss was unchanged (equal); the recorded windows show no generalisation improvement, and this is not evidence of degradation either."}),
         );
     }
     if calibration == "lower_loss" && validation == "unknown" {

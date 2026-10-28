@@ -330,9 +330,6 @@ fn calibration_study_status(evidence: Value) -> Value {
     })
 }
 
-// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
-// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
-#[cfg(unix)]
 fn calibration_validation(status: &str, configured: bool, reasons: Value) -> Value {
     json!({
         "configured": configured,
@@ -342,9 +339,6 @@ fn calibration_validation(status: &str, configured: bool, reasons: Value) -> Val
     })
 }
 
-// 这些夹具只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试，
-// 不挂 cfg 会让 -D warnings 把帮助函数当 dead_code。
-#[cfg(unix)]
 fn calibration_evidence(
     kind: &str,
     calibration_relation: &str,
@@ -523,7 +517,7 @@ fn calibration_keeps_validation_unconfigured_and_unavailable_distinct() {
         .contains("no paired values"));
     assert!(step(&unavailable, "dual_period")["missing"]
         .to_string()
-        .contains("not configured or recorded"));
+        .contains("recorded validation losses are unavailable"));
     assert!(unavailable["hypotheses"]
         .to_string()
         .contains("In-sample fit improvement"));
@@ -615,5 +609,526 @@ fn calibration_evidence_output_stays_valid_json_within_budget() {
     let decoded: Value = serde_json::from_str(&serialized).unwrap();
     assert_eq!(decoded["status"], "incomplete");
     assert_eq!(step(&decoded, "study")["status"], "partial");
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+// ---- R03/R04：两期关系措辞与共同证据核心 ----
+
+fn recorded_hash() -> String {
+    "a".repeat(64)
+}
+
+/// 记录模型身份/核验范围/来源路径的证据；read.rs 会按当前选择补 current_selection 与 comparison。
+fn with_recorded_identity(mut evidence: Value) -> Value {
+    evidence["model_identity"] = json!({
+        "study_record": {
+            "status": "pinned",
+            "name": "CoLM-2026",
+            "head": "head-sha",
+            "base_commit": "base-sha",
+            "version": {"id": "ver-7", "revision": 7},
+            "code_source_sha256": recorded_hash(),
+            "revision_recorded": true,
+        },
+        "current_selection": Value::Null,
+        "comparison": {"status": "unknown", "matches": Value::Null, "basis": "completed by the assistant"},
+    });
+    evidence["verification"] = json!({
+        "recorded_result_files": 4,
+        "succeeded_tasks": 2,
+        "reverified": false,
+        "note": "scores and losses are read from recorded task-result files; they were not re-verified against history output, observations or the frozen kernel by this status read",
+    });
+    evidence["source_paths"] = json!({
+        "root": "/studies/s-1", "manifest": "manifest.json", "samples": "samples",
+        "state": "checkpoints/state", "results": "results/tasks",
+    });
+    evidence
+}
+
+#[cfg(unix)]
+fn frozen_model_context(root: &std::path::Path) -> crate::tools::ModelContext {
+    crate::tools::ModelContext {
+        model: json!({
+            "version": {"id": "ver-7", "revision": 7},
+            "code": {"source_sha256": recorded_hash()},
+        }),
+        model_root: root.join("model"),
+        source_dir: root.join("source"),
+        docs_dir: None,
+        source_case: None,
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_improved_equal_worse_and_unknown_are_reported_separately() {
+    let mut ctx = fixture("calibration-relations");
+    let available = || calibration_validation("available", true, json!([]));
+    let unavailable = || {
+        calibration_validation(
+            "unavailable",
+            true,
+            json!(["validation target Qle unavailable: window has no paired values"]),
+        )
+    };
+    let not_configured = || {
+        calibration_validation(
+            "not_configured",
+            false,
+            json!(["The Study spec has no validation windows; only in-sample calibration fit is recorded."]),
+        )
+    };
+    // (calibration relation, validation relation, validation fixture, status, required, forbidden)
+    type RelationCase = (
+        &'static str,
+        &'static str,
+        Value,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+    let cases: Vec<RelationCase> = vec![
+        (
+            "lower_loss",
+            "lower_loss",
+            available(),
+            "collected",
+            &["Both recorded periods improved", "limited to this Study"],
+            &["unchanged (equal)"],
+        ),
+        (
+            "lower_loss",
+            "equal",
+            available(),
+            "partial",
+            &[
+                "unchanged (equal)",
+                "Do not state that both periods improved",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "lower_loss",
+            "higher_loss",
+            available(),
+            "divergent",
+            &[
+                "explicit divergence",
+                "do not claim improved generalisation",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "lower_loss",
+            "unknown",
+            unavailable(),
+            "missing",
+            &[
+                "recorded validation losses are unavailable",
+                "fit improved, generalisation was not checked",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "lower_loss",
+            "unknown",
+            not_configured(),
+            "missing",
+            &[
+                "validation windows are not configured",
+                "fit improved, generalisation was not checked",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "equal",
+            "lower_loss",
+            available(),
+            "missing",
+            &["unchanged (equal)", "not a calibration improvement"],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "equal",
+            "equal",
+            available(),
+            "missing",
+            &["unchanged (equal)", "Held-out validation relation: equal"],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "equal",
+            "higher_loss",
+            available(),
+            "missing",
+            &[
+                "unchanged (equal)",
+                "Held-out validation relation: higher_loss",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "equal",
+            "unknown",
+            unavailable(),
+            "missing",
+            &["unchanged (equal)", "Held-out validation relation: unknown"],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "higher_loss",
+            "lower_loss",
+            available(),
+            "divergent",
+            &[
+                "higher calibration loss",
+                "do not present it as an improvement",
+            ],
+            &["Both recorded periods improved"],
+        ),
+        (
+            "unknown",
+            "lower_loss",
+            available(),
+            "missing",
+            &["Calibration scores are unavailable"],
+            &["Both recorded periods improved"],
+        ),
+    ];
+    for (calibration, validation, fixture_status, status, required, forbidden) in cases {
+        fake_study_cli(
+            &mut ctx,
+            calibration_study_status(calibration_evidence(
+                "tuning",
+                calibration,
+                validation,
+                fixture_status,
+            )),
+        );
+        let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+        let dual = step(&result, "dual_period");
+        assert_eq!(
+            dual["status"], status,
+            "calibration={calibration} validation={validation}"
+        );
+        let text = dual["missing"].to_string();
+        for needle in required {
+            assert!(
+                text.contains(needle),
+                "calibration={calibration} validation={validation}: {needle:?} missing from {text}"
+            );
+        }
+        for needle in forbidden {
+            assert!(
+                !text.contains(needle),
+                "calibration={calibration} validation={validation}: unexpectedly claimed {needle:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_projection_keeps_actual_model_identity_and_not_reverified() {
+    let mut ctx = fixture("calibration-identity");
+    ctx.model_context = Some(frozen_model_context(&ctx.project_root));
+    fake_study_cli(
+        &mut ctx,
+        calibration_study_status(with_recorded_identity(calibration_evidence(
+            "tuning",
+            "lower_loss",
+            "lower_loss",
+            calibration_validation("available", true, json!([])),
+        ))),
+    );
+    let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    let hash = recorded_hash();
+    for id in ["study", "dual_period", "held_out"] {
+        let evidence = &step(&result, id)["evidence"];
+        let identity = &evidence["model_identity"];
+        assert_eq!(
+            identity["study_record"]["version"]["id"], "ver-7",
+            "{id}: {evidence}"
+        );
+        assert_eq!(identity["study_record"]["version"]["revision"], 7, "{id}");
+        assert_eq!(
+            identity["study_record"]["code_source_sha256"].as_str(),
+            Some(hash.as_str()),
+            "{id}"
+        );
+        assert_eq!(identity["current_selection"]["status"], "frozen", "{id}");
+        assert_eq!(
+            identity["current_selection"]["version"]["id"], "ver-7",
+            "{id}"
+        );
+        assert_eq!(
+            identity["current_selection"]["code_source_sha256"].as_str(),
+            Some(hash.as_str()),
+            "{id}"
+        );
+        assert_eq!(identity["comparison"]["status"], "matches", "{id}");
+        assert_eq!(evidence["verification"]["reverified"], false, "{id}");
+        let scope = evidence["verification"]["scope"].to_string();
+        assert!(scope.contains("not re-verified"), "{id}: {scope}");
+        assert_eq!(evidence["source_paths"]["root"], "/studies/s-1", "{id}");
+        assert_eq!(evidence["objective"]["direction"], "minimize", "{id}");
+        assert_eq!(
+            evidence["comparison"]["relation"]["calibration"], "lower_loss",
+            "{id}"
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["validation"], "lower_loss",
+            "{id}"
+        );
+    }
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_budget_reduction_keeps_identity_and_not_reverified() {
+    let mut ctx = fixture("calibration-identity-budget");
+    let mut evidence = with_recorded_identity(calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "higher_loss",
+        calibration_validation(
+            "partial",
+            true,
+            json!(["one validation target could not be scored; the aggregate validation score is not comparable"]),
+        ),
+    ));
+    evidence["warnings"] = Value::Array(
+        (0..40)
+            .map(|index| json!(format!("warning {index}: {}", "x".repeat(2000))))
+            .collect(),
+    );
+    evidence["objective"]["targets"] = Value::Array(
+        (0..30)
+            .map(|index| json!({"key": format!("target_{index:02}"), "variable": "Qle"}))
+            .collect(),
+    );
+    evidence["validation"]["windows"] = Value::Array(
+        (0..25)
+            .map(|index| json!({"target": format!("target_{index:02}"), "from": 10, "to": 20}))
+            .collect(),
+    );
+    evidence["comparison"]["best"]["validation"]["targets"] = Value::Array(
+        (0..30)
+            .map(|index| json!({"key": format!("target_{index:02}"), "loss": 0.5}))
+            .collect(),
+    );
+    fake_study_cli(&mut ctx, calibration_study_status(evidence));
+    let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    let serialized = super::super::result_text(&result);
+    assert!(
+        serialized.chars().count() <= super::super::MAX_RESULT_CHARS,
+        "{}",
+        serialized.chars().count()
+    );
+    let decoded: Value = serde_json::from_str(&serialized).unwrap();
+    let hash = recorded_hash();
+    for id in ["study", "dual_period", "held_out"] {
+        let evidence = &step(&decoded, id)["evidence"];
+        assert_eq!(
+            evidence["model_identity"]["study_record"]["version"]["id"], "ver-7",
+            "{id}: {evidence}"
+        );
+        assert_eq!(
+            evidence["model_identity"]["study_record"]["code_source_sha256"].as_str(),
+            Some(hash.as_str()),
+            "{id}"
+        );
+        assert_eq!(evidence["verification"]["reverified"], false, "{id}");
+        assert_eq!(evidence["source_paths"]["root"], "/studies/s-1", "{id}");
+    }
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn calibration_reports_missing_identity_and_verification_as_explicit_unknown() {
+    let mut ctx = fixture("calibration-missing-identity");
+    let mut evidence = calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "lower_loss",
+        calibration_validation("available", true, json!([])),
+    );
+    // 旧证据可能完全没有这些字段：压缩后必须给出具体“不足”原因，不能变成肯定结论。
+    evidence["model_identity"] = json!({});
+    let object = evidence.as_object_mut().unwrap();
+    object.remove("verification");
+    object.remove("source_paths");
+    fake_study_cli(&mut ctx, calibration_study_status(evidence));
+    let result = DiagnosticPlan.call(&calibration_request(), &ctx).unwrap();
+    let study = &step(&result, "study")["evidence"];
+    assert!(
+        study["model_identity"]["study_record"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not record"),
+        "{study}"
+    );
+    assert!(study["verification"]["reverified"].is_null(), "{study}");
+    assert!(
+        study["verification"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not record"),
+        "{study}"
+    );
+    assert!(
+        study["verification"]["scope"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("did not re-verify"),
+        "{study}"
+    );
+    assert!(
+        study["source_paths"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not record"),
+        "{study}"
+    );
+    assert!(!study.to_string().contains("\"matches\":true"), "{study}");
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+fn evidence_core_stays_bounded_and_keeps_identity_under_maximum_details() {
+    let mut evidence = with_recorded_identity(calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "equal",
+        calibration_validation("available", true, json!([])),
+    ));
+    evidence["study"]["id"] = json!("s".repeat(500));
+    evidence["study"]["method"] = json!("m".repeat(500));
+    evidence["selection"]["rule"] = json!("r".repeat(500));
+    evidence["selection"]["no_best_reason"] =
+        json!({"code": "c".repeat(200), "detail": "d".repeat(500)});
+    evidence["objective"]["loss"] = json!("l".repeat(500));
+    evidence["comparison"]["basis"] = json!("b".repeat(500));
+    evidence["comparison"]["baseline"]["reason"] = json!("x".repeat(500));
+    evidence["comparison"]["best"]["reason"] = json!("y".repeat(500));
+    evidence["model_identity"]["study_record"]["reason"] = json!("i".repeat(500));
+    evidence["warnings"] = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("{index}: {}", "w".repeat(500))))
+            .collect(),
+    );
+    evidence["missing"] = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("{index}: {}", "m".repeat(500))))
+            .collect(),
+    );
+    evidence["validation"]["reasons"] =
+        Value::Array((0..20).map(|_| json!("v".repeat(500))).collect());
+    evidence["validation"]["windows"] = Value::Array(
+        (0..20)
+            .map(|index| json!({"target": "t".repeat(300), "from": index, "to": index + 1}))
+            .collect(),
+    );
+    let core = crate::tools::read::study_evidence_core(&evidence);
+    let text = core.to_string();
+    assert!(
+        text.len() <= crate::tools::read::EVIDENCE_CORE_MAX_BYTES,
+        "{} bytes: {text}",
+        text.len()
+    );
+    let hash = recorded_hash();
+    assert_eq!(
+        core["model_identity"]["study_record"]["version"]["id"],
+        "ver-7"
+    );
+    assert_eq!(
+        core["model_identity"]["study_record"]["version"]["revision"],
+        7
+    );
+    assert_eq!(
+        core["model_identity"]["study_record"]["code_source_sha256"].as_str(),
+        Some(hash.as_str())
+    );
+    assert_eq!(core["verification"]["reverified"], false);
+    assert!(core["verification"]["scope"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not re-verified"));
+    assert_eq!(core["source_paths"]["root"], "/studies/s-1");
+    assert_eq!(core["objective"]["direction"], "minimize");
+    assert_eq!(core["study"]["kind"], "tuning");
+    assert_eq!(core["comparison"]["relation"]["calibration"], "lower_loss");
+    assert_eq!(core["comparison"]["relation"]["validation"], "equal");
+}
+
+#[test]
+fn step_evidence_fallback_keeps_the_shared_core() {
+    let evidence = with_recorded_identity(calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "equal",
+        calibration_validation("available", true, json!([])),
+    ));
+    let core = crate::tools::read::study_evidence_core(&evidence);
+    let huge = json!({"padding": "p".repeat(10_000), "model_identity": {"status": "deleted"}});
+    let reduced = super::bounded_step_evidence(huge, &core);
+    assert_eq!(reduced["status"], "abbreviated");
+    assert!(reduced.to_string().len() <= super::STEP_EVIDENCE_MAX_BYTES);
+    assert_eq!(
+        reduced["model_identity"]["study_record"]["version"]["id"],
+        "ver-7"
+    );
+    assert_eq!(reduced["verification"]["reverified"], false);
+    assert!(reduced["verification"]["scope"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not re-verified"));
+    assert_eq!(reduced["source_paths"]["root"], "/studies/s-1");
+    assert_eq!(reduced["comparison"]["relation"]["validation"], "equal");
+}
+
+#[test]
+#[cfg(unix)]
+fn study_summary_budget_fallback_keeps_identity_and_not_reverified() {
+    let mut ctx = fixture("summary-fallback");
+    let mut evidence = with_recorded_identity(calibration_evidence(
+        "tuning",
+        "lower_loss",
+        "equal",
+        calibration_validation("available", true, json!([])),
+    ));
+    // 触发 StudySummary 的最后一道 24k 预算保险：身份和“未重新核验”不能被换成一句 abbreviated。
+    evidence["study"]["id"] = json!("s".repeat(30_000));
+    fake_study_cli(&mut ctx, calibration_study_status(evidence));
+    let tool = super::super::read::tools()
+        .into_iter()
+        .find(|tool| tool.name() == "study_summary")
+        .expect("study_summary tool");
+    let summary = tool.call(&json!({"study": "study"}), &ctx).unwrap();
+    assert_eq!(summary["truncated"], true);
+    let evidence = &summary["evidence"];
+    assert_eq!(evidence["truncated"], true, "{evidence}");
+    let hash = recorded_hash();
+    assert_eq!(
+        evidence["model_identity"]["study_record"]["version"]["id"],
+        "ver-7"
+    );
+    assert_eq!(
+        evidence["model_identity"]["study_record"]["version"]["revision"],
+        7
+    );
+    assert_eq!(
+        evidence["model_identity"]["study_record"]["code_source_sha256"].as_str(),
+        Some(hash.as_str())
+    );
+    assert_eq!(evidence["verification"]["reverified"], false);
+    assert_eq!(evidence["source_paths"]["root"], "/studies/s-1");
+    let text = super::super::result_text(&summary);
+    assert!(text.chars().count() <= super::super::MAX_RESULT_CHARS);
+    assert!(serde_json::from_str::<Value>(&text).is_ok());
     std::fs::remove_dir_all(ctx.project_root).unwrap();
 }
