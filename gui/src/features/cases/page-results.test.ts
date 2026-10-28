@@ -16,6 +16,8 @@ import {
   parameterContextKey,
   sameParameterContextIdentity,
 } from '../studies/parameter-context-cache';
+import { boundedMap } from '../results/series';
+import { comparisonCsv, comparisonKey, exportGate } from '../results/analysis-state';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -393,6 +395,116 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
   assert.equal(downloads.length, 0, 'a late response does not download a different selection');
 });
 
+test('a comparison whose conditions change mid-flight cannot publish its stale rows', async () => {
+  const page = '../results/ResultsPage.tsx';
+  const published: unknown[] = [];
+  const raw = [
+    { name: 'Qle', n: 1, rmse: 1, mae: 1, bias: 0, r2: 1, correlation: 1, nse: 1, kge: 1 },
+  ];
+  const requestSeq = { current: { single: 0, multi: 0 } };
+  const run = {
+    run_case: '/case/runs/a',
+    case_dir: '/case',
+    case_name: 'case',
+    status: 'succeeded',
+  };
+  const compare = callback(page, 'compare', {
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    comparisonEntries: [{ run, obs: '/obs/a.nc' }],
+    projectRuns: [run],
+    from: '',
+    to: '',
+    spinup: '0',
+    corrected: false,
+    requestSeq,
+    comparisonKey,
+    boundedMap,
+    // 计算进行中条件变了（例如换了窗口/编辑了清单）：请求序号前进，这份结果必须作废。
+    invokeJson: async () => {
+      requestSeq.current.multi++;
+      return raw;
+    },
+    windowArgs: () => ({ from: null, to: null }),
+    caseDirOfRunPath: () => null,
+    setComparisonProgress: () => {},
+    setComparisonResult: (value: unknown) => published.push(value),
+    bilingual: (zh: string) => zh,
+  });
+  const rows = (await compare()) as Record<string, unknown>[];
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].site, '/case/runs/a');
+  assert.equal(published.length, 0, 'a late comparison cannot overwrite the current scope state');
+});
+
+test('comparison export refuses a stale snapshot and writes the snapshot conditions', async () => {
+  const page = '../results/ResultsPage.tsx';
+  const task = callback(page, 'task', {
+    lock: { current: false },
+    epoch: { current: 1 },
+    setBusy: () => {},
+    setError: () => {},
+  });
+  const request = {
+    entries: [{ runCase: '/case/runs/a', obs: '/obs/a.nc' }],
+    from: '2008-01-01T00:00',
+    to: '2008-01-02T00:00',
+    spinup: '8',
+    corrected: true,
+  };
+  const result = {
+    scope: 'multi',
+    id: comparisonKey(request),
+    request,
+    rows: [
+      {
+        name: 'Qle',
+        site: '/case/runs/a',
+        comparison_obs: '/obs/a.nc',
+        n: 2,
+        rmse: 1,
+      },
+    ],
+    failures: [],
+    completedAt: 1,
+  };
+  const downloads: unknown[][] = [];
+  const notices: string[] = [];
+  const context = (gate: { ok: boolean; reason?: string }) => ({
+    task,
+    comparisonExportGate: gate,
+    comparisonResult: result,
+    comparisonCsv,
+    download: (...args: unknown[]) => {
+      downloads.push(args);
+      return { status: 'saved', path: '/saved.csv' };
+    },
+    tr: (zh: string) => zh,
+    exportMessage: () => 'saved',
+    setExportNotice: (value: string) => notices.push(value),
+  });
+  await assert.rejects(
+    callback(page, 'exportComparison', context({ ok: false, reason: 'conditions-changed' }))(),
+    /重新运行比较/,
+    'changing a comparison condition must block the old snapshot',
+  );
+  await assert.rejects(
+    callback(page, 'exportComparison', context({ ok: false, reason: 'none' }))(),
+    /先运行比较/,
+  );
+  assert.equal(downloads.length, 0);
+  await callback(page, 'exportComparison', context({ ok: true }))();
+  assert.equal(downloads.length, 1);
+  const text = String(downloads[0][1]);
+  assert.match(text, /2008-01-01T00:00/);
+  assert.match(text, /2008-01-02T00:00/);
+  assert.match(
+    text,
+    /,8,1,Qle/,
+    'spinup and corrected columns come from the compare-time snapshot',
+  );
+  assert.equal(notices.at(-1), 'saved');
+});
+
 test('Results report formats retain summary metrics and route native PDF through print_report', async () => {
   const { reportFile } = await import('../results/series');
   const page = '../results/ResultsPage.tsx',
@@ -419,12 +531,30 @@ test('Results report formats retain summary metrics and route native PDF through
     model: [1, 2],
     obs: [1, 2],
   };
+  const reportRequest = {
+    caseDir: '/case',
+    versionId: 'official',
+    revision: 1,
+    source: '/copy',
+    obs: '/obs.csv',
+    from: '',
+    to: '',
+    spinup: '0',
+    corrected: false,
+  };
   const reportData = callback(page, 'reportData', {
     source: '/copy',
     runs: [],
     catalog: { steps: 2 },
-    evaluation: [],
-    metrics: [metric],
+    // 报告只描述单站评估快照；条件列取快照 request。
+    singleResult: {
+      scope: 'single',
+      key: 'report-key',
+      request: reportRequest,
+      rows: [metric],
+      evaluation: [],
+      completedAt: 1,
+    },
     diagnostic: null,
     baseline: null,
     baselineNote: '',
@@ -448,11 +578,21 @@ test('Results report formats retain summary metrics and route native PDF through
     task,
     catalog: { steps: 2 },
     reportData,
+    singleExportGate: exportGate(
+      {
+        scope: 'single',
+        key: 'report-key',
+        rows: [metric],
+      },
+      'report-key',
+    ),
     en: true,
     reportFile,
     setExportNotice: noop,
     exportMessage: callback(page, 'exportMessage', { tr: (zh: string) => zh }),
     tr: (zh: string) => zh,
+    // 报告闸门的两条拒绝信息用 bilingual 拼；此前的用例从未走到抛错分支。
+    bilingual: (zh: string) => zh,
     download: (...args: unknown[]) => {
       downloads.push(args);
       return { status: 'download_requested', filename: args[0], mime_type: args[2] };
@@ -477,6 +617,22 @@ test('Results report formats retain summary metrics and route native PDF through
       'download_requested',
     );
   assert.equal(downloads.length, 4);
+  await assert.rejects(
+    callback(page, 'report', {
+      ...common,
+      singleExportGate: { ok: false, reason: 'conditions-changed' },
+    })(),
+    /重新评估/,
+    'a report never describes a stale single-station snapshot',
+  );
+  await assert.rejects(
+    callback(page, 'report', {
+      ...common,
+      singleExportGate: { ok: false, reason: 'none' },
+    })(),
+    /先完成一次观测评估/,
+  );
+  assert.equal(downloads.length, 4, 'stale report attempts do not download');
   const result = await callback(page, 'report', { ...common, reportFormat: 'pdf' })();
   assert.deepEqual(result, { status: 'printdialog_requested', format: 'pdf' });
   assert.deepEqual(commands, ['print_report']);
@@ -504,20 +660,29 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
   const rows = [
     { name: 'Qle', model_var: 'f_lfevpa', n: 9000, time: [0, 1], model: [1, 2], obs: [2, 3] },
   ];
-  const published: unknown[] = [],
+  const published: Record<string, unknown>[] = [],
     calls: Record<string, unknown>[] = [];
+  // evaluate 发布的是「条件快照」：key 与 request 在发起时定死，晚返回的结果不能写进来。
+  const singleRequest = {
+    caseDir: '/case',
+    versionId: 'official',
+    revision: 1,
+    source: '/run',
+    obs: '/obs',
+    from: '',
+    to: '',
+    spinup: '0',
+    corrected: false,
+  };
+  const requestSeq = { current: { single: 0, multi: 0 } };
   const context = {
     task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
-    obs: '/obs',
-    spinup: '0',
-    source: '/run',
-    corrected: false,
+    singleRequest,
+    requestSeq,
     selectionKey: 'verified-selection',
     tr: (zh: string) => zh,
     windowArgs: () => ({ from: null, to: null }),
-    setEvaluation: () => {},
-    setMetrics: (value: unknown) => published.push(value),
-    setSingleEvaluation: (value: unknown) => published.push(value),
+    setSingleResult: (value: Record<string, unknown>) => published.push(value),
     setSettingsOpen: () => {},
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       calls.push(args);
@@ -525,9 +690,16 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
     },
   };
   assert.equal(await callback(page, 'evaluate', context)(), rows);
-  assert.deepEqual(published.at(-1), { key: 'verified-selection', rows });
+  const snapshot = published.at(-1)!;
+  assert.equal(snapshot.scope, 'single');
+  assert.equal(snapshot.key, 'verified-selection');
+  assert.deepEqual(snapshot.request, singleRequest);
+  assert.deepEqual(snapshot.rows, rows);
+  assert.deepEqual(snapshot.evaluation, [{ name: 'Qle', available: true }]);
+  assert.equal(typeof snapshot.completedAt, 'number');
   assert.equal(calls[1].summaryOnly, false);
   assert.deepEqual(calls[1].pairVars, ['Qle']);
+  assert.equal(calls[1].spinup, 0, 'metrics uses the request snapshot spinup');
   published.length = 0;
   let current = true;
   await callback(page, 'evaluate', {
@@ -554,7 +726,12 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
     })(),
     [],
   );
-  assert.deepEqual(published.at(-1), { key: 'verified-selection', rows: [] });
+  const empty = published.at(-1)!;
+  assert.equal(empty.key, 'verified-selection');
+  assert.deepEqual(empty.rows, []);
+  assert.deepEqual(empty.evaluation, [
+    { name: 'FCH4', available: false, missing_model: ['f_methane_surf_flux_tot'] },
+  ]);
 });
 
 test('result navigation opens 新建修改版 from the model-improvement action', async () => {
@@ -601,6 +778,8 @@ test('overview contract exposes optional evaluation conditions only while advanc
       ].indexOf(name),
     // 分析范围（单站点/多站点）与"切回原站点页签"的 ref 也被 fields 回调引用。
     multiStation: false,
+    // 窗口标签按时间基准显示（表单里的「（UTC）」不再硬编码）。
+    timeBasisText: 'UTC',
     lastStationTab: { current: 'overview' },
     // 多站点比较的契约字段把结构化条目序列化成文本；这两个函数也在 fields 回调里被调用。
     comparisonEntries: [],
@@ -786,15 +965,15 @@ test('result time-window changes clear sampled curves while observation edits pr
   const noop = () => {};
   const context = {
     epoch: { current: 0 },
+    requestSeq: { current: { single: 0, multi: 0 } },
     setSeries: (value: unknown) => {
       curve = value;
     },
     setSeriesKey: (value: string) => {
       key = value;
     },
-    setMetrics: noop,
+    setSingleResult: noop,
     setDiagnostic: noop,
-    setSingleEvaluation: noop,
   };
   const run = (effect: { body: string }) => {
     const js = ts.transpileModule(`const effect=(${effect.body});`, {

@@ -24,7 +24,7 @@ function visit(node: ts.Node) {
   ts.forEachChild(node, visit);
 }
 visit(source);
-function harness() {
+function harness(series?: Record<string, unknown>) {
   let busy = false,
     error = '',
     notice = '';
@@ -46,13 +46,14 @@ function harness() {
     source: '/case/run',
     variable: 'GPP',
     fullSeriesCsv,
-    readSeries: async () => ({
-      time: [1, 2],
-      vars: { GPP: [3, 4] },
-      n: 2,
-      source_n: 2,
-      downsampled: false,
-    }),
+    readSeries: async () =>
+      series ?? {
+        time: [1, 2],
+        vars: { GPP: [3, 4] },
+        n: 2,
+        source_n: 2,
+        downsampled: false,
+      },
     download: (...args: unknown[]) => {
       calls.push(args);
       return new Promise((resolve, reject) => {
@@ -92,6 +93,12 @@ test('result export stays locked until native completion and distinguishes cance
     assert.equal(h.notice, '');
     await assert.rejects(h.run(), /in progress/);
     assert.equal(h.calls.length, 1);
+    // 没有 time_basis 的旧响应按模型钟导出：不得出现 time_utc，也不得带 Z。
+    const csv = String(h.calls[0][1]);
+    assert.ok(csv.includes('"model_time"'));
+    assert.ok(csv.includes('"model_clock"'));
+    assert.ok(!csv.includes('time_utc'));
+    assert.ok(!csv.includes('Z'));
     h.resolve({ status, path: status === 'saved' ? '/chosen/run.csv' : null });
     assert.equal((await pending).status, status);
     assert.equal(h.busy, false);
@@ -108,4 +115,23 @@ test('result export exposes native write failures and unlocks for retry without 
   assert.match(h.error, /permission denied/);
   assert.equal(h.notice, '');
   assert.equal(h.busy, false);
+});
+test('result export writes true UTC columns only for a utc-basis series', async () => {
+  const h = harness({
+    time: [0, 60],
+    vars: { GPP: [3, 4] },
+    n: 2,
+    source_n: 2,
+    downsampled: false,
+    time_basis: { kind: 'utc', utc_offset_seconds: 0, calendar: 'standard', source: 'grid' },
+  });
+  const pending = h.run();
+  await Promise.resolve();
+  h.resolve({ status: 'saved', path: '/chosen/run.csv' });
+  assert.equal((await pending).status, 'saved');
+  const csv = String(h.calls[0][1]);
+  assert.ok(csv.includes('"time_utc"'));
+  assert.ok(csv.includes('"1970-01-01T00:00:00.000Z"'));
+  assert.ok(csv.includes('"utc"'));
+  assert.ok(!csv.includes('model_time'));
 });

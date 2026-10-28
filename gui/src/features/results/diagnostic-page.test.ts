@@ -5,6 +5,8 @@ import ts from 'typescript';
 import * as seriesHelpers from './series';
 import * as overviewHelpers from './result-overview';
 import * as variableLabels from './variable-labels';
+import * as analysisHelpers from './analysis-state';
+import * as timeBasisHelpers from './time-basis';
 import type { PageContract, UiAction } from '../../lib/guide';
 
 type Element = { type: string | { name: string }; props: Record<string, unknown> };
@@ -108,6 +110,30 @@ function harness(
         variables: [{ name: 'f_lfevpa', kind: 'series', units: 'W/m²', dimensions: [] }],
       };
     if (command === 'series') return delayedSeries ?? normal;
+    if (command === 'evaluation_catalog') return [{ name: 'Qle', available: true }];
+    // 单站评估：只有 /obs/single.nc 这条路径返回一行指标，避免自动评估等用例拿到假数据。
+    if (command === 'metrics' && args.obs === '/obs/single.nc')
+      return [
+        {
+          name: 'Qle',
+          n: 2,
+          rmse: 2,
+          mae: 1,
+          bias: 1,
+          r2: 1,
+          correlation: 1,
+          nse: 1,
+          kge: 1,
+          units: 'W/m²',
+          source_units: 'kW/m2',
+          qc_kind: 'generated_validity',
+          qc_rule: 'finite=0, missing=1',
+          correction_status: 'not_applied',
+          correction_reason: 'Qle_cor missing',
+          coverage: 0.6,
+          coverage_min: 0.25,
+        },
+      ];
     if (command === 'energy_summary') return diagnostic;
     // 多站点比较：每个"运行副本 | 观测"条目调一次 metrics；只在比较测试用的观测路径上返回一行指标，
     // 其他路径照旧抛错，免得把自动评估等用例的结果喂假装数据。
@@ -124,6 +150,11 @@ function harness(
           nse: 1,
           kge: 1,
           units: 'W/m²',
+          qc_kind: 'measured_only',
+          qc_variable: 'Qle_qc',
+          correction_status: 'applied',
+          correction_variable: 'Qle_cor',
+          coverage: 0.85,
         },
       ];
     throw Error(command);
@@ -132,6 +163,8 @@ function harness(
     ...seriesHelpers,
     ...overviewHelpers,
     ...variableLabels,
+    ...analysisHelpers,
+    ...timeBasisHelpers,
     GridMap: () => {},
     invokeJson,
     invoke: invokeJson,
@@ -679,6 +712,48 @@ test('analysis scope switches between one station and the multi-station comparis
   assert.ok(h.station(), 'the station selector comes back');
 });
 
+test('single evaluation, comparison and the way back keep their own result snapshots', async () => {
+  const h = harness(true);
+  await h.render();
+  await h.tab('evaluation');
+  h.field('result-observation')!.set!('/obs/single.nc');
+  await h.render();
+  await h.action('evaluate-observations');
+  const cells = (node: unknown): string[] => {
+    if (Array.isArray(node)) return node.flatMap(cells);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    if (element.type === 'td')
+      return [String((element.props.children ?? []).filter((x) => x != null).join(''))];
+    return cells(element.props?.children);
+  };
+  assert.ok(cells(h.tree()).includes('Qle'), 'single evaluation row is shown');
+  assert.ok(!cells(h.tree()).includes('f_lfevpa'), 'comparison rows never leak into single scope');
+  // 指标表补的四列：单位、QC 来源、订正状态、有效覆盖率（后端新字段缺失时按旧行为显示 —）。
+  const rendered = JSON.stringify(h.tree());
+  assert.ok(rendered.includes('Generated validity mask'), 'QC provenance is shown');
+  assert.ok(rendered.includes('Not applied'), 'unapplied correction is shown, not hidden');
+  assert.ok(rendered.includes('60%'), 'coverage is shown as a percentage');
+
+  // 多站比较：得到比较快照（f_lfevpa），单站快照仍保留在各自的 state 里。
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  h.field('comparison-sources')!.set!('/case/.colm/runs/a | /obs/compare.nc');
+  await h.render();
+  assert.ok(!cells(h.tree()).includes('Qle'), 'single rows never leak into comparison scope');
+  await h.action('compare-sites');
+  assert.ok(cells(h.tree()).includes('f_lfevpa'), 'comparison row is shown');
+
+  // 切回单站：页面回到原来的 evaluation 页签，显示的是单站快照，不是比较行。
+  h.field('result-scope')!.set!('single');
+  await h.render();
+  assert.ok(cells(h.tree()).includes('Qle'), 'single snapshot survives the comparison round trip');
+  assert.ok(!cells(h.tree()).includes('f_lfevpa'), 'comparison rows do not replace single rows');
+});
+
 test('the multi-station comparison asks for run copies and shows paired metrics per site', async () => {
   const h = harness(true);
   await h.render();
@@ -702,6 +777,9 @@ test('the multi-station comparison asks for run copies and shows paired metrics 
   const cells = text(h.tree());
   assert.ok(cells.includes('f_lfevpa'), 'the paired metric row is rendered');
   assert.ok(cells.includes('.colm · a'), 'the site column identifies the compared run copy');
+  assert.ok(cells.includes('Measured QC'), 'QC provenance column comes from the backend field');
+  assert.ok(cells.includes('Applied'), 'correction status column is shown');
+  assert.ok(cells.includes('85%'), 'coverage column is shown');
   assert.ok(!cellError(h), 'no error notice after a valid comparison');
 });
 function cellError(h: { tree: () => unknown }): boolean {
@@ -778,6 +856,8 @@ test('multi-station comparison exports the metrics with their conditions', async
   assert.match(csv, /\/case\/\.colm\/runs\/a/);
   assert.match(csv, /f_lfevpa/);
   assert.match(csv, /\/obs\/compare\.nc/);
+  // 条件列来自比较时的快照（空窗口、跳过 0 条、未订正），不是导出时界面上的新输入。
+  assert.match(csv, /\/obs\/compare\.nc,,,0,0,f_lfevpa/);
 });
 
 test('a run from another project joins the comparison without scanning the project', async () => {
