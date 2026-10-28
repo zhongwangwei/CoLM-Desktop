@@ -38742,3 +38742,50 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 3. `comparison` 图表需要真实完成一次评估验收（含 HeatMap 的评分依赖、图表数量/类型与 OpenBench 3.0.8 一致）；统计阶段（statistics）仍未接入。
 4. 占位锁的陈旧回收在极端崩溃交错下仍有理论窗口（锁内只做毫秒级操作、超时回收），未做真实 NFS 故障注入。
 5. 数据探测的"亚小时粗化为 Hour"是对 CoLM TIMESTEP 输出的产品决定，需在真实评估里确认重采样没有引入系统性偏差。
+
+## 研究页第一批：派生设计身份 / AI 网络写回 / 冻结输入 / 覆盖率 / 空间配对（2026-10-29，审查报告 CoLM-Research-Review-b3686b1）
+
+基准 `b3686b1`；结果页批次先落地，本批只写研究页与 CLI 研究/模型路径。提交：`b0b779e5`（派生身份 P1-4）、`613443cb`（网络写回 P1-5）、`911c047a`（两步拟合冻结输入 P1-6）、`69b8ba9c`（覆盖率与空间配对 P1-1/P1-2 研究侧）、`74d69cfa`（留一站诊断正名 P1-3 前半）。
+
+### P1-4 派生研究身份（b0b779e5）
+
+- 旧行为：敏感性"带入率定"只抄算例名、变量、观测文件和参数范围；模型修订回落到全局当前版本（复现：trace r7 的研究派生后跑 official r1），逐目标指标/权重/时间聚合/时间窗全丢；不确定性分支的空间目标缺 `aggregate`（率定分支有）。
+- 新行为：`study.ts::deriveStudyDesign` 从父研究冻结 spec 完整继承算例、观测、目标（weight/metric/aggregate/corrected/validation 窗口）、种子与 kernel；`ResearchPage.carryToCalibration` 把 `researchBaseline` 钉在父研究记录的模型修订上；新 spec 记 `parent_study {study, spec_sha256, model_revision}`；界面表达不了的组合（逐目标权重/指标/时段不一致、父研究训练过网络、老研究无模型修订）明确拒绝而不是静默丢。不确定性空间目标补 `aggregate`；第 3 步显示派生来源与继承项，第 4 步冻结摘要列"派生自研究 X（模型修订 rN）"。
+- 兼容：`StudySpec.parent_study` 用 `serde(default, skip_serializing_if)`，旧 JSON 再序列化逐字节不变（旧研究 `spec_sha256` 仍能通过运行前核对）；crate 内 15 处 `StudySpec` 字面量补新字段。
+- 回归：前端派生边界 6 例（单点/格点、聚合/权重/窗口、拒绝路径）、页面回调钉版本与继承 2 例、不确定性空间 aggregate 1 例；Rust `spec_tests` 4 例。
+
+### P1-5 DE 训练网络写回（613443cb）
+
+- 旧行为：`model-import-study` 对含 `hybrid:w*` 的成员直接 `bail`，研究页挂网络入口只消费两步拟合产物；DE 训练的网络永远写不进版本（pft / soil_stress 都复现）。
+- 新行为：CLI 按成员产物分流 `parameters|network|joint`。网络用冻结 `spec.hybrid` + 成员权重经 `study::hybrid::write_member_files` 确定性重建（不从成员物化目录复制：研究证据不覆盖 hybrid.toml/models，多站点成员各有一份），暂存到 draft-assets、`HybridConfig::load` 校验后写 `overlay.hybrid`（relative_path+sha256）；preview 返回 kind/网络摘要且不改草稿；`--only` 只筛参数、绝不丢网络；`declare_studies` 按用途记 network/parameters。顺带修 `unique_id()` 并行撞名（pid+纳秒）导致互删暂存目录。
+- 前端：确认框按 kind 显示参数/网络/参数+网络与网络摘要；网络成员传 `only: null`；部分参数导入提示冻结后需复跑对照；`asset_root` 经 app state `openDraftAssets` 交给版本页，冻结时作 `model_freeze --asset-root`。
+- 回归：CLI 10 例 + 前端 4 例 + 版本页 asset_root 传 freeze 1 例。
+
+### P1-6 两步拟合读冻结输入（911c047a）
+
+- 旧行为：`hybrid_fit` 用 `study_case_root().join(site)`（原项目目录）跑 tap，率定却用创建研究时冻结的输入副本；创建后改原项目土壤/植被/强迫会把新特征配旧参数标签。
+- 新行为：逐 study/逐 site 改 `study::model::base_case`（与率定同一解析器）；`prepare_study` 先 `verify_frozen_inputs` + `verified_inputs` 全内容身份校验；缺 `study-input-identity.json` 的旧研究明确拒绝（提示用当前 colm-cli 重建），不降级为 warning——旧指纹只比 namelist 设置，放行等于重开 P1-6。报告新增 `inputs` 段（特征定义 sha256、tap 程序 path+流式 sha256、CLI 版本、每 study base_root/spec_sha256/逐站 data_sha256/观测 sha256/冻结修订（legacy 只标不拒）、warnings）；`sources[]` 同步。兼容性：参数 scope 与 slot 不符、study 自带网络 → 硬错；跨 study 冻结修订/固定 colm-rs 不同 → 报告+stderr warning。
+- 回归：`hybrid` 26 例；新增 9 例含"改原项目后仍取冻结特征"（临时改回旧路径实测红：`[9.9]` vs `[3.5]`）、篡改冻结副本被拒、报告身份、scope 拒绝、修订 warning。
+
+### P1-1/P1-2 研究侧覆盖率与空间配对（69b8ba9c）
+
+- P1-1 旧行为：`aggregate_pairs` 用已配对时刻相邻间隔中位数反推步长；逐时观测每天只剩正午一个有效值时 step=86400 → expected=1 → 日覆盖率 100%，单个白天点当日均。
+- 新行为：`VarMetrics` 导出模型输出步长（按 history 频率；TIMESTEP 用算例步长）与观测完整时间轴步长（QC 前）；聚合取两者较粗者作理论间隔、按时段实际长度算 expected，沿用 0.5 门槛，结果记录每时段覆盖率与被丢弃时段数（CSV/JSON 新增 `coverage_mean/coverage_min/periods_dropped`）。预检用观测完整轴步长，因此"只有正午的逐时观测"在跑模型前就被拒。
+- P1-2 旧行为：格内无观测格心时无条件最近邻，观测只覆盖欧洲也会和华南模型格"配上"。新行为：只认格内观测、返回覆盖比例 `space_coverage`；完全无重叠明确报 "does not overlap the model grid"。
+- 回归：单日 1/24 不通过门槛（模型本来日输出时 1/1 通过）、100%/50%/月均丢弃、完整轴步长、域外拒绝、部分覆盖比例 1/3。
+
+### P1-3 留一站诊断正名（74d69cfa）
+
+- 旧行为：把 `cross_validation.json` 叫"留一站交叉验证"，把"在拿掉的站上仍更好"当泛化证据；候选其实来自全站综合损失的 DE，留出站已参与候选生成/父代选择/优化轨迹。
+- 新行为：改名 `leave_one_site_out_reselection`，证据写 `kind/basis/held_out_used_in_selection=false/retrained=false + note`；结果页改称"留一站重排诊断（不是交叉验证）"并逐字说明限制。真正的分折训练仍是未实现能力。
+
+### 验证（真实执行）
+
+- Rust：`spec_tests` 4 passed；`study_import_tests` 10 passed；`hybrid_fit_tests` 13 passed；`study::runner` 71 passed；`study:: -- --test-threads=1` 204 passed（另有 4 个失败属另一在飞任务的 `remote_study_tests`）；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；相关文件 `rustfmt --check` 干净。
+- 前端：`npm test` 1177 passed/0 failed（含契约自检）、`npm run typecheck`、`npm run build` 通过；`lint`/`format:check` 仅剩另一会话在飞的 `features/compare/*`（未触碰）。
+- 未运行：真实 Tauri 应用、真实 SSH 作业、真实科学算例（无内核/重启数据）、`cargo test --workspace`。
+
+### 决策与遗留
+
+- 决策：hybrid-fit 拒绝没有输入身份文件的旧 study，不降级为 warning（理由见 P1-6）。
+- 遗留：P1-7a/P1-7b 远程资产清单与按类型核验（子任务进行中）；P1-7c 取回后写回、P1-9 失败状态机与取消身份、P1-8 冻结执行器统一；界面的覆盖率/空间覆盖呈现与观测预检预览；严格分折验证、多目标、流式评价与资源预算。
