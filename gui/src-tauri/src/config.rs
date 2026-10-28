@@ -1110,7 +1110,11 @@ impl<'a> VisibilityContext<'a> {
             doc,
             have,
             methane_mode: case_dir.and_then(|dir| methane_mode(doc, dir)),
-            single: have.contains("SinglePoint"),
+            // 单点判据：内核宏优先；但新建算例向导/内核未选时 backend 拿到的是带 SITE_fsitedata
+            // 的草稿、宏里还没有 SinglePoint。只看宏会把站点身份字段（SITE_landtype 等）当成可编辑，
+            // 界面上就出现“地表覆盖类型 = -1”“从站点文件读取地表类型 = 关”这种迷惑默认值。
+            // 已经有站点文件就是单点（空间算例没有 SITE_fsitedata）。
+            single: have.contains("SinglePoint") || doc.get("SITE_fsitedata").is_some(),
             usgs: have.contains("LULC_USGS"),
             lct: logical(doc, "DEF_USE_LCT"),
             pft: logical(doc, "DEF_USE_PFT"),

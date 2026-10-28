@@ -246,6 +246,14 @@ export default function ModelSettings({
         'Confirm the basic structure, then review process schemes and parameters.',
       )}
     >
+      {['site', 'single'].includes(setupEnvironment?.domain ?? '') && (
+        <Notice>
+          {t(
+            '站点文件、经纬度和地表覆盖类型在创建算例时按所选站点自动写入：自然站从站点文件的 IGBP_classification（USGS 内核用 USGS_classification）读取地类，城市站固定为 13（USGS 为 1）。这些字段不在这里设置，避免和站点文件不一致。',
+            'The site file, coordinates and land-cover type are written from the selected station when the case is created: natural sites take IGBP_classification (USGS_classification for USGS kernels), urban sites use 13 (1 for USGS). They are not edited here, so they cannot drift from the site file.',
+          )}
+        </Notice>
+      )}
       <h3>{t('地表覆盖与植被方案', 'Land cover and vegetation scheme')}</h3>
       <p className="muted">
         {t(
