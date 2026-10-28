@@ -249,6 +249,11 @@ struct TargetResult {
     /// 格点产品目标：模型陆地格子里有观测的比例。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     space_coverage: Option<f64>,
+    /// 观测解码与研究评估口径的警告（单位假定、QC 来源、时间标签推断、频率叠加…）。
+    /// `VarMetrics.warnings` 原来在目标结果里被丢掉，界面诊断卡片和导出报告都看不到。
+    /// 旧结果 JSON 没有这个字段，`default` 让它们仍可读；空时不写回，老结果文件不变。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -313,6 +318,9 @@ struct ObjectiveMetricRow {
     /// 格点产品目标：模型陆地格子里有观测的比例。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     space_coverage: Option<f64>,
+    /// 同 [`TargetResult::warnings`]：汇总表（metrics.csv / metrics.json）也要能查。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 enum WorkerEvent {
@@ -2404,6 +2412,22 @@ fn push_warning_once(state: &mut StudyState, warning: String) {
     }
 }
 
+/// 把目标结果里的观测解码/评估口径警告记进研究级诊断（GUI 诊断卡片与导出报告读它）。
+///
+/// 按「站点 + 目标 + 原文」去重：同一份观测的解码警告在每个成员、率定期和验证期各出现一次，
+/// 逐成员记会把诊断卡片刷屏，而警告的成因（单位假定、QC 来源、标签推断、频率叠加）与成员
+/// 参数无关。`TargetResult.warnings` 里仍保留逐目标的原文，供 CSV/JSON 精确定位。
+fn record_target_warnings(state: &mut StudyState, result: &TaskResult) {
+    for row in result.calibration.iter().chain(&result.validation) {
+        for warning in &row.warnings {
+            push_warning_once(
+                state,
+                format!("{} / {}: observation warning: {warning}", row.site, row.key),
+            );
+        }
+    }
+}
+
 fn update_uncertainty_outputs(manifest: &Manifest, members: &[MemberPlan], state: &mut StudyState) {
     clear_uncertainty_aggregation_warnings(state);
     if let Err(error) = clear_uncertainty_summary_outputs(manifest) {
@@ -2840,6 +2864,8 @@ fn finish_task(
                     task.stage = None;
                     task.process = None;
                 }
+                // 观测解码/口径警告在任务成功写入结果时就进研究诊断，界面不必等到整批跑完。
+                record_target_warnings(state, &result);
                 emit(
                     Path::new(&manifest.root),
                     stream,
@@ -3441,9 +3467,39 @@ fn target_result(
     // 聚合覆盖率的理论样本间隔：模型输出间隔与观测采样间隔取较粗者（配对只在共同时间格点上存在）。
     // 不能再从已配对时刻反推——那正是审计 P1-1 里日覆盖率被缺测绕过的地方。
     let coverage_interval = row.model_step_seconds.max(row.obs_step_seconds).max(1);
-    // 要按日或按月比时，把逐时配对平均成时段再算指标（支持集也换成时段）。
+    // 观测解码警告（单位假定、QC 来源、时间标签推断、覆盖不足…）原来在这里被丢掉；
+    // 它们决定指标的口径，必须随目标结果一起进 CSV/证据/界面诊断。
+    let mut warnings = row.warnings.clone();
+    // 要按日或按月比时，把逐时配对平均成时段再算指标（支持集也换成时段）。但 history 本身
+    // 已经是逐日/逐月输出时，一条记录就是那个尺度的均值：再按同一尺度平均一遍是二次平均
+    // （数值上还是同一条记录，却把区间覆盖率掩盖成 100%）。history 比目标尺度还粗时，
+    // 日/月值根本恢复不出来，也不能假装聚合成功。两种都跳过，并把口径写进 warnings。
+    let aggregate = match target.aggregate {
+        None => None,
+        Some(aggregate) => match aggregate_overlap(&row.output_frequency, aggregate) {
+            AggregateOverlap::Aggregate => Some(aggregate),
+            AggregateOverlap::AlreadyNative => {
+                warnings.push(format!(
+                    "target {}: history output frequency is already {}; the {} target aggregate is skipped so the native means are not averaged a second time",
+                    target.key,
+                    row.output_frequency,
+                    target_period_name(aggregate)
+                ));
+                None
+            }
+            AggregateOverlap::CoarserThanRequested => {
+                warnings.push(format!(
+                    "target {}: history output frequency {} is coarser than the requested {} target aggregate; the pairs stay at the native frequency because the finer means cannot be recovered",
+                    target.key,
+                    row.output_frequency,
+                    target_period_name(aggregate)
+                ));
+                None
+            }
+        },
+    };
     let (support_hash, pairs, value, observation_sd, model_mean, observation_mean, coverage) =
-        if let Some(aggregate) = target.aggregate {
+        if let Some(aggregate) = aggregate {
             let model = row.model.as_ref().with_context(|| {
                 format!(
                     "target {} ({}) did not return full paired model values",
@@ -3477,7 +3533,9 @@ fn target_result(
                 ObjectiveMetric::R => metrics.correlation,
             };
             (
-                pair_support_hash(&paired.support, &paired.obs),
+                // 聚合后的观测均值可能因为模型缺测缩小支持而碰巧不变，支持哈希必须覆盖
+                // 每时段原始的观测有限样本数/配对样本数（见 `targets::PeriodIdentity`）。
+                super::targets::aggregate_support_hash(&paired.identity, &paired.obs),
                 metrics.n,
                 value,
                 metrics.obs_sd,
@@ -3533,6 +3591,7 @@ fn target_result(
         coverage_min,
         periods_dropped,
         space_coverage: None,
+        warnings,
     })
 }
 
@@ -3608,6 +3667,8 @@ fn paired_target_result(
         coverage_min: None,
         periods_dropped: None,
         space_coverage: paired.space_coverage,
+        // 格点产品/水文站不走 `compute_metric_rows`，没有解码警告可带。
+        warnings: Vec::new(),
     })
 }
 
@@ -3630,6 +3691,55 @@ fn pair_support_hash(time: &[i64], obs: &[f64]) -> String {
         hash.update(obs.to_bits().to_le_bytes());
     }
     format!("{:x}", hash.finalize())
+}
+
+/// 目标要求的时间尺度（`target.aggregate`）与 history 原生输出频率的叠加关系。
+///
+/// 为什么要有这一层：`compute_metric_rows` 已经按每条 history 记录的真实输出区间配对，
+/// 逐日/逐月输出的一条记录就是该尺度的均值。再调用 `aggregate_pairs` 按同一尺度平均一次
+/// 不会把值变大变小（每个时段只有一条），却会把区间覆盖率掩盖成 100%、丢掉"这条记录本来
+/// 代表一天/一个月"的事实；history 比目标尺度还粗时（月输出想按日比）日值根本不存在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggregateOverlap {
+    /// 原生输出比目标细（逐时/timestep → 日/月）：按目标尺度聚合。
+    Aggregate,
+    /// 原生输出已经等于目标尺度：不能再平均一次，直接用原生配对。
+    AlreadyNative,
+    /// 原生输出比目标还粗：细尺度恢复不出来，只能按原生配对用并说明。
+    CoarserThanRequested,
+}
+
+fn aggregate_overlap(output_frequency: &str, aggregate: TargetPeriod) -> AggregateOverlap {
+    // 由细到粗：TIMESTEP/HOURLY = 0，DAILY = 1，MONTHLY = 2，YEARLY = 3。
+    let native = match output_frequency {
+        "timestep" | "hourly" => 0,
+        "daily" => 1,
+        "monthly" => 2,
+        "yearly" => 3,
+        // 频率未知（旧结果字段缺失、空串或未来新频率）：保持旧行为，不凭猜测跳过聚合。
+        _ => return AggregateOverlap::Aggregate,
+    };
+    let requested = match aggregate {
+        TargetPeriod::Daily => 1,
+        TargetPeriod::Monthly => 2,
+    };
+    match native.cmp(&requested) {
+        std::cmp::Ordering::Less => AggregateOverlap::Aggregate,
+        std::cmp::Ordering::Equal => AggregateOverlap::AlreadyNative,
+        std::cmp::Ordering::Greater => AggregateOverlap::CoarserThanRequested,
+    }
+}
+
+fn target_period_name(period: TargetPeriod) -> &'static str {
+    match period {
+        TargetPeriod::Daily => "daily",
+        TargetPeriod::Monthly => "monthly",
+    }
+}
+
+/// 支持哈希写进报错时只留前 12 位：够区分，又不把 64 位十六进制塞满日志。
+fn short_support_hash(hash: &str) -> &str {
+    hash.get(..12).unwrap_or(hash)
 }
 
 fn fixed_score(results: &[TargetResult]) -> Option<f64> {
@@ -3820,10 +3930,16 @@ fn comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Resu
             .get(&(row.period.as_str(), row.key.as_str()))
             .with_context(|| format!("baseline missing target {} / {}", row.period, row.key))?;
         if row.pairs != base.pairs || row.support_hash != base.support_hash {
+            // 聚合目标的支持哈希覆盖每时段的原始样本数：候选模型缺值缩了支持、日均却碰巧
+            // 相同也会在这里判不可比。报错带上计数与哈希前缀，免得用户只看到一句"不一样"。
             bail!(
-                "target {} / {} uses different model-observation support than baseline",
+                "target {} / {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {})",
                 row.period,
-                row.key
+                row.key,
+                row.pairs,
+                short_support_hash(&row.support_hash),
+                base.pairs,
+                short_support_hash(&base.support_hash)
             );
         }
     }
@@ -3841,8 +3957,12 @@ fn validation_comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResu
             .with_context(|| format!("baseline missing validation target {}", row.key))?;
         if row.pairs != base.pairs || row.support_hash != base.support_hash {
             bail!(
-                "validation target {} uses different model-observation support than baseline",
-                row.key
+                "validation target {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {})",
+                row.key,
+                row.pairs,
+                short_support_hash(&row.support_hash),
+                base.pairs,
+                short_support_hash(&base.support_hash)
             );
         }
     }
@@ -3889,6 +4009,9 @@ fn refresh_candidates(
             for site in &manifest.spec.base_cases {
                 match read_task_result(manifest, &member.id, site) {
                     Ok(result) => {
+                        // 续跑/汇总时也从已写下的结果补记观测解码警告（`push_warning_once` 去重），
+                        // 这样旧研究刷新状态后诊断卡片同样能看到口径问题。
+                        record_target_warnings(state, &result);
                         // 目标函数只有和基准同一组配对时刻、同一份观测才可比；带目标的不确定性分析也一样。
                         let scored = !manifest.spec.targets.is_empty() && member.id != "m000000";
                         let baseline = scored
@@ -4813,7 +4936,7 @@ pub(super) fn write_objective_tables_to(
         ));
     }
     write_bytes(&results.join("objectives.csv"), objectives.as_bytes())?;
-    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage\n");
+    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings\n");
     let mut metric_rows = Vec::new();
     for task in state
         .tasks
@@ -4829,8 +4952,10 @@ pub(super) fn write_objective_tables_to(
         for row in result.calibration.iter().chain(&result.validation) {
             let number =
                 |value: Option<f64>| value.map(|value| format!("{value:.6}")).unwrap_or_default();
+            // 多条警告合成一格；`csv_cell` 负责引号/逗号/换行转义，警告原文里这些都可能有。
+            let warnings = csv_cell(&row.warnings.join("; "));
             metrics.push_str(&format!(
-                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&task.member),
                 csv_cell(&row.site),
                 csv_cell(&row.period),
@@ -4853,6 +4978,7 @@ pub(super) fn write_objective_tables_to(
                     .map(|count| count.to_string())
                     .unwrap_or_default(),
                 number(row.space_coverage),
+                warnings,
             ));
             metric_rows.push(ObjectiveMetricRow {
                 member: task.member.clone(),
@@ -4874,6 +5000,7 @@ pub(super) fn write_objective_tables_to(
                 coverage_min: row.coverage_min,
                 periods_dropped: row.periods_dropped,
                 space_coverage: row.space_coverage,
+                warnings: row.warnings.clone(),
             });
         }
     }
@@ -6140,6 +6267,7 @@ mod tests {
             coverage_min: None,
             periods_dropped: None,
             space_coverage: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -8224,6 +8352,7 @@ mod tests {
                     coverage_min: None,
                     periods_dropped: None,
                     space_coverage: None,
+                    warnings: vec!["Qle: no units attribute, assuming canonical units W/m2".into()],
                 }],
                 validation: Vec::new(),
                 validation_errors: Vec::new(),
@@ -8243,6 +8372,19 @@ mod tests {
         assert!(csv.contains("\"Qle,\r\nquoted\"\"key\""), "{csv:?}");
         assert_eq!(rows[0]["min_pairs"], 2);
         assert_eq!(rows[0]["observation_sd"], 2.0);
+        // 观测解码警告也要进汇总表，且 CSV 里必须按 csv_cell 转义（这条带逗号）。
+        assert_eq!(
+            rows[0]["warnings"][0],
+            "Qle: no units attribute, assuming canonical units W/m2"
+        );
+        assert!(
+            csv.starts_with("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings\n"),
+            "{csv:?}"
+        );
+        assert!(
+            csv.contains("\"Qle: no units attribute, assuming canonical units W/m2\""),
+            "{csv:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -9955,5 +10097,503 @@ esac
             Some(0.2)
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ---- 聚合支持身份 / 观测解码警告进证据 / 原生频率不二次聚合 ----
+
+    /// 用真实的 `aggregate_pairs` 生成支持身份，而不是手搓哈希：复现复核里的三天反例。
+    /// `keep_first_half` 为真时每天 24 个原始小时全用；为假时模型每天只写后 12 小时。
+    fn aggregated_task_result(keep_first_half: bool) -> TaskResult {
+        let mut time = Vec::new();
+        let mut model = Vec::new();
+        let mut obs = Vec::new();
+        for day in 0..3 {
+            for hour in 0..24 {
+                time.push(day * 86_400 + hour * 3_600);
+                model.push(if keep_first_half || hour >= 12 {
+                    2.0
+                } else {
+                    f64::NAN
+                });
+                obs.push(1.0);
+            }
+        }
+        let paired =
+            crate::study::targets::aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily, 3_600)
+                .unwrap();
+        let mut row = target_row("calibration", Vec::new());
+        row.pairs = paired.support.len();
+        row.support_hash =
+            crate::study::targets::aggregate_support_hash(&paired.identity, &paired.obs);
+        TaskResult {
+            member: "m000001".into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![row],
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_with_fewer_aggregated_raw_samples_is_incomparable_to_baseline() {
+        let baseline = aggregated_task_result(true);
+        let candidate = aggregated_task_result(false);
+        // 时段数一样：旧的比较只数了聚合后的时段个数，候选每天 12 小时也凑得出 3 个日均。
+        assert_eq!(
+            baseline.calibration[0].pairs,
+            candidate.calibration[0].pairs
+        );
+        let error = comparable_to_baseline(&candidate, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("different model-observation support"),
+            "{error}"
+        );
+        // 同一批原始样本重算的候选仍然可比：换哈希格式不能把正常候选判成不可比。
+        comparable_to_baseline(&aggregated_task_result(true), &baseline).unwrap();
+    }
+
+    #[test]
+    fn aggregate_overlap_skips_only_when_history_is_already_as_coarse_as_the_target() {
+        // history 已经是逐日/逐月输出：一条记录就是该尺度的均值，再按同一尺度聚合是二次平均。
+        assert_eq!(
+            aggregate_overlap("daily", TargetPeriod::Daily),
+            AggregateOverlap::AlreadyNative
+        );
+        assert_eq!(
+            aggregate_overlap("monthly", TargetPeriod::Monthly),
+            AggregateOverlap::AlreadyNative
+        );
+        // history 比目标还粗：日/月尺度根本恢复不出来，只能按原样用并把原因说清楚。
+        assert_eq!(
+            aggregate_overlap("monthly", TargetPeriod::Daily),
+            AggregateOverlap::CoarserThanRequested
+        );
+        assert_eq!(
+            aggregate_overlap("yearly", TargetPeriod::Monthly),
+            AggregateOverlap::CoarserThanRequested
+        );
+        // 原始输出比目标细：正常聚合（逐日 history 的日均再算月均是合法月均）。
+        assert_eq!(
+            aggregate_overlap("hourly", TargetPeriod::Daily),
+            AggregateOverlap::Aggregate
+        );
+        assert_eq!(
+            aggregate_overlap("timestep", TargetPeriod::Monthly),
+            AggregateOverlap::Aggregate
+        );
+        assert_eq!(
+            aggregate_overlap("daily", TargetPeriod::Monthly),
+            AggregateOverlap::Aggregate
+        );
+        // 频率未知（旧结果/空串）保持原行为，不去猜。
+        assert_eq!(
+            aggregate_overlap("none", TargetPeriod::Daily),
+            AggregateOverlap::Aggregate
+        );
+    }
+
+    /// 合成"原生逐日 history + 半小时观测"的单点算例。观测 Qle 故意不写 units 属性，
+    /// 用来产生一条必须进目标结果的研究证据。
+    fn daily_history_case(label: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-daily-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let case = root.join("case");
+        std::fs::create_dir_all(case.join("out/daily/history")).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm
+ DEF_CASE_NAME = 'daily'
+ DEF_HIST_FREQ = 'DAILY'
+ DEF_HIST_groupby = 'MONTH'
+ DEF_simulation_time%greenwich = .false.
+ DEF_simulation_time%start_year = 2008
+ DEF_simulation_time%start_month = 1
+ DEF_simulation_time%start_day = 1
+ DEF_simulation_time%start_sec = 0
+ DEF_simulation_time%timestep = 1800.
+/
+",
+        )
+        .unwrap();
+        let base = colm_hist::time::minutes_from_1900(2008) as f64;
+        let daily = [10.0, 20.0, 30.0, 40.0];
+        {
+            let path = case.join("out/daily/history/daily_hist_2008-01.nc");
+            let mut file = netcdf::create(path).unwrap();
+            file.add_dimension("time", daily.len()).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "minutes since 1900-1-1 0:0:0")
+                .unwrap();
+            let labels = (0..daily.len())
+                .map(|day| base + day as f64 * 1440.0 + 720.0)
+                .collect::<Vec<_>>();
+            time.put_values(&labels, ..).unwrap();
+            file.add_variable::<f64>("f_lfevpa", &["time"])
+                .unwrap()
+                .put_values(&daily, ..)
+                .unwrap();
+        }
+        let observation = root.join("obs.nc");
+        {
+            let n = daily.len() * 48;
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", n).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+                .unwrap();
+            let seconds = (0..n).map(|i| i as f64 * 1800.0).collect::<Vec<_>>();
+            time.put_values(&seconds, ..).unwrap();
+            let values = (0..n).map(|i| daily[i / 48]).collect::<Vec<_>>();
+            // 不写 units：解码层只能假定规范单位，这条警告必须留在目标结果里。
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&vec![0.0; n], ..)
+                .unwrap();
+        }
+        (case, observation)
+    }
+
+    fn daily_target(aggregate: Option<TargetPeriod>) -> TargetSpec {
+        // 2008-01-01 00:00 UTC。
+        const JAN1_2008: i64 = 1_199_145_600;
+        let mut target: TargetSpec = serde_json::from_value(serde_json::json!({
+            "key": "Qle",
+            "variable": "Qle",
+            "from": JAN1_2008,
+            "to": JAN1_2008 + 4 * 86_400,
+            "min_pairs": 2,
+        }))
+        .unwrap();
+        target.aggregate = aggregate;
+        target
+    }
+
+    #[test]
+    fn a_native_daily_history_is_not_aggregated_twice_and_keeps_decode_warnings() {
+        let _guard = crate::netcdf_test_guard();
+        let (case, observation) = daily_history_case("native");
+        let target = daily_target(Some(TargetPeriod::Daily));
+        let row = target_result(&case, &observation, "site", &target, false, 1).unwrap();
+        // history 一条记录就是一天的均值：4 天 = 4 对，不能再按日平均一次。
+        assert_eq!(row.pairs, 4);
+        assert!(row.value.abs() < 1e-12, "{}", row.value);
+        assert!(
+            row.coverage_mean.is_none(),
+            "原生频率已等于目标尺度时不该再记一次聚合覆盖率"
+        );
+        // 观测缺 units 属性的解码警告必须进目标结果，不能只留在 VarMetrics 里丢掉。
+        assert!(
+            row.warnings
+                .iter()
+                .any(|warning| warning.contains("no units attribute")),
+            "{:?}",
+            row.warnings
+        );
+        // 跳过二次聚合要说明理由（透明化），不能静默改变口径。
+        assert!(
+            row.warnings
+                .iter()
+                .any(|warning| warning.contains("already daily")),
+            "{:?}",
+            row.warnings
+        );
+        std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
+    }
+
+    /// 合成"原生逐时 history + 半小时观测"的单点算例；`keep` 决定每个小时模型有没有写值。
+    /// 复核反例的完整运行路径：模型缺测的样本在 `pair_intervals` 阶段就被丢掉，目标结果拿到
+    /// 的配对序列本身变短，`aggregate_pairs` 看到的模型值都是有限值。
+    fn hourly_history_case(label: &str, keep: impl Fn(usize, usize) -> bool) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-hourly-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let case = root.join("case");
+        std::fs::create_dir_all(case.join("out/hourly/history")).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm
+ DEF_CASE_NAME = 'hourly'
+ DEF_HIST_FREQ = 'HOURLY'
+ DEF_HIST_groupby = 'MONTH'
+ DEF_simulation_time%greenwich = .false.
+ DEF_simulation_time%start_year = 2008
+ DEF_simulation_time%start_month = 1
+ DEF_simulation_time%start_day = 1
+ DEF_simulation_time%start_sec = 0
+ DEF_simulation_time%timestep = 1800.
+/
+",
+        )
+        .unwrap();
+        let base = colm_hist::time::minutes_from_1900(2008) as f64;
+        let days = 3;
+        let hours = days * 24;
+        {
+            let path = case.join("out/hourly/history/hourly_hist_2008-01.nc");
+            let mut file = netcdf::create(path).unwrap();
+            file.add_dimension("time", hours).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "minutes since 1900-1-1 0:0:0")
+                .unwrap();
+            // 真实 HOURLY 标签：写点（整点）截断到分钟后减 30 分钟，即每小时的 :30。
+            let labels = (0..hours)
+                .map(|hour| base + hour as f64 * 60.0 + 30.0)
+                .collect::<Vec<_>>();
+            time.put_values(&labels, ..).unwrap();
+            let values = (0..hours)
+                .map(|hour| {
+                    if keep(hour / 24, hour % 24) {
+                        2.0
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect::<Vec<_>>();
+            file.add_variable::<f64>("f_lfevpa", &["time"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+        }
+        let observation = root.join("obs.nc");
+        {
+            let n = days * 48;
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", n).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+                .unwrap();
+            let seconds = (0..n).map(|i| i as f64 * 1800.0).collect::<Vec<_>>();
+            time.put_values(&seconds, ..).unwrap();
+            // 每天前 12 小时上下交替（均值仍是当天均值），后 12 小时恒为当天均值。
+            // 两半的均值相同：候选只取后 12 小时时日均与基线完全一样，但观测本身有起伏，
+            // NRMSE 的观测标准差不为零。
+            let values = (0..n)
+                .map(|i| {
+                    let day = i / 48;
+                    let hour = (i % 48) / 2;
+                    let day_mean = 1.0 + day as f64;
+                    if hour < 12 && hour % 2 == 0 {
+                        day_mean + 1.0
+                    } else if hour < 12 {
+                        day_mean - 1.0
+                    } else {
+                        day_mean
+                    }
+                })
+                .collect::<Vec<_>>();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&vec![0.0; n], ..)
+                .unwrap();
+        }
+        (case, observation)
+    }
+
+    /// 复核反例的完整路径：基线每天 24 个有效小时，候选每天只有后 12 个；三天日均恰好相同，
+    /// 指标、均值全都一样，但候选的支持只有一半，必须判不可比。
+    #[test]
+    fn a_candidate_that_saw_half_the_hours_is_incomparable_even_with_equal_aggregate_means() {
+        let _guard = crate::netcdf_test_guard();
+        let (full_case, full_obs) = hourly_history_case("full", |_, _| true);
+        let (thin_case, thin_obs) = hourly_history_case("thin", |_, hour| hour >= 12);
+        // 2008-01-01 00:00 UTC。
+        const JAN1_2008: i64 = 1_199_145_600;
+        let target: TargetSpec = serde_json::from_value(serde_json::json!({
+            "key": "Qle",
+            "variable": "Qle",
+            "from": JAN1_2008,
+            "to": JAN1_2008 + 3 * 86_400,
+            "min_pairs": 2,
+            "aggregate": "daily",
+        }))
+        .unwrap();
+        let baseline_row = target_result(&full_case, &full_obs, "site", &target, false, 1).unwrap();
+        let candidate_row =
+            target_result(&thin_case, &thin_obs, "site", &target, false, 1).unwrap();
+        // 反例的前提：聚合后指标、均值、时段数全都一样，只有原始样本数减半。
+        assert_eq!(baseline_row.pairs, 3);
+        assert_eq!(candidate_row.pairs, 3);
+        assert_eq!(baseline_row.value, candidate_row.value);
+        assert_eq!(baseline_row.model_mean, candidate_row.model_mean);
+        assert_eq!(
+            baseline_row.observation_mean,
+            candidate_row.observation_mean
+        );
+        assert!(
+            candidate_row.coverage_mean.unwrap() < baseline_row.coverage_mean.unwrap(),
+            "候选每天只用一半小时，聚合覆盖率必须更低"
+        );
+        assert_ne!(baseline_row.support_hash, candidate_row.support_hash);
+
+        let result = |member: &str, row: &TargetResult| TaskResult {
+            member: member.into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration: vec![row.clone()],
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        };
+        let baseline = result("m000000", &baseline_row);
+        let candidate = result("m000001", &candidate_row);
+        let error = comparable_to_baseline(&candidate, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("different model-observation support"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(full_case.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(thin_case.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn observation_warnings_are_appended_to_study_diagnostics_once() {
+        let mut calibration = target_row("calibration", vec![1, 2]);
+        calibration.warnings = vec![
+            "Qle in /data/AT-Neu/obs.nc has no units attribute; assuming canonical units W/m2"
+                .into(),
+        ];
+        let mut validation = target_row("validation", vec![3, 4]);
+        validation.warnings = calibration.warnings.clone();
+        let result = TaskResult {
+            member: "m000001".into(),
+            site: "AT-Neu".into(),
+            outputs: Vec::new(),
+            calibration: vec![calibration],
+            validation: vec![validation],
+            validation_errors: Vec::new(),
+        };
+        let mut state = StudyState::new("s".into(), []).unwrap();
+        record_target_warnings(&mut state, &result);
+        record_target_warnings(&mut state, &result);
+        assert_eq!(state.warnings.len(), 1, "{:?}", state.warnings);
+        // 诊断卡片要能看出是哪份观测、哪个目标：成因与成员参数无关，所以按站点/目标去重。
+        assert!(state.warnings[0].contains("AT-Neu"), "{:?}", state.warnings);
+        assert!(state.warnings[0].contains("Qle"), "{:?}", state.warnings);
+        assert!(
+            state.warnings[0].contains("no units attribute"),
+            "{:?}",
+            state.warnings
+        );
+        let mut other_member = result.clone();
+        other_member.member = "m000002".into();
+        record_target_warnings(&mut state, &other_member);
+        assert_eq!(state.warnings.len(), 1, "{:?}", state.warnings);
+    }
+
+    /// 接线检查：`refresh_candidates` 从已写下的任务结果里补记警告，且反复刷新不重复追加。
+    #[test]
+    fn refresh_candidates_records_observation_warnings_once() {
+        let root = evidence_root("refresh-warnings");
+        let manifest = evidence_manifest(&root);
+        let site = "site";
+        let mut calibration = target_row("calibration", vec![1, 2]);
+        calibration.warnings = vec!["Qle in obs.nc has no units attribute".into()];
+        let mut validation = target_row("validation", vec![3, 4]);
+        validation.warnings = calibration.warnings.clone();
+        write_json(
+            &task_result_path(&manifest, "m000000", site),
+            &TaskResult {
+                member: "m000000".into(),
+                site: site.into(),
+                outputs: Vec::new(),
+                calibration: vec![calibration],
+                validation: vec![validation],
+                validation_errors: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000000".into(),
+                site: site.into(),
+                case_dir: "case".into(),
+                status: TaskStatus::Succeeded,
+                stage: None,
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        let members = vec![MemberPlan {
+            id: "m000000".into(),
+            generation: 0,
+            candidate_index: 0,
+            baseline: true,
+            parameters: BTreeMap::new(),
+        }];
+        refresh_candidates(&manifest, &members, &mut state).unwrap();
+        refresh_candidates(&manifest, &members, &mut state).unwrap();
+        assert_eq!(
+            state
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("no units attribute"))
+                .count(),
+            1,
+            "{:?}",
+            state.warnings
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 旧研究/旧结果 JSON 必须还能读：新增字段是 serde default，空的时候也不写回。
+    #[test]
+    fn legacy_result_json_without_warnings_still_parses_and_reserializes_unchanged() {
+        let legacy = serde_json::json!({
+            "member": "m000001",
+            "site": "site",
+            "outputs": [],
+            "calibration": [{
+                "key": "Qle",
+                "site": "site",
+                "variable": "Qle",
+                "period": "calibration",
+                "metric": "nrmse",
+                "weight": 1.0,
+                "min_pairs": 2,
+                "pairs": 2,
+                "value": 0.4,
+                "observation_sd": 2.0,
+                "loss": 0.2,
+                "model_mean": 5.0,
+                "observation_mean": 4.5,
+                "support_hash": "abc"
+            }],
+            "validation": [],
+            "validation_errors": []
+        });
+        let result: TaskResult = serde_json::from_value(legacy).unwrap();
+        assert!(result.calibration[0].warnings.is_empty());
+        let written = serde_json::to_value(&result).unwrap();
+        assert!(
+            written["calibration"][0].get("warnings").is_none(),
+            "空警告不能写回旧结果，否则旧结果文件会被改写"
+        );
     }
 }

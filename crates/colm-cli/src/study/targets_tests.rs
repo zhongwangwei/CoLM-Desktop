@@ -508,3 +508,125 @@ fn gauge_csv_keeps_empty_columns_and_treats_missing_codes_as_missing() {
     assert!(values[3].is_nan(), "NA 是缺测码");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// 复核 P1 反例：三天，基线每天 24 个有效小时，候选每天只有后 12 小时；两边的观测日均
+/// 恰好相同。旧的聚合支持哈希只覆盖"时段标签 + 观测均值"，这两个候选会算成同一批支持。
+/// 现在每个时段还要带原始身份：观测有限样本数（不受模型缺测影响）与实际配对样本数。
+#[test]
+fn aggregated_support_identity_separates_a_candidate_that_saw_fewer_raw_samples() {
+    let mut base_time = Vec::new();
+    let mut base_model = Vec::new();
+    let mut base_obs = Vec::new();
+    let mut thin_time = Vec::new();
+    let mut thin_model = Vec::new();
+    let mut thin_obs = Vec::new();
+    for day in 0..3 {
+        for hour in 0..24 {
+            let t = day * DAY + hour * 3_600;
+            base_time.push(t);
+            base_model.push(2.0);
+            base_obs.push(1.0);
+            thin_time.push(t);
+            // 候选模型每天只有后 12 小时有值；观测本身每天都全有效。
+            thin_model.push(if hour < 12 { f64::NAN } else { 2.0 });
+            thin_obs.push(1.0);
+        }
+    }
+    let baseline = aggregate_pairs(
+        &base_time,
+        &base_model,
+        &base_obs,
+        TargetPeriod::Daily,
+        3_600,
+    )
+    .unwrap();
+    let candidate = aggregate_pairs(
+        &thin_time,
+        &thin_model,
+        &thin_obs,
+        TargetPeriod::Daily,
+        3_600,
+    )
+    .unwrap();
+    // 反例的前提成立：聚合后的时段与观测日均完全一样。旧哈希只哈希这两样输入，
+    // 所以旧行为必然把两个候选判成同一批支持。这里直接比较输入，不再复述旧哈希。
+    assert_eq!(baseline.support, candidate.support);
+    assert_eq!(baseline.obs, candidate.obs);
+    assert_eq!(candidate.coverage, vec![0.5, 0.5, 0.5]);
+
+    assert_eq!(baseline.identity.len(), 3);
+    assert_eq!(candidate.identity.len(), 3);
+    // 观测有限样本数按完整观测轴算（每天 24 个），配对样本数才随模型缺测缩小（每天 12 个）。
+    assert_eq!(baseline.identity[0].obs_finite, 24);
+    assert_eq!(baseline.identity[0].paired, 24);
+    assert_eq!(candidate.identity[0].obs_finite, 24);
+    assert_eq!(candidate.identity[0].paired, 12);
+
+    assert_ne!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&candidate.identity, &candidate.obs),
+        "模型缺值缩小支持后必须得到不同的支持哈希"
+    );
+
+    // 完全相同的支持重算必须得到同一个哈希：成员结果重算、续跑不能因此变成"不可比"。
+    let again = aggregate_pairs(
+        &base_time,
+        &base_model,
+        &base_obs,
+        TargetPeriod::Daily,
+        3_600,
+    )
+    .unwrap();
+    assert_eq!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&again.identity, &again.obs)
+    );
+}
+
+/// 只记样本个数还不够：候选缺前 12 小时、另一个缺后 12 小时，配对样本数都是 12，
+/// 但用的原始观测不是同一批。支持身份要能区分这两种情况。
+#[test]
+fn aggregated_support_identity_sees_which_raw_samples_were_kept() {
+    let mut late_time = Vec::new();
+    let mut late_model = Vec::new();
+    let mut late_obs = Vec::new();
+    let mut early_time = Vec::new();
+    let mut early_model = Vec::new();
+    let mut early_obs = Vec::new();
+    for day in 0..3 {
+        for hour in 0..24 {
+            let t = day * DAY + hour * 3_600;
+            late_time.push(t);
+            late_model.push(if hour < 12 { f64::NAN } else { 2.0 });
+            late_obs.push(1.0);
+            early_time.push(t);
+            early_model.push(if hour < 12 { 2.0 } else { f64::NAN });
+            early_obs.push(1.0);
+        }
+    }
+    let late = aggregate_pairs(
+        &late_time,
+        &late_model,
+        &late_obs,
+        TargetPeriod::Daily,
+        3_600,
+    )
+    .unwrap();
+    let early = aggregate_pairs(
+        &early_time,
+        &early_model,
+        &early_obs,
+        TargetPeriod::Daily,
+        3_600,
+    )
+    .unwrap();
+    assert_eq!(late.support, early.support);
+    assert_eq!(late.obs, early.obs);
+    assert_eq!(late.coverage, early.coverage);
+    assert_eq!(late.identity[0].paired, early.identity[0].paired);
+    assert_ne!(
+        aggregate_support_hash(&late.identity, &late.obs),
+        aggregate_support_hash(&early.identity, &early.obs),
+        "缺的不是同一批原始样本，支持身份必须不同"
+    );
+}

@@ -38872,3 +38872,35 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 结论：那 5 个失败是构建缓存问题，不是代码回归。以后遇到"同一源码 `-p` 绿、`--workspace` 红"且报缺失符号，先按 crate 清理 `target` 再判断。
 
+
+## 研究页第三批：派生设计保真 / 旧冻结 CLI 兼容 / 评分原始支持 / 观测警告（2026-10-29）
+
+接研究页第一、二批，对应新一轮复核（复核基于旧远端主干 f0059eed，部分条目在本批之前已修；本批只处理在当前 main 上仍真实复现的问题，全部先写失败测试）。
+
+### 派生/带入率定一致性（前端，derive-ui）
+
+- **P1 回归：带入率定被 effect 清空**。`carryToCalibration` 先设 sites/observations、再更新 `researchBaseline`；模型身份变化触发的 `[dir, versionId, revision]` effect 又 `setSites([dir])`、`setObservations('')`，来源研究的两个站点退成一个、两份观测被清空。修法：新增 `applyingDerivation` ref，只在研究基线模型身份**真的变化**时置位（避免标记泄漏吞掉下一次真换算例的 reset）；该 effect 消费标记后只清 contexts/parameters/loadedFor（强制按新修订重读参数）并返回，保留派生的 sites/observations。测试走完整链路：打开两站点+两观测+trace@7 的来源研究 → 带入率定 → 重新 render/settle 跑完 effects → 按 trace r7 两站重读参数 → 最终 `study_create_json` 断言 base_cases 两站、observations 两条、targets 两条、modelRevision trace@7（不再只断言 setter 被调用）。
+- **P1 派生改变目标设计**（`deriveStudyDesign`）：权重一致性改为 Map 记录**含默认 1** 的全部权重（旧的"只记非 1"让 [1,2] 静默变成 [2,2]，[2,1] 才拒绝），输出 UI 时只写非 1；稀疏"站点×变量"组合（Qle@site1 + GPP@site2）明确拒绝并列出缺失对，不再按并集重建出 4 个目标；空间与单点共用 `carriedWindow()` 提取/校验 time/val 窗口（能表达则精确保留，来源不一致则拒绝），空间分支不再写空字符串。
+- **P2 版本页导入资产目录**：`VersionsPage.importChosen` 消费 `kind/asset_root/network`，`asset_root` 非空才 `setAssetRoot`（纯参数导入仍保留旧目录），成功提示按参数/网络/参数+网络区分并带网络摘要；冻结使用新目录。CLI 直出为 snake_case `asset_root`，前端类型注释已写明，若以后改名需同步。
+- 回归：前端 `npm test` 1202 passed（新增 6 条），typecheck/lint/format:check 全绿。
+
+### parent_study 与旧冻结修订的兼容（CLI，lead）
+
+- 旧冻结修订的 `StudySpec` 是 `deny_unknown_fields`，不认识这一轮新增的 `parent_study`；创建/预检被委托给该修订自己的 CLI 时整份设定会被未知字段拒绝，派生研究在建研究阶段失败。
+- 修法（按"执行规格与审计元数据分离"）：`study-create` 把谱系写到研究目录的独立文件 `parent-study.json`（`study::spec::PARENT_STUDY_FILE`；新程序仍可从 spec 或该文件读到）；本地创建路径在写盘前落这份文件，失败按创建失败清理。转交旧修订 CLI 时用 `spec_for_older_program()` 剥掉 `parent_study`（以及旧程序不认的 `include_baseline` 增强，第一次保留、被拒重试时去掉）后写临时副本，创建成功后由当前程序把谱系写回研究目录；用户给的设定文件绝不被改写。远程提交时 staging 的 spec 同样剥掉该字段（服务器引擎可能来自较旧快照；谱系只在本地保留）。
+- 测试：spec 元数据写入/无该字段不落文件；转交副本不含 parent_study、原始文件不变、include_baseline 只在重试时去掉；旧转交测试同步改为断言"交给旧程序的是剥离副本"；远程 staging 不再带 parent_study。旧冻结二进制未实际执行（无构造的第二份 CLI），只覆盖决策与参数/文件契约。
+
+### 评分可比性：聚合原始支持与观测警告（Rust，study-evidence）
+
+- **P1 聚合支持哈希太弱**：旧哈希只覆盖"时段标签 + 观测均值"。候选模型缺值导致每时段只用了部分原始样本时，聚合均值可能恰好相同 → 被判同一支持并参与排名（复核给了"基线 24h/天、候选后 12h/天、三天日均相同"的反例）。修法：`aggregate_pairs` 每时段记录 `PeriodIdentity { start, obs_finite, paired, paired_digest }`（观测有限数不受模型缺测影响；paired 为实际配对数；paired_digest 是配对时刻相对时段起点的滚动摘要，防"缺前 12h vs 缺后 12h"计数相同仍用不同原始样本），聚合分支改用 `aggregate_support_hash(identity, obs_means)`：候选支持缩小或原始样本不同必与基线哈希不同，`comparable_to_baseline` 报不可比并附计数/哈希前缀。测试在完整 `target_result` 路径复现该反例。
+- **P1 观测解码警告被丢弃**：`VarMetrics.warnings`（单位假定、QC 来源、时间标签推断、覆盖不足）原来不进研究证据。`TargetResult.warnings` / `ObjectiveMetricRow.warnings` 新字段（serde default + 空不写回），metrics.csv 增 `warnings` 列（转义）、metrics.json 同步；`finish_task` 与 `refresh_candidates` 按站点/目标去重追加进 `StudyState.warnings`，界面诊断卡片可见，逐目标原文保留在结果与 CSV 里。
+- **P1 频率叠加**：目标 `aggregate=Daily/Monthly` 而 history 原生输出已是该尺度（或更粗）时不再二次平均（否则覆盖率被伪装成 100%、丢掉"一条记录代表一天/月"），跳过聚合并把口径写进 warning；逐时/timestep → 日/月仍正常聚合。
+- 回归：`study::` 238 passed（基线 229，+9）；CLI bin 696 passed；`study_cli_tuning` 24 passed；clippy `-D warnings` exit 0；fmt clean。
+
+### 遗留 / 未验证
+
+- 旧研究（已跑完旧基准 + 带 aggregate 目标）续跑时，旧结果文件里的 support_hash 是旧算法，新候选会被判"不同支持"；JSON 仍可读，重跑基准即恢复（未做哈希版本迁移）。
+- TIMESTEP 且实际步长恰为 1 天的算例 `output_frequency` 仍是 `timestep`，会走聚合分支（数值等同每天一条、覆盖率记 1.0），后续可用 model_step_seconds 补判。
+- `preflight_observation_window` 只有观测轴、不知道 history 原生频率；原生比目标粗时可能预检通过、运行时以可行动错误或 warning 结束。
+- 格点产品/水文站目标的 warnings 恒空（该路径没有 VarMetrics）；诊断卡片里的新警告按原文（英文）显示，未加中英映射。
+- 未运行：真实旧冻结 CLI 二进制、真实 Tauri 窗口、真实科学算例与真实 SSH；旧基准结果支持哈希的迁移未实现。

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use sha2::{Digest, Sha256};
 
 use super::spec::{TargetPeriod, TargetSource, TargetSpec};
 
@@ -19,6 +20,9 @@ pub(super) struct Paired {
     pub support: Vec<i64>,
     pub model: Vec<f64>,
     pub obs: Vec<f64>,
+    /// 每个被接受时段的原始支持身份（只由 [`aggregate_pairs`] 填；格点/水文站目标用
+    /// `support` + 观测值哈希，不走这份身份）。
+    pub identity: Vec<PeriodIdentity>,
     /// 每个被接受时段的有效观测覆盖率 `valid / expected`，与 `support` 等长。
     pub coverage: Vec<f64>,
     /// 因覆盖率不足被丢掉的时段数。
@@ -35,6 +39,64 @@ impl Paired {
             .zip(self.obs.iter().copied())
             .collect()
     }
+}
+
+/// 聚合后一个时段的**原始支持身份**。
+///
+/// 为什么不能只哈希"时段起点 + 观测均值"：模型缺值会让时段里实际参与平均的样本变少，
+/// 而聚合均值可能碰巧与基线相同（复核反例：基线每天 24 个有效小时，候选每天只有后 12 个，
+/// 三天的日均完全相同），两个候选于是被误判成"同一批支持"、通过了可比性检查。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PeriodIdentity {
+    /// 时段起点（Unix 秒）。
+    pub start: i64,
+    /// 该时段观测有限值的个数。观测不受模型缺测影响，记录的是"这份观测本来有多少样本"。
+    pub obs_finite: usize,
+    /// 实际配上对（模型与观测都有限）的样本数。
+    pub paired: usize,
+    /// 配上对时刻（相对时段起点的秒）的摘要。只记个数仍不够：候选缺前 12 小时、
+    /// 基线缺后 12 小时时个数相同、用的却不是同一批原始观测，均值也可能碰巧一样。
+    pub paired_digest: u64,
+}
+
+/// 聚合分支的支持哈希：每个时段的原始身份 + 聚合后的观测均值。
+///
+/// 均值这一项沿用旧哈希的保护：换了观测文件、时段和计数却没变时同样要判不可比
+/// （观测冻结由执行身份负责，这里只是不让哈希比原来更弱）。
+pub(super) fn aggregate_support_hash(identity: &[PeriodIdentity], obs_means: &[f64]) -> String {
+    let mut hash = Sha256::new();
+    for (identity, obs) in identity.iter().zip(obs_means) {
+        hash.update(identity.start.to_le_bytes());
+        hash.update((identity.obs_finite as u64).to_le_bytes());
+        hash.update((identity.paired as u64).to_le_bytes());
+        hash.update(identity.paired_digest.to_le_bytes());
+        hash.update(obs.to_bits().to_le_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+/// splitmix64 的终端混合：把原始时刻的秒偏移打散，避免简单的加法/异或组合互相抵消。
+fn splitmix64(value: u64) -> u64 {
+    let value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// 把一对相对时段起点的秒偏移滚进摘要。输入顺序来自同一套配对代码（时间严格递增），
+/// 所以不需要顺序无关；滚动哈希保证多记/少记任何一个样本都会改变摘要。
+fn mix_paired_time(digest: u64, offset_seconds: i64) -> u64 {
+    digest.rotate_left(11).wrapping_mul(0x0000_0100_0000_01b3) ^ splitmix64(offset_seconds as u64)
+}
+
+/// 聚合过程中一个时段的累加器。观测有限数在模型缺测时也要数，所以不能沿用
+/// "模型与观测都有限才建桶"的旧循环。
+#[derive(Default)]
+struct PeriodSums {
+    model: f64,
+    obs: f64,
+    obs_finite: usize,
+    paired: usize,
+    paired_digest: u64,
 }
 
 /// 站点目标聚合时，一个时段至少要有这么多比例的时刻配上对才算数。半小时尺度下 QC 只留实测，夜间和雨天
@@ -66,17 +128,26 @@ pub(super) fn aggregate_pairs(
     if time.is_empty() {
         return Ok(Paired::default());
     }
-    let mut sums: std::collections::BTreeMap<i64, (f64, f64, usize)> = Default::default();
+    let mut sums: BTreeMap<i64, PeriodSums> = BTreeMap::new();
     for ((&t, &m), &o) in time.iter().zip(model).zip(obs) {
-        if m.is_finite() && o.is_finite() {
-            let entry = sums.entry(period_start(t, period)).or_default();
-            entry.0 += m;
-            entry.1 += o;
-            entry.2 += 1;
+        // 观测缺测的样本哪个时段都不能进；模型缺测时观测仍然算"本来有样本"，
+        // 这正是候选支持缩小与观测本身缺样本的区别（见 [`PeriodIdentity`]）。
+        if !o.is_finite() {
+            continue;
+        }
+        let start = period_start(t, period);
+        let entry = sums.entry(start).or_default();
+        entry.obs_finite += 1;
+        if m.is_finite() {
+            entry.model += m;
+            entry.obs += o;
+            entry.paired += 1;
+            entry.paired_digest = mix_paired_time(entry.paired_digest, t - start);
         }
     }
     let mut out = Paired::default();
-    for (start, (model_sum, obs_sum, count)) in sums {
+    for (start, sums) in sums {
+        let count = sums.paired;
         let length = match period {
             TargetPeriod::Daily => 86_400,
             TargetPeriod::Monthly => {
@@ -96,8 +167,14 @@ pub(super) fn aggregate_pairs(
             continue;
         }
         out.support.push(start);
-        out.model.push(model_sum / count as f64);
-        out.obs.push(obs_sum / count as f64);
+        out.identity.push(PeriodIdentity {
+            start,
+            obs_finite: sums.obs_finite,
+            paired: sums.paired,
+            paired_digest: sums.paired_digest,
+        });
+        out.model.push(sums.model / count as f64);
+        out.obs.push(sums.obs / count as f64);
         out.coverage.push(count as f64 / expected);
     }
     Ok(out)
