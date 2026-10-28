@@ -8,13 +8,21 @@
 //! commit SHA、同一 PR 编号在两个仓库里会被混成同一个对象（证据串用）。desktop 与
 //! colm_upstream 的 owner/repo 只在这里写死一次，和 CLI 注册表常量保持一致。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use super::history_github::GithubClient;
-use super::{object, opt_str, req_str, ModelContext, Tier, Tool, ToolContext};
+use super::{
+    object, opt_str, req_str, HistorySource, HistorySourceKind, ModelContext, Tier, Tool,
+    ToolContext,
+};
+
+/// 来源 handle 的进程内序号；handle 形如 `hist-src-3-<random>`，只在同一 ToolContext 的
+/// Arc 注册表内可解析。加随机后缀避免同一进程里猜出别的句柄。
+static SOURCE_HANDLE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// 仓库注册表。与 `crates/colm-cli/src/history.rs` 的规范仓库常量保持一致；改这里也要改那边。
 const DESKTOP_OWNER: &str = "zhongwangwei";
@@ -116,6 +124,49 @@ fn frozen_source<'a>(model: &'a ModelContext, source: Option<&'a str>) -> Result
     Ok(&model.source_dir)
 }
 
+/// 显式 workspace/源码目录的来源校验：必须是绝对路径、非空、无控制字符；canonicalize
+/// 后绑定（不要求它是 git root，历史对象库由 CLI 自己核对）。
+fn canonical_workspace_source(source: &str) -> Result<PathBuf> {
+    if source.trim().is_empty() {
+        bail!("argument source must not be empty");
+    }
+    if source.chars().any(char::is_control) {
+        bail!("argument source must not contain control characters");
+    }
+    let path = Path::new(source);
+    if !path.is_absolute() {
+        bail!("argument source must be an absolute path for a selected history source");
+    }
+    path.canonicalize()
+        .with_context(|| format!("source directory {} is not readable", path.display()))
+}
+
+/// 把可信来源注册成 handle。注册表由宿主维护；调用细节只拿 handle，不拿任意路径。
+fn register_history_source(ctx: &ToolContext, source: HistorySource) -> Result<String> {
+    let sequence = SOURCE_HANDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let handle = format!("hist-src-{sequence}-{}", crate::bridge::random_hex(16));
+    ctx.history_sources
+        .lock()
+        .map_err(|_| anyhow::anyhow!("history source registry is unavailable"))?
+        .insert(handle.clone(), source);
+    Ok(handle)
+}
+
+/// 凭 handle 取回上一次 source_history 绑定的来源。未知/过期（包括重新 Configure 换了
+/// Arc）必须显式报错，绝不退化成 app 或模型默认来源。
+fn resolve_history_source(ctx: &ToolContext, handle: &str) -> Result<HistorySource> {
+    ctx.history_sources
+        .lock()
+        .map_err(|_| anyhow::anyhow!("history source registry is unavailable"))?
+        .get(handle)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "source handle {handle} is unknown or expired; rerun source_history in this session"
+            )
+        })
+}
+
 /// 查询对象的可信来源块。CLI 返回的 `query.source` 是数据，这个块是 Agent 侧对“到底查了谁”
 /// 的声明：selected 必须带冻结模型/工作区/应用来源；仓库模式只声明注册表里的两个仓库。
 fn source_context(repository: &str, model: Option<&ModelContext>, source: Option<&str>) -> Value {
@@ -158,7 +209,7 @@ impl Tool for SourceHistory {
         "source_history"
     }
     fn description(&self) -> &'static str {
-        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory; without a selected model the application source is resolved by the CLI), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
+        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory; without a selected model the application source is resolved by the CLI), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. For repository=selected the result includes a source_handle: pass it to commit_details(repository=selected) to read the exact same source (required to continue reading a mutable workspace's local/not-yet-pushed commits; the handle expires when the assistant is reconfigured, so rerun source_history instead of guessing). Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -202,6 +253,12 @@ impl Tool for SourceHistory {
             .map(|value| checked("source", value))
             .transpose()?;
 
+        // 同一轮 UI 可能改过当前模型选择：先按可信 bridge 刷新，避免继续用旧快照
+        // 冒充“当前选择”（普通 search_code/read_file 也是这个约定）。
+        let refreshed = (repository == "selected")
+            .then(|| ctx.selected_context())
+            .transpose()?;
+        let ctx: &ToolContext = refreshed.as_ref().map_or(ctx, |selected| selected);
         let model = if repository == "selected" {
             ctx.model_context.as_ref()
         } else {
@@ -211,20 +268,57 @@ impl Tool for SourceHistory {
         if let Some(model) = model {
             model.verify_source(ctx)?;
         }
-        let mut source: Option<String> = explicit_source;
-        if let Some(model) = model {
-            let frozen = frozen_source(model, source.as_deref())?;
-            source = Some(
-                frozen
-                    .to_str()
-                    .context("frozen model source path is not UTF-8")?
-                    .to_owned(),
-            );
-        } else if repository == "selected" && source.is_none() {
-            // 没有冻结模型时 selected 指应用自身源码。显式给 CLI 的 `app` 别名（由 CLI 解析成
-            // 可核验检出），这样 source_history 找到的本地提交能由 commit_details(selected)
-            // 从同一来源继续读取（审查 H05 的完整链路），而不是两边各自猜来源。
-            source = Some("app".to_owned());
+
+        // repository=selected 时把“这次到底查了哪个来源”绑定成 descriptor，返回 handle 给
+        // 后续 commit_details；desktop/colm_upstream/both 是仓库身份，不需要 descriptor。
+        let mut history_source: Option<HistorySource> = None;
+        let mut cli_source: Option<String> = explicit_source;
+        if repository == "selected" {
+            if let Some(model) = model {
+                let frozen = frozen_source(model, cli_source.as_deref())?;
+                let source_dir = frozen.to_path_buf();
+                history_source = Some(HistorySource {
+                    kind: HistorySourceKind::FrozenModel,
+                    source_dir: Some(source_dir.clone()),
+                    model: Some(model.model.clone()),
+                    fingerprint: model.model["code"]["source_sha256"]
+                        .as_str()
+                        .map(str::to_owned),
+                    commit: model.model["code"]["commit"].as_str().map(str::to_owned),
+                });
+                cli_source = Some(
+                    source_dir
+                        .to_str()
+                        .context("frozen model source path is not UTF-8")?
+                        .to_owned(),
+                );
+            } else if let Some(explicit) = cli_source.take() {
+                // 显式 workspace：只绑定 canonical 绝对目录；不要求它是 git root。
+                let canonical = canonical_workspace_source(&explicit)?;
+                history_source = Some(HistorySource {
+                    kind: HistorySourceKind::Workspace,
+                    source_dir: Some(canonical.clone()),
+                    model: None,
+                    fingerprint: None,
+                    commit: None,
+                });
+                cli_source = Some(
+                    canonical
+                        .to_str()
+                        .context("workspace source path is not UTF-8")?
+                        .to_owned(),
+                );
+            } else {
+                // 无模型且无显式来源：让 CLI 用 app 别名解析；详情也继续复用 app 别名。
+                history_source = Some(HistorySource {
+                    kind: HistorySourceKind::App,
+                    source_dir: None,
+                    model: None,
+                    fingerprint: None,
+                    commit: None,
+                });
+                cli_source = Some("app".to_owned());
+            }
         }
 
         let mut cli: Vec<String> = vec![
@@ -238,7 +332,7 @@ impl Tool for SourceHistory {
             "--limit".into(),
             limit.to_string(),
         ];
-        if let Some(source) = &source {
+        if let Some(source) = &cli_source {
             cli.extend(["--source".to_owned(), source.clone()]);
         }
         if let Some(path) = path {
@@ -272,7 +366,40 @@ impl Tool for SourceHistory {
         if !value.is_object() {
             bail!("colm-cli history-track did not return a JSON object");
         }
-        value["source_context"] = source_context(repository, model, source.as_deref());
+        let mut context = source_context(repository, model, cli_source.as_deref());
+        if let Some(mut source) = history_source {
+            // CLI 返回的 query.source 是数据：用它校正 canonical 目录、记录 commit 与指纹，
+            // 但 App 仍保留 `--source app` 语义（不把解析结果变成可被模型重定向的路径）。
+            let returned = &value["query"]["source"];
+            if let Some(dir) = returned["source_dir"]
+                .as_str()
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty())
+            {
+                if source.kind != HistorySourceKind::App {
+                    source.source_dir = Some(PathBuf::from(dir));
+                    context["canonical_root"] = json!(dir);
+                } else if Path::new(dir).is_absolute() {
+                    // App 由 CLI 解析成绝对检出路径时才写 canonical_root；别名 "app" 本身不是路径。
+                    context["canonical_root"] = json!(dir);
+                }
+            }
+            if let Some(commit) = returned["commit"].as_str() {
+                source.commit = Some(commit.to_owned());
+            }
+            if let Some(fingerprint) = returned["fingerprint"].as_str() {
+                source.fingerprint = Some(fingerprint.to_owned());
+            }
+            if context["canonical_root"].is_null() {
+                if let Some(path) = value["repository"]["path"].as_str() {
+                    context["canonical_root"] = json!(path);
+                }
+            }
+            let handle = register_history_source(ctx, source)?;
+            context["handle"] = json!(handle);
+            value["source_handle"] = json!(handle);
+        }
+        value["source_context"] = context;
         Ok(value)
     }
 }
@@ -285,7 +412,7 @@ impl Tool for CommitDetails {
         "commit_details"
     }
     fn description(&self) -> &'static str {
-        "Show one commit: full 40-hex SHA, parents, author and committer with their Git times (not local edit times), the complete message, and the commit-vs-parent diff with old/new code around a symbol or path (truncated honestly). A merge commit says which parent it compares with. repository=selected reads the current selected source: the verified frozen model's source directory (its local/not-yet-pushed commits are readable here) or, without a selected model, the application source. The source path is never taken from model input. repository=desktop|colm_upstream must match the repository the SHA belongs to; a SHA that only exists in a local selected source has no public GitHub PR association. A commit message is only a candidate for motivation; 'documented' requires an explicit reason sentence with its source, and code analysis is only an inference."
+        "Show one commit: full 40-hex SHA, parents, author and committer with their Git times (not local edit times), the complete message, and the commit-vs-parent diff with old/new code around a symbol or path (truncated honestly). A merge commit says which parent it compares with. repository=selected reads one selected source: pass the source_handle returned by an earlier source_history(repository=selected) call to continue on exactly the same canonical source (this is how local/not-yet-pushed commits from an explicit workspace stay readable); without a handle it falls back to the verified frozen model source, or the application source when no model is selected. Source paths are never taken from model input. repository=desktop|colm_upstream must match the repository the SHA belongs to; a SHA that only exists in a local selected source has no public GitHub PR association. A commit message is only a candidate for motivation; 'documented' requires an explicit reason sentence with its source, and code analysis is only an inference."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -296,6 +423,7 @@ impl Tool for CommitDetails {
             "sha": string("full 40-character lowercase hexadecimal commit SHA"),
             "symbol": nullable("string", "variable/function to keep in the diff hunks, or null for the whole commit"),
             "path": nullable("string", "repository-relative file path to limit the diff, or null"),
+            "source_handle": nullable("string", "for repository=selected: the source_handle returned by source_history in this session to keep reading the same source; null to follow the current verified model/application source"),
         }))
     }
     fn tier(&self) -> Tier {
@@ -318,25 +446,75 @@ impl Tool for CommitDetails {
             "--repository".into(),
             repository.into(),
         ];
-        // selected 的真实来源只能来自宿主 Configure：模型输入里没有 source 目录参数，
-        // 避免模型把任意路径冒充“当前模型源码”。无模型时交给 CLI 用应用源码（`app`）。
+        let source_handle = opt_str(args, "source_handle");
+        // selected 的真实来源只有两种：宿主验证过的 descriptor（handle）或当前可信选择
+        // （model_context/app）。模型输入里没有路径参数，避免把任意目录冒充“当前模型源码”。
         let selected_source = match repository {
             "desktop" | "colm_upstream" => None,
             "selected" => {
-                let (source, model) = match &ctx.model_context {
-                    Some(model) => {
-                        model.verify_source(ctx)?;
-                        let source = model
-                            .source_dir
-                            .to_str()
-                            .context("frozen model source path is not UTF-8")?
-                            .to_owned();
-                        (source, Some(model))
-                    }
-                    None => ("app".to_owned(), None),
-                };
-                cli.extend(["--source".to_owned(), source.clone()]);
-                Some((source, model))
+                let (source_arg, resolution, model_identity, canonical_root, handle) =
+                    match source_handle {
+                        Some(handle) => {
+                            // 已绑定的来源优先：不再刷新 UI/模型，也不静默换成 app。
+                            let descriptor = resolve_history_source(ctx, handle)?;
+                            let source_arg = match descriptor.kind {
+                                HistorySourceKind::App => "app".to_owned(),
+                                _ => descriptor
+                                    .source_dir
+                                    .as_ref()
+                                    .and_then(|dir| dir.to_str())
+                                    .map(str::to_owned)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "source handle {handle} has no canonical source directory"
+                                        )
+                                    })?,
+                            };
+                            (
+                                source_arg,
+                                "source_handle".to_owned(),
+                                descriptor.model.clone(),
+                                descriptor.source_dir.clone(),
+                                Some(handle.to_owned()),
+                            )
+                        }
+                        None => {
+                            // 旧路径：按可信 UI 当前选择刷新一次（同轮换模型时不能用旧快照）。
+                            let selected = ctx.selected_context()?;
+                            match &selected.model_context {
+                                Some(model) => {
+                                    model.verify_source(&selected)?;
+                                    let source = model
+                                        .source_dir
+                                        .to_str()
+                                        .context("frozen model source path is not UTF-8")?
+                                        .to_owned();
+                                    (
+                                        source,
+                                        "verified_frozen_model_source".to_owned(),
+                                        Some(model.model.clone()),
+                                        Some(model.source_dir.clone()),
+                                        None,
+                                    )
+                                }
+                                None => (
+                                    "app".to_owned(),
+                                    "application_source".to_owned(),
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                            }
+                        }
+                    };
+                cli.extend(["--source".to_owned(), source_arg.clone()]);
+                Some((
+                    source_arg,
+                    resolution,
+                    model_identity,
+                    canonical_root,
+                    handle,
+                ))
             }
             other => {
                 bail!("unknown repository {other}: expected desktop, colm_upstream or selected")
@@ -351,20 +529,35 @@ impl Tool for CommitDetails {
         }
         let refs: Vec<&str> = cli.iter().map(String::as_str).collect();
         let mut value = ctx.cli_json(&refs)?;
-        if let Some((source, model)) = selected_source {
+        if let Some((source_arg, resolution, model_identity, canonical_root, handle)) =
+            selected_source
+        {
             if !value.is_object() {
                 bail!("colm-cli history-commit did not return a JSON object");
             }
-            // 可信块写明这次 selected 详情读的是哪个来源；冻结模型另附记录身份，
-            // 便于上层把“本地提交详情”和“当前模型”绑在一起，而不是看模型自述。
-            value["source_context"] = match model {
-                Some(model) => json!({
-                    "kind": "selected_source",
-                    "source": source,
-                    "model": {"version": model.model["version"], "code": model.model["code"]},
-                }),
-                None => json!({"kind": "selected_source", "source": source}),
-            };
+            // 可信块写明这次 selected 详情读的是哪个来源、凭哪个 handle、走哪种解析；
+            // identity 直接取 CLI 对实际仓库的核验结果，不是模型自述。
+            let identity = value
+                .get("repository")
+                .and_then(|repository| repository.get("identity"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let canonical_root = canonical_root
+                .or_else(|| value["repository"]["path"].as_str().map(PathBuf::from))
+                .map(|path| json!(path.display().to_string()))
+                .unwrap_or(Value::Null);
+            let model_identity = model_identity
+                .map(|model| json!({"version": model["version"], "code": model["code"]}))
+                .unwrap_or(Value::Null);
+            value["source_context"] = json!({
+                "kind": "selected_source",
+                "handle": handle,
+                "source": source_arg,
+                "canonical_root": canonical_root,
+                "model": model_identity,
+                "identity": identity,
+                "resolution": resolution,
+            });
         }
         Ok(value)
     }

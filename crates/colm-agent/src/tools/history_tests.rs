@@ -83,6 +83,10 @@ case "$1" in
   model-source-context) cat '{base}/model-source.json' ;;
   history-track) cat '{base}/track.json' ;;
   history-commit)
+    if [ -f '{base}/app-commit-fails' ] && printf '%s' "$*" | grep -q -- '--source app'; then
+      echo 'commit is not readable in the application source checkout' >&2
+      exit 128
+    fi
     if [ -f '{base}/commit-fails' ]; then
       echo 'fatal: bad object; the commit is not in this repository' >&2
       exit 128
@@ -125,6 +129,12 @@ esac
 
     fn fail_commit(&self) {
         std::fs::write(self.root.join("commit-fails"), b"1").unwrap();
+    }
+
+    /// 模拟“app 检出/注册历史库里没有这个对象”：只让 `--source app` 的详情失败，
+    /// 显式来源（workspace/frozen）仍能读，用于验证 handle 没有退回 app。
+    fn fail_commit_for_app_source(&self) {
+        std::fs::write(self.root.join("app-commit-fails"), b"1").unwrap();
     }
 
     fn calls(&self) -> Vec<String> {
@@ -189,6 +199,12 @@ fn the_three_history_tools_are_registered_as_strict_read_only_tools() {
             properties.get("sha").is_none() == (name == "source_history"),
             "{name}"
         );
+        if name == "commit_details" {
+            // F03：详情凭 source_history 返回的 handle 续用同一来源，schema 里没有路径参数。
+            assert!(properties.get("source_handle").is_some(), "{name}");
+            assert!(properties.get("source").is_none(), "{name}");
+            assert!(properties.get("source_dir").is_none(), "{name}");
+        }
     }
 }
 
@@ -282,6 +298,11 @@ fn source_history_verifies_the_selected_model_and_forwards_its_identity() {
     assert_eq!(value["query"]["symbol"], "t_soisno");
     assert_eq!(value["source_context"]["kind"], "frozen_model");
     assert_eq!(value["source_context"]["version"]["revision"], 3);
+    let handle = value["source_handle"]
+        .as_str()
+        .expect("selected source_history must return a source handle");
+    assert!(handle.starts_with("hist-src-"), "{handle}");
+    assert_eq!(value["source_context"]["handle"], json!(handle));
     let calls = fake.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(calls[0].starts_with("model-source-context"), "{calls:?}");
@@ -399,6 +420,10 @@ fn source_history_routes_both_repositories_with_the_default_limit() {
         calls[0]
     );
     assert!(!calls[0].contains("--model-json"), "{}", calls[0]);
+    assert!(
+        value.get("source_handle").is_none(),
+        "repository mode has no selected-source handle"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -429,20 +454,32 @@ fn source_history_selected_without_a_model_resolves_the_application_source() {
     );
     assert_eq!(value["source_context"]["kind"], "app");
     assert_eq!(value["source_context"]["source"], "app");
+    let app_handle = value["source_handle"]
+        .as_str()
+        .expect("selected app source must also register a handle");
+    assert!(app_handle.starts_with("hist-src-"), "{app_handle}");
 
-    // 显式 source 目录仍然优先（workspace/独立检出查询），不被 app 别名覆盖。
+    // 显式 source 目录仍然优先（workspace/独立检出查询），不被 app 别名覆盖；
+    // F03 起要求它是 canonical 绝对目录。
+    let workspace = root.join("some-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
     let mut args = source_args("selected", "t_soisno");
-    args["source"] = json!("/tmp/some-workspace");
+    args["source"] = json!(workspace.display().to_string());
     let value = SourceHistory.call(&args, &ctx).unwrap();
     let calls = fake.calls();
     assert!(
         calls
             .last()
             .unwrap()
-            .contains("--source /tmp/some-workspace"),
+            .contains(&format!("--source {}", canonical.display())),
         "{calls:?}"
     );
     assert_eq!(value["source_context"]["kind"], "workspace");
+    let workspace_handle = value["source_handle"]
+        .as_str()
+        .expect("workspace source must register a handle");
+    assert_ne!(workspace_handle, app_handle);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -626,6 +663,16 @@ fn commit_details_selected_reads_the_verified_frozen_source_and_labels_it() {
         json!(model.source_dir.display().to_string())
     );
     assert_eq!(value["source_context"]["model"]["version"]["revision"], 3);
+    assert_eq!(value["source_context"]["handle"], Value::Null);
+    assert_eq!(
+        value["source_context"]["resolution"],
+        "verified_frozen_model_source"
+    );
+    assert_eq!(
+        value["source_context"]["canonical_root"],
+        json!(model.source_dir.display().to_string())
+    );
+    assert_eq!(value["source_context"]["identity"]["state"], "verified");
     assert_eq!(
         value["notes"][0],
         "the commit exists only in the local selected source checkout"
@@ -640,7 +687,10 @@ fn commit_details_selected_without_a_model_uses_the_application_source() {
     let fake = FakeCli::new(&root);
     fake.set_commit(&json!({
         "schema": 1,
-        "repository": {"identity": {"state": "verified", "root": "/application/source"}},
+        "repository": {
+            "path": "/application/source",
+            "identity": {"state": "verified", "root": "/application/source"},
+        },
         "commit": {"sha": "a".repeat(40), "parents": [], "files": [], "truncated": false},
         "reason": {"status": "not_recorded", "basis": null, "excerpt": null},
         "notes": [],
@@ -664,7 +714,207 @@ fn commit_details_selected_without_a_model_uses_the_application_source() {
     assert!(calls[0].contains("--source app"), "{}", calls[0]);
     assert_eq!(value["source_context"]["kind"], "selected_source");
     assert_eq!(value["source_context"]["source"], "app");
-    assert!(value["source_context"].get("model").is_none());
+    assert_eq!(value["source_context"]["handle"], Value::Null);
+    assert_eq!(value["source_context"]["resolution"], "application_source");
+    assert_eq!(
+        value["source_context"]["canonical_root"],
+        json!("/application/source")
+    );
+    assert_eq!(value["source_context"]["model"], Value::Null);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn source_history_workspace_handle_continues_to_commit_details_on_the_same_root() {
+    let root = temp_dir("workspace-chain");
+    let workspace = root.join("local-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let fake = FakeCli::new(&root);
+    let sha = "c".repeat(40);
+    // 该 workspace 的本地未推送 commit X：track 从显式 workspace 找到它。
+    fake.set_track(&json!({
+        "schema": 1,
+        "query": {
+            "symbol": "local_var",
+            "repository": "selected",
+            "source": {
+                "mode": "workspace",
+                "source_dir": canonical.display().to_string(),
+                "fingerprint": "f".repeat(64),
+                "commit": sha,
+                "dirty": true,
+            },
+        },
+        "repos": {"selected": {"key": "selected"}},
+        "cross": {"links": []},
+        "limits": [],
+        "truncated": false,
+        "history_root": "/history",
+    }));
+    fake.set_commit(&json!({
+        "schema": 1,
+        "repository": {
+            "path": canonical.display().to_string(),
+            "identity": {"state": "unverified", "root": canonical.display().to_string(), "remote": null},
+        },
+        "commit": {
+            "sha": sha,
+            "parents": ["e".repeat(40)],
+            "author": "Local Author",
+            "author_time_unix": 1_700_000_000,
+            "committer_time_unix": 1_700_000_100,
+            "message": "Local workspace fix, not pushed",
+            "files": [],
+            "truncated": false,
+        },
+        "reason": {"status": "unchecked", "basis": "commit_message", "excerpt": "Local workspace fix, not pushed"},
+        "notes": ["the commit exists only in this local workspace"],
+    }));
+    // app 检出/注册历史库里没有 X：只有显式 workspace 能读。
+    fake.fail_commit_for_app_source();
+    let ctx = context(&fake.cli, &root);
+
+    // 第一次调用：source_history(selected, source=workspace) 绑定来源并返回 handle。
+    let mut args = source_args("selected", "local_var");
+    args["source"] = json!(workspace.display().to_string());
+    let track = SourceHistory.call(&args, &ctx).unwrap();
+    let handle = track["source_handle"]
+        .as_str()
+        .expect("track must return a source handle")
+        .to_owned();
+    assert!(handle.starts_with("hist-src-"), "{handle}");
+    assert_eq!(track["source_context"]["kind"], "workspace");
+    assert_eq!(
+        track["source_context"]["source"],
+        json!(canonical.display().to_string())
+    );
+    assert_eq!(
+        track["source_context"]["canonical_root"],
+        json!(canonical.display().to_string())
+    );
+    assert_eq!(track["source_context"]["handle"], json!(handle));
+    assert_eq!(fake.calls().len(), 1, "one track call");
+
+    // 第二次调用用**同一个 ToolContext 的克隆**（Arc 共享注册表）续读同一 canonical root。
+    let clone = ctx.clone();
+    let details = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": "local_var",
+                "path": null,
+                "source_handle": handle,
+            }),
+            &clone,
+        )
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let commit_call = calls.last().unwrap();
+    assert!(
+        commit_call.contains("--repository selected"),
+        "{commit_call}"
+    );
+    assert!(
+        commit_call.contains(&format!("--source {}", canonical.display())),
+        "{commit_call}"
+    );
+    assert!(
+        commit_call.contains(&format!("--sha {sha}")),
+        "{commit_call}"
+    );
+    assert!(
+        !commit_call.contains("--source app"),
+        "handle must not fall back to the application source: {commit_call}"
+    );
+    assert_eq!(details["commit"]["sha"], sha);
+    assert_eq!(details["source_context"]["kind"], "selected_source");
+    assert_eq!(details["source_context"]["handle"], json!(handle));
+    assert_eq!(details["source_context"]["resolution"], "source_handle");
+    assert_eq!(
+        details["source_context"]["canonical_root"],
+        json!(canonical.display().to_string())
+    );
+    assert_eq!(details["source_context"]["identity"]["state"], "unverified");
+
+    // 已绑定 descriptor 不因“当前选择可能变了”静默换源：克隆里带着别的冻结模型也只用
+    // descriptor 的 canonical source，不调用 model-source-context。
+    let mut switched = ctx.clone();
+    switched.model_context = Some(model_context(&root));
+    let details = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": null,
+                "path": null,
+                "source_handle": handle,
+            }),
+            &switched,
+        )
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(
+        calls.len(),
+        3,
+        "track + two details calls, no model-source-context: {calls:?}"
+    );
+    assert!(
+        calls[2].contains(&format!("--source {}", canonical.display())),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("model-source-context")),
+        "a bound handle must not re-resolve the model/UI: {calls:?}"
+    );
+    assert_eq!(details["source_context"]["resolution"], "source_handle");
+
+    // 未知/过期 handle：明确报错，绝不退化成 app 或模型默认来源，也不运行 CLI。
+    let error = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": null,
+                "path": null,
+                "source_handle": "hist-src-999-unknown",
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(
+            "source handle hist-src-999-unknown is unknown or expired; rerun source_history in this session"
+        ),
+        "{error:#}"
+    );
+    assert_eq!(fake.calls().len(), 3, "unknown handle must not run CLI");
+
+    // 无 handle 的旧路径仍是 app；app 检出没有 X 时错误原样报出，不退化成别处。
+    let error = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": null,
+                "path": null,
+                "source_handle": null,
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("not readable in the application source checkout"),
+        "{error:#}"
+    );
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 4, "the legacy path ran one app-source call");
+    assert!(calls.last().unwrap().contains("--source app"), "{calls:?}");
     std::fs::remove_dir_all(root).unwrap();
 }
 

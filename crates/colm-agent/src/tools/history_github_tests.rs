@@ -1074,6 +1074,8 @@ fn comment_failure_marks_reason_unavailable() {
     assert_eq!(pull["reason"]["basis"], Value::Null);
     assert_eq!(pull["reason"]["evidence_candidates"], json!([]));
     assert_eq!(pull["reason"]["coverage"]["discussion_requested"], true);
+    // 第一页就失败：只算“尝试读取”，没有读到讨论 → discussion_read=false。
+    assert_eq!(pull["reason"]["coverage"]["discussion_read"], false);
     assert_eq!(pull["reason"]["coverage"]["discussion_complete"], false);
     assert_eq!(pull["comments"]["complete"], false);
     assert_eq!(result["complete"], false);

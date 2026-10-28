@@ -319,15 +319,23 @@ fn session_limit_error(
     None
 }
 
-/// Configure 建立的可信网络上下文：GitHub 网络权限来自用户“联网”设置
-/// （[`Inbound::Configure::web_search`]），Builtin 与外部后端走同一路径。
+/// 有效联网权限：沿用现有产品规则，OpenCode 不启用这类联网，其它后端尊重用户设置。
+///
+/// 这个值必须同时用于 `Settings.web_search`（外部后端启动说明/模型提示）与可信
+/// `ToolContext.github_network`（GitHub PR 工具），否则会出现“说明关闭但 PR 工具联网”。
+fn effective_web_search(raw_web_search: bool, backend: BackendKind) -> bool {
+    raw_web_search && backend != BackendKind::Opencode
+}
+
+/// Configure 建立的可信网络上下文：GitHub 网络权限来自**有效**联网设置
+/// （[`effective_web_search`]），Builtin 与外部后端走同一路径。
 ///
 /// 注意这里**不**设置 `web`：DeepSeek 搜索客户端只为内置后端按轮挂载；外部后端
 /// （Codex/Claude Code）用自带搜索，`web` 恒为 None。历史工具的离线判断只能看
 /// `github_network`，否则外部后端的 PR 查询会被误判成离线。
-fn configure_network(web_search: bool) -> ToolContext {
+fn configure_network(effective_web_search: bool) -> ToolContext {
     ToolContext {
-        github_network: web_search,
+        github_network: effective_web_search,
         ..ToolContext::default()
     }
 }
@@ -830,6 +838,9 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             .flatten()
                     });
                 let model = display_model(backend, &provider.model, &choice);
+                // 先按现有产品规则算有效权限，再统一用于模型说明（Settings.web_search）与
+                // GitHub 工具（github_network）：OpenCode 隐藏的旧 raw=true 不能偷偷生效。
+                let effective_web_search = effective_web_search(web_search, backend);
                 *settings.lock().unwrap() = Some(Settings {
                     provider: *provider,
                     context: ToolContext {
@@ -851,10 +862,10 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             .map(|root| root.join("history"))
                             .unwrap_or_default(),
                         github_token,
-                        ..configure_network(web_search)
+                        ..configure_network(effective_web_search)
                     },
                     approval,
-                    web_search: web_search && backend != BackendKind::Opencode,
+                    web_search: effective_web_search,
                     ui,
                     remote,
                     backend,
@@ -1567,15 +1578,31 @@ mod tests {
     }
 
     #[test]
-    fn github_network_permission_follows_the_configure_web_setting_for_every_backend() {
-        // Configure 的真实构造路径用 configure_network 填这个字段：外部后端没有 WebAccess，
-        // 但用户联网设置必须同样生效；关闭时的零 HTTP 行为由工具层的 Builtin/外部矩阵测试覆盖。
-        let external_like = configure_network(true);
-        assert!(external_like.github_network);
-        assert!(external_like.web.is_none());
-        let offline = configure_network(false);
-        assert!(!offline.github_network);
-        assert!(offline.web.is_none());
+    fn effective_web_search_unifies_opencode_permissions_and_github_tools() {
+        // Configure 的真实构造路径：effective_web_search 同时决定 Settings.web_search（外部
+        // 后端说明/模型提示）与 ToolContext.github_network（GitHub PR 工具）。
+        for backend in [
+            BackendKind::Builtin,
+            BackendKind::Codex,
+            BackendKind::ClaudeCode,
+            BackendKind::Opencode,
+        ] {
+            for raw in [false, true] {
+                let expected = raw && backend != BackendKind::Opencode;
+                let effective = effective_web_search(raw, backend);
+                assert_eq!(effective, expected, "raw={raw} backend={backend:?}");
+                let context = configure_network(effective);
+                assert_eq!(context.github_network, effective, "{backend:?}");
+                assert!(context.web.is_none(), "web client is attached per turn");
+            }
+        }
+        // 回归触发条件：OpenCode + 隐藏保留的 raw=true 不能给 PR 工具联网。
+        let opencode = configure_network(effective_web_search(true, BackendKind::Opencode));
+        assert!(!opencode.github_network);
+        assert!(!effective_web_search(true, BackendKind::Opencode));
+        assert!(effective_web_search(true, BackendKind::Codex));
+        assert!(effective_web_search(true, BackendKind::ClaudeCode));
+        assert!(effective_web_search(true, BackendKind::Builtin));
     }
 
     #[test]

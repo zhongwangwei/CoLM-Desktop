@@ -16,11 +16,12 @@ mod remote_workspace;
 pub mod ui;
 pub mod web;
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -46,6 +47,42 @@ impl Tier {
 }
 
 /// 工具运行的环境。
+/// 只读历史查询的来源种类。`selected` 的三种可信来源分别建模，避免把显式 workspace
+/// 或应用源码在后续详情查询里静默换成别的仓库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySourceKind {
+    /// 已核验的冻结模型源码（Configure 的 ModelContext，经 verify_source）。
+    FrozenModel,
+    /// 调用方显式给出的源码/工作区目录（绝对路径，已 canonicalize）。
+    Workspace,
+    /// CLI 的 `--source app` 别名：应用自身检出，由 CLI 解析。
+    App,
+}
+
+impl HistorySourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FrozenModel => "frozen_model",
+            Self::Workspace => "workspace",
+            Self::App => "app",
+        }
+    }
+}
+
+/// `source_history` 注册、`commit_details` 续用的来源 descriptor。
+///
+/// 只保存读取历史所需的来源身份，不存凭据；`source_dir` 是 canonical 绝对路径
+/// （App 由 CLI 解析，这里为 None，详情继续传 `--source app`）。handle 只在同一
+/// ToolContext（Arc 共享）内有效，重新 Configure 后旧 handle 自然过期。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistorySource {
+    pub kind: HistorySourceKind,
+    pub source_dir: Option<PathBuf>,
+    pub model: Option<Value>,
+    pub fingerprint: Option<String>,
+    pub commit: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     /// 项目目录（算例所在的根）。相对路径按它解析。
@@ -84,6 +121,12 @@ pub struct ToolContext {
     /// （Codex/Claude Code）根本没有它；若用 `web.is_none()` 判断 GitHub 离线，会把
     /// 外部后端打开联网的用户误判成离线。默认关闭（没有可信配置时宁可只读缓存）。
     pub github_network: bool,
+    /// 只读历史查询的来源注册表：`source_history` 把可信来源注册成 handle，
+    /// `commit_details(repository=selected)` 凭 handle 沿同一 canonical root 读取。
+    ///
+    /// 由宿主维护、不序列化、不含凭据；Arc 让同一 ToolContext 的克隆/派生上下文共享
+    /// 注册表。重新 Configure 会换掉整个上下文，旧 handle 因此过期（显式报错，不退化）。
+    pub history_sources: Arc<Mutex<BTreeMap<String, HistorySource>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

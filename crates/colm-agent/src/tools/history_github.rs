@@ -322,7 +322,7 @@ impl GithubClient {
             // （原因可能就在没读的讨论里，不能写 not_recorded）。
             for pull in pulls.iter_mut() {
                 // 没请求讨论：discussion_requested/read/complete 都是 false。
-                let reason = build_reason(pull, false, None, false);
+                let reason = build_reason(pull, false, None, false, false);
                 pull["reason"] = reason;
             }
         }
@@ -338,16 +338,16 @@ impl GithubClient {
             for (index, pull) in pulls.iter_mut().enumerate() {
                 let number = pull["number"].as_u64().unwrap_or_default();
                 if index >= fetch_limit {
-                    let reason = build_reason(pull, true, None, false);
+                    let reason = build_reason(pull, true, None, false, false);
                     pull["reason"] = reason;
                     continue;
                 }
-                let (comments, complete) =
+                let (comments, complete, comments_read) =
                     self.fetch_pull_comments(api_base, repository, number, notices, errors);
                 if !complete {
                     comments_complete = false;
                 }
-                let reason = build_reason(pull, true, Some(&comments), complete);
+                let reason = build_reason(pull, true, Some(&comments), complete, comments_read);
                 pull["reason"] = reason;
                 pull["comments"] = comments;
             }
@@ -357,6 +357,9 @@ impl GithubClient {
 
     /// 读一个 PR 的 issue comments。`complete` 只表示“请求范围内是否全部读完”，
     /// 摘录条数有上限（[`MAX_COMMENT_EXCERPTS`]），超出的部分只丢摘录不只丢完整性判断。
+    ///
+    /// 第三个返回值 `read_any` 表示“至少成功读到了第一页”。第一页直接失败时没有读到
+    /// 任何讨论，reason.coverage.discussion_read 必须为 false（不能把尝试当已读）。
     fn fetch_pull_comments(
         &self,
         api_base: &str,
@@ -364,15 +367,18 @@ impl GithubClient {
         number: u64,
         notices: &mut Vec<String>,
         errors: &mut Vec<ApiError>,
-    ) -> (Value, bool) {
+    ) -> (Value, bool, bool) {
         let mut excerpts = Vec::new();
         let mut complete = true;
+        let mut read_any = false;
         let mut skipped_excerpts = 0usize;
         let mut page = 1u64;
         loop {
             let url = comments_url(api_base, repository, number, page);
             match self.get_json_array(&url, &format!("comments for pull request #{number}")) {
                 Ok((items, link_next)) => {
+                    // 第一页成功即“读到过讨论”；后面再失败只影响 complete。
+                    read_any = true;
                     for item in &items {
                         let body = item
                             .get("body")
@@ -425,6 +431,7 @@ impl GithubClient {
         (
             json!({"complete": complete, "excerpts": excerpts}),
             complete,
+            read_any,
         )
     }
 
@@ -813,6 +820,7 @@ fn build_reason(
     include_discussion: bool,
     comments: Option<&Value>,
     discussion_complete: bool,
+    discussion_read: bool,
 ) -> Value {
     let body = pull["body"].as_str().unwrap_or_default().trim();
     let mut candidates = Vec::new();
@@ -847,7 +855,8 @@ fn build_reason(
             }));
         }
     }
-    let discussion_read = include_discussion && comments.is_some();
+    // “尝试读取”不等于“读到”：第一页失败时 read=false、complete=false。
+    let discussion_read = include_discussion && discussion_read;
     let coverage = json!({
         "body_read": true,
         "discussion_requested": include_discussion,
