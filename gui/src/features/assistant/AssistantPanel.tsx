@@ -105,6 +105,16 @@ export default function AssistantPanel() {
         '上一条还在回答，请先点"停止"或等它结束。',
         'The previous answer is still running; stop it or wait for it to finish.',
       );
+    if (text.includes('the context window for this model endpoint is unknown'))
+      return t(
+        '这个端点/模型没有已知的上下文窗口。请在助手设置 → 高级设置里填写“上下文窗口”（tokens）后再发送；应用不会猜一个窗口。',
+        'This endpoint/model has no known context window. Open assistant settings → Advanced, set the context window (tokens), then send again; the app does not guess one.',
+      );
+    if (text.includes('estimated input tokens') && text.includes('context window'))
+      return t(
+        '这条请求即使折叠较早的工具结果仍超过当前上下文窗口。本次没有发往模型服务；请缩短附件或对话、在助手设置里调大上下文窗口，或调低输出 token 上限后再发送。',
+        'This request exceeds the configured context window even after folding older tool results. Nothing was sent to the model service; shorten the attachment or conversation, raise the context window in assistant settings, or lower the maximum output tokens, then send again.',
+      );
     return text;
   }
   function attachmentErrorText(message: string) {
@@ -170,6 +180,12 @@ export default function AssistantPanel() {
     tokens: number;
     window: number;
     compressed: number;
+    /** 窗口减去估算输入、输出预留与安全余量后的可用输入估算；null = 后端未启用预算。 */
+    available: number | null;
+    outputReserve: number;
+    safety: number;
+    /** 窗口来源："user" 用户填写 / "preset" 文档确认的预设。 */
+    source: string | null;
   } | null>(null);
   const [limitReached, setLimitReached] = useState(false);
   const [stepLimit, setStepLimit] = useState(0);
@@ -342,6 +358,13 @@ export default function AssistantPanel() {
             tokens: event.estimated_tokens || 0,
             window: event.window_tokens || 0,
             compressed: event.compressed_tools || 0,
+            available:
+              typeof event.available_input_tokens === 'number'
+                ? event.available_input_tokens
+                : null,
+            outputReserve: event.output_reserve_tokens || 0,
+            safety: event.safety_margin_tokens || 0,
+            source: event.window_source || null,
           });
           break;
         case 'turn_done':
@@ -506,6 +529,16 @@ export default function AssistantPanel() {
     await invoke('assistant_save_settings', { settings: next });
     setSettings(next);
     setModel('');
+    // 换后端或换端点/模型/协议后，旧的 API 上下文估算不再属于当前发送目标：清掉，别当成新配置的占用。
+    if (
+      next.backend !== 'builtin' ||
+      next.backend !== settings.backend ||
+      next.base_url !== settings.base_url ||
+      next.model !== settings.model ||
+      next.api_format !== settings.api_format ||
+      next.context_window !== settings.context_window
+    )
+      setContextUsage(null);
   }
   async function attachDocument() {
     if (runningRef.current || !ready) return;
@@ -759,6 +792,7 @@ export default function AssistantPanel() {
     ? apiEfforts(providerId(settings), settings.model)
     : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
   const contextWarning =
+    builtin &&
     !!contextUsage &&
     contextUsage.window > 0 &&
     contextUsage.tokens >= contextUsage.window * CONTEXT_WARN_RATIO;
@@ -1168,8 +1202,16 @@ export default function AssistantPanel() {
       {contextWarning && (
         <Notice tone="warning">
           {t(
-            `当前上下文估算约 ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens，已接近模型窗口；下一步会自动折叠较早的工具结果。`,
-            `Estimated context is about ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens, near the model window; the next step will automatically fold older tool results.`,
+            `当前上下文估算约 ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens${
+              contextUsage!.available !== null
+                ? `（可用输入估算 ${tokenLabel(contextUsage!.available)}）`
+                : ''
+            }，已接近模型窗口；下一步会自动折叠较早的工具结果。`,
+            `Estimated context is about ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens${
+              contextUsage!.available !== null
+                ? ` (available input estimate ${tokenLabel(contextUsage!.available)})`
+                : ''
+            }, near the model window; the next step will automatically fold older tool results.`,
           )}
         </Notice>
       )}
@@ -1358,8 +1400,19 @@ export default function AssistantPanel() {
                   .filter(Boolean)
                   .join(' · ')}`
               : usage}
-        {contextUsage &&
-          ` · ${t('上下文估算', 'Context estimate')}: ${tokenLabel(contextUsage.tokens)} / ${tokenLabel(contextUsage.window)} tokens`}
+        {builtin &&
+          contextUsage &&
+          ` · ${t('上下文估算', 'Context estimate')}: ${tokenLabel(contextUsage.tokens)} / ${tokenLabel(contextUsage.window)} tokens${
+            contextUsage.available !== null
+              ? ` · ${t('可用输入估算', 'available input estimate')} ${tokenLabel(contextUsage.available)}`
+              : ''
+          }${
+            contextUsage.source === 'user'
+              ? t('（窗口：已填写）', ' (window: set)')
+              : contextUsage.source === 'preset'
+                ? t('（窗口：已确认预设）', ' (window: documented preset)')
+                : ''
+          }`}
       </p>
     </div>
   );

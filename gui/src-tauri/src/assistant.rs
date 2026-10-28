@@ -128,6 +128,9 @@ impl AssistantProcess {
 pub struct AssistantSettings {
     pub base_url: String,
     pub model: String,
+    /// 当前端点/模型/协议的上下文窗口（token）。None = 用文档确认的预设，未知模型则发送前要求填写。
+    #[serde(default)]
+    pub context_window: Option<u64>,
     #[serde(default)]
     pub provider_id: String,
     #[serde(default = "default_api_format")]
@@ -176,6 +179,9 @@ pub struct AssistantSettings {
 pub struct ApiProfile {
     pub base_url: String,
     pub model: String,
+    /// 这份配置自己的窗口；直接改模型/地址/协议时前端清空，只有恢复完整匹配的 profile 才取回。
+    #[serde(default)]
+    pub context_window: Option<u64>,
     #[serde(default)]
     pub thinking: Option<bool>,
     #[serde(default)]
@@ -210,6 +216,7 @@ impl AssistantSettings {
         ApiProfile {
             base_url: self.base_url.clone(),
             model: self.model.clone(),
+            context_window: self.context_window,
             thinking: self.thinking,
             reasoning_effort: self.reasoning_effort.clone(),
             api_format: self.api_format.clone(),
@@ -235,6 +242,7 @@ impl Default for AssistantSettings {
         Self {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-flash".into(),
+            context_window: None,
             provider_id: "deepseek".into(),
             api_format: default_api_format(),
             api_options: default_api_options(),
@@ -364,6 +372,14 @@ fn validate_api_profile(profile: &ApiProfile) -> Result<(), String> {
         || !(1..=1_000_000).contains(&profile.max_output_tokens)
     {
         return Err("超时须为 1–3600 秒，最大输出须为 1–1000000 token".into());
+    }
+    // 窗口是预算的唯一依据，空着表示交给内置的已确认预设；显式值必须有合理下界，
+    // 否则输出预留加安全余量就占满窗口，任何请求都发不出去。
+    if profile
+        .context_window
+        .is_some_and(|window| !(1_024..=10_000_000).contains(&window))
+    {
+        return Err("上下文窗口须为 1024–10000000 token，留空表示使用内置预设".into());
     }
     if profile.reasoning_effort.as_ref().is_some_and(|e| {
         e.is_empty() || e.len() > 32 || !e.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -1102,6 +1118,8 @@ pub(crate) fn configure_message(
         "provider": {
             "base_url": settings.base_url.trim(),
             "model": settings.model.trim(),
+            // 只有显式值才下传；None 由 agent 按文档确认的预设解析，未知模型在发送前要求填写。
+            "context_window": settings.context_window,
             "provider_id":settings.provider_id,
             "api_format":settings.api_format,
             "api_options":settings.api_options,

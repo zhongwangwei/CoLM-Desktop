@@ -110,6 +110,7 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     assert_eq!(old.provider_id, "");
     assert_eq!(old.api_format, "chat_completions");
     assert_eq!(old.max_output_tokens, 16384);
+    assert_eq!(old.context_window, None);
     assert!(old.api_profiles.is_empty());
     let odd_backend = AssistantSettings {
         backend: "gemini".into(),
@@ -196,6 +197,7 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
         api_options: json!({"temperature":1}),
         timeout_seconds: 60,
         max_output_tokens: 8192,
+        context_window: Some(200_000),
         ..AssistantSettings::default()
     };
     settings
@@ -213,6 +215,7 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
         ("api_format", json!("anthropic")),
         ("max_output_tokens", json!(8192)),
         ("timeout_seconds", json!(60)),
+        ("context_window", json!(200_000)),
         ("api_options", json!({"temperature":1})),
     ] {
         assert_eq!(message["provider"][key], value);
@@ -239,6 +242,56 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
     assert!(validate_settings(&invalid).is_err());
     settings.api_format = "unknown".into();
     assert!(validate_settings(&settings).is_err());
+}
+
+#[test]
+fn context_window_is_optional_bounded_and_rides_through_configure() {
+    let mut settings = AssistantSettings::default();
+    // 旧设置文件没有窗口字段：保留 None，由 agent 按已确认预设解析或要求填写。
+    assert_eq!(settings.context_window, None);
+    assert!(validate_settings(&settings).is_ok());
+    for valid in [1_024, 128_000, 1_000_000, 10_000_000] {
+        settings.context_window = Some(valid);
+        assert!(validate_settings(&settings).is_ok(), "{valid}");
+    }
+    for invalid in [0, 1, 1_023, 10_000_001, u64::MAX] {
+        settings.context_window = Some(invalid);
+        assert!(validate_settings(&settings).is_err(), "{invalid}");
+    }
+    // 每个服务各自的窗口独立保存，恢复时不串值。
+    let mut deepseek = AssistantSettings {
+        context_window: Some(1_000_000),
+        ..AssistantSettings::default()
+    };
+    let mut openai = AssistantSettings {
+        provider_id: "openai".into(),
+        base_url: "https://api.openai.com/v1".into(),
+        model: "gpt-6.1-sol".into(),
+        api_format: "responses".into(),
+        context_window: Some(400_000),
+        ..AssistantSettings::default()
+    };
+    deepseek
+        .api_profiles
+        .insert("deepseek".into(), deepseek.api_profile());
+    openai
+        .api_profiles
+        .insert("deepseek".into(), deepseek.api_profile());
+    openai
+        .api_profiles
+        .insert("openai".into(), openai.api_profile());
+    assert!(validate_settings(&openai).is_ok());
+    let round: AssistantSettings =
+        serde_json::from_value(serde_json::to_value(&openai).unwrap()).unwrap();
+    assert_eq!(
+        round.api_profiles["deepseek"].context_window,
+        Some(1_000_000)
+    );
+    assert_eq!(round.api_profiles["openai"].context_window, Some(400_000));
+    let message = configure_message(&openai, "/p", None, None, None);
+    assert_eq!(message["provider"]["context_window"], 400_000);
+    let unset = configure_message(&AssistantSettings::default(), "/p", None, None, None);
+    assert!(unset["provider"]["context_window"].is_null());
 }
 
 #[test]
@@ -558,6 +611,8 @@ mod colm_agent_protocol {
     pub struct Provider {
         pub base_url: String,
         pub model: String,
+        #[serde(default)]
+        pub context_window: Option<u64>,
         #[serde(default)]
         pub thinking: Option<bool>,
         #[serde(default)]

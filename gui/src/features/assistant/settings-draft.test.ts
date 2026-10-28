@@ -19,6 +19,7 @@ test('a fresh settings form is saved; changing any saved field makes it dirty', 
   for (const draft of [
     { ...saved, model: 'other-model' },
     { ...saved, base_url: 'https://example.com/v1' },
+    { ...saved, context_window: 128_000 },
     { ...saved, session_turn_limit: 7 },
     { ...saved, web_search: !saved.web_search },
     { ...saved, external: { opencode: { model: 'x', effort: null } } },
