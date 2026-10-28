@@ -594,6 +594,9 @@ fn set_stream_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), Stri
     if remaining.is_zero() {
         return Err("健康检查超时".to_owned());
     }
+    // macOS 的 SO_RCVTIMEO/SO_SNDTIMEO 对 {0,0} 返回 EINVAL：高负载下 deadline 可能只剩
+    // 亚微秒，Duration→timeval 会退化成 0，必须钳到 1ms（对真实 1s 级预算没有影响）。
+    let remaining = remaining.max(Duration::from_millis(1));
     stream
         .set_read_timeout(Some(remaining))
         .map_err(|error| format!("设置健康检查超时失败：{error}"))?;

@@ -151,7 +151,9 @@ fn fake_server(responder: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> F
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                Err(_) => break,
+                // 高负载的 CI 上非阻塞 accept 可能短暂返回 ECONNABORTED/EMFILE；
+                // 测试服务器不能因此退出，否则后续 probe 会拿到 reset/空响应。
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
             }
         }
     });
