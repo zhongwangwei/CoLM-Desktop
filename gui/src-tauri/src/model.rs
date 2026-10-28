@@ -657,6 +657,11 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
     let source = Path::new(&dir).canonicalize().map_err(|e| e.to_string())?;
     let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
     ledger.import_case(&source).map_err(|e| e.to_string())?;
+    case_run_rows(&source, &ledger)
+}
+
+/// 一个算例在台账里的运行记录（`model_case_runs` 与项目级比较选择器共用）。
+fn case_run_rows(source: &Path, ledger: &colm_history::History) -> Result<Vec<Value>, String> {
     let mut query = colm_history::Query {
         case_path: Some(source.display().to_string()),
         limit: 1000,
@@ -707,6 +712,7 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
             }
             row["status"] = json!(event.status);
             row["needs_reconciliation"] = json!(operation.needs_reconciliation);
+            row["finished_ms"] = json!(operation.finished_ms);
             // 服务器运行在提交时就建好了本机运行目录（只有配置），结果要取回才有。结果页据此提示去取回，
             // 而不是去读一个还没有的 history（天河 2026-10-19：AU-Cpr 跑完了，结果页报 "no history"）。
             if let Some(run_case) = row["run_case"].as_str().map(PathBuf::from) {
@@ -724,6 +730,52 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
             break;
         }
     }
+    Ok(rows)
+}
+
+/// 项目里所有站点可比较的成功运行，一次 IPC 查完（多站点比较的选择器用，免得前端为每个站点各查一次）。
+/// 只收有结果、状态成功、不是只跑到预处理的运行；每个站点最多 20 条最近的运行。
+#[tauri::command]
+pub async fn model_project_runs(dirs: Vec<String>) -> Result<Vec<Value>, String> {
+    let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for dir in dirs {
+        let Ok(source) = Path::new(&dir).canonicalize() else {
+            continue;
+        };
+        let case_name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.display().to_string());
+        let Ok(mut runs) = case_run_rows(&source, &ledger) else {
+            continue;
+        };
+        runs.sort_by_key(|row| std::cmp::Reverse(row["finished_ms"].as_i64().unwrap_or(0)));
+        for mut row in runs.into_iter().take(20) {
+            if row["legacy"].as_bool() == Some(true)
+                || row["needs_reconciliation"].as_bool() == Some(true)
+            {
+                continue;
+            }
+            if !matches!(row["status"].as_str(), Some("succeeded" | "completed")) {
+                continue;
+            }
+            if row["run_case"].as_str().is_none_or(str::is_empty) {
+                continue;
+            }
+            // 只跑到预处理的运行没有模拟结果，不能进多站点比较。
+            if matches!(
+                row["provenance"]["stage"].as_str(),
+                Some("mksrfdata" | "mkinidata")
+            ) {
+                continue;
+            }
+            row["case_dir"] = json!(source.display().to_string());
+            row["case_name"] = json!(case_name);
+            rows.push(row);
+        }
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(row["finished_ms"].as_i64().unwrap_or(0)));
     Ok(rows)
 }
 /// 本机运行目录里有没有取回来的历史输出（`out/<算例>/history/` 里至少一个文件）。

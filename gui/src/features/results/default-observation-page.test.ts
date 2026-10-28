@@ -64,7 +64,8 @@ function initialization() {
     setTo: noop,
     setSpinup: noop,
     setCorrected: noop,
-    setComparison: noop,
+    setComparisonEntries: noop,
+    setComparisonProgress: noop,
     setError: noop,
   };
   const body = effects.find((effect) => effect.includes('defaultObservation(caseDir)'));

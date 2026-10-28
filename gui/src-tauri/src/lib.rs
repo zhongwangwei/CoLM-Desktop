@@ -220,6 +220,7 @@ pub fn run() {
             model_code_file,
             model_migrate_case,
             model_case_runs,
+            model_project_runs,
             model_case_context,
             model_case_profiles,
             model_configuration,

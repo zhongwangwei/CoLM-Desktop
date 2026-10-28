@@ -433,7 +433,8 @@ test('Results report formats retain summary metrics and route native PDF through
     to: '',
     spinup: '0',
     corrected: false,
-    comparison: '',
+    comparisonEntries: [],
+    comparisonText: () => '',
   }) as unknown as () => Record<string, unknown>;
   const snapshot = reportData();
   const summary = (snapshot.metrics as Record<string, unknown>[])[0];
@@ -601,6 +602,10 @@ test('overview contract exposes optional evaluation conditions only while advanc
     // 分析范围（单站点/多站点）与"切回原站点页签"的 ref 也被 fields 回调引用。
     multiStation: false,
     lastStationTab: { current: 'overview' },
+    // 多站点比较的契约字段把结构化条目序列化成文本；这两个函数也在 fields 回调里被调用。
+    comparisonEntries: [],
+    comparisonText: () => '',
+    applyComparisonText: () => {},
     // 页签的中英文字面量：源文件里的 tabLabels 对象也被 `fields` 回调引用。
     tabLabels: {
       en: [

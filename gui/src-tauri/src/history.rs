@@ -280,6 +280,7 @@ fn assistant_ui_event(
                     | "export-full-series-csv"
                     | "export-series-data"
                     | "export-report"
+                    | "export-comparison-csv"
                     | "result-fetch"
                     | "resource-build"
                     | "resource-save"
