@@ -1409,3 +1409,23 @@ fn commands_emit_the_documented_contract_keys() {
         .git(&["status", "--porcelain"])
         .contains("src/lib.rs"));
 }
+
+#[test]
+fn offline_sync_flag_accepts_its_bare_documented_form() {
+    // 任务书/文档写的是 `[--offline]`；解析器也接受历史写法 `--offline 1`。
+    let bare = crate::Opts::parse(&[
+        "--history-root".into(),
+        "/tmp/x".into(),
+        "--repository".into(),
+        "desktop".into(),
+        "--offline".into(),
+    ])
+    .unwrap();
+    assert_eq!(bare.get("--offline").as_deref(), Some("1"));
+    let explicit =
+        crate::Opts::parse(&["--offline".into(), "1".into(), "positional".into()]).unwrap();
+    assert_eq!(explicit.get("--offline").as_deref(), Some("1"));
+    assert_eq!(explicit.positional, vec!["positional".to_string()]);
+    // 其它 flag 仍然必须有值，不能被下一个 flag 静默吞掉。
+    assert!(crate::Opts::parse(&["--history-root".into()]).is_err());
+}

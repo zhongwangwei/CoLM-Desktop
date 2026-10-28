@@ -1255,3 +1255,80 @@ fn token_is_sent_in_authorization_and_never_leaks() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// 真实 GitHub 冒烟（默认跳过；只做人工验收，不进 CI 网络）
+// ---------------------------------------------------------------------------
+
+/// 真实 `api.github.com` 的只读冒烟：验证 TLS、公开限流下的真实响应与 commit→PR
+/// 关联语义。默认 `#[ignore]`，只有显式
+/// `COLM_HISTORY_GITHUB_LIVE=1 cargo test -p colm-agent --lib live_github -- --ignored --nocapture`
+/// 才运行；CI 不需要网络。
+#[test]
+#[ignore = "live GitHub API smoke; enabled only by COLM_HISTORY_GITHUB_LIVE=1"]
+fn live_github_commit_pull_request_association_smoke() {
+    if std::env::var("COLM_HISTORY_GITHUB_LIVE").as_deref() != Ok("1") {
+        eprintln!("skip live GitHub smoke: set COLM_HISTORY_GITHUB_LIVE=1");
+        return;
+    }
+    let root = temp("live-github");
+    let mut client = GithubClient::new(root.clone(), None, false);
+    client.timeout = Duration::from_secs(20);
+
+    // 上游 CoLM 的一个公开 merge commit：GitHub 明确关联 PR #512。
+    let upstream_sha = "f9ea408e74b3397d49aae10926143e711a3fbbf0";
+    let result = client.pulls("CoLM-SYSU", "CoLM", upstream_sha, true, false);
+    assert!(errors(&result).is_empty(), "live upstream errors: {result}");
+    assert_eq!(result["repository"]["owner"], "CoLM-SYSU");
+    assert_eq!(result["commit"], upstream_sha);
+    assert_eq!(result["offline"], false);
+    let pulls = result["pulls"].as_array().expect("pulls array");
+    assert!(
+        !pulls.is_empty(),
+        "the public merge commit should expose an associated PR: {result}"
+    );
+    assert!(
+        pulls
+            .iter()
+            .any(|pull| pull["number"] == json!(512)
+                && pull["owner_repo"] == json!("CoLM-SYSU/CoLM")),
+        "expected PR #512 from CoLM-SYSU/CoLM: {result}"
+    );
+    assert_eq!(result["complete"], true);
+    eprintln!(
+        "live upstream: {} pull(s), complete={}, from_cache={}",
+        pulls.len(),
+        result["complete"],
+        result["from_cache"]
+    );
+
+    // 同一份缓存离线读取；此时不得再依赖网络。
+    let offline = GithubClient::new(root.clone(), None, true);
+    let cached = offline.pulls("CoLM-SYSU", "CoLM", upstream_sha, false, false);
+    assert!(
+        errors(&cached).is_empty(),
+        "offline cache read failed: {cached}"
+    );
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(
+        cached["fetched_at_unix_ms"], result["fetched_at_unix_ms"],
+        "offline read must preserve the original fetch time"
+    );
+
+    // 反例：本仓库直接推送的提交没有关联 PR，API 返回空数组而不是错误。
+    let desktop_sha = "4302a30c0eba22e257403f76fb90b8130d7c0af1";
+    let desktop = client.pulls("zhongwangwei", "CoLM-Desktop", desktop_sha, true, false);
+    assert!(
+        errors(&desktop).is_empty(),
+        "live desktop errors (rate limit?): {desktop}"
+    );
+    assert!(
+        desktop["pulls"].as_array().is_some_and(Vec::is_empty),
+        "a direct push without a PR should return zero associations: {desktop}"
+    );
+    eprintln!(
+        "live desktop: zero PRs confirmed, fetched_at={:?}",
+        desktop["fetched_at_unix_ms"]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1051,11 +1051,19 @@ impl Opts {
         let mut i = 0;
         while i < args.len() {
             if let Some(name) = args[i].strip_prefix("--") {
-                let v = args
-                    .get(i + 1)
-                    .with_context(|| format!("--{name} needs a value"))?;
-                flags.push((format!("--{name}"), v.clone()));
-                i += 2;
+                // `--offline` is a boolean history-sync switch. Accept both its bare
+                // form (as documented) and the older `--offline 1`; every other flag
+                // still requires an explicit value so typos cannot silently swallow
+                // the next positional argument.
+                let next = args.get(i + 1);
+                if name == "offline" && next.is_none_or(|value| value.starts_with("--")) {
+                    flags.push((format!("--{name}"), "1".to_owned()));
+                    i += 1;
+                } else {
+                    let v = next.with_context(|| format!("--{name} needs a value"))?;
+                    flags.push((format!("--{name}"), v.clone()));
+                    i += 2;
+                }
             } else {
                 positional.push(args[i].clone());
                 i += 1;

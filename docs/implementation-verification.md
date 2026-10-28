@@ -38461,7 +38461,7 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 ### 实测（真实执行）
 
 - `cargo fmt --all --check` → exit 0；`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
-- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2979 passed / 0 failed / 15 ignored**。其中 `colm-cli` **552**（新增 16 个真实 git 夹具历史测试 + 1 个时间戳平局回归）、`colm-agent` **360**（新增 14 个工具测试 + 20 个 GitHub mock 测试，含传输层重试回归）。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2980 passed / 0 failed / 16 ignored**。其中 `colm-cli` **553**（新增 16 个真实 git 夹具历史测试 + 时间戳平局回归 + `--offline` 裸 flag 解析回归）、`colm-agent` **360 passed + 1 ignored**（14 个工具测试 + 20 个 GitHub mock 测试，含传输层重试回归；ignored 的是需要显式联网的真实 GitHub smoke）。
 - GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib -- --test-threads=1` → **494 passed / 1 ignored / 0 failed**（本功能未新增 Tauri 命令，契约不变）。
 - **真实 Desktop 仓库只读 smoke**（`cargo run -p colm-cli -- ...`）：
   - `history-repos --desktop-path .` → desktop identity=verified（remote `git@github.com:zhongwangwei/CoLM-Desktop.git`）、default_branch=main、coverage commits=2283/complete_history=true；上游 missing 并有明确错误，不伪造。
@@ -38469,6 +38469,8 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
   - `history-track --limit 1` 的真实 hunk 给出该提交的 old/new 代码（`xerj_data_dir_name` 整段新增）。
 - **真实跨仓映射 smoke**（两个临时真实 git 仓库，测试数据，不是本仓库真实 PR）：upstream 先改 `alpha` 公式提交 `fa05824d`，desktop 后 import 同一 blob（`4e3f2aa3`），另有 Desktop 独立后续提交；`history-track --repository both --symbol alpha` → cross state=**verified**、basis=`path,import-commit,blob-equal`、upstream commit 正确为 `fa05824d`、两侧时间与 later_commits 齐全。修复前同一夹具会因两个上游提交时间相同而按 SHA 选中旧的 `e0d165f7`（candidate），已加回归。
 - **真实 GitHub API 只读 smoke**（curl，仅验证公开端点语义，不是客户端测试）：`CoLM-SYSU/CoLM` HEAD `f9ea408e` 是 merge PR **#512**，`/commits/<sha>/pulls` 返回 PR 512（HTTP 200）；`zhongwangwei/CoLM-Desktop` 提交 `4302a30c` 返回 `[]`（直接推送，无关联 PR）。GitHub 客户端本身全部用本地 mock HTTP 测试（20 项），未用真实 token/TLS 调用；客户端对幂等 GET 的瞬时传输失败只重试一次（HTTP 语义错误不重试），并有专门回归。Windows runner 对关闭的回环端口可能返回超时而非 refused，两者都映射为 network，测试只强制 network 类型。
+- **真实 GitHub 客户端 smoke（已执行，公开无 token）**：`COLM_HISTORY_GITHUB_LIVE=1 cargo test -p colm-agent --lib live_github -- --ignored --nocapture` → passed。真实 `api.github.com`（TLS、公开限流、无凭据）对上游 merge commit `f9ea408e74b3…` 返回关联 PR **#512**（`CoLM-SYSU/CoLM`、complete=true）；随后用离线客户端读同一缓存 → `from_cache=true`、保留原 `fetched_at`；对本仓库直接推送提交 `4302a30c…` 返回零 PR（不是错误）。该用例默认 `#[ignore]`，CI 不联网。
+- **在线同步 smoke（已执行）**：`history-sync --repository desktop --desktop-path <当前仓库>` → `actions.desktop="fetched"`、synced `origin/main@e2f9a18d`、coverage commits=2290/complete_history=true；随后 `--offline`（裸 flag）→ `actions.desktop="offline"`、不 fetch、保留 synced SHA。管理副本首次 clone 路径未跑（避免拉取完整远端历史）。
 - 新测试覆盖任务书 12 类验收：公式改而出现次数不变（`-G`）、同名变量 Rust/Fortran 不串历史、冻结旧 commit 不混未来修改与 overlay 不能凭 ancestry、rename/删除、dirty 单独 uncommitted、无 .git/浅克隆/截断降级、0/多 PR/无理由/401/403/429/网络/离线缓存/缓存隔离、工具注册与调用链、双仓同名变量与不同 PR 不串用、官方先改 Desktop 后引入 verified、官方 PR 未合并/Desktop 独立修改分开、仅内容相似不编造出处。
 - 示例输出（测试夹具，非本仓库真实 PR）：`source_history` 返回 `{"query":{"symbol":"alpha","repository":"both","endpoints":{...}},"repos":{"colm_upstream":{"commits":[{"sha":"fa05824d…","reason":{"status":"documented","basis":"commit_message","excerpt":"Change alpha update formula…"}}]},"desktop":{"commits":[…]}},"cross":{"links":[{"state":"verified","basis":["path","import-commit","blob-equal"],…}]},"limits":[],"truncated":false}`；`commit_pull_requests` 对 mock 返回 `{"pulls":[{"number":512,"owner_repo":"CoLM-SYSU/CoLM","reason":{"status":"documented","basis":"pull_body",…},"evidence_id":"github:CoLM-SYSU/CoLM#512"}],"complete":true,"offline":false}`。
 
@@ -38482,8 +38484,8 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 ### 未验证/限制（如实）
 
-1. 真实 GitHub **客户端**（TLS、token、Link 头、真实限流头）未跑：全部 19 个测试用本地 mock；上面的 curl smoke 只验证了公开端点本身。私有仓库/无凭据行为未对真实服务验证。
-2. 真实 `history-sync` 的在线 clone/fetch 未真机执行（本轮禁止联网同步）；只测了 offline 与已有本地仓库路径。应用管理副本的真正初始化需要用户显式运行一次同步命令。
+1. 真实 GitHub **客户端**只验证了公开、无 token 的 TLS/API 路径（live smoke 返回 PR #512、离线缓存与零关联）；带 token 的私有仓库认证、真实 Link 分页、限流响应头仍未对真实服务验证（本地 mock 覆盖这些分支）。
+2. 真实 `history-sync` 的在线 **fetch** 已在现有 Desktop 检出上真机验证；**管理副本首次 clone** 未跑（避免拉取完整大仓库），该路径只有代码与测试覆盖。应用管理副本的首次初始化仍需用户显式运行一次同步命令。
 3. GUI 没有专门的“追踪修改历史”页面/按钮：按任务书“没有合适入口则先保证聊天入口完整可用”，本轮只接聊天工具；同步也只能走 CLI（后续可加界面入口）。
 4. Windows 上依赖 shell 假 CLI 的部分测试跳过（`#[cfg(unix)]`）；git 命令路径与 JSON/注册表测试跨平台保留，真实 Windows 运行未在本机验证。
 5. 变量重命名、宏、别名、间接赋值、同名不同作用域等只能给候选与限制，不做完整语义追踪；blame/-G/-S 是保守文本证据，注释行与代码行以 hunk 内容为准但不解析语义。数值/物理结论是否受某次修改影响不能由 commit 祖先关系证明，工具会返回 unknown，需另做运行或对照证据。
