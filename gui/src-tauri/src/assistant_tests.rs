@@ -1189,3 +1189,28 @@ fn managed_xerj_settings_round_trip_and_status_is_explicit_without_a_key() {
     managed.stop();
     managed.stop();
 }
+
+#[test]
+fn the_managed_xerj_data_directory_is_scoped_to_the_pinned_release() {
+    let name = xerj_data_dir_name();
+    assert_eq!(name, "v1.0.0-rc.100");
+    // 只能是单层目录名：不能带路径分隔符/控制字符，否则会把数据目录移出应用数据目录。
+    assert!(!name.contains('/') && !name.contains('\\'));
+    assert!(name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_')));
+    // 版本字符串与 xerj_manager 的固定版本一致（升级时这里必须跟着变，数据目录随之隔离）。
+    assert_eq!(
+        name,
+        crate::xerj_manager::PINNED_XERJ_RELEASE
+            .chars()
+            .map(
+                |ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            )
+            .collect::<String>()
+    );
+}

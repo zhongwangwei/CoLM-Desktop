@@ -11,14 +11,17 @@
       "binaries/mkinidata-rs",
       "binaries/colm-rs",
       "binaries/colm-agent",
-      "binaries/colm-mcp"
+      "binaries/colm-mcp",
+      "binaries/xerj"
     ],
     "resources": {
       "../../kernels": "kernels",
       "../../examples": "examples",
       "engine": "engine",
       "engine/docs": "docs",
-      "binaries/colm-build-source.json": "colm-build-source.json"
+      "binaries/colm-build-source.json": "colm-build-source.json",
+      "binaries/xerj-release.json": "xerj-release.json",
+      "binaries/xerj-LICENSE": "xerj-LICENSE"
     }
   }
 }

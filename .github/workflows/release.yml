@@ -328,6 +328,17 @@ jobs:
           name: colm-engine-linux
           path: gui/src-tauri/engine
 
+      # The pinned Xerj release is downloaded during the bundle step (stage-sidecar).
+      # Cache it so a retried or repeated release build does not re-download ~30 MB per
+      # platform; the xtask still verifies the pinned SHA-256 on every use. The cache key
+      # includes the platform: each target downloads a different archive, and a cache key is
+      # immutable once written, so a shared key would hand the wrong archive to other jobs.
+      - name: Cache the pinned Xerj sidecar download
+        uses: actions/cache@v4
+        with:
+          path: .xerj-cache
+          key: xerj-v1.0.0-rc.100-${{ matrix.label }}
+
       - name: Bundle (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -337,6 +348,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           # A local bundle reuses stale kernels; a release rebuilds any the cache did not match.
           COLM_BUILD_KERNELS: '1'
+          COLM_XERJ_CACHE: ${{ github.workspace }}/.xerj-cache
         run: bash ../../scripts/bundle-release.sh
 
       - name: Bundle (Windows)
@@ -348,6 +360,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           # A local bundle reuses stale kernels; a release rebuilds any the cache did not match.
           COLM_BUILD_KERNELS: '1'
+          COLM_XERJ_CACHE: ${{ github.workspace }}/.xerj-cache
         run: bash ../../scripts/bundle-release.sh
 
       # 装出来的东西必须自带内核，否则这条流水线就白跑了。
@@ -364,6 +377,12 @@ jobs:
           done
           test -x "$app/Contents/Resources/kernels/_runtime/bin/mpiexec"
           test -x "$app/Contents/MacOS/colm-cli"
+          # 固定的 Xerj sidecar：managed 文档检索靠它，缺了安装包仍能启动但不该发布。
+          # 这里连版本一起断言，防止流水线悄悄换成别的 release。
+          test -x "$app/Contents/MacOS/xerj"
+          "$app/Contents/MacOS/xerj" --version | grep -q 'v1.0.0-rc.100'
+          test -f "$app/Contents/Resources/xerj-release.json"
+          test -f "$app/Contents/Resources/xerj-LICENSE"
           # 远程运行要用的：随附的引擎源码（没有仓库也能在服务器上编），以及两种架构的预编引擎。
           test -f "$app/Contents/Resources/engine/colm-src.tar.gz"
           test -f "$app/Contents/Resources/docs/colm-process-knowledge.md"

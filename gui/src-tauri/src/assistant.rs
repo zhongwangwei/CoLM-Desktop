@@ -216,7 +216,9 @@ impl ManagedXerj {
         .collect();
         let config = crate::xerj_manager::ManagedConfig {
             binary_path: settings.retrieval.binary_path.clone(),
-            data_dir: data_dir(app)?.join("xerj"),
+            // 按固定 Xerj 版本隔离数据目录：应用升级换随包版本时，新版本从空索引开始重建，
+            // 绝不复用旧版本写下的索引/数据（Xerj 的存储格式不保证跨版本兼容）。
+            data_dir: data_dir(app)?.join("xerj").join(xerj_data_dir_name()),
             preferred_port: settings.retrieval.port,
             extra_binary_dirs: starts,
             ready_timeout: crate::xerj_manager::DEFAULT_READY_TIMEOUT,
@@ -265,6 +267,22 @@ impl ManagedXerj {
             detail: Arc::clone(&self.detail),
         }
     }
+}
+
+/// 托管节点数据目录的版本子目录名：只保留文件系统安全字符，其余替换为 `_`。
+/// 应用升级换了随包 Xerj 版本时必须用新目录（旧索引/存储格式不保证兼容），
+/// 这一层与 `xerj_manager` 的二进制探测共同实现“装好即用、版本不混用”。
+pub(crate) fn xerj_data_dir_name() -> String {
+    crate::xerj_manager::PINNED_XERJ_RELEASE
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// 把应用托管的 Xerj key 交给 `colm-agent` 写进本地 Key 文件（与 assistant_set_key 同一条路径）。
