@@ -1114,7 +1114,12 @@ fn retrieval_managed_settings_load_old_files_and_validate_the_new_fields() {
     let mut settings = AssistantSettings::default();
     settings.retrieval.enabled = true;
     settings.retrieval.mode = "managed".into();
-    settings.retrieval.binary_path = Some("/opt/homebrew/bin/xerj".into());
+    settings.retrieval.binary_path = Some(
+        std::env::temp_dir()
+            .join("xerj")
+            .to_string_lossy()
+            .into_owned(),
+    );
     settings.retrieval.port = Some(9_310);
     assert!(validate_settings(&settings).is_ok());
     // configure 给 agent 的仍是它认识的四个字段；mode/binary_path/port 只由窗口进程使用。
@@ -1152,14 +1157,24 @@ fn managed_xerj_settings_round_trip_and_status_is_explicit_without_a_key() {
     let mut settings = AssistantSettings::default();
     settings.retrieval.enabled = true;
     settings.retrieval.mode = "managed".into();
-    settings.retrieval.binary_path = Some("/opt/homebrew/bin/xerj".into());
+    settings.retrieval.binary_path = Some(
+        std::env::temp_dir()
+            .join("xerj")
+            .to_string_lossy()
+            .into_owned(),
+    );
     settings.retrieval.port = Some(9_320);
     let round: AssistantSettings =
         serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
     assert_eq!(round.retrieval.mode, "managed");
     assert_eq!(
-        round.retrieval.binary_path.as_deref(),
-        Some("/opt/homebrew/bin/xerj")
+        round.retrieval.binary_path,
+        Some(
+            std::env::temp_dir()
+                .join("xerj")
+                .to_string_lossy()
+                .into_owned()
+        )
     );
     assert_eq!(round.retrieval.port, Some(9_320));
 

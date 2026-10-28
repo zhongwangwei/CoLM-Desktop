@@ -762,12 +762,18 @@ fn study_summary_missing_evidence_falls_back_and_stays_within_the_transport_budg
 
 // ---- 可选 Xerj 召回：search_docs 集成（假 HTTP 服务；真实 Xerj 验收在 tests/xerj_acceptance.rs） ----
 
+#[cfg(unix)]
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq)]
 enum FakeXerjMode {
     Normal,
@@ -776,17 +782,20 @@ enum FakeXerjMode {
     SearchFailure,
 }
 
+#[cfg(unix)]
 struct FakeXerjState {
     docs: HashMap<String, Value>,
     mode: FakeXerjMode,
     requests: usize,
 }
 
+#[cfg(unix)]
 struct FakeXerj {
     endpoint: String,
     state: Arc<Mutex<FakeXerjState>>,
 }
 
+#[cfg(unix)]
 impl FakeXerj {
     fn set_mode(&self, mode: FakeXerjMode) {
         self.state.lock().unwrap().mode = mode;
@@ -796,6 +805,7 @@ impl FakeXerj {
     }
 }
 
+#[cfg(unix)]
 fn fake_bytes_contain(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -804,12 +814,14 @@ fn fake_bytes_contain(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// 从 fake 收到的 ES 查询里取文本条件：生产候选查询是 must.bool.should 的两个 match，
 /// 发布前验证查询则没有文本条件（等价 match_all）。
+#[cfg(unix)]
 fn fake_match_text(item: &Value) -> Option<&str> {
     item["match"]["body"]
         .as_str()
         .or_else(|| item["match"]["title"].as_str())
 }
 
+#[cfg(unix)]
 fn fake_http_respond(stream: &mut TcpStream, status: &str, body: &str) {
     let _ = write!(
         stream,
@@ -818,6 +830,7 @@ fn fake_http_respond(stream: &mut TcpStream, status: &str, body: &str) {
     );
 }
 
+#[cfg(unix)]
 fn fake_xerj_spawn() -> FakeXerj {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -838,6 +851,7 @@ fn fake_xerj_spawn() -> FakeXerj {
     FakeXerj { endpoint, state }
 }
 
+#[cfg(unix)]
 fn fake_xerj_handle(
     mut stream: TcpStream,
     state: Arc<Mutex<FakeXerjState>>,
@@ -885,6 +899,7 @@ fn fake_xerj_handle(
     fake_xerj_route(&mut stream, &method, &path, &body, &state)
 }
 
+#[cfg(unix)]
 fn fake_xerj_route(
     stream: &mut TcpStream,
     method: &str,
@@ -1086,6 +1101,7 @@ fn fake_xerj_route(
     Ok(())
 }
 
+#[cfg(unix)]
 fn wait_xerj_ready(handle: &crate::retrieval::Handle, timeout: Duration) -> Value {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1103,6 +1119,7 @@ fn wait_xerj_ready(handle: &crate::retrieval::Handle, timeout: Duration) -> Valu
     }
 }
 
+#[cfg(unix)]
 fn xerj_fake_cli(root: &Path, source: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = root.join("fake-xerj-cli");
@@ -1119,6 +1136,7 @@ fn xerj_fake_cli(root: &Path, source: &Path) -> PathBuf {
     script
 }
 
+#[cfg(unix)]
 fn xerj_context(
     label: &str,
     enabled: bool,
