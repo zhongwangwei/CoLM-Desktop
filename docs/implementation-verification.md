@@ -38789,3 +38789,43 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 - 决策：hybrid-fit 拒绝没有输入身份文件的旧 study，不降级为 warning（理由见 P1-6）。
 - 遗留：P1-7a/P1-7b 远程资产清单与按类型核验（子任务进行中）；P1-7c 取回后写回、P1-9 失败状态机与取消身份、P1-8 冻结执行器统一；界面的覆盖率/空间覆盖呈现与观测预检预览；严格分折验证、多目标、流式评价与资源预算。
+
+## 研究页第二批：远程闭环 / 冻结执行器 / 取消身份 / 资源预算（2026-10-29，提交 1d1fed4a、be0aae46、f884b137、f09fc48d）
+
+基准 `b3686b1` 之后，接第一批（研究页 R1）。本批按审计 P1-7/P1-8/P1-9 + P2-10 前半推进；四个提交。
+
+### P1-7c 远程取回后写入版本（1d1fed4a 前半）
+
+- 旧行为：取回只下载摘要/样本，history 留在服务器；写回（`model-import-study`、`study-save-version`）走 `runner::verified_member`，要求本地成员目录有输出/评估证据 → 远程取回研究永远写不进版本。
+- 新行为：统一成员核验接口 `remote_study::verified_study_member`（持研究锁；本地 → 原 `verified_member` 语义；远程 → 注入式 `StudyRemote` trait 经 SSH 核验：作业 identity/Finished 0、研究目录在记录项目内、成员任务成功、结果/评估身份哈希、样本文件逐字节、取回证据与 fresh 服务器证据交叉核对，不下载 history）。`model-import-study`（参数/网络/联合）改走该接口；`study-save-version` 由 runner 侧调用点替换。失败分支（服务器不可达/作业失败/无研究目录/记录缺失/成员输出缺失/证据被篡改/目录越界）都有可行动错误与测试（假 SSH + 已取回 fixture）。
+- 回归：`remote_study_tests` 42 passed（新增 10 + 资源 5）；`model_version::` 34 passed；`study::runner` 73 passed。
+
+### P2-10 远程资源预算（1d1fed4a 后半）
+
+- 旧行为：默认申请 `max(threads, jobs)` 核，但最多 `jobs` 个候选各用 `threads` 线程（8×4 只申请 8 核、最多 32 线程）。
+- 新行为：默认 `cpus = threads × jobs`（溢出报错）；显式 `--cpus` 优先且校验 `cpus ≥ threads`；`threads`/`jobs` 必须 ≥1；dry-run 与提交报告带 `cpus/cores_per_candidate/concurrent_candidates/ranks/nodes/...`。
+
+### P1-8 冻结执行器一致（be0aae46）
+
+- 旧行为：旧 workspace 修订的研究由当前 CLI 创建（当前参数目录算 provenance），首次 `study-run` 快照该修订 CLI 并委托运行；快照程序重算哈希不同 → `verify_frozen_inputs` 拒绝；重建研究仍用当前程序，问题复现。
+- 新行为：workspace 修订 + 快照 CLI ≠ 当前程序时，`study-create`/`study-preflight` 整条命令委托给修订 CLI（原始 case_root、`--spec`、model flags 透传；`COLM_STUDY_BY_PARENT` 防绕圈）；由它 prepare/pin/create/provenance；当前程序透传 stdout/退出码。旧程序读不了设计 → 既有可行动错误；`include_baseline` 用临时 spec 副本重试、不改用户文件；创建后核对 `model-version.json` 绑定修订，旧 CLI 静默忽略 model 参数时拒绝并清理坏研究。官方修订保持本地路径。
+- 回归：`study_version` 21 passed（新增 9，含假 CLI 端到端与决策三态）；`study:: -- --test-threads=1` 228 passed。
+- 遗留：`study-clone` 同类 provenance 问题存在（GUI 未启用该命令）；真实"第二份 colm-cli + GUI"端到端未跑。
+
+### P1-9 取消身份与远程失败状态机（f884b137）
+
+- 本地取消：冻结修订时内层 CLI 持锁、GUI 只知外层 PID → 收尾拿外层 PID 匹配锁失败。新行为：GUI 每次运行生成运行 ID（`COLM_STUDY_RUN_ID`，委托时内层继承），CLI 写进 `run.lock`（`RunLockRecord`，旧记录兼容）；`finalize_cancel` 按运行 ID 认锁，无 ID 退回 PID，别人运行的锁仍拒绝；GUI 停止按进程组 + 锁 owner 补杀（先校验当前可执行文件名与锁记录一致，防 PID 复用误杀），收尾带 ID；关窗取消同路径。
+- 远程失败：提交/构建/建研究/成员运行/成功/取消/丢失/排队/未知 10 态分类 + 权限矩阵 + 中英下一步；取回构建/创建失败 → "服务器没有研究目录 + 看日志/归档关闭后重提"；关闭按矩阵：已取回或已结束失败 → 用刚读取且 CLI 核对过作业身份的 status 本地归档（与 CLI 同格式、不删数据）；排队/运行中/未取回成功拒绝并给下一步；已确认失败终态重提前先归档。前端优先用后端矩阵、旧回复回退、按钮标签/提示随状态。
+- 回归：`gui/src-tauri` 串行 536 passed / 1 ignored（sidecar 85、remote 60，新增 9+12）；前端 1196 passed（remote-study 新增 5）；两侧 clippy/fmt 全绿；`xtask check-gui` 257 contracts（未改命令签名）。
+- 遗留：真实 Tauri 窗口点击、真实双层 CLI 取消、真实 SSH 状态未实机验收。
+
+### 集成夹具对齐（f09fc48d）
+
+结果页批次把时间戳逐点配对换成真实输出区间语义后，`study_cli_tuning` 的合成观测仍照抄 golden history 的模型标签（区间中点），合成 history 又缺 `time:units`，13/24 集成测试在 main 上进评估阶段失败。修法：合成观测按真实产品语义写区间起点标签（整体前移半步长），合成 history 补 `minutes since 1900-01-01` 单位；**无生产代码变更**。回归：`study_cli_tuning` 24 passed；CLI 全量 685 passed。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` 685 passed；`--test study_cli_tuning -- --test-threads=1` 24 passed；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- GUI/Tauri：`cargo test -q --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` 536 passed；两侧 clippy/fmt clean。
+- 前端：`npm run typecheck`/`lint`/`format:check` clean、`npm test` 1196 passed/0 failed；`cargo run -q -p xtask -- check-gui` 257 contracts。
+- 未运行：真实 SSH 服务器端到端、真实 Tauri 窗口点击、真实第三份冻结修订程序的完整创建+运行链路、真实科学算例。
