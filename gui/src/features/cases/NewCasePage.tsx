@@ -149,9 +149,16 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
 const preparedEngines = new Set<string>();
 type EngineState = {
   host: string;
-  phase: 'checking' | 'building' | 'failed';
+  /**
+   * checking/building：正在准备；ready：刚确认完，短暂告诉用户这次是复用还是新编；
+   * failed：准备失败，读取站点/创建算例会再试。
+   */
+  phase: 'checking' | 'building' | 'ready' | 'failed';
   since: number;
   error?: string;
+  /** `ready` 时：这次准备的源码快照与是否复用了服务器上已有的引擎。 */
+  id?: string;
+  cached?: boolean;
 };
 
 export default function NewCasePage() {
@@ -670,10 +677,23 @@ export default function NewCasePage() {
       if (current)
         setEngine((old) => (old?.phase === 'checking' ? { host, phase: 'building', since } : old));
     }, 5000);
-    invoke('remote_prepare_engine', { host, modelRevision: state.versionRef })
-      .then(() => {
+    invoke<{ ready?: boolean; engine?: { id?: unknown; cached?: unknown } | null }>(
+      'remote_prepare_engine',
+      { host, modelRevision: state.versionRef },
+    )
+      .then((reply) => {
         preparedEngines.add(engineKey);
-        if (current) setEngine(null);
+        if (!current) return;
+        // 用户反馈"刚编过又显示在准备引擎"：把这次是复用已有引擎还是为新源码快照编了一次
+        // 说明白，短暂显示后收起（不占后续操作的位置）。
+        const info = reply?.engine;
+        setEngine({
+          host,
+          phase: 'ready',
+          since,
+          id: typeof info?.id === 'string' ? info.id : undefined,
+          cached: typeof info?.cached === 'boolean' ? info.cached : undefined,
+        });
       })
       .catch((e) => {
         if (current) setEngine({ host, phase: 'failed', since, error: String(e) });
@@ -686,9 +706,16 @@ export default function NewCasePage() {
     // engineKey already encodes form.host and state.versionRef.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engineKey]);
+  // `ready` 只是给用户一句解释，8 秒后收起；进入下一步不受它影响。
+  useEffect(() => {
+    if (engine?.phase !== 'ready') return;
+    const done = setTimeout(() => setEngine((old) => (old?.phase === 'ready' ? null : old)), 8000);
+    return () => clearTimeout(done);
+  }, [engine?.phase, engine?.since]);
   // A one-second clock for the waiting notices, running only while something is waited for.
   const [clock, setClock] = useState(() => Date.now());
-  const waitingForEngine = !!engine && engine.phase !== 'failed';
+  const engineBusy = !!engine && (engine.phase === 'checking' || engine.phase === 'building');
+  const waitingForEngine = engineBusy;
   useEffect(() => {
     if (!waitingForEngine && !scanning) return;
     setClock(Date.now());
@@ -1022,7 +1049,8 @@ export default function NewCasePage() {
   }
   // 读取站点在服务器上可能先等引擎编完（几分钟）、再逐个打开站点与强迫场文件（几十秒到一两分钟）；
   // 只写"正在读取站点…"时用户看不出在等什么（land02，2026-10-19）。
-  const scanWaitsForEngine = !!form.host && !!engine && engine.phase !== 'failed';
+  const scanWaitsForEngine =
+    !!form.host && !!engine && (engine.phase === 'checking' || engine.phase === 'building');
   function scanLabel() {
     if (!form.host)
       return t(
@@ -2603,14 +2631,31 @@ export default function NewCasePage() {
         <Notice tone="warning">{autoClosed.text}</Notice>
       )}
       {optionError && <Notice tone="warning">{optionError}</Notice>}
-      {engine?.host === form.host && engine.phase !== 'failed' && (
-        <EngineProgress
-          host={engine.host}
-          phase={engine.phase}
-          waited={waited(engine.since)}
-          progress={buildProgress}
-          en={en}
-        />
+      {engine?.host === form.host &&
+        (engine.phase === 'checking' || engine.phase === 'building') && (
+          <EngineProgress
+            host={engine.host}
+            phase={engine.phase}
+            waited={waited(engine.since)}
+            progress={buildProgress}
+            engineId={buildProgress?.engine ?? null}
+            en={en}
+          />
+        )}
+      {engine?.host === form.host && engine.phase === 'ready' && (
+        <p className="muted" role="status" data-engine-ready>
+          {engine.cached === true
+            ? t(
+                `计算引擎已就绪：复用服务器上为源码快照 ${engine.id?.slice(0, 8) ?? ''} 编好的那份，本次没有重新编译。`,
+                `Compute engine ready: reusing the engine already built on the server for source snapshot ${engine.id?.slice(0, 8) ?? ''}; nothing was recompiled this time.`,
+              )
+            : engine.cached === false
+              ? t(
+                  `已为源码快照 ${engine.id?.slice(0, 8) ?? ''} 编好计算引擎；同一快照后续运行会复用它，不会重复编。`,
+                  `Built the compute engine for source snapshot ${engine.id?.slice(0, 8) ?? ''}; later runs with the same snapshot reuse it instead of rebuilding.`,
+                )
+              : t('计算引擎已就绪。', 'The compute engine is ready.')}
+        </p>
       )}
       {engine?.host === form.host && engine.phase === 'failed' && (
         <Notice tone="warning">

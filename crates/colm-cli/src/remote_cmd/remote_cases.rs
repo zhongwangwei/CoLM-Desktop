@@ -30,17 +30,24 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         None
     };
     let operation = || -> Result<serde_json::Value> {
+        // `prepare` 要把"这次是复用已有引擎还是为新源码快照编了一次"告诉界面：复用说清楚，
+        // 用户就不会把软件更新后的一次性编译误当成每次运行都重复编译。
+        let mut prepared_engine: Option<(String, bool)> = None;
         let cli = if needs_engine {
             let version = remote_version(&prepared)?;
             let engine = choose_engine(&prepared, &ssh, &root, version.as_ref())?;
-            engine.upload(&ssh, &root)?;
-            build_on_login_node(&ssh, &root, &engine)?;
+            let uploaded = engine.upload(&ssh, &root)?;
+            let built = build_on_login_node(&ssh, &root, &engine)?;
+            prepared_engine = Some((engine.id().to_owned(), !uploaded && !built));
             format!("{}/bin/colm-cli", engine::engine_dir(&root, engine.id()))
         } else {
             String::new()
         };
         if action == "prepare" {
-            return Ok(json!({"ready": true}));
+            return Ok(match prepared_engine {
+                Some((id, cached)) => prepare_reply(&id, cached),
+                None => json!({"ready": true}),
+            });
         }
         if let Some(single) = action.strip_suffix("-batch") {
             return run_batch(&ssh, single, &request, &cli);
@@ -93,39 +100,52 @@ fn ascii_json(value: &serde_json::Value) -> Result<String> {
 /// Compiler jobs for the engine build on a shared login node.
 const LOGIN_NODE_BUILD_JOBS: u32 = 4;
 
+/// `prepare` 的应答：界面据此说明"复用已有引擎"还是"为新源码快照编了一次"。
+/// 引擎的目录名就是源码快照的标识，界面只显示前 8 位。
+fn prepare_reply(id: &str, cached: bool) -> serde_json::Value {
+    json!({"ready": true, "engine": {"id": id, "cached": cached}})
+}
+
 /// Build an uploaded source engine on the login node (nothing to do once it is built). Compute
 /// nodes cannot be relied on to build it: 天河's have no `cc`, so a job building the engine fails
 /// at the link step (2026-10-19).
-pub(super) fn build_on_login_node(ssh: &Ssh, root: &str, engine: &Engine) -> Result<()> {
+///
+/// Return whether this call actually compiled. `ensure_script` only prints "building the Rust
+/// engine" when it enters the build branch; that flag lets `prepare` tell the UI a cached engine
+/// was reused without adding another SSH round trip.
+pub(super) fn build_on_login_node(ssh: &Ssh, root: &str, engine: &Engine) -> Result<bool> {
     let Engine::Source(snapshot) = engine else {
-        return Ok(());
+        return Ok(false);
     };
     // Keep build output away from the JSON response. This runs on the login node, which
     // other users share and where heavy programs are discouraged (星逸, 摆渡船): four
     // compiler jobs at the lowest priority.
-    let build = || {
-        ssh.run_ok(&format!(
+    let build = || -> Result<bool> {
+        let output = ssh.run_ok(&format!(
             "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
             quote(root),
             engine::ensure_script(root, engine.id(), LOGIN_NODE_BUILD_JOBS)
-        ))
+        ))?;
+        Ok(output.contains("building the Rust engine"))
     };
-    if let Err(error) = build() {
-        // The connectivity check fetches two tiny files; a slow proxy passes it and can
-        // still time out on real downloads (天河's: 8 KB/s from GitHub, 2026-10-19).
-        // Such a failure gets one offline retry.
-        if !colm_remote::offline::looks_like_network_failure(&format!("{error:#}")) {
-            return Err(error);
+    match build() {
+        Ok(built) => Ok(built),
+        Err(error) => {
+            // The connectivity check fetches two tiny files; a slow proxy passes it and can
+            // still time out on real downloads (天河's: 8 KB/s from GitHub, 2026-10-19).
+            // Such a failure gets one offline retry.
+            if !colm_remote::offline::looks_like_network_failure(&format!("{error:#}")) {
+                return Err(error);
+            }
+            eprintln!(
+                "the server failed to download build dependencies; sending them from this computer"
+            );
+            colm_remote::offline::stage(ssh, root, &engine::lock_text(snapshot)?, &|line| {
+                eprintln!("{line}")
+            })?;
+            build()
         }
-        eprintln!(
-            "the server failed to download build dependencies; sending them from this computer"
-        );
-        colm_remote::offline::stage(ssh, root, &engine::lock_text(snapshot)?, &|line| {
-            eprintln!("{line}")
-        })?;
-        build()?;
     }
-    Ok(())
 }
 
 fn run_batch(
@@ -206,6 +226,20 @@ fn frozen_source_options(opts: &Opts, code: &colm_model::CodeRef) -> Result<Opts
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_reply_names_the_engine_snapshot_and_whether_it_was_reused() {
+        // 界面靠这两个字段区分"复用已有引擎"和"为新源码快照编了一次"；字段名/形状必须稳定。
+        assert_eq!(
+            prepare_reply("deadbeef0123456789", true),
+            json!({"ready": true, "engine": {"id": "deadbeef0123456789", "cached": true}})
+        );
+        assert_eq!(
+            prepare_reply("deadbeef0123456789", false)["engine"]["cached"],
+            json!(false)
+        );
+        assert_eq!(prepare_reply("x", true)["engine"]["id"], json!("x"));
+    }
 
     #[test]
     fn data_embedded_in_server_programs_is_ascii_and_round_trips() {
