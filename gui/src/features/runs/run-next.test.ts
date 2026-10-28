@@ -272,7 +272,7 @@ test('running, failed, cancelled and preprocessing-only runs have no next-result
   ])
     assert.equal(render(record).next, undefined);
 });
-test('remote next retrieves finished output before navigating', async () => {
+test('remote next opens results on the server without downloading the history', async () => {
   const page = render({
     ...success,
     location: 'remote',
@@ -287,8 +287,13 @@ test('remote next retrieves finished output before navigating', async () => {
   assert.ok(page.next);
   await (page.next.props.onClick as () => Promise<void>)();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(page.calls, ['remote_fetch', 'remote_status']);
-  assert.equal(page.state.running['/case'].run_case, '/run-copy');
+  // 只核对一次作业终态；history 留在服务器上，结果页用 remote-read 读曲线和指标。
+  assert.deepEqual(page.calls, ['remote_status']);
+  assert.equal(
+    page.state.running['/case'].run_case,
+    undefined,
+    'viewing results must not copy the whole history back',
+  );
   assert.deepEqual(page.routes, [['case', 'results']]);
 });
 
@@ -349,9 +354,10 @@ test('remote reconciliation restores preprocessing stage before showing results'
   assert.match(page.errors.join('\n'), /只到预处理阶段/);
 });
 
-test('a completed remote result without a confirmed job state explains why results are blocked', () => {
-  // Reopened project: the ledger says the station finished, but its server record has not been
-  // reconciled yet, so fetching would be premature. The button stays disabled and says why.
+test('a completed remote result opens straight from the server, without downloading history', async () => {
+  // Reopened project: the ledger says the station finished but its local run copy only has the
+  // configuration. Viewing results should not fetch the history; only a lightweight job-state
+  // check is made before opening the results page on the server.
   const page = render(
     {
       ...success,
@@ -365,11 +371,21 @@ test('a completed remote result without a confirmed job state explains why resul
     ['/case', '/other'],
   );
   assert.ok(page.next);
-  assert.equal(page.next.props.disabled, true);
-  assert.match(String(page.next.props.title), /核对服务器任务/);
-  // 即使有入口直接调用，也要有一句可见提示而不是静默返回。
+  assert.equal(page.next.props.disabled, false);
   (page.next.props.onClick as () => void)();
-  assert.match(page.errors.join('\n'), /核对服务器任务/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    page.invocations
+      .filter(({ command }) => command === 'remote_fetch' || command === 'remote_status')
+      .map(({ command, args }) => [command, args.case]),
+    [['remote_status', '/case']],
+  );
+  assert.deepEqual(page.routes, [['openCase', '/case', 'results']]);
+  assert.equal(
+    page.state.running['/case'].run_case,
+    undefined,
+    'the history stays on the server until the user explicitly fetches it',
+  );
 });
 
 test('Stop remains visible when the primary batch case failed but another member is running', () => {
@@ -608,7 +624,7 @@ test('batch resource preferences are retained without clicking Back', () => {
   );
 });
 
-test('batch fetches the successful remote station without using the failed first station job', async () => {
+test('batch opens the successful remote station on the server without downloading it', async () => {
   const first = { ...success, status: 'failed' };
   const other: RunState = {
     ...success,
@@ -633,14 +649,15 @@ test('batch fetches the successful remote station without using the failed first
     page.invocations
       .filter(({ command }) => command === 'remote_fetch' || command === 'remote_status')
       .map(({ command, args }) => [command, args.case]),
-    [
-      ['remote_fetch', '/other'],
-      ['remote_status', '/other'],
-    ],
+    [['remote_status', '/other']],
   );
   assert.deepEqual(page.routes, [['openCase', '/other', 'results']]);
   assert.strictEqual(page.state.running['/case'], first);
-  assert.equal(page.state.running['/other'].run_case, '/run-copy');
+  assert.equal(
+    page.state.running['/other'].run_case,
+    undefined,
+    'opening results keeps the history on the server; fetching stays explicit',
+  );
 });
 
 test('delayed server defaults are not mistaken for automatically saved batch preferences', async () => {
