@@ -5042,8 +5042,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   <>
                     <p className="muted study-hint">
                       {tr(
-                        '留一站交叉验证：每次拿掉一个站，只按其余站挑最优参数，再看它在拿掉的站上是否仍比默认参数好。',
-                        'Leave-one-site-out: each time one site is left out, the best set is picked on the others and scored at the left-out site against the defaults.',
+                        '留一站重排诊断（不是交叉验证）：候选来自全站综合损失上的差分进化；这里每次拿掉一个站，只按其余站在已有候选里重挑，再看它在拿掉的站上是否仍比默认参数好。被拿掉的站已参与候选生成，所以这不能证明对未参与率定站点的泛化。',
+                        'Leave-one-site-out reselection (not cross-validation): candidates came from differential evolution on the all-site objective. Each round reselects them on the kept sites and scores the held-out site against the defaults; because the held-out site already shaped the candidates, this does not prove generalisation to unseen sites.',
                       )}
                     </p>
                     <div className="table-scroll">
@@ -5072,7 +5072,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                                 {fold.better == null
                                   ? tr('算不出', 'unavailable')
                                   : fold.better
-                                    ? tr('换到这个站仍然更好', 'still better at this site')
+                                    ? tr(
+                                        '在这个站上也优于默认（候选仍来自全站优化）',
+                                        'also better at this site (candidates still from the all-site search)',
+                                      )
                                     : tr(
                                         '换到这个站反而更差：参数在拟合别的站',
                                         'worse at this site: the parameters fit the other sites',

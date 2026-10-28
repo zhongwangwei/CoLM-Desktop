@@ -2331,15 +2331,10 @@ fn preflight_observation_window(
     // 有效值"当成每天一个样本，日覆盖率永远 100%（审计 P1-1）；预检时还没有 history，
     // 只能取观测轴；运行时再与模型输出间隔取较粗者。
     let expected_interval = super::targets::observation_axis_step(observation)?;
-    let count = super::targets::aggregate_pairs(
-        &times,
-        &zeros,
-        &zeros,
-        aggregate,
-        expected_interval,
-    )?
-    .support
-    .len();
+    let count =
+        super::targets::aggregate_pairs(&times, &zeros, &zeros, aggregate, expected_interval)?
+            .support
+            .len();
     if count < target.min_pairs {
         let unit = match aggregate {
             TargetPeriod::Daily => "daily",
@@ -3397,66 +3392,60 @@ fn target_result(
     // 不能再从已配对时刻反推——那正是审计 P1-1 里日覆盖率被缺测绕过的地方。
     let coverage_interval = row.model_step_seconds.max(row.obs_step_seconds).max(1);
     // 要按日或按月比时，把逐时配对平均成时段再算指标（支持集也换成时段）。
-    let (
-        support_hash,
-        pairs,
-        value,
-        observation_sd,
-        model_mean,
-        observation_mean,
-        coverage,
-    ) = if let Some(aggregate) = target.aggregate {
-        let model = row.model.as_ref().with_context(|| {
-            format!(
-                "target {} ({}) did not return full paired model values",
-                target.key, target.variable
-            )
-        })?;
-        let paired = super::targets::aggregate_pairs(time, model, obs, aggregate, coverage_interval)?;
-        let coverage = Some((
-            paired.coverage.iter().sum::<f64>() / paired.coverage.len().max(1) as f64,
-            paired
-                .coverage
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min),
-            paired.dropped,
-        ));
-        let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
+    let (support_hash, pairs, value, observation_sd, model_mean, observation_mean, coverage) =
+        if let Some(aggregate) = target.aggregate {
+            let model = row.model.as_ref().with_context(|| {
+                format!(
+                    "target {} ({}) did not return full paired model values",
+                    target.key, target.variable
+                )
+            })?;
+            let paired =
+                super::targets::aggregate_pairs(time, model, obs, aggregate, coverage_interval)?;
+            let coverage = Some((
+                paired.coverage.iter().sum::<f64>() / paired.coverage.len().max(1) as f64,
+                paired
+                    .coverage
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min),
+                paired.dropped,
+            ));
+            let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
                 format!(
                     "target {} ({}) has fewer than two {aggregate:?} means with enough data for {site} in the {period} window",
                     target.key, target.variable
                 )
             })?;
-        let value = match target.metric {
-            ObjectiveMetric::Nrmse => metrics.rmse,
-            ObjectiveMetric::Mae => metrics.mae,
-            ObjectiveMetric::AbsBias => metrics.bias,
-            ObjectiveMetric::Nse => metrics.nse,
-            ObjectiveMetric::Kge => metrics.kge,
-            ObjectiveMetric::R2 => metrics.r2,
-            ObjectiveMetric::R => metrics.correlation,
+            let value = match target.metric {
+                ObjectiveMetric::Nrmse => metrics.rmse,
+                ObjectiveMetric::Mae => metrics.mae,
+                ObjectiveMetric::AbsBias => metrics.bias,
+                ObjectiveMetric::Nse => metrics.nse,
+                ObjectiveMetric::Kge => metrics.kge,
+                ObjectiveMetric::R2 => metrics.r2,
+                ObjectiveMetric::R => metrics.correlation,
+            };
+            (
+                pair_support_hash(&paired.support, &paired.obs),
+                metrics.n,
+                value,
+                metrics.obs_sd,
+                metrics.model_mean,
+                metrics.obs_mean,
+                coverage,
+            )
+        } else {
+            (
+                pair_support_hash(time, obs),
+                row.n,
+                metric_value(&row, target.metric),
+                row.obs_sd,
+                row.model_mean,
+                row.obs_mean,
+                None,
+            )
         };
-        (
-            pair_support_hash(&paired.support, &paired.obs),
-            metrics.n,
-            value,
-            metrics.obs_sd,
-            metrics.model_mean,
-            metrics.obs_mean,
-            coverage,
-        )
-    } else {
-        (
-            pair_support_hash(time, obs),
-            row.n,
-            metric_value(&row, target.metric),
-            row.obs_sd,
-            row.model_mean,
-            row.obs_mean,
-            None,
-        )
-    };
     let (coverage_mean, coverage_min, periods_dropped) = match coverage {
         Some((mean, min, dropped)) if min.is_finite() => (Some(mean), Some(min), Some(dropped)),
         _ => (None, None, None),
@@ -4674,10 +4663,17 @@ fn near_optimal(
     }))
 }
 
-/// 多站点共享参数的留一站交叉验证：每次拿掉一个站，只按其余站的成绩挑最优成员，再看它在拿掉的那个站上
-/// 是否仍比基准好。全站一起挑出的最优可能只是在拟合个别站；这一步回答"换到没参与率定的站还灵不灵"。
-/// 用的是已有的成员结果，不额外运行模型。
-fn leave_one_site_out(manifest: &Manifest, state: &StudyState) -> Option<serde_json::Value> {
+/// 多站点共享参数的留一站**重排诊断**（不是交叉验证）：每次拿掉一个站，只按其余站的成绩在已有候选里
+/// 重挑最优，再看它在拿掉的那个站上是否仍比基准好。用的是已有的成员结果，不额外运行模型。
+///
+/// 它证明不了对未参与率定站点的泛化：候选本身是全站综合损失上差分进化出来的，被拿掉的站已经影响了
+/// 候选生成、父代选择和优化轨迹，最后排除它重排无法消除这份信息（审计 P1-3）。结果里因此显式标
+/// `basis: candidates-optimized-on-all-sites` 与 `held_out_used_in_selection: false`；
+/// 真正的留站/留年/留气候区分折训练是把留出数据从搜索中彻底排除，另作一项能力，不在这里冒充。
+fn leave_one_site_out_reselection(
+    manifest: &Manifest,
+    state: &StudyState,
+) -> Option<serde_json::Value> {
     let sites = &manifest.spec.base_cases;
     if sites.len() < 2 {
         return None;
@@ -4718,7 +4714,16 @@ fn leave_one_site_out(manifest: &Manifest, state: &StudyState) -> Option<serde_j
             "baseline": baseline,
         }));
     }
-    (!folds.is_empty()).then(|| serde_json::json!({ "folds": folds }))
+    (!folds.is_empty()).then(|| {
+        serde_json::json!({
+            "kind": "leave-one-site-out-reselection",
+            "basis": "candidates-optimized-on-all-sites",
+            "held_out_used_in_selection": false,
+            "retrained": false,
+            "note": "candidates were generated by differential evolution on the all-site objective; this only reselects them on the kept sites, so it is not a generalisation test for the held-out site",
+            "folds": folds
+        })
+    })
 }
 
 pub(super) fn write_objective_tables_to(
@@ -4735,7 +4740,7 @@ pub(super) fn write_objective_tables_to(
         {
             write_json(&results.join("near_optimal.json"), &near)?;
         }
-        if let Some(cross) = leave_one_site_out(manifest, state) {
+        if let Some(cross) = leave_one_site_out_reselection(manifest, state) {
             write_json(&results.join("cross_validation.json"), &cross)?;
         }
     }
@@ -4772,9 +4777,8 @@ pub(super) fn write_objective_tables_to(
             )
         })?;
         for row in result.calibration.iter().chain(&result.validation) {
-            let number = |value: Option<f64>| {
-                value.map(|value| format!("{value:.6}")).unwrap_or_default()
-            };
+            let number =
+                |value: Option<f64>| value.map(|value| format!("{value:.6}")).unwrap_or_default();
             metrics.push_str(&format!(
                 "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&task.member),
@@ -5941,7 +5945,12 @@ mod tests {
                 .candidates
                 .insert(member.into(), candidate(Some(loss)));
         }
-        let cross = leave_one_site_out(&manifest, &state).unwrap();
+        let cross = leave_one_site_out_reselection(&manifest, &state).unwrap();
+        // 证据必须自己说清"这不是泛化检验"：候选来自全站优化，留出站已参与候选生成。
+        assert_eq!(cross["kind"], "leave-one-site-out-reselection");
+        assert_eq!(cross["basis"], "candidates-optimized-on-all-sites");
+        assert_eq!(cross["held_out_used_in_selection"], false);
+        assert_eq!(cross["retrained"], false);
         let folds = cross["folds"].as_array().unwrap();
         // 拿掉 b：只看 a 会挑 m000001，可它在 b 上 1.6，比基准 0.8 差 —— 这就是交叉验证要揭出来的。
         let held_b = folds.iter().find(|f| f["site"] == "b").unwrap();
@@ -5952,7 +5961,7 @@ mod tests {
         assert_eq!(held_a["chosen"], "m000002");
         assert!(held_a["held_out"].as_f64().unwrap() < held_a["baseline"].as_f64().unwrap());
         manifest.spec.base_cases.truncate(1);
-        assert!(leave_one_site_out(&manifest, &state).is_none());
+        assert!(leave_one_site_out_reselection(&manifest, &state).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
