@@ -4,15 +4,24 @@
 //! 这里读每个 Study 的最优成员，在它的基础算例上抓取逐行特征（`colm-rs` 空跑加 tap，行与运行时
 //! 网络作用的行相同），按行的分类（PFT 或地类）对上率定值，拼成“特征 → 参数”样本，拟合网络。
 //! 有两个以上 Study 时再做留一站交叉验证：每次留出一个 Study 的全部行，用其余的拟合、预测它。
+//!
+//! **特征必须与率定读同一份输入。** 率定跑的是 Study 创建时冻结的算例（`model-inputs.json` 指向的
+//! materialized 副本），而本模块原来用 `study_case_root` 回到原项目目录取 tap：原项目算例在建 Study
+//! 之后被改过，就会拿新数据的特征配旧参数标签，而且报告里无从发现。现在每个 Study 都走
+//! `study::model::base_case`（与率定同一个解析器），并用 `verified_inputs` 的全内容身份证明冻结副本没变
+//! （逐文件 sha256 覆盖配置、站点/重启数据和 `hybrid_climate/`，而 tap 的输入恰好只有重启常数与
+//! `hybrid_climate/`；强迫字节按仓库策略不进身份，tap 也不读）。报告同时记下逐站 `data_sha256`、观测 sha256、
+//! spec 哈希、冻结模型修订与特征提取程序，多研究混用时这些身份还可以互相核对。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_hybrid::fit::{Dataset, FitOptions, Fitted};
 use colm_hybrid::{Matrix, OutputSpec};
 
-use super::study::spec::HybridStudySpec;
+use super::study::model::StudyInputIdentity;
+use super::study::spec::{HybridStudySpec, Manifest, MemberPlan, ParameterScopeKind, StudyKind};
 use super::{
     rust_model_crop_arguments, rust_model_executable, rust_model_land_cover, Kernel, Opts,
 };
@@ -274,12 +283,18 @@ pub(crate) fn fit_rows(
     })
 }
 
-/// 在算例上空跑加 tap，返回 CSV 文本。
-fn tap(case: &Path, spec: &Path, kernel: &Kernel, scratch: &Path) -> Result<String> {
+/// 在算例上空跑加 tap，返回 CSV 文本。`executable` 由调用方给出并写进报告：
+/// 执行的和上报的必须是同一份程序，不能靠两次定位恰好指向同一个文件。
+fn tap(
+    executable: &Path,
+    case: &Path,
+    spec: &Path,
+    kernel: &Kernel,
+    scratch: &Path,
+) -> Result<String> {
     let out = scratch.join("tap.csv");
     let _ = std::fs::remove_file(&out);
-    let executable = rust_model_executable()?;
-    let output = std::process::Command::new(&executable)
+    let output = std::process::Command::new(executable)
         .current_dir(case)
         .arg(case.join("case.nml"))
         .args([
@@ -326,6 +341,431 @@ fn spec_toml(network: &HybridStudySpec) -> String {
         );
     }
     text + "]\n"
+}
+
+/// 特征提取程序的身份：tap 用的 `colm-rs` 路径与内容 sha256。
+///
+/// 报告只记“这一次拟合实际执行了什么”。多研究时行全由同一个程序抽出，所以没有逐研究的
+/// 提取程序；每个研究自己固定版本里的 `colm-rs` 另记在 `frozen_feature_program`，
+/// 供复核者比较“率定用的物理”与“提特征用的物理”。两者不做逐研究比较：同一份源码的
+/// 两次构建字节就不同，直接比 hash 会把“重编过”误报成“物理变了”。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct FeatureProgram {
+    pub path: String,
+    /// 读不到文件时为 None，报告里是 `null`，不填一个假 hash。
+    pub sha256: Option<String>,
+}
+
+impl FeatureProgram {
+    fn of(path: &Path) -> Self {
+        Self {
+            path: path.display().to_string(),
+            // 流式哈希：colm-rs 是几十上百 MB 的可执行文件，整份读进内存只为算 hash 不划算。
+            sha256: crate::fingerprint::sha256_file(path).ok(),
+        }
+    }
+
+    /// 当前 colm-cli 同级的 `colm-rs`（tap 真正执行的那份）。
+    fn current() -> Result<Self> {
+        Ok(Self::of(&rust_model_executable()?))
+    }
+}
+
+/// 特征定义的 sha256：`--network` 规格按值规范化后的字节。
+///
+/// 不能直接哈希 JSON 原文：键序、空白、省略的默认值不同也会是同一个定义。用 serde 按
+/// `HybridStudySpec` 的字段顺序序列化，报告才能判断“这次拟合/两个研究的特征与输出是不是同一套”。
+/// 整个规格（含 hidden/activation/range）都进 hash：它们决定标签怎么被网络解释，不只 tap 的列。
+fn feature_definition_sha256(network: &HybridStudySpec) -> Result<String> {
+    Ok(colm_kernel::sha256_hex(&serde_json::to_vec(network)?))
+}
+
+/// 一个 Study 进入抽行前的冻结身份。
+#[derive(Debug)]
+struct PreparedStudy {
+    dir: PathBuf,
+    manifest: Manifest,
+    /// 创建时冻结输入的根：`model-inputs.json` 记的 materialized 根；老研究没有该文件时
+    /// 是 `base_case` 的兜底（原项目根），其内容仍由 `verified_inputs` 保证与创建时一致。
+    base_root: PathBuf,
+    /// 原项目根。只写进报告供追溯，说明这台机器上哪份项目算例是研究的来源；
+    /// 取特征不读它（那正是 P1-6 的漏洞）。与 `base_root` 不同即特征来自冻结副本。
+    /// 不是 `<项目>/.colm/studies/<id>` 布局时（例如导入的研究）为空，不影响取特征。
+    source_project_root: Option<PathBuf>,
+    /// `verified_inputs` 证明未变的实际身份：逐站 `data_sha256`、观测文件 sha256。
+    identity: StudyInputIdentity,
+    /// 研究固定的模型版本；官方版、或旧研究没有（报告标 legacy，不报错）。
+    pin: Option<super::study_version::Pinned>,
+    /// 研究固定版本目录里的 `colm-rs`（能定位到才记）：率定与取特征是否同一版程序的证据。
+    frozen_feature_program: Option<FeatureProgram>,
+}
+
+/// 把 Study 的输入身份校验完、固定下来。之后取行只读 `base_case`，不再看原项目目录。
+fn prepare_study(study_dir: &Path) -> Result<PreparedStudy> {
+    let dir = study_dir
+        .canonicalize()
+        .with_context(|| format!("cannot find Study {}", study_dir.display()))?;
+    let manifest = crate::study::engine::status(&dir)?;
+    ensure!(
+        manifest.spec.kind == StudyKind::Tuning,
+        "Study {} is not a parameter-tuning Study; the two-step fit takes the first-step tuning Studies",
+        dir.display()
+    );
+    ensure!(
+        manifest.spec.hybrid.is_none(),
+        "Study {} trains its own hybrid network; a two-step first step must calibrate physical parameters",
+        dir.display()
+    );
+    // 冻结规格/样本/指纹不变：成员参数与报告引用的规格哈希都靠它。
+    crate::study::engine::verify_frozen_inputs(&manifest)
+        .with_context(|| format!("Study {} failed its frozen-input check", dir.display()))?;
+    ensure!(
+        dir.join(crate::study::model::IDENTITY_FILE).is_file(),
+        "Study {} has no full-content input identity captured at creation (an older colm-cli wrote it); \
+         the fit cannot prove its tap features still match the inputs its parameters were calibrated on - \
+         recreate the Study with the current colm-cli",
+        dir.display()
+    );
+    // 全内容身份：配置与数据文件逐文件 sha256（`sha256-nonforcing-v1`）。研究自身指纹只按
+    // namelist 设置比对（`forcing_content_policy=excluded-v1`），发现不了被改过或拷坏的
+    // 站点/重启/`hybrid_climate/` 数据，那正是 P1-6 的漏洞：新数据的特征配旧参数标签。
+    // 强迫字节也不在这份身份里，但 tap 只用重启常数与 `hybrid_climate/`，两者都已入账。
+    let identity = crate::study::model::verified_inputs(&manifest)
+        .with_context(|| format!("Study {} input identity check failed", dir.display()))?;
+
+    let mut base_roots = BTreeSet::new();
+    for site in &manifest.spec.base_cases {
+        let case = crate::study::model::base_case(&manifest, site)?;
+        base_roots.insert(
+            case.parent()
+                .with_context(|| {
+                    format!("Study {} base case {site} has no directory", dir.display())
+                })?
+                .to_path_buf(),
+        );
+    }
+    ensure!(
+        base_roots.len() == 1,
+        "Study {} resolves its base cases under {} different input roots; the fit needs one frozen input root",
+        dir.display(),
+        base_roots.len()
+    );
+    let base_root = base_roots
+        .into_iter()
+        .next()
+        .context("Study has no base cases")?;
+    // 老研究没有 `model-inputs.json` 时 `base_case` 的兜底就是原项目根，两者相同；
+    // 冻结过的研究两者不同，报告里并排列出，复核者一眼能看出特征不是从原项目目录读的。
+    // 布局不是 `<项目>/.colm/studies/<id>` 的研究没有可报的原项目根，留空即可。
+    let source_project_root = crate::study::runner::study_case_root(&manifest).ok();
+
+    let pin = super::study_version::pinned(&dir)?;
+    let frozen_feature_program = pin.as_ref().and_then(frozen_feature_program);
+    // 拿当前 colm-rs 的 hash 与研究的固定程序比在这里没有意义：同一份源码的两次构建
+    // 字节就不同，会把“重编过”报成“物理变了”。报告如实记两边（`feature_program` 是本次
+    // 实际执行的那份），跨研究的比较放在 check_compatibility 里做。
+    Ok(PreparedStudy {
+        dir,
+        manifest,
+        base_root,
+        source_project_root,
+        identity,
+        pin,
+        frozen_feature_program,
+    })
+}
+
+/// 研究固定版本里的 `colm-rs`：`Pinned::cli` 是同一快照/缓存目录里的 `colm-cli`，程序按同级目录找。
+fn frozen_feature_program(pin: &super::study_version::Pinned) -> Option<FeatureProgram> {
+    let name = if cfg!(windows) {
+        "colm-rs.exe"
+    } else {
+        "colm-rs"
+    };
+    let path = pin.cli.parent()?.join(name);
+    path.is_file().then(|| FeatureProgram::of(&path))
+}
+
+/// 多研究一起训练前的兼容性检查，返回要写进报告与 stderr 的警告。
+///
+/// 硬拒绝的只有会让样本本身错掉的两件事：冻结输入无法证明（在 [`prepare_study`] 里）、
+/// 以及研究率定的参数种类与本次网络插槽对不上（网络是 `pft` 却只率定了整算例系数）：
+/// 分类键永远匹配不上，所有行会被静默丢掉。Study 自己训练网络属于同类问题，也在
+/// [`prepare_study`] 里拒绝。
+///
+/// 其余不一致只影响“这条样本是在哪版物理上率定/提特征的”，不改变已经抽出的行。两步法允许
+/// 在更新后的物理上重拟合（这正是改模型后再训练的用法），所以逐条写成 warning 进报告，
+/// 由结果页和使用者判断，不在这里替他们拒绝。
+fn check_compatibility(
+    studies: &[PreparedStudy],
+    network: &HybridStudySpec,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let mut revision_labels = Vec::new();
+    let mut revisions: BTreeSet<Option<(String, u64)>> = BTreeSet::new();
+    let mut program_labels = Vec::new();
+    let mut programs: BTreeSet<Option<(String, String)>> = BTreeSet::new();
+    for study in studies {
+        let has_scope = |kind: ParameterScopeKind| {
+            study.manifest.spec.parameters.iter().any(|parameter| {
+                parameter
+                    .scope_instance
+                    .as_ref()
+                    .is_some_and(|scope| scope.kind == kind)
+            })
+        };
+        match network.slot.as_str() {
+            "pft"
+                if !has_scope(ParameterScopeKind::PftType)
+                    && !has_scope(ParameterScopeKind::PcPftComponent) =>
+            {
+                bail!(
+                    "Study {} tunes no PFT-scoped parameter, but the network uses the pft slot; its rows would have no calibrated target",
+                    study.dir.display()
+                )
+            }
+            "land_class" if !has_scope(ParameterScopeKind::LandCoverClass) => bail!(
+                "Study {} tunes no land-cover-scoped parameter, but the network uses the land_class slot; its rows would have no calibrated target",
+                study.dir.display()
+            ),
+            _ => {}
+        }
+        let revision = study
+            .pin
+            .as_ref()
+            .and_then(|pin| pin.model_revision.as_ref());
+        revisions.insert(
+            revision.map(|revision| (revision.version.id.clone(), revision.version.revision)),
+        );
+        revision_labels.push(match revision {
+            Some(revision) => format!(
+                "{}: {}#{}",
+                study.dir.display(),
+                revision.version.id,
+                revision.version.revision
+            ),
+            None => format!("{}: legacy (no frozen model revision)", study.dir.display()),
+        });
+        programs.insert(study.frozen_feature_program.as_ref().map(|program| {
+            (
+                program.path.clone(),
+                program.sha256.clone().unwrap_or_default(),
+            )
+        }));
+        program_labels.push(match &study.frozen_feature_program {
+            Some(program) => format!("{}: {}", study.dir.display(), program.path),
+            None => format!("{}: unknown (no frozen colm-rs)", study.dir.display()),
+        });
+    }
+    if studies.len() > 1 && revisions.len() > 1 {
+        warnings.push(format!(
+            "the Studies come from different frozen model revisions ({}); the fit combines their calibrated parameters as they are",
+            revision_labels.join("; ")
+        ));
+    }
+    if studies.len() > 1 && programs.len() > 1 {
+        warnings.push(format!(
+            "the Studies do not all have the same frozen colm-rs ({}); the rows are all extracted by the fit's own program, recorded as feature_program",
+            program_labels.join("; ")
+        ));
+    }
+    Ok(warnings)
+}
+
+fn resolve_study_member(study: &PreparedStudy) -> Result<MemberPlan> {
+    crate::study::runner::resolve_apply_member(&study.dir, &study.manifest, "best")
+}
+
+/// 抽一个 Study 全部站点的行，并给每个站点写一条 `sources` 身份记录。
+///
+/// `tap_case` 是实际执行 tap 的闭包：生产路径是 `colm-rs` 空跑，测试里换成读算例目录里
+/// 标记值的假程序，两边检查的都是“传进去的是哪个算例目录”。
+// 平铺参数是刻意的：拆成上下文结构体会让“这一行来自哪个 study/member/program”在调用处
+// 更难读，测试也得多搭一层结构体；这里 9 个参数都是直接数据。
+#[allow(clippy::too_many_arguments)]
+fn collect_study_rows(
+    group: usize,
+    study: &PreparedStudy,
+    member: &MemberPlan,
+    network: &HybridStudySpec,
+    weight_column: Option<&str>,
+    program: &FeatureProgram,
+    tap_case: &mut dyn FnMut(&Path) -> Result<String>,
+    rows: &mut Vec<Row>,
+    sources: &mut Vec<serde_json::Value>,
+) -> Result<()> {
+    let land_classes: BTreeMap<String, i64> = study
+        .manifest
+        .spec
+        .parameters
+        .iter()
+        .filter_map(|parameter| {
+            let index = parameter.scope_instance.as_ref()?.index?;
+            parameter
+                .name
+                .starts_with("DEF_LC_")
+                .then(|| (parameter.name.clone(), i64::from(index)))
+        })
+        .collect();
+    for site in &study.manifest.spec.base_cases {
+        // 与率定同一个解析器：创建时冻结的 materialized 算例（老研究兜底到原项目根，
+        // 但那份内容已由 verified_inputs 证明没变）。
+        let case = crate::study::model::base_case(&study.manifest, site)?.canonicalize()?;
+        let case_identity = study.identity.base_cases.get(site).with_context(|| {
+            format!(
+                "Study {} has no verified identity for {site}",
+                study.dir.display()
+            )
+        })?;
+        let tapped = parse_tap(&tap_case(&case)?)?;
+        let (mut kept, mut dropped) = (0usize, 0usize);
+        for row in tapped {
+            let Some(targets) = row_targets(network, &member.parameters, &land_classes, &row)
+            else {
+                dropped += 1;
+                continue;
+            };
+            let features = network
+                .features
+                .iter()
+                .map(|name| {
+                    row.values
+                        .get(name)
+                        .copied()
+                        .with_context(|| format!("the tap of {site} has no {name}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let weight = match weight_column {
+                Some(name) => *row
+                    .values
+                    .get(name)
+                    .with_context(|| format!("the tap of {site} has no weight column {name}"))?,
+                None => 1.0,
+            };
+            if weight <= 0.0 {
+                dropped += 1;
+                continue;
+            }
+            rows.push(Row {
+                group,
+                features,
+                targets,
+                weight,
+            });
+            kept += 1;
+        }
+        sources.push(serde_json::json!({
+            "study": study.dir.display().to_string(),
+            "study_id": study.manifest.id,
+            "member": member.id,
+            "site": site,
+            "rows": kept,
+            "dropped": dropped,
+            "base_root": study.base_root.display().to_string(),
+            "spec_sha256": study.manifest.provenance.spec_sha256,
+            "data_sha256": case_identity.data_sha256,
+            "observation_sha256": study.identity.observations.get(site).map(|file| file.sha256.clone()),
+            "feature_program_sha256": program.sha256,
+            "model_revision": revision_json(study.pin.as_ref()),
+            "legacy_model_revision": study.pin.as_ref().and_then(|pin| pin.model_revision.as_ref()).is_none(),
+        }));
+    }
+    Ok(())
+}
+
+fn model_source_json(pin: &super::study_version::Pinned) -> serde_json::Value {
+    serde_json::json!({
+        "name": pin.name,
+        "head": pin.head,
+        "base_commit": pin.base_commit,
+        "based_on": pin.based_on,
+        "touches": pin.touches,
+        "cli": pin.cli.display().to_string(),
+        "kernel": pin.kernel.display().to_string(),
+    })
+}
+
+fn revision_json(pin: Option<&super::study_version::Pinned>) -> serde_json::Value {
+    match pin.and_then(|pin| pin.model_revision.as_ref()) {
+        Some(revision) => serde_json::json!({
+            "version": revision.version,
+            "name": revision.name,
+            "fingerprint": revision.fingerprint,
+            "code": revision.code,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+impl PreparedStudy {
+    /// 报告里的每研究 inputs/identity 段。只投影输入身份的必要字段：
+    /// `VerifiedInputs` 的 `files` 在格点算例上可能有几千项，原样写进报告会把结果页撑爆。
+    fn report(&self, program: &FeatureProgram) -> serde_json::Value {
+        let base_cases = self
+            .identity
+            .base_cases
+            .iter()
+            .map(|(site, identity)| {
+                (
+                    site.clone(),
+                    serde_json::json!({
+                        "algorithm": identity.algorithm,
+                        "complete": identity.complete,
+                        "data_sha256": identity.data_sha256,
+                        "data_settings": identity.data_settings,
+                        "file_count": identity.files.len(),
+                        "unresolved": identity.unresolved,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        let observations = self
+            .identity
+            .observations
+            .iter()
+            .map(|(site, file)| {
+                (
+                    site.clone(),
+                    serde_json::json!({
+                        "path": file.path.display().to_string(),
+                        "sha256": file.sha256,
+                        "bytes": file.bytes,
+                        "category": file.category,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        serde_json::json!({
+            "study": self.dir.display().to_string(),
+            "id": self.manifest.id,
+            "base_root": self.base_root.display().to_string(),
+            "source_project_root": self.source_project_root.as_ref().map(|root| root.display().to_string()),
+            "spec_sha256": self.manifest.provenance.spec_sha256,
+            "base_cases": base_cases,
+            "observations": observations,
+            "model_source": self.pin.as_ref().map(model_source_json),
+            "model_revision": revision_json(self.pin.as_ref()),
+            "legacy_model_revision": self.pin.as_ref().and_then(|pin| pin.model_revision.as_ref()).is_none(),
+            "feature_program": program,
+            "frozen_feature_program": self.frozen_feature_program,
+        })
+    }
+}
+
+/// 报告新增的 `inputs` 段：这次拟合的特征定义、实际提取程序，以及每个 Study 的输入身份。
+fn inputs_report(
+    studies: &[PreparedStudy],
+    network: &HybridStudySpec,
+    program: &FeatureProgram,
+    warnings: &[String],
+) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "feature_definition_sha256": feature_definition_sha256(network)?,
+        "feature_program": program,
+        "cli_version": env!("CARGO_PKG_VERSION"),
+        "studies": studies.iter().map(|study| study.report(program)).collect::<Vec<_>>(),
+        "warnings": warnings,
+    }))
 }
 
 /// 项目里的一个调优 Study（两步法的第一步）。
@@ -436,6 +876,15 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
     let options = options(opts, &network)?;
     let outputs = output_specs(&network);
 
+    // 先把每个 Study 的输入身份固定下来。这一步拒绝“无法证明与率定读同一份输入”的研究，
+    // 发生在抽任何一行之前：宁可不出模型，也不拿改过的原项目数据配旧参数标签。
+    let program = FeatureProgram::current()?;
+    let prepared = studies
+        .iter()
+        .map(|study| prepare_study(study))
+        .collect::<Result<Vec<_>>>()?;
+    let warnings = check_compatibility(&prepared, &network)?;
+
     let scratch = std::env::temp_dir().join(format!("colm-hybrid-fit-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
     let spec_path = scratch.join("hybrid.toml");
@@ -444,71 +893,22 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
     let mut rows = Vec::new();
     let mut sources = Vec::new();
     let collected = (|| -> Result<()> {
-        for (group, study) in studies.iter().enumerate() {
-            let study = study
-                .canonicalize()
-                .with_context(|| format!("cannot find Study {}", study.display()))?;
-            let manifest = crate::study::engine::status(&study)?;
-            let member = crate::study::runner::resolve_apply_member(&study, &manifest, "best")?;
-            let land_classes: BTreeMap<String, i64> = manifest
-                .spec
-                .parameters
-                .iter()
-                .filter_map(|p| {
-                    let index = p.scope_instance.as_ref()?.index?;
-                    p.name
-                        .starts_with("DEF_LC_")
-                        .then(|| (p.name.clone(), i64::from(index)))
-                })
-                .collect();
-            let case_root = crate::study::runner::study_case_root(&manifest)?;
-            for site in &manifest.spec.base_cases {
-                let case = case_root.join(site).canonicalize()?;
-                let tapped = parse_tap(&tap(&case, &spec_path, &kernel, &scratch)?)?;
-                let (mut kept, mut dropped) = (0usize, 0usize);
-                for row in tapped {
-                    let Some(targets) =
-                        row_targets(&network, &member.parameters, &land_classes, &row)
-                    else {
-                        dropped += 1;
-                        continue;
-                    };
-                    let features = network
-                        .features
-                        .iter()
-                        .map(|name| {
-                            row.values
-                                .get(name)
-                                .copied()
-                                .with_context(|| format!("the tap of {site} has no {name}"))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let weight = match &weight_column {
-                        Some(name) => *row.values.get(name).with_context(|| {
-                            format!("the tap of {site} has no weight column {name}")
-                        })?,
-                        None => 1.0,
-                    };
-                    if weight <= 0.0 {
-                        dropped += 1;
-                        continue;
-                    }
-                    rows.push(Row {
-                        group,
-                        features,
-                        targets,
-                        weight,
-                    });
-                    kept += 1;
-                }
-                sources.push(serde_json::json!({
-                    "study": study.display().to_string(),
-                    "member": member.id,
-                    "site": site,
-                    "rows": kept,
-                    "dropped": dropped,
-                }));
-            }
+        // 执行与上报用同一个路径：报告里的 path/sha256 就是这次 tap 跑的那一份。
+        let executable = Path::new(&program.path);
+        let mut tap_case = |case: &Path| tap(executable, case, &spec_path, &kernel, &scratch);
+        for (group, study) in prepared.iter().enumerate() {
+            let member = resolve_study_member(study)?;
+            collect_study_rows(
+                group,
+                study,
+                &member,
+                &network,
+                weight_column.as_deref(),
+                &program,
+                &mut tap_case,
+                &mut rows,
+                &mut sources,
+            )?;
         }
         Ok(())
     })();
@@ -525,7 +925,7 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
             .join(", ")
     );
 
-    let outcome = fit_rows(&rows, &outputs, &options, studies.len())?;
+    let outcome = fit_rows(&rows, &outputs, &options, prepared.len())?;
     let gate = outcome.passes_gate();
     if gate == Some(false) && opts.get("--require-gate").as_deref() == Some("1") {
         let (network, baseline) = outcome
@@ -562,14 +962,16 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
         serde_json::to_string_pretty(&fitted.normalization)?,
     )?;
     let names: Vec<&str> = network.outputs.iter().map(|o| o.name.as_str()).collect();
+    let inputs = inputs_report(&prepared, &network, &program, &warnings)?;
     let report = serde_json::json!({
         "network": network,
         "rows": rows.len(),
         "sources": sources,
+        "inputs": inputs,
         "outputs": names,
         "train_rmse": train,
-        "held_out_rmse": studies.iter().zip(&held_out).zip(&baseline).map(|((study, rmse), base)| serde_json::json!({
-            "study": study.display().to_string(),
+        "held_out_rmse": prepared.iter().zip(&held_out).zip(&baseline).map(|((study, rmse), base)| serde_json::json!({
+            "study": study.dir.display().to_string(),
             "rmse": rmse,
             "mean_predictor_rmse": base,
         })).collect::<Vec<_>>(),
@@ -581,6 +983,9 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
     });
     std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    for warning in &warnings {
+        eprintln!("WARNING: {warning}");
+    }
     if gate == Some(false) {
         eprintln!(
             "WARNING: in leave-one-study-out validation the network is no better than predicting \
