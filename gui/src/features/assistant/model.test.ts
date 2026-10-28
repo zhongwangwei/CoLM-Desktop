@@ -9,6 +9,7 @@ import {
   API_PROVIDERS,
   defaultSettings,
   historyInput,
+  managedNodeText,
   parseApiOptions,
   rememberProfile,
   retrievalSettingsProblem,
@@ -23,6 +24,7 @@ import {
   examplePrompt,
   providerLabel,
   egressTarget,
+  type RetrievalSettings,
 } from './model';
 import { approvalSnapshot, matchesGrant, respondToUiRequest, uiGrant } from './ui-request';
 
@@ -347,9 +349,12 @@ it('refusals before a turn starts are recognised so the input can be restored', 
   assert.equal(rejectedBeforeTurn('HTTP 500 from the model'), false);
 });
 
-it('defaults Xerj retrieval off and keeps it out of provider profiles', () => {
+it('defaults Xerj retrieval to an external node and keeps it out of provider profiles', () => {
   assert.deepEqual(defaultSettings.retrieval, {
     enabled: false,
+    mode: 'external',
+    binary_path: null,
+    port: null,
     endpoint: 'http://127.0.0.1:9200',
     index: 'colm-docs-v1',
     timeout_ms: 1500,
@@ -358,6 +363,9 @@ it('defaults Xerj retrieval off and keeps it out of provider profiles', () => {
     ...defaultSettings,
     retrieval: {
       enabled: true,
+      mode: 'managed',
+      binary_path: '/opt/xerj/bin/xerj',
+      port: 9300,
       endpoint: 'http://localhost:9200',
       index: 'docs-v2',
       timeout_ms: 2000,
@@ -365,15 +373,18 @@ it('defaults Xerj retrieval off and keeps it out of provider profiles', () => {
   });
   // 检索是应用级设置：不能进服务商 profile，否则切服务商会被旧 profile 覆盖。
   assert.equal('retrieval' in (saved.api_profiles.deepseek as object), false);
-  // 切服务商不丢检索设置；保存（含 profile 归一）也原样保留。
+  // 切服务商不丢检索设置（含 managed 字段）；保存（含 profile 归一）也原样保留。
   const switched = selectProvider(saved, 'openai');
   assert.deepEqual(switched.retrieval, saved.retrieval);
   const forSave = settingsForSave(
-    { ...switched, retrieval: { ...switched.retrieval, index: 'docs-v3' } },
+    { ...switched, retrieval: { ...switched.retrieval, index: 'docs-v3', port: null } },
     saved,
   );
   assert.deepEqual(forSave.retrieval, {
     enabled: true,
+    mode: 'managed',
+    binary_path: '/opt/xerj/bin/xerj',
+    port: null,
     endpoint: 'http://localhost:9200',
     index: 'docs-v3',
     timeout_ms: 2000,
@@ -415,6 +426,75 @@ it('validates Xerj retrieval settings with bilingual messages even when disabled
     );
   assert.match(retrievalSettingsProblem({ ...base, index: 'Docs' }, 'zh')!, /索引名/);
   assert.match(retrievalSettingsProblem({ ...base, index: 'Docs' }, 'en')!, /index name/i);
+
+  // 接入方式只接受 external|managed；managed 的托管字段只在 managed 下校验。
+  for (const mode of ['', 'MANAGED', 'automatic'])
+    assert.ok(
+      retrievalSettingsProblem({ ...base, mode: mode as RetrievalSettings['mode'] }, 'en'),
+      mode,
+    );
+  const managed: RetrievalSettings = { ...base, mode: 'managed' };
+  assert.equal(retrievalSettingsProblem(managed, 'en'), null);
+  for (const binary_path of ['relative/xerj', 'xerj', '.\\xerj.exe', '/opt/bad\npath', '\t'])
+    assert.ok(retrievalSettingsProblem({ ...managed, binary_path }, 'zh'), binary_path);
+  for (const binary_path of [null, '', '  ', '/usr/local/bin/xerj', 'C:\\xerj\\xerj.exe'])
+    assert.equal(
+      retrievalSettingsProblem({ ...managed, binary_path }, 'en'),
+      null,
+      String(binary_path),
+    );
+  for (const port of [null, 1024, 9200, 65_000])
+    assert.equal(retrievalSettingsProblem({ ...managed, port }, 'en'), null, String(port));
+  for (const port of [0, 1023, 65_001, 1024.5, Number.NaN])
+    assert.ok(retrievalSettingsProblem({ ...managed, port }, 'zh'), String(port));
+  // external 模式不校验（也不理会）托管字段：切回去不应被上次 managed 的残留值挡住。
+  assert.equal(
+    retrievalSettingsProblem({ ...base, binary_path: 'relative/xerj', port: 1 }, 'en'),
+    null,
+  );
+  // managed 仍要能通过整条保存校验（endpoint 是回退值，也必须合法）。
+  assert.ok(retrievalSettingsProblem({ ...managed, endpoint: 'https://127.0.0.1:9200' }, 'en'));
+});
+
+it('translates the managed Xerj node status and keeps unknown values visible', () => {
+  assert.equal(managedNodeText(null, 'zh'), '节点状态尚未获取');
+  assert.equal(managedNodeText(null, 'en'), 'Node status has not been loaded');
+  const running = {
+    mode: 'managed',
+    running: true,
+    endpoint: 'http://127.0.0.1:9300',
+    port: 9300,
+    version: 'v1.0.0-rc.100',
+    pinned_version: 'v1.0.0-rc.100',
+    pinned_match: true,
+    binary: '/opt/xerj/bin/xerj',
+    data_dir: '/tmp/colm-xerj',
+    detail: null,
+  };
+  assert.match(managedNodeText(running, 'zh'), /运行中/);
+  assert.match(managedNodeText(running, 'zh'), /v1\.0\.0-rc\.100/);
+  assert.match(managedNodeText(running, 'zh'), /一致/);
+  assert.match(managedNodeText(running, 'en'), /Running/);
+  assert.match(managedNodeText(running, 'en'), /http:\/\/127\.0\.0\.1:9300/);
+  const stopped = {
+    ...running,
+    running: false,
+    version: 'v1.0.0-rc.99',
+    pinned_match: false,
+    detail: 'version differs from the pinned release; replace the binary manually',
+  };
+  assert.match(managedNodeText(stopped, 'zh'), /未运行/);
+  assert.match(managedNodeText(stopped, 'zh'), /不一致/);
+  assert.match(managedNodeText(stopped, 'en'), /does not match/);
+  // detail 是后端给的原样说明，不翻译、不吞掉。
+  assert.match(managedNodeText(stopped, 'en'), /replace the binary manually/);
+  assert.match(managedNodeText(stopped, 'zh'), /replace the binary manually/);
+  // 未知 mode 原样显示；external 说清楚不探测。
+  assert.match(
+    managedNodeText({ ...running, mode: 'future_mode' }, 'en'),
+    /Unknown node mode future_mode/,
+  );
+  assert.match(managedNodeText({ ...running, mode: 'external' }, 'en'), /External node/);
 });
 
 it('translates known Xerj index states and leaves unknown states untouched', () => {

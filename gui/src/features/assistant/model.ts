@@ -12,9 +12,17 @@ export interface ApiProfile {
   reasoning_effort: string | null;
   strict: boolean;
 }
+/** Xerj 节点的接入方式：external = 用户自己运行；managed = 应用启动并管理。 */
+export type XerjMode = 'external' | 'managed';
 /** Xerj 文档检索设置：应用级，不随服务商 profile 切换；默认关闭。 */
 export interface RetrievalSettings {
   enabled: boolean;
+  /** 接入方式；旧配置缺这个字段时按 external 处理。 */
+  mode: XerjMode;
+  /** managed 模式的可选二进制路径；null/空 = 依次找 COLM_XERJ_BINARY、资源目录、PATH。 */
+  binary_path: string | null;
+  /** managed 模式的可选端口；null = 自动选连续 3 个空闲 loopback 端口。 */
+  port: number | null;
   endpoint: string;
   index: string;
   timeout_ms: number;
@@ -54,6 +62,9 @@ export const defaultSettings: Settings = {
   backend: 'builtin',
   retrieval: {
     enabled: false,
+    mode: 'external',
+    binary_path: null,
+    port: null,
     endpoint: 'http://127.0.0.1:9200',
     index: 'colm-docs-v1',
     timeout_ms: 1500,
@@ -467,15 +478,52 @@ export function retrievalStateText(state: string, language: string) {
   return language === 'en' ? text.en : text.zh;
 }
 
+/** 控制字符会被当成命令行参数或路径的一部分，必须显式拒绝；不用正则以免触发 no-control-regex。 */
+function hasControlCharacters(text: string) {
+  return [...text].some((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return code < 0x20 || code === 0x7f;
+  });
+}
+
 /**
  * 前端按后端 validate_retrieval 的同一套规则先校验 Xerj 设置（关闭也要校验）：
- * 只接受本机回环 http + 显式端口，索引名安全，超时 100–10000 ms。合法返回 null。
+ * 接入方式与托管字段合法，endpoint 始终是本机回环 http + 显式端口（managed 也存一个回退值），
+ * 索引名安全，超时 100–10000 ms。合法返回 null。
  */
 export function retrievalSettingsProblem(
   settings: RetrievalSettings,
   language: string,
 ): string | null {
   const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  // 旧后端返回的设置可能还没有 mode 字段；按 external 处理，与后端"缺字段按 external"一致。
+  const mode: XerjMode = settings.mode ?? 'external';
+  if (mode !== 'external' && mode !== 'managed')
+    return t(
+      'Xerj 接入方式只能是使用本机节点（external）或由应用管理（managed）。',
+      'The Xerj connection mode must be external (a local node you run) or managed (started by the app).',
+    );
+  if (mode === 'managed') {
+    // binary_path 空 = 自动探测；有值就必须是绝对路径，且不能带控制字符（会作为命令行参数）。
+    const rawBinary = settings.binary_path ?? '';
+    const binary = rawBinary.trim();
+    if (
+      hasControlCharacters(rawBinary) ||
+      (binary !== '' && !/^(?:\/|[A-Za-z]:[\\/])/.test(binary))
+    )
+      return t(
+        'Xerj 二进制路径必须是绝对路径（以 / 或盘符开头），且不能含控制字符；留空表示自动探测。',
+        'The Xerj binary path must be absolute (starting with / or a drive letter) and must not contain control characters; leave it blank to detect automatically.',
+      );
+    if (
+      settings.port !== null &&
+      (!Number.isSafeInteger(settings.port) || settings.port < 1024 || settings.port > 65_000)
+    )
+      return t(
+        'Xerj 节点端口须为 1024–65000 的整数；留空表示自动选择。',
+        'The Xerj node port must be an integer between 1024 and 65000; leave it blank for automatic selection.',
+      );
+  }
   let url: URL;
   try {
     url = new URL(settings.endpoint.trim());
@@ -515,4 +563,48 @@ export function retrievalSettingsProblem(
       'The Xerj retrieval timeout must be an integer between 100 and 10000 milliseconds.',
     );
   return null;
+}
+
+/** `assistant_xerj_node` 返回的托管节点状态；字段与 Tauri 命令一致，缺失/未知值原样显示。 */
+export interface XerjNodeStatus {
+  mode?: string;
+  running?: boolean;
+  endpoint?: string | null;
+  port?: number | null;
+  version?: string | null;
+  pinned_version?: string | null;
+  pinned_match?: boolean | null;
+  binary?: string | null;
+  data_dir?: string | null;
+  detail?: string | null;
+}
+
+/**
+ * 托管 Xerj 节点状态的中英文字：运行中/未运行、版本、是否与固定 release 一致、endpoint 与
+ * 后端给的 detail。未知 mode 与 detail 原样显示 —— 后端加字段时界面不能把它悄悄吞掉。
+ */
+export function managedNodeText(status: XerjNodeStatus | null, language: string): string {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  if (!status) return t('节点状态尚未获取', 'Node status has not been loaded');
+  if (status.mode === 'external')
+    return t(
+      '外部节点：使用你自行运行的 Xerj（应用不探测、不启动）',
+      'External node: use the Xerj you run yourself (the app does not probe or start it)',
+    );
+  if (status.mode !== undefined && status.mode !== 'managed')
+    return `${t('未知节点模式', 'Unknown node mode')} ${status.mode}${
+      status.detail ? ` · ${status.detail}` : ''
+    }`;
+  const parts = [status.running ? t('运行中', 'Running') : t('未运行', 'Not running')];
+  if (status.version) parts.push(`${t('版本', 'version')} ${status.version}`);
+  if (status.pinned_match === true) parts.push(t('与固定版本一致', 'matches the pinned release'));
+  if (status.pinned_match === false)
+    parts.push(
+      status.pinned_version
+        ? `${t('与固定版本不一致', 'does not match the pinned release')} (${status.pinned_version})`
+        : t('与固定版本不一致', 'does not match the pinned release'),
+    );
+  if (status.endpoint) parts.push(status.endpoint);
+  if (status.detail) parts.push(status.detail);
+  return parts.join(' · ');
 }

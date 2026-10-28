@@ -15,6 +15,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "assistant_xerj_node": {
+    "action": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "assistant_codex_models": {},
   "assistant_opencode_models": {},
   "assistant_sessions": {},

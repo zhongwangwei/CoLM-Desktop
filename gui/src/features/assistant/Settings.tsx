@@ -7,6 +7,7 @@ import {
   API_PROVIDERS,
   providerLabel,
   apiEfforts,
+  managedNodeText,
   parseApiOptions,
   providerId,
   retrievalSettingsProblem,
@@ -22,6 +23,7 @@ import {
   type Settings,
   type ModelChoice,
   type RetrievalSettings,
+  type XerjNodeStatus,
 } from './model';
 import { draftSaveState, sendingSummary, settingsDraftDirty } from './settings-draft';
 
@@ -65,6 +67,8 @@ export default function AssistantSettings({
   // Xerj 的 Key 按检索 endpoint 另存一条，和模型服务不是同一个条目，不能复用上面的 key/hasKey。
   const [retrievalKey, setRetrievalKey] = useState('');
   const [retrievalHasKey, setRetrievalHasKey] = useState<boolean | null>(null);
+  // 托管节点（managed）的实时状态来自 assistant_xerj_node；external 模式不探测、不启动。
+  const [xerjNode, setXerjNode] = useState<XerjNodeStatus | null>(null);
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -104,11 +108,12 @@ export default function AssistantSettings({
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
   // Xerj 的 Key 按 endpoint 单独登记（与模型服务的 Key 不是同一条），改动地址后重新问一次。
+  // managed 模式的 Key 由应用自己管，不探测外部 Key。
   // 新 effect 放在已有 effect 之后，避免打乱按出现顺序抽取的页面状态。
   useEffect(() => {
     let active = true;
     setRetrievalHasKey(null);
-    if (hasBackend())
+    if (hasBackend() && draft.retrieval.mode !== 'managed')
       invoke<boolean>('assistant_has_key', { baseUrl: draft.retrieval.endpoint })
         .then((value) => {
           if (active) setRetrievalHasKey(value);
@@ -120,7 +125,25 @@ export default function AssistantSettings({
     return () => {
       active = false;
     };
-  }, [draft.retrieval.endpoint]);
+  }, [draft.retrieval.endpoint, draft.retrieval.mode]);
+  // 打开设置时若已保存配置是 managed 模式，自动查一次托管节点状态（只查一次，不自动启动）。
+  // 新 effect 放最后，避免打乱按出现顺序抽取的页面状态。
+  useEffect(() => {
+    if (!hasBackend() || settings.retrieval.mode !== 'managed') return;
+    let active = true;
+    void invoke<XerjNodeStatus>('assistant_xerj_node', { action: 'status' })
+      .then((value) => {
+        if (active) setXerjNode(value);
+      })
+      .catch((error) => {
+        if (active) setStatus(settingsError(error));
+      });
+    return () => {
+      active = false;
+    };
+    // 只在已保存的接入方式变化（首次打开/保存后）时执行；草稿里的未保存切换不触发探测。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.retrieval.mode]);
   function patch(value: Partial<Settings>) {
     // 字段一改就清掉上一次"设置已保存"的成功提示，避免过时成功状态（U-05 / U-07）。
     setStatus('');
@@ -183,6 +206,17 @@ export default function AssistantSettings({
       );
     }
   }
+  /** 调 assistant_xerj_node，并把返回的托管节点状态存下来。 */
+  async function xerjNodeAction(action: 'start' | 'stop' | 'status') {
+    const value = await invoke<XerjNodeStatus>('assistant_xerj_node', { action });
+    setXerjNode(value);
+    return value;
+  }
+  /** 启动后立刻再查一次：启动是异步的，界面要显示新的 running/port/endpoint。 */
+  async function startXerjNode() {
+    await xerjNodeAction('start');
+    await xerjNodeAction('status');
+  }
   const builtin = draft.backend === 'builtin';
   const model = builtin ? draft.model : draft.external[draft.backend]?.model || '';
   const effort = builtin ? thinkValue(draft) : draft.external[draft.backend]?.effort || '';
@@ -202,6 +236,8 @@ export default function AssistantSettings({
   const customProvider = builtin && providerId(draft) === 'custom';
   const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
   const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
+  // 旧后端保存的 retrieval 可能还没有 mode：按 external 呈现（与后端"缺字段按 external"一致）。
+  const retrievalMode = draft.retrieval.mode === 'managed' ? 'managed' : 'external';
   // 自定义服务的地址是必填项，不能藏在"高级设置"里（GUI 审查 A-02/R14）；预设服务改过地址时
   // 把实际目标地址显示出来，避免用户以为还在用预设站点。
   const serviceUrlField = (
@@ -549,28 +585,209 @@ export default function AssistantSettings({
               {t('启用文档检索', 'Enable document search')}
             </label>
             <Field
-              label={t('Xerj 服务地址', 'Xerj service URL')}
+              label={t('接入方式', 'Connection mode')}
               hint={t(
-                '只接受本机回环 http，且必须写明端口；例如 http://127.0.0.1:9200。',
-                'Only loopback http with an explicit port, for example http://127.0.0.1:9200.',
+                'external 使用你自行运行的本机节点；managed 由应用启动并停止自己的 Xerj 进程。切换接入方式不会清掉已填的服务地址、索引名或已登记的 Key。',
+                'external uses a local node you run yourself; managed starts and stops the app’s own Xerj process. Switching modes does not clear the saved service URL, index name or registered key.',
               )}
             >
-              <Input
-                value={draft.retrieval.endpoint}
-                onChange={(e) => {
-                  if (retrievalKey) {
-                    setStatus(
-                      t(
-                        '请先登记或清空 Xerj Key 再修改服务地址。',
-                        'Register or clear the Xerj key before changing the service URL.',
-                      ),
-                    );
-                    return;
-                  }
-                  patchRetrieval({ endpoint: e.target.value });
-                }}
-              />
+              <Select
+                value={retrievalMode}
+                onChange={(e) =>
+                  patchRetrieval({ mode: e.target.value === 'managed' ? 'managed' : 'external' })
+                }
+              >
+                <option value="external">
+                  {t('使用已运行的本机节点（external）', 'Use a local node you run (external)')}
+                </option>
+                <option value="managed">
+                  {t(
+                    '由应用启动并管理节点（managed）',
+                    'Let the app start and manage the node (managed)',
+                  )}
+                </option>
+              </Select>
             </Field>
+            {retrievalMode === 'managed' ? (
+              <>
+                <Field
+                  label={t('Xerj 二进制路径（可选）', 'Xerj binary path (optional)')}
+                  hint={t(
+                    '留空则依次查找 COLM_XERJ_BINARY、应用资源目录、PATH。只接受固定 release v1.0.0-rc.100。',
+                    'Leave blank to look for COLM_XERJ_BINARY, the app resources directory, then PATH. Only the pinned release v1.0.0-rc.100 is accepted.',
+                  )}
+                >
+                  <Input
+                    placeholder={t('留空自动探测', 'Blank = detect automatically')}
+                    value={draft.retrieval.binary_path ?? ''}
+                    onChange={(e) => patchRetrieval({ binary_path: e.target.value })}
+                  />
+                </Field>
+                <Field
+                  label={t('节点端口（可选）', 'Node port (optional)')}
+                  hint={t(
+                    '留空自动选连续 3 个空闲 loopback 端口。',
+                    'Blank picks three consecutive free loopback ports.',
+                  )}
+                  range={t('1024–65000 的整数；留空 = 自动', 'integer 1024–65000; blank = auto')}
+                >
+                  <Input
+                    type="number"
+                    min={1024}
+                    max={65_000}
+                    placeholder={t('自动', 'auto')}
+                    value={draft.retrieval.port ?? ''}
+                    onChange={(e) =>
+                      patchRetrieval({
+                        port: e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                  />
+                </Field>
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    '应用不会自动下载或升级 Xerj：版本不等于固定 release v1.0.0-rc.100 时只提示，需要人工替换二进制并重跑验收。',
+                    'The app never downloads or upgrades Xerj: if the version differs from the pinned release v1.0.0-rc.100 it only warns; replace the binary manually and re-run acceptance.',
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('托管节点：', 'Managed node: ')}
+                  {managedNodeText(xerjNode, state.language)}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('服务地址（由应用决定）：', 'Service URL (set by the app): ')}
+                  {xerjNode?.endpoint || t('启动节点后显示', 'shown after the node starts')}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    '节点操作使用已保存的设置；改了接入方式或二进制路径后请先保存。',
+                    'Node actions use the saved settings; save first after changing the mode or binary path.',
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() =>
+                      void run(async () => {
+                        await startXerjNode();
+                        setStatus(
+                          t(
+                            '已请求启动 Xerj 节点；状态已刷新。',
+                            'Xerj node start requested; status refreshed.',
+                          ),
+                        );
+                      })
+                    }
+                  >
+                    {t('启动节点', 'Start node')}
+                  </Button>
+                  <Button
+                    onClick={() =>
+                      void run(async () => {
+                        await xerjNodeAction('stop');
+                        setStatus(t('已停止 Xerj 节点。', 'Xerj node stopped.'));
+                      })
+                    }
+                  >
+                    {t('停止节点', 'Stop node')}
+                  </Button>
+                  <Button
+                    onClick={() =>
+                      void run(async () => {
+                        await xerjNodeAction('status');
+                        setStatus(t('已刷新节点状态。', 'Node status refreshed.'));
+                      })
+                    }
+                  >
+                    {t('刷新状态', 'Refresh status')}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    'Key 由应用自动生成并保管在本机应用数据目录，不需要手动填写。',
+                    'The key is generated and kept by the app in its local application data directory; no manual key entry is needed.',
+                  )}
+                </p>
+              </>
+            ) : (
+              <>
+                <Field
+                  label={t('Xerj 服务地址', 'Xerj service URL')}
+                  hint={t(
+                    '只接受本机回环 http，且必须写明端口；例如 http://127.0.0.1:9200。',
+                    'Only loopback http with an explicit port, for example http://127.0.0.1:9200.',
+                  )}
+                >
+                  <Input
+                    value={draft.retrieval.endpoint}
+                    onChange={(e) => {
+                      if (retrievalKey) {
+                        setStatus(
+                          t(
+                            '请先登记或清空 Xerj Key 再修改服务地址。',
+                            'Register or clear the Xerj key before changing the service URL.',
+                          ),
+                        );
+                        return;
+                      }
+                      patchRetrieval({ endpoint: e.target.value });
+                    }}
+                  />
+                </Field>
+                <Field
+                  label={t('Xerj API Key', 'Xerj API key')}
+                  hint={
+                    retrievalHasKey === null
+                      ? t('Key 状态尚未确认', 'Key status is not yet confirmed')
+                      : retrievalHasKey
+                        ? t(
+                            '已在本机登记，前端不读取已保存 Key',
+                            'Registered locally; the saved key is never read by this form',
+                          )
+                        : t(
+                            '尚未登记 Key（无认证的 Xerj 节点可留空）',
+                            'No key registered (leave empty for an unauthenticated Xerj node)',
+                          )
+                  }
+                >
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    value={retrievalKey}
+                    onChange={(e) => setRetrievalKey(e.target.value)}
+                  />
+                </Field>
+                <div className="flex gap-2">
+                  <Button
+                    disabled={!retrievalKey.trim()}
+                    onClick={() =>
+                      void run(async () => {
+                        await invoke('assistant_set_key', {
+                          baseUrl: draft.retrieval.endpoint,
+                          key: retrievalKey,
+                        });
+                        setRetrievalKey('');
+                        setRetrievalHasKey(true);
+                        setStatus(t('Xerj Key 已登记', 'Xerj key registered'));
+                      })
+                    }
+                  >
+                    {t('登记 Key', 'Register key')}
+                  </Button>
+                  <Button
+                    disabled={!retrievalHasKey}
+                    onClick={() =>
+                      void run(async () => {
+                        await invoke('assistant_delete_key', { baseUrl: draft.retrieval.endpoint });
+                        setRetrievalHasKey(false);
+                      })
+                    }
+                  >
+                    {t('删除 Key', 'Delete key')}
+                  </Button>
+                </div>
+              </>
+            )}
+            {/* 索引名与超时两种接入方式共用：external 靠自己运行的节点，managed 的索引也建在这个名字下。 */}
             <Field
               label={t('索引名', 'Index name')}
               hint={t(
@@ -596,58 +813,6 @@ export default function AssistantSettings({
                 onChange={(e) => patchRetrieval({ timeout_ms: Number(e.target.value) })}
               />
             </Field>
-            <Field
-              label={t('Xerj API Key', 'Xerj API key')}
-              hint={
-                retrievalHasKey === null
-                  ? t('Key 状态尚未确认', 'Key status is not yet confirmed')
-                  : retrievalHasKey
-                    ? t(
-                        '已在本机登记，前端不读取已保存 Key',
-                        'Registered locally; the saved key is never read by this form',
-                      )
-                    : t(
-                        '尚未登记 Key（无认证的 Xerj 节点可留空）',
-                        'No key registered (leave empty for an unauthenticated Xerj node)',
-                      )
-              }
-            >
-              <Input
-                type="password"
-                autoComplete="off"
-                value={retrievalKey}
-                onChange={(e) => setRetrievalKey(e.target.value)}
-              />
-            </Field>
-            <div className="flex gap-2">
-              <Button
-                disabled={!retrievalKey.trim()}
-                onClick={() =>
-                  void run(async () => {
-                    await invoke('assistant_set_key', {
-                      baseUrl: draft.retrieval.endpoint,
-                      key: retrievalKey,
-                    });
-                    setRetrievalKey('');
-                    setRetrievalHasKey(true);
-                    setStatus(t('Xerj Key 已登记', 'Xerj key registered'));
-                  })
-                }
-              >
-                {t('登记 Key', 'Register key')}
-              </Button>
-              <Button
-                disabled={!retrievalHasKey}
-                onClick={() =>
-                  void run(async () => {
-                    await invoke('assistant_delete_key', { baseUrl: draft.retrieval.endpoint });
-                    setRetrievalHasKey(false);
-                  })
-                }
-              >
-                {t('删除 Key', 'Delete key')}
-              </Button>
-            </div>
             <p className="text-xs text-muted-foreground">
               {t('索引状态：', 'Index status: ')}
               {docsIndex ? (
@@ -712,7 +877,8 @@ export default function AssistantSettings({
                 if (key)
                   throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
                 // Xerj 的 Key 也是"输入框里有内容"= 还没登记；保存会重启助手，先让用户登记或清空。
-                if (retrievalKey)
+                // managed 模式的 Key 由应用管理，外部模式残留的输入不影响保存。
+                if (retrievalMode === 'external' && retrievalKey)
                   throw new Error(
                     t('请先登记或清空 Xerj Key。', 'Register or clear the Xerj key first.'),
                   );
@@ -739,8 +905,14 @@ export default function AssistantSettings({
                 // 检索关闭也校验格式：开/关之间切换不应因为存了非法值才发现。
                 const retrievalProblem = retrievalSettingsProblem(draft.retrieval, state.language);
                 if (retrievalProblem) throw new Error(retrievalProblem);
+                // 二进制路径的首尾空白不代表路径本身；空串按"自动探测"归一成 null，别把空白存进设置。
+                const retrieval: RetrievalSettings = {
+                  ...draft.retrieval,
+                  binary_path: draft.retrieval.binary_path?.trim() || null,
+                  endpoint: draft.retrieval.endpoint.trim(),
+                };
                 const next = settingsForSave(
-                  rememberProfile({ ...draft, api_options: parseApiOptions(options) }),
+                  rememberProfile({ ...draft, retrieval, api_options: parseApiOptions(options) }),
                   settings,
                 );
                 setSaving(true);
