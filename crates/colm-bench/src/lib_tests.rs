@@ -101,3 +101,32 @@ fn only_plain_http_index_urls_are_accepted() {
         assert!(!valid_index_url(bad), "{bad:?}");
     }
 }
+
+#[test]
+fn embedded_bench_scripts_stay_plain_lf_python() {
+    // 两个脚本由 include_str! 从 src/scripts/*.py 嵌进来：远程 heredoc、本机 `python -c`、
+    // scripts/test-bench-scripts.py 跑的是同一份。它们不是 Rust 代码，rustfmt 管不到，这里守住
+    // 最基本的三条：非空、LF（逐字节比较的规矩）、可直接当 Python 源执行。
+    for (name, script) in [("inspect", INSPECT_SCRIPT), ("prepare", PREPARE_SCRIPT)] {
+        assert!(script.len() > 1000, "{name} script looks truncated");
+        assert!(script.starts_with("#!/usr/bin/env python3"), "{name}");
+        assert!(script.ends_with('\n'), "{name}");
+        assert!(!script.contains('\r'), "{name} must stay LF-only");
+    }
+    // 这些 JSON 字段与参数位置是窗口进程/CLI 与脚本之间的契约，改名要两侧一起改。
+    for field in [
+        "spatial_type",
+        "unsupported_variables",
+        "crosses_dateline",
+        "families",
+    ] {
+        assert!(
+            INSPECT_SCRIPT.contains(&format!("\"{field}\"")),
+            "inspect.py no longer reports {field}"
+        );
+    }
+    assert!(
+        PREPARE_SCRIPT.contains("[LON] [LAT]"),
+        "prepare.py usage changed"
+    );
+}

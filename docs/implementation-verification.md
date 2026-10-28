@@ -38590,6 +38590,56 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - Tauri/GUI 本轮未改：沿用 494 passed / 1 ignored 与前端 1141 passed / 257 命令契约。
 - 真实 CLI/夹具 smoke：F01 selected 详情 source/object store 分离；F02 结构化 Upstream-Commit verified + 否定提及不误选；F03 workspace 未推送 commit 的 track→details 同源（CLI 半边）。
 - 未运行：真实索引型官方冻结包（用同形态 git init+add 夹具覆盖）、真实 Agent 模型端到端、真实 GitHub/TLS/token、真实 OpenCode/Codex/Claude Code 进程、GUI；复核报告 F01–F04 之外仍留 H07–H09、S01–S02、U01–U05 后续批次。
+
+
+## 比较页第一批修复：有效评估配置、数据契约、运行身份与远程状态（2026-10-28，审查报告 CoLM-Desktop_compare_audit_2026-10-28）
+
+按比较页审查报告（基线 b3686b13）做第一批：先修"页面确认的条件 / 实际提交的条件 / 报告归属"三者不一致，再修数据探测制备契约与远程作业状态语义。只改比较页链路，不动研究页/结果页；未提交 git（工作区另有并行会话的未提交改动，避免混提）。
+
+### 1 有效评估配置：摘要/指纹/运行都从实际提交的 YAML 解析（`gui/src/features/compare/config.ts`、`fingerprint.ts`）
+
+- 旧行为：`comparisonDesign()` 只读表单；用户手改 YAML 后 `run()` 提交的是手改文本，但运行前摘要、配置指纹、完成提示仍按表单算（2002–2005/Day vs 实际 2004–2004/Month）。保存徽标手改后仍显示 saved。
+- 新行为：`parseOpenbenchConfig()` 解析页面自己生成的那套 YAML 子集（无第三方依赖），`effectiveSummary()`/`configFingerprint()`/`run()` 全部以解析结果为准；手改后摘要立即跟着变，`configSaveState` 把手改视为未保存，完成提示绑定"有效配置指纹"（运行期间改文本/改设置都会使旧提示失效）。解析器只接受 `project/evaluation/reference/simulation/metrics/scores` 这套键与 per-type 字段；不认识的键、非法年份、单点站点清单路径被改等一律在运行前拒绝（不静默忽略）。
+- 运行前冻结：`run()` 重新解析、做结构校验（模拟集合、单点 `root_dir/fulllist` 必须与页面准备的一致），把文本/站点清单/指纹记成这次运行的快照；运行结果回来时 `showRunNotice` 只在指纹未变时生效。
+- 生成器兜底 `data_groupby` 的小写 `month` 改为 `Month`（与表单枚举/探测输出一致）。
+
+### 2 数据探测与制备契约（`crates/colm-bench/src/scripts/{inspect,prepare}.py`，`include_str!` 进原常量）
+
+- 文件族：只有 `_hist_` 后紧跟日期的是主 history；同目录 tracer/unitcat/basin/restart 只报告 `families`、不参与探测/制备。混 case 前缀（A/Z）报错列候选，不再把首尾文件拼成 2000–2010。
+- 时间轴：跨主族全部文件采样求中位步长判 `tim_res`（每日一文件单记录 → Day，逐年 → Year，3 小时 → 3Hour）；只有一个时刻时才按文件名推断并在 `warnings` 里标注。`data_groupby` 按文件名日期模式判，混合模式报错。
+- 空间类型：显式 `spatial_type`（station/patch/grid/unstructured/unknown）+ `patch`；单格 lat×lon 网格是 grid 而不是单点；element/ncol 是非结构；未知类型给 `comparable=false/blockers`，前端保存前阻断（旧逻辑先显示可比较、制备时 KeyError）。
+- 层/类别维变量：进 `unsupported_variables` 并带原因；PREPARE 打印被跳过的变量（不再静默丢）。
+- 经度：环绕归一化后算范围和分辨率；0–360 的 [200,201] → [-160,-159]；跨日界线给 `crosses_dateline=true`、`extent=null` 并由前端明确拒绝（OpenBench 的 [西,东] 表达不了）。
+- PREPARE：只并主族、按时间排序去重、同时间不同变量按坐标合并；`FOLDER PREFIX OUT_NC OUT_CSV STATION [LON [LAT]]`，坐标成对可选（覆盖文件里的旧坐标，修复"手填经纬度不进计算链"）；CSV 用 `csv.writer`（站点名/路径含逗号不再裂成七列）。
+- 测试：脚本移出 Rust raw string，`scripts/test-bench-scripts.py` 用 python3+xarray 造合成 NetCDF 覆盖 21 类用例并真实执行两个脚本（含 stdin/`-c` 两种调用）。
+
+### 3 本机运行身份（`gui/src-tauri/src/{bench,bench_runs}.rs`）
+
+- 每次运行在 `projects/<名字>/runs/<run_id>/` 冻结本次 `openbench.yaml`（逐字节）、站点清单副本、`sites.json`/`inputs.json`/`meta.json`；check/run 在该目录内执行，报告只从本次 `output/` 发现。成功才原子更新 `latest-success.json`；失败写自己的 `meta=failed` 并保留上次成功指针，不再出现"B 的配置 + A 的报告"。
+- `bench_run` 返回 `run_id/run_dir/config_sha/state/report/latest_success`；`bench_status.projects` 每项带 `latest_run{state,error,report,...}` 与 `latest_success`，无 `runs/` 的旧目录/服务器镜像仍回退旧逻辑。失败原文带 run_id 与冻结目录（前端补了英文映射）。
+- `BenchSite` 加可选 `lon/lat`（有限值/成对/范围校验），本机与远程 PREPARE 都在 station 后成对追加；远程 `Site` 同步加 serde 字段。
+
+### 4 远程作业状态语义（`crates/colm-remote/src/{job,sched}.rs`、`crates/colm-cli/src/remote_bench.rs`）
+
+- 状态脚本区分"查询执行失败"与"调度器回答查无记录"：squeue/sacct 命令失败 → `query=failed`，CLI 以固定前缀"查询作业状态失败："非零退出，前端走 uncertain 保留身份；不再落成 lost 终态。只有调度器明确终态词/退出码才 `terminal=confirmed`；`lost`（查无记录）保留身份继续核对，前端删掉"连续 3 次判失败"的轮询启发式。
+- 取消：请求被调度器收下只置 `cancel_requested`（前端显示"正在取消"），终态仍由调度器确认；占位（`.active-job`）只在 `terminal=true` 时释放，`Lost`/查询失败不再被当成结束。
+- 前端 `watch()` 相应改为：terminal 但退出码未可见 → 继续轮询；lost/unknown → 保留身份；取消在途不再写 cancelled。
+
+### 本轮验证（真实执行）
+
+- 前端（lead 最终复跑）：`node ../scripts/check-gui.mjs --self-test` → 0；`node ../scripts/check-gui.mjs` → 0（257 个已注册命令的参数名对得上）；`node ../scripts/test-react.mjs` → **1176 passed / 0 failed**；比较页测试 **88 passed**（`compare.test.ts` 31、`config.test.ts` 8、`compare-layout.test.ts` 9、`compare-page.test.ts` 15、`compare-remote.test.ts` 25）；`tsc --noEmit` 0 error；比较页 `eslint`、`prettier --check` 干净。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **508 passed / 0 failed / 1 ignored**（在 data-contract 把脚本移入 `.py`、`include_str!` 嵌入之后复跑，含新增 11+5 个 bench 测试）；clippy `--all-targets -- -D warnings` 干净；受影响文件 rustfmt 干净（`skip_children=true`，避免格式化其他会话的文件）。
+- 数据契约（data-contract 工作流 + lead 复跑）：`python3 scripts/test-bench-scripts.py` → **21 passed / 0 failed**（覆盖主+tracer 同目录、每日单记录、逐年、3 小时、混前缀报错、单格网格、0–360 经度、跨日界线、patch=2、element 向量、层维度变量、缺坐标+覆盖、CSV 逗号、重复时刻按变量合并、unknown/grid 拒绝制备、stdin 与 `-c` 两种调用）；`cargo test -p colm-bench --lib` 7 passed；clippy/fmt 干净；用 golden 数据（CN-Cng 单文件）实跑了 inspect/prepare：264 步 108 变量，11 个层/类别变量正确跳过并打印原因。
+- 远程状态（remote-job-state 工作流）：`cargo test -p colm-remote --lib` → **126 passed / 0 failed**（含 9 个新增 job 状态回归）；`cargo test -p colm-cli --bin colm-cli remote_bench` → **21 passed / 0 failed**（含真实 bash 沙箱端到端：取消在途不放占位、查询失败不放占位、sacct CANCELLED 确认后才放）；`cargo test -p colm-cli --lib remote_bench` 不可用（该 crate 只有 bin target）；`cargo clippy -p colm-remote --all-targets -- -D warnings` 干净；5 个改动文件 `rustfmt --check` 干净。**Not-tested**：colm-cli 整包 clippy `-D warnings` 被另一会话未提交的 `observation_input.rs` dead-code 挡住（远程比较页相关文件零诊断）；无真实 SSH/Slurm/PBS/LSF 故障注入。
+- 未跑：真实 Tauri 窗口端到端（本机没有可用的 OpenBench 环境）；真实格点 history 样本；远程 run 级身份（本轮只做本机）。
+
+### 未覆盖/后续批次
+
+1. 远程评估的 run 级身份与取回绑定仍缺（本轮只做本机 `runs/<run_id>/`）；远程"B 失败后取回旧报告"的风险仍在下一批处理。
+2. 层维度变量目前是"预检列出 + 制备跳过"，未支持深度选择/聚合；跨日界线区域目前明确拒绝，未支持环绕范围。
+3. 中文名称在前端已用稳定短指纹生成内部 ID（比较名/模拟键不再塌成 `_`/`sim_run`），但后端 `valid_name` 仍只收 ASCII、服务器镜像名仍可能碰撞；显示名与内部 ID 的彻底分离属第四批。
+4. 报告浏览器尚未做成运行历史列表（只显示最新运行/上次成功）；停止按钮与日志位置、草稿离页恢复等 UI 调整属第四批。
+5. 本机没有 OpenBench 环境，`bench_run` 的 prepare/check/run spawn 与 `runs/<id>/output` 报告发现只有逻辑单测；装好环境后需跑一次真实比较验收。
 ## 结果页第一批修复：区间配对、观测语义、时间基准与结果归属（2026 年，实测）
 
 基于对结果页的审计（基线提交 `6322d828`，核对时 HEAD `b3686b13`，这些路径在两者之间无改动），本轮修四组 P1。出发点是一条共同的缺口：图表、指标、诊断与导出引用的不是同一份「带条件的结果快照」，且外部观测/时间轴的含义只有部分环节在管。以下只记实测结论与踩过的坑，不重复代码在做什么。

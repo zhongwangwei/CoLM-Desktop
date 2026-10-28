@@ -231,6 +231,24 @@ pub async fn bench_remote_scan(
     call(app, &host, "scan", &[("--dir", dir)]).await
 }
 
+/// 站点清单发到服务器时的 JSON：字段与 `remote-bench-run --json` 的解析一一对应。
+/// 经纬度没有就是 null（远程侧缺省时用 history 文件里的坐标）。
+pub(crate) fn sites_payload(sites: &[crate::bench::BenchSite]) -> Vec<Value> {
+    sites
+        .iter()
+        .map(|site| {
+            json!({
+                "id": site.id.as_str(),
+                "station": site.station.as_str(),
+                "history_dir": site.history_dir.as_str(),
+                "prefix": site.prefix.as_str(),
+                "lon": site.lon,
+                "lat": site.lat,
+            })
+        })
+        .collect()
+}
+
 /// 在服务器上评估：按服务器设置的调度系统提交作业，返回作业号。
 #[tauri::command]
 pub async fn bench_remote_run(
@@ -245,17 +263,10 @@ pub async fn bench_remote_run(
     if let Some(root) = ref_root.as_deref().filter(|r| !r.trim().is_empty()) {
         server_dir(root)?;
     }
+    let sites = sites.unwrap_or_default();
+    crate::bench::validate_sites(&sites)?;
+    let sites = sites_payload(&sites);
     let server = server_for(app.clone(), &host)?;
-    let sites = sites
-        .unwrap_or_default()
-        .into_iter()
-        .map(|site| {
-            serde_json::json!({
-                "id": site.id, "station": site.station,
-                "history_dir": site.history_dir, "prefix": site.prefix,
-            })
-        })
-        .collect::<Vec<_>>();
     let request = serde_json::json!({
         "name": name, "config": config, "sites": sites,
         "ref_root": ref_root.filter(|r| !r.trim().is_empty()),

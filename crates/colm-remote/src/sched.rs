@@ -388,37 +388,174 @@ echo "$ID"
     }
 }
 
-/// 状态脚本里“没有 `exit_code` 时问调度器”的一段，输出 `state=…` 与（可选）`detail=…`。
-/// 调度器给的状态词只放进 `detail`，`state` 只有 queued、running、lost 三种。
+/// 状态脚本里“没有 `exit_code` 时问调度器”的一段。
+///
+/// 输出契约（[`crate::job::parse_report`] 消费）：
+/// - `state=queued|running`：作业还在队列里或在运行，`detail` 是调度系统的原始状态词；
+/// - `state=lost`：调度器回答了“没有这个作业”或给出了结束状态，`detail` 是它的说法；
+/// - `state=unknown` + `query=failed <原因>`：查询命令本身没能回答（调度器不可用、命令不存在、
+///   需要的那条命令失败）。这不是“作业没了”，解析层会把它变成错误，比较页保留作业身份；
+/// - `terminal=confirmed`：调度系统确认作业已经结束（CANCELLED/FAILED/COMPLETED…），只给占位判断用。
+///
+/// 为什么把失败和“查无记录”分得这么细：以前 squeue/sacct 失败时两者都输出空，脚本照样 exit 0，
+/// 状态就落成 lost；比较页连续几次之后把作业判失败、删掉身份，服务器侧占位也被当成“已结束”清掉
+/// （审查报告第 6 条）。命令非零退出有时只是“这个作业号已经不在”，所以先看它输出的说法，只有明确说
+/// 没有这个作业才算回答（`job_not_found`），其余都按查询失败上报。
 pub const QUERY: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
 ID=$(cat sched_id 2>/dev/null)
+one_line() {
+  printf '%s' "$1" | tr '\n\r' '  '
+}
+query_failed() {
+  echo "state=unknown"
+  echo "query=failed $*"
+}
+# 调度系统明确给出的终态词：确认作业已经结束，但不编造退出码（COMPLETED 的退出码可能还没经 NFS
+# 传回来，前端等 exit_code 出现后再判成功/失败）。
+lost_confirmed() {
+  echo "state=lost"
+  echo "detail=$1"
+  echo "terminal=confirmed"
+}
+# 调度器回答了“没有这个作业”，但没给结束方式：确实查不到，不是查询失败，也不能据此判终态。
+lost_unconfirmed() {
+  echo "state=lost"
+  [ -n "$1" ] && echo "detail=$1"
+  true
+}
+# 非零退出时用来判断“是不是只是没有这个作业号”：各家把这句话放在输出里（常是 stderr）。
+job_not_found() {
+  case "$1" in
+  *"Invalid job id"*|*"Unknown Job Id"*|*"Job has finished"*|*"is not found"*) return 0 ;;
+  esac
+  return 1
+}
+# 调度系统的作业号还没写下来（提交正写到一半、并发查询撞上这个窗口）：身份不完整，不是“没有这个
+# 作业”。bare/pack 不用 $ID，不适用。
+case "$S" in
+bare|*-pack) ;;
+*) case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "state=unknown"; S=incomplete ;; esac ;;
+esac
 case "$S" in
 bare)
-  if [ -f pid ] && kill -0 "$(cat pid)" 2>/dev/null; then echo "state=running"; else echo "state=lost"; fi ;;
+  # pid 文件还没出现时作业可能正在提交（占位已建、launch 还没落盘）：这时既不是 running 也不是 lost。
+  P=$(cat pid 2>/dev/null)
+  case "$P" in
+  ''|*[!0-9]*) echo "state=unknown" ;;
+  *) if kill -0 "$P" 2>/dev/null; then echo "state=running"; else lost_confirmed "the job process is gone"; fi ;;
+  esac ;;
 slurm)
-  # 状态带上原因（`PENDING|Priority`）：排队时界面要说清楚是在等优先级更高的作业还是在等资源。
-  Q=$(squeue -h -j "$ID" -o '%T|%r' 2>/dev/null | head -n 1)
-  if [ -z "$Q" ]; then
-    echo "state=lost"; echo "detail=$(sacct -n -X -P -j "$ID" -o State,ExitCode 2>/dev/null | head -n 1)"
+  # squeue 管“还在不在队列”，sacct 管“怎么结束的”。两条都正常回答才算查无记录；需要的那条命令
+  # 答不上来时只能报查询失败（尤其是 squeue 失败、sacct 无记录：作业可能还在跑，sacct 里没有）。
+  Q=$(squeue -h -j "$ID" -o '%T|%r' 2>/dev/null); SQ=$?
+  SQERR=
+  if [ "$SQ" -ne 0 ]; then
+    SQERR=$(one_line "$(squeue -h -j "$ID" -o '%T|%r' 2>&1)")
+    if job_not_found "$SQERR"; then SQ=0; Q=; fi
+  fi
+  if [ "$SQ" -eq 0 ] && [ -n "$Q" ]; then
+    # 状态带上原因（`PENDING|Priority`）：排队时界面要说清楚是在等优先级更高的作业还是在等资源。
+    Q=$(printf '%s\n' "$Q" | head -n 1)
+    case "${Q%%|*}" in
+    PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";;
+    # squeue 偶尔也会直接给出终态词（取消在途）：那是调度器确认结束，不是"在运行"。
+    CANCELLED|FAILED|COMPLETED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|PREEMPTED|BOOT_FAIL|DEADLINE) lost_confirmed "$Q"; Q= ;;
+    *) echo "state=running";;
+    esac
+    [ -n "$Q" ] && echo "detail=$Q"
   else
-    case "${Q%%|*}" in PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";; *) echo "state=running";; esac
-    echo "detail=$Q"
+    # sacct 不写 -S 时默认只看"今天"，跨夜结束的作业会查成"没有记录"；比页面身份更久的作业
+    # 本来也不该再被当成还在跑，所以固定回看 7 天（slurmdbd 的默认查询范围足够大）。
+    H=$(sacct -n -X -P -j "$ID" -S now-7days -o State,ExitCode 2>/dev/null); SH=$?
+    HERR=
+    if [ "$SH" -ne 0 ]; then
+      HERR=$(one_line "$(sacct -n -X -P -j "$ID" -S now-7days -o State,ExitCode 2>&1)")
+      if job_not_found "$HERR"; then SH=0; H=; fi
+    fi
+    if [ "$SH" -ne 0 ]; then
+      query_failed "squeue: ${SQERR:-no answer}; sacct: $HERR"
+    elif [ -n "$H" ]; then
+      H=$(printf '%s\n' "$H" | head -n 1)
+      case "$H" in
+      *CANCELLED*|*FAILED*|*COMPLETED*|*TIMEOUT*|*OUT_OF_MEMORY*|*NODE_FAIL*|*PREEMPTED*|*BOOT_FAIL*|*DEADLINE*) lost_confirmed "$H" ;;
+      *) lost_unconfirmed "$H" ;;
+      esac
+    elif [ "$SQ" -eq 0 ]; then
+      # 两个命令都正常回答且都没有记录：确实查不到（不是查询失败），但也没确认怎么结束的。
+      lost_unconfirmed ""
+    else
+      query_failed "squeue did not answer and sacct has no record: $SQERR"
+    fi
   fi ;;
 pbs)
-  Q=$(qstat -f "$ID" 2>/dev/null | sed -n 's/^ *job_state = *//p' | head -n 1)
-  if [ -z "$Q" ]; then
-    echo "state=lost"; echo "detail=$(qstat -xf "$ID" 2>/dev/null | sed -n 's/^ *job_state = *//p;s/^ *Exit_status = */exit /p' | tr '\n' ' ')"
-  else
-    case "$Q" in Q|H|W|T|S) echo "state=queued";; *) echo "state=running";; esac
-    echo "detail=$Q"
-  fi ;;
-lsf)
-  Q=$(bjobs -noheader -o stat "$ID" 2>/dev/null | head -n 1 | tr -d ' ')
-  case "$Q" in
-  PEND|PSUSP) echo "state=queued"; echo "detail=$Q";;
-  RUN|USUSP|SSUSP|WAIT|PROV) echo "state=running"; echo "detail=$Q";;
-  *) echo "state=lost"; echo "detail=$Q";;
+  QF=$(qstat -f "$ID" 2>/dev/null); SQ=$?
+  QERR=
+  if [ "$SQ" -ne 0 ]; then
+    QERR=$(one_line "$(qstat -f "$ID" 2>&1)")
+    if job_not_found "$QERR"; then SQ=0; QF=; fi
+  fi
+  QSTATE=$(printf '%s\n' "$QF" | sed -n 's/^ *job_state = *//p' | head -n 1)
+  case "$QSTATE" in
+  Q|H|W|T|S) echo "state=queued"; echo "detail=$QSTATE" ;;
+  R|E|B) echo "state=running"; echo "detail=$QSTATE" ;;
+  *)
+    # 活动查询没有答案，或者它给的是 C/F/X 这类已经结束的状态：再去 qstat -x 找结束方式。
+    HF=$(qstat -xf "$ID" 2>/dev/null); SH=$?
+    HERR=
+    if [ "$SH" -ne 0 ]; then
+      HERR=$(one_line "$(qstat -xf "$ID" 2>&1)")
+      if job_not_found "$HERR"; then SH=0; HF=; fi
+    fi
+    HSTATE=$(printf '%s\n' "$HF" | sed -n 's/^ *job_state = *//p' | head -n 1)
+    HEXIT=$(printf '%s\n' "$HF" | sed -n 's/^ *Exit_status = */exit /p' | head -n 1)
+    if [ "$SH" -ne 0 ]; then
+      if [ "$SQ" -eq 0 ] && [ -n "$QSTATE" ]; then
+        # 活动查询自己说了 C/F/X：调度器已经确认结束，历史查询失败不改变这一点。
+        case "$QSTATE" in C|F|X) lost_confirmed "$QSTATE" ;; *) lost_unconfirmed "$QSTATE" ;; esac
+      else
+        query_failed "qstat: ${QERR:-no answer}; qstat -xf: $HERR"
+      fi
+    elif [ -n "$HSTATE" ]; then
+      case "$HSTATE" in
+      C|F|X)
+        case "$HEXIT" in
+        "exit 0"|"") lost_confirmed "$HSTATE${HEXIT:+ $HEXIT}" ;;
+        *)
+          # 取消请求被收下之后出现的非零退出就是它在确认取消；没发过取消那是作业自己失败。
+          if [ -f cancel_requested ]; then lost_confirmed "CANCELLED by request (PBS $HSTATE $HEXIT)"
+          else lost_confirmed "FAILED (PBS $HSTATE $HEXIT)"; fi ;;
+        esac ;;
+      *) lost_unconfirmed "$HSTATE${HEXIT:+ $HEXIT}" ;;
+      esac
+    elif [ "$SQ" -eq 0 ] && [ -z "$QSTATE" ]; then
+      lost_unconfirmed ""
+    else
+      query_failed "qstat did not answer and qstat -xf has no record: $QERR"
+    fi ;;
   esac ;;
+lsf)
+  Q=$(bjobs -noheader -o stat "$ID" 2>/dev/null); SQ=$?
+  if [ "$SQ" -ne 0 ]; then
+    QERR=$(one_line "$(bjobs -noheader -o stat "$ID" 2>&1)")
+    if job_not_found "$QERR"; then
+      lost_unconfirmed "$QERR"
+    else
+      query_failed "bjobs did not answer (exit $SQ): $QERR"
+    fi
+  else
+    Q=$(printf '%s\n' "$Q" | head -n 1 | tr -d ' ')
+    case "$Q" in
+    PEND|PSUSP) echo "state=queued"; echo "detail=$Q" ;;
+    RUN|USUSP|SSUSP|WAIT|PROV) echo "state=running"; echo "detail=$Q" ;;
+    # LSF 的终态词：DONE=正常结束，EXIT=非零退出。取消请求被收下之后出现的 EXIT 是它确认取消的方式。
+    DONE*) lost_confirmed "COMPLETED (LSF $Q)" ;;
+    EXIT*)
+      if [ -f cancel_requested ]; then lost_confirmed "CANCELLED by request (LSF $Q)"
+      else lost_confirmed "FAILED (LSF $Q)"; fi ;;
+    '') lost_unconfirmed "" ;;
+    *) lost_unconfirmed "$Q" ;;
+    esac
+  fi ;;
 *-pack)
   # 打包运行（`crate::pack`）：看站点被哪个载体领走、那个载体还在不在。
   COLM_BASE=${S%-pack}
@@ -447,18 +584,23 @@ lsf)
 esac
 "#;
 
-/// Submit cancellation; scheduler acceptance is not proof of termination.
+/// 取消：调度系统的作业交给它结束；后台进程则结束整个进程组。
+///
+/// 调度器接受取消请求不等于作业已经终止：它可能还在队列里、还在运行。所以 slurm/pbs/lsf 只在请求
+/// 被收下后写下 `cancel_requested` 标记（状态查询据此显示"正在取消"），绝不伪造退出码或终态；
+/// 只有后面的状态查询看到调度器确认 CANCELLED/FAILED/COMPLETED 或退出码，才算作业结束。没有调度
+/// 系统时 `bare` 是亲手确认进程组不在了才写 `exit_code`+`cancelled`，那是确认过的终态。
 pub const CANCEL: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
 [ -f exit_code ] && { echo finished; exit 0; }
 ID=$(cat sched_id 2>/dev/null || true)
 case "$S" in
-slurm) scancel "$ID" || exit $? ;;
+slurm) scancel "$ID" || exit $?; : > cancel_requested ;;
 *-pack)
   # 不能取消整个载体：它上面还跑着别的站点。没领走的抢先占住，领走了的请载体只杀这一个。
   P=$(cat pool) || exit 1; J=${PWD##*/}
   if mkdir "$P/claimed/$J" 2>/dev/null; then : > "$P/claimed/$J/cancelled"; else : > "$P/claimed/$J/cancel"; fi ;;
-pbs) qdel "$ID" || exit $? ;;
-lsf) bkill "$ID" || exit $? ;;
+pbs) qdel "$ID" || exit $?; : > cancel_requested ;;
+lsf) bkill "$ID" || exit $?; : > cancel_requested ;;
 bare)
   P=$(cat pid) || exit 1
   case "$P" in ''|*[!0-9]*|0|1) echo "invalid job pid" >&2; exit 1;; esac

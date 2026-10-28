@@ -147,6 +147,23 @@ pub struct Status {
     pub log_tail: String,
 }
 
+/// 一次状态查询的完整结论：`Status` 之外再带上比较页与占位判断需要的两个结论。
+///
+/// 为什么不在 [`Status`]/[`State`] 上加字段或变体：远程运行、远程研究、打包运行都会构造或穷举这两个
+/// 类型（不在本次修复范围），多加一个字段就得同步改那些流程；这里让同一个状态脚本多输出两行，
+/// [`status`] 仍返回旧形状，[`report`] 才把新结论交给比较页。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub status: Status,
+    /// 已经向调度系统发过取消、它收下了；但作业可能还在排队或运行，终止尚未确认。
+    /// 前端据此显示"正在取消"，不能据此写 cancelled。
+    pub cancel_requested: bool,
+    /// 调度系统确认作业已经结束：有退出码，或调度器给出 CANCELLED/FAILED/COMPLETED 之类终态词
+    /// （没有调度系统时是进程探测确认进程不在了）。`state=lost` 只说明"查不到记录"时是 false ——
+    /// 那是调度器回答了"没有这个作业"，不是确认它怎么结束的。
+    pub terminal: bool,
+}
+
 /// 作业不在队列里、也没有退出码（`Lost`），但调度系统明确记下了它怎么结束的：`cancelled` 或 `failed`。
 /// land02 实测（2026-10-19）：取消 40 个还在排队的作业后，sacct 是 `CANCELLED by 1026|0:0`；它们从没开始，
 /// 所以没有 `exit_code`。只认 `Finished` 时这些站点永远"待核对"，界面一直显示运行中，也不能重新提交。
@@ -177,10 +194,11 @@ pub fn status_script(root: &str, id: &str, lines: usize) -> String {
     let dir = quote(&job_dir(root, id));
     format!(
         r#"{prelude}{alive}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
-if [ -f exit_code ] && [ -f cancelled ]; then echo "state=lost"; echo "detail=CANCELLED by request (exit $(cat exit_code))"
+if [ -f exit_code ] && [ -f cancelled ]; then echo "state=lost"; echo "detail=CANCELLED by request (exit $(cat exit_code))"; echo "terminal=confirmed"
 elif [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
 else
 {query}fi
+if [ -f cancel_requested ]; then echo "cancel_requested=yes"; else echo "cancel_requested=no"; fi
 echo "phase=$(tail -n 1 phase 2>/dev/null)"
 echo "---log---"
 tail -n {lines} log 2>/dev/null
@@ -192,11 +210,23 @@ true
     )
 }
 
-pub fn parse_status(text: &str) -> Status {
+/// 状态脚本解析出来的原始字段。`query_error` 只由 `parse_report` 变成错误：`parse_status` 的历史
+/// 调用方（别的远程流程、旧测试文本）不认查询失败这个概念，保持原样返回 `Unknown`。
+struct Parsed {
+    status: Status,
+    cancel_requested: bool,
+    terminal: bool,
+    query_error: Option<String>,
+}
+
+fn parse_fields(text: &str) -> Parsed {
     let (head, log) = text.split_once("---log---\n").unwrap_or((text, ""));
     let mut state = State::Unknown;
     let mut phase = None;
     let mut detail = None;
+    let mut cancel_requested = false;
+    let mut terminal = false;
+    let mut query_error = None;
     for line in head.lines() {
         if let Some(value) = line.strip_prefix("state=") {
             state = match value.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -212,14 +242,60 @@ pub fn parse_status(text: &str) -> Status {
             phase = Some(value.trim().to_owned()).filter(|p| !p.is_empty());
         } else if let Some(value) = line.strip_prefix("detail=") {
             detail = Some(value.trim().to_owned()).filter(|d| !d.is_empty());
+        } else if let Some(value) = line.strip_prefix("cancel_requested=") {
+            cancel_requested = value.trim() == "yes";
+        } else if let Some(value) = line.strip_prefix("terminal=") {
+            terminal = value.trim() == "confirmed";
+        } else if let Some(value) = line.strip_prefix("query=failed") {
+            let reason = value.trim_start_matches([':', ' ']).trim();
+            query_error = Some(if reason.is_empty() {
+                "the scheduler did not answer and did not say why".to_owned()
+            } else {
+                reason.to_owned()
+            });
         }
     }
-    Status {
-        state,
-        phase,
-        detail,
-        log_tail: crate::auth::redact(log),
+    // 有退出码就是确认终态；`terminal=` 只对 lost 有意义，放在别的状态上不采信（脚本按契约不会那样写，
+    // 这里挡住被拼错/旧版本脚本误导的可能）。cancel_requested 在任何状态都保留：排队/运行中带着它
+    // 就是前端要显示的"正在取消"。
+    if matches!(state, State::Finished { .. }) {
+        terminal = true;
     }
+    if !matches!(state, State::Lost | State::Finished { .. }) {
+        terminal = false;
+    }
+    Parsed {
+        status: Status {
+            state,
+            phase,
+            detail,
+            log_tail: crate::auth::redact(log),
+        },
+        cancel_requested,
+        terminal,
+        query_error,
+    }
+}
+
+pub fn parse_status(text: &str) -> Status {
+    parse_fields(text).status
+}
+
+/// 和 [`parse_status`] 一样解析，但把"查询失败"变成错误。
+///
+/// 调度器暂时不可用（squeue/sacct 非零退出或命令不存在）时，状态脚本输出 `query=failed <原因>`；
+/// 这不是"作业丢了"，绝不能落成 lost/终态：比较页要把这个错误当成"终态暂不可确认"，保留作业身份
+/// 继续核对。调用方拿到的是可诊断的错误文本（Tauri 会把它转成 Err 交给前端）。
+pub fn parse_report(text: &str) -> Result<Report> {
+    let parsed = parse_fields(text);
+    if let Some(reason) = parsed.query_error {
+        bail!("查询作业状态失败：{reason}");
+    }
+    Ok(Report {
+        status: parsed.status,
+        cancel_requested: parsed.cancel_requested,
+        terminal: parsed.terminal,
+    })
 }
 
 /// 取消：调度系统的作业交给它结束；后台进程则结束整个进程组（`setsid` 让作业自成一组）。
@@ -347,8 +423,13 @@ pub fn submit_plain(ssh: &Ssh, root: &str, id: &str, body: &str, spec: &Spec) ->
 }
 
 pub fn status(ssh: &Ssh, root: &str, id: &str, lines: usize) -> Result<Status> {
+    Ok(report(ssh, root, id, lines)?.status)
+}
+
+/// 和 [`status`] 同一次查询，但把取消请求/确认终态一起带回来（比较页与占位判断用）。
+pub fn report(ssh: &Ssh, root: &str, id: &str, lines: usize) -> Result<Report> {
     check_id(id)?;
-    Ok(parse_status(&ssh.run_ok(&status_script(root, id, lines))?))
+    parse_report(&ssh.run_ok(&status_script(root, id, lines))?)
 }
 
 pub fn cancel(ssh: &Ssh, root: &str, id: &str) -> Result<()> {

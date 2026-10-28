@@ -9,6 +9,8 @@ fn request(config: &str) -> RunRequest {
             station: "AT-Neu".into(),
             history_dir: "/data/x y/out/AT-Neu/history".into(),
             prefix: "AT-Neu_hist_".into(),
+            lon: None,
+            lat: None,
         }],
         ref_root: Some("/data/ref".into()),
     }
@@ -83,6 +85,34 @@ fn the_run_job_refuses_unsafe_names_paths_and_terminators() {
     let mut bad = request("x");
     bad.ref_root = Some("data/ref".into());
     assert!(run_body(root, &bad).is_err());
+}
+
+/// PREPARE 的签名是 `folder prefix out_nc out_csv station [lon] [lat]`：经纬度是成对的可选参数。
+/// 缺省时必须停在站点名（多传空参数会让脚本把空串当坐标）；两个都给时按位置紧跟在站点名后面。
+#[test]
+fn station_coordinates_reach_prepare_only_when_both_are_given() {
+    let root = "/srv/colm/openbench";
+    let plain = run_body(root, &request("x")).unwrap();
+    assert!(!plain.contains("'-77.5'"), "{plain}");
+    let mut located = request("x");
+    located.sites[0].lon = Some(-77.5);
+    located.sites[0].lat = Some(40.25);
+    let body = run_body(root, &located).unwrap();
+    assert!(
+        body.contains("'AT-Neu' '-77.5' '40.25'"),
+        "经纬度要成对跟在 station 后面：{body}"
+    );
+    #[cfg(unix)]
+    assert_bash_parses(&body);
+    // 只给一半：签名是成对的，宁可拒绝也不写出半份坐标。
+    let mut half = request("x");
+    half.sites[0].lon = Some(-77.5);
+    assert!(run_body(root, &half).is_err());
+    // 范围与 Tauri 侧一致：|lat| <= 90、|lon| <= 360。
+    let mut out_of_range = request("x");
+    out_of_range.sites[0].lon = Some(400.0);
+    out_of_range.sites[0].lat = Some(0.0);
+    assert!(run_body(root, &out_of_range).is_err());
 }
 
 #[test]
@@ -180,13 +210,24 @@ fn a_model_variable_mapping_refuses_colons_and_trims_fields() {
 
 // ---- GUI-07 服务器侧：同名比较的活动作业占位 ----
 
-fn job_status(state: job::State) -> job::Status {
-    job::Status {
-        state,
-        phase: None,
-        detail: None,
-        log_tail: String::new(),
+/// 用状态脚本真实的输出格式构造 [`job::Report`]：占位判定只看解析结果，不需要真的连服务器。
+fn job_report(
+    state: &str,
+    detail: Option<&str>,
+    terminal: bool,
+    cancel_requested: bool,
+) -> job::Report {
+    let mut text = format!("state={state}\n");
+    if let Some(detail) = detail {
+        text.push_str(&format!("detail={detail}\n"));
     }
+    if terminal {
+        text.push_str("terminal=confirmed\n");
+    }
+    if cancel_requested {
+        text.push_str("cancel_requested=yes\n");
+    }
+    job::parse_report(&text).unwrap()
 }
 
 #[test]
@@ -207,42 +248,54 @@ fn an_unfinished_comparison_job_has_one_stable_refusal_prefix() {
 #[test]
 fn only_a_confirmed_terminal_job_frees_the_stale_placeholder() {
     // 排队中/运行中：拒绝重复提交，错误里带的就是占位记的作业号。
-    for state in [job::State::Queued, job::State::Running] {
-        let status = job_status(state);
+    for state in ["queued", "running"] {
+        let report = job_report(state, None, false, false);
         assert_eq!(
-            active_job_refusal("bench-run-1", &status, false).as_deref(),
+            active_job_refusal("bench-run-1", &report, false).as_deref(),
             Some(active_job_error("bench-run-1").as_str()),
-            "{:?}",
-            status.state
+            "{state}"
         );
     }
-    // 已确认终态（含调度系统记下的 lost / cancelled / failed）→ 陈旧占位可以清掉重新提交。
-    for state in [
-        job::State::Finished { exit_code: 0 },
-        job::State::Finished { exit_code: 2 },
-        job::State::Lost,
+    // 取消请求在途、调度器尚未确认：仍然是排队/运行，占位不能放，也不能判终态。
+    for state in ["queued", "running"] {
+        let cancelling = job_report(state, Some("PENDING"), false, true);
+        assert!(
+            cancelling.cancel_requested && !cancelling.terminal,
+            "{state}"
+        );
+        assert!(active_job_refusal("bench-run-1", &cancelling, true).is_some());
+    }
+    // 已确认终态：有退出码，或调度器确认 CANCELLED/FAILED/COMPLETED → 陈旧占位可以清掉重新提交。
+    for (state, detail) in [
+        ("finished 0", None),
+        ("finished 2", None),
+        ("lost", Some("CANCELLED by 1026|0:0")),
+        ("lost", Some("TIMEOUT|0:0")),
+        ("lost", Some("COMPLETED|0:0")),
+        ("lost", Some("FAILED (LSF EXIT)")),
     ] {
-        let status = job_status(state);
+        let report = job_report(state, detail, true, false);
+        assert!(report.terminal, "{state} {detail:?}");
         assert_eq!(
-            active_job_refusal("bench-run-1", &status, true),
+            active_job_refusal("bench-run-1", &report, true),
             None,
-            "{:?}",
-            status.state
+            "{state} {detail:?}"
         );
         assert_eq!(
-            active_job_refusal("bench-run-1", &status, false),
+            active_job_refusal("bench-run-1", &report, false),
             None,
-            "{:?}",
-            status.state
+            "{state} {detail:?}"
         );
     }
+    // 调度器回答了"查不到这个作业"（terminal=false）：不是查询失败，但也没确认怎么结束 ——
+    // 不能据此放行重复提交（审查报告第 6 条：以前所有 Lost 都当可结束）。
+    let lost = job_report("lost", None, false, false);
+    assert!(active_job_refusal("bench-run-1", &lost, true).is_some());
     // Unknown 不能一律当终态：作业目录还在，可能只是这次查不到，宁可拒绝。
-    assert!(active_job_refusal("bench-run-1", &job_status(job::State::Unknown), true).is_some());
+    let unknown = job_report("unknown", None, false, false);
+    assert!(active_job_refusal("bench-run-1", &unknown, true).is_some());
     // 作业目录都没有：占位是提交在 mkdir 与 submit 之间崩掉的残留，可以清掉。
-    assert_eq!(
-        active_job_refusal("bench-run-1", &job_status(job::State::Unknown), false),
-        None
-    );
+    assert_eq!(active_job_refusal("bench-run-1", &unknown, false), None);
 }
 
 #[test]
@@ -450,4 +503,194 @@ fn the_active_job_scripts_really_claim_and_release_on_disk() {
     assert!(!project.join(".active-job").exists());
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---- 取消/查询失败在真实状态脚本下的整条链：用替身调度器跑 `job::status_script` ----
+
+/// 状态脚本在真实 bash 下的沙箱：替身 squeue/sacct/scancel 读到 `$STUBS/*` 里的文件，和
+/// `job_tests.rs` 的写法一致；这里只跑状态/取消脚本，不连 SSH。
+#[cfg(unix)]
+struct StatusSandbox {
+    root: std::path::PathBuf,
+    bin: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl StatusSandbox {
+    fn new(tag: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("colm-bench-status-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sandbox = Self { root, bin };
+        sandbox.stub("squeue", "cat \"$STUBS/slurm_state\" 2>/dev/null; true");
+        sandbox.stub("sacct", "cat \"$STUBS/sacct_out\" 2>/dev/null; true");
+        sandbox.stub("scancel", "echo \"$@\" > \"$STUBS/cancelled\"");
+        sandbox
+    }
+
+    fn stub(&self, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.bin.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn set(&self, file: &str, value: &str) {
+        std::fs::write(self.bin.join(file), value).unwrap();
+    }
+
+    fn unset(&self, file: &str) {
+        let _ = std::fs::remove_file(self.bin.join(file));
+    }
+
+    fn work(&self) -> String {
+        self.root.join("work").to_string_lossy().into_owned()
+    }
+
+    fn prepare_job(&self, id: &str) -> std::path::PathBuf {
+        let dir = self.root.join("work/jobs").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scheduler"), "slurm").unwrap();
+        std::fs::write(dir.join("sched_id"), "4242").unwrap();
+        dir
+    }
+
+    /// 和 `Ssh::run` 一样把脚本经 stdin 交给 `bash -s`。
+    fn run(&self, script: &str) -> (String, String, bool) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("bash")
+            .arg("-s")
+            .env("STUBS", &self.bin)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display()),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.success(),
+        )
+    }
+
+    fn report(&self, id: &str) -> job::Report {
+        let (out, err, ok) = self.run(&job::status_script(&self.work(), id, 5));
+        assert!(ok, "{err}");
+        job::parse_report(&out).unwrap_or_else(|error| panic!("{error}\n{out}"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StatusSandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// 审查报告第 6 条：取消请求被调度系统收下时作业可能还 queued；此时不能算结束，占位也不能放。
+/// 只有 sacct 确认 CANCELLED 后才结束并释放占位（以前请求一收下前端就写 cancelled、占位被清）。
+#[cfg(unix)]
+#[test]
+fn a_cancelled_job_frees_the_placeholder_only_after_the_scheduler_confirms_it() {
+    let sb = StatusSandbox::new("cancel");
+    let id = "bench-run-1";
+    sb.prepare_job(id);
+    sb.set("slurm_state", "PENDING\n");
+    let project = sb.root.join("work/openbench/projects/versions_vs_flux");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_text = project.to_string_lossy().into_owned();
+    let claim = sb.run(&acquire_script(&project_text, id));
+    assert!(claim.2, "{}", claim.1);
+    assert!(project.join(".active-job").exists());
+
+    let queued = sb.report(id);
+    assert_eq!(queued.status.state, job::State::Queued);
+    assert!(!queued.cancel_requested && !queued.terminal);
+    assert!(placeholder_unfinished(&queued, true));
+
+    // 服务器收下取消：作业还在排队，状态必须是"正在取消"而不是已取消。
+    let requested = sb.run(&job::cancel_script(&sb.work(), id));
+    assert!(requested.2, "{}", requested.1);
+    assert!(
+        requested.0.contains("cancellation_requested"),
+        "{}",
+        requested.0
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.bin.join("cancelled"))
+            .unwrap()
+            .trim(),
+        "4242"
+    );
+    let in_flight = sb.report(id);
+    assert_eq!(in_flight.status.state, job::State::Queued);
+    assert!(in_flight.cancel_requested, "前端要显示正在取消");
+    assert!(!in_flight.terminal);
+    assert_eq!(job::ended(&in_flight.status), None);
+    assert!(placeholder_unfinished(&in_flight, true), "未确认前占位不放");
+
+    // 调度器仍说在运行：还是不能结束。
+    sb.set("slurm_state", "RUNNING\n");
+    let running = sb.report(id);
+    assert_eq!(running.status.state, job::State::Running);
+    assert!(running.cancel_requested && !running.terminal);
+
+    // sacct 确认 CANCELLED：这才算结束，占位才可以释放。
+    sb.unset("slurm_state");
+    sb.set("sacct_out", "CANCELLED by 1026|0:0\n");
+    let confirmed = sb.report(id);
+    assert_eq!(confirmed.status.state, job::State::Lost);
+    assert!(confirmed.terminal);
+    assert_eq!(job::ended(&confirmed.status), Some("cancelled"));
+    assert!(!placeholder_unfinished(&confirmed, true));
+    let released = sb.run(&release_script(&project_text, id));
+    assert!(released.2, "{}", released.1);
+    assert!(
+        !project.join(".active-job").exists(),
+        "确认终态后陈旧占位才清掉"
+    );
+}
+
+/// 查询失败时状态脚本输出 `query=failed`，`job::report` 直接报错 —— 提交/取回流程在读取占位作业
+/// 状态这一步就会带着可诊断错误中止，不会走到"释放占位"的分支。
+#[cfg(unix)]
+#[test]
+fn a_failed_status_query_never_releases_the_placeholder() {
+    let sb = StatusSandbox::new("query-down");
+    let id = "bench-run-2";
+    sb.prepare_job(id);
+    let project = sb.root.join("work/openbench/projects/versions_vs_flux");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_text = project.to_string_lossy().into_owned();
+    let claim = sb.run(&acquire_script(&project_text, id));
+    assert!(claim.2, "{}", claim.1);
+
+    sb.stub(
+        "squeue",
+        "echo 'slurm_load_jobs error: Unable to contact slurm controller' >&2; exit 1",
+    );
+    sb.stub("sacct", "echo 'slurmdbd is down' >&2; exit 1");
+    let (out, err, ok) = sb.run(&job::status_script(&sb.work(), id, 5));
+    assert!(ok, "{err}");
+    let error = job::parse_report(&out).unwrap_err().to_string();
+    assert!(error.starts_with("查询作业状态失败："), "{error}");
+    assert!(
+        error.contains("Unable to contact slurm controller"),
+        "{error}"
+    );
+    assert!(project.join(".active-job").exists(), "查询失败不释放占位");
 }

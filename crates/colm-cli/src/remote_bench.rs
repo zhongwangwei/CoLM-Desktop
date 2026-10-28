@@ -252,6 +252,12 @@ struct Site {
     station: String,
     history_dir: String,
     prefix: String,
+    /// 站点经纬度（十进制度）：PREPARE 优先用它们写站点清单，缺省时回退到 history 文件里的坐标。
+    /// 与 Tauri 侧 `BenchSite` 的契约一致：两个参数要么都给、要么都不给。
+    #[serde(default)]
+    lon: Option<f64>,
+    #[serde(default)]
+    lat: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -276,8 +282,8 @@ fn read_json<T: serde::de::DeserializeOwned>(opts: &Opts) -> Result<T> {
 // 客户端已经按"本机记着的作业身份"阻止了重复提交，但身份只存在发起提交的那台电脑上：换一台电脑、
 // 手工清掉 localStorage、或两次提交交错时，服务器仍会被要求写同一个成果目录。这里在服务器侧的
 // 比较目录里放一个原子占位（`mkdir` 只有一个进程能成功），提交前必须先占住它。
-// 占位里的作业号由提交者先本地生成，所以占位写下的就是最终作业号；调用方据此向普通远程运行
-// 已有的 `job::status` 核对终态，不另造一套状态判定。
+// 占位里的作业号由提交者先本地生成，所以占位写下的就是最终作业号；调用方据此用普通远程运行
+// 有的 `job::report` 核对终态，不另造一套状态判定（查询失败会变成错误，不会落成 lost）。
 
 /// 比较目录里的活动作业占位目录。
 const ACTIVE_JOB: &str = ".active-job";
@@ -426,20 +432,25 @@ fn parse_probe(output: &str) -> Option<Option<String>> {
     }
 }
 
-/// 占位里的作业是否还没到确认终态。Queued/Running 一定是；Finished 与调度系统记下的 ended（Lost 里
-/// 的 CANCELLED/FAILED…）是终态（任务书 GUI-07 列的 succeeded/failed/cancelled/lost）；Unknown 不能
-/// 一律当终态 —— 作业目录还在时可能只是这次查不到，宁可拒绝也不能赌它已经结束。
-fn placeholder_unfinished(status: &job::Status, job_dir_exists: bool) -> bool {
-    match status.state {
-        job::State::Finished { .. } | job::State::Lost => false,
-        job::State::Queued | job::State::Running => true,
+/// 占位里的作业是否还没到确认终态。Queued/Running 一定是；Finished 与调度系统确认的终态
+/// （CANCELLED/FAILED/COMPLETED…，见 [`job::Report::terminal`]）才是结束。Unknown 不能当终态 ——
+/// 作业目录还在时可能只是这次查不到。Lost 但调度器只是回答"查不到记录"（terminal=false）同样不能
+/// 当结束：宁可拒绝重复提交，也不能赌它已经跑完。查询失败更不会走到这里 —— [`job::report`] 直接返回
+/// 错误，提交中止且不释放占位（审查报告第 6 条）。
+fn placeholder_unfinished(report: &job::Report, job_dir_exists: bool) -> bool {
+    if report.terminal {
+        return false;
+    }
+    match report.status.state {
         job::State::Unknown => job_dir_exists,
+        job::State::Queued | job::State::Running | job::State::Lost => true,
+        job::State::Finished { .. } => false,
     }
 }
 
 /// 提交/取回前的拒绝判定：`Some(固定错误原文)` 表示拒绝。
-fn active_job_refusal(id: &str, status: &job::Status, job_dir_exists: bool) -> Option<String> {
-    if placeholder_unfinished(status, job_dir_exists) {
+fn active_job_refusal(id: &str, report: &job::Report, job_dir_exists: bool) -> Option<String> {
+    if placeholder_unfinished(report, job_dir_exists) {
         Some(active_job_error(id))
     } else {
         None
@@ -482,19 +493,19 @@ fn claim_active_job(ssh: &Ssh, base: &str, project: &str, id: &str) -> Result<()
                     ssh.run_ok(&remove_placeholder_script(project))?;
                     continue;
                 }
-                let status = job::status(ssh, base, &existing, 5)?;
-                let dir_exists = if matches!(status.state, job::State::Unknown) {
+                let report = job::report(ssh, base, &existing, 5)?;
+                let dir_exists = if matches!(report.status.state, job::State::Unknown) {
                     job_dir_exists(ssh, base, &existing)?
                 } else {
                     false
                 };
-                if let Some(error) = active_job_refusal(&existing, &status, dir_exists) {
+                if let Some(error) = active_job_refusal(&existing, &report, dir_exists) {
                     bail!("{error}");
                 }
                 // 作业号在、作业目录不在、状态还查不出来：可能是并发的另一份提交刚占位、还没提交出去。
                 // 一分钟内不能清（否则两份提交都会提交成功、写同一个成果目录）；超时仍没有作业目录，
                 // 才当"提交在 mkdir 与 submit 之间崩了"的残留清掉。
-                if matches!(status.state, job::State::Unknown) && !dir_exists {
+                if matches!(report.status.state, job::State::Unknown) && !dir_exists {
                     let expired = ssh.run_ok(&placeholder_expired_script(project))?;
                     if expired.trim() != "stale" {
                         bail!("{}", active_job_error(&existing));
@@ -573,6 +584,26 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 站点经纬度是 PREPARE 末尾的成对可选参数（`… station [lon] [lat]`）。只给一个会写出半份坐标，
+/// 所以在拼 argv 前就拒绝；范围与 Tauri 侧 `valid_coordinates` 一致（经度允许 0–360 写法）。
+fn coordinate_pair(site: &Site) -> Result<Option<(f64, f64)>> {
+    match (site.lon, site.lat) {
+        (None, None) => Ok(None),
+        (Some(lon), Some(lat)) => {
+            ensure!(
+                lon.is_finite() && lat.is_finite() && lon.abs() <= 360.0 && lat.abs() <= 90.0,
+                "bad site coordinates for {:?}: lon={lon}, lat={lat}",
+                site.id
+            );
+            Ok(Some((lon, lat)))
+        }
+        _ => bail!(
+            "site {:?} gives only one of lon/lat; give both or neither",
+            site.id
+        ),
+    }
+}
+
 fn run_body(root: &str, request: &RunRequest) -> Result<String> {
     ensure!(
         request.config.len() <= 512 * 1024,
@@ -613,16 +644,24 @@ fn run_body(root: &str, request: &RunRequest) -> Result<String> {
             "echo {}\n",
             quote(&format!("合并 {} 的 history", site.id))
         ));
+        // 位置参数顺序由 PREPARE 的签名决定：folder prefix out_nc out_csv station [lon] [lat]。
+        // 经纬度只在两个都给时追加（缺省时 Python 回退到 history 文件里的坐标）。
+        let mut prepare = vec![
+            site.history_dir.clone(),
+            site.prefix.clone(),
+            format!("{project}/sim/{}.nc", site.id),
+            format!("{project}/sim/{}.csv", site.id),
+            site.station.clone(),
+        ];
+        if let Some((lon, lat)) = coordinate_pair(site)? {
+            prepare.push(lon.to_string());
+            prepare.push(lat.to_string());
+        }
+        let prepare: Vec<&str> = prepare.iter().map(String::as_str).collect();
         body.push_str(&python_here(
             root,
             PREPARE_SCRIPT,
-            &[
-                &site.history_dir,
-                &site.prefix,
-                &format!("{project}/sim/{}.nc", site.id),
-                &format!("{project}/sim/{}.csv", site.id),
-                &site.station,
-            ],
+            &prepare,
             "COLM_BENCH_PREPARE",
         ));
     }
@@ -667,6 +706,15 @@ fn uninstall_script(root: &str, targets: &[&str]) -> String {
 }
 
 /// `remote-bench-job`：作业状态与日志末尾。
+///
+/// 比原来的 JSON 多两个字段，给比较页判断"取消在途"与"已确认结束"：
+/// - `cancel_requested`：取消请求已被调度系统收下，但作业可能还在排队/运行（前端显示"正在取消"）；
+/// - `terminal`：调度系统确认作业已经结束（退出码或 CANCELLED/FAILED/COMPLETED…）。它是"能不能放开
+///   重复提交/别再把还在跑当结束"的判断依据，不等于 `ended`：COMPLETED 但退出码还没到时会
+///   terminal=true、ended=null，前端应继续等退出码，不写成功/失败。
+///
+/// 查询命令本身失败（调度器不可用等）时这里返回错误、进程非零退出：Tauri 把它交给前端，前端保留
+/// 作业身份继续核对。绝不返回一个"lost"让前端/占位把暂时查不到当成作业已经没了。
 pub(super) fn job_status(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let base = super::remote_cmd::root_of(opts)?;
@@ -678,10 +726,17 @@ pub(super) fn job_status(opts: &Opts) -> Result<()> {
         .context("--lines must be a whole number")?
         .unwrap_or(80usize)
         .min(400);
-    let status = job::status(&ssh, &base, &id, lines)?;
+    let report = job::report(&ssh, &base, &id, lines)?;
+    let status = &report.status;
     println!(
         "{}",
-        json!({ "job": id, "status": status, "ended": job::ended(&status) })
+        json!({
+            "job": id,
+            "status": status,
+            "ended": job::ended(status),
+            "terminal": report.terminal,
+            "cancel_requested": report.cancel_requested,
+        })
     );
     Ok(())
 }
@@ -917,13 +972,13 @@ pub(super) fn fetch(opts: &Opts) -> Result<()> {
         "--out must be an absolute local directory"
     );
     if let Some(active) = active_job_id(&ssh, &project)? {
-        let status = job::status(&ssh, &base, &active, 5)?;
-        let dir_exists = if matches!(status.state, job::State::Unknown) {
+        let report = job::report(&ssh, &base, &active, 5)?;
+        let dir_exists = if matches!(report.status.state, job::State::Unknown) {
             job_dir_exists(&ssh, &base, &active)?
         } else {
             false
         };
-        if let Some(error) = active_job_refusal(&active, &status, dir_exists) {
+        if let Some(error) = active_job_refusal(&active, &report, dir_exists) {
             bail!("{error}");
         }
     }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invoke, invokeJson, listen } from '../../lib/ipc';
@@ -7,6 +7,12 @@ import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '..
 import { ActionButton } from '../../components/ActionButton';
 import { SaveBadge } from '../../components/SaveBadge';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
+import {
+  configFingerprint,
+  effectiveSummary,
+  parseOpenbenchConfig,
+  structuralProblems,
+} from './config';
 import {
   benchErrorText,
   benchLogText,
@@ -20,6 +26,9 @@ import {
   defaultGridRes,
   designFingerprint,
   evaluationSummary,
+  inspectBlockerText,
+  inspectFamilyNote,
+  inspectWarningText,
   jobContacted,
   jobEnded,
   jobUncertain,
@@ -31,6 +40,7 @@ import {
   validateSimulation,
   type BenchReference,
   type ComparisonDesign,
+  type EvaluationDesign,
   type HistoryInfo,
   type RemoteJobIdentity,
   type SimulationField,
@@ -38,7 +48,30 @@ import {
   type SimulationIssue,
 } from './compare';
 
-type Project = { name: string; dir?: string; config?: string | null; report: string | null };
+type ProjectRun = {
+  run_id: string;
+  state: 'running' | 'succeeded' | 'failed';
+  report: string | null;
+  finished_at?: string | null;
+  created_at?: string | null;
+  config_sha?: string | null;
+  error?: string | null;
+};
+type Project = {
+  name: string;
+  dir?: string;
+  config?: string | null;
+  report: string | null;
+  /** 最近一次运行的真实身份与结果；失败时 error 是本次运行的失败原因。 */
+  latest_run?: ProjectRun | null;
+  /** 最近一次成功运行（只有成功才更新）：报告取回/打开都以它为准。 */
+  latest_success?: {
+    run_id: string;
+    config_sha: string;
+    report: string | null;
+    finished_at: string | null;
+  } | null;
+};
 /** 本机（`bench_status`）与服务器（`bench_remote_status`）的状态；服务器那份没有 uv 的路径，多了平台与下载工具。 */
 type Status = {
   root: string;
@@ -59,13 +92,23 @@ type Pick = {
   label: string;
   info: HistoryInfo | null;
   error?: string;
+  /** 探测警告（时间分辨率是推断的、缺坐标、文件族不参与）：不阻断，但要在列表里看得到。 */
+  note?: string;
   /** 新模块的模拟变量覆盖（per-simulation variables）。 */
   variables?: Record<string, { varname: string; varunit: string }>;
   dataGroupby?: string | null;
   gridRes?: number | null;
 };
 /** 单点模拟要先并成的站点清单项（与后端 `bench_run` 的 `sites` 参数一致）。 */
-type Site = { id: string; station: string; history_dir: string; prefix: string };
+type Site = {
+  id: string;
+  station: string;
+  history_dir: string;
+  prefix: string;
+  /** 页面确认的站点坐标；合并站点文件时用它，缺省才回退到文件里的值。 */
+  lon: number | null;
+  lat: number | null;
+};
 /**
  * 登记/编辑模拟的表单。保存相关字段就是 `SimulationFormValues`；`probe` 保存完整探测结果，
  * 保存时只覆盖用户明确编辑的字段（GUI-10），`probeDir` 记住它属于哪个目录。
@@ -100,6 +143,10 @@ type RemoteJob = {
   job: string;
   status: { state: string; exit_code?: number; log_tail: string; detail?: string | null };
   ended: string | null;
+  /** 调度系统明确确认作业不会再写（退出码/结果可能还没经 NFS 可见）。 */
+  terminal?: boolean;
+  /** 已向调度器发出取消且它收下了，但作业可能仍 queued/running。 */
+  cancel_requested?: boolean;
 };
 /**
  * 正在服务器上跑的那个作业：完整身份记在本机（主机、比较项目、提交时间、最后确认状态），
@@ -247,6 +294,14 @@ export default function ComparePage() {
     null,
   );
   const [sites, setSites] = useState<Site[]>([]);
+  // 本机最近一次运行的身份（后端 run 快照）：完成提示与报告显示都绑定它，而不是"目录里有一份报告"。
+  const [lastRun, setLastRun] = useState<{
+    runId: string;
+    configSha: string;
+    fingerprint: string;
+    at: string;
+    report: string | null;
+  } | null>(null);
   // 生成配置时读不出区域范围的格点模拟：只写目标分辨率，页面说明原因（GUI-10）。
   const [missingExtent, setMissingExtent] = useState<string[]>([]);
   const [report, setReport] = useState<{ path: string; html: string } | null>(null);
@@ -293,8 +348,11 @@ export default function ComparePage() {
   const fetching = useRef<Set<string>>(new Set());
   // 生成配置时记下设计指纹与自动生成的文本、站点清单：运行前再核对，手改过的配置不被清掉（GUI-04）。
   const generated = useRef<{ fingerprint: string; config: string; sites: Site[] } | null>(null);
-  // 运行完成提示对应的设计指纹：设置一改提示就过期（U-05）。
+  // 运行完成提示对应的有效配置指纹：设置或配置文本一改提示就过期（U-05）。
   const runNoticeFor = useRef('');
+  // 上一次自动预填的网格分辨率：只有输入框还是这个值（或空着）时才允许被新的默认值覆盖，
+  // 用户手填的值不被"新增模拟"悄悄改掉（审查报告：手工网格设置被再次应用默认值）。
+  const autoGridRes = useRef('');
   const LEFT = 'compare page left';
   const remote = !!host;
   const jobKey = (machine: string) => `colm.benchJob@${machine}`;
@@ -440,7 +498,6 @@ export default function ComparePage() {
     job.current = identity;
     setActiveJob(identity);
     rememberJob(machine, identity);
-    let unsure = 0;
     try {
       for (;;) {
         if (!alive.current) throw new Error(LEFT);
@@ -474,27 +531,27 @@ export default function ComparePage() {
           settleJob(machine, identity, 'cancelled');
           return { state: 'cancelled', job: identity };
         }
-        // 点了停止：服务器上先结束进程、后写下"已取消"，中间那一下查到的是"找不到结果"，不能报成失败。
-        if (stopping.current && reply.status.state !== 'running') {
-          settleJob(machine, identity, 'cancelled');
-          return { state: 'cancelled', job: identity };
+        // 调度系统已确认作业不会再写，但退出码/结果还没经 NFS 可见（terminal=true、state 不是 finished）：
+        // 继续轮询等结果，不能凭"已经结束"或轮询次数判成功/失败（审查报告第 6 条契约）。
+        if (reply.terminal === true) {
+          identity = jobContacted(identity, reply.status.state, new Date().toISOString());
+          rememberJob(machine, identity);
+          job.current = identity;
+          setActiveJob(identity);
+          await sleep(3000);
+          continue;
         }
-        // 进程没了、退出码还没写下：可能正在收尾，多看几次再下结论（2026-10-23 窗口实测停止时的竞态）。
-        // 调度系统说已经结束（Slurm 的 COMPLETED）时多等一会儿：计算节点写下的退出码，登录节点经 NFS
-        // 要过一阵才看得到（land02 实测：作业已不在队列、sacct 是 COMPLETED|0:0，exit_code 稍后才出现）。
-        // 只凭 COMPLETED 不能算成功：作业脚本最后一行写退出码，评估失败时作业本身照样以 0 结束。
-        const settling = /COMPLETED/i.test(reply.status.detail ?? '');
-        const state = reply.status.state;
-        if ((state === 'lost' || state === 'unknown') && ++unsure > (settling ? 30 : 2)) {
-          const reason = t(
-            `服务器上找不到这个作业的结果（${reply.status.detail ?? state}）。`,
-            `The server job ended without a result (${reply.status.detail ?? state}).`,
+        // 点了停止、调度器也收下了取消请求：显示"正在取消"，等它确认终态；绝不在这里写 cancelled。
+        if (reply.cancel_requested || stopping.current)
+          setNotice(
+            t(
+              '已请求取消，等待调度系统确认终态…',
+              'Cancellation requested; waiting for the scheduler to confirm the final state…',
+            ),
           );
-          settleJob(machine, identity, 'failed', reason);
-          return { state: 'failed', job: identity, error: reason };
-        }
-        // 还在跑：记下最后确认状态，重开应用/回到页面后能显示这个作业到了哪一步。
-        identity = jobContacted(identity, state, new Date().toISOString());
+        // 查不到记录（lost/unknown）不是查询失败，也不是确认终态：保留身份继续核对。
+        // 不能用"连续几次"制造终态（审查报告：3 次后写 failed 并删身份是错的）。
+        identity = jobContacted(identity, reply.status.state, new Date().toISOString());
         rememberJob(machine, identity);
         job.current = identity;
         setActiveJob(identity);
@@ -553,7 +610,13 @@ export default function ComparePage() {
           source: from,
           index: mirror,
         });
-        await afterWatch(machine, await watch(machine, { job: submitted.job, kind: 'install' }));
+        const outcome = await afterWatch(
+          machine,
+          await watch(machine, { job: submitted.job, kind: 'install' }),
+        );
+        // 只是"暂时查不到/失联"时身份还在，不能继续装下一步，也不能显示装好了
+        // （审查报告：最后一步返回 uncertain 后仍继续显示"装好了"）。
+        if (outcome.state !== 'succeeded') return;
       }
       setNotice(t('装好了', 'Installed'));
     });
@@ -564,10 +627,25 @@ export default function ComparePage() {
       const machine = host;
       stopping.current = true;
       // 取消失败（比如同样断网）要说出来并让停止按钮恢复可用，不能悄悄停在一个永远等下去的状态。
-      void invoke('bench_remote_cancel', { host: machine, job: job.current.job }).catch((e) => {
-        stopping.current = false;
-        if (stillCurrent(machine, hostEpoch.current)) setError(shown(e));
-      });
+      void invoke<{ job: string; request_accepted?: boolean }>('bench_remote_cancel', {
+        host: machine,
+        job: job.current.job,
+      })
+        .then((reply) => {
+          if (!stillCurrent(machine, hostEpoch.current)) return;
+          // request_accepted 只说明调度器收下取消请求，不是终态：继续等它确认（审查报告第 6 条）。
+          if (reply.request_accepted)
+            setNotice(
+              t(
+                '已请求取消，等待调度系统确认终态…',
+                'Cancellation requested; waiting for the scheduler to confirm the final state…',
+              ),
+            );
+        })
+        .catch((e) => {
+          stopping.current = false;
+          if (stillCurrent(machine, hostEpoch.current)) setError(shown(e));
+        });
     } else void invoke('bench_cancel');
   };
   const uninstall = async (what: 'env' | 'all') => {
@@ -680,7 +758,24 @@ export default function ComparePage() {
       );
       // 探测期间换了机器：结果属于旧机器，不能写进当前页面的模拟表（GUI-05）。
       if (!stillCurrent(machine, epoch)) return;
-      setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, info } : p)));
+      const blocked = info.comparable === false ? inspectBlockerText(info) : null;
+      const warning = inspectWarningText(info);
+      const family = inspectFamilyNote(info);
+      const note = [warning ? t(warning[0], warning[1]) : '', family ? t(family[0], family[1]) : '']
+        .filter(Boolean)
+        .join(' ');
+      setPicks((old) =>
+        old.map((p) =>
+          p.dir === dir
+            ? {
+                ...p,
+                info,
+                error: blocked ? t(blocked[0], blocked[1]) : undefined,
+                note: note || undefined,
+              }
+            : p,
+        ),
+      );
     } catch (e) {
       if (!stillCurrent(machine, epoch)) return;
       setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: shown(e) } : p)));
@@ -796,7 +891,9 @@ export default function ComparePage() {
             probeDir: dir,
           };
         });
-        setSimError(null);
+        const blocked = info.comparable === false ? inspectBlockerText(info) : null;
+        if (blocked) showSimulationIssue({ field: 'dir', message: blocked });
+        else setSimError(null);
       },
       t('已读取目录概况', 'Folder inspected'),
     );
@@ -822,6 +919,20 @@ export default function ComparePage() {
           .filter((row) => row.variable && row.varname)
           .map((row) => [row.variable, { varname: row.varname, varunit: row.unit }]),
       );
+      // 编辑已有模拟时以打开弹窗的那条为身份：即使把目录改到别处也替换原条目，不能留下旧条目
+      // 再新增一条（审查报告：编辑已有模拟目录后旧条目仍在；同名时后续生成失败）。
+      const editingAt = simEditing === null ? -1 : picks.findIndex((p) => p.dir === simEditing);
+      const sameDir = picks.findIndex((p) => p.dir === dir);
+      if (sameDir >= 0 && sameDir !== editingAt) {
+        showSimulationIssue({
+          field: 'dir',
+          message: [
+            '这个目录已经是一个模拟了；请选别的目录，或直接编辑那一条。',
+            'This folder is already one of the simulations; pick another folder or edit that entry.',
+          ],
+        });
+        return;
+      }
       setPicks((old) => {
         // 分组/原生分辨率已经并进 info；清掉旧的手动覆盖，免得它继续盖住用户在表单里改的值（GUI-09/10）。
         const next = {
@@ -832,6 +943,8 @@ export default function ComparePage() {
           dataGroupby: null,
           gridRes: null,
         };
+        if (editingAt >= 0)
+          return old.map((p, i) => (i === editingAt ? { ...p, ...next, error: undefined } : p));
         const at = old.findIndex((p) => p.dir === dir);
         return at >= 0
           ? old.map((p, i) => (i === at ? { ...p, ...next, error: undefined } : p))
@@ -847,7 +960,11 @@ export default function ComparePage() {
       setError(shown(e));
     }
   };
-  const ok = picks.filter((p): p is Pick & { info: HistoryInfo } => !!p.info);
+  // 探测明确判定不可比较（多 patch/非结构/未知空间类型/跨日界线）的目录不参与生成与运行：
+  // 运行前就阻断，而不是先显示"可比较"再在制备阶段 KeyError（审查报告第 2 条）。
+  const ok = picks.filter(
+    (p): p is Pick & { info: HistoryInfo } => !!p.info && p.info.comparable !== false,
+  );
   useEffect(() => {
     const years = commonYears(ok.map((p) => ({ label: p.label, info: p.info })));
     if (years && !from && !to) {
@@ -855,7 +972,9 @@ export default function ComparePage() {
       setTo(String(years[1]));
     }
     const res = defaultGridRes(ok.map((p) => p.info));
-    setGridRes(res ? String(res) : '');
+    const next = res ? String(res) : '';
+    setGridRes((old) => (old === '' || old === autoGridRes.current ? next : old));
+    autoGridRes.current = next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ok.length]);
   // 换了评估的机器：状态、登记表、参考数据根目录都换成那台的；所选模拟的路径属于原来那台，清掉。
@@ -928,34 +1047,48 @@ export default function ComparePage() {
     scores,
   });
   const machine = { host, openbenchRoot: status?.root ?? '', refRoot: scanDir };
+  // 表单设计：`保存评估配置` 生成配置与站点清单时用它（GUI-04）。
+  const formDesign: EvaluationDesign = { machine, ...comparisonDesign() };
   // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
-  const design = designFingerprint({ machine, ...comparisonDesign() });
-  // 页面最新一版设计的指纹：运行期间用户还能改字段，成功提示回来时据此判断它是不是已经过时（U-05）。
-  const latestDesign = useRef(design);
-  latestDesign.current = design;
+  const design = designFingerprint(formDesign);
   const generatedConfig = generated.current;
-  // 配置属于旧设计：没手改过的自动作废、要求重新生成；手改过的原样留着，标记过期并禁止直接运行。
-  const yamlStale = !!yaml && !!generatedConfig && generatedConfig.fingerprint !== design;
+  // 有效评估配置：用户可以在文本框里直接改 YAML，提交给后端的也是这段文本。摘要、指纹、运行校验
+  // 一律以解析后的文本为准，不再只读表单（审查报告 P1：手改 YAML 后摘要/完成提示与真实运行不一致）。
+  const parsedConfig = useMemo(() => (yaml ? parseOpenbenchConfig(yaml) : null), [yaml]);
+  const effectiveConfig = parsedConfig?.config ?? null;
+  const configProblems = parsedConfig?.problems ?? [];
+  // 手改不能增删模拟或改单点站点清单路径：那些文件由后端按页面选中的目录准备。
+  const structureProblems = effectiveConfig ? structuralProblems(formDesign, effectiveConfig) : [];
+  const effectiveFingerprint = effectiveConfig
+    ? configFingerprint(formDesign, effectiveConfig)
+    : design;
+  // 运行期间用户还能改字段/改文本，完成提示回来时据此判断它是不是已经过时（U-05）。
+  const latestEffective = useRef(effectiveFingerprint);
+  latestEffective.current = effectiveFingerprint;
   const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.config;
-  // U-04：运行前条件摘要和实际提交用同一份 design（comparisonDesign + 机器/路径身份），不另读页面状态。
-  const conditionSummary = () => evaluationSummary({ machine, ...comparisonDesign() });
-  // U-05：评估配置三态（有未保存修改 / 正在保存 / 已保存）。
+  // 生成配置之后表单又改过（但用户手写的内容还留着）：提示表单改动没有进入这份配置。
+  const formChanged = !!yaml && !!generatedConfig && generatedConfig.fingerprint !== design;
+  // U-04：运行前条件摘要直接来自有效配置；没有生成配置时仍按表单设计显示（还没提交过任何文本）。
+  const conditionSummary = () =>
+    effectiveConfig ? effectiveSummary(formDesign, effectiveConfig) : evaluationSummary(formDesign);
+  // U-05：评估配置三态（有未保存修改 / 正在保存 / 已保存）。手改后的文本还没有写进比较项目目录，
+  // 因此显示"未保存"而不是"saved"（审查报告已复现的误导）。
   const configState = configSaveState({
     yaml,
     currentFingerprint: design,
     generated: generated.current,
     submitting: configSaving,
   });
-  // 运行/保存成功提示只在同一版设计上有效；设置一改就清掉（U-05）。
-  const showRunNotice = (message: string) => {
-    // 运行期间设置已经改过：这次完成的是旧设计，不能给当前设置挂"评估完成"。
-    if (latestDesign.current !== design) return;
-    runNoticeFor.current = design;
+  // 运行/保存成功提示只在同一份有效配置上有效；设置或文本一改就清掉（U-05）。
+  const showRunNotice = (message: string, fingerprint: string) => {
+    // 运行期间配置已经改过：这次完成的是旧配置，不能给当前设置挂"评估完成"。
+    if (latestEffective.current !== fingerprint) return;
+    runNoticeFor.current = fingerprint;
     setRunNotice(message);
   };
   const clearStaleEvaluationNotice = () => {
-    if (!runNotice || runNoticeFor.current === design) return;
+    if (!runNotice || runNoticeFor.current === effectiveFingerprint) return;
     runNoticeFor.current = '';
     setRunNotice('');
   };
@@ -977,7 +1110,7 @@ export default function ComparePage() {
     invalidateGeneratedConfig();
     clearStaleEvaluationNotice();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [design]);
+  }, [design, effectiveFingerprint]);
   const allVariables = comparableVariables(
     references,
     ok.map((p) => p.info),
@@ -1024,28 +1157,61 @@ export default function ComparePage() {
   };
   const run = () =>
     task(async () => {
-      // 运行前再校验一次：只认按当前设计生成的配置和站点清单，旧配置不能直接运行（GUI-04）。
-      const generatedNow = generated.current;
-      if (!generatedNow || generatedNow.fingerprint !== design)
+      // 运行前只认页面当前这份有效配置：解析、结构校验、冻结，全部以即将提交的文本为准。
+      // 光看表单或"生成时的指纹"会让手改过的 YAML 绕过校验（审查报告 P1 的复现路径）。
+      const parsedNow = parseOpenbenchConfig(yaml);
+      if (!parsedNow.config)
         throw new Error(
           t(
-            '评估设置改过了，旧配置不能直接运行；请先重新生成评估配置。',
-            'The evaluation settings changed; generate the evaluation configuration again before running.',
+            `配置里有不能运行的内容：${parsedNow.problems.map(([zh]) => zh).join('；')}`,
+            `The configuration cannot run: ${parsedNow.problems.map(([, en]) => en).join('; ')}`,
           ),
         );
+      const frozenConfig = parsedNow.config;
+      const mismatched = structuralProblems(formDesign, frozenConfig);
+      if (mismatched.length)
+        throw new Error(
+          t(mismatched.map(([zh]) => zh).join('；'), mismatched.map(([, en]) => en).join('; ')),
+        );
+      // 冻结这次运行的实际条件（配置文本、站点清单、指纹）：完成提示与报告身份都绑定这份快照，
+      // 运行期间再改页面也不会把"上一次的结果"说成当前配置的结果。
+      const frozen = {
+        config: yaml,
+        sites: generated.current?.sites ?? sites,
+        fingerprint: configFingerprint(formDesign, frozenConfig),
+        at: new Date().toISOString(),
+      };
       const project = comparisonName(name);
       // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
       setConfigSaving(true);
       try {
         if (!remote) {
-          const result = await invokeJson<{ report: string | null }>('bench_run', {
+          const result = await invokeJson<{
+            report: string | null;
+            run_id?: string;
+            config_sha?: string;
+            state?: string;
+            latest_success?: unknown;
+          }>('bench_run', {
             name: project,
-            config: yaml,
-            sites,
+            config: frozen.config,
+            sites: frozen.sites,
             refRoot: scanDir || null,
           });
+          setLastRun({
+            runId: result.run_id ?? '',
+            configSha: result.config_sha ?? '',
+            fingerprint: frozen.fingerprint,
+            at: frozen.at,
+            report: result.report,
+          });
           if (result.report) await view(result.report);
-          showRunNotice(t('评估完成', 'Evaluation finished'));
+          showRunNotice(
+            result.run_id
+              ? t(`评估完成（运行 ${result.run_id}）`, `Evaluation finished (run ${result.run_id})`)
+              : t('评估完成', 'Evaluation finished'),
+            frozen.fingerprint,
+          );
           return;
         }
         // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
@@ -1055,13 +1221,22 @@ export default function ComparePage() {
         const submitted = await invokeJson<{ job: string }>('bench_remote_run', {
           host: machine,
           name: project,
-          config: yaml,
-          sites,
+          config: frozen.config,
+          sites: frozen.sites,
           refRoot: scanDir || null,
         });
         const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
         await afterWatch(machine, outcome, () => fetchReport(machine, project));
-        if (outcome.state === 'succeeded') showRunNotice(t('评估完成', 'Evaluation finished'));
+        if (outcome.state === 'succeeded') {
+          setLastRun({
+            runId: submitted.job,
+            configSha: '',
+            fingerprint: frozen.fingerprint,
+            at: frozen.at,
+            report: null,
+          });
+          showRunNotice(t('评估完成', 'Evaluation finished'), frozen.fingerprint);
+        }
       } finally {
         setConfigSaving(false);
       }
@@ -1118,7 +1293,7 @@ export default function ComparePage() {
       setLog(reply.status.log_tail.split('\n').filter(Boolean));
       const end = remoteJobTerminal(reply);
       if (!end) {
-        // 仍在跑：更新"最后确认状态"，但保持"待核对"（终态确认前不结束活动跟踪）。
+        // 更新"最后确认状态"，但保持"待核对"（终态确认前不结束活动跟踪）。
         const kept: ActiveJob = {
           ...jobContacted(current.job, reply.status.state, new Date().toISOString()),
           uncertain: true,
@@ -1126,10 +1301,20 @@ export default function ComparePage() {
         rememberJob(machine, kept);
         setUnsettled({ job: kept, reason: '' });
         setNotice(
-          t(
-            '作业仍在服务器上运行；确认终态之前不会结束跟踪。',
-            'The job is still running on the server; tracking ends only once its final state is confirmed.',
-          ),
+          reply.terminal === true
+            ? t(
+                '调度系统已确认作业结束，但退出码/结果还没可见；继续核对终态。',
+                'The scheduler confirms the job has ended, but its exit code/result is not visible yet; check again shortly.',
+              )
+            : reply.cancel_requested
+              ? t(
+                  '取消请求已被调度系统接受；等它确认终态后才结束跟踪。',
+                  'The scheduler accepted the cancellation request; tracking ends only once it confirms the final state.',
+                )
+              : t(
+                  '作业仍在服务器上运行；确认终态之前不会结束跟踪。',
+                  'The job is still running on the server; tracking ends only once its final state is confirmed.',
+                ),
         );
         return;
       }
@@ -1210,8 +1395,10 @@ export default function ComparePage() {
       status,
       picks: picks.map((p) => ({ dir: p.dir, label: p.label, info: p.info })),
       config: {
-        stale: yamlStale,
+        formChanged,
         handEdited: yamlHandEdited,
+        problems: [...configProblems, ...structureProblems],
+        fingerprint: effectiveFingerprint,
         missingExtent,
         saveState: configState,
         summary: conditionSummary(),
@@ -1548,6 +1735,7 @@ export default function ComparePage() {
                                 : p.info.spatial
                                   ? t('格点', 'Gridded')
                                   : t('单点（站点）', 'Single point (station)')}
+                            {p.note && <p className="muted study-hint">{p.note}</p>}
                           </td>
                           <td>{p.info ? `${p.info.syear}–${p.info.eyear}` : '—'}</td>
                           <td>{p.info?.tim_res ?? '—'}</td>
@@ -1970,8 +2158,8 @@ export default function ComparePage() {
               <h3 className="study-subhead">{t('运行前条件摘要', 'Pre-run condition summary')}</h3>
               <p className="muted study-hint">
                 {t(
-                  '下面这些就是运行时会提交的评估条件：摘要、OpenBench 配置和站点清单都由同一份设计生成。',
-                  'These are the conditions that will be submitted: the summary, the OpenBench configuration and the station list all come from the same design.',
+                  '下面这些就是运行时会提交的评估条件：有了配置文本后，摘要直接从这段配置解析；手改配置，摘要跟着变。',
+                  'These are the conditions that will be submitted: once the configuration text exists, the summary is parsed from it, so hand edits show up here immediately.',
                 )}
               </p>
               <ul className="compare-status" data-compare-summary>
@@ -2015,11 +2203,76 @@ export default function ComparePage() {
                       onChange={(e) => setYaml(e.target.value)}
                     />
                   </Field>
-                  {yamlStale && (
+                  {effectiveConfig && (
+                    <p className="muted study-hint" data-compare-effective>
+                      {t(
+                        `当前有效配置指纹 ${effectiveFingerprint}：摘要按这段配置解析，运行时会冻结它并绑定报告。`,
+                        `Effective configuration fingerprint ${effectiveFingerprint}: the summary is parsed from this text; running freezes it and binds the report to it.`,
+                      )}
+                    </p>
+                  )}
+                  {configProblems.length > 0 && (
+                    <Notice tone="error">
+                      <strong>
+                        {t('这段配置还不能运行：', 'This configuration cannot run yet:')}
+                      </strong>
+                      <ul>
+                        {configProblems.map((problem) => (
+                          <li key={problem[0]}>{t(problem[0], problem[1])}</li>
+                        ))}
+                      </ul>
+                    </Notice>
+                  )}
+                  {structureProblems.length > 0 && (
+                    <Notice tone="error">
+                      <strong>
+                        {t(
+                          '配置与页面选中的模拟对不上，不能运行：',
+                          'The configuration does not match the simulations picked on the page and cannot run:',
+                        )}
+                      </strong>
+                      <ul>
+                        {structureProblems.map((problem) => (
+                          <li key={problem[0]}>{t(problem[0], problem[1])}</li>
+                        ))}
+                      </ul>
+                    </Notice>
+                  )}
+                  {formChanged && yamlHandEdited && (
                     <Notice tone="warning">
                       {t(
-                        '评估设置改过了，下面这份配置是旧设置下的，不能直接运行。你在配置里手改的内容还保留着；要让改动生效，请重新生成评估配置（会覆盖手改内容）或把设置改回去。',
-                        'The evaluation settings changed, so this configuration is out of date and cannot run as is. Your edits to it are kept; regenerate the evaluation configuration (this replaces the edits) or restore the old settings.',
+                        '生成配置之后你又在上面改过评估设置，但下面这份配置按你手改后的内容运行。要让表单里的改动生效并进入配置，请重新生成评估配置（会覆盖手改内容）。',
+                        'You changed the evaluation settings after generating the configuration, but the configuration below runs exactly as you edited it. Regenerate the evaluation configuration to apply the form changes (this replaces your edits).',
+                      )}
+                    </Notice>
+                  )}
+                  {lastRun && (
+                    <p className="muted study-hint" data-compare-last-run>
+                      {t(
+                        `上次运行 ${lastRun.runId || '（本机）'} · 配置指纹 ${lastRun.fingerprint}${lastRun.configSha ? ` · 配置哈希 ${lastRun.configSha.slice(0, 12)}` : ''} · ${lastRun.at}`,
+                        `Last run ${lastRun.runId || '(this computer)'} · configuration fingerprint ${lastRun.fingerprint}${lastRun.configSha ? ` · config hash ${lastRun.configSha.slice(0, 12)}` : ''} · ${lastRun.at}`,
+                      )}
+                    </p>
+                  )}
+                  {ok.some((p) => (p.info.unsupported_variables ?? []).length > 0) && (
+                    <Notice tone="warning">
+                      {t(
+                        `这些变量超出单点/地表评估维度，制备站点文件时会被跳过（不会静默丢掉，日志里会写明）：${ok
+                          .flatMap((p) =>
+                            (p.info.unsupported_variables ?? []).map(
+                              (v) => `${p.label}: ${v.name}`,
+                            ),
+                          )
+                          .join('；')}。如果比较需要它们，要先支持层维度选择或聚合。`,
+                        `These variables have dimensions beyond a station/surface evaluation and are skipped when preparing station files (not silently: the log names them): ${ok
+                          .flatMap((p) =>
+                            (p.info.unsupported_variables ?? []).map(
+                              (v) => `${p.label}: ${v.name}`,
+                            ),
+                          )
+                          .join(
+                            '; ',
+                          )}. Supporting layer selection or aggregation is needed before they can be compared.`,
                       )}
                     </Notice>
                   )}
@@ -2040,7 +2293,7 @@ export default function ComparePage() {
                         )}
                       </p>
                     )}
-                    {yamlStale && (
+                    {formChanged && (
                       <Button disabled={busy} onClick={() => void regenerate()}>
                         {t('重新生成评估配置', 'Regenerate evaluation configuration')}
                       </Button>
@@ -2050,23 +2303,33 @@ export default function ComparePage() {
                       label={t('检查并运行', 'Check and run')}
                       kind="commit"
                       variant="primary"
-                      disabled={busy || yamlStale}
+                      disabled={
+                        busy ||
+                        !effectiveConfig ||
+                        configProblems.length > 0 ||
+                        structureProblems.length > 0
+                      }
                       title={
-                        yamlStale
+                        !effectiveConfig || configProblems.length > 0
                           ? t(
-                              '设置改过了：先重新生成评估配置再运行',
-                              'The settings changed: regenerate the evaluation configuration before running',
+                              '配置还不能运行：先修正上面的问题',
+                              'The configuration cannot run yet: fix the problems above first',
                             )
-                          : undefined
+                          : structureProblems.length > 0
+                            ? t(
+                                '配置与页面的模拟对不上：先重新生成评估配置',
+                                'The configuration does not match the page simulations: regenerate it first',
+                              )
+                            : undefined
                       }
                       run={run}
                     />
                   </div>
-                  {yamlHandEdited && !yamlStale && (
+                  {yamlHandEdited && (
                     <p className="muted study-hint">
                       {t(
-                        '这份配置有你手工改过的内容；运行时会按你改后的内容提交。',
-                        'This configuration contains edits you made; running submits it as edited.',
+                        '这份配置有你手工改过的内容；运行时会按你改后的内容提交，摘要与指纹以上面的有效配置为准。',
+                        'This configuration contains edits you made; running submits it exactly as edited, and the summary and fingerprint above follow it.',
                       )}
                     </p>
                   )}
@@ -2167,6 +2430,34 @@ export default function ComparePage() {
                     {status.projects.map((p) => (
                       <tr key={p.dir ?? p.name}>
                         <td>{p.name}</td>
+                        <td data-compare-project-run>
+                          {p.latest_run ? (
+                            <>
+                              {p.latest_run.state === 'succeeded'
+                                ? t('最近运行：成功', 'last run: succeeded')
+                                : p.latest_run.state === 'failed'
+                                  ? t('最近运行：失败', 'last run: failed')
+                                  : t('最近运行：进行中', 'last run: running')}
+                              {` · ${p.latest_run.run_id}`}
+                              {p.latest_run.config_sha
+                                ? ` · ${p.latest_run.config_sha.slice(0, 12)}`
+                                : ''}
+                              {p.latest_run.state === 'failed' && p.latest_run.error && (
+                                <span className="muted"> — {shown(p.latest_run.error)}</span>
+                              )}
+                            </>
+                          ) : (
+                            t('还没有运行记录', 'no run recorded yet')
+                          )}
+                          {p.latest_success && p.report && (
+                            <p className="muted study-hint">
+                              {t(
+                                `报告来自成功运行 ${p.latest_success.run_id}；之后失败的重跑不会覆盖它。`,
+                                `The report is from successful run ${p.latest_success.run_id}; a later failed run does not overwrite it.`,
+                              )}
+                            </p>
+                          )}
+                        </td>
                         <td>
                           {p.report
                             ? t('有报告', 'has a report')
@@ -2216,6 +2507,25 @@ export default function ComparePage() {
             {report && (
               <>
                 <p className="muted">{report.path}</p>
+                {(() => {
+                  const bound = status?.projects.find((p) => p.report === report.path);
+                  const success = bound?.latest_success;
+                  const runId =
+                    lastRun && lastRun.report === report.path ? lastRun.runId : success?.run_id;
+                  const sha =
+                    lastRun && lastRun.report === report.path
+                      ? lastRun.configSha
+                      : success?.config_sha;
+                  if (!runId) return null;
+                  return (
+                    <p className="muted" data-compare-report-run>
+                      {t(
+                        `这份报告属于成功运行 ${runId}${sha ? `（配置哈希 ${sha.slice(0, 12)}）` : ''}；之后失败的重跑不会覆盖它。`,
+                        `This report belongs to successful run ${runId}${sha ? ` (config hash ${sha.slice(0, 12)})` : ''}; a later failed run does not overwrite it.`,
+                      )}
+                    </p>
+                  );
+                })()}
                 {/* 报告放进完全的沙箱：不跑脚本、不给同源权限。OpenBench 3.0.8 的报告里没有一个 <script>
                 （实测两份都是 0 个），用不着脚本；Windows 上 wry 会往子框架注入 IPC 初始化脚本，
                 允许脚本就只剩 origin 校验一层兜底（复验 D2-04）。 */}
@@ -2336,7 +2646,7 @@ export default function ComparePage() {
               value={reg.timRes}
               onChange={(e) => setReg((old) => ({ ...old, timRes: e.target.value }))}
             >
-              {['Hour', 'Day', 'Month', 'Year'].map((v) => (
+              {['Hour', '3Hour', 'Day', 'Month', 'Year'].map((v) => (
                 <option key={v} value={v}>
                   {v}
                 </option>
@@ -2562,7 +2872,9 @@ export default function ComparePage() {
           {t('新模拟变量覆盖', 'New simulation variable overrides')}
         </h3>
         {simForm.variables.map((row, at) => (
-          <div className="form-grid" key={`${at}-${row.variable}`}>
+          // 行的身份只用位置：key 里带 row.variable 时每敲一个字都会重建这一行，输入框失去焦点
+          // （审查报告：标准变量输入框逐字符失焦，React+jsdom 已复现）。
+          <div className="form-grid" key={at}>
             <Field label={t('标准变量', 'Standard variable')}>
               <Input
                 data-sim-field="variables"

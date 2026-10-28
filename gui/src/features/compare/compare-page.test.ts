@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import * as compareConfig from './config';
 import {
   buildOpenbenchConfig,
   configInvalidation,
@@ -10,6 +11,7 @@ import {
   simulationInfoForSave,
   validateSimulation,
   type ComparisonDesign,
+  type EvaluationDesign,
   type HistoryInfo,
   type SimulationField,
   type SimulationFormValues,
@@ -78,7 +80,14 @@ type Pick = {
   gridRes?: number | null;
   error?: string;
 };
-type Site = { id: string; station: string; history_dir: string; prefix: string };
+type Site = {
+  id: string;
+  station: string;
+  history_dir: string;
+  prefix: string;
+  lon: number | null;
+  lat: number | null;
+};
 type Generated = { fingerprint: string; config: string; sites: Site[] };
 
 const probedGrid: HistoryInfo = {
@@ -138,6 +147,8 @@ function saveSimulationRun(form: Form, existing: Pick[] = []) {
   const save = execute<() => void>('saveSimulation', {
     simForm: form,
     picks,
+    // 页面上"编辑已有模拟"先记下打开弹窗的那条目录；用 existing[0] 模拟这个状态。
+    simEditing: existing[0]?.dir ?? null,
     validateSimulation,
     simulationInfoForSave,
     showSimulationIssue: (issue: SimulationIssue) => issues.push(issue),
@@ -393,6 +404,9 @@ test('saving a type change persists the new type and the whole probe', () => {
       station: 'hb',
       history_dir: probedGrid.history_dir,
       prefix: 'hb_hist_',
+      // 探测到的坐标原样带上（这里 hb 是格点，坐标为空）。
+      lon: probedGrid.lon,
+      lat: probedGrid.lat,
     },
   ]);
 });
@@ -539,73 +553,166 @@ test('an edited per-simulation grouping or resolution override really reaches th
   assert.match(built.config, /grid_res: 0\.25/);
 });
 
-test('running a configuration generated for older settings is refused', async () => {
+test('running refuses a configuration that cannot be parsed or does not match the page', async () => {
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
-  const run = execute<() => Promise<unknown>>('run', {
-    task: async (fn: () => Promise<unknown>) => fn(),
-    generated: { current: { fingerprint: 'old-design', config: 'old: config\n', sites: [] } },
-    design: 'new-design',
+  const runWith = (yaml: string) =>
+    execute<() => Promise<unknown>>('run', {
+      task: async (fn: () => Promise<unknown>) => fn(),
+      generated: { current: { fingerprint: 'old-design', config: yaml, sites: [] } },
+      formDesign: {
+        machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+        name: 'comparison',
+        years: [2002, 2005],
+        timRes: 'Day',
+        variables: { Latent_Heat: 'ERA5' },
+        projectDir: '/ob/projects/comparison',
+        simulations: [
+          {
+            label: 'AT-Neu',
+            info: {
+              ...probedGrid,
+              spatial: false,
+              extent: null,
+              lon: 11.3,
+              lat: 47.1,
+              prefix: 'AT-Neu_hist_',
+            },
+          },
+        ],
+      },
+      parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+      structuralProblems: compareConfig.structuralProblems,
+      configFingerprint: compareConfig.configFingerprint,
+      name: 'comparison',
+      t,
+      comparisonName: (comparison: string) => comparison,
+      remote: false,
+      invokeJson: async (command: string, args: Record<string, unknown>) => {
+        calls.push({ command, args });
+        return { report: null };
+      },
+      yaml,
+      sites: [],
+      scanDir: '/refs',
+      host: '',
+      watch: async () => {},
+      fetchReport: async () => {},
+      view: async () => {},
+      setLastRun: () => {},
+      setConfigSaving: () => {},
+    });
+  // 手改出语法错误：明确拒绝，且一个后端调用都不发。
+  await assert.rejects(runWith('project:\n  name: [unclosed\n'), /cannot run/);
+  // 手改删掉/改了单点站点清单路径：文件是后端按页面目录准备的，运行前就拒绝。
+  const station = buildOpenbenchConfig({
     name: 'comparison',
-    t,
-    comparisonName: (comparison: string) => comparison,
-    remote: false,
-    invokeJson: async (command: string, args: Record<string, unknown>) => {
-      calls.push({ command, args });
-      return { report: null };
-    },
-    yaml: 'old: config\n',
-    sites: [],
-    scanDir: '/refs',
-    host: '',
-    watch: async () => {},
-    fetchReport: async () => {},
-    view: async () => {},
-  });
-  await assert.rejects(run(), /generate the evaluation configuration again/);
-  assert.deepEqual(calls, [], 'nothing is sent to the backend for a stale design (GUI-04)');
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5' },
+    projectDir: '/ob/projects/comparison',
+    simulations: [
+      {
+        label: 'AT-Neu',
+        info: {
+          ...probedGrid,
+          spatial: false,
+          extent: null,
+          lon: 11.3,
+          lat: 47.1,
+          prefix: 'AT-Neu_hist_',
+        },
+      },
+    ],
+  }).config.replace(
+    'fulllist: "/ob/projects/comparison/sim/AT_Neu.csv"',
+    'fulllist: "/tmp/stale.csv"',
+  );
+  await assert.rejects(runWith(station), /station list path of simulation/);
+  assert.deepEqual(calls, [], 'nothing is sent to the backend for a configuration that cannot run');
 });
 
-test('a current configuration runs with exactly the generated config and station list', async () => {
+test('a current configuration runs with exactly the effective config and station list', async () => {
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
-  const sites: Site[] = [
-    {
-      id: 'AT_Neu',
-      station: 'AT-Neu',
+  const simulation = {
+    label: 'AT-Neu',
+    info: {
+      ...probedGrid,
       history_dir: '/p/AT-Neu/history',
       prefix: 'AT-Neu_hist_',
+      tim_res: 'Hour',
+      spatial: false,
+      extent: null,
+      lon: 11.3,
+      lat: 47.1,
     },
-  ];
+  };
+  const baseDesign: ComparisonDesign = {
+    name: 'comparison',
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [simulation],
+    projectDir: '/ob/projects/comparison',
+  };
+  const built = buildOpenbenchConfig(baseDesign);
+  const formDesign: EvaluationDesign = {
+    machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+    ...baseDesign,
+  };
+  const notices: string[] = [];
+  const runs: unknown[] = [];
   const run = execute<() => Promise<unknown>>('run', {
     task: async (fn: () => Promise<unknown>) => fn(),
     generated: {
-      current: { fingerprint: 'current-design', config: 'project:\n  name: x\n', sites },
+      current: {
+        fingerprint: designFingerprint(formDesign),
+        config: built.config,
+        sites: built.sites,
+      },
     },
-    design: 'current-design',
+    formDesign,
+    parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+    structuralProblems: compareConfig.structuralProblems,
+    configFingerprint: compareConfig.configFingerprint,
     name: 'comparison',
     t,
     comparisonName: (comparison: string) => comparison,
     remote: false,
+    // 后端返回 run 身份：页面必须把它记成这次运行的结果，而不是"目录里找到了一份报告"。
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       calls.push({ command, args });
-      return { report: null };
+      return { report: null, run_id: 'run-42', config_sha: 'abc123', state: 'succeeded' };
     },
-    yaml: 'project:\n  name: x\n',
-    sites,
+    yaml: built.config,
+    sites: built.sites,
     scanDir: '/refs',
     host: '',
-    watch: async () => {},
-    fetchReport: async () => {},
     view: async () => {},
+    setLastRun: (value: unknown) => runs.push(value),
+    showRunNotice: (message: string) => notices.push(message),
+    setConfigSaving: () => {},
+    watch: async () => ({}),
+    fetchReport: async () => {},
   });
   await run();
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]!.command, 'bench_run');
   assert.deepEqual(calls[0]!.args, {
     name: 'comparison',
-    config: 'project:\n  name: x\n',
-    sites,
+    config: built.config,
+    sites: built.sites,
     refRoot: '/refs',
   });
+  const frozen = runs[0] as {
+    runId: string;
+    configSha: string;
+    fingerprint: string;
+    report: string | null;
+  };
+  assert.equal(frozen.runId, 'run-42');
+  assert.equal(frozen.configSha, 'abc123');
+  assert.match(frozen.fingerprint, /^[0-9a-f]{8}$/);
+  assert.equal(frozen.report, null);
+  assert.match(notices[0] ?? '', /Evaluation finished \(run run-42\)/);
 });
 
 test('a changed setting clears an untouched configuration but keeps a hand-edited one', () => {

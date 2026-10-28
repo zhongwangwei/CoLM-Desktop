@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import * as compareConfig from './config';
 import {
   benchErrorText,
+  buildOpenbenchConfig,
   comparisonName,
   jobContacted,
   jobEnded,
@@ -331,6 +333,7 @@ function watchHarness(seed: Record<string, string> = {}) {
   const alive = { current: true };
   const jobs: unknown[] = [];
   const logs: string[][] = [];
+  const notices: string[] = [];
   const unsettled: unknown[] = [];
   const lastJobs: unknown[] = [];
   const jobKey = execute<(machine: string) => string>('jobKey', {});
@@ -394,6 +397,7 @@ function watchHarness(seed: Record<string, string> = {}) {
     jobFailureText,
     remoteJobTerminal,
     setLog: (value: string[]) => logs.push(value),
+    setNotice: (value: string) => notices.push(value),
     setUnsettled,
     invokeJson: ipc.invokeJson,
     LEFT,
@@ -409,6 +413,7 @@ function watchHarness(seed: Record<string, string> = {}) {
     alive,
     jobs,
     logs,
+    notices,
     unsettled,
     lastJobs,
     watch,
@@ -488,32 +493,64 @@ test('GUI-07: scheduler-recorded cancel and failure are different terminal state
   );
 });
 
-test('GUI-07: a job that keeps disappearing is only marked failed after repeated confirmations', async () => {
+test('GUI-07: lost/unknown replies never become a terminal state by polling count', async () => {
   const h: WatchHarness = watchHarness();
   const pending = h.watch('serverA', { job: 'bench-run-4', kind: 'run', name: 'x' });
-  // 前两次"找不到"都可能只是收尾延迟：记录保留、不误标失败。
+  // 查不到记录既不是查询失败、也不是确认终态：原身份保留、继续核对（旧实现 3 次后写 failed 是错的）。
   await h.ipc.answer(0, jobReply('lost'));
   assert.equal(parseRemoteJob(h.storage.values['colm.benchJob@serverA'])?.lastState, 'lost');
   await h.ipc.answer(1, jobReply('unknown'));
   assert.equal(parseRemoteJob(h.storage.values['colm.benchJob@serverA'])?.lastState, 'unknown');
-  // 连续第三次才确认"服务器上找不到结果"这个终态。
   await h.ipc.answer(2, jobReply('lost'));
+  assert.equal(
+    parseRemoteJob(h.storage.values['colm.benchJob@serverA'])?.job,
+    'bench-run-4',
+    'the identity is still tracked after repeated lost/unknown replies',
+  );
+  assert.equal(h.storage.values['colm.benchLastJob@serverA'], undefined, 'no terminal history yet');
+  // 只有调度系统明确记下的结束才结束跟踪：这里回一条 ended=failed 收尾。
+  await h.ipc.answer(3, { ...jobReply('lost'), ended: 'failed' });
   const outcome = await pending;
   assert.equal(outcome.state, 'failed');
-  assert.match(outcome.state === 'failed' ? outcome.error : '', /without a result/);
   assert.equal(parseRemoteJob(h.storage.values['colm.benchJob@serverA']), null);
   assert.equal(parseRemoteJob(h.storage.values['colm.benchLastJob@serverA'])?.end, 'failed');
 });
 
-test('GUI-07: a stopped job is reported as cancelled, not failed, once it leaves running', async () => {
+test('GUI-07: a cancellation in flight is not reported as cancelled until the scheduler confirms', async () => {
   const h: WatchHarness = watchHarness();
   const pending = h.watch('serverA', { job: 'bench-run-5', kind: 'run', name: 'x' });
   await h.ipc.wait(0);
   h.stopping.current = true;
-  await h.ipc.answer(0, jobReply('queued'));
+  // 取消请求已被调度器收下，但作业还 queued：只提示"正在取消"，身份与跟踪都保留（旧实现这一步就写 cancelled）。
+  await h.ipc.answer(0, { ...jobReply('queued'), cancel_requested: true });
+  assert.equal(
+    parseRemoteJob(h.storage.values['colm.benchJob@serverA'])?.job,
+    'bench-run-5',
+    'the job identity is still tracked while cancellation is in flight',
+  );
+  assert.equal(h.storage.values['colm.benchLastJob@serverA'], undefined);
+  assert.match(h.notices.at(-1) ?? '', /Cancellation requested/);
+  // 调度系统确认取消之后才结束跟踪。
+  await h.ipc.answer(1, { ...jobReply('lost'), ended: 'cancelled' });
   const outcome = await pending;
   assert.equal(outcome.state, 'cancelled');
   assert.equal(parseRemoteJob(h.storage.values['colm.benchLastJob@serverA'])?.end, 'cancelled');
+});
+
+test('GUI-07: a scheduler-confirmed end without exit code keeps polling instead of failing', async () => {
+  const h: WatchHarness = watchHarness();
+  const pending = h.watch('serverA', { job: 'bench-run-11', kind: 'run', name: 'x' });
+  // terminal=true 只说明"作业不会再写"，退出码还没经 NFS 可见：不能当失败，继续轮询。
+  await h.ipc.answer(0, { ...jobReply('lost'), terminal: true });
+  assert.equal(
+    parseRemoteJob(h.storage.values['colm.benchJob@serverA'])?.job,
+    'bench-run-11',
+    'tracking continues until the result is visible',
+  );
+  assert.equal(h.storage.values['colm.benchLastJob@serverA'], undefined);
+  // 退出码可见后按正常终态处理。
+  await h.ipc.answer(1, jobReply('finished', { exit_code: 0 }));
+  assert.equal((await pending).state, 'succeeded');
 });
 
 test('GUI-05/07: switching to another machine detaches the wait but keeps the job identity', async () => {
@@ -570,17 +607,49 @@ test('GUI-07: running a comparison refuses to resubmit while an unconfirmed job 
     parseRemoteJob,
     t,
   });
+  const simulation = {
+    label: 'hb',
+    info: {
+      history_dir: '/p/hb/out/hb/history',
+      prefix: 'hb_hist_',
+      tim_res: 'Day',
+      syear: 2002,
+      eyear: 2005,
+      spatial: true,
+      lon: null,
+      lat: null,
+      files: 48,
+      extent: [111, 115.5, 21.5, 24.5] as [number, number, number, number],
+      resolution: 0.1,
+      data_groupby: 'Month',
+    },
+  };
+  const baseDesign = {
+    name: 'qfo era5',
+    years: [2002, 2005] as [number, number],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [simulation],
+    projectDir: '/ob/projects/qfo_era5',
+  };
+  const yaml = buildOpenbenchConfig(baseDesign).config;
   const run = execute<() => Promise<unknown>>('run', {
     task: (fn: () => Promise<unknown>) => fn(),
-    generated: { current: { fingerprint: 'same', config: 'x', sites: [] } },
-    design: 'same',
+    generated: { current: { fingerprint: 'same', config: yaml, sites: [] } },
+    formDesign: {
+      machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
+      ...baseDesign,
+    },
+    parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+    structuralProblems: compareConfig.structuralProblems,
+    configFingerprint: compareConfig.configFingerprint,
     name: 'qfo era5',
     comparisonName,
     remote: true,
     host: 'serverA',
     assertNoUnresolvedJob,
     invokeJson: ipc.invokeJson,
-    yaml: 'x',
+    yaml,
     sites: [],
     scanDir: '/refs',
     watch: async () => ({ state: 'succeeded' }),
@@ -588,6 +657,7 @@ test('GUI-07: running a comparison refuses to resubmit while an unconfirmed job 
     fetchReport: async () => {},
     setNotice: () => {},
     setConfigSaving: () => {},
+    setLastRun: () => {},
     showRunNotice: () => {},
     t,
   });

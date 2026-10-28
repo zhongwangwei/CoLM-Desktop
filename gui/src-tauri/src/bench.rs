@@ -4,7 +4,10 @@
 //! - `tools/uv`：固定版本的 uv，从官方发布页下载，按写死的 SHA-256 校验后才解压（不执行远程脚本）；
 //! - `python/`：uv 管理的专用 Python（`--python-preference only-managed`，不借用系统里的 Python）；
 //! - `env/`：虚拟环境，OpenBench 和它的全部依赖装在这里；
-//! - `projects/<名字>/`：一次比较的 `openbench.yaml` 与输出，报告在 `output/<项目>/reports/`。
+//! - `projects/<名字>/`：一次比较。每次运行一个不可变快照 `runs/<run_id>/`（冻结的 `openbench.yaml`、
+//!   站点/输入清单、`meta.json` 与 `output/`），`latest-success.json` 指向上次成功的那次；旧目录没有
+//!   `runs/`，报告仍按 `output/` 里第一份 HTML 兼容显示。报告只从本次运行的 `output/` 发现，
+//!   失败不改上次成功指针（比较页审查报告第 5 条）。
 //!
 //! 窗口进程不链接 NetCDF：OpenBench 是独立的 Python 进程，这里只负责起进程、转日志、找报告。
 //! 每个子进程都登记成 [`ChildOwner::Bench`]，停止按钮和关窗都能终止它。
@@ -21,6 +24,7 @@ use colm_bench::{
     OPENBENCH_VERSION, PREPARE_SCRIPT, PROGRAM_ENV, PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 
+use crate::bench_runs::{self, RunSite, RunSnapshot};
 use crate::sidecar::{register_child, ChildOwner};
 
 /// 在软件里直接显示的报告大小上限；独立报告把图嵌在 HTML 里，更大的交给浏览器打开。
@@ -222,24 +226,53 @@ fn projects(root: &Path) -> Vec<Value> {
     let mut out = entries
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_dir())
-        .map(|entry| {
-            let dir = entry.path();
-            let modified = std::fs::metadata(dir.join("openbench.yaml"))
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            json!({
-                "name": entry.file_name().to_string_lossy(),
-                "dir": dir,
-                "config": dir.join("openbench.yaml").is_file().then(|| dir.join("openbench.yaml")),
-                "report": find_report(&dir.join("output")),
-                "modified": modified,
-            })
-        })
+        .map(|entry| project_json(&entry.path()))
         .collect::<Vec<_>>();
     out.sort_by(|a, b| b["modified"].as_u64().cmp(&a["modified"].as_u64()));
     out
+}
+
+/// 比较项目在状态页上的一行。新目录的报告只认 `latest-success.json`（失败/进行中的运行不顶掉
+/// 上次成功的报告）；没有 `runs/` 的旧目录（含服务器取回的本机镜像）回退到旧的 `output/` 发现。
+fn project_json(dir: &Path) -> Value {
+    let latest = bench_runs::latest_run(dir);
+    let success = bench_runs::latest_success(dir);
+    let legacy = !bench_runs::has_runs(dir);
+    // 旧目录才回退：新目录即使 `latest-success.json` 还没有（第一次运行失败），也不能把项目根
+    // `output/` 里旧版本留下的 HTML 当成当前报告 —— 那正是"报告没绑到运行"的老毛病。
+    let legacy_report = legacy.then(|| find_report(&dir.join("output"))).flatten();
+    let report = success
+        .as_ref()
+        .and_then(|success| success.report_path(dir))
+        .or(legacy_report);
+    let legacy_config = dir.join("openbench.yaml");
+    let config = latest
+        .as_ref()
+        .map(|run| run.dir().join(bench_runs::CONFIG_FILE))
+        .filter(|path| path.is_file())
+        .or_else(|| legacy_config.is_file().then_some(legacy_config));
+    // 排序键：新目录用最新一次运行的创建时间；旧目录还用配置文件的修改时间。
+    let modified = latest
+        .as_ref()
+        .map(|run| run.meta().created_unix)
+        .or_else(|| modified_secs(dir.join("openbench.yaml")));
+    json!({
+        "name": dir.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(),
+        "dir": dir,
+        "config": config,
+        "report": report,
+        "latest_success": success.as_ref().map(|success| success.to_json(dir)),
+        "latest_run": latest.as_ref().map(|run| run.to_json()),
+        "modified": modified,
+    })
+}
+
+fn modified_secs(path: PathBuf) -> Option<u64> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs())
 }
 
 /// `output/<项目>/reports/` 下的报告：优先把图嵌在里面的独立版。
@@ -479,6 +512,8 @@ pub async fn bench_inspect(dir: String) -> Result<Value, String> {
 }
 
 /// 要先并成一个文件的单点模拟（[`PREPARE_SCRIPT`]）：并到比较目录的 `sim/<id>.nc`，站点清单 `sim/<id>.csv`。
+/// 这两个位置由前端生成的配置文本里的绝对路径决定（OpenBench 3.0.8 的 `check` 按 root_dir 解析 fulllist、
+/// `run` 却按工作目录打开，相对路径总有一边找不到 —— 2026-10-23 窗口实测），不跟着本次运行的 cwd 走。
 #[derive(serde::Deserialize)]
 pub struct BenchSite {
     /// 文件名与 YAML 键（只有字母、数字、_、-）。
@@ -488,10 +523,68 @@ pub struct BenchSite {
     pub station: String,
     pub history_dir: String,
     pub prefix: String,
+    /// 站点经纬度（十进制度）：PREPARE 优先用它们写站点清单，缺省时回退到 history 文件里的坐标。
+    /// 两者要么都给、要么都不给 —— PREPARE 签名末尾的 `[lon] [lat]` 是成对的可选参数。
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default)]
+    pub lat: Option<f64>,
 }
 
-/// 写下 `openbench.yaml`，先把单点模拟并成站点文件，再 `openbench check`、`openbench run`，返回报告路径。
-/// 在比较目录里运行，配置里的相对路径（`./output`、`sim/…`）都落在这个比较自己的目录下。
+/// 经纬度：有限值、|lat| <= 90、|lon| <= 360（允许 0–360 的经度写法）；只给一个就没法用，直接拒绝。
+fn valid_coordinates(lon: Option<f64>, lat: Option<f64>) -> Result<(), String> {
+    match (lon, lat) {
+        (None, None) => Ok(()),
+        (Some(lon), Some(lat)) => {
+            if !lon.is_finite() || !lat.is_finite() {
+                return Err(format!("经纬度必须是有限数值（lon={lon}, lat={lat}）"));
+            }
+            if lon.abs() > 360.0 || lat.abs() > 90.0 {
+                return Err(format!("经纬度超出范围（lon={lon}, lat={lat}）"));
+            }
+            Ok(())
+        }
+        _ => Err("经纬度要成对给：lon 和 lat 要么都有、要么都没有".into()),
+    }
+}
+
+/// 本机与服务器两个入口共用的站点参数校验：id、站点名、经纬度。
+pub(crate) fn validate_sites(sites: &[BenchSite]) -> Result<(), String> {
+    for site in sites {
+        valid_project(&site.id)?;
+        if !valid_station(&site.station) {
+            return Err(format!("站点名不合适：{:?}", site.station));
+        }
+        valid_coordinates(site.lon, site.lat)
+            .map_err(|error| format!("站点 {}：{error}", site.id))?;
+    }
+    Ok(())
+}
+
+/// 把 IPC 参数转成运行快照里的站点记录（多存一份 history 目录与前缀作为输入清单）。
+fn run_sites(sites: &[BenchSite]) -> Vec<RunSite> {
+    sites
+        .iter()
+        .map(|site| RunSite {
+            id: site.id.clone(),
+            station: site.station.clone(),
+            lon: site.lon,
+            lat: site.lat,
+            history_dir: site.history_dir.clone(),
+            prefix: site.prefix.clone(),
+        })
+        .collect()
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// 先把单点模拟并成站点文件，再 `openbench check`、`openbench run`，返回报告路径与本次运行身份。
+///
+/// 每次运行在 `<比较目录>/runs/<run_id>/` 建一个不可变快照并把配置文本冻结进去，`check`/`run` 在
+/// 这个目录里跑 —— 配置里的 `./output` 相对 cwd，落进本次运行的 `output/`，报告只从这一次的
+/// `output/` 发现，绝不跨 run 取。失败只写自己的 meta，上次成功指针一个字节都不动（审查报告第 5 条）。
 #[tauri::command]
 pub async fn bench_run(
     app: AppHandle,
@@ -501,50 +594,122 @@ pub async fn bench_run(
     ref_root: Option<String>,
 ) -> Result<Value, String> {
     valid_project(&name)?;
-    for site in sites.iter().flatten() {
-        valid_project(&site.id)?;
-        if !valid_station(&site.station) {
-            return Err(format!("站点名不合适：{:?}", site.station));
-        }
-    }
+    let sites = sites.unwrap_or_default();
+    validate_sites(&sites)?;
+    let frozen_sites = run_sites(&sites);
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
         let root = root()?;
         let openbench = env_bin(&root, "openbench");
         if !openbench.is_file() {
             return Err("先装 OpenBench".into());
         }
-        let dir = root.join("projects").join(&name);
-        std::fs::create_dir_all(dir.join("sim")).map_err(|e| e.to_string())?;
-        let file = dir.join("openbench.yaml");
-        std::fs::write(&file, config).map_err(|e| e.to_string())?;
-        for site in sites.unwrap_or_default() {
-            say(&app, "prepare", &format!("合并 {} 的 history", site.id));
-            let mut command = env_command(&root, "python");
-            command
-                .args(["-c", PREPARE_SCRIPT])
-                .arg(&site.history_dir)
-                .arg(&site.prefix)
-                .arg(dir.join("sim").join(format!("{}.nc", site.id)))
-                .arg(dir.join("sim").join(format!("{}.csv", site.id)))
-                .arg(&site.station);
-            stream(&app, command, "prepare")?;
-        }
-        // 内置登记表的路径写成 `${OPENBENCH_REF_ROOT}/…`；不设它，`check` 直接报错（2026-10-23 窗口实测）。
-        let ref_root = ref_root.filter(|r| !r.trim().is_empty());
-        for stage in ["check", "run"] {
-            say(&app, stage, &format!("openbench {stage} openbench.yaml"));
-            let mut command = env_command(&root, "openbench");
-            command.arg(stage).arg("openbench.yaml").current_dir(&dir);
-            if let Some(root) = &ref_root {
-                command.env("OPENBENCH_REF_ROOT", root);
+        let project_dir = root.join("projects").join(&name);
+        // 单点模拟的合并文件仍在比较目录的 `sim/` 下（配置文本里的绝对路径，见 [`BenchSite`]）；
+        // 每次运行前的 prepare 会把它们重写成这次的输入，顺序运行不会串。
+        let sim = project_dir.join("sim");
+        std::fs::create_dir_all(&sim).map_err(|e| e.to_string())?;
+        let mut run = RunSnapshot::create(
+            &project_dir,
+            &name,
+            &config,
+            &frozen_sites,
+            ref_root.as_deref(),
+        )?;
+        say(
+            &app,
+            "run",
+            &format!(
+                "本次运行 {}（配置 sha {}）；报告只从这次运行的 output 里取",
+                run.id(),
+                short_sha(run.config_sha()),
+            ),
+        );
+        let outcome = (|| -> Result<Option<PathBuf>, String> {
+            for site in &sites {
+                say(&app, "prepare", &format!("合并 {} 的 history", site.id));
+                let nc = sim.join(format!("{}.nc", site.id));
+                let csv = sim.join(format!("{}.csv", site.id));
+                let mut command = env_command(&root, "python");
+                command
+                    .args(["-c", PREPARE_SCRIPT])
+                    .arg(&site.history_dir)
+                    .arg(&site.prefix)
+                    .arg(&nc)
+                    .arg(&csv)
+                    .arg(&site.station);
+                // PREPARE 签名末尾是可选的 [lon] [lat]；只给一个的输入前面已拒绝，这里成对追加。
+                if let (Some(lon), Some(lat)) = (site.lon, site.lat) {
+                    command.arg(lon.to_string()).arg(lat.to_string());
+                }
+                stream(&app, command, "prepare")?;
+                // 站点清单副本进本次运行的快照（小文件）；大的 .nc 不复制，输入清单里记着它的来源。
+                run.stash_station_manifest(&site.id, &csv)?;
             }
-            stream(&app, command, stage)?;
+            // 内置登记表的路径写成 `${OPENBENCH_REF_ROOT}/…`；不设它，`check` 直接报错（2026-10-23 窗口实测）。
+            let ref_root = ref_root.filter(|r| !r.trim().is_empty());
+            for stage in ["check", "run"] {
+                say(
+                    &app,
+                    stage,
+                    &format!("openbench {stage}（运行 {}）", run.id()),
+                );
+                let mut command = env_command(&root, "openbench");
+                command
+                    .arg(stage)
+                    .arg(bench_runs::CONFIG_FILE)
+                    .current_dir(run.dir());
+                if let Some(root) = &ref_root {
+                    command.env("OPENBENCH_REF_ROOT", root);
+                }
+                stream(&app, command, stage)?;
+            }
+            Ok(run.discover_report())
+        })();
+        match outcome {
+            Ok(report) => {
+                let latest = run.succeed(report.as_deref()).map_err(|error| {
+                    format!(
+                        "运行 {} 已结束，但没能记下这次运行或更新上次成功指针：{error}\n运行目录：{}",
+                        run.id(),
+                        run.dir().display(),
+                    )
+                })?;
+                Ok(json!({
+                    "dir": project_dir,
+                    "config": run.config_file(),
+                    "report": report,
+                    "run_id": run.id(),
+                    "run_dir": run.dir(),
+                    "config_sha": run.config_sha(),
+                    "state": "succeeded",
+                    "latest_success": latest.to_json(&project_dir),
+                }))
+            }
+            Err(detail) => {
+                let cancelled = detail == "已停止";
+                if let Err(meta_error) = run.fail(&detail) {
+                    return Err(format!(
+                        "运行 {} 失败，运行记录也没能写成：{meta_error}\n{detail}",
+                        run.id(),
+                    ));
+                }
+                // 取消保持原文：前端按固定文字 recognize 成 Stopped。普通失败带上 run_id 与运行目录，
+                // 否则用户不知道刚才那次运行把现场留在哪。
+                if cancelled {
+                    return Err("已停止".into());
+                }
+                let previous = if bench_runs::latest_success(&project_dir).is_some() {
+                    "上次成功的报告未受影响。"
+                } else {
+                    "这个比较还没有成功过的报告。"
+                };
+                Err(format!(
+                    "运行 {} 失败：{detail}\n运行目录：{}；配置与站点清单已冻结在这次运行里。{previous}",
+                    run.id(),
+                    run.dir().display(),
+                ))
+            }
         }
-        Ok(json!({
-            "dir": dir,
-            "config": file,
-            "report": find_report(&dir.join("output")),
-        }))
     })
     .await
     .map_err(|e| e.to_string())?

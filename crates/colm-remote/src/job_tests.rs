@@ -140,6 +140,44 @@ fn status_output_is_parsed() {
     assert_eq!(serde_json::to_value(&queued).unwrap()["state"], "queued");
 }
 
+#[test]
+fn a_report_separates_cancelling_from_ended_and_query_failure() {
+    // 取消请求在途：状态仍是排队，但前端要知道这是"正在取消"。
+    let cancelling = parse_report("state=queued\ndetail=PENDING\ncancel_requested=yes\n").unwrap();
+    assert_eq!(cancelling.status.state, State::Queued);
+    assert!(cancelling.cancel_requested);
+    assert!(!cancelling.terminal);
+    assert_eq!(ended(&cancelling.status), None);
+    // 有退出码 = 确认终态，不管脚本有没有写 terminal=。
+    let finished = parse_report("state=finished 3\ncancel_requested=no\n").unwrap();
+    assert_eq!(finished.status.state, State::Finished { exit_code: 3 });
+    assert!(finished.terminal);
+    assert!(!finished.cancel_requested);
+    // 调度器确认终态词才把 lost 变成终态；查无记录（没有 terminal= 行）不是。
+    let confirmed = parse_report("state=lost\ndetail=TIMEOUT|0:0\nterminal=confirmed\n").unwrap();
+    assert!(confirmed.terminal);
+    let recordless = parse_report("state=lost\n").unwrap();
+    assert!(!recordless.terminal);
+    // 别的状态上误写的 terminal= 不采信：终态只可能是 finished 或调度器确认的 lost。
+    let wrong = parse_report("state=running\nterminal=confirmed\n").unwrap();
+    assert!(!wrong.terminal);
+    // 查询失败是错误，不是状态：错误里带现场原因，方便前端显示也方便排查。
+    let error =
+        parse_report("state=unknown\nquery=failed squeue: Unable to contact slurm controller\n")
+            .unwrap_err()
+            .to_string();
+    assert!(error.starts_with("查询作业状态失败："), "{error}");
+    assert!(
+        error.contains("Unable to contact slurm controller"),
+        "{error}"
+    );
+    // 旧格式（没有新行）仍按原样解析，其他远程流程的既有调用方不用跟着改。
+    assert_eq!(
+        parse_status("state=queued\ndetail=PENDING\n").state,
+        State::Queued
+    );
+}
+
 // ---- 用模拟的调度命令真正执行生成的脚本（bash 与 sed 在 macOS 与 Linux 上都有；调度命令的输出格式照各家文档） ----
 
 // 沙箱用 bash 与 POSIX 工具扮演调度器。Windows 上 `bash` 会落到没装发行版的 WSL，
@@ -250,6 +288,20 @@ impl Sandbox {
     }
 
     #[cfg(unix)]
+    fn report(&self, id: &str) -> Report {
+        let (out, err, ok) = self.run(&status_script(&self.work(), id, 5));
+        assert!(ok, "{err}");
+        parse_report(&out).unwrap_or_else(|error| panic!("{error}\n{out}"))
+    }
+
+    #[cfg(unix)]
+    fn report_text(&self, id: &str) -> String {
+        let (out, err, ok) = self.run(&status_script(&self.work(), id, 5));
+        assert!(ok, "{err}");
+        out
+    }
+
+    #[cfg(unix)]
     fn job_dir(&self, id: &str) -> PathBuf {
         Path::new(&job_dir(&self.work(), id)).to_path_buf()
     }
@@ -348,6 +400,153 @@ fn slurm_job_the_scheduler_killed_is_lost_with_its_reason() {
     let lost = sb.status("j-2");
     assert_eq!(lost.state, State::Lost);
     assert_eq!(lost.detail.as_deref(), Some("TIMEOUT|0:0"));
+    // 调度器确认了结束方式：终态成立（lost 仍不编造退出码，ended 负责说"失败"）。
+    let report = sb.report("j-2");
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("failed"));
+}
+
+// ---- 查询失败不能落成 lost（审查报告第 6 条）：squeue/sacct 是"问调度器"，不是"作业不见了" ----
+
+#[cfg(unix)]
+#[test]
+fn a_scheduler_that_cannot_be_queried_is_unknown_not_lost() {
+    let sb = Sandbox::new("slurm-query-down");
+    let spec = slurm_spec();
+    assert!(
+        sb.run(&submit_script(&sb.work(), "j-q", "true", &spec).unwrap())
+            .2
+    );
+    // 调度器不可用：两条命令都非零退出，stdout 里没有状态可读。
+    sb.stub(
+        "squeue",
+        "echo 'slurm_load_jobs error: Unable to contact slurm controller' >&2; exit 1",
+    );
+    sb.stub("sacct", "echo 'slurmdbd: cannot connect' >&2; exit 1");
+    let text = sb.report_text("j-q");
+    // 脚本自己仍 exit 0（这样 ssh 层不把"查询失败"和"连接断了"混在一起），但状态绝不能是 lost。
+    assert!(text.contains("state=unknown"), "{text}");
+    assert!(text.contains("query=failed"), "{text}");
+    assert_eq!(parse_status(&text).state, State::Unknown);
+    let error = parse_report(&text).unwrap_err().to_string();
+    assert!(error.contains("查询作业状态失败"), "{error}");
+    assert!(
+        error.contains("Unable to contact slurm controller"),
+        "{error}"
+    );
+    assert!(error.contains("cannot connect"), "{error}");
+    assert!(ended(&parse_status(&text)).is_none(), "查询失败不是终态");
+}
+
+#[cfg(unix)]
+#[test]
+fn one_scheduler_command_failing_without_a_record_is_a_query_failure_too() {
+    // squeue 挂了、sacct 正常回答"没有记录"：作业可能还在跑（sacct 只收已经结束的），不能当 lost。
+    let sb = Sandbox::new("slurm-query-partial");
+    let spec = slurm_spec();
+    assert!(
+        sb.run(&submit_script(&sb.work(), "j-q2", "true", &spec).unwrap())
+            .2
+    );
+    sb.stub(
+        "squeue",
+        "echo 'Unable to contact slurm controller' >&2; exit 1",
+    );
+    sb.unset("sacct_out");
+    let text = sb.report_text("j-q2");
+    assert!(text.contains("query=failed"), "{text}");
+    assert!(parse_report(&text).is_err());
+    assert_eq!(parse_status(&text).state, State::Unknown);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scheduler_that_answers_without_a_record_is_lost_but_not_terminal() {
+    // 两条命令都正常退出、都没有这个作业：确实查不到（不是查询失败），但没确认怎么结束的。
+    let sb = Sandbox::new("slurm-no-record");
+    let spec = slurm_spec();
+    assert!(
+        sb.run(&submit_script(&sb.work(), "j-n", "true", &spec).unwrap())
+            .2
+    );
+    sb.unset("slurm_state");
+    sb.unset("sacct_out");
+    let report = sb.report("j-n");
+    assert_eq!(report.status.state, State::Lost);
+    assert_eq!(report.status.detail, None);
+    assert!(!report.terminal, "查无记录不是终态");
+    assert_eq!(ended(&report.status), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_scheduler_message_is_not_a_query_failure() {
+    // squeue 对无效作业号也是非零退出；那是回答"没有这个作业号"，不是调度器坏了。
+    let sb = Sandbox::new("slurm-invalid-id");
+    let spec = slurm_spec();
+    assert!(
+        sb.run(&submit_script(&sb.work(), "j-i", "true", &spec).unwrap())
+            .2
+    );
+    sb.stub(
+        "squeue",
+        "echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1",
+    );
+    sb.set("sacct_out", "CANCELLED by 1026|0:0\n");
+    let report = sb.report("j-i");
+    assert_eq!(report.status.state, State::Lost);
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("cancelled"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lsf_scheduler_that_is_down_is_not_a_lost_job_but_a_missing_job_is() {
+    let sb = Sandbox::new("lsf-down");
+    let dir = sb.job_dir("j-lsf");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("scheduler"), "lsf").unwrap();
+    std::fs::write(dir.join("sched_id"), "555").unwrap();
+    sb.stub("bjobs", "echo 'LSF is down. Please wait' >&2; exit 255");
+    let text = sb.report_text("j-lsf");
+    assert!(text.contains("query=failed"), "{text}");
+    assert!(parse_report(&text).is_err());
+    // 调度器明确说没有这个作业：那是回答，落成 lost（但没给结束方式，不是终态）。
+    sb.stub("bjobs", "echo 'Job <555> is not found' >&2; exit 255");
+    let report = sb.report("j-lsf");
+    assert_eq!(report.status.state, State::Lost);
+    assert!(!report.terminal);
+    assert_eq!(ended(&report.status), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_terminal_word_straight_from_squeue_is_not_running() {
+    // 取消在途的 Slurm 作业偶尔还在 squeue 里显示终态词：此时不能报 running（那会让前端一直等）。
+    let sb = Sandbox::new("slurm-squeue-terminal");
+    let spec = slurm_spec();
+    assert!(
+        sb.run(&submit_script(&sb.work(), "j-t", "true", &spec).unwrap())
+            .2
+    );
+    sb.set("slurm_state", "CANCELLED\n");
+    let report = sb.report("j-t");
+    assert_eq!(report.status.state, State::Lost);
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("cancelled"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scheduler_job_without_its_id_yet_is_unknown_not_gone() {
+    // 提交窗口里 sched_id 还没写：作业可能正在提交，不能报"没有这个作业"（更不能算终态）。
+    let sb = Sandbox::new("sched-no-id");
+    let dir = sb.job_dir("j-partial");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("scheduler"), "slurm").unwrap();
+    let report = sb.report("j-partial");
+    assert_eq!(report.status.state, State::Unknown);
+    assert!(!report.terminal);
 }
 
 #[cfg(unix)]
@@ -365,11 +564,33 @@ fn slurm_cancel_acceptance_does_not_forge_a_terminal_state() {
     assert!(out.contains("cancellation_requested"));
     assert_eq!(sb.read("cancelled").trim(), "4242");
     assert!(!sb.job_dir("j-3").join("exit_code").exists());
-    assert_eq!(sb.status("j-3").state, State::Queued);
+    assert!(
+        sb.job_dir("j-3").join("cancel_requested").is_file(),
+        "请求被收下只留标记，不写终态"
+    );
+    // 取消在途：作业仍在排队，状态是 queued + cancel_requested，不是结束。
+    let queued = sb.report("j-3");
+    assert_eq!(queued.status.state, State::Queued);
+    assert!(queued.cancel_requested);
+    assert!(!queued.terminal);
+    assert_eq!(ended(&queued.status), None);
     sb.set("slurm_state", "RUNNING\n");
-    assert_eq!(sb.status("j-3").state, State::Running);
+    let running = sb.report("j-3");
+    assert_eq!(running.status.state, State::Running);
+    assert!(running.cancel_requested);
+    assert!(!running.terminal);
+    // 调度器只是查不到记录：lost 但不是确认终态。
     sb.unset("slurm_state");
-    assert_eq!(sb.status("j-3").state, State::Lost);
+    let silent = sb.report("j-3");
+    assert_eq!(silent.status.state, State::Lost);
+    assert!(!silent.terminal);
+    // 调度器确认 CANCELLED：这才算结束，ended 说"已取消"。
+    sb.set("sacct_out", "CANCELLED by 1026|0:0\n");
+    let confirmed = sb.report("j-3");
+    assert_eq!(confirmed.status.state, State::Lost);
+    assert!(confirmed.terminal);
+    assert_eq!(ended(&confirmed.status), Some("cancelled"));
+    assert!(!sb.job_dir("j-3").join("exit_code").exists());
 }
 
 #[cfg(unix)]
@@ -449,7 +670,36 @@ fn pbs_job_states_and_cancel() {
 
     assert!(sb.run(&cancel_script(&sb.work(), "j-5")).2);
     assert_eq!(sb.read("cancelled").trim(), "777.pbsserver");
+    assert!(sb.job_dir("j-5").join("cancel_requested").is_file());
     assert!(!sb.job_dir("j-5").join("exit_code").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pbs_job_the_scheduler_finished_is_terminal() {
+    // qstat -f 没有活动作业，qstat -xf 给出结束状态与退出码：调度器确认了终态。
+    let sb = Sandbox::new("pbs-history");
+    let dir = sb.job_dir("j-pb");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("scheduler"), "pbs").unwrap();
+    std::fs::write(dir.join("sched_id"), "777.pbsserver").unwrap();
+    sb.stub(
+        "qstat",
+        "case \"$1\" in -xf) printf '    job_state = C\\n    Exit_status = 3\\n';; esac",
+    );
+    let report = sb.report("j-pb");
+    assert_eq!(report.status.state, State::Lost);
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("failed"), "{:?}", report.status);
+    // 两条查询命令都连不上：查询失败，不是 lost。
+    sb.stub(
+        "qstat",
+        "echo 'qstat: cannot connect to server' >&2; exit 1",
+    );
+    let text = sb.report_text("j-pb");
+    assert!(text.contains("query=failed"), "{text}");
+    assert_eq!(parse_status(&text).state, State::Unknown);
+    assert!(parse_report(&text).is_err());
 }
 
 #[cfg(unix)]
@@ -470,13 +720,27 @@ fn lsf_job_states_and_cancel() {
     assert_eq!(sb.status("j-6").state, State::Queued);
     sb.set("lsf_state", "RUN\n");
     assert_eq!(sb.status("j-6").state, State::Running);
+    // LSF 的 EXIT 是它确认的"非零退出"：终态，不再是"查不到"。
     sb.set("lsf_state", "EXIT\n");
-    let lost = sb.status("j-6");
-    assert_eq!(lost.state, State::Lost);
-    assert_eq!(lost.detail.as_deref(), Some("EXIT"));
+    let failed = sb.report("j-6");
+    assert_eq!(failed.status.state, State::Lost);
+    assert!(failed.terminal);
+    assert_eq!(ended(&failed.status), Some("failed"), "{:?}", failed.status);
+    // 取消请求被收下之后出现的 EXIT 是取消的确认。
+    std::fs::write(sb.job_dir("j-6").join("cancel_requested"), "").unwrap();
+    let cancelled = sb.report("j-6");
+    assert_eq!(
+        ended(&cancelled.status),
+        Some("cancelled"),
+        "{:?}",
+        cancelled.status
+    );
+    assert!(cancelled.terminal);
+    std::fs::remove_file(sb.job_dir("j-6").join("cancel_requested")).unwrap();
 
     assert!(sb.run(&cancel_script(&sb.work(), "j-6")).2);
     assert_eq!(sb.read("cancelled").trim(), "555");
+    assert!(sb.job_dir("j-6").join("cancel_requested").is_file());
     assert!(!sb.job_dir("j-6").join("exit_code").exists());
 }
 
@@ -504,10 +768,33 @@ fn cancellation_failures_never_forge_a_terminal_state() {
         let (out, err, ok) = sb.run(&cancel_script(&sb.work(), "j-fail"));
         assert!(!ok && err.contains("permission-denied"), "{out} {err}");
         assert!(!dir.join("exit_code").exists());
+        assert!(
+            !dir.join("cancel_requested").exists(),
+            "取消请求没被收下：不能留下'正在取消'的标记"
+        );
         std::fs::write(dir.join("exit_code"), "0").unwrap();
         assert!(sb.run(&cancel_script(&sb.work(), "j-fail")).2);
         assert_eq!(std::fs::read_to_string(dir.join("exit_code")).unwrap(), "0");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bare_job_without_a_pid_is_unknown_not_gone() {
+    let sb = Sandbox::new("bare-no-pid");
+    let dir = sb.job_dir("j-bare");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("scheduler"), "bare").unwrap();
+    // 占位刚建、launch 还没写下 pid：既不能报 running，也不能报"进程没了"（那会放行重复提交）。
+    let report = sb.report("j-bare");
+    assert_eq!(report.status.state, State::Unknown);
+    assert!(!report.terminal);
+    // pid 写下但进程已经不在：没有调度系统可问，进程探测就是确认终态。
+    std::fs::write(dir.join("pid"), "99999999").unwrap();
+    let gone = sb.report("j-bare");
+    assert_eq!(gone.status.state, State::Lost);
+    assert!(gone.terminal);
+    assert_eq!(ended(&gone.status), None, "进程没了不等于失败");
 }
 
 #[test]

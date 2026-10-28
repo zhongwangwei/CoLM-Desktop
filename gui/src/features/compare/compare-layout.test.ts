@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as compare from './compare';
+import * as compareConfig from './config';
 import {
   benchErrorText,
   buildOpenbenchConfig,
@@ -200,6 +201,8 @@ function pageHarness() {
     if (!(key in slots)) slots[key] = { current: initial };
     return slots[key] as { current: unknown };
   };
+  // 页面用 useMemo 缓存"从配置文本解析出的有效配置"；受控渲染每次重算即可。
+  const useMemo = (fn: () => unknown) => fn();
   const useEffect = (fn: () => void | (() => void), deps?: unknown[]) => {
     const key = effectCursor++;
     const previous = registered.get(key);
@@ -237,12 +240,14 @@ function pageHarness() {
   };
   const environment: Record<string, unknown> = {
     ...compare,
+    ...compareConfig,
     React,
     useApp,
     usePageContract,
     useState,
     useRef,
     useEffect,
+    useMemo,
     Advanced: 'Advanced',
     Button: 'Button',
     Card: 'Card',
@@ -566,15 +571,16 @@ test('U-05: hand-edited configuration survives until the user explicitly regener
   });
   await page.settle();
   await page.setField('compare-name', 'another comparison');
-  // 手改过的配置不被背景清掉，但标记过期、不能直接运行；给"重新生成评估配置"入口。
+  // 手改过的配置不被背景清掉；表单改动没有进入这份文本，页面要明确说出来。运行按手改后的文本
+  // （有效配置即文本本身），所以不再用"表单指纹变了"把它一刀切判成不可运行。
   const kept = page.configTextarea();
   assert.ok(kept, 'the edited configuration is kept');
   assert.match(String(kept.props.value), /# mine/);
-  assert.match(text(page.nodes()), /out of date and cannot run as is/);
+  assert.match(text(page.nodes()), /You changed the evaluation settings after generating/);
   assert.equal(
     page.actions().find((action) => action.id === 'compare-run')?.enabled,
-    false,
-    'a stale configuration cannot be run',
+    true,
+    'a hand-edited configuration is the effective one and can run',
   );
   // 不确认就不覆盖手改内容；确认后才重新生成。
   page.setConfirm(false);
@@ -619,20 +625,23 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
     comparisonDir: compare.comparisonDir,
   });
   const machine = { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' };
-  const conditionSummary = execute<() => ReturnType<typeof evaluationSummary>>('conditionSummary', {
-    machine,
-    comparisonDesign,
+  const design = comparisonDesign();
+  const machineDesign = { machine, ...design };
+  // 摘要现在的来源是"有效配置"（解析后的提交文本）；没有文本时才退回表单设计。
+  const formSummary = execute<() => ReturnType<typeof evaluationSummary>>('conditionSummary', {
+    effectiveConfig: null,
+    formDesign: machineDesign,
+    effectiveSummary: compareConfig.effectiveSummary,
     evaluationSummary,
   });
-  const design = comparisonDesign();
-  const summary = conditionSummary();
-  assert.deepEqual(summary, evaluationSummary({ machine, ...design }));
-  const byLabel = (label: string) => summary.find((item) => item.label[1] === label)?.value;
-  assert.equal(byLabel('Machine'), 'server serverA');
-  assert.equal(byLabel('Comparison project folder'), design.projectDir);
-  assert.equal(byLabel('Reference data root'), '/refs');
-  assert.match(byLabel('Simulation 1') ?? '', /AT-Neu_hist_/);
-  assert.match(byLabel('Simulation 1') ?? '', /47\.1°, 11\.3°/);
+  assert.deepEqual(formSummary(), evaluationSummary(machineDesign));
+  const byLabelOf = (summary: ReturnType<typeof evaluationSummary>, label: string) =>
+    summary.find((item) => item.label[1] === label)?.value;
+  assert.equal(byLabelOf(formSummary(), 'Machine'), 'server serverA');
+  assert.equal(byLabelOf(formSummary(), 'Comparison project folder'), design.projectDir);
+  assert.equal(byLabelOf(formSummary(), 'Reference data root'), '/refs');
+  assert.match(byLabelOf(formSummary(), 'Simulation 1') ?? '', /AT-Neu_hist_/);
+  assert.match(byLabelOf(formSummary(), 'Simulation 1') ?? '', /47\.1°, 11\.3°/);
 
   // 用同一份 design 生成配置；再用 run 提交。比对 summary ↔ config ↔ sites ↔ 实际 IPC 参数。
   const yamlRef: { current: string } = { current: '' };
@@ -669,13 +678,21 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
 
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const notices: string[] = [];
+  const parsed = compareConfig.parseOpenbenchConfig(yamlRef.current);
+  assert.deepEqual(parsed.problems, []);
+  const parseOpenbenchConfig = compareConfig.parseOpenbenchConfig;
+  const structuralProblems = compareConfig.structuralProblems;
+  const configFingerprint = compareConfig.configFingerprint;
   const run = execute<() => Promise<unknown>>('run', {
     task: async (fn: () => Promise<unknown>) => fn(),
     generated,
-    design: generated.current!.fingerprint,
+    formDesign: machineDesign,
     name: 'versions vs flux',
     comparisonName,
     remote: false,
+    parseOpenbenchConfig,
+    structuralProblems,
+    configFingerprint,
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       calls.push({ command, args });
       return { report: null };
@@ -688,9 +705,20 @@ test('U-04: the condition summary is computed from the very comparisonDesign the
     watch: async () => ({}),
     fetchReport: async () => {},
     setConfigSaving: () => {},
+    setLastRun: () => {},
     showRunNotice: (value: string) => notices.push(value),
     t: (_zh: string, english: string) => english,
   });
+  // 摘要从有效配置解析：与表单设计同一份条件，数值一致。
+  const effectiveSummary = execute<() => ReturnType<typeof evaluationSummary>>('conditionSummary', {
+    effectiveConfig: parsed.config,
+    formDesign: machineDesign,
+    effectiveSummary: compareConfig.effectiveSummary,
+    evaluationSummary,
+  });
+  const byLabel = (label: string) => byLabelOf(effectiveSummary(), label);
+  assert.equal(byLabel('Evaluation years'), '2003–2005');
+  assert.equal(byLabel('Time scale'), 'Day');
   await run();
   const submitted = calls.find((call) => call.command === 'bench_run');
   assert.ok(submitted);
@@ -713,7 +741,7 @@ test('U-05: a run success notice is cleared as soon as the evaluation settings c
   const clearWhenChanged = execute<() => void>('clearStaleEvaluationNotice', {
     runNotice: 'Evaluation finished',
     runNoticeFor: { current: 'old-design' },
-    design: 'new-design',
+    effectiveFingerprint: 'new-design',
     setRunNotice: (value: string) => cleared.push(value),
   });
   clearWhenChanged();
@@ -722,7 +750,7 @@ test('U-05: a run success notice is cleared as soon as the evaluation settings c
   const sameDesign = execute<() => void>('clearStaleEvaluationNotice', {
     runNotice: 'Evaluation finished',
     runNoticeFor: { current: 'same-design' },
-    design: 'same-design',
+    effectiveFingerprint: 'same-design',
     setRunNotice: (value: string) => kept.push(value),
   });
   sameDesign();
@@ -731,7 +759,7 @@ test('U-05: a run success notice is cleared as soon as the evaluation settings c
   const noNotice = execute<() => void>('clearStaleEvaluationNotice', {
     runNotice: '',
     runNoticeFor: { current: '' },
-    design: 'x',
+    effectiveFingerprint: 'x',
     setRunNotice: (value: string) => empty.push(value),
   });
   noNotice();
@@ -759,11 +787,34 @@ test('GUI-07: submission errors carry the sidecar unfinished-job message into th
     hostEpoch: { current: 1 },
     refresh: async () => null,
   });
-  const generated = { current: { fingerprint: 'same', config: 'x', sites: [] } };
+  const gridInfo: HistoryInfo = {
+    ...probedGrid,
+    history_dir: '/p/hb/out/hb/history',
+  };
+  const yaml = buildOpenbenchConfig({
+    name: 'qfo era5',
+    years: [2002, 2005],
+    timRes: 'Day',
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [{ label: 'hb', info: gridInfo }],
+    projectDir: '/ob/projects/qfo_era5',
+  }).config;
+  const generated = { current: { fingerprint: 'same', config: yaml, sites: [] } };
   const run = execute<() => Promise<unknown>>('run', {
     task,
     generated,
-    design: 'same',
+    formDesign: {
+      machine: { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' },
+      name: 'qfo era5',
+      years: [2002, 2005],
+      timRes: 'Day',
+      variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+      simulations: [{ label: 'hb', info: gridInfo }],
+      projectDir: '/ob/projects/qfo_era5',
+    },
+    parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+    structuralProblems: compareConfig.structuralProblems,
+    configFingerprint: compareConfig.configFingerprint,
     name: 'qfo era5',
     comparisonName,
     remote: true,
@@ -775,13 +826,14 @@ test('GUI-07: submission errors carry the sidecar unfinished-job message into th
         throw new Error('这个比较还有未完成的评估作业（bench-run-77）：先核对或停止它。');
       return { job: 'new-job' };
     },
-    yaml: 'x',
+    yaml,
     sites: [],
     scanDir: '/refs',
     watch: async () => ({ state: 'succeeded' }),
     afterWatch: async () => ({ state: 'succeeded' }),
     fetchReport: async () => {},
     setConfigSaving: () => {},
+    setLastRun: () => {},
     showRunNotice: () => {},
     t: (_zh: string, english: string) => english,
   });

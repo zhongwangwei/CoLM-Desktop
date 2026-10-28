@@ -192,53 +192,12 @@ pub fn strict_json(text: &str) -> String {
     out
 }
 
-/// 看一个 history 目录：文件前缀、时间分辨率、年份、是不是格点、单点的经纬度。用专用环境里的 xarray 读，
-/// 窗口进程不链接 NetCDF。
-pub const INSPECT_SCRIPT: &str = r#"
-import glob, json, os, re, sys
-import numpy as np, xarray as xr
-folder = sys.argv[1]
-files = sorted(glob.glob(os.path.join(folder, "*_hist_*.nc")))
-if not files:
-    # 给的是算例目录：history 在 out/<DEF_CASE_NAME>/history（名字不一定和目录名一样）。
-    nested = sorted(glob.glob(os.path.join(folder, "out", "*", "history", "*_hist_*.nc")))
-    if nested:
-        folder = os.path.dirname(nested[0])
-        files = sorted(glob.glob(os.path.join(folder, "*_hist_*.nc")))
-if not files:
-    raise SystemExit(f"no *_hist_*.nc in {folder}")
-name = os.path.basename(files[0])
-prefix = name[: name.index("_hist_") + len("_hist_")]
-with xr.open_dataset(files[0]) as first:
-    times = first["time"].values
-    step = float((times[1] - times[0]) / np.timedelta64(1, "s")) if len(times) > 1 else 2.6e6
-    spatial = any(first.sizes.get(d, 1) > 1 for d in ("lat", "lon", "lat_cama", "lon_cama"))
-    lon = float(first["lon"].values.ravel()[0]) if "lon" in first and not spatial else None
-    lat = float(first["lat"].values.ravel()[0]) if "lat" in first and not spatial else None
-    start = int(str(times[0])[:4])
-    # 格点：范围（格子边界）与分辨率。OpenBench 缺省按全球 0.5 度比，区域模拟大半是空格子（实测 GreaterBay
-    # 只有 4 个格子有值）；配置里按模拟的范围裁，比较才落在模拟覆盖的地方。
-    extent = resolution = None
-    if spatial and "lon" in first and "lat" in first:
-        xs = np.unique(first["lon"].values.ravel())
-        ys = np.unique(first["lat"].values.ravel())
-        if len(xs) > 1 and len(ys) > 1:
-            resolution = float(max(np.median(np.diff(xs)), np.median(np.diff(ys))))
-            half = resolution / 2
-            extent = [float(xs.min() - half), float(xs.max() + half), float(ys.min() - half), float(ys.max() + half)]
-with xr.open_dataset(files[-1]) as last:
-    end = int(str(last["time"].values[-1])[:4])
-tim = "Hour" if step <= 3600 else "3Hour" if step <= 3 * 3600 else "Day" if step <= 86400 else "Month"
-# 文件按年/月/日切，还是只有一个文件：OpenBench 的 data_groupby 必须和实际命名一致
-# （默认 month 只在 CoLM 的 *_hist_YYYY-MM.nc 下成立）。
-tail = os.path.basename(files[0])[len(prefix):]
-groupby = "Day" if re.search(r"\d{4}-\d{2}-\d{2}", tail) else "Month" if re.search(r"\d{4}-\d{2}", tail) else "Year" if re.search(r"\d{4}", tail) else "single"
-if len(files) == 1:
-    groupby = "single"
-print(json.dumps({"history_dir": os.path.abspath(folder), "prefix": prefix, "tim_res": tim, "syear": start, "eyear": end,
-                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files), "extent": extent, "resolution": resolution,
-                  "data_groupby": groupby}))
-"#;
+/// 看一个 history 目录：主 history 文件族、前缀、时间分辨率、年份、空间类型（station/patch/grid/
+/// unstructured/unknown）、单点坐标或格点范围、其余文件族、带层维度的变量清单。用专用环境里的 xarray
+/// 读，窗口进程不链接 NetCDF。脚本本体在 `src/scripts/inspect.py`：放进单独 .py 源码比塞在 Rust 原始
+/// 字符串里好测（`scripts/test-bench-scripts.py` 用 python3 + xarray 造合成 NetCDF 直接执行它），
+/// 本机 `python -c`、服务器 heredoc 跑的都是同一份。
+pub const INSPECT_SCRIPT: &str = include_str!("scripts/inspect.py");
 
 /// OpenBench 可选指标/评分及显示名：直接问已安装的 OpenBench registry，避免 GUI 自己维护一份会过期的清单。
 pub const METRIC_SCRIPT: &str = r#"
@@ -273,38 +232,15 @@ for category, name in [("physical", "land"), ("physical", "coastline"), ("physic
             print(f"basemap {scale} {name} not fetched: {error}")
 "#;
 
-/// 单点算例的 history 是每月一个文件；OpenBench 的站点模拟要一个站一个文件。只并只随时间变的地表变量
-/// （维度只有 `time`、`patch`）：带上土壤层、积雪层这些维度一起并，实测 AT-Neu 48 个文件吃到 17 GB 内存
-/// 十分钟还没完；只并地表变量 9.5 秒、360 MB。站点清单（ID,SYEAR,EYEAR,LON,LAT,DIR）用文件自己的经纬度与年份。
-pub const PREPARE_SCRIPT: &str = r#"
-import glob, os, sys
-import xarray as xr
-folder, prefix, out_nc, out_csv, station = sys.argv[1:6]
-files = sorted(glob.glob(os.path.join(folder, prefix + "*.nc")))
-if not files:
-    raise SystemExit(f"no {prefix}*.nc in {folder}")
-parts = []
-for path in files:
-    with xr.open_dataset(path) as ds:
-        keep = [v for v in ds.data_vars if "time" in ds[v].dims and set(ds[v].dims) <= {"time", "patch"}]
-        part = ds[keep]
-        if "patch" in part.dims:
-            part = part.squeeze("patch", drop=True)
-        parts.append(part.load())
-merged = xr.concat(parts, dim="time")
-with xr.open_dataset(files[0]) as first:
-    lon = float(first["lon"].values.ravel()[0])
-    lat = float(first["lat"].values.ravel()[0])
-merged["lon"] = lon
-merged["lat"] = lat
-merged.to_netcdf(out_nc)
-start = int(str(merged["time"].values[0])[:4])
-end = int(str(merged["time"].values[-1])[:4])
-with open(out_csv, "w") as handle:
-    handle.write("ID,SYEAR,EYEAR,LON,LAT,DIR\n")
-    handle.write(f"{station},{start},{end},{lon},{lat},{os.path.abspath(out_nc)}\n")
-print(f"{station}: {len(files)} files, {merged.sizes['time']} steps, {len(merged.data_vars)} variables")
-"#;
+/// 把单点算例的 history 并成一个站点文件，写 OpenBench 的站点清单（ID,SYEAR,EYEAR,LON,LAT,DIR）。
+/// 调用参数：`folder prefix out_nc out_csv station [lon [lat]]`；history 文件缺坐标时必须给 lon/lat。
+///
+/// 为什么这么并：单点算例的 history 是每月一个文件，OpenBench 的站点模拟要一个站一个文件。只并只随时间
+/// 变的地表变量（维度只有 `time`、`patch`）：带上土壤层、积雪层这些维度一起并，实测 AT-Neu 48 个文件
+/// 吃到 17 GB 内存十分钟还没完；只并地表变量 9.5 秒、360 MB。被跳过的变量逐个打印原因，不静默丢。
+/// 目录里的 tracer/unitcat 等文件族不参与合并（同一天两族拼一起会出现重复时刻、主变量一半 NaN）。
+/// 脚本本体在 `src/scripts/prepare.py`，测试同 [`INSPECT_SCRIPT`]。
+pub const PREPARE_SCRIPT: &str = include_str!("scripts/prepare.py");
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

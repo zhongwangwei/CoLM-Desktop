@@ -12,6 +12,7 @@
 mod assistant;
 mod bench;
 mod bench_remote;
+mod bench_runs;
 mod close_gate;
 mod config;
 #[cfg(feature = "e2e-driver")]

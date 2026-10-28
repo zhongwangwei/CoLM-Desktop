@@ -96,6 +96,9 @@ it('builds a config with grid simulations pointing at history and sites as stati
       station: 'AT-Neu',
       history_dir: '/p/AT-Neu/out/AT-Neu/history',
       prefix: 'AT-Neu_hist_',
+      // 编辑模拟时确认的坐标也要进站点清单：合并脚本用它，而不是再读文件里的旧坐标。
+      lon: 11.3,
+      lat: 47.1,
     },
   ]);
   assert.deepEqual(commonYears([site, basin]), [2003, 2005]);
@@ -774,6 +777,46 @@ it('states in English that a failed fetch kept the previous local report', () =>
   assert.match(busy, /being fetched already/);
 });
 
+it('waits for an exit code instead of inventing a terminal state', () => {
+  // 审查报告第 6 条：COMPLETED 已写、exit_code 还在 NFS 路上时不能当失败；terminal=true 只代表"不再写"。
+  assert.equal(remoteJobTerminal({ status: { state: 'finished' }, ended: null }), null);
+  assert.equal(
+    remoteJobTerminal({ status: { state: 'finished', exit_code: null }, ended: null }),
+    null,
+  );
+  assert.equal(remoteJobTerminal({ status: { state: 'lost' }, ended: null, terminal: true }), null);
+  assert.equal(
+    remoteJobTerminal({ status: { state: 'running' }, ended: null, terminal: false }),
+    null,
+  );
+  // 退出码/调度系统结论出现后照常判终态。
+  assert.equal(
+    remoteJobTerminal({ status: { state: 'finished', exit_code: 0 }, ended: null, terminal: true }),
+    'succeeded',
+  );
+  assert.equal(remoteJobTerminal({ status: { state: 'running' }, ended: 'failed' }), 'failed');
+});
+
+it('maps the new run-identity and job-query errors into English', () => {
+  // 本机运行身份（run-identity）：失败原因带 run_id 与冻结目录；英文界面不能漏出中文句子。
+  const failed = benchErrorText(
+    '运行 20261028T132345Z-38134-000010 失败：check failed (1):\nboom\n运行目录：/ob/projects/cmp/runs/20261028T132345Z-38134-000010；配置与站点清单已冻结在这次运行里。上次成功的报告未受影响。',
+  )[1];
+  assert.match(failed, /^Run 20261028T132345Z-38134-000010 failed:/);
+  assert.match(failed, /Run folder: \/ob\/projects\/cmp\/runs\//);
+  assert.match(failed, /last successful report is unaffected/);
+  assert.doesNotMatch(failed, /[\u4e00-\u9fa5]/);
+  const never = benchErrorText(
+    '运行 r-1 失败：boom\n运行目录：/ob/runs/r-1；配置与站点清单已冻结在这次运行里。这个比较还没有成功过的报告。',
+  )[1];
+  assert.match(never, /no successful report yet/);
+
+  // 远程查询执行失败（调度器不可用）不是"作业失败"：走 uncertain 路径，英文说清是查不到状态。
+  const query = benchErrorText('查询作业状态失败：squeue: command not found')[1];
+  assert.match(query, /^Cannot query the job status:/);
+  assert.doesNotMatch(query, /[\u4e00-\u9fa5]/);
+});
+
 it('summarises exactly the design that is about to be submitted', () => {
   // U-04：摘要里的机器/路径/年份/模拟/变量等必须能在真实生成的配置里逐项对上，证明摘要与提交同源。
   const gba = {
@@ -816,7 +859,7 @@ it('summarises exactly the design that is about to be submitted', () => {
     'gridded',
     'gba_hist_',
     '2002–2005',
-    'month',
+    'Month',
     '0.008333°',
     '/p/gba/history',
   ])
@@ -893,17 +936,18 @@ it('explains a missing region instead of pretending a default one', () => {
 });
 
 it('maps the three evaluation-configuration save states used by SaveBadge', () => {
-  // U-05：没生成/设置变了 = dirty；提交时 = saving；与当前设计一致 = saved。
+  // U-05：没生成/设置变了 = dirty；提交时 = saving；文本与当前设计完全一致 = saved。
   const current = {
     yaml: 'project: x',
     currentFingerprint: 'aaa',
-    generated: { fingerprint: 'aaa' },
+    generated: { fingerprint: 'aaa', config: 'project: x' },
   };
   assert.equal(configSaveState({ ...current, submitting: false }), 'saved');
-  // 手改过的配置仍算这一版设计已保存（文本是用户的有意内容）。
+  // 手改过的文本还没写进比较项目目录（运行时才写），必须显示未保存：
+  // 审查报告已复现"只改 YAML 后徽标仍显示已保存"。
   assert.equal(
     configSaveState({ ...current, yaml: 'project: x # edit', submitting: false }),
-    'saved',
+    'dirty',
   );
   assert.equal(configSaveState({ ...current, submitting: true }), 'saving');
   assert.equal(configSaveState({ ...current, yaml: '', submitting: false }), 'dirty');

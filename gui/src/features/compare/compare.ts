@@ -1,6 +1,7 @@
 import { bilingual } from '../../lib/bilingual';
 import type { SaveState } from '../../lib/save-status';
 import { remoteEndStatus } from '../runs/run-model';
+import { fingerprintOf } from './fingerprint';
 
 /** `bench_inspect` 读出的一个 history 目录。 */
 export interface HistoryInfo {
@@ -18,6 +19,30 @@ export interface HistoryInfo {
   resolution?: number | null;
   /** history 文件按年/月/日切，还是 single；OpenBench 用它找文件。 */
   data_groupby?: string | null;
+  /** 目录里的文件族（主 history 之外还有 tracer/unitcat 等时不参与探测，只是报告出来）。 */
+  families?: {
+    family: string;
+    prefix: string;
+    files: number;
+    syear?: number | null;
+    eyear?: number | null;
+  }[];
+  /** 显式空间类型：station/patch/grid/unstructured/unknown（不能只看维度长度是否大于 1）。 */
+  spatial_type?: 'station' | 'patch' | 'grid' | 'unstructured' | 'unknown' | null;
+  /** 每格 patch 数；>1 时单点比较不支持。 */
+  patch?: number | null;
+  /** tim_res 是实测时间轴还是文件名推断（单时刻数据只能推断，界面要说明）。 */
+  tim_res_source?: 'time' | 'filename' | null;
+  /** 格点跨日界线：OpenBench 的 [西, 东] 表示不了，探测会拒绝给范围。 */
+  crosses_dateline?: boolean;
+  /** 这个目录能不能进比较；不能时 blockers/reason 说明原因。 */
+  comparable?: boolean;
+  reason?: string | null;
+  blockers?: { code: string; message: string }[];
+  variables?: { name: string; dims: string[] }[];
+  /** 超出站点评估维度（土层/积雪层/类别等）的变量：制备时会被跳过，运行前要能看到。 */
+  unsupported_variables?: { name: string; dims: string[]; reason: string }[];
+  warnings?: string[];
 }
 
 /** 比较里的一个模拟：一个算例（或别的 history 目录）的一次输出。 */
@@ -128,6 +153,10 @@ export function validateSimulation(
 ): SimulationIssue | null {
   if (!values.dir.trim())
     return { field: 'dir', message: ['请先填模拟目录。', 'Enter the simulation folder first.'] };
+  if (probe && probe.comparable === false) {
+    const blocker = inspectBlockerText(probe);
+    if (blocker) return { field: 'dir', message: blocker };
+  }
   const auto = values.dataType === 'auto';
   if (auto && !probe)
     return {
@@ -240,6 +269,9 @@ export function simulationInfoForSave(
   // 类型变了就把另一类才有的空间字段清掉：站点没有格点范围，格点也不该带上一段单点范围。
   const extent = spatial ? (parseExtent(values.extent) ?? probe?.extent ?? null) : null;
   return {
+    // 探测结论（文件族/空间类型/patch/层维度/警告）要原样带过去：保存模拟时丢掉它们，
+    // 运行前就无法再提示"哪些变量会被跳过""为什么不可比较"（审查报告第 2 条）。
+    ...(probe ?? {}),
     history_dir: probe?.history_dir ?? values.dir.trim(),
     prefix: values.prefix.trim() || probe?.prefix || '',
     tim_res: values.timRes.trim() || probe?.tim_res || 'Day',
@@ -252,7 +284,95 @@ export function simulationInfoForSave(
     extent,
     resolution: typeof gridRes === 'number' ? gridRes : (probe?.resolution ?? null),
     data_groupby: values.dataGroupby.trim() || probe?.data_groupby || null,
+    // 用户显式改过类型时，探测里的 spatial_type 也要跟着改；否则界面一边说格点、
+    // 一边保留"单点"的空间分类，摘要/阻断判断会自相矛盾。旧后端/旧夹具没有 spatial_type 时不要凭空补，
+    // 保持"保存再打开不变"（GUI-09）。
+    ...(probe?.spatial_type != null
+      ? {
+          spatial_type: spatial
+            ? ('grid' as const)
+            : probe.spatial_type === 'patch'
+              ? ('patch' as const)
+              : ('station' as const),
+        }
+      : {}),
   };
+}
+
+/**
+ * 探测脚本报告"这个目录不能进比较"时的双语原因。按固定 code 翻译（后端 message 是英文诊断），
+ * 不认得的 code 至少给出可操作的中文说明 + 原诊断，避免中文界面只看到英文。
+ */
+export function inspectBlockerText(info: {
+  blockers?: { code: string; message: string }[];
+  reason?: string | null;
+  patch?: number | null;
+}): [string, string] | null {
+  const blocker = info.blockers?.[0];
+  if (!blocker) return info.reason ? [info.reason, info.reason] : null;
+  switch (blocker.code) {
+    case 'multi_patch':
+      return [
+        `这个 history 每格有 ${info.patch ?? '多个'} 个 patch；比较页目前只支持单 patch，不能按单点比较。`,
+        `This history has ${info.patch ?? 'multiple'} patches per grid cell; the comparison page supports a single patch and cannot treat it as one station.`,
+      ];
+    case 'unstructured':
+      return [
+        '这个 history 是非结构网格（element/ncol 向量），不能按单点或规则网格比较。',
+        'This history is an unstructured (element/ncol) grid; it cannot be compared as a station or a regular grid.',
+      ];
+    case 'unknown_spatial_type':
+      return [
+        '从文件里看不出这是单点还是格点（没有经纬度维度/坐标，也没有 patch 维度）。',
+        'The files do not say whether this is a station or a grid (no lat/lon dimensions or coordinates, and no patch dimension).',
+      ];
+    case 'dateline_crossing':
+      return [
+        '这个格点区域跨日界线，OpenBench 的 [西, 东] 范围写法表示不了；请先用不跨日界线的范围。',
+        'This grid crosses the antimeridian, which OpenBench’s [west, east] range cannot express; use a region that does not cross it.',
+      ];
+    default:
+      return [`这个目录不能进比较：${blocker.message}`, blocker.message];
+  }
+}
+
+/** 探测脚本的警告（tim_res 来自文件名、缺经纬度、格点范围读不出）的双语说法。 */
+export function inspectWarningText(info: { warnings?: string[] }): [string, string] | null {
+  const warning = info.warnings?.[0];
+  if (!warning) return null;
+  if (warning.includes('single time step'))
+    return [
+      '这个 history 只有一个时刻，时间分辨率是按文件名推断的。',
+      'This history has a single time step; the time resolution was inferred from the file names.',
+    ];
+  if (warning.includes('no coordinates'))
+    return [
+      'history 文件里没有经纬度；保存模拟时请在编辑弹窗里填站点经纬度，制备站点文件会用它。',
+      'The history files have no coordinates; fill in the station longitude/latitude in the simulation dialog, and preparing the station file will use them.',
+    ];
+  if (warning.includes('grid extent'))
+    return [
+      '读不出格点范围；请在编辑模拟里手动填区域范围，否则配置不会写区域。',
+      'Could not read the grid extent; fill in the region in the simulation dialog, otherwise the configuration has no region.',
+    ];
+  return [warning, warning];
+}
+
+/**
+ * 主 history 之外的文件族（tracer/unitcat/…）：不参与比较，但要在界面里说明存在，
+ * 避免用户以为这些时刻也进了站点文件。
+ */
+export function inspectFamilyNote(info: {
+  families?: { family: string; prefix: string; files: number }[];
+}): [string, string] | null {
+  const others = (info.families ?? []).filter((family) => family.family !== 'main');
+  if (!others.length) return null;
+  const text = others.map((family) => `${family.family}（${family.files} 个文件）`).join('、');
+  const english = others.map((family) => `${family.family} (${family.files} files)`).join(', ');
+  return [
+    `同目录另有不参与比较的文件族：${text}（只合并主 history）。`,
+    `Other file families in the same folder are not compared: ${english} (only the main history is merged).`,
+  ];
 }
 
 /**
@@ -310,10 +430,22 @@ export function simulationFormForPick(pick: {
   };
 }
 
-/** 名字只留字母、数字和下划线：它要当 YAML 的键、站点 ID 和文件名。 */
+/**
+ * 名字里有没有非 ASCII 字符（中文等）。ESLint 的 no-control-regex 不接受 [\x00-\x7F] 这种
+ * 控制字符范围；`\p{ASCII}` 的属性转义等价且不触发规则。
+ */
+const hasNonAscii = (text: string) => !/^[\p{ASCII}]*$/u.test(text);
+
+/**
+ * 名字只留字母、数字和下划线：它要当 YAML 的键、站点 ID 和文件名。
+ * 显示名里有非 ASCII（中文等）时，按字符清洗会塌成同一个 `sim_run`，不同模拟被报重名、共用站点文件；
+ * 追加显示名指纹保持稳定且互不相同（审查报告：中文名称身份碰撞）。纯 ASCII 名的键保持原样，
+ * 已有比较的目录与配置不迁移。
+ */
 export function simulationKey(label: string): string {
   const key = label.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-  return /^[A-Za-z]/.test(key) ? key : `sim_${key || 'run'}`;
+  const base = /^[A-Za-z]/.test(key) ? key : `sim_${key || 'run'}`;
+  return hasNonAscii(label) ? `${base}_${fingerprintOf(label).slice(0, 6)}` : base;
 }
 
 /** `ref list --format json` 的输出各版本略有不同（数组，或 `{datasets: [...]}`）；统一成 [`BenchReference`]。 */
@@ -352,14 +484,26 @@ export function unionRegion(
 ): [number, number, number, number] | null {
   const extents = simulations
     .filter((s) => s.info.spatial && s.info.extent)
-    .map((s) => s.info.extent!);
+    .map((s) => s.info.extent!)
+    // 只并"能当范围用"的 extent。西>东或越界的值不再钳到 ±180（审查报告：0–360 经度会生成
+    // lon_range [199.5, 180] 这种西界大于东界的配置）；不可用的范围由页面按"缺范围"提示。
+    .filter(
+      (extent) =>
+        extent.every((value) => Number.isFinite(value)) &&
+        extent[0] >= -180 &&
+        extent[1] <= 180 &&
+        extent[0] < extent[1] &&
+        extent[2] >= -90 &&
+        extent[3] <= 90 &&
+        extent[2] < extent[3],
+    );
   if (!extents.length) return null;
   const round = (v: number, up: boolean) => (up ? Math.ceil(v * 100) : Math.floor(v * 100)) / 100;
   return [
-    round(Math.max(-180, Math.min(...extents.map((e) => e[0]))), false),
-    round(Math.min(180, Math.max(...extents.map((e) => e[1]))), true),
-    round(Math.max(-90, Math.min(...extents.map((e) => e[2]))), false),
-    round(Math.min(90, Math.max(...extents.map((e) => e[3]))), true),
+    round(Math.min(...extents.map((e) => e[0])), false),
+    round(Math.max(...extents.map((e) => e[1])), true),
+    round(Math.min(...extents.map((e) => e[2])), false),
+    round(Math.max(...extents.map((e) => e[3])), true),
   ];
 }
 
@@ -496,13 +640,21 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     }
   }
   lines.push('simulation:');
-  const sites: { id: string; station: string; history_dir: string; prefix: string }[] = [];
+  const sites: {
+    id: string;
+    station: string;
+    history_dir: string;
+    prefix: string;
+    /** 页面确认的站点坐标（度）：后端合并站点文件时传给准备脚本，缺省时才回退到文件里的值。 */
+    lon: number | null;
+    lat: number | null;
+  }[] = [];
   design.simulations.forEach((sim, i) => {
     const key = keys[i]!;
     lines.push(`  ${key}:`, '    model: CoLM2024');
     if (sim.info.spatial) {
       const groupby =
-        sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'month');
+        sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'Month');
       const native = sim.gridRes ?? sim.info.resolution;
       lines.push(
         `    root_dir: ${quote(sim.info.history_dir)}`,
@@ -516,7 +668,15 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
       // 站点 ID 用站点自己的名字（history 前缀去掉 `_hist_`，如 AT-Neu）：OpenBench 按 ID 和参考数据里的站点
       // 对上，整理过的键（AT_Neu）对不上。
       const station = sim.info.prefix.replace(/_hist_$/, '') || key;
-      sites.push({ id: key, station, history_dir: sim.info.history_dir, prefix: sim.info.prefix });
+      // 编辑模拟弹窗允许修正经纬度：界面显示的是这组值，实际计算也必须用它，而不是再读文件里的旧值。
+      sites.push({
+        id: key,
+        station,
+        history_dir: sim.info.history_dir,
+        prefix: sim.info.prefix,
+        lon: Number.isFinite(sim.info.lon) ? sim.info.lon : null,
+        lat: Number.isFinite(sim.info.lat) ? sim.info.lat : null,
+      });
       // 用绝对路径：OpenBench 3.0.8 的 `check` 按 root_dir 解析 fulllist，`run` 却按工作目录打开它，
       // 相对路径总有一边找不到（2026-10-23 窗口实测：sim/sim/x.csv 与 x.csv 各错一次）。
       const sep = design.projectDir.includes('\\') && !design.projectDir.includes('/') ? '\\' : '/';
@@ -549,33 +709,14 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
   return { config: `${lines.join('\n')}\n`, sites, missingExtent };
 }
 
-/** 指纹里的对象键按名字排序：同一份设计不因勾选/写入顺序不同得到两个指纹。 */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object')
-    return `{${Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map(
-        (key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,
-      )
-      .join(',')}}`;
-  if (typeof value === 'number' && !Number.isFinite(value)) return 'null';
-  return JSON.stringify(value) ?? 'null';
-}
-
 /**
  * 一次评估设计的稳定指纹：把**生成配置与运行所依赖的全部输入**（目录、类型、前缀、时间、分组、
  * 空间范围与分辨率、变量映射、参考数据、指标评分，以及机器/OpenBench/参考数据路径身份）压成一个
  * 短串。生成配置时记下它，运行前再算一遍；只是目录和显示名不变、内部输入变了也能发现（GUI-04）。
+ * 算法本体在 `fingerprint.ts`：手改后的有效配置（`config.ts`）必须用同一套规范化/哈希，判断才一致。
  */
 export function designFingerprint(design: EvaluationDesign): string {
-  const text = canonicalJson(design);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < text.length; index++) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
+  return fingerprintOf(design);
 }
 
 /**
@@ -626,7 +767,7 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
   design.simulations.forEach((sim, index) => {
     const kind = sim.info.spatial ? bilingual('格点', 'gridded') : bilingual('单点', 'station');
     const groupby =
-      sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'month');
+      sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'Month');
     const native = sim.gridRes ?? sim.info.resolution;
     items.push({
       label: [`模拟 ${index + 1}`, `Simulation ${index + 1}`],
@@ -705,12 +846,15 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
 export function configSaveState(args: {
   yaml: string;
   currentFingerprint: string;
-  generated: { fingerprint: string } | null;
+  generated: { fingerprint: string; config: string } | null;
   submitting: boolean;
 }): SaveState {
   if (args.submitting && args.yaml) return 'saving';
   if (!args.yaml || !args.generated || args.generated.fingerprint !== args.currentFingerprint)
     return 'dirty';
+  // U-05 的补充：手改过的文本还没有写进比较项目目录（运行时才写），不能显示"已保存"
+  // （审查报告：只改 YAML 后徽标仍是 saved）。
+  if (args.yaml !== args.generated.config) return 'dirty';
   return 'saved';
 }
 
@@ -728,9 +872,17 @@ export function comparisonDir(root: string, name: string): string {
   return `${root}${sep}projects${sep}${comparisonName(name)}`;
 }
 
-/** 比较名在后端只认字母、数字、- 和 _。 */
+/**
+ * 比较名在后端只认字母、数字、- 和 _（`valid_name`）。
+ * 中文比较名按字符清洗后都会变成 `_`，不同比较共用一个目录、报告互相覆盖；非 ASCII 名追加显示名
+ * 指纹，得到稳定且互不相同的目录名。ASCII 名保持原样（已有比较目录不迁移）。长度按后端上限 60 截断。
+ */
 export function comparisonName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]+/g, '_') || 'comparison';
+  const slug = name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!hasNonAscii(name)) return slug || 'comparison';
+  const base = slug || 'comparison';
+  const suffix = fingerprintOf(name).slice(0, 8);
+  return `${base.slice(0, 60 - suffix.length - 1)}-${suffix}`;
 }
 
 /**
@@ -801,10 +953,16 @@ export function parseRemoteJob(text: string | null | undefined): RemoteJobIdenti
 export function remoteJobTerminal(reply: {
   status?: { state?: string; exit_code?: number | null };
   ended?: string | null;
+  /** 调度系统明确确认作业不会再写（但退出码/结果经 NFS 可能还没可见）。 */
+  terminal?: boolean;
 }): 'succeeded' | 'failed' | 'cancelled' | null {
   const state = reply.status?.state;
-  const ended = reply.ended === 'cancelled' || reply.ended === 'failed';
-  if (state !== 'finished' && !ended) return null;
+  // 调度系统记下的取消/失败是明确终态（没有退出码也认）。
+  if (reply.ended === 'cancelled' || reply.ended === 'failed') return remoteEndStatus(reply);
+  if (state !== 'finished') return null;
+  // finished 但退出码还没出现（COMPLETED 已写、exit_code 还在 NFS 路上）：继续等，不能当失败。
+  // 同理 terminal=true 只是"不再写"，成功/失败未定，也不是本函数要回答的问题（由页面继续轮询）。
+  if (reply.status?.exit_code == null) return null;
   return remoteEndStatus(reply);
 }
 
@@ -872,6 +1030,22 @@ export function benchErrorText(error: string): [string, string] {
   };
   if (text in fixed) return [text, fixed[text]!];
   const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    // 审查报告第 6 条：调度器不可用/查询命令执行失败（不是"作业丢了"）。
+    [
+      /^查询作业状态失败：([\s\S]*)$/,
+      (m) => `Cannot query the job status: ${benchErrorText(m[1]!)[1]}`,
+    ],
+    // 本机运行身份：失败原因带 run_id 与冻结目录（run-identity 定的固定格式）。
+    [
+      /^运行 (\S+) 失败：([\s\S]*?)\n运行目录：([\s\S]*?)；配置与站点清单已冻结在这次运行里。上次成功的报告未受影响。$/,
+      (m) =>
+        `Run ${m[1]} failed: ${m[2]!.trim()}. Run folder: ${m[3]}; the configuration and station list are frozen with this run. The last successful report is unaffected.`,
+    ],
+    [
+      /^运行 (\S+) 失败：([\s\S]*?)\n运行目录：([\s\S]*?)；配置与站点清单已冻结在这次运行里。这个比较还没有成功过的报告。$/,
+      (m) =>
+        `Run ${m[1]} failed: ${m[2]!.trim()}. Run folder: ${m[3]}; the configuration and station list are frozen with this run. This comparison has no successful report yet.`,
+    ],
     // GUI-07 服务器侧：同名比较还有未确认终态的作业时，sidecar 拒绝提交/取回，作业号在括号里。
     // 括号后的中文动作说明不逐句翻（服务端措辞会变）：英文固定给出"还有未完成作业（作业号）"这一可操作含义。
     [
