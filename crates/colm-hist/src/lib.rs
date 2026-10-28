@@ -29,6 +29,7 @@ pub mod pair;
 pub mod schedule;
 pub mod selection;
 pub mod time;
+pub mod timeline;
 
 use std::collections::BTreeSet;
 
