@@ -38437,3 +38437,56 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2928 passed / 0 failed / 15 ignored**；其中 colm-agent 库 326（新增 R01/R02/R03/R04 回归）、colm-cli 535（含 R05 回归）、xtask 37。
 - GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib -- --test-threads=1` → **493 passed / 1 ignored / 0 failed**。
 - 未运行：真实 Xerj（R01 fake 为状态化本地实现，未新增真机验收）、真实 SSH/远程 Study、真实模型 API、GUI 原生窗口、科学任务评测；Windows/Linux 运行未在本机执行（CI 覆盖编译与测试）。审查报告中的 R06–R15 与第六、七节建议不在本次范围。
+
+## 双仓库变量变更历史追踪（第一版，2026-10-28）
+
+依据 `COLM-Variable-History-Implementation-Prompt.txt`，在现有 Agent/CLI/来源校验上实现可用的只读“变量历史”功能：同时把官方 CoLM 纳入独立查询来源，回答“变量 X 何时改过、对应 commit/PR、作者为什么改、Desktop 何时引入、当前冻结模型是否仍保留”。不新增 Agent 框架、向量库、后台同步或独立前端；不调用真实模型 API/SSH/科学模拟。
+
+### 实现结构
+
+- `crates/colm-cli/src/history.rs`（新增，约 2.7k 行）：四个新命令供 Agent 工具调用，全部只用固定参数的本地 `git -C`，无 shell、无 HTTP：
+  - `history-repos`：双仓库注册表。规范来源 desktop=`zhongwangwei/CoLM-Desktop`、colm_upstream=`CoLM-SYSU/CoLM`；路径默认 `<history-root>/repos/<key>`，也可用 `COLM_HISTORY_DESKTOP_PATH`/`COLM_HISTORY_UPSTREAM_PATH` 或 `--desktop-path/--upstream-path` 指向已有本地仓库；身份按实际 `git rev-parse --show-toplevel` 与 `origin` remote 核验，只有规范 owner/repo 才 `verified`，否则 `unverified` 并保留真实 remote；vendor/CoLM202X 在外层 Desktop 检出里运行时 root 报 Desktop，绝不冒充官方。默认分支从 `origin/HEAD`/HEAD 发现；coverage 报 shallow/commits/complete_history。
+  - `history-sync`：显式同步。`--offline` 零 clone/fetch；在线时缺失管理副本才 clone、已有则 `git fetch --prune origin`，不切用户分支、不改 vendor/冻结模型；逐仓库返回 cloned/fetched/skipped/offline/error 与同步 ref/SHA/时间。
+  - `history-track`：变量定位与历史。`selected` 固定当前冻结模型 source_dir 与记录的 commit（无 .git 时用 model code commit 在 Desktop 历史查；两者都缺则“源码可读、历史来源不可核验”，绝不回退应用 HEAD/不 git init 造历史）。`desktop`/`colm_upstream` 各用自己默认分支或 `--ref`，`both` 分别解析终点、不串 SHA。定位用 `git grep --fixed-strings` 返回全部候选（同名变量多文件/作用域不任意选第一项）；历史用 `git log --follow -G`（行内容变化，覆盖出现次数不变但赋值/公式改变）与 `-S`（出现次数变化）并集 + `git blame` 补最后触摸，只保留 diff 确实含该符号的 hunk；文件重命名用 `--follow`。dirty 工作区单独列 `uncommitted` diff，不编造 commit/作者时间；limit 默认 5/上限 20、offset、`truncated` 与 limits 明确。`query.overlay` 比较当前源码字节与查询 commit blob，不凭 ancestry 断言修改仍生效。
+  - `history-commit`：必须显式仓库身份 + 完整 40 hex SHA；返回 author/committer 时间、父提交、完整说明、commit vs 第一父的真实 diff（合并提交注明 multiplicity）、reason（commit message: documented/not_recorded + 摘录）。不读工作区、不拼当前文件。
+  - cross 映射：upstream 修改文件按路径映射 `vendor/CoLM202X/<path>`（目录迁移时唯一 basename 作 candidate）；Desktop 首次加入提交（`--diff-filter=A`）+ 后续提交；比较 upstream commit blob 与 Desktop import commit blob，state=verified（path+blob-equal+import commit）/candidate/unmapped 并给 basis；仅内容相同/重复 hash 不编引入日期；Desktop 独立修改单独返回 unmapped。同一文件多个上游 commit 时按 import blob 选真正引入的那条（修复了提交时间相同时按 SHA 平局任选的缺陷，见回归）。
+- `crates/colm-agent/src/tools/history.rs`（新增）：三个 A 级只读工具。
+  - `source_history`：repository=selected|desktop|colm_upstream|both、symbol 必填，可选 path/source/ref/limit/offset；selected 先 `ModelContext::verify_source`，用冻结 source_dir 并把扁平 model 身份（mode/source_dir/commit/fingerprint + 完整 model）交给 CLI；返回 CLI JSON + Agent 侧可信 `source_context`。
+  - `commit_details`：repository=desktop|colm_upstream（selected 明确要求先用 source_history 取提交）、严格 40 位小写 hex SHA；返回 commit/details/reason。
+  - `commit_pull_requests`：repository=desktop|colm_upstream、SHA、refresh/include_discussion；owner/repo 只来自可信常量（模型不能指定），`ctx.web=None` 时离线只读缓存、绝不 HTTP；返回 PR 关联 + `source_context` + `network{enabled,offline,token_present}`。
+- `crates/colm-agent/src/tools/history_github.rs`（新增）：GitHub `GET /repos/{owner}/{repo}/commits/{sha}/pulls` 客户端。严格错误分类（401/403 含 rate limit/404/429/网络/畸形/其它 HTTP）、分页上限与 complete 标记、0/1/多 PR、PR body+comments 理由摘录、缓存按 owner/repo+完整 SHA 隔离（临时文件+rename）、离线零请求、token 只进 Bearer 头且不进 Debug/错误/缓存；`COLM_HISTORY_GITHUB_API` 仅测试可指向 loopback mock。
+- 接入：`Registry::standard()` 注册三个工具（Read 级，不需审批）；`ToolContext` 增加可信 `history_root` 与专用 `github_token`；`colm-agent` Configure 从应用数据目录 `assistant/history` 与 `COLM_GITHUB_TOKEN` 或 Key 文件 `https://api.github.com` 读取；`prompt.md` 增加“何时改/哪个 PR/为什么改”的强制工具路由与证据规则（仓库分别路由、时间/理由三态、跨仓 verified/candidate/unmapped、祖先关系不等于当前仍生效、离线不能声称没 PR）。
+- 文档：`docs/design-ai-assistant.md` 新增只读历史小节；README 中英提到变量历史能力。
+
+### 实测（真实执行）
+
+- `cargo fmt --all --check` → exit 0；`cargo clippy --workspace --all-targets -- -D warnings` → exit 0。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2978 passed / 0 failed / 15 ignored**。其中 `colm-cli` **552**（新增 16 个真实 git 夹具历史测试 + 1 个时间戳平局回归）、`colm-agent` **359**（新增 14 个工具测试 + 19 个 GitHub mock 测试）。
+- GUI 窗口进程：`cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib -- --test-threads=1` → **494 passed / 1 ignored / 0 failed**（本功能未新增 Tauri 命令，契约不变）。
+- **真实 Desktop 仓库只读 smoke**（`cargo run -p colm-cli -- ...`）：
+  - `history-repos --desktop-path .` → desktop identity=verified（remote `git@github.com:zhongwangwei/CoLM-Desktop.git`）、default_branch=main、coverage commits=2283/complete_history=true；上游 missing 并有明确错误，不伪造。
+  - `history-track --repository desktop --symbol PINNED_XERJ_RELEASE --limit 2` → endpoint origin/main@`4302a30c`，18 个真实 location，返回真实提交 `33293c67`、`ddb2b34d`（relevance 同时含 pickaxe-G/S），reason=documented 且带提交说明摘录，limits 明确 “4 matching commits; returning 0..2”、truncated=true。
+  - `history-track --limit 1` 的真实 hunk 给出该提交的 old/new 代码（`xerj_data_dir_name` 整段新增）。
+- **真实跨仓映射 smoke**（两个临时真实 git 仓库，测试数据，不是本仓库真实 PR）：upstream 先改 `alpha` 公式提交 `fa05824d`，desktop 后 import 同一 blob（`4e3f2aa3`），另有 Desktop 独立后续提交；`history-track --repository both --symbol alpha` → cross state=**verified**、basis=`path,import-commit,blob-equal`、upstream commit 正确为 `fa05824d`、两侧时间与 later_commits 齐全。修复前同一夹具会因两个上游提交时间相同而按 SHA 选中旧的 `e0d165f7`（candidate），已加回归。
+- **真实 GitHub API 只读 smoke**（curl，仅验证公开端点语义，不是客户端测试）：`CoLM-SYSU/CoLM` HEAD `f9ea408e` 是 merge PR **#512**，`/commits/<sha>/pulls` 返回 PR 512（HTTP 200）；`zhongwangwei/CoLM-Desktop` 提交 `4302a30c` 返回 `[]`（直接推送，无关联 PR）。GitHub 客户端本身全部用本地 mock HTTP 测试（19 项），未用真实 token/TLS 调用。
+- 新测试覆盖任务书 12 类验收：公式改而出现次数不变（`-G`）、同名变量 Rust/Fortran 不串历史、冻结旧 commit 不混未来修改与 overlay 不能凭 ancestry、rename/删除、dirty 单独 uncommitted、无 .git/浅克隆/截断降级、0/多 PR/无理由/401/403/429/网络/离线缓存/缓存隔离、工具注册与调用链、双仓同名变量与不同 PR 不串用、官方先改 Desktop 后引入 verified、官方 PR 未合并/Desktop 独立修改分开、仅内容相似不编造出处。
+- 示例输出（测试夹具，非本仓库真实 PR）：`source_history` 返回 `{"query":{"symbol":"alpha","repository":"both","endpoints":{...}},"repos":{"colm_upstream":{"commits":[{"sha":"fa05824d…","reason":{"status":"documented","basis":"commit_message","excerpt":"Change alpha update formula…"}}]},"desktop":{"commits":[…]}},"cross":{"links":[{"state":"verified","basis":["path","import-commit","blob-equal"],…}]},"limits":[],"truncated":false}`；`commit_pull_requests` 对 mock 返回 `{"pulls":[{"number":512,"owner_repo":"CoLM-SYSU/CoLM","reason":{"status":"documented","basis":"pull_body",…},"evidence_id":"github:CoLM-SYSU/CoLM#512"}],"complete":true,"offline":false}`。
+
+### 使用方式
+
+- 在聊天里直接问，例如：A “官方 CoLM 中变量 `alpha` 的这处赋值什么时候改过？对应哪个 PR，作者记录的原因是什么？”；B “CoLM-Desktop 什么时候引入或改写了这项修改？对应哪个 Desktop commit/PR？当前选定模型是否仍保留？”；C “只查我当前冻结模型的历史，不要把上游最新尚未引入的变化当成当前实现。”
+- Agent 会按问题路由：官方物理/Fortran → colm_upstream；GUI/Agent/Rust 应用 → desktop；引入/差异 → both；selected 固定当前冻结模型来源。回答必须按“查询对象/修改内容/修改时间/提交与 PR/修改原因/当前版本关系/限制”给出，并附 owner/repo、完整 SHA、缓存时间与 evidence ID。
+- 初始化/刷新历史（CLI，显式动作；不自动后台同步）：`colm-cli history-sync --history-root "<应用数据目录>/assistant/history" --repository both`。macOS 应用数据目录通常在 `~/Library/Application Support/edu.sysu.colm.desktop/assistant/history`；也可把 `COLM_HISTORY_DESKTOP_PATH`/`COLM_HISTORY_UPSTREAM_PATH` 指向已有仓库后用 `history-repos` 查看身份。离线时加 `--offline`，或关闭应用联网设置（此时 `commit_pull_requests` 只读缓存）。
+- GitHub 凭据：设置 `COLM_GITHUB_TOKEN`（专用 token，不复用模型 Key），或把 token 存到助手 Key 文件的服务名 `https://api.github.com`；无凭据仍可查公开数据，私有仓库会被明确标为未授权。
+- 缓存：仓库历史在 `history/repos/*`、GitHub PR 在 `history/github/<owner>/<repo>/<sha>.json`；旧缓存只能表述“截至上次同步”，不是实时最新。
+
+### 未验证/限制（如实）
+
+1. 真实 GitHub **客户端**（TLS、token、Link 头、真实限流头）未跑：全部 19 个测试用本地 mock；上面的 curl smoke 只验证了公开端点本身。私有仓库/无凭据行为未对真实服务验证。
+2. 真实 `history-sync` 的在线 clone/fetch 未真机执行（本轮禁止联网同步）；只测了 offline 与已有本地仓库路径。应用管理副本的真正初始化需要用户显式运行一次同步命令。
+3. GUI 没有专门的“追踪修改历史”页面/按钮：按任务书“没有合适入口则先保证聊天入口完整可用”，本轮只接聊天工具；同步也只能走 CLI（后续可加界面入口）。
+4. Windows 上依赖 shell 假 CLI 的部分测试跳过（`#[cfg(unix)]`）；git 命令路径与 JSON/注册表测试跨平台保留，真实 Windows 运行未在本机验证。
+5. 变量重命名、宏、别名、间接赋值、同名不同作用域等只能给候选与限制，不做完整语义追踪；blame/-G/-S 是保守文本证据，注释行与代码行以 hunk 内容为准但不解析语义。数值/物理结论是否受某次修改影响不能由 commit 祖先关系证明，工具会返回 unknown，需另做运行或对照证据。
+6. 跨仓库映射只在**本次已返回**的上游提交范围内做，并受 limit/cross cap 截断；路径迁移只做唯一 basename candidate；vendor 中 Desktop 自有改动标 unmapped；不遍历 fork、不解析完整传播链。
+7. GitHub 讨论只取 PR body + 有界 comments（分页上限），未读完时 `complete=false`；作者动机只来自这些原文，代码推断由回答方明确标注。
+8. 本轮没有调用真实模型 API，因此“模型实际按新工具回答”的端到端未跑；工具调用链由 14 个 fake-CLI/mock-HTTP 工具测试与真实 CLI 契约 smoke 覆盖。未运行 SSH、科学模拟或大型评测。

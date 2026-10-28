@@ -239,6 +239,17 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 **内置后端不提供任意 shell。** 所有命令都预先定义好，参数受校验。外部后端自带 shell，由它们自己的沙箱加我们的审批来约束（见第 7 节）。
 
+### 只读历史：双仓库变量变更追踪（第一版）
+
+回答“变量 X 什么时候改过、对应哪个 commit/PR、作者为什么改、Desktop 何时引入、当前模型是否仍保留”的问题。**三个工具都是 A 级只读**：`source_history`（定位变量并查询修改历史）、`commit_details`（提交详情与相对父提交的 diff）、`commit_pull_requests`（GitHub commit→PR 关联）。它们不跑模拟、不读写用户仓库、不自动提交、不创建 PR，也不依赖 Xerj。
+
+- **两个独立来源**：`desktop` = `zhongwangwei/CoLM-Desktop`；`colm_upstream` = `CoLM-SYSU/CoLM`。仓库注册表与历史缓存放在应用数据目录的 `history/`：默认管理副本在 `history/repos/<key>`，也可通过 `COLM_HISTORY_DESKTOP_PATH` / `COLM_HISTORY_UPSTREAM_PATH` 或 CLI `--desktop-path/--upstream-path` 指向用户已有本地仓库。身份按实际 git root 与 `origin` remote 核验：只有与规范 owner/repo 一致才标 `verified`，否则保留真实 remote 并标 `unverified`；在 vendor/CoLM202X 子目录跑 git 得到的是外层 Desktop 根，绝不冒充官方 commit。默认分支从仓库发现（`origin/HEAD`/HEAD），不假定两边都叫 main。
+- **同步是显式动作**：`colm-cli history-sync --history-root <应用数据目录>/history --repository desktop|colm_upstream|both [--offline]`。离线时绝不 clone/fetch；在线时缺失管理副本才 clone、已有则 `git fetch --prune origin`；只更新历史缓存，不切换用户工作区分支、不改 vendor/冻结模型。旧缓存只能表述为“截至上次同步”，上游最新查询必须显示实际 ref/SHA 与同步时间。GitHub PR 缓存位于 `history/github/<owner>/<repo>/<sha>.json`；联网关闭时三个工具仍给本地 Git 结果，PR 工具只读缓存并标明未检查实时数据。
+- **选中模型的源码身份**：selected 查询固定在当前冻结模型的 source_dir 与记录的 commit（无 .git 时用 model code 的 commit 在 Desktop 历史中查；两者都没有则“源码可读但历史来源不可核验”），绝不回退应用 HEAD，也不通过 git init 给源码快照造历史。dirty 工作区把已提交历史与未提交 diff 分开；未提交修改没有 commit/作者时间/PR。浅克隆、对象缺失、无 .git、历史截断都返回 partial/unavailable 及原因，不能说成“从未修改”。
+- **历史方法**：先用现有源码搜索/符号能力定位（同名变量多处返回候选，不任意选第一项）；历史取 `git log --follow -G`（行内容变化，覆盖出现次数不变但赋值/公式改变）与 `-S`（出现次数变化）的并集，再用 `git blame` 补最后触摸，只保留 diff 确实含该符号的 hunk；文件重命名用 `--follow`。变量重命名、宏、别名、间接赋值无法确定时返回候选与限制，不宣称完整语义追踪。
+- **证据规则**：作者时间、提交者时间、PR 合并时间、Desktop 引入时间是不同字段；修改理由只分 documented（commit/PR/讨论原文+摘录）、inferred（明确写“根据代码推断”，无作者确认）、not_recorded/unavailable；PR 标题里的 #数字只能当线索，必须用 `GET /repos/{owner}/{repo}/commits/{sha}/pulls` 的关联结果。官方修改动机与 Desktop 引入理由分别引用各自记录。`same hash / 相似片段` 不足以证明来源、唯一 SHA、传播方向或引入时间；跨仓库关系返回 verified/candidate/unmapped 与依据；官方 PR 可能未合并而 Desktop 已采用，两者分开记录。commit 祖先关系不能证明当前源码仍保留该修改或影响数值结论，撤销/cherry-pick 不明确时返回 unknown。
+- **离线与凭据**：GitHub 只使用专用凭据（`COLM_GITHUB_TOKEN`，或 Key 文件里 `https://api.github.com` 一条），不复用模型 API Key；无凭据仍可查公开数据。工具结果带 evidence ID、owner/repo、链接、截断标记与缓存时间；长结果缩减时保留依据。缓存按 owner/repo+完整 40 hex SHA 隔离，同名文件/变量、相同 PR 编号甚至相同 SHA 不会跨仓库串用。
+
 ### D 级：采纳，只能人工操作
 
 - 把实验内核设为默认；
