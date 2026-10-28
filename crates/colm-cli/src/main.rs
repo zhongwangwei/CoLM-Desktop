@@ -655,14 +655,23 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 run_options: Option<study_version::RunOptions>,
                 /// 交给服务器跑过的记录（`remote-study-run`）；没有为空。
                 remote: Option<serde_json::Value>,
+                /// 已提交但还没核对完的远程提交意图。
                 remote_pending: Option<serde_json::Value>,
+                /// 结构化 Study 证据（P1-A）：只读已记录的 checkpoint、样本与任务结果；
+                /// 供助手回答率定/验证问题，不重跑模拟也不连服务器。
+                evidence: serde_json::Value,
             }
             let study_dir = opts.positional_case()?;
+            // 只读一次 state：`status_state` 在恢复 NeedsReview 时可能写 checkpoint，
+            // 重复调用会让一条只读状态命令变成第二个写者。
+            let manifest = study::engine::status(&study_dir)?;
+            let state = study::runner::status_state(&study_dir)?;
+            let evidence = study::runner::study_evidence(&study_dir, &manifest, state.as_ref())?;
             println!(
                 "{}",
                 serde_json::to_string(&StudyStatusJson {
-                    manifest: study::engine::status(&study_dir)?,
-                    state: study::runner::status_state(&study_dir)?,
+                    manifest,
+                    state,
                     pause_requested: study::state::pause_requested(&study_dir),
                     cancel_requested: study::state::cancel_requested(&study_dir),
                     results: study::runner::result_files(&study_dir)?,
@@ -681,6 +690,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                         }
                         record
                     }),
+                    evidence,
                 })?
             );
         }

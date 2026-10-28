@@ -450,3 +450,310 @@ printf '{"argv":"%s"}\n' "$*"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ---- P1-A：study_summary 消费 study-status.evidence ----
+
+#[cfg(unix)]
+fn fake_study_cli(root: &Path, status: &Value) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let status_path = root.join("study-status.json");
+    std::fs::write(&status_path, status.to_string()).unwrap();
+    let script = root.join("fake-cli");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = study-status ] || exit 9\ncat '{}'\n",
+            status_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    script
+}
+
+fn study_evidence(study_record: Value, dims: Value, best_values: Value, warnings: Value) -> Value {
+    json!({
+        "schema": 1,
+        "study": {"kind": "tuning", "method": "differential-evolution", "status": "completed", "generation": 1},
+        "execution": {"state": "completed", "tasks": {"total": 4}, "partial_failures": false, "failed_tasks": []},
+        "selection": {"best_member": "m000005", "best_objective": 0.3, "provisional": false, "no_best_reason": null},
+        "objective": {"direction": "minimize", "loss": "weighted mean of per-target losses", "targets": [{"key": "Qle"}]},
+        "comparison": {
+            "basis": "same period only",
+            "baseline": {"member": "m000000",
+                "calibration": {"status": "recorded", "score": 0.8, "targets": [{"key": "Qle", "loss": 0.8}]},
+                "validation": {"status": "recorded", "score": 0.6, "targets": [{"key": "Qle", "loss": 0.6}]}},
+            "best": {"member": "m000005",
+                "calibration": {"status": "recorded", "score": 0.3, "targets": [{"key": "Qle", "loss": 0.3}]},
+                "validation": {"status": "recorded", "score": 0.9, "targets": [{"key": "Qle", "loss": 0.9}]}},
+            "relation": {"calibration": "lower_loss", "validation": "higher_loss"},
+        },
+        "validation": {"configured": true, "status": "available", "windows": [{"target": "Qle", "from": 10, "to": 20}], "reasons": []},
+        "parameters": {
+            "status": "recorded", "dimension_count": dims.as_array().map_or(0, Vec::len), "hybrid_weight_count": 0,
+            "dims": dims,
+            "baseline": {"status": "recorded", "values": [
+                {"key": "DEF_TUNING_CNFAC", "value": 0.5, "position": 0.5, "position_scale": "linear", "at_bound": false}
+            ]},
+            "best": {"status": "recorded", "values": best_values},
+        },
+        "model_identity": {"study_record": study_record, "current_selection": null, "comparison": {"status": "unknown"}},
+        "verification": {"recorded_result_files": 2, "reverified": false},
+        "remote": {"status": "none"},
+        "source_paths": {"root": "/study"},
+        "warnings": warnings,
+        "missing": [],
+    })
+}
+
+#[cfg(unix)]
+fn study_status_fixture(evidence: Option<Value>) -> Value {
+    let mut status = json!({
+        "manifest": {
+            "spec": {
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "base_cases": ["site"],
+                "parameters": [{"name": "DEF_TUNING_CNFAC", "sample_min": 0.1, "sample_max": 0.9, "scale": "linear"}],
+                "targets": [{"key": "Qle", "variable": "Qle", "from": 0, "to": 10, "validation_from": 10, "validation_to": 20}],
+            },
+            "members": [{
+                "id": "m000005",
+                "parameters": {"DEF_TUNING_CNFAC": 0.5},
+            }],
+        },
+        "state": {
+            "status": "completed",
+            "generation": 1,
+            "best_member": "m000005",
+            "best_objective": 0.3,
+            "candidates": {"m000000": {"calibration": 0.8}},
+            "warnings": [],
+        },
+    });
+    if let Some(evidence) = evidence {
+        status["evidence"] = evidence;
+    }
+    status
+}
+
+#[cfg(unix)]
+fn study_model_context(root: &Path, revision: u64, code: &str) -> crate::tools::ModelContext {
+    crate::tools::ModelContext {
+        model: json!({"version": {"id": "workspace-x", "revision": revision}, "code": {"source_sha256": code}, "overlay": {}}),
+        model_root: root.join("models"),
+        source_dir: root.join("source"),
+        docs_dir: None,
+        source_case: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn study_summary_merges_evidence_parameters_and_current_identity() {
+    let root = temp("study-evidence");
+    let dims = json!([
+        {"key": "DEF_TUNING_CNFAC", "range": [0.1, 0.9], "scale": "linear"},
+        {"key": "DEF_TUNING_ZLND", "range": [0.001, 0.1], "scale": "log"},
+    ]);
+    let best_values = json!([
+        {"key": "DEF_TUNING_CNFAC", "value": 0.895, "position": 0.99375, "position_scale": "linear", "at_bound": true, "bound_side": "upper"},
+        {"key": "DEF_TUNING_ZLND", "value": 0.001, "position": 0.0, "position_scale": "log", "at_bound": true, "bound_side": "lower"},
+    ]);
+    let evidence = study_evidence(
+        json!({
+            "status": "pinned",
+            "name": "modified",
+            "version": {"id": "workspace-x", "revision": 3},
+            "code_source_sha256": "a".repeat(64),
+        }),
+        dims,
+        best_values,
+        json!(["bound: DEF_TUNING_ZLND lower 0.001"]),
+    );
+    let mut status = study_status_fixture(Some(evidence));
+    // state.candidates 的 m000000 与 evidence 基线值不同：旧字段必须跟 evidence 走。
+    status["state"]["candidates"]["m000000"]["calibration"] = json!(0.123);
+    let script = fake_study_cli(&root, &status);
+    let matching = ToolContext {
+        project_root: root.clone(),
+        cli: script.clone(),
+        model_context: Some(study_model_context(&root, 3, &"a".repeat(64))),
+        ..ToolContext::default()
+    };
+    let result = StudySummary
+        .call(&json!({"study": "study"}), &matching)
+        .unwrap();
+    // 旧字段全部保留。
+    assert_eq!(result["kind"], "tuning");
+    assert_eq!(result["method"], "differential-evolution");
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["generation"], 1);
+    assert_eq!(result["base_cases"], json!(["site"]));
+    assert_eq!(result["best_member"], "m000005");
+    assert_eq!(result["best_objective"].as_f64(), Some(0.3));
+    // baseline_objective 用 evidence 里按 baseline 标记定位的成绩，不是 state.candidates 的 m000000。
+    assert_eq!(result["baseline_objective"].as_f64(), Some(0.8));
+    assert!(result.get("targets").is_some());
+    assert!(result.get("hybrid").is_some());
+    assert!(result.get("warnings").is_some());
+    // 参数由 evidence 供数：Log 位置和贴边来自记录，不按线性区间重算。
+    let positions = result["best_parameters"].as_array().unwrap();
+    assert_eq!(positions.len(), 2, "{result}");
+    let zlnd = positions
+        .iter()
+        .find(|row| row["parameter"] == "DEF_TUNING_ZLND")
+        .unwrap();
+    assert_eq!(zlnd["position"].as_f64(), Some(0.0));
+    assert_eq!(zlnd["at_bound"], true);
+    assert_eq!(zlnd["position_scale"], "log");
+    // 当前选择被补进 evidence，并与研究记录按 id+revision+sha 对比。
+    let identity = &result["evidence"]["model_identity"];
+    assert_eq!(identity["current_selection"]["status"], "frozen");
+    assert_eq!(identity["comparison"]["status"], "matches");
+    assert_eq!(identity["comparison"]["matches"], true);
+    assert_eq!(
+        identity["current_selection"]["version"]["revision"].as_u64(),
+        Some(3)
+    );
+
+    // 同名但 revision 不同：mismatch，不是 matches。
+    let stale = ToolContext {
+        model_context: Some(study_model_context(&root, 4, &"a".repeat(64))),
+        ..matching.clone()
+    };
+    let mismatch = StudySummary
+        .call(&json!({"study": "study"}), &stale)
+        .unwrap();
+    assert_eq!(
+        mismatch["evidence"]["model_identity"]["comparison"]["status"],
+        "mismatch"
+    );
+    assert_eq!(
+        mismatch["evidence"]["model_identity"]["comparison"]["matches"],
+        false
+    );
+
+    // revision 相同但源码 hash 不同：仍然 mismatch。
+    let edited = ToolContext {
+        model_context: Some(study_model_context(&root, 3, &"b".repeat(64))),
+        ..matching.clone()
+    };
+    let mismatch = StudySummary
+        .call(&json!({"study": "study"}), &edited)
+        .unwrap();
+    assert_eq!(
+        mismatch["evidence"]["model_identity"]["comparison"]["status"],
+        "mismatch"
+    );
+
+    // 官方版 / 没有冻结模型上下文：身份 unknown 并给原因，不当成匹配。
+    let official = ToolContext {
+        project_root: root.clone(),
+        cli: script.clone(),
+        ..ToolContext::default()
+    };
+    let unknown = StudySummary
+        .call(&json!({"study": "study"}), &official)
+        .unwrap();
+    assert_eq!(
+        unknown["evidence"]["model_identity"]["current_selection"]["status"],
+        "unknown"
+    );
+    assert_eq!(
+        unknown["evidence"]["model_identity"]["comparison"]["status"],
+        "unknown"
+    );
+    assert!(
+        unknown["evidence"]["model_identity"]["comparison"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("official")
+    );
+
+    // evidence 里基线不可用时保持 null，不退回 state.candidates 的 m000000 分数。
+    let mut unavailable_baseline = status.clone();
+    unavailable_baseline["evidence"]["comparison"]["baseline"]["calibration"]["status"] =
+        json!("unavailable");
+    unavailable_baseline["evidence"]["comparison"]["baseline"]["calibration"]["score"] =
+        Value::Null;
+    std::fs::write(
+        root.join("study-status.json"),
+        unavailable_baseline.to_string(),
+    )
+    .unwrap();
+    let unavailable = StudySummary
+        .call(&json!({"study": "study"}), &matching)
+        .unwrap();
+    assert!(unavailable["baseline_objective"].is_null(), "{unavailable}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn study_summary_missing_evidence_falls_back_and_stays_within_the_transport_budget() {
+    let root = temp("study-evidence-budget");
+    // 旧 CLI：没有 evidence，best_parameters 退回 manifest.members 快照（线性位置）。
+    let status = study_status_fixture(None);
+    let script = fake_study_cli(&root, &status);
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        cli: script.clone(),
+        ..ToolContext::default()
+    };
+    let fallback = StudySummary.call(&json!({"study": "study"}), &ctx).unwrap();
+    assert_eq!(fallback["evidence"]["status"], "missing");
+    assert!(fallback["evidence"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no evidence"));
+    let positions = fallback["best_parameters"].as_array().unwrap();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0]["parameter"], "DEF_TUNING_CNFAC");
+    assert_eq!(positions[0]["position"].as_f64(), Some(0.5));
+    // 旧 CLI 没有 evidence：baseline_objective 仍走旧 candidates fallback。
+    assert_eq!(fallback["baseline_objective"].as_f64(), Some(0.8));
+
+    // 大证据：输出必须仍是 ≤24k 个字符的合法 JSON。
+    let dims = Value::Array(
+        (0..40)
+            .map(|index| {
+                json!({"key": format!("DEF_TUNING_PARAMETER_{index:02}"), "range": [0.0, 1.0], "scale": "linear"})
+            })
+            .collect(),
+    );
+    let best_values = Value::Array(
+        (0..40)
+            .map(|index| {
+                json!({"key": format!("DEF_TUNING_PARAMETER_{index:02}"), "value": 0.5, "position": 0.5, "position_scale": "linear", "at_bound": false})
+            })
+            .collect(),
+    );
+    let warnings = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("warning {index}: {}", "x".repeat(5000))))
+            .collect(),
+    );
+    let mut evidence = study_evidence(
+        json!({"status": "official", "reason": "no frozen model"}),
+        dims,
+        best_values,
+        warnings,
+    );
+    evidence["objective"]["targets"] = Value::Array(
+        (0..12)
+            .map(|index| json!({"key": format!("target_{index:02}"), "variable": "Qle"}))
+            .collect(),
+    );
+    std::fs::write(
+        root.join("study-status.json"),
+        study_status_fixture(Some(evidence)).to_string(),
+    )
+    .unwrap();
+    let large = StudySummary.call(&json!({"study": "study"}), &ctx).unwrap();
+    assert_eq!(large["truncated"], true);
+    let serialized = super::super::result_text(&large);
+    assert!(serialized.chars().count() <= super::super::MAX_RESULT_CHARS);
+    assert!(serde_json::from_str::<Value>(&serialized).is_ok());
+    std::fs::remove_dir_all(root).unwrap();
+}

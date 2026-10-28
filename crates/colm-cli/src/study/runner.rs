@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use colm_namelist::Value;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::science::{ObjectiveMetric, ObjectiveTerm};
 use super::spec::{
-    Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetPeriod, TargetSource, TargetSpec,
+    Manifest, MemberPlan, ScaleSpec, StudyKind, StudyMethod, StudySpec, TargetPeriod, TargetSource,
+    TargetSpec,
 };
 use super::state::{CandidateState, ProcessIdentity, StudyState, StudyStatus, TaskStatus};
 use crate::{Layout, MetricsRequest, RunNotice, VarMetrics};
@@ -455,6 +457,1220 @@ pub fn read_result(study_dir: &Path, relative: &Path) -> Result<String> {
         bail!("Study result does not exist: {}", relative.display());
     }
     fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// 证据里每个列表最多保留多少条；远程研究状态会把这个 JSON 原样经 SSH 搬回本机。
+const EVIDENCE_LIST_LIMIT: usize = 8;
+/// 证据里每条原因 / 警告最多保留多少字符。
+const EVIDENCE_TEXT_LIMIT: usize = 200;
+/// `study-status.evidence` 的序列化上限：够放下身份、两期分数、选择规则与缺失原因，
+/// 又不至于让远程状态输出膨胀（不能把整个 state / events / results 塞进来）。
+const EVIDENCE_BUDGET_BYTES: usize = 8 * 1024;
+fn compact_evidence_text(text: &str, limit: usize) -> String {
+    let mut out = text.chars().take(limit).collect::<String>();
+    if text.chars().count() > limit {
+        out.push('…');
+    }
+    out
+}
+
+/// `study-status` 的结构化证据（P1-A）：只读 checkpoint、样本文件与已记录的任务结果。
+///
+/// 不重跑模拟、不连服务器、不重算科学评分 —— 聚合分数复用 runner 写入候选时同一个 [`fixed_score`]，
+/// 逐目标 loss 直接来自 `results/tasks/<member>/<site>.json`。`state` 由调用方传入：`status_state`
+/// 可能写 checkpoint，`study-status` 只应读一次，这条路径必须无副作用。
+pub(crate) fn study_evidence(
+    study_dir: &Path,
+    manifest: &Manifest,
+    state: Option<&StudyState>,
+) -> Result<serde_json::Value> {
+    let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    let (members, members_error) = match super::generation::load_members(manifest) {
+        Ok(members) => (Some(members), None),
+        Err(error) => (
+            None,
+            Some(compact_evidence_text(
+                &format!("{error:#}"),
+                EVIDENCE_TEXT_LIMIT,
+            )),
+        ),
+    };
+    let best_id = state.and_then(|state| state.best_member.clone());
+    // 基线成员用样本里的 `baseline` 标记定位，不按编号猜：`m000000` 只是 `sample::design`
+    // 的默认编号，样本文件才是权威来源。找不到标记时明确 unavailable，不退回任何编号。
+    let baseline_id = members
+        .as_deref()
+        .and_then(|members| members.iter().find(|member| member.baseline))
+        .map(|member| member.id.clone());
+    let baseline_unavailable = if members.is_none() {
+        Some(
+            "the recorded sample files could not be loaded, so the baseline member cannot be located"
+                .to_string(),
+        )
+    } else if baseline_id.is_none() {
+        Some("no baseline member is recorded in the Study samples".to_string())
+    } else {
+        None
+    };
+    // 研究还在跑时，某个成员缺结果可能只是还没轮到；已完成的研究则说明结果缺失/损坏。
+    let pending = state.is_none_or(|state| {
+        !matches!(
+            state.status,
+            StudyStatus::Completed
+                | StudyStatus::CompletedWithFailures
+                | StudyStatus::Cancelled
+                | StudyStatus::NeedsReview
+        )
+    });
+    let (baseline_results, baseline_missing) = match baseline_id.as_deref() {
+        Some(member) => read_recorded_results(manifest, member),
+        None => (Vec::new(), Vec::new()),
+    };
+    let comparison_baseline = match baseline_id.as_deref() {
+        Some(member) => evidence_comparison_side(
+            manifest,
+            member,
+            &baseline_results,
+            &baseline_missing,
+            pending,
+            state,
+            true,
+        ),
+        None => {
+            let reason = baseline_unavailable.clone().unwrap_or_else(|| {
+                "no baseline member is recorded in the Study samples".to_string()
+            });
+            json!({
+                "member": null,
+                "status": "unavailable",
+                "calibration": {"status": "unavailable", "score": null, "reason": reason},
+                "validation": {"status": "unavailable", "score": null, "reason": reason},
+                "warnings": [],
+                "reason": reason,
+            })
+        }
+    };
+    let comparison_best = match best_id.as_deref() {
+        Some(member) => {
+            let (results, missing) = read_recorded_results(manifest, member);
+            evidence_comparison_side(
+                manifest,
+                member,
+                &results,
+                &missing,
+                pending,
+                state,
+                baseline_id.as_deref() == Some(member),
+            )
+        }
+        None => json!({
+            "member": null, "status": "unavailable",
+            "calibration": null, "validation": null, "warnings": [],
+            "reason": "no best member is recorded",
+        }),
+    };
+    let validation = evidence_validation(manifest, &comparison_baseline, &comparison_best, state);
+    let parameters = evidence_parameters(
+        manifest,
+        members.as_deref(),
+        members_error.as_deref(),
+        best_id.as_deref(),
+    );
+    let model_identity = evidence_model_identity(&study_dir);
+    let selection = evidence_selection(manifest, state, baseline_id.as_deref());
+    let missing = {
+        let mut missing = Vec::new();
+        let mut push = |text: String| {
+            if missing.len() < EVIDENCE_LIST_LIMIT && !missing.contains(&text) {
+                missing.push(text);
+            }
+        };
+        if let Some(reason) = baseline_unavailable.as_ref() {
+            push(reason.clone());
+        }
+        if selection["best_member"].is_null() {
+            if let (Some(code), Some(detail)) = (
+                selection["no_best_reason"]["code"].as_str(),
+                selection["no_best_reason"]["detail"].as_str(),
+            ) {
+                push(format!("No best member ({code}): {detail}"));
+            }
+        }
+        for side in [&comparison_baseline, &comparison_best] {
+            for period in ["calibration", "validation"] {
+                let period = &side[period];
+                if period["status"] != "recorded" {
+                    if let Some(reason) = period["reason"].as_str() {
+                        push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+                    }
+                }
+            }
+        }
+        for reason in validation["reasons"].as_array().into_iter().flatten() {
+            if let Some(reason) = reason.as_str() {
+                push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+            }
+        }
+        if let Some(reason) = parameters["reason"].as_str() {
+            push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+        }
+        if let Some(reason) = model_identity["study_record"]["reason"].as_str() {
+            push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+        }
+        missing
+    };
+    let warnings = state
+        .map(|state| {
+            state
+                .warnings
+                .iter()
+                .take(EVIDENCE_LIST_LIMIT)
+                .map(|warning| compact_evidence_text(warning, EVIDENCE_TEXT_LIMIT))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let evidence = json!({
+        "schema": 1,
+        "study": {
+            "id": manifest.id,
+            "kind": manifest.spec.kind,
+            "method": manifest.spec.method,
+            "status": state.map(|state| state.status),
+            "generation": state.map(|state| state.generation),
+        },
+        "execution": evidence_execution(state),
+        "selection": selection,
+        "objective": evidence_objective(&manifest.spec),
+        "comparison": {
+            "basis": "best is compared with the baseline only within the same period; calibration scores are never compared with validation scores",
+            "baseline": comparison_baseline,
+            "best": comparison_best,
+            "relation": {
+                "calibration": score_relation(&comparison_baseline, &comparison_best, "calibration"),
+                "validation": score_relation(&comparison_baseline, &comparison_best, "validation"),
+            },
+        },
+        "validation": validation,
+        "parameters": parameters,
+        "model_identity": model_identity,
+        "verification": evidence_verification(manifest, state),
+        "remote": evidence_remote(&study_dir),
+        "source_paths": {
+            "root": manifest.root,
+            "manifest": "manifest.json",
+            "samples": "samples",
+            "state": "checkpoints/state",
+            "results": "results/tasks",
+        },
+        "warnings": warnings,
+        "warnings_count": state.map_or(0, |state| state.warnings.len()),
+        "missing": missing,
+    });
+    Ok(bound_evidence(evidence))
+}
+
+fn execution_state(state: Option<&StudyState>) -> &'static str {
+    match state.map(|state| state.status) {
+        None | Some(StudyStatus::Ready) => "not_started",
+        Some(StudyStatus::Running) => "running",
+        Some(StudyStatus::Paused) => "paused",
+        Some(StudyStatus::Completed) => "completed",
+        Some(StudyStatus::CompletedWithFailures) => "completed_with_failures",
+        Some(StudyStatus::Cancelled) => "cancelled",
+        Some(StudyStatus::NeedsReview) => "needs_review",
+    }
+}
+
+fn evidence_execution(state: Option<&StudyState>) -> serde_json::Value {
+    let Some(state) = state else {
+        return json!({
+            "state": "not_started",
+            "tasks": {"total": 0},
+            "completed_candidates": 0,
+            "partial_failures": false,
+            "failed_tasks": [],
+        });
+    };
+    let count = |wanted: &[TaskStatus]| {
+        state
+            .tasks
+            .values()
+            .filter(|task| wanted.contains(&task.status))
+            .count()
+    };
+    let failed = count(&[TaskStatus::Failed, TaskStatus::Interrupted]);
+    let needs_review = count(&[TaskStatus::NeedsReview]);
+    let active = count(&[
+        TaskStatus::Pending,
+        TaskStatus::Materialized,
+        TaskStatus::Queued,
+        TaskStatus::Running,
+        TaskStatus::Evaluating,
+    ]);
+    let failed_tasks = state
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Failed | TaskStatus::Interrupted | TaskStatus::NeedsReview
+            )
+        })
+        .take(5)
+        .map(|task| {
+            json!({
+                "member": task.member,
+                "site": task.site,
+                "status": task.status,
+                "reason": task.reason.as_deref().map(|reason| compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT)),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "state": execution_state(Some(state)),
+        "tasks": {
+            "total": state.tasks.len(),
+            "succeeded": count(&[TaskStatus::Succeeded]),
+            "failed": failed,
+            "needs_review": needs_review,
+            "active": active,
+            "cancelled": count(&[TaskStatus::Cancelled]),
+        },
+        "completed_candidates": state.completed_candidates,
+        "partial_failures": failed > 0 || needs_review > 0,
+        "failed_tasks": failed_tasks,
+    })
+}
+
+fn evidence_selection(
+    manifest: &Manifest,
+    state: Option<&StudyState>,
+    baseline_id: Option<&str>,
+) -> serde_json::Value {
+    let best_member = state.and_then(|state| state.best_member.clone());
+    let best_objective = state.and_then(|state| state.best_objective);
+    let feasible_non_baseline = state.map_or(0, |state| {
+        state
+            .candidates
+            .iter()
+            .filter(|(member, candidate)| {
+                Some(member.as_str()) != baseline_id && candidate.feasible
+            })
+            .count()
+    });
+    let no_best_reason = if best_member.is_some() {
+        serde_json::Value::Null
+    } else {
+        no_best_reason(manifest, state, feasible_non_baseline)
+    };
+    json!({
+        "rule": "feasible tuning member (baseline excluded) with the lowest recorded calibration loss; the validation score never selects the best member",
+        "best_member": best_member,
+        "best_objective": best_objective,
+        "provisional": matches!(
+            state.map(|state| state.status),
+            Some(StudyStatus::Running | StudyStatus::Paused)
+        ),
+        "candidates": {
+            "recorded": state.map_or(0, |state| state.candidates.len()),
+            "feasible_non_baseline": feasible_non_baseline,
+        },
+        "no_best_reason": no_best_reason,
+    })
+}
+
+fn no_best_reason(
+    manifest: &Manifest,
+    state: Option<&StudyState>,
+    feasible_non_baseline: usize,
+) -> serde_json::Value {
+    if manifest.spec.kind != StudyKind::Tuning {
+        return json!({
+            "code": "uncertainty",
+            "detail": "an uncertainty analysis ranks parameter effects; it has no best member",
+        });
+    }
+    let Some(state) = state else {
+        return json!({
+            "code": "not_started",
+            "detail": "no checkpoint records a scored candidate",
+        });
+    };
+    match state.status {
+        StudyStatus::Ready => json!({
+            "code": "not_started",
+            "detail": "the Study has no scored candidate yet",
+        }),
+        StudyStatus::Running => json!({
+            "code": "running",
+            "detail": "the Study is still running; no best member has been recorded",
+        }),
+        StudyStatus::Paused => json!({
+            "code": "paused",
+            "detail": "the Study is paused; no best member has been recorded",
+        }),
+        StudyStatus::Cancelled => json!({
+            "code": "cancelled",
+            "detail": "the Study was cancelled before a best member was recorded",
+        }),
+        StudyStatus::NeedsReview => json!({
+            "code": "needs_review",
+            "detail": "at least one task needs review; no best member is recorded",
+        }),
+        StudyStatus::Completed | StudyStatus::CompletedWithFailures => {
+            let failures = state
+                .tasks
+                .values()
+                .filter(|task| {
+                    matches!(
+                        task.status,
+                        TaskStatus::Failed | TaskStatus::Interrupted | TaskStatus::NeedsReview
+                    )
+                })
+                .count();
+            if state.candidates.is_empty() {
+                json!({
+                    "code": "no_scored_candidate",
+                    "detail": "no candidate has a complete scored task set",
+                })
+            } else if feasible_non_baseline == 0 {
+                json!({
+                    "code": if failures > 0 { "no_feasible_member_after_failures" } else { "no_feasible_member" },
+                    "detail": format!(
+                        "{} candidate result(s) recorded, none feasible{}",
+                        state.candidates.len(),
+                        if failures > 0 { format!("; {failures} task(s) failed or need review") } else { String::new() },
+                    ),
+                })
+            } else {
+                json!({
+                    "code": "not_recorded",
+                    "detail": "feasible candidates exist but no best member was recorded",
+                })
+            }
+        }
+    }
+}
+
+fn target_source_name(target: &TargetSpec) -> &'static str {
+    match &target.source {
+        None => "site_observations",
+        Some(TargetSource::Grid { .. }) => "grid_observations",
+        Some(TargetSource::Station { .. }) => "station_observations",
+        Some(TargetSource::Gauge { .. }) => "gauge_observations",
+    }
+}
+
+fn target_aggregate(target: &TargetSpec) -> Option<TargetPeriod> {
+    target.aggregate.or(match &target.source {
+        Some(TargetSource::Grid { period, .. } | TargetSource::Gauge { period, .. }) => *period,
+        Some(TargetSource::Station { .. }) | None => None,
+    })
+}
+
+fn scale_name(scale: ScaleSpec) -> &'static str {
+    match scale {
+        ScaleSpec::Linear => "linear",
+        ScaleSpec::Log => "log",
+    }
+}
+
+fn evidence_objective(spec: &StudySpec) -> serde_json::Value {
+    let targets = spec
+        .targets
+        .iter()
+        .take(EVIDENCE_LIST_LIMIT)
+        .map(|target| {
+            json!({
+                "key": target.key,
+                "variable": target.variable,
+                "metric": target.metric,
+                "weight": target.weight,
+                "calibration": [target.from, target.to],
+                "validation": target.validation_from.zip(target.validation_to),
+                "source": target_source_name(target),
+                "aggregate": target_aggregate(target),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "direction": "minimize",
+        "loss": "weighted mean of per-target losses; each loss is the metric mapped to lower-is-better (nrmse: rmse/observation_sd, mae: mae, abs_bias: |bias|, nse/kge: max(0, 1-value), r/r2: 1-value)",
+        "target_count": spec.targets.len(),
+        "targets": targets,
+    })
+}
+
+fn read_recorded_results(manifest: &Manifest, member: &str) -> (Vec<TaskResult>, Vec<String>) {
+    let mut results = Vec::new();
+    let mut missing = Vec::new();
+    for site in &manifest.spec.base_cases {
+        match read_task_result(manifest, member, site) {
+            Ok(result) => results.push(result),
+            Err(error) => missing.push(compact_evidence_text(
+                &format!("{member}/{site}: {error:#}"),
+                EVIDENCE_TEXT_LIMIT,
+            )),
+        }
+    }
+    (results, missing)
+}
+
+fn evidence_comparison_side(
+    manifest: &Manifest,
+    member: &str,
+    results: &[TaskResult],
+    missing: &[String],
+    pending: bool,
+    state: Option<&StudyState>,
+    is_baseline: bool,
+) -> serde_json::Value {
+    let candidate = state.and_then(|state| state.candidates.get(member));
+    let calibration = comparison_period(
+        manifest,
+        member,
+        results,
+        missing,
+        pending,
+        state,
+        "calibration",
+        candidate,
+    );
+    let validation = comparison_period(
+        manifest,
+        member,
+        results,
+        missing,
+        pending,
+        state,
+        "validation",
+        candidate,
+    );
+    let warnings = state.map_or_else(Vec::new, |state| {
+        state
+            .warnings
+            .iter()
+            .filter(|warning| {
+                warning.contains(&format!("{member} / "))
+                    || (!is_baseline
+                        && (warning.starts_with("overfitting:") || warning.starts_with("bound:")))
+            })
+            .take(5)
+            .map(|warning| compact_evidence_text(warning, EVIDENCE_TEXT_LIMIT))
+            .collect()
+    });
+    json!({
+        "member": member,
+        "calibration": calibration,
+        "validation": validation,
+        "warnings": warnings,
+    })
+}
+
+/// 该成员相关的引擎警告（validation unavailable / validation target … unavailable / support mismatch）。
+fn member_warnings(state: Option<&StudyState>, member: &str) -> Vec<String> {
+    state.map_or_else(Vec::new, |state| {
+        state
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains(&format!("{member} / ")))
+            .take(5)
+            .map(|warning| compact_evidence_text(warning, EVIDENCE_TEXT_LIMIT))
+            .collect()
+    })
+}
+
+/// 引擎记录里该成员的候选状态比结果文件更权威：`refresh_candidates` 只在结果可比且完整时写分数，
+/// 并把 validation 置 None 的原因写进 warnings。证据必须与这个判定一致，不能自己对文件重打分。
+fn comparison_period_from_candidate(
+    member: &str,
+    results: &[TaskResult],
+    state: Option<&StudyState>,
+    period: &str,
+    candidate: &CandidateState,
+) -> serde_json::Value {
+    let rows = if period == "calibration" {
+        results
+            .iter()
+            .flat_map(|result| result.calibration.iter().cloned())
+            .collect::<Vec<_>>()
+    } else {
+        results
+            .iter()
+            .flat_map(|result| result.validation.iter().cloned())
+            .collect::<Vec<_>>()
+    };
+    let targets = target_loss_rows(&rows);
+    if period == "calibration" {
+        return match candidate.calibration {
+            Some(score) => json!({
+                "status": "recorded",
+                "score": score,
+                "targets": targets,
+            }),
+            None => json!({
+                "status": "unavailable",
+                "score": null,
+                "reason": candidate.reason.as_deref().map_or_else(
+                    || "the Study recorded no calibration score for this member".to_string(),
+                    |reason| compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT),
+                ),
+                "targets": targets,
+            }),
+        };
+    }
+    match candidate.validation {
+        Some(score) => json!({
+            "status": "recorded",
+            "score": score,
+            "targets": targets,
+        }),
+        None => {
+            let reasons = member_warnings(state, member);
+            let errors = results
+                .iter()
+                .flat_map(|result| result.validation_errors.iter())
+                .take(EVIDENCE_LIST_LIMIT)
+                .map(|error| {
+                    json!({
+                        "key": error.key,
+                        "site": error.site,
+                        "reason": compact_evidence_text(&error.reason, EVIDENCE_TEXT_LIMIT),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "status": if rows.is_empty() { "unavailable" } else { "partial" },
+                "score": null,
+                "reason": reasons.first().cloned().unwrap_or_else(|| {
+                    "the Study recorded no validation score for this member (validation not comparable to the baseline or target errors)".to_string()
+                }),
+                "reasons": reasons,
+                "errors": errors,
+                "targets": targets,
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn comparison_period(
+    manifest: &Manifest,
+    member: &str,
+    results: &[TaskResult],
+    missing: &[String],
+    pending: bool,
+    state: Option<&StudyState>,
+    period: &str,
+    candidate: Option<&CandidateState>,
+) -> serde_json::Value {
+    let site_count = manifest.spec.base_cases.len();
+    if manifest.spec.targets.is_empty() {
+        return json!({
+            "status": "not_configured",
+            "reason": "the Study scores no targets",
+        });
+    }
+    if period == "validation"
+        && !manifest
+            .spec
+            .targets
+            .iter()
+            .any(|target| target.validation_from.is_some())
+    {
+        return json!({
+            "status": "not_configured",
+            "reason": "validation windows are not configured in the Study spec",
+        });
+    }
+    // 已有候选记录：以引擎记录为准（见 comparison_period_from_candidate）。
+    if let Some(candidate) = candidate {
+        return comparison_period_from_candidate(member, results, state, period, candidate);
+    }
+    let incomplete_reason = if missing.is_empty() {
+        format!(
+            "recorded task results are incomplete ({}/{site_count} sites); some results are missing",
+            results.len()
+        )
+    } else {
+        format!(
+            "recorded task results are incomplete ({}/{site_count} sites): {}",
+            results.len(),
+            missing.first().map_or("unreadable result", String::as_str)
+        )
+    };
+    if results.len() != site_count {
+        return json!({
+            "status": if pending { "pending" } else { "unavailable" },
+            "reason": compact_evidence_text(&incomplete_reason, EVIDENCE_TEXT_LIMIT),
+        });
+    }
+    if period == "calibration" {
+        let rows = results
+            .iter()
+            .flat_map(|result| result.calibration.iter().cloned())
+            .collect::<Vec<_>>();
+        let lost_targets = target_loss_rows(&rows);
+        return match fixed_score(&rows) {
+            Some(score) => json!({
+                "status": "recorded",
+                "score": score,
+                "targets": lost_targets,
+            }),
+            None => json!({
+                "status": "unavailable",
+                "reason": "recorded calibration rows could not be aggregated into a score",
+                "targets": lost_targets,
+            }),
+        };
+    }
+    let errors = results
+        .iter()
+        .flat_map(|result| result.validation_errors.iter())
+        .collect::<Vec<_>>();
+    let rows = results
+        .iter()
+        .flat_map(|result| result.validation.iter().cloned())
+        .collect::<Vec<_>>();
+    let lost_targets = target_loss_rows(&rows);
+    if errors.is_empty() {
+        return match fixed_score(&rows) {
+            Some(score) => json!({
+                "status": "recorded",
+                "score": score,
+                "targets": lost_targets,
+            }),
+            None => json!({
+                "status": "unavailable",
+                "reason": "validation targets are configured but no complete validation rows were recorded",
+                "targets": lost_targets,
+            }),
+        };
+    }
+    let error_rows = errors
+        .iter()
+        .take(EVIDENCE_LIST_LIMIT)
+        .map(|error| {
+            json!({
+                "key": error.key,
+                "site": error.site,
+                "reason": compact_evidence_text(&error.reason, EVIDENCE_TEXT_LIMIT),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": if rows.is_empty() { "unavailable" } else { "partial" },
+        "reason": "some validation targets could not be scored; the aggregate validation score is not comparable",
+        "errors": error_rows,
+        "targets": lost_targets,
+    })
+}
+
+/// 逐目标 loss：同一目标在多个站点上的记录按同一套权重合成一个 loss（与 [`fixed_score`] 同义），
+/// 不让同一目标重复出现多行。
+fn target_loss_rows(rows: &[TargetResult]) -> Vec<serde_json::Value> {
+    let mut by_key: BTreeMap<&str, Vec<TargetResult>> = BTreeMap::new();
+    for row in rows {
+        by_key
+            .entry(row.key.as_str())
+            .or_default()
+            .push(row.clone());
+    }
+    by_key
+        .into_iter()
+        .filter_map(|(key, rows)| {
+            fixed_score(&rows).map(|loss| {
+                json!({
+                    "key": key,
+                    "loss": loss,
+                })
+            })
+        })
+        .take(EVIDENCE_LIST_LIMIT)
+        .collect()
+}
+
+fn score_relation(
+    baseline: &serde_json::Value,
+    best: &serde_json::Value,
+    period: &str,
+) -> &'static str {
+    let baseline_score = baseline[period]["score"].as_f64();
+    let best_score = best[period]["score"].as_f64();
+    match (baseline_score, best_score) {
+        (Some(baseline), Some(best)) if best < baseline => "lower_loss",
+        (Some(baseline), Some(best)) if best > baseline => "higher_loss",
+        (Some(_), Some(_)) => "equal",
+        _ => "unknown",
+    }
+}
+
+fn evidence_validation(
+    manifest: &Manifest,
+    baseline: &serde_json::Value,
+    best: &serde_json::Value,
+    state: Option<&StudyState>,
+) -> serde_json::Value {
+    if !manifest
+        .spec
+        .targets
+        .iter()
+        .any(|target| target.validation_from.is_some())
+    {
+        return json!({
+            "configured": false,
+            "windows": [],
+            "status": "not_configured",
+            "reasons": ["The Study spec has no validation windows; only in-sample calibration fit is recorded."],
+        });
+    }
+    let windows = manifest
+        .spec
+        .targets
+        .iter()
+        .filter(|target| target.validation_from.is_some())
+        .take(EVIDENCE_LIST_LIMIT)
+        .map(|target| {
+            json!({
+                "target": target.key,
+                "from": target.validation_from,
+                "to": target.validation_to,
+            })
+        })
+        .collect::<Vec<_>>();
+    let baseline_status = baseline["validation"]["status"]
+        .as_str()
+        .unwrap_or("unknown");
+    let best_status = best["validation"]["status"].as_str().unwrap_or("unknown");
+    let running = state.is_none_or(|state| {
+        matches!(
+            state.status,
+            StudyStatus::Ready | StudyStatus::Running | StudyStatus::Paused
+        )
+    });
+    let status = if baseline_status == "recorded" && best_status == "recorded" {
+        "available"
+    } else if running && (baseline_status == "pending" || best_status == "pending") {
+        "pending"
+    } else if baseline_status == "recorded"
+        || best_status == "recorded"
+        || baseline_status == "partial"
+        || best_status == "partial"
+    {
+        "partial"
+    } else if baseline_status == "pending" && best_status == "pending" {
+        "pending"
+    } else {
+        "unavailable"
+    };
+    let mut reasons = Vec::new();
+    for side in [baseline, best] {
+        let validation = &side["validation"];
+        if validation["status"] == "recorded" {
+            continue;
+        }
+        if let Some(reason) = validation["reason"].as_str() {
+            reasons.push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+        }
+        for reason in validation["reasons"].as_array().into_iter().flatten() {
+            if let Some(reason) = reason.as_str() {
+                reasons.push(compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT));
+            }
+        }
+        for error in validation["errors"].as_array().into_iter().flatten() {
+            let text = format!(
+                "{} / {}: {}",
+                error["site"].as_str().unwrap_or("?"),
+                error["key"].as_str().unwrap_or("?"),
+                error["reason"].as_str().unwrap_or("unavailable"),
+            );
+            reasons.push(compact_evidence_text(&text, EVIDENCE_TEXT_LIMIT));
+        }
+    }
+    if best["member"].is_null() {
+        reasons.push("no best member is recorded to compare validation against".into());
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons.truncate(EVIDENCE_LIST_LIMIT);
+    json!({
+        "configured": true,
+        "windows": windows,
+        "status": status,
+        "reasons": reasons,
+    })
+}
+
+fn evidence_parameters(
+    manifest: &Manifest,
+    members: Option<&[MemberPlan]>,
+    members_error: Option<&str>,
+    best_id: Option<&str>,
+) -> serde_json::Value {
+    let Some(members) = members else {
+        return json!({
+            "status": "unavailable",
+            "reason": members_error.unwrap_or("the recorded sample files could not be loaded"),
+        });
+    };
+    let dimensions = super::sample::dimensions(&manifest.spec);
+    let sampled = dimensions
+        .iter()
+        .filter(|dimension| !super::hybrid::is_weight_key(&dimension.key))
+        .collect::<Vec<_>>();
+    let hybrid = dimensions
+        .iter()
+        .filter(|dimension| super::hybrid::is_weight_key(&dimension.key))
+        .collect::<Vec<_>>();
+    let baseline = members.iter().find(|member| member.baseline);
+    let best = best_id.and_then(|id| members.iter().find(|member| member.id == id));
+    let shown = &sampled[..sampled.len().min(EVIDENCE_LIST_LIMIT * 2)];
+    let mut value = json!({
+        "status": match (best, best_id) {
+            (Some(_), _) => "recorded",
+            (None, Some(_)) => "missing_best",
+            (None, None) => "no_best",
+        },
+        "dimension_count": sampled.len(),
+        "hybrid_weight_count": hybrid.len(),
+        "dims": shown
+            .iter()
+            .map(|dimension| json!({
+                "key": dimension.key,
+                "range": [dimension.min, dimension.max],
+                "scale": scale_name(dimension.scale),
+            }))
+            .collect::<Vec<_>>(),
+        "baseline": parameter_side(
+            baseline,
+            shown,
+            &hybrid,
+            "no baseline member is recorded in the Study samples",
+        ),
+        "best": parameter_side(
+            best,
+            shown,
+            &hybrid,
+            if best_id.is_some() {
+                "the recorded sample files do not contain the best member"
+            } else {
+                "no best member is recorded"
+            },
+        ),
+    });
+    if best_id.is_some() && best.is_none() {
+        value["reason"] = json!("the recorded sample files do not contain the best member");
+    } else if best_id.is_none() {
+        value["reason"] = json!("no best member is recorded");
+    }
+    if let Some(reason) = members_error {
+        value["samples_error"] = json!(reason);
+    }
+    if sampled.len() > shown.len() {
+        value["truncated"] = json!(true);
+        value["omitted_dimensions"] = json!(sampled.len() - shown.len());
+    }
+    value
+}
+
+fn parameter_side(
+    member: Option<&MemberPlan>,
+    dims: &[&super::sample::Dimension],
+    hybrid: &[&super::sample::Dimension],
+    missing_reason: &str,
+) -> serde_json::Value {
+    let Some(member) = member else {
+        return json!({
+            "status": "unavailable",
+            "reason": missing_reason,
+        });
+    };
+    let values = dims
+        .iter()
+        .map(|dimension| {
+            let Some(&value) = member.parameters.get(&dimension.key) else {
+                return json!({
+                    "key": dimension.key,
+                    "status": "unavailable",
+                    "reason": "the member has no value for this dimension",
+                });
+            };
+            let position = super::generation::unit_position(value, dimension);
+            let bound_side = match position {
+                Some(position) if position <= BOUND_MARGIN => Some("lower"),
+                Some(position) if position >= 1.0 - BOUND_MARGIN => Some("upper"),
+                _ => None,
+            };
+            json!({
+                "key": dimension.key,
+                "value": value,
+                "position": position,
+                "position_scale": scale_name(dimension.scale),
+                "at_bound": bound_side.is_some(),
+                "bound_side": bound_side,
+            })
+        })
+        .collect::<Vec<_>>();
+    let hybrid_value = if hybrid.is_empty() {
+        json!({
+            "status": "not_configured",
+            "reason": "this Study trains no hybrid network",
+        })
+    } else {
+        let recorded = member
+            .parameters
+            .keys()
+            .filter(|key| super::hybrid::is_weight_key(key))
+            .count();
+        if recorded != hybrid.len() {
+            json!({
+                "status": "unavailable",
+                "reason": if recorded == 0 {
+                    "the member has no hybrid network weights (physics-only reference)"
+                } else {
+                    "the member has an incomplete hybrid weight vector"
+                },
+            })
+        } else {
+            let at_bound = hybrid
+                .iter()
+                .filter(|dimension| {
+                    member
+                        .parameters
+                        .get(&dimension.key)
+                        .and_then(|&value| super::generation::unit_position(value, dimension))
+                        .is_some_and(|position| {
+                            position <= BOUND_MARGIN || position >= 1.0 - BOUND_MARGIN
+                        })
+                })
+                .count();
+            json!({
+                "status": "recorded",
+                "count": hybrid.len(),
+                "at_bound_count": at_bound,
+            })
+        }
+    };
+    json!({
+        "status": "recorded",
+        "values": values,
+        "hybrid": hybrid_value,
+    })
+}
+
+fn evidence_model_identity(study_dir: &Path) -> serde_json::Value {
+    let study_record = match crate::study_version::pinned(study_dir) {
+        Ok(Some(pinned)) => {
+            let revision = pinned.model_revision.as_ref();
+            json!({
+                "status": "pinned",
+                "name": pinned.name,
+                "head": pinned.head,
+                "base_commit": pinned.base_commit,
+                "version": revision.map(|revision| json!({
+                    "id": revision.version.id,
+                    "revision": revision.version.revision,
+                })),
+                "code_source_sha256": revision.map(|revision| revision.code.source_sha256.clone()),
+                "revision_recorded": revision.is_some(),
+            })
+        }
+        Ok(None) => json!({
+            "status": "official",
+            "reason": "no model-version.json records a frozen model; the Study runs the official version",
+        }),
+        Err(error) => json!({
+            "status": "unknown",
+            "reason": compact_evidence_text(&format!("{error:#}"), EVIDENCE_TEXT_LIMIT),
+        }),
+    };
+    json!({
+        "study_record": study_record,
+        "current_selection": null,
+        "comparison": {
+            "status": "unknown",
+            "matches": null,
+            "basis": "the CLI has no application selection to compare; the assistant compares the current selection with this recorded Study identity",
+        },
+    })
+}
+
+fn evidence_remote(study_dir: &Path) -> serde_json::Value {
+    let record = study_dir.join(crate::remote_cmd::remote_study::RECORD);
+    if record.is_file() {
+        return match crate::remote_cmd::remote_study::read_record(study_dir) {
+            Ok(record) => json!({
+                "status": "recorded",
+                "host": record.host,
+                "job": record.job,
+                "submitted_at": record.submitted_at,
+                "fetched": record.fetched_at.is_some(),
+                "note": "recorded submission metadata only; this status read made no SSH connection",
+            }),
+            Err(error) => json!({
+                "status": "unknown",
+                "reason": compact_evidence_text(&format!("{error:#}"), EVIDENCE_TEXT_LIMIT),
+                "note": "the recorded submission file could not be validated; no SSH connection was made",
+            }),
+        };
+    }
+    match crate::remote_cmd::remote_study::pending_status(study_dir) {
+        Ok(Some(pending)) => json!({
+            "status": "pending_reconciliation",
+            "job": pending["job"],
+            "note": "a submission intent was recorded but no result record exists; no SSH connection was made",
+        }),
+        _ => json!({
+            "status": "none",
+            "note": "no remote submission was recorded; all evidence is local",
+        }),
+    }
+}
+
+/// `results/tasks/**/*.json` 的文件数：记录的证据来自哪些结果文件，而不是当场重算的结论。
+fn recorded_result_files(manifest: &Manifest) -> usize {
+    let root = Path::new(&manifest.root).join("results/tasks");
+    let mut files = Vec::new();
+    let _ = collect_result_files(&root, &root, &mut files);
+    files
+        .iter()
+        .filter(|file| file.path.ends_with(".json"))
+        .count()
+}
+
+fn evidence_verification(manifest: &Manifest, state: Option<&StudyState>) -> serde_json::Value {
+    let succeeded_tasks = state.map_or(0, |state| {
+        state
+            .tasks
+            .values()
+            .filter(|task| task.status == TaskStatus::Succeeded)
+            .count()
+    });
+    json!({
+        "recorded_result_files": recorded_result_files(manifest),
+        "succeeded_tasks": succeeded_tasks,
+        "reverified": false,
+        "note": "scores and losses are read from recorded task-result files; they were not re-verified against history output, observations or the frozen kernel by this status read",
+    })
+}
+
+fn evidence_bytes(value: &serde_json::Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |text| text.len())
+}
+
+fn truncate_evidence_array(value: &mut serde_json::Value, path: &[&str], keep: usize) -> bool {
+    let mut current = value;
+    for key in path {
+        let Some(next) = current.get_mut(*key) else {
+            return false;
+        };
+        current = next;
+    }
+    let Some(array) = current.as_array_mut() else {
+        return false;
+    };
+    if array.len() <= keep {
+        return false;
+    }
+    array.truncate(keep);
+    true
+}
+
+/// 把证据压到 [`EVIDENCE_BUDGET_BYTES`] 以内：先砍列表，再收缩到只保留身份、选择、两期分数与缺失原因。
+/// 正常研究（少量目标、少量参数）不会触发裁剪。
+fn bound_evidence(mut evidence: serde_json::Value) -> serde_json::Value {
+    if evidence_bytes(&evidence) <= EVIDENCE_BUDGET_BYTES {
+        return evidence;
+    }
+    evidence["truncated"] = json!(true);
+    let trims: &[(&[&str], usize)] = &[
+        (&["warnings"], 3),
+        (&["missing"], 3),
+        (&["execution", "failed_tasks"], 2),
+        (&["validation", "windows"], 3),
+        (&["objective", "targets"], 4),
+        (&["comparison", "baseline", "calibration", "targets"], 2),
+        (&["comparison", "baseline", "validation", "targets"], 2),
+        (&["comparison", "best", "calibration", "targets"], 2),
+        (&["comparison", "best", "validation", "targets"], 2),
+        (&["parameters", "dims"], 8),
+        (&["parameters", "baseline", "values"], 8),
+        (&["parameters", "best", "values"], 8),
+        (&["parameters", "dims"], 4),
+        (&["parameters", "baseline", "values"], 4),
+        (&["parameters", "best", "values"], 4),
+        (&["objective", "targets"], 2),
+        (&["validation", "windows"], 2),
+        (&["comparison", "baseline", "validation", "errors"], 2),
+        (&["comparison", "best", "validation", "errors"], 2),
+    ];
+    for (path, keep) in trims {
+        if evidence_bytes(&evidence) <= EVIDENCE_BUDGET_BYTES {
+            break;
+        }
+        truncate_evidence_array(&mut evidence, path, *keep);
+    }
+    if evidence_bytes(&evidence) <= EVIDENCE_BUDGET_BYTES {
+        return evidence;
+    }
+    // 极端情况（目标或参数特别多）：只留判断所需的最小结构，仍然保持合法 JSON 与显式缺失。
+    let baseline = &evidence["comparison"]["baseline"];
+    let best = &evidence["comparison"]["best"];
+    json!({
+        "schema": 1,
+        "truncated": true,
+        "study": evidence["study"].clone(),
+        "execution": {
+            "state": evidence["execution"]["state"],
+            "tasks": evidence["execution"]["tasks"],
+            "partial_failures": evidence["execution"]["partial_failures"],
+            "note": "execution details omitted to fit the evidence budget",
+        },
+        "selection": {
+            "rule": evidence["selection"]["rule"],
+            "best_member": evidence["selection"]["best_member"],
+            "best_objective": evidence["selection"]["best_objective"],
+            "provisional": evidence["selection"]["provisional"],
+            "no_best_reason": evidence["selection"]["no_best_reason"],
+        },
+        "objective": {
+            "direction": "minimize",
+            "loss": evidence["objective"]["loss"],
+            "target_count": evidence["objective"]["target_count"],
+        },
+        "comparison": {
+            "basis": evidence["comparison"]["basis"],
+            "baseline": period_scores(baseline),
+            "best": period_scores(best),
+            "relation": evidence["comparison"]["relation"],
+        },
+        "validation": {
+            "configured": evidence["validation"]["configured"],
+            "status": evidence["validation"]["status"],
+            "reasons": evidence["validation"]["reasons"],
+            "note": "windows omitted to fit the evidence budget",
+        },
+        "parameters": {
+            "status": evidence["parameters"]["status"],
+            "dimension_count": evidence["parameters"]["dimension_count"],
+            "hybrid_weight_count": evidence["parameters"]["hybrid_weight_count"],
+            "note": "parameter values omitted to fit the evidence budget",
+        },
+        "model_identity": evidence["model_identity"].clone(),
+        "verification": evidence["verification"].clone(),
+        "remote": evidence["remote"].clone(),
+        "source_paths": evidence["source_paths"].clone(),
+        "warnings": [],
+        "missing": evidence["missing"],
+    })
+}
+
+fn period_scores(side: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "member": side["member"],
+        "calibration": {"status": side["calibration"]["status"], "score": side["calibration"]["score"]},
+        "validation": {"status": side["validation"]["status"], "score": side["validation"]["score"]},
+    })
 }
 
 /// 运行用的内核目录必须是建研究时冻结的那一份。
@@ -7281,6 +8497,1028 @@ esac
             .file_name()
             .to_string_lossy()
             .starts_with(".colm-study-apply-")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ---- P1-A：结构化 Study 证据（study-status.evidence） ----
+
+    fn evidence_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-evidence-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("samples")).unwrap();
+        root
+    }
+
+    fn evidence_manifest(root: &Path) -> Manifest {
+        let mut manifest = tuning_manifest(root);
+        manifest.spec.parameters = vec![super::super::spec::ParameterSpec {
+            name: "DEF_TUNING_CNFAC".into(),
+            parameter_id: None,
+            scope_instance: None,
+            sample_min: 0.1,
+            sample_max: 0.9,
+            scale: Some(ScaleSpec::Linear),
+        }];
+        manifest
+    }
+
+    /// 样本 CSV 的一行：成员、是否基线、代、候选序号、各决策维的值（`None` 写空格）。
+    type EvidenceSampleRow<'a> = (&'a str, bool, usize, usize, &'a [Option<f64>]);
+
+    fn write_evidence_sample_file(manifest: &Manifest, file: &str, rows: &[EvidenceSampleRow<'_>]) {
+        let keys = manifest
+            .spec
+            .parameters
+            .iter()
+            .map(super::super::spec::ParameterSpec::member_key)
+            .collect::<Vec<_>>();
+        let mut text = String::from("member,baseline,generation,candidate");
+        for key in &keys {
+            text.push(',');
+            text.push_str(key);
+        }
+        text.push('\n');
+        for (id, baseline, generation, candidate, values) in rows {
+            text.push_str(&format!("{id},{baseline},{generation},{candidate}"));
+            for value in *values {
+                text.push(',');
+                if let Some(value) = value {
+                    text.push_str(&value.to_string());
+                }
+            }
+            text.push('\n');
+        }
+        let path = Path::new(&manifest.root).join("samples").join(file);
+        fs::write(path, text).unwrap();
+    }
+
+    fn evidence_result_row(period: &str, key: &str, loss: f64) -> TargetResult {
+        let mut row = target_row(period, vec![1, 2]);
+        row.key = key.into();
+        row.variable = key.into();
+        row.loss = loss;
+        // Nrmse 的 loss = rmse / observation_sd，observation_sd 取 2.0。
+        row.value = loss * 2.0;
+        row
+    }
+
+    fn write_evidence_result(
+        manifest: &Manifest,
+        member: &str,
+        calibration: &[(&str, f64)],
+        validation: &[(&str, f64)],
+        validation_errors: &[(&str, &str)],
+    ) {
+        let site = manifest.spec.base_cases[0].clone();
+        let result = TaskResult {
+            member: member.into(),
+            site: site.clone(),
+            outputs: Vec::new(),
+            calibration: calibration
+                .iter()
+                .map(|(key, loss)| evidence_result_row("calibration", key, *loss))
+                .collect(),
+            validation: validation
+                .iter()
+                .map(|(key, loss)| evidence_result_row("validation", key, *loss))
+                .collect(),
+            validation_errors: validation_errors
+                .iter()
+                .map(|(key, reason)| TargetError {
+                    key: (*key).into(),
+                    site: site.clone(),
+                    variable: (*key).into(),
+                    period: "validation".into(),
+                    reason: (*reason).into(),
+                })
+                .collect(),
+        };
+        let path = task_result_path(manifest, member, &site);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&result).unwrap()).unwrap();
+    }
+
+    fn evidence_state(
+        manifest: &Manifest,
+        status: StudyStatus,
+        members: &[&str],
+        candidates: &[(&str, Option<f64>, Option<f64>)],
+        best: Option<(&str, f64)>,
+    ) -> StudyState {
+        let tasks = manifest
+            .spec
+            .base_cases
+            .iter()
+            .flat_map(|site| {
+                members
+                    .iter()
+                    .map(move |member| crate::study::state::TaskState {
+                        member: (*member).into(),
+                        site: site.clone(),
+                        case_dir: "case".into(),
+                        status: TaskStatus::Succeeded,
+                        stage: None,
+                        reason: None,
+                        objective: None,
+                        validation_objective: None,
+                        process: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut state = StudyState::new(manifest.id.clone(), tasks).unwrap();
+        state.status = status;
+        for (member, calibration, validation) in candidates {
+            state.candidates.insert(
+                (*member).to_string(),
+                CandidateState {
+                    generation: 0,
+                    feasible: calibration.is_some(),
+                    calibration: *calibration,
+                    validation: *validation,
+                    reason: calibration.is_none().then(|| "failed".into()),
+                },
+            );
+        }
+        if let Some((member, score)) = best {
+            state.best_member = Some(member.into());
+            state.best_objective = Some(score);
+        }
+        state
+    }
+
+    fn set_evidence_task_status(
+        state: &mut StudyState,
+        member: &str,
+        site: &str,
+        status: TaskStatus,
+        reason: &str,
+    ) {
+        let task = state
+            .tasks
+            .get_mut(&crate::study::state::task_id(member, site))
+            .unwrap();
+        task.status = status;
+        task.reason = Some(reason.into());
+    }
+
+    /// 率定期改善、验证期变差：两期各自比较，`relation` 必须分开报。
+    #[test]
+    fn evidence_compares_calibration_and_validation_within_the_same_period() {
+        let root = evidence_root("dual-period");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.9)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[
+                ("m000000", Some(0.8), Some(0.6)),
+                ("m000001", Some(0.4), Some(0.9)),
+            ],
+            Some(("m000001", 0.4)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(evidence["selection"]["best_member"], "m000001");
+        assert_eq!(evidence["study"]["status"], "completed");
+        assert_eq!(evidence["execution"]["state"], "completed");
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["score"].as_f64(),
+            Some(0.8)
+        );
+        assert_eq!(
+            evidence["comparison"]["best"]["calibration"]["score"].as_f64(),
+            Some(0.4)
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["calibration"],
+            "lower_loss"
+        );
+        assert_eq!(
+            evidence["comparison"]["best"]["validation"]["targets"][0]["loss"].as_f64(),
+            Some(0.9)
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["validation"],
+            "higher_loss"
+        );
+        assert_eq!(evidence["validation"]["status"], "available");
+        assert_eq!(evidence["verification"]["reverified"], false);
+        assert_eq!(evidence["objective"]["direction"], "minimize");
+        assert!(
+            evidence_bytes(&evidence) <= EVIDENCE_BUDGET_BYTES,
+            "{}",
+            evidence_bytes(&evidence)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 验证更好的另一个候选不改变记录里的 best_member：选择只用率定期。
+    #[test]
+    fn evidence_selection_never_uses_validation_to_replace_best_member() {
+        let root = evidence_root("selection");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[
+                ("m000001", false, 0, 1, &[Some(0.4)]),
+                ("m000002", false, 0, 2, &[Some(0.45)]),
+            ],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.9)], &[]);
+        write_evidence_result(&manifest, "m000002", &[("Qle", 0.45)], &[("Qle", 0.2)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001", "m000002"],
+            &[
+                ("m000000", Some(0.8), Some(0.6)),
+                ("m000001", Some(0.4), Some(0.9)),
+                ("m000002", Some(0.45), Some(0.2)),
+            ],
+            Some(("m000001", 0.4)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(evidence["selection"]["best_member"], "m000001");
+        assert_eq!(evidence["selection"]["best_objective"].as_f64(), Some(0.4));
+        assert_eq!(
+            evidence["selection"]["candidates"]["feasible_non_baseline"],
+            2
+        );
+        // 只报基线 vs 记录的最优；验证更好的 m000002 不会出现在证据里。
+        assert!(!evidence.to_string().contains("m000002"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// best 比 baseline 差也是合法记录：`relation` 报 higher_loss，不能改写成"改善"。
+    #[test]
+    fn evidence_reports_best_member_worse_than_baseline() {
+        let root = evidence_root("worse");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.7)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.3)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.5)], &[("Qle", 0.2)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[
+                ("m000000", Some(0.3), Some(0.6)),
+                ("m000001", Some(0.5), Some(0.2)),
+            ],
+            Some(("m000001", 0.5)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            evidence["comparison"]["relation"]["calibration"],
+            "higher_loss"
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["validation"],
+            "lower_loss"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// baseline 分数为 0 是有效分数；结果文件缺失才是 unavailable。
+    #[test]
+    fn evidence_keeps_zero_baseline_and_reports_missing_baseline() {
+        let root = evidence_root("zero-baseline");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.0)], &[("Qle", 0.5)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.2)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[("m000000", Some(0.0), None), ("m000001", Some(0.4), None)],
+            Some(("m000001", 0.4)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["status"],
+            "recorded"
+        );
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["score"].as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["calibration"],
+            "higher_loss"
+        );
+
+        fs::remove_file(task_result_path(&manifest, "m000000", "site")).unwrap();
+        // 引擎记录里没有候选时，缺失结果文件才是 unavailable；有候选记录时以引擎记录为准。
+        let without_candidates = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[],
+            Some(("m000001", 0.4)),
+        );
+        let missing = study_evidence(&root, &manifest, Some(&without_candidates)).unwrap();
+        assert_eq!(
+            missing["comparison"]["baseline"]["calibration"]["status"],
+            "unavailable"
+        );
+        assert_eq!(missing["comparison"]["relation"]["calibration"], "unknown");
+        assert!(!missing["missing"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 验证未配置与验证已配置但不可用是两种证据，不能都报成"没有验证"。
+    #[test]
+    fn evidence_distinguishes_unconfigured_and_unavailable_validation() {
+        let root = evidence_root("validation");
+        let mut manifest = evidence_manifest(&root);
+        manifest.spec.targets[0].validation_from = None;
+        manifest.spec.targets[0].validation_to = None;
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[("m000000", Some(0.8), None), ("m000001", Some(0.4), None)],
+            Some(("m000001", 0.4)),
+        );
+        let unconfigured = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(unconfigured["validation"]["status"], "not_configured");
+        assert_eq!(unconfigured["validation"]["configured"], false);
+        assert!(unconfigured["validation"]["reasons"]
+            .to_string()
+            .contains("no validation windows"));
+        assert_eq!(
+            unconfigured["comparison"]["relation"]["validation"],
+            "unknown"
+        );
+
+        let mut configured = evidence_manifest(&root);
+        configured.spec.targets[0].validation_from = Some(10);
+        configured.spec.targets[0].validation_to = Some(20);
+        write_evidence_result(&configured, "m000000", &[("Qle", 0.8)], &[], &[]);
+        write_evidence_result(
+            &configured,
+            "m000001",
+            &[("Qle", 0.4)],
+            &[],
+            &[("Qle", "validation window has no paired values")],
+        );
+        let unavailable = study_evidence(&root, &configured, Some(&state)).unwrap();
+        assert_eq!(unavailable["validation"]["configured"], true);
+        assert!(
+            ["unavailable", "partial"].contains(
+                &unavailable["validation"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+            ),
+            "{unavailable}"
+        );
+        assert!(unavailable["validation"]["reasons"]
+            .to_string()
+            .contains("validation window has no paired values"));
+        assert_eq!(
+            unavailable["comparison"]["best"]["validation"]["status"],
+            "unavailable"
+        );
+        assert!(!unavailable["missing"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 运行中与不确定性分析都没有 best；原因要分开报，不能编造一个最优。
+    #[test]
+    fn evidence_reports_running_uncertainty_and_partial_failure_without_best() {
+        let root = evidence_root("no-best");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        let running = evidence_state(&manifest, StudyStatus::Running, &["m000000"], &[], None);
+        let evidence = study_evidence(&root, &manifest, Some(&running)).unwrap();
+        assert!(evidence["selection"]["best_member"].is_null());
+        assert_eq!(evidence["selection"]["no_best_reason"]["code"], "running");
+        assert_eq!(evidence["selection"]["provisional"], true);
+        assert_eq!(evidence["execution"]["state"], "running");
+
+        let mut uncertainty_manifest = manifest.clone();
+        uncertainty_manifest.spec.kind = StudyKind::Uncertainty;
+        uncertainty_manifest.spec.method = StudyMethod::Lhs;
+        uncertainty_manifest.spec.targets[0].validation_from = None;
+        uncertainty_manifest.spec.targets[0].validation_to = None;
+        let complete = evidence_state(
+            &uncertainty_manifest,
+            StudyStatus::Completed,
+            &["m000000"],
+            &[("m000000", Some(0.8), None)],
+            None,
+        );
+        let uncertainty = study_evidence(&root, &uncertainty_manifest, Some(&complete)).unwrap();
+        assert!(uncertainty["selection"]["best_member"].is_null());
+        assert_eq!(
+            uncertainty["selection"]["no_best_reason"]["code"],
+            "uncertainty"
+        );
+        assert!(!uncertainty["selection"]["provisional"].as_bool().unwrap());
+
+        let mut failed = evidence_state(
+            &manifest,
+            StudyStatus::CompletedWithFailures,
+            &["m000000", "m000001"],
+            &[("m000001", None, None)],
+            None,
+        );
+        set_evidence_task_status(
+            &mut failed,
+            "m000001",
+            "site",
+            TaskStatus::Failed,
+            "engine exit 1",
+        );
+        let partial = study_evidence(&root, &manifest, Some(&failed)).unwrap();
+        assert!(partial["selection"]["best_member"].is_null());
+        assert_eq!(
+            partial["selection"]["no_best_reason"]["code"],
+            "no_feasible_member_after_failures"
+        );
+        assert_eq!(partial["execution"]["partial_failures"], true);
+        assert_eq!(partial["execution"]["tasks"]["failed"], 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 参数取全部已记录的代（samples/g*.csv）；Log 尺度、带索引的键与基线缺失的维度都要正确。
+    #[test]
+    fn evidence_parameters_use_all_generations_log_scale_and_indexed_keys() {
+        let root = evidence_root("parameters");
+        let mut manifest = tuning_manifest(&root);
+        manifest.spec.parameters = vec![
+            super::super::spec::ParameterSpec {
+                name: "DEF_TUNING_CNFAC".into(),
+                parameter_id: None,
+                scope_instance: None,
+                sample_min: 0.1,
+                sample_max: 0.9,
+                scale: Some(ScaleSpec::Linear),
+            },
+            super::super::spec::ParameterSpec {
+                name: "DEF_TUNING_ZLND".into(),
+                parameter_id: None,
+                scope_instance: None,
+                sample_min: 0.001,
+                sample_max: 0.1,
+                scale: Some(ScaleSpec::Log),
+            },
+            super::super::spec::ParameterSpec {
+                name: "DEF_PFT_VMAX25".into(),
+                parameter_id: Some("pft:DEF_PFT_VMAX25".into()),
+                scope_instance: Some(super::super::spec::ParameterScopeInstance {
+                    kind: super::super::spec::ParameterScopeKind::PftType,
+                    scheme: None,
+                    index: Some(1),
+                    type_name: None,
+                }),
+                sample_min: 10.0,
+                sample_max: 100.0,
+                scale: Some(ScaleSpec::Linear),
+            },
+        ];
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5), Some(0.01), None])],
+        );
+        // 后续代：samples/g000001.csv 里的成员必须能被找到。
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[(
+                "m000005",
+                false,
+                1,
+                5,
+                &[Some(0.895), Some(0.001), Some(55.0)],
+            )],
+        );
+        write_evidence_result(&manifest, "m000005", &[("Qle", 0.3)], &[("Qle", 0.4)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000005"],
+            &[("m000005", Some(0.3), None)],
+            Some(("m000005", 0.3)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let parameters = &evidence["parameters"];
+        assert_eq!(parameters["status"], "recorded");
+        let dims = parameters["dims"].as_array().unwrap();
+        let scale = |key: &str| {
+            dims.iter()
+                .find(|dim| dim["key"] == key)
+                .map(|dim| dim["scale"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        assert_eq!(scale("DEF_TUNING_CNFAC"), "linear");
+        assert_eq!(scale("DEF_TUNING_ZLND"), "log");
+        let value = |side: &str, key: &str| {
+            parameters[side]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|value| value["key"] == key)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(value("best", "DEF_TUNING_CNFAC")["at_bound"], true);
+        assert_eq!(value("best", "DEF_TUNING_CNFAC")["bound_side"], "upper");
+        assert_eq!(value("best", "DEF_TUNING_ZLND")["position_scale"], "log");
+        assert_eq!(
+            value("best", "DEF_TUNING_ZLND")["position"].as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(value("best", "DEF_TUNING_ZLND")["at_bound"], true);
+        let indexed = value("best", "DEF_PFT_VMAX25(2)");
+        assert!((indexed["position"].as_f64().unwrap() - 0.5).abs() < 1e-12);
+        assert_eq!(indexed["at_bound"], false);
+        assert_eq!(
+            value("baseline", "DEF_PFT_VMAX25(2)")["status"],
+            "unavailable"
+        );
+        assert!(value("baseline", "DEF_PFT_VMAX25(2)")["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no value"));
+        assert_eq!(parameters["best"]["hybrid"]["status"], "not_configured");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 研究身份只用记录文件（pinned/official/unknown）；远程记录也只读文件，不建 SSH。
+    #[test]
+    fn evidence_identity_is_read_from_records_without_contacting_a_server() {
+        let root = evidence_root("identity");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000"],
+            &[("m000000", Some(0.8), None)],
+            None,
+        );
+        let official = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            official["model_identity"]["study_record"]["status"],
+            "official"
+        );
+        assert_eq!(official["remote"]["status"], "none");
+        assert!(official["model_identity"]["study_record"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("official"));
+
+        fs::write(
+            root.join(".colm-remote-study.json"),
+            json!({
+                "host": "server",
+                "root": "/data/colm",
+                "job": "job-1",
+                "remote_project": "/data/colm/s/proj",
+                "engine": "engine-1",
+                "submitted_at": 5,
+                "scheduler": "bare",
+                "provenance": {},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let recorded = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(recorded["remote"]["status"], "recorded");
+        assert_eq!(recorded["remote"]["host"], "server");
+        assert_eq!(recorded["remote"]["fetched"], false);
+
+        let pinned = json!({
+            "name": "modified",
+            "head": "abc123",
+            "base_commit": "base",
+            "note": "",
+            "based_on": null,
+            "touches": {"engine": true, "kernel": false},
+            "cli": root.join("version/bin/colm-cli"),
+            "kernel": root.join("version/kernel"),
+            "pinned_unix": 0,
+            "model_revision": {
+                "schema": 1,
+                "version": {"id": "workspace-x", "revision": 3},
+                "name": "workspace-x#3",
+                "note": "",
+                "parent": null,
+                "code": {
+                    "kind": "workspace",
+                    "workspace": "workspace-x",
+                    "commit": "abc123",
+                    "source_sha256": "a".repeat(64),
+                },
+                "overlay": {},
+                "overlay_sha256": "b".repeat(64),
+                "fingerprint": "c".repeat(12),
+                "created_unix": 0,
+                "applicability": {},
+                "derived_from": null,
+            },
+        });
+        fs::write(root.join("model-version.json"), pinned.to_string()).unwrap();
+        let frozen = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(frozen["model_identity"]["study_record"]["status"], "pinned");
+        assert_eq!(
+            frozen["model_identity"]["study_record"]["version"]["id"],
+            "workspace-x"
+        );
+        assert_eq!(
+            frozen["model_identity"]["study_record"]["version"]["revision"],
+            3
+        );
+        assert_eq!(
+            frozen["model_identity"]["study_record"]["code_source_sha256"],
+            "a".repeat(64)
+        );
+        // 当前选择留给助手补；CLI 不自称知道界面选了什么。
+        assert!(frozen["model_identity"]["current_selection"].is_null());
+        assert_eq!(frozen["model_identity"]["comparison"]["status"], "unknown");
+
+        fs::write(root.join("model-version.json"), "not json").unwrap();
+        let unknown = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(
+            unknown["model_identity"]["study_record"]["status"],
+            "unknown"
+        );
+        assert!(!unknown["model_identity"]["study_record"]["reason"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 目标/参数/警告很多时证据仍须是合法、有界的 JSON，并显式标出被裁掉。
+    #[test]
+    fn evidence_stays_within_the_status_budget() {
+        let root = evidence_root("budget");
+        let mut manifest = tuning_manifest(&root);
+        manifest.spec.parameters = (0..40)
+            .map(|index| super::super::spec::ParameterSpec {
+                name: format!("DEF_TUNING_LONG_PARAMETER_NAME_{index:02}"),
+                parameter_id: None,
+                scope_instance: None,
+                sample_min: 0.0,
+                sample_max: 1.0,
+                scale: Some(ScaleSpec::Linear),
+            })
+            .collect();
+        let base_target = manifest.spec.targets[0].clone();
+        manifest.spec.targets = (0..12)
+            .map(|index| {
+                let mut target = base_target.clone();
+                target.key = format!("diagnostic_variable_number_{index:02}");
+                target.variable = target.key.clone();
+                target
+            })
+            .collect();
+        let mut state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000"],
+            &[("m000000", Some(0.8), None)],
+            None,
+        );
+        state.warnings = (0..20)
+            .map(|index| format!("warning {index}: {}", "x".repeat(400)))
+            .collect();
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let bytes = evidence_bytes(&evidence);
+        assert!(bytes <= EVIDENCE_BUDGET_BYTES, "{bytes}");
+        assert_eq!(evidence["truncated"], true, "bytes {bytes}");
+        for key in [
+            "study",
+            "execution",
+            "selection",
+            "objective",
+            "comparison",
+            "validation",
+            "parameters",
+            "model_identity",
+            "verification",
+            "remote",
+            "source_paths",
+            "warnings",
+            "missing",
+        ] {
+            assert!(evidence.get(key).is_some(), "missing evidence key {key}");
+        }
+        assert!(serde_json::from_str::<serde_json::Value>(&evidence.to_string()).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 基线按样本里的 baseline 标记定位，不按 m000000 编号猜。
+    #[test]
+    fn evidence_locates_baseline_by_flag_not_member_number() {
+        let root = evidence_root("baseline-flag");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000009", true, 0, 9, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000010", false, 1, 10, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000009", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000010", &[("Qle", 0.4)], &[("Qle", 0.9)], &[]);
+        let mut state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000009", "m000010"],
+            &[
+                ("m000009", Some(0.8), Some(0.6)),
+                ("m000010", Some(0.4), Some(0.9)),
+            ],
+            Some(("m000010", 0.4)),
+        );
+        state
+            .warnings
+            .push("overfitting: calibration improved while validation became worse".into());
+        state
+            .warnings
+            .push("bound: DEF_TUNING_CNFAC upper 0.895".into());
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(evidence["comparison"]["baseline"]["member"], "m000009");
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["score"].as_f64(),
+            Some(0.8)
+        );
+        assert_eq!(
+            evidence["comparison"]["baseline"]["validation"]["score"].as_f64(),
+            Some(0.6)
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["calibration"],
+            "lower_loss"
+        );
+        assert_eq!(
+            evidence["comparison"]["relation"]["validation"],
+            "higher_loss"
+        );
+        // 基线侧不挂 overfitting/bound 警告；最优侧挂。
+        assert!(evidence["comparison"]["baseline"]["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(evidence["comparison"]["best"]["warnings"]
+            .to_string()
+            .contains("overfitting"));
+        // feasible 统计排除的是标记出来的基线，不是编号 m000000。
+        assert_eq!(
+            evidence["selection"]["candidates"]["feasible_non_baseline"],
+            1
+        );
+        assert_eq!(evidence["parameters"]["baseline"]["status"], "recorded");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 样本里没有任何 baseline 标记：基线明确 unavailable，不退回 m000000、不编造分数。
+    #[test]
+    fn evidence_reports_unavailable_baseline_without_a_baseline_marker() {
+        let root = evidence_root("no-baseline");
+        let manifest = evidence_manifest(&root);
+        // 编号仍是 m000000，但样本没有 baseline=true：它不能冒充基线。
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", false, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.9)], &[]);
+        let state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[
+                ("m000000", Some(0.8), Some(0.6)),
+                ("m000001", Some(0.4), Some(0.9)),
+            ],
+            Some(("m000001", 0.4)),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert!(evidence["comparison"]["baseline"]["member"].is_null());
+        assert_eq!(evidence["comparison"]["baseline"]["status"], "unavailable");
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["status"],
+            "unavailable"
+        );
+        assert!(
+            evidence["comparison"]["baseline"]["calibration"]["score"].is_null(),
+            "no fabricated baseline score: {evidence}"
+        );
+        assert!(evidence["comparison"]["baseline"]["calibration"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no baseline member"));
+        // 配置了验证窗口，但没有基线可比：unavailable，不是 not_configured。
+        assert_eq!(
+            evidence["comparison"]["baseline"]["validation"]["status"],
+            "unavailable"
+        );
+        assert_eq!(evidence["validation"]["configured"], true);
+        assert_ne!(evidence["validation"]["status"], "not_configured");
+        assert_eq!(evidence["comparison"]["relation"]["calibration"], "unknown");
+        assert_eq!(evidence["comparison"]["relation"]["validation"], "unknown");
+        assert!(evidence["missing"]
+            .to_string()
+            .contains("no baseline member is recorded"));
+        // 参数侧也不按编号退回：baseline 明确 unavailable。
+        assert_eq!(evidence["parameters"]["baseline"]["status"], "unavailable");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn evidence_engine_candidate(
+        calibration: Option<f64>,
+        validation: Option<f64>,
+        feasible: bool,
+        reason: Option<&str>,
+    ) -> CandidateState {
+        CandidateState {
+            generation: 0,
+            feasible,
+            calibration,
+            validation,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    /// 验证期可用性以 state.candidates 为准：runner 判成不可用时证据不能对结果文件重算出 recorded。
+    #[test]
+    fn evidence_prefers_engine_candidate_availability_over_result_files() {
+        let root = evidence_root("candidate-authority");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        // 结果文件里两期都有完整行；引擎记录却判定 calibration 不可行、validation 不可用。
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.2)], &[]);
+        let mut state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[],
+            Some(("m000001", 0.4)),
+        );
+        state.candidates.insert(
+            "m000000".into(),
+            evidence_engine_candidate(
+                None,
+                None,
+                false,
+                Some("baseline required target set is incomplete"),
+            ),
+        );
+        state.candidates.insert(
+            "m000001".into(),
+            evidence_engine_candidate(Some(0.35), None, true, None),
+        );
+        state.warnings.push(
+            "m000001 / site validation unavailable: model-observation support differs from baseline"
+                .into(),
+        );
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        // calibration：引擎记录没有分数 → unavailable 且用 candidate.reason，不从文件硬算 0.4。
+        assert_eq!(
+            evidence["comparison"]["baseline"]["calibration"]["status"],
+            "unavailable"
+        );
+        assert!(evidence["comparison"]["baseline"]["calibration"]["score"].is_null());
+        assert!(evidence["comparison"]["baseline"]["calibration"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("required target set is incomplete"));
+        // 引擎记录的分数优先于文件聚合值（文件是 0.4）。
+        assert_eq!(
+            evidence["comparison"]["best"]["calibration"]["score"].as_f64(),
+            Some(0.35)
+        );
+        // validation：candidate.validation=None → 不得报 recorded；reason 取 member 相关 warning。
+        assert!(
+            ["unavailable", "partial"].contains(
+                &evidence["comparison"]["best"]["validation"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+            ),
+            "{evidence}"
+        );
+        assert!(evidence["comparison"]["best"]["validation"]["score"].is_null());
+        assert!(evidence["comparison"]["best"]["validation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("support differs from baseline"));
+        assert_ne!(evidence["validation"]["status"], "available");
+        assert!(evidence["validation"]["reasons"]
+            .to_string()
+            .contains("support differs from baseline"));
+        assert!(!evidence["missing"].as_array().unwrap().is_empty());
+
+        // 反向：candidate.validation 有值且与文件聚合值不同 → 用 candidate 的值，target 明细仍来自文件。
+        state.candidates.insert(
+            "m000000".into(),
+            evidence_engine_candidate(Some(0.8), Some(0.65), true, None),
+        );
+        state.candidates.insert(
+            "m000001".into(),
+            evidence_engine_candidate(Some(0.35), Some(0.55), true, None),
+        );
+        state.warnings.clear();
+        let recorded = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        assert_eq!(recorded["validation"]["status"], "available");
+        assert_eq!(
+            recorded["comparison"]["baseline"]["validation"]["score"].as_f64(),
+            Some(0.65)
+        );
+        assert_eq!(
+            recorded["comparison"]["best"]["validation"]["score"].as_f64(),
+            Some(0.55)
+        );
+        assert_eq!(
+            recorded["comparison"]["best"]["validation"]["targets"][0]["loss"].as_f64(),
+            Some(0.2)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
