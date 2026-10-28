@@ -867,6 +867,36 @@ describe('deriving a new study design from a finished one', () => {
     };
     assert.throws(() => deriveStudyDesign(differingWeight, options), /权重|weight/);
   });
+  it('treats the default weight 1 as a value when checking that sites agree', () => {
+    // 默认权重也是目标函数的一部分：只记非 1 的权重时，[1, 2] 会被静默当成 [2, 2]，
+    // 界面上按变量只给一个权重框，派生出来的研究悄悄换了目标函数（审计复现）。
+    const differingFromDefault = {
+      ...singleSite,
+      targets: [
+        { ...singleSite.targets[0], weight: 1 },
+        { ...singleSite.targets[1], weight: 2 },
+      ],
+    };
+    assert.throws(() => deriveStudyDesign(differingFromDefault, options), /权重|weight/);
+    // 两站都用 2 可以无损继承，输出里只写非 1 的权重（界面缺省就是 1）。
+    const uniform = {
+      ...singleSite,
+      targets: singleSite.targets.map((target) => ({ ...target, weight: 2 })),
+    };
+    assert.deepEqual(deriveStudyDesign(uniform, options).ui.weights, { Qle: '2' });
+  });
+  it('refuses sparse site × variable targets instead of rebuilding a full grid', () => {
+    // 界面上的单点目标只能是"站点 × 变量"的完整组合（spec() 就是这么重建的）。稀疏来源
+    // （Qle@AT-Neu + GPP@CH-Lae）派生后会凭空多出两个目标，等于换了一个目标函数。
+    const sparse = {
+      ...singleSite,
+      targets: [
+        singleSite.targets[0],
+        { ...singleSite.targets[1], variable: 'GPP', corrected: false },
+      ],
+    };
+    assert.throws(() => deriveStudyDesign(sparse, options), /完整|complete/);
+  });
   it('inherits gridded targets with per-target metric, period and station aggregation', () => {
     const spatial = {
       kind: 'uncertainty',
@@ -953,5 +983,44 @@ describe('deriving a new study design from a finished one', () => {
       ],
     };
     assert.throws(() => deriveStudyDesign(spatial, options), /聚合|aggregat/);
+  });
+  it('inherits the source window for gridded targets and refuses disagreeing ones', () => {
+    // 空间目标的研究页时间窗是研究级设置：原来派生时 from/to/valFrom/valTo 一律写空字符串，
+    // 界面上时间框空着，派生出来的研究不再按来源研究的率定期/验证期比。
+    const gridded = (to: number) => ({
+      kind: 'uncertainty',
+      method: 'lhs',
+      base_cases: ['region'],
+      site_mode: 'shared',
+      observations: {},
+      targets: [
+        {
+          key: 'f_lfevpa@region',
+          variable: 'f_lfevpa',
+          metric: 'nrmse',
+          weight: 1,
+          from: 1_104_537_600,
+          to,
+          validation_from: 1_136_073_600,
+          validation_to: 1_167_609_600,
+          min_pairs: 20,
+          source: { kind: 'grid', path: '/obs/gleam.nc', variable: 'E', scale: 0.0864 },
+        },
+      ],
+    });
+    const derived = deriveStudyDesign(gridded(1_136_073_600), options);
+    assert.equal(derived.ui.from, '2005-01-01T00:00');
+    assert.equal(derived.ui.to, '2006-01-01T00:00');
+    assert.equal(derived.ui.valFrom, '2006-01-01T00:00');
+    assert.equal(derived.ui.valTo, '2007-01-01T00:00');
+    // 空间与单点共用同一一致性校验：各目标时间窗不一致就明确拒绝，不挑一个静默继承。
+    const disagreeing = {
+      ...gridded(1_136_073_600),
+      targets: [
+        ...gridded(1_136_073_600).targets,
+        { ...gridded(1_136_073_600).targets[0], key: 'f_lfevpa@region2', to: 1_167_609_600 },
+      ],
+    };
+    assert.throws(() => deriveStudyDesign(disagreeing, options), /时间窗|windows/);
   });
 });

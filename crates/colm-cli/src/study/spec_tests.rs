@@ -101,3 +101,41 @@ fn parent_study_rejects_unknown_fields() {
         .to_string();
     assert!(error.contains("note"), "{error}");
 }
+
+/// 派生谱系要能在不放进 spec 的情况下落盘：旧冻结修订的 deny_unknown_fields 读不了新字段，
+/// 独立文件是两边都认的表达（新一轮复核 P1）。
+#[test]
+fn parent_study_metadata_is_written_to_a_separate_file_and_absent_specs_write_nothing() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-parent-meta-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let study = root.join("study");
+    std::fs::create_dir_all(&study).unwrap();
+    let mut value = legacy_spec();
+    value["parent_study"] = serde_json::json!({
+        "study": "/p/.colm/studies/s-uncertainty",
+        "spec_sha256": "a".repeat(64),
+        "model_revision": {"id": "trace", "revision": 7},
+    });
+    let spec = root.join("spec.json");
+    std::fs::write(&spec, serde_json::to_vec(&value).unwrap()).unwrap();
+    write_parent_study_metadata(&study, &spec).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(study.join(PARENT_STUDY_FILE)).unwrap()).unwrap();
+    assert_eq!(written["study"], "/p/.colm/studies/s-uncertainty");
+    assert_eq!(written["model_revision"]["revision"], 7);
+
+    // 没有派生来源的设定不产生空文件。
+    let plain = root.join("plain.json");
+    std::fs::write(&plain, serde_json::to_vec(&legacy_spec()).unwrap()).unwrap();
+    let other = root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    write_parent_study_metadata(&other, &plain).unwrap();
+    assert!(!other.join(PARENT_STUDY_FILE).exists());
+    std::fs::remove_dir_all(root).unwrap();
+}

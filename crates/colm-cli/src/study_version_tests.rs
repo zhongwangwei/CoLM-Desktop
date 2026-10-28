@@ -765,15 +765,16 @@ fn a_workspace_revision_study_is_created_by_its_own_cli() {
             .unwrap();
     // 研究目录原样交回给 GUI（父程序不解析、不改写）。
     assert_eq!(stdout, format!("{}\n", study.display()));
-    // 转交的是原始算例目录与原始设定，不是 prepare_create 的临时冻结输入目录。
+    // 转交的是原始算例目录；设定是一份剥掉新审计字段的临时副本（旧修订 deny_unknown_fields
+    // 读不了 parent_study），原始设定文件不被改写。
     let args: Vec<String> = std::fs::read_to_string(&log)
         .unwrap()
         .lines()
         .map(str::to_owned)
         .collect();
     assert_eq!(
-        args,
-        vec![
+        args[..args.len() - 1],
+        [
             "study-create",
             case_root.to_str().unwrap(),
             "--model-root",
@@ -785,9 +786,11 @@ fn a_workspace_revision_study_is_created_by_its_own_cli() {
             "--history-db",
             "/history.db",
             "--spec",
-            spec.to_str().unwrap(),
-        ]
+        ][..]
     );
+    let handed = Path::new(args.last().unwrap());
+    assert_ne!(handed, spec, "不能把原始设定直接交给旧修订");
+    assert!(!handed.exists(), "转交用的临时副本事后要删掉");
     assert_eq!(
         std::fs::read_to_string(&env_log).unwrap().trim(),
         "1 1",
@@ -842,10 +845,17 @@ fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec()
             (PathBuf::from(path), has == "1")
         })
         .collect();
-    assert_eq!(attempts.len(), 2, "先按原设定试一次，去掉增强后再试一次");
-    assert_eq!(attempts[0], (spec.clone(), true));
+    assert_eq!(
+        attempts.len(),
+        2,
+        "先按剥掉新字段的副本试一次，去掉增强后再试一次"
+    );
+    assert_ne!(attempts[0].0, spec, "第一次也不能直接交原始设定");
+    assert!(attempts[0].1, "第一次仍保留 GUI 的 include_baseline 增强");
     assert_ne!(attempts[1].0, spec);
+    assert_ne!(attempts[1].0, attempts[0].0, "重试使用新的副本");
     assert!(!attempts[1].1, "重试的设定里不再有 include_baseline");
+    assert!(!attempts[0].0.exists(), "第一次的临时副本事后要删掉");
     assert!(!attempts[1].0.exists(), "重试用的临时副本事后要删掉");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -932,5 +942,45 @@ fn a_revision_cli_that_ignores_the_revision_cannot_leave_a_broken_study() {
         !study.exists(),
         "绑定不了修订的研究只会建得成跑不起来，不能留给用户"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_spec_handed_to_an_older_program_drops_parent_study_and_optionally_include_baseline() {
+    let root = temp("delegate-strip");
+    let spec = root.join("spec.json");
+    let text = serde_json::json!({
+        "kind": "tuning",
+        "method": "differential-evolution",
+        "base_cases": ["case"],
+        "parameters": [{"name": "DEF_TUNING_CNFAC", "sample_min": 0.4, "sample_max": 0.6}],
+        "targets": [{"key": "Qle", "variable": "Qle", "from": 0, "to": 3600}],
+        "budget": {"population": 4, "generations": 1, "include_baseline": true},
+        "parent_study": {
+            "study": "/p/.colm/studies/s-uncertainty",
+            "spec_sha256": "a".repeat(64),
+            "model_revision": {"id": "trace", "revision": 7}
+        }
+    });
+    std::fs::write(&spec, serde_json::to_vec(&text).unwrap()).unwrap();
+    let stripped = spec_for_older_program(&spec, false).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stripped).unwrap()).unwrap();
+    assert!(value.get("parent_study").is_none(), "{value}");
+    // 第一次尝试仍保留 GUI 的 include_baseline 增强，只有旧程序明确拒绝时才去掉。
+    assert_eq!(value["budget"]["include_baseline"], true);
+    std::fs::remove_file(&stripped).unwrap();
+
+    let retried = spec_for_older_program(&spec, true).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&retried).unwrap()).unwrap();
+    assert_eq!(value["budget"]["include_baseline"], false);
+    assert!(value.get("parent_study").is_none());
+    // 用户给的设定文件本身绝不被改写。
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
+    assert!(original.get("parent_study").is_some());
+    std::fs::remove_file(&retried).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

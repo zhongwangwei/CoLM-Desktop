@@ -577,7 +577,12 @@ fn observation_staging_fixture() -> (PathBuf, study::spec::Manifest) {
             {"key":"Nee","variable":"NEE","from":0,"to":3600,"min_pairs":2,
              "source":{"kind":"grid","path":obs.join("b/Pool.nc"),"variable":"NEE"}}
         ],
-        "budget": {"population":4,"generations":1}
+        "budget": {"population":4,"generations":1},
+        "parent_study": {
+            "study": "/p/.colm/studies/s-uncertainty",
+            "spec_sha256": "a".repeat(64),
+            "model_revision": {"id": "trace", "revision": 7}
+        }
     }))
     .unwrap();
     let manifest = study::spec::Manifest {
@@ -622,6 +627,8 @@ fn every_local_observation_source_is_staged_under_a_unique_name() {
             }
         );
     }
+    // 服务器引擎可能来自较旧快照：审计元数据 parent_study 不进入给服务器的设定。
+    assert!(staged.spec.get("parent_study").is_none(), "{}", staged.spec);
     let staged_spec = serde_json::to_value(&staged.spec).unwrap();
     assert_eq!(
         staged_spec["observations"]["site"],

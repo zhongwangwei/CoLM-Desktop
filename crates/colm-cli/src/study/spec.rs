@@ -458,6 +458,28 @@ pub struct StudySpec {
     pub parent_study: Option<ParentStudy>,
 }
 
+/// 派生谱系元数据文件（研究目录里），与 StudySpec 分开。
+///
+/// 旧冻结修订的 `colm-cli` 用 `deny_unknown_fields` 读设定：把 `parent_study` 塞进 spec 会让绑定
+/// 旧修订的派生研究在预检/创建时被未知字段拒绝（新一轮复核 P1）。谱系是审计元数据，不是执行语义，
+/// 因此执行设定里虽然仍有这个字段（新程序直接读），创建时还应落一份独立文件；转交给旧程序时会被剥掉。
+pub const PARENT_STUDY_FILE: &str = "parent-study.json";
+
+/// 把设定里的 `parent_study` 原样写到研究目录的独立文件；没有这份记录时不写。
+pub fn write_parent_study_metadata(study_root: &Path, spec_file: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(spec_file)
+        .with_context(|| format!("cannot read {}", spec_file.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("invalid study spec {}", spec_file.display()))?;
+    let Some(parent) = value.get("parent_study").cloned() else {
+        return Ok(());
+    };
+    let path = study_root.join(PARENT_STUDY_FILE);
+    std::fs::write(&path, serde_json::to_vec_pretty(&parent)?)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(())
+}
+
 /// 派生研究记录的来源。`spec_sha256` 是创建父研究时写进 `manifest.provenance` 的那一份，
 /// 用来核对"派生时读到的确实是这份设计"，而不是同目录下后来重建的另一个研究。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

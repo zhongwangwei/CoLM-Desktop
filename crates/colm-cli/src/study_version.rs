@@ -326,11 +326,14 @@ fn create_with_revision_cli(
     spec_file: &Path,
     flags: &[(String, String)],
 ) -> Result<String> {
-    let args = creation_delegate_args(command, case_root, spec_file, flags);
+    // 第一次尝试就用剥掉 parent_study 的副本：旧修订读不了这个新元数据，而新程序不介意少一个
+    // 审计字段；创建成功后由这里把谱系写回研究目录。
+    let sanitized = spec_for_older_program(spec_file, false)?;
+    let args = creation_delegate_args(command, case_root, &sanitized, flags);
     let (run, retry_spec) = (|| -> Result<(CreationRun, Option<PathBuf>)> {
         let run = run_creation_cli(cli, &args)?;
         if !run.success && run.stderr.contains("unknown field `include_baseline`") {
-            let copy = spec_without_include_baseline(spec_file)?;
+            let copy = spec_for_older_program(spec_file, true)?;
             let mut retry = args.clone();
             set_spec_argument(&mut retry, &copy);
             return match run_creation_cli(cli, &retry) {
@@ -347,7 +350,12 @@ fn create_with_revision_cli(
     if let Some(copy) = retry_spec {
         let _ = std::fs::remove_file(&copy);
     }
-    result
+    let _ = std::fs::remove_file(&sanitized);
+    let root = result?;
+    if command == "study-create" {
+        study::spec::write_parent_study_metadata(Path::new(root.trim()), spec_file)?;
+    }
+    Ok(root)
 }
 
 fn finish_creation(
@@ -472,11 +480,23 @@ fn discard_unusable_study(study_root: &Path, case_root: &Path) {
     }
 }
 
-/// 旧修订读得了当前设定的大部分内容、只是不认 `include_baseline` 时，按同一份设定去掉这个增强写成
-/// 临时副本；用户给的文件保持原样。
-fn spec_without_include_baseline(spec_file: &Path) -> Result<PathBuf> {
-    let mut spec = study::spec::read_spec(spec_file)?;
-    spec.budget.include_baseline = false;
+/// 交给旧修订 CLI 的设定临时副本。
+///
+/// 旧修订的 `StudySpec` 是 `deny_unknown_fields`：这一轮新增的 `parent_study`（审计元数据）会被
+/// 判未知字段；`include_baseline` 是 GUI 自动加的增强，旧修订也可能不认。两者都不属于执行语义，
+/// 按同一份设定剥掉后写临时副本，用户给的设定文件保持原样。谱系由调用方在创建成功后写进研究目录的
+/// [`study::spec::PARENT_STUDY_FILE`]。
+fn spec_for_older_program(spec_file: &Path, drop_include_baseline: bool) -> Result<PathBuf> {
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(spec_file)?)
+        .with_context(|| format!("invalid study spec {}", spec_file.display()))?;
+    if let Some(map) = value.as_object_mut() {
+        map.remove("parent_study");
+        if drop_include_baseline {
+            if let Some(budget) = map.get_mut("budget").and_then(|b| b.as_object_mut()) {
+                budget.insert("include_baseline".into(), serde_json::Value::Bool(false));
+            }
+        }
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -485,7 +505,7 @@ fn spec_without_include_baseline(spec_file: &Path) -> Result<PathBuf> {
         "colm-study-delegated-{}-{nanos}.json",
         std::process::id()
     ));
-    std::fs::write(&path, serde_json::to_vec_pretty(&spec)?)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
     Ok(path)
 }
 

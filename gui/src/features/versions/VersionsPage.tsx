@@ -28,7 +28,10 @@ import {
 import CodeWorkspace from './CodeWorkspace';
 import CodeFiles from './CodeFiles';
 import StudyPicks from './StudyPicks';
-import StudyImportDialog, { type StudyPreview } from './StudyImportDialog';
+import StudyImportDialog, {
+  type StudyNetworkSummary,
+  type StudyPreview,
+} from './StudyImportDialog';
 import VersionChanges from './VersionChanges';
 import VersionLibrary from './VersionLibrary';
 import VersionHub from './VersionHub';
@@ -623,27 +626,58 @@ export default function VersionsPage() {
     await execute(async () => {
       if (!draft || !studyPreview) return;
       const current = dirtyNow.current ? await save() : draft;
-      const result = await invokeJson<{ draft: ModelDraft; member: string; parameters: number }>(
-        'model_import_study',
-        {
-          id: current.id,
-          studyDir: studyPreview.study,
-          member: studyPreview.member,
-          expectedGeneration: current.generation,
-          preview: null,
-          only: chosen,
-        },
-      );
+      // CLI 直接返回它写出的 JSON：`kind` 是产物类型，`asset_root` 是网络文件的暂存目录（网络/联合
+      // 导入才有，snake_case 未在 Rust 命令里改名），`network` 是网络摘要。原来是参数导入专用，
+      // 只读 draft/member/parameters，网络导入返回的新资产目录被丢掉，冻结仍用上一次的暂存目录，
+      // 冻结出来的版本里没有这次导入的网络文件（审计 P1-5 后的 P2 回归）。
+      const result = await invokeJson<{
+        draft: ModelDraft;
+        member: string;
+        parameters: number;
+        kind?: 'parameters' | 'network' | 'joint';
+        asset_root?: string | null;
+        network?: StudyNetworkSummary | null;
+      }>('model_import_study', {
+        id: current.id,
+        studyDir: studyPreview.study,
+        member: studyPreview.member,
+        expectedGeneration: current.generation,
+        preview: null,
+        only: chosen,
+      });
       setDraft(result.draft);
       dirtyNow.current = false;
       setDirty(false);
       setDrafts(await invokeJson('model_drafts'));
       setStudyPreview(null);
+      // 有网络产物时必须换成这次导入的暂存目录，之后的冻结才会带上新网络文件；纯参数导入没有
+      // asset_root，保持原来的目录（旧行为）。
+      const assets = typeof result.asset_root === 'string' ? result.asset_root : '';
+      if (assets) setAssetRoot(assets);
+      const kind = result.kind ?? 'parameters';
+      // 网络摘要只用来把成功提示说得具体（哪个插槽、多少权重）；草稿里的网络本身由后端写入。
+      const network =
+        kind === 'parameters' || !result.network
+          ? ''
+          : t(
+              `（插槽 ${result.network.slot}，${result.network.weights} 个权重）`,
+              ` (slot ${result.network.slot}, ${result.network.weights} weights)`,
+            );
       setStudyNotice(
-        t(
-          `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进这个版本，并记下了研究的站点与时段。`,
-          `Wrote ${result.parameters} parameters of study member ${result.member} into this version and recorded the study's sites and periods.`,
-        ),
+        kind === 'network'
+          ? t(
+              `已把研究成员 ${result.member} 训练的 AI 网络${network}写进这个版本，并记下了研究的站点与时段。`,
+              `Wrote the AI network trained by study member ${result.member}${network} into this version and recorded the study's sites and periods.`,
+            )
+          : kind === 'joint'
+            ? t(
+                `已把研究成员 ${result.member} 的 ${result.parameters} 个参数和 AI 网络${network}写进这个版本，并记下了研究的站点与时段。`,
+                `Wrote ${result.parameters} parameters and the AI network${network} of study member ${result.member} into this version and recorded the study's sites and periods.`,
+              )
+            : t(
+                `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进这个版本，并记下了研究的站点与时段。`,
+                `Wrote ${result.parameters} parameters of study member ${result.member} into this version and recorded the study's sites and periods.`,
+              ),
       );
     });
   }

@@ -421,6 +421,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 只清 loadedFor 会让 effect 立刻再发一次，失败一次就变成无限重试；记下失败身份来挡住它，
   // 换身份（版本/算例/配置/类型）或用户点“重新读取”时才再试（GUI-14）。
   const failedFor = useRef('');
+  // "带入率定"在同一个页面里把研究基线钉到来源研究的修订上，模型身份随之变化；这次变化是派生
+  // 引起的，不是用户换算例/换模型。`[dir, versionId, revision]` effect 看到标记时只作废参数缓存，
+  // 不能按"换版本就回落到当前算例"的旧规则把 deriveStudyDesign 刚写进来的 sites/observations 清掉。
+  // 标记由 carryToCalibration 只在身份真的变化时置位，effect 消费后复位；不置位就没人消费，
+  // 会漏到下一次真的换版本时把 reset 吞掉。
+  const applyingDerivation = useRef(false);
   // 参数上下文读取身份：模型 ID+修订号，加上实际影响读参数结果的维度（站点及顺序、编译配置、
   // 格点类型）。请求带着它出去、返回时和当前身份核对，旧修订的迟到结果不写回当前页面（GUI-14）。
   // 修订这里用 `studyModel`（研究基线，已建研究则是它自己记下的修订），和研究真正使用的模型一致。
@@ -487,6 +493,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
+    // 派生设计引起的身份变化（带入率定）：只作废参数缓存，让第 2 步按新修订重读参数；算例与观测
+    // 是 deriveStudyDesign 刚写进来的设计，保留。其它状态也都不动，否则刚派生的方法/步骤会被打回。
+    if (applyingDerivation.current) {
+      applyingDerivation.current = false;
+      setContexts([]);
+      setParameters({});
+      loadedFor.current = '';
+      return () => {
+        requestEpoch.current++;
+      };
+    }
     setSites(dir ? [dir] : []);
     // 本机研究正在跑时离开研究页去开了别的算例：设计部分照常重置，正在跑的研究留着，回来还看得到进度。
     if (!runLock.current) {
@@ -2369,6 +2386,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     loadedFor.current = '';
     failedFor.current = '';
     // 研究基线必须钉在来源研究实际用的修订上：新研究要跑在同一个冻结模型上，不能回落到当前运行版本。
+    // 只有身份真的变了才标记：标记没人消费会一直留着，下一次真的换算例/换版本时就把重置吞掉了。
+    const carriedBaseline = derived.parent.model_revision;
+    if (
+      carriedBaseline &&
+      (versionId !== carriedBaseline.id || studyBaseline.revision !== carriedBaseline.revision)
+    )
+      applyingDerivation.current = true;
     update({
       researchSeed: { parameters: picks },
       researchBaseline: derived.parent.model_revision,

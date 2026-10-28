@@ -690,6 +690,14 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     let _ = std::fs::remove_dir_all(&manifest.root);
                     return Err(error);
                 }
+                // 派生谱系写成研究目录里的独立文件（旧冻结修订读不了 spec 里的新字段；见
+                // study::spec::PARENT_STUDY_FILE）。失败时研究已建但没有谱系，按创建失败处理。
+                if let Err(error) =
+                    study::spec::write_parent_study_metadata(Path::new(&manifest.root), &spec_file)
+                {
+                    let _ = std::fs::remove_dir_all(&manifest.root);
+                    return Err(error);
+                }
                 println!("{}", manifest.root);
             }
         }

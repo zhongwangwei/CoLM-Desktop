@@ -1197,25 +1197,14 @@ const refusal = (zh: string, en: string): Error => new Error(bilingual(zh, en));
 
 const inputWindow = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16);
 
-/** 单点算例里目标按变量给权重、按研究给指标；同一变量在不同站点权重不同就无法用界面无损表达。 */
-function singleSiteWeightMap(targets: RawTarget[]): Record<string, string> {
-  const weights: Record<string, string> = {};
-  for (const target of targets) {
-    const variable = String(target.variable ?? '');
-    const weight =
-      typeof target.weight === 'number' && Number.isFinite(target.weight) ? target.weight : 1;
-    const known = weights[variable];
-    if (known != null && Number(known) !== weight)
-      throw refusal(
-        `来源研究里 ${variable} 在不同站点的权重不一样（${known} / ${weight}），研究页按变量给权重，无法无损继承；请取消派生后手工新建。`,
-        `The source study weights ${variable} differently per site (${known} / ${weight}); this page sets weights per variable, so the design cannot be carried without loss. Start a fresh study instead.`,
-      );
-    if (weight !== 1) weights[variable] = String(weight);
-  }
-  return weights;
-}
-
-function singleSiteTargets(targets: RawTarget[], baseCases: string[]) {
+/**
+ * 来源研究所有目标共用的率定期/验证期。
+ *
+ * 研究页的时间窗是研究级设置（一对率定期、一对验证期），按目标逐条存储的来源设计只有全部一致
+ * 才能无损继承；不一致就拒绝，不能挑第一条、也不能留空让界面自己重填。单点与空间目标共用这
+ * 一条校验：空间目标的 from/to 原来派生时写成空字符串，界面上时间框空着，等于换了比较时段。
+ */
+function carriedWindow(targets: RawTarget[]) {
   const windows = new Set(
     targets.map(
       (t) =>
@@ -1227,6 +1216,44 @@ function singleSiteTargets(targets: RawTarget[], baseCases: string[]) {
       '来源研究各目标的率定期/验证期不一致，研究页按整项研究给时间窗，无法无损继承；请取消派生后手工新建。',
       'The source study uses different calibration/validation windows per target; this page sets one window for the study, so the design cannot be carried without loss. Start a fresh study instead.',
     );
+  const first = targets[0];
+  const seconds = (value: unknown) => (typeof value === 'number' ? value : null);
+  return {
+    from: seconds(first?.from),
+    to: seconds(first?.to),
+    valFrom: seconds(first?.validation_from),
+    valTo: seconds(first?.validation_to),
+  };
+}
+
+/**
+ * 单点算例里目标按变量给权重、按研究给指标；同一变量在不同站点权重不同就无法用界面无损表达。
+ *
+ * 默认权重 1 也是目标函数的一部分，必须一起记下来比较：原来只记录非 1 的权重，`[1, 2]` 会被
+ * 静默当成 `[2, 2]`（界面上按变量只有一个权重框）；输出 UI 时才丢掉 1，因为界面缺省就是 1。
+ */
+function singleSiteWeightMap(targets: RawTarget[]): Record<string, string> {
+  const seen = new Map<string, number>();
+  for (const target of targets) {
+    const variable = String(target.variable ?? '');
+    const weight =
+      typeof target.weight === 'number' && Number.isFinite(target.weight) ? target.weight : 1;
+    const known = seen.get(variable);
+    if (known != null && known !== weight)
+      throw refusal(
+        `来源研究里 ${variable} 在不同站点的权重不一样（${known} / ${weight}），研究页按变量给权重，无法无损继承；请取消派生后手工新建。`,
+        `The source study weights ${variable} differently per site (${known} / ${weight}); this page sets weights per variable, so the design cannot be carried without loss. Start a fresh study instead.`,
+      );
+    seen.set(variable, weight);
+  }
+  return Object.fromEntries(
+    [...seen]
+      .filter(([, weight]) => weight !== 1)
+      .map(([variable, weight]) => [variable, String(weight)]),
+  );
+}
+
+function singleSiteTargets(targets: RawTarget[], baseCases: string[]) {
   const minPairs = new Set(targets.map((t) => String(t.min_pairs ?? 30)));
   if (minPairs.size > 1)
     throw refusal(
@@ -1403,6 +1430,9 @@ export function deriveStudyDesign(
         'The source study uses different minimum pair counts per target; this page has one setting, so the design cannot be carried without loss. Start a fresh study instead.',
       );
     const aggregate = ([...stationAggregates][0] ?? '') as '' | 'daily' | 'monthly';
+    // 空间目标的时间窗同样是研究级设置（spec() 把它套到每个格点目标上），从来源目标统一提取；
+    // 各目标不一致由 carriedWindow 明确拒绝，不再写空字符串让界面自己重填。
+    const window = carriedWindow(rawTargets);
     notes.push([
       `派生自研究 ${options.study.split(/[/\\]/).pop()}：${sites.length} 个格点算例、${drafts.length} 个目标按来源研究继承（含权重、逐目标指标与聚合）。`,
       `Derived from study ${options.study.split(/[/\\]/).pop()}: ${sites.length} gridded cases and ${drafts.length} targets are inherited from the source (weights, per-target metrics and aggregation included).`,
@@ -1419,10 +1449,10 @@ export function deriveStudyDesign(
         aggregate,
         weights: {},
         observations: '',
-        from: '',
-        to: '',
-        valFrom: '',
-        valTo: '',
+        from: window.from != null && window.to != null ? inputWindow(window.from) : '',
+        to: window.from != null && window.to != null ? inputWindow(window.to) : '',
+        valFrom: window.valFrom != null ? inputWindow(window.valFrom) : '',
+        valTo: window.valTo != null ? inputWindow(window.valTo) : '',
         gridTargets: drafts,
         seed: String(parentSpec.seed ?? 1),
         kernelDir:
@@ -1454,15 +1484,23 @@ export function deriveStudyDesign(
   const variables = [
     ...new Set(rawTargets.map((target) => String(target.variable ?? '')).filter(Boolean)),
   ];
+  // 界面上的单点目标只有"站点 × 变量"的完整组合（spec() 按 sites.flatMap(variables) 重建）。
+  // 来源研究若是稀疏组合（Qle@site1 + GPP@site2），派生会凭空造出四个目标、悄悄换掉目标函数；
+  // 界面表达不了就明确拒绝，而不是按并集重建。
+  const pairs = new Set(rawTargets.map((t) => `${String(t.site)}|${String(t.variable ?? '')}`));
+  const missingPairs = targetSites.flatMap((site) =>
+    variables.filter((variable) => !pairs.has(`${site}|${variable}`)).map((v) => `${v}@${site}`),
+  );
+  if (rawTargets.length && missingPairs.length)
+    throw refusal(
+      `来源研究的目标不是完整的站点×变量组合（缺 ${missingPairs.slice(0, 4).join('、')}${missingPairs.length > 4 ? ' 等' : ''}），研究页只能按站点×变量重建全部组合，无法无损继承；请取消派生后手工新建。`,
+      `The source study's targets are not the complete site × variable grid (missing ${missingPairs.slice(0, 4).join(', ')}${missingPairs.length > 4 ? ', …' : ''}); this page rebuilds every site × variable combination, so the design cannot be carried without loss. Start a fresh study instead.`,
+    );
   const observationsText = targetSites
     .filter((site) => typeof observations[site] === 'string')
     .map((site) => `${site} | ${String(observations[site])}`)
     .join('\n');
-  const first = rawTargets[0];
-  const from = typeof first?.from === 'number' ? first.from : null;
-  const to = typeof first?.to === 'number' ? first.to : null;
-  const valFrom = typeof first?.validation_from === 'number' ? first.validation_from : null;
-  const valTo = typeof first?.validation_to === 'number' ? first.validation_to : null;
+  const { from, to, valFrom, valTo } = carriedWindow(rawTargets);
   const weights = singleSiteWeightMap(rawTargets);
   if (from != null && to != null)
     notes.push([

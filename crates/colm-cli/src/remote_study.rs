@@ -520,6 +520,9 @@ fn stage_study_assets_inner(
         );
     }
     let mut spec = manifest.spec.clone();
+    // 服务器上的引擎可能来自较旧快照，读不了新加的审计字段 parent_study；谱系只在本地研究里保留，
+    // 服务器重建的研究不需要它。
+    spec.parent_study = None;
     let observations = stage_observation_sources(&mut spec, staging, remote_project, maps)?;
     remote_inputs.extend(observations.remote_inputs);
     remote_inputs.sort();

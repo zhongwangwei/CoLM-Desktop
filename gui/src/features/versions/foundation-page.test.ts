@@ -54,6 +54,12 @@ function page(
   physics: Record<string, string> = {},
   parameters: ParameterOverride[] = [],
   codeRef: Record<string, unknown> = { kind: 'official' },
+  // 研究导入的产物类型与资产目录：网络/联合导入会把网络文件暂存到新目录（审计 P1-5）。
+  studyImport: {
+    kind?: 'parameters' | 'network' | 'joint';
+    network?: Record<string, unknown> | null;
+    assetRoot?: string;
+  } = {},
 ) {
   const version = {
     name: 'Official',
@@ -145,8 +151,17 @@ function page(
             member: 'm000001',
             objective: 1.25,
             records: parameters,
+            kind: studyImport.kind,
+            network: studyImport.network ?? null,
           };
-        return { draft, member: 'm000001', parameters: (args.only as unknown[]).length };
+        return {
+          draft,
+          member: 'm000001',
+          parameters: (args.only as unknown[]).length,
+          kind: studyImport.kind,
+          asset_root: studyImport.assetRoot ?? null,
+          network: studyImport.network ?? null,
+        };
       default:
         throw Error(command);
     }
@@ -619,6 +634,23 @@ function page(
     },
     actions: () => visibleActions(),
   };
+}
+
+/** 页面上"成功"类的提示（研究导入结果写在这里，不是转瞬即逝的通知）。 */
+function successText(p: ReturnType<typeof page>): string {
+  return p.elements
+    .filter((element) => element.type === 'Notice' && element.props.tone === 'success')
+    .map((element) => {
+      const out: string[] = [];
+      const walk = (node: unknown) => {
+        if (typeof node === 'string') out.push(node);
+        else if (Array.isArray(node)) node.forEach(walk);
+        else if (node && typeof node === 'object') walk((node as Element).children);
+      };
+      walk(element.children);
+      return out.join('');
+    })
+    .join('\n');
 }
 
 test('legacy return context cannot create a vegetation revision', async () => {
@@ -1125,6 +1157,81 @@ test('a network written back from a study is frozen with the asset root it carri
   const call = p.calls.find((call) => call.command === 'model_freeze');
   assert.ok(call, '冻结应调用 model_freeze');
   assert.equal(call!.args.assetRoot, '/assets/model-custom/7');
+});
+
+// P2：模型导入命令也返回产物类型与网络暂存目录（`kind` / `asset_root` / `network`）。原来
+// importChosen 只读 draft/member/parameters，网络导入返回的新 asset_root 被丢掉，冻结仍用上一次
+// 的暂存目录，冻结出来的版本没有这次导入的网络文件。
+const studyNetwork = {
+  slot: 'pft',
+  features: ['clim_tair'],
+  outputs: ['DEF_PFT_VMAX25'],
+  hidden: [],
+  normalize: false,
+  weights: 3,
+};
+
+/** 从研究导入：打开草稿（带旧资产目录）→ 研究页签 → 预览 → 写进草稿。 */
+async function importStudyIntoDraft(p: ReturnType<typeof page>, priorAssets: string) {
+  const app = p.state as Record<string, unknown>;
+  app.openDraft = 'custom';
+  app.openDraftAssets = priorAssets;
+  await p.mount(false);
+  await p.settle();
+  await p.click('version-tab-research');
+  await p.settle();
+  p.pickFolder('/study');
+  let c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-import-study')!.run();
+  await p.settle();
+  c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-import-study-apply')!.run();
+  await p.settle();
+  return p.render();
+}
+
+test('a network imported from a study replaces the asset root used for freezing', async () => {
+  const p = page(
+    undefined,
+    {},
+    [],
+    { kind: 'official' },
+    {
+      kind: 'network',
+      network: studyNetwork,
+      assetRoot: '/new-network-assets',
+    },
+  );
+  const c = await importStudyIntoDraft(p, '/prior-process-assets');
+  // 成功提示按产物类型说明这次写进的是 AI 网络，不是参数。
+  assert.match(successText(p), /AI 网络|网络/);
+  const freeze = c.actions.find((action) => action.id === 'version-freeze');
+  assert.ok(freeze, '网络导入后草稿仍可冻结');
+  await freeze!.run();
+  await p.settle();
+  const call = p.calls.find((call) => call.command === 'model_freeze');
+  assert.ok(call, '冻结应调用 model_freeze');
+  assert.equal(call!.args.assetRoot, '/new-network-assets', '冻结要用这次网络导入返回的新资产目录');
+});
+
+test('a parameter-only study import keeps the asset root the page already had', async () => {
+  const record = {
+    parameter_id: 'case:DEF_X',
+    raw_key: 'DEF_X',
+    value: '0.5',
+    unit: null,
+    scope_instance: { kind: 'case-scalar', scheme: null, index: null },
+  } as unknown as ParameterOverride;
+  const p = page(undefined, {}, [record]);
+  const c = await importStudyIntoDraft(p, '/prior-process-assets');
+  assert.match(successText(p), /个参数/);
+  const freeze = c.actions.find((action) => action.id === 'version-freeze');
+  assert.ok(freeze, '参数导入后草稿仍可冻结');
+  await freeze!.run();
+  await p.settle();
+  const call = p.calls.find((call) => call.command === 'model_freeze');
+  assert.ok(call, '冻结应调用 model_freeze');
+  assert.equal(call!.args.assetRoot, '/prior-process-assets', '纯参数导入不改资产目录');
 });
 
 // U-05：草稿保存的三态 + 失败保留 dirty + 字段改动清掉过时的成功提示。

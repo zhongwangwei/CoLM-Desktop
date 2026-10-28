@@ -1401,6 +1401,7 @@ it('carrying sensitivity into calibration pins the source study identity and inh
   };
   const loadedFor = { current: 'old' };
   const failedFor = { current: 'failed' };
+  const applyingDerivation = { current: false };
   const revision = { id: 'trace', revision: 7 };
   const specSha256 = 'a'.repeat(64);
   const context = (overrides: Record<string, unknown> = {}) => ({
@@ -1472,6 +1473,10 @@ it('carrying sensitivity into calibration pins the source study identity and inh
     setDerivedDesign: set('derived'),
     loadedFor,
     failedFor,
+    // 当前研究基线（official r1）与派生要钉的修订（trace r7）不同：carry 要给模型身份 effect 留标记。
+    versionId: 'official',
+    revision: 1,
+    applyingDerivation,
     update: set('update'),
     setStep: set('step'),
     ...overrides,
@@ -1505,6 +1510,8 @@ it('carrying sensitivity into calibration pins the source study identity and inh
   assert.equal(derived.parent.study, '/p/.colm/studies/s-abc');
   assert.equal(derived.parent.spec_sha256, specSha256);
   assert.equal(calls.step, 2);
+  // 研究基线真的变了才置标记：effect 看到它只作废参数缓存，不能清掉刚写入的 sites/observations。
+  assert.equal(applyingDerivation.current, true, '派生引起的模型身份变化要标记给 effect');
 });
 it('carrying refuses a source study whose model revision or design hash was never recorded', () => {
   const failedFor = { current: '' };
@@ -1549,6 +1556,165 @@ it('carrying refuses a source study whose model revision or design hash was neve
     setStep: () => {},
   }) as unknown as () => void;
   assert.throws(carry, /模型修订|model revision/);
+});
+// P1 回归：带入率定会在同一个页面里把研究基线钉到来源研究自己的修订上。研究基线一变，模型身份
+// effect 原来会执行"换版本就回落到当前算例、清空观测"的旧规则，把 deriveStudyDesign 刚写进来的
+// 两站点算例与观测一起清掉。这里走完整链路（打开研究 → 带入率定 → 重跑所有 effects → 读参数 →
+// 建研究），断言最终交给 study_create_json 的设计仍是两站点、两观测、trace@7。
+it('carrying sensitivity into calibration keeps its derived sites and creates that study', async () => {
+  const specSha256 = 'a'.repeat(64);
+  const frozenParameter = (name: string) => ({
+    name,
+    parameter_id: `case:${name}`,
+    scope_instance: { kind: 'case-scalar', scheme: null, index: null },
+    sample_min: 0,
+    sample_max: 1,
+    scale: 'linear',
+  });
+  const target = (site: string) => ({
+    key: `Qle@${site}`,
+    site,
+    variable: 'Qle',
+    metric: 'nrmse',
+    weight: 1,
+    from: 1_104_537_600,
+    to: 1_136_073_600,
+    validation_from: 1_136_073_600,
+    validation_to: 1_167_609_600,
+    min_pairs: 20,
+  });
+  const page = researchPage({
+    versionRef: { id: 'official', revision: 1 },
+    versions: [
+      { version: { id: 'official', revision: 1 }, name: 'Official CoLM' },
+      { version: { id: 'trace', revision: 7 }, name: 'Trace scheme' },
+    ],
+  });
+  page.render();
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-carry');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-carry',
+      provenance: { spec_sha256: specSha256 },
+      spec: {
+        kind: 'uncertainty',
+        method: 'morris',
+        kernel_dir: '/kernels/default',
+        base_cases: ['site1', 'site2'],
+        observations: {
+          site1: '/obs/site1_Flux.nc',
+          site2: '/obs/site2_Flux.nc',
+        },
+        site_mode: 'shared',
+        parameters: [frozenParameter('DEF_A'), frozenParameter('DEF_B')],
+        targets: [target('site1'), target('site2')],
+      },
+    },
+    state: { status: 'Completed', best_member: 'm1', candidates: { m1: { calibration: 0.1 } } },
+    results: ['importance.json'],
+    model_version: { model_revision: { version: { id: 'trace', revision: 7 } } },
+    remote: null,
+  });
+  await page.settle();
+  const importance = page.requests.find((request) => request.command === 'study_result');
+  assert.ok(importance, 'the finished uncertainty study reads its sensitivity ranking');
+  importance!.resolve(
+    JSON.stringify(
+      ['DEF_A', 'DEF_B'].map((parameter, i) => ({
+        site: null,
+        variable: 'objective',
+        parameter,
+        method: 'morris',
+        value: 0.3 - i * 0.1,
+        mu: -0.1,
+        sigma: 0.05,
+        n: 10,
+      })),
+    ),
+  );
+  await page.settle();
+  const carry = page.actions().find((action) => action.id === 'study-carry-calibration');
+  assert.ok(carry, 'with a sensitivity ranking the carry action is offered');
+  page.press('study-carry-calibration');
+  await page.settle();
+  // 模型身份换成 trace@7 之后，参数要按新修订、两站点重读；读不出来就说明派生出的站点被清掉了。
+  const loads = () => page.requests.filter((request) => request.command === 'model_case_context');
+  assert.deepEqual(
+    loads().map((request) => request.args.dir),
+    ['/p/site1'],
+    'the derived study reads parameters for the first site',
+  );
+  assert.deepEqual(loads()[0]!.args.modelRevision, { id: 'trace', revision: 7 });
+  loads()[0]!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.deepEqual(
+    loads().map((request) => request.args.dir),
+    ['/p/site1', '/p/site2'],
+    'the second derived site is still there',
+  );
+  loads()[1]!.resolve({ entry: { dir: '/p/site2' } });
+  await page.settle();
+  const read = page.requests.find((request) => request.command === 'study_parameter_contexts');
+  assert.ok(read, 'both derived sites are read in one parameter request');
+  assert.deepEqual(read!.args.dirs, ['/p/site1', '/p/site2']);
+  read!.resolve(
+    ['DEF_A', 'DEF_B'].map((name) => ({ ...parameterRow(), id: `case:${name}`, name })),
+  );
+  await page.settle();
+  page.press('research-step-3');
+  await page.settle();
+  const observations = page
+    .nodes()
+    .filter(
+      (node) => node.type === 'Input' && String(node.props.placeholder ?? '').includes('*_Flux.nc'),
+    )
+    .map((node) => node.props.value);
+  assert.deepEqual(
+    observations,
+    ['/obs/site1_Flux.nc', '/obs/site2_Flux.nc'],
+    'the derived observation files must survive the model-identity effect',
+  );
+  const confirm = page
+    .nodes()
+    .find((node) => node.type === 'label' && node.props.className === 'param-check study-confirm')
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(confirm);
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('study-create');
+  await page.settle();
+  const preflight = page.requests.find((request) => request.command === 'study_preflight_json');
+  assert.ok(preflight, 'create preflights the derived design first');
+  preflight!.resolve({});
+  await page.settle();
+  const created = page.requests.find((request) => request.command === 'study_create_json');
+  assert.ok(created, 'the derived study is created instead of failing on a cleared design');
+  assert.deepEqual(created!.args.modelRevision, { id: 'trace', revision: 7 });
+  const spec = JSON.parse(String(created!.args.specJson)) as {
+    base_cases: string[];
+    observations: Record<string, string>;
+    targets: { site: string; variable: string; weight: number }[];
+  };
+  assert.deepEqual(spec.base_cases, ['/p/site1', '/p/site2']);
+  assert.deepEqual(spec.observations, {
+    site1: '/obs/site1_Flux.nc',
+    site2: '/obs/site2_Flux.nc',
+  });
+  assert.deepEqual(
+    spec.targets.map((row) => [row.site, row.variable, row.weight]),
+    [
+      ['site1', 'Qle', 1],
+      ['site2', 'Qle', 1],
+    ],
+  );
 });
 
 it('a finished uncertainty study shows its sensitivity ranking with the top parameters ticked', async () => {
