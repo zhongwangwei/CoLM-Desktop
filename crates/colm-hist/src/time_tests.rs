@@ -76,3 +76,141 @@ fn an_hourly_series_stays_hourly_after_conversion() {
         assert_eq!(w[1] - w[0], 3600);
     }
 }
+
+#[test]
+fn time_units_parse_spaced_and_attached_zone_offsets() {
+    let base = minutes_from_1900(2008) as f64;
+    for units in [
+        "seconds since 2008-01-01 00:00:00 +08:00",
+        "seconds since 2008-01-01T00:00:00+08:00",
+        // 无冒号写法在 CF 站点文件里也见过，不能解析失败。
+        "seconds since 2008-01-01 00:00:00+0800",
+    ] {
+        let parsed = parse_time_units(units).expect("offset origin should parse");
+        assert_eq!(parsed.civil_minutes, base, "{units}");
+        assert_eq!(parsed.utc_offset_seconds, 8 * 3_600, "{units}");
+        assert_eq!(parsed.unit_seconds, 1.0, "{units}");
+        assert_eq!(parsed.calendar, Calendar::Standard);
+    }
+
+    // Z / UTC 是「零偏移」，和完全不写不同：前面那个 0 是**声明**，可用于确认基准。
+    for units in [
+        "seconds since 2008-01-01T00:00:00Z",
+        "seconds since 2008-01-01 00:00:00 UTC",
+    ] {
+        let parsed = parse_time_units(units).expect("UTC origin should parse");
+        assert_eq!(parsed.civil_minutes, base, "{units}");
+        assert_eq!(parsed.utc_offset_seconds, 0, "{units}");
+    }
+
+    let days = parse_time_units("days since 2003-01-01").expect("day units");
+    assert_eq!(days.civil_minutes, minutes_from_1900(2003) as f64);
+    assert_eq!(days.unit_seconds, 86_400.0);
+    let hours = parse_time_units("hours since 2003-01-01 06:30").expect("hour units");
+    assert_eq!(
+        hours.civil_minutes,
+        minutes_from_1900(2003) as f64 + 6.0 * 60.0 + 30.0
+    );
+    assert_eq!(hours.unit_seconds, 3_600.0);
+}
+
+#[test]
+fn named_zones_and_calendar_dependent_units_are_refused() {
+    // 命名时区没有时区数据库可查，猜一个偏移比拒绝更危险。
+    let error = parse_time_units("seconds since 2003-01-01 00:00:00 EST").unwrap_err();
+    assert!(error.to_string().contains("named time zones"), "{error}");
+    // 月/年长度随公历变化，不能折成固定秒数。
+    for units in ["months since 2003-01-01", "years since 2003-01-01"] {
+        let error = parse_time_units(units).unwrap_err();
+        assert!(error.to_string().contains("calendar-dependent"), "{error}");
+    }
+    assert!(parse_time_units("seconds since 2008-02-30").is_err());
+    assert!(parse_time_units("seconds since 2008-01-01 24:00:00").is_err());
+    // 两个互相矛盾的时区声明不能被静默合并。
+    let error = parse_time_units("seconds since 2008-01-01 00:00:00 UTC +08:00").unwrap_err();
+    assert!(error.to_string().contains("conflicting"), "{error}");
+}
+
+#[test]
+fn utc_model_with_offset_observation_shifts_by_the_declared_offset() {
+    let base = minutes_from_1900(2008) as f64;
+    // 模型标签 2008-01-01T00:30（真 UTC）；观测原点写的是 +08:00 的 00:00。
+    let origin = parse_time_units("seconds since 2008-01-01 00:00:00 +08:00").unwrap();
+    let seconds = model_seconds_from_basis(&[base + 30.0], &origin, TimeBasis::Utc).unwrap();
+    // 旧实现会得到 1800 s（错 8 小时）；正确值是 1800 + 28800。
+    assert_eq!(seconds, vec![30_600.0]);
+}
+
+#[test]
+fn local_standard_time_with_the_same_offset_does_not_shift_twice() {
+    let base = minutes_from_1900(2008) as f64;
+    let origin = parse_time_units("seconds since 2008-01-01 00:00:00 +08:00").unwrap();
+    let seconds = model_seconds_from_basis(
+        &[base + 30.0],
+        &origin,
+        TimeBasis::LocalStandardTime {
+            utc_offset_seconds: 8 * 3_600,
+        },
+    )
+    .unwrap();
+    // 模型与观测都是同一地方标准时：两边的偏移相消，仍是 00:30。
+    assert_eq!(seconds, vec![1_800.0]);
+}
+
+#[test]
+fn unknown_model_clock_refuses_a_declared_observation_offset() {
+    let base = minutes_from_1900(2008) as f64;
+    let origin = parse_time_units("seconds since 2008-01-01 00:00:00 +08:00").unwrap();
+    let error = model_seconds_from_basis(&[base], &origin, TimeBasis::ModelClock).unwrap_err();
+    assert!(
+        error.to_string().contains("no recorded UTC offset"),
+        "{error}"
+    );
+    // 非秒单位同样不能进模型钟路径：旧实现只支持秒，静默换算是另一类错。
+    let days = parse_time_units("days since 2008-01-01").unwrap();
+    let error = model_seconds_from_basis(&[base], &days, TimeBasis::ModelClock).unwrap_err();
+    assert!(error.to_string().contains("seconds since"), "{error}");
+}
+
+#[test]
+fn non_second_units_expose_the_factor_and_still_return_seconds() {
+    let base = minutes_from_1900(2008) as f64;
+    // 因子由 ParsedTimeUnits 交给调用方：调用方把 obs raw 值乘成秒再配对。
+    assert_eq!(
+        parse_time_units("days since 2008-01-01")
+            .unwrap()
+            .unit_seconds,
+        86_400.0
+    );
+    assert_eq!(
+        parse_time_units("hours since 2008-01-01")
+            .unwrap()
+            .unit_seconds,
+        3_600.0
+    );
+    assert_eq!(
+        parse_time_units("minutes since 2008-01-01")
+            .unwrap()
+            .unit_seconds,
+        60.0
+    );
+    // model_seconds_from_basis 只返回秒（不除单位因子），单位换算留给调用方，
+    // 否则配对层会对天/小时单位的观测缩放两次。
+    let origin = parse_time_units("days since 2008-01-01 00:00:00").unwrap();
+    let seconds =
+        model_seconds_from_basis(&[base, base + 1_440.0], &origin, TimeBasis::Utc).unwrap();
+    assert_eq!(seconds, vec![0.0, 86_400.0]);
+}
+
+#[test]
+fn the_legacy_wrapper_keeps_the_old_conversion_and_rejects_offsets() {
+    let base = minutes_from_1900(2008) as f64;
+    let seconds =
+        model_seconds_from_units(&[base + 30.0], "seconds since 2008-01-01 00:00:00").unwrap();
+    assert_eq!(seconds, vec![1_800.0]);
+    // 旧实现静默丢掉 +08:00；现在宁可返回 None 让调用方报「不支持」，
+    // 也不能拿一个错 8 小时的轴去算指标。
+    assert!(
+        model_seconds_from_units(&[base], "seconds since 2008-01-01 00:00:00 +08:00").is_none()
+    );
+}

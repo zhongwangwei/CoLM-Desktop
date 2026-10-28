@@ -224,7 +224,10 @@ pub fn schedule(
 /// 这一步的**结束时刻**是否恰好落在周期边界上，与上游
 /// `isendofhour/day/month/year` 同一判据：秒数为 0（整点/零点），
 /// 月与年再看是不是 1 月/当月的第 1 天。
-fn period_ends(next: i64, frequency: HistoryFrequency) -> bool {
+///
+/// `timeline` 用同一判据从标签反推输出频率/重建区间边界 —— 复制一份判据
+/// 迟早在月末 24:00 这类边界上分叉，所以这里放开可见性而不是另写一份。
+pub(crate) fn period_ends(next: i64, frequency: HistoryFrequency) -> bool {
     let (year, julian_day, seconds) = civil_from_seconds(next).expect("supported calendar range");
     match frequency {
         HistoryFrequency::Hourly => seconds % 3_600 == 0,
@@ -253,7 +256,10 @@ pub fn tick_seconds(year: i32, julian_day: i32, seconds: i32) -> Result<i64> {
 }
 
 /// `tick_seconds` 的逆：秒 → `(year, julian_day, seconds_of_day)`。
-fn civil_from_seconds(total: i64) -> Option<(i32, i32, i32)> {
+///
+/// `timeline` 重建月/年区间起点时要从写点反查日历（"上个月从哪天开始"），
+/// 共用这一份而不是再写一个日历换算。
+pub(crate) fn civil_from_seconds(total: i64) -> Option<(i32, i32, i32)> {
     let mut year = 1900;
     let mut remaining = total;
     loop {
@@ -271,7 +277,7 @@ fn civil_from_seconds(total: i64) -> Option<(i32, i32, i32)> {
 }
 
 /// `(month, day)`，1-based。
-fn month_day(year: i32, julian_day: i32) -> (usize, usize) {
+pub(crate) fn month_day(year: i32, julian_day: i32) -> (usize, usize) {
     let mut remaining = julian_day;
     for (index, length) in month_lengths(year).iter().enumerate() {
         if remaining <= *length {

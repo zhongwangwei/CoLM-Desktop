@@ -143,3 +143,60 @@ fn humidity_names_accept_common_spacing_and_british_spelling() {
     .unwrap()
     .is_some());
 }
+
+#[test]
+fn observation_flux_aliases_are_renames_not_rescales() {
+    // 观测评估的规范单位是 ASCII 写法。上标/空格/希腊字母只是同一个量的
+    // 不同名字，**改名不许动数**（同 `mm/s` → `kg/m2/s` 的理由）。
+    let values = [1.8337343205163141, -0.0];
+    for (from, to) in [
+        ("W/m^2", "W/m2"),
+        ("W/m²", "W/m2"),
+        ("µmol/m²/s", "umol/m2/s"),
+        ("μmol/m²/s", "umol/m2/s"),
+        ("umol m-2 s-1", "umol/m2/s"),
+        ("µmol m^-2 s^-1", "umol/m2/s"),
+        ("nmol CH4/m²/s", "nmol CH4/m2/s"),
+        ("nmol CH₄ m-2 s-1", "nmol CH4/m2/s"),
+    ] {
+        let got = super::convert_units(from, to, &values).unwrap();
+        assert_eq!(got, values.to_vec(), "{from} -> {to}");
+        assert!(
+            got[1].is_sign_negative(),
+            "{from} -> {to} 丢了 -0.0 的符号位"
+        );
+        // 反向换算也必须能找到，否则缺测修复/回写会无路可走。
+        assert_eq!(super::from_canonical(to, from, &values).unwrap(), values);
+    }
+}
+
+#[test]
+fn kilowatt_flux_is_rescaled_to_watts() {
+    // Qle [kW/m2] 的 0.1 是 100 W/m²，不是 0.1 W/m²。漏掉这条，
+    // 指标会差 1000 倍而界面完全正常。
+    let got = super::convert_units("kW/m2", "W/m2", &[0.1, -0.0]).unwrap();
+    assert!((got[0] - 100.0).abs() < 1e-12, "got {}", got[0]);
+    assert_eq!(got[1], 0.0);
+    let back = super::from_canonical("W/m2", "kW/m2", &[100.0]).unwrap();
+    assert!((back[0] - 0.1).abs() < 1e-12, "got {}", back[0]);
+    for alias in ["kW/m^2", "kW/m²", "kW m-2", "kW m^-2", "kW m**-2"] {
+        let got = super::convert_units(alias, "W/m2", &[1.0]).unwrap();
+        assert_eq!(got, vec![1000.0], "{alias}");
+    }
+}
+
+#[test]
+fn molar_units_of_different_species_do_not_convert() {
+    // µmol 与 nmol 的摩尔数不是同一种物质，绝不能互相换算；
+    // 也不接受裸 `nmol m-2 s-1`（无法确认是甲烷）。
+    for (from, to) in [
+        ("umol/m2/s", "nmol CH4/m2/s"),
+        ("nmol CH4/m2/s", "umol/m2/s"),
+        ("nmol m-2 s-1", "nmol CH4/m2/s"),
+    ] {
+        assert!(
+            super::convert_units(from, to, &[1.0]).is_err(),
+            "{from} -> {to} 不该有换算"
+        );
+    }
+}

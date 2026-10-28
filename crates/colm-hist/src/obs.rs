@@ -113,6 +113,12 @@ pub struct EvaluationVariable {
     pub label_zh: &'static str,
     pub label_en: &'static str,
     pub units: &'static str,
+    /// 观测比较与换算用的**纯 ASCII 规范单位**。
+    ///
+    /// `units` 是给人看的（`W/m²`、`nmol CH₄/m²/s`），但 CF 文件里的
+    /// 上标字符、空格指数、希腊字母有十几种写法；换算表按精确字符串匹配，
+    /// 导出文件也不该混着上标字符。所以比较一律落到这一列上。
+    pub canonical_units: &'static str,
     pub model: ModelSource,
     /// `None` 表示观测文件没有对应 QC，只能使用全部有限值。
     pub qc: Option<&'static str>,
@@ -157,6 +163,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "净辐射",
         label_en: "Net radiation",
         units: "W/m²",
+        canonical_units: "W/m2",
         model: ModelSource::Direct {
             variable: "f_rnet",
             scale: 1.0,
@@ -168,6 +175,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "感热通量",
         label_en: "Sensible heat flux",
         units: "W/m²",
+        canonical_units: "W/m2",
         model: ModelSource::Direct {
             variable: "f_fsena",
             scale: 1.0,
@@ -179,6 +187,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "潜热通量",
         label_en: "Latent heat flux",
         units: "W/m²",
+        canonical_units: "W/m2",
         model: ModelSource::Direct {
             variable: "f_lfevpa",
             scale: 1.0,
@@ -190,6 +199,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "地表热通量",
         label_en: "Ground heat flux",
         units: "W/m²",
+        canonical_units: "W/m2",
         model: ModelSource::Direct {
             variable: "f_fgrnd",
             scale: 1.0,
@@ -201,6 +211,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "反射短波辐射",
         label_en: "Reflected shortwave radiation",
         units: "W/m²",
+        canonical_units: "W/m2",
         model: ModelSource::Direct {
             variable: "f_sr",
             scale: 1.0,
@@ -212,6 +223,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "摩擦速度",
         label_en: "Friction velocity",
         units: "m/s",
+        canonical_units: "m/s",
         model: ModelSource::Direct {
             variable: "f_ustar",
             scale: 1.0,
@@ -223,6 +235,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "总初级生产力（夜间分割）",
         label_en: "GPP (nighttime partitioning)",
         units: "µmol/m²/s",
+        canonical_units: "umol/m2/s",
         model: ModelSource::Alternative {
             preferred: &BGC_GPP_MODEL,
             fallback: &LEGACY_GPP_MODEL,
@@ -234,6 +247,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "总初级生产力（日间分割）",
         label_en: "GPP (daytime partitioning)",
         units: "µmol/m²/s",
+        canonical_units: "umol/m2/s",
         model: ModelSource::Alternative {
             preferred: &BGC_GPP_MODEL,
             fallback: &LEGACY_GPP_MODEL,
@@ -245,6 +259,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "生态系统呼吸",
         label_en: "Ecosystem respiration",
         units: "µmol/m²/s",
+        canonical_units: "umol/m2/s",
         model: ModelSource::Alternative {
             preferred: &BGC_RESP_MODEL,
             fallback: &LEGACY_RESP_MODEL,
@@ -256,6 +271,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "净生态系统交换",
         label_en: "Net ecosystem exchange",
         units: "µmol/m²/s",
+        canonical_units: "umol/m2/s",
         model: ModelSource::Alternative {
             preferred: &BGC_NEE_MODEL,
             fallback: &LEGACY_NEE_MODEL,
@@ -267,6 +283,7 @@ pub const EVALUATION_VARIABLES: [EvaluationVariable; 11] = [
         label_zh: "甲烷通量（FLUXNET-CH4 插补）",
         label_en: "Methane flux (FLUXNET-CH4 gap-filled)",
         units: "nmol CH₄/m²/s",
+        canonical_units: "nmol CH4/m2/s",
         model: ModelSource::Direct {
             variable: "f_methane_surf_flux_tot",
             scale: MOL_TO_NANOMOL,
