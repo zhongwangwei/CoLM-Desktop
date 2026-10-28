@@ -37959,3 +37959,166 @@ Tauri 窗口交互与真实 SSH 断连，原因见文末"未验证部分"。
 3. **U-03 跨页失效**：向导内失效快照只在当前页面会话有效；离开向导去改模型再返回不会提示上次核对基线
    （任务书只要求方案改变后立即标识，本轮按向导内范围交付）。
 4. U-01 研究基线只存在本次会话内存（与既有运行版本状态同生命周期），重启应用后回到当前运行修订。
+
+## P1：Study 实验解读证据与内置 API 上下文预算（2026-10-28）
+
+任务：用户问“这个 Study 的率定结果改善了吗，能否采用？”时，助手要能分别解释率定期、验证期、
+研究版本和缺失证据；内置 API 请求按当前模型的有效上下文预算发送。本期限定同一个 Study 内，
+引擎已选 best 与本研究 baseline 的比较；不改物理求解器、目标函数、优化器，不自动运行长模拟、
+不自动采用参数、不绕过 GUI 审批。
+
+### A. Study 证据链
+
+**数据来源（全部已落盘，只读，不重跑、不 SSH、不重算科学评分）**
+
+- 候选聚合分数、feasible 与 reason：`checkpoints/state` 里的 `StudyState.candidates`（写入口径与
+  `refresh_candidates` 一致）；best 只认 `state.best_member`，不按验证期重新选。
+- 逐目标 calibration/validation 明细与 validation 失败原因：`results/tasks/<member>/<site>.json`。
+- 验证窗口只在 `manifest.spec.targets[].validation_from/to`；结果文件不记窗口。
+- 成员参数：`generation::load_members` 读 `samples/*.csv`（含后续代；`manifest.members` 只是建研究
+  时的快照，DE 后续代不在其中）。位置用 `generation::unit_position`（Log 尺度在 log 空间、带
+  `(n)` 索引键、不夹到 0–1），baseline 按成员的 `baseline` 标记定位，不按编号猜。
+- 研究模型身份：`model-version.json`（`Pinned`，纯读文件）；官方版无该文件。远程记录只读
+  `.colm-remote-study.json`/pending 文件，`study-status` 的 evidence 路径不触发任何 SSH。
+
+**改动**
+
+- `colm-cli study-status` 新增 `evidence` 字段（旧字段全部保留），由 `runner::study_evidence` 计算：
+  身份/kind/method/status/generation；execution（not_started/running/paused/completed/
+  completed_with_failures/cancelled/needs_review、task 计数、部分失败）；selection（选择规则、
+  best、provisional、无 best 的区分原因：uncertainty/未开始/运行中/无可行成员/部分失败等）；
+  objective（direction=minimize loss、各 metric 的 loss 定义、目标与率定/验证时段、source/aggregate）；
+  comparison（baseline 与 best **各自时段内**的 calibration/validation：recorded/unavailable/
+  not_configured/pending、分数、逐目标 loss、validation errors、原因；relation 只在同期内比较、
+  绝不跨期比大小；best 可能仍比 baseline 差）；validation（configured/windows/status/reasons）；
+  parameters（baseline/best 的 value/range/scale/position/position_scale/at_bound 或明确 unavailable）；
+  model_identity（研究记录 pinned/official/unknown + 当前选择 + matches/mismatch/unknown + basis）；
+  verification（`recorded_result_files`、`succeeded_tasks`、`reverified=false` 与说明）；
+  remote（recorded/pending_reconciliation/none，标注未建 SSH 连接）；source_paths、warnings、missing。
+  证据有界（8 KiB 预算，按列表逐步裁剪，仍保留身份、两期分数、缺失原因与核验限制）。
+- `colm-agent study_summary` 保留旧字段，新增 `evidence`；旧 `baseline_objective` 优先取 evidence
+  baseline 分数（null 不变成 0），旧 CLI 无 evidence 时才走原有 fallback。助手侧用
+  `ctx.selected_context()` 刷新当前选择，与研究记录按 version id+revision+`code.source_sha256`
+  比较（同名不算匹配；官方版/无模型上下文/刷新失败 → unknown 并给 reason）。证据超过 24k
+  传输上限时裁剪为合法 JSON。
+- `diagnostic_plan(calibration)` 真正消费 evidence：study 步骤给紧凑投影；新增 `dual_period`
+  检查（divergent/collected/missing）；`held_out` 按“验证未配置”与“验证已配置但不可用”给不同
+  missing；率定改善验证变差、两期都改善、best 比 baseline 差、身份冲突分别进入 unverified 假设或
+  缺失原因；bounds/minimal_validation/report 等未完成检查保留，结果仍 `status=incomplete`，
+  不把“有分数”当诊断通过；uncertainty 不产生 best 判断。
+- `prompt.md` 增补一条：按 study_summary 的 evidence 分别说明两期；率定改善验证变差=明确分歧、
+  不宣称泛化改善、不确诊过拟合；验证缺失=拟合改善、泛化未核查；两期都改善=结论限定本研究/目标/
+  时段；只引用实际取得的证据，不因回答而运行 Study、采用参数或改模型。
+
+### B. 内置 API 上下文预算
+
+**修改前后**
+
+| 项目 | 修改前 | 修改后 |
+|---|---|---|
+| 窗口 | 固定按 DeepSeek V4 的 1M | 当前配置的有效窗口（用户填写 > 文档确认的 DeepSeek V4 预设；未知模型发送前要求填写，不猜） |
+| 预算内容 | 只按消息字符数，未计工具 schema、provider_state、输出预留 | 与实际发送共用同一 `build_request`：消息 + 工具 schema + 实际回传的 reasoning/provider_state + 协议开销 + `api_options` 覆盖后的有效输出 + 安全余量（窗口 2%，1k–16k） |
+| 估算口径 | 固定 90% 阈值才折叠 | 每次发送前估算；用实际请求体紧凑 JSON 字符数作保守上界（明确标注估算，非精确 token） |
+| 超限 | 折叠后照发，可能被服务商拒绝 | 原样→保留最近 8/4/2/0 条工具结果逐级折叠，每级重建请求体重估；仍超限则**不调用 Provider**，报错说明缩短输入/调大窗口/调低输出上限；不无限重试 |
+| 折叠安全 | 只替换工具结果 content | 同左，并保持工具调用 id/配对/顺序、assistant 消息、reasoning/provider_state、签名与参数 JSON 原样；只改发送副本，会话与审计原文不变 |
+| 总结步 | 工具集为空但预算按普通步估算 | 按实际空工具集 + 收尾提示估算，同样受预算约束 |
+| `api_options` | 可静默覆盖输出上限 | 三个协议分别校验；两键并存不同值、协议不认的键、非正数 → 发送前明确报错，预算预留=body 实际值 |
+| GUI | 固定显示 1M；切外部后端后仍显示上次 API 估算 | 动态窗口/可用输入估算/窗口来源/输出预留/安全余量来自 `context` 事件；切外部后端隐藏并清空遗留估算 |
+| 空值 | — | 未知窗口、预算超限、api_options 冲突都不重复执行已完成的工具副作用（预算解析在每次 provider 调用之前） |
+
+**窗口配置方法**
+
+- GUI：助手设置 → 高级设置 → 上下文窗口（tokens，1024–10000000；留空=自动）。直接改模型/地址/
+  接口格式会清空窗口；切换服务商恢复该服务自己的已保存 profile（含窗口）。
+- 终端：`colm-agent config --context-window 200000`（或 `chat --context-window ...`）；配置文件中
+  对应 `provider.context_window`。
+- 预设：仅官方 `https://api.deepseek.com` + Chat Completions + `deepseek-flash`/`deepseek-v4-pro`
+  取 1M（依据 `docs/design-ai-assistant.md` §3.1）；其它组合无可靠值，留空会在发送前报错要求填写。
+- 兼容：旧 `assistant.json`/终端 `config.json` 缺字段按 None 加载；旧事件缺新字段按默认解析；外部
+  Codex/Claude Code/OpenCode 自行管理上下文，不受该窗口配置阻断。
+
+### 验证命令与实际结果（2026-10-28，本机 macOS；PR #65 CI 见下）
+
+- `cargo fmt --all --check` → 通过（exit 0）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → Finished，exit 0。
+- `cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，2843 passed / 0 failed /
+  15 ignored，exit 0**。（本机 HDF5/NetCDF 并发问题：默认并行跑 `colm-cli` 曾出现 16–18 个与本改动
+  无关的 `NetCDF: HDF error`；本轮用每二进制单线程复跑全绿，属既有本机并发限制，不是回归。）
+- `cargo test -p colm-cli --bins -- --test-threads=1` → **533 passed / 0 failed**（含新增 evidence 测试）。
+- `cargo test -p colm-agent --lib --bins` → **265 + 8 passed / 0 failed**（含窗口/预算/协议/身份/诊断测试）。
+- `cd gui/src-tauri && cargo fmt --all --check` → 通过；`cargo clippy --all-targets -- -D warnings` →
+  Finished，exit 0；`cargo test --lib` → **458 passed / 1 ignored / 0 failed**。
+- `cd gui && npm run typecheck && npm run lint && npm run format:check && npm test` → 全绿，
+  **1136 passed / 0 failed**（含 check-gui 与命令契约）。
+- `cargo run -q -p xtask -- check-gui` → `Verified 255 Tauri command contracts.`；255 个注册命令、
+  217 个被前端调用（26 个走动态名），每个声明事件都有 emitter 与 listener。
+- PR #65（此前 16 个本地提交 + Windows 测试路径修复）CI：ci 工作流 rust/gui 在 ubuntu、macOS、
+  Windows 全绿，kernel-filesystem 绿，windows-kernel 的 `A real case, end to end` 32m50s 绿；
+  已按用户要求以 rebase 方式合并到 main。
+
+**新增测试覆盖（摘要）**
+
+- Study 证据（colm-cli）：率定改善验证变差且两期分开；另一候选验证更好也不替换既定 best；
+  best 比 baseline 差；baseline=0 与 baseline 缺失；baseline 按成员标记（非 m000000 编号）；
+  验证未配置 vs 已配置不可用（与引擎 candidate 记录一致，不把结果文件硬算成可用）；
+  运行中/uncertainty 无 best 与部分失败区分；后续代成员 + Log 尺度 + 带索引键的位置；
+  pinned/official 身份与不触发 SSH；证据有界且合法 JSON。
+- 助手侧：假 CLI 拼 study-status：evidence 合并、身份 matches/mismatch/unknown 与同名不匹配；
+  旧 CLI fallback；diagnostic_plan 消费双期分歧、验证未配置/不可用、输出 ≤24k 合法 JSON。
+- 上下文预算（colm-agent）：大窗口原样发送；小窗口逐级折叠且原 history 不变、协议与配对完整；
+  仍超限 Provider 调用计数=0；不同窗口下预算不同；工具 schema/中文/长工具结果/reasoning/
+  provider_state 计入估算；provider_state 替代消息不重复计；api_options 输出覆盖与冲突
+  （calls=0）；总结步空工具集；旧无预算 Provider 行为不变；未知窗口发送前报错；终端
+  `--context-window` 与旧配置加载。
+- GUI：profile 往返与切换不串窗口；改模型/地址/协议清空窗口；设置保存校验；context 事件
+  动态窗口/可用输入/来源；外部后端隐藏并清空遗留估算；预算错误的中英文提示；旧事件字段兼容。
+
+### 两条手工回放（未用真实模型回放，标注为未验证）
+
+以下示例的数值是**夹具示例（合成数据）**，取自
+`crates/colm-cli/src/study/runner.rs::evidence_compares_calibration_and_validation_within_the_same_period`
+的测试夹具（baseline m000000：率定 0.80 / 验证 0.60；best m000001：率定 0.40 / 验证 0.90；目标 Qle）。
+**不是真实科研结果**，也没有用真实 LLM 回放，因此不能证明真实模型必然遵守回答规范或给出可复现成功率。
+回放方法：在 GUI 打开/选中该 Study，向助手分别发送下面两条；核对回答是否按 evidence 分两期、
+是否带“依据：”且只引用实际取得的证据。
+
+**回放 1：“这次率定是否真的改善？分别给出率定期和验证期证据。”**
+
+期望（夹具示例，合成数据）：
+
+- 率定期：best m000001 的率定 loss 0.40，低于 baseline m000000 的 0.80（同一目标、同一率定窗口）。
+- 验证期：best 的验证 loss 0.90，高于 baseline 的 0.60 —— 两期结论相反：样本内拟合改善，但独立
+  验证期变差；不能宣称泛化改善，也不能仅凭这两组记录诊断原因（如过拟合）。
+- 依据：study_summary evidence（selection.rule=按率定 loss 选 best；comparison.baseline/best 各自
+  两期分数；validation.windows；verification.reverified=false，即记录值未重新核验）。
+
+**回放 2：“能否直接采用这个 best？还缺哪些验证？”**
+
+期望（夹具示例，合成数据）：
+
+- 不能直接采用：best 是引擎按率定 loss 选的，不是按验证期重选；验证期 loss 反而更高（0.90 vs
+  0.60），两期不一致；这些是记录值，未重新核验（reverified=false）。
+- 还缺：观测对齐/单位/QC 复核；验证期独立性与覆盖（站点/年份）；物理闭合（水量/能量）；
+  跨站点泛化；参数边界与可辨识性；若 model_identity.comparison 不是 matches（当前选择与研究记录
+  不同或未知），这些分数不能直接用于当前模型。
+- 需要按正常审批流程另做验证；本次回答不会运行 Study、采用参数或修改模型。
+- 依据：study_summary evidence（comparison.relation、validation.status、model_identity.comparison、
+  verification、parameters 的 at_bound/scale）。
+
+### 未验证部分与剩余限制
+
+1. **未用真实模型回放**：以上两条只有夹具示例与提示词规范；离线测试不能证明真实 LLM 一定遵守
+   “两期分开、不宣称泛化、不确诊过拟合”的回答规范，也没有成功率数据。
+2. **未实测远程 SSH/远程 Study**：evidence 只读本地记录与 `.colm-remote-study.json`；remote-study-status
+   经 SSH 的路径未实机验证（按要求不触发 SSH）。旧服务器快照无 evidence 时助手显式报 missing 并
+   保留部分旧 fallback。
+3. **token 是估算不是精确值**：按实际请求体字符数作保守上界（中文≈1:1、英文偏高），未用真实
+   tokenizer 或真实服务商 usage 校准；预算偏保守（可能提前折叠），不冒充精确计数。
+4. **未用真实/付费 API**：未实际发送请求验证服务商行为；未验证不同模型对 `max_completion_tokens`
+   等非标准输出键的处理（冲突在发送前报错）。
+5. **本机环境限制**：未在 MSRV 1.85.1 编译（本机 Homebrew rust 1.97.1、无 rustup）；本地
+   `cargo test` 默认并行受既有 NetCDF/HDF5 并发问题影响，用每二进制单线程复跑；需外部数据的
+   `colm-srfdata` raster/real_sites 与 `colm-forcing` met/real_forcing 按 CLAUDE.local 不跑；Windows
+   仅由 PR CI 覆盖。
+6. **GUI 视觉**未做原生窗口目视验收；动态上下文显示只到类型/静态渲染与事件测试层面。
+7. 未实机验证“未知窗口 → 提示填写 → 保存后重发”的完整 GUI 手势（Rust 侧错误与前端映射各有测试）。
