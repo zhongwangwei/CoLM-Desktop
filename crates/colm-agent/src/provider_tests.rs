@@ -872,3 +872,338 @@ fn a_cancelled_stream_stops_at_the_next_line() {
     assert_eq!(error.to_string(), "cancelled");
     assert_eq!(seen, ["{\"a\":1}"]);
 }
+
+#[test]
+fn effective_context_window_prefers_user_value_and_only_trusts_documented_presets() {
+    for model in ["deepseek-flash", "deepseek-v4-pro"] {
+        let mut c = ProviderConfig::deepseek(model, String::new());
+        c.base_url = "https://api.deepseek.com/v1".into();
+        assert_eq!(
+            c.effective_context_window().unwrap(),
+            (CONTEXT_WINDOW_TOKENS, WindowSource::Preset),
+            "{model}"
+        );
+    }
+    // 历史模型名（deepseek-chat 已停用）没有文档确认的窗口：不猜，要求填写。
+    let mut unknown = ProviderConfig::deepseek("deepseek-chat", String::new());
+    let text = unknown.effective_context_window().unwrap_err().to_string();
+    assert!(text.contains("context window"), "{text}");
+    assert!(text.contains("settings"), "{text}");
+    // 同一模型走代理/非官方地址、或换协议都不算预设。
+    let mut proxied = ProviderConfig::deepseek("deepseek-flash", String::new());
+    proxied.base_url = "https://proxy.example/v1".into();
+    assert!(proxied.effective_context_window().is_err());
+    let mut responses = ProviderConfig::deepseek("deepseek-flash", String::new());
+    responses.api_format = ApiFormat::Responses;
+    assert!(responses.effective_context_window().is_err());
+    // 用户显式值优先，不受模型/地址限制，但必须在合理范围内。
+    unknown.context_window = Some(200_000);
+    assert_eq!(
+        unknown.effective_context_window().unwrap(),
+        (200_000, WindowSource::User)
+    );
+    for invalid in [0, 1_023, 10_000_001] {
+        unknown.context_window = Some(invalid);
+        let text = unknown.effective_context_window().unwrap_err().to_string();
+        assert!(text.contains("between"), "{invalid}: {text}");
+    }
+    for valid in [MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS] {
+        unknown.context_window = Some(valid);
+        assert_eq!(
+            unknown.effective_context_window().unwrap(),
+            (valid, WindowSource::User)
+        );
+    }
+}
+
+#[test]
+fn old_configs_without_a_context_window_still_load_and_new_ones_roundtrip() {
+    let legacy: ProviderConfig = serde_json::from_value(
+        json!({"base_url":"https://api.deepseek.com","model":"deepseek-flash"}),
+    )
+    .unwrap();
+    assert_eq!(legacy.context_window, None);
+    let explicit_null: ProviderConfig = serde_json::from_value(
+        json!({"base_url":"https://api.deepseek.com","model":"deepseek-flash","context_window":null}),
+    )
+    .unwrap();
+    assert_eq!(explicit_null.context_window, None);
+    let configured: ProviderConfig = serde_json::from_value(
+        json!({"base_url":"https://custom.example/v1","model":"local","context_window":32768}),
+    )
+    .unwrap();
+    assert_eq!(configured.context_window, Some(32_768));
+    let round: ProviderConfig =
+        serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+    assert_eq!(round.context_window, Some(32_768));
+    assert!(serde_json::to_string(&legacy)
+        .unwrap()
+        .contains("\"context_window\":null"));
+}
+
+#[test]
+fn build_request_is_the_single_constructor_used_by_budget_and_transport() {
+    let messages = [Message::User {
+        content: "查一下这个算例".into(),
+    }];
+    let tools = [
+        json!({"type":"function","function":{"name":"inspect","description":"Inspect","parameters":{"type":"object","properties":{}}}}),
+    ];
+    let mut chat = ProviderConfig::deepseek("deepseek-flash", "secret".into());
+    chat.base_url = "https://api.deepseek.com".into();
+    assert_eq!(
+        build_request(&chat, &messages, &tools).unwrap(),
+        request_body(&chat, &messages, &tools)
+    );
+    let mut responses = native_config(ApiFormat::Responses);
+    responses.model = "future-model".into();
+    assert_eq!(
+        build_request(&responses, &messages, &tools).unwrap(),
+        adapters::native_body(&responses, &messages, &tools).unwrap()
+    );
+    let mut anthropic = native_config(ApiFormat::Anthropic);
+    anthropic.model = "future-model".into();
+    assert_eq!(
+        build_request(&anthropic, &messages, &tools).unwrap(),
+        adapters::native_body(&anthropic, &messages, &tools).unwrap()
+    );
+}
+
+#[test]
+fn chat_transport_sends_exactly_the_budget_estimated_request_body() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut c = ProviderConfig::deepseek("deepseek-flash", "secret".into());
+    c.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let messages = vec![Message::User {
+        content: "查一下这个算例的产流".into(),
+    }];
+    let tools = vec![
+        json!({"type":"function","function":{"name":"inspect","description":"Inspect a case","parameters":{"type":"object","properties":{"case":{"type":"string"}}}}}),
+    ];
+    // 预算估算走的就是这个构造：请求体字符数（含工具 schema 与中文）是估算口径。
+    let expected = build_request(&c, &messages, &tools).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                length = n.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).unwrap();
+        let payload: Value = serde_json::from_slice(&bytes).unwrap();
+        let body = stream(&[
+            json!({"choices":[{"delta":{"content":"ok"}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+        ]) + "data: [DONE]\n\n";
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        payload
+    });
+    let turn = OpenAiCompatible::new(c)
+        .complete(&messages, &tools, &mut |_| {})
+        .unwrap();
+    assert_eq!(turn.content, "ok");
+    assert_eq!(server.join().unwrap(), expected);
+    // 工具 schema 与中文都进估算：不含工具时明显更短。
+    let without_tools = build_request(
+        &ProviderConfig::deepseek("deepseek-flash", "secret".into()),
+        &messages,
+        &[],
+    )
+    .unwrap();
+    assert!(
+        serde_json::to_string(&expected).unwrap().chars().count()
+            > serde_json::to_string(&without_tools)
+                .unwrap()
+                .chars()
+                .count()
+    );
+}
+
+#[test]
+fn effective_max_output_reserves_exactly_the_output_limit_in_the_body() {
+    let chat = ProviderConfig::deepseek("deepseek-flash", "secret".into());
+    let body = build_request(&chat, &[], &[]).unwrap();
+    assert_eq!(
+        effective_max_output(&body, ApiFormat::ChatCompletions).unwrap(),
+        u64::from(chat.max_output_tokens)
+    );
+    // 单键（max_completion_tokens）也能作为有效输出上限。
+    let body = json!({"max_completion_tokens": 4096});
+    assert_eq!(
+        effective_max_output(&body, ApiFormat::ChatCompletions).unwrap(),
+        4_096
+    );
+    // 通过 api_options 覆盖 max_tokens：预留跟着最终 body 走。
+    let mut overridden = chat.clone();
+    overridden.api_options = json!({"max_tokens": 8192});
+    let body = build_request(&overridden, &[], &[]).unwrap();
+    assert_eq!(
+        effective_max_output(&body, ApiFormat::ChatCompletions).unwrap(),
+        8_192
+    );
+    // 两键并存但值相同是允许的：仍然只有一个有效预留值。
+    let mut same = chat.clone();
+    same.api_options = json!({"max_tokens": 8192, "max_completion_tokens": 8192});
+    assert_eq!(
+        effective_max_output(
+            &build_request(&same, &[], &[]).unwrap(),
+            ApiFormat::ChatCompletions
+        )
+        .unwrap(),
+        8_192
+    );
+    // 两键并存且值不同：预算无法确定预留哪个，发送前报错。
+    let mut conflict = chat.clone();
+    conflict.api_options = json!({"max_completion_tokens": 4096});
+    let error = effective_max_output(
+        &build_request(&conflict, &[], &[]).unwrap(),
+        ApiFormat::ChatCompletions,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("max_tokens"), "{error}");
+    assert!(error.contains("max_completion_tokens"), "{error}");
+    // 协议不认的输出键、非数字、0 都报错，而不是静默取一个值。
+    let mut responses = native_config(ApiFormat::Responses);
+    responses.model = "future-model".into();
+    for forbidden in ["max_tokens", "max_completion_tokens"] {
+        let mut forbidden_config = responses.clone();
+        forbidden_config.api_options = Value::Object(serde_json::Map::from_iter([(
+            forbidden.to_owned(),
+            json!(100),
+        )]));
+        let body = build_request(&forbidden_config, &[], &[]).unwrap();
+        let error = effective_max_output(&body, ApiFormat::Responses)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(forbidden), "{error}");
+        assert!(error.contains("output token limit"), "{error}");
+    }
+    responses.api_options = json!({"max_output_tokens": 2048});
+    assert_eq!(
+        effective_max_output(
+            &build_request(&responses, &[], &[]).unwrap(),
+            ApiFormat::Responses
+        )
+        .unwrap(),
+        2_048
+    );
+    let mut anthropic = native_config(ApiFormat::Anthropic);
+    anthropic.model = "future-model".into();
+    for forbidden in ["max_output_tokens", "max_completion_tokens"] {
+        let mut forbidden_config = anthropic.clone();
+        forbidden_config.api_options = Value::Object(serde_json::Map::from_iter([(
+            forbidden.to_owned(),
+            json!(100),
+        )]));
+        let body = build_request(&forbidden_config, &[], &[]).unwrap();
+        let error = effective_max_output(&body, ApiFormat::Anthropic)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(forbidden), "{error}");
+        assert!(error.contains("output token limit"), "{error}");
+    }
+    anthropic.api_options = json!({"max_tokens": 512});
+    assert_eq!(
+        effective_max_output(
+            &build_request(&anthropic, &[], &[]).unwrap(),
+            ApiFormat::Anthropic
+        )
+        .unwrap(),
+        512
+    );
+    let mut invalid = chat.clone();
+    invalid.api_options = json!({"max_tokens": "8192"});
+    let body = build_request(&invalid, &[], &[]).unwrap();
+    assert!(effective_max_output(&body, ApiFormat::ChatCompletions)
+        .unwrap_err()
+        .to_string()
+        .contains("positive integer"));
+    let mut zero = chat.clone();
+    zero.api_options = json!({"max_tokens": 0});
+    let body = build_request(&zero, &[], &[]).unwrap();
+    assert!(effective_max_output(&body, ApiFormat::ChatCompletions)
+        .unwrap_err()
+        .to_string()
+        .contains("positive integer"));
+    let mut no_limit = chat;
+    no_limit.max_output_tokens = 0;
+    let body = build_request(&no_limit, &[], &[]).unwrap();
+    assert!(effective_max_output(&body, ApiFormat::ChatCompletions)
+        .unwrap_err()
+        .to_string()
+        .contains("positive integer"));
+}
+
+#[test]
+fn provider_budget_limits_match_the_body_that_will_be_sent() {
+    let c = ProviderConfig::deepseek("deepseek-flash", "secret".into());
+    let provider = OpenAiCompatible::new(c.clone());
+    let limits = provider.budget_limits().unwrap().unwrap();
+    assert_eq!(limits.window_tokens, CONTEXT_WINDOW_TOKENS);
+    assert_eq!(limits.source, WindowSource::Preset);
+    assert_eq!(limits.safety_tokens, safety_margin(CONTEXT_WINDOW_TOKENS));
+    let messages = [Message::User {
+        content: "hi".into(),
+    }];
+    let tools = [
+        json!({"type":"function","function":{"name":"inspect","description":"Inspect","parameters":{"type":"object","properties":{}}}}),
+    ];
+    let body = provider.request_body(&messages, &tools).unwrap().unwrap();
+    assert_eq!(
+        effective_max_output(&body, c.api_format).unwrap(),
+        limits.output_tokens,
+        "reserved output tokens must equal the effective body limit"
+    );
+    assert_eq!(body, build_request(&c, &messages, &tools).unwrap());
+    // 未知窗口在预算解析阶段就报错（任何 HTTP 请求之前）。
+    let mut unknown = c;
+    unknown.model = "mystery-model".into();
+    unknown.base_url = "https://custom.example/v1".into();
+    unknown.provider_id = "custom".into();
+    assert!(OpenAiCompatible::new(unknown).budget_limits().is_err());
+    // 输出键冲突同样在预算解析阶段报错。
+    let mut conflict = ProviderConfig::deepseek("deepseek-flash", "secret".into());
+    conflict.api_options = json!({"max_completion_tokens": 4096});
+    assert!(OpenAiCompatible::new(conflict)
+        .budget_limits()
+        .unwrap_err()
+        .to_string()
+        .contains("max_completion_tokens"));
+}
+
+#[test]
+fn providers_without_budget_keep_the_old_default_methods() {
+    struct Bare;
+    impl Provider for Bare {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[Value],
+            _on_event: &mut dyn FnMut(StreamEvent),
+        ) -> Result<Turn> {
+            Ok(Turn::default())
+        }
+    }
+    assert!(Bare.budget_limits().unwrap().is_none());
+    assert!(Bare.request_body(&[], &[]).unwrap().is_none());
+}
