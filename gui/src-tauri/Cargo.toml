@@ -57,3 +57,19 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 # workspace 之外 —— 引擎那边只有 70 个，`cargo test --workspace` 不该
 # 每次面对 429 个 crate。见 design.md §4.1。
 [workspace]
+
+# 开发构建里窗口启动要给 17 套内核的 51 个二进制算 sha256（约 187 MB）。debug 版 sha2
+# 实测 10.8 s（2026-10-28 从进程启动到"17 preset(s)"），窗口看起来像卡死；发布版是
+# release，不受影响。只把哈希链上的几个依赖用 -O 编：把 429 个依赖整体开优化会让
+# `cargo tauri dev` 每次等更久，这几个小 crate 编起来很快。
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
+
+[profile.dev.package.crypto-common]
+opt-level = 3
