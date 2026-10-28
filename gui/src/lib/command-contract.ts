@@ -516,6 +516,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "case_land_cover": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "land_cover_contexts": {
     "dirs": {
       "required": true,

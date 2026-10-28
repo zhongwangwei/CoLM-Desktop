@@ -3073,6 +3073,34 @@ pub(crate) fn field_states(
     Ok(merge_field_states(&groups))
 }
 
+/// 单个单点算例实际写进 `case.nml` 的地类身份。给结果只读展示用：自然站由建例时从
+/// 站点文件的 IGBP_classification/USGS_classification 写入，城市站是固定类号；界面需要
+/// 告诉用户用的是哪一类，而不是把隐藏字段的 schema 默认值（-1）当答案。
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CaseLandCover {
+    pub landtype: Option<i64>,
+    pub use_site_landtype: bool,
+}
+
+#[tauri::command]
+pub fn case_land_cover(dir: String) -> Result<CaseLandCover, String> {
+    let path = std::path::Path::new(&dir).join("case.nml");
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let doc =
+        colm_namelist::parse(&text).map_err(|error| format!("{}: {error:#}", path.display()))?;
+    Ok(CaseLandCover {
+        landtype: match doc.get("SITE_landtype") {
+            Some(colm_namelist::Value::Int(value)) if *value >= 0 => Some(*value),
+            _ => None,
+        },
+        use_site_landtype: matches!(
+            doc.get("USE_SITE_landtype"),
+            Some(colm_namelist::Value::Bool(true))
+        ),
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct LandCoverContext {
     pub dir: String,

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
-import { invoke } from '../../lib/ipc';
+import { invoke, invokeJson } from '../../lib/ipc';
 import { withCatalogLabels } from '../../lib/param-presentation';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
@@ -26,6 +26,8 @@ import {
   type ModelParameter,
 } from './model-settings';
 import { parameterKey } from '../versions/model';
+/** `case_land_cover` 返回的建例结果：真正写进 case.nml 的地类号与来源开关。 */
+type CaseLandCover = { landtype: number | null; use_site_landtype: boolean };
 type Props = {
   setupEnvironment?: SetupEnvironment;
   onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
@@ -77,7 +79,10 @@ export default function ModelSettings({
     [query, setQuery] = useState(''),
     [scope, setScope] = useState(''),
     [modelFields, setModelFields] = useState<SchemaField[]>([]),
-    [settings, setSettings] = useState<{ id: string; identity: string } | null>(null);
+    [settings, setSettings] = useState<{ id: string; identity: string } | null>(null),
+    // 单点算例里真正写进 case.nml 的地类（只读展示，替代隐藏字段的 schema 默认 -1）。
+    [landCover, setLandCover] = useState<CaseLandCover | null>(null),
+    [landCoverReady, setLandCoverReady] = useState(false);
   const identity = JSON.stringify({
     caseDir,
     runHost,
@@ -119,6 +124,31 @@ export default function ModelSettings({
       live = false;
     };
   }, []);
+  useEffect(() => {
+    if (!caseDir) {
+      setLandCover(null);
+      setLandCoverReady(false);
+      return;
+    }
+    let live = true;
+    setLandCoverReady(false);
+    invokeJson<CaseLandCover>('case_land_cover', { dir: caseDir })
+      .then((value) => {
+        if (live) {
+          setLandCover(value);
+          setLandCoverReady(true);
+        }
+      })
+      .catch(() => {
+        if (live) {
+          setLandCover(null);
+          setLandCoverReady(true);
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [caseDir]);
   const ready = !!version && !loading && !error,
     scopes = [...new Set(catalog.map((item) => item.scope))].sort(),
     filtered = filterModelParameters(catalog, query, scope);
@@ -238,6 +268,36 @@ export default function ModelSettings({
     },
   });
 
+  const siteScope = ['site', 'single'].includes(setupEnvironment?.domain ?? '');
+  const landCoverScheme =
+    classification ?? (profile?.subgrid === 'USGS' ? 'USGS' : undefined) ?? 'IGBP';
+  const landCoverText = !siteScope
+    ? ''
+    : !caseDir
+      ? profile?.urban
+        ? t(
+            '城市站点：建例时固定为 13（USGS 内核为 1）',
+            'Urban site: fixed 13 at creation (1 for USGS kernels)',
+          )
+        : t(
+            `建例时从站点文件的 ${landCoverScheme}_classification 读取；城市站点固定为 13`,
+            `Read from ${landCoverScheme}_classification in the site file at creation; urban sites use 13`,
+          )
+      : !landCoverReady
+        ? t('正在读取…', 'Reading…')
+        : landCover?.landtype != null
+          ? `${landCover.landtype}（${
+              profile?.urban
+                ? t('城市站点固定值', 'urban fixed class')
+                : t(
+                    `建例时从站点文件的 ${landCoverScheme}_classification 写入`,
+                    `written from ${landCoverScheme}_classification in the site file at creation`,
+                  )
+            }）`
+          : t(
+              '算例里没有写入地类（SITE_landtype = -1）：地表数据阶段会按站点文件的分类变量或 rawdata 栅格决定；要固定站点地类请重建算例或补站点文件',
+              'No land-cover class is written (SITE_landtype = -1): the surface-data stage falls back to the site-file classification or the rawdata raster; rebuild the case or fix the site file to pin it',
+            );
   return (
     <Card
       title={t('算例方案与模型参数', 'Case schemes and model parameters')}
@@ -246,12 +306,18 @@ export default function ModelSettings({
         'Confirm the basic structure, then review process schemes and parameters.',
       )}
     >
-      {['site', 'single'].includes(setupEnvironment?.domain ?? '') && (
+      {siteScope && (
         <Notice>
-          {t(
-            '站点文件、经纬度和地表覆盖类型在创建算例时按所选站点自动写入：自然站从站点文件的 IGBP_classification（USGS 内核用 USGS_classification）读取地类，城市站固定为 13（USGS 为 1）。这些字段不在这里设置，避免和站点文件不一致。',
-            'The site file, coordinates and land-cover type are written from the selected station when the case is created: natural sites take IGBP_classification (USGS_classification for USGS kernels), urban sites use 13 (1 for USGS). They are not edited here, so they cannot drift from the site file.',
-          )}
+          <p>
+            {t(
+              '站点文件、经纬度和地表覆盖类型在创建算例时按所选站点自动写入：自然站从站点文件的 IGBP_classification（USGS 内核用 USGS_classification）读取地类，城市站固定为 13（USGS 为 1）。这些字段不在这里设置，避免和站点文件不一致。',
+              'The site file, coordinates and land-cover type are written from the selected station when the case is created: natural sites take IGBP_classification (USGS_classification for USGS kernels), urban sites use 13 (1 for USGS). They are not edited here, so they cannot drift from the site file.',
+            )}
+          </p>
+          <p className="field-hint">
+            <strong>{t('地表覆盖类型（只读）', 'Land-cover type (read-only)')}</strong>：
+            {landCoverText}
+          </p>
         </Notice>
       )}
       <h3>{t('地表覆盖与植被方案', 'Land cover and vegetation scheme')}</h3>

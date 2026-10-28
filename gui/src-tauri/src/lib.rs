@@ -381,6 +381,7 @@ pub fn run() {
             unknown_fields,
             irrelevant_fields,
             field_states_batch,
+            case_land_cover,
             land_cover_contexts,
             pft_parameter_states,
             set_pft_parameter_batch,
