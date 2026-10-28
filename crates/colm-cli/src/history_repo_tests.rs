@@ -108,6 +108,14 @@ impl RepoFixture {
         &self.path
     }
 
+    /// 已存在的仓库（例如 `git clone` 出来的 managed 缓存）：不再 init，只做读写/提交。
+    fn open(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            clock: std::cell::Cell::new(0),
+        }
+    }
+
     fn git(&self, args: &[&str]) -> String {
         let (ok, stdout, stderr) = run_program(&self.path, "git", args, &[]);
         assert!(ok, "git {args:?} failed: {}", stderr.trim());
@@ -267,6 +275,17 @@ fn history_commit_selected(
 
 fn history_repos(root: &TempDir) -> Value {
     run_ok("history-repos", &[("--history-root", text(root.path()))])
+}
+
+fn history_sync_online(root: &TempDir, repository: &str) -> Value {
+    let root_text = root.path().display().to_string();
+    run_ok(
+        "history-sync",
+        &[
+            ("--history-root", root_text.as_str()),
+            ("--repository", repository),
+        ],
+    )
 }
 
 fn history_sync(root: &TempDir, repository: &str, offline: bool) -> Value {
@@ -1324,22 +1343,40 @@ fn history_repos_and_offline_sync_report_identity_branch_and_coverage() {
     assert_eq!(repos["repos"]["colm_upstream"]["coverage"]["commits"], 2);
     assert_eq!(repos["repos"]["desktop"]["synced"], Value::Null);
 
-    let synced = history_sync(&root, "both", true);
-    assert_eq!(synced["actions"]["desktop"], "offline");
-    assert_eq!(synced["actions"]["colm_upstream"], "offline");
+    let offline = history_sync(&root, "both", true);
+    assert_eq!(offline["actions"]["desktop"], "offline");
+    assert_eq!(offline["actions"]["colm_upstream"], "offline");
+    // H09：offline 只是一次本地检查，不是成功同步；不得写 synced/last_successful_sync。
+    assert_eq!(offline["repos"]["desktop"]["synced"], Value::Null);
     assert_eq!(
-        synced["repos"]["desktop"]["synced"]["sha"],
-        json!(desktop.head())
+        offline["repos"]["desktop"]["last_successful_sync"],
+        Value::Null
     );
-    assert!(synced["repos"]["desktop"]["synced"]["at_unix_ms"]
+    assert_eq!(
+        offline["repos"]["desktop"]["last_attempt"]["action"],
+        "offline"
+    );
+    assert!(offline["repos"]["desktop"]["checked_at_unix_ms"]
         .as_u64()
         .is_some_and(|value| value > 0));
-    // 同步记录落盘，后续 history-repos 能读到。
+    assert_eq!(
+        offline["repos"]["desktop"]["checked_at_unix_ms"],
+        offline["repos"]["desktop"]["last_attempt"]["at_unix_ms"]
+    );
+    assert!(offline["sync_semantics"].as_str().is_some());
+    // 尝试记录落盘，后续 history-repos 能读到，且仍没有成功同步时间。
     let after = history_repos(&root);
     assert_eq!(
-        after["repos"]["colm_upstream"]["synced"]["sha"],
-        json!(upstream.head())
+        after["repos"]["colm_upstream"]["last_successful_sync"],
+        Value::Null
     );
+    assert_eq!(
+        after["repos"]["colm_upstream"]["last_attempt"]["action"],
+        "offline"
+    );
+    assert!(after["repos"]["colm_upstream"]["checked_at_unix_ms"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
 }
 
 #[test]
@@ -1351,6 +1388,17 @@ fn offline_sync_reports_missing_managed_repositories_without_cloning() {
     assert_eq!(synced["actions"]["colm_upstream"], "offline");
     assert_eq!(synced["repos"]["desktop"]["identity"]["state"], "missing");
     assert_eq!(synced["repos"]["desktop"]["synced"], Value::Null);
+    assert_eq!(
+        synced["repos"]["desktop"]["last_successful_sync"],
+        Value::Null
+    );
+    assert_eq!(
+        synced["repos"]["desktop"]["last_attempt"]["action"],
+        "offline"
+    );
+    assert!(synced["repos"]["desktop"]["last_attempt"]["error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty()));
     assert!(!synced["repos"]["desktop"]["errors"]
         .as_array()
         .unwrap()
@@ -1362,6 +1410,18 @@ fn offline_sync_reports_missing_managed_repositories_without_cloning() {
     // 只同步一侧时，另一侧明确 skipped。
     let one = history_sync(&root, "desktop", true);
     assert_eq!(one["actions"]["colm_upstream"], "skipped");
+    // skipped 也记录一次尝试（checked_at/last_attempt），但不代表成功同步。
+    assert_eq!(
+        one["repos"]["colm_upstream"]["last_attempt"]["action"],
+        "skipped"
+    );
+    assert!(one["repos"]["colm_upstream"]["checked_at_unix_ms"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
+    assert_eq!(
+        one["repos"]["colm_upstream"]["last_successful_sync"],
+        Value::Null
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2548,4 +2608,201 @@ fn frozen_recorded_commit_missing_everywhere_stays_unavailable() {
 
     let error = history_commit_selected(&root, &freeze, &recorded, None).unwrap_err();
     assert!(format!("{error:#}").contains("not readable"), "{error:#}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// H09：失败/离线不刷新 last_successful_sync，持久错误不被清空
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn sync_failure_and_offline_keep_last_successful_sync_and_persistent_errors() {
+    clean_history_env();
+    let root = TempDir::new("h09-sync-state");
+    // 用本地路径做 origin：fetch 成功/失败都是真实 Git 行为，不联网。
+    let remote = RepoFixture::init(&root.join("remote"));
+    remote.write("main/MOD_A.F90", "SUBROUTINE a\n  x = 1.0\nEND\n");
+    let remote_first = remote.commit("Remote first");
+    let desktop_path = root.join("repos/desktop");
+    let (ok, _, stderr) = run_program(
+        root.path(),
+        "git",
+        &["clone", "-q", text(remote.path()), text(&desktop_path)],
+        &[],
+    );
+    assert!(ok, "local clone failed: {stderr}");
+    let desktop = RepoFixture::open(&desktop_path);
+
+    // 1) 成功 fetch → last_successful_sync 记录。
+    let first = history_sync_online(&root, "desktop");
+    assert_eq!(first["actions"]["desktop"], "fetched", "{first:#?}");
+    let success = first["repos"]["desktop"]["last_successful_sync"].clone();
+    assert_eq!(success["sha"], json!(remote_first));
+    let success_at = success["at_unix_ms"]
+        .as_u64()
+        .expect("last successful sync time");
+    assert!(success_at > 0);
+    assert_eq!(first["repos"]["desktop"]["synced"], success);
+    assert_eq!(
+        first["repos"]["desktop"]["last_attempt"]["action"],
+        "fetched"
+    );
+    assert!(first["repos"]["desktop"]["errors"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // 2) remote 改成不存在的路径 → fetch 失败：成功时间/SHA 不变，错误持久化。
+    desktop.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        text(&root.join("missing-remote")),
+    ]);
+    let failed = history_sync_online(&root, "desktop");
+    assert_eq!(failed["actions"]["desktop"], "error", "{failed:#?}");
+    assert_eq!(
+        failed["repos"]["desktop"]["last_successful_sync"], success,
+        "a failed fetch must not advance the last successful sync"
+    );
+    assert_eq!(failed["repos"]["desktop"]["synced"], success);
+    assert_eq!(
+        failed["repos"]["desktop"]["last_successful_sync"]["at_unix_ms"],
+        json!(success_at)
+    );
+    assert_eq!(
+        failed["repos"]["desktop"]["last_attempt"]["action"],
+        "error"
+    );
+    let failed_error = failed["repos"]["desktop"]["last_attempt"]["error"]
+        .as_str()
+        .expect("last_attempt.error");
+    assert!(!failed_error.is_empty());
+    let checked_failed = failed["repos"]["desktop"]["checked_at_unix_ms"]
+        .as_u64()
+        .expect("checked_at");
+    assert!(checked_failed >= success_at);
+    assert!(failed["repos"]["desktop"]["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error.as_str().is_some_and(|text| text.contains("fetch"))));
+
+    // 3) history-repos 仍显示上次成功时间与持久错误，不能把旧 SHA 标成刚同步。
+    let after_failed = history_repos(&root);
+    let repo = &after_failed["repos"]["desktop"];
+    assert_eq!(repo["last_successful_sync"], success);
+    assert_eq!(repo["last_attempt"]["action"], "error");
+    assert_eq!(repo["last_attempt"]["error"], json!(failed_error));
+    assert_eq!(repo["checked_at_unix_ms"], json!(checked_failed));
+    assert!(repo["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error.as_str().is_some_and(|text| text.contains("fetch"))));
+
+    // 4) 失败后再 offline：只推进 checked_at/last_attempt，成功时间不动，旧错误也不被清。
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let offline = history_sync(&root, "desktop", true);
+    assert_eq!(offline["actions"]["desktop"], "offline");
+    assert_eq!(offline["repos"]["desktop"]["last_successful_sync"], success);
+    assert_eq!(
+        offline["repos"]["desktop"]["last_attempt"]["action"],
+        "offline"
+    );
+    assert!(offline["repos"]["desktop"]["last_attempt"]
+        .get("error")
+        .is_none_or(Value::is_null));
+    assert!(
+        offline["repos"]["desktop"]["checked_at_unix_ms"]
+            .as_u64()
+            .expect("checked_at")
+            >= checked_failed
+    );
+    assert!(offline["repos"]["desktop"]["errors"]
+        .to_string()
+        .contains("fetch"));
+
+    // 5) 修复 remote 且有新提交 → 成功 fetch：成功时间前进、last_attempt=fetched、错误清空。
+    remote.write("main/MOD_A.F90", "SUBROUTINE a\n  x = 2.0\nEND\n");
+    let remote_second = remote.commit("Remote second");
+    desktop.git(&["remote", "set-url", "origin", text(remote.path())]);
+    let repaired = history_sync_online(&root, "desktop");
+    assert_eq!(repaired["actions"]["desktop"], "fetched", "{repaired:#?}");
+    let new_success = &repaired["repos"]["desktop"]["last_successful_sync"];
+    assert_eq!(new_success["sha"], json!(remote_second));
+    assert!(new_success["at_unix_ms"].as_u64().expect("new sync time") >= success_at);
+    assert_eq!(repaired["repos"]["desktop"]["synced"], *new_success);
+    assert_eq!(
+        repaired["repos"]["desktop"]["last_attempt"]["action"],
+        "fetched"
+    );
+    assert!(repaired["repos"]["desktop"]["last_attempt"]
+        .get("error")
+        .is_none_or(Value::is_null));
+    assert!(repaired["repos"]["desktop"]["errors"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let after_repaired = history_repos(&root);
+    let repo = &after_repaired["repos"]["desktop"];
+    assert_eq!(repo["last_successful_sync"], *new_success);
+    assert_eq!(repo["last_attempt"]["action"], "fetched");
+    assert!(repo["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn legacy_repos_json_synced_is_read_as_last_successful_sync() {
+    clean_history_env();
+    let root = TempDir::new("h09-legacy");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    // 先指向一个不存在的 remote，确保后面的“失败 fetch”不联网、且只更新尝试记录。
+    desktop.git(&[
+        "remote",
+        "add",
+        "origin",
+        text(&root.join("missing-remote")),
+    ]);
+    desktop.write("src/lib.rs", "pub fn legacy() {}\n");
+    desktop.commit("Legacy desktop commit");
+    let legacy_sync = json!({
+        "ref": "origin/main",
+        "sha": "d".repeat(40),
+        "at_unix_ms": 1_700_000_000_000_u64,
+    });
+    let legacy = json!({
+        "schema": 1,
+        "repos": {"desktop": {"default_branch": "main", "synced": legacy_sync}},
+    });
+    std::fs::write(
+        root.join("repos.json"),
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let repos = history_repos(&root);
+    let repo = &repos["repos"]["desktop"];
+    assert_eq!(repo["last_successful_sync"], legacy_sync, "{repo:#?}");
+    assert_eq!(repo["synced"], legacy_sync, "legacy alias must survive");
+    assert_eq!(repo["last_attempt"], Value::Null);
+    assert_eq!(repo["checked_at_unix_ms"], Value::Null);
+    assert_eq!(
+        repos["repos"]["colm_upstream"]["last_successful_sync"],
+        Value::Null
+    );
+
+    // 旧格式数据在失败的 sync 后也不能丢：成功时间保持旧值，只新增尝试/错误。
+    let failed = history_sync_online(&root, "desktop");
+    assert_eq!(failed["actions"]["desktop"], "error");
+    assert_eq!(
+        failed["repos"]["desktop"]["last_successful_sync"],
+        legacy_sync
+    );
+    assert!(failed["repos"]["desktop"]["checked_at_unix_ms"]
+        .as_u64()
+        .is_some_and(|value| value > 0));
+    assert!(!failed["repos"]["desktop"]["errors"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }

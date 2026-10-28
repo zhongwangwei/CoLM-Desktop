@@ -1037,17 +1037,29 @@ fn partial_page_two_failure_marks_incomplete_and_keeps_page_one() {
     assert!(notices(&result)
         .iter()
         .any(|notice| notice.contains("could not read page 2")));
-    // 部分数据仍值得缓存（离线时给出“不完整的旧结果”比什么都没有好）。
+    // 不完整结果只写 partial 旁路文件，不冒充完整快照；离线可读但明确 incomplete。
     let cache = root.join(OWNER).join(REPO).join(format!("{SHA}.json"));
-    assert!(cache.is_file());
+    let partial = root
+        .join(OWNER)
+        .join(REPO)
+        .join(format!("{SHA}.partial.json"));
+    assert!(
+        !cache.is_file(),
+        "incomplete data must not be the complete cache"
+    );
+    assert!(partial.is_file());
     let mut offline = GithubClient::new(root.clone(), None, true);
     offline.api_base = server.base.clone();
     let cached = offline.pulls(OWNER, REPO, SHA, false, false);
     assert_eq!(server.request_count(), 2);
     assert_eq!(cached["from_cache"], true);
     assert_eq!(cached["complete"], false);
+    assert_eq!(cached["partial"], true);
     assert_eq!(cached["pulls"].as_array().unwrap().len(), 2);
     assert_eq!(first_error(&cached)["status"], 500);
+    assert!(notices(&cached)
+        .iter()
+        .any(|notice| notice.contains("incomplete cached attempt")));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1515,6 +1527,169 @@ fn live_github_commit_pull_request_association_smoke() {
     eprintln!(
         "live desktop: zero PRs confirmed, fetched_at={:?}",
         desktop["fetched_at_unix_ms"]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// H08：完整快照与不完整尝试分层；失败刷新不能摧毁 last_success
+// ---------------------------------------------------------------------------
+
+fn cache_file(root: &Path, suffix: &str) -> PathBuf {
+    root.join(OWNER)
+        .join(REPO)
+        .join(format!("{SHA}{suffix}.json"))
+}
+
+#[test]
+fn failed_refresh_keeps_the_last_complete_snapshot_and_success_replaces_it() {
+    let _env = super::test_env_lock();
+    let fail_comments = Arc::new(AtomicBool::new(false));
+    let server = mock_github({
+        let fail_comments = Arc::clone(&fail_comments);
+        move |request| {
+            let path = request.path().to_owned();
+            if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+                MockResponse::json(
+                    200,
+                    json!([pull_json(OWNER, REPO, 5, "fix", Value::Null, None)]),
+                )
+            } else if path.ends_with("/issues/5/comments") {
+                if fail_comments.load(Ordering::SeqCst) {
+                    MockResponse::json(500, json!({"message": "comments exploded"}))
+                } else {
+                    MockResponse::json(
+                        200,
+                        json!([comment_json(
+                            "alice",
+                            "because the old default was wrong",
+                            5
+                        )]),
+                    )
+                }
+            } else {
+                MockResponse::json(404, json!({"message": "unexpected path"}))
+            }
+        }
+    });
+    let root = temp("cache-recovery");
+    let mut online = GithubClient::new(root.clone(), Some("ghp_cache_secret".into()), false);
+    online.api_base = server.base.clone();
+    online.timeout = Duration::from_secs(3);
+
+    // 1) 先形成一份完整快照。
+    let first = online.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(first["complete"], true, "{first}");
+    let fetched_at = first["fetched_at_unix_ms"].as_u64().unwrap();
+    assert!(cache_file(&root, "").is_file());
+    assert!(!cache_file(&root, ".partial").is_file());
+
+    // 2) 评论 500 的 refresh：本次结果不完整，但绝不能覆盖完整快照。
+    fail_comments.store(true, Ordering::SeqCst);
+    let failed = online.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(failed["from_cache"], false);
+    assert_eq!(failed["complete"], false, "{failed}");
+    assert_eq!(first_error(&failed)["status"], 500);
+    assert!(
+        notices(&failed)
+            .iter()
+            .any(|notice| notice.contains("previous complete snapshot")
+                && notice.contains("kept unchanged")),
+        "{failed}"
+    );
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(cache_file(&root, "")).unwrap()).unwrap();
+    assert_eq!(
+        stored["complete"], true,
+        "old complete snapshot must survive"
+    );
+    assert_eq!(stored["fetched_at_unix_ms"], fetched_at);
+    let partial: Value =
+        serde_json::from_str(&std::fs::read_to_string(cache_file(&root, ".partial")).unwrap())
+            .unwrap();
+    assert_eq!(partial["complete"], false);
+    for file in [cache_file(&root, ""), cache_file(&root, ".partial")] {
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(
+            !text.contains("ghp_cache_secret"),
+            "the GitHub token must never reach cache files"
+        );
+    }
+
+    // 3) 离线普通查询：返回旧完整快照（from_cache、complete、fetched_at 不变）。
+    let mut offline = GithubClient::new(root.clone(), None, true);
+    offline.api_base = server.base.clone();
+    let cached = offline.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(server.request_count(), 3, "offline must not send HTTP");
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["complete"], true);
+    assert_eq!(cached["fetched_at_unix_ms"], fetched_at);
+    assert_eq!(cached["pulls"], first["pulls"]);
+
+    // 4) 恢复后成功 refresh：替换完整快照并清掉 partial。
+    fail_comments.store(false, Ordering::SeqCst);
+    let recovered = online.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(recovered["complete"], true, "{recovered}");
+    assert_eq!(recovered["from_cache"], false);
+    let recovered_at = recovered["fetched_at_unix_ms"].as_u64().unwrap();
+    assert!(recovered_at >= fetched_at);
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(cache_file(&root, "")).unwrap()).unwrap();
+    assert_eq!(stored["complete"], true);
+    assert_eq!(stored["fetched_at_unix_ms"], recovered_at);
+    assert!(
+        !cache_file(&root, ".partial").is_file(),
+        "a successful complete refresh clears the partial cache"
+    );
+    let cached = offline.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["complete"], true);
+    assert_eq!(cached["fetched_at_unix_ms"], recovered_at);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn partial_cache_is_readable_offline_when_no_complete_snapshot_exists() {
+    let _env = super::test_env_lock();
+    let server = mock_github(|request| {
+        let path = request.path().to_owned();
+        if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+            MockResponse::json(
+                200,
+                json!([pull_json(OWNER, REPO, 6, "partial only", Value::Null, None)]),
+            )
+        } else if path.ends_with("/issues/6/comments") {
+            MockResponse::json(500, json!({"message": "comments exploded"}))
+        } else {
+            MockResponse::json(404, json!({"message": "unexpected path"}))
+        }
+    });
+    let root = temp("partial-offline");
+    let client = client_for(&server, &root);
+    let failed = client.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(failed["complete"], false);
+    let fetched_at = failed["fetched_at_unix_ms"].as_u64().unwrap();
+    assert!(
+        !cache_file(&root, "").is_file(),
+        "an incomplete attempt must not create a complete snapshot"
+    );
+    assert!(cache_file(&root, ".partial").is_file());
+
+    let mut offline = GithubClient::new(root.clone(), None, true);
+    offline.api_base = server.base.clone();
+    let cached = offline.pulls(OWNER, REPO, SHA, false, true);
+    assert_no_http_refresh(&server, server.request_count());
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["complete"], false);
+    assert_eq!(cached["partial"], true);
+    assert_eq!(cached["fetched_at_unix_ms"], fetched_at);
+    assert_eq!(cached["pulls"].as_array().unwrap().len(), 1);
+    assert_eq!(first_error(&cached)["status"], 500);
+    assert!(
+        notices(&cached)
+            .iter()
+            .any(|notice| notice.contains("incomplete cached attempt")),
+        "{cached}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -38829,3 +38829,32 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - GUI/Tauri：`cargo test -q --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` 536 passed；两侧 clippy/fmt clean。
 - 前端：`npm run typecheck`/`lint`/`format:check` clean、`npm test` 1196 passed/0 failed；`cargo run -q -p xtask -- check-gui` 257 contracts。
 - 未运行：真实 SSH 服务器端到端、真实 Tauri 窗口点击、真实第三份冻结修订程序的完整创建+运行链路、真实科学算例。
+
+## GitHub 证据链 H07–H09：PR 分页/完整快照/同步语义（2026-10-29，审查报告后续批次）
+
+接 b3686b1 记录的 H01–H06。本批只改 history 证据链（`crates/colm-agent/src/tools/history*.rs`、`crates/colm-cli/src/history*.rs`、agent `prompt.md`），未改 GUI 与其他模块。
+
+### H07 commit_pull_requests 有界分页
+
+- 旧行为：一次把完整 PR 列表塞进结果，超过 registry 24k 截断线后"后面的 PR 永远看不到"；重复调用只能拿同样前缀。
+- 新行为：默认返回紧凑分页列表（最多 5 个 PR；正文摘录 800 字、理由摘录 300 字，按字符截断并标记省略），顶层 `page` 带 `next_cursor`；`pr_number` 指定时只返回那一个 PR 的完整对象。`next_cursor` 绑定 `(owner, repo, full sha)` 与列表指纹，列表变了就拒绝并要求从头再查。工具说明与 agent prompt 明确：不得声称一次调用读完了所有 PR 正文/讨论；失败刷新不清空最后一次完整快照，`partial:true`/`complete=false` 属不完整证据，不能当"没有 PR"或当前事实。
+- 回归：`commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand` 等。
+
+### H08 缓存按仓库绑定 + 完整/不完整快照分层
+
+- 旧行为：缓存只按 SHA 或 PR 编号做键，fork/导入场景会互相覆盖；失败/不完整刷新可能覆盖上一次完整结果，之后离线看到的其实是半截数据。
+- 新行为：缓存键 `(owner, repo, full sha)`，写临时文件再 rename；完整结果只进 `<sha>.json`（只认 `complete=true`），失败/部分尝试写 `<sha>.partial.json`，**失败刷新绝不写完整快照**；离线且无完整快照时可降级读 partial，但明确标 incomplete/older attempt、保留原 `fetched_at` 与 errors；成功刷新才替换完整快照并删除 partial；损坏/不属于该 (owner,repo,sha) 的缓存一律当未命中。工具结果带 `complete/from_cache/fetched_at/notices/errors`。
+- 回归：`failed_refresh_keeps_the_last_complete_snapshot_and_success_replaces_it`、`partial_cache_is_readable_offline_when_no_complete_snapshot_exists`。
+
+### H09 同步成功时间与尝试语义分离
+
+- 旧行为：`repos.json` 只有一个 `synced`，一次失败的 fetch/offline 检查也会让它看起来"刚同步过"；同步错误只活在本次输出里，下一次 `history-repos` 就消失。
+- 新行为：`last_successful_sync`（仅 clone/fetch 真正成功时更新）与 `checked_at`/`last_attempt`（每次尝试都更新，含 offline/skipped/error）分开；失败把错误同时写进持久 `errors`，成功才清；旧格式只有 `synced` 时读成 last_successful_sync，`synced` 继续作为向后兼容别名输出；工具说明明确不能把 checked_at 当成功同步时间。
+- 回归：`sync_failure_and_offline_keep_last_successful_sync_and_persistent_errors`、`legacy_repos_json_synced_is_read_as_last_successful_sync`。
+
+### 本轮验证（真实执行）
+
+- `cargo test -p colm-cli --bin colm-cli -- --test-threads=1` → 685 passed（含 history 夹具测试）。
+- `cargo test -p colm-agent --lib --bins -- --test-threads=1` → 374 passed / 1 ignored + 9 passed。
+- `cargo clippy --workspace --all-targets -- -D warnings` → exit 0；`cargo fmt --all --check` → clean。
+- 未运行：真实 GitHub 网络/token 与真实 PR 分页（夹具/mock）、真实外部后端（Codex/Claude Code）进程内联网矩阵；Windows 路径与缓存损坏的真实文件系统场景。

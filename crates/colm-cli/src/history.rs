@@ -486,6 +486,19 @@ impl Endpoint {
 // 注册表输出
 // ---------------------------------------------------------------------------------------------
 
+/// 写进输出 JSON 的语义说明：调用方不能把 checked_at 当成本次同步成功时间。
+const SYNC_SEMANTICS: &str = "synced/last_successful_sync = last successful clone or fetch; \
+checked_at_unix_ms = time of the last sync attempt (fetched/cloned/offline/error/skipped); \
+last_attempt = that attempt (may contain an error). history-repos only reads these values and \
+never advances either timestamp.";
+
+/// 最多持久保存多少条同步错误，避免 repos.json 无限增长。
+const MAX_STORED_SYNC_ERRORS: usize = 20;
+
+fn non_null(value: Value) -> Option<Value> {
+    (!value.is_null()).then_some(value)
+}
+
 fn config_path(root: &Path) -> PathBuf {
     root.join("repos.json")
 }
@@ -509,20 +522,35 @@ fn write_config(root: &Path, value: &Value) -> Result<()> {
 
 fn repo_json(repo: &Repo, config: &Value) -> Value {
     let identity = repo.identity();
-    let errors = repo.errors();
+    let entry = &config["repos"][repo.key.as_str()];
+    // H09：成功同步时间与“最近一次尝试”分开。旧格式只有 synced 时把它读成
+    // last_successful_sync（synced 继续作为向后兼容别名输出，语义仍是上次成功同步）。
+    let last_successful_sync = non_null(entry["last_successful_sync"].clone())
+        .or_else(|| non_null(entry["synced"].clone()));
+    let last_attempt = non_null(entry["last_attempt"].clone());
+    let checked_at_unix_ms = non_null(entry["checked_at_unix_ms"].clone());
     let default_branch = if repo.is_existing_checkout() {
         repo.default_branch()
     } else {
         None
     };
-    let synced = {
-        let value = config["repos"][repo.key.as_str()]["synced"].clone();
-        if value.is_null() {
-            Value::Null
-        } else {
-            value
+    let mut errors = repo.errors();
+    // 持久错误不能因一次 history-repos 读取而消失；last_attempt.error 也必须在顶层 errors 可见。
+    for persisted in entry["errors"].as_array().into_iter().flatten() {
+        if let Some(text) = persisted.as_str() {
+            if !errors.iter().any(|existing| existing == text) {
+                errors.push(text.to_owned());
+            }
         }
-    };
+    }
+    if let Some(error) = last_attempt
+        .as_ref()
+        .and_then(|attempt| attempt["error"].as_str())
+    {
+        if !errors.iter().any(|existing| existing == error) {
+            errors.push(error.to_owned());
+        }
+    }
     let coverage = if repo.is_existing_checkout() {
         repo.coverage()
     } else {
@@ -536,7 +564,11 @@ fn repo_json(repo: &Repo, config: &Value) -> Value {
         "path": repo.path.display().to_string(),
         "identity": identity,
         "default_branch": default_branch,
-        "synced": synced,
+        // 向后兼容别名：只代表上次成功 clone/fetch，不是本次检查时间。
+        "synced": last_successful_sync.clone().unwrap_or(Value::Null),
+        "last_successful_sync": last_successful_sync.unwrap_or(Value::Null),
+        "last_attempt": last_attempt.unwrap_or(Value::Null),
+        "checked_at_unix_ms": checked_at_unix_ms.unwrap_or(Value::Null),
         "coverage": coverage,
         "errors": errors,
     })
@@ -557,6 +589,7 @@ fn command_repos(opts: &Opts) -> Result<Value> {
     let config = read_config(&root);
     Ok(json!({
         "history_root": root.display().to_string(),
+        "sync_semantics": SYNC_SEMANTICS,
         "repos": repos_json(&root, &overrides, &config),
     }))
 }
@@ -584,6 +617,7 @@ fn command_sync(opts: &Opts) -> Result<Value> {
     let mut actions = Map::new();
     for key in [RepoKey::Desktop, RepoKey::Upstream] {
         if !selection.includes(key) {
+            record_attempt(&mut config, key.as_str(), "skipped", None);
             actions.insert(key.as_str().to_owned(), json!("skipped"));
             continue;
         }
@@ -594,6 +628,7 @@ fn command_sync(opts: &Opts) -> Result<Value> {
     write_config(&root, &config)?;
     Ok(json!({
         "history_root": root.display().to_string(),
+        "sync_semantics": SYNC_SEMANTICS,
         "repos": repos_json(&root, &overrides, &config),
         "actions": Value::Object(actions),
     }))
@@ -614,51 +649,55 @@ fn sync_one(
         if !offline {
             // 只更新 remote-tracking ref，不动用户工作区/当前分支。显式路径的仓库也允许 fetch：
             // fetch 不改变工作区内容，但失败只影响本仓库，不中断另一侧。
-            let fetched = git_ok(&repo.path, &["fetch", "--prune", "origin"]).is_some();
-            if fetched {
-                record_sync(config, &repo);
+            if git_ok(&repo.path, &["fetch", "--prune", "origin"]).is_some() {
+                record_success(config, &repo, "fetched");
                 return "fetched";
             }
-            record_error(config, &repo, "git fetch origin failed");
-            // 仍记录当前本地状态，避免整个命令只剩错误。
-            record_sync(config, &repo);
+            // H09：fetch 失败只记录本次尝试/错误，绝不刷新 last_successful_sync。
+            record_attempt(
+                config,
+                key.as_str(),
+                "error",
+                Some("git fetch origin failed"),
+            );
             return "error";
         }
-        record_sync(config, &repo);
+        // offline 只更新 checked_at/last_attempt；成功同步时间与旧错误都保持不变。
+        record_attempt(config, key.as_str(), "offline", None);
         return "offline";
     }
     if repo.path.is_dir() {
-        record_error(
+        record_attempt(
             config,
-            &repo,
-            "path exists but is not an independent git checkout",
+            key.as_str(),
+            "error",
+            Some("path exists but is not an independent git checkout"),
         );
         return "error";
     }
     if offline {
-        record_error(
+        record_attempt(
             config,
-            &repo,
-            "repository is missing and --offline forbids cloning it",
+            key.as_str(),
+            "offline",
+            Some("repository is missing and --offline forbids cloning it"),
         );
         return "offline";
     }
     if repo.external {
-        record_error(
+        record_attempt(
             config,
-            &repo,
-            "explicit repository path does not exist; refusing to clone over it",
+            key.as_str(),
+            "error",
+            Some("explicit repository path does not exist; refusing to clone over it"),
         );
         return "error";
     }
     let parent = repo.path.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
         if let Err(error) = std::fs::create_dir_all(&parent) {
-            record_error(
-                config,
-                &repo,
-                &format!("cannot create {}: {error}", parent.display()),
-            );
+            let message = format!("cannot create {}: {error}", parent.display());
+            record_attempt(config, key.as_str(), "error", Some(&message));
             return "error";
         }
     }
@@ -668,42 +707,85 @@ fn sync_one(
     );
     match cloned {
         Some(_) => {
-            record_sync(config, &repo);
+            record_success(config, &repo, "cloned");
             "cloned"
         }
         None => {
-            record_error(
+            record_attempt(
                 config,
-                &repo,
-                "git clone failed (network, credentials or remote unavailable)",
+                key.as_str(),
+                "error",
+                Some("git clone failed (network, credentials or remote unavailable)"),
             );
             "error"
         }
     }
 }
 
-fn record_sync(config: &mut Value, repo: &Repo) {
+/// 取/建 per-repo config 对象。写入时不覆盖已有字段（旧 repos.json 可能只有 synced）。
+fn repo_entry_mut<'a>(config: &'a mut Value, key: &str) -> &'a mut Value {
+    if !config["repos"].is_object() {
+        config["repos"] = json!({});
+    }
+    if !config["repos"][key].is_object() {
+        config["repos"][key] = json!({});
+    }
+    &mut config["repos"][key]
+}
+
+/// 记录一次同步尝试（包括 offline/skipped/error）：只更新 checked_at 与 last_attempt；
+/// 失败时把错误同时写进持久 errors（成功才清）。成功时间由 [`record_success`] 独占更新。
+fn record_attempt(config: &mut Value, key: &str, action: &str, error: Option<&str>) {
+    let now = now_unix_ms();
+    let entry = repo_entry_mut(config, key);
+    entry["checked_at_unix_ms"] = json!(now);
+    let mut attempt = json!({"action": action, "at_unix_ms": now});
+    if let Some(error) = error {
+        let message = truncate(error, MAX_DETAIL_CHARS);
+        attempt["error"] = json!(message);
+        let mut errors = entry["errors"].as_array().cloned().unwrap_or_default();
+        if !errors
+            .iter()
+            .any(|existing| existing.as_str() == Some(&message))
+        {
+            errors.push(json!(message));
+        }
+        if errors.len() > MAX_STORED_SYNC_ERRORS {
+            let drop_count = errors.len() - MAX_STORED_SYNC_ERRORS;
+            errors.drain(0..drop_count);
+        }
+        entry["errors"] = Value::Array(errors);
+    }
+    entry["last_attempt"] = attempt;
+}
+
+/// 只有 clone/fetch 真正成功才走到这里：更新 last_successful_sync（以及兼容别名 synced）、
+/// default_branch 与 last_attempt=成功动作，并清掉持久错误。失败路径绝不能调用它。
+fn record_success(config: &mut Value, repo: &Repo, action: &'static str) {
     let Some(endpoint) = repo.endpoint(None).ok() else {
-        record_error(config, repo, "cannot resolve a query endpoint after sync");
+        record_attempt(
+            config,
+            repo.key.as_str(),
+            "error",
+            Some("cannot resolve a query endpoint after a successful sync"),
+        );
         return;
     };
     let branch = repo.default_branch();
-    config["repos"][repo.key.as_str()] = json!({
-        "default_branch": branch,
-        "synced": {
-            "ref": endpoint.ref_name,
-            "sha": endpoint.sha,
-            "at_unix_ms": now_unix_ms(),
-        },
-        "errors": [],
+    let now = now_unix_ms();
+    let synced = json!({
+        "ref": endpoint.ref_name,
+        "sha": endpoint.sha,
+        "at_unix_ms": now,
     });
-}
-
-fn record_error(config: &mut Value, repo: &Repo, message: &str) {
-    let entry = config["repos"][repo.key.as_str()].clone();
-    let mut errors = entry["errors"].as_array().cloned().unwrap_or_default();
-    errors.push(json!(truncate(message, MAX_DETAIL_CHARS)));
-    config["repos"][repo.key.as_str()]["errors"] = Value::Array(errors);
+    let entry = repo_entry_mut(config, repo.key.as_str());
+    entry["default_branch"] = json!(branch);
+    entry["last_successful_sync"] = synced.clone();
+    // 向后兼容：旧调用方只认 synced。语义仍是“上次成功 clone/fetch”。
+    entry["synced"] = synced;
+    entry["checked_at_unix_ms"] = json!(now);
+    entry["last_attempt"] = json!({"action": action, "at_unix_ms": now});
+    entry["errors"] = json!([]);
 }
 
 // ---------------------------------------------------------------------------------------------

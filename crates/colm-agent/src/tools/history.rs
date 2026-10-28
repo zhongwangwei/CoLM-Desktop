@@ -563,6 +563,152 @@ impl Tool for CommitDetails {
     }
 }
 
+/// commit_pull_requests 的分页/紧凑预算：一次最多 5 个 PR、每个正文摘录 800 字、理由摘录
+/// 300 字。这样默认结果远低于 registry 的 24k 截断线；“后面看不到”的部分用 next_cursor
+/// 继续、要完整原文用 pr_number 单独取，而不是重复调用拿同样的前缀。
+const PR_PAGE_DEFAULT: u64 = 3;
+const PR_PAGE_MAX: u64 = 5;
+const PR_BODY_EXCERPT_CHARS: usize = 800;
+const PR_REASON_EXCERPT_CHARS: usize = 300;
+
+/// 按字符截断并标记省略；中文按字符计数，和 MAX_RESULT_CHARS 的口径一致。
+fn truncate_excerpt(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(limit).collect();
+    out.push('…');
+    out
+}
+
+/// 紧凑列表里的一个 PR：保留身份/时间/理由状态/完整性/evidence_id 与有界正文摘录，
+/// 丢掉完整 body、候选明细与评论摘录（那些用 pr_number 单独读）。
+fn compact_pull(pull: &Value) -> Value {
+    let body = pull["body"].as_str().unwrap_or_default();
+    let body_chars = body.chars().count();
+    let reason = pull.get("reason").unwrap_or(&Value::Null);
+    let comments = pull.get("comments").unwrap_or(&Value::Null);
+    json!({
+        "number": pull["number"],
+        "owner_repo": pull["owner_repo"],
+        "url": pull["url"],
+        "title": pull["title"],
+        "state": pull["state"],
+        "merged_at_unix_ms": pull["merged_at_unix_ms"],
+        "author": pull["author"],
+        "head_sha": pull["head_sha"],
+        "base_ref": pull["base_ref"],
+        "body_excerpt": truncate_excerpt(body, PR_BODY_EXCERPT_CHARS),
+        "body_chars": body_chars,
+        "body_truncated": body_chars > PR_BODY_EXCERPT_CHARS,
+        "reason": {
+            "status": reason["status"],
+            "basis": reason["basis"],
+            "excerpt": reason["excerpt"]
+                .as_str()
+                .map(|text| truncate_excerpt(text, PR_REASON_EXCERPT_CHARS)),
+            "coverage": reason["coverage"],
+        },
+        "comments": {
+            "complete": comments["complete"],
+            "excerpt_count": comments["excerpts"].as_array().map_or(0, Vec::len),
+        },
+        "evidence_id": pull["evidence_id"],
+    })
+}
+
+/// 把 client 返回的完整 PR 列表变成有界输出：默认是紧凑分页列表（顶层 page + next_cursor），
+/// pr_number 指定时只返回那一个 PR 的完整对象（正文/讨论原文仍≤客户端上限）。
+fn paginate_pull_requests(value: &mut Value, args: &Value) -> Result<()> {
+    let page_size = optional_u64(args, "page_size")?.unwrap_or(PR_PAGE_DEFAULT);
+    if page_size == 0 || page_size > PR_PAGE_MAX {
+        bail!("argument page_size must be between 1 and {PR_PAGE_MAX}");
+    }
+    let cursor = opt_str(args, "cursor");
+    let pr_number = optional_u64(args, "pr_number")?;
+    let pulls = value
+        .get("pulls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(number) = pr_number {
+        if cursor.is_some() {
+            bail!("cursor cannot be combined with pr_number; use one continuation mode at a time");
+        }
+        if let Some(pull) = pulls
+            .iter()
+            .find(|pull| pull["number"].as_u64() == Some(number))
+            .cloned()
+        {
+            value["pulls"] = json!([pull]);
+            value["page"] = Value::Null;
+            return Ok(());
+        }
+        let read_errors = value
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty());
+        if pulls.is_empty() && read_errors {
+            // 读取失败不是“未关联”：保留 errors，不谎报关联结果。
+            if let Some(notices) = value["notices"].as_array_mut() {
+                notices.push(json!(format!(
+                    "could not read the PR association list; pull request #{number} was not checked (see errors)"
+                )));
+            }
+            value["page"] = Value::Null;
+            return Ok(());
+        }
+        let associated: Vec<u64> = pulls
+            .iter()
+            .filter_map(|pull| pull["number"].as_u64())
+            .collect();
+        bail!(
+            "pull request #{number} is not associated with this commit in the returned list (associated: {associated:?}); omit pr_number to see the paginated list"
+        );
+    }
+
+    let total = pulls.len();
+    let offset = match cursor {
+        Some(cursor) => {
+            if cursor.is_empty() || !cursor.bytes().all(|byte| byte.is_ascii_digit()) {
+                bail!(
+                    "cursor {cursor:?} is not a valid pagination cursor; use the next_cursor returned by the previous call, or omit it to start from the first page"
+                );
+            }
+            let offset = cursor.parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("cursor {cursor:?} is not a valid pagination cursor")
+            })?;
+            if offset > total || (offset > 0 && offset == total) {
+                bail!(
+                    "cursor offset {offset} is outside the associated PR list (total {total}); the list may have changed - restart without cursor"
+                );
+            }
+            offset
+        }
+        None => 0,
+    };
+    let size = page_size as usize;
+    let end = (offset + size).min(total);
+    let returned = end - offset;
+    let has_more = end < total;
+    let compact: Vec<Value> = pulls[offset..end].iter().map(compact_pull).collect();
+    value["pulls"] = Value::Array(compact);
+    value["page"] = json!({
+        "offset": offset,
+        "page_size": size,
+        "returned": returned,
+        "total": total,
+        "has_more": has_more,
+        "next_cursor": if has_more {
+            Value::String(end.to_string())
+        } else {
+            Value::Null
+        },
+    });
+    Ok(())
+}
+
 /// GitHub 上与该 commit 关联的 PR（0/1/多个）及其理由摘录与缓存。
 struct CommitPullRequests;
 
@@ -571,7 +717,7 @@ impl Tool for CommitPullRequests {
         "commit_pull_requests"
     }
     fn description(&self) -> &'static str {
-        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. reason is NOT a motivation verdict: status=unchecked means raw evidence_candidates (pull body / discussion excerpts with author, URL and coverage) exist and the upper layer must quote an explicit sentence before calling a reason documented; not_recorded means the requested scope was read completely and contains no candidate; unavailable means the discussion was not read, failed or was truncated. Template bodies and bot/courtesy comments are candidates only. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input; a selected local-only commit has no verified GitHub repository here. GitHub networking follows the user's network setting (independent of the backend's search client): when it is off the tool reads the offline cache only and never sends HTTP, even with refresh=true; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. Call commit_details first for the local Git evidence."
+        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. reason is NOT a motivation verdict: status=unchecked means raw evidence_candidates (pull body / discussion excerpts with author, URL and coverage) exist and the upper layer must quote an explicit sentence before calling a reason documented; not_recorded means the requested scope was read completely and contains no candidate; unavailable means the discussion was not read, failed or was truncated. Template bodies and bot/courtesy comments are candidates only. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input; a selected local-only commit has no verified GitHub repository here. GitHub networking follows the user's network setting (independent of the backend's search client): when it is off the tool reads the offline cache only and never sends HTTP, even with refresh=true; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. The PR list is returned as a bounded compact page (default 3, page_size 1-5): continue with the returned page.next_cursor; pass pr_number to read one associated PR's full body/reason candidates/discussion excerpts. Multiple long PRs or a full discussion never fit in one result - do not claim you read them all in one call. Call commit_details first for the local Git evidence."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -582,6 +728,9 @@ impl Tool for CommitPullRequests {
             "sha": string("full 40-character lowercase hexadecimal commit SHA"),
             "refresh": nullable("boolean", "re-query GitHub even when the cache exists (online only); null for false"),
             "include_discussion": nullable("boolean", "also read the PR discussion comments as reason evidence; null for false"),
+            "cursor": nullable("string", "opaque continuation cursor: pass the previous result's page.next_cursor to read the next compact page; null to start from the first page; invalid/out-of-range cursors are rejected, never silently restarted"),
+            "page_size": nullable("integer", "compact PRs per page, 1..=5; null for 3"),
+            "pr_number": nullable("integer", "return only this associated PR with its full body/reason candidates/discussion excerpts; null for the paged compact list"),
         }))
     }
     fn tier(&self) -> Tier {
@@ -612,6 +761,9 @@ impl Tool for CommitPullRequests {
             offline,
         );
         let mut value = client.pulls(owner, repo, &sha, refresh, include_discussion);
+        // H07：client 返回完整列表，工具层在这里切成有界紧凑页 / 单 PR 全文，避免 24k
+        // 截断后“后部永远不可达”。
+        paginate_pull_requests(&mut value, args)?;
         value["source_context"] = json!({
             "kind": "github_repository",
             "repositories": [repository],

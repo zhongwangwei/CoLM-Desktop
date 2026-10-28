@@ -205,6 +205,12 @@ fn the_three_history_tools_are_registered_as_strict_read_only_tools() {
             assert!(properties.get("source").is_none(), "{name}");
             assert!(properties.get("source_dir").is_none(), "{name}");
         }
+        if name == "commit_pull_requests" {
+            // H07：有界分页 + 单 PR 原文取回参数。
+            for key in ["cursor", "page_size", "pr_number"] {
+                assert!(properties.get(key).is_some(), "{name} {key}");
+            }
+        }
     }
 }
 
@@ -1497,5 +1503,289 @@ fn commit_pull_requests_reports_selected_local_commits_as_having_no_github_repos
         format!("{error:#}").contains("selected local commit has no owner/repo"),
         "{error:#}"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn long_pull_requests(count: u64, body_chars: usize) -> Value {
+    let pulls: Vec<Value> = (1..=count)
+        .map(|number| {
+            let mut body = format!(
+                "PR#{number} reason: the old default physically froze at night; this fixes it. "
+            );
+            while body.chars().count() < body_chars {
+                body.push('中');
+            }
+            json!({
+                "number": number,
+                "title": format!("Long PR {number}"),
+                "body": body,
+                "state": "closed",
+                "merged_at": "2024-05-01T10:00:00Z",
+                "html_url": format!("https://github.com/CoLM-SYSU/CoLM/pull/{number}"),
+                "head": {"sha": "b".repeat(40)},
+                "base": {"ref": "main"},
+                "user": {"login": format!("author{number}")},
+            })
+        })
+        .collect();
+    Value::Array(pulls)
+}
+
+fn pr_page_args(
+    repository: &str,
+    sha: &str,
+    refresh: bool,
+    include_discussion: bool,
+    cursor: Value,
+    page_size: Value,
+    pr_number: Value,
+) -> Value {
+    json!({
+        "repository": repository,
+        "sha": sha,
+        "refresh": refresh,
+        "include_discussion": include_discussion,
+        "cursor": cursor,
+        "page_size": page_size,
+        "pr_number": pr_number,
+    })
+}
+
+#[test]
+fn commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand() {
+    let root = temp_dir("pulls-pages");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    mock.set_response(long_pull_requests(4, 8_000));
+    let sha = "e".repeat(40);
+    let ctx = online_context(&root, None);
+    let call = |args: Value| CommitPullRequests.call(&args, &ctx);
+
+    // 默认页：3 个紧凑项，body/reason 有界，输出不会被 result_text 截断。
+    let first = call(pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+    ))
+    .unwrap();
+    assert_eq!(first["schema"], 2);
+    assert_eq!(first["commit"], json!(sha));
+    assert_eq!(first["complete"], true);
+    assert!(first.get("repository").is_some());
+    let page = &first["page"];
+    assert_eq!(page["offset"], 0);
+    assert_eq!(page["page_size"], 3);
+    assert_eq!(page["returned"], 3);
+    assert_eq!(page["total"], 4);
+    assert_eq!(page["has_more"], true);
+    assert_eq!(page["next_cursor"], "3");
+    let pulls = first["pulls"].as_array().unwrap();
+    assert_eq!(pulls.len(), 3);
+    for (index, pull) in pulls.iter().enumerate() {
+        assert_eq!(pull["number"], json!(index as u64 + 1));
+        assert!(
+            pull.get("body").is_none(),
+            "compact page must not carry full bodies"
+        );
+        assert_eq!(pull["body_chars"], 8_000);
+        assert_eq!(pull["body_truncated"], true);
+        assert!(
+            pull["body_excerpt"].as_str().unwrap().chars().count() <= PR_BODY_EXCERPT_CHARS + 1
+        );
+        assert!(pull["reason"]["coverage"].is_object());
+        assert!(
+            pull["reason"]["excerpt"].as_str().unwrap().chars().count()
+                <= PR_REASON_EXCERPT_CHARS + 1
+        );
+        assert!(pull["comments"]["complete"].is_boolean());
+        assert_eq!(pull["comments"]["excerpt_count"], 0);
+        assert!(
+            pull["evidence_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("github:zhongwangwei/CoLM-Desktop#"),
+            "{pull}"
+        );
+    }
+    assert!(
+        serde_json::to_string(&first).unwrap().chars().count() < crate::tools::MAX_RESULT_CHARS,
+        "a compact page must fit the 24k result budget"
+    );
+
+    // 用 next_cursor 继续，最后一页 has_more=false / next_cursor=null。
+    let second = call(pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        json!("3"),
+        Value::Null,
+        Value::Null,
+    ))
+    .unwrap();
+    assert_eq!(second["page"]["offset"], 3);
+    assert_eq!(second["page"]["returned"], 1);
+    assert_eq!(second["page"]["has_more"], false);
+    assert_eq!(second["page"]["next_cursor"], Value::Null);
+    assert_eq!(second["pulls"][0]["number"], 4);
+
+    // pr_number：只返回该 PR 的完整对象（完整 body ≤8000、候选理由、讨论摘录），page=null。
+    let single = call(pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        Value::Null,
+        Value::Null,
+        json!(2),
+    ))
+    .unwrap();
+    assert_eq!(single["page"], Value::Null);
+    let pulls = single["pulls"].as_array().unwrap();
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pulls[0]["number"], 2);
+    assert_eq!(pulls[0]["body"].as_str().unwrap().chars().count(), 8_000);
+    assert!(!pulls[0]["reason"]["evidence_candidates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(pulls[0]["comments"]["excerpts"].is_array());
+    assert_eq!(pulls[0]["author"], "author2");
+
+    // page_size 边界（1 和最大 5）。
+    let one = call(pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        Value::Null,
+        json!(1),
+        Value::Null,
+    ))
+    .unwrap();
+    assert_eq!(one["page"]["page_size"], 1);
+    assert_eq!(one["page"]["returned"], 1);
+    assert_eq!(one["page"]["next_cursor"], "1");
+    let max = call(pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        Value::Null,
+        json!(5),
+        Value::Null,
+    ))
+    .unwrap();
+    assert_eq!(max["page"]["returned"], 4);
+    assert_eq!(max["page"]["has_more"], false);
+
+    // 非法 cursor/page_size/pr_number 都明确报错，不静默从头或返回空。
+    let cases = [
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                json!("abc"),
+                Value::Null,
+                Value::Null,
+            ),
+            "not a valid pagination cursor",
+        ),
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                json!("4"),
+                Value::Null,
+                Value::Null,
+            ),
+            "outside the associated PR list",
+        ),
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                json!(0),
+                Value::Null,
+            ),
+            "page_size must be between 1 and 5",
+        ),
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                json!(6),
+                Value::Null,
+            ),
+            "page_size must be between 1 and 5",
+        ),
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                Value::Null,
+                json!(99),
+            ),
+            "not associated",
+        ),
+        (
+            pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                json!("0"),
+                Value::Null,
+                json!(1),
+            ),
+            "cannot be combined with pr_number",
+        ),
+    ];
+    for (args, expected) in cases {
+        let error = format!("{:#}", call(args).unwrap_err());
+        assert!(
+            error.contains(expected),
+            "expected {expected:?} in {error:#}"
+        );
+    }
+
+    // 离线缓存与在线使用同一分页逻辑（缓存里保留完整 pulls，工具层再切片）。
+    let offline = pull_context(&root, None, false, false);
+    let cached = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                json!(2),
+                Value::Null,
+            ),
+            &offline,
+        )
+        .unwrap();
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["complete"], true);
+    assert_eq!(cached["page"]["page_size"], 2);
+    assert_eq!(cached["page"]["returned"], 2);
+    assert_eq!(cached["page"]["next_cursor"], "2");
     std::fs::remove_dir_all(root).unwrap();
 }
