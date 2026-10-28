@@ -45,7 +45,7 @@ const ResearchPage = lazy(() => import('./features/studies/ResearchPage'));
 const SettingsPage = lazy(() => import('./features/settings/SettingsPage'));
 const ComparePage = lazy(() => import('./features/compare/ComparePage'));
 const AssistantPanel = lazy(() => import('./features/assistant/AssistantPanel'));
-/** 侧栏收起成图标 rail 是长期偏好；专注视图只管本次会话。 */
+/** 侧栏收起成图标 rail 是长期偏好。 */
 const NAV_RAIL_KEY = 'colm-ui-nav-rail';
 type Language = AppState['language'];
 const shellText = (language: Language, zh: string, en: string) => (language === 'en' ? en : zh);
@@ -164,13 +164,11 @@ export function AppShell({
   language,
   assistantOpen,
   navCollapsed,
-  focusMode,
   sidebar,
   main,
   splitter,
   assistant,
   onToggleNav,
-  onToggleFocus,
   onToggleAssistant,
   onToggleLanguage,
   onCloseAssistant,
@@ -179,13 +177,11 @@ export function AppShell({
   language: Language;
   assistantOpen: boolean;
   navCollapsed: boolean;
-  focusMode: boolean;
   sidebar: ReactNode;
   main: ReactNode;
   splitter?: ReactNode;
   assistant?: ReactNode;
   onToggleNav: () => void;
-  onToggleFocus: () => void;
   onToggleAssistant: () => void;
   onToggleLanguage: () => void;
   onCloseAssistant: () => void;
@@ -199,7 +195,6 @@ export function AppShell({
       : layout.assistant === 'drawer'
         ? 'assistant-drawer'
         : '',
-    focusMode ? 'shell-focus' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -224,22 +219,13 @@ export function AppShell({
               variant="ghost"
               className="toolbar-toggle"
               aria-pressed={navCollapsed}
-              aria-controls={layout.nav === 'hidden' ? undefined : 'app-sidebar'}
+              aria-controls="app-sidebar"
               aria-expanded={layout.nav === 'full'}
-              disabled={layout.nav === 'hidden'}
               onClick={onToggleNav}
             >
               {navCollapsed
                 ? tr('展开导航', 'Expand navigation')
                 : tr('收起导航', 'Collapse navigation')}
-            </Button>
-            <Button
-              variant="ghost"
-              className="toolbar-toggle"
-              aria-pressed={focusMode}
-              onClick={onToggleFocus}
-            >
-              {focusMode ? tr('退出专注视图', 'Exit focus view') : tr('专注视图', 'Focus view')}
             </Button>
             <Button variant="ghost" aria-pressed={assistantOpen} onClick={onToggleAssistant}>
               {tr('AI 助手', 'AI assistant')}
@@ -253,11 +239,9 @@ export function AppShell({
             </Button>
           </div>
         </header>
-        {layout.nav !== 'hidden' && (
-          <aside id="app-sidebar" className="sidebar" aria-label={tr('主导航', 'Main navigation')}>
-            {sidebar}
-          </aside>
-        )}
+        <aside id="app-sidebar" className="sidebar" aria-label={tr('主导航', 'Main navigation')}>
+          {sidebar}
+        </aside>
         <main className="main-pane">{main}</main>
         {layout.splitter ? splitter : null}
         {assistant != null && (
@@ -291,9 +275,8 @@ export default function App() {
   const [assistantWidth, setAssistantWidth] = useState(() =>
     assistantPanelWidth(Number(readStored('colm-ui-assistant-width')) || 320, window.innerWidth),
   );
-  // 收起导航是长期偏好；专注视图不跨重启，避免下次打开软件时找不到导航。
+  // 收起导航是长期偏好。
   const [navCollapsed, setNavCollapsed] = useState(() => readStored(NAV_RAIL_KEY) === 'true');
-  const [focusMode, setFocusMode] = useState(false);
   const drag = useRef<{ id: number; x: number; width: number } | null>(null);
   useEffect(() => {
     writeStored('colm-ui-assistant-width', String(assistantWidth));
@@ -316,11 +299,10 @@ export default function App() {
   useEffect(() => {
     if (state.assistantOpen) setAssistantMounted(true);
   }, [state.assistantOpen]);
-  // U-06：布局完全由纯函数按窗口宽度与三个开关算出（窄窗口助手改抽屉、专注视图隐藏两栏）。
+  // U-06：布局完全由纯函数按窗口宽度与两个开关算出（窄窗口助手改抽屉、可收起导航）。
   const layout = shellLayout({
     viewportWidth: viewport,
     assistantOpen: state.assistantOpen,
-    focusMode,
     navCollapsed,
     assistantWidth,
   });
@@ -359,15 +341,7 @@ export default function App() {
     update({ projectView: view, projectCasesOpen: false });
     return true;
   };
-  // 工具栏开关：专注视图里点助手会先退出专注，再展开助手，免得按了没反应。
-  const toggleAssistant = () => {
-    if (focusMode) {
-      setFocusMode(false);
-      update({ assistantOpen: true });
-      return;
-    }
-    update({ assistantOpen: !state.assistantOpen });
-  };
+  const toggleAssistant = () => update({ assistantOpen: !state.assistantOpen });
   usePageContract({
     title: 'CoLM Desktop',
     step: state.route,
@@ -526,13 +500,11 @@ export default function App() {
         language={state.language}
         assistantOpen={state.assistantOpen}
         navCollapsed={navCollapsed}
-        focusMode={focusMode}
         sidebar={sidebar}
         main={main}
         splitter={splitter}
         assistant={assistant}
         onToggleNav={() => setNavCollapsed((value) => !value)}
-        onToggleFocus={() => setFocusMode((value) => !value)}
         onToggleAssistant={toggleAssistant}
         onToggleLanguage={() => update({ language: en ? 'zh' : 'en' })}
         onCloseAssistant={() => update({ assistantOpen: false })}
