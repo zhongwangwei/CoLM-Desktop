@@ -103,12 +103,42 @@ pub(super) fn aggregate_pairs(
     Ok(out)
 }
 
+/// CF `calendar` 只接受与固定秒数一致的公历；noleap/360_day/all_leap/julian 必须明确拒绝。
+///
+/// 审计 P1-2：原来只读 `time:units`、按公历固定秒数换算，noleap 的 `days since 2000-01-01`
+/// 第 59 天会被算成 2 月 29 日（实际应为 3 月 1 日），时间轴整体错位还会被当真。
+fn ensure_standard_calendar(file: &netcdf::File, path: &Path, time_variable: &str) -> Result<()> {
+    let Some(calendar) = file
+        .variable(time_variable)
+        .and_then(|variable| variable.attribute_value("calendar"))
+        .and_then(Result::ok)
+        .and_then(|value| match value {
+            netcdf::AttributeValue::Str(text) => Some(text),
+            netcdf::AttributeValue::Strs(mut texts) => texts.pop(),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    let normalized = calendar.trim().to_ascii_lowercase();
+    ensure!(
+        matches!(
+            normalized.as_str(),
+            "standard" | "gregorian" | "proleptic_gregorian"
+        ),
+        "{}: unsupported CF calendar {calendar:?} for {time_variable}; only standard/gregorian/proleptic_gregorian can be converted to Unix time (noleap/360_day need a real calendar implementation, refuse instead of silently shifting the axis)",
+        path.display()
+    );
+    Ok(())
+}
+
 /// 观测文件**完整时间轴**的采样步长（秒）：日/月聚合覆盖率的分母。
 ///
 /// 不能用 QC/缺测过滤后的可用时刻反推（同上）。预检时还没有模型 history，只能取观测文件的
 /// 完整时间轴；运行时以模型输出间隔与它的较粗者为准。
 pub(super) fn observation_axis_step(path: &Path) -> Result<i64> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    ensure_standard_calendar(&file, path, "time")?;
     let units = crate::variable_units(&file, "time")
         .with_context(|| format!("time in {} has no units", path.display()))?;
     let times =
@@ -565,6 +595,7 @@ impl GridObservation {
         let time_name = coordinate(time_dim, &["time"])?;
         let lat_name = coordinate(lat_dim, &["lat", "latitude"])?;
         let lon_name = coordinate(lon_dim, &["lon", "longitude"])?;
+        ensure_standard_calendar(&file, path, &time_name)?;
         let units = crate::variable_units(&file, &time_name)
             .with_context(|| format!("{time_name} in {} has no units", path.display()))?;
         let time = cf_unix_seconds(&crate::read_file_1d(&file, path, &time_name)?, &units)
@@ -689,16 +720,40 @@ fn read_gauge(path: &Path, variable: Option<&str>) -> Result<(Vec<i64>, Vec<f64>
         "{variable} in {} holds more than one gauge; give a file with one station",
         path.display()
     );
+    ensure_standard_calendar(&file, path, "time")?;
     let units = crate::variable_units(&file, "time")
         .with_context(|| format!("time in {} has no units", path.display()))?;
     let time = cf_unix_seconds(&crate::read_file_1d(&file, path, "time")?, &units)
         .with_context(|| format!("unsupported time units {units:?} in {}", path.display()))?;
-    let values = crate::read_file_1d(&file, path, variable)?;
+    // 流量变量常以 packed int16 存储（scale_factor/add_offset）：不解包会把 100 当 10 用。
+    // 缺测标记要在解码前识别，否则 _FillValue 会解成一个有限值进入指标（审计 P1-2）。
+    let markers = crate::variable_missing_markers(&field);
+    let numeric = |name: &str| {
+        field
+            .attribute_value(name)
+            .and_then(Result::ok)
+            .and_then(|value| crate::numeric_attribute_values(value).into_iter().next())
+    };
+    let (scale, offset) = (
+        numeric("scale_factor").unwrap_or(1.0),
+        numeric("add_offset").unwrap_or(0.0),
+    );
+    let raw = crate::read_file_1d(&file, path, variable)?;
     ensure!(
-        values.len() == time.len(),
+        raw.len() == time.len(),
         "{variable} in {} does not have one value per time",
         path.display()
     );
+    let values = raw
+        .into_iter()
+        .map(|value| {
+            if !value.is_finite() || markers.contains(&value) {
+                f64::NAN
+            } else {
+                value * scale + offset
+            }
+        })
+        .collect();
     Ok((time, values))
 }
 
@@ -712,11 +767,13 @@ fn read_gauge_text(path: &Path) -> Result<(Vec<i64>, Vec<f64>)> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut fields = line
+        // 空列表示"这个字段没填"，不是"这一列不存在"：`2003-01-01,,1` 的流量列是空的（缺测），
+        // 第三列可能是 QC 值。原来把空字段删掉会把 QC 的 1 当流量（审计 P1-2）。
+        let columns = line
             .split([',', ';', '\t'])
             .map(str::trim)
-            .filter(|field| !field.is_empty());
-        let (Some(date), Some(value)) = (fields.next(), fields.next()) else {
+            .collect::<Vec<_>>();
+        let Some(date) = columns.first().filter(|field| !field.is_empty()) else {
             continue;
         };
         // 表头（`date,discharge`）解析不出日期，跳过。
@@ -724,7 +781,7 @@ fn read_gauge_text(path: &Path) -> Result<(Vec<i64>, Vec<f64>)> {
             continue;
         };
         time.push(t);
-        values.push(value.parse::<f64>().unwrap_or(f64::NAN));
+        values.push(parse_gauge_value(columns.get(1).copied().unwrap_or("")));
     }
     ensure!(
         !time.is_empty(),
@@ -732,6 +789,20 @@ fn read_gauge_text(path: &Path) -> Result<(Vec<i64>, Vec<f64>)> {
         path.display()
     );
     Ok((time, values))
+}
+
+/// 文本流量值：空字段与常见缺测码一律当缺测，不当 0 或 -9999 参与指标。
+fn parse_gauge_value(text: &str) -> f64 {
+    let text = text.trim();
+    if text.is_empty()
+        || matches!(
+            text.to_ascii_lowercase().as_str(),
+            "-9999" | "-9999.0" | "-999" | "-999.9" | "nan" | "na" | "n/a" | "null"
+        )
+    {
+        return f64::NAN;
+    }
+    text.parse::<f64>().unwrap_or(f64::NAN)
 }
 
 /// `YYYY-MM-DD`、`YYYY/MM/DD`，可带 ` HH:MM[:SS]` 或 `THH:MM[:SS]`、可带时区后缀。

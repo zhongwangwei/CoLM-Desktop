@@ -438,3 +438,73 @@ fn the_expected_step_comes_from_the_full_observation_axis() {
     assert_eq!(observation_axis_step(&daily).unwrap(), DAY);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// 审计 P1-2：水文站 NetCDF 的流量变量是 packed 存储时必须解包；_FillValue 要在解码前识别。
+#[test]
+fn gauge_netcdf_values_are_unpacked_and_missing_markers_stay_missing() {
+    let root = scratch("gauge-packed");
+    let path = root.join("gauge.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("time", 3).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2003-01-01")
+            .unwrap();
+        time.put_values(&[0.0, 1.0, 2.0], ..).unwrap();
+        let mut flow = file.add_variable::<i16>("Q", &["time"]).unwrap();
+        flow.put_attribute("scale_factor", 0.1).unwrap();
+        flow.put_attribute("add_offset", 0.0).unwrap();
+        flow.put_attribute("_FillValue", -9999i16).unwrap();
+        flow.put_values(&[100i16, -9999, 250], ..).unwrap();
+    }
+    let (time, values) = read_gauge(&path, Some("Q")).unwrap();
+    assert_eq!(time, [JAN1, JAN1 + DAY, JAN1 + 2 * DAY]);
+    // 存储 100 → 10.0 m³/s；-9999 是缺测，不能解成 -999.9。
+    assert!((values[0] - 10.0).abs() < 1e-12);
+    assert!(values[1].is_nan());
+    assert!((values[2] - 25.0).abs() < 1e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 审计 P1-2：非公历 CF calendar 必须明确拒绝，不能按公历固定秒数静默换算。
+#[test]
+fn a_non_standard_cf_calendar_is_refused_instead_of_shifted() {
+    let root = scratch("gauge-calendar");
+    let path = root.join("gauge-noleap.nc");
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2000-01-01")
+            .unwrap();
+        time.put_attribute("calendar", "noleap").unwrap();
+        time.put_values(&[0.0, 59.0], ..).unwrap();
+        file.add_variable::<f64>("Q", &["time"])
+            .unwrap()
+            .put_values(&[1.0, 2.0], ..)
+            .unwrap();
+    }
+    let error = read_gauge(&path, Some("Q")).unwrap_err();
+    assert!(format!("{error:#}").contains("calendar"), "{error:#}");
+    assert!(format!("{error:#}").contains("noleap"), "{error:#}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 审计 P1-2：`date,,1` 的空列是缺测，不是"这一列不存在"；不能把第三列 QC 值当流量。
+#[test]
+fn gauge_csv_keeps_empty_columns_and_treats_missing_codes_as_missing() {
+    let root = scratch("gauge-csv");
+    let csv = root.join("gauge.csv");
+    std::fs::write(
+        &csv,
+        "date,discharge,qc\n2003-01-01,,1\n2003-01-02,-9999,0\n2003-01-03,5,0\n2003-01-04,NA,0\n",
+    )
+    .unwrap();
+    let (time, values) = read_gauge(&csv, None).unwrap();
+    assert_eq!(time.len(), 4);
+    assert!(values[0].is_nan(), "空流量列是缺测，不能取到 QC 的 1");
+    assert!(values[1].is_nan(), "-9999 是缺测码");
+    assert!((values[2] - 5.0).abs() < 1e-12);
+    assert!(values[3].is_nan(), "NA 是缺测码");
+    std::fs::remove_dir_all(root).unwrap();
+}
