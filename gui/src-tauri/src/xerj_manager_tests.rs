@@ -497,6 +497,8 @@ fn probe_health_reports_http_failures_without_leaking_key() {
     let error = probe_health(&unauthorized.endpoint, secret, Duration::from_secs(2)).unwrap_err();
     assert!(error.contains("401"), "{error}");
     assert!(!error.contains(secret), "错误文本泄露了 key：{error}");
+    // HTTP 语义错误不是传输失败，不能自动重试（否则会重复打真实服务）。
+    assert_eq!(unauthorized.requests().len(), 1, "语义错误不应触发传输重试");
 
     let broken =
         fake_server(|_| http_response("500 Internal Server Error", r#"{"status":"green"}"#));
@@ -533,20 +535,41 @@ fn probe_health_sends_key_only_when_present() {
     let server = fake_server(|_| green_health());
     probe_health(&server.endpoint, "key-abc-123", Duration::from_secs(2)).unwrap();
     probe_health(&server.endpoint, "", Duration::from_secs(2)).unwrap();
+    // 传输层失败会重试一次，所以不能断言总数；最后两次请求必须对应两次成功 probe。
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
+    assert!(requests.len() >= 2, "{requests:?}");
+    let tail = &requests[requests.len() - 2..];
     assert!(
-        requests[0].contains("Authorization: ApiKey key-abc-123"),
+        tail[0].contains("Authorization: ApiKey key-abc-123"),
         "带 key 的请求缺少 Authorization 头：{}",
-        requests[0]
+        tail[0]
     );
     assert!(
-        !requests[1].contains("Authorization"),
+        !tail[1].contains("Authorization"),
         "key 为空时不应发送 Authorization 头：{}",
-        requests[1]
+        tail[1]
     );
     // 请求行固定打在健康检查路径上。
-    assert!(requests[0].starts_with("GET /_cluster/health HTTP/1.1"));
+    assert!(tail[0].starts_with("GET /_cluster/health HTTP/1.1"));
+}
+
+#[test]
+fn probe_health_retries_once_after_a_transport_failure() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        // 第一次连接：accept 后立即关闭，模拟回环上的瞬时 reset/EOF。
+        let (first, _) = listener.accept().unwrap();
+        drop(first);
+        // 第二次连接：正常读请求并回健康响应。
+        let (mut second, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut second);
+        let _ = second.write_all(&green_health());
+        let _ = second.flush();
+    });
+    let endpoint = format!("http://127.0.0.1:{port}");
+    probe_health(&endpoint, "k", Duration::from_secs(2)).expect("传输层首次失败后应重试一次并成功");
+    handle.join().unwrap();
 }
 
 #[test]

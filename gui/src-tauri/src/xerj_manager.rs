@@ -487,20 +487,62 @@ fn three_ports_available(base: u16) -> bool {
     true
 }
 
+/// 健康检查的失败分两类：传输层暂时失败（连接/写/读/提前 EOF，值得换一条连接重试一次）
+/// 与响应语义失败（HTTP 状态、JSON、red 等，重试不会改变结论）。健康检查是幂等 GET；
+/// 本机回环在 CI/高负载下偶发 reset/EOF，一次重试用于区分真故障与瞬时抖动。
+struct ProbeError {
+    message: String,
+    retryable: bool,
+}
+
+impl ProbeError {
+    fn transport(message: String) -> Self {
+        Self {
+            message,
+            retryable: true,
+        }
+    }
+
+    fn response(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+}
+
 /// 最小 HTTP/1.1 健康检查：`GET {endpoint}/_cluster/health`。
 ///
 /// 只接受 HTTP 200 且 JSON 里 `status` 为 `green`/`yellow`；`red` 视为未就绪。
-/// key 只进 `Authorization: ApiKey` 头，错误文本里绝不出现。
+/// key 只进 `Authorization: ApiKey` 头，错误文本里绝不出现。传输层失败只重试一次。
 pub fn probe_health(endpoint: &str, api_key: &str, timeout: Duration) -> Result<(), String> {
+    match probe_health_once(endpoint, api_key, timeout) {
+        Ok(()) => Ok(()),
+        Err(first) if first.retryable => match probe_health_once(endpoint, api_key, timeout) {
+            Ok(()) => Ok(()),
+            Err(second) if !second.retryable => Err(second.message),
+            Err(second) => Err(format!(
+                "{}; retry failed: {}",
+                first.message, second.message
+            )),
+        },
+        Err(error) => Err(error.message),
+    }
+}
+
+fn probe_health_once(endpoint: &str, api_key: &str, timeout: Duration) -> Result<(), ProbeError> {
     if timeout.is_zero() {
-        return Err("健康检查超时：timeout 为 0".to_owned());
+        return Err(ProbeError::response(
+            "健康检查超时：timeout 为 0".to_owned(),
+        ));
     }
     let deadline = Instant::now()
         .checked_add(timeout)
-        .ok_or_else(|| "健康检查超时：timeout 过大".to_owned())?;
-    let (host, address) = parse_http_endpoint(endpoint)?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout)
-        .map_err(|error| format!("无法连接 Xerj 节点 {endpoint}：{error}"))?;
+        .ok_or_else(|| ProbeError::response("健康检查超时：timeout 过大".to_owned()))?;
+    let (host, address) = parse_http_endpoint(endpoint).map_err(ProbeError::response)?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        ProbeError::transport(format!("无法连接 Xerj 节点 {endpoint}：{error}"))
+    })?;
     let _ = stream.set_nodelay(true);
     write_health_request(&mut stream, &host, api_key, deadline)?;
     let (status, body) = read_http_response(&mut stream, deadline)?;
@@ -573,7 +615,7 @@ fn write_health_request(
     host: &str,
     api_key: &str,
     deadline: Instant,
-) -> Result<(), String> {
+) -> Result<(), ProbeError> {
     let mut request = format!(
         "GET /_cluster/health HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n"
     );
@@ -584,32 +626,35 @@ fn write_health_request(
     }
     request.push_str("\r\n");
     set_stream_deadline(stream, deadline)?;
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("向 Xerj 节点 {host} 发送健康检查请求失败：{error}"))
+    stream.write_all(request.as_bytes()).map_err(|error| {
+        ProbeError::transport(format!("向 Xerj 节点 {host} 发送健康检查请求失败：{error}"))
+    })
 }
 
-fn set_stream_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
+fn set_stream_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), ProbeError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err("健康检查超时".to_owned());
+        return Err(ProbeError::transport("健康检查超时".to_owned()));
     }
     // macOS 的 SO_RCVTIMEO/SO_SNDTIMEO 对 {0,0} 返回 EINVAL：高负载下 deadline 可能只剩
     // 亚微秒，Duration→timeval 会退化成 0，必须钳到 1ms（对真实 1s 级预算没有影响）。
     let remaining = remaining.max(Duration::from_millis(1));
     stream
         .set_read_timeout(Some(remaining))
-        .map_err(|error| format!("设置健康检查超时失败：{error}"))?;
+        .map_err(|error| ProbeError::transport(format!("设置健康检查超时失败：{error}")))?;
     stream
         .set_write_timeout(Some(remaining))
-        .map_err(|error| format!("设置健康检查超时失败：{error}"))?;
+        .map_err(|error| ProbeError::transport(format!("设置健康检查超时失败：{error}")))?;
     Ok(())
 }
 
 /// 读完整 HTTP 响应（受总 deadline 约束，最多 [`MAX_HEALTH_BODY`] 字节）。
 /// 有 `Content-Length` 时按它的长度读完即停，不依赖对端关连接 —— Xerj 的响应带
 /// `Content-Length`，但“对端一定守 Connection: close”不值得赌。
-fn read_http_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16, Vec<u8>), String> {
+fn read_http_response(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> Result<(u16, Vec<u8>), ProbeError> {
     let mut data: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
     let mut expected_total: Option<usize> = None;
@@ -640,31 +685,39 @@ fn read_http_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16,
                     }
                 }
             }
-            Err(error) if is_io_timeout(&error) => return Err("健康检查超时".to_owned()),
-            Err(error) => return Err(format!("读取健康检查响应失败：{error}")),
+            Err(error) if is_io_timeout(&error) => {
+                return Err(ProbeError::transport("健康检查超时".to_owned()))
+            }
+            Err(error) => {
+                return Err(ProbeError::transport(format!(
+                    "读取健康检查响应失败：{error}"
+                )))
+            }
         }
     }
-    let header_end =
-        find_header_end(&data).ok_or_else(|| "健康检查响应缺少完整的 HTTP 头".to_owned())?;
+    let header_end = find_header_end(&data).ok_or_else(|| {
+        // 对端在发完完整头之前关连接：按传输层失败处理，换一条连接重试一次。
+        ProbeError::transport("健康检查响应缺少完整的 HTTP 头".to_owned())
+    })?;
     let head = std::str::from_utf8(&data[..header_end])
-        .map_err(|_| "健康检查响应的 HTTP 头不是合法 UTF-8".to_owned())?;
+        .map_err(|_| ProbeError::response("健康检查响应的 HTTP 头不是合法 UTF-8".to_owned()))?;
     let status_line = head.lines().next().unwrap_or("");
     let mut parts = status_line.split_whitespace();
     let protocol = parts.next().unwrap_or("");
     if !protocol.starts_with("HTTP/") {
-        return Err(format!(
+        return Err(ProbeError::response(format!(
             "健康检查响应不是 HTTP：{}",
             truncate_chars(status_line, 80)
-        ));
+        )));
     }
     let status = parts
         .next()
         .and_then(|text| text.parse::<u16>().ok())
         .ok_or_else(|| {
-            format!(
+            ProbeError::response(format!(
                 "健康检查响应缺少状态码：{}",
                 truncate_chars(status_line, 80)
-            )
+            ))
         })?;
     let body_start = header_end + 4;
     let body_end = expected_total.unwrap_or(data.len()).min(data.len());
@@ -676,8 +729,11 @@ fn read_http_response(stream: &mut TcpStream, deadline: Instant) -> Result<(u16,
     Ok((status, body))
 }
 
-fn response_too_large() -> String {
-    format!("健康检查响应超过 {} KiB 上限", MAX_HEALTH_BODY / 1024)
+fn response_too_large() -> ProbeError {
+    ProbeError::response(format!(
+        "健康检查响应超过 {} KiB 上限",
+        MAX_HEALTH_BODY / 1024
+    ))
 }
 
 fn find_header_end(data: &[u8]) -> Option<usize> {
@@ -703,24 +759,28 @@ fn is_io_timeout(error: &std::io::Error) -> bool {
     )
 }
 
-fn judge_health_response(status: u16, body: &[u8]) -> Result<(), String> {
+fn judge_health_response(status: u16, body: &[u8]) -> Result<(), ProbeError> {
     if status != 200 {
         // 不把响应体带进错误：401 的响应体可能含服务端给出的提示，但更稳妥的做法是
         // 一律不带，避免将来 Xerj 改文案时把不该外露的内容带进 IPC/日志。
-        return Err(format!("健康检查返回 HTTP {status}"));
+        return Err(ProbeError::response(format!("健康检查返回 HTTP {status}")));
     }
-    let text =
-        std::str::from_utf8(body).map_err(|_| "健康检查响应不是合法的 UTF-8 JSON".to_owned())?;
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|_| "健康检查响应不是合法 JSON".to_owned())?;
+    let text = std::str::from_utf8(body)
+        .map_err(|_| ProbeError::response("健康检查响应不是合法的 UTF-8 JSON".to_owned()))?;
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| ProbeError::response("健康检查响应不是合法 JSON".to_owned()))?;
     match value.get("status").and_then(serde_json::Value::as_str) {
         Some("green" | "yellow") => Ok(()),
-        Some("red") => Err("Xerj 集群状态为 red（未就绪）".to_owned()),
-        Some(other) => Err(format!(
+        Some("red") => Err(ProbeError::response(
+            "Xerj 集群状态为 red（未就绪）".to_owned(),
+        )),
+        Some(other) => Err(ProbeError::response(format!(
             "Xerj 集群状态为 {}（未就绪）",
             truncate_chars(other, 40)
+        ))),
+        None => Err(ProbeError::response(
+            "健康检查响应缺少 status 字段（未就绪）".to_owned(),
         )),
-        None => Err("健康检查响应缺少 status 字段（未就绪）".to_owned()),
     }
 }
 
