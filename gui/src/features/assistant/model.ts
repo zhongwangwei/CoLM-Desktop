@@ -2,6 +2,8 @@ import { bilingual } from '../../lib/bilingual';
 export interface ApiProfile {
   base_url: string;
   model: string;
+  /** 当前端点/模型/协议的窗口（token）；null = 用内置的已确认预设，未知模型发送前要求填写。 */
+  context_window: number | null;
   api_format: string;
   api_options: Record<string, unknown>;
   max_output_tokens: number;
@@ -26,6 +28,7 @@ export interface Settings extends ApiProfile {
 export const defaultSettings: Settings = {
   base_url: 'https://api.deepseek.com',
   model: 'deepseek-flash',
+  context_window: null,
   provider_id: 'deepseek',
   api_format: 'chat_completions',
   api_options: {},
@@ -121,6 +124,7 @@ export function providerId(settings: Partial<Settings>) {
 const PROFILE_FIELDS: (keyof ApiProfile)[] = [
   'base_url',
   'model',
+  'context_window',
   'api_format',
   'api_options',
   'max_output_tokens',
@@ -148,6 +152,8 @@ export function selectProvider(settings: Settings, id: string): Settings {
     {
       base_url: preset.base_url,
       model: preset.model,
+      // 没有为这个服务保存过窗口时不沿用上一个服务的值；预设模型由 agent 用已确认预设解析。
+      context_window: null,
       api_format: preset.api_format,
       api_options: {},
       max_output_tokens: 16384,
@@ -292,6 +298,12 @@ export interface AgentEvent {
   estimated_tokens?: number;
   window_tokens?: number;
   compressed_tools?: number;
+  /** 窗口减去估算输入、输出预留与安全余量后还能容纳的输入估算；null/缺省 = 未启用预算（外部后端）。 */
+  available_input_tokens?: number | null;
+  output_reserve_tokens?: number;
+  safety_margin_tokens?: number;
+  /** 窗口来源："user" 用户填写 / "preset" 文档确认的预设。 */
+  window_source?: string | null;
   limit_reached?: boolean;
   step_limit?: number;
 }
@@ -371,16 +383,24 @@ export function assistantModels(settings: Settings, activeModel = '') {
     ]),
   ].filter((value, index) => value || index === 0);
 }
+/**
+ * 直接改接口三要素（地址/模型/协议）后，旧窗口不再对应当前配置，必须清空；
+ * 切换服务商走 selectProvider 恢复完整匹配的 profile 时才保留各自保存的值。
+ * 其它字段（输出上限、思考、超时）不代表端点换了，窗口不动。
+ */
+export function withContextWindowCleared(settings: Settings, patch: Partial<ApiProfile>): Settings {
+  return { ...settings, ...patch, context_window: null };
+}
 export function selectAssistantModel(settings: Settings, model: string) {
   if (settings.backend !== 'builtin') return withChoice(settings, { model });
   const effort = thinkValue(settings);
-  return {
-    ...settings,
+  // 换模型等于换了端点能力，旧的窗口不能再沿用（外部后端的模型不占此字段）。
+  return withContextWindowCleared(settings, {
     model,
     ...(!apiEfforts(providerId(settings), model).includes(effort)
       ? { thinking: null, reasoning_effort: null }
       : {}),
-  };
+  });
 }
 
 /**

@@ -446,6 +446,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     error: '',
     usage: '',
     usagePending: false,
+    contextUsage: null as Record<string, unknown> | null,
   };
   const refs = {
     running: { current: false },
@@ -480,6 +481,9 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setSessionUsage: () => {},
     setUsagePending: (value: boolean) => {
       ui.usagePending = value;
+    },
+    setContextUsage: (value: Record<string, unknown> | null) => {
+      ui.contextUsage = value;
     },
     setLimitReached: () => {},
     setConsent: () => {},
@@ -547,6 +551,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setUsage: updates.setUsage,
     setSessionUsage: updates.setSessionUsage,
     setUsagePending: updates.setUsagePending,
+    setContextUsage: updates.setContextUsage,
   });
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
     input: typed,
@@ -827,4 +832,66 @@ test('the panel really sends through the extracted turn functions', () => {
   assert.match(sendBody, /beginSendTurn\(/);
   assert.match(sendBody, /settleSendTurn\(/);
   assert.ok(!sendBody.includes('pendingSend'), 'the old single pendingSend ref is gone');
+});
+
+test('the context event carries the dynamic window, available input and the estimate label', () => {
+  const harness = sendHarness();
+  harness.handleEvent({
+    type: 'context',
+    estimated_tokens: 12_000,
+    window_tokens: 128_000,
+    compressed_tools: 2,
+    available_input_tokens: 100_000,
+    output_reserve_tokens: 8_192,
+    safety_margin_tokens: 2_560,
+    window_source: 'user',
+  });
+  assert.deepEqual(harness.ui.contextUsage, {
+    tokens: 12_000,
+    window: 128_000,
+    compressed: 2,
+    available: 100_000,
+    outputReserve: 8_192,
+    safety: 2_560,
+    source: 'user',
+  });
+  // 旧 agent 事件没有新字段：可用预算按“未知”处理，不能伪装成 0 或估计成 1M。
+  harness.handleEvent({ type: 'context', estimated_tokens: 1, window_tokens: 1_000 });
+  assert.deepEqual(harness.ui.contextUsage, {
+    tokens: 1,
+    window: 1_000,
+    compressed: 0,
+    available: null,
+    outputReserve: 0,
+    safety: 0,
+    source: null,
+  });
+});
+
+test('a leftover built-in context estimate is never shown for an external backend', () => {
+  // 外部后端自己管上下文：切过去后不显示上一次 API 请求的占用；窗口和可用输入都来自事件而不是常量。
+  assert.match(panelSource, /const contextWarning =\s*builtin &&/);
+  assert.match(panelSource, /\{builtin &&\s*contextUsage &&/);
+  assert.match(panelSource, /next\.backend !== 'builtin' \|\|/);
+  assert.match(panelSource, /可用输入估算/);
+  assert.match(panelSource, /documented preset/);
+});
+
+test('budget errors tell the user how to set a window or shrink the request without claiming anything was sent', () => {
+  const errorText = compileFunction<(message: string) => string>('errorText', {
+    t: (_zh: string, en: string) => en,
+  });
+  assert.match(
+    errorText(
+      'the context window for this model endpoint is unknown; set the context window (in tokens)',
+    ),
+    /set the context window/i,
+  );
+  assert.match(
+    errorText(
+      'the request needs about 120000 estimated input tokens plus 8192 reserved output tokens and 2560 safety tokens, which exceeds the 128000-token context window',
+    ),
+    /nothing was sent/i,
+  );
+  assert.equal(errorText('HTTP 500 from the model'), 'HTTP 500 from the model');
 });

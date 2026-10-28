@@ -10,11 +10,13 @@ import {
   defaultSettings,
   historyInput,
   parseApiOptions,
+  rememberProfile,
   selectProvider,
   settingsForSave,
   thinkSettings,
   thinkValue,
   withChoice,
+  withContextWindowCleared,
   EXAMPLE_STARTERS,
   examplePrompt,
   providerLabel,
@@ -229,7 +231,27 @@ it('restores missing profile fields from provider defaults', () => {
   assert.equal(next.model, 'custom');
   assert.equal(next.max_output_tokens, 16384);
   assert.equal(next.timeout_seconds, 600);
+  assert.equal(next.context_window, null);
   assert.deepEqual(next.api_options, {});
+});
+it('keeps a context window per provider profile and drops it when the connection changes', () => {
+  // 恢复完整匹配的已保存 profile 时保留它自己的窗口。
+  const saved = rememberProfile({ ...defaultSettings, context_window: 1_000_000 });
+  assert.equal(selectProvider(saved, 'deepseek').context_window, 1_000_000);
+  // 切到没有保存过窗口的服务：不沿用 DeepSeek 的 1M；切回来再恢复。
+  const anthropic = selectProvider(saved, 'anthropic');
+  assert.equal(anthropic.context_window, null);
+  assert.equal(selectProvider(anthropic, 'deepseek').context_window, 1_000_000);
+  // 直接改模型/地址/协议：窗口属于旧配置，必须清空。
+  for (const patch of [
+    { model: 'deepseek-v4-pro' },
+    { base_url: 'https://proxy.example/v1' },
+    { api_format: 'responses' },
+  ])
+    assert.equal(withContextWindowCleared(saved, patch).context_window, null);
+  assert.equal(selectAssistantModel(saved, 'deepseek-v4-pro').context_window, null);
+  // 其它字段（输出上限、思考、超时）不代表端点换了，窗口保留。
+  assert.equal({ ...saved, max_output_tokens: 2048 }.context_window, 1_000_000);
 });
 it('offers all four real bundled examples in both languages without sending', () => {
   assert.deepEqual(

@@ -15,6 +15,7 @@ import {
   thinkValue,
   thinkSettings,
   withChoice,
+  withContextWindowCleared,
   type Settings,
   type ModelChoice,
 } from './model';
@@ -179,7 +180,7 @@ export default function AssistantSettings({
             );
             return;
           }
-          patch({ base_url: e.target.value });
+          patch(withContextWindowCleared(draft, { base_url: e.target.value }));
         }}
       />
     </Field>
@@ -323,7 +324,7 @@ export default function AssistantSettings({
             value={model}
             onChange={(e) =>
               builtin
-                ? patch({ model: e.target.value })
+                ? patch(withContextWindowCleared(draft, { model: e.target.value }))
                 : setDraft(withChoice(draft, { model: e.target.value }))
             }
           />
@@ -385,7 +386,9 @@ export default function AssistantSettings({
               <Field label={t('接口格式', 'API format')}>
                 <Select
                   value={draft.api_format}
-                  onChange={(e) => patch({ api_format: e.target.value })}
+                  onChange={(e) =>
+                    patch(withContextWindowCleared(draft, { api_format: e.target.value }))
+                  }
                 >
                   <option value="chat_completions">Chat Completions</option>
                   <option value="responses">Responses</option>
@@ -402,6 +405,30 @@ export default function AssistantSettings({
                   min={1}
                   value={draft.max_output_tokens}
                   onChange={(e) => patch({ max_output_tokens: Number(e.target.value) })}
+                />
+              </Field>
+              <Field
+                label={t('上下文窗口', 'Context window')}
+                hint={t(
+                  '内置 API 按这个窗口预留输入、输出和安全余量。留空时只对文档确认的 DeepSeek V4 模型自动取 1M；未知模型留空会在发送前要求填写，不会猜一个数。',
+                  'Built-in API requests reserve input, output and a safety margin against this window. Blank auto-resolves only for the documented DeepSeek V4 models (1M); for any unknown model a blank window asks you to fill it in before sending instead of guessing.',
+                )}
+                unit={t('tokens', 'tokens')}
+                range={t(
+                  '1024–10000000 的整数；留空 = 自动',
+                  'integer 1024–10000000; blank = auto',
+                )}
+              >
+                <Input
+                  type="number"
+                  min={1024}
+                  max={10_000_000}
+                  value={draft.context_window ?? ''}
+                  onChange={(e) =>
+                    patch({
+                      context_window: e.target.value === '' ? null : Number(e.target.value),
+                    })
+                  }
                 />
               </Field>
               <Field
@@ -489,14 +516,20 @@ export default function AssistantSettings({
                   ![draft.max_output_tokens, draft.timeout_seconds].every(
                     (n) => Number.isSafeInteger(n) && n > 0,
                   ) ||
+                  !(
+                    draft.context_window === null ||
+                    (Number.isSafeInteger(draft.context_window) &&
+                      draft.context_window >= 1024 &&
+                      draft.context_window <= 10_000_000)
+                  ) ||
                   ![draft.session_turn_limit, draft.session_token_limit].every(
                     (n) => Number.isSafeInteger(n) && n >= 0,
                   )
                 )
                   throw new Error(
                     t(
-                      '输出上限和超时必须是正整数；会话上限必须是非负整数。',
-                      'Output limit and timeout must be positive integers; session limits must be non-negative integers.',
+                      '输出上限和超时必须是正整数；上下文窗口须为 1024–10000000 的整数或留空；会话上限必须是非负整数。',
+                      'Output limit and timeout must be positive integers; the context window must be an integer between 1024 and 10000000 or blank; session limits must be non-negative integers.',
                     ),
                   );
                 const next = settingsForSave(
