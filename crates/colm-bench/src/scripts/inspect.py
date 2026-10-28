@@ -30,6 +30,12 @@
   [-179,179] 这种跨日界线的两点网格分辨率是 2° 而不是 358°。OpenBench 的 [西,东] 表示法写不出
   跨日界线的范围（必须 西<东），所以这种网格给 extent=null、crosses_dateline=true，让上层拒绝，
   而不是给一个 199.5>180 的假范围。
+- 只有一个中心点时（1×1 格）中心间距法失灵：分辨率要退回格子边界并按环绕距离算，跨缝也只能由
+  边界判断。中心 180°、西 179.5°、东 -179.5° 的 1×1 格是 1° 宽、横跨日界线，旧实现报 359°、
+  crosses_dateline=false 并把 extent 夹成半格，上层就静默放行了一个省掉半格的区域（R05）。
+- 非公历日历（noleap、360_day…）经 xarray 解出来是 cftime 对象，不是 datetime64：排序、步长、
+  年份都要走日历感知的分支（cftime 相减给 datetime.timedelta），不能 np.diff 后除 timedelta64，
+  那会抛裸 TypeError；同一目录混不同日历/标准日历则明确拒绝（R06）。
 - 土层/积雪层/类别维（soil、soilsnow、lake、band…）超出站点评估的 {time,patch}：不能静默丢掉，
   要逐个列进 unsupported_variables，制备时再明确打印跳过原因。
 """
@@ -53,6 +59,13 @@ if __name__ == "__main__" and "__file__" in globals():
 
 import numpy as np
 import xarray as xr
+
+try:
+    # 非公历日历（noleap/360_day…）由 xarray 解成 cftime 对象；它是可选依赖，标准日历的
+    # 环境没装也必须能探测。用不到时保持 None，is_cftime_values 就是恒 False。
+    import cftime
+except ImportError:  # pragma: no cover - 装了 xarray 的机器通常也有；没有时只影响非公历文件
+    cftime = None
 
 # DEF_HIST_groupby 只产生这三种后缀（colm-hist/src/schedule.rs 的 HistoryGrouping）。
 MAIN_SUFFIX = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
@@ -212,24 +225,81 @@ def resolve_folder(folder):
     return nested[0]
 
 
+def is_cftime_values(values):
+    """xarray 把非公历日历（noleap、360_day…）解成 cftime 对象，标准日历仍是 datetime64。
+
+    cftime 只在遇到非公历文件时才会被 xarray 用到，标准日历的机器不装它也必须能探测，
+    所以 import 是可选依赖；这里没装就恒为 False。
+    """
+    return (
+        cftime is not None
+        and values.dtype.kind == "O"
+        and values.size > 0
+        and isinstance(values.ravel()[0], cftime.datetime)
+    )
+
+
+def time_year(value):
+    """时间点的年份。cftime 不能 astype 成 datetime64（日历不同），直接读 .year。"""
+    if cftime is not None and isinstance(value, cftime.datetime):
+        return int(value.year)
+    return int(str(value)[:4])
+
+
 def file_times(path):
     """只取 time 变量（xarray 懒打开，读到的只有时间轴）。"""
     with xr.open_dataset(path) as dataset:
         if "time" not in dataset.variables:
             raise SystemExit(f"{path} has no time variable")
         values = np.asarray(dataset["time"].values)
-    if values.dtype.kind != "M":
-        raise SystemExit(f"{path}: time variable does not decode to datetime ({values.dtype})")
-    return np.sort(values)
+    if values.dtype.kind == "M":
+        return np.sort(values)
+    if is_cftime_values(values):
+        # cftime 对象没有 datetime64 的纳秒表示，np.sort 走对象比较（同一文件内日历相同）。
+        return np.asarray(sorted(values.ravel()), dtype=object)
+    raise SystemExit(
+        f"{path}: time variable does not decode to datetime64 or cftime ({values.dtype}); "
+        "check the time:units/calendar attributes"
+    )
 
 
 def collect_times(paths):
     chunks = [file_times(path) for path in paths]
-    return np.sort(np.concatenate(chunks)) if chunks else np.array([], dtype="datetime64[ns]")
+    if not chunks:
+        return np.array([], dtype="datetime64[ns]")
+    kinds = {"cftime" if is_cftime_values(chunk) else "datetime64" for chunk in chunks if chunk.size}
+    if len(kinds) > 1:
+        raise SystemExit(
+            "the main history files mix standard-calendar datetime64 with non-standard cftime "
+            "time axes; they cannot be ordered on one axis — keep one calendar per history"
+        )
+    if "cftime" in kinds:
+        calendars = sorted(
+            {chunk.ravel()[0].calendar for chunk in chunks if is_cftime_values(chunk)}
+        )
+        if len(calendars) > 1:
+            # 不同日历的"同一天"不是同一时刻，拼接后排序没有意义；明确拒绝，不猜。
+            raise SystemExit(
+                f"the main history files use different calendars ({', '.join(calendars)}); "
+                "they cannot share one time axis — keep one calendar per history"
+            )
+        return np.asarray(sorted(np.concatenate(chunks)), dtype=object)
+    return np.sort(np.concatenate(chunks))
 
 
 def median_step_seconds(times):
     """相邻记录的中位步长；只有一个时刻时返回 None（调用方再试频率元数据/文件名）。"""
+    if is_cftime_values(times):
+        # 不能用 np.diff(times)/np.timedelta64(1,'s')：cftime 相减给 datetime.timedelta，
+        # 除 numpy timedelta64 会抛 TypeError（R06）。
+        unique = sorted(set(times.ravel()))
+        if len(unique) < 2:
+            return None
+        seconds = [
+            (later - earlier).total_seconds()
+            for earlier, later in zip(unique, unique[1:])
+        ]
+        return float(np.median(seconds))
     unique = np.unique(times)
     if unique.size < 2:
         return None
@@ -477,15 +547,23 @@ def linear_spacing(values):
     return float(np.median(np.diff(unique)))
 
 
-def boundary_spacing(dataset, low, high):
-    """用格边界（lat_s/lat_n、lon_w/lon_e）求分辨率，中心点只有一格时也能得到格子大小。"""
+def boundary_spacing(dataset, low, high, period=None):
+    """用格边界（lat_s/lat_n、lon_w/lon_e）求分辨率，中心点只有一格时也能得到格子大小。
+
+    period=360 时按环绕距离算：一个 1° 宽的格子把西边界写成 179.5、东边界写成 -179.5 时，
+    朴素差是 359°，会把分辨率报成 359（R05）；环绕距离 `((high-low+180) % 360) - 180`
+    给出的是跨缝的 1°。纬度不绕圈，period=None 时仍直接相减。
+    """
     if low not in dataset.variables or high not in dataset.variables:
         return None
     low_values = np.asarray(dataset[low].values, dtype=float).ravel()
     high_values = np.asarray(dataset[high].values, dtype=float).ravel()
     if low_values.size == 0 or low_values.size != high_values.size:
         return None
-    spans = np.abs(high_values - low_values)
+    if period is None:
+        spans = np.abs(high_values - low_values)
+    else:
+        spans = np.abs(((high_values - low_values + period / 2.0) % period) - period / 2.0)
     spans = spans[np.isfinite(spans)]
     return float(np.median(spans)) if spans.size else None
 
@@ -513,6 +591,21 @@ def crosses_dateline(lon_centers, spacing):
     return naive - covered > tolerance
 
 
+def boundary_crosses_dateline(boundary_pairs):
+    """边界对（已对齐到各自格心）里是否有一格越过了 ±180。
+
+    中心点法要求至少两个中心：单格横跨日界线时只有一个中心，永远看不出缝（R05）。这时只能
+    看边界——西 179.5、东 -179.5 对齐后落在 -180 两侧；把东边界写成 180.5 的等价写法归一化
+    后同样落在 -180 的另一侧，所以两种写法结论一致。容差只吸收浮点往返（真实越缝是边界间距
+    量级），不能大到把半格越缝放过去、再让 extent 被夹回 ±180。
+    """
+    tolerance = 1e-6
+    return any(
+        west < -180.0 - tolerance or east > 180.0 + tolerance
+        for west, east in boundary_pairs
+    )
+
+
 def grid_geometry(dataset):
     """格点文件 -> (extent, resolution, crosses_dateline, lon_centers)。读不出给 None。"""
     if "lon" not in dataset.variables or "lat" not in dataset.variables:
@@ -526,18 +619,15 @@ def grid_geometry(dataset):
     lon_spacing = circular_spacing(lon_centers)
     lat_spacing = linear_spacing(lat_raw)
     if lon_spacing is None:
-        lon_spacing = boundary_spacing(dataset, "lon_w", "lon_e")
+        lon_spacing = boundary_spacing(dataset, "lon_w", "lon_e", period=360.0)
     if lat_spacing is None:
         lat_spacing = boundary_spacing(dataset, "lat_s", "lat_n")
     spacings = [value for value in (lon_spacing, lat_spacing) if value]
     # 格点 resolution 取 max：OpenBench 的 grid_res 是单一值，取大的一边保证覆盖粗方向。
     resolution = max(spacings) if spacings else None
 
-    crossing = crosses_dateline(lon_centers, lon_spacing)
-    if crossing:
-        return None, resolution, True, lon_centers
-
-    extent = None
+    west = east = south = north = None
+    boundary_pairs = None
     if (
         "lon_w" in dataset.variables
         and "lon_e" in dataset.variables
@@ -549,24 +639,29 @@ def grid_geometry(dataset):
         lat_s = np.asarray(dataset["lat_s"].values, dtype=float).ravel()
         lat_n = np.asarray(dataset["lat_n"].values, dtype=float).ravel()
         if lon_w.size == lon_raw.size and lon_e.size == lon_raw.size:
-            west = min(
-                float(nearest_wrap(normalize_lon(value), center))
-                for value, center in zip(lon_w, lon_centers)
-            )
-            east = max(
-                float(nearest_wrap(normalize_lon(value), center))
-                for value, center in zip(lon_e, lon_centers)
-            )
+            # 边界对齐到各自格心所在的那一圈；0–360 与 ±180 混写时才能和中心点比较。
+            boundary_pairs = [
+                (
+                    float(nearest_wrap(normalize_lon(low), center)),
+                    float(nearest_wrap(normalize_lon(high), center)),
+                )
+                for low, high, center in zip(lon_w, lon_e, lon_centers)
+            ]
+            west = min(pair[0] for pair in boundary_pairs)
+            east = max(pair[1] for pair in boundary_pairs)
+            south = float(np.min(lat_s)) if lat_s.size else None
+            north = float(np.max(lat_n)) if lat_n.size else None
             # 自检：边界必须真的包住中心点；0–360 文件单格在日界线附近时容易把两圈混起来，
             # 出现了就当作跨日界线，不给假范围。
             if not (west <= float(lon_centers.min()) and east >= float(lon_centers.max())):
                 return None, resolution, True, lon_centers
-            south = float(np.min(lat_s)) if lat_s.size else None
-            north = float(np.max(lat_n)) if lat_n.size else None
-        else:
-            west = east = south = north = None
-    else:
-        west = east = south = north = None
+
+    crossing = crosses_dateline(lon_centers, lon_spacing)
+    if not crossing and boundary_pairs is not None:
+        # 只有一个中心点时中心间距法永远返回 False；单格横跨日界线只能由边界看出来（R05）。
+        crossing = boundary_crosses_dateline(boundary_pairs)
+    if crossing:
+        return None, resolution, True, lon_centers
 
     if west is None or south is None:
         # 没有边界变量时用中心点 ± 半个分辨率；只有一组中心点时推不出格子边界。
@@ -597,12 +692,14 @@ def family_report(folder, entries):
         entry = {"family": family, "prefix": prefix, "files": len(paths), "syear": None, "eyear": None}
         try:
             # 其他族只报范围：读首尾两个文件的 time 就够，没必要把几百个 tracer 文件全打开。
-            start = int(str(file_times(paths[0]).min())[:4])
-            end = int(str(file_times(paths[-1]).max())[:4])
+            # cftime 的年份只能读 .year（没有 datetime64 表示），所以统一走 time_year。
+            start = time_year(file_times(paths[0])[0])
+            end = time_year(file_times(paths[-1])[-1])
             entry["syear"] = start
             entry["eyear"] = end
-        except (SystemExit, ValueError, OSError, KeyError):
+        except (SystemExit, ValueError, TypeError, OSError, KeyError):
             # 旁车文件可能没有可解码的 time；族报告只是展示，不因此让整个探测失败。
+            # TypeError 也收进来：混合日历的对象数组排序会抛它，不能让它裸奔到上层。
             pass
         report.append(entry)
     return report
@@ -682,8 +779,8 @@ def inspect(folder, prefix_argument):
     times = collect_times(main_paths)
     if times.size == 0:
         raise SystemExit(f"the main history files in {folder} have no time records")
-    start = int(str(times.min())[:4])
-    end = int(str(times.max())[:4])
+    start = time_year(times[0])
+    end = time_year(times[-1])
 
     step = median_step_seconds(times)
 

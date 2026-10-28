@@ -38904,3 +38904,47 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `preflight_observation_window` 只有观测轴、不知道 history 原生频率；原生比目标粗时可能预检通过、运行时以可行动错误或 warning 结束。
 - 格点产品/水文站目标的 warnings 恒空（该路径没有 VarMetrics）；诊断卡片里的新警告按原文（英文）显示，未加中英映射。
 - 未运行：真实旧冻结 CLI 二进制、真实 Tauri 窗口、真实科学算例与真实 SSH；旧基准结果支持哈希的迁移未实现。
+
+## 比较页第三批：有效输入统一 / 运行文件归属 / 数据探测边界（2026-10-29，复查报告 f0059ee）
+
+公开复查 f0059ee 早于本地比较页第二批提交 32a2e988，所以它列出的项里有一批已在 32a2e988 关闭。本轮先把 R01–R12 + C09/C10/C16 逐条对当前 main（61182d6e）做只读核对，再只修真正仍存在的项；每项先写失败测试。
+
+### 核对结论（对 61182d6e）
+
+| 条目 | 结论 |
+|---|---|
+| R08 频率误判（2h→3Hour、6h→Day） | 已由 32a2e988 修复（2h/4h 明确 cannot map，6h→6Hour）；本轮只补测试固化 |
+| C09 提交回执丢失 / C16 锁释放竞争 / C10 镜像名碰撞 | 已由 32a2e988 修复（intent 先写 + 3×1s 有界重查；单一 mkdir 锁 + 所有权核对；host 清洗改动时追加 FNV 哈希）；本轮用既有测试复核 |
+| R07 层变量运行前拒绝 | 部分：生成前检查只覆盖表单映射，手改 YAML 换 varname 可绕过；本轮补有效配置路径 |
+| R01–R06、R09、R10、R11 | 仍存在，本批修复 |
+
+### 一、有效输入统一（前端）
+
+- **R01 生成后手改 YAML + 再改站点导致摘要/指纹/提交分叉**：生成时冻结 `CompareSnapshot{design, designFingerprint, sites, generatedText, fingerprint}`；摘要把配置部分（读当前解析文本）与站点部分（读冻结 sites）拼起来，有效指纹 = `{machine, projectDir, 解析后配置, 冻结站点清单}`，运行提交 = 当前文本 + 冻结 sites + 同一指纹；表单变化（含编辑站点目录/坐标/前缀）→ 快照过期 → 运行按钮禁用 + 双语提示 + `run()` 内部再阻断并给 `details.config.stale`。手改 YAML 仍可运行（按用户裁定保留既有能力），解析/结构校验不过才阻断；删除旧的独立 `sites` state 与 `generated.current?.sites ?? sites` 兜底，站点只有一个真相源。测试覆盖 f0059ee 操作链（生成→手改年份/时间尺度→改坐标→运行被拒）与"仅手改文本→可运行且显示指纹逐字等于 config+sites 计算值"。
+- **R02 变量映射 `convert` 被静默丢弃**：变量映射改严格 schema，只允许 `varname/varunit`；`convert` 等未支持字段双语报错（不再接收后忽略），支持的字段全部进入有效配置与指纹。
+- **R10 单引号 YAML 路径被 `#` 截断**：注释识别改为 YAML 引号语义（单/双引号、`''` 转义、只在节点起点开引号）；未闭合/尾随内容明确报错；行内列表支持单引号。
+- **R11 `_experiment_` 与 `experiment` 共用比较目录**：已符合后端 `valid_name` 的 ASCII 名原样保留（不再 strip 首尾下划线），只清洗非法字符（映射与旧版一致），超 60 字符才截断+指纹；非 ASCII 行为不变。
+- **R07 剩余缺口**：`structuralProblems` 按有效配置再查一遍 varname × design 的 `unsupported_variables`，手改 YAML 换成层/类别变量也在运行前拒绝。
+
+### 二、运行文件归属（后端）
+
+- **R03 `project.output_dir` 绕过运行隔离**：产品语义定为**拒绝不安全路径，不改写冻结配置**。只接受相对运行目录且归一后仍在内部的路径（`./custom-output`→`custom-output`、`a/../out`→`out`）；拒绝绝对路径、`../shared`、跳出型 `..`、`.`/`sim/..`（归一为运行目录本身）、`~`、内联 project、`<<` 合并键、多文档 YAML、重复 project 段（都给行号/原因）。`RunMeta` 记录归一后的 `output_dir`；本地报告发现读 meta，远程取回按 meta.report（新 run 写扁平 `latest-success.json`，旧项目/旧 run 回退原 `output/*` 路径）。前端 `config.ts` 用同一规则做解析期拒绝，避免手改绕过（指纹随 output_dir 变化）。
+- **R04 运行输入未冻结**：本机与远程的 PREPARE 产物（NC+CSV）写进 `runs/<run_id>/sim/`，清单副本再发布到配置的 `fulllist` 位置，清单 DIR 指向运行目录内 NC；归档 A 的 NC/CSV 不被 B 的后续准备覆盖。远程镜像不改目录布局（用扁平 meta/latest-success 绑定 run）。
+- **R09 已终止但结果未知的任务无法收尾**：CLI `remote-bench-job` 对 bare 进程消失（无退出码）返回 `ended:"unknown"` + `result_unknown:true` + `terminal:true`；`finished 0/2` 明确返回 `ended:"succeeded"/"failed"`；COMPLETED 缺退出码仍继续等（不误判）。`remote-bench-cancel` 撞上已消失 PID 不再报错，返回 `request_accepted:false` + 可行动 note；占位按终态释放，允许重提。前端 `remoteJobTerminal` 识别 `unknown` 为独立终态：停止轮询、写历史 `end:"unknown"`、清身份、显示"已终止，结果未知，可关闭后重新提交"，不再永远每 3 秒轮询、也不再用未终态身份挡新提交。
+
+### 三、数据探测边界
+
+- **R05 单格跨日界线**：经度边界间距改环绕距离；边界判缝（边界对齐格心后任一格越过 ±180）在裁切前识别。中心 180°/西 179.5°/东 -179.5° 的 1×1 格现在 `resolution=1`、`crosses_dateline=true`、`extent=null`、`comparable=false`（两种缝写法一致）；旧多格跨缝/普通网格/全球网格不回归。
+- **R06 非公历日历**：`inspect.py` 识别 cftime/CFTimeIndex（file_times 排序、collect_times 统一解码/日历校验、median_step_seconds 用 timedelta、年份读 `.year`）；noleap 与 360_day 合成 NetCDF 可正常探测时间轴与频率（6h→6Hour、月步长→Month）；混日历/混标准与 cftime 报可行动错误而非裸 TypeError。
+- 能力结论（不改代码）：多 patch、element 向量、跨日界线仍**明确阻断**（`comparable=false` + blockers，prepare 对 patch=2/unstructured 明确报错）；`comparison` 段已进正式 schema/生成/摘要/UI（32a2e988）。
+- 遗留：非公历只保证**探测**，prepare.py 仍走 datetime64 路径；真实多 patch/element 科学计算未支持。
+
+### 本轮验证（真实执行）
+
+- 前端：`npm run typecheck` 0 error、`lint` 0、`format:check` clean、`npm test` **1214 passed / 0 failed**（比较页分项 config 18、compare 35、compare-page 15、compare-layout 12、compare-remote 28）。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` → **549 tests：548 passed / 0 failed / 1 ignored**（bench 模块 48）。
+- CLI：`cargo test -q -p colm-cli --bin colm-cli remote_bench -- --test-threads=1` → **46 passed**。
+- 脚本：`python3 scripts/test-bench-scripts.py` → **32 passed / 0 failed**；`cargo test -q -p colm-bench --lib` → 7 passed。
+- clippy 两侧 `-D warnings`、两个 workspace `cargo fmt --all --check` 全绿。
+- 未运行：真实 Tauri 窗口点击、真实 SSH/调度器/集群故障注入、真实 OpenBench 安装与比较运行、真实科学数据端到端（远程测试用本地 bash+python 假 openbench；R04 用文件内容代理真实 PREPARE）。
+- 未完成的产品语义（能力/易用性，超出本批）：多 patch/element 支持、非公历的 prepare 路径；草稿离页恢复、保存按钮语义、常驻任务栏、站点 ID/模型 profile 独立选择、CoLM2024 仍固定写；`simulationKey` 与 `project.name` 对下划线名的差异未统一。

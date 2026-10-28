@@ -9,13 +9,15 @@ stdout 的 JSON / stderr 的错误 / 并出来的 NetCDF 与站点清单：
 
 每类用例对应比较页审查报告里的一个现状缺陷：
 主 history 与 tracer 同目录、每天一个文件、逐年文件、patch=2、单格 lat×lon 网格、
-element 向量、土层变量、同目录混前缀、0–360 经度、跨日界线、缺坐标 + 经纬度覆盖、
-站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：单时刻读频率元数据
-（source=metadata）、元数据与实测冲突以实测为准、亚小时输出粗化成 Hour、6 小时/8 天档位、
-以及落不到任何档位的步长明确报错。
+element 向量、土层变量、同目录混前缀、0–360 经度、跨日界线（含中心 180° 的 1×1 格）、
+缺坐标 + 经纬度覆盖、站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：
+单时刻读频率元数据（source=metadata）、元数据与实测冲突以实测为准、亚小时输出粗化成 Hour、
+6 小时/8 天档位、2/4 小时与 6 小时不落错档（R08）、以及落不到任何档位的步长明确报错；
+R06 的非公历日历：cftime 解码出的 noleap/360_day 时间轴仍要能采样步长与判频率。
 """
 
 import csv
+import datetime
 import json
 import os
 import shutil
@@ -30,6 +32,11 @@ try:
 except ImportError as error:  # pragma: no cover - 本机环境已装；缺了给清楚提示
     print(f"this test needs python3 with numpy and xarray: {error}", file=sys.stderr)
     sys.exit(2)
+
+try:
+    import cftime
+except ImportError:  # pragma: no cover - 只有非公历用例需要；缺了在那个用例里明确说
+    cftime = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSPECT = os.path.join(ROOT, "crates", "colm-bench", "src", "scripts", "inspect.py")
@@ -181,8 +188,21 @@ def write_station(
     dataset.to_netcdf(path)
 
 
-def write_grid(path, time_values, lat, lon, variables, boundaries=True):
-    """格点文件：lat/lon 是维度坐标（单格也是 grid），另写可选的格子边界变量。"""
+def write_grid(
+    path,
+    time_values,
+    lat,
+    lon,
+    variables,
+    boundaries=True,
+    lon_bounds=None,
+    lat_bounds=None,
+):
+    """格点文件：lat/lon 是维度坐标（单格也是 grid），另写可选的格子边界变量。
+
+    lon_bounds/lat_bounds 是 (下边界, 上边界) 的显式覆盖：真机文件里跨日界线的格子可能把
+    东边界写成 -179.5，默认的 lon+0.5 写不出这种写法。
+    """
     lat = np.asarray(lat, dtype=float)
     lon = np.asarray(lon, dtype=float)
     sizes = {"time": np.asarray(time_values).size, "lat": lat.size, "lon": lon.size}
@@ -194,12 +214,35 @@ def write_grid(path, time_values, lat, lon, variables, boundaries=True):
         data, coords={"time": np.asarray(time_values), "lat": lat, "lon": lon}
     )
     if boundaries:
-        dataset["lat_s"] = ("lat", lat - 0.5)
-        dataset["lat_n"] = ("lat", lat + 0.5)
-        dataset["lon_w"] = ("lon", lon - 0.5)
-        dataset["lon_e"] = ("lon", lon + 0.5)
+        lat_s, lat_n = lat_bounds if lat_bounds is not None else (lat - 0.5, lat + 0.5)
+        lon_w, lon_e = lon_bounds if lon_bounds is not None else (lon - 0.5, lon + 0.5)
+        dataset["lat_s"] = ("lat", np.asarray(lat_s, dtype=float))
+        dataset["lat_n"] = ("lat", np.asarray(lat_n, dtype=float))
+        dataset["lon_w"] = ("lon", np.asarray(lon_w, dtype=float))
+        dataset["lon_e"] = ("lon", np.asarray(lon_e, dtype=float))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     dataset.to_netcdf(path)
+
+
+def cftime_axis(calendar, start, count, step_minutes):
+    """非公历时间轴：按日历构造 cftime 对象，xarray 写文件时会把 calendar 落成属性。
+
+    start 是 (年, 月, 日, 时, 分)。不能用 datetime64 代替：那样写出来的就是标准日历，
+    根本走不到 R06 里 cftime 的分支。
+    """
+    base = cftime.datetime(*start, calendar=calendar)
+    return np.array(
+        [base + datetime.timedelta(minutes=step_minutes * index) for index in range(count)],
+        dtype=object,
+    )
+
+
+def cftime_months(calendar, year, months, day, minute=30):
+    """按日历构造每月一条的时间轴，用来验证非固定月长下的中位步长。"""
+    return np.array(
+        [cftime.datetime(year, month, day, 0, minute, calendar=calendar) for month in months],
+        dtype=object,
+    )
 
 
 def write_vector(path, time_values, elements=3):
@@ -491,6 +534,123 @@ def eight_day_history_maps_to_8day(workdir):
 
 
 @test
+def two_and_four_hour_steps_do_not_snap_to_three_hour(workdir):
+    """R08：2 小时曾被判成 3Hour、6 小时曾被判成 Day；现在 2/4 小时明确报错、6 小时是 6Hour。
+
+    2/4 小时不对应任何 OpenBench 档位。若按 3Hour 交给 OpenBench，它会把 2 小时一条的时间轴
+    当 3 小时重采样，相位和周期都错；宁可报错让用户改输出频率或手填，也不能静默套相邻档位。
+    """
+    for label, step_minutes, seconds in (
+        ("TwoHourly", 2 * 60, 7200),
+        ("FourHourly", 4 * 60, 14400),
+    ):
+        folder = os.path.join(workdir, f"history-{label}")
+        write_station(
+            os.path.join(folder, f"{label}_hist_2000-01.nc"),
+            times("2000-01-01T00:00", 4, step_minutes),
+            {"f_xy_t": ("time", "patch")},
+        )
+        stderr = inspect_stderr(folder)
+        assert "cannot map" in stderr and str(seconds) in stderr, (label, stderr)
+
+    # 6 小时必须落 6Hour；旧档位表曾把它判成 Day（日档的下界容差太宽）。这里同时锁住
+    # "不是 Day" 和元数据一致时 source=time。
+    folder = os.path.join(workdir, "history-6h")
+    write_station(
+        os.path.join(folder, "SixHourly_hist_2000-01.nc"),
+        times("2000-01-01T00:00", 4, 6 * 60),
+        {"f_xy_t": ("time", "patch")},
+        attrs={"frequency": "6-hourly"},
+    )
+    info = inspect(folder)
+    show_tim_res(info)
+    assert info["tim_res"] == "6Hour", info["tim_res"]
+    assert info["tim_res"] != "Day", info["tim_res"]
+    assert info["tim_res_source"] == "time", info["tim_res_source"]
+
+
+@test
+def non_gregorian_calendars_are_probed(workdir):
+    """R06：noleap/360_day 经 xarray 解码成 cftime 对象后，探测仍要能采样时间轴并判频率。
+
+    旧实现只认 datetime64（dtype.kind != "M" 直接 SystemExit），即使放过也会在 np.diff/
+    astype/排序处抛裸 TypeError。这里用真实 cftime 编码的 NetCDF 覆盖两种日历：固定步长与
+    月长随日历变化的步长都要算对，标准日历的用例不受影响（其余用例就是那部分回归）。
+    """
+    if cftime is None:
+        raise AssertionError(
+            "the non-Gregorian regression needs cftime; install it (pip install cftime)"
+        )
+    for calendar in ("noleap", "360_day"):
+        folder = os.path.join(workdir, f"history-{calendar}-6h")
+        write_station(
+            os.path.join(folder, "Calendar_hist_2000-01.nc"),
+            cftime_axis(calendar, (2000, 1, 1, 0, 30), 4, 6 * 60),
+            {"f_xy_t": ("time", "patch")},
+            attrs={"frequency": "6-hourly"},
+        )
+        info = inspect(folder)
+        show_tim_res(info)
+        assert info["tim_res"] == "6Hour", (calendar, info["tim_res"])
+        assert info["tim_res_source"] == "time", (calendar, info["tim_res_source"])
+        assert info["tim_res_metadata"] == "6Hour", (calendar, info["tim_res_metadata"])
+        assert info["syear"] == 2000 and info["eyear"] == 2000, (
+            calendar,
+            info["syear"],
+            info["eyear"],
+        )
+        # family_report 也读年份；cftime 没有 datetime64 表示，走错分支会被 except 吞成 None，
+        # 所以这里显式核对，别让"族报告静默没年份"混过去。
+        families = {entry["family"]: entry for entry in info["families"]}
+        assert families["main"]["syear"] == 2000, (calendar, families["main"])
+
+        # 月长随日历变化：noleap 的 2 月 28 天、360_day 恒 30 天。中位步长仍应落到 Month；
+        # 若退回 np.diff(...)/np.timedelta64 就会在这里抛 TypeError。
+        monthly = os.path.join(workdir, f"history-{calendar}-monthly")
+        write_station(
+            os.path.join(monthly, "CalendarMonth_hist_2000.nc"),
+            cftime_months(calendar, 2000, (1, 2, 3), day=16),
+            {"f_xy_t": ("time", "patch")},
+        )
+        info = inspect(monthly)
+        show_tim_res(info)
+        assert info["tim_res"] == "Month", (calendar, info["tim_res"])
+        assert info["tim_res_source"] == "time", (calendar, info["tim_res_source"])
+
+    # 不同日历不能共用一个时间轴：明确报错并点名日历，而不是在排序处抛裸 TypeError。
+    mixed = os.path.join(workdir, "history-mixed-calendars")
+    write_station(
+        os.path.join(mixed, "Mix_hist_2000.nc"),
+        cftime_axis("noleap", (2000, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    write_station(
+        os.path.join(mixed, "Mix_hist_2001.nc"),
+        cftime_axis("360_day", (2001, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    stderr = inspect_stderr(mixed)
+    assert "different calendars" in stderr, stderr
+    assert "Traceback" not in stderr and "TypeError" not in stderr, stderr
+
+    # 同一目录混标准日历与 cftime 也不行：解码表示不同，不能按字符串/对象比较硬排。
+    mixed = os.path.join(workdir, "history-mixed-decoding")
+    write_station(
+        os.path.join(mixed, "Mix_hist_2000.nc"),
+        times("2000-01-01T00:00", 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    write_station(
+        os.path.join(mixed, "Mix_hist_2001.nc"),
+        cftime_axis("noleap", (2001, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    stderr = inspect_stderr(mixed)
+    assert "mix standard-calendar datetime64" in stderr, stderr
+    assert "Traceback" not in stderr and "TypeError" not in stderr, stderr
+
+
+@test
 def unmappable_step_is_an_explicit_error(workdir):
     """5 天步长不对应任何 OpenBench tim_res：明确报错，不许猜成相邻档位。"""
     folder = os.path.join(workdir, "history")
@@ -637,6 +797,66 @@ def dateline_crossing_is_marked_not_mixed(workdir):
     assert info["crosses_dateline"] is True, info
     assert info["extent"] is None, info["extent"]
     approx(info["resolution"], 2.0, "resolution (0-360 spelling)")
+
+
+@test
+def single_cell_dateline_grid_is_resolved_and_rejected(workdir):
+    """R05：中心 180° 的 1×1 格横跨日界线，分辨率是 1° 不是 359°，也不能给出半格范围。
+
+    旧实现用 |179.5-(-179.5)|=359 当分辨率（只有一个中心，中心间距法失灵），又把边界对齐后的
+    西边界夹到 -180，给出 [-180,-179.5] 的半格范围并判 comparable——上层看到的是"可比较"，
+    真正跨缝的区域被静默裁掉一半。
+    """
+    folder = os.path.join(workdir, "history")
+    write_grid(
+        os.path.join(folder, "Seam_hist_2000-01.nc"),
+        times("2000-01-01T00:30", 2, 1440),
+        lat=[20.0],
+        lon=[180.0],
+        variables={"f_xy_t": ("time", "lat", "lon")},
+        lon_bounds=([179.5], [-179.5]),
+    )
+    info = inspect(folder)
+    assert info["spatial_type"] == "grid", info["spatial_type"]
+    approx(info["resolution"], 1.0, "resolution")
+    assert info["crosses_dateline"] is True, info
+    assert info["extent"] is None, info["extent"]
+    assert info["comparable"] is False
+    assert any(blocker["code"] == "dateline_crossing" for blocker in info["blockers"]), info["blockers"]
+
+    # 同一格的不跨缝写法（东边界 180.5 而非 -179.5）：物理上是同一片区域，结论必须一致。
+    other = os.path.join(workdir, "history-360")
+    write_grid(
+        os.path.join(other, "Seam360_hist_2000-01.nc"),
+        times("2000-01-01T00:30", 2, 1440),
+        lat=[20.0],
+        lon=[180.0],
+        variables={"f_xy_t": ("time", "lat", "lon")},
+        lon_bounds=([179.5], [180.5]),
+    )
+    info = inspect(other)
+    approx(info["resolution"], 1.0, "resolution (179.5/180.5 spelling)")
+    assert info["crosses_dateline"] is True, info
+    assert info["extent"] is None, info["extent"]
+    assert info["comparable"] is False
+
+    # 普通网格不回归：边界全在 ±180 内时照旧给出范围，不能被跨缝判断误伤。
+    normal = os.path.join(workdir, "history-normal")
+    write_grid(
+        os.path.join(normal, "Normal_hist_2000-01.nc"),
+        times("2000-01-01T00:30", 2, 1440),
+        lat=[19.0, 20.0],
+        lon=[110.0, 111.0],
+        variables={"f_xy_t": ("time", "lat", "lon")},
+    )
+    info = inspect(normal)
+    assert info["crosses_dateline"] is False, info
+    approx(info["resolution"], 1.0, "resolution (normal grid)")
+    extent = info["extent"]
+    assert extent is not None, info
+    approx(extent[0], 109.5, "normal extent west")
+    approx(extent[1], 111.5, "normal extent east")
+    assert info["comparable"] is True
 
 
 @test
