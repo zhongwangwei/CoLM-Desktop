@@ -1761,6 +1761,8 @@ struct SourceInfo {
     fingerprint: Option<String>,
     dirty: bool,
     commit: Option<String>,
+    /// 记录的冻结 commit 实际从哪个 Git 对象库读出（F01）。无历史时为 null。
+    history_object: Option<Value>,
 }
 
 impl SourceInfo {
@@ -1771,6 +1773,7 @@ impl SourceInfo {
             "fingerprint": self.fingerprint,
             "dirty": self.dirty,
             "commit": self.commit,
+            "history_object": self.history_object.clone().unwrap_or(Value::Null),
         })
     }
 }
@@ -1883,6 +1886,7 @@ fn resolve_source(
         fingerprint: model_json.and_then(model_fingerprint),
         dirty: false,
         commit: commit.clone(),
+        history_object: None,
     };
     if info.fingerprint.is_none() {
         if let Some(dir) = &source_dir {
@@ -2219,6 +2223,20 @@ fn cross_links(
             let sha = import["sha"].as_str()?;
             blob_of(desktop_dir, sha, desktop_path)
         });
+        let import_message = import
+            .as_ref()
+            .and_then(|import| import["sha"].as_str())
+            .map(|sha| commit_message(desktop_dir, sha))
+            .unwrap_or_default();
+        // F02：自动 verified 只认结构化 trailer `Upstream-Commit: <40 lowercase hex>`。
+        // 普通正文里的完整 SHA 只是“被提到”，不证明作者采用了那个 revision。
+        let structured_records = structured_upstream_commits(&import_message);
+        let mut structured_shas: Vec<String> = Vec::new();
+        for record in &structured_records {
+            if !structured_shas.contains(&record.sha) {
+                structured_shas.push(record.sha.clone());
+            }
+        }
         // 内容相同只说明“可能对应”，不能说明唯一上游 revision 或传播方向：同一文件在 A→B→revert A
         // 的历史里可以多次拥有相同 blob。全部返回候选，blob_equal 单独标出依据。
         let mut candidate_values: Vec<Value> = Vec::new();
@@ -2244,51 +2262,82 @@ fn cross_links(
                 "summary": summary,
                 "blob_equal": equal,
                 "blob": blob,
+                // 普通正文提及（任何位置出现完整 SHA）只是引用证据。
+                "mentioned_in_message": message_references_sha(&import_message, sha),
+                // 是否出现在结构化 `Upstream-Commit:` trailer 行里。
+                "structured": structured_shas.iter().any(|structured| structured == sha),
+                // listed = 内容与 import blob 相等的候选（列出来供人判断的来源候选）。
+                "listed": equal,
             }));
         }
         if !blob_equal.is_empty() {
             basis.push("blob-equal");
         }
-        // 最小可核验关联：Desktop import commit 的提交说明里出现上游候选的**完整 40 hex SHA**，
-        // 且该候选内容与 import blob 相等。不从 PR 标题/短 SHA/时间猜来源。
-        let import_message = import
-            .as_ref()
-            .and_then(|import| import["sha"].as_str())
-            .map(|sha| commit_message(desktop_dir, sha))
-            .unwrap_or_default();
-        let referenced = candidate_values.iter().find(|candidate| {
-            candidate["blob_equal"].as_bool() == Some(true)
-                && candidate["sha"]
-                    .as_str()
-                    .is_some_and(|sha| message_references_sha(&import_message, sha))
-        });
-        let mismatched_reference = candidate_values.iter().find(|candidate| {
-            candidate["blob_equal"].as_bool() == Some(false)
-                && candidate["sha"]
-                    .as_str()
-                    .is_some_and(|sha| message_references_sha(&import_message, sha))
-        });
-        let (state, upstream_commit, notes) = if let Some(referenced) = referenced {
-            basis.push("import-message-sha");
-            ("verified", Some(referenced["sha"].clone()), Vec::new())
+        let structured_reference = if structured_shas.len() == 1 {
+            structured_records
+                .iter()
+                .find(|record| record.sha == structured_shas[0])
+                .map(|record| json!({"sha": record.sha, "excerpt": record.raw}))
         } else {
-            let ambiguous = blob_equal.len() > 1;
-            let unique = if blob_equal.len() == 1 {
-                Some(json!(blob_equal[0]))
-            } else {
-                None
-            };
-            let commit = unique.or_else(|| {
-                if blob_equal.is_empty() {
-                    Some(json!(newest_commit))
-                } else {
-                    None
-                }
-            });
+            None
+        };
+        // 唯一结构化记录 + 该 SHA 在返回候选里 + blob 与 import blob 相等 → 才自动 verified。
+        let verified_record = if structured_shas.len() == 1 {
+            let sha = &structured_shas[0];
+            candidate_values
+                .iter()
+                .find(|candidate| {
+                    candidate["sha"].as_str() == Some(sha.as_str())
+                        && candidate["blob_equal"].as_bool() == Some(true)
+                })
+                .map(|_| sha.clone())
+        } else {
+            None
+        };
+        let (state, upstream_commit, notes) = if let Some(sha) = verified_record {
+            basis.push("structured-upstream-commit");
+            ("verified", Some(json!(sha)), Vec::new())
+        } else {
             let mut notes: Vec<String> = Vec::new();
+            if structured_shas.len() > 1 {
+                notes.push(format!(
+                    "{} structured Upstream-Commit records; no unique source is claimed",
+                    structured_shas.len()
+                ));
+                push_limit(
+                    limits,
+                    "multiple structured Upstream-Commit records; source is ambiguous",
+                );
+            } else if let Some(record) = &structured_reference {
+                match candidate_values
+                    .iter()
+                    .find(|candidate| candidate["sha"] == record["sha"])
+                {
+                    None => notes.push(format!(
+                        "structured Upstream-Commit {} does not appear among the returned upstream candidates for this file",
+                        record["sha"].as_str().unwrap_or_default()
+                    )),
+                    Some(candidate) if candidate["blob_equal"].as_bool() != Some(true) => {
+                        notes.push(format!(
+                            "structured Upstream-Commit {} has a different blob from the imported file",
+                            record["sha"].as_str().unwrap_or_default()
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            } else if candidate_values
+                .iter()
+                .any(|candidate| candidate["mentioned_in_message"].as_bool() == Some(true))
+            {
+                notes.push(
+                    "the import commit message mentions full SHA(s) but has no structured Upstream-Commit record; mentions are references, not evidence of adoption"
+                        .to_owned(),
+                );
+            }
+            let ambiguous = blob_equal.len() > 1;
             if ambiguous {
                 notes.push(format!(
-                    "{} upstream commits carry the same file content; without an explicit import reference no unique source is claimed",
+                    "{} upstream commits carry the same file content; no unique source is claimed",
                     blob_equal.len()
                 ));
                 push_limit(
@@ -2300,18 +2349,17 @@ fn cross_links(
                     "path mapping only; the imported content matches no returned upstream commit"
                         .to_owned(),
                 );
+            }
+            // 候选状态不按遍历顺序选来源：唯一结构化记录允许展示；否则仅唯一内容相等候选/最新候选。
+            let commit = if structured_shas.len() == 1 {
+                Some(json!(structured_shas[0]))
+            } else if blob_equal.len() == 1 {
+                Some(json!(blob_equal[0]))
+            } else if blob_equal.is_empty() {
+                Some(json!(newest_commit))
             } else {
-                notes.push(
-                    "path and content match only; the import commit message does not name the upstream revision"
-                        .to_owned(),
-                );
-            }
-            if let Some(mismatched) = mismatched_reference {
-                notes.push(format!(
-                    "the import commit message names {} but that upstream blob differs from the imported file",
-                    mismatched["sha"].as_str().unwrap_or_default()
-                ));
-            }
+                None
+            };
             ("candidate", commit, notes)
         };
         let upstream_blob = upstream_commit
@@ -2343,6 +2391,7 @@ fn cross_links(
                 "blob": desktop_blob,
             },
             "candidates": candidate_values,
+            "structured_reference": structured_reference,
             "notes": notes,
         }));
         if links.len() >= MAX_CROSS_LINKS {
@@ -2407,6 +2456,39 @@ fn commit_meta(dir: &Path, sha: &str) -> (String, u64, String) {
     )
 }
 
+/// 结构化导入记录：独立一行 `Upstream-Commit: <40 lowercase hex>`（键大小写不敏感、
+/// 允许前后空白，可多行）。这是唯一能自动升级 verified 的来源记录；普通正文提及不算。
+#[derive(Debug, Clone)]
+struct StructuredUpstreamCommit {
+    sha: String,
+    raw: String,
+}
+
+fn structured_upstream_commits(message: &str) -> Vec<StructuredUpstreamCommit> {
+    let mut records = Vec::new();
+    for line in message.lines() {
+        let trimmed = line.trim();
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("upstream-commit") {
+            continue;
+        }
+        let sha = value.trim();
+        if sha.len() == 40
+            && sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            records.push(StructuredUpstreamCommit {
+                sha: sha.to_owned(),
+                raw: truncate(trimmed, MAX_DETAIL_CHARS),
+            });
+        }
+    }
+    records
+}
+
 /// 提交说明里是否出现某个**完整 40 hex SHA**（前后不能紧邻其它 hex 字符，避免匹配到更长串）。
 fn message_references_sha(message: &str, sha: &str) -> bool {
     if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -2459,7 +2541,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
         None => None,
     };
     let overrides = PathOverrides::from_opts(opts);
-    let source = resolve_source(opts, model_json.as_ref(), &root, &overrides);
+    let mut source = resolve_source(opts, model_json.as_ref(), &root, &overrides);
 
     let mut repos = Map::new();
     let mut endpoints = Map::new();
@@ -2477,6 +2559,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
                 dir,
                 spec,
                 endpoint,
+                history,
             } => {
                 let target = Target {
                     key: "selected",
@@ -2497,11 +2580,26 @@ fn command_track(opts: &Opts) -> Result<Value> {
                 let mut report = report;
                 let overlay_value = overlay;
                 report.json["overlay"] = overlay_value;
+                if let Some(history) = history {
+                    // F01：记录这次历史到底读的是源码对象库还是注册 Desktop 库。
+                    source.history_object = Some(history.object.json());
+                    if let Some(notes) = report.json["notes"].as_array_mut() {
+                        for note in history.notes {
+                            notes.push(json!(note));
+                        }
+                    }
+                }
                 endpoints.insert("selected".to_owned(), endpoint.json());
                 truncated |= report.truncated;
                 repos.insert("selected".to_owned(), report.json.clone());
             }
-            SelectedTarget::ModelCommit { repo, sha, dir } => {
+            SelectedTarget::ModelCommit {
+                repo,
+                sha,
+                dir,
+                history,
+            } => {
+                source.history_object = Some(history.object.json());
                 let endpoint = Endpoint {
                     ref_name: sha.clone(),
                     sha: sha.clone(),
@@ -2542,6 +2640,9 @@ fn command_track(opts: &Opts) -> Result<Value> {
                 report.json["overlay"] = overlay;
                 if let Some(notes) = report.json["notes"].as_array_mut() {
                     notes.push(json!("history endpoint is the model's recorded commit in the registered desktop repository"));
+                    for note in history.notes {
+                        notes.push(json!(note));
+                    }
                 }
                 endpoints.insert(
                     "selected".to_owned(),
@@ -2743,11 +2844,15 @@ enum SelectedTarget {
         dir: PathBuf,
         spec: Option<RepoSpec>,
         endpoint: Endpoint,
+        /// 冻结模型记录 commit 的实际对象库；非冻结 selected 为 None。
+        history: Option<ResolvedHistory>,
     },
+    /// 历史终点在注册 Desktop 历史库里（源码是索引型快照或无 .git 快照）。
     ModelCommit {
         repo: Repo,
         sha: String,
         dir: Option<PathBuf>,
+        history: ResolvedHistory,
     },
     /// 选中源码没有可核验的历史终点：只给 notes 说明原因，绝不回退应用 HEAD。
     Unavailable { notes: Vec<String> },
@@ -2755,6 +2860,100 @@ enum SelectedTarget {
 
 fn commit_object_exists(dir: &Path, sha: &str) -> bool {
     git_ok(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some()
+}
+
+fn resolve_ref_in(dir: &Path, reference: &str) -> Option<String> {
+    git_ok(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+}
+
+/// 冻结模型的历史对象来源。应用 Official/Checkout 冻结会复制源码后 `git init + git add`
+/// （只有索引、没有历史 commit），此时 recorded commit 的 commit 对象通常只存在于注册 Desktop
+/// 历史库；F01 要求 track 与 details 用**同一套**规则按同一完整 SHA 找到它，绝不换成 HEAD/别的 ref。
+#[derive(Debug, Clone)]
+struct HistoryObjectInfo {
+    /// `source_object_store`（源码自己的对象库）或 `registered_desktop`（注册 Desktop 历史库）。
+    kind: &'static str,
+    path: PathBuf,
+    sha: String,
+}
+
+impl HistoryObjectInfo {
+    fn json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "path": self.path.display().to_string(),
+            "sha": self.sha,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedHistory {
+    object: HistoryObjectInfo,
+    notes: Vec<String>,
+}
+
+/// 按固定顺序找 recorded commit 的对象库：
+/// 1) 源码自己的 Git 对象库（完整 clone / 已有该 commit 的索引型快照）；
+/// 2) 注册 Desktop 历史库（显式 --desktop-path/env 或 managed history-root/repos/desktop）。
+///
+/// 找不到时返回 None；调用方必须 unavailable，不能回退 HEAD。
+fn resolve_history_object(
+    root: &Path,
+    overrides: &PathOverrides,
+    source_dir: Option<&Path>,
+    sha: &str,
+) -> Option<ResolvedHistory> {
+    if let Some(dir) = source_dir {
+        if let Some(checkout) = own_checkout(dir) {
+            if commit_object_exists(&checkout, sha) {
+                return Some(ResolvedHistory {
+                    object: HistoryObjectInfo {
+                        kind: "source_object_store",
+                        path: checkout,
+                        sha: sha.to_owned(),
+                    },
+                    notes: Vec::new(),
+                });
+            }
+        }
+    }
+    let repo = overrides.resolve(root, RepoKey::Desktop);
+    if repo.is_existing_checkout() && repo.rev(sha).is_some() {
+        let note = match source_dir {
+            Some(dir) if own_checkout(dir).is_some() => format!(
+                "the source checkout {} has no object for recorded commit {sha}; the same full SHA is read from the registered desktop history at {}",
+                dir.display(),
+                repo.path.display()
+            ),
+            Some(dir) => format!(
+                "the source snapshot {} has no git checkout; recorded commit {sha} is read from the registered desktop history at {}",
+                dir.display(),
+                repo.path.display()
+            ),
+            None => format!(
+                "no source checkout was given; recorded commit {sha} is read from the registered desktop history at {}",
+                repo.path.display()
+            ),
+        };
+        return Some(ResolvedHistory {
+            object: HistoryObjectInfo {
+                kind: "registered_desktop",
+                path: repo.path,
+                sha: sha.to_owned(),
+            },
+            notes: vec![note],
+        });
+    }
+    None
 }
 
 fn resolve_selected_target(
@@ -2772,64 +2971,59 @@ fn resolve_selected_target(
                 let Some(recorded) = source.commit.as_deref() else {
                     return Ok(SelectedTarget::Unavailable {
                         notes: vec![
-                            "the frozen model source has no recorded commit; refusing to use its                              current HEAD as the frozen model's history"
-                                .to_owned(),
+                            "the frozen model source has no recorded commit; refusing to use its current HEAD as the frozen model's history".to_owned(),
                         ],
                     });
                 };
-                if !commit_object_exists(&checkout, recorded) {
+                // F01：Official/Checkout 冻结源的 `git init + git add` 副本没有历史 commit 对象，
+                // 但同一个完整 SHA 可能在注册 Desktop 历史库里。按同一 SHA 回退，绝不换成 HEAD。
+                let Some(history) =
+                    resolve_history_object(root, overrides, source.source_dir.as_deref(), recorded)
+                else {
                     return Ok(SelectedTarget::Unavailable {
                         notes: vec![format!(
-                            "the frozen model records commit {recorded}, but that object is not                              readable in {}; refusing to fall back to HEAD",
+                            "the frozen model records commit {recorded}, but it is not readable in the source object store {} or the registered desktop history; no history source was substituted",
                             checkout.display()
                         )],
                     });
-                }
+                };
                 if let Some(reference) = requested_ref {
-                    match git_ok(
-                        &checkout,
-                        &[
-                            "rev-parse",
-                            "--verify",
-                            "-q",
-                            &format!("{reference}^{{commit}}"),
-                        ],
-                    ) {
+                    // ref 只在“能找到它”的可信对象库里解析；结果必须仍是 recorded commit。
+                    let resolved = resolve_ref_in(&checkout, reference)
+                        .or_else(|| resolve_ref_in(&history.object.path, reference));
+                    match resolved {
                         Some(sha) if sha == recorded => {}
                         Some(sha) => bail!(
-                            "requested ref {reference} resolves to {sha}, but the frozen model                              records commit {recorded}; refusing to attribute another commit to                              the frozen model (query an independent repository/ref explicitly for                              other commits)"
+                            "requested ref {reference} resolves to {sha}, but the frozen model records commit {recorded}; refusing to attribute another commit to the frozen model (query an independent repository/ref explicitly for other commits)"
                         ),
                         None => bail!(
-                            "requested ref {reference} is not readable in the frozen model                              source {}; it cannot be verified against the recorded commit {recorded}",
-                            checkout.display()
+                            "requested ref {reference} is not readable in the frozen model source or its registered history; it cannot be verified against the recorded commit {recorded}"
                         ),
                     }
                 }
-                return Ok(SelectedTarget::Git {
-                    dir: checkout,
-                    spec,
-                    endpoint: Endpoint {
-                        ref_name: recorded.to_owned(),
-                        sha: recorded.to_owned(),
-                    },
+                if history.object.kind == "source_object_store" {
+                    return Ok(SelectedTarget::Git {
+                        dir: checkout,
+                        spec,
+                        endpoint: Endpoint {
+                            ref_name: recorded.to_owned(),
+                            sha: recorded.to_owned(),
+                        },
+                        history: Some(history),
+                    });
+                }
+                return Ok(SelectedTarget::ModelCommit {
+                    repo: overrides.resolve(root, RepoKey::Desktop),
+                    sha: recorded.to_owned(),
+                    dir: source.source_dir.clone(),
+                    history,
                 });
             }
             let endpoint = match requested_ref {
-                Some(reference) => {
-                    let sha = git_ok(
-                        &checkout,
-                        &[
-                            "rev-parse",
-                            "--verify",
-                            "-q",
-                            &format!("{reference}^{{commit}}"),
-                        ],
-                    );
-                    sha.map(|sha| Endpoint {
-                        ref_name: reference.to_owned(),
-                        sha,
-                    })
-                }
+                Some(reference) => resolve_ref_in(&checkout, reference).map(|sha| Endpoint {
+                    ref_name: reference.to_owned(),
+                    sha,
+                }),
                 None => git_ok(&checkout, &["rev-parse", "HEAD"]).map(|sha| Endpoint {
                     ref_name: "HEAD".to_owned(),
                     sha,
@@ -2840,23 +3034,26 @@ fn resolve_selected_target(
                     dir: checkout,
                     spec,
                     endpoint,
+                    history: None,
                 });
             }
         }
     }
     if let Some(commit) = &source.commit {
-        let repo = overrides.resolve(root, RepoKey::Desktop);
-        if repo.rev(commit).is_some() {
+        if let Some(history) =
+            resolve_history_object(root, overrides, source.source_dir.as_deref(), commit)
+        {
             return Ok(SelectedTarget::ModelCommit {
-                repo,
+                repo: overrides.resolve(root, RepoKey::Desktop),
                 sha: commit.clone(),
                 dir: source.source_dir.clone(),
+                history,
             });
         }
         if source.mode == "frozen_model" {
             return Ok(SelectedTarget::Unavailable {
                 notes: vec![format!(
-                    "the frozen model records commit {commit}, but it is not readable in the                      registered desktop repository either; no history source was substituted"
+                    "the frozen model records commit {commit}, but it is not readable in the source object store or the registered desktop repository; no history source was substituted"
                 )],
             });
         }
@@ -3073,45 +3270,60 @@ fn commit_details_selected(
         .context("--repository selected requires --source <directory|app>")?;
     let overrides = PathOverrides::from_opts(opts);
     let app_alias = source.trim() == "app";
-    let root = if app_alias {
+    // 源码位置：完整检出用 Git 根；`git init + git add` 的索引型快照与无 .git 快照用目录本身。
+    // 历史对象可能不在这个目录里（F01），下面统一解析并分别报告。
+    let source_path = if app_alias {
         resolve_app_source(history_root, &overrides)?
     } else {
-        let source_path = PathBuf::from(&source);
-        if !source_path.exists() {
-            bail!("--source {} does not exist", source_path.display());
+        let given = PathBuf::from(&source);
+        if !given.exists() {
+            bail!("--source {} does not exist", given.display());
         }
-        PathBuf::from(
-            git_root(&source_path)
-                .with_context(|| format!("--source {source} is not a readable git checkout"))?,
-        )
+        own_checkout(&given).unwrap_or_else(|| given.canonicalize().unwrap_or(given))
     };
     let sha = parse_lowercase_sha(sha_text)?;
-    let identity = identity_for(&root, None);
-    let mut notes = vec![
-        "commit read from the explicitly supplied local source; it is not a registered \
-         desktop/colm_upstream repository and was not pushed or fetched"
-            .to_owned(),
-    ];
-    if app_alias {
-        notes.insert(
-            0,
-            format!(
-                "--source app resolved to the application source checkout at {}",
-                root.display()
-            ),
+    let Some(history) = resolve_history_object(history_root, &overrides, Some(&source_path), &sha)
+    else {
+        bail!(
+            "commit {sha} is not readable in the source object store {} or the registered desktop history; pass the checkout that contains it",
+            source_path.display()
         );
+    };
+    let history_path = history.object.path.clone();
+    let identity = identity_for(&history_path, None);
+    let mut notes = Vec::new();
+    if app_alias {
+        notes.push(format!(
+            "--source app resolved to the application source checkout at {}",
+            source_path.display()
+        ));
     }
+    notes.extend(history.notes);
     if identity["state"] != "verified" {
-        notes.push("remote identity of the supplied source is not verified".to_owned());
+        notes.push("remote identity of the history object store is not verified".to_owned());
     }
-    if git_ok(&root, &["rev-parse", "--is-shallow-repository"])
+    if git_ok(&history_path, &["rev-parse", "--is-shallow-repository"])
         .map(|text| text.trim() == "true")
         .unwrap_or(false)
     {
         notes.push("shallow repository: parent commits or older history may be missing".to_owned());
     }
+    if same_dir(&source_path, &history_path) {
+        notes.push(format!(
+            "commit {sha} is read from the source object store at {}",
+            history_path.display()
+        ));
+    } else {
+        notes.push(format!(
+            "source snapshot bytes are at {}; commit {sha} is read from the Git object store at {} ({})",
+            source_path.display(),
+            history_path.display(),
+            history.object.kind
+        ));
+    }
+    notes.push("a locally created commit has no pushed/PR evidence and was not pushed or fetched; PR lookup must report that gap instead of guessing".to_owned());
     let mut limits = Vec::new();
-    let fields = read_commit_fields(&root, &sha, symbol, path_filter, &mut limits)?;
+    let fields = read_commit_fields(&history_path, &sha, symbol, path_filter, &mut limits)?;
     if fields.parents.len() > 1 {
         notes.push(format!(
             "merge commit with {} parents; diff compares against the first parent {}",
@@ -3119,13 +3331,17 @@ fn commit_details_selected(
             fields.parents.first().map(String::as_str).unwrap_or("")
         ));
     }
-    notes.push("a locally created commit has no pushed/PR evidence; PR lookup must report that gap instead of guessing".to_owned());
     Ok(json!({
         "schema": SCHEMA,
         "repository": {
             "kind": "selected_source",
             "key": "selected",
-            "path": root.display().to_string(),
+            // 向后兼容：path 仍是源码位置；历史对象来源另列，避免两者混用。
+            "path": source_path.display().to_string(),
+            "source_path": source_path.display().to_string(),
+            "history_path": history_path.display().to_string(),
+            "history_object": history.object.json(),
+            "history_resolution": history.object.kind,
             "identity": identity,
         },
         "commit": fields.json(),

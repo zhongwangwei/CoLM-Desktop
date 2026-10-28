@@ -309,6 +309,65 @@ fn history_commit(
     run("history-commit", &opts(&flags))
 }
 
+/// 构造 F02 反例夹具：上游 A(1)→B(2)→C(revert 1)。Desktop 导入 A 的内容这一步由
+/// [`RevertFixture::import`] 在调用方知道 A/C 的完整 SHA 之后再做（免得 format! 时变量还没绑定）。
+struct RevertFixture {
+    root: TempDir,
+    upstream: RepoFixture,
+    desktop: RepoFixture,
+    commit_a: String,
+    commit_b: String,
+    commit_c: String,
+}
+
+impl RevertFixture {
+    fn new(label: &str) -> Self {
+        let root = TempDir::new(label);
+        let upstream = RepoFixture::init(&root.join("repos/colm_upstream"));
+        upstream.add_origin("https://github.com/CoLM-SYSU/CoLM");
+        upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+        let commit_a = upstream.commit("Add omega 1");
+        upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 2.0\nEND\n");
+        let commit_b = upstream.commit("Change omega 2");
+        upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+        let commit_c = upstream.commit("Revert omega to 1");
+        let desktop = RepoFixture::init(&root.join("repos/desktop"));
+        desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
+        Self {
+            root,
+            upstream,
+            desktop,
+            commit_a,
+            commit_b,
+            commit_c,
+        }
+    }
+
+    fn import(&self, import_message: &str) -> Value {
+        let imported = self.upstream.raw_file_at(&self.commit_a, "main/MOD_R.F90");
+        self.desktop
+            .write("vendor/CoLM202X/main/MOD_R.F90", &imported);
+        self.desktop.commit(import_message);
+        track(
+            &self.root,
+            &[
+                ("--repository", "both".to_owned()),
+                ("--symbol", "omega".to_owned()),
+                ("--limit", "10".to_owned()),
+            ],
+        )
+    }
+}
+
+fn candidate_with_sha<'a>(link: &'a Value, sha: &str) -> &'a Value {
+    link["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["sha"] == json!(sha))
+        .unwrap_or_else(|| panic!("candidate {sha} missing: {link:#?}"))
+}
+
 /// 找某个上游路径对应的 cross link。
 fn cross_link<'a>(result: &'a Value, upstream_path: &str) -> Option<&'a Value> {
     result["cross"]["links"]
@@ -915,9 +974,9 @@ fn cross_maps_upstream_change_to_verified_desktop_import() {
     desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
     let imported = upstream.raw_file_at(&upstream_change, "main/MOD_X.F90");
     desktop.write("vendor/CoLM202X/main/MOD_X.F90", &imported);
-    // H02：verified 需要可核验的来源关联；import 说明写明上游完整 40 hex SHA。
+    // F02：自动 verified 只认结构化 `Upstream-Commit: <40 lowercase hex>` trailer 行。
     let import_commit = desktop.commit(&format!(
-        "Import upstream CoLM202X snapshot at {upstream_change}"
+        "Import upstream CoLM202X snapshot\n\nUpstream-Commit: {upstream_change}"
     ));
     desktop.write(
         "vendor/CoLM202X/main/MOD_X.F90",
@@ -958,9 +1017,18 @@ fn cross_maps_upstream_change_to_verified_desktop_import() {
     assert!(basis.contains(&"blob-equal"), "{basis:?}");
     assert!(basis.contains(&"import-commit"), "{basis:?}");
     assert!(
-        basis.contains(&"import-message-sha"),
-        "verified needs the full upstream SHA written in the import message: {basis:?}"
+        basis.contains(&"structured-upstream-commit"),
+        "verified needs a structured Upstream-Commit record: {basis:?}"
     );
+    assert_eq!(
+        link["structured_reference"]["sha"],
+        json!(upstream_change),
+        "{link:#?}"
+    );
+    assert!(link["structured_reference"]["excerpt"]
+        .as_str()
+        .unwrap()
+        .starts_with("Upstream-Commit:"));
     assert_eq!(link["upstream"]["commit"], json!(upstream_change));
     assert_eq!(
         link["desktop"]["import_commit"]["sha"],
@@ -996,7 +1064,10 @@ fn cross_picks_the_commit_whose_blob_matches_the_desktop_import_on_a_timestamp_t
     desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
     let imported = upstream.raw_file_at(&imported_change, "main/MOD_TIE.F90");
     desktop.write("vendor/CoLM202X/main/MOD_TIE.F90", &imported);
-    desktop.commit_at(0, &format!("Import upstream snapshot at {imported_change}"));
+    desktop.commit_at(
+        0,
+        &format!("Import upstream snapshot\n\nUpstream-Commit: {imported_change}"),
+    );
 
     let result = track(
         &root,
@@ -1673,7 +1744,7 @@ fn cross_revert_scenario_lists_ambiguous_candidates_without_a_unique_source() {
     assert!(basis.contains(&"path"));
     assert!(basis.contains(&"blob-equal"));
     assert!(basis.contains(&"import-commit"));
-    assert!(!basis.contains(&"import-message-sha"));
+    assert!(!basis.contains(&"structured-upstream-commit"));
     assert!(!link["notes"].as_array().unwrap().is_empty());
 }
 
@@ -2016,4 +2087,465 @@ fn selected_source_app_alias_resolves_the_application_checkout() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// F02：普通正文提及不升级 verified；结构化 Upstream-Commit 才 verified
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn cross_mentions_without_structured_trailer_do_not_verify_a_revision() {
+    clean_history_env();
+    // A→B→revert A；Desktop 导入 A；说明里同时提到 A 和 C，并明确说 C 未采用。
+    let root = TempDir::new("f02-mentions");
+    let upstream = RepoFixture::init(&root.join("repos/colm_upstream"));
+    upstream.add_origin("https://github.com/CoLM-SYSU/CoLM");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+    let commit_a = upstream.commit("Add omega 1");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 2.0\nEND\n");
+    let commit_b = upstream.commit("Change omega 2");
+    upstream.write("main/MOD_R.F90", "SUBROUTINE r\n  omega = 1.0\nEND\n");
+    let commit_c = upstream.commit("Revert omega to 1");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
+    let imported = upstream.raw_file_at(&commit_a, "main/MOD_R.F90");
+    desktop.write("vendor/CoLM202X/main/MOD_R.F90", &imported);
+    desktop.commit(&format!(
+        "Import upstream revision {commit_a}\n\nReviewed later revision {commit_c} but did not adopt that revision."
+    ));
+    let result = track(
+        &root,
+        &[
+            ("--repository", "both".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--limit", "10".to_owned()),
+        ],
+    );
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "mentioning a SHA is not evidence of adopting it: {link:#?}"
+    );
+    // 同一 blob 的 A/C 都是内容候选；C 被明确提到但没有结构化记录，仍不能成为来源。
+    for sha in [&commit_a, &commit_c] {
+        let candidate = candidate_with_sha(link, sha);
+        assert_eq!(candidate["blob_equal"], true, "{candidate:#?}");
+        assert_eq!(candidate["mentioned_in_message"], true, "{candidate:#?}");
+        assert_eq!(candidate["structured"], false, "{candidate:#?}");
+    }
+    assert!(
+        candidate_with_sha(link, &commit_b)["blob_equal"] == false,
+        "{link:#?}"
+    );
+    let basis: Vec<&str> = link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect();
+    assert!(!basis.contains(&"structured-upstream-commit"));
+    assert_eq!(link["structured_reference"], Value::Null);
+    assert!(
+        link["notes"]
+            .to_string()
+            .contains("not evidence of adoption"),
+        "mentions must be explained as references: {link:#?}"
+    );
+    let _ = root;
+}
+
+#[test]
+fn cross_multiple_plain_mentions_are_ambiguous() {
+    clean_history_env();
+    let fixture = RevertFixture::new("f02-multi-mention");
+    let result = fixture.import(&format!(
+        "Import snapshot; reviewed {} and later {}.",
+        fixture.commit_a, fixture.commit_c
+    ));
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(link["upstream"]["commit"], Value::Null);
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["mentioned_in_message"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_c)["mentioned_in_message"],
+        true
+    );
+    assert_eq!(link["structured_reference"], Value::Null);
+    assert!(!link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "structured-upstream-commit"));
+}
+
+#[test]
+fn cross_structured_upstream_commit_verifies_only_the_named_revision() {
+    clean_history_env();
+    // 结构化 trailer 写 A（键大小写不敏感），正文另外提到 C：verified 只能指向 A。
+    let fixture = RevertFixture::new("f02-structured");
+    let result = fixture.import(&format!(
+        "Import upstream snapshot\n\nupstream-commit: {}\n\nNote: revision {} was reviewed but not adopted.",
+        fixture.commit_a, fixture.commit_c
+    ));
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "verified", "{link:#?}");
+    assert_eq!(link["upstream"]["commit"], json!(fixture.commit_a));
+    let basis: Vec<&str> = link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect();
+    assert!(basis.contains(&"structured-upstream-commit"), "{basis:?}");
+    assert_eq!(link["structured_reference"]["sha"], json!(fixture.commit_a));
+    assert!(link["structured_reference"]["excerpt"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .starts_with("upstream-commit:"));
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["structured"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["blob_equal"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_c)["mentioned_in_message"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_c)["structured"],
+        false
+    );
+    assert!(
+        candidate_with_sha(link, &fixture.commit_b)["blob_equal"] == false,
+        "{link:#?}"
+    );
+}
+
+#[test]
+fn cross_two_structured_upstream_commits_are_ambiguous() {
+    clean_history_env();
+    let fixture = RevertFixture::new("f02-structured-conflict");
+    let result = fixture.import(&format!(
+        "Import upstream snapshot\n\nUpstream-Commit: {}\nUpstream-Commit: {}",
+        fixture.commit_a, fixture.commit_c
+    ));
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "two structured records must stay ambiguous: {link:#?}"
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["structured"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_c)["structured"],
+        true
+    );
+    assert!(
+        link["notes"]
+            .to_string()
+            .contains("structured Upstream-Commit"),
+        "{link:#?}"
+    );
+    assert_eq!(link["structured_reference"], Value::Null);
+}
+
+// ---------------------------------------------------------------------------------------------
+// F01：索引型冻结源的 recorded commit 从注册 Desktop 历史库读同一完整 SHA
+// ---------------------------------------------------------------------------------------------
+
+fn index_only_snapshot(root: &TempDir, name: &str, file: &str, text: &str) -> PathBuf {
+    let path = root.join(name);
+    let repo = RepoFixture::init(&path);
+    repo.write(file, text);
+    repo.git(&["add", "-A"]);
+    let (has_head, _, _) = run_program(&path, "git", &["rev-parse", "--verify", "-q", "HEAD"], &[]);
+    assert!(!has_head, "an index-only snapshot must not have a commit");
+    path
+}
+
+#[test]
+fn frozen_index_only_snapshot_reads_its_recorded_commit_from_registered_desktop() {
+    clean_history_env();
+    let root = TempDir::new("f01-index-only");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    let recorded = desktop.commit("Add omega at the frozen revision");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let future = desktop.commit("Future change after the frozen revision");
+    // Official/Checkout 冻结形态：复制源码 bytes 后 git init + git add，没有历史 commit。
+    let frozen_bytes = desktop.raw_file_at(&recorded, "main/MOD_A.F90");
+    let freeze = index_only_snapshot(&root, "freeze", "main/MOD_A.F90", &frozen_bytes);
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(&freeze),
+        "commit": recorded,
+        "fingerprint": "a".repeat(64),
+    })
+    .to_string();
+
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(&freeze).to_owned()),
+            ("--model-json", model_json.clone()),
+        ],
+    );
+    assert_eq!(
+        result["query"]["endpoints"]["selected"]["sha"],
+        json!(recorded),
+        "the endpoint must stay the recorded commit, not the future one"
+    );
+    let source = &result["query"]["source"];
+    assert_eq!(
+        source["history_object"]["kind"], "registered_desktop",
+        "{source:#?}"
+    );
+    assert_eq!(
+        Path::new(source["history_object"]["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        desktop.path().canonicalize().unwrap()
+    );
+    assert_eq!(source["history_object"]["sha"], json!(recorded));
+    assert_eq!(source["source_dir"], json!(text(&freeze)));
+    let report = &result["repos"]["selected"];
+    assert_eq!(report["history"], "verified");
+    assert!(report["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|commit| commit["sha"] == json!(recorded)));
+    assert!(
+        !report["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|commit| commit["sha"] == json!(future)),
+        "the future revision must not appear: {report:#?}"
+    );
+    assert!(
+        report["notes"]
+            .to_string()
+            .contains("has no object for recorded commit"),
+        "the split between source bytes and history objects must be explained: {report:#?}"
+    );
+    assert_eq!(report["overlay"]["status"], "candidate");
+
+    // H01 保留：ref 指向同一注册库里的 future commit 仍然必须被拒绝。
+    let error = track_fail(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(&freeze).to_owned()),
+            ("--model-json", model_json),
+            ("--ref", future.clone()),
+        ],
+    );
+    assert!(
+        format!("{error:#}").contains("refusing to attribute another commit"),
+        "{error:#}"
+    );
+
+    // 详情共用规则：同一 source 缺 recorded commit 时从注册 Desktop 读同一 A。
+    let detail = history_commit_selected(&root, &freeze, &recorded, Some("omega"))
+        .expect("details must read the same recorded commit");
+    let repository = &detail["repository"];
+    assert_eq!(repository["kind"], "selected_source");
+    assert_eq!(
+        Path::new(repository["source_path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        freeze.canonicalize().unwrap()
+    );
+    assert_eq!(
+        Path::new(repository["history_path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        desktop.path().canonicalize().unwrap()
+    );
+    assert_eq!(repository["history_resolution"], "registered_desktop");
+    assert_eq!(repository["history_object"]["kind"], "registered_desktop");
+    assert_eq!(repository["identity"]["state"], "verified");
+    assert_eq!(detail["commit"]["sha"], json!(recorded));
+    assert!(detail["notes"]
+        .to_string()
+        .contains("source snapshot bytes are at"));
+}
+
+#[test]
+fn frozen_snapshot_without_git_reads_registered_commit_in_details() {
+    clean_history_env();
+    let root = TempDir::new("f01-no-git-detail");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.add_origin("https://github.com/zhongwangwei/CoLM-Desktop");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    let recorded = desktop.commit("Add omega");
+    let plain = TempDir::new("f01-plain-source");
+    std::fs::create_dir_all(plain.path().join("main")).unwrap();
+    std::fs::write(
+        plain.path().join("main/MOD_A.F90"),
+        desktop.raw_file_at(&recorded, "main/MOD_A.F90"),
+    )
+    .unwrap();
+
+    let detail = history_commit_selected(&root, plain.path(), &recorded, Some("omega"))
+        .expect("no-.git snapshot must still resolve the recorded commit from desktop");
+    let repository = &detail["repository"];
+    assert_eq!(repository["history_resolution"], "registered_desktop");
+    assert_eq!(
+        Path::new(repository["source_path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        plain.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        Path::new(repository["history_path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        desktop.path().canonicalize().unwrap()
+    );
+    assert_eq!(detail["commit"]["sha"], json!(recorded));
+    assert!(detail["notes"].to_string().contains("no git checkout"));
+
+    // track 的既有无 .git fallback 也报告 history_object。
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(plain.path()),
+        "commit": recorded,
+    })
+    .to_string();
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(plain.path()).to_owned()),
+            ("--model-json", model_json),
+        ],
+    );
+    assert_eq!(
+        result["query"]["source"]["history_object"]["kind"],
+        "registered_desktop"
+    );
+    assert_eq!(
+        result["query"]["endpoints"]["selected"]["sha"],
+        json!(recorded)
+    );
+}
+
+#[test]
+fn frozen_complete_git_source_reports_source_object_store() {
+    clean_history_env();
+    let root = TempDir::new("f01-source-store");
+    let source = RepoFixture::init(&root.join("frozen"));
+    source.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    let recorded = source.commit("Add omega");
+    // 注册 Desktop 历史库里也有同一个完整 SHA：仍应优先读源码自己的对象库。
+    let registered = root.join("repos/desktop");
+    let (ok, _, stderr) = run_program(
+        root.path(),
+        "git",
+        &[
+            "clone",
+            "-q",
+            "--local",
+            "--no-hardlinks",
+            text(source.path()),
+            text(&registered),
+        ],
+        &[],
+    );
+    assert!(ok, "local clone failed: {stderr}");
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(source.path()),
+        "commit": recorded,
+    })
+    .to_string();
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(source.path()).to_owned()),
+            ("--model-json", model_json),
+        ],
+    );
+    assert_eq!(
+        result["query"]["source"]["history_object"]["kind"],
+        "source_object_store"
+    );
+    assert_eq!(
+        Path::new(
+            result["query"]["source"]["history_object"]["path"]
+                .as_str()
+                .unwrap()
+        )
+        .canonicalize()
+        .unwrap(),
+        source.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        result["query"]["endpoints"]["selected"]["sha"],
+        json!(recorded)
+    );
+}
+
+#[test]
+fn frozen_recorded_commit_missing_everywhere_stays_unavailable() {
+    clean_history_env();
+    let root = TempDir::new("f01-missing");
+    let freeze = index_only_snapshot(
+        &root,
+        "freeze",
+        "main/MOD_A.F90",
+        "SUBROUTINE a\n  omega = 1.0\nEND\n",
+    );
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("src/lib.rs", "pub fn unrelated() {}\n");
+    desktop.commit("Unrelated desktop commit");
+    let recorded = "f".repeat(40);
+    let model_json = json!({
+        "mode": "frozen_model",
+        "source_dir": text(&freeze),
+        "commit": recorded,
+    })
+    .to_string();
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(&freeze).to_owned()),
+            ("--model-json", model_json),
+        ],
+    );
+    let report = &result["repos"]["selected"];
+    assert_eq!(report["history"], "unavailable", "{report:#?}");
+    assert!(report["commits"].as_array().unwrap().is_empty());
+    assert_eq!(result["query"]["source"]["history_object"], Value::Null);
+    assert_eq!(result["query"]["endpoints"]["selected"], Value::Null);
+    let notes = report["notes"].to_string();
+    assert!(notes.contains("records commit"), "{notes}");
+    assert!(notes.contains("not readable"), "{notes}");
+
+    let error = history_commit_selected(&root, &freeze, &recorded, None).unwrap_err();
+    assert!(format!("{error:#}").contains("not readable"), "{error:#}");
 }
