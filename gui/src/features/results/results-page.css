@@ -292,21 +292,59 @@
   min-height: 34px;
   padding: 6px 12px;
 }
-/* 跨站点/导出功能单独一行，避免和"当前站点"的页签混在一起被误读为站点级视图。 */
-.results-scopes {
+/* 分析范围：单站点/多站点是范围选择，不是页签；和站点选择器并排放在标题下面。 */
+.results-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.results-scope {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  margin: -2px 0 10px;
 }
 .results-scope-label {
-  font-size: 12px;
-  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--foreground);
 }
-.results-tabs-scope .results-tab {
-  font-size: 12px;
-  padding: 5px 10px;
+.results-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--elevated);
+}
+.results-scope-option {
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  padding: 5px 13px;
+}
+.results-scope-option:hover:not(:disabled) {
+  color: var(--foreground);
+}
+.results-scope-option.is-active {
+  background: var(--surface);
+  color: var(--foreground);
+}
+.results-scope-option:disabled {
+  opacity: 0.55;
+}
+.results-scope-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.results-scope-heading {
+  margin: 0;
+  font-size: 16px;
 }
 .results-controls {
   display: flex;

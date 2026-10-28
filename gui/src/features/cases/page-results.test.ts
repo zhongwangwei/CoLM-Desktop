@@ -588,6 +588,19 @@ test('overview contract exposes optional evaluation conditions only while advanc
     source: '/run',
     runs: [],
     tabs: ['overview', 'catalog', 'series', 'evaluation', 'comparison', 'diagnostics', 'report'],
+    tabIndex: (name: string) =>
+      [
+        'overview',
+        'catalog',
+        'series',
+        'evaluation',
+        'comparison',
+        'diagnostics',
+        'report',
+      ].indexOf(name),
+    // 分析范围（单站点/多站点）与"切回原站点页签"的 ref 也被 fields 回调引用。
+    multiStation: false,
+    lastStationTab: { current: 'overview' },
     // 页签的中英文字面量：源文件里的 tabLabels 对象也被 `fields` 回调引用。
     tabLabels: {
       en: [

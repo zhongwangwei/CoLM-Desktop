@@ -100,12 +100,11 @@ const tabLabels = {
   zh: ['结果总览', '数据目录', '时序分析', '观测评估', '多站比较', '闭合诊断', '报告导出'],
 } as const;
 /**
- * 站点内的页签：随上面选中的站点/运行变化，放同一行。
- * 多站比较与报告导出是跨站点/导出功能，不跟"当前站点"走，单独放一行（用户反馈：放在站点页签里
- * 会让人以为它们也只为所选站点服务）。
+ * 站点内的页签：随上面选中的站点/运行变化。多站点比较不是页签，而是"分析范围"里的另一个选项，
+ * 由结果页上方的单站点/多站点选择器切换（2026-10-28 用户反馈：别把跨站点功能混进站点页签）。
+ * 报告导出视图已从界面移除（用户要求），保留内部 tab 支持。
  */
 const stationTabs = ['overview', 'catalog', 'series', 'evaluation', 'diagnostics'] as const;
-const crossTabs = ['comparison', 'report'] as const;
 const tabIndex = (name: (typeof tabs)[number]) => tabs.indexOf(name);
 export function ScienceChart({
   data,
@@ -227,6 +226,11 @@ export default function ResultsPage({
   const [reportFormat, setReportFormat] = useState<ReportFormat>('json');
   const [exportNotice, setExportNotice] = useState('');
   const [tab, setTab] = useState<(typeof tabs)[number]>('overview');
+  // 单站点/多站点是"分析范围"，不是页签：多站点就是多运行比较页，页签只保留站点内视图。
+  // 记住进多站点前看的是哪个站点内视图，切回单站点时回到原处。
+  const lastStationTab = useRef<(typeof tabs)[number]>('overview');
+  if (tab !== 'comparison' && tab !== 'report') lastStationTab.current = tab;
+  const multiStation = tab === 'comparison';
   const [runs, setRuns] = useState<Run[]>([]);
   const [source, setSource] = useState('');
   const completedRunCase =
@@ -809,13 +813,17 @@ export default function ResultsPage({
       : [
           {
             id: 'result-tab',
-            label: tr('更多分析与导出', 'More analyses and exports'),
+            label: tr('分析视图', 'Analysis view'),
             type: 'choice',
+            // 报告导出视图不再出现在界面里（用户 2026-10-28：报告导出按钮不要）；保留内部 tab 支持，
+            // 因此这里只列出界面上真正能看到的页签。
             value: tab,
-            options: tabs.map((v, i) => ({
-              value: v,
-              label: en ? tabLabels.en[i] : tabLabels.zh[i],
-            })),
+            options: tabs
+              .filter((v) => v !== 'report')
+              .map((v) => ({
+                value: v,
+                label: en ? tabLabels.en[tabIndex(v)] : tabLabels.zh[tabIndex(v)],
+              })),
             disabled: busy,
             set: (v) => setTab(v as typeof tab),
           },
@@ -824,7 +832,8 @@ export default function ResultsPage({
     !runChooser &&
     !settingsOpen &&
     state.cases.length > 0 &&
-    (!caseDir || state.cases.length > 1)
+    (!caseDir || state.cases.length > 1) &&
+    !multiStation
   )
     fields.unshift({
       id: 'result-station',
@@ -837,6 +846,20 @@ export default function ResultsPage({
       })),
       disabled: busy,
       set: (dir) => run(() => chooseStation(dir)),
+    });
+  if (!runChooser && !settingsOpen)
+    fields.unshift({
+      id: 'result-scope',
+      label: tr('分析范围', 'Scope'),
+      type: 'choice',
+      value: multiStation ? 'multi' : 'single',
+      options: [
+        { value: 'single', label: tr('单站点', 'Single station') },
+        { value: 'multi', label: tr('多站点', 'Multiple stations') },
+      ],
+      disabled: busy,
+      set: (value) =>
+        setTab(value === 'multi' ? 'comparison' : (lastStationTab.current as typeof tab)),
     });
   if (!runChooser && settingsOpen)
     fields.push({
@@ -1006,49 +1029,80 @@ export default function ResultsPage({
           {tr('比较其他运行', 'Compare other runs')}
         </ActionButton>
       </header>
-      {state.cases.length > 0 && (!caseDir || state.cases.length > 1) && (
-        <Field label={tr('站点', 'Station')}>
-          <Select
-            value={caseDir}
-            disabled={busy}
-            onChange={(event) => run(() => chooseStation(event.target.value))}
-          >
-            {!caseDir && (
-              <option value="" disabled>
-                {tr('请选择站点', 'Choose a station')}
-              </option>
-            )}
-            {state.cases.map((entry) => (
-              <option key={entry.dir} value={entry.dir}>
-                {entry.name || entry.dir.split(/[\\/]/).at(-1) || entry.dir}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      )}
-      {/* 分析页签与页面级动作放在同一条工具条里：原来塞在页面底部的一个 11px 下拉框和幽灵按钮里，
-          既不起眼也不好看（2026-10-28 用户反馈）。站点内页签和跨站点功能分开两行；「模型改进」
-          只留在结果总览的"下一步可以做什么"卡片里，不再和"返回总览/返回模拟"并列。 */}
-      <div className="results-toolbar">
-        <nav
-          className="results-tabs"
-          role="tablist"
-          aria-label={tr('当前站点的分析视图', 'Views for the selected station')}
-        >
-          {stationTabs.map((name) => (
+      {/* 分析范围（单站点/多站点）放在站点选择旁边：多站点不是页签，而是看整个项目的多站比较页。 */}
+      <div className="results-scope-row">
+        <div className="results-scope" role="group" aria-label={tr('分析范围', 'Scope')}>
+          <span className="results-scope-label">{tr('分析范围', 'Scope')}</span>
+          <div className="results-segmented">
             <button
-              key={name}
               type="button"
-              role="tab"
-              aria-selected={tab === name}
-              className={`results-tab${tab === name ? ' is-active' : ''}`}
+              className={`results-scope-option${multiStation ? '' : ' is-active'}`}
+              aria-pressed={!multiStation}
               disabled={busy}
-              onClick={() => setTab(name)}
+              onClick={() => setTab(lastStationTab.current)}
             >
-              {en ? tabLabels.en[tabIndex(name)] : tabLabels.zh[tabIndex(name)]}
+              {tr('单站点', 'Single station')}
             </button>
-          ))}
-        </nav>
+            <button
+              type="button"
+              className={`results-scope-option${multiStation ? ' is-active' : ''}`}
+              aria-pressed={multiStation}
+              disabled={busy}
+              onClick={() => setTab('comparison')}
+            >
+              {tr('多站点', 'Multiple stations')}
+            </button>
+          </div>
+        </div>
+        {!multiStation && state.cases.length > 0 && (!caseDir || state.cases.length > 1) && (
+          <Field label={tr('站点', 'Station')}>
+            <Select
+              value={caseDir}
+              disabled={busy}
+              onChange={(event) => run(() => chooseStation(event.target.value))}
+            >
+              {!caseDir && (
+                <option value="" disabled>
+                  {tr('请选择站点', 'Choose a station')}
+                </option>
+              )}
+              {state.cases.map((entry) => (
+                <option key={entry.dir} value={entry.dir}>
+                  {entry.name || entry.dir.split(/[\\/]/).at(-1) || entry.dir}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+      </div>
+      {/* 工具条：单站点时是站点内页签 + 页面动作；多站点时是"多站点比较"标题 + 返回类动作。
+          「模型改进」只留在结果总览的"下一步可以做什么"卡片里，不再和"返回总览/返回模拟"并列。 */}
+      <div className="results-toolbar">
+        {multiStation ? (
+          <h2 className="results-scope-heading">
+            {tr('多站点比较', 'Multiple-station comparison')}
+          </h2>
+        ) : (
+          <nav
+            className="results-tabs"
+            role="tablist"
+            aria-label={tr('当前站点的分析视图', 'Views for the selected station')}
+          >
+            {stationTabs.map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={tab === name}
+                className={`results-tab${tab === name ? ' is-active' : ''}`}
+                disabled={busy}
+                onClick={() => setTab(name)}
+              >
+                {en ? tabLabels.en[tabIndex(name)] : tabLabels.zh[tabIndex(name)]}
+              </button>
+            ))}
+          </nav>
+        )}
         <div className="results-actions">
           {tab !== 'overview' && (
             <ActionButton
@@ -1062,7 +1116,7 @@ export default function ResultsPage({
               {tr('← 结果总览', '← Overview')}
             </ActionButton>
           )}
-          {tab === 'overview' && (
+          {!multiStation && tab === 'overview' && (
             <ActionButton
               action="export-full-series-csv"
               label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
@@ -1086,30 +1140,6 @@ export default function ResultsPage({
             </ActionButton>
           )}
         </div>
-      </div>
-      <div className="results-scopes">
-        <span className="results-scope-label">
-          {tr('跨站点与导出：', 'Across stations and export:')}
-        </span>
-        <nav
-          className="results-tabs results-tabs-scope"
-          role="tablist"
-          aria-label={tr('跨站点与导出', 'Across stations and export')}
-        >
-          {crossTabs.map((name) => (
-            <button
-              key={name}
-              type="button"
-              role="tab"
-              aria-selected={tab === name}
-              className={`results-tab${tab === name ? ' is-active' : ''}`}
-              disabled={busy}
-              onClick={() => setTab(name)}
-            >
-              {en ? tabLabels.en[tabIndex(name)] : tabLabels.zh[tabIndex(name)]}
-            </button>
-          ))}
-        </nav>
       </div>
       {awaitingFetch && (
         <Notice>
