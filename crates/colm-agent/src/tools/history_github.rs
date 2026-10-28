@@ -515,6 +515,22 @@ impl GithubClient {
     }
 
     fn http_get(&self, url: &str) -> Result<ApiResponse, ApiError> {
+        // 幂等 GET：瞬时连接失败（回环端口复用、CI 负载、短暂 reset）只重试一次。
+        // HTTP 语义错误（401/403/404/429/5xx）绝不重试；超时也归为传输错误重试一次。
+        let mut first_error = None;
+        for _ in 0..2 {
+            match self.http_get_once(url) {
+                Ok(response) => return Ok(response),
+                Err(error) if error.kind == "network" && first_error.is_none() => {
+                    first_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(first_error.expect("one network attempt must have failed"))
+    }
+
+    fn http_get_once(&self, url: &str) -> Result<ApiResponse, ApiError> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
@@ -1157,3 +1173,13 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 #[path = "history_github_tests.rs"]
 mod history_github_tests;
+
+/// 进程级 GitHub API 环境变量（`COLM_HISTORY_GITHUB_API`）的测试锁。
+///
+/// 它同时被工具层测试（会设置该变量）和客户端测试（`GithubClient::new` 会读它）
+/// 使用；测试并行时若不共享同一把锁，另一个测试会在错误的 mock 地址上发请求或断言。
+#[cfg(test)]
+pub(super) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}

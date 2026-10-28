@@ -68,6 +68,7 @@ struct MockResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    close_without_response: bool,
 }
 
 impl MockResponse {
@@ -76,6 +77,7 @@ impl MockResponse {
             status,
             headers: Vec::new(),
             body: body.to_string().into_bytes(),
+            close_without_response: false,
         }
     }
 
@@ -84,6 +86,17 @@ impl MockResponse {
             status,
             headers: Vec::new(),
             body: body.into(),
+            close_without_response: false,
+        }
+    }
+
+    /// 接受连接并读完请求后直接关闭（模拟回环瞬时 reset/EOF），用于验证传输层重试。
+    fn close() -> Self {
+        Self {
+            status: 0,
+            headers: Vec::new(),
+            body: Vec::new(),
+            close_without_response: true,
         }
     }
 
@@ -210,6 +223,10 @@ fn serve_mock_connection(
             .push(request.clone());
     }
     let response = handler(&request);
+    if response.close_without_response {
+        // drop(stream) 由作用域结束完成：客户端看到 EOF，触发一次传输重试。
+        return Ok(());
+    }
     let mut head = format!(
         "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.status,
@@ -293,6 +310,7 @@ fn notices(result: &Value) -> Vec<&str> {
 
 #[test]
 fn parse_github_time_ms_accepts_github_timestamps() {
+    let _env = super::test_env_lock();
     assert_eq!(
         parse_github_time_ms("2024-03-02T01:02:03Z"),
         Some(1_709_341_323_000)
@@ -325,6 +343,7 @@ fn parse_github_time_ms_accepts_github_timestamps() {
 
 #[test]
 fn api_base_validation_allows_https_and_only_loopback_http() {
+    let _env = super::test_env_lock();
     assert_eq!(
         normalized_api_base("https://api.github.com").as_deref(),
         Ok("https://api.github.com")
@@ -362,11 +381,39 @@ fn api_base_validation_allows_https_and_only_loopback_http() {
 }
 
 // ---------------------------------------------------------------------------
+// 传输层重试
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_transport_failure_is_retried_once_and_then_succeeds() {
+    let _env = super::test_env_lock();
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = mock_github(move |_request| {
+        if attempts_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            MockResponse::close()
+        } else {
+            MockResponse::json(200, json!([]))
+        }
+    });
+    let root = temp("retry-transport");
+    let client = client_for(&server, &root);
+    let result = client.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(server.requests().len(), 2);
+    assert!(errors(&result).is_empty(), "{result}");
+    assert_eq!(result["pulls"], json!([]));
+    assert_eq!(result["complete"], true);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
 // 0 / 1 / 多 PR
 // ---------------------------------------------------------------------------
 
 #[test]
 fn zero_pull_requests_returns_notice_not_error() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         assert_eq!(request.method, "GET");
         assert!(request.path().ends_with(&format!("/commits/{SHA}/pulls")));
@@ -397,6 +444,7 @@ fn zero_pull_requests_returns_notice_not_error() {
 
 #[test]
 fn single_pull_request_parses_fields_and_body_reason() {
+    let _env = super::test_env_lock();
     let body = "This fixes the Qle default that broke the calibration.\n\nDetails here.";
     let server = mock_github(move |request| {
         if request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
@@ -452,6 +500,7 @@ fn single_pull_request_parses_fields_and_body_reason() {
 
 #[test]
 fn multiple_pull_requests_follow_link_pagination() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         if !request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
             return MockResponse::json(404, json!({"message": "unexpected path"}));
@@ -508,6 +557,7 @@ fn multiple_pull_requests_follow_link_pagination() {
 
 #[test]
 fn empty_body_is_not_recorded_then_discussion_documents_reason() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         let path = request.path().to_owned();
         if path.ends_with(&format!("/commits/{SHA}/pulls")) {
@@ -570,6 +620,7 @@ fn empty_body_is_not_recorded_then_discussion_documents_reason() {
 
 #[test]
 fn http_failures_map_to_error_kinds_without_false_empty() {
+    let _env = super::test_env_lock();
     let cases = [
         (401u16, "unauthorized"),
         (403, "forbidden"),
@@ -606,6 +657,7 @@ fn http_failures_map_to_error_kinds_without_false_empty() {
 
 #[test]
 fn rate_limited_responses_report_reset_information() {
+    let _env = super::test_env_lock();
     let server = mock_github(|_request| {
         MockResponse::json(403, json!({"message": "API rate limit exceeded"}))
             .header("X-RateLimit-Remaining", "0")
@@ -649,24 +701,37 @@ fn rate_limited_responses_report_reset_information() {
 
 #[test]
 fn connection_failure_and_timeout_map_to_network() {
-    // 连接失败：拿一个刚释放的端口（没有监听者）。
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let _env = super::test_env_lock();
+    // 连接失败：拿一个刚释放的端口（没有监听者）。CI 上该端口可能在 bind 与
+    // connect 之间被并行测试的 mock server 复用，表现为 timeout 而不是 refused；
+    // 换新端口重试，直到拿到一个真正的“没有监听者”的端口。
     let root = temp("connection");
-    let mut client = GithubClient::new(root.clone(), None, false);
-    client.api_base = format!("http://127.0.0.1:{port}");
-    client.timeout = Duration::from_millis(500);
-    let result = client.pulls(OWNER, REPO, SHA, false, false);
-    let error = first_error(&result);
-    assert_eq!(error["kind"], "network");
-    assert_eq!(error["status"], Value::Null);
-    assert!(
-        first_error(&result)["message"]
+    let mut last = Value::Null;
+    let mut saw_connection_error = false;
+    for _ in 0..10 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut client = GithubClient::new(root.clone(), None, false);
+        client.api_base = format!("http://127.0.0.1:{port}");
+        client.timeout = Duration::from_millis(500);
+        let result = client.pulls(OWNER, REPO, SHA, false, false);
+        let error = first_error(&result);
+        assert_eq!(error["kind"], "network", "{result}");
+        assert_eq!(error["status"], Value::Null, "{result}");
+        if first_error(&result)["message"]
             .as_str()
-            .unwrap()
-            .contains("connection"),
-        "{result}"
+            .unwrap_or_default()
+            .contains("connection")
+        {
+            saw_connection_error = true;
+            break;
+        }
+        last = result;
+    }
+    assert!(
+        saw_connection_error,
+        "no fresh port behaved as closed: {last}"
     );
 
     // 超时：服务端接受连接但 1 秒后才回，客户端 150ms 必须放弃。
@@ -691,6 +756,7 @@ fn connection_failure_and_timeout_map_to_network() {
 
 #[test]
 fn pagination_stops_at_the_page_limit_and_marks_incomplete() {
+    let _env = super::test_env_lock();
     // 每一页都装满 100 条且都带 next：客户端必须在 MAX_PAGES 停下并标 complete=false，
     // 不能无限翻页（也不能声称“已检查全部”）。
     let server = mock_github(|request| {
@@ -724,6 +790,7 @@ fn pagination_stops_at_the_page_limit_and_marks_incomplete() {
 
 #[test]
 fn long_bodies_are_truncated_to_the_documented_limits() {
+    let _env = super::test_env_lock();
     let long_body = "中".repeat(MAX_PR_BODY_CHARS + 500);
     let long_comment = "文".repeat(MAX_COMMENT_BODY_CHARS + 500);
     let server = mock_github(move |request| {
@@ -766,6 +833,7 @@ fn long_bodies_are_truncated_to_the_documented_limits() {
 
 #[test]
 fn partial_page_two_failure_marks_incomplete_and_keeps_page_one() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         if !request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
             return MockResponse::json(404, json!({"message": "unexpected path"}));
@@ -812,6 +880,7 @@ fn partial_page_two_failure_marks_incomplete_and_keeps_page_one() {
 
 #[test]
 fn comment_failure_marks_reason_unavailable() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         if request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
             MockResponse::json(
@@ -842,6 +911,7 @@ fn comment_failure_marks_reason_unavailable() {
 
 #[test]
 fn cache_hit_offline_makes_no_http_requests_and_keeps_fetched_at() {
+    let _env = super::test_env_lock();
     let server = mock_github(|request| {
         if request.path().ends_with(&format!("/commits/{SHA}/pulls")) {
             MockResponse::json(
@@ -911,6 +981,7 @@ fn assert_no_http_refresh(server: &MockGithub, expected: usize) {
 
 #[test]
 fn offline_without_cache_returns_notice_without_network() {
+    let _env = super::test_env_lock();
     let server = mock_github(|_request| {
         panic!("offline mode must never send a request");
     });
@@ -936,6 +1007,7 @@ fn offline_without_cache_returns_notice_without_network() {
 
 #[test]
 fn cache_is_isolated_by_owner_and_repo_for_the_same_sha() {
+    let _env = super::test_env_lock();
     let desktop = format!("/repos/zhongwangwei/CoLM-Desktop/commits/{SHA}/pulls");
     let upstream = format!("/repos/CoLM-SYSU/CoLM/commits/{SHA}/pulls");
     let server = mock_github(move |request| {
@@ -1016,6 +1088,7 @@ fn cache_is_isolated_by_owner_and_repo_for_the_same_sha() {
 
 #[test]
 fn oversized_and_malformed_responses_are_invalid_response() {
+    let _env = super::test_env_lock();
     // 超过 2 MiB：不能读进内存当正常结果。
     let oversized = mock_github(|_request| {
         MockResponse::raw(200, "x".repeat((MAX_RESPONSE_BYTES + 1024) as usize))
@@ -1050,6 +1123,7 @@ fn oversized_and_malformed_responses_are_invalid_response() {
 
 #[test]
 fn invalid_arguments_are_rejected_before_any_request() {
+    let _env = super::test_env_lock();
     let server = mock_github(|_request| {
         panic!("invalid arguments must be rejected before any HTTP request")
     });
@@ -1107,6 +1181,7 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn token_is_sent_in_authorization_and_never_leaks() {
+    let _env = super::test_env_lock();
     let secret = "ghp_SECRET_TOKEN_value_123";
     let server = mock_github(|request| {
         assert_eq!(
