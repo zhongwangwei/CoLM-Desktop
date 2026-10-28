@@ -86,6 +86,19 @@ const tabs = [
   'diagnostics',
   'report',
 ] as const;
+/** 页签的中英文名称；页签按钮与助手契约共用一份，避免两处各写一遍再走样。 */
+const tabLabels = {
+  en: [
+    'Overview',
+    'Data catalog',
+    'Time series',
+    'Observation evaluation',
+    'Site comparison',
+    'Diagnostics',
+    'Report',
+  ],
+  zh: ['结果总览', '数据目录', '时序分析', '观测评估', '多站比较', '闭合诊断', '报告导出'],
+} as const;
 export function ScienceChart({
   data,
   labels,
@@ -793,25 +806,7 @@ export default function ResultsPage({
             value: tab,
             options: tabs.map((v, i) => ({
               value: v,
-              label: en
-                ? [
-                    'Overview',
-                    'Data catalog',
-                    'Time series',
-                    'Observation evaluation',
-                    'Site comparison',
-                    'Diagnostics',
-                    'Report',
-                  ][i]
-                : [
-                    '结果总览',
-                    '数据目录',
-                    '时序分析',
-                    '观测评估',
-                    '多站比较',
-                    '闭合诊断',
-                    '报告导出',
-                  ][i],
+              label: en ? tabLabels.en[i] : tabLabels.zh[i],
             })),
             disabled: busy,
             set: (v) => setTab(v as typeof tab),
@@ -1023,6 +1018,74 @@ export default function ResultsPage({
           </Select>
         </Field>
       )}
+      {/* 分析页签与页面级动作放在同一条工具条里：原来塞在页面底部的一个 11px 下拉框和幽灵按钮里，
+          既不起眼也不好看（2026-10-28 用户反馈）。页签直接用按钮呈现，助手仍通过 result-tab 契约字段切换。 */}
+      <div className="results-toolbar">
+        <nav className="results-tabs" role="tablist" aria-label={tr('分析视图', 'Analysis views')}>
+          {tabs.map((name, index) => (
+            <button
+              key={name}
+              type="button"
+              role="tab"
+              aria-selected={tab === name}
+              className={`results-tab${tab === name ? ' is-active' : ''}`}
+              disabled={busy}
+              onClick={() => setTab(name)}
+            >
+              {en ? tabLabels.en[index] : tabLabels.zh[index]}
+            </button>
+          ))}
+        </nav>
+        <div className="results-actions">
+          {tab !== 'overview' && (
+            <ActionButton
+              action="result-overview"
+              label={tr('返回结果总览', 'Back to results overview')}
+              kind="click"
+              variant="ghost"
+              disabled={busy}
+              run={() => setTab('overview')}
+            >
+              {tr('← 结果总览', '← Overview')}
+            </ActionButton>
+          )}
+          {tab !== 'overview' && (
+            <ActionButton
+              action="result-improve"
+              label={tr('模型改进', 'Improve model')}
+              kind="click"
+              variant="primary"
+              disabled={busy}
+              run={improveModel}
+            >
+              {tr('模型改进', 'Improve model')}
+            </ActionButton>
+          )}
+          {tab === 'overview' && (
+            <ActionButton
+              action="export-full-series-csv"
+              label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
+              kind="commit"
+              variant="ghost"
+              disabled={!source || !variable || busy}
+              run={exportFullSeries}
+            >
+              {tr('导出完整 CSV', 'Export full CSV')}
+            </ActionButton>
+          )}
+          {onBack && (
+            <ActionButton
+              action="result-back"
+              label={tr('返回模拟', 'Back to simulation')}
+              kind="click"
+              variant="ghost"
+              run={onBack}
+            >
+              {tr('返回模拟', 'Back to simulation')}
+            </ActionButton>
+          )}
+        </div>
+      </div>
       {awaitingFetch && (
         <Notice>
           {tr(
@@ -1273,85 +1336,6 @@ export default function ResultsPage({
           </Card>
         </section>
       )}
-      <footer className="results-secondary">
-        {tab !== 'overview' && (
-          <>
-            <ActionButton
-              action="result-overview"
-              label={tr('返回结果总览', 'Back to results overview')}
-              kind="click"
-              variant="ghost"
-              disabled={busy}
-              run={() => setTab('overview')}
-            >
-              {tr('← 返回结果总览', '← Back to results overview')}
-            </ActionButton>
-            <ActionButton
-              action="result-improve"
-              label={tr('模型改进', 'Improve model')}
-              kind="click"
-              disabled={busy}
-              run={improveModel}
-            >
-              {tr('模型改进', 'Improve model')}
-            </ActionButton>
-          </>
-        )}
-        <Field label={tr('更多分析与导出', 'More analyses and exports')}>
-          <Select
-            value={tab}
-            disabled={busy}
-            onChange={(event) => setTab(event.target.value as typeof tab)}
-          >
-            {tabs.map((name, index) => (
-              <option key={name} value={name}>
-                {en
-                  ? [
-                      'Overview',
-                      'Data catalog',
-                      'Time series',
-                      'Observation evaluation',
-                      'Site comparison',
-                      'Diagnostics',
-                      'Report',
-                    ][index]
-                  : [
-                      '结果总览',
-                      '数据目录',
-                      '时序分析',
-                      '观测评估',
-                      '多站比较',
-                      '闭合诊断',
-                      '报告导出',
-                    ][index]}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        {tab === 'overview' && (
-          <ActionButton
-            action="export-full-series-csv"
-            label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
-            kind="commit"
-            variant="ghost"
-            disabled={!source || !variable || busy}
-            run={exportFullSeries}
-          >
-            {tr('导出完整 CSV', 'Export full CSV')}
-          </ActionButton>
-        )}
-        {onBack && (
-          <ActionButton
-            action="result-back"
-            label={tr('返回模拟', 'Back to simulation')}
-            kind="click"
-            variant="ghost"
-            run={onBack}
-          >
-            {tr('返回模拟', 'Back to simulation')}
-          </ActionButton>
-        )}
-      </footer>
       <Dialog
         title={tr('选择运行', 'Choose a run')}
         description={tr(

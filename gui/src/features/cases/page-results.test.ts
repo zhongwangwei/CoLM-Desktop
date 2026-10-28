@@ -588,6 +588,19 @@ test('overview contract exposes optional evaluation conditions only while advanc
     source: '/run',
     runs: [],
     tabs: ['overview', 'catalog', 'series', 'evaluation', 'comparison', 'diagnostics', 'report'],
+    // 页签的中英文字面量：源文件里的 tabLabels 对象也被 `fields` 回调引用。
+    tabLabels: {
+      en: [
+        'Overview',
+        'Data catalog',
+        'Time series',
+        'Observation evaluation',
+        'Site comparison',
+        'Diagnostics',
+        'Report',
+      ],
+      zh: ['结果总览', '数据目录', '时序分析', '观测评估', '多站比较', '闭合诊断', '报告导出'],
+    },
     tab: 'overview',
     series: null,
     diagnostic: null,

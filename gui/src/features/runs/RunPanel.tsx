@@ -158,9 +158,9 @@ export default function RunPanel({
       now: number;
     } | null>(null),
     [monitor, setMonitor] = useState(false),
-    // 远程结果没取回时，"查看站点结果"要先从服务器下载（几秒到几分钟）。这段时间原来没有任何
-    // 可见反馈，连点还会被锁静默忽略，用户以为按钮坏了（2026-10-28 实测反馈）。
-    [fetchingResults, setFetchingResults] = useState(false),
+    // 打开远程结果时只做一次轻量的作业状态核对（确认不是只跑到预处理）；不再在打开前取回
+    // 整个站点的 history —— 结果页会在服务器上读变量/曲线/指标，只把要显示的数据传回来。
+    [openingResults, setOpeningResults] = useState(false),
     [lastCheck, setLastCheck] = useState<{ at: number; text: string } | null>(null),
     // 服务器忙不忙（`remote_load`）：选中服务器时读一次，"核对服务器状态"时再读。初值不用 null：
     // 只记哪台服务器的、什么时候读到的。
@@ -266,8 +266,7 @@ export default function RunPanel({
   // 结果按钮为什么现在不能按：把原因说出来（按钮的 title/点击提示都用它），不能只是一个灰按钮
   // 或点了没反应的函数静默 return。
   const resultsBlockedReason = (() => {
-    if (fetchingResults)
-      return t('正在从服务器取回站点结果…', 'Fetching station results from the server…');
+    if (openingResults) return t('正在打开站点结果…', 'Opening station results…');
     if (disabled)
       return t('先保存算例设置，再查看结果。', 'Save the case settings before viewing results.');
     if (monitor)
@@ -285,15 +284,6 @@ export default function RunPanel({
             '正在提交或运行，完成后再查看结果。',
             'Submission or a run is in progress; view the results when it finishes.',
           );
-    if (
-      resultRun?.location === 'remote' &&
-      !resultRun.run_case &&
-      !remoteRunPermissions(resultCasePath === casePath ? remote : resultRun.progress?.remote).fetch
-    )
-      return t(
-        '先核对服务器任务的真实终态，再取回结果。',
-        'Confirm the server job’s terminal state before fetching results.',
-      );
     return null;
   })();
   const resultsBlocked = resultsBlockedReason !== null;
@@ -1099,7 +1089,7 @@ export default function RunPanel({
       );
       return;
     }
-    if (fetchingResults) return;
+    if (openingResults) return;
     const blocked = resultsBlockedReason;
     if (blocked) {
       notify(blocked);
@@ -1115,27 +1105,37 @@ export default function RunPanel({
       return;
     }
     if (resultRun?.location === 'remote' && !resultRun.run_case) {
-      setFetchingResults(true);
-      let fetched: unknown;
-      try {
-        fetched = await remoteAction('remote_fetch', resultCasePath);
-      } catch {
-        // remoteAction 已经提示了取回错误；这里只收起"取回中"。
-        return;
-      } finally {
-        setFetchingResults(false);
-      }
-      const stage = (fetched as { record?: { provenance?: { stage?: string } } } | undefined)
-        ?.record?.provenance?.stage;
-      if (!fetched) {
+      // 结果数据留在服务器上：结果页通过 `remote-read` 在服务器上读变量、曲线和评估指标，只把要
+      // 显示的数值传回来。这里不再整份取回 history（一个站点约 0.5 GB），只做一次轻量的作业状态
+      // 核对，确认不是"只跑到预处理"。要 NetCDF 文件时，用结果页里的「取回结果」按需取回。
+      const fetchOnlyStage =
+        resultRun.requested_stage === 'mksrfdata' || resultRun.requested_stage === 'mkinidata';
+      if (fetchOnlyStage) {
         notify(
           t(
-            '没有取回结果：服务器还没确认这次运行的终态，或结果尚未生成。先核对服务器任务状态再试。',
-            'No results were fetched: the server has not confirmed this run’s terminal state, or the output does not exist yet. Check the job state and try again.',
+            '这次运行只到预处理阶段（mksrfdata/mkinidata），还没有可查看的模拟结果。',
+            'This run stopped after preprocessing (mksrfdata/mkinidata); there are no simulation results to view.',
           ),
         );
         return;
       }
+      setOpeningResults(true);
+      let statusRecord: unknown;
+      try {
+        statusRecord = await remoteAction('remote_status', resultCasePath);
+      } catch {
+        // remoteAction 已经提示了核对错误。
+        return;
+      } finally {
+        setOpeningResults(false);
+      }
+      // 直接从这次核对返回的记录读阶段：`latest.current` 要等下一次渲染才带上刚写入的
+      // requested_stage，在同一个异步调用里读会读到旧值（只会跑到预处理的运行会被放行）。
+      const checked = statusRecord as {
+        record?: { provenance?: { stage?: string | null } };
+      } | null;
+      const stage =
+        checked?.record?.provenance?.stage ?? latest.current[resultCasePath]?.requested_stage;
       if (stage === 'mksrfdata' || stage === 'mkinidata') {
         notify(
           t(
@@ -1767,30 +1767,18 @@ export default function RunPanel({
                 : t('开始运行', 'Start run')}
           </ActionButton>
           {completed && (
-            <>
-              <ActionButton
-                action="run-view-results"
-                label={
-                  fetchingResults
-                    ? t('正在取回站点结果…', 'Fetching station results…')
-                    : resultsLabel
-                }
-                variant="primary"
-                // 禁用时把原因放在 title/aria 上，鼠标悬停或读屏能知道为什么现在点不了。
-                title={resultsBlockedReason ?? undefined}
-                aria-description={resultsBlockedReason ?? undefined}
-                disabled={resultsBlocked}
-                run={() => viewResults().catch((e) => notify(String(e), true))}
-              />
-              {fetchingResults && (
-                <span className="muted" role="status">
-                  {t(
-                    '正在从服务器取回结果，取回完成后会自动打开。',
-                    'Fetching the results from the server; they open automatically when the fetch finishes.',
-                  )}
-                </span>
-              )}
-            </>
+            <ActionButton
+              action="run-view-results"
+              label={
+                openingResults ? t('正在打开站点结果…', 'Opening station results…') : resultsLabel
+              }
+              variant="primary"
+              // 禁用时把原因放在 title/aria 上，鼠标悬停或读屏能知道为什么现在点不了。
+              title={resultsBlockedReason ?? undefined}
+              aria-description={resultsBlockedReason ?? undefined}
+              disabled={resultsBlocked}
+              run={() => viewResults().catch((e) => notify(String(e), true))}
+            />
           )}
         </div>
       </footer>

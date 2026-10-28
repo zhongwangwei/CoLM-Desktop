@@ -236,45 +236,61 @@
   height: 16px;
   margin: 0;
 }
-/* 结果页底部的分析/导航动作条：原来 11px 的"小字按钮"很难注意到（2026-10-28 用户反馈
-   "返回结果总览/模型改进/更多分析与导出/返回模拟 太小"）。改成正常控件尺寸并用分隔线把它
-   从内容里分出来；返回类动作靠右，避免和"下一步"混在一起。 */
-.results-secondary {
+/* 结果页的分析工具条：左边是页签（直接按钮，不再是底部那个不起眼的下拉框），右边是页面级动作。
+   原来是 11px 的小字按钮塞在页面底部，用户反馈"太小、丑"（2026-10-28）。 */
+.results-toolbar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 14px 0 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.results-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex-wrap: wrap;
 }
-.results-secondary .field {
+.results-tab {
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  padding: 7px 13px;
+  white-space: nowrap;
+}
+.results-tab:hover:not(:disabled) {
+  background: var(--background);
+  color: var(--foreground);
+}
+.results-tab.is-active {
+  background: var(--accent-soft);
+  border-color: var(--border);
+  color: var(--foreground);
+}
+.results-tab:disabled {
+  opacity: 0.55;
+}
+.results-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.results-actions {
   display: flex;
-  flex-direction: row;
   align-items: center;
   gap: 8px;
-  margin: 0;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
-.results-secondary .field-label {
-  font-size: 13px;
-  color: var(--foreground);
-  font-weight: 600;
-}
-.results-secondary .input {
-  font-size: 13px;
-  width: auto;
-  min-height: 34px;
-  padding: 6px 10px;
-}
-.results-secondary .button {
+.results-actions .button {
   font-size: 13px;
   min-height: 34px;
   padding: 6px 12px;
-}
-/* 返回类动作放右边，和"模型改进/更多分析"这类前行动作分开。 */
-.results-secondary [data-action='result-back'] {
-  margin-left: auto;
 }
 .results-controls {
   display: flex;
