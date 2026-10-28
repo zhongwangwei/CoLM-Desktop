@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod message;
 pub mod protocol;
 pub mod provider;
+pub mod retrieval;
 pub mod secrets;
 pub mod session;
 pub mod terminal;
