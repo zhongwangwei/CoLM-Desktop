@@ -5,9 +5,10 @@
 //! - `python/`：uv 管理的专用 Python（`--python-preference only-managed`，不借用系统里的 Python）；
 //! - `env/`：虚拟环境，OpenBench 和它的全部依赖装在这里；
 //! - `projects/<名字>/`：一次比较。每次运行一个不可变快照 `runs/<run_id>/`（冻结的 `openbench.yaml`、
-//!   站点/输入清单、`meta.json` 与 `output/`），`latest-success.json` 指向上次成功的那次；旧目录没有
-//!   `runs/`，报告仍按 `output/` 里第一份 HTML 兼容显示。报告只从本次运行的 `output/` 发现，
-//!   失败不改上次成功指针（比较页审查报告第 5 条）。
+//!   准备出来的 NC/CSV、站点/输入清单、`meta.json` 与输出），`latest-success.json` 指向上次成功的那次；
+//!   输出根来自配置的 `project.output_dir`，归一后记进 `meta.json`，报告只按这次运行的记录发现。
+//!   旧目录没有 `runs/`，报告仍按 `output/` 里第一份 HTML 兼容显示；远程取回的本机镜像根下就是那次
+//!   运行的 `meta.json`，同样按记录发现。失败不改上次成功指针（比较页审查报告第 5 条）。
 //!
 //! 窗口进程不链接 NetCDF：OpenBench 是独立的 Python 进程，这里只负责起进程、转日志、找报告。
 //! 每个子进程都登记成 [`ChildOwner::Bench`]，停止按钮和关窗都能终止它；取消还记一个运行级代次 ——
@@ -282,13 +283,20 @@ fn projects(root: &Path) -> Vec<Value> {
 }
 
 /// 比较项目在状态页上的一行。新目录的报告只认 `latest-success.json`（失败/进行中的运行不顶掉
-/// 上次成功的报告）；没有 `runs/` 的旧目录（含服务器取回的本机镜像）回退到旧的 `output/` 发现。
+/// 上次成功的报告）；远程取回的本机镜像没有 `runs/`，根下的 `meta.json` 就是那次运行的记录，
+/// 同样按记录里的报告路径发现；只有连运行记录都没有的旧目录才回退到旧的 `output/` 扫描。
 fn project_json(dir: &Path) -> Value {
-    let latest = bench_runs::latest_run(dir);
-    let success = bench_runs::latest_success(dir);
-    let legacy = !bench_runs::has_runs(dir);
+    let runs = bench_runs::has_runs(dir);
+    let flat = (!runs).then(|| bench_runs::flat_run(dir)).flatten();
+    let latest = bench_runs::latest_run(dir).or(flat);
+    let success = bench_runs::latest_success(dir).or_else(|| {
+        latest
+            .as_ref()
+            .and_then(bench_runs::RunRecord::succeeded_latest)
+    });
     // 旧目录才回退：新目录即使 `latest-success.json` 还没有（第一次运行失败），也不能把项目根
     // `output/` 里旧版本留下的 HTML 当成当前报告 —— 那正是"报告没绑到运行"的老毛病。
+    let legacy = !runs && latest.is_none();
     let legacy_report = legacy.then(|| find_report(&dir.join("output"))).flatten();
     let report = success
         .as_ref()
@@ -638,6 +646,16 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 
+/// 本次运行的准备产物位置（NC 与站点清单）。抽出来是为了让"准备不该写共享的 `<项目>/sim/`"
+/// 这条约束有一个不依赖 Tauri/OpenBench 的回归测试（R04）。
+fn station_files(run: &RunSnapshot, site_id: &str) -> (PathBuf, PathBuf) {
+    let dir = run.sim_dir();
+    (
+        dir.join(format!("{site_id}.nc")),
+        dir.join(format!("{site_id}.csv")),
+    )
+}
+
 /// 依次执行一组阶段：每个阶段开始时核对取消代次 —— 第一次迭代是"循环开始前"，之后每次是
 /// "两个阶段之间"；取消后不再进入任何阶段。`bench_run` 的 prepare(sites)/check/run 用它串起来；
 /// 抽成独立函数是为了能单测"取消后不再 spawn"——`bench_run` 本身要 Tauri 的 AppHandle
@@ -685,8 +703,9 @@ pub async fn bench_run(
             return Err("先装 OpenBench".into());
         }
         let project_dir = root.join("projects").join(&name);
-        // 单点模拟的合并文件仍在比较目录的 `sim/` 下（配置文本里的绝对路径，见 [`BenchSite`]）；
-        // 每次运行前的 prepare 会把它们重写成这次的输入，顺序运行不会串。
+        // 配置文本里的 `fulllist` 是项目 `sim/<id>.csv` 的绝对路径（OpenBench 的 check 与 run 对
+        // 相对路径解析不一致，见 [`BenchSite`]），这里只建目录；真正的准备产物落在本次运行目录，
+        // 再把清单复制过去（R04）。
         let sim = project_dir.join("sim");
         std::fs::create_dir_all(&sim).map_err(|e| e.to_string())?;
         let mut run = RunSnapshot::create(
@@ -700,7 +719,7 @@ pub async fn bench_run(
             &app,
             "run",
             &format!(
-                "本次运行 {}（配置 sha {}）；报告只从这次运行的 output 里取",
+                "本次运行 {}（配置 sha {}）；报告只从这次运行的输出目录里取",
                 run.id(),
                 short_sha(run.config_sha()),
             ),
@@ -709,8 +728,9 @@ pub async fn bench_run(
             // 站点合并阶段：每个站点起一个 Python 进程，取消后不再处理下一个站点。
             for_each_stage(cancel, &sites, |site| {
                 say(&app, "prepare", &format!("合并 {} 的 history", site.id));
-                let nc = sim.join(format!("{}.nc", site.id));
-                let csv = sim.join(format!("{}.csv", site.id));
+                // 准备产物写进本次运行目录：NC 与 CSV 一起冻结，下一次准备写的是新 run 目录，
+                // 已归档运行不会被覆盖（R04）。
+                let (nc, csv) = station_files(&run, &site.id);
                 let mut command = env_command(&root, "python");
                 command
                     .args(["-c", PREPARE_SCRIPT])
@@ -724,8 +744,9 @@ pub async fn bench_run(
                     command.arg(lon.to_string()).arg(lat.to_string());
                 }
                 stream(&app, cancel, command, "prepare")?;
-                // 站点清单副本进本次运行的快照（小文件）；大的 .nc 不复制，输入清单里记着它的来源。
-                run.stash_station_manifest(&site.id, &csv)?;
+                // 配置里的 fulllist 位置必须存在：把本次运行的清单复制过去；清单里的 DIR 指向
+                // 本运行目录的 NC，历史 run 的数据不会被下一次准备改掉。
+                run.publish_station_manifest(&site.id)?;
                 Ok(())
             })?;
             // 内置登记表的路径写成 `${OPENBENCH_REF_ROOT}/…`；不设它，`check` 直接报错（2026-10-23 窗口实测）。

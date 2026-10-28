@@ -242,6 +242,96 @@ fn new_style_projects_bind_the_report_to_the_last_success_not_the_last_run() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// R03：状态页的报告必须来自 run 记录里记的输出目录，不能假设项目根或运行根下的 `output/`。
+#[test]
+fn the_status_list_reads_the_output_dir_recorded_in_the_run() {
+    let root = temp("status-output-dir");
+    let project = root.join("projects/custom");
+    let config = "project:\n  name: custom\n  output_dir: ./results\n";
+    let mut run =
+        crate::bench_runs::RunSnapshot::create(&project, "custom", config, &[], None).unwrap();
+    let reports = run.dir().join("results/custom/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report_standalone.html");
+    std::fs::write(&report, "<p>custom</p>").unwrap();
+    run.succeed(run.discover_report().as_deref()).unwrap();
+
+    let row = projects(&root)
+        .into_iter()
+        .find(|row| row["name"] == "custom")
+        .unwrap();
+    assert_eq!(row["report"].as_str().unwrap(), report.to_string_lossy());
+    assert_eq!(row["latest_run"]["state"], "succeeded");
+    assert_eq!(
+        row["latest_success"]["report"].as_str().unwrap(),
+        report.to_string_lossy()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 远程取回的本机镜像没有 `runs/`：根目录的 `meta.json` 就是那次运行的记录，
+/// 报告按它记的相对路径发现，不要再猜 `output/`（R03）。
+#[test]
+fn a_flat_fetched_mirror_finds_its_report_through_its_run_record() {
+    let root = temp("status-flat-mirror");
+    let mirror = root.join("projects/cmp@host");
+    let reports = mirror.join("custom/mirror/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report.html");
+    std::fs::write(&report, "<p>mirror</p>").unwrap();
+    std::fs::write(
+        mirror.join("meta.json"),
+        json!({
+            "run_id": "bench-run-1-2",
+            "project": "cmp",
+            "created_at": "2023-11-14T22:13:20Z",
+            "created_unix": 1_700_000_000u64,
+            "finished_at": "2023-11-14T22:13:21Z",
+            "finished_unix": 1_700_000_001u64,
+            "state": "succeeded",
+            "config_sha": "abc",
+            "output_dir": "custom",
+            "report": "custom/mirror/reports/evaluation_report.html",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let row = projects(&root)
+        .into_iter()
+        .find(|row| row["name"] == "cmp@host")
+        .unwrap();
+    assert_eq!(row["report"].as_str().unwrap(), report.to_string_lossy());
+    assert_eq!(row["latest_run"]["run_id"], "bench-run-1-2");
+    assert_eq!(row["latest_success"]["run_id"], "bench-run-1-2");
+    assert_eq!(
+        row["latest_success"]["report"].as_str().unwrap(),
+        report.to_string_lossy()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R04：真正的 PREPARE 输出必须落在运行目录，不能写回共享的 `<项目>/sim/`（那里只放清单副本）。
+#[test]
+fn prepared_station_files_live_inside_the_run_not_the_shared_sim_folder() {
+    let root = temp("prepare-paths");
+    let project = root.join("projects/cmp");
+    let run = crate::bench_runs::RunSnapshot::create(
+        &project,
+        "cmp",
+        "project:\n  name: cmp\n",
+        &[],
+        None,
+    )
+    .unwrap();
+    let (nc, csv) = station_files(&run, "at_neu");
+    assert_eq!(nc, run.sim_dir().join("at_neu.nc"));
+    assert_eq!(csv, run.sim_dir().join("at_neu.csv"));
+    assert!(nc.starts_with(run.dir()), "{}", nc.display());
+    assert!(!nc.starts_with(project.join("sim")), "{}", nc.display());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn projects_list_new_style_runs_by_their_creation_time() {
     let root = temp("status-order");

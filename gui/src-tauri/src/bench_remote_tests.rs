@@ -44,6 +44,27 @@ fn staged_report(staging: &Path, project: &str, body: &str) -> PathBuf {
     report
 }
 
+/// 一次运行的 `meta.json`：远程镜像的收尾按它记的报告/输出目录发现报告（R03）。
+fn staged_meta(staging: &Path, run_id: &str, output_dir: &str, report: Option<&str>) {
+    let meta = json!({
+        "run_id": run_id,
+        "project": "cmp",
+        "created_at": "2023-11-14T22:13:20Z",
+        "created_unix": 1_700_000_000u64,
+        "finished_at": "2023-11-14T22:13:21Z",
+        "finished_unix": 1_700_000_001u64,
+        "state": "succeeded",
+        "config_sha": "abc123",
+        "output_dir": output_dir,
+        "report": report,
+    });
+    std::fs::write(
+        staging.join(crate::bench_runs::META_FILE),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+}
+
 fn leftovers(base: &Path) -> Vec<String> {
     match std::fs::read_dir(base.join(FETCH_WORK_DIR)) {
         Ok(entries) => entries
@@ -252,8 +273,13 @@ fn a_fetched_run_returns_its_identity_and_config_hash() {
     let local = mirror(&base);
     let staging = FetchStaging::begin(&local).unwrap();
     staged_report(staging.dir(), "only", "<p>only</p>");
+    staged_meta(
+        staging.dir(),
+        "bench-run-1-2",
+        "output",
+        Some("output/only/reports/evaluation_report_standalone.html"),
+    );
     std::fs::write(staging.dir().join("openbench.yaml"), "frozen").unwrap();
-    std::fs::write(staging.dir().join("meta.json"), "{}").unwrap();
     let result = staging
         .finish(Ok(json!({
             "entries": ["output/only/reports"],
@@ -269,8 +295,126 @@ fn a_fetched_run_returns_its_identity_and_config_hash() {
     assert_eq!(result["legacy"], false);
     // 冻结的配置与运行记录也进了本机镜像，事后能看出报告对应哪份配置。
     assert_eq!(read(local.join("openbench.yaml")), "frozen");
-    assert_eq!(read(local.join("meta.json")), "{}");
+    assert!(local.join("meta.json").is_file());
+    // 报告按 run 记录里的相对路径打开，并且状态页能从这条平铺记录读出它（R03）。
+    let installed = local.join("output/only/reports/evaluation_report_standalone.html");
+    assert_eq!(
+        Path::new(result["report"].as_str().unwrap()),
+        installed.as_path()
+    );
+    assert_eq!(
+        crate::bench_runs::flat_run(&local)
+            .unwrap()
+            .report_path()
+            .as_deref(),
+        Some(installed.as_path())
+    );
+    let success = crate::bench_runs::latest_success(&local).unwrap();
+    assert!(success.flat);
+    assert_eq!(
+        success.report_path(&local).as_deref(),
+        Some(installed.as_path())
+    );
     assert!(leftovers(&base).is_empty(), "{:?}", leftovers(&base));
+}
+
+/// R03：自定义 output_dir 的运行，取回后报告按 meta 里记的路径打开；镜像根仍是一层运行记录。
+#[test]
+fn a_fetched_run_with_a_custom_output_dir_keeps_its_recorded_report_path() {
+    let base = temp("custom-output");
+    let local = mirror(&base);
+    let staging = FetchStaging::begin(&local).unwrap();
+    let reports = staging.dir().join("results/cmp/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report_standalone.html");
+    std::fs::write(&report, "<p>custom</p>").unwrap();
+    staged_meta(
+        staging.dir(),
+        "bench-run-2-3",
+        "results",
+        Some("results/cmp/reports/evaluation_report_standalone.html"),
+    );
+    let result = staging
+        .finish(Ok(json!({
+            "entries": ["results/cmp/reports"],
+            "run_id": "bench-run-2-3",
+            "config_sha": "sha",
+            "state": "succeeded",
+            "legacy": false,
+        })))
+        .unwrap();
+    let installed = local.join("results/cmp/reports/evaluation_report_standalone.html");
+    assert_eq!(
+        Path::new(result["report"].as_str().unwrap()),
+        installed.as_path()
+    );
+    assert!(installed.is_file());
+    let record = crate::bench_runs::flat_run(&local).unwrap();
+    assert_eq!(record.meta().output_dir, "results");
+    assert_eq!(record.report_path().as_deref(), Some(installed.as_path()));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// 运行记录里写了一份服务器上已经没有的报告：不能装一份空镜像顶掉旧报告，要明确失败。
+#[test]
+fn a_recorded_report_that_is_missing_fails_the_fetch() {
+    let base = temp("missing-recorded");
+    let local = previous_mirror(&base);
+    let staging = FetchStaging::begin(&local).unwrap();
+    staged_meta(
+        staging.dir(),
+        "bench-run-3-4",
+        "output",
+        Some("output/gone/reports/evaluation_report.html"),
+    );
+    let error = staging
+        .finish(Ok(json!({
+            "entries": ["meta.json"],
+            "run_id": "bench-run-3-4",
+            "config_sha": "sha",
+            "state": "succeeded",
+            "legacy": false,
+        })))
+        .unwrap_err();
+    assert!(error.contains("取回失败"), "{error}");
+    assert!(error.contains("报告"), "{error}");
+    assert!(
+        error.contains("本机旧报告未改动"),
+        "旧镜像必须保持原样：{error}"
+    );
+    assert_eq!(
+        crate::bench::find_report(&local.join("output")),
+        Some(local.join("output/older/reports/evaluation_report.html"))
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// 被人手改过的运行记录不能借 `report` 字段把读取带出镜像目录。
+#[test]
+fn a_recorded_report_outside_the_mirror_is_refused() {
+    let base = temp("escaping-recorded");
+    let local = mirror(&base);
+    let staging = FetchStaging::begin(&local).unwrap();
+    let outside = base.join("secret.html");
+    std::fs::write(&outside, "<p>secret</p>").unwrap();
+    staged_meta(
+        staging.dir(),
+        "bench-run-4-5",
+        "output",
+        Some("../secret.html"),
+    );
+    let error = staging
+        .finish(Ok(json!({
+            "entries": [],
+            "run_id": "bench-run-4-5",
+            "config_sha": "sha",
+            "state": "succeeded",
+            "legacy": false,
+        })))
+        .unwrap_err();
+    assert!(error.contains("取回失败"), "{error}");
+    assert!(!local.exists(), "拒绝后不该装出镜像");
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]

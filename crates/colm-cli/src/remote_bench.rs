@@ -417,6 +417,225 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// 配置没写 `project.output_dir` 时 OpenBench 的默认输出根（相对运行目录）。
+const DEFAULT_OUTPUT_DIR: &str = "output";
+
+/// 远程 run 的 `project.output_dir`：只允许本次运行目录内的相对路径（服务器是 POSIX，统一用 `/`）。
+/// 配置由窗口进程生成/校验，这里再挡一次：CLI 也能被直接调用，不能靠调用方保证。
+fn output_dir_from_config(config: &str) -> Result<String> {
+    let mut in_project = false;
+    let mut seen_project = false;
+    let mut project_child_indent: Option<usize> = None;
+    let mut found: Option<String> = None;
+    for (index, raw) in config.lines().enumerate() {
+        let line = strip_yaml_comment(raw.trim_end_matches('\r'));
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+        // 多文档 YAML 里 OpenBench 只读第一份，而我们会把每份的 project 都扫进来 —— 不猜。
+        if trimmed == "---" || trimmed == "..." {
+            bail!(
+                "project.output_dir 不合格（配置第 {} 行）：不支持多文档 YAML",
+                index + 1
+            );
+        }
+        let Some((key, value)) = split_mapping(trimmed) else {
+            if trimmed.contains("output_dir") {
+                bail!(
+                    "project.output_dir 不合格（配置第 {} 行）：无法识别的写法",
+                    index + 1
+                );
+            }
+            continue;
+        };
+        if indent == 0 {
+            if key == "project" {
+                if seen_project {
+                    bail!("project.output_dir 不合格：project 段只能有一个");
+                }
+                seen_project = true;
+                // 内联 `project: {output_dir: /tmp}` 会绕过逐行检查，而 OpenBench 仍会读它。
+                if !value.trim().is_empty() {
+                    bail!(
+                        "project.output_dir 不合格（配置第 {} 行）：project 段必须用块写法",
+                        index + 1
+                    );
+                }
+                in_project = true;
+                project_child_indent = None;
+                continue;
+            }
+            in_project = false;
+            project_child_indent = None;
+            if key == "output_dir" {
+                bail!("project.output_dir 必须写在 project 段下面");
+            }
+            continue;
+        }
+        if !in_project {
+            if key == "output_dir" {
+                bail!("project.output_dir 必须写在 project 段下面");
+            }
+            continue;
+        }
+        // `<<` 合并键能把别处的 output_dir 注进 project，逐行检查看不见；OpenBench 却会展开它。
+        if key == "<<" {
+            bail!("project.output_dir 不合格：不支持 YAML 的 `<<` 合并键");
+        }
+        let child_indent = *project_child_indent.get_or_insert(indent);
+        if key != "output_dir" {
+            if trimmed.contains("output_dir") {
+                bail!(
+                    "project.output_dir 不合格（配置第 {} 行）：无法识别的写法",
+                    index + 1
+                );
+            }
+            continue;
+        }
+        if indent != child_indent {
+            bail!("project.output_dir 只能是 project 的直属键");
+        }
+        if found.is_some() {
+            bail!("project.output_dir 只能写一次");
+        }
+        found = Some(
+            match yaml_scalar(value)
+                .with_context(|| format!("project.output_dir 不合格（配置第 {} 行）", index + 1))?
+            {
+                None => DEFAULT_OUTPUT_DIR.to_owned(),
+                Some(raw) => normalize_output_dir(&raw).with_context(|| {
+                    format!("project.output_dir 不合格（配置第 {} 行）", index + 1)
+                })?,
+            },
+        );
+    }
+    Ok(found.unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_owned()))
+}
+
+fn normalize_output_dir(raw: &str) -> Result<String> {
+    let text = raw.trim();
+    ensure!(!text.is_empty(), "output_dir 不能是空路径");
+    ensure!(!text.contains('\0'), "output_dir 不能含 NUL 字符");
+    // `~` 一旦被对面的路径库展开就跑到运行目录外；这里只接受字面相对目录名。
+    ensure!(
+        !text.starts_with('~'),
+        "output_dir 不支持 ~ 展开（{text}），请写运行目录内的普通相对路径"
+    );
+    ensure!(
+        !text.starts_with('/'),
+        "output_dir 不能是绝对路径（{text}），请改用运行目录内的相对路径"
+    );
+    let mut parts: Vec<&str> = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => ensure!(
+                parts.pop().is_some(),
+                "output_dir 不能跳出运行目录（{text}），请改用运行目录内的相对路径"
+            ),
+            other => {
+                ensure!(
+                    !other.contains('\\'),
+                    "服务器上的 output_dir 只用 / 分隔（{text}）"
+                );
+                ensure!(
+                    !other.chars().any(char::is_control),
+                    "output_dir 不能含控制字符"
+                );
+                parts.push(other);
+            }
+        }
+    }
+    ensure!(
+        !parts.is_empty(),
+        "output_dir 不能是运行目录本身（{text}），请指定一个子目录（例如 output）"
+    );
+    Ok(parts.join("/"))
+}
+
+/// 去掉 YAML 行尾注释：`#` 只有不在引号里、且前面是空白（或行首）时才是注释。
+fn strip_yaml_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(current) if byte == current => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) => {
+                return &line[..index];
+            }
+            None => {}
+        }
+    }
+    line
+}
+
+/// 拆一行 `键: 值`；冒号须后跟空白或行尾，引号里的冒号跳过。
+fn split_mapping(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(current) if byte == current => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b':' => {
+                let next = bytes.get(index + 1).copied();
+                if next.is_none() || next.is_some_and(|c| c.is_ascii_whitespace()) {
+                    let key = line[..index].trim();
+                    return Some((strip_key_quotes(key), line[index + 1..].trim()));
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn strip_key_quotes(key: &str) -> &str {
+    let bytes = key.as_bytes();
+    if key.len() >= 2
+        && ((bytes[0] == b'"' && bytes[key.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[key.len() - 1] == b'\''))
+    {
+        &key[1..key.len() - 1]
+    } else {
+        key
+    }
+}
+
+/// YAML 标量 → 字符串；`None` 表示 null/空值。流式/块式/锚点写法不猜（可能藏绝对路径）。
+fn yaml_scalar(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("~") || value.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    match value.chars().next().expect("non-empty") {
+        '"' => serde_json::from_str::<String>(value)
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!("双引号字符串读不懂（{error}）")),
+        '\'' => {
+            ensure!(
+                value.len() >= 2 && value.ends_with('\''),
+                "单引号字符串没有收尾"
+            );
+            let inner = &value[1..value.len() - 1];
+            ensure!(
+                !inner.replace("''", "").contains('\''),
+                "单引号字符串里的引号要写成两个单引号"
+            );
+            Ok(Some(inner.replace("''", "'")))
+        }
+        '[' | '{' | '&' | '*' | '!' | '|' | '>' => {
+            bail!("不支持 YAML 的流式/块式/锚点写法，请写成普通字符串")
+        }
+        _ => Ok(Some(value.to_owned())),
+    }
+}
+
 /// 占位锁的 shell 函数：`_colm_lock_acquire` 成功返回 0、超时返回 1；`_colm_lock_release` 只释放
 /// 自己令牌的锁。抽成函数是为了让"占位/清理/释放"三段脚本共用同一份实现。
 ///
@@ -677,18 +896,70 @@ fn parse_probe(output: &str) -> Option<Option<String>> {
     }
 }
 
+/// 一次比较作业的收尾结论（R09）。
+///
+/// `EndedUnknown` 专门表示"进程/队列已经不在了，却没留下退出码"：既不能永远等（页面会一直转、
+/// 活动身份挡住重提），也不能编造成败。bare 调度器的 `kill -0` 探测失败走 `lost_confirmed
+/// "the job process is gone"`；调度器确认结束但没有可识别的终态词也落在这里。COMPLETED 例外：
+/// 那只是退出码还没经 NFS 回来，继续等退出码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobEnd {
+    Succeeded,
+    Failed,
+    Cancelled,
+    EndedUnknown,
+}
+
+impl JobEnd {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::EndedUnknown => "unknown",
+        }
+    }
+
+    fn from_report(report: &job::Report) -> Option<Self> {
+        match report.status.state {
+            job::State::Finished { exit_code } => Some(if exit_code == 0 {
+                Self::Succeeded
+            } else {
+                Self::Failed
+            }),
+            job::State::Lost => match job::ended(&report.status) {
+                Some("cancelled") => Some(Self::Cancelled),
+                Some(_) => Some(Self::Failed),
+                None => {
+                    let detail = report
+                        .status
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_uppercase();
+                    (report.terminal && !detail.contains("COMPLETED")).then_some(Self::EndedUnknown)
+                }
+            },
+            job::State::Queued | job::State::Running | job::State::Unknown => None,
+        }
+    }
+}
+
 /// 占位里的作业是否还没到确认终态。Queued/Running 一定是；Finished 与调度系统确认的终态
 /// （CANCELLED/FAILED/COMPLETED…，见 [`job::Report::terminal`]）才是结束。Unknown 不能当终态 ——
 /// 作业目录还在时可能只是这次查不到。Lost 但调度器只是回答"查不到记录"（terminal=false）同样不能
 /// 当结束：宁可拒绝重复提交，也不能赌它已经跑完。查询失败更不会走到这里 —— [`job::report`] 直接返回
 /// 错误，提交中止且不释放占位（审查报告第 6 条）。
 fn placeholder_unfinished(report: &job::Report, job_dir_exists: bool) -> bool {
-    if report.terminal {
+    // terminal 覆盖 COMPLETED 等"确认不会再写、但退出码可能还在路上"的终态：占位可以放，
+    // 页面仍按 terminal 继续等退出码（两件事不能混）。
+    if report.terminal || JobEnd::from_report(report).is_some() {
         return false;
     }
     match report.status.state {
         job::State::Unknown => job_dir_exists,
         job::State::Queued | job::State::Running | job::State::Lost => true,
+        // Finished 一定 terminal，前面已经返回；保留显式分支，避免用 `_` 把拼错的状态吞掉。
         job::State::Finished { .. } => false,
     }
 }
@@ -904,6 +1175,7 @@ fn run_meta_json(
     created_unix: u64,
     config_sha: &str,
     ref_root: Option<&str>,
+    output_dir: &str,
 ) -> serde_json::Value {
     json!({
         "run_id": id,
@@ -913,6 +1185,7 @@ fn run_meta_json(
         "state": "running",
         "config_sha": config_sha,
         "ref_root": ref_root,
+        "output_dir": output_dir,
     })
 }
 
@@ -928,8 +1201,8 @@ fn run_dir(project: &str, id: &str) -> String {
 /// 原子写用"同目录临时文件 + os.replace"：读的一方要么看到旧内容、要么看到新内容。
 const FINISH_SCRIPT: &str = r#"import datetime, json, os, sys, time
 
-run_dir, project_dir, job_log = sys.argv[1], sys.argv[2], sys.argv[3]
-limit = int(sys.argv[4])
+run_dir, project_dir, job_log, output_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+limit = int(sys.argv[5])
 code = os.environ.get('COLM_BENCH_EXIT', '1').strip()
 
 
@@ -956,7 +1229,7 @@ meta['finished_at'] = finished_at
 meta['finished_unix'] = finished_unix
 if code == '0':
     report = None
-    output = os.path.join(run_dir, 'output')
+    output = os.path.join(run_dir, output_dir)
     for current, dirs, files in os.walk(output):
         dirs.sort()
         for name in ('evaluation_report_standalone.html', 'evaluation_report.html'):
@@ -998,11 +1271,24 @@ else:
 /// 作业体里的收尾函数 + EXIT trap：先写 meta/指针，再在锁内释放占位，最后带着原退出码退出。
 /// 只有作业体真的进了本次运行的目录（`_colm_run_ready=1`）才碰 meta：万一 `mkdir` 撞上同名目录，
 /// 不能把别人的运行记录当成自己的改写。
-fn finish_function(base: &str, root: &str, project: &str, id: &str, run_dir: &str) -> String {
+fn finish_function(
+    base: &str,
+    root: &str,
+    project: &str,
+    id: &str,
+    run_dir: &str,
+    output_dir: &str,
+) -> String {
     let run_dir_q = quote(run_dir);
     let job_log = format!("{}/log", job::job_dir(base, id));
     let limit = RUN_ERROR_LIMIT.to_string();
-    let args = [run_dir, project, job_log.as_str(), limit.as_str()];
+    let args = [
+        run_dir,
+        project,
+        job_log.as_str(),
+        output_dir,
+        limit.as_str(),
+    ];
     let python = format!(
         "COLM_BENCH_EXIT=\"$_colm_code\" {}",
         python_here(root, FINISH_SCRIPT, &args, "COLM_BENCH_FINISH")
@@ -1049,10 +1335,13 @@ fn to_pretty(value: &serde_json::Value) -> Result<String> {
 }
 
 /// 远程 run 的作业体：在 `<project>/runs/<作业号>/` 冻结配置/站点/输入/meta，`check`/`run` 都在这个
-/// 目录里跑（`./output` 落在这里），报告只从这一次的 `output/` 发现；收尾由 EXIT trap 的
-/// [`FINISH_SCRIPT`] 写 meta 与 `latest-success.json`。单点模拟的合并文件（`sim/<键>.nc`.
-/// `.csv`）例外 —— 配置文本里的路径是前端按项目目录算好的绝对路径（OpenBench 的 check 与 run 对
-/// 相对路径解析不一致，2026-10-23 窗口实测），所以它们仍在 `<project>/sim/`，每次运行前重写。
+/// 目录里跑；输出根取配置里归一后的 `project.output_dir`（缺省 `output`），报告只从这一次的输出根
+/// 发现；收尾由 EXIT trap 的 [`FINISH_SCRIPT`] 写 meta 与 `latest-success.json`。
+///
+/// R04：单点模拟的准备产物（`sim/<键>.nc`、`.csv`）也写进本次运行目录 —— 配置文本里的 `fulllist`
+/// 是前端按项目目录算好的绝对路径（OpenBench 的 check 与 run 对相对路径解析不一致，2026-10-23
+/// 窗口实测），所以运行目录里的清单再复制到 `<project>/sim/`；清单里的 DIR 指向运行目录里的 NC，
+/// 下一次准备覆盖共享路径也改不到已归档运行的数据。
 fn run_body(
     base: &str,
     root: &str,
@@ -1070,6 +1359,7 @@ fn run_body(
     );
     let project = project_dir(root, &request.name)?;
     let config_sha = sha256_hex(request.config.as_bytes());
+    let output_dir = output_dir_from_config(&request.config)?;
     let ref_root = request.ref_root.as_deref().filter(|r| !r.trim().is_empty());
     if let Some(ref_root) = ref_root {
         server_path(ref_root, "ref_root")?;
@@ -1109,6 +1399,7 @@ fn run_body(
     let inputs_json = to_pretty(&json!({
         "config_sha": config_sha,
         "ref_root": ref_root,
+        "output_dir": output_dir,
         "sites": input_rows,
     }))?;
     let meta_json = to_pretty(&run_meta_json(
@@ -1117,6 +1408,7 @@ fn run_body(
         created_unix,
         &config_sha,
         ref_root,
+        &output_dir,
     ))?;
     let run_dir_text = run_dir(&project, id);
     let sim = quote(&format!("{project}/sim"));
@@ -1125,7 +1417,14 @@ fn run_body(
     body.push_str(&program_env(root));
     body.push_str(&lock_helpers(&project, id));
     body.push_str(&release_function(&project, id));
-    body.push_str(&finish_function(base, root, &project, id, &run_dir_text));
+    body.push_str(&finish_function(
+        base,
+        root,
+        &project,
+        id,
+        &run_dir_text,
+        &output_dir,
+    ));
     body.push_str(&format!(
         r#"test -x {openbench} || {{ echo '先装 OpenBench' >&2; exit 1; }}
 mkdir -p {sim}
@@ -1159,11 +1458,15 @@ _colm_run_ready=1
         ));
         // 位置参数顺序由 PREPARE 的签名决定：folder prefix out_nc out_csv station [lon] [lat]。
         // 经纬度只在两个都给时追加（缺省时 Python 回退到 history 文件里的坐标）。
+        // R04：准备产物落在本次运行目录；冻结的清单再复制到配置里的 fulllist 位置（项目 sim/），
+        // 清单里的 DIR 指向运行目录里的 NC，后续准备覆盖共享路径也改不到已归档运行的数据。
+        let frozen_nc = format!("{run_dir_text}/sim/{}.nc", site.id);
+        let frozen_csv = format!("{run_dir_text}/sim/{}.csv", site.id);
         let mut prepare = vec![
             site.history_dir.clone(),
             site.prefix.clone(),
-            format!("{project}/sim/{}.nc", site.id),
-            format!("{project}/sim/{}.csv", site.id),
+            frozen_nc,
+            frozen_csv.clone(),
             site.station.clone(),
         ];
         if let Some((lon, lat)) = coordinates {
@@ -1176,6 +1479,11 @@ _colm_run_ready=1
             PREPARE_SCRIPT,
             &prepare,
             "COLM_BENCH_PREPARE",
+        ));
+        body.push_str(&format!(
+            "cp {} {}\n",
+            quote(&frozen_csv),
+            quote(&format!("{project}/sim/{}.csv", site.id))
         ));
     }
     // 内置登记表的路径写成 `${OPENBENCH_REF_ROOT}/…`；不设它 `check` 直接报错（本机 2026-10-23 实测）。
@@ -1307,6 +1615,8 @@ fn uninstall_script(root: &str, targets: &[&str]) -> String {
 /// - `terminal`：调度系统确认作业已经结束（退出码或 CANCELLED/FAILED/COMPLETED…）。它是"能不能放开
 ///   重复提交/别再把还在跑当结束"的判断依据，不等于 `ended`：COMPLETED 但退出码还没到时会
 ///   terminal=true、ended=null，前端应继续等退出码，不写成功/失败。
+/// - `result_unknown`（R09）：进程/队列已经不在、又没有退出码。`ended="unknown"` 是终态，
+///   页面应把它归档并允许重新提交，而不是无限轮询。
 ///
 /// 查询命令本身失败（调度器不可用等）时这里返回错误、进程非零退出：Tauri 把它交给前端，前端保留
 /// 作业身份继续核对。绝不返回一个"lost"让前端/占位把暂时查不到当成作业已经没了。
@@ -1322,27 +1632,66 @@ pub(super) fn job_status(opts: &Opts) -> Result<()> {
         .unwrap_or(80usize)
         .min(400);
     let report = job::report(&ssh, &base, &id, lines)?;
-    let status = &report.status;
-    println!(
-        "{}",
-        json!({
-            "job": id,
-            "status": status,
-            "ended": job::ended(status),
-            "terminal": report.terminal,
-            "cancel_requested": report.cancel_requested,
-        })
-    );
+    println!("{}", job_status_json(&id, &report));
     Ok(())
 }
 
+/// 作业状态 JSON：纯函数，状态机单测直接覆盖各条收尾路径（R09）。
+fn job_status_json(id: &str, report: &job::Report) -> serde_json::Value {
+    let end = JobEnd::from_report(report);
+    let result_unknown = end == Some(JobEnd::EndedUnknown);
+    json!({
+        "job": id,
+        "status": &report.status,
+        "ended": end.map(JobEnd::as_str),
+        "terminal": report.terminal || result_unknown,
+        "result_unknown": result_unknown,
+        "cancel_requested": report.cancel_requested,
+    })
+}
+
+/// 取消失败后的收尾：作业已经是终态（含"已终止、结果未知"）就返回可行动的结论，`None` 表示
+/// 作业还在排队/运行、取消错误必须照实上报。纯函数，`cancel` 只在 `job::cancel` 报错时调用。
+fn cancel_outcome(id: &str, report: &job::Report) -> Option<serde_json::Value> {
+    let end = JobEnd::from_report(report);
+    if !report.terminal && end.is_none() {
+        return None;
+    }
+    let result_unknown = end == Some(JobEnd::EndedUnknown);
+    let note = if result_unknown {
+        "作业进程已经不在服务器上，没有留下退出码：这次运行按“已终止、结果未知”收尾，可以重新提交。"
+    } else {
+        "作业已经结束，取消请求不再需要。"
+    };
+    Some(json!({
+        "job": id,
+        "request_accepted": false,
+        "ended": end.map(JobEnd::as_str),
+        "result_unknown": result_unknown,
+        "state": &report.status.state,
+        "note": note,
+    }))
+}
+
 /// `remote-bench-cancel`：结束作业（调度系统的交给它，后台进程结束整个进程组）。
+///
+/// Stop 撞上已经不存在的 PID 时不能只报 kill 错误（R09）：先查终态，确认作业已经结束就返回
+/// "已终止、结果未知"（或已知的取消/失败），让页面收尾并放开重新提交；仍在排队/运行才照实报错。
 pub(super) fn cancel(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let base = super::remote_cmd::root_of(opts)?;
     let id = opts.need_str("--job")?;
-    job::cancel(&ssh, &base, &id)?;
-    println!("{}", json!({ "job": id, "request_accepted": true }));
+    match job::cancel(&ssh, &base, &id) {
+        Ok(()) => println!("{}", json!({ "job": id, "request_accepted": true })),
+        Err(error) => {
+            let report = job::report(&ssh, &base, &id, 5)
+                .map_err(|probe| anyhow::anyhow!("{error}；核对作业终态也失败：{probe}"))?;
+            match cancel_outcome(&id, &report) {
+                Some(outcome) => println!("{outcome}"),
+                None => return Err(error),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1637,15 +1986,17 @@ pub(super) fn fetch(opts: &Opts) -> Result<()> {
             run_id,
             config_sha,
             state,
+            output_dir,
+            report,
         } => {
             let dir = run_dir(&project, &run_id);
-            let listing = ssh.run_ok(&run_listing_script(&dir))?;
+            let listing = ssh.run_ok(&run_listing_script(&dir, &output_dir, report.as_deref()))?;
             ensure!(
                 !listing.contains(NO_SUCH_REMOTE_PATH),
                 "服务器上没有这次运行的快照：{run_id}"
             );
             let entries = clean_entries(&listing);
-            require_report(&entries)?;
+            require_recorded_report(&entries, report.as_deref())?;
             ssh.download(&dir, &entries, &out)?;
             println!(
                 "{}",
@@ -1656,6 +2007,8 @@ pub(super) fn fetch(opts: &Opts) -> Result<()> {
                     "config_sha": config_sha,
                     "state": state,
                     "legacy": false,
+                    "output_dir": output_dir,
+                    "report": report,
                 })
             );
         }
@@ -1673,12 +2026,36 @@ fn legacy_listing_script(project: &str) -> String {
 
 /// 一次运行的取回清单：冻结文件 + 这次运行自己的 reports/metrics/scores。`cd` 失败时输出哨兵，
 /// 调用方据此报"没有这次运行的快照"，而不是拿一个空清单去装一份什么都没有的镜像。
-fn run_listing_script(run_dir: &str) -> String {
+///
+/// R03：输出根取运行记录里的 `project.output_dir`（归一后的相对路径）。记录里有报告时直接列它的
+/// 父目录与文件本身，不再猜 `output/*/reports`；旧运行记录没有 `report` 字段时退回输出根的通配。
+/// 输出根已经过 `run_relative_path` 校验，拼进 shell 前只可能是目录名片段。
+fn run_listing_script(run_dir: &str, output_dir: &str, report: Option<&str>) -> String {
+    let out = quote(output_dir);
+    let outputs = match report {
+        Some(report) => {
+            let mut paths = vec![quote(report)];
+            // 报告在运行目录根下时没有父目录可列：`.` 进 tar 清单会把整个运行目录再打一次。
+            if let Some((parent, _)) = report.rsplit_once('/') {
+                if !parent.is_empty() {
+                    paths.push(quote(parent));
+                }
+            }
+            format!("{} {out}/*/metrics {out}/*/scores", paths.join(" "))
+        }
+        None => format!("{out}/*/reports {out}/*/metrics {out}/*/scores"),
+    };
     format!(
-        "cd {dir} || {{ echo '{missing}'; exit 0; }}\nls -d {files} output/*/reports output/*/metrics output/*/scores 2>/dev/null\ntrue\n",
+        "cd {dir} || {{ echo '{missing}'; exit 0; }}\nls -d {files} {outputs} 2>/dev/null\ntrue\n",
         dir = quote(run_dir),
         missing = NO_SUCH_REMOTE_PATH,
-        files = [RUN_CONFIG_FILE, RUN_META_FILE, RUN_SITES_FILE, RUN_INPUTS_FILE].join(" "),
+        files = [
+            RUN_CONFIG_FILE,
+            RUN_META_FILE,
+            RUN_SITES_FILE,
+            RUN_INPUTS_FILE
+        ]
+        .join(" "),
     )
 }
 
@@ -1694,7 +2071,7 @@ struct LatestSuccess {
     config_sha: String,
 }
 
-/// 运行记录的只读子集：取回时确认这次运行真的成功过，并取出配置哈希。
+/// 运行记录的只读子集：取回时确认这次运行真的成功过，并取出配置哈希、输出根与报告路径。
 #[derive(Debug, Deserialize)]
 struct RunMeta {
     #[serde(default)]
@@ -1703,6 +2080,16 @@ struct RunMeta {
     state: String,
     #[serde(default)]
     config_sha: String,
+    /// R03：本次运行的输出根（相对运行目录）。旧记录没这个字段，按 OpenBench 默认的 `output`。
+    #[serde(default = "default_output_dir")]
+    output_dir: String,
+    /// 收尾脚本记下的报告路径（相对运行目录）；32a2e988 之后的新记录都有。
+    #[serde(default)]
+    report: Option<String>,
+}
+
+fn default_output_dir() -> String {
+    DEFAULT_OUTPUT_DIR.to_owned()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1714,7 +2101,36 @@ enum FetchTarget {
         run_id: String,
         config_sha: String,
         state: String,
+        output_dir: String,
+        report: Option<String>,
     },
+}
+
+/// 运行记录里的相对路径（输出根/报告）：只能是运行目录内的 POSIX 相对路径。
+/// 记录在服务器上生成，但可能被人手改；不校验就拼进 `ls`/`tar` 的清单，等于允许读运行目录之外。
+fn run_relative_path(value: &str, what: &str) -> Result<String> {
+    let text = value.trim();
+    ensure!(!text.is_empty(), "运行记录里的 {what} 是空路径");
+    ensure!(
+        !text.starts_with('/'),
+        "运行记录里的 {what} 不能是绝对路径：{text}"
+    );
+    let mut parts: Vec<&str> = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => bail!("运行记录里的 {what} 不能跳出运行目录：{text}"),
+            other => {
+                ensure!(
+                    !other.contains('\\') && !other.chars().any(char::is_control),
+                    "运行记录里的 {what} 不是安全的相对路径：{text}"
+                );
+                parts.push(other);
+            }
+        }
+    }
+    ensure!(!parts.is_empty(), "运行记录里的 {what} 没有指向任何文件");
+    Ok(parts.join("/"))
 }
 
 fn read_remote_file(ssh: &Ssh, path: &str) -> Result<Option<String>> {
@@ -1756,6 +2172,19 @@ fn require_report(entries: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// R03：运行记录里有报告路径时，清单里必须真的有这个文件；旧记录没有路径时按输出根的通配清单判。
+/// 只列到父目录、文件被删的情况下不能放行 —— 那会装一份没有报告的镜像顶掉本机旧报告。
+fn require_recorded_report(entries: &[String], report: Option<&str>) -> Result<()> {
+    let Some(report) = report else {
+        return require_report(entries);
+    };
+    ensure!(
+        entries.iter().any(|entry| entry == report),
+        "服务器上这次运行的报告不在了：{report}"
+    );
+    Ok(())
+}
+
 fn run_record_error(what: &str, detail: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("服务器上的运行记录读不懂：{what}（{detail}）")
 }
@@ -1777,11 +2206,20 @@ fn read_run_meta(ssh: &Ssh, project: &str, run_id: &str) -> Result<RunMeta> {
     let Some(text) = read_remote_file(ssh, &path)? else {
         bail!("服务器上没有这次运行的快照：{run_id}");
     };
-    let meta = parse_run_meta(&text)?;
+    let mut meta = parse_run_meta(&text)?;
     if !meta.run_id.is_empty() && meta.run_id != run_id {
         bail!(
             "服务器上的运行记录读不懂：{path} 里记的是另一运行（{}）",
             meta.run_id
+        );
+    }
+    // 记录里的路径要拼进取回清单/`ls`：先按运行目录内的相对路径校验，坏记录直接拒绝。
+    meta.output_dir = run_relative_path(&meta.output_dir, "output_dir")
+        .with_context(|| format!("运行记录读不懂：{path}"))?;
+    if let Some(report) = meta.report.as_deref() {
+        meta.report = Some(
+            run_relative_path(report, "report")
+                .with_context(|| format!("运行记录读不懂：{path}"))?,
         );
     }
     Ok(meta)
@@ -1811,6 +2249,8 @@ fn resolve_target(ssh: &Ssh, project: &str, requested: Option<&str>) -> Result<F
             run_id: run_id.to_owned(),
             config_sha: meta.config_sha,
             state: meta.state,
+            output_dir: meta.output_dir,
+            report: meta.report,
         });
     }
     if !remote_dir_exists(ssh, &runs)? {
@@ -1827,14 +2267,16 @@ fn resolve_target(ssh: &Ssh, project: &str, requested: Option<&str>) -> Result<F
     })?;
     let meta = read_run_meta(ssh, project, &success.run_id)?;
     succeeded_state(&success.run_id, &meta)?;
+    let mut config_sha = meta.config_sha;
+    if config_sha.is_empty() {
+        config_sha = success.config_sha;
+    }
     Ok(FetchTarget::Run {
         run_id: success.run_id,
-        config_sha: if meta.config_sha.is_empty() {
-            success.config_sha
-        } else {
-            meta.config_sha
-        },
+        config_sha,
         state: meta.state,
+        output_dir: meta.output_dir,
+        report: meta.report,
     })
 }
 

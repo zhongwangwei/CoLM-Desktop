@@ -115,6 +115,103 @@ fn the_submit_intent_records_the_pre_generated_job_id_before_submitting() {
     );
 }
 
+// ---- R03：远程 output_dir 只能落在本次运行目录内 ----
+
+#[test]
+fn remote_output_dir_is_normalized_inside_the_run_directory() {
+    // 没写 project.output_dir：沿用 OpenBench 的默认 output。
+    assert_eq!(output_dir_from_config("x: 1\n").unwrap(), "output");
+    assert_eq!(
+        output_dir_from_config("project:\n  name: cmp\n  output_dir: ./custom-output/\n").unwrap(),
+        "custom-output"
+    );
+    assert_eq!(
+        output_dir_from_config("project:\n  output_dir: \"a/b\"\n").unwrap(),
+        "a/b"
+    );
+    // 词法上能落回运行目录的 `..` 安全归一，不拒绝。
+    assert_eq!(
+        output_dir_from_config("project:\n  output_dir: sim/../out\n").unwrap(),
+        "out"
+    );
+    for bad in [
+        "../shared",
+        "/srv/shared",
+        "a/../../out",
+        ".",
+        "sim/..",
+        "~/shared",
+    ] {
+        let error =
+            output_dir_from_config(&format!("project:\n  output_dir: {bad}\n")).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("output_dir"), "{bad:?}: {error}");
+    }
+    // `output_dir:` 空值在 YAML 是 null：用默认 output，不拒绝。
+    assert_eq!(
+        output_dir_from_config("project:\n  output_dir:\n").unwrap(),
+        "output"
+    );
+    // 不写在 project 段的 output_dir 不能猜：OpenBench 不会读它，猜错就绕过了隔离。
+    assert!(output_dir_from_config("output_dir: /tmp/x\nproject:\n  name: cmp\n").is_err());
+    // 嵌在 project 的子块里同样不是 project.output_dir。
+    assert!(output_dir_from_config("project:\n  nested:\n    output_dir: ./x\n").is_err());
+    // 这些写法能让 OpenBench 看到另一份 output_dir 而逐行扫描看不到：一律拒绝，不猜。
+    for unsupported in [
+        "project: {name: cmp, output_dir: /tmp/x}\n",
+        "project:\n  <<: *defaults\n",
+        "---\nproject:\n  output_dir: ./x\n",
+        "project:\n  name: cmp\nproject:\n  output_dir: ./x\n",
+    ] {
+        assert!(
+            output_dir_from_config(unsupported).is_err(),
+            "{unsupported:?}"
+        );
+    }
+}
+
+/// R03：运行记录里的输出根/报告路径要拼进取回清单，绝对路径与 `..` 不能通过。
+#[test]
+fn recorded_run_paths_stay_inside_the_run_directory() {
+    assert_eq!(
+        run_relative_path("results/demo/reports/evaluation_report.html", "report").unwrap(),
+        "results/demo/reports/evaluation_report.html"
+    );
+    for bad in ["../shared", "/tmp/x", "a/../../x", ".", "a//../../x"] {
+        assert!(run_relative_path(bad, "report").is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn the_run_job_records_and_uses_the_configured_output_dir() {
+    let body = run_body(
+        "/srv/colm",
+        "/srv/colm/openbench",
+        &request("project:\n  name: cmp\n  output_dir: ./results\n"),
+        "bench-run-1",
+        0,
+    )
+    .unwrap();
+    let project = "/srv/colm/openbench/projects/versions_vs_flux";
+    let run = format!("{project}/runs/bench-run-1");
+    assert!(body.contains("\"output_dir\": \"results\""), "{body}");
+    // R04：准备结果落进本次运行目录；配置里的 fulllist 位置只放一份指向它的清单副本。
+    assert!(body.contains(&format!("'{run}/sim/AT_Neu.nc'")), "{body}");
+    assert!(body.contains(&format!("'{run}/sim/AT_Neu.csv'")), "{body}");
+    assert!(
+        !body.contains(&format!("'{project}/sim/AT_Neu.nc'")),
+        "共享目录不能再是准备结果的落点：{body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "cp '{run}/sim/AT_Neu.csv' '{project}/sim/AT_Neu.csv'"
+        )),
+        "{body}"
+    );
+    #[cfg(unix)]
+    assert_bash_parses(&body);
+}
+
 // ---- 远程 run 的作业体（C07） ----
 
 #[test]
@@ -152,13 +249,16 @@ fn the_run_job_freezes_a_run_snapshot_and_runs_inside_it() {
     let check = body.find(" check openbench.yaml").unwrap();
     let run_stage = body.find(" run openbench.yaml").unwrap();
     assert!(cd < check && check < run_stage, "{body}");
-    // 合并出来的站点文件仍在项目根的 sim/（配置文本里的绝对路径）。
+    // R04：准备结果在本次运行目录里冻结，配置文本指向的项目 sim/ 只放指向它的清单副本。
     assert!(
         body.contains(&format!("mkdir -p '{project}/sim'")),
         "{body}"
     );
+    assert!(body.contains(&format!("'{run}/sim/AT_Neu.nc'")), "{body}");
     assert!(
-        body.contains(&format!("'{project}/sim/AT_Neu.nc'")),
+        body.contains(&format!(
+            "cp '{run}/sim/AT_Neu.csv' '{project}/sim/AT_Neu.csv'"
+        )),
         "{body}"
     );
     assert!(
@@ -306,6 +406,11 @@ struct RunSandbox {
 #[cfg(unix)]
 impl RunSandbox {
     fn new(tag: &str, failing: bool) -> Self {
+        Self::new_with_output(tag, failing, "output")
+    }
+
+    /// 指定 OpenBench 的输出目录（R03：自定义 output_dir 的收尾也要能找到报告）。
+    fn new_with_output(tag: &str, failing: bool, output_dir: &str) -> Self {
         let base = temp_dir(&format!("run-{tag}"));
         let root = base.join("openbench");
         std::fs::create_dir_all(root.join("env/bin")).unwrap();
@@ -326,20 +431,23 @@ run) echo 'boom: metric missing' >&2; exit 3;;
 *) echo "unexpected stage $*" >&2; exit 2;;
 esac
 "#
+            .to_owned()
         } else {
-            r#"#!/bin/bash
+            format!(
+                r#"#!/bin/bash
 case "$1" in
 check) echo 'check ok'; exit 0;;
 run)
-  mkdir -p output/demo/reports
-  printf '<html>fresh report</html>\n' > output/demo/reports/evaluation_report_standalone.html
+  mkdir -p {output_dir}/demo/reports
+  printf '<html>fresh report</html>\n' > {output_dir}/demo/reports/evaluation_report_standalone.html
   echo 'run ok'
   exit 0;;
 *) echo "unexpected stage $*" >&2; exit 2;;
 esac
 "#
+            )
         };
-        write_executable(&root.join("env/bin/openbench"), stub);
+        write_executable(&root.join("env/bin/openbench"), &stub);
         Self { base, root }
     }
 
@@ -467,6 +575,53 @@ fn a_successful_remote_run_freezes_its_snapshot_and_moves_the_success_pointer() 
     // 占位与锁都释放（锁内核对所有权后删）。
     assert!(!project.join(".active-job").exists());
     assert!(!project.join(".active-job.lock").exists());
+}
+
+/// R03：自定义 output_dir 的一次运行，meta 与指针里记的都是实际落盘的报告路径，
+/// 收尾脚本按它找报告，而不是死看 `output/`。
+#[cfg(unix)]
+#[test]
+fn a_custom_output_dir_run_records_and_finds_its_own_report() {
+    if system_python3().is_none() {
+        eprintln!("skipping: no python3 available for the run-job sandbox");
+        return;
+    }
+    let sandbox = RunSandbox::new_with_output("custom", false, "results/nested");
+    let id = "bench-run-5-5";
+    let config = "project:\n  name: versions_vs_flux\n  output_dir: ./results/nested\n";
+    let config_sha = sha256_hex(config.as_bytes());
+    let request = frozen_request(config);
+    let body = run_body(
+        &sandbox.base_text(),
+        &sandbox.root_text(),
+        &request,
+        id,
+        1_700_000_000,
+    )
+    .unwrap();
+    assert_eq!(
+        sandbox.claim(id, &submit_intent(id, 1_700_000_000, &config_sha)),
+        "acquired"
+    );
+    let (log, code) = sandbox.run_job(id, &body);
+    assert_eq!(code.as_deref(), Some("0"), "{log}");
+
+    let project = sandbox.project();
+    let run = project.join("runs").join(id);
+    let meta = read_json(&run.join("meta.json"));
+    assert_eq!(meta["output_dir"], "results/nested");
+    assert_eq!(
+        meta["report"],
+        "results/nested/demo/reports/evaluation_report_standalone.html"
+    );
+    let latest = read_json(&project.join("latest-success.json"));
+    assert_eq!(
+        latest["report"],
+        "results/nested/demo/reports/evaluation_report_standalone.html"
+    );
+    assert!(run
+        .join("results/nested/demo/reports/evaluation_report_standalone.html")
+        .is_file());
 }
 
 #[cfg(unix)]
@@ -665,6 +820,88 @@ fn only_a_provably_absent_job_may_be_reclaimed_by_the_grace_rule() {
             false
         ));
     }
+}
+
+// ---- R09：已终止、结果未知 ----
+
+#[test]
+fn a_job_that_ended_without_an_exit_code_is_terminal_with_an_unknown_result() {
+    use JobEnd::{Cancelled, EndedUnknown, Failed, Succeeded};
+    let cases: &[(&str, Option<&str>, bool, Option<JobEnd>)] = &[
+        ("queued", None, false, None),
+        ("running", Some("RUNNING"), false, None),
+        ("unknown", None, false, None),
+        ("finished 0", None, false, Some(Succeeded)),
+        ("finished 3", None, false, Some(Failed)),
+        ("lost", Some("CANCELLED by 1026|0:0"), true, Some(Cancelled)),
+        ("lost", Some("FAILED (LSF EXIT)"), true, Some(Failed)),
+        // COMPLETED 只是退出码还没经 NFS 回来：继续等退出码，不能当成"结果未知"。
+        ("lost", Some("COMPLETED|0:0"), true, None),
+        // 进程没了、也没有退出码：R09 的"已终止、结果未知"。
+        (
+            "lost",
+            Some("the job process is gone"),
+            true,
+            Some(EndedUnknown),
+        ),
+    ];
+    for (state, detail, terminal, expected) in cases {
+        let report = job_report(state, *detail, *terminal, false);
+        assert_eq!(
+            JobEnd::from_report(&report),
+            *expected,
+            "{state} {detail:?} terminal={terminal}"
+        );
+    }
+
+    // 状态查询把这条路径交给前端：ended=unknown + result_unknown，不再只有 terminal=true。
+    let gone = job_report("lost", Some("the job process is gone"), true, false);
+    let status = job_status_json("bench-run-1", &gone);
+    assert_eq!(status["ended"], "unknown");
+    assert_eq!(status["result_unknown"], true);
+    assert_eq!(status["terminal"], true);
+    // 占位不能继续挡住新提交：进程已经没了，陈旧占位按"重跑"回收。
+    assert!(!placeholder_unfinished(&gone, true));
+    assert_eq!(active_job_refusal("bench-run-1", &gone, true), None);
+
+    // 正常成功/失败/取消的 JSON 不回归。
+    let finished = job_status_json("bench-run-1", &job_report("finished 0", None, false, false));
+    assert_eq!(finished["ended"], "succeeded");
+    assert_eq!(finished["result_unknown"], false);
+    let failed = job_status_json("bench-run-1", &job_report("finished 2", None, false, false));
+    assert_eq!(failed["ended"], "failed");
+    let cancelled = job_status_json(
+        "bench-run-1",
+        &job_report("lost", Some("CANCELLED by 1026|0:0"), true, false),
+    );
+    assert_eq!(cancelled["ended"], "cancelled");
+}
+
+#[test]
+fn stopping_a_job_whose_process_is_gone_advances_instead_of_failing() {
+    // Stop 撞上已经消失的 PID：状态已经是终态，返回可行动的结论而不是 kill 的错误。
+    let gone = job_report("lost", Some("the job process is gone"), true, false);
+    let outcome = cancel_outcome("bench-run-1", &gone).unwrap();
+    assert_eq!(outcome["request_accepted"], false);
+    assert_eq!(outcome["ended"], "unknown");
+    assert_eq!(outcome["result_unknown"], true);
+    assert!(
+        outcome["note"].as_str().unwrap().contains("已经不在"),
+        "{outcome}"
+    );
+
+    // 作业还在排队/运行而取消失败：不能吞掉，返回 None 让调用方报错。
+    for state in ["queued", "running"] {
+        assert!(
+            cancel_outcome("bench-run-1", &job_report(state, None, false, false)).is_none(),
+            "{state}"
+        );
+    }
+    // COMPLETED 但没有退出码：调度系统确认结束了，Stop 不该报错；结果仍按等待退出码处理。
+    let completed = job_report("lost", Some("COMPLETED|0:0"), true, false);
+    let outcome = cancel_outcome("bench-run-1", &completed).unwrap();
+    assert_eq!(outcome["request_accepted"], false);
+    assert_eq!(outcome["result_unknown"], false);
 }
 
 #[test]
@@ -1120,6 +1357,21 @@ fn the_success_pointer_and_run_meta_are_parsed_or_refused_with_one_prefix() {
         failed.starts_with("这次运行没有成功，没有可显示的评估报告"),
         "{failed}"
     );
+    // 旧运行记录没有 output_dir/report：按默认输出根取，报告路径交给通配清单（不拒绝）。
+    let legacy_run = parse_run_meta("{\"state\":\"succeeded\"}").unwrap();
+    assert_eq!(legacy_run.output_dir, "output");
+    assert!(legacy_run.report.is_none());
+    // 新运行记录带自定义输出根与报告路径，取回清单按它走。
+    let custom = parse_run_meta(
+        "{\"state\":\"succeeded\",\"output_dir\":\"results\",\
+         \"report\":\"results/demo/reports/evaluation_report.html\"}",
+    )
+    .unwrap();
+    assert_eq!(custom.output_dir, "results");
+    assert_eq!(
+        custom.report.as_deref(),
+        Some("results/demo/reports/evaluation_report.html")
+    );
     // 空状态（记录被人改坏）也要把话说清楚，不能伪装成成功。
     let unknown = succeeded_state("bench-run-1", &parse_run_meta("{}").unwrap())
         .unwrap_err()
@@ -1139,7 +1391,8 @@ fn the_fetch_listing_only_looks_inside_the_selected_run() {
     for name in ["openbench.yaml", "meta.json", "sites.json", "inputs.json"] {
         std::fs::write(run.join(name), "{}").unwrap();
     }
-    let (success, out, err) = bash_script(&run_listing_script(&run.to_string_lossy()));
+    let (success, out, err) =
+        bash_script(&run_listing_script(&run.to_string_lossy(), "output", None));
     assert!(success, "{err}");
     let entries = clean_entries(&out);
     for expected in [
@@ -1155,7 +1408,11 @@ fn the_fetch_listing_only_looks_inside_the_selected_run() {
     assert!(require_report(&entries).is_ok());
 
     // 运行目录不存在：明确给哨兵，不能默默按别的路径取。
-    let (_, missing, _) = bash_script(&run_listing_script("/nope/runs/bench-run-1"));
+    let (_, missing, _) = bash_script(&run_listing_script(
+        "/nope/runs/bench-run-1",
+        "output",
+        None,
+    ));
     assert!(missing.contains(NO_SUCH_REMOTE_PATH), "{missing}");
 
     // 旧式项目：项目根 output/ 的老布局照旧能取。
@@ -1177,7 +1434,7 @@ fn the_fetch_listing_only_looks_inside_the_selected_run() {
 
     // 有 runs/ 但这次运行没有报告：拒绝装一份只有指标的镜像。
     std::fs::remove_dir_all(run.join("output/demo/reports")).unwrap();
-    let (_, out, _) = bash_script(&run_listing_script(&run.to_string_lossy()));
+    let (_, out, _) = bash_script(&run_listing_script(&run.to_string_lossy(), "output", None));
     let error = require_report(&clean_entries(&out))
         .unwrap_err()
         .to_string();
@@ -1185,6 +1442,51 @@ fn the_fetch_listing_only_looks_inside_the_selected_run() {
         error.starts_with("服务器上还没有可显示的评估报告"),
         "{error}"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R03：运行记录里写了自定义输出目录/报告时，取回清单按它取，不再猜 `output/*/reports`。
+#[cfg(unix)]
+#[test]
+fn the_fetch_listing_follows_the_output_dir_recorded_in_the_run() {
+    let base = temp_dir("fetch-list-custom");
+    let run = base.join("projects/p/runs/bench-run-2");
+    let report_rel = "results/demo/reports/evaluation_report_standalone.html";
+    std::fs::create_dir_all(run.join("results/demo/reports")).unwrap();
+    std::fs::write(run.join(report_rel), "<p>ok</p>").unwrap();
+    std::fs::create_dir_all(run.join("results/demo/scores")).unwrap();
+    let (success, out, err) = bash_script(&run_listing_script(
+        &run.to_string_lossy(),
+        "results",
+        Some(report_rel),
+    ));
+    assert!(success, "{err}");
+    let entries = clean_entries(&out);
+    assert!(
+        entries.iter().any(|entry| entry == report_rel),
+        "{entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry == "results/demo/reports"),
+        "{entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry == "results/demo/scores"),
+        "{entries:?}"
+    );
+    require_recorded_report(&entries, Some(report_rel)).unwrap();
+
+    // 记录里的报告被删了：只列到父目录也要明确拒绝，不能装一份没有报告的镜像。
+    std::fs::remove_file(run.join(report_rel)).unwrap();
+    let (success, out, err) = bash_script(&run_listing_script(
+        &run.to_string_lossy(),
+        "results",
+        Some(report_rel),
+    ));
+    assert!(success, "{err}");
+    let entries = clean_entries(&out);
+    let error = require_recorded_report(&entries, Some(report_rel)).unwrap_err();
+    assert!(error.to_string().contains("报告"), "{error}");
     let _ = std::fs::remove_dir_all(&base);
 }
 

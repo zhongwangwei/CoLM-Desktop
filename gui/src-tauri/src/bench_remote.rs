@@ -4,13 +4,14 @@
 //! 取回的结果放在本机 `openbench/projects/<名字>@<服务器>/`：和本机跑的比较列在一起，`bench_report` 也只认
 //! `projects/` 下的报告。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use crate::bench_runs::{LatestSuccess, RunMeta, META_FILE};
 use crate::remote::{resource_dir, scheduler_args, server_for, ssh_cli_json, Server};
 
 /// 拼一条 `remote-bench-*` 命令：带上这台服务器和它的工作目录。
@@ -388,6 +389,44 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// 运行记录里的相对路径：必须是镜像内的普通相对路径，不能绝对、不能带 `..`。
+/// 记录在服务器上生成，但本机也可能被人手改过；报告路径不校验就会变成读任意文件。
+fn checked_relative(value: &str, what: &str) -> Result<PathBuf, String> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err(format!("运行记录里的 {what} 是空路径"));
+    }
+    let path = Path::new(text);
+    if path.is_absolute() {
+        return Err(format!("运行记录里的 {what} 不能是绝对路径：{text}"));
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => relative.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("运行记录里的 {what} 不能跳出镜像目录：{text}"));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(format!("运行记录里的 {what} 没有指向任何文件：{text}"));
+    }
+    Ok(relative)
+}
+
+/// 报告相对本次取回目录的路径（写进 `latest-success.json` 与返回值）。
+fn relative_to(base: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(base)
+        .map_err(|_| format!("报告不在本次取回目录里：{}", path.display()))?;
+    if relative.as_os_str().is_empty() {
+        return Err("报告路径不完整".into());
+    }
+    Ok(relative.to_string_lossy().into_owned())
+}
+
 /// Windows 上杀毒/索引短暂占用刚下载的文件时，目录 rename 会失败（ERROR_ACCESS_DENIED），
 /// 这类失败几百毫秒内自愈；Linux/macOS 的 rename 不受目录内容影响。只重试 rename 本身，
 /// 不重试"删旧再写"那类不可回滚的动作。
@@ -488,29 +527,131 @@ impl FetchStaging {
         &self.dir
     }
 
-    /// 下载结束后的统一收尾。失败只清理本次临时内容并返回可诊断错误；成功要再确认服务器
-    /// 确实给了一份能显示的报告，然后整体替换 —— 只凭命令退出码就替换正是"半新半旧"的来源。
+    /// 下载结束后的统一收尾。失败只清理本次临时内容并返回可诊断错误；成功要再确认确实得到
+    /// 一份能显示的报告，然后整体替换 —— 只凭命令退出码就替换正是"半新半旧"的来源。
+    ///
+    /// 带 run 身份的取回按 `meta.json` 里记的报告路径确认（R03）；旧式项目没有运行记录，仍按
+    /// 项目根 `output/` 兼容发现，两条路都不改对方的语义。
     fn finish(self, fetched: Result<Value, String>) -> Result<Value, String> {
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(error) => return Err(self.failed(&error)),
         };
+        let run_id = fetched
+            .get("run_id")
+            .and_then(Value::as_str)
+            .filter(|run| !run.is_empty())
+            .map(str::to_owned);
+        let legacy = fetched
+            .get("legacy")
+            .and_then(Value::as_bool)
+            .unwrap_or(run_id.is_none());
+        if let Some(run_id) = run_id.filter(|_| !legacy) {
+            return self.finish_run(fetched, &run_id);
+        }
         if crate::bench::find_report(&self.dir.join("output")).is_none() {
             return Err(self.failed(
                 "服务器上这次比较没有找到可显示的报告（output/<项目>/reports/ 下没有 HTML）",
             ));
         }
         replace_mirror(&self.dir, &self.local).map_err(|error| self.failed(&error))?;
+        // 换成本机镜像之后再找：替换前找到的是旧镜像的报告。
+        let installed = crate::bench::find_report(&self.local.join("output"));
         Ok(json!({
             "dir": self.local,
-            "report": crate::bench::find_report(&self.local.join("output")),
+            "report": installed,
             "entries": fetched["entries"],
             // C07：取回的是哪一次运行。旧式项目没有 run 身份，三个字段是 null/true。
             "run_id": fetched.get("run_id").cloned().unwrap_or(Value::Null),
             "config_sha": fetched.get("config_sha").cloned().unwrap_or(Value::Null),
             "state": fetched.get("state").cloned().unwrap_or(Value::Null),
-            "legacy": fetched.get("legacy").cloned().unwrap_or(Value::Bool(true)),
+            "legacy": true,
         }))
+    }
+
+    /// 新式比较：镜像根就是那次运行的目录（下载清单里的冻结文件与输出都相对运行目录），
+    /// 所以 `meta.json` 在根下，报告按里面记的相对路径打开；同时补写一份扁平
+    /// `latest-success.json`，让状态页用与本地运行相同的一条索引发现报告。
+    fn finish_run(self, fetched: Value, run_id: &str) -> Result<Value, String> {
+        let meta = match self.staged_meta() {
+            Ok(meta) => meta,
+            Err(error) => return Err(self.failed(&error)),
+        };
+        if !meta.run_id.is_empty() && meta.run_id != run_id {
+            return Err(self.failed(&format!(
+                "服务器上的运行记录与取回的运行号不一致（记录 {}，取回 {}）",
+                meta.run_id, run_id
+            )));
+        }
+        let report = match self.recorded_report(&meta) {
+            Ok(Some(report)) => report,
+            Ok(None) => {
+                return Err(self.failed(&format!(
+                    "服务器上这次运行没有找到可显示的报告（运行记录里记的输出目录是 {}）",
+                    meta.output_dir
+                )))
+            }
+            Err(error) => return Err(self.failed(&error)),
+        };
+        let relative = relative_to(&self.dir, &report).map_err(|error| self.failed(&error))?;
+        let latest = LatestSuccess {
+            run_id: run_id.to_owned(),
+            config_sha: if meta.config_sha.is_empty() {
+                fetched
+                    .get("config_sha")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            } else {
+                meta.config_sha.clone()
+            },
+            report: Some(relative.clone()),
+            finished_at: meta
+                .finished_at
+                .clone()
+                .unwrap_or_else(|| meta.created_at.clone()),
+            finished_unix: meta.finished_unix.unwrap_or(meta.created_unix),
+            flat: true,
+        };
+        crate::bench_runs::write_latest_success(&self.dir, &latest)
+            .map_err(|error| self.failed(&error))?;
+        replace_mirror(&self.dir, &self.local).map_err(|error| self.failed(&error))?;
+        let report = self.local.join(&relative);
+        Ok(json!({
+            "dir": self.local,
+            "report": report,
+            "entries": fetched["entries"],
+            "run_id": run_id,
+            "config_sha": latest.config_sha,
+            "state": meta.state.as_str(),
+            "legacy": false,
+            "latest_success": latest.to_json(&self.local),
+        }))
+    }
+
+    /// 下载回来的运行记录；读不出来就是一次失败的取回（不能凭空猜报告位置）。
+    fn staged_meta(&self) -> Result<RunMeta, String> {
+        let path = self.dir.join(META_FILE);
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "服务器上没有这次运行的 meta.json（{}）：{error}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&text)
+            .map_err(|error| format!("服务器上的运行记录读不懂（{}）：{error}", path.display()))
+    }
+
+    /// 报告按 `meta.report` 找；旧运行记录没这个字段时退回它记的输出根（缺省 `output`）扫描。
+    /// 两条路都要求相对路径，手改过的记录不能把读取带出镜像目录。
+    fn recorded_report(&self, meta: &RunMeta) -> Result<Option<PathBuf>, String> {
+        if let Some(relative) = meta.report.as_deref() {
+            let path = checked_relative(relative, "report")?;
+            let path = self.dir.join(path);
+            return Ok(path.is_file().then_some(path));
+        }
+        let output = checked_relative(&meta.output_dir, "output_dir")?;
+        Ok(crate::bench::find_report(&self.dir.join(output)))
     }
 
     fn failed(&self, detail: &str) -> String {

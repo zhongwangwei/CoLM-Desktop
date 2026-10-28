@@ -3,29 +3,31 @@
 //!
 //! 旧实现把 `openbench.yaml` 覆盖写进比较目录、在比较目录里跑，报告再从 `output/` 里找第一份 HTML：
 //! A 跑成功留下报告、B 改了设置再跑失败时，目录里就是"B 的配置 + A 的报告"，界面把 A 的报告当成
-//! B 的结果（比较页审查报告第 5 条）。现在一次运行一个不可变目录 —— 配置文本、站点清单、输入清单、
-//! 报告都在这次运行的目录里；报告只从本次 `output/` 发现；失败只写自己的 meta，上次成功指针
-//! 一个字节都不动。
+//! B 的结果（比较页审查报告第 5 条）。现在一次运行一个不可变目录 —— 配置文本、准备出来的 NC/CSV、
+//! 站点清单、输入清单、报告都在这次运行的目录里；报告只从本次输出根发现（输出根取自配置的
+//! `project.output_dir`，归一后记进 meta）；失败只写自己的 meta，上次成功指针一个字节都不动。
 //!
 //! 这里只做纯文件系统逻辑，不起进程、不依赖 `AppHandle`：临时目录里就能把整条身份链测完。
-//! 单点模拟的合并文件（`sim/<键>.nc`、`sim/<键>.csv`）例外 —— 配置文本里的路径是前端按项目目录
-//! 算好的绝对路径（OpenBench 的 check 与 run 对相对路径解析不一致，2026-10-23 窗口实测），
-//! 所以它们仍落在 `<项目>/sim/`，由每次 prepare 重写；快照里存站点清单与输入清单，不复制大的 NetCDF。
+//! 配置文本里的 `fulllist` 是前端按项目目录算好的绝对路径（OpenBench 的 check 与 run 对相对路径
+//! 解析不一致，2026-10-23 窗口实测），所以 preparation 产物仍要先落进运行目录，再把清单复制到
+//! `<项目>/sim/<键>.csv`；清单里的 DIR 指向运行目录里的 NC，下一次准备覆盖共享路径也改不到已归档
+//! 运行的数据（R04）。
 //!
 //! 文件布局：
 //! ```text
 //! projects/<名字>/
+//!   sim/<键>.csv           配置 fulllist 指向的清单副本，DIR 指向本次运行目录里的 NC
 //!   runs/<run_id>/
 //!     openbench.yaml        本次实际提交的配置文本（逐字节冻结）
 //!     sites.json            提交的站点（id/station/lon/lat）
-//!     inputs.json           history 目录、前缀、参考根（输入清单）
-//!     sim/<键>.csv           PREPARE 实际生成的站点清单副本
-//!     meta.json             run_id/created_at/finished_at/state/config_sha/机器/失败原因
-//!     output/               OpenBench 的输出（报告在这里）
+//!     inputs.json           history 目录、前缀、参考根、输出根（输入清单）
+//!     sim/<键>.nc/.csv      PREPARE 产物：NC 与站点清单一起冻结
+//!     meta.json             run_id/created_at/finished_at/state/config_sha/output_dir/机器/失败原因
+//!     output/               OpenBench 的输出（默认输出根；配置自定义时用归一后的目录）
 //!   latest-success.json     只有成功才更新：run_id、config_sha、report、finished_at
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +46,8 @@ pub(crate) const LATEST_SUCCESS_FILE: &str = "latest-success.json";
 pub(crate) const SITES_FILE: &str = "sites.json";
 /// 输入清单（history 目录、前缀、参考根）。
 pub(crate) const INPUTS_FILE: &str = "inputs.json";
+/// 配置没写 `project.output_dir` 时 OpenBench 的默认输出根（相对运行目录）。
+pub(crate) const DEFAULT_OUTPUT_DIR: &str = "output";
 
 /// 失败原因写进 meta 的上限（按字符）：OpenBench 的输出可能很长，meta 只用来诊断，
 /// 不能让一份日志把状态文件撑大。
@@ -129,6 +133,10 @@ pub(crate) struct RunMeta {
     pub sites: Vec<RunSite>,
     #[serde(default)]
     pub machine: Machine,
+    /// 本次运行的输出根（相对运行目录，已归一）。本地报告发现按它找，不再假设固定的 `output/`。
+    /// 旧 meta 没这个字段时按 OpenBench 默认的 `output` 读，旧运行仍能打开。
+    #[serde(default = "default_output_dir")]
+    pub output_dir: String,
     /// 报告相对**运行目录**的路径；只有成功才有。存相对路径，整个 openbench 目录搬家后还能打开。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
@@ -148,13 +156,25 @@ pub(crate) struct LatestSuccess {
     pub finished_at: String,
     #[serde(default)]
     pub finished_unix: u64,
+    /// 远程取回的本机镜像是"扁平"的：镜像根目录本身就是那次运行的目录（没有 `runs/<run_id>/`）。
+    /// `report` 因此相对镜像根，而不是相对 `runs/<run_id>/`。旧指针没有这个字段，按普通项目读。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flat: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl LatestSuccess {
     /// 报告的实际路径；文件被人手工删掉就返回 `None`（界面显示"没有报告"而不是一个打不开的路径）。
     pub(crate) fn report_path(&self, project_dir: &Path) -> Option<PathBuf> {
         let relative = self.report.as_deref()?;
-        let path = project_dir.join(RUNS_DIR).join(&self.run_id).join(relative);
+        let path = if self.flat {
+            project_dir.join(relative)
+        } else {
+            project_dir.join(RUNS_DIR).join(&self.run_id).join(relative)
+        };
         path.is_file().then_some(path)
     }
 
@@ -203,6 +223,23 @@ impl RunRecord {
             "error": self.meta.error,
         })
     }
+
+    /// 扁平的远程镜像没有 `latest-success.json`（旧版本取回时没写）：它的 meta 就是那个指针。
+    /// 只有成功过的运行才能当"上次成功"；失败/进行中返回 `None`，状态页不会拿它顶报告。
+    pub(crate) fn succeeded_latest(&self) -> Option<LatestSuccess> {
+        (self.meta.state == RunState::Succeeded).then(|| LatestSuccess {
+            run_id: self.meta.run_id.clone(),
+            config_sha: self.meta.config_sha.clone(),
+            report: self.meta.report.clone(),
+            finished_at: self
+                .meta
+                .finished_at
+                .clone()
+                .unwrap_or_else(|| self.meta.created_at.clone()),
+            finished_unix: self.meta.finished_unix.unwrap_or(self.meta.created_unix),
+            flat: true,
+        })
+    }
 }
 
 /// 项目是否已经用上快照目录。旧目录（以及服务器取回的本机镜像）没有 `runs/`，
@@ -247,6 +284,17 @@ pub(crate) fn latest_run(project_dir: &Path) -> Option<RunRecord> {
     latest
 }
 
+/// 一次远程取回的本机镜像：根目录就是运行目录（没有 `runs/<run_id>/`），`meta.json` 就在根下。
+/// 旧镜像没有 `latest-success.json`，报告身份由这条记录给出（R03：按 run 记录而不是猜 `output/`）。
+pub(crate) fn flat_run(project_dir: &Path) -> Option<RunRecord> {
+    let text = std::fs::read_to_string(project_dir.join(META_FILE)).ok()?;
+    let meta = serde_json::from_str::<RunMeta>(&text).ok()?;
+    Some(RunRecord {
+        dir: project_dir.to_path_buf(),
+        meta,
+    })
+}
+
 /// 一次正在进行的运行。`create` 时就把配置、站点、输入与 `running` 状态的 meta 一起落盘：
 /// 进程之后崩溃，留下的也是一个可诊断的快照，而不是"目录里半份别人的东西"。
 pub(crate) struct RunSnapshot {
@@ -257,6 +305,8 @@ pub(crate) struct RunSnapshot {
 
 impl RunSnapshot {
     /// 建立快照目录并冻结输入。`config` 是本次实际要提交的文本，原样写入（不重新格式化）。
+    /// `project.output_dir` 在这里先归一/拒绝：报告发现、状态页与远程取回都按 meta 里记的输出根走，
+    /// 一个能跳出运行目录的路径会让报告跑进别的 run 或项目外（R03）。
     pub(crate) fn create(
         project_dir: &Path,
         project: &str,
@@ -264,6 +314,7 @@ impl RunSnapshot {
         sites: &[RunSite],
         ref_root: Option<&str>,
     ) -> Result<Self, String> {
+        let output_dir = output_dir_from_config(config)?;
         let runs = project_dir.join(RUNS_DIR);
         std::fs::create_dir_all(&runs)
             .map_err(|error| format!("建不了运行目录 {}：{error}", runs.display()))?;
@@ -309,6 +360,7 @@ impl RunSnapshot {
             &json!({
                 "config_sha": config_sha,
                 "ref_root": ref_root,
+                "output_dir": output_dir,
                 "sites": sites
                     .iter()
                     .map(|site| json!({
@@ -331,6 +383,7 @@ impl RunSnapshot {
             ref_root: ref_root.map(str::to_owned),
             sites: sites.to_vec(),
             machine: Machine::detect(),
+            output_dir,
             report: None,
             error: None,
         };
@@ -359,22 +412,46 @@ impl RunSnapshot {
         self.dir.join(CONFIG_FILE)
     }
 
-    /// 本次运行自己 `output/` 下的报告。只看这一个运行目录，绝不回退到别的运行。
-    pub(crate) fn discover_report(&self) -> Option<PathBuf> {
-        crate::bench::find_report(&self.dir.join("output"))
+    /// 本次运行的准备产物目录：NC 与站点清单都在这里冻结（R04）。配置里的 `fulllist` 指向项目
+    /// `sim/`（OpenBench 的 check 与 run 对相对路径解析不一致），那份清单由
+    /// [`Self::publish_station_manifest`] 复制过来，CSV 里的 DIR 指向本运行目录里的 NC —— 下一次
+    /// 准备写新的运行目录，历史运行的数据不会被覆盖。
+    pub(crate) fn sim_dir(&self) -> PathBuf {
+        self.dir.join("sim")
     }
 
-    /// PREPARE 实际生成的站点清单副本（小文件）：它是 OpenBench 真正读到的站点行，
-    /// 与 `sites.json`（提交的参数）区分开，复盘时能看出经纬度回退成了什么值。
-    pub(crate) fn stash_station_manifest(&self, site_id: &str, csv: &Path) -> Result<(), String> {
-        let target = self.dir.join("sim").join(format!("{site_id}.csv"));
+    /// 本次运行自己输出根下的报告（输出根由配置的 `project.output_dir` 归一而来）。只看这一个
+    /// 运行目录，绝不回退到别的运行。
+    pub(crate) fn discover_report(&self) -> Option<PathBuf> {
+        crate::bench::find_report(&self.dir.join(&self.meta.output_dir))
+    }
+
+    /// 把本次运行冻结的站点清单发布到配置文本里的 `fulllist` 位置（`<项目>/sim/<id>.csv`）。
+    /// 清单里的 DIR 是本次运行目录内 NC 的绝对路径：后一次准备覆盖项目 `sim/` 时，已归档运行的
+    /// NC 仍在自己的目录里，数据不会漂移（R04）。
+    pub(crate) fn publish_station_manifest(&self, site_id: &str) -> Result<(), String> {
+        let source = self.sim_dir().join(format!("{site_id}.csv"));
+        let target = self.project_dir.join("sim").join(format!("{site_id}.csv"));
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("建不了站点清单快照目录：{error}"))?;
+                .map_err(|error| format!("建不了站点清单目录：{error}"))?;
         }
-        std::fs::copy(csv, &target)
-            .map(|_| ())
-            .map_err(|error| format!("复制站点清单快照失败（{}）：{error}", csv.display()))
+        // 临时文件 + rename：OpenBench 读 fulllist 时不会读到写了一半的清单。序号防止同一进程里
+        // 两次发布撞在同一个临时名上。
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let staged = target.with_file_name(format!(
+            ".{site_id}.csv.tmp-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if let Err(error) = std::fs::copy(&source, &staged) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("复制站点清单失败（{}）：{error}", source.display()));
+        }
+        std::fs::rename(&staged, &target).map_err(|error| {
+            let _ = std::fs::remove_file(&staged);
+            format!("发布站点清单失败（{}）：{error}", target.display())
+        })
     }
 
     /// 成功收尾：写自己的 meta，再原子更新 `latest-success.json`。
@@ -395,11 +472,9 @@ impl RunSnapshot {
             report,
             finished_at,
             finished_unix,
+            flat: false,
         };
-        write_json(
-            &self.project_dir.join(LATEST_SUCCESS_FILE),
-            &to_json(&latest)?,
-        )?;
+        write_latest_success(&self.project_dir, &latest)?;
         Ok(latest)
     }
 
@@ -493,6 +568,252 @@ fn compact_utc(unix: u64) -> String {
 
 fn to_json<T: Serialize>(value: &T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|error| format!("运行记录序列化失败：{error}"))
+}
+
+/// 写 `latest-success.json`。本地运行与远程取回共用：远程取回把扁平镜像的那份记录也写成同一形状，
+/// 状态页因此只认一种指针（R03）。
+pub(crate) fn write_latest_success(
+    project_dir: &Path,
+    latest: &LatestSuccess,
+) -> Result<(), String> {
+    write_json(&project_dir.join(LATEST_SUCCESS_FILE), &to_json(latest)?)
+}
+
+fn default_output_dir() -> String {
+    DEFAULT_OUTPUT_DIR.to_owned()
+}
+
+/// 从配置文本里取 `project.output_dir` 并归一成相对运行目录的路径（R03）。
+///
+/// 不引入 YAML 依赖（窗口进程只带 serde_json）：只认 `project:` 下直属的 `output_dir:` 一行。
+/// 认不出的写法一律拒绝 —— 猜错就等于让 OpenBench 把报告写到运行目录之外，本地报告发现与远程
+/// 取回都会落空。没写这个键时用 OpenBench 的默认 `output`。
+pub(crate) fn output_dir_from_config(config: &str) -> Result<String, String> {
+    let mut in_project = false;
+    let mut seen_project = false;
+    let mut project_child_indent: Option<usize> = None;
+    let mut found: Option<String> = None;
+    for (index, raw) in config.lines().enumerate() {
+        let line = strip_yaml_comment(raw.trim_end_matches('\r'));
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+        // 多文档 YAML 里 OpenBench 只读第一份，而我们会把每份的 project 都扫进来 —— 不猜。
+        if trimmed == "---" || trimmed == "..." {
+            return Err(output_dir_error(index, "不支持多文档 YAML（--- / ...）"));
+        }
+        let Some((key, value)) = split_mapping(trimmed) else {
+            if trimmed.contains("output_dir") {
+                return Err(output_dir_error(
+                    index,
+                    "这一行不是 `output_dir: 值` 的写法",
+                ));
+            }
+            continue;
+        };
+        if indent == 0 {
+            if key == "project" {
+                if seen_project {
+                    return Err(output_dir_error(index, "project 段只能有一个"));
+                }
+                seen_project = true;
+                // 内联 `project: {output_dir: /tmp}` 会绕过逐行检查，而 OpenBench 仍会读它。
+                if !value.trim().is_empty() {
+                    return Err(output_dir_error(
+                        index,
+                        "project 段必须用块写法（project: 后换行缩进）",
+                    ));
+                }
+                in_project = true;
+                project_child_indent = None;
+                continue;
+            }
+            in_project = false;
+            project_child_indent = None;
+            if key == "output_dir" {
+                return Err(output_dir_error(index, "必须写在 project 段下面"));
+            }
+            continue;
+        }
+        if !in_project {
+            if key == "output_dir" {
+                return Err(output_dir_error(index, "必须写在 project 段下面"));
+            }
+            continue;
+        }
+        // `<<` 合并键能把别处的 output_dir 注进 project，逐行检查看不见；OpenBench 却会展开它。
+        if key == "<<" {
+            return Err(output_dir_error(index, "不支持 YAML 的 `<<` 合并键"));
+        }
+        let child_indent = *project_child_indent.get_or_insert(indent);
+        if key != "output_dir" {
+            if trimmed.contains("output_dir") {
+                return Err(output_dir_error(
+                    index,
+                    "这一行不是 `output_dir: 值` 的写法",
+                ));
+            }
+            continue;
+        }
+        if indent != child_indent {
+            return Err(output_dir_error(index, "只能是 project 的直属键"));
+        }
+        if found.is_some() {
+            return Err(output_dir_error(index, "只能写一次"));
+        }
+        found = Some(
+            match yaml_scalar(value).map_err(|detail| output_dir_error(index, &detail))? {
+                None => default_output_dir(),
+                Some(raw) => {
+                    normalize_output_dir(&raw).map_err(|detail| output_dir_error(index, &detail))?
+                }
+            },
+        );
+    }
+    Ok(found.unwrap_or_else(default_output_dir))
+}
+
+fn output_dir_error(line: usize, detail: &str) -> String {
+    format!(
+        "project.output_dir 不合格（配置第 {} 行）：{detail}",
+        line + 1
+    )
+}
+
+/// 只允许相对路径，且归一后仍在运行目录内；`..` 只有在能被前面的目录抵消时才接受。
+/// 绝对路径（含 Windows 盘符）明确拒绝：那种路径会跨 run 共享报告，正是 R03 的根因。
+pub(crate) fn normalize_output_dir(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("不能是空路径".into());
+    }
+    if text.contains('\0') {
+        return Err("不能含 NUL 字符".into());
+    }
+    // `~`、环境变量之类的展开由 OpenBench 那侧的路径库决定；这里看到的是字面相对路径，
+    // 一旦对面展开就会跑到运行目录外。没有展开语义的普通目录名才在允许范围内。
+    if text.starts_with('~') {
+        return Err(format!(
+            "不支持 ~ 展开（{text}），请写运行目录内的普通相对路径"
+        ));
+    }
+    let path = Path::new(text);
+    if path.is_absolute() {
+        return Err(format!(
+            "不能是绝对路径（{text}），请改用运行目录内的相对路径"
+        ));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!(
+                        "不能跳出运行目录（{text}），请改用运行目录内的相对路径"
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "不能是绝对路径（{text}），请改用运行目录内的相对路径"
+                ));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        // `.` 或 `a/..`：归一后就是运行目录本身。虽然没跳出去，但输出会跟冻结的 meta/配置混在
+        // 一起，报告发现也会扫到运行目录根；要求一个专门的子目录，拒绝比事后收拾干净。
+        return Err(format!(
+            "不能是运行目录本身（{text}），请指定一个子目录（例如 output）"
+        ));
+    }
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+/// 去掉 YAML 行尾注释：`#` 只有不在引号里、且前面是空白（或在行首）时才是注释。
+fn strip_yaml_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(current) if byte == current => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) => {
+                return &line[..index];
+            }
+            None => {}
+        }
+    }
+    line
+}
+
+/// 拆一行块映射 `键: 值`。冒号必须后跟空白或行尾（YAML 的 plain scalar 里冒号不算分隔符），
+/// 引号里的冒号跳过；键两端的引号去掉。
+fn split_mapping(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match quote {
+            Some(current) if byte == current => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b':' => {
+                let next = bytes.get(index + 1).copied();
+                if next.is_none() || next.is_some_and(|c| c.is_ascii_whitespace()) {
+                    let key = line[..index].trim();
+                    let key = strip_key_quotes(key);
+                    return Some((key, line[index + 1..].trim()));
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn strip_key_quotes(key: &str) -> &str {
+    let bytes = key.as_bytes();
+    if key.len() >= 2
+        && ((bytes[0] == b'"' && bytes[key.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[key.len() - 1] == b'\''))
+    {
+        &key[1..key.len() - 1]
+    } else {
+        key
+    }
+}
+
+/// YAML 标量 → 字符串。`None` 表示 null/空值（调用方用默认输出根）。
+/// 流式/块式/锚点这类写法不猜：它们可能藏着一个绝对路径，拒绝比猜错安全。
+fn yaml_scalar(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("~") || value.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    match value.chars().next().expect("non-empty") {
+        '"' => serde_json::from_str::<String>(value)
+            .map(Some)
+            .map_err(|error| format!("双引号字符串读不懂（{error}）")),
+        '\'' => {
+            if value.len() < 2 || !value.ends_with('\'') {
+                return Err("单引号字符串没有收尾".into());
+            }
+            let inner = &value[1..value.len() - 1];
+            if inner.replace("''", "").contains('\'') {
+                return Err("单引号字符串里的引号要写成两个单引号".into());
+            }
+            Ok(Some(inner.replace("''", "'")))
+        }
+        '[' | '{' | '&' | '*' | '!' | '|' | '>' => {
+            Err("不支持 YAML 的流式/块式/锚点写法，请写成普通字符串".into())
+        }
+        _ => Ok(Some(value.to_owned())),
+    }
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {

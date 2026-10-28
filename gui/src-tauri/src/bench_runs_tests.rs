@@ -26,6 +26,41 @@ fn read_meta(run_dir: &Path) -> RunMeta {
     serde_json::from_str(&std::fs::read_to_string(run_dir.join(META_FILE)).unwrap()).unwrap()
 }
 
+/// 带 `project.output_dir` 的配置；`dir` 是原样的 YAML 值。
+fn config_with_output_dir(dir: &str) -> String {
+    format!("project:\n  name: cmp\n  output_dir: {dir}\n")
+}
+
+/// 模拟一次 PREPARE：在运行目录里写 NC 与站点清单，返回 NC 的实际路径。
+/// 真实 PREPARE 写在 `run/sim/` 下（R04），这里用文件内容代表"这份归档数据"。
+fn prepare_into_run(run: &RunSnapshot, site_id: &str, first_value: &str) -> PathBuf {
+    let dir = run.sim_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let nc = dir.join(format!("{site_id}.nc"));
+    std::fs::write(&nc, first_value).unwrap();
+    let csv = dir.join(format!("{site_id}.csv"));
+    std::fs::write(
+        &csv,
+        format!(
+            "ID,SYEAR,EYEAR,LON,LAT,DIR\nAT-Neu,2000,2002,11.310000,47.120000,{}\n",
+            nc.display()
+        ),
+    )
+    .unwrap();
+    nc
+}
+
+/// 站点清单里的 DIR 列（CSV 最后一列）：归档数据到底指向哪个文件。
+fn csv_dir(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap();
+    text.lines()
+        .nth(1)
+        .and_then(|line| line.rsplit(',').next())
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -68,6 +103,7 @@ fn write_run_meta(project: &Path, run_id: &str, created_unix: u64, state: RunSta
         ref_root: None,
         sites: Vec::new(),
         machine: Machine::default(),
+        output_dir: DEFAULT_OUTPUT_DIR.to_owned(),
         report: None,
         error: None,
     };
@@ -138,18 +174,16 @@ fn a_run_snapshot_freezes_its_config_sites_and_inputs() {
     assert_eq!(inputs["sites"][0]["history_dir"], "/data/AT-Neu");
     assert_eq!(inputs["sites"][0]["prefix"], "AT-Neu_hist_");
 
-    // 站点清单副本来自 PREPARE 实际生成的小 CSV。
-    let csv = project.join("sim").join("at_neu.csv");
-    std::fs::create_dir_all(csv.parent().unwrap()).unwrap();
-    std::fs::write(
-        &csv,
-        "ID,SYEAR,EYEAR,LON,LAT,DIR\nAT-Neu,2000,2002,11.31,47.12,/x.nc\n",
-    )
-    .unwrap();
-    run.stash_station_manifest("at_neu", &csv).unwrap();
+    // 站点清单是 PREPARE 写进本次运行目录的小 CSV；发布到项目 sim/ 后，内容（含 DIR）不变。
+    let frozen_nc = prepare_into_run(&run, "at_neu", "10");
+    run.publish_station_manifest("at_neu").unwrap();
     assert_eq!(
         std::fs::read(run.dir().join("sim/at_neu.csv")).unwrap(),
-        std::fs::read(&csv).unwrap()
+        std::fs::read(project.join("sim/at_neu.csv")).unwrap()
+    );
+    assert_eq!(
+        csv_dir(&project.join("sim/at_neu.csv")),
+        frozen_nc.to_string_lossy()
     );
 
     // 运行目录里只有快照文件，没有原子写的临时残骸。
@@ -428,5 +462,206 @@ fn a_newer_run_wins_even_if_its_meta_is_readable_but_the_newer_one_is_corrupt() 
     assert!(!has_runs(&legacy));
     assert!(latest_run(&legacy).is_none());
     assert!(latest_success(&legacy).is_none());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---- R03：output_dir 不能带报告跑出这次运行 ----
+
+#[test]
+fn a_custom_output_dir_is_normalized_inside_the_run_directory() {
+    let base = temp("output-dir-ok");
+    let project = project_dir(&base);
+    let config = config_with_output_dir("./custom-output/");
+    let mut run = RunSnapshot::create(&project, "cmp", &config, &[], None).unwrap();
+    assert_eq!(run.meta.output_dir, "custom-output");
+    // 配置文本逐字节冻结，但报告发现按归一后的目录走。
+    assert_eq!(std::fs::read(run.config_file()).unwrap(), config.as_bytes());
+
+    let reports = run.dir().join("custom-output/cmp/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report_standalone.html");
+    std::fs::write(&report, "<p>ok</p>").unwrap();
+    assert_eq!(run.discover_report().as_deref(), Some(report.as_path()));
+    run.succeed(run.discover_report().as_deref()).unwrap();
+    assert_eq!(
+        latest_run(&project).unwrap().report_path().as_deref(),
+        Some(report.as_path())
+    );
+    assert_eq!(
+        latest_success(&project)
+            .unwrap()
+            .report_path(&project)
+            .as_deref(),
+        Some(report.as_path())
+    );
+
+    // `a/../output` 这类能在词法上落回运行目录的写法安全归一，不拒绝。
+    let base = temp("output-dir-dotdot");
+    let project = project_dir(&base);
+    let run = RunSnapshot::create(
+        &project,
+        "cmp",
+        &config_with_output_dir("sim/../nested/output"),
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(run.meta.output_dir, "nested/output");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_run_refuses_an_output_dir_that_can_escape_or_leaves_the_run_root() {
+    let base = temp("output-dir-bad");
+    let project = project_dir(&base);
+    let absolute = if cfg!(windows) {
+        "C:\\Users\\shared\\output"
+    } else {
+        "/tmp/shared-output"
+    };
+    for raw in [
+        "../shared",
+        "../../outside",
+        "sim/../../outside",
+        absolute,
+        // 归一后就是运行目录本身：不要跟冻结文件混在一起。
+        ".",
+        "sim/..",
+        // 对面一旦展开 ~ 就跑到运行目录外。
+        "~/shared",
+    ] {
+        let error = RunSnapshot::create(&project, "cmp", &config_with_output_dir(raw), &[], None)
+            .err()
+            .expect("不安全的 output_dir 必须被拒绝");
+        assert!(
+            error.contains("output_dir"),
+            "{raw:?} 的拒绝理由要说清是 output_dir：{error}"
+        );
+        assert!(
+            !project.join(RUNS_DIR).exists(),
+            "{raw:?} 被拒绝前不能留下运行目录"
+        );
+    }
+    // `output_dir:` 空值在 YAML 是 null，按 OpenBench 默认的 output 处理（不是"跳到别处"）。
+    let defaulted =
+        RunSnapshot::create(&project, "cmp", &config_with_output_dir(""), &[], None).unwrap();
+    assert_eq!(defaulted.meta.output_dir, DEFAULT_OUTPUT_DIR);
+    // 不写在 project 段里的 output_dir 不能猜：它可能是别的块的，OpenBench 也不会读它。
+    let stray = "output_dir: ../shared\nproject:\n  name: cmp\n";
+    assert!(RunSnapshot::create(&project, "cmp", stray, &[], None).is_err());
+    // 这些写法能让 OpenBench 看到另一份 output_dir 而逐行扫描看不到：一律拒绝，不猜。
+    for unsupported in [
+        "project: {name: cmp, output_dir: /tmp/x}\n",
+        "project:\n  <<: *defaults\n",
+        "---\nproject:\n  output_dir: ./x\n",
+        "project:\n  name: cmp\nproject:\n  output_dir: ./x\n",
+    ] {
+        assert!(
+            RunSnapshot::create(&project, "cmp", unsupported, &[], None).is_err(),
+            "{unsupported:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_config_without_output_dir_keeps_the_default() {
+    let base = temp("output-dir-default");
+    let project = project_dir(&base);
+    let run = RunSnapshot::create(&project, "cmp", "project:\n  name: cmp\n", &[], None).unwrap();
+    assert_eq!(run.meta.output_dir, "output");
+    let reports = run.dir().join("output/cmp/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report.html");
+    std::fs::write(&report, "<p>ok</p>").unwrap();
+    assert_eq!(run.discover_report().as_deref(), Some(report.as_path()));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn an_old_meta_without_output_dir_still_finds_the_default_report() {
+    let base = temp("output-dir-old-meta");
+    let project = project_dir(&base);
+    let dir = write_run_meta(&project, "r0", 1_700_000_000, RunState::Succeeded);
+    // 旧 meta 没有 output_dir 字段：解析成默认 output，不能因此读不出状态页。
+    let record = latest_run(&project).unwrap();
+    assert_eq!(record.meta().output_dir, DEFAULT_OUTPUT_DIR);
+    assert_eq!(record.dir(), dir.as_path());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---- R04：归档运行的数据不能被下一次准备覆盖 ----
+
+#[test]
+fn a_later_prepare_cannot_change_the_data_an_archived_run_used() {
+    let base = temp("freeze-input");
+    let project = project_dir(&base);
+    let config = config_with_output_dir("./output");
+
+    // A：首值 10，归档进自己的运行目录；配置里的 fulllist 位置（项目 sim/）指向归档 NC。
+    let mut run_a =
+        RunSnapshot::create(&project, "cmp", &config, &[site("a", "AT-Neu")], None).unwrap();
+    let archived_nc = prepare_into_run(&run_a, "a", "10");
+    run_a.publish_station_manifest("a").unwrap();
+    run_a.succeed(None).unwrap();
+    let published_a = project.join("sim/a.csv");
+    assert_eq!(csv_dir(&published_a), archived_nc.to_string_lossy());
+    assert!(std::fs::read_to_string(&published_a)
+        .unwrap()
+        .contains("10"));
+
+    // B：覆盖准备（首值 90）。项目 sim/ 是共享路径，会被重写成 B 的清单；A 的归档不能被碰到。
+    let run_b =
+        RunSnapshot::create(&project, "cmp", &config, &[site("a", "AT-Neu")], None).unwrap();
+    let prepared_b = prepare_into_run(&run_b, "a", "90");
+    run_b.publish_station_manifest("a").unwrap();
+    let published_b = project.join("sim/a.csv");
+    assert_eq!(csv_dir(&published_b), prepared_b.to_string_lossy());
+    assert_ne!(archived_nc, prepared_b);
+
+    // 按 A 的归档读：清单仍指向 A 的 NC，内容仍是 10。
+    assert_eq!(
+        csv_dir(&run_a.sim_dir().join("a.csv")),
+        archived_nc.to_string_lossy()
+    );
+    assert_eq!(std::fs::read_to_string(&archived_nc).unwrap(), "10");
+    // 按 B 的归档读：90；两次运行互不覆盖。
+    assert_eq!(std::fs::read_to_string(&prepared_b).unwrap(), "90");
+    assert_eq!(std::fs::read_to_string(&archived_nc).unwrap(), "10");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_flat_mirror_with_a_run_record_is_not_treated_as_a_legacy_project() {
+    let base = temp("flat-mirror");
+    let mirror = base.join("projects").join("cmp@host");
+    let meta = RunMeta {
+        run_id: "bench-run-1-2".to_owned(),
+        project: "cmp".to_owned(),
+        created_at: iso8601_utc(1_700_000_000),
+        created_unix: 1_700_000_000,
+        finished_at: Some(iso8601_utc(1_700_000_100)),
+        finished_unix: Some(1_700_000_100),
+        state: RunState::Succeeded,
+        config_sha: "abc".to_owned(),
+        ref_root: None,
+        sites: Vec::new(),
+        machine: Machine::default(),
+        output_dir: "custom".to_owned(),
+        report: Some("custom/cmp/reports/evaluation_report.html".to_owned()),
+        error: None,
+    };
+    std::fs::create_dir_all(mirror.join("custom/cmp/reports")).unwrap();
+    let report = mirror.join("custom/cmp/reports/evaluation_report.html");
+    std::fs::write(&report, "<p>ok</p>").unwrap();
+    std::fs::write(
+        mirror.join(META_FILE),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    assert!(!has_runs(&mirror));
+    let record = flat_run(&mirror).unwrap();
+    assert_eq!(record.meta(), &meta);
+    assert_eq!(record.report_path().as_deref(), Some(report.as_path()));
     let _ = std::fs::remove_dir_all(&base);
 }
