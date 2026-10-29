@@ -896,7 +896,15 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
             let target = stage.join("workspaces").join(name);
             std::fs::create_dir_all(&target)?;
             let output = std::process::Command::new("git")
-                .args(["clone", "--local", "--no-hardlinks"])
+                // Git for Windows 默认 core.longpaths=false，缓存目录较深时复制 loose object
+                // 会报 "Filename too long"（CI windows 实测）；只对本命令开长路径。
+                .args([
+                    "-c",
+                    "core.longpaths=true",
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                ])
                 .arg(std::path::absolute(ws.src())?)
                 // Git for Windows rejects verbatim absolute clone destinations.
                 .arg("src")
@@ -1278,8 +1286,15 @@ mod tests {
         let mut last_stderr = String::new();
         let mut cloned = false;
         for flags in [
-            &["clone", "-q", "--local", "--no-hardlinks"][..],
-            &["clone", "-q", "--no-local"][..],
+            &[
+                "-c",
+                "core.longpaths=true",
+                "clone",
+                "-q",
+                "--local",
+                "--no-hardlinks",
+            ][..],
+            &["-c", "core.longpaths=true", "clone", "-q", "--no-local"][..],
         ] {
             let output = std::process::Command::new("git")
                 .args(flags)
