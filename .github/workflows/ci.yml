@@ -252,7 +252,10 @@ jobs:
         shell: bash
         working-directory: gui/src-tauri
         run: |
-          cargo test
+          # 串行：xerj_manager 的端口探测测试在并行执行时会偶发抢同一个本地端口
+          # （pick_base_port_*/probe_health_* 在 macos-latest 上出现过假红）。测试只改
+          # 执行方式，不改任何断言；549 个用例串行约 22 秒，代价可接受。
+          cargo test -- --test-threads=1
           cargo clippy --all-targets -- -D warnings
           cargo fmt --all --check
 

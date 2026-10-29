@@ -283,7 +283,10 @@ fn a_successful_run_updates_the_pointer_and_records_its_own_report() {
     assert_eq!(json["run_id"], first.id());
     assert_eq!(json["state"], "succeeded");
     assert_eq!(json["config_sha"], first.config_sha());
-    assert_eq!(json["report"].as_str().unwrap(), report.to_string_lossy());
+    // 记录里的相对路径用 `/`，与原生目录拼出来的绝对路径在 Windows 上会混用两种分隔符。
+    let json_report = json["report"].as_str().unwrap().replace('\\', "/");
+    let expected_report = report.to_string_lossy().replace('\\', "/");
+    assert_eq!(json_report, expected_report);
     assert_eq!(json["error"], Value::Null);
 
     // 指针与 meta 都是原子写：目标目录里没有以点开头的临时残骸。

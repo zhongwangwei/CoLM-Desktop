@@ -1274,9 +1274,10 @@ mod tests {
         std::fs::create_dir_all(&cached).unwrap();
         // 与冻结时一样克隆到相对路径：Git for Windows 不接受 verbatim 的绝对目标路径（CI 实测）。
         assert!(std::process::Command::new("git")
-            .args(["clone", "-q", "--local"])
-            // 不能传 std::path::absolute()：Windows 上它带 `\\?\` verbatim 前缀，
-            // Git for Windows 不接受（CI windows 实测）。夹具里的 repo 本来就是绝对路径。
+            // 与生产代码同一条命令（`--no-hardlinks`）：Windows runner 上 temp 与缓存目录
+            // 可能跨卷，`--local` 默认建硬链接会失败（CI windows 实测）；也不要传
+            // `std::path::absolute()`，它带 `\\?\` verbatim 前缀。
+            .args(["clone", "-q", "--local", "--no-hardlinks"])
             .arg(&repo)
             .arg("src")
             .current_dir(&cached)

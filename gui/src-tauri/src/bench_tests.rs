@@ -232,10 +232,10 @@ fn new_style_projects_bind_the_report_to_the_last_success_not_the_last_run() {
     );
 
     let legacy_row = list.iter().find(|row| row["name"] == "legacy").unwrap();
-    assert_eq!(
+    assert!(same_path(
         legacy_row["report"].as_str().unwrap(),
-        legacy_report.to_string_lossy()
-    );
+        &legacy_report
+    ));
     assert_eq!(legacy_row["latest_run"], Value::Null);
     assert_eq!(legacy_row["latest_success"], Value::Null);
     assert_eq!(

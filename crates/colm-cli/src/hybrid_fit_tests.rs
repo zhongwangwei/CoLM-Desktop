@@ -292,6 +292,18 @@ fn member() -> MemberPlan {
 
 /// 假 tap：从算例目录的 `tap_value.txt` 读特征值。真实路径上这里是 colm-rs 空跑，
 /// 测试要断言的是“读的是哪个算例目录、哪个副本里的数据”。
+/// Windows 的 `canonicalize()` 会返回带 `\\?\` verbatim 前缀、反斜杠分隔的路径；记录里写的是
+/// 创建时的普通路径。比较前统一去掉前缀并归一分隔符，两边才说同一件事。
+fn same_path_text(actual: &str, expected: &std::path::Path) -> bool {
+    fn normalized(text: &str) -> String {
+        text.trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_owned()
+    }
+    normalized(actual) == normalized(&expected.to_string_lossy())
+}
+
 fn marker_tap(case: &Path) -> Result<String> {
     let value: f64 = std::fs::read_to_string(case.join("tap_value.txt"))?
         .trim()
@@ -356,15 +368,24 @@ fn features_come_from_the_frozen_inputs_after_the_source_case_changed() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].features, vec![3.5, 285.0]);
-    assert_eq!(
-        tapped,
-        vec![fixture.frozen.canonicalize().unwrap().join("caseA")]
+    let expected_case = fixture.frozen.canonicalize().unwrap().join("caseA");
+    assert_eq!(tapped.len(), 1);
+    assert!(
+        same_path_text(&tapped[0].to_string_lossy(), &expected_case),
+        "tapped {:?} vs {:?}",
+        tapped[0],
+        expected_case
     );
     // sources 本身带可追溯身份：冻结根、规格哈希、逐站数据哈希。
     let identity = &prepared.identity.base_cases["caseA"];
-    assert_eq!(
+    assert!(
+        same_path_text(
+            sources[0]["base_root"].as_str().unwrap(),
+            &fixture.frozen.canonicalize().unwrap()
+        ),
+        "sources base_root {:?} vs {:?}",
         sources[0]["base_root"],
-        fixture.frozen.canonicalize().unwrap().display().to_string()
+        fixture.frozen.canonicalize().unwrap()
     );
     assert_eq!(
         sources[0]["data_sha256"],
