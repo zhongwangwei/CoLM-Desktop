@@ -539,6 +539,9 @@ fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
     let mut command = Command::new("git");
     command
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Git for Windows 默认 core.longpaths=false，模型库缓存目录较深时复制 loose object
+        // 会报 "Filename too long"（CI windows 实测）；只对这条命令开长路径。
+        .args(["-c", "core.longpaths=true"])
         .arg("clone")
         .arg("-q");
     if local {
