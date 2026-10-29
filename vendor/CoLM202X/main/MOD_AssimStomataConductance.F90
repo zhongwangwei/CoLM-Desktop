@@ -12,12 +12,6 @@ MODULE MOD_AssimStomataConductance
    PUBLIC :: stomata
    PUBLIC :: update_photosyn
 
-   ! Land class of the patch being computed, set by CoLMDRIVER for every patch. DEF_LC_RESPCP is
-   ! looked up by class here because respcp is recomputed from c3/c4 below instead of coming
-   ! from the land-cover table. One copy per OpenMP thread: patches run in parallel.
-   integer, PUBLIC :: lc_current_class = 0
-!$OMP THREADPRIVATE(lc_current_class)
-
 ! PRIVATE MEMBER FUNCTIONS:
    PRIVATE :: sortin
    PRIVATE :: calc_photo_params
@@ -30,7 +24,7 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-   SUBROUTINE stomata (vmax25,effcon,c3c4,slti,hlti,shti, &
+   SUBROUTINE stomata (vmax25,effcon,slti,hlti,shti, &
                        hhti,trda,trdm,trop,g1,g0,gradm,binter,tm, &
                        psrf,po2m,pco2m,pco2a,ea,ei,tlef,par, &
 !Ozone stress variables
@@ -39,7 +33,7 @@ CONTAINS
 !WUE stomata model parameter
                        lambda, &
 !End WUE stomata model parameter
-                       rb,ra,rstfac,cint,assim,respc,rst )
+                       rb,ra,rstfac,cint,assim,respc,rst,c3c4)
 
 !=======================================================================
 !
@@ -101,8 +95,7 @@ CONTAINS
       g0,           &! conductance-photosynthesis intercept for medlyn model
       gradm,        &! conductance-photosynthesis slope parameter
       binter         ! conductance-photosynthesis intercept
-   integer, intent(in) :: &
-      c3c4           ! 1 for c3, 0 for c4
+
    real(r8),intent(in) :: &
       tm,           &! atmospheric air temperature (K)
       psrf,         &! surface atmospheric pressure (pa)
@@ -128,6 +121,9 @@ CONTAINS
 
    real(r8),intent(in), dimension(3) :: &
       cint           ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+      c3c4           ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &! ATTENTION : all for canopy not leaf
       assim,        &! canopy assimilation rate (mol m-2 s-1)
@@ -185,36 +181,22 @@ CONTAINS
    real(r8) :: &
       eyy(iterationtotal),    &! differnce of pco2i at two iteration step
       pco2y(iterationtotal),  &! adjusted to total iteration number
-      range,                  &
-      g1_used,                &! case override, or the land-cover/PFT table value
-      g0_used,                &
-      gradm_used,             &
-      binter_used,            &
-      lambda_used
+      range                    !
 
    integer ic
 !-----------------------------------------------------------------------
 
-      g1_used = g1
-      g0_used = g0
-      gradm_used = gradm
-      binter_used = binter
-      lambda_used = lambda
-      IF (DEF_USE_MEDLYNST) THEN
-         IF (DEF_MEDLYN_G1 >= 0.0_r8) g1_used = DEF_MEDLYN_G1
-         IF (DEF_MEDLYN_G0 >= 0.0_r8) g0_used = DEF_MEDLYN_G0
-      ELSE IF (DEF_USE_WUEST) THEN
-         IF (DEF_WUE_LAMBDA > 0.0_r8) lambda_used = DEF_WUE_LAMBDA
+      IF ( present(c3c4) ) THEN
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4=c3c4)
       ELSE
-         IF (DEF_BALL_BERRY_GRADM > 1.6_r8) gradm_used = DEF_BALL_BERRY_GRADM
-         IF (DEF_BALL_BERRY_BINTER >= 0.0_r8) binter_used = DEF_BALL_BERRY_BINTER
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
       ENDIF
 
-      CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
-                             trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                             vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
-
-      bintc = binter_used * max( 0.1, rstfac )
+      bintc = binter * max( 0.1, rstfac )
       bintc = bintc * cint(3)
 
 !-----------------------------------------------------------------------
@@ -226,7 +208,7 @@ CONTAINS
       co2m = pco2m/psrf                               ! mol mol-1
       co2a = pco2a/psrf
 
-      range = pco2m * ( 1. - 1.6/gradm_used ) - gammas
+      range = pco2m * ( 1. - 1.6/gradm ) - gammas
 
       DO ic = 1, iterationtotal    ! loop for total iteration number
          pco2y(ic) = 0.
@@ -242,7 +224,7 @@ CONTAINS
             pco2i_c = pco2i
             pco2i_e = pco2i
          ELSE
-            CALL WUE_solver(gammas, lambda_used, co2a, ei, ea, psrf, pco2i_c, pco2i_e)
+            CALL WUE_solver(gammas, lambda, co2a, ei, ea, psrf, pco2i_c, pco2i_e)
          ENDIF
 
 !-----------------------------------------------------------------------
@@ -346,14 +328,14 @@ CONTAINS
                vpd   = amax1((ei - ea),50._r8) * 1.e-3 ! in kpa
                acp   = 1.6*assmt/co2st                 ! in mol m-2 s-1
                aquad = 1._r8
-               bquad = -2*(g0_used*1.e-6 + acp) - (g1_used*acp)**2/(gbh2o*vpd)       ! in mol m-2 s-1
-               cquad = (g0_used*1.e-6)**2 + (2*g0_used*1.e-6+acp*(1-g1_used**2)/vpd)*acp  ! in (mol m-2 s-1)**2
+               bquad = -2*(g0*1.e-6 + acp) - (g1*acp)**2/(gbh2o*vpd)       ! in mol m-2 s-1
+               cquad = (g0*1.e-6)**2 + (2*g0*1.e-6+acp*(1-g1**2)/vpd)*acp  ! in (mol m-2 s-1)**2
 
                sqrtin= max( 0., ( bquad**2 - 4.*aquad*cquad ) )
                gsh2o = ( -bquad + sqrt ( sqrtin ) ) / (2.*aquad)
 
             ELSE
-               hcdma = ei*co2st / ( gradm_used*assmt )
+               hcdma = ei*co2st / ( gradm*assmt )
 
                aquad = hcdma
                bquad = gbh2o*hcdma - ei - bintc*hcdma
@@ -481,12 +463,11 @@ CONTAINS
 
    END SUBROUTINE sortin
 
-   SUBROUTINE calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
+   SUBROUTINE calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
                                trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4)
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_LCT, DEF_LC_RESPCP, LC_OVERRIDE_UNSET, LC_OVERRIDE_SLOTS
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -508,12 +489,12 @@ CONTAINS
             trda,     &! temperature coefficient in gs-a model             (1.3)
             trdm,     &! temperature coefficient in gs-a model             (328.16)
             psrf       ! surface atmospheric pressure (pa)
-            
-   integer, intent(in) :: &
-            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(in), dimension(3) :: &
             cint       ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &
             vm,       &! maximum catalytic activity of Rubison (mol co2 m-2 s-1)
@@ -542,7 +523,13 @@ CONTAINS
 !-----------------------------------------------------------------------
 
       c3 = 0.
-      IF (c3c4.eq.1) c3 = 1.
+
+      IF ( present(c3c4) ) THEN
+         IF (c3c4 .eq. 1) c3 = 1.
+      ELSE
+         IF (effcon .gt. 0.07) c3 = 1.
+      ENDIF
+
       c4 = 1. - c3
 
 !-----------------------------------------------------------------------
@@ -597,12 +584,6 @@ CONTAINS
       epar = min(4.6e-6 * par * effcon, jmax)
 
       respcp = 0.015 * c3 + 0.025 * c4
-      ! DEF_LC_RESPCP(lc) is stored in the land cover table too but never reaches here, because
-      ! respcp is recomputed from c3/c4 above; apply it for the class of this patch (LCT only).
-      IF (DEF_USE_LCT .and. lc_current_class >= 1 .and. lc_current_class <= LC_OVERRIDE_SLOTS) THEN
-         IF (DEF_LC_RESPCP(lc_current_class) /= LC_OVERRIDE_UNSET) &
-            respcp = DEF_LC_RESPCP(lc_current_class)
-      ENDIF
       respc = respcp * vmax25 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
 !     respc = 0.7e-6 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
       respc = respc * cint(1)
@@ -628,8 +609,8 @@ CONTAINS
    END SUBROUTINE calc_photo_params
 
    SUBROUTINE update_photosyn(tlef, po2m, pco2m, pco2a, par, psrf, rstfac, rb, gsh2o,&
-                             effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, trdm, cint,&
-                             assim, respc)
+                             effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, trdm, cint,&
+                             assim, respc, c3c4)
 
    USE MOD_Precision
    IMPLICIT NONE
@@ -658,11 +639,11 @@ CONTAINS
             trda,     &! temperature coefficient in gs-a model             (1.3)
             trdm       ! temperature coefficient in gs-a model             (328.16)
 
-   integer, intent(in) :: &
-            c3c4       ! 1 for c3, 0 for c4
-
    real(r8),intent(in), dimension(3) :: &
             cint       ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &
             assim,    &! canopy assimilation rate (mol m-2 s-1)
@@ -702,25 +683,26 @@ CONTAINS
    integer, parameter :: iterationtotal = 6   ! total iteration number in pco2i calculation
 
    real(r8) :: &
-      eyy(iterationtotal),    &! differnce of pco2i at two iteration step
-      pco2y(iterationtotal),  &! adjusted to total iteration number
-      range,                  &
-      gradm_used
+            eyy(iterationtotal),    &! differnce of pco2i at two iteration step
+            pco2y(iterationtotal),  &! adjusted to total iteration number
+            range                    !
 
    integer ic
 !-----------------------------------------------------------------------
 
-      gradm_used = gradm
-      IF (.not. DEF_USE_MEDLYNST .and. .not. DEF_USE_WUEST .and. &
-          DEF_BALL_BERRY_GRADM > 1.6_r8) gradm_used = DEF_BALL_BERRY_GRADM
-
-      CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
-                             trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                             vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      IF ( present(c3c4) ) THEN
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4=c3c4)
+      ELSE
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      ENDIF
 
       co2a = pco2a/psrf
 
-      range = pco2m * ( 1. - 1.6/gradm_used ) - gammas
+      range = pco2m * ( 1. - 1.6/gradm ) - gammas
 
       DO ic = 1, iterationtotal    ! loop for total iteration number
          pco2y(ic) = 0.

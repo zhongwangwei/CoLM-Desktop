@@ -24,80 +24,13 @@ MODULE MOD_HistVector
 #endif
    USE MOD_Pixelset
    USE MOD_NetCDFSerial
-   USE MOD_DataType, only: pointer_int32_1d
 #ifdef CATCHMENT
    USE MOD_HRUVector
 #else
    USE MOD_ElmVector
 #endif
 
-#ifdef FLAT_SPMD
-   PUBLIC :: gather_history_fields
-#endif
-
 CONTAINS
-
-#ifdef FLAT_SPMD
-   SUBROUTINE gather_history_fields (local_data, nfield, numset, totalnumset, &
-         data_address, global_data)
-
-   IMPLICIT NONE
-
-   real(r8), intent(in) :: local_data(:)
-   integer, intent(in) :: nfield, numset, totalnumset
-   type(pointer_int32_1d), allocatable, intent(in) :: data_address(:)
-   real(r8), allocatable, intent(out) :: global_data(:,:)
-
-   integer :: iaddr, iwork, iset, ndata, offset
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   real(r8), allocatable :: gathered(:)
-
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (numset, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iwork = 1, p_np_glb-1
-         disps(iwork) = disps(iwork-1) + counts(iwork-1)
-      ENDDO
-      counts_data = counts * nfield
-      disps_data = disps * nfield
-
-      IF (p_is_master) THEN
-         allocate (gathered(max(1,nfield*totalnumset)))
-      ELSE
-         allocate (gathered(1))
-      ENDIF
-      CALL mpi_gatherv (local_data, nfield*numset, MPI_REAL8, gathered, counts_data, &
-         disps_data, MPI_REAL8, p_root, p_comm_glb, p_err)
-
-      IF (p_is_master) THEN
-         IF (.not. allocated(data_address)) &
-            CALL CoLM_stop ('gather_history_fields: missing data addresses')
-         IF (sum(counts) /= totalnumset) &
-            CALL CoLM_stop ('gather_history_fields: vector length mismatch')
-         allocate (global_data(nfield,totalnumset))
-         global_data = spval
-         DO iwork = 0, p_np_glb-1
-            ndata = counts(iwork)
-            IF (ndata > 0) THEN
-               iaddr = lbound(data_address,1) + iwork
-               IF (.not. allocated(data_address(iaddr)%val)) &
-                  CALL CoLM_stop ('gather_history_fields: missing data address')
-               IF (size(data_address(iaddr)%val) /= ndata) &
-                  CALL CoLM_stop ('gather_history_fields: data address size mismatch')
-               DO iset = 1, ndata
-                  offset = disps_data(iwork) + (iset-1)*nfield
-                  global_data(:,data_address(iaddr)%val(iset)) = &
-                     gathered(offset+1:offset+nfield)
-               ENDDO
-            ENDIF
-         ENDDO
-      ENDIF
-
-      deallocate (counts, counts_data, disps, disps_data, gathered)
-
-   END SUBROUTINE gather_history_fields
-#endif
 
    ! -- write history time --
    SUBROUTINE hist_vector_write_time (filename, filelast, dataname, time, itime_in_file)
@@ -174,9 +107,13 @@ CONTAINS
    integer :: numset, totalnumset, iset, istt, iend, iwork, mesg(2), isrc, ndata, compress
    logical,  allocatable :: mask(:)
    real(r8), allocatable :: frac(:)
-   real(r8), allocatable :: acc_vec(:), rcache(:), sendbuf(:), global_fields(:,:)
+   real(r8), allocatable :: acc_vec(:), rcache(:)
    real(r8) :: sumwt
    character(len=256) :: inmode
+
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 
       IF (p_is_worker) THEN
 #ifdef CATCHMENT
@@ -226,29 +163,7 @@ CONTAINS
             ENDDO
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-#ifdef CATCHMENT
-         totalnumset = totalnumhru
-#else
-         totalnumset = totalnumelm
-#endif
-         allocate (sendbuf(max(1,numset)))
-         IF (numset > 0) sendbuf(1:numset) = acc_vec
-#ifdef CATCHMENT
-         CALL gather_history_fields (sendbuf, 1, numset, totalnumset, &
-            hru_data_address, global_fields)
-#else
-         CALL gather_history_fields (sendbuf, 1, numset, totalnumset, &
-            elm_data_address, global_fields)
-#endif
-         deallocate (sendbuf)
-         IF (allocated(acc_vec)) deallocate (acc_vec)
-         IF (p_is_master) THEN
-            allocate (acc_vec(totalnumset))
-            acc_vec = global_fields(1,:)
-            deallocate (global_fields)
-         ENDIF
-#elif defined(USEMPI)
+#ifdef USEMPI
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -270,15 +185,12 @@ CONTAINS
             allocate (acc_vec (totalnumset))
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-         ! acc_vec was assembled collectively above.
-#elif defined(USEMPI)
+#ifdef USEMPI
          DO iwork = 0, p_np_worker-1
-            isrc = p_address_worker(iwork)
-            CALL mpi_recv (mesg, 2, MPI_INTEGER, isrc, &
+            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 
-            IF (mesg(1) /= isrc) CALL CoLM_stop ('history-vector worker/source mismatch')
+            isrc  = mesg(1)
             ndata = mesg(2)
             IF (ndata > 0) THEN
                allocate(rcache (ndata))
@@ -333,6 +245,10 @@ CONTAINS
 
       IF (allocated(acc_vec)) deallocate (acc_vec)
 
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
+
    END SUBROUTINE aggregate_to_vector_and_write_2d
 
 
@@ -365,8 +281,12 @@ CONTAINS
    integer :: ub1, i1
    logical,  allocatable :: mask(:)
    real(r8), allocatable :: frac(:)
-   real(r8), allocatable :: acc_vec(:,:), rcache(:,:), sendbuf(:), global_fields(:,:)
+   real(r8), allocatable :: acc_vec(:,:), rcache(:,:)
    real(r8) :: sumwt
+
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 
       ub1 = lb1 + ndim1 - 1
 
@@ -414,25 +334,7 @@ CONTAINS
             ENDDO
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-#ifdef CATCHMENT
-         totalnumset = totalnumhru
-#else
-         totalnumset = totalnumelm
-#endif
-         allocate (sendbuf(max(1,ndim1*numset)))
-         IF (numset > 0) sendbuf(1:ndim1*numset) = reshape(acc_vec, (/ndim1*numset/))
-#ifdef CATCHMENT
-         CALL gather_history_fields (sendbuf, ndim1, numset, totalnumset, &
-            hru_data_address, global_fields)
-#else
-         CALL gather_history_fields (sendbuf, ndim1, numset, totalnumset, &
-            elm_data_address, global_fields)
-#endif
-         deallocate (sendbuf)
-         IF (allocated(acc_vec)) deallocate (acc_vec)
-         IF (p_is_master) CALL move_alloc (global_fields, acc_vec)
-#elif defined(USEMPI)
+#ifdef USEMPI
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -454,15 +356,12 @@ CONTAINS
             allocate (acc_vec (ndim1,totalnumset))
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-         ! acc_vec was assembled collectively above.
-#elif defined(USEMPI)
+#ifdef USEMPI
          DO iwork = 0, p_np_worker-1
-            isrc = p_address_worker(iwork)
-            CALL mpi_recv (mesg, 2, MPI_INTEGER, isrc, &
+            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 
-            IF (mesg(1) /= isrc) CALL CoLM_stop ('history-vector worker/source mismatch')
+            isrc  = mesg(1)
             ndata = mesg(2)
             IF (ndata > 0) THEN
                allocate(rcache (ndim1,ndata))
@@ -526,6 +425,10 @@ CONTAINS
 
       IF (allocated(acc_vec)) deallocate (acc_vec)
 
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
+
    END SUBROUTINE aggregate_to_vector_and_write_3d
 
 
@@ -558,8 +461,12 @@ CONTAINS
    integer :: ub1, i1, ub2, i2
    logical,  allocatable :: mask(:)
    real(r8), allocatable :: frac(:)
-   real(r8), allocatable :: acc_vec(:,:,:), rcache(:,:,:), sendbuf(:), global_fields(:,:)
+   real(r8), allocatable :: acc_vec(:,:,:), rcache(:,:,:)
    real(r8) :: sumwt
+
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
 
       ub1 = lb1 + ndim1 - 1
       ub2 = lb2 + ndim2 - 1
@@ -610,30 +517,7 @@ CONTAINS
             ENDDO
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-#ifdef CATCHMENT
-         totalnumset = totalnumhru
-#else
-         totalnumset = totalnumelm
-#endif
-         allocate (sendbuf(max(1,ndim1*ndim2*numset)))
-         IF (numset > 0) sendbuf(1:ndim1*ndim2*numset) = &
-            reshape(acc_vec, (/ndim1*ndim2*numset/))
-#ifdef CATCHMENT
-         CALL gather_history_fields (sendbuf, ndim1*ndim2, numset, totalnumset, &
-            hru_data_address, global_fields)
-#else
-         CALL gather_history_fields (sendbuf, ndim1*ndim2, numset, totalnumset, &
-            elm_data_address, global_fields)
-#endif
-         deallocate (sendbuf)
-         IF (allocated(acc_vec)) deallocate (acc_vec)
-         IF (p_is_master) THEN
-            allocate (acc_vec(ndim1,ndim2,totalnumset))
-            acc_vec = reshape(global_fields, shape(acc_vec))
-            deallocate (global_fields)
-         ENDIF
-#elif defined(USEMPI)
+#ifdef USEMPI
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -655,15 +539,12 @@ CONTAINS
             allocate (acc_vec (ndim1,ndim2,totalnumset))
          ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-         ! acc_vec was assembled collectively above.
-#elif defined(USEMPI)
+#ifdef USEMPI
          DO iwork = 0, p_np_worker-1
-            isrc = p_address_worker(iwork)
-            CALL mpi_recv (mesg, 2, MPI_INTEGER, isrc, &
+            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 
-            IF (mesg(1) /= isrc) CALL CoLM_stop ('history-vector worker/source mismatch')
+            isrc  = mesg(1)
             ndata = mesg(2)
             IF (ndata > 0) THEN
                allocate(rcache (ndim1,ndim2,ndata))
@@ -731,8 +612,188 @@ CONTAINS
 
       IF (allocated(acc_vec)) deallocate (acc_vec)
 
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
+
    END SUBROUTINE aggregate_to_vector_and_write_4d
 
+
+   SUBROUTINE aggregate_to_vector_and_write_urb_2d ( &
+         acc_vec_patch, file_hist, varname, itime_in_file, filter, &
+         longname, units, input_mode)
+
+   USE MOD_Precision
+   USE MOD_SPMD_Task
+   USE MOD_Namelist
+   USE MOD_LandPatch
+   USE MOD_LandUrban
+   USE MOD_Vars_Global, only: spval
+   IMPLICIT NONE
+
+   real(r8), intent(in) :: acc_vec_patch (:)
+   character(len=*), intent(in) :: file_hist
+   character(len=*), intent(in) :: varname
+   integer,          intent(in) :: itime_in_file
+   logical, intent(in) :: filter(:)
+
+   character(len=*), intent(in) :: longname
+   character(len=*), intent(in) :: units
+
+   character(len=*), intent(in), optional :: input_mode
+
+   ! Local variables
+   integer :: u, ipth, urb_s, urb_e, numpth
+   integer :: numset, totalnumset, iset, iwork, mesg(2), isrc, ndata, compress
+   logical,  allocatable :: mask(:)
+   integer , allocatable :: locpth(:)
+   real(r8), allocatable :: frac(:)
+   real(r8), allocatable :: acc_vec(:), rcache(:)
+   real(r8) :: sumwt
+   character(len=256) :: inmode
+
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
+
+      IF (p_is_worker) THEN
+#ifdef CATCHMENT
+         numset = numhru
+#else
+         numset = numelm
+#endif
+
+         inmode = 'average'
+         IF (present(input_mode)) inmode = trim(input_mode)
+
+         IF (numset > 0) THEN
+
+            allocate (acc_vec (numset))
+            acc_vec(:) = spval
+
+            DO iset = 1, numset
+
+               numpth = count(landurban%eindex==landelm%eindex(iset))
+               IF (allocated(locpth)) deallocate(locpth)
+               allocate(locpth(numpth))
+
+               locpth = pack([(ipth, ipth=1, numurban)], &
+                        landurban%eindex==landelm%eindex(iset))
+
+               urb_s = minval(locpth)
+               urb_e = maxval(locpth)
+
+               IF ((urb_s > 0) .and. (urb_e >= urb_s)) THEN
+                  allocate (mask(urb_s:urb_e))
+                  allocate (frac(urb_s:urb_e))
+                  mask = (acc_vec_patch(urb_s:urb_e) /= spval) .and. filter(urb_s:urb_e)
+                  IF (any(mask)) THEN
+                     IF (trim(inmode) == 'average') THEN
+#ifdef CATCHMENT
+                        frac = hru_patch%subfrc(urban2patch(urb_s:urb_e))
+#else
+                        frac = elm_patch%subfrc(urban2patch(urb_s:urb_e))
+#endif
+                        sumwt = sum(frac, mask = mask)
+                        acc_vec(iset) = sum(frac * acc_vec_patch(urb_s:urb_e), mask = mask)
+                        acc_vec(iset) = acc_vec(iset) / sumwt
+                     ELSE
+                        acc_vec(iset) = sum(acc_vec_patch(urb_s:urb_e), mask = mask)
+                     ENDIF
+                  ENDIF
+                  deallocate(mask)
+                  deallocate(frac)
+               ENDIF
+            ENDDO
+         ENDIF
+
+#ifdef USEMPI
+         mesg = (/p_iam_glb, numset/)
+         CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+         IF (numset > 0) THEN
+            CALL mpi_send (acc_vec, numset, MPI_REAL8, &
+               p_address_master, mpi_tag_data, p_comm_glb, p_err)
+         ENDIF
+#endif
+      ENDIF
+
+      IF (p_is_master) THEN
+
+#ifdef CATCHMENT
+         totalnumset = totalnumhru
+#else
+         totalnumset = totalnumelm
+#endif
+
+         IF (.not. allocated(acc_vec)) THEN
+            allocate (acc_vec (totalnumset))
+         ENDIF
+
+#ifdef USEMPI
+         DO iwork = 0, p_np_worker-1
+            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
+               mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+
+            isrc  = mesg(1)
+            ndata = mesg(2)
+            IF (ndata > 0) THEN
+               allocate(rcache (ndata))
+               CALL mpi_recv (rcache, ndata, MPI_REAL8, isrc, &
+                  mpi_tag_data, p_comm_glb, p_stat, p_err)
+
+#ifdef CATCHMENT
+               acc_vec(hru_data_address(p_itis_worker(isrc))%val) = rcache
+#else
+               acc_vec(elm_data_address(p_itis_worker(isrc))%val) = rcache
+#endif
+
+               deallocate (rcache)
+            ENDIF
+         ENDDO
+#else
+#ifdef CATCHMENT
+         acc_vec(hru_data_address(0)%val) = acc_vec
+#else
+         acc_vec(elm_data_address(0)%val) = acc_vec
+#endif
+#endif
+      ENDIF
+
+      IF (p_is_master) THEN
+
+         compress = DEF_HIST_CompressLevel
+
+         IF (itime_in_file >= 1) THEN
+#ifdef CATCHMENT
+            CALL ncio_write_serial_time (file_hist, varname, itime_in_file, acc_vec, &
+               'hydrounit', 'time', compress)
+#else
+            CALL ncio_write_serial_time (file_hist, varname, itime_in_file, acc_vec, &
+               'element', 'time', compress)
+#endif
+         ELSE
+#ifdef CATCHMENT
+            CALL ncio_write_serial (file_hist, varname, acc_vec, 'hydrounit', compress)
+#else
+            CALL ncio_write_serial (file_hist, varname, acc_vec, 'element', compress)
+#endif
+         ENDIF
+
+         IF (itime_in_file <= 1) THEN
+            CALL ncio_put_attr (file_hist, varname, 'long_name', longname)
+            CALL ncio_put_attr (file_hist, varname, 'units', units)
+            CALL ncio_put_attr (file_hist, varname, 'missing_value', spval)
+         ENDIF
+
+      ENDIF
+
+      IF (allocated(acc_vec)) deallocate (acc_vec)
+
+#ifdef USEMPI
+      CALL mpi_barrier (p_comm_glb, p_err)
+#endif
+
+   END SUBROUTINE aggregate_to_vector_and_write_urb_2d
 
 END MODULE MOD_HistVector
 #endif

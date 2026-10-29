@@ -53,14 +53,14 @@ pub fn standard_file_accepts(file: &str, path: &str, group: &str) -> bool {
 
 pub fn code_defaults() -> Vec<ProcessDefault> {
     let mut defaults = process_type_defaults(
-        include_str!("../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Defs.F90"),
+        include_str!("../../../../vendor/CoLM202X/main/MATERIAL/MOD_MT_Defs.F90"),
         "MOD_Tracer_Defs.F90",
         "tracer_parameter_type",
         "DEF_TRACER",
         "nl_colm_tracer_parameter",
     );
     let methane = include_str!(
-        "../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90"
+        "../../../../vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Const.F90"
     );
     defaults.extend(process_type_defaults(
         methane,
@@ -77,7 +77,7 @@ pub fn code_defaults() -> Vec<ProcessDefault> {
         "nl_colm_methane_parameter",
     ));
     defaults.extend(process_type_defaults(
-        include_str!("../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Particle_Sediment.F90"),
+        include_str!("../../../../vendor/CoLM202X/main/MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90"),
         "MOD_Tracer_Particle_Sediment.F90",
         "sediment_parameter_type",
         "DEF_SEDIMENT",

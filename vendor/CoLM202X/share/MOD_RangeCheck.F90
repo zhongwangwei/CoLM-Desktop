@@ -14,8 +14,8 @@ MODULE MOD_RangeCheck
 !  Created by Shupeng Zhang, May 2023
 !-----------------------------------------------------------------------
 
+#ifdef RangeCheck
    USE MOD_UserDefFun, only: isnan_ud
-   USE MOD_Namelist,   only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    INTERFACE check_block_data
@@ -148,7 +148,7 @@ CONTAINS
             wfmt = "('Check block  data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(str_print,wfmt) varname, gmin, gmax, trim(exception)
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (exception, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
@@ -158,7 +158,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (exception, 256, MPI_CHARACTER, p_address_io(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_io(p_root), &
@@ -167,11 +167,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          IF (len_trim(exception) > 0) THEN
-            CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+            CALL CoLM_stop ()
          ENDIF
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE check_block_data_real8_2d
@@ -272,7 +272,7 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(str_print,wfmt) varname, vmin, vmax, trim(exception)
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (exception, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
@@ -282,7 +282,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (exception, 256, MPI_CHARACTER, p_address_worker(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_worker(p_root), &
@@ -291,11 +291,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          IF (len_trim(exception) > 0) THEN
-            CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+            CALL CoLM_stop ()
          ENDIF
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_1d
@@ -397,7 +397,7 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(str_print,wfmt) varname, vmin, vmax, trim(exception)
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (exception, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
@@ -407,7 +407,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (exception, 256, MPI_CHARACTER, p_address_worker(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_worker(p_root), &
@@ -416,11 +416,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          IF (len_trim(exception) > 0) THEN
-            CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+            CALL CoLM_stop ()
          ENDIF
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_2d
@@ -525,7 +525,7 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(str_print,wfmt) varname, vmin, vmax, trim(exception)
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (exception, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
@@ -535,7 +535,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (exception, 256, MPI_CHARACTER, p_address_worker(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_worker(p_root), &
@@ -544,11 +544,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          IF (len_trim(exception) > 0) THEN
-            CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+            CALL CoLM_stop ()
          ENDIF
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_3d
@@ -655,7 +655,7 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(str_print,wfmt) varname, vmin, vmax, trim(exception)
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (exception, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
@@ -665,7 +665,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (exception, 256, MPI_CHARACTER, p_address_worker(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_worker(p_root), &
@@ -674,11 +674,11 @@ CONTAINS
 
          write(*,'(A)') trim(str_print)
 
-         IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
          IF (len_trim(exception) > 0) THEN
-            CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+            CALL CoLM_stop ()
          ENDIF
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE check_vector_data_real8_4d
@@ -782,11 +782,11 @@ CONTAINS
             wfmt = "('Check vector data:', A25, ' is in (', e20.10, ',', e20.10, ')', A)"
             write(*,wfmt) varname, vmin, vmax, info
 
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if(defined CoLMDEBUG)
             IF (len_trim(info) > 0) THEN
-               CALL CoLM_stop (' ***** ERROR: RangeCheck rejected the values printed above (CoLMDEBUG)')
+               CALL CoLM_stop ()
             ENDIF
-            ENDIF
+#endif
 
          ENDIF
 
@@ -864,7 +864,7 @@ CONTAINS
          IF (p_iam_worker == p_root) THEN
             wfmt = "('Check vector data:', A25, ' is in (', I20, ',', I20, ')')"
             write(str_print,wfmt) varname, vmin, vmax
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             CALL mpi_send (str_print, 256, MPI_CHARACTER, p_address_master, &
                mpi_tag_mesg, p_comm_glb, p_err)
 #endif
@@ -872,7 +872,7 @@ CONTAINS
       ENDIF
 
       IF (p_is_master) THEN
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          CALL mpi_recv (str_print, 256, MPI_CHARACTER, p_address_worker(p_root), &
             mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 #endif
@@ -881,5 +881,6 @@ CONTAINS
 
    END SUBROUTINE check_vector_data_int32_1d
 
+#endif
 
 END MODULE MOD_RangeCheck

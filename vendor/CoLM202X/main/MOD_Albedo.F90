@@ -15,8 +15,10 @@ MODULE MOD_Albedo
 
 ! PRIVATE MEMBER FUNCTIONS:
    PRIVATE :: twostream
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    PRIVATE :: twostream_mod
    PRIVATE :: twostream_wrap
+#endif
 
 
 !-----------------------------------------------------------------------
@@ -78,14 +80,18 @@ CONTAINS
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: tfrz
-   USE MOD_Namelist, only: DEF_USE_SNICAR, DEF_USE_LCT, DEF_USE_PFT, DEF_USE_PC
+   USE MOD_Namelist, only: DEF_USE_SNICAR
    USE MOD_Vars_TimeInvariants, only: patchclass
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
+#endif
    USE MOD_Aerosol, only: AerosolMasses
    USE MOD_SnowSnicar, only: SnowAge_grain
+#ifdef LULC_IGBP_PC
    USE MOD_3DCanopyRadiation, only: ThreeDCanopy_wrap
+#endif
 
    IMPLICIT NONE
 
@@ -244,7 +250,7 @@ CONTAINS
       ssno_lyr(:,:,:) = 0. !set initial snow layer absorption
 
 IF (patchtype == 0) THEN
-   IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       ps = patch_pft_s(ipatch)
       pe = patch_pft_e(ipatch)
       ssun_p(:,:,ps:pe) = 0.
@@ -254,7 +260,7 @@ IF (patchtype == 0) THEN
       WHERE (lai_p(ps:pe)+sai_p(ps:pe) <= 1.e-6) thermk_p(ps:pe) = 1.
       extkb_p(ps:pe)    = 1.
       extkd_p(ps:pe)    = 0.718
-   ENDIF
+#endif
 ENDIF
 
 ! ----------------------------------------------------------------------
@@ -404,13 +410,13 @@ ENDIF
 
          IF (patchtype == 0) THEN  !soil patches
 
-            IF (DEF_USE_LCT) THEN
+#if (defined LULC_USGS || defined LULC_IGBP)
             CALL twostream (chil,rho,tau,green,lai,sai,fwet_snow,&
                             czen,albg,albv,tran,thermk,extkb,extkd,ssun,ssha)
 
             ! 08/31/2023, yuan: to be consistent with PFT and PC
             alb(:,:) = albv(:,:)
-            ENDIF
+#endif
          ELSE  !other patchtypes (/=0)
             CALL twostream (chil,rho,tau,green,lai,sai,fwet_snow,&
                             czen,albg,albv,tran,thermk,extkb,extkd,ssun,ssha)
@@ -423,12 +429,12 @@ ENDIF
 
 
       IF (patchtype == 0) THEN
-         IF (DEF_USE_PFT) THEN
+#ifdef LULC_IGBP_PFT
          CALL twostream_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
          alb(:,:) = albv(:,:)
-         ENDIF
+#endif
 
-         IF (DEF_USE_PC) THEN
+#ifdef LULC_IGBP_PC
          ! Only process nature PFTs using 3D model if set DEF_PC_CROP_SPLIT true
          CALL ThreeDCanopy_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
 
@@ -436,7 +442,7 @@ ENDIF
          CALL twostream_wrap (ipatch, czen, albg, albv, tran, ssun, ssha)
 
          alb(:,:) = albv(:,:)
-         ENDIF
+#endif
       ENDIF
 
       ! treat soil/snow absorption in direct and diffuse respectively
@@ -560,6 +566,7 @@ ENDIF
    real(r8) :: upscat_sno = 0.5   !upscat parameter for snow
    real(r8) :: beta0_sno  = 0.5   !beta0 parameter for snow
    real(r8) :: scat_sno(2)        !snow single scattering albedo
+   real(r8) :: scat_new           !snow-modified single scattering albedo
    data scat_sno(1), scat_sno(2) /0.8, 0.4/   ! 1:vis, 2: nir
 
    integer iw               ! band iterator
@@ -626,9 +633,10 @@ ENDIF
       ! modify scat, upscat and beta0
       ! USE: fwet_snow, snow properties, scatter vis0.8, nir0.4, upscat0.5, beta0.5
       IF ( DEF_VEG_SNOW ) THEN
-         scat   =   (1.-fwet_snow)*scat        + fwet_snow*scat_sno(iw)
-         upscat = ( (1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno ) / scat
-         beta0  = ( (1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno  ) / scat
+         scat_new = (  1.-fwet_snow)*scat        + fwet_snow*scat_sno(iw)
+         upscat   = ( (1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno ) / scat_new
+         beta0    = ( (1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno  ) / scat_new
+         scat     = scat_new
       ENDIF
 
 !-----------------------------------------------------------------------
@@ -780,6 +788,7 @@ ENDIF
    END SUBROUTINE twostream
 
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE twostream_mod ( chil, rho, tau, green, lai, sai, fwet_snow, &
               coszen, albg, albv, tran, thermk, extkb, extkd, ssun, ssha )
 
@@ -892,6 +901,7 @@ ENDIF
    real(r8) :: upscat_sno = 0.5   !upscatter parameter for snow
    real(r8) :: beta0_sno  = 0.5   !beta0 parameter for snow
    real(r8) :: scat_sno(2)        !snow single scattering albedo
+   real(r8) :: scat_new           !snow-modified single scattering albedo
    data scat_sno(1), scat_sno(2) /0.8, 0.4/   ! 1:vis, 2: nir
 
    integer iw                ! band loop index
@@ -982,9 +992,10 @@ ENDIF
       ! modify scat, upscat and beta0
       ! USE: fwet_snow, snow properties, scatter vis0.8, nir0.4, upscat0.5, beta0.5
       IF ( DEF_VEG_SNOW ) THEN
-         scat   =   (1.-fwet_snow)*scat        + fwet_snow*scat_sno(iw)
-         upscat = ( (1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno ) / scat
-         beta0  = ( (1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno  ) / scat
+         scat_new = (  1.-fwet_snow)*scat        + fwet_snow*scat_sno(iw)
+         upscat   = ( (1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno ) / scat_new
+         beta0    = ( (1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno  ) / scat_new
+         scat     = scat_new
       ENDIF
 
 !-----------------------------------------------------------------------
@@ -1164,8 +1175,10 @@ ENDIF
       extkb = extkbd
 
    END SUBROUTINE twostream_mod
+#endif
 
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE twostream_wrap ( ipatch, coszen, albg, &
               albv, tran, ssun, ssha )
 
@@ -1271,6 +1284,7 @@ ENDIF
       deallocate ( albv_p )
 
    END SUBROUTINE twostream_wrap
+#endif
 
 
    SUBROUTINE snowage ( deltim,tg,scv,scvold,sag )

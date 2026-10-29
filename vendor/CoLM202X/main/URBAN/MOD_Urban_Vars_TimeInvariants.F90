@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef URBAN_MODEL
 MODULE MOD_Urban_Vars_TimeInvariants
 
 !-----------------------------------------------------------------------
@@ -222,7 +223,6 @@ CONTAINS
       compress = DEF_REST_CompressLevel
 
       CALL ncio_create_file_vector (file_restart, landurban)
-      CALL ncio_define_dimension_vector (file_restart, landurban, 'urban')
 
       CALL ncio_define_dimension_vector (file_restart, landurban, 'urban')
       CALL ncio_define_dimension_vector (file_restart, landurban, 'numsolar', nr  )
@@ -335,4 +335,5 @@ CONTAINS
    END SUBROUTINE deallocate_UrbanTimeInvariants
 
 END MODULE MOD_Urban_Vars_TimeInvariants
+#endif
 ! ---------- EOP ------------

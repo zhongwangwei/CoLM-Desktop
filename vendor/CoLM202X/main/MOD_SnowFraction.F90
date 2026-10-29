@@ -4,13 +4,14 @@ MODULE MOD_SnowFraction
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_TUNING_SNOW_COVER_EXPONENT
    IMPLICIT NONE
    SAVE
 
 ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: snowfraction
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    PUBLIC :: snowfraction_pftwrap
+#endif
 
 
 !-----------------------------------------------------------------------
@@ -51,6 +52,10 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: fmelt              ! dimensionless melting factor
+   real(r8), parameter :: m = 1.0 ! the value of m used in CLM4.5 is 1.0.
+                                  ! WHILE the value of m given by Niu et al (2007) is 1.6
+                                  ! WHILE Niu (2012) suggested 3.0
+
 !-----------------------------------------------------------------------
       IF(lai+sai > 1e-6) THEN
          ! Fraction of vegetation buried (covered) by snow
@@ -71,12 +76,13 @@ CONTAINS
 ! Fraction of soil covered by snow
       fsno = 0.0
       IF(snowdp > 0.) THEN
-         fmelt = (scv/snowdp/100.) ** DEF_TUNING_SNOW_COVER_EXPONENT
+         fmelt = (scv/snowdp/100.) ** m
          fsno  = tanh(snowdp/(2.5 * zlnd * fmelt))
       ENDIF
 
    END SUBROUTINE snowfraction
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    SUBROUTINE snowfraction_pftwrap (ipatch,zlnd,scv,snowdp,wt,sigf,fsno)
 
 !-----------------------------------------------------------------------
@@ -112,6 +118,10 @@ CONTAINS
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: fmelt              ! dimensionless melting factor
+   real(r8), parameter :: m = 1.0 ! the value of m used in CLM4.5 is 1.0.
+                                  ! WHILE the value of m given by Niu et al (2007) is 1.6
+                                  ! WHILE Niu (2012) suggested 3.0
+
    integer i, p, ps, pe
    real(r8) wt_tmp
 !-----------------------------------------------------------------------
@@ -154,11 +164,12 @@ CONTAINS
       ! Fraction of soil covered by snow
       fsno = 0.0
       IF(snowdp > 0.) THEN
-         fmelt = (scv/snowdp/100.) ** DEF_TUNING_SNOW_COVER_EXPONENT
+         fmelt = (scv/snowdp/100.) ** m
          fsno  = tanh(snowdp/(2.5 * zlnd * fmelt))
       ENDIF
 
    END SUBROUTINE snowfraction_pftwrap
+#endif
 
 END MODULE MOD_SnowFraction
 ! ---------- EOP ------------

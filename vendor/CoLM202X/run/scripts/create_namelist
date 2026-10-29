@@ -106,14 +106,6 @@ CreateNamelist()
       LandMask=""
    fi
 
-   DEF_USE_LCT=${COLM_DEF_USE_LCT:-.true.}
-   DEF_USE_PFT=${COLM_DEF_USE_PFT:-.false.}
-   DEF_USE_PC=${COLM_DEF_USE_PC:-.false.}
-   DEF_USE_BGC=${COLM_DEF_USE_BGC:-.false.}
-   DEF_URBAN_RUN=${COLM_DEF_URBAN_RUN:-.false.}
-   DEF_USE_LULCC=${COLM_DEF_USE_LULCC:-.false.}
-   DEF_USE_Campbell_SOIL_MODEL=${COLM_DEF_USE_Campbell_SOIL_MODEL:-.false.}
-
 cat>${CASEPATH}/${CASENAME}/${NMLNAME}<<EOF
 &nl_colm
 
@@ -146,14 +138,6 @@ cat>${CASEPATH}/${CASENAME}/${NMLNAME}<<EOF
    DEF_dir_output   = '$CASEPATH/'
 
    ! ----- land units and land sets -----
-   DEF_USE_LCT = ${DEF_USE_LCT}
-   DEF_USE_PFT = ${DEF_USE_PFT}
-   DEF_USE_PC = ${DEF_USE_PC}
-   DEF_USE_BGC = ${DEF_USE_BGC}
-   DEF_URBAN_RUN = ${DEF_URBAN_RUN}
-   DEF_USE_LULCC = ${DEF_USE_LULCC}
-   DEF_USE_Campbell_SOIL_MODEL = ${DEF_USE_Campbell_SOIL_MODEL}
-
    ! for GRIDBASED
    DEF_GRIDBASED_lon_res = $reslon
    DEF_GRIDBASED_lat_res = $reslat
@@ -292,14 +276,14 @@ else
       fi
       if grep -q "^${SITENAME}[[:space:]]" "${SITELIST}"; then
          echo "Note: Site name ${SITENAME} is found in the Site list file ${SITELIST}."
-         if ! awk '{
+	 awk '{
               if (NF != 7) {
-                 print "Error: line " NR " has " NF " columns (expected 7): " $0
+                 print "Error: the " NR " line has only " NF " columns, (expected 7): " $0
                  found_error = 1
                            }
-              }
-              END { exit found_error }
-              ' "${SITELIST}"; then
+              }' "${SITELIST}"
+
+         if [ ! -z "$found_error" ]; then
             exit 1
          fi
       else
@@ -659,3 +643,4 @@ else
    fi
 fi
 CreateNamelist $CASEPATH $CASENAME $NMLNAME $startyr $endyr $RAWDATA $RUNTIME $reslon $reslat $Forcing $ISUSESASU $LandMask $EDGES $EDGEN $EDGEW $EDGEE $NX_BLOCK $NY_BLOCK $NGROUP $SITENAME $SITELIST
+

@@ -1,6 +1,7 @@
 #include <define.h>
 
 MODULE MOD_BGC_Vars_1DFluxes
+#ifdef BGC
 !---------------------------------------------------------------------------------------------------------
 ! !DESCRIPTION
 ! Define, allocate, and deallocate biogeochemical flux variables at patch level
@@ -231,6 +232,11 @@ MODULE MOD_BGC_Vars_1DFluxes
    real(r8), allocatable :: fire_mortality_to_cwdn   (:,:)   ! fire mortality-associated plant N loss to coarse woody debris N (gN m-3 s-1)
 
    real(r8), allocatable :: sminn_leached_vr         (:,:)   ! vertical resolved: soil mineral N loss due to leaching (gN m-3 s-1)
+#ifdef MaterialTransport
+   ! NH4-specific leaching, written only by the material-transport build when
+   ! DEF_USE_NH4_LEACHING is on (see MOD_BGC_Soil_BiogeochemNLeaching).
+   real(r8), allocatable :: smin_nh4_leached_vr      (:,:)   ! vertical resolved: soil mineral NH4 loss due to leaching (gN m-3 s-1)
+#endif
    real(r8), allocatable :: smin_no3_leached_vr      (:,:)   ! vertical resolved: soil mineral NO3 loss due to leaching (gN m-3 s-1)
    real(r8), allocatable :: smin_no3_runoff_vr       (:,:)   ! vertical resolved: soil mineral NO3 loss due to runoff (gN m-3 s-1)
    real(r8), allocatable :: net_nmin_vr              (:,:)   ! vertical resolved: net N mineralization (gN m-3 s-1)
@@ -269,6 +275,9 @@ MODULE MOD_BGC_Vars_1DFluxes
    real(r8), allocatable :: soyfixn_to_sminn         (:)     ! soybean N fixation to soil mineral N (gN m-2 s-1)
    real(r8), allocatable :: denit                    (:)     ! total N denitrification (gN m-2 s-1)
    real(r8), allocatable :: sminn_leached            (:)     ! soil mineral N loss due to leaching (gN m-2 s-1)
+#ifdef MaterialTransport
+   real(r8), allocatable :: smin_nh4_leached         (:)     ! soil mineral NH4 loss due to leaching (gN m-2 s-1)
+#endif
    real(r8), allocatable :: f_n2o_nit                (:)     ! flux of N2O from N nitrification (gN m-2 s-1)
    real(r8), allocatable :: smin_no3_leached         (:)     ! soil mineral NO3 loss due to leaching (gN m-2 s-1)
    real(r8), allocatable :: smin_no3_runoff          (:)     ! soil mineral NO3 loss due to runoff (gN m-2 s-1)
@@ -519,6 +528,9 @@ CONTAINS
             allocate (fire_mortality_to_cwdn   (nl_soil,numpatch)); fire_mortality_to_cwdn   (:,:) = spval
 
             allocate (sminn_leached_vr         (nl_soil,numpatch)); sminn_leached_vr         (:,:) = spval
+#ifdef MaterialTransport
+            allocate (smin_nh4_leached_vr      (nl_soil,numpatch)); smin_nh4_leached_vr      (:,:) = spval
+#endif
             allocate (smin_no3_leached_vr      (nl_soil,numpatch)); smin_no3_leached_vr      (:,:) = spval
             allocate (smin_no3_runoff_vr       (nl_soil,numpatch)); smin_no3_runoff_vr       (:,:) = spval
             allocate (net_nmin_vr              (nl_soil,numpatch)); net_nmin_vr              (:,:) = spval
@@ -557,6 +569,9 @@ CONTAINS
             allocate (soyfixn_to_sminn         (numpatch)) ; soyfixn_to_sminn         (:) = spval
             allocate (denit                    (numpatch)) ; denit                    (:) = spval
             allocate (sminn_leached            (numpatch)) ; sminn_leached            (:) = spval
+#ifdef MaterialTransport
+            allocate (smin_nh4_leached         (numpatch)) ; smin_nh4_leached         (:) = spval
+#endif
             allocate (f_n2o_nit                (numpatch)) ; f_n2o_nit                (:) = spval
             allocate (smin_no3_leached         (numpatch)) ; smin_no3_leached         (:) = spval
             allocate (smin_no3_runoff          (numpatch)) ; smin_no3_runoff          (:) = spval
@@ -794,6 +809,9 @@ CONTAINS
             deallocate (fire_mortality_to_cwdn   )
 
             deallocate (sminn_leached_vr         )
+#ifdef MaterialTransport
+            deallocate (smin_nh4_leached_vr      )
+#endif
             deallocate (smin_no3_leached_vr      )
             deallocate (smin_no3_runoff_vr       )
             deallocate (net_nmin_vr              )
@@ -832,6 +850,9 @@ CONTAINS
             deallocate (soyfixn_to_sminn         )
             deallocate (denit                    )
             deallocate (sminn_leached            )
+#ifdef MaterialTransport
+            deallocate (smin_nh4_leached         )
+#endif
             deallocate (f_n2o_nit                )
             deallocate (smin_no3_leached         )
             deallocate (smin_no3_runoff          )
@@ -1074,6 +1095,9 @@ SUBROUTINE set_1D_BGCFluxes(Values, Nan)
             fire_mortality_to_cwdn   (:,:)   = Values
 
             sminn_leached_vr         (:,:)   = Values
+#ifdef MaterialTransport
+            smin_nh4_leached_vr      (:,:)   = Values
+#endif
             smin_no3_leached_vr      (:,:)   = Values
             smin_no3_runoff_vr       (:,:)   = Values
             net_nmin_vr              (:,:)   = Values
@@ -1112,6 +1136,9 @@ SUBROUTINE set_1D_BGCFluxes(Values, Nan)
             soyfixn_to_sminn         (:)     = Values
             denit                    (:)     = Values
             sminn_leached            (:)     = Values
+#ifdef MaterialTransport
+            smin_nh4_leached         (:)     = Values
+#endif
             f_n2o_nit                (:)     = Values
             smin_no3_leached         (:)     = Values
             smin_no3_runoff          (:)     = Values
@@ -1120,6 +1147,7 @@ SUBROUTINE set_1D_BGCFluxes(Values, Nan)
 
    END SUBROUTINE set_1D_BGCFluxes
 
+#endif
 END MODULE MOD_BGC_Vars_1DFluxes
 ! ---------- EOP ------------
 

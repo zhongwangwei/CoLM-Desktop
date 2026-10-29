@@ -12,7 +12,6 @@ SUBROUTINE Aggregation_SoilBrightness ( &
 !  Shupeng Zhang, 01/2022: porting codes to MPI parallel version.
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -22,10 +21,14 @@ SUBROUTINE Aggregation_SoilBrightness ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
    USE MOD_Vars_Global, only: spval
 
    IMPLICIT NONE
@@ -57,7 +60,9 @@ SUBROUTINE Aggregation_SoilBrightness ( &
    integer :: wmo_src
    real(r8), allocatable :: soil_one(:)
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
+#endif
 
    ! ----------------------------------------------------------------------
    ! The soil color and reflectance is from the work:
@@ -89,7 +94,7 @@ SUBROUTINE Aggregation_SoilBrightness ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A29)') 'Aggregate Soil Brightness ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -99,7 +104,7 @@ SUBROUTINE Aggregation_SoilBrightness ( &
 ! aggregate the soil parameters from the resolution of raw data to modelling resolution
 ! -------------------------------------------------------------------------------------
 
-      lndname = trim(dir_rawdata)//'/soil_brightness.nc'
+      lndname = trim(dir_rawdata)//trim(DEF_rawdata%soil_albedo%dir)//'/soil_brightness.nc'
 
       IF (p_is_io) THEN
 
@@ -327,12 +332,12 @@ SUBROUTINE Aggregation_SoilBrightness ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('s_v_alb ', soil_s_v_alb)
       CALL check_vector_data ('d_v_alb ', soil_d_v_alb)
       CALL check_vector_data ('s_n_alb ', soil_s_n_alb)
       CALL check_vector_data ('d_n_alb ', soil_d_n_alb)
-      ENDIF
+#endif
 
       ! (1) Write-out the albedo of visible of the saturated soil
       lndname = trim(landdir)//'/soil_s_v_alb_patches.nc'
@@ -341,12 +346,12 @@ SUBROUTINE Aggregation_SoilBrightness ( &
       CALL ncio_write_vector (lndname, 'soil_s_v_alb', 'patch', &
          landpatch, soil_s_v_alb, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_brightness_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_s_v_alb, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'soil_s_v_alb', compress = 1, write_mode = 'one', create_mode=.true.)
-      ENDIF
+         spval, lndname, 'soil_s_v_alb', compress = 6, write_mode = 'one', create_mode=.true.)
+#endif
 
       ! (2) Write-out the albedo of visible of the dry soil
       lndname = trim(landdir)//'/soil_d_v_alb_patches.nc'
@@ -355,12 +360,12 @@ SUBROUTINE Aggregation_SoilBrightness ( &
       CALL ncio_write_vector (lndname, 'soil_d_v_alb', 'patch', &
          landpatch, soil_d_v_alb, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_brightness_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_d_v_alb, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'soil_d_v_alb', compress = 1, write_mode = 'one')
-      ENDIF
+         spval, lndname, 'soil_d_v_alb', compress = 6, write_mode = 'one')
+#endif
 
       ! (3) Write-out the albedo of near infrared of the saturated soil
       lndname = trim(landdir)//'/soil_s_n_alb_patches.nc'
@@ -369,12 +374,12 @@ SUBROUTINE Aggregation_SoilBrightness ( &
       CALL ncio_write_vector (lndname, 'soil_s_n_alb', 'patch', &
          landpatch, soil_s_n_alb, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_brightness_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_s_n_alb, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'soil_s_n_alb', compress = 1, write_mode = 'one')
-      ENDIF
+         spval, lndname, 'soil_s_n_alb', compress = 6, write_mode = 'one')
+#endif
 
       ! (4) Write-out the albedo of near infrared of the dry soil
       lndname = trim(landdir)//'/soil_d_n_alb_patches.nc'
@@ -383,12 +388,12 @@ SUBROUTINE Aggregation_SoilBrightness ( &
       CALL ncio_write_vector (lndname, 'soil_d_n_alb', 'patch', &
          landpatch, soil_d_n_alb, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_brightness_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_d_n_alb, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'soil_d_n_alb', compress = 1, write_mode = 'one')
-      ENDIF
+         spval, lndname, 'soil_d_n_alb', compress = 6, write_mode = 'one')
+#endif
 
       ! Deallocate the allocatable array
       ! --------------------------------

@@ -1,0 +1,199 @@
+diff --color -ru a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,7 @@
+ INCLUDE_DIR = -Iinclude -I.bld/ -I${NETCDF_INC}
+ VPATH = include : share : mksrfdata : mkinidata \
+ 	: main : main/HYDRO : main/BGC : main/URBAN : main/LULCC : main/DA \
+-	: main/ParaOpt : extends/CaMa/src : postprocess : .bld
++	: main/ParaOpt : extends/CaMa/src : extends/interception : postprocess : .bld
+ 
+ # ********** Targets ALL **********
+ .PHONY: all
+@@ -315,6 +315,7 @@
+ 				MOD_SimpleOcean.o                         \
+ 				MOD_GroundFluxes.o                        \
+ 				MOD_GroundTemperature.o                   \
++				MOD_LeafInterception_Extended.o           \
+ 				MOD_LeafInterception.o                    \
+ 				MOD_NetSolar.o                            \
+ 				MOD_NetSolar_Hyper.o                      \
+@@ -367,6 +368,7 @@
+ 
+ MOD_Urban_Thermal.o: MOD_Urban_Flux.o
+ MOD_LeafTemperature.o MOD_LeafTemperaturePC.o: MOD_LeafInterception.o
++MOD_LeafInterception.o: MOD_LeafInterception_Extended.o
+ MOD_Grid_RiverLakeSediment.o: MOD_Grid_RiverLakeNetwork.o MOD_Vector_ReadWrite.o
+ MOD_Grid_RiverLakeTimeVars.o: MOD_Grid_RiverLakeSediment.o
+ MOD_Grid_RiverLakeFlow.o: MOD_Grid_RiverLakeHist.o
+diff --color -ru a/main/MOD_LeafInterception.F90 b/main/MOD_LeafInterception.F90
+--- a/main/MOD_LeafInterception.F90
++++ b/main/MOD_LeafInterception.F90
+@@ -31,6 +31,7 @@
+    USE MOD_Precision
+    USE MOD_Const_Physical, only: tfrz, denh2o, denice, cpliq, cpice, hfus
+    USE MOD_Namelist, only: DEF_Interception_scheme, DEF_VEG_SNOW
++   USE MOD_LeafInterception_Extended
+ 
+    IMPLICIT NONE
+ 
+@@ -576,8 +577,49 @@
+                                              bifall,patchclass,.false.,ncd,ncw,bcw,htop,&
+                                              ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
+                                              pg_snow,qintr,qintr_rain,qintr_snow)
++      ELSEIF (DEF_Interception_scheme==2) THEN
++         CALL LEAF_interception_CLM4 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF (DEF_Interception_scheme==3) THEN
++         CALL LEAF_interception_CLM5(deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF (DEF_Interception_scheme==4) THEN
++         CALL LEAF_interception_NoahMP (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF  (DEF_Interception_scheme==5) THEN
++         CALL LEAF_interception_matsiro (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF  (DEF_Interception_scheme==6) THEN
++         CALL LEAF_interception_vic (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF  (DEF_Interception_scheme==7) THEN
++         CALL LEAF_interception_JULES (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
++
++      ELSEIF  (DEF_Interception_scheme==9) THEN
++         CALL LEAF_interception_colm202x (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tair,tleaf,&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew,ldew_rain,ldew_snow,z0m,hu,pg_rain,&
++                                             pg_snow,qintr,qintr_rain,qintr_snow)
+       ELSE
+-         write(6,*) 'LEAF_interception_wrap requires scheme 1 or 8'
++         write(6,*) 'LEAF_interception_wrap requires scheme 1-9'
+          CALL abort
+       ENDIF
+ 
+@@ -671,8 +713,71 @@
+             pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
+             pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
+          ENDDO
++      ELSEIF (DEF_Interception_scheme==2) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_clm4 (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==3) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_clm5 (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==4) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_NoahMP (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==5) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_MATSIRO (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==6) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_VIC (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==7) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_JULES (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
++      ELSEIF (DEF_Interception_scheme==9) THEN
++         DO i = ps, pe
++            p = pftclass(i)
++            CALL LEAF_interception_CoLM202x (deltim,dewmx,forc_us,forc_vs,chil_p(p),sigf_p(i),lai_p(i),sai_p(i),forc_t,tleaf_p(i),&
++                                             prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler_,&
++                                             ldew_p(i),ldew_rain_p(i),ldew_snow_p(i),z0m_p(i),hu,pg_rain,pg_snow,qintr_p(i),qintr_rain_p(i),qintr_snow_p(i))
++            pg_rain_tmp = pg_rain_tmp + pg_rain*pftfrac(i)
++            pg_snow_tmp = pg_snow_tmp + pg_snow*pftfrac(i)
++         ENDDO
+       ELSE
+-         write(6,*) 'LEAF_interception_pftwrap requires scheme 1 or 8'
++         write(6,*) 'LEAF_interception_pftwrap requires scheme 1-9'
+          CALL abort
+       ENDIF
+ 
+diff --color -ru a/main/MOD_LeafTemperature.F90 b/main/MOD_LeafTemperature.F90
+--- a/main/MOD_LeafTemperature.F90
++++ b/main/MOD_LeafTemperature.F90
+@@ -1391,7 +1391,7 @@
+             ldew = ldew_rain + ldew_snow
+          ENDIF
+ 
+-      ELSEIF (DEF_Interception_scheme .eq. 8) THEN !CoLM202X
++      ELSEIF (DEF_Interception_scheme .eq. 8 .or. DEF_Interception_scheme .eq. 9) THEN !CoLM2024, CoLM202X
+          ldew = max(0., ldew-evplwet*deltim)
+ 
+          ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+diff --color -ru a/main/MOD_LeafTemperaturePC.F90 b/main/MOD_LeafTemperaturePC.F90
+--- a/main/MOD_LeafTemperaturePC.F90
++++ b/main/MOD_LeafTemperaturePC.F90
+@@ -1938,7 +1938,7 @@
+                   ldew_snow(i) = max(0., ldew(i)-evplwet(i)*deltim)
+                   ldew (i)     = ldew_snow(i)
+                ENDIF
+-            ELSEIF (DEF_Interception_scheme .eq. 7) THEN !JULES
++            ELSEIF (DEF_Interception_scheme .eq. 7 .or. DEF_Interception_scheme .eq. 9) THEN !JULES, CoLM202x
+                IF (ldew_rain(i) .gt. evplwet(i)*deltim) THEN
+                   ldew_rain(i) = ldew_rain(i)-evplwet(i)*deltim
+                   ldew_snow(i) = ldew_snow(i)
+diff --color -ru a/share/MOD_Namelist.F90 b/share/MOD_Namelist.F90
+--- a/share/MOD_Namelist.F90
++++ b/share/MOD_Namelist.F90
+@@ -336,7 +336,7 @@
+ ! ----- Part 11: parameterization schemes -----
+ ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 
+-   integer :: DEF_Interception_scheme = 1
++   integer :: DEF_Interception_scheme = 1  !1:CoLM2014; 2:CLM4.5; 3:CLM5; 4:Noah-MP; 5:MATSIRO; 6:VIC; 7:JULES; 8:CoLM2024; 9:CoLM202x
+ 
+    ! ----- SOIL parameters and supercool water setting ------
+    integer :: DEF_THERMAL_CONDUCTIVITY_SCHEME = 4  ! Options for soil thermal conductivity schemes

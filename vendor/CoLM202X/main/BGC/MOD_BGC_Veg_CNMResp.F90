@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Veg_CNMResp
 
 !-----------------------------------------------------------------------------------------------------
@@ -115,3 +116,4 @@ CONTAINS
    END SUBROUTINE CNMResp
 
 END MODULE MOD_BGC_Veg_CNMResp
+#endif

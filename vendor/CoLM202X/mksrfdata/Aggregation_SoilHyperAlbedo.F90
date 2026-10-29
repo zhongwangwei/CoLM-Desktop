@@ -12,7 +12,6 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
 !  Shupeng Zhang, 01/2022: porting codes to MPI parallel version.
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -21,10 +20,14 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
    USE MOD_LandPatch
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
 
@@ -50,7 +53,9 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
    integer :: ipatch, iblkme, iblk, jblk, ix, iy, wl
    real(r8), allocatable :: soil_one(:)
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
+#endif
 
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/HyperAlbedo/' // trim(cyear)
@@ -60,7 +65,7 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
 #endif
    IF (p_is_master) THEN
       write(*,'(/, A29)') 'Aggregate Hyper Albedo ...'
-      CALL make_directory(trim(adjustl(landdir)))
+      CALL system('mkdir -p ' // trim(adjustl(landdir)))
    ENDIF
 #ifdef USEMPI
    CALL mpi_barrier (p_comm_glb, p_err)
@@ -130,9 +135,9 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('soil_hyper_alb ', soil_hyper_alb)
-      ENDIF
+#endif
 
       ! Write-out the hyper spectral soil albedo
       lndname = trim(landdir)//'/soil_hyper_alb_'//trim(wavelength)//'nm_patches.nc'
@@ -141,12 +146,12 @@ SUBROUTINE Aggregation_SoilHyperAlbedo ( &
       CALL ncio_write_vector (lndname, 'soil_hyper_alb', 'patch', &
          landpatch, soil_hyper_alb, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/soil_hyper_alb_' // trim(wavelength) // 'nm_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (soil_hyper_alb, landpatch%settyp, typpatch, m_patch2diag, &
          -1.0e36_r8, lndname, 'soil_hyper_alb', compress = 1, write_mode = 'one')
-      ENDIF
+#endif
 
    END DO   ! loop over "wl"
 

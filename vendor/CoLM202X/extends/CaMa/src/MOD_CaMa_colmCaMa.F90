@@ -3,7 +3,6 @@ MODULE MOD_CaMa_colmCaMa
 #if defined(CaMa_Flood) && (defined(GridRiverLakeFlow) || defined(CatchLateralFlow))
 #error "CaMa_Flood cannot run alongside another routing solver; choose one routing scheme"
 #endif
-   USE MOD_Filesystem, ONLY: make_directory
 #if(defined CaMa_Flood)
 !DESCRIPTION
 !===========
@@ -160,7 +159,7 @@ CONTAINS
             ENDIF
          ENDIF
       
-         CALL make_directory(trim(DEF_dir_restart)//'/CaMa')
+         CALL system('mkdir -p ' // trim(DEF_dir_restart)//'/CaMa')
 
 
          !----------------------- Dummy argument --------------------------------
@@ -700,7 +699,7 @@ CONTAINS
       write(cyear,'(i4.4)') lc_year
       write(cdate,'(i4.4,"-",i3.3,"-",i5.5)') idate(1), idate(2), idate(3)
       CRESTDIR =    trim(DEF_dir_restart)// '/CaMa'//'/'//trim(cdate)//'/'
-      CALL make_directory(trim(CRESTDIR))
+      CALL system('mkdir -p ' // trim(CRESTDIR))
       CALL CMF_RESTART_WRITE()
       IF (LSEDIMENT) THEN
          CALL CMF_SED_RESTART_WRITE()

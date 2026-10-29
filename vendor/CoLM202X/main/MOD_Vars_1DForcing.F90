@@ -63,7 +63,6 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Mesh
    USE MOD_LandPatch
-   USE MOD_Vars_Global, only: spval
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
@@ -95,12 +94,7 @@ CONTAINS
             allocate (forc_hgt_t  (numpatch) ) ! observational height of temperature [m]
             allocate (forc_hgt_q  (numpatch) ) ! observational height of humidity [m]
             allocate (forc_rhoair (numpatch) ) ! air density [kg/m3]
-            allocate (forc_ozone  (numpatch) ) ! ozone concentration [ppbv]
-            ! FIX upstream-bugs #70: without DEF_USE_OZONEDATA, forc_ozone is assigned only
-            ! by the first CalcOzoneStress call of a patch, but acc1d(forc_ozone, a_ozone)
-            ! runs for every patch every step. Start from spval so acc1d skips patches
-            ! that never ran LeafTemperature instead of accumulating uninitialized memory.
-            forc_ozone(:) = spval
+            allocate (forc_ozone  (numpatch) ) ! air density [kg/m3]
 
             allocate (forc_hpbl   (numpatch) ) ! atmospheric boundary layer height [m]
 
@@ -109,12 +103,6 @@ CONTAINS
             ENDIF
 
             allocate (forc_aerdep(14,numpatch) ) ! atmospheric aerosol deposition data [kg/m/s]
-
-! ==== FIX: forc_rain/forc_snow are written only by CoLMMAIN per patch; patches masked by
-! ==== missing forcing (forcmask_pch) never run it, so accumulate_fluxes summed
-! ==== uninitialised memory into a_rain/a_snow (upstream-bugs #47). Start them at 0.
-            forc_rain(:) = 0._r8
-            forc_snow(:) = 0._r8
 
          ENDIF
 

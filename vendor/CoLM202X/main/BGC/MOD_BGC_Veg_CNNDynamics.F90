@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Veg_CNNDynamics
 
 !---------------------------------------------------------------------------------------------------------
@@ -189,3 +190,4 @@ CONTAINS
 #endif
 
 END MODULE MOD_BGC_Veg_CNNDynamics
+#endif

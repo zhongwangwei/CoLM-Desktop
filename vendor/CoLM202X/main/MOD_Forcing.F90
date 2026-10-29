@@ -178,12 +178,8 @@ CONTAINS
          ! allocate memory for forcing data
          CALL allocate_block_data (gforc, metdata)  ! forcing data
          CALL allocate_block_data (gforc, avgcos )  ! time-average of cos(zenith)
-#ifdef SinglePoint
-         IF (DEF_URBAN_RUN) THEN
          CALL allocate_block_data (gforc, rainf)
          CALL allocate_block_data (gforc, snowf)
-         ENDIF
-#endif
 
       ENDIF
 
@@ -295,25 +291,23 @@ CONTAINS
 
          filename = trim(dir_forcing)//trim(fprefix(1))
 
-IF ((.not. DEF_URBAN_RUN)) THEN
          IF (ncio_var_exist(filename,'reference_height_v')) THEN
             CALL ncio_read_serial (filename, 'reference_height_v', Height_V)
+         ELSE IF (ncio_var_exist(filename,'measurement_height_above_ground')) THEN
+            CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_V)
          ENDIF
 
          IF (ncio_var_exist(filename,'reference_height_t')) THEN
             CALL ncio_read_serial (filename, 'reference_height_t', Height_T)
+         ELSE IF (ncio_var_exist(filename,'measurement_height_above_ground')) THEN
+            CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_T)
          ENDIF
 
          IF (ncio_var_exist(filename,'reference_height_q')) THEN
             CALL ncio_read_serial (filename, 'reference_height_q', Height_Q)
-         ENDIF
-ELSE
-         IF (ncio_var_exist(filename,'measurement_height_above_ground')) THEN
-            CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_V)
-            CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_T)
+         ELSE IF (ncio_var_exist(filename,'measurement_height_above_ground')) THEN
             CALL ncio_read_serial (filename, 'measurement_height_above_ground', Height_Q)
          ENDIF
-ENDIF
 
       ENDIF
 
@@ -986,7 +980,7 @@ ENDIF
          ENDIF
       ENDIF
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -1011,7 +1005,7 @@ ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
-      ENDIF
+#endif
 
    END SUBROUTINE read_forcing
 
@@ -1028,9 +1022,6 @@ ENDIF
    SUBROUTINE metreadLBUB (idate, dir_forcing, is_spinup)
 
    USE MOD_UserSpecifiedForcing
-#ifdef CaMa_Flood
-   USE YOS_CMF_INPUT, only: CSETFILE
-#endif
    USE MOD_Namelist
    USE MOD_Block
    USE MOD_DataType
@@ -1072,10 +1063,7 @@ ENDIF
                IF (forcing_read_ahead) THEN
                   metdata%blk(gblock%xblkme(1),gblock%yblkme(1))%val = forc_disk(time_i,ivar)
                ELSE
-IF ((.not. DEF_URBAN_RUN)) THEN
-                  CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
-ELSE
-                  IF (trim(vname(ivar)) == 'Rainf') THEN
+                  IF (trim(vname(ivar))=='Rainf' .and. ncio_var_exist(filename,'Snowf') ) THEN
                      CALL ncio_read_site_time (filename, 'Rainf', time_i, rainf)
                      CALL ncio_read_site_time (filename, 'Snowf', time_i, snowf)
 
@@ -1089,7 +1077,6 @@ ELSE
                   ELSE
                      CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
                   ENDIF
-ENDIF
                ENDIF
             ELSE
                CALL ncio_read_block_time (filename, vname(ivar), gforc, time_i, metdata)
@@ -1121,10 +1108,7 @@ ENDIF
                IF (forcing_read_ahead) THEN
                   metdata%blk(gblock%xblkme(1),gblock%yblkme(1))%val = forc_disk(time_i,ivar)
                ELSE
-IF ((.not. DEF_URBAN_RUN)) THEN
-                  CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
-ELSE
-                  IF (trim(vname(ivar)) == 'Rainf') THEN
+                  IF (trim(vname(ivar))=='Rainf' .and. ncio_var_exist(filename,'Snowf')) THEN
                      CALL ncio_read_site_time (filename, 'Rainf', time_i, rainf)
                      CALL ncio_read_site_time (filename, 'Snowf', time_i, snowf)
 
@@ -1138,7 +1122,6 @@ ELSE
                   ELSE
                      CALL ncio_read_site_time (filename, vname(ivar), time_i, metdata)
                   ENDIF
-ENDIF
                ENDIF
             ELSE
                CALL ncio_read_block_time (filename, vname(ivar), gforc, time_i, metdata)
@@ -1148,15 +1131,7 @@ ENDIF
 
             ! calculate time average coszen, for shortwave radiation
             IF (ivar == 7) THEN
-#ifdef CaMa_Flood
-               IF(CSETFILE=='NONE')THEN
-                  CALL calavgcos((/tstamp_LB(7)%year,tstamp_LB(7)%day,tstamp_LB(7)%sec/))
-               ELSE
-                  CALL calavgcos(idate)
-               ENDIF
-#else
                CALL calavgcos(idate)
-#endif
             ENDIF
          ENDIF
 
@@ -1335,17 +1310,10 @@ ENDIF
 
          allocate (forc_disk (size(forctime),NVAR))
 
+         filename = trim(dir_forcing)//trim(metfilename(-1,-1,-1,-1))
          DO ivar = 1, NVAR
             IF (trim(vname(ivar)) /= 'NULL') THEN
-               ! POINT 的边界层高度可以来自另一份、但时间轴完全相同的站点
-               ! 文件。每个变量都按自己的 fprefix 求文件名；原先在循环外用
-               ! var_i=-1 固定成主强迫场，read-ahead 会错误地去主文件找 blh。
-               filename = trim(dir_forcing)//trim(metfilename(-1,-1,-1,ivar))
-IF ((.not. DEF_URBAN_RUN)) THEN
-               CALL ncio_read_period_serial (filename, vname(ivar), its, ite, metcache)
-               forc_disk(:,ivar) = metcache(1,1,:)
-ELSE
-               IF (trim(vname(ivar)) == 'Rainf') THEN
+               IF (trim(vname(ivar))=='Rainf' .and. ncio_var_exist(filename,'Snowf')) THEN
                   CALL ncio_read_period_serial (filename, 'Rainf', its, ite, metcache)
                   forc_disk(:,ivar) = metcache(1,1,:)
 
@@ -1355,7 +1323,6 @@ ELSE
                   CALL ncio_read_period_serial (filename, vname(ivar), its, ite, metcache)
                   forc_disk(:,ivar) = metcache(1,1,:)
                ENDIF
-ENDIF
             ENDIF
          ENDDO
 

@@ -375,7 +375,6 @@ CONTAINS
    USE MOD_SoilThermalParameters
    USE MOD_Utils
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 !-------------------------- Dummy Arguments ----------------------------
    integer, intent(in) :: patchtype    ! land patch type (4=deep lake, 5=shallow lake)
@@ -1305,7 +1304,7 @@ CONTAINS
       ENDIF
 
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       ! sum energy content and total energy into lake for energy check. any errors will be from the
       !     tridiagonal solution.
       esum1 = 0.0
@@ -1320,7 +1319,7 @@ CONTAINS
          write(6,*)'energy conservation error in LAND WATER COLUMN during tridiagonal solution,', &
                    'error (W/m^2):', errsoi, fgrnd
       ENDIF
-      ENDIF
+#endif
 
 
 !------------------------------------------------------------
@@ -1416,7 +1415,7 @@ CONTAINS
          ENDDO
       ENDIF
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       ! second energy check and water check. now check energy balance before and after phase
       ! change, considering the possibility of changed heat capacity during phase change, by
       ! using initial heat capacity in the first step, final heat capacity in the second step,
@@ -1437,7 +1436,7 @@ CONTAINS
       write(6,*) 'energy conservation error in LAND WATER COLUMN during phase change, error (W/m^2):', errsoi
       ENDIF
 
-      ENDIF
+#endif
 
 !------------------------------------------------------------
 !*[5] Convective mixing: make sure fracice*dz is conserved, heat content c*dz*T is conserved, and
@@ -2081,9 +2080,7 @@ CONTAINS
 
    SUBROUTINE adjust_lake_layer (nl_lake, dz_lake, t_lake, lake_icefrac)
 
-   USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    USE MOD_Const_Physical
-   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
 
    integer,  intent(in)    :: nl_lake
@@ -2100,17 +2097,7 @@ CONTAINS
    real(r8) :: lake_icefrac_new (nl_lake)
    real(r8), parameter :: dzlak(10) = (/0.1, 1., 2., 3., 4., 5., 7., 7., 10.45, 10.45/)  ! m
 
-      IF (any(.not. ieee_is_finite(dz_lake))) THEN
-         CALL CoLM_stop ('Lake layer thickness must be finite')
-      ENDIF
-
-      IF (any(dz_lake < 0._r8)) THEN
-         CALL CoLM_stop ('Lake layer thickness must be non-negative')
-      ENDIF
-
       wdsrfm = sum(dz_lake)
-
-      IF (wdsrfm <= 0._r8) RETURN
 
       IF(wdsrfm > 1.)THEN
          depthratio = wdsrfm / sum(dzlak(1:nl_lake))
@@ -2132,8 +2119,7 @@ CONTAINS
          wliqsum = 0.
 
          resi = dz_lake_new(i)
-         ! olp=min(resi,resj) exhausts resi or advances j, so exact zero is the loop bound.
-         DO WHILE (resi > 0._r8)
+         DO WHILE (resi > 1.e-8)
 
             olp = min(resi, resj)
             ticesum = ticesum + olp * lake_icefrac(j) * t_lake(j)

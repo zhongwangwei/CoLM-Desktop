@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Soil_BiogeochemDecomp
 
 !-----------------------------------------------------------------------------------------------------------
@@ -118,3 +119,4 @@ CONTAINS
    END SUBROUTINE SoilBiogeochemDecomp
 
 END MODULE MOD_BGC_Soil_BiogeochemDecomp
+#endif

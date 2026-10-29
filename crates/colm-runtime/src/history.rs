@@ -404,16 +404,26 @@ pub fn bgc_history_variables(switches: colm_core::bgc_driver::BgcSwitches) -> Ve
     let mut names: Vec<&'static str> = Vec::new();
     for var in colm_hist::generated::VARS {
         let wanted = match var.runtime {
+            None if !var.macros.is_empty() => true, // 编译期 BGC 宏下的写出点
             Some("DEF_USE_BGC") => true,
             Some("(DEF_USE_BGC) .and. (DEF_USE_NITRIF)") => nitrif,
+            // 上游改回编译期 BGC 后，这两个的运行时条件只剩 DEF_USE_NITRIF。
+            Some("DEF_USE_NITRIF") => nitrif,
             Some("(DEF_USE_BGC) .and. (DEF_USE_DiagMatrix)") => diag_matrix,
+            Some("DEF_USE_DiagMatrix") => diag_matrix,
             Some("(DEF_USE_BGC) .and. (DEF_USE_FIRE)") => switches.fire,
             Some("(DEF_USE_BGC) .and. (DEF_USE_IRRIGATION)") => switches.irrigation,
             _ => false,
         };
+        // 上游 2026-10-29 把 BGC 改回编译期宏：BGC 变量挂在 `#ifdef BGC` 下，
         // `#ifdef CROP` 的一批（64 个）只在 CROP 内核里存在。
-        let compiled =
-            var.macros.is_empty() || (crop && var.macros == [colm_hist::Cond::AnyOf(&["CROP"])]);
+        let compiled = var.macros.iter().all(|c| match c {
+            colm_hist::Cond::AnyOf(v) => {
+                v.iter().all(|m| *m == "BGC" || *m == "LULC_IGBP_PFT" || *m == "LULC_IGBP_PC")
+                    || (crop && v.iter().all(|m| *m == "CROP"))
+            }
+            _ => false,
+        });
         // `manunitro` 声明默认为关，只有 `DEF_USE_FERT` 时 `sync_hist_vars` 才把它同步成
         // `DEF_HIST_vars_out_default`（`MOD_Namelist.F90:3315-3326`）；`fertnitro_*` 声明默认即为开。
         let enabled = var.name != "manunitro" || switches.fert;

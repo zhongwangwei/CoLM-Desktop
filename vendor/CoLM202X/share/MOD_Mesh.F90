@@ -124,11 +124,7 @@ CONTAINS
    IMPLICIT NONE
 
    ! Local Variables
-#if defined (UNSTRUCTURED) || defined (CATCHMENT)
-   type(block_data_int64_2d) :: datamesh
-#else
    type(block_data_int32_2d) :: datamesh
-#endif
 
    integer  :: nelm, ie, je, dsp
    integer  :: iblkme, iblk, jblk, xloc, yloc, xg, yg, ixloc, iyloc
@@ -147,8 +143,7 @@ CONTAINS
    integer*8 :: elmid
    integer*8, allocatable :: elist(:), elist2(:,:), sbuf64(:), elist_recv(:)
 
-   integer, allocatable :: iaddr(:), order(:)
-   integer*8, allocatable :: elmindx(:)
+   integer, allocatable :: iaddr(:), elmindx  (:), order(:)
    integer, allocatable :: xlist(:), ylist    (:), npxl_(:), xlist_recv(:), ylist_recv(:), sbuf(:)
    logical, allocatable :: msk  (:), work_done(:)
 
@@ -171,7 +166,7 @@ CONTAINS
 #endif
 
 #ifdef CATCHMENT
-      CALL catchment_data_read (DEF_CatchmentMesh_data, 'icatchment2d', gridmesh, datamesh, spv = -1_8)
+      CALL catchment_data_read (DEF_CatchmentMesh_data, 'icatchment2d', gridmesh, datamesh, spv = -1)
 #endif
 
 #ifdef UNSTRUCTURED
@@ -232,7 +227,7 @@ CONTAINS
                ENDDO
             ENDDO
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             DO iworker = 0, p_np_worker-1
                IF (nelm_worker(iworker) > 0) THEN
                   idest = p_address_worker(iworker)
@@ -248,7 +243,7 @@ CONTAINS
             nelm_worker(:) = 0
          ENDDO
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          DO iworker = 0, p_np_worker-1
             idest = p_address_worker(iworker)
             ! send(02)
@@ -266,7 +261,7 @@ CONTAINS
 
       ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       IF (p_is_worker) THEN
          nelm = 0
          allocate(work_done(0:p_np_io-1))
@@ -393,7 +388,7 @@ CONTAINS
                ENDDO
             ENDDO
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             allocate (sbuf (nxp*nyp))
             allocate (ipt2 (nxp,nyp))
 
@@ -484,7 +479,7 @@ CONTAINS
 
          ENDDO
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          DO iworker = 0, p_np_worker-1
             idest = p_address_worker(iworker)
             ! send(07)
@@ -496,7 +491,7 @@ CONTAINS
 
       ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       IF (p_is_worker) THEN
 
          allocate(work_done(0:p_np_io-1))
@@ -620,7 +615,7 @@ CONTAINS
          deallocate (npxl_blk)
       ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       IF (.not. p_is_worker) THEN
          allocate (nelm_blk (gblock%nxblk,gblock%nyblk))
          nelm_blk(:,:) = 0
@@ -647,11 +642,7 @@ CONTAINS
                      jblk_p = jblk - 1
                   ENDIF
 
-#ifdef FLAT_SPMD
-                  IF (gblock%pio(iblk_p,jblk_p) >= 0) THEN
-#else
                   IF (gblock%pio(iblk_p,jblk_p) == p_iam_glb) THEN
-#endif
                      blkdsp(iblk,jblk) = blkdsp(iblk_p,jblk_p) + nelm_blk(iblk_p,jblk_p)
                   ELSE
                      blkdsp(iblk,jblk) = blkdsp(iblk_p,jblk_p)
@@ -662,7 +653,7 @@ CONTAINS
 
       ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       IF (p_is_worker) THEN
          DO iblk = 1, gblock%nxblk
             DO jblk = 1, gblock%nyblk
@@ -875,24 +866,15 @@ CONTAINS
       ENDIF
 
       ! Step 5: IF MPI is used, scatter elms from IO to workers.
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       CALL scatter_mesh_from_io_to_worker ()
-#endif
-
-#ifdef FLAT_SPMD
-      CALL mesh_partition_spmd ()
 #endif
 
       IF (p_is_master) THEN
          write(*,'(A)') 'Making mesh elements:'
       ENDIF
 
-#ifdef FLAT_SPMD
-      CALL mpi_allreduce (numelm, nelm_glb, 1, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
-      IF (p_is_master) THEN
-         write(*,'(A,I12,A)') 'Total   : ', nelm_glb, ' elements.'
-      ENDIF
-#elif defined(USEMPI)
+#ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 
       IF (p_is_io) THEN
@@ -1040,42 +1022,6 @@ CONTAINS
    END SUBROUTINE scatter_mesh_from_io_to_worker
 
 #endif
-
-   ! --------------------------------
-   SUBROUTINE mesh_partition_spmd ()
-
-   USE MOD_SPMD_Task
-   IMPLICIT NONE
-
-   integer :: ie, ifirst, ilast, nlocal
-   type(irregular_elm_type), allocatable :: mesh_local(:)
-
-      IF (p_np_glb <= 1) RETURN
-
-      ! Keep the load order (block by block, ascending element index within a block) and give each
-      ! rank a contiguous slice of it.  Pixel sets are read block by block and vec_gather_scatter_set
-      ! needs every block's sets to be contiguous; element indices of neighbouring blocks interleave,
-      ! so a global sort by index would scatter a block across ranks and within a rank.
-      CALL spmd_partition_range (numelm, ifirst, ilast)
-      nlocal = ilast - ifirst + 1
-
-      allocate (mesh_local(nlocal))
-      IF (numelm > 0) THEN
-         DO ie = ifirst, ilast
-            CALL copy_elm (mesh(ie), mesh_local(ie-ifirst+1))
-         ENDDO
-
-         DO ie = 1, numelm
-            IF (allocated(mesh(ie)%ilon)) deallocate (mesh(ie)%ilon)
-            IF (allocated(mesh(ie)%ilat)) deallocate (mesh(ie)%ilat)
-         ENDDO
-         deallocate (mesh)
-      ENDIF
-
-      CALL move_alloc (mesh_local, mesh)
-      numelm = nlocal
-
-   END SUBROUTINE mesh_partition_spmd
 
    ! --------------------------------
    SUBROUTINE mesh_free_mem ()

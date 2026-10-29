@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Soil_BiogeochemDecompCascadeBGC
 
 !---------------------------------------------------------------------------------------------------
@@ -118,3 +119,4 @@ CONTAINS
    END SUBROUTINE decomp_rate_constants_bgc
 
 END MODULE MOD_BGC_Soil_BiogeochemDecompCascadeBGC
+#endif

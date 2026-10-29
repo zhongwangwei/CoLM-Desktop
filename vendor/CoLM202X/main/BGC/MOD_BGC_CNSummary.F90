@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_CNSummary
 
 !------------------------------------------------------------------------------------------
@@ -92,6 +93,9 @@ MODULE MOD_BGC_CNSummary
        cropprod1c_loss, grainc_to_cropprodc, grainc_to_seed, grainn_to_cropprodn, &
 #endif
         sminn_leached, sminn_leached_vr, smin_no3_leached, smin_no3_leached_vr, smin_no3_runoff, smin_no3_runoff_vr, &
+#ifdef MaterialTransport
+        smin_nh4_leached, smin_nh4_leached_vr, &
+#endif
         f_n2o_nit, f_n2o_nit_vr, decomp_cpools_transport_tendency, decomp_npools_transport_tendency, &
         denit, f_denit_vr, m_decomp_cpools_to_fire_vr, m_decomp_npools_to_fire_vr, &
        pft_fire_closs, pft_fire_nloss, litfire, &
@@ -186,7 +190,6 @@ MODULE MOD_BGC_CNSummary
    IMPLICIT NONE
  
    PUBLIC CNDriverSummarizeStates
-   PUBLIC CNDriverSummarizeNonvegetatedSoilStates
    PUBLIC CNDriverSummarizeFluxes
    
    PRIVATE soilbiogeochem_carbonstate_summary
@@ -226,26 +229,6 @@ CONTAINS
       CALL cnveg_nitrogenstate_summary(i,ps,pe)
 
    END SUBROUTINE CNDriverSummarizeStates
-
-   SUBROUTINE CNDriverSummarizeNonvegetatedSoilStates(i,nl_soil,dz_soi,ndecomp_pools)
-
-
-   integer, intent(in) :: i
-   integer, intent(in) :: nl_soil
-   real(r8), intent(in) :: dz_soi(1:nl_soil)
-   integer, intent(in) :: ndecomp_pools
-
-      CALL soilbiogeochem_carbonstate_summary(i,nl_soil,dz_soi,ndecomp_pools)
-      CALL soilbiogeochem_nitrogenstate_summary(i,nl_soil,dz_soi,ndecomp_pools)
-
-      totvegc(i) = 0._r8
-      ctrunc_veg(i) = 0._r8
-      totvegn(i) = 0._r8
-      ntrunc_veg(i) = 0._r8
-      totcolc(i) = totcwdc(i) + totlitc(i) + totsomc(i) + ctrunc_soil(i)
-      totcoln(i) = totcwdn(i) + totlitn(i) + totsomn(i) + sminn(i) + ntrunc_soil(i)
-
-   END SUBROUTINE CNDriverSummarizeNonvegetatedSoilStates
 
    SUBROUTINE CNDriverSummarizeFluxes(i,ps,pe,nl_soil,dz_soi,ndecomp_transitions,ndecomp_pools,deltim)
 
@@ -427,11 +410,7 @@ CONTAINS
       cphase(i)             = sum(cphase_p(ps:pe)             * pftfrac(ps:pe))
       hui(i)                = hui_p(ps)           
       gddplant(i)           = sum(gddplant_p(ps:pe)           * pftfrac(ps:pe))
-      IF (any(gddmaturity_p(ps:pe) /= spval)) THEN
-         gddmaturity(i) = sum(gddmaturity_p(ps:pe) * pftfrac(ps:pe), mask=gddmaturity_p(ps:pe) /= spval)
-      ELSE
-         gddmaturity(i) = spval
-      ENDIF
+      gddmaturity(i)        = sum(gddmaturity_p(ps:pe)        * pftfrac(ps:pe))
       vf(i)                 = sum(vf_p(ps:pe)             * pftfrac(ps:pe))
   
       fertnitro_corn(i)     = 0._r8
@@ -733,6 +712,9 @@ CONTAINS
   
       DO j = 1, nl_soil
          supplement_to_sminn(i) = supplement_to_sminn(i) + supplement_to_sminn_vr(j,i) * dz_soi(j)
+#ifdef MaterialTransport
+         smin_nh4_leached(i)    = smin_nh4_leached(i)    + smin_nh4_leached_vr(j,i) * dz_soi(j)
+#endif
          smin_no3_leached(i)    = smin_no3_leached(i)    + smin_no3_leached_vr(j,i) * dz_soi(j)
          smin_no3_runoff(i)     = smin_no3_runoff(i)     + smin_no3_runoff_vr(j,i) * dz_soi(j)
          sminn_leached(i)       = sminn_leached(i)       + sminn_leached_vr(j,i) * dz_soi(j)
@@ -1026,7 +1008,7 @@ CONTAINS
       hrv_xsmrpool_to_atm(i) = sum(hrv_xsmrpool_to_atm_p(ps:pe) * pftfrac(ps:pe))
   
       nfixlags = nfix_timeconst * 86400._r8
-      IF(nfixlags > 0._r8 .and. lag_npp(i) /= spval)THEN
+      IF(lag_npp(i) /= spval)THEN
          lag_npp(i) = lag_npp(i) * exp(-deltim/nfixlags) + &
                       (gpp(i) - ar(i)) * (1._r8 - exp(-deltim/nfixlags))
       ELSE
@@ -1152,3 +1134,4 @@ CONTAINS
  END MODULE MOD_BGC_CNSummary
 
 
+#endif

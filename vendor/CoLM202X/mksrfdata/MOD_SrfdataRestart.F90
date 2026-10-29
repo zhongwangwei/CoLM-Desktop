@@ -1,7 +1,6 @@
 #include <define.h>
 
 MODULE MOD_SrfdataRestart
-   USE MOD_Filesystem, ONLY: make_directory
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -52,7 +51,7 @@ CONTAINS
 #endif
       IF (p_is_master) THEN
          write(*,*) 'Saving land elements ...'
-         CALL make_directory(trim(dir_landdata) // '/mesh/' // trim(cyear))
+         CALL system('mkdir -p ' // trim(dir_landdata) // '/mesh/' // trim(cyear))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -60,9 +59,6 @@ CONTAINS
 
       filename = trim(dir_landdata) // '/mesh/' //trim(cyear) // '/mesh.nc'
 
-#ifdef FLAT_SPMD
-      CALL mesh_save_blocks_flat(filename)
-#else
       DO jblk = 1, gblock%nyblk
          DO iblk = 1, gblock%nxblk
 
@@ -79,11 +75,11 @@ CONTAINS
                      ENDIF
                   ENDDO
 
-                  allocate (elmindx (nelm))
-                  allocate (npxlall (nelm))
-                  allocate (elmpixels (2,totlen))
-
                   IF (nelm > 0) THEN
+
+                     allocate (elmindx (nelm))
+                     allocate (npxlall (nelm))
+                     allocate (elmpixels (2,totlen))
 
                      je = 0
                      ndsp = 0
@@ -206,7 +202,6 @@ CONTAINS
 #endif
          ENDDO
       ENDDO
-#endif
 
       IF (p_is_master) THEN
 
@@ -256,101 +251,6 @@ CONTAINS
 
    END SUBROUTINE mesh_save_to_file
 
-#ifdef FLAT_SPMD
-   SUBROUTINE mesh_save_blocks_flat (filename)
-
-   USE MOD_SPMD_Task
-   USE MOD_NetCDFSerial
-   USE MOD_Mesh
-   USE MOD_Block
-   IMPLICIT NONE
-
-   character(len=*), intent(in) :: filename
-
-   character(len=256) :: fileblock
-   integer :: iblk, jblk, ie, je, iproc, nelm, nelm_glb, totlen, totlen_glb, ndsp
-   integer, allocatable :: nelm_rank(:), nelm_dsp(:), npix_rank(:), npix_dsp(:)
-   integer, allocatable :: npix_count(:), npix_dsp2(:), npxl_local(:), npxlall(:)
-   integer, allocatable :: elmpixels_local(:,:), elmpixels(:,:)
-   integer*8, allocatable :: elmindx_local(:), elmindx(:)
-
-      allocate(nelm_rank(0:p_np_glb-1), nelm_dsp(0:p_np_glb-1))
-      allocate(npix_rank(0:p_np_glb-1), npix_dsp(0:p_np_glb-1))
-      allocate(npix_count(0:p_np_glb-1), npix_dsp2(0:p_np_glb-1))
-
-      DO jblk = 1, gblock%nyblk
-         DO iblk = 1, gblock%nxblk
-            nelm = 0
-            totlen = 0
-            DO ie = 1, numelm
-               IF ((mesh(ie)%xblk == iblk) .and. (mesh(ie)%yblk == jblk)) THEN
-                  nelm = nelm + 1
-                  totlen = totlen + mesh(ie)%npxl
-               ENDIF
-            ENDDO
-
-            allocate(elmindx_local(max(1,nelm)), npxl_local(max(1,nelm)))
-            allocate(elmpixels_local(2,max(1,totlen)))
-            je = 0
-            ndsp = 0
-            DO ie = 1, numelm
-               IF ((mesh(ie)%xblk /= iblk) .or. (mesh(ie)%yblk /= jblk)) CYCLE
-               je = je + 1
-               elmindx_local(je) = mesh(ie)%indx
-               npxl_local(je) = mesh(ie)%npxl
-               elmpixels_local(1,ndsp+1:ndsp+mesh(ie)%npxl) = mesh(ie)%ilon
-               elmpixels_local(2,ndsp+1:ndsp+mesh(ie)%npxl) = mesh(ie)%ilat
-               ndsp = ndsp + mesh(ie)%npxl
-            ENDDO
-
-            CALL mpi_allgather(nelm, 1, MPI_INTEGER, nelm_rank, 1, MPI_INTEGER, p_comm_glb, p_err)
-            CALL mpi_allgather(totlen, 1, MPI_INTEGER, npix_rank, 1, MPI_INTEGER, p_comm_glb, p_err)
-            nelm_dsp(0) = 0
-            npix_dsp(0) = 0
-            DO iproc = 1, p_np_glb-1
-               nelm_dsp(iproc) = nelm_dsp(iproc-1) + nelm_rank(iproc-1)
-               npix_dsp(iproc) = npix_dsp(iproc-1) + npix_rank(iproc-1)
-            ENDDO
-            npix_count = 2 * npix_rank
-            npix_dsp2 = 2 * npix_dsp
-            nelm_glb = sum(nelm_rank)
-            totlen_glb = sum(npix_rank)
-
-            IF (p_is_master) THEN
-               allocate(elmindx(max(1,nelm_glb)), npxlall(max(1,nelm_glb)))
-               allocate(elmpixels(2,max(1,totlen_glb)))
-            ELSE
-               allocate(elmindx(1), npxlall(1), elmpixels(2,1))
-            ENDIF
-
-            CALL mpi_gatherv(elmindx_local, nelm, MPI_INTEGER8, elmindx, nelm_rank, nelm_dsp, &
-               MPI_INTEGER8, p_root, p_comm_glb, p_err)
-            CALL mpi_gatherv(npxl_local, nelm, MPI_INTEGER, npxlall, nelm_rank, nelm_dsp, &
-               MPI_INTEGER, p_root, p_comm_glb, p_err)
-            CALL mpi_gatherv(elmpixels_local, 2*totlen, MPI_INTEGER, elmpixels, npix_count, &
-               npix_dsp2, MPI_INTEGER, p_root, p_comm_glb, p_err)
-
-            IF (p_is_master .and. nelm_glb > 0) THEN
-               CALL get_filename_block(filename, iblk, jblk, fileblock)
-               CALL ncio_create_file(fileblock)
-               CALL ncio_define_dimension(fileblock, 'element', nelm_glb)
-               CALL ncio_define_dimension(fileblock, 'ncoor', 2)
-               CALL ncio_define_dimension(fileblock, 'pixel', totlen_glb)
-               CALL ncio_write_serial(fileblock, 'elmindex', elmindx, 'element')
-               CALL ncio_write_serial(fileblock, 'elmnpxl', npxlall, 'element')
-               CALL ncio_write_serial(fileblock, 'elmpixels', elmpixels, 'ncoor', 'pixel', compress=1)
-            ENDIF
-
-            deallocate(elmindx_local, npxl_local, elmpixels_local)
-            deallocate(elmindx, npxlall, elmpixels)
-         ENDDO
-      ENDDO
-
-      deallocate(nelm_rank, nelm_dsp, npix_rank, npix_dsp, npix_count, npix_dsp2)
-
-   END SUBROUTINE mesh_save_blocks_flat
-#endif
-
    !------------------------------------
    SUBROUTINE mesh_load_from_file (dir_landdata, lc_year)
 
@@ -386,11 +286,7 @@ CONTAINS
 
       IF (p_is_io) THEN
 
-#ifdef FLAT_SPMD
-         numelm = sum(nelm_blk, mask = gblock%pio >= 0)
-#else
          numelm = sum(nelm_blk, mask = gblock%pio == p_iam_glb)
-#endif
 
          IF (numelm > 0) THEN
 
@@ -449,14 +345,11 @@ CONTAINS
 
       ENDIF
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#ifdef CoLMDEBUG
       IF (p_is_io) write(*,'(I10,A,I4)') numelm, ' elements on group ', p_iam_io
-      ENDIF
+#endif
 
-#ifdef FLAT_SPMD
-      CALL mesh_partition_spmd ()
-      CALL mpi_barrier (p_comm_glb, p_err)
-#elif defined(USEMPI)
+#ifdef USEMPI
       CALL scatter_mesh_from_io_to_worker
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -491,7 +384,7 @@ CONTAINS
 #endif
       IF (p_is_master) THEN
          write(*,*) 'Saving Pixel Sets ' // trim(psetname) // ' ...'
-         CALL make_directory(trim(dir_landdata) // '/' // trim(psetname) // '/' // trim(cyear))
+         CALL system('mkdir -p ' // trim(dir_landdata) // '/' // trim(psetname) // '/' // trim(cyear))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -523,16 +416,12 @@ CONTAINS
    !---------------------------
    SUBROUTINE pixelset_load_from_file (dir_landdata, psetname, pixelset, numset, lc_year)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_Block
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
    USE MOD_Mesh
    USE MOD_Pixelset
-#ifdef FLAT_SPMD
-   USE MOD_Utils, only: quicksort, find_in_sorted_list1
-#endif
    IMPLICIT NONE
 
    integer         ,    intent(in) :: lc_year
@@ -549,10 +438,6 @@ CONTAINS
    integer,   allocatable :: iworker(:)
    logical,   allocatable :: msk(:)
    logical :: fexists, fexists_any
-#ifdef FLAT_SPMD
-   integer*8, allocatable :: elmsorted(:)
-   integer,   allocatable :: elmorder(:)
-#endif
 
       write(cyear,'(i4.4)') lc_year
 #ifdef USEMPI
@@ -646,35 +531,8 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef FLAT_SPMD
-      IF (pixelset%nset > 0) THEN
-         ! Keep the sets whose element this rank owns.  The mesh is in load order (block by block),
-         ! and element indices of neighbouring blocks interleave, so test membership against a
-         ! sorted copy instead of walking the mesh; the sets keep their block-by-block order.
-         allocate(msk(pixelset%nset))
-         msk = .false.
-         IF (numelm > 0) THEN
-            allocate(elmsorted(numelm), elmorder(numelm))
-            DO ie = 1, numelm
-               elmsorted(ie) = mesh(ie)%indx
-               elmorder(ie)  = ie
-            ENDDO
-            CALL quicksort (numelm, elmsorted, elmorder)
-            DO iset = 1, pixelset%nset
-               msk(iset) = find_in_sorted_list1(pixelset%eindex(iset), numelm, elmsorted) > 0
-            ENDDO
-            deallocate(elmsorted, elmorder)
-         ENDIF
-         nset = count(msk)
-         allocate(sbuff(nset))
-         IF (nset > 0) sbuff = pack(pixelset%eindex, msk)
-         deallocate(pixelset%eindex, msk)
-         CALL move_alloc(sbuff, pixelset%eindex)
-         pixelset%nset = nset
-      ENDIF
-#endif
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
       IF (p_is_io) THEN
          IF (pixelset%nset > 0) THEN
             allocate (iworker (pixelset%nset))
@@ -785,9 +643,9 @@ CONTAINS
          CALL ncio_read_vector (filename, 'pctshared', pixelset, pixelset%pctshared)
       ENDIF
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#ifdef CoLMDEBUG
       IF (p_is_io)  write(*,*) numset, trim(psetname), ' on group', p_iam_io
-      ENDIF
+#endif
 
    END SUBROUTINE pixelset_load_from_file
 

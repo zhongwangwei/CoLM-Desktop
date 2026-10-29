@@ -2,7 +2,7 @@
 
 !-----------------------------------------------------------------------
 !
-!            --- CoLM 3D Building Community Urban Model ---
+!            --- CoLM Urban Building Community Model ---
 !
 !                Sun
 !                 \\\
@@ -32,8 +32,8 @@
 !  The CoLM urban model utilizes comprehensive high-resolution data on
 !  urban cover, geometric structure, vegetation, water bodies, etc.
 !  Furthermore, it has developed a relatively complete simulation of
-!  anthropogenic heat processes, including building energy consumption,
-!  traffic heat, and metabolic heat.
+!  anthropogenic processes, including building energy consumption,
+!  traffic heat, metabolic heat, and urban irrigation.
 !
 !  Created by Hua Yuan, 09/2021
 !
@@ -79,15 +79,17 @@
            vf_quartz    ,vf_gravels   ,vf_om        ,vf_sand      ,&
            wf_gravels   ,wf_sand      ,porsl        ,psi0         ,&
            bsw          ,theta_r      ,fsatmax      ,fsatdcf      ,&
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
            alpha_vgm    ,n_vgm        ,L_vgm                      ,&
            sc_vgm       ,fc_vgm                                   ,&
+#endif
            hksati       ,csol         ,k_solids     ,dksatu       ,&
            dksatf       ,dkdry        ,BA_alpha     ,BA_beta      ,&
            alb_roof     ,alb_wall     ,alb_gimp     ,alb_gper     ,&
 
          ! vegetation information
            htop         ,hbot         ,sqrtdi       ,chil         ,&
-           effcon       ,vmax25       ,c3c4         ,slti         ,hlti,&
+           effcon       ,vmax25       ,slti         ,hlti         ,&
            shti         ,hhti         ,trda         ,trdm         ,&
            trop         ,g1           ,g0           ,gradm        ,&
            binter       ,extkn        ,rho          ,tau          ,&
@@ -174,7 +176,6 @@
            fh           ,fq           ,hpbl                        )
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: tfrz, denh2o, denice
    USE MOD_Vars_TimeVariables, only: tlai, tsai
@@ -259,11 +260,13 @@
         fsatmax               ,&! maximum saturated area fraction [-]
         fsatdcf               ,&! decay factor in calculation of saturated area fraction [1/m]
 
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
         alpha_vgm (1:nl_soil) ,&! parameter correspond approximately to inverse of air-entry value
         n_vgm     (1:nl_soil) ,&! a shape parameter
         L_vgm     (1:nl_soil) ,&! pore-connectivity parameter
         sc_vgm    (1:nl_soil) ,&! saturation at air entry value in classical vanGenuchten model [-]
         fc_vgm    (1:nl_soil) ,&! a scaling factor by using air entry value in the Mualem model [-]
+#endif
         hksati      (nl_soil) ,&! hydraulic conductivity at saturation [mm h2o/s]
         csol        (nl_soil) ,&! heat capacity of soil solids [J/(m3 K)]
         k_solids    (nl_soil) ,&! thermal conductivity of minerals soil [W/m-K]
@@ -317,8 +320,6 @@
         smpmin                ,&! restriction for min of soil poten.  (mm)
         trsmx0                ,&! max transpiration for moist soil+100% veg.  [mm/s]
         tcrit                   ! critical temp. to determine rain or snow
-
-   integer,  intent(in) :: c3c4 ! 1 for C3, 0 for C4
 
    real(r8), intent(in) :: hpbl ! atmospheric boundary layer height [m]
 
@@ -697,13 +698,6 @@
    real(r8) snofrz    (maxsnl+1:0)  !snow freezing rate (col,lyr) [kg m-2 s-1]
    real(r8) sabg_lyr  (maxsnl+1:1)  !snow layer absorption [W/m-2]
 
-   !irrigation
-   real(r8) :: &
-         qflx_irrig_drip      ,&! drip irrigation rate [mm/s]
-         qflx_irrig_sprinkler ,&! sprinkler irrigation rate [mm/s]
-         qflx_irrig_flood     ,&! flood irrigation rate [mm/s]
-         qflx_irrig_paddy       ! paddy irrigation rate [mm/s]
-
    ! A simple urban irrigation scheme accounts for soil water stress of trees
    ! a factor represents irrigation efficiency, '1' represents a 50% direct irrigation efficiency.
    real(r8), parameter :: wst_irrig = 1.0
@@ -873,14 +867,10 @@
 !----------------------------------------------------------------------
 ! [2] Canopy interception and precipitation onto ground surface
 !----------------------------------------------------------------------
-      qflx_irrig_drip = 0._r8
-      qflx_irrig_sprinkler = 0._r8
-      qflx_irrig_flood = 0._r8
-      qflx_irrig_paddy = 0._r8
 
       ! with vegetation canopy
       CALL LEAF_interception_CoLM2014 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tref,tleaf,&
-                              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
+                              prc_rain,prc_snow,prl_rain,prl_snow,bifall,0.,&
                               ldew,ldew_rain,ldew_snow,z0m,forc_hgt_u,pgper_rain,pgper_snow,&
                               qintr,qintr_rain,qintr_snow)
 
@@ -993,9 +983,13 @@
          zsno               ,capr               ,cnfac              ,vf_quartz          ,&
          vf_gravels         ,vf_om              ,vf_sand            ,wf_gravels         ,&
          wf_sand            ,csol               ,porsl              ,psi0               ,&
+#ifdef Campbell_SOIL_MODEL
          bsw                                                                            ,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
          theta_r            ,alpha_vgm          ,n_vgm              ,L_vgm              ,&
          sc_vgm             ,fc_vgm                                                     ,&
+#endif
          k_solids           ,dksatu             ,dksatf             ,dkdry              ,&
          BA_alpha           ,BA_beta                                                    ,&
          cv_roof            ,cv_wall            ,cv_gimp                                ,&
@@ -1005,7 +999,7 @@
          z_wall(:)          ,zi_roofsno(lbr-1:) ,zi_gimpsno(lbi-1:) ,zi_gpersno(lbp-1:) ,&
          zi_lakesno(:)      ,zi_wall(0:)        ,dz_lake(1:)        ,lakedepth          ,&
          dewmx              ,sqrtdi             ,rootfr(:)          ,effcon             ,&
-         vmax25             ,c3c4               ,slti               ,hlti               ,shti,&
+         vmax25             ,slti               ,hlti               ,shti               ,&
          hhti               ,trda               ,trdm               ,trop               ,&
          g1                 ,g0                 ,gradm              ,binter             ,&
          extkn              ,lambda                                                     ,&
@@ -1042,7 +1036,7 @@
          qfros_roof         ,qfros_gimp         ,qfros_gper         ,qfros_lake         ,&
          imeltr(lbr:)       ,imelti(lbi:)       ,imeltp(lbp:)       ,imeltl(:)          ,&
          sm_roof            ,sm_gimp            ,sm_gper            ,sm_lake            ,&
-         sabg               ,rss                ,rstfac             ,rootr(:)           ,etr_deficit        ,&
+         sabg               ,rstfac             ,rootr(:)           ,etr_deficit        ,&
          tref               ,qref               ,trad               ,rst                ,&
          assim              ,respc              ,errore             ,emis               ,&
          z0m                ,zol                ,rib                ,ustar              ,&
@@ -1096,9 +1090,7 @@
          mss_bcpho(lbsn:0)  ,mss_bcphi(lbsn:0)  ,mss_ocpho(lbsn:0)  ,mss_ocphi(lbsn:0)  ,&
          mss_dst1 (lbsn:0)  ,mss_dst2 (lbsn:0)  ,mss_dst3 (lbsn:0)  ,mss_dst4 (lbsn:0)  ,&
 ! END SNICAR model variables
-!  irrigaiton 
-         qflx_irrig_drip    ,qflx_irrig_flood   ,qflx_irrig_paddy                       ,&
-!  end irrigation
+
          ! output
          rsur               ,rnof               ,qinfl              ,zwt                ,&
          wdsrf              ,wa                 ,qcharge            ,smp                ,hk                 )
@@ -1229,11 +1221,11 @@
       ! energy balance check
       ! ----------------------------------------
       zerr=errore
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       IF(abs(errore)>.5)THEN
          write(6,*) 'Warning: energy balance violation ',errore,patchclass
       ENDIF
-      ENDIF
+#endif
 
       ! ----------------------------------------
       ! water balance check
@@ -1259,12 +1251,12 @@
       errorw = (endwb - totwb) - (forc_prc + forc_prl + urb_irrig - fevpa - rnof)*deltim
       xerr   = errorw/deltim
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       IF(abs(errorw)>1.e-3) THEN
          write(6,*) 'Warning: water balance violation', errorw, ipatch, patchclass
          !STOP
       ENDIF
-      ENDIF
+#endif
 
 !======================================================================
 ! Preparation for the next time step

@@ -1,59 +1,47 @@
 # =======================================================
-# mpif90 - gfortran 
-# 
+# macOS ARM64/x86_64 / Homebrew gfortran + OpenMPI
+# Local build options; keep Makeoptions.github Linux-only for CI.
+#
 
-  FF ?= mpif90 -fopenmp
+  FF = mpif90 -fopenmp
 
-  PKG_CONFIG ?= pkg-config
-  NF_CONFIG ?= nf-config
-  NC_CONFIG ?= nc-config
-  NETCDF_INC ?= $(shell command -v $(NF_CONFIG) >/dev/null 2>&1 && $(NF_CONFIG) --includedir || echo /usr/include)
-  NETCDF_FLIBS ?= $(shell if command -v $(PKG_CONFIG) >/dev/null 2>&1 && \
-                           $(PKG_CONFIG) --exists netcdf-fortran netcdf; then \
-                              $(PKG_CONFIG) --libs netcdf-fortran netcdf; \
-                           else \
-                              command -v $(NF_CONFIG) >/dev/null 2>&1 && $(NF_CONFIG) --flibs || printf '%s ' -lnetcdff; \
-                              command -v $(NC_CONFIG) >/dev/null 2>&1 && $(NC_CONFIG) --libs || printf '%s' -lnetcdf; \
-                           fi)
+  NETCDF_PREFIX ?= $(shell brew --prefix)
+  NETCDF_LIB = $(NETCDF_PREFIX)/lib
+  NETCDF_INC = $(NETCDF_PREFIX)/include
 
   MOD_CMD = -J
 
-  # Desktop releases default to optimized kernels.  The old full-check build
-  # remains available with COLM_KERNEL_PROFILE=debug.
+# Desktop releases run the optimized profile.  Developers can retain the
+# former bounds-checked build with COLM_KERNEL_PROFILE=debug.
   COLM_KERNEL_PROFILE ?= production
   FOPTS_COMMON = -fdefault-real-8 -fdefault-double-8 -ffree-form -g \
-                 -ffpe-trap=invalid,zero,overflow -fbacktrace -cpp \
-                 -ffree-line-length-0
-  GFORTRAN_MAJOR := $(shell $(word 1,$(FF)) -dumpversion 2>/dev/null | cut -d. -f1)
-  ifneq ($(shell test "$(GFORTRAN_MAJOR)" -ge 10 2>/dev/null && echo yes),)
+                 -ffpe-trap=invalid,zero,overflow \
+                 -fbacktrace -fdump-core -cpp -ffree-line-length-0
+
+# determine the gfortran version
+  GCC_VERSION := "`gcc -dumpversion`"
+  IS_GCC_ABOVE_10 := $(shell expr "$(GCC_VERSION)" ">=" "10")
+  ifeq "$(IS_GCC_ABOVE_10)" "1"
      FOPTS_COMMON += -fallow-argument-mismatch
-  endif
-  ifeq ($(shell uname -m),x86_64)
-     FOPTS_COMMON += -mcmodel=medium
   endif
 
   FOPTS_PRODUCTION = -O2 $(FOPTS_COMMON)
-  FOPTS_DEBUG = -O0 -fcheck=all $(FOPTS_COMMON)
-  ifeq ($(COLM_KERNEL_PROFILE),production)
+  FOPTS_DEBUG = -O0 -C -fbounds-check $(FOPTS_COMMON)
+  ifeq "$(COLM_KERNEL_PROFILE)" "production"
      FOPTS = $(FOPTS_PRODUCTION)
-  else ifeq ($(COLM_KERNEL_PROFILE),debug)
+  else ifeq "$(COLM_KERNEL_PROFILE)" "debug"
      FOPTS = $(FOPTS_DEBUG)
   else
      $(error COLM_KERNEL_PROFILE must be production or debug)
   endif
 
   INCLUDE_DIR = -I../include -I../share -I../mksrfdata -I../mkinidata -I../main -I$(NETCDF_INC)
-  ifeq ($(shell uname -s),Darwin)
-     BLAS_LIBS ?= -framework Accelerate
-  else
-     BLAS_LIBS ?= -llapack -lblas
-  endif
-  LDFLAGS ?= $(NETCDF_FLIBS) $(BLAS_LIBS)
+  LDFLAGS = -L$(NETCDF_LIB) -lnetcdff -lnetcdf -llapack -lblas
 
 
 
 #============================================================
-# CaMa-Flood Mkinclude (for Linux, gfortran)
+# CaMa-Flood Mkinclude (macOS Homebrew, gfortran)
 
 RM = /bin/rm -f
 CP = /bin/cp
@@ -66,11 +54,10 @@ CP = /bin/cp
 #DMPI=-DUseMPI
 DCDF=-DUseCDF -DUseCDF_CMF
 #DATM=-DNoAtom
-CFLAGS=$(DMPI) $(DCDF) $(DATM) 
+CFLAGS=$(DMPI) $(DCDF) $(DATM)
 #----
-GFORTRAN ?= $(shell command -v gfortran 2>/dev/null || echo gfortran)
-FCMP = $(GFORTRAN) -fopenmp
-FC   = $(GFORTRAN)
+FCMP = gfortran -fopenmp
+FC   = gfortran
 
 LFLAGS =
-FFLAGS = -O3 -Wall -cpp -free -fimplicit-none -fbounds-check -fbacktrace 
+FFLAGS = -O0 -Wall -cpp -free -fimplicit-none -fbounds-check -fbacktrace

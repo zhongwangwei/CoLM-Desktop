@@ -13,7 +13,6 @@ SUBROUTINE Aggregation_DBedrock ( &
 !  Created by Shupeng Zhang, 05/2023
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -25,7 +24,9 @@ SUBROUTINE Aggregation_DBedrock ( &
    USE MOD_RangeCheck
    USE MOD_AggregationRequestData
 
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
 
@@ -44,7 +45,9 @@ SUBROUTINE Aggregation_DBedrock ( &
    integer :: ipatch
    integer :: wmo_src
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
+#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/dbedrock/' //trim(cyear)
@@ -54,7 +57,7 @@ SUBROUTINE Aggregation_DBedrock ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate depth to bedrock ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -64,7 +67,8 @@ SUBROUTINE Aggregation_DBedrock ( &
 
          CALL allocate_block_data (gland, dbedrock)
 
-         lndname = trim(dir_rawdata)//'/bedrock.nc'
+         !TODO: add dir, file name and var name
+         lndname = trim(dir_rawdata)//trim(DEF_rawdata%soil_bedrock%dir)//'/bedrock.nc'
          CALL ncio_read_block (lndname, 'dbedrock', gland, dbedrock)
 
 #ifdef USEMPI
@@ -101,9 +105,9 @@ SUBROUTINE Aggregation_DBedrock ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('dbedrock_patches ', dbedrock_patches, -9999.0)
-      ENDIF
+#endif
 
       ! Write-out the depth of the pacth in the gridcell
       lndname = trim(landdir)//'/dbedrock_patches.nc'
@@ -112,12 +116,12 @@ SUBROUTINE Aggregation_DBedrock ( &
       CALL ncio_write_vector (lndname, 'dbedrock_patches', 'patch', &
            landpatch, dbedrock_patches, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/dbedrock_patch_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (dbedrock_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'dbedrock', compress = 1, write_mode = 'one', create_mode=.true.)
-      ENDIF
+         -1.0e36_r8, lndname, 'dbedrock', compress = 6, write_mode = 'one', create_mode=.true.)
+#endif
 
       IF (p_is_worker) THEN
          deallocate ( dbedrock_patches )

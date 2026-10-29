@@ -199,7 +199,7 @@ MODULE MOD_Const_LC
           0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08,&
           0.08, 0.08, 0.08, 0.05, 0.05, 0.05, 0.05, 0.05/)
 
-   !c3c4 flag
+   !C3C4 flag 1: C3, 0: C4
    integer, parameter, dimension(N_land_classification) :: c3c4_usgs &
       = (/1, 1, 1, 1, 1, 1, 1, 1,&
           1, 1, 1, 1, 1, 1, 1, 1,&
@@ -508,7 +508,7 @@ MODULE MOD_Const_LC
       = (/0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08,&
           0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08,&
           0.08 /)
-   
+
    !c3c4 flag
    integer, parameter, dimension(N_land_classification) :: c3c4_igbp &
       = (/1, 1, 1, 1, 1, 1, 1, 1,&
@@ -690,7 +690,8 @@ MODULE MOD_Const_LC
       d50,        &! depth at 50% roots
       beta         ! coefficient of root profile
 
-   integer, dimension(N_land_classification) :: c3c4 ! c3c4 flag
+   ! c3c4 flag
+   integer, dimension(N_land_classification) :: c3c4
 
 ! Plant Hydraulic Parameters
    real(r8), dimension(N_land_classification) :: &
@@ -718,6 +719,9 @@ MODULE MOD_Const_LC
 
    ! fraction of roots in each soil layer
    real(r8), dimension(nl_soil,N_land_classification) :: rootfr
+
+   ! land cover mapping look-up table
+   integer :: LC_Map(0:255)
 
    ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: Init_LC_Const
@@ -837,8 +841,6 @@ ENDIF
       tau    (2,2,:) = taus_nir_igbp   (:)
 #endif
 
-      CALL apply_lc_overrides()
-
       ! ----------------------------------------------------------
       ! The definition of global root distribution is based on
       ! Schenk and Jackson, 2002: The Global Biogeography of Roots.
@@ -874,67 +876,53 @@ ENDIF
          ENDDO
       ENDIF
 
+      ! initialization
+      LC_Map(:) = 0
+
+      ! set the land cover look-up table for mapping
+      ! mapping from GLC_FCS30D ==> IGBP 17 classes
+      IF ( DEF_USE_GLC30 ) THEN
+            LC_Map(10)  = 12; LC_Map(20)  = 12;
+            LC_Map(11)  = 14; LC_Map(12)  = 14;
+            LC_Map(51)  =  2; LC_Map(52)  =  2;
+            LC_Map(61)  =  4; LC_Map(62)  =  4;
+            LC_Map(71)  =  1; LC_Map(72)  =  1;
+            LC_Map(81)  =  3; LC_Map(82)  =  3;
+            LC_Map(91)  =  5; LC_Map(92)  =  5;
+            LC_Map(120) =  7; LC_Map(121) =  7; LC_Map(122) =  7;
+            LC_Map(130) = 10; LC_Map(140) = 10;
+            LC_Map(150) = 16; LC_Map(152) = 16; LC_Map(153) = 16;
+            LC_Map(181) = 11; LC_Map(182) = 11; LC_Map(183) = 11;
+            LC_Map(184) = 11; LC_Map(185) = 11; LC_Map(186) = 11;
+            LC_Map(187) = 11;
+            LC_Map(190) = 13;
+            LC_Map(200) = 16; LC_Map(201) = 16; LC_Map(202) = 16;
+            LC_Map(210) = 17;
+            LC_Map(220) = 15;
+      ENDIF
+
+      ! mapping from ESA-CCI ==> IGBP 17 classes
+      IF ( DEF_USE_ESACCI ) THEN
+            LC_Map(10)  = 12; LC_Map(11)  = 12; LC_Map(20)  = 12;
+            LC_Map(12)  = 14; LC_Map(30)  = 14; LC_Map(40)  = 14;
+            LC_Map(50)  =  2;
+            LC_Map(60)  =  4; LC_Map(61)  =  4; LC_Map(62)  =  4;
+            LC_Map(70)  =  1; LC_Map(71)  =  1; LC_Map(72)  =  1;
+            LC_Map(80)  =  3; LC_Map(81)  =  3; LC_Map(82)  =  3;
+            LC_Map(90)  =  5;
+            LC_Map(100) =  8;
+            LC_Map(110) =  9;
+            LC_Map(120) =  7; LC_Map(121) =  7; LC_Map(122) =  7;
+            LC_Map(130) = 10; LC_Map(140) = 10;
+            LC_Map(150) = 16; LC_Map(152) = 16; LC_Map(153) = 16;
+            LC_Map(160) = 11; LC_Map(170) = 11; LC_Map(180) = 11;
+            LC_Map(190) = 13;
+            LC_Map(200) = 16; LC_Map(201) = 16; LC_Map(202) = 16;
+            LC_Map(210) = 17;
+            LC_Map(220) = 15;
+      ENDIF
+
    END SUBROUTINE Init_LC_Const
-
-   ! Land-cover table overrides, class by class, at every scale (single point, catchment,
-   ! regional, global) whenever DEF_USE_LCT. A slot left at LC_OVERRIDE_UNSET (C3C4: -1) keeps
-   ! the table value, so with no overrides the tables stay bit-identical. Called before the root
-   ! profile below, so D50/BETA overrides still reshape it.
-   SUBROUTINE apply_lc_overrides()
-   USE MOD_Namelist
-   IMPLICIT NONE
-
-   integer :: lc
-
-      IF (.not. DEF_USE_LCT) RETURN
-      DO lc = 1, min(N_land_classification, LC_OVERRIDE_SLOTS)
-         IF (DEF_LC_HTOP0(lc) /= LC_OVERRIDE_UNSET) htop0(lc) = DEF_LC_HTOP0(lc)
-         IF (DEF_LC_HBOT0(lc) /= LC_OVERRIDE_UNSET) hbot0(lc) = DEF_LC_HBOT0(lc)
-         IF (DEF_LC_FVEG0(lc) /= LC_OVERRIDE_UNSET) fveg0(lc) = DEF_LC_FVEG0(lc)
-         IF (DEF_LC_SAI0(lc) /= LC_OVERRIDE_UNSET) sai0(lc) = DEF_LC_SAI0(lc)
-         IF (DEF_LC_Z0MR(lc) /= LC_OVERRIDE_UNSET) z0mr(lc) = DEF_LC_Z0MR(lc)
-         IF (DEF_LC_DISPLAR(lc) /= LC_OVERRIDE_UNSET) displar(lc) = DEF_LC_DISPLAR(lc)
-         IF (DEF_LC_SQRTDI(lc) /= LC_OVERRIDE_UNSET) sqrtdi(lc) = DEF_LC_SQRTDI(lc)
-         IF (DEF_LC_CHIL(lc) /= LC_OVERRIDE_UNSET) chil(lc) = DEF_LC_CHIL(lc)
-         IF (DEF_LC_RHOL_VIS(lc) /= LC_OVERRIDE_UNSET) rho(1,1,lc) = DEF_LC_RHOL_VIS(lc)
-         IF (DEF_LC_RHOL_NIR(lc) /= LC_OVERRIDE_UNSET) rho(2,1,lc) = DEF_LC_RHOL_NIR(lc)
-         IF (DEF_LC_RHOS_VIS(lc) /= LC_OVERRIDE_UNSET) rho(1,2,lc) = DEF_LC_RHOS_VIS(lc)
-         IF (DEF_LC_RHOS_NIR(lc) /= LC_OVERRIDE_UNSET) rho(2,2,lc) = DEF_LC_RHOS_NIR(lc)
-         IF (DEF_LC_TAUL_VIS(lc) /= LC_OVERRIDE_UNSET) tau(1,1,lc) = DEF_LC_TAUL_VIS(lc)
-         IF (DEF_LC_TAUL_NIR(lc) /= LC_OVERRIDE_UNSET) tau(2,1,lc) = DEF_LC_TAUL_NIR(lc)
-         IF (DEF_LC_TAUS_VIS(lc) /= LC_OVERRIDE_UNSET) tau(1,2,lc) = DEF_LC_TAUS_VIS(lc)
-         IF (DEF_LC_TAUS_NIR(lc) /= LC_OVERRIDE_UNSET) tau(2,2,lc) = DEF_LC_TAUS_NIR(lc)
-         IF (DEF_LC_VMAX25(lc) /= LC_OVERRIDE_UNSET) vmax25     (lc) = DEF_LC_VMAX25(lc) * 1.e-6_r8
-         IF (DEF_LC_EFFCON(lc) /= LC_OVERRIDE_UNSET) effcon(lc) = DEF_LC_EFFCON(lc)
-         IF (DEF_LC_C3C4(lc) /= -1) c3c4(lc) = DEF_LC_C3C4(lc)
-         IF (DEF_LC_RESPCP(lc) /= LC_OVERRIDE_UNSET) respcp(lc) = DEF_LC_RESPCP(lc)
-         IF (DEF_LC_SHTI(lc) /= LC_OVERRIDE_UNSET) shti(lc) = DEF_LC_SHTI(lc)
-         IF (DEF_LC_SLTI(lc) /= LC_OVERRIDE_UNSET) slti(lc) = DEF_LC_SLTI(lc)
-         IF (DEF_LC_TRDA(lc) /= LC_OVERRIDE_UNSET) trda(lc) = DEF_LC_TRDA(lc)
-         IF (DEF_LC_TRDM(lc) /= LC_OVERRIDE_UNSET) trdm(lc) = DEF_LC_TRDM(lc)
-         IF (DEF_LC_TROP(lc) /= LC_OVERRIDE_UNSET) trop(lc) = DEF_LC_TROP(lc)
-         IF (DEF_LC_HHTI(lc) /= LC_OVERRIDE_UNSET) hhti(lc) = DEF_LC_HHTI(lc)
-         IF (DEF_LC_HLTI(lc) /= LC_OVERRIDE_UNSET) hlti(lc) = DEF_LC_HLTI(lc)
-         IF (DEF_LC_EXTKN(lc) /= LC_OVERRIDE_UNSET) extkn(lc) = DEF_LC_EXTKN(lc)
-         IF (DEF_LC_D50(lc) /= LC_OVERRIDE_UNSET) d50(lc) = DEF_LC_D50(lc)
-         IF (DEF_LC_BETA(lc) /= LC_OVERRIDE_UNSET) beta(lc) = DEF_LC_BETA(lc)
-         IF (DEF_LC_GRADM(lc) /= LC_OVERRIDE_UNSET) gradm(lc) = DEF_LC_GRADM(lc)
-         IF (DEF_LC_BINTER(lc) /= LC_OVERRIDE_UNSET) binter(lc) = DEF_LC_BINTER(lc)
-         IF (DEF_LC_G1(lc) /= LC_OVERRIDE_UNSET) g1(lc) = DEF_LC_G1(lc)
-         IF (DEF_LC_G0(lc) /= LC_OVERRIDE_UNSET) g0(lc) = DEF_LC_G0(lc)
-         IF (DEF_LC_LAMBDA(lc) /= LC_OVERRIDE_UNSET) lambda(lc) = DEF_LC_LAMBDA(lc)
-         IF (DEF_LC_KMAX_SUN(lc) /= LC_OVERRIDE_UNSET) kmax_sun(lc) = DEF_LC_KMAX_SUN(lc)
-         IF (DEF_LC_KMAX_SHA(lc) /= LC_OVERRIDE_UNSET) kmax_sha(lc) = DEF_LC_KMAX_SHA(lc)
-         IF (DEF_LC_KMAX_XYL(lc) /= LC_OVERRIDE_UNSET) kmax_xyl(lc) = DEF_LC_KMAX_XYL(lc)
-         IF (DEF_LC_KMAX_ROOT(lc) /= LC_OVERRIDE_UNSET) kmax_root(lc) = DEF_LC_KMAX_ROOT(lc)
-         IF (DEF_LC_PSI50_SUN(lc) /= LC_OVERRIDE_UNSET) psi50_sun(lc) = DEF_LC_PSI50_SUN(lc)
-         IF (DEF_LC_PSI50_SHA(lc) /= LC_OVERRIDE_UNSET) psi50_sha(lc) = DEF_LC_PSI50_SHA(lc)
-         IF (DEF_LC_PSI50_XYL(lc) /= LC_OVERRIDE_UNSET) psi50_xyl(lc) = DEF_LC_PSI50_XYL(lc)
-         IF (DEF_LC_PSI50_ROOT(lc) /= LC_OVERRIDE_UNSET) psi50_root(lc) = DEF_LC_PSI50_ROOT(lc)
-         IF (DEF_LC_CK(lc) /= LC_OVERRIDE_UNSET) ck(lc) = DEF_LC_CK(lc)
-      ENDDO
-
-   END SUBROUTINE apply_lc_overrides
 
 END MODULE MOD_Const_LC
 ! ---------- EOP ------------

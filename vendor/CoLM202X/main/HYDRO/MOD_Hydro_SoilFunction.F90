@@ -17,7 +17,6 @@ MODULE MOD_Hydro_SoilFunction
 !----------------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL
 
    IMPLICIT NONE
 
@@ -73,16 +72,18 @@ CONTAINS
          RETURN
       ENDIF
 
-      IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-         ! bsw => prms(1)
-         soil_hk_from_psi = hksat * (psi / psi_s)**(- 3.0_r8 / prms(1) - 2.0_r8)
-      ELSE
-         ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
-         m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
-         esat = (1.0_r8 + (- prms(1) * psi)**(prms(2)))**(-m_vgm) / prms(4)
-         soil_hk_from_psi = hksat * esat**prms(3) &
-            * ((1.0_r8 - (1.0_r8 - (esat*prms(4))**(1.0_r8/m_vgm))**m_vgm) / prms(5))**2.0_r8
-      ENDIF
+#ifdef Campbell_SOIL_MODEL
+      ! bsw => prms(1)
+      soil_hk_from_psi = hksat * (psi / psi_s)**(- 3.0_r8 / prms(1) - 2.0_r8)
+#endif
+      
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
+      m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
+      esat = (1.0_r8 + (- prms(1) * psi)**(prms(2)))**(-m_vgm) / prms(4)
+      soil_hk_from_psi = hksat * esat**prms(3) &
+         * ((1.0_r8 - (1.0_r8 - (esat*prms(4))**(1.0_r8/m_vgm))**m_vgm) / prms(5))**2.0_r8 
+#endif
 
    END FUNCTION soil_hk_from_psi
 
@@ -113,16 +114,18 @@ CONTAINS
          RETURN
       ENDIF
 
-      IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-         ! bsw => prms(1)
-         soil_psi_from_vliq = psi_s * (vliq / porsl)**(-prms(1))
-      ELSE
-         ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
-         m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
-         esat = (vliq - vl_r) / (porsl - vl_r)
-         soil_psi_from_vliq = - ((esat*prms(4))**(- 1.0_r8/m_vgm) - 1.0_r8)**(1.0_r8/prms(2)) &
-            / prms(1)
-      ENDIF
+#ifdef Campbell_SOIL_MODEL
+      ! bsw => prms(1)
+      soil_psi_from_vliq = psi_s * (vliq / porsl)**(-prms(1))
+#endif
+      
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
+      m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
+      esat = (vliq - vl_r) / (porsl - vl_r)
+      soil_psi_from_vliq = - ((esat*prms(4))**(- 1.0_r8/m_vgm) - 1.0_r8)**(1.0_r8/prms(2)) &
+         / prms(1)
+#endif
 
       soil_psi_from_vliq = max(soil_psi_from_vliq, minsmp) 
       
@@ -152,15 +155,17 @@ CONTAINS
          RETURN
       ENDIF
 
-      IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-         ! bsw => prms(1)
-         soil_vliq_from_psi = porsl * (psi / psi_s)**(-1.0/prms(1))
-      ELSE
-         ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
-         m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
-         esat = (1.0_r8 + (psi * (-prms(1)))**(prms(2))) ** (-m_vgm) / prms(4)
-         soil_vliq_from_psi = (porsl - vl_r) * esat + vl_r
-      ENDIF
+#ifdef Campbell_SOIL_MODEL
+      ! bsw => prms(1)
+      soil_vliq_from_psi = porsl * (psi / psi_s)**(-1.0/prms(1))
+#endif
+      
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      ! alpha_vgm => prms(1), n_vgm => prms(2), L_vgm => prms(3), sc_vgm => prms(4), fc_vgm => prms(5)
+      m_vgm = 1.0_r8 - 1.0_r8 / prms(2)
+      esat = (1.0_r8 + (psi * (-prms(1)))**(prms(2))) ** (-m_vgm) / prms(4)
+      soil_vliq_from_psi = (porsl - vl_r) * esat + vl_r  
+#endif
 
    END FUNCTION soil_vliq_from_psi
 

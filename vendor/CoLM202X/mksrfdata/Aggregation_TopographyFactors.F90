@@ -7,7 +7,6 @@ SUBROUTINE Aggregation_TopographyFactors ( &
 !
 !  Created by Sisi Chen, Lu Li, 06/2024
 !-----------------------------------------------------------------------
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -16,12 +15,16 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
+#ifdef SrfdataDiag
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
 
@@ -98,7 +101,9 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    integer :: ipatch, i, ps, pe, type, a, z, count_pixels, num_pixels, j, index, n
    integer :: wmo_src
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp  ! number of land classification
+#endif
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
 
@@ -107,7 +112,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
 #endif
    IF (p_is_master) THEN
       write(*,'(/, A)') 'Aggregate topography factor ...'
-      CALL make_directory(trim(adjustl(landdir)))
+      CALL system('mkdir -p ' // trim(adjustl(landdir)))
    ENDIF
 #ifdef USEMPI
    CALL mpi_barrier (p_comm_glb, p_err)
@@ -356,14 +361,14 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-   IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
    CALL check_vector_data ('svf_patches       ', svf_patches      )
    CALL check_vector_data ('cur_patches       ', cur_patches      )
    CALL check_vector_data ('slp_type_patches  ', slp_type_patches )
    CALL check_vector_data ('asp_type_patches  ', asp_type_patches )
    CALL check_vector_data ('area_type_patches ', area_type_patches)
    CALL check_vector_data ('sf_lut_patches    ', sf_lut_patches   )
-   ENDIF
+#endif
 
 ! Reduce the dimension of the shadow factor array
 ! Construct a new array with dimensions of sf_curve_patches(azimuth, shadow factor parameters, patches)
@@ -467,7 +472,7 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    CALL ncio_write_vector (lndname, 'sf_curve_patches', 'azimuth', num_azimuth, 'zenith_p', num_zenith_parameter, 'patch', &
                            landpatch, sf_curve_patches, 1)
 
-   IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
    typpatch = (/(ityp, ityp = 0, N_land_classification)/)
 
    ! only write the first type of slope and aspect at patches
@@ -475,23 +480,23 @@ SUBROUTINE Aggregation_TopographyFactors ( &
    DO i = 1, num_slope_type
       write(sdir,'(I0)') i
       CALL srfdata_map_and_write (slp_type_patches(i,:), landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'slp_'//trim(sdir), compress = 1, write_mode = 'one')
+         -1.0e36_r8, lndname, 'slp_'//trim(sdir), compress = 6, write_mode = 'one')
    ENDDO
 
    lndname  = trim(dir_model_landdata) // '/diag/topo_factor_asp_' // trim(cyear) // '.nc'
    DO i = 1, num_slope_type
       write(sdir,'(I0)') i
       CALL srfdata_map_and_write (asp_type_patches(i,:), landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'asp_'//trim(sdir), compress = 1, write_mode = 'one')
+         -1.0e36_r8, lndname, 'asp_'//trim(sdir), compress = 6, write_mode = 'one')
    ENDDO
 
    lndname  = trim(dir_model_landdata) // '/diag/topo_factor_svf_' // trim(cyear) // '.nc'
    CALL srfdata_map_and_write (svf_patches, landpatch%settyp, typpatch, m_patch2diag, &
-      -1.0e36_r8, lndname, 'svf', compress = 1, write_mode = 'one')
+      -1.0e36_r8, lndname, 'svf', compress = 6, write_mode = 'one')
 
    lndname  = trim(dir_model_landdata) // '/diag/topo_factor_cur_' // trim(cyear) // '.nc'
    CALL srfdata_map_and_write (cur_patches, landpatch%settyp, typpatch, m_patch2diag, &
-      -1.0e36_r8, lndname, 'cur', compress = 1, write_mode = 'one')
+      -1.0e36_r8, lndname, 'cur', compress = 6, write_mode = 'one')
 
    lndname  = trim(dir_model_landdata) // '/diag/topo_factor_sf_lut_' // trim(cyear) // '.nc'
 
@@ -500,10 +505,10 @@ SUBROUTINE Aggregation_TopographyFactors ( &
          write(sdir,'(I0)') j
          write(sdir1,'(I0)') i
          CALL srfdata_map_and_write (sf_lut_patches(j,i,:), landpatch%settyp, typpatch, m_patch2diag, &
-            -1.0e36_r8, lndname, 'sf_'//trim(sdir)//'_'//trim(sdir1), compress = 1, write_mode = 'one')
+            -1.0e36_r8, lndname, 'sf_'//trim(sdir)//'_'//trim(sdir1), compress = 6, write_mode = 'one')
       ENDDO
    ENDDO
-   ENDIF
+#endif
 
    IF (p_is_worker) THEN
       IF (allocated(slp_type_patches)) deallocate ( slp_type_patches )

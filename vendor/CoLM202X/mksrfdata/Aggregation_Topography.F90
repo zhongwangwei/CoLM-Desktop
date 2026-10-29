@@ -13,7 +13,6 @@ SUBROUTINE Aggregation_Topography ( &
 !  Created by Shupeng Zhang, 05/2023
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -22,13 +21,17 @@ SUBROUTINE Aggregation_Topography ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
 
+#ifdef SrfdataDiag
    USE MOD_Mesh, only: numelm
    USE MOD_LandElm
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -53,7 +56,9 @@ SUBROUTINE Aggregation_Topography ( &
    real(r8), allocatable :: elevation_patches(:), elvstd_patches(:), sloperatio_patches(:)
    real(r8), allocatable :: landarea_one     (:)
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
+#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
@@ -63,13 +68,13 @@ SUBROUTINE Aggregation_Topography ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate topography ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      lndname = trim(dir_rawdata)//'/topography.nc'
+      lndname = trim(dir_rawdata)//trim(DEF_rawdata%topo%dir)//'/topography.nc'
 
 ! ---------------------------------------------------------------------------------
 !   aggregate the elevation from the resolution of raw data to modelling resolution
@@ -151,11 +156,11 @@ SUBROUTINE Aggregation_Topography ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('elevation_patches ', elevation_patches )
       CALL check_vector_data ('elvstd_patches    ', elvstd_patches    )
       CALL check_vector_data ('sloperatio_patches', sloperatio_patches)
-      ENDIF
+#endif
 
       lndname = trim(landdir)//'/elevation_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -175,22 +180,22 @@ SUBROUTINE Aggregation_Topography ( &
       CALL ncio_write_vector (lndname, 'sloperatio_patches', 'patch', landpatch, &
          sloperatio_patches, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/topography_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (elevation_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'elevation', compress = 1, write_mode = 'one', create_mode=.true.)
+         -1.0e36_r8, lndname, 'elevation', compress = 6, write_mode = 'one', create_mode=.true.)
 
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/topography_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (elvstd_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'elvstd', compress = 1, write_mode = 'one')
+         -1.0e36_r8, lndname, 'elvstd', compress = 6, write_mode = 'one')
 
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname  = trim(dir_model_landdata) // '/diag/topography_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (sloperatio_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         -1.0e36_r8, lndname, 'sloperatio', compress = 1, write_mode = 'one')
-      ENDIF
+         -1.0e36_r8, lndname, 'sloperatio', compress = 6, write_mode = 'one')
+#endif
 
       IF (p_is_worker) THEN
          deallocate ( elevation_patches  )

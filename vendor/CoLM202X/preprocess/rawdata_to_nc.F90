@@ -1,6 +1,5 @@
 PROGRAM rawdata_to_nc
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_NetCDFSerial
    IMPLICIT NONE
@@ -104,7 +103,7 @@ PROGRAM rawdata_to_nc
    allocate (a_chr1 (nlon,nlat))
    allocate (a_int8 (nlon, nlat))
 
-   CALL make_directory(trim(ncdir) // '/lai/global_30s_10_year_avg')
+   CALL execute_command_line ('mkdir -p ' // trim(ncdir) // '/lai/global_30s_10_year_avg')
 
    DO n8 = 1, 46
       Julian_day = 1 + (N8-1)*8
@@ -242,7 +241,7 @@ PROGRAM rawdata_to_nc
    !-------------------------------
    allocate (a_real8 (nlon,nlat))
 
-   CALL make_directory(trim(ncdir) // '/soil')
+   CALL execute_command_line ('mkdir -p ' // trim(ncdir) // '/soil')
 
    lndname = trim(ncdir) // '/soil/theta_s.nc'
    CALL ncio_create_file (lndname)

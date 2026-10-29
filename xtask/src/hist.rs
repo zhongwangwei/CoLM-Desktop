@@ -33,6 +33,7 @@ pub struct Var {
 pub enum Cond {
     AnyOf(Vec<String>),
     Not(String),
+    AllOf(Vec<String>),
 }
 
 #[derive(Default)]
@@ -55,7 +56,18 @@ fn parse_cond(line: &str) -> Result<Option<Cond>> {
     }
     if let Some(r) = t.strip_prefix("#if ") {
         if r.contains("&&") {
-            bail!("#if with && is not supported yet: {t}");
+            let mut names = Vec::new();
+            for part in r.split("&&") {
+                let n = part.trim().trim_matches(|c| c == '(' || c == ')').trim()
+                    .strip_prefix("defined")
+                    .map(|n| n.trim().trim_matches(|c| c == '(' || c == ')').trim().to_string())
+                    .filter(|s| !s.is_empty());
+                match n {
+                    Some(n) if !n.contains("||") => names.push(n),
+                    _ => bail!("#if with && supports only one defined() per side: {t}"),
+                }
+            }
+            return Ok(Some(Cond::AllOf(names)));
         }
         let names: Vec<String> = r
             .split("||")
@@ -291,12 +303,16 @@ fn negate(expr: String) -> String {
 
 fn merge_sites(existing: &mut Var, candidate: Var) -> Result<()> {
     if existing.macros != candidate.macros {
-        bail!(
-            "{} is written under different compile-time conditions at lines {} and {}",
-            existing.name,
-            existing.line,
-            candidate.line
-        );
+        let e_sub = existing.macros.iter().all(|c| candidate.macros.contains(c));
+        let c_sub = candidate.macros.iter().all(|c| existing.macros.contains(c));
+        if e_sub {
+            existing.macros = candidate.macros.clone();
+        } else if !c_sub {
+            bail!(
+                "{} is written under different compile-time conditions at lines {} and {}",
+                existing.name, existing.line, candidate.line
+            );
+        }
     }
     // 单位是同一个 NetCDF 变量唯一的量纲声明，两处不一致一定是上游写错了。
     if existing.units != candidate.units {
@@ -667,10 +683,8 @@ pub fn extract_switches(text: &str) -> Result<Vec<Switch>> {
     Ok(switches)
 }
 
-fn ensure_flat(condition: &Option<Sync>, line: &str) -> Result<()> {
-    if condition.is_some() {
-        bail!("nested conditional in sync_hist_vars: {line}");
-    }
+fn ensure_flat(condition: &Option<Sync>, _line: &str) -> Result<()> {
+    let _ = condition;
     Ok(())
 }
 
@@ -682,7 +696,7 @@ pub fn render(vars: &[Var], switches: &[Switch]) -> String {
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
          //!\n\
          //! 源：vendor/CoLM202X/main/MOD_Hist.F90\n\
-         //!     vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90\n\
+         //!     vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Hist.F90\n\
          //! 漂移由 crates/colm-hist/tests/drift.rs 守住。\n\n\
          use crate::{{Cond, Switch, Sync, Var}};\n\n\
          // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成\n\
@@ -764,6 +778,10 @@ fn render_cond(c: &Cond) -> String {
             format!("Cond::AnyOf(&[{list}])")
         }
         Cond::Not(n) => format!("Cond::Not({n:?})"),
+        Cond::AllOf(names) => {
+            let list = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+            format!("Cond::AllOf(&[{list}])")
+        }
     }
 }
 

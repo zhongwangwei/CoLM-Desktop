@@ -24,10 +24,7 @@ MODULE MOD_Vars_Global
    integer, parameter :: URBAN     = 1
    integer, parameter :: WATERBODY = 16
    integer, parameter :: WETLAND   = 17
-   ! FIX upstream-bugs #73: was 7, which is Grassland in the GLCC legend (MOD_Const_LC).
-   ! Class 2 is Dryland Cropland and Pasture. Every user of CROPLAND is in a PFT/PC/CROP
-   ! path, which supports IGBP only, so no valid USGS configuration reached the old value.
-   integer, parameter :: CROPLAND  = 2
+   integer, parameter :: CROPLAND  = 7
    integer, parameter :: GLACIERS  = 24
 #else
    ! MODIS IGBP number of land cover category
@@ -115,10 +112,18 @@ MODULE MOD_Vars_Global
    real(r8), parameter :: PI       = 4*atan(1.)    ! pi value
    real(r8), parameter :: deg2rad  = 1.745329251994330e-2_r8 ! degree to radius
 
+   integer , parameter :: irrig_start_time = 21600           ! local time of irrigation start
+   real(r8), parameter :: irrig_max_depth  = 1._r8           ! max irrigation depth
+   real(r8), parameter :: irrig_threshold_fraction = 1._r8   ! irrigation thershold
+   real(r8), parameter :: irrig_supply_fraction = 1._r8      ! irrigation supply thershold
+   real(r8), parameter :: irrig_min_cphase = 1._r8           ! crop phenology when begin irrigation
+   real(r8), parameter :: irrig_max_cphase = 4._r8           ! crop phenology when end irrigation
+   integer , parameter :: irrig_time_per_day = 14400         ! irrigation last time
    integer , parameter :: irrig_method_drip = 1              ! irrigation method
    integer , parameter :: irrig_method_sprinkler = 2         ! irrigation method
    integer , parameter :: irrig_method_flood = 3             ! irrigation method
    integer , parameter :: irrig_method_paddy = 4             ! irrigation method
+   real(r8), parameter :: pondmxc = 100.0                    ! ponding depth (mm)
 ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: Init_GlobalVars
 

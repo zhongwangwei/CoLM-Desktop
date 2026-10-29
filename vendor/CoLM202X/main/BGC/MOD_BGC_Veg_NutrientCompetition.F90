@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Veg_NutrientCompetition
 
 !----------------------------------------------------------------------------------------------------
@@ -535,3 +536,4 @@ CONTAINS
    END SUBROUTINE calc_plant_nutrient_demand_CLM45_default
 
 END MODULE MOD_BGC_Veg_NutrientCompetition
+#endif

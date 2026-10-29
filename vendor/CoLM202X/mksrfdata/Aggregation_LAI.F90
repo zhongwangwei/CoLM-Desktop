@@ -22,7 +22,6 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 !  Hua Yuan,      05/2023: TODO
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
@@ -33,14 +32,20 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
    USE MOD_Land2mWMO
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
 
    USE MOD_AggregationRequestData
 
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
+#endif
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
 
@@ -65,7 +70,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
    integer :: start_year, end_year, iy
 
    ! for IGBP data
-   character(len=256) :: dir_5x5, suffix
+   character(len=256) :: dir, fname
    integer :: month
    type (block_data_real8_2d) :: SAI          ! plant stem area index (m2/m2)
    real(r8), allocatable :: SAI_patches(:), sai_one(:)
@@ -81,6 +86,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
    logical  :: first_call_LAI_patch, first_call_SAI_patch
    logical  :: first_call_LAI_pft, first_call_SAI_pft
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
 #ifndef CROP
    integer :: typpft  (N_PFT)
@@ -88,6 +94,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
    integer :: typpft  (N_PFT+N_CFT)
 #endif
    character(len=256) :: varname
+#endif
 
       ! LAI data root directory->case/landdata/LAI
       landdir = trim(dir_model_landdata) // '/LAI/'
@@ -97,7 +104,7 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate LAI ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -132,18 +139,18 @@ SUBROUTINE Aggregation_LAI (gridlai, dir_rawdata, dir_model_landdata, lc_year)
 ! ... global plant leaf area index
 ! ................................................
 
-IF (DEF_USE_LCT) THEN
+#if (defined LULC_USGS || defined LULC_IGBP)
       ! add time variation of LAI
       IF (DEF_LAI_MONTHLY) THEN
          ! monthly average LAI
          ! if use lai change, LAI data of simulation start year and end year will be made
          ! if do not use lai change, only make LAI data of defined lc year
-IF (DEF_USE_LULCC) THEN
+#ifdef LULCC
          ! 07/2023, NOTE: if defined LULCC, only one year (lc_year) lai processed.
          start_year = lc_year
          end_year   = lc_year
          ntime      = 12
-ELSE
+#else
          IF (DEF_LAI_CHANGE_YEARLY) THEN
             start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR )
             start_year = min(start_year,                DEF_LAI_END_YEAR   )
@@ -155,7 +162,7 @@ ELSE
             end_year   = lc_year
             ntime      = 12
          ENDIF
-ENDIF
+#endif
       ! 8-day LAI
       ELSE
          start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR)
@@ -177,7 +184,7 @@ ENDIF
          DO iy = start_year, end_year
 
             write(cyear,'(i4.4)') iy
-            CALL make_directory(trim(landdir) // trim(cyear))
+            CALL system('mkdir -p ' // trim(landdir) // trim(cyear))
 
             ! loop for month or 8-day
             DO itime = 1, ntime
@@ -197,16 +204,16 @@ ENDIF
 
                IF (p_is_io) THEN
                   IF (DEF_LAI_MONTHLY) THEN
-                     dir_5x5 = trim(dir_rawdata) // '/plant_15s'
+                     dir = trim(dir_rawdata) // trim(DEF_rawdata%lai_sai%dir)
                      IF (iy < 2000) THEN
                         ! every 5 years one file
                         write(cyear_bk,'(i4.4)') (iy / 5) * 5
-                        suffix = 'MOD'//trim(cyear_bk)
-                        CALL read_5x5_data_time (dir_5x5, suffix, gridlai, &
+                        fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear_bk, '')
+                        CALL read_5x5_data_time (dir, fname, gridlai, &
                                    'MONTHLY_LC_LAI_'//trim(cyear), itime, LAI)
                      ELSE
-                        suffix = 'MOD'//trim(cyear)
-                        CALL read_5x5_data_time (dir_5x5, suffix, gridlai, &
+                        fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear, '')
+                        CALL read_5x5_data_time (dir, fname, gridlai, &
                                                  'MONTHLY_LC_LAI', itime, LAI)
                      ENDIF
                   ELSE
@@ -237,9 +244,9 @@ ENDIF
 #endif
                ENDIF
 
-               IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
                CALL check_vector_data ('LAI value '//trim(c3), LAI_patches)
-               ENDIF
+#endif
 
 #ifdef USEMPI
                CALL mpi_barrier (p_comm_glb, p_err)
@@ -259,7 +266,7 @@ ENDIF
                CALL ncio_write_vector (lndname, 'LAI_patches', 'patch', &
                   landpatch, LAI_patches, DEF_Srfdata_CompressLevel)
 
-               IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
                typpatch = (/(ityp, ityp = 0, N_land_classification)/)
                lndname  = trim(dir_model_landdata) // '/diag/LAI_patch_'// trim(cyear) // '.nc'
                IF (DEF_LAI_MONTHLY) THEN
@@ -269,10 +276,10 @@ ENDIF
                   varname = 'LAI_8-day'
                ENDIF
                CALL srfdata_map_and_write (LAI_patches, landpatch%settyp, typpatch, m_patch2diag, &
-                  -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+                  -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                   lastdimname = 'Itime', lastdimvalue = itime, create_mode=first_call_LAI_patch)
                IF ( first_call_LAI_patch ) first_call_LAI_patch = .false.
-               ENDIF
+#endif
             ENDDO
             first_call_LAI_patch = .true.
          ENDDO
@@ -289,14 +296,15 @@ ENDIF
             allocate (SAI_patches (numpatch))
          ENDIF
 
-         dir_5x5 = trim(dir_rawdata) // '/plant_15s'
+         dir = trim(dir_rawdata) // trim(DEF_rawdata%lai_sai%dir)
          DO iy = start_year, end_year
             write(cyear,'(i4.4)') iy
+
             IF (iy < 2000) THEN
                write(cyear_bk,'(i4.4)') (iy / 5) * 5
-               suffix = 'MOD'//trim(cyear_bk)
+               fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear_bk, '')
             ELSE
-               suffix = 'MOD'//trim(cyear)
+               fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear, '')
             ENDIF
 
             DO itime = 1, 12
@@ -308,10 +316,10 @@ ENDIF
 
                IF (p_is_io) THEN
                   IF (iy < 2000) THEN
-                     CALL read_5x5_data_time (dir_5x5, suffix, gridlai, &
+                     CALL read_5x5_data_time (dir, fname, gridlai, &
                         'MONTHLY_LC_SAI_'//trim(cyear), itime, SAI)
                   ELSE
-                     CALL read_5x5_data_time (dir_5x5, suffix, gridlai, &
+                     CALL read_5x5_data_time (dir, fname, gridlai, &
                         'MONTHLY_LC_SAI', itime, SAI)
                   ENDIF
 
@@ -339,9 +347,9 @@ ENDIF
 #endif
                ENDIF
 
-            IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
             CALL check_vector_data ('SAI value '//trim(c3), SAI_patches)
-            ENDIF
+#endif
 
 #ifdef USEMPI
                CALL mpi_barrier (p_comm_glb, p_err)
@@ -355,7 +363,7 @@ ENDIF
                CALL ncio_write_vector (lndname, 'SAI_patches', 'patch', landpatch, SAI_patches, &
                   DEF_Srfdata_CompressLevel)
 
-               IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
                typpatch = (/(ityp, ityp = 0, N_land_classification)/)
                lndname  = trim(dir_model_landdata) // '/diag/SAI_patch_'// trim(cyear) // '.nc'
                IF (DEF_LAI_MONTHLY) THEN
@@ -365,29 +373,29 @@ ENDIF
                   varname = 'SAI_8-day'
                ENDIF
                CALL srfdata_map_and_write (SAI_patches, landpatch%settyp, typpatch, m_patch2diag, &
-                  -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+                  -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                   lastdimname = 'Itime', lastdimvalue = itime, create_mode=first_call_SAI_patch)
                IF ( first_call_SAI_patch ) first_call_SAI_patch = .false.
 
-               ENDIF
+#endif
             ENDDO
             first_call_SAI_patch = .true.
          ENDDO
       ENDIF
-ENDIF
+#endif
 
 ! For both PFT and PC run LAI!!!!!
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          ! add time variation of LAI
          ! monthly average LAI
          ! if use lai change, LAI data of simulation start year and end year will be made
          ! if not use lai change, only make LAI data of defined lc year
-IF (DEF_USE_LULCC) THEN
+#ifdef LULCC
          ! 07/2023, NOTE: if defined LULCC, only one year (lc_year) lai processed.
          start_year = lc_year
          end_year   = lc_year
          ntime      = 12
-ELSE
+#else
       IF (DEF_LAI_CHANGE_YEARLY) THEN
          start_year = max(simulation_lai_year_start, DEF_LAI_START_YEAR )
          start_year = min(start_year,                DEF_LAI_END_YEAR   )
@@ -399,11 +407,11 @@ ELSE
          end_year   = lc_year
          ntime      = 12
       ENDIF
-ENDIF
+#endif
 
       IF (p_is_io) THEN
-         CALL allocate_block_data (gridlai, pftLSAI, N_PFT_modis, lb1 = 0)
-         CALL allocate_block_data (gridlai, pftPCT,  N_PFT_modis, lb1 = 0)
+         CALL allocate_block_data (gridlai , pftLSAI, N_PFT_modis, lb1 = 0)
+         CALL allocate_block_data (grid_pft, pftPCT,  N_PFT_modis, lb1 = 0)
       ENDIF
 
       IF (p_is_worker) THEN
@@ -413,40 +421,49 @@ ENDIF
          allocate(SAI_pfts    (numpft  ))
       ENDIF
 
-      dir_5x5 = trim(dir_rawdata) // '/plant_15s'
       DO iy = start_year, end_year
          write(cyear,'(i4.4)') iy
-         CALL make_directory(trim(landdir) // trim(cyear))
-
-         IF (iy < 2000) THEN
-            write(cyear_bk,'(i4.4)') (iy / 5) * 5
-            suffix = 'MOD'//trim(cyear_bk)
-         ELSE
-            suffix = 'MOD'//trim(cyear)
-         ENDIF
+         CALL system('mkdir -p ' // trim(landdir) // trim(cyear))
 
          IF (p_is_master) THEN
             write(*,'(A,I4)') 'Aggregate LAI : ', iy
          ENDIF
 
-         IF (p_is_io) THEN
-            CALL read_5x5_data_pft (dir_5x5, suffix, gridlai, 'PCT_PFT', pftPCT)
+         dir = trim(dir_rawdata) // trim(DEF_rawdata%pft%dir)
+
+         IF (iy < 2000) THEN
+            write(cyear_bk,'(i4.4)') (iy / 5) * 5
+            fname = get_rawdata_fname (DEF_rawdata%pft%fname, cyear_bk, '')
+         ELSE
+            fname = get_rawdata_fname (DEF_rawdata%pft%fname, cyear, '')
          ENDIF
 
-         IF(.not. DEF_USE_LAIFEEDBACK)THEN
+         IF (p_is_io) THEN
+            CALL read_5x5_data_pft (dir, fname, grid_pft, 'PCT_PFT', pftPCT)
+         ENDIF
+
+         IF (.not. DEF_USE_LAIFEEDBACK)THEN
+            dir = trim(dir_rawdata) // trim(DEF_rawdata%lai_sai%dir)
+            IF (iy < 2000) THEN
+               write(cyear_bk,'(i4.4)') (iy / 5) * 5
+               fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear_bk, '')
+            ELSE
+               fname = get_rawdata_fname (DEF_rawdata%lai_sai%fname, cyear, '')
+            ENDIF
+
             DO month = 1, 12
                IF (p_is_io) THEN
                   IF (iy < 2000) THEN
-                     CALL read_5x5_data_pft_time (dir_5x5, suffix, gridlai, &
+                     CALL read_5x5_data_pft_time (dir, fname, gridlai, &
                         'MONTHLY_PFT_LAI_'//trim(cyear), month, pftLSAI)
                   ELSE
-                     CALL read_5x5_data_pft_time (dir_5x5, suffix, gridlai, &
+                     CALL read_5x5_data_pft_time (dir, fname, gridlai, &
                         'MONTHLY_PFT_LAI', month, pftLSAI)
                   ENDIF
 #ifdef USEMPI
-                  CALL aggregation_data_daemon (gridlai, &
+                  CALL aggregation_data_daemon_multigrid (grid_pft, &
                      data_r8_3d_in1 = pftPCT,  n1_r8_3d_in1 = 16, &
-                     data_r8_3d_in2 = pftLSAI, n1_r8_3d_in2 = 16)
+                     grid_in2=gridlai, data_r8_3d_in2 = pftLSAI, n1_r8_3d_in2 = 16)
 #endif
                ENDIF
 
@@ -477,11 +494,10 @@ ENDIF
                         CYCLE
                      ENDIF
 
-                     CALL aggregation_request_data (landpatch, ipatch, gridlai, &
-                        zip = USE_zip_for_aggregation, area = area_one, &
+                     CALL aggregation_request_data_multigrid (landpatch, ipatch, grid_pft, area_one, &
                         data_r8_3d_in1 = pftPCT,  data_r8_3d_out1 = pct_pft_one, &
                         n1_r8_3d_in1 = 16, lb1_r8_3d_in1 = 0, &
-                        data_r8_3d_in2 = pftLSAI, data_r8_3d_out2 = lai_pft_one, &
+                        grid_in2=gridlai, data_r8_3d_in2 = pftLSAI, data_r8_3d_out2 = lai_pft_one, &
                         n1_r8_3d_in2 = 16, lb1_r8_3d_in2 = 0)
 
                      IF (allocated(lai_one)) deallocate(lai_one)
@@ -524,15 +540,15 @@ ENDIF
                   ENDDO
 
 #ifdef USEMPI
-                  CALL aggregation_worker_done ()
+                  CALL aggregation_worker_done_multigrid ()
 #endif
                ENDIF
 
                write(c2,'(i2.2)') month
-               IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
                CALL check_vector_data ('LAI_patches ' // trim(c2), LAI_patches)
                CALL check_vector_data ('LAI_pfts    ' // trim(c2), LAI_pfts   )
-               ENDIF
+#endif
 #ifdef USEMPI
                CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -546,15 +562,15 @@ ENDIF
                CALL ncio_write_vector (lndname, 'LAI_patches', 'patch', &
                   landpatch, LAI_patches, DEF_Srfdata_CompressLevel)
 
-               IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
                typpatch = (/(ityp, ityp = 0, N_land_classification)/)
                lndname  = trim(dir_model_landdata) // '/diag/LAI_patch_'// trim(cyear) // '.nc'
                varname  = 'LAI'
                CALL srfdata_map_and_write (LAI_patches, landpatch%settyp, typpatch, m_patch2diag, &
-                  -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+                  -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                   lastdimname = 'Itime', lastdimvalue = month, create_mode=first_call_LAI_patch)
                IF ( first_call_LAI_patch ) first_call_LAI_patch = .false.
-               ENDIF
+#endif
 
                lndname = trim(landdir)//trim(cyear)//'/LAI_pfts'//trim(c2)//'.nc'
                CALL ncio_create_file_vector (lndname, landpft)
@@ -562,7 +578,7 @@ ENDIF
                CALL ncio_write_vector (lndname, 'LAI_pfts', 'pft', &
                   landpft, LAI_pfts, DEF_Srfdata_CompressLevel)
 
-               IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
 #ifndef CROP
                typpft  = (/(ityp, ityp = 0, N_PFT-1)/)
 #else
@@ -571,10 +587,10 @@ ENDIF
                lndname = trim(dir_model_landdata) // '/diag/LAI_pft_'// trim(cyear) // '.nc'
                varname = 'LAI_pft'
                CALL srfdata_map_and_write (LAI_pfts, landpft%settyp, typpft, m_pft2diag, &
-                  -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+                  -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                   lastdimname = 'Itime', lastdimvalue = month, create_mode=first_call_LAI_pft)
                IF ( first_call_LAI_pft ) first_call_LAI_pft = .false.
-               ENDIF
+#endif
             ! loop end of month
             ENDDO
 
@@ -583,16 +599,16 @@ ENDIF
          DO month = 1, 12
             IF (p_is_io) THEN
                IF (iy < 2000) THEN
-                  CALL read_5x5_data_pft_time (dir_5x5, suffix, gridlai, &
+                  CALL read_5x5_data_pft_time (dir, fname, gridlai, &
                      'MONTHLY_PFT_SAI_'//trim(cyear), month, pftLSAI)
                ELSE
-                  CALL read_5x5_data_pft_time (dir_5x5, suffix, gridlai, &
+                  CALL read_5x5_data_pft_time (dir, fname, gridlai, &
                      'MONTHLY_PFT_SAI', month, pftLSAI)
                ENDIF
 #ifdef USEMPI
-               CALL aggregation_data_daemon (gridlai, &
+               CALL aggregation_data_daemon_multigrid (grid_pft, &
                   data_r8_3d_in1 = pftPCT,  n1_r8_3d_in1 = 16, &
-                  data_r8_3d_in2 = pftLSAI, n1_r8_3d_in2 = 16)
+                  grid_in2 = gridlai, data_r8_3d_in2 = pftLSAI, n1_r8_3d_in2 = 16)
 #endif
             ENDIF
 
@@ -623,11 +639,10 @@ ENDIF
                      CYCLE
                   ENDIF
 
-                  CALL aggregation_request_data (landpatch, ipatch, gridlai, &
-                     zip = USE_zip_for_aggregation, area = area_one, &
+                  CALL aggregation_request_data_multigrid (landpatch, ipatch, grid_pft, area = area_one, &
                      data_r8_3d_in1 = pftPCT,  data_r8_3d_out1 = pct_pft_one, &
                      n1_r8_3d_in1 = 16, lb1_r8_3d_in1 = 0, &
-                     data_r8_3d_in2 = pftLSAI, data_r8_3d_out2 = sai_pft_one, &
+                     grid_in2 = gridlai, data_r8_3d_in2 = pftLSAI, data_r8_3d_out2 = sai_pft_one, &
                      n1_r8_3d_in2 = 16, lb1_r8_3d_in2 = 0)
 
                   IF (allocated(sai_one)) deallocate(sai_one)
@@ -670,15 +685,15 @@ ENDIF
                ENDDO
 
 #ifdef USEMPI
-               CALL aggregation_worker_done ()
+               CALL aggregation_worker_done_multigrid ()
 #endif
             ENDIF
 
          write(c2,'(i2.2)') month
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_vector_data ('SAI_patches ' // trim(c2), SAI_patches)
          CALL check_vector_data ('SAI_pfts    ' // trim(c2), SAI_pfts   )
-         ENDIF
+#endif
 #ifdef USEMPI
             CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -692,15 +707,15 @@ ENDIF
             CALL ncio_write_vector (lndname, 'SAI_patches', 'patch', &
                landpatch, SAI_patches, DEF_Srfdata_CompressLevel)
 
-            IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
             typpatch = (/(ityp, ityp = 0, N_land_classification)/)
             lndname  = trim(dir_model_landdata) // '/diag/SAI_patch_'// trim(cyear) // '.nc'
             varname  = 'SAI'
             CALL srfdata_map_and_write (SAI_patches, landpatch%settyp, typpatch, m_patch2diag, &
-               -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+               -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                lastdimname = 'Itime', lastdimvalue = month, create_mode=first_call_SAI_patch)
                IF ( first_call_SAI_patch ) first_call_SAI_patch = .false.
-            ENDIF
+#endif
 
             lndname = trim(landdir)//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
             CALL ncio_create_file_vector (lndname, landpft)
@@ -708,7 +723,7 @@ ENDIF
             CALL ncio_write_vector (lndname, 'SAI_pfts', 'pft', &
                landpft, SAI_pfts, DEF_Srfdata_CompressLevel)
 
-            IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
 #ifndef CROP
             typpft  = (/(ityp, ityp = 0, N_PFT-1)/)
 #else
@@ -717,10 +732,10 @@ ENDIF
             lndname = trim(dir_model_landdata) // '/diag/SAI_pft_'// trim(cyear) // '.nc'
             varname = 'SAI_pft'
             CALL srfdata_map_and_write (SAI_pfts, landpft%settyp, typpft, m_pft2diag, &
-               -1.0e36_r8, lndname, trim(varname), compress = 0, write_mode = 'one', defval=0._r8, &
+               -1.0e36_r8, lndname, trim(varname), compress = 6, write_mode = 'one', defval=0._r8, &
                lastdimname = 'Itime', lastdimvalue = month, create_mode=first_call_SAI_pft)
                IF ( first_call_SAI_pft ) first_call_SAI_pft = .false.
-            ENDIF
+#endif
          ! loop end of month
          ENDDO
 
@@ -747,6 +762,6 @@ ENDIF
          IF (allocated(area_one   )) deallocate(area_one   )
 
       ENDIF
-ENDIF
+#endif
 
 END SUBROUTINE Aggregation_LAI

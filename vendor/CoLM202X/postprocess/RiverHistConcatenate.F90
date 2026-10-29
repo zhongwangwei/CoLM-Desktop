@@ -31,7 +31,6 @@ PROGRAM river_hist_concatenate
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist
-   USE MOD_Filesystem, ONLY: list_matching_paths, move_file
    USE MOD_NetCDFSerial
    USE netcdf
 
@@ -74,13 +73,15 @@ PROGRAM river_hist_concatenate
          CALL CoLM_stop ('river_hist_concatenate: missing arguments')
       ENDIF
 
-      ! Scan_shards builds an ls command with the target single-quoted; a single
-      ! quote cannot be represented and must be rejected before any shell call.
+      ! BEFORE anything shells out. scan_shards builds an ls command with the
+      ! target single-quoted, and a single quote is the one character single
+      ! quotes cannot contain -- a target of  x'; rm -rf ~; #.nc  closes the
+      ! quote and the rest runs as commands. Checking this inside rename_file
+      ! was useless: that runs at the very end, long after the injected
+      ! command has executed.
       CALL reject_unquotable (nlfile,     'namelist')
       CALL reject_unquotable (filetarget, 'target')
 
-      ! read_namelist contains MPI broadcasts; every rank must participate before
-      ! non-master ranks leave the postprocess-only program.
       CALL read_namelist (nlfile)
 
 #ifdef USEMPI
@@ -112,7 +113,13 @@ PROGRAM river_hist_concatenate
 
 CONTAINS
 
-   !> Reject paths that cannot be safely embedded in a single-quoted shell word.
+   !> Refuse a path that cannot be safely single-quoted in a shell command.
+   !!
+   !! Every other metacharacter -- space, $, ;, &, backtick, newline -- is
+   !! inert inside single quotes. A single quote is not: it ends the quoted
+   !! string and hands the remainder to the shell. Rather than attempt to
+   !! escape it, refuse the path. This must run before the first shell
+   !! command, not before the last one.
    SUBROUTINE reject_unquotable (path, what)
    character(len=*), intent(in) :: path, what
       IF (index(path, "'") > 0) THEN
@@ -136,10 +143,15 @@ CONTAINS
    real(r8), allocatable :: tref(:), tcmp(:)
    logical :: fexists
 
-      ! Enumerate segments from the shard-0 files on disk. The segment id is a
-      ! timestamp that cannot be guessed, so list literal path matches natively.
+      ! Enumerate segments from the shard-0 files on disk. Fortran has no
+      ! portable directory listing, and the segment id is a timestamp that
+      ! cannot be guessed, so shell out once.
       listfile = trim(filetarget) // '.segments.tmp'
-      CALL list_matching_paths(trim(stem()) // '_seg', '_shard00000.nc', trim(listfile))
+      ! Single-quote both paths: they come from the command line, so a space
+      ! would split the argument and a metacharacter would be interpreted.
+      ! The glob must stay outside the quotes to remain a glob.
+      CALL system ("ls '" // trim(stem()) // "'_seg*_shard00000.nc 2>/dev/null > '" &
+         // trim(listfile) // "'")
 
       nseg = 0
       OPEN (newunit=u, file=trim(listfile), status='old', action='read', iostat=ierr)
@@ -385,7 +397,6 @@ CONTAINS
 
       CALL rebuild_resv_variables ()
       CALL rebuild_bif_matrix ()
-      CALL rebuild_aux_variables (trim(filetmp), nlon, nlat)
 
       write(*,'(A,I0,A,I0,A)') '  rebuilt ', nvar, ' unit-catchment fields over ', &
          totalnumucat, ' catchments'
@@ -1010,84 +1021,47 @@ CONTAINS
       IF (n > 0) names(1:n) = tmp(1:n)
    END SUBROUTINE collect_varnames
 
-   !> Copy the one-dimensional time auxiliaries and the static upstream mask
-   !! that the shard writer emits but the ucat sweep does not collect.
-   SUBROUTINE rebuild_aux_variables (fileout, nlon, nlat)
-
-   USE netcdf
-   USE MOD_Vars_Global, only: spval
-   character(len=*), intent(in) :: fileout
-   integer, intent(in) :: nlon, nlat
-
-   character(len=256) :: name, fname
-   real(r8), allocatable :: vals(:), mask(:)
-   real(r8), allocatable :: grid(:,:)
-   integer, allocatable :: ids(:), xs(:), ys(:)
-   integer :: ish, ncid, k
-
-      name = 'history_window_seconds'
-      CALL copy_time_aux (trim(fileout), trim(name))
-      name = 'history_window_end_minutes'
-      CALL copy_time_aux (trim(fileout), trim(name))
-
-      allocate (grid(nlon,nlat)); grid = spval
-      DO ish = 0, seg_shards(1)-1
-         CALL shard_name (1, ish, fname)
-         ierr = nf90_open (trim(fname), NF90_NOWRITE, ncid)
-         CALL read_int (ncid, 'ucat_ucid', ids)
-         CALL read_int (ncid, 'x_ucat', xs)
-         CALL read_int (ncid, 'y_ucat', ys)
-         CALL read_real (ncid, 'mask_complete_upstream', mask)
-         DO k = 1, min(size(ids), min(size(xs), min(size(ys), size(mask))))
-            IF (xs(k) >= 1 .and. xs(k) <= nlon .and. ys(k) >= 1 .and. ys(k) <= nlat) &
-               grid(xs(k),ys(k)) = mask(k)
-         ENDDO
-         IF (allocated(ids)) deallocate (ids)
-         IF (allocated(xs)) deallocate (xs)
-         IF (allocated(ys)) deallocate (ys)
-         IF (allocated(mask)) deallocate (mask)
-         ierr = nf90_close (ncid)
-      ENDDO
-      CALL ncio_write_serial (trim(fileout), 'mask_complete_upstream', grid, &
-         'lon_ucat', 'lat_ucat')
-      CALL copy_var_attrs ('mask_complete_upstream')
-      deallocate (grid)
-
-
-   END SUBROUTINE rebuild_aux_variables
-
-   !> Copy one time-axis auxiliary from the owning shard/record.
-   SUBROUTINE copy_time_aux (fileout, name)
-   USE netcdf
-   character(len=*), intent(in) :: fileout, name
-   character(len=256) :: fname
-   real(r8), allocatable :: vals(:)
-   integer :: g, vid, ierr, ncid
-      DO g = 1, size(rec_seg)
-         CALL shard_name (rec_seg(g), 0, fname)
-         ierr = nf90_open (trim(fname), NF90_NOWRITE, ncid)
-         CALL read_real (ncid, trim(name), vals)
-         vid = -1
-         ierr = nf90_inq_varid (ncid, trim(name), vid)
-         IF (rec_local(g) >= 1 .and. rec_local(g) <= size(vals)) &
-            CALL ncio_write_serial_time (trim(fileout), trim(name), g, &
-               vals(rec_local(g)), 'time')
-         ierr = nf90_close (ncid)
-         IF (allocated(vals)) deallocate (vals)
-      ENDDO
-      CALL copy_var_attrs (trim(name))
-   END SUBROUTINE copy_time_aux
-
    !> Move src onto dst, or stop. Nothing downstream may treat a failed
    !! promotion as success: the .complete marker written afterwards is what
    !! tells an operator the aggregate is trustworthy.
    SUBROUTINE rename_file (src, dst)
    character(len=*), intent(in) :: src, dst
+   integer :: u, estat, cstat
    logical :: fexists
+   character(len=256) :: cmsg
 
-      CALL move_file(trim(src), trim(dst))
+      ! Both paths come from the command line. Unquoted, a path containing a
+      ! space was split into separate mv arguments -- observed moving the file
+      ! to a truncated name, or failing outright. Single quotes handle every
+      ! shell metacharacter except a single quote itself, which cannot be
+      ! escaped inside them, so that case is refused rather than mangled.
+      ! Defence in depth; the real gate is reject_unquotable at startup.
+      CALL reject_unquotable (src, 'source')
+      CALL reject_unquotable (dst, 'destination')
 
-      ! A zero status is not proof the file arrived. Check the filesystem.
+      inquire (file=trim(dst), exist=fexists)
+      IF (fexists) THEN
+         OPEN (newunit=u, file=trim(dst), status='old'); CLOSE (u, status='delete')
+      ENDIF
+
+      ! execute_command_line, not system: it is standard Fortran and it reports
+      ! the exit status. system() gave none, so mv could fail and the program
+      ! carried on to write the success marker.
+      cmsg = ''
+      CALL execute_command_line ("mv '" // trim(src) // "' '" // trim(dst) // "'", &
+         wait = .true., exitstat = estat, cmdstat = cstat, cmdmsg = cmsg)
+
+      IF (cstat /= 0) THEN
+         write(*,'(A,I0,2A)') 'ERROR: could not run mv (cmdstat=', cstat, '): ', trim(cmsg)
+         CALL CoLM_stop ('river_hist_concatenate: rename failed')
+      ENDIF
+      IF (estat /= 0) THEN
+         write(*,'(A,I0)') 'ERROR: mv exited with status ', estat
+         write(*,'(4A)') '       ', trim(src), ' -> ', trim(dst)
+         CALL CoLM_stop ('river_hist_concatenate: rename failed')
+      ENDIF
+
+      ! A zero exit status is not proof the file arrived. Check the filesystem.
       inquire (file=trim(dst), exist=fexists)
       IF (.not. fexists) THEN
          write(*,'(2A)') 'ERROR: rename reported success but the target is absent: ', trim(dst)

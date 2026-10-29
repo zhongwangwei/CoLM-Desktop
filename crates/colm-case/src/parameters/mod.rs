@@ -585,6 +585,20 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     if n.starts_with("DEF_SIMULATION_TIME%") {
         return Some("时间与预热");
     }
+    // 上游 2026-10-29 的 rawdata namelist：`DEF_rawdata%<条目>%{dir,gname,fname,vname}`
+    // 与 `DEF_rawdata_nml%<条目>%{idx,opt}`，都指地表原始数据文件。
+    if matches!(n.as_str(), "DEF_USE_SEDIMENT" | "DEF_USE_ISOTOPE" | "DEF_USE_METHANE") {
+        return Some("生态与生地化");
+    }
+    if n == "DEF_RS_CROWN_STRUCTURE" {
+        return Some("冠层结构与光学");
+    }
+    if n == "DEF_USE_GLC30" || n == "DEF_USE_ESACCI" || n == "DEF_LC_YEAR" {
+        return Some("地表数据");
+    }
+    if n.starts_with("DEF_RAWDATA%") || n.starts_with("DEF_RAWDATA_NML%") {
+        return Some("地表数据");
+    }
     if n.starts_with("DEF_LC_") {
         return Some("生态与生地化");
     }

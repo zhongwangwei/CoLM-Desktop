@@ -3,8 +3,6 @@
 MODULE MOD_Vars_1DAccFluxes
 
    USE MOD_Precision
-   ! Runtime switches read by land_history_restart.inc (module procedures).
-   USE MOD_Namelist, only: DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
 #ifdef DataAssimilation
    USE MOD_DA_Vars_TimeVariables
    USE MOD_DA_Vars_1DFluxes
@@ -13,11 +11,10 @@ MODULE MOD_Vars_1DAccFluxes
 #ifdef EXTERNAL_LAKE
    USE MOD_Lake_1DAccVars
 #endif
-   USE MOD_Tracer_LandPhase, only: tracer_flush_acc_fluxes, tracer_accumulate_fluxes
-
-   interface history_acc_write
-      module procedure history_acc_write1, history_acc_write2, history_acc_write3
-   end interface
+#ifdef MaterialTransport
+   USE MOD_MT_LandPhase, only: mt_flush_acc_fluxes, mt_accumulate_fluxes
+   USE MOD_MT_Namelist, only: mt_any_enabled
+#endif
 
    real(r8) :: nac ! number of accumulation
    real(r8), allocatable :: nac_ln      (:)
@@ -94,6 +91,9 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_snowdp    (:)
    real(r8), allocatable :: a_fsno      (:)
    real(r8), allocatable :: a_frcsat    (:)
+#ifdef MaterialTransport
+   real(r8), allocatable :: nac_frcsat  (:)
+#endif
    real(r8), allocatable :: a_sigf      (:)
    real(r8), allocatable :: a_green     (:)
    real(r8), allocatable :: a_lai       (:)
@@ -130,6 +130,7 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_t_soisno_ens   (:,:,:)
 #endif
 
+#ifdef URBAN_MODEL
    real(r8), allocatable :: a_t_room    (:) !temperature of inner building [K]
    real(r8), allocatable :: a_tafu      (:) !temperature of outer building [K]
    real(r8), allocatable :: a_fhac      (:) !sensible flux from heat or cool AC [W/m2]
@@ -154,7 +155,9 @@ MODULE MOD_Vars_1DAccFluxes
 
    real(r8), allocatable :: a_troof     (:) !temperature of roof [K]
    real(r8), allocatable :: a_twall     (:) !temperature of wall [K]
+#endif
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: a_lai_enftemp      (:) !1
    real(r8), allocatable :: a_lai_enfboreal    (:) !2
    real(r8), allocatable :: a_lai_dnfboreal    (:) !3
@@ -169,7 +172,9 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_lai_c3arcgrass   (:) !12
    real(r8), allocatable :: a_lai_c3grass      (:) !13
    real(r8), allocatable :: a_lai_c4grass      (:) !14
+#endif
 
+#ifdef BGC
    ! Fire diagnostics
    real(r8), allocatable :: a_farea_burned(:)
    real(r8), allocatable :: a_baf_crop(:)
@@ -488,6 +493,7 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_deadcrootnCap         (:)
    real(r8), allocatable :: a_deadcrootn_storageCap (:)
    real(r8), allocatable :: a_deadcrootn_xferCap    (:)
+#endif
 ! Ozone stress variables
    real(r8), allocatable :: a_ozone                 (:)
 ! End ozone stress variables
@@ -509,6 +515,7 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_t_lake      (:,:)
    real(r8), allocatable :: a_lake_icefrac(:,:)
 
+#ifdef BGC
    real(r8), allocatable :: a_litr1c_vr   (:,:)
    real(r8), allocatable :: a_litr2c_vr   (:,:)
    real(r8), allocatable :: a_litr3c_vr   (:,:)
@@ -542,6 +549,7 @@ MODULE MOD_Vars_1DAccFluxes
    real(r8), allocatable :: a_w_scalar    (:,:)
    real(r8), allocatable :: a_sminn_vr    (:,:)
    real(r8), allocatable :: decomp_vr_tmp (:,:)
+#endif
 
    real(r8), allocatable :: a_ustar   (:)
    real(r8), allocatable :: a_ustar2  (:)
@@ -592,7 +600,6 @@ CONTAINS
    SUBROUTINE allocate_acc_fluxes
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_LandElm
    USE MOD_LandPatch
    USE MOD_LandUrban, only: numurban
@@ -604,6 +611,7 @@ CONTAINS
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
+         IF (numpatch > 0) THEN
 
             allocate (a_us        (numpatch))
             allocate (a_vs        (numpatch))
@@ -677,6 +685,11 @@ CONTAINS
             allocate (a_snowdp    (numpatch))
             allocate (a_fsno      (numpatch))
             allocate (a_frcsat    (numpatch))
+#ifdef MaterialTransport
+            IF (mt_any_enabled()) THEN
+               allocate (nac_frcsat (numpatch))
+            ENDIF
+#endif
             allocate (a_sigf      (numpatch))
             allocate (a_green     (numpatch))
             allocate (a_lai       (numpatch))
@@ -713,6 +726,7 @@ CONTAINS
             allocate (a_t_soisno_ens   (maxsnl+1:nl_soil,DEF_DA_ENS_NUM,numpatch))
 #endif
 
+#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                allocate (a_t_room    (numurban))
                allocate (a_tafu      (numurban))
@@ -739,7 +753,8 @@ CONTAINS
                allocate (a_troof     (numurban))
                allocate (a_twall     (numurban))
             ENDIF
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#endif
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             allocate (a_lai_enftemp        (numpatch))
             allocate (a_lai_enfboreal      (numpatch))
             allocate (a_lai_dnfboreal      (numpatch))
@@ -754,8 +769,8 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             allocate (a_lai_c3arcgrass     (numpatch))
             allocate (a_lai_c3grass        (numpatch))
             allocate (a_lai_c4grass        (numpatch))
-ENDIF
-IF (DEF_USE_BGC) THEN
+#endif
+#ifdef BGC
             allocate (a_farea_burned(numpatch))
             allocate (a_baf_crop(numpatch))
             allocate (a_baf_peatf(numpatch))
@@ -1076,7 +1091,7 @@ IF (DEF_USE_BGC) THEN
             allocate (a_deadcrootnCap         (numpatch))
             allocate (a_deadcrootn_storageCap (numpatch))
             allocate (a_deadcrootn_xferCap    (numpatch))
-ENDIF
+#endif
 ! Ozone stress variables
             allocate (a_ozone              (numpatch))
 ! End ozone stress variables
@@ -1097,7 +1112,7 @@ ENDIF
             allocate (a_t_lake      (nl_lake,         numpatch))
             allocate (a_lake_icefrac(nl_lake,         numpatch))
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             allocate (a_litr1c_vr   (1:nl_soil,       numpatch))
             allocate (a_litr2c_vr   (1:nl_soil,       numpatch))
             allocate (a_litr3c_vr   (1:nl_soil,       numpatch))
@@ -1132,7 +1147,7 @@ IF (DEF_USE_BGC) THEN
             allocate (a_cwdnCap_vr  (1:nl_soil,       numpatch))
             allocate (a_t_scalar    (1:nl_soil,       numpatch))
             allocate (a_w_scalar    (1:nl_soil,       numpatch))
-ENDIF
+#endif
 
             allocate (a_ustar     (numpatch))
             allocate (a_ustar2    (numpatch))
@@ -1177,6 +1192,7 @@ ENDIF
             allocate (nac_dt      (numpatch))
             allocate (filter_dt   (numpatch))
 
+         ENDIF
       ENDIF
 
 #ifdef EXTERNAL_LAKE
@@ -1192,12 +1208,12 @@ ENDIF
    SUBROUTINE deallocate_acc_fluxes ()
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
    USE MOD_LandPatch, only: numpatch
    USE MOD_LandUrban, only: numurban
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
+         IF (numpatch > 0) THEN
 
             deallocate (a_us     )
             deallocate (a_vs     )
@@ -1271,6 +1287,9 @@ ENDIF
             deallocate (a_snowdp    )
             deallocate (a_fsno      )
             deallocate (a_frcsat    )
+#ifdef MaterialTransport
+            IF (allocated(nac_frcsat)) deallocate (nac_frcsat)
+#endif
             deallocate (a_sigf      )
             deallocate (a_green     )
             deallocate (a_lai       )
@@ -1308,6 +1327,7 @@ ENDIF
             deallocate (a_t_soisno_ens   )
 #endif
 
+#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                deallocate (a_t_room    )
                deallocate (a_tafu      )
@@ -1334,8 +1354,9 @@ ENDIF
                deallocate (a_troof     )
                deallocate (a_twall     )
             ENDIF
+#endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             deallocate (a_lai_enftemp        )
             deallocate (a_lai_enfboreal      )
             deallocate (a_lai_dnfboreal      )
@@ -1350,9 +1371,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             deallocate (a_lai_c3arcgrass     )
             deallocate (a_lai_c3grass        )
             deallocate (a_lai_c4grass        )
-ENDIF
+#endif
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             deallocate (a_farea_burned)
             deallocate (a_baf_crop)
             deallocate (a_baf_peatf)
@@ -1673,7 +1694,7 @@ IF (DEF_USE_BGC) THEN
             deallocate (a_deadcrootnCap        )
             deallocate (a_deadcrootn_storageCap)
             deallocate (a_deadcrootn_xferCap   )
-ENDIF
+#endif
 ! Ozone stress variables
             deallocate (a_ozone              )
 ! END ozone stress variables
@@ -1694,7 +1715,7 @@ ENDIF
             deallocate (a_dz_lake     )
             deallocate (a_t_lake      )
             deallocate (a_lake_icefrac)
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             deallocate (a_litr1c_vr   )
             deallocate (a_litr2c_vr   )
             deallocate (a_litr3c_vr   )
@@ -1728,7 +1749,7 @@ IF (DEF_USE_BGC) THEN
             deallocate (a_cwdnCap_vr  )
             deallocate (a_t_scalar    )
             deallocate (a_w_scalar    )
-ENDIF
+#endif
 
             deallocate (a_ustar     )
             deallocate (a_ustar2    )
@@ -1773,6 +1794,7 @@ ENDIF
             deallocate (nac_dt      )
             deallocate (filter_dt   )
 
+         ENDIF
       ENDIF
 
 #ifdef EXTERNAL_LAKE
@@ -1782,19 +1804,26 @@ ENDIF
    END SUBROUTINE deallocate_acc_fluxes
 
    !-----------------------
-   SUBROUTINE FLUSH_acc_fluxes (flush_reactive)
+#ifdef MaterialTransport
+   SUBROUTINE FLUSH_acc_fluxes (flush_mt)
+#else
+   SUBROUTINE FLUSH_acc_fluxes ()
+#endif
 
       USE MOD_SPMD_Task
       USE MOD_LandPatch, only: numpatch
       USE MOD_LandUrban, only: numurban
       USE MOD_Vars_Global, only: spval
-      USE MOD_Namelist, only: DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
       IMPLICIT NONE
-      logical, intent(in), optional :: flush_reactive
-      logical :: flush_reactive_active
+#ifdef MaterialTransport
+      ! .false. keeps the material accumulators: at start-up they may
+      ! already hold values read from the material restart.
+      logical, intent(in), optional :: flush_mt
+      logical :: flush_mt_active
 
-      flush_reactive_active = .true.
-      IF (present(flush_reactive)) flush_reactive_active = flush_reactive
+      flush_mt_active = .true.
+      IF (present(flush_mt)) flush_mt_active = flush_mt
+#endif
 
       IF (p_is_worker) THEN
 
@@ -1874,6 +1903,9 @@ ENDIF
             a_snowdp    (:) = spval
             a_fsno      (:) = spval
             a_frcsat    (:) = spval
+#ifdef MaterialTransport
+            IF (allocated(nac_frcsat)) nac_frcsat(:) = 0._r8
+#endif
             a_sigf      (:) = spval
             a_green     (:) = spval
             a_lai       (:) = spval
@@ -1910,6 +1942,7 @@ ENDIF
             a_t_soisno_ens   (:,:,:) = spval
 #endif
 
+#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                a_t_room   (:) = spval
                a_tafu     (:) = spval
@@ -1936,8 +1969,9 @@ ENDIF
                a_troof    (:) = spval
                a_twall    (:) = spval
             ENDIF
+#endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             a_lai_enftemp      (:) = spval
             a_lai_enfboreal    (:) = spval
             a_lai_dnfboreal    (:) = spval
@@ -1952,8 +1986,8 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             a_lai_c3arcgrass   (:) = spval
             a_lai_c3grass      (:) = spval
             a_lai_c4grass      (:) = spval
-ENDIF
-IF (DEF_USE_BGC) THEN
+#endif
+#ifdef BGC
             a_farea_burned(:) = spval
             a_baf_crop(:) = spval
             a_baf_peatf(:) = spval
@@ -2273,7 +2307,7 @@ IF (DEF_USE_BGC) THEN
             a_deadcrootnCap        (:) = spval
             a_deadcrootn_storageCap(:) = spval
             a_deadcrootn_xferCap   (:) = spval
-ENDIF
+#endif
             a_ozone                (:) = spval
 
             a_t_soisno     (:,:) = spval
@@ -2292,7 +2326,7 @@ ENDIF
             a_dz_lake      (:,:) = spval
             a_t_lake       (:,:) = spval
             a_lake_icefrac (:,:) = spval
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             a_litr1c_vr    (:,:) = spval
             a_litr2c_vr    (:,:) = spval
             a_litr3c_vr    (:,:) = spval
@@ -2328,7 +2362,7 @@ IF (DEF_USE_BGC) THEN
             a_w_scalar     (:,:) = spval
 
             a_sminn_vr     (:,:) = spval
-ENDIF
+#endif
 
             a_ustar (:) = spval
             a_ustar2(:) = spval
@@ -2380,10 +2414,9 @@ ENDIF
       CALL Flush_LakeAccVars
 #endif
 
-      IF (DEF_USE_TRACER) THEN
-         IF (flush_reactive_active) CALL tracer_flush_acc_fluxes ()
-      ENDIF
-
+#ifdef MaterialTransport
+      IF (flush_mt_active) CALL mt_flush_acc_fluxes ()
+#endif
    END SUBROUTINE FLUSH_acc_fluxes
 
    SUBROUTINE accumulate_fluxes
@@ -2407,8 +2440,7 @@ ENDIF
    USE MOD_Vars_1DForcing
    USE MOD_Vars_1DFluxes
    USE MOD_FrictionVelocity
-   USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, &
-      DEF_USE_TRACER, DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_USE_VariablySaturatedFlow, DEF_USE_FIRE
+   USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_OZONESTRESS, DEF_USE_PLANTHYDRAULICS, DEF_USE_NITRIF, DEF_USE_FIRE
    USE MOD_TurbulenceLEddy
    USE MOD_Vars_Global
 #ifdef CatchLateralFlow
@@ -2549,7 +2581,7 @@ ENDIF
             CALL acc1d (etrsun_out    , a_etrsun         )
             CALL acc1d (etrsha_out    , a_etrsha         )
 
-            IF (.not. DEF_USE_VariablySaturatedFlow) CALL acc1d (qcharge, a_qcharge)
+            CALL acc1d (qcharge       , a_qcharge        )
 
             CALL acc1d (t_grnd        , a_t_grnd         )
             CALL acc1d (tleaf         , a_tleaf          )
@@ -2559,7 +2591,21 @@ ENDIF
             CALL acc1d (scv           , a_scv            )
             CALL acc1d (snowdp        , a_snowdp         )
             CALL acc1d (fsno          , a_fsno           )
+#ifdef MaterialTransport
+            IF (mt_any_enabled()) THEN
+               CALL acc1d (frcsat, a_frcsat, frcsat_hist_valid)
+               DO i = 1, numpatch
+                  IF (.not. frcsat_hist_valid(i)) CYCLE
+                  ! A legacy partial window has no recoverable valid-sample count.
+                  IF (nac_frcsat(i) < 0._r8) CYCLE
+                  IF (frcsat(i) /= spval) nac_frcsat(i) = nac_frcsat(i) + 1._r8
+               ENDDO
+            ELSE
+#endif
             CALL acc1d (frcsat        , a_frcsat         )
+#ifdef MaterialTransport
+            ENDIF
+#endif
             CALL acc1d (sigf          , a_sigf           )
             CALL acc1d (green         , a_green          )
             CALL acc1d (lai           , a_lai            )
@@ -2629,6 +2675,7 @@ ENDIF
             CALL acc3d (t_soisno_ens   , a_t_soisno_ens   )
 #endif
 
+#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                CALL acc1d(t_room     , a_t_room    )
                CALL acc1d(tafu       , a_tafu      )
@@ -2655,8 +2702,9 @@ ENDIF
                CALL acc1d(t_roof     , a_troof     )
                CALL acc1d(t_wall     , a_twall     )
             ENDIF
+#endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             CALL acc1d (lai_enftemp        , a_lai_enftemp       )
             CALL acc1d (lai_enfboreal      , a_lai_enfboreal     )
             CALL acc1d (lai_dnfboreal      , a_lai_dnfboreal     )
@@ -2671,8 +2719,8 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
             CALL acc1d (lai_c3arcgrass     , a_lai_c3arcgrass    )
             CALL acc1d (lai_c3grass        , a_lai_c3grass       )
             CALL acc1d (lai_c4grass        , a_lai_c4grass       )
-ENDIF
-IF (DEF_USE_BGC) THEN
+#endif
+#ifdef BGC
             IF (DEF_USE_FIRE) THEN
                CALL acc1d (farea_burned                                 , a_farea_burned)
                CALL acc1d (baf_crop                                     , a_baf_crop)
@@ -2939,9 +2987,7 @@ IF (DEF_USE_BGC) THEN
             CALL acc1d (grainc_to_seed     ,   a_grainc_to_seed     )
             CALL acc1d (fert_to_sminn      ,   a_fert_to_sminn      )
 
-            ! growing-season running totals: keep the latest value (written as instantaneous)
             a_sum_irrig = sum_irrig
-            a_sum_deficit_irrig = sum_deficit_irrig
             a_sum_irrig_count = sum_irrig_count
             a_waterstorage = waterstorage
             CALL acc1d (groundwater_demand   ,   a_groundwater_demand )
@@ -2998,7 +3044,7 @@ IF (DEF_USE_BGC) THEN
                CALL acc1d (deadcrootn_storageCap,a_deadcrootn_storageCap)
                CALL acc1d (deadcrootn_xferCap   ,a_deadcrootn_xferCap   )
             ENDIF
-ENDIF
+#endif
             IF(DEF_USE_OZONESTRESS)THEN
                CALL acc1d (forc_ozone  , a_ozone       )
             ENDIF
@@ -3025,7 +3071,7 @@ ENDIF
             ENDIF
             CALL acc2d (t_lake      , a_t_lake       )
             CALL acc2d (lake_icefrac, a_lake_icefrac )
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             DO i = 1, numpatch
                DO j = 1, nl_soil
                   decomp_vr_tmp(j,i)  = decomp_cpools_vr(j,i_met_lit,i)
@@ -3200,7 +3246,7 @@ IF (DEF_USE_BGC) THEN
 
             CALL acc2d (t_scalar     , a_t_scalar       )
             CALL acc2d (w_scalar     , a_w_scalar       )
-ENDIF
+#endif
             allocate (r_ustar  (numpatch));  r_ustar (:) = spval
             allocate (r_ustar2 (numpatch));  r_ustar2(:) = spval !Shaofeng, 2023.05.20
             allocate (r_tstar  (numpatch));  r_tstar (:) = spval
@@ -3400,13 +3446,14 @@ ENDIF
       CALL accumulate_LakeTimeVars
 #endif
 
-      IF (DEF_USE_TRACER) CALL tracer_accumulate_fluxes ()
-
+#ifdef MaterialTransport
+      CALL mt_accumulate_fluxes ()
+#endif
    END SUBROUTINE accumulate_fluxes
 
 
 
-   SUBROUTINE acc1d (var, s)
+   SUBROUTINE acc1d (var, s, filter)
 
    USE MOD_Precision
    USE MOD_Vars_Global, only: spval
@@ -3415,10 +3462,14 @@ ENDIF
 
    real(r8), intent(in)    :: var(:)
    real(r8), intent(inout) :: s  (:)
+   logical,  intent(in), optional :: filter(:)
    ! Local variables
    integer :: i
 
       DO i = lbound(var,1), ubound(var,1)
+         IF (present(filter)) THEN
+            IF (.not. filter(i)) CYCLE
+         ENDIF
          IF (var(i) /= spval) THEN
             IF (s(i) /= spval) THEN
                s(i) = s(i) + var(i)
@@ -3492,8 +3543,6 @@ ENDIF
       ENDDO
 
    END SUBROUTINE acc3d
-
-#include <land_history_restart.inc>
 
 END MODULE MOD_Vars_1DAccFluxes
 ! ---------- EOP ------------

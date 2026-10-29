@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Veg_CNGapMortality
 
 !---------------------------------------------------------------------------------------------------
@@ -270,3 +271,4 @@ CONTAINS
    END SUBROUTINE CNGap_VegToLitter
 
 END MODULE MOD_BGC_Veg_CNGapMortality
+#endif

@@ -39578,3 +39578,34 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 在此之前，`main/TRACER/` 与上游 `main/MATERIAL/` 是**有意分叉**：上游这批 MT 工作在其提交里
 自述为未完成（`quarantine`、`unfinished`、`revert`），vendor 这边保持与 Rust 引擎逐位核对过的旧实现。
+
+## 上游全量替换：vendor/CoLM202X 到 7d2fca93（2026-10-29）
+
+**做了什么**：vendor 的 Fortran 源码整体替换为 zhongwangwei/CoLM202X `7d2fca93`（保留
+`include/Makeoptions.Mac-arm`、`tests/`、`share/CoLM_Mkdir.c`、`share/MOD_Filesystem.F90`、
+`include/pft_override_fields.inc`、`run/scripts/test_create_newcase_runtime_contract.sh`）。
+`main/TRACER/` 换成 `main/MATERIAL/`（GENERIC_WATER / FAMILY_ISOTOPE / FAMILY_SOLUTE /
+FAMILY_PARTICLE / FAMILY_GAS），259 个标识符按上游改名。
+
+**构建**：`create_defineh.bash` 的参数位变成 `GRID LULC URBAN Campbell CaMa BGC CROP MT LULCC`
+共 9 个；`build_kernel.sh` 的 17 个预设与自检映射已跟着改。`Makefile` 补回 vendor 本地的
+`MOD_Filesystem.o` / `CoLM_Mkdir.o` 及其依赖。vendor 在 `SinglePoint LULC_IGBP URBANOFF vanGenu
+CaMaOFF BGCOFF CROPOFF MTOFF LULCCOFF` 下 `make mksrfdata.x mkinidata.x colm.x` 退出码 0。
+
+**运行时的开关退回编译期**：上游把 BGC/URBAN/TRACER 改回 `#ifdef`，`DEF_USE_BGC`/`DEF_URBAN_RUN`
+一类运行时判断在 `MOD_Hist.F90` 里大幅减少。`colm-hist` 的闸门表随之变化：默认宏集合下
+`writable=122`、`unconditional=113`、总变量 724；BGC/URBAN 变量改成"加宏才可见"。
+
+**生成器**：`gen-schema` 认 `datainfo`/`rawdata_nml_entry`/`rawdata_nml_type`（新增 rawdata namelist，
+字段 951 → 960）；`gen-histmap` 支持 `#if (defined A) && (defined B)`、同名变量在 MT 内外各写一遍
+（取更宽条件）、`sync_hist_vars` 里的嵌套 `#ifdef`。`gen-co2mlo` 不再产出 `off` 场景（上游删了
+那一段），Rust 侧 `Co2Scenario::Off` 改为取最后一个观测月。
+
+**本地字段保留**：`MOD_Namelist` 以"上游新结构 + vendor 的 107 个本地字段（`DEF_LC_*`、气孔五参数、
+`DEF_USE_*` 运行时开关）"重建，手工解决 8 个冲突块并补回被拼接吞掉的 `ENDIF`。
+
+**已知未完成**：
+- 87 条本地物理修复（`o3coef` 初始化、`gssun` 公式、`pn` 未定义、示踪物流切片越界……）尚未按新文件位置重放；
+  `MOD_Thermal`、`MOD_LeafTemperature`、`MOD_SoilSnowHydrology` 等 16 个文件是上游原版。
+- `colm-srfdata`、`colm-bench`、`xtask`、`oracle` 的部分契约测试仍按旧结构断言，需要跟着改。
+

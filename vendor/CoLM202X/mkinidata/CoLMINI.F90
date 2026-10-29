@@ -17,7 +17,6 @@ PROGRAM CoLMINI
 !  Revised by Yongjiu Dai Februay 2014
 !=======================================================================
 
-   USE MOD_NetCDFSerial, ONLY: ncio_initialize
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -34,8 +33,12 @@ PROGRAM CoLMINI
    USE MOD_Const_LC
    USE MOD_Const_PFT
    USE MOD_TimeManager
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
+#endif
+#ifdef URBAN_MODEL
    USE MOD_LandUrban
+#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -46,6 +49,7 @@ PROGRAM CoLMINI
    USE MOD_HRUVector
 #endif
    USE MOD_Initialize
+   USE MOD_UnitCatchmentRegional, only: unitcatchment_regional_build
    ! SNICAR
 #ifdef HYPERSPECTRAL
    USE MOD_SnowSnicar_HiRes, only: SnowAge_init, SnowOptics_init
@@ -81,7 +85,6 @@ PROGRAM CoLMINI
 
       ! ----------------------------------------------------------------------
       CALL getarg (1, nlfile)
-      CALL ncio_initialize ()
       CALL read_namelist (nlfile)
 
       DEF_PIO_groupsize = 2
@@ -97,23 +100,23 @@ PROGRAM CoLMINI
 
 #ifdef SinglePoint
       fsrfdata = trim(dir_landdata) // '/srfdata.nc'
-IF ((.not. DEF_URBAN_RUN)) THEN
+#ifndef URBAN_MODEL
       CALL read_surface_data_single (fsrfdata, mksrfdata=.false.)
-ELSE
+#else
       CALL read_urban_surface_data_single (fsrfdata, mksrfdata=.false., mkrun=.true.)
-ENDIF
+#endif
 #endif
 
       CALL monthday2julian(s_year,s_month,s_day,s_julian)
       idate(1) = s_year; idate(2) = s_julian; idate(3) = s_seconds
       CALL adj2begin(idate)
 
-IF (DEF_USE_LULCC) THEN
+#ifdef LULCC
       lc_year = idate(1)
       DEF_LC_YEAR = lc_year
-ELSE
+#else
       lc_year = DEF_LC_YEAR
-ENDIF
+#endif
 
       CALL Init_GlobalVars
       CALL Init_LC_Const
@@ -123,6 +126,18 @@ ENDIF
 
       CALL pixel%load_from_file  (dir_landdata)
       CALL gblock%load_from_file (dir_landdata)
+
+      ! Regional river-lake network, cut from the land patches before the land data of
+      ! the initial year are loaded (it loads and frees them itself). With LULCC the
+      ! network serves every land-cover year of the run.
+      IF (DEF_UnitCatchment_regional) THEN
+#ifdef LULCC
+         CALL unitcatchment_regional_build (dir_landdata, lc_year, DEF_simulation_time%end_year)
+#else
+         CALL unitcatchment_regional_build (dir_landdata, lc_year, lc_year)
+#endif
+      ENDIF
+
       CALL mesh_load_from_file   (dir_landdata, lc_year)
 
       CALL pixelset_load_from_file (dir_landdata, 'landelm', landelm, numelm, lc_year)
@@ -133,15 +148,15 @@ ENDIF
 
       CALL pixelset_load_from_file (dir_landdata, 'landpatch', landpatch, numpatch, lc_year)
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL pixelset_load_from_file (dir_landdata, 'landpft', landpft, numpft, lc_year)
       CALL map_patch_to_pft
-ENDIF
+#endif
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
       CALL pixelset_load_from_file (dir_landdata, 'landurban', landurban, numurban, lc_year)
       CALL map_patch_to_urban
-ENDIF
+#endif
 #if (defined UNSTRUCTURED || defined CATCHMENT)
       CALL elm_vector_init ()
 #ifdef CATCHMENT

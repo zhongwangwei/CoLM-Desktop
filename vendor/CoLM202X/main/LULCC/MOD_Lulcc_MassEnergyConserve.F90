@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef LULCC
 MODULE MOD_Lulcc_MassEnergyConserve
 
    USE MOD_Precision
@@ -51,12 +52,16 @@ CONTAINS
    USE MOD_Lulcc_Vars_TimeInvariants
    USE MOD_Lulcc_Vars_TimeVariables
    USE MOD_Lulcc_TransferTraceReadin
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
+#endif
+#ifdef URBAN_MODEL
    USE MOD_LandUrban
    USE MOD_Urban_Vars_TimeVariables
    USE MOD_Urban_Vars_TimeInvariants
+#endif
    USE MOD_Const_Physical, only: cpice, cpliq, hfus, tfrz, denh2o, denice
    USE MOD_GroundTemperature
    USE MOD_SnowFraction
@@ -103,11 +108,12 @@ CONTAINS
 
    ! update for zwt, wa, ldew
    real(r8) :: tolerance, tol_z, tol_v, zi_soisno(0:nl_soil), sp_zi(0:nl_soil), sp_dz(1:nl_soil)
-   real(r8) :: zwt_mm   ! get_zwt_from_wa works in mm (FIX: upstream-bugs #45)
-   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
-   ! the union now, see the fill further below (Campbell only ever uses
-   ! prms(1,:)).
+#ifdef Campbell_SOIL_MODEL
+   integer, parameter :: nprms = 1
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    integer, parameter :: nprms = 5
+#endif
    real(r8) :: prms(nprms, 1:nl_soil)
    real(r8) :: ldew_tmp
 !-----------------------------------------------------------------------
@@ -170,20 +176,21 @@ CONTAINS
 
 IF (patchtype(np) .ne. 3) THEN !not a glacier patch
 
-IF ((DEF_USE_PFT .and. .not. DEF_SOLO_PFT) .or. DEF_FAST_PC) THEN
+IF (DEF_USE_PFT .or. DEF_FAST_PC) THEN
                      lccpct_np(:) = 0
                      lccpct_np(1) = sum(lccpct_patches(np,1:), mask=patchtypes(:)==0)
                      lccpct_np(URBAN  )   = lccpct_patches(np,URBAN  )
                      lccpct_np(WETLAND)   = lccpct_patches(np,WETLAND)
                      lccpct_np(WATERBODY) = lccpct_patches(np,WATERBODY)
                      lccpct_np(GLACIERS)  = lccpct_patches(np,GLACIERS)
-
+#ifndef CROP
                      !TODO: treat cropland separately for FAST_PC
                      IF ( DEF_FAST_PC ) THEN
                         lccpct_np(CROPLAND) = lccpct_patches(np,CROPLAND) &
                                             + lccpct_patches(np,14)
                         lccpct_np(1) = lccpct_np(1) - lccpct_np(CROPLAND)
                      ENDIF
+#endif
 ELSE
                      lccpct_np(:) = lccpct_patches(np,1:nlc)
 ENDIF
@@ -224,7 +231,6 @@ ENDIF
                               IF (.not.(FOUND)) THEN
                                  PRINT*, 'source patch not found, np', np, 'patchclass_', &
                                     patchclass_(grid_patch_s_(j):grid_patch_e_(j))
-                                 CALL CoLM_stop ('LULCC source patch not found')
                               ENDIF
                            ELSE
                              CYCLE
@@ -788,15 +794,16 @@ ENDIF
                               ENDDO
                            ELSE
                               PRINT*, 'Water table is below the soil column.'
-                              IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-                                 prms(1,1:nl_soil) = bsw(1:nl_soil,np)
-                              ELSE
-                                 prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,np)
-                                 prms(2,1:nl_soil) = n_vgm    (1:nl_soil,np)
-                                 prms(3,1:nl_soil) = L_vgm    (1:nl_soil,np)
-                                 prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,np)
-                                 prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,np)
-                              ENDIF
+#ifdef Campbell_SOIL_MODEL
+                              prms(1,1:nl_soil) = bsw(1:nl_soil,np)
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+                              prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,np)
+                              prms(2,1:nl_soil) = n_vgm    (1:nl_soil,np)
+                              prms(3,1:nl_soil) = L_vgm    (1:nl_soil,np)
+                              prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,np)
+                              prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,np)
+#endif
 
                               tolerance = 1.e-3
                               tol_z = tolerance / real(nl_soil,r8) /2.0
@@ -804,10 +811,8 @@ ENDIF
                               sp_zi(0:nl_soil) = zi_soisno(0:nl_soil) * 1000.0   ! from meter to mm
                               sp_dz(1:nl_soil) = sp_zi(1:nl_soil) - sp_zi(0:nl_soil-1)
                               tol_v = tol_z / maxval(sp_dz)
-! ==== FIX: get_zwt_from_wa returns mm (zmin = sp_zi is mm); zwt is in m (upstream-bugs #45) ====
                               CALL get_zwt_from_wa(porsl(nl_soil,np), theta_r(nl_soil,np), psi0(nl_soil,np), hksati(nl_soil,np), &
-                                                   nprms, prms(:,nl_soil), tol_v, tol_z, wa(np), sp_zi(nl_soil), zwt_mm          )
-                              zwt(np) = zwt_mm / 1000.0
+                                                   nprms, prms(:,nl_soil), tol_v, tol_z, wa(np), sp_zi(nl_soil), zwt(np)         )
                            ENDIF
                         ENDIF
 
@@ -876,7 +881,7 @@ ENDIF
 !                    ENDDO
 ENDIF
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
                      IF (patchtype(np)==0) THEN
                         ps  = patch_pft_s(np)
@@ -948,9 +953,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                      !    ldew(np) = sum( ldew_p(ps:pe)*pftfrac(ps:pe) )
                      ! ENDIF
 
-ENDIF
+#endif
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
                      IF (patchclass(np)==URBAN) THEN
 
                         ! If there isn't any urban patch in last year's grid,initialized value was
@@ -958,9 +963,6 @@ IF (DEF_URBAN_RUN) THEN
                         ! ground related variables.
                         u = patch2urban (np)
                         nurb = count( patchclass_(grid_patch_s_(j):grid_patch_e_(j)) == URBAN )
-                        ! reset per patch: they used to keep the previous urban patch's values
-                        selfu_ = -1
-                        u_     = -1
 
                         ! Get the index of urban patches in last year's grid, and index of urban
                         ! patch with the same urbclass
@@ -1001,12 +1003,9 @@ IF (DEF_URBAN_RUN) THEN
                            ENDDO
                         ENDIF
 
-                        ! no urban patch in last year's element: keep the cold-start values
-                        IF (nurb > 0) THEN
-
                         IF (u.le.0 .or. u_.le.0) THEN
                            print *, "Error in LuLccMassEnergyConserve URBAN_MODEL!"
-                           CALL CoLM_stop ('LulccMassEnergyConserve: invalid urban mapping')
+                           STOP
                         ENDIF
 
                         fwsun          (u) = fwsun_          (u_)
@@ -1085,12 +1084,9 @@ IF (DEF_URBAN_RUN) THEN
                         tafu           (u) = tafu_           (u_)
                         urb_green      (u) = urb_green_      (u_)
 
-                        ENDIF ! nurb > 0
-
                         ! used soil patch value for variable on pervious ground
-                        ! (frnp_ is only filled when the patch's share changed)
                         FROM_SOIL = .false.
-                        IF (selfu_ < 0 .and. (sum_lccpct_np - lccpct_np(patchclass(np))) .gt. 0) THEN
+                        IF (selfu_ < 0) THEN
                            DO k = 1, num
                               IF (patchtype_(frnp_(k)) == 0) THEN
                                  FROM_SOIL = .true.
@@ -1126,7 +1122,7 @@ IF (DEF_URBAN_RUN) THEN
                                 + scv_gimp(u)*(1-froof(u))*(1-fgper(u))
 
                      ENDIF
-ENDIF
+#endif
 
                      ! CALL albland (np, patchtype(np),deltim,&
                      !    soil_s_v_alb(np),soil_d_v_alb(np),soil_s_n_alb(np),soil_d_n_alb(np),&
@@ -1166,4 +1162,5 @@ ENDIF
    END SUBROUTINE LulccMassEnergyConserve
 
 END MODULE MOD_Lulcc_MassEnergyConserve
+#endif
 ! ---------- EOP ------------

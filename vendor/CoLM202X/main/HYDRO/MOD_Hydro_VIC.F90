@@ -38,7 +38,10 @@ MODULE MOD_Hydro_VIC
 
         real(r8), intent(inout) :: rsur, rsubst
         real(r8), intent(out)   :: wliq_soisno_tmp(1:nl_soil)
-        real(r8), intent(out)   :: frcsat   ! fraction of saturated area (VIC asat)
+        ! saturated area fraction at the end of the step (cell%asat). Optional:
+        ! only WATER_VSF, whose frcsat is intent(out) and written to history as
+        ! f_frcsat, asks for it; it is a diagnostic and changes no other output.
+        real(r8), intent(out), optional :: frcsat
 
         !-----------------------Local Variables---------------------------------
         integer  :: ilay
@@ -64,7 +67,8 @@ MODULE MOD_Hydro_VIC
 
         IF (ppt > 0.) rsur = cell%runoff/deltim
         rsubst = cell%baseflow/deltim
-        frcsat = cell%asat
+
+        IF (present(frcsat)) frcsat = cell%asat
 
     END SUBROUTINE Runoff_VIC
 

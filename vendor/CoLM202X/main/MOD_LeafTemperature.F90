@@ -3,7 +3,6 @@
 MODULE MOD_LeafTemperature
 
 !-----------------------------------------------------------------------
-   USE MOD_Namelist, only: DEF_USE_PC, DEF_USE_PFT
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
                            DEF_RSS_SCHEME, DEF_Interception_scheme, DEF_SPLIT_SOILSNOW, &
@@ -59,9 +58,12 @@ CONTAINS
 !End WUE stomata model parameter
               hpbl       ,&
               qintr_rain ,qintr_snow ,t_precip   ,hprl       ,dheatl     ,smp        ,&
-              hk         ,hksati     ,rootflux                                        &
-             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               &
-             ,ipft_index)
+#ifdef MaterialTransport
+              hk         ,hksati     ,rootflux   ,ipft_index                          &
+             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               )
+#else
+              hk         ,hksati     ,rootflux   ,ipft_index                          )
+#endif
 
 !=======================================================================
 ! !DESCRIPTION:
@@ -121,13 +123,12 @@ CONTAINS
    USE MOD_Ozone, only: CalcOzoneStress
    USE MOD_Qsadv
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
 
    integer,  intent(in) :: ipatch,ivt
-   integer,  intent(in), optional :: ipft_index
+   integer,  intent(in), optional :: ipft_index  ! global PFT index, PFT/PC calls only
    real(r8), intent(in) :: &
         deltim,     &! seconds in a time step [second]
         csoilc,     &! drag coefficient for soil under canopy [-]
@@ -161,7 +162,7 @@ CONTAINS
 !End WUE stomata model parameter
         extkn        ! coefficient of leaf nitrogen allocation
    integer , intent(in) :: &
-        c3c4 ! 1 for c3, 0 for c4
+        c3c4         ! 1 for c3, 0 for c4
    real(r8), intent(in) :: & ! for plant hydraulic scheme
         kmax_sun,   &! Plant Hydraulics Parameters
         kmax_sha,   &! Plant Hydraulics Parameters
@@ -266,18 +267,17 @@ CONTAINS
         cgrnds,     &! deriv of soil latent heat flux wrt soil temp [w/m**2/k]
         tref,       &! 2 m height air temperature (kelvin)
         qref,       &! 2 m height air specific humidity
+        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
+        rstfacsha,  &! factor of soil water stress to transpiration on shaded leaf
         gssun,      &! stomata conductance of sunlit leaf
         gssha,      &! stomata conductance of shaded leaf
         rootflux(1:nl_soil)  ! root water uptake from different layers
-
-   ! Read the caller's soil water stress factors; plant hydraulics may update them.
-   real(r8), intent(inout) :: &
-        rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
-        rstfacsha    ! factor of soil water stress to transpiration on shaded leaf
-
-   real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow->rain mass [mm]
-   real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy rain->snow mass [mm]
-   real(r8), intent(out), optional :: raw_trc_out            ! reference-to-canopy moisture resistance [s/m]
+#ifdef MaterialTransport
+   ! Diagnostics for material transport only; not used by the host.
+   real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow melted this step [mm]
+   real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy water frozen this step [mm]
+   real(r8), intent(out), optional :: raw_trc_out           ! moisture resistance raw [s/m]
+#endif
 
    real(r8), intent(inout) :: &
         assimsun,   &! sunlit leaf assimilation rate [umol co2 /m**2/ s] [+]
@@ -439,33 +439,30 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-! fix-local: the ozone-stress factors must be 1.0 from the very first iteration.
-! Upstream assigns them only AFTER the stability loop, in the non-ozone branch,
-! but the loop body already hands them to `stomata` (and uses them for the
-! `gs0*` diagnostics). Because they are `intent(inout)` dummies fed from the
-! caller's SAVE variables, the first call in a run saw uninitialised values:
-! measured on the CN-Cng first step, that left rssun ~10x too large and the
-! canopy transpiration `etr` ~4800x too small. Setting them here keeps both
-! the ozone and the non-ozone branch on the same, defined starting point.
-! See `vendor/PROVENANCE.md` and the matching section in
-! `docs/implementation-verification.md`.
-      o3coefv_sun = 1.0_r8
-      o3coefv_sha = 1.0_r8
-      o3coefg_sun = 1.0_r8
-      o3coefg_sha = 1.0_r8
-
 ! initialization of errors and  iteration parameters
       it     = 1    !counter for leaf temperature iteration
       del    = 0.0  !change in leaf temperature from previous iteration
       dele   = 0.0  !latent head flux from leaf for previous iteration
+#ifdef MaterialTransport
       IF (present(canopy_smelt_mass_out)) canopy_smelt_mass_out = 0._r8
       IF (present(canopy_frzc_mass_out))  canopy_frzc_mass_out  = 0._r8
+#endif
 
       dtl(0) = 0.
       fevpl_bef = 0.
 
-! (Upstream's FIX #4b set these only for ozone-off runs; the unconditional
-!  initialisation above covers both branches.)
+! ==== FIX 2026-08-16 #4b BEGIN: same ozone-off issue as in MOD_LeafTemperaturePC.
+! When DEF_USE_OZONESTRESS is off, o3coefv/o3coefg are used INSIDE the stability
+! iteration (gs0sun at line ~707) but were only set to 1.0 AFTER the iteration
+! (ELSE branch below), leaving spval at the first step after restart. Set them
+! to 1.0 BEFORE the iteration loop. ====
+      IF (.not. DEF_USE_OZONESTRESS) THEN
+         o3coefv_sun = 1.0_r8
+         o3coefg_sun = 1.0_r8
+         o3coefv_sha = 1.0_r8
+         o3coefg_sha = 1.0_r8
+      ENDIF
+! ==== FIX 2026-08-16 #4b END ====
 
       fht  = 0.     !integral of profile function for heat
       fqt  = 0.     !integral of profile function for moisture
@@ -500,10 +497,12 @@ CONTAINS
          clai = 0.2*(lai+sai)*cpliq + ldew_rain*cpliq + ldew_snow*cpice
       ENDIF
 
-      ! The wetted fraction uses the rain storage capacity of the active interception
-      ! scheme (CoLM2024 under scheme 8, dewmx*(lai+sai) otherwise).
-      CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry, &
-                        colm2024_rain_capacity_for_fwet(ipatch,ivt,ipft_index,dewmx,lai,sai,us,vs,htop))
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry, &
+              colm2024_rain_capacity_for_fwet(ipatch,ivt,dewmx,lai,sai,us,vs,htop,ipft_index))
+      ELSE
+         CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry)
+      ENDIF
 
       CALL qsadv(tl,psrf,ei,deiDT,qsatl,qsatlDT)
 
@@ -710,7 +709,7 @@ CONTAINS
             rbsha = rb / laisha
 
             ! Sunlit leaves
-            CALL stomata  (vmax25   ,effcon   ,c3c4     ,slti     ,hlti     ,&
+            CALL stomata  (vmax25   ,effcon   ,slti     ,hlti     ,&
                  shti     ,hhti     ,trda     ,trdm     ,trop     ,&
                  g1       ,g0       ,gradm    ,binter   ,thm      ,&
                  psrf     ,po2m     ,pco2m    ,pco2a    ,eah      ,&
@@ -722,10 +721,10 @@ CONTAINS
                  lambda   ,&
             !End WUE stomata model parameter
                  rbsun    ,raw      ,rstfacsun,cintsun  ,&
-                 assimsun ,respcsun ,rssun    )
+                 assimsun ,respcsun ,rssun    ,c3c4=c3c4 )
 
             ! Shaded leaves
-            CALL stomata  (vmax25   ,effcon   ,c3c4     ,slti     ,hlti     ,&
+            CALL stomata  (vmax25   ,effcon   ,slti     ,hlti     ,&
                  shti     ,hhti     ,trda     ,trdm     ,trop     ,&
                  g1       ,g0       ,gradm    ,binter   ,thm      ,&
                  psrf     ,po2m     ,pco2m    ,pco2a    ,eah      ,&
@@ -737,7 +736,7 @@ CONTAINS
                  lambda   ,&
             ! End WUE stomata model parameter
                  rbsha    ,raw      ,rstfacsha,cintsha  ,&
-                 assimsha ,respcsha ,rssha    )
+                 assimsha ,respcsha ,rssha    ,c3c4=c3c4 )
 
             IF (DEF_USE_PLANTHYDRAULICS) THEN
 
@@ -765,12 +764,12 @@ CONTAINS
                gssha = gssha * laisha
 
                CALL update_photosyn(tl, po2m, pco2m, pco2a, parsun, psrf, rstfacsun, rb, gssun, &
-                                    effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, &
-                                    trdm, cintsun, assimsun, respcsun)
+                                    effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, &
+                                    trdm, cintsun, assimsun, respcsun, c3c4=c3c4)
 
                CALL update_photosyn(tl, po2m, pco2m, pco2a, parsha, psrf, rstfacsha, rb, gssha, &
-                                    effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, &
-                                    trdm, cintsha, assimsha, respcsha)
+                                    effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, &
+                                    trdm, cintsha, assimsha, respcsha, c3c4=c3c4)
 
                rssun = tprcor/tl * 1.e6 / gssun
                rssha = tprcor/tl * 1.e6 / gssha
@@ -1034,22 +1033,16 @@ ENDIF
          assimsha = assimsha * o3coefv_sha
 !         rssun    = rssun / o3coefg_sun
 !         rssha    = rssha / o3coefg_sha
+      ELSE
+         o3coefv_sun = 1.0_r8
+         o3coefg_sun = 1.0_r8
+         o3coefv_sha = 1.0_r8
+         o3coefg_sha = 1.0_r8
       ENDIF
 
 ! ======================================================================
 !     END stability iteration
 ! ======================================================================
-
-      ! Diagnose canopy conductance (mol m-2 s-1) from the resistances used
-      ! by the final iteration, also when plant hydraulics is disabled.
-      ! rssun/rssha are now leaf-scale; tlbef is the temperature at which
-      ! they were evaluated. Do not change the resistances or the solver.
-      gssun = 0._r8
-      gssha = 0._r8
-      IF (lai > 0.001_r8) THEN
-         gssun = (laisun / rssun) * (tprcor / tlbef)
-         gssha = (laisha / rssha) * (tprcor / tlbef)
-      ENDIF
 
       z0m = z0mv
       zol = zeta
@@ -1101,15 +1094,6 @@ ENDIF
       evplwet = evplwet + evplwet_dtl*dtl(it-1)
       fevpl   = fevpl_noadj
       fevpl   = fevpl   +   fevpl_dtl*dtl(it-1)
-      ! Negative transpiration (vapour flux into the stomata) is dew onto the wet leaf,
-      ! not reverse sap flow: move it to the wet-leaf evaporation.
-      IF (etr < 0._r8) THEN
-         evplwet = evplwet + etr
-         etr = 0._r8
-         etrsun = 0._r8
-         etrsha = 0._r8
-         IF (DEF_USE_PLANTHYDRAULICS) rootflux = 0._r8
-      ENDIF
 
       elwmax  = ldew/deltim
       elwdif  = max(0., evplwet-elwmax)
@@ -1182,18 +1166,16 @@ ENDIF
           ! account for vegetation heat change
           - dheatl
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       IF(abs(err) .gt. .2) &
       write(6,*) 'energy imbalance in LeafTemperature.F90',it-1,&
          err,sabv,irab,fsenl,hvap*fevpl,hprl,dheatl
-      ENDIF
+#endif
 
 !-----------------------------------------------------------------------
 ! Update dew accumulation (kg/m2)
 !-----------------------------------------------------------------------
-      ! Upstream used to branch on DEF_Interception_scheme here, but the eight branches
-      ! are identical; only an unknown scheme aborts.
-      IF (DEF_Interception_scheme < 1 .or. DEF_Interception_scheme > 8) CALL abort
+      IF (DEF_Interception_scheme .eq. 1) THEN
          ldew = max(0., ldew-evplwet*deltim)
 
          ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
@@ -1226,6 +1208,239 @@ ENDIF
             ldew = ldew_rain + ldew_snow
          ENDIF
 
+      ELSEIF (DEF_Interception_scheme .eq. 2) THEN !CLM4.5
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 3) THEN !CLM5
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 4) THEN !Noah-MP
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 5) THEN !MATSIRO
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 6) THEN !VIC
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 7) THEN !JULES
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+
+      ELSEIF (DEF_Interception_scheme .eq. 8) THEN !CoLM202X
+         ldew = max(0., ldew-evplwet*deltim)
+
+         ! account for vegetation snow and update ldew_rain, ldew_snow, ldew
+         IF ( DEF_VEG_SNOW ) THEN
+            IF (tl > tfrz) THEN
+               qevpl = max (evplwet, 0.)
+               qdewl = abs (min (evplwet, 0.) )
+               qsubl = 0.
+               qfrol = 0.
+
+               IF (qevpl > ldew_rain/deltim) THEN
+                  qsubl = qevpl - ldew_rain/deltim
+                  qevpl = ldew_rain/deltim
+               ENDIF
+            ELSE
+               qevpl = 0.
+               qdewl = 0.
+               qsubl = max (evplwet, 0.)
+               qfrol = abs (min (evplwet, 0.) )
+
+               IF (qsubl > ldew_snow/deltim) THEN
+                  qevpl = qsubl - ldew_snow/deltim
+                  qsubl = ldew_snow/deltim
+               ENDIF
+            ENDIF
+
+            ldew_rain = ldew_rain + (qdewl-qevpl)*deltim
+            ldew_snow = ldew_snow + (qfrol-qsubl)*deltim
+
+            ldew = ldew_rain + ldew_snow
+         ENDIF
+      ELSE
+         CALL abort
+      ENDIF
 
       ! Bug fix: When DEF_VEG_SNOW is false, only ldew is updated above
       ! (via ldew = max(0., ldew - evplwet*deltim)), but ldew_rain/ldew_snow
@@ -1270,7 +1485,9 @@ ENDIF
             qmelt = min(ldew_snow/deltim,(tl-tfrz)*cpice*ldew_snow/(deltim*hfus))
             ldew_snow = max(0.,ldew_snow - qmelt*deltim)
             ldew_rain = max(0.,ldew_rain + qmelt*deltim)
+#ifdef MaterialTransport
             IF (present(canopy_smelt_mass_out)) canopy_smelt_mass_out = qmelt*deltim
+#endif
             !NOTE: There may be some problem, energy imbalance
             !      However, detailed treatment could be somewhat trivial
             tl = fwet_snow*tfrz + (1.-fwet_snow)*tl  !Niu et al., 2004
@@ -1280,7 +1497,9 @@ ENDIF
             qfrz  = min(ldew_rain/deltim,(tfrz-tl)*cpliq*ldew_rain/(deltim*hfus))
             ldew_rain = max(0.,ldew_rain - qfrz*deltim)
             ldew_snow = max(0.,ldew_snow + qfrz*deltim)
+#ifdef MaterialTransport
             IF (present(canopy_frzc_mass_out)) canopy_frzc_mass_out = qfrz*deltim
+#endif
             !NOTE: There may be some problem, energy imbalance
             !      However, detailed treatment could be somewhat trivial
             tl = fwet_snow*tfrz + (1.-fwet_snow)*tl  !Niu et al., 2004
@@ -1292,7 +1511,9 @@ ENDIF
 !-----------------------------------------------------------------------
       tref = thm + vonkar/(fh-fht)*dth * (fh2m/vonkar - fh/vonkar)
       qref =  qm + vonkar/(fq-fqt)*dqh * (fq2m/vonkar - fq/vonkar)
+#ifdef MaterialTransport
       IF (present(raw_trc_out)) raw_trc_out = max(raw, 0._r8)
+#endif
 
    END SUBROUTINE LeafTemperature
 !----------------------------------------------------------------------
@@ -1337,7 +1558,7 @@ ENDIF
    real(r8), intent(in)  :: ldew_snow !depth of snow on foliage [kg/m2/s]
    real(r8), intent(out) :: fwet      !fraction of foliage covered by water&snow [-]
    real(r8), intent(out) :: fdry      !fraction of foliage that is green and dry [-]
-   real(r8), intent(in), optional :: satcap_rain_override
+   real(r8), intent(in), optional :: satcap_rain_override !rain capacity of the CoLM2024 scheme [kg/m2]
 
    real(r8) :: lsai                   !lai + sai
    real(r8) :: dewmxi                 !inverse of maximum allowed dew [1/mm]
@@ -1354,12 +1575,14 @@ ENDIF
       dewmxi = 1.0/dewmx
       ! 06/2018, yuan: remove sigf, to compatible with PFT
       vegt   =  lsai
-      satcap_rain = dewmx * vegt
-      IF (present(satcap_rain_override)) satcap_rain = max(0._r8, satcap_rain_override)
 
       fwet = 0
       IF (ldew > 0.) THEN
-         fwet = (ldew/max(satcap_rain,1.e-10_r8))**.666666666666
+         IF (present(satcap_rain_override)) THEN
+            fwet = (ldew/max(satcap_rain_override,1.e-10_r8))**.666666666666
+         ELSE
+            fwet = ((dewmxi/vegt)*ldew)**.666666666666
+         ENDIF
          ! Check for maximum limit of fwet
          fwet = min(fwet,1.0)
       ENDIF
@@ -1370,7 +1593,11 @@ ENDIF
 
          fwet_rain = 0
          IF(ldew_rain > 0.) THEN
-            fwet_rain = (ldew_rain/max(satcap_rain,1.e-10_r8))**.666666666666
+            IF (present(satcap_rain_override)) THEN
+               fwet_rain = (ldew_rain/max(satcap_rain_override,1.e-10_r8))**.666666666666
+            ELSE
+               fwet_rain = ((dewmxi/vegt)*ldew_rain)**.666666666666
+            ENDIF
             ! Check for maximum limit of fwet_rain
             fwet_rain = min(fwet_rain,1.0)
          ENDIF
@@ -1392,34 +1619,33 @@ ENDIF
 
    END SUBROUTINE dewfraction
 
-
-   FUNCTION colm2024_rain_capacity_for_fwet(ipatch,ivt,ipft_index,dewmx,lai,sai,forc_us,forc_vs,htop_in) RESULT(satcap)
+   FUNCTION colm2024_rain_capacity_for_fwet(ipatch,ivt,dewmx,lai,sai,forc_us,forc_vs,htop,ipft_index) RESULT(satcap)
+   ! rain storage capacity used by the CoLM2024 interception scheme, so that the
+   ! wetted fraction of the canopy is consistent with the intercepted water
    USE MOD_Precision
    USE MOD_Vars_TimeInvariants, only: patchclass, ncd, ncw, bcw
-   USE MOD_Vars_TimeInvariants, only: ncd_p, ncw_p, bcw_p
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+   USE MOD_Vars_PFTimeInvariants, only: ncd_p, ncw_p, bcw_p
+#endif
    IMPLICIT NONE
    integer,  intent(in) :: ipatch, ivt
+   real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop
    integer,  intent(in), optional :: ipft_index
-   real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop_in
    real(r8)             :: satcap
-   integer              :: ipft
 
       satcap = dewmx * max(0._r8, lai+sai)
-      IF (DEF_Interception_scheme /= 8 .or. lai+sai <= 1.e-6_r8) RETURN
+      IF (lai+sai <= 1.e-6_r8) RETURN
 
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       IF (present(ipft_index)) THEN
-         ipft = ipft_index
-         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs, &
-                                                   htop_in,ncd_p(ipft),ncw_p(ipft),bcw_p(ipft),ivt,.true.)
+         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop, &
+                  ncd_p(ipft_index),ncw_p(ipft_index),bcw_p(ipft_index),ivt,.true.)
          RETURN
       ENDIF
-      ENDIF
-         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs, &
-                                                   htop_in,ncd(ipatch),ncw(ipatch),bcw(ipatch), &
-                                                   patchclass(ipatch),.false.)
+#endif
+      satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop, &
+               ncd(ipatch),ncw(ipatch),bcw(ipatch),patchclass(ipatch),.false.)
+
    END FUNCTION colm2024_rain_capacity_for_fwet
-
-
 
 END MODULE MOD_LeafTemperature

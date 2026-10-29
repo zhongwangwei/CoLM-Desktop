@@ -23,7 +23,7 @@ fn methane_provider_registration_is_not_guarded_by_the_removed_bgc_macro() {
 #[test]
 fn methane_routing_modes_reject_kernels_without_river_routing() {
     let methane = std::fs::read_to_string(
-        root().join("vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90"),
+        root().join("vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Const.F90"),
     )
     .unwrap();
     for mode in ["routing", "hybrid"] {

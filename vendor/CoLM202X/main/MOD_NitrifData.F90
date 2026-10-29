@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef BGC
 MODULE MOD_NitrifData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -121,9 +122,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('CONC_O2_UNSAT', tCONC_O2_UNSAT)
-      ENDIF
+#endif
 
       DO nsl = 1, nl_soil
 
@@ -155,9 +156,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('O2_DECOMP_DEPTH_UNSAT', tO2_DECOMP_DEPTH_UNSAT)
-      ENDIF
+#endif
 
       IF (p_is_worker) THEN
          deallocate (tCONC_O2_UNSAT_tmp)
@@ -167,3 +168,4 @@ CONTAINS
    END SUBROUTINE update_nitrif_data
 
 END MODULE MOD_NitrifData
+#endif

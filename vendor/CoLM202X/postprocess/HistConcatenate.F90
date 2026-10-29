@@ -212,7 +212,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_2d (filehist, 'f_xy_snow', timelen, compress, &
          'snow','mm/s')
    
-   IF (DEF_USE_BGC) THEN
+#ifdef BGC
             ! leaf carbon display pool
       CALL hist_concatenate_var_2d (filehist, 'f_leafc', timelen, compress, &
                 'leaf carbon display pool','gC/m2')
@@ -422,7 +422,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_2d (filehist, 'f_grainc_to_seed', timelen, compress, &
                 'grain to crop seed carbon','gC/m2/s')
 #endif
-   ENDIF
+#endif
       !--------------------------------------------------------------
       CALL hist_concatenate_var_3d (filehist, 'f_t_soisno   ', timelen, 'soilsnow', &
          nl_soil-maxsnl, compress, 'soil temperature','K')
@@ -462,7 +462,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_3d (filehist, 'f_lake_icefrac', timelen, 'lake', &
          nl_lake, compress, 'lake ice fraction cover','0-1')
    
-   IF (DEF_USE_BGC) THEN
+#ifdef BGC
             ! litter 1 carbon density in soil layers
       CALL hist_concatenate_var_3d (filehist, 'f_litr1c_vr', timelen, 'soil', &
          nl_soil, compress, 'litter 1 carbon density in soil layers','gC/m3')
@@ -523,7 +523,7 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_3d (filehist, 'f_sminn_vr', timelen, 'soil', &
          nl_soil, compress, 'mineral nitrogen density in soil layers','gN/m3')
    
-   ENDIF
+#endif
       CALL hist_concatenate_var_2d (filehist, 'f_ustar  ', timelen, compress, &
          'u* in similarity theory','m/s')
    
@@ -634,26 +634,6 @@ PROGRAM hist_concatenate
    
       CALL hist_concatenate_var_2d (filehist, 'f_srniln ', timelen, compress, &
          'reflected diffuse beam nir solar radiation at local noon(W/m2)','W/m2')
-
-#ifdef GridRiverLakeFlow
-      CALL hist_concatenate_var_2d (filehist, 'f_wdpth_ucat_regrid', timelen, compress, &
-         'regridded deepest water depth in river and flood plain','m')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_veloc_riv_regrid', timelen, compress, &
-         'regridded water velocity in river','m/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_discharge', timelen, compress, &
-         'regridded discharge in river and flood plain','m^3/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_discharge_rivermouth_regrid', timelen, compress, &
-         'regridded river mouth discharge into ocean','m^3/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_floodfrc', timelen, compress, &
-         'flooded area fraction','100%')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_floodarea', timelen, compress, &
-         'flooded area','m^2')
-#endif
 
 END PROGRAM hist_concatenate
 ! ----------------------------------------------------------------------

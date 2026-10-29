@@ -15,14 +15,17 @@ CONTAINS
    SUBROUTINE pct_readin (dir_landdata, lc_year)
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_RangeCheck, DEF_USE_PFT, DEF_USE_PC
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_NetCDFVector
    USE MOD_LandPatch
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
+#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -36,7 +39,7 @@ CONTAINS
    integer :: npatch, ipatch
 
       write(cyear,'(i4.4)') lc_year
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 #ifdef SinglePoint
       IF (patchtypes(SITE_landtype) /= 0) RETURN
 #endif
@@ -61,10 +64,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #endif
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       IF (p_is_worker) THEN
-         npatch = 0
-         IF (numpatch > 0) npatch = count(patchtypes(landpatch%settyp) == 0)
+         npatch = count(patchtypes(landpatch%settyp) == 0)
          allocate (sumpct (npatch))
 
          npatch = 0
@@ -81,9 +83,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #if (defined CROP)
       CALL check_vector_data ('CROP pct', cropfrac)
 #endif
-      ENDIF
+#endif
 
-ENDIF
+#endif
 
       IF (allocated(sumpct)) deallocate(sumpct)
 

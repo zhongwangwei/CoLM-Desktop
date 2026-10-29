@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Soil_BiogeochemCompetition
 
 !---------------------------------------------------------------------------------------------------
@@ -30,7 +31,7 @@ MODULE MOD_BGC_Soil_BiogeochemCompetition
 
    IMPLICIT NONE
 
-   PUBLIC SoilBiogeochemCompetition, SoilBiogeochemCompetitionNoPlant
+   PUBLIC SoilBiogeochemCompetition
 
 CONTAINS
 
@@ -464,54 +465,5 @@ CONTAINS
 
    END SUBROUTINE SoilBiogeochemCompetition
 
-   SUBROUTINE SoilBiogeochemCompetitionNoPlant(i, deltim, nl_soil, dz_soi)
-
-      integer,  intent(in) :: i, nl_soil
-      real(r8), intent(in) :: deltim, dz_soi(1:nl_soil)
-      integer :: j
-      real(r8) :: available, remaining, actual_immob, potential_immob
-
-      actual_immob = 0._r8
-      potential_immob = 0._r8
-      DO j = 1, nl_soil
-         sminn_to_plant_vr(j,i) = 0._r8
-         smin_nh4_to_plant_vr(j,i) = 0._r8
-         smin_no3_to_plant_vr(j,i) = 0._r8
-         supplement_to_sminn_vr(j,i) = 0._r8
-         sminn_to_denit_excess_vr(j,i) = 0._r8
-         f_nit_vr(j,i) = 0._r8
-         f_denit_vr(j,i) = 0._r8
-
-         IF (.not. DEF_USE_NITRIF) THEN
-            available = max(sminn_vr(j,i), 0._r8) / deltim
-            actual_immob_vr(j,i) = min(max(potential_immob_vr(j,i), 0._r8), available)
-            actual_immob_nh4_vr(j,i) = 0._r8
-            actual_immob_no3_vr(j,i) = 0._r8
-         ELSE
-            actual_immob_nh4_vr(j,i) = min(max(potential_immob_vr(j,i), 0._r8), &
-               max(smin_nh4_vr(j,i), 0._r8) / deltim)
-            remaining = max(potential_immob_vr(j,i) - actual_immob_nh4_vr(j,i), 0._r8)
-            actual_immob_no3_vr(j,i) = min(remaining, max(smin_no3_vr(j,i), 0._r8) / deltim)
-            actual_immob_vr(j,i) = actual_immob_nh4_vr(j,i) + actual_immob_no3_vr(j,i)
-         ENDIF
-
-         IF (potential_immob_vr(j,i) > 0._r8) THEN
-            fpi_vr(j,i) = actual_immob_vr(j,i) / potential_immob_vr(j,i)
-         ELSE
-            fpi_vr(j,i) = 1._r8
-         ENDIF
-         actual_immob = actual_immob + actual_immob_vr(j,i) * dz_soi(j)
-         potential_immob = potential_immob + max(potential_immob_vr(j,i), 0._r8) * dz_soi(j)
-      ENDDO
-
-      sminn_to_plant(i) = 0._r8
-      fpg(i) = 1._r8
-      IF (potential_immob > 0._r8) THEN
-         fpi(i) = actual_immob / potential_immob
-      ELSE
-         fpi(i) = 1._r8
-      ENDIF
-
-   END SUBROUTINE SoilBiogeochemCompetitionNoPlant
-
 END MODULE MOD_BGC_Soil_BiogeochemCompetition
+#endif

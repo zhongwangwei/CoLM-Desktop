@@ -18,8 +18,16 @@ MODULE MOD_Hist
    USE MOD_Vars_1DAccFluxes
    USE MOD_Vars_Global, only: spval
    USE MOD_NetCDFSerial
-   USE MOD_Tracer_Vars, only: flush_Tracer_Acc
-   USE MOD_Tracer_Hist, only: tracer_hist_out
+#if (defined MaterialTransport) && (defined GridRiverLakeFlow)
+   USE MOD_MT_RiverLake, only: mt_riverlake_snapshot_hist_acc
+   USE MOD_MT_Sediment, only: mt_sediment_snapshot_hist_acc
+#endif
+#ifdef MaterialTransport
+   USE MOD_MT_Vars, only: flush_Tracer_Acc
+   USE MOD_MT_Hist, only: mt_hist_out
+   USE MOD_MT_HostFixes, only: mt_hist_continue_file
+   USE MOD_MT_Namelist, only: mt_any_enabled
+#endif
 
    USE MOD_HistGridded
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -32,9 +40,7 @@ MODULE MOD_Hist
    USE MOD_Catch_Hist
 #endif
 #ifdef GridRiverLakeFlow
-   USE MOD_Grid_RiverLakeHist, only: hist_grid_riverlake_init, hist_grid_riverlake_out, &
-      hist_grid_riverlake_final, flush_acc_fluxes_riverlake
-   USE MOD_Grid_RiverLakeHistState
+   USE MOD_Grid_RiverLakeHist
 #endif
 #ifdef EXTERNAL_LAKE
    USE MOD_Lake_Hist
@@ -47,25 +53,34 @@ MODULE MOD_Hist
    character(len=10) :: HistForm ! 'Gridded', 'Vector', 'Single'
 
    character(len=256) :: file_last = 'null'
+#ifdef MaterialTransport
    character(len=256) :: file_last_tracer = 'null'
+#endif
 
 !--------------------------------------------------------------------------
 CONTAINS
 
    SUBROUTINE hist_init (dir_hist, lulcc_call)
 
-   USE MOD_Namelist, only: DEF_USE_TRACER, DEF_USE_GridRiverLakeFlow
    IMPLICIT NONE
 
    character(len=*) , intent(in) :: dir_hist
    logical, optional, intent(in) :: lulcc_call
-   logical :: flush_reactive
+#ifdef MaterialTransport
+   logical :: flush_mt
+#endif
 
       CALL allocate_acc_fluxes ()
-      flush_reactive = .false.
-      IF (present(lulcc_call)) flush_reactive = lulcc_call
-      CALL FLUSH_acc_fluxes (flush_reactive=flush_reactive)
-      IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
+#ifdef MaterialTransport
+      ! The material accumulators may hold values read from the material
+      ! restart at start-up; clear them only when called for a LULCC change.
+      flush_mt = .false.
+      IF (present(lulcc_call)) flush_mt = lulcc_call
+      CALL FLUSH_acc_fluxes (flush_mt=flush_mt)
+      CALL flush_Tracer_Acc ()
+#else
+      CALL FLUSH_acc_fluxes ()
+#endif
 
       HistForm = 'Gridded'
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -94,7 +109,7 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
-      IF (DEF_USE_GridRiverLakeFlow) CALL hist_grid_riverlake_init (HistForm)
+      CALL hist_grid_riverlake_init (HistForm)
 #endif
 
    END SUBROUTINE hist_init
@@ -102,7 +117,6 @@ CONTAINS
 
    SUBROUTINE hist_final ()
 
-   USE MOD_Namelist, only: DEF_USE_GridRiverLakeFlow
    IMPLICIT NONE
 
       CALL deallocate_acc_fluxes ()
@@ -116,14 +130,14 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
-      IF (DEF_USE_GridRiverLakeFlow) CALL hist_grid_riverlake_final ()
+      CALL hist_grid_riverlake_final ()
 #endif
 
    END SUBROUTINE hist_final
 
 
    SUBROUTINE hist_out (idate, deltim, itstamp, etstamp, ptstamp, &
-         dir_hist, casename, restart_date, dir_restart, history_saved_raw)
+         dir_hist, casename)
 
 !=======================================================================
 !  Original version: Yongjiu Dai, September 15, 1999, 03/2014
@@ -141,13 +155,18 @@ CONTAINS
    USE MOD_LandPatch
    USE MOD_SpatialMapping
    USE MOD_Vars_TimeInvariants, only: patchtype, patchclass, patchmask
+#ifdef URBAN_MODEL
    USE MOD_LandUrban
+#endif
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_PFTimeInvariants, only: pftclass
    USE MOD_LandPFT, only: patch_pft_s
+#endif
 #if (defined CaMa_Flood)
    USE MOD_CaMa_Vars !definition of CaMa variables
 #endif
    USE MOD_Forcing, only: forcmask_pch
+   USE MOD_HistAccRestart, only: hist_acc_final_snapshot
 #ifdef DataAssimilation
    USE MOD_DA_TWS, only: fslp_k_mon
    USE MOD_Vars_Global
@@ -165,19 +184,22 @@ CONTAINS
 
    character(len=*), intent(in) :: dir_hist
    character(len=*), intent(in) :: casename
-   integer, optional, intent(in) :: restart_date(3)
-   character(len=*), optional, intent(in) :: dir_restart
-   logical, optional, intent(out) :: history_saved_raw
 
    ! Local variables
    logical :: lwrite
-   logical :: natural_boundary
+#ifdef MaterialTransport
    logical :: forcmask_empty(0)
-   real(r8) :: history_window_seconds
+#endif
    character(len=256) :: file_hist
    integer :: itime_in_file
+#ifdef MaterialTransport
+   real(r8) :: history_window_seconds
    character(len=256) :: file_hist_tracer
    integer :: itime_in_file_tracer
+#ifdef SinglePoint
+   logical :: site_hist_writeback_saved
+#endif
+#endif
 #if (defined CaMa_Flood)
    character(len=256) :: file_hist_cama
    integer :: itime_in_file_cama
@@ -203,7 +225,9 @@ CONTAINS
 #endif
 
    integer i, u
+#ifdef URBAN_MODEL
    logical,  allocatable ::  filter_urb (:)
+#endif
 
 #ifdef DataAssimilation
    integer :: np
@@ -223,43 +247,45 @@ CONTAINS
    real(r8), allocatable ::  a_t_brt_fy3d_ens_std (:,:)
 #endif
 
-      IF (present(history_saved_raw)) history_saved_raw = .false.
       IF (itstamp <= ptstamp) THEN
          CALL FLUSH_acc_fluxes ()
-      IF (DEF_USE_TRACER) THEN
+#ifdef MaterialTransport
          CALL flush_Tracer_Acc ()
-      ENDIF
-#ifdef GridRiverLakeFlow
-         IF (DEF_USE_GridRiverLakeFlow) CALL flush_acc_fluxes_riverlake ()
 #endif
-         IF (.not. (itstamp < etstamp)) THEN
-            IF (present(restart_date) .and. present(dir_restart)) THEN
-               CALL write_history_acc_restart(restart_date, casename, dir_restart)
-               IF (present(history_saved_raw)) history_saved_raw = .true.
-            ENDIF
-         ENDIF
+#ifdef GridRiverLakeFlow
+         CALL flush_acc_fluxes_riverlake ()
+#endif
          RETURN
       ELSE
          CALL accumulate_fluxes ()
       ENDIF
 
-      natural_boundary = .false.
+      ! History-accumulator restart (MOD_HistAccRestart): at the last time
+      ! step, if the history window is not complete, the partial window is
+      ! written below and the sums are cleared before the model restart is
+      ! saved, so the raw sums are saved here first. Nothing happens at other
+      ! steps; it only writes a file in the restart directory and changes no
+      ! model or history variable.
+      CALL hist_acc_final_snapshot (idate, deltim, itstamp, etstamp)
+#if (defined MaterialTransport) && (defined GridRiverLakeFlow)
+      ! N05: keep the material history rows of this partial terminal window for
+      ! the physical restart written after the output flush (host side does the
+      ! same for its own accumulators).
+      CALL mt_riverlake_snapshot_hist_acc ()
+      CALL mt_sediment_snapshot_hist_acc ()
+#endif
+
       select CASE (trim(adjustl(DEF_HIST_FREQ)))
       CASE ('TIMESTEP')
-         natural_boundary = .true.
          lwrite = .true.
       CASE ('HOURLY')
-         natural_boundary = isendofhour (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofhour (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('DAILY')
-         natural_boundary = isendofday (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofday  (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('MONTHLY')
-         natural_boundary = isendofmonth(idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofmonth(idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('YEARLY')
-         natural_boundary = isendofyear (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofyear (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE default
          lwrite = .false.
          write(*,*) &
@@ -267,13 +293,6 @@ CONTAINS
          write(*,*) &
          '          Set to FALSE by default.                                                     '
       END select
-
-      IF (.not. (itstamp < etstamp) .and. .not.natural_boundary) THEN
-         IF (present(restart_date) .and. present(dir_restart)) THEN
-            CALL write_history_acc_restart(restart_date, casename, dir_restart)
-            IF (present(history_saved_raw)) history_saved_raw = .true.
-         ENDIF
-      ENDIF
 
       IF (lwrite) THEN
 
@@ -317,61 +336,69 @@ CONTAINS
 
          file_hist = trim(dir_hist) // '/' // trim(casename) //'_hist_'//trim(cdate)//'.nc'
 
-      IF (DEF_USE_TRACER) THEN
-         history_window_seconds=0._r8
-         IF (p_is_worker) history_window_seconds=max(nac,0._r8)*deltim
+#ifdef MaterialTransport
+         ! After a restart inside a history group, append to the existing file
+         ! instead of creating it again (materials enabled only; see
+         ! MOD_MT_HostFixes). Does nothing otherwise.
+         CALL mt_hist_continue_file (file_hist, idate, HistForm, file_last)
+#endif
+         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
+#ifdef MaterialTransport
+         ! material history goes to its own file, with the averaging window;
+         ! nothing is written when no material is enabled
+         IF (mt_any_enabled()) THEN
+            history_window_seconds=0._r8
+            IF (p_is_worker) history_window_seconds=max(nac,0._r8)*deltim
 #ifdef USEMPI
-         CALL mpi_allreduce(MPI_IN_PLACE, history_window_seconds, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+            CALL mpi_allreduce(MPI_IN_PLACE, history_window_seconds, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+#endif
+            file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_material_'//trim(cdate)//'.nc'
+            CALL mt_hist_continue_file (file_hist_tracer, idate, HistForm, file_last_tracer)
+#ifdef SinglePoint
+            ! The single-site cache belongs to the host stream, not this file.
+            site_hist_writeback_saved = USE_SITE_HistWriteBack
+            USE_SITE_HistWriteBack = .false.
+#endif
+            CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
+#ifdef SinglePoint
+            USE_SITE_HistWriteBack = site_hist_writeback_saved
+#endif
+            ! Written by the master into the single file; in 'block' mode that file
+            ! does not exist (per-block files), and with write-back it is created
+            ! by the write-back process, so the window is not written there.
+            IF (HistForm=='Gridded' .and. p_is_master .and. trim(DEF_HIST_mode)=='one' &
+                .and. .not. DEF_HIST_WriteBack) THEN
+               CALL ncio_write_serial_time (file_hist_tracer, 'history_window_seconds', &
+                  itime_in_file_tracer, history_window_seconds, 'time')
+               CALL ncio_write_serial_time (file_hist_tracer, 'history_window_end_minutes', &
+                  itime_in_file_tracer, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
+                  real(mod(idate(3),60),r8)/60._r8, 'time')
+               IF (itime_in_file_tracer==1) THEN
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'units', 's')
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'long_name', &
+                     'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_end_minutes', 'units', &
+                     'minutes since 1900-1-1 0:0:0')
+               ENDIF
+            ENDIF
+         ENDIF
 #endif
 
-         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
-         IF (HistForm=='Gridded' .and. p_is_master) THEN
-            CALL ncio_write_serial_time (file_hist, 'history_window_seconds', &
-               itime_in_file, history_window_seconds, 'time')
-            CALL ncio_write_serial_time (file_hist, 'history_window_end_minutes', &
-               itime_in_file, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
-               real(mod(idate(3),60),r8)/60._r8, 'time')
-            IF (itime_in_file==1) THEN
-               CALL ncio_put_attr(file_hist, 'history_window_seconds', 'units', 's')
-               CALL ncio_put_attr(file_hist, 'history_window_seconds', 'long_name', &
-                  'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
-               CALL ncio_put_attr(file_hist, 'history_window_end_minutes', 'units', &
-                  'minutes since 1900-1-1 0:0:0')
-            ENDIF
-         ENDIF
-         file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_tracer_'//trim(cdate)//'.nc'
-         CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
-         IF (HistForm=='Gridded' .and. p_is_master) THEN
-            CALL ncio_write_serial_time (file_hist_tracer, 'history_window_seconds', &
-               itime_in_file_tracer, history_window_seconds, 'time')
-            CALL ncio_write_serial_time (file_hist_tracer, 'history_window_end_minutes', &
-               itime_in_file_tracer, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
-               real(mod(idate(3),60),r8)/60._r8, 'time')
-            IF (itime_in_file_tracer==1) THEN
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'units', 's')
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'long_name', &
-                  'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_end_minutes', 'units', &
-                  'minutes since 1900-1-1 0:0:0')
-            ENDIF
-         ENDIF
-      ELSE
-         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
-      ENDIF
-
          IF (p_is_worker) THEN
-            allocate (filter    (numpatch))
-            allocate (filter_dt (numpatch))
-            allocate (vecacc    (numpatch))
+            IF (numpatch > 0) THEN
+               allocate (filter    (numpatch))
+               allocate (filter_dt (numpatch))
+               allocate (vecacc    (numpatch))
+            ENDIF
+#ifdef URBAN_MODEL
             IF (numurban > 0) THEN
                allocate (filter_urb (numurban))
             ENDIF
+#endif
 #ifdef CROP
             IF (numpatch > 0) THEN
                allocate (filter_crop (numpatch))
                allocate (filter_irrig (numpatch))
-               ! only DEF_USE_IRRIGATION sets it; without irrigation no patch is irrigated
-               filter_irrig(:) = .false.
             ENDIF
 #endif
          ENDIF
@@ -380,9 +407,9 @@ CONTAINS
             IF (p_is_io) THEN
                CALL allocate_block_data (ghist, sumarea)
                CALL allocate_block_data (ghist, sumarea_dt)
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
                CALL allocate_block_data (ghist, sumarea_urb)
-ENDIF
+#endif
 #ifdef CROP
                CALL allocate_block_data (ghist, sumarea_crop)
                CALL allocate_block_data (ghist, sumarea_irrig)
@@ -796,9 +823,22 @@ ENDIF
             'fraction of snow cover on ground','-')
 
          ! fraction of saturation area on ground
+#ifdef MaterialTransport
+         IF (mt_any_enabled()) THEN
+            IF (allocated(nac_frcsat)) THEN
+               WHERE (nac_frcsat <= 0._r8) a_frcsat = spval
+            ENDIF
+            CALL write_history_variable_2d ( DEF_hist_vars%frcsat, &
+               a_frcsat, file_hist, 'f_frcsat', itime_in_file, sumarea, filter, &
+               'fraction of saturation area on ground','-', acc_num=nac_frcsat)
+         ELSE
+#endif
          CALL write_history_variable_2d ( DEF_hist_vars%frcsat, &
             a_frcsat, file_hist, 'f_frcsat', itime_in_file, sumarea, filter, &
             'fraction of saturation area on ground','-')
+#ifdef MaterialTransport
+         ENDIF
+#endif
 
          ! fraction of veg cover, excluding snow-covered veg [-]
          CALL write_history_variable_2d ( DEF_hist_vars%sigf, &
@@ -926,7 +966,7 @@ ENDIF
          ! Mapping the urban variables at patch [numurban] to grid
          ! ------------------------------------------------------------------
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
          IF (p_is_worker) THEN
             IF (numpatch > 0) THEN
                DO i = 1, numpatch
@@ -1046,7 +1086,7 @@ IF (DEF_URBAN_RUN) THEN
          CALL write_history_variable_urb_2d ( DEF_hist_vars%t_wall, &
             a_twall, file_hist, 'f_t_wall', itime_in_file, sumarea_urb, filter_urb, &
             'temperature of urban wall [K]','kelvin')
-ENDIF
+#endif
 
          ! ------------------------------------------------------------------
          ! Mapping the fluxes and state variables at patch [numpatch] to grid
@@ -1111,7 +1151,7 @@ ENDIF
              a_rss, file_hist, 'f_rss', itime_in_file, sumarea, filter, &
              'soil surface resistance','s/m')
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
          ! Fire diagnostics: rates averaged in time by the standard history writer.
          CALL write_history_variable_2d ( DEF_hist_vars%farea_burned, &
             a_farea_burned, &
@@ -2031,9 +2071,7 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_irrig (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig, &
@@ -2043,9 +2081,7 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts demand at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_deficit_irrig (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_deficit_irrig, &
@@ -2053,22 +2089,14 @@ IF (DEF_USE_BGC) THEN
                'total irrigation amounts demand at growing season','kg/m2')
 
             ! total irrigation times at growing season
-            IF (p_is_worker) THEN
-               IF (numpatch > 0) THEN
-                  vecacc (:) = a_sum_irrig_count (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
-               ENDIF
-            ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig_count, &
-               vecacc, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
+               a_sum_irrig_count, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
                'total irrigation times at growing season','-')
 
             ! irrigation waterstorage [kg/m2]
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_waterstorage (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%waterstorage, &
@@ -2359,7 +2387,7 @@ IF (DEF_USE_BGC) THEN
          ! ozone concentration
             CALL write_history_variable_2d ( DEF_hist_vars%xy_ozone, &
                a_ozone, file_hist, 'f_xy_ozone', itime_in_file, sumarea, filter, &
-               'Ozone concentration','ppbv') ! FIX upstream-bugs #72: was 'mol/mol'
+               'Ozone concentration','mol/mol')
          ENDIF
 
          ! litter 1 carbon density in soil layers
@@ -2604,18 +2632,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_enftemp, &
              a_leafc_enftemp, file_hist, 'f_leafc_enftemp', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for needleleaf evergreen temperate tree','gC/m2')
+
          ! 1: leaf area index enf temperate
          CALL write_history_variable_2d ( DEF_hist_vars%lai_enftemp, &
              a_lai_enftemp, file_hist, 'f_lai_enftemp', itime_in_file, sumarea, filter, &
              'leaf area index for needleleaf evergreen temperate tree','m2/m2')
+
          ! 1: npp enf temperate
          CALL write_history_variable_2d ( DEF_hist_vars%npp_enftemp, &
              a_npp_enftemp, file_hist, 'f_npp_enftemp', itime_in_file, sumarea, filter, &
-             'npp for needleleaf evergreen temperate tree','gC/m2/s')
+             'npp for needleleaf evergreen temperate tree','m2/m2')
+
          ! 1: npp to leafc enf temperate
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_enftemp, &
              a_npptoleafc_enftemp, file_hist, 'f_npptoleafc_enftemp', itime_in_file, sumarea, filter, &
-             'npp to leafc for needleleaf evergreen temperate tree','gC/m2/s')
+             'npp to leafc for needleleaf evergreen temperate tree','m2/m2')
+
          ! 2: gpp enf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_enfboreal, &
              a_gpp_enfboreal, file_hist, 'f_gpp_enfboreal', itime_in_file, sumarea, filter, &
@@ -2625,18 +2657,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_enfboreal, &
              a_leafc_enfboreal, file_hist, 'f_leafc_enfboreal', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for needleleaf evergreen boreal tree','gC/m2')
+
          ! 2: leaf area index enf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%lai_enfboreal, &
              a_lai_enfboreal, file_hist, 'f_lai_enfboreal', itime_in_file, sumarea, filter, &
              'leaf area index for needleleaf evergreen boreal tree','m2/m2')
+
          ! 2: npp enf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npp_enfboreal, &
              a_npp_enfboreal, file_hist, 'f_npp_enfboreal', itime_in_file, sumarea, filter, &
-             'npp for needleleaf evergreen boreal tree','gC/m2/s')
+             'npp for needleleaf evergreen boreal tree','m2/m2')
+
          ! 2: npp to leafc enf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_enfboreal, &
              a_npptoleafc_enfboreal, file_hist, 'f_npptoleafc_enfboreal', itime_in_file, sumarea, filter, &
-             'npp to leafc for needleleaf evergreen boreal tree','gC/m2/s')
+             'npp to leafc for needleleaf evergreen boreal tree','m2/m2')
+
          ! 3: gpp dnf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dnfboreal, &
              a_gpp_dnfboreal, file_hist, 'f_gpp_dnfboreal', itime_in_file, sumarea, filter, &
@@ -2646,18 +2682,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dnfboreal, &
              a_leafc_dnfboreal, file_hist, 'f_leafc_dnfboreal', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for needleleaf deciduous boreal tree','gC/m2')
+
          ! 3: leaf area index dnf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dnfboreal, &
              a_lai_dnfboreal, file_hist, 'f_lai_dnfboreal', itime_in_file, sumarea, filter, &
              'leaf area index for needleleaf deciduous boreal tree','m2/m2')
+
          ! 3: npp dnf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dnfboreal, &
              a_npp_dnfboreal, file_hist, 'f_npp_dnfboreal', itime_in_file, sumarea, filter, &
-             'npp for needleleaf deciduous boreal tree','gC/m2/s')
+             'npp for needleleaf deciduous boreal tree','m2/m2')
+
          ! 3: npp to leafc dnf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dnfboreal, &
              a_npptoleafc_dnfboreal, file_hist, 'f_npptoleafc_dnfboreal', itime_in_file, sumarea, filter, &
-             'npp to leafc for needleleaf deciduous boreal tree','gC/m2/s')
+             'npp to leafc for needleleaf deciduous boreal tree','m2/m2')
+
          ! 4: gpp ebf trop
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_ebftrop, &
              a_gpp_ebftrop, file_hist, 'f_gpp_ebftrop', itime_in_file, sumarea, filter, &
@@ -2667,18 +2707,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_ebftrop, &
              a_leafc_ebftrop, file_hist, 'f_leafc_ebftrop', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf evergreen tropical tree','gC/m2')
+
          ! 4: leaf area index ebf trop
          CALL write_history_variable_2d ( DEF_hist_vars%lai_ebftrop, &
              a_lai_ebftrop, file_hist, 'f_lai_ebftrop', itime_in_file, sumarea, filter, &
              'leaf area index for broadleaf evergreen tropical tree','m2/m2')
+
          ! 4: npp ebf trop
          CALL write_history_variable_2d ( DEF_hist_vars%npp_ebftrop, &
              a_npp_ebftrop, file_hist, 'f_npp_ebftrop', itime_in_file, sumarea, filter, &
-             'npp for broadleaf evergreen tropical tree','gC/m2/s')
+             'npp for broadleaf evergreen tropical tree','m2/m2')
+
          ! 4: npp to leafc ebf trop
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_ebftrop, &
              a_npptoleafc_ebftrop, file_hist, 'f_npptoleafc_ebftrop', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf evergreen tropical tree','gC/m2/s')
+             'npp to leafc for broadleaf evergreen tropical tree','m2/m2')
+
          ! 5: gpp ebf temp
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_ebftemp, &
              a_gpp_ebftemp, file_hist, 'f_gpp_ebftemp', itime_in_file, sumarea, filter, &
@@ -2688,18 +2732,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_ebftemp, &
              a_leafc_ebftemp, file_hist, 'f_leafc_ebftemp', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf evergreen temperate tree','gC/m2')
+
          ! 5: leaf area index ebf temp
          CALL write_history_variable_2d ( DEF_hist_vars%lai_ebftemp, &
              a_lai_ebftemp, file_hist, 'f_lai_ebftemp', itime_in_file, sumarea, filter, &
              'leaf area index for broadleaf evergreen temperate tree','m2/m2')
+
          ! 5: npp ebf temp
          CALL write_history_variable_2d ( DEF_hist_vars%npp_ebftemp, &
              a_npp_ebftemp, file_hist, 'f_npp_ebftemp', itime_in_file, sumarea, filter, &
-             'npp for broadleaf evergreen temperate tree','gC/m2/s')
+             'npp for broadleaf evergreen temperate tree','m2/m2')
+
          ! 5: npp to leafc ebf temp
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_ebftemp, &
              a_npptoleafc_ebftemp, file_hist, 'f_npptoleafc_ebftemp', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf evergreen temperate tree','gC/m2/s')
+             'npp to leafc for broadleaf evergreen temperate tree','m2/m2')
+
          ! 6: gpp dbf trop
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dbftrop, &
              a_gpp_dbftrop, file_hist, 'f_gpp_dbftrop', itime_in_file, sumarea, filter, &
@@ -2709,18 +2757,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dbftrop, &
              a_leafc_dbftrop, file_hist, 'f_leafc_dbftrop', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf deciduous tropical tree','gC/m2')
+
          ! 6: leaf area index dbf trop
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dbftrop, &
              a_lai_dbftrop, file_hist, 'f_lai_dbftrop', itime_in_file, sumarea, filter, &
-             'leaf area index for broadleaf deciduous tropical tree','m2/m2')
+             'leaf area index for broadleaf evergreen temperate tree','m2/m2')
+
          ! 6: npp dbf trop
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dbftrop, &
              a_npp_dbftrop, file_hist, 'f_npp_dbftrop', itime_in_file, sumarea, filter, &
-             'npp for broadleaf deciduous tropical tree','gC/m2/s')
+             'npp for broadleaf evergreen temperate tree','m2/m2')
+
          ! 6: npp to leafc dbf trop
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dbftrop, &
              a_npptoleafc_dbftrop, file_hist, 'f_npptoleafc_dbftrop', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf deciduous tropical tree','gC/m2/s')
+             'npp to leafc for broadleaf evergreen temperate tree','m2/m2')
+
          ! 7: gpp dbf temp
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dbftemp, &
              a_gpp_dbftemp, file_hist, 'f_gpp_dbftemp', itime_in_file, sumarea, filter, &
@@ -2730,18 +2782,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dbftemp, &
              a_leafc_dbftemp, file_hist, 'f_leafc_dbftemp', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf deciduous temperate tree','gC/m2')
+
          ! 7: leaf area index dbf temp
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dbftemp, &
              a_lai_dbftemp, file_hist, 'f_lai_dbftemp', itime_in_file, sumarea, filter, &
-             'leaf area index for broadleaf deciduous temperate tree','m2/m2')
+             'leaf area index for broadleaf decidous temperate tree','m2/m2')
+
          ! 7: npp dbf temp
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dbftemp, &
              a_npp_dbftemp, file_hist, 'f_npp_dbftemp', itime_in_file, sumarea, filter, &
-             'npp for broadleaf deciduous temperate tree','gC/m2/s')
+             'npp for broadleaf decidous temperate tree','m2/m2')
+
          ! 7: npp to leafc dbf temp
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dbftemp, &
              a_npptoleafc_dbftemp, file_hist, 'f_npptoleafc_dbftemp', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf deciduous temperate tree','gC/m2/s')
+             'npp to leafc for broadleaf decidous temperate tree','m2/m2')
+
          ! 8: gpp dbf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dbfboreal, &
              a_gpp_dbfboreal, file_hist, 'f_gpp_dbfboreal', itime_in_file, sumarea, filter, &
@@ -2751,18 +2807,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dbfboreal, &
              a_leafc_dbfboreal, file_hist, 'f_leafc_dbfboreal', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf deciduous boreal tree','gC/m2')
+
          ! 8: leaf area index dbf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dbfboreal, &
              a_lai_dbfboreal, file_hist, 'f_lai_dbfboreal', itime_in_file, sumarea, filter, &
-             'leaf area index for broadleaf deciduous boreal tree','m2/m2')
+             'leaf area index for broadleaf decidous boreal tree','m2/m2')
+
          ! 8: npp dbf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dbfboreal, &
              a_npp_dbfboreal, file_hist, 'f_npp_dbfboreal', itime_in_file, sumarea, filter, &
-             'npp for broadleaf deciduous boreal tree','gC/m2/s')
+             'npp for broadleaf decidous boreal tree','m2/m2')
+
          ! 8: npp to leafc dbf boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dbfboreal, &
              a_npptoleafc_dbfboreal, file_hist, 'f_npptoleafc_dbfboreal', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf deciduous boreal tree','gC/m2/s')
+             'npp to leafc for broadleaf decidous boreal tree','m2/m2')
+
          ! 9: gpp ebs temp
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_ebstemp, &
              a_gpp_ebstemp, file_hist, 'f_gpp_ebstemp', itime_in_file, sumarea, filter, &
@@ -2772,18 +2832,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_ebstemp, &
              a_leafc_ebstemp, file_hist, 'f_leafc_ebstemp', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf evergreen temperate shrub','gC/m2')
+
          ! 9: leaf area index ebs temp
          CALL write_history_variable_2d ( DEF_hist_vars%lai_ebstemp, &
              a_lai_ebstemp, file_hist, 'f_lai_ebstemp', itime_in_file, sumarea, filter, &
              'leaf area index for broadleaf evergreen temperate shrub','m2/m2')
+
          ! 9: npp ebs temp
          CALL write_history_variable_2d ( DEF_hist_vars%npp_ebstemp, &
              a_npp_ebstemp, file_hist, 'f_npp_ebstemp', itime_in_file, sumarea, filter, &
-             'npp for broadleaf evergreen temperate shrub','gC/m2/s')
+             'npp for broadleaf evergreen temperate shrub','m2/m2')
+
          ! 9: npp to leafc ebs temp
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_ebstemp, &
              a_npptoleafc_ebstemp, file_hist, 'f_npptoleafc_ebstemp', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf evergreen temperate shrub','gC/m2/s')
+             'npp to leafc for broadleaf evergreen temperate shrub','m2/m2')
+
          ! 10: gpp dbs temp
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dbstemp, &
              a_gpp_dbstemp, file_hist, 'f_gpp_dbstemp', itime_in_file, sumarea, filter, &
@@ -2793,18 +2857,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dbstemp, &
              a_leafc_dbstemp, file_hist, 'f_leafc_dbstemp', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf deciduous temperate shrub','gC/m2')
+
          ! 10: leaf area index dbs temp
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dbstemp, &
              a_lai_dbstemp, file_hist, 'f_lai_dbstemp', itime_in_file, sumarea, filter, &
              'leaf area index for broadleaf deciduous temperate shrub','m2/m2')
+
          ! 10: npp dbs temp
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dbstemp, &
              a_npp_dbstemp, file_hist, 'f_npp_dbstemp', itime_in_file, sumarea, filter, &
-             'npp for broadleaf deciduous temperate shrub','gC/m2/s')
+             'npp for broadleaf deciduous temperate shrub','m2/m2')
+
          ! 10: npp to leafc dbs temp
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dbstemp, &
              a_npptoleafc_dbstemp, file_hist, 'f_npptoleafc_dbstemp', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf deciduous temperate shrub','gC/m2/s')
+             'npp to leafc for broadleaf deciduous temperate shrub','m2/m2')
+
          ! 11: gpp dbs boreal
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_dbsboreal, &
              a_gpp_dbsboreal, file_hist, 'f_gpp_dbsboreal', itime_in_file, sumarea, filter, &
@@ -2814,18 +2882,22 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_dbsboreal, &
              a_leafc_dbsboreal, file_hist, 'f_leafc_dbsboreal', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for broadleaf deciduous boreal shrub','gC/m2')
+
          ! 11: leaf area index dbs boreal
          CALL write_history_variable_2d ( DEF_hist_vars%lai_dbsboreal, &
              a_lai_dbsboreal, file_hist, 'f_lai_dbsboreal', itime_in_file, sumarea, filter, &
              'leaf area index for broadleaf deciduous boreal shrub','m2/m2')
+
          ! 11: npp dbs boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npp_dbsboreal, &
              a_npp_dbsboreal, file_hist, 'f_npp_dbsboreal', itime_in_file, sumarea, filter, &
-             'npp for broadleaf deciduous boreal shrub','gC/m2/s')
+             'npp for broadleaf deciduous boreal shrub','m2/m2')
+
          ! 11: npp to leafc dbs boreal
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_dbsboreal, &
              a_npptoleafc_dbsboreal, file_hist, 'f_npptoleafc_dbsboreal', itime_in_file, sumarea, filter, &
-             'npp to leafc for broadleaf deciduous boreal shrub','gC/m2/s')
+             'npp to leafc for broadleaf deciduous boreal shrub','m2/m2')
+
          ! 12: gpp arctic c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_c3arcgrass, &
              a_gpp_c3arcgrass, file_hist, 'f_gpp_c3arcgrass', itime_in_file, sumarea, filter, &
@@ -2835,60 +2907,72 @@ IF (DEF_USE_BGC) THEN
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_c3arcgrass, &
              a_leafc_c3arcgrass, file_hist, 'f_leafc_c3arcgrass', itime_in_file, sumarea, filter, &
              'leaf carbon display pool for c3 arctic grass','gC/m2')
+
          ! 12: leaf area index c3 arctic grass
          CALL write_history_variable_2d ( DEF_hist_vars%lai_c3arcgrass, &
              a_lai_c3arcgrass, file_hist, 'f_lai_c3arcgrass', itime_in_file, sumarea, filter, &
-             'leaf area index for c3 arctic grass','m2/m2')
+             'leaf area index for c3 arctic grass','gC/m2')
+
          ! 12: npp c3 arctic grass
          CALL write_history_variable_2d ( DEF_hist_vars%npp_c3arcgrass, &
              a_npp_c3arcgrass, file_hist, 'f_npp_c3arcgrass', itime_in_file, sumarea, filter, &
-             'npp for c3 arctic grass','gC/m2/s')
+             'npp for c3 arctic grass','gC/m2')
+
          ! 12: npp to leafc c3 arctic grass
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_c3arcgrass, &
              a_npptoleafc_c3arcgrass, file_hist, 'f_npptoleafc_c3arcgrass', itime_in_file, sumarea, filter, &
-             'npp to leafc for c3 arctic grass','gC/m2/s')
+             'npp to leafc for c3 arctic grass','gC/m2')
+
          ! 13: gpp c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_c3grass, &
              a_gpp_c3grass, file_hist, 'f_gpp_c3grass', itime_in_file, sumarea, filter, &
              'gross primary productivity for c3 grass','gC/m2/s')
 
-         ! 13: leaf carbon display pool non-c3 grass
+         ! 13: leaf carbon display pool arctic c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_c3grass, &
              a_leafc_c3grass, file_hist, 'f_leafc_c3grass', itime_in_file, sumarea, filter, &
-             'leaf carbon display pool for c3 grass','gC/m2')
-         ! 13: leaf area index non-c3 grass
+             'leaf carbon display pool for c3 arctic grass','gC/m2')
+
+         ! 13: leaf area index arctic c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%lai_c3grass, &
              a_lai_c3grass, file_hist, 'f_lai_c3grass', itime_in_file, sumarea, filter, &
-             'leaf area index for c3 grass','m2/m2')
-         ! 13: npp non-c3 grass
+             'leaf area index for c3 arctic grass','gC/m2')
+
+         ! 13: npp arctic c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%npp_c3grass, &
              a_npp_c3grass, file_hist, 'f_npp_c3grass', itime_in_file, sumarea, filter, &
-             'npp for c3 grass','gC/m2/s')
-         ! 13: npp to leafc non-c3 grass
+             'npp for c3 arctic grass','gC/m2')
+
+         ! 13: npp to leafc arctic c3 grass
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_c3grass, &
              a_npptoleafc_c3grass, file_hist, 'f_npptoleafc_c3grass', itime_in_file, sumarea, filter, &
-             'npp to leafc for c3 grass','gC/m2/s')
+             'npp to leafc for c3 arctic grass','gC/m2')
+
          ! 14: gpp c4 grass
          CALL write_history_variable_2d ( DEF_hist_vars%gpp_c4grass, &
              a_gpp_c4grass, file_hist, 'f_gpp_c4grass', itime_in_file, sumarea, filter, &
              'gross primary productivity for c4 grass','gC/m2/s')
 
-         ! 14: leaf carbon display pool c4 grass
+         ! 14: leaf carbon display pool arctic c4 grass
          CALL write_history_variable_2d ( DEF_hist_vars%leafc_c4grass, &
              a_leafc_c4grass, file_hist, 'f_leafc_c4grass', itime_in_file, sumarea, filter, &
-             'leaf carbon display pool for c4 grass','gC/m2')
-         ! 14: leaf area index c4 grass
+             'leaf carbon display pool for c4 arctic grass','gC/m2')
+
+         ! 14: leaf area index arctic c4 grass
          CALL write_history_variable_2d ( DEF_hist_vars%lai_c4grass, &
              a_lai_c4grass, file_hist, 'f_lai_c4grass', itime_in_file, sumarea, filter, &
-             'leaf area index for c4 grass','m2/m2')
-         ! 14: npp c4 grass
+             'leaf area index for c4 arctic grass','gC/m2')
+
+         ! 14: npp arctic c4 grass
          CALL write_history_variable_2d ( DEF_hist_vars%npp_c4grass, &
              a_npp_c4grass, file_hist, 'f_npp_c4grass', itime_in_file, sumarea, filter, &
-             'npp for c4 grass','gC/m2/s')
-         ! 14: npp to leafc c4 grass
+             'npp for c4 arctic grass','gC/m2')
+
+         ! 14: npp to leafc arctic c4 grass
          CALL write_history_variable_2d ( DEF_hist_vars%npptoleafc_c4grass, &
              a_npptoleafc_c4grass, file_hist, 'f_npptoleafc_c4grass', itime_in_file, sumarea, filter, &
-             'npp to leafc for c4 grass','gC/m2/s')
+             'npp to leafc for c4 arctic grass','gC/m2')
+
 #ifdef CROP
 !*****************************************
          IF (p_is_worker) THEN
@@ -3341,8 +3425,7 @@ IF (DEF_USE_BGC) THEN
                IF (numpatch > 0) THEN
                   DO i=1,numpatch
                      IF(patchclass(i) == 12)THEN
-                        ! 17 rainfed / 18 irrigated temperate corn, like the other crops' pairs
-                        IF(pftclass(patch_pft_s(i)).eq.17 .or. pftclass(patch_pft_s(i)).eq.18)THEN
+                        IF(pftclass(patch_pft_s(i)) .eq. 17)THEN
                            filter(i) = .true.
                         ELSE
                            filter(i) = .false.
@@ -4684,7 +4767,7 @@ IF (DEF_USE_BGC) THEN
              vecacc, file_hist, 'f_cropprodc_unmanagedcrop', itime_in_file, sumarea, filter, &
              'Crop production (unmanaged crop production)','gC/m2/s')
 #endif
-ENDIF
+#endif
          ! --------------------------------------------------------------------
          ! Temperature and water (excluding land water bodies and ocean patches)
          ! [soil => 0; urban and built-up => 1; wetland => 2; land ice => 3;
@@ -5005,7 +5088,7 @@ ENDIF
             'water storage in aquifer','mm')
 
          ! instantaneous water storage in aquifer [mm]
-         IF (p_is_worker .AND. numpatch > 0) THEN
+         IF (p_is_worker) THEN
             vecacc = wa
             WHERE(vecacc /= spval) vecacc = vecacc * nac
          ENDIF
@@ -5019,7 +5102,7 @@ ENDIF
             'depth of surface water','mm')
 
          ! instantaneous depth of surface water [mm]
-         IF (p_is_worker .AND. numpatch > 0) THEN
+         IF (p_is_worker) THEN
             vecacc = wdsrf
             WHERE(vecacc /= spval) vecacc = vecacc * nac
          ENDIF
@@ -5283,13 +5366,14 @@ ENDIF
 #endif
 
 #ifdef GridRiverLakeFlow
-         IF (DEF_USE_GridRiverLakeFlow) THEN
          CALL hist_grid_riverlake_out (file_hist, HistForm, idate, &
             itime_in_file, trim(file_hist)/=trim(file_last))
 
          IF (p_is_worker) THEN
-            allocate (nac_one (numpatch))
-            nac_one = 1.
+            IF (numpatch > 0) THEN
+               allocate (nac_one (numpatch))
+               nac_one = 1.
+            ENDIF
          ENDIF
 
          IF (HistForm == 'Gridded') THEN
@@ -5326,27 +5410,29 @@ ENDIF
          ENDIF
 
          IF (allocated(nac_one   )) deallocate (nac_one   )
+#endif
+#ifdef MaterialTransport
+         IF (mt_any_enabled()) THEN
+            IF (allocated(forcmask_pch)) THEN
+               CALL mt_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
+                  sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
+            ELSE
+               CALL mt_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
+                  sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_empty)
+            ENDIF
          ENDIF
 #endif
 
-      IF (DEF_USE_TRACER) THEN
-         IF (allocated(forcmask_pch)) THEN
-            CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
-               sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
-         ELSE
-            CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
-               sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_empty)
-         ENDIF
-      ENDIF
-
          IF (allocated(filter    )) deallocate (filter    )
          IF (allocated(filter_dt )) deallocate (filter_dt )
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
          IF (allocated(filter_urb)) deallocate (filter_urb)
-ENDIF
+#endif
 
          CALL FLUSH_acc_fluxes ()
-         IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
+#ifdef MaterialTransport
+         CALL flush_Tracer_Acc ()
+#endif
 
 #ifdef SinglePoint
          IF (USE_SITE_HistWriteBack .and. memory_to_disk) THEN
@@ -5355,7 +5441,9 @@ ENDIF
 #endif
 
          file_last = file_hist
-         IF (DEF_USE_TRACER) file_last_tracer = file_hist_tracer
+#ifdef MaterialTransport
+         file_last_tracer = file_hist_tracer
+#endif
 
       ENDIF
 
@@ -5392,23 +5480,14 @@ ENDIF
          IF (p_is_worker) &
             WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
       ELSE
-         IF (p_is_worker) THEN
-            WHERE (acc_vec/=spval .and. acc_num>0)
-               acc_vec = acc_vec / acc_num
-            ELSEWHERE (acc_vec/=spval .and. acc_num<=0)
-               acc_vec = spval
-            END WHERE
-         ENDIF
+         IF (p_is_worker)  &
+            WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
       ENDIF
 #else
       IF ( .not. present(acc_num) ) THEN
          WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
       ELSE
-         WHERE (acc_vec/=spval .and. acc_num>0)
-               acc_vec = acc_vec / acc_num
-            ELSEWHERE (acc_vec/=spval .and. acc_num<=0)
-               acc_vec = spval
-            END WHERE
+         WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
       ENDIF
 #endif
 
@@ -5434,16 +5513,19 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, longname, units)
 #endif
       END select
 
    END SUBROUTINE write_history_variable_2d
 
 
+#ifdef URBAN_MODEL
    SUBROUTINE write_history_variable_urb_2d ( is_hist, &
          acc_vec, file_hist, varname, itime_in_file, sumarea, filter, &
-         longname, units)
+         longname, units, acc_num)
+
+   USE MOD_Vars_1DAccFluxes, only: nac
 
    IMPLICIT NONE
 
@@ -5458,8 +5540,25 @@ ENDIF
 
    type(block_data_real8_2d), intent(in) :: sumarea
    logical, intent(in) :: filter(:)
+   real(r8), intent(in), optional  :: acc_num(:)
 
       IF (.not. is_hist) RETURN
+
+#ifndef SinglePoint
+      IF ( .not. present(acc_num) ) THEN
+         IF (p_is_worker) &
+            WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
+      ELSE
+         IF (p_is_worker)  &
+            WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
+      ENDIF
+#else
+      IF ( .not. present(acc_num) ) THEN
+         WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
+      ELSE
+         WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
+      ENDIF
+#endif
 
       select CASE (HistForm)
       CASE ('Gridded')
@@ -5468,18 +5567,18 @@ ENDIF
 #if (defined UNSTRUCTURED || defined CATCHMENT)
       CASE ('Vector')
          !TODO: currently, it is not applicable to urban variables
-         CALL aggregate_to_vector_and_write_2d ( &
+         CALL aggregate_to_vector_and_write_urb_2d ( &
             acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
 #ifdef SinglePoint
       CASE ('Single')
-         WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, longname, units)
 #endif
       END select
 
    END SUBROUTINE write_history_variable_urb_2d
+#endif
 
 
    SUBROUTINE write_history_variable_3d ( is_hist, &
@@ -5522,7 +5621,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_3d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, filter, longname, units)
+            dim1name, ndim1, longname, units)
 #endif
       END select
 
@@ -5564,11 +5663,8 @@ ENDIF
          IF (p_is_worker) THEN
             DO i1 = lbound(acc_vec,1), ubound(acc_vec,1)
                DO i2 = lbound(acc_vec,2), ubound(acc_vec,2)
-                  WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0)
+                  WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0) &
                         acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
-                  ELSEWHERE (acc_vec(i1,i2,:)/=spval .and. acc_num<=0)
-                        acc_vec(i1,i2,:) = spval
-                  END WHERE
                ENDDO
             ENDDO
          ENDIF
@@ -5579,11 +5675,8 @@ ENDIF
       ELSE
          DO i1 = lbound(acc_vec,1), ubound(acc_vec,1)
             DO i2 = lbound(acc_vec,2), ubound(acc_vec,2)
-               WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0)
+               WHERE (acc_vec(i1,i2,:)/=spval .and. acc_num>0) &
                      acc_vec(i1,i2,:) = acc_vec(i1,i2,:) / acc_num
-               ELSEWHERE (acc_vec(i1,i2,:)/=spval .and. acc_num<=0)
-                     acc_vec(i1,i2,:) = spval
-               END WHERE
             ENDDO
          ENDDO
       ENDIF
@@ -5603,7 +5696,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_4d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, dim2name, ndim2, filter, longname, units)
+            dim1name, ndim1, dim2name, ndim2, longname, units)
 #endif
       END select
 

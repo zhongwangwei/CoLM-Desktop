@@ -13,7 +13,6 @@ SUBROUTINE Aggregation_TopoWetness ( &
 !  Created by Shupeng Zhang, 06/2025
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -25,10 +24,14 @@ SUBROUTINE Aggregation_TopoWetness ( &
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
    USE MOD_CatchmentDataReadin
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -56,7 +59,9 @@ SUBROUTINE Aggregation_TopoWetness ( &
    real(r8), allocatable :: twi_sort(:), xx(:), yy(:)
    integer,  allocatable :: order   (:)
 
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
+#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/topography/' // trim(cyear)
@@ -66,7 +71,7 @@ SUBROUTINE Aggregation_TopoWetness ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate topographic wetness index ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -85,13 +90,6 @@ SUBROUTINE Aggregation_TopoWetness ( &
 #ifdef USEMPI
          CALL aggregation_data_daemon (gridtwi, data_r8_3d_in1 = twi, n1_r8_3d_in1 = 25)
 #endif
-      ENDIF
-
-      ! The element loop below indexes elm_patch, which landpatch_build only builds in kernels
-      ! without URBAN_MODEL/CROP; with URBAN_MODEL it is left to landurban_build, which runs only
-      ! when DEF_URBAN_RUN is on.  Build it here when nothing else has.
-      IF (.not. allocated(elm_patch%substt)) THEN
-         CALL elm_patch%build (landelm, landpatch, use_frac = .true.)
       ENDIF
 
       IF (p_is_worker) THEN
@@ -154,7 +152,8 @@ SUBROUTINE Aggregation_TopoWetness ( &
                sigma_twi = sqrt(sum((twi_sort-mean_twi)**2) / (npxl-1))
 
                IF (sigma_twi > 0) THEN
-                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) * sum((twi_sort-mean_twi)**3) / sigma_twi**3
+                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) &
+                     * sum((twi_sort-mean_twi)**3) / sigma_twi**3
                   IF (skew_twi > 0) THEN
                      alp_twi_patches(ipatch) = (2./skew_twi)**2
                      chi_twi_patches(ipatch) = sigma_twi*skew_twi/2
@@ -225,7 +224,8 @@ SUBROUTINE Aggregation_TopoWetness ( &
                sigma_twi = sqrt(sum((twi_sort-mean_twi)**2) / (npxl-1))
 
                IF (sigma_twi > 0) THEN
-                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) * sum((twi_sort-mean_twi)**3) / sigma_twi**3
+                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) &
+                     * sum((twi_sort-mean_twi)**3) / sigma_twi**3
                   IF (skew_twi > 0) THEN
                      alp_twi = (2./skew_twi)**2
                      chi_twi = sigma_twi*skew_twi/2
@@ -271,14 +271,14 @@ SUBROUTINE Aggregation_TopoWetness ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('mean_twi_patches  ', mean_twi_patches)
       CALL check_vector_data ('fsatmax_patches   ', fsatmax_patches )
       CALL check_vector_data ('fsatdcf_patches   ', fsatdcf_patches )
       CALL check_vector_data ('alp_twi_patches   ', alp_twi_patches )
       CALL check_vector_data ('chi_twi_patches   ', chi_twi_patches )
       CALL check_vector_data ('mu_twi_patches    ', mu_twi_patches  )
-      ENDIF
+#endif
 
       lndname = trim(landdir)//'/mean_twi_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -317,23 +317,23 @@ SUBROUTINE Aggregation_TopoWetness ( &
          mu_twi_patches, DEF_Srfdata_CompressLevel)
 
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
 
       lndname  = trim(dir_model_landdata) // '/diag/twi_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (mean_twi_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'mean_twi', compress = 1, write_mode = 'one', create_mode=.true.)
+         spval, lndname, 'mean_twi', compress = 6, write_mode = 'one', create_mode=.true.)
       CALL srfdata_map_and_write (fsatmax_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'fsatmax',  compress = 1, write_mode = 'one')
+         spval, lndname, 'fsatmax',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (fsatdcf_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'fsatdcf',  compress = 1, write_mode = 'one')
+         spval, lndname, 'fsatdcf',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (alp_twi_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'alp_twi',  compress = 1, write_mode = 'one')
+         spval, lndname, 'alp_twi',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (chi_twi_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'chi_twi',  compress = 1, write_mode = 'one')
+         spval, lndname, 'chi_twi',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (mu_twi_patches,   landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'mu_twi',   compress = 1, write_mode = 'one')
-      ENDIF
+         spval, lndname, 'mu_twi',   compress = 6, write_mode = 'one')
+#endif
 
       IF (p_is_worker) THEN
          deallocate ( mean_twi_patches )

@@ -45,9 +45,13 @@ CONTAINS
         zsno           ,capr           ,cnfac          ,vf_quartz      ,&
         vf_gravels     ,vf_om          ,vf_sand        ,wf_gravels     ,&
         wf_sand        ,csol           ,porsl          ,psi0           ,&
+#ifdef Campbell_SOIL_MODEL
         bsw                                                            ,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
         theta_r        ,alpha_vgm      ,n_vgm          ,L_vgm          ,&
         sc_vgm         ,fc_vgm                                         ,&
+#endif
         k_solids       ,dksatu         ,dksatf         ,dkdry          ,&
         BA_alpha       ,BA_beta                                        ,&
         cv_roof        ,cv_wall        ,cv_gimp                        ,&
@@ -57,7 +61,7 @@ CONTAINS
         z_wall         ,zi_roofsno     ,zi_gimpsno     ,zi_gpersno     ,&
         zi_lakesno     ,zi_wall        ,dz_lake        ,lakedepth      ,&
         dewmx          ,sqrtdi         ,rootfr         ,effcon         ,&
-        vmax25         ,c3c4           ,slti           ,hlti           ,shti,&
+        vmax25         ,slti           ,hlti           ,shti           ,&
         hhti           ,trda           ,trdm           ,trop           ,&
         g1             ,g0             ,gradm          ,binter         ,&
         extkn          ,lambda                                         ,&
@@ -95,7 +99,7 @@ CONTAINS
         qfros_roof     ,qfros_gimp     ,qfros_gper     ,qfros_lake     ,&
         imelt_roof     ,imelt_gimp     ,imelt_gper     ,imelt_lake     ,&
         sm_roof        ,sm_gimp        ,sm_gper        ,sm_lake        ,&
-        sabg           ,rss            ,rstfac         ,rootr          ,etr_deficit    ,&
+        sabg           ,rstfac         ,rootr          ,etr_deficit    ,&
         tref           ,qref           ,trad           ,rst            ,&
         assim          ,respc          ,errore         ,emis           ,&
         z0m            ,zol            ,rib            ,ustar          ,&
@@ -105,7 +109,6 @@ CONTAINS
 
    USE MOD_Precision
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_Vars_Global
    USE MOD_Const_Physical, only: denh2o,roverg,hvap,hsub,rgas,cpair,&
                                  stefnc,denice,tfrz,vonkar,grav
@@ -121,7 +124,9 @@ CONTAINS
    USE MOD_Urban_BEM
    USE MOD_Urban_LUCY, only: LUCY
    USE MOD_Eroot, only: eroot
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
+#endif
 
    IMPLICIT NONE
 
@@ -206,7 +211,10 @@ CONTAINS
         csol      (1:nl_soil)          ,&! heat capacity of soil solids [J/(m3 K)]
         porsl     (1:nl_soil)          ,&! soil porosity [-]
         psi0      (1:nl_soil)          ,&! soil water suction, negative potential [mm]
+#ifdef Campbell_SOIL_MODEL
         bsw       (1:nl_soil)          ,&! clapp and hornberger "b" parameter [-]
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
         theta_r   (1:nl_soil)          ,&! residual water content (cm3/cm3)
 
         alpha_vgm (1:nl_soil)  ,&! parameter correspond approximately to inverse of air-entry value
@@ -214,6 +222,7 @@ CONTAINS
         L_vgm     (1:nl_soil)  ,&! pore-connectivity parameter
         sc_vgm    (1:nl_soil)  ,&! saturation at air entry value in classical vanGenuchten model [-]
         fc_vgm    (1:nl_soil)  ,&! a scaling factor by using air entry value in the Mualem model [-]
+#endif
         k_solids  (1:nl_soil)          ,&! thermal conductivity of minerals soil [W/m-K]
         dkdry     (1:nl_soil)          ,&! thermal conductivity of dry soil [W/m-K]
         dksatu    (1:nl_soil)          ,&! thermal conductivity of saturated unfrozen soil [W/m-K]
@@ -266,10 +275,7 @@ CONTAINS
         gradm               ,&! conductance-photosynthesis slope parameter
         binter              ,&! conductance-photosynthesis intercept
         lambda              ,&! marginal water cost of carbon gain
-        extkn                ! coefficient of leaf nitrogen allocation
-   
-   integer , intent(in) :: &
-        c3c4                              ! 1 for C3, 0 for C4
+        extkn                 ! coefficient of leaf nitrogen allocation
 
    real(r8), intent(in) :: &
         fsno_roof                      ,&! fraction of ground covered by snow
@@ -397,7 +403,6 @@ CONTAINS
         sm_gper                        ,&! rate of snowmelt [kg/(m2 s)]
         sm_lake                        ,&! rate of snowmelt [kg/(m2 s)]
         sabg                           ,&! overall ground solar radiation absorption (+wall)
-        rss                            ,&! soil surface resistance [s/m]
         rstfac                         ,&! factor of soil water stress
         rootr(1:nl_soil)               ,&! root resistance of a layer, all layers add to 1
         etr_deficit                    ,&! urban irrigation [mm/s]
@@ -477,6 +482,7 @@ CONTAINS
         olrb               ,&! olrg assuming black body emission [W/m2]
         psit               ,&! negative potential of soil
 
+        rss                ,&! soil resistance
         qroof              ,&! roof specific humidity [kg/kg]
         qgimp              ,&! ground impervious road specific humidity [kg/kg]
         qgper              ,&! ground pervious specific humidity [kg/kg]
@@ -616,7 +622,7 @@ CONTAINS
          lwsha = (fwsha*lwsha - dfwsun*lwsun ) / (fwsha-dfwsun)
       ENDIF
 
-      ! update fwsun (and fwsha, which weights twall below)
+      ! update fwsun
       fwsun = fwsun + dfwsun
       fwsha = 1. - fwsun
 
@@ -689,13 +695,14 @@ CONTAINS
             fac = max( fac, 0.001 )
          ENDIF
 
-         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-            psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
-         ELSE
-            psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
-               porsl(1), theta_r(1), psi0(1), &
-               5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
-         ENDIF
+#ifdef Campbell_SOIL_MODEL
+         psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
+            porsl(1), theta_r(1), psi0(1), &
+            5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
+#endif
          psit = max( -1.e8, psit )
          hr   = exp(psit/roverg/tgper)
          qred = (1.-fsno_gper)*hr + fsno_gper
@@ -839,12 +846,15 @@ CONTAINS
       IF ( doveg ) THEN
 
          ! soil water stress factor on stomatal resistance
-         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
-         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL eroot (nl_soil,trsmx0,porsl,&
+#ifdef Campbell_SOIL_MODEL
             bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-            psi0,rootfr,dz_gpersno(1:),t_gpersno(1:),wliq_gpersno(1:),rootr,etrc,rstfac)
+#endif
+            psi0,rootfr,dz_gpersno(1:nl_soil),t_gpersno(1:nl_soil), &
+            wliq_gpersno(1:nl_soil),rootr,etrc,rstfac)
 
          nurb = 3
 
@@ -863,7 +873,7 @@ CONTAINS
             hroof          ,hlr            ,nurb           ,fcover         ,&
             ewall          ,egimp          ,egper          ,ev             ,&
             htop           ,hbot           ,lai            ,sai            ,&
-            sqrtdi         ,effcon         ,vmax25         ,c3c4           ,slti,&
+            sqrtdi         ,effcon         ,vmax25         ,slti           ,&
             hlti           ,shti           ,hhti           ,trda           ,&
             trdm           ,trop           ,g1             ,g0             ,&
             gradm          ,binter         ,extkn          ,extkd          ,&
@@ -986,9 +996,13 @@ CONTAINS
            capr,cnfac,csol,k_solids,porsl,psi0,dkdry,dksatu,dksatf,&
            vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
            BA_alpha, BA_beta,&
+#ifdef Campbell_SOIL_MODEL
            bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
            theta_r,alpha_vgm,n_vgm,L_vgm,&
            sc_vgm,fc_vgm,&
+#endif
            dz_gpersno,z_gpersno,zi_gpersno,&
            t_gpersno,wice_gpersno,wliq_gpersno,scv_gper,snowdp_gper,&
            lgper,clgper,sabgper,fsengper,fevpgper,cgper,htvp_gper,&
@@ -1101,11 +1115,11 @@ CONTAINS
       fseng = fsenroof*fcover(0) + fsenwsun*fcover(1) + fsenwsha*fcover(2) + &
               fsengimp*fcover(3) + fsengper*fcover(4)
 
-      fsen_roof = fsenroof*fcover(0)
-      fsen_wsun = fsenwsun*fcover(1)
-      fsen_wsha = fsenwsha*fcover(2)
-      fsen_gimp = fsengimp*fcover(3)
-      fsen_gper = fsengper*fcover(4)
+      fsen_roof = fsenroof*fcover(0)*(1-flake)
+      fsen_wsun = fsenwsun*fcover(1)*(1-flake)
+      fsen_wsha = fsenwsha*fcover(2)*(1-flake)
+      fsen_gimp = fsengimp*fcover(3)*(1-flake)
+      fsen_gper = fsengper*fcover(4)*(1-flake)
 
       fevpg = fevproof*fcover(0) + fevpgimp*fcover(3) + fevpgper*fcover(4)
 
@@ -1113,9 +1127,9 @@ CONTAINS
                htvp_gimp*fevpgimp*fcover(3) + &
                htvp_gper*fevpgper*fcover(4)
 
-      lfevp_roof = htvp_roof*fevproof*fcover(0)
-      lfevp_gimp = htvp_gimp*fevpgimp*fcover(3)
-      lfevp_gper = htvp_gper*fevpgper*fcover(4)
+      lfevp_roof = htvp_roof*fevproof*fcover(0)*(1-flake)
+      lfevp_gimp = htvp_gimp*fevpgimp*fcover(3)*(1-flake)
+      lfevp_gper = htvp_gper*fevpgper*fcover(4)*(1-flake)
 
       IF ( doveg ) THEN
          assim  = assim * fveg
@@ -1127,8 +1141,8 @@ CONTAINS
          fevpa  = fevpl + fevpg
          lfevpa = lfevpa + hvap*fevpl
 
-         fsen_urbl   = fsenl
-         lfevp_urbl  = hvap*fevpl
+         fsen_urbl   = fsenl*(1-flake)
+         lfevp_urbl  = hvap*fevpl*(1-flake)
          etr_deficit = etr_deficit*fveg
       ELSE
          fsena  = fseng
@@ -1300,7 +1314,7 @@ CONTAINS
       ! ground heat flux
       fgrnd = sabg + lnet - dlwbef - dlout*fg*(1-flake) &
             - 4.*eroof*stefnc*troof_bef**3*dT(0)*froof*(1-flake)&
-            - fseng - (lfevp_roof + lfevp_gimp + lfevp_gper)*(1-flake) &
+            - fseng - (lfevp_roof + lfevp_gimp + lfevp_gper) &
             - lfevpa_lake*flake
 
       ! energy balance check
@@ -1312,7 +1326,7 @@ CONTAINS
 
       fgrnd = fgrnd - (Fhac + Fwst + Fach + vehc + meta)*(1-flake)
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       IF (abs(errore)>.5) THEN
          write(6,*) 'Urban_THERMAL.F90: Urban energy balance violation'
          write(6,*) ipatch,errore,sabg,sabv*fveg*(1-flake)
@@ -1323,7 +1337,7 @@ CONTAINS
          CALL CoLM_stop()
       ENDIF
 100   format(10(f15.3))
-      ENDIF
+#endif
 
       ! diagnostic sabg only for pervious and impervious ground
       !sabg = sabgper*fgper + sabgimp*(1-fgper)
@@ -1355,7 +1369,8 @@ CONTAINS
 !=======================================================================
 
       ! A simple Building energy model
-      CALL SimpleBEM ( deltim, forc_rhoair, fcover(0:2), hroof, troommax, troommin, &
+      CALL SimpleBEM ( idate, deltim, patchlonr, forc_rhoair, fcover(0:2), hroof, &
+                       troommax, troommin, weh_prof, &
                        troof_nl_bef, twsun_nl_bef, twsha_nl_bef, &
                        t_roofsno(nl_roof), t_wallsun(nl_wall), t_wallsha(nl_wall), &
                        tkdz_roof, tkdz_wsun, tkdz_wsha, tafu, troom, &
@@ -1377,7 +1392,6 @@ CONTAINS
       Fwst = Fwst * (1-flake)
       Fach = Fach * (1-flake)
       Fhah = Fhah * (1-flake)
-
 
       deallocate ( fcover )
 

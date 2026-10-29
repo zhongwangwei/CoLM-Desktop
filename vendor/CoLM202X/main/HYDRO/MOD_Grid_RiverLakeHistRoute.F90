@@ -18,9 +18,7 @@ MODULE MOD_Grid_RiverLakeHistRoute
 !    the call sites rather than of a list someone has to remember to update.
 !
 !    This lives in its own module rather than in MOD_Grid_RiverLakeHist
-!    because the tracer route-history writers must reach the same dispatch,
-!    and MOD_Grid_RiverLakeHist already depends on the tracer lifecycle.
-!    It also keeps the river-network dependency out of the generic
+!    to keep the river-network dependency out of the generic
 !    MOD_Vector_ReadWrite utility.
 !
 !    Usage per history write:
@@ -39,12 +37,10 @@ MODULE MOD_Grid_RiverLakeHistRoute
    ! Sharded (block-mode) writers live in their own module; the generic
    ! master-gather writers stay in MOD_Vector_ReadWrite.
    USE MOD_Vector_ReadWrite
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_gather_matrix_to_master
    USE MOD_Grid_RiverLakeHistShard
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_ucid, x_ucat, y_ucat, griducat
-#ifdef FLAT_SPMD
-   USE MOD_Grid_RiverLakeNetwork, only: x_ucat_all, y_ucat_all
-#endif
    USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id, &
       resv_data_address, dam_GRAND_ID
 
@@ -88,45 +84,7 @@ MODULE MOD_Grid_RiverLakeHistRoute
    ! them so the fingerprint can be recomputed without re-plumbing them.
    real(r8), allocatable :: rh_lon_cache(:), rh_lat_cache(:)
 
-   ! Output window of the single unitcat file: the unit-catchment cells whose centres lie
-   ! in the model domain (DEF_domain), so the river fields line up with the land history.
-   ! Rivers are still routed over their whole systems; cells outside are just not written.
-   ! A domain across the dateline, and grouped SPMD, keep the global grid.
-   integer :: rh_x0 = 1, rh_y0 = 1, rh_nlon = 0, rh_nlat = 0
-   integer, allocatable :: rh_xw(:), rh_yw(:)
-
 CONTAINS
-
-   SUBROUTINE route_hist_window ()
-   IMPLICIT NONE
-   integer :: i, x0, x1, y0, y1
-      IF (rh_nlon > 0) RETURN
-      rh_x0 = 1;  rh_nlon = griducat%nlon
-      rh_y0 = 1;  rh_nlat = griducat%nlat
-#ifdef FLAT_SPMD
-      IF (allocated(rh_lon_cache) .and. (DEF_domain%edgew < DEF_domain%edgee)) THEN
-         x0 = 0;  x1 = 0;  y0 = 0;  y1 = 0
-         DO i = 1, size(rh_lon_cache)
-            IF ((rh_lon_cache(i) > DEF_domain%edgew) .and. (rh_lon_cache(i) < DEF_domain%edgee)) THEN
-               IF (x0 == 0) x0 = i
-               x1 = i
-            ENDIF
-         ENDDO
-         DO i = 1, size(rh_lat_cache)
-            IF ((rh_lat_cache(i) > DEF_domain%edges) .and. (rh_lat_cache(i) < DEF_domain%edgen)) THEN
-               IF (y0 == 0) y0 = i
-               y1 = i
-            ENDIF
-         ENDDO
-         IF ((x0 > 0) .and. (y0 > 0)) THEN
-            rh_x0 = x0;  rh_nlon = x1 - x0 + 1
-            rh_y0 = y0;  rh_nlat = y1 - y0 + 1
-         ENDIF
-      ENDIF
-      rh_xw = x_ucat_all - rh_x0 + 1
-      rh_yw = y_ucat_all - rh_y0 + 1
-#endif
-   END SUBROUTINE route_hist_window
 
    logical FUNCTION route_hist_is_block ()
       route_hist_is_block = rh_block
@@ -198,13 +156,10 @@ CONTAINS
             IF (.not. fexists) THEN
                CALL ncio_create_file (trim(file_hist_ucat))
                CALL ncio_define_dimension (trim(file_hist_ucat), 'time', 0)
-               CALL route_hist_window ()
-               CALL ncio_define_dimension (trim(file_hist_ucat), 'lat_ucat', rh_nlat)
-               CALL ncio_define_dimension (trim(file_hist_ucat), 'lon_ucat', rh_nlon)
-               CALL ncio_write_serial (trim(file_hist_ucat), 'lat_ucat', &
-                  lat_ucat(rh_y0:rh_y0+rh_nlat-1), 'lat_ucat')
-               CALL ncio_write_serial (trim(file_hist_ucat), 'lon_ucat', &
-                  lon_ucat(rh_x0:rh_x0+rh_nlon-1), 'lon_ucat')
+               CALL ncio_define_dimension (trim(file_hist_ucat), 'lat_ucat', griducat%nlat)
+               CALL ncio_define_dimension (trim(file_hist_ucat), 'lon_ucat', griducat%nlon)
+               CALL ncio_write_serial (trim(file_hist_ucat), 'lat_ucat', lat_ucat, 'lat_ucat')
+               CALL ncio_write_serial (trim(file_hist_ucat), 'lon_ucat', lon_ucat, 'lon_ucat')
                ! Reservoir axis belongs to the skeleton, not to the first
                ! reservoir variable: it used to be guarded by an 'is the file
                ! new' flag computed in the caller, which is exactly the kind of
@@ -404,22 +359,6 @@ CONTAINS
             ENDIF
          ENDIF
       ELSE
-         ! The master maps the gathered (global) vector with the global coordinates; on FLAT_SPMD
-         ! it also computes, so x_ucat/y_ucat are only its local slice there.
-#ifdef FLAT_SPMD
-         CALL route_hist_window ()
-         IF (with_time) THEN
-            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
-               ucat_data_address, rh_nlon, rh_xw, rh_nlat, rh_yw, &
-               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat', rh_itime,      &
-               longname, units)
-         ELSE
-            CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
-               ucat_data_address, rh_nlon, rh_xw, rh_nlat, rh_yw, &
-               trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
-               longname=longname, units=units)
-         ENDIF
-#else
          IF (with_time) THEN
             CALL vector_gather_map2grid_and_write (vector, numucat, totalnumucat, &
                ucat_data_address, griducat%nlon, x_ucat, griducat%nlat, y_ucat,   &
@@ -431,7 +370,6 @@ CONTAINS
                trim(rh_file_one), varname, 'lon_ucat', 'lat_ucat',                &
                longname=longname, units=units)
          ENDIF
-#endif
       ENDIF
 
    END SUBROUTINE route_hist_write_ucat
@@ -496,6 +434,12 @@ CONTAINS
          CALL vector_gather_matrix_to_master (matrix, nrow, ncol_local, ncol_global, &
             global_id, wdata)
          IF (p_is_master) THEN
+            ! The single-file dimensions are defined here, not by the caller: in
+            ! block mode rh_file_one is never created (each I/O group writes its
+            ! own shard with define_bif_shard_dims), so defining them there
+            ! stopped the run with "No such file or directory".
+            CALL ncio_define_dimension (trim(rh_file_one), 'bifurcation_level', nrow)
+            CALL ncio_define_dimension (trim(rh_file_one), 'bifurcation_pathway', ncol_global)
             CALL ncio_write_serial_time (trim(rh_file_one), varname, rh_itime, wdata, &
                'bifurcation_level', 'bifurcation_pathway', 'time', DEF_HIST_CompressLevel)
             IF (rh_itime <= 1) THEN

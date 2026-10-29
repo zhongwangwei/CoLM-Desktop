@@ -90,7 +90,6 @@ SUBROUTINE rd_land_types(dir_rawdata)
 !  Created by Yongjiu Dai, 12/2013
 !-----------------------------------------------------------------------
 USE MOD_Precision
-USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
 USE spmd_TM
 #if (defined usempi)
 USE spmd_io
@@ -665,7 +664,7 @@ IMPLICIT NONE
       IF (p_master) print*,'URBAN'
       IF (p_master) print*,'Urban and Built-up Land Points =', ii
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
 #if (defined LULC_USGS)
       ii = 0
       iii = 0
@@ -747,7 +746,7 @@ IMPLICIT NONE
       IF (p_master) print*,' SECOND MODIS IGBP land cover '
       IF (p_master) print*,'land water points =', ii, 'wetland points=', iii, 'glacier points=', iiii, 'urban points=', jjj
 #endif
-      ENDIF
+#endif
 
 #if (defined usempi)
 #if (defined LULC_USGS)
@@ -1071,7 +1070,7 @@ IMPLICIT NONE
       IF (p_master) print*, 'MODIS IGBP GLACIER/ICESHEET','iii=',iii
 #endif
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
 #if (defined LULC_USGS)
       iiii = 0
 
@@ -1114,7 +1113,7 @@ IMPLICIT NONE
 #endif
       IF (p_master) print*, 'MODIS IGBP GLACIER/ICESHEET', 'iiii=',iiii
 #endif
-      ENDIF
+#endif
 
       ! URBAN and BUILT-UP LAND
       ! ------------------
@@ -1190,7 +1189,7 @@ IMPLICIT NONE
       IF (p_master) print*, 'MODIS IGBP URBAN and BUILT-UP LAND','iii=',iii
 #endif
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
 #if (defined LULC_USGS)
       iiii = 0
 
@@ -1233,10 +1232,10 @@ IMPLICIT NONE
 #endif
       IF (p_master) print*, 'MODIS IGBP URBAN and BUILT-UP LAND', 'iiii=',iiii
 #endif
-      ENDIF
+#endif
 
       !--------------------------------------------------------------------
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
 #if (defined LULC_USGS)
       ii = 0
       iii = 0
@@ -1322,7 +1321,7 @@ IMPLICIT NONE
       IF (p_master) print*,' FINAL MODIS IGBP land cover '
       IF (p_master) print*,'land water points =', ii, 'wetland points=', iii, 'glacier points=', iiii, 'urban points=', jjj
 #endif
-      ENDIF
+#endif
 
 !#if (defined ongoing)
 ! ..............................................

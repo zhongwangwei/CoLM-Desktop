@@ -22,6 +22,7 @@ MODULE MOD_HistGridded
    USE MOD_SpatialMapping
    USE MOD_Namelist
    USE MOD_NetCDFSerial
+   USE MOD_SPMD_Task
 #ifdef USEMPI
    USE MOD_HistWriteBack
 #endif
@@ -34,82 +35,20 @@ MODULE MOD_HistGridded
 
    type(grid_concat_type) :: hist_concat
 
-   integer, parameter :: hist_data_id_first = 1001
-   integer, parameter :: hist_data_id_count = 2000
    integer :: hist_data_id
 
 !--------------------------------------------------------------------------
 CONTAINS
 
-#ifdef FLAT_SPMD
-   SUBROUTINE gather_gridded_history (local_data, nlocal, nfield, global_data)
-
-   USE MOD_Block
-   USE MOD_Vars_Global, only: spval
-   IMPLICIT NONE
-
-   real(r8), intent(in) :: local_data(:)
-   integer, intent(in) :: nlocal, nfield
-   real(r8), allocatable, intent(out) :: global_data(:,:,:)
-
-   integer :: iblk, jblk, ixseg, iyseg, iproc, ipos, nseg, xcnt, ycnt
-   integer, allocatable :: counts(:), disps(:), offsets(:)
-   real(r8), allocatable :: gathered(:)
-
-      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
-      CALL mpi_allgather (nlocal, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, &
-         p_comm_glb, p_err)
-      disps(0) = 0
-      DO iproc = 1, p_np_glb-1
-         disps(iproc) = disps(iproc-1) + counts(iproc-1)
-      ENDDO
-
-      IF (p_is_master) THEN
-         allocate (gathered(max(1,sum(counts))), offsets(0:p_np_glb-1))
-         allocate (global_data(nfield,hist_concat%ginfo%nlon,hist_concat%ginfo%nlat))
-         global_data = spval
-         offsets = 0
-      ELSE
-         allocate (gathered(1), offsets(0:0))
-      ENDIF
-
-      CALL mpi_gatherv (local_data, nlocal, MPI_REAL8, gathered, counts, disps, &
-         MPI_REAL8, p_root, p_comm_glb, p_err)
-
-      IF (p_is_master) THEN
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               iproc = gblock%pio(iblk,jblk)
-               xcnt = hist_concat%xsegs(ixseg)%cnt
-               ycnt = hist_concat%ysegs(iyseg)%cnt
-               nseg = nfield*xcnt*ycnt
-               ipos = disps(iproc) + offsets(iproc)
-               global_data(:, &
-                  hist_concat%xsegs(ixseg)%gdsp+1:hist_concat%xsegs(ixseg)%gdsp+xcnt, &
-                  hist_concat%ysegs(iyseg)%gdsp+1:hist_concat%ysegs(iyseg)%gdsp+ycnt) = &
-                  reshape(gathered(ipos+1:ipos+nseg), (/nfield,xcnt,ycnt/))
-               offsets(iproc) = offsets(iproc) + nseg
-            ENDDO
-         ENDDO
-         IF (any(offsets /= counts)) &
-            CALL CoLM_stop ('gather_gridded_history: packed length mismatch')
-      ENDIF
-
-      deallocate (counts, disps, offsets, gathered)
-
-   END SUBROUTINE gather_gridded_history
-#endif
-
    SUBROUTINE hist_gridded_init (dir_hist, lulcc_call)
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_URBAN_RUN
    USE MOD_Vars_Global
    USE MOD_Block
    USE MOD_LandPatch
+#ifdef URBAN_MODEL
    USE MOD_LandUrban
+#endif
    USE MOD_Vars_1DAccFluxes
    USE MOD_Forcing, only: gforc
 #ifdef SinglePoint
@@ -134,10 +73,10 @@ CONTAINS
       IF (present(lulcc_call)) CALL mp2g_hist%forc_free_mem
       CALL mp2g_hist%build_arealweighted (ghist, landpatch)
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
       IF (present(lulcc_call)) CALL mp2g_hist_urb%forc_free_mem
       CALL mp2g_hist_urb%build_arealweighted (ghist, landurban)
-ENDIF
+#endif
 
       IF (p_is_io) THEN
          CALL allocate_block_data (ghist, landfraction)
@@ -167,7 +106,7 @@ ENDIF
 #endif
 
       IF (trim(DEF_HIST_mode) == 'one') THEN
-         hist_data_id = hist_data_id_first
+         hist_data_id = 10001
       ENDIF
 
    END SUBROUTINE hist_gridded_init
@@ -241,7 +180,6 @@ ENDIF
          longname, units)
 
    USE MOD_Block
-   USE MOD_Vars_1DAccFluxes,  only: nac
    USE MOD_Vars_Global, only: spval
    IMPLICIT NONE
 
@@ -260,7 +198,6 @@ ENDIF
    integer :: iblkme, xblk, yblk, xloc, yloc
    integer :: compress
 
-      IF (p_is_worker)  WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
       IF (p_is_io)      CALL allocate_block_data (ghist, flux_xy_2d)
 
       CALL mp2g_hist_urb%pset2grid (acc_vec, flux_xy_2d, spv = spval, msk = filter)
@@ -497,15 +434,11 @@ ENDIF
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
-         itime = 0
          IF (p_is_io) THEN
 
             DO iblkme = 1, gblock%nblkme
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
-#ifdef FLAT_SPMD
-               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
-#endif
                IF (ghist%ycnt(jblk) <= 0) CYCLE
                IF (ghist%xcnt(iblk) <= 0) CYCLE
 
@@ -524,11 +457,7 @@ ENDIF
 
          ENDIF
 #ifdef USEMPI
-#ifdef FLAT_SPMD
-         CALL mpi_allreduce (MPI_IN_PLACE, itime, 1, MPI_INTEGER, MPI_MAX, p_comm_glb, p_err)
-#else
          IF (.not. p_is_master) CALL mpi_bcast (itime, 1, MPI_INTEGER, p_root, p_comm_group, p_err)
-#endif
 #endif
 
       ENDIF
@@ -560,51 +489,12 @@ ENDIF
    integer :: rmesg(3), smesg(3), isrc
    character(len=256) :: fileblock
    real(r8), allocatable :: rbuf(:,:), sbuf(:,:), vdata(:,:)
-#ifdef FLAT_SPMD
-   integer :: nlocal, ipos
-   real(r8), allocatable :: sendbuf(:), global_fields(:,:,:)
-#endif
 
       IF (trim(DEF_HIST_mode) == 'one') THEN
 
-#ifdef FLAT_SPMD
-         nlocal = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) &
-                  nlocal = nlocal + hist_concat%xsegs(ixseg)%cnt * hist_concat%ysegs(iyseg)%cnt
-            ENDDO
-         ENDDO
-         allocate (sendbuf(max(1,nlocal)))
-         ipos = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
-                  xbdsp = hist_concat%xsegs(ixseg)%bdsp
-                  ybdsp = hist_concat%ysegs(iyseg)%bdsp
-                  xcnt = hist_concat%xsegs(ixseg)%cnt
-                  ycnt = hist_concat%ysegs(iyseg)%cnt
-                  sendbuf(ipos+1:ipos+xcnt*ycnt) = reshape( &
-                     wdata%blk(iblk,jblk)%val(xbdsp+1:xbdsp+xcnt,ybdsp+1:ybdsp+ycnt), &
-                     (/xcnt*ycnt/))
-                  ipos = ipos + xcnt*ycnt
-               ENDIF
-            ENDDO
-         ENDDO
-         CALL gather_gridded_history (sendbuf, nlocal, 1, global_fields)
-         deallocate (sendbuf)
-#endif
-
          IF (p_is_master) THEN
 
-#ifdef FLAT_SPMD
-            allocate (vdata (hist_concat%ginfo%nlon, hist_concat%ginfo%nlat))
-            vdata = global_fields(1,:,:)
-#elif defined(USEMPI)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 
                allocate (vdata (hist_concat%ginfo%nlon, hist_concat%ginfo%nlat))
@@ -665,7 +555,7 @@ ENDIF
             ENDDO
 #endif
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 #endif
                IF (itime >= 1) THEN
@@ -684,13 +574,13 @@ ENDIF
                ENDIF
 
                deallocate (vdata)
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             ENDIF
 #endif
 
          ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          IF (p_is_io) THEN
             DO iyseg = 1, hist_concat%nyseg
                DO ixseg = 1, hist_concat%nxseg
@@ -726,12 +616,7 @@ ENDIF
          ENDIF
 #endif
 
-#ifdef FLAT_SPMD
-         IF (allocated(global_fields)) deallocate (global_fields)
-#endif
-
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
@@ -741,9 +626,6 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
-#ifdef FLAT_SPMD
-               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
-#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)
@@ -791,54 +673,12 @@ ENDIF
    integer :: rmesg(4), smesg(4), isrc
    character(len=256) :: fileblock
    real(r8), allocatable :: rbuf(:,:,:), sbuf(:,:,:), vdata(:,:,:)
-#ifdef FLAT_SPMD
-   integer :: nlocal, ipos
-   real(r8), allocatable :: sendbuf(:), global_fields(:,:,:)
-#endif
 
       IF (trim(DEF_HIST_mode) == 'one') THEN
 
-#ifdef FLAT_SPMD
-         ndim1 = wdata%ub1 - wdata%lb1 + 1
-         nlocal = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) &
-                  nlocal = nlocal + ndim1 * hist_concat%xsegs(ixseg)%cnt * hist_concat%ysegs(iyseg)%cnt
-            ENDDO
-         ENDDO
-         allocate (sendbuf(max(1,nlocal)))
-         ipos = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
-                  xbdsp = hist_concat%xsegs(ixseg)%bdsp
-                  ybdsp = hist_concat%ysegs(iyseg)%bdsp
-                  xcnt = hist_concat%xsegs(ixseg)%cnt
-                  ycnt = hist_concat%ysegs(iyseg)%cnt
-                  sendbuf(ipos+1:ipos+ndim1*xcnt*ycnt) = reshape( &
-                     wdata%blk(iblk,jblk)%val(:,xbdsp+1:xbdsp+xcnt,ybdsp+1:ybdsp+ycnt), &
-                     (/ndim1*xcnt*ycnt/))
-                  ipos = ipos + ndim1*xcnt*ycnt
-               ENDIF
-            ENDDO
-         ENDDO
-         CALL gather_gridded_history (sendbuf, nlocal, ndim1, global_fields)
-         deallocate (sendbuf)
-#endif
-
          IF (p_is_master) THEN
 
-#ifdef FLAT_SPMD
-            allocate (vdata (hist_concat%ginfo%nlon, hist_concat%ginfo%nlat, ndim1))
-            DO idim1 = 1, ndim1
-               vdata(:,:,idim1) = global_fields(idim1,:,:)
-            ENDDO
-#elif defined(USEMPI)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 
                DO idata = 1, hist_concat%ndatablk
@@ -904,7 +744,7 @@ ENDIF
 #endif
 
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 #endif
                CALL ncio_define_dimension (filename, dim1name, ndim1)
@@ -919,12 +759,12 @@ ENDIF
                ENDIF
 
                deallocate (vdata)
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             ENDIF
 #endif
          ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          IF (p_is_io) THEN
 
             DO iyseg = 1, hist_concat%nyseg
@@ -961,12 +801,7 @@ ENDIF
          ENDIF
 #endif
 
-#ifdef FLAT_SPMD
-         IF (allocated(global_fields)) deallocate (global_fields)
-#endif
-
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
@@ -976,9 +811,6 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
-#ifdef FLAT_SPMD
-               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
-#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)
@@ -1021,58 +853,12 @@ ENDIF
    integer :: rmesg(5), smesg(5), isrc
    character(len=256) :: fileblock
    real(r8), allocatable :: rbuf(:,:,:,:), sbuf(:,:,:,:), vdata(:,:,:,:)
-#ifdef FLAT_SPMD
-   integer :: nfield, nlocal, ipos
-   real(r8), allocatable :: sendbuf(:), global_fields(:,:,:)
-#endif
 
       IF (trim(DEF_HIST_mode) == 'one') THEN
 
-#ifdef FLAT_SPMD
-         ndim1 = wdata%ub1 - wdata%lb1 + 1
-         ndim2 = wdata%ub2 - wdata%lb2 + 1
-         nfield = ndim1*ndim2
-         nlocal = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) &
-                  nlocal = nlocal + nfield * hist_concat%xsegs(ixseg)%cnt * hist_concat%ysegs(iyseg)%cnt
-            ENDDO
-         ENDDO
-         allocate (sendbuf(max(1,nlocal)))
-         ipos = 0
-         DO iyseg = 1, hist_concat%nyseg
-            DO ixseg = 1, hist_concat%nxseg
-               iblk = hist_concat%xsegs(ixseg)%blk
-               jblk = hist_concat%ysegs(iyseg)%blk
-               IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
-                  xbdsp = hist_concat%xsegs(ixseg)%bdsp
-                  ybdsp = hist_concat%ysegs(iyseg)%bdsp
-                  xcnt = hist_concat%xsegs(ixseg)%cnt
-                  ycnt = hist_concat%ysegs(iyseg)%cnt
-                  sendbuf(ipos+1:ipos+nfield*xcnt*ycnt) = reshape( &
-                     wdata%blk(iblk,jblk)%val(:,:,xbdsp+1:xbdsp+xcnt,ybdsp+1:ybdsp+ycnt), &
-                     (/nfield*xcnt*ycnt/))
-                  ipos = ipos + nfield*xcnt*ycnt
-               ENDIF
-            ENDDO
-         ENDDO
-         CALL gather_gridded_history (sendbuf, nlocal, nfield, global_fields)
-         deallocate (sendbuf)
-#endif
-
          IF (p_is_master) THEN
 
-#ifdef FLAT_SPMD
-            allocate (vdata (hist_concat%ginfo%nlon,hist_concat%ginfo%nlat,ndim1,ndim2))
-            DO idim2 = 1, ndim2
-               DO idim1 = 1, ndim1
-                  vdata(:,:,idim1,idim2) = global_fields(idim1+(idim2-1)*ndim1,:,:)
-               ENDDO
-            ENDDO
-#elif defined(USEMPI)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 
                DO idata = 1, hist_concat%ndatablk
@@ -1144,7 +930,7 @@ ENDIF
 
 #endif
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             IF (.not. DEF_HIST_WriteBack) THEN
 #endif
                CALL ncio_define_dimension (filename, dim1name, ndim1)
@@ -1160,12 +946,12 @@ ENDIF
                ENDIF
 
                deallocate (vdata)
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
             ENDIF
 #endif
          ENDIF
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          IF (p_is_io) THEN
 
             DO iyseg = 1, hist_concat%nyseg
@@ -1203,12 +989,7 @@ ENDIF
          ENDIF
 #endif
 
-#ifdef FLAT_SPMD
-         IF (allocated(global_fields)) deallocate (global_fields)
-#endif
-
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
          IF (p_is_io) THEN
@@ -1217,9 +998,6 @@ ENDIF
                iblk = gblock%xblkme(iblkme)
                jblk = gblock%yblkme(iblkme)
 
-#ifdef FLAT_SPMD
-               IF (gblock%pio(iblk,jblk) /= p_iam_glb) CYCLE
-#endif
                IF ((grid%xcnt(iblk) == 0) .or. (grid%ycnt(jblk) == 0)) CYCLE
 
                CALL get_filename_block (filename, iblk, jblk, fileblock)

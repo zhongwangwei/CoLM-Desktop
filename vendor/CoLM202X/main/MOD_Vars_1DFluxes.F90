@@ -6,12 +6,18 @@ MODULE MOD_Vars_1DFluxes
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_Vars_1DPFTFluxes
+#endif
+#ifdef BGC
    USE MOD_BGC_Vars_1DFluxes
+#endif
 #ifdef CatchLateralFlow
    USE MOD_Catch_Vars_1DFluxes
 #endif
+#ifdef URBAN_MODEL
    USE MOD_Urban_Vars_1DFluxes
+#endif
 #ifdef DataAssimilation
    USE MOD_DA_Vars_1DFluxes
 #endif
@@ -63,6 +69,9 @@ MODULE MOD_Vars_1DFluxes
    real(r8), allocatable :: xerr   (:) !the error of water balance [mm/s]
    real(r8), allocatable :: zerr   (:) !the error of energy balance [W/m2]
    real(r8), allocatable :: frcsat (:) !fraction of saturation area [-]
+#ifdef MaterialTransport
+   logical, allocatable :: frcsat_hist_valid(:)
+#endif
    real(r8), allocatable :: rsur   (:) !surface runoff (mm h2o/s)
    real(r8), allocatable :: rsur_se(:) !saturation excess surface runoff (mm h2o/s)
    real(r8), allocatable :: rsur_ie(:) !infiltration excess surface runoff (mm h2o/s)
@@ -101,7 +110,6 @@ CONTAINS
    ! Allocates memory for CoLM 1d [numpatch] variables
    ! -------------------------------------------------------------------
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_Vars_Global
    USE MOD_SPMD_Task
    USE MOD_LandPatch
@@ -154,6 +162,9 @@ CONTAINS
             allocate ( zerr   (numpatch) )  ; zerr   (:) = spval ! the error of energy balance [W/m2]
 
             allocate ( frcsat (numpatch) )  ; frcsat (:) = spval ! fraction of saturation area [-]
+#ifdef MaterialTransport
+            allocate (frcsat_hist_valid(numpatch)); frcsat_hist_valid(:) = .true.
+#endif
             allocate ( rsur   (numpatch) )  ; rsur   (:) = spval ! surface runoff (mm h2o/s)
             allocate ( rsur_se(numpatch) )  ; rsur_se(:) = spval ! saturation excess surface runoff (mm h2o/s)
             allocate ( rsur_ie(numpatch) )  ; rsur_ie(:) = spval ! infiltration excess surface runoff (mm h2o/s)
@@ -170,27 +181,28 @@ CONTAINS
             allocate ( qlayer (0:nl_soil,numpatch) ); qlayer(:,:) = spval ! water flux between soil layer [mm h2o/s]
             allocate ( lake_deficit (numpatch) ); lake_deficit(:) = spval ! lake deficit due to evaporation (mm h2o/s)
 
+            allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
+
             allocate ( sensors(nsensor,numpatch) ); sensors(:,:) = spval !
 
          ENDIF
-         allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
       ENDIF
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL allocate_1D_PFTFluxes
-ENDIF
+#endif
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
       CALL allocate_1D_BGCFluxes
-ENDIF
+#endif
 
 #ifdef CatchLateralFlow
       CALL allocate_1D_CatchFluxes
 #endif
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
       CALL allocate_1D_UrbanFluxes
-ENDIF
+#endif
 
 #ifdef DataAssimilation
       CALL allocate_1D_DAFluxes
@@ -203,7 +215,6 @@ ENDIF
    ! deallocates memory for CoLM 1d [numpatch] variables
    ! --------------------------------------------------------------------
    USE MOD_SPMD_Task
-   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_LandPatch
 
       IF (p_is_worker) THEN
@@ -252,6 +263,9 @@ ENDIF
             deallocate ( xerr    )  ! the error of water balance [mm/s]
             deallocate ( zerr    )  ! the error of energy balance [W/m2]
             deallocate ( frcsat  )  ! fraction of saturation area [-]
+#ifdef MaterialTransport
+            deallocate (frcsat_hist_valid)
+#endif
             deallocate ( rsur    )  ! surface runoff (mm h2o/s)
             deallocate ( rsur_se )  ! saturation excess surface runoff (mm h2o/s)
             deallocate ( rsur_ie )  ! infiltration excess surface runoff (mm h2o/s)
@@ -267,27 +281,28 @@ ENDIF
             deallocate ( qlayer  )  ! water flux between soil layer [mm h2o/s]
             deallocate ( lake_deficit )  ! lake deficit due to evaporation (mm h2o/s)
 
+            deallocate ( oroflag )  !
+
             deallocate ( sensors )  !
 
          ENDIF
-         IF (allocated(oroflag)) deallocate ( oroflag )
       ENDIF
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL deallocate_1D_PFTFluxes
-ENDIF
+#endif
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
       CALL deallocate_1D_BGCFluxes
-ENDIF
+#endif
 
 #ifdef CatchLateralFlow
       CALL deallocate_1D_CatchFluxes
 #endif
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
       CALL deallocate_1D_UrbanFluxes
-ENDIF
+#endif
 
 #ifdef DataAssimilation
       CALL deallocate_1D_DAFluxes

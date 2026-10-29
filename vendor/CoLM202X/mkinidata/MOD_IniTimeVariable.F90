@@ -4,7 +4,9 @@ MODULE MOD_IniTimeVariable
 
 !-----------------------------------------------------------------------
    USE MOD_Precision
+#ifdef BGC
    USE MOD_BGC_CNSummary, only: CNDriverSummarizeStates, CNDriverSummarizeFluxes
+#endif
    IMPLICIT NONE
    SAVE
 
@@ -41,6 +43,7 @@ CONTAINS
 #endif
 !Ozone Variables
                      ,o3coefv_sun,o3coefv_sha,o3coefg_sun,o3coefg_sha&
+#if (defined BGC)
                      ,use_cnini, totlitc, totsomc, totcwdc, decomp_cpools, decomp_cpools_vr, ctrunc_veg, ctrunc_soil, ctrunc_vr &
                      ,totlitn, totsomn, totcwdn, decomp_npools, decomp_npools_vr, ntrunc_veg, ntrunc_soil, ntrunc_vr &
                      ,totvegc, totvegn, totcolc, totcoln, col_endcb, col_begcb, col_endnb, col_begnb &
@@ -49,7 +52,7 @@ CONTAINS
                      ,col_sminnendnb, col_sminnbegnb &
                      ,altmax, altmax_lastyear, altmax_lastyear_indx, lag_npp &
                      ,sminn_vr, sminn, smin_no3_vr, smin_nh4_vr &
-                     ,prec10, prec30, prec60, prec365, prec_today, rh30_today, prec_daily, tsoi17, rh30, accumnstep, skip_balance_check &
+                     ,prec10, prec60, prec365, prec_today, prec_daily, tsoi17, rh30, accumnstep, skip_balance_check &
 !------------------------SASU variables-----------------
                      ,decomp0_cpools_vr          , decomp0_npools_vr           &
                      ,I_met_c_vr_acc             , I_cel_c_vr_acc             , I_lig_c_vr_acc             , I_cwd_c_vr_acc              &
@@ -67,6 +70,7 @@ CONTAINS
                      ,AKX_soil1_exit_n_vr_acc    , AKX_soil2_exit_n_vr_acc    , AKX_soil3_exit_n_vr_acc     &
                      ,diagVX_n_vr_acc            , upperVX_n_vr_acc           , lowerVX_n_vr_acc           &
 !------------------------------------------------------------
+#endif
                      ,use_soilini, nl_soil_ini, soil_z,   soil_t,   soil_w, use_snowini, snow_d &
                      ,use_wtd,     zwtmm,       zc_soimm, zi_soimm, vliq_r, nprms, prms)
 
@@ -82,9 +86,11 @@ CONTAINS
    USE MOD_Vars_TimeVariables, only: tlai, tsai
    USE MOD_Const_PFT, only: isevg, woody, leafcn, frootcn, livewdcn, deadwdcn, slatop, manure
    USE MOD_Vars_TimeInvariants, only: ibedrock, dbedrock
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
+#endif
    USE MOD_Vars_Global
 #ifdef HYPERSPECTRAL
    USE MOD_Albedo_HiRes
@@ -126,7 +132,7 @@ CONTAINS
          reflectance    ( 0:15, 211, 2 )     ,&
          transmittance  ( 0:15, 211, 2 )     ,&
          soil_alb       ( 211 ), kw(211), nw(211)
-   
+
    real(r8), intent(in) ::       &!
          patchlatr,              &! patch latitude
          patchlonr                ! patch longitude
@@ -142,7 +148,9 @@ CONTAINS
          z0m                      ! aerodynamic roughness length [m]
 
    logical, intent(in)  :: use_soilini
+#ifdef BGC
    logical, intent(in)  :: use_cnini
+#endif
    integer, intent(in)  :: nl_soil_ini
    real(r8), intent(in) ::       &!
          soil_z(nl_soil_ini),    &! soil layer depth for initial (m)
@@ -242,6 +250,7 @@ CONTAINS
          o3coefg_sun,            &! Ozone stress factor for stomata on shaded leaf
          o3coefg_sha              ! Ozone stress factor for stomata on shaded leaf
 
+#ifdef BGC
    real(r8),intent(out) ::      &
         totlitc               , &
         totsomc               , &
@@ -287,11 +296,9 @@ CONTAINS
         smin_no3_vr               (nl_soil)                   , &
         smin_nh4_vr               (nl_soil)                   , &
         prec10                                                , &
-        prec30                                                , &
         prec60                                                , &
         prec365                                               , &
         prec_today                                            , &
-        rh30_today                                            , &
         prec_daily                (365)                       , &
         tsoi17                                                , &
         rh30                                                  , &
@@ -356,6 +363,8 @@ CONTAINS
    !----------------------------------------------------
    logical, intent(out) :: &
         skip_balance_check
+
+#endif
 
    integer j, snl, m, ivt
    real(r8) wet(nl_soil), zi_soi_a(0:nl_soil), psi, vliq, wt, ssw, oro, rhosno_ini, a
@@ -508,7 +517,7 @@ CONTAINS
          ! (2) snow initialization
          !     variables: snowdp, sag, scv, fsno, snl, z_soisno, dz_soisno
          z0m = htop * z0mr
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF(patchtype==0)THEN
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
@@ -516,7 +525,7 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                z0m_p(ps:pe) = htop_p(ps:pe) * z0mr
             ENDIF
          ENDIF
-ENDIF
+#endif
 
          IF (use_snowini) THEN
 
@@ -534,7 +543,7 @@ ENDIF
             sai = tsai(ipatch) * sigf
 
             IF (patchtype == 0) THEN
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
                ps = patch_pft_s(ipatch)
                pe = patch_pft_e(ipatch)
                CALL snowfraction_pftwrap (ipatch,zlnd,scv,snowdp,wt,sigf,fsno)
@@ -546,7 +555,7 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                ENDIF
                sai_p(ps:pe) = tsai_p(ps:pe) * sigf_p(ps:pe)
                sai = sum(sai_p(ps:pe)*pftfrac(ps:pe))
-ENDIF
+#endif
             ENDIF
 
             IF(snl.lt.0)THEN
@@ -610,7 +619,7 @@ ENDIF
          ENDIF
 
          IF (patchtype == 0) THEN
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
             ps = patch_pft_s(ipatch)
             pe = patch_pft_e(ipatch)
             ldew_rain_p(ps:pe) = 0.
@@ -625,7 +634,7 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                gs0sun_p(ps:pe) = 1.0e4
                gs0sha_p(ps:pe) = 1.0e4
             ENDIF
-ENDIF
+#endif
          ENDIF
 
          ! (5) Ground
@@ -637,16 +646,16 @@ ENDIF
 
          IF (.not. use_snowini) THEN
             IF (patchtype == 0) THEN
-IF (DEF_USE_LCT) THEN
+#if (defined LULC_USGS || defined LULC_IGBP)
                sigf = fveg
                lai  = tlai(ipatch)
                sai  = tsai(ipatch) * sigf
                IF(DEF_USE_OZONESTRESS)THEN
                   lai_old = lai
                ENDIF
-ENDIF
+#endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
                ps = patch_pft_s(ipatch)
                pe = patch_pft_e(ipatch)
                sigf_p (ps:pe)  = 1.
@@ -660,7 +669,7 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                   lai_old = lai
                   lai_old_p(ps:pe) = lai_p(ps:pe)
                ENDIF
-ENDIF
+#endif
             ELSE
                sigf  = fveg
                lai   = tlai(ipatch)
@@ -684,7 +693,7 @@ ENDIF
          mss_dst3  (:) = 0.
          mss_dst4  (:) = 0.
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
          totlitc                         = 0.0
          totsomc                         = 0.0
          totcwdc                         = 0.0
@@ -737,11 +746,9 @@ IF (DEF_USE_BGC) THEN
          col_sminnbegnb                  = sminn
          totcoln                         = totvegn + totcwdn + totlitn + totsomn + sminn + ntrunc_veg + ntrunc_soil
          prec10                          = 0._r8
-         prec30                          = 0._r8   ! like the other running means (was spval)
          prec60                          = 0._r8
          prec365                         = 0._r8
          prec_today                      = 0._r8
-         rh30_today                      = 0._r8
          prec_daily                (:)   = 0._r8
          tsoi17                          = 273.15_r8
          rh30                            = 0._r8
@@ -804,7 +811,7 @@ IF (DEF_USE_BGC) THEN
          !----------------------------------------------------
          skip_balance_check              = .false.
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (patchtype == 0) THEN
             DO m = ps, pe
                ivt = pftclass(m)
@@ -869,8 +876,14 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                !            totcoln = totcoln + (leafn_p(m) + leafn_storage_p(m) + deadstemn_p(m))* pftfrac(m)
                !            totvegn = totvegn + (leafn_p(m) + leafn_storage_p(m) + deadstemn_p(m))* pftfrac(m)
             ENDDO
-            ! (upstream-bugs #69) the PFT ozone state is now initialized for every
-            ! configuration in MOD_Initialize, not only in this DEF_USE_BGC section.
+            IF(DEF_USE_OZONESTRESS)THEN
+               o3uptakesun_p         (ps:pe) = 0._r8
+               o3uptakesha_p         (ps:pe) = 0._r8
+               o3coefv_sun_p         (ps:pe) = 1._r8
+               o3coefv_sha_p         (ps:pe) = 1._r8
+               o3coefg_sun_p         (ps:pe) = 1._r8
+               o3coefg_sha_p         (ps:pe) = 1._r8
+            ENDIF
             leafc_xfer_p             (ps:pe) = 0.0
             frootc_xfer_p            (ps:pe) = 0.0
             livestemc_storage_p      (ps:pe) = 0.0
@@ -994,9 +1007,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
                ENDIF
             ENDIF
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
             CALL CNDriverSummarizeStates(ipatch,ps,pe,nl_soil,dz_soi,ndecomp_pools,.true.)
-ENDIF
+#endif
 
             ! SASU varaibles
             leafc0_p                 (ps:pe) = 0.0
@@ -1180,8 +1193,8 @@ ENDIF
             AKX_grainn_xf_exit_p_acc                    (ps:pe) = 0._r8
 
          ENDIF
-ENDIF
-ENDIF
+#endif
+#endif
 
          ! (8) surface albedo
          ! Variables: alb, ssun, ssha, ssno, thermk, extkb, extkd
@@ -1350,9 +1363,7 @@ ENDIF
             zi = 0.
             DO i = 0, snl+1, -1
                z_soisno(i) = zi - dz_soisno(i)/2.
-! ==== FIX: interface depth recurrence was `zi = -zi-dz`, which flips sign from the
-! ==== third layer on and leaves non-monotonic node depths (upstream-bugs #46)
-               zi = zi-dz_soisno(i)
+               zi = zi - dz_soisno(i)
             ENDDO
          ENDIF
 

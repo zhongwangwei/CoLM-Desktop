@@ -98,7 +98,7 @@ fn parses_core_defaults_from_fortran_source() {
 fn parses_runtime_branch_defaults() {
     assert_eq!(
         default_value("DEF_PFT_VMAX25", 1, true, false).unwrap(),
-        Some(56.0)
+        Some(55.0) // 上游 2026-10-29 的 VGM 表改成 52,55,42,...
     );
     assert_eq!(
         default_value("DEF_PFT_VMAX25", 1, false, false).unwrap(),
@@ -118,7 +118,7 @@ fn parses_runtime_branch_defaults() {
 fn parses_pc_optical_defaults() {
     assert_eq!(
         default_value("DEF_PFT_RHOL_VIS", 5, true, false).unwrap(),
-        Some(0.1)
+        Some(0.11)
     );
     assert_eq!(
         default_value("DEF_PFT_RHOL_VIS", 5, true, true).unwrap(),

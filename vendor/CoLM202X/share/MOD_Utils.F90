@@ -80,26 +80,17 @@ CONTAINS
    SUBROUTINE normalize_longitude (lon)
 
    USE MOD_Precision
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
-   USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
    IMPLICIT NONE
 
    real(r8), intent(inout) :: lon
 
-      IF (.NOT. ieee_is_finite(lon)) THEN
-         CALL CoLM_stop('***** ERROR: longitude must be finite')
-         RETURN
-      ENDIF
-      ! Missing-value sentinels such as -1e36 cannot even represent a 360-degree
-      ! change. The old repeated addition/subtraction never made progress.
-      IF (abs(lon) - 360.0_r8 == abs(lon)) THEN
-         CALL CoLM_stop('***** ERROR: longitude magnitude cannot resolve a full revolution')
-         RETURN
-      ENDIF
-      IF (lon >= 180.0_r8 .OR. lon < -180.0_r8) THEN
-         lon = modulo(lon, 360.0_r8)
-         IF (lon >= 180.0_r8) lon = lon - 360.0_r8
-      ENDIF
+      DO WHILE (lon >= 180.0)
+         lon = lon - 360.0
+      ENDDO
+
+      DO WHILE (lon < -180.0)
+         lon = lon + 360.0
+      ENDDO
 
    END SUBROUTINE normalize_longitude
 
@@ -581,7 +572,7 @@ CONTAINS
 
             DO WHILE (iright - ileft > 1)
                i = (iright + ileft) / 2
-               IF (y >= lat(i)) THEN
+               IF (y>lat(i) .or. abs(y-lat(i))<1.e-10) THEN
                   ileft = i
                ELSE
                   iright = i
@@ -600,7 +591,7 @@ CONTAINS
 
             DO WHILE (iright - ileft > 1)
                i = (iright + ileft) / 2
-               IF (y >= lat(i)) THEN
+               IF (y>lat(i) .or. abs(y-lat(i))<1.e-10) THEN
                   iright = i
                ELSE
                   ileft = i
@@ -638,7 +629,7 @@ CONTAINS
 
             DO WHILE (iright - ileft > 1)
                i = (iright + ileft) / 2
-               IF (y > lat(i)) THEN
+               IF (y-lat(i) > 1.e-10) THEN
                   ileft = i
                ELSE
                   iright = i
@@ -657,7 +648,7 @@ CONTAINS
 
             DO WHILE (iright - ileft > 1)
                i = (iright + ileft) / 2
-               IF (y > lat(i)) THEN
+               IF (y-lat(i) > 1.e-10) THEN
                   iright = i
                ELSE
                   ileft = i
@@ -679,9 +670,13 @@ CONTAINS
    real(r8), intent(in) :: lon, west, east ! [-180, 180)
 
       IF (west >= east) THEN
-         lon_between_floor = (lon >= west) .or. (lon < east)
+        !lon_between_floor = (lon >= west) .or.  (lon < east)
+         lon_between_floor = (lon>west .or.  abs(lon-west)<1.e-10) .or.  &
+                             (lon<east .and. abs(lon-east)>1.e-10)
       ELSE
-         lon_between_floor = (lon >= west) .and. (lon < east)
+        !lon_between_floor = (lon >= west) .and. (lon < east)
+         lon_between_floor = (lon>west .or.  abs(lon-west)<1.e-10) .and. &
+                             (lon<east .and. abs(lon-east)>1.e-10)
       ENDIF
 
    END FUNCTION lon_between_floor
@@ -692,12 +687,16 @@ CONTAINS
    USE MOD_Precision
    IMPLICIT NONE
 
-   real(r8), intent(in) :: lon, west, east ! [-180, 180)
+   real(r8), intent(in) :: lon, west, east ! (-180, 180]
 
       IF (west >= east) THEN
-         lon_between_ceil = (lon > west) .or. (lon <= east)
+        !lon_between_ceil = (lon > west) .or.  (lon <= east)
+         lon_between_ceil = (lon>west .and. abs(lon-west)>1.e-10) .or.  &
+                            (lon<east .or.  abs(lon-east)<1.e-10)
       ELSE
-         lon_between_ceil = (lon > west) .and. (lon <= east)
+        !lon_between_ceil = (lon > west) .and. (lon <= east)
+         lon_between_ceil = (lon>west .and. abs(lon-west)>1.e-10) .and. &
+                            (lon<east .or.  abs(lon-east)<1.e-10)
       ENDIF
 
    END FUNCTION lon_between_ceil
@@ -1160,24 +1159,32 @@ CONTAINS
    END SUBROUTINE unpack_inplace_lastdim_real8
 
    !---------------------------------------------------
-   integer FUNCTION num_max_frequency (data_in)
+   integer FUNCTION num_max_frequency (data_in, ignore_value)
 
    IMPLICIT NONE
 
    integer, intent(in) :: data_in(:)
+   integer, intent(in), optional :: ignore_value
 
    ! Local Variables
    integer, allocatable :: data_(:), cnts(:)
-   integer :: ndata, i, n, iloc
-   logical :: is_new
+   integer :: ndata, i, n, iloc, iv
+   logical :: is_new, use_ignore
 
       ndata = size(data_in)
       allocate (data_(ndata))
       allocate (cnts (ndata))
 
+      use_ignore = present(ignore_value)
+      if (use_ignore) iv = ignore_value
+
       n = 0
       cnts(:) = 0
       DO i = 1, ndata
+         IF (use_ignore) THEN
+            IF (data_in(i) == iv) CYCLE
+         ENDIF
+
          CALL insert_into_sorted_list1 (data_in(i), n, data_, iloc, is_new)
          IF (is_new) THEN
             IF (iloc < n) cnts(iloc+1:ndata) = cnts(iloc:ndata-1)
@@ -1187,7 +1194,9 @@ CONTAINS
          ENDIF
       ENDDO
 
-      num_max_frequency = data_(maxloc(cnts,dim=1))
+      IF (n > 0) THEN
+         num_max_frequency = data_(maxloc(cnts,dim=1))
+      ENDIF
 
       deallocate(data_)
       deallocate(cnts )

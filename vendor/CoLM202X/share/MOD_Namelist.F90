@@ -152,9 +152,107 @@ MODULE MOD_Namelist
    !         only available for USGS/IGBP/PFT CLASSIFICATION
    logical :: USE_srfdata_from_3D_gridded_data = .false.
 
+   ! ----- rawdata definition -----
+   ! Path of rawdata namelist, e.g.
+   !    CoLM2024 configure file (500m) is ./rawdata/colm2024.nml
+   !    The base directory is run/
+   !
+   ! -----
+   ! NOTE: Another rawdata namelist example files colm500m.nml, colm30m.nml are
+   ! also available in the same directory.
+   !    A CoLM 500m configure file is ./rawdata/colm500m.nml
+   !    A CoLM 30m  configure file is ./rawdata/colm30m.nml
+   ! Both sample files contain a wide range of data options with a maximum
+   ! resolution of 30 meters, which can be modified and set according to users'
+   ! requirements. These files can also be copied and set.
+   character(len=256) :: DEF_rawdata_namelist  = './rawdata/colm2024.nml'
+
+   type :: datainfo
+      character(len=256) :: dir   = 'null' ! dir related to rawdata dir
+      character(len=256) :: gname = 'null' ! grid name
+      character(len=256) :: fname = 'null' ! file name, exclude prefix and suffix
+      character(len=256) :: vname = 'null' ! variable name in nc file
+   end type
+
+   type rawdata
+      type(datainfo) :: landcover
+      type(datainfo) :: pft
+      type(datainfo) :: htop
+      type(datainfo) :: cdepth
+      type(datainfo) :: cratio
+      type(datainfo) :: lai_sai
+      type(datainfo) :: soil_property
+      type(datainfo) :: soil_th
+      type(datainfo) :: soil_albedo
+      type(datainfo) :: soil_bedrock
+      type(datainfo) :: topo
+      type(datainfo) :: hydro
+      type(datainfo) :: water
+      type(datainfo) :: urban_type
+      type(datainfo) :: urban_htop
+      type(datainfo) :: urban_fveg
+      type(datainfo) :: urban_flake
+      type(datainfo) :: urban_lsai
+      type(datainfo) :: urban_lucy
+      type(datainfo) :: urban_pop
+      type(datainfo) :: urban_roof
+      type(datainfo) :: urban_hl
+      type(datainfo) :: urban_fgper
+      type(datainfo) :: urban_alb
+      type(datainfo) :: crop
+      type(datainfo) :: bgc
+   end type rawdata
+
+   type (rawdata) :: DEF_rawdata
+
+   ! ----- rawdata namelist entry (with multi-option support, up to 10 choices) -----
+   ! idx : active data option index (1-10)
+   ! opt : array of datainfo, up to 10 alternative datasets
+   type :: rawdata_nml_entry
+      integer :: idx = 1        !default is option index 1
+      type(datainfo) :: opt(10)
+   end type rawdata_nml_entry
+
+   type :: rawdata_nml_type
+      type(rawdata_nml_entry) :: landcover
+      type(rawdata_nml_entry) :: pft
+      type(rawdata_nml_entry) :: htop
+      type(rawdata_nml_entry) :: cdepth
+      type(rawdata_nml_entry) :: cratio
+      type(rawdata_nml_entry) :: lai_sai
+      type(rawdata_nml_entry) :: soil_property
+      type(rawdata_nml_entry) :: soil_th
+      type(rawdata_nml_entry) :: soil_albedo
+      type(rawdata_nml_entry) :: soil_bedrock
+      type(rawdata_nml_entry) :: topo
+      type(rawdata_nml_entry) :: hydro
+      type(rawdata_nml_entry) :: water
+      type(rawdata_nml_entry) :: urban_type
+      type(rawdata_nml_entry) :: urban_htop
+      type(rawdata_nml_entry) :: urban_fveg
+      type(rawdata_nml_entry) :: urban_flake
+      type(rawdata_nml_entry) :: urban_lsai
+      type(rawdata_nml_entry) :: urban_lucy
+      type(rawdata_nml_entry) :: urban_pop
+      type(rawdata_nml_entry) :: urban_roof
+      type(rawdata_nml_entry) :: urban_hl
+      type(rawdata_nml_entry) :: urban_fgper
+      type(rawdata_nml_entry) :: urban_alb
+      type(rawdata_nml_entry) :: crop
+      type(rawdata_nml_entry) :: bgc
+   end type rawdata_nml_type
+
+   type (rawdata_nml_type) :: DEF_rawdata_nml
+
    ! ----- land cover data year (for static land cover, i.e. non-LULCC) -----
    ! NOTE: Please check the LC data year range available
-   integer :: DEF_LC_YEAR  = 2005
+   integer :: DEF_LC_YEAR = 2005
+
+   ! ----- land cover data -----
+   ! NOTE: default using MODIS MCD12Q1 IGBP land cover system, or choose one below
+   !       it will be automatically set according to rawdata namelist
+   logical :: DEF_USE_GLC30  = .false.
+   logical :: DEF_USE_ESACCI = .false.
 
    ! ----- Subgrid scheme -----
    ! DEF_USE_USGS/DEF_USE_IGBP: read-only reflection of the compile-time
@@ -172,6 +270,8 @@ MODULE MOD_Namelist
    logical :: DEF_SOLO_PFT = .false.
    logical :: DEF_FAST_PC  = .true.
    logical :: DEF_PC_CROP_SPLIT = .true.
+   ! Use remotely sensed crown depth and crown aspect ratio data.
+   logical :: DEF_RS_CROWN_STRUCTURE = .false.
    character(len=256) :: DEF_SUBGRID_SCHEME = 'LCT'
 
    logical :: DEF_LANDONLY                  = .true.
@@ -250,8 +350,7 @@ MODULE MOD_Namelist
    ! Options for urban type scheme
    ! 1: NCAR Urban Classification, 3 urban type with Tall Building, High Density and Medium Density
    ! 2: LCZ Classification, 10 urban type with LCZ 1-10
-   integer :: DEF_URBAN_type_scheme = 1
-   integer :: DEF_URBAN_geom_data   = 1
+   integer :: DEF_URBAN_type_scheme = 2
    logical :: DEF_URBAN_ONLY        = .false.
    logical :: DEF_URBAN_RUN         = .false.
    logical :: DEF_URBAN_BEM         = .true.
@@ -286,6 +385,7 @@ MODULE MOD_Namelist
    ! 3: TR13, Tang and Riley (2013)
    ! 4: LP92, Lee and Pielke (1992)
    ! 5: S92,  Sellers et al (1992)
+   ! 6: S92_sand, Liu et al (2026)
    integer :: DEF_RSS_SCHEME = 1
 
    ! ----- Options for runoff parameterization schemes -----
@@ -403,9 +503,10 @@ MODULE MOD_Namelist
    integer  :: DEF_Reservoir_Method         = 0
    real(r8) :: DEF_GRIDBASED_ROUTING_MAX_DT = 3600.
    logical  :: DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT = .false.
-   ! With bifurcation, .false. skips the storage bound (volume / net outflow);
-   ! the outgoing-flux limiter keeps storage non-negative.  Without
-   ! bifurcation there is no such limiter and the bound always applies.
+   ! .false.: with bifurcation, the storage bound (volume / net outflow) no longer
+   ! limits the routing sub-step; the outgoing-flux limiter keeps storage
+   ! non-negative instead, so dt is limited by CFL (and the momentum bound, if on)
+   ! only.  Without bifurcation there is no such limiter and the bound always applies.
    logical  :: DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT = .true.
    logical  :: DEF_GridRiverLake_FloodFeedback = .false.
    real(r8) :: DEF_GridRiverLake_FloodInfiltMax = 5._r8
@@ -413,17 +514,17 @@ MODULE MOD_Namelist
    logical  :: DEF_USE_BIFURCATION = .false.
 
 
-   ! ----- tracer module -----
-   ! Water tracer subsystem: isotope / solute / particle / gas families
+   ! ----- mt module -----
+   ! Water mt subsystem: isotope / solute / particle / gas families
    ! (42 modules under main/TRACER/). Used to be a compile-time macro
    ! (TRACER, create_defineh.bash's old 7th argument, TRACERON/TRACEROFF).
    ! Every TRACER module is now always compiled in and this flag picks
    ! whether the subsystem actually runs at runtime instead. Default
-   ! .false. -- both shipped kernels currently build with the tracer
+   ! .false. -- both shipped kernels currently build with the mt
    ! subsystem compiled in but inactive, and the golden regression baseline
    ! has it off; flipping the default would silently change every existing
    ! result (no tracers get registered/allocated/stepped when this is
-   ! .false., see MOD_Tracer_Defs.F90:tracer_defs_init).
+   ! .false., see MOD_MT_Defs.F90:mt_defs_init).
    logical  :: DEF_USE_TRACER = .false.
    logical  :: DEF_TRACER_USE_FRACTIONATION = .false.
    ! Air diffusivity ratios used by the kinetic (Craig-Gordon) term.
@@ -462,11 +563,13 @@ MODULE MOD_Namelist
    character(len=256) :: DEF_TRACER_SOIL_INIT_FILE = 'null'
    character(len=256) :: DEF_TRACER_SOIL_INIT_VARS = ''
    character(len=2048) :: DEF_TRACER_PARAM_FILES = 'null'
-   ! ----- Generic BGC/reactive-tracer shared inputs -----
+   ! ----- Generic BGC/reactive-mt shared inputs -----
    ! Used to be declared only "#ifdef BGC"; BGC is a runtime switch now
    ! (DEF_USE_BGC below, default .false.) so these are always declared.
    character(len=256) :: DEF_file_GIEMS = 'null'
    integer :: DEF_wetland_finundation_scheme = 1
+   ! ----- sediment module -----
+   logical  :: DEF_USE_SEDIMENT        = .false.
 
    ! ----- others -----
    character(len=5)   :: DEF_precip_phase_discrimination_scheme = 'I'
@@ -1454,11 +1557,14 @@ CONTAINS
       DEF_CatchmentMesh_data,                 &
       DEF_file_mesh_filter,                   &
 
+      DEF_rawdata_namelist,                   &
+
       DEF_USE_LCT,                            &
       DEF_USE_PFT,                            &
       DEF_USE_PC,                             &
       DEF_FAST_PC,                            &
       DEF_PC_CROP_SPLIT,                      &
+      DEF_RS_CROWN_STRUCTURE,                 &
       DEF_SOLO_PFT,                           &
       DEF_SUBGRID_SCHEME,                     &
 
@@ -1482,7 +1588,6 @@ CONTAINS
       DEF_USE_BGC,                            &
 
       DEF_URBAN_type_scheme,                  &
-      DEF_URBAN_geom_data,                    &
       DEF_URBAN_ONLY,                         &
       DEF_URBAN_RUN,                          & !add by hua yuan, open urban model or not
       DEF_URBAN_BEM,                          & !add by hua yuan, open urban BEM model or not
@@ -1754,12 +1859,12 @@ CONTAINS
       DEF_HIST_vars_namelist,                 &
       DEF_HIST_vars_out_default
 
+   namelist /nl_colm_rawdata/ DEF_rawdata_nml
    namelist /nl_colm_forcing/ DEF_dir_forcing, DEF_forcing
    namelist /nl_colm_history/ DEF_hist_vars
 
       ! ----- open the namelist file -----
       IF (p_is_master) THEN
-
          open(10, status='OLD', file=nlfile, form="FORMATTED")
          read(10, nml=nl_colm, iostat=ierr, iomsg=iomesg)
          IF (ierr /= 0) THEN
@@ -1767,10 +1872,29 @@ CONTAINS
             CALL CoLM_Stop (' ***** ERROR: Problem reading namelist: '// trim(nlfile))
          ENDIF
          close(10)
+      ENDIF
       IF (DEF_USE_TRACER) THEN
          IF (len_trim(DEF_TRACER_PARAM_FILES) == len(DEF_TRACER_PARAM_FILES)) &
             CALL CoLM_Stop ('DEF_TRACER_PARAM_FILES is too long.')
       ENDIF
+
+         ! CALL set_rawdata_default()
+         open(10, status='OLD', file=trim(DEF_rawdata_namelist), form="FORMATTED")
+         read(10, nml=nl_colm_rawdata, iostat=ierr)
+         IF (ierr /= 0) THEN
+            !TODO: can change the prompt information and set flag.
+            CALL CoLM_Stop (' ***** ERROR: Problem reading namelist: '// trim(DEF_rawdata_namelist))
+         ENDIF
+         close(10)
+
+         ! to get the file name of rawdata namelist file full path
+         DEF_rawdata_namelist = get_basename(trim(DEF_rawdata_namelist))
+
+         CALL resolve_rawdata()
+
+         IF ( trim(DEF_rawdata%landcover%fname) == "LC30m.GLC" ) THEN
+            DEF_USE_GLC30 = .true.
+         ENDIF
 
          open(10, status='OLD', file=trim(DEF_forcing_namelist), form="FORMATTED")
          read(10, nml=nl_colm_forcing, iostat=ierr, iomsg=iomesg)
@@ -1807,17 +1931,25 @@ CONTAINS
                CALL CoLM_Stop ('Grid flood feedback requires DEF_USE_GridRiverLakeFlow.')
          ENDIF
 #endif
+         IF (DEF_simulation_time%timestep > 3600.) THEN
+            write(*,*) '                  *****                  '
+            write(*,*) 'Warning: timestep should be less than or equal to 3600 seconds.'
+            CALL CoLM_Stop ()
+         ENDIF
+
          IF (DEF_UnitCatchment_regional) THEN
             IF (trim(DEF_UnitCatchment_file) == 'null') &
                CALL CoLM_Stop ('Regional unit catchment requires DEF_UnitCatchment_file.')
-            IF (len_trim(DEF_dir_landdata) + len(REGIONAL_UNITCATCHMENT_SUFFIX) > len(DEF_dir_landdata)) &
+            IF (len_trim(DEF_dir_output) + len_trim(adjustl(DEF_CASE_NAME)) + 1 &
+                + len(REGIONAL_UNITCATCHMENT_SUFFIX) > len(DEF_dir_landdata)) &
                CALL CoLM_Stop ('Regional unit catchment path is too long.')
 #ifndef GridRiverLakeFlow
-            CALL CoLM_Stop ('Regional unit catchment requires GridRiverLakeFlow without LULCC.')
+            CALL CoLM_Stop ('Regional unit catchment requires GridRiverLakeFlow.')
 #endif
          ENDIF
 #ifndef GridRiverLakeFlow
-         IF (DEF_GridRiverLake_FloodFeedback .or. DEF_USE_LEVEE) &
+         IF (DEF_GridRiverLake_FloodFeedback .or. &
+             DEF_USE_LEVEE) &
             CALL CoLM_Stop ('RiverLake features require GridRiverLakeFlow.')
 #endif
          IF (.not. (DEF_GRIDBASED_ROUTING_MAX_DT > 0._r8 .and. DEF_GRIDBASED_ROUTING_MAX_DT < huge(1._r8))) &
@@ -1825,10 +1957,6 @@ CONTAINS
 #ifndef CaMa_Flood
          IF (DEF_CaMa_FloodFeedback) CALL CoLM_Stop ('CaMa feedback requires CaMa_Flood.')
 #endif
-         IF ((DEF_GridRiverLake_FloodFeedback .or. DEF_CaMa_FloodFeedback) .and. DEF_Runoff_SCHEME /= 0) THEN
-            write(*,*) 'Note: DEF_Runoff_SCHEME is set to 0 for two-way river coupling.'
-            DEF_Runoff_SCHEME = 0
-         ENDIF
 #if !defined GridRiverLakeFlow && !defined CaMa_Flood
          IF (DEF_USE_BIFURCATION) CALL CoLM_Stop ('Bifurcation requires a river routing solver.')
 #endif
@@ -1888,6 +2016,12 @@ CONTAINS
             write(*,*) '                  *****                  '
             write(*,*) 'Warning: timestep should be less than or equal to 3600 seconds.'
             CALL CoLM_Stop ()
+         ! The river sediment switch now belongs to &nl_colm_material and is
+         ! read by MOD_MT_Namelist (where its compile-time requirements are
+         ! checked).  It is intentionally not part of &nl_colm anymore.
+         IF ((DEF_GridRiverLake_FloodFeedback .or. DEF_CaMa_FloodFeedback) .and. DEF_Runoff_SCHEME /= 0) THEN
+            write(*,*) 'Note: DEF_Runoff_SCHEME is set to 0 for two-way river coupling.'
+            DEF_Runoff_SCHEME = 0
          ENDIF
 
 ! ===============================================================
@@ -1913,7 +2047,7 @@ CONTAINS
          ! namelist read, as upstream does); the two model-compatibility
          ! requirements stay here.
          IF (DEF_USE_TRACER) THEN
-            ! Campbell/vanGenuchten is a runtime choice here; the tracer soil-water
+            ! Campbell/vanGenuchten is a runtime choice here; the mt soil-water
             ! physics is written against the vanGenuchten variable set.
             IF (DEF_USE_Campbell_SOIL_MODEL) &
                CALL CoLM_Stop ('TRACER requires vanGenuchten_Mualem_SOIL_MODEL (DEF_USE_Campbell_SOIL_MODEL = .false.).')
@@ -2033,7 +2167,7 @@ CONTAINS
          IF (DEF_USE_BGC .and. .not. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
             write(*,*) '                  *****                  '
             write(*,*) 'Fatal ERROR: DEF_USE_BGC requires DEF_USE_PFT or DEF_USE_PC', &
-               ' (BGC carbon/nitrogen pool state, and the methane tracer family if', &
+               ' (BGC carbon/nitrogen pool state, and the methane mt family if', &
                ' DEF_USE_TRACER is on, are per-PFT and need pftfrac access).'
             CALL CoLM_stop ()
          ENDIF
@@ -2596,6 +2730,120 @@ CONTAINS
       CALL mpi_bcast (USE_zip_for_aggregation                ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_Srfdata_CompressLevel              ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
 
+      CALL mpi_bcast (DEF_rawdata_namelist                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_RS_CROWN_STRUCTURE                 ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+
+      ! 09/2025, added by yuan: rawdata info
+      CALL mpi_bcast (DEF_rawdata%landcover%dir              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%landcover%gname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%landcover%fname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%pft%dir                    ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%pft%gname                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%pft%fname                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%lai_sai%dir                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%lai_sai%gname              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%lai_sai%fname              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%soil_property%dir          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_property%gname        ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_property%fname        ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%soil_th%dir                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_th%gname              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_th%fname              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%soil_albedo%dir            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_albedo%gname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_albedo%fname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%soil_bedrock%dir           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_bedrock%gname         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%soil_bedrock%fname         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%topo%dir                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%topo%gname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%topo%fname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%hydro%dir                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%hydro%gname                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%hydro%fname                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%water%dir                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%water%gname                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%water%fname                ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%htop%dir                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%htop%gname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%htop%fname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%htop%vname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%cdepth%dir                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cdepth%gname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cdepth%fname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cdepth%vname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%cratio%dir                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cratio%gname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cratio%fname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%cratio%vname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_type%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_type%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_type%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_roof%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_roof%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_roof%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_hl%dir               ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_hl%gname             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_hl%fname             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_fgper%dir            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_fgper%gname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_fgper%fname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_lsai%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_lsai%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_lsai%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_fveg%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_fveg%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_fveg%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_flake%dir            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_flake%gname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_flake%fname          ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_htop%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_htop%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_htop%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_htop%vname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_pop%dir              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_pop%gname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_pop%fname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_lucy%dir             ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_lucy%gname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_lucy%fname           ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%urban_alb%dir              ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_alb%gname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%urban_alb%fname            ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%crop%dir                   ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%crop%gname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%crop%fname                 ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_rawdata%bgc%dir                    ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%bgc%gname                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_rawdata%bgc%fname                  ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+
+      CALL mpi_bcast (DEF_USE_GLC30                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_USE_ESACCI                         ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       ! 07/2023, added by yuan: subgrid setting related
       CALL mpi_bcast (DEF_USE_USGS                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_IGBP                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
@@ -2628,7 +2876,6 @@ CONTAINS
       CALL mpi_bcast (DEF_USE_CROP                           ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
       CALL mpi_bcast (DEF_URBAN_type_scheme                  ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_URBAN_geom_data                    ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
       ! 05/2023, added by yuan
       CALL mpi_bcast (DEF_URBAN_ONLY                         ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_URBAN_RUN                          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
@@ -2878,6 +3125,8 @@ CONTAINS
       CALL mpi_bcast (DEF_file_GIEMS                         ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_wetland_finundation_scheme         ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
 
+      CALL mpi_bcast (DEF_USE_SEDIMENT                       ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
+
       CALL mpi_bcast (DEF_HISTORY_IN_VECTOR                  ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
 
       CALL mpi_bcast (DEF_HIST_lon_res                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
@@ -3027,27 +3276,52 @@ CONTAINS
 
    END SUBROUTINE read_namelist
 
-   FUNCTION regional_unitcatchment_file () RESULT (fname)
+
+   SUBROUTINE set_rawdata_default
 
    IMPLICIT NONE
-   character(len=256) :: fname
 
-      fname = trim(DEF_dir_landdata) // REGIONAL_UNITCATCHMENT_SUFFIX
+      DEF_rawdata_nml%htop%opt(:)%vname          = 'HTOP'
+      DEF_rawdata_nml%cdepth%opt(:)%vname        = 'CROWN_DEPTH'
+      DEF_rawdata_nml%cratio%opt(:)%vname        = 'ASPECT_RATIO'
+      DEF_rawdata_nml%urban_htop%opt(:)%vname    = 'HTOP'
 
-   END FUNCTION regional_unitcatchment_file
+   END SUBROUTINE set_rawdata_default
 
-   FUNCTION get_unitcatchment_file () RESULT (fname)
+
+   ! ---------------
+   SUBROUTINE resolve_rawdata
 
    IMPLICIT NONE
-   character(len=256) :: fname
 
-      IF (DEF_UnitCatchment_regional) THEN
-         fname = regional_unitcatchment_file ()
-      ELSE
-         fname = DEF_UnitCatchment_file
-      ENDIF
+      DEF_rawdata%landcover     = DEF_rawdata_nml%landcover%opt     ( DEF_rawdata_nml%landcover%idx     )
+      DEF_rawdata%pft           = DEF_rawdata_nml%pft%opt           ( DEF_rawdata_nml%pft%idx           )
+      DEF_rawdata%htop          = DEF_rawdata_nml%htop%opt          ( DEF_rawdata_nml%htop%idx          )
+      DEF_rawdata%cdepth        = DEF_rawdata_nml%cdepth%opt        ( DEF_rawdata_nml%cdepth%idx          )
+      DEF_rawdata%cratio        = DEF_rawdata_nml%cratio%opt        ( DEF_rawdata_nml%cratio%idx          )
+      DEF_rawdata%lai_sai       = DEF_rawdata_nml%lai_sai%opt       ( DEF_rawdata_nml%lai_sai%idx       )
+      DEF_rawdata%soil_property = DEF_rawdata_nml%soil_property%opt ( DEF_rawdata_nml%soil_property%idx )
+      DEF_rawdata%soil_th       = DEF_rawdata_nml%soil_th%opt       ( DEF_rawdata_nml%soil_th%idx       )
+      DEF_rawdata%soil_albedo   = DEF_rawdata_nml%soil_albedo%opt   ( DEF_rawdata_nml%soil_albedo%idx   )
+      DEF_rawdata%soil_bedrock  = DEF_rawdata_nml%soil_bedrock%opt  ( DEF_rawdata_nml%soil_bedrock%idx  )
+      DEF_rawdata%topo          = DEF_rawdata_nml%topo%opt          ( DEF_rawdata_nml%topo%idx          )
+      DEF_rawdata%hydro         = DEF_rawdata_nml%hydro%opt         ( DEF_rawdata_nml%hydro%idx         )
+      DEF_rawdata%water         = DEF_rawdata_nml%water%opt         ( DEF_rawdata_nml%water%idx         )
+      DEF_rawdata%urban_type    = DEF_rawdata_nml%urban_type%opt    ( DEF_rawdata_nml%urban_type%idx    )
+      DEF_rawdata%urban_htop    = DEF_rawdata_nml%urban_htop%opt    ( DEF_rawdata_nml%urban_htop%idx    )
+      DEF_rawdata%urban_fveg    = DEF_rawdata_nml%urban_fveg%opt    ( DEF_rawdata_nml%urban_fveg%idx    )
+      DEF_rawdata%urban_flake   = DEF_rawdata_nml%urban_flake%opt   ( DEF_rawdata_nml%urban_flake%idx   )
+      DEF_rawdata%urban_lsai    = DEF_rawdata_nml%urban_lsai%opt    ( DEF_rawdata_nml%urban_lsai%idx    )
+      DEF_rawdata%urban_lucy    = DEF_rawdata_nml%urban_lucy%opt    ( DEF_rawdata_nml%urban_lucy%idx    )
+      DEF_rawdata%urban_pop     = DEF_rawdata_nml%urban_pop%opt     ( DEF_rawdata_nml%urban_pop%idx     )
+      DEF_rawdata%urban_roof    = DEF_rawdata_nml%urban_roof%opt    ( DEF_rawdata_nml%urban_roof%idx    )
+      DEF_rawdata%urban_hl      = DEF_rawdata_nml%urban_hl%opt      ( DEF_rawdata_nml%urban_hl%idx      )
+      DEF_rawdata%urban_fgper   = DEF_rawdata_nml%urban_fgper%opt   ( DEF_rawdata_nml%urban_fgper%idx   )
+      DEF_rawdata%urban_alb     = DEF_rawdata_nml%urban_alb%opt     ( DEF_rawdata_nml%urban_alb%idx     )
+      DEF_rawdata%crop          = DEF_rawdata_nml%crop%opt          ( DEF_rawdata_nml%crop%idx          )
+      DEF_rawdata%bgc           = DEF_rawdata_nml%bgc%opt           ( DEF_rawdata_nml%bgc%idx           )
 
-   END FUNCTION get_unitcatchment_file
+   END SUBROUTINE resolve_rawdata
 
    SUBROUTINE check_lc_override(name, values, lower, upper, rule)
    USE MOD_SPMD_Task, ONLY: CoLM_stop
@@ -3832,5 +4106,84 @@ CONTAINS
 #endif
 
    END SUBROUTINE sync_hist_vars_one
+
+   ! path of the regional unit catchment file written by mkinidata: in the case
+   ! directory next to restart and history, so landdata shared by cases is not written
+   FUNCTION regional_unitcatchment_file () RESULT (fname)
+
+   IMPLICIT NONE
+   character(len=256) :: fname
+
+      fname = trim(DEF_dir_output) // '/' // trim(adjustl(DEF_CASE_NAME)) // REGIONAL_UNITCATCHMENT_SUFFIX
+
+   END FUNCTION regional_unitcatchment_file
+
+   FUNCTION get_unitcatchment_file () RESULT (fname)
+
+   IMPLICIT NONE
+   character(len=256) :: fname
+
+      IF (DEF_UnitCatchment_regional) THEN
+         fname = regional_unitcatchment_file ()
+      ELSE
+         fname = DEF_UnitCatchment_file
+      ENDIF
+
+   END FUNCTION get_unitcatchment_file
+
+   ! get file name only from full file path
+   FUNCTION get_basename(path) result(fn)
+
+      IMPLICIT NONE
+      character(len=*), intent(in) :: path
+      character(len=len(path)) :: fn
+      character(len=len(path)) :: s
+      integer :: pos_slash, pos_back, pos_last, n
+
+      s = trim(path)
+      n = len_trim(s)
+      fn = ''
+      IF (n == 0) RETURN
+      pos_slash = index(s, "/", back=.true.)
+      pos_back  = index(s, "\", back=.true.)
+      pos_last  = max(pos_slash, pos_back)
+      IF (pos_last == 0) THEN
+         fn = s
+      ELSEIF (pos_last < n) THEN
+         fn = s(pos_last+1 : n)
+      ENDIF
+   END FUNCTION get_basename
+
+   ! Rawdata namelists that use the CoLM2024 unified file naming
+   ! (URBSRFYYYY, LCZ_DOM, HTOP read from pft files, etc.).
+   LOGICAL FUNCTION is_colm2024_rawdata () RESULT(is_c2024)
+
+      IMPLICIT NONE
+
+      is_c2024 = ( index(DEF_rawdata_namelist, '2024') > 0 )
+
+   END FUNCTION is_colm2024_rawdata
+
+   ! Build rawdata file name with a year suffix.
+   ! For colm2024.nml the legacy rawdata layout is used:
+   !   PFT/LAI:       MOD2005.nc
+   !   urban LAI/SAI: URBLAI_2005.nc
+   ! Other namelists keep the original "fname.year" convention,
+   ! including colm2024_land.nml which uses the c2022 layout.
+   FUNCTION get_rawdata_fname (fname, cyear, old_sep) RESULT(name)
+
+      IMPLICIT NONE
+      character(len=*), intent(in) :: fname
+      character(len=*), intent(in) :: cyear
+      character(len=*), intent(in) :: old_sep
+      character(len=256) :: name
+
+      IF (trim(DEF_rawdata_namelist) == "colm2024.nml") THEN
+         name = trim(fname) // trim(old_sep) // trim(cyear)
+      ELSE
+         name = trim(fname) // '.' // trim(cyear)
+      ENDIF
+
+   END FUNCTION get_rawdata_fname
 
 END MODULE MOD_Namelist

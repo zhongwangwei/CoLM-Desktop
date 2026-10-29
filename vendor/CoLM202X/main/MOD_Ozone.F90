@@ -25,7 +25,7 @@ Module MOD_Ozone
    USE MOD_DataType
    USE MOD_SpatialMapping
    USE MOD_Vars_1DForcing, only: forc_ozone
-   USE MOD_Namelist, only: DEF_USE_OZONEDATA, DEF_OZONE_KO3
+   USE MOD_Namelist, only: DEF_USE_OZONEDATA
    IMPLICIT NONE
 
    character(len=256) :: file_ozone
@@ -36,51 +36,13 @@ Module MOD_Ozone
 
    type(spatial_mapping_type) :: mg2p_ozone
 
-   ! FIX upstream-bugs #72: the 3-hourly record currently held in forc_ozone
-   integer :: itime_ozone = -1
-
    SAVE
 
    PUBLIC :: CalcOzoneStress
-   PUBLIC :: ozone_pft_of_lct
    PUBLIC :: init_ozone_data
    PUBLIC :: update_ozone_data
 
 CONTAINS
-
-   ! FIX upstream-bugs #68: LCT patches have no PFT, and MOD_Thermal used to call
-   ! LeafTemperature with ivt = 1, so every land cover class took the ozone
-   ! parameters of the temperate needleleaf evergreen tree. Each class now takes
-   ! the PFT closest in life form and leaf habit; classes without vegetation take
-   ! 0 (bare), which leaves o3coefv = o3coefg = 1. Mixed forests keep PFT 1.
-   integer FUNCTION ozone_pft_of_lct (lc) RESULT(ivt)
-
-   IMPLICIT NONE
-   integer, intent(in) :: lc
-
-#ifdef LULC_USGS
-   ! 0 ocean, 1 urban, 2-6 cropland and mosaics, 7 grassland, 8 shrubland,
-   ! 9 mixed shrub/grass, 10 savanna, 11 DBF, 12 DNF, 13 EBF, 14 ENF, 15 mixed,
-   ! 16 water, 17 herbaceous wetland, 18 wooded wetland, 19 barren,
-   ! 20 herbaceous tundra, 21 wooded tundra, 22 mixed tundra, 23 bare tundra, 24 ice
-   integer, parameter :: map(0:24) = (/ 0, 13, 15, 15, 15, 15, 15, 13, 10, 10, 14, &
-                                        7,  3,  4,  1,  1,  0, 13,  7,  0, 12, 11, 12, 0, 0 /)
-#else
-   ! 0 ocean, 1 ENF, 2 EBF, 3 DNF, 4 DBF, 5 mixed, 6 closed shrub, 7 open shrub,
-   ! 8 woody savanna, 9 savanna, 10 grassland, 11 wetland, 12 cropland, 13 urban,
-   ! 14 cropland mosaic, 15 snow/ice, 16 barren, 17 water
-   integer, parameter :: map(0:17) = (/ 0, 1, 4, 3, 7, 1, 9, 10, 7, 14, 13, 13, 15, &
-                                        13, 15, 0, 0, 0 /)
-#endif
-
-      IF (lc >= lbound(map,1) .and. lc <= ubound(map,1)) THEN
-         ivt = map(lc)
-      ELSE
-         ivt = 0
-      ENDIF
-
-   END FUNCTION ozone_pft_of_lct
-
 
    SUBROUTINE CalcOzoneStress (o3coefv,o3coefg, forc_ozone, forc_psrf, th, ram, &
                               rs, rb, lai, lai_old, ivt, o3uptake, sabv, deltim)
@@ -114,11 +76,8 @@ CONTAINS
    real(r8) :: lai_thresh     ! LAI threshold for LAIs that asymptote and don't
    real(r8) :: o3_flux_threshold !threshold below which o3flux is set to 0 (nmol m^-2 s^-1)
 
-      ! FIX upstream-bugs #71: o3coefv/o3coefg are intent(out); when o3uptake /= 0 and
-      ! ivt falls outside the five classes below (e.g. bare ground, ivt = 0) neither
-      ! was assigned. Default both to "no stress".
-      o3coefv = 1._r8
-      o3coefg = 1._r8
+   real(r8), parameter :: ko3 = 1.51_r8  !F. Li
+
 
       IF(.not. DEF_USE_OZONEDATA)THEN
          forc_ozone = 100._r8  ! ozone partial pressure [ppbv]
@@ -127,7 +86,7 @@ CONTAINS
       o3concnmolm3 = forc_ozone * (forc_psrf/(th * 8.314 ))
 
       ! calculate instantaneous flux
-      o3flux = o3concnmolm3/ (DEF_OZONE_KO3*rs+ rb + ram)
+      o3flux = o3concnmolm3/ (ko3*rs+ rb + ram)
 
       ! set lai_thresh
        IF (isevg(ivt)) THEN
@@ -252,11 +211,7 @@ CONTAINS
 !     IF(idate(1) .gt. 2021)iyear = 2021
 !     write(syear,"(I4.4)")  iyear
 !     write(smonth,"(I2.2)") month
-      IF (trim(DEF_file_Ozone) == 'null') THEN
-         file_ozone = trim(DEF_dir_runtime) // '/Ozone/Global/OZONE-setgrid.nc'
-      ELSE
-         file_ozone = trim(DEF_file_Ozone)
-      ENDIF
+      file_ozone = trim(DEF_dir_runtime) // '/Ozone//Global/OZONE-setgrid.nc'
 !      file_ozone = '/share/home/dq010/CoLM/data/rawdata/CROP-NITRIF/CoLMruntime/Ozone//Global/OZONE-setgrid.nc'
 
       CALL ncio_read_bcast_serial (file_ozone, 'lat', lat)
@@ -268,22 +223,19 @@ CONTAINS
 
       CALL mg2p_ozone%build_arealweighted (grid_ozone, landpatch)
 
-      ! FIX upstream-bugs #72: read the 3-hour window that contains the start time
-      ! (was (idate(3)-1800)/10800+..., i.e. the window before it for a 00:00 start).
-      itime = ozone_record (idate(1), idate(2), idate(3))
-      itime_ozone = itime
+      itime = (idate(3) - 1800) / 10800 + (min(idate(2),365) - 1) * 8 + 1
 
       CALL ncio_read_block_time (file_ozone, 'OZONE', grid_ozone, itime, f_ozone)
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_block_data ('Ozone', f_ozone)
-      ENDIF
+#endif
 
       ! The first time-step precedes the first three-hour update boundary.
       ! Populate patch forcing immediately instead of leaving it uninitialized.
       CALL mg2p_ozone%grid2pset (f_ozone, forc_ozone)
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('Ozone', forc_ozone)
-      ENDIF
+#endif
 
    END SUBROUTINE init_ozone_data
 
@@ -309,56 +261,22 @@ CONTAINS
    integer :: iyear, itime
    character(len=8) :: syear, smonth
 
-      IF (trim(DEF_file_Ozone) == 'null') THEN
-         file_ozone = trim(DEF_dir_runtime) // '/Ozone/Global/OZONE-setgrid.nc'
-      ELSE
-         file_ozone = trim(DEF_file_Ozone)
-      ENDIF
+      file_ozone = trim(DEF_dir_runtime) // '/Ozone/Global/OZONE-setgrid.nc'
 !      file_ozone = '/share/home/dq010/CoLM/data/rawdata/CROP-NITRIF/CoLMruntime/Ozone/Global/OZONE-setgrid.nc'
-      ! FIX upstream-bugs #72: use the 3-hour window that contains the current step
-      ! (its start time), and read it whenever it differs from the one in memory.
-      ! The old test/index read (time%sec-int(deltim))/10800, one window late, and
-      ! gave itime = 0 for a 10800 s step at the start of a year.
-      itime = ozone_record (time%year, time%day, time%sec)
-      IF (itime /= itime_ozone) THEN
-         itime_ozone = itime
+      IF(time%sec/10800 .ne. (time%sec+int(deltim))/10800)then
+         itime = (time%sec - int(deltim)) / 10800 + (min(time%day,365) - 1) * 8 + 1
          CALL ncio_read_block_time (file_ozone, 'OZONE', grid_ozone, itime, f_ozone)
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_block_data ('Ozone', f_ozone)
-         ENDIF
+#endif
 
          CALL mg2p_ozone%grid2pset (f_ozone, forc_ozone)
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_vector_data ('Ozone', forc_ozone)
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE update_ozone_data
-
-   integer FUNCTION ozone_record (year, day, sec)
-!-----------------------------------------------------------------------
-! !DESCRIPTION:
-!  1-based 3-hourly record (8 per day, 365-day climatology) of the window that
-!  contains a time stamp given in CoLM's end form (sec in (0, 86400]): the end of
-!  a day is the start of the next one. Day 366 of a leap year reuses day 365.
-!-----------------------------------------------------------------------
-   USE MOD_TimeManager, only: isleapyear
-   IMPLICIT NONE
-   integer, intent(in) :: year, day, sec
-   integer :: d, s, maxday
-
-      d = day
-      s = sec
-      IF (s >= 86400) THEN
-         s = s - 86400
-         d = d + 1
-         maxday = 365
-         IF (isleapyear(year)) maxday = 366
-         IF (d > maxday) d = 1
-      ENDIF
-      ozone_record = s / 10800 + (min(d,365) - 1) * 8 + 1
-
-   END FUNCTION ozone_record
 
 END MODULE MOD_Ozone
 ! ---------- EOP ------------

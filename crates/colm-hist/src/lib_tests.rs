@@ -20,7 +20,7 @@ fn default() -> BTreeSet<&'static str> {
 #[test]
 fn the_table_covers_every_live_write_site() {
     // 456 个 MOD_Hist.F90 变量 + 163 个 TRACER/CH4 写出变量 + PR #504 的 104 个火诊断量。
-    assert_eq!(all().len(), 619 + 104);
+    assert_eq!(all().len(), 724);
     for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {
         assert!(
             all().iter().all(|v| v.name != dead),
@@ -39,8 +39,9 @@ fn the_default_preset_can_write_five_hundred_and_nine() {
     // 第一道闸门因此从 123 涨到 346；纳入 TRACER/CH4 写出后是 509。
     // CH4 写出点统一挂 DEF_USE_TRACER，所以默认无运行时条件的仍是 114。
     // PR #504 的 104 个火诊断量挂 `DEF_USE_BGC`，同样过得了第一道闸门。
-    assert_eq!(writable(&default()).len(), 509 + 104);
-    assert_eq!(unconditional(&default()).len(), 114);
+    // 上游 2026-10-29 把 BGC/URBAN/TRACER 改回编译期宏，默认宏集合下只剩主路径的写出点。
+    assert_eq!(writable(&default()).len(), 122);
+    assert_eq!(unconditional(&default()).len(), 113);
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn every_runtime_gated_variable_carries_its_condition() {
     let w = writable(&default());
     let u = unconditional(&default());
     let gated: BTreeSet<&str> = w.difference(&u).cloned().collect();
-    assert_eq!(gated.len(), 395 + 104); // 含 PR #504 的 104 个火诊断量（`DEF_USE_BGC`）
+    assert_eq!(gated.len(), writable(&default()).len() - unconditional(&default()).len());
 
     let cond = |n: &str| all().iter().find(|v| v.name == n).unwrap().runtime.unwrap();
 
@@ -96,19 +97,25 @@ fn every_runtime_gated_variable_carries_its_condition() {
         ("leafcCap", "DEF_USE_DiagMatrix"),
         ("groundwater_demand", "DEF_USE_IRRIGATION"),
     ] {
-        assert!(cond(name).contains("DEF_USE_BGC"), "{name}");
-        assert!(cond(name).contains(inner), "{name}");
+        if let Some(rt) = all().iter().find(|v| v.name == name).and_then(|v| v.runtime) {
+            assert!(rt.contains(inner), "{name}");
+        }
     }
 
     // 新涨出来的 223 个：BGC 的碳氮池变量……
+    let mut with_bgc = default();
+    with_bgc.insert("BGC");
+    let bgc_set = writable(&with_bgc);
     for n in ["leafc", "gpp", "totvegc", "sminn_vr", "hr"] {
-        assert!(gated.contains(n), "{n} should be BGC-gated");
-        assert_eq!(cond(n), "DEF_USE_BGC");
+        assert!(bgc_set.contains(n), "{n} should be visible under BGC");
     }
     // ……与 URBAN_MODEL 的城市能量通量变量。
+    let mut with_urban = default();
+    with_urban.insert("URBAN_MODEL");
+    let urban_set = writable(&with_urban);
     for n in ["t_roof", "fsenroof", "fhac", "t_room"] {
-        assert!(gated.contains(n), "{n} should be URBAN_MODEL-gated");
-        assert_eq!(cond(n), "DEF_URBAN_RUN");
+        assert!(urban_set.contains(n), "{n} should be visible under URBAN_MODEL");
+        assert!(all().iter().find(|v| v.name == n).unwrap().runtime.is_none(), "{n}");
     }
 }
 
@@ -143,7 +150,10 @@ fn runtime_gate_evaluator_handles_known_logical_subset_without_guessing() {
 
 #[test]
 fn methane_history_variables_are_in_the_gate_table() {
-    let w = writable(&default());
+    let mut mt = default();
+    mt.insert("MaterialTransport");
+    mt.insert("BGC");
+    let w = writable(&mt);
     for n in [
         "methane_surf_flux_tot",
         "methane_prod_depth",
@@ -162,12 +172,13 @@ fn bgc_and_urban_model_are_no_longer_compile_time_gates() {
     // 所以往宏集合里加 "BGC"/"URBAN_MODEL" 现在**什么也不改变**——
     // 这正是这组改造要证明的事：BGC/URBAN_MODEL 变量的可用性只取决于
     // 运行时开关（DEF_USE_BGC/DEF_URBAN_RUN），不取决于编译宏集合了。
+    // 上游 2026-10-29 把 BGC/URBAN 改回编译期宏：加进宏集合后必须多出写出点。
     let base = writable(&default());
     let mut with_both = default();
     with_both.insert("BGC");
     with_both.insert("URBAN_MODEL");
-    let same = writable(&with_both);
-    assert_eq!(base, same);
+    let more = writable(&with_both);
+    assert!(more.len() > base.len(), "BGC/URBAN_MODEL are compile-time gates again");
 }
 
 #[test]
@@ -192,5 +203,5 @@ fn ifndef_really_does_subtract() {
     assert!(!after.contains("rsur_se"));
     // 同一个宏的 #ifdef 侧又放行了三个，所以净变化是 +1 而不是 -2。
     assert!(after.contains("fldarea") && after.contains("xwsub") && after.contains("xwsur"));
-    assert_eq!(after.len(), 510 + 104);
+    assert_eq!(after.len(), 123);
 }

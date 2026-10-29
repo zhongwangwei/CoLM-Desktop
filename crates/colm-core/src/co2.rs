@@ -53,7 +53,7 @@ impl Co2Scenario {
 
     fn series(self) -> &'static [[f64; 12]] {
         match self {
-            Self::Off => &crate::co2_generated::SSP_OFF,
+            Self::Off => &[],
             Self::Ssp126 => &crate::co2_generated::SSP_126,
             Self::Ssp245 => &crate::co2_generated::SSP_245,
             Self::Ssp370 => &crate::co2_generated::SSP_370,
@@ -84,6 +84,10 @@ pub fn monthly_co2_ppm(scenario: Co2Scenario, year: i32, month: u8) -> Result<f6
             .get(index)
             .ok_or_else(|| anyhow::anyhow!("the observed CO2 table has no row for {year}"))?;
         return Ok(row[month_index]);
+    }
+    if scenario == Co2Scenario::Off {
+        let index = (OBSERVED_LAST_YEAR - OBSERVED_FIRST_YEAR) as usize;
+        return Ok(historical[index][11]);
     }
     let series = scenario.series();
     let first_year = SCENARIOS

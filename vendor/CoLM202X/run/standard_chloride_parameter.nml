@@ -1,37 +1,32 @@
-&nl_colm_tracer_parameter
+&nl_colm_solute_parameter
     ! ------------------------------------------------------------------
-    ! Dilute conservative chloride tracer.
+    ! Dilute chloride, a conservative hydrologic tracer.
     !
-    ! Main &nl_colm mapping example:
-    !   DEF_TRACER_NAMES       = 'CL'
-    !   DEF_TRACER_TYPES       = 'solute'
-    !   DEF_TRACER_PARAM_FILES = 'CL:run/standard_chloride_parameter.nml'
+    !   &nl_colm_material
+    !      DEF_SOLUTE_NAMES       = 'CL'
+    !      DEF_SOLUTE_PARAM_FILES = 'CL:run/standard_chloride_parameter.nml'
+    !   /
     !
-    ! The current generic land transport carries a tracer/water ratio.  For CL,
-    ! mass_fraction means kg Cl per kg water; for dilute water this is
-    ! approximately mg/L divided by 1.0e6. River/lake amount diagnostics still
-    ! use the model's legacy ratio*m3 scaling, so this file is a conservative
-    ! hydrologic-tracer configuration, not yet a full salt-budget setup.
-    ! Explicit initial/forcing concentrations are separate.  init_delta is
-    ! retained only as the backward-compatible fallback for older files.
+    ! Land transport carries a solute/water ratio; for CL, mass_fraction
+    ! is kg Cl per kg water (dilute water: about mg/L divided by 1.0e6).
     !
-    ! Dissolved chloride is limited to 1.0e-2 kg/kg water, restoring the
-    ! historical ChlorideWetDep safety ceiling. Excess mass is transferred to
+    ! Dissolved chloride is limited by halite saturation: NaCl solubility
+    ! at 25 C is about 359 g per kg water, and Cl is 35.453/58.443 of the
+    ! NaCl mass, giving 0.218 kg Cl per kg water. Excess mass goes to
     ! location-preserving solid inventories and redissolves only up to the
-    ! available water capacity; no chloride mass is silently clipped.
-    ! Internal freeze/thaw still uses the generic bulk-water phase bookkeeping;
-    ! brine rejection, salt precipitation, ion activity, and electroneutrality
-    ! require a future coupled salinity/chemistry model.
+    ! available water capacity; no mass is clipped. Leaving
+    ! max_dissolved_conc out means no dissolved limit. Freeze/thaw uses
+    ! the bulk-water phase bookkeeping; brine rejection, salt precipitation,
+    ! ion activity and electroneutrality are not modelled.
+    ! Every field is optional; the code defaults are 0, except
+    ! unit_kind = 'tracer_per_water' and no dissolved limit.
     ! ------------------------------------------------------------------
-    DEF_TRACER%unit_kind           = 'mass_fraction'
-    DEF_TRACER%mol_weight          = 35.453     ! Cl molecular weight [g/mol]
-    DEF_TRACER%ref_ratio           = 1.0        ! unused for conservative tracer
-    DEF_TRACER%init_delta          = 0.0        ! legacy fallback [kg Cl / kg water]
-    DEF_TRACER%init_conc           = 0.0        ! initial water [kg Cl / kg water]
-    DEF_TRACER%precip_default_conc = 0.0        ! when no precip field is configured
-    DEF_TRACER%vapor_default_conc  = 0.0        ! when no vapor field is configured
-    DEF_TRACER%max_dissolved_conc  = 1.0e-2     ! kg Cl / kg water
-    DEF_TRACER%reactive_decay_rate = 0.0
-    DEF_TRACER%charge              = -1
-
+    DEF_SOLUTE%unit_kind           = 'mass_fraction'
+    DEF_SOLUTE%mol_weight          = 35.453     ! [g/mol]
+    DEF_SOLUTE%init_conc           = 0.0        ! initial water [kg Cl / kg water]
+    DEF_SOLUTE%precip_default_conc = 0.0        ! when no precip field is configured
+    DEF_SOLUTE%vapor_default_conc  = 0.0        ! when no vapor field is configured
+    DEF_SOLUTE%max_dissolved_conc  = 0.218      ! kg Cl / kg water, halite saturation at 25 C
+    DEF_SOLUTE%decay_rate          = 0.0        ! first-order loss [1/s]
+    DEF_SOLUTE%charge              = -1
 /

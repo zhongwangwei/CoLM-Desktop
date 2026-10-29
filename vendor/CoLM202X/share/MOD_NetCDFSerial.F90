@@ -53,7 +53,6 @@ MODULE MOD_NetCDFSerial
       MODULE procedure ncio_read_serial_int8_2d
       MODULE procedure ncio_read_serial_int16_2d
       MODULE procedure ncio_read_serial_int32_2d
-      MODULE procedure ncio_read_serial_int64_2d
       MODULE procedure ncio_read_serial_real4_2d
       MODULE procedure ncio_read_serial_real8_2d
       MODULE procedure ncio_read_serial_int32_3d
@@ -77,7 +76,6 @@ MODULE MOD_NetCDFSerial
 
    INTERFACE ncio_read_part_serial
       MODULE procedure ncio_read_part_serial_int32_2d
-      MODULE procedure ncio_read_part_serial_int64_2d
       MODULE procedure ncio_read_part_serial_real8_2d
    END INTERFACE ncio_read_part_serial
 
@@ -128,27 +126,6 @@ MODULE MOD_NetCDFSerial
    PUBLIC :: ncio_write_colm_dimension
 
 CONTAINS
-
-   SUBROUTINE ncio_initialize ()
-      USE, INTRINSIC :: iso_c_binding, ONLY: c_int
-      USE, INTRINSIC :: ieee_exceptions
-      IMPLICIT NONE
-      TYPE(ieee_status_type) :: saved_status
-      INTEGER(c_int) :: status
-      INTERFACE
-         FUNCTION nc_initialize () BIND(C, name="nc_initialize") RESULT(code)
-            IMPORT :: c_int
-            INTEGER(c_int) :: code
-         END FUNCTION nc_initialize
-      END INTERFACE
-
-      ! HDF5 probes native floating types during initialization; restore physics traps afterwards.
-      CALL ieee_get_status (saved_status)
-      CALL ieee_set_halting_mode (ieee_all, .false.)
-      status = nc_initialize ()
-      CALL ieee_set_status (saved_status)
-      CALL nccheck (status)
-   END SUBROUTINE ncio_initialize
 
    ! ----
    SUBROUTINE nccheck (status, trace)
@@ -652,34 +629,6 @@ CONTAINS
    END SUBROUTINE ncio_read_serial_int32_2d
 
    !---------------------------------------------------------
-   SUBROUTINE ncio_read_serial_int64_2d (filename, dataname, rdata)
-
-   USE netcdf
-   IMPLICIT NONE
-
-   character(len=*), intent(in) :: filename
-   character(len=*), intent(in) :: dataname
-   integer*8, allocatable, intent(out) :: rdata (:,:)
-
-   ! Local variables
-   integer :: ncid, varid
-   integer, allocatable :: varsize(:)
-
-      CALL check_ncfile_exist (filename)
-
-      CALL ncio_inquire_varsize(filename, dataname, varsize)
-      allocate (rdata (varsize(1), varsize(2)) )
-
-      CALL nccheck( nf90_open(trim(filename), NF90_NOWRITE, ncid) )
-      CALL nccheck( nf90_inq_varid(ncid, trim(dataname), varid), trim(dataname) )
-      CALL nccheck( nf90_get_var(ncid, varid, rdata) )
-      CALL nccheck( nf90_close(ncid) )
-
-      deallocate (varsize)
-
-   END SUBROUTINE ncio_read_serial_int64_2d
-
-   !---------------------------------------------------------
    SUBROUTINE ncio_read_serial_real4_2d (filename, dataname, rdata)
 
    USE netcdf
@@ -1140,31 +1089,6 @@ CONTAINS
       CALL nccheck( nf90_close(ncid) )
 
    END SUBROUTINE ncio_read_part_serial_int32_2d
-
-   !---------------------------------------------------------
-   SUBROUTINE ncio_read_part_serial_int64_2d (filename, dataname, datastt, dataend, rdata)
-
-   USE netcdf
-   IMPLICIT NONE
-
-   character(len=*), intent(in) :: filename
-   character(len=*), intent(in) :: dataname
-   integer, intent(in) :: datastt(2), dataend(2)
-   integer*8, allocatable, intent(out) :: rdata (:,:)
-
-   integer :: ncid, varid
-
-      CALL check_ncfile_exist (filename)
-
-      allocate (rdata (datastt(1):dataend(1), datastt(2):dataend(2)) )
-
-      CALL nccheck( nf90_open(trim(filename), NF90_NOWRITE, ncid) )
-      CALL nccheck( nf90_inq_varid(ncid, trim(dataname), varid), trim(dataname) )
-      CALL nccheck( nf90_get_var(ncid, varid, rdata, &
-         (/datastt(1),datastt(2)/), (/dataend(1)-datastt(1)+1, dataend(2)-datastt(2)+1/)) )
-      CALL nccheck( nf90_close(ncid) )
-
-   END SUBROUTINE ncio_read_part_serial_int64_2d
 
    !---------------------------------------------------------
    SUBROUTINE ncio_read_part_serial_real8_2d (filename, dataname, datastt, dataend, rdata)

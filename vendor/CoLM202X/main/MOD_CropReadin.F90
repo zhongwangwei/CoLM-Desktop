@@ -77,24 +77,6 @@ CONTAINS
    integer  :: iblkme, iblk, jblk
    integer  :: maxvalue, minvalue
 
-      ! A single-site crop smoke case should not need global management maps
-      ! when planting day is explicit and fertilisation/irrigation are off.
-      IF (DEF_TUNING_CROP_PLANTING_DAY > 0._r8 .and. .not. DEF_USE_FERT .and. .not. DEF_USE_IRRIGATION) THEN
-         IF (p_is_worker) THEN
-            pdrice2(:) = 0
-            plantdate_p(:) = -99999999._r8
-            fertnitro_p(:) = 0._r8
-            manunitro_p(:) = 0._r8
-            irrig_method_p(:) = -99999999
-            DO ipft = 1, numpft
-               IF (landpft%settyp(ipft) >= 15 .and. landpft%settyp(ipft) <= 78) THEN
-                  plantdate_p(ipft) = DEF_TUNING_CROP_PLANTING_DAY
-               ENDIF
-            ENDDO
-         ENDIF
-         RETURN
-      ENDIF
-
       ! READ in crops
 
       file_crop = trim(DEF_dir_runtime) // '/crop/plantdt-colm-64cfts-rice2_fillcoast.nc'
@@ -153,9 +135,9 @@ CONTAINS
          ENDDO
       ENDIF
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('plant date value for rice2 ', pdrice2)
-      ENDIF
+#endif
 
       ! (2) Read in plant date.
       IF (p_is_worker) THEN
@@ -184,26 +166,11 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (p_is_worker .and. DEF_TUNING_CROP_PLANTING_DAY > 0._r8) THEN
-         DO ipft = 1, numpft
-            IF (landpft%settyp(ipft) >= 15 .and. landpft%settyp(ipft) <= 78) THEN
-               plantdate_p(ipft) = DEF_TUNING_CROP_PLANTING_DAY
-            ENDIF
-         ENDDO
-      ENDIF
-
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('plantdate_pfts value ', plantdate_p)
-      ENDIF
+#endif
 
       ! (3) Read in fertlization
-      IF (p_is_worker) THEN
-         IF (numpft > 0) THEN
-            fertnitro_p(:) = 0._r8
-            manunitro_p(:) = 0._r8
-         ENDIF
-      ENDIF
-      IF (DEF_USE_FERT) THEN
       IF (DEF_FERT_SOURCE == 1) THEN
          IF (p_is_worker) THEN
             IF (numpft > 0) fertnitro_p(:) = -99999999._r8
@@ -300,17 +267,12 @@ CONTAINS
          IF (allocated (fertilizer_tmp)) deallocate(fertilizer_tmp)
          IF (allocated (manure_tmp))     deallocate(manure_tmp)
       ENDIF
-      ENDIF
 
-      IF (DEF_USE_RangeCheck .and. DEF_USE_FERT) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('fert nitro value ', fertnitro_p)
-      ENDIF
+#endif
 
       ! (4) Read in irrigation method
-      IF (p_is_worker) THEN
-         IF (numpft > 0) irrig_method_p(:) = -99999999
-      ENDIF
-      IF (DEF_USE_IRRIGATION) THEN
       !file_irrig = trim(DEF_dir_runtime) // '/crop/surfdata_irrigation_method.nc'
       file_irrig = trim(DEF_dir_runtime) // '/crop/surfdata_irrigation_method_96x144.nc'
 
@@ -327,6 +289,10 @@ CONTAINS
 
       IF (allocated(lon)) deallocate(lon)
       IF (allocated(lat)) deallocate(lat)
+
+      IF (p_is_worker) THEN
+         IF (numpft > 0) irrig_method_p(:) = -99999999
+      ENDIF
 
       DO cft = 1, N_CFT
          IF (p_is_io) THEN
@@ -348,17 +314,16 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('irrigation method ', irrig_method_p)
-      ENDIF
-      ENDIF
+#endif
 
       IF (allocated (pdrice2_tmp  ))    deallocate(pdrice2_tmp  )
       IF (allocated (plantdate_tmp))    deallocate(plantdate_tmp)
       IF (allocated (fertnitro_tmp))    deallocate(fertnitro_tmp)
       IF (allocated (irrig_method_tmp)) deallocate(irrig_method_tmp)
 
-      IF (DEF_USE_IRRIGATION .and. DEF_IRRIGATION_ALLOCATION == 3) THEN
+      IF (DEF_IRRIGATION_ALLOCATION == 3) THEN 
          ! (5) Read in irrigation allocated to groundwater
          file_irrigalloc = trim(DEF_dir_runtime) // '/crop/surfdata_irrigation_allocation.nc'
 
@@ -386,9 +351,9 @@ CONTAINS
 
          call mg2p_irrigalloc%grid2pset (f_xy_irrigalloc, irrig_gw_alloc)
 
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_vector_data ('irrigation goundwater allocation ', irrig_gw_alloc)
-         ENDIF
+#endif
 
          ! (6) Read in irrigation allocated to surfacewater
          IF (p_is_worker) THEN
@@ -401,9 +366,9 @@ CONTAINS
 
          call mg2p_irrigalloc%grid2pset (f_xy_irrigalloc, irrig_sw_alloc)
 
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_vector_data ('irrigation surfacewater allocation ', irrig_sw_alloc)
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE CROP_readin

@@ -15,9 +15,6 @@ MODULE MOD_Grid_Reservoir
    integer :: totalnumresv
    integer :: numresv
    integer,  allocatable :: ucat2resv   (:)
-   ! Local reservoir state is ordered by the active parameter rows. Preserve
-   ! both that dense global state ordinal and its owning ucatch so restart files
-   ! can prove that volresv has not been rebound after a dam-table change.
    integer,  allocatable :: resv_global_id(:)
    integer,  allocatable :: resv_ucid     (:)
    type(pointer_int32_1d), allocatable :: resv_data_address (:)
@@ -55,7 +52,7 @@ CONTAINS
    USE MOD_NetCDFSerial
    USE MOD_Utils
    USE MOD_Namelist,              only: DEF_ReservoirPara_file, DEF_Reservoir_Method, &
-      DEF_UnitCatchment_regional, regional_unitcatchment_file, DEF_UnitCatchment_file
+      DEF_UnitCatchment_regional, regional_unitcatchment_file
    USE MOD_Grid_RiverLakeNetwork, only: numucat, ucat_ucid, lake_type
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
@@ -66,9 +63,6 @@ CONTAINS
 
    integer,  allocatable :: dam_seq(:), order(:), loc2all(:), ordinal_count(:)
    integer,  allocatable :: catalogue_to_active(:)
-#ifdef FLAT_SPMD
-   integer,  allocatable :: counts(:), disps(:), resv_ids(:)
-#endif
    real(r8), allocatable :: rcache (:)
    integer,  allocatable :: icache (:)
 
@@ -77,11 +71,9 @@ CONTAINS
 
 
       parafile = DEF_ReservoirPara_file
-      ! The unit catchment file carries the GRanD dam_* table (source numbering), so it is
-      ! the default parameter file when none is given.
-      IF ((trim(parafile) == 'null') .or. (len_trim(parafile) == 0)) &
-         parafile = DEF_UnitCatchment_file
 
+      ! 1 = Funato et al. (CaMa-Flood v4.20); 2 is reserved for Hanazaki et al. (2022),
+      ! not implemented yet (see reservoir_operation).
       IF (DEF_Reservoir_Method == 2) &
          CALL CoLM_stop ('reservoir operation method 2 (Hanazaki et al. 2022) is not implemented yet')
       IF (DEF_Reservoir_Method /= 1) &
@@ -124,9 +116,10 @@ CONTAINS
 
       CALL quicksort (nresv_catalogue, dam_seq, order)
 
+      ndropped = 0
+
       ! One reservoir per unit catchment: when several rows share a dam_seq, keep the
       ! first row in the file and drop the others (their seq becomes -row, never matched).
-      ndropped = 0
       IF (nresv_catalogue > 1) THEN
          IF (any(dam_seq(2:nresv_catalogue) == dam_seq(1:nresv_catalogue-1))) THEN
             allocate (icache (nresv_catalogue))
@@ -228,37 +221,6 @@ CONTAINS
       deallocate (catalogue_to_active)
 
 #ifdef USEMPI
-#ifdef FLAT_SPMD
-      allocate (counts(0:p_np_glb-1), disps(0:p_np_glb-1))
-      CALL mpi_allgather (numresv, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iworker = 1, p_np_glb-1
-         disps(iworker) = disps(iworker-1) + counts(iworker-1)
-      ENDDO
-
-      allocate (icache(max(1,numresv)))
-      IF (numresv > 0) icache(1:numresv) = resv_global_id
-      IF (p_is_master) THEN
-         allocate (resv_ids(max(1,sum(counts))))
-      ELSE
-         allocate (resv_ids(1))
-      ENDIF
-      CALL mpi_gatherv (icache, numresv, MPI_INTEGER, resv_ids, counts, disps, &
-         MPI_INTEGER, p_root, p_comm_glb, p_err)
-
-      allocate (resv_data_address(0:p_np_glb-1))
-      IF (p_is_master) THEN
-         DO iworker = 0, p_np_glb-1
-            nresv = counts(iworker)
-            IF (nresv > 0) THEN
-               allocate (resv_data_address(iworker)%val(nresv))
-               resv_data_address(iworker)%val = &
-                  resv_ids(disps(iworker)+1:disps(iworker)+nresv)
-            ENDIF
-         ENDDO
-      ENDIF
-      deallocate (counts, disps, resv_ids, icache)
-#else
       IF (p_is_master) THEN
 
          allocate (resv_data_address (0:p_np_worker-1))
@@ -289,7 +251,6 @@ CONTAINS
       IF (.not. p_is_master .and. .not. allocated(resv_data_address)) THEN
          allocate (resv_data_address (0:-1))
       ENDIF
-#endif
 #else
       IF (numresv > 0) THEN
          allocate (resv_data_address (0:0))
@@ -414,6 +375,16 @@ CONTAINS
          ELSE
             qout = (vol/volresv_normal(irsv))**0.5 * qresv_normal(irsv)
          ENDIF
+
+      CASE (2)
+         ! *** Reserved: Hanazaki et al. (2022) ***
+         ! [2] Risa Hanazaki, Dai Yamazaki, Kei Yoshimura.
+         ! Development of a Reservoir Flood Control Scheme for Global Flood Models.
+         ! Journal of Advances in Modeling Earth Systems, 2022.
+         ! Not implemented yet; reservoir_init stops before this is reached.
+         ! It needs its own parameters (flood control and conservative storage,
+         ! normal and flood discharge) read in reservoir_init.
+         CALL CoLM_stop ('reservoir operation method 2 (Hanazaki et al. 2022) is not implemented yet')
 
       CASE DEFAULT
          CALL CoLM_stop ('unsupported reservoir operation method')

@@ -45,6 +45,8 @@ pub enum Cond {
     AnyOf(&'static [&'static str]),
     /// `#ifndef X`
     Not(&'static str),
+    /// `#if (defined A) && (defined B)`
+    AllOf(&'static [&'static str]),
 }
 
 impl Cond {
@@ -52,6 +54,7 @@ impl Cond {
         match self {
             Cond::AnyOf(v) => v.iter().any(|m| macros.contains(m)),
             Cond::Not(m) => !macros.contains(m),
+            Cond::AllOf(v) => v.iter().all(|m| macros.contains(m)),
         }
     }
 }

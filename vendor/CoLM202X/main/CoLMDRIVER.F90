@@ -1,6 +1,10 @@
 #include <define.h>
 
+#ifdef MaterialTransport
 SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
+#else
+SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro)
+#endif
 
 
 !=======================================================================
@@ -16,7 +20,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Precision
    USE MOD_Const_Physical, only: tfrz, rgas, vonkar
    USE MOD_Const_LC
-   USE MOD_AssimStomataConductance, only: lc_current_class
    USE MOD_Vars_Global
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
@@ -24,14 +27,20 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Vars_1DFluxes
    USE MOD_LandPatch, only: numpatch,landpatch
    USE MOD_LandUrban, only: patch2urban
-   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN
    USE MOD_Forcing, only: forcmask_pch
    USE omp_lib
-   USE MOD_Tracer_LandPhase, only: tracer_resolve_step, tracer_lake_step, &
-      tracer_wetland_decomp, tracer_soil_step, tracer_report
-   USE MOD_Tracer_Defs, only: ntracers
+#ifdef MaterialTransport
+   USE MOD_MT_LandPhase, only: mt_resolve_step, mt_lake_step, &
+      mt_wetland_decomp, mt_soil_step, mt_report
+   USE MOD_MT_Defs, only: nmts
    USE MOD_SPMD_Task, only: CoLM_stop
-   USE MOD_Tracer_SpecialPatches, only: waterbody_hist_sample
+   USE MOD_MT_SpecialPatches, only: mt_waterbody_hist_sample
+#endif
+#if (defined MaterialTransport && defined BGC)
+   ! Reads the BGC leaching flux without changing BGC physics (see module).
+   USE MOD_MT_NitrogenLeaching, only: mt_bgc_n_leaching
+#endif
 #ifdef HYPERSPECTRAL
   USE MOD_HighRes_Parameters
 #endif
@@ -40,6 +49,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    ! inundation evaporation [mm/s], inundation re-infiltration[mm/s]
    USE MOD_CaMa_Vars, only: flddepth_cama,fldfrc_cama,fevpg_fld,finfg_fld
 #elif defined(GridRiverLakeFlow)
+   ! [GridRiverLakeFlow] Grid flood feedback passes its patch flood state through the
+   ! same arguments as CaMa flood feedback (the CaMa names are kept as aliases).
+   ! CaMa_Flood builds are unchanged; with the feedback off the arrays stay zero.
    USE MOD_Grid_RiverLakeFlow, only: flddepth_cama => flood_depth_patch, &
       fldfrc_cama => flood_fraction_patch, fevpg_fld => flood_evap_patch, &
       finfg_fld => flood_infil_patch
@@ -55,17 +67,22 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    logical,  intent(in) :: dosst    ! true if time for update sst/ice/snow
 
    real(r8), intent(inout) :: oro(numpatch)  ! ocean(0)/seaice(2)/ flag
+#ifdef MaterialTransport
    integer,  intent(in), optional :: istep_in
+#endif
 
    real(r8) :: deltim_phy
    integer  :: steps_in_one_deltim
    integer  :: i, m, u, k
+#ifdef MaterialTransport
    integer  :: istep_local
+#endif
 
 ! ======================================================================
 
-      IF (DEF_USE_TRACER) CALL tracer_resolve_step (istep_in, istep_local)
-
+#ifdef MaterialTransport
+      CALL mt_resolve_step (istep_in, istep_local)
+#endif
 #ifdef OPENMP
 !$OMP PARALLEL DO NUM_THREADS(OPENMP) &
 !$OMP PRIVATE(i, m, u, k, steps_in_one_deltim, deltim_phy) &
@@ -87,13 +104,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ENDIF
 
          m = patchclass(i)
-         ! Photosynthesis looks up the per-class DEF_LC_RESPCP override by this (thread-private).
-         lc_current_class = m
-
-         IF (DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
-            CALL CoLM_stop ('TRACER does not yet support full urban patches: ' // &
-               'CoLMMAIN_Urban has no tracer sub-surface state or runoff tracer update.')
-         ENDIF
 
          steps_in_one_deltim = 1
          ! deltim need to be within 1800s for water body with snow in order to avoid large
@@ -105,9 +115,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          IF (.not.DEF_URBAN_RUN .or. m.ne.URBAN) THEN
 
             DO k = 1, steps_in_one_deltim
-      IF (DEF_USE_TRACER) THEN
-               waterbody_hist_sample = k == steps_in_one_deltim
-      ENDIF
+#ifdef MaterialTransport
+               mt_waterbody_hist_sample = k == steps_in_one_deltim
+#endif
                !                ***** Call CoLM main program *****
                !
                CALL CoLMMAIN (  i,idate,         coszen(i),       deltim_phy,      &
@@ -120,8 +130,10 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                wf_gravels(1:,i),wf_sand(1:,i),   porsl(1:,i),     psi0(1:,i),      &
                bsw(1:,i),       theta_r(1:,i),   fsatmax(i),      fsatdcf(i),      &
                topoweti(i),     alp_twi(i),      chi_twi(i),      mu_twi(i),       &
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                alpha_vgm(1:,i), n_vgm(1:,i),     L_vgm(1:,i),                      &
                sc_vgm(1:,i),    fc_vgm(1:,i),                                      &
+#endif
                hksati(1:,i),    csol(1:,i),      k_solids(1:,i),  dksatu(1:,i),    &
                dksatf(1:,i),    dkdry(1:,i),     BA_alpha(1:,i),  BA_beta(1:,i),   &
                rootfr(1:,m),    lakedepth(i),    dz_lake(1:,i),   elvstd(i),       &
@@ -231,27 +243,34 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                ustar(i),        qstar(i),        tstar(i),                         &
                fm(i),           fh(i),           fq(i)                             )
 
-               IF (DEF_USE_TRACER) &
-                  CALL tracer_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
-
+#ifdef MaterialTransport
+               CALL mt_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
+#endif
             ENDDO
          ENDIF
 
 
-      IF ((DEF_USE_BGC)) THEN
+#if (defined BGC)
          IF(patchtype(i) .eq. 0)THEN
             !
             !               ***** Call CoLM BGC model *****
             !
             CALL bgc_driver (i,idate(1:3),deltim, patchlatr(i)*180/PI,patchlonr(i)*180/PI)
          ENDIF
+#ifdef MaterialTransport
+         CALL mt_wetland_decomp (i, deltim)
+         CALL mt_soil_step (istep_local, i, idate, deltim)
+#ifdef BGC
+         ! Book the BGC mineral-N leaching loss as an external solute input.
+         ! BGC physics is untouched; this only reads the flux it already
+         ! removed from sminn/smin_no3 and adds it to the runoff hand-off.
+         CALL mt_bgc_n_leaching (i, patchtype(i), deltim)
+#endif
+#endif
+#endif
 
-         IF (DEF_USE_TRACER) CALL tracer_wetland_decomp (i, deltim)
 
-         IF (DEF_USE_TRACER) CALL tracer_soil_step (istep_local, i, idate, deltim)
-         ENDIF
-
-
+#ifdef URBAN_MODEL
          ! For urban model and urban patches
          IF (DEF_URBAN_RUN .and. m.eq.URBAN) THEN
 
@@ -280,15 +299,17 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             vf_quartz(1:,i) ,vf_gravels(1:,i),vf_om(1:,i)     ,vf_sand(1:,i)   ,&
             wf_gravels(1:,i),wf_sand(1:,i)   ,porsl(1:,i)     ,psi0(1:,i)      ,&
             bsw(1:,i)       ,theta_r(1:,i)   ,fsatmax(i)      ,fsatdcf(i)      ,&
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
             alpha_vgm(1:,i) ,n_vgm(1:,i)     ,L_vgm(1:,i)                      ,&
             sc_vgm(1:,i)    ,fc_vgm(1:,i)                                      ,&
+#endif
             hksati(1:,i)    ,csol(1:,i)      ,k_solids(1:,i)  ,dksatu(1:,i)    ,&
             dksatf(1:,i)    ,dkdry(1:,i)     ,BA_alpha(1:,i)  ,BA_beta(1:,i)   ,&
             alb_roof(:,:,u) ,alb_wall(:,:,u) ,alb_gimp(:,:,u) ,alb_gper(:,:,u) ,&
 
           ! VEGETATION INFORMATION
             htop(i)         ,hbot(i)         ,sqrtdi(m)       ,chil(m)         ,&
-            effcon(m)       ,vmax25(m)       ,c3c4(m)         ,slti(m)         ,hlti(m)         ,&
+            effcon(m)       ,vmax25(m)       ,slti(m)         ,hlti(m)         ,&
             shti(m)         ,hhti(m)         ,trda(m)         ,trdm(m)         ,&
             trop(m)         ,g1(m)           ,g0(m)           ,gradm(m)        ,&
             binter(m)       ,extkn(m)        ,rho(1:,1:,m)    ,tau(1:,1:,m)    ,&
@@ -387,14 +408,14 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             rsub(i) = rnof(i) - rsur(i)
          ENDIF
 
+#endif
       ENDDO
 #ifdef OPENMP
 !$OMP END PARALLEL DO
 #endif
 
-      IF (DEF_USE_TRACER) THEN
-      CALL tracer_report ()
-      ENDIF
-
+#ifdef MaterialTransport
+      CALL mt_report ()
+#endif
 END SUBROUTINE CoLMDRIVER
 ! ---------- EOP ------------

@@ -16,7 +16,6 @@ MODULE MOD_Catch_SubsurfaceFlow
 !-------------------------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_TUNING_SOIL_ICE_IMPEDANCE
    USE MOD_DataType
    USE MOD_Catch_HillslopeNetwork
    IMPLICIT NONE
@@ -28,6 +27,8 @@ MODULE MOD_Catch_SubsurfaceFlow
    real(r8), allocatable :: lakedepth_elm(:)
    real(r8), allocatable :: riverdpth_elm(:)
    real(r8), allocatable :: wdsrf_elm    (:)
+
+   real(r8), parameter :: e_ice  = 6.0   ! soil ice impedance factor
 
    ! anisotropy ratio of lateral/vertical hydraulic conductivity (unitless)
    ! for USDA soil texture class:
@@ -176,7 +177,6 @@ CONTAINS
    ! ---------
    SUBROUTINE subsurface_flow (deltime)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_SPMD_Task
    USE MOD_UserDefFun
    USE MOD_Mesh
@@ -231,9 +231,12 @@ CONTAINS
    real(r8) :: exwater
    real(r8) :: sp_zi(0:nl_soil), sp_dz(1:nl_soil), zwtmm ! [mm]
    real(r8) :: vl_r (1:nl_soil)
-   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
-   ! the union now, see the fill below (Campbell only ever uses prms(1,:)).
+#ifdef Campbell_SOIL_MODEL
+   integer, parameter :: nprms = 1
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    integer, parameter :: nprms = 5
+#endif
    real(r8) :: prms  (nprms,1:nl_soil)
    real(r8) :: vol_ice     (1:nl_soil)
    real(r8) :: vol_liq     (1:nl_soil)
@@ -330,7 +333,7 @@ CONTAINS
                      IF (patchtype(ipatch) <= 2) THEN
                         DO ilev = 1, nl_soil
                            icefrac = min(1., wice_soisno(ilev,ipatch)/denice/dz_soi(ilev)/porsl(ilev,ipatch))
-                           imped   = 10.**(-DEF_TUNING_SOIL_ICE_IMPEDANCE*icefrac)
+                           imped   = 10.**(-e_ice*icefrac)
                            Kl_h(i) = Kl_h(i) + hru_patch%subfrc(ipatch) * raniso(soiltext(ipatch)) &
                               * hksati(ilev,ipatch)/1.0e3 * imped * dz_soi(ilev)/zi_soi(nl_soil)
                         ENDDO
@@ -649,11 +652,11 @@ CONTAINS
 
          DO ipatch = 1, numpatch
 
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
             ! For water balance check, the sum of water in soil column before the calcultion
             w_sum_before = sum(wliq_soisno(1:nl_soil,ipatch)) + sum(wice_soisno(1:nl_soil,ipatch)) &
                + wa(ipatch) + wdsrf(ipatch) + wetwat(ipatch)
-            ENDIF
+#endif
 
             IF (DEF_USE_Dynamic_Lake) THEN
                is_dry_lake = (patchtype(ipatch) == 4) .and. (zwt(ipatch) > 0.)
@@ -665,17 +668,18 @@ CONTAINS
 
                exwater = xwsub(ipatch) * deltime
 
-               IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-                  vl_r(1:nl_soil) = 0._r8
-                  prms(1,:) = bsw(1:nl_soil,ipatch)
-               ELSE
-                  vl_r  (1:nl_soil) = theta_r  (1:nl_soil,ipatch)
-                  prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,ipatch)
-                  prms(2,1:nl_soil) = n_vgm    (1:nl_soil,ipatch)
-                  prms(3,1:nl_soil) = L_vgm    (1:nl_soil,ipatch)
-                  prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,ipatch)
-                  prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,ipatch)
-               ENDIF
+#ifdef Campbell_SOIL_MODEL
+               vl_r(1:nl_soil) = 0._r8
+               prms(1,:) = bsw(1:nl_soil,ipatch)
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+               vl_r  (1:nl_soil) = theta_r  (1:nl_soil,ipatch)
+               prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,ipatch)
+               prms(2,1:nl_soil) = n_vgm    (1:nl_soil,ipatch)
+               prms(3,1:nl_soil) = L_vgm    (1:nl_soil,ipatch)
+               prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,ipatch)
+               prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,ipatch)
+#endif
 
                DO ilev = 1, nl_soil
                   vol_ice(ilev) = wice_soisno(ilev,ipatch)/denice*1000. / sp_dz(ilev)
@@ -775,7 +779,7 @@ CONTAINS
 
             ENDIF
 
-            IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
             ! For water balance check, the sum of water in soil column after the calcultion
             w_sum_after = sum(wliq_soisno(1:nl_soil,ipatch)) + sum(wice_soisno(1:nl_soil,ipatch)) &
                + wa(ipatch) + wdsrf(ipatch) + wetwat(ipatch)
@@ -787,7 +791,7 @@ CONTAINS
                write(*,*) patchtype(ipatch)
                CALL CoLM_stop ()
             ENDIF
-            ENDIF
+#endif
          ENDDO
       ENDIF
 

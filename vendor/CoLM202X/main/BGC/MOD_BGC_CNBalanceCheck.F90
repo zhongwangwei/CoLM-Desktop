@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 
 MODULE MOD_BGC_CNBalanceCheck
 
@@ -26,6 +27,10 @@ MODULE MOD_BGC_CNBalanceCheck
        som_c_leached, ndep_to_sminn, nfix_to_sminn, supplement_to_sminn, ffix_to_sminn, &
        fert_to_sminn, soyfixn_to_sminn, denit, fire_nloss, wood_harvestn, grainn_to_cropprodn, &
        sminn_leached, f_n2o_nit, smin_no3_leached, smin_no3_runoff, som_n_leached, sminn_to_plant
+#ifdef MaterialTransport
+   ! Optional NH4 leaching of the material-transport build.
+   USE MOD_BGC_Vars_1DFluxes, only: smin_nh4_leached
+#endif
    USE MOD_BGC_Vars_PFTimeVariables, only: &
        leafc_p, frootc_p, livestemc_p, deadstemc_p, livecrootc_p, deadcrootc_p, &
        leafc_storage_p, frootc_storage_p, livestemc_storage_p, &
@@ -186,7 +191,7 @@ CONTAINS
          write(*,*)'grainc_to_cropprodc      = ',grainc_to_cropprodc(i)*deltim, grainc_to_food_p(ps)*deltim
          write(*,*)'-1*som_c_leached         = ',som_c_leached(i)*deltim
 #ifdef USEMPI
-         CALL mpi_abort (p_comm_glb, 1, p_err)
+         CALL mpi_abort (p_comm_glb, p_err)
 #else
          CALL abort
 #endif
@@ -227,7 +232,12 @@ CONTAINS
       col_noutputs = denit(i) + fire_nloss(i) + wood_harvestn(i) + grainn_to_cropprodn(i)
   
       IF(DEF_USE_NITRIF)THEN
+#ifdef MaterialTransport
+         col_noutputs = col_noutputs + f_n2o_nit(i) + smin_nh4_leached(i) + &
+                        smin_no3_leached(i) + smin_no3_runoff(i)
+#else
          col_noutputs = col_noutputs + f_n2o_nit(i) + smin_no3_leached(i) + smin_no3_runoff(i)
+#endif
       ELSE
          col_noutputs = col_noutputs + sminn_leached(i)
       ENDIF
@@ -249,6 +259,9 @@ CONTAINS
          write(*,*)'output mass              = ',col_noutputs*deltim,f_n2o_nit(i)*deltim,smin_no3_leached(i)*deltim,&
                                                  smin_no3_runoff(i)*deltim, denit(i)*deltim,fire_nloss(i)*deltim,&
                                                  ( wood_harvestn(i) + grainn_to_cropprodn(i))*deltim
+#ifdef MaterialTransport
+         write(*,*)'NH4 leached mass         = ',smin_nh4_leached(i)*deltim
+#endif
          write(*,*)'net flux                 = ',(col_ninputs-col_noutputs)*deltim
          write(*,*)'inputs,ffix,nfix,ndep    = ',ffix_to_sminn(i)*deltim,nfix_to_sminn(i)*deltim,ndep_to_sminn(i)*deltim,&
                                             fert_to_sminn(i)*deltim,soyfixn_to_sminn(i)*deltim
@@ -260,7 +273,7 @@ CONTAINS
                       (wood_harvestn(i)+grainn_to_cropprodn(i))*deltim, - som_n_leached(i)
          ENDIF
 #ifdef USEMPI
-         CALL mpi_abort (p_comm_glb, 1, p_err)
+         CALL mpi_abort (p_comm_glb, p_err)
 #else
          CALL abort
 #endif
@@ -269,3 +282,4 @@ CONTAINS
    END SUBROUTINE NBalanceCheck
 
 END MODULE MOD_BGC_CNBalanceCheck
+#endif

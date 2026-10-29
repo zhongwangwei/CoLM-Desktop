@@ -391,12 +391,11 @@ fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
     let names: Vec<&str> = req.iter().map(|(p, _)| p.as_str()).collect();
     assert!(names.contains(&"SITE_landtype"));
     assert!(names.contains(&"USE_SITE_landtype"));
-    assert!(names.contains(&"DEF_URBAN_type_scheme"));
+    // 上游 2026-10-29 把 DEF_URBAN_type_scheme 的默认值改成 2（LCZ），显式写 2 等于默认。
 
     let by = |n: &str| &req.iter().find(|(p, _)| p == n).unwrap().1;
     assert_eq!(*by("SITE_landtype"), colm_namelist::Value::Int(13));
-    // 方案 2 = LCZ。默认是 1（NCAR），而实测那条路在栅格给不出城市类别时越界。
-    assert_eq!(*by("DEF_URBAN_type_scheme"), colm_namelist::Value::Int(2));
+    assert!(all.iter().any(|(p, v)| p == "DEF_URBAN_type_scheme" && *v == colm_namelist::Value::Int(2)));
 }
 
 #[test]

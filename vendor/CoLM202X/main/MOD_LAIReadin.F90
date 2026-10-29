@@ -37,8 +37,10 @@ CONTAINS
 
    USE MOD_Vars_Global
    USE MOD_Const_LC
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeVariables
+#endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
 #endif
@@ -52,7 +54,7 @@ CONTAINS
    integer :: iyear, itime
    character(len=256) :: cyear, ctime
    character(len=256) :: landdir, lndname
-   integer :: m, npatch, pc, ps, pe
+   integer :: m, npatch, pc
 
 #ifdef LULC_USGS
    real(r8), dimension(24), parameter :: &   ! Maximum fractional cover of vegetation [-]
@@ -66,7 +68,7 @@ CONTAINS
       landdir = trim(dir_landdata) // '/LAI'
 
 #ifdef SinglePoint
-IF ((.not. DEF_URBAN_RUN)) THEN
+#ifndef URBAN_MODEL
       IF (USE_SITE_LAI) THEN
          iyear = minloc(abs(SITE_LAI_year-year), dim=1)
       ELSE
@@ -76,20 +78,20 @@ IF ((.not. DEF_URBAN_RUN)) THEN
       IF (.not. DEF_LAI_MONTHLY) THEN
          itime = (time-1)/8 + 1
       ENDIF
-ENDIF
+#endif
 #endif
 
-IF (DEF_USE_LCT) THEN
+#if (defined LULC_USGS || defined LULC_IGBP)
 
 #ifdef SinglePoint
-IF ((.not. DEF_URBAN_RUN)) THEN
+#ifndef URBAN_MODEL
       IF (DEF_LAI_MONTHLY) THEN
          tlai(:) = SITE_LAI_monthly(time,iyear)
          tsai(:) = SITE_SAI_monthly(time,iyear)
       ELSE
          tlai(:) = SITE_LAI_8day(itime,iyear)
       ENDIF
-ENDIF
+#endif
 #else
       IF (DEF_LAI_MONTHLY) THEN
          write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
@@ -132,9 +134,9 @@ ENDIF
 
             DO npatch = 1, numpatch
                m = patchclass(npatch)
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
                IF(m == URBAN) CYCLE
-ENDIF
+#endif
                IF(m == 0 .or. m == WATERBODY)THEN
                   fveg(npatch)  = 0.
                   tlai(npatch)  = 0.
@@ -161,26 +163,19 @@ ENDIF
          ENDIF
       ENDIF
 
-ENDIF
+#endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 #ifdef SinglePoint
 
-IF ((.not. DEF_URBAN_RUN)) THEN
+#ifndef URBAN_MODEL
       IF (.not. DEF_USE_LAIFEEDBACK)THEN
          IF (patchtypes(SITE_landtype) == 0) THEN
             tlai_p(:) = pack(SITE_LAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
             tsai_p(:) = pack(SITE_SAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
-            ! each patch sums its own PFTs (a multi-crop site has one patch per crop with
-            ! SITE_pctpfts = 1, so the all-site sum added every crop's LAI to every patch);
-            ! a natural site has one patch spanning all PFTs, i.e. the same sum as before
-            DO npatch = 1, numpatch
-               ps = patch_pft_s(npatch)
-               pe = patch_pft_e(npatch)
-               tlai(npatch) = sum (SITE_LAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
-               tsai(npatch) = sum (SITE_SAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
-            ENDDO
+            tlai(:)   = sum (SITE_LAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
+            tsai(:)   = sum (SITE_SAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
          ELSE
             tlai(:) = SITE_LAI_monthly(time,iyear)
             tsai(:) = SITE_SAI_monthly(time,iyear)
@@ -188,16 +183,12 @@ IF ((.not. DEF_URBAN_RUN)) THEN
       ELSE
          IF (patchtypes(SITE_landtype) == 0) THEN
             tsai_p(:) = pack(SITE_SAI_pfts_monthly(:,time,iyear), SITE_pctpfts > 0.)
-            DO npatch = 1, numpatch
-               ps = patch_pft_s(npatch)
-               pe = patch_pft_e(npatch)
-               tsai(npatch) = sum (SITE_SAI_pfts_monthly(ps:pe,time,iyear) * SITE_pctpfts(ps:pe))
-            ENDDO
+            tsai(:)   = sum (SITE_SAI_pfts_monthly(:,time,iyear) * SITE_pctpfts)
          ELSE
             tsai(:) = SITE_SAI_monthly(time,iyear)
          ENDIF
       ENDIF
-ENDIF
+#endif
 #else
 
       write(cyear,'(i4.4)') min(DEF_LAI_END_YEAR, max(DEF_LAI_START_YEAR,year) )
@@ -250,9 +241,9 @@ ENDIF
             DO npatch = 1, numpatch
                m = patchclass(npatch)
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
                IF (m == URBAN) CYCLE
-ENDIF
+#endif
                !TODO@yuan: may need to revise patch LAI/SAI
                green(npatch) = 1.
                fveg (npatch) = fveg0(m)
@@ -268,7 +259,7 @@ ENDIF
          ENDIF
       ENDIF
 
-ENDIF
+#endif
 
    END SUBROUTINE LAI_readin
 

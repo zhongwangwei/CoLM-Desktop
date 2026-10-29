@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef BGC
 MODULE MOD_LightningData
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -64,9 +65,9 @@ CONTAINS
       IF (itime .gt. 2920)itime = itime - 8 ! for the leap year
 
       CALL ncio_read_block_time (file_lightning, 'lnfm', grid_lightning, itime, f_lnfm)
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_block_data ('lightning', f_lnfm)
-      ENDIF
+#endif
 
    END SUBROUTINE init_lightning_data
 
@@ -78,7 +79,6 @@ CONTAINS
 !  read lightning data during simulation
 !-----------------------------------------------------------------------
 
-   USE MOD_Namelist, only: DEF_USE_RangeCheck
    USE MOD_TimeManager
    USE MOD_NetCDFBlock
    USE MOD_RangeCheck
@@ -100,16 +100,17 @@ CONTAINS
       IF (itime_next /= itime) THEN
          itime_next = min(itime_next,2920)
          CALL ncio_read_block_time (file_lightning, 'lnfm', grid_lightning, itime_next, f_lnfm)
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_block_data ('lightning', f_lnfm)
-         ENDIF
+#endif
 
          CALL mg2p_lnfm%grid2pset (f_lnfm, lnfm)
-         IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
          CALL check_vector_data ('lightning', lnfm)
-         ENDIF
+#endif
       ENDIF
 
    END SUBROUTINE update_lightning_data
 
 END MODULE MOD_LightningData
+#endif

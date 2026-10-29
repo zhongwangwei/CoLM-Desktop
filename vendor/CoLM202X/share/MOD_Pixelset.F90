@@ -326,11 +326,7 @@ CONTAINS
    ! Local variables
    integer :: iproc
    integer :: iset, ie, xblk, yblk, iblk, jblk, scnt, iblkgrp, iblkall
-   integer, allocatable :: gathered_counts(:)
    logical, allocatable :: nonzero(:,:)
-#ifdef FLAT_SPMD
-   integer, allocatable :: allcounts(:,:,:)
-#endif
 
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
@@ -370,7 +366,7 @@ CONTAINS
 
          this%vecgs%vlen = this%vecgs%vend - this%vecgs%vstt + 1
 
-#if defined(USEMPI) && !defined(FLAT_SPMD)
+#ifdef USEMPI
          DO jblk = 1, gblock%nyblk
             DO iblk = 1, gblock%nxblk
                IF (gblock%pio(iblk,jblk) == p_address_io(p_my_group)) THEN
@@ -385,27 +381,7 @@ CONTAINS
 #endif
       ENDIF
 
-#ifdef FLAT_SPMD
-      IF (.not. allocated(this%vecgs%vcnt)) THEN
-         allocate (this%vecgs%vcnt (0:p_np_glb-1,gblock%nxblk,gblock%nyblk))
-         allocate (this%vecgs%vdsp (0:p_np_glb-1,gblock%nxblk,gblock%nyblk))
-      ENDIF
-      ! One collective for all blocks: every rank's per-block set counts.
-      allocate (allcounts (gblock%nxblk,gblock%nyblk,0:p_np_glb-1))
-      CALL mpi_allgather (this%vecgs%vlen, gblock%nxblk*gblock%nyblk, MPI_INTEGER, &
-         allcounts, gblock%nxblk*gblock%nyblk, MPI_INTEGER, p_comm_glb, p_err)
-      DO jblk = 1, gblock%nyblk
-         DO iblk = 1, gblock%nxblk
-            this%vecgs%vcnt(:,iblk,jblk) = allcounts(iblk,jblk,:)
-            this%vecgs%vdsp(0,iblk,jblk) = 0
-            DO iproc = 1, p_np_glb-1
-               this%vecgs%vdsp(iproc,iblk,jblk) = this%vecgs%vdsp(iproc-1,iblk,jblk) &
-                  + this%vecgs%vcnt(iproc-1,iblk,jblk)
-            ENDDO
-         ENDDO
-      ENDDO
-      deallocate (allcounts)
-#elif defined(USEMPI)
+#ifdef USEMPI
       IF (p_is_io) THEN
 
          IF (.not. allocated(this%vecgs%vcnt)) THEN
@@ -414,16 +390,14 @@ CONTAINS
          ENDIF
 
          this%vecgs%vcnt(:,:,:) = 0
-         allocate (gathered_counts(0:p_np_group-1))
          DO jblk = 1, gblock%nyblk
             DO iblk = 1, gblock%nxblk
                IF (gblock%pio(iblk,jblk) == p_iam_glb) THEN
 
                   scnt = 0
                   CALL mpi_gather (scnt, 1, MPI_INTEGER, &
-                     gathered_counts, 1, MPI_INTEGER, &
+                     this%vecgs%vcnt(:,iblk,jblk), 1, MPI_INTEGER, &
                      p_root, p_comm_group, p_err)
-                  this%vecgs%vcnt(:,iblk,jblk) = gathered_counts
 
                   this%vecgs%vdsp(0,iblk,jblk) = 0
                   DO iproc = 1, p_np_group-1
@@ -436,7 +410,6 @@ CONTAINS
                ENDIF
             ENDDO
          ENDDO
-         deallocate (gathered_counts)
       ENDIF
 #endif
 

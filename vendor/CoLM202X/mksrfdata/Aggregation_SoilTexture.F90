@@ -15,7 +15,6 @@ SUBROUTINE Aggregation_SoilTexture ( &
 !  Created by Shupeng Zhang, 01/2025
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -24,10 +23,14 @@ SUBROUTINE Aggregation_SoilTexture ( &
    USE MOD_Land2mWMO
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
    USE MOD_Utils, only: num_max_frequency
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
    ! arguments:
@@ -45,8 +48,10 @@ SUBROUTINE Aggregation_SoilTexture ( &
 
    type(block_data_int32_2d) :: soiltext
    integer, allocatable :: soiltext_patches(:), soiltext_one(:)
+#ifdef SrfdataDiag
    integer :: typpatch(N_land_classification+1), ityp
    real(r8), allocatable :: soiltext_r8 (:)
+#endif
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_model_landdata) // '/soil/' // trim(cyear)
@@ -56,13 +61,14 @@ SUBROUTINE Aggregation_SoilTexture ( &
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A)') 'Aggregate soil texture ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      lndname = trim(dir_rawdata)//'/soil/soiltexture_0cm-60cm_mean.nc'
+      lndname = trim(dir_rawdata)//trim(DEF_rawdata%soil_property%dir)//&
+                '/soiltexture_0cm-60cm_mean.nc'
 
       IF (p_is_io) THEN
          CALL allocate_block_data (gland, soiltext)
@@ -102,9 +108,9 @@ SUBROUTINE Aggregation_SoilTexture ( &
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('soiltext_patches ', soiltext_patches)
-      ENDIF
+#endif
 
       lndname = trim(landdir)//'/soiltexture_patches.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -112,7 +118,7 @@ SUBROUTINE Aggregation_SoilTexture ( &
       CALL ncio_write_vector (lndname, 'soiltext_patches', 'patch', &
          landpatch, soiltext_patches, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpatch = (/(ityp, ityp = 0, N_land_classification)/)
       lndname = trim(dir_model_landdata)//'/diag/soiltexture_'//trim(cyear)//'.nc'
       IF (allocated(soiltext_patches)) THEN
@@ -121,11 +127,11 @@ SUBROUTINE Aggregation_SoilTexture ( &
       ENDIF
 
       CALL srfdata_map_and_write (soiltext_r8, landpatch%settyp, typpatch,  &
-         m_patch2diag, -1., lndname, 'soiltexture', compress = 1, write_mode = 'one', &
+         m_patch2diag, -1., lndname, 'soiltexture', compress = 6, write_mode = 'one', &
          create_mode=.true.)
 
       IF (allocated(soiltext_r8)) deallocate(soiltext_r8)
-      ENDIF
+#endif
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) deallocate ( soiltext_patches )

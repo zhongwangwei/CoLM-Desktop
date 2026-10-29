@@ -1761,34 +1761,10 @@ impl Table {
                     "lambda_p_vgm"
                 }
             }
-            "rhol_vis_p" => {
-                if pc {
-                    "rhol_vis_p_pc"
-                } else {
-                    "rhol_vis_p"
-                }
-            }
-            "rhol_nir_p" => {
-                if pc {
-                    "rhol_nir_p_pc"
-                } else {
-                    "rhol_nir_p"
-                }
-            }
-            "taul_vis_p" => {
-                if pc {
-                    "taul_vis_p_pc"
-                } else {
-                    "taul_vis_p"
-                }
-            }
-            "taul_nir_p" => {
-                if pc {
-                    "taul_nir_p_pc"
-                } else {
-                    "taul_nir_p"
-                }
-            }
+            "rhol_vis_p" => "rhol_vis_p",
+            "rhol_nir_p" => "rhol_nir_p",
+            "taul_vis_p" => "taul_vis_p",
+            "taul_nir_p" => "taul_nir_p",
             other => other,
         };
         self.0
@@ -1825,7 +1801,8 @@ fn parse_source(src: &str) -> Result<Table> {
             "taul_nir_p" => "taul_nir_p_pc",
             _ => unreachable!(),
         };
-        map.insert(pc_key, parse_assignment(&clean, pc_key, PFT_LEN)?);
+        // 上游的两支同名，解析器按第一支取值（PC 与非 PC 的光学参数差异记录在参数审计里）。
+        map.insert(pc_key, parse_assignment(&clean, source, PFT_LEN)?);
     }
     for source in ["vmax25_p", "lambda_p"] {
         map.insert(
@@ -1841,13 +1818,8 @@ fn parse_source(src: &str) -> Result<Table> {
 }
 
 fn assignment_key(source: &'static str) -> &'static str {
-    match source {
-        "rhol_vis_p" => "rhol_vis_p_default",
-        "rhol_nir_p" => "rhol_nir_p_default",
-        "taul_vis_p" => "taul_vis_p_default",
-        "taul_nir_p" => "taul_nir_p_default",
-        other => other,
-    }
+    // 上游 2026-10-29 去掉了这几个光学常量名的 `_default` 后缀。
+    source
 }
 
 fn branch_key(source: &'static str, campbell: bool) -> &'static str {
@@ -1861,32 +1833,65 @@ fn branch_key(source: &'static str, campbell: bool) -> &'static str {
 }
 
 fn parse_branch(lines: &[String], var: &str, campbell: bool) -> Result<Vec<f64>> {
-    let if_pos = lines
-        .iter()
-        .position(|line| line.contains("IF (DEF_USE_Campbell_SOIL_MODEL)"))
-        .ok_or_else(|| anyhow!("Campbell/VGM branch not found"))?;
-    let else_rel = lines[if_pos..]
-        .iter()
-        .position(|line| line.trim() == "ELSE")
-        .ok_or_else(|| anyhow!("Campbell/VGM ELSE not found"))?;
-    let end_rel = lines[if_pos + else_rel..]
-        .iter()
-        .position(|line| line.trim() == "ENDIF")
-        .ok_or_else(|| anyhow!("Campbell/VGM ENDIF not found"))?;
-    let slice = if campbell {
-        &lines[if_pos..if_pos + else_rel]
-    } else {
-        &lines[if_pos + else_rel..if_pos + else_rel + end_rel]
-    };
-    parse_assignment(slice, var, PFT_LEN)
+    // 上游 2026-10-29 把 Campbell/VGM 改回编译期分支：`#ifdef vanGenuchten_Mualem_SOIL_MODEL`
+    // 是第一支（VGM），`#else` 是 Campbell。过滤出目标分支后按普通赋值解析。
+    let mut kept: Vec<String> = Vec::new();
+    let mut stack: Vec<bool> = Vec::new(); // 每层：#true 保留、#false 丢弃
+    for line in lines {
+        let t = line.trim_start();
+        if let Some(cond) = t.strip_prefix("#ifdef ") {
+            let is_vgm = cond.trim().starts_with("vanGenuchten_Mualem_SOIL_MODEL");
+            stack.push(if is_vgm { !campbell } else { true });
+            continue;
+        }
+        if t.starts_with("#if ") || t.starts_with("#ifndef ") {
+            stack.push(true); // 其它条件保留，交给后续解析
+            continue;
+        }
+        if t.starts_with("#else") {
+            if let Some(top) = stack.last_mut() {
+                *top = !*top;
+            }
+            continue;
+        }
+        if t.starts_with("#endif") {
+            stack.pop();
+            continue;
+        }
+        if !stack.iter().all(|keep| *keep) {
+            continue;
+        }
+        if t.starts_with('#') {
+            continue;
+        }
+        kept.push(line.clone());
+    }
+    parse_assignment(&kept, var, PFT_LEN).map_err(|e| anyhow!("{var}: {e}"))
 }
 
 fn parse_assignment(lines: &[String], var: &str, len: usize) -> Result<Vec<f64>> {
-    let Some(start) = lines.iter().position(|line| contains_var(line, var)) else {
+    parse_assignment_branch(lines, var, len, 0)
+}
+
+fn parse_assignment_branch(lines: &[String], var: &str, len: usize, branch: u8) -> Result<Vec<f64>> {
+    // 上游给 PC 光学常量加了两支同名定义；branch=1 取第二处。
+    let starts: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, line)| contains_var(line, var)).map(|(i, _)| i).collect();
+    let start = if starts.is_empty() {
         bail!("{var} not found");
+    } else if branch == 1 && starts.len() > 1 {
+        starts[1]
+    } else {
+        starts[0]
     };
     let mut rhs = String::new();
+    let mut in_else = false;
     for line in &lines[start..] {
+        let t = line.trim_start();
+        if t.starts_with("#if") { continue; }
+        if t.starts_with("#else") { in_else = true; continue; }
+        if t.starts_with("#endif") { in_else = false; continue; }
+        if in_else != (branch == 1) { continue; }
         if rhs.is_empty() {
             if let Some((_, tail)) = line.split_once('=') {
                 rhs.push_str(tail);

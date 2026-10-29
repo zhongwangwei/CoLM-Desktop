@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef URBAN_MODEL
 MODULE MOD_UrbanIniTimeVariable
 
 !-----------------------------------------------------------------------
@@ -128,3 +129,4 @@ CONTAINS
 END MODULE MOD_UrbanIniTimeVariable
 !-----------------------------------------------------------------------
 ! EOP
+#endif

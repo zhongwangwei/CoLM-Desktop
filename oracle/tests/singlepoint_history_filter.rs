@@ -21,7 +21,7 @@ fn singlepoint_history_writers_apply_the_patch_filter() {
 
     for path in [
         "vendor/CoLM202X/main/MOD_Hist.F90",
-        "vendor/CoLM202X/main/TRACER/MOD_Tracer_Hist.F90",
+        "vendor/CoLM202X/main/MATERIAL/MOD_MT_Hist.F90",
     ] {
         let calls = flat(path);
         assert!(!calls.contains("itime_in_file, longname, units)"), "{path}");

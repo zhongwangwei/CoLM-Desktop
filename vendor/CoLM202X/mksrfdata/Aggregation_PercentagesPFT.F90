@@ -12,7 +12,6 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 !  Shupeng Zhang, 01/2022: porting codes to MPI parallel version
 !-----------------------------------------------------------------------
 
-   USE MOD_Filesystem, ONLY: make_directory
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
@@ -25,14 +24,20 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
    USE MOD_NetCDFBlock
    USE MOD_NetCDFVector
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
    USE MOD_AggregationRequestData
 
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
+#endif
+#ifdef SrfdataDiag
    USE MOD_SrfdataDiag
+#endif
 
    IMPLICIT NONE
 
@@ -48,18 +53,22 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
    character(len=256) :: landdir, lndname
 
    ! for IGBP data
-   character(len=256) :: dir_5x5, suffix, cyear
+   character(len=256) :: dir, fname, cyear
    ! for PFT
    type (block_data_real8_3d) :: pftPCT
    real(r8), allocatable :: pct_one(:), area_one(:)
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    real(r8), allocatable :: pct_pft_one(:,:)
    real(r8), allocatable :: pct_pfts(:)
+#endif
    integer  :: ipatch, ipc, ipft, p
    integer  :: wmo_pth
    real(r8) :: sumarea, sum_pct_pfts
+#ifdef SrfdataDiag
    integer :: typpft(0:N_PFT-1)
 #ifdef CROP
    integer :: typcrop(N_CFT), ityp
+#endif
 #endif
 
       write(cyear,'(i4.4)') lc_year
@@ -70,23 +79,21 @@ SUBROUTINE Aggregation_PercentagesPFT (gland, dir_rawdata, dir_model_landdata, l
 #endif
       IF (p_is_master) THEN
          write(*,'(/, A43)') 'Aggregate plant function type fractions ...'
-         CALL make_directory(trim(adjustl(landdir)))
+         CALL system('mkdir -p ' // trim(adjustl(landdir)))
       ENDIF
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
-      dir_5x5 = trim(dir_rawdata) // '/plant_15s'
-      ! add parameter input for time year
-      !write(cyear,'(i4.4)') lc_year
-      suffix  = 'MOD'//trim(cyear)
+      dir   = trim(dir_rawdata) // trim(DEF_rawdata%pft%dir)
+      fname = get_rawdata_fname (DEF_rawdata%pft%fname, cyear, '')
 
       IF (p_is_io) THEN
          CALL allocate_block_data (gland, pftPCT, N_PFT_modis, lb1 = 0)
-         CALL read_5x5_data_pft   (dir_5x5, suffix, gland, 'PCT_PFT', pftPCT)
+         CALL read_5x5_data_pft   (dir, fname, gland, 'PCT_PFT', pftPCT)
 #ifdef USEMPI
          CALL aggregation_data_daemon (gland, data_r8_3d_in1 = pftPCT, n1_r8_3d_in1 = N_PFT_modis)
 #endif
@@ -161,9 +168,9 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #endif
 
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('PCT_PFTs ', pct_pfts)
-      ENDIF
+#endif
 
       lndname = trim(landdir)//'/pct_pfts.nc'
       CALL ncio_create_file_vector (lndname, landpatch)
@@ -171,14 +178,14 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL ncio_write_vector (lndname, 'pct_pfts', 'pft', &
          landpft, pct_pfts, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typpft = (/(ipft, ipft = 0, N_PFT-1)/)
       lndname = trim(dir_model_landdata)//'/diag/pftfrac_elm_'//trim(cyear)//'.nc'
       CALL srfdata_map_and_write (pct_pfts, landpft%settyp, typpft, m_pft2diag, &
-         -1.0e36_r8, lndname, 'pftfrac_elm', compress = 1, write_mode = 'one',  &
+         -1.0e36_r8, lndname, 'pftfrac_elm', compress = 6, write_mode = 'one',  &
          defval=0._r8, stat_mode = 'fraction', pctshared = landpft%pctshared,   &
          create_mode=.true.)
-      ENDIF
+#endif
 
       IF (p_is_worker) THEN
          IF (allocated(pct_pfts   )) deallocate(pct_pfts   )
@@ -194,16 +201,16 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
       CALL ncio_write_vector (lndname, 'pct_crops', 'patch', &
          landpatch, cropfrac, DEF_Srfdata_CompressLevel)
 
-      IF (DEF_USE_SrfdataDiag) THEN
+#ifdef SrfdataDiag
       typcrop = (/(ityp, ityp = 1, N_CFT)/)
       lndname = trim(dir_model_landdata) // '/diag/cropfrac_elm_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (cropfrac, cropclass, typcrop, m_patch2diag,   &
-         -1.0e36_r8, lndname, 'cropfrac_elm', compress = 1, write_mode = 'one', &
+         -1.0e36_r8, lndname, 'cropfrac_elm', compress = 6, write_mode = 'one', &
          defval=0._r8, stat_mode = 'fraction', pctshared = landpatch%pctshared, &
          create_mode=.true.)
-      ENDIF
+#endif
 #endif
 
-ENDIF
+#endif
 
 END SUBROUTINE Aggregation_PercentagesPFT

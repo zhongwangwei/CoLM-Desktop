@@ -23,12 +23,19 @@ CONTAINS
                      fact,brr,hs,hs_soil,hs_snow,fsno,dhsdT, &
                      t_soisno_bef,t_soisno,wliq_soisno,wice_soisno,imelt, &
                      scv,snowdp,sm,xmf,porsl,psi0,&
+#ifdef Campbell_SOIL_MODEL
                      bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                      theta_r,alpha_vgm,n_vgm,L_vgm,&
                      sc_vgm,fc_vgm,&
+#endif
+#ifdef MaterialTransport
                      dz &
-                    ,qphs_thaw_lay, qphs_frzc_lay &
-                    )
+                    ,qphs_thaw_lay, qphs_frzc_lay)
+#else
+                     dz)
+#endif
 
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -76,13 +83,17 @@ CONTAINS
    real(r8), intent(in) :: dhsdT                       !temperature derivative of "hs"
    real(r8), intent(in) :: porsl(1:nl_soil)            !soil porosity [-]
    real(r8), intent(in) :: psi0 (1:nl_soil)            !soil water suction, negative potential [mm]
+#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)              !clapp and hornberger "b" parameter [-]
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil), &
                            alpha_vgm(1:nl_soil), &
                            n_vgm    (1:nl_soil), &
                            L_vgm    (1:nl_soil), &
                            sc_vgm   (1:nl_soil), &
                            fc_vgm   (1:nl_soil)
+#endif
    real(r8), intent(in) :: dz(1:nl_soil)               !soil layer thickness [m]
 
    real(r8), intent(inout) :: t_soisno   (lb:nl_soil)  !temperature at current time step [K]
@@ -94,10 +105,10 @@ CONTAINS
    real(r8), intent(out) :: sm                         !rate of snowmelt [mm/s, kg/(m2 s)]
    real(r8), intent(out) :: xmf                        !total latent heat of phase change
     integer, intent(out) :: imelt(lb:nl_soil)          !flag for melting or freezing [-]
-
-   ! Optional per-layer phase-change mass exports for TRACER [kg/m2].
+#ifdef MaterialTransport
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
+#endif
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: hm(lb:nl_soil)        !energy residual [W/m2]
@@ -114,8 +125,10 @@ CONTAINS
 !-----------------------------------------------------------------------
       sm = 0.
       xmf = 0.
+#ifdef MaterialTransport
       IF (present(qphs_thaw_lay)) qphs_thaw_lay(:) = 0._r8
       IF (present(qphs_frzc_lay)) qphs_frzc_lay(:) = 0._r8
+#endif
       DO j = lb, nl_soil
          imelt(j) = 0
          hm(j) = 0.
@@ -136,12 +149,12 @@ CONTAINS
             IF(t_soisno(j) < tfrz .and. ((patchtype <=2) .or. is_dry_lake)) THEN
                smp = hfus * (t_soisno(j)-tfrz)/(grav*t_soisno(j)) * 1000.     ! mm
                IF (porsl(j) > 0.) THEN
-                  IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-                     supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
-                  ELSE
-                     supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
-                        (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
-                  ENDIF
+#ifdef Campbell_SOIL_MODEL
+                  supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
+#else
+                  supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
+                     (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
+#endif
                ELSE
                   supercool(j) = 0.
                ENDIF
@@ -305,11 +318,12 @@ CONTAINS
             IF(imelt(j) == 1 .and. j < 1) &
             sm = sm + max(0.,(wice0(j)-wice_soisno(j)))/deltim
 
+#ifdef MaterialTransport
             IF (present(qphs_thaw_lay)) &
                qphs_thaw_lay(j) = max(wice0(j) - wice_soisno(j), 0._r8)
             IF (present(qphs_frzc_lay)) &
                qphs_frzc_lay(j) = max(wice_soisno(j) - wice0(j), 0._r8)
-
+#endif
          ENDIF
       ENDDO
 
@@ -329,12 +343,19 @@ CONTAINS
                      fact,brr,hs,hs_soil,hs_snow,fsno,sabg_snow_lyr,dhsdT, &
                      t_soisno_bef,t_soisno,wliq_soisno,wice_soisno,imelt, &
                      scv,snowdp,sm,xmf,porsl,psi0,&
+#ifdef Campbell_SOIL_MODEL
                      bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                      theta_r,alpha_vgm,n_vgm,L_vgm,&
                      sc_vgm,fc_vgm,&
+#endif
+#ifdef MaterialTransport
                      dz &
-                    ,qphs_thaw_lay, qphs_frzc_lay &
-                    )
+                    ,qphs_thaw_lay, qphs_frzc_lay)
+#else
+                     dz)
+#endif
 
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
@@ -383,13 +404,17 @@ CONTAINS
    real(r8), intent(in) :: sabg_snow_lyr (lb:1)        !snow layer absorption [W/m-2]
    real(r8), intent(in) :: porsl(1:nl_soil)            !soil porosity [-]
    real(r8), intent(in) :: psi0 (1:nl_soil)            !soil water suction, negative potential [mm]
+#ifdef Campbell_SOIL_MODEL
    real(r8), intent(in) :: bsw(1:nl_soil)              !clapp and hornberger "b" parameter [-]
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    real(r8), intent(in) :: theta_r  (1:nl_soil), &
                            alpha_vgm(1:nl_soil), &
                            n_vgm    (1:nl_soil), &
                            L_vgm    (1:nl_soil), &
                            sc_vgm   (1:nl_soil), &
                            fc_vgm   (1:nl_soil)
+#endif
    real(r8), intent(in) :: dz(1:nl_soil)               !soil layer thickness [m]
 
    real(r8), intent(inout) :: t_soisno (lb:nl_soil)    !temperature at current time step [K]
@@ -401,10 +426,10 @@ CONTAINS
    real(r8), intent(out) :: sm                         !rate of snowmelt [mm/s, kg/(m2 s)]
    real(r8), intent(out) :: xmf                        !total latent heat of phase change
     integer, intent(out) :: imelt(lb:nl_soil)          !flag for melting or freezing [-]
-
-   ! Optional per-layer phase-change mass exports for TRACER [kg/m2].
+#ifdef MaterialTransport
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
+#endif
 
 !-------------------------- Local Variables ----------------------------
    real(r8) :: hm(lb:nl_soil)        !energy residual [W/m2]
@@ -422,8 +447,10 @@ CONTAINS
 
       sm = 0.
       xmf = 0.
+#ifdef MaterialTransport
       IF (present(qphs_thaw_lay)) qphs_thaw_lay(:) = 0._r8
       IF (present(qphs_frzc_lay)) qphs_frzc_lay(:) = 0._r8
+#endif
       DO j = lb, nl_soil
          imelt(j) = 0
          hm(j) = 0.
@@ -444,12 +471,12 @@ CONTAINS
             IF(t_soisno(j) < tfrz .and. ((patchtype <= 2) .or. is_dry_lake)) THEN
                smp = hfus * (t_soisno(j)-tfrz)/(grav*t_soisno(j)) * 1000.     ! mm
                IF (porsl(j) > 0.) THEN
-                  IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-                     supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
-                  ELSE
-                     supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
-                        (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
-                  ENDIF
+#ifdef Campbell_SOIL_MODEL
+                  supercool(j) = porsl(j)*(smp/psi0(j))**(-1.0/bsw(j))
+#else
+                  supercool(j) = soil_vliq_from_psi(smp, porsl(j), theta_r(j), -10.0, 5, &
+                     (/alpha_vgm(j), n_vgm(j), L_vgm(j), sc_vgm(j), fc_vgm(j)/))
+#endif
                ELSE
                   supercool(j) = 0.
                ENDIF
@@ -619,11 +646,12 @@ CONTAINS
             IF(imelt(j) == 1 .and. j < 1) &
             sm = sm + max(0.,(wice0(j)-wice_soisno(j)))/deltim
 
+#ifdef MaterialTransport
             IF (present(qphs_thaw_lay)) &
                qphs_thaw_lay(j) = max(wice0(j) - wice_soisno(j), 0._r8)
             IF (present(qphs_frzc_lay)) &
                qphs_frzc_lay(j) = max(wice_soisno(j) - wice0(j), 0._r8)
-
+#endif
          ENDIF
       ENDDO
 

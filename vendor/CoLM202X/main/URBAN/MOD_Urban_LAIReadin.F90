@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef URBAN_MODEL
 MODULE MOD_Urban_LAIReadin
 
    USE MOD_Precision
@@ -78,4 +79,5 @@ CONTAINS
    END SUBROUTINE UrbanLAI_readin
 
 END MODULE MOD_Urban_LAIReadin
+#endif
 ! ---------- EOP ------------

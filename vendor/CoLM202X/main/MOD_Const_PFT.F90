@@ -165,7 +165,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! canopy top height
-   real(r8) :: htop0_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: htop0_p(0:N_PFT+N_CFT-1) &
       =(/ 0.5,  17.0,  17.0,  14.0,  35.0,  35.0,  18.0,  20.0&
         ,20.0,   0.5,   0.5,   0.5,   0.5,   0.5,   0.5,   0.5&
 #ifdef CROP
@@ -182,7 +182,7 @@ MODULE MOD_Const_PFT
 
    ! canopy bottom height
    ! 01/06/2020, yuan: adjust htop: grass/shrub -> 0, tree->1
-   real(r8) :: hbot0_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: hbot0_p(0:N_PFT+N_CFT-1) &
      !TODO: check the setting values
      !=(/0.01,   8.5,   8.5,   7.0,   1.0,   1.0,  10.0,  11.5&
      !   11.5,   0.1,   0.1,   0.1,  0.01,  0.01,  0.01,  0.01/)
@@ -227,10 +227,10 @@ MODULE MOD_Const_PFT
    real(r8), parameter :: displar_p(0:N_PFT+N_CFT-1) = 0.667
 
    ! inverse&sqrt leaf specific dimension size 4 cm
-   real(r8) :: sqrtdi_p(0:N_PFT+N_CFT-1) = 5.0
+   real(r8), parameter :: sqrtdi_p(0:N_PFT+N_CFT-1) = 5.0
 
    ! leaf angle distribution parameter
-   real(r8) :: chil_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: chil_p(0:N_PFT+N_CFT-1) &
       = (/-0.300,  0.010,  0.010,  0.010,  0.100,  0.100,  0.010,  0.250&
          , 0.250,  0.010,  0.250,  0.250, -0.300, -0.300, -0.300, -0.300&
 #ifdef CROP
@@ -246,29 +246,16 @@ MODULE MOD_Const_PFT
          /)
 
    ! reflectance of green leaf in visible band
-   ! Used to be two compile-time-selected `parameter` arrays (LULC_IGBP_PC
-   ! vs. not), same shape, values differing only for the PC 3D radiative
-   ! transfer scheme (Dong et al., 2021 measured data). A `parameter` can't
-   ! be picked at runtime, so -- same pattern as vmax25_p/lambda_p above
-   ! (Campbell vs. vanGenuchten) -- this is a plain module array filled in
-   ! by Init_PFT_Const below once DEF_USE_PC is known.
-   real(r8), parameter :: rhol_vis_p_pc(0:N_PFT+N_CFT-1) &
+#if (defined LULC_IGBP_PC)
+   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
+   real(r8), parameter :: rhol_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.110,  0.070,  0.070,  0.070,  0.100,  0.110,  0.100,  0.100&
         , 0.100,  0.070,  0.100,  0.100,  0.110,  0.110,  0.110,  0.110&
-#ifdef CROP
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
-        , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110    &
-#endif
-         /)
-   real(r8), parameter :: rhol_vis_p_default(0:N_PFT+N_CFT-1) &
+#else
+   real(r8), parameter :: rhol_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.110,  0.070,  0.070,  0.070,  0.100,  0.100,  0.100,  0.100&
         , 0.100,  0.070,  0.100,  0.100,  0.110,  0.110,  0.110,  0.110&
+#endif
 #ifdef CROP
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110&
@@ -280,10 +267,9 @@ MODULE MOD_Const_PFT
         , 0.110,  0.110,  0.110,  0.110,  0.110,  0.110,  0.110    &
 #endif
          /)
-   real(r8) :: rhol_vis_p(0:N_PFT+N_CFT-1)
 
    ! reflectance of dead leaf in visible band
-   real(r8) :: rhos_vis_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: rhos_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.310,  0.160,  0.160,  0.160,  0.160,  0.160,  0.160,  0.160&
         , 0.160,  0.160,  0.160,  0.160,  0.310,  0.310,  0.310,  0.310&
 #ifdef CROP
@@ -299,24 +285,16 @@ MODULE MOD_Const_PFT
          /)
 
    ! reflectance of green leaf in near infrared band
-   ! Runtime-selected the same way as rhol_vis_p above.
-   real(r8), parameter :: rhol_nir_p_pc(0:N_PFT+N_CFT-1) &
+#if (defined LULC_IGBP_PC)
+   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
+   real(r8), parameter :: rhol_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.350,  0.360,  0.370,  0.360,  0.450,  0.460,  0.450,  0.420&
         , 0.450,  0.350,  0.450,  0.450,  0.350,  0.350,  0.350,  0.350&
-#ifdef CROP
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
-        , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350    &
-#endif
-         /)
-   real(r8), parameter :: rhol_nir_p_default(0:N_PFT+N_CFT-1) &
+#else
+   real(r8), parameter :: rhol_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.350,  0.350,  0.350,  0.350,  0.450,  0.450,  0.450,  0.450&
         , 0.450,  0.350,  0.450,  0.450,  0.350,  0.350,  0.350,  0.350&
+#endif
 #ifdef CROP
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350&
@@ -328,10 +306,9 @@ MODULE MOD_Const_PFT
         , 0.350,  0.350,  0.350,  0.350,  0.350,  0.350,  0.350    &
 #endif
          /)
-   real(r8) :: rhol_nir_p(0:N_PFT+N_CFT-1)
 
    ! reflectance of dead leaf in near infrared band
-   real(r8) :: rhos_nir_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: rhos_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.530,  0.390,  0.390,  0.390,  0.390,  0.390,  0.390,  0.390&
         , 0.390,  0.390,  0.390,  0.390,  0.530,  0.530,  0.530,  0.530&
 #ifdef CROP
@@ -347,24 +324,16 @@ MODULE MOD_Const_PFT
          /)
 
    ! transmittance of green leaf in visible band
-   ! Runtime-selected the same way as rhol_vis_p above.
-   real(r8), parameter :: taul_vis_p_pc(0:N_PFT+N_CFT-1) &
+#if (defined LULC_IGBP_PC)
+   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
+   real(r8), parameter :: taul_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.050,  0.050,  0.050,  0.050,  0.050,  0.060,  0.050,  0.060&
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-#ifdef CROP
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
-        , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050    &
-#endif
-         /)
-   real(r8), parameter :: taul_vis_p_default(0:N_PFT+N_CFT-1) &
+#else
+   real(r8), parameter :: taul_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
+#endif
 #ifdef CROP
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050&
@@ -376,10 +345,9 @@ MODULE MOD_Const_PFT
         , 0.050,  0.050,  0.050,  0.050,  0.050,  0.050,  0.050    &
 #endif
          /)
-   real(r8) :: taul_vis_p(0:N_PFT+N_CFT-1)
 
    ! transmittance of dead leaf in visible band
-   real(r8) :: taus_vis_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: taus_vis_p(0:N_PFT+N_CFT-1) &
       = (/0.120,  0.001,  0.001,  0.001,  0.001,  0.001,  0.001,  0.001&
         , 0.001,  0.001,  0.001,  0.001,  0.120,  0.120,  0.120,  0.120&
 #ifdef CROP
@@ -395,24 +363,16 @@ MODULE MOD_Const_PFT
          /)
 
    ! transmittance of green leaf in near infrared band
-   ! Runtime-selected the same way as rhol_vis_p above.
-   real(r8), parameter :: taul_nir_p_pc(0:N_PFT+N_CFT-1) &
+#if (defined LULC_IGBP_PC)
+   ! Leaf optical properties adapted from measured data (Dong et al., 2021)
+   real(r8), parameter :: taul_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.340,  0.280,  0.290,  0.380,  0.250,  0.330,  0.250,  0.430&
         , 0.400,  0.100,  0.250,  0.250,  0.340,  0.340,  0.340,  0.340&
-#ifdef CROP
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
-        , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340    &
-#endif
-         /)
-   real(r8), parameter :: taul_nir_p_default(0:N_PFT+N_CFT-1) &
+#else
+   real(r8), parameter :: taul_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.340,  0.100,  0.100,  0.100,  0.250,  0.250,  0.250,  0.250&
         , 0.250,  0.100,  0.250,  0.250,  0.340,  0.340,  0.340,  0.340&
+#endif
 #ifdef CROP
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340&
@@ -424,10 +384,9 @@ MODULE MOD_Const_PFT
         , 0.340,  0.340,  0.340,  0.340,  0.340,  0.340,  0.340    &
 #endif
          /)
-   real(r8) :: taul_nir_p(0:N_PFT+N_CFT-1)
 
    ! transmittance of dead leaf in near infrared band
-   real(r8) :: taus_nir_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: taus_nir_p(0:N_PFT+N_CFT-1) &
       = (/0.250,  0.001,  0.001,  0.001,  0.001,  0.001,  0.001,  0.001&
         , 0.001,  0.001,  0.001,  0.001,  0.250,  0.250,  0.250,  0.250&
 #ifdef CROP
@@ -444,22 +403,49 @@ MODULE MOD_Const_PFT
 
    ! maximum carboxylation rate at 25 C at canopy top
    ! /06/03/2014/ based on Bonan et al., 2011 (Table 2)
-  !real(r8) :: vmax25_p(0:N_PFT+N_CFT-1) &
+  !real(r8), parameter :: vmax25_p(0:N_PFT+N_CFT-1) &
   !   = (/ 52.0, 61.0, 54.0, 57.0, 72.0, 72.0, 52.0, 52.0&
   !      , 52.0, 72.0, 52.0, 52.0, 52.0, 52.0, 52.0, 57.0&
   ! /07/27/2022/ based on Bonan et al., 2011 (Table 2, VmaxF(N))
   ! Temporarilly tune Vegetation parameter to match VGM model (soil too wet)
-   ! Used to be two compile-time-selected `parameter` arrays with the same
-   ! shape but different values (Campbell vs. vanGenuchten). A `parameter`
-   ! can't be picked at runtime, so this is a plain module array now,
-   ! filled in by Init_PFT_Const below (see there for the two value sets)
-   ! once DEF_USE_Campbell_SOIL_MODEL is known -- the namelist is always
-   ! read before Init_PFT_Const runs (CoLM.F90, CoLMINI.F90,
-   ! MOD_Lulcc_Initialize.F90 all CALL it after namelist setup).
-   real(r8) :: vmax25_p(0:N_PFT+N_CFT-1)
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   real(r8), parameter :: vmax25_p(0:N_PFT+N_CFT-1) &
+!      = (/ 52.0, 16.1, 16.5, 22.5, 12.3, 10.7, 16.2, 15.1&
+!         , 15.3, 21.4, 22.0, 26.6, 34.2, 20.6, 10.0, 57.0&
+!       = (/ 52.0, 56.0, 54.0, 57.0, 18.0, 23.0, 31.3, 36.1&
+!          , 52.0, 40.0, 37.5, 52.0, 52.0, 52.0, 13.4, 57.0&
+       = (/ 52.0, 25.2, 26.5, 34.1, 13.2, 15.7, 20.3, 24.2&
+          , 28.0, 33.1, 33.4, 48.5, 55.7, 41.5, 10.0, 57.0&
+#ifdef CROP
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0  &
+#endif
+         /) * 1.e-6
+#else
+   real(r8), parameter :: vmax25_p(0:N_PFT+N_CFT-1) &
+      = (/ 52.0, 55.0, 42.0, 29.0, 41.0, 51.0, 36.0, 30.0&
+         , 40.0, 36.0, 30.0, 19.0, 21.0, 26.0, 25.0, 57.0&
+#ifdef CROP
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
+         , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0  &
+#endif
+         /) * 1.e-6
+#endif
 
    ! quantum efficiency
-   real(r8) :: effcon_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: effcon_p(0:N_PFT+N_CFT-1) &
       = (/0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08&
         , 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.05, 0.08&
 #ifdef CROP
@@ -474,8 +460,8 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-      !C3C4 switch 1: C3, 0: C4
-   integer :: c3c4_p(0:N_PFT+N_CFT-1) &
+   ! C3C4 flag 1: C3, 0: C4
+   integer, parameter :: c3c4_p(0:N_PFT+N_CFT-1) &
       = (/1, 1, 1, 1, 1, 1, 1, 1&
         , 1, 1, 1, 1, 1, 1, 0, 1&
 #ifdef CROP
@@ -491,7 +477,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! conductance-photosynthesis slope parameter
-   real(r8) :: g1_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: g1_p(0:N_PFT+N_CFT-1) &
       = (/4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0&
         , 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0&
 #ifdef CROP
@@ -507,7 +493,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! conductance-photosynthesis intercept
-   real(r8) :: g0_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: g0_p(0:N_PFT+N_CFT-1) &
       = (/100, 100, 100, 100, 100, 100, 100, 100&
         , 100, 100, 100, 100, 100, 100, 100, 100&
 #ifdef CROP
@@ -523,7 +509,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! conductance-photosynthesis slope parameter
-   real(r8) :: gradm_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: gradm_p(0:N_PFT+N_CFT-1) &
       = (/9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0&
         , 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 4.0, 9.0&
 #ifdef CROP
@@ -539,7 +525,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! conductance-photosynthesis intercept
-   real(r8) :: binter_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: binter_p(0:N_PFT+N_CFT-1) &
       = (/0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01&
         , 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.04, 0.01&
 #ifdef CROP
@@ -571,22 +557,22 @@ MODULE MOD_Const_PFT
          /)
 
    ! slope of high temperature inhibition FUNCTION (s1)
-   real(r8) :: shti_p(0:N_PFT+N_CFT-1) = 0.3
+   real(r8), parameter :: shti_p(0:N_PFT+N_CFT-1) = 0.3
 
    ! slope of low temperature inhibition FUNCTION (s3)
-   real(r8) :: slti_p(0:N_PFT+N_CFT-1) = 0.2
+   real(r8), parameter :: slti_p(0:N_PFT+N_CFT-1) = 0.2
 
    ! temperature coefficient in gs-a model (s5)
-   real(r8) :: trda_p(0:N_PFT+N_CFT-1) = 1.3
+   real(r8), parameter :: trda_p(0:N_PFT+N_CFT-1) = 1.3
 
    ! temperature coefficient in gs-a model (s6)
-   real(r8) :: trdm_p(0:N_PFT+N_CFT-1) = 328.0
+   real(r8), parameter :: trdm_p(0:N_PFT+N_CFT-1) = 328.0
 
    ! temperature coefficient in gs-a model (273.16+25)
-   real(r8) :: trop_p(0:N_PFT+N_CFT-1) = 298.0
+   real(r8), parameter :: trop_p(0:N_PFT+N_CFT-1) = 298.0
 
    ! 1/2 point of high temperature inhibition FUNCTION (s2)
-   real(r8) :: hhti_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: hhti_p(0:N_PFT+N_CFT-1) &
       =(/308.0, 303.0, 303.0, 303.0, 313.0, 313.0, 311.0, 311.0&
         ,311.0, 313.0, 313.0, 303.0, 303.0, 308.0, 313.0, 308.0&
 #ifdef CROP
@@ -602,7 +588,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! 1/2 point of low temperature inhibition FUNCTION (s4)
-   real(r8) :: hlti_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: hlti_p(0:N_PFT+N_CFT-1) &
       =(/281.0, 278.0, 278.0, 278.0, 288.0, 288.0, 283.0, 283.0&
         ,283.0, 283.0, 283.0, 278.0, 278.0, 281.0, 288.0, 281.0&
 #ifdef CROP
@@ -618,7 +604,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! coefficient of leaf nitrogen allocation
-   real(r8) :: extkn_p(0:N_PFT+N_CFT-1) = 0.5
+   real(r8), parameter :: extkn_p(0:N_PFT+N_CFT-1) = 0.5
 
    real(r8) :: &
 #ifndef CROP
@@ -630,7 +616,7 @@ MODULE MOD_Const_PFT
 #endif
 
    ! depth at 50% roots
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: d50_p &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: d50_p &
       =(/27.0,  21.0,  12.0,  12.0,  15.0,  23.0,  16.0,  23.0&
         ,12.0,  23.5,  23.5,  23.5,   9.0,   7.0,  16.0,  22.0&
 #ifdef CROP
@@ -646,7 +632,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! coefficient of root profile
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: beta_p &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: beta_p &
       =(/-2.051, -1.835, -1.880, -1.880, -1.632, -1.757, -1.681, -1.757&
        , -1.880, -1.623, -1.623, -1.623, -2.621, -1.176, -1.452, -1.796&
 #ifdef CROP
@@ -706,28 +692,28 @@ MODULE MOD_Const_PFT
 
 !   bgc PFT constants
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: grperc = 0.11_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: grperc = 0.11_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: grpnow = 1._r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: grpnow = 1._r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: lf_flab = 0.25_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: lf_flab = 0.25_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: lf_fcel = 0.5_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: lf_fcel = 0.5_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: lf_flig = 0.25_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: lf_flig = 0.25_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fr_flab = 0.25_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fr_flab = 0.25_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fr_fcel = 0.5_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fr_fcel = 0.5_r8
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fr_flig = 0.25_r8
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fr_flig = 0.25_r8
 
 
    logical , parameter, dimension(0:N_PFT+N_CFT-1) :: isshrub & ! True => is a shrub
@@ -883,7 +869,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fsr_pft &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fsr_pft &
       =(/   0.,   0.02,   0.02,  0.026,   0.04,   0.02,   0.04,   0.02 &
        ,  0.02,   0.02,   0.02,  0.026,  0.026,   0.04,   0.06,   0.04 &
 #ifdef CROP
@@ -898,7 +884,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fd_pft &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fd_pft &
       =(/   0.,    120.,    120.,    120.,    120.,    120.,    120.,    120. &
        ,  120.,    120.,    120.,    120.,    120.,    120.,    120.,    120. &
 #ifdef CROP
@@ -913,7 +899,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: rswf_min &
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: rswf_min &
       = (/0.25, 0.25, 0.35, 0.35, 0.35,  0.3,  0.3,  0.3 &
         ,  0.3,  0.3,  0.3, 0.35, 0.35,  0.3,  0.4,  0.3 &
 #ifdef CROP
@@ -928,7 +914,7 @@ MODULE MOD_Const_PFT
 #endif
         /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: rswf_max &
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: rswf_max &
       = (/ 0.7, 0.55,  0.7,  0.7, 0.75,  0.7,  0.7,  0.7 &
         ,  0.7, 0.55, 0.55,  0.7,  0.7,  0.7,  0.7,  0.7 &
 #ifdef CROP
@@ -943,7 +929,7 @@ MODULE MOD_Const_PFT
 #endif
         /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: leafcn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: leafcn &
       =(/              1.,              58.,              58., 25.8131130614352 &
        ,  29.603315571344,  29.603315571344, 23.4521575984991, 23.4521575984991 &
        , 23.4521575984991, 36.4166059723234, 23.2558139534884, 23.2558139534884 &
@@ -968,7 +954,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: frootcn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: frootcn &
       =(/   1.,     42.,     42.,     42.,     42.,     42.,     42.,     42.&
        ,   42.,     42.,     42.,     42.,     42.,     42.,     42.,     42.&
 #ifdef CROP
@@ -983,7 +969,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: livewdcn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: livewdcn &
       =(/   1.,     50.,     50.,     50.,     50.,     50.,     50.,     50.&
        ,   50.,     50.,     50.,     50.,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -998,7 +984,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: deadwdcn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: deadwdcn &
       =(/   1.,    500.,    500.,    500.,    500.,    500.,    500.,    500.&
        ,  500.,    500.,    500.,    500.,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -1013,7 +999,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: graincn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: graincn &
       =(/-999.,   -999.,   -999.,   -999.,   -999.,   -999.,   -999.,   -999.&
        , -999.,   -999.,   -999.,   -999.,   -999.,   -999.,   -999.,   -999.&
 #ifdef CROP
@@ -1028,7 +1014,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: lflitcn &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: lflitcn &
       =(/   1.,     70.,     80.,     50.,     60.,     60.,     50.,     50.&
        ,   50.,     60.,     50.,     50.,     50.,     50.,     50.,     50.&
 #ifdef CROP
@@ -1043,7 +1029,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: leaf_long &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: leaf_long &
       =(/            0., 3.30916666666667, 3.30916666666667, 0.506666666666667&
     ,            1.4025,           1.4025, 0.48333333333333, 0.483333333333333&
     , 0.483333333333333, 1.32333333333333,             0.39,              0.39&
@@ -1068,7 +1054,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: cc_leaf  &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: cc_leaf  &
       =(/   0.,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8&
       ,    0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1083,7 +1069,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: cc_lstem &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: cc_lstem &
       =(/   0.,     0.3,     0.3,     0.3,    0.27,    0.27,    0.27,    0.27&
       ,   0.27,    0.35,    0.35,    0.35,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1098,7 +1084,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: cc_dstem &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: cc_dstem &
       =(/   0.,     0.3,     0.3,     0.3,    0.27,    0.27,    0.27,    0.27&
       ,   0.27,    0.35,    0.35,    0.35,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1113,7 +1099,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: cc_other &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: cc_other &
       =(/   0.,     0.5,     0.5,     0.5,    0.45,    0.45,    0.45,    0.45&
       ,   0.45,    0.55,    0.55,    0.55,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1128,7 +1114,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_leaf  &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_leaf  &
       =(/   0.,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8&
       ,    0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1143,7 +1129,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_lstem &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_lstem &
       =(/   0.,     0.5,     0.5,     0.5,    0.45,    0.45,    0.35,    0.35&
       ,   0.45,    0.55,    0.55,    0.55,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1158,7 +1144,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_lroot &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_lroot &
       =(/   0.,    0.15,    0.15,    0.15,    0.13,    0.13,     0.1,     0.1&
       ,   0.13,    0.17,    0.17,    0.17,     0.2,     0.2,     0.2,     0.2&
 #ifdef CROP
@@ -1173,7 +1159,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_root  &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_root  &
       =(/   0.,    0.15,    0.15,    0.15,    0.13,    0.13,     0.1,     0.1&
       ,   0.13,    0.17,    0.17,    0.17,     0.2,     0.2,     0.2,     0.2&
 #ifdef CROP
@@ -1188,7 +1174,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_droot &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_droot &
       =(/   0.,    0.15,    0.15,    0.15,    0.13,    0.13,     0.1,     0.1&
       ,   0.13,    0.17,    0.17,    0.17,     0.2,     0.2,     0.2,     0.2&
 #ifdef CROP
@@ -1203,7 +1189,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fm_other &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fm_other &
       =(/   0.,     0.5,     0.5,     0.5,    0.45,    0.45,    0.35,    0.35&
       ,   0.45,    0.55,    0.55,    0.55,     0.8,     0.8,     0.8,     0.8&
 #ifdef CROP
@@ -1218,7 +1204,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: froot_leaf         &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: froot_leaf         &
       =(/   0.,     1.5,     1.5,     1.5,     1.5,     1.5,     1.5,     1.5&
       ,    1.5,     1.5,     1.5,     1.5,     1.5,     1.5,     1.5,     1.5&
 #ifdef CROP
@@ -1233,7 +1219,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: croot_stem         &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: croot_stem         &
       =(/  0.3,     0.3,     0.3,     0.3,     0.3,     0.3,     0.3,     0.3&
       ,    0.3,     0.3,     0.3,     0.3,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -1248,7 +1234,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: stem_leaf          &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: stem_leaf          &
       =(/   0.,     2.3,     2.3,      1.,     2.3,     1.5,      1.,     2.3&
       ,    2.3,     1.4,    0.24,    0.24,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -1263,7 +1249,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: flivewd            &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: flivewd            &
       =(/   0.,     0.1,     0.1,     0.1,     0.1,     0.1,     0.1,     0.1&
       ,    0.1,     0.5,     0.5,     0.1,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -1278,7 +1264,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fcur2              &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: fcur2              &
       =(/   0.,      1.,      1.,      0.,      1.,      1.,      0.,      0.&
       ,     0.,      1.,      0.,      0.,      0.,      0.,      0.,      0.&
 #ifdef CROP
@@ -1308,7 +1294,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: slatop             &
+   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: slatop             &
       =(/   0., 0.01222, 0.01122, 0.02432, 0.03143, 0.02728, 0.03385, 0.03541&
       , 0.0447, 0.01332, 0.02255, 0.01564, 0.01077, 0.02663, 0.01983, 0.04024&
 #ifdef CROP
@@ -1324,7 +1310,7 @@ MODULE MOD_Const_PFT
          /)
 !--- crop variables ---
    ! Max fertilizer to be applied in total (kg N/m2)
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: manure  &
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: manure  &
       = (/  0.,     0.,     0.,     0.,     0.,     0.,     0.,     0. &
       ,     0.,     0.,     0.,     0.,     0.,     0.,     0.,     0. &
 #ifdef CROP
@@ -1339,7 +1325,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: lfemerg   & ! used in CNPhenology
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: lfemerg   & ! parameter used in CNPhenology
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1354,7 +1340,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   integer, dimension(0:N_PFT+N_CFT-1) :: mxmat   & ! used in CNPhenology
+   integer, parameter, dimension(0:N_PFT+N_CFT-1) :: mxmat   & ! parameter used in CNPhenology
       = (/-999, -999, -999, -999, -999, -99 , -999, -999 &
       ,   -999, -999, -999, -999, -999, -999, -999, -999 &
 #ifdef CROP
@@ -1369,7 +1355,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: grnfill  & ! used in CNPhenology
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: grnfill  & ! parameter used in CNPhenology
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1385,7 +1371,7 @@ MODULE MOD_Const_PFT
          /)
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: baset   & ! used in accFlds
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: baset   & ! parameter used in accFlds
       = (/0.,  0.,  0.,  0.,  0.,  0.,  0.,  0. &
       ,   0.,  0.,  0.,  0.,  0.,  0.,  0.,  0. &
 #ifdef CROP
@@ -1400,7 +1386,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: astemf  & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: astemf  & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1415,7 +1401,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: arooti  & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: arooti  & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1430,7 +1416,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: arootf  & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: arootf  & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1445,7 +1431,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) ::fleafi   & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) ::fleafi   & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1460,7 +1446,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: bfact   & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: bfact   & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1475,7 +1461,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: declfact & ! currently unused
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: declfact & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1490,7 +1476,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: allconss & ! used in CNAllocation
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: allconss & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1505,7 +1491,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), parameter, dimension(0:N_PFT+N_CFT-1) :: allconsl & ! currently unused
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: allconsl & ! parameter used in CNAllocation
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
       ,   -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1521,7 +1507,7 @@ MODULE MOD_Const_PFT
          /)
 
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fleafcn & ! C:N during grain fill; leaf
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: fleafcn & ! C:N during grain fill; leaf
       = (/999., 999., 999., 999., 999., 999., 999., 999. &
       ,   999., 999., 999., 999., 999., 999., 999., 999. &
 #ifdef CROP
@@ -1536,7 +1522,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: fstemcn & ! C:N during grain fill; stem
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: fstemcn & ! C:N during grain fill; stem
       = (/999., 999., 999., 999., 999., 999., 999., 999. &
       ,   999., 999., 999., 999., 999., 999., 999., 999. &
 #ifdef CROP
@@ -1551,7 +1537,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: ffrootcn & ! C:N during grain fill; fine root
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: ffrootcn & ! C:N during grain fill; fine root
       = (/999., 999., 999., 999., 999., 999., 999., 999. &
         , 999., 999., 999., 999., 999., 999., 999., 999. &
 #ifdef CROP
@@ -1566,7 +1552,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8), dimension(0:N_PFT+N_CFT-1) :: laimx    & ! maximum leaf area index
+   real(r8),parameter, dimension(0:N_PFT+N_CFT-1) :: laimx    & ! maximum leaf area index
       = (/-999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
         , -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9, -999.9 &
 #ifdef CROP
@@ -1591,7 +1577,7 @@ MODULE MOD_Const_PFT
 !   end bgc variables
 
 ! Plant Hydraulics Parameters
-   real(r8) :: kmax_sun_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: kmax_sun_p(0:N_PFT+N_CFT-1) &
       = (/     0.,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
          ,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
 #ifdef CROP
@@ -1606,7 +1592,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8) :: kmax_sha_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: kmax_sha_p(0:N_PFT+N_CFT-1) &
       = (/     0.,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
          ,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
 #ifdef CROP
@@ -1620,7 +1606,7 @@ MODULE MOD_Const_PFT
          ,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
 #endif
          /)
-   real(r8) :: kmax_xyl_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: kmax_xyl_p(0:N_PFT+N_CFT-1) &
       = (/     0.,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
          ,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
 #ifdef CROP
@@ -1635,7 +1621,7 @@ MODULE MOD_Const_PFT
 #endif
          /)
 
-   real(r8) :: kmax_root_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: kmax_root_p(0:N_PFT+N_CFT-1) &
       = (/     0.,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
          ,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007,1.e-007&
 #ifdef CROP
@@ -1651,7 +1637,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! water potential at 50% loss of sunlit leaf tissue conductance (mmH2O)
-   real(r8) :: psi50_sun_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: psi50_sun_p(0:N_PFT+N_CFT-1) &
       = (/-150000, -530000, -400000, -380000, -250000, -270000, -340000, -270000&
          ,-200000, -400000, -390000, -390000, -340000, -340000, -340000, -340000&
 #ifdef CROP
@@ -1667,7 +1653,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! water potential at 50% loss of shaded leaf tissue conductance (mmH2O)
-   real(r8) :: psi50_sha_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: psi50_sha_p(0:N_PFT+N_CFT-1) &
       = (/-150000, -530000, -400000, -380000, -250000, -270000, -340000, -270000&
          ,-200000, -400000, -390000, -390000, -340000, -340000, -340000, -340000&
 #ifdef CROP
@@ -1683,7 +1669,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! water potential at 50% loss of xylem tissue conductance (mmH2O)
-   real(r8) :: psi50_xyl_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: psi50_xyl_p(0:N_PFT+N_CFT-1) &
       = (/-200000, -530000, -400000, -380000, -250000, -270000, -340000, -270000&
          ,-200000, -400000, -390000, -390000, -340000, -340000, -340000, -340000&
 #ifdef CROP
@@ -1699,7 +1685,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! water potential at 50% loss of root tissue conductance (mmH2O)
-   real(r8) :: psi50_root_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: psi50_root_p(0:N_PFT+N_CFT-1) &
       = (/-200000, -530000, -400000, -380000, -250000, -270000, -340000, -270000&
          ,-200000, -400000, -390000, -390000, -340000, -340000, -340000, -340000&
 #ifdef CROP
@@ -1715,7 +1701,7 @@ MODULE MOD_Const_PFT
          /)
 
    ! shape-fitting parameter for vulnerability curve (-)
-   real(r8) :: ck_p(0:N_PFT+N_CFT-1) &
+   real(r8), parameter :: ck_p(0:N_PFT+N_CFT-1) &
       = (/3.95,  3.95, 3.95,  3.95, 3.95,  3.95, 3.95, 3.95&
          ,3.95,  3.95, 3.95,  3.95, 3.95,  3.95, 3.95, 3.95&
 #ifdef CROP
@@ -1732,10 +1718,37 @@ MODULE MOD_Const_PFT
 !end plant hydraulic parameters
 
   ! Temporally tune Vegetation parameter to match VGM model (soil too wet)
-   ! Same situation as vmax25_p above: used to be two compile-time
-   ! `parameter` arrays, now a plain module array filled in by
-   ! Init_PFT_Const below.
-   real(r8) :: lambda_p(0:N_PFT+N_CFT-1)
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+   real(r8), parameter :: lambda_p(0:N_PFT+N_CFT-1) &
+      = (/1000.,   222.,  383.,   467., 2500.,   500.,  737.,  428.&
+         , 199.,   749.,  751.,   200.,  150.,   480.,  800., 1000.&
+#ifdef CROP
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
+#endif
+         /)
+#else
+   real(r8), parameter :: lambda_p(0:N_PFT+N_CFT-1) &
+      = (/1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+#ifdef CROP
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
+         ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
+#endif
+         /)
+#endif
    ! irrigation parameter for irrigated crop
    logical , parameter :: irrig_crop(0:N_PFT+N_CFT-1)  &
            =(/.False., .False., .False., .False., .False., .False., .False., .False. &
@@ -1775,102 +1788,7 @@ CONTAINS
 
    SUBROUTINE Init_PFT_Const
 
-   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL, DEF_USE_PC, DEF_USE_PFT, &
-      PFT_OVERRIDE_SLOTS, PFT_OVERRIDE_UNSET, PFT_OVERRIDE_INT_UNSET, &
-#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) VAR, &
-#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) VAR, &
-#include <pft_override_fields.inc>
-#undef PFT_OVERRIDE_INTEGER
-#undef PFT_OVERRIDE_REAL
-      DEF_CASE_NAME
    IMPLICIT NONE
-
-      ! vmax25_p / lambda_p: two vegetation parameters "temporarily tuned
-      ! to match the VGM model (soil too wet)" -- used to be two
-      ! compile-time `parameter` arrays selected by Campbell_SOIL_MODEL /
-      ! vanGenuchten_Mualem_SOIL_MODEL, now filled in at runtime here
-      ! (see the declarations above for why they can't stay `parameter`).
-      IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-         vmax25_p &
-!      = (/ 52.0, 55.0, 42.0, 29.0, 41.0, 51.0, 36.0, 30.0&
-!         , 40.0, 36.0, 30.0, 19.0, 21.0, 26.0, 25.0, 57.0&
-          = (/ 52.0, 56.0, 54.0, 57.0, 18.0, 23.0, 31.3, 36.1&
-             , 52.0, 40.0, 37.5, 52.0, 52.0, 52.0, 13.4, 57.0&
-#ifdef CROP
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0  &
-#endif
-            /) * 1.e-6
-         lambda_p &
-             = (/1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-#ifdef CROP
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
-#endif
-                /)
-      ELSE
-         vmax25_p &
-!      = (/ 52.0, 16.1, 16.5, 22.5, 12.3, 10.7, 16.2, 15.1&
-!         , 15.3, 21.4, 22.0, 26.6, 34.2, 20.6, 10.0, 57.0&
-!       = (/ 52.0, 56.0, 54.0, 57.0, 18.0, 23.0, 31.3, 36.1&
-!          , 52.0, 40.0, 37.5, 52.0, 52.0, 52.0, 13.4, 57.0&
-          = (/ 52.0, 25.2, 26.5, 34.1, 13.2, 15.7, 20.3, 24.2&
-             , 28.0, 33.1, 33.4, 48.5, 55.7, 41.5, 10.0, 57.0&
-#ifdef CROP
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0&
-            , 57.0, 57.0, 57.0, 57.0, 57.0, 57.0, 57.0  &
-#endif
-            /) * 1.e-6
-         lambda_p &
-             = (/1000.,   222.,  383.,   467., 2500.,   500.,  737.,  428.&
-                , 199.,   749.,  751.,   200.,  150.,   480.,  800., 1000.&
-#ifdef CROP
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000., 1000.&
-                ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
-#endif
-                /)
-      ENDIF
-
-      ! rhol_vis_p/rhol_nir_p/taul_vis_p/taul_nir_p: leaf optical properties
-      ! that differ between the PC 3D radiative transfer scheme (Dong et
-      ! al., 2021 measured data) and the two-stream scheme used by LCT/PFT
-      ! -- see the declarations above for why they can't stay `parameter`.
-      IF (DEF_USE_PC) THEN
-         rhol_vis_p = rhol_vis_p_pc
-         rhol_nir_p = rhol_nir_p_pc
-         taul_vis_p = taul_vis_p_pc
-         taul_nir_p = taul_nir_p_pc
-      ELSE
-         rhol_vis_p = rhol_vis_p_default
-         rhol_nir_p = rhol_nir_p_default
-         taul_vis_p = taul_vis_p_default
-         taul_nir_p = taul_nir_p_default
-      ENDIF
 
       rho_p(1,1,:) = rhol_vis_p(:)
       rho_p(2,1,:) = rhol_nir_p(:)
@@ -1880,22 +1798,6 @@ CONTAINS
       tau_p(2,1,:) = taul_nir_p(:)
       tau_p(1,2,:) = taus_vis_p(:)
       tau_p(2,2,:) = taus_nir_p(:)
-
-      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-#define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) CALL apply_pft_real_override(VAR, TARGET, SCALE)
-#define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) CALL apply_pft_integer_override(VAR, TARGET)
-#include <pft_override_fields.inc>
-#undef PFT_OVERRIDE_INTEGER
-#undef PFT_OVERRIDE_REAL
-         rho_p(1,1,:) = rhol_vis_p(:)
-         rho_p(2,1,:) = rhol_nir_p(:)
-         rho_p(1,2,:) = rhos_vis_p(:)
-         rho_p(2,2,:) = rhos_nir_p(:)
-         tau_p(1,1,:) = taul_vis_p(:)
-         tau_p(2,1,:) = taul_nir_p(:)
-         tau_p(1,2,:) = taus_vis_p(:)
-         tau_p(2,2,:) = taus_nir_p(:)
-      ENDIF
 
 IF (ROOTFR_SCHEME == 1) THEN
 #ifdef CROP
@@ -1938,35 +1840,6 @@ ENDIF
 
 
    END SUBROUTINE Init_PFT_Const
-
-   SUBROUTINE apply_pft_real_override(values, target, scale)
-   IMPLICIT NONE
-
-   real(r8), intent(in) :: values(PFT_OVERRIDE_SLOTS)
-   real(r8), intent(inout) :: target(0:)
-   real(r8), intent(in) :: scale
-   integer :: pft, last_pft
-
-      last_pft = min(ubound(target, 1), PFT_OVERRIDE_SLOTS - 1)
-      DO pft = 0, last_pft
-         IF (values(pft + 1) /= PFT_OVERRIDE_UNSET) target(pft) = values(pft + 1) * scale
-      ENDDO
-
-   END SUBROUTINE apply_pft_real_override
-
-   SUBROUTINE apply_pft_integer_override(values, target)
-   IMPLICIT NONE
-
-   integer, intent(in) :: values(PFT_OVERRIDE_SLOTS)
-   integer, intent(inout) :: target(0:)
-   integer :: pft, last_pft
-
-      last_pft = min(ubound(target, 1), PFT_OVERRIDE_SLOTS - 1)
-      DO pft = 0, last_pft
-         IF (values(pft + 1) /= PFT_OVERRIDE_INT_UNSET) target(pft) = values(pft + 1)
-      ENDDO
-
-   END SUBROUTINE apply_pft_integer_override
 
 END MODULE MOD_Const_PFT
 ! ---------- EOP ------------

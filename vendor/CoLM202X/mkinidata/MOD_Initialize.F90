@@ -27,18 +27,21 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Pixel
    USE MOD_LandPatch
+#ifdef URBAN_MODEL
    USE MOD_LandUrban
    USE MOD_UrbanIniTimeVariable
    USE MOD_UrbanReadin
    USE MOD_Urban_LAIReadin
    USE MOD_Urban_Albedo
+#endif
    USE MOD_Const_Physical
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
-   USE MOD_BGC_CNSummary, only: CNDriverSummarizeNonvegetatedSoilStates
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
+#endif
 #ifdef DataAssimilation
    USE MOD_DA_Vars_TimeVariables
 #endif
@@ -51,8 +54,12 @@ CONTAINS
    USE MOD_NetCDFSerial
    USE MOD_NetCDFVector
    USE MOD_NetCDFBlock
+#ifdef RangeCheck
    USE MOD_RangeCheck
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction
+#endif
    USE MOD_SpatialMapping
 #ifdef CatchLateralFlow
    USE MOD_Mesh
@@ -64,8 +71,8 @@ CONTAINS
 #endif
 #ifdef GridRiverLakeFlow
    USE MOD_Grid_RiverLakeNetwork
-   USE MOD_Grid_RiverLakeLevee, only: levee_init, levsto, levdph
    USE MOD_Grid_Reservoir
+   USE MOD_Grid_RiverLakeLevee, only: levee_init, levsto, levdph
 #endif
 #ifdef CROP
    USE MOD_CropReadin
@@ -105,14 +112,6 @@ CONTAINS
 
    ! ------------------------ local variables -----------------------------
    real(r8) :: rlon, rlat
-   ! wetland_tot_c/wetland_existing_c are computed and consumed only inside
-   ! the "#ifdef BGC" block further below, itself gated at runtime on
-   ! DEF_USE_TRACER (methane is one of TRACER's four families but needs BGC
-   ! at compile time; TRACER itself is a runtime switch now, MOD_Namelist.F90).
-   real(r8) :: wetland_tot_c
-   real(r8) :: wetland_existing_c
-   real(r8), parameter :: wetland_cn_ratio = 15._r8
-   real(r8), parameter :: carbon_per_kg_om = 580._r8
 
    ! for SOIL INIT of water, temperature, snow depth
    logical :: use_soilini
@@ -208,10 +207,12 @@ CONTAINS
    real(r8) :: zc_soimm(1:nl_soil)
    real(r8) :: zi_soimm(0:nl_soil)
    real(r8) :: vliq_r  (1:nl_soil)
-   ! Used to be 1 under Campbell, 5 under vanGenuchten; always sized for
-   ! the union now, see the fill further below (Campbell only ever uses
-   ! prms(1,:)).
+#ifdef Campbell_SOIL_MODEL
+   integer, parameter :: nprms = 1
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    integer, parameter :: nprms = 5
+#endif
    real(r8) :: prms(nprms, 1:nl_soil)
 
    real(r8) :: wdsrfm, depthratio
@@ -236,6 +237,7 @@ CONTAINS
    integer :: Julian_8day
    integer :: ltyp
 
+#ifdef BGC
    real(r8) f_s1s2 (1:nl_soil)
    real(r8) f_s1s3 (1:nl_soil)
    real(r8) rf_s1s2(1:nl_soil)
@@ -243,6 +245,7 @@ CONTAINS
    real(r8) f_s2s1
    real(r8) f_s2s3
    real(r8) t
+#endif
 
    integer  :: txt_id
    real(r8) :: vic_b_infilt_, vic_Dsmax_, vic_Ds_, vic_Ws_, vic_c_
@@ -272,7 +275,6 @@ CONTAINS
 #endif
 
 #ifdef GridRiverLakeFlow
-      IF (DEF_USE_GridRiverLakeFlow) THEN
       ! LULCC re-runs the initialization with the network already built: release it first.
       ! The unit catchments do not change, but the patch-to-grid runoff mapping does.
       IF (present(lulcc_call)) CALL riverlake_network_final ()
@@ -283,6 +285,7 @@ CONTAINS
          IF (present(lulcc_call)) CALL reservoir_final ()
          CALL reservoir_init ()
       ENDIF
+
       IF (DEF_USE_LEVEE) THEN
          ! LULCC: levee_init rebuilds the (unchanged) levee geometry and zeroes the
          ! protected-side state; levsto/levdph are river state like those kept by
@@ -299,7 +302,6 @@ CONTAINS
             ENDIF
             deallocate (levsto_lulcc, levdph_lulcc)
          ENDIF
-      ENDIF
       ENDIF
 #endif
 
@@ -351,15 +353,15 @@ ENDIF
          patchlatr(:) = SITE_lat_location * pi/180.
 #endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (numpft > 0) pftclass = landpft%settyp
-ENDIF
+#endif
 
       ENDIF
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL pct_readin (dir_landdata, lc_year)
-ENDIF
+#endif
 
 ! ------------------------------------------
 ! 1.1 Ponding water
@@ -391,39 +393,9 @@ ENDIF
 
       CALL soil_parameters_readin (dir_landdata, lc_year)
 
-IF (DEF_USE_BGC) THEN
-      ! lake_soilc_srf is populated whenever BGC is compiled in (see its
-      ! "#ifdef BGC" declaration/allocation, MOD_Vars_TimeInvariants.F90),
-      ! regardless of DEF_USE_TRACER: the SinglePoint branch derives it
-      ! straight from OM_density with no tracer-file dependency, and the
-      ! non-SinglePoint branch's ncio_read_vector has a defval=0 fallback
-      ! for the (BGC on, DEF_USE_TRACER off) case where mksrfdata never
-      ! produced lake_soilc_patches.nc. Only the lake-sediment CH4 pathway
-      ! that actually reads this array back out is gated on DEF_USE_TRACER
-      ! (methane provider registration, see MOD_Tracer_Defs.F90).
-#ifndef SinglePoint
-      write(cyear,'(i4.4)') lc_year
-      lndname = trim(dir_landdata)//'/soil/'//trim(cyear)//'/lake_soilc_patches.nc'
-      CALL ncio_read_vector (lndname, 'lake_soilc_patches', nl_soil, landpatch, lake_soilc_srf, defval = 0._r8)
-#else
-      IF (p_is_worker .and. numpatch > 0) THEN
-         lake_soilc_srf(:,:) = 0._r8
-         DO ipatch = 1, numpatch
-            IF (patchtype(ipatch) == 4) THEN
-               lake_soilc_srf(:,ipatch) = carbon_per_kg_om * max(OM_density(:,ipatch), 0._r8)
-            ENDIF
-         ENDDO
-      ENDIF
-#endif
-ENDIF
 
-      ! alpha_vgm/n_vgm are only meaningfully populated under vanGenuchten
-      ! (see MOD_SoilParametersReadin.F90) -- under Campbell they are
-      ! whatever allocate() left them as, and this build traps on invalid
-      ! FP ops (-ffpe-trap=invalid,zero,overflow), so this has to stay
-      ! gated rather than becoming unconditional like the plain
-      ! declare/allocate cases elsewhere.
-      IF ((.not. DEF_USE_Campbell_SOIL_MODEL) .and. p_is_worker) THEN
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+      IF (p_is_worker) THEN
          IF (numpatch > 0) THEN
             DO ipatch = 1, numpatch
                DO i = 1, nl_soil
@@ -434,13 +406,30 @@ ENDIF
             ENDDO
          ENDIF
       ENDIF
+#endif
+
+      ! [GridRiverLakeFlow] Only some runoff schemes read these, but all are written
+      ! into the constant restart, so with any other scheme (e.g. DEF_Runoff_SCHEME = 0,
+      ! which grid flood feedback and CaMa flood feedback require) uninitialised memory
+      ! was written there and runs differed between process counts.  Give them a
+      ! defined value first (soil texture 0 = no class).
+      ! Results are unchanged: a scheme that uses them sets them right below
+      ! (soiltext_readin, BVIC) or reads them later, and no other scheme reads them.
+      IF (p_is_worker) THEN
+         IF (numpatch > 0) THEN
+            soiltext(:) = 0
+            BVIC    (:) = BVIC_USDA(0)
+            topoweti(:) = 0.
+            alp_twi (:) = 0.
+            chi_twi (:) = 0.
+            mu_twi  (:) = 0.
+         ENDIF
+      ENDIF
 
 #ifdef CatchLateralFlow
       use_soiltext = .true.
 #else
-      ! TOPMODEL (scheme 0) needs the USDA class for BVIC; previously only
-      ! scheme 3 read it, leaving soiltext uninitialised in the const restart.
-      use_soiltext = (DEF_Runoff_SCHEME == 3) .or. (DEF_Runoff_SCHEME == 0)
+      use_soiltext = (DEF_Runoff_SCHEME == 3) ! only for Simple VIC
 #endif
       IF (use_soiltext) THEN
          CALL soiltext_readin (dir_landdata, lc_year)
@@ -459,9 +448,9 @@ ENDIF
 
       ! read global tree top height from nc file
       CALL HTOP_readin (dir_landdata, lc_year)
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
       CALL Urban_readin (dir_landdata, lc_year)
-ENDIF
+#endif
 ! ................................
 ! 1.5 Initialize topography data
 ! ................................
@@ -517,55 +506,41 @@ ENDIF
 ! ................................
 ! 1.6 Initialize TUNABLE constants
 ! ................................
-      zlnd   = DEF_TUNING_ZLND     !Roughness length for soil [m]
-      zsno   = DEF_TUNING_ZSNO   !Roughness length for snow [m]
-      csoilc = DEF_TUNING_CSOILC    !Drag coefficient for soil under canopy [-]
-      dewmx  = DEF_TUNING_DEWMX      !maximum dew
+      zlnd   = 0.01     !Roughness length for soil [m]
+      zsno   = 0.0024   !Roughness length for snow [m]
+      csoilc = 0.004    !Drag coefficient for soil under canopy [-]
+      dewmx  = 0.1      !maximum dew
 
       ! 'wtfact' is updated to gridded 'fsatmax' data. (by Shupeng Zhang)
       ! wtfact = 0.38   !Maximum saturated fraction (global mean; see Niu et al., 2005)
 
-      capr   = DEF_TUNING_CAPR     !Tuning factor to turn first layer T into surface T
-      cnfac  = DEF_TUNING_CNFAC      !Crank Nicholson factor between 0 and 1
-      ssi    = DEF_TUNING_SSI    !Irreducible water saturation of snow
-      wimp   = DEF_TUNING_WIMP     !Water impremeable if porosity less than wimp
-      pondmx = DEF_TUNING_PONDMX     !Ponding depth (mm)
-      smpmax = DEF_TUNING_SMPMAX   !Wilting point potential in mm
-      smpmin = DEF_TUNING_SMPMIN    !Restriction for min of soil poten. (mm)
-      smpmax_hr = DEF_TUNING_SMPMAX_HR !Wilting point potential in mm
-      smpmin_hr = DEF_TUNING_SMPMIN_HR !Restriction for min of soil poten. (mm)
-      trsmx0 = DEF_TUNING_TRSMX0    !Max transpiration for moist soil+100% veg. [mm/s]
+      capr   = 0.34     !Tuning factor to turn first layer T into surface T
+      cnfac  = 0.5      !Crank Nicholson factor between 0 and 1
+      ssi    = 0.033    !Irreducible water saturation of snow
+      wimp   = 0.05     !Water impremeable if porosity less than wimp
+      pondmx = 10.0     !Ponding depth (mm)
+      smpmax = -1.5e5   !Wilting point potential in mm
+      smpmin = -1.e8    !Restriction for min of soil poten. (mm)
+      smpmax_hr = -2.e2 !Wilting point potential in mm
+      smpmin_hr = -2.e5 !Restriction for min of soil poten. (mm)
+      trsmx0 = 2.e-4    !Max transpiration for moist soil+100% veg. [mm/s]
       tcrit  = 2.5      !critical temp. to determine rain or snow
-      wetwatmax = DEF_TUNING_WETWATMAX !maximum wetland water (mm)
+      wetwatmax = 200.0 !maximum wetland water (mm)
 
       ! for TOPMODEL: read saturated fraction parameter data from files.
       ! (see Niu et al., 2005)
       IF (DEF_Runoff_SCHEME == 0) THEN
 
-         ! method 0 reads none and method 1 only part of these; give the rest a defined value
+         ! (DEF_TOPMOD_method == 0) or as default
          IF (p_is_worker) THEN
             IF (numpatch > 0) THEN
-               topoweti(:) = 0.
-               alp_twi (:) = 0.
-               chi_twi (:) = 0.
-               mu_twi  (:) = 0.
-            ENDIF
-         ENDIF
-
-         ! method 0 values ('wtfact = 0.38' and 'fff = 0.5') for every method: method 1 reads
-         ! its own below, method 2 used to leave them undefined (written into the restart)
-         IF (p_is_worker) THEN
-            IF (numpatch > 0) THEN
+               ! equal to 'wtfact = 0.38' and 'fff = 0.5'
                fsatmax(:) = 0.38
                fsatdcf(:) = 0.125
             ENDIF
          ENDIF
 
-         IF (DEF_TOPMOD_method == 0) THEN
-
-            CONTINUE
-
-         ELSEIF (DEF_TOPMOD_method == 1) THEN
+         IF (DEF_TOPMOD_method == 1) THEN
 
             ftopo = trim(dir_landdata)//'/topography/'//trim(cyear)//'/fsatmax_patches.nc'
             CALL ncio_read_vector (ftopo, 'fsatmax_patches', landpatch, fsatmax)
@@ -576,11 +551,11 @@ ENDIF
             ftopo = trim(dir_landdata)//'/topography/'//trim(cyear)//'/mean_twi_patches.nc'
             CALL ncio_read_vector (ftopo, 'mean_twi_patches', landpatch, topoweti)
 
-            IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
             CALL check_vector_data ('maximum saturated fraction', fsatmax )
             CALL check_vector_data ('fsat decay factor         ', fsatdcf )
             CALL check_vector_data ('topographic wetness index ', topoweti)
-            ENDIF
+#endif
 
          ELSEIF (DEF_TOPMOD_method == 2) THEN
 
@@ -596,12 +571,12 @@ ENDIF
             ftopo = trim(dir_landdata)//'/topography/'//trim(cyear)//'/mu_twi_patches.nc'
             CALL ncio_read_vector (ftopo, 'mu_twi_patches', landpatch, mu_twi)
 
-            IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
             CALL check_vector_data ('topographic wetness index  ', topoweti)
             CALL check_vector_data ('twi alpha in three gamma   ', alp_twi )
             CALL check_vector_data ('twi chi   in three gamma   ', chi_twi )
             CALL check_vector_data ('twi mu    in three gamma   ', mu_twi  )
-            ENDIF
+#endif
 
          ENDIF
       ENDIF
@@ -648,7 +623,7 @@ ENDIF
          ENDIF
       ENDIF
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
    ! bgc constant
       i_met_lit = 1
       i_cel_lit = 2
@@ -750,8 +725,8 @@ IF (DEF_USE_BGC) THEN
       soilpsi_off     = -0.8
 
       ! constant for fire module
-      occur_hi_gdp_tree        = 0.33_r8
-      borealat                 = 60._r8   ! degrees north
+      occur_hi_gdp_tree        = 0.33
+      borealat                 = 60._r8
       non_boreal_peatfire_c    = 0.71e-4_r8
       nonborpeat_fire_precip_denom = 6.5_r8
       boreal_peatfire_c        = 0.28e-4_r8
@@ -759,14 +734,14 @@ IF (DEF_USE_BGC) THEN
       prh30                    = 0.6_r8
       max_rh30_affecting_fuel  = 95._r8
       ignition_efficiency      = 0.22_r8
-      ! (the pre-PR#504 lines 'occur_hi_gdp_tree = 0.39' and 'borealat = 40/(4*atan(1))' used to
-      !  follow here and silently override the values set above)
+      occur_hi_gdp_tree        = 0.39_r8
       lfuel                    = 75._r8
       ufuel                    = 825._r8
       cropfire_a1              = 0.3_r8
-      ! tropics in degrees, like borealat: '23.5/(4*atan(1))' (= 7.5) was a botched conversion
-      ! from the CLM heritage, compared with dlat in degrees
-      troplat                  = 23.5_r8
+      borealat                 = 40._r8/(4.*atan(1.))
+      troplat                  = 23.5_r8/(4.*atan(1.))
+      non_boreal_peatfire_c    = 0.000071_r8
+      boreal_peatfire_c        = 0.28e-4_r8
       rh_low                   = 30.0_r8
       rh_hgh                   = 85.0_r8
       bt_min                   = 0.85_r8
@@ -776,15 +751,15 @@ IF (DEF_USE_BGC) THEN
 
       sf     = 0.1_r8
       sf_no3 = 1._r8
-ENDIF
+#endif
 
 ! ...............................................
 ! 1.6 Write out as a restart file [histTimeConst]
 ! ...............................................
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_TimeInvariants ()
-      ENDIF
+#endif
 
       CALL WRITE_TimeInvariants (lc_year, casename, dir_restart)
 
@@ -928,7 +903,7 @@ ENDIF
          ENDIF
       ENDIF
 
-IF (DEF_USE_BGC) THEN
+#ifdef BGC
       IF (DEF_USE_CN_INIT) THEN
          fcndat = DEF_file_cn_init
          IF (p_is_master) THEN
@@ -1086,11 +1061,7 @@ IF (DEF_USE_BGC) THEN
 
             IF (p_is_worker) THEN
                DO i = 1, numpatch
-                  ! Used to be "#ifdef TRACER: patchtype==0 .or. patchtype==2
-                  ! #else: patchtype==0"; DEF_USE_TRACER is loop-invariant so
-                  ! this single boolean expression is exactly equivalent to
-                  ! that compile-time branch, now chosen at runtime.
-                  IF (patchtype(i) == 0 .or. (DEF_USE_TRACER .and. patchtype(i) == 2)) THEN
+                  IF (patchtype(i) == 0)THEN
                      ps = patch_pft_s(i)
                      pe = patch_pft_e(i)
                      DO nsl = 1, nl_soil
@@ -1112,47 +1083,6 @@ IF (DEF_USE_BGC) THEN
                         smin_no3_vr     (nsl, i)            = min_no3_vr(nsl,i)
                         sminn_vr        (nsl, i)            = min_nh4_vr(nsl,i)+min_no3_vr(nsl,i)
                      ENDDO
-                  ENDIF
-
-                  IF (DEF_USE_TRACER) THEN
-                  IF (patchtype(i) == 2) THEN
-                     DO nsl = 1, nl_soil
-                        wetland_existing_c = 0._r8
-                        IF (litr1c_vr(nsl, i) > 0._r8 .and. litr1c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + litr1c_vr(nsl, i)
-                        IF (litr2c_vr(nsl, i) > 0._r8 .and. litr2c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + litr2c_vr(nsl, i)
-                        IF (litr3c_vr(nsl, i) > 0._r8 .and. litr3c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + litr3c_vr(nsl, i)
-                        IF (cwdc_vr(nsl, i) > 0._r8 .and. cwdc_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + cwdc_vr(nsl, i)
-                        IF (soil1c_vr(nsl, i) > 0._r8 .and. soil1c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + soil1c_vr(nsl, i)
-                        IF (soil2c_vr(nsl, i) > 0._r8 .and. soil2c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + soil2c_vr(nsl, i)
-                        IF (soil3c_vr(nsl, i) > 0._r8 .and. soil3c_vr(nsl, i) < 1.e30_r8) &
-                           wetland_existing_c = wetland_existing_c + soil3c_vr(nsl, i)
-                        IF (OM_density(nsl, i) > 0._r8 .and. &
-                            OM_density(nsl, i) < 1.e30_r8 .and. &
-                            wetland_existing_c <= 1.e-12_r8) THEN
-                           wetland_tot_c = OM_density(nsl, i) * 580._r8
-                           decomp_cpools_vr(nsl, i_met_lit, i) = 0.05_r8 * wetland_tot_c
-                           decomp_cpools_vr(nsl, i_cel_lit, i) = 0.10_r8 * wetland_tot_c
-                           decomp_cpools_vr(nsl, i_lig_lit, i) = 0.05_r8 * wetland_tot_c
-                           decomp_cpools_vr(nsl, i_cwd    , i) = 0._r8
-                           decomp_cpools_vr(nsl, i_soil1  , i) = 0.05_r8 * wetland_tot_c
-                           decomp_cpools_vr(nsl, i_soil2  , i) = 0.25_r8 * wetland_tot_c
-                           decomp_cpools_vr(nsl, i_soil3  , i) = 0.50_r8 * wetland_tot_c
-                           decomp_npools_vr(nsl, i_met_lit, i) = 0.05_r8 * wetland_tot_c / wetland_cn_ratio
-                           decomp_npools_vr(nsl, i_cel_lit, i) = 0.10_r8 * wetland_tot_c / wetland_cn_ratio
-                           decomp_npools_vr(nsl, i_lig_lit, i) = 0.05_r8 * wetland_tot_c / wetland_cn_ratio
-                           decomp_npools_vr(nsl, i_cwd    , i) = 0._r8
-                           decomp_npools_vr(nsl, i_soil1  , i) = 0.05_r8 * wetland_tot_c / wetland_cn_ratio
-                           decomp_npools_vr(nsl, i_soil2  , i) = 0.25_r8 * wetland_tot_c / wetland_cn_ratio
-                           decomp_npools_vr(nsl, i_soil3  , i) = 0.50_r8 * wetland_tot_c / wetland_cn_ratio
-                        ENDIF
-                     ENDDO
-                  ENDIF
                   ENDIF
                   IF (patchtype(i) == 0)THEN
                      DO m = ps, pe
@@ -1188,7 +1118,7 @@ IF (DEF_USE_BGC) THEN
       ELSE
          use_cnini = .false.
       ENDIF
-ENDIF
+#endif
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) THEN
@@ -1324,31 +1254,23 @@ ENDIF
          IF (DEF_LAI_CHANGE_YEARLY) THEN
             ! 08/03/2019, yuan: read global LAI/SAI data
             CALL LAI_readin (year, month, dir_landdata)
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
             CALL UrbanLAI_readin (year, month, dir_landdata)
-ENDIF
+#endif
          ELSE
             CALL LAI_readin (lc_year, month, dir_landdata)
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
             CALL UrbanLAI_readin (lc_year, month, dir_landdata)
-ENDIF
+#endif
          ENDIF
       ELSE
          Julian_8day = int(calendarday(idate)-1)/8*8 + 1
          CALL LAI_readin (year, Julian_8day, dir_landdata)
       ENDIF
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('LAI ', tlai)
       CALL check_vector_data ('SAI ', tsai)
-      ENDIF
-
-      ! Under DEF_USE_LAIFEEDBACK the PFT/PC branch of LAI_readin reads SAI only.
-      ! Soil patches get their LAI from BGC below, but patches without BGC leaf
-      ! carbon (wetland, urban, water) would keep the allocation value spval and
-      ! carry LAI = -1e36 through the whole run. Start them bare instead.
-      IF (p_is_worker .and. allocated(tlai)) THEN
-         WHERE (tlai == spval) tlai = 0._r8
-      ENDIF
+#endif
 
 #ifdef CROP
          CALL CROP_readin ()
@@ -1394,7 +1316,7 @@ ENDIF
       ! PLEASE
       ! PLEASE UPDATE
       ! PLEASE UPDATE when have the observed lake status
-      IF (p_is_worker .AND. numpatch > 0) THEN
+      IF (p_is_worker) THEN
 
          t_lake      (:,:) = 285.
          lake_icefrac(:,:) = 0.
@@ -1431,17 +1353,18 @@ ENDIF
                zwtmm = zwt(i) * 1000.
             ENDIF
 
-            IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-               vliq_r(:) = 0.
-               prms(1,1:nl_soil) = bsw(1:nl_soil,i)
-            ELSE
-               vliq_r(:) = theta_r(1:nl_soil,i)
-               prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,i)
-               prms(2,1:nl_soil) = n_vgm    (1:nl_soil,i)
-               prms(3,1:nl_soil) = L_vgm    (1:nl_soil,i)
-               prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,i)
-               prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,i)
-            ENDIF
+#ifdef Campbell_SOIL_MODEL
+            vliq_r(:) = 0.
+            prms(1,1:nl_soil) = bsw(1:nl_soil,i)
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+            vliq_r(:) = theta_r(1:nl_soil,i)
+            prms(1,1:nl_soil) = alpha_vgm(1:nl_soil,i)
+            prms(2,1:nl_soil) = n_vgm    (1:nl_soil,i)
+            prms(3,1:nl_soil) = L_vgm    (1:nl_soil,i)
+            prms(4,1:nl_soil) = sc_vgm   (1:nl_soil,i)
+            prms(5,1:nl_soil) = fc_vgm   (1:nl_soil,i)
+#endif
 #ifdef HYPERSPECTRAL
             CALL flux_frac_init              ( )
             CALL leaf_property_init          ( rho_p, tau_p )
@@ -1480,6 +1403,7 @@ ENDIF
 #endif
 !Ozone Vairables
                ,o3coefv_sun(i),o3coefv_sha(i),o3coefg_sun(i),o3coefg_sha(i)&
+#ifdef BGC
                ,use_cnini, totlitc(i), totsomc(i), totcwdc(i), decomp_cpools(:,i), decomp_cpools_vr(:,:,i) &
                ,ctrunc_veg(i), ctrunc_soil(i), ctrunc_vr(:,i) &
                ,totlitn(i), totsomn(i), totcwdn(i), decomp_npools(:,i), decomp_npools_vr(:,:,i) &
@@ -1490,7 +1414,7 @@ ENDIF
                ,col_sminnendnb(i), col_sminnbegnb(i) &
                ,altmax(i) , altmax_lastyear(i), altmax_lastyear_indx(i), lag_npp(i) &
                ,sminn_vr(:,i), sminn(i), smin_no3_vr  (:,i), smin_nh4_vr       (:,i)&
-               ,prec10(i), prec30(i), prec60(i), prec365 (i), prec_today(i), rh30_today(i), prec_daily(:,i), tsoi17(i), rh30(i), accumnstep(i) , skip_balance_check(i) &
+               ,prec10(i), prec60(i), prec365 (i), prec_today(i), prec_daily(:,i), tsoi17(i), rh30(i), accumnstep(i) , skip_balance_check(i) &
 !------------------------SASU variables----------------------- ,decomp0_cpools_vr        (:,:,i), decomp0_npools_vr        (:,:,i) &
                ,decomp0_cpools_vr        (:,:,i), decomp0_npools_vr        (:,:,i)    &
                ,I_met_c_vr_acc             (:,i), I_cel_c_vr_acc             (:,i), I_lig_c_vr_acc             (:,i), I_cwd_c_vr_acc             (:,i) &
@@ -1508,13 +1432,11 @@ ENDIF
                ,AKX_soil1_exit_n_vr_acc    (:,i), AKX_soil2_exit_n_vr_acc    (:,i), AKX_soil3_exit_n_vr_acc    (:,i) &
                ,diagVX_n_vr_acc          (:,:,i), upperVX_n_vr_acc         (:,:,i), lowerVX_n_vr_acc         (:,:,i) &
    !------------------------------------------------------------
+#endif
                ! for SOIL INIT of water, temperature, snow depth
                ,use_soilini, nl_soil_ini, soil_z, soil_t(1:,i), soil_w(1:,i), use_snowini, snow_d(i) &
                ! for SOIL Water INIT by using water table depth
                ,use_wtd, zwtmm, zc_soimm, zi_soimm, vliq_r, nprms, prms)
-      IF (DEF_USE_TRACER .and. DEF_USE_BGC) THEN
-            IF (patchtype(i) == 2) CALL CNDriverSummarizeNonvegetatedSoilStates(i, nl_soil, dz_soi, ndecomp_pools)
-      ENDIF
 
 #ifdef EXTERNAL_LAKE
             IF(patchtype(i) == 4) THEN
@@ -1522,7 +1444,7 @@ ENDIF
             ENDIF
 #endif
 
-IF (DEF_URBAN_RUN) THEN
+#ifdef URBAN_MODEL
             IF (m == URBAN) THEN
 
                u = patch2urban(i)
@@ -1588,28 +1510,8 @@ IF (DEF_URBAN_RUN) THEN
                   swsun(:,:,u),swsha(:,:,u),sgimp(:,:,u),sgper(:,:,u),slake(:,:,u))
 
             ENDIF
-ENDIF
+#endif
          ENDDO
-
-! ==== FIX upstream-bugs #69: ozone uptake/stress state was left at spval on cold start ====
-! IniTimeVar never assigned the patch-level o3uptakesun/sha, and the PFT-level
-! o3uptake*_p / o3coef*_p were assigned only inside its DEF_USE_BGC section, so
-! non-BGC PFT/PC runs wrote spval into the restart (a bare PFT keeps it forever and
-! the patch aggregate sum(o3uptakesun_p*pftfrac) becomes ~ -1e35 in the history).
-! Initialize them for every configuration.
-         IF (DEF_USE_OZONESTRESS) THEN
-            o3uptakesun(:) = 0._r8
-            o3uptakesha(:) = 0._r8
-            IF (allocated(o3uptakesun_p)) THEN
-               o3uptakesun_p(:) = 0._r8
-               o3uptakesha_p(:) = 0._r8
-               o3coefv_sun_p(:) = 1._r8
-               o3coefv_sha_p(:) = 1._r8
-               o3coefg_sun_p(:) = 1._r8
-               o3coefg_sha_p(:) = 1._r8
-            ENDIF
-         ENDIF
-! ==== END FIX upstream-bugs #69 ====
 
          DO i = 1, numpatch
             z_sno (maxsnl+1:0,i) = z_soisno (maxsnl+1:0,i)
@@ -1701,17 +1603,17 @@ ENDIF
 
       ENDIF
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_vector_data ('Basin Water Depth   [m]  ', wdsrf_bsn)
       CALL check_vector_data ('HRU Water Depth     [m]  ', wdsrf_bsnhru)
-      ENDIF
+#endif
 
       IF (allocated(patcharea)) deallocate(patcharea)
 
 #endif
 
 #ifdef GridRiverLakeFlow
-      IF (p_is_worker .and. DEF_USE_GridRiverLakeFlow) THEN
+      IF (p_is_worker) THEN
          IF (numucat > 0) THEN
             wdsrf_ucat = topo_rivhgt
             veloc_riv  = 0
@@ -1780,9 +1682,9 @@ ENDIF
 ! 2.6 Write out the model variables for restart run [histTimeVar]
 ! ...............................................................
 
-      IF (DEF_USE_RangeCheck) THEN
+#ifdef RangeCheck
       CALL check_TimeVariables ()
-      ENDIF
+#endif
 
       IF ( .not. present(lulcc_call) ) THEN
          ! only be called in running MKINI, LULCC will be executed later

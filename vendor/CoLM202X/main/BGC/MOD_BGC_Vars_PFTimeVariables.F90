@@ -1,5 +1,6 @@
 #include <define.h>
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
 
 MODULE MOD_BGC_Vars_PFTimeVariables
 
@@ -11,6 +12,7 @@ MODULE MOD_BGC_Vars_PFTimeVariables
 ! !ORIGINAL:
 ! Xingjie Lu, 2022, created the original version
 
+#ifdef BGC
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_SASU, DEF_USE_DiagMatrix
@@ -390,7 +392,9 @@ MODULE MOD_BGC_Vars_PFTimeVariables
    PUBLIC :: deallocate_BGCPFTimeVariables
    PUBLIC :: READ_BGCPFTimeVariables
    PUBLIC :: WRITE_BGCPFTimeVariables
+#ifdef RangeCheck
    PUBLIC :: check_BGCPFTimeVariables
+#endif
 
 ! PRIVATE MEMBER FUNCTIONS:
 
@@ -2315,6 +2319,7 @@ CONTAINS
 
    END SUBROUTINE deallocate_BGCPFTimeVariables
 
+#ifdef RangeCheck
    SUBROUTINE check_BGCPFTimeVariables
 
    USE MOD_RangeCheck
@@ -2682,7 +2687,10 @@ CONTAINS
          CALL check_vector_data ('AKX_grainn_xf_exit_p_acc                  ', AKX_grainn_xf_exit_p_acc                  )
       ENDIF
    END SUBROUTINE check_BGCPFTimeVariables
+#endif
 
+#endif
 END MODULE MOD_BGC_Vars_PFTimeVariables
 
+#endif
 ! ---------- EOP ------------

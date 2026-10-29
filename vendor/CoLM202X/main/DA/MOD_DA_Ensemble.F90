@@ -20,7 +20,6 @@ MODULE MOD_DA_Ensemble
    USE MOD_DA_Vars_TimeVariables
    USE MOD_Vars_1DForcing
    USE MOD_LandPatch
-   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
    SAVE
 
@@ -89,10 +88,6 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-      IF (mod(DEF_DA_ENS_NUM, 2) /= 0) THEN
-         CALL CoLM_stop ('Data assimilation DEF_DA_ENS_NUM must be even')
-      ENDIF
-
       ! initialize persistent variables
       IF (.not. initialized) THEN
          allocate(r_prev(numpatch, nvar, DEF_DA_ENS_NUM))
@@ -131,7 +126,7 @@ CONTAINS
       ENDDO
       IF (info /= 0) THEN
          print *, 'Error: Cholesky decomposition failed'
-         CALL CoLM_stop ('Data assimilation Cholesky decomposition failed')
+         stop
       ENDIF
 
       ! Generate ensemble samples for forcing variables

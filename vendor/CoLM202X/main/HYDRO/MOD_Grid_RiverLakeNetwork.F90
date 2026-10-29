@@ -12,17 +12,12 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    USE MOD_Grid
    USE MOD_WorkerPushData
-   USE MOD_Grid_RiverLakePush, only: riverlake_pushcache_type, riverlake_pushcache_build, &
-      riverlake_pushcache_free_mem
+   USE MOD_Grid_RiverLakePush
    USE, INTRINSIC :: ieee_arithmetic, ONLY: ieee_is_finite
 #ifdef USEMPI
    USE MOD_SPMD_Task, ONLY: MPI_COMM_NULL
 #endif
    IMPLICIT NONE
-
-#ifdef FLAT_SPMD
-   PRIVATE :: scatter_ucat_integer_fields, scatter_ucat_real_fields
-#endif
 
    ! ----- River Lake network -----
 
@@ -33,12 +28,6 @@ MODULE MOD_Grid_RiverLakeNetwork
    integer, allocatable :: ucat_ucid (:)   ! index in unit catchment numbering
    integer, allocatable :: x_ucat    (:)   !
    integer, allocatable :: y_ucat    (:)   !
-#ifdef FLAT_SPMD
-   ! Global seq_x/seq_y kept on the master (zero-length elsewhere).  The master computes too, so
-   ! x_ucat/y_ucat are its local slice; one-file history maps gathered vectors with these.
-   integer, allocatable :: x_ucat_all (:)
-   integer, allocatable :: y_ucat_all (:)
-#endif
    integer, allocatable :: ucat_gdid (:)   !
 
    integer, allocatable :: numucat_wrk (:)
@@ -70,17 +59,37 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    type(worker_pushdata_type) :: push_next2ucat
    type(worker_pushdata_type) :: push_ups2ucat
-   type(riverlake_pushcache_type) :: cache_ups2ucat
+   type(riverlake_pushcache_type) :: cache_ups2ucat   ! batched pushes (MOD_Grid_RiverLakePush)
 
    ! ----- Part 3: river systems -----
    integer :: numrivsys
    logical :: rivsys_by_multiple_procs
    integer, allocatable :: irivsys (:)
-   integer :: numrivsys_shared = 0
-   integer, allocatable :: irivsys_shared (:)
 #ifdef USEMPI
    integer :: p_comm_rivsys = MPI_COMM_NULL
 #endif
+
+   ! Adaptive time step groups under bifurcation.
+   ! Reason: with DEF_USE_BIFURCATION the routing sub-step used to be one global
+   ! minimum dt over all river systems of all workers, so the whole globe
+   ! advanced with the dt of its single most restrictive cell (about 1.5 times
+   ! the unit-catchment sub-steps of the per-river-system dt, and about twice the
+   ! wall time of a run without bifurcation).  A global dt is only needed where
+   ! bifurcation pathways couple two river systems: the flux over a pathway must
+   ! use the same dt on both sides to conserve water.  Here, in bifurcation mode,
+   ! "river system" (irivsys) means a group of river systems that are connected
+   ! by bifurcation pathways (or a single unconnected river system); groups
+   ! advance with their own dt like river systems without bifurcation.
+   ! Effect on results: this changes the time discretisation (each group takes
+   ! its own adaptive sub-steps instead of the global minimum), so results differ
+   ! at the level of the time-stepping error, as they would between two valid
+   ! adaptive time steps.  Without bifurcation nothing changes.
+   ! irivsys_shared(k) > 0 marks a group k that lies on more than one worker; its
+   ! value indexes the vector that is reduced (MPI_MIN) over all workers so that
+   ! every part of that group uses the same dt.  numrivsys_shared is the number of
+   ! such groups, identical on all processes.
+   integer :: numrivsys_shared = 0
+   integer, allocatable :: irivsys_shared (:)
 
 
    ! ----- Parameters for River and Lake -----
@@ -120,6 +129,8 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    type(worker_pushdata_type) :: push_bif_dn2pth
    type(worker_pushdata_type) :: push_bif_influx
+   type(riverlake_pushcache_type) :: cache_bif_dn2pth ! batched pushes (MOD_Grid_RiverLakePush)
+   type(riverlake_pushcache_type) :: cache_bif_influx
 
    real(r8), allocatable :: bedelv_next    (:)   ! downstream river bed elevation [m]
    real(r8), allocatable :: outletwth      (:)   ! river outlet width [m]
@@ -148,126 +159,6 @@ MODULE MOD_Grid_RiverLakeNetwork
 
 CONTAINS
 
-#ifdef FLAT_SPMD
-   SUBROUTINE scatter_ucat_integer_fields (global_data, nfield, local_data)
-
-   USE MOD_SPMD_Task
-   IMPLICIT NONE
-
-   integer, allocatable, intent(inout) :: global_data(:)
-   integer, intent(in) :: nfield
-   integer, allocatable, intent(out) :: local_data(:)
-
-   integer :: iwork, iset, ndata, offset, source
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   integer, allocatable :: sendbuf(:), recvbuf(:)
-
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (numucat, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iwork = 1, p_np_glb-1
-         disps(iwork) = disps(iwork-1) + counts(iwork-1)
-      ENDDO
-      counts_data = counts * nfield
-      disps_data = disps * nfield
-
-      IF (p_is_master) THEN
-         IF (.not. allocated(global_data)) &
-            CALL CoLM_stop ('scatter_ucat_integer_fields: missing global data')
-         IF (size(global_data) /= nfield*totalnumucat .or. sum(counts) /= totalnumucat) &
-            CALL CoLM_stop ('scatter_ucat_integer_fields: vector length mismatch')
-         allocate (sendbuf(max(1,nfield*totalnumucat)))
-         DO iwork = 0, p_np_glb-1
-            ndata = counts(iwork)
-            IF (ndata > 0) THEN
-               IF (.not. allocated(ucat_data_address(iwork)%val)) &
-                  CALL CoLM_stop ('scatter_ucat_integer_fields: missing data address')
-               IF (size(ucat_data_address(iwork)%val) /= ndata) &
-                  CALL CoLM_stop ('scatter_ucat_integer_fields: data address size mismatch')
-               DO iset = 1, ndata
-                  source = (ucat_data_address(iwork)%val(iset)-1)*nfield
-                  offset = disps_data(iwork) + (iset-1)*nfield
-                  sendbuf(offset+1:offset+nfield) = global_data(source+1:source+nfield)
-               ENDDO
-            ENDIF
-         ENDDO
-      ELSE
-         allocate (sendbuf(1))
-      ENDIF
-
-      allocate (recvbuf(max(1,nfield*numucat)))
-      CALL mpi_scatterv (sendbuf, counts_data, disps_data, MPI_INTEGER, recvbuf, &
-         nfield*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
-      allocate (local_data(nfield*numucat))
-      IF (numucat > 0) local_data = recvbuf(1:nfield*numucat)
-
-      IF (allocated(global_data)) deallocate (global_data)
-      deallocate (counts, counts_data, disps, disps_data, sendbuf, recvbuf)
-
-   END SUBROUTINE scatter_ucat_integer_fields
-
-
-   SUBROUTINE scatter_ucat_real_fields (global_data, nfield, local_data)
-
-   USE MOD_Precision
-   USE MOD_SPMD_Task
-   IMPLICIT NONE
-
-   real(r8), allocatable, intent(inout) :: global_data(:)
-   integer, intent(in) :: nfield
-   real(r8), allocatable, intent(out) :: local_data(:)
-
-   integer :: iwork, iset, ndata, offset, source
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   real(r8), allocatable :: sendbuf(:), recvbuf(:)
-
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (numucat, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iwork = 1, p_np_glb-1
-         disps(iwork) = disps(iwork-1) + counts(iwork-1)
-      ENDDO
-      counts_data = counts * nfield
-      disps_data = disps * nfield
-
-      IF (p_is_master) THEN
-         IF (.not. allocated(global_data)) &
-            CALL CoLM_stop ('scatter_ucat_real_fields: missing global data')
-         IF (size(global_data) /= nfield*totalnumucat .or. sum(counts) /= totalnumucat) &
-            CALL CoLM_stop ('scatter_ucat_real_fields: vector length mismatch')
-         allocate (sendbuf(max(1,nfield*totalnumucat)))
-         DO iwork = 0, p_np_glb-1
-            ndata = counts(iwork)
-            IF (ndata > 0) THEN
-               IF (.not. allocated(ucat_data_address(iwork)%val)) &
-                  CALL CoLM_stop ('scatter_ucat_real_fields: missing data address')
-               IF (size(ucat_data_address(iwork)%val) /= ndata) &
-                  CALL CoLM_stop ('scatter_ucat_real_fields: data address size mismatch')
-               DO iset = 1, ndata
-                  source = (ucat_data_address(iwork)%val(iset)-1)*nfield
-                  offset = disps_data(iwork) + (iset-1)*nfield
-                  sendbuf(offset+1:offset+nfield) = global_data(source+1:source+nfield)
-               ENDDO
-            ENDIF
-         ENDDO
-      ELSE
-         allocate (sendbuf(1))
-      ENDIF
-
-      allocate (recvbuf(max(1,nfield*numucat)))
-      CALL mpi_scatterv (sendbuf, counts_data, disps_data, MPI_REAL8, recvbuf, &
-         nfield*numucat, MPI_REAL8, p_root, p_comm_glb, p_err)
-      allocate (local_data(nfield*numucat))
-      IF (numucat > 0) local_data = recvbuf(1:nfield*numucat)
-
-      IF (allocated(global_data)) deallocate (global_data)
-      deallocate (counts, counts_data, disps, disps_data, sendbuf, recvbuf)
-
-   END SUBROUTINE scatter_ucat_real_fields
-#endif
-
    ! ----------
    SUBROUTINE build_riverlake_network ()
 
@@ -278,7 +169,6 @@ CONTAINS
    USE MOD_Utils
    USE MOD_LandPatch
    USE MOD_Vars_Global, only: spval
-   USE MOD_Vector_ReadWrite, only: vector_gather_to_master
    IMPLICIT NONE
 
    ! Local Variables
@@ -300,11 +190,8 @@ CONTAINS
    integer,  allocatable :: grdindex(:)
 
 
-   integer,  allocatable :: idata1d(:), idata2d(:,:), idata_recv(:)
-   real(r8), allocatable :: rdata1d(:), rdata2d(:,:), rdata_recv(:)
-
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   integer, allocatable :: ucat_next_all(:)
+   integer,  allocatable :: idata1d(:), idata2d(:,:)
+   real(r8), allocatable :: rdata1d(:), rdata2d(:,:)
 
    integer,  allocatable :: allgrd_in_inp (:), nucat_g2d(:,:), iucat_g(:)
 
@@ -543,42 +430,12 @@ CONTAINS
             ENDIF
          ENDDO
 
-#ifndef FLAT_SPMD
          deallocate (ucat_ucid)
-#endif
       ENDIF
 
       CALL mpi_bcast (totalnumucat, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
       ! send unit catchment index to workers
-#ifdef FLAT_SPMD
-      IF (.not. allocated(numucat_wrk)) allocate (numucat_wrk(0:p_np_glb-1))
-      CALL mpi_scatter (numucat_wrk, 1, MPI_INTEGER, numucat, 1, MPI_INTEGER, &
-         p_root, p_comm_glb, p_err)
-
-      IF (.not. allocated(ucat_data_address)) allocate (ucat_data_address(0:p_np_glb-1))
-
-      IF (p_is_master) CALL move_alloc (ucat_ucid, idata1d)
-      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
-      CALL move_alloc (idata_recv, ucat_ucid)
-
-      IF (allocated(x_ucat_all)) deallocate (x_ucat_all)
-      IF (allocated(y_ucat_all)) deallocate (y_ucat_all)
-      IF (p_is_master) THEN
-         x_ucat_all = x_ucat
-         y_ucat_all = y_ucat
-      ELSE
-         allocate (x_ucat_all (0), y_ucat_all (0))
-      ENDIF
-
-      IF (p_is_master) CALL move_alloc (x_ucat, idata1d)
-      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
-      CALL move_alloc (idata_recv, x_ucat)
-
-      IF (p_is_master) CALL move_alloc (y_ucat, idata1d)
-      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
-      CALL move_alloc (idata_recv, y_ucat)
-#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -632,7 +489,6 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
-#endif
 #else
       numucat = totalnumucat
 
@@ -659,6 +515,9 @@ CONTAINS
       CALL griducat%define_by_ndims (nlon_ucat, nlat_ucat)
 
       CALL build_worker_remapdata (landpatch, griducat, remap_patch2inpm)
+
+      IF (DEF_UnitCatchment_regional) &
+         CALL check_regional_coverage (nlon_ucat, nlat_ucat, idmap_x, idmap_y, remap_patch2inpm)
 
       IF (p_is_worker) THEN
          numinpm = remap_patch2inpm%num_grid
@@ -729,84 +588,6 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_bcast (inpn, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
-#ifdef FLAT_SPMD
-      IF (p_is_master) THEN
-         allocate (idata1d(inpn*totalnumucat))
-         idata1d = reshape(idmap_gd2uc, (/inpn*totalnumucat/))
-         deallocate (idmap_gd2uc)
-      ENDIF
-      CALL scatter_ucat_integer_fields (idata1d, inpn, idata_recv)
-      IF (numucat > 0) THEN
-         allocate (idmap_gd2uc(inpn,numucat))
-         idmap_gd2uc = reshape(idata_recv, shape(idmap_gd2uc))
-      ENDIF
-      deallocate (idata_recv)
-
-      IF (p_is_master) THEN
-         allocate (rdata1d(inpn*totalnumucat))
-         rdata1d = reshape(area_gd2uc, (/inpn*totalnumucat/))
-         deallocate (area_gd2uc)
-      ENDIF
-      CALL scatter_ucat_real_fields (rdata1d, inpn, rdata_recv)
-      IF (numucat > 0) THEN
-         allocate (area_gd2uc(inpn,numucat))
-         area_gd2uc = reshape(rdata_recv, shape(area_gd2uc))
-      ENDIF
-      deallocate (rdata_recv)
-
-      CALL mpi_bcast (nucpart, 1, mpi_integer, p_address_master, p_comm_glb, p_err)
-
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (numinpm, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iworker = 1, p_np_glb-1
-         disps(iworker) = disps(iworker-1) + counts(iworker-1)
-      ENDDO
-
-      allocate (idata1d(max(1,numinpm)))
-      IF (numinpm > 0) idata1d(1:numinpm) = inpm_gdid
-      IF (p_is_master) THEN
-         allocate (grdindex(max(1,sum(counts))))
-      ELSE
-         allocate (grdindex(1))
-      ENDIF
-      CALL mpi_gatherv (idata1d, numinpm, MPI_INTEGER, grdindex, counts, disps, &
-         MPI_INTEGER, p_root, p_comm_glb, p_err)
-      deallocate (idata1d)
-
-      counts_data = counts * nucpart
-      disps_data = disps * nucpart
-      IF (p_is_master) THEN
-         allocate (idata_recv(max(1,nucpart*sum(counts))))
-         allocate (rdata_recv(max(1,nucpart*sum(counts))))
-         idata_recv = 0
-         rdata_recv = 0._r8
-         DO i = 1, sum(counts)
-            iloc = find_in_sorted_list1 (grdindex(i), ngrdall, allgrd_in_inp(1:ngrdall))
-            IF (iloc > 0) THEN
-               idata_recv((i-1)*nucpart+1:i*nucpart) = idmap_uc2gd_all(:,iloc)
-               rdata_recv((i-1)*nucpart+1:i*nucpart) = area_uc2gd_all(:,iloc)
-            ENDIF
-         ENDDO
-      ELSE
-         allocate (idata_recv(1), rdata_recv(1))
-      ENDIF
-
-      allocate (idata1d(max(1,nucpart*numinpm)), rdata1d(max(1,nucpart*numinpm)))
-      CALL mpi_scatterv (idata_recv, counts_data, disps_data, MPI_INTEGER, idata1d, &
-         nucpart*numinpm, MPI_INTEGER, p_root, p_comm_glb, p_err)
-      CALL mpi_scatterv (rdata_recv, counts_data, disps_data, MPI_REAL8, rdata1d, &
-         nucpart*numinpm, MPI_REAL8, p_root, p_comm_glb, p_err)
-      IF (numinpm > 0) THEN
-         allocate (idmap_uc2gd(nucpart,numinpm), area_uc2gd(nucpart,numinpm))
-         idmap_uc2gd = reshape(idata1d(1:nucpart*numinpm), shape(idmap_uc2gd))
-         area_uc2gd = reshape(rdata1d(1:nucpart*numinpm), shape(area_uc2gd))
-      ENDIF
-
-      deallocate (counts, counts_data, disps, disps_data)
-      deallocate (grdindex, idata1d, rdata1d, idata_recv, rdata_recv)
-#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -913,7 +694,6 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
-#endif
 #else
       allocate (idmap_uc2gd (nucpart,numinpm))
       allocate (area_uc2gd  (nucpart,numinpm))
@@ -974,25 +754,6 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_bcast (upnmax, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
-#ifdef FLAT_SPMD
-      IF (p_is_master) THEN
-         allocate (ucat_next_all(totalnumucat))
-         ucat_next_all = ucat_next
-         CALL move_alloc (ucat_next, idata1d)
-      ENDIF
-      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
-      CALL move_alloc (idata_recv, ucat_next)
-
-      IF (p_is_master) THEN
-         allocate (idata1d(upnmax*totalnumucat))
-         idata1d = reshape(ucat_ups, (/upnmax*totalnumucat/))
-         deallocate (ucat_ups)
-      ENDIF
-      CALL scatter_ucat_integer_fields (idata1d, upnmax, idata_recv)
-      allocate (ucat_ups(upnmax,numucat))
-      IF (numucat > 0) ucat_ups = reshape(idata_recv, shape(ucat_ups))
-      deallocate (idata_recv)
-#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -1043,7 +804,6 @@ CONTAINS
          IF (.not. allocated(wts_ups  )) allocate (wts_ups   (upnmax, 0))
       ENDIF
 #endif
-#endif
 
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
@@ -1056,19 +816,16 @@ CONTAINS
       CALL build_worker_pushdata (numucat, ucat_ucid, numucat, ucat_ups,  wts_ups, push_ups2ucat )
       CALL riverlake_pushcache_build (push_ups2ucat, cache_ups2ucat)
 
+#ifdef CoLMDEBUG
       ! IF (p_is_worker) THEN
       !    write(*,'(A,I0,A,I0,A,I0,A)') 'worker ', p_iam_worker, ' has ', numucat, &
       !       ' unit catchment with ', sum(push_next2ucat%n_from_other), ' downstream to other workers'
       ! ENDIF
+#endif
 
       ! ----- Part 3: river systems -----
 
 #ifdef USEMPI
-#ifdef FLAT_SPMD
-      IF (p_is_master) CALL move_alloc (rivermouth, idata1d)
-      CALL scatter_ucat_integer_fields (idata1d, 1, idata_recv)
-      CALL move_alloc (idata_recv, rivermouth)
-#else
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
             nucat = numucat_wrk(iworker)
@@ -1087,7 +844,6 @@ CONTAINS
                mpi_tag_data, p_comm_glb, p_stat, p_err)
          ENDIF
       ENDIF
-#endif
 
       rivsys_by_multiple_procs = .false.
       IF (p_is_worker) THEN
@@ -1106,6 +862,12 @@ CONTAINS
          ENDIF
       ENDIF
 
+      ! With bifurcation the time step groups are the clusters of river systems
+      ! connected by bifurcation pathways (see irivsys_shared above).  The
+      ! river-mouth labels sent above have already set up p_comm_rivsys, which is
+      ! not used in bifurcation mode; here the master relabels every river system
+      ! with its cluster, and sends the labels and the index of clusters that are
+      ! shared between workers.  The grouping below then works per cluster.
       IF (DEF_USE_BIFURCATION) THEN
          IF (p_is_master) THEN
             CALL bifurcation_dt_groups (parafile, numrivmth, rivermouth, shared_ucat)
@@ -1145,6 +907,9 @@ CONTAINS
          allocate (irivsys_shared (numucat))
          irivsys_shared(:) = 0
 
+         ! In bifurcation mode the groups are always formed per cluster, also on
+         ! workers that hold a part of a large river system; groups shared with
+         ! other workers are synchronised through irivsys_shared instead.
          IF ((.not. rivsys_by_multiple_procs) .or. DEF_USE_BIFURCATION) THEN
             IF (numucat > 0) THEN
 
@@ -1234,11 +999,18 @@ CONTAINS
                      floodplain_curve(i)%flpaccare(j-1) + floodplain_curve(i)%flparea(j)
                ENDDO
 
+               ! [GridRiverLakeFlow] Bug fix: upstream integrates the storage of layer j
+               ! with the per-layer area increments, 0.5*(flparea(j)+flparea(j-1)).  The
+               ! flooded area at height h is the cumulative area flpaccare, so the storage
+               ! between two heights is the trapezoid of the cumulative areas, as used by
+               ! volume(), depth() and floodarea() of this type.  With the increments the
+               ! layer thresholds disagree with those functions: the volume jumps down at
+               ! each layer top (non-monotonic) and depth(volume(d)) /= d.  For example,
+               ! with three 1 m layers over 3000 m2, volume(4 m) = 2200 m3 but
+               ! volume(4.000001 m) = 1700 m3, and depth(2200 m3) = 4.236 m.
+               ! This changes results of all runs whose water rises onto the floodplain
+               ! (above the first layer).  The flood feedback always used this formula.
                floodplain_curve(i)%flpstomax(0) = 0.
-               ! Integrate with the cumulative flooded area, the same area used by
-               ! volume()/depth()/floodarea().  The old per-layer increment made the
-               ! storage curve non-monotonic at layer boundaries: depth(volume(d)) /= d
-               ! once water rose above the first floodplain layer.
                DO j = 1, floodplain_curve(i)%nlfp
                   floodplain_curve(i)%flpstomax(j) = floodplain_curve(i)%flpstomax(j-1)        &
                      + 0.5 * (floodplain_curve(i)%flpaccare(j) + floodplain_curve(i)%flpaccare(j-1)) &
@@ -1257,8 +1029,29 @@ CONTAINS
 
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
+            ! Outlet width is the width of this cell's own channel (it was the
+            ! mean of this and the downstream channel), as in CaMa-Flood
+            ! (cmf_calc_outflw_mod: flow area and outflow use D2RIVWTH of the
+            ! upstream cell).  The momentum of a cell is divided by its own
+            ! channel area topo_rivare = rivwth*rivlen, while the CFL limit
+            ! uses rivlen.  Where a narrow tributary (~5 m) enters a wide river
+            ! or lake (~2000 m) the mean width was hundreds of times the cell's
+            ! own width, the effective length topo_rivare/outletwth only tens
+            ! of metres, and the outflow flipped sign every other substep: a
+            ! 1e-13 velocity perturbation grew to O(1) within a day (0.25 deg
+            ! global network, 3 days: 73-89 cells with discharge >= 10 m3/s off
+            ! by more than 1%, none now).  With the own width the effective
+            ! length is rivlen and the CFL limit holds; the adaptive dt now
+            ! stays at its 60 s cap (27% fewer substeps over 30 days).  The
+            ! routing results change wherever the two widths differ (69% of
+            ! the faces at 0.25 deg, 50% at 0.1 deg; most rivers widen
+            ! downstream, so the outlet becomes narrower): on a cold start the
+            ! discharge of the 10 largest river mouths averaged over 30 days is
+            ! 0-13% lower, the river storage up to 1.6% higher.
+            ! (min(w, w_next) was also tested: same stability and cost, about
+            ! twice the change of the results.)
             WHERE (ucat_next > 0)
-               outletwth = (outletwth + topo_rivwth) * 0.5
+               outletwth = topo_rivwth
             ELSEWHERE
                outletwth = topo_rivwth
             END WHERE
@@ -1267,10 +1060,6 @@ CONTAINS
 
       ! ----- Mask of Grids with all upstream area in the simulation region -----
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-      CALL vector_gather_to_master (push_inpm2ucat%sum_area, numucat, totalnumucat, &
-         ucat_data_address, ucat_area_all)
-#else
       IF (p_is_master) allocate (ucat_area_all (totalnumucat))
 
 #ifdef USEMPI
@@ -1300,7 +1089,6 @@ CONTAINS
 #else
       ucat_area_all = push_inpm2ucat%sum_area
 #endif
-#endif
 
       IF (p_is_master) THEN
 
@@ -1315,26 +1103,16 @@ CONTAINS
 
                   allups_mask_ucat(j) = 1
 
-#ifdef FLAT_SPMD
-                  IF (ucat_next_all(j) > 0) THEN
-                     iups_nst(ucat_next_all(j)) = iups_nst(ucat_next_all(j)) + 1
-                  ENDIF
-#else
                   IF (ucat_next(j) > 0) THEN
                      iups_nst(ucat_next(j)) = iups_nst(ucat_next(j)) + 1
                   ENDIF
-#endif
                ENDIF
             ENDIF
          ENDDO
 
       ENDIF
 
-#if defined(USEMPI) && defined(FLAT_SPMD)
-      IF (p_is_master) CALL move_alloc (allups_mask_ucat, rdata1d)
-      CALL scatter_ucat_real_fields (rdata1d, 1, rdata_recv)
-      CALL move_alloc (rdata_recv, allups_mask_ucat)
-#elif defined(USEMPI)
+#ifdef USEMPI
       IF (p_is_master) THEN
          DO iworker = 0, p_np_worker-1
             IF (numucat_wrk(iworker) > 0) THEN
@@ -1361,9 +1139,111 @@ CONTAINS
       IF (allocated (nups_nst     )) deallocate (nups_nst     )
       IF (allocated (iups_nst     )) deallocate (iups_nst     )
       IF (allocated (ucat_area_all)) deallocate (ucat_area_all)
-      IF (allocated (ucat_next_all)) deallocate (ucat_next_all)
 
    END SUBROUTINE build_riverlake_network
+
+   SUBROUTINE check_regional_coverage (nlon, nlat, idmap_x, idmap_y, remap)
+
+   ! The regional network must take the runoff of every runoff-input cell that the
+   ! land patches overlap and that the full network (DEF_UnitCatchment_file) routes;
+   ! otherwise that runoff would be dropped without notice.  mkinidata cuts the
+   ! network so, from the land patches of every land-cover year of the run, but the
+   ! run may reach a year that mkinidata had no land data for, or use a file cut for
+   ! another period or domain.  Called at start-up and after each LULCC.
+   ! Collective over all processes.  idmap_x/idmap_y (the regional input matrix) are
+   ! used on the master only.
+
+   USE MOD_SPMD_Task
+   USE MOD_Namelist,      only: DEF_UnitCatchment_file
+   USE MOD_NetCDFSerial
+   IMPLICIT NONE
+
+   integer, intent(in) :: nlon, nlat
+   integer, allocatable, intent(in) :: idmap_x(:,:), idmap_y(:,:)
+   type(worker_remapdata_type), intent(in) :: remap
+
+   logical, allocatable :: touched(:,:), routed_full(:,:), routed_regional(:,:)
+   integer, allocatable :: src_x(:,:), src_y(:,:), ids(:)
+   integer :: ng, ix, iy, nmiss
+#ifdef USEMPI
+   integer :: iworker
+#endif
+
+      IF (p_is_master) THEN
+         allocate (touched (nlon,nlat));  touched = .false.
+      ENDIF
+
+#ifdef USEMPI
+      IF (p_is_worker) THEN
+         ng = remap%num_grid
+         CALL mpi_send (ng, 1, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+         IF (ng > 0) CALL mpi_send (remap%ids_me, ng, MPI_INTEGER, p_address_master, mpi_tag_data, &
+            p_comm_glb, p_err)
+      ELSEIF (p_is_master) THEN
+         DO iworker = 0, p_np_worker-1
+            CALL mpi_recv (ng, 1, MPI_INTEGER, p_address_worker(iworker), mpi_tag_mesg, p_comm_glb, &
+               p_stat, p_err)
+            IF (ng > 0) THEN
+               allocate (ids (ng))
+               CALL mpi_recv (ids, ng, MPI_INTEGER, p_address_worker(iworker), mpi_tag_data, &
+                  p_comm_glb, p_stat, p_err)
+               CALL mark (ids)
+               deallocate (ids)
+            ENDIF
+         ENDDO
+      ENDIF
+#else
+      IF (remap%num_grid > 0) CALL mark (remap%ids_me)
+#endif
+
+      nmiss = 0
+      IF (p_is_master) THEN
+         CALL ncio_read_serial (DEF_UnitCatchment_file, 'inpmat_x', src_x)
+         CALL ncio_read_serial (DEF_UnitCatchment_file, 'inpmat_y', src_y)
+         allocate (routed_full     (nlon,nlat));  CALL routed (src_x, src_y, routed_full)
+         allocate (routed_regional (nlon,nlat));  CALL routed (idmap_x, idmap_y, routed_regional)
+
+         nmiss = count(touched .and. routed_full .and. .not. routed_regional)
+         IF (nmiss > 0) THEN
+            write(*,'(A,I0,A)') 'ERROR: ', nmiss, ' runoff-input cells under the land patches are routed by'
+            write(*,'(A)') '   DEF_UnitCatchment_file but not by the regional unit-catchment network.'
+            write(*,'(A)') '   Run mkinidata again for this domain and simulation period'
+            write(*,'(A)') '   (with LULCC, after mksrfdata has made the land data of every year).'
+         ENDIF
+         deallocate (touched, routed_full, routed_regional, src_x, src_y)
+      ENDIF
+
+#ifdef USEMPI
+      CALL mpi_bcast (nmiss, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
+#endif
+      IF (nmiss > 0) CALL CoLM_stop ('regional unit-catchment network does not cover the land patches')
+
+   CONTAINS
+
+      SUBROUTINE mark (cell_ids)
+      integer, intent(in) :: cell_ids(:)
+      integer :: k
+         DO k = 1, size(cell_ids)
+            ix = mod(cell_ids(k)-1, nlon) + 1
+            iy = (cell_ids(k)-1) / nlon + 1
+            touched(ix,iy) = .true.
+         ENDDO
+      END SUBROUTINE mark
+
+      SUBROUTINE routed (mx, my, cell)
+      integer, intent(in)  :: mx(:,:), my(:,:)
+      logical, intent(out) :: cell(:,:)
+      integer :: j, k
+         cell = .false.
+         DO k = 1, size(mx,2)
+            DO j = 1, size(mx,1)
+               IF (mx(j,k) >= 1 .and. mx(j,k) <= nlon .and. my(j,k) >= 1 .and. my(j,k) <= nlat) &
+                  cell(mx(j,k), my(j,k)) = .true.
+            ENDDO
+         ENDDO
+      END SUBROUTINE routed
+
+   END SUBROUTINE check_regional_coverage
 
    SUBROUTINE verify_regional_network (file_regional, x_regional, y_regional)
 
@@ -1390,7 +1270,7 @@ CONTAINS
       IF (.not. consistent) THEN
          write(*,'(A)') 'ERROR: the regional unit-catchment network does not belong to DEF_UnitCatchment_file.'
          write(*,'(2A)') '   regional file: ', trim(file_regional)
-         write(*,'(A)') '   Run mksrfdata again with the current DEF_UnitCatchment_file.'
+         write(*,'(A)') '   Run mkinidata again with the current DEF_UnitCatchment_file.'
          CALL CoLM_stop ()
       ENDIF
 
@@ -1403,7 +1283,6 @@ CONTAINS
 
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
-   USE MOD_Vector_ReadWrite, only: vector_read_and_scatter, vector_read_matrix_and_scatter
    IMPLICIT NONE
 
    character(len=*), intent(in) :: parafile
@@ -1415,41 +1294,9 @@ CONTAINS
 
    ! Local Variables
    integer :: iworker, nucat, ndim1, i
-   integer, allocatable :: varsize (:)
    real(r8), allocatable :: rsend1d (:)
    real(r8), allocatable :: rsend2d (:,:)
    integer,  allocatable :: isend1d (:)
-
-#if defined(USEMPI) && defined(FLAT_SPMD)
-      IF (present(rdata1d)) THEN
-         CALL vector_read_and_scatter (parafile, rdata1d, numucat, varname, ucat_data_address)
-      ENDIF
-
-      IF (present(rdata2d)) THEN
-         IF (p_is_master) THEN
-            CALL ncio_inquire_varsize (parafile, varname, varsize)
-            IF (size(varsize) /= 2) CALL CoLM_stop ('readin_riverlake_parameter: expected matrix')
-            ndim1 = varsize(1)
-            deallocate (varsize)
-         ENDIF
-         CALL mpi_bcast (ndim1, 1, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL vector_read_matrix_and_scatter (parafile, rdata2d, ndim1, numucat, &
-            varname, ucat_ucid, totalnumucat)
-      ENDIF
-
-      IF (present(idata1d)) THEN
-         IF (p_is_master) THEN
-            CALL ncio_read_serial (parafile, varname, idata1d)
-            CALL move_alloc (idata1d, isend1d)
-         ELSE
-            allocate (isend1d(totalnumucat))
-         ENDIF
-         CALL mpi_bcast (isend1d, totalnumucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         allocate (idata1d(numucat))
-         idata1d = isend1d(ucat_ucid)
-         deallocate (isend1d)
-      ENDIF
-#else
 
       IF (p_is_master) THEN
          IF (present(rdata1d))  CALL ncio_read_serial (parafile, varname, rdata1d)
@@ -1540,7 +1387,6 @@ CONTAINS
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)
-#endif
 #endif
 
    END SUBROUTINE readin_riverlake_parameter
@@ -1670,85 +1516,6 @@ CONTAINS
    END SUBROUTINE vol_depth_curve_free_mem
 
    ! ---------
-   SUBROUTINE bifurcation_dt_groups (parafile, numrivmth, rivermouth, shared_ucat)
-
-   USE MOD_SPMD_Task
-   USE MOD_NetCDFSerial
-   IMPLICIT NONE
-
-   character(len=*), intent(in) :: parafile
-   integer, intent(in)    :: numrivmth
-   integer, intent(inout) :: rivermouth (:)
-   integer, allocatable, intent(out) :: shared_ucat (:)
-
-   integer, allocatable :: bif_upst (:), bif_down (:)
-   integer, allocatable :: parent (:), owner (:), ishared (:)
-   integer :: npth, ip, i, a, b, iworker, ic
-
-      CALL ncio_inquire_length (parafile, 'bifurcation_upst', npth)
-      IF (npth > 0) THEN
-         CALL ncio_read_serial (parafile, 'bifurcation_upst', bif_upst)
-         CALL ncio_read_serial (parafile, 'bifurcation_down', bif_down)
-      ENDIF
-
-      allocate (parent (numrivmth))
-      parent = (/(i, i = 1, numrivmth)/)
-      DO ip = 1, npth
-         IF (bif_upst(ip) < 1 .or. bif_upst(ip) > size(rivermouth)) CYCLE
-         IF (bif_down(ip) < 1 .or. bif_down(ip) > size(rivermouth)) CYCLE
-         a = find_root (rivermouth(bif_upst(ip)))
-         b = find_root (rivermouth(bif_down(ip)))
-         IF (a /= b) parent(max(a,b)) = min(a,b)
-      ENDDO
-
-      DO i = 1, size(rivermouth)
-         rivermouth(i) = find_root (rivermouth(i))
-      ENDDO
-
-      allocate (owner (numrivmth));  owner(:) = -1
-      allocate (ishared (numrivmth)); ishared(:) = 0
-      DO iworker = 0, p_np_worker-1
-         DO i = 1, numucat_wrk(iworker)
-            ic = rivermouth(ucat_data_address(iworker)%val(i))
-            IF (owner(ic) == -1) THEN
-               owner(ic) = iworker
-            ELSEIF (owner(ic) /= iworker) THEN
-               ishared(ic) = 1
-            ENDIF
-         ENDDO
-      ENDDO
-
-      numrivsys_shared = 0
-      DO ic = 1, numrivmth
-         IF (ishared(ic) > 0) THEN
-            numrivsys_shared = numrivsys_shared + 1
-            ishared(ic) = numrivsys_shared
-         ENDIF
-      ENDDO
-
-      allocate (shared_ucat (size(rivermouth)))
-      shared_ucat = ishared(rivermouth)
-
-      write(*,'(A,I0,A,I0,A,I0,A)') 'Bifurcation time step groups: ', &
-         count(parent == (/(i, i = 1, numrivmth)/)), ' groups from ', numrivmth, &
-         ' river systems, ', numrivsys_shared, ' shared by several workers.'
-
-      deallocate (parent, owner, ishared)
-      IF (allocated(bif_upst)) deallocate (bif_upst)
-      IF (allocated(bif_down)) deallocate (bif_down)
-
-   CONTAINS
-
-      integer FUNCTION find_root (k)
-      integer, intent(in) :: k
-         find_root = k
-         DO WHILE (parent(find_root) /= find_root)
-            find_root = parent(find_root)
-         ENDDO
-      END FUNCTION find_root
-
-   END SUBROUTINE bifurcation_dt_groups
-
    SUBROUTINE riverlake_network_final ()
 
 #ifdef USEMPI
@@ -1762,17 +1529,15 @@ CONTAINS
       CALL worker_pushdata_free_mem (allreduce_inpm)
       CALL worker_pushdata_free_mem (push_next2ucat)
       CALL worker_pushdata_free_mem (push_ups2ucat)
-      CALL riverlake_pushcache_free_mem (cache_ups2ucat)
       CALL worker_pushdata_free_mem (push_bif_dn2pth)
       CALL worker_pushdata_free_mem (push_bif_influx)
+      CALL riverlake_pushcache_free_mem (cache_ups2ucat)
+      CALL riverlake_pushcache_free_mem (cache_bif_dn2pth)
+      CALL riverlake_pushcache_free_mem (cache_bif_influx)
       CALL worker_remapdata_free_mem (remap_patch2inpm)
       CALL grid_free_mem (griducat)
 
       IF (allocated(x_ucat           )) deallocate(x_ucat           )
-#ifdef FLAT_SPMD
-      IF (allocated(x_ucat_all       )) deallocate(x_ucat_all       )
-      IF (allocated(y_ucat_all       )) deallocate(y_ucat_all       )
-#endif
       IF (allocated(y_ucat           )) deallocate(y_ucat           )
 
       IF (allocated(ucat_ucid        )) deallocate(ucat_ucid        )
@@ -1831,9 +1596,96 @@ CONTAINS
 
    END SUBROUTINE riverlake_network_final
 
+   ! Time step groups for bifurcation (master only), see irivsys_shared.
+   ! rivermouth(totalnumucat) holds the river system of each unit catchment on
+   ! input and the cluster of river systems connected by bifurcation pathways on
+   ! output; a cluster is labelled by one of its river systems.  shared_ucat gives,
+   ! for each unit catchment, the index (1..numrivsys_shared) of its cluster when
+   ! that cluster has unit catchments on more than one worker, and 0 otherwise.
+   SUBROUTINE bifurcation_dt_groups (parafile, numrivmth, rivermouth, shared_ucat)
+
+   USE MOD_SPMD_Task
+   USE MOD_NetCDFSerial
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: parafile
+   integer, intent(in)    :: numrivmth
+   integer, intent(inout) :: rivermouth (:)
+   integer, allocatable, intent(out) :: shared_ucat (:)
+
+   integer, allocatable :: bif_upst (:), bif_down (:)
+   integer, allocatable :: parent (:), owner (:), ishared (:)
+   integer :: npth, ip, i, a, b, iworker, ic
+
+      CALL ncio_inquire_length (parafile, 'bifurcation_upst', npth)
+      IF (npth > 0) THEN
+         CALL ncio_read_serial (parafile, 'bifurcation_upst', bif_upst)
+         CALL ncio_read_serial (parafile, 'bifurcation_down', bif_down)
+      ENDIF
+
+      ! union-find over river systems; a pathway into the ocean (down <= 0) or
+      ! out of range joins nothing (read_bifurcation_global_arrays checks ranges)
+      allocate (parent (numrivmth))
+      parent = (/(i, i = 1, numrivmth)/)
+      DO ip = 1, npth
+         IF (bif_upst(ip) < 1 .or. bif_upst(ip) > size(rivermouth)) CYCLE
+         IF (bif_down(ip) < 1 .or. bif_down(ip) > size(rivermouth)) CYCLE
+         a = find_root (rivermouth(bif_upst(ip)))
+         b = find_root (rivermouth(bif_down(ip)))
+         IF (a /= b) parent(max(a,b)) = min(a,b)
+      ENDDO
+
+      DO i = 1, size(rivermouth)
+         rivermouth(i) = find_root (rivermouth(i))
+      ENDDO
+
+      ! clusters with unit catchments on more than one worker
+      allocate (owner (numrivmth));  owner(:) = -1
+      allocate (ishared (numrivmth)); ishared(:) = 0
+      DO iworker = 0, p_np_worker-1
+         DO i = 1, numucat_wrk(iworker)
+            ic = rivermouth(ucat_data_address(iworker)%val(i))
+            IF (owner(ic) == -1) THEN
+               owner(ic) = iworker
+            ELSEIF (owner(ic) /= iworker) THEN
+               ishared(ic) = 1
+            ENDIF
+         ENDDO
+      ENDDO
+
+      numrivsys_shared = 0
+      DO ic = 1, numrivmth
+         IF (ishared(ic) > 0) THEN
+            numrivsys_shared = numrivsys_shared + 1
+            ishared(ic) = numrivsys_shared
+         ENDIF
+      ENDDO
+
+      allocate (shared_ucat (size(rivermouth)))
+      shared_ucat = ishared(rivermouth)
+
+      write(*,'(A,I0,A,I0,A,I0,A)') 'Bifurcation time step groups: ', &
+         count(parent == (/(i, i = 1, numrivmth)/)), ' groups from ', numrivmth, &
+         ' river systems, ', numrivsys_shared, ' shared by several workers.'
+
+      deallocate (parent, owner, ishared)
+      IF (allocated(bif_upst)) deallocate (bif_upst)
+      IF (allocated(bif_down)) deallocate (bif_down)
+
+   CONTAINS
+
+      integer FUNCTION find_root (k)
+      integer, intent(in) :: k
+         find_root = k
+         DO WHILE (parent(find_root) /= find_root)
+            find_root = parent(find_root)
+         ENDDO
+      END FUNCTION find_root
+
+   END SUBROUTINE bifurcation_dt_groups
+
    SUBROUTINE read_and_distribute_bifurcation (parafile)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
    USE MOD_Utils
@@ -1863,21 +1715,12 @@ CONTAINS
    integer,  allocatable :: bif_inc_all   (:,:)
    integer,  allocatable :: bif_inc_send  (:,:)
    real(r8), allocatable :: bif_wt_send   (:,:)
-   integer,  allocatable :: pth_count(:), pth_disp(:), pth_count_2d(:), pth_disp_2d(:)
-   integer,  allocatable :: ucat_count(:), ucat_disp(:), pack_cursor(:)
 
    integer :: iworker, nucat, npth, ip, i, j, iloc
    integer :: max_bif_inc_global
 
 #ifdef USEMPI
 
-#ifdef FLAT_SPMD
-      allocate (npth_wrk (0:p_np_glb-1))
-#endif
-
-      ! ================================================================
-      ! Master: read NetCDF data and prepare for distribution
-      ! ================================================================
       IF (p_is_master) THEN
 
          CALL read_bifurcation_global_arrays (parafile, bif_upst_all, bif_down_all, &
@@ -1892,9 +1735,7 @@ CONTAINS
          ENDDO
 
          allocate (pth_owner (totalnpthout))
-#ifndef FLAT_SPMD
-         allocate (npth_wrk (0:p_np_worker-1))
-#endif
+         allocate (npth_wrk  (0:p_np_worker-1))
          npth_wrk(:) = 0
          DO ip = 1, totalnpthout
             pth_owner(ip) = iworker_of_ucat(bif_upst_all(ip))
@@ -1940,122 +1781,6 @@ CONTAINS
       IF (p_is_master) max_bif_incoming = max_bif_inc_global
       CALL mpi_bcast (max_bif_incoming, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
 
-      ! ================================================================
-      ! Distribute pathway data and reverse mapping to workers
-      ! ================================================================
-#ifdef FLAT_SPMD
-      ! Every rank computes.  The root only prepares packed buffers; Scatterv
-      ! distributes each rank's ordinary SPMD slice without self-send traffic.
-      IF (p_is_master) THEN
-         allocate (pth_count(0:p_np_glb-1), pth_disp(0:p_np_glb-1))
-         allocate (pth_count_2d(0:p_np_glb-1), pth_disp_2d(0:p_np_glb-1))
-         allocate (pack_cursor(0:p_np_glb-1))
-         pth_count = npth_wrk
-         pth_disp(0) = 0
-         DO iworker = 1, p_np_glb-1
-            pth_disp(iworker) = pth_disp(iworker-1) + pth_count(iworker-1)
-         ENDDO
-         pth_count_2d = pth_count * npthlev_bif
-         pth_disp_2d = pth_disp * npthlev_bif
-         pack_cursor = pth_disp
-
-         allocate (pth_upst_send(totalnpthout), pth_down_send(totalnpthout))
-         allocate (pth_glid_send(totalnpthout), pth_dist_send(totalnpthout))
-         allocate (pth_elev_send(npthlev_bif,totalnpthout))
-         allocate (pth_wdth_send(npthlev_bif,totalnpthout))
-         DO ip = 1, totalnpthout
-            iworker = pth_owner(ip)
-            pack_cursor(iworker) = pack_cursor(iworker) + 1
-            j = pack_cursor(iworker)
-            pth_upst_send(j) = bif_upst_all(ip)
-            pth_down_send(j) = bif_down_all(ip)
-            pth_glid_send(j) = ip
-            pth_dist_send(j) = bif_dist_all(ip)
-            pth_elev_send(:,j) = bif_elev_all(:,ip)
-            pth_wdth_send(:,j) = bif_wdth_all(:,ip)
-         ENDDO
-      ENDIF
-
-      CALL mpi_scatter (npth_wrk, 1, MPI_INTEGER, npthout_local, 1, MPI_INTEGER, &
-         p_root, p_comm_glb, p_err)
-
-      allocate (pth_upst_local(npthout_local), pth_down_ucid(npthout_local))
-      allocate (pth_down_local(npthout_local), pth_global_id(npthout_local))
-      allocate (pth_dst(npthout_local))
-      allocate (pth_elv(npthlev_bif,npthout_local), pth_wth(npthlev_bif,npthout_local))
-
-      IF (p_is_master) THEN
-         CALL mpi_scatterv (pth_upst_send, pth_count, pth_disp, MPI_INTEGER, &
-            pth_upst_local, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (pth_down_send, pth_count, pth_disp, MPI_INTEGER, &
-            pth_down_ucid, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (pth_glid_send, pth_count, pth_disp, MPI_INTEGER, &
-            pth_global_id, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (pth_dist_send, pth_count, pth_disp, MPI_REAL8, &
-            pth_dst, npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (pth_elev_send, pth_count_2d, pth_disp_2d, MPI_REAL8, &
-            pth_elv, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (pth_wdth_send, pth_count_2d, pth_disp_2d, MPI_REAL8, &
-            pth_wth, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-      ELSE
-         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
-            pth_upst_local, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
-            pth_down_ucid, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
-            pth_global_id, npthout_local, MPI_INTEGER, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
-            pth_dst, npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
-            pth_elv, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-         CALL mpi_scatterv (MPI_RNULL_P, MPI_INULL_P, MPI_INULL_P, MPI_REAL8, &
-            pth_wth, npthlev_bif*npthout_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-      ENDIF
-
-      IF (npthout_local > 0) THEN
-         CALL localize_bifurcation_path_indices (pth_upst_local, pth_down_ucid, pth_down_local)
-      ENDIF
-
-      IF (p_is_master) THEN
-         allocate (ucat_count(0:p_np_glb-1), ucat_disp(0:p_np_glb-1))
-         ucat_count = numucat_wrk * max_bif_incoming
-         ucat_disp(0) = 0
-         DO iworker = 1, p_np_glb-1
-            ucat_disp(iworker) = ucat_disp(iworker-1) + ucat_count(iworker-1)
-         ENDDO
-         allocate (bif_inc_send(max_bif_incoming,totalnumucat))
-         j = 0
-         DO iworker = 0, p_np_glb-1
-            DO i = 1, numucat_wrk(iworker)
-               j = j + 1
-               bif_inc_send(:,j) = bif_inc_all(:,ucat_data_address(iworker)%val(i))
-            ENDDO
-         ENDDO
-      ENDIF
-
-      allocate (bif_incoming_pths(max_bif_incoming,numucat))
-      allocate (bif_incoming_wts(max_bif_incoming,numucat))
-      IF (p_is_master) THEN
-         CALL mpi_scatterv (bif_inc_send, ucat_count, ucat_disp, MPI_INTEGER, &
-            bif_incoming_pths, max_bif_incoming*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
-      ELSE
-         CALL mpi_scatterv (MPI_INULL_P, MPI_INULL_P, MPI_INULL_P, MPI_INTEGER, &
-            bif_incoming_pths, max_bif_incoming*numucat, MPI_INTEGER, p_root, p_comm_glb, p_err)
-      ENDIF
-      bif_incoming_wts = 0._r8
-      WHERE (bif_incoming_pths > 0) bif_incoming_wts = 1._r8
-
-      IF (p_is_master) THEN
-         deallocate (pth_upst_send, pth_down_send, pth_glid_send, pth_dist_send)
-         deallocate (pth_elev_send, pth_wdth_send)
-         deallocate (pth_count, pth_disp, pth_count_2d, pth_disp_2d, pack_cursor)
-         deallocate (ucat_count, ucat_disp, bif_inc_send)
-         deallocate (bif_upst_all, bif_down_all, bif_dist_all, bif_elev_all, bif_wdth_all)
-         deallocate (iworker_of_ucat, pth_owner, bif_inc_cnt, bif_inc_all)
-      ENDIF
-      deallocate (npth_wrk)
-
-#else
       IF (p_is_master) THEN
 
          DO iworker = 0, p_np_worker-1
@@ -2206,7 +1931,6 @@ CONTAINS
          allocate (bif_incoming_pths (max_bif_incoming, 0))
          allocate (bif_incoming_wts  (max_bif_incoming, 0))
       ENDIF
-#endif
 
 #else
 
@@ -2294,6 +2018,9 @@ CONTAINS
 
       CALL build_worker_pushdata (npthout_local, pth_global_id, numucat, &
          bif_incoming_pths, bif_incoming_wts, push_bif_influx)
+
+      CALL riverlake_pushcache_build (push_bif_dn2pth, cache_bif_dn2pth)
+      CALL riverlake_pushcache_build (push_bif_influx, cache_bif_influx)
 
    END SUBROUTINE read_and_distribute_bifurcation
 

@@ -55,7 +55,6 @@ MODULE MOD_MonthlyinSituCO2MaunaLoa
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_SSP
-   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
    SAVE
 
@@ -360,10 +359,6 @@ CONTAINS
       !(v1.1). ISIMIP Repository.  https://doi.org/10.48364/ISIMIP.482153.1
       !added by Zhongwang Wei @ SYSU 2022.12.12
       select CASE (trim(DEF_SSP))
-      CASE ('off')
-            ! No future emissions scenario: keep atmospheric CO2 at the last
-            ! observed monthly value instead of leaving 2023--2100 undefined.
-            co2mlo(2023:eyear,:) = co2mlo(2022,12)
       CASE ('126')
             !co2mlo(2015,:) =  (/ 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95, 399.95 /)
             !co2mlo(2016,:) =  (/ 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12, 403.12 /)
@@ -716,8 +711,6 @@ CONTAINS
             co2mlo(2098,:) = (/ 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89, 1107.89 /)
             co2mlo(2099,:) = (/ 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55, 1121.55 /)
             co2mlo(2100,:) = (/ 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21, 1135.21 /)
-      CASE DEFAULT
-            CALL CoLM_stop ('Fatal ERROR: unknown DEF_SSP=' // trim(DEF_SSP))
       END select
 
    END SUBROUTINE init_monthly_co2_mlo

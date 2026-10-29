@@ -23,9 +23,13 @@ CONTAINS
                        dewmx         ,capr          ,cnfac         ,vf_quartz     ,&
                        vf_gravels    ,vf_om         ,vf_sand       ,wf_gravels    ,&
                        wf_sand       ,csol          ,porsl         ,psi0          ,&
+#ifdef Campbell_SOIL_MODEL
                        bsw           ,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                        theta_r       ,alpha_vgm     ,n_vgm         ,L_vgm         ,&
                        sc_vgm        ,fc_vgm        ,                              &
+#endif
                        k_solids      ,dksatu        ,dksatf        ,dkdry         ,&
                        BA_alpha      ,BA_beta       ,lai           ,laisun        ,&
                        laisha        ,sai           ,htop          ,hbot          ,&
@@ -33,7 +37,8 @@ CONTAINS
                        rss           ,gssun_out     ,gssha_out     ,assimsun_out  ,&
                        etrsun_out    ,assimsha_out  ,etrsha_out    ,&
 !photosynthesis and plant hydraulic variables
-                       effcon        ,vmax25        ,c3c4          ,hksati        ,smp     ,hk   ,&
+                       effcon        ,vmax25        ,c3c4          ,hksati        ,&
+                       smp           ,hk            ,&
                        kmax_sun      ,kmax_sha      ,kmax_xyl      ,kmax_root     ,&
                        psi50_sun     ,psi50_sha     ,psi50_xyl     ,psi50_root    ,&
                        ck            ,vegwp         ,gs0sun        ,gs0sha        ,&
@@ -73,8 +78,10 @@ CONTAINS
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
                       ,flddepth      ,fldfrc        ,fevpg_fld                    &
 #endif
+#ifdef MaterialTransport
                       ,canopy_smelt_mass_th, canopy_frzc_mass_th                  ,&
                        qphs_thaw_lay_th, qphs_frzc_lay_th, raw_trc_th             &
+#endif
                        )
 
 !=======================================================================
@@ -118,31 +125,36 @@ CONTAINS
    USE MOD_GroundTemperature
    USE MOD_Qsadv
    USE MOD_SoilSurfaceResistance
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT, only: patch_pft_s, patch_pft_e
    USE MOD_Vars_TimeInvariants, only: patchclass
-   USE MOD_Ozone, only: ozone_pft_of_lct
    USE MOD_Vars_TimeVariables, only: &
        lai_enftemp, lai_enfboreal, lai_dnfboreal, lai_ebftrop, lai_ebftemp, lai_dbftrop, lai_dbftemp, &
        lai_dbfboreal, lai_ebstemp, lai_dbstemp, lai_dbsboreal, lai_c3arcgrass, lai_c3grass, lai_c4grass
    USE MOD_Vars_PFTimeInvariants
    USE MOD_Vars_PFTimeVariables
    USE MOD_Vars_1DPFTFluxes
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
    USE MOD_Hydro_SoilFunction, only: soil_psi_from_vliq
+#endif
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_RSS_SCHEME, DEF_SPLIT_SOILSNOW, &
-                           DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT, &
-                           DEF_USE_Campbell_SOIL_MODEL
-   USE MOD_Namelist, only: DEF_VEG_SNOW
+                           DEF_USE_LCT,DEF_USE_PFT,DEF_USE_PC,DEF_PC_CROP_SPLIT
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
    USE MOD_CaMa_colmCaMa, only: get_fldevp
 #ifdef CaMa_Flood
-   USE YOS_CMF_INPUT, only: LWEVAP, CSETFILE
+   USE YOS_CMF_INPUT, only: LWEVAP
 #else
+   ! [GridRiverLakeFlow] Grid flood feedback reuses the CaMa flood-feedback code paths
+   ! (all "CaMa_Flood || GridRiverLakeFlow" blocks in this file), with its namelist
+   ! switch in place of CaMa's LWEVAP.  CaMa_Flood builds are unchanged, and with
+   ! DEF_GridRiverLake_FloodFeedback = .false. (default) the blocks do nothing, as
+   ! without them (checked: land restart bit-identical to upstream).
    USE MOD_Namelist, only: LWEVAP => DEF_GridRiverLake_FloodFeedback
 #endif
 #endif
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -176,13 +188,17 @@ CONTAINS
        csol      (1:nl_soil),    &! heat capacity of soil solids [J/(m3 K)]
        porsl     (1:nl_soil),    &! soil porosity [-]
        psi0      (1:nl_soil),    &! soil water suction, negative potential [mm]
+#ifdef Campbell_SOIL_MODEL
        bsw(1:nl_soil),           &! clapp and hornberger "b" parameter [-]
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
        theta_r   (1:nl_soil),    &! residual moisture content [-]
        alpha_vgm (1:nl_soil),    &! a parameter corresponding approximately to the inverse of the air-entry value
        n_vgm     (1:nl_soil),    &! pore-connectivity parameter [dimensionless]
        L_vgm     (1:nl_soil),    &! a shape parameter [dimensionless]
        sc_vgm    (1:nl_soil),    &! saturation at the air entry value in the classical vanGenuchten model [-]
        fc_vgm    (1:nl_soil),    &! a scaling factor by using air entry value in the Mualem model [-]
+#endif
        k_solids  (1:nl_soil),    &! thermal conductivity of minerals soil [W/m-K]
        dkdry     (1:nl_soil),    &! thermal conductivity of dry soil [W/m-K]
        dksatu    (1:nl_soil),    &! thermal conductivity of saturated unfrozen soil [W/m-K]
@@ -263,16 +279,24 @@ CONTAINS
        zi_soisno(lb-1:nl_soil)    ! interface depth [m]
 
    integer , intent(in) :: &
-       c3c4 ! C3/C4 plant type
+       c3c4                       ! C3/C4 plant type
 
    real(r8), intent(in) :: &
        sabg_snow_lyr(lb:1)        ! snow layer absorption
 
-   real(r8), intent(out), optional :: canopy_smelt_mass_th ! canopy snow->rain mass [mm]
-   real(r8), intent(out), optional :: canopy_frzc_mass_th  ! canopy rain->snow mass [mm]
-   real(r8), intent(out), optional :: qphs_thaw_lay_th(lb:nl_soil) ! ice->liquid mass [mm]
-   real(r8), intent(out), optional :: qphs_frzc_lay_th(lb:nl_soil) ! liquid->ice mass [mm]
-   real(r8), intent(out), optional :: raw_trc_th ! reference-to-canopy moisture resistance [s/m]
+#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
+   real(r8), intent(inout) :: flddepth   ! inundation depth [mm]
+   real(r8), intent(in)    :: fldfrc     ! inundation fraction [0-1]
+   real(r8), intent(out)   :: fevpg_fld  ! inundation evaporation [mm/s]
+#endif
+#ifdef MaterialTransport
+   ! Diagnostics for material transport only; not used by the host.
+   real(r8), intent(out), optional :: canopy_smelt_mass_th          ! canopy snow melted [mm]
+   real(r8), intent(out), optional :: canopy_frzc_mass_th           ! canopy water frozen [mm]
+   real(r8), intent(out), optional :: qphs_thaw_lay_th(lb:nl_soil)  ! ice melted per layer [mm]
+   real(r8), intent(out), optional :: qphs_frzc_lay_th(lb:nl_soil)  ! water frozen per layer [mm]
+   real(r8), intent(out), optional :: raw_trc_th                    ! moisture resistance [s/m]
+#endif
 
        ! state variables (2)
    real(r8), intent(inout) :: &
@@ -377,12 +401,6 @@ CONTAINS
        fm,                       &! integral of profile function for momentum
        fh,                       &! integral of profile function for heat
        fq                         ! integral of profile function for moisture
-
-#if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
-   real(r8), intent(inout) :: flddepth
-   real(r8), intent(in)    :: fldfrc
-   real(r8), intent(out)   :: fevpg_fld
-#endif
 
 !Ozone stress variables
    real(r8),intent(inout) ::     &
@@ -501,8 +519,10 @@ CONTAINS
    real(r8), allocatable :: assimsha_p    (:)
    real(r8), allocatable :: etrsha_p      (:)
    real(r8), allocatable :: dheatl_p      (:)
+#ifdef MaterialTransport
    real(r8) :: canopy_smelt_mass_local, canopy_frzc_mass_local, raw_trc_local, raw_trc_pc
    real(r8), allocatable :: canopy_smelt_mass_p_local(:), canopy_frzc_mass_p_local(:), raw_trc_p(:)
+#endif
 
 
 !=======================================================================
@@ -522,12 +542,6 @@ CONTAINS
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
       fevpg_fld = 0._r8
       flood_evap_active = .FALSE.
-      fldfrc_eff = 0._r8
-      fevpg_fld_local = 0._r8
-      fseng_fld_local = 0._r8
-      fseng_land = 0._r8; fseng_soil_land = 0._r8; fseng_snow_land = 0._r8
-      fevpg_land = 0._r8; fevpg_soil_land = 0._r8; fevpg_snow_land = 0._r8
-      cgrnd_land = 0._r8; cgrndl_land = 0._r8; cgrnds_land = 0._r8
 #endif
 
       cgrnds = 0.;  cgrndl = 0.
@@ -536,6 +550,7 @@ CONTAINS
       assim  = 0.;  respc  = 0.
       hprl   = 0.;  dheatl = 0.
 
+#ifdef MaterialTransport
       canopy_smelt_mass_local = 0._r8
       canopy_frzc_mass_local  = 0._r8
       raw_trc_local           = 0._r8
@@ -545,7 +560,7 @@ CONTAINS
       IF (present(qphs_thaw_lay_th)) qphs_thaw_lay_th(:) = 0._r8
       IF (present(qphs_frzc_lay_th)) qphs_frzc_lay_th(:) = 0._r8
       IF (present(raw_trc_th)) raw_trc_th = 0._r8
-
+#endif
       emis   = 0.;  z0m    = 0.
       zol    = 0.;  rib    = 0.
       ustar  = 0.;  qstar  = 0.
@@ -602,13 +617,14 @@ ENDIF
             fac  = max( fac, 0.001 )
          ENDIF
 
-         IF (DEF_USE_Campbell_SOIL_MODEL) THEN
-            psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
-         ELSE
-            psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
-               porsl(1), theta_r(1), psi0(1), &
-               5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
-         ENDIF
+#ifdef Campbell_SOIL_MODEL
+         psit = psi0(1) * fac ** (- bsw(1) )   !psit = max(smpmin, psit)
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+         psit = soil_psi_from_vliq ( fac*(porsl(1)-theta_r(1)) + theta_r(1), &
+            porsl(1), theta_r(1), psi0(1), &
+            5, (/alpha_vgm(1), n_vgm(1), L_vgm(1), sc_vgm(1), fc_vgm(1)/))
+#endif
          psit = max( -1.e8, psit )
          hr   = exp(psit/roverg/t_grnd)
          qred = (1.-fsno)*hr + fsno
@@ -654,12 +670,16 @@ ENDIF
 
          !NOTE: If the beta scheme is used, the rss is not soil resistance,
          !but soil beta factor (soil wetness relative to field capacity [0-1]).
-         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
-         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
-         CALL SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0, &
+         CALL SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0,vf_sand, &
+#ifdef Campbell_SOIL_MODEL
                             bsw, &
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-                            dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),wice_soisno(1:),fsno,qg,rss)
+#endif
+                            dz_soisno(1:nl_soil),t_soisno(1:nl_soil), &
+                            wliq_soisno(1:nl_soil),wice_soisno(1:nl_soil), &
+                            fsno,qg,rss)
       ELSE
          IF (DEF_RSS_SCHEME == 4) THEN
             rss = 1.        !LP92
@@ -683,8 +703,12 @@ ENDIF
                          !taux,tauy,fseng,fevpg,tref,qref, &
                          taux,tauy,fseng,fseng_soil,fseng_snow, &
                          fevpg,fevpg_soil,fevpg_snow,tref,qref, &
+#ifdef MaterialTransport
                          z0m_g,z0h_g,zol_g,rib_g,ustar_g,qstar_g,tstar_g,fm_g,fh_g,fq_g, &
                          raw_out=raw_trc_local)
+#else
+                         z0m_g,z0h_g,zol_g,rib_g,ustar_g,qstar_g,tstar_g,fm_g,fh_g,fq_g)
+#endif
 
       obu_g = forc_hgt_u / zol_g
 
@@ -700,12 +724,15 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
       IF (lai+sai > 1e-6) THEN
 
          ! soil water stress factor on stomatal resistance
-         ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
-         ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL eroot (nl_soil,trsmx0,porsl,&
+#ifdef Campbell_SOIL_MODEL
             bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
-            psi0,rootfr,dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),rootr,etrc,rstfac)
+#endif
+            psi0,rootfr,dz_soisno(1:nl_soil),t_soisno(1:nl_soil), &
+            wliq_soisno(1:nl_soil),rootr,etrc,rstfac)
 
          ! fraction of sunlit and shaded leaves of canopy
          fsun = ( 1. - exp(-min(extkb*lai,40.))) / max( min(extkb*lai,40.), 1.e-6 )
@@ -717,7 +744,7 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
          rstfacsun_out = rstfac
          rstfacsha_out = rstfac
 
-         CALL LeafTemperature(ipatch,ozone_pft_of_lct(patchclass(ipatch)),deltim,csoilc,dewmx,htvp,&
+         CALL LeafTemperature(ipatch,1,deltim,csoilc   ,dewmx       ,htvp        ,&
                  lai         ,sai         ,htop        ,hbot        ,sqrtdi      ,&
                  effcon      ,vmax25      ,c3c4        ,slti        ,hlti        ,shti        ,&
                  hhti        ,trda        ,trdm        ,trop        ,g1          ,&
@@ -752,11 +779,14 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
 !End WUE stomata model parameter
                  forc_hpbl   ,&
                  qintr_rain  ,qintr_snow  ,t_precip    ,hprl        ,dheatl      ,&
-                 smp         ,hk(1:)      ,hksati(1:)  ,rootflux(1:)              &
+#ifdef MaterialTransport
+                 smp         ,hk(1:)      ,hksati(1:)  ,rootflux(1:)               &
                 ,canopy_smelt_mass_out=canopy_smelt_mass_local, &
                  canopy_frzc_mass_out =canopy_frzc_mass_local, &
-                 raw_trc_out=raw_trc_local                     &
-                 )
+                 raw_trc_out=raw_trc_local)
+#else
+                 smp         ,hk(1:)      ,hksati(1:)  ,rootflux(1:)              )
+#endif
       ELSE
          tleaf         = forc_t
          laisun        = 0.
@@ -781,64 +811,56 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
 ENDIF
 
 
-IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+IF (patchtype == 0) THEN
 
       ps = patch_pft_s(ipatch)
       pe = patch_pft_e(ipatch)
 
-      allocate ( rootr_p (nl_soil, ps:pe) )
-      allocate ( rootflux_p(nl_soil,ps:pe))
-      allocate ( etrc_p           (ps:pe) )
-      allocate ( rstfac_p         (ps:pe) )
-      allocate ( rstfacsun_p      (ps:pe) )
-      allocate ( rstfacsha_p      (ps:pe) )
-      allocate ( gssun_p          (ps:pe) )
-      allocate ( gssha_p          (ps:pe) )
-      allocate ( fsun_p           (ps:pe) )
-      allocate ( sabv_p           (ps:pe) )
-      allocate ( fcover           (ps:pe) )
+      allocate ( rootr_p   (nl_soil,ps:pe) )
+      allocate ( rootflux_p(nl_soil,ps:pe) )
+      allocate ( etrc_p            (ps:pe) )
+      allocate ( rstfac_p          (ps:pe) )
+      allocate ( rstfacsun_p       (ps:pe) )
+      allocate ( rstfacsha_p       (ps:pe) )
+      allocate ( gssun_p           (ps:pe) )
+      allocate ( gssha_p           (ps:pe) )
+      allocate ( fsun_p            (ps:pe) )
+      allocate ( sabv_p            (ps:pe) )
+      allocate ( fcover            (ps:pe) )
 
-      allocate ( fseng_soil_p     (ps:pe) )
-      allocate ( fseng_snow_p     (ps:pe) )
-      allocate ( fevpg_soil_p     (ps:pe) )
-      allocate ( fevpg_snow_p     (ps:pe) )
-      allocate ( cgrnd_p          (ps:pe) )
-      allocate ( cgrnds_p         (ps:pe) )
-      allocate ( cgrndl_p         (ps:pe) )
-      allocate ( dlrad_p          (ps:pe) )
-      allocate ( ulrad_p          (ps:pe) )
-      allocate ( zol_p            (ps:pe) )
-      allocate ( rib_p            (ps:pe) )
-      allocate ( ustar_p          (ps:pe) )
-      allocate ( qstar_p          (ps:pe) )
-      allocate ( tstar_p          (ps:pe) )
-      allocate ( fm_p             (ps:pe) )
-      allocate ( fh_p             (ps:pe) )
-      allocate ( fq_p             (ps:pe) )
+      allocate ( fseng_soil_p      (ps:pe) )
+      allocate ( fseng_snow_p      (ps:pe) )
+      allocate ( fevpg_soil_p      (ps:pe) )
+      allocate ( fevpg_snow_p      (ps:pe) )
+      allocate ( cgrnd_p           (ps:pe) )
+      allocate ( cgrnds_p          (ps:pe) )
+      allocate ( cgrndl_p          (ps:pe) )
+      allocate ( dlrad_p           (ps:pe) )
+      allocate ( ulrad_p           (ps:pe) )
+      allocate ( zol_p             (ps:pe) )
+      allocate ( rib_p             (ps:pe) )
+      allocate ( ustar_p           (ps:pe) )
+      allocate ( qstar_p           (ps:pe) )
+      allocate ( tstar_p           (ps:pe) )
+      allocate ( fm_p              (ps:pe) )
+      allocate ( fh_p              (ps:pe) )
+      allocate ( fq_p              (ps:pe) )
 
-      allocate ( hprl_p           (ps:pe) )
-      allocate ( assimsun_p       (ps:pe) )
-      allocate ( etrsun_p         (ps:pe) )
-      allocate ( assimsha_p       (ps:pe) )
-      allocate ( etrsha_p         (ps:pe) )
-      allocate ( dheatl_p         (ps:pe) )
+      allocate ( hprl_p            (ps:pe))
+      allocate ( assimsun_p        (ps:pe))
+      allocate ( etrsun_p          (ps:pe))
+      allocate ( assimsha_p        (ps:pe))
+      allocate ( etrsha_p          (ps:pe))
+      allocate ( dheatl_p          (ps:pe))
+#ifdef MaterialTransport
       allocate ( canopy_smelt_mass_p_local(ps:pe) )
       allocate ( canopy_frzc_mass_p_local (ps:pe) )
       allocate ( raw_trc_p(ps:pe) )
       canopy_smelt_mass_p_local(:) = 0._r8
       canopy_frzc_mass_p_local (:) = 0._r8
       raw_trc_p(:) = 0._r8
-      ! Keep the per-PFT rain/snow split of canopy water consistent when DEF_VEG_SNOW
-      ! is off (formerly only in TRACER builds).
-      IF (.not. DEF_VEG_SNOW) THEN
-         IF (tleaf > tfrz) THEN
-            ldew_rain_p(ps:pe) = ldew_p(ps:pe)
-            ldew_snow_p(ps:pe) = 0._r8
-         ELSE
-            ldew_rain_p(ps:pe) = 0._r8
-            ldew_snow_p(ps:pe) = ldew_p(ps:pe)
-         ENDIF
-      ENDIF
+#endif
 
       sabv_p(ps:pe) = sabvsun_p(ps:pe) + sabvsha_p(ps:pe)
       sabv = sabvsun + sabvsha
@@ -848,13 +870,16 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 
          IF (lai_p(i)+sai_p(i) > 1e-6) THEN
 
-            ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
-            ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
             CALL eroot (nl_soil,trsmx0,porsl,&
+#ifdef Campbell_SOIL_MODEL
                bsw, &
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
+#endif
                psi0,rootfr_p(:,p),&
-               dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),rootr_p(:,i),etrc_p(i),rstfac_p(i))
+               dz_soisno(1:nl_soil),t_soisno(1:nl_soil),wliq_soisno(1:nl_soil), &
+               rootr_p(:,i),etrc_p(i),rstfac_p(i))
 
             ! fraction of sunlit and shaded leaves of canopy
             fsun_p(i) = ( 1. - exp(-min(extkb_p(i)*lai_p(i),40.))) &
@@ -877,6 +902,7 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
             rootflux_p(:,i)= 0.
             rstfacsun_p(i) = 0.
             rstfacsha_p(i) = 0.
+            fsun_p(i)      = 0.5
             dheatl_p(i)    = 0.
          ENDIF
       ENDDO
@@ -934,7 +960,7 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
          p = pftclass(i)
 
          ! Dealing with PFTs for PC:
-         ! If defined DEF_PC_CROP_SPLIT, for crop PFTs, use 1D twostream model;
+         ! If defined DEF_PC_CROP_SPLIT, for crop PFTs, use 1D turbulence model;
          ! Otherwise, skip to run PC 3D model.
          IF ( DEF_USE_PC .and. (.not.DEF_PC_CROP_SPLIT .or. p.lt.15) ) THEN
             CYCLE
@@ -944,7 +970,7 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 
             CALL LeafTemperature(ipatch,p,deltim  ,csoilc          ,dewmx           ,htvp           ,&
                  lai_p(i)        ,sai_p(i)        ,htop_p(i)       ,hbot_p(i)       ,sqrtdi_p(p)    ,&
-                 effcon_p(p)     ,vmax25_p(p)     ,c3c4_p(p)       ,slti_p(p)       ,hlti_p(p)       ,shti_p(p)      ,&
+                 effcon_p(p)     ,vmax25_p(p)     ,c3c4_p(p)       ,slti_p(p)       ,hlti_p(p)      ,shti_p(p)      ,&
                  hhti_p(p)       ,trda_p(p)       ,trdm_p(p)       ,trop_p(p)       ,g1_p(p)        ,&
                  g0_p(p)         ,gradm_p(p)      ,binter_p(p)     ,extkn_p(p)      ,extkb_p(i)     ,&
                  extkd_p(i)      ,forc_hgt_u      ,forc_hgt_t      ,forc_hgt_q      ,forc_us        ,&
@@ -977,11 +1003,15 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
 !End WUE stomata model parameter
                  forc_hpbl                                                                         ,&
                  qintr_rain_p(i) ,qintr_snow_p(i) ,t_precip        ,hprl_p(i)       ,dheatl_p(i)   ,&
-                 smp             ,hk(1:)          ,hksati(1:)      ,rootflux_p(1:,i)                &
-                ,canopy_smelt_mass_out=canopy_smelt_mass_p_local(i), &
+                 smp             ,hk(1:)          ,hksati(1:)      ,rootflux_p(1:,i)                ,&
+#ifdef MaterialTransport
+                 ipft_index=i                                        , &
+                 canopy_smelt_mass_out=canopy_smelt_mass_p_local(i), &
                  canopy_frzc_mass_out =canopy_frzc_mass_p_local (i), &
-                 raw_trc_out=raw_trc_p(i),                           &
+                 raw_trc_out=raw_trc_p(i))
+#else
                  ipft_index=i)
+#endif
          ELSE
 
             CALL GroundFluxes (zlnd,zsno,forc_hgt_u,forc_hgt_t,forc_hgt_q,forc_hpbl, &
@@ -992,7 +1022,11 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
                                taux_p(i),tauy_p(i),fseng_p(i),fseng_soil_p(i),fseng_snow_p(i), &
                                fevpg_p(i),fevpg_soil_p(i),fevpg_snow_p(i),tref_p(i),qref_p(i), &
                                z0m_p(i),z0h_g,zol_p(i),rib_p(i),ustar_p(i),&
+#ifdef MaterialTransport
                                qstar_p(i),tstar_p(i),fm_p(i),fh_p(i),fq_p(i),raw_out=raw_trc_p(i))
+#else
+                               qstar_p(i),tstar_p(i),fm_p(i),fh_p(i),fq_p(i))
+#endif
 
             tleaf_p      (i) = forc_t
             gssun_p      (i) = 0.
@@ -1024,11 +1058,7 @@ ENDIF
          ENDIF
       ENDDO
 
-      ! Calculate end index of natrue PFTs.  Some patches can have an empty
-      ! PFT slice (ps > pe); keep pn below ps so the PC branch is skipped
-      ! instead of reading an undefined pn. (Local fix; upstream sets it only
-      ! in TRACER builds.)
-      pn = ps - 1
+      ! Calculate end index of natrue PFTs
       DO i = ps, pe
          pn = i
          p = pftclass(i)
@@ -1056,27 +1086,6 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
       etrsha_p   (ps:pe) = 0.
       gssun_p    (ps:pe) = 0.
       gssha_p    (ps:pe) = 0.
-
-! ==== FIX 2026-08-16 BEGIN: initialize pft-loop arrays that the PC path skips ====
-! For LULC_IGBP_PC cases, the pft loop above is skipped by CYCLE, so rootflux_p,
-! rootr_p, etrc_p, rstfac_p (and their sun/sha copies) were NEVER assigned before
-! being passed into LeafTemperaturePC -> uninitialized heap memory entered the
-! plant-hydraulics solver, causing run-dependent (case-dependent) tiny differences
-! in canopy fluxes (ulrad/olrg ~1e-5 W/m2). Initialize them explicitly.
-      rootflux_p (:,ps:pe) = 0.
-      rootr_p    (:,ps:pe) = 0.
-      etrc_p       (ps:pe) = 0.
-      rstfac_p     (ps:pe) = 1.
-      rstfacsun_p  (ps:pe) = 1.
-      rstfacsha_p  (ps:pe) = 1.
-      ! fsun_p is normally set in the pft loop (skipped by CYCLE for PC cases);
-      ! without this it enters LeafTemperaturePC as uninitialized heap memory.
-      fsun_p(ps:pe) = (1. - exp(-min(extkb_p(ps:pe)*lai_p(ps:pe),40.))) &
-                    / max(min(extkb_p(ps:pe)*lai_p(ps:pe),40.), 1.e-6)
-      DO i = ps, pe
-         IF (coszen<=0.0 .or. sabv_p(i)<1.) fsun_p(i) = 0.5
-      ENDDO
-! ==== FIX 2026-08-16 END ====
 
       fcover     (ps:pe) = pftfrac(ps:pe) / sum(pftfrac(ps:pe))
       z0m_p      (ps:pe) = (1.-fsno)*zlnd + fsno*zsno
@@ -1113,11 +1122,14 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
          forc_hpbl            ,&
          qintr_rain_p(ps:pe)  ,qintr_snow_p(ps:pe)  ,t_precip             ,hprl_p(:)            ,&
          dheatl_p(ps:pe)      ,smp                  ,hk(1:)               ,hksati(1:)           ,&
-         rootflux_p(:,:)                                                                  &
+#ifdef MaterialTransport
+         rootflux_p(:,:)                                          &
         ,canopy_smelt_mass_p_out=canopy_smelt_mass_p_local(ps:pe),&
          canopy_frzc_mass_p_out =canopy_frzc_mass_p_local (ps:pe),&
-         raw_trc_out=raw_trc_pc                                  &
-         )
+         raw_trc_out=raw_trc_pc                                  )
+#else
+         rootflux_p(:,:)       )
+#endif
 
       dlrad_p      (ps:pe) = dlrad
       ulrad_p      (ps:pe) = ulrad
@@ -1143,7 +1155,9 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
       fm_p         (ps:pe) = fm
       fh_p         (ps:pe) = fh
       fq_p         (ps:pe) = fq
+#ifdef MaterialTransport
       raw_trc_p    (ps:pe) = raw_trc_pc
+#endif
 ENDIF
 
       pe = patch_pft_e(ipatch)
@@ -1199,9 +1213,11 @@ ENDIF
       etrsha_out    = sum( etrsha_p    (ps:pe)*pftfrac(ps:pe) )
       hprl          = sum( hprl_p      (ps:pe)*pftfrac(ps:pe) )
       dheatl        = sum( dheatl_p    (ps:pe)*pftfrac(ps:pe) )
+#ifdef MaterialTransport
       canopy_smelt_mass_local = sum( canopy_smelt_mass_p_local(ps:pe)*pftfrac(ps:pe) )
       canopy_frzc_mass_local  = sum( canopy_frzc_mass_p_local (ps:pe)*pftfrac(ps:pe) )
       raw_trc_local           = sum( raw_trc_p(ps:pe)*pftfrac(ps:pe) )
+#endif
 IF (DEF_USE_OZONESTRESS)THEN
       o3uptakesun   = sum(o3uptakesun_p(ps:pe)*pftfrac(ps:pe) )
       o3uptakesha   = sum(o3uptakesha_p(ps:pe)*pftfrac(ps:pe) )
@@ -1225,59 +1241,59 @@ END IF
          ENDIF
       ENDIF
 
-      deallocate ( rootflux_p  )
-      deallocate ( etrc_p      )
-      deallocate ( rstfac_p    )
-      deallocate ( rstfacsun_p )
-      deallocate ( rstfacsha_p )
-      deallocate ( gssun_p     )
-      deallocate ( gssha_p     )
-      deallocate ( fsun_p      )
-      deallocate ( sabv_p      )
-      deallocate ( fcover      )
+      deallocate ( rootflux_p   )
+      deallocate ( etrc_p       )
+      deallocate ( rstfac_p     )
+      deallocate ( rstfacsun_p  )
+      deallocate ( rstfacsha_p  )
+      deallocate ( gssun_p      )
+      deallocate ( gssha_p      )
+      deallocate ( fsun_p       )
+      deallocate ( sabv_p       )
+      deallocate ( fcover       )
 
-      deallocate ( fseng_soil_p)
-      deallocate ( fseng_snow_p)
-      deallocate ( fevpg_soil_p)
-      deallocate ( fevpg_snow_p)
-      deallocate ( cgrnd_p     )
-      deallocate ( cgrnds_p    )
-      deallocate ( cgrndl_p    )
-      deallocate ( dlrad_p     )
-      deallocate ( ulrad_p     )
-      deallocate ( zol_p       )
-      deallocate ( rib_p       )
-      deallocate ( ustar_p     )
-      deallocate ( qstar_p     )
-      deallocate ( tstar_p     )
-      deallocate ( fm_p        )
-      deallocate ( fh_p        )
-      deallocate ( fq_p        )
+      deallocate ( fseng_soil_p )
+      deallocate ( fseng_snow_p )
+      deallocate ( fevpg_soil_p )
+      deallocate ( fevpg_snow_p )
+      deallocate ( cgrnd_p      )
+      deallocate ( cgrnds_p     )
+      deallocate ( cgrndl_p     )
+      deallocate ( dlrad_p      )
+      deallocate ( ulrad_p      )
+      deallocate ( zol_p        )
+      deallocate ( rib_p        )
+      deallocate ( ustar_p      )
+      deallocate ( qstar_p      )
+      deallocate ( tstar_p      )
+      deallocate ( fm_p         )
+      deallocate ( fh_p         )
+      deallocate ( fq_p         )
 
-      deallocate ( hprl_p      )
-      deallocate ( assimsun_p  )
-      deallocate ( etrsun_p    )
-      deallocate ( assimsha_p  )
-      deallocate ( etrsha_p    )
-      deallocate ( dheatl_p    )
+      deallocate ( hprl_p       )
+      deallocate ( assimsun_p   )
+      deallocate ( etrsun_p     )
+      deallocate ( assimsha_p   )
+      deallocate ( etrsha_p     )
+      deallocate ( dheatl_p     )
+#ifdef MaterialTransport
       deallocate ( canopy_smelt_mass_p_local )
       deallocate ( canopy_frzc_mass_p_local  )
       deallocate ( raw_trc_p )
+#endif
 
 ENDIF
+#endif
 
+#ifdef MaterialTransport
       IF (present(canopy_smelt_mass_th)) canopy_smelt_mass_th = canopy_smelt_mass_local
       IF (present(canopy_frzc_mass_th))  canopy_frzc_mass_th  = canopy_frzc_mass_local
       IF (present(raw_trc_th)) raw_trc_th = raw_trc_local
-
+#endif
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
-#ifdef CaMa_Flood
-      IF (CSETFILE == 'NONE' .and. LWEVAP .and. patchtype == 0 .and. &
-          flddepth > 0._r8 .and. fldfrc > EPSILON(1._r8)) THEN
-#else
+      ! CaMa: inundation evaporation is part of the ground energy balance
       IF (LWEVAP .and. patchtype == 0 .and. &
           flddepth > 0._r8 .and. fldfrc > EPSILON(1._r8)) THEN
-#endif
          fldfrc_eff = MIN(1._r8, MAX(0._r8, fldfrc))
          flood_evap_active = fldfrc_eff > 0._r8
          fseng_land = fseng; fseng_soil_land = fseng_soil; fseng_snow_land = fseng_snow
@@ -1303,7 +1319,6 @@ ENDIF
       ENDIF
 #endif
 
-
 !=======================================================================
 ! [5] Ground temperature
 !=======================================================================
@@ -1311,19 +1326,25 @@ ENDIF
       CALL GroundTemperature (patchtype,is_dry_lake,lb,nl_soil,deltim,&
                       capr,cnfac,vf_quartz,vf_gravels,vf_om,vf_sand,wf_gravels,wf_sand,&
                       porsl,psi0,&
+#ifdef Campbell_SOIL_MODEL
                       bsw,&
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
                       theta_r, alpha_vgm, n_vgm, L_vgm,&
                       sc_vgm , fc_vgm,&
+#endif
                       csol,k_solids,dksatu,dksatf,dkdry,&
                       BA_alpha,BA_beta,&
                       sigf,dz_soisno,z_soisno,zi_soisno,&
                       t_soisno,t_grnd,t_soil,t_snow,wice_soisno,wliq_soisno,scv,snowdp,fsno,&
                       frl,dlrad,sabg,sabg_soil,sabg_snow,sabg_snow_lyr,&
                       fseng,fseng_soil,fseng_snow,fevpg,fevpg_soil,fevpg_snow,cgrnd,htvp,emg,&
+#ifdef MaterialTransport
                       imelt,snofrz,sm,xmf,fact,pg_rain,pg_snow,t_precip &
-                     ,qphs_thaw_lay=qphs_thaw_lay_th, &
-                      qphs_frzc_lay=qphs_frzc_lay_th &
-                      )
+                     ,qphs_thaw_lay=qphs_thaw_lay_th, qphs_frzc_lay=qphs_frzc_lay_th)
+#else
+                      imelt,snofrz,sm,xmf,fact,pg_rain,pg_snow,t_precip)
+#endif
 
 !=======================================================================
 ! [6] Correct fluxes to present soil temperature
@@ -1447,13 +1468,13 @@ ELSE
       ENDIF
 ENDIF
 
+
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
       IF (flood_evap_active) THEN
          fevpg = fevpg + fevpg_fld
          fevpg_soil = fevpg_soil + fevpg_fld
          fevpg_snow = fevpg_snow + fevpg_fld
       ENDIF
-#else
 #endif
 
 ! total fluxes to atmosphere
@@ -1535,7 +1556,7 @@ ENDIF
          errore = errore - (t_soisno(j)-t_soisno_bef(j))/fact(j)
       ENDDO
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       IF (abs(errore) > .5) THEN
       write(6,*) 'MOD_Thermal.F90: energy balance violation'
       write(6,*) ipatch,errore,sabv,sabg,frl,olrg,fsenl,fseng,hvap*fevpl,htvp*fevpg,xmf,hprl
@@ -1543,7 +1564,7 @@ ENDIF
       CALL CoLM_stop ()
       ENDIF
 100   format(10(f15.3))
-      ENDIF
+#endif
 
   END SUBROUTINE THERMAL
 

@@ -289,7 +289,6 @@ CONTAINS
    SUBROUTINE levee_fldstg (i, vol_total, wdsrf, levsto_out, levdph_out, fldfrc)
    ! =========================================================================
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_Grid_RiverLakeNetwork, only: topo_rivlen, topo_rivwth, topo_area, &
       floodplain_curve
    IMPLICIT NONE
@@ -457,7 +456,7 @@ CONTAINS
          levsto_out = MAX(vol_total - rivsto - fldsto_unprot, 0._r8)
       ENDIF
 
-      IF (DEF_USE_CoLMDEBUG) THEN
+#if (defined CoLMDEBUG)
       ! Debug invariant checks for the levee storage partition:
       ! visible_volume + levsto_out == vol_total by construction, with
       ! non-negative partitions and bounded flood fraction.
@@ -472,7 +471,7 @@ CONTAINS
             ' levdph=', levdph_out, ' fldfrc=', fldfrc
          CALL CoLM_stop()
       ENDIF
-      ENDIF
+#endif
 
    END SUBROUTINE levee_fldstg
 

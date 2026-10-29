@@ -13,8 +13,9 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
    USE MOD_AggregationRequestData
    USE MOD_Const_LC
    USE MOD_5x5DataReadin
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    USE MOD_LandPFT
-   USE MOD_Filesystem, ONLY: make_directory
+#endif
 
    IMPLICIT NONE
 
@@ -30,9 +31,11 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
    real(r8) :: sumarea
    logical :: raw_exists
 
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    type(block_data_real8_3d) :: pftPCT
    real(r8), allocatable :: ncd_pft(:), ncw_pft(:), bcw_pft(:), pct_one(:,:)
    integer :: ip, p, wmo_src
+#endif
 
    write(cyear,'(i4.4)') lc_year
    landdir = trim(dir_model_landdata) // '/cstructure/' // trim(cyear)
@@ -50,40 +53,35 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
 #endif
    IF (p_is_master) THEN
       write(*,'(/,A)') 'Aggregate canopy structure for CoLM2024 interception ...'
-      CALL make_directory(trim(adjustl(landdir)))
+      CALL system('mkdir -p ' // trim(adjustl(landdir)))
    ENDIF
 #ifdef USEMPI
    CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-! LULC_IGBP_PFT/PC are runtime subgrids (DEF_USE_PFT/PC) on an IGBP/USGS kernel.
-#if (defined LULC_USGS || defined LULC_IGBP)
+#if (defined LULC_USGS || defined LULC_IGBP || defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    IF (p_is_io) THEN
       CALL allocate_block_data (gland, ncd_grid)
       CALL allocate_block_data (gland, ncw_grid)
       CALL allocate_block_data (gland, bcw_grid)
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL allocate_block_data (gland, pftPCT, N_PFT_modis, lb1=0)
-      ENDIF
+#endif
 
       CALL read_5x5_data (dir_5x5, suffix, gland, 'NEEDLELEAF_CROWN_DEPTH', ncd_grid)
       CALL read_5x5_data (dir_5x5, suffix, gland, 'NEEDLELEAF_CROWN_WIDTH', ncw_grid)
       CALL read_5x5_data (dir_5x5, suffix, gland, 'BROADLEAF_CROWN_WIDTH', bcw_grid)
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       CALL read_5x5_data_pft (trim(dir_rawdata)//'/plant_15s', 'MOD'//trim(cyear), &
                               gland, 'PCT_PFT', pftPCT)
-      ENDIF
+#endif
 #ifdef USEMPI
-      ! pftPCT is an optional input: pass it only when the PFT/PC subgrid is active.
-      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-         CALL aggregation_data_daemon (gland, data_r8_2d_in1=ncd_grid, &
-            data_r8_2d_in2=ncw_grid, data_r8_2d_in3=bcw_grid &
-            , data_r8_3d_in1=pftPCT, n1_r8_3d_in1=16 &
-            )
-      ELSE
-         CALL aggregation_data_daemon (gland, data_r8_2d_in1=ncd_grid, &
-            data_r8_2d_in2=ncw_grid, data_r8_2d_in3=bcw_grid)
-      ENDIF
+      CALL aggregation_data_daemon (gland, data_r8_2d_in1=ncd_grid, &
+         data_r8_2d_in2=ncw_grid, data_r8_2d_in3=bcw_grid &
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+         , data_r8_3d_in1=pftPCT, n1_r8_3d_in1=16 &
+#endif
+         )
 #endif
    ENDIF
 
@@ -92,15 +90,15 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
       ncd_patch = -1.0e36_r8
       ncw_patch = -1.0e36_r8
       bcw_patch = -1.0e36_r8
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       allocate(ncd_pft(numpft), ncw_pft(numpft), bcw_pft(numpft))
       ncd_pft = -1.0e36_r8
       ncw_pft = -1.0e36_r8
       bcw_pft = -1.0e36_r8
-      ENDIF
+#endif
 
       DO ipatch = 1, numpatch
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          IF (ipatch == wmo_patch(landpatch%ielm(ipatch))) THEN
             wmo_src = wmo_source(landpatch%ielm(ipatch))
             ncd_patch(ipatch) = ncd_patch(wmo_src)
@@ -112,22 +110,17 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
             bcw_pft(ip) = bcw_patch(ipatch)
             CYCLE
          ENDIF
-      ENDIF
+#endif
 
-         IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-            CALL aggregation_request_data (landpatch, ipatch, gland, zip=USE_zip_for_aggregation, &
-               area=area_one, data_r8_2d_in1=ncd_grid, data_r8_2d_out1=ncd_one, &
-               data_r8_2d_in2=ncw_grid, data_r8_2d_out2=ncw_one, &
-               data_r8_2d_in3=bcw_grid, data_r8_2d_out3=bcw_one &
-               , data_r8_3d_in1=pftPCT, data_r8_3d_out1=pct_one, &
-               n1_r8_3d_in1=16, lb1_r8_3d_in1=0 &
-               )
-         ELSE
-            CALL aggregation_request_data (landpatch, ipatch, gland, zip=USE_zip_for_aggregation, &
-               area=area_one, data_r8_2d_in1=ncd_grid, data_r8_2d_out1=ncd_one, &
-               data_r8_2d_in2=ncw_grid, data_r8_2d_out2=ncw_one, &
-               data_r8_2d_in3=bcw_grid, data_r8_2d_out3=bcw_one)
-         ENDIF
+         CALL aggregation_request_data (landpatch, ipatch, gland, zip=USE_zip_for_aggregation, &
+            area=area_one, data_r8_2d_in1=ncd_grid, data_r8_2d_out1=ncd_one, &
+            data_r8_2d_in2=ncw_grid, data_r8_2d_out2=ncw_one, &
+            data_r8_2d_in3=bcw_grid, data_r8_2d_out3=bcw_one &
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
+            , data_r8_3d_in1=pftPCT, data_r8_3d_out1=pct_one, &
+            n1_r8_3d_in1=16, lb1_r8_3d_in1=0 &
+#endif
+            )
 
          sumarea = sum(area_one, mask=ncd_one > 0._r8 .and. ncd_one < 1000._r8)
          IF (sumarea > 0._r8) ncd_patch(ipatch) = &
@@ -139,7 +132,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
          IF (sumarea > 0._r8) bcw_patch(ipatch) = &
             sum(bcw_one*area_one, mask=bcw_one > 0._r8 .and. bcw_one < 1000._r8) / sumarea
 
-      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
          pct_one = max(pct_one, 0._r8)
 #ifndef CROP
          IF (patchtypes(landpatch%settyp(ipatch)) == 0) THEN
@@ -181,7 +174,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
             bcw_pft(ip) = bcw_patch(ipatch)
 #endif
          ENDIF
-      ENDIF
+#endif
       ENDDO
 
 #ifdef USEMPI
@@ -206,7 +199,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
    CALL ncio_define_dimension_vector (lndname, landpatch, 'patch')
    CALL ncio_write_vector (lndname, 'bcw_patches', 'patch', landpatch, bcw_patch, DEF_Srfdata_CompressLevel)
 
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
    lndname = trim(landdir)//'/ncd_pfts.nc'
    CALL ncio_create_file_vector (lndname, landpft)
    CALL ncio_define_dimension_vector (lndname, landpft, 'pft')
@@ -219,7 +212,7 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
    CALL ncio_create_file_vector (lndname, landpft)
    CALL ncio_define_dimension_vector (lndname, landpft, 'pft')
    CALL ncio_write_vector (lndname, 'bcw_pfts', 'pft', landpft, bcw_pft, DEF_Srfdata_CompressLevel)
-      ENDIF
+#endif
 
    IF (p_is_worker) THEN
       deallocate(ncd_patch, ncw_patch, bcw_patch)
@@ -227,10 +220,10 @@ SUBROUTINE Aggregation_CanopyStructure (gland, dir_rawdata, dir_model_landdata, 
       IF (allocated(ncw_one)) deallocate(ncw_one)
       IF (allocated(bcw_one)) deallocate(bcw_one)
       IF (allocated(area_one)) deallocate(area_one)
-      IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
+#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)
       deallocate(ncd_pft, ncw_pft, bcw_pft)
       IF (allocated(pct_one)) deallocate(pct_one)
-      ENDIF
+#endif
    ENDIF
 #endif
 

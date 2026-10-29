@@ -477,7 +477,7 @@ fn gen_histmap() -> Result<()> {
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let mut vars = hist::extract(&text)?;
 
-    let src = root.join("vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90");
+    let src = root.join("vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Hist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let mut methane = hist::extract_at_least(&text, 100)?;
@@ -769,6 +769,9 @@ fn owner_prefix(type_name: &str) -> &'static str {
         "nl_simulation_time_type" => "DEF_simulation_time",
         "nl_forcing_type" => "DEF_forcing",
         "history_var_type" => "DEF_hist_vars",
+        "datainfo" => "DEF_rawdata",
+        "rawdata_nml_entry" => "DEF_rawdata_nml",
+        "rawdata_nml_type" => "DEF_rawdata_nml",
         other => panic!("unknown derived type {other}: add it to owner_prefix"),
     }
 }

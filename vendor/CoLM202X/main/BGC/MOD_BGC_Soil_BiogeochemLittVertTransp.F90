@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 MODULE MOD_BGC_Soil_BiogeochemLittVertTransp
 
 !----------------------------------------------------------------------------------------------------
@@ -329,3 +330,4 @@ CONTAINS
    END SUBROUTINE SoilBiogeochemLittVertTransp
 
 END MODULE MOD_BGC_Soil_BiogeochemLittVertTransp
+#endif

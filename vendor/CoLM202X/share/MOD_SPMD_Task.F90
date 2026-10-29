@@ -29,10 +29,9 @@ MODULE MOD_SPMD_Task
 !-----------------------------------------------------------------------------------------
 
    USE MOD_Precision
-#ifdef USEMPI
-   USE mpi
-#endif
    IMPLICIT NONE
+
+   include 'mpif.h'
 
 #ifndef USEMPI
 
@@ -55,46 +54,45 @@ MODULE MOD_SPMD_Task
 #else
    integer, parameter :: p_root = 0
 
-   logical :: p_is_master = .false.
-   logical :: p_is_io = .false.
-   logical :: p_is_worker = .false.
-   logical :: p_is_writeback = .false.
-   logical :: p_mpi_owned = .false.
+   logical :: p_is_master
+   logical :: p_is_io
+   logical :: p_is_worker
+   logical :: p_is_writeback
 
-   integer :: p_comm_glb_plus = MPI_COMM_NULL
-   integer :: p_iam_glb_plus = -1
+   integer :: p_comm_glb_plus
+   integer :: p_iam_glb_plus
 
    ! Global communicator
-   integer :: p_comm_glb = MPI_COMM_NULL
-   integer :: p_iam_glb = -1
-   integer :: p_np_glb = 0
+   integer :: p_comm_glb
+   integer :: p_iam_glb
+   integer :: p_np_glb
 
    ! Processes in the same working group
-   integer :: p_comm_group = MPI_COMM_NULL
-   integer :: p_iam_group = -1
-   integer :: p_np_group = 0
+   integer :: p_comm_group
+   integer :: p_iam_group
+   integer :: p_np_group
 
-   integer :: p_my_group = -1
+   integer :: p_my_group
 
-   integer :: p_address_master = -1
+   integer :: p_address_master
 
    ! Input/output processes
-   integer :: p_comm_io = MPI_COMM_NULL
-   integer :: p_iam_io = -1
-   integer :: p_np_io = 0
+   integer :: p_comm_io
+   integer :: p_iam_io
+   integer :: p_np_io
 
    integer, allocatable :: p_itis_io (:)
    integer, allocatable :: p_address_io (:)
 
    ! Processes carrying out computing work
-   integer :: p_comm_worker = MPI_COMM_NULL
-   integer :: p_iam_worker = -1
-   integer :: p_np_worker = 0
+   integer :: p_comm_worker
+   integer :: p_iam_worker
+   integer :: p_np_worker
 
    integer, allocatable :: p_itis_worker (:)
    integer, allocatable :: p_address_worker (:)
 
-   integer :: p_address_writeback = -1
+   integer :: p_address_writeback
 
    integer :: p_stat (MPI_STATUS_SIZE)
    integer :: p_err
@@ -119,27 +117,6 @@ MODULE MOD_SPMD_Task
 
 CONTAINS
 
-   ! -----------------------------------------
-   SUBROUTINE spmd_partition_range (nitem, ifirst, ilast)
-
-   IMPLICIT NONE
-   integer, intent(in)  :: nitem
-   integer, intent(out) :: ifirst, ilast
-   integer :: nave, nres, nlocal
-
-      nave = nitem / p_np_glb
-      nres = mod(nitem, p_np_glb)
-      IF (p_iam_glb < nres) THEN
-         nlocal = nave + 1
-         ifirst = p_iam_glb * nlocal + 1
-      ELSE
-         nlocal = nave
-         ifirst = nres * (nave + 1) + (p_iam_glb - nres) * nave + 1
-      ENDIF
-      ilast = ifirst + nlocal - 1
-
-   END SUBROUTINE spmd_partition_range
-
 #ifdef USEMPI
    !-----------------------------------------
    SUBROUTINE spmd_init (MyComm_r)
@@ -149,28 +126,10 @@ CONTAINS
    logical mpi_inited
 
       CALL MPI_INITIALIZED (mpi_inited, p_err)
-      p_mpi_owned = .not. mpi_inited
 
-      IF (p_mpi_owned) THEN
+      IF ( .not. mpi_inited ) THEN
          CALL mpi_init (p_err)
       ENDIF
-
-      p_is_io = .false.
-      p_is_worker = .false.
-      p_is_writeback = .false.
-      p_comm_glb_plus = MPI_COMM_NULL
-      p_iam_glb_plus = -1
-      p_comm_group = MPI_COMM_NULL
-      p_iam_group = -1
-      p_np_group = 0
-      p_comm_io = MPI_COMM_NULL
-      p_iam_io = -1
-      p_np_io = 0
-      p_comm_worker = MPI_COMM_NULL
-      p_iam_worker = -1
-      p_np_worker = 0
-      p_my_group = -1
-      p_address_writeback = -1
 
       IF (present(MyComm_r)) THEN
          CALL MPI_Comm_dup (MyComm_r, p_comm_glb, p_err)
@@ -182,11 +141,7 @@ CONTAINS
       CALL mpi_comm_rank (p_comm_glb, p_iam_glb, p_err)
       CALL mpi_comm_size (p_comm_glb, p_np_glb,  p_err)
 
-#ifdef FLAT_SPMD
-      p_address_master = p_root
-#else
       p_address_master = p_np_glb-1
-#endif
       p_is_master = (p_iam_glb == p_address_master)
 
       p_is_writeback = .false.
@@ -198,9 +153,6 @@ CONTAINS
 
    IMPLICIT NONE
 
-#ifdef FLAT_SPMD
-      CALL CoLM_stop ('FLAT_SPMD does not reserve a writeback rank; set DEF_HIST_WriteBack = .false.')
-#else
    integer :: p_np_glb_plus
 
       CALL MPI_Comm_dup  (p_comm_glb, p_comm_glb_plus, p_err)
@@ -225,12 +177,8 @@ CONTAINS
 
       ELSE
          CALL mpi_comm_split (p_comm_glb_plus, MPI_UNDEFINED, p_iam_glb_plus, p_comm_glb, p_err)
-         p_comm_glb = MPI_COMM_NULL
-         p_iam_glb = -1
-         p_np_glb = 0
          p_is_master = .false.
       ENDIF
-#endif
 
    END SUBROUTINE spmd_assign_writeback
 
@@ -248,38 +196,6 @@ CONTAINS
    integer :: nave, nres, igrp, key, nwrt
    character(len=512) :: info
    character(len=5)   :: cnum
-
-#ifdef FLAT_SPMD
-      p_is_io = .true.
-      p_is_worker = .true.
-      p_my_group = 0
-
-      p_comm_io = p_comm_glb
-      p_iam_io = p_iam_glb
-      p_np_io = p_np_glb
-
-      p_comm_worker = p_comm_glb
-      p_iam_worker = p_iam_glb
-      p_np_worker = p_np_glb
-
-      p_comm_group = p_comm_glb
-      p_iam_group = p_iam_glb
-      p_np_group = p_np_glb
-
-      allocate (p_itis_io (0:p_np_glb-1), p_address_io (0:p_np_glb-1))
-      allocate (p_itis_worker (0:p_np_glb-1), p_address_worker (0:p_np_glb-1))
-      DO iproc = 0, p_np_glb-1
-         p_itis_io(iproc) = iproc
-         p_address_io(iproc) = iproc
-         p_itis_worker(iproc) = iproc
-         p_address_worker(iproc) = iproc
-      ENDDO
-
-      IF (p_is_master) THEN
-         write (*,'(A,I0,A)') '----- Flat SPMD: ', p_np_glb, ' computing ranks -----'
-      ENDIF
-      RETURN
-#endif
 
       ! 1. Determine number of groups
       IF (ngrp <= 0) THEN
@@ -401,21 +317,11 @@ CONTAINS
       IF (allocated(p_itis_worker   )) deallocate (p_itis_worker   )
       IF (allocated(p_address_worker)) deallocate (p_address_worker)
 
-      IF ((.not. p_is_writeback) .and. p_comm_glb /= MPI_COMM_NULL) THEN
+      IF (.not. p_is_writeback) THEN
          CALL mpi_barrier (p_comm_glb, p_err)
       ENDIF
 
-#ifdef FLAT_SPMD
-      IF (p_comm_glb /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb, p_err)
-#else
-      IF (p_comm_group /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_group, p_err)
-      IF (p_is_io .and. p_comm_io /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_io, p_err)
-      IF (p_is_worker .and. p_comm_worker /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_worker, p_err)
-      IF (p_comm_glb /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb, p_err)
-      IF (p_comm_glb_plus /= MPI_COMM_NULL) CALL mpi_comm_free (p_comm_glb_plus, p_err)
-#endif
-
-      IF (p_mpi_owned) CALL mpi_finalize(p_err)
+      CALL mpi_finalize(p_err)
 
    END SUBROUTINE spmd_exit
 
@@ -428,12 +334,11 @@ CONTAINS
    character(len=*), optional :: mesg
 
       IF (present(mesg)) write(*,*) trim(mesg)
-      flush(6)
 
 #ifdef USEMPI
       CALL mpi_abort (p_comm_glb, 1, p_err)
 #else
-      STOP 1
+      STOP
 #endif
 
    END SUBROUTINE CoLM_stop

@@ -1,4 +1,5 @@
 #include <define.h>
+#ifdef BGC
 
 MODULE MOD_BGC_CNCStateUpdate2
 
@@ -172,3 +173,4 @@ CONTAINS
    END SUBROUTINE CStateUpdate2
 
 END MODULE MOD_BGC_CNCStateUpdate2
+#endif

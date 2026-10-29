@@ -1,5 +1,6 @@
 #include <define.h>
 
+#ifdef BGC
 MODULE MOD_BGC_CNAnnualUpdate
 
 !------------------------------------------------------------------------------------------------------
@@ -77,3 +78,4 @@ CONTAINS
 
 END MODULE MOD_BGC_CNAnnualUpdate
 
+#endif
