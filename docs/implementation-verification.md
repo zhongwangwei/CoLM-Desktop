@@ -39298,3 +39298,14 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - Tauri：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **569 passed / 0 failed / 1 ignored**。
 - 前端：typecheck/lint/format:check exit 0；`npm test` → **1267 passed / 0 failed**；`npm run contract` 生成 262 条命令（assistant_send 新增可选 requestId）；`xtask check-gui` → 262 registered / 224 called / 26 dynamic，事件均有 emitter/listener。
 - 未运行：真实窗口目视/点击、真实 GitHub commit/PR 页面、真实历史仓库端到端、真实模型 API/外部后端、Windows 分支。
+
+## U01 收口：仓库数据同步进度（2026-10-29）
+
+- 后端 `assistant_history_sync(repository, offline)` 已支持单仓库，因此前端“准备/更新数据”与“离线更新”改为**逐仓库顺序同步**（desktop → colm_upstream），不再一次传 `both`：
+  - 进度 `{done,total,current,offline}` 显示“正在同步 Desktop（1/2）…”“正在同步 CoLM 官方（2/2）…”；离线显示“离线更新…”。busy 期间刷新/同步/选择/清除路径全部禁用，`syncRunning` 防重复。
+  - 每步（成功/失败/取消）后用 quiet 模式刷新 `assistant_history_status`（不闪 busy），结束再刷一次；状态读取失败保留上次好行。
+  - 单仓失败记录原因并**继续**第二个仓库，结束区分全部成功/部分失败/全部失败；合并 actions 保持既有每仓汇总，错误用双语仓名 + 后端原文。
+  - 停止同步：置取消标记 + `assistant_history_cancel()`；当前调用返回后不再发起下一仓库，显示“已停止同步；剩余的仓库步骤没有发起。”并刷新状态、清零 busy。
+- 测试（settings-history.test.ts，13 passed）：在线顺序 desktop→status→colm→status→status、进度 1/2→2/2→null；第一步失败仍执行第二步并报 partial、失败后仍刷新；离线两步都 offline=true；两步都失败且 status 读取失败时保留上次好状态；取消只发一次第一步、不再发第二步、outcome cancelled；中英文进度/结果文案；原有 status 只读、pick_folder 保存、清除路径、渲染断言保留。
+- 验证：`npm run typecheck`/`lint`/`format:check` exit 0；`npm test` **1271 passed / 0 failed**；`xtask check-gui` 262 registered / 224 called，exit 0。
+- 未覆盖：原生窗口目视；真实网络/GitHub 同步（mock invoke + deferred 模拟取消）；固定同步两个仓库、不按状态跳过；清除路径后仍同步应用管理副本；取消只能阻止当前调用返回后的下一步。
