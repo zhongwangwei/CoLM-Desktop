@@ -75,6 +75,119 @@ fn gridded_case(root: &Path, values: impl Fn(usize, usize, usize) -> f64) -> Pat
     case
 }
 
+/// 2° × 2° 的 4 × 4、0.5° 格点算例（与 [`gridded_case`] 同一区域），全部格子有陆地。
+/// `case.nml` 声明模型分辨率，预检才可能在没有 history 时判断观测产品是否太粗。
+fn gridded_half_degree_case(root: &Path) -> PathBuf {
+    let case = root.join("case");
+    let history = case.join("out/grid/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'grid'\n DEF_HIST_lat_res = 0.5\n DEF_HIST_lon_res = 0.5\n/\n",
+    )
+    .unwrap();
+    let mut file = netcdf::create(history.join("grid_hist_2003-01.nc")).unwrap();
+    file.add_unlimited_dimension("time").unwrap();
+    file.add_dimension("lat", 4).unwrap();
+    file.add_dimension("lon", 4).unwrap();
+    let put = |file: &mut netcdf::FileMut, name: &str, dims: &[&str], data: &[f64]| {
+        file.add_variable::<f64>(name, dims)
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    };
+    let lat_centers = (0..4)
+        .map(|index| 10.25 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let lat_lower = (0..4)
+        .map(|index| 10.0 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let lat_upper = (0..4)
+        .map(|index| 10.5 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let lon_centers = (0..4)
+        .map(|index| 100.25 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let lon_lower = (0..4)
+        .map(|index| 100.0 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let lon_upper = (0..4)
+        .map(|index| 100.5 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    put(&mut file, "lat", &["lat"], &lat_centers);
+    put(&mut file, "lon", &["lon"], &lon_centers);
+    put(&mut file, "lat_s", &["lat"], &lat_lower);
+    put(&mut file, "lat_n", &["lat"], &lat_upper);
+    put(&mut file, "lon_w", &["lon"], &lon_lower);
+    put(&mut file, "lon_e", &["lon"], &lon_upper);
+    put(&mut file, "landarea", &["lat", "lon"], &[1.0; 16]);
+    let mut time = file.add_variable::<i32>("time", &["time"]).unwrap();
+    let ends = (1..=3)
+        .map(|day| model_minutes(JAN1 + day * DAY) as i32)
+        .collect::<Vec<_>>();
+    time.put_values(&ends, 0..3).unwrap();
+    let mut data = Vec::new();
+    for day in 0..3 {
+        for row in 0..4 {
+            for column in 0..4 {
+                data.push((10 * day + 2 * row + column) as f64);
+            }
+        }
+    }
+    let mut field = file
+        .add_variable::<f64>("f_lfevpa", &["time", "lat", "lon"])
+        .unwrap();
+    field.put_values(&data, (0..3, .., ..)).unwrap();
+    case
+}
+
+/// 逐日格点观测产品：`lats × lons` 的规则网格，`values(day, lat_index, lon_index)`。
+fn write_grid_observation(
+    path: &Path,
+    days: usize,
+    lats: &[f64],
+    lons: &[f64],
+    values: impl Fn(usize, usize, usize) -> f64,
+) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", days).unwrap();
+    file.add_dimension("lat", lats.len()).unwrap();
+    file.add_dimension("lon", lons.len()).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "days since 2003-01-01")
+        .unwrap();
+    let labels = (0..days).map(|day| day as f64 + 0.5).collect::<Vec<_>>();
+    time.put_values(&labels, ..).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(lats, ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(lons, ..)
+        .unwrap();
+    let mut data = Vec::new();
+    for day in 0..days {
+        for lat in 0..lats.len() {
+            for lon in 0..lons.len() {
+                data.push(values(day, lat, lon));
+            }
+        }
+    }
+    file.add_variable::<f64>("E", &["time", "lat", "lon"])
+        .unwrap()
+        .put_values(&data, ..)
+        .unwrap();
+}
+
+fn grid_target(observation: &Path) -> TargetSpec {
+    serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "grid", "path": observation, "variable": "E"}
+    }))
+    .unwrap()
+}
+
 #[test]
 fn calendar_helpers_round_trip_and_cut_periods() {
     for days in [-1_000, 0, 12_053, 20_000] {
@@ -581,6 +694,143 @@ fn partial_spatial_coverage_pairs_only_covered_cells_and_reports_the_ratio() {
     assert_eq!(paired.obs, [1.0, 2.0, 3.0]);
     // 3 个陆地格子里只覆盖了 1 个。
     assert!((paired.space_coverage.unwrap() - 1.0 / 3.0).abs() < 1e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #17：观测产品 1° 像元比 0.5° 模型格粗时，格心只落进 4/16 个模型格：
+/// 必须给出可行动警告，并如实报告偏低的空间覆盖率；配对方式不变（仍 in-cell）。
+#[test]
+fn a_coarser_observation_product_warns_that_space_coverage_is_understated() {
+    let root = scratch("coarse-observation");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-coarse.nc");
+    // 1° 格心（10.5/11.5、100.5/101.5）落在 0.5° 网格的奇数行/列，即 4 个模型格。
+    write_grid_observation(
+        &observation,
+        3,
+        &[10.5, 11.5],
+        &[100.5, 101.5],
+        |day, row, column| (10 * day + 2 * (2 * row + 1) + (2 * column + 1)) as f64,
+    );
+    let target = grid_target(&observation);
+    let paired = grid_pairs(&case, &target, (JAN1, JAN1 + 3 * DAY)).unwrap();
+    // 每天 4 个格心配对，值仍与模型格一一对应。
+    assert_eq!(paired.model.len(), 12);
+    assert_eq!(paired.model, paired.obs);
+    assert!((paired.space_coverage.unwrap() - 4.0 / 16.0).abs() < 1e-12);
+    assert_eq!(paired.warnings.len(), 1, "{:?}", paired.warnings);
+    let warning = &paired.warnings[0];
+    assert!(warning.contains("coarser than the model grid"), "{warning}");
+    assert!(warning.contains("in-cell matching"), "{warning}");
+    assert!(
+        warning.contains("space_coverage will be understated"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("resampling is not implemented"),
+        "{warning}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 0.1° 观测比 0.5° 模型格细：每个模型格都有格心落入，覆盖率 100%，不能误报"产品太粗"。
+#[test]
+fn a_finer_observation_product_does_not_warn() {
+    let root = scratch("fine-observation");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-fine.nc");
+    let centers = (0..20)
+        .map(|index| 10.05 + 0.1 * index as f64)
+        .collect::<Vec<_>>();
+    let lon_centers = (0..20)
+        .map(|index| 100.05 + 0.1 * index as f64)
+        .collect::<Vec<_>>();
+    write_grid_observation(
+        &observation,
+        3,
+        &centers,
+        &lon_centers,
+        |day, row, column| {
+            // 每个 0.5° 模型格收 5 × 5 个 0.1° 格心，值按所在模型格给。
+            (10 * day + 2 * (row / 5) + (column / 5)) as f64
+        },
+    );
+    let target = grid_target(&observation);
+    let paired = grid_pairs(&case, &target, (JAN1, JAN1 + 3 * DAY)).unwrap();
+    assert_eq!(paired.model.len(), 3 * 16);
+    assert_eq!(paired.model, paired.obs);
+    assert!((paired.space_coverage.unwrap() - 1.0).abs() < 1e-12);
+    assert!(paired.warnings.is_empty(), "{:?}", paired.warnings);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 单点观测没有 lat/lon 轴间距，无法判断产品粗细：不能崩溃，也不能拿一条虚假间距误报。
+#[test]
+fn a_single_point_observation_is_skipped_by_the_coarse_product_check() {
+    let root = scratch("single-point-observation");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-single.nc");
+    write_grid_observation(&observation, 3, &[10.25], &[100.25], |day, _, _| {
+        (10 * day) as f64
+    });
+    let target = grid_target(&observation);
+    let paired = grid_pairs(&case, &target, (JAN1, JAN1 + 3 * DAY)).unwrap();
+    assert_eq!(paired.model.len(), 3);
+    assert!((paired.space_coverage.unwrap() - 1.0 / 16.0).abs() < 1e-12);
+    assert!(paired.warnings.is_empty(), "{:?}", paired.warnings);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 预检也要能识别粗产品：模型分辨率取 `case.nml` 的声明值；声明不出来（单点/非结构网格）
+/// 时跳过，不拿缺省值误报；细产品和单点产品都不告警。
+#[test]
+fn preflight_reports_a_coarse_product_only_when_the_model_resolution_is_known() {
+    let root = scratch("preflight-coarse");
+    let case = gridded_half_degree_case(&root);
+    let planned = ["f_lfevpa"].into_iter().map(String::from).collect();
+
+    let coarse = root.join("obs-coarse.nc");
+    write_grid_observation(&coarse, 3, &[10.5, 11.5], &[100.5, 101.5], |_, _, _| 1.0);
+    let warnings = preflight_observation(&case, &grid_target(&coarse), &planned).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("coarser than the model grid"),
+        "{warnings:?}"
+    );
+
+    let fine = root.join("obs-fine.nc");
+    let centers = (0..20)
+        .map(|index| 10.05 + 0.1 * index as f64)
+        .collect::<Vec<_>>();
+    let lon_centers = (0..20)
+        .map(|index| 100.05 + 0.1 * index as f64)
+        .collect::<Vec<_>>();
+    write_grid_observation(&fine, 3, &centers, &lon_centers, |_, _, _| 1.0);
+    assert!(preflight_observation(&case, &grid_target(&fine), &planned)
+        .unwrap()
+        .is_empty());
+
+    let single = root.join("obs-single.nc");
+    write_grid_observation(&single, 3, &[10.25], &[100.25], |_, _, _| 1.0);
+    assert!(
+        preflight_observation(&case, &grid_target(&single), &planned)
+            .unwrap()
+            .is_empty()
+    );
+
+    // 没有声明分辨率的算例（比如单点或非结构网格）：不可算就跳过，不能误报。
+    let undeclared = root.join("undeclared");
+    std::fs::create_dir_all(&undeclared).unwrap();
+    std::fs::write(
+        undeclared.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'undeclared'\n/\n",
+    )
+    .unwrap();
+    assert!(
+        preflight_observation(&undeclared, &grid_target(&coarse), &planned)
+            .unwrap()
+            .is_empty()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

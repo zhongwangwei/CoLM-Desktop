@@ -429,6 +429,9 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
             return Ok(());
         }
     }
+    // 预检没有 StudyState 可写，只能在创建研究前把可行动警告打到 stderr；同一份观测
+    // 会按站点重复检查，先跨站点去重，避免多站点研究把同一条警告刷屏。
+    let mut observation_warnings = std::collections::BTreeSet::new();
     for (site, case) in &sites {
         let planned = crate::planned_history_variables(&case.join("case.nml"), &resolved)?;
         for target in spec
@@ -466,7 +469,9 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
             }
             let observation = match &target.source {
                 Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. }) => {
-                    super::targets::preflight_observation(&case_root, target, &planned)?;
+                    observation_warnings.extend(super::targets::preflight_observation(
+                        &case_root, target, &planned,
+                    )?);
                     continue;
                 }
                 Some(TargetSource::Station { path, .. }) => resolve_observation(&case_root, path)?,
@@ -522,6 +527,9 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
                 preflight_observation_window(&observation, site, target, true)?;
             }
         }
+    }
+    for warning in &observation_warnings {
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }
@@ -3964,8 +3972,9 @@ fn paired_target_result(
         // 格点/水文站的聚合不做覆盖率门槛（观测产品本来就有缺测），所以没有丢掉的时段。
         periods_dropped: Some(paired.dropped),
         space_coverage: paired.space_coverage,
-        // 格点产品/水文站不走 `compute_metric_rows`，没有解码警告可带。
-        warnings: Vec::new(),
+        // 格点产品/水文站不走 `compute_metric_rows`，没有解码警告；但"观测产品比模型格粗、
+        // space_coverage 会偏低"这类口径警告由 `targets::grid_pairs` 生成，必须带出来。
+        warnings: paired.warnings,
     })
 }
 

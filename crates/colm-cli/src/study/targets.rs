@@ -30,6 +30,9 @@ pub(super) struct Paired {
     pub dropped: usize,
     /// 格点产品目标里"模型格子里有观测"的比例；单点/水文站目标为 `None`。
     pub space_coverage: Option<f64>,
+    /// 观测产品本身带来的评估口径警告（目前是"像元比模型格粗"）。与解码警告一样走
+    /// `TargetResult.warnings` → 研究级诊断的通道，不能只留在目标结果里。
+    pub warnings: Vec<String>,
 }
 
 impl Paired {
@@ -173,6 +176,87 @@ fn median_step_seconds(times: &[i64]) -> Option<i64> {
         .collect::<Vec<_>>();
     gaps.sort_unstable();
     gaps.get(gaps.len() / 2).copied()
+}
+
+/// 一条坐标轴（lat 或 lon）上相邻坐标的中位间距（度）。
+///
+/// 经向必须按环形最短距离算：全球观测产品的经度轴会从 179.x 跳回 -179.x，直接相减得到
+/// 接近 360 的假间距，会把正常产品误报成"比模型格粗"。轴不足两个坐标（单点产品）、含
+/// 非有限值或有重复坐标（间距为 0）时返回 `None` —— 无法判断就跳过，不猜。
+fn axis_spacing(values: &[f64], circular: bool) -> Option<f64> {
+    if values.len() < 2 || values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let mut gaps = Vec::with_capacity(values.len() - 1);
+    for pair in values.windows(2) {
+        let raw = pair[1] - pair[0];
+        let gap = if circular {
+            let raw = raw.rem_euclid(360.0);
+            raw.min(360.0 - raw)
+        } else {
+            raw.abs()
+        };
+        // 0 间距说明轴上有重复坐标（不规则产品），中位数不能代表像元大小。
+        if gap.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return None;
+        }
+        gaps.push(gap);
+    }
+    gaps.sort_unstable_by(f64::total_cmp);
+    gaps.get(gaps.len() / 2).copied()
+}
+
+/// 一组格边界跨度的中位数；任一边界无效时返回 `None`，免得用半张网格推出错误的尺度。
+fn median_span(spans: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut spans = spans.collect::<Vec<_>>();
+    if spans.is_empty() || spans.iter().any(|span| !span.is_finite() || *span <= 0.0) {
+        return None;
+    }
+    spans.sort_unstable_by(f64::total_cmp);
+    spans.get(spans.len() / 2).copied()
+}
+
+/// 观测像元比模型格粗时给用户的可行动警告。
+///
+/// #17 的背景：in-cell 匹配只认格心落在模型格里的观测像元。观测产品比模型格粗时，
+/// 一个模型格往往收不到任何格心，`space_coverage` 会静默偏低，用户却只看到"覆盖差"
+/// 不知道是产品分辨率的问题。这里只提示，不恢复无界最近邻、也不做重采样 —— 最近邻会
+/// 把域外观测配上（审计 P1-2），重采样还没实现；两者都不能在告警里假装已经做了。
+fn coarse_observation_warning(
+    key: &str,
+    observation: &Path,
+    obs: (f64, f64),
+    model: (f64, f64),
+) -> Option<String> {
+    // 1° 观测配 1° 模型格只是写法不同（坐标轴可能有十进制表示误差），相等不能报"太粗"。
+    let coarser = |obs: f64, model: f64| obs > model * (1.0 + 1e-9);
+    let axes = match (coarser(obs.0, model.0), coarser(obs.1, model.1)) {
+        (false, false) => return None,
+        (true, false) => "lat",
+        (false, true) => "lon",
+        (true, true) => "lat/lon",
+    };
+    Some(format!(
+        "target {key}: the observation product {} has {:.3}° (lat) × {:.3}° (lon) pixels, coarser than the model grid resolution {:.3}° × {:.3}° ({axes} axis). Only observation pixels whose centres fall inside a model cell are matched (in-cell matching, no regridding), so space_coverage will be understated. Use a finer observation product, or resample by pixel boundaries once that is implemented (resampling is not implemented).",
+        observation.display(),
+        obs.0,
+        obs.1,
+        model.0,
+        model.1
+    ))
+}
+
+/// 预检阶段模型网格分辨率只能从 `case.nml` 声明值来：那时还没有 history 可读格边界。
+///
+/// 只认 lat/lon 网格（`DEF_HIST_*` 或 `DEF_GRIDBASED_*`）；非结构/流域网格不写这两个字段，
+/// 返回 `None` 让预检跳过 —— 运行时会用 history 的实际格边界再判一次。
+fn declared_model_resolution(case_root: &Path) -> Option<(f64, f64)> {
+    let text = std::fs::read_to_string(case_root.join("case.nml")).ok()?;
+    let document = colm_namelist::parse(&text).ok()?;
+    let real = |name: &str| document.get(name).and_then(|value| value.as_f64());
+    let lat = real("DEF_HIST_lat_res").or_else(|| real("DEF_GRIDBASED_lat_res"))?;
+    let lon = real("DEF_HIST_lon_res").or_else(|| real("DEF_GRIDBASED_lon_res"))?;
+    (lat > 0.0 && lon > 0.0).then_some((lat, lon))
 }
 
 /// 聚合过程中一个时段的累加器。观测有限数在模型缺测时也要数，所以不能沿用
@@ -328,6 +412,15 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
         space_coverage: Some(space_coverage),
         ..Default::default()
     };
+    // #17：观测产品比模型格粗时，in-cell 匹配只认格心，space_coverage 会静默偏低。
+    // 这里只把口径写进目标警告；不改变配对方式（不做最近邻、不重采样）。
+    if let (Some(obs_spacing), Some(model_resolution)) = (obs.pixel_spacing(), model.resolution()) {
+        if let Some(warning) =
+            coarse_observation_warning(&target.key, Path::new(path), obs_spacing, model_resolution)
+        {
+            paired.warnings.push(warning);
+        }
+    }
     for (start, model_cells) in &model.means {
         let Some(obs_cells) = obs_means.get(start) else {
             continue;
@@ -517,11 +610,15 @@ pub(super) fn grid_period(
 
 /// 建研究前检查格点产品、水文站目标：观测文件读得了、率定期（与验证期）里有观测；格点产品还要算例写出
 /// 要比的那个变量（水文站的流量在汇流 history 里，不在陆面 history 的计划表里，不查）。
+///
+/// 同时返回"观测产品比模型格粗"的警告（#17）：预检阶段还没有 history，模型格分辨率只能取
+/// `case.nml` 的声明值；声明不出来（站点、非结构网格）就跳过，运行时再用 history 的格边界判。
+/// 水文站是点观测，没有像元间距，天然不会因产品分辨率丢格，因此不告警。
 pub(super) fn preflight_observation(
     case_root: &Path,
     target: &TargetSpec,
     planned: &std::collections::BTreeSet<String>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let source = target
         .source
         .as_ref()
@@ -532,7 +629,7 @@ pub(super) fn preflight_observation(
     } else {
         case_root.join(path)
     };
-    let time = match source {
+    let (time, warnings) = match source {
         TargetSource::Grid { variable, .. } => {
             ensure!(
                 planned.contains(&target.variable),
@@ -540,9 +637,23 @@ pub(super) fn preflight_observation(
                 target.key,
                 target.variable
             );
-            GridObservation::open(&path, variable)?.time
+            let observation = GridObservation::open(&path, variable)?;
+            let warnings = match (
+                observation.pixel_spacing(),
+                declared_model_resolution(case_root),
+            ) {
+                (Some(spacing), Some(resolution)) => {
+                    coarse_observation_warning(&target.key, &path, spacing, resolution)
+                        .into_iter()
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            (observation.time, warnings)
         }
-        TargetSource::Gauge { variable, .. } => read_gauge(&path, variable.as_deref())?.0,
+        TargetSource::Gauge { variable, .. } => {
+            (read_gauge(&path, variable.as_deref())?.0, Vec::new())
+        }
         TargetSource::Station { .. } => bail!("target {} is a flux-station target", target.key),
     };
     let windows = std::iter::once((target.from, target.to, "calibration")).chain(
@@ -559,7 +670,7 @@ pub(super) fn preflight_observation(
             path.display()
         );
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn history_files(case: &Path) -> Result<Vec<PathBuf>> {
@@ -621,6 +732,23 @@ struct ModelGrid {
 }
 
 impl ModelGrid {
+    /// 模型格在 lat/lon 方向的典型分辨率（度）：格边界跨度的中位数。
+    ///
+    /// 规则网格上就是 `resolution`；变宽的高斯格/变间距网格用中位数代表典型尺度。
+    /// 边界不完整或跨度为 0 时返回 `None`，让粗分辨率告警跳过而不是用坏数据误报。
+    fn resolution(&self) -> Option<(f64, f64)> {
+        let lat = median_span(
+            self.lat_bounds
+                .iter()
+                .map(|(south, north)| (north - south).abs()),
+        )?;
+        let lon = median_span(self.lon_bounds.iter().map(|&(west, east)| {
+            let west = (west + 180.0).rem_euclid(360.0) - 180.0;
+            crate::lon_width(west, east)
+        }))?;
+        Some((lat, lon))
+    }
+
     fn read(case: &Path, variable: &str, period: TargetPeriod, window: Window) -> Result<Self> {
         Self::read_counted(
             case,
@@ -798,6 +926,14 @@ struct GridObservation {
 }
 
 impl GridObservation {
+    /// 观测像元在 lat/lon 方向的典型间距（度）。单点产品没有第二条坐标，返回 `None`。
+    fn pixel_spacing(&self) -> Option<(f64, f64)> {
+        Some((
+            axis_spacing(&self.lat, false)?,
+            axis_spacing(&self.lon, true)?,
+        ))
+    }
+
     fn open(path: &Path, variable: &str) -> Result<Self> {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let field = file
