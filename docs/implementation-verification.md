@@ -39182,3 +39182,29 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 - `cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3260 passed / 0 failed / 16 ignored**（`colm-cli` 758；`colm-agent` 387 passed + 1 ignored live smoke）。
 - 未运行：真实远程 Study/科学模拟、真实模型 API；GUI 未改；U01–U05 留待下一轮。
+
+## AI 易用性 U01–U02（2026-10-29，历史证据复核报告 U01–U02）
+
+### U01 首次使用“仓库数据”入口（Tauri + 设置页）
+
+- 后端：`AssistantSettings.history`（scope/desktop_path/upstream_path，旧 assistant.json 兼容与校验）；新增 Tauri 命令
+  - `assistant_history_status()`：只读运行 `colm-cli history-repos --history-root <app data>/history --repository both [--desktop-path][--upstream-path]`，返回 CLI JSON + 绝对 `history_root`（可选 `cli_stderr` 摘要），不 fetch；
+  - `assistant_history_sync(repository, offline)`：仅接受 `desktop|colm_upstream|both`，offline=true 才加 `--offline`；同一时刻只允许一个同步，子进程按进程组登记为 `HistorySync` 可被 `assistant_history_cancel()` 终止；失败带 exit code + ≤600 字符 stderr 摘要，超时 180s 终止并报告；
+  - 三个命令 `spawn_blocking`、无 shell 拼接、`top_level_sidecar`，关窗由既有 detached child 清理覆盖。
+- 前端设置新增“仓库数据（只读历史）”区：打开设置只读一次状态（绝不自动同步）；显示 history_root、Desktop/官方两行的身份状态/默认分支、本地仓库或管理副本路径；**“上次成功同步 ref @ 短 SHA · UTC”与“上次检查”分开展示**；last_attempt/持久 errors 去重后错误样式；`legacy_synced` 只显示“旧记录：未证实同步成功”；partial/未准备/身份未核验给出准备说明。按钮：刷新状态、准备/更新数据（both 在线）、离线更新（both offline=true）、每行选择已有本地仓库（`pick_folder` → 以已保存设置为基底保存路径 → 重读状态）、清除本地路径；busy 禁用并显示“正在更新仓库数据…”与“停止同步”；失败保留上次状态并显示双语错误。
+- 配置传递：`configure_message` 带 `history_desktop_path/upstream_path`；agent sidecar 在解析 configure 前将非空值写入 `COLM_HISTORY_DESKTOP_PATH`/`COLM_HISTORY_UPSTREAM_PATH`（None/空串移除），agent 启动的 colm-cli 继承，改路径无需重启进程、不沿用旧值；offline 语义不变。
+- 测试：gui 10 条（settings 默认/校验/旧文件兼容、configure 路径、argv 参数安全、repository 校验、sync 互斥、status/sync 假 CLI、stderr 截断、超时终止、取消）+ agent bin 1 条（`COLM_HISTORY_*` set/remove）；前端 settings-history 9 条（status 只读、失败保留旧行、同步 repository/offline、pick_folder→保存、清除单路径、失败路径不进入状态、busy/双时间/legacy 渲染）。
+- 未覆盖：真实 Tauri 窗口点按钮/原生文件夹对话框/真实 GitHub clone/fetch（网络+凭据）；Windows 分支（macOS 本地验证，Windows 用既有 taskkill 路径）；同步时间显示 UTC。
+
+### U02 聊天范围提示与历史范围选择
+
+- AssistantPanel 输入框上方新增一行：历史范围 Select（自动/当前模型/Desktop/CoLM 官方/两个仓库）+ 当前后端·模型·冻结 revision（优先 `version.code.commit` 前 7 位，否则 `id@revision`；无冻结显示“官方/应用内置”）+ “自动按问题路由；显式范围优先，除非问题明确要求别的仓库”的双语说明。
+- 选择以**已保存设置**为基底写入 `AssistantSettings.history.scope`（设置对话框打开/回答中/保存中禁用且函数自身拒绝），不夹带设置页未保存草稿；每条 `assistant_send` 的 context = 现有 guideState + `history_scope`；`assistant_start` 的 `modelRevision` 行为不变。设置页 settings→draft 同步改为“草稿不脏才重置”，路径保存不吞未保存编辑。
+- 测试：model.test.ts 6 条（默认 auto、确定性 UTC/短 SHA、双语标签、成功/检查/legacy 分离、同步摘要、当前后端模型 revision）；settings-history 9 条；assistant-panel 5 条（scope 落盘、失败保留旧值、禁用条件、send context 含 history_scope、面板显示 revision/提示）。
+
+### 本轮验证（真实执行）
+
+- 根 workspace：`cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3261 passed / 0 failed / 16 ignored**。
+- Tauri workspace：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **563 passed / 0 failed / 1 ignored**。
+- 前端：`npm run typecheck`、`npm run lint`、`npm run format:check` exit 0；`npm test` → **1245 passed / 0 failed**；`xtask check-gui` → 260 registered / 222 called，声明事件均有 emitter/listener；`npm run contract` 重新生成 260 条契约。
+- 未运行：真实窗口目视、真实 GitHub 网络同步、真实模型 API；U03–U05 留待下一轮。
