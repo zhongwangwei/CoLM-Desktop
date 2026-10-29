@@ -1788,17 +1788,41 @@ fn write_run_lock(dir: &std::path::Path, pid: u32, run_id: Option<&str>) {
 }
 
 fn write_run_lock_for(dir: &std::path::Path, pid: u32, run_id: Option<&str>, executable: &str) {
+    write_run_lock_at(dir, pid, run_id, executable, 1);
+}
+
+fn write_run_lock_at(
+    dir: &std::path::Path,
+    pid: u32,
+    run_id: Option<&str>,
+    executable: &str,
+    started_unix: i64,
+) {
     let mut value = serde_json::json!({
         "pid": pid,
         "executable": executable,
         "argv_sha256": "sha",
-        "started_unix": 1,
+        "started_unix": started_unix,
         "heartbeat_unix": 1,
     });
     if let Some(run_id) = run_id {
         value["run_id"] = serde_json::Value::String(run_id.into());
     }
     std::fs::write(dir.join("run.lock"), serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+fn lock_snapshot(
+    pid: u32,
+    executable: &str,
+    run_id: Option<&str>,
+    started_unix: i64,
+) -> StudyLockSnapshot {
+    StudyLockSnapshot {
+        pid,
+        executable: Some(executable.into()),
+        started_unix: Some(started_unix),
+        run_id: run_id.map(str::to_owned),
+    }
 }
 
 #[test]
@@ -1847,6 +1871,7 @@ fn read_study_lock_keeps_only_a_usable_identity() {
         Some(StudyLockSnapshot {
             pid: 4242,
             executable: Some("/bin/sh".into()),
+            started_unix: Some(1),
             run_id: Some("run-1".into()),
         })
     );
@@ -1857,10 +1882,23 @@ fn read_study_lock_keeps_only_a_usable_identity() {
         Some(StudyLockSnapshot {
             pid: 4242,
             executable: Some("/bin/sh".into()),
+            started_unix: Some(1),
             run_id: None,
         })
     );
+    // 更旧的记录可能把启动时间叫 `start`；没有它就只能比对 PID 与可执行文件。
+    std::fs::write(
+        dir.join("run.lock"),
+        br#"{"pid":4242,"executable":"/bin/sh","start":7}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_study_lock(&study).and_then(|lock| lock.started_unix),
+        Some(7)
+    );
     std::fs::write(dir.join("run.lock"), b"{broken").unwrap();
+    assert_eq!(read_study_lock(&study), None);
+    std::fs::write(dir.join("run.lock"), b"  \n").unwrap();
     assert_eq!(read_study_lock(&study), None);
     std::fs::write(dir.join("run.lock"), br#"{"pid":"4242"}"#).unwrap();
     assert_eq!(read_study_lock(&study), None);
@@ -1872,6 +1910,7 @@ fn lock_identity_rejects_another_runs_lock_before_any_termination() {
     let other = StudyLockSnapshot {
         pid: 10,
         executable: Some("/bin/sh".into()),
+        started_unix: Some(1),
         run_id: Some("run-other".into()),
     };
     // 锁里带运行 ID 时它说了算：即使 PID 恰好等于本次登记的那个，也不是这次运行的锁。
@@ -1888,6 +1927,7 @@ fn a_bare_lock_is_only_claimed_by_its_own_pid() {
     let bare = StudyLockSnapshot {
         pid: 10,
         executable: Some("/bin/sh".into()),
+        started_unix: Some(1),
         run_id: None,
     };
     // 旧锁没有运行 ID，只能按锁里的 PID 认。冻结修订时 GUI 登记的外层 PID 与它不同，
@@ -1904,6 +1944,7 @@ fn finalize_cancel_uses_the_lock_owner_pid_for_a_legacy_bare_lock() {
     let with_id = StudyLockSnapshot {
         pid: 4242,
         executable: Some("/bin/sh".into()),
+        started_unix: Some(1),
         run_id: Some("run-1".into()),
     };
     // 锁里有运行 ID：外层 PID 只用于定位进程组，认领靠环境变量里的运行 ID。
@@ -1921,6 +1962,7 @@ fn finalize_cancel_uses_the_lock_owner_pid_for_a_legacy_bare_lock() {
     let bare = StudyLockSnapshot {
         pid: 4242,
         executable: Some("/bin/sh".into()),
+        started_unix: Some(1),
         run_id: None,
     };
     let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"), Some(&bare));
@@ -2072,8 +2114,8 @@ fn a_lock_from_another_run_is_rejected_before_any_process_is_stopped() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// 旧锁没有运行 ID，只能靠可执行文件确认锁 owner 仍是那个调度器：一致就允许补杀，
-/// 并用锁里的 PID（不是外层 PID）收尾，否则 CLI 会拒绝，进程停了锁还在。
+/// 旧锁没有运行 ID：启动后登记过同一份锁身份，PID、可执行文件与启动时间都对得上，才允许
+/// 补杀，并用锁里的 PID（不是外层 PID）收尾，否则 CLI 会拒绝，进程停了锁还在。
 #[cfg(unix)]
 #[test]
 fn a_legacy_bare_lock_with_a_matching_executable_is_still_stopped() {
@@ -2089,6 +2131,10 @@ fn a_legacy_bare_lock_with_a_matching_executable_is_still_stopped() {
     let image = process_image_name(legacy_pid).expect("the legacy scheduler has a known image");
     write_run_lock_for(&dir, legacy_pid, None, &image);
     assert!(process_alive(legacy_pid));
+    // 轮询线程本来会登记这份身份；测试直接注入，省掉真实等待。
+    processes
+        .remember_startup_lock(&key, read_study_lock(&study).unwrap())
+        .unwrap();
 
     let calls = std::sync::Mutex::new(Vec::new());
     cancel_study_run_with(&processes, &study, |args, env| {
@@ -2134,5 +2180,339 @@ fn cancelling_without_a_registered_process_finalizes_idle_state_only() {
         vec!["study-finalize-idle-cancel".to_string(), study.clone()]
     );
     assert!(calls[1].1.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 裸锁没有运行 ID，而启动后也没观察到它：不能只凭锁里的 PID 补杀（PID 可能被另一个
+/// 同名 colm-cli 复用），连 cancel.request 与收尾都不能写。
+#[cfg(unix)]
+#[test]
+fn a_bare_lock_without_a_startup_observation_is_rejected_before_any_termination() {
+    let dir = temporary_study_dir("bare-lock-unobserved");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    let mut legacy = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    let legacy_pid = legacy.id();
+    let image = process_image_name(legacy_pid).expect("the legacy scheduler has a known image");
+    write_run_lock_for(&dir, legacy_pid, None, &image);
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    let error = cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("never observed"), "{error}");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "refusal must not write cancel.request or finalize"
+    );
+    assert!(
+        process_alive(outer.id()),
+        "the registered tree must not be stopped either"
+    );
+    assert!(
+        process_alive(legacy_pid),
+        "an unconfirmed bare lock owner must not be killed"
+    );
+
+    terminate_process_tree(outer.id()).unwrap();
+    let _ = outer.wait();
+    terminate_process_tree(legacy_pid).unwrap();
+    let _ = legacy.wait();
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 轮询线程在启动后第一次看到 run.lock 时登记它；测试注入读取序列，不真等 150 ms。
+#[test]
+fn the_first_lock_seen_after_startup_is_registered_for_the_run() {
+    let processes = RunProcesses::default();
+    let key = "study:/tmp/polled-study";
+    processes.prepare_study_run(key, "run-1").unwrap();
+    assert!(processes.remember(key, 4242).unwrap());
+    let lock = lock_snapshot(9001, "/opt/colm-cli", None, 1_700_000_000);
+    let mut reads = std::collections::VecDeque::from([None, None, Some(lock.clone())]);
+    let slept = std::cell::Cell::new(0);
+    let observed = poll_first_study_lock(
+        || reads.pop_front().unwrap_or(None),
+        || true,
+        |_| slept.set(slept.get() + 1),
+    );
+    assert_eq!(observed, Some(lock.clone()));
+    assert_eq!(slept.get(), 2, "the first two polls saw no lock");
+    processes
+        .remember_startup_lock(key, observed.unwrap())
+        .unwrap();
+    assert_eq!(
+        processes
+            .running_identity(key)
+            .unwrap()
+            .unwrap()
+            .startup_lock,
+        Some(lock)
+    );
+    processes.forget(key).unwrap();
+}
+
+/// 运行在锁出现之前就失败退出：轮询必须立刻停，不能空等满 5 秒。
+#[test]
+fn the_lock_watcher_stops_when_the_run_is_gone_and_never_sleeps() {
+    let reads = std::cell::Cell::new(0);
+    let observed = poll_first_study_lock(
+        || {
+            reads.set(reads.get() + 1);
+            None
+        },
+        || false,
+        |_| panic!("no wait after the run ended"),
+    );
+    assert_eq!(observed, None);
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
+fn the_lock_watcher_gives_up_after_its_short_window() {
+    let slept = std::cell::Cell::new(0);
+    let observed = poll_first_study_lock(|| None, || true, |_| slept.set(slept.get() + 1));
+    assert_eq!(observed, None);
+    assert_eq!(slept.get(), STUDY_LOCK_POLL_TRIES);
+}
+
+/// 只保留第一次观察（心跳刷新或后来换锁都不能改写它），并且运行结束后清干净 ——
+/// 否则同一研究目录的下一次运行会把上一轮的锁当成自己的启动身份。
+#[test]
+fn a_startup_lock_is_never_rewritten_and_dies_with_its_run() {
+    let processes = RunProcesses::default();
+    let key = "study:/tmp/lock-lifecycle";
+    processes.prepare_study_run(key, "run-1").unwrap();
+    assert!(processes.remember(key, 4242).unwrap());
+    let first = lock_snapshot(9001, "/opt/colm-cli", None, 1);
+    processes.remember_startup_lock(key, first.clone()).unwrap();
+    processes
+        .remember_startup_lock(key, lock_snapshot(9002, "/opt/colm-cli", None, 2))
+        .unwrap();
+    assert_eq!(
+        processes
+            .running_identity(key)
+            .unwrap()
+            .unwrap()
+            .startup_lock,
+        Some(first)
+    );
+    processes.forget(key).unwrap();
+    // 运行结束之后迟到的轮询结果不能留给下一次运行。
+    processes
+        .remember_startup_lock(key, lock_snapshot(9003, "/opt/colm-cli", None, 3))
+        .unwrap();
+    processes.prepare_study_run(key, "run-2").unwrap();
+    assert!(processes.remember(key, 4243).unwrap());
+    assert_eq!(
+        processes
+            .running_identity(key)
+            .unwrap()
+            .unwrap()
+            .startup_lock,
+        None
+    );
+    processes.forget(key).unwrap();
+}
+
+/// 启动时登记的锁已经被另一个 PID 的旧格式锁替换：拒绝，且一个进程都不杀、什么都不写。
+#[cfg(unix)]
+#[test]
+fn a_bare_lock_replaced_by_another_pid_is_rejected_before_any_termination() {
+    let dir = temporary_study_dir("bare-lock-pid-replaced");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    let mut first = grouped_sleeper();
+    let mut other = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    let image = process_image_name(first.id()).expect("the first scheduler has a known image");
+    write_run_lock_at(&dir, first.id(), None, &image, 1);
+    processes
+        .remember_startup_lock(&key, read_study_lock(&study).unwrap())
+        .unwrap();
+    write_run_lock_at(&dir, other.id(), None, &image, 1);
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    let error = cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("changed since this run started"), "{error}");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "refusal must not write cancel.request or finalize"
+    );
+    assert!(process_alive(outer.id()), "our tree must not be stopped");
+    assert!(
+        process_alive(first.id()) && process_alive(other.id()),
+        "neither lock owner may be killed"
+    );
+
+    terminate_process_tree(outer.id()).unwrap();
+    let _ = outer.wait();
+    terminate_process_tree(first.id()).unwrap();
+    let _ = first.wait();
+    terminate_process_tree(other.id()).unwrap();
+    let _ = other.wait();
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// PID 与可执行文件都被复用（同名 colm-cli 拿到同一个 PID）时，只有启动时间能把两轮
+/// 运行分开；启动时间变了就必须拒绝。
+#[cfg(unix)]
+#[test]
+fn a_bare_lock_with_a_different_start_time_is_rejected_before_any_termination() {
+    let dir = temporary_study_dir("bare-lock-started-replaced");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    let mut legacy = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    let legacy_pid = legacy.id();
+    let image = process_image_name(legacy_pid).expect("the legacy scheduler has a known image");
+    write_run_lock_at(&dir, legacy_pid, None, &image, 1);
+    processes
+        .remember_startup_lock(&key, read_study_lock(&study).unwrap())
+        .unwrap();
+    write_run_lock_at(&dir, legacy_pid, None, &image, 2);
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    let error = cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("started"), "{error}");
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(process_alive(outer.id()));
+    assert!(process_alive(legacy_pid));
+
+    terminate_process_tree(outer.id()).unwrap();
+    let _ = outer.wait();
+    terminate_process_tree(legacy_pid).unwrap();
+    let _ = legacy.wait();
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 带 run_id 的锁仍按 ID 认领：启动快照与当前锁不同也不能否决它，否则冻结修订的
+/// 委托运行会回到“进程已停、锁还在”的老问题。
+#[cfg(unix)]
+#[test]
+fn a_run_id_lock_is_still_claimed_even_when_the_startup_snapshot_differs() {
+    let dir = temporary_study_dir("run-id-ignores-startup-lock");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    processes
+        .prepare_study_run(&key, "run-outer-inner")
+        .unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    processes
+        .remember_startup_lock(&key, lock_snapshot(9001, "/opt/colm-cli", None, 1))
+        .unwrap();
+    // 委托运行里锁记的是内层 PID（已随进程组退出），和启动快照完全不同。
+    write_run_lock(&dir, exited_child_id(), Some("run-outer-inner"));
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap();
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].0[0], "study-finalize-cancel");
+    assert_eq!(
+        calls[1].1,
+        vec![(STUDY_RUN_ID_ENV.to_string(), "run-outer-inner".into())]
+    );
+    assert!(!outer.wait().unwrap().success());
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 空白锁文件（写了一半、读不懂）当“没有锁”处理，不能因此拒绝一次正常取消。
+#[cfg(unix)]
+#[test]
+fn a_blank_lock_file_does_not_block_cancellation() {
+    let dir = temporary_study_dir("blank-lock");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    std::fs::write(dir.join("run.lock"), b"  \n\t").unwrap();
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap();
+    assert!(!outer.wait().unwrap().success());
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(&calls[1].0[2..], ["--pid", &outer.id().to_string()]);
+    assert_eq!(
+        calls[1].1,
+        vec![(STUDY_RUN_ID_ENV.to_string(), "run-ours".into())]
+    );
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 真实文件路径下的接线：外层 CLI 启动后锁才出现，后台线程仍要把它记进这次运行。
+/// 轮询间隔是 150 ms，这里最多等 2 秒（不是任务禁止的“真等几秒”）。
+#[cfg(unix)]
+#[test]
+fn the_background_watcher_registers_a_lock_that_appears_after_spawn() {
+    let dir = temporary_study_dir("observer-real-lock");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut child = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-1").unwrap();
+    assert!(processes.remember(&key, child.id()).unwrap());
+    spawn_study_lock_observer(&processes, &key, &study);
+    std::thread::sleep(Duration::from_millis(20));
+    let image = process_image_name(child.id()).expect("the scheduler has a known image");
+    write_run_lock_for(&dir, child.id(), None, &image);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let observed = processes
+            .running_identity(&key)
+            .unwrap()
+            .and_then(|identity| identity.startup_lock);
+        if observed.is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the background watcher never registered the lock"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    terminate_process_tree(child.id()).unwrap();
+    let _ = child.wait();
+    processes.forget(&key).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

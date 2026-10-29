@@ -347,13 +347,25 @@ struct RunProcessState {
     /// 由 GUI 每次运行新生成，启动与收尾两次调用都传给 CLI（CLI 写进 `run.lock`），
     /// 与 PID 无关地证明“这把锁是这次运行写的”。
     study_run_ids: HashMap<String, String>,
+    /// 启动后第一次轮询到的 `run.lock` 身份。裸锁（旧 CLI 不写运行 ID）取消时，只有当前
+    /// 锁与它逐字段相同才允许补杀；单看锁里的 PID + 可执行文件名挡不住 PID 复用。
+    startup_locks: HashMap<String, StudyLockSnapshot>,
 }
 
-/// GUI 侧登记的一次运行身份：外层 PID 用于终止进程组，运行 ID 用于认领研究锁。
+impl RunProcessState {
+    /// 这次运行仍在进行或正要开始；`cancelled` 一旦置位，后续的锁身份登记就没有意义了。
+    fn has_live_run(&self, key: &str) -> bool {
+        !self.cancelled.contains(key) && (self.pids.contains_key(key) || self.pending.contains(key))
+    }
+}
+
+/// GUI 侧登记的一次运行身份：外层 PID 用于终止进程组，运行 ID 用于认领研究锁，
+/// 启动时观察到的锁身份用于否决裸锁。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunningIdentity {
     pub pid: u32,
     pub run_id: Option<String>,
+    pub startup_lock: Option<StudyLockSnapshot>,
 }
 
 impl RunProcesses {
@@ -459,7 +471,29 @@ impl RunProcesses {
         }
         state.pending.remove(key);
         state.study_run_ids.remove(key);
+        state.startup_locks.remove(key);
         Ok(state.cancelled.remove(key))
+    }
+
+    /// 后台轮询只收运行还在登记表里的结果：进程已退出（`forget` 之后）或取消已开始，
+    /// 迟到的锁身份不能留给同一研究目录的下一次运行。
+    fn remember_startup_lock(&self, key: &str, lock: StudyLockSnapshot) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| "run process registry poisoned")?;
+        if state.has_live_run(key) {
+            state.startup_locks.entry(key.to_string()).or_insert(lock);
+        }
+        Ok(())
+    }
+
+    /// 后台观察线程用：运行结束或被取消后就不必再读 `run.lock`。
+    fn study_run_active(&self, key: &str) -> Result<bool, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "run process registry poisoned".to_string())
+            .map(|state| state.has_live_run(key))
     }
 
     /// 只给测试用的事后检查（生产路径一律走 [`RunProcesses::running_identity`]，它保证 PID
@@ -472,8 +506,9 @@ impl RunProcesses {
             .map(|state| state.pids.get(key).copied())
     }
 
-    /// PID 与运行 ID 一起取出来：取消收尾要用 PID 终止进程组、用运行 ID 认领研究锁。
-    /// 两者必须在同一把锁下读取，否则中途 `forget` 会把它们拆成不匹配的两半。
+    /// PID、运行 ID 与启动时观察到的锁身份一起取出来：取消收尾要用 PID 终止进程组、用运行
+    /// ID 认领研究锁、用锁身份否决裸锁。三者必须在同一把锁下读取，否则中途 `forget` 会把
+    /// 它们拆成不匹配的几半。
     fn running_identity(&self, key: &str) -> Result<Option<RunningIdentity>, String> {
         let state = self
             .inner
@@ -482,6 +517,7 @@ impl RunProcesses {
         Ok(state.pids.get(key).copied().map(|pid| RunningIdentity {
             pid,
             run_id: state.study_run_ids.get(key).cloned(),
+            startup_lock: state.startup_locks.get(key).cloned(),
         }))
     }
 
@@ -512,6 +548,15 @@ impl RunProcesses {
             // 与手动取消同一条顺序：先核对锁身份，锁属于另一轮就一个进程都不杀；核对通过
             // 后才写取消请求、组杀、补杀，最后用同一份快照收尾。
             let lock = read_study_lock(&study_dir);
+            if let Some(lock) = lock.as_ref().filter(|lock| lock.run_id.is_none()) {
+                let observed = identity
+                    .as_ref()
+                    .and_then(|identity| identity.startup_lock.as_ref());
+                if let Err(error) = bare_lock_matches_startup(lock, observed) {
+                    failures.push(format!("{key}: {error}"));
+                    continue;
+                }
+            }
             if let Some(identity) = &identity {
                 let expected_pid = lock_owner_or_registered_pid(lock.as_ref(), identity.pid);
                 if let Err(error) = lock_identity_matches(
@@ -853,12 +898,28 @@ fn process_alive(pid: u32) -> bool {
 ///
 /// 只读一次，并在“核对 → 终止 → 收尾”之间复用：两次读之间锁可能被另一个调度器换掉，
 /// 拿两份不同的身份去先验后杀会自相矛盾。`run_id` 缺省表示升级前冻结的 CLI 写的旧锁，
-/// 那种锁只能按 PID 与可执行文件核对。
+/// 那种锁只能按 PID、可执行文件和启动时间核对。
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StudyLockSnapshot {
+pub(crate) struct StudyLockSnapshot {
     pid: u32,
     executable: Option<String>,
+    /// 锁记录里的进程启动时间（Unix 秒）；`started_unix` 是现行字段，`start` 是旧记录别名。
+    started_unix: Option<i64>,
     run_id: Option<String>,
+}
+
+impl StudyLockSnapshot {
+    /// 当前锁与启动时观察到的是否还是同一个调度器。
+    ///
+    /// `heartbeat_unix` 每 10 秒由持锁者刷新，不能进比对；`argv_sha256` 不是任务要求的身份
+    /// 字段，旧锁也可能没有。PID 会被复用，所以 `started_unix` 必须一起比 —— 只按 PID +
+    /// 可执行文件比对正是这次要堵的误杀路径。
+    fn same_identity(&self, observed: &Self) -> bool {
+        self.pid == observed.pid
+            && self.executable == observed.executable
+            && self.started_unix == observed.started_unix
+            && self.run_id == observed.run_id
+    }
 }
 
 /// 读 `run.lock` 的身份快照。坏记录/读不到都当没有：真正的最终校验在 CLI 收尾里做，
@@ -878,11 +939,64 @@ fn read_study_lock(study_dir: &str) -> Option<StudyLockSnapshot> {
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
     };
+    let started_unix = value
+        .get("started_unix")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| value.get("start").and_then(serde_json::Value::as_i64));
     Some(StudyLockSnapshot {
         pid,
         executable: text("executable"),
+        started_unix,
         run_id: text("run_id"),
     })
+}
+
+/// 启动后观察第一次 `run.lock` 的间隔与窗口：150 ms × 33 次 ≈ 5 秒。
+///
+/// 只用来确认裸锁身份，不能一直轮询（研究可能跑几小时），也不能无限等（用户点停止时
+/// 没有登记就该立刻得到可行动错误，而不是卡到锁出现）。
+const STUDY_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const STUDY_LOCK_POLL_TRIES: usize = 33;
+
+/// 轮询到第一份锁身份、运行结束或窗口用尽。
+///
+/// `read`／`running`／`sleep` 注入给测试：“锁在第 N 次出现”“进程已退出”“超时”都能
+/// 立刻验证，不必真等 5 秒。
+fn poll_first_study_lock(
+    mut read: impl FnMut() -> Option<StudyLockSnapshot>,
+    mut running: impl FnMut() -> bool,
+    mut sleep: impl FnMut(Duration),
+) -> Option<StudyLockSnapshot> {
+    for _ in 0..STUDY_LOCK_POLL_TRIES {
+        if let Some(lock) = read() {
+            return Some(lock);
+        }
+        if !running() {
+            return None;
+        }
+        sleep(STUDY_LOCK_POLL_INTERVAL);
+    }
+    None
+}
+
+/// 后台线程只做一件事：把本次运行第一次见到的锁身份记进登记表。
+///
+/// 运行可能在锁写出来之前就失败退出，所以每轮都先问登记表还在不在；结束后迟到的结果由
+/// [`RunProcesses::remember_startup_lock`] 丢掉，不会污染同一研究目录的下一次运行。
+fn spawn_study_lock_observer(processes: &RunProcesses, key: &str, study_dir: &str) {
+    let processes = processes.clone();
+    let key = key.to_string();
+    let study_dir = study_dir.to_string();
+    std::thread::spawn(move || {
+        let observed = poll_first_study_lock(
+            || read_study_lock(&study_dir),
+            || processes.study_run_active(&key).unwrap_or(false),
+            std::thread::sleep,
+        );
+        if let Some(lock) = observed {
+            let _ = processes.remember_startup_lock(&key, lock);
+        }
+    });
 }
 
 /// 锁是否属于这次取消，必须在任何终止操作之前回答。
@@ -927,6 +1041,45 @@ fn lock_identity_matches(
 fn lock_owner_or_registered_pid(lock: Option<&StudyLockSnapshot>, registered: u32) -> u32 {
     lock.filter(|lock| lock.run_id.is_none())
         .map_or(registered, |lock| lock.pid)
+}
+
+/// 裸锁（旧 CLI 没有运行 ID）必须与启动后第一次观察到的锁身份逐字段相同才允许认领。
+///
+/// 只凭锁自己写的 PID + 可执行文件名核对等于让锁自证：陈旧裸锁的 PID 被另一个同名
+/// `colm-cli` 复用时两边都对得上，迟到的取消就会杀掉那一轮。启动时登记的 `started_unix`
+/// 是唯一能区分两次进程身份的字段；没有登记就拒绝，让用户先确认进程，不赌误杀。
+fn bare_lock_matches_startup(
+    lock: &StudyLockSnapshot,
+    observed: Option<&StudyLockSnapshot>,
+) -> Result<(), String> {
+    let Some(observed) = observed else {
+        return Err(format!(
+            "run.lock names scheduler PID {} for a legacy run without a run id, and this run never \
+             observed the lock; refusing to stop any process, write cancel.request or finalize. \
+             Wait for that run to finish or check for a stale colm-cli process, then cancel again.",
+            lock.pid
+        ));
+    };
+    if lock.same_identity(observed) {
+        return Ok(());
+    }
+    Err(format!(
+        "run.lock changed since this run started (startup: {}; now: {}); it is held by another \
+         run, so refusing to stop any process, write cancel.request or finalize. Wait for that \
+         run to finish or check the process, then cancel again.",
+        describe_lock_identity(observed),
+        describe_lock_identity(lock)
+    ))
+}
+
+fn describe_lock_identity(lock: &StudyLockSnapshot) -> String {
+    format!(
+        "PID {} executable {} started {}",
+        lock.pid,
+        lock.executable.as_deref().unwrap_or("<unknown>"),
+        lock.started_unix
+            .map_or_else(|| "<unknown>".to_string(), |started| started.to_string()),
+    )
 }
 
 /// 停掉锁快照记录的调度器（冻结模型修订时是内层 CLI）。
@@ -4165,6 +4318,9 @@ fn study_run_untracked(
         })?;
     remember_process(&processes, &study_key, &mut child)?;
     let (out, err) = take_process_pipes(&mut child, &processes, &study_key)?;
+    // 只读研究目录的 run.lock，把本次运行第一次见到的身份记下来；取消裸锁时它是唯一能
+    // 区分“这轮运行持有的锁”与“PID 被复用后出现的同名锁”的证据。
+    spawn_study_lock_observer(&processes, &study_key, &study_dir);
     let errs = drain_stderr(err);
     let mut last = None;
     let mut last_task_log_emit = None;
@@ -4265,6 +4421,14 @@ fn cancel_study_run_with(
     let identity = processes.running_identity(&key)?;
     // 同一份快照走完核对、补杀、收尾，避免中途锁被换掉后拿两份不同的身份做决定。
     let lock = read_study_lock(study_dir);
+    // 裸锁没有运行 ID，不能只信锁自己写的 PID：必须还是启动后轮询登记的那把锁。没有登记
+    // （刚启动尚未看到锁、旧数据）同样拒绝，不写 cancel.request、不杀、不 finalize。
+    if let Some(lock) = lock.as_ref().filter(|lock| lock.run_id.is_none()) {
+        let observed = identity
+            .as_ref()
+            .and_then(|identity| identity.startup_lock.as_ref());
+        bare_lock_matches_startup(lock, observed)?;
+    }
     if let Some(identity) = &identity {
         let expected_pid = lock_owner_or_registered_pid(lock.as_ref(), identity.pid);
         lock_identity_matches(
