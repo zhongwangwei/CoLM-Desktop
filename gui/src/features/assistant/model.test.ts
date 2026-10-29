@@ -5,6 +5,8 @@ import {
   appendDelta,
   apiEfforts,
   assistantModels,
+  canonicalCommitUrl,
+  canonicalRepositorySlug,
   selectAssistantModel,
   API_PROVIDERS,
   defaultHistorySettings,
@@ -33,6 +35,7 @@ import {
   selectProvider,
   settingsForSave,
   shortSha,
+  sourceRetentionFields,
   taskActionOutput,
   taskActionTitle,
   taskSnapshotOf,
@@ -1183,4 +1186,210 @@ it('summarises review actions and finds local paths without opening arbitrary UR
   assert.deepEqual(localPathsInJsonText('{"a":"https://x/y","b":"rel/z"}'), []);
   assert.equal(formatUnixSeconds(1_790_000_000), '2026-09-21 14:13 UTC');
   assert.equal(formatUnixSeconds(0), '');
+});
+
+// ---------------------------------------------------------------------------
+// A2：规范 GitHub 仓库的 commit 打开链接
+// ---------------------------------------------------------------------------
+
+it('A2: builds commit URLs only for canonical repositories and full lowercase SHAs', () => {
+  const sha = 'b'.repeat(40);
+  assert.equal(
+    canonicalCommitUrl('desktop', sha),
+    `https://github.com/zhongwangwei/CoLM-Desktop/commit/${sha}`,
+  );
+  assert.equal(
+    canonicalCommitUrl('colm_upstream', sha),
+    `https://github.com/CoLM-SYSU/CoLM/commit/${sha}`,
+  );
+  // owner/repo 与 GitHub URL 只要匹配注册表就归一成规范大小写。
+  assert.equal(
+    canonicalCommitUrl('zhongwangwei/colM-desktop', sha),
+    `https://github.com/zhongwangwei/CoLM-Desktop/commit/${sha}`,
+  );
+  assert.equal(
+    canonicalCommitUrl('https://github.com/CoLM-SYSU/CoLM', sha),
+    `https://github.com/CoLM-SYSU/CoLM/commit/${sha}`,
+  );
+  assert.equal(canonicalRepositorySlug('desktop'), 'zhongwangwei/CoLM-Desktop');
+  assert.equal(canonicalRepositorySlug('selected'), null);
+  // selected/local、未知仓库、短 SHA/大写 SHA/别名都不生成链接（不猜 URL）。
+  for (const repository of ['selected', 'selected_source', 'local', '', 'other/repo', null])
+    assert.equal(canonicalCommitUrl(repository, sha), null, String(repository));
+  for (const digest of ['b'.repeat(39), 'b'.repeat(41), 'B'.repeat(40), 'bbbbbbb', '', 'HEAD'])
+    assert.equal(canonicalCommitUrl('desktop', digest), null, digest);
+});
+
+it('A2: only canonical source_history and commit_details commits get an open-commit action', () => {
+  const sha = 'b'.repeat(40);
+  const source = historyEvidence(
+    'source_history',
+    historyToolResult({
+      query: { symbol: 'x', endpoints: { desktop: { ref: 'main', sha } } },
+      repos: {
+        desktop: {
+          key: 'desktop',
+          identity: { state: 'verified', root: '/repos/desktop' },
+          commits: [{ sha, summary: 'change', reason: { status: 'unchecked' } }],
+          notes: [],
+          errors: [],
+        },
+      },
+      limits: [],
+      truncated: false,
+    }),
+    'zh',
+  );
+  const desktop = source!.sections.find((section) => section.title === 'Desktop 仓库')!;
+  const commit = desktop.items!.find((item) => item.title.includes('bbbbbbb'))!;
+  const link = commit.fields.find((field) => field.linkLabel === '打开 commit')!;
+  assert.equal(link.url, `https://github.com/zhongwangwei/CoLM-Desktop/commit/${sha}`);
+
+  // selected 来源即使有完整 SHA 也不生成 GitHub 链接（只在本地 Git 证据里）。
+  const selected = historyEvidence(
+    'source_history',
+    historyToolResult({
+      query: { symbol: 'x', endpoints: { selected: { ref: 'HEAD', sha } } },
+      repos: {
+        selected: {
+          key: 'selected',
+          identity: { state: 'verified', root: '/models/src' },
+          commits: [{ sha, summary: 'local change' }],
+          notes: [],
+          errors: [],
+        },
+      },
+      limits: [],
+      truncated: false,
+    }),
+    'en',
+  );
+  const selectedSection = selected!.sections.find((section) => /selected/i.test(section.title))!;
+  const localCommit = selectedSection.items!.find((item) => item.title.includes('bbbbbbb'))!;
+  assert.equal(
+    localCommit.fields.some((field) => field.url),
+    false,
+  );
+
+  const details = historyEvidence(
+    'commit_details',
+    historyToolResult({
+      repository: { key: 'desktop', path: '/repos/desktop', identity: { state: 'verified' } },
+      commit: { sha, parents: [], message: 'subject', files: [] },
+      reason: { status: 'not_recorded' },
+      notes: [],
+    }),
+    'en',
+  );
+  const commitSection = details!.sections.find((section) => section.title === 'commit')!;
+  assert.ok(commitSection.fields.some((field) => field.linkLabel === 'Open commit'));
+
+  // selected_source 的 commit_details 不给 GitHub 链接。
+  const localDetails = historyEvidence(
+    'commit_details',
+    historyToolResult({
+      repository: { key: 'selected_source', path: '/models/src', kind: 'selected_source' },
+      commit: { sha, parents: [], message: 'local', files: [] },
+      reason: { status: 'not_recorded' },
+      notes: [],
+    }),
+    'en',
+  );
+  const localCommitSection = localDetails!.sections.find((section) => section.title === 'commit')!;
+  assert.equal(
+    localCommitSection.fields.some((field) => field.url),
+    false,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A1：source_history 当前源码保留状态（三态，不猜测）
+// ---------------------------------------------------------------------------
+
+it('A1: renders retention as retained / not_retained / unknown without inferring success', () => {
+  const retained = sourceRetentionFields(
+    {
+      state: 'retained',
+      basis: ['line-grep'],
+      checked_ref: 'origin/main',
+      checked_sha: 'c'.repeat(40),
+      commit: 'b'.repeat(40),
+      paths: ['src/a.F90', 'src/b.F90'],
+      note: 'line-level check only',
+    },
+    'zh',
+  );
+  const retainedState = retained.find((field) => field.label === '当前源码保留状态')!;
+  assert.match(retainedState.value, /当前终点仍含该提交新增行/);
+  assert.match(retainedState.value, /不等于数值影响已证实/);
+  assert.ok(retained.some((field) => /origin\/main @ ccccccc/.test(field.value)));
+  assert.ok(retained.some((field) => field.label === '该提交' && field.value === 'bbbbbbb'));
+  assert.ok(
+    retained.some((field) => field.label === '保留判断依据' && field.value === 'line-grep'),
+  );
+  assert.ok(
+    retained.some(
+      (field) => field.label === '保留状态说明' && field.value === 'line-level check only',
+    ),
+  );
+
+  const notRetained = sourceRetentionFields(
+    { state: 'not_retained', checked_ref: 'main', checked_sha: 'c'.repeat(40) },
+    'en',
+  );
+  assert.match(notRetained[0].value, /not found at the current endpoint/);
+  assert.match(notRetained[0].value, /does not prove reversion/);
+
+  const unknown = sourceRetentionFields({ state: 'unknown', note: 'shallow clone' }, 'en');
+  assert.match(unknown[0].value, /cannot be determined \(shallow clone\)/);
+
+  // 缺 retention 字段的旧结果：明确“工具未提供”，不能当成 retained。
+  const missing = sourceRetentionFields(undefined, 'zh');
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].label, '当前源码保留状态');
+  assert.equal(missing[0].value, '工具未提供');
+  // 未知枚举原样显示，不翻译成 retained。
+  const future = sourceRetentionFields({ state: 'future_state', note: 'x' }, 'en');
+  assert.match(future[0].value, /unknown state: future_state/);
+});
+
+it('A1: source_history repo rows include retention, including the missing case', () => {
+  const evidence = historyEvidence(
+    'source_history',
+    historyToolResult({
+      query: { symbol: 'x', endpoints: { desktop: { ref: 'main', sha: 'b'.repeat(40) } } },
+      repos: {
+        desktop: {
+          key: 'desktop',
+          identity: { state: 'verified', root: '/repos/desktop' },
+          retention: { state: 'retained', checked_ref: 'main', checked_sha: 'c'.repeat(40) },
+          commits: [],
+          notes: [],
+          errors: [],
+        },
+        colm_upstream: {
+          key: 'colm_upstream',
+          identity: { state: 'verified', root: '/repos/upstream' },
+          commits: [],
+          notes: [],
+          errors: [],
+        },
+      },
+      limits: [],
+      truncated: false,
+    }),
+    'en',
+  );
+  const desktop = evidence!.sections.find((section) => section.title === 'Desktop repository')!;
+  const desktopRetention = desktop.fields.find(
+    (field) => field.label === 'current source retention',
+  )!;
+  assert.match(desktopRetention.value, /still contains lines added/);
+  const upstream = evidence!.sections.find(
+    (section) => section.title === 'CoLM upstream repository',
+  )!;
+  const upstreamRetention = upstream.fields.find(
+    (field) => field.label === 'current source retention',
+  )!;
+  assert.equal(upstreamRetention.value, 'not provided by the tool');
 });

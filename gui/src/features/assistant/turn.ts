@@ -24,6 +24,8 @@ export interface PendingTurn<A> {
   prompt: string;
   attachments: A[];
   phase: SendPhase;
+  /** A3：本轮 stdin 请求 id；只有匹配它的 turn_started 才证明消息被模型接受。 */
+  requestId?: string;
 }
 
 export function newTurn<A>(
@@ -31,9 +33,17 @@ export function newTurn<A>(
   typed: string,
   prompt: string,
   attachments: A[],
+  requestId = '',
 ): PendingTurn<A> {
   // 附件数组必须快照：发送后界面可能清空或替换它，恢复草稿要的还是这一轮发出去的内容。
-  return { id, typed, prompt, attachments: [...attachments], phase: 'preparing' };
+  return {
+    id,
+    typed,
+    prompt,
+    attachments: [...attachments],
+    phase: 'preparing',
+    requestId,
+  };
 }
 
 /** 这一轮自己的业务事件：后端已经开始/完成这一轮，消息确实被记下了。 */
@@ -74,32 +84,23 @@ export function clearsDraftAfterAck<A>(turn: PendingTurn<A>): boolean {
 }
 
 /**
- * 属于当前这一轮的轮内事件类型。`task_state`（turn_done 之后才发的任务检查点）、
- * `docs_index_status`、`ready`/`exited`/`error` 都不是"本轮已被模型接受"的证据：
- * 它们的迟到实例不能把刚发出的新消息误标成 accepted，否则拒绝时就不再撤回气泡/恢复草稿。
- */
-const TURN_EVENT_TYPES = new Set([
-  'assistant_delta',
-  'reasoning_delta',
-  'tool_call',
-  'tool_result',
-  'approval_request',
-  'ui_request',
-  'usage',
-  'context',
-  'turn_done',
-]);
-
-/**
- * 迟到/旧轮事件不得影响新消息（U05）：若后端给了轮次/请求 ID，必须与当前 pending 轮一致；
- * 没有 ID 时只接受轮内事件类型（上面的白名单），其余一律不算接受证据。
+ * A3：只有匹配本轮 requestId 的 `turn_started` 才能证明“消息已被模型接受”。
+ * 不再用“轮内事件类型白名单”兜底：usage/context/tool_result/task_state 等迟到事件
+ * 都不能把新消息标成 accepted；旧 agent 不发 turn_started 时保持 pending，
+ * 这样轮次前拒绝仍会撤回气泡并恢复草稿。
  */
 export function eventBelongsToTurn<A>(
   turn: PendingTurn<A>,
-  event: { type?: string; turn?: unknown; turn_id?: unknown; request_id?: unknown },
+  event: {
+    type?: string;
+    request_id?: unknown;
+    requestId?: unknown;
+  },
 ): boolean {
-  const explicit = event.turn_id ?? event.turn ?? event.request_id;
-  if (explicit !== undefined && explicit !== null && String(explicit).trim() !== '')
-    return String(explicit) === String(turn.id);
-  return typeof event.type === 'string' && TURN_EVENT_TYPES.has(event.type);
+  if (event.type !== 'turn_started') return false;
+  const requestId = (turn.requestId ?? '').trim();
+  if (!requestId) return false;
+  const explicit = event.request_id ?? event.requestId;
+  if (typeof explicit !== 'string' && typeof explicit !== 'number') return false;
+  return String(explicit) === requestId;
 }

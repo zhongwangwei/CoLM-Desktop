@@ -48,7 +48,14 @@ test('U03 evidence cards render structured fields and clickable targets', () => 
       },
       repos: {
         desktop: {
+          key: 'desktop',
           identity: { state: 'verified', root: '/repos/desktop' },
+          retention: {
+            state: 'retained',
+            checked_ref: 'main',
+            checked_sha: 'c'.repeat(40),
+            note: 'line-level check only',
+          },
           locations: [{ path: 'src/a.F90', line: 42 }],
           commits: [
             {
@@ -78,6 +85,13 @@ test('U03 evidence cards render structured fields and clickable targets', () => 
   assert.match(html, /committer time/i);
   assert.match(html, /unchecked/, 'reason status stays raw');
   assert.match(html, /Open file/, 'location is clickable through open_path');
+  // A1：保留状态三态之一按后端字段渲染，并带检查终点与 note 原文。
+  assert.match(html, /current source retention/);
+  assert.match(html, /still contains lines added/);
+  assert.match(html, /line-level check only/);
+  assert.match(html, /main @ ccccccc/);
+  // A2：规范仓库 + 完整 SHA 的 commit 显示“打开 commit”。
+  assert.match(html, /Open commit/);
 });
 
 test('U04 review banner lists old actions and offers the review controls', () => {

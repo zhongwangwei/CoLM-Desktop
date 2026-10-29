@@ -42,7 +42,7 @@ function EvidenceFieldView({
       )}
       {field.url && (
         <Button variant="ghost" onClick={() => onOpenUrl(field.url!)}>
-          {t('打开链接', 'Open link')}
+          {field.linkLabel || t('打开链接', 'Open link')}
         </Button>
       )}
     </div>
@@ -94,7 +94,7 @@ function EvidenceItemView({
             )}
             {item.url && (
               <Button variant="ghost" onClick={() => onOpenUrl(item.url!)}>
-                {t('打开链接', 'Open link')}
+                {item.urlLabel || t('打开链接', 'Open link')}
               </Button>
             )}
           </div>

@@ -131,6 +131,10 @@ export const commandContract = {
     "context": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "requestId": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "assistant_approve": {

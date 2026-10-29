@@ -997,6 +997,8 @@ export interface EvidenceField {
   path?: string;
   /** http/https 链接：点击用 assistant_open_url。 */
   url?: string;
+  /** 链接按钮文字（默认“打开链接”）；commit 链接用“打开 commit”。 */
+  linkLabel?: string;
 }
 
 export interface EvidenceItem {
@@ -1007,6 +1009,8 @@ export interface EvidenceItem {
   detailLabel?: string;
   path?: string;
   url?: string;
+  /** 链接按钮文字（默认“打开链接”）。 */
+  urlLabel?: string;
 }
 
 export interface EvidenceSection {
@@ -1219,6 +1223,104 @@ function hunkDiffText(value: unknown, maxLines = 30) {
   return clip(lines.join('\n'), 4000);
 }
 
+/** 内置注册表里的两个规范 GitHub 仓库；selected/local 与未知来源不生成链接。 */
+const CANONICAL_GITHUB_REPOSITORIES: Record<string, string> = {
+  desktop: 'zhongwangwei/CoLM-Desktop',
+  colm_upstream: 'CoLM-SYSU/CoLM',
+};
+
+/** 从仓库 key / owner-repo / GitHub URL 里取规范 slug；拿不准返回 null。 */
+export function canonicalRepositorySlug(repository: string | null | undefined): string | null {
+  const value = (repository ?? '').trim();
+  if (!value) return null;
+  if (CANONICAL_GITHUB_REPOSITORIES[value]) return CANONICAL_GITHUB_REPOSITORIES[value];
+  let candidate = value.replace(/^https?:\/\/(?:www\.)?github\.com\//i, '');
+  candidate = candidate.replace(/\/+$/, '').split('/').slice(0, 2).join('/');
+  if (!candidate.includes('/')) return null;
+  return (
+    Object.values(CANONICAL_GITHUB_REPOSITORIES).find(
+      (slug) => slug.toLowerCase() === candidate.toLowerCase(),
+    ) ?? null
+  );
+}
+
+/**
+ * 可映射到规范 GitHub 仓库的完整 commit 链接。sha 必须是 40 位小写 hex；
+ * 短 SHA/别名、selected/local 来源和未知 owner/repo 一律不给链接（不猜 URL）。
+ */
+export function canonicalCommitUrl(
+  repository: string | null | undefined,
+  sha: string | null | undefined,
+): string | null {
+  const digest = (sha ?? '').trim();
+  if (!/^[0-9a-f]{40}$/.test(digest)) return null;
+  const slug = canonicalRepositorySlug(repository);
+  return slug ? `https://github.com/${slug}/commit/${digest}` : null;
+}
+
+/**
+ * A1：source_history 每个 repo 的“当前源码保留状态”。只翻译后端给的结构化 state，
+ * 绝不根据祖先关系或文本把未知情况猜成 retained。
+ */
+export function sourceRetentionFields(retention: unknown, language: string): EvidenceField[] {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  const record = asRecord(retention);
+  if (!record)
+    return [
+      field(
+        t('当前源码保留状态', 'current source retention'),
+        t('工具未提供', 'not provided by the tool'),
+      ),
+    ];
+  const state = asText(record.state);
+  const note = asText(record.note);
+  let stateText: string;
+  if (state === 'retained')
+    stateText = t(
+      '当前终点仍含该提交新增行（行级检查，不等于数值影响已证实）',
+      'the current endpoint still contains lines added by this commit (line-level check; numerical impact is not proven)',
+    );
+  else if (state === 'not_retained')
+    stateText = t(
+      '当前终点未找到新增行（不能据此证明被撤销或改写）',
+      'the added lines were not found at the current endpoint (this does not prove reversion or rewriting)',
+    );
+  else if (state === 'unknown')
+    stateText = note
+      ? t(`不可判断（${note}）`, `cannot be determined (${note})`)
+      : t('不可判断（原因未提供）', 'cannot be determined (no reason provided)');
+  else if (state)
+    stateText =
+      language === 'en'
+        ? `unknown state: ${state}${note ? ` (${note})` : ''}`
+        : `未知状态：${state}${note ? `（${note}）` : ''}`;
+  else stateText = t('状态未提供', 'state not provided');
+  const fields: EvidenceField[] = [
+    field(t('当前源码保留状态', 'current source retention'), stateText),
+  ];
+  const checkedRef = asText(record.checked_ref);
+  const checkedSha = shortSha(asText(record.checked_sha));
+  if (checkedRef || checkedSha)
+    fields.push(
+      field(
+        t('检查终点', 'checked endpoint'),
+        [checkedRef, checkedSha].filter(Boolean).join(' @ '),
+        { mono: true },
+      ),
+    );
+  if (asText(record.commit))
+    fields.push(field(t('该提交', 'that commit'), shortSha(asText(record.commit)), { mono: true }));
+  const basis = Array.isArray(record.basis)
+    ? record.basis.map(asText).filter(Boolean).join(', ')
+    : asText(record.basis);
+  if (basis) fields.push(field(t('保留判断依据', 'retention basis'), basis));
+  if (note) fields.push(field(t('保留状态说明', 'retention note'), note));
+  const paths = asArray(record.paths).map(asText).filter(Boolean);
+  if (paths.length)
+    fields.push(field(t('相关文件', 'retention paths'), clip(paths.slice(0, 5).join('；'), 600)));
+  return fields;
+}
+
 function sourceHistoryEvidence(
   root: JsonRecord,
   language: string,
@@ -1271,6 +1373,13 @@ function sourceHistoryEvidence(
     if (identityState) fields.push(field(t('身份', 'identity'), identityState));
     if (asText(repo?.history))
       fields.push(field(t('历史可用性', 'history'), asText(repo?.history)));
+    // A1：当前源码保留状态；缺字段时明确写“工具未提供”，绝不从祖先关系猜 retained。
+    fields.push(...sourceRetentionFields(repo?.retention, language));
+    const repositorySlug = canonicalRepositorySlug(
+      asText(repo?.key) ||
+        [asText(repo?.owner), asText(repo?.repo)].filter(Boolean).join('/') ||
+        asText(repo?.url),
+    );
     const items: EvidenceItem[] = [];
     for (const value of asArray(repo?.locations)) {
       const location = asRecord(value);
@@ -1301,6 +1410,15 @@ function sourceHistoryEvidence(
         fields.push(field(t('提交时间', 'committer time'), committerTime, { mono: true }));
       const relevance = asArray(commit.relevance).map(asText).filter(Boolean);
       if (relevance.length) fields.push(field(t('相关性', 'relevance'), relevance.join(', ')));
+      // A2：只有规范 GitHub 仓库 + 完整 40hex 才给“打开 commit”；selected/短 SHA 不生成链接。
+      const commitUrl = canonicalCommitUrl(repositorySlug, asText(commit.sha));
+      if (commitUrl)
+        fields.push(
+          field(t('提交链接', 'commit link'), t('在 GitHub 上查看', 'View on GitHub'), {
+            url: commitUrl,
+            linkLabel: t('打开 commit', 'Open commit'),
+          }),
+        );
       fields.push(...commitReasonFields(asRecord(commit.reason), language, t));
       if (commit.truncated === true)
         fields.push(field(t('截断', 'truncated'), yesNo(true, language)));
@@ -1460,6 +1578,11 @@ function commitDetailsEvidence(
   if (repoPath) repoFields.push(field(t('本地路径', 'local path'), repoPath, { path: repoPath }));
   const identity = asText(asRecord(repository.identity)?.state);
   if (identity) repoFields.push(field(t('身份', 'identity'), identity));
+  const repositorySlug = canonicalRepositorySlug(
+    asText(repository.key) ||
+      [asText(repository.owner), asText(repository.repo)].filter(Boolean).join('/') ||
+      asText(repository.url),
+  );
   if (asText(repository.kind))
     repoFields.push(field(t('来源类型', 'source kind'), asText(repository.kind)));
   if (asText(repository.history_path))
@@ -1473,6 +1596,15 @@ function commitDetailsEvidence(
   const sha = asText(commit.sha);
   const commitFields: EvidenceField[] = [];
   if (sha) commitFields.push(field(t('提交', 'commit'), shortSha(sha), { mono: true }));
+  // A2：commit_details 的提交映射同样是“规范仓库 + 完整 40hex”才可打开；selected_source 不猜。
+  const commitUrl = canonicalCommitUrl(repositorySlug, sha);
+  if (commitUrl)
+    commitFields.push(
+      field(t('提交链接', 'commit link'), t('在 GitHub 上查看', 'View on GitHub'), {
+        url: commitUrl,
+        linkLabel: t('打开 commit', 'Open commit'),
+      }),
+    );
   const parents = asArray(commit.parents)
     .map((parent) => shortSha(asText(parent)))
     .filter(Boolean);

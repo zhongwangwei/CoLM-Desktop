@@ -58,40 +58,42 @@ describe('assistant send turn state machine', () => {
   });
 });
 
-describe('U05: events must belong to the pending turn', () => {
-  it('accepts turn-scoped event types but not checkpoints or app-level events', () => {
-    const sent = turn();
+describe('A3: only a matching turn_started accepts the pending turn', () => {
+  it('accepts only a turn_started carrying the pending request id', () => {
+    const sent = newTurn(1, 'hello', 'hello', [], 'turn-1-abc');
+    assert.equal(
+      eventBelongsToTurn(sent, { type: 'turn_started', request_id: 'turn-1-abc' }),
+      true,
+    );
+    assert.equal(eventBelongsToTurn(sent, { type: 'turn_started', requestId: 'turn-1-abc' }), true);
+    // 迟到旧轮的 turn_started 不匹配：不能把新消息标成已接受。
+    assert.equal(
+      eventBelongsToTurn(sent, { type: 'turn_started', request_id: 'turn-0-old' }),
+      false,
+    );
+    assert.equal(eventBelongsToTurn(sent, { type: 'turn_started' }), false, '没有 request id 不算');
+    assert.equal(eventBelongsToTurn(sent, { type: 'turn_started', request_id: 1 }), false);
+    // 其它事件即使带匹配 id 也不再标记接受（严格模式，旧白名单已删除）。
     for (const type of [
-      'assistant_delta',
-      'reasoning_delta',
-      'tool_call',
-      'tool_result',
-      'approval_request',
-      'ui_request',
       'usage',
       'context',
+      'tool_result',
+      'assistant_delta',
+      'task_state',
       'turn_done',
+      'ready',
+      'exited',
     ])
-      assert.equal(eventBelongsToTurn(sent, { type }), true, type);
-    // task_state 在 turn_done 之后才发；docs_index_status 是应用级后台事件；ready/exited/error
-    // 都不是"这一轮被模型接受"的证据。
-    for (const type of ['task_state', 'docs_index_status', 'ready', 'exited', 'error'])
-      assert.equal(eventBelongsToTurn(sent, { type }), false, type);
+      assert.equal(eventBelongsToTurn(sent, { type, request_id: 'turn-1-abc' }), false, type);
   });
 
-  it('prefers an explicit turn/request id and rejects stale ids', () => {
-    const sent = turn(); // id = 1
-    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: 1 }), true);
-    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: '1' }), true);
-    assert.equal(eventBelongsToTurn(sent, { type: 'task_state', turn: 1 }), true);
-    assert.equal(eventBelongsToTurn(sent, { type: 'tool_result', turn_id: 1 }), true);
-    assert.equal(eventBelongsToTurn(sent, { type: 'usage', request_id: 1 }), true);
-    // 迟到旧轮事件即使类型属于轮内事件，也因 ID 不匹配而不算本轮接受。
-    assert.equal(eventBelongsToTurn(sent, { type: 'assistant_delta', turn: 2 }), false);
-    assert.equal(eventBelongsToTurn(sent, { type: 'tool_result', turn_id: 'old-turn' }), false);
-    assert.equal(eventBelongsToTurn(sent, { type: 'usage', request_id: 99 }), false);
-    // 空字符串不算提供了 ID：退回类型白名单。
-    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: '' }), true);
-    assert.equal(eventBelongsToTurn(sent, { type: 'task_state', turn: '' }), false);
+  it('never accepts when the pending turn has no request id (old agent / malformed send)', () => {
+    const legacy = turn();
+    assert.equal(legacy.requestId, '');
+    assert.equal(eventBelongsToTurn(legacy, { type: 'turn_started', request_id: 'turn-1' }), false);
+    assert.equal(eventBelongsToTurn(legacy, { type: 'turn_started', request_id: '' }), false);
+    // 空字符串 request id 的 pending 也不能被任何事件“匹配”成接受。
+    const empty = newTurn(1, 'hello', 'hello', [], '  ');
+    assert.equal(eventBelongsToTurn(empty, { type: 'turn_started', request_id: '  ' }), false);
   });
 });

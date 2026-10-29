@@ -540,10 +540,9 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setMessages: updates.setMessages,
     setError: updates.setError,
   };
-  const beginSendTurn = compileFunction<(typed: string, prompt: string) => PendingTurn<Attachment>>(
-    'beginSendTurn',
-    common,
-  );
+  const beginSendTurn = compileFunction<
+    (typed: string, prompt: string, requestId: string) => PendingTurn<Attachment>
+  >('beginSendTurn', common);
   const settleSendTurn = compileFunction<
     (id: number, delivered: boolean, failure?: unknown) => void
   >('settleSendTurn', common);
@@ -607,6 +606,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     invoke,
     guideState: () => ({ kernelDir: '/kernel' }),
     historySettingsOf,
+    newRequestId: () => 'turn-test-1',
     fresh: refs.fresh,
     session: refs.session,
     streamed: refs.streamed,
@@ -695,7 +695,7 @@ test('GUI-18: a late ack from an old turn cannot clear the next turn draft', asy
   await settle();
   harness.handleEvent(rejection);
   assert.equal(harness.ui.draft, 'hello');
-  const next = harness.beginSendTurn('next question', 'next question');
+  const next = harness.beginSendTurn('next question', 'next question', 'turn-next-1');
   harness.ui.draft = 'next question';
   harness.resolveAck();
   await sending;
@@ -708,8 +708,11 @@ test('GUI-18: a turn the backend already started is not restored by a late refus
   const harness = sendHarness();
   const sending = harness.send();
   await settle();
-  // 后端产出了这一轮自己的事件：消息确实被记下了，IPC 成功与否不再是接受依据。
-  harness.handleEvent({ type: 'usage', prompt_tokens: 3, completion_tokens: 5 });
+  // A3：后端发来匹配本轮 requestId 的 turn_started，消息确实被记下了；IPC 成功与否不再是接受依据。
+  const requestId = String(
+    harness.invocations.find((item) => item.command === 'assistant_send')?.args.requestId,
+  );
+  harness.handleEvent({ type: 'turn_started', request_id: requestId });
   assert.equal(harness.refs.outgoing.current?.phase, 'accepted');
   harness.ui.draft = 'next question';
   harness.resolveAck();
@@ -1156,10 +1159,17 @@ test('U03: only open_path for local files and assistant_open_url for http(s) lin
     command: 'assistant_open_url',
     args: { url: 'https://github.com/o/r/pull/7' },
   });
+  // A2：规范仓库的完整 commit 链接走同一个命令，参数原样。
+  const commitUrl = `https://github.com/zhongwangwei/CoLM-Desktop/commit/${'b'.repeat(40)}`;
+  await harness.openEvidenceUrl(commitUrl);
+  assert.deepEqual(harness.calls.at(-1), {
+    command: 'assistant_open_url',
+    args: { url: commitUrl },
+  });
   // 非 http(s) 链接不发给后端，也不拼成文件路径。
   await harness.openEvidenceUrl('file:///etc/passwd');
   assert.match(harness.state.error, /http\/https/i);
-  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls.length, 3);
 });
 
 function reconcileHarness(options: { reject?: Error; note?: string } = {}) {
@@ -1231,18 +1241,28 @@ test('U04: banner comes from the task snapshot and normal turn events cannot cle
   assert.match(panelSource, /reconcileEffects\(ids\)/);
 });
 
-test('U05: late task_state and mismatched turn ids do not mark the new message as accepted', async () => {
+test('A3: only a matching turn_started accepts the message; late events keep it pending', async () => {
   const harness = sendHarness();
   const sending = harness.send();
   await settle();
-  // task_state 在 turn_done 之后才发：它不能证明新消息已被模型接受。
+  const sentTurn = harness.refs.outgoing.current!;
+  const requestId = String(
+    harness.invocations.find((item) => item.command === 'assistant_send')?.args.requestId,
+  );
+  assert.match(requestId, /^turn-/, 'assistant_send 携带本轮 requestId');
+  assert.equal(sentTurn.requestId, requestId, 'pending 状态记录同一个 requestId');
+
+  // 迟到的 task_state / usage / context / tool_result 都不再标记“已被接受”。
   harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: false } });
+  harness.handleEvent({ type: 'usage', prompt_tokens: 1, completion_tokens: 2 });
+  harness.handleEvent({ type: 'context', estimated_tokens: 1, window_tokens: 100 });
+  harness.handleEvent({ type: 'tool_result', id: 'call-1', ok: true, result: '{}' });
   assert.equal(harness.refs.outgoing.current?.phase, 'preparing');
-  // 后端给了轮次 ID 但不是当前这一轮：同样不接受。
-  harness.handleEvent({ type: 'usage', turn: 999, prompt_tokens: 1 });
+  // 旧轮/伪造的 turn_started 不匹配，也不接受。
+  harness.handleEvent({ type: 'turn_started', request_id: 'turn-0-old' });
   assert.equal(harness.refs.outgoing.current?.phase, 'preparing');
-  // 属于这一轮的事件（id 对齐）才算接受。
-  harness.handleEvent({ type: 'usage', turn: 1, prompt_tokens: 1, completion_tokens: 2 });
+  // 匹配本轮 requestId 的 turn_started 才算接受。
+  harness.handleEvent({ type: 'turn_started', request_id: requestId });
   assert.equal(harness.refs.outgoing.current?.phase, 'accepted');
   harness.resolveAck();
   await sending;

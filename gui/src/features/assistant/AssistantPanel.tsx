@@ -169,6 +169,8 @@ export default function AssistantPanel() {
   // 刚发出、助手还没开始回应的那一轮：拒绝时用它恢复输入框与附件（D-06 / GUI-18）。
   const outgoing = useRef<PendingTurn<DocumentAttachment> | null>(null);
   const turnSeq = useRef(0);
+  // A3：每轮 stdin 请求 id（计数器 + 随机后缀），与后端 turn_started.request_id 对齐。
+  const requestSeq = useRef(0);
   const [attaching, setAttaching] = useState(false);
   const [attachNotice, setAttachNotice] = useState('');
   const [error, setError] = useState('');
@@ -274,9 +276,8 @@ export default function AssistantPanel() {
     let active = true;
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
-      // 后端产出这一轮自己的事件 = 消息确实被模型接下了；IPC 确认只代表送达，不能代替（GUI-18）。
-      // 但只有属于**当前这一轮**的事件才算（U05）：后端给 turn/request ID 时必须匹配，没有 ID 时
-      // 只接受轮内事件类型；迟到旧 task_state/docs_index_status/上一轮事件不能把新消息误标为已接受。
+      // A3：只有匹配本轮 requestId 的 turn_started 才证明“消息已被模型接受”；IPC 确认只代表送达。
+      // usage/context/tool_result/task_state 等即使属于本轮也不标记接受，迟到旧事件更不会。
       if (outgoing.current && eventBelongsToTurn(outgoing.current, event))
         outgoing.current = turnOutput(outgoing.current);
       if (!active) return;
@@ -284,6 +285,9 @@ export default function AssistantPanel() {
         case 'ready':
           session.current = event.session || session.current;
           setModel(event.model || '');
+          break;
+        case 'turn_started':
+          // A3：turn_started 只用于标记本轮接受（上面已处理）；不清 busy、不写消息。
           break;
         case 'assistant_delta':
           streamed.current = true;
@@ -678,9 +682,13 @@ export default function AssistantPanel() {
       setAttaching(false);
     }
   }
-  /** 开始一轮发送：快照这一轮要发出的草稿，并分配轮次号（GUI-18）。 */
-  function beginSendTurn(typed: string, prompt: string) {
-    const record = newTurn(++turnSeq.current, typed, prompt, attachmentsRef.current);
+  /** A3：生成本轮请求 id；测试通过抽出的 send/beginSendTurn 上下文注入稳定的实现。 */
+  function newRequestId() {
+    return `turn-${++requestSeq.current}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+  /** 开始一轮发送：快照这一轮要发出的草稿，并分配轮次号与请求 id（GUI-18 / A3）。 */
+  function beginSendTurn(typed: string, prompt: string, requestId: string) {
+    const record = newTurn(++turnSeq.current, typed, prompt, attachmentsRef.current, requestId);
     outgoing.current = record;
     return record;
   }
@@ -770,7 +778,9 @@ export default function AssistantPanel() {
         ? `${prompt}\n\n${t('附件：', 'Attachments: ')}${attachments.map((item) => item.name).join('、')}`
         : prompt;
       setMessages((old) => [...old, { kind: 'user', text: shown }]);
-      sent = beginSendTurn(typed, prompt);
+      // A3：先把本轮请求 id 记进 pending 状态，再随 assistant_send 交给后端。
+      const requestId = newRequestId();
+      sent = beginSendTurn(typed, prompt, requestId);
       // U02：每条消息都带上当前历史范围（保留 guideState 的页面上下文）；范围改动会先落盘到设置。
       await invoke('assistant_send', {
         text,
@@ -778,6 +788,7 @@ export default function AssistantPanel() {
           ...guideState(),
           history_scope: historySettingsOf(current).scope,
         }),
+        requestId,
       });
       settleSendTurn(sent.id, true);
     } catch (e) {
