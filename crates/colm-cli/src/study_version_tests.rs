@@ -421,6 +421,43 @@ fn same_design_compares_observation_contents_separately_from_their_host_paths() 
     assert!(!same_design(&left, &right).unwrap());
 }
 
+#[test]
+fn same_design_ignores_parent_study_lineage_metadata() {
+    let mut local: study::spec::StudySpec = serde_json::from_value(serde_json::json!({
+        "kind":"uncertainty","method":"oat","base_cases":["caseA"],
+        "parameters":[],"observations":{"caseA":"/local/obs.nc"},"outputs":["f_tref"],
+        "parent_study":{
+            "study":"/p/.colm/studies/s-uncertainty",
+            "spec_sha256":"a".repeat(64)
+        }
+    }))
+    .unwrap();
+    let mut remote = local.clone();
+    // 远程 staging 故意把 parent_study 清成 None（服务器引擎可能不认识）；谱系是审计元数据，
+    // 不参与执行设计相等判断，否则派生研究取回时会被误拒。
+    remote.parent_study = None;
+    assert!(
+        same_design(&local, &remote).unwrap(),
+        "parent_study Some vs None 应是同一设计"
+    );
+    local.parent_study = None;
+    let mut remote = local.clone();
+    remote.parent_study = Some(study::spec::ParentStudy {
+        study: "/p/.colm/studies/s-uncertainty".into(),
+        spec_sha256: "a".repeat(64),
+        model_revision: None,
+    });
+    assert!(
+        same_design(&local, &remote).unwrap(),
+        "parent_study None vs Some 也应是同一设计"
+    );
+    remote.seed = 1;
+    assert!(
+        !same_design(&local, &remote).unwrap(),
+        "执行语义（seed）不同仍必须判为不同设计"
+    );
+}
+
 /// 早于新设定的修订程序：设定里出现它不认得的字段就像旧版 serde 那样报错。
 #[cfg(unix)]
 fn old_cli(root: &Path) -> PathBuf {
@@ -801,6 +838,71 @@ fn a_workspace_revision_study_is_created_by_its_own_cli() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// GUI 的 study-create/study-preflight 一直把设定放在 flags 的 `--spec 原文件` 里；转交旧修订时
+/// 若原样透传这个 flag，剥离 parent_study 的副本根本送不出去（5a）。
+#[cfg(unix)]
+#[test]
+fn gui_flags_hand_the_sanitized_spec_to_an_older_revision() {
+    let root = temp("delegate-gui-spec");
+    let spec = valid_spec(&root, true);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
+    value["parent_study"] = serde_json::json!({
+        "study": "/p/.colm/studies/s-uncertainty",
+        "spec_sha256": "a".repeat(64)
+    });
+    std::fs::write(&spec, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let before = std::fs::read(&spec).unwrap();
+    let args_log = root.join("args.log");
+    let handed_log = root.join("handed.json");
+    let script = format!(
+        "spec=''\nprev=''\n\
+         for arg in \"$@\"; do\n\
+           printf '%s\\n' \"$arg\" >> '{args}'\n\
+           if [ \"$prev\" = \"--spec\" ]; then spec=\"$arg\"; fi\n\
+           prev=\"$arg\"\n\
+         done\n\
+         cp \"$spec\" '{handed}'\n\
+         echo ok\n",
+        args = args_log.display(),
+        handed = handed_log.display(),
+    );
+    let cli = fake_cli(&root, &script);
+    let revision = workspace_revision("ws", 2);
+    let flags = vec![("--spec".to_string(), spec.to_string_lossy().into_owned())];
+    let stdout =
+        create_with_revision_cli("study-preflight", &revision, &cli, &root, &spec, &flags).unwrap();
+    assert_eq!(stdout.trim(), "ok");
+    let args: Vec<String> = std::fs::read_to_string(&args_log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        args.iter().filter(|arg| *arg == "--spec").count(),
+        1,
+        "不能把 --spec 写两遍: {args:?}"
+    );
+    let handed = Path::new(&args[args.iter().position(|arg| arg == "--spec").unwrap() + 1]);
+    assert_ne!(
+        handed, spec,
+        "GUI 传来的 --spec 必须换成剥掉 parent_study 的副本"
+    );
+    assert!(!handed.exists(), "转交用的临时副本事后要删掉");
+    let handed_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&handed_log).unwrap()).unwrap();
+    assert!(
+        handed_value.get("parent_study").is_none(),
+        "旧修订收到的设定不能带 parent_study: {handed_value}"
+    );
+    assert_eq!(
+        std::fs::read(&spec).unwrap(),
+        before,
+        "用户给的设定绝不被改写"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec() {
@@ -815,7 +917,7 @@ fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec()
            prev=\"$arg\"\n\
          done\n\
          has=0\n\
-         if grep -q '\"include_baseline\": true' \"$spec\"; then has=1; fi\n\
+         if grep -q '\"include_baseline\"' \"$spec\"; then has=1; fi\n\
          printf '%s %s\\n' \"$spec\" \"$has\" >> '{log}'\n\
          if [ \"$has\" = \"1\" ]; then\n\
            echo 'Error: unknown field `include_baseline`, expected one of `jobs`' >&2\n\
@@ -836,7 +938,8 @@ fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec()
     )
     .unwrap();
     assert_eq!(stdout.trim(), "ok");
-    // 只认不得 include_baseline 时去掉它重试；用户给的设定文件绝不改写。
+    // 旧程序的 deny_unknown_fields 只认键存在，值是 true 还是 false 都拒绝；重试副本必须删掉
+    // 这个键，而不是写成 false。用户给的设定文件绝不改写。
     assert_eq!(std::fs::read(&spec).unwrap(), before);
     let attempts: Vec<(PathBuf, bool)> = std::fs::read_to_string(&log)
         .unwrap()
@@ -855,7 +958,10 @@ fn an_older_revision_drops_the_baseline_seed_but_never_rewrites_the_given_spec()
     assert!(attempts[0].1, "第一次仍保留 GUI 的 include_baseline 增强");
     assert_ne!(attempts[1].0, spec);
     assert_ne!(attempts[1].0, attempts[0].0, "重试使用新的副本");
-    assert!(!attempts[1].1, "重试的设定里不再有 include_baseline");
+    assert!(
+        !attempts[1].1,
+        "重试的设定里必须没有 include_baseline 键（写 false 旧程序也拒绝）"
+    );
     assert!(!attempts[0].0.exists(), "第一次的临时副本事后要删掉");
     assert!(!attempts[1].0.exists(), "重试用的临时副本事后要删掉");
     let _ = std::fs::remove_dir_all(&root);
@@ -976,7 +1082,11 @@ fn a_spec_handed_to_an_older_program_drops_parent_study_and_optionally_include_b
     let retried = spec_for_older_program(&spec, true).unwrap();
     let value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&retried).unwrap()).unwrap();
-    assert_eq!(value["budget"]["include_baseline"], false);
+    // 旧程序的 deny_unknown_fields 只看键在不在：写 `false` 一样被拒，必须整键删除。
+    assert!(
+        value["budget"].get("include_baseline").is_none(),
+        "重试副本仍带 include_baseline 键: {value}"
+    );
     assert!(value.get("parent_study").is_none());
     // 用户给的设定文件本身绝不被改写。
     let original: serde_json::Value =

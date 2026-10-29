@@ -329,7 +329,11 @@ fn create_with_revision_cli(
     // 第一次尝试就用剥掉 parent_study 的副本：旧修订读不了这个新元数据，而新程序不介意少一个
     // 审计字段；创建成功后由这里把谱系写回研究目录。
     let sanitized = spec_for_older_program(spec_file, false)?;
-    let args = creation_delegate_args(command, case_root, &sanitized, flags);
+    let mut args = creation_delegate_args(command, case_root, &sanitized, flags);
+    // GUI 的 study-create/study-preflight 一直把 `--spec 原文件` 放在 flags 里；
+    // `creation_delegate_args` 只在没有 --spec 时才补副本，于是剥离 parent_study 的副本根本
+    // 没送出去（5a）。这里统一把已有的 --spec 重指到副本，第一次尝试与重试走同一条路径。
+    set_spec_argument(&mut args, &sanitized);
     let (run, retry_spec) = (|| -> Result<(CreationRun, Option<PathBuf>)> {
         let run = run_creation_cli(cli, &args)?;
         if !run.success && run.stderr.contains("unknown field `include_baseline`") {
@@ -493,7 +497,9 @@ fn spec_for_older_program(spec_file: &Path, drop_include_baseline: bool) -> Resu
         map.remove("parent_study");
         if drop_include_baseline {
             if let Some(budget) = map.get_mut("budget").and_then(|b| b.as_object_mut()) {
-                budget.insert("include_baseline".into(), serde_json::Value::Bool(false));
+                // 旧 StudyBudget 是 deny_unknown_fields：它只看键在不在，写 `false` 一样被拒，
+                // 所以整键删掉而不是置 false（5b）。
+                budget.remove("include_baseline");
             }
         }
     }
@@ -595,6 +601,10 @@ pub(crate) fn same_design(a: &study::spec::StudySpec, b: &study::spec::StudySpec
         let mut value = serde_json::to_value(spec)?;
         if let Some(map) = value.as_object_mut() {
             map.remove("kernel_dir");
+            // 谱系是审计元数据，不属于执行设计：远程 staging 会故意把 parent_study 清成 None
+            // （服务器引擎可能不认识它），留在这里会让本机 Some / 远端 None 判成不同设计，
+            // 派生研究取回时被误拒（7a）。
+            map.remove("parent_study");
             // Paths relocate across hosts; observation contents are checked separately.
             map.insert(
                 "observations".into(),

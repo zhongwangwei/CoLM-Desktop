@@ -658,6 +658,26 @@ fn every_local_observation_source_is_staged_under_a_unique_name() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 7a：staging 会把 parent_study 清掉（服务器引擎可能不认识），设计比较必须同样忽略它，
+/// 否则带谱系的派生研究从服务器取回时会被判成设计不一致而拒绝。
+#[test]
+fn a_staged_study_without_parent_study_still_matches_the_local_design() {
+    let (root, manifest) = observation_staging_fixture();
+    assert!(
+        manifest.spec.parent_study.is_some(),
+        "fixture 必须带谱系，否则测不到 7a"
+    );
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap();
+    let remote: study::spec::StudySpec = serde_json::from_value(staged.spec).unwrap();
+    assert!(remote.parent_study.is_none(), "staging 必须剥掉谱系");
+    assert!(
+        same_study_design(&manifest.spec, &remote).unwrap(),
+        "本地带谱系、服务器不带谱系仍是同一执行设计"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn mapped_observation_sources_keep_the_server_path_and_are_not_copied() {
     let (root, manifest) = observation_staging_fixture();
