@@ -39086,3 +39086,31 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 旧 grid/gauge 研究续跑需重跑基线（支持哈希算法升级，未做版本标记迁移；#16 仍在下一批）。
 - `DEF_HIST_FREQ` 缺失时预检无法判定、退回旧行为。
 - 其余复核项（#6a/6b 执行器统一、#7b 归档后写回、#8a/8b 目标内容身份与非最优成员核验、#9b 裸锁 PID 复用残余、#13 流式读取、#14 Gauge sentinel、#16 哈希算法版本、#17 粗产品重采样）仍在本轮之后。
+
+## 研究页第六批：history 分块读取 / Gauge 数值缺测 / 支持哈希算法版本（2026-10-29）
+
+接第五批。本批处理复核报告中的读取风险与旧研究迁移提示。
+
+### 1 大网格 history 改为逐记录读取（#13）
+
+- 旧行为：`ModelGrid::read` 对每份 history 先 `read_file_1d`（`get_values::<f64,_>(..)` 整月分配）再按时间窗过滤；`domain_mean_series` 同样整场读取。全球 0.1°（1800×3600）、逐时、一个月 744 条时单变量峰值约 38.6 GB，易 OOM。
+- 新行为：`main.rs` 新增 `RecordReadStats{records, values, max_record_values}` 与 `read_file_records`：`get_values_into` 逐条解码、复用单条 buffer、`keep` 在解码前筛掉窗口外记录，保留 `_FillValue/missing_value→NaN` 语义；`read_file_1d` 保留给时间轴/经纬度/landarea 等小变量与既有调用者。`ModelGrid::read_counted` 仍读完整时间轴用于覆盖率步长，但只解码 `[from,to)` 内记录，格点尺寸校验改为按维长度；`domain_mean_series_counted` 逐条在线累积全区加权平均，不再整月分配。
+- 数值累加顺序不变，coverage/support identity 与旧实现一致。测试：窗口外记录零解码、窗口内只解码一条（`stats.records=1`、`max_record_values=4`）、domain mean 与旧整场实现逐位相等、`_FillValue` 仍转 NaN。
+
+### 2 Gauge CSV 缺测码按数值判定（#14）
+
+- 旧行为：`parse_gauge_value` 用字符串精确匹配 `-9999/-9999.0/-999/-999.9/nan/na/n/a/null`；`-9999.00`、`-9999.000`、`-9.999e3`、`-999.0` 会被当作有限值进入指标，静默产生极大负偏差。
+- 新行为：先 `parse::<f64>()`，再按数值 sentinel（-9999 / -999 / -999.9，相对容差比较）判缺测，保留 nan/na/n/a/null/空串；NetCDF Gauge 路径仍按 `_FillValue/missing_value`，不受影响。测试覆盖上述浮点写法与正常值（0、1.5、-50），并保留端到端 CSV 缺测用例。
+
+### 3 支持哈希算法版本与旧研究续跑迁移（#16）
+
+- 旧行为：`TargetResult.support_hash` 没有算法版本；旧研究已跑完基线后，新算法（聚合目标的 `PeriodIdentity` 支持身份、grid/gauge 新身份）产生的候选哈希必然与旧基线不等，比较只报 "different model-observation support than baseline"，用户误以为模型/观测支持变了，研究卡住且归因错误。
+- 新行为：`TargetResult`/`ObjectiveMetricRow` 新增 `support_hash_algorithm`（`serde(default, skip_serializing_if = "String::is_empty")`，旧 JSON 缺字段解析为空串、空值不写回，旧结果文件形状不变；`TaskResult` 刻意不加任务级字段——同一任务可同时含聚合/非聚合目标，逐行标签才准确）。`target_result` 聚合分支写 `aggregate-period-identity-v1`、非聚合（含被 AlreadyNative/CoarserThanRequested 跳过的）写 `pair-v1`，grid/gauge 的 `paired_target_result` 写聚合标签；metrics.json 带标签，metrics.csv 末尾新增 `support_hash_algorithm` 列（旧列顺序不变、`csv_cell` 转义）。
+- 比较处新增 `support_hash_algorithm_mismatch()`：旧基线/标签不同时明确报 "the support hash algorithm was upgraded … rerun the baseline under the current algorithm"，不再落到"支持不同"；candidate 自身是旧算法时提示重跑该候选；行为仍是安全拒绝（calibration 不可比、validation 走既有 unavailable warning）。
+- 旧研究续跑：`requeue_legacy_baseline_tasks()` 在 `reconcile_tasks` 后检测旧算法基线，仅当本轮确实还会有新算法结果需要比较（未完成/可重试候选、DE 还有下一代、或已出现新标签候选）时把基线 Succeeded→Queued 并写 state warning + task reason；整套缓存结果都是旧算法且无新任务时保持自洽、只写提示。否决"无条件自动重跑旧基线"（会把缓存里已完成旧候选全部判不可比）。
+- 遗留：旧候选结果不自动重跑；基线重跑后旧候选会收到"candidate uses legacy … rerun this candidate"的明确提示。
+
+### 本轮验证（真实执行）
+
+- `cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **733 passed**；`study::` **258 passed**；`study::targets` **26 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- 未运行：真实全球逐时 history（合成夹具验证逐记录读取）、跨多文件窗口筛选的专项用例（单文件已覆盖窗口筛与读取统计）、真实 Tauri/GUI 端到端。
