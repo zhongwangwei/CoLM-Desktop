@@ -39399,3 +39399,18 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 研究 pin 到旧 `colm-cli` 时 `study-save-version` 整条转交旧程序，旧程序不会向远程引擎传 `--member`，仍走旧弱核验；父进程目前无法探测 pinned CLI 能力，建议后续加能力探针或在非 best/baseline 写回时拒绝旧 pin。
 - `metrics_recomputed` 对 selected 仍为 false（单点可改 true 并更新断言）。
 - 旧引擎支持范围：schema 1 旧 JSON 可读，但按成员核验要求服务器引擎新到支持 `--member`。
+
+## 研究页第十一批：旧 pin 程序下的成员写回守卫（2026-10-29）
+
+接第十批。第十批让服务器按 `--member` 核验指定成员，但研究 pin 到旧 `colm-cli` 时 `study-save-version`/`model-import-study` 会整条委托给旧程序，旧程序不会传 `--member`，非 best/baseline 成员写回仍走 state-only 弱核验。本批在委托判定处收紧：
+
+- 新增 `MEMBER_WRITE_BACK_COMMANDS`（study-save-version / model-import-study）、`manifest_identity()`（只读 manifest.json 的 `id`/`members[].baseline`/`spec.kind`，不反序列化 StudySpec）与 `best_member_in_state()`（只读 `checkpoints/state`，manifest id 可读时要求等于 `state.study_id`）。
+- 当 pin CLI 与当前程序不同且命令属于这两条、`--member` 显式指定且不是 baseline/state best（字面量 `best`/缺省放行）时，在起子进程/读 stdin 前 `Refuse`，说明"该研究绑定到旧程序，旧程序不会按成员在服务器核验；请改写 best/baseline，或用当前程序重建研究后重跑"。状态缺失/损坏/无 best 时同样拒绝并说明无法确认成员身份，不静默走弱核验。
+- **不确定性研究例外**：`spec.kind == "uncertainty"` 时不做率定守卫（它没有"最优成员"语义，远程按成员核验只服务率定），非 baseline 成员仍整条交给 pin 程序。该例外是初版守卫过宽（会误拒 uncertainty 写回）后按源码语义修正。
+- 判定只读 manifest/state JSON，不调用 verify_frozen_inputs、不连服务器；Local 判定与 `DELEGATED_ENV` 早退顺序不变，委托参数/退出码协议不变；未改 main.rs。
+
+测试：非 best/baseline 成员被拒（无程序启动）、best/baseline/未指定仍实际委托并核对原序参数、pin 相同/空保持本地、状态缺失拒绝、`DELEGATED_ENV` 阻止二次委托、uncertainty 非 baseline 成员仍委托。
+
+验证（真实执行）：`cargo test -q -p colm-cli --bin colm-cli study_version -- --test-threads=1` **49 passed**；`--bin colm-cli -- --test-threads=1` **792 passed**；`study_cli_tuning` **24 passed**；clippy `-D warnings` exit 0；fmt clean。未运行真实旧 CLI 二进制/真实 SSH。
+
+遗留：旧 pin 程序的能力无法从父进程探测，因此对"旧 pin + best/baseline 写回"仍按委托处理（旧程序对该路径的核验语义不变）；uncertainty 例外依据 manifest `spec.kind`，旧 manifest 缺 `spec` 时仍保守拒绝显式非 baseline 成员。
