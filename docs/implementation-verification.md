@@ -39460,3 +39460,41 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 验证（真实执行）：`cargo test -q --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` 581 passed / 1 ignored；`cargo clippy -q --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` exit 0；两侧 `cargo fmt --all --check` clean。未运行真实 Tauri 窗口点击。
 
 遗留：无新增；#17 完整按像元边界重采样仍是需要产品决策的能力项。
+
+## 研究页第十四批：#17 按像元边界重叠的面积加权匹配（2026-10-29）
+
+接第十三批。复核报告最后一项能力空缺：粗分辨率观测产品在 in-cell 匹配下只认像元中心，`space_coverage` 偏低，此前只给了告警。本批实现 opt-in 的 `pixel-overlap` 匹配，默认行为（`in-cell`）逐位不变。
+
+### spec
+
+- `GridMatching { #[default] InCell, PixelOverlap }`（serde kebab-case）；`TargetSource::Grid` 新增 `matching`，`#[serde(default, skip_serializing_if = "GridMatching::is_in_cell")]`：旧 spec 缺字段解析为 in-cell；默认/显式 in-cell 序列化后都不出现该键，旧 `spec_sha256` 与旧程序（`deny_unknown_fields`）都不受影响；`pixel-overlap` roundtrip；拼错值 serde 拒绝。
+
+### targets
+
+- `half_pixel_bounds`：用纬度/经度轴的中位间距生成像元半格边界；lat 规范为 south<north；lon 归一到 [-180,180)，跨日界线像元用 `west>east` 表示。单点、重复坐标、非有限轴在 pixel-overlap 下明确报错并提示改用 in-cell——不静默退回另一种语义。
+- `lon_overlap_degrees`：环形区间重叠（含跨 360 的拆分）；`-180..180` 与 `0..360` 两种写法结果一致。
+- `PeriodAggregate` 新增 `weight` 与 `add_weighted`：`sum += value*weight`、`weight += weight`、digest 混入 `(offset_seconds, weight)`（`mix_weighted_sample`）；`mean()` 在 `weight==0` 时仍走旧的 `sum/count`。in-cell 路径权重恒 1，逐位等价。
+- `ModelGrid::cells_with_observations(obs, matching)` / `GridObservation::period_means(..., matching)`：in-cell 分支逻辑与旧实现文本等价；pixel-overlap 对每个模型格与每个像元算 `lat 重叠 × 环形 lon 重叠`，`weight>0` 即参与，格观测值 = Σ(value×重叠面积)/Σ(重叠面积)；`space_coverage` 仍为"有覆盖的陆地格/全部陆地格"。
+- `grid_pairs`：pixel-overlap 时不发 in-cell 粗产品告警，改发 "area-weighted pixel-overlap matching" 诊断；in-cell 告警尾部从"resampling not implemented"改为建议 `matching = pixel-overlap`。`preflight_observation` 在 pixel-overlap 下抑制 in-cell 粗产品告警。
+- 测试（37 passed）：1° 粗像元覆盖 4 个 0.5° 模型格 → 每格 weight 0.25、观测值等于粗像元值、coverage 100%；同场景 in-cell 仅 4/16 覆盖；半格重叠 weight 0.5；跨日界线像元两种经度写法一致；单点像元 pixel-overlap 明确报错而 in-cell 仍可用；仅权重不同 → support identity 不同；in-cell 黄金 support hash 锁定 `9604baf2a12b0881748dc28fd6be23f71e2c7cd2e388eaecfbe0d3a874b7b5bc`（另用独立 Python 按改动前算法复算确认一致）。
+
+### 旧程序兼容
+
+- `spec_for_older_program`：任一 grid target `matching=pixel-overlap` → 明确拒绝（这是执行语义，不是审计元数据；剥字段会让旧程序悄悄换成 in-cell、指标看似正常却不可复现）；显式 `in-cell` 整键删除、缺省不留痕；未知 matching 值也拒绝。
+
+### GUI
+
+- 目标编辑区仅对 grid 目标显示"匹配方式 / Matching"下拉：in-cell（只按落格中心）与 pixel-overlap（按像元边界重叠、面积加权）；站点/水文站不显示。
+- `GridTargetDraft.matching` 默认 in-cell 只存在于草稿，不落 JSON；`pixel-overlap` 才序列化 `source.matching`。选择 pixel-overlap 时提示旧冻结程序无法复现、由后端拒绝（页面拿不到可靠的 revision→能力映射，未猜测/禁用）。测试：grid 下拉默认/切换/序列化、站点无下拉、旧 spec 读成 in-cell；`npm test` 1275 passed。
+
+### 本轮验证（真实执行）
+
+- CLI：`--bin colm-cli` **811 passed**；`study::targets` **37 passed**；`study_version` **50 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- 前端：`npm run typecheck` / `lint` / `format:check` 全过；`npm test` **1275 passed / 0 failed**。
+- 未运行：真实粗分辨率产品文件（合成 1°/0.5°、半格、跨日界线夹具）、真实 Tauri 窗口、旧冻结 CLI 二进制。
+
+### 遗留
+
+- `pixel-overlap` 是 opt-in：默认仍 in-cell，不做"按分辨率自动选择"；单点/无法定界的粗产品仍只能用 in-cell（pixel-overlap 明确报错）。
+- 旧冻结 CLI 不能运行 pixel-overlap（创建/回退时明确拒绝，需用当前程序重建）。
+- 面积权重按"重叠面积（度²）"计算，未做纬度 cos 面积修正；对纬向跨度的相对权重无影响，但与真实面积比例在极区不完全一致（记录在案，若要做全球产品加权可再加 cos(lat)）。
