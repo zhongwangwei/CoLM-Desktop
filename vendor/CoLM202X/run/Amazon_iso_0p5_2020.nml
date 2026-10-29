@@ -1,9 +1,14 @@
 &nl_colm
 
+   ! 2026-10-30 迁到 MaterialTransport namelist：水同位素的 family 开关与参数
+   ! 文件在文件末尾的 &nl_colm_material，旧的 DEF_TRACER_* 已不再被读取。
+   ! 映射明细见文件末尾。
+
    ! ===================================================================
-   ! Water-isotope tracer test: delta-18O (H2_18O) + delta-D (HDO)
+   ! Water-isotope test: delta-18O (H2_18O) + delta-D (HDO)
    ! Amazon box, 0.5 deg, IsoGSM 2020 forcing, monthly history output.
-   ! Fractionation ON. Requires #define TRACER in include/define.h.
+   ! Requires #define MaterialTransport in include/define.h; the family switch
+   ! and the isotope parameter file are in &nl_colm_material at the end.
    ! Field set mirrors the proven repo nml riverlake_15yr_0p25_ctl.nml.
    ! ===================================================================
 
@@ -57,20 +62,12 @@
    DEF_USE_LEVEE = .false.
    DEF_USE_BIFURCATION = .false.
 
-   ! ----- water isotope tracers: delta-18O + delta-D -----
-   ! Per-species metadata (mol_weight/ref_ratio/init_delta) AND per-species
-   ! forcing (&nl_colm_tracer_forcing) live in the parameter files below;
-   ! the main namelist stays species-neutral.
-   DEF_TRACER_NUM               = 2
-   DEF_TRACER_NAMES             = "H2_18O,HDO"
-   DEF_TRACER_TYPES             = "isotope,isotope"
-   DEF_TRACER_USE_FRACTIONATION = .true.
-   ! Required with VSF isotopes: set DEF_TRACER_AQUIFER_MIXING_WATER_MM
-   ! to a measured/calibrated positive effective mixing depth [mm].
-   ! No value is supplied here deliberately; see main/TRACER/README.md.
-   ! Merlivat pair: consistent with the IsoGSM forcing below (d-excess).
-   DEF_TRACER_KINETIC_SCHEME    = 'MERLIVAT1978' ! or 'CAPPA2003'
-   DEF_TRACER_PARAM_FILES       = 'H2_18O:/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_O18_parameter.nml,HDO:/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_HDO_parameter.nml'
+   ! ----- water isotopes: delta-18O + delta-D -----
+   ! 2026-10-30 迁到 MaterialTransport namelist：family 开关与参数文件都搬到
+   ! 文件末尾的 &nl_colm_material。原来的 DEF_TRACER_PARAM_FILES 把两个
+   ! species 各指一份参数文件，新方案里所有 isotope species 共用
+   ! DEF_ISOTOPE_PARAM_FILE 一个文件，因此改用合并后的
+   ! standard_isotope_parameter.nml（= 旧的 standard_O18/HDO 两份内容）。
 
    ! ----- forcing: IsoGSM (covers 2020, with isotope precip + vapor) -----
    DEF_forcing_namelist = '/share/home/dq013/zhwei/colm/script/CoLM202X/run/IsoGSM_2020.nml'
@@ -87,4 +84,29 @@
    DEF_HIST_WriteBack = .false.
    DEF_hist_vars_out_default = .true.
 
+/
+
+&nl_colm_material
+   ! 2026-10-30 迁到 MaterialTransport namelist：
+   !   DEF_TRACER_NUM = 2 / DEF_TRACER_NAMES = "H2_18O,HDO" /
+   !   DEF_TRACER_TYPES = "isotope,isotope"
+   !     → DEF_USE_ISOTOPE + DEF_ISOTOPE_SPECIES（family 开关，不再列 type）
+   !   DEF_TRACER_PARAM_FILES = 'H2_18O:standard_O18_...,HDO:standard_HDO_...'
+   !     → DEF_ISOTOPE_PARAM_FILE（一个文件，species 之间靠 DEF_ISO_*_H2_18O /
+   !       DEF_ISO_*_HDO 字段区分）
+   DEF_USE_ISOTOPE        = .true.
+   DEF_ISOTOPE_SPECIES    = 'H2_18O,HDO'
+   DEF_ISOTOPE_PARAM_FILE = '/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_isotope_parameter.nml'
+   ! Run/standard_isotope_parameter.nml 自带两个 species 的 ref_ratio、init_delta
+   ! 和两份 &nl_colm_mt_forcing（对应旧 standard_O18/HDO_parameter.nml 的内容）。
+   ! 旧 DEF_TRACER_KINETIC_SCHEME = 'MERLIVAT1978' 由那里的 DEF_ISO_KINETIC_SCHEME
+   ! 默认值承担，不需要再写。
+   ! 旧 DEF_TRACER_USE_FRACTIONATION = .true. → DEF_ISO_USE_FRACTIONATION，
+   ! 该文件默认 .false.；要复现本算例原来的分馏，须把它改成 .true.。
+   ! （同一个文件还被别的算例共用，所以这里没有可写该开关的位置。）
+
+   ! VSF + 同位素必须给一个正的、实测/率定的有效混合水深 [mm]；
+   ! 旧 DEF_TRACER_AQUIFER_MIXING_WATER_MM → DEF_MT_AQUIFER_MIXING_WATER_MM，
+   ! 不给值时运行会直接停止。
+   ! DEF_MT_AQUIFER_MIXING_WATER_MM = <mm>
 /

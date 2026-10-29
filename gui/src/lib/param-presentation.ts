@@ -308,19 +308,25 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   ),
   DEF_USE_CBL_HEIGHT: pair('读取边界层高度', 'Read boundary-layer height'),
 
-  DEF_USE_TRACER: pair('启用示踪剂', 'Enable tracers'),
-  DEF_TRACER_USE_FRACTIONATION: pair('启用同位素分馏', 'Enable isotope fractionation'),
-  DEF_TRACER_KINETIC_SCHEME: pair('气液动理分馏方案', 'Gas–liquid kinetic fractionation'),
-  DEF_TRACER_OPEN_WATER_KINETIC: pair('开阔水面动理分馏方案', 'Open-water kinetic fractionation'),
-  DEF_TRACER_SOIL_KINETIC: pair('土壤蒸发动理分馏方案', 'Soil-evaporation kinetic fractionation'),
-  DEF_TRACER_SOIL_DIFFUSION: pair('启用土壤液相扩散', 'Enable soil liquid diffusion'),
-  DEF_TRACER_SOIL_VAPOR_DIFFUSION: pair('启用土壤水汽扩散', 'Enable soil-vapor diffusion'),
-  DEF_TRACER_NUM: pair('示踪剂数量', 'Number of tracers'),
-  DEF_TRACER_NAMES: pair('示踪剂名称', 'Tracer names'),
-  DEF_TRACER_TYPES: pair('示踪剂类型', 'Tracer types'),
-  DEF_TRACER_PARAM_FILES: pair('示踪剂参数文件', 'Tracer parameter files'),
-  DEF_TRACER_USE_SOIL_INIT: pair('使用示踪剂土壤初始场', 'Use tracer soil initial state'),
-  DEF_TRACER_SOIL_INIT_FILE: pair('示踪剂土壤初始场文件', 'Tracer soil initial-state file'),
+  DEF_USE_ISOTOPE: pair('启用同位素示踪', 'Enable isotope tracers'),
+  DEF_USE_METHANE: pair('启用甲烷示踪', 'Enable methane tracers'),
+  DEF_USE_SEDIMENT: pair('启用河道泥沙', 'Enable river sediment'),
+  DEF_USE_NH4_LEACHING: pair('启用铵盐淋溶', 'Enable ammonium leaching'),
+  DEF_ISOTOPE_SPECIES: pair('同位素物种', 'Isotope species'),
+  DEF_ISOTOPE_PARAM_FILE: pair('同位素参数文件', 'Isotope parameter file'),
+  DEF_METHANE_PARAM_FILE: pair('甲烷参数文件', 'Methane parameter file'),
+  DEF_SOLUTE_NAMES: pair('溶质名称', 'Solute names'),
+  DEF_SOLUTE_PARAM_FILES: pair('溶质参数文件', 'Solute parameter files'),
+  DEF_SEDIMENT_PARAM_FILE: pair('泥沙参数文件', 'Sediment parameter file'),
+  DEF_NH4_LEACHING_MODE: pair('铵盐淋溶模式', 'Ammonium leaching mode'),
+  DEF_ISO_USE_FRACTIONATION: pair('启用同位素分馏', 'Enable isotope fractionation'),
+  DEF_ISO_KINETIC_SCHEME: pair('气液动理分馏方案', 'Gas–liquid kinetic fractionation'),
+  DEF_ISO_OPEN_WATER_KINETIC: pair('开阔水面动理分馏方案', 'Open-water kinetic fractionation'),
+  DEF_ISO_SOIL_KINETIC: pair('土壤蒸发动理分馏方案', 'Soil-evaporation kinetic fractionation'),
+  DEF_ISO_SOIL_DIFFUSION: pair('启用土壤液相扩散', 'Enable soil liquid diffusion'),
+  DEF_ISO_SOIL_VAPOR_DIFFUSION: pair('启用土壤水汽扩散', 'Enable soil-vapor diffusion'),
+  DEF_MT_USE_SOIL_INIT: pair('使用示踪剂土壤初始场', 'Use tracer soil initial state'),
+  DEF_MT_SOIL_INIT_FILE: pair('示踪剂土壤初始场文件', 'Tracer soil initial-state file'),
   DEF_file_GIEMS: pair('GIEMS 卫星湿地数据', 'GIEMS satellite wetland data'),
   DEF_wetland_finundation_scheme: pair('甲烷湿地淹水范围来源', 'Methane wetland-inundation source'),
   'DEF_METHANE%inundation_mode': pair('甲烷淹水范围模式', 'Methane inundation mode'),
@@ -413,16 +419,39 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     '边界层高度时间偏移（秒）',
     'Boundary-layer height time offset (s)',
   ),
-  'DEF_TRACER%unit_kind': pair('浓度单位类型', 'Concentration unit kind'),
-  'DEF_TRACER%mol_weight': pair('摩尔质量（g/mol）', 'Molar mass (g/mol)'),
-  'DEF_TRACER%ref_ratio': pair('参考同位素比', 'Reference isotope ratio'),
-  'DEF_TRACER%init_delta': pair('初始 δ 值', 'Initial delta value'),
-  'DEF_TRACER%init_conc': pair('初始浓度', 'Initial concentration'),
-  'DEF_TRACER%precip_default_conc': pair('降水缺省浓度', 'Default precipitation concentration'),
-  'DEF_TRACER%vapor_default_conc': pair('水汽缺省浓度', 'Default vapour concentration'),
-  'DEF_TRACER%max_dissolved_conc': pair('最大溶解浓度', 'Maximum dissolved concentration'),
-  'DEF_TRACER%reactive_decay_rate': pair('反应衰减速率', 'Reactive decay rate'),
-  'DEF_TRACER%charge': pair('离子电荷', 'Ionic charge'),
+  'DEF_SOLUTE%unit_kind': pair('浓度单位类型', 'Concentration unit kind'),
+  'DEF_SOLUTE%mol_weight': pair('摩尔质量（g/mol）', 'Molar mass (g/mol)'),
+  DEF_ISO_REF_RATIO_H2_18O: pair('参考同位素比（H₂¹⁸O）', 'Reference ratio (H₂¹⁸O)'),
+  DEF_ISO_INIT_DELTA_H2_18O: pair('初始 δ 值（H₂¹⁸O）', 'Initial delta (H₂¹⁸O)'),
+  DEF_ISO_REF_RATIO_HDO: pair('参考同位素比（HDO）', 'Reference ratio (HDO)'),
+  DEF_ISO_INIT_DELTA_HDO: pair('初始 δ 值（HDO）', 'Initial delta (HDO)'),
+  'DEF_SOLUTE%init_conc': pair('初始浓度', 'Initial concentration'),
+  'DEF_SOLUTE%precip_default_conc': pair('降水缺省浓度', 'Default precipitation concentration'),
+  'DEF_SOLUTE%vapor_default_conc': pair('水汽缺省浓度', 'Default vapour concentration'),
+  'DEF_SOLUTE%max_dissolved_conc': pair('最大溶解浓度', 'Maximum dissolved concentration'),
+  'DEF_SOLUTE%decay_rate': pair('反应衰减速率', 'Reactive decay rate'),
+  'DEF_SOLUTE%n2o_ef5': pair('间接 N2O 排放因子', 'Indirect N2O emission factor'),
+  'DEF_SOLUTE%charge': pair('离子电荷', 'Ionic charge'),
+  // 旧算例的参数文件仍可能用拆开前的组名；保留标签，迁移时只需改字段名。
+  'DEF_TRACER%unit_kind': pair('浓度单位类型（旧）', 'Concentration unit kind (legacy)'),
+  'DEF_TRACER%mol_weight': pair('摩尔质量（g/mol，旧）', 'Molar mass (g/mol, legacy)'),
+  'DEF_TRACER%ref_ratio': pair('参考同位素比（旧）', 'Reference isotope ratio (legacy)'),
+  'DEF_TRACER%init_delta': pair('初始 δ 值（旧）', 'Initial delta value (legacy)'),
+  'DEF_TRACER%init_conc': pair('初始浓度（旧）', 'Initial concentration (legacy)'),
+  'DEF_TRACER%precip_default_conc': pair(
+    '降水缺省浓度（旧）',
+    'Default precipitation concentration (legacy)',
+  ),
+  'DEF_TRACER%vapor_default_conc': pair(
+    '水汽缺省浓度（旧）',
+    'Default vapour concentration (legacy)',
+  ),
+  'DEF_TRACER%max_dissolved_conc': pair(
+    '最大溶解浓度（旧）',
+    'Maximum dissolved concentration (legacy)',
+  ),
+  'DEF_TRACER%reactive_decay_rate': pair('反应衰减速率（旧）', 'Reactive decay rate (legacy)'),
+  'DEF_TRACER%charge': pair('离子电荷（旧）', 'Ionic charge (legacy)'),
   'DEF_METHANE%f_methane_tropical_peat': pair('甲烷产率：热带泥炭地', 'CH4 yield: tropical peat'),
   'DEF_METHANE%f_methane_tropical_floodplain': pair(
     '甲烷产率：热带洪泛区',
@@ -828,59 +857,43 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_DA_SM_SMAP: pair('同化 SMAP 亮温', 'Assimilate SMAP brightness temperature'),
   DEF_DA_SM_FY: pair('同化风云 3D 亮温', 'Assimilate FY-3D brightness temperature'),
   DEF_DA_SM_SYNOP: pair('同化站点土壤水分', 'Assimilate in-situ soil moisture'),
-  DEF_TRACER_ICE_SUPERSAT_SLOPE: pair(
-    '示踪剂：冰面过饱和斜率',
-    'Tracer: ice-supersaturation slope',
-  ),
-  DEF_TRACER_CG_RELHUM_MAX: pair(
-    '示踪剂：Craig–Gordon 相对湿度上限',
-    'Tracer: Craig–Gordon RH cap',
-  ),
-  DEF_TRACER_SUBL_SKIN_MM: pair('示踪剂：升华表层厚度（mm）', 'Tracer: sublimation skin (mm)'),
-  DEF_TRACER_CANOPY_EQUILIBRATION: pair(
+  DEF_ISO_ICE_SUPERSAT_SLOPE: pair('示踪剂：冰面过饱和斜率', 'Tracer: ice-supersaturation slope'),
+  DEF_ISO_CG_RELHUM_MAX: pair('示踪剂：Craig–Gordon 相对湿度上限', 'Tracer: Craig–Gordon RH cap'),
+  DEF_ISO_SUBL_SKIN_MM: pair('示踪剂：升华表层厚度（mm）', 'Tracer: sublimation skin (mm)'),
+  DEF_ISO_CANOPY_EQUILIBRATION: pair(
     '示踪剂：冠层水平衡交换比例',
     'Tracer: canopy-water equilibration',
   ),
-  DEF_TRACER_SNOWMELT_EQUILIBRATION: pair(
+  DEF_ISO_SNOWMELT_EQUILIBRATION: pair(
     '示踪剂：融雪平衡交换比例',
     'Tracer: snowmelt equilibration',
   ),
-  DEF_TRACER_NSS_LEAF_WATER_PER_LAI: pair(
+  DEF_ISO_NSS_LEAF_WATER_PER_LAI: pair(
     '示踪剂：非稳态叶片水量（每单位 LAI）',
     'Tracer: non-steady leaf water per LAI',
   ),
-  DEF_TRACER_NSS_LEAF_PATH_LENGTH: pair(
+  DEF_ISO_NSS_LEAF_PATH_LENGTH: pair(
     '示踪剂：非稳态叶片扩散路径长度',
     'Tracer: non-steady leaf path length',
   ),
-  DEF_TRACER_NSS_LEAF_RB: pair(
+  DEF_ISO_NSS_LEAF_RB: pair(
     '示踪剂：非稳态叶片边界层阻抗',
     'Tracer: non-steady leaf boundary resistance',
   ),
-  DEF_TRACER_AQUIFER_MIXING_WATER_MM: pair(
+  DEF_MT_AQUIFER_MIXING_WATER_MM: pair(
     '示踪剂：含水层混合水量（mm）',
     'Tracer: aquifer mixing water (mm)',
   ),
-  DEF_TRACER_BALANCE_ABORT_NBAD: pair(
+  DEF_MT_BALANCE_ABORT_NBAD: pair(
     '示踪剂：质量平衡超差停机次数',
     'Tracer: balance-failure abort count',
   ),
-  DEF_TRACER_RESID_ABORT_NBAD: pair(
-    '示踪剂：残差超差停机次数',
-    'Tracer: residual-failure abort count',
-  ),
-  DEF_TRACER_LULCC_ABORT_NBAD: pair(
+  DEF_MT_RESID_ABORT_NBAD: pair('示踪剂：残差超差停机次数', 'Tracer: residual-failure abort count'),
+  DEF_MT_LULCC_ABORT_NBAD: pair(
     '示踪剂：LULCC 迁移超差停机次数',
     'Tracer: LULCC-failure abort count',
   ),
-  DEF_TRACER_MRAT: pair('示踪剂：摩尔质量比', 'Tracer: molar-mass ratios'),
-  DEF_TRACER_REF_RATIO: pair('示踪剂：参考同位素比', 'Tracer: reference ratios'),
-  DEF_TRACER_INIT_DELTA: pair('示踪剂：初始 δ 值', 'Tracer: initial delta values'),
-  DEF_TRACER_REACTIVE_DECAY_RATE: pair('示踪剂：反应衰减速率', 'Tracer: reactive decay rates'),
-  DEF_TRACER_SOIL_INIT_VARS: pair(
-    '示踪剂：土壤初始场变量名',
-    'Tracer: soil initial-state variables',
-  ),
+  DEF_MT_SOIL_INIT_VARS: pair('示踪剂：土壤初始场变量名', 'Tracer: soil initial-state variables'),
 
   DEF_DA_obsdir: pair('同化观测目录', 'Assimilation-observation directory'),
   DEF_DA_TWS: pair('同化陆地总储水量', 'Assimilate terrestrial water storage'),
@@ -1111,15 +1124,15 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
     arealweight: pair('面积权重', 'Area-weighted'),
     bilinear: pair('双线性插值', 'Bilinear'),
   },
-  DEF_TRACER_KINETIC_SCHEME: {
+  DEF_ISO_KINETIC_SCHEME: {
     CAPPA2003: pair('Cappa 等（2003）', 'Cappa et al. (2003)'),
     MERLIVAT1978: pair('Merlivat（1978）', 'Merlivat (1978)'),
   },
-  DEF_TRACER_OPEN_WATER_KINETIC: {
+  DEF_ISO_OPEN_WATER_KINETIC: {
     EXPONENT: pair('指数形式', 'Exponent form'),
     MJ79: pair('Merlivat–Jouzel（1979）简写', 'Merlivat–Jouzel (1979), short form'),
   },
-  DEF_TRACER_SOIL_KINETIC: {
+  DEF_ISO_SOIL_KINETIC: {
     EXPONENT: pair('指数形式', 'Exponent form'),
     RESISTANCE: pair('阻力形式', 'Resistance form'),
   },

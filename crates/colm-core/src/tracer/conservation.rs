@@ -564,8 +564,8 @@ pub struct BalanceReport {
 impl BalanceTracker {
     /// `tracer_balance_report`（单进程，`print_me = .true.`，`owner = 0`）。
     ///
-    /// `balance_abort_nbad`/`resid_abort_nbad` 是 `DEF_TRACER_BALANCE_ABORT_NBAD`、
-    /// `DEF_TRACER_RESID_ABORT_NBAD`。上游在第一处 `CoLM_stop` 就退出，后面的行不再打印、
+    /// `balance_abort_nbad`/`resid_abort_nbad` 是 `DEF_MT_BALANCE_ABORT_NBAD`、
+    /// `DEF_MT_RESID_ABORT_NBAD`。上游在第一处 `CoLM_stop` 就退出，后面的行不再打印、
     /// 计数器也不清零；这里遇到中止即返回（不清零）。`ntracers <= 0` 时什么都不做。
     pub fn report(
         &mut self,

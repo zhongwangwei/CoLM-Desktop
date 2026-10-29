@@ -9,6 +9,9 @@
   rebase 上千处改动。
 - 入库 591 个文件、磁盘上 709 个：`vendor/CoLM202X/.gitignore` 的 `/tests` 是上游自己的规则，那 118 个
   文件在 submodule 时期同样未跟踪。
+- 2026-10-30 追平上游 `7d2fca93`（此前后者在 `1d7f3b25`）：`1d7f3b25..7d2fca93` 之间 256 个提交、
+  280 个文件，主体是 MaterialTransport 重构、colm30/rawdata 前处理重构与汇流/CaMa 修复。
+  下游的 `main/TRACER/` 目录被 `main/MATERIAL/` 整体取代。
 
 ## 本地改动在哪里查
 
@@ -19,6 +22,28 @@
 下面只记**改变了模型对外约定**的本地改动：namelist 的写法或语义变了，旧算例要跟着改。
 
 ## 改变对外约定的本地改动
+
+### 2026-10-30：tracers 改名 MaterialTransport，namelist 按 family 拆开
+
+并入上游 `7d2fca93`。**旧算例必须迁移**：
+
+- `main/TRACER/` 整个目录换成 `main/MATERIAL/`（`GENERIC_WATER` / `FAMILY_ISOTOPE` /
+  `FAMILY_SOLUTE` / `FAMILY_PARTICLE` / `FAMILY_GAS`），模块名 `MOD_Tracer_*` → `MOD_MT_*`。
+- 编译期宏 `TRACER` 改名 `MaterialTransport`，并和其它跑时开关一样在这里被展开：所有 MATERIAL
+  模块始终编译，运行期由 family 开关决定跑不跑。
+- namelist：`&nl_colm` 里的 `DEF_USE_TRACER` + 一组 `DEF_TRACER_*` 整块删除，改为
+  `&nl_colm_material`（新文件 `main/MATERIAL/MOD_MT_Namelist.F90`）里的
+  `DEF_USE_ISOTOPE` / `DEF_ISOTOPE_SPECIES` / `DEF_ISOTOPE_PARAM_FILE` / `DEF_SOLUTE_NAMES` /
+  `DEF_SOLUTE_PARAM_FILES` / `DEF_USE_METHANE` / `DEF_METHANE_PARAM_FILE` /
+  `DEF_SEDIMENT_PARAM_FILE` / `DEF_MT_*`；同位素物理参数移进 `DEF_ISOTOPE_PARAM_FILE` 指向的
+  `&nl_colm_isotope_parameter`（`DEF_ISO_*`），甲烷在 `&nl_colm_methane_parameter`。
+  `DEF_USE_SEDIMENT` 仍由 `share/MOD_Namelist.F90` 拥有（河道代码直接读）。
+- 参数文件也换了：`run/standard_isotope_parameter.nml`、`standard_methane_parameter.nml`、
+  `standard_sediment_parameter.nml`、`standard_chloride_parameter.nml`、`standard_nh4_parameter.nml`、
+  `standard_no3_parameter.nml` 取代旧的 `standard_O18_parameter.nml` / `standard_HDO_parameter.nml` /
+  `standard_ch4_parameter.nml`（`run/` 下 8 个旧样例已在本轮迁到新写法）。
+- GUI 侧带旧算例迁移：`gui/src-tauri/src/config.rs::migrate_legacy_material` 会把旧的
+  `DEF_TRACER_NAMES/TYPES/PARAM_FILES` 拆成四个 family 字段，缺 `&nl_colm_material` 时自动补组。
 
 ### 2026-10-21：地类表改值 `DEF_LC_X` 改成逐地类、所有尺度生效
 

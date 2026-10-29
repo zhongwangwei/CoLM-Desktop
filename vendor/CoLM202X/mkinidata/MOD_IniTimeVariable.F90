@@ -126,7 +126,7 @@ CONTAINS
          reflectance    ( 0:15, 211, 2 )     ,&
          transmittance  ( 0:15, 211, 2 )     ,&
          soil_alb       ( 211 ), kw(211), nw(211)
-   
+
    real(r8), intent(in) ::       &!
          patchlatr,              &! patch latitude
          patchlonr                ! patch longitude

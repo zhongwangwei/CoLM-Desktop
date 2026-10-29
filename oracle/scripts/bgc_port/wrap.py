@@ -32,7 +32,7 @@ def match(s, i):
     raise SystemExit("unbalanced")
 
 
-# `IF (DEF_USE_TRACER) ... ELSE ... ENDIF`：只保留 ELSE 分支。
+# `IF (mt_any_enabled()) ... ELSE ... ENDIF`：只保留 ELSE 分支。
 while True:
     mm = re.search(r"if false /\*(\w+)\*/", body)
     i = mm.start() if mm else -1
@@ -49,7 +49,7 @@ while True:
         e, inner = b, ""
     ls = body.rfind("\n", 0, i) + 1
     ind = body[ls:i]
-    note = ("// DEF_USE_TRACER 的示踪物分解分支未移植（运行时拒绝 DEF_USE_TRACER）。"
+    note = ("// 材料运移（mt_any_enabled）的分解分支未移植（运行时拒绝）。"
             if mm.group(1) == "TRACER" else f"// `#ifdef {mm.group(1)}` 分支：单点 Rust 引擎里该宏未定义。")
     body = body[:ls] + ind + note + "\n" + ind + "{" + inner + "}" + body[e + 1:]
 # `#ifdef FUN` 在任何内核里都不定义。

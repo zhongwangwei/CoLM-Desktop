@@ -1,18 +1,22 @@
-//! 示踪物运行时强迫（`MOD_Tracer_ForcingInput` + `MOD_Tracer_Forcing` 的网格路径）。
+//! 材料运行时强迫（`main/MATERIAL/GENERIC_WATER/MOD_MT_ForcingInput.F90` +
+//! `MOD_MT_Forcing.F90` 的网格路径）。
 //!
-//! 每个走陆面水输运的示踪物可在自己的参数文件里用 `&nl_colm_tracer_forcing` 声明 `precip`、
-//! `vapor` 两类输入。逐变量维护上下界记录（与主强迫同一套 `setstampLB/UB`），在强迫格上做时间
-//! 插值、`grid2pset` 到 patch，再按 `input_mode` 解码成比值。解码失败（近干、缺测、越界）就保留
-//! 上一次的有效值；起点是描述符的默认比值。`*_over_total` 模式另读一份主强迫的总降水/总比湿
-//! —— 直接读文件，**不经** `metpreprocess`。
+//! 每个走陆面水输运的材料可在自己的参数文件里用 `&nl_colm_mt_forcing` 声明 `precip`、
+//! `vapor` 两类输入；同位素共用一份文件，靠 `forcing_species` 区分。逐变量维护上下界记录
+//! （与主强迫同一套 `setstampLB/UB`），在强迫格上做时间插值、`grid2pset` 到 patch，再按
+//! `input_mode` 解码成比值。解码失败（近干、缺测、越界）就保留上一次的有效值；起点是描述符的
+//! 默认比值。`*_over_total` 模式另读一份主强迫的总降水/总比湿 —— 直接读文件，**不经**
+//! `metpreprocess`。
 //!
-//! 「最近一次有效值」是预报量：写进陆面重启（`trc_forcing_*_last`），续跑原样读回。
+//! 「最近一次有效值」是预报量：写进陆面重启（`mt_forcing_*_last`），续跑原样读回。
 
 use colm_numeric::Contract;
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_core::tracer::descriptor::{delta_to_ratio, param_file_for_index, TRC_TINY};
+use colm_core::tracer::descriptor::{
+    delta_to_ratio, param_file_for_index, TracerParamFiles, TRC_TINY,
+};
 use colm_core::tracer::{TracerPhysics, TracerSet};
 use colm_core::CalendarTime;
 use colm_namelist::{Segment, Value};
@@ -60,9 +64,16 @@ impl Default for ForcingSpec {
     }
 }
 
-/// `tracer_forcing_input_load`：逐示踪物读参数文件里的 `&nl_colm_tracer_forcing`。
-/// 没有参数文件、文件不存在或没有这一组的示踪物，输入个数为 0。
-pub fn load_specs(set: &TracerSet, param_files: &str) -> Result<Vec<Vec<ForcingSpec>>> {
+/// `tracer_forcing_input_load`：逐材料读参数文件里的 `&nl_colm_mt_forcing`。
+///
+/// 上游把强迫组从 `&nl_colm_tracer_forcing` 改成 `&nl_colm_mt_forcing`，并用
+/// `forcing_species` 选中材料：同位素文件被多个 species 共用，所以每个组都必须写
+/// `forcing_species`；溶质自己的文件里可以省略（省略即属于该文件对应的溶质）。
+/// 没有参数文件、文件不存在、或没有匹配的组时，输入个数为 0。
+pub fn load_specs(
+    set: &TracerSet,
+    param_files: &TracerParamFiles,
+) -> Result<Vec<Vec<ForcingSpec>>> {
     let mut out = Vec::with_capacity(set.len());
     for (itrc, tracer) in set.tracers.iter().enumerate() {
         let Some(path) = param_file_for_index(param_files, &set.tracers, itrc)? else {
@@ -73,69 +84,34 @@ pub fn load_specs(set: &TracerSet, param_files: &str) -> Result<Vec<Vec<ForcingS
             out.push(Vec::new());
             continue;
         };
-        let Some(group) = forcing_group(&source) else {
+        let mut matched: Option<(Option<String>, i64, Vec<ForcingSpec>)> = None;
+        for group in forcing_groups(&source) {
+            let (species, num, specs) = parse_forcing_group(&group, &path)?;
+            let applies = match &species {
+                Some(name) => name.eq_ignore_ascii_case(&tracer.name),
+                None => {
+                    // 同位素共用一份文件：省略 forcing_species 就无法判断属于谁（上游停机）。
+                    ensure!(
+                        !tracer.is_isotope(),
+                        "forcing_species must be set in each &nl_colm_mt_forcing of {path}"
+                    );
+                    true
+                }
+            };
+            if !applies {
+                continue;
+            }
+            ensure!(
+                matched.is_none(),
+                "More than one &nl_colm_mt_forcing group for {} in {path}",
+                tracer.name
+            );
+            matched = Some((species, num, specs));
+        }
+        let Some((_, num, mut specs)) = matched else {
             out.push(Vec::new());
             continue;
         };
-        let document = colm_namelist::parse(&group)
-            .with_context(|| format!("invalid &nl_colm_tracer_forcing in {path}"))?;
-        let mut num: i64 = 0;
-        let mut specs = vec![ForcingSpec::default(); TRACER_FORCING_MAX];
-        for item in &document.items {
-            let colm_namelist::document::Item::Entry(entry) = item else {
-                continue;
-            };
-            let (name, index) = match entry.path.segments.as_slice() {
-                [Segment::Field(name)] => (name.to_ascii_lowercase(), None),
-                [Segment::Field(name), Segment::Index(k)] => (name.to_ascii_lowercase(), Some(*k)),
-                _ => bail!(
-                    "invalid &nl_colm_tracer_forcing entry {} in {path}",
-                    entry.path
-                ),
-            };
-            if name == "forcing_num" {
-                let Value::Int(value) = entry.value else {
-                    bail!("forcing_num in {path} must be an integer");
-                };
-                num = value;
-                continue;
-            }
-            // 整列赋值从 1 号元素起依次填；带下标的赋值只改那一个。
-            let values: Vec<&Value> = match &entry.value {
-                Value::List(items) => items.iter().collect(),
-                other => vec![other],
-            };
-            let start = index.unwrap_or(1);
-            ensure!(
-                start >= 1 && start - 1 + values.len() <= TRACER_FORCING_MAX,
-                "{name} index out of range in {path}"
-            );
-            for (k, value) in values.into_iter().enumerate() {
-                let spec = &mut specs[start - 1 + k];
-                let text = || -> Result<String> {
-                    match value {
-                        Value::Str(s) => Ok(s.clone()),
-                        other => bail!("{name} in {path} must hold strings, got {other:?}"),
-                    }
-                };
-                let int = || -> Result<i32> {
-                    match value {
-                        Value::Int(i) => Ok(i32::try_from(*i)?),
-                        other => bail!("{name} in {path} must hold integers, got {other:?}"),
-                    }
-                };
-                match name.as_str() {
-                    "forcing_role" => spec.role = text()?,
-                    "forcing_fprefix" => spec.fprefix = text()?,
-                    "forcing_vname" => spec.vname = text()?,
-                    "forcing_tintalgo" => spec.tintalgo = text()?,
-                    "forcing_dtime" => spec.dtime = int()?,
-                    "forcing_offset" => spec.offset = int()?,
-                    "forcing_input_mode" => spec.input_mode = text()?,
-                    other => bail!("invalid &nl_colm_tracer_forcing in {path}: unknown {other}"),
-                }
-            }
-        }
         ensure!(
             (0..=TRACER_FORCING_MAX as i64).contains(&num),
             "tracer_forcing_input_load: forcing_num={num} must be between 0 and \
@@ -193,26 +169,106 @@ pub fn load_specs(set: &TracerSet, param_files: &str) -> Result<Vec<Vec<ForcingS
     Ok(out)
 }
 
-/// `tracer_forcing_group_present` 判定后，截出 `&nl_colm_tracer_forcing` 那一组的原文。
-fn forcing_group(source: &str) -> Option<String> {
-    let mut lines = source.lines();
-    let header = lines.by_ref().find(|line| {
+/// 解析一组 `&nl_colm_mt_forcing`：返回 `forcing_species`（可省略）、`forcing_num` 与逐项设置。
+fn parse_forcing_group(group: &str, path: &str) -> Result<(Option<String>, i64, Vec<ForcingSpec>)> {
+    let document = colm_namelist::parse(group)
+        .with_context(|| format!("invalid &nl_colm_mt_forcing in {path}"))?;
+    let mut species: Option<String> = None;
+    let mut num: i64 = 0;
+    let mut specs = vec![ForcingSpec::default(); TRACER_FORCING_MAX];
+    for item in &document.items {
+        let colm_namelist::document::Item::Entry(entry) = item else {
+            continue;
+        };
+        let (name, index) = match entry.path.segments.as_slice() {
+            [Segment::Field(name)] => (name.to_ascii_lowercase(), None),
+            [Segment::Field(name), Segment::Index(k)] => (name.to_ascii_lowercase(), Some(*k)),
+            _ => bail!("invalid &nl_colm_mt_forcing entry {} in {path}", entry.path),
+        };
+        if name == "forcing_species" {
+            let Value::Str(value) = &entry.value else {
+                bail!("forcing_species in {path} must be a string");
+            };
+            let value = value.trim();
+            species = (!value.is_empty()).then(|| value.to_owned());
+            continue;
+        }
+        if name == "forcing_num" {
+            let Value::Int(value) = entry.value else {
+                bail!("forcing_num in {path} must be an integer");
+            };
+            num = value;
+            continue;
+        }
+        // 整列赋值从 1 号元素起依次填；带下标的赋值只改那一个。
+        let values: Vec<&Value> = match &entry.value {
+            Value::List(items) => items.iter().collect(),
+            other => vec![other],
+        };
+        let start = index.unwrap_or(1);
+        ensure!(
+            start >= 1 && start - 1 + values.len() <= TRACER_FORCING_MAX,
+            "{name} index out of range in {path}"
+        );
+        for (k, value) in values.into_iter().enumerate() {
+            let spec = &mut specs[start - 1 + k];
+            let text = || -> Result<String> {
+                match value {
+                    Value::Str(s) => Ok(s.clone()),
+                    other => bail!("{name} in {path} must hold strings, got {other:?}"),
+                }
+            };
+            let int = || -> Result<i32> {
+                match value {
+                    Value::Int(i) => Ok(i32::try_from(*i)?),
+                    other => bail!("{name} in {path} must hold integers, got {other:?}"),
+                }
+            };
+            match name.as_str() {
+                "forcing_role" => spec.role = text()?,
+                "forcing_fprefix" => spec.fprefix = text()?,
+                "forcing_vname" => spec.vname = text()?,
+                "forcing_tintalgo" => spec.tintalgo = text()?,
+                "forcing_dtime" => spec.dtime = int()?,
+                "forcing_offset" => spec.offset = int()?,
+                "forcing_input_mode" => spec.input_mode = text()?,
+                other => bail!("invalid &nl_colm_mt_forcing in {path}: unknown {other}"),
+            }
+        }
+    }
+    Ok((species, num, specs))
+}
+
+/// `tracer_forcing_group_present` 判定后，截出每一组 `&nl_colm_mt_forcing` 的原文。
+///
+/// 同位素文件里每个 species 一组，所以要全部返回（旧实现只取第一组）。
+fn forcing_groups(source: &str) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut current: Option<String> = None;
+    for line in source.lines() {
         let low = line.trim_start().to_ascii_lowercase();
-        !low.starts_with('!')
-            && (low.starts_with("&nl_colm_tracer_forcing")
-                || low.starts_with("$nl_colm_tracer_forcing"))
-    })?;
-    let mut group = format!("{}\n", header.trim_start().replacen('$', "&", 1));
-    for line in lines {
+        if current.is_none() {
+            if !low.starts_with('!')
+                && (low.starts_with("&nl_colm_mt_forcing")
+                    || low.starts_with("$nl_colm_mt_forcing"))
+            {
+                current = Some(format!("{}\n", line.trim_start().replacen('$', "&", 1)));
+            }
+            continue;
+        }
+        let group = current.as_mut().expect("inside a group");
         group.push_str(line);
         group.push('\n');
         let code = line.split('!').next().unwrap_or("").trim();
         if code == "/" || code == "&end" || code == "$end" {
-            return Some(group);
+            groups.push(current.take().expect("inside a group"));
         }
     }
-    group.push_str("/\n");
-    Some(group)
+    if let Some(mut group) = current {
+        group.push_str("/\n");
+        groups.push(group);
+    }
+    groups
 }
 
 /// 强迫变量的去向（`STREAM_*`，1 起编号即重启指纹里的值）。

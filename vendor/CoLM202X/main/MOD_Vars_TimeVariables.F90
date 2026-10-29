@@ -93,7 +93,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_LandPFT
    USE MOD_Vars_Global
-   USE MOD_Namelist, only: DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_PC, DEF_USE_PFT, DEF_USE_RangeCheck
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
@@ -154,7 +154,7 @@ CONTAINS
 
    SUBROUTINE READ_PFTimeVariables (file_restart)
 
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_PC, DEF_USE_PFT, DEF_USE_RangeCheck
    USE MOD_NetCDFVector
    USE MOD_LandPFT
    USE MOD_Vars_Global
@@ -314,7 +314,7 @@ ENDIF
    !--------------------------------------------------------------------
    USE MOD_SPMD_Task
    USE MOD_LandPFT
-   USE MOD_Namelist, only: DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_PC, DEF_USE_PFT, DEF_USE_RangeCheck
 
       IF (p_is_worker) THEN
          IF (numpft > 0) THEN
@@ -374,7 +374,7 @@ ENDIF
    SUBROUTINE check_PFTimeVariables
 
    USE MOD_RangeCheck
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_PC, DEF_USE_PFT, DEF_USE_RangeCheck
 
    IMPLICIT NONE
 
@@ -1104,17 +1104,18 @@ ENDIF
 
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_REST_CompressLevel, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
-                           DEF_USE_IRRIGATION, DEF_USE_Dynamic_Lake, SITE_landtype, DEF_USE_TRACER, &
+                           DEF_USE_IRRIGATION, DEF_USE_Dynamic_Lake, SITE_landtype, &
                            DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN, DEF_USE_GridRiverLakeFlow
    USE MOD_LandPatch
    USE MOD_NetCDFVector
    USE MOD_Vars_Global
    USE MOD_Vars_TimeInvariants, only: dz_lake
    USE MOD_Const_LC, only: patchtypes
-   USE MOD_Tracer_Defs, only: ntracers
-   USE MOD_Tracer_Rest, only: write_tracer_restart_all
+   USE MOD_MT_Defs, only: nmts
+   USE MOD_MT_Rest, only: write_mt_restart_all
 #ifdef GridRiverLakeFlow
-   USE MOD_Tracer_RiverLake, only: write_tracer_restart
+   USE MOD_MT_RiverLake, only: mt_riverlake_write_restart
+   USE MOD_MT_Lifecycle, only: mt_lifecycle_route_write_restart
 #endif
    IMPLICIT NONE
 
@@ -1257,7 +1258,6 @@ ENDIF
       CALL ncio_write_vector (file_restart, 'fm   ', 'patch', landpatch, fm   , compress) ! integral of profile FUNCTION for momentum
       CALL ncio_write_vector (file_restart, 'fh   ', 'patch', landpatch, fh   , compress) ! integral of profile FUNCTION for heat
       CALL ncio_write_vector (file_restart, 'fq   ', 'patch', landpatch, fq   , compress) ! integral of profile FUNCTION for moisture
-      IF (DEF_USE_TRACER) THEN
          IF (allocated(ldew_rain)) THEN
             IF (.not. p_is_worker) CALL CoLM_stop ('tracer restart patch state on non-worker')
             IF (numpatch < 0) CALL CoLM_stop ('invalid tracer restart patch count')
@@ -1273,22 +1273,21 @@ ENDIF
                 CALL CoLM_stop ('tracer restart water shape mismatch')
             IF (allocated(waterstorage)) THEN
                IF (size(waterstorage) /= numpatch) CALL CoLM_stop ('tracer restart waterstorage shape mismatch')
-               CALL write_tracer_restart_all(file_restart, maxsnl, nl_soil, numpatch, &
+               CALL write_mt_restart_all(file_restart, maxsnl, nl_soil, numpatch, &
                   ldew_rain, ldew_snow, wliq_soisno, wice_soisno, wa, wdsrf, wetwat, scv, &
                   compress, waterstorage)
             ELSE
-               CALL write_tracer_restart_all(file_restart, maxsnl, nl_soil, numpatch, &
+               CALL write_mt_restart_all(file_restart, maxsnl, nl_soil, numpatch, &
                   ldew_rain, ldew_snow, wliq_soisno, wice_soisno, wa, wdsrf, wetwat, scv, compress)
             ENDIF
          ELSE
             IF (p_is_worker) THEN
                IF (numpatch /= 0) CALL CoLM_stop ('missing tracer restart patch state on worker')
             ENDIF
-            CALL write_tracer_restart_all(file_restart, maxsnl, nl_soil, 0, &
+            CALL write_mt_restart_all(file_restart, maxsnl, nl_soil, 0, &
                empty_patch, empty_patch, empty_soilsnow, empty_soilsnow, &
                empty_patch, empty_patch, empty_patch, empty_patch, compress)
          ENDIF
-      ENDIF
 
 IF (DEF_USE_IRRIGATION) THEN
       CALL ncio_write_vector (file_restart, 'irrig_rate            ' , 'patch',landpatch,irrig_rate            , compress)
@@ -1336,7 +1335,10 @@ ENDIF
       IF (DEF_USE_GridRiverLakeFlow) THEN
       file_restart = trim(dir_restart)// '/'//trim(cdate)//'/' // trim(site) //'_restart_gridriver_'//trim(cdate)//'_lc'//trim(cyear)//'.nc'
       CALL WRITE_GridRiverLakeTimeVars (file_restart)
-      IF (DEF_USE_TRACER) CALL write_tracer_restart(file_restart)
+      ! river material pools (mt_* variables) and the state of the materials
+      ! with their own river state (sediment) into the same file, before the commit
+      CALL mt_riverlake_write_restart (file_restart)
+      CALL mt_lifecycle_route_write_restart (file_restart)
       CALL commit_GridRiverLakeRestart (file_restart)
       ENDIF
 #endif
@@ -1570,7 +1572,7 @@ ENDIF
    USE MOD_RangeCheck
    USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, DEF_USE_IRRIGATION, &
                            DEF_USE_SNICAR, DEF_USE_Dynamic_Lake, &
-                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC
+                           DEF_USE_PFT, DEF_USE_PC, DEF_USE_BGC, DEF_URBAN_RUN
    USE MOD_Vars_TimeInvariants, only: dz_lake
 
    IMPLICIT NONE
@@ -1687,6 +1689,10 @@ ENDIF
 
 IF (DEF_USE_BGC) THEN
       CALL check_BGCTimeVariables
+ENDIF
+
+IF (DEF_URBAN_RUN) THEN
+      CALL check_UrbanTimeVariables
 ENDIF
 
 #ifdef EXTERNAL_LAKE

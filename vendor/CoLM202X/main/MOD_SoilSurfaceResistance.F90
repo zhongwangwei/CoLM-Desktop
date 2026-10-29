@@ -37,7 +37,7 @@ MODULE MOD_SoilSurfaceResistance
 CONTAINS
 !-----------------------------------------------------------------------
 
-   SUBROUTINE SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0, &
+   SUBROUTINE SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0,vf_sand, &
                               bsw, &
                               theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
                               dz_soisno,t_soisno,wliq_soisno,wice_soisno,fsno,qg,rss)
@@ -51,6 +51,7 @@ CONTAINS
 !    3: TR13, Tang and Riley (2013)
 !    4: LP92, Lee and Pielke (1992)
 !    5: S92,  Sellers et al (1992)
+!    6: S92_sand, Liu et al (2026)
 !
 !  NOTE: Support for both Campbell and VG soil parameters.
 !=======================================================================
@@ -70,6 +71,7 @@ CONTAINS
         hksati      (1:nl_soil),     &! hydraulic conductivity at saturation [mm h2o/s]
         porsl       (1:nl_soil),     &! soil porosity [-]
         psi0        (1:nl_soil),     &! saturated soil suction [mm] (NEGATIVE)
+        vf_sand     (1:nl_soil),     &! sand volume fraction
         bsw         (1:nl_soil),     &! clapp and hornberger "b" parameter [-]
         theta_r     (1:nl_soil),     &! residual moisture content [-]
         ! a parameter corresponding approximately to the inverse of the air-entry value
@@ -111,6 +113,10 @@ CONTAINS
         rg_1,             &! inverse of vapor diffusion resistance [m/s]
         rw_1,             &! inverse of volatilization resistance [m/s]
         rss_1,            &! inverse of soil surface resistance [m/s]
+        f_sigmoid,        &! factor for s92_sand
+        f_transition,     &! factor for s92_sand
+        rss_basic,        &! factor for s92_sand
+        rss_adjusted,     &! factor for s92_sand
         tao,              &! tortuosity of the vapor flow paths through the soil matrix
         eps100,           &! air-filled porosity at −1000 mm of water matric potential
         fac,              &! temporal variable for calculating wx/porsl
@@ -225,8 +231,8 @@ CONTAINS
 
       SELECTCASE (DEF_RSS_SCHEME)
 
+! calculate rss by SL14
 !-----------------------------------------------------------------------
-      ! calculate rss by SL14
       CASE (1)
          dsl = dz_soisno(1)*max(1.e-6_r8,(0.8*eff_porosity - vol_liq)) &
                            /max(1.e-6_r8,(0.8*porsl(1)- aird))
@@ -236,8 +242,8 @@ CONTAINS
 
          rss = dsl/dg
 
+! calculate rss by SZ09
 !-----------------------------------------------------------------------
-      ! calculate rss by SZ09
       CASE (2)
          dsl = dz_soisno(1)*(exp((1._r8 - vol_liq/porsl(1))**5) - 1._r8)/ (exp(1._r8) - 1._r8)
          dsl = min(dsl,0.2_r8)
@@ -245,8 +251,8 @@ CONTAINS
 
          rss = dsl/dg
 
+! calculate rss by TR13
 !-----------------------------------------------------------------------
-      ! calculate rss by TR13
       CASE (3)
          ! TR13, Eq. (11) and Eq. (12):
          B     = denh2o/(qg*forc_rhoair)
@@ -256,8 +262,8 @@ CONTAINS
          rss_1 = rg_1 + rw_1
          rss   = 1.0/rss_1
 
+! LP92 beta scheme
 !-----------------------------------------------------------------------
-      ! LP92 beta scheme
       CASE (4)
          wx  = (max(wliq_soisno(1),1.e-6)/denh2o+wice_soisno(1)/denice)/dz_soisno(1)
          fac = min(1._r8, wx/porsl(1))
@@ -280,8 +286,8 @@ CONTAINS
             rss  = 1._r8
          ENDIF
 
+! Sellers, 1992
 !-----------------------------------------------------------------------
-      ! Sellers, 1992
       CASE (5)
          wx  = (max(wliq_soisno(1),1.e-6)/denh2o+wice_soisno(1)/denice)/dz_soisno(1)
          fac = min(1._r8, wx/porsl(1))
@@ -289,6 +295,19 @@ CONTAINS
         !rss = exp(8.206-4.255*fac)   !original Sellers (1992)
          rss = exp(8.206-6.0*fac)     !adjusted Sellers (1992) to decrease rss
                                       !for wet soil according to Noah-MP v5
+
+! Liu et al., 2026
+!-----------------------------------------------------------------------
+      CASE (6)
+         wx  = (max(wliq_soisno(1),1.e-6)/denh2o+wice_soisno(1)/denice)/dz_soisno(1)
+         fac = min(1._r8, wx/porsl(1))
+         fac = max(fac , 0.001_r8)
+         f_transition = 1._r8 / (1._r8 + exp(-50.0_r8 * (fac - 0.35)))
+         f_sigmoid    = 1._r8 / (1._r8 + exp( 25.0_r8 * (fac - 0.70)))
+
+         rss_basic    = exp(8.206 - 6.0*fac)
+         rss_adjusted = exp(8.206 - log(1.+exp(20.45 * vf_sand(1) - 4.12)) * fac)
+         rss = (1.0_r8 - f_transition) * rss_basic + f_transition * rss_adjusted * f_sigmoid
       ENDSELECT
 
 !-----------------------------------------------------------------------

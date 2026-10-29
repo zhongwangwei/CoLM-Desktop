@@ -76,11 +76,31 @@ MODULE MOD_Grid_RiverLakeNetwork
    integer :: numrivsys
    logical :: rivsys_by_multiple_procs
    integer, allocatable :: irivsys (:)
-   integer :: numrivsys_shared = 0
-   integer, allocatable :: irivsys_shared (:)
 #ifdef USEMPI
    integer :: p_comm_rivsys = MPI_COMM_NULL
 #endif
+
+   ! Adaptive time step groups under bifurcation.
+   ! Reason: with DEF_USE_BIFURCATION the routing sub-step used to be one global
+   ! minimum dt over all river systems of all workers, so the whole globe
+   ! advanced with the dt of its single most restrictive cell (about 1.5 times
+   ! the unit-catchment sub-steps of the per-river-system dt, and about twice the
+   ! wall time of a run without bifurcation).  A global dt is only needed where
+   ! bifurcation pathways couple two river systems: the flux over a pathway must
+   ! use the same dt on both sides to conserve water.  Here, in bifurcation mode,
+   ! "river system" (irivsys) means a group of river systems that are connected
+   ! by bifurcation pathways (or a single unconnected river system); groups
+   ! advance with their own dt like river systems without bifurcation.
+   ! Effect on results: this changes the time discretisation (each group takes
+   ! its own adaptive sub-steps instead of the global minimum), so results differ
+   ! at the level of the time-stepping error, as they would between two valid
+   ! adaptive time steps.  Without bifurcation nothing changes.
+   ! irivsys_shared(k) > 0 marks a group k that lies on more than one worker; its
+   ! value indexes the vector that is reduced (MPI_MIN) over all workers so that
+   ! every part of that group uses the same dt.  numrivsys_shared is the number of
+   ! such groups, identical on all processes.
+   integer :: numrivsys_shared = 0
+   integer, allocatable :: irivsys_shared (:)
 
 
    ! ----- Parameters for River and Lake -----
@@ -120,6 +140,8 @@ MODULE MOD_Grid_RiverLakeNetwork
 
    type(worker_pushdata_type) :: push_bif_dn2pth
    type(worker_pushdata_type) :: push_bif_influx
+   type(riverlake_pushcache_type) :: cache_bif_dn2pth ! batched pushes (MOD_Grid_RiverLakePush)
+   type(riverlake_pushcache_type) :: cache_bif_influx
 
    real(r8), allocatable :: bedelv_next    (:)   ! downstream river bed elevation [m]
    real(r8), allocatable :: outletwth      (:)   ! river outlet width [m]
@@ -659,6 +681,9 @@ CONTAINS
       CALL griducat%define_by_ndims (nlon_ucat, nlat_ucat)
 
       CALL build_worker_remapdata (landpatch, griducat, remap_patch2inpm)
+
+      IF (DEF_UnitCatchment_regional) &
+         CALL check_regional_coverage (nlon_ucat, nlat_ucat, idmap_x, idmap_y, remap_patch2inpm)
 
       IF (p_is_worker) THEN
          numinpm = remap_patch2inpm%num_grid
@@ -1234,6 +1259,17 @@ CONTAINS
                      floodplain_curve(i)%flpaccare(j-1) + floodplain_curve(i)%flparea(j)
                ENDDO
 
+               ! [GridRiverLakeFlow] Bug fix: upstream integrates the storage of layer j
+               ! with the per-layer area increments, 0.5*(flparea(j)+flparea(j-1)).  The
+               ! flooded area at height h is the cumulative area flpaccare, so the storage
+               ! between two heights is the trapezoid of the cumulative areas, as used by
+               ! volume(), depth() and floodarea() of this type.  With the increments the
+               ! layer thresholds disagree with those functions: the volume jumps down at
+               ! each layer top (non-monotonic) and depth(volume(d)) /= d.  For example,
+               ! with three 1 m layers over 3000 m2, volume(4 m) = 2200 m3 but
+               ! volume(4.000001 m) = 1700 m3, and depth(2200 m3) = 4.236 m.
+               ! This changes results of all runs whose water rises onto the floodplain
+               ! (above the first layer).  The flood feedback always used this formula.
                floodplain_curve(i)%flpstomax(0) = 0.
                ! Integrate with the cumulative flooded area, the same area used by
                ! volume()/depth()/floodarea().  The old per-layer increment made the
@@ -1257,8 +1293,29 @@ CONTAINS
 
       IF (p_is_worker) THEN
          IF (numucat > 0) THEN
+            ! Outlet width is the width of this cell's own channel (it was the
+            ! mean of this and the downstream channel), as in CaMa-Flood
+            ! (cmf_calc_outflw_mod: flow area and outflow use D2RIVWTH of the
+            ! upstream cell).  The momentum of a cell is divided by its own
+            ! channel area topo_rivare = rivwth*rivlen, while the CFL limit
+            ! uses rivlen.  Where a narrow tributary (~5 m) enters a wide river
+            ! or lake (~2000 m) the mean width was hundreds of times the cell's
+            ! own width, the effective length topo_rivare/outletwth only tens
+            ! of metres, and the outflow flipped sign every other substep: a
+            ! 1e-13 velocity perturbation grew to O(1) within a day (0.25 deg
+            ! global network, 3 days: 73-89 cells with discharge >= 10 m3/s off
+            ! by more than 1%, none now).  With the own width the effective
+            ! length is rivlen and the CFL limit holds; the adaptive dt now
+            ! stays at its 60 s cap (27% fewer substeps over 30 days).  The
+            ! routing results change wherever the two widths differ (69% of
+            ! the faces at 0.25 deg, 50% at 0.1 deg; most rivers widen
+            ! downstream, so the outlet becomes narrower): on a cold start the
+            ! discharge of the 10 largest river mouths averaged over 30 days is
+            ! 0-13% lower, the river storage up to 1.6% higher.
+            ! (min(w, w_next) was also tested: same stability and cost, about
+            ! twice the change of the results.)
             WHERE (ucat_next > 0)
-               outletwth = (outletwth + topo_rivwth) * 0.5
+               outletwth = topo_rivwth
             ELSEWHERE
                outletwth = topo_rivwth
             END WHERE
@@ -1365,6 +1422,109 @@ CONTAINS
 
    END SUBROUTINE build_riverlake_network
 
+   SUBROUTINE check_regional_coverage (nlon, nlat, idmap_x, idmap_y, remap)
+
+   ! The regional network must take the runoff of every runoff-input cell that the
+   ! land patches overlap and that the full network (DEF_UnitCatchment_file) routes;
+   ! otherwise that runoff would be dropped without notice.  mkinidata cuts the
+   ! network so, from the land patches of every land-cover year of the run, but the
+   ! run may reach a year that mkinidata had no land data for, or use a file cut for
+   ! another period or domain.  Called at start-up and after each LULCC.
+   ! Collective over all processes.  idmap_x/idmap_y (the regional input matrix) are
+   ! used on the master only.
+
+   USE MOD_SPMD_Task
+   USE MOD_Namelist,      only: DEF_UnitCatchment_file
+   USE MOD_NetCDFSerial
+   IMPLICIT NONE
+
+   integer, intent(in) :: nlon, nlat
+   integer, allocatable, intent(in) :: idmap_x(:,:), idmap_y(:,:)
+   type(worker_remapdata_type), intent(in) :: remap
+
+   logical, allocatable :: touched(:,:), routed_full(:,:), routed_regional(:,:)
+   integer, allocatable :: src_x(:,:), src_y(:,:), ids(:)
+   integer :: ng, ix, iy, nmiss
+#ifdef USEMPI
+   integer :: iworker
+#endif
+
+      IF (p_is_master) THEN
+         allocate (touched (nlon,nlat));  touched = .false.
+      ENDIF
+
+#ifdef USEMPI
+      IF (p_is_worker) THEN
+         ng = remap%num_grid
+         CALL mpi_send (ng, 1, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+         IF (ng > 0) CALL mpi_send (remap%ids_me, ng, MPI_INTEGER, p_address_master, mpi_tag_data, &
+            p_comm_glb, p_err)
+      ELSEIF (p_is_master) THEN
+         DO iworker = 0, p_np_worker-1
+            CALL mpi_recv (ng, 1, MPI_INTEGER, p_address_worker(iworker), mpi_tag_mesg, p_comm_glb, &
+               p_stat, p_err)
+            IF (ng > 0) THEN
+               allocate (ids (ng))
+               CALL mpi_recv (ids, ng, MPI_INTEGER, p_address_worker(iworker), mpi_tag_data, &
+                  p_comm_glb, p_stat, p_err)
+               CALL mark (ids)
+               deallocate (ids)
+            ENDIF
+         ENDDO
+      ENDIF
+#else
+      IF (remap%num_grid > 0) CALL mark (remap%ids_me)
+#endif
+
+      nmiss = 0
+      IF (p_is_master) THEN
+         CALL ncio_read_serial (DEF_UnitCatchment_file, 'inpmat_x', src_x)
+         CALL ncio_read_serial (DEF_UnitCatchment_file, 'inpmat_y', src_y)
+         allocate (routed_full     (nlon,nlat));  CALL routed (src_x, src_y, routed_full)
+         allocate (routed_regional (nlon,nlat));  CALL routed (idmap_x, idmap_y, routed_regional)
+
+         nmiss = count(touched .and. routed_full .and. .not. routed_regional)
+         IF (nmiss > 0) THEN
+            write(*,'(A,I0,A)') 'ERROR: ', nmiss, ' runoff-input cells under the land patches are routed by'
+            write(*,'(A)') '   DEF_UnitCatchment_file but not by the regional unit-catchment network.'
+            write(*,'(A)') '   Run mkinidata again for this domain and simulation period'
+            write(*,'(A)') '   (with LULCC, after mksrfdata has made the land data of every year).'
+         ENDIF
+         deallocate (touched, routed_full, routed_regional, src_x, src_y)
+      ENDIF
+
+#ifdef USEMPI
+      CALL mpi_bcast (nmiss, 1, MPI_INTEGER, p_address_master, p_comm_glb, p_err)
+#endif
+      IF (nmiss > 0) CALL CoLM_stop ('regional unit-catchment network does not cover the land patches')
+
+   CONTAINS
+
+      SUBROUTINE mark (cell_ids)
+      integer, intent(in) :: cell_ids(:)
+      integer :: k
+         DO k = 1, size(cell_ids)
+            ix = mod(cell_ids(k)-1, nlon) + 1
+            iy = (cell_ids(k)-1) / nlon + 1
+            touched(ix,iy) = .true.
+         ENDDO
+      END SUBROUTINE mark
+
+      SUBROUTINE routed (mx, my, cell)
+      integer, intent(in)  :: mx(:,:), my(:,:)
+      logical, intent(out) :: cell(:,:)
+      integer :: j, k
+         cell = .false.
+         DO k = 1, size(mx,2)
+            DO j = 1, size(mx,1)
+               IF (mx(j,k) >= 1 .and. mx(j,k) <= nlon .and. my(j,k) >= 1 .and. my(j,k) <= nlat) &
+                  cell(mx(j,k), my(j,k)) = .true.
+            ENDDO
+         ENDDO
+      END SUBROUTINE routed
+
+   END SUBROUTINE check_regional_coverage
+
    SUBROUTINE verify_regional_network (file_regional, x_regional, y_regional)
 
 
@@ -1390,7 +1550,7 @@ CONTAINS
       IF (.not. consistent) THEN
          write(*,'(A)') 'ERROR: the regional unit-catchment network does not belong to DEF_UnitCatchment_file.'
          write(*,'(2A)') '   regional file: ', trim(file_regional)
-         write(*,'(A)') '   Run mksrfdata again with the current DEF_UnitCatchment_file.'
+         write(*,'(A)') '   Run mkinidata again with the current DEF_UnitCatchment_file.'
          CALL CoLM_stop ()
       ENDIF
 
@@ -1403,7 +1563,9 @@ CONTAINS
 
    USE MOD_SPMD_Task
    USE MOD_NetCDFSerial
-   USE MOD_Vector_ReadWrite, only: vector_read_and_scatter, vector_read_matrix_and_scatter
+   USE MOD_Vector_ReadWrite, only: vector_read_and_scatter
+   ! 上游把矩阵版搬到了 MOD_Grid_RiverLakeVectorIO（MOD_Vector_ReadWrite 里已没有它）
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_read_matrix_and_scatter
    IMPLICIT NONE
 
    character(len=*), intent(in) :: parafile
@@ -1669,86 +1831,6 @@ CONTAINS
 
    END SUBROUTINE vol_depth_curve_free_mem
 
-   ! ---------
-   SUBROUTINE bifurcation_dt_groups (parafile, numrivmth, rivermouth, shared_ucat)
-
-   USE MOD_SPMD_Task
-   USE MOD_NetCDFSerial
-   IMPLICIT NONE
-
-   character(len=*), intent(in) :: parafile
-   integer, intent(in)    :: numrivmth
-   integer, intent(inout) :: rivermouth (:)
-   integer, allocatable, intent(out) :: shared_ucat (:)
-
-   integer, allocatable :: bif_upst (:), bif_down (:)
-   integer, allocatable :: parent (:), owner (:), ishared (:)
-   integer :: npth, ip, i, a, b, iworker, ic
-
-      CALL ncio_inquire_length (parafile, 'bifurcation_upst', npth)
-      IF (npth > 0) THEN
-         CALL ncio_read_serial (parafile, 'bifurcation_upst', bif_upst)
-         CALL ncio_read_serial (parafile, 'bifurcation_down', bif_down)
-      ENDIF
-
-      allocate (parent (numrivmth))
-      parent = (/(i, i = 1, numrivmth)/)
-      DO ip = 1, npth
-         IF (bif_upst(ip) < 1 .or. bif_upst(ip) > size(rivermouth)) CYCLE
-         IF (bif_down(ip) < 1 .or. bif_down(ip) > size(rivermouth)) CYCLE
-         a = find_root (rivermouth(bif_upst(ip)))
-         b = find_root (rivermouth(bif_down(ip)))
-         IF (a /= b) parent(max(a,b)) = min(a,b)
-      ENDDO
-
-      DO i = 1, size(rivermouth)
-         rivermouth(i) = find_root (rivermouth(i))
-      ENDDO
-
-      allocate (owner (numrivmth));  owner(:) = -1
-      allocate (ishared (numrivmth)); ishared(:) = 0
-      DO iworker = 0, p_np_worker-1
-         DO i = 1, numucat_wrk(iworker)
-            ic = rivermouth(ucat_data_address(iworker)%val(i))
-            IF (owner(ic) == -1) THEN
-               owner(ic) = iworker
-            ELSEIF (owner(ic) /= iworker) THEN
-               ishared(ic) = 1
-            ENDIF
-         ENDDO
-      ENDDO
-
-      numrivsys_shared = 0
-      DO ic = 1, numrivmth
-         IF (ishared(ic) > 0) THEN
-            numrivsys_shared = numrivsys_shared + 1
-            ishared(ic) = numrivsys_shared
-         ENDIF
-      ENDDO
-
-      allocate (shared_ucat (size(rivermouth)))
-      shared_ucat = ishared(rivermouth)
-
-      write(*,'(A,I0,A,I0,A,I0,A)') 'Bifurcation time step groups: ', &
-         count(parent == (/(i, i = 1, numrivmth)/)), ' groups from ', numrivmth, &
-         ' river systems, ', numrivsys_shared, ' shared by several workers.'
-
-      deallocate (parent, owner, ishared)
-      IF (allocated(bif_upst)) deallocate (bif_upst)
-      IF (allocated(bif_down)) deallocate (bif_down)
-
-   CONTAINS
-
-      integer FUNCTION find_root (k)
-      integer, intent(in) :: k
-         find_root = k
-         DO WHILE (parent(find_root) /= find_root)
-            find_root = parent(find_root)
-         ENDDO
-      END FUNCTION find_root
-
-   END SUBROUTINE bifurcation_dt_groups
-
    SUBROUTINE riverlake_network_final ()
 
 #ifdef USEMPI
@@ -1765,6 +1847,9 @@ CONTAINS
       CALL riverlake_pushcache_free_mem (cache_ups2ucat)
       CALL worker_pushdata_free_mem (push_bif_dn2pth)
       CALL worker_pushdata_free_mem (push_bif_influx)
+      CALL riverlake_pushcache_free_mem (cache_ups2ucat)
+      CALL riverlake_pushcache_free_mem (cache_bif_dn2pth)
+      CALL riverlake_pushcache_free_mem (cache_bif_influx)
       CALL worker_remapdata_free_mem (remap_patch2inpm)
       CALL grid_free_mem (griducat)
 
@@ -1830,6 +1915,94 @@ CONTAINS
 #endif
 
    END SUBROUTINE riverlake_network_final
+
+   ! Time step groups for bifurcation (master only), see irivsys_shared.
+   ! rivermouth(totalnumucat) holds the river system of each unit catchment on
+   ! input and the cluster of river systems connected by bifurcation pathways on
+   ! output; a cluster is labelled by one of its river systems.  shared_ucat gives,
+   ! for each unit catchment, the index (1..numrivsys_shared) of its cluster when
+   ! that cluster has unit catchments on more than one worker, and 0 otherwise.
+   SUBROUTINE bifurcation_dt_groups (parafile, numrivmth, rivermouth, shared_ucat)
+
+   USE MOD_SPMD_Task
+   USE MOD_NetCDFSerial
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: parafile
+   integer, intent(in)    :: numrivmth
+   integer, intent(inout) :: rivermouth (:)
+   integer, allocatable, intent(out) :: shared_ucat (:)
+
+   integer, allocatable :: bif_upst (:), bif_down (:)
+   integer, allocatable :: parent (:), owner (:), ishared (:)
+   integer :: npth, ip, i, a, b, iworker, ic
+
+      CALL ncio_inquire_length (parafile, 'bifurcation_upst', npth)
+      IF (npth > 0) THEN
+         CALL ncio_read_serial (parafile, 'bifurcation_upst', bif_upst)
+         CALL ncio_read_serial (parafile, 'bifurcation_down', bif_down)
+      ENDIF
+
+      ! union-find over river systems; a pathway into the ocean (down <= 0) or
+      ! out of range joins nothing (read_bifurcation_global_arrays checks ranges)
+      allocate (parent (numrivmth))
+      parent = (/(i, i = 1, numrivmth)/)
+      DO ip = 1, npth
+         IF (bif_upst(ip) < 1 .or. bif_upst(ip) > size(rivermouth)) CYCLE
+         IF (bif_down(ip) < 1 .or. bif_down(ip) > size(rivermouth)) CYCLE
+         a = find_root (rivermouth(bif_upst(ip)))
+         b = find_root (rivermouth(bif_down(ip)))
+         IF (a /= b) parent(max(a,b)) = min(a,b)
+      ENDDO
+
+      DO i = 1, size(rivermouth)
+         rivermouth(i) = find_root (rivermouth(i))
+      ENDDO
+
+      ! clusters with unit catchments on more than one worker
+      allocate (owner (numrivmth));  owner(:) = -1
+      allocate (ishared (numrivmth)); ishared(:) = 0
+      DO iworker = 0, p_np_worker-1
+         DO i = 1, numucat_wrk(iworker)
+            ic = rivermouth(ucat_data_address(iworker)%val(i))
+            IF (owner(ic) == -1) THEN
+               owner(ic) = iworker
+            ELSEIF (owner(ic) /= iworker) THEN
+               ishared(ic) = 1
+            ENDIF
+         ENDDO
+      ENDDO
+
+      numrivsys_shared = 0
+      DO ic = 1, numrivmth
+         IF (ishared(ic) > 0) THEN
+            numrivsys_shared = numrivsys_shared + 1
+            ishared(ic) = numrivsys_shared
+         ENDIF
+      ENDDO
+
+      allocate (shared_ucat (size(rivermouth)))
+      shared_ucat = ishared(rivermouth)
+
+      write(*,'(A,I0,A,I0,A,I0,A)') 'Bifurcation time step groups: ', &
+         count(parent == (/(i, i = 1, numrivmth)/)), ' groups from ', numrivmth, &
+         ' river systems, ', numrivsys_shared, ' shared by several workers.'
+
+      deallocate (parent, owner, ishared)
+      IF (allocated(bif_upst)) deallocate (bif_upst)
+      IF (allocated(bif_down)) deallocate (bif_down)
+
+   CONTAINS
+
+      integer FUNCTION find_root (k)
+      integer, intent(in) :: k
+         find_root = k
+         DO WHILE (parent(find_root) /= find_root)
+            find_root = parent(find_root)
+         ENDDO
+      END FUNCTION find_root
+
+   END SUBROUTINE bifurcation_dt_groups
 
    SUBROUTINE read_and_distribute_bifurcation (parafile)
 
@@ -2294,6 +2467,9 @@ CONTAINS
 
       CALL build_worker_pushdata (npthout_local, pth_global_id, numucat, &
          bif_incoming_pths, bif_incoming_wts, push_bif_influx)
+
+      CALL riverlake_pushcache_build (push_bif_dn2pth, cache_bif_dn2pth)
+      CALL riverlake_pushcache_build (push_bif_influx, cache_bif_influx)
 
    END SUBROUTINE read_and_distribute_bifurcation
 

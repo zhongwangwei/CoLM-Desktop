@@ -2001,14 +2001,15 @@ fn run_spatial_segment(
                 .iter()
                 .position(colm_runtime::river::sediment::is_sediment_tracer)
             {
-                let files = string_field(document, "DEF_TRACER_PARAM_FILES")?;
+                let files = colm_runtime::tracer::param_files_from_document(document)?;
                 let param = colm_core::tracer::descriptor::param_file_for_index(
                     &files,
                     &set.tracers,
                     index,
                 )?
                 .context(
-                    "Cannot find sediment parameter file for SEDIMENT in DEF_TRACER_PARAM_FILES",
+                    "Cannot find sediment parameter file for SEDIMENT in \
+                             DEF_SEDIMENT_PARAM_FILE",
                 )?;
                 let sediment = colm_runtime::river::sediment::Sediment::init(
                     &river.network,
@@ -2146,7 +2147,7 @@ fn run_spatial_segment(
                 })
                 .with_streaming_if(tracer_runtime.is_none())
                 .with_tracer_history(
-                    logical_field(document, "DEF_USE_TRACER")?
+                    material_transport_enabled(document)?
                         .then(|| real_field(document, "DEF_simulation_time%timestep"))
                         .transpose()?,
                 )
@@ -2647,8 +2648,8 @@ fn check_catchment(document: &Document) -> Result<()> {
         "catchment lateral flow with DEF_USE_LULCC is not ported"
     );
     ensure!(
-        !logical_field(document, "DEF_USE_TRACER")?,
-        "catchment lateral flow with tracers is not ported"
+        !material_transport_enabled(document)?,
+        "catchment lateral flow with material transport is not ported"
     );
     ensure!(
         !logical_field(document, "DEF_URBAN_RUN")?,
@@ -2883,7 +2884,7 @@ fn lulcc_patch_areas(
 ///   `lcc(np,c)·old_area(op)/Σ_同类 old_area` 加权平均。没有权重时退回同类型的旧 patch，再没有就保持分配值。
 ///   之后核对每个输运示踪物的陆面水池质量守恒（`TRC_LULCC_BAL`）。
 ///
-/// 同位素且开了含水层混合（变饱和流、`DEF_TRACER_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
+/// 同位素且开了含水层混合（变饱和流、`DEF_MT_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
 /// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
 // 按新 patch 下标 `np` 同时索引多张表，照上游的 `DO np` 写。
 #[allow(clippy::needless_range_loop)]
@@ -3128,7 +3129,7 @@ fn lulcc_land_tracers(
 
 /// `compute_*_lulcc_land_water_mass` + `assert_lulcc_land_water_mass_conserved`：逐输运示踪物把各陆面
 /// 水池按面积求和（`FMA(pool, area, total)`，面积 ≤ tiny 的 patch 不计），前后之差超过
-/// `max(1e-8, 1e-10·max(|前|, |后|, 1))` 的示踪物个数多于 `DEF_TRACER_LULCC_ABORT_NBAD` 就停。
+/// `max(1e-8, 1e-10·max(|前|, |后|, 1))` 的示踪物个数多于 `DEF_MT_LULCC_ABORT_NBAD` 就停。
 fn lulcc_check_land_water_mass(
     set: &colm_core::tracer::TracerSet,
     old_states: &[colm_core::tracer::PatchTracerState],
@@ -3701,10 +3702,7 @@ fn lulcc_transition(
     let land_tracers = colm_runtime::tracer::tracer_set_from_document(document)?
         .filter(|set| set.transport_indices().next().is_some())
         .map(|set| -> Result<_> {
-            Ok((
-                set,
-                real_field(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
-            ))
+            Ok((set, real_field(document, "DEF_MT_AQUIFER_MIXING_WATER_MM")?))
         })
         .transpose()?;
     // 示踪物强迫的"最近有效值"缓存（`tracer_forcing_lulcc_remap`）：默认比值与旧侧的 `subfrc`。
@@ -4092,7 +4090,7 @@ fn lulcc_transition(
                     }),
                     _ => None,
                 },
-                integer_field(document, "DEF_TRACER_LULCC_ABORT_NBAD")?,
+                integer_field(document, "DEF_MT_LULCC_ABORT_NBAD")?,
             )
             .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
             let cache = match (&forcing_defaults, &old, &old_subfrc) {
@@ -4251,7 +4249,7 @@ fn lulcc_transition(
                 u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                     .context("DEF_REST_CompressLevel must fit 0..=9")?,
             )?,
-            None if logical_field(document, "DEF_USE_TRACER")? => {
+            None if material_transport_enabled(document)? => {
                 colm_runtime::river::restart::write_empty_river_tracers(&path)?;
             }
             None => {}
@@ -5998,6 +5996,14 @@ fn history_namelist_overrides(path: &Path) -> Result<Vec<(String, bool)>> {
     }
     ensure!(seen, "{} has no &nl_colm_history group", path.display());
     Ok(overrides)
+}
+
+/// `mt_any_enabled`：有没有任何 family 的材料运移在跑。
+///
+/// 上游 7d2fca93 把单一的 `DEF_USE_TRACER` 拆成四个 family 开关，纯配置层的判定
+/// 放在 [`colm_namelist::material::any_enabled`]，这里只是个别名，免得每处都写全路径。
+fn material_transport_enabled(document: &Document) -> Result<bool> {
+    colm_namelist::material::any_enabled(document)
 }
 
 /// 取一个逻辑字段：算例里写了就用算例的，否则用 schema 的声明默认值。

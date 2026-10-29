@@ -24,14 +24,16 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Vars_1DFluxes
    USE MOD_LandPatch, only: numpatch,landpatch
    USE MOD_LandUrban, only: patch2urban
-   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_TRACER, DEF_USE_BGC
+   USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_BGC
    USE MOD_Forcing, only: forcmask_pch
    USE omp_lib
-   USE MOD_Tracer_LandPhase, only: tracer_resolve_step, tracer_lake_step, &
-      tracer_wetland_decomp, tracer_soil_step, tracer_report
-   USE MOD_Tracer_Defs, only: ntracers
+   USE MOD_MT_LandPhase, only: mt_resolve_step, mt_lake_step, &
+      mt_wetland_decomp, mt_soil_step, mt_report
+   USE MOD_MT_Defs, only: nmts
    USE MOD_SPMD_Task, only: CoLM_stop
-   USE MOD_Tracer_SpecialPatches, only: waterbody_hist_sample
+   USE MOD_MT_SpecialPatches, only: mt_waterbody_hist_sample
+   ! Reads the BGC leaching flux without changing BGC physics (see module).
+   USE MOD_MT_NitrogenLeaching, only: mt_bgc_n_leaching
 #ifdef HYPERSPECTRAL
   USE MOD_HighRes_Parameters
 #endif
@@ -40,6 +42,9 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    ! inundation evaporation [mm/s], inundation re-infiltration[mm/s]
    USE MOD_CaMa_Vars, only: flddepth_cama,fldfrc_cama,fevpg_fld,finfg_fld
 #elif defined(GridRiverLakeFlow)
+   ! [GridRiverLakeFlow] Grid flood feedback passes its patch flood state through the
+   ! same arguments as CaMa flood feedback (the CaMa names are kept as aliases).
+   ! CaMa_Flood builds are unchanged; with the feedback off the arrays stay zero.
    USE MOD_Grid_RiverLakeFlow, only: flddepth_cama => flood_depth_patch, &
       fldfrc_cama => flood_fraction_patch, fevpg_fld => flood_evap_patch, &
       finfg_fld => flood_infil_patch
@@ -64,8 +69,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 
 ! ======================================================================
 
-      IF (DEF_USE_TRACER) CALL tracer_resolve_step (istep_in, istep_local)
-
+      CALL mt_resolve_step (istep_in, istep_local)
 #ifdef OPENMP
 !$OMP PARALLEL DO NUM_THREADS(OPENMP) &
 !$OMP PRIVATE(i, m, u, k, steps_in_one_deltim, deltim_phy) &
@@ -90,7 +94,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ! Photosynthesis looks up the per-class DEF_LC_RESPCP override by this (thread-private).
          lc_current_class = m
 
-         IF (DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
+         IF (nmts > 0 .and. DEF_URBAN_RUN .and. m.eq.URBAN) THEN
             CALL CoLM_stop ('TRACER does not yet support full urban patches: ' // &
                'CoLMMAIN_Urban has no tracer sub-surface state or runoff tracer update.')
          ENDIF
@@ -105,9 +109,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          IF (.not.DEF_URBAN_RUN .or. m.ne.URBAN) THEN
 
             DO k = 1, steps_in_one_deltim
-      IF (DEF_USE_TRACER) THEN
-               waterbody_hist_sample = k == steps_in_one_deltim
-      ENDIF
+               mt_waterbody_hist_sample = k == steps_in_one_deltim
                !                ***** Call CoLM main program *****
                !
                CALL CoLMMAIN (  i,idate,         coszen(i),       deltim_phy,      &
@@ -231,9 +233,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
                ustar(i),        qstar(i),        tstar(i),                         &
                fm(i),           fh(i),           fq(i)                             )
 
-               IF (DEF_USE_TRACER) &
-                  CALL tracer_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
-
+               CALL mt_lake_step (istep_local, i, idate, deltim_phy, k, steps_in_one_deltim)
             ENDDO
          ENDIF
 
@@ -245,11 +245,15 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             !
             CALL bgc_driver (i,idate(1:3),deltim, patchlatr(i)*180/PI,patchlonr(i)*180/PI)
          ENDIF
-
-         IF (DEF_USE_TRACER) CALL tracer_wetland_decomp (i, deltim)
-
-         IF (DEF_USE_TRACER) CALL tracer_soil_step (istep_local, i, idate, deltim)
-         ENDIF
+         CALL mt_wetland_decomp (i, deltim)
+         CALL mt_soil_step (istep_local, i, idate, deltim)
+#ifdef BGC
+         ! Book the BGC mineral-N leaching loss as an external solute input.
+         ! BGC physics is untouched; this only reads the flux it already
+         ! removed from sminn/smin_no3 and adds it to the runoff hand-off.
+         CALL mt_bgc_n_leaching (i, patchtype(i), deltim)
+#endif
+      ENDIF
 
 
          ! For urban model and urban patches
@@ -288,7 +292,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 
           ! VEGETATION INFORMATION
             htop(i)         ,hbot(i)         ,sqrtdi(m)       ,chil(m)         ,&
-            effcon(m)       ,vmax25(m)       ,c3c4(m)         ,slti(m)         ,hlti(m)         ,&
+            effcon(m)       ,vmax25(m)       ,slti(m)         ,hlti(m)         ,&
             shti(m)         ,hhti(m)         ,trda(m)         ,trdm(m)         ,&
             trop(m)         ,g1(m)           ,g0(m)           ,gradm(m)        ,&
             binter(m)       ,extkn(m)        ,rho(1:,1:,m)    ,tau(1:,1:,m)    ,&
@@ -392,9 +396,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 !$OMP END PARALLEL DO
 #endif
 
-      IF (DEF_USE_TRACER) THEN
-      CALL tracer_report ()
-      ENDIF
-
+      CALL mt_report ()
 END SUBROUTINE CoLMDRIVER
 ! ---------- EOP ------------

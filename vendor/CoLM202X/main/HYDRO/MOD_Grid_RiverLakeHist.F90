@@ -12,8 +12,10 @@ MODULE MOD_Grid_RiverLakeHist
 
    USE MOD_Precision
    USE MOD_Grid_RiverLakeHistState
-   USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_route_write_history, tracer_lifecycle_route_flush_history
-   USE MOD_Tracer_RiverLake, only: write_tracer_history, tracer_flush_acc
+   ! river material history (f_mt_* variables); writes only material fields
+   USE MOD_MT_RiverLake, only: mt_riverlake_write_history, mt_riverlake_flush_acc
+   ! and the history of the materials with their own river state (sediment)
+   USE MOD_MT_Lifecycle, only: mt_lifecycle_route_write_history, mt_lifecycle_route_flush_history
 
    ! -- PUBLIC SUBROUTINEs --
    PUBLIC :: hist_grid_riverlake_init
@@ -529,11 +531,6 @@ CONTAINS
          deallocate (bifout_local)
 
          IF (npthlev_bif > 0 .and. totalnpthout > 0) THEN
-            IF (p_is_master) THEN
-               CALL ncio_define_dimension (file_hist_ucat, 'bifurcation_level', npthlev_bif)
-               CALL ncio_define_dimension (file_hist_ucat, 'bifurcation_pathway', totalnpthout)
-            ENDIF
-
             IF (p_is_worker) THEN
                ncol_local_bif = npthout_local
                IF (allocated(a_bifflw_lev) .and. allocated(a_bifflw_acctime)) THEN
@@ -572,10 +569,8 @@ CONTAINS
       IF (allocated (a_floodfrc_inpm)) deallocate (a_floodfrc_inpm)
       IF (allocated (acc_vec_grid   )) deallocate (acc_vec_grid   )
 
-      IF (DEF_USE_TRACER) CALL tracer_lifecycle_route_write_history (file_hist_ucat, itime_in_file_ucat)
-
-      ! ----- tracer variables -----
-      IF (DEF_USE_TRACER) CALL write_tracer_history (file_hist_ucat, itime_in_file_ucat, acctime_ucat)
+      CALL mt_riverlake_write_history (file_hist_ucat, itime_in_file_ucat, acctime_ucat)
+      CALL mt_lifecycle_route_write_history (file_hist_ucat, itime_in_file_ucat)
 
       ! ----- reservoir variables -----
       IF (DEF_Reservoir_Method > 0) THEN
@@ -675,10 +670,8 @@ CONTAINS
             a_qresv_out  (:) = 0.
          ENDIF
 
-         IF (DEF_USE_TRACER) THEN
-            CALL tracer_flush_acc()
-            CALL tracer_lifecycle_route_flush_history()
-         ENDIF
+         CALL mt_riverlake_flush_acc ()
+         CALL mt_lifecycle_route_flush_history ()
 
       ENDIF
 

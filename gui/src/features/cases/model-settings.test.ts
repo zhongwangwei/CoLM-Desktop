@@ -412,13 +412,14 @@ test('upstream choices close processes they invalidate, and the newest side of a
   assert.deepEqual(r.closed, []);
   // 选择 Campbell 关闭示踪；关闭变饱和流同样关闭示踪。
   r = exclusionPatch(
-    { DEF_USE_TRACER: on },
+    { DEF_USE_ISOTOPE: on },
     { DEF_USE_Campbell_SOIL_MODEL: on },
     { subgrid: 'PFT' },
   );
-  assert.equal(r.patch.DEF_USE_TRACER, off);
-  r = exclusionPatch({ DEF_USE_TRACER: on }, { DEF_USE_VariablySaturatedFlow: off }, {});
-  assert.equal(r.patch.DEF_USE_TRACER, off);
+  assert.equal(r.patch.DEF_USE_ISOTOPE, off);
+  assert.equal(r.patch.DEF_USE_METHANE, off);
+  r = exclusionPatch({ DEF_USE_ISOTOPE: on }, { DEF_USE_VariablySaturatedFlow: off }, {});
+  assert.equal(r.patch.DEF_USE_ISOTOPE, off);
   // 单点城市与 BGC：本次选择的一方保留。
   r = exclusionPatch(
     { DEF_URBAN_RUN: on },

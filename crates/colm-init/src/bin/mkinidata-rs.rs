@@ -236,12 +236,12 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     if let Some(path) = files.urban {
         wrote(&path);
     }
-    // `DEF_USE_TRACER`：时间重启带空示踪物事务（mkinidata 不注册示踪物）。
+    // 任一 family 打开（`mt_any_enabled`）：时间重启带空材料事务（mkinidata 不注册示踪物）。
     let document = parse(&std::fs::read_to_string(&run.namelist)?)?;
-    if namelist_bool(&document, "DEF_USE_TRACER", false)? {
+    if colm_namelist::material::any_enabled(&document)? {
         colm_init::write_empty_land_tracer_transaction(
             &time.common.block,
-            namelist_f64(&document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM", -1.0)?,
+            namelist_f64(&document, "DEF_MT_AQUIFER_MIXING_WATER_MM", -1.0)?,
         )?;
     }
     wrote(&time.common.block);
@@ -320,7 +320,7 @@ struct SpatialNamelistRun {
     /// LCT（含城市）的 `DEF_LC_X(lc)`：先按 24 格读，地类方案定了再查是否越界。
     land_classes: colm_core::LandClassOverrideTable,
     snicar: Option<SnicarInitialization>,
-    /// `DEF_USE_TRACER`：`Some(DEF_TRACER_AQUIFER_MIXING_WATER_MM)`，时间重启带空示踪物事务。
+    /// 任一 family 打开（`mt_any_enabled`）：`Some(DEF_MT_AQUIFER_MIXING_WATER_MM)`，时间重启带空示踪物事务。
     tracer_mixing_water_mm: Option<f64>,
 }
 
@@ -930,10 +930,10 @@ fn spatial_namelist_run_with_subgrid(
             colm_core::LandClassOverrideTable::new()
         },
         snicar,
-        tracer_mixing_water_mm: if namelist_bool(&document, "DEF_USE_TRACER", false)? {
+        tracer_mixing_water_mm: if colm_namelist::material::any_enabled(&document)? {
             Some(namelist_f64(
                 &document,
-                "DEF_TRACER_AQUIFER_MIXING_WATER_MM",
+                "DEF_MT_AQUIFER_MIXING_WATER_MM",
                 -1.0,
             )?)
         } else {
@@ -2130,7 +2130,7 @@ mod tests {
         std::fs::write(
             &namelist,
             format!(
-                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_TRACER=.true.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_Reservoir_Method=1\n DEF_ReservoirPara_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
+                "&nl_colm\n DEF_CASE_NAME='river'\n DEF_dir_output='{}'\n DEF_file_mesh='mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_ISOTOPE=.true.\n DEF_LC_YEAR=2005\n DEF_UnitCatchment_file='{}'\n DEF_USE_LEVEE=.true.\n DEF_Reservoir_Method=1\n DEF_ReservoirPara_file='{}'\n DEF_simulation_time%start_year=2008\n DEF_simulation_time%start_month=2\n DEF_simulation_time%start_day=29\n/\n",
                 root.display(),
                 unit_catchment.display(),
                 reservoir.display(),

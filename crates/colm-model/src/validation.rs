@@ -157,6 +157,10 @@ fn upgrade_legacy_stomatal_records(overlay: &mut Overlay) {
 }
 
 /// Only actual coefficients belong to a model; selecting existing schemes is case configuration.
+///
+/// 上游 7d2fca93 把示踪物拆成 MaterialTransport：物理系数前缀是 `DEF_ISO_*` / `DEF_MT_*`
+/// （`DEF_ISO_USE_FRACTIONATION` 一类开关除外，它们不是 Real）。family 开关、名单与参数
+/// 文件字段都是算例选择，不属于模型。
 pub fn is_model_field(key: &str) -> bool {
     if colm_case::pft::is_parameter(key) || colm_case::land_cover::is_parameter(key) {
         return true;
@@ -170,7 +174,7 @@ pub fn is_model_field(key: &str) -> bool {
     }
     colm_schema::find(key).is_some_and(|field| {
         field.group.is_some()
-            && (field.name.starts_with("DEF_TRACER_")
+            && ((field.name.starts_with("DEF_ISO_") || field.name.starts_with("DEF_MT_"))
                 && matches!(field.kind, colm_schema::FieldKind::Real)
                 || field.name == "DEF_GridRiverLake_FloodInfiltMax")
     })
@@ -251,25 +255,6 @@ pub(crate) fn schema_value(key: &str, text: &str) -> Result<Value> {
             field.values.is_empty() || field.values.iter().any(|v| v.eq_ignore_ascii_case(&token)),
             "unsupported {key} value: {token}"
         );
-        if matches!(
-            field.name,
-            "DEF_TRACER_MRAT"
-                | "DEF_TRACER_REF_RATIO"
-                | "DEF_TRACER_INIT_DELTA"
-                | "DEF_TRACER_REACTIVE_DECAY_RATE"
-        ) {
-            // Fortran otherwise warns and silently substitutes scientific defaults.
-            if let Value::Str(csv) = value {
-                if !csv.trim().is_empty() {
-                    for number in csv.split(',') {
-                        ensure!(
-                            literal(number.trim())?.as_f64().is_some_and(f64::is_finite),
-                            "{key}: tracer values must be finite numbers"
-                        );
-                    }
-                }
-            }
-        }
         if let Some(number) = value.as_f64() {
             if colm_case::tuning::find(key)?.is_some() {
                 colm_case::tuning::validate_value(key, number)?;
@@ -450,18 +435,33 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
             .filter(|record| record.scope_instance.kind == "case-scalar")
             .map(|record| (&record.raw_key, &record.value)),
     ) {
-        if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
-            if let Value::Str(raw) = literal(text)? {
-                for path in colm_namelist::tracer_files::param_file_paths(&raw)? {
-                    relative(&path)?;
-                    ensure!(
-                        overlay
-                            .process_files
-                            .iter()
-                            .any(|a| a.relative_path == path),
-                        "process file reference lacks frozen asset: {path}"
-                    );
+        if !colm_namelist::material::PARAM_FILE_FIELDS
+            .iter()
+            .any(|field| key.eq_ignore_ascii_case(field))
+        {
+            continue;
+        }
+        if let Value::Str(raw) = literal(text)? {
+            // `DEF_SOLUTE_PARAM_FILES` 是列表，其余三个是单路径；统一拆成路径再逐条核对资产。
+            let paths = if key.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+                colm_namelist::tracer_files::param_file_paths(&raw)?
+            } else {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                    Vec::new()
+                } else {
+                    vec![trimmed.to_owned()]
                 }
+            };
+            for path in paths {
+                relative(&path)?;
+                ensure!(
+                    overlay
+                        .process_files
+                        .iter()
+                        .any(|a| a.relative_path == path),
+                    "process file reference lacks frozen asset: {path}"
+                );
             }
         }
     }

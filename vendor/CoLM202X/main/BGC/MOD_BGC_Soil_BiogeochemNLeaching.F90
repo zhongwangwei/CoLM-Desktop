@@ -18,6 +18,12 @@ MODULE MOD_BGC_Soil_BiogeochemNLeaching
    USE MOD_BGC_Vars_TimeInvariants, only: sf, sf_no3
    USE MOD_Vars_TimeVariables, only: wliq_soisno
    USE MOD_BGC_Vars_TimeVariables,   only: sminn_vr, smin_no3_vr
+   ! NH4-specific leaching is a material-transport extension.  It is off
+   ! unless DEF_USE_NH4_LEACHING is set, so a material-transport build that
+   ! does not request it keeps the upstream BGC results bit-identical.
+   USE MOD_BGC_Vars_TimeVariables,   only: smin_nh4_vr
+   USE MOD_BGC_Vars_1DFluxes, only: smin_nh4_leached_vr
+   USE MOD_MT_Namelist, only: DEF_USE_NH4_LEACHING
    USE MOD_Vars_1DFluxes,     only: rnof, rsur
    USE MOD_BGC_Vars_1DFluxes, only: &
        sminn_leached_vr, smin_no3_leached_vr, smin_no3_runoff_vr
@@ -100,6 +106,26 @@ CONTAINS
          !----------------------------------------
   
          DO j = 1,nl_soil
+            ! Species-resolved NH4 leaching, independent of the NH4:NO3
+            ! pool ratio.  Only active when the material transport asks for
+            ! it (DEF_USE_NH4_LEACHING); otherwise the row is zeroed.
+            IF (DEF_USE_NH4_LEACHING) THEN
+               disn_conc = 0._r8
+               IF (wliq_soisno(j,i) > 0._r8) THEN
+                  disn_conc = (sf * max(smin_nh4_vr(j,i),0._r8) * dz_soi(j)) / wliq_soisno(j,i)
+               ENDIF
+               IF (tot_water > 0._r8) THEN
+                  smin_nh4_leached_vr(j,i) = disn_conc * drain_tot * wliq_soisno(j,i) / &
+                                             (tot_water * dz_soi(j))
+               ELSE
+                  smin_nh4_leached_vr(j,i) = 0._r8
+               ENDIF
+               smin_nh4_leached_vr(j,i) = min(smin_nh4_leached_vr(j,i), &
+                                              (sf * max(smin_nh4_vr(j,i),0._r8))/deltim)
+               smin_nh4_leached_vr(j,i) = max(smin_nh4_leached_vr(j,i), 0._r8)
+            ELSE
+               smin_nh4_leached_vr(j,i) = 0._r8
+            ENDIF
             ! calculate the dissolved mineral N concentration (gN/kg water)
             ! assumes that 10% of mineral nitrogen is soluble
             disn_conc = 0._r8

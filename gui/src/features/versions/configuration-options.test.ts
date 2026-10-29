@@ -97,7 +97,7 @@ test('Fortran typed input rejects incomplete and nonfinite numeric literals', ()
   assert.equal(fieldLiteral(field('x', 'character'), "O'Brien"), "'O''Brien'");
 });
 test('process and PFT overrides keep file/kind/index identity and reset only their own entry', () => {
-  const d = descriptor('process:init', 'DEF_TRACER%init_conc');
+  const d = descriptor('process:init', 'DEF_SOLUTE%init_conc');
   const overlay = empty();
   overlay.process_files = [
     { relative_path: 'a.nml', sha256: 'a' },
@@ -137,36 +137,33 @@ test('methane research edits update only the process parameter and reset it with
   assert.equal(next.physics.DEF_USE_Dynamic_Wetland, undefined);
   assert.equal(resetProcessOption(next, d, 'CH4.nml').parameters.length, 0);
 });
-test('tracer table applies aligned definitions once and invalid partial input does not mutate the draft', () => {
-  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
+test('tracer table maps family switches and invalid input does not mutate the draft', () => {
+  const fields = tracerKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
   const overlay = empty();
-  const rows = [
-    {
-      NAMES: 'CH4',
-      TYPES: 'reactive',
-      MRAT: '',
-      REF_RATIO: '',
-      INIT_DELTA: '',
-      REACTIVE_DECAY_RATE: '',
-      PARAM_FILES: 'CH4.nml',
-    },
-    {
-      NAMES: 'O18',
-      TYPES: 'isotope',
-      MRAT: '',
-      REF_RATIO: '',
-      INIT_DELTA: '',
-      REACTIVE_DECAY_RATE: '',
-      PARAM_FILES: 'O18.nml',
-    },
-  ];
-  const next = setTracerRows(overlay, fields, rows);
-  assert.equal(next.physics.DEF_TRACER_NUM, '2');
-  assert.equal(next.physics.DEF_TRACER_MRAT, "''");
-  assert.deepEqual(tracerRows(next), rows);
-  assert.throws(() => setTracerRows(overlay, fields, [rows[0], { ...rows[1], MRAT: '1.1' }]));
+  // O18 不是上游支持的物种名（只认 H2_18O / HDO），应先拒绝而不是写进配置。
+  assert.throws(() =>
+    setTracerRows(overlay, fields, [
+      { NAMES: 'CH4', TYPES: 'gas', PARAM_FILES: 'methane.nml' },
+      { NAMES: 'O18', TYPES: 'isotope', PARAM_FILES: 'isotope.nml' },
+    ]),
+  );
   assert.deepEqual(overlay, empty());
-  assert.throws(() => setTracerRows(overlay, fields, [rows[0], { ...rows[1], NAMES: 'CH4' }]));
+  const valid = [
+    { NAMES: 'CH4', TYPES: 'gas', PARAM_FILES: 'methane.nml' },
+    { NAMES: 'HDO', TYPES: 'isotope', PARAM_FILES: 'isotope.nml' },
+  ];
+  const next = setTracerRows(overlay, fields, valid);
+  assert.equal(next.physics.DEF_USE_METHANE, '.true.');
+  assert.equal(next.physics.DEF_METHANE_PARAM_FILE, "'methane.nml'");
+  assert.equal(next.physics.DEF_USE_ISOTOPE, '.true.');
+  assert.equal(next.physics.DEF_ISOTOPE_SPECIES, "'HDO'");
+  assert.equal(next.physics.DEF_ISOTOPE_PARAM_FILE, "'isotope.nml'");
+  const names = (rows: ReturnType<typeof tracerRows>) => rows.map((row) => row.NAMES).sort();
+  assert.deepEqual(names(tracerRows(next)), names(valid));
+  assert.throws(() => setTracerRows(overlay, fields, [valid[0], { ...valid[1], NAMES: 'CH4' }]));
+  assert.deepEqual(overlay, empty());
 });
 test('process arrays retain numeric and character list types, per-element bounds and guarded reset', () => {
   const d = descriptor(
@@ -219,70 +216,59 @@ test('methane legacy mode aliases restore only the research asset parameter', ()
     assert.equal(result.parameters.length, 0);
   }
 });
-test('tracer files resolve keyed and positional mappings and preserve untouched original serialization', () => {
-  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
+test('solute files resolve keyed and positional mappings and serialize one name:path entry per solute', () => {
+  const fields = tracerKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
   const overlay = empty();
   overlay.physics = {
-    DEF_TRACER_NUM: '2',
-    DEF_TRACER_NAMES: "'CH4,O18'",
-    DEF_TRACER_TYPES: "'gas,isotope'",
-    DEF_TRACER_PARAM_FILES: "'O18:oxygen.nml; CH4:methane.nml'",
+    DEF_SOLUTE_NAMES: "'Cl,NO3'",
+    DEF_SOLUTE_PARAM_FILES: "'NO3:no3.nml; Cl:cl.nml'",
   };
   let rows = tracerRows(overlay);
   assert.deepEqual(
     rows.map((row) => row.PARAM_FILES),
-    ['methane.nml', 'oxygen.nml'],
+    ['cl.nml', 'no3.nml'],
   );
   assert.equal(
-    setTracerRows(overlay, fields, rows).physics.DEF_TRACER_PARAM_FILES,
-    overlay.physics.DEF_TRACER_PARAM_FILES,
+    setTracerRows(overlay, fields, rows).physics.DEF_SOLUTE_PARAM_FILES,
+    "'Cl:cl.nml,NO3:no3.nml'",
   );
-  rows[0].PARAM_FILES = 'new-ch4.nml';
+  rows[0].PARAM_FILES = 'new-cl.nml';
   const next = setTracerRows(overlay, fields, rows);
-  assert.equal(next.physics.DEF_TRACER_PARAM_FILES, "'CH4:new-ch4.nml,O18:oxygen.nml'");
-  overlay.physics.DEF_TRACER_PARAM_FILES = "'null; O18:oxygen.nml'";
+  assert.equal(next.physics.DEF_SOLUTE_PARAM_FILES, "'Cl:new-cl.nml,NO3:no3.nml'");
+  assert.equal(next.physics.DEF_SOLUTE_NAMES, "'Cl,NO3'");
+  overlay.physics.DEF_SOLUTE_PARAM_FILES = "'null; no3.nml'";
   rows = tracerRows(overlay);
   assert.deepEqual(
     rows.map((row) => row.PARAM_FILES),
-    ['', 'oxygen.nml'],
+    ['', 'no3.nml'],
   );
-  assert.equal(
-    setTracerRows(overlay, fields, rows).physics.DEF_TRACER_PARAM_FILES,
-    "'null; O18:oxygen.nml'",
-  );
-  overlay.physics.DEF_TRACER_PARAM_FILES = "'C:\\data\\CH4.nml,oxygen.nml'";
+  overlay.physics.DEF_SOLUTE_PARAM_FILES = "'C:\\data\\cl.nml,no3.nml'";
   assert.deepEqual(
     tracerRows(overlay).map((row) => row.PARAM_FILES),
-    ['C:\\data\\CH4.nml', 'oxygen.nml'],
+    ['C:\\data\\cl.nml', 'no3.nml'],
   );
   rows[0].PARAM_FILES = '';
   assert.equal(
-    setTracerRows(overlay, fields, rows).physics.DEF_TRACER_PARAM_FILES,
-    "'CH4:null,O18:oxygen.nml'",
+    setTracerRows(overlay, fields, rows).physics.DEF_SOLUTE_PARAM_FILES,
+    "'Cl:null,NO3:no3.nml'",
   );
 });
-test('tracer numeric metadata accepts Fortran exponents and rejects invalid finite values atomically', () => {
-  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character')),
-    overlay = empty();
-  const row = {
-    NAMES: 'CH4',
-    TYPES: 'gas',
-    MRAT: '',
-    REF_RATIO: '',
-    INIT_DELTA: '',
-    REACTIVE_DECAY_RATE: '',
-    PARAM_FILES: '',
-  };
-  for (const column of ['MRAT', 'REF_RATIO', 'INIT_DELTA', 'REACTIVE_DECAY_RATE']) {
-    for (const bad of ['not-a-number', 'NaN', 'Infinity'])
-      assert.throws(() => setTracerRows(overlay, fields, [{ ...row, [column]: bad }]));
-    assert.equal(
-      setTracerRows(overlay, fields, [{ ...row, [column]: '1d-3' }]).physics[
-        `DEF_TRACER_${column}`
-      ],
-      "'1d-3'",
-    );
-  }
+test('tracer table rejects unsupported types and duplicate names atomically', () => {
+  const fields = tracerKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
+  const overlay = empty();
+  assert.throws(() =>
+    setTracerRows(overlay, fields, [{ NAMES: 'custom', TYPES: 'reactive', PARAM_FILES: '' }]),
+  );
+  assert.throws(() =>
+    setTracerRows(overlay, fields, [
+      { NAMES: 'CH4', TYPES: 'gas', PARAM_FILES: '' },
+      { NAMES: 'CH4', TYPES: 'solute', PARAM_FILES: '' },
+    ]),
+  );
   assert.deepEqual(overlay, empty());
 });
 test('active and inactive methane research assets preserve all case-owned wetland switches', () => {
@@ -329,15 +315,11 @@ test('generic groups exclude indexed catalog scopes while retaining ordinary sca
   assert.equal(groupedField(field('DEF_USE_NITRIF_DENITRIF'), catalog), true);
 });
 
-test('family presets only add missing names/types with built-in files without mutating existing rows or inventing numeric values', () => {
+test('family presets only add missing names/types with built-in files without mutating existing rows', () => {
   const rows = [
     {
       NAMES: 'custom',
-      TYPES: 'custom-type',
-      MRAT: '16',
-      REF_RATIO: '1',
-      INIT_DELTA: '0',
-      REACTIVE_DECAY_RATE: '0',
+      TYPES: 'solute',
       PARAM_FILES: 'own.nml',
     },
   ];
@@ -345,10 +327,10 @@ test('family presets only add missing names/types with built-in files without mu
   assert.equal(result.length, 3);
   assert.deepEqual(result[0], rows[0]);
   assert.deepEqual(
-    result.slice(1).map((r) => [r.NAMES, r.TYPES, r.MRAT, r.PARAM_FILES]),
+    result.slice(1).map((r) => [r.NAMES, r.TYPES, r.PARAM_FILES]),
     [
-      ['H2_18O', 'isotope', '', 'standard_O18_parameter.nml'],
-      ['HDO', 'isotope', '', 'standard_HDO_parameter.nml'],
+      ['H2_18O', 'isotope', 'standard_isotope_parameter.nml'],
+      ['HDO', 'isotope', 'standard_isotope_parameter.nml'],
     ],
   );
   assert.deepEqual(appendTracerFamily(result, 'isotope'), result);
@@ -360,7 +342,9 @@ test('family prerequisites distinguish explicit conflicts from unresolved condit
   const overlay = empty();
   assert.equal(tracerFamilyState(overlay, 'methane', {}).status, 'pending');
   overlay.physics = {
-    DEF_USE_TRACER: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_METHANE: '.true.',
+    DEF_USE_SEDIMENT: '.true.',
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_URBAN_RUN: '.false.',
     DEF_USE_BGC: '.true.',
@@ -405,24 +389,26 @@ test('stomatal choice writes both flags atomically while retaining their scalar 
   assert.throws(() => setStomatalScheme(overlay, fields, 'bogus'));
 });
 
-test('appending a family preserves a custom type already stored by the chosen source', () => {
+test('appending a solute family keeps an existing matching row and writes family fields', () => {
   const overlay = empty();
-  overlay.physics = {
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'custom'",
-    DEF_TRACER_TYPES: "'custom-type'",
-  };
-  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
+  overlay.physics = { DEF_SOLUTE_NAMES: "'Cl'", DEF_SOLUTE_PARAM_FILES: "'Cl:cl.nml'" };
+  const fields = tracerKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
   const rows = appendTracerFamily(tracerRows(overlay), 'chloride');
+  assert.equal(rows.length, 1);
   const result = setTracerRows(overlay, fields, rows);
-  assert.equal(result.physics.DEF_TRACER_TYPES, "'custom-type,solute'");
-  assert.throws(() => setTracerRows(empty(), fields, rows));
+  assert.equal(result.physics.DEF_SOLUTE_NAMES, "'Cl'");
+  assert.equal(result.physics.DEF_SOLUTE_PARAM_FILES, "'Cl:cl.nml'");
+  assert.equal(result.physics.DEF_USE_METHANE, '.false.');
 });
 
 test('methane requires an explicit case scheme and ignores version scheme flags', () => {
   const overlay = empty();
   overlay.physics = {
-    DEF_USE_TRACER: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_METHANE: '.true.',
+    DEF_USE_SEDIMENT: '.true.',
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_URBAN_RUN: '.false.',
     DEF_USE_BGC: '.true.',
@@ -440,10 +426,6 @@ test('a saved METHANE alias prevents a second methane family row', () => {
     {
       NAMES: 'METHANE',
       TYPES: 'gas',
-      MRAT: '16.04',
-      REF_RATIO: '1',
-      INIT_DELTA: '0',
-      REACTIVE_DECAY_RATE: '',
       PARAM_FILES: 'methane.nml',
     },
   ];
@@ -454,10 +436,10 @@ test('case options override stale model switches without promoting defaults or e
   const { caseOptionOverlay, caseOptionPatch } = await import('./configuration-options');
   const original = empty();
   original.physics = { DEF_USE_BGC: '.true.', DEF_TUNING_CSOILC: '2' };
-  const fields = [field('DEF_USE_BGC'), field('DEF_USE_TRACER')];
+  const fields = [field('DEF_USE_BGC'), field('DEF_USE_ISOTOPE')];
   const effective = caseOptionOverlay(original, fields, { DEF_USE_BGC: '.false.' }, [
     {
-      name: 'DEF_USE_TRACER',
+      name: 'DEF_USE_ISOTOPE',
       configured_value: null,
       built_in_default: '.true.',
       mode: 'editable',
@@ -466,7 +448,7 @@ test('case options override stale model switches without promoting defaults or e
     },
   ]);
   assert.equal(effective.physics.DEF_USE_BGC, '.false.');
-  assert.equal(effective.physics.DEF_USE_TRACER, undefined);
+  assert.equal(effective.physics.DEF_USE_ISOTOPE, undefined);
   assert.equal(effective.physics.DEF_TUNING_CSOILC, '2');
   assert.deepEqual(caseOptionPatch(effective, resetModelOption(effective, 'DEF_USE_BGC'), fields), {
     DEF_USE_BGC: null,
@@ -506,38 +488,29 @@ test('case child visibility follows ancestor gates without treating readonly par
   assert.equal(caseFieldVisible('FILE', fields), false, 'cyclic metadata cannot recurse forever');
 });
 
-test('isotope fields require an isotope tracer without changing unrelated fields', () => {
-  const names = [
-    'DEF_TRACER_USE_FRACTIONATION',
-    'DEF_TRACER_KINETIC_SCHEME',
-    'DEF_TRACER_SOIL_INIT_FILE',
-  ];
-  for (const types of [undefined, '', "'gas'", "'solute,particle'"])
-    for (const name of names) assert.equal(tracerFieldVisible(name, types), false);
-  for (const types of ["'isotope'", "'gas,isotope'", '"GAS, ISOTOPE"'])
-    for (const name of names) assert.equal(tracerFieldVisible(name.toLowerCase(), types), true);
-  assert.equal(tracerFieldVisible('DEF_TRACER_NUM'), true);
+test('isotope fields require an isotope family without changing unrelated fields', () => {
+  const names = ['DEF_ISO_USE_FRACTIONATION', 'DEF_ISO_KINETIC_SCHEME', 'DEF_MT_SOIL_INIT_FILE'];
+  for (const isotope of [undefined, false])
+    for (const name of names) assert.equal(tracerFieldVisible(name, isotope), false);
+  for (const name of names) assert.equal(tracerFieldVisible(name.toLowerCase(), true), true);
+  assert.equal(tracerFieldVisible('DEF_SOLUTE_NAMES'), true);
   assert.equal(tracerFieldVisible('UNKNOWN'), true);
   const fields: ConfigurationField[] = [
     {
-      name: 'DEF_TRACER_TYPES',
-      configured_value: "'isotope'",
+      name: 'DEF_USE_ISOTOPE',
+      configured_value: '.true.',
       mode: 'editable',
       pending: true,
       allowed_values: [],
     },
   ];
   assert.equal(caseFieldVisible(names[0], fields), true);
-  assert.equal(caseFieldVisible(names[0], fields, { def_tracer_types: "'gas'" }), false);
+  assert.equal(caseFieldVisible(names[0], fields, { def_use_isotope: '.false.' }), false);
 });
 
 test('fractionation visibility requires current explicit activation without guessing unrelated unknown fields', () => {
-  const parent = 'DEF_TRACER_USE_FRACTIONATION';
-  const children = [
-    'DEF_TRACER_KINETIC_SCHEME',
-    'DEF_TRACER_OPEN_WATER_KINETIC',
-    'DEF_TRACER_SOIL_KINETIC',
-  ];
+  const parent = 'DEF_ISO_USE_FRACTIONATION';
+  const children = ['DEF_ISO_KINETIC_SCHEME', 'DEF_ISO_OPEN_WATER_KINETIC', 'DEF_ISO_SOIL_KINETIC'];
   for (const child of children) {
     const metadata: ConfigurationField[] = [
       {
@@ -552,26 +525,26 @@ test('fractionation visibility requires current explicit activation without gues
     ];
     for (const value of [undefined, '.false.', 'unknown']) {
       const values: Record<string, string> = {
-        DEF_TRACER_TYPES: "'isotope'",
+        DEF_USE_ISOTOPE: '.true.',
         ...(value === undefined ? {} : { [parent]: value }),
       };
       assert.equal(caseFieldVisible(child, [], values), false);
       assert.equal(caseFieldVisible(child, metadata, values), false);
     }
     assert.equal(
-      caseFieldVisible(child, metadata, { DEF_TRACER_TYPES: "'isotope'", [parent]: '.true.' }),
+      caseFieldVisible(child, metadata, { DEF_USE_ISOTOPE: '.true.', [parent]: '.true.' }),
       true,
     );
     metadata[0].parent_gate_enabled = false;
     assert.equal(
-      caseFieldVisible(child, metadata, { DEF_TRACER_TYPES: "'isotope'", [parent]: '.true.' }),
+      caseFieldVisible(child, metadata, { DEF_USE_ISOTOPE: '.true.', [parent]: '.true.' }),
       false,
     );
   }
   assert.equal(caseFieldVisible('UNKNOWN_DATA', [], {}), true);
   assert.equal(
     caseFieldVisible(children[0].toLowerCase(), [], {
-      def_tracer_types: "'isotope'",
+      def_use_isotope: '.true.',
       [parent.toLowerCase()]: '.TRUE.',
     }),
     true,
@@ -587,7 +560,7 @@ test('path placeholders accept actual filenames while scientific enums remain cl
   for (const name of [
     'DEF_UnitCatchment_file',
     'DEF_file_cn_init',
-    'DEF_TRACER_SOIL_INIT_FILE',
+    'DEF_MT_SOIL_INIT_FILE',
     'DEF_dir_forcing',
   ]) {
     const field = { name, kind: 'Character { len: 256 }', values: ['', 'NONE', 'NULL'] };
@@ -601,7 +574,7 @@ test('path placeholders accept actual filenames while scientific enums remain cl
     () =>
       fieldLiteral(
         {
-          name: 'DEF_TRACER_KINETIC_SCHEME',
+          name: 'DEF_ISO_KINETIC_SCHEME',
           kind: 'Character',
           values: ['MERLIVAT1978', 'CAPPA2003'],
         },
@@ -699,7 +672,9 @@ test('VIC controls follow runoff and parameter source even while applicability i
 
 test('tracer family defaults match VG runtime without requiring an unspecified generic kernel', () => {
   const overlay = empty();
-  overlay.physics.DEF_USE_TRACER = '.true.';
+  overlay.physics.DEF_USE_ISOTOPE = '.true.';
+  overlay.physics.DEF_USE_METHANE = '.true.';
+  overlay.physics.DEF_USE_SEDIMENT = '.true.';
   overlay.physics.DEF_USE_VariablySaturatedFlow = '.false.';
   const defaults = {
     def_use_campbell_soil_model: '.false.',
@@ -733,7 +708,9 @@ test('tracer family defaults match VG runtime without requiring an unspecified g
 test('tracer readiness requires actual species and required metadata while preserving external paths', () => {
   const overlay = empty();
   const defaults = {
-    DEF_USE_TRACER: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_METHANE: '.true.',
+    DEF_USE_SEDIMENT: '.true.',
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_URBAN_RUN: '.false.',
     DEF_USE_BGC: '.true.',
@@ -742,50 +719,47 @@ test('tracer readiness requires actual species and required metadata while prese
   const context = { defaults, subgrid: 'PFT', engine: 'rust' };
   assert.equal(tracerSetupIssues(overlay, context).length, 1);
   Object.assign(overlay.physics, {
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'CH4'",
-    DEF_TRACER_TYPES: "'gas'",
-    DEF_TRACER_PARAM_FILES: "'CH4:null'",
+    DEF_USE_METHANE: '.true.',
+    DEF_METHANE_PARAM_FILE: "'null'",
   });
   assert.equal(tracerRows(overlay)[0].PARAM_FILES, '');
   assert.equal(tracerSetupIssues(overlay, context).length, 1);
   for (const path of [
-    'standard_ch4_parameter.nml',
+    'standard_methane_parameter.nml',
     '/server/input/methane.nml',
     'process/frozen.nml',
   ]) {
-    overlay.physics.DEF_TRACER_PARAM_FILES = `'CH4:${path}'`;
+    overlay.physics.DEF_METHANE_PARAM_FILE = `'${path}'`;
     assert.deepEqual(tracerSetupIssues(overlay, context), []);
   }
-  overlay.physics.DEF_TRACER_NAMES = "'OTHER'";
-  assert.equal(tracerSetupIssues(overlay, context).length, 1);
-  assert.deepEqual(tracerSetupIssues(overlay, { ...context, engine: 'fortran' }), []);
-  overlay.physics.DEF_TRACER_NAMES = "'HDO'";
-  overlay.physics.DEF_TRACER_TYPES = "'isotope'";
-  overlay.physics.DEF_TRACER_PARAM_FILES = "'none'";
+  overlay.physics.DEF_USE_METHANE = '.false.';
+  overlay.physics.DEF_USE_ISOTOPE = '.true.';
+  overlay.physics.DEF_ISOTOPE_SPECIES = "'HDO'";
+  overlay.physics.DEF_ISOTOPE_PARAM_FILE = "'none'";
   for (const value of ['0', '-1', 'NaN', 'Infinity', '']) {
-    overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM = value;
+    overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM = value;
     assert.equal(tracerSetupIssues(overlay, context).length, 1);
   }
-  delete overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM;
+  delete overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM;
   assert.deepEqual(
     tracerSetupIssues(overlay, {
       ...context,
-      defaults: { ...defaults, DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1.d2' },
+      defaults: { ...defaults, DEF_MT_AQUIFER_MIXING_WATER_MM: '1.d2' },
     }),
     [],
   );
 });
 
-test('all tracer definitions enforce common prerequisites including custom reactive tracers', () => {
+test('all tracer definitions enforce common prerequisites', () => {
   const overlay = empty();
   Object.assign(overlay.physics, {
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'custom'",
-    DEF_TRACER_TYPES: "'reactive'",
+    DEF_SOLUTE_NAMES: "'Cl'",
+    DEF_SOLUTE_PARAM_FILES: "'Cl:null'",
   });
   const defaults = {
-    DEF_USE_TRACER: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_METHANE: '.true.',
+    DEF_USE_SEDIMENT: '.true.',
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_URBAN_RUN: '.false.',
   };
@@ -810,13 +784,13 @@ test('all tracer definitions enforce common prerequisites including custom react
 test('verified active methane inundation modes require routing without rejecting external parameter references', () => {
   const overlay = empty();
   Object.assign(overlay.physics, {
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'CH4'",
-    DEF_TRACER_TYPES: "'gas'",
-    DEF_TRACER_PARAM_FILES: "'CH4:/server/input/methane.nml'",
+    DEF_USE_METHANE: '.true.',
+    DEF_METHANE_PARAM_FILE: "'/server/input/methane.nml'",
   });
   const defaults = {
-    DEF_USE_TRACER: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_METHANE: '.true.',
+    DEF_USE_SEDIMENT: '.true.',
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_URBAN_RUN: '.false.',
     DEF_USE_BGC: '.true.',
@@ -882,13 +856,13 @@ test('verified active methane inundation modes require routing without rejecting
 
 test('applying methane selection enables BGC atomically without changing dry-run validation or unrelated metadata', () => {
   const fields = [
-    ...tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character')),
+    ...tracerKeys.map((k) => field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character')),
     field('DEF_USE_BGC'),
   ];
   const overlay = empty();
   overlay.physics.DEF_USE_BGC = '.false.';
   overlay.physics.KEEP = 'saved';
-  const d = descriptor('process:init', 'DEF_TRACER%init_conc');
+  const d = descriptor('process:init', 'DEF_SOLUTE%init_conc');
   overlay.process_files = [{ relative_path: 'custom.nml', sha256: 'a' }];
   const saved = setScopedOption(overlay, d, '2.', 0, 'custom.nml');
   const before = structuredClone(saved);
@@ -925,7 +899,9 @@ test('applying methane selection enables BGC atomically without changing dry-run
 });
 
 test('nonmethane selections retain the existing BGC choice', () => {
-  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
+  const fields = tracerKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
   for (const bgc of ['.true.', '.false.']) {
     const overlay = empty();
     overlay.physics.DEF_USE_BGC = bgc;
@@ -934,10 +910,11 @@ test('nonmethane selections retain the existing BGC choice', () => {
         applyTracerSelection(overlay, fields, appendTracerFamily([], family)).physics.DEF_USE_BGC,
         bgc,
       );
-    const reactive = appendTracerFamily([], 'methane').map((row) => ({
+    const solute = appendTracerFamily([], 'methane').map((row) => ({
       ...row,
-      TYPES: 'reactive',
+      NAMES: 'Cl',
+      TYPES: 'solute',
     }));
-    assert.equal(applyTracerSelection(overlay, fields, reactive).physics.DEF_USE_BGC, bgc);
+    assert.equal(applyTracerSelection(overlay, fields, solute).physics.DEF_USE_BGC, bgc);
   }
 });

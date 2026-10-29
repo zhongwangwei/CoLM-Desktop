@@ -586,7 +586,7 @@ fn field(path: &str) -> Result<&'static colm_schema::Field> {
 
 /// Fortran 实数字面量转 `f64`。`_r8` 后缀与 `d` 指数都要处理 ——
 /// `MOD_Namelist.F90` 里两种写法都有。
-fn parse_fortran_real(text: &str) -> Result<f64> {
+pub(crate) fn parse_fortran_real(text: &str) -> Result<f64> {
     let cleaned = text.trim().trim_end_matches("_r8").replace(['d', 'D'], "e");
     cleaned
         .parse()

@@ -1,7 +1,7 @@
-//! 陆面示踪物（`main/TRACER/`）。
+//! 陆面材料运移（`main/MATERIAL/`，上游 7d2fca93 前叫 `main/TRACER/`）。
 //!
-//! 示踪物只记账、不改宿主（第 477 轮解耦之后）：每个过程读宿主本步的水量快照，
-//! 按同样的路径搬运示踪物质量。
+//! 材料只记账、不改宿主（第 477 轮解耦之后）：每个过程读宿主本步的水量快照，
+//! 按同样的路径搬运材料质量。
 
 pub mod conservation;
 pub mod descriptor;
@@ -18,7 +18,7 @@ pub mod step;
 
 pub use descriptor::{
     delta_to_ratio, ReactionMode, StateOwner, TracerDescriptor, TracerFamily, TracerNamelist,
-    TracerParameterOverrides, TracerSet, DESCRIPTOR_IDENTITY_WIDTH, TRC_TINY,
+    TracerParamFiles, TracerParameterOverrides, TracerSet, DESCRIPTOR_IDENTITY_WIDTH, TRC_TINY,
     TRC_WATER_MIN_FOR_RATIO,
 };
 pub use precip::{tracer_precip, PrecipInput};
@@ -27,27 +27,27 @@ pub use state::{
     TracerStep, WaterAccumulators, WaterInventory, MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS,
 };
 
-/// 示踪物物理的全局开关与分馏参数（`DEF_TRACER_USE_FRACTIONATION` 等）。
+/// 材料分馏的全局开关与参数（`&nl_colm_isotope_parameter` 的 `DEF_ISO_*`）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TracerPhysics {
-    /// `DEF_TRACER_USE_FRACTIONATION`。
+    /// `DEF_ISO_USE_FRACTIONATION`。
     pub fractionation: bool,
-    /// `DEF_TRACER_KINETIC_SCHEME`。
+    /// `DEF_ISO_KINETIC_SCHEME`。
     pub kinetic_scheme: frac::KineticScheme,
-    /// `DEF_TRACER_ICE_SUPERSAT_SLOPE`。
+    /// `DEF_ISO_ICE_SUPERSAT_SLOPE`。
     pub ice_supersat_slope: f64,
-    /// `DEF_TRACER_CG_RELHUM_MAX`。
+    /// `DEF_ISO_CG_RELHUM_MAX`。
     pub cg_relhum_max: f64,
-    /// `DEF_TRACER_OPEN_WATER_KINETIC`。
+    /// `DEF_ISO_OPEN_WATER_KINETIC`。
     pub open_water_kinetic: frac::OpenWaterKinetic,
-    /// `DEF_TRACER_NSS_LEAF_WATER_PER_LAI`、`_PATH_LENGTH`、`_RB`。
+    /// `DEF_ISO_NSS_LEAF_WATER_PER_LAI`、`_PATH_LENGTH`、`_RB`。
     pub nss_leaf_water_per_lai: f64,
     pub nss_leaf_path_length: f64,
     pub nss_leaf_rb: f64,
 }
 
 impl Default for TracerPhysics {
-    /// `MOD_Namelist.F90:421-442` 的默认值。
+    /// `MOD_MT_Namelist.F90` 里 `DEF_ISO_*` 的声明默认值。
     fn default() -> Self {
         Self {
             fractionation: false,

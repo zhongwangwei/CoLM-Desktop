@@ -30,7 +30,7 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-   SUBROUTINE stomata (vmax25,effcon,c3c4,slti,hlti,shti, &
+   SUBROUTINE stomata (vmax25,effcon,slti,hlti,shti, &
                        hhti,trda,trdm,trop,g1,g0,gradm,binter,tm, &
                        psrf,po2m,pco2m,pco2a,ea,ei,tlef,par, &
 !Ozone stress variables
@@ -39,7 +39,7 @@ CONTAINS
 !WUE stomata model parameter
                        lambda, &
 !End WUE stomata model parameter
-                       rb,ra,rstfac,cint,assim,respc,rst )
+                       rb,ra,rstfac,cint,assim,respc,rst,c3c4)
 
 !=======================================================================
 !
@@ -101,8 +101,7 @@ CONTAINS
       g0,           &! conductance-photosynthesis intercept for medlyn model
       gradm,        &! conductance-photosynthesis slope parameter
       binter         ! conductance-photosynthesis intercept
-   integer, intent(in) :: &
-      c3c4           ! 1 for c3, 0 for c4
+
    real(r8),intent(in) :: &
       tm,           &! atmospheric air temperature (K)
       psrf,         &! surface atmospheric pressure (pa)
@@ -128,6 +127,9 @@ CONTAINS
 
    real(r8),intent(in), dimension(3) :: &
       cint           ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+      c3c4           ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &! ATTENTION : all for canopy not leaf
       assim,        &! canopy assimilation rate (mol m-2 s-1)
@@ -210,9 +212,15 @@ CONTAINS
          IF (DEF_BALL_BERRY_BINTER >= 0.0_r8) binter_used = DEF_BALL_BERRY_BINTER
       ENDIF
 
-      CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
-                             trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                             vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      IF ( present(c3c4) ) THEN
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4=c3c4)
+      ELSE
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      ENDIF
 
       bintc = binter_used * max( 0.1, rstfac )
       bintc = bintc * cint(3)
@@ -481,9 +489,9 @@ CONTAINS
 
    END SUBROUTINE sortin
 
-   SUBROUTINE calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
+   SUBROUTINE calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
                                trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4)
 
    USE MOD_Precision
    USE MOD_Namelist, only: DEF_USE_LCT, DEF_LC_RESPCP, LC_OVERRIDE_UNSET, LC_OVERRIDE_SLOTS
@@ -508,12 +516,12 @@ CONTAINS
             trda,     &! temperature coefficient in gs-a model             (1.3)
             trdm,     &! temperature coefficient in gs-a model             (328.16)
             psrf       ! surface atmospheric pressure (pa)
-            
-   integer, intent(in) :: &
-            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(in), dimension(3) :: &
             cint       ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &
             vm,       &! maximum catalytic activity of Rubison (mol co2 m-2 s-1)
@@ -542,7 +550,13 @@ CONTAINS
 !-----------------------------------------------------------------------
 
       c3 = 0.
-      IF (c3c4.eq.1) c3 = 1.
+
+      IF ( present(c3c4) ) THEN
+         IF (c3c4 .eq. 1) c3 = 1.
+      ELSE
+         IF (effcon .gt. 0.07) c3 = 1.
+      ENDIF
+
       c4 = 1. - c3
 
 !-----------------------------------------------------------------------
@@ -628,8 +642,8 @@ CONTAINS
    END SUBROUTINE calc_photo_params
 
    SUBROUTINE update_photosyn(tlef, po2m, pco2m, pco2a, par, psrf, rstfac, rb, gsh2o,&
-                             effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, trdm, cint,&
-                             assim, respc)
+                             effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, trdm, cint,&
+                             assim, respc, c3c4)
 
    USE MOD_Precision
    IMPLICIT NONE
@@ -658,11 +672,11 @@ CONTAINS
             trda,     &! temperature coefficient in gs-a model             (1.3)
             trdm       ! temperature coefficient in gs-a model             (328.16)
 
-   integer, intent(in) :: &
-            c3c4       ! 1 for c3, 0 for c4
-
    real(r8),intent(in), dimension(3) :: &
             cint       ! scaling up from leaf to canopy
+
+   integer, intent(in), optional :: &
+            c3c4       ! 1 for c3, 0 for c4
 
    real(r8),intent(out) :: &
             assim,    &! canopy assimilation rate (mol m-2 s-1)
@@ -714,9 +728,15 @@ CONTAINS
       IF (.not. DEF_USE_MEDLYNST .and. .not. DEF_USE_WUEST .and. &
           DEF_BALL_BERRY_GRADM > 1.6_r8) gradm_used = DEF_BALL_BERRY_GRADM
 
-      CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, c3c4, &
-                             trop, slti, hlti, shti, hhti, trda, trdm, cint, &
-                             vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      IF ( present(c3c4) ) THEN
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4, c3c4=c3c4)
+      ELSE
+         CALL calc_photo_params(tlef, po2m, par , psrf, rstfac, rb, effcon, vmax25, &
+                               trop, slti, hlti, shti, hhti, trda, trdm, cint, &
+                               vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
+      ENDIF
 
       co2a = pco2a/psrf
 

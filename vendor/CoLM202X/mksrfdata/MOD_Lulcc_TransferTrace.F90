@@ -91,13 +91,13 @@ CONTAINS
    integer, intent(in) :: lc_year
 
 !-------------------------- Local Variables ----------------------------
-   character(len=256) :: dir_5x5, suffix, lastyr, thisyr, dir_landdata, lndname
+   character(len=256) :: dir_5x5, fname, lastyr, thisyr, dir_landdata, lndname
    character(len=4)   :: c2
-   integer :: i,ipatch,ipxl,numpxl,ilc
+   integer :: i,ipatch,ipxl,ipxstt,ipxend,numpxl,ilc
    integer, allocatable, dimension(:) :: locpxl
    type (block_data_int32_2d)         :: lcdatafr !land cover data of last year
-   integer, allocatable, dimension(:) :: lcdatafr_one(:)
-   real(r8),allocatable, dimension(:) :: area_one(:)
+   integer, allocatable, dimension(:) :: lcdatafr_one(:), lcfrbuff(:)
+   real(r8),allocatable, dimension(:) :: area_one(:)    , areabuff(:)
    real(r8) :: sum_areabuff, gridarea
    integer, allocatable, dimension(:) :: grid_patch_s, grid_patch_e
    logical :: first_call
@@ -127,21 +127,15 @@ CONTAINS
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
 
-      CALL grid_patch%define_by_name ('colm_500m')
-      CALL pixel%assimilate_grid (grid_patch)
-      CALL pixel%map_to_grid (grid_patch)
 
       IF (p_is_io) THEN
+
          CALL allocate_block_data (grid_patch, lcdatafr)
-         dir_5x5 = trim(DEF_dir_rawdata) // '/plant_15s'
-         suffix  = 'MOD'//trim(lastyr)
+         dir_5x5 = trim(DEF_dir_rawdata) // trim(DEF_rawdata%landcover%dir)
+         fname = trim(DEF_rawdata%landcover%fname)
+
          ! read the previous year land cover data
-         ! TODO: Add IF statement for using different LC products
-         ! IF use MODIS data THEN
-         CALL read_5x5_data (dir_5x5, suffix, grid_patch, 'LC', lcdatafr)
-         ! ELSE
-         ! 'LC_GLC' is not recomended for IGBP
-         !CALL read_5x5_data (dir_5x5, suffix, grid_patch, 'LC_GLC', lcdatafr)
+         CALL read_5x5_data (dir_5x5, fname, grid_patch, 'LC', lcdatafr)
 
 #ifdef USEMPI
          CALL aggregation_data_daemon (grid_patch, data_i4_2d_in1 = lcdatafr)
@@ -193,16 +187,24 @@ CONTAINS
                CALL aggregation_request_data (landpatch, ipatch, grid_patch, zip = .true., &
                   area = area_one, data_i4_2d_in1 = lcdatafr, data_i4_2d_out1 = lcdatafr_one)
 
-               ! zip = .true. returns one sample per distinct source cell (areas summed), not
-               ! one per pixel: walk the returned samples themselves. The old copy into
-               ! pixel-sized buffers read past them whenever pixels are finer than the source.
-               sum_areabuff = sum(area_one)
-               DO ipxl = 1, size(area_one)
+               ipxstt = landpatch%ipxstt(ipatch)
+               ipxend = landpatch%ipxend(ipatch)
+
+               IF (allocated(lcfrbuff)) deallocate(lcfrbuff)
+               allocate(lcfrbuff(ipxstt:ipxend))
+               lcfrbuff(:) = lcdatafr_one(:)
+
+               IF (allocated(areabuff)) deallocate(areabuff)
+               allocate(areabuff(ipxstt:ipxend))
+               areabuff(:) = area_one(:)
+
+               sum_areabuff = sum(areabuff)
+               DO ipxl = ipxstt, ipxend
                   ! Transfer trace - the key codes to count for the source land cover types of LULCC
-                  lccpct_patches(ipatch, lcdatafr_one(ipxl)) = lccpct_patches(ipatch, lcdatafr_one(ipxl)) &
-                                                             + area_one(ipxl) / sum_areabuff
-                  lccpct_matrix (ipatch, lcdatafr_one(ipxl)) = lccpct_matrix (ipatch, lcdatafr_one(ipxl)) &
-                                                             + area_one(ipxl)
+                  lccpct_patches(ipatch, lcfrbuff(ipxl)) = lccpct_patches(ipatch, lcfrbuff(ipxl)) &
+                                                         + areabuff(ipxl) / sum_areabuff
+                  lccpct_matrix (ipatch, lcfrbuff(ipxl)) = lccpct_matrix (ipatch, lcfrbuff(ipxl)) &
+                                                         + areabuff(ipxl)
                ENDDO
                gridarea = gridarea + sum_areabuff
                ipatch = ipatch + 1
@@ -236,7 +238,7 @@ CONTAINS
                  '/diag/lccpct_matrix_' // trim(thisyr) // '.nc'
       DO ilc = 0, N_land_classification
          CALL srfdata_map_and_write (lccpct_matrix(:,ilc), landpatch%settyp, typindex, &
-            m_patch2diag, -1.0e36_r8, lndname, 'lccpct_matrix', compress = 0, &
+            m_patch2diag, -1.0e36_r8, lndname, 'lccpct_matrix', compress = 6, &
             write_mode = 'one', defval=0._r8, lastdimname = 'source_patch', lastdimvalue = ilc, &
             create_mode=first_call)
          IF ( first_call ) first_call = .false.

@@ -160,8 +160,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
             continue;
         }
         if stage != "colm"
-            && (p.eq_ignore_ascii_case("DEF_forcing_namelist")
-                || p.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
+            && (p.eq_ignore_ascii_case("DEF_forcing_namelist") || is_material_param_field(&p))
         {
             continue;
         }
@@ -172,10 +171,10 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         {
             continue;
         }
-        if p.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
-            // 与 Fortran 同一套拆法（`,`/`;`、盘符、`null` 占位）；写错了就让指纹带上错误，
-            // 改对之后自然对不上、会重跑。
-            match colm_namelist::tracer_files::param_file_paths(raw) {
+        if is_material_param_field(&p) {
+            // `DEF_SOLUTE_PARAM_FILES` 是列表，其余三个是单路径；与 Fortran 同一套拆法
+            // （`,`/`;`、盘符、`null` 占位）。写错了就让指纹带上错误，改对之后自然对不上、会重跑。
+            match colm_namelist::material::param_file_paths(&doc, &p) {
                 Ok(paths) => {
                     for file in paths {
                         record_file(
@@ -186,10 +185,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
                     }
                 }
                 Err(error) => {
-                    inputs.insert(
-                        "DEF_TRACER_PARAM_FILES (invalid)".into(),
-                        format!("{error:#}"),
-                    );
+                    inputs.insert(format!("{p} (invalid)"), format!("{error:#}"));
                 }
             }
             continue;
@@ -285,6 +281,13 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         files,
         kernel: kernel.to_string(),
     })
+}
+
+/// 四个 family 的参数文件字段（上游 7d2fca93 把 `DEF_TRACER_PARAM_FILES` 拆开）。
+fn is_material_param_field(field: &str) -> bool {
+    colm_namelist::material::PARAM_FILE_FIELDS
+        .iter()
+        .any(|name| field.eq_ignore_ascii_case(name))
 }
 
 fn looks_like_config_path(field: &str) -> bool {
@@ -581,11 +584,12 @@ impl ForcingExclusions {
             effective_doc.insert(&key, value, "forcing")?;
         }
         out.add_document(&effective_doc, &base);
-        if let Some(raw) = doc.get("DEF_TRACER_PARAM_FILES").and_then(string_value) {
-            for (index, name) in colm_namelist::tracer_files::param_file_paths(raw)?
-                .into_iter()
-                .enumerate()
-            {
+        // 强迫的 `fprefix` 写在材料参数文件里（`&nl_colm_mt_forcing`）：四个 family 的文件
+        // 都要看，否则改了同位素/甲烷文件里的前缀指纹不动。
+        let mut index = 0_u32;
+        for field in colm_namelist::material::PARAM_FILE_FIELDS {
+            for name in colm_namelist::material::param_file_paths(doc, field)? {
+                index += 1;
                 let path = resolve(case, &name);
                 if path.is_file() {
                     let tracer = colm_namelist::parse(&std::fs::read_to_string(path)?)?;
@@ -1094,12 +1098,19 @@ pub(crate) fn full_inputs_with_progress(
         ) {
             continue;
         }
-        if lower == "def_tracer_param_files" {
+        if is_material_param_field(&lower) {
             if let Some(raw) = string_value(value) {
-                for (index, path) in colm_namelist::tracer_files::param_file_paths(raw)?
-                    .into_iter()
-                    .enumerate()
-                {
+                let paths = if lower == "def_solute_param_files" {
+                    colm_namelist::tracer_files::param_file_paths(raw)?
+                } else {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                        Vec::new()
+                    } else {
+                        vec![trimmed.to_owned()]
+                    }
+                };
+                for (index, path) in paths.into_iter().enumerate() {
                     add(
                         &mut out,
                         format!("model:tracer:{index}"),
@@ -1613,10 +1624,16 @@ fn simple_site_roots_unused(nml: &Path, doc: &colm_namelist::Document) -> Result
         || logical("DEF_USE_LCT") != Some(true)
         || !matches!(integer("DEF_Runoff_SCHEME"), Some(0 | 2 | 3))
         || !matches!(integer("DEF_Interception_scheme"), Some(1..=7))
-        || ["DEF_USE_PFT", "DEF_USE_PC", "DEF_USE_BGC", "DEF_USE_TRACER",
-            "DEF_URBAN_RUN", "DEF_USE_CROP", "DEF_METHANE", "DEF_USE_OZONESTRESS",
+        || ["DEF_USE_PFT", "DEF_USE_PC", "DEF_USE_BGC", "DEF_USE_ISOTOPE",
+            "DEF_USE_METHANE", "DEF_USE_SEDIMENT",
+            "DEF_URBAN_RUN", "DEF_USE_CROP", "DEF_USE_OZONESTRESS",
             "DEF_USE_OZONEDATA", "DEF_USE_SNICAR", "DEF_USE_LULCC", "DEF_Aerosol_Readin",
             "DEF_USE_IRRIGATION", "DEF_USE_BEDROCK"].iter().any(|key| logical(key) != Some(false))
+        // 溶质没有布尔开关：`DEF_SOLUTE_NAMES` 非空就是材料运移在跑。
+        || doc
+            .get("DEF_SOLUTE_NAMES")
+            .and_then(string_value)
+            .is_some_and(|names| !names.trim().is_empty())
         // SinglePoint undefines GridRiverLakeFlow in define.h. Still fail closed
         // for an explicitly requested routing setting rather than assuming it inert.
         || doc.get("DEF_USE_GridRiverLakeFlow").is_some_and(|value| !matches!(value, Value::Bool(false)))
@@ -2008,10 +2025,10 @@ mod full_identity_tests {
             "DEF_Runoff_SCHEME=1",
             "DEF_Interception_scheme=8",
             "DEF_USE_BGC=.TRUE.",
-            "DEF_USE_TRACER=.TRUE.",
+            "DEF_USE_ISOTOPE=.TRUE.",
             "DEF_URBAN_RUN=.TRUE.",
             "DEF_USE_CROP=.TRUE.",
-            "DEF_METHANE=.TRUE.",
+            "DEF_USE_METHANE=.TRUE.",
             "DEF_USE_OZONESTRESS=.TRUE.",
             "DEF_USE_OZONEDATA=.TRUE.",
             "DEF_USE_SNICAR=.TRUE.",
@@ -2177,7 +2194,7 @@ mod full_identity_tests {
             ("DEF_SUBGRID_SCHEME", "'PC'"),
             ("DEF_USE_BGC", ".true."),
             ("DEF_USE_MEDLYNST", ".true."),
-            ("DEF_USE_TRACER", ".true."),
+            ("DEF_USE_ISOTOPE", ".true."),
             ("DEF_TUNING_CSOILC", "0.008"),
         ] {
             let modified = case.replace("/\n", &format!(" {field}={value}\n/\n"));

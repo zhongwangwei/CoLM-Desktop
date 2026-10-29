@@ -657,6 +657,7 @@ ENDIF
          ! Pass the soil sections (1:): the dummies are (1:nl_soil), and the whole
          ! (lb:nl_soil) arrays would be sequence-associated shifted by |snl| layers.
          CALL SoilSurfaceResistance (nl_soil,forc_rhoair,hksati,porsl,psi0, &
+                            vf_sand, &
                             bsw, &
                             theta_r, alpha_vgm, n_vgm, L_vgm, sc_vgm, fc_vgm, &
                             dz_soisno(1:),t_soisno(1:),wliq_soisno(1:),wice_soisno(1:),fsno,qg,rss)

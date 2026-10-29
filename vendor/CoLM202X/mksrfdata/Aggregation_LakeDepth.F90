@@ -76,7 +76,8 @@ SUBROUTINE Aggregation_LakeDepth ( &
 ! ................................................
 ! global lake coverage and lake depth
 ! ................................................
-      lndname = trim(dir_rawdata)//'/lake_depth.nc'
+      !TODO:
+      lndname = trim(dir_rawdata)//trim(DEF_rawdata%hydro%dir)//'/lake_depth.nc'
 
       IF (p_is_io) THEN
          CALL allocate_block_data (gland, lakedepth)

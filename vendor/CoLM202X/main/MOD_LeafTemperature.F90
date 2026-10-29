@@ -59,9 +59,8 @@ CONTAINS
 !End WUE stomata model parameter
               hpbl       ,&
               qintr_rain ,qintr_snow ,t_precip   ,hprl       ,dheatl     ,smp        ,&
-              hk         ,hksati     ,rootflux                                        &
-             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               &
-             ,ipft_index)
+              hk         ,hksati     ,rootflux   ,ipft_index                          &
+             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               )
 
 !=======================================================================
 ! !DESCRIPTION:
@@ -502,8 +501,12 @@ CONTAINS
 
       ! The wetted fraction uses the rain storage capacity of the active interception
       ! scheme (CoLM2024 under scheme 8, dewmx*(lai+sai) otherwise).
-      CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry, &
-                        colm2024_rain_capacity_for_fwet(ipatch,ivt,ipft_index,dewmx,lai,sai,us,vs,htop))
+      IF (DEF_Interception_scheme == 8) THEN
+         CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry, &
+              colm2024_rain_capacity_for_fwet(ipatch,ivt,dewmx,lai,sai,us,vs,htop,ipft_index))
+      ELSE
+         CALL dewfraction (sigf,lai,sai,dewmx,ldew,ldew_rain,ldew_snow,fwet,fdry)
+      ENDIF
 
       CALL qsadv(tl,psrf,ei,deiDT,qsatl,qsatlDT)
 
@@ -710,7 +713,7 @@ CONTAINS
             rbsha = rb / laisha
 
             ! Sunlit leaves
-            CALL stomata  (vmax25   ,effcon   ,c3c4     ,slti     ,hlti     ,&
+            CALL stomata  (vmax25   ,effcon   ,slti     ,hlti     ,&
                  shti     ,hhti     ,trda     ,trdm     ,trop     ,&
                  g1       ,g0       ,gradm    ,binter   ,thm      ,&
                  psrf     ,po2m     ,pco2m    ,pco2a    ,eah      ,&
@@ -722,10 +725,10 @@ CONTAINS
                  lambda   ,&
             !End WUE stomata model parameter
                  rbsun    ,raw      ,rstfacsun,cintsun  ,&
-                 assimsun ,respcsun ,rssun    )
+                 assimsun ,respcsun ,rssun    ,c3c4=c3c4 )
 
             ! Shaded leaves
-            CALL stomata  (vmax25   ,effcon   ,c3c4     ,slti     ,hlti     ,&
+            CALL stomata  (vmax25   ,effcon   ,slti     ,hlti     ,&
                  shti     ,hhti     ,trda     ,trdm     ,trop     ,&
                  g1       ,g0       ,gradm    ,binter   ,thm      ,&
                  psrf     ,po2m     ,pco2m    ,pco2a    ,eah      ,&
@@ -737,7 +740,7 @@ CONTAINS
                  lambda   ,&
             ! End WUE stomata model parameter
                  rbsha    ,raw      ,rstfacsha,cintsha  ,&
-                 assimsha ,respcsha ,rssha    )
+                 assimsha ,respcsha ,rssha    ,c3c4=c3c4 )
 
             IF (DEF_USE_PLANTHYDRAULICS) THEN
 
@@ -765,12 +768,12 @@ CONTAINS
                gssha = gssha * laisha
 
                CALL update_photosyn(tl, po2m, pco2m, pco2a, parsun, psrf, rstfacsun, rb, gssun, &
-                                    effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, &
-                                    trdm, cintsun, assimsun, respcsun)
+                                    effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, &
+                                    trdm, cintsun, assimsun, respcsun, c3c4=c3c4)
 
                CALL update_photosyn(tl, po2m, pco2m, pco2a, parsha, psrf, rstfacsha, rb, gssha, &
-                                    effcon, vmax25, c3c4, gradm, trop, slti, hlti, shti, hhti, trda, &
-                                    trdm, cintsha, assimsha, respcsha)
+                                    effcon, vmax25, gradm, trop, slti, hlti, shti, hhti, trda, &
+                                    trdm, cintsha, assimsha, respcsha, c3c4=c3c4)
 
                rssun = tprcor/tl * 1.e6 / gssun
                rssha = tprcor/tl * 1.e6 / gssha
@@ -1354,12 +1357,14 @@ ENDIF
       dewmxi = 1.0/dewmx
       ! 06/2018, yuan: remove sigf, to compatible with PFT
       vegt   =  lsai
-      satcap_rain = dewmx * vegt
-      IF (present(satcap_rain_override)) satcap_rain = max(0._r8, satcap_rain_override)
 
       fwet = 0
       IF (ldew > 0.) THEN
-         fwet = (ldew/max(satcap_rain,1.e-10_r8))**.666666666666
+         IF (present(satcap_rain_override)) THEN
+            fwet = (ldew/max(satcap_rain_override,1.e-10_r8))**.666666666666
+         ELSE
+            fwet = ((dewmxi/vegt)*ldew)**.666666666666
+         ENDIF
          ! Check for maximum limit of fwet
          fwet = min(fwet,1.0)
       ENDIF
@@ -1370,7 +1375,11 @@ ENDIF
 
          fwet_rain = 0
          IF(ldew_rain > 0.) THEN
-            fwet_rain = (ldew_rain/max(satcap_rain,1.e-10_r8))**.666666666666
+            IF (present(satcap_rain_override)) THEN
+               fwet_rain = (ldew_rain/max(satcap_rain_override,1.e-10_r8))**.666666666666
+            ELSE
+               fwet_rain = ((dewmxi/vegt)*ldew_rain)**.666666666666
+            ENDIF
             ! Check for maximum limit of fwet_rain
             fwet_rain = min(fwet_rain,1.0)
          ENDIF
@@ -1393,31 +1402,31 @@ ENDIF
    END SUBROUTINE dewfraction
 
 
-   FUNCTION colm2024_rain_capacity_for_fwet(ipatch,ivt,ipft_index,dewmx,lai,sai,forc_us,forc_vs,htop_in) RESULT(satcap)
+   FUNCTION colm2024_rain_capacity_for_fwet(ipatch,ivt,dewmx,lai,sai,forc_us,forc_vs,htop,ipft_index) RESULT(satcap)
+   ! rain storage capacity used by the CoLM2024 interception scheme, so that the
+   ! wetted fraction of the canopy is consistent with the intercepted water
    USE MOD_Precision
    USE MOD_Vars_TimeInvariants, only: patchclass, ncd, ncw, bcw
-   USE MOD_Vars_TimeInvariants, only: ncd_p, ncw_p, bcw_p
+   USE MOD_Vars_PFTimeInvariants, only: ncd_p, ncw_p, bcw_p
    IMPLICIT NONE
    integer,  intent(in) :: ipatch, ivt
+   real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop
    integer,  intent(in), optional :: ipft_index
-   real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop_in
    real(r8)             :: satcap
-   integer              :: ipft
 
       satcap = dewmx * max(0._r8, lai+sai)
-      IF (DEF_Interception_scheme /= 8 .or. lai+sai <= 1.e-6_r8) RETURN
+      IF (lai+sai <= 1.e-6_r8) RETURN
 
       IF ((DEF_USE_PFT .or. DEF_USE_PC)) THEN
-      IF (present(ipft_index)) THEN
-         ipft = ipft_index
-         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs, &
-                                                   htop_in,ncd_p(ipft),ncw_p(ipft),bcw_p(ipft),ivt,.true.)
-         RETURN
+         IF (present(ipft_index)) THEN
+            satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop, &
+                     ncd_p(ipft_index),ncw_p(ipft_index),bcw_p(ipft_index),ivt,.true.)
+            RETURN
+         ENDIF
       ENDIF
-      ENDIF
-         satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs, &
-                                                   htop_in,ncd(ipatch),ncw(ipatch),bcw(ipatch), &
-                                                   patchclass(ipatch),.false.)
+      satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop, &
+               ncd(ipatch),ncw(ipatch),bcw(ipatch),patchclass(ipatch),.false.)
+
    END FUNCTION colm2024_rain_capacity_for_fwet
 
 

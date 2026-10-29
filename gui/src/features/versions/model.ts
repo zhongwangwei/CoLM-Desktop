@@ -198,7 +198,6 @@ export const foundationControls = [
     ['DEF_USE_GridRiverLakeFlow', '河湖汇流', 'River-lake routing'],
     ['DEF_USE_BGC', '生物地球化学（BGC）', 'Biogeochemistry (BGC)'],
     ['DEF_URBAN_RUN', '城市过程', 'Urban processes'],
-    ['DEF_USE_TRACER', '示踪剂过程', 'Tracer processes'],
   ].map(([id, zh, en]) => ({
     id,
     zh,

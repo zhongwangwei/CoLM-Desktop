@@ -444,7 +444,7 @@ export default function ModelSettings({
             disabled={disabled || loading}
             onCaseChange={onCaseChange}
             hasSettings={(id, states) =>
-              id === 'DEF_USE_TRACER' ||
+              id === 'tracer' ||
               fields.some(
                 (field) =>
                   processSettingOwner(field, states) === id &&
@@ -645,8 +645,7 @@ function ProcessSettingsDialog({
 }) {
   const { state } = useApp(),
     t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
-  const initialPatch: CaseOptionPatch =
-    process === 'DEF_USE_TRACER' ? { DEF_USE_TRACER: '.true.' } : {};
+  const initialPatch: CaseOptionPatch = {};
   const [patch, setPatch] = useState<CaseOptionPatch>(initialPatch),
     [saving, setSaving] = useState(false),
     [ready, setReady] = useState(false),
@@ -658,7 +657,7 @@ function ProcessSettingsDialog({
   lockedNow.current = disabled;
   const titles: Record<string, [string, string]> = {
     DEF_USE_BGC: ['BGC 设置', 'BGC settings'],
-    DEF_USE_TRACER: ['选择示踪剂与配置', 'Choose and configure tracers'],
+    tracer: ['选择示踪剂与配置', 'Choose and configure tracers'],
     DEF_USE_GridRiverLakeFlow: ['河湖流与水库设置', 'River and reservoir settings'],
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
@@ -670,7 +669,7 @@ function ProcessSettingsDialog({
   };
   const title = titles[process] ?? ['过程设置', 'Process settings'];
   const saveLabel =
-    process === 'DEF_USE_TRACER'
+    process === 'tracer'
       ? t('保存并启用示踪', 'Save and enable tracers')
       : t('保存设置', 'Save settings');
   useEffect(() => {
@@ -727,7 +726,7 @@ function ProcessSettingsDialog({
       )}
     >
       {error && <Notice tone="error">{error}</Notice>}
-      {process === 'DEF_USE_TRACER' && (
+      {process === 'tracer' && (
         <Notice>
           {t(
             '先选择水同位素、甲烷、氯离子或河道泥沙，并完善相关参数；手工修改定义表后请先应用定义。保存时一起启用示踪，取消不会打开示踪开关或更改已有定义。',

@@ -3,7 +3,7 @@
 //! `history_var_type` 有 482 个开关、343 个默认为真，而 default 预设的一次
 //! 真实运行只写出 117 个。差额不是 bug，是三道闸门：
 //!
-//! 1. **编译期宏** —— `MOD_Hist.F90` 与 TRACER/CH4 history 源里的 `#ifdef`。
+//! 1. **编译期宏** —— `MOD_Hist.F90` 与 MaterialTransport/CH4 history 源里的 `#ifdef`。
 //!    619 个写出点在当前 default 内核下剩 509 个。这道闸门由本 crate 回答，
 //!    输入是内核清单里的 `macros`。
 //! 2. **运行时 `DEF_*` 条件** —— 内联 `.and.` 与外层 `IF (DEF_*) THEN`。509 个里

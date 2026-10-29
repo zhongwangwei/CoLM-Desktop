@@ -18,9 +18,7 @@ MODULE MOD_Grid_RiverLakeHistRoute
 !    the call sites rather than of a list someone has to remember to update.
 !
 !    This lives in its own module rather than in MOD_Grid_RiverLakeHist
-!    because the tracer route-history writers must reach the same dispatch,
-!    and MOD_Grid_RiverLakeHist already depends on the tracer lifecycle.
-!    It also keeps the river-network dependency out of the generic
+!    to keep the river-network dependency out of the generic
 !    MOD_Vector_ReadWrite utility.
 !
 !    Usage per history write:
@@ -39,6 +37,7 @@ MODULE MOD_Grid_RiverLakeHistRoute
    ! Sharded (block-mode) writers live in their own module; the generic
    ! master-gather writers stay in MOD_Vector_ReadWrite.
    USE MOD_Vector_ReadWrite
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_gather_matrix_to_master
    USE MOD_Grid_RiverLakeHistShard
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_ucid, x_ucat, y_ucat, griducat
@@ -496,6 +495,12 @@ CONTAINS
          CALL vector_gather_matrix_to_master (matrix, nrow, ncol_local, ncol_global, &
             global_id, wdata)
          IF (p_is_master) THEN
+            ! The single-file dimensions are defined here, not by the caller: in
+            ! block mode rh_file_one is never created (each I/O group writes its
+            ! own shard with define_bif_shard_dims), so defining them there
+            ! stopped the run with "No such file or directory".
+            CALL ncio_define_dimension (trim(rh_file_one), 'bifurcation_level', nrow)
+            CALL ncio_define_dimension (trim(rh_file_one), 'bifurcation_pathway', ncol_global)
             CALL ncio_write_serial_time (trim(rh_file_one), varname, rh_itime, wdata, &
                'bifurcation_level', 'bifurcation_pathway', 'time', DEF_HIST_CompressLevel)
             IF (rh_itime <= 1) THEN

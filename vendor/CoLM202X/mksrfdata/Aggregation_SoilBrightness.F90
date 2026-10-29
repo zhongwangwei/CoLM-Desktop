@@ -99,7 +99,7 @@ SUBROUTINE Aggregation_SoilBrightness ( &
 ! aggregate the soil parameters from the resolution of raw data to modelling resolution
 ! -------------------------------------------------------------------------------------
 
-      lndname = trim(dir_rawdata)//'/soil_brightness.nc'
+      lndname = trim(dir_rawdata)//trim(DEF_rawdata%soil_albedo%dir)//'/soil_brightness.nc'
 
       IF (p_is_io) THEN
 

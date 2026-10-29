@@ -40,7 +40,11 @@ const base = {
   drafts: [natural, crop, urban].map(siteDraft),
   mode: 'first-year' as const,
   repeat: '3',
-  physics: { DEF_USE_BGC: '.true.', DEF_USE_TRACER: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '120' },
+  physics: {
+    DEF_USE_BGC: '.true.',
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_TUNING_CROP_PLANTING_DAY: '120',
+  },
   cropDefaults: { DEF_TUNING_CROP_PLANTING_DAY: '100', DEF_USE_BGC: '.true.' },
   step: 5 as const,
 };
@@ -59,7 +63,7 @@ test('mixed station plans preserve individual inputs, periods and supported stru
   assert.equal(farm.fields.DEF_USE_BGC, '.true.');
   assert.equal(farm.fields.DEF_USE_LULCC, '.false.');
   assert.equal(city.fields.DEF_USE_BGC, '.false.');
-  assert.equal(city.fields.DEF_USE_TRACER, '.false.');
+  assert.equal(city.fields.DEF_USE_ISOTOPE, '.false.');
   assert.equal(forest.fields.DEF_USE_BGC, '.true.');
   assert.ok(!('DEF_TUNING_CROP_PLANTING_DAY' in forest.fields));
   assert.ok(!('DEF_TUNING_CROP_PLANTING_DAY' in city.fields));

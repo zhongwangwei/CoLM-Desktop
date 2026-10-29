@@ -163,7 +163,13 @@ export function planMultiSites({
     } else {
       delete fields.DEF_TUNING_CROP_PLANTING_DAY;
       if (scanned.urban)
-        Object.assign(fields, { DEF_USE_BGC: '.false.', DEF_USE_TRACER: '.false.' });
+        Object.assign(fields, {
+          DEF_USE_BGC: '.false.',
+          DEF_USE_ISOTOPE: '.false.',
+          DEF_USE_METHANE: '.false.',
+          DEF_USE_SEDIMENT: '.false.',
+          DEF_SOLUTE_NAMES: "''",
+        });
     }
     if (structure !== 'PFT') fields.DEF_USE_IRRIGATION = '.false.';
     Object.assign(

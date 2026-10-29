@@ -161,7 +161,7 @@ fn absolutize_existing_paths(
 ) -> Result<()> {
     let paths = document.paths();
     for field in paths {
-        if field.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES")
+        if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES")
             || field.to_ascii_lowercase().contains("fprefix")
         {
             continue;
@@ -237,13 +237,17 @@ fn copy_process_parameters(
     baseline: &Path,
     destination: &Path,
 ) -> Result<()> {
-    let raw = string_path(document, "DEF_TRACER_PARAM_FILES");
+    let mut raw_by_field = Vec::new();
     let mut sources = BTreeSet::new();
-    if let Some(raw) = &raw {
-        // 与 Fortran 同一套拆法：`,`/`;`、`key:path`、盘符、`null` 占位。
-        for file in colm_namelist::tracer_files::param_file_paths(raw)? {
+    for field in colm_namelist::material::PARAM_FILE_FIELDS {
+        let Some(raw) = string_path(document, field) else {
+            continue;
+        };
+        // 与 Fortran 同一套拆法：`,`/`;`、`key:path`、盘符、`null` 占位；单值字段只有一条。
+        for file in colm_namelist::material::param_file_paths(document, field)? {
             sources.insert(resolve_path(baseline, &file));
         }
+        raw_by_field.push((field, raw));
     }
     for entry in std::fs::read_dir(baseline)? {
         let entry = entry?;
@@ -279,16 +283,24 @@ fn copy_process_parameters(
         std::fs::copy(&source, &target)?;
         copied.insert(source, target);
     }
-    if let Some(raw) = &raw {
-        // 只换路径：键、`null` 占位与条目位置原样保留，否则按位置对应的示踪物会错位。
-        let rewritten = colm_namelist::tracer_files::rewrite_param_files(raw, |file| {
-            let source = colm_kernel::manifest::absolute(&resolve_path(baseline, file))?;
-            let target = copied.get(&source).with_context(|| {
-                format!("process parameter file {} was not copied", source.display())
-            })?;
-            Ok(target.to_string_lossy().into_owned())
+    let map = |file: &str| -> Result<String> {
+        let source = colm_kernel::manifest::absolute(&resolve_path(baseline, file))?;
+        let target = copied.get(&source).with_context(|| {
+            format!("process parameter file {} was not copied", source.display())
         })?;
-        document.set("DEF_TRACER_PARAM_FILES", Value::Str(rewritten))?;
+        Ok(target.to_string_lossy().into_owned())
+    };
+    for (field, raw) in raw_by_field {
+        if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+            // 只换路径：键、`null` 占位与条目位置原样保留，否则按位置对应的溶质会错位。
+            let rewritten = colm_namelist::tracer_files::rewrite_param_files(&raw, map)?;
+            document.set(field, Value::Str(rewritten))?;
+        } else {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null") {
+                document.set(field, Value::Str(map(trimmed)?))?;
+            }
+        }
     }
     Ok(())
 }
@@ -326,7 +338,7 @@ mod tests {
         std::fs::write(baseline.join("site.nc"), b"site").unwrap();
         std::fs::write(baseline.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
         std::fs::write(
-            baseline.join("standard_ch4_parameter.nml"),
+            baseline.join("standard_methane_parameter.nml"),
             "&nl_colm_methane_parameter\n/\n",
         )
         .unwrap();
@@ -335,7 +347,7 @@ mod tests {
             "&nl_colm_unused_parameter\n/\n",
         )
         .unwrap();
-        let original = "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   SITE_fsitedata = 'site.nc'\n   DEF_forcing_namelist = 'forcing.nml'\n   DEF_TRACER_PARAM_FILES = 'methane:standard_ch4_parameter.nml'\n/\n";
+        let original = "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   SITE_fsitedata = 'site.nc'\n   DEF_forcing_namelist = 'forcing.nml'\n/\n&nl_colm_material\n   DEF_USE_METHANE = .true.\n   DEF_METHANE_PARAM_FILE = 'standard_methane_parameter.nml'\n/\n";
         std::fs::write(baseline.join("case.nml"), original).unwrap();
 
         let member = member_case(
@@ -357,10 +369,10 @@ mod tests {
         assert!(text.contains(member.join("out").to_string_lossy().as_ref()));
         assert!(text.contains(baseline.join("site.nc").to_string_lossy().as_ref()));
         assert!(text.contains("DEF_TUNING_ZLND"));
-        assert!(text.contains("methane:"));
+        assert!(text.contains("DEF_METHANE_PARAM_FILE"));
         assert!(!text.contains("unused_parameter.nml"));
         assert!(member.join("forcing.nml").is_file());
-        assert!(member.join("standard_ch4_parameter.nml").is_file());
+        assert!(member.join("standard_methane_parameter.nml").is_file());
         assert!(member.join("unused_parameter.nml").is_file());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -610,7 +622,7 @@ mod tests {
         std::fs::write(baseline.join("b/param.nml"), "&b\n/\n").unwrap();
         std::fs::write(
             baseline.join("case.nml"),
-            "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_forcing_namelist = 'forcing.nml'\n   DEF_TRACER_PARAM_FILES = 'a:a/param.nml,b:b/param.nml'\n/\n",
+            "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_forcing_namelist = 'forcing.nml'\n   DEF_SOLUTE_PARAM_FILES = 'a:a/param.nml,b:b/param.nml'\n/\n",
         )
         .unwrap();
 
@@ -635,14 +647,14 @@ mod tests {
         std::fs::write(
             baseline.join("case.nml"),
             "&nl_colm\n   DEF_CASE_NAME = 'base'\n   DEF_dir_output = 'out'\n   DEF_forcing_namelist = 'forcing.nml'\n   \
-             DEF_TRACER_PARAM_FILES = 'null,ch4_parameter.nml; HDO:o18_parameter.nml'\n/\n",
+             DEF_SOLUTE_PARAM_FILES = 'null,ch4_parameter.nml; HDO:o18_parameter.nml'\n/\n",
         )
         .unwrap();
         member_case(&baseline, &member, "m000001", "AT-Neu", &[]).unwrap();
         let text = std::fs::read_to_string(member.join("case.nml")).unwrap();
         let doc = colm_namelist::parse(&text).unwrap();
-        let Some(Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") else {
-            panic!("DEF_TRACER_PARAM_FILES missing: {text}");
+        let Some(Value::Str(raw)) = doc.get("DEF_SOLUTE_PARAM_FILES") else {
+            panic!("DEF_SOLUTE_PARAM_FILES missing: {text}");
         };
         let entries = colm_namelist::tracer_files::param_file_entries(raw).unwrap();
         assert_eq!(entries.len(), 3, "{raw}");

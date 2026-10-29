@@ -22,6 +22,7 @@ MODULE MOD_Vars_PFTimeInvariants
    real(r8), allocatable :: pftfrac     (:) !PFT fractional cover
    real(r8), allocatable :: htop_p      (:) !canopy top height [m]
    real(r8), allocatable :: hbot_p      (:) !canopy bottom height [m]
+   real(r8), allocatable :: cratio_p    (:) !canopy depth to canopy width
    real(r8), allocatable :: ncd_p       (:)
    real(r8), allocatable :: ncw_p       (:)
    real(r8), allocatable :: bcw_p       (:)
@@ -61,6 +62,9 @@ CONTAINS
             allocate (pftfrac       (numpft))
             allocate (htop_p        (numpft))
             allocate (hbot_p        (numpft))
+            IF (DEF_USE_PC) THEN
+               allocate (cratio_p      (numpft))
+            ENDIF
             allocate (ncd_p         (numpft))
             allocate (ncw_p         (numpft))
             allocate (bcw_p         (numpft))
@@ -92,6 +96,9 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'pftfrac ', landpft, pftfrac ) !
       CALL ncio_read_vector (file_restart, 'htop_p  ', landpft, htop_p  ) !
       CALL ncio_read_vector (file_restart, 'hbot_p  ', landpft, hbot_p  ) !
+      IF (DEF_USE_PC) THEN
+         CALL ncio_read_vector (file_restart, 'cratio_p', landpft, cratio_p) !
+      ENDIF
       IF (DEF_Interception_scheme == 8) THEN
          CALL ncio_read_vector (file_restart, 'ncd_p', landpft, ncd_p)
          CALL ncio_read_vector (file_restart, 'ncw_p', landpft, ncw_p)
@@ -125,6 +132,9 @@ CONTAINS
       CALL ncio_write_vector (file_restart, 'pftfrac ', 'pft', landpft, pftfrac , compress) !
       CALL ncio_write_vector (file_restart, 'htop_p  ', 'pft', landpft, htop_p  , compress) !
       CALL ncio_write_vector (file_restart, 'hbot_p  ', 'pft', landpft, hbot_p  , compress) !
+      IF (DEF_USE_PC) THEN
+         CALL ncio_write_vector (file_restart, 'cratio_p', 'pft', landpft, cratio_p, compress) !
+      ENDIF
       IF (DEF_Interception_scheme == 8) THEN
          CALL ncio_write_vector (file_restart, 'ncd_p', 'pft', landpft, ncd_p, compress)
          CALL ncio_write_vector (file_restart, 'ncw_p', 'pft', landpft, ncw_p, compress)
@@ -151,6 +161,9 @@ CONTAINS
             deallocate (pftfrac )
             deallocate (htop_p  )
             deallocate (hbot_p  )
+            IF (DEF_USE_PC) THEN
+               deallocate (cratio_p)
+            ENDIF
             deallocate (ncd_p)
             deallocate (ncw_p)
             deallocate (bcw_p)
@@ -170,6 +183,9 @@ CONTAINS
       CALL check_vector_data ('pftfrac', pftfrac) !
       CALL check_vector_data ('htop_p ', htop_p ) !
       CALL check_vector_data ('hbot_p ', hbot_p ) !
+      IF (DEF_USE_PC) THEN
+         CALL check_vector_data ('cratio_p', cratio_p) !
+      ENDIF
 #ifdef CROP
       CALL check_vector_data ('cropfrac', cropfrac) !
 #endif
@@ -268,6 +284,7 @@ MODULE MOD_Vars_TimeInvariants
    real(r8), allocatable :: BA_beta      (:,:)  !beta in Balland and Arp(2005) thermal conductivity scheme
    real(r8), allocatable :: htop           (:)  !canopy top height [m]
    real(r8), allocatable :: hbot           (:)  !canopy bottom height [m]
+   real(r8), allocatable :: cratio         (:)  !ratio of canopy depth to width
    real(r8), allocatable :: ncd            (:)
    real(r8), allocatable :: ncw            (:)
    real(r8), allocatable :: bcw            (:)
@@ -399,12 +416,6 @@ ENDIF
             allocate (vic_Ds               (numpatch))
             allocate (vic_Ws               (numpatch))
             allocate (vic_c                (numpatch))
-            ! These are only assigned for some runoff/TOPMODEL schemes but always written to the
-            ! constant restart: start from zero instead of whatever the allocator returned.
-            BVIC = 0._r8
-            fsatmax = 0._r8; fsatdcf = 0._r8; topoweti = 0._r8
-            alp_twi = 0._r8; chi_twi = 0._r8; mu_twi  = 0._r8
-            vic_b_infilt = 0._r8; vic_Dsmax = 0._r8; vic_Ds = 0._r8; vic_Ws = 0._r8; vic_c = 0._r8
 
             allocate (hksati       (nl_soil,numpatch))
             allocate (csol         (nl_soil,numpatch))
@@ -416,6 +427,9 @@ ENDIF
             allocate (BA_beta      (nl_soil,numpatch))
             allocate (htop                 (numpatch))
             allocate (hbot                 (numpatch))
+            IF (DEF_USE_PC) THEN
+               allocate (cratio               (numpatch))
+            ENDIF
             allocate (ncd                  (numpatch))
             allocate (ncw                  (numpatch))
             allocate (bcw                  (numpatch))
@@ -574,6 +588,9 @@ ENDIF
       CALL ncio_read_vector (file_restart, 'BA_beta' ,     nl_soil, landpatch, BA_beta )   ! beta in Balland and Arp(2005) thermal conductivity scheme
       CALL ncio_read_vector (file_restart, 'htop'    ,     landpatch, htop)                !
       CALL ncio_read_vector (file_restart, 'hbot'    ,     landpatch, hbot)                !
+      IF (DEF_USE_PC) THEN
+         CALL ncio_read_vector (file_restart, 'cratio'  ,     landpatch, cratio)              !
+      ENDIF
       IF (DEF_Interception_scheme == 8) THEN
          CALL ncio_read_vector (file_restart, 'ncd', landpatch, ncd)
          CALL ncio_read_vector (file_restart, 'ncw', landpatch, ncw)
@@ -792,8 +809,11 @@ ENDIF
       CALL ncio_write_vector (file_restart, 'BA_alpha ' , 'soil', nl_soil, 'patch', landpatch, BA_alpha  , compress) ! alpha in Balland and Arp(2005) thermal conductivity scheme
       CALL ncio_write_vector (file_restart, 'BA_beta  ' , 'soil', nl_soil, 'patch', landpatch, BA_beta   , compress) ! beta in Balland and Arp(2005) thermal conductivity scheme
 
-      CALL ncio_write_vector (file_restart, 'htop' , 'patch', landpatch, htop)                                       !
-      CALL ncio_write_vector (file_restart, 'hbot' , 'patch', landpatch, hbot)                                       !
+      CALL ncio_write_vector (file_restart, 'htop'  , 'patch', landpatch, htop  )                                    !
+      CALL ncio_write_vector (file_restart, 'hbot'  , 'patch', landpatch, hbot  )                                    !
+      IF (DEF_USE_PC) THEN
+         CALL ncio_write_vector (file_restart, 'cratio', 'patch', landpatch, cratio)                                    !
+      ENDIF
       IF (DEF_Interception_scheme == 8) THEN
          CALL ncio_write_vector (file_restart, 'ncd', 'patch', landpatch, ncd, compress)
          CALL ncio_write_vector (file_restart, 'ncw', 'patch', landpatch, ncw, compress)
@@ -826,7 +846,7 @@ ENDIF
          CALL ncio_write_vector (file_restart, 'cur_patches', 'patch', landpatch, cur_patches)
          CALL ncio_write_vector (file_restart, 'slp_type_patches',  'type_a', num_aspect_type, 'patch', landpatch, slp_type_patches)
          CALL ncio_write_vector (file_restart, 'asp_type_patches',  'type_a', num_aspect_type, 'patch', landpatch, asp_type_patches)
-      ENDIF   
+      ENDIF
 
 
 #ifdef USEMPI
@@ -970,6 +990,9 @@ ENDIF
 
             deallocate (htop           )
             deallocate (hbot           )
+            IF (DEF_USE_PC) THEN
+               deallocate (cratio         )
+            ENDIF
             deallocate (ncd)
             deallocate (ncw)
             deallocate (bcw)
@@ -1097,6 +1120,9 @@ ENDIF
 
       CALL check_vector_data ('htop         [m]     ', htop        )
       CALL check_vector_data ('hbot         [m]     ', hbot        )
+      IF (DEF_USE_PC) THEN
+         CALL check_vector_data ('cratio       [-]     ', cratio      )
+      ENDIF
 
       IF(DEF_USE_BEDROCK)THEN
          CALL check_vector_data ('dbedrock     [m]     ', dbedrock ) !

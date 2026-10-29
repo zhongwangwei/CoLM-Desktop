@@ -372,7 +372,7 @@ test('model setup captures only the dimensions that can invalidate earlier wizar
       DEF_TUNING_CROP_PLANTING_DAY: '120',
       DEF_URBAN_RUN: '.TRUE.',
       DEF_USE_BGC: 'true',
-      DEF_USE_TRACER: '1',
+      DEF_USE_ISOTOPE: '1',
     },
   });
   assert.deepEqual(

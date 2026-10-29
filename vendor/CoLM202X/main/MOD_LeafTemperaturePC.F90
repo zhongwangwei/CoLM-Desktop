@@ -26,6 +26,7 @@ MODULE MOD_LeafTemperaturePC
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT, DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &
                            DEF_RSS_SCHEME, DEF_Interception_scheme, DEF_SPLIT_SOILSNOW, &
                            DEF_VEG_SNOW
+   USE MOD_LeafInterception, only: canopy_storage_capacity_colm2024
    IMPLICIT NONE
    SAVE
 
@@ -68,9 +69,7 @@ CONTAINS
                hpbl, &
                qintr_rain ,qintr_snow ,t_precip   ,hprl       ,&
                dheatl     ,smp        ,hk         ,hksati     ,&
-               rootflux                                            &
-              ,canopy_smelt_mass_p_out, canopy_frzc_mass_p_out, raw_trc_out &
-               )
+               rootflux   ,canopy_smelt_mass_p_out, canopy_frzc_mass_p_out, raw_trc_out )
 
 !=======================================================================
 !
@@ -276,7 +275,6 @@ CONTAINS
         etr,           &! transpiration rate [mm/s]
         hprl,          &! precipitation sensible heat from canopy
         dheatl          ! vegetation heat change [W/m2]
-
    real(r8), intent(inout) :: &
         z0m,           &! effective roughness [m]
         zol,           &! dimensionless height (z/L) used in Monin-Obukhov theory
@@ -328,7 +326,7 @@ CONTAINS
         extkn           ! coefficient of leaf nitrogen allocation
 
    integer, dimension(ps:pe)  :: &
-        c3c4 ! C3/C4 plant type
+        c3c4            ! C3/C4 plant type
 
    real(r8), dimension(ps:pe) :: &
         kmax_sun,      &! Plant Hydraulics Parameters
@@ -528,9 +526,6 @@ CONTAINS
 
 ! only process with vegetated patches
 
-      IF (present(canopy_smelt_mass_p_out)) canopy_smelt_mass_p_out(:) = 0._r8
-      IF (present(canopy_frzc_mass_p_out))  canopy_frzc_mass_p_out(:)  = 0._r8
-
       lsai(:) = lai(:) + sai(:)
       is_vegetated_patch = .false.
 
@@ -542,6 +537,9 @@ CONTAINS
          ENDIF
       ENDDO
 
+      IF (present(canopy_smelt_mass_p_out)) canopy_smelt_mass_p_out(:) = 0._r8
+      IF (present(canopy_frzc_mass_p_out))  canopy_frzc_mass_p_out(:)  = 0._r8
+      IF (present(raw_trc_out)) raw_trc_out = 0._r8
       ! When there is no vegetation in this Plant Community Patch, RETURN
       IF (.not. is_vegetated_patch) THEN
 ! ==== FIX 2026-10-05 #75 BEGIN: the intent(out) outputs were left unassigned on this
@@ -1210,7 +1208,7 @@ CONTAINS
 
 ! note: calculate resistance for sunlit/shaded leaves
 !-----------------------------------------------------------------------
-               CALL stomata ( vmax25(i)    ,effcon(i) ,c3c4(i)   ,slti(i)   ,hlti(i)   ,&
+               CALL stomata ( vmax25(i)    ,effcon(i) ,slti(i)   ,hlti(i)   ,&
                     shti(i)    ,hhti(i)    ,trda(i)   ,trdm(i)   ,trop(i)   ,&
                     g1(i)      ,g0(i)      ,gradm(i)  ,binter(i) ,thm       ,&
                     psrf       ,po2m       ,pco2m     ,pco2a     ,eah       ,&
@@ -1220,9 +1218,9 @@ CONTAINS
 !End ozone stress variables
                     lambda(i),                         &
                     rbsun      ,raw        ,rstfacsun(i),cintsun(:,i),&
-                    assimsun(i),respcsun(i),rssun(i)   )
+                    assimsun(i),respcsun(i),rssun(i)   ,c3c4=c3c4(i))
 
-               CALL stomata ( vmax25(i)    ,effcon(i) ,c3c4(i)   ,slti(i)   ,hlti(i)   ,&
+               CALL stomata ( vmax25(i)    ,effcon(i) ,slti(i)   ,hlti(i)   ,&
                     shti(i)    ,hhti(i)    ,trda(i)   ,trdm(i)   ,trop(i)   ,&
                     g1(i)      ,g0(i)      ,gradm(i)  ,binter(i) ,thm       ,&
                     psrf       ,po2m       ,pco2m     ,pco2a     ,eah       ,&
@@ -1234,7 +1232,7 @@ CONTAINS
                     lambda(i)                                               ,&
 !WUE stomata model parameter
                     rbsha      ,raw        ,rstfacsha(i),cintsha(:,i),&
-                    assimsha(i),respcsha(i),rssha(i)   )
+                    assimsha(i),respcsha(i),rssha(i)   ,c3c4=c3c4(i))
 
                IF (DEF_USE_PLANTHYDRAULICS) THEN
 
@@ -1257,12 +1255,14 @@ CONTAINS
                   gssha(i) = gssha(i) * laisha(i) * 1.e-6
 
                   CALL update_photosyn(tl(i), po2m, pco2m, pco2a, parsun(i), psrf, rstfacsun(i), &
-                     rb(i), gssun(i), effcon(i), vmax25(i), c3c4(i), gradm(i), trop(i), slti(i), hlti(i), &
-                     shti(i), hhti(i), trda(i), trdm(i), cintsun(:,i), assimsun(i), respcsun(i))
+                     rb(i), gssun(i), effcon(i), vmax25(i), gradm(i), trop(i), slti(i), hlti(i), &
+                     shti(i), hhti(i), trda(i), trdm(i), cintsun(:,i), assimsun(i), respcsun(i), &
+                     c3c4=c3c4(i))
 
                   CALL update_photosyn(tl(i), po2m, pco2m, pco2a, parsha(i), psrf, rstfacsha(i), &
-                     rb(i), gssha(i), effcon(i), vmax25(i), c3c4(i), gradm(i), trop(i), slti(i), hlti(i), &
-                     shti(i), hhti(i), trda(i), trdm(i), cintsha(:,i), assimsha(i), respcsha(i))
+                     rb(i), gssha(i), effcon(i), vmax25(i), gradm(i), trop(i), slti(i), hlti(i), &
+                     shti(i), hhti(i), trda(i), trdm(i), cintsha(:,i), assimsha(i), respcsha(i), &
+                     c3c4=c3c4(i))
 
                   ! leaf scale stomata resistance
                   rssun(i) = tprcor / tl(i) / gssun(i)
@@ -2169,6 +2169,8 @@ ENDIF
 
    FUNCTION colm2024_rain_capacity_for_fwet(dewmx,lai,sai,forc_us,forc_vs,htop_in, &
                                             veg_class,is_pft,ncd_eff,ncw_eff,bcw_eff) RESULT(satcap)
+   ! vendor 版本：形参直接接收当前的 ncd/ncw/bcw，不用 PFT 表的 ipft 下标，
+   ! 因为调用点（第 678 行）本来就按 patch 传的是这组有效值。
    USE MOD_Precision
    IMPLICIT NONE
    real(r8), intent(in) :: dewmx, lai, sai, forc_us, forc_vs, htop_in
@@ -2176,13 +2178,15 @@ ENDIF
    logical,  intent(in) :: is_pft
    real(r8), intent(in) :: ncd_eff, ncw_eff, bcw_eff
    real(r8)             :: satcap
+
       satcap = dewmx * max(0._r8, lai+sai)
+      ! 只有 CoLM2024 方案（scheme 8）才用冠层储水容量覆盖默认值；其他方案
+      ! 保持 dewmx*(lai+sai)，与 dewfraction 里的 (dewmxi/vegt) 表达式等价。
       IF (DEF_Interception_scheme == 8 .and. lai+sai > 1.e-6_r8) THEN
          satcap = canopy_storage_capacity_colm2024(dewmx,lai,sai,forc_us,forc_vs,htop_in, &
                                                    ncd_eff,ncw_eff,bcw_eff,veg_class,is_pft)
       ENDIF
+
    END FUNCTION colm2024_rain_capacity_for_fwet
-
-
 
 END MODULE MOD_LeafTemperaturePC

@@ -2,7 +2,7 @@
 
 !-----------------------------------------------------------------------
 !
-!            --- CoLM 3D Building Community Urban Model ---
+!            --- CoLM Urban Building Community Model ---
 !
 !                Sun
 !                 \\\
@@ -32,8 +32,8 @@
 !  The CoLM urban model utilizes comprehensive high-resolution data on
 !  urban cover, geometric structure, vegetation, water bodies, etc.
 !  Furthermore, it has developed a relatively complete simulation of
-!  anthropogenic heat processes, including building energy consumption,
-!  traffic heat, and metabolic heat.
+!  anthropogenic processes, including building energy consumption,
+!  traffic heat, metabolic heat, and urban irrigation.
 !
 !  Created by Hua Yuan, 09/2021
 !
@@ -87,7 +87,7 @@
 
          ! vegetation information
            htop         ,hbot         ,sqrtdi       ,chil         ,&
-           effcon       ,vmax25       ,c3c4         ,slti         ,hlti,&
+           effcon       ,vmax25       ,slti         ,hlti         ,&
            shti         ,hhti         ,trda         ,trdm         ,&
            trop         ,g1           ,g0           ,gradm        ,&
            binter       ,extkn        ,rho          ,tau          ,&
@@ -317,8 +317,6 @@
         smpmin                ,&! restriction for min of soil poten.  (mm)
         trsmx0                ,&! max transpiration for moist soil+100% veg.  [mm/s]
         tcrit                   ! critical temp. to determine rain or snow
-
-   integer,  intent(in) :: c3c4 ! 1 for C3, 0 for C4
 
    real(r8), intent(in) :: hpbl ! atmospheric boundary layer height [m]
 
@@ -880,7 +878,7 @@
 
       ! with vegetation canopy
       CALL LEAF_interception_CoLM2014 (deltim,dewmx,forc_us,forc_vs,chil,sigf,lai,sai,tref,tleaf,&
-                              prc_rain,prc_snow,prl_rain,prl_snow,qflx_irrig_sprinkler,bifall,&
+                              prc_rain,prc_snow,prl_rain,prl_snow,bifall,qflx_irrig_sprinkler,&
                               ldew,ldew_rain,ldew_snow,z0m,forc_hgt_u,pgper_rain,pgper_snow,&
                               qintr,qintr_rain,qintr_snow)
 
@@ -1005,7 +1003,7 @@
          z_wall(:)          ,zi_roofsno(lbr-1:) ,zi_gimpsno(lbi-1:) ,zi_gpersno(lbp-1:) ,&
          zi_lakesno(:)      ,zi_wall(0:)        ,dz_lake(1:)        ,lakedepth          ,&
          dewmx              ,sqrtdi             ,rootfr(:)          ,effcon             ,&
-         vmax25             ,c3c4               ,slti               ,hlti               ,shti,&
+         vmax25             ,slti               ,hlti               ,shti               ,&
          hhti               ,trda               ,trdm               ,trop               ,&
          g1                 ,g0                 ,gradm              ,binter             ,&
          extkn              ,lambda                                                     ,&
@@ -1042,7 +1040,7 @@
          qfros_roof         ,qfros_gimp         ,qfros_gper         ,qfros_lake         ,&
          imeltr(lbr:)       ,imelti(lbi:)       ,imeltp(lbp:)       ,imeltl(:)          ,&
          sm_roof            ,sm_gimp            ,sm_gper            ,sm_lake            ,&
-         sabg               ,rss                ,rstfac             ,rootr(:)           ,etr_deficit        ,&
+         sabg               ,rstfac             ,rootr(:)           ,etr_deficit        ,&
          tref               ,qref               ,trad               ,rst                ,&
          assim              ,respc              ,errore             ,emis               ,&
          z0m                ,zol                ,rib                ,ustar              ,&
@@ -1096,7 +1094,7 @@
          mss_bcpho(lbsn:0)  ,mss_bcphi(lbsn:0)  ,mss_ocpho(lbsn:0)  ,mss_ocphi(lbsn:0)  ,&
          mss_dst1 (lbsn:0)  ,mss_dst2 (lbsn:0)  ,mss_dst3 (lbsn:0)  ,mss_dst4 (lbsn:0)  ,&
 ! END SNICAR model variables
-!  irrigaiton 
+!  irrigaiton
          qflx_irrig_drip    ,qflx_irrig_flood   ,qflx_irrig_paddy                       ,&
 !  end irrigation
          ! output

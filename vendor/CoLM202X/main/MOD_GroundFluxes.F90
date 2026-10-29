@@ -109,6 +109,8 @@ CONTAINS
           fm,        &! integral of profile FUNCTION for momentum
           fh,        &! integral of profile FUNCTION for heat
           fq          ! integral of profile FUNCTION for moisture
+   ! Material transport: aerodynamic resistance for water vapour, used by
+   ! the isotope kinetic fractionation. Output only; nothing here reads it.
    real(r8), intent(out), optional :: raw_out
 
 !-------------------------- Local Variables ----------------------------

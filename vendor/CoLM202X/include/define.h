@@ -86,35 +86,36 @@
 
 ! 12b. If defined, extended canopy interception schemes are enabled.
 
-! 13. Water tracer module (isotope / solute / particle / gas families).
-!     TRACER used to live here as a compile-time macro (the old script
-!     7th argument, TRACERON/TRACEROFF). Every main/TRACER module file is
-!     now always compiled in and the choice is a runtime namelist switch
-!     instead (DEF_USE_TRACER, share/MOD_Namelist.F90, default .false.) --
-!     so that argument slot is gone and this line no longer exists.
+! 13. Material transport (water isotopes, solutes, river sediment, methane).
+!     Upstream names this macro `MaterialTransport` (it used to be `TRACER`,
+!     the old script 7th argument TRACERON/TRACEROFF). Here it is a
+!     **runtime** choice again: every main/MATERIAL/ module is always
+!     compiled in and each family is switched on from the namelist
+!     (DEF_USE_ISOTOPE / DEF_SOLUTE_NAMES / DEF_USE_METHANE, in
+!     main/MATERIAL/MOD_MT_Namelist.F90, all off by default). With every
+!     family off the results are unchanged. No macro is defined here: the
+!     preprocessing guards upstream writes around material-transport code
+!     were expanded away exactly like the old TRACER ones.
 !
-!     TRACER requiring vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.)
-!     used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL);
-!     Campbell/vanGenuchten became a runtime choice first (see above), so that
-!     check already moved to MOD_Namelist.F90 -- it now runs whenever
-!     DEF_USE_TRACER is .true., regardless of which soil scheme is picked.
+!     Upstream's compile-time rules, kept here as documentation because
+!     this build no longer branches on the macro (the runtime checks live
+!     in MOD_MT_Namelist.F90 / MOD_Namelist.F90):
+!       * needs vanGenuchten_Mualem (not Campbell) -- runtime:
+!         DEF_USE_Campbell_SOIL_MODEL must be .false.;
+!       * not supported with CATCHMENT (unit-catchment) grids;
+!       * not supported with URBAN_MODEL;
+!       * turns GridRiverLakeFlow on and CaMa_Flood off.
 !
-!     NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
-!     subsystem has four families (isotope, solute, particle, gas) and only
-!     the river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and
-!     MOD_Tracer_Particle_Sediment.F90 guard themselves with
-!     #ifdef GridRiverLakeFlow, so they simply are not compiled without it.
-!     The other 38 MOD_Tracer_*.F90 modules -- water isotopes, snow tracers,
-!     forcing tracers -- are independent of the river network and are
-!     perfectly meaningful for SinglePoint runs, where water-isotope
-!     observations are common.
+!     NOTE: material transport as a whole does NOT require GridRiverLakeFlow.
+!     It has four families (isotope, solute, particle, gas) and only the
+!     river-lake ones need a river network: MOD_MT_RiverLake.F90 and
+!     MOD_MT_Sediment.F90 guard themselves with #ifdef GridRiverLakeFlow,
+!     so they simply are not compiled without it. The isotope/solute/snow/
+!     forcing modules are independent of the river network and work for
+!     SinglePoint runs, where water-isotope observations are common.
 !
-! 13.1 Methane (one of the four TRACER families: MOD_Tracer_Reactive_Methane*.F90
-!      and MOD_Tracer_Reactive_BgcShim.F90) hard-USEs BGC carbon/nitrogen
-!      pools. BGC is a runtime switch now too (see 7. above), so unlike
-!      before, this is no longer a compile-time gate at all -- main/BGC/ is
-!      always compiled in, so the hard USE always resolves. The runtime
-!      requirement (methane needs DEF_USE_BGC = .true., which itself needs
-!      DEF_USE_PFT or DEF_USE_PC) is enforced by the MOD_Namelist.F90
-!      DEF_USE_BGC-requires-PFT-or-PC check, replacing
-!      the old compile-time #error that used to live here.
+! 13.1 Methane (MOD_MT_Methane*.F90) hard-USEs BGC carbon/nitrogen pools.
+!      BGC is a runtime switch too (see 7. above), so this is not a
+!      compile-time gate: main/BGC/ is always compiled in. The runtime
+!      requirement (DEF_USE_METHANE needs DEF_USE_BGC = .true., which itself
+!      needs DEF_USE_PFT or DEF_USE_PC) is enforced by MOD_Namelist.F90.

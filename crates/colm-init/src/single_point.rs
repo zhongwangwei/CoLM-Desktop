@@ -407,7 +407,7 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
     let subgrid = single_point_subgrid(&document, subgrid_fallback)?;
     let snicar = crate::SnicarInitialization::from_document(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
-    optional_bool_or(&document, "DEF_USE_TRACER", false)?;
+    colm_namelist::material::any_enabled(&document)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     ensure!(
         !bgc || matches!(subgrid, SinglePointSubgrid::Pft | SinglePointSubgrid::Pc),
@@ -2681,7 +2681,7 @@ fn single_point_bgc_state(
 ) -> Result<Option<crate::BgcColdStartState>> {
     let config = run.static_run.static_config();
     let kind = patch_type(config.land_cover, surface.land_class)?;
-    let use_tracer = optional_bool_or(document, "DEF_USE_TRACER", false)?;
+    let use_tracer = colm_namelist::material::any_enabled(document)?;
     let class = pft.map_or(&[][..], |pft| pft.class.as_slice());
     let fraction = pft.map_or(&[][..], |pft| pft.fraction.as_slice());
     Ok(if run.bgc {

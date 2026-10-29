@@ -11,7 +11,6 @@ MODULE MOD_Grid_RiverLakeTimeVars
 !-------------------------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_route_write_restart
    USE MOD_Grid_RiverLakeBifurcation, only: write_bifurcation_restart
    IMPLICIT NONE
 
@@ -31,7 +30,9 @@ MODULE MOD_Grid_RiverLakeTimeVars
    real(r8), allocatable, target :: veloc_riv  (:)
    real(r8), allocatable :: momen_riv  (:) ! unit river momentum       [m^2/s]
    real(r8), allocatable :: volresv    (:) ! reservoir water volume    [m^3]
-   ! previous-substep release of the reservoirs directly upstream [m^3/s]
+   ! release of the reservoirs directly upstream that reached each reservoir in
+   ! the previous routing sub-step [m^3/s]; part of the inflow seen by the
+   ! reservoir operation (see grid_riverlake_flow)
    real(r8), allocatable :: qresv_ups_prev (:)
    real(r8), allocatable :: volwater_ucat (:)
    logical               :: volwater_ucat_valid = .false.
@@ -39,14 +40,13 @@ MODULE MOD_Grid_RiverLakeTimeVars
    real(r8), save       :: acctime_rnof = 0._r8
    real(r8), allocatable :: acc_rnof_uc (:)
 
-   ! -- restart file path (saved for deferred sediment restart read) --
+   ! -- restart file path (saved for the deferred levee, bifurcation and material reads) --
    character(len=512) :: gridriver_restart_file = ''
 
    ! -- running state set aside while LULCC re-initializes (see hold_GridRiverLakeTimeVars_lulcc) --
    real(r8), allocatable :: held_wdsrf_ucat (:), held_wdsrf_ucat_prev (:), held_veloc_riv (:)
-   real(r8), allocatable :: held_momen_riv (:), held_volresv (:), held_qresv_ups_prev (:)
-   real(r8), allocatable :: held_volwater_ucat (:)
-   real(r8), allocatable :: held_acc_rnof_uc (:)
+   real(r8), allocatable :: held_momen_riv (:), held_volresv (:), held_volwater_ucat (:)
+   real(r8), allocatable :: held_acc_rnof_uc (:), held_qresv_ups_prev (:)
    real(r8)              :: held_acctime_rnof
    logical               :: held_flags (7)
    character(len=512)    :: held_restart_file
@@ -89,7 +89,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_REST_CompressLevel
    USE MOD_NetCDFSerial, only: ncio_define_dimension, ncio_write_serial
-   USE MOD_Vector_ReadWrite, only: vector_gather_matrix_to_master
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_gather_matrix_to_master
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_ucid
    IMPLICIT NONE
 
@@ -143,7 +143,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_REST_CompressLevel
    USE MOD_NetCDFSerial, only: ncio_define_dimension, ncio_write_serial
-   USE MOD_Vector_ReadWrite, only: vector_gather_matrix_to_master
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_gather_matrix_to_master
    USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id
    IMPLICIT NONE
 
@@ -255,7 +255,7 @@ CONTAINS
    SUBROUTINE validate_gridriver_ucatch_identity (file_restart, legacy_restart)
 
    USE MOD_SPMD_Task
-   USE MOD_Vector_ReadWrite, only: vector_read_matrix_and_scatter
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_read_matrix_and_scatter
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_ucid
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    IMPLICIT NONE
@@ -313,7 +313,7 @@ CONTAINS
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_Reservoir_Method
    USE MOD_NetCDFSerial, only: ncio_var_exist
-   USE MOD_Vector_ReadWrite, only: vector_read_matrix_and_scatter
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_read_matrix_and_scatter
    USE MOD_Grid_Reservoir, only: numresv, totalnumresv, resv_global_id
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    IMPLICIT NONE
@@ -545,6 +545,7 @@ CONTAINS
       IF (DEF_Reservoir_Method > 0) THEN
          IF (totalnumresv > 0) THEN
             CALL vector_read_and_scatter (file_restart, volresv, numresv, 'volresv', resv_data_address)
+            ! absent in restarts written before it existed: start from no upstream release
             has_var = .false.
             IF (p_is_master) has_var = ncio_var_exist(file_restart, 'qresv_ups_prev', readflag = .false.)
 #ifdef USEMPI
@@ -553,7 +554,7 @@ CONTAINS
             IF (has_var) THEN
                CALL vector_read_and_scatter (file_restart, qresv_ups_prev, numresv, &
                   'qresv_ups_prev', resv_data_address)
-            ELSE
+            ELSEIF (allocated(qresv_ups_prev)) THEN
                qresv_ups_prev = 0._r8
             ENDIF
          ENDIF
@@ -599,9 +600,6 @@ CONTAINS
          DO i = 1, size(volresv)
             IF (.not. ieee_is_finite(volresv(i))) THEN
                invalid_base_count = invalid_base_count + 1
-            ! mkinidata marks reservoirs whose dam has not yet been built
-            ! with spval. Grid_RiverLakeFlow recognizes that marker on the
-            ! build year and initializes its storage then.
             ELSEIF (volresv(i) < 0._r8 .and. volresv(i) /= spval) THEN
                invalid_base_count = invalid_base_count + 1
             ENDIF
@@ -629,8 +627,7 @@ CONTAINS
    SUBROUTINE WRITE_GridRiverLakeTimeVars (file_restart)
 
    USE MOD_SPMD_Task
-   USE MOD_Namelist,              only: DEF_Reservoir_Method, DEF_USE_LEVEE, DEF_USE_BIFURCATION, &
-      DEF_USE_TRACER
+   USE MOD_Namelist,              only: DEF_Reservoir_Method, DEF_USE_LEVEE, DEF_USE_BIFURCATION
    USE MOD_NetCDFSerial
    USE MOD_Vector_ReadWrite
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
@@ -701,7 +698,6 @@ CONTAINS
          CALL write_bifurcation_restart(file_restart)
       ENDIF
 
-      IF (DEF_USE_TRACER) CALL tracer_lifecycle_route_write_restart(file_restart)
 
    END SUBROUTINE WRITE_GridRiverLakeTimeVars
 
@@ -741,9 +737,9 @@ CONTAINS
       CALL move_alloc (veloc_riv      , held_veloc_riv      )
       CALL move_alloc (momen_riv      , held_momen_riv      )
       CALL move_alloc (volresv        , held_volresv        )
-      CALL move_alloc (qresv_ups_prev , held_qresv_ups_prev )
       CALL move_alloc (volwater_ucat  , held_volwater_ucat  )
       CALL move_alloc (acc_rnof_uc    , held_acc_rnof_uc    )
+      CALL move_alloc (qresv_ups_prev , held_qresv_ups_prev )
       held_acctime_rnof = acctime_rnof
       held_flags = (/ wdsrf_ucat_prev_valid, wdsrf_ucat_prev_restart_found, &
          restart_transaction_validated, restart_feature_manifest_present, &
@@ -754,24 +750,32 @@ CONTAINS
 
    SUBROUTINE restore_GridRiverLakeTimeVars_lulcc ()
 
+   USE MOD_SPMD_Task, only: CoLM_stop
    IMPLICIT NONE
+
+      ! The held state is indexed by local unit catchment and reservoir.  That holds
+      ! because the rebuilt network distributes them as before (the distribution
+      ! depends on the river network only, not on the land patches); stop if the
+      ! rebuilt arrays nevertheless differ in size.
+      CALL check_same_size (wdsrf_ucat, held_wdsrf_ucat, 'unit catchments')
+      CALL check_same_size (volresv,    held_volresv,    'reservoirs')
 
       IF (allocated (wdsrf_ucat     )) deallocate (wdsrf_ucat     )
       IF (allocated (wdsrf_ucat_prev)) deallocate (wdsrf_ucat_prev)
       IF (allocated (veloc_riv      )) deallocate (veloc_riv      )
       IF (allocated (momen_riv      )) deallocate (momen_riv      )
       IF (allocated (volresv        )) deallocate (volresv        )
-      IF (allocated (qresv_ups_prev )) deallocate (qresv_ups_prev )
       IF (allocated (volwater_ucat  )) deallocate (volwater_ucat  )
       IF (allocated (acc_rnof_uc    )) deallocate (acc_rnof_uc    )
+      IF (allocated (qresv_ups_prev )) deallocate (qresv_ups_prev )
       CALL move_alloc (held_wdsrf_ucat     , wdsrf_ucat     )
       CALL move_alloc (held_wdsrf_ucat_prev, wdsrf_ucat_prev)
       CALL move_alloc (held_veloc_riv      , veloc_riv      )
       CALL move_alloc (held_momen_riv      , momen_riv      )
       CALL move_alloc (held_volresv        , volresv        )
-      CALL move_alloc (held_qresv_ups_prev , qresv_ups_prev )
       CALL move_alloc (held_volwater_ucat  , volwater_ucat  )
       CALL move_alloc (held_acc_rnof_uc    , acc_rnof_uc    )
+      CALL move_alloc (held_qresv_ups_prev , qresv_ups_prev )
       acctime_rnof                     = held_acctime_rnof
       wdsrf_ucat_prev_valid            = held_flags(1)
       wdsrf_ucat_prev_restart_found    = held_flags(2)
@@ -781,6 +785,18 @@ CONTAINS
       restart_levee_enabled            = held_flags(6)
       volwater_ucat_valid              = held_flags(7)
       gridriver_restart_file           = held_restart_file
+
+
+   CONTAINS
+
+      SUBROUTINE check_same_size (rebuilt, held, what)
+      real(r8), allocatable, intent(in) :: rebuilt(:), held(:)
+      character(len=*), intent(in) :: what
+         IF (allocated(rebuilt) .and. allocated(held)) THEN
+            IF (size(rebuilt) /= size(held)) &
+               CALL CoLM_stop ('LULCC: the rebuilt river network has a different number of ' // what)
+         ENDIF
+      END SUBROUTINE check_same_size
 
    END SUBROUTINE restore_GridRiverLakeTimeVars_lulcc
 

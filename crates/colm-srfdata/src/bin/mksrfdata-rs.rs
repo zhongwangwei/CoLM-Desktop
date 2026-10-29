@@ -7688,10 +7688,10 @@ mod tests {
     fn spatial_case_enables_methane_surface_inputs_only_for_active_ch4() {
         let (root, namelist) = case_namelist(
             "methane",
-            "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_BGC=.true.\n DEF_USE_TRACER=.true.\n DEF_TRACER_NUM=1\n DEF_TRACER_NAMES='CH4'\n DEF_TRACER_TYPES='gas'\n DEF_TRACER_PARAM_FILES='CH4:standard_ch4.nml'\n/\n",
+            "&nl_colm\n DEF_CASE_NAME='case'\n DEF_dir_output='$ROOT/out'\n DEF_dir_rawdata='$ROOT/raw'\n DEF_file_mesh='$ROOT/mesh.nc'\n DEF_USE_LCT=.true.\n DEF_USE_PFT=.false.\n DEF_USE_PC=.false.\n DEF_USE_BGC=.true.\n DEF_USE_METHANE=.true.\n DEF_METHANE_PARAM_FILE='standard_methane.nml'\n/\n",
         );
         std::fs::write(
-            root.join("standard_ch4.nml"),
+            root.join("standard_methane.nml"),
             "&nl_colm_methane_parameter\n DEF_METHANE%allowlakeprod=.true.\n DEF_METHANE%use_spatial_ph=.true.\n/\n",
         )
         .unwrap();

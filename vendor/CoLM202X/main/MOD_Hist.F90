@@ -18,8 +18,14 @@ MODULE MOD_Hist
    USE MOD_Vars_1DAccFluxes
    USE MOD_Vars_Global, only: spval
    USE MOD_NetCDFSerial
-   USE MOD_Tracer_Vars, only: flush_Tracer_Acc
-   USE MOD_Tracer_Hist, only: tracer_hist_out
+#if (defined GridRiverLakeFlow)
+   USE MOD_MT_RiverLake, only: mt_riverlake_snapshot_hist_acc
+   USE MOD_MT_Sediment, only: mt_sediment_snapshot_hist_acc
+#endif
+   USE MOD_MT_Vars, only: flush_Tracer_Acc
+   USE MOD_MT_Hist, only: mt_hist_out
+   USE MOD_MT_HostFixes, only: mt_hist_continue_file
+   USE MOD_MT_Namelist, only: mt_any_enabled
 
    USE MOD_HistGridded
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -54,18 +60,20 @@ CONTAINS
 
    SUBROUTINE hist_init (dir_hist, lulcc_call)
 
-   USE MOD_Namelist, only: DEF_USE_TRACER, DEF_USE_GridRiverLakeFlow
+   USE MOD_Namelist, only: DEF_USE_GridRiverLakeFlow
    IMPLICIT NONE
 
    character(len=*) , intent(in) :: dir_hist
    logical, optional, intent(in) :: lulcc_call
-   logical :: flush_reactive
+   logical :: flush_mt
 
       CALL allocate_acc_fluxes ()
-      flush_reactive = .false.
-      IF (present(lulcc_call)) flush_reactive = lulcc_call
-      CALL FLUSH_acc_fluxes (flush_reactive=flush_reactive)
-      IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
+      ! The material accumulators may hold values read from the material
+      ! restart at start-up; clear them only when called for a LULCC change.
+      flush_mt = .false.
+      IF (present(lulcc_call)) flush_mt = lulcc_call
+      CALL FLUSH_acc_fluxes (flush_mt=flush_mt)
+      CALL flush_Tracer_Acc ()
 
       HistForm = 'Gridded'
 #if (defined UNSTRUCTURED || defined CATCHMENT)
@@ -123,7 +131,7 @@ CONTAINS
 
 
    SUBROUTINE hist_out (idate, deltim, itstamp, etstamp, ptstamp, &
-         dir_hist, casename, restart_date, dir_restart, history_saved_raw)
+         dir_hist, casename)
 
 !=======================================================================
 !  Original version: Yongjiu Dai, September 15, 1999, 03/2014
@@ -148,6 +156,7 @@ CONTAINS
    USE MOD_CaMa_Vars !definition of CaMa variables
 #endif
    USE MOD_Forcing, only: forcmask_pch
+   USE MOD_HistAccRestart, only: hist_acc_final_snapshot
 #ifdef DataAssimilation
    USE MOD_DA_TWS, only: fslp_k_mon
    USE MOD_Vars_Global
@@ -165,19 +174,18 @@ CONTAINS
 
    character(len=*), intent(in) :: dir_hist
    character(len=*), intent(in) :: casename
-   integer, optional, intent(in) :: restart_date(3)
-   character(len=*), optional, intent(in) :: dir_restart
-   logical, optional, intent(out) :: history_saved_raw
 
    ! Local variables
    logical :: lwrite
-   logical :: natural_boundary
    logical :: forcmask_empty(0)
    real(r8) :: history_window_seconds
    character(len=256) :: file_hist
    integer :: itime_in_file
    character(len=256) :: file_hist_tracer
    integer :: itime_in_file_tracer
+#ifdef SinglePoint
+   logical :: site_hist_writeback_saved
+#endif
 #if (defined CaMa_Flood)
    character(len=256) :: file_hist_cama
    integer :: itime_in_file_cama
@@ -223,43 +231,43 @@ CONTAINS
    real(r8), allocatable ::  a_t_brt_fy3d_ens_std (:,:)
 #endif
 
-      IF (present(history_saved_raw)) history_saved_raw = .false.
       IF (itstamp <= ptstamp) THEN
          CALL FLUSH_acc_fluxes ()
-      IF (DEF_USE_TRACER) THEN
          CALL flush_Tracer_Acc ()
-      ENDIF
 #ifdef GridRiverLakeFlow
          IF (DEF_USE_GridRiverLakeFlow) CALL flush_acc_fluxes_riverlake ()
 #endif
-         IF (.not. (itstamp < etstamp)) THEN
-            IF (present(restart_date) .and. present(dir_restart)) THEN
-               CALL write_history_acc_restart(restart_date, casename, dir_restart)
-               IF (present(history_saved_raw)) history_saved_raw = .true.
-            ENDIF
-         ENDIF
          RETURN
       ELSE
          CALL accumulate_fluxes ()
       ENDIF
 
-      natural_boundary = .false.
+      ! History-accumulator restart (MOD_HistAccRestart): at the last time
+      ! step, if the history window is not complete, the partial window is
+      ! written below and the sums are cleared before the model restart is
+      ! saved, so the raw sums are saved here first. Nothing happens at other
+      ! steps; it only writes a file in the restart directory and changes no
+      ! model or history variable.
+      CALL hist_acc_final_snapshot (idate, deltim, itstamp, etstamp)
+#if (defined GridRiverLakeFlow)
+      ! N05: keep the material history rows of this partial terminal window for
+      ! the physical restart written after the output flush (host side does the
+      ! same for its own accumulators).
+      CALL mt_riverlake_snapshot_hist_acc ()
+      CALL mt_sediment_snapshot_hist_acc ()
+#endif
+
       select CASE (trim(adjustl(DEF_HIST_FREQ)))
       CASE ('TIMESTEP')
-         natural_boundary = .true.
          lwrite = .true.
       CASE ('HOURLY')
-         natural_boundary = isendofhour (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofhour (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('DAILY')
-         natural_boundary = isendofday (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofday  (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('MONTHLY')
-         natural_boundary = isendofmonth(idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofmonth(idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE ('YEARLY')
-         natural_boundary = isendofyear (idate, deltim)
-         lwrite = natural_boundary .or. (.not. (itstamp < etstamp))
+         lwrite = isendofyear (idate, deltim) .or. (.not. (itstamp < etstamp))
       CASE default
          lwrite = .false.
          write(*,*) &
@@ -267,13 +275,6 @@ CONTAINS
          write(*,*) &
          '          Set to FALSE by default.                                                     '
       END select
-
-      IF (.not. (itstamp < etstamp) .and. .not.natural_boundary) THEN
-         IF (present(restart_date) .and. present(dir_restart)) THEN
-            CALL write_history_acc_restart(restart_date, casename, dir_restart)
-            IF (present(history_saved_raw)) history_saved_raw = .true.
-         ENDIF
-      ENDIF
 
       IF (lwrite) THEN
 
@@ -317,47 +318,49 @@ CONTAINS
 
          file_hist = trim(dir_hist) // '/' // trim(casename) //'_hist_'//trim(cdate)//'.nc'
 
-      IF (DEF_USE_TRACER) THEN
-         history_window_seconds=0._r8
-         IF (p_is_worker) history_window_seconds=max(nac,0._r8)*deltim
+         ! After a restart inside a history group, append to the existing file
+         ! instead of creating it again (materials enabled only; see
+         ! MOD_MT_HostFixes). Does nothing otherwise.
+         CALL mt_hist_continue_file (file_hist, idate, HistForm, file_last)
+         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
+         ! material history goes to its own file, with the averaging window;
+         ! nothing is written when no material is enabled
+         IF (mt_any_enabled()) THEN
+            history_window_seconds=0._r8
+            IF (p_is_worker) history_window_seconds=max(nac,0._r8)*deltim
 #ifdef USEMPI
-         CALL mpi_allreduce(MPI_IN_PLACE, history_window_seconds, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+            CALL mpi_allreduce(MPI_IN_PLACE, history_window_seconds, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
 #endif
-
-         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
-         IF (HistForm=='Gridded' .and. p_is_master) THEN
-            CALL ncio_write_serial_time (file_hist, 'history_window_seconds', &
-               itime_in_file, history_window_seconds, 'time')
-            CALL ncio_write_serial_time (file_hist, 'history_window_end_minutes', &
-               itime_in_file, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
-               real(mod(idate(3),60),r8)/60._r8, 'time')
-            IF (itime_in_file==1) THEN
-               CALL ncio_put_attr(file_hist, 'history_window_seconds', 'units', 's')
-               CALL ncio_put_attr(file_hist, 'history_window_seconds', 'long_name', &
-                  'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
-               CALL ncio_put_attr(file_hist, 'history_window_end_minutes', 'units', &
-                  'minutes since 1900-1-1 0:0:0')
+            file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_material_'//trim(cdate)//'.nc'
+            CALL mt_hist_continue_file (file_hist_tracer, idate, HistForm, file_last_tracer)
+#ifdef SinglePoint
+            ! The single-site cache belongs to the host stream, not this file.
+            site_hist_writeback_saved = USE_SITE_HistWriteBack
+            USE_SITE_HistWriteBack = .false.
+#endif
+            CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
+#ifdef SinglePoint
+            USE_SITE_HistWriteBack = site_hist_writeback_saved
+#endif
+            ! Written by the master into the single file; in 'block' mode that file
+            ! does not exist (per-block files), and with write-back it is created
+            ! by the write-back process, so the window is not written there.
+            IF (HistForm=='Gridded' .and. p_is_master .and. trim(DEF_HIST_mode)=='one' &
+                .and. .not. DEF_HIST_WriteBack) THEN
+               CALL ncio_write_serial_time (file_hist_tracer, 'history_window_seconds', &
+                  itime_in_file_tracer, history_window_seconds, 'time')
+               CALL ncio_write_serial_time (file_hist_tracer, 'history_window_end_minutes', &
+                  itime_in_file_tracer, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
+                  real(mod(idate(3),60),r8)/60._r8, 'time')
+               IF (itime_in_file_tracer==1) THEN
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'units', 's')
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'long_name', &
+                     'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
+                  CALL ncio_put_attr(file_hist_tracer, 'history_window_end_minutes', 'units', &
+                     'minutes since 1900-1-1 0:0:0')
+               ENDIF
             ENDIF
          ENDIF
-         file_hist_tracer = trim(dir_hist) // '/' // trim(casename) //'_hist_tracer_'//trim(cdate)//'.nc'
-         CALL hist_write_time (file_hist_tracer, file_last_tracer, 'time', idate, itime_in_file_tracer)
-         IF (HistForm=='Gridded' .and. p_is_master) THEN
-            CALL ncio_write_serial_time (file_hist_tracer, 'history_window_seconds', &
-               itime_in_file_tracer, history_window_seconds, 'time')
-            CALL ncio_write_serial_time (file_hist_tracer, 'history_window_end_minutes', &
-               itime_in_file_tracer, real(minutes_since_1900(idate(1), idate(2), idate(3)), r8) + &
-               real(mod(idate(3),60),r8)/60._r8, 'time')
-            IF (itime_in_file_tracer==1) THEN
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'units', 's')
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_seconds', 'long_name', &
-                  'elapsed window ending at history_window_end_minutes; terminal and resumed records can overlap')
-               CALL ncio_put_attr(file_hist_tracer, 'history_window_end_minutes', 'units', &
-                  'minutes since 1900-1-1 0:0:0')
-            ENDIF
-         ENDIF
-      ELSE
-         CALL hist_write_time (file_hist, file_last, 'time', idate, itime_in_file)
-      ENDIF
 
          IF (p_is_worker) THEN
             allocate (filter    (numpatch))
@@ -370,8 +373,6 @@ CONTAINS
             IF (numpatch > 0) THEN
                allocate (filter_crop (numpatch))
                allocate (filter_irrig (numpatch))
-               ! only DEF_USE_IRRIGATION sets it; without irrigation no patch is irrigated
-               filter_irrig(:) = .false.
             ENDIF
 #endif
          ENDIF
@@ -796,9 +797,18 @@ ENDIF
             'fraction of snow cover on ground','-')
 
          ! fraction of saturation area on ground
+         IF (mt_any_enabled()) THEN
+            IF (allocated(nac_frcsat)) THEN
+               WHERE (nac_frcsat <= 0._r8) a_frcsat = spval
+            ENDIF
+            CALL write_history_variable_2d ( DEF_hist_vars%frcsat, &
+               a_frcsat, file_hist, 'f_frcsat', itime_in_file, sumarea, filter, &
+               'fraction of saturation area on ground','-', acc_num=nac_frcsat)
+         ELSE
          CALL write_history_variable_2d ( DEF_hist_vars%frcsat, &
             a_frcsat, file_hist, 'f_frcsat', itime_in_file, sumarea, filter, &
             'fraction of saturation area on ground','-')
+         ENDIF
 
          ! fraction of veg cover, excluding snow-covered veg [-]
          CALL write_history_variable_2d ( DEF_hist_vars%sigf, &
@@ -2031,9 +2041,7 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_irrig (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig, &
@@ -2043,9 +2051,7 @@ IF (DEF_USE_BGC) THEN
             !  total irrigation amounts demand at growing season
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_sum_deficit_irrig (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_deficit_irrig, &
@@ -2060,15 +2066,13 @@ IF (DEF_USE_BGC) THEN
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%sum_irrig_count, &
-               vecacc, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
+               a_sum_irrig_count, file_hist, 'f_sum_irrig_count', itime_in_file, sumarea_irrig, filter_irrig, &
                'total irrigation times at growing season','-')
 
             ! irrigation waterstorage [kg/m2]
             IF (p_is_worker) THEN
                IF (numpatch > 0) THEN
-                  ! running total, not a mean: write the latest value (as the *_inst variables)
                   vecacc (:) = a_waterstorage (:)
-                  WHERE (vecacc /= spval) vecacc = vecacc * nac
                ENDIF
             ENDIF
             CALL write_history_variable_2d ( DEF_hist_vars%waterstorage, &
@@ -3341,8 +3345,7 @@ IF (DEF_USE_BGC) THEN
                IF (numpatch > 0) THEN
                   DO i=1,numpatch
                      IF(patchclass(i) == 12)THEN
-                        ! 17 rainfed / 18 irrigated temperate corn, like the other crops' pairs
-                        IF(pftclass(patch_pft_s(i)).eq.17 .or. pftclass(patch_pft_s(i)).eq.18)THEN
+                        IF(pftclass(patch_pft_s(i)) .eq. 17)THEN
                            filter(i) = .true.
                         ELSE
                            filter(i) = .false.
@@ -5005,7 +5008,7 @@ ENDIF
             'water storage in aquifer','mm')
 
          ! instantaneous water storage in aquifer [mm]
-         IF (p_is_worker .AND. numpatch > 0) THEN
+         IF (p_is_worker) THEN
             vecacc = wa
             WHERE(vecacc /= spval) vecacc = vecacc * nac
          ENDIF
@@ -5019,7 +5022,7 @@ ENDIF
             'depth of surface water','mm')
 
          ! instantaneous depth of surface water [mm]
-         IF (p_is_worker .AND. numpatch > 0) THEN
+         IF (p_is_worker) THEN
             vecacc = wdsrf
             WHERE(vecacc /= spval) vecacc = vecacc * nac
          ENDIF
@@ -5288,8 +5291,10 @@ ENDIF
             itime_in_file, trim(file_hist)/=trim(file_last))
 
          IF (p_is_worker) THEN
-            allocate (nac_one (numpatch))
-            nac_one = 1.
+            IF (numpatch > 0) THEN
+               allocate (nac_one (numpatch))
+               nac_one = 1.
+            ENDIF
          ENDIF
 
          IF (HistForm == 'Gridded') THEN
@@ -5328,16 +5333,15 @@ ENDIF
          IF (allocated(nac_one   )) deallocate (nac_one   )
          ENDIF
 #endif
-
-      IF (DEF_USE_TRACER) THEN
-         IF (allocated(forcmask_pch)) THEN
-            CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
-               sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
-         ELSE
-            CALL tracer_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
-               sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_empty)
+         IF (mt_any_enabled()) THEN
+            IF (allocated(forcmask_pch)) THEN
+               CALL mt_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
+                  sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_pch)
+            ELSE
+               CALL mt_hist_out (file_hist_tracer, itime_in_file_tracer, HistForm, &
+                  sumarea, filter, maxsnl, nl_soil, DEF_forcing%has_missing_value, forcmask_empty)
+            ENDIF
          ENDIF
-      ENDIF
 
          IF (allocated(filter    )) deallocate (filter    )
          IF (allocated(filter_dt )) deallocate (filter_dt )
@@ -5346,7 +5350,7 @@ IF (DEF_URBAN_RUN) THEN
 ENDIF
 
          CALL FLUSH_acc_fluxes ()
-         IF (DEF_USE_TRACER) CALL flush_Tracer_Acc ()
+         CALL flush_Tracer_Acc ()
 
 #ifdef SinglePoint
          IF (USE_SITE_HistWriteBack .and. memory_to_disk) THEN
@@ -5355,7 +5359,7 @@ ENDIF
 #endif
 
          file_last = file_hist
-         IF (DEF_USE_TRACER) file_last_tracer = file_hist_tracer
+         file_last_tracer = file_hist_tracer
 
       ENDIF
 
@@ -5434,7 +5438,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, longname, units, filter=filter)
 #endif
       END select
 
@@ -5443,7 +5447,9 @@ ENDIF
 
    SUBROUTINE write_history_variable_urb_2d ( is_hist, &
          acc_vec, file_hist, varname, itime_in_file, sumarea, filter, &
-         longname, units)
+         longname, units, acc_num)
+
+   USE MOD_Vars_1DAccFluxes, only: nac
 
    IMPLICIT NONE
 
@@ -5458,8 +5464,25 @@ ENDIF
 
    type(block_data_real8_2d), intent(in) :: sumarea
    logical, intent(in) :: filter(:)
+   real(r8), intent(in), optional  :: acc_num(:)
 
       IF (.not. is_hist) RETURN
+
+#ifndef SinglePoint
+      IF ( .not. present(acc_num) ) THEN
+         IF (p_is_worker) &
+            WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
+      ELSE
+         IF (p_is_worker)  &
+            WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
+      ENDIF
+#else
+      IF ( .not. present(acc_num) ) THEN
+         WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
+      ELSE
+         WHERE (acc_vec/=spval .and. acc_num>0) acc_vec = acc_vec / acc_num
+      ENDIF
+#endif
 
       select CASE (HistForm)
       CASE ('Gridded')
@@ -5468,14 +5491,13 @@ ENDIF
 #if (defined UNSTRUCTURED || defined CATCHMENT)
       CASE ('Vector')
          !TODO: currently, it is not applicable to urban variables
-         CALL aggregate_to_vector_and_write_2d ( &
+         CALL aggregate_to_vector_and_write_urb_2d ( &
             acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
 #endif
 #ifdef SinglePoint
       CASE ('Single')
-         WHERE (acc_vec /= spval) acc_vec = acc_vec / nac
          CALL single_write_2d ( &
-            acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
+            acc_vec, file_hist, varname, itime_in_file, longname, units, filter=filter)
 #endif
       END select
 
@@ -5522,7 +5544,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_3d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, filter, longname, units)
+            dim1name, ndim1, longname, units, filter=filter)
 #endif
       END select
 
@@ -5603,7 +5625,7 @@ ENDIF
 #ifdef SinglePoint
       CASE ('Single')
          CALL single_write_4d (acc_vec, file_hist, varname, itime_in_file, &
-            dim1name, ndim1, dim2name, ndim2, filter, longname, units)
+            dim1name, ndim1, dim2name, ndim2, longname, units, filter=filter)
 #endif
       END select
 

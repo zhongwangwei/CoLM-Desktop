@@ -415,6 +415,16 @@ CONTAINS
             qout = (vol/volresv_normal(irsv))**0.5 * qresv_normal(irsv)
          ENDIF
 
+      CASE (2)
+         ! *** Reserved: Hanazaki et al. (2022) ***
+         ! [2] Risa Hanazaki, Dai Yamazaki, Kei Yoshimura.
+         ! Development of a Reservoir Flood Control Scheme for Global Flood Models.
+         ! Journal of Advances in Modeling Earth Systems, 2022.
+         ! Not implemented yet; reservoir_init stops before this is reached.
+         ! It needs its own parameters (flood control and conservative storage,
+         ! normal and flood discharge) read in reservoir_init.
+         CALL CoLM_stop ('reservoir operation method 2 (Hanazaki et al. 2022) is not implemented yet')
+
       CASE DEFAULT
          CALL CoLM_stop ('unsupported reservoir operation method')
       END SELECT

@@ -8,15 +8,16 @@ fn catalog_counts_match_current_sources() {
     // `DEF_HIST_grid_as_model_mesh` + 河湖汇流运行时开关 `DEF_USE_GridRiverLakeFlow`
     // + 按地类的气孔五张表 `DEF_LC_GRADM/BINTER/G1/G0/LAMBDA`（地类参数个数不变：原来那五个
     // 整算例标量挪回全局参数）。
-    assert_eq!(colm_schema::all().len(), 840 + 104 + 1 + 1 + 5);
-    assert_eq!(
-        parameters::schema_descriptors().len(),
-        884 + 104 + 1 + 1 + 5
-    );
+    // 上游 7d2fca93（MaterialTransport 改名 + rawdata）后总数 951 -> 964。
+    assert_eq!(colm_schema::all().len(), 964);
+    assert_eq!(parameters::schema_descriptors().len(), 1008);
     assert_eq!(parameters::land_cover_descriptors().len(), 88);
     assert_eq!(parameters::pft_descriptors().len(), 87);
     assert_eq!(parameters::pc_pft_descriptors().len(), 87);
-    assert_eq!(parameters::process_descriptors().len(), 170);
+    // 上游 7d2fca93 把通用 tracer_parameter_type 换成按 species 的
+    // solute_parameter_type（9 项）加 MOD_MT_Namelist 的 18 个 DEF_ISO_* 模块变量，
+    // 过程参数从 170 涨到 187。
+    assert_eq!(parameters::process_descriptors().len(), 187);
 }
 
 #[test]

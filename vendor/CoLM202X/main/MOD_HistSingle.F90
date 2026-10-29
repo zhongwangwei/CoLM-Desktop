@@ -54,8 +54,6 @@ CONTAINS
             secs_group = 31*24*3600
          ELSEIF ( trim(DEF_HIST_groupby) == 'DAY' ) THEN
             secs_group = 24*3600
-         ELSE
-            secs_group = 366*24*3600
          ENDIF
 
          select CASE (trim(adjustl(DEF_HIST_FREQ)))
@@ -170,11 +168,7 @@ CONTAINS
             minutes = minutes - 262800
          END select
 
-         IF (itime_mem == 0) THEN
-            itime_mem = 1
-         ELSEIF (time_memory(itime_mem) /= minutes) THEN
-            itime_mem = itime_mem + 1
-         ENDIF
+         itime_mem = itime_mem + 1
          time_memory(itime_mem) = minutes
 
          IF (memory_to_disk) THEN
@@ -194,7 +188,7 @@ CONTAINS
 
    ! -- write 2D data --
    SUBROUTINE single_write_2d ( &
-         acc_vec, file_hist, varname, itime_in_file, filter, longname, units)
+         acc_vec, file_hist, varname, itime_in_file, longname, units, filter)
 
       USE MOD_Vars_Global,      only: spval
       IMPLICIT NONE
@@ -203,11 +197,16 @@ CONTAINS
       character(len=*), intent(in)    :: file_hist
       character(len=*), intent(in)    :: varname
       integer,          intent(in)    :: itime_in_file
-      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+      ! 上游 7d2fca93 把 filter 从形参表里去掉了（MATERIAL 侧按位置调用）。
+      ! 这里保留成尾部可选参数：vendor 自己的 history 路径仍靠它把无效格点
+      ! 置成 spval，物运移那条路不传就跳过这一步。
+      logical,          intent(in), optional :: filter(:)
 
-      WHERE (.not. filter) acc_vec = spval
+      IF (present(filter)) THEN
+         WHERE (.not. filter) acc_vec = spval
+      ENDIF
 
       IF (USE_SITE_HistWriteBack) THEN
 
@@ -252,7 +251,7 @@ CONTAINS
 
    ! -- write 3D data --
    SUBROUTINE single_write_3d ( &
-         acc_vec, file_hist, varname, itime_in_file, dim1name, ndim1, filter, longname, units)
+         acc_vec, file_hist, varname, itime_in_file, dim1name, ndim1, longname, units, filter)
 
       USE MOD_Vars_1DAccFluxes, only: nac
       USE MOD_Vars_Global,      only: spval
@@ -264,15 +263,18 @@ CONTAINS
       integer,          intent(in)    :: itime_in_file
       character(len=*), intent(in)    :: dim1name
       integer,          intent(in)    :: ndim1
-      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+      ! 见 single_write_2d：filter 是 vendor 保留的尾部可选参数。
+      logical,          intent(in), optional :: filter(:)
 
       integer :: i1
 
-      DO i1 = 1, size(acc_vec, 1)
-         WHERE (.not. filter) acc_vec(i1,:) = spval
-      ENDDO
+      IF (present(filter)) THEN
+         DO i1 = 1, size(acc_vec, 1)
+            WHERE (.not. filter) acc_vec(i1,:) = spval
+         ENDDO
+      ENDIF
 
       WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
 
@@ -322,7 +324,7 @@ CONTAINS
    ! -- write 4D data --
    SUBROUTINE single_write_4d ( &
          acc_vec, file_hist, varname, itime_in_file, &
-         dim1name, ndim1, dim2name, ndim2, filter, longname, units)
+         dim1name, ndim1, dim2name, ndim2, longname, units, filter)
 
       USE MOD_Vars_Global,      only: spval
       IMPLICIT NONE
@@ -335,17 +337,20 @@ CONTAINS
       integer,          intent(in)    :: ndim1
       character(len=*), intent(in)    :: dim2name
       integer,          intent(in)    :: ndim2
-      logical,          intent(in)    :: filter(:)
       character(len=*), intent(in)    :: longname
       character(len=*), intent(in)    :: units
+      ! 见 single_write_2d：filter 是 vendor 保留的尾部可选参数。
+      logical,          intent(in), optional :: filter(:)
 
       integer :: i1, i2
 
-      DO i1 = 1, size(acc_vec, 1)
-         DO i2 = 1, size(acc_vec, 2)
-            WHERE (.not. filter) acc_vec(i1,i2,:) = spval
+      IF (present(filter)) THEN
+         DO i1 = 1, size(acc_vec, 1)
+            DO i2 = 1, size(acc_vec, 2)
+               WHERE (.not. filter) acc_vec(i1,i2,:) = spval
+            ENDDO
          ENDDO
-      ENDDO
+      ENDIF
 
       IF (USE_SITE_HistWriteBack) THEN
 

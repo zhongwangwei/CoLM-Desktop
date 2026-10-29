@@ -209,7 +209,10 @@ fn process_assets_are_copied_frozen_and_tamper_detected() {
     let reg = tmp.registry();
     let case = tmp.case();
     let mut text = fs::read_to_string(case.join("case.nml")).unwrap();
-    text = text.replace("/\n", " DEF_TRACER_PARAM_FILES = 'CH4:process.nml'\n/\n");
+    text = text.replace(
+        "/\n",
+        "/\n&nl_colm_material\n DEF_USE_METHANE = .true.\n DEF_METHANE_PARAM_FILE = 'process.nml'\n/\n",
+    );
     fs::write(case.join("case.nml"), text).unwrap();
     fs::write(case.join("process.nml"), "&nl_colm_methane_parameter\n/\n").unwrap();
     let binding = reg.migrate_case(&case, code()).unwrap();
@@ -306,6 +309,10 @@ fn coefficients_are_frozen_but_all_scheme_controls_are_case_owned() {
         "DEF_LC_VMAX25",
         "DEF_PFT_VMAX25(1)",
         "DEF_GridRiverLake_FloodInfiltMax",
+        "DEF_ISO_REF_RATIO_H2_18O",
+        "DEF_ISO_INIT_DELTA_HDO",
+        "DEF_MT_AQUIFER_MIXING_WATER_MM",
+        "DEF_MT_N2O_EF5_NH4",
     ] {
         assert!(is_model_field(key), "{key}");
     }
@@ -324,13 +331,19 @@ fn coefficients_are_frozen_but_all_scheme_controls_are_case_owned() {
         "DEF_USE_VariablySaturatedFlow",
         "DEF_USE_BGC",
         "DEF_URBAN_RUN",
-        "DEF_USE_TRACER",
+        "DEF_USE_ISOTOPE",
+        "DEF_USE_METHANE",
+        "DEF_USE_SEDIMENT",
         "DEF_USE_GridRiverLakeFlow",
         "DEF_USE_LULCC",
         "DEF_TUNING_CROP_PLANTING_DAY",
-        "DEF_TRACER_NAMES",
-        "DEF_TRACER_MRAT",
-        "DEF_TRACER_PARAM_FILES",
+        "DEF_ISOTOPE_SPECIES",
+        "DEF_SOLUTE_NAMES",
+        "DEF_SOLUTE_PARAM_FILES",
+        "DEF_ISOTOPE_PARAM_FILE",
+        "DEF_METHANE_PARAM_FILE",
+        "DEF_SEDIMENT_PARAM_FILE",
+        "DEF_MT_BALANCE_ABORT_NBAD",
         "DEF_SOLO_PFT",
         "DEF_FAST_PC",
         "DEF_PC_CROP_SPLIT",
@@ -514,45 +527,60 @@ fn expected_old_value_rejects_stale_parameter_edits() {
 }
 
 #[test]
-fn tracer_definition_columns_are_not_writable_model_parameters() {
+fn tracer_species_and_file_columns_are_case_owned_while_physics_is_a_model_field() {
+    // 名字/物种/文件是算例选择（Character），不能作为模型参数写。
     for key in [
-        "DEF_TRACER_MRAT",
-        "DEF_TRACER_REF_RATIO",
-        "DEF_TRACER_INIT_DELTA",
-        "DEF_TRACER_REACTIVE_DECAY_RATE",
+        "DEF_ISOTOPE_SPECIES",
+        "DEF_SOLUTE_NAMES",
+        "DEF_ISOTOPE_PARAM_FILE",
+        "DEF_SOLUTE_PARAM_FILES",
+        "DEF_METHANE_PARAM_FILE",
+        "DEF_SEDIMENT_PARAM_FILE",
+        "DEF_USE_ISOTOPE",
+        "DEF_USE_METHANE",
     ] {
-        for raw in ["''", "'1d-3, -2.5, 18'"] {
-            let mut overlay = Overlay::default();
-            overlay.physics.insert(key.into(), raw.into());
-            assert!(validate_overlay(&overlay).is_err());
-        }
-        for raw in ["'abc'", "'NaN'", "'Infinity'", "'18,abc'", "'1,,2'"] {
-            let mut overlay = Overlay::default();
-            overlay.physics.insert(key.into(), raw.into());
-            assert!(validate_overlay(&overlay).is_err(), "{key} = {raw}");
-            overlay.physics.clear();
-            overlay.parameters.push(ParameterOverrideRecord {
-                parameter_id: colm_case::parameters::find(key).unwrap().id.clone(),
-                raw_key: key.to_ascii_lowercase(),
-                scope_instance: ParameterScopeInstance {
-                    kind: "case-scalar".into(),
-                    scheme: None,
-                    index: None,
-                    type_name: None,
-                    process_file: None,
-                },
-                value: raw.into(),
-                expected_old_value: None,
-                unit: None,
-            });
-            assert!(validate_overlay(&overlay).is_err(), "scalar {key} = {raw}");
-        }
+        let mut overlay = Overlay::default();
+        overlay.physics.insert(key.into(), "'CL'".into());
+        assert!(validate_overlay(&overlay).is_err(), "{key}");
     }
+    // 物理系数是模型字段，但类型必须对：Real 字段写非数字照样打回。
+    let mut overlay = Overlay::default();
+    overlay
+        .physics
+        .insert("DEF_ISO_REF_RATIO_H2_18O".into(), "2.0052e-3".into());
+    assert!(validate_overlay(&overlay).is_ok());
+    for raw in ["'abc'", "'NaN'", "'Infinity'"] {
+        let mut overlay = Overlay::default();
+        overlay
+            .physics
+            .insert("DEF_ISO_REF_RATIO_H2_18O".into(), raw.into());
+        assert!(validate_overlay(&overlay).is_err(), "{raw}");
+    }
+    let mut overlay = Overlay::default();
+    overlay.parameters.push(ParameterOverrideRecord {
+        parameter_id: colm_case::parameters::find("DEF_MT_BALANCE_ABORT_NBAD")
+            .unwrap()
+            .id
+            .clone(),
+        raw_key: "DEF_MT_BALANCE_ABORT_NBAD".into(),
+        scope_instance: ParameterScopeInstance {
+            kind: "case-scalar".into(),
+            scheme: None,
+            index: None,
+            type_name: None,
+            process_file: None,
+        },
+        value: "1".into(),
+        expected_old_value: None,
+        unit: None,
+    });
+    // 超差停机阈值是 Integer，不算模型系数。
+    assert!(validate_overlay(&overlay).is_err());
 }
 
 #[test]
 fn tracer_file_references_are_case_choices_while_assets_remain_frozen() {
-    let key = "DEF_TRACER_PARAM_FILES";
+    let key = "DEF_SOLUTE_PARAM_FILES";
     let mut overlay = Overlay::default();
     overlay.parameters.push(ParameterOverrideRecord {
         parameter_id: colm_case::parameters::find(key).unwrap().id.clone(),
@@ -580,12 +608,12 @@ fn tracer_file_references_are_case_choices_while_assets_remain_frozen() {
         Some(colm_namelist::Value::Str("CH4:process/CH4.nml".into()))
     );
     let selected =
-        colm_namelist::parse("&nl_colm\nDEF_TRACER_PARAM_FILES='other.nml'\n/\n").unwrap();
+        colm_namelist::parse("&nl_colm\nDEF_SOLUTE_PARAM_FILES='other.nml'\n/\n").unwrap();
     assert_eq!(
         case_process_references(&overlay, &selected, None).unwrap(),
         Some(colm_namelist::Value::Str("other.nml".into()))
     );
-    let cleared = colm_namelist::parse("&nl_colm\nDEF_TRACER_PARAM_FILES=''\n/\n").unwrap();
+    let cleared = colm_namelist::parse("&nl_colm\nDEF_SOLUTE_PARAM_FILES=''\n/\n").unwrap();
     let reloaded = colm_namelist::parse(&cleared.to_string()).unwrap();
     assert_eq!(
         case_process_references(&overlay, &reloaded, None).unwrap(),
@@ -968,15 +996,16 @@ fn clearing_legacy_process_references_survives_reload_and_materialization() {
     let tmp = Temp::new();
     let reg = tmp.registry();
     let case = tmp.case();
-    let text = fs::read_to_string(case.join("case.nml"))
-        .unwrap()
-        .replace("/\n", " DEF_TRACER_PARAM_FILES = 'process.nml'\n/\n");
+    let text = fs::read_to_string(case.join("case.nml")).unwrap().replace(
+        "/\n",
+        "/\n&nl_colm_material\n DEF_SOLUTE_PARAM_FILES = 'process.nml'\n/\n",
+    );
     fs::write(case.join("case.nml"), text).unwrap();
-    fs::write(case.join("process.nml"), "&nl_colm_methane_parameter\n/\n").unwrap();
+    fs::write(case.join("process.nml"), "&nl_colm_solute_parameter\n/\n").unwrap();
     let binding = reg.migrate_case(&case, code()).unwrap();
     let mut frozen = reg.get(&binding.version).unwrap();
     frozen.overlay.physics.insert(
-        "DEF_TRACER_PARAM_FILES".into(),
+        "DEF_SOLUTE_PARAM_FILES".into(),
         format!("'{}'", frozen.overlay.process_files[0].relative_path),
     );
     frozen.overlay_sha256 = crate::registry::digest_json(&frozen.overlay).unwrap();
@@ -995,7 +1024,7 @@ fn clearing_legacy_process_references_survives_reload_and_materialization() {
             &tmp.0.join("cleared"),
             "clear-reference",
             &[],
-            &["DEF_TRACER_PARAM_FILES".into()],
+            &["DEF_SOLUTE_PARAM_FILES".into()],
         )
         .unwrap();
     let reloaded = reg
@@ -1010,7 +1039,7 @@ fn clearing_legacy_process_references_survives_reload_and_materialization() {
         colm_namelist::parse(&fs::read_to_string(reloaded.run_case.join("case.nml")).unwrap())
             .unwrap();
     assert_eq!(
-        doc.get("DEF_TRACER_PARAM_FILES"),
+        doc.get("DEF_SOLUTE_PARAM_FILES"),
         Some(&colm_namelist::Value::Str(String::new()))
     );
     assert_eq!(reg.get(&binding.version).unwrap(), frozen);
@@ -1611,13 +1640,13 @@ fn standard_tracer_parameters_can_change_without_carrying_the_file() {
     ));
     // The inundation mode is chosen by the case when it is created; a version must not override it.
     assert!(!accepted(
-        "standard_ch4_parameter.nml",
+        "standard_methane_parameter.nml",
         "process:methane:DEF_METHANE%inundation_mode",
         "DEF_METHANE%inundation_mode",
         "'hybrid'"
     ));
     assert!(accepted(
-        "standard_ch4_parameter.nml",
+        "standard_methane_parameter.nml",
         "process:methane:DEF_METHANE%q10methane",
         "DEF_METHANE%q10methane",
         "2.5"
@@ -1633,7 +1662,10 @@ fn version_changes_land_on_the_case_parameter_file_and_skip_cases_without_it() {
     let with = case_with(
         &tmp,
         "with-sediment",
-        &format!(" SITE_landtype = 7\n DEF_TRACER_PARAM_FILES = 'SEDIMENT:{file}'\n"),
+        &format!(
+            " SITE_landtype = 7\n/\n&nl_colm_material\n DEF_USE_SEDIMENT = .true.\n \
+             DEF_SEDIMENT_PARAM_FILE = '{file}'\n"
+        ),
     );
     fs::write(with.join(file), template).unwrap();
     let without = case_with(&tmp, "without-sediment", " SITE_landtype = 7\n");

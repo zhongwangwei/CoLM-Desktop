@@ -40,6 +40,19 @@ const extra = [
     ['.false.', '关闭', 'Off'],
   ],
 }));
+// 上游把 DEF_USE_TRACER 拆成 isotope / methane / sediment 三个开关（溶质由名单非空启用），
+// 卡片仍保留一个聚合入口：显示值 = 任一 family 开启；点击开只会打开示踪设置面板让人选 family。
+const tracerKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT', 'DEF_SOLUTE_NAMES'];
+const tracerControl = {
+  id: 'tracer',
+  zh: '示踪过程',
+  en: 'Tracer processes',
+  keys: tracerKeys,
+  choices: [
+    ['.true.', '选择示踪物', 'Choose tracers'],
+    ['.false.', '关闭', 'Off'],
+  ] as [string, string, string][],
+};
 const order = [
   'soil',
   'DEF_USE_VariablySaturatedFlow',
@@ -49,9 +62,11 @@ const order = [
   'DEF_USE_BGC',
   'DEF_URBAN_RUN',
   'crop',
-  'DEF_USE_TRACER',
+  'tracer',
 ];
-const controls = order.map((id) => [...foundationControls, ...extra].find((c) => c.id === id)!);
+const controls = order.map((id) =>
+  [...foundationControls, ...extra, tracerControl].find((c) => c.id === id)!,
+);
 export const setupHandledKeys = controls.flatMap((c) => c.keys);
 export function setupChoices(
   overlay: Overlay,
@@ -87,11 +102,13 @@ export function setupChoices(
   const list = (key: string) =>
     unquote(value(key) ?? '')
       .split(',')
-      .map((v) => unquote(v.trim()).toLowerCase());
-  const names = list('DEF_TRACER_NAMES'),
-    methane = names.some((n) => ['ch4', 'methane'].includes(n)),
-    sediment = names.some((n) => ['sediment', 'sed'].includes(n)),
-    isotope = list('DEF_TRACER_TYPES').includes('isotope');
+      .map((v) => unquote(v.trim()).toLowerCase())
+      .filter(Boolean);
+  // 聚合示踪状态：任一 family 开关开启，或溶质名单非空。
+  const methane = on('DEF_USE_METHANE'),
+    sediment = on('DEF_USE_SEDIMENT'),
+    isotope = on('DEF_USE_ISOTOPE'),
+    tracerOn = () => methane || sediment || isotope || list('DEF_SOLUTE_NAMES').length > 0;
   const activeFiles =
     context?.process_files.filter((f) => f.verified && f.active_methane_asset === true) ?? [];
   const methaneModes = activeFiles
@@ -116,7 +133,7 @@ export function setupChoices(
         .keys.every((k) => fields.some((f) => f.name === k && !f.derived))
     )
       return bilingual('当前版本没有可写字段', 'No writable field in this version');
-    if (on('DEF_USE_TRACER') && id !== 'DEF_USE_TRACER') {
+    if (tracerOn() && id !== 'tracer') {
       if (methane && id === 'DEF_USE_BGC' && v === '.false.')
         return bilingual(
           '请先关闭甲烷示踪或修改 CH4 定义',
@@ -172,7 +189,7 @@ export function setupChoices(
     if (
       v === '.false.' &&
       id === 'DEF_USE_VariablySaturatedFlow' &&
-      on('DEF_USE_TRACER') &&
+      tracerOn() &&
       !environment.autoClose
     )
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
@@ -192,7 +209,7 @@ export function setupChoices(
           )
         );
     }
-    if (id === 'soil' && v === 'Campbell' && on('DEF_USE_TRACER') && !environment.autoClose)
+    if (id === 'soil' && v === 'Campbell' && tracerOn() && !environment.autoClose)
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
     if (
       isSite(environment) &&
@@ -236,9 +253,9 @@ export function setupChoices(
           'Pending: choose a grid or build configuration',
         );
     }
-    if (id === 'DEF_URBAN_RUN' && on('DEF_USE_TRACER'))
+    if (id === 'DEF_URBAN_RUN' && tracerOn())
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
-    if (id === 'DEF_USE_TRACER') {
+    if (id === 'tracer') {
       if (methane && (displayValue('DEF_USE_BGC') !== '.true.' || !['PFT', 'PC'].includes(subgrid)))
         return bilingual(
           '甲烷示踪需要先开启 BGC 并选择 PFT/PC',
@@ -350,7 +367,11 @@ export function setupChoices(
             ? displayedSoil
             : c.id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG'
               ? '.true.'
-              : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
+              : c.id === 'tracer'
+                ? tracerOn()
+                  ? '.true.'
+                  : '.false.'
+                : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
       inherited: c.id !== 'crop' && c.keys.every((key) => value(key) === undefined),
       pending: c.keys.some(
         (k) =>
@@ -405,6 +426,21 @@ export function applySetupRequest(
     return setModelOption(overlay, fields, planting, request.value);
   }
   const foundation = foundationControls.find((c) => c.id === request.id);
+  if (request.id === 'tracer' && !foundation) {
+    // 聚合入口：关闭时三个 family 开关都写 .false.，并清空溶质名单；
+    // 打开时由界面转到示踪设置面板选择 family，这里只在什么都没选时给同位素一个默认起点。
+    if (value === '.false.') {
+      let next = overlay;
+      for (const key of ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'])
+        if (fields.some((field) => field.name === key && !field.derived))
+          next = setModelOption(next, fields, key, '.false.');
+      return resetModelOption(next, 'DEF_SOLUTE_NAMES');
+    }
+    const anyOn = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'].some(
+      (key) => (modelSettingValue(overlay, key) ?? '').trim().toLowerCase() === '.true.',
+    );
+    return anyOn ? overlay : setModelOption(overlay, fields, 'DEF_USE_ISOTOPE', '.true.');
+  }
   if (!foundation) {
     let next = setModelOption(overlay, fields, request.id, request.value);
     if (request.id === 'DEF_USE_LULCC' && request.value === '.true.') {

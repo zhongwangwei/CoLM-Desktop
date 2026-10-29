@@ -1,24 +1,26 @@
-//! 示踪物的运行时部分：namelist 与参数文件 → [`TracerSet`]，陆面示踪物重启的读写
-//! （`MOD_Tracer_Rest`）。
+//! 材料运移的运行时部分：namelist 与参数文件 → [`TracerSet`]，陆面材料重启的读写
+//! （`main/MATERIAL/MOD_MT_Rest.F90`，上游 7d2fca93 前叫 `MOD_Tracer_Rest`）。
 
 use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use colm_core::tracer::{
-    PatchTracerState, TracerNamelist, TracerParameterOverrides, TracerPools, TracerSet,
-    DESCRIPTOR_IDENTITY_WIDTH, SOISNO_LAYERS,
+    PatchTracerState, TracerNamelist, TracerParamFiles, TracerParameterOverrides, TracerPools,
+    TracerSet, DESCRIPTOR_IDENTITY_WIDTH, SOISNO_LAYERS,
 };
 use colm_namelist::{Document, Value};
 
-use crate::physics::{integer, logical, real, text};
+use crate::physics::integer;
 
 /// 生效的变饱和流开关：上游 `MOD_Namelist.F90:1886-1891` 在 van Genuchten（不用 Campbell）时先把
-/// `DEF_USE_VariablySaturatedFlow` 强制成 `.true.`，再做示踪剂检查、再进物理。读字面值会让手写
-/// namelist 里残留的 `.false.` 走另一条示踪物分支（与 `physics::resolve` 同一判定）。
+/// `DEF_USE_VariablySaturatedFlow` 强制成 `.true.`，再做材料检查、再进物理。读字面值会让手写
+/// namelist 里残留的 `.false.` 走另一条材料分支（与 `physics::resolve` 同一判定）。
 fn effective_variably_saturated_flow(document: &Document) -> Result<bool> {
-    Ok(logical(document, "DEF_USE_VariablySaturatedFlow")?
-        || !logical(document, "DEF_USE_Campbell_SOIL_MODEL")?)
+    Ok(
+        crate::physics::logical(document, "DEF_USE_VariablySaturatedFlow")?
+            || !crate::physics::logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
+    )
 }
 
 /// `LAND_TRACER_RESTART_SCHEMA_VERSION`。
@@ -26,77 +28,152 @@ const LAND_TRACER_RESTART_SCHEMA: i32 = 5;
 /// `TRC_FORC_CACHE_SCHEMA`。
 const FORCING_CACHE_SCHEMA: i32 = 1;
 
-/// 算例开了 `DEF_USE_TRACER` 时注册示踪物（`tracer_defs_init`）；关着返回 `None`。
-pub fn tracer_set_from_document(document: &Document) -> Result<Option<TracerSet>> {
-    if !logical(document, "DEF_USE_TRACER")? {
+/// `DEF_ISOTOPE_PARAM_FILE` 指向的 `&nl_colm_isotope_parameter`。
+///
+/// 上游把 `DEF_ISO_*` 从主 namelist 搬到了这个文件里（`mt_read_namelist` 在
+/// `DEF_USE_ISOTOPE` 打开且文件给了时读它）。桌面端也允许把它们直接写在算例
+/// namelist 的 `&nl_colm_isotope_parameter` 组里，所以这里做"文件优先、算例文档兜底"。
+/// 文件给了却读不出这一组时上游停机，这里照做。
+fn isotope_parameter_document(document: &Document) -> Result<Option<Document>> {
+    // 上游只在 `DEF_USE_ISOTOPE .and. mt_file_given(...)` 时才读这份文件：同位素关着时
+    // 路径即使写错也不该拦住其它 family 的算例。
+    if !crate::physics::logical(document, "DEF_USE_ISOTOPE")? {
         return Ok(None);
     }
-    let namelist = TracerNamelist {
-        num: integer(document, "DEF_TRACER_NUM")?,
-        names: text(document, "DEF_TRACER_NAMES")?,
-        types: text(document, "DEF_TRACER_TYPES")?,
-        mrat: text(document, "DEF_TRACER_MRAT")?,
-        ref_ratio: text(document, "DEF_TRACER_REF_RATIO")?,
-        init_delta: text(document, "DEF_TRACER_INIT_DELTA")?,
-        reactive_decay_rate: text(document, "DEF_TRACER_REACTIVE_DECAY_RATE")?,
-        param_files: text(document, "DEF_TRACER_PARAM_FILES")?,
-        use_bgc: logical(document, "DEF_USE_BGC")?,
-        variably_saturated_flow: effective_variably_saturated_flow(document)?,
-        aquifer_mixing_water_mm: real(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
-    };
-    TracerSet::build(&namelist, read_tracer_parameter_file).map(Some)
+    let path = crate::physics::text(document, "DEF_ISOTOPE_PARAM_FILE")?;
+    let path = path.trim();
+    if path.is_empty() || path.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read DEF_ISOTOPE_PARAM_FILE: {path}"))?;
+    let present = source.lines().any(|line| {
+        let line = line.trim_start().to_ascii_lowercase();
+        !line.starts_with('!')
+            && (line.starts_with("&nl_colm_isotope_parameter")
+                || line.starts_with("$nl_colm_isotope_parameter"))
+    });
+    anyhow::ensure!(
+        present,
+        "No &nl_colm_isotope_parameter in {path} (DEF_ISOTOPE_PARAM_FILE)"
+    );
+    Ok(Some(colm_namelist::parse(&source).with_context(|| {
+        format!("invalid &nl_colm_isotope_parameter in {path}")
+    })?))
 }
 
-/// `read_tracer_parameter_file`：文件必须存在；没有 `&nl_colm_tracer_parameter` 组时
-/// 什么都不改（`tracer_parameter_group_present`）。
-fn read_tracer_parameter_file(path: &str) -> Result<Option<TracerParameterOverrides>> {
+/// 从算例文档（先用 `optional` 那份参数文件）读一个 `DEF_ISO_*` 逻辑量。
+///
+/// 三段取值顺序与上游一致：参数文件里写了就用它；否则用算例文档里的值；都没有才用
+/// schema 的声明默认值。后两句由 [`crate::physics::logical`] 完成。
+fn iso_logical(document: &Document, optional: Option<&Document>, name: &str) -> Result<bool> {
+    match optional.and_then(|doc| doc.get(name)) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(other) => anyhow::bail!("{name} must be a logical, got {other:?}"),
+        None => crate::physics::logical(document, name),
+    }
+}
+
+fn iso_real(document: &Document, optional: Option<&Document>, name: &str) -> Result<f64> {
+    match optional.and_then(|doc| doc.get(name)) {
+        Some(Value::Real { text }) => Ok(crate::physics::parse_fortran_real(text)
+            .with_context(|| format!("{name} is not a readable real: {text:?}"))?),
+        Some(Value::Int(value)) => Ok(*value as f64),
+        Some(other) => anyhow::bail!("{name} must be a real, got {other:?}"),
+        None => crate::physics::real(document, name),
+    }
+}
+
+fn iso_text(document: &Document, optional: Option<&Document>, name: &str) -> Result<String> {
+    match optional.and_then(|doc| doc.get(name)) {
+        Some(Value::Str(value)) => Ok(value.clone()),
+        Some(other) => anyhow::bail!("{name} must be a character value, got {other:?}"),
+        None => crate::physics::text(document, name),
+    }
+}
+
+/// 四个 family 的参数文件字段；运行期按 family 分派。
+pub fn param_files_from_document(document: &Document) -> Result<TracerParamFiles> {
+    Ok(TracerParamFiles {
+        isotope: crate::physics::text(document, "DEF_ISOTOPE_PARAM_FILE")?,
+        solutes: crate::physics::text(document, "DEF_SOLUTE_PARAM_FILES")?,
+        sediment: crate::physics::text(document, "DEF_SEDIMENT_PARAM_FILE")?,
+        methane: crate::physics::text(document, "DEF_METHANE_PARAM_FILE")?,
+    })
+}
+
+/// `mt_any_enabled` 为真时注册材料（`tracer_defs_init`）；一个 family 都没开返回 `None`。
+pub fn tracer_set_from_document(document: &Document) -> Result<Option<TracerSet>> {
+    if !colm_namelist::material::any_enabled(document)? {
+        return Ok(None);
+    }
+    let isotope = isotope_parameter_document(document)?;
+    let namelist = TracerNamelist {
+        use_isotope: crate::physics::logical(document, "DEF_USE_ISOTOPE")?,
+        isotope_species: crate::physics::text(document, "DEF_ISOTOPE_SPECIES")?,
+        ref_ratio_h2_18o: iso_real(document, isotope.as_ref(), "DEF_ISO_REF_RATIO_H2_18O")?,
+        init_delta_h2_18o: iso_real(document, isotope.as_ref(), "DEF_ISO_INIT_DELTA_H2_18O")?,
+        ref_ratio_hdo: iso_real(document, isotope.as_ref(), "DEF_ISO_REF_RATIO_HDO")?,
+        init_delta_hdo: iso_real(document, isotope.as_ref(), "DEF_ISO_INIT_DELTA_HDO")?,
+        solutes: crate::physics::text(document, "DEF_SOLUTE_NAMES")?,
+        use_sediment: crate::physics::logical(document, "DEF_USE_SEDIMENT")?,
+        use_methane: crate::physics::logical(document, "DEF_USE_METHANE")?,
+        use_bgc: crate::physics::logical(document, "DEF_USE_BGC")?,
+        variably_saturated_flow: effective_variably_saturated_flow(document)?,
+        aquifer_mixing_water_mm: crate::physics::real(document, "DEF_MT_AQUIFER_MIXING_WATER_MM")?,
+        param_files: param_files_from_document(document)?,
+    };
+    TracerSet::build(&namelist, read_solute_parameter_file).map(Some)
+}
+
+/// `read_solute_parameter_file`：文件必须存在；没有 `&nl_colm_solute_parameter` 组时
+/// 什么都不改（`mt_namelist_group_present`）。
+fn read_solute_parameter_file(path: &str) -> Result<Option<TracerParameterOverrides>> {
     let source = std::fs::read_to_string(path).with_context(|| {
-        format!("read_tracer_parameter_file: missing tracer parameter file: {path}")
+        format!("read_solute_parameter_file: missing solute parameter file: {path}")
     })?;
     let present = source.lines().any(|line| {
         let line = line.trim_start().to_ascii_lowercase();
         !line.starts_with('!')
-            && (line.starts_with("&nl_colm_tracer_parameter")
-                || line.starts_with("$nl_colm_tracer_parameter"))
+            && (line.starts_with("&nl_colm_solute_parameter")
+                || line.starts_with("$nl_colm_solute_parameter"))
     });
     if !present {
         return Ok(None);
     }
     let document = colm_namelist::parse(&source)
-        .with_context(|| format!("invalid &nl_colm_tracer_parameter in {path}"))?;
+        .with_context(|| format!("invalid &nl_colm_solute_parameter in {path}"))?;
     let real_field = |name: &str| -> Result<Option<f64>> {
-        match document.get(&format!("DEF_TRACER%{name}")) {
+        match document.get(&format!("DEF_SOLUTE%{name}")) {
             None => Ok(None),
             Some(value) => value
                 .as_f64()
                 .map(Some)
-                .with_context(|| format!("DEF_TRACER%{name} in {path} is not a real")),
+                .with_context(|| format!("DEF_SOLUTE%{name} in {path} is not a real")),
         }
     };
-    let charge = match document.get("DEF_TRACER%charge") {
+    let charge = match document.get("DEF_SOLUTE%charge") {
         None => None,
         Some(Value::Int(value)) => Some(i32::try_from(*value)?),
         Some(other) => {
-            anyhow::bail!("DEF_TRACER%charge in {path} must be an integer, got {other:?}")
+            anyhow::bail!("DEF_SOLUTE%charge in {path} must be an integer, got {other:?}")
         }
     };
-    let unit_kind = match document.get("DEF_TRACER%unit_kind") {
+    let unit_kind = match document.get("DEF_SOLUTE%unit_kind") {
         None => None,
         Some(Value::Str(value)) => Some(value.clone()),
         Some(other) => {
-            anyhow::bail!("DEF_TRACER%unit_kind in {path} must be a string, got {other:?}")
+            anyhow::bail!("DEF_SOLUTE%unit_kind in {path} must be a string, got {other:?}")
         }
     };
     Ok(Some(TracerParameterOverrides {
         unit_kind,
         mol_weight: real_field("mol_weight")?,
-        ref_ratio: real_field("ref_ratio")?,
-        init_delta: real_field("init_delta")?,
         init_conc: real_field("init_conc")?,
         precip_default_conc: real_field("precip_default_conc")?,
         vapor_default_conc: real_field("vapor_default_conc")?,
         max_dissolved_conc: real_field("max_dissolved_conc")?,
-        reactive_decay_rate: real_field("reactive_decay_rate")?,
+        decay_rate: real_field("decay_rate")?,
         charge,
     }))
 }
@@ -121,52 +198,55 @@ pub struct TracerRuntime {
     pub vegetation_snow: bool,
     pub variably_saturated_flow: bool,
     pub aquifer_mixing_water_mm: f64,
-    /// `DEF_TRACER_BALANCE_ABORT_NBAD`、`DEF_TRACER_RESID_ABORT_NBAD`。
+    /// `DEF_MT_BALANCE_ABORT_NBAD`、`DEF_MT_RESID_ABORT_NBAD`。
     pub balance_abort_nbad: i32,
     pub resid_abort_nbad: i32,
     /// `MOD_Tracer_Conservation` 的模块级"最差/计数"跟踪（整次运行共享）。
     pub tracker: std::sync::Mutex<colm_core::tracer::conservation::BalanceTracker>,
 }
 
-/// 分馏开关与参数（`MOD_Namelist.F90:421-442`，方案名的规范化同 `:1703-1717`）。
-fn tracer_physics_from_document(document: &Document) -> Result<colm_core::tracer::TracerPhysics> {
+/// 分馏开关与参数（`&nl_colm_isotope_parameter`，方案名的规范化同上游 `check_settings`）。
+fn tracer_physics_from_document(
+    document: &Document,
+    isotope: Option<&Document>,
+) -> Result<colm_core::tracer::TracerPhysics> {
     use colm_core::tracer::frac::{KineticScheme, OpenWaterKinetic};
-    let kinetic = text(document, "DEF_TRACER_KINETIC_SCHEME")?;
-    let open_water = text(document, "DEF_TRACER_OPEN_WATER_KINETIC")?;
+    let kinetic = iso_text(document, isotope, "DEF_ISO_KINETIC_SCHEME")?;
+    let open_water = iso_text(document, isotope, "DEF_ISO_OPEN_WATER_KINETIC")?;
     let physics = colm_core::tracer::TracerPhysics {
-        fractionation: logical(document, "DEF_TRACER_USE_FRACTIONATION")?,
+        fractionation: iso_logical(document, isotope, "DEF_ISO_USE_FRACTIONATION")?,
         kinetic_scheme: KineticScheme::parse(&kinetic)
-            .with_context(|| format!("Invalid DEF_TRACER_KINETIC_SCHEME: {kinetic}"))?,
-        ice_supersat_slope: real(document, "DEF_TRACER_ICE_SUPERSAT_SLOPE")?,
-        cg_relhum_max: real(document, "DEF_TRACER_CG_RELHUM_MAX")?,
+            .with_context(|| format!("Invalid DEF_ISO_KINETIC_SCHEME: {kinetic}"))?,
+        ice_supersat_slope: iso_real(document, isotope, "DEF_ISO_ICE_SUPERSAT_SLOPE")?,
+        cg_relhum_max: iso_real(document, isotope, "DEF_ISO_CG_RELHUM_MAX")?,
         open_water_kinetic: OpenWaterKinetic::parse(&open_water)
-            .with_context(|| format!("Invalid DEF_TRACER_OPEN_WATER_KINETIC: {open_water}"))?,
-        nss_leaf_water_per_lai: real(document, "DEF_TRACER_NSS_LEAF_WATER_PER_LAI")?,
-        nss_leaf_path_length: real(document, "DEF_TRACER_NSS_LEAF_PATH_LENGTH")?,
-        nss_leaf_rb: real(document, "DEF_TRACER_NSS_LEAF_RB")?,
+            .with_context(|| format!("Invalid DEF_ISO_OPEN_WATER_KINETIC: {open_water}"))?,
+        nss_leaf_water_per_lai: iso_real(document, isotope, "DEF_ISO_NSS_LEAF_WATER_PER_LAI")?,
+        nss_leaf_path_length: iso_real(document, isotope, "DEF_ISO_NSS_LEAF_PATH_LENGTH")?,
+        nss_leaf_rb: iso_real(document, isotope, "DEF_ISO_NSS_LEAF_RB")?,
     };
     anyhow::ensure!(
         physics.cg_relhum_max > 0.0
             && physics.cg_relhum_max < 1.0
             && physics.ice_supersat_slope >= 0.0,
-        "Invalid tracer fractionation parameters (DEF_TRACER_CG_RELHUM_MAX in (0,1), \
-         DEF_TRACER_ICE_SUPERSAT_SLOPE >= 0)"
+        "Invalid tracer fractionation parameters (DEF_ISO_CG_RELHUM_MAX in (0,1), \
+         DEF_ISO_ICE_SUPERSAT_SLOPE >= 0)"
     );
     Ok(physics)
 }
 
-/// `DEF_TRACER_SOIL_KINETIC`（`MOD_Namelist.F90:1718-1725`）：`RESISTANCE` 为真、`EXPONENT` 为假。
-fn soil_kinetic_resistance(document: &Document) -> Result<bool> {
-    let scheme = text(document, "DEF_TRACER_SOIL_KINETIC")?;
+/// `DEF_ISO_SOIL_KINETIC`：`RESISTANCE` 为真、`EXPONENT` 为假。
+fn soil_kinetic_resistance(document: &Document, isotope: Option<&Document>) -> Result<bool> {
+    let scheme = iso_text(document, isotope, "DEF_ISO_SOIL_KINETIC")?;
     match scheme.trim() {
         "RESISTANCE" | "resistance" => Ok(true),
         "EXPONENT" | "exponent" => Ok(false),
-        other => anyhow::bail!("Invalid DEF_TRACER_SOIL_KINETIC: {other}"),
+        other => anyhow::bail!("Invalid DEF_ISO_SOIL_KINETIC: {other}"),
     }
 }
 
 impl TracerRuntime {
-    /// 由算例文档建立；`DEF_USE_TRACER` 关着返回 `None`。比值先取描述符默认值，
+    /// 由算例文档建立；没有任何 family 打开时返回 `None`。比值先取描述符默认值，
     /// 强迫配置由 [`TracerRuntime::configure_forcing`] 落定。
     pub fn from_document(document: &Document) -> Result<Option<Self>> {
         let Some(set) = tracer_set_from_document(document)? else {
@@ -175,7 +255,7 @@ impl TracerRuntime {
         // provider 示踪物（CH4 的 `methane`、SEDIMENT 的泥沙）各有自己的状态与物理，还没移植；
         // 不拒绝的话 Rust 会照常跑完却没有甲烷/泥沙过程，输出悄悄与 Fortran 不同。
         // CH4 由 [`crate::methane`] 接在 BGC 之后（要开 BGC）；其余 provider 都还没移植。
-        let use_bgc = logical(document, "DEF_USE_BGC")?;
+        let use_bgc = crate::physics::logical(document, "DEF_USE_BGC")?;
         // SEDIMENT 由 [`crate::river::sediment`] 接在网格河湖汇流上（单点没有汇流，由单点入口拒绝）。
         if let Some(tracer) = set.tracers.iter().find(|t| {
             t.state_owner == colm_core::tracer::descriptor::StateOwner::Provider
@@ -189,7 +269,8 @@ impl TracerRuntime {
                 tracer.category
             );
         }
-        let physics = tracer_physics_from_document(document)?;
+        let isotope = isotope_parameter_document(document)?;
+        let physics = tracer_physics_from_document(document, isotope.as_ref())?;
         let precip_ratio = set
             .tracers
             .iter()
@@ -203,30 +284,45 @@ impl TracerRuntime {
         let runtime_forced = vec![false; set.len()];
         let forcing_specs = crate::spatial::tracer_forcing::load_specs(
             &set,
-            &text(document, "DEF_TRACER_PARAM_FILES")?,
+            &param_files_from_document(document)?,
         )?;
         Ok(Some(Self {
             has_vapor: vec![false; set.len()],
             forcing_specs,
             physics,
             soil_options: colm_core::tracer::soil_water::SoilWaterOptions {
-                subl_skin_mm: real(document, "DEF_TRACER_SUBL_SKIN_MM")?,
-                soil_diffusion: logical(document, "DEF_TRACER_SOIL_DIFFUSION")?,
-                soil_vapor_diffusion: logical(document, "DEF_TRACER_SOIL_VAPOR_DIFFUSION")?,
-                colm_debug: logical(document, "DEF_USE_CoLMDEBUG")?,
-                soil_kinetic_resistance: soil_kinetic_resistance(document)?,
-                snowmelt_equilibration: real(document, "DEF_TRACER_SNOWMELT_EQUILIBRATION")?,
+                subl_skin_mm: iso_real(document, isotope.as_ref(), "DEF_ISO_SUBL_SKIN_MM")?,
+                soil_diffusion: iso_logical(document, isotope.as_ref(), "DEF_ISO_SOIL_DIFFUSION")?,
+                soil_vapor_diffusion: iso_logical(
+                    document,
+                    isotope.as_ref(),
+                    "DEF_ISO_SOIL_VAPOR_DIFFUSION",
+                )?,
+                colm_debug: crate::physics::logical(document, "DEF_USE_CoLMDEBUG")?,
+                soil_kinetic_resistance: soil_kinetic_resistance(document, isotope.as_ref())?,
+                snowmelt_equilibration: iso_real(
+                    document,
+                    isotope.as_ref(),
+                    "DEF_ISO_SNOWMELT_EQUILIBRATION",
+                )?,
             },
-            canopy_equilibration: real(document, "DEF_TRACER_CANOPY_EQUILIBRATION")?,
+            canopy_equilibration: iso_real(
+                document,
+                isotope.as_ref(),
+                "DEF_ISO_CANOPY_EQUILIBRATION",
+            )?,
             precip_ratio,
             vapor_ratio,
             runtime_forced,
-            debug: logical(document, "DEF_USE_CoLMDEBUG")?,
-            vegetation_snow: logical(document, "DEF_VEG_SNOW")?,
+            debug: crate::physics::logical(document, "DEF_USE_CoLMDEBUG")?,
+            vegetation_snow: crate::physics::logical(document, "DEF_VEG_SNOW")?,
             variably_saturated_flow: effective_variably_saturated_flow(document)?,
-            aquifer_mixing_water_mm: real(document, "DEF_TRACER_AQUIFER_MIXING_WATER_MM")?,
-            balance_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_BALANCE_ABORT_NBAD")?)?,
-            resid_abort_nbad: i32::try_from(integer(document, "DEF_TRACER_RESID_ABORT_NBAD")?)?,
+            aquifer_mixing_water_mm: crate::physics::real(
+                document,
+                "DEF_MT_AQUIFER_MIXING_WATER_MM",
+            )?,
+            balance_abort_nbad: i32::try_from(integer(document, "DEF_MT_BALANCE_ABORT_NBAD")?)?,
+            resid_abort_nbad: i32::try_from(integer(document, "DEF_MT_RESID_ABORT_NBAD")?)?,
             tracker: Default::default(),
             set,
         }))
@@ -302,7 +398,7 @@ impl TracerRuntime {
 }
 
 /// 一个土壤/湿地 patch 步末的示踪物记账（`CoLMMAIN.F90:1528-1561` 与 `tracer_report`）：一阶衰减、
-/// 收支检查、history 累加，再按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
+/// 收支检查、history 累加，再按 `DEF_MT_*_ABORT_NBAD` 决定是否中止。
 #[allow(clippy::too_many_arguments)]
 pub fn end_of_step(
     runtime: &TracerRuntime,
@@ -444,7 +540,7 @@ pub fn report_after_patches(
     }
 }
 
-/// `tracer_report`：打印本步的收支/签名报告，按 `DEF_TRACER_*_ABORT_NBAD` 决定是否中止。
+/// `tracer_report`：打印本步的收支/签名报告，按 `DEF_MT_*_ABORT_NBAD` 决定是否中止。
 fn report_step(runtime: &TracerRuntime) -> Result<()> {
     let report = runtime
         .tracker

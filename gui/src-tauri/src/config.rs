@@ -178,26 +178,30 @@ pub fn parameter_type_defaults(parameter_id: String) -> Result<Vec<TypeDefault>,
 }
 
 /// 示踪物标准参数文件的内容，和 `colm_case::parameters::process::STANDARD_PARAM_FILES` 一一对应。
-const STANDARD_PARAM_TEMPLATES: [(&str, &str); 5] = [
+const STANDARD_PARAM_TEMPLATES: [(&str, &str); 6] = [
     (
-        "standard_ch4_parameter.nml",
-        include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml"),
+        "standard_methane_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_methane_parameter.nml"),
     ),
     (
         "standard_sediment_parameter.nml",
         include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"),
     ),
     (
-        "standard_O18_parameter.nml",
-        include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
-    ),
-    (
-        "standard_HDO_parameter.nml",
-        include_str!("../../../vendor/CoLM202X/run/standard_HDO_parameter.nml"),
+        "standard_isotope_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_isotope_parameter.nml"),
     ),
     (
         "standard_chloride_parameter.nml",
         include_str!("../../../vendor/CoLM202X/run/standard_chloride_parameter.nml"),
+    ),
+    (
+        "standard_nh4_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_nh4_parameter.nml"),
+    ),
+    (
+        "standard_no3_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_no3_parameter.nml"),
     ),
 ];
 
@@ -1133,10 +1137,10 @@ impl<'a> VisibilityContext<'a> {
             }) || ncar_urban_properties(doc, case_dir)
                 .is_some_and(|path| path.is_file()),
             lulcc: logical(doc, "DEF_USE_LULCC"),
-            tracer: logical(doc, "DEF_USE_TRACER"),
-            isotope_tracer: character(doc, "DEF_TRACER_TYPES")
-                .split(',')
-                .any(|kind| kind.trim().eq_ignore_ascii_case("isotope")),
+            tracer: tracer_enabled(doc),
+            // 上游把示踪子系统拆成 isotope / methane / solute / sediment 四个 family，
+            // 同位素专属参数（分馏、含水层混合水量等）只看 DEF_USE_ISOTOPE。
+            isotope_tracer: logical(doc, "DEF_USE_ISOTOPE"),
             site_landtype: integer(doc, "SITE_landtype"),
             soil_init: logical(doc, "DEF_USE_SoilInit"),
             snow_init: logical(doc, "DEF_USE_SnowInit"),
@@ -1611,6 +1615,10 @@ fn validate_runtime_contract_at(
     model_asset_dir: &std::path::Path,
     kernel: Option<KernelFacts>,
 ) -> Result<(), String> {
+    // 旧算例先迁移到 MaterialTransport 的字段名，再按新模型校验；调用方持有的原文不受影响。
+    let mut migrated = doc.clone();
+    migrate_legacy_material(&mut migrated);
+    let doc = &migrated;
     validate_expert_tuning(
         doc,
         colm_schema::all()
@@ -1649,7 +1657,7 @@ fn validate_runtime_contract_at(
     }
 
     let bgc = logical(doc, "DEF_USE_BGC");
-    let tracer = logical(doc, "DEF_USE_TRACER");
+    let tracer = tracer_enabled(doc);
     if logical(doc, "DEF_USE_MEDLYNST") && logical(doc, "DEF_USE_WUEST") {
         // `DEF_USE_WUEST` 缺省就是 `.true.`：只写了 `DEF_USE_MEDLYNST = .true.` 也算同开。
         return Err(
@@ -1658,9 +1666,7 @@ fn validate_runtime_contract_at(
                 .into(),
         );
     }
-    let methane = character(doc, "DEF_TRACER_NAMES")
-        .split(',')
-        .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"));
+    let methane = logical(doc, "DEF_USE_METHANE");
     let urban = logical(doc, "DEF_URBAN_RUN");
     let single = kernel.map(|facts| facts.single).unwrap_or_else(|| {
         doc.get("SITE_fsitedata").is_some()
@@ -1682,23 +1688,18 @@ fn validate_runtime_contract_at(
     }
     if tracer {
         if urban {
-            return Err("城市模式暂不支持 TRACER".into());
+            return Err("城市模式暂不支持示踪剂".into());
         }
         // 上游在 van Genuchten 下先把变饱和流强制打开再检查示踪剂（`MOD_Namelist.F90:1886-1907`），
         // 所以只有 Campbell 会挡住；字面上的 `.false.` 不算（界面在 van Genuchten 下也不显示它）。
         if logical(doc, "DEF_USE_Campbell_SOIL_MODEL") {
-            return Err("TRACER 需要 van Genuchten/VariablySaturatedFlow 土壤水方案".into());
+            return Err("示踪剂需要 van Genuchten/VariablySaturatedFlow 土壤水方案".into());
         }
         if methane && (!bgc || !(pft || pc)) {
-            return Err("甲烷 TRACER 需要 BGC 且使用 PFT 或 PC 次网格".into());
+            return Err("甲烷示踪剂需要 BGC 且使用 PFT 或 PC 次网格".into());
         }
         // 河道泥沙（`SEDIMENT` provider）挂在网格河湖汇流上：单点内核不编它，空间算例要打开河湖汇流。
-        let sediment = character(doc, "DEF_TRACER_NAMES").split(',').any(|name| {
-            matches!(
-                name.trim().to_ascii_uppercase().as_str(),
-                "SEDIMENT" | "SED"
-            )
-        });
+        let sediment = logical(doc, "DEF_USE_SEDIMENT");
         if sediment {
             if single {
                 return Err("河道泥沙只能用于空间算例（单点内核没有网格河湖汇流）".into());
@@ -1708,15 +1709,12 @@ fn validate_runtime_contract_at(
                 return Err("河道泥沙需要网格河湖汇流：请打开 DEF_USE_GridRiverLakeFlow".into());
             }
         }
-        let isotope = character(doc, "DEF_TRACER_TYPES")
-            .split(',')
-            .any(|kind| kind.trim().eq_ignore_ascii_case("isotope"));
+        let isotope = logical(doc, "DEF_USE_ISOTOPE");
         if isotope {
             // 变饱和流下的同位素要一份正的含水层参考水量（`MOD_Tracer_Defs.F90:416-420`）。
-            if real(doc, "DEF_TRACER_AQUIFER_MIXING_WATER_MM") <= 0.0 {
+            if real(doc, "DEF_MT_AQUIFER_MIXING_WATER_MM") <= 0.0 {
                 return Err(
-                    "水同位素需要正的含水层混合水量 DEF_TRACER_AQUIFER_MIXING_WATER_MM（mm）"
-                        .into(),
+                    "水同位素需要正的含水层混合水量 DEF_MT_AQUIFER_MIXING_WATER_MM（mm）".into(),
                 );
             }
             // 开了混合，LULCC 新建的土壤/湿地 patch 没有参考水量，上游停机（第 514 轮）。
@@ -1726,7 +1724,7 @@ fn validate_runtime_contract_at(
                         .into(),
                 );
             }
-            if logical(doc, "DEF_TRACER_USE_FRACTIONATION") {
+            if logical(doc, "DEF_ISO_USE_FRACTIONATION") {
                 // 分馏要读同位素水汽强迫（`MOD_Tracer_Forcing.F90:773-779`），示踪物强迫不支持 POINT。
                 if single {
                     return Err(
@@ -1743,33 +1741,29 @@ fn validate_runtime_contract_at(
                 }
             }
         }
-        let tracer_num = integer(doc, "DEF_TRACER_NUM");
-        if !(0..=1000).contains(&tracer_num) {
-            return Err("DEF_TRACER_NUM 必须在 0 到 1000 之间".into());
-        }
-        let relative_humidity = real(doc, "DEF_TRACER_CG_RELHUM_MAX");
+        let relative_humidity = real(doc, "DEF_ISO_CG_RELHUM_MAX");
         if !(relative_humidity > 0.0 && relative_humidity < 1.0) {
-            return Err("DEF_TRACER_CG_RELHUM_MAX 必须严格位于 0 与 1 之间".into());
+            return Err("DEF_ISO_CG_RELHUM_MAX 必须严格位于 0 与 1 之间".into());
         }
         for name in [
-            "DEF_TRACER_SNOWMELT_EQUILIBRATION",
-            "DEF_TRACER_CANOPY_EQUILIBRATION",
+            "DEF_ISO_SNOWMELT_EQUILIBRATION",
+            "DEF_ISO_CANOPY_EQUILIBRATION",
         ] {
             let value = real(doc, name);
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                 return Err(format!("{name} 必须在 0 到 1 之间"));
             }
         }
-        for name in ["DEF_TRACER_SUBL_SKIN_MM", "DEF_TRACER_ICE_SUPERSAT_SLOPE"] {
+        for name in ["DEF_ISO_SUBL_SKIN_MM", "DEF_ISO_ICE_SUPERSAT_SLOPE"] {
             let value = real(doc, name);
             if !value.is_finite() || value < 0.0 {
                 return Err(format!("{name} 必须为非负有限数值"));
             }
         }
         for name in [
-            "DEF_TRACER_BALANCE_ABORT_NBAD",
-            "DEF_TRACER_RESID_ABORT_NBAD",
-            "DEF_TRACER_LULCC_ABORT_NBAD",
+            "DEF_MT_BALANCE_ABORT_NBAD",
+            "DEF_MT_RESID_ABORT_NBAD",
+            "DEF_MT_LULCC_ABORT_NBAD",
         ] {
             if integer(doc, name) < 0 {
                 return Err(format!("{name} 必须为非负整数"));
@@ -1779,16 +1773,16 @@ fn validate_runtime_contract_at(
     // 流域网格的侧向流（`check_catchment`）还没接城市、LULCC、示踪剂；向导已挡住，这里再拦一次
     // 手改 namelist 的情况，免得要等到预检才报英文错误。
     if kernel.is_some_and(|facts| facts.catchment) {
-        for (field, what) in [
-            ("DEF_URBAN_RUN", "城市模型"),
-            ("DEF_USE_LULCC", "LULCC"),
-            ("DEF_USE_TRACER", "示踪剂"),
-        ] {
+        for (field, what) in [("DEF_URBAN_RUN", "城市模型"), ("DEF_USE_LULCC", "LULCC")] {
             if logical(doc, field) {
                 return Err(format!(
                     "流域网格当前不支持{what}（{field}），请关闭后再运行"
                 ));
             }
+        }
+        // 示踪剂拆成 family 开关后没有单一字段可查，这里统一用派生判定。
+        if tracer_enabled(doc) {
+            return Err("流域网格当前不支持示踪剂，请关闭后再运行".into());
         }
     }
     // 甲烷淹没方案与动态湿地、河湖汇流必须一致（`configure_methane_inundation_mode` 不一致就停机）。
@@ -2270,11 +2264,11 @@ fn field_runtime_state(
         }
     }
     // 含水层参考水量只有走通用水输运的同位素用（`MOD_Tracer_Defs`）；甲烷、溶质都不用。
-    if name == "DEF_TRACER_AQUIFER_MIXING_WATER_MM" && !c.isotope_tracer {
+    if name == "DEF_MT_AQUIFER_MIXING_WATER_MM" && !c.isotope_tracer {
         return hidden("只有水同位素使用");
     }
     // 分馏由向导按强迫数据决定（要 IsoGSM 同位素降水与水汽）；单点没有示踪物强迫。
-    if name == "DEF_TRACER_USE_FRACTIONATION" && c.single {
+    if name == "DEF_ISO_USE_FRACTIONATION" && c.single {
         return hidden("单点没有示踪物强迫，不能分馏");
     }
     // 漫滩入渗上限只在回馈里扣水时用（`debit_flood_feedback`）。
@@ -2759,33 +2753,35 @@ fn field_runtime_state(
     {
         return hidden("城市模式会自动关闭这个过程");
     }
-    if name != "DEF_USE_TRACER" && field_section(name, field.group) == Some("示踪剂") && !c.tracer
+    if !is_tracer_switch(name) && field_section(name, field.group) == Some("示踪剂") && !c.tracer
     {
-        return hidden("需要先启用 TRACER");
+        return hidden("需要先启用任一种示踪物");
     }
     if c.tracer
         && !c.isotope_tracer
         && one_of(&[
-            "DEF_TRACER_USE_FRACTIONATION",
-            "DEF_TRACER_KINETIC_SCHEME",
-            "DEF_TRACER_ICE_SUPERSAT_SLOPE",
-            "DEF_TRACER_CG_RELHUM_MAX",
-            "DEF_TRACER_OPEN_WATER_KINETIC",
-            "DEF_TRACER_SUBL_SKIN_MM",
-            "DEF_TRACER_SOIL_KINETIC",
-            "DEF_TRACER_SOIL_DIFFUSION",
-            "DEF_TRACER_SOIL_VAPOR_DIFFUSION",
-            "DEF_TRACER_CANOPY_EQUILIBRATION",
-            "DEF_TRACER_SNOWMELT_EQUILIBRATION",
-            "DEF_TRACER_NSS_LEAF_WATER_PER_LAI",
-            "DEF_TRACER_NSS_LEAF_PATH_LENGTH",
-            "DEF_TRACER_NSS_LEAF_RB",
-            "DEF_TRACER_USE_SOIL_INIT",
-            "DEF_TRACER_SOIL_INIT_FILE",
-            "DEF_TRACER_SOIL_INIT_VARS",
+            "DEF_ISOTOPE_SPECIES",
+            "DEF_ISOTOPE_PARAM_FILE",
+            "DEF_ISO_USE_FRACTIONATION",
+            "DEF_ISO_KINETIC_SCHEME",
+            "DEF_ISO_ICE_SUPERSAT_SLOPE",
+            "DEF_ISO_CG_RELHUM_MAX",
+            "DEF_ISO_OPEN_WATER_KINETIC",
+            "DEF_ISO_SUBL_SKIN_MM",
+            "DEF_ISO_SOIL_KINETIC",
+            "DEF_ISO_SOIL_DIFFUSION",
+            "DEF_ISO_SOIL_VAPOR_DIFFUSION",
+            "DEF_ISO_CANOPY_EQUILIBRATION",
+            "DEF_ISO_SNOWMELT_EQUILIBRATION",
+            "DEF_ISO_NSS_LEAF_WATER_PER_LAI",
+            "DEF_ISO_NSS_LEAF_PATH_LENGTH",
+            "DEF_ISO_NSS_LEAF_RB",
+            "DEF_MT_USE_SOIL_INIT",
+            "DEF_MT_SOIL_INIT_FILE",
+            "DEF_MT_SOIL_INIT_VARS",
         ])
     {
-        return hidden("当前选择的是气体示踪，不使用水同位素参数");
+        return hidden("当前没有启用同位素，不使用水同位素参数");
     }
 
     if field.group.is_none() {
@@ -2804,7 +2800,8 @@ fn field_states_for_at(
     have: &std::collections::BTreeSet<&str>,
     case_dir: Option<&std::path::Path>,
 ) -> Result<Vec<FieldState>, String> {
-    let doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
+    let mut doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
+    migrate_legacy_material(&mut doc);
     let context = VisibilityContext::new_at(&doc, have, case_dir);
     // `DEF_wetland_finundation_scheme` 在甲烷算例里按 CH4 参数文件的淹没方案派生，namelist 值不生效。
     let finundation = case_dir
@@ -2830,7 +2827,7 @@ fn field_states_for_at(
                     built_in_default: Some(default_literal(field.default)),
                     override_value: None,
                     effective_value: Some(scheme.to_string()),
-                    provenance: "standard_ch4_parameter.nml".into(),
+                    provenance: "standard_methane_parameter.nml".into(),
                     override_mixed: false,
                     effective_mixed: false,
                 });
@@ -3528,11 +3525,16 @@ fn process_section(name: &str, groups: &std::collections::BTreeSet<String>) -> &
     let n = name.to_ascii_lowercase();
     if groups.iter().any(|group| {
         group.starts_with("nl_colm_tracer")
+            || group.starts_with("nl_colm_isotope")
+            || group.starts_with("nl_colm_solute")
+            || group.starts_with("nl_colm_mt_")
             || group.contains("methane")
             || group.contains("sediment")
     }) || n.contains("methane")
         || n.contains("ch4")
         || n.contains("tracer")
+        || n.contains("isotope")
+        || n.contains("solute")
         || n.contains("sediment")
         || n.contains("chloride")
         || n.contains("hdo")
@@ -3641,35 +3643,353 @@ fn typed_process_known(
     }
 }
 
+/// 材质输运引用的参数文件。上游把旧的单张 `DEF_TRACER_PARAM_FILES` 拆成按 family 的
+/// 单文件（同位素、甲烷、泥沙）加溶质名单；`null`/`none` 占位和空路径不收。
 fn tracer_param_files(doc: &colm_namelist::Document) -> Vec<String> {
-    let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") else {
-        return Vec::new();
-    };
-    // 与 Fortran 同一套拆法（`,`/`;`、盘符、`null` 占位）；写错时不列文件，引擎启动会报出原因。
-    colm_namelist::tracer_files::param_file_paths(raw)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|file| file.trim_matches(['\'', '"']).to_string())
-        .collect()
+    let mut out = Vec::new();
+    if let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_SOLUTE_PARAM_FILES") {
+        // 与 Fortran 同一套拆法（`,`/`;`、盘符、`null` 占位）；写错时不列文件，引擎启动会报出原因。
+        out.extend(
+            colm_namelist::tracer_files::param_file_paths(raw)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|file| file.trim_matches(['\'', '"']).to_string())
+                .filter(|file| !is_null_file(file)),
+        );
+    }
+    for key in [
+        "DEF_ISOTOPE_PARAM_FILE",
+        "DEF_METHANE_PARAM_FILE",
+        "DEF_SEDIMENT_PARAM_FILE",
+    ] {
+        let file = character(doc, key).trim_matches(['\'', '"']).to_string();
+        if !is_null_file(&file) {
+            out.push(file);
+        }
+    }
+    out
 }
 
-/// 第一个满足 `pick(名字, 类型)` 的示踪物的参数文件（照 Fortran 的映射规则查）。
+fn is_null_file(file: &str) -> bool {
+    matches!(
+        file.trim().to_ascii_lowercase().as_str(),
+        "" | "null" | "none"
+    )
+}
+
+/// 删字段时保留占位、写空串的材质参数文件字段。
+fn is_removable_placeholder(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "DEF_SOLUTE_PARAM_FILES"
+            | "DEF_ISOTOPE_PARAM_FILE"
+            | "DEF_METHANE_PARAM_FILE"
+            | "DEF_SEDIMENT_PARAM_FILE"
+    )
+}
+
+/// 旧算例的 case.nml 往往只有 `&nl_colm`，没有 `&nl_colm_material`。迁移或写入新 family
+/// 字段时要往新组里写，先补一个空组再插入；`Document` 的 insert 约定不替调用方建组。
+fn ensure_namelist_group(doc: &mut colm_namelist::Document, group: &str) {
+    let text = doc.to_string();
+    // 与 `colm-namelist` 的组判定一致：忽略 `!` 之后的注释与大小写。
+    // 不这么做的话 `&nl_colm_material ! 用户笔记` 会被当成缺组，补出重复的空组。
+    let present = text.lines().any(|line| {
+        line.split('!')
+            .next()
+            .unwrap_or(line)
+            .trim()
+            .trim_start_matches('&')
+            .trim()
+            .eq_ignore_ascii_case(group)
+            && line.trim_start().starts_with('&')
+    });
+    if present {
+        return;
+    }
+    let combined = format!("{text}\n&{group}\n/\n");
+    if let Ok(parsed) = colm_namelist::parse(&combined) {
+        *doc = parsed;
+    }
+}
+
+/// 旧算例迁移：上游把 tracers 子系统改成 MaterialTransport，`DEF_USE_TRACER` 拆成
+/// isotope / methane / sediment 三个 family 开关，`DEF_TRACER_*` 改名或拆成按 family 的字段。
+/// 这里把读取到的旧 namelist 就地改写；已有的新字段优先，不覆盖。
+/// 返回是否有改动。只在读取后、校验或保存前调用，避免每次解析都改文件。
+pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool {
+    use colm_namelist::Value;
+    let text = |doc: &colm_namelist::Document, name: &str| match doc.get(name) {
+        Some(Value::Str(value)) => value.clone(),
+        _ => String::new(),
+    };
+    let flag = |doc: &colm_namelist::Document, name: &str| match doc.get(name) {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    };
+    let mut changed = false;
+    // 一对一改名：只有新字段属于主 namelist（&nl_colm_material / &nl_colm）时才在 case.nml 里换名。
+    // 分馏等 DEF_ISO_* 现在住在同位素参数文件（&nl_colm_isotope_parameter），不能塞进 case.nml；
+    // 那部分由「示踪物与泥沙」页的过程文件读取，旧文件的 DEF_TRACER% 组名仍能显示。
+    for (old, new) in [
+        ("DEF_TRACER_USE_FRACTIONATION", "DEF_ISO_USE_FRACTIONATION"),
+        ("DEF_TRACER_KINETIC_SCHEME", "DEF_ISO_KINETIC_SCHEME"),
+        (
+            "DEF_TRACER_ICE_SUPERSAT_SLOPE",
+            "DEF_ISO_ICE_SUPERSAT_SLOPE",
+        ),
+        ("DEF_TRACER_CG_RELHUM_MAX", "DEF_ISO_CG_RELHUM_MAX"),
+        (
+            "DEF_TRACER_OPEN_WATER_KINETIC",
+            "DEF_ISO_OPEN_WATER_KINETIC",
+        ),
+        ("DEF_TRACER_SUBL_SKIN_MM", "DEF_ISO_SUBL_SKIN_MM"),
+        ("DEF_TRACER_SOIL_KINETIC", "DEF_ISO_SOIL_KINETIC"),
+        ("DEF_TRACER_SOIL_DIFFUSION", "DEF_ISO_SOIL_DIFFUSION"),
+        (
+            "DEF_TRACER_SOIL_VAPOR_DIFFUSION",
+            "DEF_ISO_SOIL_VAPOR_DIFFUSION",
+        ),
+        (
+            "DEF_TRACER_CANOPY_EQUILIBRATION",
+            "DEF_ISO_CANOPY_EQUILIBRATION",
+        ),
+        (
+            "DEF_TRACER_SNOWMELT_EQUILIBRATION",
+            "DEF_ISO_SNOWMELT_EQUILIBRATION",
+        ),
+        (
+            "DEF_TRACER_NSS_LEAF_WATER_PER_LAI",
+            "DEF_ISO_NSS_LEAF_WATER_PER_LAI",
+        ),
+        (
+            "DEF_TRACER_NSS_LEAF_PATH_LENGTH",
+            "DEF_ISO_NSS_LEAF_PATH_LENGTH",
+        ),
+        ("DEF_TRACER_NSS_LEAF_RB", "DEF_ISO_NSS_LEAF_RB"),
+        ("DEF_TRACER_BALANCE_ABORT_NBAD", "DEF_MT_BALANCE_ABORT_NBAD"),
+        ("DEF_TRACER_RESID_ABORT_NBAD", "DEF_MT_RESID_ABORT_NBAD"),
+        ("DEF_TRACER_LULCC_ABORT_NBAD", "DEF_MT_LULCC_ABORT_NBAD"),
+        (
+            "DEF_TRACER_AQUIFER_MIXING_WATER_MM",
+            "DEF_MT_AQUIFER_MIXING_WATER_MM",
+        ),
+        ("DEF_TRACER_USE_SOIL_INIT", "DEF_MT_USE_SOIL_INIT"),
+        ("DEF_TRACER_SOIL_INIT_FILE", "DEF_MT_SOIL_INIT_FILE"),
+        ("DEF_TRACER_SOIL_INIT_VARS", "DEF_MT_SOIL_INIT_VARS"),
+    ] {
+        let Some(value) = doc.get(old).cloned() else {
+            continue;
+        };
+        // 目标字段在主 namelist 里才迁移；同位素文件里的参数留给过程文件页。
+        let movable = colm_schema::find(new)
+            .and_then(|field| field.group)
+            .is_some_and(|group| group == "nl_colm_material" || group == "nl_colm");
+        if movable && doc.get(new).is_none() {
+            let group = colm_schema::find(new).and_then(|field| field.group);
+            if let Some(group) = group {
+                ensure_namelist_group(doc, group);
+                let _ = doc.insert(new, value, group);
+            }
+        }
+        if movable {
+            changed |= doc.remove(old).unwrap_or(false);
+        }
+    }
+    let old_names = text(doc, "DEF_TRACER_NAMES");
+    let old_files = text(doc, "DEF_TRACER_PARAM_FILES");
+    let legacy_use = flag(doc, "DEF_USE_TRACER");
+    // 旧表格的派生列先读出来再删，否则拆 family 时拿不到类型。
+    let types = text(doc, "DEF_TRACER_TYPES");
+    for old in [
+        "DEF_TRACER_NUM",
+        "DEF_TRACER_TYPES",
+        "DEF_TRACER_MRAT",
+        "DEF_TRACER_REF_RATIO",
+        "DEF_TRACER_INIT_DELTA",
+        "DEF_TRACER_REACTIVE_DECAY_RATE",
+    ] {
+        changed |= doc.remove(old).unwrap_or(false);
+    }
+    if old_names.is_empty() && old_files.is_empty() && legacy_use.is_none() {
+        return changed;
+    }
+    let mut isotope = Vec::new();
+    let mut isotope_file = String::new();
+    let mut methane_file = None;
+    let mut sediment_file = String::new();
+    let mut solutes = Vec::new();
+    let mut solute_files = Vec::new();
+    let names: Vec<&str> = old_names.split(',').map(str::trim).collect();
+    let kinds: Vec<&str> = types.split(',').map(str::trim).collect();
+    for (index, name) in names.iter().enumerate() {
+        if name.is_empty() {
+            continue;
+        }
+        let kind = kinds.get(index).copied().unwrap_or("").to_ascii_lowercase();
+        let file = colm_namelist::tracer_files::param_file_for(&old_files, index, |key| {
+            key.eq_ignore_ascii_case(name)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .trim_matches(['\'', '"'])
+        .to_string();
+        match kind.as_str() {
+            "isotope" => {
+                isotope.push((*name).to_string());
+                if isotope_file.is_empty() && !is_null_file(&file) {
+                    isotope_file = file.clone();
+                }
+            }
+            "gas" if matches!(name.to_ascii_uppercase().as_str(), "CH4" | "METHANE") => {
+                methane_file = Some(file.clone());
+            }
+            "solute" => {
+                solutes.push((*name).to_string());
+                let path = if is_null_file(&file) {
+                    "null"
+                } else {
+                    file.as_str()
+                };
+                solute_files.push(format!("{name}:{path}"));
+            }
+            "particle" if matches!(name.to_ascii_uppercase().as_str(), "SEDIMENT" | "SED") => {
+                sediment_file = file.clone();
+            }
+            _ => {}
+        }
+    }
+    let on = legacy_use.unwrap_or(false);
+    let assign = |doc: &mut colm_namelist::Document,
+                  name: &str,
+                  value: colm_namelist::Value,
+                  changed: &mut bool| {
+        if doc.get(name).is_none() {
+            if let Some(group) = colm_schema::find(name).and_then(|field| field.group) {
+                ensure_namelist_group(doc, group);
+                let _ = doc.insert(name, value, group);
+            }
+            *changed = true;
+        }
+    };
+    assign(
+        doc,
+        "DEF_USE_ISOTOPE",
+        Value::Bool(on && !isotope.is_empty()),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_ISOTOPE_SPECIES",
+        Value::Str(if !isotope.is_empty() {
+            isotope.join(",")
+        } else {
+            "H2_18O,HDO".into()
+        }),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_ISOTOPE_PARAM_FILE",
+        Value::Str(if isotope_file.is_empty() {
+            "null".into()
+        } else {
+            isotope_file
+        }),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_USE_METHANE",
+        Value::Bool(on && methane_file.is_some()),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_METHANE_PARAM_FILE",
+        Value::Str(
+            methane_file
+                .filter(|file| !is_null_file(file))
+                .unwrap_or_else(|| "null".into()),
+        ),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_SOLUTE_NAMES",
+        Value::Str(solutes.join(",")),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_SOLUTE_PARAM_FILES",
+        Value::Str(if solute_files.is_empty() {
+            "null".into()
+        } else {
+            solute_files.join(",")
+        }),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_USE_SEDIMENT",
+        Value::Bool(on && !sediment_file.is_empty()),
+        &mut changed,
+    );
+    assign(
+        doc,
+        "DEF_SEDIMENT_PARAM_FILE",
+        Value::Str(if sediment_file.is_empty() {
+            "null".into()
+        } else {
+            sediment_file
+        }),
+        &mut changed,
+    );
+    for old in [
+        "DEF_USE_TRACER",
+        "DEF_TRACER_NAMES",
+        "DEF_TRACER_PARAM_FILES",
+    ] {
+        changed |= doc.remove(old).unwrap_or(false);
+    }
+    changed
+}
+
+/// 第一个满足 `pick(名字, 类型)` 的示踪物的参数文件。
+///
+/// 上游已没有逐示踪物类型表：同位素/甲烷/泥沙各有一个自己的文件字段，溶质按
+/// `DEF_SOLUTE_NAMES` 的顺序在 `DEF_SOLUTE_PARAM_FILES` 里查（与 Fortran 的映射规则一致）。
 fn tracer_param_file(
     doc: &colm_namelist::Document,
     pick: impl Fn(&str, &str) -> bool,
 ) -> Option<String> {
-    let names = character(doc, "DEF_TRACER_NAMES");
-    let types = character(doc, "DEF_TRACER_TYPES");
-    let names: Vec<&str> = names.split(',').map(str::trim).collect();
-    let types: Vec<&str> = types.split(',').map(str::trim).collect();
-    let index = (0..names.len()).find(|&i| pick(names[i], types.get(i).copied().unwrap_or("")))?;
-    let files = character(doc, "DEF_TRACER_PARAM_FILES");
-    colm_namelist::tracer_files::param_file_for(&files, index, |key| {
-        key.eq_ignore_ascii_case(names[index])
-    })
-    .ok()
-    .flatten()
-    .map(|file| file.trim_matches(['\'', '"']).to_string())
+    for (name, kind, key) in [
+        ("CH4", "gas", "DEF_METHANE_PARAM_FILE"),
+        ("SEDIMENT", "particle", "DEF_SEDIMENT_PARAM_FILE"),
+        ("H2_18O", "isotope", "DEF_ISOTOPE_PARAM_FILE"),
+        ("HDO", "isotope", "DEF_ISOTOPE_PARAM_FILE"),
+    ] {
+        if pick(name, kind) {
+            let file = character(doc, key).trim_matches(['\'', '"']).to_string();
+            return (!is_null_file(&file)).then_some(file);
+        }
+    }
+    let names = character(doc, "DEF_SOLUTE_NAMES");
+    let files = character(doc, "DEF_SOLUTE_PARAM_FILES");
+    for (index, name) in names.split(',').map(str::trim).enumerate() {
+        if name.is_empty() || !pick(name, "solute") {
+            continue;
+        }
+        if let Ok(Some(file)) = colm_namelist::tracer_files::param_file_for(&files, index, |key| {
+            key.eq_ignore_ascii_case(name)
+        }) {
+            let file = file.trim_matches(['\'', '"']).to_string();
+            return (!is_null_file(&file)).then_some(file);
+        }
+    }
+    None
 }
 
 fn safe_process_file(case_dir: &std::path::Path, file: &str) -> Result<std::path::PathBuf, String> {
@@ -3826,8 +4146,8 @@ fn spatial_blocks(doc: &colm_namelist::Document) -> usize {
 /// CH4 参数文件里的淹没方案字段（不在 case.nml 里）。
 pub(crate) const METHANE_MODE: &str = "DEF_METHANE%inundation_mode";
 /// 溶质（Cl）参数文件里的初始浓度与降水浓度 [kg/kg]（不在 case.nml 里，向导建例时写进参数文件）。
-pub(crate) const SOLUTE_INIT_CONC: &str = "DEF_TRACER%init_conc";
-pub(crate) const SOLUTE_PRECIP_CONC: &str = "DEF_TRACER%precip_default_conc";
+pub(crate) const SOLUTE_INIT_CONC: &str = "DEF_SOLUTE%init_conc";
+pub(crate) const SOLUTE_PRECIP_CONC: &str = "DEF_SOLUTE%precip_default_conc";
 
 /// 淹没方案 → （`DEF_wetland_finundation_scheme`，要不要动态湿地，要不要网格河湖）。
 /// 与 `configure_methane_inundation_mode` / `MethaneParameters::configure_inundation` 一一对应。
@@ -3864,11 +4184,25 @@ fn methane_inundation_options(dynamic_allowed: bool, grid_river: bool) -> Vec<&'
     out
 }
 
+/// 上游 MaterialTransport 没有总开关：任一家族开启（或溶质名单非空）就算示踪在跑。
+/// 界面上的“示踪过程”聚合开关由此派生；写回时按 family 分别落到各自的开关上。
+pub(crate) fn tracer_enabled(doc: &colm_namelist::Document) -> bool {
+    logical(doc, "DEF_USE_ISOTOPE")
+        || logical(doc, "DEF_USE_METHANE")
+        || logical(doc, "DEF_USE_SEDIMENT")
+        || !character(doc, "DEF_SOLUTE_NAMES").trim().is_empty()
+}
+
+/// 四个 family 开关本身不受“示踪过程已开启”的父闸门限制，否则打开示踪的入口会被自己隐藏。
+fn is_tracer_switch(name: &str) -> bool {
+    matches!(
+        name,
+        "DEF_USE_ISOTOPE" | "DEF_USE_METHANE" | "DEF_USE_SEDIMENT" | "DEF_SOLUTE_NAMES"
+    )
+}
+
 fn is_methane(doc: &colm_namelist::Document) -> bool {
-    logical(doc, "DEF_USE_TRACER")
-        && character(doc, "DEF_TRACER_NAMES")
-            .split(',')
-            .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"))
+    logical(doc, "DEF_USE_METHANE")
 }
 
 /// 甲烷算例的 CH4 参数文件里选的淹没方案；文件里没写时是代码缺省 `hybrid`。
@@ -3936,13 +4270,13 @@ pub(crate) fn methane_history_settings(
 }
 
 /// 溶质算例参数文件里的初始浓度与降水浓度 `[init_conc, precip_default_conc]`（kg/kg）。
-/// 取 `DEF_TRACER_TYPES` 里第一个 `solute` 的参数文件；没有溶质或文件读不到时为 `None`，
+/// 取 `DEF_SOLUTE_NAMES` 里第一个溶质的参数文件；没有溶质或文件读不到时为 `None`，
 /// 文件里没写的量按上游缺省 0。
 pub(crate) fn solute_concentrations(
     doc: &colm_namelist::Document,
     case_dir: &std::path::Path,
 ) -> Option<[f64; 2]> {
-    if !logical(doc, "DEF_USE_TRACER") {
+    if character(doc, "DEF_SOLUTE_NAMES").trim().is_empty() {
         return None;
     }
     let file = tracer_param_file(doc, |_, kind| kind.eq_ignore_ascii_case("solute"))?;
@@ -4461,19 +4795,6 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
             })
         }
         K::Character { len } => {
-            if matches!(
-                f.name,
-                "DEF_TRACER_MRAT"
-                    | "DEF_TRACER_REF_RATIO"
-                    | "DEF_TRACER_INIT_DELTA"
-                    | "DEF_TRACER_REACTIVE_DECAY_RATE"
-            ) && !bare.trim().is_empty()
-                && !bare
-                    .split(',')
-                    .all(|number| parse_real(number.trim()).is_some_and(f64::is_finite))
-            {
-                return Err(format!("{path}: tracer values must be finite numbers"));
-            }
             if f.name.eq_ignore_ascii_case("DEF_CASE_NAME") {
                 crate::project::validate_case_name(if quoted { bare } else { raw })?;
             }
@@ -4506,7 +4827,14 @@ fn put(
     // 组名从 schema 来 —— 那是从 CoLM 自己的声明里扫出来的。
     // schema 不认识的字段只能改不能插：不知道往哪个组插，而插错组等于没设。
     match colm_schema::find(schema_name(path)).and_then(|f| f.group) {
-        Some(g) => doc.insert(path, v, g).map_err(|e| format!("{e:#}")),
+        Some(g) => {
+            // 上游把示踪剂拆到 `&nl_colm_material` 等新组后，建例只写 `&nl_colm`，
+            // 老算例更没有这些组。缺组时补一个空组再插，否则向导打开第一个 family
+            // 开关就会撞上 "this namelist has no group"。`Document::insert` 坚持
+            // 不替调用方建组，所以这里显式补。
+            ensure_namelist_group(doc, g);
+            doc.insert(path, v, g).map_err(|e| format!("{e:#}"))
+        }
         None => doc.set(path, v).map_err(|e| format!("{e:#}")),
     }
 }
@@ -4621,6 +4949,8 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     let path = std::path::Path::new(dir).join("case.nml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
+    // 保存时顺手把旧示踪字段迁移成 MaterialTransport 的新名字，避免新旧两套并存。
+    migrate_legacy_material(&mut doc);
     // 甲烷淹没方案与溶质浓度写进各自的参数文件，不进 case.nml。
     let (param_fields, fields): (Vec<_>, Vec<_>) = fields.iter().cloned().partition(|field| {
         [METHANE_MODE, SOLUTE_INIT_CONC, SOLUTE_PRECIP_CONC]
@@ -4666,31 +4996,44 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     write_files_atomic_untracked(&writes).map(|_| ())
 }
 
-/// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO、Cl、
-/// SEDIMENT）仅在缺失时从上游模板生成；已有文件只修改向导明确提交的参数。
+/// 向导写的材质输运内置参数文件。上游把旧的单张 `DEF_TRACER_PARAM_FILES` 拆成按 family 的
+/// 单文件字段（同位素/甲烷/泥沙）与溶质名单；只有当向导点名内置模板时才在算例目录生成它。
+/// 已有文件只修改向导明确提交的参数。
 fn stage_tracer_parameters(
     dir: &str,
     fields: &[FieldChange],
     mode: Option<&str>,
     solute: (Option<&str>, Option<&str>),
 ) -> Result<(), String> {
-    let Some(files) = fields
-        .iter()
-        .find(|field| field.path == "DEF_TRACER_PARAM_FILES")
-        .map(|field| field.value.trim_matches(['\'', '"']).to_string())
-    else {
-        return Ok(());
+    let file = |key: &str| {
+        fields
+            .iter()
+            .find(|field| field.path.eq_ignore_ascii_case(key))
+            .map(|field| field.value.trim_matches(['\'', '"']).trim().to_string())
+            .filter(|value| !is_null_file(value))
     };
-    let listed = colm_namelist::tracer_files::param_file_paths(&files)
-        .map_err(|e| format!("DEF_TRACER_PARAM_FILES：{e:#}"))?;
-    let wanted = |file: &str| listed.iter().any(|f| f.trim() == file);
-    if wanted("standard_ch4_parameter.nml") {
-        stage_ch4_parameter(dir, mode)?;
+    let methane = file("DEF_METHANE_PARAM_FILE");
+    let isotope = file("DEF_ISOTOPE_PARAM_FILE");
+    let sediment = file("DEF_SEDIMENT_PARAM_FILE");
+    let solutes = fields
+        .iter()
+        .find(|field| field.path.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES"))
+        .map(|field| {
+            colm_namelist::tracer_files::param_file_paths(field.value.trim_matches(['\'', '"']))
+        })
+        .transpose()
+        .map_err(|e| format!("DEF_SOLUTE_PARAM_FILES：{e:#}"))?
+        .unwrap_or_default();
+    if methane.as_deref() == Some("standard_methane_parameter.nml") {
+        stage_methane_parameter(dir, mode)?;
     }
-    if wanted("standard_chloride_parameter.nml") {
+    if solutes
+        .iter()
+        .any(|file| file.trim() == "standard_chloride_parameter.nml")
+    {
         stage_solute_parameter(dir, solute)?;
     }
-    if wanted("standard_sediment_parameter.nml") {
+    if sediment.as_deref() == Some("standard_sediment_parameter.nml") {
         let path = std::path::Path::new(dir).join("standard_sediment_parameter.nml");
         stage_tracer_parameter_file(
             &path,
@@ -4698,91 +5041,76 @@ fn stage_tracer_parameters(
             &[],
         )?;
     }
-    let fractionation = fields.iter().any(|field| {
-        field.path == "DEF_TRACER_USE_FRACTIONATION"
-            && field.value.trim().eq_ignore_ascii_case(".true.")
-    });
-    for (file, template) in [
-        (
-            "standard_O18_parameter.nml",
-            include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
-        ),
-        (
-            "standard_HDO_parameter.nml",
-            include_str!("../../../vendor/CoLM202X/run/standard_HDO_parameter.nml"),
-        ),
-    ] {
-        if wanted(file) {
-            let text = isotope_parameter_text(template, fractionation)?;
-            let path = std::path::Path::new(dir).join(file);
-            stage_tracer_parameter_file(&path, &text, &[])?;
-        }
+    if isotope.as_deref() == Some("standard_isotope_parameter.nml") {
+        let fractionation = fields.iter().any(|field| {
+            field.path.eq_ignore_ascii_case("DEF_ISO_USE_FRACTIONATION")
+                && field.value.trim().eq_ignore_ascii_case(".true.")
+        });
+        let text = isotope_parameter_text(
+            include_str!("../../../vendor/CoLM202X/run/standard_isotope_parameter.nml"),
+            fractionation,
+        )?;
+        let path = std::path::Path::new(dir).join("standard_isotope_parameter.nml");
+        stage_tracer_parameter_file(&path, &text, &[])?;
     }
     Ok(())
 }
 
-/// Prepare defaults in the disposable model preview; commit them with case.nml only after validation.
+/// 新算例的预览目录里生成过内置参数文件；把它们随 case.nml 一起提交到源算例目录
+/// （源目录已有同名普通文件时不覆盖）。
 fn stage_case_tracer_parameters(
     dir: &str,
     context: &str,
     fields: &[FieldChange],
 ) -> Result<Vec<(std::path::PathBuf, String)>, String> {
-    let Some(selection) = fields
+    let mut selected = Vec::new();
+    for key in [
+        "DEF_ISOTOPE_PARAM_FILE",
+        "DEF_METHANE_PARAM_FILE",
+        "DEF_SEDIMENT_PARAM_FILE",
+    ] {
+        if let Some(field) = fields
+            .iter()
+            .find(|field| field.path.eq_ignore_ascii_case(key))
+        {
+            let file = field.value.trim_matches(['\'', '"']).trim().to_string();
+            if !is_null_file(&file) {
+                selected.push(file);
+            }
+        }
+    }
+    if let Some(field) = fields
         .iter()
-        .find(|f| f.path.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
-    else {
-        return Ok(Vec::new());
-    };
-    let text = std::fs::read_to_string(std::path::Path::new(context).join("case.nml"))
-        .map_err(|e| e.to_string())?;
-    let doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
-    let effective = character(&doc, "DEF_TRACER_PARAM_FILES");
-    stage_tracer_parameters(
-        context,
-        &[
-            FieldChange {
-                path: "DEF_TRACER_PARAM_FILES".into(),
-                value: effective.clone(),
-            },
-            FieldChange {
-                path: "DEF_TRACER_USE_FRACTIONATION".into(),
-                value: if logical(&doc, "DEF_TRACER_USE_FRACTIONATION") {
-                    ".true."
-                } else {
-                    ".false."
-                }
-                .into(),
-            },
-        ],
-        None,
-        (None, None),
-    )?;
-    let selected =
-        colm_namelist::tracer_files::param_file_paths(selection.value.trim_matches(['\'', '"']))
-            .map_err(|e| e.to_string())?;
-    let resolved =
-        colm_namelist::tracer_files::param_file_paths(&effective).map_err(|e| e.to_string())?;
+        .find(|field| field.path.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES"))
+    {
+        selected.extend(
+            colm_namelist::tracer_files::param_file_paths(field.value.trim_matches(['\'', '"']))
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|file| file.trim().to_string()),
+        );
+    }
     let mut pending = Vec::new();
     for file in selected {
         if !matches!(
             file.as_str(),
-            "standard_ch4_parameter.nml"
-                | "standard_chloride_parameter.nml"
+            "standard_methane_parameter.nml"
                 | "standard_sediment_parameter.nml"
-                | "standard_O18_parameter.nml"
-                | "standard_HDO_parameter.nml"
-        ) || !resolved.contains(&file)
-        {
+                | "standard_isotope_parameter.nml"
+                | "standard_chloride_parameter.nml"
+                | "standard_nh4_parameter.nml"
+                | "standard_no3_parameter.nml"
+        ) {
             continue;
         }
         let path = std::path::Path::new(dir).join(&file);
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => continue,
-            Ok(_) => return Err(format!("{}: 示踪物参数目标必须是普通文件", path.display())),
+            Ok(_) => return Err(format!("{}: 材质参数目标必须是普通文件", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("{}: {error}", path.display())),
         }
-        let text = std::fs::read_to_string(std::path::Path::new(context).join(file))
+        let text = std::fs::read_to_string(std::path::Path::new(context).join(&file))
             .map_err(|e| e.to_string())?;
         pending.push((path, text));
     }
@@ -4835,25 +5163,22 @@ fn stage_tracer_parameter_file(
     }
 }
 
-/// 同位素参数文件。分馏要读 IsoGSM 的同位素降水与水汽，上游模板里那一组强迫原样保留；不分馏时
-/// 整组删掉——两个引擎遇到没有这一组的文件都按"没有示踪物强迫"处理，降水与水汽取 `init_delta`
-/// 对应的缺省比值。替换进去的说明里不能再出现那一组的组名，否则会被当成这一组还在。
+/// 同位素参数文件。分馏要读 IsoGSM 的同位素降水与水汽，上游模板里每个物种一组
+/// `&nl_colm_mt_forcing`，原样保留；不分馏时把这些组全部删掉——两个引擎遇到没有强迫组
+/// 的文件都按"没有同位素强迫"处理，降水与水汽取 `init_delta` 对应的缺省比值。
+/// 替换进去的说明里不能再出现那一组的组名，否则会被当成这一组还在。
 fn isotope_parameter_text(template: &str, fractionation: bool) -> Result<String, String> {
+    const GROUP: &str = "&nl_colm_mt_forcing";
     if fractionation {
         return Ok(template.to_string());
     }
+    // 强迫组总在文件尾部，且一个物种一组；从第一组起整段删掉即可。
     let start = template
-        .find("&nl_colm_tracer_forcing")
-        .ok_or("内置同位素参数模板缺少示踪物强迫组")?;
-    let end = template[start..]
-        .find("\n/")
-        .map(|k| start + k + 2)
-        .ok_or("内置同位素参数模板的示踪物强迫组没有结尾")?;
-    let rest = template[end..].trim_start_matches(['\r', '\n']);
+        .find(GROUP)
+        .ok_or("内置同位素参数模板缺少同位素强迫组")?;
+    let kept = template[..start].trim_end();
     Ok(format!(
-        "{}! 不分馏：已去掉示踪物强迫组（IsoGSM 同位素降水与水汽），降水与水汽取缺省比值。\n{}",
-        &template[..start],
-        rest
+        "{kept}\n! 不分馏：已去掉同位素强迫组（IsoGSM 同位素降水与水汽），降水与水汽取缺省比值。\n"
     ))
 }
 
@@ -4891,8 +5216,8 @@ fn stage_solute_parameter(
     stage_tracer_parameter_file(&path, &doc.to_string(), &changed_fields)
 }
 
-/// CH4 参数文件：淹没方案取向导所选，关掉稻田与空间 pH（分别要 CROP 稻田与预处理生成的 pH 数据）。
-fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
+/// 甲烷参数文件：淹没方案取向导所选，关掉稻田与空间 pH（分别要 CROP 稻田与预处理生成的 pH 数据）。
+fn stage_methane_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
     let changed_fields = if mode.is_some() {
         &[METHANE_MODE][..]
     } else {
@@ -4908,7 +5233,7 @@ fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
     }
     let mode_line = format!("DEF_METHANE%inundation_mode  = '{mode}'");
     let mut text =
-        include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml").to_string();
+        include_str!("../../../vendor/CoLM202X/run/standard_methane_parameter.nml").to_string();
     for (from, to) in [
         (
             "DEF_METHANE%inundation_mode  = 'hybrid'",
@@ -4928,7 +5253,7 @@ fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
         }
         text = text.replacen(from, to, 1);
     }
-    let path = std::path::Path::new(dir).join("standard_ch4_parameter.nml");
+    let path = std::path::Path::new(dir).join("standard_methane_parameter.nml");
     stage_tracer_parameter_file(&path, &text, changed_fields)
 }
 
@@ -5035,7 +5360,9 @@ fn set_fields_with_forcing(
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
         }
         for key in remove_fields {
-            if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+            // 材质参数文件字段有默认占位（'null'），删项时写成空串而不是从 namelist 组里移除，
+            // 否则下一次读取会退回模板默认路径。
+            if is_removable_placeholder(key) {
                 put(&mut doc, key, colm_namelist::Value::Str(String::new()))?;
             } else {
                 doc.remove(key).map_err(|e| format!("{d}: {e}"))?;
@@ -5078,14 +5405,14 @@ fn set_fields_with_forcing(
             let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
             for field in &fields {
                 // The candidate preview already resolves aliases to the selected frozen assets.
-                if field.path.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                if is_removable_placeholder(&field.path) {
                     continue;
                 }
                 put(&mut overlay, &field.path, typed(&field.path, &field.value)?)
                     .map_err(|e| e.to_string())?;
             }
             for key in remove_fields {
-                if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                if is_removable_placeholder(key) {
                     put(&mut overlay, key, colm_namelist::Value::Str(String::new()))?;
                 } else {
                     overlay.remove(key).map_err(|e| format!("{d}: {e}"))?;

@@ -462,11 +462,9 @@ impl SedimentParams {
                 self.diam.iter().all(|d| d.is_finite() && *d > 0.0),
                 "sediment grain diameters must be positive"
             );
-            let dmax = self.diam.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            ensure!(
-                self.lyrdph >= dmax,
-                "sediment active layer depth is thinner than the largest grain"
-            );
+            // 上游 7d2fca93 把"活动层比最大粒径薄"从停机降成了**警告**
+            // （`MOD_MT_Sediment.F90:577-584`：标准参数文件本身就是 0.05 mm 活动层
+            // 配 1 mm 砂）。这里照做，不再把它当作致命错误。
         }
         if !self.setvel.is_empty() {
             ensure!(

@@ -116,7 +116,7 @@ fn accepts_a_logical_written_without_its_trailing_dot() {
 
 #[test]
 fn keeps_the_double_quotes_the_file_used() {
-    // 156 处，集中在 CaMa 与 TRACER 的 namelist。Value::Str 只会写单引号。
+    // 156 处，集中在 CaMa 与 MaterialTransport 的 namelist。Value::Str 只会写单引号。
     let src = "&NMAP\n   CDIMINFO = \"../CaMa/map/glb.txt\"\n/\n";
     let d = doc(src);
     assert_eq!(

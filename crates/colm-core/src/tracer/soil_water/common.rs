@@ -1,7 +1,7 @@
 //! `tracer_soil_water` 与 `tracer_wetland` 共用的部分：含水层参考水的记账、`check_isotope_aquifer`、
 //! `exhaust_surface_phase`、`release_leaf_iso_storage`、内部函数 `atmospheric_loss_tracer`/
 //! `deposition_ratio_for`（不分馏形态）、雪顶层外部通量与雪层渗流（两处镜像）、溶质的
-//! 气相扩散（`DEF_TRACER_SOIL_VAPOR_DIFFUSION`）。
+//! 气相扩散（`DEF_ISO_SOIL_VAPOR_DIFFUSION`）。
 
 use anyhow::{bail, Result};
 use colm_numeric::Contract;
@@ -240,7 +240,7 @@ pub fn release_leaf_iso_storage(
 #[derive(Clone, Copy)]
 pub(super) enum EvapKinetics {
     /// `tracer_soil_water`：裸土液面蒸发（`kinetic_on_soil_surface`）且
-    /// `DEF_TRACER_SOIL_KINETIC = 'RESISTANCE'` 且 `ra`/`rss` 都给了时按阻力加权，
+    /// `DEF_ISO_SOIL_KINETIC = 'RESISTANCE'` 且 `ra`/`rss` 都给了时按阻力加权，
     /// 否则 `tracer_alpha_kinetic_craig_gordon`。
     Soil {
         resistance: bool,
@@ -257,7 +257,7 @@ pub(super) struct TracerCtx<'a> {
     pub tracer: &'a TracerDescriptor,
     pub itrc: usize,
     pub nonvolatile: bool,
-    /// `DEF_TRACER_SUBL_SKIN_MM`（上游总以 `skin_mass=` 传入）。
+    /// `DEF_ISO_SUBL_SKIN_MM`（上游总以 `skin_mass=` 传入）。
     pub subl_skin_mm: f64,
     pub physics: TracerPhysics,
     /// `tracer_fractionation_active(itrc)`。
@@ -430,7 +430,7 @@ pub(super) struct SnowColumn<'a> {
     pub wice_soisno_bef: &'a [f64; SOISNO_LAYERS],
     pub snow_qout_layer: Option<&'a [f64; MAX_SNOW_LAYERS]>,
     pub layer_temp: &'a dyn Fn(i32) -> f64,
-    /// `DEF_TRACER_SNOWMELT_EQUILIBRATION`。
+    /// `DEF_ISO_SNOWMELT_EQUILIBRATION`。
     pub snowmelt_equilibration: f64,
 }
 
@@ -698,7 +698,7 @@ pub(super) fn snow_column(
     }
 }
 
-/// 雪层之间的冰相气相扩散（`DEF_TRACER_SOIL_VAPOR_DIFFUSION`，`:1424-1470`）。未登记分馏物理的
+/// 雪层之间的冰相气相扩散（`DEF_ISO_SOIL_VAPOR_DIFFUSION`，`:1424-1470`）。未登记分馏物理的
 /// 示踪物 `tracer_diffusivity_ratio_air = tracer_alpha_ice_vap = 1`。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn snow_vapor_diffusion(
@@ -778,7 +778,7 @@ pub(super) fn snow_vapor_diffusion(
 }
 
 /// 土壤层之间的扩散（液膜 + 孔隙气相，`:1337-1420`）。液相自扩散系数对未登记分馏物理的
-/// 示踪物是 0：只开 `DEF_TRACER_SOIL_DIFFUSION` 时第一个合格界面就 `EXIT`。
+/// 示踪物是 0：只开 `DEF_ISO_SOIL_DIFFUSION` 时第一个合格界面就 `EXIT`。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn soil_diffusion(
     ctx: &TracerCtx<'_>,

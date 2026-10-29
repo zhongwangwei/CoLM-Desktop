@@ -17,9 +17,7 @@ MODULE MOD_Hydro_SoilWater
 
    USE MOD_Precision
    USE MOD_Hydro_SoilFunction
-   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_Campbell_SOIL_MODEL
-   USE MOD_SPMD_Task, only: CoLM_stop
-   USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
+   USE MOD_Namelist, only: DEF_USE_PLANTHYDRAULICS, DEF_USE_Campbell_SOIL_MODEL, DEF_USE_CoLMDEBUG
    USE MOD_UserDefFun, only: findloc_ud
 
    IMPLICIT NONE
@@ -57,7 +55,8 @@ MODULE MOD_Hydro_SoilWater
 
    ! private subroutines and functions
    PRIVATE :: Richards_solver
-   PRIVATE :: project_richards_liquid_water
+   PRIVATE :: mt_exchange_layer_water
+   PRIVATE :: mt_split_aquifer_exchange
 
    PRIVATE :: water_balance
    PRIVATE :: initialize_sublevel_structure
@@ -165,10 +164,10 @@ CONTAINS
          vl_r,       psi_s,      hksat,  nprm,     prms,          porsl_wa, &
          qgtop,      etr,        rootr,  rootflux, rsubst,        qinfl,    &
          ss_dp,      zwt,        wa,     ss_vliq,  smp,           hk,       &
-         qlayer                                                          &
-        ,etroot_out, etroot_actual_out, etroot_aquifer_out, etroot_surface_out, &
-        rsub_layer_out, rsub_surface_out, rsub_aquifer_out &
-        ,tolerance,  wblc)
+         qlayer,                                                            &
+         etroot_out, etroot_actual_out, etroot_aquifer_out, etroot_surface_out, &
+         rsub_layer_out, rsub_surface_out, rsub_aquifer_out,                &
+         tolerance,  wblc)
 
    !=======================================================================
    ! this is the main subroutine to execute the calculation of
@@ -216,11 +215,16 @@ CONTAINS
    real(r8), intent(out) :: hk (1:nlev) ! hydraulic conductivity (mm/s)
 
    real(r8), intent(out) :: qlayer(0:nlev) ! water flux at interface of soil layers (mm/s)
-
-   real(r8), intent(out) :: etroot_out(1:nlev)
-   real(r8), intent(out) :: etroot_actual_out(1:nlev)
-   real(r8), intent(out) :: etroot_aquifer_out
-   real(r8), intent(out) :: etroot_surface_out
+   ! Diagnostics for material transport only (mm per time step). They are
+   ! derived from the host water state before and after each host operation
+   ! and are never read back by the host, so the soil-water solution is the
+   ! same with or without MaterialTransport.
+   ! etroot_*: water taken by roots (negative: water released by roots);
+   ! rsub_*  : water leaving as subsurface runoff, by donor store.
+   real(r8), intent(out) :: etroot_out(1:nlev)        ! root flux demand per layer (mm/s)
+   real(r8), intent(out) :: etroot_actual_out(1:nlev) ! root water taken from each layer
+   real(r8), intent(out) :: etroot_aquifer_out        ! root water taken from the aquifer
+   real(r8), intent(out) :: etroot_surface_out        ! root water taken from ponding water
    real(r8), intent(out) :: rsub_layer_out(1:nlev), rsub_surface_out, rsub_aquifer_out
 
    real(r8), intent(in)  :: tolerance
@@ -230,7 +234,6 @@ CONTAINS
    ! Local variables
    integer  :: lb, ub, ilev, izwt
    real(r8) :: sumroot, deficit, etrdef, wexchange
-   real(r8) :: attempted, ss_vliq_pre, residual_mm
    real(r8) :: dp_m1, psi, vliq, zwtp, air
    logical  :: is_sat
 
@@ -244,9 +247,8 @@ CONTAINS
    real(r8) :: lbc_val_sub
 
    real(r8) :: w_sum_before, w_sum_after, vl_before(nlev), wt_before, wa_before, dp_before
-   real(r8) :: exchange_dp_before, pond_exchange
-   real(r8) :: exchange_layer_before(nlev), exchange_layer_after, exchange_wa_before
-   real(r8) :: exchange_zwt_before, et_fraction, rsub_fraction, layer_debit
+   real(r8) :: mt_layer_pre, mt_dp_pre, mt_wa_pre
+   real(r8) :: mt_layer_before(nlev), mt_layer_after(nlev)
 
    real(r8) :: tol_q, tol_z, tol_v, tol_p
 
@@ -300,8 +302,7 @@ CONTAINS
          etrdef = 0.
          etroot(:) = rootflux
       ENDIF
-
-      etroot_out(1:nlev) = etroot(1:nlev)
+      etroot_out(1:nlev)        = etroot(1:nlev)
       etroot_actual_out(1:nlev) = 0._r8
       etroot_aquifer_out        = 0._r8
       etroot_surface_out        = 0._r8
@@ -314,24 +315,22 @@ CONTAINS
       DO ilev = 1, izwt-1
          IF (is_permeable(ilev)) THEN
 
-            attempted   = etroot(ilev)*dt + deficit
-            ss_vliq_pre = ss_vliq(ilev) * sp_dz(ilev)
-
-            ss_vliq(ilev) = (ss_vliq_pre - etroot(ilev)*dt - deficit) / sp_dz(ilev)
+            mt_layer_pre = ss_vliq(ilev) * sp_dz(ilev)
+            ss_vliq(ilev) = (ss_vliq(ilev) * sp_dz(ilev) &
+               - etroot(ilev)*dt - deficit) / sp_dz(ilev)
 
             IF (ss_vliq(ilev) < 0) THEN
-               residual_mm  = -ss_vliq(ilev) * sp_dz(ilev)
-               etroot_actual_out(ilev) = max(ss_vliq_pre, 0._r8)
-               deficit = residual_mm
+               deficit = ( - ss_vliq(ilev)) * sp_dz(ilev)
                ss_vliq(ilev) = 0
             ELSEIF (ss_vliq(ilev) > porsl(ilev)) THEN
-               etroot_actual_out(ilev) = ss_vliq_pre - porsl(ilev)*sp_dz(ilev)
-               deficit = -(ss_vliq(ilev) - porsl(ilev)) * sp_dz(ilev)
+               deficit = - (ss_vliq(ilev) - porsl(ilev)) * sp_dz(ilev)
                ss_vliq(ilev) = porsl(ilev)
             ELSE
-               etroot_actual_out(ilev) = attempted
                deficit = 0.
             ENDIF
+            ! Water actually taken by roots from this layer, after the
+            ! host's clipping to [0, porsl]; the rest moved on in deficit.
+            etroot_actual_out(ilev) = mt_layer_pre - ss_vliq(ilev) * sp_dz(ilev)
          ELSE
             deficit = deficit + etroot(ilev)*dt
          ENDIF
@@ -343,90 +342,22 @@ CONTAINS
 
       ! Exchange water with aquifer
       wexchange = rsubst * dt + deficit
-      exchange_dp_before = ss_dp
-      pond_exchange = 0._r8
-      ! A PHS net root return and the baseflow are exchanged with the aquifer in two
-      ! separate steps (formerly only in TRACER builds; others applied their sum once).
-      IF (DEF_USE_PLANTHYDRAULICS .and. deficit < 0._r8) THEN
-         exchange_wa_before = wa
-         exchange_zwt_before = zwt
-         DO ilev = 1, nlev
-            exchange_layer_before(ilev) = ss_vliq(ilev) * sp_dz(ilev)
-            IF (is_permeable(ilev) .and. exchange_zwt_before < sp_zi(ilev)) THEN
-               exchange_layer_before(ilev) = ss_vliq(ilev) * &
-                  max(exchange_zwt_before-sp_zi(ilev-1), 0._r8) + &
-                  porsl(ilev) * min(sp_zi(ilev)-exchange_zwt_before, sp_dz(ilev))
-            ENDIF
-         ENDDO
-         CALL soilwater_aquifer_exchange ( &
-            nlev, deficit, sp_zi, is_permeable, porsl, vl_r, psi_s, hksat, &
-            nprm, prms, porsl_wa, ss_dp, ss_vliq, zwt, wa, izwt)
-         etroot_surface_out = exchange_dp_before - ss_dp
-         etroot_aquifer_out = exchange_wa_before - wa
-         DO ilev = 1, nlev
-            exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-            IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
-               exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
-                  porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
-            ENDIF
-            etroot_actual_out(ilev) = etroot_actual_out(ilev) + &
-               exchange_layer_before(ilev) - exchange_layer_after
-            exchange_layer_before(ilev) = exchange_layer_after
-         ENDDO
-         exchange_wa_before = wa
-         exchange_dp_before = ss_dp
-         IF (rsubst > 0._r8) THEN
-            CALL soilwater_aquifer_exchange ( &
-               nlev, rsubst*dt, sp_zi, is_permeable, porsl, vl_r, psi_s, hksat, &
-               nprm, prms, porsl_wa, ss_dp, ss_vliq, zwt, wa, izwt)
-            rsub_surface_out = max(exchange_dp_before-ss_dp, 0._r8)
-            rsub_aquifer_out = max(exchange_wa_before-wa, 0._r8)
-            DO ilev = 1, nlev
-               exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-               IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
-                  exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
-                     porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
-               ENDIF
-               rsub_layer_out(ilev) = max(exchange_layer_before(ilev)-exchange_layer_after, 0._r8)
-            ENDDO
-         ENDIF
-         pond_exchange = dp_before-ss_dp
-      ELSE
-      IF (wexchange > 0._r8) THEN
-         et_fraction = min(max(deficit, 0._r8) / wexchange, 1._r8)
-         rsub_fraction = 1._r8 - et_fraction
-         exchange_wa_before = wa
-         exchange_zwt_before = zwt
-         DO ilev = 1, nlev
-            exchange_layer_before(ilev) = ss_vliq(ilev) * sp_dz(ilev)
-            IF (is_permeable(ilev) .and. exchange_zwt_before < sp_zi(ilev)) THEN
-               exchange_layer_before(ilev) = ss_vliq(ilev) * &
-                  max(exchange_zwt_before-sp_zi(ilev-1), 0._r8) + &
-                  porsl(ilev) * min(sp_zi(ilev)-exchange_zwt_before, sp_dz(ilev))
-            ENDIF
-         ENDDO
-      ENDIF
+      ! The host exchanges the net amount rsubst*dt + deficit in one call.
+      ! Record the stores around that call so the change of each store can
+      ! be split into its root-water and subsurface-runoff parts.
+      mt_dp_pre = ss_dp
+      mt_wa_pre = wa
+      CALL mt_exchange_layer_water (nlev, sp_zi, is_permeable, porsl, ss_vliq, zwt, &
+         mt_layer_before)
       CALL soilwater_aquifer_exchange ( &
          nlev, wexchange, sp_zi, is_permeable, porsl, vl_r, psi_s, hksat, &
          nprm, prms, porsl_wa, ss_dp, ss_vliq, zwt, wa, izwt)
-      IF (wexchange > 0._r8) pond_exchange = max(exchange_dp_before-ss_dp, 0._r8)
-      IF (wexchange > 0._r8) THEN
-         etroot_surface_out = pond_exchange * et_fraction
-         rsub_surface_out = pond_exchange * rsub_fraction
-         etroot_aquifer_out = max(exchange_wa_before-wa, 0._r8) * et_fraction
-         rsub_aquifer_out = max(exchange_wa_before-wa, 0._r8) * rsub_fraction
-         DO ilev = 1, nlev
-            exchange_layer_after = ss_vliq(ilev) * sp_dz(ilev)
-            IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
-               exchange_layer_after = ss_vliq(ilev) * max(zwt-sp_zi(ilev-1), 0._r8) + &
-                  porsl(ilev) * min(sp_zi(ilev)-zwt, sp_dz(ilev))
-            ENDIF
-            layer_debit = max(exchange_layer_before(ilev)-exchange_layer_after, 0._r8)
-            etroot_actual_out(ilev) = etroot_actual_out(ilev) + layer_debit * et_fraction
-            rsub_layer_out(ilev) = layer_debit * rsub_fraction
-         ENDDO
-      ENDIF
-      ENDIF
+      CALL mt_exchange_layer_water (nlev, sp_zi, is_permeable, porsl, ss_vliq, zwt, &
+         mt_layer_after)
+      CALL mt_split_aquifer_exchange (nlev, rsubst*dt, deficit, &
+         mt_layer_before - mt_layer_after, mt_wa_pre - wa, mt_dp_pre - ss_dp, &
+         etroot_actual_out, etroot_aquifer_out, etroot_surface_out, &
+         rsub_layer_out, rsub_aquifer_out, rsub_surface_out)
 
       ! water table location
       ss_wt(:) = 0._r8
@@ -523,7 +454,7 @@ CONTAINS
          ENDIF
       ENDDO
 
-      qinfl = qgtop - (ss_dp - dp_m1 + pond_exchange)/dt
+      qinfl = qgtop - (ss_dp - dp_m1)/dt
 
       ! total water mass
       w_sum_after = ss_dp
@@ -573,20 +504,123 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (DEF_USE_PLANTHYDRAULICS .and. &
-          .not. any(etroot_actual_out > 0._r8) .and. &
-          etroot_aquifer_out <= 0._r8 .and. etroot_surface_out <= 0._r8) THEN
-         IF (-sum(min(etroot_actual_out, 0._r8)) - &
-             min(etroot_aquifer_out, 0._r8) - min(etroot_surface_out, 0._r8) <= &
-             max(sqrt(epsilon(1._r8)) * sum(abs(etroot)) * dt, &
-                 8._r8*epsilon(1._r8)*maxval(abs(ss_vliq(1:nlev)*sp_dz(1:nlev))))) THEN
-            etroot_actual_out = 0._r8
-            etroot_aquifer_out = 0._r8
-            etroot_surface_out = 0._r8
+   END SUBROUTINE soil_water_vertical_movement
+
+   ! --- material transport: water held by each layer ---
+   ! Liquid water of each layer counting the saturated part below the water
+   ! table at porosity, i.e. the storage soilwater_aquifer_exchange moves.
+   SUBROUTINE mt_exchange_layer_water (nlev, sp_zi, is_permeable, porsl, ss_vliq, zwt, wlayer)
+
+   IMPLICIT NONE
+
+   integer,  intent(in)  :: nlev
+   real(r8), intent(in)  :: sp_zi (0:nlev)
+   logical,  intent(in)  :: is_permeable (1:nlev)
+   real(r8), intent(in)  :: porsl (1:nlev)
+   real(r8), intent(in)  :: ss_vliq (1:nlev)
+   real(r8), intent(in)  :: zwt
+   real(r8), intent(out) :: wlayer (1:nlev)
+
+   integer :: ilev
+
+      DO ilev = 1, nlev
+         wlayer(ilev) = ss_vliq(ilev) * (sp_zi(ilev) - sp_zi(ilev-1))
+         IF (is_permeable(ilev) .and. zwt < sp_zi(ilev)) THEN
+            wlayer(ilev) = ss_vliq(ilev) * max(zwt - sp_zi(ilev-1), 0._r8) &
+               + porsl(ilev) * min(sp_zi(ilev) - zwt, sp_zi(ilev) - sp_zi(ilev-1))
          ENDIF
+      ENDDO
+
+   END SUBROUTINE mt_exchange_layer_water
+
+   ! --- material transport: split the net aquifer exchange ---
+   ! The host moves the net amount drain + et_left (subsurface runoff plus the
+   ! root demand that the unsaturated layers could not meet, negative when
+   ! roots release water) in one soilwater_aquifer_exchange call. Given the
+   ! loss of each store in that call (layers, aquifer, ponding water), split
+   ! it into root water and subsurface runoff:
+   !  * net removal, et_left >= 0: each store's loss is shared in proportion
+   !    et_left : drain;
+   !  * net removal, et_left < 0: the released root water is put into the
+   !    losing stores in proportion to their loss, and leaves with the runoff;
+   !  * net addition (et_left < 0 and larger than drain): the released water
+   !    enters the gaining stores, the runoff leaves from them in proportion.
+   ! In every case root water minus runoff of a store equals its net loss.
+   SUBROUTINE mt_split_aquifer_exchange (nlev, drain, et_left, &
+         dlayer, dwa, ddp, etroot_layer, etroot_wa, etroot_dp, &
+         rsub_layer, rsub_wa, rsub_dp)
+
+   IMPLICIT NONE
+
+   integer,  intent(in)    :: nlev
+   real(r8), intent(in)    :: drain, et_left    ! mm
+   real(r8), intent(in)    :: dlayer(1:nlev), dwa, ddp  ! loss of each store (mm)
+   real(r8), intent(inout) :: etroot_layer(1:nlev), etroot_wa, etroot_dp
+   real(r8), intent(out)   :: rsub_layer(1:nlev), rsub_wa, rsub_dp
+
+   real(r8) :: share(1:nlev+2), w(1:nlev+2), wsum, et_fraction, release
+
+      rsub_layer = 0._r8
+      rsub_wa    = 0._r8
+      rsub_dp    = 0._r8
+
+      IF (drain + et_left > 0._r8) THEN
+         ! net removal; gains of single stores are not expected here
+         share(1:nlev) = max(dlayer, 0._r8)
+         share(nlev+1) = max(dwa, 0._r8)
+         share(nlev+2) = max(ddp, 0._r8)
+         IF (et_left >= 0._r8) THEN
+            et_fraction = min(et_left / (drain + et_left), 1._r8)
+            etroot_layer = etroot_layer + share(1:nlev) * et_fraction
+            etroot_wa    = share(nlev+1) * et_fraction
+            etroot_dp    = share(nlev+2) * et_fraction
+            rsub_layer   = share(1:nlev) * (1._r8 - et_fraction)
+            rsub_wa      = share(nlev+1) * (1._r8 - et_fraction)
+            rsub_dp      = share(nlev+2) * (1._r8 - et_fraction)
+         ELSE
+            release = - et_left
+            wsum = sum(share)
+            IF (wsum > 0._r8) THEN
+               w = share / wsum
+            ELSE
+               w = 0._r8;  w(nlev+1) = 1._r8
+            ENDIF
+            etroot_layer = etroot_layer - release * w(1:nlev)
+            etroot_wa    = - release * w(nlev+1)
+            etroot_dp    = - release * w(nlev+2)
+            rsub_layer   = share(1:nlev) + release * w(1:nlev)
+            rsub_wa      = share(nlev+1) + release * w(nlev+1)
+            rsub_dp      = share(nlev+2) + release * w(nlev+2)
+         ENDIF
+      ELSEIF (et_left < 0._r8) THEN
+         ! net addition of released root water
+         share(1:nlev) = max(-dlayer, 0._r8)
+         share(nlev+1) = max(-dwa, 0._r8)
+         share(nlev+2) = max(-ddp, 0._r8)
+         wsum = sum(share)
+         IF (wsum > 0._r8) THEN
+            w = share / wsum
+         ELSE
+            w = 0._r8;  w(nlev+1) = 1._r8
+         ENDIF
+         etroot_layer = etroot_layer - share(1:nlev) - drain * w(1:nlev)
+         etroot_wa    = - share(nlev+1) - drain * w(nlev+1)
+         etroot_dp    = - share(nlev+2) - drain * w(nlev+2)
+         rsub_layer   = drain * w(1:nlev)
+         rsub_wa      = drain * w(nlev+1)
+         rsub_dp      = drain * w(nlev+2)
       ENDIF
 
-   END SUBROUTINE soil_water_vertical_movement
+      ! Diagnostic for the aquifer-debt investigation: the split treats the
+      ! host wa drop as an aquifer loss, so a host wa driven far below zero
+      ! (or an unexpectedly large drain) shows up here.  Print-only; it does
+      ! not change the split.
+      IF (abs(dwa) > 1.0e3_r8 .or. abs(drain) > 1.0e3_r8) THEN
+         write(*,'(A,6ES16.8)') 'MT_DIAG split_aquifer drain,dwa,ddp,et_left,rsub_wa,share_wa: ', &
+            drain, dwa, ddp, et_left, rsub_wa, share(nlev+1)
+      ENDIF
+
+   END SUBROUTINE mt_split_aquifer_exchange
 
    ! --- water exchange between soil water and aquifer ---
    SUBROUTINE soilwater_aquifer_exchange ( &
@@ -742,7 +776,6 @@ CONTAINS
          ss_dp, waquifer, ss_vl, ss_wt, ss_q, &
          tol_q, tol_z, tol_v, tol_p)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: lb, ub      ! lower and upper boundary
@@ -837,17 +870,13 @@ CONTAINS
 
    logical  :: wet2dry
 
-   real(r8) :: wsum_m1, wsum, werr, mass_budget
-   logical :: projection_ok
+   real(r8) :: wsum_m1, wsum, werr
 
       ss_wf(lb:ub) = 0
 
       DO ilev = lb, ub
          sp_dz(ilev) = sp_zi(ilev) - sp_zi(ilev-1)
       ENDDO
-
-      mass_budget = 256._r8 * epsilon(1._r8) * &
-         max(1._r8, sum(abs(sp_dz * vl_s)))
 
       dt_explicit = dt / max_iters_richards
 
@@ -933,23 +962,10 @@ CONTAINS
                .or. (.not. is_solvable)          &
                .or. wet2dry) THEN
 
-               ! Defined in every build: the convergence test below reads it.
-               projection_ok = .true.
-               IF ((f2_norm(iter) < tol_richards * dt_this) .and. &
-                   (dt_this >= dt_explicit) .and. (iter < max_iters_richards) .and. &
-                   is_solvable .and. (.not. wet2dry) .and. &
-                   (abs(sum(blc)) > mass_budget)) THEN
-                  CALL project_richards_liquid_water ( &
-                     lb, ub, sp_dz, dt_this, vl_s, vl_r, q_this, &
-                     ubc_typ, ubc_val, lbc_typ, ss_dp, waquifer, &
-                     ss_wf, ss_vl, ss_wt, dp_m1, waquifer_m1, &
-                     wf_m1, vl_m1, wt_m1, mass_budget, projection_ok)
-               ENDIF
-
                IF ((dt_this < dt_explicit) &
                   .or. (iter >= max_iters_richards) &
                   .or. (.not. is_solvable) &
-                  .or. wet2dry .or. (.not. projection_ok)) THEN
+                  .or. wet2dry) THEN
 
                   dt_this = min(dt_this, dt_explicit)
                   q_this  = q_0
@@ -969,13 +985,13 @@ CONTAINS
                dt_done = dt_done + dt_this
 
                IF (DEF_USE_CoLMDEBUG) THEN
-               IF (f2_norm(iter) < tol_richards * dt_this) THEN
-                  count_implicit = count_implicit + 1
-               ELSEIF (iter >= max_iters_richards) then
-                  count_explicit = count_explicit + 1
-               ELSEIF (wet2dry) THEN
-                  count_wet2dry = count_wet2dry + 1
-               ENDIF
+                  IF (f2_norm(iter) < tol_richards * dt_this) THEN
+                     count_implicit = count_implicit + 1
+                  ELSEIF (iter >= max_iters_richards) then
+                     count_explicit = count_explicit + 1
+                  ELSEIF (wet2dry) THEN
+                     count_wet2dry = count_wet2dry + 1
+                  ENDIF
                ENDIF
 
                EXIT
@@ -1205,70 +1221,6 @@ CONTAINS
       ENDDO
 
    END SUBROUTINE Richards_solver
-
-
-   SUBROUTINE project_richards_liquid_water ( &
-         lb, ub, dz, dt, vl_s, vl_r, q, ubc_typ, ubc_val, lbc_typ, &
-         dp, waquifer, wf, vl, wt, dp_m1, waquifer_m1, &
-         wf_m1, vl_m1, wt_m1, mass_budget, success)
-
-   integer, intent(in) :: lb, ub, ubc_typ, lbc_typ
-   real(r8), intent(in) :: dz(lb:ub), dt, vl_s(lb:ub), vl_r(lb:ub)
-   real(r8), intent(in) :: q(lb-1:ub), ubc_val, dp, waquifer
-   real(r8), intent(in) :: wf(lb:ub), wt(lb:ub), dp_m1, waquifer_m1
-   real(r8), intent(in) :: wf_m1(lb:ub), vl_m1(lb:ub), wt_m1(lb:ub)
-   real(r8), intent(in) :: mass_budget
-   real(r8), intent(inout) :: vl(lb:ub)
-   logical, intent(out) :: success
-
-   real(r8) :: candidate(lb:ub), unsat, residual
-   real(r8) :: level_budget, total_residual
-   integer :: j
-
-      success = .false.
-      level_budget = mass_budget / real(ub-lb+3, r8)
-      total_residual = 0._r8
-      IF (ubc_typ == BC_RAINFALL) THEN
-         residual = max(dp, 0._r8) - max(dp_m1, 0._r8) - (ubc_val-q(lb-1))*dt
-         IF (.not. ieee_is_finite(residual)) RETURN
-         IF (abs(residual) > level_budget) RETURN
-         total_residual = total_residual + residual
-      ENDIF
-      IF (lbc_typ == BC_DRAINAGE) THEN
-         residual = waquifer - waquifer_m1 - q(ub)*dt
-         IF (.not. ieee_is_finite(residual)) RETURN
-         IF (abs(residual) > level_budget) RETURN
-         total_residual = total_residual + residual
-      ENDIF
-
-      DO j = lb, ub
-         unsat = dz(j) - wf(j) - wt(j)
-         residual = (vl_s(j)-vl_m1(j)) * &
-            ((wf(j)-wf_m1(j)) + (wt(j)-wt_m1(j))) &
-            + unsat*(vl(j)-vl_m1(j)) - (q(j-1)-q(j))*dt
-         IF (.not. ieee_is_finite(residual) .or. &
-             .not. ieee_is_finite(unsat)) RETURN
-         candidate(j) = vl(j)
-         IF (abs(residual) > level_budget) THEN
-            IF (unsat <= 64._r8*epsilon(1._r8)*max(1._r8, dz(j))) RETURN
-            candidate(j) = vl(j) - residual/unsat
-            IF (.not. ieee_is_finite(candidate(j))) RETURN
-            IF (candidate(j) < max(0._r8, min(vl_r(j), vl(j))) .or. &
-                candidate(j) > vl_s(j)) RETURN
-         ENDIF
-         residual = (vl_s(j)-vl_m1(j)) * &
-            ((wf(j)-wf_m1(j)) + (wt(j)-wt_m1(j))) &
-            + unsat*(candidate(j)-vl_m1(j)) - (q(j-1)-q(j))*dt
-         IF (abs(residual) > level_budget) RETURN
-         total_residual = total_residual + residual
-      ENDDO
-
-      IF (abs(total_residual) > mass_budget) RETURN
-
-      vl = candidate
-      success = .true.
-
-   END SUBROUTINE project_richards_liquid_water
 
 
    ! ---- water balance ----
@@ -2941,7 +2893,8 @@ CONTAINS
          IF (DEF_USE_Campbell_SOIL_MODEL) THEN
             ! bsw => prms(1)
             r0 = 1.0_r8 / (3.0_r8 / prms(1) + 2.0_r8)
-         ELSE
+         ENDIF
+         IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
             ! n_gm => prms(2), L_gm => prms(3)
             r0 = 1.0_r8 / (prms(3) * (prms(2) - 1.0_r8) + prms(2) * 2.0_r8)
          ENDIF
@@ -2974,7 +2927,6 @@ CONTAINS
          psi_s_l, hksat_l, prms_l, dz_l, psi_l, hk_l, &
          flux_u, flux_l, tol_q, tol_p)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: nprm
@@ -3068,9 +3020,9 @@ CONTAINS
       ENDDO
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (iter == 50) THEN
-         write(*,*) 'Warning : flux_at_unsaturated_interface: not converged.'
-      ENDIF
+         IF (iter == 50) THEN
+            write(*,*) 'Warning : flux_at_unsaturated_interface: not converged.'
+         ENDIF
       ENDIF
 
    END SUBROUTINE flux_at_unsaturated_interface
@@ -3082,7 +3034,6 @@ CONTAINS
          nlev_sat, dz_sat, psi_sat, hk_sat, psi_btm, &
          q_us_up, qlc, tol_q, tol_z, tol_p, flux_btm)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: psi_s_u, hksat_u
@@ -3239,9 +3190,9 @@ CONTAINS
       ENDDO
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (iter == 50) THEN
-         write(*,*) 'Warning : flux_top_transitive_interface: not converged.'
-      ENDIF
+         IF (iter == 50) THEN
+            write(*,*) 'Warning : flux_top_transitive_interface: not converged.'
+         ENDIF
       ENDIF
 
    END SUBROUTINE flux_top_transitive_interface
@@ -3253,7 +3204,6 @@ CONTAINS
          nlev_sat, dz_sat, psi_sat, hk_sat, psi_top, &
          q_us_l, qlc, tol_q, tol_z, tol_p, flux_top)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in) :: psi_s_l, hksat_l
@@ -3413,9 +3363,9 @@ CONTAINS
       ENDDO
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (iter == 50) THEN
-         write(*,*) 'Warning : flux_btm_transitive_interface: not converged.'
-      ENDIF
+         IF (iter == 50) THEN
+            write(*,*) 'Warning : flux_btm_transitive_interface: not converged.'
+         ENDIF
       ENDIF
 
    END SUBROUTINE flux_btm_transitive_interface
@@ -3430,7 +3380,6 @@ CONTAINS
          q_us_u, q_us_l, qlc, &
          tol_q, tol_z, tol_p)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    integer,  intent(in) :: ilev_us_u, ilev_us_l
@@ -3577,9 +3526,9 @@ CONTAINS
       ENDDO
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (iter == 50) THEN
-         write(*,*) 'Warning : flux_both_transitive_interface: not converged.'
-      ENDIF
+         IF (iter == 50) THEN
+            write(*,*) 'Warning : flux_both_transitive_interface: not converged.'
+         ENDIF
       ENDIF
 
    END SUBROUTINE flux_both_transitive_interface
@@ -3589,7 +3538,6 @@ CONTAINS
          vl_s, vl_r, psi_s, hksat, nprm, prms, tol_v, tol_z, &
          wa, zmin, zwt)
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    IMPLICIT NONE
 
    real(r8), intent(in)  :: vl_s, vl_r, psi_s, hksat
@@ -3648,9 +3596,9 @@ CONTAINS
       ENDDO
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (iter == 50) THEN
-         write(*,*) 'Warning : get_zwt_from_wa: not converged.'
-      ENDIF
+         IF (iter == 50) THEN
+            write(*,*) 'Warning : get_zwt_from_wa: not converged.'
+         ENDIF
       ENDIF
 
    END SUBROUTINE get_zwt_from_wa
@@ -3799,7 +3747,6 @@ CONTAINS
    ! -----
    SUBROUTINE print_VSF_iteration_stat_info ()
 
-   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task
    IMPLICIT NONE
 
@@ -3809,54 +3756,50 @@ CONTAINS
    integer :: iwork
 
       IF (DEF_USE_CoLMDEBUG) THEN
-      IF (p_is_worker) THEN
+         IF (p_is_worker) THEN
 #ifdef USEMPI
-         CALL mpi_allreduce (MPI_IN_PLACE, count_implicit, 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
-         CALL mpi_allreduce (MPI_IN_PLACE, count_explicit, 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
-         CALL mpi_allreduce (MPI_IN_PLACE, count_wet2dry , 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
+            CALL mpi_allreduce (MPI_IN_PLACE, count_implicit, 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
+            CALL mpi_allreduce (MPI_IN_PLACE, count_explicit, 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
+            CALL mpi_allreduce (MPI_IN_PLACE, count_wet2dry , 1, MPI_INTEGER8, MPI_SUM, p_comm_worker, p_err)
 #endif
-         IF (p_iam_worker == p_root) THEN
-            count_implicit_accum = count_implicit_accum + count_implicit
-            count_explicit_accum = count_explicit_accum + count_explicit
-            count_wet2dry_accum  = count_wet2dry_accum  + count_wet2dry
+            IF (p_iam_worker == p_root) THEN
+               count_implicit_accum = count_implicit_accum + count_implicit
+               count_explicit_accum = count_explicit_accum + count_explicit
+               count_wet2dry_accum  = count_wet2dry_accum  + count_wet2dry
 
 #ifdef USEMPI
-#ifndef FLAT_SPMD
-            CALL mpi_send (count_implicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-            CALL mpi_send (count_explicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-            CALL mpi_send (count_wet2dry,        1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-            CALL mpi_send (count_implicit_accum, 1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-            CALL mpi_send (count_explicit_accum, 1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-            CALL mpi_send (count_wet2dry_accum,  1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_implicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_explicit,       1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_wet2dry,        1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_implicit_accum, 1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_explicit_accum, 1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+               CALL mpi_send (count_wet2dry_accum,  1, MPI_INTEGER8, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
 #endif
-#endif
+            ENDIF
          ENDIF
-      ENDIF
 
-      IF (p_is_master) THEN
+         IF (p_is_master) THEN
 
 #ifdef USEMPI
-#ifndef FLAT_SPMD
-         iwork = p_address_worker(p_root)
-         CALL mpi_recv (count_implicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-         CALL mpi_recv (count_explicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-         CALL mpi_recv (count_wet2dry ,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-         CALL mpi_recv (count_implicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-         CALL mpi_recv (count_explicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-         CALL mpi_recv (count_wet2dry_accum , 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-#endif
+            iwork = p_address_worker(p_root)
+            CALL mpi_recv (count_implicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+            CALL mpi_recv (count_explicit,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+            CALL mpi_recv (count_wet2dry ,       1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+            CALL mpi_recv (count_implicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+            CALL mpi_recv (count_explicit_accum, 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
+            CALL mpi_recv (count_wet2dry_accum , 1, MPI_INTEGER8, iwork, mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 #endif
 
-         write(*,"(/,A,I13,A,I13,A,I13,A)") 'VSF scheme this step: ',    &
-            count_implicit, ' (implicit)', count_explicit, ' (explicit)', count_wet2dry, ' (wet2dry)'
-         write(*,"(A,I13,A,I13,A,I13,A)") 'VSF scheme all steps: ',      &
-            count_implicit_accum, ' (implicit)', count_explicit_accum, ' (explicit)', &
-            count_wet2dry_accum, ' (wet2dry)'
-      ENDIF
+            write(*,"(/,A,I13,A,I13,A,I13,A)") 'VSF scheme this step: ',    &
+               count_implicit, ' (implicit)', count_explicit, ' (explicit)', count_wet2dry, ' (wet2dry)'
+            write(*,"(A,I13,A,I13,A,I13,A)") 'VSF scheme all steps: ',      &
+               count_implicit_accum, ' (implicit)', count_explicit_accum, ' (explicit)', &
+               count_wet2dry_accum, ' (wet2dry)'
+         ENDIF
 
-      count_implicit = 0
-      count_explicit = 0
-      count_wet2dry  = 0
+         count_implicit = 0
+         count_explicit = 0
+         count_wet2dry  = 0
       ENDIF
    END SUBROUTINE print_VSF_iteration_stat_info
 

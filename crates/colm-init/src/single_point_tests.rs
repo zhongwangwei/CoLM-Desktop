@@ -1071,7 +1071,7 @@ fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
                     };
                 }
                 std::fs::write(&namelist, format!(
-                    "&nl_colm\nDEF_CASE_NAME='test'\nDEF_dir_output='{}'\nDEF_USE_BGC={}\nDEF_USE_TRACER=.false.\n/\n",
+                    "&nl_colm\nDEF_CASE_NAME='test'\nDEF_dir_output='{}'\nDEF_USE_BGC={}\nDEF_USE_ISOTOPE=.false.\n/\n",
                     root.display(), if bgc { ".true." } else { ".false." },
                 )).unwrap();
                 let run =
@@ -2199,7 +2199,7 @@ fn scalar_nonvegetated_run(
          DEF_USE_PFT={}\n \
          DEF_USE_PC={}\n \
          DEF_USE_BGC={}\n \
-         DEF_USE_TRACER={}\n \
+         DEF_USE_ISOTOPE={}\n \
          DEF_USE_NITRIF=.false.\n \
          DEF_simulation_time%greenwich=.false.\n \
          DEF_simulation_time%start_year=2005\n \

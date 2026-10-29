@@ -39578,3 +39578,129 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 在此之前，`main/TRACER/` 与上游 `main/MATERIAL/` 是**有意分叉**：上游这批 MT 工作在其提交里
 自述为未完成（`quarantine`、`unfinished`、`revert`），vendor 这边保持与 Rust 引擎逐位核对过的旧实现。
+
+## 上游并入 7d2fca93：MaterialTransport 全量落地（2026-10-30）
+
+上一节把 MT 标成「有意分叉」，这一轮反过来把它整批并进来了。范围是 `1d7f3b25..7d2fca93`
+（280 个文件），做法不是整树替换，而是**逐文件三方合并 + 机械转换**：
+
+- 三方合并：`git merge-file --diff3`，base=`1d7f3b25`、ours=vendor 的入库版本、theirs=`7d2fca93`。
+- 转换器（一次性脚本，不入库）：
+  - `guard2if.py` —— 把上游新写的编译期开关翻成 vendor 的运行时开关：
+    `LULCC→DEF_USE_LULCC`、`BGC→DEF_USE_BGC`、`LULC_IGBP_PFT/PC→DEF_USE_PFT/DEF_USE_PC`、
+    `URBAN_MODEL→DEF_URBAN_RUN`、`CoLMDEBUG→DEF_USE_CoLMDEBUG`、`RANGECHECK→DEF_USE_RangeCheck`、
+    `SrfdataDiag→DEF_USE_SrfdataDiag`、`Campbell_SOIL_MODEL→DEF_USE_Campbell_SOIL_MODEL`、
+    `vanGenuchten_Mualem_SOIL_MODEL→.not. DEF_USE_Campbell_SOIL_MODEL`；
+    `TRACER`/`MaterialTransport` 守卫整体去掉（物运移模块始终编译）。
+    纯 `USE`/声明块直接去掉守卫（Fortran 不允许把声明包进 IF）；包住整段 `CONTAINS` 或整个程序单元的
+    守卫同样去掉。`#if` 的 `#else` 分支在「无条件化」时取真分支（上游用它表达「MT 编译时走新路径」）。
+  - `sys2fs.py` —— `CALL system('mkdir -p …')`/`system('cp …')` → `MOD_Filesystem` 的
+    `make_directory`/`copy_file`（Windows 没有 sh）。
+  - `fix_imports.py` —— 给 `USE MOD_Namelist, only:` 补上转换后新用到的 `DEF_*`（单行形式）。
+- 保留为编译期宏的：`USEMPI`、`CATCHMENT`、`SinglePoint`、`GRIDBASED`、`UNSTRUCTURED`、
+  `LULC_IGBP`、`LULC_USGS`、`CROP`、`GridRiverLakeFlow`、`CaMa_Flood`、`CatchLateralFlow`、
+  `FLAT_SPMD`、`HYPERSPECTRAL`、`URBAN_LCZ` —— 这些确实是「编哪一份内核」的选择。
+
+### 合并里必须手工收口的几类损坏
+
+自动合并 + 上面三个脚本能处理九成，剩下的都是**声明与过程体不一致**这类编译期就能抓到的：
+
+1. **声明被吞**（上游重写了声明区，本地过程体还在用旧名字）。例：`MOD_RegionClip` 丢
+   `pixels/datasize/pixelmask`；`Aggregation_SoilParameters` 整份被截断（1623 行 vs 上游 2068 行，
+   直接按上游重建）；`MOD_Lulcc_Vars_TimeVariables` 丢 `scale_baseflow_/zwt_init_/rchg_year_/rsub_year_`。
+2. **重复定义**：`MOD_Grid_RiverLakeNetwork` 有一份重复的 `bifurcation_dt_groups` 与重复声明；
+   `MOD_NetCDFVector` 与上游新增的 `main/MATERIAL/MOD_MT_NcIO` 同时导出 `ncio_read_vector_complete`，
+   调用点同时 USE 两个模块就 "Ambiguous interfaces"。**上游把整份实现搬进了 MOD_MT_NcIO，
+   vendor 里那份删掉**，只留 `MOD_NetCDFVector` 的 `known_present=` 扩展。
+3. **形参表被上游改写而调用点没跟上**：`SoilSurfaceResistance` 新增 `vf_sand`（vendor 漏了形参声明，
+   上游调用点已经传了）；`single_write_2d/3d/4d` 上游删掉了 `filter` 形参，vendor 的历史路径还要用它
+   —— 折中方案是把 `filter` 改成**尾部可选参数**，vendor 自己的调用点用 `filter=filter` 传，
+   物运移那侧的按位置调用不受影响。
+4. **守卫展开产生的非法 Fortran**：`IF` 落到 `CONTAINS` 前后、预处理指令被缩进、`IF (a) .and. (b)`；
+   转换器都做了对应处理（见上）。
+
+### 运行期开关的落点
+
+`DEF_USE_TRACER`/`DEF_TRACER_*` 从 `share/MOD_Namelist.F90` 整块删除，改由
+`main/MATERIAL/MOD_MT_Namelist.F90` 承担（`&nl_colm_material` + `&nl_colm_isotope_parameter`）。
+Fortran 里剩下需要「有没有物运移在跑」的地方统一改成 `nmts > 0`（`MOD_MT_Defs`）或
+`mt_any_enabled()`（`MOD_MT_Namelist`），不再有旧名字。
+`DEF_USE_SEDIMENT` 按上游留在 `MOD_Namelist.F90`（河道代码直接读），声明/导出/MPI 广播都补齐。
+
+### 验证（真实输出）
+
+- **上游基线**：`1d7f3b25..7d2fca93` 的快照在本机独立编过（GNU Fortran 16.1.0 + OpenMPI 5.0.9 +
+  netCDF-C 4.9.3 / netCDF-Fortran 4.6.3）。
+- **官方全量构建（干净树）**：三个预设各跑一次
+  `./oracle/scripts/build_kernel.sh <preset> /tmp/colm-sync-build`，全部 `exit=0`，
+  各自产出 `mksrfdata.x` / `mkinidata.x` / `colm.x` 与 `manifest.json`：
+  - `default`（SinglePoint + LULC_IGBP，production）：`colm=6afd548e…`
+  - `latlon`（GRIDBASED + FLAT_SPMD + 河湖汇流，production）：覆盖 `USEMPI`/`GridRiverLakeFlow`/`FLAT_SPMD` 分支
+  - `crop`（CROP 编译期宏）：覆盖 `#ifdef CROP` 的作物与灌溉路径
+  选这三个是因为它们把编译期宏的正交组合都点到了；`catchment`/`usgs`/`unstructured` 走同一批模块，未单独构建。
+- **构建脚本不能并发复用同一输出目录**：两次 `build_kernel.sh <preset>` 同时指向同一 `OUTDIR` 时，
+  脚本开头的 `rm -rf $BUILD` 与退出时的 `trap` 会删掉对方正在用的目录，表现为
+  `Unable to get the current working directory` / `No rule to make target`。不同预设可以并行
+  （`BUILD` 是 `build-$PRESET`），同一预设不能。
+- **增量构建目录**同日用来逐文件定位编译错误（`/tmp/colsinc`，不属于仓库）。
+- Rust 下层：`cargo run -p xtask -- gen-schema` 964 字段、`gen-histmap` 724 变量 / 586 开关；
+  `colm-schema --test drift`、`colm-hist --test drift`、`colm-namelist --test roundtrip`、
+  `cargo test -p xtask`（10 个 target 共 62 例）全绿；`gen-landcover`/`gen-co2mlo` 逐字节未变。
+
+### 已知遗留（不在本轮范围，但记在这里防止下次重踩）
+
+- `include/land_history_restart.inc`、`include/tracer_*.inc` 是上游已删的死文件，vendor 里还留着，
+  已经没有任何 `#include` 指向它们；`land_history_restart.inc` 内部仍写着旧 tracer 名。
+- `extends/interception/*_Extended.F90`：上游删除了这几个扩展，vendor 保留着（默认预设不编译）。
+- `MOD_Grid_RiverLakeNetwork` 里 `vector_read_matrix_and_scatter` 已按上游改从
+  `MOD_Grid_RiverLakeVectorIO` 导入；但上游的 VectorIO 没有 `FLAT_SPMD` 分支，
+  若以后要支持 FLAT_SPMD 的矩阵收发，需要把 vendor 旧实现补进去。
+- `main/MATERIAL/MOD_MT_Lulcc.F90` 的 `mt_lulcc_save` 用 `DEF_LULCC_SCHEME == 2` 决定是否做
+  清单校验，而 `LulccDriver` 的 spinup `rewind` 会强制 `scheme = 1`。MEC + spinup rewind 的组合下
+  MT 侧仍会进入校验并因缺 `lccpct_patches` 而 `CoLM_stop`——需要决定是让 MT 感知 rewind，
+  还是让算例配置避开这个组合。
+- 上游 `MOD_HistGridded` 的新 id 公式 `mod(hist_data_id-10000,10000)+100001` 与它自己的
+  `hist_data_id = 10001` 初值不自洽（首轮就从 100002 起跳）。照上游原样保留，属上游自身问题。
+
+## Rust 引擎层的 MaterialTransport 迁移（2026-10-30）
+
+上层（`xtask` / `colm-schema` / `colm-hist` / `colm-namelist` / `colm-case`）迁完后，引擎侧
+（`colm-core` / `colm-runtime` / `colm-model` / `colm-init` / `colm-cli` / `colm-srfdata` / `oracle`）
+做的是同一件事，但**构造方式**必须跟着上游换，不能只改字符串：
+
+- `colm-core::tracer::TracerNamelist` 从旧的 `num/names/types/mrat/...` CSV 形状换成 family 形状
+  （`use_isotope` / `isotope_species` / 逐 species 的 `ref_ratio`、`init_delta` / `solutes` /
+  `use_sediment` / `use_methane`）。`TracerSet::build` 按上游 `tracer_defs_init` 的顺序
+  （同位素 → 溶质 → 泥沙 → 甲烷）构造描述符，重名直接报错（不再自动加后缀）；负的
+  `decay_rate` 从"夹成 0"改成上游的停机。
+- 参数文件按 family 分派（`TracerParamFiles`）：同位素/泥沙/甲烷是单路径字段，只有
+  `DEF_SOLUTE_PARAM_FILES` 还是 `NAME:path` 列表，而且**按位对应的是溶质自己的顺序**，
+  不是全局材料序号。`&nl_colm_tracer_forcing` 也随之换成 `&nl_colm_mt_forcing`，同位素文件里
+  一个 species 一组，靠 `forcing_species` 选中（旧实现只看第一组，HDO 的强迫会被丢掉）。
+- `DEF_USE_TRACER` 的两种语义分开处理：配置层（`colm-init`、`colm-rs` 的入口检查）用
+  `colm_namelist::material::any_enabled`（同位素/溶质名单/泥沙/甲烷任一开）；运行期已经拿到
+  注册表的（`colm-runtime` 的空河道事务、`with_tracer`）继续按 `TracerSet` 的 family 判断。
+- `colm-model` 的模型字段规则改成 `DEF_ISO_*`/`DEF_MT_*` 里的 Real（与 `colm-case` 的
+  `expert_coefficient` 一致）；列表/文件/开关仍是算例选择。冻结资产从一条列表变成四个 family
+  字段，`case_process_references` 保留旧签名（只返回溶质列表，GUI 面板用），新增
+  `case_process_reference_fields` 给材料化路径用。
+- `colm-srfdata` 的甲烷前处理直接读 `DEF_USE_METHANE` + `DEF_METHANE_PARAM_FILE`；甲烷开了却没给
+  文件时按上游 `check_settings` 报错。
+- `oracle`：`histmap` 的甲烷运行时条件是 `DEF_USE_METHANE`，上游新增 `co2_hr_methane` 让
+  多报数从 496 涨到 497；`singlepoint_history_filter` 的路径常量改成
+  `main/MATERIAL/MOD_MT_Hist.F90`。
+
+同轮修掉两处**上游同步带来的非命名回归**（都在本轮验证里红过）：
+
+1. `colm-runtime` 的泥沙参数校验仍把"活动层比最大粒径薄"当致命错误；上游 7d2fca93 已把它降成
+   警告（标准参数文件本身就是 0.05 mm 活动层配 1 mm 砂），照上游改掉。
+2. `colm-srfdata` 的 `urban_population_rawdata_fallback_uses_its_initialized_grid` 还在断言旧变量名
+   `gridpopu`；上游改成 `grid_pop`。
+
+### 遗留
+
+- `oracle/nml-unread.snapshot` 是旧审计脚本的产物（脚本本身已不在仓库），里面仍是 `DEF_TRACER_*`
+  的旧名字；没有测试消费它，本轮未重生成。
+- 上游新增 `DEF_MT_FORCING_MIN_PRECIP` / `DEF_MT_FORCING_MEMORY_PRECIP`（近干阈值与雪相回退），
+  Rust 的 `tracer_forcing` 仍用旧的常量 `1e-7`，也还没有"记住上一次雪比值"的相态回退；
+  这是新功能，不属于改名迁移。

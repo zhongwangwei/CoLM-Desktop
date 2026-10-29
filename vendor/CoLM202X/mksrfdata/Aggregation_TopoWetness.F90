@@ -154,7 +154,8 @@ SUBROUTINE Aggregation_TopoWetness ( &
                sigma_twi = sqrt(sum((twi_sort-mean_twi)**2) / (npxl-1))
 
                IF (sigma_twi > 0) THEN
-                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) * sum((twi_sort-mean_twi)**3) / sigma_twi**3
+                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) &
+                     * sum((twi_sort-mean_twi)**3) / sigma_twi**3
                   IF (skew_twi > 0) THEN
                      alp_twi_patches(ipatch) = (2./skew_twi)**2
                      chi_twi_patches(ipatch) = sigma_twi*skew_twi/2
@@ -225,7 +226,8 @@ SUBROUTINE Aggregation_TopoWetness ( &
                sigma_twi = sqrt(sum((twi_sort-mean_twi)**2) / (npxl-1))
 
                IF (sigma_twi > 0) THEN
-                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) * sum((twi_sort-mean_twi)**3) / sigma_twi**3
+                  skew_twi  = real(npxl)/(real(npxl-1)*real(npxl-2)) &
+                     * sum((twi_sort-mean_twi)**3) / sigma_twi**3
                   IF (skew_twi > 0) THEN
                      alp_twi = (2./skew_twi)**2
                      chi_twi = sigma_twi*skew_twi/2
@@ -322,15 +324,15 @@ SUBROUTINE Aggregation_TopoWetness ( &
 
       lndname  = trim(dir_model_landdata) // '/diag/twi_' // trim(cyear) // '.nc'
       CALL srfdata_map_and_write (mean_twi_patches, landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'mean_twi', compress = 1, write_mode = 'one', create_mode=.true.)
+         spval, lndname, 'mean_twi', compress = 6, write_mode = 'one', create_mode=.true.)
       CALL srfdata_map_and_write (fsatmax_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'fsatmax',  compress = 1, write_mode = 'one')
+         spval, lndname, 'fsatmax',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (fsatdcf_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'fsatdcf',  compress = 1, write_mode = 'one')
+         spval, lndname, 'fsatdcf',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (alp_twi_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'alp_twi',  compress = 1, write_mode = 'one')
+         spval, lndname, 'alp_twi',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (chi_twi_patches,  landpatch%settyp, typpatch, m_patch2diag, &
-         spval, lndname, 'chi_twi',  compress = 1, write_mode = 'one')
+         spval, lndname, 'chi_twi',  compress = 6, write_mode = 'one')
       CALL srfdata_map_and_write (mu_twi_patches,   landpatch%settyp, typpatch, m_patch2diag, &
          spval, lndname, 'mu_twi',   compress = 1, write_mode = 'one')
       ENDIF

@@ -172,7 +172,7 @@ pub struct StandardLctSnowSoilState {
     pub irrigation: Option<Box<crate::IrrigationState>>,
     /// `DEF_USE_SNICAR`：雪粒径、雪中气溶胶与分层吸收；关闭时 `None`。
     pub snicar: Option<Box<crate::SnicarColumnState>>,
-    /// `DEF_USE_TRACER` 且注册了陆面输运示踪物：本 patch 的示踪物状态；否则 `None`。
+    /// 任一 family 打开且注册了陆面输运材料：本 patch 的示踪物状态；否则 `None`。
     pub tracer: Option<Box<crate::tracer::step::PatchTracerTrack>>,
 }
 

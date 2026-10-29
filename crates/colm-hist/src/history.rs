@@ -294,8 +294,9 @@ pub struct HistoryBuffers {
     grid: Option<std::sync::Arc<HistoryGrid>>,
     /// 调用方已经聚合到网格窗口的量（河道量各有自己的过滤、分母与写法）：`(record, cell)`。
     gridded: BTreeMap<&'static str, Vec<f64>>,
-    /// `DEF_USE_TRACER`：每条记录的 `(history_window_seconds, history_window_end_minutes)`
-    /// （`MOD_Hist.F90:319-361`，只在网格写出时写）。
+    /// `mt_any_enabled()`（同位素/溶质/甲烷/泥沙任一族开启）：每条记录的
+    /// `(history_window_seconds, history_window_end_minutes)`
+    /// （`MOD_Hist.F90` 的 `IF (mt_any_enabled())` 分支，只在网格写出时写）。
     windows: Option<Vec<(f64, f64)>>,
     /// 非结构网格的向量写出；与 `grid` 互斥。
     vector: Option<std::sync::Arc<HistoryVector>>,

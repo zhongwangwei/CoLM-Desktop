@@ -1299,9 +1299,8 @@ fn spatial_pft_pc_empty_blocks_keep_common_cn_and_crop_without_pft_files() {
  DEF_USE_{mode}=.true.
  DEF_USE_BGC={}
  DEF_USE_CN_INIT={}
- DEF_USE_TRACER=.true.
- DEF_TRACER_NUM=0
- DEF_file_cn_init='{}'
+ DEF_USE_ISOTOPE=.true.
+  DEF_file_cn_init='{}'
  DEF_USE_CROP={}
  DEF_USE_FERT=.false.
  DEF_USE_IRRIGATION=.false.
@@ -1652,7 +1651,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
             }
             let restart = root.join(format!("{mode}-{label}"));
             let logical = |value| if value { ".true." } else { ".false." };
-            std::fs::write(&namelist, format!("&nl_colm\nDEF_USE_PFT={}\nDEF_USE_PC={}\nDEF_USE_BGC=.true.\nDEF_USE_TRACER={}\nDEF_TRACER_NUM=0\nDEF_USE_CN_INIT={}\nDEF_file_cn_init='{}'\n/\n", logical(mode=="PFT"), logical(mode=="PC"), logical(tracer), logical(use_cn), cn.display())).unwrap();
+            std::fs::write(&namelist, format!("&nl_colm\nDEF_USE_PFT={}\nDEF_USE_PC={}\nDEF_USE_BGC=.true.\nDEF_USE_ISOTOPE={}\nDEF_USE_CN_INIT={}\nDEF_file_cn_init='{}'\n/\n", logical(mode=="PFT"), logical(mode=="PC"), logical(tracer), logical(use_cn), cn.display())).unwrap();
             let mut config = crate::SpatialPftTimeConfig::new(
                 crate::SpatialPftStaticConfig::new(
                     &namelist, &landdata, &restart, "test", 2005, "w180_s90",
@@ -1709,7 +1708,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
     let restart = root.join("invalid");
     std::fs::write(
         &namelist,
-        "&nl_colm\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true.\nDEF_USE_TRACER='yes'\n/\n",
+        "&nl_colm\nDEF_USE_PFT=.true.\nDEF_USE_BGC=.true.\nDEF_USE_ISOTOPE='yes'\n/\n",
     )
     .unwrap();
     let config = crate::SpatialPftTimeConfig::new(
@@ -1723,7 +1722,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
         },
     );
     let error = crate::write_spatial_pft_cold_time_restarts(config).unwrap_err();
-    assert!(error.to_string().contains("DEF_USE_TRACER"));
+    assert!(error.to_string().contains("DEF_USE_ISOTOPE"));
     assert!(!restart.exists());
     crate::remove_test_tree(root);
 }

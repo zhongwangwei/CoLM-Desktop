@@ -33,27 +33,18 @@ MODULE MOD_Grid_RiverLakeBifurcation
    real(r8), allocatable :: bif_hflux_lev (:,:)  ! effective volume flux per pathway layer [m^3/s]
    real(r8), allocatable :: bif_hflux_sum (:)    ! net volume flux per ucat [m^3/s]
    logical, allocatable :: bif_path_active (:)    ! true when pathway was eligible this call
-   ! Per-ucat layer-2+ ("overland" / above-bankfull) bif
-   ! water flux. tracer_substep already subtracts the matching layer-2+
-   ! tracer flux from trc_levsto, but the water-side accumulator
-   ! `sum_hflux_riv` (MOD_Grid_RiverLakeFlow.F90:820) lumps every layer
-   ! onto the visible side. The second levee_tracer_repartition uses
-   ! `levsto_bef = levsto(i)` as the ratio denominator while
-   ! `trc_levsto` already reflects the layer-2+ subtraction — denominator
-   ! and numerator are out of phase, leaking the Phase-1 R_init invariant
-   ! at the levee/bif interface. Exposing this per-cell layer-2+ flux
-   ! lets the caller compute the post-bif protected water and align both.
+   ! Per-ucat layer-2+ ("overland" / above-bankfull) bif water flux;
+   ! the water-side accumulator `sum_hflux_riv` lumps every layer onto the
+   ! visible side, so the caller needs this to find the protected-side part.
    real(r8), allocatable :: bif_lev_hflux_sum(:) ! net layer-2+ vol flux per ucat [m^3/s]
    logical, save :: dbg_bif_restart_checked = .false.
    integer, save :: n_dt_mismatch_warn_count = 0
    ! Static downstream-pushed path fields (riverbed elevation, levee mask,
-   ! reservoir mask) do not change within a routing call, so bifurcation_calc
-   ! pushes them once per call instead of every sub-step.
-   ! bifurcation_invalidate_static_dn resets this at the start of each routing
-   ! call; it is set .true. after the first push.  All workers flip it
-   ! identically, so the resulting one-per-call push stays collective-matched
-   ! with the per-sub-step pushes (no orphaned isend/irecv).
-   logical, save :: bif_static_dn_valid = .false.
+   ! reservoir mask) do not change within a routing call.  bifurcation_calc
+   ! pushes them only on the first sub-step, selected by its explicit
+   ! first_substep argument (tied to the globally synchronized substep
+   ! counter), so the push sequence is collective-matched by construction and
+   ! cannot depend on stale module state.
 
    ! ----- Persistent scratch buffers (allocated once in bifurcation_init,
    !       reused every bifurcation_calc call to avoid alloc/dealloc churn).
@@ -102,12 +93,27 @@ MODULE MOD_Grid_RiverLakeBifurcation
    real(r8), allocatable, target, save :: is_resv_r8_buf           (:)
    real(r8), allocatable, target, save :: is_resv_dn_pth_buf       (:)
 
+   ! Local unit catchments that take part in bifurcation on this worker, ascending:
+   ! endpoints of local pathways, sources of push_bif_dn2pth and receivers of
+   ! push_bif_influx.  Built once in bifurcation_init (the network is fixed).
+   ! Reason: bifurcation_calc used to reset and fill about a dozen numucat-sized
+   ! buffers and evaluate the storage of every unit catchment on every routing
+   ! substep, although only these cells are ever read (17242 pathways on the
+   ! 15min network against 252383 unit catchments); this was ~15% of routing CPU
+   ! with bifurcation on.  It now does that work for bif_ucat only.
+   ! Results are unchanged, bit for bit: the per-cell buffers are only read at
+   ! pathway endpoints (i_up, i_dn), at the cells whose values are pushed, and
+   ! in the per-cell loops, which run over the same cells in the same order;
+   ! values at other cells were written but never used.  bif_hflux_sum and
+   ! bif_lev_hflux_sum, which are read by the routing for every cell, are still
+   ! reset in full, and the remote inflow they lose is 0 outside bif_ucat.
+   integer, allocatable, save :: bif_ucat (:)
+
    PUBLIC :: bifurcation_init
    PUBLIC :: bifurcation_calc
    PUBLIC :: read_bifurcation_restart
    PUBLIC :: write_bifurcation_restart
    PUBLIC :: bifurcation_final
-   PUBLIC :: bifurcation_invalidate_static_dn
    PUBLIC :: bif_hflux_sum
    PUBLIC :: bif_hflux_lev
    PUBLIC :: bif_lev_hflux_sum
@@ -123,9 +129,16 @@ CONTAINS
    !
    ! =========================================================================
 
-   USE MOD_Grid_RiverLakeNetwork, only: numucat, npthout_local, npthlev_bif
+   USE MOD_Grid_RiverLakeNetwork, only: numucat, npthout_local, npthlev_bif, &
+      pth_upst_local, pth_down_local, push_bif_dn2pth, push_bif_influx, cache_bif_influx
 
    IMPLICIT NONE
+
+   logical, allocatable :: is_bif_ucat (:)
+   integer :: ipth, i, j
+#ifdef USEMPI
+   integer :: iworker
+#endif
 
       ! bifurcation_init is contractually one-shot per run, but the
       ! allocates below will blow up with a runtime error if the module is
@@ -137,25 +150,40 @@ CONTAINS
 
       IF (.not. p_is_worker) THEN
          CALL allocate_bifurcation_arrays (0, 0, 0)
+         allocate (bif_ucat (0))
          RETURN
       ENDIF
 
       CALL allocate_bifurcation_arrays (numucat, npthlev_bif, npthout_local)
 
+      ! cells taking part in bifurcation on this worker (see bif_ucat)
+      allocate (is_bif_ucat (numucat))
+      is_bif_ucat(:) = .false.
+      DO ipth = 1, npthout_local
+         i = pth_upst_local(ipth)
+         IF (i >= 1 .and. i <= numucat) is_bif_ucat(i) = .true.
+         i = pth_down_local(ipth)
+         IF (i >= 1 .and. i <= numucat) is_bif_ucat(i) = .true.
+      ENDDO
+      IF (push_bif_dn2pth%nself > 0) is_bif_ucat(push_bif_dn2pth%self_from) = .true.
+#ifdef USEMPI
+      IF (allocated(push_bif_dn2pth%n_to_other)) THEN
+         DO iworker = 0, p_np_worker-1
+            IF (push_bif_dn2pth%n_to_other(iworker) > 0) &
+               is_bif_ucat(push_bif_dn2pth%to_other(iworker)%val) = .true.
+         ENDDO
+      ENDIF
+#endif
+      IF (allocated(cache_bif_influx%ptr)) THEN
+         DO j = 1, min(numucat, size(cache_bif_influx%ptr)-1)
+            IF (cache_bif_influx%ptr(j+1) > cache_bif_influx%ptr(j)) is_bif_ucat(j) = .true.
+         ENDDO
+      ENDIF
+      bif_ucat = pack((/(i, i = 1, numucat)/), is_bif_ucat)
+      deallocate (is_bif_ucat)
+
    END SUBROUTINE bifurcation_init
 
-
-   ! =========================================================================
-   SUBROUTINE bifurcation_invalidate_static_dn ()
-   ! =========================================================================
-   ! Mark the static downstream-pushed path fields (riverbed elevation, levee
-   ! mask, reservoir mask) stale so bifurcation_calc re-pushes them on its next
-   ! call.  Call once per routing call, before the sub-step loop, on EVERY
-   ! worker (it only sets a module flag; no MPI), so the resulting one-per-call
-   ! push stays collective-matched with the other per-sub-step pushes.
-   ! =========================================================================
-      bif_static_dn_valid = .false.
-   END SUBROUTINE bifurcation_invalidate_static_dn
 
 
    SUBROUTINE bif_path_levee_sides (i_up, i_dn, ipth, nucat, upstream_has_levee, downstream_has_levee)
@@ -256,7 +284,7 @@ CONTAINS
 
    ! =========================================================================
    SUBROUTINE bifurcation_calc (wdsrf_ucat, wdsrf_ucat_prev, volwater_ucat_in, volwater_ucat_valid_in, &
-      volresv, is_built_resv, dt_all, irivsys, ucatfilter, normal_outgoing_rate)
+      volresv, is_built_resv, dt_all, irivsys, ucatfilter, normal_outgoing_rate, first_substep)
    ! =========================================================================
    !
    ! Compute bifurcation fluxes for one sub-timestep. The net volume flux per
@@ -266,11 +294,12 @@ CONTAINS
 
    USE MOD_Const_Physical, only: grav
    USE MOD_WorkerPushData
+   USE MOD_Grid_RiverLakePush, only: riverlake_push_field_type, riverlake_push_batch
    USE MOD_Grid_RiverLakeNetwork, only: &
       numucat, npthout_local, npthlev_bif, &
       pth_upst_local, pth_down_local, &
       pth_dst, pth_elv, pth_wth, pth_man, &
-      push_bif_dn2pth, push_bif_influx, &
+      push_bif_dn2pth, push_bif_influx, cache_bif_dn2pth, cache_bif_influx, &
       topo_rivelv
 
    USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
@@ -286,6 +315,7 @@ CONTAINS
    integer,  intent(in) :: irivsys    (:)   ! river system id per ucat
    logical,  intent(in) :: ucatfilter (:)   ! active ucat filter
    real(r8), intent(in) :: normal_outgoing_rate(:) ! ordinary routing gross donor outflow [m3/s]
+   logical,  intent(in) :: first_substep          ! first sub-step of this routing call
 
    ! Pointer aliases to persistent module-level buffers (no per-call alloc).
    real(r8), pointer :: wdsrf_dn_pth     (:) => null()
@@ -335,12 +365,12 @@ CONTAINS
       real(r8) :: normal_outflow, bif_outflow, remaining_capacity
       logical  :: upstream_has_levee, downstream_has_levee
       logical  :: use_protected_fields
-      type(worker_push_real8_field_type) :: dynamic_state_fields(7)
-      type(worker_push_real8_field_type) :: donor_reverse_fields(2)
-      type(worker_push_real8_field_type) :: donor_rate_fields(2)
-      type(worker_push_real8_field_type) :: final_influx_fields(2)
+      type(riverlake_push_field_type) :: dynamic_state_fields(7)
+      type(riverlake_push_field_type) :: donor_reverse_fields(2)
+      type(riverlake_push_field_type) :: donor_rate_fields(2)
+      type(riverlake_push_field_type) :: final_influx_fields(2)
       integer :: n_dynamic_state_fields, n_coupled_fields, n_final_influx_fields
-   integer  :: ipth, ilev, i_up, i_dn, i_ucat
+   integer  :: ipth, ilev, i_up, i_dn, i_ucat, iu
    integer  :: n_dt_mismatch_skip, n_dt_mismatch_skip_glb
 
       IF (.not. p_is_worker) RETURN
@@ -403,55 +433,56 @@ CONTAINS
 
       wdsrf_dn_pth     (:) = 0._r8
       wdsrf_prev_dn_pth(:) = BIF_MISSING_VALUE
-      IF (.not. bif_static_dn_valid) rivelv_dn_pth(:) = 0._r8
-      protected_wdsrf_ucat  (:) = 0._r8
+      IF (first_substep) rivelv_dn_pth(:) = 0._r8
       protected_wdsrf_dn_pth(:) = BIF_MISSING_VALUE
-      IF (.not. bif_static_dn_valid) has_levee_dn_pth(:) = 0._r8
+      IF (first_substep) has_levee_dn_pth(:) = 0._r8
          storage_dn_pth   (:) = 0._r8
-         visible_storage_ucat(:) = 0._r8
-         protected_storage_ucat(:) = 0._r8
          visible_storage_dn_pth(:) = 0._r8
          protected_storage_dn_pth(:) = 0._r8
          pth_hflux_total(:) = 0._r8
-      ! storage_ucat is fully overwritten by the available_storage_ucat
-      ! loop below, so there is no need to zero it here.
-      limiter_outgoing(:) = 0._r8
-      limiter_out_rate(:) = 1._r8
-      protected_outgoing(:) = 0._r8
-      protected_out_rate(:) = 1._r8
          pth_limiter_rate(:) = 1._r8
          layer_limiter_rate(:,:) = 1._r8
       pth_lev_hflux_total(:) = 0._r8
-      bif_lev_influx     (:) = 0._r8
-      ! has_levee_r8 is referenced only under DEF_USE_LEVEE guards, but
-      ! zero it unconditionally so a future refactor that decouples the
-      ! guards can't read uninitialised values.
-      has_levee_r8(:) = 0._r8
       neg_pth             (:) = 0._r8
-      bif_neg_recv        (:) = 0._r8
       limiter_out_rate_pth(:) = 1._r8
       protected_neg_pth(:) = 0._r8
-      protected_out_recv(:) = 0._r8
       protected_out_rate_pth(:) = 1._r8
-      ! materialise ucatfilter as r8 so the push machinery can ship
-      ! it to each pathway's destination cell. The dn_pth view is filled by
-      ! the Step 2 push below.
-      ucatfilter_r8    (:) = 0._r8
       ucatfilter_dn_pth(:) = 0._r8
-      is_resv_r8       (:) = 0._r8
-      IF (.not. bif_static_dn_valid) is_resv_dn_pth(:) = 0._r8
-      IF (numucat > 0) THEN
-         WHERE (ucatfilter) ucatfilter_r8 = 1._r8
-         WHERE (is_built_resv) is_resv_r8 = 1._r8
-      ENDIF
+      IF (first_substep) is_resv_dn_pth(:) = 0._r8
+
+      ! Per-cell buffers are only read at bifurcation cells, so they are reset
+      ! and filled for bif_ucat only (see its declaration; values identical).
+      ! The receive buffers bif_neg_recv / protected_out_recv / bif_lev_influx
+      ! are overwritten in full by their pushes.
+      ! storage_ucat is fully overwritten for these cells below.
+      ! has_levee_r8 is referenced only under DEF_USE_LEVEE guards, but zero it
+      ! unconditionally so a future refactor that decouples the guards can't
+      ! read uninitialised values.  ucatfilter / is_built_resv are materialised
+      ! as r8 so the push machinery can ship them to each pathway's
+      ! destination cell (the dn_pth views are filled by the Step 2 push).
+      DO iu = 1, size(bif_ucat)
+         i_ucat = bif_ucat(iu)
+         protected_wdsrf_ucat(i_ucat) = 0._r8
+         visible_storage_ucat(i_ucat) = 0._r8
+         protected_storage_ucat(i_ucat) = 0._r8
+         limiter_outgoing(i_ucat) = 0._r8
+         limiter_out_rate(i_ucat) = 1._r8
+         protected_outgoing(i_ucat) = 0._r8
+         protected_out_rate(i_ucat) = 1._r8
+         bif_lev_influx(i_ucat) = 0._r8
+         has_levee_r8(i_ucat) = 0._r8
+         bif_neg_recv(i_ucat) = 0._r8
+         protected_out_recv(i_ucat) = 0._r8
+         ucatfilter_r8(i_ucat) = merge(1._r8, 0._r8, ucatfilter(i_ucat))
+         is_resv_r8   (i_ucat) = merge(1._r8, 0._r8, is_built_resv(i_ucat))
+      ENDDO
 
       IF (DEF_USE_LEVEE) THEN
          IF (allocated(has_levee)) THEN
-            WHERE (has_levee)
-               has_levee_r8 = 1._r8
-            END WHERE
-            DO i_ucat = 1, numucat
+            DO iu = 1, size(bif_ucat)
+               i_ucat = bif_ucat(iu)
                IF (has_levee(i_ucat)) THEN
+                  has_levee_r8(i_ucat) = 1._r8
                   protected_wdsrf_ucat(i_ucat) = floodplain_curve(i_ucat)%rivhgt + levdph(i_ucat)
                ELSE
                   protected_wdsrf_ucat(i_ucat) = wdsrf_ucat(i_ucat)
@@ -460,20 +491,19 @@ CONTAINS
          ENDIF
       ENDIF
 
-      IF (numucat > 0) THEN
-         DO i_ucat = 1, numucat
-            storage_ucat(i_ucat) = available_storage_ucat(i_ucat, wdsrf_ucat(i_ucat), &
+      DO iu = 1, size(bif_ucat)
+         i_ucat = bif_ucat(iu)
+         storage_ucat(i_ucat) = available_storage_ucat(i_ucat, wdsrf_ucat(i_ucat), &
+            volwater_ucat_in, volwater_ucat_valid_in, volresv, is_built_resv)
+         IF (DEF_USE_LEVEE) THEN
+            visible_storage_ucat(i_ucat) = available_visible_storage_ucat(i_ucat, wdsrf_ucat(i_ucat), &
                volwater_ucat_in, volwater_ucat_valid_in, volresv, is_built_resv)
-            IF (DEF_USE_LEVEE) THEN
-               visible_storage_ucat(i_ucat) = available_visible_storage_ucat(i_ucat, wdsrf_ucat(i_ucat), &
-                  volwater_ucat_in, volwater_ucat_valid_in, volresv, is_built_resv)
-               protected_storage_ucat(i_ucat) = available_protected_storage_ucat(i_ucat, is_built_resv)
-            ELSE
-               visible_storage_ucat(i_ucat) = storage_ucat(i_ucat)
-               protected_storage_ucat(i_ucat) = 0._r8
-            ENDIF
-         ENDDO
-      ENDIF
+            protected_storage_ucat(i_ucat) = available_protected_storage_ucat(i_ucat, is_built_resv)
+         ELSE
+            visible_storage_ucat(i_ucat) = storage_ucat(i_ucat)
+            protected_storage_ucat(i_ucat) = 0._r8
+         ENDIF
+      ENDDO
 
       ! ----- Step 2: Get downstream cell state via push objects -----
       ! Dynamic fields share one fixed-order communication phase.  All ranks use
@@ -510,7 +540,7 @@ CONTAINS
          n_dynamic_state_fields = 7
       ENDIF
 
-      CALL worker_push_data (push_bif_dn2pth, &
+      CALL riverlake_push_batch (push_bif_dn2pth, cache_bif_dn2pth, &
          dynamic_state_fields(1:n_dynamic_state_fields))
 
       IF (.not. DEF_USE_LEVEE) THEN
@@ -520,19 +550,19 @@ CONTAINS
          protected_storage_dn_pth(:) = 0._r8
       ENDIF
 
-      ! Static fields remain one-per-routing-call pushes.
-      IF (.not. bif_static_dn_valid) &
+      ! Static fields are pushed on the first sub-step only (explicit argument
+      ! instead of a module flag, so every worker makes this decision from the
+      ! same globally synchronized substep counter).
+      IF (first_substep) &
          CALL worker_push_data (push_bif_dn2pth, topo_rivelv, rivelv_dn_pth, fillvalue = BIF_MISSING_VALUE)
-      IF (use_protected_fields .and. .not. bif_static_dn_valid) &
+      IF (use_protected_fields .and. first_substep) &
          CALL worker_push_data (push_bif_dn2pth, has_levee_r8, has_levee_dn_pth, fillvalue = 0._r8)
-      IF (.not. bif_static_dn_valid) &
+      IF (first_substep) &
          CALL worker_push_data (push_bif_dn2pth, is_resv_r8, is_resv_dn_pth, fillvalue = 0._r8)
 
       ! Static downstream path fields (rivelv/has_levee/is_resv) are now cached
       ! in their persistent path buffers for the remaining sub-steps of this
-      ! routing call.  bifurcation_invalidate_static_dn() resets this each call.
-      bif_static_dn_valid = .true.
-
+      ! routing call.
       ! ----- Step 3: local-inertial solver for each pathway / layer -----
       DO ipth = 1, npthout_local
 
@@ -574,9 +604,11 @@ CONTAINS
          ELSE
             IF (ucatfilter_dn_pth(ipth) < 0.5_r8) CYCLE
             IF (is_resv_dn_pth(ipth) > 0.5_r8) CYCLE
-            ! Flow synchronizes one global BIF dt after all local stability
-            ! constraints.  The remote active mask is therefore sufficient;
-            ! sending the identical destination dt was a redundant MPI phase.
+            ! Flow synchronizes the dt of each group of river systems connected
+            ! by bifurcation pathways after all local stability constraints, and
+            ! both ends of a pathway are in the same group.  The remote active
+            ! mask is therefore sufficient; sending the identical destination dt
+            ! was a redundant MPI phase.
             dt_dn = dt
          ENDIF
 
@@ -735,10 +767,9 @@ CONTAINS
                   abs(pth_hflux_total(ipth)) * dt)
             ENDIF
 
-            ! Split-pool no-overdraft limiter for CoLM's levee/tracer
-            ! compartment semantics.  CaMa's original 5% limiter is total
-            ! storage based; CoLM additionally has a protected levee pool
-            ! (`levsto`) and a protected tracer pool (`trc_levsto`).  Limit
+            ! Split-pool no-overdraft limiter for CoLM's levee compartment.
+            ! CaMa's original 5% limiter is total storage based; CoLM
+            ! additionally has a protected levee pool (`levsto`).  Limit
             ! each layer by the donor compartment only so a dry protected side
             ! cannot be silently clipped by the caller.  CaMa's path-level
             ! endpoint-storage limiter above remains the stability constraint.
@@ -757,14 +788,19 @@ CONTAINS
                         limiter_outgoing(i_up) = limiter_outgoing(i_up) + layer_transfer
                      ENDIF
                   ELSE
-                     ! downstream -> upstream: destination cell is donor
+                     ! downstream -> upstream: destination cell is donor.
+                     ! Its outgoing total is gathered through push_bif_influx
+                     ! also when it is local (neg_pth / protected_neg_pth), so
+                     ! it is summed in global pathway order whatever the
+                     ! decomposition (adding local terms here directly made
+                     ! the results depend on the number of processes).
                      IF (i_dn > 0 .and. i_dn <= numucat) THEN
                         IF (ilev > 1 .and. downstream_has_levee) THEN
                            donor_storage = protected_storage_ucat(i_dn)
-                           protected_outgoing(i_dn) = protected_outgoing(i_dn) + layer_transfer
+                           protected_neg_pth(ipth) = protected_neg_pth(ipth) + layer_transfer
                         ELSE
                            donor_storage = visible_storage_ucat(i_dn)
-                           limiter_outgoing(i_dn) = limiter_outgoing(i_dn) + layer_transfer
+                           neg_pth(ipth) = neg_pth(ipth) + layer_transfer
                         ENDIF
                      ELSE
                         IF (ilev > 1 .and. downstream_has_levee) THEN
@@ -795,11 +831,15 @@ CONTAINS
          donor_reverse_fields(2)%recv => protected_out_recv
          donor_reverse_fields(2)%fillvalue = 0._r8
       ENDIF
-      CALL worker_push_data (push_bif_influx, &
+      CALL riverlake_push_batch (push_bif_influx, cache_bif_influx, &
          donor_reverse_fields(1:n_coupled_fields), mode = 'sum')
 
+      ! Per-cell loops below run over bif_ucat only: elsewhere the received donor
+      ! totals and the remote inflow are 0 and the per-cell rates are never read
+      ! (see bif_ucat), so the results are identical.
       IF (use_protected_fields) THEN
-         DO i_ucat = 1, numucat
+         DO iu = 1, size(bif_ucat)
+            i_ucat = bif_ucat(iu)
             protected_outgoing(i_ucat) = protected_outgoing(i_ucat) + protected_out_recv(i_ucat)
             IF (.not. ucatfilter(i_ucat)) CYCLE
             dt_cell = dt_all(irivsys(i_ucat))
@@ -829,11 +869,13 @@ CONTAINS
       ! already fixed dt and is not rescaled here.  For split-pool levee cells,
       ! this limiter covers the visible pool; protected pool has its own
       ! aggregate limiter above.
-      DO i_ucat = 1, numucat
+      DO iu = 1, size(bif_ucat)
+         i_ucat = bif_ucat(iu)
          limiter_outgoing(i_ucat) = limiter_outgoing(i_ucat) + bif_neg_recv(i_ucat)
       ENDDO
 
-      DO i_ucat = 1, numucat
+      DO iu = 1, size(bif_ucat)
+         i_ucat = bif_ucat(iu)
          IF (.not. ucatfilter(i_ucat)) CYCLE
          dt_cell = dt_all(irivsys(i_ucat))
          storage_ref = max(visible_storage_ucat(i_ucat), 0._r8)
@@ -859,7 +901,7 @@ CONTAINS
          donor_rate_fields(2)%recv => protected_out_rate_pth
          donor_rate_fields(2)%fillvalue = 1._r8
       ENDIF
-      CALL worker_push_data (push_bif_dn2pth, &
+      CALL riverlake_push_batch (push_bif_dn2pth, cache_bif_dn2pth, &
          donor_rate_fields(1:n_coupled_fields))
 
       DO ipth = 1, npthout_local
@@ -957,18 +999,14 @@ CONTAINS
             bif_lev_hflux_sum(i_up) = bif_lev_hflux_sum(i_up) + pth_lev_hflux_total(ipth)
          ENDIF
 
-         ! Also accumulate directly to downstream ucat if local
-         ! (i_dn was set above)
-         IF (i_dn > 0 .and. i_dn <= numucat) THEN
-            bif_hflux_sum(i_dn) = bif_hflux_sum(i_dn) - pth_hflux_total(ipth)
-            IF (npthlev_bif >= 2) THEN
-               bif_lev_hflux_sum(i_dn) = bif_lev_hflux_sum(i_dn) - pth_lev_hflux_total(ipth)
-            ENDIF
-         ENDIF
-
       ENDDO  ! ipth
 
-      ! ----- Step 6: Scatter flux to remote downstream ucats -----
+      ! ----- Step 6: Scatter flux to the downstream ucats -----
+      ! Every downstream ucat, local or remote, receives its inflow through this
+      ! push, summed in global pathway order.  Local downstream ucats used to be
+      ! updated directly in step 5 and their pathways subtracted again from the
+      ! push result ((a+b)-a /= b in floating point), which made the results
+      ! depend on the number of processes.
       IF (numucat > 0) THEN
          bif_influx(:) = 0._r8
          bif_lev_influx(:) = 0._r8
@@ -981,27 +1019,17 @@ CONTAINS
          final_influx_fields(2)%recv => bif_lev_influx
          final_influx_fields(2)%fillvalue = 0._r8
       ENDIF
-      CALL worker_push_data (push_bif_influx, &
+      CALL riverlake_push_batch (push_bif_influx, cache_bif_influx, &
          final_influx_fields(1:n_final_influx_fields), mode = 'sum')
 
-      ! ----- Step 7: Subtract remote inflow, avoiding double-counting -----
-      ! Remove contributions from local pathways (already counted in step 5)
-      DO ipth = 1, npthout_local
-         i_dn = pth_down_local(ipth)
-         IF (i_dn > 0 .and. i_dn <= numucat) THEN
-            bif_influx(i_dn) = bif_influx(i_dn) - pth_hflux_total(ipth)
-            IF (npthlev_bif >= 2) THEN
-               bif_lev_influx(i_dn) = bif_lev_influx(i_dn) - pth_lev_hflux_total(ipth)
-            ENDIF
-         ENDIF
-      ENDDO
-
-      ! Apply remote inflow to bif_hflux_sum
-      DO i_ucat = 1, numucat
+      ! ----- Step 7: Apply the inflow to bif_hflux_sum (it is 0 outside bif_ucat)
+      DO iu = 1, size(bif_ucat)
+         i_ucat = bif_ucat(iu)
          bif_hflux_sum(i_ucat) = bif_hflux_sum(i_ucat) - bif_influx(i_ucat)
       ENDDO
       IF (npthlev_bif >= 2) THEN
-         DO i_ucat = 1, numucat
+         DO iu = 1, size(bif_ucat)
+            i_ucat = bif_ucat(iu)
             bif_lev_hflux_sum(i_ucat) = bif_lev_hflux_sum(i_ucat) - bif_lev_influx(i_ucat)
          ENDDO
       ENDIF
@@ -1277,7 +1305,7 @@ CONTAINS
    ! =========================================================================
 
    USE MOD_NetCDFSerial, only: ncio_var_exist
-   USE MOD_Vector_ReadWrite, only: vector_read_matrix_and_scatter
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_read_matrix_and_scatter
    USE MOD_Grid_RiverLakeNetwork, only: npthlev_bif, npthout_local, totalnpthout, pth_global_id
    USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
    IMPLICIT NONE
@@ -1557,7 +1585,7 @@ CONTAINS
 
    USE MOD_Namelist, only: DEF_REST_CompressLevel
    USE MOD_NetCDFSerial, only: ncio_define_dimension, ncio_write_serial
-   USE MOD_Vector_ReadWrite, only: vector_gather_matrix_to_master
+   USE MOD_Grid_RiverLakeVectorIO, only: vector_gather_matrix_to_master
    USE MOD_Grid_RiverLakeNetwork, only: npthlev_bif, npthout_local, totalnpthout, pth_global_id
    IMPLICIT NONE
 
@@ -1653,11 +1681,8 @@ CONTAINS
 
    IMPLICIT NONE
 
-      ! Reset the static-push cache flag so it can never outlive the path
-      ! buffers it guards: a later bifurcation_init reallocates them fresh.
-      bif_static_dn_valid = .false.
-
       IF (allocated(pth_veloc))     deallocate (pth_veloc)
+      IF (allocated(bif_ucat))      deallocate (bif_ucat)
       IF (allocated(pth_momen))     deallocate (pth_momen)
       IF (allocated(bif_hflux_lev)) deallocate (bif_hflux_lev)
       IF (allocated(bif_hflux_sum)) deallocate (bif_hflux_sum)

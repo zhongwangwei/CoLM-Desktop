@@ -251,7 +251,9 @@ fn parameter_audit() -> Result<()> {
     {
         bail!("unified catalog source coverage drifted; classify and regenerate the audit");
     }
-    if unique_lc < 39 || pft_overrides.len() != 87 || parameters::process_descriptors().len() != 170
+    // 过程参数从 170 涨到 187：MaterialTransport 把通用 tracer_parameter_type
+    // 换成 solute_parameter_type（9 项）加 MOD_MT_Namelist 的 18 个 DEF_ISO_* 变量。
+    if unique_lc < 39 || pft_overrides.len() != 87 || parameters::process_descriptors().len() != 187
     {
         bail!("required LC/PFT/process baseline coverage is incomplete");
     }
@@ -416,14 +418,22 @@ fn gen_schema() -> Result<()> {
     let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
-    let groups = colm_schema::source::namelist_groups(&text);
+    // 上游 7d2fca93 把物运移（同位素/溶质/甲烷/泥沙）的 namelist 拆到了
+    // main/MATERIAL/MOD_MT_Namelist.F90，schema 必须两处都读，否则
+    // DEF_USE_ISOTOPE、DEF_SOLUTE_NAMES、DEF_USE_METHANE 这些字段整组消失。
+    let src_mt = root.join("vendor/CoLM202X/main/MATERIAL/MOD_MT_Namelist.F90");
+    let text_mt = std::fs::read_to_string(&src_mt)
+        .with_context(|| format!("cannot read {}", src_mt.display()))?;
+    let mut groups = colm_schema::source::namelist_groups(&text);
+    groups.extend(colm_schema::source::namelist_groups(&text_mt));
     if groups.len() < 150 {
         bail!(
             "only {} namelist members found — the statement format must have changed",
             groups.len()
         );
     }
-    let fields = extract(&text, &groups)?;
+    let mut fields = extract(&text, &groups)?;
+    fields.extend(extract(&text_mt, &groups)?);
     // 取值与宏依赖只能从**用到这些字段的地方**看出来，MOD_Namelist.F90 里
     // 只有声明。所以另扫一遍整棵树，见 `usage.rs`。
     let usage = usage::scan(&root.join("vendor/CoLM202X"))?;
@@ -477,14 +487,15 @@ fn gen_histmap() -> Result<()> {
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let mut vars = hist::extract(&text)?;
 
-    let src = root.join("vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90");
+    let src = root.join("vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Hist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let mut methane = hist::extract_at_least(&text, 100)?;
     for var in &mut methane {
+        // 上游把编译期 TRACER 宏拆成了运行时的 DEF_USE_METHANE（甲烷这一族）。
         var.runtime = match var.runtime.take() {
-            Some(runtime) => Some(format!("(DEF_USE_TRACER) .and. ({runtime})")),
-            None => Some("DEF_USE_TRACER".to_string()),
+            Some(runtime) => Some(format!("(DEF_USE_METHANE) .and. ({runtime})")),
+            None => Some("DEF_USE_METHANE".to_string()),
         };
     }
     vars.extend(methane);
@@ -493,6 +504,9 @@ fn gen_histmap() -> Result<()> {
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let switches = hist::extract_switches(&text)?;
+    // MOD_MT_Namelist.F90 只声明 material 家族的开关（DEF_USE_ISOTOPE /
+    // DEF_USE_METHANE / …），history_var_type 仍然只有 MOD_Namelist.F90 那
+    // 一份；早先在这里也读一遍 MT namelist 会找不到类型而报错。
     // 每个变量的开关都必须是声明过的成员（大小写不敏感，Fortran 如此）。
     for var in &vars {
         if let Some(switch) = &var.switch {
@@ -538,6 +552,13 @@ fn extract(text: &str, groups: &BTreeMap<String, String>) -> Result<Vec<Field>> 
     let constants = integer_parameters(text);
     let mut out = Vec::new();
     let mut owner: Option<String> = None;
+    // 上游 7d2fca93 在 MOD_Namelist.F90 里加了 rawdata 一组辅助类型
+    // （datainfo / rawdata / rawdata_nml_entry / rawdata_nml_type）。它们不是
+    // namelist 的拥有者：真正的成员只有一个派生类型变量 DEF_rawdata_nml，
+    // 用户字段在 rawdata 文件里按 idx + opt(10) 组织，不是这里的简单默认值。
+    // 这些类型的成员没有一个是 namelist 成员或 DEF_ 字段，跳过即可；
+    // 万一以后某个未知类型里出现了字段，仍然报错，免得静默漏字段。
+    let mut helper_type: Option<String> = None;
     let mut lines = text.lines().enumerate().peekable();
 
     while let Some((i, raw)) = lines.next() {
@@ -550,12 +571,30 @@ fn extract(text: &str, groups: &BTreeMap<String, String>) -> Result<Vec<Field>> 
         if let Some(rest) = low.strip_prefix("type ") {
             let n = rest.trim_start_matches(":: ").trim();
             if !n.is_empty() && !n.contains('(') {
-                owner = Some(n.to_string());
+                if is_owner_type(n) {
+                    owner = Some(n.to_string());
+                    helper_type = None;
+                } else {
+                    owner = None;
+                    helper_type = Some(n.to_string());
+                }
             }
             continue;
         }
         if low.starts_with("end type") {
             owner = None;
+            helper_type = None;
+            continue;
+        }
+        if let Some(helper) = &helper_type {
+            if let Some(decl) = parse_decl(line, &constants) {
+                if decl.name.starts_with("DEF_") || lookup_ci(groups, &decl.name).is_some() {
+                    bail!(
+                        "unknown derived type {helper} holds namelist field {}: add it to owner_prefix",
+                        decl.name
+                    );
+                }
+            }
             continue;
         }
 
@@ -704,6 +743,7 @@ fn render(fields: &[Field], groups: &BTreeMap<String, String>, usage: &usage::Us
         "//! 由 `cargo run -p xtask -- gen-schema` 生成。**不要手改。**\n\
          //!\n\
          //! 源：vendor/CoLM202X/share/MOD_Namelist.F90\n\
+         //!     vendor/CoLM202X/main/MATERIAL/MOD_MT_Namelist.F90\n\
          //! 漂移由 crates/colm-schema/tests/drift.rs 守住。\n\n\
          use crate::field::{Default, Field, FieldKind};\n\n\
          pub static FIELDS: &[Field] = &[\n",
@@ -757,6 +797,15 @@ fn render(fields: &[Field], groups: &BTreeMap<String, String>, usage: &usage::Us
     }
     s.push_str("];\n");
     s
+}
+
+/// 哪些派生类型承载 namelist 字段。其余 `type` 块是辅助容器（如 rawdata 那组），
+/// 其成员不是可直接设置的字段。
+fn is_owner_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "nl_domain_type" | "nl_simulation_time_type" | "nl_forcing_type" | "history_var_type"
+    )
 }
 
 /// 派生类型名 -> 它在 namelist 里的实例名。

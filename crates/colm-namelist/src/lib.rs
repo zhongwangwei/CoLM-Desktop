@@ -14,6 +14,7 @@
 //! 那时它们指向的东西才存在。
 
 pub mod document;
+pub mod material;
 pub mod parse;
 pub mod tracer_files;
 pub mod value;

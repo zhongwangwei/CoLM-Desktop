@@ -30,7 +30,7 @@ test('the full catalog covers every current schema variable and gives each recor
         p.storage === 'case-nml' &&
         (p.scope === 'land-cover-class' ||
           p.calibration_eligible ||
-          (p.raw_key.startsWith('DEF_TRACER_') && p.value_kind === 'real') ||
+          (p.raw_key.startsWith('DEF_MT_') && p.value_kind === 'real') ||
           p.raw_key === 'DEF_GridRiverLake_FloodInfiltMax'),
     )
     .map((p) => ({ name: p.raw_key }));

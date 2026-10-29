@@ -203,8 +203,15 @@ CONTAINS
             do j = 1, nl_soil
                s_node = max(wliq_soisno(j,i)/(1000.*dz_soi(j)*porsl(j,i)),0.001)
                s_node = min(1., s_node)
-               ! (#504 also computed the soil matric potential smp_node here, but its only use
-               !  below is commented out in favour of s_node; the dead computation is dropped)
+#ifdef Campbell_SOIL_MODEL
+               smp_node = max(smpswc, psi0(j,i)*s_node**(-bsw(j,i)))
+#endif
+#ifdef vanGenuchten_Mualem_SOIL_MODEL
+               smp_node = soil_psi_from_vliq ( s_node*(porsl(j,i)-theta_r(j,i)) + theta_r(j,i), &
+                  porsl(j,i), theta_r(j,i), psi0(j,i), &
+                  5, (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
+               smp_node = max(smpswc, smp_node)
+#endif
             
 !               btran2_p(m) = btran2_p(m) + rootfr_p(j,ivt) * max(0._r8, min((smp_node - smpswc) / &
 !                    (smpsfc - smpswc),1._r8))

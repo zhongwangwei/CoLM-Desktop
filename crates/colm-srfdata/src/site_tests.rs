@@ -872,7 +872,7 @@ fn urban_population_rawdata_fallback_uses_its_initialized_grid() {
         .and_then(|tail| tail.split("u_site_lucy=").next())
         .expect("urban population block");
     assert!(
-        population.contains("read_point_5x5_var_2d_time_real8 (gridpopu"),
+        population.contains("read_point_5x5_var_2d_time_real8 (grid_pop"),
         "population fallback must use the grid it just initialized"
     );
     assert!(!population.contains("read_point_5x5_var_2d_time_real8 (gridlaiu"));

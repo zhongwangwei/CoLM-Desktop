@@ -30,6 +30,7 @@ import {
   tracerFamilies,
   tracerFamilyState,
   tracerSetupIssues,
+  tracerProcessEnabled,
   appendTracerFamily,
   applyTracerSelection,
   setStomatalScheme,
@@ -44,6 +45,7 @@ import {
   tracerTypes,
   tracerLabels,
   tracerColumns,
+  tracerKeys,
   tracerRows,
   setTracerRows,
   type ConfigurationSource,
@@ -201,13 +203,15 @@ export default function ConfigurationOptions({
   const parentValues = Object.fromEntries(
     Object.entries({
       ecology: 'DEF_USE_BGC',
-      tracer: 'DEF_USE_TRACER',
+      tracer: 'tracer-process',
       river: 'DEF_USE_GridRiverLakeFlow',
       urban: 'DEF_URBAN_RUN',
       subgrid: 'DEF_USE_LULCC',
     }).map(([id, name]) => [
       id,
-      modelSettingValue(overlay, name)?.trim().toLowerCase() === '.true.',
+      name === 'tracer-process'
+        ? tracerProcessEnabled(overlay)
+        : modelSettingValue(overlay, name)?.trim().toLowerCase() === '.true.',
     ]),
   );
   const parentSignature = JSON.stringify({ sourceKey, parentValues });
@@ -348,7 +352,7 @@ export default function ConfigurationOptions({
     const cardChoice =
       [
         'DEF_METHANE%inundation_mode',
-        'DEF_TRACER_USE_FRACTIONATION',
+        'DEF_ISO_USE_FRACTIONATION',
         'DEF_Runoff_SCHEME',
         'DEF_URBAN_type_scheme',
       ].includes(rawKey) &&
@@ -731,13 +735,20 @@ export default function ConfigurationOptions({
   ].map((id) => modelSettingGroups.find((g) => g[0] === id)!);
   const caseProcessVisible = (id: string) =>
     (!hideProcesses || !['ecology', 'tracer', 'river', 'urban'].includes(id)) &&
-    (!process || id !== 'tracer' || process === 'DEF_USE_TRACER') &&
-    (!onCaseChange ||
-      parentValues[id] === true ||
-      (id === 'tracer' && process === 'DEF_USE_TRACER'));
-  const currentTracerTypes = tracers
-    ? tracers.map((row) => row.TYPES).join(',')
-    : (modelSettingValue(overlay, 'DEF_TRACER_TYPES') ?? undefined);
+    (!process || id !== 'tracer' || process === 'tracer') &&
+    (!onCaseChange || parentValues[id] === true || (id === 'tracer' && process === 'tracer'));
+  // 同位素专属字段是否显示：编辑中的表格优先，其次看当前配置里的 family 开关。
+  const currentIsotope = tracers
+    ? tracers.some((row) => row.TYPES.toLowerCase() === 'isotope')
+    : (() => {
+        const raw =
+          overlay.physics.DEF_USE_ISOTOPE ??
+          values.fields.find((field) => field.name === 'DEF_USE_ISOTOPE')?.configured_value ??
+          values.fields.find((field) => field.name === 'DEF_USE_ISOTOPE')?.built_in_default;
+        return raw === undefined || raw === null
+          ? undefined
+          : raw.trim().toLowerCase() === '.true.';
+      })();
   const groups = orderedGroups.map(([id, zh, english]) => {
     if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
@@ -751,7 +762,7 @@ export default function ConfigurationOptions({
           groupedField(field, catalog) &&
           !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
-      .filter((field) => tracerFieldVisible(field.name, currentTracerTypes))
+      .filter((field) => tracerFieldVisible(field.name, currentIsotope))
       .filter(
         (field) =>
           (!onCaseChange &&
@@ -759,7 +770,9 @@ export default function ConfigurationOptions({
           (field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff) ||
           caseFieldVisible(field.name, values.fields, {
             ...overlay.physics,
-            ...(currentTracerTypes === undefined ? {} : { DEF_TRACER_TYPES: currentTracerTypes }),
+            ...(currentIsotope === undefined
+              ? {}
+              : { DEF_USE_ISOTOPE: currentIsotope ? '.true.' : '.false.' }),
           }),
       )
       .filter(
@@ -832,23 +845,14 @@ export default function ConfigurationOptions({
   try {
     storedTracers = tracerRows(overlay);
   } catch (e) {
-    storedTracers = tracerRows(resetModelOption(overlay, 'DEF_TRACER_PARAM_FILES'));
+    storedTracers = [];
     tracerError = String(e);
   }
   const tracerOpen = caseProcessVisible('tracer') && open('tracer'),
     table = tracers ?? storedTracers,
-    tracerFields = fields.filter((f) => f.name.startsWith('DEF_TRACER_'));
-  const tracerTooLarge = Number(modelSettingValue(overlay, 'DEF_TRACER_NUM') ?? '0') > 100;
-  const tracerReady =
-    !tracerTooLarge &&
-    !locked &&
-    ready &&
-    tracerFields.length > 0 &&
-    !(
-      process === 'DEF_USE_TRACER'
-        ? ['readonly', 'read-only']
-        : ['disabled', 'readonly', 'read-only']
-    ).includes(values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode ?? '');
+    tracerFields = fields.filter((f) => tracerKeys.includes(f.name));
+  const tracerTooLarge = table.length > 100;
+  const tracerReady = !tracerTooLarge && !locked && ready && tracerFields.length > 0;
   const familyContext: FamilyContext = {
     subgrid,
     processFiles: values.process_files,
@@ -882,11 +886,11 @@ export default function ConfigurationOptions({
     !error &&
     tracers === null &&
     !pickingFile &&
-    (process !== 'DEF_USE_TRACER' || (tracerFields.length > 0 && tracerValid));
+    (process !== 'tracer' || (tracerFields.length > 0 && tracerValid));
   useEffect(() => {
     onReady?.(canSave);
   }, [canSave, onReady]);
-  const stagedTracerModal = process === 'DEF_USE_TRACER' && !!modalActions && !!onCaseChange;
+  const stagedTracerModal = process === 'tracer' && !!modalActions && !!onCaseChange;
   const familyVisible = tracerOpen;
   const familyCards = familyVisible && (
     <Card
@@ -1125,7 +1129,7 @@ export default function ConfigurationOptions({
         </ActionButton>
       </div>
       <p>
-        {t('示踪物数量', 'Tracer count')} (DEF_TRACER_NUM): {table.length}
+        {t('示踪物数量', 'Tracer count')}: {table.length}
       </p>
       <p>
         {t(

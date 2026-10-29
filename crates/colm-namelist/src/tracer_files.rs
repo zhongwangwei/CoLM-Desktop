@@ -1,4 +1,5 @@
-//! `DEF_TRACER_PARAM_FILES` 的解析，规则照 `MOD_Tracer_Defs.F90` 的参数文件查找：
+//! `DEF_SOLUTE_PARAM_FILES`（旧名 `DEF_TRACER_PARAM_FILES`）的解析，规则照
+//! `MOD_MT_Defs.F90` 的参数文件查找（上游 7d2fca93 前在 `MOD_Tracer_Defs.F90`）：
 //!
 //! - 条目以 `,` 或 `;` 分隔，空条目跳过；整串为空或为 `null` 表示没有参数文件。
 //! - 含 `:` 的条目是 `key:path` 映射，按第一个冒号拆开，键名不分大小写。但 `X:\…`（Windows
@@ -48,7 +49,7 @@ pub fn param_file_entries(raw: &str) -> Result<Vec<ParamFileEntry<'_>>> {
             Some((key, path)) => {
                 let (key, path) = (key.trim(), path.trim());
                 if key.is_empty() || path.is_empty() {
-                    bail!("MOD_Tracer_Defs: empty tracer parameter file mapping entry: {entry}");
+                    bail!("MOD_MT_Defs: empty material parameter file mapping entry: {entry}");
                 }
                 out.push(ParamFileEntry::Keyed { key, path });
             }
@@ -90,7 +91,7 @@ pub fn param_file_paths(raw: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-/// 把条目重新拼回 `DEF_TRACER_PARAM_FILES`（用 `,`），每条的路径经 `map` 换掉；`null` 占位原样保留，
+/// 把条目重新拼回 `DEF_SOLUTE_PARAM_FILES`（用 `,`），每条的路径经 `map` 换掉；`null` 占位原样保留，
 /// 位置不变。
 pub fn rewrite_param_files(
     raw: &str,

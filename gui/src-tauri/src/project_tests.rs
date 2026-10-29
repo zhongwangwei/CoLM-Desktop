@@ -201,7 +201,7 @@ fn an_opened_case_brings_back_its_inputs() {
 #[test]
 fn an_opened_site_case_reads_usgs_and_methane_from_the_last_run() {
     let text =
-        "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_TRACER = .true.\n DEF_TRACER_NAMES = 'CH4'\n/\n";
+        "&nl_colm\n DEF_CASE_NAME = 's'\n DEF_USE_METHANE = .true.\n DEF_METHANE_PARAM_FILE = 'ch4.nml'\n/\n";
     let stages = r#"{"mksrfdata":{"kernel":"preset=usgs;macros=SinglePoint,LULC_USGS"}}"#;
     let p = case_profile(text, false, Some(stages), None).expect("profile");
     assert_eq!((p.grid, p.subgrid), (None, "USGS"));

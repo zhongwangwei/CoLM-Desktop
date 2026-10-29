@@ -21,6 +21,7 @@ SUBROUTINE Aggregation_LakeSoilC ( &
    USE MOD_Grid
    USE MOD_LandPatch
    USE MOD_NetCDFVector
+   USE MOD_MT_NcIO, only: ncio_read_vector_complete
    USE MOD_NetCDFBlock
    USE MOD_RangeCheck
    USE MOD_AggregationRequestData

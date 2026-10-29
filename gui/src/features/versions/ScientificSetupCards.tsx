@@ -126,7 +126,7 @@ export default function ScientificSetupCards({
     if (locked || writeLocked.current || current.current !== key)
       throw new Error(bilingual('配置不可修改或已切换', 'Configuration is locked or stale'));
     try {
-      if (request.id === 'DEF_USE_TRACER' && request.value === '.true.' && onOpenSettings) {
+      if (request.id === 'tracer' && request.value === '.true.' && onOpenSettings) {
         onOpenSettings(request.id);
         setError('');
         return;
@@ -194,7 +194,7 @@ export default function ScientificSetupCards({
     }
   }
   const cards = choices.map((control, index) => {
-    const tracerSetup = control.id === 'DEF_USE_TRACER' && !!onOpenSettings;
+    const tracerSetup = control.id === 'tracer' && !!onOpenSettings;
     const settingsAvailable =
       !!onOpenSettings &&
       hasSettings(control.id, result?.fields) &&

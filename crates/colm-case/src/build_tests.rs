@@ -380,7 +380,7 @@ fn the_land_cover_fields_sit_right_after_the_coordinates() {
 }
 
 #[test]
-fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
+fn an_urban_case_gets_lcz_from_the_code_default() {
     // 城市站点文件都不带分类地类，调用方没给 scheme-specific 值时保留
     // IGBP/PFT/PC 的城市类号 13。
     let mut s = cn_cng();
@@ -391,12 +391,16 @@ fn an_urban_case_declares_the_land_cover_and_the_lcz_scheme() {
     let names: Vec<&str> = req.iter().map(|(p, _)| p.as_str()).collect();
     assert!(names.contains(&"SITE_landtype"));
     assert!(names.contains(&"USE_SITE_landtype"));
-    assert!(names.contains(&"DEF_URBAN_type_scheme"));
+    // 上游 7d2fca93 起 DEF_URBAN_type_scheme 的代码默认值就是 2（LCZ），
+    // 与算例要的值相同，所以 minimal::required 会把它省掉。
+    assert!(!names.contains(&"DEF_URBAN_type_scheme"));
+    assert_eq!(
+        colm_schema::find("DEF_URBAN_type_scheme").map(|f| f.default),
+        Some(colm_schema::Default::Integer(2))
+    );
 
     let by = |n: &str| &req.iter().find(|(p, _)| p == n).unwrap().1;
     assert_eq!(*by("SITE_landtype"), colm_namelist::Value::Int(13));
-    // 方案 2 = LCZ。默认是 1（NCAR），而实测那条路在栅格给不出城市类别时越界。
-    assert_eq!(*by("DEF_URBAN_type_scheme"), colm_namelist::Value::Int(2));
 }
 
 #[test]

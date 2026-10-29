@@ -229,10 +229,10 @@ test('tracer choice opens species configuration before saving, including incompa
     const h = harness();
     h.props.source = { kind: 'frozen', version: { id: 'official', revision: 5 } };
     h.props.environment.caseValues = {
-      DEF_USE_TRACER: enabled ? '.true.' : '.false.',
+      DEF_USE_METHANE: enabled ? '.true.' : '.false.',
       DEF_USE_Campbell_SOIL_MODEL: '.true.',
       DEF_URBAN_RUN: '.true.',
-      DEF_TRACER_NAMES: "'CH4'",
+      DEF_METHANE_PARAM_FILE: "'standard_methane_parameter.nml'",
     };
     const patches: CaseOptionPatch[] = [],
       opened: string[] = [];
@@ -244,17 +244,17 @@ test('tracer choice opens species configuration before saving, including incompa
     };
     h.render();
     const c = await h.resolve();
-    const tracer = c.fields.find((field) => field.id === 'setup-DEF_USE_TRACER')!;
+    const tracer = c.fields.find((field) => field.id === 'setup-tracer')!;
     assert.ok(
       tracer.options!.some((option) => option.value === '.true.' && option.label === '选择示踪剂'),
     );
     await tracer.set('.true.');
     // 界面上示踪剂没有单独的"设置"按钮，再次进入就是再选一次"选择示踪剂"（第 737 轮起清单与界面一致）。
-    assert.ok(!c.actions.some((action) => action.id === 'setup-DEF_USE_TRACER-settings'));
+    assert.ok(!c.actions.some((action) => action.id === 'setup-tracer-settings'));
     await tracer.set('.true.');
-    assert.deepEqual(opened, ['DEF_USE_TRACER', 'DEF_USE_TRACER']);
+    assert.deepEqual(opened, ['tracer', 'tracer']);
     assert.deepEqual(patches, []);
-    assert.equal(h.props.environment.caseValues.DEF_USE_TRACER, enabled ? '.true.' : '.false.');
+    assert.equal(h.props.environment.caseValues.DEF_USE_METHANE, enabled ? '.true.' : '.false.');
     h.props.disabled = true;
     h.render();
     assert.throws(() => tracer.set('.true.'), /locked|stale|不可修改|已切换/i);
@@ -284,10 +284,10 @@ test('visible river options and guide enforce the same verified methane-mode gat
   for (const mode of ['routing', 'hybrid', 'wetwat']) {
     const h = harness();
     Object.assign(h.props.overlay.physics, {
-      DEF_USE_TRACER: '.true.',
+      DEF_USE_METHANE: '.true.',
       DEF_USE_BGC: '.true.',
       DEF_USE_GridRiverLakeFlow: '.true.',
-      DEF_TRACER_NAMES: "'CH4'",
+      DEF_METHANE_PARAM_FILE: "'standard_methane_parameter.nml'",
     });
     h.response.process_files = [
       {

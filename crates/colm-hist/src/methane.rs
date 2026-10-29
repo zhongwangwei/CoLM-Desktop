@@ -1,4 +1,4 @@
-//! CH4 history 写哪些变量（`MOD_Tracer_Reactive_Methane_Hist`）：由 CH4 参数文件里的
+//! CH4 history 写哪些变量（`MOD_MT_Methane_Hist`）：由 CH4 参数文件里的
 //! `DEF_METHANE%write_ch4_history` 与 `DEF_METHANE%ch4_history_vars` 决定。引擎与 GUI 共用这份规则，
 //! 输出变量页显示的开关才与实际写出的一致。
 

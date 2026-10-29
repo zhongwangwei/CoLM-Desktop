@@ -15,6 +15,8 @@ CONTAINS
 
 ! ===========================================================
 ! Read in the canopy tree top height
+! Revisions:
+!  12/2025, Jiayi Xiang & Yuan: add crown structure data for tree PFTs.
 ! ===========================================================
 
    USE MOD_Precision
@@ -23,6 +25,7 @@ CONTAINS
    USE MOD_Vars_Global
    USE MOD_Const_LC
    USE MOD_Const_PFT
+   USE MOD_Namelist, only: DEF_RS_CROWN_STRUCTURE
    USE MOD_Vars_TimeInvariants
    USE MOD_Namelist, only: DEF_Interception_scheme
    USE MOD_LandPatch
@@ -32,6 +35,7 @@ CONTAINS
    USE MOD_NetCDFVector
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
+   USE MOD_NetCDFSerial
 #endif
 
    IMPLICIT NONE
@@ -41,11 +45,12 @@ CONTAINS
 
    ! Local Variables
    character(len=256) :: c
-   character(len=256) :: landdir, cstructdir, lndname, cyear
+   character(len=256) :: landdir, lndname, cyear, fsrfdata
+   character(len=256) :: cstructdir
    integer :: i,j,t,p,ps,pe,m,n,npatch
 
    real(r8), allocatable :: htoplc  (:)
-   real(r8), allocatable :: htoppft (:)
+   real(r8), allocatable :: htoppft (:), hbotpft(:), cratio_pft(:)
 
       write(cyear,'(i4.4)') lc_year
       landdir = trim(dir_landdata) // '/htop/' // trim(cyear)
@@ -70,7 +75,7 @@ CONTAINS
 #endif
       ENDIF
 
-
+! ==============USGS scheme===========================
 #ifdef LULC_USGS
 
       IF (p_is_worker) THEN
@@ -84,7 +89,7 @@ CONTAINS
       ENDIF
 
 #endif
-
+! ==============IGBP scheme===========================
 #ifdef LULC_IGBP
 #ifdef SinglePoint
       allocate (htoplc (numpatch))
@@ -121,7 +126,16 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #ifdef SinglePoint
       IF (numpft > 0) THEN
          allocate(htoppft(numpft))
-         htoppft = pack(SITE_htop_pfts, SITE_pctpfts > 0.)
+         fsrfdata = trim(DEF_dir_landdata) // '/srfdata.nc'
+         CAll ncio_read_serial (fsrfdata, 'canopy_height_pfts', htoppft)
+         IF (DEF_RS_CROWN_STRUCTURE) THEN
+            allocate(hbotpft(numpft))
+            CAll ncio_read_serial (fsrfdata, 'canopy_bottom_height_pfts', hbotpft)
+            IF (DEF_USE_PC) THEN
+               allocate(cratio_pft(numpft))
+               CAll ncio_read_serial (fsrfdata, 'crown_aspect_ratio_pfts', cratio_pft)
+            ENDIF
+         ENDIF
          IF (DEF_Interception_scheme == 8) THEN
             ncd_p = pack(SITE_ncd_pfts, SITE_pctpfts > 0.)
             ncw_p = pack(SITE_ncw_pfts, SITE_pctpfts > 0.)
@@ -131,6 +145,14 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 #else
       lndname = trim(landdir)//'/htop_pfts.nc'
       CALL ncio_read_vector (lndname, 'htop_pfts', landpft,   htoppft)
+      IF (DEF_RS_CROWN_STRUCTURE) THEN
+         lndname = trim(landdir)//'/hbot_pfts.nc'
+         CALL ncio_read_vector (lndname, 'hbot_pfts', landpft, hbotpft)
+         IF (DEF_USE_PC) THEN
+            lndname = trim(landdir)//'/cratio_pfts.nc'
+            CALL ncio_read_vector (lndname, 'cratio_pfts', landpft, cratio_pft)
+         ENDIF
+      ENDIF
       IF (DEF_Interception_scheme == 8) THEN
          lndname = trim(cstructdir)//'/ncd_pfts.nc'
          CALL ncio_read_vector (lndname, 'ncd_pfts', landpft, ncd_p)
@@ -143,35 +165,55 @@ IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
 
       IF (p_is_worker) THEN
          DO npatch = 1, numpatch
-            t = patchtype(npatch)
-            m = patchclass(npatch)
+            t = patchtype(npatch)        ! land cover type
+                                         ! 0: soil, 1: urban, 2: wetland, 3: ice, 4: lake
+            m = patchclass(npatch)       ! index of land cover type
 
-            IF (t == 0) THEN
+            IF (t == 0) THEN             ! land cover type is soil, growing with vegetation
                ps = patch_pft_s(npatch)
                pe = patch_pft_e(npatch)
 
                DO p = ps, pe
-                  n = pftclass(p)
+                  n = pftclass(p)        ! pft index
 
-                  htop_p(p) = htop0_p(n)
+                  htop_p(p) = htop0_p(n) ! for non-tree, use the default height
                   hbot_p(p) = hbot0_p(n)
+                  IF (DEF_USE_PC) THEN
+                     cratio_p(p) = 1.
+                  ENDIF
 
                   ! for trees
                   ! 01/06/2020, yuan: adjust htop reading
                   ! 11/15/2021, yuan: adjust htop setting
-                  IF ( n>0 .and. n<9 ) THEN
+                  ! 12/16/2025, xiangjy: adjust hbot and cratio reading
+                  IF ( n>0 .and. n<9 ) THEN ! pft is tree
                      htop_p(p) = max(2., htoppft(p))
+
+                     ! Diagnose default hbot from the PFT hbot/htop ratio.
                      hbot_p(p) = htoppft(p)*hbot0_p(n)/htop0_p(n)
                      hbot_p(p) = max(1., hbot_p(p))
+
+                     IF (DEF_RS_CROWN_STRUCTURE) THEN
+                        hbot_p(p) = hbotpft(p)
+                        IF (DEF_USE_PC) THEN
+                           cratio_p(p) = cratio_pft(p)
+                        ENDIF
+                     ENDIF
+
                   ENDIF
                ENDDO
 
-               htop(npatch) = sum(htop_p(ps:pe)*pftfrac(ps:pe))
-               hbot(npatch) = sum(hbot_p(ps:pe)*pftfrac(ps:pe))
-
-            ELSE
+               htop(npatch) = sum(htop_p(ps:pe)*pftfrac(ps:pe)) ! weighted average
+               hbot(npatch) = sum(hbot_p(ps:pe)*pftfrac(ps:pe)) ! but in fact, only htop_p & hbot_p used in 3DCanopyRadiation
+               IF (DEF_USE_PC) THEN
+                  cratio(npatch) = sum(cratio_p(ps:pe)*pftfrac(ps:pe))
+               ENDIF
+            ELSE ! if land cover type is not soil, use the default height
                htop(npatch) = htop0(m)
                hbot(npatch) = hbot0(m)
+               IF (DEF_USE_PC) THEN
+                  cratio(npatch) = 1.
+               ENDIF
             ENDIF
 
          ENDDO

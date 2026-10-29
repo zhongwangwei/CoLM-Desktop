@@ -855,7 +855,7 @@ mod tests {
         let _cleanup = PreviewCleanup(dir.clone());
         std::fs::write(
             dir.join("case.nml"),
-            "&nl_colm\n DEF_TRACER_PARAM_FILES = 'process/frozen.nml'\n DEF_USE_BGC = .true.\n/\n",
+            "&nl_colm\n DEF_SOLUTE_PARAM_FILES = 'process/frozen.nml'\n DEF_USE_BGC = .true.\n/\n",
         )
         .unwrap();
         std::fs::write(
@@ -866,7 +866,7 @@ mod tests {
         let files = publish_files(&dir, "/server/case").unwrap();
         let case = colm_namelist::parse(&files["case.nml"]).unwrap();
         assert_eq!(
-            case.get("DEF_TRACER_PARAM_FILES"),
+            case.get("DEF_SOLUTE_PARAM_FILES"),
             Some(&colm_namelist::Value::Str("frozen.nml".into()))
         );
         assert_eq!(

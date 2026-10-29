@@ -53,7 +53,7 @@ MODULE MOD_Urban_Vars_TimeVariables
    real(r8), allocatable :: t_wallsha    (:,:) !temperature of shaded wall [K]
    real(r8), allocatable :: t_gimpsno    (:,:) !temperature of impervious [K]
    real(r8), allocatable :: t_gpersno    (:,:) !temperature of pervious [K]
-   real(r8), allocatable :: t_lakesno    (:,:) !temperature of pervious [K]
+   real(r8), allocatable :: t_lakesno    (:,:) !temperature of urban lake [K]
 
    real(r8), allocatable :: wliq_roofsno (:,:) !liquid water in layers [kg/m2]
    real(r8), allocatable :: wliq_gimpsno (:,:) !liquid water in layers [kg/m2]
@@ -108,6 +108,9 @@ MODULE MOD_Urban_Vars_TimeVariables
    PUBLIC :: deallocate_UrbanTimeVariables
    PUBLIC :: READ_UrbanTimeVariables
    PUBLIC :: WRITE_UrbanTimeVariables
+   ! check_ 一族在 vendor 里始终编译（RangeCheck 是运行时开关），
+   ! 调用点又在 #ifdef URBAN_MODEL 里，所以必须导出，否则链接不到。
+   PUBLIC :: check_UrbanTimeVariables
 
 ! PRIVATE MEMBER FUNCTIONS:
 
@@ -203,9 +206,6 @@ CONTAINS
             allocate (t_room                        (numurban))
             allocate (t_roof                        (numurban))
             allocate (t_wall                        (numurban))
-            ! diagnostics computed in UrbanTHERMAL; give the cold-start restart a defined value
-            t_roof(:) = 0.
-            t_wall(:) = 0.
             allocate (tafu                          (numurban))
 
             allocate (urb_green                     (numurban))
@@ -294,7 +294,7 @@ CONTAINS
       CALL ncio_read_vector (file_restart, 'Fhah'       , landurban, Fhah       )
       CALL ncio_read_vector (file_restart, 'vehc'       , landurban, vehc       )
       CALL ncio_read_vector (file_restart, 'meta'       , landurban, meta       )
-      CALL ncio_read_vector (file_restart, 't_room '    , landurban, t_room     )
+      CALL ncio_read_vector (file_restart, 't_room'     , landurban, t_room     )
       CALL ncio_read_vector (file_restart, 't_roof'     , landurban, t_roof     )
       CALL ncio_read_vector (file_restart, 't_wall'     , landurban, t_wall     )
       CALL ncio_read_vector (file_restart, 'tafu'       , landurban, tafu       )
@@ -502,6 +502,26 @@ CONTAINS
       ENDIF
 
    END SUBROUTINE deallocate_UrbanTimeVariables
+
+   SUBROUTINE check_UrbanTimeVariables
+
+   USE MOD_RangeCheck
+
+   IMPLICIT NONE
+
+      CALL check_vector_data ('        t_room', t_room         )
+      CALL check_vector_data ('        t_roof', t_roof         )
+      CALL check_vector_data ('        t_wall', t_wall         )
+      CALL check_vector_data ('          tafu', tafu           )
+      CALL check_vector_data ('          Fahe', Fahe           )
+      CALL check_vector_data ('          Fach', Fach           )
+      CALL check_vector_data ('          Fhac', Fhac           )
+      CALL check_vector_data ('          Fhah', Fhah           )
+      CALL check_vector_data ('          Fwst', Fwst           )
+      CALL check_vector_data ('         Fvehc', vehc           )
+      CALL check_vector_data ('         Fmeta', meta           )
+
+   END SUBROUTINE check_UrbanTimeVariables
 
 END MODULE MOD_Urban_Vars_TimeVariables
 ! ---------- EOP ------------

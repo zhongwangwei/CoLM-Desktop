@@ -730,7 +730,8 @@ pub(crate) fn case_profile(
     mode: Option<&str>,
 ) -> Result<CaseProfile, String> {
     use crate::config::{character, integer, logical, real};
-    let doc = colm_namelist::parse(text).map_err(|e| format!("case.nml: {e}"))?;
+    let mut doc = colm_namelist::parse(text).map_err(|e| format!("case.nml: {e}"))?;
+    crate::config::migrate_legacy_material(&mut doc);
     let has = |name: &str| doc.get(name).is_some();
     // 只看算例里显式写了的值：schema 缺省是占位路径，不代表用了这种网格。
     let set = |name: &str| match doc.get(name) {
@@ -793,12 +794,7 @@ pub(crate) fn case_profile(
     } else {
         "IGBP"
     };
-    let methane = logical(&doc, "DEF_USE_TRACER")
-        && character(&doc, "DEF_TRACER_NAMES").split(',').any(|name| {
-            name.trim()
-                .trim_matches(['\'', '"'])
-                .eq_ignore_ascii_case("CH4")
-        });
+    let methane = logical(&doc, "DEF_USE_METHANE");
     let gridded_routing = matches!(grid, Some("latlon" | "unstructured"));
     // `DEF_simulation_time%<which>_year/month/day`（缺省取 schema 里的值）。
     let date = |which: &str| {
@@ -857,25 +853,13 @@ pub(crate) fn case_profile(
         bgc: logical(&doc, "DEF_USE_BGC"),
         crop,
         methane,
-        isotope: logical(&doc, "DEF_USE_TRACER")
-            && character(&doc, "DEF_TRACER_TYPES")
-                .split(',')
-                .any(|kind| kind.trim().eq_ignore_ascii_case("isotope")),
-        fractionation: logical(&doc, "DEF_TRACER_USE_FRACTIONATION"),
-        aquifer_mixing_mm: Some(real(&doc, "DEF_TRACER_AQUIFER_MIXING_WATER_MM"))
+        isotope: logical(&doc, "DEF_USE_ISOTOPE"),
+        fractionation: logical(&doc, "DEF_ISO_USE_FRACTIONATION"),
+        aquifer_mixing_mm: Some(real(&doc, "DEF_MT_AQUIFER_MIXING_WATER_MM"))
             .filter(|value| *value > 0.0),
-        solute: logical(&doc, "DEF_USE_TRACER")
-            && character(&doc, "DEF_TRACER_TYPES")
-                .split(',')
-                .any(|kind| kind.trim().eq_ignore_ascii_case("solute")),
+        solute: !character(&doc, "DEF_SOLUTE_NAMES").trim().is_empty(),
         solute_conc: None,
-        sediment: logical(&doc, "DEF_USE_TRACER")
-            && character(&doc, "DEF_TRACER_NAMES").split(',').any(|name| {
-                matches!(
-                    name.trim().to_ascii_uppercase().as_str(),
-                    "SEDIMENT" | "SED"
-                )
-            }),
+        sediment: logical(&doc, "DEF_USE_SEDIMENT"),
         river: gridded_routing && logical(&doc, "DEF_USE_GridRiverLakeFlow"),
         rangecheck: logical(&doc, "DEF_USE_RangeCheck"),
         colmdebug: logical(&doc, "DEF_USE_CoLMDEBUG"),

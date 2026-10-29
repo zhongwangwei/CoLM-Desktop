@@ -1538,9 +1538,9 @@ fn derive_spatial_bgc_state(
     let equilibrium = cn_initial_state
         .map(|path| read_spatial_cn_equilibrium(path, config, patches, pfts))
         .transpose()?;
-    // Desktop replaced upstream's TRACER build gate with DEF_USE_TRACER.
+    // Desktop 用 family 开关（`mt_any_enabled`）替代上游的 TRACER 编译期门。
     // Wetland BGC initialization is independent of tracer count and CH4 selection.
-    let use_tracer = optional_bool_or(document, "DEF_USE_TRACER", false)?;
+    let use_tracer = colm_namelist::material::any_enabled(document)?;
     let states = (0..patches.class.len())
         .map(|patch| {
             let indices = &pft_to_patch[patch];
@@ -2293,7 +2293,7 @@ fn read_pft_document(namelist: &Path) -> Result<colm_namelist::Document> {
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
-    optional_bool_or(&document, "DEF_USE_TRACER", false)?;
+    colm_namelist::material::any_enabled(&document)?;
     Ok(document)
 }
 

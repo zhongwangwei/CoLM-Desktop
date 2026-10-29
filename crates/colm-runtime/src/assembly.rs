@@ -1050,7 +1050,7 @@ pub struct StandardLctRestartTemplate {
     pub bgc: Option<crate::bgc_step::BgcRuntime>,
     /// `DEF_USE_IRRIGATION` 的起跑灌溉状态（[`Self::with_irrigation`] 装上）。
     pub irrigation: Option<colm_core::IrrigationState>,
-    /// `DEF_USE_TRACER` 且有输运示踪物：共享配置与本 patch 的起跑示踪物状态
+    /// 有材料运移（`mt_any_enabled`）且有输运材料：共享配置与本 patch 的起跑示踪物状态
     /// （[`Self::with_tracer`] 装上）。
     pub tracer: Option<(
         std::sync::Arc<crate::tracer::TracerRuntime>,
@@ -1787,7 +1787,7 @@ impl StandardLctRestartTemplate {
         );
         ensure!(
             runtime.variably_saturated_flow,
-            "upstream requires DEF_USE_VariablySaturatedFlow for DEF_USE_TRACER"
+            "upstream requires DEF_USE_VariablySaturatedFlow for material transport"
         );
         self.tracer = Some((runtime, initial));
         Ok(self)

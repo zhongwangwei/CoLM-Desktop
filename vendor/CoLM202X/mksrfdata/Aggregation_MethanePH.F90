@@ -44,7 +44,7 @@ SUBROUTINE Aggregation_MethanePH (dir_rawdata, dir_model_landdata, lc_year)
    USE MOD_LandPatch
    USE MOD_Land2mWMO, only: wmo_patch, wmo_source
    USE MOD_Grid
-   USE MOD_Tracer_Reactive_Methane_PHMapping, only: methane_ph_mapping_type, &
+   USE MOD_MT_Methane_PHMapping, only: methane_ph_mapping_type, &
       build_methane_ph_areal_mapping
    USE MOD_DataType, only: pointer_real8_1d
    USE MOD_NetCDFVector

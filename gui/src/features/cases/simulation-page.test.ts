@@ -1209,13 +1209,13 @@ test('existing case can reach its data step to repair dates after first reviewin
 
 const processSchema = [
   ...schema,
-  ...['DEF_USE_BGC', 'DEF_USE_TRACER', 'DEF_USE_GridRiverLakeFlow', 'DEF_URBAN_RUN'].map(
+  ...['DEF_USE_BGC', 'DEF_USE_ISOTOPE', 'DEF_USE_GridRiverLakeFlow', 'DEF_URBAN_RUN'].map(
     (name) => ({ ...field(name, '地表数据', '.false.'), kind: 'Logical' }),
   ),
   { ...field('DEF_USE_CN_INIT', '初始场', '.false.'), kind: 'Logical' },
   { ...field('DEF_file_cn_init', '初始场', 'null'), kind: 'Character' },
   { ...field('DEF_UnitCatchment_file', '河道与水库', 'null'), kind: 'Character' },
-  { ...field('DEF_TRACER_SOIL_INIT_FILE', '初始场', 'null'), kind: 'Character' },
+  { ...field('DEF_MT_SOIL_INIT_FILE', '初始场', 'null'), kind: 'Character' },
   { ...field('DEF_URBAN_type_scheme', '地表数据', '1'), kind: 'Integer' },
 ];
 for (const name of ['NewCasePage', 'CasesPage'] as const)
@@ -1262,7 +1262,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
 const dataGroups = [
   ['bgc', 'DEF_USE_BGC', 'DEF_file_cn_init'],
   ['river', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_file'],
-  ['tracer', 'DEF_USE_TRACER', 'DEF_TRACER_SOIL_INIT_FILE'],
+  ['tracer', 'DEF_USE_ISOTOPE', 'DEF_MT_SOIL_INIT_FILE'],
   ['urban', 'DEF_URBAN_RUN', 'DEF_URBAN_type_scheme'],
 ] as const;
 for (const name of ['NewCasePage', 'CasesPage'] as const)
@@ -1796,17 +1796,17 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       'DEF_file_cn_init',
       'DEF_file_Ozone',
       'DEF_Aerosol_Clim',
-      'DEF_TRACER_SOIL_INIT_FILE',
+      'DEF_MT_SOIL_INIT_FILE',
     ];
     const values = {
       ...initialValues,
       DEF_USE_BGC: '.true.',
-      DEF_USE_TRACER: '.true.',
+      DEF_USE_ISOTOPE: '.true.',
       ...Object.fromEntries(children.map((key) => [key, 'retained'])),
     };
     const extra = [
       'DEF_USE_BGC',
-      'DEF_USE_TRACER',
+      'DEF_USE_ISOTOPE',
       'UNKNOWN_DATA',
       'READONLY_DATA',
       'DEF_USE_CN_INIT',
@@ -3841,15 +3841,14 @@ test('existing forcing recognition cannot restore discarded paths or results fro
 const methaneSchema = [
   ...setupSchema,
   ...[
-    'DEF_USE_TRACER',
     'DEF_USE_Campbell_SOIL_MODEL',
     'DEF_USE_VariablySaturatedFlow',
     'DEF_USE_LULCC',
     'DEF_USE_Dynamic_Wetland',
   ].map((name) => ({ ...field(name, '示踪剂', '.false.'), kind: 'Logical' })),
   ...configuration.tracerKeys.map((name) => ({
-    ...field(name, '示踪剂', name === 'DEF_TRACER_NUM' ? '0' : "''"),
-    kind: name === 'DEF_TRACER_NUM' ? 'Integer' : 'Character',
+    ...field(name, '示踪剂', name.startsWith('DEF_USE_') ? '.false.' : "''"),
+    kind: name.startsWith('DEF_USE_') ? 'Logical' : 'Character',
   })),
 ];
 for (const marked of ['name', 'site', 'observation']) {
@@ -3871,7 +3870,7 @@ for (const marked of ['name', 'site', 'observation']) {
     assert.equal(setup.mode, 'PFT');
     const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
     assert.equal(values.DEF_USE_BGC, '.true.');
-    assert.equal(values.DEF_USE_TRACER, '.true.');
+    assert.equal(values.DEF_USE_METHANE, '.true.');
     assert.equal(values.DEF_USE_Campbell_SOIL_MODEL, '.false.');
     assert.equal(values.DEF_USE_VariablySaturatedFlow, '.true.');
     assert.equal(values.DEF_USE_LULCC, '.false.');
@@ -3880,18 +3879,13 @@ for (const marked of ['name', 'site', 'observation']) {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].NAMES, 'CH4');
     assert.equal(rows[0].TYPES, 'gas');
-    assert.equal(rows[0].PARAM_FILES, 'standard_ch4_parameter.nml');
+    assert.equal(rows[0].PARAM_FILES, 'standard_methane_parameter.nml');
     await p.click('new-next');
     await p.click('new-create');
     const created = p.calls.find((call) => call.command === 'new_case')!;
     assert.ok(created);
     const written = created.args.fields as { path: string; value: string }[];
-    for (const key of [
-      'DEF_USE_TRACER',
-      'DEF_USE_BGC',
-      'DEF_TRACER_NAMES',
-      'DEF_TRACER_PARAM_FILES',
-    ])
+    for (const key of ['DEF_USE_METHANE', 'DEF_USE_BGC', 'DEF_METHANE_PARAM_FILE'])
       assert.equal(written.find((entry) => entry.path === key)?.value, values[key]);
     assert.deepEqual(p.state.version.overlay.physics, {});
     assert.ok(!p.calls.some((call) => call.command === 'model_create'));
@@ -3907,10 +3901,10 @@ test('methane example preserves PC and custom tracer metadata while removing cro
       sites: [methane],
       step: 3,
       caseValues: {
-        DEF_TRACER_NUM: '2',
-        DEF_TRACER_NAMES: "'Cl,CH4'",
-        DEF_TRACER_TYPES: "'solute,gas'",
-        DEF_TRACER_PARAM_FILES: "'Cl:/custom/cl.nml,CH4:/custom/ch4.nml'",
+        DEF_USE_METHANE: '.true.',
+        DEF_METHANE_PARAM_FILE: "'/custom/ch4.nml'",
+        DEF_SOLUTE_NAMES: "'Cl'",
+        DEF_SOLUTE_PARAM_FILES: "'Cl:/custom/cl.nml'",
         DEF_TUNING_CROP_PLANTING_DAY: '120',
         DEF_HIST_FREQ: "'DAILY'",
       },
@@ -3925,9 +3919,9 @@ test('methane example preserves PC and custom tracer metadata while removing cro
   const setup = p.element('ModelSettings').props;
   assert.equal(setup.mode, 'PC');
   const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
-  assert.equal(values.DEF_TRACER_NUM, '2');
-  assert.equal(values.DEF_TRACER_NAMES, "'Cl,CH4'");
-  assert.equal(values.DEF_TRACER_PARAM_FILES, "'Cl:/custom/cl.nml,CH4:/custom/ch4.nml'");
+  assert.equal(values.DEF_SOLUTE_NAMES, "'Cl'");
+  assert.equal(values.DEF_SOLUTE_PARAM_FILES, "'Cl:/custom/cl.nml'");
+  assert.equal(values.DEF_METHANE_PARAM_FILE, "'/custom/ch4.nml'");
   assert.equal(values.DEF_TUNING_CROP_PLANTING_DAY, undefined);
   assert.equal(values.DEF_HIST_FREQ, "'DAILY'");
 });
@@ -3947,7 +3941,7 @@ test('methane selection with missing tracer schema leaves the original site and 
   const values = (
     p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
   ).caseValues;
-  assert.notEqual(values.DEF_USE_TRACER, '.true.');
+  assert.notEqual(values.DEF_USE_METHANE, '.true.');
   assert.deepEqual(p.state.version.overlay.physics, {});
 });
 
@@ -3969,9 +3963,9 @@ test('selecting urban after methane disables BGC and tracers while retaining def
   assert.equal(setup.mode, 'IGBP');
   const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
   assert.equal(values.DEF_USE_BGC, '.false.');
-  assert.equal(values.DEF_USE_TRACER, '.false.');
+  assert.equal(values.DEF_USE_METHANE, '.false.');
   assert.equal(values.DEF_URBAN_RUN, '.true.');
-  assert.equal(values.DEF_TRACER_NAMES, "'CH4'");
+  assert.equal(values.DEF_METHANE_PARAM_FILE, "'standard_methane_parameter.nml'");
 });
 
 test('methane example retains inherited custom tracer scalar metadata without copying unrelated version flags', async () => {
@@ -3982,15 +3976,13 @@ test('methane example retains inherited custom tracer scalar metadata without co
   });
   const overlay = p.state.version.overlay as Overlay;
   Object.assign(overlay.physics, {
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'Cl'",
-    DEF_TRACER_TYPES: "'solute'",
-    DEF_TRACER_PARAM_FILES: "'CustomCl:/custom/cl.nml'",
+    DEF_SOLUTE_NAMES: "'Cl'",
+    DEF_SOLUTE_PARAM_FILES: "'CustomCl:/custom/cl.nml'",
     DEF_UNRELATED_VERSION_FLAG: '.true.',
   });
   overlay.parameters.push({
-    parameter_id: 'case:DEF_TRACER_NAMES',
-    raw_key: 'DEF_TRACER_NAMES',
+    parameter_id: 'case:DEF_SOLUTE_NAMES',
+    raw_key: 'DEF_SOLUTE_NAMES',
     scope_instance: { kind: 'case-scalar' },
     value: "'CustomCl'",
   });
@@ -4004,13 +3996,13 @@ test('methane example retains inherited custom tracer scalar metadata without co
   assert.deepEqual(
     rows.map((row) => [row.NAMES, row.TYPES]),
     [
-      ['CustomCl', 'solute'],
       ['CH4', 'gas'],
+      ['CustomCl', 'solute'],
     ],
   );
-  assert.equal(rows[0].PARAM_FILES, '/custom/cl.nml');
+  assert.equal(rows.find((row) => row.TYPES === 'solute')!.PARAM_FILES, '/custom/cl.nml');
   assert.equal(values.DEF_UNRELATED_VERSION_FLAG, undefined);
-  assert.equal(overlay.physics.DEF_TRACER_NAMES, "'Cl'");
+  assert.equal(overlay.physics.DEF_SOLUTE_NAMES, "'Cl'");
   assert.equal(overlay.parameters[0].value, "'CustomCl'");
 });
 
@@ -4021,14 +4013,12 @@ for (const retained of ['new', 'missing-file', 'builtin-file', 'custom-file', 'c
       DEF_USE_Dynamic_Wetland: '.true.',
       ...(['missing-file', 'builtin-file', 'custom-file'].includes(retained)
         ? {
-            DEF_TRACER_NUM: '1',
-            DEF_TRACER_NAMES: "'CH4'",
-            DEF_TRACER_TYPES: "'gas'",
-            DEF_TRACER_PARAM_FILES:
+            DEF_USE_METHANE: '.true.',
+            DEF_METHANE_PARAM_FILE:
               retained === 'custom-file'
-                ? "'CH4:/custom/ch4.nml'"
+                ? "'/custom/ch4.nml'"
                 : retained === 'builtin-file'
-                  ? "'CH4:standard_ch4_parameter.nml'"
+                  ? "'standard_methane_parameter.nml'"
                   : "'null'",
           }
         : {}),
@@ -4042,7 +4032,7 @@ for (const retained of ['new', 'missing-file', 'builtin-file', 'custom-file', 'c
     );
     if (retained === 'custom-asset')
       (p.state.version.overlay as Overlay).process_files.push({
-        relative_path: 'standard_ch4_parameter.nml',
+        relative_path: 'standard_methane_parameter.nml',
         sha256: 'custom',
       });
     await p.mount();
@@ -4068,10 +4058,10 @@ for (const retained of ['new', 'missing-file', 'builtin-file', 'custom-file', 'c
 test('methane example rejects oversized tracer definitions without truncating or changing the selected site', async () => {
   const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
   const caseValues = {
-    DEF_TRACER_NUM: '101',
-    DEF_TRACER_NAMES: `'${['CH4', ...Array.from({ length: 100 }, (_, index) => `Cl${index}`)].join(',')}'`,
-    DEF_TRACER_TYPES: `'${['gas', ...Array.from({ length: 100 }, () => 'solute')].join(',')}'`,
-    DEF_TRACER_PARAM_FILES: "'CH4:/custom/ch4.nml'",
+    DEF_USE_METHANE: '.true.',
+    DEF_METHANE_PARAM_FILE: "'/custom/ch4.nml'",
+    DEF_SOLUTE_NAMES: `'${Array.from({ length: 100 }, (_, index) => `Cl${index}`).join(',')}'`,
+    DEF_SOLUTE_PARAM_FILES: "'null'",
   };
   const p = page(
     'NewCasePage',

@@ -682,7 +682,7 @@ pub fn render(vars: &[Var], switches: &[Switch]) -> String {
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
          //!\n\
          //! 源：vendor/CoLM202X/main/MOD_Hist.F90\n\
-         //!     vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Hist.F90\n\
+         //!     vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Hist.F90\n\
          //! 漂移由 crates/colm-hist/tests/drift.rs 守住。\n\n\
          use crate::{{Cond, Switch, Sync, Var}};\n\n\
          // 一个变量一行 —— 上游改一处，diff 就只有一行。rustfmt 会把每条拆成\n\

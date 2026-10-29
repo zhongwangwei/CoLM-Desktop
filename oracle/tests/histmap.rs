@@ -86,7 +86,8 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
         .filter(|v| !golden.contains(*v))
         .collect();
     // PR #504（FIRE）加的 104 个火诊断量都在 `DEF_USE_BGC` 下，这份算例没开 BGC：392 + 104。
-    assert_eq!(over.len(), 392 + 104);
+    // 上游 7d2fca93 的 MaterialTransport 同步又给甲烷加了 `co2_hr_methane`：再 +1。
+    assert_eq!(over.len(), 392 + 104 + 1);
 
     let all = colm_hist::all();
     let runtime_of = |n: &str| all.iter().find(|v| v.name == n).and_then(|v| v.runtime);
@@ -118,7 +119,8 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
         );
         assert_eq!(runtime_of(n), Some("DEF_URBAN_RUN"));
     }
-    // CH4/TRACER 变量由单独的 tracer history writer 写出，但仍受 DEF_USE_TRACER 控制。
+    // CH4/材料运移变量由单独的 material history writer 写出，受 `DEF_USE_METHANE` 控制
+    // （上游 7d2fca93 把 TRACER 拆成 family 开关后，甲烷变量挂在甲烷开关下）。
     for n in [
         "methane_surf_flux_tot",
         "methane_prod_depth",
@@ -126,9 +128,9 @@ fn the_only_over_prediction_is_explained_by_a_runtime_condition() {
     ] {
         assert!(
             over.contains(&n),
-            "{n} should be over-predicted (TRACER off)"
+            "{n} should be over-predicted (METHANE off)"
         );
-        assert!(runtime_of(n).is_some_and(|r| r.contains("DEF_USE_TRACER")));
+        assert!(runtime_of(n).is_some_and(|r| r.contains("DEF_USE_METHANE")));
     }
 }
 

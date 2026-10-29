@@ -5607,7 +5607,10 @@ pub fn apply(
             for field in [
                 "DEF_forcing_namelist",
                 "DEF_HIST_vars_namelist",
-                "DEF_TRACER_PARAM_FILES",
+                "DEF_ISOTOPE_PARAM_FILE",
+                "DEF_SOLUTE_PARAM_FILES",
+                "DEF_SEDIMENT_PARAM_FILE",
+                "DEF_METHANE_PARAM_FILE",
             ] {
                 let Some(Value::Str(raw)) = document.get(field).cloned() else {
                     continue;

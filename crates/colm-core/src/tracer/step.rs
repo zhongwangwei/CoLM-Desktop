@@ -1,4 +1,4 @@
-//! 一个土壤/湿地 patch 一步之内的示踪物记账顺序（`CoLMMAIN.F90` 的 `DEF_USE_TRACER` 段）。
+//! 一个土壤/湿地 patch 一步之内的材料记账顺序（`CoLMMAIN.F90` 的 `mt_any_enabled` 段）。
 //!
 //! 宿主在各时刻交出快照，这里按上游顺序调各过程：
 //! 截留后 `tracer_save_storage` + `tracer_precip` → 新雪 `tracer_newsnow` → THERMAL 前快照与
@@ -23,7 +23,7 @@ pub struct TracerStepContext<'a> {
     pub set: &'a TracerSet,
     pub physics: TracerPhysics,
     pub soil_options: SoilWaterOptions,
-    /// `DEF_TRACER_CANOPY_EQUILIBRATION`。
+    /// `DEF_ISO_CANOPY_EQUILIBRATION`。
     pub canopy_equilibration: f64,
     /// 逐示踪物的 `tracer_forcing_precip_value`/`tracer_forcing_vapor_value`。
     pub precip_ratio: &'a [f64],

@@ -35,11 +35,13 @@ SOURCE_SHA=$(python3 "$REPO_ROOT/oracle/scripts/ensure_native_kernels.py" --fing
 # compiled in, so create_defineh.bash no longer takes that argument and
 # the presets below don't pass it either.
 #
-# Same story for TRACER (used to be a 7th positional argument,
-# TRACERON/TRACEROFF). It is a runtime namelist switch now (DEF_USE_TRACER,
-# MOD_Namelist.F90, default .false.) -- every main/TRACER module file is
-# always compiled in, so create_defineh.bash no longer takes that argument
-# either.
+# Same story for material transport (the old compile-time macro was TRACER,
+# a 7th positional argument TRACERON/TRACEROFF). Upstream renamed it
+# MaterialTransport and split the switch by family at runtime
+# (DEF_USE_ISOTOPE / DEF_USE_METHANE / DEF_SOLUTE_NAMES, in
+# main/MATERIAL/MOD_MT_Namelist.F90, all off by default) -- every
+# main/MATERIAL module file is always compiled in, so create_defineh.bash
+# no longer takes that argument either.
 #
 # Same story again for the subgrid structure (LULC_IGBP_PFT/LULC_IGBP_PC,
 # used to be part of the old 2nd argument), URBAN_MODEL (used to be a 3rd
@@ -186,8 +188,10 @@ is_effective() { printf '%s\n' "$EFFECTIVE" | grep -qxF "$1"; }
 #
 # 没有 Campbell/vanGenu 条目——土壤水力方案改成运行时开关之后，
 # create_defineh.bash 不再吃这个参数，两条物理路径始终一起编进去。
-# 也没有 TRACERON 条目——TRACER 同样改成运行时开关了（DEF_USE_TRACER），
-# create_defineh.bash 不再吃这个参数，main/TRACER/ 底下的模块始终编进去。
+# 也没有 TRACERON 条目——物运移（上游改名 MaterialTransport）同样改成按 family
+# 的运行时开关了（DEF_USE_ISOTOPE / DEF_USE_METHANE / DEF_SOLUTE_NAMES，
+# 见 main/MATERIAL/MOD_MT_Namelist.F90），create_defineh.bash 不再吃这个参数，
+# main/MATERIAL/ 底下的模块始终编进去。
 # 也没有 LULC_IGBP_PFT/LULC_IGBP_PC/URBANON/BGCON 条目——同一批理由：
 # 次网格结构（DEF_USE_PFT/DEF_USE_PC）、URBAN_MODEL（DEF_URBAN_RUN）、
 # BGC（DEF_USE_BGC）都改成运行时开关了，main/BGC/、main/URBAN/、

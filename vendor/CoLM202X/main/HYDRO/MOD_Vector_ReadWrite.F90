@@ -10,10 +10,8 @@ MODULE MOD_Vector_ReadWrite
 !-----------------------------------------------------------------------
 
    PUBLIC :: vector_gather_and_write
-   PUBLIC :: vector_gather_matrix_to_master
    PUBLIC :: vector_gather_map2grid_and_write
    PUBLIC :: vector_read_and_scatter
-   PUBLIC :: vector_read_matrix_and_scatter
 
 CONTAINS
 
@@ -42,6 +40,8 @@ CONTAINS
 
       IF (totalvlen <= 0) RETURN
 
+      ! Cells no worker writes keep spval, so a truly uncovered grid point is
+      ! visible as missing rather than whatever the allocator returned.
       IF (p_is_master) THEN
          allocate (wdata (totalvlen))
          wdata = spval
@@ -119,127 +119,6 @@ CONTAINS
 
    END SUBROUTINE vector_gather_to_master
 
-   SUBROUTINE vector_gather_matrix_to_master ( &
-         matrix, nrow, ncol_local, ncol_global, global_id, wdata)
-
-   USE MOD_Precision
-   USE MOD_SPMD_Task
-   IMPLICIT NONE
-
-   real(r8), intent(in) :: matrix (:,:)
-   integer,  intent(in) :: nrow
-   integer,  intent(in) :: ncol_local
-   integer,  intent(in) :: ncol_global
-   integer,  intent(in) :: global_id (:)
-
-   real(r8), allocatable, intent(inout) :: wdata (:,:)
-
-   integer :: iwork, isrc, ndata, ipth, mesg(2)
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   integer, allocatable :: icache(:), send_id(:)
-   real(r8), allocatable :: rcache(:), sendbuf(:)
-
-      IF (nrow <= 0 .or. ncol_global <= 0) RETURN
-
-      IF (size(global_id) /= ncol_local) THEN
-         CALL CoLM_stop ('vector_gather_matrix_to_master: global_id size mismatch')
-      ENDIF
-
-      IF (p_is_master) THEN
-         allocate (wdata (nrow, ncol_global))
-         wdata(:,:) = 0._r8
-      ENDIF
-
-#if defined(USEMPI) && defined(FLAT_SPMD)
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (ncol_local, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iwork = 1, p_np_glb-1
-         disps(iwork) = disps(iwork-1) + counts(iwork-1)
-      ENDDO
-      counts_data = counts * nrow
-      disps_data = disps * nrow
-
-      allocate (send_id(max(1,ncol_local)), sendbuf(max(1,nrow*ncol_local)))
-      IF (ncol_local > 0) THEN
-         send_id(1:ncol_local) = global_id
-         sendbuf(1:nrow*ncol_local) = reshape(matrix, (/nrow*ncol_local/))
-      ENDIF
-      IF (p_is_master) THEN
-         allocate (icache(max(1,sum(counts))))
-         allocate (rcache(max(1,nrow*sum(counts))))
-      ELSE
-         allocate (icache(1), rcache(1))
-      ENDIF
-      CALL mpi_gatherv (send_id, ncol_local, MPI_INTEGER, icache, counts, disps, &
-         MPI_INTEGER, p_root, p_comm_glb, p_err)
-      CALL mpi_gatherv (sendbuf, nrow*ncol_local, MPI_REAL8, rcache, counts_data, &
-         disps_data, MPI_REAL8, p_root, p_comm_glb, p_err)
-
-      IF (p_is_master) THEN
-         DO ipth = 1, sum(counts)
-            IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
-               CALL CoLM_stop ('vector_gather_matrix_to_master: global_id out of range')
-            ENDIF
-            wdata(:, icache(ipth)) = rcache((ipth-1)*nrow+1:ipth*nrow)
-         ENDDO
-      ENDIF
-      deallocate (counts, counts_data, disps, disps_data)
-      deallocate (icache, rcache, send_id, sendbuf)
-#elif defined(USEMPI)
-      IF (p_is_worker) THEN
-         mesg = (/p_iam_glb, ncol_local/)
-         CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-         IF (ncol_local > 0) THEN
-            CALL mpi_send (global_id, ncol_local, MPI_INTEGER, &
-               p_address_master, mpi_tag_mesg + 1, p_comm_glb, p_err)
-            CALL mpi_send (matrix, nrow*ncol_local, MPI_REAL8, &
-               p_address_master, mpi_tag_data, p_comm_glb, p_err)
-         ENDIF
-      ENDIF
-
-      IF (p_is_master) THEN
-         DO iwork = 0, p_np_worker-1
-            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
-               mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-
-            isrc  = mesg(1)
-            ndata = mesg(2)
-            IF (ndata > 0) THEN
-               allocate (icache (ndata))
-               allocate (rcache (nrow*ndata))
-
-               CALL mpi_recv (icache, ndata, MPI_INTEGER, isrc, &
-                  mpi_tag_mesg + 1, p_comm_glb, p_stat, p_err)
-               CALL mpi_recv (rcache, nrow*ndata, MPI_REAL8, isrc, &
-                  mpi_tag_data, p_comm_glb, p_stat, p_err)
-
-               DO ipth = 1, ndata
-                  IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
-                     CALL CoLM_stop ('vector_gather_matrix_to_master: global_id out of range')
-                  ENDIF
-                  wdata(:, icache(ipth)) = rcache((ipth-1)*nrow+1:ipth*nrow)
-               ENDDO
-
-               deallocate (icache)
-               deallocate (rcache)
-            ENDIF
-         ENDDO
-      ENDIF
-
-      CALL mpi_barrier (p_comm_glb, p_err)
-#else
-      DO ipth = 1, ncol_local
-         IF (global_id(ipth) < 1 .or. global_id(ipth) > ncol_global) THEN
-            CALL CoLM_stop ('vector_gather_matrix_to_master: global_id out of range')
-         ENDIF
-         wdata(:, global_id(ipth)) = matrix(:, ipth)
-      ENDDO
-#endif
-
-   END SUBROUTINE vector_gather_matrix_to_master
-
    ! -------
    SUBROUTINE vector_gather_and_write ( vector, vlen, totalvlen, data_address, &
          fileout, varname, dimname, itime_in_file, longname, units)
@@ -271,6 +150,11 @@ CONTAINS
    logical :: write_attr
 
 
+      ! [GridRiverLakeFlow] Nothing to write when the vector is empty on all
+      ! processes (e.g. no reservoir or no bifurcation pathway in the domain);
+      ! writing it would define a zero-length dimension, which netCDF takes as
+      ! unlimited.  totalvlen is the same on all processes, so all return together.
+      ! Results are unchanged for any non-empty vector.
       IF (totalvlen <= 0) RETURN
 
       CALL vector_gather_to_master (vector, vlen, totalvlen, data_address, wdata)
@@ -337,6 +221,11 @@ CONTAINS
    real(r8), allocatable :: wdata(:), wdata2d(:,:)
    logical :: write_attr
 
+      ! [GridRiverLakeFlow] Nothing to write when the vector is empty on all
+      ! processes (e.g. no reservoir or no bifurcation pathway in the domain);
+      ! writing it would define a zero-length dimension, which netCDF takes as
+      ! unlimited.  totalvlen is the same on all processes, so all return together.
+      ! Results are unchanged for any non-empty vector.
       IF (totalvlen <= 0) RETURN
 
       CALL vector_gather_to_master (vector, vlen, totalvlen, data_address, wdata)
@@ -406,6 +295,10 @@ CONTAINS
       IF (p_is_master) THEN
          CALL ncio_read_serial (filein, varname, rdata)
 
+         ! The restart vector must describe exactly the global vectors that
+         ! this run is about to scatter into: a length or index mismatch means
+         ! the restart belongs to another network and would be read into the
+         ! wrong unit catchments, so stop instead of scattering it.
          expected_length = 0
          DO iwork = lbound(data_address, 1), ubound(data_address, 1)
             IF (allocated(data_address(iwork)%val)) &
@@ -492,143 +385,5 @@ CONTAINS
       IF (p_is_master) deallocate(rdata)
 
    END SUBROUTINE vector_read_and_scatter
-
-   SUBROUTINE vector_read_matrix_and_scatter ( &
-         filein, matrix, nrow, ncol_local, varname, global_id, ncol_global)
-
-   USE MOD_Precision
-   USE MOD_SPMD_Task
-   USE MOD_NetCDFSerial
-   IMPLICIT NONE
-
-   character(len=*),       intent(in)    :: filein
-   real(r8),  allocatable, intent(inout) :: matrix (:,:)
-   integer,                intent(in)    :: nrow
-   integer,                intent(in)    :: ncol_local
-   character(len=*),       intent(in)    :: varname
-   integer,                intent(in)    :: global_id (:)
-   integer,                intent(in)    :: ncol_global
-
-   integer :: iwork, isrc, ndata, ipth, mesg(2)
-   integer, allocatable :: counts(:), counts_data(:), disps(:), disps_data(:)
-   integer, allocatable :: icache(:), send_id(:)
-   real(r8), allocatable :: rdata(:,:), rcache(:), recvbuf(:)
-
-      IF (nrow <= 0 .or. ncol_global <= 0) RETURN
-
-      IF (size(global_id) /= ncol_local) THEN
-         CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id size mismatch')
-      ENDIF
-
-      IF (p_is_master) THEN
-         CALL ncio_read_serial (filein, varname, rdata)
-
-         IF (size(rdata, 1) /= nrow .or. size(rdata, 2) /= ncol_global) THEN
-            CALL CoLM_stop ('vector_read_matrix_and_scatter: restart matrix shape mismatch')
-         ENDIF
-      ENDIF
-
-#if defined(USEMPI) && defined(FLAT_SPMD)
-      allocate (counts(0:p_np_glb-1), counts_data(0:p_np_glb-1))
-      allocate (disps(0:p_np_glb-1), disps_data(0:p_np_glb-1))
-      CALL mpi_allgather (ncol_local, 1, MPI_INTEGER, counts, 1, MPI_INTEGER, p_comm_glb, p_err)
-      disps(0) = 0
-      DO iwork = 1, p_np_glb-1
-         disps(iwork) = disps(iwork-1) + counts(iwork-1)
-      ENDDO
-      counts_data = counts * nrow
-      disps_data = disps * nrow
-
-      allocate (send_id(max(1,ncol_local)))
-      IF (ncol_local > 0) send_id(1:ncol_local) = global_id
-      IF (p_is_master) THEN
-         allocate (icache(max(1,sum(counts))))
-      ELSE
-         allocate (icache(1))
-      ENDIF
-      CALL mpi_gatherv (send_id, ncol_local, MPI_INTEGER, icache, counts, disps, &
-         MPI_INTEGER, p_root, p_comm_glb, p_err)
-
-      IF (p_is_master) THEN
-         allocate (rcache(max(1,nrow*sum(counts))))
-         DO ipth = 1, sum(counts)
-            IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
-               CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id out of range')
-            ENDIF
-            rcache((ipth-1)*nrow+1:ipth*nrow) = rdata(:, icache(ipth))
-         ENDDO
-      ELSE
-         allocate (rcache(1))
-      ENDIF
-      allocate (recvbuf(max(1,nrow*ncol_local)))
-      CALL mpi_scatterv (rcache, counts_data, disps_data, MPI_REAL8, recvbuf, &
-         nrow*ncol_local, MPI_REAL8, p_root, p_comm_glb, p_err)
-      IF (ncol_local > 0) THEN
-         IF (.not. allocated(matrix)) allocate (matrix(nrow, ncol_local))
-         matrix = reshape(recvbuf(1:nrow*ncol_local), shape(matrix))
-      ENDIF
-      deallocate (counts, counts_data, disps, disps_data)
-      deallocate (icache, send_id, rcache, recvbuf)
-#elif defined(USEMPI)
-      CALL mpi_barrier (p_comm_glb, p_err)
-
-      IF (p_is_worker) THEN
-         mesg = (/p_iam_glb, ncol_local/)
-         CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
-
-         IF (ncol_local > 0) THEN
-            CALL mpi_send (global_id, ncol_local, MPI_INTEGER, &
-               p_address_master, mpi_tag_mesg + 1, p_comm_glb, p_err)
-
-            IF (.not. allocated(matrix)) allocate (matrix(nrow, ncol_local))
-            CALL mpi_recv (matrix, nrow*ncol_local, MPI_REAL8, p_address_master, &
-               mpi_tag_data, p_comm_glb, p_stat, p_err)
-         ENDIF
-      ENDIF
-
-      IF (p_is_master) THEN
-         DO iwork = 0, p_np_worker-1
-            CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
-               mpi_tag_mesg, p_comm_glb, p_stat, p_err)
-
-            isrc  = mesg(1)
-            ndata = mesg(2)
-            IF (ndata > 0) THEN
-               allocate (icache (ndata))
-               allocate (rcache (nrow*ndata))
-
-               CALL mpi_recv (icache, ndata, MPI_INTEGER, isrc, &
-                  mpi_tag_mesg + 1, p_comm_glb, p_stat, p_err)
-
-               DO ipth = 1, ndata
-                  IF (icache(ipth) < 1 .or. icache(ipth) > ncol_global) THEN
-                     CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id out of range')
-                  ENDIF
-                  rcache((ipth-1)*nrow+1:ipth*nrow) = rdata(:, icache(ipth))
-               ENDDO
-
-               CALL mpi_send (rcache, nrow*ndata, MPI_REAL8, isrc, &
-                  mpi_tag_data, p_comm_glb, p_err)
-
-               deallocate (icache)
-               deallocate (rcache)
-            ENDIF
-         ENDDO
-      ENDIF
-
-      CALL mpi_barrier (p_comm_glb, p_err)
-#else
-      IF (.not. allocated(matrix)) allocate (matrix(nrow, ncol_local))
-      DO ipth = 1, ncol_local
-         IF (global_id(ipth) < 1 .or. global_id(ipth) > ncol_global) THEN
-            CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id out of range')
-         ENDIF
-         matrix(:, ipth) = rdata(:, global_id(ipth))
-      ENDDO
-#endif
-
-      IF (p_is_master) deallocate (rdata)
-
-   END SUBROUTINE vector_read_matrix_and_scatter
 
 END MODULE MOD_Vector_ReadWrite

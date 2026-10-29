@@ -92,6 +92,7 @@ MODULE MOD_BGC_CNSummary
        cropprod1c_loss, grainc_to_cropprodc, grainc_to_seed, grainn_to_cropprodn, &
 #endif
         sminn_leached, sminn_leached_vr, smin_no3_leached, smin_no3_leached_vr, smin_no3_runoff, smin_no3_runoff_vr, &
+        smin_nh4_leached, smin_nh4_leached_vr, &
         f_n2o_nit, f_n2o_nit_vr, decomp_cpools_transport_tendency, decomp_npools_transport_tendency, &
         denit, f_denit_vr, m_decomp_cpools_to_fire_vr, m_decomp_npools_to_fire_vr, &
        pft_fire_closs, pft_fire_nloss, litfire, &
@@ -733,6 +734,7 @@ CONTAINS
   
       DO j = 1, nl_soil
          supplement_to_sminn(i) = supplement_to_sminn(i) + supplement_to_sminn_vr(j,i) * dz_soi(j)
+         smin_nh4_leached(i)    = smin_nh4_leached(i)    + smin_nh4_leached_vr(j,i) * dz_soi(j)
          smin_no3_leached(i)    = smin_no3_leached(i)    + smin_no3_leached_vr(j,i) * dz_soi(j)
          smin_no3_runoff(i)     = smin_no3_runoff(i)     + smin_no3_runoff_vr(j,i) * dz_soi(j)
          sminn_leached(i)       = sminn_leached(i)       + sminn_leached_vr(j,i) * dz_soi(j)

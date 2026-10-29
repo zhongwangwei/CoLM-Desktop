@@ -516,7 +516,7 @@ pub struct GlacierInput<'a> {
     /// 步末 `wliq_soisno(maxsnl+1:nl_soil)`。
     pub wliq_soisno: &'a [f64; SOISNO_LAYERS],
     pub wice_soisno: &'a [f64; SOISNO_LAYERS],
-    /// `DEF_TRACER_SUBL_SKIN_MM`。
+    /// `DEF_ISO_SUBL_SKIN_MM`。
     pub subl_skin_mm: f64,
     /// `tracer_forcing_precip_value(itrc, ipatch)`，逐示踪物。
     pub precip_ratio: &'a [f64],
@@ -713,7 +713,7 @@ pub struct WaterbodyInput<'a> {
     pub wice_soisno: &'a [f64; SOISNO_LAYERS],
     /// `DEF_USE_Dynamic_Lake`。
     pub use_dynamic_lake: bool,
-    /// `DEF_TRACER_SUBL_SKIN_MM`。
+    /// `DEF_ISO_SUBL_SKIN_MM`。
     pub subl_skin_mm: f64,
     /// `waterbody_hist_sample`（CoLMDRIVER 在子步循环里只让最后一个子步累加 history）。
     pub hist_sample: bool,

@@ -1,6 +1,6 @@
 //! 甲烷 provider（`MOD_Tracer_Reactive_Methane_*`）：CLM4.5 CH4 模型的 CoLM 移植。
 //!
-//! 只在 `DEF_USE_TRACER` 注册了 `gas` 类 CH4 示踪物、并开 BGC 时运行；每个 patch 在
+//! 只在打开 `DEF_USE_METHANE` 并注册了 `gas` 类 CH4 材料、并开 BGC 时运行；每个 patch 在
 //! `bgc_driver` 之后调用，结果经 `tracer_ch4_bgc_finalize_step` 回写 BGC 的
 //! `decomp_hr`/`er`。
 //!

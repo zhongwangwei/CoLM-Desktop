@@ -3212,7 +3212,7 @@ pub struct HistorySession {
     vector_statics: Vec<(String, String, String, Vec<f64>)>,
     /// 本步那条记录的逐 patch 量（[`Self::stage_patch_field`]）。
     staged_patch: Vec<(&'static str, Vec<f64>, Vec<bool>)>,
-    /// `DEF_USE_TRACER`（网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
+    /// 有材料运移（`mt_any_enabled`，网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
     /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
     tracer_time_step_seconds: Option<f64>,
     /// 有输运示踪物时的示踪物 history（`tracer_hist_out`），见 [`Self::with_tracer_variables`]。
@@ -3636,7 +3636,7 @@ impl HistorySession {
         Ok((tick_of(end)? == record.write_at_tick).then(|| record.clone()))
     }
 
-    /// `DEF_USE_TRACER`：主 history 多写 `history_window_seconds = nac*deltim` 与
+    /// 有材料运移（`mt_any_enabled`）：主 history 多写 `history_window_seconds = nac*deltim` 与
     /// `history_window_end_minutes`，并另写 `<case>_hist_tracer_<cdate>.nc`
     /// （`MOD_Hist.F90:319-358`，只在 `HistForm == 'Gridded'` 时写窗口变量）。
     pub fn with_tracer_history(mut self, time_step_seconds: Option<f64>) -> Result<Self> {

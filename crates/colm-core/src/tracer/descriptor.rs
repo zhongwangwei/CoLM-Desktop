@@ -1,10 +1,12 @@
-//! 示踪物描述符与注册（`MOD_Tracer_Defs:tracer_defs_init` 及其辅助例程）。
+//! 示踪物描述符与注册（`main/MATERIAL/MOD_MT_Defs.F90:tracer_defs_init` 及其辅助例程）。
 //!
 //! 上游把描述符放在全局表 `tracers(:)` 里，按 `itrc` 查询；这里是显式的 [`TracerSet`]。
-//! namelist 的 CSV 键与逐示踪物参数文件（`&nl_colm_tracer_parameter`）由调用方读成字符串/
-//! 数值后交给 [`TracerSet::build`]，本模块不碰文件。
+//! 上游 7d2fca93 之后，条目由 family 开关的顺序决定（同位素 → 溶质 → 泥沙 → 甲烷），
+//! 不再有 `DEF_TRACER_NUM/_NAMES/_TYPES` 那张 CSV；溶质的参数文件
+//! （`&nl_colm_solute_parameter` 的 `DEF_SOLUTE%*`）由调用方读成
+//! [`TracerParameterOverrides`] 后交给 [`TracerSet::build`]，本模块不碰文件。
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 /// `trc_tiny`：只作算术非零保护。
 pub const TRC_TINY: f64 = 1.0e-30;
@@ -61,35 +63,87 @@ pub struct TracerDescriptor {
     pub charge: i32,
 }
 
-/// `&nl_colm_tracer_parameter` 的 `DEF_TRACER%*`：只放文件里写了的字段。
+/// `&nl_colm_solute_parameter` 的 `DEF_SOLUTE%*`：只放文件里写了的字段。
+///
+/// 上游把旧的 `tracer_parameter_type` 换成了按 species 的 `solute_parameter_type`，
+/// 其中没有 `ref_ratio`/`init_delta`（溶质固定 1/0，同位素由主 namelist 的
+/// `DEF_ISO_REF_RATIO_*` 决定），也没有通用的 `unit_kind` 以外的东西。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TracerParameterOverrides {
     pub unit_kind: Option<String>,
     pub mol_weight: Option<f64>,
-    pub ref_ratio: Option<f64>,
-    pub init_delta: Option<f64>,
     pub init_conc: Option<f64>,
     pub precip_default_conc: Option<f64>,
     pub vapor_default_conc: Option<f64>,
     pub max_dissolved_conc: Option<f64>,
-    pub reactive_decay_rate: Option<f64>,
+    pub decay_rate: Option<f64>,
     pub charge: Option<i32>,
 }
 
-/// 构建描述符所需的 namelist 键（`DEF_TRACER_*`，均为原始字符串）。
-#[derive(Debug, Clone, Default)]
+/// 四个 family 各自的参数文件字段（上游 `tracer_param_file_for_index` 的输入）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TracerParamFiles {
+    /// `DEF_ISOTOPE_PARAM_FILE`：所有同位素共用（物理与逐 species 的比值默认值）。
+    pub isotope: String,
+    /// `DEF_SOLUTE_PARAM_FILES`：`NAME:path` 列表，按溶质自己的顺序对应。
+    pub solutes: String,
+    /// `DEF_SEDIMENT_PARAM_FILE`。
+    pub sediment: String,
+    /// `DEF_METHANE_PARAM_FILE`。
+    pub methane: String,
+}
+
+/// `tracer_defs_init` 的输入：family 开关、各 family 的名单与同位素物种参数。
+///
+/// 形状照抄 `MOD_MT_Namelist.F90` 的 `&nl_colm_material` / `&nl_colm_isotope_parameter`；
+/// 调用方（运行期、前处理）负责把算例文档读成这个结构，本模块不碰文件。
+#[derive(Debug, Clone)]
 pub struct TracerNamelist {
-    pub num: i64,
-    pub names: String,
-    pub types: String,
-    pub mrat: String,
-    pub ref_ratio: String,
-    pub init_delta: String,
-    pub reactive_decay_rate: String,
-    pub param_files: String,
+    /// `DEF_USE_ISOTOPE`。
+    pub use_isotope: bool,
+    /// `DEF_ISOTOPE_SPECIES`（`H2_18O,HDO`；只有这两个有编译好的分馏物理）。
+    pub isotope_species: String,
+    /// `DEF_ISO_REF_RATIO_H2_18O` / `DEF_ISO_INIT_DELTA_H2_18O`。
+    pub ref_ratio_h2_18o: f64,
+    pub init_delta_h2_18o: f64,
+    /// `DEF_ISO_REF_RATIO_HDO` / `DEF_ISO_INIT_DELTA_HDO`。
+    pub ref_ratio_hdo: f64,
+    pub init_delta_hdo: f64,
+    /// `DEF_SOLUTE_NAMES`。
+    pub solutes: String,
+    /// `DEF_USE_SEDIMENT`。
+    pub use_sediment: bool,
+    /// `DEF_USE_METHANE`。
+    pub use_methane: bool,
+    /// `DEF_USE_BGC`（甲烷需要 BGC，上游是编译期 `BGC` 宏，这里按运行期开关判）。
     pub use_bgc: bool,
+    /// `DEF_USE_VariablySaturatedFlow` 的生效值。
     pub variably_saturated_flow: bool,
+    /// `DEF_MT_AQUIFER_MIXING_WATER_MM`。
     pub aquifer_mixing_water_mm: f64,
+    /// 四个 family 的参数文件字段。
+    pub param_files: TracerParamFiles,
+}
+
+impl Default for TracerNamelist {
+    /// 与 `MOD_MT_Namelist.F90` 的声明默认值一致。
+    fn default() -> Self {
+        Self {
+            use_isotope: false,
+            isotope_species: "H2_18O,HDO".to_owned(),
+            ref_ratio_h2_18o: 2.0052e-3,
+            init_delta_h2_18o: -10.0,
+            ref_ratio_hdo: 1.5576e-4,
+            init_delta_hdo: -70.0,
+            solutes: String::new(),
+            use_sediment: false,
+            use_methane: false,
+            use_bgc: false,
+            variably_saturated_flow: false,
+            aquifer_mixing_water_mm: -1.0,
+            param_files: TracerParamFiles::default(),
+        }
+    }
 }
 
 /// 注册好的示踪物表（上游的 `ntracers` 与 `tracers(:)`）。
@@ -99,62 +153,149 @@ pub struct TracerSet {
 }
 
 impl TracerSet {
-    /// `tracer_defs_init`（开关已打开时）。`read_parameters(path)` 读一个参数文件里的
-    /// `&nl_colm_tracer_parameter`：文件不存在报错，没有这一组返回 `None`。
+    /// `tracer_defs_init`（`MOD_MT_Defs.F90`）。条目顺序固定：同位素 → 溶质 → 泥沙 → 甲烷，
+    /// 与上游一致（描述符指纹和历史变量名按这个顺序排）。
+    ///
+    /// `read_parameters(path)` 读一个溶质参数文件里的 `&nl_colm_solute_parameter`：文件不存在
+    /// 报错，没有这一组返回 `None`。同位素/泥沙/甲烷的参数文件不由这里套用（上游分别在
+    /// 分馏物理、`MOD_MT_Sediment`、`MOD_MT_Methane_Const` 里读）。
     pub fn build(
         namelist: &TracerNamelist,
         mut read_parameters: impl FnMut(&str) -> Result<Option<TracerParameterOverrides>>,
     ) -> Result<Self> {
-        ensure!(
-            namelist.num >= 0,
-            "tracer_defs_init: DEF_TRACER_NUM must be >= 0, got {}",
-            namelist.num
-        );
-        ensure!(
-            namelist.num <= 1000,
-            "tracer_defs_init: DEF_TRACER_NUM={} is unreasonably large",
-            namelist.num
-        );
-        let n = usize::try_from(namelist.num)?;
+        let isotopes = if namelist.use_isotope {
+            split_names(&namelist.isotope_species)?
+        } else {
+            Vec::new()
+        };
+        if namelist.use_isotope && isotopes.is_empty() {
+            bail!("tracer_defs_init: DEF_USE_ISOTOPE is on but DEF_ISOTOPE_SPECIES is empty.");
+        }
+        let solutes = split_names(&namelist.solutes)?;
+        let nsed = usize::from(namelist.use_sediment);
+        let ngas = usize::from(namelist.use_methane);
+        let n = isotopes.len() + solutes.len() + nsed + ngas;
         if n == 0 {
             return Ok(Self::default());
         }
-        let names = unique_names(&parse_csv(&namelist.names), n);
-        let types = parse_csv(&namelist.types);
-        ensure!(
-            types.len() == n,
-            "tracer_defs_init: DEF_TRACER_TYPES has {} entries but DEF_TRACER_NUM={n}; every \
-             tracer needs an explicit type",
-            types.len()
-        );
-        let mol_weight = parse_csv_real(&namelist.mrat, n, 18.0);
-        let ref_ratio = parse_csv_real(&namelist.ref_ratio, n, 1.0);
-        let init_delta = parse_csv_real(&namelist.init_delta, n, 0.0);
-        let decay = parse_csv_real(&namelist.reactive_decay_rate, n, 0.0);
         let mut tracers = Vec::with_capacity(n);
-        for i in 0..n {
+        for token in &isotopes {
+            // 只有编译了分馏物理的两个物种；mol_weight、ref_ratio、init_delta 来自主 namelist。
+            let (name, mol_weight, ref_ratio, init_delta) =
+                match token.trim().to_ascii_uppercase().as_str() {
+                    "H2_18O" => (
+                        "H2_18O",
+                        20.0,
+                        namelist.ref_ratio_h2_18o,
+                        namelist.init_delta_h2_18o,
+                    ),
+                    "HDO" => ("HDO", 19.0, namelist.ref_ratio_hdo, namelist.init_delta_hdo),
+                    other => bail!(
+                        "tracer_defs_init: unknown isotope species \"{other}\" in \
+                         DEF_ISOTOPE_SPECIES; available: H2_18O, HDO."
+                    ),
+                };
             let mut tracer = TracerDescriptor {
-                name: names[i].clone(),
-                category: canonical_category(&types[i]),
+                name: name.to_owned(),
+                category: "isotope".to_owned(),
                 family: TracerFamily::Unresolved,
                 state_owner: StateOwner::Unknown,
                 reaction_mode: ReactionMode::None,
                 unit_kind: String::new(),
-                mol_weight: mol_weight[i],
-                ref_ratio: ref_ratio[i],
-                init_delta: init_delta[i],
-                init_conc: init_delta[i],
-                precip_default_conc: init_delta[i],
-                vapor_default_conc: init_delta[i],
+                mol_weight,
+                ref_ratio,
+                init_delta,
+                // 同位素从 init_delta 起跑也回落到它；浓度字段只进描述符指纹。
+                init_conc: init_delta,
+                precip_default_conc: init_delta,
+                vapor_default_conc: init_delta,
                 max_dissolved_conc: HUGE,
-                reactive_decay_rate: decay[i],
+                reactive_decay_rate: 0.0,
                 charge: 0,
             };
             set_category_defaults(&mut tracer);
             tracers.push(tracer);
         }
-        // `apply_tracer_param_files`。
-        for i in 0..n {
+        for token in &solutes {
+            let mut tracer = TracerDescriptor {
+                name: sanitize_ncname(token),
+                category: "solute".to_owned(),
+                family: TracerFamily::Unresolved,
+                state_owner: StateOwner::Unknown,
+                reaction_mode: ReactionMode::None,
+                unit_kind: String::new(),
+                mol_weight: 0.0,
+                ref_ratio: 1.0,
+                init_delta: 0.0,
+                init_conc: 0.0,
+                precip_default_conc: 0.0,
+                vapor_default_conc: 0.0,
+                max_dissolved_conc: HUGE,
+                reactive_decay_rate: 0.0,
+                charge: 0,
+            };
+            set_category_defaults(&mut tracer);
+            tracers.push(tracer);
+        }
+        if nsed > 0 {
+            // 状态与参数由 `MOD_MT_Sediment` 拥有，注册时挂到这个条目上。
+            let mut tracer = TracerDescriptor {
+                name: "SEDIMENT".to_owned(),
+                category: "particle".to_owned(),
+                family: TracerFamily::Unresolved,
+                state_owner: StateOwner::Unknown,
+                reaction_mode: ReactionMode::None,
+                unit_kind: String::new(),
+                mol_weight: 1.0,
+                ref_ratio: 1.0,
+                init_delta: 0.0,
+                init_conc: 0.0,
+                precip_default_conc: 0.0,
+                vapor_default_conc: 0.0,
+                max_dissolved_conc: HUGE,
+                reactive_decay_rate: 0.0,
+                charge: 0,
+            };
+            set_category_defaults(&mut tracer);
+            tracers.push(tracer);
+        }
+        if ngas > 0 {
+            // 状态、参数与反应由 `MOD_MT_Methane_Const` 拥有，注册时挂到这个条目上。
+            let mut tracer = TracerDescriptor {
+                name: "CH4".to_owned(),
+                category: "gas".to_owned(),
+                family: TracerFamily::Unresolved,
+                state_owner: StateOwner::Unknown,
+                reaction_mode: ReactionMode::None,
+                unit_kind: String::new(),
+                mol_weight: 16.04,
+                ref_ratio: 1.0,
+                init_delta: 0.0,
+                init_conc: 0.0,
+                precip_default_conc: 0.0,
+                vapor_default_conc: 0.0,
+                max_dissolved_conc: HUGE,
+                reactive_decay_rate: 0.0,
+                charge: 0,
+            };
+            set_category_defaults(&mut tracer);
+            tracers.push(tracer);
+        }
+        // 名字会成为 NetCDF 变量名：重名直接停机（上游 `Do i = 2, nmts` 的两两比较）。
+        for i in 1..tracers.len() {
+            for j in 0..i {
+                ensure!(
+                    !param_equal(&tracers[i].name, &tracers[j].name),
+                    "tracer_defs_init: material name \"{}\" is used twice.",
+                    tracers[i].name
+                );
+            }
+        }
+        // `mt_solute_read_parameters`：只有溶质的参数文件覆盖描述符。
+        for i in 0..tracers.len() {
+            if tracers[i].family != TracerFamily::Solute {
+                continue;
+            }
             let Some(path) = param_file_for_index(&namelist.param_files, &tracers, i)? else {
                 continue;
             };
@@ -163,20 +304,18 @@ impl TracerSet {
             }
         }
         for tracer in &mut tracers {
-            ensure!(
-                category_supported(&tracer.category),
-                "tracer_defs_init: unknown tracer category \"{}\" for {}",
-                tracer.category,
-                tracer.name
-            );
+            // 上游 `tracer_defs_validate`：非有限与负的 decay 都停机（旧实现把负值夹成 0，
+            // 那会让写错符号的实验静默变成不衰减）。
             ensure!(
                 tracer.reactive_decay_rate.is_finite(),
-                "tracer_defs_init: non-finite reactive_decay_rate for {}",
+                "tracer_defs_init: non-finite decay_rate for {}",
                 tracer.name
             );
-            if tracer.reactive_decay_rate < 0.0 {
-                tracer.reactive_decay_rate = 0.0;
-            }
+            ensure!(
+                tracer.reactive_decay_rate >= 0.0,
+                "tracer_defs_init: negative decay_rate for {}",
+                tracer.name
+            );
             derive_taxonomy(tracer);
             validate(tracer, namelist.use_bgc)?;
             if namelist.variably_saturated_flow && tracer.family == TracerFamily::Isotope {
@@ -184,7 +323,7 @@ impl TracerSet {
                     namelist.aquifer_mixing_water_mm.is_finite()
                         && namelist.aquifer_mixing_water_mm > 0.0,
                     "tracer_defs_init: VSF isotopes require explicit positive \
-                     DEF_TRACER_AQUIFER_MIXING_WATER_MM"
+                     DEF_MT_AQUIFER_MIXING_WATER_MM"
                 );
             }
         }
@@ -374,39 +513,24 @@ pub fn format_es24_16e3(value: f64) -> String {
     format!("{:>24}", format!("{mantissa}E{sign}{:03}", exponent.abs()))
 }
 
-/// `parse_csv`：按逗号切分，逐项去首尾空白；末尾无逗号的残段也算一项，全空串得零项。
-pub fn parse_csv(raw: &str) -> Vec<String> {
-    let text = raw.trim();
-    if text.is_empty() {
-        return Vec::new();
+/// `split_names`：按逗号切分，去首尾空白，空项跳过；单名超过 32 字符停机。
+///
+/// 上游 7d2fca93 的 `tracer_defs_init` 只接受名字列表，不再有乱填的补名/自动去重；
+/// 名字后来会成为 NetCDF 变量名，超过 32 字符上游直接 `CoLM_stop`。
+fn split_names(raw: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        ensure!(
+            token.len() <= 32,
+            "Material name longer than 32 characters: {token}"
+        );
+        out.push(token.to_owned());
     }
-    let mut tokens: Vec<String> = text
-        .split(',')
-        .map(|token| token.trim().to_owned())
-        .collect();
-    // 上游：最后一个逗号之后没有字符时不再补一项（`j <= slen` 不成立）。
-    if text.ends_with(',') {
-        tokens.pop();
-    }
-    tokens
-}
-
-/// `parse_csv_real`：不足或不是数的项用默认值。
-fn parse_csv_real(raw: &str, n: usize, default: f64) -> Vec<f64> {
-    let tokens = parse_csv(raw);
-    (0..n)
-        .map(|i| {
-            tokens
-                .get(i)
-                .and_then(|token| parse_fortran_real(token))
-                .unwrap_or(default)
-        })
-        .collect()
-}
-
-/// 列表式读入一个实数（接受 `d`/`D` 指数）。
-fn parse_fortran_real(token: &str) -> Option<f64> {
-    token.trim().replace(['d', 'D'], "e").parse().ok()
+    Ok(out)
 }
 
 /// `sanitize_ncname`：只留字母数字、下划线与句点，最多 32 个；全被删掉时为 `unnamed`。
@@ -424,47 +548,8 @@ fn sanitize_ncname(raw: &str) -> String {
     }
 }
 
-/// 名字：清洗、缺的补 `tracer_N`，再按 `_<序号>` 去重（与已有名字大小写不敏感比较）。
-fn unique_names(tokens: &[String], n: usize) -> Vec<String> {
-    let mut names: Vec<String> = (0..n)
-        .map(|i| match tokens.get(i) {
-            Some(token) => sanitize_ncname(token),
-            None => format!("tracer_{}", i + 1),
-        })
-        .collect();
-    for i in 0..n {
-        let base = names[i].clone();
-        let mut suffix_index = i + 1;
-        while names[..i].iter().any(|prior| param_equal(prior, &names[i])) {
-            let suffix = format!("_{suffix_index}");
-            suffix_index += 1;
-            let max_base = 32usize.saturating_sub(suffix.len()).max(1);
-            let stem: String = base.chars().take(max_base).collect();
-            names[i] = format!("{stem}{suffix}");
-        }
-    }
-    names
-}
-
 fn param_equal(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
-}
-
-/// `canonical_tracer_category`：小写，`conservative` 归为 `solute`。
-fn canonical_category(raw: &str) -> String {
-    let lower = raw.trim().to_ascii_lowercase();
-    if lower == "conservative" {
-        "solute".to_owned()
-    } else {
-        lower
-    }
-}
-
-fn category_supported(category: &str) -> bool {
-    matches!(
-        category,
-        "isotope" | "solute" | "particle" | "gas" | "reactive"
-    )
 }
 
 /// `set_tracer_category_defaults`。
@@ -500,8 +585,10 @@ fn set_category_defaults(tracer: &mut TracerDescriptor) {
     }
 }
 
-/// `read_tracer_parameter_file` 的赋值部分：三个浓度先回落到（可能被改过的）`init_delta`，
-/// 文件里写了才覆盖。
+/// `read_solute_parameter_file` 的赋值部分：文件里没写的字段保持描述符当前值。
+///
+/// 上游先把 `DEF_SOLUTE%*` 全填成描述符的当前值再读文件，所以"没写"等价于"不变"，
+/// 不是回落到某个默认值。
 fn apply_overrides(tracer: &mut TracerDescriptor, overrides: &TracerParameterOverrides) {
     if let Some(unit_kind) = &overrides.unit_kind {
         tracer.unit_kind = unit_kind.trim().to_ascii_lowercase();
@@ -509,19 +596,17 @@ fn apply_overrides(tracer: &mut TracerDescriptor, overrides: &TracerParameterOve
     if let Some(value) = overrides.mol_weight {
         tracer.mol_weight = value;
     }
-    if let Some(value) = overrides.ref_ratio {
-        tracer.ref_ratio = value;
-    }
-    if let Some(value) = overrides.init_delta {
-        tracer.init_delta = value;
-    }
-    tracer.init_conc = overrides.init_conc.unwrap_or(tracer.init_delta);
-    tracer.precip_default_conc = overrides.precip_default_conc.unwrap_or(tracer.init_delta);
-    tracer.vapor_default_conc = overrides.vapor_default_conc.unwrap_or(tracer.init_delta);
+    tracer.init_conc = overrides.init_conc.unwrap_or(tracer.init_conc);
+    tracer.precip_default_conc = overrides
+        .precip_default_conc
+        .unwrap_or(tracer.precip_default_conc);
+    tracer.vapor_default_conc = overrides
+        .vapor_default_conc
+        .unwrap_or(tracer.vapor_default_conc);
     if let Some(value) = overrides.max_dissolved_conc {
         tracer.max_dissolved_conc = value;
     }
-    if let Some(value) = overrides.reactive_decay_rate {
+    if let Some(value) = overrides.decay_rate {
         tracer.reactive_decay_rate = value;
     }
     if let Some(value) = overrides.charge {
@@ -529,16 +614,39 @@ fn apply_overrides(tracer: &mut TracerDescriptor, overrides: &TracerParameterOve
     }
 }
 
-/// `tracer_param_file_for_index`：`,`/`;` 分隔；`key:path` 按名字匹配（大小写不敏感），
-/// 无冒号的项按位置。第一个匹配生效；`null` 表示不读。
+/// `tracer_param_file_for_index`：按 family 选字段。
+///
+/// 同位素、泥沙、甲烷各读自己的单一路径字段；溶质把 `DEF_SOLUTE_PARAM_FILES` 的
+/// `key:path` 按名字匹配、无冒号项按**溶质自己的顺序**（不是全局示踪物序号）对应。
+/// `null` 与空串表示不读。
 pub fn param_file_for_index(
-    raw: &str,
+    files: &TracerParamFiles,
     tracers: &[TracerDescriptor],
     index: usize,
 ) -> Result<Option<String>> {
-    colm_namelist::tracer_files::param_file_for(raw, index, |key| {
-        param_equal(key, &tracers[index].name)
-    })
+    let tracer = tracers
+        .get(index)
+        .with_context(|| format!("tracer index {index} is not registered"))?;
+    let single = |raw: &str| {
+        let text = raw.trim();
+        (!text.is_empty() && !text.eq_ignore_ascii_case("null")).then(|| text.to_owned())
+    };
+    match tracer.family {
+        TracerFamily::Isotope => Ok(single(&files.isotope)),
+        TracerFamily::Particle => Ok(single(&files.sediment)),
+        TracerFamily::Gas => Ok(single(&files.methane)),
+        TracerFamily::Solute => {
+            let solute_index = tracers[..=index]
+                .iter()
+                .filter(|t| t.family == TracerFamily::Solute)
+                .count()
+                - 1;
+            colm_namelist::tracer_files::param_file_for(&files.solutes, solute_index, |key| {
+                param_equal(key, &tracer.name)
+            })
+        }
+        TracerFamily::Unresolved => Ok(None),
+    }
 }
 
 /// `derive_tracer_taxonomy`。

@@ -535,9 +535,8 @@ fn large_trees_track_names_and_directories_without_per_file_stat() {
 fn methane_preprocessing_switches_invalidate_the_surface_stage() {
     let case = CASE.replace(
         "   DEF_dir_output = '/out/'\n",
-        "   DEF_dir_output = '/out/'\n   DEF_USE_BGC = .true.\n   DEF_USE_TRACER = .true.\n   \
-         DEF_TRACER_NUM = 1\n   DEF_TRACER_NAMES = 'CH4'\n   DEF_TRACER_TYPES = 'gas'\n   \
-         DEF_TRACER_PARAM_FILES = 'CH4:ch4.nml'\n",
+        "   DEF_dir_output = '/out/'\n   DEF_USE_BGC = .true.\n   DEF_USE_METHANE = .true.\n   \
+         DEF_METHANE_PARAM_FILE = 'ch4.nml'\n",
     );
     let path = write("ch4", &case);
     let dir = path.parent().unwrap();
@@ -586,7 +585,7 @@ fn semicolon_separated_parameter_files_are_all_recorded() {
         "semi",
         &CASE.replace(
             "   DEF_dir_output = '/out/'\n",
-            "   DEF_dir_output = '/out/'\n   DEF_TRACER_PARAM_FILES = 'a_param.nml; B:b.nml'\n",
+            "   DEF_dir_output = '/out/'\n   DEF_SOLUTE_PARAM_FILES = 'a_param.nml; B:b.nml'\n",
         ),
     );
     let dir = path.parent().unwrap();
@@ -656,11 +655,11 @@ fn forcing_exclusions_cover_cbl_tracers_and_overlapping_data_roots() {
     let root = temp_dir("all-forcing-excluded");
     let raw = root.join("raw");
     std::fs::create_dir(&raw).unwrap();
-    std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_dir_rawdata='raw'\nDEF_TRACER_PARAM_FILES='tracer.nml'\nSITE_fsitedata='raw/exact.nc'\n/\n").unwrap();
+    std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_dir_rawdata='raw'\nDEF_SOLUTE_PARAM_FILES='tracer.nml'\nSITE_fsitedata='raw/exact.nc'\n/\n").unwrap();
     std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='raw'\nforcing%fprefix(1)='met_'\nforcing%fprefix(2)='exact.nc'\nforcing%CBL_fprefix='cbl_'\n/\n").unwrap();
     std::fs::write(
         root.join("tracer.nml"),
-        "&nl_colm_tracer_forcing\nforcing_fprefix='ch4_', 'isotope_'\n/\n",
+        "&nl_colm_mt_forcing\nforcing_fprefix='ch4_', 'isotope_'\n/\n",
     )
     .unwrap();
     for name in [

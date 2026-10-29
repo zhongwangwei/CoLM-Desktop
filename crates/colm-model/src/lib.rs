@@ -5,7 +5,9 @@ mod materialize;
 mod registry;
 mod validation;
 pub use equivalence::{is_noop, minimize_physics, same_effect};
-pub use materialize::{case_land_cover_scheme, case_process_references};
+pub use materialize::{
+    case_land_cover_scheme, case_process_reference_fields, case_process_references,
+};
 pub use registry::{source_cache_name, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

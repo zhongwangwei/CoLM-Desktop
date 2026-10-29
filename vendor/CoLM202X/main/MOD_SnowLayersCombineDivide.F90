@@ -251,8 +251,7 @@ CONTAINS
    !-----------------------------------------------------------------------
    SUBROUTINE snowlayerscombine (lb,snl, &
               z_soisno,dz_soisno,zi_soisno,wliq_soisno,wice_soisno,t_soisno,scv,snowdp &
-              ,trc_wliq, trc_wice, trc_solid, trc_scv &
-              )
+              ,mt_wliq, mt_wice, mt_solid, mt_scv)
 
 !=======================================================================
 !  Original author: Yongjiu Dai, September 15, 1999
@@ -282,12 +281,10 @@ CONTAINS
    real(r8), intent(inout) :: scv                 ! snow mass - water equivalent [kg/m2]
    integer, intent(inout) :: snl                  ! Number of snow
 
-   ! Optional TRACER mass arrays aligned with wliq/wice/scv.
-   real(r8), intent(inout), optional :: trc_wliq(:, lb:)
-   real(r8), intent(inout), optional :: trc_wice(:, lb:)
-   real(r8), intent(inout), optional :: trc_solid(:, lb:)
-   real(r8), intent(inout), optional :: trc_scv(:)
-
+   real(r8), intent(inout), optional :: mt_wliq(:, lb:)
+   real(r8), intent(inout), optional :: mt_wice(:, lb:)
+   real(r8), intent(inout), optional :: mt_solid(:, lb:)
+   real(r8), intent(inout), optional :: mt_scv(:)
 !-------------------------- Local Variables ----------------------------
    real(r8) :: drr           ! thickness of the combined [m]
    real(r8) :: dzmin(5)      ! minimum of snow layer 1 (top) to msn0 (bottom)
@@ -302,20 +299,17 @@ CONTAINS
    integer :: mssi           ! node index
    integer :: neibor         ! adjacent node selected for combination
 
-   ! TRACER aggregates for the snowdp<0.01 collapse branch
    real(r8), allocatable :: zwtrc_ice(:), zwtrc_liq(:), zwtrc_solid(:)
    integer :: ntr
-   integer :: itrc
-
+   integer :: imt
    data dzmin /0.010, 0.015, 0.025, 0.055, 0.115/
 
 !-----------------------------------------------------------------------
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
-         ntr = size(trc_wliq, 1)
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
+         ntr = size(mt_wliq, 1)
          allocate(zwtrc_ice(ntr), zwtrc_liq(ntr), zwtrc_solid(ntr))
          zwtrc_ice = 0._r8; zwtrc_liq = 0._r8; zwtrc_solid = 0._r8
       ENDIF
-
 ! check the mass of ice lens of snow, when the total less than a small value,
 ! combine it with the underlying neighbor
       msn_old = snl
@@ -323,12 +317,12 @@ CONTAINS
          IF(wice_soisno(j) <= .1)THEN
             wliq_soisno(j+1) = wliq_soisno(j+1) + wliq_soisno(j)
             wice_soisno(j+1) = wice_soisno(j+1) + wice_soisno(j)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
-               DO itrc = 1, ntr
-                  trc_wliq(itrc, j+1) = trc_wliq(itrc, j+1) + trc_wliq(itrc, j)
-                  trc_wice(itrc, j+1) = trc_wice(itrc, j+1) + trc_wice(itrc, j)
-                  IF (present(trc_solid)) trc_solid(itrc, j+1) = &
-                     trc_solid(itrc, j+1) + trc_solid(itrc, j)
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
+               DO imt = 1, ntr
+                  mt_wliq(imt, j+1) = mt_wliq(imt, j+1) + mt_wliq(imt, j)
+                  mt_wice(imt, j+1) = mt_wice(imt, j+1) + mt_wice(imt, j)
+                  IF (present(mt_solid)) mt_solid(imt, j+1) = &
+                     mt_solid(imt, j+1) + mt_solid(imt, j)
                ENDDO
             ENDIF
 
@@ -339,27 +333,27 @@ CONTAINS
                   wliq_soisno(i) = wliq_soisno(i-1)
                   wice_soisno(i) = wice_soisno(i-1)
                   dz_soisno(i) = dz_soisno(i-1)
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     DO itrc = 1, ntr
-                        trc_wliq(itrc, i) = trc_wliq(itrc, i-1)
-                        trc_wice(itrc, i) = trc_wice(itrc, i-1)
-                        IF (present(trc_solid)) trc_solid(itrc, i) = trc_solid(itrc, i-1)
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                     DO imt = 1, ntr
+                        mt_wliq(imt, i) = mt_wliq(imt, i-1)
+                        mt_wice(imt, i) = mt_wice(imt, i-1)
+                        IF (present(mt_solid)) mt_solid(imt, i) = mt_solid(imt, i-1)
                      ENDDO
                   ENDIF
                ENDDO
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                  trc_wliq(:, snl+1) = 0._r8
-                  trc_wice(:, snl+1) = 0._r8
-                  IF (present(trc_solid)) trc_solid(:, snl+1) = 0._r8
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                  mt_wliq(:, snl+1) = 0._r8
+                  mt_wice(:, snl+1) = 0._r8
+                  IF (present(mt_solid)) mt_solid(:, snl+1) = 0._r8
                ENDIF
             ENDIF
 
             snl = snl + 1
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                IF (snl >= lb) THEN
-                  trc_wliq(:, lb:snl) = 0._r8
-                  trc_wice(:, lb:snl) = 0._r8
-                  IF (present(trc_solid)) trc_solid(:, lb:snl) = 0._r8
+                  mt_wliq(:, lb:snl) = 0._r8
+                  mt_wice(:, lb:snl) = 0._r8
+                  IF (present(mt_solid)) mt_solid(:, lb:snl) = 0._r8
                ENDIF
             ENDIF
 !*          write(6,*) 'one snow layer is gone'
@@ -372,7 +366,7 @@ CONTAINS
          scv = 0.
          snowdp = 0.
 !*       write(6,*) 'all snow has gone'
-         IF (present(trc_wliq) .and. present(trc_wice)) &
+         IF (present(mt_wliq) .and. present(mt_wice)) &
             deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
          RETURN
       ELSE
@@ -385,12 +379,12 @@ CONTAINS
             snowdp = snowdp + dz_soisno(j)
             zwice = zwice + wice_soisno(j)
             zwliq = zwliq + wliq_soisno(j)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
-               DO itrc = 1, ntr
-                  zwtrc_ice(itrc) = zwtrc_ice(itrc) + trc_wice(itrc, j)
-                  zwtrc_liq(itrc) = zwtrc_liq(itrc) + trc_wliq(itrc, j)
-                  IF (present(trc_solid)) zwtrc_solid(itrc) = &
-                     zwtrc_solid(itrc) + trc_solid(itrc, j)
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
+               DO imt = 1, ntr
+                  zwtrc_ice(imt) = zwtrc_ice(imt) + mt_wice(imt, j)
+                  zwtrc_liq(imt) = zwtrc_liq(imt) + mt_wliq(imt, j)
+                  IF (present(mt_solid)) zwtrc_solid(imt) = &
+                     zwtrc_solid(imt) + mt_solid(imt, j)
                ENDDO
             ENDIF
          ENDDO
@@ -407,16 +401,16 @@ CONTAINS
 ! the liquid water assumed ponding on soil surface
          wliq_soisno(1) = wliq_soisno(1) + zwliq
 !*       write(6,'(17h all snow is gone)')
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            IF (present(trc_scv)) trc_scv(:) = zwtrc_ice(:)
-            DO itrc = 1, ntr
-               trc_wliq(itrc, 1) = trc_wliq(itrc, 1) + zwtrc_liq(itrc)
-               IF (present(trc_solid)) trc_solid(itrc, 1) = &
-                  trc_solid(itrc, 1) + zwtrc_solid(itrc)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            IF (present(mt_scv)) mt_scv(:) = zwtrc_ice(:)
+            DO imt = 1, ntr
+               mt_wliq(imt, 1) = mt_wliq(imt, 1) + zwtrc_liq(imt)
+               IF (present(mt_solid)) mt_solid(imt, 1) = &
+                  mt_solid(imt, 1) + zwtrc_solid(imt)
             ENDDO
-            trc_wliq(:, lb:0) = 0._r8
-            trc_wice(:, lb:0) = 0._r8
-            IF (present(trc_solid)) trc_solid(:, lb:0) = 0._r8
+            mt_wliq(:, lb:0) = 0._r8
+            mt_wice(:, lb:0) = 0._r8
+            IF (present(mt_solid)) mt_solid(:, lb:0) = 0._r8
             deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
          ENDIF
          RETURN
@@ -456,12 +450,12 @@ CONTAINS
                   ENDIF
                   CALL combo ( dz_soisno(j), wliq_soisno(j), wice_soisno(j), t_soisno(j),&
                                dz_soisno(l), wliq_soisno(l), wice_soisno(l), t_soisno(l) )
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     DO itrc = 1, ntr
-                        trc_wliq(itrc, j) = trc_wliq(itrc, j) + trc_wliq(itrc, l)
-                        trc_wice(itrc, j) = trc_wice(itrc, j) + trc_wice(itrc, l)
-                        IF (present(trc_solid)) trc_solid(itrc, j) = &
-                           trc_solid(itrc, j) + trc_solid(itrc, l)
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                     DO imt = 1, ntr
+                        mt_wliq(imt, j) = mt_wliq(imt, j) + mt_wliq(imt, l)
+                        mt_wice(imt, j) = mt_wice(imt, j) + mt_wice(imt, l)
+                        IF (present(mt_solid)) mt_solid(imt, j) = &
+                           mt_solid(imt, j) + mt_solid(imt, l)
                      ENDDO
                   ENDIF
 
@@ -473,22 +467,22 @@ CONTAINS
                         wice_soisno(k) = wice_soisno(k-1)
                         wliq_soisno(k) = wliq_soisno(k-1)
                         dz_soisno(k) = dz_soisno(k-1)
-                        IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                           DO itrc = 1, ntr
-                              trc_wliq(itrc, k) = trc_wliq(itrc, k-1)
-                              trc_wice(itrc, k) = trc_wice(itrc, k-1)
-                              IF (present(trc_solid)) trc_solid(itrc, k) = trc_solid(itrc, k-1)
+                        IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                           DO imt = 1, ntr
+                              mt_wliq(imt, k) = mt_wliq(imt, k-1)
+                              mt_wice(imt, k) = mt_wice(imt, k-1)
+                              IF (present(mt_solid)) mt_solid(imt, k) = mt_solid(imt, k-1)
                            ENDDO
                         ENDIF
                      ENDDO
                   ENDIF
 
                   snl = snl + 1
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
                      IF (snl >= lb) THEN
-                        trc_wliq(:, lb:snl) = 0._r8
-                        trc_wice(:, lb:snl) = 0._r8
-                        IF (present(trc_solid)) trc_solid(:, lb:snl) = 0._r8
+                        mt_wliq(:, lb:snl) = 0._r8
+                        mt_wice(:, lb:snl) = 0._r8
+                        IF (present(mt_solid)) mt_solid(:, lb:snl) = 0._r8
                      ENDIF
                   ENDIF
 
@@ -515,16 +509,14 @@ CONTAINS
 
       ENDIF                       !!! snow layers combined
 
-      IF (present(trc_wliq) .and. present(trc_wice)) &
+      IF (present(mt_wliq) .and. present(mt_wice)) &
          deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
-
    END SUBROUTINE snowlayerscombine
 
 
 
    SUBROUTINE snowlayersdivide(lb,snl,z_soisno,dz_soisno,zi_soisno,wliq_soisno,wice_soisno,t_soisno &
-                               ,trc_wliq, trc_wice, trc_solid &
-                               )
+                               ,mt_wliq, mt_wice, mt_solid)
 
 !=======================================================================
 !  Original author: Yongjiu Dai, September 15, 1999
@@ -546,10 +538,9 @@ CONTAINS
    real(r8), intent(inout) :: z_soisno   (lb:0)   ! Node depth [m]
    real(r8), intent(inout) :: zi_soisno  (lb-1:0) ! Depth of layer interface [m]
 
-   real(r8), intent(inout), optional :: trc_wliq(:, lb:)  ! (ntracers, lb:0)
-   real(r8), intent(inout), optional :: trc_wice(:, lb:)
-   real(r8), intent(inout), optional :: trc_solid(:, lb:)
-
+   real(r8), intent(inout), optional :: mt_wliq(:, lb:)
+   real(r8), intent(inout), optional :: mt_wice(:, lb:)
+   real(r8), intent(inout), optional :: mt_solid(:, lb:)
 !-------------------------- Local Variables ----------------------------
 
 ! numbering from 1 (surface) msno (bottom)
@@ -564,15 +555,12 @@ CONTAINS
 
    real(r8) zwice,zwliq,propor
 
-   ! TRACER locals mirror swice/swliq/zwice/zwliq.
    real(r8), allocatable :: strc_wice(:,:), strc_wliq(:,:), strc_solid(:,:)
    real(r8), allocatable :: z_strc_wice(:), z_strc_wliq(:), z_strc_solid(:)
-   integer :: ntr, itrc
-
+   integer :: ntr, imt
 !-----------------------------------------------------------------------
-
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
-         ntr = size(trc_wliq, 1)
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
+         ntr = size(mt_wliq, 1)
          allocate(strc_wice(ntr, 5), strc_wliq(ntr, 5), strc_solid(ntr, 5))
          allocate(z_strc_wice(ntr), z_strc_wliq(ntr), z_strc_solid(ntr))
          strc_wice = 0._r8; strc_wliq = 0._r8; strc_solid = 0._r8
@@ -585,11 +573,11 @@ CONTAINS
          swice(k) = wice_soisno(k + snl)
          swliq(k) = wliq_soisno(k + snl)
          tsno(k)  = t_soisno (k + snl)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            DO itrc = 1, ntr
-               strc_wice(itrc, k) = trc_wice(itrc, k + snl)
-               strc_wliq(itrc, k) = trc_wliq(itrc, k + snl)
-               IF (present(trc_solid)) strc_solid(itrc, k) = trc_solid(itrc, k + snl)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            DO imt = 1, ntr
+               strc_wice(imt, k) = mt_wice(imt, k + snl)
+               strc_wliq(imt, k) = mt_wliq(imt, k + snl)
+               IF (present(mt_solid)) strc_solid(imt, k) = mt_solid(imt, k + snl)
             ENDDO
          ENDIF
       ENDDO
@@ -601,20 +589,20 @@ CONTAINS
          dzsno(1) = dzsno(1)/2.
          swice(1) = swice(1)/2.
          swliq(1) = swliq(1)/2.
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 1) = strc_wice(:, 1) / 2._r8
             strc_wliq(:, 1) = strc_wliq(:, 1) / 2._r8
-            IF (present(trc_solid)) strc_solid(:, 1) = strc_solid(:, 1) / 2._r8
+            IF (present(mt_solid)) strc_solid(:, 1) = strc_solid(:, 1) / 2._r8
          ENDIF
 
          dzsno(2) = dzsno(1)
          swice(2) = swice(1)
          swliq(2) = swliq(1)
          tsno(2)  = tsno(1)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 2) = strc_wice(:, 1)
             strc_wliq(:, 2) = strc_wliq(:, 1)
-            IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 1)
+            IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 1)
          ENDIF
 !        write(6,*)'Subdivided Top Node into two layer (1/2)'
          ENDIF
@@ -626,28 +614,28 @@ CONTAINS
          propor = drr/dzsno(1)
          zwice = propor*swice(1)
          zwliq = propor*swliq(1)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             z_strc_wice(:) = propor * strc_wice(:, 1)
             z_strc_wliq(:) = propor * strc_wliq(:, 1)
-            IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 1)
+            IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 1)
          ENDIF
 
          propor = 0.02/dzsno(1)
          swice(1) = propor*swice(1)
          swliq(1) = propor*swliq(1)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 1) = propor * strc_wice(:, 1)
             strc_wliq(:, 1) = propor * strc_wliq(:, 1)
-            IF (present(trc_solid)) strc_solid(:, 1) = propor * strc_solid(:, 1)
+            IF (present(mt_solid)) strc_solid(:, 1) = propor * strc_solid(:, 1)
          ENDIF
          dzsno(1) = 0.02
 
          CALL combo(dzsno(2),swliq(2),swice(2),tsno(2), &
                     drr,zwliq,zwice,tsno(1))
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 2) = strc_wice(:, 2) + z_strc_wice(:)
             strc_wliq(:, 2) = strc_wliq(:, 2) + z_strc_wliq(:)
-            IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 2) + z_strc_solid(:)
+            IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 2) + z_strc_solid(:)
          ENDIF
 
 !        write(6,*) 'Subdivided Top Node &
@@ -659,20 +647,20 @@ CONTAINS
             dzsno(2) = dzsno(2)/2.
             swice(2) = swice(2)/2.
             swliq(2) = swliq(2)/2.
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 2) = strc_wice(:, 2) / 2._r8
                strc_wliq(:, 2) = strc_wliq(:, 2) / 2._r8
-               IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 2) / 2._r8
+               IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 2) / 2._r8
             ENDIF
 
             dzsno(3) = dzsno(2)
             swice(3) = swice(2)
             swliq(3) = swliq(2)
             tsno(3)  = tsno(2)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 3) = strc_wice(:, 2)
                strc_wliq(:, 3) = strc_wliq(:, 2)
-               IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 2)
+               IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 2)
             ENDIF
          ENDIF
          ENDIF
@@ -684,28 +672,28 @@ CONTAINS
          propor = drr/dzsno(2)
          zwice = propor*swice(2)
          zwliq = propor*swliq(2)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             z_strc_wice(:) = propor * strc_wice(:, 2)
             z_strc_wliq(:) = propor * strc_wliq(:, 2)
-            IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 2)
+            IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 2)
          ENDIF
 
          propor = 0.05/dzsno(2)
          swice(2) = propor*swice(2)
          swliq(2) = propor*swliq(2)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 2) = propor * strc_wice(:, 2)
             strc_wliq(:, 2) = propor * strc_wliq(:, 2)
-            IF (present(trc_solid)) strc_solid(:, 2) = propor * strc_solid(:, 2)
+            IF (present(mt_solid)) strc_solid(:, 2) = propor * strc_solid(:, 2)
          ENDIF
          dzsno(2) = 0.05
 
          CALL combo(dzsno(3),swliq(3),swice(3),tsno(3), &
                     drr,     zwliq,   zwice,   tsno(2))
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 3) = strc_wice(:, 3) + z_strc_wice(:)
             strc_wliq(:, 3) = strc_wliq(:, 3) + z_strc_wliq(:)
-            IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 3) + z_strc_solid(:)
+            IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 3) + z_strc_solid(:)
          ENDIF
 
 !        write(6,*)'Subdivided 50 mm from the subsurface layer &
@@ -717,20 +705,20 @@ CONTAINS
             dzsno(3) = dzsno(3)/2.
             swice(3) = swice(3)/2.
             swliq(3) = swliq(3)/2.
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 3) = strc_wice(:, 3) / 2._r8
                strc_wliq(:, 3) = strc_wliq(:, 3) / 2._r8
-               IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 3) / 2._r8
+               IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 3) / 2._r8
             ENDIF
 
             dzsno(4) = dzsno(3)
             swice(4) = swice(3)
             swliq(4) = swliq(3)
             tsno(4)  = tsno(3)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 4) = strc_wice(:, 3)
                strc_wliq(:, 4) = strc_wliq(:, 3)
-               IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 3)
+               IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 3)
             ENDIF
          ENDIF
          ENDIF
@@ -742,28 +730,28 @@ CONTAINS
          propor = drr/dzsno(3)
          zwice = propor*swice(3)
          zwliq = propor*swliq(3)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             z_strc_wice(:) = propor * strc_wice(:, 3)
             z_strc_wliq(:) = propor * strc_wliq(:, 3)
-            IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 3)
+            IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 3)
          ENDIF
 
          propor = 0.11/dzsno(3)
          swice(3) = propor*swice(3)
          swliq(3) = propor*swliq(3)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 3) = propor * strc_wice(:, 3)
             strc_wliq(:, 3) = propor * strc_wliq(:, 3)
-            IF (present(trc_solid)) strc_solid(:, 3) = propor * strc_solid(:, 3)
+            IF (present(mt_solid)) strc_solid(:, 3) = propor * strc_solid(:, 3)
          ENDIF
          dzsno(3) = 0.11
 
          CALL combo(dzsno(4),swliq(4),swice(4),tsno(4), &
                     drr,     zwliq,   zwice,   tsno(3))
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 4) = strc_wice(:, 4) + z_strc_wice(:)
             strc_wliq(:, 4) = strc_wliq(:, 4) + z_strc_wliq(:)
-            IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 4) + z_strc_solid(:)
+            IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 4) + z_strc_solid(:)
          ENDIF
 
 !        write(6,*)'Subdivided 110 mm from the third Node &
@@ -775,20 +763,20 @@ CONTAINS
             dzsno(4) = dzsno(4)/2.
             swice(4) = swice(4)/2.
             swliq(4) = swliq(4)/2.
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 4) = strc_wice(:, 4) / 2._r8
                strc_wliq(:, 4) = strc_wliq(:, 4) / 2._r8
-               IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 4) / 2._r8
+               IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 4) / 2._r8
             ENDIF
 
             dzsno(5) = dzsno(4)
             swice(5) = swice(4)
             swliq(5) = swliq(4)
             tsno(5)  = tsno(4)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 5) = strc_wice(:, 4)
                strc_wliq(:, 5) = strc_wliq(:, 4)
-               IF (present(trc_solid)) strc_solid(:, 5) = strc_solid(:, 4)
+               IF (present(mt_solid)) strc_solid(:, 5) = strc_solid(:, 4)
             ENDIF
          ENDIF
          ENDIF
@@ -800,28 +788,28 @@ CONTAINS
          propor = drr/dzsno(4)
          zwice = propor*swice(4)
          zwliq = propor*swliq(4)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             z_strc_wice(:) = propor * strc_wice(:, 4)
             z_strc_wliq(:) = propor * strc_wliq(:, 4)
-            IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 4)
+            IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 4)
          ENDIF
 
          propor = 0.23/dzsno(4)
          swice(4) = propor*swice(4)
          swliq(4) = propor*swliq(4)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 4) = propor * strc_wice(:, 4)
             strc_wliq(:, 4) = propor * strc_wliq(:, 4)
-            IF (present(trc_solid)) strc_solid(:, 4) = propor * strc_solid(:, 4)
+            IF (present(mt_solid)) strc_solid(:, 4) = propor * strc_solid(:, 4)
          ENDIF
          dzsno(4) = 0.23
 
          CALL combo(dzsno(5),swliq(5),swice(5),tsno(5), &
                     drr,     zwliq,   zwice,   tsno(4))
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
             strc_wice(:, 5) = strc_wice(:, 5) + z_strc_wice(:)
             strc_wliq(:, 5) = strc_wliq(:, 5) + z_strc_wliq(:)
-            IF (present(trc_solid)) strc_solid(:, 5) = strc_solid(:, 5) + z_strc_solid(:)
+            IF (present(mt_solid)) strc_solid(:, 5) = strc_solid(:, 5) + z_strc_solid(:)
          ENDIF
 
 !        write(6,*)'Subdivided 230 mm from the fourth Node &
@@ -836,11 +824,11 @@ CONTAINS
          wice_soisno(k) = swice(k - snl)
          wliq_soisno(k) = swliq(k - snl)
          t_soisno(k)  = tsno (k - snl)
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            DO itrc = 1, ntr
-               trc_wice(itrc, k) = strc_wice(itrc, k - snl)
-               trc_wliq(itrc, k) = strc_wliq(itrc, k - snl)
-               IF (present(trc_solid)) trc_solid(itrc, k) = strc_solid(itrc, k - snl)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            DO imt = 1, ntr
+               mt_wice(imt, k) = strc_wice(imt, k - snl)
+               mt_wliq(imt, k) = strc_wliq(imt, k - snl)
+               IF (present(mt_solid)) mt_solid(imt, k) = strc_solid(imt, k - snl)
             ENDDO
          ENDIF
       ENDDO
@@ -851,11 +839,10 @@ CONTAINS
          zi_soisno(k-1) = zi_soisno(k) - dz_soisno(k)
       ENDDO
 
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
          deallocate(strc_wice, strc_wliq, strc_solid, &
             z_strc_wice, z_strc_wliq, z_strc_solid)
       ENDIF
-
    END SUBROUTINE snowlayersdivide
 
 
@@ -930,9 +917,8 @@ CONTAINS
 ! Aerosol Fluxes (Jan. 07, 2023)
               mss_bcpho, mss_bcphi, mss_ocpho, mss_ocphi,&
               mss_dst1 , mss_dst2 , mss_dst3 , mss_dst4 &
+              ,mt_wliq, mt_wice, mt_solid, mt_scv)
 ! Aerosol Fluxes (Jan. 07, 2023)
-              ,trc_wliq, trc_wice, trc_solid, trc_scv &
-              )
 
 
 !=======================================================================
@@ -975,12 +961,10 @@ CONTAINS
         mss_dst4  (lb:0)   ! mass of dust species 4 in snow  (col,lyr) [kg]
 ! Aerosol Fluxes (Jan. 07, 2023)
 
-   ! Optional TRACER arrays aligned with wliq/wice/scv.
-   real(r8), intent(inout), optional :: trc_wliq(:, lb:)
-   real(r8), intent(inout), optional :: trc_wice(:, lb:)
-   real(r8), intent(inout), optional :: trc_solid(:, lb:)
-   real(r8), intent(inout), optional :: trc_scv(:)
-
+   real(r8), intent(inout), optional :: mt_wliq(:, lb:)
+   real(r8), intent(inout), optional :: mt_wice(:, lb:)
+   real(r8), intent(inout), optional :: mt_solid(:, lb:)
+   real(r8), intent(inout), optional :: mt_scv(:)
 !-------------------------- Local Variables ----------------------------
    real(r8) :: drr          ! thickness of the combined [m]
    real(r8) :: dzmin(5)     ! minimum of snow layer 1 (top) to msn0 (bottom)
@@ -995,19 +979,16 @@ CONTAINS
    integer :: mssi          ! node index
    integer :: neibor        ! adjacent node selected for combination
 
-   ! TRACER aggregates for the snowdp<0.01 collapse branch
    real(r8), allocatable :: zwtrc_ice(:), zwtrc_liq(:), zwtrc_solid(:)
-   integer :: ntr, itrc
-
+   integer :: ntr, imt
    data dzmin /0.010, 0.015, 0.025, 0.055, 0.115/
 
 !-----------------------------------------------------------------------
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
-         ntr = size(trc_wliq, 1)
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
+         ntr = size(mt_wliq, 1)
          allocate(zwtrc_ice(ntr), zwtrc_liq(ntr), zwtrc_solid(ntr))
          zwtrc_ice = 0._r8; zwtrc_liq = 0._r8; zwtrc_solid = 0._r8
       ENDIF
-
 ! check the mass of ice lens of snow, when the total less than a small value,
 ! combine it with the underlying neighbor
       msn_old = snl
@@ -1015,12 +996,12 @@ CONTAINS
          IF(wice_soisno(j) <= .1)THEN
             wliq_soisno(j+1) = wliq_soisno(j+1) + wliq_soisno(j)
             wice_soisno(j+1) = wice_soisno(j+1) + wice_soisno(j)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
-               DO itrc = 1, ntr
-                  trc_wliq(itrc, j+1) = trc_wliq(itrc, j+1) + trc_wliq(itrc, j)
-                  trc_wice(itrc, j+1) = trc_wice(itrc, j+1) + trc_wice(itrc, j)
-                  IF (present(trc_solid)) trc_solid(itrc, j+1) = &
-                     trc_solid(itrc, j+1) + trc_solid(itrc, j)
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
+               DO imt = 1, ntr
+                  mt_wliq(imt, j+1) = mt_wliq(imt, j+1) + mt_wliq(imt, j)
+                  mt_wice(imt, j+1) = mt_wice(imt, j+1) + mt_wice(imt, j)
+                  IF (present(mt_solid)) mt_solid(imt, j+1) = &
+                     mt_solid(imt, j+1) + mt_solid(imt, j)
                ENDDO
             ENDIF
 
@@ -1045,11 +1026,11 @@ CONTAINS
                   wliq_soisno(i) = wliq_soisno(i-1)
                   wice_soisno(i) = wice_soisno(i-1)
                   dz_soisno(i) = dz_soisno(i-1)
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     DO itrc = 1, ntr
-                        trc_wliq(itrc, i) = trc_wliq(itrc, i-1)
-                        trc_wice(itrc, i) = trc_wice(itrc, i-1)
-                        IF (present(trc_solid)) trc_solid(itrc, i) = trc_solid(itrc, i-1)
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                     DO imt = 1, ntr
+                        mt_wliq(imt, i) = mt_wliq(imt, i-1)
+                        mt_wice(imt, i) = mt_wice(imt, i-1)
+                        IF (present(mt_solid)) mt_solid(imt, i) = mt_solid(imt, i-1)
                      ENDDO
                   ENDIF
 
@@ -1064,19 +1045,19 @@ CONTAINS
                   mss_dst4 (i) = mss_dst4 (i-1)
 !Aerosol Fluxes (January 07, 2023)
                ENDDO
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                  trc_wliq(:, snl+1) = 0._r8
-                  trc_wice(:, snl+1) = 0._r8
-                  IF (present(trc_solid)) trc_solid(:, snl+1) = 0._r8
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                  mt_wliq(:, snl+1) = 0._r8
+                  mt_wice(:, snl+1) = 0._r8
+                  IF (present(mt_solid)) mt_solid(:, snl+1) = 0._r8
                ENDIF
             ENDIF
 
             snl = snl + 1
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                IF (snl >= lb) THEN
-                  trc_wliq(:, lb:snl) = 0._r8
-                  trc_wice(:, lb:snl) = 0._r8
-                  IF (present(trc_solid)) trc_solid(:, lb:snl) = 0._r8
+                  mt_wliq(:, lb:snl) = 0._r8
+                  mt_wice(:, lb:snl) = 0._r8
+                  IF (present(mt_solid)) mt_solid(:, lb:snl) = 0._r8
                ENDIF
             ENDIF
 !*          write(6,*) 'one snow layer is gone'
@@ -1101,7 +1082,7 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
 
 !*       write(6,*) 'all snow has gone'
-         IF (present(trc_wliq) .and. present(trc_wice)) &
+         IF (present(mt_wliq) .and. present(mt_wice)) &
             deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
          RETURN
       ELSE
@@ -1114,12 +1095,12 @@ CONTAINS
             snowdp = snowdp + dz_soisno(j)
             zwice = zwice + wice_soisno(j)
             zwliq = zwliq + wliq_soisno(j)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
-               DO itrc = 1, ntr
-                  zwtrc_ice(itrc) = zwtrc_ice(itrc) + trc_wice(itrc, j)
-                  zwtrc_liq(itrc) = zwtrc_liq(itrc) + trc_wliq(itrc, j)
-                  IF (present(trc_solid)) zwtrc_solid(itrc) = &
-                     zwtrc_solid(itrc) + trc_solid(itrc, j)
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
+               DO imt = 1, ntr
+                  zwtrc_ice(imt) = zwtrc_ice(imt) + mt_wice(imt, j)
+                  zwtrc_liq(imt) = zwtrc_liq(imt) + mt_wliq(imt, j)
+                  IF (present(mt_solid)) zwtrc_solid(imt) = &
+                     zwtrc_solid(imt) + mt_solid(imt, j)
                ENDDO
             ENDIF
          ENDDO
@@ -1147,16 +1128,16 @@ CONTAINS
 ! the liquid water assumed ponding on soil surface
          wliq_soisno(1) = wliq_soisno(1) + zwliq
 !*       write(6,'(17h all snow is gone)')
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            IF (present(trc_scv)) trc_scv(:) = zwtrc_ice(:)
-            DO itrc = 1, ntr
-               trc_wliq(itrc, 1) = trc_wliq(itrc, 1) + zwtrc_liq(itrc)
-               IF (present(trc_solid)) trc_solid(itrc, 1) = &
-                  trc_solid(itrc, 1) + zwtrc_solid(itrc)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            IF (present(mt_scv)) mt_scv(:) = zwtrc_ice(:)
+            DO imt = 1, ntr
+               mt_wliq(imt, 1) = mt_wliq(imt, 1) + zwtrc_liq(imt)
+               IF (present(mt_solid)) mt_solid(imt, 1) = &
+                  mt_solid(imt, 1) + zwtrc_solid(imt)
             ENDDO
-            trc_wliq(:, lb:0) = 0._r8
-            trc_wice(:, lb:0) = 0._r8
-            IF (present(trc_solid)) trc_solid(:, lb:0) = 0._r8
+            mt_wliq(:, lb:0) = 0._r8
+            mt_wice(:, lb:0) = 0._r8
+            IF (present(mt_solid)) mt_solid(:, lb:0) = 0._r8
             deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
          ENDIF
          RETURN
@@ -1196,12 +1177,12 @@ CONTAINS
                   ENDIF
                   CALL combo ( dz_soisno(j), wliq_soisno(j), wice_soisno(j), t_soisno(j),&
                                dz_soisno(l), wliq_soisno(l), wice_soisno(l), t_soisno(l) )
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                     DO itrc = 1, ntr
-                        trc_wliq(itrc, j) = trc_wliq(itrc, j) + trc_wliq(itrc, l)
-                        trc_wice(itrc, j) = trc_wice(itrc, j) + trc_wice(itrc, l)
-                        IF (present(trc_solid)) trc_solid(itrc, j) = &
-                           trc_solid(itrc, j) + trc_solid(itrc, l)
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                     DO imt = 1, ntr
+                        mt_wliq(imt, j) = mt_wliq(imt, j) + mt_wliq(imt, l)
+                        mt_wice(imt, j) = mt_wice(imt, j) + mt_wice(imt, l)
+                        IF (present(mt_solid)) mt_solid(imt, j) = &
+                           mt_solid(imt, j) + mt_solid(imt, l)
                      ENDDO
                   ENDIF
 
@@ -1225,11 +1206,11 @@ CONTAINS
                         wice_soisno(k) = wice_soisno(k-1)
                         wliq_soisno(k) = wliq_soisno(k-1)
                         dz_soisno(k) = dz_soisno(k-1)
-                        IF (present(trc_wliq) .and. present(trc_wice)) THEN
-                           DO itrc = 1, ntr
-                              trc_wliq(itrc, k) = trc_wliq(itrc, k-1)
-                              trc_wice(itrc, k) = trc_wice(itrc, k-1)
-                              IF (present(trc_solid)) trc_solid(itrc, k) = trc_solid(itrc, k-1)
+                        IF (present(mt_wliq) .and. present(mt_wice)) THEN
+                           DO imt = 1, ntr
+                              mt_wliq(imt, k) = mt_wliq(imt, k-1)
+                              mt_wice(imt, k) = mt_wice(imt, k-1)
+                              IF (present(mt_solid)) mt_solid(imt, k) = mt_solid(imt, k-1)
                            ENDDO
                         ENDIF
 
@@ -1247,11 +1228,11 @@ CONTAINS
                   ENDIF
 
                   snl = snl + 1
-                  IF (present(trc_wliq) .and. present(trc_wice)) THEN
+                  IF (present(mt_wliq) .and. present(mt_wice)) THEN
                      IF (snl >= lb) THEN
-                        trc_wliq(:, lb:snl) = 0._r8
-                        trc_wice(:, lb:snl) = 0._r8
-                        IF (present(trc_solid)) trc_solid(:, lb:snl) = 0._r8
+                        mt_wliq(:, lb:snl) = 0._r8
+                        mt_wice(:, lb:snl) = 0._r8
+                        IF (present(mt_solid)) mt_solid(:, lb:snl) = 0._r8
                      ENDIF
                   ENDIF
 
@@ -1278,9 +1259,8 @@ CONTAINS
 
       ENDIF                       !!! snow layers combined
 
-      IF (present(trc_wliq) .and. present(trc_wice)) &
+      IF (present(mt_wliq) .and. present(mt_wice)) &
          deallocate(zwtrc_ice, zwtrc_liq, zwtrc_solid)
-
    END SUBROUTINE SnowLayersCombine_snicar
 !-----------------------------------------------------------------------
 
@@ -1291,9 +1271,8 @@ CONTAINS
 ! Aerosol Fluxes (Jan. 07, 2023)
                                        mss_bcpho, mss_bcphi, mss_ocpho, mss_ocphi,&
                                        mss_dst1 , mss_dst2 , mss_dst3 , mss_dst4 &
+                                       ,mt_wliq, mt_wice, mt_solid)
 ! Aerosol Fluxes (Jan. 07, 2023)
-                                       ,trc_wliq, trc_wice, trc_solid &
-                                       )
 
 
 !=======================================================================
@@ -1330,10 +1309,9 @@ CONTAINS
         mss_dst4  (lb:0)   ! mass of dust species 4 in snow  (col,lyr) [kg]
 ! Aerosol Fluxes (Jan. 07, 2023)
 
-   real(r8), intent(inout), optional :: trc_wliq(:, lb:)
-   real(r8), intent(inout), optional :: trc_wice(:, lb:)
-   real(r8), intent(inout), optional :: trc_solid(:, lb:)
-
+   real(r8), intent(inout), optional :: mt_wliq(:, lb:)
+   real(r8), intent(inout), optional :: mt_wice(:, lb:)
+   real(r8), intent(inout), optional :: mt_solid(:, lb:)
 !-------------------------- Local Variables ----------------------------
 
 ! numbering from 1 (surface) msno (bottom)
@@ -1355,12 +1333,10 @@ CONTAINS
 
    real(r8), allocatable :: strc_wice(:,:), strc_wliq(:,:), strc_solid(:,:)
    real(r8), allocatable :: z_strc_wice(:), z_strc_wliq(:), z_strc_solid(:)
-   integer :: ntr, itrc
-
+   integer :: ntr, imt
 !-----------------------------------------------------------------------
-
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
-         ntr = size(trc_wliq, 1)
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
+         ntr = size(mt_wliq, 1)
          allocate(strc_wice(ntr, 5), strc_wliq(ntr, 5), strc_solid(ntr, 5))
          allocate(z_strc_wice(ntr), z_strc_wliq(ntr), z_strc_solid(ntr))
          strc_wice = 0._r8; strc_wliq = 0._r8; strc_solid = 0._r8
@@ -1384,12 +1360,11 @@ CONTAINS
          mss_aerosol(k, 7) = mss_dst3 (k+snl)
          mss_aerosol(k, 8) = mss_dst4 (k+snl)
 !Aerosol Fluxes (January 07, 2023)
-
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            DO itrc = 1, ntr
-               strc_wice(itrc, k) = trc_wice(itrc, k + snl)
-               strc_wliq(itrc, k) = trc_wliq(itrc, k + snl)
-               IF (present(trc_solid)) strc_solid(itrc, k) = trc_solid(itrc, k + snl)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            DO imt = 1, ntr
+               strc_wice(imt, k) = mt_wice(imt, k + snl)
+               strc_wliq(imt, k) = mt_wliq(imt, k + snl)
+               IF (present(mt_solid)) strc_solid(imt, k) = mt_solid(imt, k + snl)
             ENDDO
          ENDIF
 
@@ -1405,10 +1380,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(1,:) = mss_aerosol(1,:)/2.
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 1) = strc_wice(:, 1) / 2._r8
                strc_wliq(:, 1) = strc_wliq(:, 1) / 2._r8
-               IF (present(trc_solid)) strc_solid(:, 1) = strc_solid(:, 1) / 2._r8
+               IF (present(mt_solid)) strc_solid(:, 1) = strc_solid(:, 1) / 2._r8
             ENDIF
 
             dzsno(2) = dzsno(1)
@@ -1417,10 +1392,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(2,:) = mss_aerosol(1,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 2) = strc_wice(:, 1)
                strc_wliq(:, 2) = strc_wliq(:, 1)
-               IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 1)
+               IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 1)
             ENDIF
 
             tsno(2)  = tsno(1)
@@ -1438,10 +1413,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             z_mss_aerosol(:) = propor*mss_aerosol(1,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                z_strc_wice(:) = propor * strc_wice(:, 1)
                z_strc_wliq(:) = propor * strc_wliq(:, 1)
-               IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 1)
+               IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 1)
             ENDIF
 
             propor = 0.02/dzsno(1)
@@ -1450,10 +1425,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(1,:) = propor*mss_aerosol(1,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 1) = propor * strc_wice(:, 1)
                strc_wliq(:, 1) = propor * strc_wliq(:, 1)
-               IF (present(trc_solid)) strc_solid(:, 1) = propor * strc_solid(:, 1)
+               IF (present(mt_solid)) strc_solid(:, 1) = propor * strc_solid(:, 1)
             ENDIF
 
             dzsno(1) = 0.02
@@ -1464,10 +1439,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(2,:) = z_mss_aerosol(:) + mss_aerosol(2,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 2) = strc_wice(:, 2) + z_strc_wice(:)
                strc_wliq(:, 2) = strc_wliq(:, 2) + z_strc_wliq(:)
-               IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 2) + z_strc_solid(:)
+               IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 2) + z_strc_solid(:)
             ENDIF
 
 !           write(6,*) 'Subdivided Top Node &
@@ -1482,10 +1457,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(2,:) = mss_aerosol(2,:)/2.
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 2) = strc_wice(:, 2) / 2._r8
                   strc_wliq(:, 2) = strc_wliq(:, 2) / 2._r8
-                  IF (present(trc_solid)) strc_solid(:, 2) = strc_solid(:, 2) / 2._r8
+                  IF (present(mt_solid)) strc_solid(:, 2) = strc_solid(:, 2) / 2._r8
                ENDIF
 
                dzsno(3) = dzsno(2)
@@ -1494,10 +1469,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(3,:) = mss_aerosol(2,:)
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 3) = strc_wice(:, 2)
                   strc_wliq(:, 3) = strc_wliq(:, 2)
-                  IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 2)
+                  IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 2)
                ENDIF
 
                tsno(3)  = tsno(2)
@@ -1514,10 +1489,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             z_mss_aerosol(:) = propor*mss_aerosol(2,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                z_strc_wice(:) = propor * strc_wice(:, 2)
                z_strc_wliq(:) = propor * strc_wliq(:, 2)
-               IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 2)
+               IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 2)
             ENDIF
 
             propor = 0.05/dzsno(2)
@@ -1526,10 +1501,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(2,:) = propor*mss_aerosol(2,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 2) = propor * strc_wice(:, 2)
                strc_wliq(:, 2) = propor * strc_wliq(:, 2)
-               IF (present(trc_solid)) strc_solid(:, 2) = propor * strc_solid(:, 2)
+               IF (present(mt_solid)) strc_solid(:, 2) = propor * strc_solid(:, 2)
             ENDIF
 
             dzsno(2) = 0.05
@@ -1540,10 +1515,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(3,:) = z_mss_aerosol(:) + mss_aerosol(3,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 3) = strc_wice(:, 3) + z_strc_wice(:)
                strc_wliq(:, 3) = strc_wliq(:, 3) + z_strc_wliq(:)
-               IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 3) + z_strc_solid(:)
+               IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 3) + z_strc_solid(:)
             ENDIF
 
 !           write(6,*)'Subdivided 50 mm from the subsurface layer &
@@ -1558,10 +1533,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(3,:) = mss_aerosol(3,:)/2.
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 3) = strc_wice(:, 3) / 2._r8
                   strc_wliq(:, 3) = strc_wliq(:, 3) / 2._r8
-                  IF (present(trc_solid)) strc_solid(:, 3) = strc_solid(:, 3) / 2._r8
+                  IF (present(mt_solid)) strc_solid(:, 3) = strc_solid(:, 3) / 2._r8
                ENDIF
 
                dzsno(4) = dzsno(3)
@@ -1570,10 +1545,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(4,:) = mss_aerosol(3,:)
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 4) = strc_wice(:, 3)
                   strc_wliq(:, 4) = strc_wliq(:, 3)
-                  IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 3)
+                  IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 3)
                ENDIF
 
                tsno(4)  = tsno(3)
@@ -1591,10 +1566,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             z_mss_aerosol(:) = propor*mss_aerosol(3,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                z_strc_wice(:) = propor * strc_wice(:, 3)
                z_strc_wliq(:) = propor * strc_wliq(:, 3)
-               IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 3)
+               IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 3)
             ENDIF
 
             propor = 0.11/dzsno(3)
@@ -1603,10 +1578,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(3,:) = propor*mss_aerosol(3,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 3) = propor * strc_wice(:, 3)
                strc_wliq(:, 3) = propor * strc_wliq(:, 3)
-               IF (present(trc_solid)) strc_solid(:, 3) = propor * strc_solid(:, 3)
+               IF (present(mt_solid)) strc_solid(:, 3) = propor * strc_solid(:, 3)
             ENDIF
 
             dzsno(3) = 0.11
@@ -1617,10 +1592,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(4,:) = z_mss_aerosol(:) + mss_aerosol(4,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 4) = strc_wice(:, 4) + z_strc_wice(:)
                strc_wliq(:, 4) = strc_wliq(:, 4) + z_strc_wliq(:)
-               IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 4) + z_strc_solid(:)
+               IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 4) + z_strc_solid(:)
             ENDIF
 
 !           write(6,*)'Subdivided 110 mm from the third Node &
@@ -1635,10 +1610,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(4,:) = mss_aerosol(4,:)/2.
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 4) = strc_wice(:, 4) / 2._r8
                   strc_wliq(:, 4) = strc_wliq(:, 4) / 2._r8
-                  IF (present(trc_solid)) strc_solid(:, 4) = strc_solid(:, 4) / 2._r8
+                  IF (present(mt_solid)) strc_solid(:, 4) = strc_solid(:, 4) / 2._r8
                ENDIF
 
                dzsno(5) = dzsno(4)
@@ -1647,10 +1622,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
                mss_aerosol(5,:) = mss_aerosol(4,:)
 !Aerosol Fluxes (January 07, 2023)
-               IF (present(trc_wliq) .and. present(trc_wice)) THEN
+               IF (present(mt_wliq) .and. present(mt_wice)) THEN
                   strc_wice(:, 5) = strc_wice(:, 4)
                   strc_wliq(:, 5) = strc_wliq(:, 4)
-                  IF (present(trc_solid)) strc_solid(:, 5) = strc_solid(:, 4)
+                  IF (present(mt_solid)) strc_solid(:, 5) = strc_solid(:, 4)
                ENDIF
 
                tsno(5)  = tsno(4)
@@ -1668,10 +1643,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             z_mss_aerosol(:) = propor*mss_aerosol(4,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                z_strc_wice(:) = propor * strc_wice(:, 4)
                z_strc_wliq(:) = propor * strc_wliq(:, 4)
-               IF (present(trc_solid)) z_strc_solid(:) = propor * strc_solid(:, 4)
+               IF (present(mt_solid)) z_strc_solid(:) = propor * strc_solid(:, 4)
             ENDIF
 
             propor = 0.23/dzsno(4)
@@ -1680,10 +1655,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(4,:) = propor*mss_aerosol(4,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 4) = propor * strc_wice(:, 4)
                strc_wliq(:, 4) = propor * strc_wliq(:, 4)
-               IF (present(trc_solid)) strc_solid(:, 4) = propor * strc_solid(:, 4)
+               IF (present(mt_solid)) strc_solid(:, 4) = propor * strc_solid(:, 4)
             ENDIF
 
             dzsno(4) = 0.23
@@ -1694,10 +1669,10 @@ CONTAINS
 !Aerosol Fluxes (January 07, 2023)
             mss_aerosol(5,:) = z_mss_aerosol(:) + mss_aerosol(5,:)
 !Aerosol Fluxes (January 07, 2023)
-            IF (present(trc_wliq) .and. present(trc_wice)) THEN
+            IF (present(mt_wliq) .and. present(mt_wice)) THEN
                strc_wice(:, 5) = strc_wice(:, 5) + z_strc_wice(:)
                strc_wliq(:, 5) = strc_wliq(:, 5) + z_strc_wliq(:)
-               IF (present(trc_solid)) strc_solid(:, 5) = strc_solid(:, 5) + z_strc_solid(:)
+               IF (present(mt_solid)) strc_solid(:, 5) = strc_solid(:, 5) + z_strc_solid(:)
             ENDIF
 
 !           write(6,*)'Subdivided 230 mm from the fourth Node &
@@ -1725,14 +1700,13 @@ CONTAINS
 
          t_soisno(k)  = tsno (k - snl)
 
-         IF (present(trc_wliq) .and. present(trc_wice)) THEN
-            DO itrc = 1, ntr
-               trc_wice(itrc, k) = strc_wice(itrc, k - snl)
-               trc_wliq(itrc, k) = strc_wliq(itrc, k - snl)
-               IF (present(trc_solid)) trc_solid(itrc, k) = strc_solid(itrc, k - snl)
+         IF (present(mt_wliq) .and. present(mt_wice)) THEN
+            DO imt = 1, ntr
+               mt_wice(imt, k) = strc_wice(imt, k - snl)
+               mt_wliq(imt, k) = strc_wliq(imt, k - snl)
+               IF (present(mt_solid)) mt_solid(imt, k) = strc_solid(imt, k - snl)
             ENDDO
          ENDIF
-
       ENDDO
 
       zi_soisno(0) = 0.
@@ -1741,11 +1715,10 @@ CONTAINS
          zi_soisno(k-1) = zi_soisno(k) - dz_soisno(k)
       ENDDO
 
-      IF (present(trc_wliq) .and. present(trc_wice)) THEN
+      IF (present(mt_wliq) .and. present(mt_wice)) THEN
          deallocate(strc_wice, strc_wliq, strc_solid, &
             z_strc_wice, z_strc_wliq, z_strc_solid)
       ENDIF
-
    END SUBROUTINE SnowLayersDivide_snicar
 
 END MODULE MOD_SnowLayersCombineDivide

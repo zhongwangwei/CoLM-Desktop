@@ -3,14 +3,25 @@ use colm_core::tracer::descriptor::TracerNamelist;
 
 fn isotope_set(param_file: &str) -> TracerSet {
     let namelist = TracerNamelist {
-        num: 2,
-        names: "H2_18O,HDO".to_owned(),
-        types: "isotope,isotope".to_owned(),
-        ref_ratio: "2.0052e-3,1.5576e-4".to_owned(),
-        param_files: format!("H2_18O:{param_file}"),
+        use_isotope: true,
+        isotope_species: "H2_18O,HDO".to_owned(),
+        ref_ratio_h2_18o: 2.0052e-3,
+        ref_ratio_hdo: 1.5576e-4,
+        param_files: TracerParamFiles {
+            isotope: param_file.to_owned(),
+            ..TracerParamFiles::default()
+        },
         ..TracerNamelist::default()
     };
     TracerSet::build(&namelist, |_| Ok(None)).unwrap()
+}
+
+/// 同位素共用一份参数文件（两个 species 各一组 `&nl_colm_mt_forcing`）。
+fn isotope_files(param_file: &str) -> TracerParamFiles {
+    TracerParamFiles {
+        isotope: param_file.to_owned(),
+        ..TracerParamFiles::default()
+    }
 }
 
 /// 每个测试自己的参数文件（测试并行跑，名字带标签区分）。
@@ -23,8 +34,8 @@ fn write_param(label: &str, body: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-const STANDARD_O18: &str = "&nl_colm_tracer_parameter\n   DEF_TRACER%mol_weight = 20.0\n/\n\
-&nl_colm_tracer_forcing\n    forcing_num        = 2\n    forcing_role       = 'precip', 'vapor'\n\
+const STANDARD_O18: &str = "&nl_colm_mt_forcing\n    forcing_species    = 'H2_18O'\n\
+    forcing_num        = 2\n    forcing_role       = 'precip', 'vapor'\n\
     forcing_fprefix    = 'IsoGSM_prate', 'IsoGSM_Q'\n    forcing_vname      = 'prate1sfc', 'spfh12m'\n\
     forcing_tintalgo   = 'nearest', 'linear'\n    forcing_dtime      = 21600, 21600\n\
     forcing_offset     = 10800, 10800\n\
@@ -51,7 +62,7 @@ fn totals() -> MainTotals {
 fn the_standard_o18_group_loads_like_upstream() {
     let path = write_param("standard", STANDARD_O18);
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     assert_eq!(specs.len(), 2);
     assert!(specs[1].is_empty(), "HDO has no parameter file");
     assert_eq!(specs[0].len(), 2);
@@ -65,11 +76,11 @@ fn the_standard_o18_group_loads_like_upstream() {
 fn indexed_assignments_override_single_elements() {
     let path = write_param(
         "indexed",
-        "&nl_colm_tracer_forcing\n forcing_num = 1\n forcing_role(1) = 'VAPOR'\n \
+        "&nl_colm_mt_forcing\n forcing_species = 'H2_18O'\n forcing_num = 1\n forcing_role(1) = 'VAPOR'\n \
          forcing_fprefix(1) = 'q'\n forcing_vname(1) = 'v'\n forcing_input_mode(1) = 'Delta'\n/\n",
     );
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     assert_eq!(specs[0][0].role, "vapor");
     assert_eq!(specs[0][0].input_mode, "delta");
     assert_eq!(
@@ -82,17 +93,17 @@ fn indexed_assignments_override_single_elements() {
 fn duplicate_roles_are_rejected() {
     let path = write_param(
         "duplicate",
-        "&nl_colm_tracer_forcing\n forcing_num = 2\n forcing_role = 'vapor', 'vapor'\n/\n",
+        "&nl_colm_mt_forcing\n forcing_species = 'H2_18O'\n forcing_num = 2\n forcing_role = 'vapor', 'vapor'\n/\n",
     );
     let set = isotope_set(&path);
-    assert!(load_specs(&set, &format!("H2_18O:{path}")).is_err());
+    assert!(load_specs(&set, &isotope_files(&path)).is_err());
 }
 
 #[test]
 fn over_total_inputs_register_their_total_first() {
     let path = write_param("total", STANDARD_O18);
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
     let config = configure(&set, &physics, &specs, Some(&totals())).unwrap();
     let streams: Vec<_> = config.vars.iter().map(|v| v.stream).collect();
@@ -119,7 +130,7 @@ fn mismatched_total_timing_is_rejected() {
     let body = STANDARD_O18.replace("'nearest', 'linear'", "'linear', 'linear'");
     let path = write_param("mismatch", &body);
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
     assert!(configure(&set, &physics, &specs, Some(&totals())).is_err());
 }
@@ -128,7 +139,7 @@ fn mismatched_total_timing_is_rejected() {
 fn decoding_keeps_the_last_valid_ratio() {
     let path = write_param("decode", STANDARD_O18);
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
     let config = configure(&set, &physics, &specs, Some(&totals())).unwrap();
     let main = isogsm_main();
@@ -183,7 +194,7 @@ fn isogsm_main() -> GriddedForcingConfig {
 fn main_totals_and_identity_follow_the_main_forcing() {
     let path = write_param("identity", STANDARD_O18);
     let set = isotope_set(&path);
-    let specs = load_specs(&set, &format!("H2_18O:{path}")).unwrap();
+    let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let main = isogsm_main();
     let totals = MainTotals::from_config(&main);
     assert_eq!(totals.precip.1, "pratesfc");

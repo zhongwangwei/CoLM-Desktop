@@ -162,7 +162,7 @@ fn tracer_configuration_lists_methane_history_variables() {
         return;
     }
     let vars = hist_vars(
-        "&nl_colm\n DEF_USE_TRACER = .true.\n/\n".into(),
+        "&nl_colm\n DEF_USE_METHANE = .true.\n DEF_METHANE_PARAM_FILE = 'ch4.nml'\n/\n".into(),
         kernel("default"),
         None,
     )
@@ -221,12 +221,10 @@ fn methane_history_variables_follow_the_ch4_parameter_file() {
     let dir = std::env::temp_dir().join(format!("colm-histvars-ch4-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let isotope = "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 2\n \
-                   DEF_TRACER_NAMES = 'H2_18O,HDO'\n DEF_TRACER_TYPES = 'isotope,isotope'\n/\n";
-    let methane =
-        "&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 1\n \
-                   DEF_TRACER_NAMES = 'CH4'\n DEF_TRACER_TYPES = 'gas'\n \
-                   DEF_TRACER_PARAM_FILES = 'CH4:ch4.nml'\n/\n";
+    let isotope = "&nl_colm\n DEF_USE_ISOTOPE = .true.\n \
+                   DEF_ISOTOPE_SPECIES = 'H2_18O,HDO'\n/\n";
+    let methane = "&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_METHANE = .true.\n \
+                   DEF_METHANE_PARAM_FILE = 'ch4.nml'\n/\n";
     let run = |text: &str| {
         hist_vars(
             text.into(),
@@ -237,8 +235,9 @@ fn methane_history_variables_follow_the_ch4_parameter_file() {
     };
     let on = |vars: &[HistVar], name: &str| vars.iter().find(|v| v.name == name).unwrap().on;
     let iso = run(isotope);
-    assert!(!on(&iso, "methane_surf_flux_tot"));
-    assert!(!on(&iso, "conc_methane"));
+    // 只开同位素时甲烷 family 未启用，CH4 history 变量根本不在列表里。
+    assert!(iso.iter().all(|v| v.name != "methane_surf_flux_tot"));
+    assert!(iso.iter().all(|v| v.name != "conc_methane"));
     std::fs::write(
         dir.join("ch4.nml"),
         "&nl_colm_methane_parameter\n DEF_METHANE%ch4_history_vars = 'core'\n/\n",

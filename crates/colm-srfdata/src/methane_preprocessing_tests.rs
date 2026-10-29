@@ -1,17 +1,5 @@
 use super::*;
 
-#[test]
-fn methane_parameter_mapping_keeps_the_first_matching_alias() {
-    assert_eq!(
-        tracer_parameter_file("CH4:null; METHANE:later.nml", 0, &["CH4"]).unwrap(),
-        None
-    );
-    assert_eq!(
-        tracer_parameter_file("other.nml, standard_ch4.nml", 1, &["CL", "METHANE"]).unwrap(),
-        Some("standard_ch4.nml".into())
-    );
-}
-
 /// 没有甲烷时两项都不生成；参数文件里打开 `allowlakeprod` 就要生成湖泊土壤碳。
 #[test]
 fn requirements_follow_the_ch4_parameter_file() {
@@ -33,8 +21,8 @@ fn requirements_follow_the_ch4_parameter_file() {
     )
     .unwrap();
     let methane = colm_namelist::parse(
-        "&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 1\n \
-         DEF_TRACER_NAMES = 'CH4'\n DEF_TRACER_TYPES = 'gas'\n DEF_TRACER_PARAM_FILES = 'ch4.nml'\n/\n",
+        "&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_METHANE = .true.\n \
+         DEF_METHANE_PARAM_FILE = 'ch4.nml'\n/\n",
     )
     .unwrap();
     assert_eq!(
@@ -44,5 +32,13 @@ fn requirements_follow_the_ch4_parameter_file() {
             spatial_ph: false
         }
     );
+    // 甲烷开了但没给参数文件：上游 `check_settings` 停机，这里也不静默跳过。
+    let missing =
+        colm_namelist::parse("&nl_colm\n DEF_USE_BGC = .true.\n DEF_USE_METHANE = .true.\n/\n")
+            .unwrap();
+    assert!(requirements(&missing, &namelist)
+        .unwrap_err()
+        .to_string()
+        .contains("DEF_METHANE_PARAM_FILE"));
     let _ = std::fs::remove_dir_all(&dir);
 }

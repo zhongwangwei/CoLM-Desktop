@@ -24,6 +24,7 @@ CONTAINS
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Namelist
+   USE MOD_MT_Namelist, only: mt_any_enabled
    USE MOD_SPMD_Task
    USE MOD_Pixel
    USE MOD_LandPatch
@@ -64,8 +65,8 @@ CONTAINS
 #endif
 #ifdef GridRiverLakeFlow
    USE MOD_Grid_RiverLakeNetwork
-   USE MOD_Grid_RiverLakeLevee, only: levee_init, levsto, levdph
    USE MOD_Grid_Reservoir
+   USE MOD_Grid_RiverLakeLevee, only: levee_init, levsto, levdph
 #endif
 #ifdef CROP
    USE MOD_CropReadin
@@ -107,8 +108,10 @@ CONTAINS
    real(r8) :: rlon, rlat
    ! wetland_tot_c/wetland_existing_c are computed and consumed only inside
    ! the "#ifdef BGC" block further below, itself gated at runtime on
-   ! DEF_USE_TRACER (methane is one of TRACER's four families but needs BGC
-   ! at compile time; TRACER itself is a runtime switch now, MOD_Namelist.F90).
+   ! 上游把编译期 TRACER 宏拆成了按物料的运行时开关（main/MATERIAL/
+   ! MOD_MT_Namelist.F90：DEF_USE_ISOTOPE / DEF_USE_METHANE / DEF_SOLUTE_NAMES），
+   ! 所以「有没有物运移在跑」要问 mt_any_enabled()，不再是 DEF_USE_TRACER。
+   logical :: mt_enabled
    real(r8) :: wetland_tot_c
    real(r8) :: wetland_existing_c
    real(r8), parameter :: wetland_cn_ratio = 15._r8
@@ -283,6 +286,7 @@ CONTAINS
          IF (present(lulcc_call)) CALL reservoir_final ()
          CALL reservoir_init ()
       ENDIF
+
       IF (DEF_USE_LEVEE) THEN
          ! LULCC: levee_init rebuilds the (unchanged) levee geometry and zeroes the
          ! protected-side state; levsto/levdph are river state like those kept by
@@ -394,13 +398,13 @@ ENDIF
 IF (DEF_USE_BGC) THEN
       ! lake_soilc_srf is populated whenever BGC is compiled in (see its
       ! "#ifdef BGC" declaration/allocation, MOD_Vars_TimeInvariants.F90),
-      ! regardless of DEF_USE_TRACER: the SinglePoint branch derives it
-      ! straight from OM_density with no tracer-file dependency, and the
-      ! non-SinglePoint branch's ncio_read_vector has a defval=0 fallback
-      ! for the (BGC on, DEF_USE_TRACER off) case where mksrfdata never
+      ! regardless of whether material transport runs: the SinglePoint branch
+      ! derives it straight from OM_density with no material-file dependency,
+      ! and the non-SinglePoint branch's ncio_read_vector has a defval=0
+      ! fallback for the (BGC on, transport off) case where mksrfdata never
       ! produced lake_soilc_patches.nc. Only the lake-sediment CH4 pathway
-      ! that actually reads this array back out is gated on DEF_USE_TRACER
-      ! (methane provider registration, see MOD_Tracer_Defs.F90).
+      ! that actually reads this array back out is gated on the material
+      ! switches (DEF_USE_METHANE, see main/MATERIAL/MOD_MT_Namelist.F90).
 #ifndef SinglePoint
       write(cyear,'(i4.4)') lc_year
       lndname = trim(dir_landdata)//'/soil/'//trim(cyear)//'/lake_soilc_patches.nc'
@@ -432,6 +436,24 @@ ENDIF
                      sc_vgm(i,ipatch), fc_vgm(i,ipatch))
                ENDDO
             ENDDO
+         ENDIF
+      ENDIF
+
+      ! [GridRiverLakeFlow] Only some runoff schemes read these, but all are written
+      ! into the constant restart, so with any other scheme (e.g. DEF_Runoff_SCHEME = 0,
+      ! which grid flood feedback and CaMa flood feedback require) uninitialised memory
+      ! was written there and runs differed between process counts.  Give them a
+      ! defined value first (soil texture 0 = no class).
+      ! Results are unchanged: a scheme that uses them sets them right below
+      ! (soiltext_readin, BVIC) or reads them later, and no other scheme reads them.
+      IF (p_is_worker) THEN
+         IF (numpatch > 0) THEN
+            soiltext(:) = 0
+            BVIC    (:) = BVIC_USDA(0)
+            topoweti(:) = 0.
+            alp_twi (:) = 0.
+            chi_twi (:) = 0.
+            mu_twi  (:) = 0.
          ENDIF
       ENDIF
 
@@ -556,6 +578,7 @@ ENDIF
          ! its own below, method 2 used to leave them undefined (written into the restart)
          IF (p_is_worker) THEN
             IF (numpatch > 0) THEN
+               ! equal to 'wtfact = 0.38' and 'fff = 0.5'
                fsatmax(:) = 0.38
                fsatdcf(:) = 0.125
             ENDIF
@@ -1085,12 +1108,13 @@ IF (DEF_USE_BGC) THEN
             CALL mc2f%grid2pset (deadcrootc_grid, deadcrootcin_p )
 
             IF (p_is_worker) THEN
+               mt_enabled = mt_any_enabled()
                DO i = 1, numpatch
                   ! Used to be "#ifdef TRACER: patchtype==0 .or. patchtype==2
-                  ! #else: patchtype==0"; DEF_USE_TRACER is loop-invariant so
-                  ! this single boolean expression is exactly equivalent to
-                  ! that compile-time branch, now chosen at runtime.
-                  IF (patchtype(i) == 0 .or. (DEF_USE_TRACER .and. patchtype(i) == 2)) THEN
+                  ! #else: patchtype==0"; mt_enabled is loop-invariant so this
+                  ! single boolean expression is exactly equivalent to that
+                  ! compile-time branch, now chosen at runtime.
+                  IF (patchtype(i) == 0 .or. (mt_enabled .and. patchtype(i) == 2)) THEN
                      ps = patch_pft_s(i)
                      pe = patch_pft_e(i)
                      DO nsl = 1, nl_soil
@@ -1114,7 +1138,7 @@ IF (DEF_USE_BGC) THEN
                      ENDDO
                   ENDIF
 
-                  IF (DEF_USE_TRACER) THEN
+                  IF (mt_enabled) THEN
                   IF (patchtype(i) == 2) THEN
                      DO nsl = 1, nl_soil
                         wetland_existing_c = 0._r8
@@ -1394,7 +1418,7 @@ ENDIF
       ! PLEASE
       ! PLEASE UPDATE
       ! PLEASE UPDATE when have the observed lake status
-      IF (p_is_worker .AND. numpatch > 0) THEN
+      IF (p_is_worker) THEN
 
          t_lake      (:,:) = 285.
          lake_icefrac(:,:) = 0.
@@ -1512,7 +1536,7 @@ ENDIF
                ,use_soilini, nl_soil_ini, soil_z, soil_t(1:,i), soil_w(1:,i), use_snowini, snow_d(i) &
                ! for SOIL Water INIT by using water table depth
                ,use_wtd, zwtmm, zc_soimm, zi_soimm, vliq_r, nprms, prms)
-      IF (DEF_USE_TRACER .and. DEF_USE_BGC) THEN
+      IF (mt_enabled .and. DEF_USE_BGC) THEN
             IF (patchtype(i) == 2) CALL CNDriverSummarizeNonvegetatedSoilStates(i, nl_soil, dz_soi, ndecomp_pools)
       ENDIF
 

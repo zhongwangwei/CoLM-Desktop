@@ -26,23 +26,23 @@ MODULE MOD_HistWriteBack
    END type HistSendBufferType
 
    ! Sending Variables
-   type(HistSendBufferType), pointer :: HistSendBuffer => null()
-   type(HistSendBufferType), pointer :: LastSendBuffer => null()
+   type(HistSendBufferType), pointer :: HistSendBuffer
+   type(HistSendBufferType), pointer :: LastSendBuffer
 
    ! type of times
    type :: timenodetype
-      integer :: dataid = 0
       character(len=256) :: filename
       character(len=256) :: filelast
       character(len=256) :: timename
       integer :: time(3)
-      integer :: req (5)
+      integer :: req (4)
       type(timenodetype), pointer :: next
    END type timenodetype
 
    ! time nodes
-   type(timenodetype), pointer :: timenodes => null()
-   type(timenodetype), pointer :: lasttime  => null()
+   integer :: dataid_zero = 0
+   integer :: req_zero
+   type(timenodetype), pointer :: timenodes, lasttime
 
    ! dimension information
    logical :: SDimInited = .false.
@@ -58,6 +58,7 @@ MODULE MOD_HistWriteBack
 
    ! Memory limits
    integer*8, parameter :: MaxHistMemSize = 1073741824_8 ! 1024^3
+   ! buffers are counted in bytes, so the cap above means bytes as written
    integer*8, parameter :: HistRealBytes = storage_size(0._r8) / 8
    integer*8 :: TotalMemSize = 0
 
@@ -370,7 +371,7 @@ CONTAINS
    ! Local Variables
    integer :: i
    logical :: senddone
-   integer :: sendstat(MPI_STATUS_SIZE,5)
+   integer :: sendstat(MPI_STATUS_SIZE,4)
    type(timenodetype), pointer :: tempnode
 
       IF (.not. associated(timenodes)) THEN
@@ -381,27 +382,26 @@ CONTAINS
          lasttime => lasttime%next
       ENDIF
 
-      lasttime%dataid   = 0
       lasttime%filename = filename
       lasttime%filelast = filelast
       lasttime%timename = timename
       lasttime%time = time
       lasttime%next => null()
 
-      CALL mpi_isend (lasttime%dataid, 1, MPI_INTEGER, &
-         p_address_writeback, tag_next, p_comm_glb_plus, lasttime%req(1), p_err)
+      CALL mpi_isend (dataid_zero, 1, MPI_INTEGER, &
+         p_address_writeback, tag_next, p_comm_glb_plus, req_zero, p_err)
 
       CALL mpi_isend (lasttime%filename, 256, MPI_CHARACTER, &
-         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(2), p_err)
+         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(1), p_err)
 
       CALL mpi_isend (lasttime%filelast, 256, MPI_CHARACTER, &
-         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(3), p_err)
+         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(2), p_err)
 
       CALL mpi_isend (lasttime%timename, 256, MPI_CHARACTER, &
-         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(4), p_err)
+         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(3), p_err)
 
       CALL mpi_isend (lasttime%time, 3, MPI_INTEGER, &
-         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(5), p_err)
+         p_address_writeback, tag_time, p_comm_glb_plus, lasttime%req(4), p_err)
 
 
       IF (.not. SDimInited) THEN
@@ -473,7 +473,7 @@ CONTAINS
 
       DO WHILE (associated(timenodes%next))
 
-         CALL MPI_TestAll (5, timenodes%req, senddone, sendstat(:,1:5), p_err)
+         CALL MPI_TestAll (4, timenodes%req, senddone, sendstat(:,1:4), p_err)
 
          IF (senddone) THEN
             tempnode  => timenodes
@@ -519,11 +519,7 @@ CONTAINS
       ! clean sending buffer and free memory
       DO WHILE (associated(HistSendBuffer%next))
 
-         IF (allocated(HistSendBuffer%senddata)) THEN
-            CALL MPI_Testall (2, HistSendBuffer%sendreqs(1:2), senddone, sendstat(:,1:2), p_err)
-         ELSE
-            CALL MPI_Testall (3, HistSendBuffer%sendreqs(1:3), senddone, sendstat(:,1:3), p_err)
-         ENDIF
+         CALL MPI_Testall (3, HistSendBuffer%sendreqs, senddone, sendstat(:,1:3), p_err)
 
          IF (senddone) THEN
 
@@ -531,8 +527,6 @@ CONTAINS
             HistSendBuffer => HistSendBuffer%next
 
             IF (allocated(TempSendBuffer%senddata)) THEN
-               TotalMemSize = TotalMemSize - &
-                  int(size(TempSendBuffer%senddata), 8) * HistRealBytes
                deallocate (TempSendBuffer%senddata)
             ENDIF
             deallocate (TempSendBuffer)
@@ -700,14 +694,14 @@ CONTAINS
 
    ! Local Variables
    integer :: dataid, nreq
-   integer :: sendstat(MPI_STATUS_SIZE,5)
+   integer :: sendstat(MPI_STATUS_SIZE,4)
    type(timenodetype),       pointer :: tempnode
    type(HistSendBufferType), pointer :: TempSendBuffer
 
       lasttime => null()
       DO WHILE (associated(timenodes))
 
-         CALL MPI_WaitAll (5, timenodes%req, sendstat(:,1:5), p_err)
+         CALL MPI_WaitAll (4, timenodes%req, sendstat(:,1:4), p_err)
 
          tempnode  => timenodes
          timenodes => timenodes%next
@@ -729,7 +723,6 @@ CONTAINS
          deallocate (TempSendBuffer)
 
       ENDDO
-      TotalMemSize = 0
 
       IF (allocated(xGridDsp)) deallocate(xGridDsp)
       IF (allocated(yGridDsp)) deallocate(yGridDsp)

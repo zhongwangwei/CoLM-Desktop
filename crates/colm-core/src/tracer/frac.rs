@@ -33,7 +33,7 @@ const SEVEN_THIRDS: f64 = 7.0 / 3.0;
 pub const RSMOW_18O: f64 = 2.0052e-3;
 pub const RSMOW_D: f64 = 1.5576e-4;
 
-/// `DEF_TRACER_KINETIC_SCHEME`。
+/// `DEF_ISO_KINETIC_SCHEME`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KineticScheme {
     #[default]
@@ -52,7 +52,7 @@ impl KineticScheme {
     }
 }
 
-/// `DEF_TRACER_OPEN_WATER_KINETIC`。
+/// `DEF_ISO_OPEN_WATER_KINETIC`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenWaterKinetic {
     #[default]

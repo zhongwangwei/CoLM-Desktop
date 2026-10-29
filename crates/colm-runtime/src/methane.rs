@@ -33,10 +33,10 @@ pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Opti
     let Some(index) = set.tracers.iter().position(is_methane_tracer) else {
         return Ok(None);
     };
-    let files = crate::physics::text(document, "DEF_TRACER_PARAM_FILES")?;
+    let files = crate::tracer::param_files_from_document(document)?;
     let path = colm_core::tracer::descriptor::param_file_for_index(&files, &set.tracers, index)?
         .context(
-            "the CH4 tracer has no parameter file; methane needs &nl_colm_methane_parameter",
+            "the CH4 material has no parameter file; methane needs &nl_colm_methane_parameter",
         )?;
     let mut params = read_parameters(&path)?;
     // CH4 history：Rust 只移植了 `core` 那 18 个量。`diagnostic`/`all`/逐个列名会让上游多写变量，

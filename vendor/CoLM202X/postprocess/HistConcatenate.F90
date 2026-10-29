@@ -635,26 +635,6 @@ PROGRAM hist_concatenate
       CALL hist_concatenate_var_2d (filehist, 'f_srniln ', timelen, compress, &
          'reflected diffuse beam nir solar radiation at local noon(W/m2)','W/m2')
 
-#ifdef GridRiverLakeFlow
-      CALL hist_concatenate_var_2d (filehist, 'f_wdpth_ucat_regrid', timelen, compress, &
-         'regridded deepest water depth in river and flood plain','m')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_veloc_riv_regrid', timelen, compress, &
-         'regridded water velocity in river','m/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_discharge', timelen, compress, &
-         'regridded discharge in river and flood plain','m^3/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_discharge_rivermouth_regrid', timelen, compress, &
-         'regridded river mouth discharge into ocean','m^3/s')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_floodfrc', timelen, compress, &
-         'flooded area fraction','100%')
-
-      CALL hist_concatenate_var_2d (filehist, 'f_floodarea', timelen, compress, &
-         'flooded area','m^2')
-#endif
-
 END PROGRAM hist_concatenate
 ! ----------------------------------------------------------------------
 ! EOP

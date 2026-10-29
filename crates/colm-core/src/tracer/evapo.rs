@@ -73,9 +73,9 @@ pub struct EvapoInput<'a> {
     /// `forc_q_frac`/`forc_psrf_frac`：任一缺失时蒸发比值不分馏。
     pub forc_q: Option<f64>,
     pub forc_psrf: Option<f64>,
-    /// `DEF_TRACER_SUBL_SKIN_MM`。
+    /// `DEF_ISO_SUBL_SKIN_MM`。
     pub subl_skin_mm: f64,
-    /// `DEF_TRACER_CANOPY_EQUILIBRATION`。
+    /// `DEF_ISO_CANOPY_EQUILIBRATION`。
     pub canopy_equilibration: f64,
 }
 

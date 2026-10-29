@@ -7,8 +7,9 @@ fn the_table_has_the_measured_number_of_fields() {
     // DEF_USE_RangeCheck / DEF_USE_SrfdataDiag，顶层数从 202 变 205；
     // 土壤水力方案改成运行时开关后新增了 DEF_USE_Campbell_SOIL_MODEL
     // （extend_interception 没有对应的开关，见 MOD_Namelist.F90 里的说明），
-    // 顶层数从 205 变 206；示踪物子系统改成运行时开关后新增了
-    // DEF_USE_TRACER，顶层数从 206 变 207；LULC/BGC/CROP/URBAN/LULCC
+    // 顶层数从 205 变 206；示踪物子系统改成运行时开关时新增过
+    // DEF_USE_TRACER（上游 7d2fca93 又把它拆成 DEF_USE_ISOTOPE /
+    // DEF_USE_METHANE / DEF_USE_NH4_LEACHING），顶层数从 206 变 207；LULC/BGC/CROP/URBAN/LULCC
     // 那组改造新增了 DEF_USE_BGC、DEF_USE_CROP、DEF_USE_LULCC 三个
     // （DEF_USE_USGS/DEF_USE_IGBP/DEF_USE_LCT/DEF_USE_PFT/DEF_USE_PC
     // 早就在 MOD_Namelist.F90 里声明了，不算新增，只是从死代码变成
@@ -23,14 +24,19 @@ fn the_table_has_the_measured_number_of_fields() {
     // 总数到 944（顶层不变）。PR #507 加了 `DEF_HIST_grid_as_model_mesh`，顶层 305 变 306、总数 945。
     // 河湖汇流改成运行时开关（`DEF_USE_GridRiverLakeFlow`），顶层 306 变 307、总数 946。
     // 气孔五张表按地类改（`DEF_LC_GRADM/BINTER/G1/G0/LAMBDA`），顶层 307 变 312、总数 951。
+    // 上游 7d2fca93 把 tracer 子系统改名 MaterialTransport：删除 31 个旧顶层字段
+    // （30 个 `DEF_TRACER_*` 加 `DEF_USE_TRACER`，另有 `DEF_URBAN_geom_data` 被上游去掉），
+    // 新增 44 个（材料运移的 `DEF_USE_ISOTOPE`/`DEF_SOLUTE_*`/`DEF_MT_*`/`DEF_ISO_*`、
+    // rawdata 的 `DEF_rawdata_namelist`/`DEF_USE_GLC30`/`DEF_USE_ESACCI` 等），
+    // 顶层 312 变 325、总数 964。
     // 若这个数再变了，要么上游改了，要么生成器漏了 —— 两种都必须有人看一眼。
     let total = all().len();
     assert!(
-        (900..=980).contains(&total),
-        "expected roughly 951 fields, got {total}"
+        (900..=1000).contains(&total),
+        "expected roughly 964 fields, got {total}"
     );
     let top = all().iter().filter(|f| f.owner.is_none()).count();
-    assert_eq!(top, 312, "top-level count changed");
+    assert_eq!(top, 325, "top-level count changed");
 }
 
 #[test]
@@ -220,10 +226,10 @@ fn members_inherit_the_group_of_their_container() {
 }
 
 #[test]
-fn the_macro_guarded_member_is_still_a_field() {
-    // DEF_file_GIEMS 在 namelist 语句里被 #if (defined TRACER) && (defined BGC)
-    // 包着。它是真字段，只是仅在那个预设下可设 —— 不能因为解析器看见
-    // 一行 `#if` 就把它丢掉。
+fn a_former_macro_guarded_member_is_still_a_field() {
+    // DEF_file_GIEMS 曾包在 #if (defined TRACER) && (defined BGC) 里；上游
+    // 7d2fca93 去掉守卫后它仍在 nl_colm 里。解析器对守卫行的处理（跳过守卫、
+    // 成员照收）不能因为这里没有守卫了就退回成丢字段。
     assert_eq!(
         find("DEF_file_GIEMS").and_then(|f| f.group),
         Some("nl_colm")

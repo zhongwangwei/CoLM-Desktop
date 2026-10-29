@@ -1,4 +1,7 @@
 &nl_colm
+   ! 2026-10-30 迁到 MaterialTransport namelist：泥沙的 family 开关与参数文件
+   ! 在文件末尾的 &nl_colm_material，旧的 DEF_TRACER_* 已不再被读取。
+   ! 映射明细见文件末尾。
    DEF_CASE_NAME = 'Amazon_iso_0p5_2020'
    DEF_domain%edges =  -15.0
    DEF_domain%edgen =    5.0
@@ -36,10 +39,8 @@
    DEF_GRIDBASED_ROUTING_MAX_DT = 3600.
    DEF_USE_LEVEE = .false.
    DEF_USE_BIFURCATION = .false.
-   DEF_TRACER_NUM               = 1
-   DEF_TRACER_NAMES             = "SEDIMENT"
-   DEF_TRACER_TYPES             = "particle"
-   DEF_TRACER_PARAM_FILES       = 'SEDIMENT:/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_sediment_parameter.nml'
+   ! river sediment is a MaterialTransport family now: DEF_USE_SEDIMENT and
+   ! DEF_SEDIMENT_PARAM_FILE are set in &nl_colm_material at the end of this file.
    DEF_forcing_namelist = '/share/home/dq013/zhwei/colm/script/CoLM202X/run/IsoGSM_2020.nml'
    DEF_HIST_lon_res = 0.5
    DEF_HIST_lat_res = 0.5
@@ -51,4 +52,15 @@
    DEF_HIST_CompressLevel = 1
    DEF_HIST_WriteBack = .false.
    DEF_hist_vars_out_default = .true.
+/
+
+&nl_colm_material
+   ! 2026-10-30 迁到 MaterialTransport namelist：
+   !   DEF_TRACER_NUM = 1 / DEF_TRACER_NAMES = "SEDIMENT" /
+   !   DEF_TRACER_TYPES = "particle" / DEF_TRACER_PARAM_FILES = 'SEDIMENT:<path>'
+   !     → DEF_USE_SEDIMENT + DEF_SEDIMENT_PARAM_FILE
+   ! 泥沙是 family 开关（FAMILY_PARTICLE），不再作为 species 列出；参数文件
+   ! 用 &nl_colm_sediment_parameter 组（见 run/standard_sediment_parameter.nml）。
+   DEF_USE_SEDIMENT        = .true.
+   DEF_SEDIMENT_PARAM_FILE = '/share/home/dq013/zhwei/colm/script/CoLM202X/run/standard_sediment_parameter.nml'
 /

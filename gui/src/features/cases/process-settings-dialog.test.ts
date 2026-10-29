@@ -154,15 +154,15 @@ test('process dialog stages edits, discards on cancel or escape, and never disab
 
 test('tracer chooser stages enable intent without changing the saved switch and cancels atomically', async () => {
   for (const escape of [false, true]) {
-    const h = dialog('DEF_USE_TRACER');
-    h.props.environment.caseValues.DEF_USE_TRACER = '.false.';
+    const h = dialog('tracer');
+    h.props.environment.caseValues.DEF_USE_METHANE = '.false.';
     h.props.environment.caseValues.DEF_USE_BGC = '.false.';
     const child = h.render();
-    assert.equal(child.caseValues.DEF_USE_TRACER, '.true.');
+    assert.equal(child.caseValues.DEF_USE_METHANE, '.false.');
     assert.equal(h.action('save').enabled, false);
     child.onCaseChange({
-      DEF_TRACER_NAMES: "'CH4'",
-      DEF_TRACER_TYPES: "'gas'",
+      DEF_USE_METHANE: '.true.',
+      DEF_METHANE_PARAM_FILE: "'standard_methane_parameter.nml'",
       DEF_USE_BGC: '.true.',
     });
     assert.equal(h.render().caseValues.DEF_USE_BGC, '.true.');
@@ -174,21 +174,19 @@ test('tracer chooser stages enable intent without changing the saved switch and 
     else await h.action('cancel').run();
     assert.equal(h.closed, 1);
     assert.deepEqual(h.saved, []);
-    assert.equal(h.props.environment.caseValues.DEF_USE_TRACER, '.false.');
+    assert.equal(h.props.environment.caseValues.DEF_USE_METHANE, '.false.');
     assert.equal(h.props.environment.caseValues.DEF_USE_BGC, '.false.');
   }
 });
 
 test('tracer save commits enable and validated definitions together, preserving the draft on failure', async () => {
-  const h = dialog('DEF_USE_TRACER');
-  h.props.environment.caseValues.DEF_USE_TRACER = '.false.';
+  const h = dialog('tracer');
+  h.props.environment.caseValues.DEF_USE_METHANE = '.false.';
   h.props.environment.caseValues.DEF_USE_BGC = '.false.';
   const changes = {
     DEF_USE_BGC: '.true.',
-    DEF_TRACER_NUM: '1',
-    DEF_TRACER_NAMES: "'CH4'",
-    DEF_TRACER_TYPES: "'gas'",
-    DEF_TRACER_PARAM_FILES: "'CH4:standard_ch4_parameter.nml'",
+    DEF_USE_METHANE: '.true.',
+    DEF_METHANE_PARAM_FILE: "'standard_methane_parameter.nml'",
   };
   const child = h.ready();
   child.onCaseChange(changes);
@@ -196,11 +194,11 @@ test('tracer save commits enable and validated definitions together, preserving 
   await h.action('save').run();
   assert.equal(h.closed, 0);
   assert.deepEqual(h.saved, []);
-  assert.equal(h.render().caseValues.DEF_TRACER_NAMES, "'CH4'");
+  assert.equal(h.render().caseValues.DEF_USE_METHANE, '.true.');
   assert.equal(h.props.environment.caseValues.DEF_USE_BGC, '.false.');
   h.fail = false;
   await h.action('save').run();
-  assert.deepEqual(h.saved, [{ DEF_USE_TRACER: '.true.', ...changes }]);
+  assert.deepEqual(h.saved, [changes]);
   assert.equal(h.closed, 1);
 });
 test('process dialog saves the latest patch without another render, keeps removals explicit, and supports StrictMode replay', async () => {
@@ -239,7 +237,7 @@ test('process dialog completes unchanged without empty save and stays open on fa
 });
 
 test('all process settings use save and cancel without the redundant close button', () => {
-  for (const process of ['PC', 'PFT', 'DEF_USE_BGC', 'DEF_USE_TRACER', 'crop']) {
+  for (const process of ['PC', 'PFT', 'DEF_USE_BGC', 'tracer', 'crop']) {
     const h = dialog();
     h.props.process = process;
     h.render();

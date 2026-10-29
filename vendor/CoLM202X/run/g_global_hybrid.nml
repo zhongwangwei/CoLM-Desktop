@@ -1,5 +1,9 @@
 &nl_colm
 
+   ! 2026-10-30 迁到 MaterialTransport namelist：甲烷的 family 开关与参数文件
+   ! 在文件末尾的 &nl_colm_material，旧的 DEF_TRACER_* 已不再被读取。
+   ! 映射明细见文件末尾。
+
    DEF_CASE_NAME = 'g_global_hybrid'
 
    DEF_domain%edges = -90.0
@@ -37,6 +41,12 @@
    DEF_GRIDBASED_lon_res = 2
    DEF_GRIDBASED_lat_res = 2
 
+   ! 甲烷要求 BGC + PFT/PC 子网格。上游把这两项从编译期（#define BGC /
+   ! LULC_IGBP_PFT）改成了运行时开关，三个必须且只能有一个为 .true.。
+   DEF_USE_LCT = .false.
+   DEF_USE_PFT = .true.
+   DEF_USE_BGC = .true.
+
    ! soil state init
    DEF_USE_SoilInit  = .true.
    DEF_file_SoilInit = '${COLM_DATA_ROOT}/soilstate/soilstate.nc'
@@ -50,14 +60,9 @@
    DEF_LAI_CHANGE_YEARLY = .false.
 
 
-   ! Activate the CH4 gas provider.
-   DEF_TRACER_NUM                 = 1
-   DEF_TRACER_NAMES               = "CH4"
-   DEF_TRACER_TYPES               = "gas"
-   DEF_TRACER_MRAT                = "16.04"
-   ! Per-tracer generic ref_ratio/init_delta/reactive_decay_rate are read
-   ! from the file listed here; multiple tracers use a comma-separated list.
-   DEF_TRACER_PARAM_FILES           = 'CH4:./standard_ch4_parameter.nml'
+   ! Activate the CH4 gas provider: family switch in &nl_colm_material at the end.
+   ! All CH4 physics and hydrology settings now live in DEF_METHANE_PARAM_FILE
+   ! (&nl_colm_methane_parameter); the main namelist only switches it on.
 
    DEF_USE_VariablySaturatedFlow = .true.
    DEF_USE_Dynamic_Wetland = .true.
@@ -85,4 +90,20 @@
    DEF_hist_vars_out_default = .true.
    ! DEF_hist_vars_namelist = './history_ME.nml'   ! file absent; defaults used
 
+/
+
+&nl_colm_material
+   ! 2026-10-30 迁到 MaterialTransport namelist：
+   !   DEF_TRACER_NUM = 1 / DEF_TRACER_NAMES = "CH4" / DEF_TRACER_TYPES = "gas"
+   !     → DEF_USE_METHANE（family 开关，不再列 species）
+   !   DEF_TRACER_PARAM_FILES = 'CH4:./standard_ch4_parameter.nml'
+   !     → DEF_METHANE_PARAM_FILE（单个路径，不再带 'CH4:' 前缀；
+   !       &nl_colm_methane_parameter 组）
+   !   DEF_TRACER_MRAT = "16.04" 已删除：CH4 的分子量是代码常量
+   !   （MOD_MT_Defs 里 16.04 g/mol），ref_ratio/init_delta 同样不再配置。
+   ! 参数文件里 inundation_mode = 'hybrid'，要求 DEF_USE_Dynamic_Wetland = .true.
+   ! 与 GridRiverLakeFlow 内核（本文件两者都满足）；它同时打开稻田甲烷，
+   ! 因此要用 #define CROP 编译。
+   DEF_USE_METHANE        = .true.
+   DEF_METHANE_PARAM_FILE = './standard_methane_parameter.nml'
 /

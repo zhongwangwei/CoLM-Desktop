@@ -1,24 +1,38 @@
-&nl_colm_tracer_parameter
+&nl_colm_isotope_parameter
     ! ------------------------------------------------------------------
-    ! Generic per-tracer metadata for the delta-18O water isotope.
-    ! Read by MOD_Tracer_Defs when the main land namelist maps this
-    ! species via  DEF_TRACER_PARAM_FILES = 'H2_18O:<path>'.
-    ! Isotope fractionation factors are compiled in MOD_Tracer_Isotope_O18.
+    ! Delta-18O (H2_18O) water-isotope settings, read when
+    ! DEF_USE_ISOTOPE = .true. and DEF_ISOTOPE_PARAM_FILE points here.
+    ! 2026-10-30 迁到 MaterialTransport namelist：旧 &nl_colm_tracer_parameter
+    ! 的 DEF_TRACER%ref_ratio / DEF_TRACER%init_delta 映射成
+    ! DEF_ISO_REF_RATIO_H2_18O / DEF_ISO_INIT_DELTA_H2_18O。
+    !   DEF_TRACER%unit_kind = 'ratio'        -> 不再配置：同位素的 unit_kind
+    !      由 MOD_MT_Defs 的 set_mt_category_defaults 定为 'ratio'。
+    !   DEF_TRACER%mol_weight = 20.0          -> 不再配置：代码常量 20.0 g/mol。
+    !   DEF_TRACER%reactive_decay_rate = 0.0  -> 不再配置：同位素不反应衰减。
+    ! 同位素物理开关（DEF_ISO_USE_FRACTIONATION、DEF_ISO_KINETIC_SCHEME、
+    ! DEF_ISO_* 一族）也属于这个组，这里一律不写，取代码默认值：
+    ! 分馏 .false.、MERLIVAT1978、冰面过饱和斜率 0.003 …（见
+    ! run/standard_isotope_parameter.nml 的完整清单）。
+    !
+    ! 注意：新方案里所有 isotope species 共用一个
+    ! DEF_ISOTOPE_PARAM_FILE，所以一个算例同时要 H2_18O 和 HDO 时
+    ! 应当用 run/standard_isotope_parameter.nml（两份旧文件合并后的版本）；
+    ! 本文件是只设 H2_18O 的单项版本，HDO 保持代码默认值。
     ! ------------------------------------------------------------------
-    DEF_TRACER%unit_kind           = 'ratio'
-    DEF_TRACER%mol_weight          = 20.0       ! H2(18O) molecular weight [g/mol]
-    DEF_TRACER%ref_ratio           = 2.0052e-3  ! VSMOW 18O/16O reference ratio
-    DEF_TRACER%init_delta          = -10.0      ! initial delta-18O [permil]
-    DEF_TRACER%reactive_decay_rate = 0.0        ! isotope: no reactive loss
+    DEF_ISO_REF_RATIO_H2_18O  = 2.0052e-3   ! VSMOW 18O/16O reference ratio
+    DEF_ISO_INIT_DELTA_H2_18O = -10.0       ! initial delta-18O [permil]
 /
 
-&nl_colm_tracer_forcing
+&nl_colm_mt_forcing
     ! ------------------------------------------------------------------
-    ! This species' OWN forcing inputs, read by MOD_Tracer_ForcingInput
-    ! (in main/TRACER/). IsoGSM 18O fields are SMOW-normalised
-    ! (raw = water * R/Rstd); input_mode='normalized_over_total' tells the
-    ! reader to recover R = raw/total*Rstd.
+    ! H2_18O 自己的强迫输入。2026-10-30 迁到 MaterialTransport namelist：
+    ! 旧的 &nl_colm_tracer_forcing 组改名成 &nl_colm_mt_forcing，并新增
+    ! forcing_species（必须是 H2_18O/HDO 之一，读的是本 species 的
+    ! 参数文件，也就是这个文件）。
+    ! IsoGSM 18O 场是 SMOW 归一的（raw = water * R/Rstd）；
+    ! input_mode='normalized_over_total' 让读取器按 R = raw/total*Rstd 还原。
     ! ------------------------------------------------------------------
+    forcing_species    = 'H2_18O'
     forcing_num        = 2
     forcing_role       = 'precip', 'vapor'
     forcing_fprefix    = 'IsoGSM_prate', 'IsoGSM_Q'

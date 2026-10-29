@@ -21,23 +21,34 @@ type StandardFile = {
 };
 const tracerFiles: Record<string, [string, string]> = {
   'standard_sediment_parameter.nml': ['河道泥沙', 'River sediment'],
-  'standard_ch4_parameter.nml': ['甲烷 CH4', 'Methane CH4'],
-  'standard_O18_parameter.nml': ['水同位素 H₂¹⁸O', 'Water isotope H₂¹⁸O'],
-  'standard_HDO_parameter.nml': ['水同位素 HDO', 'Water isotope HDO'],
+  'standard_methane_parameter.nml': ['甲烷 CH4', 'Methane CH4'],
+  'standard_isotope_parameter.nml': ['水同位素', 'Water isotopes'],
   'standard_chloride_parameter.nml': ['氯离子 Cl', 'Chloride Cl'],
+  'standard_nh4_parameter.nml': ['铵盐 NH4', 'Ammonium NH4'],
+  'standard_no3_parameter.nml': ['硝酸盐 NO3', 'Nitrate NO3'],
+  // 旧算例可能仍引用拆开前的单物种文件；保留标签让迁移前的算例也能读到名字。
+  'standard_ch4_parameter.nml': ['甲烷 CH4（旧）', 'Methane CH4 (legacy)'],
+  'standard_O18_parameter.nml': ['水同位素 H₂¹⁸O（旧）', 'Water isotope H₂¹⁸O (legacy)'],
+  'standard_HDO_parameter.nml': ['水同位素 HDO（旧）', 'Water isotope HDO (legacy)'],
 };
 /**
- * 示踪物共用的设置（DEF_TRACER_*，如 Craig–Gordon 相对湿度上限、非稳态叶片水）：存法是普通 namelist 参数，
- * 但只跟示踪物有关，放在"示踪物与泥沙"页，不放全局参数（2026-10-21 用户：全局参数里还有很多示踪物的参数）。
+ * 材质输运共用的设置（DEF_ISO_/DEF_MT_/DEF_SOLUTE_*，如 Craig–Gordon 相对湿度上限、非稳态叶片水）：
+ * 存法是普通 namelist 参数，但只跟示踪物有关，放在"示踪物与泥沙"页，不放全局参数。
  */
-const sharedTracer = (key: string) => /^DEF_TRACER_/i.test(key);
+const sharedTracer = (key: string) =>
+  /^DEF_(ISO_|ISOTOPE_|MT_|SOLUTE_|METHANE_|SEDIMENT_|USE_ISOTOPE$|USE_METHANE$|USE_SEDIMENT$)/i.test(
+    key,
+  );
 /** namelist 里的一组数显示成逗号隔开，和输入时的写法一样。 */
 const listText = (value: string) => value.trim().split(/\s+/).join(', ');
 const SHARED = 'shared-tracer-settings';
 const tracerGroups: Record<string, [string, string]> = {
-  nl_colm_tracer_parameter: ['通用示踪参数', 'Generic tracer parameters'],
+  nl_colm_isotope_parameter: ['同位素参数', 'Isotope parameters'],
   nl_colm_methane_parameter: ['甲烷参数', 'Methane parameters'],
   nl_colm_sediment_parameter: ['泥沙参数', 'Sediment parameters'],
+  nl_colm_solute_parameter: ['溶质参数', 'Solute parameters'],
+  nl_colm_tracer_parameter: ['通用示踪参数（旧）', 'Generic tracer parameters (legacy)'],
+  nl_colm_mt_forcing: ['同位素强迫', 'Isotope forcing'],
 };
 
 /** namelist 字面值读成数：`1.5d-3`、`0.01_r8` 这类写法都认；不是数时为 null。 */

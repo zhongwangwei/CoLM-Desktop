@@ -8,11 +8,13 @@
 # default .false. i.e. vanGenuchten) -- so that argument slot is gone and
 # every argument after it moved down by one.
 #
-# The tracer subsystem (TRACER, formerly a 7th positional argument here:
-# TRACERON/TRACEROFF) went the same way. Both code paths (tracer on/off) are
-# always compiled in now and the choice is a runtime namelist switch
-# instead (DEF_USE_TRACER, MOD_Namelist.F90, default .false.) -- so that
-# argument slot is gone too.
+# Material transport (the old compile-time macro TRACER, formerly a 7th
+# positional argument here: TRACERON/TRACEROFF) went the same way. Upstream
+# renamed the macro MaterialTransport and split the switch by family; both
+# code paths are always compiled in now and the choice is runtime namelist
+# settings instead (DEF_USE_ISOTOPE / DEF_USE_METHANE / DEF_SOLUTE_NAMES in
+# main/MATERIAL/MOD_MT_Namelist.F90, all off by default) -- so that argument
+# slot is gone too.
 #
 # LULC/BGC/URBAN_MODEL/LULCC group: the subgrid *structure* (LCT / PFT / PC)
 # and BGC/URBAN_MODEL/LULCC are runtime switches now too (DEF_USE_LCT,
@@ -192,36 +194,37 @@ $CROP
 !    .false.) picks whether it runs -- no existing kernel/preset ever
 !    set the old "#define LULCC" here, so this stays .false. by default.
 
-! 13. Water tracer module (isotope / solute / particle / gas families).
-!     TRACER used to live here as a compile-time macro (the old script
-!     7th argument, TRACERON/TRACEROFF). Every main/TRACER module file is
-!     now always compiled in and the choice is a runtime namelist switch
-!     instead (DEF_USE_TRACER, share/MOD_Namelist.F90, default .false.) --
-!     so that argument slot is gone and this line no longer exists.
+! 13. Material transport (isotope / solute / particle / gas families).
+!     The macro used to live here as TRACER (the old script 7th argument,
+!     TRACERON/TRACEROFF); upstream renamed it MaterialTransport and moved
+!     the modules from main/TRACER/ to main/MATERIAL/. Every main/MATERIAL
+!     module file is now always compiled in and the choice is runtime
+!     namelist settings instead (DEF_USE_ISOTOPE / DEF_USE_METHANE /
+!     DEF_SOLUTE_NAMES in main/MATERIAL/MOD_MT_Namelist.F90, all off by
+!     default) -- so that argument slot is gone and this line no longer
+!     exists.
 !
-!     TRACER requiring vanGenuchten (DEF_USE_Campbell_SOIL_MODEL = .false.)
-!     used to be a compile-time #error here on (TRACER && Campbell_SOIL_MODEL);
-!     Campbell/vanGenuchten became a runtime choice first (see above), so that
-!     check already moved to MOD_Namelist.F90 -- it now runs whenever
-!     DEF_USE_TRACER is .true., regardless of which soil scheme is picked.
+!     Isotope transport requiring vanGenuchten (DEF_USE_Campbell_SOIL_MODEL
+!     = .false.) used to be a compile-time #error here on
+!     (TRACER && Campbell_SOIL_MODEL); Campbell/vanGenuchten became a
+!     runtime choice first (see above), so that check already moved to
+!     MOD_Namelist.F90 -- it now runs whenever DEF_USE_ISOTOPE is .true.,
+!     regardless of which soil scheme is picked.
 !
-!     NOTE: TRACER as a whole does NOT require GridRiverLakeFlow. The tracer
-!     subsystem has four families (isotope, solute, particle, gas) and only
-!     the river-lake ones need a river network: MOD_Tracer_RiverLake.F90 and
-!     MOD_Tracer_Particle_Sediment.F90 guard themselves with
+!     NOTE: material transport as a whole does NOT require GridRiverLakeFlow.
+!     Only the river-lake pieces need a river network (MOD_MT_RiverLake.F90,
+!     MOD_MT_Sediment.F90); they guard themselves with
 !     #ifdef GridRiverLakeFlow, so they simply are not compiled without it.
-!     The other 38 MOD_Tracer_*.F90 modules -- water isotopes, snow tracers,
-!     forcing tracers -- are independent of the river network and are
-!     perfectly meaningful for SinglePoint runs, where water-isotope
-!     observations are common.
+!     The water-isotope, snow and forcing pieces are independent of the
+!     river network and are perfectly meaningful for SinglePoint runs, where
+!     water-isotope observations are common.
 !
-! 13.1 Methane (one of the four TRACER families: MOD_Tracer_Reactive_Methane*.F90
-!      and MOD_Tracer_Reactive_BgcShim.F90) hard-USEs BGC carbon/nitrogen
-!      pools. BGC is a runtime switch now too (see 7. above), so unlike
-!      before, this is no longer a compile-time gate at all -- main/BGC/ is
-!      always compiled in, so the hard USE always resolves. The runtime
-!      requirement (methane needs DEF_USE_BGC = .true., which itself needs
-!      DEF_USE_PFT or DEF_USE_PC) is enforced by the MOD_Namelist.F90
-!      DEF_USE_BGC-requires-PFT-or-PC check, replacing
-!      the old compile-time #error that used to live here.
+! 13.1 Methane (main/MATERIAL/FAMILY_GAS/MOD_MT_Methane*.F90) hard-USEs BGC
+!      carbon/nitrogen pools. BGC is a runtime switch now too (see 7.
+!      above), so unlike before, this is no longer a compile-time gate at
+!      all -- main/BGC/ is always compiled in, so the hard USE always
+!      resolves. The runtime requirement (methane needs DEF_USE_BGC = .true.,
+!      which itself needs DEF_USE_PFT or DEF_USE_PC) is enforced by the
+!      MOD_MT_Namelist.F90 settings check, replacing the old compile-time
+!      #error that used to live here.
 EOF

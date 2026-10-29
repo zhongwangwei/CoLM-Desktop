@@ -356,7 +356,9 @@ fn model_schemes_expose_complete_discrete_choices_to_the_gui() {
         ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
         ("DEF_TOPMOD_method", &["0", "1", "2"]),
         ("DEF_NDEP_FREQUENCY", &["1", "2"]),
-        ("DEF_Reservoir_Method", &["0", "1"]),
+        // 上游 7d2fca93 的 MOD_Grid_Reservoir.F90 新增 method 2
+        // （`IF (DEF_Reservoir_Method == 2)`），所以下拉框从 0/1 变 0/1/2。
+        ("DEF_Reservoir_Method", &["0", "1", "2"]),
         (
             "DEF_wetland_finundation_scheme",
             &["1", "2", "3", "4", "5", "6", "7"],

@@ -429,10 +429,10 @@ pub fn fields(s: &CaseSpec) -> Result<Vec<(String, Value)>> {
         out.insert(5, ("USE_SITE_landtype".into(), Value::Bool(true)));
     }
     if s.urban {
-        // LCZ（局地气候区）方案，不是默认的 1（NCAR 城市密度分类）。
-        // 实测默认那条路在栅格给不出城市类别时会越界崩溃，而 LCZ 分类
-        // 的覆盖更完整。CoLM 自带的城市单点示例用的也是 2。
-        out.push(("DEF_URBAN_type_scheme".into(), Value::Int(2)));
+        // 上游 7d2fca93 把 DEF_URBAN_type_scheme 的默认值从 1（NCAR 城市密度
+        // 分类）改成了 2（LCZ，局地气候区）。本地原先显式写 2，因为默认那条路
+        // 在栅格给不出城市类别时会越界崩溃；现在默认就是 LCZ，再写一遍只会
+        // 被 minimal::required 当作冗余滤掉，所以这里不再写它。
         // URBAN_MODEL 从编译期宏改成运行时开关之后，`DEF_URBAN_RUN`
         // 不再被"编译时带 URBAN_MODEL 就强制 .true."那条路径兜底
         // （main/URBAN/ 现在总是编译进去，MOD_Namelist.F90 只是原样

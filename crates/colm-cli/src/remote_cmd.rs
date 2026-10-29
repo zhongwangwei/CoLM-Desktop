@@ -314,7 +314,7 @@ fn rewrite_namelist(
             )?;
             continue;
         }
-        if field.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+        if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
             let rewritten =
                 colm_namelist::tracer_files::rewrite_param_files(
                     trimmed,

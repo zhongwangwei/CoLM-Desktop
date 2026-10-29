@@ -5,12 +5,12 @@ use crate::tracer::{TracerNamelist, TracerParameterOverrides, SOISNO_LAYERS};
 
 const R: f64 = 2.0052e-3;
 
-fn set_of(types: &str, names: &str, num: i64) -> TracerSet {
+fn set_of(isotope: Option<&str>, solutes: &str) -> TracerSet {
     TracerSet::build(
         &TracerNamelist {
-            num,
-            names: names.to_owned(),
-            types: types.to_owned(),
+            use_isotope: isotope.is_some(),
+            isotope_species: isotope.unwrap_or("").to_owned(),
+            solutes: solutes.to_owned(),
             ..TracerNamelist::default()
         },
         |_| Ok(None::<TracerParameterOverrides>),
@@ -20,8 +20,9 @@ fn set_of(types: &str, names: &str, num: i64) -> TracerSet {
 
 /// 一个 O18 同位素（init_delta=0 → 比值 = ref_ratio）。
 fn isotope_set() -> TracerSet {
-    let mut set = set_of("isotope", "O18", 1);
+    let mut set = set_of(Some("H2_18O"), "");
     set.tracers[0].ref_ratio = R;
+    set.tracers[0].init_delta = 0.0;
     set
 }
 
@@ -128,7 +129,7 @@ fn total(state: &PatchTracerState, itrc: usize) -> f64 {
 
 #[test]
 fn tracer_change_equals_deposition_minus_booked_losses() {
-    for (set, ratio) in [(isotope_set(), R), (set_of("solute", "cl", 1), 0.7)] {
+    for (set, ratio) in [(isotope_set(), R), (set_of(None, "cl"), 0.7)] {
         let s = scene();
         let mut state = PatchTracerState::allocated(&set);
         fill(&mut state, 0, &s, ratio);
@@ -182,7 +183,7 @@ fn uniform_ratio_is_preserved_without_fractionation() {
 
 #[test]
 fn nonvolatile_solute_stays_behind() {
-    let set = set_of("solute", "cl", 1);
+    let set = set_of(None, "cl");
     let s = scene();
     let mut state = PatchTracerState::allocated(&set);
     fill(&mut state, 0, &s, 0.7);
@@ -255,7 +256,7 @@ fn fractionating_isotope_departs_from_the_proportional_path() {
     // O18 已登记分馏物理：蒸发/凝结比值不再等于源/水汽比值。
     assert_ne!(state, plain);
     // 溶质不受分馏开关影响。
-    let solute = set_of("solute", "cl", 1);
+    let solute = set_of(None, "cl");
     let mut state = PatchTracerState::allocated(&solute);
     fill(&mut state, 0, &s, 0.7);
     tracer_evapo(&solute, &mut state, physics, &[0.7], &input(&s)).unwrap();
@@ -263,7 +264,7 @@ fn fractionating_isotope_departs_from_the_proportional_path() {
 
 #[test]
 fn flood_loss_is_proportional_and_skips_solutes() {
-    let set = set_of("isotope,solute", "O18,cl", 2);
+    let set = set_of(Some("H2_18O"), "cl");
     let flood = FloodEvapInput {
         water_credit: 50.0,
         water_evap: 2.0,

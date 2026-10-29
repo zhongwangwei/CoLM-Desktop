@@ -119,7 +119,11 @@ export function modelSetup(input: {
     crop: cropEnabled(physics),
     urban: enabled('DEF_URBAN_RUN'),
     bgc: enabled('DEF_USE_BGC'),
-    tracer: enabled('DEF_USE_TRACER'),
+    tracer:
+      enabled('DEF_USE_ISOTOPE') ||
+      enabled('DEF_USE_METHANE') ||
+      enabled('DEF_USE_SEDIMENT') ||
+      (physics.DEF_SOLUTE_NAMES ?? '').replace(/['"]/g, '').trim() !== '',
     revision: (input.revision ?? '').trim(),
   };
 }

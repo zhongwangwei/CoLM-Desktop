@@ -25,8 +25,8 @@
   },
   "MOD_Namelist.F90": {
     "case_tuning_fields": 43,
-    "catalog_descriptors": 995,
-    "schema_fields": 951
+    "catalog_descriptors": 1008,
+    "schema_fields": 964
   },
   "high_confidence_packages": {
     "bgc_fire_phenology_crop": "covered only where pft_override_fields.inc supplies a reviewed hook",
@@ -38,9 +38,10 @@
     "override_fields": 87
   },
   "process_type_defaults": {
-    "MOD_Tracer_Defs.F90": 10,
-    "MOD_Tracer_ForcingInput.F90": 8,
-    "MOD_Tracer_Particle_Sediment.F90": 18,
-    "MOD_Tracer_Reactive_Methane_Const.F90": 134
+    "MOD_MT_ForcingInput.F90": 8,
+    "MOD_MT_Methane_Const.F90": 134,
+    "MOD_MT_Namelist.F90": 18,
+    "MOD_MT_Sediment.F90": 18,
+    "MOD_MT_Solute.F90": 9
   }
 }

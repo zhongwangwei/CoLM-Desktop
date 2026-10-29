@@ -14,18 +14,19 @@ fn solute_set(dir: &Path) -> TracerSet {
     let param = dir.join("sol1.nml");
     std::fs::write(
         &param,
-        "&nl_colm_tracer_parameter\n   DEF_TRACER%init_conc = 1.0\n   DEF_TRACER%precip_default_conc = 2.0\n/\n",
+        "&nl_colm_solute_parameter\n   DEF_SOLUTE%init_conc = 1.0\n   DEF_SOLUTE%precip_default_conc = 2.0\n/\n",
     )
     .unwrap();
     let namelist = TracerNamelist {
-        num: 1,
-        names: "sol1".to_owned(),
-        types: "solute".to_owned(),
-        param_files: param.display().to_string(),
+        solutes: "sol1".to_owned(),
+        param_files: TracerParamFiles {
+            solutes: param.display().to_string(),
+            ..TracerParamFiles::default()
+        },
         aquifer_mixing_water_mm: -1.0,
         ..TracerNamelist::default()
     };
-    TracerSet::build(&namelist, read_tracer_parameter_file).unwrap()
+    TracerSet::build(&namelist, read_solute_parameter_file).unwrap()
 }
 
 /// 不带宿主量的检查：跳过含水层同位素与 `patchtype` 两项。
@@ -198,22 +199,16 @@ fn restart_write_rejects_corrupt_state() {
 #[test]
 fn restart_write_checks_the_isotope_aquifer_reference() {
     let dir = temp_dir("isotope-reference");
-    let param = dir.join("o18.nml");
-    std::fs::write(
-        &param,
-        "&nl_colm_tracer_parameter\n   DEF_TRACER%ref_ratio = 2.0052e-3\n   DEF_TRACER%init_delta = -10.0\n/\n",
-    )
-    .unwrap();
     let set = TracerSet::build(
         &TracerNamelist {
-            num: 1,
-            names: "H2_18O".to_owned(),
-            types: "isotope".to_owned(),
-            param_files: param.display().to_string(),
+            use_isotope: true,
+            isotope_species: "H2_18O".to_owned(),
+            ref_ratio_h2_18o: 2.0052e-3,
+            init_delta_h2_18o: -10.0,
             aquifer_mixing_water_mm: 1000.0,
             ..TracerNamelist::default()
         },
-        read_tracer_parameter_file,
+        read_solute_parameter_file,
     )
     .unwrap();
     let path = restart_file(&dir, 2);

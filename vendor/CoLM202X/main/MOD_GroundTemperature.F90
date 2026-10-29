@@ -152,10 +152,6 @@ CONTAINS
    integer,  intent(out) :: imelt(lb:nl_soil) !flag for melting or freezing [-]
 
    real(r8), intent(out) :: snofrz(lb:0)      !snow freezing rate (lyr) [kg m-2 s-1]
-
-   ! Per-layer phase-change mass exports forwarded from meltf / meltf_snicar
-   ! into the tracer subsystem. Zero on layers where imelt(j) == 0 or no
-   ! mass actually transferred. See MOD_PhaseChange::meltf for semantics.
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
 

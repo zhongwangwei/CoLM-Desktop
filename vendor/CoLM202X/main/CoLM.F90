@@ -30,6 +30,7 @@ PROGRAM CoLM
    USE MOD_Vars_1DAccFluxes
    USE MOD_Forcing
    USE MOD_Hist
+   USE MOD_HistAccRestart, only: read_history_acc_restart, save_history_acc_restart
    USE MOD_CheckEquilibrium
    USE MOD_TimeManager
    USE MOD_RangeCheck
@@ -53,7 +54,6 @@ PROGRAM CoLM
 #endif
 #if (defined CaMa_Flood)
    USE MOD_CaMa_colmCaMa, only: colm_CaMa_init, colm_CaMa_drv, colm_cama_write_restart, colm_cama_exit
-   USE YOS_CMF_INPUT, only: CSETFILE
 #endif
 #ifdef SinglePoint
    USE MOD_SingleSrfdata
@@ -93,15 +93,17 @@ PROGRAM CoLM
    USE MOD_Aerosol, only: AerosolDepInit, AerosolDepReadin
 
    USE MOD_ParameterOptimization
-   USE MOD_Tracer_LandPhase, only: land_tracer_init, land_tracer_final
-   USE MOD_Tracer_Lifecycle, only: tracer_lifecycle_reset
-   USE MOD_Tracer_Defs, only: tracer_defs_final
+   USE MOD_MT_LandPhase, only: mt_land_init, mt_land_final
+   USE MOD_MT_Lifecycle, only: mt_lifecycle_reset
+   USE MOD_MT_Vars, only: mt_reset_rnof_step
+   USE MOD_MT_Defs, only: mt_defs_final
+   USE MOD_MT_HostFixes, only: mt_bgc_data_init_year
 #ifdef CaMa_Flood
-   USE MOD_Tracer_Defs, only: ntracers, tracer_uses_land_water_transport
+   USE MOD_MT_Defs, only: nmts, mt_uses_generic_water
 #endif
-   USE MOD_Tracer_Forcing, only: tracer_forcing_init, read_tracer_forcing, &
-                                 tracer_forcing_reset, tracer_forcing_final, tracer_forcing_read_restart, &
-                                 tracer_forcing_lulcc_save, tracer_forcing_lulcc_restore
+   USE MOD_MT_Forcing, only: mt_forcing_init, mt_read_forcing, &
+                                 mt_forcing_reset, mt_forcing_final, mt_forcing_read_restart, &
+                                 mt_forcing_lulcc_save, mt_forcing_lulcc_restore
 
 #ifdef DataAssimilation
    USE MOD_DA_Main
@@ -146,7 +148,8 @@ PROGRAM CoLM
    integer :: s_year, s_month, s_day, s_seconds, s_julian
    integer :: e_year, e_month, e_day, e_seconds, e_julian
    integer :: p_year, p_month, p_day, p_seconds, p_julian
-   integer :: lc_year, lai_year, restart_lc_year
+   integer :: lc_year, lai_year
+   integer :: bgc_data_year   ! start year of the ndep/fire data, sdate(1) as upstream
    integer :: month, mday, year_p, month_p, mday_p, month_prev, mday_prev
    integer :: n_spinupcycle, i_spinupcycle, istep
 #ifdef CaMa_Flood
@@ -154,7 +157,6 @@ PROGRAM CoLM
 #endif
    logical :: is_spinup
    logical :: lulcc_in_spinup = .false. ! LulccDriver ran during the current spinup cycle
-   logical :: history_saved_raw
    logical :: tracer_loaded_restart
    character(len=256) :: tracer_restart_file
 
@@ -340,12 +342,10 @@ PROGRAM CoLM
       CALL allocate_TimeVariables  ()
       CALL READ_TimeVariables (jdate, lc_year, casename, dir_restart)
 
-      IF (DEF_USE_TRACER) THEN
-      CALL land_tracer_init (numpatch, maxsnl, nl_soil, s_month, lc_year, jdate, &
+      CALL mt_land_init (numpatch, maxsnl, nl_soil, s_month, lc_year, jdate, &
          casename, dir_restart, dir_landdata, ldew_rain, ldew_snow, wliq_soisno, &
          wice_soisno, wa, wdsrf, wetwat, scv, waterstorage, &
          loaded_restart=tracer_loaded_restart, restart_file=tracer_restart_file)
-      ENDIF
 
       ! Read in SNICAR optical and aging parameters
       IF (DEF_USE_SNICAR) THEN
@@ -370,15 +370,12 @@ PROGRAM CoLM
       ! Initialize meteorological forcing data module
       CALL allocate_1D_Forcing ()
       CALL forcing_init (dir_forcing, deltim, ststamp, lc_year, etstamp)
-      IF (DEF_USE_TRACER) THEN
-      CALL tracer_forcing_init (gforc, numpatch)
-      CALL tracer_forcing_read_restart (tracer_restart_file, tracer_loaded_restart)
-      ENDIF
+      CALL mt_forcing_init (gforc, numpatch)
+      CALL mt_forcing_read_restart (tracer_restart_file, tracer_loaded_restart)
       CALL allocate_2D_Forcing (gforc)
 
       ! Initialize history data module
       CALL hist_init (dir_hist)
-      CALL read_history_acc_restart (jdate, lc_year, casename, dir_restart)
       CALL allocate_1D_Fluxes ()
 
       CALL CheckEqb_init (n_spinupcycle, lc_year)
@@ -387,15 +384,13 @@ PROGRAM CoLM
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
-      CALL colm_CaMa_init(jdate)
+      CALL colm_CaMa_init(jdate) !initialize CaMa-Flood
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
-      IF (DEF_USE_TRACER) THEN
-      IF (p_is_master .and. ntracers > 0) THEN
-         IF (any([(tracer_uses_land_water_transport(itrc_cama), itrc_cama = 1, ntracers)])) &
+      IF (p_is_master .and. nmts > 0) THEN
+         IF (any([(mt_uses_generic_water(itrc_cama), itrc_cama = 1, nmts)])) &
             write(*,'(A)') 'WARNING: CaMa_Flood does not route land runoff tracers; they leave at the land boundary.'
-      ENDIF
       ENDIF
 #endif
 
@@ -413,8 +408,9 @@ PROGRAM CoLM
          CALL init_nitrif_data (ststamp)
       ENDIF
 
-      ! Read the start year: sdate(1) is moved to the previous year by adj2end for a
-      ! 00:00 Jan-1 start (formerly only TRACER builds read s_year).
+      ! Read the start year: sdate(1) is moved to the previous year by adj2end
+      ! for a 00:00 Jan-1 start, so the three calls below take s_year (the
+      ! vendor fix formerly limited to tracer builds).
       IF (DEF_NDEP_FREQUENCY==1)THEN ! Initial annual ndep data readin
             CALL init_ndep_data_annually (s_year)
       ELSEIF(DEF_NDEP_FREQUENCY==2)THEN ! Initial monthly ndep data readin
@@ -441,12 +437,13 @@ PROGRAM CoLM
 #ifdef GridRiverLakeFlow
       IF (DEF_USE_GridRiverLakeFlow) THEN
          CALL grid_riverlake_flow_init (s_year, is_spinup)
-         CALL restore_river_history_acc_restart (jdate, casename, dir_restart)
       ELSE
          ! CoLMDRIVER still passes the (zero) flood fields to the land model.
          CALL allocate_flood_patch ()
       ENDIF
 #endif
+
+      CALL read_history_acc_restart (jdate)
 
       CALL ParaOpt_init (jdate, lc_year)
 
@@ -484,7 +481,7 @@ PROGRAM CoLM
          ! Read in the meteorological forcing
          ! ----------------------------------------------------------------------
          CALL read_forcing (jdate, dir_forcing, is_spinup)
-         IF (DEF_USE_TRACER) CALL read_tracer_forcing (jdate, dir_forcing)
+         CALL mt_read_forcing (jdate, dir_forcing)
 
          IF(DEF_USE_OZONEDATA)THEN
             CALL update_Ozone_data(itstamp, deltim)
@@ -542,12 +539,12 @@ PROGRAM CoLM
 
          ! Call CoLM driver
          ! ----------------------------------------------------------------------
+         ! Lake/waterbody substeps of this land step accumulate into
+         ! mt_rnof_step; clear it once per main step, before any land patch
+         ! physics and before the river coupling reads it later this step.
+         IF (p_is_worker) CALL mt_reset_rnof_step ()
          IF (p_is_worker) THEN
-      IF (DEF_USE_TRACER) THEN
             CALL CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oroflag,istep)
-      ELSE
-            CALL CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oroflag)
-      ENDIF
          ENDIF
 
 #if (defined CatchLateralFlow)
@@ -563,11 +560,7 @@ PROGRAM CoLM
 #ifdef USEMPI
          CALL mpi_barrier (p_comm_glb, p_err)
 #endif
-         IF(CSETFILE=='NONE')THEN
-            CALL colm_CaMa_drv(idate(3),deltim,save_to_restart(idate,deltim,itstamp,ptstamp,etstamp))
-         ELSE
-            CALL colm_CaMa_drv(idate(3))
-         ENDIF
+         CALL colm_CaMa_drv(idate(3),deltim,save_to_restart(idate,deltim,itstamp,ptstamp,etstamp)) ! run CaMa-Flood
 #ifdef USEMPI
          CALL mpi_barrier (p_comm_glb, p_err)
 #endif
@@ -581,14 +574,7 @@ PROGRAM CoLM
 
          ! Write out the model histroy file
          ! ----------------------------------------------------------------------
-         CALL hist_out (idate, deltim, itstamp, etstamp, ptstamp, &
-            dir_hist, casename, jdate, dir_restart, history_saved_raw)
-
-         ! Close the parameter optimization year before LULCC: LULCC reallocates the
-         ! fluxes (spval) and changes the patch layout, so calling it afterwards dropped the
-         ! year's last step and closed the year on the new layout. Nothing between here and
-         ! the old call site (LAI readin, restart output) touches its inputs.
-         CALL ParameterOptimization (idate, deltim, is_spinup)
+         CALL hist_out (idate, deltim, itstamp, etstamp, ptstamp, dir_hist, casename)
 
          ! DO land use and land cover change simulation
          ! ----------------------------------------------------------------------
@@ -600,10 +586,8 @@ PROGRAM CoLM
             CALL deallocate_1D_Forcing
             CALL deallocate_1D_Fluxes
 
-      IF (DEF_USE_TRACER) THEN
-            CALL tracer_forcing_lulcc_save ()
-            CALL tracer_forcing_final ()
-      ENDIF
+            CALL mt_forcing_lulcc_save ()
+            CALL mt_forcing_final ()
             CALL forcing_final ()
             CALL hist_final    ()
 
@@ -621,10 +605,8 @@ PROGRAM CoLM
             ! Allocate Forcing and Fluxes variable of next year
             CALL allocate_1D_Forcing
             CALL forcing_init (dir_forcing, deltim, itstamp, jdate(1), lulcc_call=.true.)
-      IF (DEF_USE_TRACER) THEN
-            CALL tracer_forcing_init (gforc, numpatch)
-            CALL tracer_forcing_lulcc_restore ()
-      ENDIF
+            CALL mt_forcing_init (gforc, numpatch)
+            CALL mt_forcing_lulcc_restore ()
 
             CALL hist_init (dir_hist, lulcc_call=.true.)
             CALL allocate_1D_Fluxes
@@ -671,22 +653,18 @@ PROGRAM CoLM
          ! Write out the model state variables for restart run
          ! ----------------------------------------------------------------------
          IF (save_to_restart (idate, deltim, itstamp, ptstamp, etstamp)) THEN
-            IF (.not.history_saved_raw) &
-               CALL write_history_acc_restart (jdate, casename, dir_restart)
             IF (DEF_USE_LULCC) THEN
                IF (jdate(1) >= 2000) THEN
-                  restart_lc_year = jdate(1)
                   CALL WRITE_TimeVariables (jdate, jdate(1), casename, dir_restart)
                ELSE
-                  restart_lc_year = (jdate(1)/5)*5
                   CALL WRITE_TimeVariables (jdate, (jdate(1)/5)*5, casename, dir_restart)
                ENDIF
             ELSE
-               restart_lc_year = lc_year
                CALL WRITE_TimeVariables (jdate, lc_year,  casename, dir_restart)
             ENDIF
-            CALL mark_history_acc_restart (jdate, restart_lc_year, casename, dir_restart)
-            CALL complete_history_acc_restart (jdate, casename, dir_restart)
+            ! History-accumulator sidecar next to the restart just written; the
+            ! snapshot taken at the terminal step is reused when the dates match.
+            CALL save_history_acc_restart (jdate)
 
 #if (defined CaMa_Flood)
 #ifdef USEMPI
@@ -714,6 +692,8 @@ PROGRAM CoLM
             CALL print_VSF_iteration_stat_info ()
          ENDIF
          ENDIF
+
+         CALL ParameterOptimization (idate, deltim, is_spinup)
 
          IF (p_is_master) THEN
             CALL system_clock (end_time, count_rate = c_per_sec)
@@ -743,10 +723,8 @@ PROGRAM CoLM
                   IF (lulcc_in_spinup) THEN
                      CALL deallocate_1D_Forcing
                      CALL deallocate_1D_Fluxes
-      IF (DEF_USE_TRACER) THEN
-                     CALL tracer_forcing_lulcc_save ()
-                     CALL tracer_forcing_final ()
-      ENDIF
+                     CALL mt_forcing_lulcc_save ()
+                     CALL mt_forcing_final ()
                      CALL forcing_final ()
                      CALL hist_final    ()
 
@@ -762,17 +740,15 @@ PROGRAM CoLM
 
                      CALL allocate_1D_Forcing
                      CALL forcing_init (dir_forcing, deltim, itstamp, jdate(1), lulcc_call=.true.)
-      IF (DEF_USE_TRACER) THEN
-                     CALL tracer_forcing_init (gforc, numpatch)
-                     CALL tracer_forcing_lulcc_restore ()
-      ENDIF
+                     CALL mt_forcing_init (gforc, numpatch)
+                     CALL mt_forcing_lulcc_restore ()
 
                      CALL hist_init (dir_hist, lulcc_call=.true.)
                      CALL allocate_1D_Fluxes
                      lulcc_in_spinup = .false.
                   ENDIF
                   CALL forcing_reset ()
-                  IF (DEF_USE_TRACER) CALL tracer_forcing_reset ()
+                  CALL mt_forcing_reset ()
                ELSE
                   is_spinup = .false.
                ENDIF
@@ -788,11 +764,8 @@ PROGRAM CoLM
          istep = istep + 1
 
       ENDDO TIMELOOP
-
-      IF (DEF_USE_TRACER) THEN
-         CALL tracer_forcing_final ()
-         CALL land_tracer_final ()
-      ENDIF
+         CALL mt_forcing_final ()
+         CALL mt_land_final ()
 
       CALL deallocate_TimeInvariants ()
       CALL deallocate_TimeVariables  ()
@@ -811,11 +784,8 @@ PROGRAM CoLM
 #if (defined GridRiverLakeFlow)
       IF (DEF_USE_GridRiverLakeFlow) CALL grid_riverlake_flow_final ()
 #endif
-
-      IF (DEF_USE_TRACER) THEN
-         CALL tracer_lifecycle_reset ()
-         CALL tracer_defs_final ()
-      ENDIF
+      CALL mt_lifecycle_reset ()
+      CALL mt_defs_final ()
 
       CALL forcing_final ()
       CALL hist_final    ()

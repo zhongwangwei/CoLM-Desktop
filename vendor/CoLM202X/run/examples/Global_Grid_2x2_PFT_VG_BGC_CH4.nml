@@ -2,6 +2,10 @@
 
 !Author: Xingjie Lu
 
+! 2026-10-30 迁到 MaterialTransport namelist：甲烷的 family 开关与参数文件
+! 在文件末尾的 &nl_colm_material，旧的 DEF_TRACER_* 已不再被读取。
+! 映射明细见文件末尾。
+
    DEF_CASE_NAME = 'GlobalBGCPFTnoCROPHist1851-2014-CH4'
 
    DEF_domain%edges = -90.0
@@ -39,6 +43,12 @@
    DEF_GRIDBASED_lon_res = 2.5
    DEF_GRIDBASED_lat_res = 1.875
 
+   ! 甲烷要求 BGC + PFT/PC 子网格。上游把这两项从编译期（#define BGC /
+   ! LULC_IGBP_PFT）改成了运行时开关，三个必须且只能有一个为 .true.。
+   DEF_USE_LCT = .false.
+   DEF_USE_PFT = .true.
+   DEF_USE_BGC = .true.
+
    ! LAI setting
    DEF_LAI_MONTHLY = .true.
    DEF_LAI_CHANGE_YEARLY = .false.
@@ -67,17 +77,25 @@
    DEF_hist_vars_out_default = .true.
 
    ! ----- Methane gas provider -----
-   ! Requires #define TRACER, #define BGC, and #define CROP in include/define.h
-   ! because standard_ch4_parameter.nml enables rice-paddy methane.
-   ! CH4 runtime activation is species-driven; no #define CH4 is used.
+   ! Requires #define MaterialTransport and #define CROP in include/define.h
+   ! because standard_methane_parameter.nml enables rice-paddy methane.
+   ! BGC and the PFT subgrid are runtime switches now (DEF_USE_BGC / DEF_USE_PFT
+   ! above); CH4 runtime activation is the family switch in &nl_colm_material.
    DEF_USE_Dynamic_Wetland = .true.
-   DEF_TRACER_NUM         = 1
-   DEF_TRACER_NAMES       = "CH4"
-   DEF_TRACER_TYPES       = "gas"
-   DEF_TRACER_MRAT        = "16.04"
-   DEF_TRACER_REF_RATIO   = "1.0"
-   DEF_TRACER_INIT_DELTA  = "0.0"
-   DEF_TRACER_REACTIVE_DECAY_RATE = "0.0"
-   DEF_TRACER_PARAM_FILES = "CH4:run/standard_ch4_parameter.nml"
 
+/
+
+&nl_colm_material
+   ! 2026-10-30 迁到 MaterialTransport namelist：
+   !   DEF_TRACER_NUM = 1 / DEF_TRACER_NAMES = "CH4" / DEF_TRACER_TYPES = "gas"
+   !     → DEF_USE_METHANE（family 开关，不再列 species）
+   !   DEF_TRACER_PARAM_FILES = "CH4:run/standard_ch4_parameter.nml"
+   !     → DEF_METHANE_PARAM_FILE（单个路径，不再带 'CH4:' 前缀；
+   !       &nl_colm_methane_parameter 组）
+   !   DEF_TRACER_MRAT / DEF_TRACER_REF_RATIO / DEF_TRACER_INIT_DELTA /
+   !   DEF_TRACER_REACTIVE_DECAY_RATE 已删除：CH4 的分子量（16.04 g/mol）、
+   !   ref_ratio（1.0）、init_delta（0.0）和零衰减都是代码常量
+   !   （MOD_MT_Defs 的 tracer_defs_init）。
+   DEF_USE_METHANE        = .true.
+   DEF_METHANE_PARAM_FILE = 'run/standard_methane_parameter.nml'
 /

@@ -1,7 +1,6 @@
 #include <define.h>
 
 MODULE MOD_RegionClip
-   USE MOD_Filesystem, ONLY: make_directory, copy_file
 !-----------------------------------------------------------------------
 ! !DESCRIPTION:
 !
@@ -14,14 +13,16 @@ MODULE MOD_RegionClip
 !  Created by Shupeng Zhang, May 2023
 !-----------------------------------------------------------------------
 
+   USE MOD_Filesystem, ONLY: make_directory, copy_file
 CONTAINS
 
    ! ----- region clip -----
-   SUBROUTINE srfdata_region_clip (dir_landdata_in, dir_landdata_out)
+   SUBROUTINE srfdata_region_clip (dir_landdata_in, dir_landdata_out, requires_lake_soilc, requires_spatial_ph)
 
    USE MOD_SPMD_Task
    USE MOD_Namelist
    USE MOD_Utils
+   USE MOD_Const_LC, only: N_land_classification
    USE MOD_Pixel
    USE MOD_Block
    USE MOD_NetCDFSerial
@@ -29,15 +30,17 @@ CONTAINS
    IMPLICIT NONE
 
    character(len=*), intent(in) :: dir_landdata_in, dir_landdata_out
+   logical, intent(in) :: requires_lake_soilc, requires_spatial_ph
 
    ! Local Variables
    real(r8) :: edges, edgen, edgew, edgee
    character(len=256) :: file_in, file_out, fileblock
    integer :: iproc, iblk, jblk, ie, ipxl, ilon, ilat, i1
-   integer :: nelm_in, nelm_out
+   integer :: nelm_in, nelm_out, lc_year, pdsp
    integer,   allocatable :: nelm_blk(:,:), IOproc(:,:)
    integer*8, allocatable :: elmindex(:)
-   integer,   allocatable :: elmnpxl(:), elmpixels(:,:,:)
+   integer,   allocatable :: elmnpxl(:), elmpixels(:,:,:), pixels(:,:), datasize(:)
+   logical, allocatable :: pixelmask(:)
    logical :: fexists
 
    logical, allocatable :: elmmask  (:)
@@ -47,13 +50,39 @@ CONTAINS
 #endif
    logical, allocatable :: pftmask  (:)
 
-   integer :: month, YY, itime, Julian_day, nsl
+   integer :: month, YY, itime, Julian_day, nsl, ilc
    integer :: start_year, end_year
    character(len=1) :: c1
    character(len=2) :: c2, cx
    character(len=3) :: c3
-   character(len=4) :: cyear
+   character(len=4) :: cyear, lc_cyear, input_year
 
+
+      ! Like MKSRFDATA, clip one land-cover epoch per invocation. LULCC
+      ! callers invoke mksrfdata for each epoch; LAI years are handled below.
+      lc_year = DEF_LC_YEAR
+      IF (DEF_USE_LULCC) THEN
+         IF (lc_year < 2000) lc_year = MAX(1985, (lc_year / 5) * 5)
+      ENDIF
+      write(lc_cyear,'(i4.4)') lc_year
+      file_in = trim(dir_landdata_in)//'/mesh/'//lc_cyear//'/mesh.nc'
+      inquire(file=trim(file_in), exist=fexists)
+      input_year = lc_cyear
+      IF (.not. fexists) THEN
+         file_in = trim(dir_landdata_in)//'/mesh/mesh.nc'
+         inquire(file=trim(file_in), exist=fexists)
+         IF (.not. fexists) CALL clip_error('Missing mesh for requested land-cover year '//lc_cyear)
+         ! Select the layout once, never fall back separately for individual fields.
+         input_year = ''
+         IF (p_is_master) write(*,*) 'RegionClip: reading legacy unyear surface layout for epoch ', lc_cyear
+      ENDIF
+#if defined URBAN_MODEL || defined HYPERSPECTRAL
+      CALL clip_error('RegionClip does not support URBAN_MODEL or HYPERSPECTRAL surface data')
+#endif
+      IF (DEF_Interception_scheme == 8 .or. &
+          (DEF_Runoff_SCHEME == 0 .and. DEF_TOPMOD_method /= 0) .or. &
+          DEF_USE_Forcing_Downscaling .or. DEF_USE_Forcing_Downscaling_Simple) &
+         CALL clip_error('RegionClip does not support canopy-structure, topographic-wetness or downscaling surface data')
 
       IF (p_is_master) THEN
          IF (trim(adjustl(dir_landdata_in)) == trim(adjustl(dir_landdata_out))) THEN
@@ -95,9 +124,9 @@ CONTAINS
 
       IF (p_is_master) THEN
 
-         CALL make_directory(trim(dir_landdata_out) // '/mesh')
-         file_in  = trim(dir_landdata_in ) // '/mesh/mesh.nc'
-         file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
+         CALL make_directory(trim(dir_landdata_out)//'/mesh/'//lc_cyear)
+         file_in  = trim(dir_landdata_in ) // '/mesh/' // trim(input_year) // '/mesh.nc'
+         file_out = trim(dir_landdata_out) // '/mesh/' // lc_cyear // '/mesh.nc'
          CALL copy_file(trim(file_in), trim(file_out))
 
          file_in  = trim(dir_landdata_in ) // '/pixel.nc'
@@ -110,7 +139,7 @@ CONTAINS
 
       ENDIF
 
-      file_in = trim(dir_landdata_in) // '/mesh/mesh.nc'
+      file_in = trim(dir_landdata_in) // '/mesh/' // trim(input_year) // '/mesh.nc'
       CALL ncio_read_bcast_serial (file_in, 'nelm_blk', nelm_blk)
 
       allocate (IOproc (gblock%nxblk, gblock%nyblk))
@@ -150,22 +179,38 @@ CONTAINS
          DO iblk = 1, gblock%nxblk
             IF (IOproc(iblk,jblk) == p_iam_glb) THEN
 
-               file_in = trim(dir_landdata_in) // '/mesh/mesh.nc'
+               file_in = trim(dir_landdata_in) // '/mesh/' // trim(input_year) // '/mesh.nc'
                CALL get_filename_block (file_in, iblk, jblk, fileblock)
 
                CALL ncio_read_serial (fileblock, 'elmindex' , elmindex )
                CALL ncio_read_serial (fileblock, 'elmnpxl'  , elmnpxl  )
-               CALL ncio_read_serial (fileblock, 'elmpixels', elmpixels)
+               CALL ncio_inquire_varsize(fileblock, 'elmpixels', datasize)
+               IF (size(datasize) == 3) THEN
+                  CALL ncio_read_serial(fileblock, 'elmpixels', elmpixels)
+               ELSEIF (size(datasize) == 2) THEN
+                  CALL ncio_read_serial(fileblock, 'elmpixels', pixels)
+                  allocate(pixelmask(size(pixels,2)))
+                  pixelmask = .false.
+               ELSE
+                  CALL clip_error('Unsupported mesh pixel rank: '//trim(fileblock))
+               ENDIF
 
                nelm_in = nelm_blk(iblk,jblk)
 
+               IF (allocated(elmmask)) deallocate(elmmask)
                allocate (elmmask (nelm_in))
                elmmask(:) = .false.
 
+               pdsp = 0
                DO ie = 1, nelm_in
                   DO ipxl = 1, elmnpxl(ie)
-                     ilon = elmpixels(1,ipxl,ie)
-                     ilat = elmpixels(2,ipxl,ie)
+                     IF (size(datasize) == 3) THEN
+                        ilon = elmpixels(1,ipxl,ie)
+                        ilat = elmpixels(2,ipxl,ie)
+                     ELSE
+                        ilon = pixels(1,pdsp+ipxl)
+                        ilat = pixels(2,pdsp+ipxl)
+                     ENDIF
 
                      IF (((pixel%lat_s(ilat) < edgen) .and. (pixel%lat_n(ilat) > edges)) &
                         .and. (lon_between_floor(pixel%lon_w(ilon), edgew, edgee) &
@@ -178,83 +223,111 @@ CONTAINS
                         CYCLE
                      ENDIF
                   ENDDO
+                  IF (allocated(pixelmask)) pixelmask(pdsp+1:pdsp+elmnpxl(ie)) = elmmask(ie)
+                  pdsp = pdsp + elmnpxl(ie)
                ENDDO
 
                nelm_out = count(elmmask)
                nelm_blk(iblk,jblk) = nelm_out
 
+               IF (nelm_out == 0) THEN
+                  IF (allocated(pixelmask)) deallocate(pixelmask)
+                  CYCLE
+               ENDIF
                IF (nelm_out > 0) THEN
 
-                  CALL clip_pixelset (dir_landdata_in, 'landpatch', iblk, jblk, elmmask, elmindex, patchmask)
+                  CALL clip_pixelset (dir_landdata_in, trim(input_year), 'landpatch', iblk, jblk, elmmask, elmindex, patchmask)
 #ifdef CATCHMENT
-                  CALL clip_pixelset (dir_landdata_in, 'landhru'  , iblk, jblk, elmmask, elmindex, hrumask  )
+                  CALL clip_pixelset (dir_landdata_in, trim(input_year), 'landhru'  , iblk, jblk, elmmask, elmindex, hrumask  )
 #endif
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-                  CALL clip_pixelset (dir_landdata_in, 'landpft'  , iblk, jblk, elmmask, elmindex, pftmask  )
-ENDIF
-                  CALL make_directory(trim(dir_landdata_out) // '/mesh')
-                  file_in  = trim(dir_landdata_in)  // '/mesh/mesh.nc'
-                  file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
+                  IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                     CALL clip_pixelset (dir_landdata_in, trim(input_year), 'landpft'  , iblk, jblk, elmmask, elmindex, pftmask  )
+                  ENDIF
+                  CALL make_directory(trim(dir_landdata_out) // '/mesh/' // lc_cyear)
+                  file_in  = trim(dir_landdata_in)  // '/mesh/' // trim(input_year) // '/mesh.nc'
+                  file_out = trim(dir_landdata_out) // '/mesh/' // lc_cyear // '/mesh.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'elmindex' , elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'elmnpxl'  , elmmask)
-                  CALL clip_vector (file_in, file_out, iblk, jblk, 'elmpixels', elmmask)
+                  IF (size(datasize) == 3) THEN
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'elmpixels', elmmask)
+                  ELSE
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'elmpixels', pixelmask)
+                     deallocate(pixelmask)
+                  ENDIF
 
-                  CALL make_directory(trim(dir_landdata_out) // '/landelm')
-                  file_in  = trim(dir_landdata_in)  // '/landelm/landelm.nc'
-                  file_out = trim(dir_landdata_out) // '/landelm/landelm.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/landelm/' // lc_cyear)
+                  file_in  = trim(dir_landdata_in)  // '/landelm/' // trim(input_year) // '/landelm.nc'
+                  file_out = trim(dir_landdata_out) // '/landelm/' // lc_cyear // '/landelm.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', elmmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', elmmask)
+                  CALL get_filename_block(file_in, iblk, jblk, fileblock)
+                  IF (ncio_var_exist(fileblock, 'pctshared', readflag=.false.)) &
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'pctshared', elmmask)
 
-                  CALL make_directory(trim(dir_landdata_out) // '/landpatch')
-                  file_in  = trim(dir_landdata_in)  // '/landpatch/landpatch.nc'
-                  file_out = trim(dir_landdata_out) // '/landpatch/landpatch.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/landpatch/' // lc_cyear)
+                  file_in  = trim(dir_landdata_in)  // '/landpatch/' // trim(input_year) // '/landpatch.nc'
+                  file_out = trim(dir_landdata_out) // '/landpatch/' // lc_cyear // '/landpatch.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', patchmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', patchmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', patchmask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', patchmask)
+                  CALL get_filename_block(file_in, iblk, jblk, fileblock)
+                  IF (ncio_var_exist(fileblock, 'pctshared', readflag=.false.)) &
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'pctshared', patchmask)
 
-                  file_in  = trim(dir_landdata_in)  // '/landpatch/patchfrac_elm.nc'
-                  file_out = trim(dir_landdata_out) // '/landpatch/patchfrac_elm.nc'
+                  file_in  = trim(dir_landdata_in)  // '/landpatch/' // trim(input_year) // '/patchfrac_elm.nc'
+                  file_out = trim(dir_landdata_out) // '/landpatch/' // lc_cyear // '/patchfrac_elm.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'patchfrac_elm', patchmask)
 
 #ifdef CATCHMENT
-                  CALL make_directory(trim(dir_landdata_out) // '/landhru')
-                  file_in  = trim(dir_landdata_in)  // '/landhru/landhru.nc'
-                  file_out = trim(dir_landdata_out) // '/landhru/landhru.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/landhru/' // lc_cyear)
+                  file_in  = trim(dir_landdata_in)  // '/landhru/' // trim(input_year) // '/landhru.nc'
+                  file_out = trim(dir_landdata_out) // '/landhru/' // lc_cyear // '/landhru.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', hrumask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', hrumask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', hrumask)
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', hrumask)
+                  CALL get_filename_block(file_in, iblk, jblk, fileblock)
+                  IF (ncio_var_exist(fileblock, 'pctshared', readflag=.false.)) &
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'pctshared', hrumask)
 
-                  file_in  = trim(dir_landdata_in)  // '/landpatch/patchfrac_hru.nc'
-                  file_out = trim(dir_landdata_out) // '/landpatch/patchfrac_hru.nc'
+                  file_in  = trim(dir_landdata_in)  // '/landpatch/' // trim(input_year) // '/patchfrac_hru.nc'
+                  file_out = trim(dir_landdata_out) // '/landpatch/' // lc_cyear // '/patchfrac_hru.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'patchfrac_hru', patchmask)
 #endif
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-                  CALL make_directory(trim(dir_landdata_out) // '/landpft')
-                  file_in  = trim(dir_landdata_in)  // '/landpft/landpft.nc'
-                  file_out = trim(dir_landdata_out) // '/landpft/landpft.nc'
-                  CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', pftmask)
-                  CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', pftmask)
-                  CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', pftmask)
-                  CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', pftmask)
-ENDIF
+                  IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                     CALL make_directory(trim(dir_landdata_out) // '/landpft/' // lc_cyear)
+                     file_in  = trim(dir_landdata_in)  // '/landpft/' // trim(input_year) // '/landpft.nc'
+                     file_out = trim(dir_landdata_out) // '/landpft/' // lc_cyear // '/landpft.nc'
+                     CALL clip_vector (file_in, file_out, iblk, jblk, 'eindex', pftmask)
+                     CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxstt', pftmask)
+                     CALL clip_vector (file_in, file_out, iblk, jblk, 'ipxend', pftmask)
+                     CALL clip_vector (file_in, file_out, iblk, jblk, 'settyp', pftmask)
+                     CALL get_filename_block(file_in, iblk, jblk, fileblock)
+                     IF (ncio_var_exist(fileblock, 'pctshared', readflag=.false.)) &
+                        CALL clip_vector(file_in, file_out, iblk, jblk, 'pctshared', pftmask)
+                  ENDIF
                ENDIF
 
                ! Leaf Area Index
                CALL make_directory(trim(dir_landdata_out) // '/LAI')
 
-               IF (DEF_LAI_CHANGE_YEARLY) THEN
-                  start_year = DEF_simulation_time%start_year
-                  end_year   = DEF_simulation_time%end_year
-               ELSE
+               IF (DEF_USE_LULCC) THEN
                   start_year = DEF_LC_YEAR
-                  end_year   = DEF_LC_YEAR
-               ENDIF
+                  end_year = DEF_LC_YEAR
+               ELSE
+                  IF (DEF_LAI_CHANGE_YEARLY) THEN
+                     start_year = min(max(DEF_simulation_time%start_year, DEF_LAI_START_YEAR), DEF_LAI_END_YEAR)
+                     end_year = max(min(DEF_simulation_time%end_year, DEF_LAI_END_YEAR), DEF_LAI_START_YEAR)
+                  ELSE
+                     start_year = DEF_LC_YEAR
+                     end_year   = DEF_LC_YEAR
+                  ENDIF
 
+               ENDIF
                DO YY = start_year, end_year
 
                   write(cyear,'(i4.4)') YY
@@ -283,98 +356,121 @@ ENDIF
                      ENDDO
                   ENDIF
 
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-                  DO month = 1, 12
-                     write(c2,'(i2.2)') month
+                  IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                     DO month = 1, 12
+                        write(c2,'(i2.2)') month
 
-                     file_in  = trim(dir_landdata_in) //'/LAI/'//trim(cyear)//'/LAI_pfts'//trim(c2)//'.nc'
-                     file_out = trim(dir_landdata_out)//'/LAI/'//trim(cyear)//'/LAI_pfts'//trim(c2)//'.nc'
-                     CALL clip_vector (file_in, file_out, iblk, jblk, 'LAI_pfts', pftmask)
+                        file_in  = trim(dir_landdata_in) //'/LAI/'//trim(cyear)//'/LAI_pfts'//trim(c2)//'.nc'
+                        file_out = trim(dir_landdata_out)//'/LAI/'//trim(cyear)//'/LAI_pfts'//trim(c2)//'.nc'
+                        CALL clip_vector (file_in, file_out, iblk, jblk, 'LAI_pfts', pftmask)
 
-                     file_in  = trim(dir_landdata_in) //'/LAI/'//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
-                     file_out = trim(dir_landdata_out)//'/LAI/'//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
-                     CALL clip_vector (file_in, file_out, iblk, jblk, 'SAI_pfts', pftmask)
-                  ENDDO
-ENDIF
+                        file_in  = trim(dir_landdata_in) //'/LAI/'//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
+                        file_out = trim(dir_landdata_out)//'/LAI/'//trim(cyear)//'/SAI_pfts'//trim(c2)//'.nc'
+                        CALL clip_vector (file_in, file_out, iblk, jblk, 'SAI_pfts', pftmask)
+                     ENDDO
+                  ENDIF
                ENDDO
+
+               IF (DEF_USE_LULCC) THEN
+                  IF (lc_year >= 1990) THEN
+                     CALL make_directory(trim(dir_landdata_out)//'/lulcc/'//lc_cyear)
+                     DO ilc = 0, N_land_classification
+                        write(c2,'(i2.2)') ilc
+                        file_in = trim(dir_landdata_in)//'/lulcc/'//trim(input_year)//'/lccpct_patches_lc'//c2//'.nc'
+                        file_out = trim(dir_landdata_out)//'/lulcc/'//lc_cyear//'/lccpct_patches_lc'//c2//'.nc'
+                        CALL clip_vector(file_in, file_out, iblk, jblk, 'lccpct_patches', patchmask)
+                     ENDDO
+                  ENDIF
+               ENDIF
 
                ! depth to bedrock
                IF(DEF_USE_BEDROCK)THEN
-                  CALL make_directory(trim(dir_landdata_out) // '/dbedrock')
-                  file_in  = trim(dir_landdata_in)  // '/dbedrock/dbedrock_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/dbedrock/dbedrock_patches.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/dbedrock/' // lc_cyear)
+                  file_in  = trim(dir_landdata_in)  // '/dbedrock/' // trim(input_year) // '/dbedrock_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/dbedrock/' // lc_cyear // '/dbedrock_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'dbedrock_patches', patchmask)
                ENDIF
 
                ! forest height
-               CALL make_directory(trim(dir_landdata_out) // '/htop')
-               file_in  = trim(dir_landdata_in)  // '/htop/htop_patches.nc'
-               file_out = trim(dir_landdata_out) // '/htop/htop_patches.nc'
+               CALL make_directory(trim(dir_landdata_out) // '/htop/' // lc_cyear)
+               file_in  = trim(dir_landdata_in)  // '/htop/' // trim(input_year) // '/htop_patches.nc'
+               file_out = trim(dir_landdata_out) // '/htop/' // lc_cyear // '/htop_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_patches', patchmask)
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-               file_in  = trim(dir_landdata_in)  // '/htop/htop_pfts.nc'
-               file_out = trim(dir_landdata_out) // '/htop/htop_pfts.nc'
-               CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_pfts', pftmask)
-ENDIF
+               IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                  file_in  = trim(dir_landdata_in)  // '/htop/' // trim(input_year) // '/htop_pfts.nc'
+                  file_out = trim(dir_landdata_out) // '/htop/' // lc_cyear // '/htop_pfts.nc'
+                  CALL clip_vector (file_in, file_out, iblk, jblk, 'htop_pfts', pftmask)
+                  IF (DEF_RS_CROWN_STRUCTURE) THEN
+                     file_in = trim(dir_landdata_in)//'/htop/'//trim(input_year)//'/hbot_pfts.nc'
+                     file_out = trim(dir_landdata_out)//'/htop/'//lc_cyear//'/hbot_pfts.nc'
+                     CALL clip_vector(file_in, file_out, iblk, jblk, 'hbot_pfts', pftmask)
+                     IF (DEF_USE_PC) THEN
+                        file_in = trim(dir_landdata_in)//'/htop/'//trim(input_year)//'/cratio_pfts.nc'
+                        file_out = trim(dir_landdata_out)//'/htop/'//lc_cyear//'/cratio_pfts.nc'
+                        CALL clip_vector(file_in, file_out, iblk, jblk, 'cratio_pfts', pftmask)
+                     ENDIF
+                  ENDIF
+               ENDIF
 
                ! lake depth
-               CALL make_directory(trim(dir_landdata_out) // '/lakedepth')
-               file_in  = trim(dir_landdata_in)  // '/lakedepth/lakedepth_patches.nc'
-               file_out = trim(dir_landdata_out) // '/lakedepth/lakedepth_patches.nc'
+               CALL make_directory(trim(dir_landdata_out) // '/lakedepth/' // lc_cyear)
+               file_in  = trim(dir_landdata_in)  // '/lakedepth/' // trim(input_year) // '/lakedepth_patches.nc'
+               file_out = trim(dir_landdata_out) // '/lakedepth/' // lc_cyear // '/lakedepth_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'lakedepth_patches', patchmask)
 
                ! plant function type percentage
-               CALL make_directory(trim(dir_landdata_out) // '/pctpft')
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-               file_in  = trim(dir_landdata_in)  // '/pctpft/pct_pfts.nc'
-               file_out = trim(dir_landdata_out) // '/pctpft/pct_pfts.nc'
-               CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_pfts', pftmask)
+               CALL make_directory(trim(dir_landdata_out) // '/pctpft/' // lc_cyear)
+               IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                  file_in  = trim(dir_landdata_in)  // '/pctpft/' // trim(input_year) // '/pct_pfts.nc'
+                  file_out = trim(dir_landdata_out) // '/pctpft/' // lc_cyear // '/pct_pfts.nc'
+                  CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_pfts', pftmask)
 #ifdef CROP
-               file_in  = trim(dir_landdata_in)  // '/pctpft/pct_crops.nc'
-               file_out = trim(dir_landdata_out) // '/pctpft/pct_crops.nc'
-               CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_crops', patchmask)
+                  file_in  = trim(dir_landdata_in)  // '/pctpft/' // trim(input_year) // '/pct_crops.nc'
+                  file_out = trim(dir_landdata_out) // '/pctpft/' // lc_cyear // '/pct_crops.nc'
+                  CALL clip_vector (file_in, file_out, iblk, jblk, 'pct_crops', patchmask)
 #endif
-ENDIF
+               ENDIF
 
                ! soil
-               CALL make_directory(trim(dir_landdata_out) // '/soil')
+               CALL make_directory(trim(dir_landdata_out) // '/soil/' // lc_cyear)
 
-IF (DEF_USE_BGC) THEN
-               write(cyear,'(i4.4)') DEF_LC_YEAR
+               ! Methane surface data (lake-bottom soil carbon, soil pH), made by
+               ! mksrfdata when methane needs them; required inputs must exist.
 
-               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(cyear) // '/lake_soilc_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/lake_soilc_patches.nc'
                CALL get_filename_block (file_in, iblk, jblk, fileblock)
                inquire (file=trim(fileblock), exist=fexists)
+               IF (.not. fexists .and. requires_lake_soilc) CALL clip_error('Missing required lake carbon: '//trim(fileblock))
                IF (fexists) THEN
-                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // trim(cyear))
-                  file_out = trim(dir_landdata_out) // '/soil/' // trim(cyear) // '/lake_soilc_patches.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // lc_cyear)
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/lake_soilc_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'lake_soilc_patches', patchmask)
                ENDIF
 
-               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(cyear) // '/methane_ph_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/methane_ph_patches.nc'
                CALL get_filename_block (file_in, iblk, jblk, fileblock)
                inquire (file=trim(fileblock), exist=fexists)
+               IF (.not. fexists .and. requires_spatial_ph) CALL clip_error('Missing required methane pH: '//trim(fileblock))
                IF (fexists) THEN
-                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // trim(cyear))
-                  file_out = trim(dir_landdata_out) // '/soil/' // trim(cyear) // '/methane_ph_patches.nc'
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // lc_cyear)
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/methane_ph_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'methane_ph_patches', patchmask)
                ENDIF
-ENDIF
 
-               file_in  = trim(dir_landdata_in)  // '/soil/soil_s_v_alb_patches.nc'
-               file_out = trim(dir_landdata_out) // '/soil/soil_s_v_alb_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/soil_s_v_alb_patches.nc'
+               file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/soil_s_v_alb_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'soil_s_v_alb', patchmask)
 
-               file_in  = trim(dir_landdata_in)  // '/soil/soil_d_v_alb_patches.nc'
-               file_out = trim(dir_landdata_out) // '/soil/soil_d_v_alb_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/soil_d_v_alb_patches.nc'
+               file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/soil_d_v_alb_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'soil_d_v_alb', patchmask)
 
-               file_in  = trim(dir_landdata_in)  // '/soil/soil_s_n_alb_patches.nc'
-               file_out = trim(dir_landdata_out) // '/soil/soil_s_n_alb_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/soil_s_n_alb_patches.nc'
+               file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/soil_s_n_alb_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'soil_s_n_alb', patchmask)
 
-               file_in  = trim(dir_landdata_in)  // '/soil/soil_d_n_alb_patches.nc'
-               file_out = trim(dir_landdata_out) // '/soil/soil_d_n_alb_patches.nc'
+               file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/soil_d_n_alb_patches.nc'
+               file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/soil_d_n_alb_patches.nc'
                CALL clip_vector (file_in, file_out, iblk, jblk, 'soil_d_n_alb', patchmask)
 
                DO nsl = 1, 8
@@ -382,159 +478,171 @@ ENDIF
                   write(c1,'(i1)') nsl
 
                   ! (1) volumetric fraction of quartz within mineral soil
-                  file_in  = trim(dir_landdata_in)  // '/soil/vf_quartz_mineral_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/vf_quartz_mineral_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/vf_quartz_mineral_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/vf_quartz_mineral_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'vf_quartz_mineral_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (2) volumetric fraction of gravels
-                  file_in  = trim(dir_landdata_in)  // '/soil/vf_gravels_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/vf_gravels_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/vf_gravels_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/vf_gravels_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'vf_gravels_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (3) volumetric fraction of sand
-                  file_in  = trim(dir_landdata_in)  // '/soil/vf_sand_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/vf_sand_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/vf_sand_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/vf_sand_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'vf_sand_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (4) volumetric fraction of organic matter with the parameter alpha and beta in the Balland V. and P. A. Arp (2005) model
-                  file_in  = trim(dir_landdata_in)  // '/soil/vf_om_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/vf_om_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/vf_om_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/vf_om_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'vf_om_s_l'//trim(c1)//'_patches', patchmask)
 
-                  file_in  = trim(dir_landdata_in)  // '/soil/BA_alpha_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/BA_alpha_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/BA_alpha_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/BA_alpha_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'BA_alpha_l'//trim(c1)//'_patches', patchmask)
 
-                  file_in  = trim(dir_landdata_in)  // '/soil/BA_beta_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/BA_beta_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/BA_beta_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/BA_beta_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'BA_beta_l'//trim(c1)//'_patches', patchmask)
 
                   ! (5) gravimetric fraction of gravels
-                  file_in  = trim(dir_landdata_in)  // '/soil/wf_gravels_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/wf_gravels_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/wf_gravels_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/wf_gravels_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'wf_gravels_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (6) gravimetric fraction of sand
-                  file_in  = trim(dir_landdata_in)  // '/soil/wf_sand_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/wf_sand_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/wf_sand_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/wf_sand_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'wf_sand_s_l'//trim(c1)//'_patches', patchmask)
 
-                  ! L_vgm_l/theta_r_l/alpha_vgm_l/n_vgm_l are only written
-                  ! to landdata under vanGenuchten -- under Campbell these
-                  ! .nc files don't exist in dir_landdata_in, so this has
-                  ! to stay gated.
                   IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
                      ! (7) VGM's pore-connectivity parameter (L)
-                     file_in  = trim(dir_landdata_in)  // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
-                     file_out = trim(dir_landdata_out) // '/soil/L_vgm_l'//trim(c1)//'_patches.nc'
+                     file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/L_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/L_vgm_l'//trim(c1)//'_patches.nc'
                      CALL clip_vector (file_in, file_out, iblk, jblk, &
                         'L_vgm_l'//trim(c1)//'_patches', patchmask)
 
                      ! (8) VGM's residual water content (theta_r) [cm3/cm3]
-                     file_in  = trim(dir_landdata_in)  // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
-                     file_out = trim(dir_landdata_out) // '/soil/theta_r_l'//trim(c1)//'_patches.nc'
+                     file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/theta_r_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/theta_r_l'//trim(c1)//'_patches.nc'
                      CALL clip_vector (file_in, file_out, iblk, jblk, &
                         'theta_r_l'//trim(c1)//'_patches', patchmask)
 
                      ! (9) VGM's parameter corresponding approximately to the inverse of the air-entry value (alpha)
-                     file_in  = trim(dir_landdata_in)  // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
-                     file_out = trim(dir_landdata_out) // '/soil/alpha_vgm_l'//trim(c1)//'_patches.nc'
+                     file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/alpha_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/alpha_vgm_l'//trim(c1)//'_patches.nc'
                      CALL clip_vector (file_in, file_out, iblk, jblk, &
                         'alpha_vgm_l'//trim(c1)//'_patches', patchmask)
 
                      ! (10) VGM's shape parameter (n)
-                     file_in  = trim(dir_landdata_in)  // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
-                     file_out = trim(dir_landdata_out) // '/soil/n_vgm_l'//trim(c1)//'_patches.nc'
+                     file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/n_vgm_l'//trim(c1)//'_patches.nc'
+                     file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/n_vgm_l'//trim(c1)//'_patches.nc'
                      CALL clip_vector (file_in, file_out, iblk, jblk, &
                         'n_vgm_l'//trim(c1)//'_patches', patchmask)
                   ENDIF
                   ! (11) saturated water content [cm3/cm3]
-                  file_in  = trim(dir_landdata_in)  // '/soil/theta_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/theta_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/theta_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/theta_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'theta_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (12) matric potential at saturation (psi_s) [cm]
-                  file_in  = trim(dir_landdata_in)  // '/soil/psi_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/psi_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/psi_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/psi_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'psi_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (13) pore size distribution index [dimensionless]
-                  file_in  = trim(dir_landdata_in)  // '/soil/lambda_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/lambda_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/lambda_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/lambda_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'lambda_l'//trim(c1)//'_patches', patchmask)
 
                   ! (14) saturated hydraulic conductivity [cm/day]
-                  file_in  = trim(dir_landdata_in)  // '/soil/k_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/k_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/k_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/k_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'k_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (15) heat capacity of soil solids [J/(m3 K)]
-                  file_in  = trim(dir_landdata_in)  // '/soil/csol_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/csol_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/csol_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/csol_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'csol_l'//trim(c1)//'_patches', patchmask)
 
                   ! (16) thermal conductivity of unfrozen saturated soil [W/m-K]
-                  file_in  = trim(dir_landdata_in)  // '/soil/tksatu_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/tksatu_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/tksatu_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/tksatu_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'tksatu_l'//trim(c1)//'_patches', patchmask)
 
                   ! (17) thermal conductivity of frozen saturated soil [W/m-K]
-                  file_in  = trim(dir_landdata_in)  // '/soil/tksatf_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/tksatf_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/tksatf_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/tksatf_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'tksatf_l'//trim(c1)//'_patches', patchmask)
 
                   ! (18) thermal conductivity for dry soil [W/(m-K)]
-                  file_in  = trim(dir_landdata_in)  // '/soil/tkdry_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/tkdry_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/tkdry_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/tkdry_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'tkdry_l'//trim(c1)//'_patches', patchmask)
 
                   ! (19) thermal conductivity of soil solids [W/m-K]
-                  file_in  = trim(dir_landdata_in)  // '/soil/k_solids_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/k_solids_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/k_solids_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/k_solids_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'k_solids_l'//trim(c1)//'_patches', patchmask)
 
                   ! (20) OM_density [kg/m3]
-                  file_in  = trim(dir_landdata_in)  // '/soil/OM_density_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/OM_density_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/OM_density_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/OM_density_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'OM_density_s_l'//trim(c1)//'_patches', patchmask)
 
                   ! (21) bulk density of soil (GRAVELS + OM + Mineral Soils)
-                  file_in  = trim(dir_landdata_in)  // '/soil/BD_all_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/BD_all_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/BD_all_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/BD_all_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'BD_all_s_l'//trim(c1)//'_patches', patchmask)
 
+                  file_in = trim(dir_landdata_in)//'/soil/'//trim(input_year)//'/wf_clay_s_l'//c1//'_patches.nc'
+                  file_out = trim(dir_landdata_out)//'/soil/'//lc_cyear//'/wf_clay_s_l'//c1//'_patches.nc'
+                  CALL clip_vector(file_in, file_out, iblk, jblk, 'wf_clay_s_l'//c1//'_patches', patchmask)
+                  file_in = trim(dir_landdata_in)//'/soil/'//trim(input_year)//'/wf_om_s_l'//c1//'_patches.nc'
+                  file_out = trim(dir_landdata_out)//'/soil/'//lc_cyear//'/wf_om_s_l'//c1//'_patches.nc'
+                  CALL clip_vector(file_in, file_out, iblk, jblk, 'wf_om_s_l'//c1//'_patches', patchmask)
                   ! (22) volumetric fraction of clay
-                  file_in  = trim(dir_landdata_in)  // '/soil/vf_clay_s_l'//trim(c1)//'_patches.nc'
-                  file_out = trim(dir_landdata_out) // '/soil/vf_clay_s_l'//trim(c1)//'_patches.nc'
+                  file_in  = trim(dir_landdata_in)  // '/soil/' // trim(input_year) // '/vf_clay_s_l'//trim(c1)//'_patches.nc'
+                  file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/vf_clay_s_l'//trim(c1)//'_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, &
                      'vf_clay_s_l'//trim(c1)//'_patches', patchmask)
 
                ENDDO
 
                ! topography
-               CALL make_directory(trim(dir_landdata_out) // '/topography')
-               file_in  = trim(dir_landdata_in)  // '/topography/topography_patches.nc'
-               file_out = trim(dir_landdata_out) // '/topography/topography_patches.nc'
-               CALL clip_vector (file_in, file_out, iblk, jblk, 'topography_patches', patchmask)
+               CALL make_directory(trim(dir_landdata_out) // '/topography/' // lc_cyear)
+               file_in = trim(dir_landdata_in)//'/topography/'//trim(input_year)//'/elevation_patches.nc'
+               file_out = trim(dir_landdata_out)//'/topography/'//lc_cyear//'/elevation_patches.nc'
+               CALL clip_vector(file_in, file_out, iblk, jblk, 'elevation_patches', patchmask)
+               file_in = trim(dir_landdata_in)//'/topography/'//trim(input_year)//'/elvstd_patches.nc'
+               file_out = trim(dir_landdata_out)//'/topography/'//lc_cyear//'/elvstd_patches.nc'
+               CALL clip_vector(file_in, file_out, iblk, jblk, 'elvstd_patches', patchmask)
+               file_in = trim(dir_landdata_in)//'/topography/'//trim(input_year)//'/sloperatio_patches.nc'
+               file_out = trim(dir_landdata_out)//'/topography/'//lc_cyear//'/sloperatio_patches.nc'
+               CALL clip_vector(file_in, file_out, iblk, jblk, 'sloperatio_patches', patchmask)
+               file_in = trim(dir_landdata_in)//'/soil/'//trim(input_year)//'/soiltexture_patches.nc'
+               file_out = trim(dir_landdata_out)//'/soil/'//lc_cyear//'/soiltexture_patches.nc'
+               CALL clip_vector(file_in, file_out, iblk, jblk, 'soiltext_patches', patchmask)
+
 
             ENDIF
          ENDDO
@@ -546,7 +654,7 @@ ENDIF
 #endif
 
       IF (p_is_master) THEN
-         file_out = trim(dir_landdata_out) // '/mesh/mesh.nc'
+         file_out = trim(dir_landdata_out) // '/mesh/' // lc_cyear // '/mesh.nc'
          CALL ncio_write_serial (file_out, 'nelm_blk', nelm_blk, 'xblk', 'yblk')
       ENDIF
 
@@ -568,22 +676,35 @@ ENDIF
 #ifdef CATCHMENT
       IF (allocated(hrumask  )) deallocate(hrumask  )
 #endif
-IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
-      IF (allocated(pftmask  )) deallocate(pftmask  )
-ENDIF
+      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+         IF (allocated(pftmask  )) deallocate(pftmask  )
+      ENDIF
 
    END SUBROUTINE srfdata_region_clip
 
+   SUBROUTINE clip_error(message)
+      USE MOD_SPMD_Task
+      character(len=*), intent(in) :: message
+      write(*,*) 'RegionClip: ', trim(message)
+#ifdef USEMPI
+      CALL mpi_abort(p_comm_glb, 1, p_err)
+#else
+      CALL EXIT(1)
+#endif
+   END SUBROUTINE clip_error
+
    ! ----- pixelset clip -----
-   SUBROUTINE clip_pixelset (dir_landdata_in, psetname, iblk, jblk, elmmask, elmindex, psetmask)
+   SUBROUTINE clip_pixelset (dir_landdata_in, lc_cyear, psetname, iblk, jblk, elmmask, elmindex, psetmask)
 
    USE MOD_NetCDFSerial
    USE MOD_Block
+   USE MOD_Const_LC, only: patchtypes_igbp
+   USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC
 
    IMPLICIT NONE
 
    character(len=*), intent(in) :: dir_landdata_in
-   character(len=*), intent(in) :: psetname
+   character(len=*), intent(in) :: lc_cyear, psetname
    integer, intent(in) :: iblk, jblk
    logical, intent(in) :: elmmask (:)
 
@@ -596,25 +717,47 @@ ENDIF
    logical :: fexists
    integer :: nset, ie, iset
    integer*8, allocatable :: eindex_p(:)
+   integer, allocatable :: patchtypes_source(:)
 
-      filename = trim(dir_landdata_in) // '/' // trim(psetname) // '/' // trim(psetname) // '.nc'
+      filename = trim(dir_landdata_in) // '/' // trim(psetname) // '/' // lc_cyear // '/' // trim(psetname) // '.nc'
       CALL get_filename_block (filename, iblk, jblk, fileblock)
 
       inquire (file=trim(fileblock), exist=fexists)
+      IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+         IF (.not. fexists .and. psetname == 'landpft') THEN
+            ! Vector files have no block-count header: the producer omits zero-PFT
+            ! blocks. Prove zero from ALL source patches, not just the clipped subset.
+            ! Use the constant table: clip runs before Init_LC_Const initializes patchtypes.
+            filename = trim(dir_landdata_in)//'/landpatch/'//lc_cyear//'/landpatch.nc'
+            CALL get_filename_block(filename, iblk, jblk, fileblock)
+            CALL ncio_read_serial(fileblock, 'settyp', patchtypes_source)
+            IF (any(patchtypes_source < 1) .or. any(patchtypes_source > size(patchtypes_igbp))) &
+               CALL clip_error('Invalid source patch types while checking absent PFT block: '//trim(fileblock))
+            IF (size(patchtypes_source) > 0) THEN
+               IF (all(patchtypes_igbp(patchtypes_source) /= 0)) THEN
+                  allocate(psetmask(0))
+                  RETURN
+               ENDIF
+            ENDIF
+            CALL clip_error('Missing pixelset landpft for PFT-bearing source block: '//trim(fileblock))
+         ENDIF
+      ENDIF
+      IF (.not. fexists) CALL clip_error('Missing pixelset: '//trim(fileblock))
       IF (fexists) THEN
          CALL ncio_inquire_length (fileblock, 'eindex', nset)
 
+         allocate(psetmask(nset))
          IF (nset > 0) THEN
 
             CALL ncio_read_serial (fileblock, 'eindex', eindex_p)
 
-            allocate (psetmask (nset))
             psetmask(:) = .false.
 
             ie = 1
             DO iset = 1, nset
                DO WHILE ((eindex_p(iset) /= elmindex(ie)))
                   ie = ie + 1
+                  IF (ie > size(elmindex)) CALL clip_error('Pixelset element absent from mesh: '//trim(fileblock))
                ENDDO
                psetmask(iset) = elmmask(ie)
             ENDDO
@@ -642,7 +785,8 @@ ENDIF
    character(len=256) :: input, output
    integer :: ncidin,  ncidout
    integer :: varidin, varidout
-   integer :: vlen_in, vlen_out, xtype, ndims, id, i1, i2
+   integer :: vlen_in, vlen_out, xtype, ndims, id, i1, i2, natts, iatt
+   character(len=256) :: attname
    logical :: fexists, dim_exist
    integer, allocatable :: dimids (:), dimlens (:)
    character(len=256), allocatable :: dimnames (:)
@@ -666,6 +810,9 @@ ENDIF
    real(r8), allocatable :: data_r8_out2 (:,:)
    real(r8), allocatable :: data_r8_out3 (:,:,:)
 
+      ! Zero selected entries have no vector block file in the producer contract.
+      IF (count(vecmask) == 0) RETURN
+
       CALL get_filename_block (file_in,  iblk, jblk, input )
       CALL get_filename_block (file_out, iblk, jblk, output)
 
@@ -688,6 +835,9 @@ ENDIF
       DO id = 1, ndims
          CALL nccheck( nf90_inquire_dimension (ncidin, dimids(id), dimnames(id), dimlens(id)) )
       ENDDO
+      IF (dimlens(ndims) /= vlen_in) CALL clip_error('Vector/mask length mismatch: '//trim(input))
+      IF (ndims > 3 .or. (xtype /= NF90_INT .and. xtype /= NF90_INT64 .and. xtype /= NF90_DOUBLE)) &
+         CALL clip_error('Unsupported vector type/rank: '//trim(input))
       CALL nccheck( nf90_close (ncidin) )
 
       inquire (file=trim(output), exist=fexists)
@@ -726,6 +876,14 @@ ENDIF
       IF (nf90_inq_varid(ncidout,trim(varname),varidout) /= nf90_noerr) THEN
          CALL nccheck( nf90_redef (ncidout) )
          CALL nccheck( nf90_def_var (ncidout, trim(varname), xtype, dimids, varidout, deflate_level = 1) )
+         CALL nccheck(nf90_open(trim(input), NF90_NOWRITE, ncidin))
+         CALL nccheck(nf90_inq_varid(ncidin, trim(varname), varidin))
+         CALL nccheck(nf90_inquire_variable(ncidin, varidin, natts=natts))
+         DO iatt = 1, natts
+            CALL nccheck(nf90_inq_attname(ncidin, varidin, iatt, attname))
+            CALL nccheck(nf90_copy_att(ncidin, varidin, trim(attname), ncidout, varidout))
+         ENDDO
+         CALL nccheck(nf90_close(ncidin))
          CALL nccheck( nf90_enddef (ncidout) )
       ENDIF
 

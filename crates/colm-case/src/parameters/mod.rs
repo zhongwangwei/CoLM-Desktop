@@ -181,7 +181,8 @@ fn build_catalog() -> Vec<ParameterDescriptor> {
 /// 汇流子步长。桌面端把它们和调优系数一起放在各页的专家模式里，常规模式只留开关、方案与路径。
 fn expert_coefficient(field: &colm_schema::Field) -> bool {
     let name = field.name;
-    (name.starts_with("DEF_TRACER_") && matches!(field.kind, colm_schema::FieldKind::Real))
+    ((name.starts_with("DEF_ISO_") || name.starts_with("DEF_MT_"))
+        && matches!(field.kind, colm_schema::FieldKind::Real))
         || name.ends_with("_ABORT_NBAD")
         || matches!(
             name,
@@ -639,7 +640,22 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
         return Some("站点");
     }
-    if has(&["TRACER", "GIEMS", "WETLAND_FINUNDATION"]) {
+    // 上游 7d2fca93 把 tracer 改名 MaterialTransport，字段前缀变成
+    // DEF_ISO_* / DEF_SOLUTE_* / DEF_MT_*，family 开关是 DEF_USE_ISOTOPE /
+    // DEF_USE_METHANE / DEF_USE_SEDIMENT；只认旧名字 TRACER 会让整组落进
+    // 「未分类」。
+    if has(&[
+        "TRACER",
+        "ISOTOPE",
+        "DEF_ISO_",
+        "SOLUTE",
+        "METHANE",
+        "SEDIMENT",
+        "DEF_MT_",
+        "NH4_LEACHING",
+        "GIEMS",
+        "WETLAND_FINUNDATION",
+    ]) {
         return Some("示踪剂");
     }
     if n.starts_with("DEF_DA_") {
@@ -690,6 +706,11 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     }
     if has(&[
         "SRFDATA",
+        // 上游 7d2fca93 的 rawdata 改造：原始数据清单、GLC30/ESACCI 两套
+        // 地类数据的选择开关。
+        "RAWDATA",
+        "GLC30",
+        "ESACCI",
         "DEF_LC_YEAR",
         "DEF_USE_USGS",
         "DEF_USE_IGBP",
@@ -731,6 +752,8 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
         "DYNAMIC_LAKE",
         "DYNAMIC_WETLAND",
         "CHECKEQUILIBRIUM",
+        // 上游 7d2fca93 新增的冠层结构/辐射方案开关。
+        "RS_CROWN_STRUCTURE",
         // 基流优化是预热期的产流参数调整（`MOD_Opt_Baseflow`），不属于数据同化；放在
         // 「数据同化」里会随 DataAssimilation 宏一起被整栏隐藏。
         "OPTIMIZE_BASEFLOW",
@@ -781,7 +804,16 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
 }
 
 fn process_section(group: &str) -> &'static str {
-    if group.contains("tracer") || group.contains("methane") || group.contains("sediment") {
+    // 新组名：nl_colm_isotope_parameter / nl_colm_solute_parameter /
+    // nl_colm_material / nl_colm_mt_forcing；旧的三组保留兼容。
+    if group.contains("tracer")
+        || group.contains("methane")
+        || group.contains("sediment")
+        || group.contains("isotope")
+        || group.contains("solute")
+        || group.contains("material")
+        || group.contains("mt_forcing")
+    {
         "示踪剂"
     } else {
         "水热过程"

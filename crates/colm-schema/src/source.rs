@@ -20,8 +20,8 @@ use std::collections::BTreeMap;
 /// 1. 续行里夹**空行**（`DEF_domain, &` 之后隔一行才是 `SITE_fsitedata`）——
 ///    按「上一行以 `&` 结尾就取下一行」会在这里断掉，只解析出 2 个成员；
 /// 2. 续行符之后带**行尾注释**（`DEF_LAI_MONTHLY, & !add by ...`）；
-/// 3. 有一个成员被宏包住（`DEF_file_GIEMS` 在 TRACER+BGC 下才可设）——
-///    守卫行本身跳过，成员照收，因为它确实是字段。
+/// 3. 有一个成员被宏包住（`DEF_file_GIEMS` 曾在 TRACER+BGC 下才可设，上游
+///    7d2fca93 已去掉这层守卫）—— 守卫行本身跳过，成员照收，因为它确实是字段。
 pub fn namelist_groups(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut lines = text.lines();

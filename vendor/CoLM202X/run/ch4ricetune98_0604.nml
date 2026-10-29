@@ -1,5 +1,9 @@
 &nl_colm
 
+   ! 2026-10-30 迁到 MaterialTransport namelist：甲烷的 family 开关与参数文件
+   ! 在文件末尾的 &nl_colm_material，旧的 DEF_TRACER_* 已不再被读取。
+   ! 映射明细见文件末尾。
+
    DEF_CASE_NAME = 'ch4ricetune98_0604'
 
    DEF_domain%edges = -90.0
@@ -37,6 +41,12 @@
    DEF_GRIDBASED_lon_res = 2
    DEF_GRIDBASED_lat_res = 2
 
+   ! 甲烷要求 BGC + PFT/PC 子网格。上游把这两项从编译期（#define BGC /
+   ! LULC_IGBP_PFT）改成了运行时开关，三个必须且只能有一个为 .true.。
+   DEF_USE_LCT = .false.
+   DEF_USE_PFT = .true.
+   DEF_USE_BGC = .true.
+
    ! soil state init
    DEF_USE_SoilInit  = .true.
    DEF_file_SoilInit = '/share/home/dq013/zhwei/colm/data/soilstate/soilstate.nc'
@@ -50,14 +60,9 @@
    DEF_LAI_CHANGE_YEARLY = .false.
 
 
-   ! Activate the CH4 gas provider.
-   DEF_TRACER_NUM                 = 1
-   DEF_TRACER_NAMES               = "CH4"
-   DEF_TRACER_TYPES               = "gas"
-   DEF_TRACER_MRAT                = "16.04"
-   ! Generic per-tracer parameter file(s); this CH4 file also contains
-   ! DEF_TRACER%ref_ratio/init_delta/reactive_decay_rate plus CH4 options.
-   DEF_TRACER_PARAM_FILES           = 'CH4:/share/home/dq013/zhwei/colm/cases/globe/ch4ricetune98_0604/config/standard_ch4_parameter.nml'
+   ! Activate the CH4 gas provider: family switch in &nl_colm_material at the end.
+   ! All CH4 physics and hydrology settings now live in DEF_METHANE_PARAM_FILE
+   ! (&nl_colm_methane_parameter, new format); the main namelist only switches it on.
 
    DEF_USE_VariablySaturatedFlow = .true.
    DEF_USE_Dynamic_Wetland = .true.
@@ -87,4 +92,20 @@
    DEF_hist_vars_out_default = .true.
    DEF_hist_vars_namelist = 'null'
 
+/
+
+&nl_colm_material
+   ! 2026-10-30 迁到 MaterialTransport namelist：
+   !   DEF_TRACER_NUM = 1 / DEF_TRACER_NAMES = "CH4" / DEF_TRACER_TYPES = "gas"
+   !     → DEF_USE_METHANE（family 开关，不再列 species）
+   !   DEF_TRACER_PARAM_FILES = 'CH4:<case>/config/standard_ch4_parameter.nml'
+   !     → DEF_METHANE_PARAM_FILE（单个路径，不再带 'CH4:' 前缀）
+   !   DEF_TRACER_MRAT = "16.04" 已删除：CH4 的分子量是代码常量
+   !   （MOD_MT_Defs 里 16.04 g/mol），ref_ratio/init_delta 同样不再配置。
+   ! 本算例是稻田甲烷调参算例，调参值放在算例自己的副本里；该副本要按新的
+   ! &nl_colm_methane_parameter 格式（参考 run/standard_methane_parameter.nml）重写，
+   ! 原来那份 standard_ch4_parameter.nml 的 &nl_colm_tracer_parameter 写法已不被读取。
+   ! 稻田甲烷（enable_rice_paddy）要求用 #define CROP 编译。
+   DEF_USE_METHANE        = .true.
+   DEF_METHANE_PARAM_FILE = '/share/home/dq013/zhwei/colm/cases/globe/ch4ricetune98_0604/config/standard_methane_parameter.nml'
 /

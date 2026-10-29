@@ -275,11 +275,11 @@ pub struct RiverModel {
     pub momentum_dt_limit: bool,
     /// `DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT`：开分汊时是否保留蓄量限制（默认 true）。
     pub storage_dt_limit: bool,
-    /// `DEF_USE_TRACER`（有走通用输运的示踪物）：河湖示踪物（[`tracer`]）。
+    /// 有材料运移（`mt_any_enabled`，含走通用输运的材料）：河湖示踪物（[`tracer`]）。
     pub tracers: Option<tracer::RiverTracers>,
     /// `SEDIMENT` provider 示踪物：河道泥沙（[`sediment`]）。
     pub sediment: Option<sediment::Sediment>,
-    /// `DEF_USE_TRACER` 但没有输运示踪物：续跑里仍提交空的河道示踪物事务。
+    /// 有材料运移但没有输运材料：续跑里仍提交空的河道示踪物事务。
     pub empty_tracer_transaction: bool,
     /// 注册了 CH4 provider：每次汇流末推到 patch 的淹没比例（见 [`MethaneFlood`]）。
     pub methane_flood: Option<MethaneFlood>,
@@ -1665,7 +1665,7 @@ fn route_system<'a>(
             } else {
                 curve.floodarea(w)
             };
-            // `DEF_USE_TRACER`：`total_floodarea/total_flooddepth`（`:1200-1207`），留最后一个子步的值。
+            // 有材料运移：`total_floodarea/total_flooddepth`（`:1200-1207`），留最后一个子步的值。
             let above_bank = (w - curve.rivhgt).max(0.0);
             flood_uc[k] = [
                 floodarea,

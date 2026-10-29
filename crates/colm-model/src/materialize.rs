@@ -7,47 +7,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Resolve case-selected parameter files to verified frozen assets without overriding the selection.
-pub fn case_process_references(
+/// 算例里四个 family 参数文件字段的冻结资产引用。
+///
+/// 上游 7d2fca93 把 `DEF_TRACER_PARAM_FILES` 拆成同位素/溶质/泥沙/甲烷四条字段
+/// （`colm_namelist::material::PARAM_FILE_FIELDS`）。这里逐字段把算例选的文件解析成
+/// 已冻结资产，保持"选择归算例、字节归版本"的边界；返回要写回文档的 `(字段, 值)`。
+pub fn case_process_reference_fields(
     overlay: &Overlay,
     doc: &Document,
     source_case: Option<&Path>,
-) -> Result<Option<Value>> {
-    let legacy = overlay
-        .physics
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
-        .map(|(_, value)| value.as_str())
-        .or_else(|| {
-            overlay
-                .parameters
-                .iter()
-                .find(|r| {
-                    r.scope_instance.kind == "case-scalar"
-                        && r.raw_key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES")
-                })
-                .map(|r| r.value.as_str())
-        });
-    let fallback = legacy.map(validation::literal).transpose()?;
-    if let Some(Value::Str(raw)) = &fallback {
-        for path in colm_namelist::tracer_files::param_file_paths(raw)? {
-            validation::relative(&path)?;
-            ensure!(
-                overlay
-                    .process_files
-                    .iter()
-                    .any(|asset| asset.relative_path == path),
-                "legacy process reference lacks frozen asset: {path}"
-            );
-        }
-    }
-    let selected = doc.get("DEF_TRACER_PARAM_FILES").or(fallback.as_ref());
-    let Some(value) = selected else {
-        return Ok(None);
-    };
-    let Value::Str(raw) = value else {
-        anyhow::bail!("DEF_TRACER_PARAM_FILES must be a string")
-    };
+) -> Result<Vec<(String, Value)>> {
     let data: Option<CaseData> = source_case
         .filter(|dir| dir.join(CASE_DATA_FILE).exists())
         .map(|dir| read_json(&dir.join(CASE_DATA_FILE)))
@@ -56,49 +25,124 @@ pub fn case_process_references(
         .as_ref()
         .map(|data| data.process_file_bindings.clone())
         .unwrap_or_default();
-    // Older sidecars lack bindings; their unchanged original namelist identifies the old mapping.
-    if let (Some(data), Some(dir), Some(Value::Str(old))) = (&data, source_case, &fallback) {
-        if bindings.is_empty()
-            && digest(&fs::read(dir.join("case.nml"))?) == data.original_case_sha256
-        {
-            let actual = colm_namelist::tracer_files::param_file_paths(raw)?;
-            let frozen = colm_namelist::tracer_files::param_file_paths(old)?;
-            if actual.len() == frozen.len() {
-                bindings.extend(actual.into_iter().zip(frozen));
-            }
-        }
-    }
-    let rewritten = colm_namelist::tracer_files::rewrite_param_files(raw, |path| {
-        if overlay
-            .process_files
+    let original_matches_sidecar = match (&data, source_case) {
+        (Some(data), Some(dir)) => match fs::read(dir.join("case.nml")) {
+            Ok(bytes) => digest(&bytes) == data.original_case_sha256,
+            Err(_) => false,
+        },
+        _ => false,
+    };
+    let mut out = Vec::new();
+    for field in colm_namelist::material::PARAM_FILE_FIELDS {
+        let fallback = overlay
+            .physics
             .iter()
-            .any(|asset| asset.relative_path == path)
-        {
-            return Ok(path.to_owned());
-        }
-        if let Some(target) = bindings.get(path).filter(|target| {
-            overlay
-                .process_files
-                .iter()
-                .any(|asset| asset.relative_path == **target)
-        }) {
-            return Ok(target.clone());
-        }
-        if let Some(dir) = source_case {
-            if let Ok(bytes) = fs::read(dir.join(path)) {
-                let hash = digest(&bytes);
-                if let Some(asset) = overlay
-                    .process_files
+            .find(|(key, _)| key.eq_ignore_ascii_case(field))
+            .map(|(_, value)| value.as_str())
+            .or_else(|| {
+                overlay
+                    .parameters
                     .iter()
-                    .find(|asset| asset.sha256 == hash)
-                {
-                    return Ok(asset.relative_path.clone());
+                    .find(|r| {
+                        r.scope_instance.kind == "case-scalar"
+                            && r.raw_key.eq_ignore_ascii_case(field)
+                    })
+                    .map(|r| r.value.as_str())
+            })
+            .map(validation::literal)
+            .transpose()?;
+        let selected = doc.get(field).or(fallback.as_ref());
+        let Some(value) = selected else {
+            continue;
+        };
+        let Value::Str(raw) = value else {
+            anyhow::bail!("{field} must be a string")
+        };
+        let paths_of = |value: &str| -> Result<Vec<String>> {
+            if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+                colm_namelist::tracer_files::param_file_paths(value)
+            } else {
+                let trimmed = value.trim();
+                Ok(
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                        Vec::new()
+                    } else {
+                        vec![trimmed.to_owned()]
+                    },
+                )
+            }
+        };
+        // 旧 sidecar 没有绑定表：算例原文没变时，按同样顺序把实际路径对回旧映射。
+        if let (Some(data), Some(dir), Some(Value::Str(old))) = (&data, source_case, &fallback) {
+            if bindings.is_empty() && original_matches_sidecar {
+                let actual = paths_of(raw)?;
+                let frozen = paths_of(old)?;
+                if actual.len() == frozen.len() {
+                    bindings.extend(actual.into_iter().zip(frozen));
                 }
             }
+            let _ = (data, dir);
         }
-        Ok(path.to_owned())
-    })?;
-    Ok(Some(Value::Str(rewritten)))
+        let map = |path: &str| -> Result<String> {
+            if overlay
+                .process_files
+                .iter()
+                .any(|asset| asset.relative_path == path)
+            {
+                return Ok(path.to_owned());
+            }
+            if let Some(target) = bindings.get(path).filter(|target| {
+                overlay
+                    .process_files
+                    .iter()
+                    .any(|asset| asset.relative_path == **target)
+            }) {
+                return Ok(target.clone());
+            }
+            if let Some(dir) = source_case {
+                if let Ok(bytes) = fs::read(dir.join(path)) {
+                    let hash = digest(&bytes);
+                    if let Some(asset) = overlay
+                        .process_files
+                        .iter()
+                        .find(|asset| asset.sha256 == hash)
+                    {
+                        return Ok(asset.relative_path.clone());
+                    }
+                }
+            }
+            Ok(path.to_owned())
+        };
+        let rewritten = if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+            colm_namelist::tracer_files::rewrite_param_files(raw, map)?
+        } else {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                raw.clone()
+            } else {
+                map(trimmed)?
+            }
+        };
+        // 只做路径安全校验：算例可以在迁移后改选另一份文件，那份文件是否已冻结由
+        // `validate_overlay` 对版本自身的引用负责；运行目录里的缺失会在复制阶段暴露。
+        for path in paths_of(&rewritten)? {
+            validation::relative(&path)?;
+        }
+        out.push((field.to_owned(), Value::Str(rewritten)));
+    }
+    Ok(out)
+}
+
+/// 兼容入口：GUI 的配置面板只把溶质列表写回 `DEF_SOLUTE_PARAM_FILES`。
+pub fn case_process_references(
+    overlay: &Overlay,
+    doc: &Document,
+    source_case: Option<&Path>,
+) -> Result<Option<Value>> {
+    Ok(case_process_reference_fields(overlay, doc, source_case)?
+        .into_iter()
+        .find(|(field, _)| field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES"))
+        .map(|(_, value)| value))
 }
 
 impl Registry {
@@ -222,26 +266,39 @@ impl Registry {
         ));
         fs::create_dir(&stage).context("another case migration is active")?;
         let result = (|| {
-            if let Some(Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") {
-                colm_namelist::tracer_files::rewrite_param_files(raw, |file| {
-                    let bytes = fs::read(case.join(file))?;
-                    colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
-                    let sha256 = digest(&bytes);
-                    let relative_path = format!("process/{sha256}.nml");
-                    write_asset(&stage, &relative_path, &bytes)?;
-                    if !overlay
-                        .process_files
-                        .iter()
-                        .any(|a| a.relative_path == relative_path)
-                    {
-                        overlay.process_files.push(Asset {
-                            relative_path: relative_path.clone(),
-                            sha256,
-                        });
+            // 每个 family 的参数文件都是算例选的：把它们复制成 `process/<sha>.nml` 冻结资产，
+            // 并记下原路径→资产的绑定（材料化时据此把选择换成本地副本）。
+            let mut stage_file = |file: &str| -> Result<String> {
+                let bytes = fs::read(case.join(file))?;
+                colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
+                let sha256 = digest(&bytes);
+                let relative_path = format!("process/{sha256}.nml");
+                write_asset(&stage, &relative_path, &bytes)?;
+                if !overlay
+                    .process_files
+                    .iter()
+                    .any(|a| a.relative_path == relative_path)
+                {
+                    overlay.process_files.push(Asset {
+                        relative_path: relative_path.clone(),
+                        sha256,
+                    });
+                }
+                process_file_bindings.insert(file.to_owned(), relative_path.clone());
+                Ok(relative_path)
+            };
+            for field in colm_namelist::material::PARAM_FILE_FIELDS {
+                let Some(Value::Str(raw)) = doc.get(field) else {
+                    continue;
+                };
+                if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+                    colm_namelist::tracer_files::rewrite_param_files(raw, &mut stage_file)?;
+                } else {
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null") {
+                        stage_file(trimmed)?;
                     }
-                    process_file_bindings.insert(file.to_owned(), relative_path.clone());
-                    Ok(relative_path)
-                })?;
+                }
             }
             if case.join("hybrid.toml").exists() {
                 colm_hybrid::HybridConfig::load(&case.join("hybrid.toml"))?;
@@ -483,7 +540,10 @@ impl Registry {
                         && colm_schema::find(key).is_some_and(|field| field.group.is_some()),
                     "{key} is not a writable case field"
                 );
-                if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                if colm_namelist::material::PARAM_FILE_FIELDS
+                    .iter()
+                    .any(|field| key.eq_ignore_ascii_case(field))
+                {
                     // An explicit empty selection prevents old revisions from restoring references.
                     put(&mut doc, key, Value::Str(String::new()))?;
                 } else {
@@ -497,14 +557,16 @@ impl Registry {
                 );
                 put(&mut doc, key, value.clone())?;
             }
-            if !remove_fields
-                .iter()
-                .any(|key| key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
-            {
-                if let Some(value) =
-                    case_process_references(&original_overlay, &doc, Some(&source))?
+            let removed_param_field = remove_fields.iter().any(|key| {
+                colm_namelist::material::PARAM_FILE_FIELDS
+                    .iter()
+                    .any(|field| key.eq_ignore_ascii_case(field))
+            });
+            if !removed_param_field {
+                for (field, value) in
+                    case_process_reference_fields(&original_overlay, &doc, Some(&source))?
                 {
-                    put(&mut doc, "DEF_TRACER_PARAM_FILES", value)?;
+                    put(&mut doc, &field, value)?;
                 }
             }
             // Remove all recognized model controls, including later edits to legacy cases.
@@ -883,7 +945,7 @@ fn rewrite_case_paths(
                 && !text.is_empty()
                 && !text.eq_ignore_ascii_case("null")
                 && !text.contains([',', ';'])
-                && !key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES")
+                && !key.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES")
             {
                 let path = source.join(text);
                 if path.exists() {

@@ -251,7 +251,7 @@ pub struct WaterInventory<'a> {
 }
 
 /// 冷启动示踪物时的全局开关（`DEF_USE_VariablySaturatedFlow` 与
-/// `DEF_TRACER_AQUIFER_MIXING_WATER_MM`）。
+/// `DEF_MT_AQUIFER_MIXING_WATER_MM`）。
 #[derive(Debug, Clone, Copy)]
 pub struct TracerColdStart {
     pub variably_saturated_flow: bool,

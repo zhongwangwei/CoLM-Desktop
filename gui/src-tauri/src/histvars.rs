@@ -57,7 +57,10 @@ pub fn hist_vars(
         .map_err(|e| format!("{e:#}"))?;
     let macros: std::collections::BTreeSet<&str> =
         k.manifest.macros.iter().map(String::as_str).collect();
-    let doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+    let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+    // 旧算例的 CH4 开关还在 `DEF_USE_TRACER`/`DEF_TRACER_NAMES` 里；不迁移的话
+    // 打开旧算例时 methane history 会被判成未启用。
+    crate::config::migrate_legacy_material(&mut doc);
 
     // 输出变量开关在 `DEF_HIST_vars_namelist` 指的文件里（`config::set_fields_batch` 写在那里）。
     let overrides = dir
@@ -139,7 +142,7 @@ pub fn hist_vars(
             long_name: switch_long_name(name),
         });
     }
-    if truth("DEF_USE_TRACER") {
+    if truth("DEF_USE_METHANE") {
         // 没有开关的这些变量都是 CH4 history（`MOD_Tracer_Reactive_Methane_Hist`）：写不写、写哪些由
         // CH4 参数文件的 `write_ch4_history`/`ch4_history_vars` 决定，规则与引擎共用 `colm_hist::methane`。
         let methane = dir.as_ref().and_then(|dir| {

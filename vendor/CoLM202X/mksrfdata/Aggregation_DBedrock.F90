@@ -64,7 +64,8 @@ SUBROUTINE Aggregation_DBedrock ( &
 
          CALL allocate_block_data (gland, dbedrock)
 
-         lndname = trim(dir_rawdata)//'/bedrock.nc'
+         !TODO: add dir, file name and var name
+         lndname = trim(dir_rawdata)//trim(DEF_rawdata%soil_bedrock%dir)//'/bedrock.nc'
          CALL ncio_read_block (lndname, 'dbedrock', gland, dbedrock)
 
 #ifdef USEMPI

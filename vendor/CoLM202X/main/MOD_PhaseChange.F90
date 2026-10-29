@@ -94,8 +94,6 @@ CONTAINS
    real(r8), intent(out) :: sm                         !rate of snowmelt [mm/s, kg/(m2 s)]
    real(r8), intent(out) :: xmf                        !total latent heat of phase change
     integer, intent(out) :: imelt(lb:nl_soil)          !flag for melting or freezing [-]
-
-   ! Optional per-layer phase-change mass exports for TRACER [kg/m2].
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
 
@@ -401,8 +399,6 @@ CONTAINS
    real(r8), intent(out) :: sm                         !rate of snowmelt [mm/s, kg/(m2 s)]
    real(r8), intent(out) :: xmf                        !total latent heat of phase change
     integer, intent(out) :: imelt(lb:nl_soil)          !flag for melting or freezing [-]
-
-   ! Optional per-layer phase-change mass exports for TRACER [kg/m2].
    real(r8), intent(out), optional :: qphs_thaw_lay(lb:nl_soil)
    real(r8), intent(out), optional :: qphs_frzc_lay(lb:nl_soil)
 

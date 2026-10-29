@@ -63,6 +63,7 @@ MODULE MOD_Vars_1DFluxes
    real(r8), allocatable :: xerr   (:) !the error of water balance [mm/s]
    real(r8), allocatable :: zerr   (:) !the error of energy balance [W/m2]
    real(r8), allocatable :: frcsat (:) !fraction of saturation area [-]
+   logical, allocatable :: frcsat_hist_valid(:)
    real(r8), allocatable :: rsur   (:) !surface runoff (mm h2o/s)
    real(r8), allocatable :: rsur_se(:) !saturation excess surface runoff (mm h2o/s)
    real(r8), allocatable :: rsur_ie(:) !infiltration excess surface runoff (mm h2o/s)
@@ -154,6 +155,7 @@ CONTAINS
             allocate ( zerr   (numpatch) )  ; zerr   (:) = spval ! the error of energy balance [W/m2]
 
             allocate ( frcsat (numpatch) )  ; frcsat (:) = spval ! fraction of saturation area [-]
+            allocate (frcsat_hist_valid(numpatch)); frcsat_hist_valid(:) = .true.
             allocate ( rsur   (numpatch) )  ; rsur   (:) = spval ! surface runoff (mm h2o/s)
             allocate ( rsur_se(numpatch) )  ; rsur_se(:) = spval ! saturation excess surface runoff (mm h2o/s)
             allocate ( rsur_ie(numpatch) )  ; rsur_ie(:) = spval ! infiltration excess surface runoff (mm h2o/s)
@@ -170,10 +172,11 @@ CONTAINS
             allocate ( qlayer (0:nl_soil,numpatch) ); qlayer(:,:) = spval ! water flux between soil layer [mm h2o/s]
             allocate ( lake_deficit (numpatch) ); lake_deficit(:) = spval ! lake deficit due to evaporation (mm h2o/s)
 
+            allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
+
             allocate ( sensors(nsensor,numpatch) ); sensors(:,:) = spval !
 
          ENDIF
-         allocate ( oroflag(numpatch) )  ; oroflag(:) = 1.0   ! /ocean(0)/seaice(2) flag
       ENDIF
 
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
@@ -252,6 +255,7 @@ ENDIF
             deallocate ( xerr    )  ! the error of water balance [mm/s]
             deallocate ( zerr    )  ! the error of energy balance [W/m2]
             deallocate ( frcsat  )  ! fraction of saturation area [-]
+            deallocate (frcsat_hist_valid)
             deallocate ( rsur    )  ! surface runoff (mm h2o/s)
             deallocate ( rsur_se )  ! saturation excess surface runoff (mm h2o/s)
             deallocate ( rsur_ie )  ! infiltration excess surface runoff (mm h2o/s)
@@ -267,10 +271,11 @@ ENDIF
             deallocate ( qlayer  )  ! water flux between soil layer [mm h2o/s]
             deallocate ( lake_deficit )  ! lake deficit due to evaporation (mm h2o/s)
 
+            deallocate ( oroflag )  !
+
             deallocate ( sensors )  !
 
          ENDIF
-         IF (allocated(oroflag)) deallocate ( oroflag )
       ENDIF
 
 IF (DEF_USE_PFT .or. DEF_USE_PC) THEN

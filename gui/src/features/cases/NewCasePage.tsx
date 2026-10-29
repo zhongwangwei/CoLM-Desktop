@@ -1242,19 +1242,19 @@ export default function NewCasePage() {
           parameters: [],
           process_files: [],
         };
-        if (Number(modelSettingValue(existing, 'DEF_TRACER_NUM') ?? '0') > 100)
+        const previousRows = tracerRows(existing);
+        if (previousRows.length > 100)
           throw new Error(
             t(
               '超过100个示踪物的定义，请先在示踪设置中核对；未更改算例。',
               'Definitions exceeding 100 tracers must be reviewed in tracer settings; the case was not changed.',
             ),
           );
-        const previousRows = tracerRows(existing);
         const rows = appendTracerFamily(previousRows, 'methane').map((row) =>
           row.TYPES.toLowerCase() === 'gas' &&
           /^(ch4|methane)$/i.test(row.NAMES) &&
           /^(null|none)?$/i.test(unquote(row.PARAM_FILES).trim())
-            ? { ...row, PARAM_FILES: 'standard_ch4_parameter.nml' }
+            ? { ...row, PARAM_FILES: 'standard_methane_parameter.nml' }
             : row,
         );
         if (
@@ -1273,16 +1273,15 @@ export default function NewCasePage() {
             (row) =>
               row.TYPES.toLowerCase() === 'gas' &&
               /^(ch4|methane)$/i.test(row.NAMES) &&
-              unquote(row.PARAM_FILES).trim() === 'standard_ch4_parameter.nml',
+              unquote(row.PARAM_FILES).trim() === 'standard_methane_parameter.nml',
           ) &&
           !state.version?.overlay.process_files.some(
-            (asset) => asset.relative_path === 'standard_ch4_parameter.nml',
+            (asset) => asset.relative_path === 'standard_methane_parameter.nml',
           );
         methaneValues = {
           ...applyTracerSelection(existing, schema, rows).physics,
           ...(generatedMethaneDefault ? { DEF_USE_Dynamic_Wetland: '.false.' } : {}),
           DEF_USE_BGC: '.true.',
-          DEF_USE_TRACER: '.true.',
           DEF_USE_Campbell_SOIL_MODEL: '.false.',
           DEF_USE_VariablySaturatedFlow: '.true.',
           DEF_URBAN_RUN: '.false.',
@@ -1327,7 +1326,14 @@ export default function NewCasePage() {
         });
       } else {
         delete next.DEF_TUNING_CROP_PLANTING_DAY;
-        if (site.urban) Object.assign(next, { DEF_USE_BGC: '.false.', DEF_USE_TRACER: '.false.' });
+        if (site.urban)
+          Object.assign(next, {
+            DEF_USE_BGC: '.false.',
+            DEF_USE_ISOTOPE: '.false.',
+            DEF_USE_METHANE: '.false.',
+            DEF_USE_SEDIMENT: '.false.',
+            DEF_SOLUTE_NAMES: "''",
+          });
       }
       return next;
     });

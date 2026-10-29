@@ -30,6 +30,8 @@ pub(crate) fn query(
         .map_err(|e| e.to_string())?,
         None => colm_namelist::parse("").map_err(|e| e.to_string())?,
     };
+    // 旧算例打开配置面板前先迁移示踪字段，界面直接显示新 family 字段。
+    crate::config::migrate_legacy_material(&mut doc);
     for (key, raw) in case_values.unwrap_or_default() {
         let field = colm_schema::find(&key).ok_or_else(|| format!("unknown case field: {key}"))?;
         if field.group.is_none() || colm_model::is_model_field(&key) {
@@ -40,10 +42,13 @@ pub(crate) fn query(
         let value = super::typed(&key, &raw)?;
         put(&mut doc, field.name, &value.to_string())?;
     }
-    if let Some(value) = colm_model::case_process_references(&stored_overlay, &doc, case.as_deref())
-        .map_err(|e| e.to_string())?
+    // 四个 family 的参数文件字段各自把算例选的路径解析成冻结资产。
+    // 只写回溶质列表会漏掉同位素/甲烷/泥沙三条（上游 7d2fca93 拆表后的新字段）。
+    for (field, value) in
+        colm_model::case_process_reference_fields(&stored_overlay, &doc, case.as_deref())
+            .map_err(|e| e.to_string())?
     {
-        put(&mut doc, "DEF_TRACER_PARAM_FILES", &value.to_string())?;
+        put(&mut doc, &field, &value.to_string())?;
     }
     let overlay = colm_model::model_overlay(&stored_overlay);
     for path in doc.paths() {
@@ -312,6 +317,12 @@ fn confirmed_gate(
         return true;
     }
     gate_switch(reason).is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
+        // 示踪剂拆成 family 后，隐藏理由不再点名某个字段，父闸门要按子字段所属 family 反查。
+        || matches!(
+            reason,
+            Some("需要先启用任一种示踪物") | Some("当前没有启用同位素，不使用水同位素参数")
+        ) && tracer_parent_gate(field.name)
+            .is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
         || forced_by_explicit_switch(reason, doc, have, kernel)
 }
 
@@ -342,7 +353,7 @@ fn forced_by_explicit_switch(
             kernel && have.contains("CatchLateralFlow")
         }
         Some("由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭") => {
-            explicit("DEF_USE_TRACER", true) && doc.get("DEF_TRACER_NAMES").is_some()
+            explicit("DEF_USE_METHANE", true) && doc.get("DEF_METHANE_PARAM_FILE").is_some()
         }
         _ => false,
     }
@@ -351,7 +362,7 @@ fn forced_by_explicit_switch(
 fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
     match reason {
         Some("河湖流已关闭") => Some("DEF_USE_GridRiverLakeFlow"),
-        Some("需要先启用 TRACER") => Some("DEF_USE_TRACER"),
+        // 示踪剂拆成 family 开关后没有单一父字段，隐藏由 field_runtime_state 的派生判定负责。
         Some("需要先启用城市模型") => Some("DEF_URBAN_RUN"),
         Some("需要 BGC") | Some("需要先启用 BGC") => Some("DEF_USE_BGC"),
         Some("需要先启用土壤初始场") => Some("DEF_USE_SoilInit"),
@@ -368,6 +379,26 @@ fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
 
 // Presentation dependencies stay available even when runtime rules return no disabling reason.
 // An absent parent is deliberately not treated as an enabled catalog default.
+/// 示踪剂拆成 family 后，父字段按 family 选择。溶质没有布尔开关（由名单非空启用），
+/// 通用 MT 参数也不属于某个 family，二者不设父闸门。
+fn tracer_parent_gate(name: &str) -> Option<&'static str> {
+    let upper = name.to_ascii_uppercase();
+    if upper.starts_with("DEF_ISO_")
+        || upper.starts_with("DEF_ISOTOPE_")
+        || upper == "DEF_MT_AQUIFER_MIXING_WATER_MM"
+        || upper == "DEF_MT_USE_SOIL_INIT"
+        || upper.starts_with("DEF_MT_SOIL_INIT_")
+    {
+        Some("DEF_USE_ISOTOPE")
+    } else if upper.starts_with("DEF_METHANE") || upper == "DEF_USE_METHANE" {
+        Some("DEF_USE_METHANE")
+    } else if upper.starts_with("DEF_SEDIMENT") || upper == "DEF_USE_SEDIMENT" {
+        Some("DEF_USE_SEDIMENT")
+    } else {
+        None
+    }
+}
+
 fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'static str> {
     let name = field.name;
     let parent = match name {
@@ -381,12 +412,10 @@ fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'sta
         "DEF_file_SnowInit" => Some("DEF_USE_SnowInit"),
         "DEF_file_cn_init" => Some("DEF_USE_CN_INIT"),
         "DEF_file_WaterTable" => Some("DEF_USE_WaterTableInit"),
-        "DEF_TRACER_KINETIC_SCHEME"
-        | "DEF_TRACER_OPEN_WATER_KINETIC"
-        | "DEF_TRACER_SOIL_KINETIC" => Some("DEF_TRACER_USE_FRACTIONATION"),
-        "DEF_TRACER_SOIL_INIT_FILE" | "DEF_TRACER_SOIL_INIT_VARS" => {
-            Some("DEF_TRACER_USE_SOIL_INIT")
+        "DEF_ISO_KINETIC_SCHEME" | "DEF_ISO_OPEN_WATER_KINETIC" | "DEF_ISO_SOIL_KINETIC" => {
+            Some("DEF_ISO_USE_FRACTIONATION")
         }
+        "DEF_MT_SOIL_INIT_FILE" | "DEF_MT_SOIL_INIT_VARS" => Some("DEF_MT_USE_SOIL_INIT"),
         "DEF_FERT_SOURCE" => Some("DEF_USE_FERT"),
         "DEF_IRRIGATION_ALLOCATION" => Some("DEF_USE_IRRIGATION"),
         "DEF_USE_FERT"
@@ -417,7 +446,7 @@ fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'sta
             Some("DEF_USE_PLANTHYDRAULICS")
         }
         _ if name.starts_with("DEF_GridRiverLake_") => Some("DEF_USE_GridRiverLakeFlow"),
-        _ if field_section(name, field.group) == Some("示踪剂") => Some("DEF_USE_TRACER"),
+        _ if field_section(name, field.group) == Some("示踪剂") => tracer_parent_gate(name),
         _ if field_section(name, field.group) == Some("城市") => Some("DEF_URBAN_RUN"),
         _ => gate_switch(reason),
     };
@@ -468,9 +497,8 @@ fn process_files(
         )?)
         .map_err(|e| e.to_string())?;
         file["verified"] = json!(true);
-        let explicit_mapping = ["DEF_TRACER_NAMES", "DEF_TRACER_PARAM_FILES"]
-            .iter()
-            .all(|key| matches!(doc.get(key), Some(NmlValue::Str(_))));
+        // 甲烷 family 是否引用这份资产：只看它自己的参数文件字段，其他 family 的文件不参与。
+        let explicit_mapping = matches!(doc.get("DEF_METHANE_PARAM_FILE"), Some(NmlValue::Str(_)));
         let active = explicit_mapping.then(|| {
             tracer_param_file(doc, |name, _| {
                 matches!(name.to_ascii_uppercase().as_str(), "CH4" | "METHANE")
@@ -678,13 +706,10 @@ mod tests {
             ("DEF_Aerosol_Clim", "DEF_Aerosol_Readin"),
             ("DEF_USE_OZONEDATA", "DEF_USE_OZONESTRESS"),
             ("DEF_file_Ozone", "DEF_USE_OZONEDATA"),
-            ("DEF_TRACER_SOIL_INIT_FILE", "DEF_TRACER_USE_SOIL_INIT"),
-            ("DEF_TRACER_KINETIC_SCHEME", "DEF_TRACER_USE_FRACTIONATION"),
-            (
-                "DEF_TRACER_OPEN_WATER_KINETIC",
-                "DEF_TRACER_USE_FRACTIONATION",
-            ),
-            ("DEF_TRACER_SOIL_KINETIC", "DEF_TRACER_USE_FRACTIONATION"),
+            ("DEF_MT_SOIL_INIT_FILE", "DEF_MT_USE_SOIL_INIT"),
+            ("DEF_ISO_KINETIC_SCHEME", "DEF_ISO_USE_FRACTIONATION"),
+            ("DEF_ISO_OPEN_WATER_KINETIC", "DEF_ISO_USE_FRACTIONATION"),
+            ("DEF_ISO_SOIL_KINETIC", "DEF_ISO_USE_FRACTIONATION"),
             ("DEF_file_cn_init", "DEF_USE_CN_INIT"),
             ("DEF_USE_FIRE", "DEF_USE_BGC"),
             ("DEF_FERT_SOURCE", "DEF_USE_FERT"),
@@ -783,7 +808,7 @@ mod tests {
         let (root, _, draft) = fixture();
         for (parent, child) in [
             ("DEF_URBAN_RUN", "DEF_URBAN_type_scheme"),
-            ("DEF_USE_TRACER", "DEF_TRACER_NUM"),
+            ("DEF_USE_ISOTOPE", "DEF_ISOTOPE_SPECIES"),
         ] {
             for enabled in [false, true] {
                 let result = query(
@@ -895,11 +920,11 @@ mod tests {
             result["fields"].as_array().unwrap().len(),
             colm_schema::all().len()
         );
-        assert_eq!(field(&result, "DEF_TRACER_TYPES")["mode"], "editable");
-        assert_eq!(field(&result, "DEF_TRACER_TYPES")["pending"], true);
-        assert!(field(&result, "DEF_USE_TRACER")["effective_value"].is_null());
+        assert_eq!(field(&result, "DEF_ISOTOPE_SPECIES")["mode"], "editable");
+        assert_eq!(field(&result, "DEF_ISOTOPE_SPECIES")["pending"], true);
+        assert!(field(&result, "DEF_USE_ISOTOPE")["effective_value"].is_null());
         let values = BTreeMap::from([
-            ("DEF_USE_TRACER".into(), ".false.".into()),
+            ("DEF_USE_ISOTOPE".into(), ".false.".into()),
             ("DEF_USE_BGC".into(), ".false.".into()),
         ]);
         let result = query(
@@ -911,7 +936,7 @@ mod tests {
             Some(values),
         )
         .unwrap();
-        assert_eq!(field(&result, "DEF_TRACER_TYPES")["mode"], "disabled");
+        assert_eq!(field(&result, "DEF_ISOTOPE_SPECIES")["mode"], "disabled");
         assert_eq!(field(&result, "DEF_USE_FIRE")["mode"], "disabled");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1207,12 +1232,12 @@ mod tests {
         let (root, registry, draft) = fixture();
         let case = root.join("case");
         std::fs::create_dir(&case).unwrap();
-        let original = "&nl_colm\nDEF_CASE_NAME='case'\nDEF_USE_LCT=.true.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.false.\nDEF_USE_BGC=.false.\nDEF_USE_TRACER=.false.\nDEF_TRACER_PARAM_FILES='old.nml'\nDEF_TUNING_CROP_PLANTING_DAY=120\n/\n";
+        let original = "&nl_colm\nDEF_CASE_NAME='case'\nDEF_USE_LCT=.true.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.false.\nDEF_USE_BGC=.false.\nDEF_TUNING_CROP_PLANTING_DAY=120\n/\n&nl_colm_material\nDEF_USE_ISOTOPE=.false.\nDEF_SOLUTE_PARAM_FILES='old.nml'\n/\n";
         std::fs::write(case.join("case.nml"), original).unwrap();
         let frozen = registry.freeze(&draft.id, &case).unwrap();
         let remove = vec![
             "DEF_TUNING_CROP_PLANTING_DAY".into(),
-            "DEF_TRACER_PARAM_FILES".into(),
+            "DEF_SOLUTE_PARAM_FILES".into(),
         ];
         let rejected = vec![("DEF_USE_BGC".into(), NmlValue::Bool(true))];
         let preview = registry
@@ -1272,7 +1297,7 @@ mod tests {
             colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml")).unwrap()).unwrap();
         assert!(saved.get(&remove[0]).is_none());
         assert_eq!(
-            saved.get("DEF_TRACER_PARAM_FILES"),
+            saved.get("DEF_SOLUTE_PARAM_FILES"),
             Some(&NmlValue::Str(String::new()))
         );
         assert_eq!(saved.get("DEF_USE_BGC"), Some(&NmlValue::Bool(false)));
@@ -1290,7 +1315,7 @@ mod tests {
         std::fs::write(case.join("process/source.nml"), bytes).unwrap();
         std::fs::write(stage.join("process/frozen.nml"), bytes).unwrap();
         let original =
-            "&nl_colm\nDEF_TRACER_NAMES='CH4'\nDEF_TRACER_PARAM_FILES='process/source.nml'\n/\n";
+            "&nl_colm\n/\n&nl_colm_material\nDEF_USE_METHANE=.true.\nDEF_METHANE_PARAM_FILE='process/source.nml'\n/\n";
         std::fs::write(case.join("case.nml"), original).unwrap();
         draft.overlay.process_files.push(Asset {
             relative_path: "process/frozen.nml".into(),
@@ -1304,14 +1329,14 @@ mod tests {
         };
         let result = query(&root, source(), case.to_str(), None, None, None).unwrap();
         assert_eq!(
-            field(&result, "DEF_TRACER_PARAM_FILES")["configured_value"],
+            field(&result, "DEF_METHANE_PARAM_FILE")["configured_value"],
             "'process/frozen.nml'"
         );
         assert_eq!(result["process_files"][0]["active_methane_asset"], true);
-        let edited = BTreeMap::from([("DEF_TRACER_PARAM_FILES".into(), "custom.nml".into())]);
+        let edited = BTreeMap::from([("DEF_METHANE_PARAM_FILE".into(), "custom.nml".into())]);
         let result = query(&root, source(), case.to_str(), None, None, Some(edited)).unwrap();
         assert_eq!(
-            field(&result, "DEF_TRACER_PARAM_FILES")["configured_value"],
+            field(&result, "DEF_METHANE_PARAM_FILE")["configured_value"],
             "'custom.nml'"
         );
         assert_eq!(result["process_files"][0]["active_methane_asset"], false);
@@ -1347,7 +1372,7 @@ mod tests {
         std::fs::create_dir_all(&assets).unwrap();
         std::fs::write(
             assets.join("x.nml"),
-            "&nl_colm_tracer_parameter\nDEF_TRACER%init_conc=1.\n/\n",
+            "&nl_colm_solute_parameter\nDEF_SOLUTE%init_conc=1.\n/\n",
         )
         .unwrap();
         let mut overlay = Overlay::default();
@@ -1368,7 +1393,7 @@ mod tests {
         let (root, registry, mut draft) = fixture();
         let stage = root.join("stage");
         std::fs::create_dir(&stage).unwrap();
-        let bytes = b"&nl_colm_tracer_parameter\nDEF_TRACER%init_conc=1.\n/\n";
+        let bytes = b"&nl_colm_solute_parameter\nDEF_SOLUTE%init_conc=1.\n/\n";
         std::fs::write(stage.join("tracer.nml"), bytes).unwrap();
         draft.overlay.process_files.push(Asset {
             relative_path: "tracer.nml".into(),
@@ -1604,10 +1629,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(source.join("fresh-soil.nc"), b"fixture").unwrap();
-        let original="&nl_colm\nDEF_CASE_NAME='original'\nDEF_dir_runtime='runtime'\nDEF_USE_SoilInit=.false.\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\n/\n";
+        let original="&nl_colm\nDEF_CASE_NAME='original'\nDEF_dir_runtime='runtime'\nDEF_USE_SoilInit=.false.\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\n/\n&nl_colm_material\n/\n";
         std::fs::write(source.join("case.nml"), original).unwrap();
-        let stale = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='hybrid'\n/\n";
-        let frozen_asset = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='wetwat'\n/\n";
+        let stale = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='wetwat'\n/\n";
+        let frozen_asset =
+            b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='satellite'\n/\n";
         std::fs::write(source.join("process/source-ch4.nml"), stale).unwrap();
         std::fs::write(stage.join("process/ch4.nml"), frozen_asset).unwrap();
         let source_alias = source
@@ -1618,19 +1644,19 @@ mod tests {
         let mut case_doc = colm_namelist::parse(original).unwrap();
         for (key, value) in [
             ("DEF_USE_BGC", ".true."),
-            ("DEF_USE_TRACER", ".true."),
+            ("DEF_USE_METHANE", ".true."),
             ("DEF_USE_Campbell_SOIL_MODEL", ".false."),
             ("DEF_USE_VariablySaturatedFlow", ".true."),
-            ("DEF_TRACER_NAMES", "'CH4'"),
-            ("DEF_TRACER_TYPES", "'gas'"),
-            ("DEF_TRACER_NUM", "1"),
-            ("DEF_TRACER_PARAM_FILES", reference.as_str()),
+            ("DEF_METHANE_PARAM_FILE", reference.as_str()),
             ("DEF_USE_Dynamic_Wetland", ".false."),
             ("DEF_USE_NITRIF", ".false."),
             ("DEF_USE_FIRE", ".false."),
         ] {
+            let group = colm_schema::find(key)
+                .and_then(|field| field.group)
+                .expect("case field has no namelist group");
             case_doc
-                .insert(key, parse_value(value).unwrap(), "nl_colm")
+                .insert(key, parse_value(value).unwrap(), group)
                 .unwrap();
         }
         std::fs::write(source.join("case.nml"), case_doc.to_string()).unwrap();
@@ -1660,7 +1686,7 @@ mod tests {
         let context = vec![preview.to_string_lossy().into_owned()];
         let changes = vec![
             FieldChange {
-                path: "DEF_TRACER_PARAM_FILES".into(),
+                path: "DEF_METHANE_PARAM_FILE".into(),
                 value: source_alias,
             },
             FieldChange {
@@ -1729,7 +1755,7 @@ mod tests {
 
     #[test]
     fn process_override_is_file_scoped_and_unknown_entries_are_read_only() {
-        let bytes = b"&nl_colm_tracer_parameter\nDEF_TRACER%init_conc=1.\nunknown=7\n/\n";
+        let bytes = b"&nl_colm_solute_parameter\nDEF_SOLUTE%init_conc=1.\nunknown=7\n/\n";
         let assets = BTreeMap::from([
             ("a.nml".into(), bytes.to_vec()),
             ("b.nml".into(), bytes.to_vec()),
@@ -1742,8 +1768,8 @@ mod tests {
             });
         }
         overlay.parameters.push(ParameterOverrideRecord {
-            parameter_id: "process:tracer:DEF_TRACER%init_conc".into(),
-            raw_key: "DEF_TRACER%init_conc".into(),
+            parameter_id: "process:solute:DEF_SOLUTE%init_conc".into(),
+            raw_key: "DEF_SOLUTE%init_conc".into(),
             scope_instance: ParameterScopeInstance {
                 kind: "process-file".into(),
                 scheme: None,
@@ -1765,11 +1791,11 @@ mod tests {
                 .find(|e| e["path"] == key)
                 .unwrap()
         };
-        assert_eq!(entry(0, "DEF_TRACER%init_conc")["value"], "2.");
-        assert_eq!(entry(1, "DEF_TRACER%init_conc")["value"], "1.");
+        assert_eq!(entry(0, "DEF_SOLUTE%init_conc")["value"], "2.");
+        assert_eq!(entry(1, "DEF_SOLUTE%init_conc")["value"], "1.");
         assert_eq!(entry(0, "unknown")["editable"], false);
-        assert_eq!(entry(0, "DEF_TRACER%init_conc")["editable"], true);
-        assert_eq!(entry(0, "DEF_TRACER%init_conc")["asset_value"], "1.");
+        assert_eq!(entry(0, "DEF_SOLUTE%init_conc")["editable"], true);
+        assert_eq!(entry(0, "DEF_SOLUTE%init_conc")["asset_value"], "1.");
     }
 
     #[test]
@@ -1794,20 +1820,27 @@ mod tests {
         assert!(files
             .iter()
             .all(|file| file["active_methane_asset"].is_null()));
-        put(&mut doc, "DEF_TRACER_NAMES", "'CH4'").unwrap();
+        put(&mut doc, "DEF_USE_METHANE", ".true.").unwrap();
         let files = process_files(&overlay, &assets, &doc, &BTreeSet::new(), false, false).unwrap();
         assert!(files
             .iter()
             .all(|file| file["active_methane_asset"].is_null()));
-        put(&mut doc, "DEF_TRACER_PARAM_FILES", "'second.nml'").unwrap();
+        // 溶质名单不再是甲烷的映射来源：只有 DEF_METHANE_PARAM_FILE 决定挂哪份资产。
+        put(&mut doc, "DEF_SOLUTE_NAMES", "'METHANE'").unwrap();
+        let files = process_files(&overlay, &assets, &doc, &BTreeSet::new(), false, false).unwrap();
+        assert!(files
+            .iter()
+            .all(|file| file["active_methane_asset"].is_null()));
+        put(&mut doc, "DEF_METHANE_PARAM_FILE", "'second.nml'").unwrap();
         let files = process_files(&overlay, &assets, &doc, &BTreeSet::new(), false, false).unwrap();
         assert_eq!(files[0]["active_methane_asset"], false);
         assert_eq!(files[1]["active_methane_asset"], true);
         assert!(files.iter().all(|file| file["verified"] == true));
         assert!(assets.values().all(|asset| asset == bytes));
-        put(&mut doc, "DEF_TRACER_NAMES", "'METHANE'").unwrap();
+        put(&mut doc, "DEF_METHANE_PARAM_FILE", "'first.nml'").unwrap();
         let files = process_files(&overlay, &assets, &doc, &BTreeSet::new(), false, false).unwrap();
-        assert_eq!(files[1]["active_methane_asset"], true);
+        assert_eq!(files[0]["active_methane_asset"], true);
+        assert_eq!(files[1]["active_methane_asset"], false);
     }
 
     #[test]

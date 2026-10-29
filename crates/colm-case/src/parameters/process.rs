@@ -14,22 +14,31 @@ pub struct ProcessDefault {
 /// CoLM 随附的示踪物标准参数文件（`vendor/CoLM202X/run/standard_*_parameter.nml`）和版本能改的 namelist 组。
 /// 新建模拟开示踪物时，算例目录里生成的就是这几份。版本不带文件、只记改动时，改动作用在算例自己的
 /// 这份文件上（2026-10-21 用户选的做法）：算例在新建模拟时选的方案和浓度不被版本整份盖掉。
-/// `nl_colm_tracer_forcing` 是强迫数据的设置，属于算例，不在可改之列。
+/// `nl_colm_mt_forcing` 是强迫数据的设置，属于算例，不在可改之列。
+///
+/// 上游 7d2fca93 把通用示踪物参数拆成了按 family 的组：同位素一份
+/// `standard_isotope_parameter.nml`（`&nl_colm_isotope_parameter`），每个溶质
+/// 各一份（`&nl_colm_solute_parameter`），甲烷、泥沙各一份；旧的
+/// `&nl_colm_tracer_parameter` 与 `standard_ch4_parameter.nml` 已不存在。
 pub const STANDARD_PARAM_FILES: &[(&str, &[&str])] = &[
     (
-        "standard_ch4_parameter.nml",
-        &["nl_colm_tracer_parameter", "nl_colm_methane_parameter"],
+        "standard_methane_parameter.nml",
+        &["nl_colm_methane_parameter"],
     ),
     (
         "standard_sediment_parameter.nml",
-        &["nl_colm_tracer_parameter", "nl_colm_sediment_parameter"],
+        &["nl_colm_sediment_parameter"],
     ),
-    ("standard_O18_parameter.nml", &["nl_colm_tracer_parameter"]),
-    ("standard_HDO_parameter.nml", &["nl_colm_tracer_parameter"]),
+    (
+        "standard_isotope_parameter.nml",
+        &["nl_colm_isotope_parameter"],
+    ),
     (
         "standard_chloride_parameter.nml",
-        &["nl_colm_tracer_parameter"],
+        &["nl_colm_solute_parameter"],
     ),
+    ("standard_nh4_parameter.nml", &["nl_colm_solute_parameter"]),
+    ("standard_no3_parameter.nml", &["nl_colm_solute_parameter"]),
 ];
 
 /// 新建模拟时由算例选定、写进这些文件的值（甲烷淹没方案、稻田、空间 pH、溶质初始与降水浓度）：
@@ -38,8 +47,8 @@ pub const CASE_CHOSEN: &[&str] = &[
     "DEF_METHANE%inundation_mode",
     "DEF_METHANE%enable_rice_paddy",
     "DEF_METHANE%use_spatial_ph",
-    "DEF_TRACER%init_conc",
-    "DEF_TRACER%precip_default_conc",
+    "DEF_SOLUTE%init_conc",
+    "DEF_SOLUTE%precip_default_conc",
 ];
 
 /// 不带文件时，`path`（所属组 `group`）能不能作为改动记在标准参数文件 `file` 上。
@@ -52,33 +61,45 @@ pub fn standard_file_accepts(file: &str, path: &str, group: &str) -> bool {
 }
 
 pub fn code_defaults() -> Vec<ProcessDefault> {
+    // 上游把通用的 tracer_parameter_type 删掉了：溶质参数改成按 species 的
+    // solute_parameter_type（&nl_colm_solute_parameter），同位素参数拍平成
+    // MOD_MT_Namelist.F90 的模块变量 DEF_ISO_*（&nl_colm_isotope_parameter）。
+    // 两者都要留，否则桌面端的"示踪物与泥沙"页会整组消失。
     let mut defaults = process_type_defaults(
-        include_str!("../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Defs.F90"),
-        "MOD_Tracer_Defs.F90",
-        "tracer_parameter_type",
-        "DEF_TRACER",
-        "nl_colm_tracer_parameter",
+        include_str!("../../../../vendor/CoLM202X/main/MATERIAL/FAMILY_SOLUTE/MOD_MT_Solute.F90"),
+        "MOD_MT_Solute.F90",
+        "solute_parameter_type",
+        "DEF_SOLUTE",
+        "nl_colm_solute_parameter",
     );
+    defaults.extend(module_variable_defaults(
+        include_str!("../../../../vendor/CoLM202X/main/MATERIAL/MOD_MT_Namelist.F90"),
+        "MOD_MT_Namelist.F90",
+        "DEF_ISO_",
+        "nl_colm_isotope_parameter",
+    ));
     let methane = include_str!(
-        "../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Reactive_Methane_Const.F90"
+        "../../../../vendor/CoLM202X/main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Const.F90"
     );
     defaults.extend(process_type_defaults(
         methane,
-        "MOD_Tracer_Reactive_Methane_Const.F90",
+        "MOD_MT_Methane_Const.F90",
         "Methane_type",
         "DEF_METHANE",
         "nl_colm_methane_parameter",
     ));
     defaults.extend(process_type_defaults(
         methane,
-        "MOD_Tracer_Reactive_Methane_Const.F90",
+        "MOD_MT_Methane_Const.F90",
         "Methane_hydrology_type",
         "DEF_METHANE_hydrology",
         "nl_colm_methane_parameter",
     ));
     defaults.extend(process_type_defaults(
-        include_str!("../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Particle_Sediment.F90"),
-        "MOD_Tracer_Particle_Sediment.F90",
+        include_str!(
+            "../../../../vendor/CoLM202X/main/MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90"
+        ),
+        "MOD_MT_Sediment.F90",
         "sediment_parameter_type",
         "DEF_SEDIMENT",
         "nl_colm_sediment_parameter",
@@ -102,13 +123,55 @@ pub fn code_defaults() -> Vec<ProcessDefault> {
             path: path.into(),
             value: value.into(),
             kind,
-            group: "nl_colm_tracer_forcing",
+            group: "nl_colm_mt_forcing",
             doc: None,
             insertable,
-            source_location: "MOD_Tracer_ForcingInput.F90:DEF_TRACER_PARAM_FILES".into(),
+            source_location: "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing".into(),
         });
     }
     defaults
+}
+
+/// 模块级配置变量（不是派生类型成员）：按 `:: 名字 = 默认值` 的声明行抽取，
+/// 只收指定前缀的变量，遇到 `CONTAINS` 即停止。上游把同位素参数从
+/// tracer_parameter_type 拍平成了 MOD_MT_Namelist.F90 的 DEF_ISO_* 模块变量，
+/// 没有 type 可扫，只能这样抽。
+fn module_variable_defaults(
+    source: &str,
+    file: &str,
+    prefix: &str,
+    group: &'static str,
+) -> Vec<ProcessDefault> {
+    let mut fields = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        if line.trim().eq_ignore_ascii_case("contains") {
+            break;
+        }
+        let (declaration, comment) = line.split_once('!').unwrap_or((line, ""));
+        let Some((decl, assignment)) = declaration.split_once("::") else {
+            continue;
+        };
+        let Some(kind) = process_decl_kind(decl) else {
+            continue;
+        };
+        let Some((name, raw)) = assignment.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.to_ascii_uppercase().starts_with(prefix) {
+            continue;
+        }
+        fields.push(ProcessDefault {
+            path: name.to_string(),
+            value: process_code_value(kind, raw),
+            kind,
+            group,
+            doc: (!comment.trim().is_empty()).then(|| comment.trim().to_string()),
+            insertable: true,
+            source_location: format!("{file}:{}", index + 1),
+        });
+    }
+    fields
 }
 
 fn process_type_defaults(

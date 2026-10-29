@@ -34,8 +34,6 @@ MODULE MOD_HistGridded
 
    type(grid_concat_type) :: hist_concat
 
-   integer, parameter :: hist_data_id_first = 1001
-   integer, parameter :: hist_data_id_count = 2000
    integer :: hist_data_id
 
 !--------------------------------------------------------------------------
@@ -167,7 +165,7 @@ ENDIF
 #endif
 
       IF (trim(DEF_HIST_mode) == 'one') THEN
-         hist_data_id = hist_data_id_first
+         hist_data_id = 10001
       ENDIF
 
    END SUBROUTINE hist_gridded_init
@@ -241,7 +239,6 @@ ENDIF
          longname, units)
 
    USE MOD_Block
-   USE MOD_Vars_1DAccFluxes,  only: nac
    USE MOD_Vars_Global, only: spval
    IMPLICIT NONE
 
@@ -260,7 +257,6 @@ ENDIF
    integer :: iblkme, xblk, yblk, xloc, yloc
    integer :: compress
 
-      IF (p_is_worker)  WHERE (acc_vec /= spval)  acc_vec = acc_vec / nac
       IF (p_is_io)      CALL allocate_block_data (ghist, flux_xy_2d)
 
       CALL mp2g_hist_urb%pset2grid (acc_vec, flux_xy_2d, spv = spval, msk = filter)
@@ -730,8 +726,7 @@ ENDIF
          IF (allocated(global_fields)) deallocate (global_fields)
 #endif
 
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
@@ -965,8 +960,7 @@ ENDIF
          IF (allocated(global_fields)) deallocate (global_fields)
 #endif
 
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
 
@@ -1207,8 +1201,7 @@ ENDIF
          IF (allocated(global_fields)) deallocate (global_fields)
 #endif
 
-         hist_data_id = mod(hist_data_id-hist_data_id_first+1, hist_data_id_count) + &
-            hist_data_id_first
+         hist_data_id = mod(hist_data_id-10000,10000) + 100001
 
       ELSEIF (trim(DEF_HIST_mode) == 'block') THEN
          IF (p_is_io) THEN

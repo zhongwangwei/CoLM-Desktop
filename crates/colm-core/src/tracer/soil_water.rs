@@ -12,7 +12,7 @@
 //! # 尚未移植
 //! 分馏（`tracer_fractionation_active`）与同位素的土壤/雪层扩散属于下一阶段：只要某个
 //! 输运示踪物会走到这些分支，入口就返回错误、什么都不改。非同位素示踪物（溶质）在
-//! `DEF_TRACER_SOIL_VAPOR_DIFFUSION` 打开时的气相扩散**已移植**——上游对未登记分馏物理
+//! `DEF_ISO_SOIL_VAPOR_DIFFUSION` 打开时的气相扩散**已移植**——上游对未登记分馏物理
 //! 的示踪物取 `diff_ratio = alpha = 1`、液相自扩散系数 0。
 //!
 //! # 层下标
@@ -78,21 +78,21 @@ const SPVAL: f64 = -1.0e36;
 
 /// 本模块读的 namelist 开关（`MOD_Namelist`）。
 ///
-/// `DEF_TRACER_SOIL_KINETIC` 与 `DEF_TRACER_SNOWMELT_EQUILIBRATION` 只在分馏生效时起作用。
+/// `DEF_ISO_SOIL_KINETIC` 与 `DEF_ISO_SNOWMELT_EQUILIBRATION` 只在分馏生效时起作用。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SoilWaterOptions {
-    /// `DEF_TRACER_SUBL_SKIN_MM`（默认 5）：升华的表层交换厚度，总以 `skin_mass=` 传入
+    /// `DEF_ISO_SUBL_SKIN_MM`（默认 5）：升华的表层交换厚度，总以 `skin_mass=` 传入
     /// `tracer_atmospheric_tracer_loss`，不分馏时也改变舍入路径。
     pub subl_skin_mm: f64,
-    /// `DEF_TRACER_SOIL_DIFFUSION`（默认开）。
+    /// `DEF_ISO_SOIL_DIFFUSION`（默认开）。
     pub soil_diffusion: bool,
-    /// `DEF_TRACER_SOIL_VAPOR_DIFFUSION`（默认开）。
+    /// `DEF_ISO_SOIL_VAPOR_DIFFUSION`（默认开）。
     pub soil_vapor_diffusion: bool,
     /// `DEF_USE_CoLMDEBUG`：标准土壤支里 `wetwat` 变化时打印警告。
     pub colm_debug: bool,
-    /// `DEF_TRACER_SOIL_KINETIC == 'RESISTANCE'`（默认）；`'EXPONENT'` 时为假。
+    /// `DEF_ISO_SOIL_KINETIC == 'RESISTANCE'`（默认）；`'EXPONENT'` 时为假。
     pub soil_kinetic_resistance: bool,
-    /// `DEF_TRACER_SNOWMELT_EQUILIBRATION`（默认 0）。
+    /// `DEF_ISO_SNOWMELT_EQUILIBRATION`（默认 0）。
     pub snowmelt_equilibration: f64,
 }
 

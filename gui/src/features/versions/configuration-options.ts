@@ -25,35 +25,39 @@ export type ConfigurationField = {
   built_in_default?: string | null;
 };
 const fractionationChildren = new Set([
-  'DEF_TRACER_KINETIC_SCHEME',
-  'DEF_TRACER_OPEN_WATER_KINETIC',
-  'DEF_TRACER_SOIL_KINETIC',
+  'DEF_ISO_KINETIC_SCHEME',
+  'DEF_ISO_OPEN_WATER_KINETIC',
+  'DEF_ISO_SOIL_KINETIC',
 ]);
+// 上游 MaterialTransport 把示踪剂拆成 family：这些字段只对水同位素有意义。
 const isotopeFields = new Set([
   ...fractionationChildren,
-  'DEF_TRACER_USE_FRACTIONATION',
-  'DEF_TRACER_AQUIFER_MIXING_WATER_MM',
-  'DEF_TRACER_ICE_SUPERSAT_SLOPE',
-  'DEF_TRACER_CG_RELHUM_MAX',
-  'DEF_TRACER_SUBL_SKIN_MM',
-  'DEF_TRACER_SOIL_DIFFUSION',
-  'DEF_TRACER_SOIL_VAPOR_DIFFUSION',
-  'DEF_TRACER_CANOPY_EQUILIBRATION',
-  'DEF_TRACER_SNOWMELT_EQUILIBRATION',
-  'DEF_TRACER_NSS_LEAF_WATER_PER_LAI',
-  'DEF_TRACER_NSS_LEAF_PATH_LENGTH',
-  'DEF_TRACER_NSS_LEAF_RB',
-  'DEF_TRACER_USE_SOIL_INIT',
-  'DEF_TRACER_SOIL_INIT_FILE',
-  'DEF_TRACER_SOIL_INIT_VARS',
+  'DEF_USE_ISOTOPE',
+  'DEF_ISOTOPE_SPECIES',
+  'DEF_ISOTOPE_PARAM_FILE',
+  'DEF_ISO_USE_FRACTIONATION',
+  'DEF_ISO_ICE_SUPERSAT_SLOPE',
+  'DEF_ISO_CG_RELHUM_MAX',
+  'DEF_ISO_SUBL_SKIN_MM',
+  'DEF_ISO_SOIL_DIFFUSION',
+  'DEF_ISO_SOIL_VAPOR_DIFFUSION',
+  'DEF_ISO_CANOPY_EQUILIBRATION',
+  'DEF_ISO_SNOWMELT_EQUILIBRATION',
+  'DEF_ISO_NSS_LEAF_WATER_PER_LAI',
+  'DEF_ISO_NSS_LEAF_PATH_LENGTH',
+  'DEF_ISO_NSS_LEAF_RB',
+  'DEF_ISO_REF_RATIO_H2_18O',
+  'DEF_ISO_INIT_DELTA_H2_18O',
+  'DEF_ISO_REF_RATIO_HDO',
+  'DEF_ISO_INIT_DELTA_HDO',
+  'DEF_MT_AQUIFER_MIXING_WATER_MM',
+  'DEF_MT_USE_SOIL_INIT',
+  'DEF_MT_SOIL_INIT_FILE',
+  'DEF_MT_SOIL_INIT_VARS',
 ]);
-export function tracerFieldVisible(name: string, types?: string): boolean {
-  return (
-    !isotopeFields.has(name.toUpperCase()) ||
-    unquote(types ?? '')
-      .split(',')
-      .some((type) => unquote(type.trim()).toLowerCase() === 'isotope')
-  );
+/// 同位素字段是否可见：只有明确启用同位素时才显示；undefined 表示尚未核对，按不可见处理。
+export function tracerFieldVisible(name: string, isotope?: boolean): boolean {
+  return !isotopeFields.has(name.toUpperCase()) || isotope === true;
 }
 export function caseFieldVisible(
   name: string,
@@ -65,21 +69,18 @@ export function caseFieldVisible(
       ([name]) => name.toLowerCase() === key.toLowerCase(),
     )?.[1];
   const enabled = (value: string | undefined) => /^(true|\.true\.)$/i.test(value?.trim() ?? '');
-  if (
-    !tracerFieldVisible(
-      name,
-      currentValue('DEF_TRACER_TYPES') ??
-        fields.find((field) => field.name.toUpperCase() === 'DEF_TRACER_TYPES')?.configured_value ??
-        fields.find((field) => field.name.toUpperCase() === 'DEF_TRACER_TYPES')?.built_in_default ??
-        undefined,
-    )
-  )
-    return false;
+  const isotopeValue =
+    currentValue('DEF_USE_ISOTOPE') ??
+    fields.find((field) => field.name.toUpperCase() === 'DEF_USE_ISOTOPE')?.configured_value ??
+    fields.find((field) => field.name.toUpperCase() === 'DEF_USE_ISOTOPE')?.built_in_default ??
+    undefined;
+  const isotope = isotopeValue === undefined ? undefined : enabled(isotopeValue);
+  if (!tracerFieldVisible(name, isotope)) return false;
   // These controls must not flash back while the next applicability query is loading.
   if (
     currentValues &&
     fractionationChildren.has(name.toUpperCase()) &&
-    !enabled(currentValue('DEF_TRACER_USE_FRACTIONATION'))
+    !enabled(currentValue('DEF_ISO_USE_FRACTIONATION'))
   )
     return false;
   if (['DEF_VIC_OPT', 'DEF_FILE_VIC_PARA', 'DEF_FILE_VIC_OPT'].includes(name.toUpperCase())) {
@@ -149,32 +150,30 @@ export type ConfigurationResult = {
   warnings: string[];
   context_complete: boolean;
 };
-export const tracerColumns = [
-  'NAMES',
-  'TYPES',
-  'MRAT',
-  'REF_RATIO',
-  'INIT_DELTA',
-  'REACTIVE_DECAY_RATE',
-  'PARAM_FILES',
-] as const;
+export const tracerColumns = ['NAMES', 'TYPES', 'PARAM_FILES'] as const;
 export const tracerTypes = [
   ['isotope', '同位素', 'Isotope'],
   ['solute', '溶质', 'Solute'],
   ['particle', '颗粒 / 泥沙', 'Particle / sediment'],
   ['gas', '气体', 'Gas'],
-  ['reactive', '反应性物质', 'Reactive'],
 ] as const;
 export const tracerLabels: Record<(typeof tracerColumns)[number], [string, string]> = {
   NAMES: ['名称', 'Name'],
   TYPES: ['类型', 'Type'],
-  MRAT: ['分子质量', 'Molecular mass'],
-  REF_RATIO: ['参考比率', 'Reference ratio'],
-  INIT_DELTA: ['初始δ值', 'Initial delta'],
-  REACTIVE_DECAY_RATE: ['反应衰减率', 'Reactive decay rate'],
   PARAM_FILES: ['过程参数文件（当前行对应的路径）', 'Process file (path for this tracer)'],
 };
-export const tracerKeys = ['DEF_TRACER_NUM', ...tracerColumns.map((c) => `DEF_TRACER_${c}`)];
+// 上游把旧的平铺 `DEF_TRACER_*` 表拆成按 family 的字段；表格只是这些字段的视图。
+export const tracerKeys = [
+  'DEF_USE_ISOTOPE',
+  'DEF_ISOTOPE_SPECIES',
+  'DEF_ISOTOPE_PARAM_FILE',
+  'DEF_USE_METHANE',
+  'DEF_METHANE_PARAM_FILE',
+  'DEF_SOLUTE_NAMES',
+  'DEF_SOLUTE_PARAM_FILES',
+  'DEF_USE_SEDIMENT',
+  'DEF_SEDIMENT_PARAM_FILE',
+];
 export const groupedField = (field: ModelField, catalog: readonly Descriptor[]) =>
   !field.derived &&
   !foundationControls.some((c) => c.keys.includes(field.name)) &&
@@ -287,30 +286,57 @@ export function tracerFileFor(raw: string, name: string, index: number): string 
   }
   return '';
 }
+const tracerSetting = (overlay: Overlay, key: string) =>
+  unquote(modelSettingValue(overlay, key) ?? '').trim();
+const tracerFlag = (overlay: Overlay, key: string) =>
+  tracerSetting(overlay, key).toLowerCase() === '.true.';
+const tracerList = (raw: string) =>
+  unquote(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+const tracerFile = (value: string) => (/^(null|none)?$/i.test(value) ? '' : value);
+/// 聚合判定：上游没有总开关，任一 family 开着（或溶质名单非空）即“示踪过程开启”。
+export function tracerProcessEnabled(overlay: Overlay): boolean {
+  return (
+    tracerFlag(overlay, 'DEF_USE_ISOTOPE') ||
+    tracerFlag(overlay, 'DEF_USE_METHANE') ||
+    tracerFlag(overlay, 'DEF_USE_SEDIMENT') ||
+    tracerSetting(overlay, 'DEF_SOLUTE_NAMES') !== ''
+  );
+}
+
+/// 把新的 family 字段还原成表格行：同位素、甲烷、溶质、泥沙各占若干行。
 export function tracerRows(overlay: Overlay) {
-  const arrays = tracerColumns.map((c) =>
-    unquote(modelSettingValue(overlay, `DEF_TRACER_${c}`) ?? '')
-      .split(',')
-      .map((s) => s.trim()),
+  const rows: Record<(typeof tracerColumns)[number], string>[] = [];
+  if (tracerFlag(overlay, 'DEF_USE_ISOTOPE'))
+    for (const name of tracerList(tracerSetting(overlay, 'DEF_ISOTOPE_SPECIES')))
+      rows.push({
+        NAMES: name,
+        TYPES: 'isotope',
+        PARAM_FILES: tracerFile(tracerSetting(overlay, 'DEF_ISOTOPE_PARAM_FILE')),
+      });
+  if (tracerFlag(overlay, 'DEF_USE_METHANE'))
+    rows.push({
+      NAMES: 'CH4',
+      TYPES: 'gas',
+      PARAM_FILES: tracerFile(tracerSetting(overlay, 'DEF_METHANE_PARAM_FILE')),
+    });
+  const soluteFiles = tracerSetting(overlay, 'DEF_SOLUTE_PARAM_FILES');
+  tracerList(tracerSetting(overlay, 'DEF_SOLUTE_NAMES')).forEach((name, index) =>
+    rows.push({
+      NAMES: name,
+      TYPES: 'solute',
+      PARAM_FILES: tracerFile(tracerFileFor(soluteFiles, name, index)),
+    }),
   );
-  const countText = modelSettingValue(overlay, 'DEF_TRACER_NUM');
-  const count =
-    countText && /^\d+$/.test(countText)
-      ? Math.min(Number(countText), 100)
-      : Math.max(0, ...arrays.slice(0, -1).map((a) => (a.length === 1 && !a[0] ? 0 : a.length)));
-  const files = modelSettingValue(overlay, 'DEF_TRACER_PARAM_FILES') ?? '';
-  return Array.from(
-    { length: count },
-    (_, i) =>
-      Object.fromEntries(
-        tracerColumns.map((c, j) => [
-          c,
-          c === 'PARAM_FILES'
-            ? tracerFileFor(files, arrays[0][i] ?? '', i).replace(/^(null|none)$/i, '')
-            : (arrays[j][i] ?? ''),
-        ]),
-      ) as Record<(typeof tracerColumns)[number], string>,
-  );
+  if (tracerFlag(overlay, 'DEF_USE_SEDIMENT'))
+    rows.push({
+      NAMES: 'SEDIMENT',
+      TYPES: 'particle',
+      PARAM_FILES: tracerFile(tracerSetting(overlay, 'DEF_SEDIMENT_PARAM_FILE')),
+    });
+  return rows;
 }
 export function setTracerRows(
   overlay: Overlay,
@@ -318,68 +344,68 @@ export function setTracerRows(
   rows: ReturnType<typeof tracerRows>,
 ): Overlay {
   if (rows.length > 100) throw new Error(bilingual('示踪物数量过多', 'Too many tracers'));
-  const existing = tracerRows(resetModelOption(overlay, 'DEF_TRACER_PARAM_FILES'));
-  const required = ['NAMES', 'TYPES'] as const;
   for (const row of rows) {
-    if (
-      !tracerTypes.some(([type]) => type === row.TYPES) &&
-      !existing.some(
-        (previous) =>
-          previous.NAMES.toLowerCase() === row.NAMES.toLowerCase() && previous.TYPES === row.TYPES,
-      )
-    )
-      throw new Error(bilingual('请选择有效示踪物类型', 'Choose a valid tracer type'));
-    for (const key of required)
+    if (!tracerTypes.some(([type]) => type === row.TYPES.toLowerCase()))
+      throw new Error(
+        bilingual(
+          `请选择有效示踪物类型：${row.TYPES || '（空）'}`,
+          `Choose a valid tracer type: ${row.TYPES || '(empty)'}`,
+        ),
+      );
+    for (const key of ['NAMES', 'TYPES'] as const)
       if (!row[key].trim())
         throw new Error(bilingual('每行需要名称和类型', 'Each row needs a name and type'));
     for (const value of Object.values(row))
       if (/[,;\r\n]/.test(value))
         throw new Error(bilingual('每个单元格只能有一个值', 'One value per cell'));
   }
-  for (const column of tracerColumns.slice(2, -1)) {
-    const populated = rows.filter((row) => row[column].trim()).length;
-    if (populated && populated !== rows.length)
-      throw new Error(`${column}: 请填写整列或留空 / Fill the whole column or leave it empty`);
-  }
-  for (const row of rows)
-    for (const column of ['MRAT', 'REF_RATIO', 'INIT_DELTA', 'REACTIVE_DECAY_RATE'] as const)
-      if (row[column].trim() && fortranNumberInputValue(row[column]) === null)
-        throw new Error(`${column}: 请输入有限 Fortran 数值 / Enter a finite Fortran number`);
-  if (new Set(rows.map((row) => row.NAMES.toLowerCase())).size !== rows.length)
+  if (new Set(rows.map((row) => row.NAMES.trim().toLowerCase())).size !== rows.length)
     throw new Error(bilingual('示踪物名称不能重复', 'Tracer names must be unique'));
-  let next = overlay;
-  let sameFiles = false;
-  try {
-    const previous = tracerRows(overlay);
-    sameFiles =
-      rows.length === previous.length &&
-      rows.every(
-        (row, i) => row.NAMES === previous[i].NAMES && row.PARAM_FILES === previous[i].PARAM_FILES,
+  const namesOf = (type: string) =>
+    rows.filter((row) => row.TYPES.toLowerCase() === type).map((row) => row.NAMES.trim());
+  // 上游只编了两种水同位素、甲烷和河道泥沙各一种 provider；其余名字写进去引擎不认。
+  for (const name of namesOf('isotope'))
+    if (!['H2_18O', 'HDO'].includes(name.toUpperCase()))
+      throw new Error(
+        bilingual(
+          `水同位素只支持 H2_18O / HDO：${name}`,
+          `Isotopes support only H2_18O / HDO: ${name}`,
+        ),
       );
-  } catch {
-    /* A corrected table can replace an invalid existing mapping. */
-  }
-  for (const key of tracerKeys) {
-    if (key === 'DEF_TRACER_PARAM_FILES') {
-      if (!sameFiles)
-        next = setModelOption(
-          next,
-          fields,
-          key,
-          rows.map((row) => `${row.NAMES}:${row.PARAM_FILES.trim() || 'null'}`).join(','),
-        );
-      continue;
-    }
-    if (!fields.some((f) => f.name === key && !f.derived))
+  for (const name of namesOf('gas'))
+    if (!['CH4', 'METHANE'].includes(name.toUpperCase()))
+      throw new Error(bilingual(`甲烷只支持 CH4：${name}`, `Methane supports only CH4: ${name}`));
+  for (const name of namesOf('particle'))
+    if (!['SEDIMENT', 'SED'].includes(name.toUpperCase()))
+      throw new Error(
+        bilingual(`颗粒物只支持 SEDIMENT：${name}`, `Particles support only SEDIMENT: ${name}`),
+      );
+  const firstFile = (type: string) =>
+    rows
+      .filter((row) => row.TYPES.toLowerCase() === type)
+      .map((row) => tracerFile(row.PARAM_FILES.trim()))
+      .find(Boolean) ?? '';
+  const isotopeNames = namesOf('isotope');
+  const soluteNames = namesOf('solute');
+  const soluteFiles = rows
+    .filter((row) => row.TYPES.toLowerCase() === 'solute')
+    .map((row) => `${row.NAMES.trim()}:${tracerFile(row.PARAM_FILES.trim()) || 'null'}`)
+    .join(',');
+  let next = overlay;
+  const write = (key: string, value: string) => {
+    if (!fields.some((field) => field.name === key && !field.derived))
       throw new Error(`${key}: 字段不可编辑 / Field is not writable`);
-    const text =
-      key === 'DEF_TRACER_NUM'
-        ? String(rows.length)
-        : rows.some((r) => r[key.slice(11) as (typeof tracerColumns)[number]].trim())
-          ? rows.map((r) => r[key.slice(11) as (typeof tracerColumns)[number]]).join(',')
-          : '';
-    next = setModelOption(next, fields, key, text);
-  }
+    next = setModelOption(next, fields, key, value);
+  };
+  write('DEF_USE_ISOTOPE', isotopeNames.length ? '.true.' : '.false.');
+  write('DEF_ISOTOPE_SPECIES', isotopeNames.join(','));
+  write('DEF_ISOTOPE_PARAM_FILE', firstFile('isotope') || 'null');
+  write('DEF_USE_METHANE', namesOf('gas').length ? '.true.' : '.false.');
+  write('DEF_METHANE_PARAM_FILE', firstFile('gas') || 'null');
+  write('DEF_SOLUTE_NAMES', soluteNames.join(','));
+  write('DEF_SOLUTE_PARAM_FILES', soluteFiles || 'null');
+  write('DEF_USE_SEDIMENT', namesOf('particle').length ? '.true.' : '.false.');
+  write('DEF_SEDIMENT_PARAM_FILE', firstFile('particle') || 'null');
   return next;
 }
 export function applyTracerSelection(
@@ -545,14 +571,10 @@ export function appendTracerFamily(
       .map(([NAMES, TYPES]) => ({
         NAMES,
         TYPES,
-        MRAT: '',
-        REF_RATIO: '',
-        INIT_DELTA: '',
-        REACTIVE_DECAY_RATE: '',
         PARAM_FILES: {
-          CH4: 'standard_ch4_parameter.nml',
-          H2_18O: 'standard_O18_parameter.nml',
-          HDO: 'standard_HDO_parameter.nml',
+          CH4: 'standard_methane_parameter.nml',
+          H2_18O: 'standard_isotope_parameter.nml',
+          HDO: 'standard_isotope_parameter.nml',
           Cl: 'standard_chloride_parameter.nml',
           SEDIMENT: 'standard_sediment_parameter.nml',
         }[NAMES],
@@ -582,7 +604,20 @@ export function tracerFamilyState(
     if (actual === null) pending.push([zh, en]);
     else if (actual !== value) reasons.push([zh, en]);
   };
-  need('DEF_USE_TRACER', true, '先开启示踪过程', 'Enable tracer processes first');
+  // 上游没有总开关：任一家族开启（或溶质名单非空）才算“示踪过程已开启”。
+  const familyFlags = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'].map(flag);
+  const soluteNames = (
+    modelSettingValue(overlay, 'DEF_SOLUTE_NAMES') ??
+    Object.entries(context.defaults ?? {}).find(
+      ([name]) => name.toLowerCase() === 'def_solute_names',
+    )?.[1] ??
+    ''
+  ).trim();
+  if (!familyFlags.includes(true) && !soluteNames) {
+    if (familyFlags.includes(null))
+      pending.push(['先开启示踪过程', 'Enable tracer processes first']);
+    else reasons.push(['先开启示踪过程', 'Enable tracer processes first']);
+  }
   need(
     'DEF_USE_Campbell_SOIL_MODEL',
     false,
@@ -691,7 +726,7 @@ export function tracerSetupIssues(overlay: Overlay, context: FamilyContext): [st
     if (state.status === 'blocked') issues.push(...state.reasons);
   }
   if (families.has('isotope')) {
-    const key = 'DEF_TRACER_AQUIFER_MIXING_WATER_MM';
+    const key = 'DEF_MT_AQUIFER_MIXING_WATER_MM';
     const raw =
       modelSettingValue(overlay, key) ??
       Object.entries(context.defaults ?? {}).find(
