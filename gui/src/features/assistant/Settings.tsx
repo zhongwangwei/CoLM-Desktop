@@ -7,6 +7,10 @@ import {
   API_PROVIDERS,
   providerLabel,
   apiEfforts,
+  historyRepoLines,
+  historyRepositoryLabel,
+  historySettingsOf,
+  historySyncSummary,
   managedNodeText,
   parseApiOptions,
   providerId,
@@ -19,7 +23,11 @@ import {
   thinkSettings,
   withChoice,
   withContextWindowCleared,
+  withHistoryPath,
   type AgentEvent,
+  type HistoryReposStatus,
+  type HistoryRepository,
+  type HistorySyncResult,
   type Settings,
   type ModelChoice,
   type RetrievalSettings,
@@ -69,16 +77,25 @@ export default function AssistantSettings({
   const [retrievalHasKey, setRetrievalHasKey] = useState<boolean | null>(null);
   // 托管节点（managed）的实时状态来自 assistant_xerj_node；external 模式不探测、不启动。
   const [xerjNode, setXerjNode] = useState<XerjNodeStatus | null>(null);
+  // U01 只读历史仓库：status 来自 assistant_history_status，同步结果来自 assistant_history_sync。
+  // 读取失败时保留上次显示（historyStatus 不清空），只把错误单独展示。
+  const [historyStatus, setHistoryStatus] = useState<HistoryReposStatus | null>(null);
+  const [historyResult, setHistoryResult] = useState<HistorySyncResult | null>(null);
+  const [historyError, setHistoryError] = useState('');
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   // 只用于保存请求在飞时显示"正在保存"；发现模型、登记 Key 等操作不算保存设置。
   const [saving, setSaving] = useState(false);
   const request = useRef(0);
+  // 外部保存（例如选完历史仓库路径立即落盘，父级 settings 随之更新）只同步没有未保存修改的草稿：
+  // 有未保存修改时保留用户正在编辑的内容，别让一次路径保存冲掉整个表单（U-07）。
   useEffect(() => {
+    if (settingsDraftDirty(settings, draft, options)) return;
     setDraft(settings);
     setOptions(JSON.stringify(settings.api_options, null, 2));
-  }, [settings]);
+  }, [settings, draft, options]);
   // 状态字符串是生成时语言的文本，切换语言后清掉，避免英文界面残留中文。
   useEffect(() => {
     setStatus('');
@@ -144,6 +161,12 @@ export default function AssistantSettings({
     // 只在已保存的接入方式变化（首次打开/保存后）时执行；草稿里的未保存切换不触发探测。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.retrieval.mode]);
+  // U01：打开设置对话框时读一次仓库数据状态（只读；绝不自动同步）。新 effect 放最后。
+  useEffect(() => {
+    void loadHistoryStatus();
+    // loadHistoryStatus 每次渲染都是新函数，不能进依赖；只在挂载（打开设置）时读一次，之后靠按钮/同步刷新。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   function patch(value: Partial<Settings>) {
     // 字段一改就清掉上一次"设置已保存"的成功提示，避免过时成功状态（U-05 / U-07）。
     setStatus('');
@@ -217,6 +240,74 @@ export default function AssistantSettings({
     await xerjNodeAction('start');
     await xerjNodeAction('status');
   }
+  /**
+   * U01：读取仓库数据状态（只读）。读取失败保留上一次的显示并单独报错；
+   * 这里永远不发同步请求——同步必须由用户显式点按钮。
+   */
+  async function loadHistoryStatus() {
+    if (!hasBackend()) return null;
+    setHistoryBusy(true);
+    setHistoryError('');
+    try {
+      const status = await invoke<HistoryReposStatus>('assistant_history_status', {});
+      setHistoryStatus(status);
+      return status;
+    } catch (error) {
+      setHistoryError(settingsError(error));
+      return null;
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+  /** U01：显式同步（在线/离线）。history-sync 的返回就是最新的仓库状态，直接拿来刷新两行。 */
+  async function syncHistory(repository: HistoryRepository | 'both', offline: boolean) {
+    if (!hasBackend()) return null;
+    setHistoryBusy(true);
+    setHistoryError('');
+    setHistoryResult(null);
+    try {
+      const result = await invoke<HistorySyncResult>('assistant_history_sync', {
+        repository,
+        offline,
+      });
+      setHistoryResult(result);
+      setHistoryStatus(result);
+      return result;
+    } catch (error) {
+      // 同步失败时不丢上一次的状态：失败原因单独显示，别把仓库行清空。
+      setHistoryError(settingsError(error));
+      return null;
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+  /**
+   * U01：把某个仓库的本地路径写回设置（null = 清除，回到应用管理副本）。
+   * 只用**已保存**的 settings 作基底，绝不把设置对话框里的未保存草稿一起保存。
+   */
+  async function saveHistoryPath(repository: HistoryRepository, path: string | null) {
+    const next = withHistoryPath(settings, repository, path);
+    setDraft((old) => ({ ...old, history: next.history }));
+    setHistoryBusy(true);
+    setHistoryError('');
+    try {
+      await onSave(next);
+      // 路径变化会改变身份/path 的读取结果；落盘成功后重新读一次状态。
+      await loadHistoryStatus();
+    } catch (error) {
+      setHistoryError(settingsError(error));
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+  /** U01：用后端文件夹选择器挑一个已有本地仓库，选中后立即保存路径。 */
+  async function pickHistoryRepository(repository: HistoryRepository) {
+    if (!hasBackend() || historyBusy) return;
+    const path = await invoke<string | null>('pick_folder', {
+      key: repository === 'desktop' ? 'assistant-history-desktop' : 'assistant-history-upstream',
+    });
+    if (path) await saveHistoryPath(repository, path);
+  }
   const builtin = draft.backend === 'builtin';
   const model = builtin ? draft.model : draft.external[draft.backend]?.model || '';
   const effort = builtin ? thinkValue(draft) : draft.external[draft.backend]?.effort || '';
@@ -238,6 +329,9 @@ export default function AssistantSettings({
   const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
   // 旧后端保存的 retrieval 可能还没有 mode：按 external 呈现（与后端"缺字段按 external"一致）。
   const retrievalMode = draft.retrieval.mode === 'managed' ? 'managed' : 'external';
+  // 旧后端保存的设置可能还没有 history：统一补默认值，界面不因缺字段崩掉。
+  const currentHistory = historySettingsOf(settings);
+  const historySummary = historySyncSummary(historyResult, state.language);
   // 自定义服务的地址是必填项，不能藏在"高级设置"里（GUI 审查 A-02/R14）；预设服务改过地址时
   // 把实际目标地址显示出来，避免用户以为还在用预设站点。
   const serviceUrlField = (
@@ -858,6 +952,123 @@ export default function AssistantSettings({
               </Button>
             </div>
           </div>
+          {/* U01：只读历史仓库数据（Desktop + CoLM 官方）。同步是显式动作，聊天永远不会自动触发。 */}
+          <div className="space-y-2 border-t pt-3">
+            <strong>{t('仓库数据（只读历史）', 'Repository data (read-only history)')}</strong>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                '只读历史查询用的 Desktop 与 CoLM 官方仓库。同步只在点按钮时发生；普通聊天绝不自动下载或更新仓库。',
+                'The Desktop and CoLM upstream repositories used for read-only history queries. Syncing happens only when you press a button; normal chat never downloads or updates them.',
+              )}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t('数据目录：', 'Data directory: ')}
+              {historyStatus?.history_root || t('尚未读取', 'not loaded yet')}
+            </p>
+            {historyBusy && (
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs text-muted-foreground">
+                  {historyStatus
+                    ? t('正在处理仓库数据…', 'Working on repository data…')
+                    : t('正在读取仓库状态…', 'Reading repository status…')}
+                </p>
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    void invoke('assistant_history_cancel', {}).catch((error) =>
+                      setHistoryError(settingsError(error)),
+                    )
+                  }
+                >
+                  {t('停止同步', 'Stop syncing')}
+                </Button>
+              </div>
+            )}
+            {(['desktop', 'colm_upstream'] as HistoryRepository[]).map((repository) => {
+              const repo = historyStatus?.repos?.[repository];
+              const lines = historyRepoLines(repo, state.language);
+              const configuredPath =
+                repository === 'desktop'
+                  ? currentHistory.desktop_path
+                  : currentHistory.upstream_path;
+              const localPath = configuredPath || repo?.path || repo?.identity?.root || '';
+              return (
+                <div key={repository} className="space-y-1 rounded border p-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <strong>{historyRepositoryLabel(repository, state.language)}</strong>
+                    <span className="text-xs text-muted-foreground">
+                      {lines.state}
+                      {repo?.default_branch
+                        ? ` · ${t('默认分支', 'default branch')} ${repo.default_branch}`
+                        : ''}
+                    </span>
+                  </div>
+                  <p className="text-xs">{lines.lastSync}</p>
+                  <p className="text-xs text-muted-foreground">{lines.checkedAt}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {configuredPath
+                      ? t('本地仓库（已指定）：', 'Local repository (configured): ')
+                      : t('应用管理副本：', 'App-managed copy: ')}
+                    {localPath || t('未设置', 'not set')}
+                  </p>
+                  {lines.errors.length > 0 && (
+                    <Notice tone="error">
+                      {lines.errors.map((error) => (
+                        <p key={error} className="text-xs">
+                          {error}
+                        </p>
+                      ))}
+                    </Notice>
+                  )}
+                  {lines.preparation && (
+                    <p className="text-xs text-muted-foreground">{lines.preparation}</p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      disabled={disabled || historyBusy}
+                      onClick={() => void pickHistoryRepository(repository)}
+                    >
+                      {t('选择已有本地仓库', 'Choose an existing local repository')}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={disabled || historyBusy || !configuredPath}
+                      onClick={() => void saveHistoryPath(repository, null)}
+                    >
+                      {t('清除本地路径', 'Clear local path')}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={disabled || historyBusy} onClick={() => void loadHistoryStatus()}>
+                {t('刷新状态', 'Refresh status')}
+              </Button>
+              <Button
+                disabled={disabled || historyBusy}
+                onClick={() => void syncHistory('both', false)}
+              >
+                {historyBusy
+                  ? t('正在更新仓库数据…', 'Updating repository data…')
+                  : t('准备 / 更新数据', 'Prepare / update data')}
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={disabled || historyBusy}
+                onClick={() => void syncHistory('both', true)}
+              >
+                {t('离线更新（不联网）', 'Offline update (no network)')}
+              </Button>
+            </div>
+            {historySummary &&
+              (historySummary.failed ? (
+                <Notice tone="error">{historySummary.text}</Notice>
+              ) : (
+                <p className="text-xs text-muted-foreground">{historySummary.text}</p>
+              ))}
+            {historyError && <Notice tone="error">{historyError}</Notice>}
+          </div>
           <Button
             onClick={() =>
               void run(async () =>
@@ -921,6 +1132,9 @@ export default function AssistantSettings({
                 } finally {
                   setSaving(false);
                 }
+                // 保存后的归一化值（trim/空串转 null）直接成为草稿，避免刚保存完又显示"未保存修改"。
+                setDraft(next);
+                setOptions(JSON.stringify(next.api_options, null, 2));
                 setStatus(
                   t(
                     '设置已保存，下次发送时生效。',

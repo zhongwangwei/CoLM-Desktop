@@ -12,18 +12,24 @@ import {
   apiEfforts,
   defaultSettings,
   egressTarget,
+  historyContextLabel,
   historyInput,
+  historyScopeHint,
+  historyScopeLabel,
+  historySettingsOf,
   providerId,
   assistantModels,
   selectAssistantModel,
   thinkSettings,
   thinkValue,
   withChoice,
+  withHistoryScope,
   EXAMPLE_STARTERS,
   examplePrompt,
   rejectedBeforeTurn,
   withoutLastUser,
   type AgentEvent,
+  type HistoryScope,
   type Message,
   type Settings,
 } from './model';
@@ -173,6 +179,8 @@ export default function AssistantPanel() {
   // Xerj 文档索引状态是应用级的，不随对话切换；设置对话框打开时直接显示最近一次状态。
   const [docsIndex, setDocsIndex] = useState<AgentEvent | null>(null);
   const [deciding, setDeciding] = useState(false);
+  // U02 历史范围选择正在落盘：按钮禁用并显示忙碌，失败不清掉当前选择。
+  const [scopeBusy, setScopeBusy] = useState(false);
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
   const [sessionUsage, setSessionUsage] = useState({ turns: 0, tokens: 0 });
@@ -548,6 +556,27 @@ export default function AssistantPanel() {
     )
       setContextUsage(null);
   }
+  /**
+   * U02：把历史范围选择写回已保存设置（只改 history.scope）。
+   * 用 settingsRef 的已保存设置做基底，绝不带上设置对话框里的未保存草稿；设置对话框开着时选择器禁用。
+   */
+  async function changeHistoryScope(scope: HistoryScope) {
+    if (scopeBusy || runningRef.current || app.current.assistantSettingsOpen) return;
+    const base = settingsRef.current;
+    const next = withHistoryScope(base, scope);
+    if (historySettingsOf(next).scope === historySettingsOf(base).scope) return;
+    setScopeBusy(true);
+    setError('');
+    try {
+      await invoke('assistant_save_settings', { settings: next });
+      setSettings(next);
+    } catch (e) {
+      // 保存失败保持原来的范围：界面不能显示一个并没有落盘的选择。
+      setError(errorText(String(e)));
+    } finally {
+      setScopeBusy(false);
+    }
+  }
   async function attachDocument() {
     if (runningRef.current || !ready) return;
     // 记下这次读取属于哪个对话/草稿：读取期间可以切换对话，完成后必须核对身份（GUI-17）。
@@ -690,7 +719,14 @@ export default function AssistantPanel() {
         : prompt;
       setMessages((old) => [...old, { kind: 'user', text: shown }]);
       sent = beginSendTurn(typed, prompt);
-      await invoke('assistant_send', { text, context: JSON.stringify(guideState()) });
+      // U02：每条消息都带上当前历史范围（保留 guideState 的页面上下文）；范围改动会先落盘到设置。
+      await invoke('assistant_send', {
+        text,
+        context: JSON.stringify({
+          ...guideState(),
+          history_scope: historySettingsOf(current).scope,
+        }),
+      });
       settleSendTurn(sent.id, true);
     } catch (e) {
       busy(false);
@@ -796,6 +832,14 @@ export default function AssistantPanel() {
   const builtin = settings.backend === 'builtin';
   const selectedModel = builtin ? settings.model : settings.external[settings.backend]?.model || '';
   const effort = builtin ? thinkValue(settings) : settings.external[settings.backend]?.effort || '';
+  // U02：输入框上方显示当前后端/模型/冻结 revision 与历史范围（旧设置缺 history 时按 auto）。
+  const historySettings = historySettingsOf(settings);
+  const historyContext = historyContextLabel(
+    settings,
+    state.version,
+    state.versionRef,
+    state.language,
+  );
   const efforts = builtin
     ? apiEfforts(providerId(settings), settings.model)
     : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -1240,6 +1284,32 @@ export default function AssistantPanel() {
           )}
         </Notice>
       )}
+      {/* U02：历史范围提示/选择器。选择落在 AssistantSettings.history.scope，随每条消息的 context 下发。 */}
+      <div className="assistant-history-scope flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <label className="flex items-center gap-1">
+          <span>{t('历史范围：', 'History scope: ')}</span>
+          <Select
+            aria-label={t('只读历史范围', 'Read-only history scope')}
+            value={historySettings.scope}
+            disabled={!ready || running || scopeBusy || state.assistantSettingsOpen}
+            onChange={(e) => void changeHistoryScope(e.target.value as HistoryScope)}
+          >
+            {(['auto', 'selected', 'desktop', 'upstream', 'both'] as HistoryScope[]).map(
+              (scope) => (
+                <option key={scope} value={scope}>
+                  {historyScopeLabel(scope, state.language)}
+                </option>
+              ),
+            )}
+          </Select>
+        </label>
+        <span>
+          {t('当前：', 'Current: ')}
+          {historyContext.backend} · {model || historyContext.model} · {historyContext.revision}
+        </span>
+        {scopeBusy && <span>{t('正在保存范围…', 'Saving scope…')}</span>}
+      </div>
+      <p className="text-xs text-muted-foreground">{historyScopeHint(state.language)}</p>
       <textarea
         aria-label={t('给助手的消息', 'Message to assistant')}
         placeholder={t(

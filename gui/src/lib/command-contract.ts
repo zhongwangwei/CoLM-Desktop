@@ -89,6 +89,18 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "assistant_history_status": {},
+  "assistant_history_sync": {
+    "repository": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "offline": {
+      "required": true,
+      "rust_type": "bool"
+    }
+  },
+  "assistant_history_cancel": {},
   "assistant_start": {
     "projectRoot": {
       "required": true,

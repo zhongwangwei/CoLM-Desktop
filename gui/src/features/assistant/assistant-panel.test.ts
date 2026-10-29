@@ -6,6 +6,7 @@ import { withTimeout } from '../../lib/ipc';
 import {
   defaultSettings,
   egressTarget,
+  historySettingsOf,
   rejectedBeforeTurn,
   withoutLastUser,
   type AgentEvent,
@@ -462,6 +463,13 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     session: { current: 'session' },
     grant: { current: null },
     attachmentsRef: { current: initialAttachments },
+    settingsRef: {
+      current: {
+        ...defaultSettings,
+        web_search: false,
+        egress_acknowledged: 'https://api.deepseek.com',
+      } as Settings,
+    },
   };
   const updates = {
     setInput: (update: string | ((old: string) => string)) => {
@@ -497,9 +505,11 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
   const errorText = (message: string) => String(message).replace(/^Error: /, '');
   const t = (_zh: string, en: string) => en;
   const commands: string[] = [];
+  const invocations: { command: string; args: Record<string, unknown> }[] = [];
   const ack = deferred<void>();
-  const invoke = (command: string) => {
+  const invoke = (command: string, args: Record<string, unknown> = {}) => {
     commands.push(command);
+    invocations.push({ command, args });
     if (command === 'assistant_send') return ack.promise;
     return Promise.resolve(undefined);
   };
@@ -566,13 +576,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     runningRef: refs.running,
     ready: true,
     attaching: false,
-    settingsRef: {
-      current: {
-        ...defaultSettings,
-        web_search: false,
-        egress_acknowledged: 'https://api.deepseek.com',
-      },
-    },
+    settingsRef: refs.settingsRef,
     egressTarget,
     setConsent: updates.setConsent,
     busy: (value: boolean) => {
@@ -590,6 +594,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     currentApprovalSnapshot: () => 'snapshot',
     invoke,
     guideState: () => ({ kernelDir: '/kernel' }),
+    historySettingsOf,
     fresh: refs.fresh,
     session: refs.session,
     streamed: refs.streamed,
@@ -602,6 +607,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     ui,
     refs,
     commands,
+    invocations,
     send,
     handleEvent,
     beginSendTurn,
@@ -935,4 +941,151 @@ test('budget errors tell the user how to set a window or shrink the request with
     /nothing was sent/i,
   );
   assert.equal(errorText('HTTP 500 from the model'), 'HTTP 500 from the model');
+});
+
+// ---------------------------------------------------------------------------
+// U02：聊天范围提示/选择器（持久化 + 每条消息的 history_scope）
+// ---------------------------------------------------------------------------
+
+function scopeHarness(options: { saved?: Settings; reject?: Error } = {}) {
+  const saved = options.saved ?? defaultSettings;
+  const state = {
+    settings: null as Settings | null,
+    busy: [] as boolean[],
+    error: '',
+  };
+  const requests: { command: string; args: Record<string, unknown> }[] = [];
+  const invoke = async (command: string, args: Record<string, unknown> = {}) => {
+    requests.push({ command, args });
+    if (options.reject) throw options.reject;
+    return undefined;
+  };
+  const refs = { running: { current: false }, settingsRef: { current: saved } };
+  const app = { current: { assistantSettingsOpen: false } };
+  const changeHistoryScope = compileFunction<
+    (scope: 'auto' | 'selected' | 'desktop' | 'upstream' | 'both') => Promise<void>
+  >('changeHistoryScope', {
+    scopeBusy: false,
+    runningRef: refs.running,
+    app,
+    settingsRef: refs.settingsRef,
+    setScopeBusy: (value: boolean) => {
+      state.busy.push(value);
+    },
+    setError: (value: string) => {
+      state.error = value;
+    },
+    errorText: (message: string) => String(message).replace(/^Error: /, ''),
+    invoke,
+    withHistoryScope: (settings: Settings, scope: string) => ({
+      ...settings,
+      history: { ...settings.history, scope },
+    }),
+    historySettingsOf: (settings: Partial<Settings>) => ({
+      scope: settings.history?.scope ?? 'auto',
+      desktop_path: settings.history?.desktop_path ?? null,
+      upstream_path: settings.history?.upstream_path ?? null,
+    }),
+    setSettings: (value: Settings) => {
+      state.settings = value;
+    },
+  });
+  return {
+    state,
+    refs,
+    app,
+    requests,
+    changeHistoryScope,
+    savedSettings: () => refs.settingsRef.current,
+  };
+}
+
+test('U02: changing the history scope persists it on top of the saved settings', async () => {
+  const saved = {
+    ...defaultSettings,
+    history: { scope: 'auto' as const, desktop_path: '/repos/desktop', upstream_path: null },
+  };
+  const harness = scopeHarness({ saved });
+  await harness.changeHistoryScope('both');
+  assert.deepEqual(
+    harness.requests.map((request) => request.command),
+    ['assistant_save_settings'],
+  );
+  const sent = harness.requests[0].args.settings as Settings;
+  assert.deepEqual(sent.history, {
+    scope: 'both',
+    desktop_path: '/repos/desktop',
+    upstream_path: null,
+  });
+  // 其它设置（例如模型/后端）不能被范围切换改写。
+  assert.equal(sent.model, saved.model);
+  assert.equal(sent.backend, saved.backend);
+  assert.deepEqual(harness.state.settings?.history.scope, 'both');
+  assert.deepEqual(harness.state.busy, [true, false]);
+});
+
+test('U02: a failed scope save keeps the old scope and shows the error', async () => {
+  const harness = scopeHarness({ reject: new Error('settings file is read-only') });
+  await harness.changeHistoryScope('desktop');
+  assert.equal(harness.state.settings, null, '失败时不更新界面选择');
+  assert.match(harness.state.error, /read-only/);
+  assert.deepEqual(harness.state.busy, [true, false]);
+});
+
+test('U02: scope changes are ignored while answering or while settings are open', async () => {
+  const harness = scopeHarness();
+  harness.refs.running.current = true;
+  await harness.changeHistoryScope('desktop');
+  assert.deepEqual(harness.requests, []);
+  harness.refs.running.current = false;
+  harness.app.current.assistantSettingsOpen = true;
+  await harness.changeHistoryScope('desktop');
+  assert.deepEqual(harness.requests, [], '设置对话框打开时不落盘，避免带走未保存草稿');
+  harness.app.current.assistantSettingsOpen = false;
+  await harness.changeHistoryScope('auto');
+  assert.deepEqual(harness.requests, [], '没变化就不写设置');
+});
+
+test('U02: every assistant_send carries history_scope and assistant_start keeps modelRevision', async () => {
+  const harness = sendHarness();
+  const sending = harness.send();
+  await settle();
+  const start = harness.invocations.find((item) => item.command === 'assistant_start');
+  assert.deepEqual(start?.args.modelRevision, { id: 'official', revision: 1 });
+  const sent = harness.invocations.find((item) => item.command === 'assistant_send');
+  const context = JSON.parse(String(sent?.args.context));
+  assert.equal(context.history_scope, 'auto');
+  assert.equal(context.kernelDir, '/kernel', '原有 guideState 内容保留');
+  harness.resolveAck();
+  await sending;
+
+  // 用户选了 Desktop 范围：下一条消息立刻带上它（不必先重启助手）。
+  harness.refs.settingsRef.current = {
+    ...harness.refs.settingsRef.current,
+    history: { scope: 'desktop', desktop_path: null, upstream_path: null },
+  };
+  // 上一轮靠 turn_done 才复位 running；这里直接复位等价状态。
+  harness.refs.running.current = false;
+  const second = harness.send('second question');
+  await settle();
+  const next = harness.invocations.filter((item) => item.command === 'assistant_send').at(-1);
+  assert.equal(JSON.parse(String(next?.args.context)).history_scope, 'desktop');
+  harness.resolveAck();
+  await second;
+});
+
+test('U02: the panel shows the backend, model, frozen revision and the routing hint', () => {
+  assert.match(panelSource, /historyScopeLabel\(scope, state\.language\)/);
+  assert.match(panelSource, /historyContext\.backend/);
+  assert.match(panelSource, /historyContext\.model/);
+  assert.match(panelSource, /historyContext\.revision/);
+  assert.match(panelSource, /historyScopeHint\(state\.language\)/);
+  assert.match(panelSource, /historyContextLabel\(/);
+  assert.match(panelSource, /assistant-history-scope/);
+  assert.match(panelSource, /history_scope: historySettingsOf\(current\)\.scope/);
+  assert.match(
+    panelSource,
+    /disabled=\{!ready \|\| running \|\| scopeBusy \|\| state\.assistantSettingsOpen\}/,
+  );
+  assert.match(panelSource, /正在保存范围/);
 });

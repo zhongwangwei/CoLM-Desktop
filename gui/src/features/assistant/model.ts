@@ -27,6 +27,19 @@ export interface RetrievalSettings {
   index: string;
   timeout_ms: number;
 }
+/** 只读历史数据的默认范围：auto = 按问题路由到仓库；其余是用户显式指定的范围。 */
+export type HistoryScope = 'auto' | 'selected' | 'desktop' | 'upstream' | 'both';
+/** 双仓库历史（U01/U02）：scope 随助手设置保存，两个路径是用户已有的本地仓库（null = 用应用管理副本）。 */
+export interface HistorySettings {
+  scope: HistoryScope;
+  desktop_path: string | null;
+  upstream_path: string | null;
+}
+export const defaultHistorySettings: HistorySettings = {
+  scope: 'auto',
+  desktop_path: null,
+  upstream_path: null,
+};
 export interface Settings extends ApiProfile {
   provider_id: string;
   api_profiles: Record<string, ApiProfile>;
@@ -39,6 +52,8 @@ export interface Settings extends ApiProfile {
   backend: string;
   /** Xerj 文档检索（可选，应用级）：关闭时不访问本机 Xerj。 */
   retrieval: RetrievalSettings;
+  /** 只读历史仓库的默认查询范围（应用级）；旧配置缺字段时按 auto/null/null。 */
+  history: HistorySettings;
   egress_acknowledged: string | null;
   external: Record<string, { model: string | null; effort: string | null }>;
 }
@@ -69,6 +84,7 @@ export const defaultSettings: Settings = {
     index: 'colm-docs-v1',
     timeout_ms: 1500,
   },
+  history: { ...defaultHistorySettings },
   egress_acknowledged: null,
   external: {},
 };
@@ -607,4 +623,335 @@ export function managedNodeText(status: XerjNodeStatus | null, language: string)
   if (status.endpoint) parts.push(status.endpoint);
   if (status.detail) parts.push(status.detail);
   return parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------------------------
+// 只读历史仓库（U01/U02）：status 来自 `assistant_history_status`（colm-cli history-repos），
+// 同步来自 `assistant_history_sync`（history-sync）。两者共用同一份 per-repo 形状。
+// ---------------------------------------------------------------------------------------------
+
+/** 一次成功 clone/fetch 的记录；legacy synced 也可能是这个形状，但它不是成功证据。 */
+export interface HistorySyncRecord {
+  ref?: string | null;
+  sha?: string | null;
+  at_unix_ms?: number | null;
+}
+
+export interface HistoryRepoStatus {
+  key?: string;
+  owner?: string;
+  repo?: string;
+  url?: string;
+  path?: string;
+  identity?: {
+    state?: string;
+    root?: string | null;
+    remote?: { url?: string | null; owner?: string | null; repo?: string | null } | null;
+  } | null;
+  default_branch?: string | null;
+  /** 兼容别名，语义同 last_successful_sync。 */
+  synced?: HistorySyncRecord | null;
+  last_successful_sync?: HistorySyncRecord | null;
+  legacy_synced?: HistorySyncRecord | null;
+  sync_notes?: string[];
+  last_attempt?: { action?: string; at_unix_ms?: number | null; error?: string | null } | null;
+  checked_at_unix_ms?: number | null;
+  coverage?: {
+    shallow?: boolean;
+    commits?: number;
+    complete_history?: boolean;
+    truncated?: boolean;
+  } | null;
+  errors?: string[];
+}
+
+/** `history-repos` / `history-sync` 的顶层形状。 */
+export interface HistoryReposStatus {
+  history_root?: string;
+  sync_semantics?: string;
+  repos?: { desktop?: HistoryRepoStatus | null; colm_upstream?: HistoryRepoStatus | null };
+}
+
+export interface HistorySyncResult extends HistoryReposStatus {
+  actions?: Record<string, string>;
+}
+
+export type HistoryRepository = 'desktop' | 'colm_upstream';
+
+const HISTORY_SCOPES: HistoryScope[] = ['auto', 'selected', 'desktop', 'upstream', 'both'];
+
+/** 旧设置没有 history 字段时按默认（auto/null/null）补全，读和保存都不能因此丢字段。 */
+export function historySettingsOf(
+  settings: { history?: Partial<HistorySettings> | null } | null | undefined,
+): HistorySettings {
+  const saved = settings?.history;
+  return {
+    scope: HISTORY_SCOPES.includes(saved?.scope as HistoryScope)
+      ? (saved?.scope as HistoryScope)
+      : 'auto',
+    desktop_path: saved?.desktop_path ?? null,
+    upstream_path: saved?.upstream_path ?? null,
+  };
+}
+
+export function historyScopeLabel(scope: string, language: string) {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  switch (scope) {
+    case 'auto':
+      return t('自动（按问题）', 'Automatic (by question)');
+    case 'selected':
+      return t('当前模型', 'Current model');
+    case 'desktop':
+      return t('Desktop 仓库', 'Desktop repository');
+    case 'upstream':
+      return t('CoLM 官方', 'CoLM upstream');
+    case 'both':
+      return t('两个仓库', 'Both repositories');
+    default:
+      // 后端/旧配置里的未知范围原样显示，不悄悄变成"自动"。
+      return scope;
+  }
+}
+
+export function historyScopeHint(language: string) {
+  return language === 'en'
+    ? 'Automatic routes by question; your chosen scope takes precedence unless the question explicitly asks for another repository.'
+    : '自动会按问题路由仓库；你选的范围优先，除非问题明确要求别的仓库。';
+}
+
+/** 只改历史范围，保留其余设置（不碰服务商 profile）。 */
+export function withHistoryScope(settings: Settings, scope: HistoryScope): Settings {
+  return { ...settings, history: { ...historySettingsOf(settings), scope } };
+}
+
+/** 只改一个仓库的本地路径；null = 清掉路径、回到应用管理副本。 */
+export function withHistoryPath(
+  settings: Settings,
+  repository: HistoryRepository,
+  path: string | null,
+): Settings {
+  const history = historySettingsOf(settings);
+  return {
+    ...settings,
+    history: {
+      ...history,
+      ...(repository === 'desktop' ? { desktop_path: path } : { upstream_path: path }),
+    },
+  };
+}
+
+/** unix 毫秒 → `YYYY-MM-DD HH:MM UTC`。用 UTC 而不是本地时区，跨平台测试与显示都稳定。 */
+export function formatHistoryTime(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '';
+  const iso = new Date(value).toISOString();
+  return `${iso.slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/** 40 hex SHA 取前 7 位；不是 SHA 时原样（最多截断到 40 位以内）返回。 */
+export function shortSha(sha: string | null | undefined) {
+  if (typeof sha !== 'string') return '';
+  const text = sha.trim();
+  if (!text) return '';
+  return /^[0-9a-f]{7,40}$/i.test(text) ? text.slice(0, 7) : text;
+}
+
+export function historyRepositoryLabel(repository: string, language: string) {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  if (repository === 'desktop') return t('Desktop 仓库', 'Desktop repository');
+  if (repository === 'colm_upstream') return t('CoLM 官方仓库', 'CoLM upstream repository');
+  return repository;
+}
+
+export interface HistoryRepoLines {
+  /** 身份/可用性：verified/unverified/missing/partial 等（读不懂的状态原样保留）。 */
+  state: string;
+  /** 上次成功同步（ref + 短 SHA + 时间）。legacy_synced 只写"未证实"，绝不显示为成功。 */
+  lastSync: string;
+  /** 上次检查时间；与成功同步时间分开显示。 */
+  checkedAt: string;
+  /** 最后一次尝试的错误与持久错误（去重）。 */
+  errors: string[];
+  /** partial / 未准备时的一句说明；已就绪为 null。 */
+  preparation: string | null;
+}
+
+/**
+ * 把一个仓库的 status 翻译成设置面板要显示的四段文字。success 与 checked 永远分开：
+ * `checked_at_unix_ms` 只是检查时间，`legacy_synced` 是旧版未证实记录，两者都不能说成"同步成功"。
+ */
+export function historyRepoLines(
+  repo: HistoryRepoStatus | null | undefined,
+  language: string,
+): HistoryRepoLines {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  const identityState = repo?.identity?.state;
+  const shallow = repo?.coverage?.shallow === true;
+  let state: string;
+  if (!repo) state = t('状态未知', 'Unknown');
+  else if (identityState === 'missing') state = t('缺失', 'Missing');
+  else if (identityState === 'unverified') state = t('身份未核验', 'Unverified identity');
+  else if (identityState === 'verified' && shallow)
+    state = t('部分历史（浅克隆）', 'Partial history (shallow clone)');
+  else if (identityState === 'verified') state = t('已核验', 'Verified');
+  else state = `${t('身份未知', 'Unknown identity')}：${identityState ?? t('无记录', 'no record')}`;
+
+  const success = repo?.last_successful_sync;
+  const legacy = repo?.legacy_synced;
+  const successName = success
+    ? [success.ref?.trim() || '', shortSha(success.sha)].filter(Boolean).join(' @ ')
+    : '';
+  let lastSync: string;
+  if (success && (successName || success.at_unix_ms))
+    lastSync = `${t('上次成功同步', 'Last successful sync')}：${successName}${
+      success.at_unix_ms
+        ? `${successName ? ' · ' : ''}${formatHistoryTime(success.at_unix_ms)}`
+        : ''
+    }`;
+  else if (legacy)
+    lastSync = `${t('旧记录', 'Legacy record')}：${t(
+      '未证实同步成功',
+      'not proof of a successful sync',
+    )}${legacy.at_unix_ms ? `（${t('截至', 'as of')} ${formatHistoryTime(legacy.at_unix_ms)}）` : ''}`;
+  else lastSync = t('还没有成功同步记录', 'No successful sync recorded');
+
+  const checkedAt = repo?.checked_at_unix_ms
+    ? `${t('上次检查', 'Last checked')}：${formatHistoryTime(repo.checked_at_unix_ms)}`
+    : t('还没有检查记录', 'Not checked yet');
+
+  const errors: string[] = [];
+  const attemptError = repo?.last_attempt?.error;
+  if (typeof attemptError === 'string' && attemptError.trim()) errors.push(attemptError.trim());
+  for (const error of repo?.errors ?? [])
+    if (typeof error === 'string' && error.trim() && !errors.includes(error.trim()))
+      errors.push(error.trim());
+
+  let preparation: string | null = null;
+  if (!repo || identityState === 'missing')
+    preparation = t(
+      '数据目录里还没有这个仓库；点“准备数据”下载后再用。',
+      'This repository is not in the data directory yet; use “Prepare data” to download it.',
+    );
+  else if (!success && legacy)
+    preparation = t(
+      '只有旧版同步记录，未证实成功；建议重新准备/更新。',
+      'Only a legacy sync record exists and it is not proof of success; prepare or update again.',
+    );
+  else if (errors.length)
+    preparation = t(
+      '上次更新失败；按上面的错误处理后重试。',
+      'The last update failed; fix the error above and retry.',
+    );
+  else if (identityState === 'unverified')
+    preparation = t(
+      '仓库身份未核验；请确认路径指向官方仓库。',
+      'The repository identity is unverified; check that the path points at the official repository.',
+    );
+  else if (shallow)
+    preparation = t(
+      '历史是浅克隆（不完整）；完整历史查询会标 partial。',
+      'History is a shallow clone (incomplete); full-history queries will be marked partial.',
+    );
+
+  return { state, lastSync, checkedAt, errors, preparation };
+}
+
+/** 同步结果（actions）→ 一行提示；未知动作原样显示，只要有一个 error 就整体标失败。 */
+export function historySyncSummary(
+  result: HistorySyncResult | null,
+  language: string,
+): { text: string; failed: boolean } | null {
+  const actions = result?.actions;
+  if (!actions) return null;
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  const parts: string[] = [];
+  let failed = false;
+  for (const repository of ['desktop', 'colm_upstream'] as HistoryRepository[]) {
+    const action = actions[repository];
+    if (!action) continue;
+    let text: string;
+    switch (action) {
+      case 'fetched':
+        text = t('已更新', 'updated');
+        break;
+      case 'cloned':
+        text = t('已克隆', 'cloned');
+        break;
+      case 'offline':
+        text = t('离线（未联网）', 'offline (no network)');
+        break;
+      case 'skipped':
+        text = t('跳过', 'skipped');
+        break;
+      case 'error':
+        text = t('失败', 'failed');
+        failed = true;
+        break;
+      default:
+        text = action;
+    }
+    parts.push(`${historyRepositoryLabel(repository, language)} ${text}`);
+  }
+  if (!parts.length) return null;
+  const prefix = failed
+    ? t('同步结果（有失败）', 'Sync result (with failures)')
+    : t('同步结果', 'Sync result');
+  return { text: `${prefix}：${parts.join('；')}`, failed };
+}
+
+const EXTERNAL_BACKEND_LABELS: Record<string, { zh: string; en: string }> = {
+  codex: { zh: '本机 Codex', en: 'Local Codex' },
+  claude_code: { zh: '本机 Claude Code', en: 'Local Claude Code' },
+  opencode: { zh: '本机 OpenCode', en: 'Local OpenCode' },
+};
+
+export interface HistoryContextLabel {
+  backend: string;
+  model: string;
+  /** 冻结模型的短 SHA（有提交）或 `id@revision`；官方/应用内置时明确写出来。 */
+  revision: string;
+}
+
+/**
+ * U02 输入框上方的"当前后端/模型/冻结 revision"文字。revision 优先用冻结记录里的
+ * code.commit 短 SHA；没有提交时退回 version 的 id@revision；官方/内置则明确显示，不猜 SHA。
+ */
+export function historyContextLabel(
+  settings: Settings,
+  version:
+    | {
+        version?: { id: string; revision: number } | null;
+        code?: { commit?: string | null } | null;
+      }
+    | null
+    | undefined,
+  versionRef: { id: string; revision: number } | null | undefined,
+  language: string,
+): HistoryContextLabel {
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  const preset = API_PROVIDERS.find((item) => item.id === providerId(settings));
+  const backend =
+    settings.backend === 'builtin'
+      ? preset
+        ? providerLabel(preset, language)
+        : settings.base_url || t('API 服务', 'API service')
+      : EXTERNAL_BACKEND_LABELS[settings.backend]
+        ? language === 'en'
+          ? EXTERNAL_BACKEND_LABELS[settings.backend].en
+          : EXTERNAL_BACKEND_LABELS[settings.backend].zh
+        : settings.backend;
+  const chosen =
+    settings.backend === 'builtin'
+      ? settings.model
+      : settings.external[settings.backend]?.model || '';
+  const model = chosen || t('默认模型', 'default model');
+  const commit = version?.code?.commit;
+  const revision =
+    typeof commit === 'string' && commit.trim()
+      ? shortSha(commit)
+      : version?.version
+        ? `${version.version.id}@${version.version.revision}`
+        : versionRef && versionRef.id !== 'official'
+          ? `${versionRef.id}@${versionRef.revision}`
+          : t('官方/应用内置', 'official / built-in');
+  return { backend, model, revision };
 }

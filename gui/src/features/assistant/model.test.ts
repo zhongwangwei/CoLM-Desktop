@@ -7,8 +7,17 @@ import {
   assistantModels,
   selectAssistantModel,
   API_PROVIDERS,
+  defaultHistorySettings,
   defaultSettings,
+  formatHistoryTime,
+  historyContextLabel,
   historyInput,
+  historyRepoLines,
+  historyRepositoryLabel,
+  historyScopeHint,
+  historyScopeLabel,
+  historySettingsOf,
+  historySyncSummary,
   managedNodeText,
   parseApiOptions,
   rememberProfile,
@@ -16,14 +25,18 @@ import {
   retrievalStateText,
   selectProvider,
   settingsForSave,
+  shortSha,
   thinkSettings,
   thinkValue,
   withChoice,
   withContextWindowCleared,
+  withHistoryPath,
+  withHistoryScope,
   EXAMPLE_STARTERS,
   examplePrompt,
   providerLabel,
   egressTarget,
+  type HistoryRepoStatus,
   type RetrievalSettings,
 } from './model';
 import { approvalSnapshot, matchesGrant, respondToUiRequest, uiGrant } from './ui-request';
@@ -509,4 +522,220 @@ it('translates known Xerj index states and leaves unknown states untouched', () 
     'rejected_by_future_backend',
   );
   assert.equal(retrievalStateText('', 'zh'), '');
+});
+
+// ---------------------------------------------------------------------------
+// U01/U02：只读历史仓库与聊天历史范围
+// ---------------------------------------------------------------------------
+
+const HISTORY_SUCCESS_MS = 1_790_000_000_000;
+const HISTORY_CHECKED_MS = 1_730_000_000_000;
+
+function historyRepo(over: Partial<HistoryRepoStatus> = {}): HistoryRepoStatus {
+  return {
+    identity: { state: 'verified', root: null, remote: null },
+    coverage: { shallow: false, commits: 42, complete_history: true, truncated: false },
+    ...over,
+  };
+}
+
+it('defaults the read-only history scope to auto and keeps it out of provider profiles', () => {
+  assert.deepEqual(defaultSettings.history, {
+    scope: 'auto',
+    desktop_path: null,
+    upstream_path: null,
+  });
+  // 旧设置缺 history：读入时补默认值，保留已有路径字段。
+  assert.deepEqual(historySettingsOf(undefined), defaultHistorySettings);
+  assert.deepEqual(historySettingsOf({}), defaultHistorySettings);
+  assert.deepEqual(
+    historySettingsOf({ history: { scope: 'future' as never, desktop_path: '/repos/desktop' } }),
+    { scope: 'auto', desktop_path: '/repos/desktop', upstream_path: null },
+  );
+  const saved = rememberProfile({
+    ...defaultSettings,
+    history: { scope: 'desktop', desktop_path: '/repos/desktop', upstream_path: null },
+  });
+  // 历史是应用级设置：不能进服务商 profile，否则切服务商会被旧 profile 覆盖。
+  assert.equal('history' in (saved.api_profiles.deepseek as object), false);
+  assert.deepEqual(selectProvider(saved, 'openai').history, saved.history);
+  // 只改范围/只改一个仓库路径，其余设置与 profile 原样保留。
+  const scoped = withHistoryScope(saved, 'both');
+  assert.equal(scoped.history.scope, 'both');
+  assert.equal(scoped.history.desktop_path, '/repos/desktop');
+  assert.deepEqual(scoped.api_profiles, saved.api_profiles);
+  const pathed = withHistoryPath(scoped, 'colm_upstream', '/repos/upstream');
+  assert.deepEqual(pathed.history, {
+    scope: 'both',
+    desktop_path: '/repos/desktop',
+    upstream_path: '/repos/upstream',
+  });
+  const forSave = settingsForSave(pathed, saved);
+  assert.deepEqual(forSave.history, pathed.history);
+  assert.deepEqual(withHistoryPath(pathed, 'desktop', null).history.desktop_path, null);
+});
+
+it('formats sync times and short SHAs deterministically', () => {
+  assert.equal(formatHistoryTime(HISTORY_SUCCESS_MS), '2026-09-21 14:13 UTC');
+  assert.equal(formatHistoryTime(0), '');
+  assert.equal(formatHistoryTime(null), '');
+  assert.equal(formatHistoryTime(undefined), '');
+  assert.equal(shortSha('0123456789abcdef0123456789abcdef01234567'), '0123456');
+  assert.equal(shortSha(''), '');
+  assert.equal(shortSha(null), '');
+  assert.equal(shortSha('not-a-sha'), 'not-a-sha');
+});
+
+it('translates history scopes, repository names and the routing hint bilingually', () => {
+  assert.equal(historyScopeLabel('auto', 'zh'), '自动（按问题）');
+  assert.equal(historyScopeLabel('auto', 'en'), 'Automatic (by question)');
+  assert.equal(historyScopeLabel('selected', 'en'), 'Current model');
+  assert.equal(historyScopeLabel('desktop', 'zh'), 'Desktop 仓库');
+  assert.equal(historyScopeLabel('upstream', 'en'), 'CoLM upstream');
+  assert.equal(historyScopeLabel('both', 'zh'), '两个仓库');
+  // 未知范围原样显示，不能悄悄变成"自动"。
+  assert.equal(historyScopeLabel('future_scope', 'en'), 'future_scope');
+  assert.match(historyScopeHint('en'), /chosen scope takes precedence/);
+  assert.match(historyScopeHint('zh'), /范围优先/);
+  assert.equal(historyRepositoryLabel('desktop', 'en'), 'Desktop repository');
+  assert.equal(historyRepositoryLabel('colm_upstream', 'zh'), 'CoLM 官方仓库');
+});
+
+it('keeps last successful sync, checked time and legacy records separate', () => {
+  const success = historyRepoLines(
+    historyRepo({
+      last_successful_sync: {
+        ref: 'main',
+        sha: '0123456789abcdef0123456789abcdef01234567',
+        at_unix_ms: HISTORY_SUCCESS_MS,
+      },
+      checked_at_unix_ms: HISTORY_CHECKED_MS,
+    }),
+    'en',
+  );
+  assert.equal(success.state, 'Verified');
+  assert.match(success.lastSync, /Last successful sync/);
+  assert.match(success.lastSync, /main @ 0123456/);
+  assert.ok(success.lastSync.includes(formatHistoryTime(HISTORY_SUCCESS_MS)));
+  // 成功时间与检查时间必须是两行：checked_at 不能被写成同步成功时间。
+  assert.match(success.checkedAt, /Last checked/);
+  assert.ok(success.checkedAt.includes(formatHistoryTime(HISTORY_CHECKED_MS)));
+  assert.ok(!success.lastSync.includes(formatHistoryTime(HISTORY_CHECKED_MS)));
+  assert.deepEqual(success.errors, []);
+  assert.equal(success.preparation, null);
+
+  // 旧版 synced 记录不是成功证据：只能标"legacy/未证实"，绝不能出现在"上次成功同步"里。
+  const legacy = historyRepoLines(
+    historyRepo({
+      last_successful_sync: null,
+      legacy_synced: { ref: 'main', sha: '0123456', at_unix_ms: HISTORY_CHECKED_MS },
+      checked_at_unix_ms: HISTORY_CHECKED_MS,
+    }),
+    'zh',
+  );
+  assert.match(legacy.lastSync, /旧记录/);
+  assert.match(legacy.lastSync, /未证实同步成功/);
+  assert.ok(!legacy.lastSync.includes('上次成功同步'));
+  assert.match(legacy.preparation!, /只有旧版同步记录/);
+
+  const missing = historyRepoLines({ identity: { state: 'missing' } }, 'zh');
+  assert.equal(missing.state, '缺失');
+  assert.match(missing.lastSync, /还没有成功同步记录/);
+  assert.match(missing.checkedAt, /还没有检查记录/);
+  assert.match(missing.preparation!, /准备数据/);
+
+  const failed = historyRepoLines(
+    historyRepo({
+      last_successful_sync: null,
+      last_attempt: { action: 'error', error: 'git fetch origin failed' },
+      errors: ['git fetch origin failed', 'network unreachable'],
+    }),
+    'en',
+  );
+  // last_attempt.error 与持久 errors 去重后都要以错误样式露出来。
+  assert.deepEqual(failed.errors, ['git fetch origin failed', 'network unreachable']);
+  assert.match(failed.preparation!, /last update failed/i);
+
+  const unverified = historyRepoLines({ identity: { state: 'unverified' } }, 'en');
+  assert.equal(unverified.state, 'Unverified identity');
+  assert.match(unverified.preparation!, /identity is unverified/);
+
+  const partial = historyRepoLines(
+    historyRepo({ coverage: { shallow: true, commits: 3, complete_history: false } }),
+    'zh',
+  );
+  assert.match(partial.state, /部分历史/);
+  assert.match(partial.preparation!, /浅克隆/);
+
+  // 后端将来新增的身份状态原样显示。
+  assert.match(
+    historyRepoLines({ identity: { state: 'future_state' } }, 'en').state,
+    /future_state/,
+  );
+});
+
+it('summarises explicit sync actions and marks failures without inventing success', () => {
+  const ok = historySyncSummary({ actions: { desktop: 'fetched', colm_upstream: 'cloned' } }, 'en');
+  assert.equal(ok?.failed, false);
+  assert.match(ok!.text, /Desktop repository updated/);
+  assert.match(ok!.text, /CoLM upstream repository cloned/);
+  const offline = historySyncSummary(
+    { actions: { desktop: 'offline', colm_upstream: 'skipped' } },
+    'zh',
+  );
+  assert.equal(offline?.failed, false);
+  assert.match(offline!.text, /离线/);
+  assert.match(offline!.text, /跳过/);
+  const failed = historySyncSummary(
+    { actions: { desktop: 'error', colm_upstream: 'future_action' } },
+    'en',
+  );
+  assert.equal(failed?.failed, true);
+  assert.match(failed!.text, /with failures/);
+  assert.match(failed!.text, /future_action/);
+  assert.equal(historySyncSummary(null, 'en'), null);
+  assert.equal(historySyncSummary({}, 'en'), null);
+});
+
+it('names the current backend, model and frozen revision for the history hint', () => {
+  const frozen = {
+    version: { id: 'soil-process', revision: 3 },
+    code: { commit: '0123456789abcdef0123456789abcdef01234567' },
+  };
+  const builtin = historyContextLabel(
+    defaultSettings,
+    frozen,
+    { id: 'soil-process', revision: 3 },
+    'en',
+  );
+  assert.equal(builtin.backend, 'DeepSeek (Pro / Flash)');
+  assert.equal(builtin.model, 'deepseek-flash');
+  assert.equal(builtin.revision, '0123456');
+  // 没有 commit 的冻结记录退回 id@revision；官方/内置明确写出来，不猜 SHA。
+  assert.equal(
+    historyContextLabel(
+      defaultSettings,
+      { version: { id: 'v1', revision: 2 }, code: { commit: null } },
+      { id: 'v1', revision: 2 },
+      'zh',
+    ).revision,
+    'v1@2',
+  );
+  assert.equal(
+    historyContextLabel(defaultSettings, null, { id: 'official', revision: 1 }, 'zh').revision,
+    '官方/应用内置',
+  );
+  const codex = historyContextLabel(
+    {
+      ...defaultSettings,
+      backend: 'codex',
+      external: { codex: { model: 'gpt-codex', effort: null } },
+    },
+    null,
+    { id: 'official', revision: 1 },
+    'en',
+  );
+  assert.equal(codex.backend, 'Local Codex');
+  assert.equal(codex.model, 'gpt-codex');
+  assert.equal(codex.revision, 'official / built-in');
 });
