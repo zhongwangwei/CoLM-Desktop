@@ -38948,3 +38948,51 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - clippy 两侧 `-D warnings`、两个 workspace `cargo fmt --all --check` 全绿。
 - 未运行：真实 Tauri 窗口点击、真实 SSH/调度器/集群故障注入、真实 OpenBench 安装与比较运行、真实科学数据端到端（远程测试用本地 bash+python 假 openbench；R04 用文件内容代理真实 PREPARE）。
 - 未完成的产品语义（能力/易用性，超出本批）：多 patch/element 支持、非公历的 prepare 路径；草稿离页恢复、保存按钮语义、常驻任务栏、站点 ID/模型 profile 独立选择、CoLM2024 仍固定写；`simulationKey` 与 `project.name` 对下划线名的差异未统一。
+
+## 历史证据链边界修补 C01–C05（2026-10-29，复核报告 C01–C05）
+
+在 H07–H09 / F01–F04 之上补齐复核报告列出的来源、PR 详情、缓存与迁移边界；仍只改历史工具与 CLI，不扩到 S01–S02/U 批次与其它功能。共享工作区此前有并行会话，先清理了被污染的 target（另一 worktree 的编译产物曾被同 target 复用），再从干净构建跑门禁。
+
+### C01 只有标准 Git trailer 才能升级 verified
+
+- 背景：`structured_upstream_commits` 逐行扫描整份提交说明，正文/引用/代码块里的 `Upstream-Commit:` 也会被当成正式记录；被否决的 C（revert 后与导入内容同 blob）可能被升级 verified。
+- 新行为：把提交说明从 stdin 交给 `git interpret-trailers --parse`，只解析该命令输出中的 `Upstream-Commit` 正式 trailer（键大小写不敏感、值须完整 40 位小写 hex）；正文/代码块/引用里的同名行只保留为候选证据（`mentioned_in_code`），不进入 verified。唯一正式字段 + 该 SHA 在候选里 + blob == Desktop import blob → verified（basis `structured-upstream-commit`，保留 raw 行与 `formal_trailer_records`）。存在任何正式字段但冲突多值/值无效/引用不在候选/blob 不匹配 → **candidate 且 `upstream.commit=null`**，不再用 blob 相等挑一个；无正式字段时保留候选定位逻辑。
+- 回归：`structured_upstream_commit_uses_standard_git_trailer_parsing`（真实 `git interpret-trailers --parse`：末尾合法 trailer/代码块内/末尾 fenced block/invalid value）、`code_block_upstream_commit_is_not_a_formal_trailer`（A→B→revert A，正文代码块写被否决 C → candidate/null，C 的 structured=false/mentioned_in_code=true）、`conflicting_formal_trailers_never_pick_a_blob_equal_source`、`invalid_or_mismatched_formal_trailer_is_candidate_without_commit`。
+- 真实 CLI 夹具 smoke：代码块写 `Upstream-Commit: C` → candidate、upstream.commit=null、formal=[]；末尾正式 `Upstream-Commit: A` → verified（basis 含 structured-upstream-commit，raw 行保留）。夹具数据。
+- 未覆盖：`git interpret-trailers --parse` 依赖本机 git/仓库 trailer 配置；命令失败时保守降级为“无正式记录”（不会误 verified）；内联反引号 SHA 只算正文引用。
+
+### C02 App handle 固定首次解析出的检出
+
+- 背景：App descriptor 的 `source_dir=None`，详情仍传 `--source app`；managed Desktop 后来出现/变化时，同一 handle 可能重解析到另一个库。
+- 新行为：App 首次查询成功后把 CLI 返回的 canonical 绝对目录写入 descriptor；拿不到绝对目录时不签发声称固定来源的 handle（明确报错）。有 handle 的详情（frozen/workspace/App）一律用 descriptor.source_dir 调 `--source <目录>`；目录不可读明确失败，不换库、不运行 CLI。只有无 handle 的默认查询才动态解析 app。
+- 回归：`app_handle_pins_the_first_resolved_checkout`（A→后来 B 出现，旧 handle 仍传 A；A 消失明确失败）、`app_source_history_refuses_a_handle_without_the_resolved_directory`；更新 App/selected fixture 断言。
+- 未覆盖：真实 managed 库出现/删除的端到端变化（fake CLI 模拟）；真实 App 工作区。
+
+### C03 PR 详情按需读取、预算与未核验状态
+
+- C03-A：`pr_number` 详情改为预算内结构：正文窗口（`body_offset`/`next_body_offset`、`body_chars`，窗口 4000 字）、评论分页（`comments_cursor`/`comments.next_cursor`、每条 ≤400 字、每页 3 条）、理由候选 ≤3 条且每条摘录 ≤300 字；新增 `body_offset`、`comments_cursor` 参数。测试走真实 `Tool::call` → `result_text`：8000 字正文 + 10 条 1000 字评论 + 候选仍 <24k、无前缀截断 wrapper，并能用 continuation 取回全部后部。
+- C03-B：`GithubClient::pulls_focused` 先按页定位目标（找到即停），只构建目标 PR、**只为目标抓讨论**（20 个讨论上限只作用于本次目标）；21 个关联 PR 直读第 21 个，mock 只收到一次 `/issues/21/comments`，返回真实讨论与 reason candidate。聚焦查询不写完整列表缓存，避免“只含目标的列表”冒充完整快照。
+- C03-C：只有完整、成功、无 errors 的关联列表里没有目标才报 not associated；离线 cache miss/列表分页失败/截断时返回结构化 `detail_unverified{pr_number,unverified,list_complete,offline,from_cache,reason}`，保留 offline/complete/notices/errors，不 Err、不误报未关联。
+- 回归：`commit_pull_requests_detail_is_budgeted_and_continuable_through_result_text`、`commit_pull_requests_reads_only_the_target_pr_discussion`、`commit_pull_requests_pr_number_is_unverified_offline_without_cache`、`..._when_a_list_page_failed`、`..._needs_a_complete_list_to_say_not_associated`、`commit_pull_requests_detail_reads_offline_complete_cache`；schema 断言新增 body_offset/comments_cursor。
+- 未覆盖：异常长的 notices/errors 未二次裁剪；评论仍受客户端 10 条摘要上限；聚焦查询不写完整列表缓存（先详情后离线无完整快照时返回 unverified）；关联列表 >5 页/500 条上限外的目标返回 unverified；真实 GitHub 网络未使用。
+
+### C04 旧 synced 只作 legacy，不升级为成功同步
+
+- 背景：旧 `repos.json` 的 `synced` 可能来自旧版失败 fetch 或 offline；升级时直接填入 last_successful_sync 会把不确定数据升级为成功证据。
+- 新行为：旧格式 `synced` 只输出为 `legacy_synced` + 每仓 `sync_notes`，`last_successful_sync`/`synced` 在升级读取后为 null/unknown；旧 SHA/缓存仍可离线读取（不联网、不删缓存、不写盘迁移）；只有新格式真正成功 clone/fetch 才建立 last_successful_sync，随后 legacy 消失、errors 清空。
+- 回归：`legacy_synced_is_kept_as_legacy_not_a_successful_sync`（模拟旧版 offline 与旧版 fetch 失败写出的 synced：升级后 last_successful_sync=null、legacy 原样；恢复 remote 后新成功 sync 才建立成功记录并清 legacy/errors）。
+- 未覆盖：真实旧版缓存样本（用等价旧 JSON 构造）；旧缓存的历史写入时间无法追溯。
+
+### C05 完整缓存写盘成功后才删除 partial
+
+- 背景：完整数据 HTTP 成功但完整快照写盘失败时，旧实现仍删除 partial，下一次离线失去可用缓存。
+- 新行为：`write_cache_file` 返回 `Result<(),String>`；只有完整快照持久化成功后才删除 `.partial.json`；失败保留 partial 原字节并返回 notice“previous partial cache left unchanged”，partial 写失败也只进 notices。
+- 回归：`complete_cache_write_failure_keeps_the_partial_cache_bytes`（预置 partial → 目录占位注入完整写失败 → partial 字节不变、notice、离线可读 partial；清除注入后成功 refresh 才删 partial）。
+- 未覆盖：真实磁盘空间不足/权限错误（用目录占位注入）；跨平台文件系统行为。
+
+### 本轮验证（真实执行）
+
+- 清理并行 worktree 导致的 target 污染后，从干净构建跑：`cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3205 passed / 0 failed / 16 ignored**（`colm-cli` 707；`colm-agent` 383 passed + 1 ignored live smoke）。
+- 真实 CLI 夹具 smoke：C01 代码块被否决 trailer → candidate/null，正式末尾 trailer → verified；C04 与 C02 由真实 git/JSON 夹具测试覆盖。
+- Tauri/GUI 未改（本轮未动 gui），沿用其既有测试记录。
+- 未运行：真实 GitHub/TLS/token、真实模型端到端、真实 App/外部后端、GUI；S01–S02 与 U01–U05 仍属后续批次。
