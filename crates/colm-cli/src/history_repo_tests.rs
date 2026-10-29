@@ -3034,3 +3034,225 @@ fn invalid_or_mismatched_formal_trailer_is_candidate_without_commit() {
     );
     assert!(link["notes"].to_string().contains("different blob"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// A1：retention（当前端点是否保留本次返回的最新相关 commit 的新增行）
+// ---------------------------------------------------------------------------------------------
+
+fn retention_of<'a>(result: &'a Value, repo: &str) -> &'a Value {
+    &result["repos"][repo]["retention"]
+}
+
+#[test]
+fn retention_reports_retained_when_endpoint_keeps_the_checked_added_lines() {
+    clean_history_env();
+    let root = TempDir::new("a1-retained");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(0, "Add omega");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let change = desktop.commit_at(10, "Change omega");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "omega".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "retained", "{retention:#?}");
+    assert_eq!(retention["basis"], "endpoint-added-lines-present");
+    assert_eq!(retention["checked_sha"], json!(desktop.head()));
+    assert!(retention["checked_ref"].as_str().is_some());
+    assert_eq!(retention["commit"], json!(change));
+    assert_eq!(retention["paths"], json!(["main/MOD_A.F90"]));
+    assert!(retention["note"]
+        .as_str()
+        .unwrap()
+        .contains("line-level presence check only"));
+    // 新增字段不影响旧字段。
+    assert_eq!(
+        result["repos"]["desktop"]["commits"][0]["sha"],
+        json!(change)
+    );
+}
+
+#[test]
+fn retention_reports_not_retained_when_the_checked_added_line_is_absent() {
+    clean_history_env();
+    let root = TempDir::new("a1-not-retained");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    // 时间戳刻意倒序：C（graph 较早、committer 时间更晚）是 commits[0]；revert 提交时间更早。
+    // retention 按契约检查 commits[0]（最新时间）的新增行，因此这里能真实观察到“端点已不含该行”。
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(0, "Add omega");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let change = desktop.commit_at(10, "Change omega");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(5, "Revert omega to 1");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "omega".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "not_retained", "{retention:#?}");
+    assert_eq!(retention["basis"], "endpoint-added-lines-absent");
+    assert_eq!(retention["commit"], json!(change));
+    let note = retention["note"].as_str().unwrap();
+    assert!(
+        note.contains("does not prove the change was reverted"),
+        "{note}"
+    );
+    assert!(note.contains("line-level presence check only"));
+}
+
+#[test]
+fn retention_reports_mixed_when_only_some_added_lines_survive() {
+    clean_history_env();
+    let root = TempDir::new("a1-mixed");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(0, "Add omega");
+    desktop.write(
+        "main/MOD_A.F90",
+        "SUBROUTINE a\n  omega = 2.0\n  omega_limit = 5.0\nEND\n",
+    );
+    let change = desktop.commit_at(10, "Change omega and add a limit");
+    // graph 更新、但 committer 时间更早：commits[0] 仍是 C；端点只保留其中一个新增行。
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    desktop.commit_at(5, "Remove omega limit");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "omega".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "unknown", "{retention:#?}");
+    assert_eq!(retention["basis"], "mixed");
+    assert_eq!(retention["commit"], json!(change));
+    assert!(retention["note"].as_str().unwrap().contains("mixed result"));
+}
+
+#[test]
+fn retention_reports_file_missing_when_the_checked_path_is_gone_at_endpoint() {
+    clean_history_env();
+    let root = TempDir::new("a1-file-missing");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("main/old.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(0, "Add omega");
+    desktop.write("main/old.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let change = desktop.commit_at(10, "Change omega");
+    // 改名提交本身不含符号行 hunk，不是“相关 commit”；端点只剩新路径。
+    desktop.rename("main/old.F90", "main/new.F90");
+    desktop.commit_at(5, "Rename module");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "omega".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "unknown", "{retention:#?}");
+    assert_eq!(retention["basis"], "file-missing-at-endpoint");
+    assert_eq!(retention["commit"], json!(change));
+    assert_eq!(retention["paths"], json!(["main/old.F90"]));
+    assert!(retention["note"]
+        .as_str()
+        .unwrap()
+        .contains("absent at the endpoint"));
+}
+
+#[test]
+fn retention_reports_no_added_lines_for_a_pure_deletion_commit() {
+    clean_history_env();
+    let root = TempDir::new("a1-deletion");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    desktop.commit_at(0, "Add omega");
+    desktop.write(
+        "main/MOD_A.F90",
+        "SUBROUTINE a\n  omega = 1.0\n  omega_hist = 3.0\nEND\n",
+    );
+    desktop.commit_at(5, "Add omega history variable");
+    desktop.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    let deletion = desktop.commit_at(10, "Delete omega history variable");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "desktop".to_owned()),
+            ("--symbol", "omega".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "unknown", "{retention:#?}");
+    assert_eq!(retention["basis"], "no-added-lines");
+    assert_eq!(retention["commit"], json!(deletion));
+    assert!(retention["note"]
+        .as_str()
+        .unwrap()
+        .contains("no added lines containing the symbol"));
+}
+
+#[test]
+fn retention_for_selected_dirty_tree_checks_head_and_says_uncommitted_is_not_included() {
+    clean_history_env();
+    let root = TempDir::new("a1-dirty-root");
+    let source = TempDir::new("a1-dirty-source");
+    let repo = RepoFixture::init(source.path());
+    repo.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 1.0\nEND\n");
+    repo.commit_at(0, "Add omega");
+    repo.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 2.0\nEND\n");
+    let change = repo.commit_at(10, "Change omega");
+    // 未提交改动：retention 仍按 HEAD 的提交树判断，note 说明未计入。
+    repo.write("main/MOD_A.F90", "SUBROUTINE a\n  omega = 3.0\nEND\n");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "selected".to_owned()),
+            ("--symbol", "omega".to_owned()),
+            ("--source", text(source.path()).to_owned()),
+        ],
+    );
+    assert_eq!(result["query"]["source"]["dirty"], true);
+    let retention = retention_of(&result, "selected");
+    assert_eq!(retention["state"], "retained", "{retention:#?}");
+    assert_eq!(retention["checked_sha"], json!(change));
+    assert_eq!(retention["commit"], json!(change));
+    assert!(retention["note"]
+        .as_str()
+        .unwrap()
+        .contains("uncommitted changes are not included"));
+}
+
+#[test]
+fn retention_reports_no_commits_when_the_query_returns_none() {
+    clean_history_env();
+    let root = TempDir::new("a1-no-commits");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    desktop.write("src/lib.rs", "pub fn unrelated() {}\n");
+    desktop.commit("Add unrelated file");
+    let result = track(
+        &root,
+        &[
+            ("--repository", "both".to_owned()),
+            ("--symbol", "missing_symbol".to_owned()),
+        ],
+    );
+    let retention = retention_of(&result, "desktop");
+    assert_eq!(retention["state"], "unknown", "{retention:#?}");
+    assert_eq!(retention["basis"], "no-commits");
+    assert_eq!(retention["commit"], Value::Null);
+    assert_eq!(retention["paths"], json!([]));
+    assert_eq!(retention["checked_sha"], json!(desktop.head()));
+    // 每个 repo 条目都有 retention；历史不可用时的占位是 unknown/unavailable。
+    assert_eq!(
+        result["repos"]["colm_upstream"]["retention"]["basis"],
+        "unavailable"
+    );
+}

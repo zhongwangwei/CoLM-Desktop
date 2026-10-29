@@ -1684,6 +1684,8 @@ struct Target<'a> {
     spec: Option<RepoSpec>,
     dir: &'a Path,
     endpoint: Endpoint,
+    /// 工作区是否有未提交改动；retention 只读 endpoint 的提交树，note 会说明未提交改动不计入。
+    dirty: bool,
 }
 
 struct TargetReport {
@@ -1693,6 +1695,205 @@ struct TargetReport {
     files: Vec<String>,
     endpoint_sha: String,
     truncated: bool,
+}
+
+const RETENTION_NOTE: &str = "line-level presence check only; Git ancestry alone cannot prove the change is still effective or its numeric effect";
+const MAX_RETENTION_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETENTION_LINES: usize = 200_000;
+
+/// 没有可核验 endpoint/历史时的 retention 占位：state=unknown，basis=unavailable。
+fn retention_unavailable(detail: &str) -> Value {
+    json!({
+        "state": "unknown",
+        "basis": "unavailable",
+        "checked_ref": Value::Null,
+        "checked_sha": Value::Null,
+        "commit": Value::Null,
+        "paths": [],
+        "note": format!("{RETENTION_NOTE}; {detail}"),
+    })
+}
+
+/// A1：当前源码/端点是否仍保留“本次返回的最新相关 commit”所加的含符号行。
+///
+/// 只做行级 presence 检查：取返回 commits[0]（按提交时间的最新相关修改），把它的 hunk 新增行中
+/// 含 symbol 的行与 endpoint 提交树里的文件行逐行 trim 比较。**绝不**用 Git 祖先关系断言
+/// “修改仍生效”——只说明这些文本行在/不在 endpoint；缺行不等于证明被 revert/改写，也不能证明数值影响。
+fn retention_for(
+    dir: &Path,
+    endpoint: &Endpoint,
+    commits: &[Value],
+    dirty: bool,
+    symbol: &str,
+) -> Value {
+    let mut notes = vec![RETENTION_NOTE.to_owned()];
+    if dirty {
+        notes.push(
+            "uncommitted changes are not included; the check reads the endpoint commit's tree"
+                .to_owned(),
+        );
+    }
+    let Some(latest) = commits.first() else {
+        return json!({
+            "state": "unknown",
+            "basis": "no-commits",
+            "checked_ref": endpoint.ref_name,
+            "checked_sha": endpoint.sha,
+            "commit": Value::Null,
+            "paths": [],
+            "note": notes.join("; "),
+        });
+    };
+    let commit_sha = latest["sha"].as_str().unwrap_or_default().to_owned();
+    // 只检查该 commit 的 hunk 里“新增且含 symbol”的行；纯删除/改名类改动没有这样的行。
+    let mut checked: Vec<(String, Vec<String>)> = Vec::new();
+    for file in latest["files"].as_array().into_iter().flatten() {
+        let Some(path) = file["path"].as_str() else {
+            continue;
+        };
+        let mut added = Vec::new();
+        for hunk in file["hunks"].as_array().into_iter().flatten() {
+            for line in hunk["new_code"].as_array().into_iter().flatten() {
+                if let Some(line) = line.as_str() {
+                    if line.contains(symbol) {
+                        added.push(line.trim().to_owned());
+                    }
+                }
+            }
+        }
+        if !added.is_empty() {
+            checked.push((path.to_owned(), added));
+        }
+    }
+    if checked.is_empty() {
+        notes.push(
+            "the latest relevant commit has no added lines containing the symbol (pure deletion, rename-only or removed-only change)"
+                .to_owned(),
+        );
+        return json!({
+            "state": "unknown",
+            "basis": "no-added-lines",
+            "checked_ref": endpoint.ref_name,
+            "checked_sha": endpoint.sha,
+            "commit": commit_sha,
+            "paths": [],
+            "note": notes.join("; "),
+        });
+    }
+    let paths: Vec<String> = checked
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let mut total = 0usize;
+    let mut found = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    let mut unreadable: Vec<(String, &'static str)> = Vec::new();
+    for (path, lines) in &checked {
+        match endpoint_file_lines(dir, &endpoint.sha, path) {
+            Ok(Some(endpoint_lines)) => {
+                for line in lines {
+                    total += 1;
+                    if endpoint_lines.iter().any(|existing| existing == line) {
+                        found += 1;
+                    }
+                }
+            }
+            Ok(None) => missing.push(path.clone()),
+            Err(kind) => unreadable.push((path.clone(), kind)),
+        }
+    }
+    if !missing.is_empty() {
+        notes.push(format!(
+            "file(s) absent at the endpoint (deleted or renamed): {}",
+            missing.join(", ")
+        ));
+        return json!({
+            "state": "unknown",
+            "basis": "file-missing-at-endpoint",
+            "checked_ref": endpoint.ref_name,
+            "checked_sha": endpoint.sha,
+            "commit": commit_sha,
+            "paths": paths,
+            "note": notes.join("; "),
+        });
+    }
+    if let Some((path, kind)) = unreadable.first() {
+        notes.push(match *kind {
+            "binary" => format!(
+                "endpoint file {path} is binary or not UTF-8; line-level check is not possible"
+            ),
+            "too-large" => format!(
+                "endpoint file {path} exceeds the retention read limit; line-level check is not possible"
+            ),
+            _ => format!("endpoint file {path} could not be read; line-level check is not possible"),
+        });
+        return json!({
+            "state": "unknown",
+            "basis": if *kind == "binary" { "binary-or-rename" } else { "unavailable" },
+            "checked_ref": endpoint.ref_name,
+            "checked_sha": endpoint.sha,
+            "commit": commit_sha,
+            "paths": paths,
+            "note": notes.join("; "),
+        });
+    }
+    let (state, basis) = if total > 0 && found == total {
+        ("retained", "endpoint-added-lines-present")
+    } else if found == 0 {
+        ("not_retained", "endpoint-added-lines-absent")
+    } else {
+        ("unknown", "mixed")
+    };
+    match state {
+        "not_retained" => notes.push(
+            "the checked added lines are absent at the endpoint; this does not prove the change was reverted or rewritten, nor its numeric effect"
+                .to_owned(),
+        ),
+        "unknown" => notes.push(
+            "only some checked added lines are present at the endpoint; the mixed result is not conclusive"
+                .to_owned(),
+        ),
+        _ => {}
+    }
+    json!({
+        "state": state,
+        "basis": basis,
+        "checked_ref": endpoint.ref_name,
+        "checked_sha": endpoint.sha,
+        "commit": commit_sha,
+        "paths": paths,
+        "note": notes.join("; "),
+    })
+}
+
+/// 读 endpoint 提交树里的一个文本文件；None=文件不存在，Err=二进制/过大/不可读。
+fn endpoint_file_lines(
+    dir: &Path,
+    sha: &str,
+    path: &str,
+) -> Result<Option<Vec<String>>, &'static str> {
+    if git_ok(dir, &["cat-file", "-e", &format!("{sha}:{path}")]).is_none() {
+        return Ok(None);
+    }
+    let (ok, content, _) = match git_capture(dir, &["show", &format!("{sha}:{path}")]) {
+        Ok(captured) => captured,
+        Err(_) => return Err("unreadable"),
+    };
+    if !ok {
+        return Ok(None);
+    }
+    if content.len() > MAX_RETENTION_FILE_BYTES {
+        return Err("too-large");
+    }
+    // 二进制/非 UTF-8：无法逐行比较；不猜。
+    if content.contains('\0') || content.contains('\u{fffd}') {
+        return Err("binary");
+    }
+    let lines: Vec<String> = content.lines().map(|line| line.trim().to_owned()).collect();
+    if lines.len() > MAX_RETENTION_LINES {
+        return Err("too-large");
+    }
+    Ok(Some(lines))
 }
 
 fn query_target(
@@ -1805,6 +2006,13 @@ fn query_target(
         );
         truncated = true;
     }
+    let retention = retention_for(
+        target.dir,
+        &target.endpoint,
+        &commit_values,
+        target.dirty,
+        symbol,
+    );
     let uncommitted = uncommitted_entries(target.dir, symbol, path_filter, limits);
     let commit_cross: Vec<(String, Vec<String>)> = commit_values
         .iter()
@@ -1835,6 +2043,7 @@ fn query_target(
         "history": "verified",
         "locations": locations.iter().map(|location| location.json(Some(&target.endpoint.sha))).collect::<Vec<_>>(),
         "commits": commit_values,
+        "retention": retention,
         "uncommitted": uncommitted,
         "notes": notes,
         "errors": [],
@@ -2139,6 +2348,7 @@ fn no_history_report(
         "history": "unavailable",
         "locations": locations.iter().map(|location| location.json(None)).collect::<Vec<_>>(),
         "commits": [],
+        "retention": retention_unavailable("history is unavailable, so retention cannot be checked"),
         "uncommitted": [],
         "notes": notes,
         "errors": [],
@@ -2755,6 +2965,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
                     spec,
                     dir: &dir,
                     endpoint: endpoint.clone(),
+                    dirty: source.dirty,
                 };
                 let report = query_target(
                     &target,
@@ -2798,6 +3009,7 @@ fn command_track(opts: &Opts) -> Result<Value> {
                     spec: Some(DESKTOP),
                     dir: &repo.path,
                     endpoint: endpoint.clone(),
+                    dirty: source.dirty,
                 };
                 let mut report = query_target(
                     &target,
@@ -2970,6 +3182,7 @@ fn registered_report(
                 "history": "unavailable",
                 "locations": [],
                 "commits": [],
+                "retention": retention_unavailable("repository history is unavailable; no git checkout was used"),
                 "uncommitted": [],
                 "notes": ["repository history is unavailable; no git checkout was used"],
                 "errors": errors,
@@ -2996,6 +3209,7 @@ fn registered_report(
                     "history": "unavailable",
                     "locations": [],
                     "commits": [],
+                    "retention": retention_unavailable("cannot resolve the requested revision"),
                     "uncommitted": [],
                     "notes": notes,
                     "errors": [format!("cannot resolve the requested revision: {error:#}")],
@@ -3012,6 +3226,7 @@ fn registered_report(
         spec: Some(repo.spec()),
         dir: &repo.path,
         endpoint,
+        dirty: repo.is_dirty(),
     };
     let mut report = query_target(&target, symbol, path_filter, limit, offset, limits);
     report.json["dirty"] = json!(repo.is_dirty());
