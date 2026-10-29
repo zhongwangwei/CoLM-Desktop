@@ -39309,3 +39309,37 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 测试（settings-history.test.ts，13 passed）：在线顺序 desktop→status→colm→status→status、进度 1/2→2/2→null；第一步失败仍执行第二步并报 partial、失败后仍刷新；离线两步都 offline=true；两步都失败且 status 读取失败时保留上次好状态；取消只发一次第一步、不再发第二步、outcome cancelled；中英文进度/结果文案；原有 status 只读、pick_folder 保存、清除路径、渲染断言保留。
 - 验证：`npm run typecheck`/`lint`/`format:check` exit 0；`npm test` **1271 passed / 0 failed**；`xtask check-gui` 262 registered / 224 called，exit 0。
 - 未覆盖：原生窗口目视；真实网络/GitHub 同步（mock invoke + deferred 模拟取消）；固定同步两个仓库、不按状态跳过；清除路径后仍同步应用管理副本；取消只能阻止当前调用返回后的下一步。
+
+## 研究页第八批：裸锁启动身份、归档后比较元数据、剩余核验入口委托（2026-10-29）
+
+接第七批。基线 `ebbefe9e`（另一个会话在本批期间把 main 从 `1a9127bf` 推进了 14 个提交；本批改动在该 HEAD 上完成并验证）。
+
+### 1 裸锁登记启动身份，关闭 PID 复用窗口（#9b 残余）
+
+- 旧行为：取消已按"读快照→验身份→终止→同一快照 finalize"，但裸锁（旧冻结 CLI 不写 run_id）只比较 lock owner PID + 可执行文件名；陈旧裸锁 PID 若被另一个同名 `colm-cli` 复用仍可能误杀。
+- 新行为：GUI 启动研究后由后台 observer（150 ms 间隔、最多约 5 秒、运行结束/取消即停）读取一次 `run.lock` 并登记"本次启动看到的锁身份"（pid/executable/started_unix/run_id；heartbeat 不参与比较），`forget` 时清理。取消时：带 run_id 的锁仍严格按 ID；裸锁要求"当前快照 == 启动登记"，无登记或不一致则在写 `cancel.request`、组杀、补杀、finalize 之前拒绝并给可行动错误（`terminate`/`finalize` 调用为 0）；`cancel_on_shutdown` 同门禁；无锁/空白/坏锁仍按原路径。10 个测试覆盖登记、退出即停、超时、首次不被覆盖、生命周期清理、PID/started 被替换拒绝、无登记拒绝、run_id 不回归、真实文件后台登记。
+- 已知窄窗口：启动前就存在的陈旧裸锁若在轮询窗口内被读到，可能被当成本次身份；CLI 的 `create_new` 会拒绝这种启动，登记了可取消运行后的窗口极窄，未加 pre-spawn 基线（记录在案）。
+
+### 2 归档后比较元数据仍可读（#7b 扩展）
+
+- 旧行为：`study-compare` 两侧读取与 `remote_study::recorded_model_version` 仍只读活动 `.colm-remote-study.json`；归档后比较/模型版本身份丢失。
+- 新行为：`recorded_model_version` 改为活动 RECORD 优先、缺失时读持久 SOURCE（`.colm-remote-study-source.json`）；RECORD+SOURCE 同时存在时交叉核对 host/root/job/remote_project/engine/scheduler/fetched_at/model_revision，并要求 `provenance.version` 一致（不一致明确报 "disagree about the model version"）；SOURCE 单独存在时校验它属于本机研究（canonical local_study、目录名=study_id、位于 project 下），完整 evidence 哈希核对仍只在写回路径（`read_source`）执行。未在比较 JSON 增加来源标记：GUI 的 `StudyComparisonSide` 是 `deny_unknown_fields`，加字段会破坏解析；来源标记已在 `verified_study_member` evidence。测试覆盖归档后 `recorded_model_version` 与完整 `study-compare`（snow/rain）、official 来源、版本不一致拒绝、无记录回归。
+
+### 3 study-verified-side / study-verify-comparison 也按 pin 委托（#6b 扩展）
+
+- `PINNED_CLI_COMMANDS` 由 4 条扩到 6 条：加入 `study-verified-side`、`study-verify-comparison`（二者只读，但结论来自 `verify_frozen_inputs`，必须由 pin 程序计算）。`study-compare` 明确不加入：两侧可能不同 pin，整条交给一份 CLI 会校验错另一侧，需按侧分进程，留待后续；新增边界测试锁住"不得把两个研究当成一个目录转交"。
+- 测试覆盖六命令的 args/env/退出码、同 CLI 保持本地、`DELEGATED_ENV` 阻止二次委托、mixed-pin 边界。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **772 passed**；`study_version` **34 passed**；`remote_study_tests` **62 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` **579 passed / 1 ignored**（580 total）；clippy exit 0；fmt clean。
+- 未运行：真实 Tauri 窗口取消/归档点击、真实 SSH 服务器、真实旧冻结 CLI 二进制；启动 observer 用可注入 tick 与真实文件后台轮询两种方式验证。
+
+### 遗留
+
+- `study-compare` / `study-clone` / `hybrid-fit` 仍是"多研究或混合 pin"场景，需按侧/按研究分别委托的设计，未纳入本批。
+- 服务器端按指定成员独立重算指标仍只覆盖 best+baseline。
+- `study-verified-side` 的远程 stdin 凭据转发仍沿用既有"仅 remote-* 命令"条件，远程 password 认证委托场景无新增覆盖。
+- SOURCE-only 的模型版本读取不做 evidence 哈希核对（写回路径仍全量核对）。
+- 启动前陈旧裸锁的窄窗口（见上）。
