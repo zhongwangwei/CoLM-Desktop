@@ -83,6 +83,22 @@ export default function AssistantSettings({
   const [historyResult, setHistoryResult] = useState<HistorySyncResult | null>(null);
   const [historyError, setHistoryError] = useState('');
   const [historyBusy, setHistoryBusy] = useState(false);
+  // U01 收口：逐仓库顺序同步的进度 / 结束结果 / 每仓失败原因；取消标记在当前调用返回后生效。
+  const [syncProgress, setSyncProgress] = useState<{
+    done: number;
+    total: number;
+    current: HistoryRepository;
+    offline: boolean;
+  } | null>(null);
+  const [syncOutcome, setSyncOutcome] = useState<
+    'success' | 'partial' | 'failed' | 'cancelled' | null
+  >(null);
+  const [syncFailures, setSyncFailures] = useState<
+    { repository: HistoryRepository; message: string }[]
+  >([]);
+  const syncCancelled = useRef(false);
+  // 双击/重复点击时 state 还没刷新，用 ref 挡住第二次逐仓库同步。
+  const syncRunning = useRef(false);
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -244,9 +260,10 @@ export default function AssistantSettings({
    * U01：读取仓库数据状态（只读）。读取失败保留上一次的显示并单独报错；
    * 这里永远不发同步请求——同步必须由用户显式点按钮。
    */
-  async function loadHistoryStatus() {
+  async function loadHistoryStatus(options: { quiet?: boolean } = {}) {
     if (!hasBackend()) return null;
-    setHistoryBusy(true);
+    // 逐仓库同步的中间刷新用 quiet：外层负责 busy，别让每次刷新闪一下按钮状态。
+    if (!options.quiet) setHistoryBusy(true);
     setHistoryError('');
     try {
       const status = await invoke<HistoryReposStatus>('assistant_history_status', {});
@@ -256,29 +273,117 @@ export default function AssistantSettings({
       setHistoryError(settingsError(error));
       return null;
     } finally {
-      setHistoryBusy(false);
+      if (!options.quiet) setHistoryBusy(false);
     }
   }
-  /** U01：显式同步（在线/离线）。history-sync 的返回就是最新的仓库状态，直接拿来刷新两行。 */
-  async function syncHistory(repository: HistoryRepository | 'both', offline: boolean) {
-    if (!hasBackend()) return null;
+  /** 逐仓库进度里的仓库短名（桌面/官方），与历史仓库行的标签区分开。 */
+  function historySyncRepositoryName(repository: HistoryRepository) {
+    return repository === 'desktop' ? 'Desktop' : t('CoLM 官方', 'CoLM upstream');
+  }
+  /** U01：逐仓库进度的中英双语文案（含离线/在线与序号）。 */
+  function historySyncProgressText(
+    progress: { done: number; total: number; current: HistoryRepository; offline: boolean } | null,
+  ) {
+    if (!progress) return '';
+    const name = historySyncRepositoryName(progress.current);
+    const position = `${progress.done + 1}/${progress.total}`;
+    return progress.offline
+      ? t(`离线更新 ${name}（${position}）…`, `Offline update ${name} (${position})…`)
+      : t(`正在同步 ${name}（${position}）…`, `Syncing ${name} (${position})…`);
+  }
+  /** U01：同步结束提示区分全部成功/部分失败/全部失败/已取消。 */
+  function historySyncOutcomeText(
+    outcome: 'success' | 'partial' | 'failed' | 'cancelled' | null,
+    failures: { repository: HistoryRepository }[],
+  ) {
+    if (!outcome) return '';
+    if (outcome === 'cancelled')
+      return t(
+        '已停止同步；剩余的仓库步骤没有发起。',
+        'Sync stopped; the remaining repository steps were not started.',
+      );
+    if (outcome === 'success')
+      return t('同步完成：两个仓库都已更新。', 'Sync completed: both repositories were updated.');
+    if (outcome === 'partial')
+      return t(
+        `部分失败：${2 - failures.length}/2 个仓库成功，失败的仓库保留上次状态。`,
+        `Partially failed: ${2 - failures.length}/2 repositories succeeded; failed repositories keep their previous status.`,
+      );
+    return t(
+      '全部失败：两个仓库都没有更新成功。',
+      'All failed: neither repository was updated successfully.',
+    );
+  }
+  /** U01：停止逐仓库同步——只置取消标记；当前 invoke 返回后循环不会再发起下一个仓库。 */
+  async function cancelHistorySync() {
+    syncCancelled.current = true;
+    try {
+      await invoke('assistant_history_cancel', {});
+    } catch (error) {
+      setHistoryError(settingsError(error));
+    }
+  }
+  /**
+   * U01 收口：逐个仓库顺序同步（desktop → colm_upstream，固定两个都跑；清掉路径时仍更新
+   * 应用管理副本）。每步后都刷新 status（失败也刷，展示 last_attempt）；某步失败继续下一步，
+   * 结束时按成功数汇总全部成功/部分失败/全部失败；取消后不再发起下一步。
+   */
+  async function syncHistory(offline: boolean) {
+    if (!hasBackend() || syncRunning.current || syncProgress) return null;
+    syncRunning.current = true;
+    const repositories: HistoryRepository[] = ['desktop', 'colm_upstream'];
+    syncCancelled.current = false;
     setHistoryBusy(true);
     setHistoryError('');
     setHistoryResult(null);
+    setSyncOutcome(null);
+    setSyncFailures([]);
+    const actions: Record<string, string> = {};
+    const failures: { repository: HistoryRepository; message: string }[] = [];
+    let latest: HistoryReposStatus | null = null;
     try {
-      const result = await invoke<HistorySyncResult>('assistant_history_sync', {
-        repository,
-        offline,
-      });
-      setHistoryResult(result);
-      setHistoryStatus(result);
-      return result;
-    } catch (error) {
-      // 同步失败时不丢上一次的状态：失败原因单独显示，别把仓库行清空。
-      setHistoryError(settingsError(error));
-      return null;
+      for (const [index, repository] of repositories.entries()) {
+        if (syncCancelled.current) break;
+        setSyncProgress({ done: index, total: repositories.length, current: repository, offline });
+        try {
+          const result = await invoke<HistorySyncResult>('assistant_history_sync', {
+            repository,
+            offline,
+          });
+          actions[repository] = result.actions?.[repository] ?? (offline ? 'offline' : 'fetched');
+          latest = result;
+          setHistoryResult(result);
+          setHistoryStatus(result);
+        } catch (error) {
+          // 取消导致的中断不是“仓库失败”：不汇总为错误，由取消提示说明。
+          if (!syncCancelled.current) {
+            const message = settingsError(error);
+            failures.push({ repository, message });
+            actions[repository] = 'error';
+            setSyncFailures([...failures]);
+          }
+        }
+        // 每步结束（成功/失败/取消）都刷新：失败时 last_attempt 与旧状态都要能看见。
+        const refreshed = await loadHistoryStatus({ quiet: true });
+        if (refreshed) latest = refreshed;
+        if (syncCancelled.current) break;
+      }
     } finally {
+      setSyncProgress(null);
       setHistoryBusy(false);
+    }
+    try {
+      setHistoryResult({ ...(latest ?? {}), actions });
+      if (syncCancelled.current) setSyncOutcome('cancelled');
+      else if (failures.length === 0) setSyncOutcome('success');
+      else if (failures.length === repositories.length) setSyncOutcome('failed');
+      else setSyncOutcome('partial');
+      // 结束再刷一次，保证取消/最后一步之后的两行状态尽量新。
+      await loadHistoryStatus({ quiet: true });
+      return { actions, failures: failures.map((failure) => failure.repository) };
+    } finally {
+      // 任何意外异常都不能让下一次同步被 syncRunning 永久挡住。
+      syncRunning.current = false;
     }
   }
   /**
@@ -302,7 +407,7 @@ export default function AssistantSettings({
   }
   /** U01：用后端文件夹选择器挑一个已有本地仓库，选中后立即保存路径。 */
   async function pickHistoryRepository(repository: HistoryRepository) {
-    if (!hasBackend() || historyBusy) return;
+    if (!hasBackend() || historyBusy || syncProgress) return;
     const path = await invoke<string | null>('pick_folder', {
       key: repository === 'desktop' ? 'assistant-history-desktop' : 'assistant-history-upstream',
     });
@@ -965,21 +1070,16 @@ export default function AssistantSettings({
               {t('数据目录：', 'Data directory: ')}
               {historyStatus?.history_root || t('尚未读取', 'not loaded yet')}
             </p>
-            {historyBusy && (
+            {(historyBusy || syncProgress) && (
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-xs text-muted-foreground">
-                  {historyStatus
-                    ? t('正在处理仓库数据…', 'Working on repository data…')
-                    : t('正在读取仓库状态…', 'Reading repository status…')}
+                  {syncProgress
+                    ? historySyncProgressText(syncProgress)
+                    : historyStatus
+                      ? t('正在处理仓库数据…', 'Working on repository data…')
+                      : t('正在读取仓库状态…', 'Reading repository status…')}
                 </p>
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    void invoke('assistant_history_cancel', {}).catch((error) =>
-                      setHistoryError(settingsError(error)),
-                    )
-                  }
-                >
+                <Button variant="ghost" onClick={() => void cancelHistorySync()}>
                   {t('停止同步', 'Stop syncing')}
                 </Button>
               </div>
@@ -1025,14 +1125,14 @@ export default function AssistantSettings({
                   )}
                   <div className="flex flex-wrap gap-2">
                     <Button
-                      disabled={disabled || historyBusy}
+                      disabled={disabled || historyBusy || syncProgress !== null}
                       onClick={() => void pickHistoryRepository(repository)}
                     >
                       {t('选择已有本地仓库', 'Choose an existing local repository')}
                     </Button>
                     <Button
                       variant="ghost"
-                      disabled={disabled || historyBusy || !configuredPath}
+                      disabled={disabled || historyBusy || syncProgress !== null || !configuredPath}
                       onClick={() => void saveHistoryPath(repository, null)}
                     >
                       {t('清除本地路径', 'Clear local path')}
@@ -1042,25 +1142,44 @@ export default function AssistantSettings({
               );
             })}
             <div className="flex flex-wrap gap-2">
-              <Button disabled={disabled || historyBusy} onClick={() => void loadHistoryStatus()}>
+              <Button
+                disabled={disabled || historyBusy || syncProgress !== null}
+                onClick={() => void loadHistoryStatus()}
+              >
                 {t('刷新状态', 'Refresh status')}
               </Button>
               <Button
-                disabled={disabled || historyBusy}
-                onClick={() => void syncHistory('both', false)}
+                disabled={disabled || historyBusy || syncProgress !== null}
+                onClick={() => void syncHistory(false)}
               >
-                {historyBusy
-                  ? t('正在更新仓库数据…', 'Updating repository data…')
+                {syncProgress
+                  ? historySyncProgressText(syncProgress)
                   : t('准备 / 更新数据', 'Prepare / update data')}
               </Button>
               <Button
                 variant="ghost"
-                disabled={disabled || historyBusy}
-                onClick={() => void syncHistory('both', true)}
+                disabled={disabled || historyBusy || syncProgress !== null}
+                onClick={() => void syncHistory(true)}
               >
                 {t('离线更新（不联网）', 'Offline update (no network)')}
               </Button>
             </div>
+            {syncOutcome && (
+              <p className="text-xs text-muted-foreground">
+                {historySyncOutcomeText(syncOutcome, syncFailures)}
+              </p>
+            )}
+            {syncFailures.length > 0 && (
+              <Notice tone="error">
+                {syncFailures.map((failure) => (
+                  <p key={failure.repository} className="text-xs">
+                    {historySyncRepositoryName(failure.repository)}
+                    {t('：', ': ')}
+                    {failure.message}
+                  </p>
+                ))}
+              </Notice>
+            )}
             {historySummary &&
               (historySummary.failed ? (
                 <Notice tone="error">{historySummary.text}</Notice>

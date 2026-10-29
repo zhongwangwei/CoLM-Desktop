@@ -5,8 +5,8 @@ import ts from 'typescript';
 import { defaultSettings, historySettingsOf, withHistoryPath, type Settings } from './model';
 
 /**
- * U01“仓库数据”入口的页面级回归：从 Settings.tsx 抽出真实的状态读取/同步/路径保存回调，
- * 用记录请求的 invoke 执行，断言按钮参数、busy/错误、失败保留旧状态，以及挂载时只读 status。
+ * U01“仓库数据”入口的页面级回归：从 Settings.tsx 抽出真实的状态读取/逐仓库同步/路径保存回调，
+ * 用记录请求的 invoke 执行，断言请求参数、逐步进度、部分失败汇总、取消语义与 busy/错误。
  */
 const settingsSource = readFileSync(new URL('./Settings.tsx', import.meta.url), 'utf8');
 const source = ts.createSourceFile(
@@ -48,8 +48,26 @@ function compile<T>(name: string, context: Record<string, unknown>): T {
     ...Object.values(context),
   ) as T;
 }
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 type Request = { command: string; args: Record<string, unknown> };
+type Progress = { done: number; total: number; current: string; offline: boolean };
+
+const statusPayload = {
+  history_root: '/app/data/history',
+  repos: {
+    desktop: {
+      identity: { state: 'verified' },
+      last_successful_sync: { ref: 'main', sha: '0123456' },
+    },
+    colm_upstream: { identity: { state: 'missing' } },
+  },
+};
+const syncResult = (repository: string) => ({
+  history_root: '/app/data/history',
+  actions: { [repository]: repository === 'desktop' ? 'fetched' : 'cloned' },
+  repos: statusPayload.repos,
+});
 
 function historyHarness(
   options: {
@@ -65,8 +83,12 @@ function historyHarness(
     status: { history_root: '/old/root' } as unknown,
     result: null as unknown,
     draft: null as unknown,
+    progress: [] as (Progress | null)[],
+    outcome: null as string | null,
+    failures: [] as { repository: string; message: string }[],
   };
   const requests: Request[] = [];
+  const syncCancelled = { current: false };
   const invoke = async (command: string, args: Record<string, unknown> = {}) => {
     requests.push({ command, args });
     return options.respond ? options.respond(command, args) : undefined;
@@ -83,7 +105,6 @@ function historyHarness(
     },
     setHistoryBusy: (value: boolean) => {
       ui.busy.push(value);
-      Object.assign(ui, { currentBusy: value });
     },
     setHistoryError: (value: string) => {
       ui.error = value;
@@ -94,29 +115,44 @@ function historyHarness(
     setHistoryResult: (value: unknown) => {
       ui.result = value;
     },
+    setSyncProgress: (value: Progress | null) => {
+      ui.progress.push(value);
+    },
+    setSyncOutcome: (value: string | null) => {
+      ui.outcome = value;
+    },
+    setSyncFailures: (value: { repository: string; message: string }[]) => {
+      ui.failures = value;
+    },
     setDraft: (update: unknown) => {
       ui.draft = typeof update === 'function' ? (update as (old: unknown) => unknown)({}) : update;
     },
     settingsError: (error: unknown) => String(error).replace(/^Error: /, ''),
     withHistoryPath,
+    syncCancelled,
+    syncRunning: { current: false },
+    syncProgress: null,
   };
-  // 页面里 saveHistoryPath 会调用 loadHistoryStatus、pickHistoryRepository 会调用 saveHistoryPath：
-  // 抽出来的函数保持同样的调用链，测试才是在验证真实失败/刷新行为。
-  const loadHistoryStatus = compile<() => Promise<unknown>>('loadHistoryStatus', context);
-  const saveHistoryPathContext = { ...context, loadHistoryStatus };
+  // saveHistoryPath 会调用 loadHistoryStatus、syncHistory 会调用 loadHistoryStatus：
+  // 抽出来的函数保持同样的调用链，测试才是在验证真实刷新/失败行为。
+  const loadHistoryStatus = compile<(options?: { quiet?: boolean }) => Promise<unknown>>(
+    'loadHistoryStatus',
+    context,
+  );
   const saveHistoryPath = compile<(repository: string, path: string | null) => Promise<void>>(
     'saveHistoryPath',
-    saveHistoryPathContext,
+    { ...context, loadHistoryStatus },
   );
   return {
     ui,
     requests,
     savedNext: () => (ui as { savedNext?: Settings }).savedNext,
     loadHistoryStatus,
-    syncHistory: compile<(repository: string, offline: boolean) => Promise<unknown>>(
-      'syncHistory',
-      context,
-    ),
+    cancelHistorySync: compile<() => Promise<void>>('cancelHistorySync', context),
+    syncHistory: compile<(offline: boolean) => Promise<unknown>>('syncHistory', {
+      ...context,
+      loadHistoryStatus,
+    }),
     saveHistoryPath,
     pickHistoryRepository: compile<(repository: string) => Promise<void>>('pickHistoryRepository', {
       ...context,
@@ -125,17 +161,6 @@ function historyHarness(
     }),
   };
 }
-
-const statusPayload = {
-  history_root: '/app/data/history',
-  repos: {
-    desktop: {
-      identity: { state: 'verified' },
-      last_successful_sync: { ref: 'main', sha: '0123456' },
-    },
-    colm_upstream: { identity: { state: 'missing' } },
-  },
-};
 
 test('opening settings reads repository status only — never syncs', async () => {
   const effects = effectsContaining('loadHistoryStatus');
@@ -168,38 +193,202 @@ test('a failed status read keeps the previous rows and shows the error', async (
   assert.equal(harness.ui.busy.at(-1), false, '失败也要退出 busy');
 });
 
-test('explicit sync sends repository and offline exactly as chosen', async () => {
-  const harness = historyHarness({ respond: () => statusPayload });
-  await harness.syncHistory('both', false);
-  assert.deepEqual(harness.requests.at(-1), {
-    command: 'assistant_history_sync',
-    args: { repository: 'both', offline: false },
+test('online update syncs desktop then colm_upstream, refreshing status between steps', async () => {
+  const harness = historyHarness({
+    respond: (command, args) => {
+      if (command === 'assistant_history_sync') return syncResult(String(args.repository));
+      if (command === 'assistant_history_status') return statusPayload;
+    },
   });
-  assert.deepEqual(harness.ui.status, statusPayload, '同步返回就是最新状态');
-  assert.deepEqual(harness.ui.result, statusPayload);
-
-  await harness.syncHistory('both', true);
-  assert.deepEqual(harness.requests.at(-1), {
-    command: 'assistant_history_sync',
-    args: { repository: 'both', offline: true },
+  await harness.syncHistory(false);
+  // 顺序：desktop → status → colm_upstream → status → 结束再刷一次。
+  assert.deepEqual(
+    harness.requests.map((request) => request.command),
+    [
+      'assistant_history_sync',
+      'assistant_history_status',
+      'assistant_history_sync',
+      'assistant_history_status',
+      'assistant_history_status',
+    ],
+  );
+  const syncs = harness.requests.filter((request) => request.command === 'assistant_history_sync');
+  assert.deepEqual(
+    syncs.map((request) => request.args),
+    [
+      { repository: 'desktop', offline: false },
+      { repository: 'colm_upstream', offline: false },
+    ],
+  );
+  // 进度：Desktop 1/2 → CoLM 官方 2/2 → 结束清空。
+  assert.deepEqual(harness.ui.progress, [
+    { done: 0, total: 2, current: 'desktop', offline: false },
+    { done: 1, total: 2, current: 'colm_upstream', offline: false },
+    null,
+  ]);
+  assert.equal(harness.ui.outcome, 'success');
+  assert.deepEqual(harness.ui.failures, []);
+  assert.deepEqual(harness.ui.result, {
+    ...statusPayload,
+    actions: { desktop: 'fetched', colm_upstream: 'cloned' },
   });
-  await harness.syncHistory('desktop', false);
-  assert.deepEqual(harness.requests.at(-1)?.args, { repository: 'desktop', offline: false });
+  assert.equal(harness.ui.busy[0], true);
+  assert.equal(harness.ui.busy.at(-1), false, '结束回到非 busy');
 });
 
-test('a failed sync keeps the last good status and reports the failure', async () => {
+test('a failed first repository still syncs the second and reports partial failure', async () => {
   const harness = historyHarness({
-    respond: (command) => {
-      if (command === 'assistant_history_sync') throw new Error('git fetch origin failed');
+    respond: (command, args) => {
+      if (command === 'assistant_history_sync') {
+        if (args.repository === 'desktop') throw new Error('git fetch origin failed');
+        return syncResult(String(args.repository));
+      }
+      if (command === 'assistant_history_status') return statusPayload;
+    },
+  });
+  await harness.syncHistory(false);
+  const syncs = harness.requests.filter((request) => request.command === 'assistant_history_sync');
+  assert.deepEqual(
+    syncs.map((request) => request.args.repository),
+    ['desktop', 'colm_upstream'],
+    '一个仓库失败不阻塞另一个',
+  );
+  assert.equal(harness.ui.outcome, 'partial');
+  assert.deepEqual(harness.ui.failures, [
+    { repository: 'desktop', message: 'git fetch origin failed' },
+  ]);
+  // 失败步骤之后也刷新了状态（显示 last_attempt）。
+  const order = harness.requests.map((request) => request.command);
+  assert.ok(
+    order.indexOf('assistant_history_status') < order.lastIndexOf('assistant_history_sync'),
+    '两步之间刷新状态',
+  );
+  assert.deepEqual(harness.ui.result, {
+    ...statusPayload,
+    actions: { desktop: 'error', colm_upstream: 'cloned' },
+  });
+  assert.equal(harness.ui.busy.at(-1), false);
+});
+
+test('offline update runs both repositories with offline=true', async () => {
+  const harness = historyHarness({
+    respond: (command, args) => {
+      if (command === 'assistant_history_sync') return syncResult(String(args.repository));
+      if (command === 'assistant_history_status') return statusPayload;
+    },
+  });
+  await harness.syncHistory(true);
+  const syncs = harness.requests.filter((request) => request.command === 'assistant_history_sync');
+  assert.deepEqual(
+    syncs.map((request) => request.args),
+    [
+      { repository: 'desktop', offline: true },
+      { repository: 'colm_upstream', offline: true },
+    ],
+  );
+  assert.equal(harness.ui.outcome, 'success');
+});
+
+test('failure on both repositories keeps the last good status and reports all failed', async () => {
+  const harness = historyHarness({
+    respond: () => {
+      throw new Error('network unreachable');
     },
   });
   const before = harness.ui.status;
-  const result = await harness.syncHistory('both', false);
-  assert.equal(result, null);
-  assert.equal(harness.ui.status, before, '同步失败不能把仓库行清空');
-  assert.equal(harness.ui.result, null);
-  assert.match(harness.ui.error, /git fetch origin failed/);
+  await harness.syncHistory(false);
+  assert.equal(harness.ui.status, before, '状态读取也失败时保留上次好行');
+  assert.equal(harness.ui.outcome, 'failed');
+  assert.deepEqual(
+    harness.ui.failures.map((failure) => failure.repository),
+    ['desktop', 'colm_upstream'],
+  );
   assert.equal(harness.ui.busy.at(-1), false);
+});
+
+test('stopping during the first repository never starts the second', async () => {
+  let release!: (value: unknown) => void;
+  const gate = new Promise<unknown>((resolve) => {
+    release = resolve;
+  });
+  const harness = historyHarness({
+    respond: (command, args) => {
+      if (command === 'assistant_history_sync' && args.repository === 'desktop') return gate;
+      if (command === 'assistant_history_status') return statusPayload;
+    },
+  });
+  const running = harness.syncHistory(false);
+  await settle();
+  assert.deepEqual(harness.ui.progress.at(-1), {
+    done: 0,
+    total: 2,
+    current: 'desktop',
+    offline: false,
+  });
+  await harness.cancelHistorySync();
+  assert.ok(
+    harness.requests.some((request) => request.command === 'assistant_history_cancel'),
+    '停止按钮调用 assistant_history_cancel',
+  );
+  release(syncResult('desktop'));
+  await running;
+  const syncs = harness.requests.filter((request) => request.command === 'assistant_history_sync');
+  assert.deepEqual(
+    syncs.map((request) => request.args.repository),
+    ['desktop'],
+    '取消后不再发起第二个仓库',
+  );
+  assert.equal(harness.ui.outcome, 'cancelled');
+  assert.equal(harness.ui.progress.at(-1), null);
+  assert.equal(harness.ui.busy.at(-1), false);
+});
+
+test('sync progress and outcome copy is bilingual', () => {
+  const progressText = compile<(progress: Progress | null) => string>('historySyncProgressText', {
+    t: (zh: string, en: string) => en,
+    historySyncRepositoryName: (repository: string) =>
+      repository === 'desktop' ? 'Desktop' : 'CoLM upstream',
+  });
+  assert.equal(
+    progressText({ done: 0, total: 2, current: 'desktop', offline: false }),
+    'Syncing Desktop (1/2)…',
+  );
+  assert.equal(
+    progressText({ done: 1, total: 2, current: 'colm_upstream', offline: false }),
+    'Syncing CoLM upstream (2/2)…',
+  );
+  assert.equal(
+    progressText({ done: 0, total: 2, current: 'desktop', offline: true }),
+    'Offline update Desktop (1/2)…',
+  );
+  const zhProgress = compile<(progress: Progress | null) => string>('historySyncProgressText', {
+    t: (zh: string) => zh,
+    historySyncRepositoryName: (repository: string) =>
+      repository === 'desktop' ? 'Desktop' : 'CoLM 官方',
+  });
+  assert.equal(
+    zhProgress({ done: 0, total: 2, current: 'desktop', offline: false }),
+    '正在同步 Desktop（1/2）…',
+  );
+  assert.equal(
+    zhProgress({ done: 1, total: 2, current: 'colm_upstream', offline: false }),
+    '正在同步 CoLM 官方（2/2）…',
+  );
+
+  const outcomeText = compile<(outcome: string | null, failures: unknown[]) => string>(
+    'historySyncOutcomeText',
+    { t: (zh: string, en: string) => en },
+  );
+  assert.match(outcomeText('success', []), /both repositories were updated/);
+  assert.match(outcomeText('partial', [{ repository: 'desktop' }]), /Partially failed/);
+  assert.match(outcomeText('failed', []), /All failed/);
+  assert.match(outcomeText('cancelled', []), /remaining repository steps were not started/);
+  const zhOutcome = compile<(outcome: string | null, failures: unknown[]) => string>(
+    'historySyncOutcomeText',
+    { t: (zh: string) => zh },
+  );
+  assert.match(zhOutcome('partial', [{ repository: 'desktop' }]), /部分失败/);
+  assert.match(zhOutcome('cancelled', []), /已停止同步/);
 });
 
 test('picking an existing repository saves the path and re-reads status', async () => {
@@ -269,7 +458,7 @@ test('a failed path save keeps the path out of status reloads and reports the er
   assert.equal(harness.ui.busy.at(-1), false);
 });
 
-test('the settings panel renders both rows, separate times and busy/error states', () => {
+test('the settings panel renders both rows, separate times, progress and busy/error states', () => {
   assert.match(settingsSource, /assistant_history_status/);
   assert.match(settingsSource, /assistant_history_sync/);
   assert.match(settingsSource, /assistant_history_cancel/, '在跑同步时有停止按钮');
@@ -278,6 +467,16 @@ test('the settings panel renders both rows, separate times and busy/error states
   assert.match(settingsSource, /lines\.checkedAt/, '检查时间单独一行');
   assert.match(settingsSource, /lines\.preparation/, 'partial/未准备时的说明');
   assert.match(settingsSource, /historyStatus\?\.history_root/, '数据目录只读展示');
-  assert.match(settingsSource, /正在更新仓库数据/, '同步中 busy 文案');
-  assert.match(settingsSource, /disabled=\{disabled \|\| historyBusy\}/, '忙时按钮禁用');
+  // 逐仓库进度 + 部分失败汇总 + 取消。
+  assert.match(settingsSource, /historySyncProgressText\(syncProgress\)/);
+  assert.match(settingsSource, /historySyncOutcomeText\(syncOutcome, syncFailures\)/);
+  assert.match(settingsSource, /syncFailures\.length > 0/);
+  assert.match(settingsSource, /cancelHistorySync\(\)/);
+  assert.match(settingsSource, /正在同步/);
+  assert.match(settingsSource, /离线更新/);
+  assert.match(
+    settingsSource,
+    /disabled=\{disabled \|\| historyBusy \|\| syncProgress !== null\}/,
+    '忙时按钮禁用',
+  );
 });
