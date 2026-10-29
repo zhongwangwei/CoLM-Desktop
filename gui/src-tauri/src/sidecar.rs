@@ -509,6 +509,20 @@ impl RunProcesses {
                     continue;
                 }
             };
+            // 与手动取消同一条顺序：先核对锁身份，锁属于另一轮就一个进程都不杀；核对通过
+            // 后才写取消请求、组杀、补杀，最后用同一份快照收尾。
+            let lock = read_study_lock(&study_dir);
+            if let Some(identity) = &identity {
+                let expected_pid = lock_owner_or_registered_pid(lock.as_ref(), identity.pid);
+                if let Err(error) = lock_identity_matches(
+                    lock.as_ref(),
+                    identity.run_id.as_deref(),
+                    Some(expected_pid),
+                ) {
+                    failures.push(format!("{key}: {error}"));
+                    continue;
+                }
+            }
             let _ = capture(&["study-cancel".into(), study_dir.clone()]);
             match self.cancel(Some(vec![key.clone()])) {
                 Ok(count) => {
@@ -516,7 +530,7 @@ impl RunProcesses {
                     if let Some(identity) = identity {
                         // 进程组杀掉之后再确认锁文件的持有者（内层 CLI）也停了，否则
                         // 收尾接口会以“调度器还在运行”拒绝，留下进程已停、锁还在的状态。
-                        if let Err(error) = terminate_study_lock_owner(&study_dir) {
+                        if let Err(error) = terminate_study_lock_owner(lock.as_ref()) {
                             failures.push(format!("{key}: {error}"));
                             continue;
                         }
@@ -524,6 +538,7 @@ impl RunProcesses {
                             &study_dir,
                             identity.pid,
                             identity.run_id.as_deref(),
+                            lock.as_ref(),
                         ) {
                             failures.push(format!("{key}: {error}"));
                         }
@@ -834,35 +849,110 @@ fn process_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// 停掉研究锁记录的调度器（冻结模型修订时是内层 CLI）。
+/// `run.lock` 里取消需要的那部分身份。
 ///
-/// GUI 停的是自己启动的进程组（外层 CLI 及其子进程）；正常情况下内层 CLI 就在这个组里，
-/// 组杀已经带走它。但锁文件里的 PID 是唯一能证明“这次运行的调度器是谁”的线索：万一它
-/// 不在那个组里（进程组被重新安排、外层 CLI 提前退出后内层被重新挂载），这里补一刀，
-/// 否则 CLI 收尾会以“调度器还在运行”拒绝，留下进程已停、锁还在的状态。
+/// 只读一次，并在“核对 → 终止 → 收尾”之间复用：两次读之间锁可能被另一个调度器换掉，
+/// 拿两份不同的身份去先验后杀会自相矛盾。`run_id` 缺省表示升级前冻结的 CLI 写的旧锁，
+/// 那种锁只能按 PID 与可执行文件核对。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StudyLockSnapshot {
+    pid: u32,
+    executable: Option<String>,
+    run_id: Option<String>,
+}
+
+/// 读 `run.lock` 的身份快照。坏记录/读不到都当没有：真正的最终校验在 CLI 收尾里做，
+/// GUI 这里只为“要不要杀、杀谁、用什么身份收尾”提供一份一致的证据。
+fn read_study_lock(study_dir: &str) -> Option<StudyLockSnapshot> {
+    let bytes = std::fs::read(PathBuf::from(study_dir).join("run.lock")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let pid = value
+        .get("pid")?
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())?;
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    Some(StudyLockSnapshot {
+        pid,
+        executable: text("executable"),
+        run_id: text("run_id"),
+    })
+}
+
+/// 锁是否属于这次取消，必须在任何终止操作之前回答。
 ///
-/// **不能只看 PID 就杀**：锁可能是上一个调度器留下的，PID 已被无关程序复用。只有这个
-/// PID 现在跑的可执行文件与锁里记录的一致才动手；认不出来就不杀，让 CLI 收尾按它自己
-/// 的身份校验拒绝（用户看到“调度器还在运行”，不会误杀别的进程）。
-fn terminate_study_lock_owner(study_dir: &str) -> Result<(), String> {
-    let Some(pid) = study_lock_owner_pid(study_dir) else {
+/// 锁带运行 ID 时它是唯一权威：PID 会被复用，冻结修订时锁里还可能是内层 PID，拿外层 PID
+/// 去比对只会误杀。锁不带运行 ID（升级前的旧锁）时只能信锁自己写的 PID；调用方要传的
+/// `expected_pid` 也是从同一份快照取出的 owner PID，而不是外层包装 PID。返回 Err 时一个
+/// 进程都不杀，把错误原样交给用户，留给仍在运行的那次研究。
+fn lock_identity_matches(
+    lock: Option<&StudyLockSnapshot>,
+    expected_run_id: Option<&str>,
+    expected_pid: Option<u32>,
+) -> Result<(), String> {
+    let Some(lock) = lock else {
         return Ok(());
     };
-    if !process_alive(pid) {
+    match lock.run_id.as_deref() {
+        Some(lock_run_id) if expected_run_id == Some(lock_run_id) => Ok(()),
+        Some(lock_run_id) => Err(format!(
+            "run.lock belongs to another study run ({lock_run_id}), not to this run ({}); \
+             refusing to stop any process. Wait for that run to finish, then cancel again.",
+            expected_run_id.unwrap_or("no run id")
+        )),
+        None => match expected_pid {
+            Some(pid) if pid == lock.pid => Ok(()),
+            Some(pid) => Err(format!(
+                "run.lock names scheduler PID {} for a legacy run without a run id, but the cancel \
+                 expected PID {pid}; refusing to stop it",
+                lock.pid
+            )),
+            None => Err(format!(
+                "run.lock names scheduler PID {} for a legacy run without a run id, and the cancel \
+                 has no matching PID; refusing to stop it",
+                lock.pid
+            )),
+        },
+    }
+}
+
+/// 旧锁（没有运行 ID）里记的 owner PID 才是持锁调度器；GUI 登记的外层 PID 只用于终止
+/// 进程组。冻结修订时两者必然不同，拿外层 PID 去核对旧锁会拒绝掉本来能收的锁。
+fn lock_owner_or_registered_pid(lock: Option<&StudyLockSnapshot>, registered: u32) -> u32 {
+    lock.filter(|lock| lock.run_id.is_none())
+        .map_or(registered, |lock| lock.pid)
+}
+
+/// 停掉锁快照记录的调度器（冻结模型修订时是内层 CLI）。
+///
+/// 调用方必须先拿同一份快照做过 [`lock_identity_matches`]：这一步只补上“PID 没被无关
+/// 程序复用”的最后一道可执行文件校验。锁可能来自旧调度器，PID 会被别的程序复用；只有
+/// 当前跑的可执行文件名与锁里记录的一致才动手，否则留给 CLI 收尾拒绝——宁可留下进程已停、
+/// 锁还在，也不误杀别的进程。
+fn terminate_study_lock_owner(lock: Option<&StudyLockSnapshot>) -> Result<(), String> {
+    let Some(lock) = lock else {
+        return Ok(());
+    };
+    if !process_alive(lock.pid) {
         return Ok(());
     }
-    let expected = study_lock_owner_executable(study_dir);
-    let matches_recorded = expected.as_deref().is_some_and(|expected| {
-        process_image_name(pid).is_some_and(|image| {
+    let matches_recorded = lock.executable.as_deref().is_some_and(|expected| {
+        process_image_name(lock.pid).is_some_and(|image| {
             std::path::Path::new(expected).file_name() == Some(OsStr::new(&image))
         })
     });
     if !matches_recorded {
         return Ok(());
     }
-    terminate_process_tree(pid)?;
-    if process_alive(pid) {
-        terminate_process(pid)?;
+    terminate_process_tree(lock.pid)?;
+    if process_alive(lock.pid) {
+        terminate_process(lock.pid)?;
     }
     Ok(())
 }
@@ -915,56 +1005,43 @@ fn process_image_name(_pid: u32) -> Option<String> {
     None
 }
 
-/// 锁文件里记的调度器可执行文件路径。旧记录没有/为空时返回 `None`，调用方就不补杀。
-fn study_lock_owner_executable(study_dir: &str) -> Option<String> {
-    let bytes = std::fs::read(PathBuf::from(study_dir).join("run.lock")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("executable")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|executable| !executable.is_empty())
-        .map(str::to_owned)
-}
-
-/// `run.lock` 里记的调度器 PID。坏记录/读不到都当没有：真正的身份校验在 CLI 收尾里做，
-/// GUI 只用它补杀进程组之外的锁持有者，不能凭它做任何放行判断。
-fn study_lock_owner_pid(study_dir: &str) -> Option<u32> {
-    let bytes = std::fs::read(PathBuf::from(study_dir).join("run.lock")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("pid")?
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-}
-
-/// 收尾：`--pid` 只是旧路径的身份；真正的认领靠环境变量里的运行 ID（见 [`STUDY_RUN_ID_ENV`]），
-/// 因为冻结修订时锁里是内层 PID，和 GUI 登记的外层 PID 不是同一个进程。
+/// 收尾：锁带运行 ID 时靠环境变量认领；旧锁只能把锁里的 PID 作为 `--pid`，因为 GUI
+/// 登记的外层 PID 可能只是外层包装，真正的持锁调度器在锁里。
 fn finalize_study_cancel(
     study_dir: &str,
     outer_pid: u32,
     run_id: Option<&str>,
+    lock: Option<&StudyLockSnapshot>,
 ) -> Result<String, String> {
-    let (args, env) = finalize_cancel_invocation(study_dir, outer_pid, run_id);
+    let (args, env) = finalize_cancel_invocation(study_dir, outer_pid, run_id, lock);
     capture_with_env(&args, &env)
 }
 
-/// `--pid` 仍然是 GUI 登记的进程组首进程（终止用）；运行 ID 走环境变量，因为冻结修订的
-/// 研究锁里是内层 CLI 的 PID，收尾接口的 `--pid` 比对只在旧路径上成立。
+/// 旧锁（没有 run_id）必须把锁 owner 的 PID 传给 `--pid`：GUI 登记的 PID 在冻结修订时
+/// 是外层包装，CLI 按 PID 认领会以“调度器变了”拒绝，于是进程已停、锁还在。锁里已经有
+/// 运行 ID 时仍传外层 PID + 环境变量，CLI 按运行 ID 校验（两者在委托运行里本来就不同）。
 fn finalize_cancel_invocation(
     study_dir: &str,
     outer_pid: u32,
     run_id: Option<&str>,
+    lock: Option<&StudyLockSnapshot>,
 ) -> (Vec<String>, Vec<(String, String)>) {
+    let bare_lock = lock.filter(|lock| lock.run_id.is_none());
+    let pid = bare_lock.map_or(outer_pid, |lock| lock.pid);
     let args = vec![
         "study-finalize-cancel".to_string(),
         study_dir.to_string(),
         "--pid".into(),
-        outer_pid.to_string(),
+        pid.to_string(),
     ];
-    let env: Vec<(String, String)> = run_id
-        .map(|run_id| vec![(STUDY_RUN_ID_ENV.to_string(), run_id.to_string())])
-        .unwrap_or_default();
+    // 锁里没有运行 ID 时硬塞一个调用方的 ID，CLI 会按 ID 校验并拒绝；旧锁只能按 PID 认。
+    let env: Vec<(String, String)> = if bare_lock.is_some() {
+        Vec::new()
+    } else {
+        run_id
+            .map(|run_id| vec![(STUDY_RUN_ID_ENV.to_string(), run_id.to_string())])
+            .unwrap_or_default()
+    };
     (args, env)
 }
 
@@ -4155,10 +4232,12 @@ pub async fn study_cancel(
 
 /// 停止一次本地研究运行并落盘取消状态。
 ///
-/// 顺序有原因：先写 `cancel.request` 让 CLI 在阶段边界自己停；再按进程组终止（外层 CLI 与
-/// 它启动的 Fortran/内层 CLI 都在这个组里）；然后按锁文件补杀一次（冻结修订时真正持锁的是
-/// 内层 CLI，PID 与 GUI 登记的外层不同）；最后用运行 ID 认领 `run.lock` 并落盘取消状态。
-/// 少了最后一步就会留下“进程已停、锁还在、状态没落盘”，下一次运行再也起不来。
+/// 顺序有原因：先读一次 `run.lock` 的身份快照并核对——锁若属于另一轮运行，必须在任何
+/// 终止动作前拒绝，否则会误杀后来者；然后写 `cancel.request` 让本次 CLI 在阶段边界自己
+/// 停；再按进程组终止（外层 CLI 与它启动的 Fortran/内层 CLI 都在这个组里）；接着用同一份
+/// 快照补杀锁持有者（冻结修订时真正持锁的内层 CLI 可能不在组里）；最后用同一份快照选出
+/// 的身份认领 `run.lock` 并落盘取消状态。少了最后一步就会留下“进程已停、锁还在、状态没
+/// 落盘”，下一次运行再也起不来。
 pub(crate) fn cancel_study_run(
     processes: &RunProcesses,
     study_dir: &str,
@@ -4175,14 +4254,28 @@ fn cancel_study_run_with(
     study_dir: &str,
     run: impl Fn(&[String], &[(String, String)]) -> Result<String, String>,
 ) -> Result<String, String> {
-    let out = run(&["study-cancel".to_string(), study_dir.to_string()], &[])?;
     let key = study_process_key(study_dir);
     let identity = processes.running_identity(&key)?;
+    // 同一份快照走完核对、补杀、收尾，避免中途锁被换掉后拿两份不同的身份做决定。
+    let lock = read_study_lock(study_dir);
+    if let Some(identity) = &identity {
+        let expected_pid = lock_owner_or_registered_pid(lock.as_ref(), identity.pid);
+        lock_identity_matches(
+            lock.as_ref(),
+            identity.run_id.as_deref(),
+            Some(expected_pid),
+        )?;
+    }
+    let out = run(&["study-cancel".to_string(), study_dir.to_string()], &[])?;
     processes.cancel(Some(vec![key]))?;
     if let Some(identity) = identity {
-        terminate_study_lock_owner(study_dir)?;
-        let (args, env) =
-            finalize_cancel_invocation(study_dir, identity.pid, identity.run_id.as_deref());
+        terminate_study_lock_owner(lock.as_ref())?;
+        let (args, env) = finalize_cancel_invocation(
+            study_dir,
+            identity.pid,
+            identity.run_id.as_deref(),
+            lock.as_ref(),
+        );
         run(&args, &env)?;
     } else {
         run(

@@ -1837,22 +1837,77 @@ fn a_study_run_reports_both_the_outer_pid_and_the_run_id() {
 }
 
 #[test]
-fn study_lock_owner_pid_only_reads_a_usable_process_id() {
-    let dir = temporary_study_dir("study-lock-pid");
+fn read_study_lock_keeps_only_a_usable_identity() {
+    let dir = temporary_study_dir("study-lock-snapshot");
     let study = dir.to_string_lossy().to_string();
-    assert_eq!(study_lock_owner_pid(&study), None);
-    write_run_lock(&dir, 4242, Some("run-1"));
-    assert_eq!(study_lock_owner_pid(&study), Some(4242));
+    assert_eq!(read_study_lock(&study), None);
+    write_run_lock_for(&dir, 4242, Some("run-1"), "/bin/sh");
+    assert_eq!(
+        read_study_lock(&study),
+        Some(StudyLockSnapshot {
+            pid: 4242,
+            executable: Some("/bin/sh".into()),
+            run_id: Some("run-1".into()),
+        })
+    );
+    // 旧格式锁没有 run_id：快照必须保留 None，收尾才能回落到 PID。
+    write_run_lock(&dir, 4242, None);
+    assert_eq!(
+        read_study_lock(&study),
+        Some(StudyLockSnapshot {
+            pid: 4242,
+            executable: Some("/bin/sh".into()),
+            run_id: None,
+        })
+    );
     std::fs::write(dir.join("run.lock"), b"{broken").unwrap();
-    assert_eq!(study_lock_owner_pid(&study), None);
+    assert_eq!(read_study_lock(&study), None);
     std::fs::write(dir.join("run.lock"), br#"{"pid":"4242"}"#).unwrap();
-    assert_eq!(study_lock_owner_pid(&study), None);
+    assert_eq!(read_study_lock(&study), None);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn the_finalize_cancel_call_carries_the_run_id_in_the_cli_environment() {
-    let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"));
+fn lock_identity_rejects_another_runs_lock_before_any_termination() {
+    let other = StudyLockSnapshot {
+        pid: 10,
+        executable: Some("/bin/sh".into()),
+        run_id: Some("run-other".into()),
+    };
+    // 锁里带运行 ID 时它说了算：即使 PID 恰好等于本次登记的那个，也不是这次运行的锁。
+    let error = lock_identity_matches(Some(&other), Some("run-ours"), Some(10)).unwrap_err();
+    assert!(error.contains("run-other"), "{error}");
+    assert!(error.contains("run-ours"), "{error}");
+    // 冻结修订时外层 PID 与锁里的内层 PID 不同，但运行 ID 能认领。
+    assert!(lock_identity_matches(Some(&other), Some("run-other"), Some(99)).is_ok());
+    assert!(lock_identity_matches(None, Some("run-ours"), Some(99)).is_ok());
+}
+
+#[test]
+fn a_bare_lock_is_only_claimed_by_its_own_pid() {
+    let bare = StudyLockSnapshot {
+        pid: 10,
+        executable: Some("/bin/sh".into()),
+        run_id: None,
+    };
+    // 旧锁没有运行 ID，只能按锁里的 PID 认。冻结修订时 GUI 登记的外层 PID 与它不同，
+    // 调用方会把锁 owner 的 PID 传进来，而不是拿外层 PID 去否决。
+    assert!(lock_identity_matches(Some(&bare), Some("run-ours"), Some(10)).is_ok());
+    assert!(lock_identity_matches(Some(&bare), None, Some(10)).is_ok());
+    // PID 对不上，或没有 PID：没有证据就不认领（不杀进程，让 CLI 拒绝并保留锁）。
+    assert!(lock_identity_matches(Some(&bare), Some("run-ours"), Some(11)).is_err());
+    assert!(lock_identity_matches(Some(&bare), Some("run-ours"), None).is_err());
+}
+
+#[test]
+fn finalize_cancel_uses_the_lock_owner_pid_for_a_legacy_bare_lock() {
+    let with_id = StudyLockSnapshot {
+        pid: 4242,
+        executable: Some("/bin/sh".into()),
+        run_id: Some("run-1".into()),
+    };
+    // 锁里有运行 ID：外层 PID 只用于定位进程组，认领靠环境变量里的运行 ID。
+    let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"), Some(&with_id));
     assert_eq!(args[0], "study-finalize-cancel");
     assert_eq!(args[1], "/tmp/study");
     assert_eq!(&args[2..], ["--pid", "99"]);
@@ -1860,8 +1915,28 @@ fn the_finalize_cancel_call_carries_the_run_id_in_the_cli_environment() {
         env,
         vec![(STUDY_RUN_ID_ENV.to_string(), "run-1".to_string())]
     );
-    // 没有运行 ID（旧路径/手工运行）时不能凭空造一个，CLI 会退回按 PID 认锁。
-    assert!(finalize_cancel_invocation("/tmp/study", 99, None)
+
+    // 旧锁没有运行 ID：必须把锁 owner 的 PID 交给 CLI 按 PID 认领；硬塞锁里不存在的
+    // 运行 ID 会被 CLI 当成“调度器变了”拒绝，留下进程已停、锁还在。
+    let bare = StudyLockSnapshot {
+        pid: 4242,
+        executable: Some("/bin/sh".into()),
+        run_id: None,
+    };
+    let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"), Some(&bare));
+    assert_eq!(&args[2..], ["--pid", "4242"]);
+    assert!(env.is_empty());
+
+    // 没有锁（进程还没写锁，或已被收尾）：保持外层 PID + 运行 ID。
+    let (args, env) = finalize_cancel_invocation("/tmp/study", 99, Some("run-1"), None);
+    assert_eq!(&args[2..], ["--pid", "99"]);
+    assert_eq!(
+        env,
+        vec![(STUDY_RUN_ID_ENV.to_string(), "run-1".to_string())]
+    );
+
+    // 手工/旧路径没有运行 ID 时不能凭空造一个。
+    assert!(finalize_cancel_invocation("/tmp/study", 99, None, None)
         .1
         .is_empty());
 }
@@ -1945,10 +2020,97 @@ fn a_reused_pid_with_another_program_is_not_killed_from_the_lock_file() {
     let mut reused = grouped_sleeper();
     let reused_pid = reused.id();
     write_run_lock_for(&dir, reused_pid, Some("run-1"), "/usr/local/bin/colm-cli");
-    terminate_study_lock_owner(&study).unwrap();
+    let lock = read_study_lock(&study);
+    terminate_study_lock_owner(lock.as_ref()).unwrap();
     assert!(process_alive(reused_pid), "a reused pid must not be killed");
     terminate_process_tree(reused_pid).unwrap();
     let _ = reused.wait();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 同名可执行文件但锁里的运行 ID 是另一轮：必须在终止任何进程前拒绝。先组杀再比对会把
+/// 本次登记的进程组和另一轮持锁的调度器都杀掉，这正是“迟到的取消误杀后来者”。
+#[cfg(unix)]
+#[test]
+fn a_lock_from_another_run_is_rejected_before_any_process_is_stopped() {
+    let dir = temporary_study_dir("other-run-lock");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    let mut other = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    let image = process_image_name(other.id()).expect("the other scheduler has a known image");
+    write_run_lock_for(&dir, other.id(), Some("run-other"), &image);
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    let error = cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("run-other"), "{error}");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "refusal must happen before cancel.request or finalize"
+    );
+    assert!(
+        process_alive(outer.id()),
+        "the registered tree must not be killed"
+    );
+    assert!(
+        process_alive(other.id()),
+        "another run's scheduler must not be killed"
+    );
+
+    terminate_process_tree(outer.id()).unwrap();
+    let _ = outer.wait();
+    terminate_process_tree(other.id()).unwrap();
+    let _ = other.wait();
+    processes.forget(&key).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// 旧锁没有运行 ID，只能靠可执行文件确认锁 owner 仍是那个调度器：一致就允许补杀，
+/// 并用锁里的 PID（不是外层 PID）收尾，否则 CLI 会拒绝，进程停了锁还在。
+#[cfg(unix)]
+#[test]
+fn a_legacy_bare_lock_with_a_matching_executable_is_still_stopped() {
+    let dir = temporary_study_dir("legacy-bare-cancel");
+    let study = dir.to_string_lossy().to_string();
+    let processes = RunProcesses::default();
+    let key = study_process_key(&study);
+    let mut outer = grouped_sleeper();
+    let mut legacy = grouped_sleeper();
+    processes.prepare_study_run(&key, "run-ours").unwrap();
+    assert!(processes.remember(&key, outer.id()).unwrap());
+    let legacy_pid = legacy.id();
+    let image = process_image_name(legacy_pid).expect("the legacy scheduler has a known image");
+    write_run_lock_for(&dir, legacy_pid, None, &image);
+    assert!(process_alive(legacy_pid));
+
+    let calls = std::sync::Mutex::new(Vec::new());
+    cancel_study_run_with(&processes, &study, |args, env| {
+        calls.lock().unwrap().push((args.to_vec(), env.to_vec()));
+        Ok("cancelled".into())
+    })
+    .unwrap();
+    assert!(
+        !process_alive(legacy_pid),
+        "the legacy lock owner must be stopped"
+    );
+    assert!(!outer.wait().unwrap().success());
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].0[0], "study-finalize-cancel");
+    assert_eq!(&calls[1].0[2..], ["--pid", &legacy_pid.to_string()]);
+    assert!(
+        calls[1].1.is_empty(),
+        "a bare lock must not claim a run id it never wrote"
+    );
+    let _ = legacy.wait();
+    processes.forget(&key).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
 

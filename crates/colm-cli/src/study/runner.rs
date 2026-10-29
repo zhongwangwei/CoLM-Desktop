@@ -2182,9 +2182,11 @@ fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
 /// 认领这把锁的证据有两种，缺一不可地防住“迟到的取消请求误关后来启动的调度器”：
 /// - 与启动时同一个 [`RUN_ID_ENV`] 值：冻结模型修订的研究由内层 CLI 持锁，GUI 只有外层
 ///   PID，这是唯一跨进程对得上的身份；
-/// - 没有运行 ID 时退回到 `expected_pid == 锁里的 PID`（旧 CLI、非委托运行）。
+/// - 锁里没有运行 ID（升级前冻结的 CLI 不写这个变量）且调用方给了 `expected_pid`：
+///   只能退回到 `expected_pid == 锁里的 PID`。GUI 收尾总会带运行 ID，不回落的话这种
+///   旧锁永远清不掉，进程停了锁还在，下一次启动只会报 stale。
 ///
-/// 两种都对不上就拒绝，绝不因为“进程已经停了”就清掉别人的锁。
+/// 都对不上就拒绝，绝不因为“进程已经停了”就清掉别人的锁。
 pub fn finalize_cancel(study_dir: &Path, expected_pid: u32) -> Result<StudyState> {
     finalize_cancel_impl(study_dir, Some(expected_pid), run_id_from_env().as_deref())
 }
@@ -2206,14 +2208,19 @@ fn finalize_cancel_impl(
         .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
     let had_lock = match run_lock_record(&lock_path)? {
         Some(record) => {
-            // 带运行 ID 时严格按运行 ID 认锁。若两个都带上却只比 PID：冻结修订的运行里
-            // 内层 PID 不可能等于外层 PID；而 PID 复用之后，另一个运行的调度器可能恰好
-            // 拿到同一个号，迟到的取消就会把它误杀。
+            // 带运行 ID 时优先按运行 ID 认锁。只有锁里没有运行 ID（升级前冻结的 CLI）
+            // 才回落到 PID：冻结修订的运行里内层 PID 不可能等于外层 PID，若两个都带上却
+            // 只比 PID，PID 复用后另一个运行的调度器可能恰好拿到同一个号，迟到的取消就会
+            // 把它误杀；反过来，有 ID 却因为锁里缺 ID 直接拒绝，旧锁就永远清不掉了。
             let claimed = match (expected_pid, expected_run_id) {
                 // 空闲收尾（GUI 没有登记到进程）只用于“调度器已确认停止”的收尾，
                 // 它本来就不带启动身份，不能因此把任何在跑的锁都当自己的。
                 (None, None) => true,
-                (_, Some(expected)) => record.run_id.as_deref() == Some(expected),
+                (Some(pid), Some(expected)) => match record.run_id.as_deref() {
+                    Some(lock_run_id) => lock_run_id == expected,
+                    None => record.owner.pid == pid,
+                },
+                (None, Some(expected)) => record.run_id.as_deref() == Some(expected),
                 (Some(pid), None) => record.owner.pid == pid,
             };
             if !claimed {
@@ -7270,6 +7277,81 @@ mod tests {
         // 收尾之后马上能重新拿锁开跑：没有留下僵尸锁，也不会被另一个调度器误认。
         let lock = StudyRunLock::acquire(&dir).unwrap();
         drop(lock);
+        assert!(!dir.join("run.lock").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 升级前冻结的 CLI 不写 `COLM_STUDY_RUN_ID`，锁里只有 PID。GUI 收尾却总会带上本次
+    /// 运行的 ID：如果带 ID 时只认 `record.run_id`，这种旧锁永远认不回来，进程停了、锁还在，
+    /// 下一次启动只会报 stale。旧锁没有 ID 时只能回落到调用方给的 PID，但绝不能在没有 PID
+    /// 的情况下放行别人的锁。
+    #[test]
+    fn a_cancel_with_a_run_id_falls_back_to_the_expected_pid_for_a_legacy_lock() {
+        let exited_pid = exited_child_pid();
+        assert!(!scheduler_process_alive(exited_pid).unwrap());
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-legacy-lock-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        let state = StudyState::new(
+            "s".into(),
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Queued,
+                stage: None,
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        // 旧格式的锁：只有 ProcessIdentity，没有 run_id。
+        let bare = RunLockRecord {
+            owner: ProcessIdentity {
+                pid: exited_pid,
+                ..supervisor_identity()
+            },
+            run_id: None,
+        };
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&bare).unwrap()).unwrap();
+
+        // PID 对不上：仍拒绝，锁保留（别人的旧锁不能因为缺 ID 就被认领）。
+        let error = finalize_cancel_impl(&dir, Some(exited_pid.wrapping_add(1)), Some("run-gui"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Study scheduler changed while cancelling"),
+            "{error}"
+        );
+        assert!(dir.join("run.lock").is_file());
+
+        // 只给运行 ID、不给 PID：旧锁没有可核对的证据，仍拒绝。
+        let error = finalize_cancel_impl(&dir, None, Some("run-gui"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Study scheduler changed while cancelling"),
+            "{error}"
+        );
+        assert!(dir.join("run.lock").is_file());
+
+        // 运行 ID + 匹配的旧锁 PID：回落到 PID 认领，收尾成功并删锁。
+        let cancelled = finalize_cancel_impl(&dir, Some(exited_pid), Some("run-gui")).unwrap();
+        assert_eq!(cancelled.status, StudyStatus::Cancelled);
+        assert!(cancelled
+            .tasks
+            .values()
+            .all(|task| task.status == TaskStatus::Cancelled));
         assert!(!dir.join("run.lock").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
