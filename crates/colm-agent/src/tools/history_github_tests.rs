@@ -1693,3 +1693,95 @@ fn partial_cache_is_readable_offline_when_no_complete_snapshot_exists() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// C05：完整快照持久化成功后才允许删除 partial
+// ---------------------------------------------------------------------------
+
+#[test]
+fn complete_cache_write_failure_keeps_the_partial_cache_bytes() {
+    let _env = super::test_env_lock();
+    let fail_comments = Arc::new(AtomicBool::new(true));
+    let server = mock_github({
+        let fail_comments = Arc::clone(&fail_comments);
+        move |request| {
+            let path = request.path().to_owned();
+            if path.ends_with(&format!("/commits/{SHA}/pulls")) {
+                MockResponse::json(
+                    200,
+                    json!([pull_json(OWNER, REPO, 8, "fix", Value::Null, None)]),
+                )
+            } else if path.ends_with("/issues/8/comments") {
+                if fail_comments.load(Ordering::SeqCst) {
+                    MockResponse::json(500, json!({"message": "comments exploded"}))
+                } else {
+                    MockResponse::json(
+                        200,
+                        json!([comment_json(
+                            "alice",
+                            "because the old default was wrong",
+                            8
+                        )]),
+                    )
+                }
+            } else {
+                MockResponse::json(404, json!({"message": "unexpected path"}))
+            }
+        }
+    });
+    let root = temp("cache-write-failure");
+    let online = client_for(&server, &root);
+    // 先形成 partial（评论失败的不完整尝试）。
+    let failed = online.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(failed["complete"], false);
+    let partial_path = root
+        .join(OWNER)
+        .join(REPO)
+        .join(format!("{SHA}.partial.json"));
+    assert!(partial_path.is_file());
+    let partial_before = std::fs::read(&partial_path).unwrap();
+
+    // 注入完整快照写失败：目标路径被目录占位，rename/替换必然失败。
+    let complete_path = root.join(OWNER).join(REPO).join(format!("{SHA}.json"));
+    std::fs::create_dir_all(&complete_path).unwrap();
+    fail_comments.store(false, Ordering::SeqCst);
+    let complete = online.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(
+        complete["complete"], true,
+        "the HTTP result itself is complete: {complete}"
+    );
+    assert!(
+        notices(&complete)
+            .iter()
+            .any(|notice| notice.contains("left unchanged")),
+        "a failed complete-cache write must be reported: {complete}"
+    );
+    assert_eq!(
+        std::fs::read(&partial_path).unwrap(),
+        partial_before,
+        "the previous partial cache bytes must survive a failed complete write"
+    );
+
+    // 随后离线：完整快照未提交，仍能读取原 partial（不是“什么都没有”）。
+    let mut offline = GithubClient::new(root.clone(), None, true);
+    offline.api_base = server.base.clone();
+    let cached = offline.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(cached["from_cache"], true);
+    assert_eq!(cached["complete"], false);
+    assert_eq!(cached["partial"], true);
+    assert_eq!(cached["pulls"].as_array().unwrap().len(), 1);
+
+    // 去掉写失败条件后成功 refresh：完整快照落盘，partial 才被清理。
+    std::fs::remove_dir_all(&complete_path).unwrap();
+    let recovered = online.pulls(OWNER, REPO, SHA, true, true);
+    assert_eq!(recovered["complete"], true, "{recovered}");
+    assert!(complete_path.is_file());
+    assert!(
+        !partial_path.is_file(),
+        "a persisted complete snapshot may clear the partial cache"
+    );
+    let cached = offline.pulls(OWNER, REPO, SHA, false, false);
+    assert_eq!(cached["complete"], true);
+    assert_eq!(cached["from_cache"], true);
+    let _ = std::fs::remove_dir_all(&root);
+}

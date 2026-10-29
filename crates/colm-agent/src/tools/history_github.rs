@@ -135,6 +135,39 @@ impl GithubClient {
         refresh: bool,
         include_discussion: bool,
     ) -> Value {
+        self.pulls_with_focus(owner, repo, sha, refresh, include_discussion, None)
+    }
+
+    /// 目标聚焦查询（C03-B）：先按页找到指定关联 PR，找到后只为它抓讨论，
+    /// 不再替列表里其它 PR（尤其前 20 个）抓讨论。
+    pub fn pulls_focused(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        refresh: bool,
+        include_discussion: bool,
+        pr_number: u64,
+    ) -> Value {
+        self.pulls_with_focus(
+            owner,
+            repo,
+            sha,
+            refresh,
+            include_discussion,
+            Some(pr_number),
+        )
+    }
+
+    fn pulls_with_focus(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        refresh: bool,
+        include_discussion: bool,
+        focus: Option<u64>,
+    ) -> Value {
         let owner = owner.trim();
         let repo = repo.trim();
         let sha = sha.trim().to_ascii_lowercase();
@@ -147,12 +180,18 @@ impl GithubClient {
         let cached = self.read_cache(owner, repo, &sha);
         if self.offline {
             if let Some(cached) = cached {
-                return cached_response(&cached, owner, repo, include_discussion, refresh, true);
+                let found = focus.is_some_and(|number| cached_has_pull(&cached, number));
+                let list_complete = cached.complete;
+                let mut response =
+                    cached_response(&cached, owner, repo, include_discussion, refresh, true);
+                attach_focus(&mut response, focus, found, list_complete);
+                return response;
             }
             // 没有完整快照时允许读上一次不完整尝试：明确标 incomplete/older attempt，
             // 不能把它伪装成完整结果，也不能因此发 HTTP。
             if let Some(partial) = self.read_partial_cache(owner, repo, &sha) {
-                return partial_cached_response(
+                let found = focus.is_some_and(|number| cached_has_pull(&partial, number));
+                let mut response = partial_cached_response(
                     &partial,
                     owner,
                     repo,
@@ -160,11 +199,14 @@ impl GithubClient {
                     refresh,
                     true,
                 );
+                attach_focus(&mut response, focus, found, false);
+                return response;
             }
             let notice = format!(
                 "offline mode: no cached GitHub PR data for {owner}/{repo}@{sha}; GitHub was not contacted. Local Git evidence is reported separately."
             );
             result["notices"] = json!([notice]);
+            attach_focus(&mut result, focus, false, false);
             return result;
         }
         if !refresh {
@@ -172,7 +214,12 @@ impl GithubClient {
                 // 完整快照要能满足这次请求：没要求讨论时可以复用；
                 // 要求讨论而快照当初没读讨论时，在线状态下补一次请求。
                 if !include_discussion || cached.include_discussion {
-                    return cached_response(&cached, owner, repo, include_discussion, false, false);
+                    let found = focus.is_some_and(|number| cached_has_pull(&cached, number));
+                    let list_complete = cached.complete;
+                    let mut response =
+                        cached_response(&cached, owner, repo, include_discussion, false, false);
+                    attach_focus(&mut response, focus, found, list_complete);
+                    return response;
                 }
             }
         }
@@ -189,7 +236,7 @@ impl GithubClient {
         let repository = Repository { owner, repo };
         let mut notices = Vec::new();
         let mut errors = Vec::new();
-        let associated = self.fetch_associated_pulls(&api_base, repository, &sha);
+        let associated = self.fetch_associated_pulls(&api_base, repository, &sha, focus);
         let mut complete = associated.complete;
         notices.extend(associated.notices);
         errors.extend(associated.errors);
@@ -197,7 +244,10 @@ impl GithubClient {
             &api_base,
             repository,
             &associated.raw,
-            include_discussion,
+            AssembleScope {
+                include_discussion,
+                focus,
+            },
             &mut notices,
             &mut errors,
         );
@@ -208,17 +258,32 @@ impl GithubClient {
                 if malformed_entries == 1 { "y" } else { "ies" }
             ));
         }
-        if include_discussion && !comments_complete {
+        if let Some(number) = focus {
+            if associated.focus_found {
+                // 本次请求的范围是目标详情：讨论完整性决定 complete；关联列表是否读完
+                // 只放在 focus.list_complete 里，不冒充详情不完整。
+                complete = !include_discussion || comments_complete;
+            } else {
+                complete = associated.complete && errors.is_empty();
+                if !associated.complete {
+                    notices.push(format!(
+                        "the commit→PR association list was not fully read (complete=false); pull request #{number} is unverified, not 'not associated'"
+                    ));
+                }
+            }
+        } else if include_discussion && !comments_complete {
             complete = false;
         }
         let fetched = associated.fetched;
         let fetched_at_unix_ms = fetched.then(now_unix_ms);
-        if fetched && errors.is_empty() && pulls.is_empty() {
+        if fetched && errors.is_empty() && pulls.is_empty() && focus.is_none() {
             notices.push("GitHub reports no pull requests associated with this commit. Association comes only from the GitHub API; #numbers in a commit message are not treated as evidence.".to_owned());
         }
         // 失败/不完整的刷新不能摧毁最后一次完整快照：先把旧快照保留情况告诉调用方，
         // 再决定写 partial（完整快照文件本身在整个流程里从未被这次失败写入）。
-        let previous_complete = if complete {
+        // 聚焦查询只为单个目标读讨论，不具备“整份列表”的缓存语义，不写缓存；
+        // 完整/partial 快照仍由普通列表查询维护。
+        let previous_complete = if complete || focus.is_some() {
             None
         } else {
             self.read_cache(owner, repo, &sha)
@@ -241,9 +306,15 @@ impl GithubClient {
             "notices": notices,
             "errors": errors_json(&errors),
         });
+        attach_focus(
+            &mut response,
+            focus,
+            associated.focus_found,
+            associated.complete,
+        );
         // 抓到至少一页（或至少有错误可诊断）才写缓存：完整结果进完整快照，
-        // 不完整结果只进 partial，绝不覆盖 last_success。
-        let should_cache = fetched || !errors.is_empty();
+        // 不完整结果只进 partial，绝不覆盖 last_success。聚焦查询不写缓存。
+        let should_cache = focus.is_none() && (fetched || !errors.is_empty());
         if should_cache {
             let cached_pulls = CachedPulls {
                 schema: CACHE_SCHEMA_VERSION,
@@ -266,14 +337,14 @@ impl GithubClient {
                     .unwrap_or_default(),
                 errors: response["errors"].clone(),
             };
-            let notice = if complete {
+            let written = if complete {
                 self.write_complete_cache(&cached_pulls)
             } else {
                 self.write_partial_cache(&cached_pulls)
             };
-            if let Some(notice) = notice {
+            if let Err(message) = written {
                 if let Some(list) = response["notices"].as_array_mut() {
-                    list.push(Value::String(notice));
+                    list.push(Value::String(message));
                 }
             }
         }
@@ -281,11 +352,15 @@ impl GithubClient {
     }
 
     /// 列表本身只翻页；失败与截断都记在这个返回值里，交给 [`GithubClient::pulls`] 汇总。
+    ///
+    /// `focus` 指定要读详情的 PR：找到它所在页就停止（不必读完剩余页），
+    /// 这样“最多 20 个讨论”的保护不会把第 21+ 个目标排除在外。
     fn fetch_associated_pulls(
         &self,
         api_base: &str,
         repository: Repository<'_>,
         sha: &str,
+        focus: Option<u64>,
     ) -> AssociatedPulls {
         let mut associated = AssociatedPulls::default();
         let mut page = 1u64;
@@ -299,6 +374,17 @@ impl GithubClient {
                     associated.complete = true;
                     associated.raw.extend(items.iter().cloned());
                     let has_next = link_next || items.len() as u64 == PER_PAGE;
+                    if let Some(wanted) = focus {
+                        if items
+                            .iter()
+                            .any(|item| item.get("number").and_then(Value::as_u64) == Some(wanted))
+                        {
+                            associated.focus_found = true;
+                            // 目标已出现在这一页；列表本身是否读完如实记录。
+                            associated.complete = !has_next;
+                            return associated;
+                        }
+                    }
                     if !has_next {
                         return associated;
                     }
@@ -335,14 +421,26 @@ impl GithubClient {
         api_base: &str,
         repository: Repository<'_>,
         raw: &[Value],
-        include_discussion: bool,
+        scope: AssembleScope,
         notices: &mut Vec<String>,
         errors: &mut Vec<ApiError>,
     ) -> (Vec<Value>, bool, usize) {
+        let AssembleScope {
+            include_discussion,
+            focus,
+        } = scope;
+        // 聚焦查询只构建目标 PR：其余条目（以及它们的讨论）不构建、不抓取。
+        let candidates: Vec<&Value> = match focus {
+            Some(wanted) => raw
+                .iter()
+                .filter(|item| item.get("number").and_then(Value::as_u64) == Some(wanted))
+                .collect(),
+            None => raw.iter().collect(),
+        };
         let mut pulls = Vec::new();
         let mut seen = BTreeSet::new();
         let mut malformed = 0usize;
-        for item in raw {
+        for item in candidates {
             let Some(number) = item.get("number").and_then(Value::as_u64) else {
                 malformed += 1;
                 continue;
@@ -515,12 +613,14 @@ impl GithubClient {
             .filter(|cached| !cached.complete)
     }
 
-    /// 写缓存文件（临时文件 + rename）。缓存失败只返回一条 notice，不影响本次结果：
-    /// 查询本身是只读的，“这次没缓存上”不该让工具调用失败。
-    fn write_cache_file(&self, path: &Path, cached: &CachedPulls) -> Option<String> {
-        let parent = path.parent()?;
+    /// 写缓存文件（临时文件 + rename）。返回值只区分“已持久化”和“失败原因”：
+    /// 查询本身是只读的，调用方把失败原因放进 notices，而不是让查询失败。
+    fn write_cache_file(&self, path: &Path, cached: &CachedPulls) -> Result<(), String> {
+        let Some(parent) = path.parent() else {
+            return Err("could not resolve the GitHub cache file directory".to_owned());
+        };
         if let Err(error) = std::fs::create_dir_all(parent) {
-            return Some(format!(
+            return Err(format!(
                 "could not create the GitHub cache directory: {error}"
             ));
         }
@@ -542,10 +642,11 @@ impl GithubClient {
             "notices": cached.notices,
             "errors": cached.errors,
         });
-        let text = serde_json::to_string(&value).ok()?;
+        let text = serde_json::to_string(&value)
+            .map_err(|error| format!("could not serialise the GitHub cache file: {error}"))?;
         if let Err(error) = std::fs::write(&temp, text) {
             let _ = std::fs::remove_file(&temp);
-            return Some(format!("could not write the GitHub cache file: {error}"));
+            return Err(format!("could not write the GitHub cache file: {error}"));
         }
         // Unix 上 rename 原子覆盖；Windows 上目标已存在时 rename 会失败，退一步先删再改名。
         if let Err(first) = std::fs::rename(&temp, path) {
@@ -554,33 +655,38 @@ impl GithubClient {
                 .and_then(|()| std::fs::rename(&temp, path).ok());
             if retried.is_none() {
                 let _ = std::fs::remove_file(&temp);
-                return Some(format!("could not replace the GitHub cache file: {first}"));
+                return Err(format!("could not replace the GitHub cache file: {first}"));
             }
         }
-        None
+        Ok(())
     }
 
-    /// 写完整快照，并删除同一 SHA 的 partial（成功刷新后才清）。
-    fn write_complete_cache(&self, cached: &CachedPulls) -> Option<String> {
+    /// 写完整快照；**持久化成功后才删除**同一 SHA 的 partial（C05）。
+    ///
+    /// 完整数据从 HTTP 拿到不等于本地文件已提交：写盘失败时旧 partial 仍可用，
+    /// 绝不能先删掉它，否则下一次离线就失去最后的缓存。
+    fn write_complete_cache(&self, cached: &CachedPulls) -> Result<(), String> {
         let path = cache_path(
             &self.cache_root,
             &cached.owner,
             &cached.repo,
             &cached.commit,
         );
-        let notice = self.write_cache_file(&path, cached);
-        // partial 只是诊断/降级材料；完整快照成功后过期就删（删不掉也不影响完整数据）。
+        self.write_cache_file(&path, cached).map_err(|message| {
+            format!("{message}; the previous partial cache (if any) was left unchanged")
+        })?;
+        // partial 只是诊断/降级材料；完整快照已持久化成功后过期就删（删不掉不影响完整数据）。
         let _ = std::fs::remove_file(partial_cache_path(
             &self.cache_root,
             &cached.owner,
             &cached.repo,
             &cached.commit,
         ));
-        notice
+        Ok(())
     }
 
     /// 写不完整尝试。绝不覆盖完整快照：完整快照在另一个文件里，只有成功刷新才替换。
-    fn write_partial_cache(&self, cached: &CachedPulls) -> Option<String> {
+    fn write_partial_cache(&self, cached: &CachedPulls) -> Result<(), String> {
         let path = partial_cache_path(
             &self.cache_root,
             &cached.owner,
@@ -689,6 +795,13 @@ impl Repository<'_> {
     }
 }
 
+/// 一次 assemble 请求的范围：是否读讨论、是否只构建某个目标 PR。
+#[derive(Clone, Copy)]
+struct AssembleScope {
+    include_discussion: bool,
+    focus: Option<u64>,
+}
+
 /// [`GithubClient::fetch_associated_pulls`] 的中间结果。
 #[derive(Default)]
 struct AssociatedPulls {
@@ -697,6 +810,8 @@ struct AssociatedPulls {
     fetched: bool,
     /// 请求范围内的分页是否完整读完。
     complete: bool,
+    /// 聚焦查询时目标 PR 是否出现在已读页里。
+    focus_found: bool,
     notices: Vec<String>,
     errors: Vec<ApiError>,
 }
@@ -831,6 +946,26 @@ fn cached_response(
         "notices": notices,
         "errors": cached.errors,
     })
+}
+
+fn cached_has_pull(cached: &CachedPulls, number: u64) -> bool {
+    cached
+        .pulls
+        .iter()
+        .any(|pull| pull.get("number").and_then(Value::as_u64) == Some(number))
+}
+
+/// 给 focus 查询的响应补结构化状态：目标是否在返回的 pulls 里、关联列表是否读完。
+/// 工具层据此区分“确实未关联（列表完整且读过）”和“未核验（离线/列表不完整）”。
+fn attach_focus(value: &mut Value, focus: Option<u64>, found: bool, list_complete: bool) {
+    let Some(number) = focus else {
+        return;
+    };
+    value["focus"] = json!({
+        "pr_number": number,
+        "found": found,
+        "list_complete": list_complete,
+    });
 }
 
 /// 命中“不完整尝试”时的返回（没有完整快照可用）。明确标 incomplete/older attempt，

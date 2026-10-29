@@ -206,8 +206,14 @@ fn the_three_history_tools_are_registered_as_strict_read_only_tools() {
             assert!(properties.get("source_dir").is_none(), "{name}");
         }
         if name == "commit_pull_requests" {
-            // H07：有界分页 + 单 PR 原文取回参数。
-            for key in ["cursor", "page_size", "pr_number"] {
+            // H07 + C03：有界分页、单 PR 详情与正文/评论续读参数。
+            for key in [
+                "cursor",
+                "page_size",
+                "pr_number",
+                "body_offset",
+                "comments_cursor",
+            ] {
                 assert!(properties.get(key).is_some(), "{name} {key}");
             }
         }
@@ -438,9 +444,23 @@ fn source_history_routes_both_repositories_with_the_default_limit() {
 fn source_history_selected_without_a_model_resolves_the_application_source() {
     let root = temp_dir("source-app");
     let fake = FakeCli::new(&root);
+    // C02：CLI 首次把 --source app 解析成真实检出 A；handle 必须固定这个目录。
+    let app_checkout = root.join("app-checkout");
+    std::fs::create_dir_all(&app_checkout).unwrap();
+    let app_canonical = app_checkout.canonicalize().unwrap();
     fake.set_track(&json!({
         "schema": 1,
-        "query": {"symbol": "t_soisno", "repository": "selected"},
+        "query": {
+            "symbol": "t_soisno",
+            "repository": "selected",
+            "source": {
+                "mode": "app",
+                "source_dir": app_canonical.display().to_string(),
+                "fingerprint": "a".repeat(64),
+                "commit": "d".repeat(40),
+                "dirty": false,
+            },
+        },
         "repos": {"selected": {"key": "selected", "history": {"mode": "app"}}},
         "cross": {"links": []},
         "limits": [],
@@ -460,6 +480,10 @@ fn source_history_selected_without_a_model_resolves_the_application_source() {
     );
     assert_eq!(value["source_context"]["kind"], "app");
     assert_eq!(value["source_context"]["source"], "app");
+    assert_eq!(
+        value["source_context"]["canonical_root"],
+        json!(app_canonical.display().to_string())
+    );
     let app_handle = value["source_handle"]
         .as_str()
         .expect("selected app source must also register a handle");
@@ -977,6 +1001,9 @@ struct MockGithub {
     status: Arc<Mutex<u16>>,
     pulls: Arc<Mutex<String>>,
     comments: Arc<Mutex<String>>,
+    /// 可选的分页 pulls 响应：按请求的 page=N 返回第 N 个元素；最后一个元素无 Link，
+    /// 越界页返回 500（模拟“目标在未读页且下一页失败”）。
+    pull_pages: Arc<Mutex<Option<Vec<String>>>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -992,12 +1019,14 @@ impl MockGithub {
         let status = Arc::new(Mutex::new(200_u16));
         let pulls = Arc::new(Mutex::new("[]".to_owned()));
         let comments = Arc::new(Mutex::new("[]".to_owned()));
+        let pull_pages: Arc<Mutex<Option<Vec<String>>>> = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let requests = Arc::clone(&requests);
             let status = Arc::clone(&status);
             let pulls = Arc::clone(&pulls);
             let comments = Arc::clone(&comments);
+            let pull_pages = Arc::clone(&pull_pages);
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
@@ -1037,19 +1066,56 @@ impl MockGithub {
                         headers,
                     });
                     let status = *status.lock().unwrap();
-                    let body = if path.contains("/comments") {
-                        comments.lock().unwrap().clone()
+                    let pages = pull_pages.lock().unwrap().clone();
+                    let mut link_header = String::new();
+                    let (status, body) = if path.contains("/comments") {
+                        (
+                            status,
+                            if status == 200 {
+                                comments.lock().unwrap().clone()
+                            } else {
+                                "{\"message\":\"mock failure\"}".to_owned()
+                            },
+                        )
+                    } else if let Some(pages) = pages {
+                        let page = path
+                            .split_once('?')
+                            .map(|(_, query)| query)
+                            .and_then(|query| {
+                                query.split('&').find_map(|pair| {
+                                    let (key, value) = pair.split_once('=')?;
+                                    (key == "page").then_some(value)
+                                })
+                            })
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(1);
+                        match pages.get(page.saturating_sub(1)) {
+                            Some(body) if status == 200 => {
+                                if page < pages.len() {
+                                    link_header = format!(
+                                        "Link: <http://mock.invalid/commits/pulls?page={}>; rel=\"next\"\r\n",
+                                        page + 1
+                                    );
+                                }
+                                (200, body.clone())
+                            }
+                            Some(_) => (status, "{\"message\":\"mock failure\"}".to_owned()),
+                            None => (500, "{\"message\":\"mock failure\"}".to_owned()),
+                        }
                     } else {
-                        pulls.lock().unwrap().clone()
-                    };
-                    let body = if status == 200 {
-                        body
-                    } else {
-                        "{\"message\":\"mock failure\"}".to_owned()
+                        let body = pulls.lock().unwrap().clone();
+                        (
+                            status,
+                            if status == 200 {
+                                body
+                            } else {
+                                "{\"message\":\"mock failure\"}".to_owned()
+                            },
+                        )
                     };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\n{link_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.flush();
@@ -1062,6 +1128,7 @@ impl MockGithub {
             status,
             pulls,
             comments,
+            pull_pages,
             stop,
             thread: Some(thread),
         }
@@ -1069,6 +1136,14 @@ impl MockGithub {
 
     fn set_response(&self, pulls: Value) {
         *self.pulls.lock().unwrap() = pulls.to_string();
+        *self.pull_pages.lock().unwrap() = None;
+    }
+
+    /// 用分页响应替换单页响应：按 GitHub 的 page query 返回每一页（价值主要在“目标在
+    /// 未读页且下一页失败”的场景）。
+    fn set_pull_pages(&self, pages: &[Value]) {
+        *self.pull_pages.lock().unwrap() =
+            Some(pages.iter().map(Value::to_string).collect::<Vec<_>>());
     }
 
     fn set_comments(&self, comments: Value) {
@@ -1648,13 +1723,34 @@ fn commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand() 
     let pulls = single["pulls"].as_array().unwrap();
     assert_eq!(pulls.len(), 1);
     assert_eq!(pulls[0]["number"], 2);
-    assert_eq!(pulls[0]["body"].as_str().unwrap().chars().count(), 8_000);
-    assert!(!pulls[0]["reason"]["evidence_candidates"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    // 详情也是预算内窗口：一次 4000 字，next_body_offset 继续。
+    assert_eq!(
+        pulls[0]["body"].as_str().unwrap().chars().count(),
+        PR_DETAIL_BODY_WINDOW
+    );
+    assert_eq!(pulls[0]["body_chars"], 8_000);
+    assert_eq!(pulls[0]["body_offset"], 0);
+    assert_eq!(pulls[0]["next_body_offset"], PR_DETAIL_BODY_WINDOW);
+    assert_eq!(pulls[0]["reason"]["candidates_total"], 1);
     assert!(pulls[0]["comments"]["excerpts"].is_array());
     assert_eq!(pulls[0]["author"], "author2");
+    // 用 next_body_offset 取回后部，而不是只拿被截断前缀。
+    let mut tail_args = pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        false,
+        Value::Null,
+        Value::Null,
+        json!(2),
+    );
+    tail_args["body_offset"] = json!(PR_DETAIL_BODY_WINDOW);
+    let tail = call(tail_args).unwrap();
+    assert_eq!(
+        tail["pulls"][0]["body"].as_str().unwrap().chars().count(),
+        8_000 - PR_DETAIL_BODY_WINDOW
+    );
+    assert_eq!(tail["pulls"][0]["next_body_offset"], Value::Null);
 
     // page_size 边界（1 和最大 5）。
     let one = call(pr_page_args(
@@ -1787,5 +1883,551 @@ fn commit_pull_requests_pages_compact_results_and_reads_one_pr_body_on_demand() 
     assert_eq!(cached["page"]["page_size"], 2);
     assert_eq!(cached["page"]["returned"], 2);
     assert_eq!(cached["page"]["next_cursor"], "2");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// C02：App handle 固定 CLI 首次解析出的真实目录
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn app_handle_pins_the_first_resolved_checkout() {
+    let root = temp_dir("app-handle-pin");
+    let app_checkout = root.join("app-checkout-a");
+    std::fs::create_dir_all(&app_checkout).unwrap();
+    let app_canonical = app_checkout.canonicalize().unwrap();
+    let fake = FakeCli::new(&root);
+    let sha = "7".repeat(40);
+    fake.set_track(&json!({
+        "schema": 1,
+        "query": {
+            "symbol": "local_var",
+            "repository": "selected",
+            "source": {
+                "mode": "app",
+                "source_dir": app_canonical.display().to_string(),
+                "fingerprint": "a".repeat(64),
+                "commit": sha,
+                "dirty": false,
+            },
+        },
+        "repos": {"selected": {"key": "selected"}},
+        "cross": {"links": []},
+        "limits": [],
+        "truncated": false,
+        "history_root": "/history",
+    }));
+    fake.set_commit(&json!({
+        "schema": 1,
+        "repository": {
+            "path": app_canonical.display().to_string(),
+            "identity": {"state": "unverified", "root": app_canonical.display().to_string(), "remote": null},
+        },
+        "commit": {
+            "sha": sha,
+            "parents": [],
+            "author": "Local Author",
+            "author_time_unix": 1_700_000_000,
+            "committer_time_unix": 1_700_000_100,
+            "message": "Local only",
+            "files": [],
+            "truncated": false,
+        },
+        "reason": {"status": "unchecked", "basis": "commit_message", "excerpt": "Local only"},
+        "notes": [],
+    }));
+    let ctx = context(&fake.cli, &root);
+    let track = SourceHistory
+        .call(&source_args("selected", "local_var"), &ctx)
+        .unwrap();
+    let handle = track["source_handle"]
+        .as_str()
+        .expect("app source must register a handle")
+        .to_owned();
+    assert_eq!(
+        track["source_context"]["canonical_root"],
+        json!(app_canonical.display().to_string())
+    );
+
+    // 首次解析到 A 之后，app 别名会解析到别处（managed 库 B 出现/没有 X）：
+    // 旧 handle 的详情必须仍读 A，而不是重新解析 app。
+    fake.fail_commit_for_app_source();
+    let calls_before = fake.calls().len();
+    let details = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": null,
+                "path": null,
+                "source_handle": handle,
+            }),
+            &ctx,
+        )
+        .unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), calls_before + 1, "{calls:?}");
+    let commit_call = calls.last().unwrap();
+    assert!(
+        commit_call.contains(&format!("--source {}", app_canonical.display())),
+        "{commit_call}"
+    );
+    assert!(
+        !commit_call.contains("--source app"),
+        "a bound app handle must not re-resolve the app alias: {commit_call}"
+    );
+    assert_eq!(
+        details["source_context"]["source"],
+        json!(app_canonical.display().to_string())
+    );
+    assert_eq!(details["source_context"]["resolution"], "source_handle");
+
+    // 原目录不可读：明确失败，不静默换到另一个库，也不运行 CLI。
+    std::fs::remove_dir_all(&app_checkout).unwrap();
+    let calls_before = fake.calls().len();
+    let error = CommitDetails
+        .call(
+            &json!({
+                "repository": "selected",
+                "sha": sha,
+                "symbol": null,
+                "path": null,
+                "source_handle": handle,
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no longer readable"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fake.calls().len(),
+        calls_before,
+        "an unreadable bound source must not run the CLI"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn app_source_history_refuses_a_handle_without_the_resolved_directory() {
+    let root = temp_dir("app-handle-missing-dir");
+    let fake = FakeCli::new(&root);
+    fake.set_track(&json!({
+        "schema": 1,
+        "query": {"symbol": "local_var", "repository": "selected"},
+        "repos": {"selected": {"key": "selected"}},
+        "cross": {"links": []},
+        "limits": [],
+        "truncated": false,
+        "history_root": "/history",
+    }));
+    let ctx = context(&fake.cli, &root);
+    let error = SourceHistory
+        .call(&source_args("selected", "local_var"), &ctx)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("canonical absolute source directory"),
+        "{error:#}"
+    );
+    assert!(
+        ctx.history_sources.lock().unwrap().is_empty(),
+        "no fixed-source handle may be issued without a resolved directory"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// C03：PR 详情的预算、目标聚焦与“未核验 ≠ 未关联”
+// ---------------------------------------------------------------------------
+
+fn pull_with_body(number: u64, body: String) -> Value {
+    json!({
+        "number": number,
+        "title": format!("PR {number}"),
+        "body": body,
+        "state": "closed",
+        "merged_at": "2024-05-01T10:00:00Z",
+        "html_url": format!("https://github.com/CoLM-SYSU/CoLM/pull/{number}"),
+        "head": {"sha": "b".repeat(40)},
+        "base": {"ref": "main"},
+        "user": {"login": format!("author{number}")},
+    })
+}
+
+fn long_comment(index: usize, length: usize) -> Value {
+    let mut body = format!("comment {index}: because the old default froze at night; ");
+    while body.chars().count() < length {
+        body.push('文');
+    }
+    json!({
+        "user": {"login": format!("commenter{index}")},
+        "body": body,
+        "html_url": format!("https://github.com/CoLM-SYSU/CoLM/pull/1#issuecomment-{index}"),
+    })
+}
+
+#[test]
+fn commit_pull_requests_detail_is_budgeted_and_continuable_through_result_text() {
+    let root = temp_dir("detail-budget");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let sha = "8".repeat(40);
+    let mut body = String::from(
+        "This PR fixes the snow temperature default because the old one froze at night. ",
+    );
+    while body.chars().count() < 8_000 {
+        body.push('中');
+    }
+    mock.set_response(json!([pull_with_body(1, body)]));
+    let comments: Vec<Value> = (0..10).map(|index| long_comment(index, 1_000)).collect();
+    mock.set_comments(Value::Array(comments));
+    let ctx = online_context(&root, None);
+    let args = pr_page_args(
+        "desktop",
+        &sha,
+        false,
+        true,
+        Value::Null,
+        Value::Null,
+        json!(1),
+    );
+
+    let value = CommitPullRequests.call(&args, &ctx).unwrap();
+    // 必须走最终 result_text 预算：不能靠通用前缀截断。
+    let text = crate::tools::result_text(&value);
+    assert!(
+        text.chars().count() <= crate::tools::MAX_RESULT_CHARS,
+        "detail result_text={} chars",
+        text.chars().count()
+    );
+    assert!(
+        !text.contains("\"truncated\":true"),
+        "detail must stay inside the result budget instead of being truncated"
+    );
+    let detail = &value["pulls"][0];
+    assert_eq!(detail["body_chars"], 8_000);
+    assert_eq!(
+        detail["body"].as_str().unwrap().chars().count(),
+        PR_DETAIL_BODY_WINDOW
+    );
+    assert_eq!(detail["next_body_offset"], PR_DETAIL_BODY_WINDOW);
+    assert_eq!(detail["comments"]["total_excerpts"], 10);
+    assert_eq!(detail["comments"]["returned"], PR_DETAIL_COMMENT_PAGE);
+    assert_eq!(
+        detail["comments"]["next_cursor"],
+        PR_DETAIL_COMMENT_PAGE.to_string()
+    );
+    assert!(detail["reason"]["candidates_total"].as_u64().unwrap() >= 1);
+    assert!(
+        detail["reason"]["evidence_candidates"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= PR_DETAIL_CANDIDATE_LIMIT
+    );
+    assert_eq!(value["page"], Value::Null);
+
+    // 用 next_body_offset 取回正文后部。
+    let mut tail_args = args.clone();
+    tail_args["body_offset"] = json!(PR_DETAIL_BODY_WINDOW);
+    let tail = CommitPullRequests.call(&tail_args, &ctx).unwrap();
+    assert_eq!(
+        tail["pulls"][0]["body"].as_str().unwrap().chars().count(),
+        8_000 - PR_DETAIL_BODY_WINDOW
+    );
+    assert_eq!(tail["pulls"][0]["next_body_offset"], Value::Null);
+    assert!(crate::tools::result_text(&tail).chars().count() <= crate::tools::MAX_RESULT_CHARS);
+
+    // 用 comments.next_cursor 逐页取回全部 10 条。
+    let mut cursor = value["pulls"][0]["comments"]["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut collected = PR_DETAIL_COMMENT_PAGE;
+    let mut pages = 0;
+    while !cursor.is_empty() && pages < 5 {
+        let mut page_args = args.clone();
+        page_args["comments_cursor"] = json!(cursor);
+        let page = CommitPullRequests.call(&page_args, &ctx).unwrap();
+        assert!(crate::tools::result_text(&page).chars().count() <= crate::tools::MAX_RESULT_CHARS);
+        collected += page["pulls"][0]["comments"]["returned"].as_u64().unwrap() as usize;
+        cursor = page["pulls"][0]["comments"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        pages += 1;
+    }
+    assert_eq!(collected, 10);
+    assert_eq!(pages, 3, "3 + 3 + 3 + 1 pages of excerpts");
+
+    // 非法续读参数明确报错。
+    let mut bad_body = args.clone();
+    bad_body["body_offset"] = json!(9_000);
+    assert!(format!(
+        "{:#}",
+        CommitPullRequests.call(&bad_body, &ctx).unwrap_err()
+    )
+    .contains("past the end of the PR body"));
+    let mut bad_comments = args.clone();
+    bad_comments["comments_cursor"] = json!("not-a-cursor");
+    assert!(format!(
+        "{:#}",
+        CommitPullRequests.call(&bad_comments, &ctx).unwrap_err()
+    )
+    .contains("not a valid continuation cursor"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_reads_only_the_target_pr_discussion() {
+    let root = temp_dir("detail-focus");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let sha = "9".repeat(40);
+    let pulls: Vec<Value> = (1..=21)
+        .map(|number| pull_with_body(number, format!("summary of PR {number}")))
+        .collect();
+    mock.set_response(Value::Array(pulls));
+    mock.set_comments(json!([{
+        "user": {"login": "alice"},
+        "body": "We changed this because the old default physically froze at night.",
+        "html_url": "https://github.com/CoLM-SYSU/CoLM/pull/21#issuecomment-1",
+    }]));
+    let ctx = online_context(&root, None);
+    let value = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+                json!(21),
+            ),
+            &ctx,
+        )
+        .unwrap();
+    let detail = &value["pulls"][0];
+    assert_eq!(detail["number"], 21);
+    assert_eq!(detail["reason"]["coverage"]["discussion_read"], true);
+    assert!(detail["reason"]["evidence_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["excerpt"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("physically froze")));
+    // 只为第 21 个目标抓讨论：前 20 个 PR 的讨论一个都不请求。
+    let requests = mock.requests();
+    let comment_lines: Vec<&str> = requests
+        .iter()
+        .map(|request| request.line.as_str())
+        .filter(|line| line.contains("/issues/"))
+        .collect();
+    assert_eq!(
+        comment_lines.len(),
+        1,
+        "only the target discussion may be fetched: {comment_lines:?}"
+    );
+    assert!(
+        comment_lines[0].contains("/issues/21/comments"),
+        "{}",
+        comment_lines[0]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_pr_number_is_unverified_offline_without_cache() {
+    // 离线且无缓存：保留 offline/complete/notices，返回结构化 unverified，不 Err。
+    let root = temp_dir("detail-offline-unverified");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let offline = pull_context(&root, None, false, false);
+    let sha = "a".repeat(40);
+    let value = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                Value::Null,
+                json!(3),
+            ),
+            &offline,
+        )
+        .unwrap();
+    assert_eq!(value["offline"], true);
+    assert_eq!(value["complete"], false);
+    assert_eq!(value["detail_unverified"]["pr_number"], 3);
+    assert_eq!(value["detail_unverified"]["unverified"], true);
+    assert_eq!(value["detail_unverified"]["list_complete"], false);
+    assert!(value["detail_unverified"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("offline"));
+    assert!(value["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice
+            .as_str()
+            .unwrap_or_default()
+            .contains("not evidence that it is unassociated")));
+    assert_eq!(mock.request_count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_pr_number_is_unverified_when_a_list_page_failed() {
+    // 关联列表第二页失败、目标在未读页：同样 unverified（而不是“未关联”错误）。
+    let root = temp_dir("detail-page-failure");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let page_one: Vec<Value> = (1_001..=1_100)
+        .map(|number| pull_with_body(number, "summary".to_owned()))
+        .collect();
+    mock.set_pull_pages(&[Value::Array(page_one)]);
+    let ctx = online_context(&root, None);
+    let sha = "b".repeat(40);
+    let value = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                Value::Null,
+                json!(1_500),
+            ),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(value["complete"], false);
+    assert_eq!(value["detail_unverified"]["unverified"], true);
+    assert_eq!(value["detail_unverified"]["list_complete"], false);
+    assert!(value["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|notice| notice
+            .as_str()
+            .unwrap_or_default()
+            .contains("not fully read")));
+    let requests = mock.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.line.contains("page=2")),
+        "the client must have tried the unread page: {requests:?}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_pr_number_needs_a_complete_list_to_say_not_associated() {
+    // 完整且成功的关联列表里确实没有目标：明确 not associated 错误。
+    let root = temp_dir("detail-not-associated");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let pulls: Vec<Value> = (1..=4)
+        .map(|number| pull_with_body(number, "summary".to_owned()))
+        .collect();
+    mock.set_response(Value::Array(pulls));
+    let ctx = online_context(&root, None);
+    let sha = "c".repeat(40);
+    let error = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                false,
+                Value::Null,
+                Value::Null,
+                json!(99),
+            ),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not associated"), "{error:#}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn commit_pull_requests_detail_reads_offline_complete_cache() {
+    let root = temp_dir("detail-cache");
+    let mock = MockGithub::start();
+    let _env = GithubApiEnv::set(&mock.base);
+    let sha = "d".repeat(40);
+    let mut body = String::from("Cached PR body because the old default froze at night. ");
+    while body.chars().count() < 8_000 {
+        body.push('中');
+    }
+    mock.set_response(json!([pull_with_body(1, body)]));
+    let comments: Vec<Value> = (0..10).map(|index| long_comment(index, 1_000)).collect();
+    mock.set_comments(Value::Array(comments));
+    // 先用普通列表查询形成完整快照（含讨论）。
+    let online = online_context(&root, None);
+    let listed = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
+            &online,
+        )
+        .unwrap();
+    assert_eq!(listed["complete"], true);
+    let requests_before = mock.request_count();
+
+    // 离线按编号取详情：只读完整快照，零 HTTP，正文/评论仍可分页续读。
+    let offline = pull_context(&root, None, false, false);
+    let value = CommitPullRequests
+        .call(
+            &pr_page_args(
+                "desktop",
+                &sha,
+                false,
+                true,
+                Value::Null,
+                Value::Null,
+                json!(1),
+            ),
+            &offline,
+        )
+        .unwrap();
+    assert_eq!(
+        mock.request_count(),
+        requests_before,
+        "offline must not send HTTP"
+    );
+    assert_eq!(value["from_cache"], true);
+    assert_eq!(value["complete"], true);
+    let detail = &value["pulls"][0];
+    assert_eq!(
+        detail["body"].as_str().unwrap().chars().count(),
+        PR_DETAIL_BODY_WINDOW
+    );
+    assert_eq!(detail["next_body_offset"], PR_DETAIL_BODY_WINDOW);
+    assert_eq!(detail["comments"]["total_excerpts"], 10);
+    assert_eq!(detail["comments"]["returned"], PR_DETAIL_COMMENT_PAGE);
+    assert_eq!(
+        detail["comments"]["next_cursor"],
+        PR_DETAIL_COMMENT_PAGE.to_string()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

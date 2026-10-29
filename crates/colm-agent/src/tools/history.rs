@@ -368,19 +368,20 @@ impl Tool for SourceHistory {
         }
         let mut context = source_context(repository, model, cli_source.as_deref());
         if let Some(mut source) = history_source {
-            // CLI 返回的 query.source 是数据：用它校正 canonical 目录、记录 commit 与指纹，
-            // 但 App 仍保留 `--source app` 语义（不把解析结果变成可被模型重定向的路径）。
+            // CLI 返回的 query.source 是可信解析结果：用它校正 canonical 目录、记录 commit
+            // 与指纹。App 第一次解析出的目录也必须固定进 descriptor（C02）：之后 managed
+            // 缓存出现或 CWD 变化时，旧 handle 不能再被重新解析到别的库。
             let returned = &value["query"]["source"];
             if let Some(dir) = returned["source_dir"]
                 .as_str()
                 .map(str::trim)
                 .filter(|dir| !dir.is_empty())
             {
-                if source.kind != HistorySourceKind::App {
+                if Path::new(dir).is_absolute() {
                     source.source_dir = Some(PathBuf::from(dir));
                     context["canonical_root"] = json!(dir);
-                } else if Path::new(dir).is_absolute() {
-                    // App 由 CLI 解析成绝对检出路径时才写 canonical_root；别名 "app" 本身不是路径。
+                } else if source.kind != HistorySourceKind::App {
+                    // 非 App 来源至少保留原参数并写展示字段；App 的非绝对别名不算固定来源。
                     context["canonical_root"] = json!(dir);
                 }
             }
@@ -390,10 +391,21 @@ impl Tool for SourceHistory {
             if let Some(fingerprint) = returned["fingerprint"].as_str() {
                 source.fingerprint = Some(fingerprint.to_owned());
             }
-            if context["canonical_root"].is_null() {
-                if let Some(path) = value["repository"]["path"].as_str() {
+            if source.source_dir.is_none() {
+                if let Some(path) = value["repository"]["path"]
+                    .as_str()
+                    .filter(|path| Path::new(path).is_absolute())
+                {
+                    source.source_dir = Some(PathBuf::from(path));
                     context["canonical_root"] = json!(path);
                 }
+            }
+            if source.source_dir.is_none() {
+                // 没有真实 canonical 目录就不能签发“固定来源”的 handle，否则后续详情
+                // 会退回动态解析（重新解析 app 可能换到别的库）。
+                bail!(
+                    "the CLI did not report a canonical absolute source directory for this selected source; cannot bind a fixed source handle; rerun source_history after the source checkout is available"
+                );
             }
             let handle = register_history_source(ctx, source)?;
             context["handle"] = json!(handle);
@@ -455,26 +467,29 @@ impl Tool for CommitDetails {
                 let (source_arg, resolution, model_identity, canonical_root, handle) =
                     match source_handle {
                         Some(handle) => {
-                            // 已绑定的来源优先：不再刷新 UI/模型，也不静默换成 app。
+                            // 已绑定的来源优先：不管是 frozen/workspace/App，详情都只用
+                            // descriptor 里固定的 canonical 目录；不重新解析 app，也不刷新 UI。
                             let descriptor = resolve_history_source(ctx, handle)?;
-                            let source_arg = match descriptor.kind {
-                                HistorySourceKind::App => "app".to_owned(),
-                                _ => descriptor
-                                    .source_dir
-                                    .as_ref()
-                                    .and_then(|dir| dir.to_str())
-                                    .map(str::to_owned)
-                                    .ok_or_else(|| {
-                                        anyhow::anyhow!(
-                                            "source handle {handle} has no canonical source directory"
-                                        )
-                                    })?,
-                            };
+                            let source_dir = descriptor.source_dir.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "source handle {handle} has no canonical source directory; rerun source_history in this session"
+                                )
+                            })?;
+                            if !source_dir.is_dir() {
+                                bail!(
+                                    "source directory {} bound to source handle {handle} is no longer readable; rerun source_history in this session for the current source",
+                                    source_dir.display()
+                                );
+                            }
+                            let source_arg = source_dir
+                                .to_str()
+                                .context("bound source directory is not UTF-8")?
+                                .to_owned();
                             (
                                 source_arg,
                                 "source_handle".to_owned(),
                                 descriptor.model.clone(),
-                                descriptor.source_dir.clone(),
+                                Some(source_dir.clone()),
                                 Some(handle.to_owned()),
                             )
                         }
@@ -570,6 +585,18 @@ const PR_PAGE_DEFAULT: u64 = 3;
 const PR_PAGE_MAX: u64 = 5;
 const PR_BODY_EXCERPT_CHARS: usize = 800;
 const PR_REASON_EXCERPT_CHARS: usize = 300;
+/// 单 PR 详情的预算（C03-A）：一次只给正文窗口、评论一页与少量候选，其余用
+/// body_offset / comments_cursor 继续读，保证经过最终 result_text 时不会被 24k 截断。
+const PR_DETAIL_BODY_WINDOW: usize = 4_000;
+const PR_DETAIL_COMMENT_PAGE: usize = 3;
+const PR_DETAIL_COMMENT_CHARS: usize = 400;
+const PR_DETAIL_CANDIDATE_LIMIT: usize = 3;
+const PR_DETAIL_EXCERPT_CHARS: usize = 300;
+
+/// 按字符窗口取子串；中文按字符计数，与 MAX_RESULT_CHARS 的口径一致。
+fn char_slice(text: &str, start: usize, take: usize) -> String {
+    text.chars().skip(start).take(take).collect()
+}
 
 /// 按字符截断并标记省略；中文按字符计数，和 MAX_RESULT_CHARS 的口径一致。
 fn truncate_excerpt(text: &str, limit: usize) -> String {
@@ -617,6 +644,112 @@ fn compact_pull(pull: &Value) -> Value {
     })
 }
 
+/// pr_number 详情的有界输出（C03-A）：正文窗口 + 评论一页 + 少量候选，附带续读参数。
+/// 单 PR 的 8k 正文 + 10 条 1k 评论不可能塞进 24k，所以详情也必须分块。
+fn pull_detail(pull: &Value, args: &Value) -> Result<Value> {
+    let body = pull["body"].as_str().unwrap_or_default();
+    let body_chars = body.chars().count();
+    let body_offset = optional_u64(args, "body_offset")?.unwrap_or(0) as usize;
+    if body_offset > body_chars {
+        bail!(
+            "argument body_offset {body_offset} is past the end of the PR body ({body_chars} characters)"
+        );
+    }
+    let window = char_slice(body, body_offset, PR_DETAIL_BODY_WINDOW);
+    let consumed = window.chars().count();
+    let next_body_offset = (body_offset + consumed < body_chars).then_some(body_offset + consumed);
+
+    let reason = pull.get("reason").unwrap_or(&Value::Null);
+    let all_candidates = reason["evidence_candidates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let candidates_total = all_candidates.len();
+    let candidates: Vec<Value> = all_candidates
+        .iter()
+        .take(PR_DETAIL_CANDIDATE_LIMIT)
+        .map(|candidate| {
+            json!({
+                "source": candidate["source"],
+                "author": candidate["author"],
+                "url": candidate["url"],
+                "scope": candidate["scope"],
+                "excerpt": candidate["excerpt"].as_str().map(|text| truncate_excerpt(text, PR_DETAIL_EXCERPT_CHARS)),
+            })
+        })
+        .collect();
+
+    let comments = pull.get("comments").unwrap_or(&Value::Null);
+    let all_excerpts = comments["excerpts"].as_array().cloned().unwrap_or_default();
+    let comments_total = all_excerpts.len();
+    let comments_offset = match opt_str(args, "comments_cursor") {
+        Some(cursor) => {
+            if cursor.is_empty() || !cursor.bytes().all(|byte| byte.is_ascii_digit()) {
+                bail!(
+                    "comments_cursor {cursor:?} is not a valid continuation cursor; use the comments.next_cursor returned by the previous detail call"
+                );
+            }
+            let offset = cursor.parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("comments_cursor {cursor:?} is not a valid continuation cursor")
+            })?;
+            if offset > comments_total {
+                bail!(
+                    "comments_cursor offset {offset} is past the end of the PR comment excerpts ({comments_total} excerpts)"
+                );
+            }
+            offset
+        }
+        None => 0,
+    };
+    let end = (comments_offset + PR_DETAIL_COMMENT_PAGE).min(comments_total);
+    let excerpts: Vec<Value> = all_excerpts[comments_offset..end]
+        .iter()
+        .map(|excerpt| {
+            json!({
+                "author": excerpt["author"],
+                "url": excerpt["url"],
+                "body": excerpt["body"].as_str().map(|text| truncate_excerpt(text, PR_DETAIL_COMMENT_CHARS)),
+            })
+        })
+        .collect();
+    let comments_next_cursor = (end < comments_total).then(|| end.to_string());
+
+    Ok(json!({
+        "number": pull["number"],
+        "owner_repo": pull["owner_repo"],
+        "url": pull["url"],
+        "title": pull["title"],
+        "state": pull["state"],
+        "merged_at_unix_ms": pull["merged_at_unix_ms"],
+        "author": pull["author"],
+        "head_sha": pull["head_sha"],
+        "base_ref": pull["base_ref"],
+        "body": window,
+        "body_chars": body_chars,
+        "body_offset": body_offset,
+        "next_body_offset": next_body_offset,
+        "body_window_chars": PR_DETAIL_BODY_WINDOW,
+        "reason": {
+            "status": reason["status"],
+            "basis": reason["basis"],
+            "excerpt": reason["excerpt"].as_str().map(|text| truncate_excerpt(text, PR_DETAIL_EXCERPT_CHARS)),
+            "coverage": reason["coverage"],
+            "evidence_candidates": candidates,
+            "candidates_total": candidates_total,
+            "candidates_truncated": candidates_total > PR_DETAIL_CANDIDATE_LIMIT,
+        },
+        "comments": {
+            "complete": comments["complete"],
+            "total_excerpts": comments_total,
+            "offset": comments_offset,
+            "returned": excerpts.len(),
+            "excerpts": excerpts,
+            "next_cursor": comments_next_cursor,
+        },
+        "evidence_id": pull["evidence_id"],
+    }))
+}
+
 /// 把 client 返回的完整 PR 列表变成有界输出：默认是紧凑分页列表（顶层 page + next_cursor），
 /// pr_number 指定时只返回那一个 PR 的完整对象（正文/讨论原文仍≤客户端上限）。
 fn paginate_pull_requests(value: &mut Value, args: &Value) -> Result<()> {
@@ -634,38 +767,63 @@ fn paginate_pull_requests(value: &mut Value, args: &Value) -> Result<()> {
 
     if let Some(number) = pr_number {
         if cursor.is_some() {
-            bail!("cursor cannot be combined with pr_number; use one continuation mode at a time");
+            bail!("cursor cannot be combined with pr_number; use body_offset/comments_cursor for PR detail continuation");
         }
         if let Some(pull) = pulls
             .iter()
             .find(|pull| pull["number"].as_u64() == Some(number))
             .cloned()
         {
-            value["pulls"] = json!([pull]);
+            value["pulls"] = json!([pull_detail(&pull, args)?]);
             value["page"] = Value::Null;
             return Ok(());
         }
+        // 只有“完整且成功读过的关联列表”才能断言目标不存在；离线 cache miss、
+        // 列表分页失败/截断都必须返回结构化未核验结果，而不是 Err（C03-C）。
         let read_errors = value
             .get("errors")
             .and_then(Value::as_array)
             .is_some_and(|errors| !errors.is_empty());
-        if pulls.is_empty() && read_errors {
-            // 读取失败不是“未关联”：保留 errors，不谎报关联结果。
-            if let Some(notices) = value["notices"].as_array_mut() {
-                notices.push(json!(format!(
-                    "could not read the PR association list; pull request #{number} was not checked (see errors)"
-                )));
-            }
-            value["page"] = Value::Null;
-            return Ok(());
+        let list_complete = value
+            .get("focus")
+            .and_then(|focus| focus["list_complete"].as_bool())
+            .unwrap_or_else(|| value["complete"].as_bool() == Some(true));
+        if list_complete && !read_errors {
+            let associated: Vec<u64> = pulls
+                .iter()
+                .filter_map(|pull| pull["number"].as_u64())
+                .collect();
+            bail!(
+                "pull request #{number} is not associated with this commit in the complete association list (associated: {associated:?}); omit pr_number to see the paginated list"
+            );
         }
-        let associated: Vec<u64> = pulls
-            .iter()
-            .filter_map(|pull| pull["number"].as_u64())
-            .collect();
-        bail!(
-            "pull request #{number} is not associated with this commit in the returned list (associated: {associated:?}); omit pr_number to see the paginated list"
-        );
+        let offline = value["offline"].as_bool() == Some(true);
+        let from_cache = value["from_cache"].as_bool() == Some(true);
+        let reason = if offline && !from_cache {
+            "GitHub was not contacted (offline cache miss)".to_owned()
+        } else if read_errors {
+            "the commit→PR association list could not be read completely (see errors)".to_owned()
+        } else if offline {
+            "no complete cached association list is available offline (only a partial older attempt)".to_owned()
+        } else {
+            "the commit→PR association list was only partially read".to_owned()
+        };
+        if let Some(notices) = value["notices"].as_array_mut() {
+            notices.push(json!(format!(
+                "pull request #{number} could not be verified: {reason}; this is not evidence that it is unassociated"
+            )));
+        }
+        value["pulls"] = json!([]);
+        value["page"] = Value::Null;
+        value["detail_unverified"] = json!({
+            "pr_number": number,
+            "unverified": true,
+            "list_complete": list_complete,
+            "offline": offline,
+            "from_cache": from_cache,
+            "reason": reason,
+        });
+        return Ok(());
     }
 
     let total = pulls.len();
@@ -717,7 +875,7 @@ impl Tool for CommitPullRequests {
         "commit_pull_requests"
     }
     fn description(&self) -> &'static str {
-        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. reason is NOT a motivation verdict: status=unchecked means raw evidence_candidates (pull body / discussion excerpts with author, URL and coverage) exist and the upper layer must quote an explicit sentence before calling a reason documented; not_recorded means the requested scope was read completely and contains no candidate; unavailable means the discussion was not read, failed or was truncated. Template bodies and bot/courtesy comments are candidates only. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input; a selected local-only commit has no verified GitHub repository here. GitHub networking follows the user's network setting (independent of the backend's search client): when it is off the tool reads the offline cache only and never sends HTTP, even with refresh=true; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. The PR list is returned as a bounded compact page (default 3, page_size 1-5): continue with the returned page.next_cursor; pass pr_number to read one associated PR's full body/reason candidates/discussion excerpts. Multiple long PRs or a full discussion never fit in one result - do not claim you read them all in one call. Call commit_details first for the local Git evidence."
+        "Map a commit SHA to the pull requests the GitHub API associates with it (GET /repos/{owner}/{repo}/commits/{sha}/pulls), with title, body, state, merge time and discussion completeness. Zero, one or several PRs are returned as-is; a '#number' in the commit title is only a hint and never an established association. reason is NOT a motivation verdict: status=unchecked means raw evidence_candidates (pull body / discussion excerpts with author, URL and coverage) exist and the upper layer must quote an explicit sentence before calling a reason documented; not_recorded means the requested scope was read completely and contains no candidate; unavailable means the discussion was not read, failed or was truncated. Template bodies and bot/courtesy comments are candidates only. Owner/repo come from the built-in registry (desktop=zhongwangwei/CoLM-Desktop, colm_upstream=CoLM-SYSU/CoLM) and are never taken from input; a selected local-only commit has no verified GitHub repository here. GitHub networking follows the user's network setting (independent of the backend's search client): when it is off the tool reads the offline cache only and never sends HTTP, even with refresh=true; a cache miss is reported as a notice, not as 'no PR'. Authentication failures, rate limits, network and partial reads are separate errors from 'no associated PR'. The PR list is returned as a bounded compact page (default 3, page_size 1-5): continue with the returned page.next_cursor; pass pr_number to read one associated PR's full body/reason candidates/discussion excerpts. pr_number returns a budgeted single-PR detail: a body window (body_offset -> next_body_offset, body_chars) and one page of discussion excerpts (comments.next_cursor), with at most a few reason candidates; continue with body_offset/comments_cursor instead of assuming the whole body/discussion was returned. Unverified is not unassociated: when the association list is incomplete or GitHub was not contacted (offline cache miss), the result is a structured detail_unverified response with offline/complete/notices/errors preserved; only a complete, successful association list justifies a 'not associated' error. Multiple long PRs or a full discussion never fit in one result - do not claim you read them all in one call. Call commit_details first for the local Git evidence."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -730,7 +888,9 @@ impl Tool for CommitPullRequests {
             "include_discussion": nullable("boolean", "also read the PR discussion comments as reason evidence; null for false"),
             "cursor": nullable("string", "opaque continuation cursor: pass the previous result's page.next_cursor to read the next compact page; null to start from the first page; invalid/out-of-range cursors are rejected, never silently restarted"),
             "page_size": nullable("integer", "compact PRs per page, 1..=5; null for 3"),
-            "pr_number": nullable("integer", "return only this associated PR with its full body/reason candidates/discussion excerpts; null for the paged compact list"),
+            "pr_number": nullable("integer", "return one associated PR as a bounded detail (body window + one page of comment excerpts + limited reason candidates) with continuation fields; null for the paged compact list"),
+            "body_offset": nullable("integer", "for pr_number: character offset of the PR body window to return (use detail.next_body_offset to continue); null for 0"),
+            "comments_cursor": nullable("string", "for pr_number: opaque continuation cursor from detail.comments.next_cursor to read the next page of discussion excerpts; null to start"),
         }))
     }
     fn tier(&self) -> Tier {
@@ -760,9 +920,15 @@ impl Tool for CommitPullRequests {
             ctx.github_token.clone(),
             offline,
         );
-        let mut value = client.pulls(owner, repo, &sha, refresh, include_discussion);
-        // H07：client 返回完整列表，工具层在这里切成有界紧凑页 / 单 PR 全文，避免 24k
-        // 截断后“后部永远不可达”。
+        let pr_number = optional_u64(args, "pr_number")?;
+        // C03-B：指定 pr_number 时让 client 先定位目标、只为它抓讨论，避免“前 20 个
+        // 讨论上限”把第 21+ 个目标排除在外；其余情况保持整份有界列表分页。
+        let mut value = match pr_number {
+            Some(number) => {
+                client.pulls_focused(owner, repo, &sha, refresh, include_discussion, number)
+            }
+            None => client.pulls(owner, repo, &sha, refresh, include_discussion),
+        };
         paginate_pull_requests(&mut value, args)?;
         value["source_context"] = json!({
             "kind": "github_repository",
