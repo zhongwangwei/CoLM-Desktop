@@ -39114,3 +39114,50 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 - `cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **733 passed**；`study::` **258 passed**；`study::targets` **26 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
 - 未运行：真实全球逐时 history（合成夹具验证逐记录读取）、跨多文件窗口筛选的专项用例（单文件已覆盖窗口筛与读取统计）、真实 Tauri/GUI 端到端。
+
+## 研究页第七批：执行器协议与远程结果身份（2026-10-29）
+
+接第六批。本批处理复核报告"执行器协议与结果身份没有统一"的根因：创建/身份敏感命令、远程归档后写回、mapped 目标内容身份、指定成员核验。
+
+### 1 创建/预检与运行使用同一个冻结执行器（#6a）
+
+- 旧行为：`creation_executor` 对 official 修订直接 Local，但 `study-run` 会通过 `revision_cli` 委派到该修订缓存的官方 CLI；若缓存 CLI 与当前可执行文件不是同一构建，创建/预检与运行由两份程序算 provenance/参数来源哈希（与 P1-8 同类）。
+- 新行为：判定只看"该修订的 revision_cli 路径是否等于当前可执行文件"，去掉 official/workspace 特判；official 与 workspace 走同一 `verify_code/cache_code` 准备逻辑（workspace 缓存缺失时先冻结，否则 revision_cli 会退回工作区现编的那份）。准备失败（CLI 缺失/无法缓存/无法校验）给可行动错误"这份研究必须由它自己的程序创建/预检，重建或恢复该修订的程序"。行为变化（有意）：冻结 official 修订的 study-create/preflight 只要缓存 CLI 与当前 exe 不同就整条委派（即使同一构建的缓存副本），与 study-run 一致。
+
+### 2 身份敏感命令整条交给 pin 的 CLI（#6b）
+
+- 旧行为：`study-save-version`、`model-import-study`、`remote-study-run`、`remote-study-fetch` 由当前 CLI 执行并调 `verify_frozen_inputs`（依赖二进制内嵌参数目录/参数源 SHA）；研究 pin 到旧 revision 时当前程序重算 provenance 与 pin 时不同 → 误报输入变化。
+- 新行为：main.rs 入口对这四个命令检测研究 pin：pin.cli 与当前程序不同则整条命令委托给 pin CLI（位置参数与全部 flag 原序透传、`DELEGATED_ENV`/`COLM_AUDIT_BY_PARENT` 防循环、stdout/stderr 继承、退出码原样返回）。委托判定前移到读取 SSH 凭据之前；远程命令的 stdin 凭据由父进程读一行后原样转发给子 CLI（否则 GUI 写的一次性凭据被子进程读不到），pin 解析失败路径也先读掉该行避免 EPIPE 盖住真实错误。审计在转交前收尾。
+- 四个入口已逐一确认都读研究 pin 并调 `verify_frozen_inputs`；测试覆盖四命令委托、退出码透传、同 CLI/DELEGATED_ENV 保持本地、凭据 stdin 转发、pin 缺失的可行动错误。
+- 遗留（不在本批四项入口内）：`study-clone`/`study-compare`/`study-verified-side`/`study-verify-comparison`/`hybrid-fit` 仍由当前 CLI 执行（其中 compare/hybrid-fit 是多研究混合 pin，不能整条交给一个 CLI；verified-side 最适合后续按 pin 转交）；不读 pin 的 export/apply/retry 无 CLI 可路由。
+
+### 3 远程结果来源持久化，归档后仍可写回（#7b）
+
+- 旧行为：成功取回后 GUI"归档"把活动 `.colm-remote-study.json` rename 走；`verified_study_member` 只按活动记录存在与否决定远程/本地，归档后退回本地 `verified_member` 要求 members/ 原始输出（fetch 不下载）→ "成功取回→归档→存为版本"失败。
+- 新行为：取回核验通过时随 evidence 原子安装 `.colm-remote-study-source.json`（host/root/job/engine/scheduler/fetched_at/model_revision）；GUI 归档只改活动记录/PENDING，SOURCE 原位保留。`verified_study_member` 读"活动 RECORD 或持久 SOURCE"，并做交叉核对：SOURCE ↔ manifest.root/id、evidence root/study_id/evidence_sha256；RECORD 与 SOURCE 同时存在时要求 host/root/job/remote_project/engine/scheduler/fetched_at/model_revision 全一致，否则拒绝。证据新增 `verification.record_source`（`active-record`/`archived-source`）。旧暂存无 SOURCE 时行为不变。
+- 遗留：归档后的 `study-compare`/`recorded_model_version` 仍只读活动 RECORD（不在本任务范围）。
+
+### 4 mapped/uploaded 目标观测有内容身份（#8a）
+
+- 旧行为：`StudyInputIdentity` 只含 base_cases/observations；`--map` 复用的 targets[].source 只检查服务器文件存在，内容不同也接受；`target_source_sha256` 只用于 UQ。
+- 新行为：`StudyInputIdentity` 新增 `target_sources: BTreeMap<target_key, FullInputFile>`（规范化路径+sha256+bytes；旧 JSON 缺字段可读，`verified_inputs` 缺字段时补实际值）；键用目标键而不是路径（本机/服务器路径不可能相等，按路径做键会误拒合法研究；值里保留规范化路径供审计）。`remote-study-run` 上传后、提交前用 SSH 对 mapped/uploaded 目标源逐文件核对 SHA-256（sha256sum 或 shasum 回退），缺失/不一致/旧研究无冻结哈希均明确拒绝；率定 fetch 增加服务器 manifest 的 `target_source_sha256` 核对，比较 evidence 的 `input_identity.target_sources` 也显式比对并指出目标键；UQ 原路径继续复用。
+
+### 5 指定成员核验的范围（#8b）
+
+- 采用最小可行方案：非 best/baseline 成员仍允许远程写回，但要求服务器 state 里有该成员 objective（率定缺失即拒绝），结果树/评估身份/样本字节仍逐个核验；evidence 新增 `member_scope`、`metrics_recomputed`、`note`，对非 best 成员明确标注"服务器未独立重算指标"，不冒充 best 级比较。未扩展服务器 `study-verify-comparison`（需改 study_version.rs 的 CLI 契约与旧引擎兼容，不在本批授权范围）。
+- 遗留：服务器侧指标重算仍只覆盖 best+baseline。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **757 passed**；`study_version` **32 passed**；`remote_study_tests` **57 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` **553 passed / 1 ignored**；clippy exit 0；fmt clean。
+- 前端本批无改动，沿用上一批 1225 passed。
+- 未运行：真实 SSH 服务器与真实旧冻结 CLI 二进制（委托/凭据/退出码用假 CLI 与真二进制手工验证）；真实 Tauri 窗口归档点击；真实集群。
+
+### 遗留总表
+
+- 其他调用 `verify_frozen_inputs` 的入口：study-clone / study-compare / study-verified-side / study-verify-comparison / hybrid-fit（多研究混合 pin 需单独设计）。
+- 服务器端按指定成员独立重算指标（当前证据已披露未重算）。
+- 归档后 study-compare / recorded_model_version 仍只读活动记录。
+- #9b 裸锁 PID 复用残余风险（带 run_id 的锁已安全）。
+- #17 粗分辨率观测重采样属能力项。
