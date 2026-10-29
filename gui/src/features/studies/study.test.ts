@@ -783,8 +783,6 @@ describe('deriving a new study design from a finished one', () => {
         weight: 2,
         from: 1_104_537_600,
         to: 1_136_073_600,
-        validation_from: 1_136_073_600,
-        validation_to: 1_167_609_600,
         min_pairs: 12,
         aggregate: 'monthly',
         corrected: true,
@@ -797,8 +795,6 @@ describe('deriving a new study design from a finished one', () => {
         weight: 2,
         from: 1_104_537_600,
         to: 1_136_073_600,
-        validation_from: 1_136_073_600,
-        validation_to: 1_167_609_600,
         min_pairs: 12,
         aggregate: 'monthly',
         corrected: true,
@@ -825,8 +821,10 @@ describe('deriving a new study design from a finished one', () => {
     );
     assert.equal(derived.ui.from, '2005-01-01T00:00');
     assert.equal(derived.ui.to, '2006-01-01T00:00');
-    assert.equal(derived.ui.valFrom, '2006-01-01T00:00');
-    assert.equal(derived.ui.valTo, '2007-01-01T00:00');
+    // 真实的不确定性研究没有验证期（后端 spec.rs 拒绝 uncertainty 带 validation_*）；
+    // 空验证期是明确的设计值，派生不能凭空补一段。
+    assert.equal(derived.ui.valFrom, '');
+    assert.equal(derived.ui.valTo, '');
     assert.equal(derived.ui.seed, '3');
     assert.equal(derived.ui.kernelDir, '/kernels/grid');
     // 派生来源：父研究、父研究冻结设计的哈希、父研究实际用的模型修订。
@@ -986,7 +984,8 @@ describe('deriving a new study design from a finished one', () => {
   });
   it('inherits the source window for gridded targets and refuses disagreeing ones', () => {
     // 空间目标的研究页时间窗是研究级设置：原来派生时 from/to/valFrom/valTo 一律写空字符串，
-    // 界面上时间框空着，派生出来的研究不再按来源研究的率定期/验证期比。
+    // 界面上时间框空着，派生出来的研究不再按来源研究的时段比。UQ 来源没有验证期（后端拒绝），
+    // 空验证期要照原样继承成空，不能补一段。
     const gridded = (to: number) => ({
       kind: 'uncertainty',
       method: 'lhs',
@@ -1001,8 +1000,6 @@ describe('deriving a new study design from a finished one', () => {
           weight: 1,
           from: 1_104_537_600,
           to,
-          validation_from: 1_136_073_600,
-          validation_to: 1_167_609_600,
           min_pairs: 20,
           source: { kind: 'grid', path: '/obs/gleam.nc', variable: 'E', scale: 0.0864 },
         },
@@ -1011,8 +1008,8 @@ describe('deriving a new study design from a finished one', () => {
     const derived = deriveStudyDesign(gridded(1_136_073_600), options);
     assert.equal(derived.ui.from, '2005-01-01T00:00');
     assert.equal(derived.ui.to, '2006-01-01T00:00');
-    assert.equal(derived.ui.valFrom, '2006-01-01T00:00');
-    assert.equal(derived.ui.valTo, '2007-01-01T00:00');
+    assert.equal(derived.ui.valFrom, '');
+    assert.equal(derived.ui.valTo, '');
     // 空间与单点共用同一一致性校验：各目标时间窗不一致就明确拒绝，不挑一个静默继承。
     const disagreeing = {
       ...gridded(1_136_073_600),

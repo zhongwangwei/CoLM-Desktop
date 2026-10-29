@@ -473,6 +473,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     envelope?.remote_pending,
     remoteReply,
   );
+  // 第 4 步的核对框、运行按钮和 start() 必须共用"服务器允许这次提交/重提"这一个判断。原来核对框
+  // 只看 resubmit，而后端分类说可以 submit（服务器记录已丢失/失败，本机 envelope 还留着旧记录）时，
+  // 运行按钮放行、框却不渲染，页面提示"勾选上面"但上面没有可勾的框。
+  const canConfirmSubmission =
+    !remotePermissions.exists || remotePermissions.resubmit || remotePermissions.submit;
   useEffect(() => {
     let current = true;
     invokeJson<{ servers: { host: string; partition?: string }[] }>('remote_config')
@@ -1110,7 +1115,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     // 已确认失败的服务器记录允许“修复后重提”：后端会先归档旧记录再提交（P1-9 B）。
     // 后端分类说服务器上已经没有记录（submit）时也放行：本机 envelope 可能还留着上一轮读到的
     // record 副本，不能让它把已经归档掉的记录又当成“有服务器提交”。
-    if (remotePermissions.exists && !remotePermissions.resubmit && !remotePermissions.submit)
+    if (!canConfirmSubmission)
       throw new Error(
         tr(
           '这个研究已经提交到服务器，请核对或取回服务器上的结果，不要再开一次运行',
@@ -1916,7 +1921,18 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     // 率定和不确定性分析的预填不同（后者不留验证期），换了方法要重算。
     const key = `${tuning}|${sites.join('|')}#${studyModel.id}@${studyModel.revision}`;
-    if (!workbench || step !== 3 || ai || !sites.length || prefilledFor.current === key) return;
+    // 派生设计的时间窗是来源研究的明确设计值（没有验证期也是明确的 ''）：来源 2000–2010 时，
+    // 按算例模拟期"推荐"会补出 2007–2010 并把率定期缩到 2007，悄悄换掉比较时段。派生模式一律
+    // 跳过普通自动预填；本页没有"重新推荐时段"这个主动作，将来要加也必须先展示前后差异。
+    if (
+      !workbench ||
+      step !== 3 ||
+      ai ||
+      !sites.length ||
+      derivedDesign ||
+      prefilledFor.current === key
+    )
+      return;
     prefilledFor.current = key;
     let live = true;
     void invoke<Record<string, CaseProfile>>('model_case_profiles', {
@@ -1959,7 +1975,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workbench, step, ai, tuning, siteKey, studyModel.id, studyModel.revision]);
+  }, [workbench, step, ai, tuning, siteKey, studyModel.id, studyModel.revision, derivedDesign]);
   // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
   // 任何研究都会写回那个草稿。但为那个草稿跑的研究本身仍该写回它：原来跑完从侧栏回来，
   // 写回悄悄从"写回草稿 X"变成"新建版本"（GUI 审查 B-05）。按研究目录记下它的草稿，
@@ -1976,8 +1992,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     }
     setFromHub(false);
     if (studyDir && state.researchTarget) studyTargets.current[studyDir] = state.researchTarget;
-    // 和研究首页方法卡片一样：回首页就清掉写回目标、参数种子与显式研究基线（U-02）。
-    update(homeResearchEntry());
+    // 侧栏"研究"只是回研究首页，不是新研究：已打开研究时保留研究基线与目录。清 researchBaseline
+    // 会让 studyBaseline 退回当前运行修订，触发 [dir, versionId, revision] effect 清空
+    // studyDir/envelope/remoteReply，首页的"查看进度"和远程追踪入口随之消失。新研究的清场由
+    // startHomeMethod/chooseMethod 负责。
+    if (studyDir) update({ researchMethod: null, researchSeed: null, researchTarget: null });
+    // 没有已打开研究时仍按研究首页入口清掉显式基线、写回目标与参数种子（U-02）。
+    else update(homeResearchEntry());
     setWorkbench(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchHome]);
@@ -2385,6 +2406,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setKernel(derived.ui.kernelDir);
     loadedFor.current = '';
     failedFor.current = '';
+    // 派生窗口已经写进 from/to/valFrom/valTo，不再属于"上次自动填的值"：把预填去重键和自动值
+    // 一起清掉，避免下次进第 3 步时 pick 把来源窗口当成可覆盖的旧推荐。
+    prefilledFor.current = '';
+    autoWindows.current = { from: '', to: '', valFrom: '', valTo: '' };
     // 研究基线必须钉在来源研究实际用的修订上：新研究要跑在同一个冻结模型上，不能回落到当前运行版本。
     // 只有身份真的变了才标记：标记没人消费会一直留着，下一次真的换算例/换版本时就把重置吞掉了。
     const carriedBaseline = derived.parent.model_revision;
@@ -2426,11 +2451,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           setError(String(e));
           throw e;
         }),
-      permissions.run &&
-        !!runKernel &&
-        confirmed &&
-        !launching &&
-        (!remotePermissions.exists || remotePermissions.resubmit || remotePermissions.submit),
+      permissions.run && !!runKernel && confirmed && !launching && canConfirmSubmission,
       true,
     ),
     ...(!remotePermissions.exists
@@ -3572,9 +3593,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 运行、恢复原来只在可用时才渲染：打开一个待运行的研究，"开始运行"整颗不存在，勾了核对才凭空出现
   //（GUI 审查 C-29）。这两个按状态该出现就出现，不可用时灰着并说明原因；其余仍只在可用时出现。
   const shownWhenDisabled: Record<string, boolean> = {
-    'study-run':
-      permissions.run &&
-      (!remotePermissions.exists || remotePermissions.resubmit || remotePermissions.submit),
+    'study-run': permissions.run && canConfirmSubmission,
     'study-resume': permissions.resume && !remotePermissions.exists,
   };
   const controls = lifecycleActions.filter(
@@ -4806,22 +4825,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </p>
             )}
             {/* 打开的已有研究还没核对过：原来勾选框只在第 3 步，这一步的"开始运行""恢复"一直不出现。 */}
-            {!confirmed &&
-              (!remotePermissions.exists || remotePermissions.resubmit) &&
-              (permissions.run || permissions.resume) && (
-                <label className="param-check study-confirm">
-                  <input
-                    type="checkbox"
-                    checked={confirmed}
-                    disabled={busy || launching}
-                    onChange={(e) => setConfirmed(e.target.checked)}
-                  />
-                  {tr(
-                    '我已核对这个研究冻结的参数范围和预算（运行会真的跑这么多次模拟）',
-                    "I reviewed this study's frozen ranges and budget (running really performs this many simulations)",
-                  )}
-                </label>
-              )}
+            {!confirmed && canConfirmSubmission && (permissions.run || permissions.resume) && (
+              <label className="param-check study-confirm">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  disabled={busy || launching}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                />
+                {tr(
+                  '我已核对这个研究冻结的参数范围和预算（运行会真的跑这么多次模拟）',
+                  "I reviewed this study's frozen ranges and budget (running really performs this many simulations)",
+                )}
+              </label>
+            )}
             <div className="button-row">
               {renderActions(controls)}
               {renderActions([byId('study-status')!].filter((a) => a.enabled))}

@@ -605,6 +605,7 @@ it('a server submission that recorded nothing can be submitted again', async () 
       envelope: { state: { status: 'Ready' } },
       confirmed: true,
       remotePermissions: { exists: false },
+      canConfirmSubmission: true,
       tr: (zh: string) => zh,
       jobs: '1',
       // U-01：运行用的修订由“研究基线 + 研究自己记录的修订”决定，不再直接读全局运行版本。
@@ -666,7 +667,10 @@ type Request = {
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 };
-function researchPage(overrides: Record<string, unknown> = {}) {
+function researchPage(
+  overrides: Record<string, unknown> = {},
+  harness: { profiles?: Record<string, unknown>; timing?: Record<string, unknown> } = {},
+) {
   const source = readFileSync(new URL('./ResearchPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -701,12 +705,49 @@ function researchPage(overrides: Record<string, unknown> = {}) {
   const pending: (() => void)[] = [];
   let tree: Tree | null = null;
   let contract: Contract = { actions: [] };
-  // remote_config 与 model_case_profiles 是页面自己读的环境信息，不是动作；直接给空结果，
-  // 免得每个用例先处理它们。
+  // remote_config 与 model_case_profiles 是页面自己读的环境信息，不是动作。第 3 步会拿算例档案的
+  // 模拟期去推荐时间窗：一直回空对象会让预填分支永远不执行，全链路测试就看不到"推荐窗口覆盖派生
+  // 设计窗口"这一类回归。默认给一个真实形状的算例档案（2000–2010、已设预热），需要别的时段时用
+  // harness.profiles / harness.timing 覆盖。read_timing 也在这里直接答，免得每个用例手动处理。
+  const defaultProfile = {
+    spatial: false,
+    grid: null,
+    subgrid: 'default',
+    soil: 'default',
+    urban: false,
+    bgc: false,
+    crop: false,
+    kernel_preset: 'default',
+    obs_file: null,
+    inputs: {
+      start: '2000-01-01',
+      end: '2010-01-01',
+      output_start: '2000-01-01',
+      spinup_years: 3,
+      timestep: 1800,
+    },
+  };
+  const defaultTiming = {
+    start: '2000-01-01',
+    end: '2010-01-01',
+    output_start: '2000-01-01',
+    spinup_years: 3,
+  };
+  const automatic = { profiles: 0, timing: 0 };
   const invoke = (command: string, args: Record<string, unknown>) =>
     new Promise((resolve, reject) => {
       if (command === 'remote_config') return resolve({ servers: [] });
-      if (command === 'model_case_profiles') return resolve({});
+      if (command === 'model_case_profiles') {
+        automatic.profiles++;
+        const dirs = Array.isArray(args.dirs) ? (args.dirs as string[]) : [];
+        return resolve(
+          Object.fromEntries(dirs.map((dir) => [dir, harness.profiles?.[dir] ?? defaultProfile])),
+        );
+      }
+      if (command === 'read_timing') {
+        automatic.timing++;
+        return resolve(harness.timing ?? defaultTiming);
+      }
       requested.push({ command, args, resolve, reject });
     });
   const app = {
@@ -906,6 +947,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     updates,
     routes,
     notices,
+    automatic,
     render,
     press,
     settle,
@@ -957,6 +999,155 @@ async function openCompletedStudy() {
   page.requests.at(-1)!.resolve(completedEnvelope());
   await page.settle();
   return page;
+}
+// 合法的不确定性研究：目标的 from/to 是唯一时段，没有 validation_*（后端 spec.rs 明确拒绝
+// uncertainty 带验证期）。页面第 3 步的推荐时段会按算例模拟期给 2000–2007 + 验证 2007–2010，
+// 正好覆盖派生设计要守住的 2000–2010。
+const sourceFrom = Date.UTC(2000, 0, 1) / 1000;
+const sourceTo = Date.UTC(2010, 0, 1) / 1000;
+type Page = ReturnType<typeof researchPage>;
+function uncertaintySourceEnvelope(from = sourceFrom, to = sourceTo) {
+  const parameter = (name: string) => ({
+    name,
+    parameter_id: `case:${name}`,
+    scope_instance: { kind: 'case-scalar', scheme: null, index: null },
+    sample_min: 0,
+    sample_max: 1,
+    scale: 'linear',
+  });
+  const target = (site: string) => ({
+    key: `Qle@${site}`,
+    site,
+    variable: 'Qle',
+    metric: 'nrmse',
+    weight: 1,
+    from,
+    to,
+    min_pairs: 20,
+  });
+  return {
+    manifest: {
+      id: 's-uq',
+      provenance: { spec_sha256: 'a'.repeat(64) },
+      spec: {
+        kind: 'uncertainty',
+        method: 'morris',
+        kernel_dir: '/kernels/default',
+        base_cases: ['site1', 'site2'],
+        observations: { site1: '/obs/site1_Flux.nc', site2: '/obs/site2_Flux.nc' },
+        site_mode: 'shared',
+        parameters: [parameter('DEF_A'), parameter('DEF_B')],
+        targets: [target('site1'), target('site2')],
+      },
+    },
+    state: { status: 'Completed', best_member: 'm1', candidates: { m1: { calibration: 0.1 } } },
+    results: ['importance.json'],
+    model_version: { model_revision: { version: { id: 'trace', revision: 7 } } },
+    remote: null,
+  };
+}
+const sensitivityRows = () =>
+  ['DEF_A', 'DEF_B'].map((parameter, i) => ({
+    site: null,
+    variable: 'objective',
+    parameter,
+    method: 'morris',
+    value: 0.3 - i * 0.1,
+    mu: -0.1,
+    sigma: 0.05,
+    n: 10,
+  }));
+async function openUncertaintyStudy(page: Page, envelope = uncertaintySourceEnvelope()) {
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-uq');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve(envelope);
+  await page.settle();
+  const importance = page.requests
+    .filter((request) => request.command === 'study_result')
+    .find((request) => request.args.path === 'importance.json');
+  assert.ok(importance, 'the source sensitivity ranking is read');
+  importance.resolve(JSON.stringify(sensitivityRows()));
+  await page.settle();
+}
+// 带入率定之后页面处在第 2 步：先按派生出的两个站点重新读参数，再读参数目录。
+async function carryDerivedStudy(page: Page, since: number) {
+  const carry = page.actions().find((action) => action.id === 'study-carry-calibration');
+  assert.ok(carry, 'the sensitivity ranking offers the carry action');
+  page.press('study-carry-calibration');
+  await page.settle();
+  for (const dir of ['/p/site1', '/p/site2']) {
+    const load = page.requests
+      .slice(since)
+      .filter((request) => request.command === 'model_case_context')
+      .at(-1);
+    assert.ok(load, `parameters are read for ${dir}`);
+    assert.equal(load.args.dir, dir);
+    load.resolve({ entry: { dir } });
+    await page.settle();
+  }
+  const read = page.requests
+    .slice(since)
+    .find((request) => request.command === 'study_parameter_contexts');
+  assert.ok(read, 'both derived sites are read in one parameter request');
+  read.resolve(['DEF_A', 'DEF_B'].map((name) => ({ ...parameterRow(), id: `case:${name}`, name })));
+  await page.settle();
+}
+function windowField(page: Page, id: string) {
+  const field = (page.contract().fields as { id: string; value: string }[]).find(
+    (item) => item.id === id,
+  )!;
+  assert.ok(field, `${id} is on screen`);
+  return field;
+}
+// 不确定性分析第 3 步的时间框没有 PageContract id（只有"分析时段开始/结束"两个 datetime-local），
+// 直接读渲染出来的输入值。
+function localWindowValues(page: Page) {
+  return page
+    .nodes()
+    .filter((node) => node.type === 'Input' && node.props.type === 'datetime-local')
+    .map((node) => String(node.props.value ?? ''));
+}
+// 从派生的第 2 步走到第 3 步，核对并创建研究，返回真正交给后端的规格。
+async function createDerivedStudy(page: Page) {
+  page.press('research-step-3');
+  await page.settle();
+  assert.equal(windowField(page, 'training-from').value, '2000-01-01T00:00');
+  assert.equal(windowField(page, 'training-to').value, '2010-01-01T00:00');
+  assert.equal(windowField(page, 'validation-from').value, '');
+  assert.equal(windowField(page, 'validation-to').value, '');
+  const confirm = page
+    .nodes()
+    .find((node) => node.type === 'label' && node.props.className === 'param-check study-confirm')
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(confirm);
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('study-create');
+  await page.settle();
+  const preflight = page.requests
+    .filter((request) => request.command === 'study_preflight_json')
+    .at(-1);
+  assert.ok(preflight, 'create preflights the derived design first');
+  preflight.resolve({});
+  await page.settle();
+  const created = page.requests.filter((request) => request.command === 'study_create_json').at(-1);
+  assert.ok(created, 'the derived study is created');
+  return JSON.parse(String(created.args.specJson)) as {
+    targets: {
+      site: string;
+      from: number;
+      to: number;
+      validation_from: number | null;
+      validation_to: number | null;
+    }[];
+  };
 }
 it('the research home offers exactly the method cards and the open-study button', () => {
   const page = researchPage();
@@ -1201,6 +1392,85 @@ it('step 4 lists the run-and-results buttons on screen and a write-back dialog b
   // 它里面的取消/写进草稿由它自己登记，不在这棵树里）。
   assert.deepEqual(page.actions(), []);
 });
+// P1 复现：服务器记录已可提交（recovery.permissions.submit）时，运行按钮按 submit 放行、第 4 步的
+// 核对框却只看 resubmit，于是页面提示"勾选上面"但上面根本没有框。框、按钮和 start() 必须共用
+// canConfirmSubmission 这一个判断。
+it('a server-submittable study shows the budget review box and unlocks the run button', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-submit');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  const envelope = {
+    manifest: {
+      id: 's-submit',
+      spec: {
+        kind: 'tuning',
+        kernel_dir: '/kernels/default',
+        parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+      },
+    },
+    state: { status: 'Ready', candidates: {} },
+    results: [],
+    model_version: { model_revision: { version: { id: 'official', revision: 1 } } },
+    remote: { host: 'cluster-a', job: 'job-7' },
+  };
+  page.requests.at(-1)!.resolve(envelope);
+  await page.settle();
+  page.press('remote-study-status');
+  await page.settle();
+  page.requests
+    .filter((request) => request.command === 'study_status')
+    .at(-1)!
+    .resolve(envelope);
+  await page.settle();
+  page.requests
+    .filter((request) => request.command === 'remote_study_status')
+    .at(-1)!
+    .resolve({
+      host: 'cluster-a',
+      job: 'job-7',
+      status: { state: 'failed', exit_code: 1 },
+      recovery: {
+        outcome: 'build_failed',
+        terminal: true,
+        finished: false,
+        study_created: false,
+        fetched: false,
+        permissions: {
+          submit: true,
+          resubmit: false,
+          cancel: false,
+          fetch: false,
+          close: true,
+          poll: false,
+        },
+        next_zh: '修复后可以重新提交',
+        next_en: 'Fix the build and submit again',
+      },
+      warnings: [],
+    });
+  await page.settle();
+  const run = () => page.actions().find((action) => action.id === 'study-run');
+  assert.ok(run(), 'the run button is offered for a submittable server record');
+  assert.equal(run()!.enabled, false, 'it waits for the review box');
+  assert.match(pageText(page), /先勾选上面/, 'the page explains why the run button is disabled');
+  const confirm = page
+    .nodes()
+    .find((node) => node.type === 'label' && node.props.className === 'param-check study-confirm')
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(confirm, 'the review box the hint points at must actually render');
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  assert.equal(run()!.enabled, true, 'checking the box unlocks the submit run');
+});
 it('switching the model revision while a study runs keeps its frozen design and identity', async () => {
   const page = researchPage();
   page.render();
@@ -1402,6 +1672,15 @@ it('carrying sensitivity into calibration pins the source study identity and inh
   const loadedFor = { current: 'old' };
   const failedFor = { current: 'failed' };
   const applyingDerivation = { current: false };
+  const prefilledFor = { current: 'old-key' };
+  const autoWindows = {
+    current: {
+      from: '2000-01-01T00:00',
+      to: '2010-12-31T00:00',
+      valFrom: '',
+      valTo: '',
+    },
+  };
   const revision = { id: 'trace', revision: 7 };
   const specSha256 = 'a'.repeat(64);
   const context = (overrides: Record<string, unknown> = {}) => ({
@@ -1419,8 +1698,6 @@ it('carrying sensitivity into calibration pins the source study identity and inh
           weight: 2,
           from: 1_104_537_600,
           to: 1_136_073_600,
-          validation_from: 1_136_073_600,
-          validation_to: 1_167_609_600,
           min_pairs: 12,
           aggregate: 'monthly',
           corrected: true,
@@ -1473,6 +1750,8 @@ it('carrying sensitivity into calibration pins the source study identity and inh
     setDerivedDesign: set('derived'),
     loadedFor,
     failedFor,
+    prefilledFor,
+    autoWindows,
     // 当前研究基线（official r1）与派生要钉的修订（trace r7）不同：carry 要给模型身份 effect 留标记。
     versionId: 'official',
     revision: 1,
@@ -1494,8 +1773,17 @@ it('carrying sensitivity into calibration pins the source study identity and inh
   assert.equal(calls.observations, 'AT-Neu | /obs/AT-Neu_Flux.nc');
   assert.equal(calls.from, '2005-01-01T00:00');
   assert.equal(calls.to, '2006-01-01T00:00');
+  // 来源 UQ 没有验证期：派生写回的验证期必须是空串（明确设计值），不能沿用页面上一轮自动填的值。
+  assert.equal(calls.valFrom, '');
+  assert.equal(calls.valTo, '');
   assert.equal(loadedFor.current, '', 'step 2 reads the parameters again and applies the seed');
   assert.equal(failedFor.current, '', 'a carried seed can retry a read that failed before');
+  assert.equal(prefilledFor.current, '', 'the derived windows are not treated as auto-filled');
+  assert.deepEqual(
+    autoWindows.current,
+    { from: '', to: '', valFrom: '', valTo: '' },
+    'the next prefill cannot mistake the derived windows for its own',
+  );
   const update = calls.update as {
     researchSeed: { parameters: { parameter_id: string; scale: string }[] };
     researchBaseline: { id: string; revision: number };
@@ -1579,8 +1867,6 @@ it('carrying sensitivity into calibration keeps its derived sites and creates th
     weight: 1,
     from: 1_104_537_600,
     to: 1_136_073_600,
-    validation_from: 1_136_073_600,
-    validation_to: 1_167_609_600,
     min_pairs: 20,
   });
   const page = researchPage({
@@ -1715,6 +2001,67 @@ it('carrying sensitivity into calibration keeps its derived sites and creates th
       ['site2', 'Qle', 1],
     ],
   );
+});
+
+// P1 复现：合法 UQ 来源（2000–2010，无验证期）带入率定后，第 3 步的普通自动预填不能按算例模拟期
+// 把窗口改成 2000–2007 + 验证 2007–2010。来源没有验证期是明确的设计值，不是"空着等推荐"。
+it('carrying a legal UQ study into calibration keeps its 2000–2010 window unchanged', async () => {
+  const page = researchPage();
+  page.render();
+  await openUncertaintyStudy(page);
+  const since = page.requests.length;
+  await carryDerivedStudy(page, since);
+  const spec = await createDerivedStudy(page);
+  assert.equal(page.automatic.timing, 0, 'derived mode skips the ordinary auto prefill');
+  assert.equal(spec.targets.length, 2);
+  for (const target of spec.targets) {
+    assert.equal(target.from, sourceFrom);
+    assert.equal(target.to, sourceTo);
+    assert.equal(target.validation_from, null, 'the source has no validation window');
+    assert.equal(target.validation_to, null);
+  }
+});
+// 第二条复现：页面先做过一项 UQ 研究并自动填过 2000–2010，再从这个来源带入率定。carry 要清掉
+// prefilledFor/autoWindows，派生模式不再推荐，最终窗口仍是来源研究的。
+it('a derived study keeps the source window after the page auto-filled the same UQ period', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-uncertainty');
+  page.press('research-step-2');
+  await page.settle();
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  page.requests.at(-1)!.resolve([parameterRow()]);
+  await page.settle();
+  const parameter = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  (parameter!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('research-step-3');
+  await page.settle();
+  // 预热已设置，UQ 的自动预填正好是整个 2000–2010（不扣第一年、不留验证期）。
+  assert.equal(page.automatic.timing, 1);
+  assert.deepEqual(localWindowValues(page), ['2000-01-01T00:00', '2010-01-01T00:00']);
+  await openUncertaintyStudy(page);
+  const since = page.requests.length;
+  await carryDerivedStudy(page, since);
+  // 打开来源研究时页面还没离开第 3 步，模型身份变化可能又自动填过一次；记下此刻的计数，
+  // 断言派生后进第 3 步不再增加。
+  const prefills = page.automatic.timing;
+  assert.ok(prefills >= 1);
+  const spec = await createDerivedStudy(page);
+  assert.equal(
+    page.automatic.timing,
+    prefills,
+    'carry resets the prefill and derived mode does not re-suggest',
+  );
+  for (const target of spec.targets) {
+    assert.equal(target.from, sourceFrom);
+    assert.equal(target.to, sourceTo);
+    assert.equal(target.validation_from, null);
+    assert.equal(target.validation_to, null);
+  }
 });
 
 it('a finished uncertainty study shows its sensitivity ranking with the top parameters ticked', async () => {
@@ -2260,6 +2607,98 @@ it('starting a method from the research home clears the previous target, seed an
   assert.equal(page.state.researchTarget, null);
   assert.equal(page.state.researchSeed, null);
   assert.equal(page.state.researchMethod, null);
+});
+// P2 复现：研究基线（soil@3）与当前运行版本（official@1）不同时，侧栏"研究"原先把 researchBaseline
+// 清成 null，模型身份 effect 随即清掉 studyDir/envelope/remoteReply，首页"查看进度"和远程追踪入口
+// 一起消失。侧栏回首页只是展示已打开研究，不是新建研究；清场由 startHomeMethod/chooseMethod 负责。
+it('the sidebar research entry keeps an open study and its remote tracking', async () => {
+  const page = researchPage({
+    versionRef: { id: 'official', revision: 1 },
+    researchBaseline: { id: 'soil', revision: 3 },
+    versions: studyVersions,
+  });
+  page.render();
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-side');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  const envelope = {
+    manifest: {
+      id: 's-side',
+      spec: {
+        kind: 'tuning',
+        kernel_dir: '/kernels/default',
+        parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+      },
+    },
+    state: { status: 'Ready', candidates: {} },
+    results: [],
+    model_version: { model_revision: { version: { id: 'trace', revision: 7 } } },
+    remote: { host: 'cluster-a', job: 'job-42' },
+  };
+  page.requests.at(-1)!.resolve(envelope);
+  await page.settle();
+  page.press('remote-study-status');
+  await page.settle();
+  page.requests
+    .filter((request) => request.command === 'study_status')
+    .at(-1)!
+    .resolve(envelope);
+  await page.settle();
+  page.requests
+    .filter((request) => request.command === 'remote_study_status')
+    .at(-1)!
+    .resolve({
+      host: 'cluster-a',
+      job: 'job-42',
+      status: { state: 'running' },
+      recovery: {
+        outcome: 'running',
+        terminal: false,
+        finished: false,
+        study_created: true,
+        fetched: false,
+        permissions: {
+          submit: false,
+          resubmit: false,
+          cancel: true,
+          fetch: false,
+          close: false,
+          poll: true,
+        },
+        next_zh: '等待服务器作业完成',
+        next_en: 'Wait for the server job to finish',
+      },
+      warnings: [],
+    });
+  await page.settle();
+  const remoteReply = '等待服务器作业完成';
+  assert.match(pageText(page), new RegExp(remoteReply));
+  const kept = () => {
+    assert.deepEqual(page.state.researchBaseline, { id: 'soil', revision: 3 });
+    assert.deepEqual(page.state.versionRef, { id: 'official', revision: 1 });
+    assert.ok(
+      page.actions().some((action) => action.id === 'research-current'),
+      'the open study still offers “查看进度”',
+    );
+    assert.match(pageText(page), /cluster-a/, 'the remote host is still shown');
+  };
+  // showHome 的既有行为就是保留研究上下文、只回首页；侧栏“研究”必须与它一致。
+  page.press('research-home');
+  await page.settle();
+  kept();
+  page.press('research-current');
+  await page.settle();
+  assert.match(pageText(page), new RegExp(remoteReply), 'the remote reply survives showHome');
+  page.state.researchHome = true;
+  page.render();
+  await page.settle();
+  assert.equal(page.state.researchHome, false);
+  kept();
+  page.press('research-current');
+  await page.settle();
+  assert.match(pageText(page), new RegExp(remoteReply), 'remote tracking is still available');
 });
 it('the parameter read identity follows the study baseline, not the run revision', async () => {
   const page = researchPage({
