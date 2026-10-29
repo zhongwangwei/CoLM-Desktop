@@ -484,6 +484,22 @@ export interface GridTargetDraft {
   key?: string;
   /** `grid` 目标的观测偏移（后端 `offset`，默认 0）。界面没有输入框；派生时继承，丢了会整体平移观测。 */
   offset?: string;
+  /**
+   * `grid` 目标里观测像元与模型格子的匹配方式：`in-cell` 只按落格中心（旧行为），
+   * `pixel-overlap` 按像元边界重叠面积加权。旧 spec 没有这个字段，读进来按 `in-cell`。
+   */
+  matching?: TargetMatching;
+}
+
+/**
+ * 匹配方式。旧 spec 缺字段时是 `in-cell`；写回只有显式 `pixel-overlap` 才落 JSON，
+ * `in-cell`/缺省不写，旧研究的规格重写后逐字节不变（后端新版本才认识这个键）。
+ */
+export type TargetMatching = 'in-cell' | 'pixel-overlap';
+
+/** 草稿缺字段（旧 spec、旧状态）一律归一成 `in-cell`，下拉才有确定的值。 */
+export function targetMatchingOf(draft: Pick<GridTargetDraft, 'matching'>): TargetMatching {
+  return draft.matching === 'pixel-overlap' ? 'pixel-overlap' : 'in-cell';
 }
 
 export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft> = {
@@ -497,6 +513,7 @@ export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft
     scale: '1',
     utcOffset: '',
     period: '',
+    matching: 'in-cell',
   },
   station: {
     kind: 'station',
@@ -585,6 +602,7 @@ export function gridTargetSpec(
       scale,
       ...(offset ? { offset } : {}),
       ...(draft.period ? { period: draft.period } : {}),
+      ...(draft.matching === 'pixel-overlap' ? { matching: 'pixel-overlap' as const } : {}),
     };
   } else {
     const lon = number(draft.lon, -180, 360, ['经度', 'longitude']);
@@ -1460,6 +1478,8 @@ function gridTargetDraftFromTarget(target: RawTarget): GridTargetDraft {
     if (typeof source.offset === 'number' && source.offset !== 0)
       draft.offset = String(source.offset);
     if (source.period === 'daily' || source.period === 'monthly') draft.period = source.period;
+    // 旧 spec 没有 matching：草稿缺省就是 in-cell，这里只继承显式的 pixel-overlap。
+    if (source.matching === 'pixel-overlap') draft.matching = 'pixel-overlap';
   } else {
     draft.lon = number(source.lon);
     draft.lat = number(source.lat);

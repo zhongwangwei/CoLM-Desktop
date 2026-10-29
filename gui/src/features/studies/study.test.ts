@@ -270,6 +270,23 @@ describe('gridded study targets', () => {
     assert.equal(flux.metric, 'nrmse');
     assert.equal(discharge.metric, 'nse');
   });
+  it('writes pixel-overlap matching only when it was chosen', () => {
+    // 旧 spec 没有这个字段；缺省/in-cell 都必须逐字节保持旧写法，只有显式选了
+    // pixel-overlap 才落 JSON，否则旧研究重写后会出现一个后端旧版本不认识的新键。
+    const base = {
+      ...gridTargetDefaults.grid,
+      path: '/obs/gleam.nc',
+      obsVariable: 'E',
+      scale: '1',
+    };
+    const implicit = gridTargetSpec(base, 0, windows, 'nrmse', 20);
+    const explicit = gridTargetSpec({ ...base, matching: 'in-cell' }, 0, windows, 'nrmse', 20);
+    const overlap = gridTargetSpec({ ...base, matching: 'pixel-overlap' }, 0, windows, 'nrmse', 20);
+    assert.equal('matching' in implicit.source, false);
+    assert.equal('matching' in explicit.source, false);
+    assert.equal(overlap.source.matching, 'pixel-overlap');
+    assert.match(JSON.stringify(overlap), /"matching":"pixel-overlap"/);
+  });
   it('refuses incomplete targets before they reach the engine', () => {
     assert.throws(() => gridTargetSpec(gridTargetDefaults.grid, 0, windows, 'kge', 20));
     assert.throws(() =>
@@ -983,6 +1000,59 @@ describe('deriving a new study design from a finished one', () => {
       ],
     };
     assert.throws(() => deriveStudyDesign(spatial, options), /聚合|aggregat/);
+  });
+  it('reads an old gridded source as in-cell and keeps a pixel-overlap choice', () => {
+    // 旧 spec 不写 matching：派生时的草稿必须归一成 in-cell，不能是 undefined（界面下拉会空）。
+    const gridded = (source: Record<string, unknown>) => ({
+      kind: 'uncertainty',
+      method: 'lhs',
+      base_cases: ['region'],
+      site_mode: 'shared',
+      observations: {},
+      targets: [
+        {
+          key: 'f_lfevpa@region',
+          variable: 'f_lfevpa',
+          metric: 'nrmse',
+          weight: 1,
+          from: 1_104_537_600,
+          to: 1_136_073_600,
+          min_pairs: 20,
+          source,
+        },
+      ],
+    });
+    const windows = {
+      from: 1_104_537_600,
+      to: 1_136_073_600,
+      validation_from: null,
+      validation_to: null,
+    };
+    const old = deriveStudyDesign(
+      gridded({ kind: 'grid', path: '/obs/gleam.nc', variable: 'E', scale: 0.0864 }),
+      options,
+    );
+    assert.equal(old.ui.gridTargets![0]!.matching, 'in-cell');
+    // 归一后的草稿再序列化仍是旧字节：没选 pixel-overlap 不写字段。
+    assert.equal(
+      'matching' in gridTargetSpec(old.ui.gridTargets![0]!, 0, windows, 'nrmse', 20).source,
+      false,
+    );
+    const overlap = deriveStudyDesign(
+      gridded({
+        kind: 'grid',
+        path: '/obs/gleam.nc',
+        variable: 'E',
+        scale: 0.0864,
+        matching: 'pixel-overlap',
+      }),
+      options,
+    );
+    assert.equal(overlap.ui.gridTargets![0]!.matching, 'pixel-overlap');
+    assert.equal(
+      gridTargetSpec(overlap.ui.gridTargets![0]!, 0, windows, 'nrmse', 20).source.matching,
+      'pixel-overlap',
+    );
   });
   it('inherits the source window for gridded targets and refuses disagreeing ones', () => {
     // 空间目标的研究页时间窗是研究级设置：原来派生时 from/to/valFrom/valTo 一律写空字符串，

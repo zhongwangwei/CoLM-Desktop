@@ -40,6 +40,7 @@ import {
   studyErrorText,
   suggestedRange,
   suggestedWindows,
+  targetMatchingOf,
   researchBaselineOf,
 } from './study';
 import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
@@ -794,6 +795,7 @@ function researchPage(
     fitValidation,
     gridTargetDefaults,
     gridTargetSpec,
+    targetMatchingOf,
     hubMethods,
     homeResearchEntry,
     researchBaselineOf,
@@ -2989,4 +2991,131 @@ it('study preflight and creation carry the study baseline, not the run version',
     ['study_preflight_json'],
   );
   assert.deepEqual(calls[0]![1].modelRevision, { id: 'soil', revision: 3 });
+});
+
+// 格点目标的"匹配方式"（in-cell / pixel-overlap）：仅 gridded 目标显示，只有显式选
+// pixel-overlap 才进规格。这里走整页渲染，因为下拉在 gridTargetEditor 的 JSX 里。
+function griddedResearchPage() {
+  return researchPage({
+    selectedCase: { dir: '/p/region', name: 'region' },
+    cases: [{ dir: '/p/region', name: 'region', spatial: true, has_history: false }],
+    // 首帧还没算出 spatialStudy，kernel 初值只从带 SinglePoint 的配置里挑；另给一个真正的
+    // 格点配置，等 sites effect 把 spatialStudy 打开后第 1 步才有可用的 kernel。
+    kernels: [
+      { dir: '/kernels/grid', preset: 'default', platform: 'macos', macros: ['SinglePoint'] },
+      {
+        dir: '/kernels/region',
+        preset: 'default',
+        platform: 'macos',
+        macros: ['GRIDBASED', 'LULC_IGBP'],
+      },
+    ],
+    kernelDir: '/kernels/grid',
+  });
+}
+async function openGridTargets(page: ReturnType<typeof researchPage>) {
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  // 格点研究先读可选的类型；参数读取等它回来才发起。
+  const types = page.requests.find((r) => r.command === 'study_type_choices');
+  assert.ok(types, 'gridded studies read their type choices');
+  types!.resolve({ spatial: true, kind: 'igbp', max: 17, present: [1, 2, 3] });
+  await page.settle();
+  page.requests
+    .filter((r) => r.command === 'model_case_context')
+    .at(-1)!
+    .resolve({
+      entry: { dir: '/p/region' },
+    });
+  await page.settle();
+  page.requests
+    .filter((r) => r.command === 'study_parameter_contexts')
+    .at(-1)!
+    .resolve([parameterRow()]);
+  await page.settle();
+  const box = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  (box!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('research-step-3');
+  await page.settle();
+  // 率定期没有自动值时必须自己填，否则预检会拒绝，看不到规格。
+  for (const [id, value] of [
+    ['training-from', '2003-01-01T00:00'],
+    ['training-to', '2006-01-01T00:00'],
+  ]) {
+    const field = (page.contract().fields as { id: string; set: (v: string) => void }[]).find(
+      (f) => f.id === id,
+    );
+    field?.set(value);
+  }
+  await page.settle();
+}
+function targetField(page: ReturnType<typeof researchPage>, label: string) {
+  const found = page.nodes().find((node) => node.type === 'Field' && node.props.label === label);
+  assert.ok(found, `field ${label} is rendered`);
+  return found!;
+}
+function targetControl(page: ReturnType<typeof researchPage>, label: string) {
+  return targetField(page, label).children.find(
+    (child) => child && typeof child === 'object',
+  ) as Tree;
+}
+const chooseInTarget = (node: Tree, value: string) =>
+  (node.props.onChange as (event: unknown) => void)({ target: { value } });
+it('a gridded target writes pixel-overlap only after it is chosen', async () => {
+  const page = griddedResearchPage();
+  await openGridTargets(page);
+  chooseInTarget(targetControl(page, '观测文件里的变量名'), 'E');
+  page.render();
+  const path = page
+    .nodes()
+    .find(
+      (node) => node.type === 'Input' && String(node.props.placeholder ?? '').includes('绝对路径'),
+    );
+  (path!.props.onChange as (event: unknown) => void)({ target: { value: '/obs/gleam.nc' } });
+  page.render();
+  const matching = targetControl(page, '匹配方式');
+  assert.equal(matching.type, 'Select');
+  assert.equal(matching.props.value, 'in-cell', '缺省就是只按落格中心');
+  assert.doesNotMatch(pageText(page), /旧程序/);
+  page.press('study-preflight');
+  await page.settle();
+  const first = page.requests.filter((r) => r.command === 'study_preflight_json').at(-1)!;
+  const firstSpec = JSON.parse(String(first.args.specJson)) as {
+    targets: { source: Record<string, unknown> }[];
+  };
+  assert.equal('matching' in firstSpec.targets[0]!.source, false, 'in-cell 不落 JSON');
+  // 预检请求不 resolve 的话 busy 一直为真，下一次按钮是灰的。
+  first.resolve({});
+  await page.settle();
+  chooseInTarget(targetControl(page, '匹配方式'), 'pixel-overlap');
+  page.render();
+  assert.match(pageText(page), /旧程序/, '选 pixel-overlap 要说明旧程序无法复现');
+  page.press('study-preflight');
+  await page.settle();
+  const second = page.requests.filter((r) => r.command === 'study_preflight_json').at(-1)!;
+  const secondSpec = JSON.parse(String(second.args.specJson)) as {
+    targets: { source: { matching?: string } }[];
+  };
+  assert.equal(secondSpec.targets[0]!.source.matching, 'pixel-overlap');
+  assert.match(String(second.args.specJson), /"matching":"pixel-overlap"/);
+});
+it('station and gauge targets have no matching choice and switching back restores cell centres', async () => {
+  const page = griddedResearchPage();
+  await openGridTargets(page);
+  const matchingFields = () =>
+    page.nodes().filter((node) => node.type === 'Field' && node.props.label === '匹配方式').length;
+  assert.equal(matchingFields(), 1, 'gridded 目标有匹配方式');
+  chooseInTarget(targetControl(page, '种类'), 'station');
+  page.render();
+  assert.equal(matchingFields(), 0, '通量站没有像元边界匹配');
+  chooseInTarget(targetControl(page, '种类'), 'gauge');
+  page.render();
+  assert.equal(matchingFields(), 0, '水文站也没有');
+  chooseInTarget(targetControl(page, '种类'), 'grid');
+  page.render();
+  assert.equal(targetControl(page, '匹配方式').props.value, 'in-cell', '切回格点恢复缺省匹配');
 });

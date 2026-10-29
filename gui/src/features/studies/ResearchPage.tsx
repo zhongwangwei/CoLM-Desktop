@@ -16,7 +16,9 @@ import {
   fitValidation,
   gridTargetDefaults,
   gridTargetSpec,
+  targetMatchingOf,
   type GridTargetDraft,
+  type TargetMatching,
   memberVerdict,
   networkSpec,
   networkDefaults,
@@ -3330,13 +3332,41 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </Field>
             )}
             {t.kind === 'grid' ? (
-              <Field label={tr('观测乘多少换成模型单位', 'Scale from observed to model units')}>
-                <Input
-                  type="number"
-                  value={t.scale}
-                  onChange={(e) => setGridTarget(index, { scale: e.target.value })}
-                />
-              </Field>
+              <>
+                <Field label={tr('观测乘多少换成模型单位', 'Scale from observed to model units')}>
+                  <Input
+                    type="number"
+                    value={t.scale}
+                    onChange={(e) => setGridTarget(index, { scale: e.target.value })}
+                  />
+                </Field>
+                {/* 只有格点产品有像元边界：通量站/水文站按落格或汇流单元比，匹配方式没有意义。 */}
+                <Field label={tr('匹配方式', 'Matching')}>
+                  <Select
+                    value={targetMatchingOf(t)}
+                    onChange={(e) =>
+                      setGridTarget(index, { matching: e.target.value as TargetMatching })
+                    }
+                  >
+                    <option value="in-cell">{tr('只按落格中心', 'cell centres only')}</option>
+                    <option value="pixel-overlap">
+                      {tr('按像元边界重叠、面积加权', 'pixel-boundary overlap, area-weighted')}
+                    </option>
+                  </Select>
+                </Field>
+                {/*
+                  页面拿不到"冻结修订是否支持 pixel-overlap"的可靠信息（VersionRef 只有 id+revision），
+                  所以不猜、不禁用：选了就明确告知旧程序无法复现，由后端按它自己的版本能力拒绝。
+                */}
+                {targetMatchingOf(t) === 'pixel-overlap' && (
+                  <p className="muted study-hint study-wide">
+                    {tr(
+                      '按像元边界重叠的匹配需要较新的模型程序。这项研究若钉的是早于该能力的冻结修订，旧程序无法复现，后端会拒绝这个选择。',
+                      'Pixel-boundary matching needs a newer model program. If this study is pinned to a frozen revision from before that capability, the older program cannot reproduce it and the backend rejects the choice.',
+                    )}
+                  </p>
+                )}
+              </>
             ) : (
               <>
                 <Field label={tr('站点经度', 'Station longitude')}>
