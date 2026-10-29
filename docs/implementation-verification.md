@@ -39245,3 +39245,56 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - Tauri：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **567 passed / 0 failed / 1 ignored**（一次无关 xerj 端口竞态单独复跑通过）。
 - 前端：typecheck/lint/format:check exit 0；`npm test` → **1263 passed / 0 failed**；`npm run contract` 生成 262 条命令；`xtask check-gui` → 262 registered / 224 called / 26 dynamic，声明事件均有 emitter/listener。
 - 未运行：真实窗口目视、真实历史仓库/GitHub、真实模型 API/外部后端、Windows 打开/核对分支；S01/S02 已在上一轮交付。
+
+## 历史证据与助手交互收口 A1–A3（2026-10-29）
+
+### A1 source_history 当前源码保留状态
+
+- `history-track` 每个 `repos.desktop|colm_upstream|selected` 新增
+  `retention:{state:"retained"|"not_retained"|"unknown", basis, checked_ref, checked_sha, commit, paths, note}`。
+  语义：取本次返回的 commits[0]（按提交时间的最新相关 commit）→ 其过滤后 hunk 的**新增且含 symbol 的行**（trim）→
+  与该仓库 query endpoint 的提交树逐行比较：全部命中 `retained`（basis endpoint-added-lines-present）、
+  全不命中 `not_retained`（basis endpoint-added-lines-absent）、部分 `unknown/mixed`；文件在端点不存在
+  `unknown/file-missing-at-endpoint`；纯删除 `unknown/no-added-lines`；无 commits `unknown/no-commits`；
+  二进制/超限/历史不可用分别 `unknown/binary-or-rename|unavailable`。note 固定声明“line-level presence check only;
+  Git ancestry alone cannot prove the change is still effective or its numeric effect”，selected dirty 注明未提交修改不计入。
+- 只新增展示字段，不改变 commits 排序、cross mapping、verified/candidate 判定；consumer 缺省兼容。
+- 测试（真实 git 夹具 7 个）：retained、revert 后 not_retained、部分保留 mixed、文件改名后 file-missing、
+  纯删除 no-added-lines、selected dirty 按 HEAD、无 commits；真实仓库只读冒烟返回
+  `state=retained`、`checked_sha=bf05b7c2…`、`commit=33293c67…` 与正确 paths。
+- 边界：commits[0] 是“本次返回页按提交时间的最新”，offset/limit 或时钟偏斜时不一定是仓库绝对最新；
+  只比较 trim 后新增文本，不检查旧行/数值/语义影响；多文件任一缺失即 unknown/file-missing；
+  端点删除文件且 symbol 不再出现时可能得到 no-commits 而非 file-missing。
+
+### A2 commit 打开
+
+- 证据卡对 `source_history` 的 commits 与 `commit_details` 的 commit section：只有规范仓库
+  （desktop=zhongwangwei/CoLM-Desktop、colm_upstream=CoLM-SYSU/CoLM，owner/repo 大小写不敏感、兼容 GitHub URL）
+  且 SHA 为完整 40 位小写 hex 时生成 `https://github.com/<owner>/<repo>/commit/<sha>`，通过
+  `assistant_open_url` 打开；selected/local、未知来源、短 SHA、大写/别名一律不生成链接（短 SHA 仍可复制）。
+- 测试：URL 生成/非规范/短 SHA 不生成、面板点击参数、证据卡按钮渲染。
+
+### A3 严格 turn/request id 对齐
+
+- 协议：`Inbound::UserMessage` 新增可选 `request_id`；新增 `Outbound::TurnStarted{request_id}`
+  （tag `turn_started`）。校验：None 允许，Some 需 1–128 字符且无控制字符；非法在 Tauri 直接 Err，
+  agent 侧发未审计错误事件且不置 busy、不写 task/messages、不发 turn_started、不进模型。
+- bin：收到合法 UserMessage 后，在所有拒绝分支之后、任何模型请求/工具执行之前**只发一次** turn_started，
+  request_id 原样回显；内置与外部后端同一路径；ready/resume/configure 不发；session.audit 跳过 TurnStarted。
+- Tauri：`assistant_send` 新增 `requestId`（optional）→ 校验后写入 inbound JSON；旧调用 None 兼容。
+- 前端：每次发送生成 `turn-<n>-<random>` 记录进 pending 并传 requestId；只有匹配 requestId 的
+  turn_started 才把消息标为已接受；删除旧轮内事件白名单，task_state/usage/context/tool_result/turn_done/迟到旧 id
+  不再确认新消息；turn_started 本身不清 busy、不写消息；错误/拒绝路径保持原撤回逻辑。
+- 测试：agent bin（id 校验、TurnStarted 形状/原样回显、无 id 为 null、turn_started 不写审计、连续两轮各一次）；
+  Tauri（inbound JSON request_id、非法 id、旧调用兼容、协议镜像字段漂移）；前端（发送携带 requestId、
+  匹配才接受、旧事件不清 pending、迟到 id 不匹配、commit/retention 渲染）。协议手工 JSONL 冒烟：
+  有 id → ready → turn_started(id) → error（计数 1）；无 id → request_id=null；非法 id → 仅 error 无 turn_started/无 task_start。
+- 边界：严格模式旧 agent 或不回显 request_id 的后端不会把消息标为已接受（按任务要求优先严格，不误清草稿）；
+  turn_started 先于 API Key/窗口校验，接受 ≠ 成功；随机后缀用于对齐不是安全令牌。
+
+### 本轮验证（真实执行）
+
+- 根 workspace：fmt/clippy exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3277 passed / 0 failed / 16 ignored**（`colm-cli` 765；agent lib 389 + bins 17）。
+- Tauri：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **569 passed / 0 failed / 1 ignored**。
+- 前端：typecheck/lint/format:check exit 0；`npm test` → **1267 passed / 0 failed**；`npm run contract` 生成 262 条命令（assistant_send 新增可选 requestId）；`xtask check-gui` → 262 registered / 224 called / 26 dynamic，事件均有 emitter/listener。
+- 未运行：真实窗口目视/点击、真实 GitHub commit/PR 页面、真实历史仓库端到端、真实模型 API/外部后端、Windows 分支。
