@@ -288,6 +288,131 @@ export function fitValidation(report: unknown): boolean | null {
   return validation ? validation.passed === true : null;
 }
 
+/** 报告里一个程序身份（`feature_program` / `frozen_feature_program`）；缺字段时返回 null。 */
+function programIdentity(value: unknown): { path: string | null; sha256: string | null } | null {
+  if (!value || typeof value !== 'object') return null;
+  const program = value as { path?: unknown; sha256?: unknown };
+  const path = typeof program.path === 'string' && program.path ? program.path : null;
+  const sha256 = typeof program.sha256 === 'string' && program.sha256 ? program.sha256 : null;
+  return path || sha256 ? { path, sha256 } : null;
+}
+
+/** 报告里的冻结修订身份，形如 `official#2`；没有就返回空串。 */
+function revisionIdentity(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const version = (value as { version?: unknown }).version;
+  if (!version || typeof version !== 'object') return '';
+  const { id, revision } = version as { id?: unknown; revision?: unknown };
+  return typeof id === 'string' && typeof revision === 'number' ? `${id}#${revision}` : '';
+}
+
+/** 提示里 hash 只留前 12 位：完整值在展开的拟合报告里，摘要里太长反而读不出来。 */
+function shortHash(value: string | null): string {
+  return value ? value.slice(0, 12) : '—';
+}
+
+/**
+ * 后端 `inputs.warnings` 的英文原文是报告的稳定字段（脱离界面也要能读），已知的几类在界面上
+ * 译成中文；以后后端新加的 warning 不吞，原文照出。固定前缀与 `hybrid_fit.rs` 的
+ * `check_compatibility` 一一对应，改那边措辞要一起改这里（测试会红）。
+ */
+export function fitInputWarningText(warning: string): [string, string] {
+  const revisions =
+    /^the Studies come from different frozen model revisions \((.*)\); the fit combines their calibrated parameters as they are$/.exec(
+      warning,
+    );
+  if (revisions)
+    return [
+      `这些研究来自不同的冻结模型修订（${revisions[1]}）；拟合会把它们的率定参数原样合并。`,
+      `The Studies come from different frozen model revisions (${revisions[1]}); the fit combines their calibrated parameters as they are.`,
+    ];
+  const programs =
+    /^the Studies do not all have the same frozen colm-rs \((.*)\); the rows are all extracted by the fit's own program, recorded as feature_program$/.exec(
+      warning,
+    );
+  if (programs)
+    return [
+      `这些研究冻结的 colm-rs 不完全相同（${programs[1]}）；所有行都由拟合自己的程序抽取，报告里记为 feature_program。`,
+      `The Studies do not all have the same frozen colm-rs (${programs[1]}); the rows are all extracted by the fit's own program, recorded as feature_program.`,
+    ];
+  const extracting =
+    /^the fit extracts features with a different colm-rs than Study (.+) was calibrated with \((.*)\); a rebuild of the same source also changes the bytes, so confirm this is intended$/.exec(
+      warning,
+    );
+  if (extracting)
+    return [
+      `本次提特征用的 colm-rs 与研究 ${extracting[1]} 率定时用的不是同一个（${extracting[2]}）；同一份源码重编也会改变字节，确认这是有意的切换。`,
+      `The fit extracts features with a different colm-rs than Study ${extracting[1]} was calibrated with (${extracting[2]}); a rebuild of the same source also changes the bytes, so confirm this is intended.`,
+    ];
+  return [warning, warning];
+}
+
+/** 拟合结果区的一条可见提示：`zh`/`en` 两版，`key` 供 React 列表用。 */
+export interface FitInputNote {
+  key: string;
+  zh: string;
+  en: string;
+}
+
+/**
+ * `hybrid-fit` 报告 `inputs` 段里使用者该看到、但以前只能展开 Advanced JSON 才看得到的信息：
+ * 后端逐条兼容性 warning，以及“本次提特征的程序”和“研究冻结的程序”之间的内容差异。
+ *
+ * 程序差异要前端自己再算一遍：旧后端写的报告没有这条 warning，但字段齐全时仍能看出来。
+ * 缺字段（老报告没有 `frozen_feature_program`、程序读不出 sha256、只有路径没有内容）一律
+ * 不报——没有证据时宁可不说，也不要把“无法比较”说成“不一致”。后端已经为同一条差异写过
+ * warning 时不再按字段重复一遍。
+ */
+export function fitInputNotes(report: unknown): FitInputNote[] {
+  const inputs =
+    report && typeof report === 'object' ? (report as { inputs?: unknown }).inputs : null;
+  if (!inputs || typeof inputs !== 'object') return [];
+  const data = inputs as {
+    warnings?: unknown;
+    feature_program?: unknown;
+    studies?: unknown;
+  };
+  const warnings = Array.isArray(data.warnings)
+    ? data.warnings.filter((item): item is string => typeof item === 'string' && !!item.trim())
+    : [];
+  const notes: FitInputNote[] = warnings.map((warning, index) => {
+    const [zh, en] = fitInputWarningText(warning);
+    return { key: `warning-${index}`, zh, en };
+  });
+  if (
+    warnings.some((warning) =>
+      warning.startsWith('the fit extracts features with a different colm-rs'),
+    )
+  )
+    return notes;
+  const current = programIdentity(data.feature_program);
+  if (!current?.sha256) return notes;
+  const studies = Array.isArray(data.studies) ? data.studies : [];
+  studies.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object') return;
+    const study = entry as {
+      id?: unknown;
+      study?: unknown;
+      frozen_feature_program?: unknown;
+      model_revision?: unknown;
+    };
+    const frozen = programIdentity(study.frozen_feature_program);
+    // 两端都有内容 hash 且不同才报；路径不同（快照副本）不算差异。
+    if (!frozen?.sha256 || frozen.sha256 === current.sha256) return;
+    const label =
+      (typeof study.id === 'string' && study.id) ||
+      (typeof study.study === 'string' && study.study) ||
+      `#${index + 1}`;
+    const revision = revisionIdentity(study.model_revision);
+    notes.push({
+      key: `program-${index}`,
+      zh: `研究 ${label}${revision ? `（冻结修订 ${revision}）` : ''} 率定时用的特征提取程序与这次不同：冻结 ${frozen.path ?? '未知'}（sha256 ${shortHash(frozen.sha256)}），本次 ${current.path ?? '未知'}（sha256 ${shortHash(current.sha256)}）；同一份源码重编也会改变字节，确认这是有意的切换。`,
+      en: `Study ${label}${revision ? ` (frozen revision ${revision})` : ''} was calibrated with a different feature-extraction program: frozen ${frozen.path ?? 'unknown'} (sha256 ${shortHash(frozen.sha256)}), extracting ${current.path ?? 'unknown'} (sha256 ${shortHash(current.sha256)}); a rebuild of the same source also changes the bytes, so confirm this is intended.`,
+    });
+  });
+  return notes;
+}
+
 export function networkDefaults(slot: string) {
   if (!['pft', 'land_class', 'soil_stress'].includes(slot))
     throw new Error(bilingual('网络作用位置不对', 'Invalid network slot'));

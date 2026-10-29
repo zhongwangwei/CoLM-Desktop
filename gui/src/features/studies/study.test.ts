@@ -8,6 +8,8 @@ import {
   convergenceRows,
   crossValidationRows,
   deriveStudyDesign,
+  fitInputNotes,
+  fitInputWarningText,
   fitValidation,
   frozenDesign,
   frozenParameterKey,
@@ -1019,5 +1021,100 @@ describe('deriving a new study design from a finished one', () => {
       ],
     };
     assert.throws(() => deriveStudyDesign(disagreeing, options), /时间窗|windows/);
+  });
+});
+describe('fit input compatibility', () => {
+  const sha = (char: string) => char.repeat(64);
+  const revisionWarning =
+    'the Studies come from different frozen model revisions (/a: rev-a#1; /b: rev-b#2); ' +
+    'the fit combines their calibrated parameters as they are';
+  it('translates the known backend warnings and keeps unknown text visible', () => {
+    const [zh, en] = fitInputWarningText(revisionWarning);
+    assert.match(zh, /不同的冻结模型修订/);
+    assert.match(zh, /rev-a#1; \/b: rev-b#2/);
+    assert.match(en, /different frozen model revisions/);
+    // 后端以后新加的 warning 不能因为译不出来就吞掉：原文照出，两种语言都用原文。
+    assert.deepEqual(fitInputWarningText('a new backend note'), [
+      'a new backend note',
+      'a new backend note',
+    ]);
+  });
+  it('reports a different extraction program from the report fields', () => {
+    const notes = fitInputNotes({
+      validation: { passed: true },
+      inputs: {
+        feature_program: { path: '/app/bin/colm-rs', sha256: sha('a') },
+        studies: [
+          {
+            id: 's-1',
+            model_revision: { version: { id: 'rev-a', revision: 2 } },
+            frozen_feature_program: {
+              path: '/s/version/bin/colm-rs',
+              sha256: sha('b'),
+            },
+          },
+        ],
+        warnings: [],
+      },
+    });
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!.zh, /研究 s-1/);
+    assert.match(notes[0]!.zh, /rev-a#2/);
+    assert.match(notes[0]!.zh, /sha256 bbbbbbbbbbbb/);
+    assert.match(notes[0]!.en, /different feature-extraction program/);
+  });
+  it('shows the backend program warning once instead of repeating it from the fields', () => {
+    const warning =
+      'the fit extracts features with a different colm-rs than Study /s was calibrated with ' +
+      '(frozen /s/version/bin/colm-rs sha256 b; extracting /app/bin/colm-rs sha256 a; ' +
+      'frozen model revision rev-a#2); a rebuild of the same source also changes the bytes, ' +
+      'so confirm this is intended';
+    const notes = fitInputNotes({
+      inputs: {
+        feature_program: { path: '/app/bin/colm-rs', sha256: sha('a') },
+        studies: [
+          {
+            id: 's-1',
+            frozen_feature_program: {
+              path: '/s/version/bin/colm-rs',
+              sha256: sha('b'),
+            },
+          },
+        ],
+        warnings: [warning],
+      },
+    });
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!.zh, /不是同一个/);
+    assert.match(notes[0]!.zh, /rev-a#2/);
+  });
+  it('reports nothing when the hashes match or the fields are missing', () => {
+    const same = fitInputNotes({
+      inputs: {
+        // 冻结副本在别处、路径不同是常态：同一个程序只看内容 sha256。
+        feature_program: { path: '/app/bin/colm-rs', sha256: sha('a') },
+        studies: [{ frozen_feature_program: { path: '/s/version/bin/colm-rs', sha256: sha('a') } }],
+        warnings: [],
+      },
+    });
+    assert.deepEqual(same, []);
+    // 旧报告没有 frozen_feature_program / 程序读不出 sha256：缺字段不比较。
+    assert.deepEqual(
+      fitInputNotes({
+        inputs: { feature_program: { path: '/a', sha256: sha('a') }, studies: [{ id: 'old' }] },
+      }),
+      [],
+    );
+    assert.deepEqual(
+      fitInputNotes({
+        inputs: {
+          feature_program: { path: '/a', sha256: null },
+          studies: [{ frozen_feature_program: { path: '/b', sha256: sha('b') } }],
+        },
+      }),
+      [],
+    );
+    assert.deepEqual(fitInputNotes({ validation: { passed: true } }), []);
+    assert.deepEqual(fitInputNotes(null), []);
   });
 });

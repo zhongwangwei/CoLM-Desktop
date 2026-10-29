@@ -12,6 +12,7 @@ import {
   budgetAdvice,
   calibrationWindows,
   candidateBudget,
+  fitInputNotes,
   fitValidation,
   gridTargetDefaults,
   gridTargetSpec,
@@ -5437,6 +5438,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                           '没有独立的交叉验证，不能推断在新站点上更好。',
                           'No independent cross-validation; better results at new sites are unproven.',
                         )}
+                </Notice>
+              )}
+              {/* #12：样本是在哪版物理上率定、这次又由哪份程序提特征，原先只在展开的
+                  Advanced JSON 里。后端 warnings 与逐研究的程序差异在这里直接给出摘要，
+                  免得使用者漏掉“率定程序和提特征程序不是同一个”。 */}
+              {fit && fitInputNotes(fit.report).length > 0 && (
+                <Notice tone="warning">
+                  <p>
+                    <strong>{tr('拟合输入的兼容性提示', 'Fit input compatibility')}</strong>
+                  </p>
+                  <ul>
+                    {fitInputNotes(fit.report).map((note) => (
+                      <li key={note.key}>{tr(note.zh, note.en)}</li>
+                    ))}
+                  </ul>
                 </Notice>
               )}
               <Advanced title={tr('拟合设置与报告', 'Fit settings and report')}>

@@ -14,6 +14,7 @@ import {
   budgetAdvice,
   calibrationWindows,
   candidateBudget,
+  fitInputNotes,
   fitValidation,
   gridTargetDefaults,
   gridTargetSpec,
@@ -789,6 +790,7 @@ function researchPage(
     candidateBudget,
     compatibleKernel,
     completedCandidates,
+    fitInputNotes,
     fitValidation,
     gridTargetDefaults,
     gridTargetSpec,
@@ -1470,6 +1472,171 @@ it('a server-submittable study shows the budget review box and unlocks the run b
   (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
   page.render();
   assert.equal(run()!.enabled, true, 'checking the box unlocks the submit run');
+});
+/**
+ * 打开一个 AI 参数网络研究，选中一个第一步研究并完成一次拟合。拟合结果区只在第 4 步、
+ * 且已打开研究时渲染（canStep(4) 要求 studyDir），所以不能从方法卡片直接走到拟合按钮。
+ */
+async function fitOnPage(report: unknown) {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-parameters');
+  // 切到 AI 方法后，页面按网络权重数自动调种群（population），这会再次触发设计 effect、
+  // 推进 epoch；不等它稳定就打开研究，browse 的 token 会过期，pick_folder 解析后直接返回。
+  await page.settle();
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-ai');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-ai',
+      spec: {
+        kind: 'tuning',
+        hybrid: { slot: 'pft' },
+        kernel_dir: '/kernels/default',
+        parameters: [
+          {
+            name: 'DEF_PFT_VMAX25',
+            sample_min: 0,
+            sample_max: 10,
+            scope_instance: { kind: 'pft-type', index: 0 },
+          },
+        ],
+      },
+    },
+    state: { status: 'Completed', best_member: 'm1', candidates: { m1: { calibration: 0.1 } } },
+    results: [],
+    model_version: { model_revision: { version: { id: 'official', revision: 1 } } },
+    remote: null,
+  });
+  await page.settle();
+  page.press('hybrid-studies');
+  await page.settle();
+  page.requests
+    .filter((request) => request.command === 'hybrid_studies')
+    .at(-1)!
+    .resolve([
+      {
+        dir: '/p/.colm/studies/first',
+        id: 'first',
+        status: 'Completed',
+        sites: ['caseA'],
+        parameters: ['DEF_PFT_VMAX25'],
+        best_member: 'm1',
+        trains_network: false,
+      },
+    ]);
+  await page.settle();
+  const checkbox = page
+    .nodes()
+    .find(
+      (node) => node.type === 'label' && String(node.props.className ?? '').includes('study-case'),
+    )
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
+  assert.ok(checkbox, 'the first-step study can be chosen');
+  (checkbox.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('hybrid-fit-output-pick');
+  // pickFolder 走 execute（微任务里才真正 invoke），press 返回时请求还没登记。
+  await page.settle();
+  const pick = page.requests.filter((request) => request.command === 'pick_folder').at(-1)!;
+  pick.resolve('/p/ai');
+  await page.settle();
+  page.press('hybrid-fit');
+  assert.equal(page.requests.at(-1)!.command, 'hybrid_fit');
+  page.requests.at(-1)!.resolve({
+    model: '/p/ai/research-model.mlp.json',
+    normalize: '/p/ai/research-model.norm.json',
+    network: '/p/ai/research-model.network.json',
+    report_file: '/p/ai/research-model.fit.json',
+    report,
+  });
+  await page.settle();
+  return page;
+}
+// #12：后端把“率定用的程序”和“这次提特征的程序”不同写进 inputs.warnings，但这条以前只能
+// 展开 Advanced 里的 JSON 才看得到。页面要在拟合结果旁边直接给出双语摘要。
+it('shows the fit input compatibility warnings without opening the advanced report', async () => {
+  const page = await fitOnPage({
+    validation: { passed: true },
+    inputs: {
+      feature_program: { path: '/app/bin/colm-rs', sha256: 'a'.repeat(64) },
+      studies: [
+        {
+          id: 'first',
+          study: '/p/.colm/studies/first',
+          model_revision: { version: { id: 'rev-a', revision: 1 } },
+          frozen_feature_program: {
+            path: '/p/.colm/studies/first/version/bin/colm-rs',
+            sha256: 'b'.repeat(64),
+          },
+        },
+      ],
+      warnings: [
+        'the fit extracts features with a different colm-rs than Study /p/.colm/studies/first ' +
+          'was calibrated with (frozen /p/.colm/studies/first/version/bin/colm-rs sha256 bbbbbbbbbbbb; ' +
+          'extracting /app/bin/colm-rs sha256 aaaaaaaaaaaa; frozen model revision rev-a#1); ' +
+          'a rebuild of the same source also changes the bytes, so confirm this is intended',
+      ],
+    },
+  });
+  const text = pageText(page);
+  assert.match(text, /拟合输入的兼容性提示/);
+  assert.match(text, /不是同一个/);
+  assert.match(text, /rev-a#1/);
+});
+// 旧后端写的报告没有这条 warning，但 inputs 里的程序身份字段齐全：页面自己按字段比较，
+// 不能因为 backend 没提示就让“率定程序和提特征程序不同”继续藏在 Advanced JSON 里。
+it('shows a fit program difference computed from the report fields', async () => {
+  const page = await fitOnPage({
+    validation: { passed: true },
+    inputs: {
+      feature_program: { path: '/app/bin/colm-rs', sha256: 'c'.repeat(64) },
+      studies: [
+        {
+          id: 'first',
+          model_revision: { version: { id: 'rev-a', revision: 2 } },
+          frozen_feature_program: {
+            path: '/p/.colm/studies/first/version/bin/colm-rs',
+            sha256: 'd'.repeat(64),
+          },
+        },
+      ],
+    },
+  });
+  const text = pageText(page);
+  assert.match(text, /拟合输入的兼容性提示/);
+  assert.match(text, /研究 first/);
+  assert.match(text, /rev-a#2/);
+});
+it('shows no fit input compatibility note when the programs and fields agree', async () => {
+  const hash = 'a'.repeat(64);
+  const page = await fitOnPage({
+    validation: { passed: true },
+    inputs: {
+      feature_program: { path: '/app/bin/colm-rs', sha256: hash },
+      studies: [
+        {
+          id: 'first',
+          frozen_feature_program: {
+            path: '/p/.colm/studies/first/version/bin/colm-rs',
+            sha256: hash,
+          },
+        },
+      ],
+      warnings: [],
+    },
+  });
+  const text = pageText(page);
+  assert.doesNotMatch(text, /拟合输入的兼容性提示/);
+  // 拟合结果本身仍然可见：不能因为没提示就把整个结果区藏了。
+  assert.match(text, /留一研究验证通过/);
 });
 it('switching the model revision while a study runs keeps its frozen design and identity', async () => {
   const page = researchPage();

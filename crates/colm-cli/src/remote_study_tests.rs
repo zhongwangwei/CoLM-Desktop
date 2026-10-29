@@ -1430,15 +1430,34 @@ fn one_concurrent_candidate_requests_only_its_own_threads() {
 }
 
 #[test]
-fn explicit_cpus_win_but_must_fit_one_candidate() {
-    let sixteen = resource_opts(&[("--cpus", "16")]);
-    let resources = study_resources(&sixteen, 8, 4).unwrap();
-    assert_eq!(resources.resources.cpus, 16);
-    let too_few = resource_opts(&[("--cpus", "4")]);
-    let error = study_resources(&too_few, 8, 4).unwrap_err();
+fn explicit_cpus_win_when_they_cover_the_concurrency() {
+    // 申请必须覆盖实际并行：4 个成员同时跑、每个 8 线程。显式给足 32 或更多时以用户为准。
+    let enough = resource_opts(&[("--cpus", "32")]);
+    let resources = study_resources(&enough, 8, 4).unwrap();
+    assert_eq!(resources.resources.cpus, 32);
+    // 多申请（整节点、共享分区）仍以用户为准，不拒绝。
+    let roomy = resource_opts(&[("--cpus", "64")]);
+    assert_eq!(study_resources(&roomy, 8, 4).unwrap().resources.cpus, 64);
+}
+
+#[test]
+fn explicit_cpus_below_threads_times_jobs_is_rejected() {
+    // 原实现只校验 cpus >= threads：16 核放行，但作业脚本里仍是 4 个成员 × 8 线程 = 32，
+    // 超配的部分会被集群限核/OOM 打掉——与 P2-10 的 max(threads, jobs) 是同一类错误。
+    let between = resource_opts(&[("--cpus", "16")]);
+    let error = study_resources(&between, 8, 4).unwrap_err();
     let text = format!("{error:#}");
-    assert!(text.contains("--cpus"), "{text}");
+    assert!(text.contains("--cpus (16)"), "{text}");
     assert!(text.contains("--threads"), "{text}");
+    assert!(text.contains("--jobs"), "{text}");
+    assert!(
+        text.contains("32"),
+        "the message names the cores to request: {text}"
+    );
+
+    // 比一个成员的线程数还少，同样拒绝（旧断言，保留）。
+    let too_few = resource_opts(&[("--cpus", "4")]);
+    assert!(study_resources(&too_few, 8, 4).is_err());
 }
 
 #[test]

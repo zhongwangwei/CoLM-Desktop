@@ -558,15 +558,22 @@ fn study_resources(opts: &Opts, threads: u32, jobs: usize) -> Result<StudyResour
     );
     let jobs_u32 =
         u32::try_from(jobs).context("--jobs is too large for a scheduler resource request")?;
-    let cpus = threads
+    let required = threads
         .checked_mul(jobs_u32)
         .context("remote Study resource request overflows the scheduler core count")?;
-    let resources = resources_from(opts, cpus, 1, 0)?;
-    // 显式 --cpus 以用户为准，但少于一个成员的线程数时那个成员本身就跑不满。
+    let resources = resources_from(opts, required, 1, 0)?;
+    // 申请的总核数必须覆盖实际并行：作业脚本里 `RAYON_NUM_THREADS=threads`、`study-run
+    // --jobs jobs`，同时最多 jobs 个成员各跑 threads 线程。显式 --cpus 小于 threads × jobs
+    // 时作业仍会开这么多线程，超出申请的部分会被集群限核或 OOM 打掉——这正是 P2-10 里
+    // max(threads, jobs) 少申请的老问题，只是换成了使用者显式给的数字。
+    //
+    // 不选“按 cpus/threads 自动降并发”：那会让作业脚本里的 --jobs、报告里的并发与用户
+    // 设定的预算三者分叉，界面也看不出并发被悄悄改了；申请不足是配置错误，明确拒绝并
+    // 告诉使用者该申请多少更有用。多申请的核（cpus > threads × jobs）仍按用户意愿保留。
     ensure!(
-        resources.cpus >= threads,
-        "--cpus ({}) must be at least --threads ({threads}): one Study member needs {threads} cores",
-        resources.cpus
+        resources.cpus >= required,
+        "--cpus ({}) must be at least --threads × --jobs ({} × {jobs} = {required}): {jobs} Study members run concurrently, each with {threads} threads; raise --cpus or lower --jobs/--threads",
+        resources.cpus, threads
     );
     Ok(StudyResources {
         resources,

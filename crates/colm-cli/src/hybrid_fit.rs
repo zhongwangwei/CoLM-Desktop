@@ -347,8 +347,9 @@ fn spec_toml(network: &HybridStudySpec) -> String {
 ///
 /// 报告只记“这一次拟合实际执行了什么”。多研究时行全由同一个程序抽出，所以没有逐研究的
 /// 提取程序；每个研究自己固定版本里的 `colm-rs` 另记在 `frozen_feature_program`，
-/// 供复核者比较“率定用的物理”与“提特征用的物理”。两者不做逐研究比较：同一份源码的
-/// 两次构建字节就不同，直接比 hash 会把“重编过”误报成“物理变了”。
+/// 供复核者比较“率定用的物理”与“提特征用的物理”。两者在 [`check_compatibility`] 里按内容
+/// sha256 逐一比较：字节不同只能证明“不是同一个构建”，证明不了物理变了（同一份源码的两次
+/// 构建字节就不同），所以只发 warning 由使用者确认，不拒绝拟合。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct FeatureProgram {
     pub path: String,
@@ -461,9 +462,9 @@ fn prepare_study(study_dir: &Path) -> Result<PreparedStudy> {
 
     let pin = super::study_version::pinned(&dir)?;
     let frozen_feature_program = pin.as_ref().and_then(frozen_feature_program);
-    // 拿当前 colm-rs 的 hash 与研究的固定程序比在这里没有意义：同一份源码的两次构建
-    // 字节就不同，会把“重编过”报成“物理变了”。报告如实记两边（`feature_program` 是本次
-    // 实际执行的那份），跨研究的比较放在 check_compatibility 里做。
+    // 当前 colm-rs 的 hash 与这个研究的固定程序在 check_compatibility 里逐研究比较（只发
+    // warning）：同一份源码的两次构建字节就不同，直接拒绝会把“重编过”当成“物理变了”，
+    // 但对使用者仍值得知道“率定时用的程序”和“这次提特征的程序”不是同一份。
     Ok(PreparedStudy {
         dir,
         manifest,
@@ -486,7 +487,7 @@ fn frozen_feature_program(pin: &super::study_version::Pinned) -> Option<FeatureP
     path.is_file().then(|| FeatureProgram::of(&path))
 }
 
-/// 多研究一起训练前的兼容性检查，返回要写进报告与 stderr 的警告。
+/// 抽行前的兼容性检查，返回要写进报告与 stderr 的警告。
 ///
 /// 硬拒绝的只有会让样本本身错掉的两件事：冻结输入无法证明（在 [`prepare_study`] 里）、
 /// 以及研究率定的参数种类与本次网络插槽对不上（网络是 `pft` 却只率定了整算例系数）：
@@ -496,11 +497,19 @@ fn frozen_feature_program(pin: &super::study_version::Pinned) -> Option<FeatureP
 /// 其余不一致只影响“这条样本是在哪版物理上率定/提特征的”，不改变已经抽出的行。两步法允许
 /// 在更新后的物理上重拟合（这正是改模型后再训练的用法），所以逐条写成 warning 进报告，
 /// 由结果页和使用者判断，不在这里替他们拒绝。
+///
+/// 两条来源都要比较：研究之间（冻结修订、冻结程序是否一致），以及本次实际执行的
+/// `program` 与每个研究的冻结程序。后者对**单研究**尤其重要（#12）：只比较研究之间时，
+/// 一个研究永远没有“不一致”可报，“率定用的程序”和“这次提特征的程序”不同在界面上完全
+/// 不可见。比较只按内容 sha256、不比路径：冻结程序是研究里的快照副本，路径与本次不同是
+/// 常态；任一边没有 sha256（旧研究没有冻结程序，或程序文件读不出内容）就不下结论。
 fn check_compatibility(
     studies: &[PreparedStudy],
     network: &HybridStudySpec,
+    program: &FeatureProgram,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
+    let mut program_differences = Vec::new();
     let mut revision_labels = Vec::new();
     let mut revisions: BTreeSet<Option<(String, u64)>> = BTreeSet::new();
     let mut program_labels = Vec::new();
@@ -556,6 +565,30 @@ fn check_compatibility(
             Some(program) => format!("{}: {}", study.dir.display(), program.path),
             None => format!("{}: unknown (no frozen colm-rs)", study.dir.display()),
         });
+        if let Some(frozen) = &study.frozen_feature_program {
+            if let (Some(frozen_sha), Some(current_sha)) = (&frozen.sha256, &program.sha256) {
+                if frozen_sha != current_sha {
+                    // 冻结修订也写进来：同一个研究目录在不同修订下可能都存过 colm-rs，
+                    // 只给 hash 复核者无法判断当时跑的是哪一版物理。
+                    let revision = revision.map_or_else(String::new, |revision| {
+                        format!(
+                            "; frozen model revision {}#{}",
+                            revision.version.id, revision.version.revision
+                        )
+                    });
+                    program_differences.push(format!(
+                        "the fit extracts features with a different colm-rs than Study {} was calibrated with \
+                         (frozen {} sha256 {}; extracting {} sha256 {}{revision}); \
+                         a rebuild of the same source also changes the bytes, so confirm this is intended",
+                        study.dir.display(),
+                        frozen.path,
+                        short_sha(frozen_sha),
+                        program.path,
+                        short_sha(current_sha),
+                    ));
+                }
+            }
+        }
     }
     if studies.len() > 1 && revisions.len() > 1 {
         warnings.push(format!(
@@ -569,7 +602,15 @@ fn check_compatibility(
             program_labels.join("; ")
         ));
     }
+    // 本次程序与每个研究冻结程序的差异放在最后：它适用于任何研究数量，而上面两条只在
+    // 多研究时才有意义，保持这个顺序让报告里的既有 warning 位置不变。
+    warnings.extend(program_differences);
     Ok(warnings)
+}
+
+/// warning 里的 hash 只留前 12 位：报告里已有完整 sha256，提示里太长反而读不出来。
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 fn resolve_study_member(study: &PreparedStudy) -> Result<MemberPlan> {
@@ -883,7 +924,7 @@ pub(super) fn cmd_hybrid_fit(opts: &Opts) -> Result<()> {
         .iter()
         .map(|study| prepare_study(study))
         .collect::<Result<Vec<_>>>()?;
-    let warnings = check_compatibility(&prepared, &network)?;
+    let warnings = check_compatibility(&prepared, &network, &program)?;
 
     let scratch = std::env::temp_dir().join(format!("colm-hybrid-fit-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;

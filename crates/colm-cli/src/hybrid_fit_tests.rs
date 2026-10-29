@@ -455,16 +455,26 @@ fn studies_tuning_the_wrong_parameter_scope_are_rejected_together() {
     let pft = frozen_fixture("compat-pft", pft_parameters());
     let scalar = frozen_fixture("compat-scalar", case_scalar_parameters());
     let network = network("pft", "DEF_PFT_VMAX25");
+    let current = program(&pft.project, b"colm-rs fixture");
     let studies = [
         prepare_study(&pft.study).unwrap(),
         prepare_study(&scalar.study).unwrap(),
     ];
-    let error = check_compatibility(&studies, &network).unwrap_err();
+    let error = check_compatibility(&studies, &network, &current).unwrap_err();
     let text = format!("{error:#}");
     assert!(text.contains("pft"), "unexpected error: {text}");
     assert!(text.contains("compat-scalar"), "unexpected error: {text}");
     std::fs::remove_dir_all(&pft.project).unwrap();
     std::fs::remove_dir_all(&scalar.project).unwrap();
+}
+
+/// 研究快照里的程序名（Windows 带 `.exe`）。
+fn exe(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    }
 }
 
 #[test]
@@ -473,13 +483,6 @@ fn a_missing_frozen_feature_program_is_a_reported_warning() {
     let legacy = frozen_fixture("program-legacy", pft_parameters());
     let bin = pinned.study.join("version/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let exe = |name: &str| {
-        if cfg!(windows) {
-            format!("{name}.exe")
-        } else {
-            name.to_owned()
-        }
-    };
     std::fs::write(bin.join(exe("colm-rs")), b"another colm-rs").unwrap();
     let pin = crate::study_version::Pinned {
         name: "fixture".into(),
@@ -508,10 +511,14 @@ fn a_missing_frozen_feature_program_is_a_reported_warning() {
         prepare_study(&pinned.study).unwrap(),
         prepare_study(&legacy.study).unwrap(),
     ];
-    let warnings = check_compatibility(&studies, &network).unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let warnings = check_compatibility(&studies, &network, &program).unwrap();
+    // 第一条是“不是每个研究都有冻结程序”的跨研究提示；第二条是本次提特征的程序与
+    // 那个研究冻结的程序内容不同（#12：单研究也要看得见）。
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(warnings[0].contains("colm-rs"), "{}", warnings[0]);
     assert!(warnings[0].contains("program-legacy"), "{}", warnings[0]);
+    assert!(warnings[1].contains("different colm-rs"), "{}", warnings[1]);
+    assert!(warnings[1].contains("program-pinned"), "{}", warnings[1]);
     // 没有 registry 修订的旧研究：报告标记 legacy，不报错；固定版本里的程序如实记下。
     let report = inputs_report(&studies, &network, &program, &warnings).unwrap();
     assert_eq!(report["studies"][0]["legacy_model_revision"], true);
@@ -653,7 +660,7 @@ fn studies_from_different_frozen_revisions_are_reported_and_traced() {
         prepare_study(&first.study).unwrap(),
         prepare_study(&second.study).unwrap(),
     ];
-    let warnings = check_compatibility(&studies, &network).unwrap();
+    let warnings = check_compatibility(&studies, &network, &program).unwrap();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
         warnings[0].contains("different frozen model revisions"),
@@ -672,4 +679,99 @@ fn studies_from_different_frozen_revisions_are_reported_and_traced() {
     );
     std::fs::remove_dir_all(&first.project).unwrap();
     std::fs::remove_dir_all(&second.project).unwrap();
+}
+
+// ==== #12：AI 输入的兼容性对单研究也要可见 ====
+
+/// 写一份带冻结修订的 pin，并在快照目录里放好它的 `colm-rs`（`frozen_feature_program` 的来源）。
+fn pin_with_program(
+    fixture: &Fixture,
+    revision: colm_model::FrozenRevision,
+    bytes: &[u8],
+) -> FeatureProgram {
+    pin_revision(fixture, revision);
+    let bin = fixture.study.join("version/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join(exe("colm-rs"));
+    std::fs::write(&path, bytes).unwrap();
+    FeatureProgram::of(&path)
+}
+
+#[test]
+fn a_single_study_calibrated_with_another_program_is_reported() {
+    let fixture = frozen_fixture("single-program", pft_parameters());
+    let frozen = pin_with_program(&fixture, frozen_revision("rev-a", 3), b"another colm-rs");
+    let current = program(&fixture.project, b"current colm-rs");
+    let network = network("pft", "DEF_PFT_VMAX25");
+    let prepared = prepare_study(&fixture.study).unwrap();
+    assert_eq!(
+        prepared
+            .frozen_feature_program
+            .as_ref()
+            .map(|program| program.sha256.clone()),
+        Some(frozen.sha256.clone())
+    );
+    // 只有这一个研究：跨研究的“冻结程序互不相同”永远不触发，必须逐研究与本次比较。
+    let warnings = check_compatibility(&[prepared], &network, &current).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let text = &warnings[0];
+    assert!(text.contains("different colm-rs"), "{text}");
+    assert!(text.contains("single-program"), "{text}");
+    assert!(
+        text.contains("rev-a#3"),
+        "the frozen revision identity is part of the note: {text}"
+    );
+    std::fs::remove_dir_all(&fixture.project).unwrap();
+}
+
+#[test]
+fn a_single_study_whose_program_matches_is_not_reported() {
+    let fixture = frozen_fixture("same-program", pft_parameters());
+    pin_revision(&fixture, frozen_revision("rev-a", 1));
+    let current = program(&fixture.project, b"same colm-rs");
+    let network = network("pft", "DEF_PFT_VMAX25");
+    let mut prepared = prepare_study(&fixture.study).unwrap();
+    // 固定版本里存的是快照副本，路径和本次不同是常态；同一个程序按内容（sha256）判断，
+    // 路径不同不能变成 warning（那会让每个固定过版本的研究都误报）。
+    prepared.frozen_feature_program = Some(FeatureProgram {
+        path: fixture
+            .study
+            .join("version/bin")
+            .join(exe("colm-rs"))
+            .display()
+            .to_string(),
+        sha256: current.sha256.clone(),
+    });
+    let warnings = check_compatibility(&[prepared], &network, &current).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    std::fs::remove_dir_all(&fixture.project).unwrap();
+}
+
+#[test]
+fn a_study_without_a_frozen_program_is_not_reported_as_incompatible() {
+    // 旧研究没有固定版本快照（或快照里没有 colm-rs）：没有可比较的字段，不能把“不知道”当“不一致”。
+    let fixture = frozen_fixture("no-program", pft_parameters());
+    let current = program(&fixture.project, b"current colm-rs");
+    let network = network("pft", "DEF_PFT_VMAX25");
+    let prepared = prepare_study(&fixture.study).unwrap();
+    assert!(prepared.frozen_feature_program.is_none());
+    let warnings = check_compatibility(&[prepared], &network, &current).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    std::fs::remove_dir_all(&fixture.project).unwrap();
+}
+
+#[test]
+fn a_frozen_program_without_a_readable_hash_is_not_reported() {
+    // 冻结程序读不出来时报告里 `sha256` 是 null；缺字段不比较，不能把“读不到”说成“不同”。
+    let fixture = frozen_fixture("unreadable-program", pft_parameters());
+    let current = program(&fixture.project, b"current colm-rs");
+    let network = network("pft", "DEF_PFT_VMAX25");
+    let mut prepared = prepare_study(&fixture.study).unwrap();
+    prepared.frozen_feature_program = Some(FeatureProgram {
+        path: "/missing/colm-rs".into(),
+        sha256: None,
+    });
+    let warnings = check_compatibility(&[prepared], &network, &current).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    std::fs::remove_dir_all(&fixture.project).unwrap();
 }
