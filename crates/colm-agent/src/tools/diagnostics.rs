@@ -584,6 +584,28 @@ fn calibration_study_missing(evidence: &Value) -> Vec<String> {
     if evidence["model_identity"]["comparison"]["status"].as_str() == Some("mismatch") {
         missing.push("The Study's recorded model identity does not match the current selection; its scores do not describe the currently selected model.".into());
     }
+    // checkpoint 聚合分仍可用，但某份 results/tasks 明细缺失/损坏时必须在诊断里指名，
+    // 不能只留分数让助手以为整组结果都完整（reverified=false 不提供这个信息）。
+    for side in [
+        &evidence["comparison"]["baseline"],
+        &evidence["comparison"]["best"],
+    ] {
+        let member = side["member"].as_str().unwrap_or("?");
+        for period in ["calibration", "validation"] {
+            let details = &side[period];
+            if details["details_status"].as_str() != Some("missing_or_partial") {
+                continue;
+            }
+            let files = details["missing_result_files"].to_string();
+            missing.push(short(
+                &format!(
+                    "{member} {period} checkpoint score is recorded, but its result-file details are incomplete (sites {}/{}): {files}",
+                    details["sites_recorded"], details["sites_total"]
+                ),
+                280,
+            ));
+        }
+    }
     match evidence["comparison"]["relation"]["calibration"]
         .as_str()
         .unwrap_or("unknown")

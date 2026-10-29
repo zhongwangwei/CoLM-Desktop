@@ -1090,9 +1090,25 @@ fn comparison_side_core(side: &Value) -> Value {
     json!({
         "member": core_text(&side["member"], 120),
         "status": side["status"],
-        "calibration": {"status": side["calibration"]["status"], "score": side["calibration"]["score"]},
-        "validation": {"status": side["validation"]["status"], "score": side["validation"]["score"]},
+        "calibration": comparison_period_core(&side["calibration"]),
+        "validation": comparison_period_core(&side["validation"]),
         "reason": core_text(&side["reason"], 240),
+    })
+}
+
+/// 两期记录的核心：除分数与状态外，checkpoint 聚合分掩盖的 results/tasks 明细缺失也要保留，
+/// 并保留站点计数，让压缩后的摘要仍能说清"分数来自 checkpoint、缺了哪一份明细"。
+fn comparison_period_core(period: &Value) -> Value {
+    json!({
+        "status": period["status"],
+        "score": period["score"],
+        "score_origin": period["score_origin"],
+        "details_status": period["details_status"],
+        "missing_result_files": core_text_list(&period["missing_result_files"], 2, 200),
+        "missing_result_file_count": period["missing_result_file_count"],
+        "sites_recorded": period["sites_recorded"],
+        "sites_total": period["sites_total"],
+        "reason": core_text(&period["reason"], 200),
     })
 }
 
@@ -1163,6 +1179,7 @@ fn model_version_core(value: &Value, missing_reason: &str) -> Value {
     let version = &value["version"];
     json!({
         "status": value["status"].as_str().unwrap_or("unknown"),
+        "source": value["source"],
         "name": core_text(&value["name"], 120),
         "head": core_text(&value["head"], 80),
         "base_commit": core_text(&value["base_commit"], 80),
@@ -1322,18 +1339,8 @@ fn minimal_evidence_core(core: &Value) -> Value {
 
 fn slim_identity(identity: &Value) -> Value {
     json!({
-        "study_record": {
-            "status": identity["study_record"]["status"],
-            "version": identity["study_record"]["version"],
-            "code_source_sha256": identity["study_record"]["code_source_sha256"],
-            "reason": identity["study_record"]["reason"],
-        },
-        "current_selection": {
-            "status": identity["current_selection"]["status"],
-            "version": identity["current_selection"]["version"],
-            "code_source_sha256": identity["current_selection"]["code_source_sha256"],
-            "reason": identity["current_selection"]["reason"],
-        },
+        "study_record": slim_model_version(&identity["study_record"], true),
+        "current_selection": slim_model_version(&identity["current_selection"], false),
         "comparison": {
             "status": identity["comparison"]["status"],
             "matches": identity["comparison"]["matches"],
@@ -1341,6 +1348,32 @@ fn slim_identity(identity: &Value) -> Value {
             "reason": identity["comparison"]["reason"],
         },
     })
+}
+
+/// 极端压缩后的最小版本身份：按身份类型保留能回答"成绩来自哪个版本"的最小字段。
+/// frozen 身份靠 version{id,revision}+code_source_sha256；legacy remote workspace 没有
+/// 冻结修订，只能靠 source+name+head+base_commit —— 这些字段一旦被删掉，压缩后就无法
+/// 说明结果来自哪个工作区/提交。
+fn slim_model_version(value: &Value, include_revision_recorded: bool) -> Value {
+    let version = &value["version"];
+    let mut slim = json!({
+        "status": value["status"],
+        "source": value["source"],
+        "name": core_text(&value["name"], 120),
+        "head": core_text(&value["head"], 80),
+        "base_commit": core_text(&value["base_commit"], 80),
+        "version": if version.is_object() {
+            json!({"id": core_text(&version["id"], 120), "revision": version["revision"]})
+        } else {
+            Value::Null
+        },
+        "code_source_sha256": core_text(&value["code_source_sha256"], 96),
+        "reason": core_text(&value["reason"], 200),
+    });
+    if include_revision_recorded {
+        slim["revision_recorded"] = value["revision_recorded"].clone();
+    }
+    slim
 }
 
 /// 24k 传输上限内的合法 JSON：先裁证据列表，最后才把完整 spec 目标换成紧凑投影。

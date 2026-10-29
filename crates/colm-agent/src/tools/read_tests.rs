@@ -1400,3 +1400,356 @@ fn missing_workspace_docs_do_not_fall_back_to_app_documents_even_with_retrieval_
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ---- S01：checkpoint 聚合分与明细缺失一起透出 ----
+
+#[cfg(unix)]
+fn with_checkpoint_details(mut evidence: Value) -> Value {
+    for (side, member) in [("baseline", "m000000"), ("best", "m000005")] {
+        for period in ["calibration", "validation"] {
+            evidence["comparison"][side][period]["score_origin"] = json!("checkpoint");
+            evidence["comparison"][side][period]["details_status"] = json!("missing_or_partial");
+            evidence["comparison"][side][period]["missing_result_files"] = json!([format!(
+                "{member}/site: cannot read results/tasks/{member}/site.json"
+            )]);
+            evidence["comparison"][side][period]["missing_result_file_count"] = json!(1);
+            evidence["comparison"][side][period]["sites_recorded"] = json!(0);
+            evidence["comparison"][side][period]["sites_total"] = json!(1);
+        }
+    }
+    evidence
+}
+
+#[cfg(unix)]
+fn s01_evidence() -> Value {
+    with_checkpoint_details(study_evidence(
+        json!({
+            "status": "workspace",
+            "source": "remote_record",
+            "name": "snow",
+            "head": "0123456789abcdef",
+            "base_commit": "base-1",
+            "version": null,
+            "code_source_sha256": null,
+            "revision_recorded": false,
+            "reason": "local pin absent",
+        }),
+        json!([{"key": "DEF_TUNING_CNFAC", "range": [0.1, 0.9], "scale": "linear"}]),
+        json!([{"key": "DEF_TUNING_CNFAC", "value": 0.5, "position": 0.5, "position_scale": "linear", "at_bound": false}]),
+        json!([]),
+    ))
+}
+
+#[test]
+fn evidence_core_keeps_checkpoint_result_file_details() {
+    let evidence = s01_evidence();
+    let core = study_evidence_core(&evidence);
+    for side in ["baseline", "best"] {
+        for period in ["calibration", "validation"] {
+            let details = &core["comparison"][side][period];
+            assert_eq!(details["score_origin"], "checkpoint", "{side}/{period}");
+            assert_eq!(details["details_status"], "missing_or_partial");
+            assert_eq!(details["sites_recorded"].as_u64(), Some(0));
+            assert_eq!(details["sites_total"].as_u64(), Some(1));
+            assert!(
+                details["missing_result_files"]
+                    .to_string()
+                    .contains("/site: cannot read"),
+                "{side}/{period}: {details}"
+            );
+        }
+    }
+    assert_eq!(
+        core["comparison"]["best"]["calibration"]["score"].as_f64(),
+        Some(0.3)
+    );
+    // 通用 reverified=false 仍在，但不替代上面的具体缺失。
+    assert_eq!(core["verification"]["reverified"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_missing_details_survive_summary_and_calibration_diagnostic() {
+    let root = temp("study-checkpoint-details");
+    let _case = case(&root, "case", " DEF_CASE_NAME = 'test'\n");
+    let script = fake_study_cli(&root, &study_status_fixture(Some(s01_evidence())));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        cli: script,
+        ..ToolContext::default()
+    };
+
+    // Study 摘要：完整 evidence 直接带出明细缺失。
+    let summary = StudySummary.call(&json!({"study": "study"}), &ctx).unwrap();
+    let calibration = &summary["evidence"]["comparison"]["best"]["calibration"];
+    assert_eq!(calibration["score"].as_f64(), Some(0.3));
+    assert_eq!(calibration["score_origin"], "checkpoint");
+    assert_eq!(calibration["details_status"], "missing_or_partial");
+    assert!(calibration["missing_result_files"]
+        .to_string()
+        .contains("m000005/site"));
+
+    // calibration 诊断：初始 study 步骤的缺失列表必须指名具体结果文件。
+    let registry = crate::tools::Registry::standard();
+    let plan = registry
+        .tools()
+        .find(|tool| tool.name() == "diagnostic_plan")
+        .expect("diagnostic_plan tool");
+    let result = plan
+        .call(
+            &json!({
+                "workflow": "calibration",
+                "case": "case",
+                "variable": null,
+                "study": "study",
+                "workspace": null,
+                "flux": null,
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(result["status"], "incomplete");
+    let steps = result["steps"].as_array().unwrap();
+    let study = steps.iter().find(|step| step["id"] == "study").unwrap();
+    assert_eq!(study["status"], "partial");
+    assert!(
+        study["missing"].to_string().contains("m000005/site"),
+        "{}",
+        study["missing"]
+    );
+    assert!(study["missing"]
+        .to_string()
+        .contains("result-file details are incomplete"));
+    assert_eq!(
+        study["evidence"]["comparison"]["best"]["calibration"]["details_status"],
+        "missing_or_partial"
+    );
+    assert_eq!(
+        study["evidence"]["comparison"]["best"]["calibration"]["score"].as_f64(),
+        Some(0.3)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---- S02：极端压缩仍保留 legacy workspace 身份 ----
+
+fn s02_evidence(identity: Value) -> Value {
+    json!({
+        "schema": 1,
+        "study": {"id": "s-1", "kind": "tuning", "method": "differential-evolution", "status": "completed", "generation": 1},
+        "execution": {"state": "completed", "tasks": {"total": 2}, "partial_failures": false, "failed_tasks": []},
+        "selection": {"rule": "rule", "best_member": "m000005", "best_objective": 0.3, "provisional": false, "no_best_reason": null},
+        "objective": {"direction": "minimize", "loss": "loss", "target_count": 1, "targets": []},
+        "comparison": {
+            "basis": "basis",
+            "baseline": {"member": "m000000", "status": "recorded",
+                "calibration": {"status": "recorded", "score": 0.8, "targets": []},
+                "validation": {"status": "recorded", "score": 0.6, "targets": []},
+                "reason": null, "warnings": []},
+            "best": {"member": "m000005", "status": "recorded",
+                "calibration": {"status": "recorded", "score": 0.3, "targets": []},
+                "validation": {"status": "recorded", "score": 0.9, "targets": []},
+                "reason": null, "warnings": []},
+            "relation": {"calibration": "lower_loss", "validation": "higher_loss"},
+        },
+        "validation": {"configured": true, "status": "available", "windows": [{"target": "Qle", "from": 10, "to": 20}], "reasons": []},
+        "parameters": {"status": "recorded", "dimension_count": 1, "hybrid_weight_count": 0, "dims": [],
+            "baseline": {"status": "recorded", "values": []}, "best": {"status": "recorded", "values": []}},
+        "model_identity": identity,
+        "verification": {"recorded_result_files": 2, "succeeded_tasks": 2, "reverified": false, "note": "scores come from recorded result files"},
+        "remote": {"status": "recorded"},
+        "source_paths": {"root": "/studies/s-1", "manifest": "manifest.json", "samples": "samples", "state": "checkpoints/state", "results": "results/tasks"},
+        "warnings": [],
+        "warnings_count": 0,
+        "missing": [],
+    })
+}
+
+fn legacy_workspace_identity() -> Value {
+    json!({
+        "study_record": {
+            "status": "workspace",
+            "source": "remote_record",
+            "name": "snow",
+            "head": "0123456789abcdef",
+            "base_commit": "base-1",
+            "version": null,
+            "code_source_sha256": null,
+            "revision_recorded": false,
+            "reason": "local model-version.json pin is absent; identity comes from the captured remote Study record",
+        },
+        "current_selection": {
+            "status": "unknown",
+            "reason": "no frozen model is selected in the application",
+        },
+        "comparison": {"status": "unknown", "matches": null, "basis": "no comparable current frozen selection", "reason": null},
+    })
+}
+
+fn frozen_identity() -> Value {
+    json!({
+        "study_record": {
+            "status": "pinned",
+            "source": "model_version_file",
+            "name": "modified",
+            "head": "abc123",
+            "base_commit": "base",
+            "version": {"id": "workspace-x", "revision": 3},
+            "code_source_sha256": "a".repeat(64),
+            "revision_recorded": true,
+            "reason": null,
+        },
+        "current_selection": {
+            "status": "frozen",
+            "version": {"id": "workspace-x", "revision": 3},
+            "code_source_sha256": "a".repeat(64),
+            "reason": null,
+        },
+        "comparison": {"status": "matches", "matches": true, "basis": "id+revision+hash", "reason": null},
+    })
+}
+
+#[test]
+fn slim_identity_keeps_legacy_workspace_frozen_and_unknown_identity() {
+    let legacy = super::slim_identity(&legacy_workspace_identity());
+    let record = &legacy["study_record"];
+    assert_eq!(record["status"], "workspace");
+    assert_eq!(record["source"], "remote_record");
+    assert_eq!(record["name"], "snow");
+    assert_eq!(record["head"], "0123456789abcdef");
+    assert_eq!(record["base_commit"], "base-1");
+    assert!(record["version"].is_null());
+    assert_eq!(record["revision_recorded"], false);
+
+    let frozen = super::slim_identity(&frozen_identity());
+    assert_eq!(frozen["study_record"]["version"]["id"], "workspace-x");
+    assert_eq!(frozen["study_record"]["version"]["revision"], 3);
+    assert_eq!(
+        frozen["study_record"]["code_source_sha256"].as_str(),
+        Some("a".repeat(64).as_str())
+    );
+    assert_eq!(frozen["study_record"]["revision_recorded"], true);
+    assert_eq!(frozen["current_selection"]["version"]["revision"], 3);
+    // current_selection 的最小身份同样按类型保留 name/head/base_commit/version/hash。
+    let selected = super::slim_identity(&json!({
+        "study_record": {"status": "pinned", "version": {"id": "workspace-x", "revision": 3}},
+        "current_selection": {
+            "status": "frozen",
+            "name": "selected-work",
+            "head": "fedcba9876543210",
+            "base_commit": "base-2",
+            "version": {"id": "workspace-x", "revision": 3},
+            "code_source_sha256": "b".repeat(64),
+            "reason": null,
+        },
+        "comparison": {"status": "matches", "matches": true, "basis": "id+revision+hash", "reason": null},
+    }));
+    assert_eq!(selected["current_selection"]["name"], "selected-work");
+    assert_eq!(selected["current_selection"]["head"], "fedcba9876543210");
+    assert_eq!(selected["current_selection"]["base_commit"], "base-2");
+    assert_eq!(selected["current_selection"]["version"]["revision"], 3);
+    assert_eq!(
+        selected["current_selection"]["code_source_sha256"].as_str(),
+        Some("b".repeat(64).as_str())
+    );
+
+    let unknown = super::slim_identity(&json!({
+        "study_record": {"status": "unknown", "reason": "no pin and no remote record"},
+        "current_selection": {"status": "unknown", "reason": "no frozen model"},
+        "comparison": {"status": "unknown", "matches": null, "basis": null, "reason": null},
+    }));
+    assert_eq!(unknown["study_record"]["status"], "unknown");
+    assert_eq!(
+        unknown["study_record"]["reason"],
+        "no pin and no remote record"
+    );
+
+    // 身份文本有上限，但不能把长名字整个丢掉。
+    let long = super::slim_identity(&json!({
+        "study_record": {"status": "workspace", "name": "n".repeat(300), "head": "h".repeat(300)},
+        "current_selection": {"status": "unknown"},
+        "comparison": {"status": "unknown"},
+    }));
+    let name = long["study_record"]["name"].as_str().unwrap();
+    assert!(name.chars().count() <= 121, "{}", name.chars().count());
+    assert!(name.ends_with('…'));
+}
+
+#[test]
+fn evidence_core_minimal_budget_keeps_legacy_workspace_identity() {
+    let mut evidence = s02_evidence(legacy_workspace_identity());
+    // 大 source_paths/reason 等把证据核心推过 3000 字节，进入 minimal 预算分支。
+    evidence["study"]["id"] = json!("s".repeat(500));
+    evidence["study"]["method"] = json!("m".repeat(500));
+    evidence["selection"]["rule"] = json!("r".repeat(500));
+    evidence["selection"]["no_best_reason"] =
+        json!({"code": "c".repeat(200), "detail": "d".repeat(500)});
+    evidence["objective"]["loss"] = json!("l".repeat(500));
+    evidence["comparison"]["basis"] = json!("b".repeat(500));
+    evidence["comparison"]["baseline"]["reason"] = json!("x".repeat(500));
+    evidence["comparison"]["best"]["reason"] = json!("y".repeat(500));
+    evidence["model_identity"]["study_record"]["reason"] = json!("i".repeat(500));
+    evidence["warnings"] = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("{index}: {}", "w".repeat(500))))
+            .collect(),
+    );
+    evidence["missing"] = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("{index}: {}", "m".repeat(500))))
+            .collect(),
+    );
+    evidence["validation"]["reasons"] =
+        Value::Array((0..20).map(|_| json!("v".repeat(500))).collect());
+    evidence["validation"]["windows"] = Value::Array(
+        (0..20)
+            .map(|index| json!({"target": "t".repeat(300), "from": index, "to": index + 1}))
+            .collect(),
+    );
+    let core = study_evidence_core(&evidence);
+    assert!(
+        core.to_string().len() <= EVIDENCE_CORE_MAX_BYTES,
+        "{} bytes",
+        core.to_string().len()
+    );
+    assert_eq!(core["truncated"], true);
+    // 必须真的走到 minimal/最后兜底，而不是仅裁剪列表。
+    assert!(
+        core.get("notice").is_some(),
+        "core stayed on the detailed branch: {} bytes",
+        core.to_string().len()
+    );
+    let record = &core["model_identity"]["study_record"];
+    assert_eq!(record["status"], "workspace");
+    assert_eq!(record["source"], "remote_record");
+    assert_eq!(record["name"], "snow");
+    assert_eq!(record["head"], "0123456789abcdef");
+    assert_eq!(record["base_commit"], "base-1");
+    assert!(!record["reason"].as_str().unwrap_or_default().is_empty());
+
+    // frozen 身份在同样的极端压缩下仍保留 version/revision/hash。
+    let mut frozen_evidence = s02_evidence(frozen_identity());
+    frozen_evidence["study"]["id"] = json!("s".repeat(500));
+    frozen_evidence["comparison"]["basis"] = json!("b".repeat(500));
+    frozen_evidence["comparison"]["baseline"]["reason"] = json!("x".repeat(500));
+    frozen_evidence["comparison"]["best"]["reason"] = json!("y".repeat(500));
+    frozen_evidence["warnings"] = Value::Array(
+        (0..20)
+            .map(|index| json!(format!("{index}: {}", "w".repeat(500))))
+            .collect(),
+    );
+    let frozen_core = study_evidence_core(&frozen_evidence);
+    assert!(frozen_core.to_string().len() <= EVIDENCE_CORE_MAX_BYTES);
+    assert_eq!(
+        frozen_core["model_identity"]["study_record"]["version"]["id"],
+        "workspace-x"
+    );
+    assert_eq!(
+        frozen_core["model_identity"]["study_record"]["version"]["revision"],
+        3
+    );
+    assert_eq!(
+        frozen_core["model_identity"]["study_record"]["code_source_sha256"].as_str(),
+        Some("a".repeat(64).as_str())
+    );
+}

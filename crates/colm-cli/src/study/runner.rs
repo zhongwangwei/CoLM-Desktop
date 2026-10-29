@@ -1090,11 +1090,48 @@ fn member_warnings(state: Option<&StudyState>, member: &str) -> Vec<String> {
     })
 }
 
+/// checkpoint 候选记录里聚合分数的明细来源。分数仍以引擎记录为准，但 `results/tasks`
+/// 文件缺失/不可读时必须指名是哪个 member/site：`verification.reverified=false` 只说明
+/// 没有重新核验，不能替代"明细缺了哪一份"这个具体事实。
+fn candidate_details(
+    missing: &[String],
+    sites_recorded: usize,
+    sites_total: usize,
+) -> serde_json::Value {
+    json!({
+        "score_origin": "checkpoint",
+        "details_status": if missing.is_empty() { "complete" } else { "missing_or_partial" },
+        "missing_result_files": missing
+            .iter()
+            .take(EVIDENCE_LIST_LIMIT)
+            .map(|entry| compact_evidence_text(entry, EVIDENCE_TEXT_LIMIT))
+            .collect::<Vec<_>>(),
+        "missing_result_file_count": missing.len(),
+        "sites_recorded": sites_recorded,
+        "sites_total": sites_total,
+    })
+}
+
+fn with_candidate_details(
+    mut value: serde_json::Value,
+    details: &serde_json::Value,
+) -> serde_json::Value {
+    if let (Some(object), Some(details)) = (value.as_object_mut(), details.as_object()) {
+        for (key, item) in details {
+            object.insert(key.clone(), item.clone());
+        }
+    }
+    value
+}
+
 /// 引擎记录里该成员的候选状态比结果文件更权威：`refresh_candidates` 只在结果可比且完整时写分数，
 /// 并把 validation 置 None 的原因写进 warnings。证据必须与这个判定一致，不能自己对文件重打分。
+/// 明细缺失只作为附加事实透出，不把聚合分数改写成 null。
 fn comparison_period_from_candidate(
     member: &str,
     results: &[TaskResult],
+    missing: &[String],
+    sites_total: usize,
     state: Option<&StudyState>,
     period: &str,
     candidate: &CandidateState,
@@ -1111,30 +1148,40 @@ fn comparison_period_from_candidate(
             .collect::<Vec<_>>()
     };
     let targets = target_loss_rows(&rows);
+    let details = candidate_details(missing, results.len(), sites_total);
     if period == "calibration" {
         return match candidate.calibration {
-            Some(score) => json!({
+            Some(score) => with_candidate_details(
+                json!({
+                    "status": "recorded",
+                    "score": score,
+                    "targets": targets,
+                }),
+                &details,
+            ),
+            None => with_candidate_details(
+                json!({
+                    "status": "unavailable",
+                    "score": null,
+                    "reason": candidate.reason.as_deref().map_or_else(
+                        || "the Study recorded no calibration score for this member".to_string(),
+                        |reason| compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT),
+                    ),
+                    "targets": targets,
+                }),
+                &details,
+            ),
+        };
+    }
+    match candidate.validation {
+        Some(score) => with_candidate_details(
+            json!({
                 "status": "recorded",
                 "score": score,
                 "targets": targets,
             }),
-            None => json!({
-                "status": "unavailable",
-                "score": null,
-                "reason": candidate.reason.as_deref().map_or_else(
-                    || "the Study recorded no calibration score for this member".to_string(),
-                    |reason| compact_evidence_text(reason, EVIDENCE_TEXT_LIMIT),
-                ),
-                "targets": targets,
-            }),
-        };
-    }
-    match candidate.validation {
-        Some(score) => json!({
-            "status": "recorded",
-            "score": score,
-            "targets": targets,
-        }),
+            &details,
+        ),
         None => {
             let reasons = member_warnings(state, member);
             let errors = results
@@ -1149,16 +1196,19 @@ fn comparison_period_from_candidate(
                     })
                 })
                 .collect::<Vec<_>>();
-            json!({
-                "status": if rows.is_empty() { "unavailable" } else { "partial" },
-                "score": null,
-                "reason": reasons.first().cloned().unwrap_or_else(|| {
-                    "the Study recorded no validation score for this member (validation not comparable to the baseline or target errors)".to_string()
+            with_candidate_details(
+                json!({
+                    "status": if rows.is_empty() { "unavailable" } else { "partial" },
+                    "score": null,
+                    "reason": reasons.first().cloned().unwrap_or_else(|| {
+                        "the Study recorded no validation score for this member (validation not comparable to the baseline or target errors)".to_string()
+                    }),
+                    "reasons": reasons,
+                    "errors": errors,
+                    "targets": targets,
                 }),
-                "reasons": reasons,
-                "errors": errors,
-                "targets": targets,
-            })
+                &details,
+            )
         }
     }
 }
@@ -1195,7 +1245,9 @@ fn comparison_period(
     }
     // 已有候选记录：以引擎记录为准（见 comparison_period_from_candidate）。
     if let Some(candidate) = candidate {
-        return comparison_period_from_candidate(member, results, state, period, candidate);
+        return comparison_period_from_candidate(
+            member, results, missing, site_count, state, period, candidate,
+        );
     }
     let incomplete_reason = if missing.is_empty() {
         format!(
@@ -1814,11 +1866,27 @@ fn bound_evidence(mut evidence: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// 极端压缩后的两期分数；checkpoint 明细缺失的事实不随列表一起删掉。
 fn period_scores(side: &serde_json::Value) -> serde_json::Value {
     json!({
         "member": side["member"],
-        "calibration": {"status": side["calibration"]["status"], "score": side["calibration"]["score"]},
-        "validation": {"status": side["validation"]["status"], "score": side["validation"]["score"]},
+        "calibration": period_score(&side["calibration"]),
+        "validation": period_score(&side["validation"]),
+    })
+}
+
+fn period_score(period: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "status": period["status"],
+        "score": period["score"],
+        "score_origin": period["score_origin"],
+        "details_status": period["details_status"],
+        "sites_recorded": period["sites_recorded"],
+        "sites_total": period["sites_total"],
+        "missing_result_files": period["missing_result_files"]
+            .as_array()
+            .and_then(|files| files.first())
+            .cloned(),
     })
 }
 
@@ -10786,6 +10854,95 @@ esac
             validation: Vec::new(),
             validation_errors: Vec::new(),
         }
+    }
+
+    /// S01：checkpoint 里的聚合分仍可用，但 results/tasks 明细缺失必须指名文件，不能只报 recorded。
+    #[test]
+    fn evidence_checkpoint_scores_expose_missing_result_file_details() {
+        let root = evidence_root("checkpoint-details");
+        let manifest = evidence_manifest(&root);
+        write_evidence_sample_file(
+            &manifest,
+            "g000000.csv",
+            &[("m000000", true, 0, 0, &[Some(0.5)])],
+        );
+        write_evidence_sample_file(
+            &manifest,
+            "g000001.csv",
+            &[("m000001", false, 1, 1, &[Some(0.2)])],
+        );
+        write_evidence_result(&manifest, "m000000", &[("Qle", 0.8)], &[("Qle", 0.6)], &[]);
+        write_evidence_result(&manifest, "m000001", &[("Qle", 0.4)], &[("Qle", 0.9)], &[]);
+        let mut state = evidence_state(
+            &manifest,
+            StudyStatus::Completed,
+            &["m000000", "m000001"],
+            &[
+                ("m000000", Some(0.8), Some(0.6)),
+                ("m000001", Some(0.4), Some(0.9)),
+            ],
+            Some(("m000001", 0.4)),
+        );
+
+        // 删除最优成员的结果文件：checkpoint 分数仍在，但明细缺一份。
+        fs::remove_file(task_result_path(&manifest, "m000001", "site")).unwrap();
+        let evidence = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let calibration = &evidence["comparison"]["best"]["calibration"];
+        assert_eq!(calibration["status"], "recorded");
+        assert_eq!(calibration["score"].as_f64(), Some(0.4));
+        assert_eq!(calibration["score_origin"], "checkpoint");
+        assert_eq!(calibration["details_status"], "missing_or_partial");
+        assert_eq!(calibration["sites_recorded"].as_u64(), Some(0));
+        assert_eq!(calibration["sites_total"].as_u64(), Some(1));
+        assert!(calibration["missing_result_files"][0]
+            .as_str()
+            .unwrap()
+            .contains("m000001/site"));
+        let validation = &evidence["comparison"]["best"]["validation"];
+        assert_eq!(validation["status"], "recorded");
+        assert_eq!(validation["score"].as_f64(), Some(0.9));
+        assert_eq!(validation["score_origin"], "checkpoint");
+        assert_eq!(validation["details_status"], "missing_or_partial");
+        // 基线明细完整时明确 complete，两者不混。
+        let baseline = &evidence["comparison"]["baseline"]["calibration"];
+        assert_eq!(baseline["details_status"], "complete");
+        assert_eq!(baseline["sites_recorded"].as_u64(), Some(1));
+        assert_eq!(baseline["sites_total"].as_u64(), Some(1));
+        // 通用 reverified=false 不能替代具体缺失原因。
+        assert_eq!(evidence["verification"]["reverified"], false);
+
+        // 损坏的结果文件同样指名，并保留解析错误。
+        fs::write(task_result_path(&manifest, "m000001", "site"), "not json").unwrap();
+        let corrupt = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let calibration = &corrupt["comparison"]["best"]["calibration"];
+        assert_eq!(calibration["score"].as_f64(), Some(0.4));
+        assert_eq!(calibration["details_status"], "missing_or_partial");
+        assert!(calibration["missing_result_files"]
+            .to_string()
+            .contains("cannot parse"));
+        assert!(calibration["missing_result_files"]
+            .to_string()
+            .contains("m000001/site"));
+
+        // 引擎记录不可用时，details 状态和缺失文件也要一起透出。
+        state.candidates.insert(
+            "m000001".into(),
+            evidence_engine_candidate(None, None, false, Some("required target set is incomplete")),
+        );
+        let unavailable = study_evidence(&root, &manifest, Some(&state)).unwrap();
+        let calibration = &unavailable["comparison"]["best"]["calibration"];
+        assert_eq!(calibration["status"], "unavailable");
+        assert!(calibration["score"].is_null());
+        assert_eq!(calibration["score_origin"], "checkpoint");
+        assert_eq!(calibration["details_status"], "missing_or_partial");
+        assert!(calibration["missing_result_files"]
+            .to_string()
+            .contains("m000001/site"));
+        assert!(calibration["reason"]
+            .as_str()
+            .unwrap()
+            .contains("required target set is incomplete"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
