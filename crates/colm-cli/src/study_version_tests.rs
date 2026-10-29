@@ -1,3 +1,4 @@
+#![cfg_attr(windows, allow(dead_code))]
 use super::*;
 use colm_workspace::version::{Readiness, Touches};
 

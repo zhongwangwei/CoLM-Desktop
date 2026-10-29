@@ -1,3 +1,4 @@
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
 use super::*;
 
 use std::path::{Path, PathBuf};
