@@ -4,17 +4,21 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { withTimeout } from '../../lib/ipc';
 import {
+  appendDelta,
   defaultSettings,
   egressTarget,
   historySettingsOf,
   rejectedBeforeTurn,
+  taskSnapshotOf,
   withoutLastUser,
   type AgentEvent,
+  type AgentTaskSnapshot,
   type Message,
   type Settings,
 } from './model';
 import {
   clearsDraftAfterAck,
+  eventBelongsToTurn,
   newTurn,
   turnDelivered,
   turnFailed,
@@ -450,6 +454,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     usagePending: false,
     contextUsage: null as Record<string, unknown> | null,
     docsIndex: null as AgentEvent | null,
+    taskSnapshot: null as AgentTaskSnapshot | null,
   };
   const refs = {
     running: { current: false },
@@ -568,6 +573,13 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setUsagePending: updates.setUsagePending,
     setContextUsage: updates.setContextUsage,
     setDocsIndex: updates.setDocsIndex,
+    streamed: refs.streamed,
+    appendDelta,
+    setTaskSnapshot: (value: AgentTaskSnapshot | null) => {
+      ui.taskSnapshot = value;
+    },
+    taskSnapshotOf,
+    eventBelongsToTurn,
   });
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
     input: typed,
@@ -938,8 +950,17 @@ test('budget errors tell the user how to set a window or shrink the request with
     errorText(
       'the request needs about 120000 estimated input tokens plus 8192 reserved output tokens and 2560 safety tokens, which exceeds the 128000-token context window',
     ),
-    /nothing was sent/i,
+    /blocked model request was not sent/i,
   );
+  // 被拦住的是这一次模型请求，不能暗示本轮更早的请求也没发出去。
+  assert.match(
+    errorText(
+      'the request needs about 120000 estimated input tokens plus 8192 reserved output tokens and 2560 safety tokens, which exceeds the 128000-token context window',
+    ),
+    /earlier requests in this turn may already have been sent/i,
+  );
+  // 中文文案同样限定"被拦住的这次"，不能暗示本轮更早请求没发。
+  assert.match(panelSource, /被拦住的这次模型请求没有发往模型服务（本轮较早的请求可能已经发送）/);
   assert.equal(errorText('HTTP 500 from the model'), 'HTTP 500 from the model');
 });
 
@@ -1088,4 +1109,141 @@ test('U02: the panel shows the backend, model, frozen revision and the routing h
     /disabled=\{!ready \|\| running \|\| scopeBusy \|\| state\.assistantSettingsOpen\}/,
   );
   assert.match(panelSource, /正在保存范围/);
+});
+
+// ---------------------------------------------------------------------------
+// U03/U04/U05：证据卡、未知副作用核对横幅、迟到事件与预算文案
+// ---------------------------------------------------------------------------
+
+test('U03: history tool results render an evidence card and keep the raw JSON fallback', () => {
+  assert.match(panelSource, /historyEvidence\(item\.name, item\.result, state\.language\)/);
+  assert.match(panelSource, /<EvidenceCardView/);
+  assert.match(panelSource, /原始 JSON/);
+  // 失败/非 JSON 仍走原来的原始 JSON 分支（historyEvidence 返回 null）。
+  assert.match(panelSource, /item\.ok && item\.result != null/);
+});
+
+function openHarness() {
+  const calls: { command: string; args: Record<string, unknown> }[] = [];
+  const state = { error: '' };
+  const context = {
+    invoke: async (command: string, args: Record<string, unknown> = {}) => {
+      calls.push({ command, args });
+    },
+    setError: (value: string) => {
+      state.error = value;
+    },
+    errorText: (message: string) => String(message).replace(/^Error: /, ''),
+    t: (_zh: string, en: string) => en,
+  };
+  return {
+    calls,
+    state,
+    openEvidencePath: compileFunction<(path: string) => Promise<void>>('openEvidencePath', context),
+    openEvidenceUrl: compileFunction<(url: string) => Promise<void>>('openEvidenceUrl', context),
+  };
+}
+
+test('U03: only open_path for local files and assistant_open_url for http(s) links', async () => {
+  const harness = openHarness();
+  await harness.openEvidencePath('/repos/desktop/src/a.F90');
+  assert.deepEqual(harness.calls.at(-1), {
+    command: 'open_path',
+    args: { path: '/repos/desktop/src/a.F90' },
+  });
+  await harness.openEvidenceUrl('https://github.com/o/r/pull/7');
+  assert.deepEqual(harness.calls.at(-1), {
+    command: 'assistant_open_url',
+    args: { url: 'https://github.com/o/r/pull/7' },
+  });
+  // 非 http(s) 链接不发给后端，也不拼成文件路径。
+  await harness.openEvidenceUrl('file:///etc/passwd');
+  assert.match(harness.state.error, /http\/https/i);
+  assert.equal(harness.calls.length, 2);
+});
+
+function reconcileHarness(options: { reject?: Error; note?: string } = {}) {
+  const calls: { command: string; args: Record<string, unknown> }[] = [];
+  const state = {
+    reconciling: [] as boolean[],
+    error: '',
+    notice: '',
+  };
+  const invoke = async (command: string, args: Record<string, unknown> = {}) => {
+    calls.push({ command, args });
+    if (options.reject) throw options.reject;
+  };
+  const reconcileEffects = compileFunction<(ids: string[]) => Promise<void>>('reconcileEffects', {
+    reconciling: false,
+    reconcileNote: options.note ?? '',
+    setReconciling: (value: boolean) => {
+      state.reconciling.push(value);
+    },
+    setReconcileError: (value: string) => {
+      state.error = value;
+    },
+    setReconcileNotice: (value: string) => {
+      state.notice = value;
+    },
+    invoke,
+    t: (_zh: string, en: string) => en,
+    errorText: (message: string) => String(message).replace(/^Error: /, ''),
+  });
+  return { calls, state, reconcileEffects };
+}
+
+test('U04: reconcile submits only the listed old action ids and keeps the banner on failure', async () => {
+  const ok = reconcileHarness({ note: 'checked run status' });
+  await ok.reconcileEffects(['old-1', 'old-2']);
+  assert.deepEqual(ok.calls.at(-1), {
+    command: 'assistant_reconcile_effects',
+    args: { ids: ['old-1', 'old-2'], note: 'checked run status' },
+  });
+  assert.match(ok.state.notice, /submitted/i);
+  assert.deepEqual(ok.state.reconciling, [true, false]);
+
+  const failed = reconcileHarness({ reject: new Error('reconcile transport failed') });
+  await failed.reconcileEffects(['old-1']);
+  assert.match(failed.state.error, /transport failed/);
+  assert.equal(failed.state.notice, '', '失败不能显示成功提示');
+  assert.deepEqual(failed.state.reconciling, [true, false]);
+});
+
+test('U04: banner comes from the task snapshot and normal turn events cannot clear it', async () => {
+  const harness = sendHarness();
+  const sending = harness.send();
+  await settle();
+  harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: true } });
+  assert.equal(harness.ui.taskSnapshot?.requires_reconciliation, true);
+  // 普通 tool_result / assistant_delta / 新消息都不改任务快照。
+  harness.handleEvent({ type: 'tool_result', id: 'call-1', ok: true, result: '{}' });
+  harness.handleEvent({ type: 'assistant_delta', text: 'still working' });
+  assert.equal(harness.ui.taskSnapshot?.requires_reconciliation, true);
+  // 只有新的 task_state 明确不再要求核对才隐藏。
+  harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: false } });
+  assert.equal(harness.ui.taskSnapshot?.requires_reconciliation, false);
+  harness.resolveAck();
+  await sending;
+  assert.match(panelSource, /review\.required &&/);
+  assert.match(panelSource, /<TaskReviewBanner/);
+  assert.match(panelSource, /pendingReconciliation\(taskSnapshot\)/);
+  assert.match(panelSource, /setTaskSnapshot\(taskSnapshotOf\(event\.task\)\)/);
+  assert.match(panelSource, /reconcileEffects\(ids\)/);
+});
+
+test('U05: late task_state and mismatched turn ids do not mark the new message as accepted', async () => {
+  const harness = sendHarness();
+  const sending = harness.send();
+  await settle();
+  // task_state 在 turn_done 之后才发：它不能证明新消息已被模型接受。
+  harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: false } });
+  assert.equal(harness.refs.outgoing.current?.phase, 'preparing');
+  // 后端给了轮次 ID 但不是当前这一轮：同样不接受。
+  harness.handleEvent({ type: 'usage', turn: 999, prompt_tokens: 1 });
+  assert.equal(harness.refs.outgoing.current?.phase, 'preparing');
+  // 属于这一轮的事件（id 对齐）才算接受。
+  harness.handleEvent({ type: 'usage', turn: 1, prompt_tokens: 1, completion_tokens: 2 });
+  assert.equal(harness.refs.outgoing.current?.phase, 'accepted');
+  harness.resolveAck();
+  await sending;
 });

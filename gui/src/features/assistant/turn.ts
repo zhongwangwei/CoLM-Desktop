@@ -72,3 +72,34 @@ export function turnFailed<A>(turn: PendingTurn<A>): PendingTurn<A> {
 export function clearsDraftAfterAck<A>(turn: PendingTurn<A>): boolean {
   return turn.phase === 'delivered' || turn.phase === 'accepted';
 }
+
+/**
+ * 属于当前这一轮的轮内事件类型。`task_state`（turn_done 之后才发的任务检查点）、
+ * `docs_index_status`、`ready`/`exited`/`error` 都不是"本轮已被模型接受"的证据：
+ * 它们的迟到实例不能把刚发出的新消息误标成 accepted，否则拒绝时就不再撤回气泡/恢复草稿。
+ */
+const TURN_EVENT_TYPES = new Set([
+  'assistant_delta',
+  'reasoning_delta',
+  'tool_call',
+  'tool_result',
+  'approval_request',
+  'ui_request',
+  'usage',
+  'context',
+  'turn_done',
+]);
+
+/**
+ * 迟到/旧轮事件不得影响新消息（U05）：若后端给了轮次/请求 ID，必须与当前 pending 轮一致；
+ * 没有 ID 时只接受轮内事件类型（上面的白名单），其余一律不算接受证据。
+ */
+export function eventBelongsToTurn<A>(
+  turn: PendingTurn<A>,
+  event: { type?: string; turn?: unknown; turn_id?: unknown; request_id?: unknown },
+): boolean {
+  const explicit = event.turn_id ?? event.turn ?? event.request_id;
+  if (explicit !== undefined && explicit !== null && String(explicit).trim() !== '')
+    return String(explicit) === String(turn.id);
+  return typeof event.type === 'string' && TURN_EVENT_TYPES.has(event.type);
+}

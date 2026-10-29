@@ -153,6 +153,22 @@ export const commandContract = {
   },
   "assistant_cancel": {},
   "assistant_new_session": {},
+  "assistant_reconcile_effects": {
+    "ids": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    },
+    "note": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "assistant_open_url": {
+    "url": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "bench_status": {},
   "bench_install": {
     "step": {

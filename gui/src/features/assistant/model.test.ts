@@ -12,26 +12,37 @@ import {
   formatHistoryTime,
   historyContextLabel,
   historyInput,
+  historyEvidence,
+  historyFileOpenPath,
   historyRepoLines,
   historyRepositoryLabel,
+  historyToolKind,
   historyScopeHint,
   historyScopeLabel,
   historySettingsOf,
   historySyncSummary,
+  localPathsInAction,
+  localPathsInJsonText,
   managedNodeText,
   parseApiOptions,
+  pendingReconciliation,
+  safeHistoryRelativePath,
   rememberProfile,
   retrievalSettingsProblem,
   retrievalStateText,
   selectProvider,
   settingsForSave,
   shortSha,
+  taskActionOutput,
+  taskActionTitle,
+  taskSnapshotOf,
   thinkSettings,
   thinkValue,
   withChoice,
   withContextWindowCleared,
   withHistoryPath,
   withHistoryScope,
+  formatUnixSeconds,
   EXAMPLE_STARTERS,
   examplePrompt,
   providerLabel,
@@ -738,4 +749,438 @@ it('names the current backend, model and frozen revision for the history hint', 
   assert.equal(codex.backend, 'Local Codex');
   assert.equal(codex.model, 'gpt-codex');
   assert.equal(codex.revision, 'official / built-in');
+});
+
+// ---------------------------------------------------------------------------
+// U03：只读历史证据卡
+// ---------------------------------------------------------------------------
+
+const historyToolResult = (value: unknown) => JSON.stringify(value);
+
+it('recognises history tools with external-backend prefixes only', () => {
+  for (const name of [
+    'source_history',
+    'mcp__colm__source_history',
+    'colm/source_history',
+    'colm.source_history',
+    'commit_details',
+    'mcp__colm__commit_details',
+    'commit_pull_requests',
+  ])
+    assert.ok(historyToolKind(name), name);
+  for (const name of ['source_history_extra', 'read_file', 'commit', '', undefined, null])
+    assert.equal(historyToolKind(name), null, String(name));
+});
+
+it('keeps only safe relative history paths and builds open_path targets from trusted roots', () => {
+  assert.equal(safeHistoryRelativePath('src/foo.F90'), 'src/foo.F90');
+  assert.equal(safeHistoryRelativePath('src\\foo.F90'), 'src/foo.F90');
+  for (const path of ['/etc/passwd', '../secret', 'a/../../b', 'a//b', 'file:///etc', 'a\nb', ''])
+    assert.equal(safeHistoryRelativePath(path), null, JSON.stringify(path));
+  assert.equal(historyFileOpenPath('/repos/desktop', 'src/foo.F90'), '/repos/desktop/src/foo.F90');
+  // 可疑相对路径/非绝对根目录都不给出可点击目标。
+  assert.equal(historyFileOpenPath('/repos/desktop', '../etc/passwd'), null);
+  assert.equal(historyFileOpenPath('relative/root', 'src/foo.F90'), null);
+  assert.equal(historyFileOpenPath('/repos/desktop', 'https://x/y'), null);
+  assert.equal(historyFileOpenPath(undefined, 'src/foo.F90'), null);
+});
+
+it('renders source_history as structured evidence without inventing motivation', () => {
+  const result = historyToolResult({
+    schema: 1,
+    query: {
+      symbol: 'f_fevg',
+      repository: 'both',
+      path: null,
+      source: {
+        mode: 'frozen_model',
+        source_dir: '/models/src',
+        dirty: true,
+        commit: 'a'.repeat(40),
+      },
+      endpoints: {
+        desktop: { ref: 'main', sha: 'b'.repeat(40) },
+        colm_upstream: { ref: 'upstream/main', sha: 'c'.repeat(40) },
+      },
+    },
+    repos: {
+      desktop: {
+        key: 'desktop',
+        identity: { state: 'verified', root: '/repos/desktop', remote: null },
+        endpoint: { ref: 'main', sha: 'b'.repeat(40) },
+        history: 'verified',
+        locations: [
+          { path: 'src/a.F90', line: 42, scope: 'module', kind: 'fortran', commit: 'b'.repeat(40) },
+        ],
+        commits: [
+          {
+            sha: 'b'.repeat(40),
+            author: 'A U Thor',
+            author_time_unix: 1_790_000_000,
+            committer_time_unix: 1_730_000_000,
+            summary: 'change f_fevg',
+            reason: {
+              status: 'unchecked',
+              basis: 'commit_message',
+              excerpt: 'because',
+              evidence_candidates: [],
+            },
+            relevance: ['grep'],
+            truncated: false,
+          },
+        ],
+        uncommitted: [{ path: 'src/b.F90', uncommitted: true, hunks: [] }],
+        notes: [],
+        errors: [],
+      },
+      colm_upstream: {
+        key: 'colm_upstream',
+        identity: { state: 'unverified', root: '/repos/upstream', remote: null },
+        endpoint: null,
+        history: 'unavailable',
+        locations: [],
+        commits: [],
+        uncommitted: [],
+        notes: ['repository history is unavailable'],
+        errors: ['not a git checkout'],
+      },
+    },
+    cross: {
+      links: [
+        {
+          state: 'verified',
+          basis: ['path+blob', 'structured-upstream-commit'],
+          upstream: {
+            repository: 'colm_upstream',
+            commit: 'c'.repeat(40),
+            path: 'src/a.F90',
+            blob: 'blob',
+          },
+          desktop: {
+            repository: 'desktop',
+            vendor_path: 'vendor/CoLM202X/src/a.F90',
+            import_commit: { sha: 'd'.repeat(40) },
+            later_commits: [],
+            blob: 'blob',
+          },
+          candidates: [],
+          notes: [],
+        },
+        {
+          state: 'candidate',
+          basis: ['path'],
+          upstream: { repository: 'colm_upstream', commit: null, path: 'src/c.F90', blob: null },
+          desktop: null,
+          candidates: [{ sha: 'e'.repeat(40), blob_equal: true }],
+          notes: ['multiple candidates'],
+        },
+        { state: 'unmapped', basis: [], upstream: null, desktop: null, candidates: [], notes: [] },
+      ],
+    },
+    limits: ['cross links capped at 20'],
+    truncated: true,
+    history_root: '/data/history',
+  });
+  const evidence = historyEvidence('mcp__colm__source_history', result, 'en');
+  assert.ok(evidence);
+  assert.match(evidence!.summary, /f_fevg/);
+  assert.match(evidence!.summary, /1 locations/);
+  assert.match(evidence!.summary, /1 commits/);
+  assert.match(evidence!.summary, /truncated/);
+  const types = evidence!.sections.map((section) => section.title);
+  assert.ok(types.includes('query'));
+  assert.ok(types.some((title) => title.includes('Desktop')));
+  // 作者时间与提交时间分开显示，不合并。
+  const desktop = evidence!.sections.find((section) => section.title.includes('Desktop'))!;
+  const commitItem = desktop.items!.find((item) => item.title.includes('bbbbbbb'))!;
+  const labels = commitItem.fields.map((field) => field.label);
+  assert.ok(labels.some((label) => /author time/i.test(label)));
+  assert.ok(labels.some((label) => /committer time/i.test(label)));
+  // reason 只显示原文候选状态，不写成已证实动机。
+  const reasonField = commitItem.fields.find((field) => /reason status/i.test(field.label))!;
+  assert.equal(reasonField.value, 'unchecked');
+  // 文件可点击目标只来自可信仓库根目录。
+  const location = desktop.items!.find((item) => item.title === 'src/a.F90:42')!;
+  assert.equal(location.path, '/repos/desktop/src/a.F90');
+  // 上游不可用时保留 error 文本，不伪造位置。
+  const upstream = evidence!.sections.find((section) => section.title.includes('CoLM upstream'))!;
+  assert.match(upstream.note!, /not a git checkout/);
+  const cross = evidence!.sections.find((section) => section.title === 'cross-repository links')!;
+  assert.deepEqual(
+    cross.items!.map((item) => item.title.split(' · ')[0]),
+    ['verified', 'candidate', 'unmapped'],
+  );
+  assert.ok(cross.items!.every((item) => item.fields.some((field) => /basis/i.test(field.label))));
+  assert.match(cross.note!, /formal Git trailer/i);
+  const limits = evidence!.sections.find((section) => section.title === 'limits and truncation')!;
+  assert.match(limits.note!, /cross links capped/);
+});
+
+it('renders commit_details with separated times, reason candidates, limited diffs and safe files', () => {
+  const result = historyToolResult({
+    schema: 1,
+    repository: {
+      key: 'desktop',
+      owner: 'zhongwangwei',
+      repo: 'CoLM-Desktop',
+      url: 'https://github.com/zhongwangwei/CoLM-Desktop',
+      path: '/repos/desktop',
+      identity: { state: 'verified', root: '/repos/desktop', remote: null },
+    },
+    commit: {
+      sha: 'b'.repeat(40),
+      parents: ['c'.repeat(40)],
+      author: 'A U Thor',
+      author_email: 'a@example.com',
+      author_time_unix: 1_790_000_000,
+      committer: 'C O Mitter',
+      committer_time_unix: 1_730_000_000,
+      message: 'subject\n\nbody of the change',
+      compare_parent: 'c'.repeat(40),
+      files: [
+        {
+          path: 'src/a.F90',
+          hunks: [
+            {
+              old_start: 1,
+              old_lines: 1,
+              new_start: 1,
+              new_lines: 1,
+              old_code: ['x=1'],
+              new_code: ['x=2'],
+              truncated: false,
+            },
+          ],
+        },
+        { path: '../etc/passwd', hunks: [] },
+      ],
+      truncated: true,
+    },
+    reason: {
+      status: 'unchecked',
+      basis: 'commit_message',
+      excerpt: 'subject',
+      evidence_candidates: [
+        {
+          source: 'commit_message',
+          author: null,
+          url: 'https://github.com/o/r/commit/abc',
+          scope: 'commit_message',
+          excerpt: 'subject',
+        },
+      ],
+    },
+    notes: ['merge commit with 2 parents; diff compares against the first parent'],
+  });
+  const evidence = historyEvidence('commit_details', result, 'zh');
+  assert.ok(evidence);
+  assert.match(evidence!.summary, /bbbbbbb/);
+  const commitSection = evidence!.sections.find((section) => section.title === '提交')!;
+  assert.ok(
+    commitSection.items!.some(
+      (item) => item.title === '提交说明' && /body of the change/.test(item.detail!),
+    ),
+    '完整提交说明放在可展开原文里',
+  );
+  const labels = commitSection.fields.map((field) => field.label);
+  assert.ok(labels.includes('作者时间'));
+  assert.ok(labels.includes('提交时间'));
+  assert.ok(
+    !commitSection.fields.some((field) => field.label === '作者时间' && field.value === ''),
+  );
+  const reason = evidence!.sections.find((section) => section.title.includes('修改理由'))!;
+  assert.match(reason.fields[0].value, /unchecked/);
+  assert.equal(reason.items![0].url, 'https://github.com/o/r/commit/abc');
+  const files = evidence!.sections.find((section) => section.title === '改动文件')!;
+  assert.equal(files.items![0].title, 'src/a.F90');
+  assert.equal(files.items![0].path, '/repos/desktop/src/a.F90');
+  assert.match(files.items![0].detail!, /@@ -1,1 \+1,1 @@/);
+  assert.match(files.items![0].detail!, /\+x=2/);
+  // 可疑路径不给可点击目标。
+  assert.equal(files.items![1].path, undefined);
+  const notes = evidence!.sections.find((section) => section.title === '说明')!;
+  assert.match(notes.note!, /merge commit/);
+});
+
+it('renders commit_pull_requests with pagination, reason candidates and unverified markers', () => {
+  const result = historyToolResult({
+    schema: 2,
+    repository: {
+      owner: 'zhongwangwei',
+      repo: 'CoLM-Desktop',
+      url: 'https://github.com/zhongwangwei/CoLM-Desktop',
+    },
+    commit: 'b'.repeat(40),
+    fetched_at_unix_ms: 1_790_000_000_000,
+    offline: false,
+    from_cache: false,
+    complete: false,
+    pulls: [
+      {
+        number: 7,
+        owner_repo: 'zhongwangwei/CoLM-Desktop',
+        url: 'https://github.com/zhongwangwei/CoLM-Desktop/pull/7',
+        title: 'Explain the change',
+        state: 'closed',
+        merged_at_unix_ms: 1_780_000_000_000,
+        author: 'A U Thor',
+        head_sha: 'd'.repeat(40),
+        base_ref: 'main',
+        body_excerpt: 'why',
+        comments: { complete: false, excerpt_count: 1 },
+        reason: {
+          status: 'unchecked',
+          basis: 'pull_body',
+          excerpt: 'why',
+          evidence_candidates: [
+            {
+              source: 'pull_body',
+              author: 'A U Thor',
+              url: 'https://github.com/o/r/pull/7',
+              scope: 'body',
+              excerpt: 'why',
+            },
+          ],
+        },
+        evidence_id: 'github:zhongwangwei/CoLM-Desktop#7',
+      },
+    ],
+    page: { offset: 0, page_size: 3, returned: 3, total: 5, has_more: true, next_cursor: '3' },
+    notices: ['cached GitHub data was fetched without PR discussion'],
+    errors: [{ kind: 'rate_limit', status: 403, message: 'API rate limit exceeded' }],
+  });
+  const evidence = historyEvidence('mcp__colm__commit_pull_requests', result, 'en');
+  assert.ok(evidence);
+  assert.match(evidence!.summary, /bbbbbbb/);
+  assert.match(evidence!.summary, /incomplete list|complete/i);
+  const query = evidence!.sections.find((section) => section.title === 'query')!;
+  assert.ok(query.fields.some((field) => /total PRs/i.test(field.label) && field.value === '5'));
+  assert.ok(query.fields.some((field) => /next cursor/i.test(field.label) && field.value === '3'));
+  const pulls = evidence!.sections.find((section) => section.title === 'associated pull requests')!;
+  assert.equal(pulls.items![0].title, '#7 Explain the change');
+  assert.equal(pulls.items![0].url, 'https://github.com/zhongwangwei/CoLM-Desktop/pull/7');
+  const labels = pulls.items![0].fields.map((field) => field.label);
+  assert.ok(labels.some((label) => /reason status/i.test(label)));
+  assert.ok(labels.some((label) => /discussion completeness/i.test(label)));
+  // 理由候选是独立条目，带出处链接。
+  assert.ok(pulls.items!.some((item) => item.url === 'https://github.com/o/r/pull/7'));
+  const notices = evidence!.sections.find((section) => section.title === 'notices')!;
+  assert.match(notices.note!, /without PR discussion/);
+  const errors = evidence!.sections.find((section) => section.title === 'errors')!;
+  assert.match(errors.items![0].title, /rate limit/);
+  const how = evidence!.sections.find((section) => section.title === 'how to continue')!;
+  assert.match(how.note!, /cursor=3/);
+  assert.match(how.note!, /do not claim the whole PR list/i);
+});
+
+it('shows detail_unverified as unverified, never as unassociated', () => {
+  const evidence = historyEvidence(
+    'commit_pull_requests',
+    historyToolResult({
+      repository: { owner: 'o', repo: 'r', url: 'https://github.com/o/r' },
+      commit: 'b'.repeat(40),
+      offline: true,
+      from_cache: false,
+      complete: false,
+      pulls: [],
+      page: null,
+      detail_unverified: {
+        pr_number: 9,
+        unverified: true,
+        list_complete: false,
+        offline: true,
+        from_cache: false,
+        reason: 'GitHub was not contacted (offline cache miss)',
+      },
+      notices: [],
+      errors: [],
+    }),
+    'zh',
+  );
+  assert.ok(evidence);
+  const section = evidence!.sections.find((item) => item.title === '未核验的 PR 详情')!;
+  assert.match(section.note!, /未核验 ≠ 未关联/);
+  assert.match(section.note!, /offline cache miss/);
+  // 空 pulls 不能在没有完整列表时写成"没有关联"。
+  const pulls = evidence!.sections.find((item) => item.title === '关联 PR')!;
+  assert.match(pulls.note!, /只有完整读过的关联列表/);
+});
+
+it('falls back to the raw JSON display for non-JSON or unknown tool results', () => {
+  assert.equal(historyEvidence('source_history', 'not json', 'en'), null);
+  assert.equal(historyEvidence('source_history', '[]', 'en'), null);
+  assert.equal(historyEvidence('read_file', historyToolResult({ a: 1 }), 'en'), null);
+  assert.equal(historyEvidence('source_history', null, 'en'), null);
+});
+
+// ---------------------------------------------------------------------------
+// U04：任务快照与未知副作用核对
+// ---------------------------------------------------------------------------
+
+it('extracts pending reconciliation actions and ids from a task snapshot', () => {
+  const snapshot = taskSnapshotOf({
+    goal: 'run something',
+    state: 'failed',
+    phase: 'validate',
+    requires_reconciliation: true,
+    effect_unknown_actions: [
+      {
+        id: 'call-1',
+        name: 'run_case',
+        arguments: '{"case_dir":"/cases/a"}',
+        effect: 'EffectUnknown',
+        state: 'effect_unknown',
+      },
+      { id: '', name: 'run_remote', arguments: '{}' },
+    ],
+    recent_actions: [{ id: 'call-1', name: 'run_case' }],
+    next_step: 'inspect existing outputs',
+  });
+  assert.ok(snapshot);
+  const review = pendingReconciliation(snapshot);
+  assert.equal(review.required, true);
+  assert.equal(review.actions.length, 2);
+  assert.deepEqual(review.ids, ['call-1'], '空 id 不能提交核对');
+  assert.equal(snapshot!.next_step, 'inspect existing outputs');
+  // 没有明确的 requires_reconciliation 时横幅不出现。
+  assert.equal(pendingReconciliation({ requires_reconciliation: false }).required, false);
+  assert.equal(pendingReconciliation(null).required, false);
+  // 缺 effect_unknown_actions 的旧快照：保守地从 actions 里取 EffectUnknown。
+  const legacy = taskSnapshotOf({
+    requires_reconciliation: true,
+    actions: [
+      { id: 'old-1', name: 'run_case', mutating: true, effect: 'EffectUnknown' },
+      { id: 'old-2', name: 'read_file', mutating: false, effect: 'FailedNoEffect' },
+      {
+        id: 'old-3',
+        name: 'run_remote',
+        mutating: true,
+        effect: 'EffectUnknown',
+        reconciled: true,
+      },
+    ],
+  });
+  assert.deepEqual(pendingReconciliation(legacy).ids, ['old-1'], '已核对过的旧动作不再提交');
+  assert.equal(pendingReconciliation(legacy).actions.length, 1);
+});
+
+it('summarises review actions and finds local paths without opening arbitrary URLs', () => {
+  const action = {
+    id: 'call-1',
+    name: 'run_case',
+    arguments: '{"case_dir":"/cases/a","note":"https://example.com/x"}',
+    result: '{"output_dir":"/cases/a/output","log":"relative/log.txt"}',
+    effect: 'EffectUnknown',
+    state: 'effect_unknown',
+  };
+  const title = taskActionTitle(action, 'en');
+  assert.match(title, /run_case/);
+  assert.match(title, /call-1/);
+  assert.match(title, /EffectUnknown/);
+  assert.match(taskActionOutput(action), /\/cases\/a/);
+  assert.deepEqual(localPathsInAction(action), ['/cases/a', '/cases/a/output']);
+  // 只提取绝对本地路径：URL 与相对路径不产生开文件请求。
+  assert.deepEqual(localPathsInJsonText('{"a":"https://x/y","b":"rel/z"}'), []);
+  assert.equal(formatUnixSeconds(1_790_000_000), '2026-09-21 14:13 UTC');
+  assert.equal(formatUnixSeconds(0), '');
 });

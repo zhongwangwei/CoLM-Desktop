@@ -5,6 +5,7 @@ import { askConfirm } from '../../lib/confirm';
 import { guideState, drive } from '../../lib/guide';
 import { Button, Select, Notice } from '../../components/ui';
 import AssistantSettings from './Settings';
+import { EvidenceCardView, TaskReviewBanner } from './EvidenceCards';
 import { Markdown } from './MarkdownMessage';
 import { followAfterContent, followAfterJump, followAfterScroll } from './scroll';
 import {
@@ -13,11 +14,14 @@ import {
   defaultSettings,
   egressTarget,
   historyContextLabel,
+  historyEvidence,
   historyInput,
   historyScopeHint,
   historyScopeLabel,
   historySettingsOf,
+  pendingReconciliation,
   providerId,
+  taskSnapshotOf,
   assistantModels,
   selectAssistantModel,
   thinkSettings,
@@ -29,6 +33,7 @@ import {
   rejectedBeforeTurn,
   withoutLastUser,
   type AgentEvent,
+  type AgentTaskSnapshot,
   type HistoryScope,
   type Message,
   type Settings,
@@ -43,6 +48,7 @@ import {
 } from './ui-request';
 import {
   clearsDraftAfterAck,
+  eventBelongsToTurn,
   newTurn,
   turnDelivered,
   turnFailed,
@@ -118,8 +124,8 @@ export default function AssistantPanel() {
       );
     if (text.includes('estimated input tokens') && text.includes('context window'))
       return t(
-        '这条请求即使折叠较早的工具结果仍超过当前上下文窗口。本次没有发往模型服务；请缩短附件或对话、在助手设置里调大上下文窗口，或调低输出 token 上限后再发送。',
-        'This request exceeds the configured context window even after folding older tool results. Nothing was sent to the model service; shorten the attachment or conversation, raise the context window in assistant settings, or lower the maximum output tokens, then send again.',
+        '这条请求即使折叠较早的工具结果仍超过当前上下文窗口。被拦住的这次模型请求没有发往模型服务（本轮较早的请求可能已经发送）；请缩短附件或对话、在助手设置里调大上下文窗口，或调低输出 token 上限后再发送。',
+        'This request exceeds the configured context window even after folding older tool results. The blocked model request was not sent to the model service (earlier requests in this turn may already have been sent); shorten the attachment or conversation, raise the context window in assistant settings, or lower the maximum output tokens, then send again.',
       );
     return text;
   }
@@ -181,6 +187,12 @@ export default function AssistantPanel() {
   const [deciding, setDeciding] = useState(false);
   // U02 历史范围选择正在落盘：按钮禁用并显示忙碌，失败不清掉当前选择。
   const [scopeBusy, setScopeBusy] = useState(false);
+  // U04：最新 task_state 快照（横幅只由 requires_reconciliation 决定，普通事件/新回答不清除）。
+  const [taskSnapshot, setTaskSnapshot] = useState<AgentTaskSnapshot | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileNote, setReconcileNote] = useState('');
+  const [reconcileNotice, setReconcileNotice] = useState('');
+  const [reconcileError, setReconcileError] = useState('');
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
   const [sessionUsage, setSessionUsage] = useState({ turns: 0, tokens: 0 });
@@ -263,14 +275,9 @@ export default function AssistantPanel() {
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
       // 后端产出这一轮自己的事件 = 消息确实被模型接下了；IPC 确认只代表送达，不能代替（GUI-18）。
-      // docs_index_status 是应用级后台事件（索引构建可能还在跑），不能当成"这一轮被接受"的证据。
-      if (
-        outgoing.current &&
-        event.type !== 'error' &&
-        event.type !== 'ready' &&
-        event.type !== 'exited' &&
-        event.type !== 'docs_index_status'
-      )
+      // 但只有属于**当前这一轮**的事件才算（U05）：后端给 turn/request ID 时必须匹配，没有 ID 时
+      // 只接受轮内事件类型；迟到旧 task_state/docs_index_status/上一轮事件不能把新消息误标为已接受。
+      if (outgoing.current && eventBelongsToTurn(outgoing.current, event))
         outgoing.current = turnOutput(outgoing.current);
       if (!active) return;
       switch (event.type) {
@@ -356,6 +363,8 @@ export default function AssistantPanel() {
             ...old.filter((item) => item.kind !== 'task'),
             { kind: 'task', task: event.task },
           ]);
+          // U04：只有任务快照能把核对横幅清掉（requires_reconciliation=false）；其它事件一律不动。
+          setTaskSnapshot(taskSnapshotOf(event.task));
           break;
         case 'usage':
           setUsage(`${event.prompt_tokens || 0} + ${event.completion_tokens || 0} tokens`);
@@ -575,6 +584,49 @@ export default function AssistantPanel() {
       setError(errorText(String(e)));
     } finally {
       setScopeBusy(false);
+    }
+  }
+  /** U03：打开本地文件（证据卡/路径字段）。后端 open_path 只接受本地路径，前端也不拼 URL。 */
+  async function openEvidencePath(path: string) {
+    try {
+      await invoke('open_path', { path });
+    } catch (e) {
+      setError(errorText(String(e)));
+    }
+  }
+  /** U03：打开 http/https 链接（PR / 证据 URL）；其它协议不发出。 */
+  async function openEvidenceUrl(url: string) {
+    try {
+      if (!/^https?:\/\//i.test(url.trim()))
+        throw new Error(t('只能打开 http/https 链接', 'Only http/https links can be opened'));
+      await invoke('assistant_open_url', { url: url.trim() });
+    } catch (e) {
+      setError(errorText(String(e)));
+    }
+  }
+  /**
+   * U04：把当前横幅里的旧动作 id 提交核对。只提交渲染时捕获的 ids，不把之后新任务的动作标掉；
+   * 成功后不本地清横幅，等后端发来 requires_reconciliation=false 的 task_state。
+   */
+  async function reconcileEffects(ids: string[]) {
+    if (reconciling) return;
+    setReconciling(true);
+    setReconcileError('');
+    setReconcileNotice('');
+    try {
+      const note = reconcileNote.trim();
+      await invoke('assistant_reconcile_effects', { ids, note: note ? note : null });
+      setReconcileNotice(
+        t(
+          '已提交核对；等后端确认后横幅会随新的任务快照消失。',
+          'Review submitted; the banner clears when the backend sends an updated task snapshot.',
+        ),
+      );
+    } catch (e) {
+      // 失败保留横幅：结果仍然未知，界面不能假装核对过。
+      setReconcileError(errorText(String(e)));
+    } finally {
+      setReconciling(false);
     }
   }
   async function attachDocument() {
@@ -840,6 +892,8 @@ export default function AssistantPanel() {
     state.versionRef,
     state.language,
   );
+  // U04：横幅只由最新任务快照的 requires_reconciliation 决定。
+  const review = pendingReconciliation(taskSnapshot);
   const efforts = builtin
     ? apiEfforts(providerId(settings), settings.model)
     : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -852,6 +906,53 @@ export default function AssistantPanel() {
     settings.session_token_limit > 0 &&
     sessionUsage.tokens >= settings.session_token_limit * CONTEXT_WARN_RATIO;
   const continuePrompt = t('继续未完成的工作。', 'Continue the unfinished work.');
+  /**
+   * U03：历史工具的 tool 消息显示“短答案 + 可展开证据卡”；失败/非 JSON/非历史工具
+   * 保持原来的原始 JSON 显示（不半解析、不补造字段）。
+   */
+  function renderToolMessage(item: Message, index: number) {
+    const evidence =
+      item.ok && item.result != null
+        ? historyEvidence(item.name, item.result, state.language)
+        : null;
+    const status =
+      item.result == null
+        ? item.text || t('未完成', 'Incomplete')
+        : item.ok
+          ? t('完成', 'Completed')
+          : t('失败', 'Failed');
+    // 证据卡默认收起：先显示一行短答案，点开才看结构化证据与原始 JSON。
+    return (
+      <details key={index} className="rounded border p-2">
+        <summary>
+          {item.name} · {evidence ? evidence.summary : status}
+        </summary>
+        {evidence ? (
+          <>
+            <EvidenceCardView
+              evidence={evidence}
+              t={t}
+              onOpenPath={(path) => void openEvidencePath(path)}
+              onOpenUrl={(url) => void openEvidenceUrl(url)}
+            />
+            <details>
+              <summary className="text-xs text-muted-foreground">
+                {t('原始 JSON', 'Raw JSON')}
+              </summary>
+              <pre className="whitespace-pre-wrap break-all text-xs">{item.result}</pre>
+            </details>
+          </>
+        ) : (
+          <>
+            <pre className="whitespace-pre-wrap break-all text-xs">{item.arguments}</pre>
+            {item.result != null && (
+              <pre className="whitespace-pre-wrap break-all text-xs">{item.result}</pre>
+            )}
+          </>
+        )}
+      </details>
+    );
+  }
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 border-l p-4">
       <header className="flex items-center justify-between">
@@ -1025,6 +1126,21 @@ export default function AssistantPanel() {
         {view.title} · {state.versionRef?.id}@{state.versionRef?.revision} ·{' '}
         {model || selectedModel || t('默认模型', 'Default model')}
       </p>
+      {/* U04：未知副作用核对横幅在对话区顶部；只有 task_state 能把它去掉。 */}
+      {review.required && (
+        <TaskReviewBanner
+          review={review}
+          note={reconcileNote}
+          onNoteChange={setReconcileNote}
+          reconciling={reconciling}
+          notice={reconcileNotice}
+          error={reconcileError}
+          onReconcile={(ids) => void reconcileEffects(ids)}
+          onOpenPath={(path) => void openEvidencePath(path)}
+          language={state.language}
+          t={t}
+        />
+      )}
       <div className="relative flex min-h-32 flex-1 flex-col">
         <div
           ref={log}
@@ -1086,20 +1202,7 @@ export default function AssistantPanel() {
           )}
           {messages.map((item, index) =>
             item.kind === 'tool' ? (
-              <details key={index} className="rounded border p-2">
-                <summary>
-                  {item.name} ·{' '}
-                  {item.result == null
-                    ? item.text || t('未完成', 'Incomplete')
-                    : item.ok
-                      ? t('完成', 'Completed')
-                      : t('失败', 'Failed')}
-                </summary>
-                <pre className="whitespace-pre-wrap break-all text-xs">{item.arguments}</pre>
-                {item.result != null && (
-                  <pre className="whitespace-pre-wrap break-all text-xs">{item.result}</pre>
-                )}
-              </details>
+              renderToolMessage(item, index)
             ) : item.kind === 'reasoning' ? (
               <details key={index}>
                 <summary>{t('思考过程', 'Reasoning')}</summary>

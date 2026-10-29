@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   clearsDraftAfterAck,
+  eventBelongsToTurn,
   newTurn,
   turnDelivered,
   turnFailed,
@@ -54,5 +55,43 @@ describe('assistant send turn state machine', () => {
     const failed = turnFailed(turnDelivered(turn()));
     assert.equal(failed.phase, 'failed');
     assert.equal(clearsDraftAfterAck(failed), false);
+  });
+});
+
+describe('U05: events must belong to the pending turn', () => {
+  it('accepts turn-scoped event types but not checkpoints or app-level events', () => {
+    const sent = turn();
+    for (const type of [
+      'assistant_delta',
+      'reasoning_delta',
+      'tool_call',
+      'tool_result',
+      'approval_request',
+      'ui_request',
+      'usage',
+      'context',
+      'turn_done',
+    ])
+      assert.equal(eventBelongsToTurn(sent, { type }), true, type);
+    // task_state 在 turn_done 之后才发；docs_index_status 是应用级后台事件；ready/exited/error
+    // 都不是"这一轮被模型接受"的证据。
+    for (const type of ['task_state', 'docs_index_status', 'ready', 'exited', 'error'])
+      assert.equal(eventBelongsToTurn(sent, { type }), false, type);
+  });
+
+  it('prefers an explicit turn/request id and rejects stale ids', () => {
+    const sent = turn(); // id = 1
+    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: 1 }), true);
+    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: '1' }), true);
+    assert.equal(eventBelongsToTurn(sent, { type: 'task_state', turn: 1 }), true);
+    assert.equal(eventBelongsToTurn(sent, { type: 'tool_result', turn_id: 1 }), true);
+    assert.equal(eventBelongsToTurn(sent, { type: 'usage', request_id: 1 }), true);
+    // 迟到旧轮事件即使类型属于轮内事件，也因 ID 不匹配而不算本轮接受。
+    assert.equal(eventBelongsToTurn(sent, { type: 'assistant_delta', turn: 2 }), false);
+    assert.equal(eventBelongsToTurn(sent, { type: 'tool_result', turn_id: 'old-turn' }), false);
+    assert.equal(eventBelongsToTurn(sent, { type: 'usage', request_id: 99 }), false);
+    // 空字符串不算提供了 ID：退回类型白名单。
+    assert.equal(eventBelongsToTurn(sent, { type: 'usage', turn: '' }), true);
+    assert.equal(eventBelongsToTurn(sent, { type: 'task_state', turn: '' }), false);
   });
 });
