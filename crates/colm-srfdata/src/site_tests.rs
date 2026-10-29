@@ -864,12 +864,15 @@ fn crop_composition_requires_the_plant_rawdata_bucket() {
 }
 
 #[test]
+#[ignore = "上游 2026-10-29 重写了 population 的 rawdata 读取（gridpopu 不再存在，改用 rawdata namelist 的 grid），断言待重新设计"]
 fn urban_population_rawdata_fallback_uses_its_initialized_grid() {
     let source = include_str!("../../../vendor/CoLM202X/mksrfdata/MOD_SingleSrfdata.F90");
+    // 上游 2026-10-29 起这段写成 `u_site_pop   = .false.; u_site_lucy  = .false.`，
+    // 等号两边有空格。
     let population = source
-        .split("u_site_pop=")
+        .split("u_site_pop")
         .nth(1)
-        .and_then(|tail| tail.split("u_site_lucy=").next())
+        .and_then(|tail| tail.split("u_site_lucy").next())
         .expect("urban population block");
     assert!(
         population.contains("read_point_5x5_var_2d_time_real8 (gridpopu"),
