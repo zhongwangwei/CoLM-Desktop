@@ -39042,3 +39042,47 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 裸锁（无 run_id）的固有残余风险：若陈旧裸锁的 PID 恰好被另一个同名 `colm-cli` 复用，可执行文件名校验会通过（带 run_id 的锁不走这条路）。
 - 派生模式没有主动"重新推荐时段"入口；将来若加，必须先展示前后差异，不能静默覆盖来源窗口。
 - 旧 CLI 兼容只覆盖副本与参数契约；参数目录/内嵌源哈希与执行器绑定的完整统一（6a/6b）仍是下一批。
+
+## 研究页第五批：所有目标共用的评分支持与时间边界、AI 输入可见性（2026-10-29）
+
+接第四批。本批处理复核报告中"评分口径不一致 / 时间边界 / AI 提示"类：Gauge/Grid 支持身份、模型频率比目标粗、普通站点 non-Gregorian calendar、跨日界线格宽、单研究 AI 程序兼容性、显式 CPU 预算。先写失败测试再改。
+
+### 1 Gauge/Grid 与普通站点共用原始支持身份（#2）
+
+- 旧行为：station 聚合已用 `PeriodIdentity{start, obs_finite, paired, paired_digest}` + `aggregate_support_hash`，但 Gauge/Grid 仍各自先算模型/观测期均值，只在结果上记 `support_key/start`；时段内部分模型缺测（基线 24h/天、候选 12h/天、日均相同）时两个候选支持 hash 相同，候选会因"缺测"得到更优日均指标。
+- 新行为：`grid_pairs`/`gauge_pairs` 逐（时段,格子）/逐时段产出同样的 `PeriodIdentity` + coverage（Grid 把格子下标折进摘要，保住空间身份；模型/观测两侧样本时刻都进 digest）；`paired_target_result` 改用 `aggregate_support_hash` 并上报 `coverage_mean/coverage_min/periods_dropped`；支持不同/不足时错误文案说明"两边需同一变量、同一原始时刻；缺测会缩小支持"，继续走 `comparable_to_baseline` 的不可比路径。反例测试：grid/gauge 24 vs 12 小时 → hash 不同、coverage 0.5；相同支持 → hash 相同。
+- 遗留：旧研究已记录的 grid/gauge 基线用旧 `pair_support_hash`，续跑会判支持不同、需重跑基线（新建研究不受影响）。
+
+### 2 目标尺度比 history 粗时预检拒绝（#3）
+
+- 旧行为：`aggregate_overlap` 的 `CoarserThanRequested` 只 quote warning 并把 aggregate 设 None，继续按原生频率评分；daily 目标 + monthly history 仍能跑（36 个月配对过 min_pairs），冻结 spec 却写 daily。
+- 新行为：新增 `ensure_target_scale_reachable`，在 `preflight_create` 的目标循环里按目标尺度检查 `DEF_HIST_FREQ`（station 按 target.aggregate；Gauge 缺省 daily；Grid 缺省周期由观测时间轴解析），模型输出更粗时明确拒绝并提示"提高 history 输出频率或改目标尺度后重建研究"。旧研究续跑保留 warning 路径，文案明确 "effective scale is the native <freq> output"；未新增结果字段，旧结果 JSON 兼容。
+- 遗留：预检依赖 `DEF_HIST_FREQ` 声明，缺失/`none` 时保持旧行为；grid/gauge 旧研究的"月 history + daily 目标"目前只有 station 的运行时 warning（新研究已被预检拦住）。
+
+### 3 普通站点 calendar 与跨日界线格宽（#4a/#4b）
+
+- **calendar**：共享入口 `observation_input::ensure_standard_calendar` / `ensure_standard_observation_time`；`preflight_observation_window` 开头无条件检查，运行时 `compute_metric_rows` 与 `observation_usable_times` 读观测时走同一入口；Gauge/Grid 原有检查改调同一函数。普通站点 `aggregate=None` + noleap 现在预检与运行都拒绝，不再按公历秒数静默错位。
+- **跨日界线**：新增 `crate::lon_width(west,east) = ((east-west).rem_euclid(360)，0 取 360)`，`ModelGrid::cells_with_observations` 与 `history_cell`（Gauge/区域站点查）共用。`west=179.5, east=-180`（上游全球网格最后一列）可正常匹配，不再静默丢列/硬报 outside；测试覆盖 west>east、0–360（east=181）、-180..180 与 0..360 整圈写法。
+
+### 4 AI 输入兼容性可见（#12）
+
+- 旧行为：`check_compatibility` 只对"多研究且 frozen program 互不相同"发 warning；单研究时"当前特征程序 vs 该研究冻结程序"不比较；`inputs.warnings`/`feature_program` 只在折叠的 Advanced JSON 里。
+- 新行为：`check_compatibility(studies, network, program)` 逐研究比较本次 tap 程序与该研究冻结程序的 sha256（只比内容不比路径），不同则追加可读 warning（含双方路径、短 hash、冻结修订）；缺 frozen program/缺 hash/旧报告字段缺失时不误报。前端新增 `fitInputWarningText`/`fitInputNotes`，AI 拟合结果区在 validation Notice 下方显示双语"拟合输入的兼容性提示"列表，不再要求展开 JSON。
+- 遗留：CLI 没有"当前模型修订"可比，单研究的修订差异并入程序差异 warning；多研究修订差异仍按原 warning。
+
+### 5 显式 CPU 预算（#15）
+
+- 旧行为：默认 `cpus=threads×jobs` 已修，但显式 `--cpus` 只校验 `>= threads`；`threads=8, jobs=4, cpus=16` 通过但实际 32 线程。
+- 新行为：显式 `--cpus` 必须 `>= threads × jobs`，错误给出应申请核数与调整建议（多申请仍允许）。否决"按 cpus/threads 自动降并发"：那会让作业脚本 `--jobs`、报告并发与用户预算三处分叉且界面看不出被改。`docs/uncertainty-and-tuning.md` 能力矩阵同步更新。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **725 passed**；`study::` **250 passed**；`study_cli_tuning` **24 passed**；`hybrid_fit` **17 passed**；`remote_study_tests` **44 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- 前端：`npm run typecheck` / `lint` / `format:check` 全过；`npm test` **1225 passed / 0 failed**（新增 AI 兼容性提示 page-level 用例）。
+- 未运行：真实 monthly history 训练/评分、真实全球网格产品、非公历真实观测产品、真实集群调度器提交、真实 Tauri 窗口；均为单测/合成夹具验证。
+
+### 遗留
+
+- 旧 grid/gauge 研究续跑需重跑基线（支持哈希算法升级，未做版本标记迁移；#16 仍在下一批）。
+- `DEF_HIST_FREQ` 缺失时预检无法判定、退回旧行为。
+- 其余复核项（#6a/6b 执行器统一、#7b 归档后写回、#8a/8b 目标内容身份与非最优成员核验、#9b 裸锁 PID 复用残余、#13 流式读取、#14 Gauge sentinel、#16 哈希算法版本、#17 粗产品重采样）仍在本轮之后。
