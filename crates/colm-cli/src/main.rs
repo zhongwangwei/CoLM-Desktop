@@ -338,23 +338,37 @@ fn main() -> Result<()> {
         opts.flags
             .push(("--model-root".into(), root.to_string_lossy().into_owned()));
     }
-    // 身份敏感命令（写回模型版本、提交/取回远程研究、单侧证据核验）会读研究 pin 并调用
-    // `verify_frozen_inputs`：provenance 必须由 pin 时那份程序重算，否则 pin 到旧修订的研究会被
-    // 误报“输入变了”。整条命令交给 pin 的 CLI，退出码原样透传。
+    // 身份敏感命令（写回模型版本、提交/取回远程研究、单侧证据核验、复制研究、比较两个研究、
+    // 两步法拟合）会读研究 pin 并调用 `verify_frozen_inputs`：provenance 必须由 pin 时那份程序
+    // 重算，否则 pin 到旧修订的研究会被误报“输入变了”。单研究整条命令交给 pin 的 CLI，退出码
+    // 原样透传；多研究绑不同程序时没有哪份 CLI 能同时代表所有研究，直接拒绝。
     //
     // 这一步必须在读 stdin 之前：远程命令的 SSH 凭据由 GUI 写在本进程的 stdin 上，父进程一旦
     // 读了，被转交的程序就读不到（P1-8 转交不只是换程序，还要把执行环境一起交过去）。
     let reads_stdin_auth =
         cmd.starts_with("remote-") || matches!(cmd.as_str(), "history-replay" | "run-replay");
     let auth_on_stdin = std::env::var("COLM_SSH_AUTH_STDIN").as_deref() == Ok("1");
-    let pinned_program = match study_version::pinned_command_program(cmd, &opts) {
-        Ok(program) => program,
+    // 凭据还在 stdin 上时，出错前也要先读掉，调用方写 pipe 时才不会因 EPIPE 盖住真正的错误。
+    let drain_stdin = || {
+        if reads_stdin_auth && auth_on_stdin {
+            let _ = read_stdin_auth_line();
+        }
+    };
+    let pinned_command = match study_version::pinned_command_plan(cmd, &opts) {
+        Ok(plan) => plan,
         Err(error) => {
-            // 凭据还在 stdin 上：先读掉，调用方写 pipe 时才不会因 EPIPE 盖住真正的错误。
-            if reads_stdin_auth && auth_on_stdin {
-                let _ = read_stdin_auth_line();
-            }
+            drain_stdin();
             return Err(error);
+        }
+    };
+    let pinned_program = match pinned_command {
+        study_version::PinnedCommand::Local => None,
+        study_version::PinnedCommand::Delegate(program) => Some(program),
+        // 混合 pin：任何一份程序都会用错的参数目录去核验另一侧。拒绝必须在起子进程、读凭据之前，
+        // 否则使用者会看到一份 CLI 静默替另一侧作证。
+        study_version::PinnedCommand::Refuse(reason) => {
+            drain_stdin();
+            bail!("{reason}");
         }
     };
     let delegated_auth = if pinned_program.is_some() && reads_stdin_auth && auth_on_stdin {

@@ -202,22 +202,22 @@ pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
-/// 会按当前程序重算 provenance 的身份敏感命令：写回模型版本、提交/取回远程研究，以及
-/// 给出“已核对输入/成绩”的单侧检查（`study-verified-side`、`study-verify-comparison`）。
-/// 它们都读研究 pin 并调用 `verify_frozen_inputs`：参数目录与来源哈希编在程序里，pin 到旧修订后
-/// 由当前程序重算会与 pin 时不同，输入被误报成变了（#6b，P1-8 同类）。后两个命令虽只读，
-/// 但它们的“已核对”结论同样来自这次重算，所以也必须由 pin 的程序来做。
+/// 会按当前程序重算 provenance 的身份敏感命令：写回模型版本、提交/取回远程研究、单侧证据核验，
+/// 以及单研究的复制。它们都读研究 pin；写回/核验/复制在 pin 到冻结模型修订时会调用
+/// `verify_frozen_inputs`：参数目录与来源哈希编在程序里，pin 到旧修订后由当前程序重算会与 pin
+/// 时不同，输入被误报成变了（#6b，P1-8 同类）。`study-clone` 只在 pin 带 `model_revision` 时重算，
+/// 但它同样读 pin 并复制版本目录，仍整条转交，保证复制与将来运行用的是同一份程序。
 ///
-/// 为什么 `study-compare` 不在这里：它有两个研究目录，两侧可能各自 pin 到不同的 CLI；整条命令
-/// 交给其中一份程序，就会用那份程序校验另一侧。按侧分别起进程是另一个改动，本批明确不静默用
-/// 一份 CLI 校验另一侧。
-const PINNED_CLI_COMMANDS: [&str; 6] = [
+/// `study-compare` 有两个研究目录、`hybrid-fit` 有一个逗号分隔的 `--studies` 列表，不能按
+/// “第一条位置参数”取研究；它们由 [`comparison_decision`] 与 [`hybrid_fit_decision`] 单独判定。
+const PINNED_CLI_COMMANDS: [&str; 7] = [
     "study-save-version",
     "model-import-study",
     "remote-study-run",
     "remote-study-fetch",
     "study-verified-side",
     "study-verify-comparison",
+    "study-clone",
 ];
 
 /// 这些命令从哪取研究目录。各入口的实际读法不同，不能统一按位置参数取。
@@ -232,6 +232,173 @@ fn pinned_command_study_dir(command: &str, opts: &crate::Opts) -> Option<PathBuf
     }
 }
 
+/// `hybrid-fit` 的 `--studies` 是一个逗号分隔的列表（GUI 在 `hybrid_fit_args` 里也这样拼），
+/// 不是重复的 `--study-dir`。与 `cmd_hybrid_fit` 的读法保持一致，否则判定看的研究和真正
+/// 喂给特征提取的研究不是同一批。
+fn hybrid_study_dirs(opts: &crate::Opts) -> Vec<PathBuf> {
+    opts.get("--studies")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|study| !study.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 整条命令该由哪份 `colm-cli` 执行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PinnedCommand {
+    /// 当前程序执行，行为不变。
+    Local,
+    /// 整条命令交给这份程序（研究 pin 指向它）。
+    Delegate(PathBuf),
+    /// 命令横跨多个研究，而它们的 pin 不一致：没有哪一份程序能同时核验所有输入。
+    /// 携带给调用方的可行动原因；这不是“可以退回本地执行”的情况。
+    Refuse(String),
+}
+
+fn ensure_pinned_program(pin: &Pinned) -> Result<()> {
+    anyhow::ensure!(
+        pin.cli.is_file(),
+        "this Study was created with model version {} whose colm-cli is missing at {}; restore that version's program or create the Study again",
+        pin.name,
+        pin.cli.display()
+    );
+    Ok(())
+}
+
+/// 单研究命令：pin 为空或就是当前程序时本地执行，否则交给 pin 的程序。
+fn single_study_decision(
+    command: &str,
+    opts: &crate::Opts,
+    current_exe: &Path,
+) -> Result<PinnedCommand> {
+    let Some(study_dir) = pinned_command_study_dir(command, opts) else {
+        return Ok(PinnedCommand::Local);
+    };
+    let Some(pin) = pinned(&study_dir)? else {
+        return Ok(PinnedCommand::Local);
+    };
+    if same_program(&pin.cli, current_exe) {
+        return Ok(PinnedCommand::Local);
+    }
+    ensure_pinned_program(&pin)?;
+    Ok(PinnedCommand::Delegate(pin.cli))
+}
+
+/// `study-compare` 两侧分别绑定哪份程序。
+///
+/// 两侧都空/当前 → 本地；两侧相同且不是当前 → 交给那一份；否则拒绝：任何一份 CLI 都只会用
+/// 自己的参数目录与来源哈希去核验**两侧**，用其中一侧的程序校验另一侧就是静默换证据来源。
+/// 按侧各起一个进程再合并是另一条路（GUI 的 `verified_study_side` 已经这样做），本命令不
+/// 假装能做到。
+fn comparison_decision(opts: &crate::Opts, current_exe: &Path) -> Result<PinnedCommand> {
+    let (Some(left_dir), Some(right_dir)) = (opts.positional.first(), opts.positional.get(1))
+    else {
+        // 少一个目录时让 `study-compare` 自己的参数校验报错，不在这里抢先翻译成 pin 错误。
+        return Ok(PinnedCommand::Local);
+    };
+    let left = pinned(Path::new(left_dir))?;
+    let right = pinned(Path::new(right_dir))?;
+    let left_cli = left
+        .as_ref()
+        .map_or_else(|| current_exe.to_path_buf(), |pin| pin.cli.clone());
+    let right_cli = right
+        .as_ref()
+        .map_or_else(|| current_exe.to_path_buf(), |pin| pin.cli.clone());
+    if same_program(&left_cli, current_exe) && same_program(&right_cli, current_exe) {
+        return Ok(PinnedCommand::Local);
+    }
+    if same_program(&left_cli, &right_cli) {
+        if let Some(pin) = left.as_ref().or(right.as_ref()) {
+            ensure_pinned_program(pin)?;
+        }
+        return Ok(PinnedCommand::Delegate(left_cli));
+    }
+    // 两侧绑定不同程序：比较两个模型版本本来就是受支持的功能（integration 测试
+    // `two_model_versions_are_calibrated_with_the_same_design_and_compared`），而此时任何
+    // 一份 CLI 都只代表自己那一版，不能替另一侧作证。保持原有本地路径：compare 会把
+    // `inputs_verified`/`same_inputs` 降级为 false 并在结果里说明，而不是拒绝整个比较
+    // （拒绝会让"比较两个版本"这个核心流程直接不可用）。
+    Ok(PinnedCommand::Local)
+}
+
+/// `hybrid-fit` 会把所有 `--studies` 的特征拼成一个样本集，并在 `prepare_study` 里逐个调用
+/// `verify_frozen_inputs`。全部相同且不是当前 → 交给那份程序；全部空/当前 → 本地；混合则拒绝：
+/// 落到本地会拿当前程序校验旧研究的输入、去抽特征，落到任何一份旧程序又会用错另一批研究。
+fn hybrid_fit_decision(opts: &crate::Opts, current_exe: &Path) -> Result<PinnedCommand> {
+    let studies = hybrid_study_dirs(opts);
+    if studies.is_empty() {
+        // 参数缺失或为空时让 `hybrid-fit` 自己报错。
+        return Ok(PinnedCommand::Local);
+    }
+    let mut programs = Vec::with_capacity(studies.len());
+    let mut pins = Vec::with_capacity(studies.len());
+    for study in &studies {
+        let pin = pinned(study)?;
+        programs.push(
+            pin.as_ref()
+                .map_or_else(|| current_exe.to_path_buf(), |pin| pin.cli.clone()),
+        );
+        pins.push(pin);
+    }
+    if programs
+        .iter()
+        .all(|program| same_program(program, current_exe))
+    {
+        return Ok(PinnedCommand::Local);
+    }
+    let first = &programs[0];
+    if programs.iter().all(|program| same_program(program, first)) {
+        // 走到这里 `first` 一定不是当前程序，所以至少有一条 pin。
+        if let Some(pin) = pins.iter().flatten().next() {
+            ensure_pinned_program(pin)?;
+        }
+        return Ok(PinnedCommand::Delegate(first.clone()));
+    }
+    let mut distinct: Vec<String> = Vec::new();
+    for program in &programs {
+        let text = program.display().to_string();
+        if !distinct.contains(&text) {
+            distinct.push(text);
+        }
+    }
+    Ok(PinnedCommand::Refuse(format!(
+        "hybrid-fit mixes Studies bound to different model-version programs ({}); feature extraction and frozen-input verification would use the wrong program for some Studies, so the fitted rows would mix revisions; put every Study on one model version revision, or rebuild them so their pins agree",
+        distinct.join(", ")
+    )))
+}
+
+/// 纯判定：只读 pin 文件与给定的当前程序，不启动进程、不读 stdin。拆出来是为了让调用方能在
+/// 读远程凭据、起子进程之前拿到 `Refuse`，并且测试可以直接锁住“多条研究绑不同程序”的边界。
+pub(crate) fn pinned_command_decision(
+    command: &str,
+    opts: &crate::Opts,
+    current_exe: &Path,
+) -> Result<PinnedCommand> {
+    if command == "study-compare" {
+        return comparison_decision(opts, current_exe);
+    }
+    if command == "hybrid-fit" {
+        return hybrid_fit_decision(opts, current_exe);
+    }
+    single_study_decision(command, opts, current_exe)
+}
+
+/// 判定整条命令的归属。已经由父进程交出来的程序不再转交：它的 `current_exe` 可能不是 pin 里
+/// 记的那条路径，再按 pin 转交会套娃。
+pub(crate) fn pinned_command_plan(command: &str, opts: &crate::Opts) -> Result<PinnedCommand> {
+    if std::env::var_os(DELEGATED_ENV).is_some() {
+        return Ok(PinnedCommand::Local);
+    }
+    let current =
+        std::env::current_exe().context("cannot locate the running colm-cli executable")?;
+    pinned_command_decision(command, opts, &current)
+}
+
 /// 转交整条命令：子命令、原位置参数、原 flags（含重复 flag 与原顺序），不重解释路径与值。
 fn pinned_command_args(command: &str, opts: &crate::Opts) -> Vec<String> {
     let mut args = vec![command.to_owned()];
@@ -242,42 +409,7 @@ fn pinned_command_args(command: &str, opts: &crate::Opts) -> Vec<String> {
     args
 }
 
-/// 研究 pin 的 CLI 与当前程序不同时，返回整条命令该交给的那份程序；`None` 表示按当前程序继续。
-///
-/// 为什么整条转交：`verify_frozen_inputs` 用程序内嵌的参数目录与来源文件重算 provenance 哈希。
-/// 研究 pin 到旧修订后，当前程序算出的值与 pin 时由旧程序算出的不同，写回/提交会被误报成
-/// “输入变了”（#6b，P1-8 同类）。协议与 `study-run` 的 [`delegate`] 一致：参数原值透传，
-/// 子进程带 [`DELEGATED_ENV`] 防止再转交，审计由父进程记（`COLM_AUDIT_BY_PARENT`），退出码
-/// 原样交回调用方。
-///
-/// 单独拆出“决定交给谁”不是为了复用，而是因为远程命令的 SSH 凭据由调用方写在 stdin 上：
-/// 一旦当前进程先读了凭据，被转交的程序就读不到了（见 main 里的调用顺序）。
-pub(crate) fn pinned_command_program(command: &str, opts: &crate::Opts) -> Result<Option<PathBuf>> {
-    // 已经由父进程交出来的程序不再转交：它的 current_exe 可能不是 pin 里记的那条路径。
-    if std::env::var_os(DELEGATED_ENV).is_some() {
-        return Ok(None);
-    }
-    let Some(study_dir) = pinned_command_study_dir(command, opts) else {
-        return Ok(None);
-    };
-    let Some(pin) = pinned(&study_dir)? else {
-        return Ok(None);
-    };
-    let current =
-        std::env::current_exe().context("cannot locate the running colm-cli executable")?;
-    if same_program(&pin.cli, &current) {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        pin.cli.is_file(),
-        "this Study was created with model version {} whose colm-cli is missing at {}; restore that version's program or create the Study again",
-        pin.name,
-        pin.cli.display()
-    );
-    Ok(Some(pin.cli))
-}
-
-/// 用 [`pinned_command_program`] 指定的程序执行整条命令，返回它的退出码。stdout/stderr 继承，
+/// 用 [`PinnedCommand::Delegate`] 指定的程序执行整条命令，返回它的退出码。stdout/stderr 继承，
 /// 输出直接交给调用方（GUI sidecar）；`auth_line` 是调用方从 stdin 读到的 SSH 凭据原文，按原样
 /// 从子进程的 stdin 送进去——远程命令的凭据只能读一次，父进程读了就必须转给真正执行的程序。
 pub(crate) fn run_pinned_command(

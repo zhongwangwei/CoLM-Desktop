@@ -1352,6 +1352,11 @@ fn pinned_command_opts(command: &str, study: &Path) -> crate::Opts {
                 ("--operation-id".into(), "op-1".into()),
             ],
         },
+        // 复制研究也在 pin 的 CLI 上做：它要读 pin、复制版本目录，并在冻结模型修订上重算输入身份。
+        "study-clone" => crate::Opts {
+            positional: vec![study],
+            flags: vec![("--operation-id".into(), "op-1".into())],
+        },
         other => panic!("test does not know {other}"),
     }
 }
@@ -1364,6 +1369,58 @@ fn pinned_command_args(command: &str, opts: &crate::Opts) -> Vec<String> {
         args.extend([flag.clone(), value.clone()]);
     }
     args
+}
+
+fn delegated_program(command: &str, opts: &crate::Opts) -> PathBuf {
+    match pinned_command_plan(command, opts).unwrap() {
+        PinnedCommand::Delegate(program) => program,
+        other => panic!("{command} 应该交给 pin 的 CLI，实际 {other:?}"),
+    }
+}
+
+fn assert_local(command: &str, opts: &crate::Opts) {
+    assert_eq!(
+        pinned_command_plan(command, opts).unwrap(),
+        PinnedCommand::Local,
+        "{command} 应该由当前程序执行"
+    );
+}
+
+fn refusal(command: &str, opts: &crate::Opts) -> String {
+    match pinned_command_plan(command, opts).unwrap() {
+        PinnedCommand::Refuse(reason) => reason,
+        other => panic!("{command} 应该拒绝执行，实际 {other:?}"),
+    }
+}
+
+fn hybrid_fit_opts(studies: &[&Path]) -> crate::Opts {
+    let studies = studies
+        .iter()
+        .map(|study| study.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::Opts {
+        positional: Vec::new(),
+        flags: vec![
+            ("--studies".into(), studies),
+            ("--network".into(), "/net.json".into()),
+            ("--kernel".into(), "/k".into()),
+            ("--out".into(), "/out.mlp.json".into()),
+        ],
+    }
+}
+
+fn comparison_opts(a: &Path, b: &Path) -> crate::Opts {
+    crate::Opts {
+        positional: vec![
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ],
+        flags: vec![
+            ("--history-db".into(), "/tmp/history.sqlite".into()),
+            ("--operation-id".into(), "op-1".into()),
+        ],
+    }
 }
 
 struct DelegatedEnv(Option<std::ffi::OsString>);
@@ -1395,6 +1452,7 @@ fn identity_sensitive_study_commands_run_on_the_pinned_cli() {
         "remote-study-fetch",
         "study-verified-side",
         "study-verify-comparison",
+        "study-clone",
     ] {
         let root = temp(&format!("pin-cli-{command}"));
         let log = root.join("args.log");
@@ -1411,9 +1469,7 @@ fn identity_sensitive_study_commands_run_on_the_pinned_cli() {
         );
         let study = pinned_study(&root, cli);
         let opts = pinned_command_opts(command, &study);
-        let program = pinned_command_program(command, &opts)
-            .unwrap()
-            .unwrap_or_else(|| panic!("{command} 应该交给 pin 的 CLI"));
+        let program = delegated_program(command, &opts);
         assert_eq!(
             run_pinned_command(&program, command, &opts, None).unwrap(),
             0,
@@ -1446,9 +1502,7 @@ fn a_delegated_identity_command_returns_the_pinned_clis_exit_status() {
         let cli = fake_cli(&root, "exit 7\n");
         let study = pinned_study(&root, cli);
         let opts = pinned_command_opts(command, &study);
-        let program = pinned_command_program(command, &opts)
-            .unwrap()
-            .unwrap_or_else(|| panic!("{command} 应该交给 pin 的 CLI"));
+        let program = delegated_program(command, &opts);
         assert_eq!(
             run_pinned_command(&program, command, &opts, None).unwrap(),
             7,
@@ -1465,21 +1519,20 @@ fn a_pin_that_names_the_running_program_stays_local() {
         "study-save-version",
         "study-verified-side",
         "study-verify-comparison",
+        "study-clone",
     ] {
         let study = pinned_study(&root.join(command), std::env::current_exe().unwrap());
         let opts = pinned_command_opts(command, &study);
-        assert_eq!(
-            pinned_command_program(command, &opts).unwrap(),
-            None,
-            "{command} 的 pin 就是当前程序，不该转交"
-        );
+        assert_local(command, &opts);
     }
     // 只读命令不重算 provenance，也不该整条转交。
     let cli_elsewhere = root.join("other-colm-cli");
     std::fs::write(&cli_elsewhere, "not a program").unwrap();
     let study = pinned_study(&root.join("readonly"), cli_elsewhere);
     let opts = pinned_command_opts("study-save-version", &study);
-    assert_eq!(pinned_command_program("study-status", &opts).unwrap(), None);
+    assert_local("study-status", &opts);
+    // `study-run` 自己按 `--model-version` 拍快照、按快照转交；不能在这里再被整条转交一次。
+    assert_local("study-run", &opts);
     // 没有 model-version.json 的研究没有 pin，按当前程序执行。
     let plain = root.join("plain");
     std::fs::create_dir_all(&plain).unwrap();
@@ -1487,37 +1540,198 @@ fn a_pin_that_names_the_running_program_stays_local() {
         positional: vec![plain.to_string_lossy().into_owned()],
         flags: Vec::new(),
     };
+    assert_local("study-save-version", &opts);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 两侧 pin 到同一份程序：它是唯一能按正确参数目录同时核验两侧的程序，整条命令交给它。
+#[cfg(unix)]
+#[test]
+fn a_comparison_bound_to_one_pinned_cli_is_delegated_to_it() {
+    let root = temp("pin-cli-compare-delegate");
+    let log = root.join("args.log");
+    let cli = fake_cli(
+        &root,
+        &format!("printf '%s\\n' \"$@\" > '{}'\nexit 0\n", log.display()),
+    );
+    let study_a = pinned_study(&root.join("a"), cli.clone());
+    let study_b = pinned_study(&root.join("b"), cli.clone());
+    let opts = comparison_opts(&study_a, &study_b);
+    let program = delegated_program("study-compare", &opts);
+    assert_eq!(program, cli);
     assert_eq!(
-        pinned_command_program("study-save-version", &opts).unwrap(),
-        None
+        run_pinned_command(&program, "study-compare", &opts, None).unwrap(),
+        0
+    );
+    let args: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    // 两个位置参数与 flags 都要按原顺序过去：少一个就变成“只比较一侧”。
+    assert_eq!(args, pinned_command_args("study-compare", &opts));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 两侧绑定不同程序时，任何一份 CLI 都只能代表自己那一版；比较两个模型版本是受支持
+/// 的功能，所以判定退回本地（compare 自己把 inputs_verified/same_inputs 降级为 false），
+/// 而不是拒绝整个比较；同时确认不会启动任何一侧的程序。
+#[cfg(unix)]
+#[test]
+fn a_comparison_with_mixed_pins_stays_local_without_starting_either_program() {
+    let current = std::env::current_exe().unwrap();
+    for case in ["one_sided", "different", "side_is_current"] {
+        let root = temp(&format!("pin-cli-compare-mixed-{case}"));
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let log_a = root.join("a.log");
+        let log_b = root.join("b.log");
+        let cli_a = fake_cli(
+            &root.join("a"),
+            &format!("printf 'ran\\n' > '{}'\n", log_a.display()),
+        );
+        let study_a = pinned_study(&root.join("a"), cli_a);
+        let study_b = match case {
+            "one_sided" => {
+                let dir = root.join("b/study");
+                std::fs::create_dir_all(&dir).unwrap();
+                dir
+            }
+            "different" => {
+                let cli_b = fake_cli(
+                    &root.join("b"),
+                    &format!("printf 'ran\\n' > '{}'\n", log_b.display()),
+                );
+                pinned_study(&root.join("b"), cli_b)
+            }
+            "side_is_current" => pinned_study(&root.join("b"), current.clone()),
+            other => panic!("unknown case {other}"),
+        };
+        let opts = comparison_opts(&study_a, &study_b);
+        assert_local("study-compare", &opts);
+        assert!(
+            !log_a.exists() && !log_b.exists(),
+            "{case}: 不该启动任何一侧的程序"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 两侧都没有 pin（或都指当前程序）时没有身份差异，按原路径比较。
+#[test]
+fn a_comparison_without_pins_stays_local() {
+    let root = temp("pin-cli-compare-local");
+    let current = std::env::current_exe().unwrap();
+    let plain_a = root.join("a/study");
+    let plain_b = root.join("b/study");
+    std::fs::create_dir_all(&plain_a).unwrap();
+    std::fs::create_dir_all(&plain_b).unwrap();
+    assert_local("study-compare", &comparison_opts(&plain_a, &plain_b));
+    let study_a = pinned_study(&root.join("pinned-a"), current.clone());
+    let study_b = pinned_study(&root.join("pinned-b"), current);
+    assert_local("study-compare", &comparison_opts(&study_a, &study_b));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 所有 `--studies` 都 pin 到同一份程序：整条命令交给它，特征提取与逐研究的
+/// `verify_frozen_inputs` 才会用同一版参数目录与 `colm-rs`。
+#[cfg(unix)]
+#[test]
+fn hybrid_fit_over_studies_bound_to_one_program_is_delegated() {
+    let root = temp("pin-cli-hybrid-delegate");
+    let log = root.join("args.log");
+    let env_log = root.join("env.log");
+    let cli = fake_cli(
+        &root,
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\n             printf '%s %s\\n' \"$COLM_STUDY_BY_PARENT\" \"$COLM_AUDIT_BY_PARENT\" > '{}'\n             exit 0\n",
+            log.display(),
+            env_log.display()
+        ),
+    );
+    let study_a = pinned_study(&root.join("a"), cli.clone());
+    let study_b = pinned_study(&root.join("b"), cli.clone());
+    let opts = hybrid_fit_opts(&[&study_a, &study_b]);
+    let program = delegated_program("hybrid-fit", &opts);
+    assert_eq!(program, cli);
+    assert_eq!(
+        run_pinned_command(&program, "hybrid-fit", &opts, None).unwrap(),
+        0
+    );
+    let args: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    // `--studies a,b` 是一个逗号列表，必须原样作为一个参数交给子 CLI。
+    assert_eq!(args, pinned_command_args("hybrid-fit", &opts));
+    assert_eq!(
+        std::fs::read_to_string(&env_log).unwrap().trim(),
+        "1 1",
+        "防循环且审计由父进程记"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `study-compare` 有两个研究目录，两侧可能各自 pin 到不同的 CLI。它不在委托名单里：
-/// 把整条命令交给其中一份程序，就会用那份程序校验另一侧，而另一侧需要的是它自己的参数目录
-/// 与来源哈希（#6b）。正确做法是按侧各起一个进程再合并结果，本批不展开，因此这里锁住
-/// “绝不把两个研究当成一个目录转交”这一边界。
+/// 混合 pin：落到本地会拿当前程序校验旧研究的输入、抽特征；落到任何一份旧程序又会用错
+/// 另一批。没有一份程序能代表全部研究，只能拒绝并让使用者先统一来源 revision。
 #[cfg(unix)]
 #[test]
-fn a_two_sided_comparison_is_not_delegated_to_one_sides_cli() {
-    let root = temp("pin-cli-mixed");
-    std::fs::create_dir_all(root.join("a")).unwrap();
-    std::fs::create_dir_all(root.join("b")).unwrap();
-    let study_a = pinned_study(&root.join("a"), fake_cli(&root.join("a"), "exit 0\n"));
-    let study_b = pinned_study(&root.join("b"), fake_cli(&root.join("b"), "exit 0\n"));
-    let opts = crate::Opts {
-        positional: vec![
-            study_a.to_string_lossy().into_owned(),
-            study_b.to_string_lossy().into_owned(),
-        ],
-        flags: Vec::new(),
-    };
-    assert_eq!(pinned_command_study_dir("study-compare", &opts), None);
-    assert_eq!(
-        pinned_command_program("study-compare", &opts).unwrap(),
-        None
-    );
+fn hybrid_fit_with_mixed_pins_is_refused() {
+    let current = std::env::current_exe().unwrap();
+    for case in ["one_sided", "different"] {
+        let root = temp(&format!("pin-cli-hybrid-mixed-{case}"));
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let log_a = root.join("a.log");
+        let log_b = root.join("b.log");
+        let cli_a = fake_cli(
+            &root.join("a"),
+            &format!("printf 'ran\\n' > '{}'\n", log_a.display()),
+        );
+        let study_a = pinned_study(&root.join("a"), cli_a);
+        let study_b = match case {
+            "one_sided" => {
+                let dir = root.join("b/study");
+                std::fs::create_dir_all(&dir).unwrap();
+                dir
+            }
+            "different" => {
+                let cli_b = fake_cli(
+                    &root.join("b"),
+                    &format!("printf 'ran\\n' > '{}'\n", log_b.display()),
+                );
+                pinned_study(&root.join("b"), cli_b)
+            }
+            other => panic!("unknown case {other}"),
+        };
+        let opts = hybrid_fit_opts(&[&study_a, &study_b]);
+        let reason = refusal("hybrid-fit", &opts);
+        assert!(
+            reason.contains("different model-version programs"),
+            "{case}: {reason}"
+        );
+        assert!(
+            reason.contains("feature extraction and frozen-input verification"),
+            "{case}: {reason}"
+        );
+        assert!(reason.contains("revision"), "{case}: {reason}");
+        assert!(
+            !log_a.exists() && !log_b.exists(),
+            "{case}: 不该启动任何程序"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    // 全部空 pin 或全部指当前程序：没有身份差异，按原路径执行。
+    let root = temp("pin-cli-hybrid-local");
+    let plain_a = root.join("a/study");
+    let plain_b = root.join("b/study");
+    std::fs::create_dir_all(&plain_a).unwrap();
+    std::fs::create_dir_all(&plain_b).unwrap();
+    assert_local("hybrid-fit", &hybrid_fit_opts(&[&plain_a, &plain_b]));
+    let study_a = pinned_study(&root.join("pinned-a"), current.clone());
+    let study_b = pinned_study(&root.join("pinned-b"), current);
+    assert_local("hybrid-fit", &hybrid_fit_opts(&[&study_a, &study_b]));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1528,6 +1742,7 @@ fn a_second_delegation_is_stopped_by_the_parent_marker() {
         "remote-study-run",
         "study-verified-side",
         "study-verify-comparison",
+        "study-clone",
     ] {
         let root = temp(&format!("pin-cli-loop-{command}"));
         let log = root.join("args.log");
@@ -1535,15 +1750,30 @@ fn a_second_delegation_is_stopped_by_the_parent_marker() {
         let study = pinned_study(&root, cli);
         let opts = pinned_command_opts(command, &study);
         let _guard = DelegatedEnv::set();
-        assert_eq!(
-            pinned_command_program(command, &opts).unwrap(),
-            None,
-            "{command} 由父进程交出来之后不能再转交"
-        );
+        assert_local(command, &opts);
         assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
         drop(_guard);
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// 多研究命令同样受父进程标记约束：父进程已经交出整条命令后，子进程不能再把它交回去。
+#[cfg(unix)]
+#[test]
+fn a_parent_marker_also_stops_multi_study_delegation() {
+    let root = temp("pin-cli-loop-multi");
+    let log = root.join("args.log");
+    let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+    let study_a = pinned_study(&root.join("a"), cli.clone());
+    let study_b = pinned_study(&root.join("b"), cli);
+    let compare = comparison_opts(&study_a, &study_b);
+    let hybrid = hybrid_fit_opts(&[&study_a, &study_b]);
+    let _guard = DelegatedEnv::set();
+    assert_local("study-compare", &compare);
+    assert_local("hybrid-fit", &hybrid);
+    assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
+    drop(_guard);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 远程命令的 SSH 凭据只能从 stdin 读一次：父进程替它读走之后必须原样转给真正执行的程序。
@@ -1555,9 +1785,7 @@ fn a_delegated_remote_command_receives_the_stdin_credentials() {
     let cli = fake_cli(&root, &format!("cat > '{}'\n", log.display()));
     let study = pinned_study(&root, cli);
     let opts = pinned_command_opts("remote-study-fetch", &study);
-    let program = pinned_command_program("remote-study-fetch", &opts)
-        .unwrap()
-        .unwrap();
+    let program = delegated_program("remote-study-fetch", &opts);
     let payload = "{\"host\":\"server\",\"auth\":\"password\"}";
     assert_eq!(
         run_pinned_command(&program, "remote-study-fetch", &opts, Some(payload)).unwrap(),
@@ -1576,7 +1804,7 @@ fn a_pin_whose_program_is_missing_is_refused_with_an_actionable_error() {
     let missing = root.join("deleted-colm-cli");
     let study = pinned_study(&root, missing.clone());
     let opts = pinned_command_opts("remote-study-fetch", &study);
-    let error = pinned_command_program("remote-study-fetch", &opts).unwrap_err();
+    let error = pinned_command_plan("remote-study-fetch", &opts).unwrap_err();
     let text = format!("{error:#}");
     assert!(text.contains("snow"), "{text}");
     assert!(text.contains(missing.to_str().unwrap()), "{text}");
