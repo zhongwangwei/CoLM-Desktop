@@ -5206,6 +5206,8 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     // minutes of native-I/O setup rather than numerical work.
     let obs_file =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    // calendar 检查与预检共用同一个入口：noleap/360_day 不能按公历固定秒数静默换算。
+    crate::observation_input::ensure_standard_calendar(&obs_file, obs_path, "time")?;
     let mut o_t = read_file_1d(&obs_file, obs_path, "time")?;
     let selected = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
@@ -5618,6 +5620,8 @@ pub(crate) fn observation_usable_times(
     validate_pair_vars(&[variable_name.to_string()])?;
     let obs_file =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
+    // 预检入口自己也要检查，不能只依赖下游 `compute_metric_rows` 的那一次。
+    crate::observation_input::ensure_standard_calendar(&obs_file, obs_path, "time")?;
     let variable = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
         .find(|variable| variable.observation.eq_ignore_ascii_case(variable_name))
@@ -6119,6 +6123,21 @@ fn read_file_at_point(
     Ok(values)
 }
 
+/// 环形经度跨度（度）。
+///
+/// 格点边界在日界线处会写成 `west > east`：上游全球网格最后一列是
+/// `lon_w = 179.5, lon_e = -180`。直接相减得到 -359.5，用 `(lon - west).rem_euclid(360) < width`
+/// 比较时永远不成立，整列观测会被静默丢掉（或点查硬报 outside）。这里统一按环形跨度算，
+/// 同一条经线（跨度为 0）按整圈 360 处理 —— 跨日界线的全球格正是 `-180..180` 这种写法。
+pub(crate) fn lon_width(west: f64, east: f64) -> f64 {
+    let width = (east - west).rem_euclid(360.0);
+    if width == 0.0 {
+        360.0
+    } else {
+        width
+    }
+}
+
 /// 点（经度, 纬度）落在格点 history 的哪一格：`(纬向下标, 经向下标)`。
 fn history_cell(
     f: &netcdf::File,
@@ -6138,8 +6157,8 @@ fn history_cell(
         let highs = read_file_1d(f, path, high)?;
         Ok(lows.iter().zip(&highs).position(|(&low, &high)| {
             if wrapped {
-                let (low, width) = (wrap(low), high - low);
-                (value - low).rem_euclid(360.0) < width
+                let low = wrap(low);
+                (value - low).rem_euclid(360.0) < lon_width(low, high)
             } else {
                 value >= low.min(high) && value < low.max(high)
             }

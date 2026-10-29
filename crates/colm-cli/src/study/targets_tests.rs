@@ -630,3 +630,372 @@ fn aggregated_support_identity_sees_which_raw_samples_were_kept() {
         "缺的不是同一批原始样本，支持身份必须不同"
     );
 }
+
+// ---------------------------------------------------------------- 原始支持身份（格点/水文站）
+
+/// 逐时输出的 2 × 2 格点算例：`values(day, hour, row, column)` 返回 NaN 表示模型缺测。
+/// 复核 A 项的反例要构造"日均相同、参与平均的原始小时数不同"的场景，逐日 history 只有
+/// 一条记录，做不出 24 → 12 的样本变化。
+fn gridded_hourly_case(
+    root: &Path,
+    days: usize,
+    values: impl Fn(usize, usize, usize, usize) -> f64,
+) -> PathBuf {
+    let case = root.join("case");
+    let history = case.join("out/grid/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'grid'\n DEF_HIST_FREQ = 'HOURLY'\n/\n",
+    )
+    .unwrap();
+    let hours = days * 24;
+    let mut file = netcdf::create(history.join("grid_hist_2003-01.nc")).unwrap();
+    file.add_dimension("time", hours).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    let put = |file: &mut netcdf::FileMut, name: &str, dims: &[&str], data: &[f64]| {
+        file.add_variable::<f64>(name, dims)
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    };
+    put(&mut file, "lat", &["lat"], &[10.5, 11.5]);
+    put(&mut file, "lon", &["lon"], &[100.5, 101.5]);
+    put(&mut file, "lat_s", &["lat"], &[10.0, 11.0]);
+    put(&mut file, "lat_n", &["lat"], &[11.0, 12.0]);
+    put(&mut file, "lon_w", &["lon"], &[100.0, 101.0]);
+    put(&mut file, "lon_e", &["lon"], &[101.0, 102.0]);
+    put(
+        &mut file,
+        "landarea",
+        &["lat", "lon"],
+        &[1.0, 3.0, 2.0, 0.0],
+    );
+    // 真实 HOURLY 标签是整点：写点截断到分钟后减 30 分钟，即每小时的 :30。
+    let mut time = file.add_variable::<i32>("time", &["time"]).unwrap();
+    let labels = (0..hours)
+        .map(|hour| model_minutes(JAN1 + hour as i64 * 3_600 + 1_800) as i32)
+        .collect::<Vec<_>>();
+    time.put_values(&labels, ..).unwrap();
+    let mut data = Vec::new();
+    for day in 0..days {
+        for hour in 0..24 {
+            for row in 0..2 {
+                for column in 0..2 {
+                    data.push(values(day, hour, row, column));
+                }
+            }
+        }
+    }
+    let mut field = file
+        .add_variable::<f64>("f_lfevpa", &["time", "lat", "lon"])
+        .unwrap();
+    field.put_values(&data, (0..hours, .., ..)).unwrap();
+    case
+}
+
+/// 与 [`gridded_hourly_case`] 同时段、同 2 × 2 格子的逐日观测产品（格心与模型一致）。
+fn write_daily_grid_observation(
+    path: &Path,
+    days: usize,
+    values: impl Fn(usize, usize, usize) -> f64,
+) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", days).unwrap();
+    file.add_dimension("lat", 2).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "days since 2003-01-01")
+        .unwrap();
+    let labels = (0..days).map(|day| day as f64 + 0.5).collect::<Vec<_>>();
+    time.put_values(&labels, ..).unwrap();
+    file.add_variable::<f64>("lat", &["lat"])
+        .unwrap()
+        .put_values(&[10.5, 11.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon", &["lon"])
+        .unwrap()
+        .put_values(&[100.5, 101.5], ..)
+        .unwrap();
+    let mut data = Vec::new();
+    for day in 0..days {
+        for row in 0..2 {
+            for column in 0..2 {
+                data.push(values(day, row, column));
+            }
+        }
+    }
+    file.add_variable::<f64>("E", &["time", "lat", "lon"])
+        .unwrap()
+        .put_values(&data, ..)
+        .unwrap();
+}
+
+/// 逐时输出的单点水文站算例：模型流量只在 `keep(day, hour)` 为真的小时有值。
+fn gauge_hourly_case(root: &Path, days: usize, keep: impl Fn(usize, usize) -> bool) -> PathBuf {
+    let case = root.join("case");
+    let history = case.join("out/gauge/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'gauge'\n DEF_HIST_FREQ = 'HOURLY'\n/\n",
+    )
+    .unwrap();
+    let hours = days * 24;
+    let mut file = netcdf::create(history.join("gauge_hist_2003-01.nc")).unwrap();
+    file.add_dimension("time", hours).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    let labels = (0..hours)
+        .map(|hour| model_minutes(JAN1 + hour as i64 * 3_600 + 1_800))
+        .collect::<Vec<_>>();
+    time.put_values(&labels, ..).unwrap();
+    let values = (0..hours)
+        .map(|hour| {
+            if keep(hour / 24, hour % 24) {
+                2.0
+            } else {
+                f64::NAN
+            }
+        })
+        .collect::<Vec<_>>();
+    file.add_variable::<f64>("f_riv", &["time"])
+        .unwrap()
+        .put_values(&values, ..)
+        .unwrap();
+    case
+}
+
+fn daily_gauge_observation(path: &Path, days: usize) {
+    let mut text = String::from("date,discharge\n");
+    for day in 0..days {
+        // 三天 1/2/3：观测日均与候选无关，只有模型侧原始支持在变。
+        let date = format!("2003-01-{:02}", day + 1);
+        text.push_str(&format!("{date},{}\n", day + 1));
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+fn gauge_target(observation: &Path) -> TargetSpec {
+    serde_json::from_value(serde_json::json!({
+        "key": "river", "variable": "f_riv", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "gauge", "path": observation, "lon": 100.5, "lat": 10.5}
+    }))
+    .unwrap()
+}
+
+/// 复核 A 项：格点产品先分别平均模型/观测后，必须留下每个（时段, 格子）的原始样本数与时刻。
+/// 基线每天 24 个有效模型小时，候选每天只有后 12 个，观测日均相同 —— 旧的
+/// `pair_support_hash(support, obs)` 只覆盖时段与观测均值，会把两者判成同一批支持。
+#[test]
+fn gridded_support_identity_separates_a_candidate_with_fewer_hourly_samples() {
+    let root = scratch("grid-identity");
+    let days = 3;
+    let value = |day: usize, row: usize, column: usize| (10 * day + 2 * row + column) as f64;
+    let full = gridded_hourly_case(&root.join("full"), days, |day, _, row, column| {
+        value(day, row, column)
+    });
+    let thin = gridded_hourly_case(&root.join("thin"), days, |day, hour, row, column| {
+        if hour < 12 {
+            f64::NAN
+        } else {
+            value(day, row, column)
+        }
+    });
+    let observation = root.join("obs.nc");
+    write_daily_grid_observation(&observation, days, value);
+    let target: TargetSpec = serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "grid", "path": observation, "variable": "E"}
+    }))
+    .unwrap();
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let baseline = grid_pairs(&full, &target, window).unwrap();
+    let candidate = grid_pairs(&thin, &target, window).unwrap();
+    // 反例前提：聚合后模型均值、观测均值与时段完全一样。
+    assert_eq!(baseline.support, candidate.support);
+    assert_eq!(baseline.model, candidate.model);
+    assert_eq!(baseline.obs, candidate.obs);
+    // 但原始样本数不同：观测每天每格 1 个，模型基线 24 个、候选 12 个。
+    assert_eq!(baseline.identity.len(), 9);
+    assert_eq!(baseline.identity[0].obs_finite, 1);
+    assert_eq!(baseline.identity[0].paired, 24);
+    assert_eq!(candidate.identity[0].obs_finite, 1);
+    assert_eq!(candidate.identity[0].paired, 12);
+    assert!((baseline.coverage[0] - 1.0).abs() < 1e-12);
+    assert!((candidate.coverage[0] - 0.5).abs() < 1e-12);
+    assert_ne!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&candidate.identity, &candidate.obs),
+        "模型少写一半小时必须得到不同的支持哈希"
+    );
+    // 完全相同支持重算仍是同一哈希（续跑/重算不能变成不可比）。
+    let again = grid_pairs(&full, &target, window).unwrap();
+    assert_eq!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&again.identity, &again.obs)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 复核 A 项（水文站）：模型/观测各自按时段平均后，支持身份也要记下模型侧 24 → 12 的
+/// 原始样本变化；观测是逐日单值，日均相同。
+#[test]
+fn gauge_support_identity_separates_a_candidate_with_fewer_hourly_samples() {
+    let root = scratch("gauge-identity");
+    let days = 3;
+    let full = gauge_hourly_case(&root.join("full"), days, |_, _| true);
+    let thin = gauge_hourly_case(&root.join("thin"), days, |_, hour| hour >= 12);
+    let observation = root.join("gauge.csv");
+    daily_gauge_observation(&observation, days);
+    let target = gauge_target(&observation);
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let baseline = gauge_pairs(&full, &target, window).unwrap();
+    let candidate = gauge_pairs(&thin, &target, window).unwrap();
+    assert_eq!(baseline.support, candidate.support);
+    assert_eq!(baseline.model, candidate.model);
+    assert_eq!(baseline.obs, candidate.obs);
+    assert_eq!(baseline.identity[0].obs_finite, 1);
+    assert_eq!(baseline.identity[0].paired, 24);
+    assert_eq!(candidate.identity[0].paired, 12);
+    assert!((baseline.coverage[0] - 1.0).abs() < 1e-12);
+    assert!((candidate.coverage[0] - 0.5).abs() < 1e-12);
+    assert_ne!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&candidate.identity, &candidate.obs),
+        "模型少写一半小时必须得到不同的支持哈希"
+    );
+    let again = gauge_pairs(&full, &target, window).unwrap();
+    assert_eq!(
+        aggregate_support_hash(&baseline.identity, &baseline.obs),
+        aggregate_support_hash(&again.identity, &again.obs)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------- 环形经度宽度
+
+/// 环形经度跨度：`west > east`（跨日界线）、0–360 写法与整圈都按同一公式。
+#[test]
+fn longitude_width_wraps_across_the_dateline() {
+    // 上游全球网格最后一列：179.5 → -180，真实宽度 0.5（不是 -359.5）。
+    assert_eq!(crate::lon_width(179.5, -180.0), 0.5);
+    assert_eq!(crate::lon_width(170.0, -170.0), 20.0);
+    // 0–360 写法：181°E 就是 -179°，与 0 起点的格子仍是 181° 宽。
+    assert_eq!(crate::lon_width(0.0, 181.0), 181.0);
+    // 同一条经线（-180..180、0..360）按整圈处理。
+    assert_eq!(crate::lon_width(-180.0, 180.0), 360.0);
+    assert_eq!(crate::lon_width(0.0, 360.0), 360.0);
+}
+
+/// 日界线格子：全球网格最后一列写作 `lon_w = 179.5, lon_e = -180`。旧公式
+/// `east - west = -359.5` 永远不满足 `< width`，整列观测被静默丢掉。
+#[test]
+fn gridded_products_match_the_wrapping_last_global_column() {
+    let root = scratch("dateline");
+    let case = root.join("case");
+    let history = case.join("out/dateline/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'dateline'\n/\n",
+    )
+    .unwrap();
+    let mut file = netcdf::create(history.join("dateline_hist_2003-01.nc")).unwrap();
+    file.add_dimension("time", 2).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    let put = |file: &mut netcdf::FileMut, name: &str, dims: &[&str], data: &[f64]| {
+        file.add_variable::<f64>(name, dims)
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    };
+    put(&mut file, "lat", &["lat"], &[10.5]);
+    put(&mut file, "lat_s", &["lat"], &[10.0]);
+    put(&mut file, "lat_n", &["lat"], &[11.0]);
+    // 第二列跨日界线：179.5 → -180，真实宽度 0.5。
+    put(&mut file, "lon_w", &["lon"], &[178.0, 179.5]);
+    put(&mut file, "lon_e", &["lon"], &[179.5, -180.0]);
+    put(&mut file, "landarea", &["lat", "lon"], &[1.0, 1.0]);
+    let mut time = file.add_variable::<i32>("time", &["time"]).unwrap();
+    time.put_values(
+        &[
+            model_minutes(JAN1 + DAY) as i32,
+            model_minutes(JAN1 + 2 * DAY) as i32,
+        ],
+        ..,
+    )
+    .unwrap();
+    file.add_variable::<f64>("f_lfevpa", &["time", "lat", "lon"])
+        .unwrap()
+        .put_values(&[10.0, 20.0, 30.0, 40.0], ..)
+        .unwrap();
+    let observation = root.join("obs.nc");
+    {
+        let mut file = netcdf::create(&observation).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        file.add_dimension("lat", 1).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "days since 2003-01-01")
+            .unwrap();
+        time.put_values(&[0.5, 1.5], ..).unwrap();
+        file.add_variable::<f64>("lat", &["lat"])
+            .unwrap()
+            .put_values(&[10.5], ..)
+            .unwrap();
+        file.add_variable::<f64>("lon", &["lon"])
+            .unwrap()
+            .put_values(&[179.75], ..)
+            .unwrap();
+        file.add_variable::<f64>("E", &["time", "lat", "lon"])
+            .unwrap()
+            .put_values(&[1.0, 2.0], ..)
+            .unwrap();
+    }
+    let target: TargetSpec = serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 2 * DAY,
+        "source": {"kind": "grid", "path": observation, "variable": "E"}
+    }))
+    .unwrap();
+    let paired = grid_pairs(&case, &target, (JAN1, JAN1 + 2 * DAY)).unwrap();
+    // 只有跨日界线那一列有观测：模型值是每天第二个格子（20、40）。
+    assert_eq!(paired.model, [20.0, 40.0]);
+    assert_eq!(paired.obs, [1.0, 2.0]);
+    // 2 个陆地格子里只覆盖了跨日界线那一个。
+    assert!((paired.space_coverage.unwrap() - 0.5).abs() < 1e-12);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 点查 history 与格点产品共用同一个环形宽度：`history_cell` 也必须能命中
+/// `lon_w = 179.5, lon_e = -180` 的最后一列，不能硬报 outside。
+#[test]
+fn point_lookup_matches_the_wrapping_last_global_column() {
+    let root = scratch("history-cell-dateline");
+    let path = root.join("hist.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    file.add_variable::<f64>("lat_s", &["lat"])
+        .unwrap()
+        .put_values(&[10.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lat_n", &["lat"])
+        .unwrap()
+        .put_values(&[11.0], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon_w", &["lon"])
+        .unwrap()
+        .put_values(&[178.0, 179.5], ..)
+        .unwrap();
+    file.add_variable::<f64>("lon_e", &["lon"])
+        .unwrap()
+        .put_values(&[179.5, -180.0], ..)
+        .unwrap();
+    assert_eq!(
+        crate::history_cell(&file, &path, "lat", "lon", (179.75, 10.5)).unwrap(),
+        (0, 1)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

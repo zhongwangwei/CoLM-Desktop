@@ -413,6 +413,34 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
             .iter()
             .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
         {
+            // 目标尺度必须能从 history 原生输出恢复：daily 目标配 monthly history 时，
+            // 运行时只能按原生月值评分（`aggregate_overlap::CoarserThanRequested`），
+            // 冻结 spec 却仍写着 daily。建研究前直接拒绝比基准白跑完再 warning 便宜。
+            let requested = match &target.source {
+                Some(TargetSource::Gauge { period, .. }) => {
+                    Some(period.unwrap_or(TargetPeriod::Daily))
+                }
+                Some(TargetSource::Grid {
+                    path,
+                    variable,
+                    period,
+                    ..
+                }) => {
+                    // 格点产品的默认尺度由观测时间轴决定（逐日产品默认 daily）；
+                    // 预检必须先解析出这个默认值，不能把 `None` 当成"不聚合"放行。
+                    let path = PathBuf::from(path);
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        case_root.join(path)
+                    };
+                    Some(super::targets::grid_period(&path, variable, *period)?)
+                }
+                Some(TargetSource::Station { .. }) | None => target.aggregate,
+            };
+            if let Some(requested) = requested {
+                ensure_target_scale_reachable(case, site, target, requested)?;
+            }
             let observation = match &target.source {
                 Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. }) => {
                     super::targets::preflight_observation(&case_root, target, &planned)?;
@@ -2366,6 +2394,9 @@ fn preflight_observation_window(
     target: &TargetSpec,
     validation: bool,
 ) -> Result<()> {
+    // 无论目标有没有 aggregate，观测 time 轴的 calendar 都必须先检查：普通站点原来直接
+    // 走进 `compute_metric_rows`，noleap 的轴会被当公历平移到错误日期后照常评分。
+    crate::observation_input::ensure_standard_observation_time(observation)?;
     let (from, to, period) = if validation {
         (
             target.validation_from.context("missing validation start")?,
@@ -3495,11 +3526,10 @@ fn target_result(
                 None
             }
             AggregateOverlap::CoarserThanRequested => {
-                warnings.push(format!(
-                    "target {}: history output frequency {} is coarser than the requested {} target aggregate; the pairs stay at the native frequency because the finer means cannot be recovered",
-                    target.key,
-                    row.output_frequency,
-                    target_period_name(aggregate)
+                warnings.push(coarser_than_requested_warning(
+                    target,
+                    &row.output_frequency,
+                    aggregate,
                 ));
                 None
             }
@@ -3655,6 +3685,22 @@ fn paired_target_result(
     };
     let loss = super::science::objective_loss(&term, target.min_pairs)
         .map_err(|reason| anyhow::anyhow!("target {} {reason}", target.key))?;
+    // 格点产品/水文站也是聚合目标：支持哈希必须覆盖每（时段, 格子）的原始样本数与时刻，
+    // 不能再用"时段标签 + 观测均值"的 `pair_support_hash`（候选少写一半小时会漏过检查）。
+    let (coverage_mean, coverage_min) = if paired.coverage.is_empty() {
+        (None, None)
+    } else {
+        (
+            Some(paired.coverage.iter().sum::<f64>() / paired.coverage.len() as f64),
+            Some(
+                paired
+                    .coverage
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min),
+            ),
+        )
+    };
     Ok(TargetResult {
         key: target.key.clone(),
         site: site.into(),
@@ -3669,10 +3715,11 @@ fn paired_target_result(
         loss,
         model_mean: metrics.model_mean,
         observation_mean: metrics.obs_mean,
-        support_hash: pair_support_hash(&paired.support, &paired.obs),
-        coverage_mean: None,
-        coverage_min: None,
-        periods_dropped: None,
+        support_hash: super::targets::aggregate_support_hash(&paired.identity, &paired.obs),
+        coverage_mean,
+        coverage_min,
+        // 格点/水文站的聚合不做覆盖率门槛（观测产品本来就有缺测），所以没有丢掉的时段。
+        periods_dropped: Some(paired.dropped),
         space_coverage: paired.space_coverage,
         // 格点产品/水文站不走 `compute_metric_rows`，没有解码警告可带。
         warnings: Vec::new(),
@@ -3698,6 +3745,36 @@ fn pair_support_hash(time: &[i64], obs: &[f64]) -> String {
         hash.update(obs.to_bits().to_le_bytes());
     }
     format!("{:x}", hash.finalize())
+}
+
+/// 建研究前核对 history 原生输出频率不粗于目标尺度。
+///
+/// **为什么不能在运行时才处理**：`aggregate_overlap` 遇到 `CoarserThanRequested` 只能
+/// warning + 按原生频率配对，无法恢复更细的日均/月均。新研究若在创建时放行，冻结 spec
+/// 会声称 daily/monthly 而实际评分用的是原生月值/年值，基准与候选都白跑一轮。这里用
+/// `case.nml` 声明的 `DEF_HIST_FREQ`（预检阶段还没有 history 标签可分类）判断；
+/// 声明的频率缺失时保持旧行为，运行结束仍以 history 标签为准。
+fn ensure_target_scale_reachable(
+    case: &Path,
+    site: &str,
+    target: &TargetSpec,
+    aggregate: TargetPeriod,
+) -> Result<()> {
+    let schedule = crate::history_schedule(case)?;
+    let Some(native) = schedule.declared_frequency else {
+        return Ok(());
+    };
+    let native = crate::history_frequency_name(native);
+    if aggregate_overlap(native, aggregate) != AggregateOverlap::CoarserThanRequested {
+        return Ok(());
+    }
+    bail!(
+        "target {} ({}) on {site} asks for a {} mean, but the case history is written at the native {native} frequency; the finer means cannot be recovered, so scoring would silently use {native} values under a {} label — raise the history output frequency (DEF_HIST_FREQ) or change the target scale, then rebuild the Study",
+        target.key,
+        target.variable,
+        target_period_name(aggregate),
+        target_period_name(aggregate)
+    )
 }
 
 /// 目标要求的时间尺度（`target.aggregate`）与 history 原生输出频率的叠加关系。
@@ -3742,6 +3819,21 @@ fn target_period_name(period: TargetPeriod) -> &'static str {
         TargetPeriod::Daily => "daily",
         TargetPeriod::Monthly => "monthly",
     }
+}
+
+/// 旧研究续跑时 history 已冻结成年/月输出，无法回溯出更细的日均/月均：只能按原生频率评分。
+/// 这条 warning 是结果与证据里唯一说明"生效尺度"的地方，必须明确写出 effective scale，
+/// 不能让冻结 spec 的 daily/monthly 看起来像是真的按那个尺度算过。
+fn coarser_than_requested_warning(
+    target: &TargetSpec,
+    output_frequency: &str,
+    aggregate: TargetPeriod,
+) -> String {
+    format!(
+        "target {}: effective scale is the native {output_frequency} output, not the requested {} target aggregate — history output frequency is coarser, so the finer means cannot be recovered. Raise the history output frequency or change the target scale and rebuild the Study.",
+        target.key,
+        target_period_name(aggregate)
+    )
 }
 
 /// 支持哈希写进报错时只留前 12 位：够区分，又不把 64 位十六进制塞满日志。
@@ -3940,7 +4032,7 @@ fn comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Resu
             // 聚合目标的支持哈希覆盖每时段的原始样本数：候选模型缺值缩了支持、日均却碰巧
             // 相同也会在这里判不可比。报错带上计数与哈希前缀，免得用户只看到一句"不一样"。
             bail!(
-                "target {} / {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {})",
+                "target {} / {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {}); check that both runs wrote the same variable over the same raw times — missing/NaN model samples shrink the support even when the aggregated means match",
                 row.period,
                 row.key,
                 row.pairs,
@@ -3964,7 +4056,7 @@ fn validation_comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResu
             .with_context(|| format!("baseline missing validation target {}", row.key))?;
         if row.pairs != base.pairs || row.support_hash != base.support_hash {
             bail!(
-                "validation target {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {})",
+                "validation target {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {}); check that both runs wrote the same variable over the same raw times — missing/NaN model samples shrink the support even when the aggregated means match",
                 row.key,
                 row.pairs,
                 short_support_hash(&row.support_hash),
@@ -8583,6 +8675,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// #3：冻结 spec 写着"日均"，模型 history 却只有月输出时，运行时只能按原生月值评分。
+    /// 新研究必须在建研究前拒绝，并把两条出路写进错误；不能等基准白跑完才在目标结果里 warning。
+    #[test]
+    fn preflight_rejects_a_target_scale_finer_than_the_declared_history_frequency() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-preflight-scale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kernel = write_fake_kernel(&root);
+        let case = root.join("site");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm
+ DEF_CASE_NAME = 'site'
+ DEF_dir_output = 'out'
+ DEF_HIST_FREQ = 'MONTHLY'
+ DEF_TUNING_CNFAC = 0.5
+/
+",
+        )
+        .unwrap();
+        let observation = root.join("obs.nc");
+        {
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", 2).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 1970-01-01 00:00:00")
+                .unwrap();
+            time.put_values(&[0.0, 1800.0], ..).unwrap();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&[1.0, 2.0], ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&[0.0, 0.0], ..)
+                .unwrap();
+        }
+        let spec = root.join("spec.json");
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "observations": {"site": observation},
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":3_600,"min_pairs":2,"aggregate":"daily"}],
+                "budget": {"population":4,"generations":1}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&root, &spec).unwrap_err().to_string();
+        assert!(error.contains("DEF_HIST_FREQ"), "{error}");
+        assert!(error.contains("monthly"), "{error}");
+        assert!(
+            error.contains("raise the history output frequency"),
+            "{error}"
+        );
+        assert!(error.contains("change the target scale"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn lhs_study_runs_end_to_end_with_a_fake_kernel() {
@@ -10277,6 +10440,137 @@ esac
         );
     }
 
+    /// 合成"原生逐月 history + 逐时观测"的单点算例：旧研究冻结 spec 写着 daily aggregate，
+    /// 续跑时 history 只有月值可用 —— 只能按原生月值评分，结果里必须说清生效尺度。
+    fn monthly_history_case(label: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-monthly-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let case = root.join("case");
+        std::fs::create_dir_all(case.join("out/monthly/history")).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm
+ DEF_CASE_NAME = 'monthly'
+ DEF_HIST_FREQ = 'MONTHLY'
+ DEF_HIST_groupby = 'MONTH'
+ DEF_simulation_time%greenwich = .false.
+ DEF_simulation_time%start_year = 2008
+ DEF_simulation_time%start_month = 1
+ DEF_simulation_time%start_day = 1
+ DEF_simulation_time%start_sec = 0
+ DEF_simulation_time%timestep = 1800.
+/
+",
+        )
+        .unwrap();
+        let base = colm_hist::time::minutes_from_1900(2008);
+        // 2008 年 2/3/4/5 月 1 日 00:00 是月度写点；MONTHLY 标签固定往前挪 15 天。
+        let write_days = [31, 60, 91, 121];
+        let labels = write_days
+            .iter()
+            .map(|day| (base + (day - 15) * 1_440) as f64)
+            .collect::<Vec<_>>();
+        {
+            let path = case.join("out/monthly/history/monthly_hist_2008-01.nc");
+            let mut file = netcdf::create(path).unwrap();
+            file.add_dimension("time", labels.len()).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "minutes since 1900-1-1 0:0:0")
+                .unwrap();
+            time.put_values(&labels, ..).unwrap();
+            file.add_variable::<f64>("f_lfevpa", &["time"])
+                .unwrap()
+                .put_values(&[10.0, 20.0, 30.0, 40.0], ..)
+                .unwrap();
+        }
+        let observation = root.join("obs.nc");
+        {
+            // 站点运行时的配对只接受 1..=3600 s 的观测步长，用逐时观测。
+            let days = 121;
+            let hours = days * 24;
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", hours).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+                .unwrap();
+            let seconds = (0..hours)
+                .map(|hour| hour as f64 * 3_600.0)
+                .collect::<Vec<_>>();
+            time.put_values(&seconds, ..).unwrap();
+            // 逐时值有日变化，观测标准差不为零；月均随月份变化，指标可算。
+            let values = (0..hours)
+                .map(|hour| 1.0 + (hour % 24) as f64 / 24.0 + ((hour / (24 * 7)) % 5) as f64)
+                .collect::<Vec<_>>();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&values, ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&vec![0.0; hours], ..)
+                .unwrap();
+        }
+        (case, observation)
+    }
+
+    /// #3 旧研究续跑走真实 `target_result` 路径：daily aggregate + monthly history 不报错，
+    /// 但只保留 4 个原生月配对，warning/结果记录"生效尺度是原生 monthly"，覆盖率不再谎报日聚合。
+    #[test]
+    fn an_old_daily_target_over_monthly_history_is_scored_at_the_native_monthly_scale() {
+        let _guard = crate::netcdf_test_guard();
+        let (case, observation) = monthly_history_case("legacy");
+        // 2008-01-01 00:00 UTC。
+        const JAN1_2008: i64 = 1_199_145_600;
+        let target: TargetSpec = serde_json::from_value(serde_json::json!({
+            "key": "Qle",
+            "variable": "Qle",
+            "from": JAN1_2008,
+            "to": JAN1_2008 + 121 * 86_400,
+            "min_pairs": 2,
+            "aggregate": "daily",
+        }))
+        .unwrap();
+        let row = target_result(&case, &observation, "site", &target, false, 1).unwrap();
+        // 原生 monthly：4 条记录 = 4 对，而不是 121 个日均。
+        assert_eq!(row.pairs, 4, "{:?}", row.warnings);
+        assert!(row.coverage_mean.is_none());
+        assert!(
+            row.warnings
+                .iter()
+                .any(|warning| warning.contains("effective scale is the native monthly output")),
+            "{:?}",
+            row.warnings
+        );
+        std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
+    }
+
+    /// #3 旧研究续跑：不阻断，但结果里的 warning 要写明"生效尺度 = 原生频率"，
+    /// 不能让冻结 spec 声称 daily 而实际按 monthly 评分。
+    #[test]
+    fn a_coarser_native_history_is_scored_at_the_native_scale_and_says_so() {
+        let mut target: TargetSpec = serde_json::from_value(serde_json::json!({
+            "key": "Qle", "variable": "Qle", "from": 0, "to": 10, "min_pairs": 2,
+        }))
+        .unwrap();
+        target.aggregate = Some(TargetPeriod::Daily);
+        let warning = coarser_than_requested_warning(&target, "monthly", TargetPeriod::Daily);
+        assert!(
+            warning.contains("effective scale is the native monthly output"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("Raise the history output frequency"),
+            "{warning}"
+        );
+        assert!(warning.contains("change the target scale"), "{warning}");
+    }
+
     /// 合成"原生逐日 history + 半小时观测"的单点算例。观测 Qle 故意不写 units 属性，
     /// 用来产生一条必须进目标结果的研究证据。
     fn daily_history_case(label: &str) -> (PathBuf, PathBuf) {
@@ -10392,6 +10686,45 @@ esac
             "{:?}",
             row.warnings
         );
+        std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
+    }
+
+    /// #4a：普通站点（`aggregate = None`）原来只在格点产品/水文站分支检查 calendar，
+    /// 运行时只按 `time:units` 读观测时间轴。noleap 的时间轴会被当成公历整体错位，
+    /// 所以预检与运行时读观测的两条路径都必须拒绝。
+    #[test]
+    fn a_plain_station_target_with_a_non_gregorian_observation_calendar_is_refused() {
+        let _guard = crate::netcdf_test_guard();
+        let (case, _) = daily_history_case("noleap");
+        let observation = case.parent().unwrap().join("obs-noleap.nc");
+        {
+            let mut file = netcdf::create(&observation).unwrap();
+            file.add_dimension("time", 4).unwrap();
+            let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+            time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+                .unwrap();
+            time.put_attribute("calendar", "noleap").unwrap();
+            time.put_values(&[0.0, 1800.0, 3600.0, 5400.0], ..).unwrap();
+            file.add_variable::<f64>("Qle", &["time"])
+                .unwrap()
+                .put_values(&[1.0, 2.0, 3.0, 4.0], ..)
+                .unwrap();
+            file.add_variable::<f64>("Qle_qc", &["time"])
+                .unwrap()
+                .put_values(&[0.0; 4], ..)
+                .unwrap();
+        }
+        let target = daily_target(None);
+        // 运行时读观测（`compute_metric_rows`）与预检（`preflight_observation_window`）。
+        let runtime = target_result(&case, &observation, "site", &target, false, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(runtime.contains("noleap"), "{runtime}");
+        let preflight = preflight_observation_window(&observation, "site", &target, false)
+            .unwrap_err()
+            .to_string();
+        assert!(preflight.contains("calendar"), "{preflight}");
+        assert!(preflight.contains("noleap"), "{preflight}");
         std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
     }
 

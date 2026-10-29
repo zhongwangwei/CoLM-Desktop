@@ -89,6 +89,46 @@ pub struct DecodedObs {
     pub warnings: Vec<String>,
 }
 
+/// 观测 `time` 轴只接受与固定秒数一致的公历（standard/gregorian/proleptic_gregorian）。
+///
+/// 为什么放在观测输入模块：noleap/360_day 的日数不能用 Unix 固定秒数换算。以前只有
+/// 格点产品/水文站分支检查 calendar，普通站点在运行时直接按 `time:units` 读轴，第 59 天
+/// 会被当成 2 月 29 日、整条观测轴错位却照常评分。预检与运行时读观测必须共用这一个入口。
+pub(crate) fn ensure_standard_calendar(
+    file: &File,
+    path: &Path,
+    time_variable: &str,
+) -> Result<()> {
+    let Some(calendar) = file
+        .variable(time_variable)
+        .and_then(|variable| variable.attribute_value("calendar"))
+        .and_then(Result::ok)
+        .and_then(|value| match value {
+            netcdf::AttributeValue::Str(text) => Some(text),
+            netcdf::AttributeValue::Strs(mut texts) => texts.pop(),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    let normalized = calendar.trim().to_ascii_lowercase();
+    ensure!(
+        matches!(
+            normalized.as_str(),
+            "standard" | "gregorian" | "proleptic_gregorian"
+        ),
+        "{}: unsupported CF calendar {calendar:?} for {time_variable}; only standard/gregorian/proleptic_gregorian can be converted to Unix time (noleap/360_day need a real calendar implementation, refuse instead of silently shifting the axis)",
+        path.display()
+    );
+    Ok(())
+}
+
+/// 打开观测文件并检查它的 `time` 轴。供预检这种"还没读任何值"的入口使用。
+pub(crate) fn ensure_standard_observation_time(path: &Path) -> Result<()> {
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    ensure_standard_calendar(&file, path, "time")
+}
+
 /// `QcProvenance` 对应的指标表口径标签。
 ///
 /// 保留旧字符串 `measured_only` / `finite_only`，新增 `generated_validity`；

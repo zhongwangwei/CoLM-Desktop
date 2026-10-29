@@ -20,8 +20,9 @@ pub(super) struct Paired {
     pub support: Vec<i64>,
     pub model: Vec<f64>,
     pub obs: Vec<f64>,
-    /// 每个被接受时段的原始支持身份（只由 [`aggregate_pairs`] 填；格点/水文站目标用
-    /// `support` + 观测值哈希，不走这份身份）。
+    /// 每个配对值的时段原始支持身份：站点目标的 [`aggregate_pairs`]、格点产品的
+    /// [`grid_pairs`] 与水文站的 [`gauge_pairs`] 都填，支持哈希统一走
+    /// [`aggregate_support_hash`]，不再只哈希时段标签与观测均值。
     pub identity: Vec<PeriodIdentity>,
     /// 每个被接受时段的有效观测覆盖率 `valid / expected`，与 `support` 等长。
     pub coverage: Vec<f64>,
@@ -46,24 +47,55 @@ impl Paired {
 /// 为什么不能只哈希"时段起点 + 观测均值"：模型缺值会让时段里实际参与平均的样本变少，
 /// 而聚合均值可能碰巧与基线相同（复核反例：基线每天 24 个有效小时，候选每天只有后 12 个，
 /// 三天的日均完全相同），两个候选于是被误判成"同一批支持"、通过了可比性检查。
+///
+/// 站点目标是模型/观测逐时刻配对后再聚合，`paired` 就是同时有限的样本数；格点产品与
+/// 水文站是模型、观测各自先按时段平均再配对，所以 `paired` 记模型侧参与平均的样本数、
+/// `obs_finite` 记观测侧样本数，`paired_digest` 把两侧样本时刻都折进去。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PeriodIdentity {
     /// 时段起点（Unix 秒）。
     pub start: i64,
     /// 该时段观测有限值的个数。观测不受模型缺测影响，记录的是"这份观测本来有多少样本"。
     pub obs_finite: usize,
-    /// 实际配上对（模型与观测都有限）的样本数。
+    /// 模型侧实际参与平均的有限样本数；站点目标里就是与观测同时配上的样本数。
     pub paired: usize,
-    /// 配上对时刻（相对时段起点的秒）的摘要。只记个数仍不够：候选缺前 12 小时、
+    /// 参与平均的原始时刻（相对时段起点的秒）摘要。只记个数仍不够：候选缺前 12 小时、
     /// 基线缺后 12 小时时个数相同、用的却不是同一批原始观测，均值也可能碰巧一样。
+    /// 格点/水文站把模型侧与观测侧的摘要合并进这一个字段。
     pub paired_digest: u64,
 }
 
-/// 聚合分支的支持哈希：每个时段的原始身份 + 聚合后的观测均值。
+/// 一条序列（模型或观测）在一个时段里的原始支持：和、有限样本数与时刻摘要。
+/// 格点/水文站分开聚合两侧，必须把这份中间量留到配对时才可能判断支持是否一致。
+#[derive(Debug, Default, Clone, Copy)]
+struct PeriodAggregate {
+    sum: f64,
+    count: usize,
+    digest: u64,
+}
+
+impl PeriodAggregate {
+    fn add(&mut self, value: f64, offset_seconds: i64) {
+        self.sum += value;
+        self.count += 1;
+        self.digest = mix_sample_time(self.digest, offset_seconds);
+    }
+
+    fn mean(&self) -> f64 {
+        self.sum / self.count as f64
+    }
+}
+
+/// 聚合路径（站点、格点产品、水文站）的支持哈希：每个配对值的原始身份 + 聚合后的观测均值。
 ///
 /// 均值这一项沿用旧哈希的保护：换了观测文件、时段和计数却没变时同样要判不可比
 /// （观测冻结由执行身份负责，这里只是不让哈希比原来更弱）。
 pub(super) fn aggregate_support_hash(identity: &[PeriodIdentity], obs_means: &[f64]) -> String {
+    debug_assert_eq!(
+        identity.len(),
+        obs_means.len(),
+        "every aggregated pair needs one support identity"
+    );
     let mut hash = Sha256::new();
     for (identity, obs) in identity.iter().zip(obs_means) {
         hash.update(identity.start.to_le_bytes());
@@ -82,10 +114,65 @@ fn splitmix64(value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-/// 把一对相对时段起点的秒偏移滚进摘要。输入顺序来自同一套配对代码（时间严格递增），
+/// 把一个相对时段起点的秒偏移滚进摘要。输入顺序来自同一套配对/聚合代码（时间严格递增），
 /// 所以不需要顺序无关；滚动哈希保证多记/少记任何一个样本都会改变摘要。
-fn mix_paired_time(digest: u64, offset_seconds: i64) -> u64 {
+fn mix_sample_time(digest: u64, offset_seconds: i64) -> u64 {
     digest.rotate_left(11).wrapping_mul(0x0000_0100_0000_01b3) ^ splitmix64(offset_seconds as u64)
+}
+
+/// 模型侧与观测侧时刻摘要的合并。两侧各自的样本数已经单独记下，这里只负责让
+/// "同一时段、换个时刻/少一个样本"也改变最终哈希。
+fn combine_support_digests(model: u64, obs: u64) -> u64 {
+    splitmix64(model.rotate_left(17) ^ obs)
+}
+
+/// 把格点产品的格子下标折进支持摘要（站点/水文站没有这层空间身份）。
+fn mix_support_slot(digest: u64, slot: usize) -> u64 {
+    splitmix64(digest ^ (slot as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}
+
+/// 一个时段的长度（秒）：日固定 86400，月按实际天数。
+fn period_length(start: i64, period: TargetPeriod) -> i64 {
+    match period {
+        TargetPeriod::Daily => 86_400,
+        TargetPeriod::Monthly => {
+            let (year, month, _) = civil_from_days(start.div_euclid(86_400));
+            let (next_year, next_month) = if month == 12 {
+                (year + 1, 1)
+            } else {
+                (year, month + 1)
+            };
+            days_from_civil(next_year, next_month, 1) * 86_400 - start
+        }
+    }
+}
+
+/// 理论样本数：时段长度除以采样步长，至少一个。
+fn expected_samples(length: i64, step: i64) -> f64 {
+    (length as f64 / step.max(1) as f64).max(1.0)
+}
+
+/// 序列在时段里的覆盖率。步长推不出来（不足两个时刻）时无法判断，按 1 处理而不是
+/// 把"样本只有一个"误报成 100% 之外的数。
+fn series_coverage(aggregate: &PeriodAggregate, length: i64, step: Option<i64>) -> f64 {
+    match step {
+        Some(step) if step > 0 => {
+            (aggregate.count as f64 / expected_samples(length, step)).min(1.0)
+        }
+        _ if aggregate.count > 0 => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// 时间轴的中位正间隔（秒）。只看完整 time 轴，不从 QC 后剩下的时刻反推。
+fn median_step_seconds(times: &[i64]) -> Option<i64> {
+    let mut gaps = times
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|gap| *gap > 0)
+        .collect::<Vec<_>>();
+    gaps.sort_unstable();
+    gaps.get(gaps.len() / 2).copied()
 }
 
 /// 聚合过程中一个时段的累加器。观测有限数在模型缺测时也要数，所以不能沿用
@@ -142,26 +229,14 @@ pub(super) fn aggregate_pairs(
             entry.model += m;
             entry.obs += o;
             entry.paired += 1;
-            entry.paired_digest = mix_paired_time(entry.paired_digest, t - start);
+            entry.paired_digest = mix_sample_time(entry.paired_digest, t - start);
         }
     }
     let mut out = Paired::default();
     for (start, sums) in sums {
         let count = sums.paired;
-        let length = match period {
-            TargetPeriod::Daily => 86_400,
-            TargetPeriod::Monthly => {
-                let (year, month, _) = civil_from_days(start.div_euclid(86_400));
-                let (next_year, next_month) = if month == 12 {
-                    (year + 1, 1)
-                } else {
-                    (year, month + 1)
-                };
-                days_from_civil(next_year, next_month, 1) * 86_400 - start
-            }
-        };
         // 一个时段的理论样本数：时段长度除以理论采样间隔。月长按实际天数。
-        let expected = (length as f64 / expected_interval as f64).max(1.0);
+        let expected = expected_samples(period_length(start, period), expected_interval);
         if (count as f64) < AGGREGATE_MIN_COVERAGE * expected {
             out.dropped += 1;
             continue;
@@ -180,42 +255,13 @@ pub(super) fn aggregate_pairs(
     Ok(out)
 }
 
-/// CF `calendar` 只接受与固定秒数一致的公历；noleap/360_day/all_leap/julian 必须明确拒绝。
-///
-/// 审计 P1-2：原来只读 `time:units`、按公历固定秒数换算，noleap 的 `days since 2000-01-01`
-/// 第 59 天会被算成 2 月 29 日（实际应为 3 月 1 日），时间轴整体错位还会被当真。
-fn ensure_standard_calendar(file: &netcdf::File, path: &Path, time_variable: &str) -> Result<()> {
-    let Some(calendar) = file
-        .variable(time_variable)
-        .and_then(|variable| variable.attribute_value("calendar"))
-        .and_then(Result::ok)
-        .and_then(|value| match value {
-            netcdf::AttributeValue::Str(text) => Some(text),
-            netcdf::AttributeValue::Strs(mut texts) => texts.pop(),
-            _ => None,
-        })
-    else {
-        return Ok(());
-    };
-    let normalized = calendar.trim().to_ascii_lowercase();
-    ensure!(
-        matches!(
-            normalized.as_str(),
-            "standard" | "gregorian" | "proleptic_gregorian"
-        ),
-        "{}: unsupported CF calendar {calendar:?} for {time_variable}; only standard/gregorian/proleptic_gregorian can be converted to Unix time (noleap/360_day need a real calendar implementation, refuse instead of silently shifting the axis)",
-        path.display()
-    );
-    Ok(())
-}
-
 /// 观测文件**完整时间轴**的采样步长（秒）：日/月聚合覆盖率的分母。
 ///
 /// 不能用 QC/缺测过滤后的可用时刻反推（同上）。预检时还没有模型 history，只能取观测文件的
 /// 完整时间轴；运行时以模型输出间隔与它的较粗者为准。
 pub(super) fn observation_axis_step(path: &Path) -> Result<i64> {
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    ensure_standard_calendar(&file, path, "time")?;
+    crate::observation_input::ensure_standard_calendar(&file, path, "time")?;
     let units = crate::variable_units(&file, "time")
         .with_context(|| format!("time in {} has no units", path.display()))?;
     let times =
@@ -286,14 +332,34 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
         let Some(obs_cells) = obs_means.get(start) else {
             continue;
         };
-        for (slot, obs_value) in obs_cells.iter().enumerate() {
+        let length = period_length(*start, period);
+        for (slot, obs_aggregate) in obs_cells.iter().enumerate() {
             let cell = model_index[slot];
-            let model_value = model_cells[cell];
-            if model_value.is_finite() && obs_value.is_finite() {
-                paired.support.push(support_key(*start, cell));
-                paired.model.push(model_value);
-                paired.obs.push(*obs_value);
+            let model_aggregate = model_cells[cell];
+            if model_aggregate.count == 0 || obs_aggregate.count == 0 {
+                continue;
             }
+            paired.support.push(support_key(*start, cell));
+            paired.model.push(model_aggregate.mean());
+            paired.obs.push(obs_aggregate.mean());
+            paired.identity.push(PeriodIdentity {
+                start: *start,
+                obs_finite: obs_aggregate.count,
+                paired: model_aggregate.count,
+                // 旧的 `pair_support_hash` 把格子下标编码在 `support_key` 里；改用聚合身份后
+                // 必须把这层空间身份折进摘要，否则两个不同格子、值又恰好相同时会得到同一哈希。
+                paired_digest: mix_support_slot(
+                    combine_support_digests(model_aggregate.digest, obs_aggregate.digest),
+                    cell,
+                ),
+            });
+            paired.coverage.push(
+                series_coverage(&model_aggregate, length, model.step).min(series_coverage(
+                    obs_aggregate,
+                    length,
+                    obs.step,
+                )),
+            );
         }
     }
     Ok(paired)
@@ -319,6 +385,7 @@ pub(super) fn gauge_pairs(case: &Path, target: &TargetSpec, window: Window) -> R
         Some((*lon, *lat)),
     )?;
     let time = colm_hist::time::unix_seconds(&data["time"]);
+    let model_step = median_step_seconds(&time);
     let model = period_means_1d(
         time.iter().map(|end| end - 1),
         &data[target.variable.as_str()],
@@ -326,16 +393,32 @@ pub(super) fn gauge_pairs(case: &Path, target: &TargetSpec, window: Window) -> R
         window,
     );
     let (obs_time, obs_values) = read_gauge(Path::new(path), variable.as_deref())?;
+    let obs_step = median_step_seconds(&obs_time);
     let obs = period_means_1d(obs_time.iter().copied(), &obs_values, period, window);
     let mut paired = Paired::default();
-    for (start, model_value) in &model {
-        if let Some(obs_value) = obs.get(start) {
-            if model_value.is_finite() && obs_value.is_finite() {
-                paired.support.push(*start);
-                paired.model.push(*model_value);
-                paired.obs.push(*obs_value);
-            }
-        }
+    for (start, model_aggregate) in &model {
+        let Some(obs_aggregate) = obs.get(start) else {
+            continue;
+        };
+        let length = period_length(*start, period);
+        paired.support.push(*start);
+        paired.model.push(model_aggregate.mean());
+        paired.obs.push(obs_aggregate.mean());
+        paired.identity.push(PeriodIdentity {
+            start: *start,
+            obs_finite: obs_aggregate.count,
+            paired: model_aggregate.count,
+            paired_digest: combine_support_digests(model_aggregate.digest, obs_aggregate.digest),
+        });
+        // 模型与观测各自按时段平均，覆盖率取两侧较差的一侧：候选只写一半小时，
+        // 即使日均碰巧相同，这里也会降到 0.5 并在结果里可见。
+        paired.coverage.push(
+            series_coverage(model_aggregate, length, model_step).min(series_coverage(
+                obs_aggregate,
+                length,
+                obs_step,
+            )),
+        );
     }
     Ok(paired)
 }
@@ -384,6 +467,19 @@ pub(super) fn domain_mean_series(case: &Path, variable: &str) -> Result<Option<D
         }
     }
     Ok(Some((times, values, units)))
+}
+
+/// 格点产品的有效聚合尺度：显式 `period` 优先，否则按观测时间轴的自然间隔（日/月）。
+/// 预检要在打开观测之后才能知道这个默认值，不能用 `None` 当作"不聚合"。
+pub(super) fn grid_period(
+    observation: &Path,
+    variable: &str,
+    requested: Option<TargetPeriod>,
+) -> Result<TargetPeriod> {
+    match requested {
+        Some(period) => Ok(period),
+        None => Ok(GridObservation::open(observation, variable)?.natural_period()),
+    }
 }
 
 /// 建研究前检查格点产品、水文站目标：观测文件读得了、率定期（与验证期）里有观测；格点产品还要算例写出
@@ -457,26 +553,23 @@ pub(super) fn period_start(t: i64, period: TargetPeriod) -> i64 {
     }
 }
 
-/// 一条序列按时段平均；只留起点在窗内的时段，缺测不计。
+/// 一条序列按时段聚合；只留起点在窗内的时段，缺测不计。
+/// 返回和、有限样本数与时刻摘要 —— 覆盖率与支持身份都要用，不能只留均值。
 fn period_means_1d(
     times: impl Iterator<Item = i64>,
     values: &[f64],
     period: TargetPeriod,
     (from, to): Window,
-) -> BTreeMap<i64, f64> {
-    let mut sums = BTreeMap::<i64, (f64, usize)>::new();
+) -> BTreeMap<i64, PeriodAggregate> {
+    let mut sums = BTreeMap::<i64, PeriodAggregate>::new();
     for (t, value) in times.zip(values) {
         let start = period_start(t, period);
         if start < from || start >= to || !value.is_finite() {
             continue;
         }
-        let entry = sums.entry(start).or_default();
-        entry.0 += value;
-        entry.1 += 1;
+        sums.entry(start).or_default().add(*value, t - start);
     }
-    sums.into_iter()
-        .map(|(start, (sum, count))| (start, sum / count as f64))
-        .collect()
+    sums
 }
 
 /// 有观测覆盖的模型格子：`(模型格子下标, 落在这个格子里的观测格 (行, 列))`。
@@ -488,7 +581,10 @@ struct ModelGrid {
     cells: Vec<(usize, usize)>,
     lat_bounds: Vec<(f64, f64)>,
     lon_bounds: Vec<(f64, f64)>,
-    means: BTreeMap<i64, Vec<f64>>,
+    /// 模型输出的采样步长（秒），覆盖率分母用；时间轴不足两个时刻时为 `None`。
+    step: Option<i64>,
+    /// `means[时段起点][陆地格]`：和与原始样本数，配对时还要用。
+    means: BTreeMap<i64, Vec<PeriodAggregate>>,
 }
 
 impl ModelGrid {
@@ -531,7 +627,8 @@ impl ModelGrid {
             })
             .collect::<Vec<_>>();
         drop(first);
-        let mut sums = BTreeMap::<i64, Vec<(f64, usize)>>::new();
+        let mut all_times = Vec::new();
+        let mut sums = BTreeMap::<i64, Vec<PeriodAggregate>>::new();
         for path in &stream {
             let file =
                 netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
@@ -542,47 +639,32 @@ impl ModelGrid {
                 "{variable} in {} does not match its grid",
                 path.display()
             );
-            for (end, record) in colm_hist::time::unix_seconds(&minutes)
-                .into_iter()
-                .zip(field.chunks(rows * columns))
-            {
-                let start = period_start(end - 1, period);
+            let times = colm_hist::time::unix_seconds(&minutes);
+            all_times.extend(times.iter().copied());
+            for (end, record) in times.into_iter().zip(field.chunks(rows * columns)) {
+                // history 的时间是时段末；归段与样本时刻都按"时段末减 1 秒"统一。
+                let end = end - 1;
+                let start = period_start(end, period);
                 if start < from || start >= to {
                     continue;
                 }
                 let slot = sums
                     .entry(start)
-                    .or_insert_with(|| vec![(0.0, 0); cells.len()]);
+                    .or_insert_with(|| vec![PeriodAggregate::default(); cells.len()]);
                 for (index, (row, column)) in cells.iter().enumerate() {
                     let value = record[row * columns + column];
                     if value.is_finite() {
-                        slot[index].0 += value;
-                        slot[index].1 += 1;
+                        slot[index].add(value, end - start);
                     }
                 }
             }
         }
-        let means = sums
-            .into_iter()
-            .map(|(start, cells)| {
-                let values = cells
-                    .into_iter()
-                    .map(|(sum, count)| {
-                        if count > 0 {
-                            sum / count as f64
-                        } else {
-                            f64::NAN
-                        }
-                    })
-                    .collect();
-                (start, values)
-            })
-            .collect();
         Ok(Self {
             cells,
             lat_bounds,
             lon_bounds,
-            means,
+            step: median_step_seconds(&all_times),
+            means: sums,
         })
     }
 
@@ -598,7 +680,9 @@ impl ModelGrid {
             let (south, north) = self.lat_bounds[row];
             let (west, east) = self.lon_bounds[column];
             let (south, north) = (south.min(north), south.max(north));
-            let width = east - west;
+            // 跨日界线的最后一列 `lon_e = -180` 会写成 east < west，直接相减得到负宽度，
+            // 下面 `rem_euclid < width` 永远不成立，整列观测会被静默丢掉。
+            let width = crate::lon_width(wrap(west), east);
             let rows = obs
                 .lat
                 .iter()
@@ -638,6 +722,8 @@ struct GridObservation {
     time: Vec<i64>,
     lat: Vec<f64>,
     lon: Vec<f64>,
+    /// 观测文件的采样步长（秒），覆盖率分母用。
+    step: Option<i64>,
 }
 
 impl GridObservation {
@@ -672,7 +758,7 @@ impl GridObservation {
         let time_name = coordinate(time_dim, &["time"])?;
         let lat_name = coordinate(lat_dim, &["lat", "latitude"])?;
         let lon_name = coordinate(lon_dim, &["lon", "longitude"])?;
-        ensure_standard_calendar(&file, path, &time_name)?;
+        crate::observation_input::ensure_standard_calendar(&file, path, &time_name)?;
         let units = crate::variable_units(&file, &time_name)
             .with_context(|| format!("{time_name} in {} has no units", path.display()))?;
         let time = cf_unix_seconds(&crate::read_file_1d(&file, path, &time_name)?, &units)
@@ -680,6 +766,7 @@ impl GridObservation {
         Ok(Self {
             path: path.to_path_buf(),
             variable: variable.to_string(),
+            step: median_step_seconds(&time),
             time,
             lat: crate::read_file_1d(&file, path, &lat_name)?,
             lon: crate::read_file_1d(&file, path, &lon_name)?,
@@ -708,7 +795,7 @@ impl GridObservation {
         (from, to): Window,
         scale: f64,
         offset: f64,
-    ) -> Result<BTreeMap<i64, Vec<f64>>> {
+    ) -> Result<BTreeMap<i64, Vec<PeriodAggregate>>> {
         let file = netcdf::open(&self.path)
             .with_context(|| format!("cannot open {}", self.path.display()))?;
         let field = file.variable(&self.variable).with_context(|| {
@@ -730,7 +817,7 @@ impl GridObservation {
             return Ok(BTreeMap::new());
         };
         let width = self.lon.len();
-        let mut sums = BTreeMap::<i64, Vec<(f64, usize)>>::new();
+        let mut sums = BTreeMap::<i64, Vec<PeriodAggregate>>::new();
         for (index, &t) in self.time.iter().enumerate() {
             let start = period_start(t, period);
             if start < from || start >= to {
@@ -741,7 +828,7 @@ impl GridObservation {
             })?;
             let slot = sums
                 .entry(start)
-                .or_insert_with(|| vec![(0.0, 0); cells.len()]);
+                .or_insert_with(|| vec![PeriodAggregate::default(); cells.len()]);
             for (cell, members) in cells.iter().enumerate() {
                 for &(row, column) in members {
                     let raw = slab[(row - low) * width + column];
@@ -749,27 +836,11 @@ impl GridObservation {
                         continue;
                     }
                     let value = (raw * packing_scale + packing_offset) * scale + offset;
-                    slot[cell].0 += value;
-                    slot[cell].1 += 1;
+                    slot[cell].add(value, t - start);
                 }
             }
         }
-        Ok(sums
-            .into_iter()
-            .map(|(start, cells)| {
-                let values = cells
-                    .into_iter()
-                    .map(|(sum, count)| {
-                        if count > 0 {
-                            sum / count as f64
-                        } else {
-                            f64::NAN
-                        }
-                    })
-                    .collect();
-                (start, values)
-            })
-            .collect())
+        Ok(sums)
     }
 }
 
@@ -797,7 +868,7 @@ fn read_gauge(path: &Path, variable: Option<&str>) -> Result<(Vec<i64>, Vec<f64>
         "{variable} in {} holds more than one gauge; give a file with one station",
         path.display()
     );
-    ensure_standard_calendar(&file, path, "time")?;
+    crate::observation_input::ensure_standard_calendar(&file, path, "time")?;
     let units = crate::variable_units(&file, "time")
         .with_context(|| format!("time in {} has no units", path.display()))?;
     let time = cf_unix_seconds(&crate::read_file_1d(&file, path, "time")?, &units)
