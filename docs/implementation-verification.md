@@ -39448,3 +39448,15 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - #17 只做到"显式警告"，按像元边界重采样/面积加权仍未实现（能力项，需产品决策与 spec/UI 变更）。
 - 旧服务器引擎不支持 `--member` 时仍拒绝按成员写回（不降级）。
 - 启动前已存在陈旧裸锁的 observer 窄窗口；`metrics_recomputed` 对 selected 保持 false（任务约定）。
+
+## 研究页第十三批：启动前陈旧裸锁基线（2026-10-29）
+
+接第十二批。第十二批遗留的"启动前已存在陈旧裸锁可能在 observer 轮询窗口内被登记为本次身份"窄窗口，本批关闭：
+
+- 启动外层 CLI 前先读一次 `run.lock` 作为"启动前快照"，把它传给后台 observer；`poll_first_study_lock` 只接受与启动前快照 `same_identity` 不同的锁（pid/executable/started_unix/run_id，排除 heartbeat）。
+- 陈旧锁一直不变时 observer 超时且**不登记**；取消裸锁时没有启动登记 → 按现有策略拒绝补杀并给可行动错误（不会认领陈旧锁）。陈锁被本次运行替换成新锁时照常登记。
+- 测试 +2：陈旧锁不变 → 轮询超时、`None`；陈旧锁被替换 → 登记新锁。全量 GUI 581 passed / 1 ignored（含既有人工数据用例）。
+
+验证（真实执行）：`cargo test -q --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` 581 passed / 1 ignored；`cargo clippy -q --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` exit 0；两侧 `cargo fmt --all --check` clean。未运行真实 Tauri 窗口点击。
+
+遗留：无新增；#17 完整按像元边界重采样仍是需要产品决策的能力项。
