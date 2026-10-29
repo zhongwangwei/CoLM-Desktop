@@ -39343,3 +39343,31 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `study-verified-side` 的远程 stdin 凭据转发仍沿用既有"仅 remote-* 命令"条件，远程 password 认证委托场景无新增覆盖。
 - SOURCE-only 的模型版本读取不做 evidence 哈希核对（写回路径仍全量核对）。
 - 启动前陈旧裸锁的窄窗口（见上）。
+
+## 研究页第九批：多研究与混合 pin 命令的委托策略（2026-10-29）
+
+接第八批。`PINNED_CLI_COMMANDS` 已覆盖单研究/远程命令；本批处理 study-clone（单研究）、study-compare（两研究）、hybrid-fit（多研究）的 pin 判定，避免"用一个 CLI 校验另一侧/另一份修订"。
+
+### 判定函数与命令清单
+
+- 新增 `PinnedCommand{Local, Delegate(path), Refuse(reason)}` 与纯判定 `pinned_command_decision(command, opts, current_exe)`（只读 pin，不启动进程、不读 stdin）；`pinned_command_plan` 保留 `DELEGATED_ENV` 防二次转交；`run_pinned_command` 协议不变（参数原序、stdout/stderr 继承、退出码透传、`DELEGATED_ENV`/`COLM_AUDIT_BY_PARENT`）。
+- `PINNED_CLI_COMMANDS` 6→7：加入 `study-clone`（任何"pin 与当前程序不同"整条转交；它只在 `pin.model_revision.is_some()` 时调 `verify_frozen_inputs`，转交比触发面更宽是刻意收紧）。
+- `study-compare`：两侧都空/当前→Local；两侧 pin 相同且≠当前→Delegate；两侧 pin 不同（含一侧有 pin 一侧无、一侧=当前）→**Local**：比较两个模型版本是受支持的核心流程（integration 测试 `two_model_versions_are_calibrated_with_the_same_design_and_compared`），任何一份 CLI 都只代表自己那一版；`study-compare` 会把 `inputs_verified`/`same_inputs` 降级为 false 并在结果里说明，而不是拒绝整个比较（拒绝会让"比较两个版本"不可用）。测试锁住混合 pin 下不启动任一侧程序且判定为 Local。GUI 的 `study_compare` 实际是起两次 `verified_study_side` 再合并，不走 CLI `study-compare`。
+- `hybrid-fit`：实际参数是**单个逗号分隔的 `--studies a,b,c`**（`cmd_hybrid_fit` 与 GUI 均如此；`--study-dir` 在该命令无人读取，未支持以免看错研究）。全部相同且≠当前→Delegate；全部空/当前→Local；混合/部分不同→Refuse（说明特征提取/输入核验会用错程序，建议统一来源 revision）。`prepare_study` 对每个 Study 调 `verify_frozen_inputs`，所以混合 pin 必须拒绝。
+- main.rs：Refuse 在读取 SSH 凭据 stdin **之前** bail（非 0 退出、stderr 可行动）；remote-* 凭据转发条件不变（含 EPIPE 排空）。
+
+### 测试
+
+`study_version_tests.rs`：删除过时的"study-compare 绝不转交"锁；新增/扩展 compare 同 pin 委托（假 CLI 记录 args/env/退出码）、compare 三种混合 pin 拒绝（无任何子进程启动）、hybrid 全同 pin 委托（逗号列表原样、env=1 1）/混合拒绝、study-clone 委托与同/空 pin 本地、`DELEGATED_ENV` 阻止二次转交、不读 pin 的命令不回归。
+
+### 本轮验证（真实执行）
+
+- `cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **777 passed**；`study_version` **39 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- 手工冒烟（真二进制）：混合 pin 的 `study-compare` 返回 exit=1 与完整 Refuse 原因；同 pin 时确实执行 pin 的程序并交回其退出码。
+- 未运行：真实旧冻结 CLI 二进制；GUI 的 compare/hybrid-fit 端到端（GUI 走的是 verified_study_side 路径）。
+
+### 遗留
+
+- GUI 的 `study_compare` 路径（两次 verified_study_side + 合并）未按 pin 改造；CLI 的 Refuse 只约束直接调用者。
+- `study-clone` 对 `model_revision=None` 的 pin 也整条转交，前提是旧 pin 程序自身支持该子命令。
+- 服务器端按指定成员独立重算指标仍只覆盖 best+baseline。
