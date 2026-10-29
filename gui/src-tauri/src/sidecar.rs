@@ -966,10 +966,17 @@ fn poll_first_study_lock(
     mut read: impl FnMut() -> Option<StudyLockSnapshot>,
     mut running: impl FnMut() -> bool,
     mut sleep: impl FnMut(Duration),
+    stale: Option<&StudyLockSnapshot>,
 ) -> Option<StudyLockSnapshot> {
     for _ in 0..STUDY_LOCK_POLL_TRIES {
         if let Some(lock) = read() {
-            return Some(lock);
+            // 启动前就存在的陈旧锁不是本次运行写的：若把它登记成本次启动身份，取消时就会
+            // 认领另一个进程的锁（正是 observer 窗口里剩下的最后一条误杀路径）。只接受与
+            // 启动前快照身份不同的锁；陈旧锁一直不变时宁可不登记（取消裸锁于是拒绝）。
+            let stale_matches = stale.is_some_and(|stale| stale.same_identity(&lock));
+            if !stale_matches {
+                return Some(lock);
+            }
         }
         if !running() {
             return None;
@@ -983,7 +990,12 @@ fn poll_first_study_lock(
 ///
 /// 运行可能在锁写出来之前就失败退出，所以每轮都先问登记表还在不在；结束后迟到的结果由
 /// [`RunProcesses::remember_startup_lock`] 丢掉，不会污染同一研究目录的下一次运行。
-fn spawn_study_lock_observer(processes: &RunProcesses, key: &str, study_dir: &str) {
+fn spawn_study_lock_observer(
+    processes: &RunProcesses,
+    key: &str,
+    study_dir: &str,
+    stale: Option<StudyLockSnapshot>,
+) {
     let processes = processes.clone();
     let key = key.to_string();
     let study_dir = study_dir.to_string();
@@ -992,6 +1004,7 @@ fn spawn_study_lock_observer(processes: &RunProcesses, key: &str, study_dir: &st
             || read_study_lock(&study_dir),
             || processes.study_run_active(&key).unwrap_or(false),
             std::thread::sleep,
+            stale.as_ref(),
         );
         if let Some(lock) = observed {
             let _ = processes.remember_startup_lock(&key, lock);
@@ -4319,8 +4332,10 @@ fn study_run_untracked(
     remember_process(&processes, &study_key, &mut child)?;
     let (out, err) = take_process_pipes(&mut child, &processes, &study_key)?;
     // 只读研究目录的 run.lock，把本次运行第一次见到的身份记下来；取消裸锁时它是唯一能
-    // 区分“这轮运行持有的锁”与“PID 被复用后出现的同名锁”的证据。
-    spawn_study_lock_observer(&processes, &study_key, &study_dir);
+    // 区分“这轮运行持有的锁”与“PID 被复用后出现的同名锁”的证据。启动前已经存在的锁快照
+    // 用来排除陈旧锁，否则旧锁的 PID 被复用时仍会被当成这次启动的身份。
+    let stale = read_study_lock(&study_dir);
+    spawn_study_lock_observer(&processes, &study_key, &study_dir, stale);
     let errs = drain_stderr(err);
     let mut last = None;
     let mut last_task_log_emit = None;

@@ -2242,6 +2242,7 @@ fn the_first_lock_seen_after_startup_is_registered_for_the_run() {
         || reads.pop_front().unwrap_or(None),
         || true,
         |_| slept.set(slept.get() + 1),
+        None,
     );
     assert_eq!(observed, Some(lock.clone()));
     assert_eq!(slept.get(), 2, "the first two polls saw no lock");
@@ -2270,6 +2271,7 @@ fn the_lock_watcher_stops_when_the_run_is_gone_and_never_sleeps() {
         },
         || false,
         |_| panic!("no wait after the run ended"),
+        None,
     );
     assert_eq!(observed, None);
     assert_eq!(reads.get(), 1);
@@ -2278,9 +2280,44 @@ fn the_lock_watcher_stops_when_the_run_is_gone_and_never_sleeps() {
 #[test]
 fn the_lock_watcher_gives_up_after_its_short_window() {
     let slept = std::cell::Cell::new(0);
-    let observed = poll_first_study_lock(|| None, || true, |_| slept.set(slept.get() + 1));
+    let observed = poll_first_study_lock(|| None, || true, |_| slept.set(slept.get() + 1), None);
     assert_eq!(observed, None);
     assert_eq!(slept.get(), STUDY_LOCK_POLL_TRIES);
+}
+
+/// 启动前就存在的陈旧锁不能被登记成本次运行的身份：登记了就等于允许取消认领
+/// 另一个进程的锁，PID 复用窗口又回来了。陈旧锁一直不变时轮询只能超时返回 None。
+#[test]
+fn a_lock_that_existed_before_startup_is_not_registered_as_ours() {
+    let stale = lock_snapshot(7001, "/opt/colm-cli", None, 1_600_000_000);
+    let slept = std::cell::Cell::new(0);
+    let observed = poll_first_study_lock(
+        || Some(stale.clone()),
+        || true,
+        |_| slept.set(slept.get() + 1),
+        Some(&stale),
+    );
+    assert_eq!(observed, None);
+    assert_eq!(slept.get(), STUDY_LOCK_POLL_TRIES);
+}
+
+/// 陈旧锁被本次运行替换后仍需登记：只排除与启动前快照身份相同的锁。
+#[test]
+fn a_lock_that_replaces_a_stale_one_is_registered() {
+    let stale = lock_snapshot(7001, "/opt/colm-cli", None, 1_600_000_000);
+    let fresh = lock_snapshot(7002, "/opt/colm-cli", None, 1_700_000_000);
+    let mut reads = std::collections::VecDeque::from([
+        Some(stale.clone()),
+        Some(stale.clone()),
+        Some(fresh.clone()),
+    ]);
+    let observed = poll_first_study_lock(
+        || reads.pop_front().unwrap_or(None),
+        || true,
+        |_| {},
+        Some(&stale),
+    );
+    assert_eq!(observed, Some(fresh));
 }
 
 /// 只保留第一次观察（心跳刷新或后来换锁都不能改写它），并且运行结束后清干净 ——
@@ -2490,7 +2527,7 @@ fn the_background_watcher_registers_a_lock_that_appears_after_spawn() {
     let mut child = grouped_sleeper();
     processes.prepare_study_run(&key, "run-1").unwrap();
     assert!(processes.remember(&key, child.id()).unwrap());
-    spawn_study_lock_observer(&processes, &key, &study);
+    spawn_study_lock_observer(&processes, &key, &study, None);
     std::thread::sleep(Duration::from_millis(20));
     let image = process_image_name(child.id()).expect("the scheduler has a known image");
     write_run_lock_for(&dir, child.id(), None, &image);
