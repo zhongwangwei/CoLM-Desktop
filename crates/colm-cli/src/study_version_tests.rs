@@ -605,23 +605,27 @@ fn workspace_revision(id: &str, revision: u64) -> colm_model::FrozenRevision {
 }
 
 #[test]
-fn creation_executor_follows_the_program_that_will_run_the_study() {
+fn creation_executor_follows_the_revisions_own_program() {
     let current = Path::new("/app/bin/colm-cli");
-    let cached = Path::new("/models/sources/abc/workspaces/ws/bin/colm-cli");
-    // workspace 修订运行时会换成缓存里的 colm-cli：创建也得用它，否则 provenance 哈希口径不同。
+    let official_cli = Path::new("/models/sources/abc/bin/colm-cli");
+    let workspace_cli = Path::new("/models/sources/def/workspaces/ws/bin/colm-cli");
+    // 运行侧官方与 workspace 修订都用 `revision_cli` 指的那份程序（study-run 的 `delegate`）；
+    // 创建/预检必须由同一份程序写 manifest 与 provenance，否则运行时 `verify_frozen_inputs`
+    // 用另一份程序内嵌的参数目录重算，哈希对不上（P1-8）。官方修订也可能是另一种构建，
+    // 不能再按“官方就不换程序”特判。
+    for cli in [official_cli, workspace_cli] {
+        assert_eq!(
+            creation_executor(current, cli),
+            CreationExecutor::Delegate(cli.to_path_buf())
+        );
+    }
+    // 当前程序就是那份修订的 CLI（例如由它自己转交回来，或正跑在它的 bin 里）：按本地处理。
+    assert_eq!(creation_executor(current, current), CreationExecutor::Local);
+    // 缓存还没准备好：决策仍是转交，由 delegate_creation 先按运行侧同一路径补齐，补不齐就拒绝。
+    let missing = Path::new("/models/sources/abc/bin/missing-colm-cli");
     assert_eq!(
-        creation_executor(&revision_code(Some("ws")), current, cached),
-        CreationExecutor::Delegate(cached.to_path_buf())
-    );
-    // 官方修订不换程序：保持当前路径。
-    assert_eq!(
-        creation_executor(&revision_code(None), current, cached),
-        CreationExecutor::Local
-    );
-    // 当前程序就是那份修订的 CLI（例如由它转交回来）：不能再转交一次。
-    assert_eq!(
-        creation_executor(&revision_code(Some("ws")), current, current),
-        CreationExecutor::Local
+        creation_executor(current, missing),
+        CreationExecutor::Delegate(missing.to_path_buf())
     );
 }
 
@@ -693,14 +697,19 @@ fn a_study_without_a_frozen_revision_stays_local() {
     .is_none());
 }
 
+/// 官方修订的研究将来由 `cached_official_cli` 那份程序运行（`study-run` 的 `delegate`），
+/// 创建/预检也必须交给同一条路径上的程序；否则当前程序写下的 provenance 与运行侧算出的对不上。
+#[cfg(unix)]
 #[test]
-fn an_official_revision_keeps_the_local_create_path() {
-    let root = temp("delegate-official");
+fn an_official_revision_study_is_created_by_its_cached_cli() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("delegate-official-cached");
     let models = root.join("models");
     let store = colm_model::Registry::open(&models).unwrap();
     let official = store.install_official(revision_code(None)).unwrap();
-    let case = root.join("case");
-    std::fs::create_dir_all(&case).unwrap();
+    let case_root = root.join("case");
+    std::fs::create_dir_all(&case_root).unwrap();
+    let spec = valid_spec(&root, false);
     let opts = crate::Opts {
         flags: vec![
             ("--model-root".into(), models.to_string_lossy().into_owned()),
@@ -710,14 +719,138 @@ fn an_official_revision_keeps_the_local_create_path() {
                 official.version.revision.to_string(),
             ),
         ],
-        positional: vec![case.to_string_lossy().into_owned()],
+        positional: vec![case_root.to_string_lossy().into_owned()],
     };
-    // 官方修订运行时不换程序，创建仍在当前程序里做。
-    assert!(
-        delegate_creation("study-create", &opts, &case, &root.join("spec.json"))
-            .unwrap()
-            .is_none()
+    let cli = crate::model_version::cached_official_cli(&opts, &official.code).unwrap();
+    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    let study = case_root.join(".colm/studies/official-created");
+    let template = student_template(
+        &root,
+        Some(serde_json::json!({
+            "model_revision": {"version": {"id": "official", "revision": official.version.revision}}
+        })),
     );
+    let log = root.join("args.log");
+    let env_log = root.join("env.log");
+    let script = format!(
+        "printf '%s\\n' \"$@\" > '{log}'\n\
+         printf '%s %s\\n' \"$COLM_STUDY_BY_PARENT\" \"$COLM_AUDIT_BY_PARENT\" > '{env_log}'\n\
+         mkdir -p '{studies}'\n\
+         cp -R '{template}' '{study}'\n\
+         printf '%s\\n' '{study}'\n",
+        log = log.display(),
+        env_log = env_log.display(),
+        studies = study.parent().unwrap().display(),
+        template = template.display(),
+        study = study.display(),
+    );
+    std::fs::write(&cli, format!("#!/bin/sh\n{script}")).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let stdout = delegate_creation("study-create", &opts, &case_root, &spec)
+        .unwrap()
+        .expect("官方修订也必须交给运行侧那份 colm-cli");
+    assert_eq!(stdout, format!("{}\n", study.display()));
+    let args: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let revision = official.version.revision.to_string();
+    assert_eq!(
+        args[..8],
+        [
+            "study-create",
+            case_root.to_str().unwrap(),
+            "--model-root",
+            models.to_str().unwrap(),
+            "--model-id",
+            "official",
+            "--model-revision",
+            revision.as_str(),
+        ][..]
+    );
+    assert_eq!(args[8], "--spec");
+    assert_ne!(
+        Path::new(&args[9]),
+        spec,
+        "交出去的仍是剥掉新审计字段的副本"
+    );
+    assert!(!Path::new(&args[9]).exists(), "转交用的临时副本事后要删掉");
+    assert_eq!(
+        std::fs::read_to_string(&env_log).unwrap().trim(),
+        "1 1",
+        "子进程要标明由父进程转交，且不再单独记审计"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 缓存里的程序就是当前这个可执行文件时（符号链接指回来）：再转交只会绕圈，保持本地路径。
+#[cfg(unix)]
+#[test]
+fn an_official_revision_that_is_this_program_stays_local() {
+    let root = temp("delegate-official-current");
+    let models = root.join("models");
+    let store = colm_model::Registry::open(&models).unwrap();
+    let official = store.install_official(revision_code(None)).unwrap();
+    let case_root = root.join("case");
+    std::fs::create_dir_all(&case_root).unwrap();
+    let spec = valid_spec(&root, false);
+    let opts = crate::Opts {
+        flags: vec![
+            ("--model-root".into(), models.to_string_lossy().into_owned()),
+            ("--model-id".into(), "official".into()),
+            (
+                "--model-revision".into(),
+                official.version.revision.to_string(),
+            ),
+        ],
+        positional: vec![case_root.to_string_lossy().into_owned()],
+    };
+    let cli = crate::model_version::cached_official_cli(&opts, &official.code).unwrap();
+    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &cli).unwrap();
+    assert!(delegate_creation("study-create", &opts, &case_root, &spec)
+        .unwrap()
+        .is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 修订的 CLI 准备不出来（缓存残缺/来源对不上）时不能退回当前程序：明确拒绝并给可行动提示。
+#[test]
+fn a_revision_cli_that_cannot_be_prepared_is_refused_with_an_actionable_error() {
+    let root = temp("delegate-unpreparable");
+    let models = root.join("models");
+    let store = colm_model::Registry::open(&models).unwrap();
+    let official = store.install_official(revision_code(None)).unwrap();
+    let opts = crate::Opts {
+        flags: vec![
+            ("--model-root".into(), models.to_string_lossy().into_owned()),
+            ("--model-id".into(), "official".into()),
+            (
+                "--model-revision".into(),
+                official.version.revision.to_string(),
+            ),
+        ],
+        positional: vec![root.join("case").to_string_lossy().into_owned()],
+    };
+    // 缓存里放另一份来源的 code.json：`verify_code` 当场判身份不符，不必去算当前源码。
+    let cache = crate::model_version::cache_dir(&opts, &official.code).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut wrong = revision_code(None);
+    wrong.source_sha256 = "b".repeat(64);
+    std::fs::write(cache.join("code.json"), serde_json::to_vec(&wrong).unwrap()).unwrap();
+    let error = delegate_creation(
+        "study-create",
+        &opts,
+        Path::new(&opts.positional[0]),
+        Path::new("/nonexistent/spec.json"),
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("official r1"), "{text}");
+    assert!(text.contains("could not be prepared"), "{text}");
+    assert!(text.contains("cached source identity mismatch"), "{text}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1093,5 +1226,247 @@ fn a_spec_handed_to_an_older_program_drops_parent_study_and_optionally_include_b
         serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
     assert!(original.get("parent_study").is_some());
     std::fs::remove_file(&retried).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------- 身份敏感命令交给研究 pin 的程序
+//
+// 这些命令会调用 `verify_frozen_inputs`：它用程序内嵌的参数目录与来源文件重算 provenance 哈希。
+// 研究 pin 到旧修订后，当前程序算出的值与 pin 时由旧程序算出的不同，会被误报成“输入变了”
+// （#6b，P1-8 同类）。所以只要研究 pin 的 CLI 与当前程序不同，整条命令交给 pin 的 CLI 执行。
+
+fn pinned_study(root: &Path, cli: PathBuf) -> PathBuf {
+    let study = root.join("study");
+    std::fs::create_dir_all(&study).unwrap();
+    let pin = Pinned {
+        name: "snow".into(),
+        head: "abc".into(),
+        base_commit: "def".into(),
+        note: String::new(),
+        based_on: None,
+        touches: Touches {
+            engine: false,
+            kernel: false,
+        },
+        cli,
+        kernel: PathBuf::from("/k/default"),
+        pinned_unix: 0,
+        model_revision: None,
+        model_root: None,
+    };
+    std::fs::write(study.join(FILE), serde_json::to_vec_pretty(&pin).unwrap()).unwrap();
+    study
+}
+
+fn pinned_command_opts(command: &str, study: &Path) -> crate::Opts {
+    let study = study.to_string_lossy().into_owned();
+    match command {
+        "study-save-version" => crate::Opts {
+            positional: vec![study],
+            flags: vec![
+                ("--member".into(), "best".into()),
+                ("--name".into(), "v1".into()),
+            ],
+        },
+        "remote-study-run" => crate::Opts {
+            positional: vec![study],
+            flags: vec![
+                ("--host".into(), "server".into()),
+                ("--dry-run".into(), "1".into()),
+                // 同一个 flag 出现多次时要按原顺序全部转交，不能只送第一条。
+                ("--map".into(), "/data/a=/srv/a".into()),
+                ("--map".into(), "/data/b=/srv/b".into()),
+            ],
+        },
+        "remote-study-fetch" => crate::Opts {
+            positional: vec![study],
+            flags: vec![("--host".into(), "server".into())],
+        },
+        "model-import-study" => crate::Opts {
+            positional: Vec::new(),
+            flags: vec![
+                ("--study-dir".into(), study),
+                ("--model-id".into(), "draft".into()),
+                ("--expected-generation".into(), "1".into()),
+            ],
+        },
+        other => panic!("test does not know {other}"),
+    }
+}
+
+/// 同一个 flag 可以重复（`--map` 等）；转交要按原值、原顺序全部送过去，不能只送第一条。
+fn pinned_command_args(command: &str, opts: &crate::Opts) -> Vec<String> {
+    let mut args = vec![command.to_owned()];
+    args.extend(opts.positional.iter().cloned());
+    for (flag, value) in &opts.flags {
+        args.extend([flag.clone(), value.clone()]);
+    }
+    args
+}
+
+struct DelegatedEnv(Option<std::ffi::OsString>);
+
+impl DelegatedEnv {
+    fn set() -> Self {
+        let previous = std::env::var_os(DELEGATED_ENV);
+        std::env::set_var(DELEGATED_ENV, "1");
+        Self(previous)
+    }
+}
+
+impl Drop for DelegatedEnv {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var(DELEGATED_ENV, value),
+            None => std::env::remove_var(DELEGATED_ENV),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn identity_sensitive_study_commands_run_on_the_pinned_cli() {
+    for command in [
+        "study-save-version",
+        "model-import-study",
+        "remote-study-run",
+        "remote-study-fetch",
+    ] {
+        let root = temp(&format!("pin-cli-{command}"));
+        let log = root.join("args.log");
+        let env_log = root.join("env.log");
+        let cli = fake_cli(
+            &root,
+            &format!(
+                "printf '%s\\n' \"$@\" > '{log}'\n\
+                 printf '%s %s\\n' \"$COLM_STUDY_BY_PARENT\" \"$COLM_AUDIT_BY_PARENT\" > '{env_log}'\n\
+                 exit 0\n",
+                log = log.display(),
+                env_log = env_log.display(),
+            ),
+        );
+        let study = pinned_study(&root, cli);
+        let opts = pinned_command_opts(command, &study);
+        let program = pinned_command_program(command, &opts)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{command} 应该交给 pin 的 CLI"));
+        assert_eq!(
+            run_pinned_command(&program, command, &opts, None).unwrap(),
+            0,
+            "{command} 应该交给 pin 的 CLI"
+        );
+        let args: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(args, pinned_command_args(command, &opts), "{command}");
+        assert_eq!(
+            std::fs::read_to_string(&env_log).unwrap().trim(),
+            "1 1",
+            "{command} 要防循环且不再单独记审计"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_delegated_identity_command_returns_the_pinned_clis_exit_status() {
+    let root = temp("pin-cli-exit");
+    let cli = fake_cli(&root, "exit 7\n");
+    let study = pinned_study(&root, cli);
+    let opts = pinned_command_opts("remote-study-fetch", &study);
+    let program = pinned_command_program("remote-study-fetch", &opts)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run_pinned_command(&program, "remote-study-fetch", &opts, None).unwrap(),
+        7
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pin_that_names_the_running_program_stays_local() {
+    let root = temp("pin-cli-current");
+    let study = pinned_study(&root, std::env::current_exe().unwrap());
+    let opts = pinned_command_opts("study-save-version", &study);
+    assert_eq!(
+        pinned_command_program("study-save-version", &opts).unwrap(),
+        None
+    );
+    // 只读命令不重算 provenance，也不该整条转交。
+    let cli_elsewhere = root.join("other-colm-cli");
+    std::fs::write(&cli_elsewhere, "not a program").unwrap();
+    let study = pinned_study(&root.join("readonly"), cli_elsewhere);
+    let opts = pinned_command_opts("study-save-version", &study);
+    assert_eq!(pinned_command_program("study-status", &opts).unwrap(), None);
+    // 没有 model-version.json 的研究没有 pin，按当前程序执行。
+    let plain = root.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let opts = crate::Opts {
+        positional: vec![plain.to_string_lossy().into_owned()],
+        flags: Vec::new(),
+    };
+    assert_eq!(
+        pinned_command_program("study-save-version", &opts).unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_second_delegation_is_stopped_by_the_parent_marker() {
+    let root = temp("pin-cli-loop");
+    let log = root.join("args.log");
+    let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+    let study = pinned_study(&root, cli);
+    let opts = pinned_command_opts("remote-study-run", &study);
+    let _guard = DelegatedEnv::set();
+    assert_eq!(
+        pinned_command_program("remote-study-run", &opts).unwrap(),
+        None
+    );
+    assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 远程命令的 SSH 凭据只能从 stdin 读一次：父进程替它读走之后必须原样转给真正执行的程序。
+#[cfg(unix)]
+#[test]
+fn a_delegated_remote_command_receives_the_stdin_credentials() {
+    let root = temp("pin-cli-auth");
+    let log = root.join("stdin.log");
+    let cli = fake_cli(&root, &format!("cat > '{}'\n", log.display()));
+    let study = pinned_study(&root, cli);
+    let opts = pinned_command_opts("remote-study-fetch", &study);
+    let program = pinned_command_program("remote-study-fetch", &opts)
+        .unwrap()
+        .unwrap();
+    let payload = "{\"host\":\"server\",\"auth\":\"password\"}";
+    assert_eq!(
+        run_pinned_command(&program, "remote-study-fetch", &opts, Some(payload)).unwrap(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        format!("{payload}\n")
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pin_whose_program_is_missing_is_refused_with_an_actionable_error() {
+    let root = temp("pin-cli-missing");
+    let missing = root.join("deleted-colm-cli");
+    let study = pinned_study(&root, missing.clone());
+    let opts = pinned_command_opts("remote-study-fetch", &study);
+    let error = pinned_command_program("remote-study-fetch", &opts).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("snow"), "{text}");
+    assert!(text.contains(missing.to_str().unwrap()), "{text}");
+    assert!(text.contains("restore"), "{text}");
     let _ = std::fs::remove_dir_all(&root);
 }

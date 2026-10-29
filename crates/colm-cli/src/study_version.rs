@@ -202,6 +202,123 @@ pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// 写回模型版本、或提交/取回远程研究的身份敏感命令：它们读研究 pin、调用
+/// `verify_frozen_inputs`，并把算出的身份写进模型或远程记录。研究目录的位置各不相同：
+/// `study-save-version`/`remote-study-run`/`remote-study-fetch` 是第一个位置参数，
+/// `model-import-study` 是 `--study-dir`。`study-status` 等只读命令不重算 provenance，不在此列。
+const PINNED_CLI_COMMANDS: [&str; 4] = [
+    "study-save-version",
+    "model-import-study",
+    "remote-study-run",
+    "remote-study-fetch",
+];
+
+/// 这些命令从哪取研究目录。四个入口的实际读法不同，不能统一按位置参数取。
+fn pinned_command_study_dir(command: &str, opts: &crate::Opts) -> Option<PathBuf> {
+    if !PINNED_CLI_COMMANDS.contains(&command) {
+        return None;
+    }
+    if command == "model-import-study" {
+        opts.get("--study-dir").map(PathBuf::from)
+    } else {
+        opts.positional.first().map(PathBuf::from)
+    }
+}
+
+/// 转交整条命令：子命令、原位置参数、原 flags（含重复 flag 与原顺序），不重解释路径与值。
+fn pinned_command_args(command: &str, opts: &crate::Opts) -> Vec<String> {
+    let mut args = vec![command.to_owned()];
+    args.extend(opts.positional.iter().cloned());
+    for (flag, value) in &opts.flags {
+        args.extend([flag.clone(), value.clone()]);
+    }
+    args
+}
+
+/// 研究 pin 的 CLI 与当前程序不同时，返回整条命令该交给的那份程序；`None` 表示按当前程序继续。
+///
+/// 为什么整条转交：`verify_frozen_inputs` 用程序内嵌的参数目录与来源文件重算 provenance 哈希。
+/// 研究 pin 到旧修订后，当前程序算出的值与 pin 时由旧程序算出的不同，写回/提交会被误报成
+/// “输入变了”（#6b，P1-8 同类）。协议与 `study-run` 的 [`delegate`] 一致：参数原值透传，
+/// 子进程带 [`DELEGATED_ENV`] 防止再转交，审计由父进程记（`COLM_AUDIT_BY_PARENT`），退出码
+/// 原样交回调用方。
+///
+/// 单独拆出“决定交给谁”不是为了复用，而是因为远程命令的 SSH 凭据由调用方写在 stdin 上：
+/// 一旦当前进程先读了凭据，被转交的程序就读不到了（见 main 里的调用顺序）。
+pub(crate) fn pinned_command_program(command: &str, opts: &crate::Opts) -> Result<Option<PathBuf>> {
+    // 已经由父进程交出来的程序不再转交：它的 current_exe 可能不是 pin 里记的那条路径。
+    if std::env::var_os(DELEGATED_ENV).is_some() {
+        return Ok(None);
+    }
+    let Some(study_dir) = pinned_command_study_dir(command, opts) else {
+        return Ok(None);
+    };
+    let Some(pin) = pinned(&study_dir)? else {
+        return Ok(None);
+    };
+    let current =
+        std::env::current_exe().context("cannot locate the running colm-cli executable")?;
+    if same_program(&pin.cli, &current) {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        pin.cli.is_file(),
+        "this Study was created with model version {} whose colm-cli is missing at {}; restore that version's program or create the Study again",
+        pin.name,
+        pin.cli.display()
+    );
+    Ok(Some(pin.cli))
+}
+
+/// 用 [`pinned_command_program`] 指定的程序执行整条命令，返回它的退出码。stdout/stderr 继承，
+/// 输出直接交给调用方（GUI sidecar）；`auth_line` 是调用方从 stdin 读到的 SSH 凭据原文，按原样
+/// 从子进程的 stdin 送进去——远程命令的凭据只能读一次，父进程读了就必须转给真正执行的程序。
+pub(crate) fn run_pinned_command(
+    program: &Path,
+    command: &str,
+    opts: &crate::Opts,
+    auth_line: Option<&str>,
+) -> Result<i32> {
+    let mut child = std::process::Command::new(program);
+    child
+        .args(pinned_command_args(command, opts))
+        .env(DELEGATED_ENV, "1")
+        .env("COLM_AUDIT_BY_PARENT", "1");
+    if auth_line.is_some() {
+        child.stdin(std::process::Stdio::piped());
+    }
+    let mut child = child.spawn().with_context(|| {
+        format!(
+            "cannot start the Study's model version program {}",
+            program.display()
+        )
+    })?;
+    if let Some(line) = auth_line {
+        use std::io::Write;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("the delegated colm-cli has no stdin")?;
+        let mut payload = line.to_owned();
+        if !payload.ends_with('\n') {
+            payload.push('\n');
+        }
+        if let Err(error) = stdin.write_all(payload.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error)
+                .context("cannot forward SSH authentication to the Study's model version program");
+        }
+    }
+    let status = child.wait().with_context(|| {
+        format!(
+            "cannot wait for the Study's model version program {}",
+            program.display()
+        )
+    })?;
+    Ok(status.code().unwrap_or(1))
+}
+
 /// 创建/预检研究时该由哪份程序写 manifest 与 provenance。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CreationExecutor {
@@ -209,20 +326,46 @@ pub(crate) enum CreationExecutor {
     Delegate(PathBuf),
 }
 
-/// workspace 型修订运行研究时会换成它自己的 `colm-cli`（[`delegate`]），创建/预检也必须由同一份程序
-/// 做：`verify_frozen_inputs` 用程序内嵌的参数目录与来源文件重算 provenance 哈希，两份不同代码算出的
-/// 值对不上，研究就会建得成却跑不起来（P1-8）。官方修订不换程序；当前程序自己就是那份修订的 CLI
-/// （例如由它自己转交回来）时再转交只会绕圈，也按本地处理。
-pub(crate) fn creation_executor(
-    code: &colm_model::CodeRef,
-    current_exe: &Path,
-    revision_cli: &Path,
-) -> CreationExecutor {
-    if code.workspace.is_none() || revision_cli == current_exe {
+fn resolved(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_owned())
+}
+
+fn same_program(left: &Path, right: &Path) -> bool {
+    resolved(left) == resolved(right)
+}
+
+/// 运行研究时用的是该修订的 `revision_cli`（[`delegate`]），创建/预检必须由同一份程序做：
+/// `verify_frozen_inputs` 用程序内嵌的参数目录与来源文件重算 provenance 哈希，两份不同代码算出的
+/// 值对不上，研究就会建得成却跑不起来（P1-8）。
+///
+/// 只看 `revision_cli` 是不是当前可执行文件，不再对官方/workspace 特判：官方修订也可能是另一份
+/// 构建（缓存里那份），按官方就本地处理会让创建与运行用两份程序算哈希。CLI 还不存在时也返回
+/// `Delegate`，由 [`delegate_creation`] 按运行侧同一条路径先补齐，补不齐再明确拒绝。
+pub(crate) fn creation_executor(current_exe: &Path, revision_cli: &Path) -> CreationExecutor {
+    if same_program(current_exe, revision_cli) {
         CreationExecutor::Local
     } else {
         CreationExecutor::Delegate(revision_cli.to_owned())
     }
+}
+
+/// 按运行侧同一条路径准备好修订自己的 `colm-cli`。
+///
+/// workspace 修订缓存不在时，[`revision_cli`] 会退到工作区现在编的那份（可能已经改过），所以即使
+/// 文件存在也必须先把代码冻结进缓存；官方修订的程序就在按内容命名的缓存里，文件在就说明已经
+/// 准备过。两边用到时才做，避免每次创建都重算源码哈希。
+fn prepare_revision_cli(opts: &crate::Opts, revision: &colm_model::FrozenRevision) -> Result<()> {
+    let ready = if revision.code.workspace.is_some() {
+        crate::model_version::cached_options(opts, &revision.code)?.is_some()
+    } else {
+        crate::model_version::cached_official_cli(opts, &revision.code)?.is_file()
+    };
+    if ready {
+        return Ok(());
+    }
+    crate::model_version::verify_code(opts, &revision.code)?;
+    crate::model_version::cache_code(opts, &revision.code)?;
+    Ok(())
 }
 
 /// 转交给修订 CLI 的参数：子命令、**原始**算例目录（不是 prepare_create 的临时冻结输入目录）、原样
@@ -247,8 +390,8 @@ pub(crate) fn creation_delegate_args(
 }
 
 /// 把创建/预检整条命令交给将来运行这份研究的那份 `colm-cli`。成功返回它的 stdout 交给调用方原样
-/// 打印（`study-create` 打印的是研究目录）；`None` 表示这不是 workspace 型修订、或当前程序就是那份
-/// 程序，按现有路径继续。快照 CLI 自己的 `study-create` 会做它版本的 prepare/pin/capture，当前程序
+/// 打印（`study-create` 打印的是研究目录）；`None` 表示没有选冻结修订、或当前程序就是那份程序，
+/// 按现有路径继续。快照 CLI 自己的 `study-create` 会做它版本的 prepare/pin/capture，当前程序
 /// 只负责转交、核对输出与退出码。
 pub(crate) fn delegate_creation(
     command: &str,
@@ -265,22 +408,26 @@ pub(crate) fn delegate_creation(
     };
     let store = crate::model_version::registry(opts)?;
     let revision = store.get(&version)?;
-    if revision.code.workspace.is_some() {
-        // revision_cli 只从代码缓存里认修订的程序；缓存不在时它会退到工作区现在编的那份（可能已经
-        // 改过），所以先把这份修订的代码缓存核对/补齐，再问该用哪个 colm-cli。
-        crate::model_version::verify_code(opts, &revision.code)?;
-        crate::model_version::cache_code(opts, &revision.code)?;
-    }
-    let (cli, _) = revision_cli(opts, &revision)?;
+    // 官方修订也要走同一条准备路径：`revision_cli` 指向缓存里的程序，缓存缺失时运行侧同样起不来。
+    // 准备与定位放在同一个上下文里：两者任一失败，用户都需要知道是哪个修订、下一步能做什么。
+    let (cli, _) = (|| -> Result<_> {
+        prepare_revision_cli(opts, &revision)?;
+        revision_cli(opts, &revision)
+    })()
+    .with_context(|| {
+        format!(
+            "model version {} r{} must create or preflight this Study itself, but its colm-cli could not be prepared; rebuild that version or restore its source, then retry (or create the Study without freezing that model version)",
+            revision.version.id, revision.version.revision
+        )
+    })?;
     let current =
         std::env::current_exe().context("cannot locate the running colm-cli executable")?;
-    let resolved = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    match creation_executor(&revision.code, &resolved(&current), &resolved(&cli)) {
+    match creation_executor(&current, &cli) {
         CreationExecutor::Local => Ok(None),
-        CreationExecutor::Delegate(_) => Ok(Some(create_with_revision_cli(
+        CreationExecutor::Delegate(program) => Ok(Some(create_with_revision_cli(
             command,
             &revision,
-            &cli,
+            &program,
             case_root,
             spec_file,
             &opts.flags,

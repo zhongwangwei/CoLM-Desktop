@@ -324,9 +324,6 @@ fn main() -> Result<()> {
         print!("{USAGE}");
         std::process::exit(2);
     };
-    if cmd.starts_with("remote-") || matches!(cmd.as_str(), "history-replay" | "run-replay") {
-        colm_remote::auth::initialize_from_stdin()?;
-    }
     let mut opts = Opts::parse(&args[1..])?;
     if opts.get("--model-root").is_none() {
         let database = opts
@@ -341,6 +338,33 @@ fn main() -> Result<()> {
         opts.flags
             .push(("--model-root".into(), root.to_string_lossy().into_owned()));
     }
+    // 身份敏感命令（写回模型版本、提交/取回远程研究）会读研究 pin 并调用 `verify_frozen_inputs`：
+    // provenance 必须由 pin 时那份程序重算，否则 pin 到旧修订的研究会被误报“输入变了”。整条命令
+    // 交给 pin 的 CLI，退出码原样透传。
+    //
+    // 这一步必须在读 stdin 之前：远程命令的 SSH 凭据由 GUI 写在本进程的 stdin 上，父进程一旦
+    // 读了，被转交的程序就读不到（P1-8 转交不只是换程序，还要把执行环境一起交过去）。
+    let reads_stdin_auth =
+        cmd.starts_with("remote-") || matches!(cmd.as_str(), "history-replay" | "run-replay");
+    let auth_on_stdin = std::env::var("COLM_SSH_AUTH_STDIN").as_deref() == Ok("1");
+    let pinned_program = match study_version::pinned_command_program(cmd, &opts) {
+        Ok(program) => program,
+        Err(error) => {
+            // 凭据还在 stdin 上：先读掉，调用方写 pipe 时才不会因 EPIPE 盖住真正的错误。
+            if reads_stdin_auth && auth_on_stdin {
+                let _ = read_stdin_auth_line();
+            }
+            return Err(error);
+        }
+    };
+    let delegated_auth = if pinned_program.is_some() && reads_stdin_auth && auth_on_stdin {
+        Some(read_stdin_auth_line()?)
+    } else {
+        None
+    };
+    if pinned_program.is_none() && reads_stdin_auth {
+        colm_remote::auth::initialize_from_stdin()?;
+    }
     let flags = opts.flags.iter().cloned().collect();
     let audit = if std::env::var("COLM_AUDIT_BY_PARENT").as_deref() == Ok("1") {
         None
@@ -353,7 +377,22 @@ fn main() -> Result<()> {
                 .push(("--operation-id".into(), token.operation_id().into()));
         }
     }
-    let result = execute(cmd, &opts);
+    let (result, exit_code) = match pinned_program {
+        Some(program) => {
+            match study_version::run_pinned_command(&program, cmd, &opts, delegated_auth.as_deref())
+            {
+                Ok(0) => (Ok(()), Some(0)),
+                Ok(code) => (
+                    Err(anyhow::anyhow!(
+                        "the Study's model version program exited with status {code}"
+                    )),
+                    Some(code),
+                ),
+                Err(error) => (Err(error), None),
+            }
+        }
+        None => (execute(cmd, &opts), None),
+    };
     if let Some(token) = audit {
         if let Err(error) = history_cmd::finish(token, &result) {
             if result.is_ok() {
@@ -362,7 +401,27 @@ fn main() -> Result<()> {
             eprintln!("warning: cannot record operation completion: {error:#}");
         }
     }
+    if let Some(code) = exit_code.filter(|code| *code != 0) {
+        eprintln!("the Study's model version program exited with status {code}");
+        std::process::exit(code);
+    }
     result
+}
+
+/// 原样读一行 SSH 凭据交给被转交的程序。上限与 `colm_remote::auth` 一致（64 KiB），
+/// 但这里不解析内容，只做搬运，免得父进程把凭据读走却用不上。
+fn read_stdin_auth_line() -> Result<String> {
+    use std::io::{BufRead, Read};
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .take(64 * 1024 + 1)
+        .read_line(&mut line)?;
+    ensure!(
+        line.len() <= 64 * 1024,
+        "SSH authentication input is too large"
+    );
+    Ok(line)
 }
 
 fn execute(cmd: &str, opts: &Opts) -> Result<()> {
