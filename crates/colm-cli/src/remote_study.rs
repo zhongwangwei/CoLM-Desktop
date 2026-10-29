@@ -39,6 +39,11 @@ pub(crate) const PENDING: &str = ".colm-remote-study-pending.json";
 /// 取回核验证据。研究目录里单独一份：记录（`RECORD`）每次状态轮询都要经 SSH 搬回，把每个成员的结果树
 /// 哈希塞进记录会把它撑大；证据是审计材料，放旁边文件，旧记录没有它也不影响任何读取路径。
 pub(crate) const EVIDENCE: &str = ".colm-remote-study-evidence.json";
+/// 取回成功后持久化的“远程结果来源”。GUI 的“归档”只把活动记录 `RECORD` 改名留档，
+/// 本机没有成员原始输出；没有这份来源，归档后再写回版本会错误地退回本机 `verified_member`
+/// 并要求 `members/` 里根本不存在的原始输出。它不在归档的固定名单
+/// （`.colm-remote-study.json` 与 `.colm-remote-study-pending.json`）里，所以改名活动记录不会带走它。
+pub(crate) const SOURCE: &str = ".colm-remote-study-source.json";
 
 /// Submission intent survives an interrupted SSH response. Only status reads may use it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +240,198 @@ pub(crate) fn read_record(study_dir: &Path) -> Result<StudyRecord> {
     job::check_id(&record.engine)?;
     colm_remote::auth::check_connection(record.ssh_auth.as_ref())?;
     Ok(record)
+}
+
+/// 取回成功后落在研究目录里的远端来源。它比活动记录多两件东西：服务器研究目录与取回证据的
+/// 内容哈希，用来把“来源”与“那次取回核验”绑死；其余字段是重连服务器并核对作业身份所需的最小集合。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StudySource {
+    schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_auth: Option<colm_remote::auth::Connection>,
+    host: String,
+    root: String,
+    job: String,
+    remote_project: String,
+    engine: String,
+    scheduler: String,
+    #[serde(default)]
+    scheduler_id: Option<String>,
+    submitted_at: u64,
+    fetched_at: u64,
+    provenance: Value,
+    /// 本机研究目录：防止来源文件被复制到另一份研究后仍被当成它的历史。
+    local_study: String,
+    study_id: String,
+    /// 服务器上的研究目录（取回证据的 `root`）。
+    remote_study: String,
+    evidence_sha256: String,
+}
+
+fn study_source(
+    record: &StudyRecord,
+    manifest: &study::spec::Manifest,
+    evidence: &Value,
+) -> Result<StudySource> {
+    let fetched_at = record
+        .fetched_at
+        .context("cannot persist a remote Study source before its fetch completed")?;
+    let remote_study = evidence["root"]
+        .as_str()
+        .filter(|root| !root.is_empty())
+        .context("remote Study evidence has no server Study root to persist")?;
+    let evidence_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec_pretty(evidence)?);
+    Ok(StudySource {
+        schema: 1,
+        ssh_auth: record.ssh_auth.clone(),
+        host: record.host.clone(),
+        root: record.root.clone(),
+        job: record.job.clone(),
+        remote_project: record.remote_project.clone(),
+        engine: record.engine.clone(),
+        scheduler: record.scheduler.clone(),
+        scheduler_id: record.scheduler_id.clone(),
+        submitted_at: record.submitted_at,
+        fetched_at,
+        provenance: record.provenance.clone(),
+        local_study: manifest.root.clone(),
+        study_id: manifest.id.clone(),
+        remote_study: remote_study.to_owned(),
+        evidence_sha256,
+    })
+}
+
+/// 把来源随取回证据一起写进暂存目录；调用方随后用 `install_fetched_study` 原子安装。
+fn write_study_source(
+    path: &Path,
+    record: &StudyRecord,
+    manifest: &study::spec::Manifest,
+    evidence: &Value,
+) -> Result<()> {
+    let source = study_source(record, manifest, evidence)?;
+    std::fs::write(path, serde_json::to_vec_pretty(&source)?)?;
+    Ok(())
+}
+
+/// 读持久来源并把它与当前本机清单、那份取回证据交叉核对，重建出可复用的记录。
+///
+/// 不能只看来源自洽：来源是普通 JSON，归档后它成了唯一入口。必须确认它属于这份本机研究、
+/// 指向同一份取回证据，且证据本身也属于这个研究编号与服务器目录。
+fn read_source(
+    study_dir: &Path,
+    manifest: &study::spec::Manifest,
+) -> Result<(StudyRecord, StudySource)> {
+    let path = study_dir.join(SOURCE);
+    let source: StudySource = serde_json::from_slice(&std::fs::read(&path).with_context(|| {
+        format!(
+            "cannot read the persisted remote Study source {}",
+            path.display()
+        )
+    })?)
+    .context("cannot parse the persisted remote Study source")?;
+    ensure!(
+        source.schema == 1,
+        "unsupported persisted remote Study source schema"
+    );
+    check_study_location(
+        &source.host,
+        &source.root,
+        &source.job,
+        &source.remote_project,
+    )?;
+    job::check_id(&source.engine)?;
+    colm_remote::auth::check_connection(source.ssh_auth.as_ref())?;
+    ensure!(
+        matches!(source.scheduler.as_str(), "bare" | "slurm" | "pbs" | "lsf"),
+        "invalid recorded scheduler in the persisted remote Study source"
+    );
+    ensure!(
+        source.scheduler == "bare"
+            || source
+                .scheduler_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty()),
+        "recorded scheduler job ID is missing from the persisted remote Study source"
+    );
+    ensure!(
+        Path::new(&source.local_study) == Path::new(&manifest.root),
+        "the persisted remote Study source belongs to another local Study"
+    );
+    ensure!(
+        source.study_id == manifest.id,
+        "the persisted remote Study source belongs to another Study identity"
+    );
+    ensure!(
+        study_under_project(
+            &source.remote_study,
+            std::slice::from_ref(&source.remote_project)
+        ),
+        "the persisted remote Study root is outside its recorded project"
+    );
+    let evidence_path = study_dir.join(EVIDENCE);
+    let evidence_bytes = std::fs::read(&evidence_path).with_context(|| {
+        format!(
+            "the persisted remote Study source has no fetch evidence ({EVIDENCE}); \
+             fetch the Study again before writing its member into a model version"
+        )
+    })?;
+    ensure!(
+        colm_kernel::sha256_hex(&evidence_bytes) == source.evidence_sha256,
+        "the persisted remote Study source does not match its fetch evidence; \
+         fetch the Study again before writing its member into a model version"
+    );
+    let evidence: Value = serde_json::from_slice(&evidence_bytes)
+        .context("cannot parse the recorded remote Study evidence")?;
+    ensure!(
+        evidence["root"].as_str() == Some(source.remote_study.as_str()),
+        "the persisted remote Study source names a different server Study root from its fetch evidence"
+    );
+    ensure!(
+        evidence["study_id"].as_str() == Some(manifest.id.as_str()),
+        "the persisted remote Study source names a different Study identity from its fetch evidence"
+    );
+    ensure_evidence_kind(&evidence, manifest.spec.kind.clone())?;
+    let record = StudyRecord {
+        ssh_auth: source.ssh_auth.clone(),
+        host: source.host.clone(),
+        root: source.root.clone(),
+        job: source.job.clone(),
+        remote_project: source.remote_project.clone(),
+        engine: source.engine.clone(),
+        submitted_at: source.submitted_at,
+        scheduler: source.scheduler.clone(),
+        scheduler_id: source.scheduler_id.clone(),
+        provenance: source.provenance.clone(),
+        fetched_at: Some(source.fetched_at),
+    };
+    Ok((record, source))
+}
+
+/// 活动记录与持久来源同时存在时必须描述同一个作业。来源可能是上一次取回留下的，记录可能已被
+/// 重提；拿错一个就会把结果从另一台服务器/另一个作业写回。
+fn ensure_source_matches_record(record: &StudyRecord, source: &StudySource) -> Result<()> {
+    let same = record.host == source.host
+        && record.root == source.root
+        && record.job == source.job
+        && record.remote_project == source.remote_project
+        && record.engine == source.engine
+        && record.scheduler == source.scheduler
+        && record.scheduler_id == source.scheduler_id
+        && record.fetched_at == Some(source.fetched_at)
+        && record.provenance["model_revision"] == source.provenance["model_revision"];
+    ensure!(
+        same,
+        "the active remote Study record and its persisted source disagree about the server job \
+         (record: {}@{} {}, source: {}@{} {}); fetch the Study again before writing its member \
+         into a model version",
+        record.host,
+        record.root,
+        record.job,
+        source.host,
+        source.root,
+        source.job,
+    );
+    Ok(())
 }
 
 /// 研究所在的项目目录：`<项目>/.colm/studies/<编号>/`。
@@ -618,6 +815,90 @@ fn dry_run_report(
     })
 }
 
+/// 提交前要核对的服务器目标观测：目标键、服务器上的最终路径、创建研究时冻结的内容哈希。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetSourceCheck {
+    key: String,
+    path: String,
+    sha256: String,
+}
+
+/// 从暂存后的服务器设定与创建时冻结的 `target_source_sha256` 生成核对表。
+/// 旧研究没记目标源哈希时明确要求重建：映射到服务器上的文件内容无法再用“存在”代替。
+fn frozen_target_sources(
+    spec: &Value,
+    provenance: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<TargetSourceCheck>> {
+    let mut checks = Vec::new();
+    for target in spec
+        .get("targets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(source) = target.get("source") else {
+            continue;
+        };
+        let key = target["key"]
+            .as_str()
+            .context("staged Study target has no key")?;
+        let path = source["path"]
+            .as_str()
+            .context("staged Study target has no observation path")?;
+        let sha256 = provenance.get(key).with_context(|| {
+            format!(
+                "this Study did not freeze the contents of target observation {key}; \
+                 create a new Study before submitting it to a server"
+            )
+        })?;
+        checks.push(TargetSourceCheck {
+            key: key.to_owned(),
+            path: path.to_owned(),
+            sha256: sha256.clone(),
+        });
+    }
+    Ok(checks)
+}
+
+fn server_file_sha256(ssh: &Ssh, path: &str) -> Result<String> {
+    let path = quote(path);
+    let text = ssh.run_ok(&format!(
+        "if [ -f {path} ]; then {{ sha256sum {path} 2>/dev/null || shasum -a 256 {path}; }} | cut -d' ' -f1 | head -n 1; else echo MISSING; fi"
+    ))?;
+    Ok(text.trim().lines().last().unwrap_or_default().to_owned())
+}
+
+/// 上传完成后、提交作业前核对服务器上每个目标观测的 SHA-256。上传与 `--map` 的文件走同一条检查：
+/// 服务器上已有的同名文件被换过、或映射指错目录，都不能让研究拿错观测去率定。
+fn verify_server_target_sources(
+    checks: &[TargetSourceCheck],
+    mut hash: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    for check in checks {
+        let actual = hash(&check.path).with_context(|| {
+            format!(
+                "cannot read the server copy of target observation {} ({})",
+                check.key, check.path
+            )
+        })?;
+        let actual = actual.trim();
+        ensure!(
+            !actual.is_empty() && actual != "MISSING",
+            "target observation {} ({}) is missing on the server; upload it or fix its --map",
+            check.key,
+            check.path
+        );
+        ensure!(
+            actual.eq_ignore_ascii_case(&check.sha256),
+            "target observation {} at {} on the server differs from the contents frozen when this \
+             Study was created; map the matching file or create a new Study",
+            check.key,
+            check.path
+        );
+    }
+    Ok(())
+}
+
 /// `remote-study-run`：在服务器上重建并运行这个研究。
 pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
@@ -754,6 +1035,7 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     }
 
     // 3. 核对服务器上的数据，上传，提交。
+    let target_checks = frozen_target_sources(&spec, &manifest.provenance.target_source_sha256)?;
     if !remote_inputs.is_empty() {
         let checks: Vec<String> = remote_inputs
             .iter()
@@ -804,7 +1086,11 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect();
         ssh.upload(&staging, &entries, &remote_project)?;
+        // 先核对服务器上的目标观测再提交作业；失败时同样清掉本机暂存副本。
+        let verified =
+            verify_server_target_sources(&target_checks, |path| server_file_sha256(&ssh, path));
         discard_staging(&staging);
+        verified?;
         let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
         Ok((engine_uploaded, id.clone(), submitted))
     })?;
@@ -1142,10 +1428,17 @@ fn ensure_remote_frozen_inputs(
             "observation {site} differs between this Study and the one on the server"
         );
     }
-    // 目标源列表：本机有、服务器没记录（旧版 CLI 建的服务器研究）时不能悄悄跳过——那正是上传目标观测
-    // 要保证的东西。缺这个新字段就明确拒绝，让用户知道这份服务器证据不能核对。
-    for (key, expected) in &local_provenance.target_source_sha256 {
-        let recorded = remote_provenance.target_source_sha256.get(key);
+    ensure_remote_target_sources(local, remote)
+}
+
+/// `target_source_sha256` 的核对原来只在不确定性取回里做；率定有格点/站点目标观测时同样要做。
+/// 服务器清单缺这个字段（旧版 CLI）就明确拒绝，不能把“没记录”当成“内容相同”。
+fn ensure_remote_target_sources(
+    local: &study::spec::Manifest,
+    remote: &study::spec::Manifest,
+) -> Result<()> {
+    for (key, expected) in &local.provenance.target_source_sha256 {
+        let recorded = remote.provenance.target_source_sha256.get(key);
         ensure!(
             recorded.is_some(),
             "the server Study did not record the identity of target observation {key}; \
@@ -1158,6 +1451,41 @@ fn ensure_remote_frozen_inputs(
         );
     }
     Ok(())
+}
+
+/// 率定比较证据也要逐个目标源核对内容身份。UQ 走服务器清单的 `target_source_sha256`；
+/// 率定证据只带输入身份，因此在这里按目标键对齐、只看 sha256/bytes，并给出具体是哪个目标。
+fn ensure_same_target_sources(
+    local: &study::model::StudyInputIdentity,
+    remote: &study::model::StudyInputIdentity,
+) -> Result<()> {
+    if study::model::same_target_sources(&local.target_sources, &remote.target_sources) {
+        return Ok(());
+    }
+    for (key, left) in &local.target_sources {
+        let right = remote.target_sources.get(key).with_context(|| {
+            format!(
+                "the server Study did not record the content identity of target observation {key}; \
+                 its server-side CLI predates target observation identity, so the fetched results \
+                 cannot be verified against this Study (update the engine snapshot and submit again)"
+            )
+        })?;
+        ensure!(
+            left.sha256 == right.sha256 && left.bytes == right.bytes,
+            "target observation {key} differs between this Study and the one on the server; \
+             map the same file or create a new Study after replacing it"
+        );
+    }
+    let extra = remote
+        .target_sources
+        .keys()
+        .find(|key| !local.target_sources.contains_key(*key))
+        .cloned()
+        .unwrap_or_default();
+    bail!(
+        "the server Study records target observation {extra}, which this Study does not have; \
+         nothing was verified"
+    )
 }
 
 fn verified_evidence(
@@ -1197,6 +1525,7 @@ fn verified_evidence(
     let local = study::model::verified_inputs(manifest)?;
     let remote: study::model::StudyInputIdentity =
         serde_json::from_value(evidence["input_identity"].clone())?;
+    ensure_same_target_sources(&local, &remote)?;
     if remote
         .base_cases
         .values()
@@ -1842,11 +2171,13 @@ impl std::fmt::Debug for VerifiedStudyMember {
     }
 }
 
-/// 统一的本机/远端成员核验入口：研究目录里有 `.colm-remote-study.json` 就走服务器核验，
-/// 否则走现有本地 `verified_member`（要求本机成员目录里有原始输出与评估证据）。
+/// 统一的本机/远端成员核验入口：研究目录里有 `.colm-remote-study.json`（或取回成功时留下的
+/// `.colm-remote-study-source.json`）就走服务器核验，否则走现有本地 `verified_member`
+/// （要求本机成员目录里有原始输出与评估证据）。
 ///
 /// 远程分支绝不"本地目录不存在就跳过核验"：本机没有原始输出时只能以服务器记录为准，记录缺失或
-/// 不可读都明确报错。
+/// 不可读都明确报错。活动记录被 GUI 归档改名后，持久来源仍能重建同一条记录；两者同时存在时必须
+/// 描述同一个作业，否则宁可拒绝也不猜。
 pub(crate) fn verified_study_member(
     study_dir: &Path,
     member_id: &str,
@@ -1860,17 +2191,42 @@ pub(crate) fn verified_study_member_with(
     injected: Option<&dyn StudyRemote>,
 ) -> Result<VerifiedStudyMember> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
-    if !study_dir.join(RECORD).is_file() {
+    let has_record = study_dir.join(RECORD).is_file();
+    let has_source = study_dir.join(SOURCE).is_file();
+    if !has_record && !has_source {
         return verified_study_member_local(&study_dir, member_id);
     }
-    let record = read_record(&study_dir)
-        .context("cannot read this Study's remote submission record; fetch the Study again before writing its member into a model version")?;
+    let (record, origin) = if has_record {
+        let record = read_record(&study_dir).context(
+            "cannot read this Study's remote submission record; fetch the Study again before \
+             writing its member into a model version",
+        )?;
+        if has_source {
+            let manifest = study::engine::status(&study_dir)?;
+            let (_, source) = read_source(&study_dir, &manifest).context(
+                "cannot use this Study's persisted remote source; fetch the Study again before \
+                 writing its member into a model version",
+            )?;
+            ensure_source_matches_record(&record, &source)?;
+        }
+        (record, "active-record")
+    } else {
+        let manifest = study::engine::status(&study_dir)?;
+        let (record, _) = read_source(&study_dir, &manifest).context(
+            "the Study's active remote record is archived, but its persisted remote source cannot \
+             be used; restore the record or fetch the Study again before writing its member into \
+             a model version",
+        )?;
+        (record, "archived-source")
+    };
     match injected {
-        Some(remote) => verified_study_member_remote(&study_dir, member_id, &record, remote),
+        Some(remote) => {
+            verified_study_member_remote(&study_dir, member_id, &record, remote, origin)
+        }
         None => {
             let ssh = Ssh::new(&record.host)
                 .with_context(|| format!("cannot connect to the server {}", record.host))?;
-            verified_study_member_remote(&study_dir, member_id, &record, &ssh)
+            verified_study_member_remote(&study_dir, member_id, &record, &ssh, origin)
         }
     }
 }
@@ -1878,11 +2234,14 @@ pub(crate) fn verified_study_member_with(
 fn verified_study_member_local(study_dir: &Path, member_id: &str) -> Result<VerifiedStudyMember> {
     match verified_study_member_local_inner(study_dir, member_id) {
         Ok(verified) => Ok(verified),
-        Err(error) if study_dir.join(EVIDENCE).is_file() => Err(error.context(
-            "this Study's original outputs are on a server, but its remote submission record \
-             (.colm-remote-study.json) is missing; fetch the Study again (or restore the record) \
-             before writing its member into a model version",
-        )),
+        Err(error) if study_dir.join(EVIDENCE).is_file() || study_dir.join(SOURCE).is_file() => {
+            Err(error.context(
+                "this Study's original outputs are on a server, but its remote submission record \
+                 (.colm-remote-study.json) and persisted source (.colm-remote-study-source.json) \
+                 are missing; fetch the Study again (or restore the record) before writing its \
+                 member into a model version",
+            ))
+        }
         Err(error) => Err(error),
     }
 }
@@ -1931,6 +2290,7 @@ fn verified_study_member_remote(
     member_id: &str,
     record: &StudyRecord,
     remote: &dyn StudyRemote,
+    record_origin: &'static str,
 ) -> Result<VerifiedStudyMember> {
     let lock = study::runner::StudyRunLock::acquire(study_dir)
         .context("cannot lock the Study while verifying its member for writing back")?;
@@ -1961,11 +2321,25 @@ fn verified_study_member_remote(
             task.reason.as_deref().unwrap_or("no reason recorded")
         );
     }
-    let objective = server
-        .state
-        .candidates
-        .get(&member.id)
-        .and_then(|candidate| candidate.calibration);
+    // 率定研究的服务器现场比较固定核验 best+baseline；用户仍可指定别的成员写回，但必须确认
+    // 服务器状态里确实记了这个成员的分数（不是只查“任务成功”）。不确定性研究按设计不选最优。
+    let objective = match manifest.spec.kind {
+        study::spec::StudyKind::Tuning => {
+            let candidate = server.state.candidates.get(&member.id).with_context(|| {
+                format!(
+                    "the server Study state records no objective for member {}; its score cannot \
+                     be verified, so it cannot be written into a model version",
+                    member.id
+                )
+            })?;
+            candidate.calibration
+        }
+        study::spec::StudyKind::Uncertainty => server
+            .state
+            .candidates
+            .get(&member.id)
+            .and_then(|candidate| candidate.calibration),
+    };
     let hashes = member_result_hashes(&server.evidence, &manifest.spec.kind, &member.id)?;
     let (tasks, results) = member_result_files(&manifest, &member, study_dir, &hashes, true)?;
     verify_remote_member_parameters(&manifest, &member, &server.remote_root, remote)?;
@@ -1986,6 +2360,29 @@ fn verified_study_member_remote(
     } else {
         "server-study-status+fetch-evidence"
     };
+    // 率定服务器命令只重算 best+baseline 的指标。别的成员写回时仍核验服务器状态分数、
+    // 该成员结果文件哈希与样本字节，但明确标出指标没有现场重算；不把这条证据冒充成
+    // “best 级”比较。扩展服务器命令要同步改 CLI 契约并照顾旧引擎，这里先用现有证据
+    // 能核到的成员身份（结果树+state 分数+samples），把边界写进证据。
+    let best = server.state.best_member.as_deref();
+    let baseline = manifest
+        .members
+        .iter()
+        .find(|candidate| candidate.baseline)
+        .map(|candidate| candidate.id.as_str());
+    let metrics_recomputed = manifest.spec.kind == study::spec::StudyKind::Tuning
+        && (best == Some(member.id.as_str()) || baseline == Some(member.id.as_str()));
+    let member_scope = match manifest.spec.kind {
+        study::spec::StudyKind::Tuning if metrics_recomputed => "best-or-baseline-metrics",
+        study::spec::StudyKind::Tuning => "server-state-score+result-tree+samples",
+        study::spec::StudyKind::Uncertainty => "server-status+fetch-evidence-artifacts",
+    };
+    let note = (manifest.spec.kind == study::spec::StudyKind::Tuning && !metrics_recomputed)
+        .then_some(
+            "the server comparison recomputes metrics for the best member and the baseline only; \
+             this member's objective, result files and sample parameters are bound to the fetched \
+             server evidence, but its metric was not independently recomputed on the server",
+        );
     let evidence = json!({
         "schema": 1,
         "location": {
@@ -2006,7 +2403,13 @@ fn verified_study_member_remote(
         "state_sha256": server.evidence["state_sha256"],
         "model_revision": local_model,
         "stored_evidence": stored_evidence,
-        "verification": {"basis": basis},
+        "verification": {
+            "basis": basis,
+            "record_source": record_origin,
+            "member_scope": member_scope,
+            "metrics_recomputed": metrics_recomputed,
+            "note": note,
+        },
     });
     Ok(VerifiedStudyMember {
         manifest,
@@ -2857,9 +3260,12 @@ fn ensure_fetch_boundary(study_dir: &Path) -> Result<()> {
 fn install_fetched_study(study_dir: &Path, staged: &Path) -> Result<()> {
     ensure_fetch_boundary(study_dir)?;
     let mut entries = vec!["results", "samples", "checkpoints/state", RECORD];
-    // 证据文件是核验通过后新写的审计材料：旧暂存目录没有它时安装行为与以前完全一样。
+    // 证据与持久来源是核验通过后新写的审计材料：旧暂存目录没有它们时安装行为与以前完全一样。
     if staged.join(EVIDENCE).is_file() {
         entries.push(EVIDENCE);
+    }
+    if staged.join(SOURCE).is_file() {
+        entries.push(SOURCE);
     }
     let mut changed = Vec::new();
     let result = (|| {
@@ -2968,6 +3374,22 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let verification = if exit_code == 0 {
         match manifest.spec.kind {
             study::spec::StudyKind::Tuning => {
+                // 率定也逐个核对目标观测：服务器清单的 target_source_sha256 与创建时冻结值一致。
+                // 有目标源却拿不到服务器清单（旧引擎）时明确拒绝，不能把“没记录”当成“没变”。
+                if !manifest.provenance.target_source_sha256.is_empty() {
+                    let remote_manifest = remote
+                        .get("manifest")
+                        .filter(|value| value.is_object())
+                        .cloned()
+                        .context(
+                            "the server Study does not report the manifest needed to verify target \
+                             observation contents; update the engine snapshot and submit again",
+                        )?;
+                    let remote_manifest: study::spec::Manifest =
+                        serde_json::from_value(remote_manifest)
+                            .context("the server Study manifest is not readable here")?;
+                    ensure_remote_target_sources(&manifest, &remote_manifest)?;
+                }
                 server_comparison_evidence(&ssh, &record, &remote_root).and_then(|evidence| {
                     verified_evidence(&manifest, &record, &remote_root, &typed, &evidence)?;
                     verify_result_tree(&tmp.join("results"), &evidence["results_sha256"])?;
@@ -3025,6 +3447,8 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     if let Ok(evidence) = &verification {
         std::fs::write(tmp.join(EVIDENCE), serde_json::to_vec_pretty(evidence)?)?;
         record.provenance["evidence"] = json!(EVIDENCE);
+        // 活动记录会被 GUI 归档改名；来源必须与证据一起落盘，之后写回版本仍能回服务器核验。
+        write_study_source(&tmp.join(SOURCE), &record, &manifest, evidence)?;
     }
     std::fs::write(tmp.join(RECORD), serde_json::to_string_pretty(&record)?)?;
     install_fetched_study(&study_dir, &tmp)?;

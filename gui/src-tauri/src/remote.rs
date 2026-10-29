@@ -2463,6 +2463,10 @@ fn verify_local_record_matches_status(study_dir: &str, status: &Value) -> Result
 /// 归档本机远程研究记录：改名留档，不删数据。命名与 CLI `remote-study-close` 一致
 /// （`.colm-remote-study-closed-<stamp>.json`、`.colm-remote-study-pending-closed-<stamp>.json`），
 /// 两个工具留下的留档文件可以互认。
+///
+/// 只动活动记录与待核对意图；`.colm-remote-study-source.json` 刻意不在名单里。取回成功后
+/// 本机没有成员原始输出，写回版本要靠这份持久来源回服务器核验；把它一起归档会让“归档”看起来
+/// 成功，之后写回却退回本机核验并失败。
 fn archive_study_record(study_dir: &str) -> Result<Vec<String>, String> {
     let directory = PathBuf::from(study_dir);
     let stamp = std::time::SystemTime::now()

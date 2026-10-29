@@ -24,6 +24,13 @@ pub(crate) struct StudyInputIdentity {
     schema: u32,
     pub(crate) base_cases: BTreeMap<String, crate::fingerprint::FullInputIdentity>,
     pub(crate) observations: BTreeMap<String, crate::fingerprint::FullInputFile>,
+    /// 目标自己的观测文件（格点产品、区域通量站、水文站）的内容身份，键是目标键。
+    ///
+    /// 为什么不用路径做键：同一份研究在本机、`--map` 后的服务器路径和服务器上传目录三处都不同，
+    /// 路径只能当审计字段。跨机器能对齐的是目标键；比较时只看 `sha256`/`bytes`，与路径无关。
+    /// 旧 identity JSON 没有这个字段，`serde(default)` 让它读成空表。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) target_sources: BTreeMap<String, crate::fingerprint::FullInputFile>,
 }
 
 fn actual_inputs(manifest: &Manifest) -> Result<StudyInputIdentity> {
@@ -31,6 +38,7 @@ fn actual_inputs(manifest: &Manifest) -> Result<StudyInputIdentity> {
         schema: 1,
         base_cases: BTreeMap::new(),
         observations: BTreeMap::new(),
+        target_sources: BTreeMap::new(),
     };
     for site in &manifest.spec.base_cases {
         let case = base_case(manifest, site)?;
@@ -43,6 +51,24 @@ fn actual_inputs(manifest: &Manifest) -> Result<StudyInputIdentity> {
                 crate::fingerprint::full_file(Path::new(observation), "observation")?,
             );
         }
+    }
+    for target in &manifest.spec.targets {
+        let Some(source) = &target.source else {
+            continue;
+        };
+        let path = Path::new(source.path());
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            Path::new(&manifest.root).join(path)
+        };
+        // 规范化成绝对路径：创建时一次记死；之后本机路径与映射后的服务器路径只作审计对照，
+        // 跨机器比较的内容身份由 sha256/bytes 承担。
+        let path = colm_kernel::manifest::absolute(&path)?;
+        identity.target_sources.insert(
+            target.key.clone(),
+            crate::fingerprint::full_file(&path, "target-observation")?,
+        );
     }
     Ok(identity)
 }
@@ -69,11 +95,29 @@ pub(crate) fn verified_inputs(manifest: &Manifest) -> Result<StudyInputIdentity>
         "unsupported Study input identity schema"
     );
     let actual = actual_inputs(manifest)?;
+    let mut expected = expected;
+    if expected.target_sources.is_empty() && !actual.target_sources.is_empty() {
+        // 旧 identity 的字段缺失表示“创建时没记”，不是“内容为空”。把它补成实际身份让旧研究
+        // 继续可读；manifest.provenance.target_source_sha256 仍会在创建/取回路径上单独核对。
+        expected.target_sources = actual.target_sources.clone();
+    }
     ensure!(
         actual == expected,
         "Study scientific input or observation contents changed after creation"
     );
     Ok(actual)
+}
+
+/// 目标源的内容身份：按目标键对齐，只看内容；本机与服务器路径必然不同，不能参与相等判断。
+pub(crate) fn same_target_sources(
+    a: &BTreeMap<String, crate::fingerprint::FullInputFile>,
+    b: &BTreeMap<String, crate::fingerprint::FullInputFile>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(key, left)| {
+            b.get(key)
+                .is_some_and(|right| left.sha256 == right.sha256 && left.bytes == right.bytes)
+        })
 }
 
 /// Model parameters and physics may differ; only data conditions and observations are matched.
@@ -116,6 +160,7 @@ pub(crate) fn same_scope_conditions(a: &StudyInputIdentity, b: &StudyInputIdenti
                 .get(site)
                 .is_some_and(|right| left.sha256 == right.sha256 && left.bytes == right.bytes)
         })
+        && same_target_sources(&a.target_sources, &b.target_sources)
 }
 
 pub(crate) fn verify_if_captured(manifest: &Manifest) -> Result<()> {
@@ -575,6 +620,80 @@ mod tests {
         super::super::hybrid::verify_member_files(&root, &empty).unwrap();
         std::fs::write(root.join("model.onnx"), b"later network").unwrap();
         assert!(super::super::hybrid::verify_member_files(&root, &empty).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn with_grid_target(root: &Path, manifest: &mut Manifest) {
+        let directory = root.join("targets");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("gpp.nc"), b"grid observation bytes").unwrap();
+        manifest.spec.targets.push(
+            serde_json::from_value(serde_json::json!({
+                "key": "Gpp",
+                "variable": "GPP",
+                "from": 0,
+                "to": 3600,
+                "min_pairs": 2,
+                "source": {"kind": "grid", "path": directory.join("gpp.nc"), "variable": "GPP"}
+            }))
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn target_source_contents_are_part_of_the_creation_identity() {
+        let root = scratch();
+        let mut manifest = input_fixture(&root);
+        with_grid_target(&root, &mut manifest);
+        capture_inputs(&manifest).unwrap();
+        let study = root.join(".colm/studies/identity");
+        let identity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(study.join(IDENTITY_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            identity["target_sources"]["Gpp"]["sha256"],
+            colm_kernel::sha256_hex(b"grid observation bytes")
+        );
+        assert_eq!(identity["target_sources"]["Gpp"]["bytes"], 22);
+        verified_inputs(&manifest).unwrap();
+        std::fs::write(root.join("targets/gpp.nc"), b"changed observation!").unwrap();
+        let error = verified_inputs(&manifest).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("changed after creation"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_identity_without_target_sources_still_verifies_unchanged_studies() {
+        let root = scratch();
+        let mut manifest = input_fixture(&root);
+        with_grid_target(&root, &mut manifest);
+        capture_inputs(&manifest).unwrap();
+        let study = root.join(".colm/studies/identity");
+        let path = study.join(IDENTITY_FILE);
+        let mut identity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // 旧版 colm-cli 写下的身份没有 target_sources；读它时不能因为新字段缺失就拒绝整个研究。
+        identity.as_object_mut().unwrap().remove("target_sources");
+        std::fs::write(&path, serde_json::to_vec_pretty(&identity).unwrap()).unwrap();
+        verified_inputs(&manifest).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn comparison_matches_target_sources_by_key_and_content_not_by_host_paths() {
+        let root = scratch();
+        let mut manifest = input_fixture(&root);
+        with_grid_target(&root, &mut manifest);
+        capture_inputs(&manifest).unwrap();
+        let identity = verified_inputs(&manifest).unwrap();
+        let mut relocated = identity.clone();
+        let source = relocated.target_sources.get_mut("Gpp").unwrap();
+        source.path = PathBuf::from("/srv/colm/obs/target-1-Gpp-gpp.nc");
+        assert!(same_scope_conditions(&identity, &relocated));
+        relocated.target_sources.get_mut("Gpp").unwrap().sha256 = "0".repeat(64);
+        assert!(!same_scope_conditions(&identity, &relocated));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1665,6 +1665,36 @@ fn archiving_a_confirmed_failed_record_renames_it_without_losing_data() {
 }
 
 #[test]
+fn archiving_keeps_the_persisted_remote_source_for_later_writeback() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-remote-archive-source-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(
+        dir.join(".colm-remote-study.json"),
+        serde_json::to_vec_pretty(&remote_record(true)).unwrap(),
+    )
+    .unwrap();
+    let source = br#"{"schema":1,"host":"server","root":"/data/colm","job":"study-1"}"#;
+    std::fs::write(dir.join(".colm-remote-study-source.json"), source).unwrap();
+
+    let archived = archive_study_record(dir.to_str().unwrap()).unwrap();
+    assert_eq!(archived.len(), 1);
+    // 活动记录留档；持久来源原位保留，之后 CLI 写回成员仍能回服务器核验原始输出。
+    assert!(std::path::Path::new(&archived[0]).is_file());
+    assert_eq!(
+        std::fs::read(dir.join(".colm-remote-study-source.json")).unwrap(),
+        source
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn archiving_refuses_a_status_that_verifies_another_job() {
     let dir = std::env::temp_dir().join(format!(
         "colm-remote-archive-mismatch-{}-{}",

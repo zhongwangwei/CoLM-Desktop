@@ -339,8 +339,19 @@ fn fetched_de_generations_retain_vectors_and_immutable_hashes() {
     std::fs::create_dir_all(staged.join("checkpoints/state")).unwrap();
     study::checkpoint::write_next(&staged.join("checkpoints/state"), &state).unwrap();
     std::fs::write(staged.join(RECORD), b"installed record fixture").unwrap();
+    std::fs::write(staged.join(SOURCE), b"installed remote source fixture").unwrap();
+    std::fs::write(staged.join(EVIDENCE), b"installed evidence fixture").unwrap();
     std::fs::write(staged.join("results/metrics.json"), b"new result fixture").unwrap();
     install_fetched_study(study, &staged).unwrap();
+    // 持久来源与取回证据一起原子安装，之后的活动记录归档不会带走它们。
+    assert_eq!(
+        std::fs::read(study.join(SOURCE)).unwrap(),
+        b"installed remote source fixture"
+    );
+    assert_eq!(
+        std::fs::read(study.join(EVIDENCE)).unwrap(),
+        b"installed evidence fixture"
+    );
     study::generation::verify_generation_hash(&study.join("samples/g000001.csv")).unwrap();
     let members = study::generation::load_members(&manifest).unwrap();
     assert_eq!(members.len(), 9);
@@ -735,6 +746,130 @@ fn a_missing_local_observation_source_says_what_to_do_instead() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn frozen_target_hashes(
+    manifest: &mut study::spec::Manifest,
+) -> std::collections::BTreeMap<String, String> {
+    for target in &manifest.spec.targets {
+        if let Some(source) = &target.source {
+            let file = crate::fingerprint::full_file(Path::new(source.path()), "target").unwrap();
+            manifest
+                .provenance
+                .target_source_sha256
+                .insert(target.key.clone(), file.sha256);
+        }
+    }
+    manifest.provenance.target_source_sha256.clone()
+}
+
+#[test]
+fn mapped_target_sources_are_checked_for_content_not_merely_existence() {
+    let (root, mut manifest) = observation_staging_fixture();
+    let frozen = frozen_target_hashes(&mut manifest);
+    let maps = vec![parse_mapping(&format!("{}=/srv/shared", root.join("obs").display())).unwrap()];
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &maps, false).unwrap();
+    let checks = frozen_target_sources(&staged.spec, &frozen).unwrap();
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    assert_eq!(checks[0].path, "/srv/shared/a/Pool.nc");
+    assert_eq!(checks[1].path, "/srv/shared/b/Pool.nc");
+    verify_server_target_sources(&checks, |path| {
+        Ok(frozen[&checks.iter().find(|check| check.path == path).unwrap().key].clone())
+    })
+    .unwrap();
+
+    let wrong = checks[0].path.clone();
+    let error = verify_server_target_sources(&checks, |path| {
+        Ok(if path == wrong {
+            "0".repeat(64)
+        } else {
+            frozen[&checks.iter().find(|check| check.path == path).unwrap().key].clone()
+        })
+    })
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("differs"), "{text}");
+    assert!(text.contains("Gpp"), "{text}");
+
+    let error = verify_server_target_sources(&checks, |_| Ok("MISSING".into())).unwrap_err();
+    assert!(format!("{error:#}").contains("missing"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn uploaded_target_sources_use_the_server_project_paths_for_the_same_check() {
+    let (root, mut manifest) = observation_staging_fixture();
+    let frozen = frozen_target_hashes(&mut manifest);
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap();
+    let checks = frozen_target_sources(&staged.spec, &frozen).unwrap();
+    assert!(
+        checks
+            .iter()
+            .all(|check| check.path.starts_with("/srv/colm/s/abc/obs/")),
+        "{checks:?}"
+    );
+    verify_server_target_sources(&checks, |path| {
+        assert!(
+            staging
+                .join("obs")
+                .join(Path::new(path).file_name().unwrap())
+                .is_file(),
+            "the uploaded source must exist before its server hash is checked"
+        );
+        Ok(frozen[&checks.iter().find(|check| check.path == path).unwrap().key].clone())
+    })
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_study_without_frozen_target_hashes_cannot_submit_them_to_a_server() {
+    let (root, manifest) = observation_staging_fixture();
+    let staging = root.join("staging");
+    let staged = stage_study_assets(&manifest, &staging, "/srv/colm/s/abc", &[], false).unwrap();
+    let error =
+        frozen_target_sources(&staged.spec, &manifest.provenance.target_source_sha256).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("target observation"), "{text}");
+    assert!(text.contains("create a new Study"), "{text}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn target_source_file(path: &str, sha256: &str, bytes: u64) -> crate::fingerprint::FullInputFile {
+    crate::fingerprint::FullInputFile {
+        path: PathBuf::from(path),
+        sha256: sha256.into(),
+        bytes,
+        category: "target-observation".into(),
+    }
+}
+
+#[test]
+fn target_observation_identity_is_compared_by_key_not_by_host_specific_paths() {
+    let mut local: study::model::StudyInputIdentity =
+        serde_json::from_value(json!({"schema":1,"base_cases":{},"observations":{}})).unwrap();
+    local.target_sources.insert(
+        "Gpp".into(),
+        target_source_file("/Users/me/GPP.nc", &"a".repeat(64), 12),
+    );
+    let mut remote = local.clone();
+    remote.target_sources.insert(
+        "Gpp".into(),
+        target_source_file("/srv/colm/obs/target-1-Gpp-GPP.nc", &"a".repeat(64), 12),
+    );
+    ensure_same_target_sources(&local, &remote).unwrap();
+    remote.target_sources.insert(
+        "Gpp".into(),
+        target_source_file("/srv/colm/obs/target-1-Gpp-GPP.nc", &"b".repeat(64), 12),
+    );
+    let error = ensure_same_target_sources(&local, &remote).unwrap_err();
+    assert!(format!("{error:#}").contains("Gpp"), "{error}");
+    // 服务器研究有、本机没有的目标源同样拒绝，不能悄悄跳过。
+    remote.target_sources.clear();
+    let error = ensure_same_target_sources(&local, &remote).unwrap_err();
+    assert!(format!("{error:#}").contains("did not record"), "{error}");
+}
+
 #[test]
 fn dry_run_discards_staged_observation_copies() {
     let (root, manifest) = observation_staging_fixture();
@@ -1084,6 +1219,27 @@ fn old_server_evidence_missing_the_new_identities_is_rejected_explicitly() {
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
+#[test]
+fn tuning_fetch_compares_target_source_hashes_from_the_remote_manifest() {
+    let (root, mut local) = observation_staging_fixture();
+    local
+        .provenance
+        .target_source_sha256
+        .insert("Gpp".into(), "a".repeat(64));
+    let mut remote = local.clone();
+    ensure_remote_target_sources(&local, &remote).unwrap();
+    remote
+        .provenance
+        .target_source_sha256
+        .insert("Gpp".into(), "b".repeat(64));
+    let error = ensure_remote_target_sources(&local, &remote).unwrap_err();
+    assert!(format!("{error:#}").contains("Gpp"), "{error}");
+    remote.provenance.target_source_sha256.clear();
+    let error = ensure_remote_target_sources(&local, &remote).unwrap_err();
+    assert!(format!("{error:#}").contains("did not record"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 // ---- P1-7c：取回的研究写回版本（统一本地/远端成员核验） ----
 
 fn copy_tree_into(from: &Path, to: &Path) {
@@ -1365,6 +1521,95 @@ fn a_missing_server_study_root_is_reported() {
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
+/// 像 `remote-study-fetch` 成功时那样，把来源随证据落进研究目录（不动活动记录）。
+fn persist_fixture_source(fixture: &RemoteStudyFixture) {
+    let record = read_record(&fixture.local).unwrap();
+    let evidence: Value =
+        serde_json::from_slice(&std::fs::read(fixture.local.join(EVIDENCE)).unwrap()).unwrap();
+    write_study_source(
+        &fixture.local.join(SOURCE),
+        &record,
+        &fixture.manifest,
+        &evidence,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_archived_remote_record_still_verifies_members_from_the_persisted_source() {
+    let fixture = remote_fetched_study("lhs");
+    persist_fixture_source(&fixture);
+    // GUI 的“归档”就是把活动记录改名留档；来源文件不随它移动。
+    let archived = fixture.local.join(".colm-remote-study-closed-123.json");
+    std::fs::rename(fixture.local.join(RECORD), &archived).unwrap();
+    let verified =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap();
+    assert_eq!(verified.member.id, "m000001");
+    assert_eq!(verified.evidence["location"]["kind"], "server");
+    assert_eq!(
+        verified.evidence["verification"]["record_source"],
+        "archived-source"
+    );
+    // 归档后的来源仍要与那次取回证据交叉核对。
+    assert_eq!(verified.evidence["stored_evidence"], "matched");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn an_active_record_must_agree_with_its_persisted_source() {
+    let fixture = remote_fetched_study("oat");
+    persist_fixture_source(&fixture);
+    let mut record = read_record(&fixture.local).unwrap();
+    record.job = "study-2".into();
+    std::fs::write(
+        fixture.local.join(RECORD),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("persisted source"), "{text}");
+    assert!(text.contains("disagree"), "{text}");
+    assert!(text.contains("job"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_persisted_source_must_match_its_fetch_evidence() {
+    let fixture = remote_fetched_study("lhs");
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join("closed.json"),
+    )
+    .unwrap();
+    let evidence = fixture.local.join(EVIDENCE);
+    let mut bytes = std::fs::read(&evidence).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] = b' ';
+    std::fs::write(&evidence, bytes).unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("does not match its fetch evidence"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn without_record_or_source_the_local_member_verification_still_applies() {
+    let fixture = remote_fetched_study("lhs");
+    std::fs::remove_file(fixture.local.join(RECORD)).unwrap();
+    std::fs::remove_file(fixture.local.join(EVIDENCE)).unwrap();
+    let error =
+        verified_study_member_with(&fixture.local, "m000001", Some(&fixture.fake)).unwrap_err();
+    // 没有记录/来源时绝不悄悄走服务器；本地分支也不会问假服务器。
+    assert!(fixture.fake.reads.borrow().is_empty());
+    let text = format!("{error:#}");
+    assert!(!text.contains("remote submission record"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
 #[test]
 fn a_missing_remote_record_is_reported_instead_of_falling_back_to_local_outputs() {
     let fixture = remote_fetched_study("lhs");
@@ -1394,6 +1639,395 @@ fn a_missing_remote_member_output_is_reported() {
     .unwrap_err();
     let text = format!("{error:#}");
     assert!(text.contains("missing on the server"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+// ---- 指定成员写回：服务器现场比较只重算 best+baseline ----
+
+struct TuningRemoteFixture {
+    root: PathBuf,
+    manifest: study::spec::Manifest,
+    local: PathBuf,
+    best: String,
+    selected: String,
+    fake: FakeStudyRemote,
+}
+
+fn write_tuning_member_result(local: &Path, remote_root: &str, member: &str) {
+    let result = json!({
+        "member": member,
+        "site": "site",
+        "outputs": [],
+        "calibration": [{
+            "key": "Qle",
+            "site": "site",
+            "variable": "Qle",
+            "period": "calibration",
+            "metric": "nrmse",
+            "weight": 1.0,
+            "min_pairs": 2,
+            "pairs": 3,
+            "value": 0.5,
+            "observation_sd": 1.0,
+            "loss": 0.5,
+            "model_mean": 0.0,
+            "observation_mean": 0.0,
+            "support_hash": "fixture-pair-support"
+        }],
+        "validation": [],
+    });
+    let bytes = serde_json::to_vec_pretty(&result).unwrap();
+    let relative = format!("tasks/{member}/site.json");
+    let path = local.join("results").join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let proof = json!({
+        "schema": 1,
+        "execution": {"complete": true},
+        "outputs": {},
+        "result": {
+            "path": format!("{remote_root}/results/{relative}"),
+            "sha256": colm_kernel::sha256_hex(&bytes),
+            "bytes": bytes.len(),
+            "category": "evaluation"
+        }
+    });
+    let proof_path = local
+        .join("results/provenance")
+        .join(member)
+        .join("site.json");
+    std::fs::create_dir_all(proof_path.parent().unwrap()).unwrap();
+    std::fs::write(proof_path, serde_json::to_vec_pretty(&proof).unwrap()).unwrap();
+}
+
+/// 一份“已取回”的率定研究：真实 `study-create` 产生的清单/样本/冻结输入，外加一份完整的
+/// 服务器状态与假比较证据。只用来验证写回分流，不模拟模型或真实分数。
+fn tuning_fetched_study() -> TuningRemoteFixture {
+    let (root, manifest, _staged, _initial) = fetch_fixture();
+    let local = Path::new(&manifest.root).to_path_buf();
+    study::model::capture_inputs(&manifest).unwrap();
+    let best = manifest
+        .members
+        .iter()
+        .find(|member| !member.baseline)
+        .unwrap()
+        .id
+        .clone();
+    let selected = manifest
+        .members
+        .iter()
+        .filter(|member| !member.baseline)
+        .nth(1)
+        .unwrap()
+        .id
+        .clone();
+    let remote_root = "/srv/colm/s/abc/.colm/studies/s-remote".to_owned();
+    let mut tasks = std::collections::BTreeMap::new();
+    let mut candidates = std::collections::BTreeMap::new();
+    for (index, member) in manifest.members.iter().enumerate() {
+        tasks.insert(
+            study::state::task_id(&member.id, "site"),
+            study::state::TaskState {
+                member: member.id.clone(),
+                site: "site".into(),
+                case_dir: local
+                    .join("members")
+                    .join(&member.id)
+                    .join("site")
+                    .to_string_lossy()
+                    .into_owned(),
+                status: study::state::TaskStatus::Succeeded,
+                stage: None,
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            },
+        );
+        candidates.insert(
+            member.id.clone(),
+            study::state::CandidateState {
+                generation: member.generation,
+                feasible: true,
+                calibration: Some(index as f64),
+                validation: None,
+                reason: None,
+            },
+        );
+    }
+    let mut state =
+        study::state::StudyState::new(manifest.id.clone(), tasks.values().cloned()).unwrap();
+    state.status = study::state::StudyStatus::Completed;
+    state.best_member = Some(best.clone());
+    state.best_objective = Some(1.0);
+    state.completed_candidates = manifest.members.len().saturating_sub(1);
+    state.candidates = candidates;
+    study::checkpoint::write_next(&local.join("checkpoints/state"), &state).unwrap();
+
+    // `resolve_apply_member` 会重算率定状态，要求每个已成功任务都有评估结果；全部写上。
+    for member in &manifest.members {
+        write_tuning_member_result(&local, &remote_root, &member.id);
+    }
+    let results_sha256 =
+        serde_json::to_value(crate::study_version::comparison_results_sha256(&local).unwrap())
+            .unwrap();
+    let mut server_state = state.clone();
+    for task in server_state.tasks.values_mut() {
+        task.case_dir = format!("{remote_root}/members/{}/site", task.member);
+    }
+    let state_value = serde_json::to_value(&server_state).unwrap();
+    // 证据里的哈希按服务器的类型化状态算；`Value` 的键序与结构体字段序不同，不能拿
+    // `to_vec(&state_value)` 冒充同一份字节。
+    let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&server_state).unwrap());
+    let input_identity = study::model::verified_inputs(&manifest).unwrap();
+    let evidence = json!({
+        "schema": 1,
+        "root": remote_root,
+        "study_id": manifest.id,
+        "spec": manifest.spec,
+        "state": state_value,
+        "state_sha256": state_sha256,
+        "best_member": best,
+        "input_identity": input_identity,
+        "model_revision": Value::Null,
+        "results_sha256": results_sha256,
+        "forcing_content_policy": "excluded-v1",
+        "forcing_contents_verified": false,
+    });
+    let record = StudyRecord {
+        ssh_auth: None,
+        host: "server".into(),
+        root: "/srv/colm".into(),
+        job: "study-1".into(),
+        remote_project: "/srv/colm/s/abc".into(),
+        engine: "0123456789abcdef".into(),
+        submitted_at: 1,
+        scheduler: "bare".into(),
+        scheduler_id: None,
+        provenance: json!({"schema": 1, "model_revision": null}),
+        fetched_at: Some(1),
+    };
+    std::fs::write(
+        local.join(RECORD),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    let sample = std::fs::read_to_string(local.join("samples/g000000.csv")).unwrap();
+    let files = [(format!("{remote_root}/samples/g000000.csv"), sample)]
+        .into_iter()
+        .collect();
+    let fake = FakeStudyRemote {
+        unreachable: false,
+        exit_code: Some(0),
+        root: Some(remote_root),
+        study_status: Value::Null,
+        comparison_evidence: Some(evidence),
+        files,
+        reads: std::cell::RefCell::new(Vec::new()),
+    };
+    TuningRemoteFixture {
+        root,
+        manifest,
+        local,
+        best,
+        selected,
+        fake,
+    }
+}
+
+/// 给已取回的率定 fixture 加一个格点目标源，并同步清单 provenance 与假服务器证据。
+/// 只动元数据，不重跑 `study-create`：模拟“建研究时就带目标观测”的合法研究。
+fn add_tuning_target_source(fixture: &mut TuningRemoteFixture, contents: &[u8]) {
+    let directory = fixture.root.join("targets");
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("gpp.nc");
+    std::fs::write(&source, contents).unwrap();
+    fixture.manifest.spec.targets.push(
+        serde_json::from_value(json!({
+            "key": "Gpp",
+            "variable": "GPP",
+            "from": 0,
+            "to": 3600,
+            "min_pairs": 2,
+            "source": {"kind": "grid", "path": source, "variable": "GPP"}
+        }))
+        .unwrap(),
+    );
+    fixture.manifest.provenance.spec_sha256 =
+        colm_kernel::sha256_hex(&serde_json::to_vec(&fixture.manifest.spec).unwrap());
+    fixture.manifest.provenance.required_targets_sha256 =
+        colm_kernel::sha256_hex(&serde_json::to_vec(&fixture.manifest.spec.targets).unwrap());
+    let file = crate::fingerprint::full_file(&source, "target-observation").unwrap();
+    fixture
+        .manifest
+        .provenance
+        .target_source_sha256
+        .insert("Gpp".into(), file.sha256);
+    std::fs::write(
+        fixture.local.join("manifest.json"),
+        serde_json::to_vec_pretty(&fixture.manifest).unwrap(),
+    )
+    .unwrap();
+    study::model::capture_inputs(&fixture.manifest).unwrap();
+    // 每个已成功任务都必须给新目标一行评估结果，否则 `resolve_apply_member` 重算状态时会拒绝；
+    // 结果字节变了，评估身份与证据里的结果树哈希也要同步。
+    for member in &fixture.manifest.members {
+        let task_path = fixture
+            .local
+            .join("results/tasks")
+            .join(&member.id)
+            .join("site.json");
+        let mut result: Value =
+            serde_json::from_slice(&std::fs::read(&task_path).unwrap()).unwrap();
+        result["calibration"].as_array_mut().unwrap().push(json!({
+            "key": "Gpp",
+            "site": "site",
+            "variable": "GPP",
+            "period": "calibration",
+            "metric": "nrmse",
+            "weight": 1.0,
+            "min_pairs": 2,
+            "pairs": 3,
+            "value": 0.4,
+            "observation_sd": 1.0,
+            "loss": 0.4,
+            "model_mean": 0.0,
+            "observation_mean": 0.0,
+            "support_hash": "fixture-pair-support"
+        }));
+        let bytes = serde_json::to_vec_pretty(&result).unwrap();
+        std::fs::write(&task_path, &bytes).unwrap();
+        let proof_path = fixture
+            .local
+            .join("results/provenance")
+            .join(&member.id)
+            .join("site.json");
+        let mut proof: Value =
+            serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+        proof["result"]["sha256"] = json!(colm_kernel::sha256_hex(&bytes));
+        proof["result"]["bytes"] = json!(bytes.len());
+        std::fs::write(&proof_path, serde_json::to_vec_pretty(&proof).unwrap()).unwrap();
+    }
+    let evidence = fixture.fake.comparison_evidence.as_mut().unwrap();
+    evidence["spec"] = serde_json::to_value(&fixture.manifest.spec).unwrap();
+    evidence["input_identity"] =
+        serde_json::to_value(study::model::verified_inputs(&fixture.manifest).unwrap()).unwrap();
+    evidence["results_sha256"] = serde_json::to_value(
+        crate::study_version::comparison_results_sha256(&fixture.local).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn fake_server_target_source_contents_must_match_the_frozen_identity_for_writeback() {
+    let mut fixture = tuning_fetched_study();
+    add_tuning_target_source(&mut fixture, b"frozen target observation");
+    // 内容一致：写回路径仍通过，且目标源身份确实参与了比较。
+    verified_study_member_with(&fixture.local, &fixture.selected, Some(&fixture.fake)).unwrap();
+
+    let mut evidence = fixture.fake.comparison_evidence.clone().unwrap();
+    evidence["input_identity"]["target_sources"]["Gpp"]["sha256"] = json!("0".repeat(64));
+    let fake = FakeStudyRemote {
+        comparison_evidence: Some(evidence),
+        ..fixture.fake
+    };
+    let error =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("Gpp"), "{text}");
+    assert!(text.contains("differs"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_non_best_member_is_verified_against_server_state_results_and_samples() {
+    let fixture = tuning_fetched_study();
+    let verified =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fixture.fake)).unwrap();
+    assert_eq!(verified.member.id, fixture.selected);
+    // 服务器状态里的分数被核验并随证据带出（不是只查任务成功）。
+    assert!(verified.objective.is_some(), "{:?}", verified.objective);
+    assert_eq!(
+        verified.evidence["verification"]["metrics_recomputed"],
+        false
+    );
+    assert_eq!(
+        verified.evidence["verification"]["member_scope"],
+        "server-state-score+result-tree+samples"
+    );
+    assert!(
+        verified.evidence["verification"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("not independently recomputed"),
+        "{}",
+        verified.evidence["verification"]
+    );
+    // 结果树身份与样本身份都由假服务器证据/样本核对过。
+    assert!(
+        verified.evidence["results_tree_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(fixture
+        .fake
+        .reads
+        .borrow()
+        .iter()
+        .any(|path| path.ends_with("/samples/g000000.csv")));
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn the_best_member_is_still_marked_as_having_its_metric_recomputed() {
+    let fixture = tuning_fetched_study();
+    let verified =
+        verified_study_member_with(&fixture.local, &fixture.best, Some(&fixture.fake)).unwrap();
+    assert_eq!(verified.member.id, fixture.best);
+    assert_eq!(
+        verified.evidence["verification"]["metrics_recomputed"],
+        true
+    );
+    assert_eq!(
+        verified.evidence["verification"]["member_scope"],
+        "best-or-baseline-metrics"
+    );
+    assert!(verified.evidence["verification"]["note"].is_null());
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_tuning_member_without_a_server_objective_cannot_be_written_back() {
+    let fixture = tuning_fetched_study();
+    let mut evidence = fixture.fake.comparison_evidence.clone().unwrap();
+    // 本机检查点与服务器证据要同时缺这个候选，否则会先在“状态已变”处拒绝，测不到分数缺失。
+    let checkpoint_dir = fixture.local.join("checkpoints/state");
+    let mut local_state =
+        study::checkpoint::load_latest::<study::state::StudyState>(&checkpoint_dir)
+            .unwrap()
+            .unwrap()
+            .payload;
+    local_state.candidates.remove(&fixture.selected);
+    study::checkpoint::write_next(&checkpoint_dir, &local_state).unwrap();
+    let mut server_state: study::state::StudyState =
+        serde_json::from_value(evidence["state"].clone()).unwrap();
+    server_state.candidates.remove(&fixture.selected);
+    evidence["state"] = serde_json::to_value(&server_state).unwrap();
+    // 状态哈希按类型化状态算，否则会在状态哈希核对处拒绝。
+    evidence["state_sha256"] = json!(colm_kernel::sha256_hex(
+        &serde_json::to_vec(&server_state).unwrap()
+    ));
+    let fake = FakeStudyRemote {
+        comparison_evidence: Some(evidence),
+        ..fixture.fake
+    };
+    let error =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("records no objective"), "{text}");
+    assert!(text.contains(&fixture.selected), "{text}");
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
