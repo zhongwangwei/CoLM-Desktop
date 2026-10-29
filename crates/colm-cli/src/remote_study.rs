@@ -215,19 +215,31 @@ impl RecordedModelVersion {
 ///
 /// 两条路径同时存在时必须描述同一个作业与同一份模型版本身份：来源可能是上一次取回残留的，
 /// 拿错一个就会把另一台服务器/另一个作业的修订算到这份研究上。这里只核对身份字段；写回版本前
-/// 的完整核验（证据哈希、服务器目录与冻结输入）仍由 `read_source` 负责。
+/// 的完整核验（证据根、服务器目录与冻结输入）仍由 `read_source` 负责。
+///
+/// 只剩持久来源时，还要把来源与它自述的取回证据对上（见 `optional_source`）。证据缺失/不可读
+/// 时按产品选择**允许**这次只读身份读取，但明确打 warning：比较页/证据页只展示历史名称，拒绝会
+/// 让证据被清理过的旧研究完全读不出身份；真正写回/核验的路径走 `read_source`，那里仍然硬性要求
+/// 证据完整。调用方 JSON（GUI 的 `StudyComparisonSide`/`VerifiedStudySide`）是
+/// `deny_unknown_fields`，不能加 `verified` 字段，所以标记只能落在 stderr 与测试里。
 pub(crate) fn recorded_model_version(study_dir: &Path) -> Result<Option<RecordedModelVersion>> {
     let record = optional_record(study_dir)?;
     let source = optional_source(study_dir)?;
     let provenance = match (record, source) {
         (None, None) => return Ok(None),
         (Some(record), None) => record.provenance,
-        (None, Some(source)) => {
+        (None, Some((source, status))) => {
+            if status == SourceEvidenceStatus::Unavailable {
+                eprintln!(
+                    "warning: the persisted remote Study source is not bound to a readable fetch \
+                     evidence file ({EVIDENCE}); its model version identity is unverified"
+                );
+            }
             return RecordedModelVersion::from_provenance(&source.provenance)
                 .context("the persisted remote Study source cannot establish the model version")
-                .map(Some)
+                .map(Some);
         }
-        (Some(record), Some(source)) => {
+        (Some(record), Some((source, _status))) => {
             ensure_source_matches_record(&record, &source)
                 .context("cannot establish this Study's remote model version")?;
             ensure!(
@@ -255,9 +267,23 @@ fn optional_record(study_dir: &Path) -> Result<Option<StudyRecord>> {
     Ok(Some(record))
 }
 
-/// 读持久来源的版本身份。这里只验证来源自身的身份字段并确认它属于这份本机研究；不读
-/// evidence，因为比较页只需要版本，而源文件在归档后是唯一入口。
-fn optional_source(study_dir: &Path) -> Result<Option<StudySource>> {
+/// 持久来源与取回证据的核对结果。`Unavailable` 不是“通过”：调用方必须把它当作未验证，
+/// 不能因为来源能解析就当成已验证的历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceEvidenceStatus {
+    /// 证据可读，且内容哈希、服务器研究根与研究编号都与来源一致。
+    Verified,
+    /// 证据文件缺失或不可读，来源自述的 `evidence_sha256` 无从核对。
+    Unavailable,
+}
+
+/// 读持久来源的版本身份。除形状与归属外，还核对来源自述的取回证据：来源是普通 JSON，
+/// 可被编辑或复制，只看形状/归属就能把任意一份 `provenance` 当成这份研究的历史。
+///
+/// 证据缺失/不可读时返回 `Unavailable` 而不是错误：这条路径只服务于只读的版本展示
+/// （`study-compare`、证据页），旧研究或被清理过证据的研究仍应显示提交时的名称与提交号；
+/// 写入/成员核验路径 (`read_source`) 依旧要求证据完整。调用方必须用状态明确报出“未验证”。
+fn optional_source(study_dir: &Path) -> Result<Option<(StudySource, SourceEvidenceStatus)>> {
     let path = study_dir.join(SOURCE);
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {}
@@ -272,7 +298,53 @@ fn optional_source(study_dir: &Path) -> Result<Option<StudySource>> {
     .context("cannot parse the persisted remote Study source")?;
     check_source_shape(&source)?;
     ensure_source_belongs_to(&source, study_dir)?;
-    Ok(Some(source))
+    let evidence = read_source_evidence(study_dir, &source, &source.study_id)?;
+    let status = if evidence.is_some() {
+        SourceEvidenceStatus::Verified
+    } else {
+        SourceEvidenceStatus::Unavailable
+    };
+    Ok(Some((source, status)))
+}
+
+/// 读来源自述的取回证据并核对三件事：内容哈希、服务器研究根、研究编号。`read_source`
+/// （写入前核验）与 `optional_source`（只读身份）共用这段只读校验，保证两个入口对“来源是否
+/// 可信”使用同一套条件。
+///
+/// `Ok(None)` 只表示证据缺失或不可读——这不是通过，调用方各自决定拒绝还是降级并明确告知。
+/// `Err` 表示证据可读但与来源不符，任何调用方都必须拒绝。
+fn read_source_evidence(
+    study_dir: &Path,
+    source: &StudySource,
+    study_id: &str,
+) -> Result<Option<Value>> {
+    let evidence_path = study_dir.join(EVIDENCE);
+    let evidence_bytes = match std::fs::read(&evidence_path) {
+        Ok(bytes) => bytes,
+        // 缺失与不可读（权限、坏链接）同策：都不能证明来源属于那次取回。
+        Err(_) => return Ok(None),
+    };
+    ensure!(
+        colm_kernel::sha256_hex(&evidence_bytes) == source.evidence_sha256,
+        "the persisted remote Study source does not match its fetch evidence; \
+         fetch the Study again before writing its member into a model version"
+    );
+    let evidence: Value = serde_json::from_slice(&evidence_bytes)
+        .context("cannot parse the recorded remote Study evidence")?;
+    ensure!(
+        evidence["root"].as_str() == Some(source.remote_study.as_str()),
+        "the persisted remote Study source names a different server Study root from its fetch evidence"
+    );
+    // 证据里的 study_id 是**服务器上**那份研究的 id；来源里的 study_id 是本机研究的 id，
+    // 两者本来不同。旧来源没有记录服务器 id 时只核对根（证据哈希与 root 已绑定那次取回）。
+    if let Some(remote_id) = source.remote_study_id.as_deref() {
+        ensure!(
+            evidence["study_id"].as_str() == Some(remote_id),
+            "the persisted remote Study source names a different server Study identity from its fetch evidence"
+        );
+    }
+    let _ = study_id;
+    Ok(Some(evidence))
 }
 
 pub(crate) fn read_record(study_dir: &Path) -> Result<StudyRecord> {
@@ -315,7 +387,11 @@ struct StudySource {
     provenance: Value,
     /// 本机研究目录：防止来源文件被复制到另一份研究后仍被当成它的历史。
     local_study: String,
+    /// 本机研究的 id（来源所在目录的身份）。
     study_id: String,
+    /// 服务器上那份研究的 id（取回证据里的 `study_id`；旧来源没有这个字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_study_id: Option<String>,
     /// 服务器上的研究目录（取回证据的 `root`）。
     remote_study: String,
     evidence_sha256: String,
@@ -349,6 +425,7 @@ fn study_source(
         provenance: record.provenance.clone(),
         local_study: manifest.root.clone(),
         study_id: manifest.id.clone(),
+        remote_study_id: evidence["study_id"].as_str().map(str::to_owned),
         remote_study: remote_study.to_owned(),
         evidence_sha256,
     })
@@ -440,28 +517,12 @@ fn read_source(
     // 写回要连服务器；记录里的 password 认证要求调用方先把凭据放进本进程。
     colm_remote::auth::check_connection(source.ssh_auth.as_ref())?;
     ensure_source_belongs_to(&source, study_dir)?;
-    let evidence_path = study_dir.join(EVIDENCE);
-    let evidence_bytes = std::fs::read(&evidence_path).with_context(|| {
+    let evidence = read_source_evidence(study_dir, &source, &manifest.id)?.with_context(|| {
         format!(
             "the persisted remote Study source has no fetch evidence ({EVIDENCE}); \
              fetch the Study again before writing its member into a model version"
         )
     })?;
-    ensure!(
-        colm_kernel::sha256_hex(&evidence_bytes) == source.evidence_sha256,
-        "the persisted remote Study source does not match its fetch evidence; \
-         fetch the Study again before writing its member into a model version"
-    );
-    let evidence: Value = serde_json::from_slice(&evidence_bytes)
-        .context("cannot parse the recorded remote Study evidence")?;
-    ensure!(
-        evidence["root"].as_str() == Some(source.remote_study.as_str()),
-        "the persisted remote Study source names a different server Study root from its fetch evidence"
-    );
-    ensure!(
-        evidence["study_id"].as_str() == Some(manifest.id.as_str()),
-        "the persisted remote Study source names a different Study identity from its fetch evidence"
-    );
     ensure_evidence_kind(&evidence, manifest.spec.kind.clone())?;
     let record = StudyRecord {
         ssh_auth: source.ssh_auth.clone(),

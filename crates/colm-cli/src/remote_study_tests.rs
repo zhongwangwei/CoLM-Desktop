@@ -1760,6 +1760,124 @@ fn a_persisted_source_must_match_its_fetch_evidence() {
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
+/// 改写证据内容并同步更新来源自述的哈希：用来验证除哈希之外，root/study_id 也被单独核对。
+fn rewrite_evidence_and_source_hash(study_dir: &Path, evidence: &Value) {
+    let bytes = serde_json::to_vec_pretty(evidence).unwrap();
+    std::fs::write(study_dir.join(EVIDENCE), &bytes).unwrap();
+    let path = study_dir.join(SOURCE);
+    let mut source: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    source["evidence_sha256"] = json!(colm_kernel::sha256_hex(&bytes));
+    std::fs::write(&path, serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+}
+
+/// 归档后只剩持久来源时，版本身份读取也必须核对证据：证据一致才通过。
+#[test]
+fn a_source_only_identity_is_verified_against_its_fetch_evidence() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join("closed.json"),
+    )
+    .unwrap();
+    let (source, status) = optional_source(&fixture.local).unwrap().unwrap();
+    assert_eq!(status, SourceEvidenceStatus::Verified);
+    assert_eq!(source.evidence_sha256.len(), 64);
+    assert_eq!(
+        recorded_model_version(&fixture.local).unwrap(),
+        Some(RecordedModelVersion::Workspace {
+            name: "snow".into(),
+            head: "0123456789abcdef".into(),
+            base_commit: Some("fedcba98".into()),
+        })
+    );
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+/// 身份读取不再只信来源自述：证据哈希不符时拒绝，而不是把来源里的名称当成已验证的历史。
+#[test]
+fn a_source_only_identity_with_mismatched_evidence_is_refused() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join("closed.json"),
+    )
+    .unwrap();
+    let evidence_path = fixture.local.join(EVIDENCE);
+    let mut evidence: Value =
+        serde_json::from_slice(&std::fs::read(&evidence_path).unwrap()).unwrap();
+    evidence["state_sha256"] = json!("0".repeat(64));
+    std::fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+    let text = format!("{:#}", recorded_model_version(&fixture.local).unwrap_err());
+    assert!(text.contains("does not match its fetch evidence"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+/// 哈希对上也不算完：来源必须与证据描述同一个服务器研究根和研究编号。
+#[test]
+fn a_source_only_identity_must_match_the_evidence_root_and_study_identity() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join("closed.json"),
+    )
+    .unwrap();
+    let original: Value =
+        serde_json::from_slice(&std::fs::read(fixture.local.join(EVIDENCE)).unwrap()).unwrap();
+    // 同时更新来源里的哈希：证明 root 是被单独核对的，而不是靠哈希不符兜住。
+    let mut other_root = original.clone();
+    other_root["root"] = json!("/srv/other/.colm/studies/s-other");
+    rewrite_evidence_and_source_hash(&fixture.local, &other_root);
+    let text = format!("{:#}", recorded_model_version(&fixture.local).unwrap_err());
+    assert!(text.contains("different server Study root"), "{text}");
+    let mut other_study = original;
+    other_study["study_id"] = json!("s-other");
+    rewrite_evidence_and_source_hash(&fixture.local, &other_study);
+    let text = format!("{:#}", recorded_model_version(&fixture.local).unwrap_err());
+    assert!(text.contains("different server Study identity"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+/// 证据缺失/不可读是产品选择的分支：只读身份仍放行（旧研究还能显示版本），但状态必须是
+/// `Unavailable` 且在读取路径上打 warning，不能静默当成已验证。写入路径的硬性拒绝由
+/// `a_persisted_source_must_match_its_fetch_evidence` 与 `read_source` 覆盖。
+#[test]
+fn a_source_only_identity_without_readable_evidence_is_allowed_but_unverified() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join("closed.json"),
+    )
+    .unwrap();
+    let expected = Some(RecordedModelVersion::Workspace {
+        name: "snow".into(),
+        head: "0123456789abcdef".into(),
+        base_commit: Some("fedcba98".into()),
+    });
+    let evidence = fixture.local.join(EVIDENCE);
+    std::fs::remove_file(&evidence).unwrap();
+    let (_, status) = optional_source(&fixture.local).unwrap().unwrap();
+    assert_eq!(status, SourceEvidenceStatus::Unavailable);
+    assert_eq!(recorded_model_version(&fixture.local).unwrap(), expected);
+    // 不可读（这里是目录）与缺失同策：状态仍为未验证。
+    std::fs::create_dir(&evidence).unwrap();
+    let (_, status) = optional_source(&fixture.local).unwrap().unwrap();
+    assert_eq!(status, SourceEvidenceStatus::Unavailable);
+    assert_eq!(recorded_model_version(&fixture.local).unwrap(), expected);
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
 #[test]
 fn without_record_or_source_the_local_member_verification_still_applies() {
     let fixture = remote_fetched_study("lhs");

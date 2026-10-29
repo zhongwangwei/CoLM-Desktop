@@ -346,8 +346,7 @@ fn main() -> Result<()> {
     //
     // 这一步必须在读 stdin 之前：远程命令的 SSH 凭据由 GUI 写在本进程的 stdin 上，父进程一旦
     // 读了，被转交的程序就读不到（P1-8 转交不只是换程序，还要把执行环境一起交过去）。
-    let reads_stdin_auth =
-        cmd.starts_with("remote-") || matches!(cmd.as_str(), "history-replay" | "run-replay");
+    let reads_stdin_auth = command_reads_stdin_auth(cmd);
     let auth_on_stdin = std::env::var("COLM_SSH_AUTH_STDIN").as_deref() == Ok("1");
     // 凭据还在 stdin 上时，出错前也要先读掉，调用方写 pipe 时才不会因 EPIPE 盖住真正的错误。
     let drain_stdin = || {
@@ -421,6 +420,21 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     result
+}
+
+/// 哪些命令会在 stdin 上接收 SSH 凭据。
+///
+/// `remote-*` 与 replay 命令会连服务器或把执行环境整体交给子进程；`study-verified-side` 在活动
+/// 记录存在时会 `verified_comparison` 现场连服务器，而且它属于 `PINNED_CLI_COMMANDS`——研究 pin
+/// 到别的 CLI 时整条命令由子进程执行。父进程若把凭据读走却不转交，子进程只能走 BatchMode，
+/// password 认证直接失败（与 P1-8 同一类错误）。GUI 对该命令同样走 `ssh_cli_json`，凭据只写在
+/// stdin 上，所以这里必须和 `remote-*` 一视同仁。
+///
+/// `study-verify-comparison` 只核对本机已取回的评估证据、`study-compare` 只读本地记录/来源，
+/// 都不建 SSH；把它们列进来会让 CLI 无谓地读走调用方 stdin 上的凭据。
+fn command_reads_stdin_auth(cmd: &str) -> bool {
+    cmd.starts_with("remote-")
+        || matches!(cmd, "history-replay" | "run-replay" | "study-verified-side")
 }
 
 /// 原样读一行 SSH 凭据交给被转交的程序。上限与 `colm_remote::auth` 一致（64 KiB），
@@ -8080,5 +8094,74 @@ mod input_fingerprint_option_tests {
             vec![Stage::MkSrfData]
         );
         assert!(required_upstream_stages(None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stdin_auth_tests {
+    use super::command_reads_stdin_auth;
+
+    /// GUI 对远端研究的 `study-verified-side` 也走 `ssh_cli_json`，凭据只写在 stdin 上；
+    /// 该命令会现场连服务器，且研究 pin 到别的 CLI 时整条转交。少列它就会让子进程只能
+    /// BatchMode（P1-8 同类），所以这里把策略钉住。
+    #[test]
+    fn ssh_credentials_on_stdin_are_read_only_by_commands_that_use_them() {
+        for command in [
+            "remote-run",
+            "remote-study-run",
+            "remote-study-fetch",
+            "remote-build-kernel",
+            "history-replay",
+            "run-replay",
+            "study-verified-side",
+        ] {
+            assert!(command_reads_stdin_auth(command), "{command}");
+        }
+        // `study-verify-comparison` 只读本机评估证据，`study-compare` 只读本地记录/来源；
+        // 两者都不建 SSH，不能抢读调用方 stdin 上的凭据。
+        for command in ["study-verify-comparison", "study-compare", "study-status"] {
+            assert!(!command_reads_stdin_auth(command), "{command}");
+        }
+    }
+
+    /// 转交时凭据必须原样送一行，然后关闭 stdin，让子进程能读到 EOF 而不是挂住。
+    #[cfg(unix)]
+    #[test]
+    fn a_delegated_verified_side_receives_the_one_line_credential() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "colm-stdin-forward-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let received = dir.join("received.txt");
+        let fake = dir.join("fake-cli");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\ncat > '{}'\n", received.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let opts = crate::Opts {
+            positional: vec![dir.display().to_string()],
+            flags: Vec::new(),
+        };
+        let line = "{\"host\":\"server\",\"username\":\"researcher\",\"auth\":\"key\"}\n";
+        assert_eq!(
+            crate::study_version::run_pinned_command(
+                &fake,
+                "study-verified-side",
+                &opts,
+                Some(line),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read_to_string(&received).unwrap(), line);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
