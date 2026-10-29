@@ -360,6 +360,12 @@ pub fn write_text(
 /// 不能用"先查 exists 再写"：两次操作之间别的进程/另一个界面实例可能刚好创建同名文件，先查再写
 /// 就会把它覆盖。`OpenOptions::create_new` 把"存在性检查 + 创建"合成一次系统调用，并发下至多
 /// 一个成功——这是 GUI-01 要求在后端保证的部分，前端列表只是提前提示。
+/// 进程内的写锁：`create_text` 等操作都是"检查干净 → 建文件 → git 提交"三步，两步并发时
+/// 会在 git 的 index.lock 上互相踩（CI ubuntu 实测：两个线程都失败，唯一赢家变成 0）。
+/// 这些操作本来就该串行（同一工作区的两次改文件不能交错提交），用一把进程内互斥锁把整段
+/// 临界区包起来；跨进程并发仍由 git 的锁文件兜底。
+static WORKSPACE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn create_text(
     workspace: &Workspace,
     path: &str,
@@ -369,6 +375,9 @@ pub fn create_text(
     let message = check_message(message)?;
     check_text(text)?;
     let file = target(workspace, path)?;
+    let _guard = WORKSPACE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     clean(workspace)?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;

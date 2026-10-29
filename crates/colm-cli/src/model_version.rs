@@ -1272,18 +1272,33 @@ mod tests {
         }
         let cached = cache_dir(&opts, &code_ref).unwrap().join("workspaces/soil");
         std::fs::create_dir_all(&cached).unwrap();
-        // 与冻结时一样克隆到相对路径：Git for Windows 不接受 verbatim 的绝对目标路径（CI 实测）。
-        assert!(std::process::Command::new("git")
-            // 与生产代码同一条命令（`--no-hardlinks`）：Windows runner 上 temp 与缓存目录
-            // 可能跨卷，`--local` 默认建硬链接会失败（CI windows 实测）；也不要传
-            // `std::path::absolute()`，它带 `\\?\` verbatim 前缀。
-            .args(["clone", "-q", "--local", "--no-hardlinks"])
-            .arg(&repo)
-            .arg("src")
-            .current_dir(&cached)
-            .status()
-            .unwrap()
-            .success());
+        // 与生产代码同一条命令（`--local --no-hardlinks`）。Windows 上若因文件系统/路径形式
+        // 失败，回退到 `--no-local`（走 git transport，跨卷/短路径都可用）；两次都失败时把
+        // stderr 带进断言，CI 上能直接看到原因而不是只有 exit status。
+        let mut last_stderr = String::new();
+        let mut cloned = false;
+        for flags in [
+            &["clone", "-q", "--local", "--no-hardlinks"][..],
+            &["clone", "-q", "--no-local"][..],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(flags)
+                .arg(&repo)
+                .arg("src")
+                .current_dir(&cached)
+                .output()
+                .unwrap();
+            if output.status.success() {
+                cloned = true;
+                break;
+            }
+            last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let _ = std::fs::remove_dir_all(cached.join("src"));
+        }
+        assert!(
+            cloned,
+            "cannot clone the workspace fixture into the cache: {last_stderr}"
+        );
         let info = colm_workspace::Info {
             name: "soil".into(),
             created_at: 1,
