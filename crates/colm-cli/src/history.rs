@@ -486,11 +486,14 @@ impl Endpoint {
 // 注册表输出
 // ---------------------------------------------------------------------------------------------
 
-/// 写进输出 JSON 的语义说明：调用方不能把 checked_at 当成本次同步成功时间。
-const SYNC_SEMANTICS: &str = "synced/last_successful_sync = last successful clone or fetch; \
-checked_at_unix_ms = time of the last sync attempt (fetched/cloned/offline/error/skipped); \
-last_attempt = that attempt (may contain an error). history-repos only reads these values and \
-never advances either timestamp.";
+/// 写进输出 JSON 的语义说明：调用方不能把 checked_at 当成本次同步成功时间，
+/// 也不能把升级前旧的 synced 当成已证实的成功同步。
+const SYNC_SEMANTICS: &str = "last_successful_sync (and the synced alias) = last successful \
+clone/fetch recorded in the new format; legacy_synced = pre-upgrade synced value kept only as \
+unverified legacy (old versions also wrote it for offline/failed checks, so it is never promoted \
+to last_successful_sync); checked_at_unix_ms = time of the last sync attempt \
+(fetched/cloned/offline/error/skipped); last_attempt = that attempt (may contain an error). \
+history-repos only reads these values and never advances either timestamp.";
 
 /// 最多持久保存多少条同步错误，避免 repos.json 无限增长。
 const MAX_STORED_SYNC_ERRORS: usize = 20;
@@ -523,10 +526,21 @@ fn write_config(root: &Path, value: &Value) -> Result<()> {
 fn repo_json(repo: &Repo, config: &Value) -> Value {
     let identity = repo.identity();
     let entry = &config["repos"][repo.key.as_str()];
-    // H09：成功同步时间与“最近一次尝试”分开。旧格式只有 synced 时把它读成
-    // last_successful_sync（synced 继续作为向后兼容别名输出，语义仍是上次成功同步）。
-    let last_successful_sync = non_null(entry["last_successful_sync"].clone())
-        .or_else(|| non_null(entry["synced"].clone()));
+    // H09/C04：新格式的 last_successful_sync 才是成功同步证据；升级前旧 synced 只保留为
+    // legacy_synced（旧版本 offline/失败也会写它，无法证明成功），绝不填充 last_successful_sync。
+    let last_successful_sync = non_null(entry["last_successful_sync"].clone());
+    let legacy_synced = if last_successful_sync.is_none() {
+        non_null(entry["synced"].clone())
+    } else {
+        None
+    };
+    let mut sync_notes: Vec<String> = Vec::new();
+    if legacy_synced.is_some() {
+        sync_notes.push(
+            "legacy_synced predates successful-sync tracking (old versions wrote synced for offline and failed checks too); it is kept only as unverified legacy data and is not proof of a successful clone/fetch"
+                .to_owned(),
+        );
+    }
     let last_attempt = non_null(entry["last_attempt"].clone());
     let checked_at_unix_ms = non_null(entry["checked_at_unix_ms"].clone());
     let default_branch = if repo.is_existing_checkout() {
@@ -564,9 +578,11 @@ fn repo_json(repo: &Repo, config: &Value) -> Value {
         "path": repo.path.display().to_string(),
         "identity": identity,
         "default_branch": default_branch,
-        // 向后兼容别名：只代表上次成功 clone/fetch，不是本次检查时间。
+        // 向后兼容别名：只代表新格式记录的上次成功 clone/fetch；旧格式值在 legacy_synced。
         "synced": last_successful_sync.clone().unwrap_or(Value::Null),
         "last_successful_sync": last_successful_sync.unwrap_or(Value::Null),
+        "legacy_synced": legacy_synced.unwrap_or(Value::Null),
+        "sync_notes": sync_notes,
         "last_attempt": last_attempt.unwrap_or(Value::Null),
         "checked_at_unix_ms": checked_at_unix_ms.unwrap_or(Value::Null),
         "coverage": coverage,
@@ -2310,15 +2326,31 @@ fn cross_links(
             .and_then(|import| import["sha"].as_str())
             .map(|sha| commit_message(desktop_dir, sha))
             .unwrap_or_default();
-        // F02：自动 verified 只认结构化 trailer `Upstream-Commit: <40 lowercase hex>`。
-        // 普通正文里的完整 SHA 只是“被提到”，不证明作者采用了那个 revision。
-        let structured_records = structured_upstream_commits(&import_message);
-        let mut structured_shas: Vec<String> = Vec::new();
-        for record in &structured_records {
-            if !structured_shas.contains(&record.sha) {
-                structured_shas.push(record.sha.clone());
+        // C01：自动 verified 只认**标准 Git trailer** 里的正式 `Upstream-Commit` 字段。
+        // 正文/引用/代码块中的同名行（包括明确被否决的提案）不进入正式记录，只作为候选引用证据。
+        let formal_records = structured_upstream_commits(desktop_dir, &import_message);
+        let mut formal_shas: Vec<String> = Vec::new();
+        let mut invalid_formal: Vec<String> = Vec::new();
+        for record in &formal_records {
+            match &record.sha {
+                Some(sha) => {
+                    if !formal_shas.contains(sha) {
+                        formal_shas.push(sha.clone());
+                    }
+                }
+                None => invalid_formal.push(record.raw.clone()),
             }
         }
+        let formal_trailer_records: Vec<Value> = formal_records
+            .iter()
+            .map(|record| {
+                json!({
+                    "sha": record.sha,
+                    "raw": record.raw,
+                    "valid": record.sha.is_some(),
+                })
+            })
+            .collect();
         // 内容相同只说明“可能对应”，不能说明唯一上游 revision 或传播方向：同一文件在 A→B→revert A
         // 的历史里可以多次拥有相同 blob。全部返回候选，blob_equal 单独标出依据。
         let mut candidate_values: Vec<Value> = Vec::new();
@@ -2344,10 +2376,11 @@ fn cross_links(
                 "summary": summary,
                 "blob_equal": equal,
                 "blob": blob,
-                // 普通正文提及（任何位置出现完整 SHA）只是引用证据。
+                // 普通正文/代码块里出现完整 SHA 只是引用证据。
                 "mentioned_in_message": message_references_sha(&import_message, sha),
-                // 是否出现在结构化 `Upstream-Commit:` trailer 行里。
-                "structured": structured_shas.iter().any(|structured| structured == sha),
+                "mentioned_in_code": sha_mentioned_in_code(&import_message, sha),
+                // structured = 出现在标准 Git trailer 的正式 Upstream-Commit 行里。
+                "structured": formal_shas.iter().any(|structured| structured == sha),
                 // listed = 内容与 import blob 相等的候选（列出来供人判断的来源候选）。
                 "listed": equal,
             }));
@@ -2355,17 +2388,18 @@ fn cross_links(
         if !blob_equal.is_empty() {
             basis.push("blob-equal");
         }
-        let structured_reference = if structured_shas.len() == 1 {
-            structured_records
+        let unique_valid_formal = formal_shas.len() == 1 && invalid_formal.is_empty();
+        let structured_reference = if unique_valid_formal {
+            formal_records
                 .iter()
-                .find(|record| record.sha == structured_shas[0])
-                .map(|record| json!({"sha": record.sha, "excerpt": record.raw}))
+                .find(|record| record.sha.as_deref() == Some(formal_shas[0].as_str()))
+                .map(|record| json!({"sha": formal_shas[0], "excerpt": record.raw}))
         } else {
             None
         };
-        // 唯一结构化记录 + 该 SHA 在返回候选里 + blob 与 import blob 相等 → 才自动 verified。
-        let verified_record = if structured_shas.len() == 1 {
-            let sha = &structured_shas[0];
+        // 唯一正式字段 + 该 SHA 在返回候选里 + blob 与 import blob 相等 → 才自动 verified。
+        let verified_record = if unique_valid_formal {
+            let sha = &formal_shas[0];
             candidate_values
                 .iter()
                 .find(|candidate| {
@@ -2381,40 +2415,55 @@ fn cross_links(
             ("verified", Some(json!(sha)), Vec::new())
         } else {
             let mut notes: Vec<String> = Vec::new();
-            if structured_shas.len() > 1 {
+            if !invalid_formal.is_empty() {
                 notes.push(format!(
-                    "{} structured Upstream-Commit records; no unique source is claimed",
-                    structured_shas.len()
+                    "{} formal Upstream-Commit trailer value(s) are not a full 40-character lowercase SHA; no source is verified",
+                    invalid_formal.len()
+                ));
+            }
+            if formal_shas.len() > 1 {
+                notes.push(format!(
+                    "{} conflicting formal Upstream-Commit trailers; no unique source is claimed",
+                    formal_shas.len()
                 ));
                 push_limit(
                     limits,
-                    "multiple structured Upstream-Commit records; source is ambiguous",
+                    "multiple formal Upstream-Commit trailers; source is ambiguous",
                 );
-            } else if let Some(record) = &structured_reference {
+            } else if unique_valid_formal {
+                let sha = &formal_shas[0];
                 match candidate_values
                     .iter()
-                    .find(|candidate| candidate["sha"] == record["sha"])
+                    .find(|candidate| candidate["sha"].as_str() == Some(sha.as_str()))
                 {
                     None => notes.push(format!(
-                        "structured Upstream-Commit {} does not appear among the returned upstream candidates for this file",
-                        record["sha"].as_str().unwrap_or_default()
+                        "formal Upstream-Commit {sha} does not appear among the returned upstream candidates for this file"
                     )),
                     Some(candidate) if candidate["blob_equal"].as_bool() != Some(true) => {
                         notes.push(format!(
-                            "structured Upstream-Commit {} has a different blob from the imported file",
-                            record["sha"].as_str().unwrap_or_default()
+                            "formal Upstream-Commit {sha} has a different blob from the imported file"
                         ));
                     }
                     Some(_) => {}
                 }
-            } else if candidate_values
-                .iter()
-                .any(|candidate| candidate["mentioned_in_message"].as_bool() == Some(true))
+            } else if formal_records.is_empty()
+                && candidate_values
+                    .iter()
+                    .any(|candidate| candidate["mentioned_in_message"].as_bool() == Some(true))
             {
                 notes.push(
-                    "the import commit message mentions full SHA(s) but has no structured Upstream-Commit record; mentions are references, not evidence of adoption"
+                    "the import commit message mentions full SHA(s) but has no valid Git trailer Upstream-Commit field; body/code references are not evidence of adoption"
                         .to_owned(),
                 );
+                if candidate_values
+                    .iter()
+                    .any(|candidate| candidate["mentioned_in_code"].as_bool() == Some(true))
+                {
+                    notes.push(
+                        "at least one mentioned SHA appears inside a code block or quotation, not in the commit's formal trailer region"
+                            .to_owned(),
+                    );
+                }
             }
             let ambiguous = blob_equal.len() > 1;
             if ambiguous {
@@ -2432,9 +2481,10 @@ fn cross_links(
                         .to_owned(),
                 );
             }
-            // 候选状态不按遍历顺序选来源：唯一结构化记录允许展示；否则仅唯一内容相等候选/最新候选。
-            let commit = if structured_shas.len() == 1 {
-                Some(json!(structured_shas[0]))
+            // 统一契约：只要存在正式字段（冲突、无效、未匹配），candidate 的 upstream.commit 一律为 null；
+            // 没有正式字段时，才允许用“唯一内容相等候选/最新候选”做候选定位。
+            let commit = if !formal_records.is_empty() {
+                None
             } else if blob_equal.len() == 1 {
                 Some(json!(blob_equal[0]))
             } else if blob_equal.is_empty() {
@@ -2474,6 +2524,7 @@ fn cross_links(
             },
             "candidates": candidate_values,
             "structured_reference": structured_reference,
+            "formal_trailer_records": formal_trailer_records,
             "notes": notes,
         }));
         if links.len() >= MAX_CROSS_LINKS {
@@ -2538,40 +2589,96 @@ fn commit_meta(dir: &Path, sha: &str) -> (String, u64, String) {
     )
 }
 
-/// 结构化导入记录：独立一行 `Upstream-Commit: <40 lowercase hex>`（键大小写不敏感、
-/// 允许前后空白，可多行）。这是唯一能自动升级 verified 的来源记录；普通正文提及不算。
+/// 正式导入记录：来自标准 Git trailer 解析（`git interpret-trailers --parse`）的
+/// `Upstream-Commit` 行。只有 trailer 区里的行才是正式字段；正文/引用/代码块里的同名行
+/// 不会出现在该命令输出里，因此不能升级 verified（C01）。
 #[derive(Debug, Clone)]
 struct StructuredUpstreamCommit {
-    sha: String,
+    /// 值必须是完整 40 位小写 hex；trailer 行存在但值无效时为 None（正式字段冲突/不可判定）。
+    sha: Option<String>,
     raw: String,
 }
 
-fn structured_upstream_commits(message: &str) -> Vec<StructuredUpstreamCommit> {
+/// 用标准 Git trailer 语义解析提交说明：把 message 从 stdin 交给 `git interpret-trailers --parse`，
+/// 只保留输出中键为 Upstream-Commit 的行。解析命令不可用时保守地当作“没有正式记录”，
+/// 绝不复刻一套近似的“最后一段”规则。
+fn structured_upstream_commits(dir: &Path, message: &str) -> Vec<StructuredUpstreamCommit> {
+    if message.trim().is_empty() {
+        return Vec::new();
+    }
+    let Some(output) = git_with_input(dir, &["interpret-trailers", "--parse"], message) else {
+        return Vec::new();
+    };
     let mut records = Vec::new();
-    for line in message.lines() {
-        let trimmed = line.trim();
-        let Some((key, value)) = trimmed.split_once(':') else {
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once(':') else {
             continue;
         };
         if !key.trim().eq_ignore_ascii_case("upstream-commit") {
             continue;
         }
-        let sha = value.trim();
-        if sha.len() == 40
-            && sha
+        let value = value.trim();
+        let sha = (value.len() == 40
+            && value
                 .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            records.push(StructuredUpstreamCommit {
-                sha: sha.to_owned(),
-                raw: truncate(trimmed, MAX_DETAIL_CHARS),
-            });
-        }
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then(|| value.to_owned());
+        records.push(StructuredUpstreamCommit {
+            sha,
+            raw: truncate(line.trim(), MAX_DETAIL_CHARS),
+        });
     }
     records
 }
 
-/// 提交说明里是否出现某个**完整 40 hex SHA**（前后不能紧邻其它 hex 字符，避免匹配到更长串）。
+/// 把 stdin 交给一个只读 git 查询（trailer 解析用）；失败返回 None。
+fn git_with_input(dir: &Path, args: &[&str], input: &str) -> Option<String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+    let output = child.wait_with_output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 某个完整 SHA 是否出现在代码块或引用行里（只作候选引用证据，不参与 verified）。
+fn sha_mentioned_in_code(message: &str, sha: &str) -> bool {
+    let mut in_fence = false;
+    let mut code = String::new();
+    let mut quoted = String::new();
+    for line in message.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            code.push_str(line);
+            code.push('\n');
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            quoted.push_str(rest.trim());
+            quoted.push('\n');
+        }
+    }
+    message_references_sha(&code, sha) || message_references_sha(&quoted, sha)
+}
+
+/// 提交说明里是否出现某个**完整 40 hex SHA**/// 提交说明里是否出现某个**完整 40 hex SHA**（前后不能紧邻其它 hex 字符，避免匹配到更长串）。
 fn message_references_sha(message: &str, sha: &str) -> bool {
     if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return false;

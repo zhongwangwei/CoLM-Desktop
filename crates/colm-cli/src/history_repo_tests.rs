@@ -2246,11 +2246,11 @@ fn cross_multiple_plain_mentions_are_ambiguous() {
 #[test]
 fn cross_structured_upstream_commit_verifies_only_the_named_revision() {
     clean_history_env();
-    // 结构化 trailer 写 A（键大小写不敏感），正文另外提到 C：verified 只能指向 A。
+    // 标准 Git trailer 必须是最后一段；正文可以在此之前提到 C。
     let fixture = RevertFixture::new("f02-structured");
     let result = fixture.import(&format!(
-        "Import upstream snapshot\n\nupstream-commit: {}\n\nNote: revision {} was reviewed but not adopted.",
-        fixture.commit_a, fixture.commit_c
+        "Import upstream snapshot\n\nNote: revision {} was reviewed but not adopted.\n\nupstream-commit: {}",
+        fixture.commit_c, fixture.commit_a
     ));
     let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
     assert_eq!(link["state"], "verified", "{link:#?}");
@@ -2314,12 +2314,11 @@ fn cross_two_structured_upstream_commits_are_ambiguous() {
         true
     );
     assert!(
-        link["notes"]
-            .to_string()
-            .contains("structured Upstream-Commit"),
+        link["notes"].to_string().contains("formal Upstream-Commit"),
         "{link:#?}"
     );
     assert_eq!(link["structured_reference"], Value::Null);
+    assert_eq!(link["formal_trailer_records"].as_array().unwrap().len(), 2);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2752,57 +2751,286 @@ fn sync_failure_and_offline_keep_last_successful_sync_and_persistent_errors() {
 }
 
 #[test]
-fn legacy_repos_json_synced_is_read_as_last_successful_sync() {
+fn legacy_synced_is_kept_as_legacy_not_a_successful_sync() {
     clean_history_env();
-    let root = TempDir::new("h09-legacy");
-    let desktop = RepoFixture::init(&root.join("repos/desktop"));
-    // 先指向一个不存在的 remote，确保后面的“失败 fetch”不联网、且只更新尝试记录。
+    let root = TempDir::new("c04-legacy");
+    // 本地路径做 origin：后面验证“只有新格式真正成功 clone/fetch 才建立成功记录”。
+    let remote = RepoFixture::init(&root.join("remote"));
+    remote.write("main/MOD_A.F90", "SUBROUTINE a\n  x = 1.0\nEND\n");
+    remote.commit("Remote first");
+    let desktop_path = root.join("repos/desktop");
+    let (ok, _, stderr) = run_program(
+        root.path(),
+        "git",
+        &["clone", "-q", text(remote.path()), text(&desktop_path)],
+        &[],
+    );
+    assert!(ok, "local clone failed: {stderr}");
+    let desktop = RepoFixture::open(&desktop_path);
+
+    // 旧版本 offline 与 fetch 失败都会写 synced；升级读取时都不能变成成功证据。
+    let mut last_legacy = Value::Null;
+    for (label, legacy_sync) in [
+        (
+            "old offline write",
+            json!({"ref": "origin/main", "sha": "d".repeat(40), "at_unix_ms": 1_700_000_000_000_u64}),
+        ),
+        (
+            "old failed-fetch write",
+            json!({"ref": "origin/main", "sha": "e".repeat(40), "at_unix_ms": 1_700_000_060_000_u64}),
+        ),
+    ] {
+        let legacy = json!({
+            "schema": 1,
+            "repos": {"desktop": {"default_branch": "main", "synced": legacy_sync}},
+        });
+        std::fs::write(
+            root.join("repos.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let repos = history_repos(&root);
+        let repo = &repos["repos"]["desktop"];
+        assert_eq!(
+            repo["last_successful_sync"],
+            Value::Null,
+            "{label}: a legacy synced value is not proof of a successful sync"
+        );
+        assert_eq!(
+            repo["synced"],
+            Value::Null,
+            "{label}: the synced alias must not expose legacy data as success"
+        );
+        assert_eq!(repo["legacy_synced"], legacy_sync, "{label}");
+        assert!(
+            !repo["sync_notes"].as_array().unwrap().is_empty(),
+            "{label}: legacy data must be explained"
+        );
+        assert_eq!(repo["last_attempt"], Value::Null);
+        last_legacy = legacy_sync;
+    }
+
+    // 失败 sync 也不能把 legacy 值升级成成功时间。
     desktop.git(&[
         "remote",
-        "add",
+        "set-url",
         "origin",
         text(&root.join("missing-remote")),
     ]);
-    desktop.write("src/lib.rs", "pub fn legacy() {}\n");
-    desktop.commit("Legacy desktop commit");
-    let legacy_sync = json!({
-        "ref": "origin/main",
-        "sha": "d".repeat(40),
-        "at_unix_ms": 1_700_000_000_000_u64,
-    });
-    let legacy = json!({
-        "schema": 1,
-        "repos": {"desktop": {"default_branch": "main", "synced": legacy_sync}},
-    });
-    std::fs::write(
-        root.join("repos.json"),
-        serde_json::to_string_pretty(&legacy).unwrap(),
-    )
-    .unwrap();
-
-    let repos = history_repos(&root);
-    let repo = &repos["repos"]["desktop"];
-    assert_eq!(repo["last_successful_sync"], legacy_sync, "{repo:#?}");
-    assert_eq!(repo["synced"], legacy_sync, "legacy alias must survive");
-    assert_eq!(repo["last_attempt"], Value::Null);
-    assert_eq!(repo["checked_at_unix_ms"], Value::Null);
-    assert_eq!(
-        repos["repos"]["colm_upstream"]["last_successful_sync"],
-        Value::Null
-    );
-
-    // 旧格式数据在失败的 sync 后也不能丢：成功时间保持旧值，只新增尝试/错误。
     let failed = history_sync_online(&root, "desktop");
     assert_eq!(failed["actions"]["desktop"], "error");
     assert_eq!(
         failed["repos"]["desktop"]["last_successful_sync"],
-        legacy_sync
+        Value::Null
     );
-    assert!(failed["repos"]["desktop"]["checked_at_unix_ms"]
-        .as_u64()
-        .is_some_and(|value| value > 0));
+    assert_eq!(
+        failed["repos"]["desktop"]["legacy_synced"], last_legacy,
+        "a failed sync must keep the legacy value as legacy data"
+    );
     assert!(!failed["repos"]["desktop"]["errors"]
         .as_array()
         .unwrap()
         .is_empty());
+
+    // 新格式真正成功 fetch 后才建立 last_successful_sync；legacy 数据被新成功记录取代。
+    desktop.git(&["remote", "set-url", "origin", text(remote.path())]);
+    let repaired = history_sync_online(&root, "desktop");
+    assert_eq!(repaired["actions"]["desktop"], "fetched", "{repaired:#?}");
+    let success = &repaired["repos"]["desktop"]["last_successful_sync"];
+    assert_eq!(success["sha"], json!(desktop.head()));
+    assert_eq!(repaired["repos"]["desktop"]["synced"], *success);
+    assert_eq!(repaired["repos"]["desktop"]["legacy_synced"], Value::Null);
+    assert!(repaired["repos"]["desktop"]["errors"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// C01：只有标准 Git trailer 才是正式来源记录；正文/代码块/引用只作候选证据
+// ---------------------------------------------------------------------------------------------
+
+fn git_interpret_trailers(dir: &Path, message: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["interpret-trailers", "--parse"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("cannot run git interpret-trailers");
+    child
+        .stdin
+        .take()
+        .expect("trailer stdin")
+        .write_all(message.as_bytes())
+        .expect("cannot write the commit message");
+    let output = child.wait_with_output().expect("git interpret-trailers");
+    assert!(
+        output.status.success(),
+        "git interpret-trailers failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn structured_upstream_commit_uses_standard_git_trailer_parsing() {
+    clean_history_env();
+    let root = TempDir::new("c01-trailer-parse");
+    let desktop = RepoFixture::init(&root.join("repos/desktop"));
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let valid = format!("Import snapshot\n\nUpstream-Commit: {sha}\n");
+    assert_eq!(
+        git_interpret_trailers(desktop.path(), &valid).trim(),
+        format!("Upstream-Commit: {sha}")
+    );
+    let rejected_block = format!(
+        "Import original snapshot A\n\nThe following proposal was rejected:\n\n```text\nUpstream-Commit: {sha}\n```\n\nKeep the original revision instead.\n"
+    );
+    assert!(
+        git_interpret_trailers(desktop.path(), &rejected_block)
+            .trim()
+            .is_empty(),
+        "a fenced code block is not the trailer region"
+    );
+    let fenced_at_end = format!("Import snapshot\n\n```text\nUpstream-Commit: {sha}\n```\n");
+    assert!(
+        git_interpret_trailers(desktop.path(), &fenced_at_end)
+            .trim()
+            .is_empty(),
+        "a fenced block at the end is still not a standard trailer"
+    );
+
+    // 直接调用真实解析函数：只有标准 trailer 区里的行才会返回。
+    let records = super::structured_upstream_commits(desktop.path(), &valid);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sha.as_deref(), Some(sha));
+    assert!(records[0].raw.contains("Upstream-Commit:"));
+    assert!(super::structured_upstream_commits(desktop.path(), &rejected_block).is_empty());
+    assert!(super::structured_upstream_commits(desktop.path(), &fenced_at_end).is_empty());
+    // 值无效的 trailer 行仍是“正式字段存在但不可核验”，必须由上层降级为 candidate。
+    let invalid = "Import snapshot\n\nUpstream-Commit: not-a-sha\n".to_owned();
+    let records = super::structured_upstream_commits(desktop.path(), &invalid);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sha, None);
+}
+
+#[test]
+fn code_block_upstream_commit_is_not_a_formal_trailer() {
+    clean_history_env();
+    let fixture = RevertFixture::new("c01-code-block");
+    // C 是 revert 回 A 内容的提交：C 的 blob 与导入内容相同，但代码块里明确是被否决的提案。
+    let message = format!(
+        "Import original snapshot {}\n\nThe following proposal was rejected:\n\n```text\nUpstream-Commit: {}\n```\n\nKeep the original revision instead.",
+        fixture.commit_a, fixture.commit_c
+    );
+    let parsed = git_interpret_trailers(fixture.desktop.path(), &message);
+    assert!(
+        parsed.trim().is_empty(),
+        "code block must not parse as trailer"
+    );
+    let result = fixture.import(&message);
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "a rejected code-block proposal must never become the source: {link:#?}"
+    );
+    assert_eq!(link["formal_trailer_records"], json!([]));
+    assert_eq!(link["structured_reference"], Value::Null);
+    let rejected = candidate_with_sha(link, &fixture.commit_c);
+    assert_eq!(rejected["structured"], false, "{rejected:#?}");
+    assert_eq!(rejected["mentioned_in_message"], true, "{rejected:#?}");
+    assert_eq!(rejected["mentioned_in_code"], true, "{rejected:#?}");
+    assert_eq!(rejected["blob_equal"], true, "{rejected:#?}");
+    assert!(
+        link["notes"].to_string().contains("code block"),
+        "{link:#?}"
+    );
+    assert!(!link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "structured-upstream-commit"));
+}
+
+#[test]
+fn conflicting_formal_trailers_never_pick_a_blob_equal_source() {
+    clean_history_env();
+    let fixture = RevertFixture::new("c01-conflict");
+    // 两个正式字段，其中 A 的 blob 与导入内容相等、B 不等：冲突仍必须 candidate/null。
+    let result = fixture.import(&format!(
+        "Import upstream snapshot\n\nUpstream-Commit: {}\nUpstream-Commit: {}",
+        fixture.commit_a, fixture.commit_b
+    ));
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "conflicting formal trailers must not be resolved by blob equality: {link:#?}"
+    );
+    assert_eq!(link["formal_trailer_records"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["structured"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_b)["structured"],
+        true
+    );
+    assert_eq!(
+        candidate_with_sha(link, &fixture.commit_a)["blob_equal"],
+        true
+    );
+    assert!(
+        candidate_with_sha(link, &fixture.commit_b)["blob_equal"] == false,
+        "{link:#?}"
+    );
+    assert!(!link["basis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "structured-upstream-commit"));
+}
+
+#[test]
+fn invalid_or_mismatched_formal_trailer_is_candidate_without_commit() {
+    clean_history_env();
+    // 值无效：正式字段存在但不可核验。
+    let fixture = RevertFixture::new("c01-invalid-value");
+    let result = fixture.import("Import upstream snapshot\n\nUpstream-Commit: not-a-sha");
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(link["upstream"]["commit"], Value::Null);
+    let records = link["formal_trailer_records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["valid"], false);
+    assert!(link["notes"]
+        .to_string()
+        .contains("not a full 40-character lowercase SHA"));
+
+    // 唯一正式字段指向 B，但 B 的 blob 与导入内容（A）不同 → candidate/null。
+    let fixture = RevertFixture::new("c01-mismatched-blob");
+    let result = fixture.import(&format!(
+        "Import upstream snapshot\n\nUpstream-Commit: {}",
+        fixture.commit_b
+    ));
+    let link = cross_link(&result, "main/MOD_R.F90").expect("file maps by path");
+    assert_eq!(link["state"], "candidate", "{link:#?}");
+    assert_eq!(
+        link["upstream"]["commit"],
+        Value::Null,
+        "a formal field whose blob differs is not a confirmed source: {link:#?}"
+    );
+    assert_eq!(link["formal_trailer_records"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        link["formal_trailer_records"][0]["sha"],
+        json!(fixture.commit_b)
+    );
+    assert!(link["notes"].to_string().contains("different blob"));
 }
