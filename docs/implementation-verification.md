@@ -39371,3 +39371,31 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - GUI 的 `study_compare` 路径（两次 verified_study_side + 合并）未按 pin 改造；CLI 的 Refuse 只约束直接调用者。
 - `study-clone` 对 `model_revision=None` 的 pin 也整条转交，前提是旧 pin 程序自身支持该子命令。
 - 服务器端按指定成员独立重算指标仍只覆盖 best+baseline。
+
+## 研究页第十批：远程指定成员核验（2026-10-29）
+
+接第九批。处理复核报告"远程成员写回非 best/baseline 时服务器只重算 best+baseline"的剩余项。
+
+### 服务器侧
+
+- `study-verify-comparison` 新增可选 `--member <id>[,<id>...]`（单值/逗号、去重、空项报错、未知/ best/baseline 别名拒绝）。不传时严格保持旧行为（只 best+baseline，旧 evidence JSON 形状不变）。
+- 指定成员走与 best/baseline 相同的 `verify_member_evidence`：任务成功、结果树/evaluation 身份、参数/样本哈希、目标源内容，并纳入证据前后快照；evidence 顶层新增 `members: [{id, kind:"selected", scores:{feasible,calibration,validation}, evidence_sha256, metrics_recomputed:false}]`（仅显式请求时出现，纯增量字段，旧 JSON 可读）。
+- `member_evidence_digest` 把条目绑定到 `results_sha256` 中该成员的 `tasks/<id>/` + `provenance/<id>/`，客户端可重算校验。
+
+### 远程写回
+
+- `StudyRemote::comparison_evidence`/`comparison_command`/`server_comparison_evidence` 透传成员；成员 id 只放行 `[A-Za-z0-9_-]`（防远端 shell 注入）。仅 tuning 且非 best/baseline 才传 `--member`；best/baseline 保持旧命令。
+- 客户端 `verify_selected_member_evidence` 要求服务器条目存在、kind=selected、scores 与证据内 state 一致、evidence_sha256 与结果树重算一致；缺条目或旧引擎报 unknown argument/usage 时统一拒绝并给可行动说明（"服务器引擎早于按成员核验：升级/重建远程引擎并重新提交，或改为写回 best/baseline"），**不退回 state-only 弱核验**。
+- selected 成员写回证据 `member_scope = "server-selected-member-evidence"`，`metrics_recomputed` 按任务保持 false（`verify_member_evidence` 实际会重算候选目标并比对；版本比较结论仍只排 best+baseline，note 已说明）。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **786 passed**；`remote_study_tests` **67 passed**；`study_version` **43 passed**；`cargo clippy --workspace --all-targets -- -D warnings` clean；两侧 `cargo fmt --all --check` clean。
+- 前端未改（GUI 不解析 `metrics_recomputed`/`member_scope`，只原样显示后端错误文本），未跑 npm。
+- 未运行：真实 SSH 服务器与旧引擎；旧引擎拒绝用 fake 服务器返回 unknown-argument 模拟。
+
+### 遗留
+
+- 研究 pin 到旧 `colm-cli` 时 `study-save-version` 整条转交旧程序，旧程序不会向远程引擎传 `--member`，仍走旧弱核验；父进程目前无法探测 pinned CLI 能力，建议后续加能力探针或在非 best/baseline 写回时拒绝旧 pin。
+- `metrics_recomputed` 对 selected 仍为 false（单点可改 true 并更新断言）。
+- 旧引擎支持范围：schema 1 旧 JSON 可读，但按成员核验要求服务器引擎新到支持 `--member`。
