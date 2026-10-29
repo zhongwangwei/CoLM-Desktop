@@ -38996,3 +38996,49 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 真实 CLI 夹具 smoke：C01 代码块被否决 trailer → candidate/null，正式末尾 trailer → verified；C04 与 C02 由真实 git/JSON 夹具测试覆盖。
 - Tauri/GUI 未改（本轮未动 gui），沿用其既有测试记录。
 - 未运行：真实 GitHub/TLS/token、真实模型端到端、真实 App/外部后端、GUI；S01–S02 与 U01–U05 仍属后续批次。
+
+## 研究页第四批：派生状态保护 / 预算核对 / 侧栏上下文 / 旧 CLI 兼容 / 取消身份（2026-10-29）
+
+基线 `main@4cba5a6` 的复核报告（对 HEAD=8aba60f9 逐条只读核查后确认存在的项）分两轮修复。本批处理"状态与身份"类：派生设计被自动预填改写、预算核对框消失、侧栏清研究上下文、旧冻结 CLI 兼容副本/设计比较、取消身份。先写失败测试再改；未改产品语义。
+
+### 1 派生设计进第 3 步不再被自动预填改写（前端）
+
+- 旧行为：第 3 步 effect 无 `derivedDesign` 保护，读算例档案后调用通用 `prefillWindows`；其覆盖规则（空值或等于上次自动值时改）会把来源研究"没有验证期"当成未填写、补上验证期，或在 `autoWindows` 恰好等于来源窗口时把 `to` 静默缩短。带入率定后用户以为保留了来源设计，实际提交的时间窗不同。
+- 新行为：派生模式（`derivedDesign` 非空）第 3 步整体跳过普通自动预填；`carryToCalibration` 重置 `prefilledFor`/`autoWindows`；来源空验证期按明确设计值 `''` 保留。页面当前没有"重新推荐时段"入口（注释写明将来若加须先展示前后差异）。
+- 测试修正（复核报告指出的覆盖缺口）：派生/UQ fixture 不再给 uncertainty target 填 `validation`（后端明确禁止，`spec.rs:961-968`）；`research-home.test.ts` 的 `model_case_profiles` mock 从 `{}` 改为真实算例档案（2000–2010、output_start、spinup），让第 3 步真实进入推荐分支。新增：`carrying a legal UQ study into calibration keeps its 2000–2010 window unchanged`、`a derived study keeps the source window after the page auto-filled the same UQ period` 等完整链路测试。
+
+### 2 服务器可提交时预算核对框必须出现（前端）
+
+- 旧行为：前端 `remoteStudyPermissions` 把 reply 也算进 `exists`，而后端 `submit = !record && !pending`；`never_submitted` 返回 `exists=true, submit=true`。运行按钮用 `permissions.submit` 放行但仍要求 `confirmed`，第 4 步核对框条件漏了 `submit` → 提示"勾选上面"但框不渲染，提交被卡死。
+- 新行为：抽 `canConfirmSubmission = !exists || resubmit || submit`，由 start、运行按钮、`shownWhenDisabled`、第 4 步核对框四处共用，不再各自拼条件。新增 page-level 状态组合测试 `a server-submittable study shows the budget review box and unlocks the run button`。
+
+### 3 侧栏"研究"保留已打开研究与远程追踪（前端）
+
+- 旧行为：侧栏总设 `researchHome:true`，页面 effect 在非运行中调 `update(homeResearchEntry())` 清 `researchBaseline` → `[dir, versionId, revision]` effect 清 `studyDir/envelope/remoteReply` → 首页 `hasStudy=false`，远程追踪入口消失（与"← 研究首页"按钮行为不一致）。
+- 新行为：已打开研究时侧栏只清 `researchMethod/researchSeed/researchTarget`，保留 baseline 与目录；新研究清场由 `startHomeMethod/chooseMethod` 负责。新增 `the sidebar research entry keeps an open study and its remote tracking`。
+
+### 4 旧冻结 CLI 兼容副本真正进入 GUI 路径（CLI）
+
+- 5a：`create_with_revision_cli` 造了剥离 `parent_study` 的临时 spec，但 `creation_delegate_args` 在 flags 已含 `--spec` 时保留原值（GUI 总是带 `--spec`）→ 副本从未生效。现在构造参数后统一 `set_spec_argument(&mut args, &sanitized)`，无论 GUI 以哪种形式给 `--spec` 都指向剥离副本；`creation_delegate_args` 保持只负责拼参。
+- 5b：`include_baseline` 回退原写 `Bool(false)`，旧 `deny_unknown_fields` 只认键存在仍拒绝。改为从 budget 删除该键；假 CLI 测试改成"键存在即拒绝"（原测试只拒 `true`，会掩盖 false 问题）。
+- 7a：远程 staging 把 `parent_study` 清 None，但 `same_design` 未忽略该审计字段 → 本地 Some vs 远端 None 被判"server comparison design differs"，派生远程研究取回被拒。`same_design` 序列化后显式移除 `parent_study`；谱系是审计元数据，不参与执行设计相等判断。
+- 测试：`gui_flags_hand_the_sanitized_spec_to_an_older_revision`、`same_design_ignores_parent_study_lineage_metadata`、`a_staged_study_without_parent_study_still_matches_the_local_design`；更新 include_baseline 两个回归测试。
+
+### 5 取消身份：旧锁回落与"先验身份再终止"（CLI + Tauri）
+
+- 9a：旧冻结 CLI 不写 `COLM_STUDY_RUN_ID`，`run.lock` 的 `run_id=None`；新 GUI 总传 expected run id，`finalize_cancel_impl` 严格比较导致进程被杀、锁留下。现在：锁里有 run_id 仍严格按 ID；锁里 run_id 为 None 且调用方给了 `expected_pid` 时回落按 PID 认锁；只给 run id 不给 PID 仍拒绝。GUI 在 finalize 前读取一次锁记录：裸锁只传锁 owner PID（不带 run ID），带 ID 锁才传 run ID + 外层 PID。
+- 9b：原顺序先组杀/补杀锁 owner 再 finalize，且补杀只比可执行文件名。现在取消全程只读一次锁快照（pid/executable/run_id）：先用 `lock_identity_matches` 校验（锁带 run_id 且不是本次 → 终止任何进程前直接拒绝；裸锁只接受锁 owner PID + executable 匹配），通过后才写 cancel.request、组杀、按同一快照补杀、最后用同一快照 finalize。`cancel_on_shutdown` 同路径。
+- 测试：`a_cancel_with_a_run_id_falls_back_to_the_expected_pid_for_a_legacy_lock`（PID 匹配→Cancelled+删锁；PID 不符/无 PID→拒绝+锁保留）；`a_lock_from_another_run_is_rejected_before_any_process_is_stopped`（同名 sh、另一 run 的锁：拒绝、调用序列为空、两个真实进程都存活）；`a_legacy_bare_lock_with_a_matching_executable_is_still_stopped` 等。
+
+### 本轮验证（真实执行）
+
+- 前端：`npm run typecheck` / `lint` / `format:check` 全过；`npm test` **1218 passed / 0 failed**（新增 4 条页面级测试，另修正非法 UQ fixture 与被 mock 空档案的覆盖缺口）。
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **711 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；`cargo fmt --all --check` clean。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml -- --test-threads=1` **552 passed / 1 ignored**；clippy exit 0；fmt clean。
+- 未运行：真实旧冻结 CLI 二进制（兼容副本用假 CLI 验证参数与文件契约）；真实 Tauri 窗口点击；真实杀进程实验（9b 用真实 sh 进程验证"不杀"路径）；CI。
+
+### 遗留
+
+- 裸锁（无 run_id）的固有残余风险：若陈旧裸锁的 PID 恰好被另一个同名 `colm-cli` 复用，可执行文件名校验会通过（带 run_id 的锁不走这条路）。
+- 派生模式没有主动"重新推荐时段"入口；将来若加，必须先展示前后差异，不能静默覆盖来源窗口。
+- 旧 CLI 兼容只覆盖副本与参数契约；参数目录/内嵌源哈希与执行器绑定的完整统一（6a/6b）仍是下一批。
