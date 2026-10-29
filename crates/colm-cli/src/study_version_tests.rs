@@ -1229,6 +1229,59 @@ fn a_spec_handed_to_an_older_program_drops_parent_study_and_optionally_include_b
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `study-compare` 读版本身份时也要能穿过 GUI 归档：活动记录被改名后，取回时写下的
+/// 持久来源还在，比较页必须仍显示提交时的修改版，而不是退回“官方版”。
+#[test]
+fn an_archived_remote_source_still_names_the_comparison_version() {
+    let root = temp("archived-source-version");
+    let study = root.join("proj/.colm/studies/s-archive");
+    std::fs::create_dir_all(&study).unwrap();
+    let local = study.canonicalize().unwrap();
+    let write_source = |version: serde_json::Value| {
+        let source = serde_json::json!({
+            "schema": 1,
+            "host": "server",
+            "root": "/srv/colm",
+            "job": "study-1",
+            "remote_project": "/srv/colm/s/abc",
+            "engine": "0123456789abcdef",
+            "scheduler": "bare",
+            "submitted_at": 1,
+            "fetched_at": 1,
+            "provenance": {"version": version, "model_revision": null},
+            "local_study": local.to_string_lossy(),
+            "study_id": "s-archive",
+            "remote_study": "/srv/colm/s/abc/.colm/studies/s-remote",
+            "evidence_sha256": "a".repeat(64),
+        });
+        std::fs::write(
+            study.join(crate::remote_cmd::remote_study::SOURCE),
+            serde_json::to_vec_pretty(&source).unwrap(),
+        )
+        .unwrap();
+    };
+    write_source(serde_json::json!({
+        "kind": "workspace", "name": "snow", "head": "0123456789abcdef", "base_commit": "fedcba98"
+    }));
+    assert_eq!(
+        comparison_version(&study).unwrap(),
+        ("snow".into(), Some("0123456789abcdef".into()))
+    );
+    // 也覆盖官方版：只有 kind=official 才判官方，不能因为来源缺字段就默认。
+    write_source(serde_json::json!({"kind": "official"}));
+    assert_eq!(
+        comparison_version(&study).unwrap(),
+        ("official".into(), None)
+    );
+    // 没有来源也没有活动记录时保持旧语义（比较页按官方版处理），不因本改动改变。
+    std::fs::remove_file(study.join(crate::remote_cmd::remote_study::SOURCE)).unwrap();
+    assert_eq!(
+        comparison_version(&study).unwrap(),
+        ("official".into(), None)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ---------------------------------------------------------------- 身份敏感命令交给研究 pin 的程序
 //
 // 这些命令会调用 `verify_frozen_inputs`：它用程序内嵌的参数目录与来源文件重算 provenance 哈希。
@@ -1290,6 +1343,15 @@ fn pinned_command_opts(command: &str, study: &Path) -> crate::Opts {
                 ("--expected-generation".into(), "1".into()),
             ],
         },
+        // 只读证据命令：参数只有研究目录，但 GUI 仍会附上 history 库与 operation id；
+        // 转交要原样带上，否则子 CLI 会写另一份审计库。
+        "study-verified-side" | "study-verify-comparison" => crate::Opts {
+            positional: vec![study],
+            flags: vec![
+                ("--history-db".into(), "/tmp/history.sqlite".into()),
+                ("--operation-id".into(), "op-1".into()),
+            ],
+        },
         other => panic!("test does not know {other}"),
     }
 }
@@ -1331,6 +1393,8 @@ fn identity_sensitive_study_commands_run_on_the_pinned_cli() {
         "model-import-study",
         "remote-study-run",
         "remote-study-fetch",
+        "study-verified-side",
+        "study-verify-comparison",
     ] {
         let root = temp(&format!("pin-cli-{command}"));
         let log = root.join("args.log");
@@ -1373,29 +1437,43 @@ fn identity_sensitive_study_commands_run_on_the_pinned_cli() {
 #[cfg(unix)]
 #[test]
 fn a_delegated_identity_command_returns_the_pinned_clis_exit_status() {
-    let root = temp("pin-cli-exit");
-    let cli = fake_cli(&root, "exit 7\n");
-    let study = pinned_study(&root, cli);
-    let opts = pinned_command_opts("remote-study-fetch", &study);
-    let program = pinned_command_program("remote-study-fetch", &opts)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        run_pinned_command(&program, "remote-study-fetch", &opts, None).unwrap(),
-        7
-    );
-    let _ = std::fs::remove_dir_all(&root);
+    for command in [
+        "remote-study-fetch",
+        "study-verified-side",
+        "study-verify-comparison",
+    ] {
+        let root = temp(&format!("pin-cli-exit-{command}"));
+        let cli = fake_cli(&root, "exit 7\n");
+        let study = pinned_study(&root, cli);
+        let opts = pinned_command_opts(command, &study);
+        let program = pinned_command_program(command, &opts)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{command} 应该交给 pin 的 CLI"));
+        assert_eq!(
+            run_pinned_command(&program, command, &opts, None).unwrap(),
+            7,
+            "{command} 的退出码要原样交回"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[test]
 fn a_pin_that_names_the_running_program_stays_local() {
     let root = temp("pin-cli-current");
-    let study = pinned_study(&root, std::env::current_exe().unwrap());
-    let opts = pinned_command_opts("study-save-version", &study);
-    assert_eq!(
-        pinned_command_program("study-save-version", &opts).unwrap(),
-        None
-    );
+    for command in [
+        "study-save-version",
+        "study-verified-side",
+        "study-verify-comparison",
+    ] {
+        let study = pinned_study(&root.join(command), std::env::current_exe().unwrap());
+        let opts = pinned_command_opts(command, &study);
+        assert_eq!(
+            pinned_command_program(command, &opts).unwrap(),
+            None,
+            "{command} 的 pin 就是当前程序，不该转交"
+        );
+    }
     // 只读命令不重算 provenance，也不该整条转交。
     let cli_elsewhere = root.join("other-colm-cli");
     std::fs::write(&cli_elsewhere, "not a program").unwrap();
@@ -1416,21 +1494,56 @@ fn a_pin_that_names_the_running_program_stays_local() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `study-compare` 有两个研究目录，两侧可能各自 pin 到不同的 CLI。它不在委托名单里：
+/// 把整条命令交给其中一份程序，就会用那份程序校验另一侧，而另一侧需要的是它自己的参数目录
+/// 与来源哈希（#6b）。正确做法是按侧各起一个进程再合并结果，本批不展开，因此这里锁住
+/// “绝不把两个研究当成一个目录转交”这一边界。
+#[cfg(unix)]
+#[test]
+fn a_two_sided_comparison_is_not_delegated_to_one_sides_cli() {
+    let root = temp("pin-cli-mixed");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    let study_a = pinned_study(&root.join("a"), fake_cli(&root.join("a"), "exit 0\n"));
+    let study_b = pinned_study(&root.join("b"), fake_cli(&root.join("b"), "exit 0\n"));
+    let opts = crate::Opts {
+        positional: vec![
+            study_a.to_string_lossy().into_owned(),
+            study_b.to_string_lossy().into_owned(),
+        ],
+        flags: Vec::new(),
+    };
+    assert_eq!(pinned_command_study_dir("study-compare", &opts), None);
+    assert_eq!(
+        pinned_command_program("study-compare", &opts).unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_second_delegation_is_stopped_by_the_parent_marker() {
-    let root = temp("pin-cli-loop");
-    let log = root.join("args.log");
-    let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
-    let study = pinned_study(&root, cli);
-    let opts = pinned_command_opts("remote-study-run", &study);
-    let _guard = DelegatedEnv::set();
-    assert_eq!(
-        pinned_command_program("remote-study-run", &opts).unwrap(),
-        None
-    );
-    assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
-    let _ = std::fs::remove_dir_all(&root);
+    for command in [
+        "remote-study-run",
+        "study-verified-side",
+        "study-verify-comparison",
+    ] {
+        let root = temp(&format!("pin-cli-loop-{command}"));
+        let log = root.join("args.log");
+        let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+        let study = pinned_study(&root, cli);
+        let opts = pinned_command_opts(command, &study);
+        let _guard = DelegatedEnv::set();
+        assert_eq!(
+            pinned_command_program(command, &opts).unwrap(),
+            None,
+            "{command} 由父进程交出来之后不能再转交"
+        );
+        assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 /// 远程命令的 SSH 凭据只能从 stdin 读一次：父进程替它读走之后必须原样转给真正执行的程序。

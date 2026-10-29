@@ -202,18 +202,25 @@ pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
-/// 写回模型版本、或提交/取回远程研究的身份敏感命令：它们读研究 pin、调用
-/// `verify_frozen_inputs`，并把算出的身份写进模型或远程记录。研究目录的位置各不相同：
-/// `study-save-version`/`remote-study-run`/`remote-study-fetch` 是第一个位置参数，
-/// `model-import-study` 是 `--study-dir`。`study-status` 等只读命令不重算 provenance，不在此列。
-const PINNED_CLI_COMMANDS: [&str; 4] = [
+/// 会按当前程序重算 provenance 的身份敏感命令：写回模型版本、提交/取回远程研究，以及
+/// 给出“已核对输入/成绩”的单侧检查（`study-verified-side`、`study-verify-comparison`）。
+/// 它们都读研究 pin 并调用 `verify_frozen_inputs`：参数目录与来源哈希编在程序里，pin 到旧修订后
+/// 由当前程序重算会与 pin 时不同，输入被误报成变了（#6b，P1-8 同类）。后两个命令虽只读，
+/// 但它们的“已核对”结论同样来自这次重算，所以也必须由 pin 的程序来做。
+///
+/// 为什么 `study-compare` 不在这里：它有两个研究目录，两侧可能各自 pin 到不同的 CLI；整条命令
+/// 交给其中一份程序，就会用那份程序校验另一侧。按侧分别起进程是另一个改动，本批明确不静默用
+/// 一份 CLI 校验另一侧。
+const PINNED_CLI_COMMANDS: [&str; 6] = [
     "study-save-version",
     "model-import-study",
     "remote-study-run",
     "remote-study-fetch",
+    "study-verified-side",
+    "study-verify-comparison",
 ];
 
-/// 这些命令从哪取研究目录。四个入口的实际读法不同，不能统一按位置参数取。
+/// 这些命令从哪取研究目录。各入口的实际读法不同，不能统一按位置参数取。
 fn pinned_command_study_dir(command: &str, opts: &crate::Opts) -> Option<PathBuf> {
     if !PINNED_CLI_COMMANDS.contains(&command) {
         return None;

@@ -338,9 +338,9 @@ fn main() -> Result<()> {
         opts.flags
             .push(("--model-root".into(), root.to_string_lossy().into_owned()));
     }
-    // 身份敏感命令（写回模型版本、提交/取回远程研究）会读研究 pin 并调用 `verify_frozen_inputs`：
-    // provenance 必须由 pin 时那份程序重算，否则 pin 到旧修订的研究会被误报“输入变了”。整条命令
-    // 交给 pin 的 CLI，退出码原样透传。
+    // 身份敏感命令（写回模型版本、提交/取回远程研究、单侧证据核验）会读研究 pin 并调用
+    // `verify_frozen_inputs`：provenance 必须由 pin 时那份程序重算，否则 pin 到旧修订的研究会被
+    // 误报“输入变了”。整条命令交给 pin 的 CLI，退出码原样透传。
     //
     // 这一步必须在读 stdin 之前：远程命令的 SSH 凭据由 GUI 写在本进程的 stdin 上，父进程一旦
     // 读了，被转交的程序就读不到（P1-8 转交不只是换程序，还要把执行环境一起交过去）。

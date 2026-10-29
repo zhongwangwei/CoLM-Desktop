@@ -1575,6 +1575,120 @@ fn an_active_record_must_agree_with_its_persisted_source() {
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
+/// 取回成功后记录里写下的模型版本身份（fixture 默认只有 model_revision）。
+fn stamp_workspace_version(study_dir: &Path, name: &str, head: &str) {
+    let mut record = read_record(study_dir).unwrap();
+    record.provenance["version"] = json!({
+        "kind": "workspace",
+        "name": name,
+        "head": head,
+        "base_commit": "fedcba98",
+    });
+    std::fs::write(
+        study_dir.join(RECORD),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+}
+
+/// 归档后（活动记录改名、来源原位保留）仍要能从来源读出模型版本身份，
+/// 否则 `study-compare` 与证据页会把修改版结果错认成官方版/未知。
+#[test]
+fn an_archived_remote_record_still_reports_the_model_version_from_the_persisted_source() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    let expected = Some(RecordedModelVersion::Workspace {
+        name: "snow".into(),
+        head: "0123456789abcdef".into(),
+        base_commit: Some("fedcba98".into()),
+    });
+    // 活动记录与来源同时存在：读活动记录。
+    assert_eq!(recorded_model_version(&fixture.local).unwrap(), expected);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join(".colm-remote-study-closed-123.json"),
+    )
+    .unwrap();
+    // 只剩来源：必须仍能给出同一身份。
+    assert_eq!(recorded_model_version(&fixture.local).unwrap(), expected);
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn an_archived_official_source_still_reports_the_official_version() {
+    let fixture = remote_fetched_study("lhs");
+    let mut record = read_record(&fixture.local).unwrap();
+    record.provenance["version"] = json!({"kind": "official"});
+    std::fs::write(
+        fixture.local.join(RECORD),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    persist_fixture_source(&fixture);
+    std::fs::rename(
+        fixture.local.join(RECORD),
+        fixture.local.join(".colm-remote-study-closed-123.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        recorded_model_version(&fixture.local).unwrap(),
+        Some(RecordedModelVersion::Official)
+    );
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+/// `study-compare` 的完整输出：两侧活动记录都归档后，仍按来源里的修改版名称/提交标记，
+/// 而不是退回官方版。
+#[test]
+fn study_compare_still_names_archived_workspace_versions() {
+    let left = remote_fetched_study("lhs");
+    stamp_workspace_version(&left.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&left);
+    std::fs::rename(left.local.join(RECORD), left.local.join("closed-left.json")).unwrap();
+    let right = remote_fetched_study("lhs");
+    stamp_workspace_version(&right.local, "rain", "fedcba9876543210");
+    persist_fixture_source(&right);
+    std::fs::rename(
+        right.local.join(RECORD),
+        right.local.join("closed-right.json"),
+    )
+    .unwrap();
+    let result = crate::study_version::compare(&left.local, &right.local).unwrap();
+    assert_eq!(result["a"]["version"], "snow");
+    assert_eq!(result["a"]["head"], "0123456789abcdef");
+    assert_eq!(result["b"]["version"], "rain");
+    assert_eq!(result["b"]["head"], "fedcba9876543210");
+    std::fs::remove_dir_all(left.root).unwrap();
+    std::fs::remove_dir_all(right.root).unwrap();
+}
+
+#[test]
+fn a_record_and_source_that_disagree_about_the_model_version_are_refused() {
+    let fixture = remote_fetched_study("lhs");
+    stamp_workspace_version(&fixture.local, "snow", "0123456789abcdef");
+    persist_fixture_source(&fixture);
+    // 记录与来源同属一次取回后才可能版本不同；模拟记录被另一份取回记录替换。
+    stamp_workspace_version(&fixture.local, "rain", "89abcdef01234567");
+    let error = recorded_model_version(&fixture.local).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("disagree"), "{text}");
+    assert!(text.contains("model version"), "{text}");
+    assert!(text.contains("record"), "{text}");
+    assert!(text.contains("source"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn without_record_or_source_the_recorded_model_version_is_absent() {
+    let fixture = remote_fetched_study("lhs");
+    std::fs::remove_file(fixture.local.join(RECORD)).unwrap();
+    // fixture 默认没有 SOURCE；连同证据一起清掉，模拟一份从未取回的本地研究。
+    let _ = std::fs::remove_file(fixture.local.join(SOURCE));
+    assert_eq!(recorded_model_version(&fixture.local).unwrap(), None);
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
 #[test]
 fn a_persisted_source_must_match_its_fetch_evidence() {
     let fixture = remote_fetched_study("lhs");

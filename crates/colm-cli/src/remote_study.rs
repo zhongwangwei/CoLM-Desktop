@@ -203,23 +203,76 @@ impl RecordedModelVersion {
     }
 }
 
-/// 从本机研究目录的 remote record 还原版本身份；没有记录时 `Ok(None)`。
+/// 从本机研究目录还原版本身份：活动记录优先，归档后读持久来源；两者都没有时 `Ok(None)`。
 ///
-/// 与 `study-compare` 的版本身份解析同一套逻辑：只读本地文件，不校验/初始化 SSH 凭据，
-/// 不连服务器。坏 JSON、缺字段、不支持的 kind 都返回错误，让调用方明确报 unknown。
+/// 为什么不能只读活动记录：GUI 的“归档”只把 `.colm-remote-study.json` 改名留档；
+/// `.colm-remote-study-source.json` 是取回核验通过时随证据一起写下的，原位保留。归档后若仍只读
+/// 活动记录，`study-compare` 会把修改版研究退回“官方版”，证据页会报 unknown。
+///
+/// 与 `study-compare` 的版本身份解析同一套逻辑：只读本地文件，不校验/初始化 SSH 凭据（记录里
+/// 可能记着 password 认证设置，读身份不是 SSH 操作），不连服务器。坏 JSON、缺字段、不支持的
+/// kind 都返回错误，让调用方明确报 unknown。
+///
+/// 两条路径同时存在时必须描述同一个作业与同一份模型版本身份：来源可能是上一次取回残留的，
+/// 拿错一个就会把另一台服务器/另一个作业的修订算到这份研究上。这里只核对身份字段；写回版本前
+/// 的完整核验（证据哈希、服务器目录与冻结输入）仍由 `read_source` 负责。
 pub(crate) fn recorded_model_version(study_dir: &Path) -> Result<Option<RecordedModelVersion>> {
+    let record = optional_record(study_dir)?;
+    let source = optional_source(study_dir)?;
+    let provenance = match (record, source) {
+        (None, None) => return Ok(None),
+        (Some(record), None) => record.provenance,
+        (None, Some(source)) => {
+            return RecordedModelVersion::from_provenance(&source.provenance)
+                .context("the persisted remote Study source cannot establish the model version")
+                .map(Some)
+        }
+        (Some(record), Some(source)) => {
+            ensure_source_matches_record(&record, &source)
+                .context("cannot establish this Study's remote model version")?;
+            ensure!(
+                record.provenance.get("version") == source.provenance.get("version"),
+                "the active remote Study record and its persisted source disagree about the model \
+                 version; restore the record that belongs to this fetch or fetch the Study again"
+            );
+            record.provenance
+        }
+    };
+    RecordedModelVersion::from_provenance(&provenance).map(Some)
+}
+
+fn optional_record(study_dir: &Path) -> Result<Option<StudyRecord>> {
     let path = study_dir.join(RECORD);
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("cannot inspect captured remote Study version"),
     }
-    // 记录里可能记着 password 认证设置；读身份不是 SSH 操作，不能因此要求凭据。
-    let record: StudyRecord = serde_json::from_str(
+    let record = serde_json::from_str(
         &std::fs::read_to_string(&path).context("cannot read captured remote Study version")?,
     )
     .context("cannot parse captured remote Study version")?;
-    RecordedModelVersion::from_provenance(&record.provenance).map(Some)
+    Ok(Some(record))
+}
+
+/// 读持久来源的版本身份。这里只验证来源自身的身份字段并确认它属于这份本机研究；不读
+/// evidence，因为比较页只需要版本，而源文件在归档后是唯一入口。
+fn optional_source(study_dir: &Path) -> Result<Option<StudySource>> {
+    let path = study_dir.join(SOURCE);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("cannot inspect the persisted remote Study source")
+        }
+    }
+    let source: StudySource = serde_json::from_slice(
+        &std::fs::read(&path).context("cannot read the persisted remote Study source")?,
+    )
+    .context("cannot parse the persisted remote Study source")?;
+    check_source_shape(&source)?;
+    ensure_source_belongs_to(&source, study_dir)?;
+    Ok(Some(source))
 }
 
 pub(crate) fn read_record(study_dir: &Path) -> Result<StudyRecord> {
@@ -313,6 +366,60 @@ fn write_study_source(
     Ok(())
 }
 
+/// 来源自身的形状：schema、服务器位置、引擎与调度字段。读身份和写回核验共用；
+/// 不碰 SSH 凭据（比较页在 GUI 里读身份时没有凭据，也不该为了读一个名字要求密码）。
+fn check_source_shape(source: &StudySource) -> Result<()> {
+    ensure!(
+        source.schema == 1,
+        "unsupported persisted remote Study source schema"
+    );
+    check_study_location(
+        &source.host,
+        &source.root,
+        &source.job,
+        &source.remote_project,
+    )?;
+    job::check_id(&source.engine)?;
+    ensure!(
+        matches!(source.scheduler.as_str(), "bare" | "slurm" | "pbs" | "lsf"),
+        "invalid recorded scheduler in the persisted remote Study source"
+    );
+    ensure!(
+        source.scheduler == "bare"
+            || source
+                .scheduler_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty()),
+        "recorded scheduler job ID is missing from the persisted remote Study source"
+    );
+    Ok(())
+}
+
+/// 来源必须属于这份本机研究：来源是普通 JSON，复制到另一份研究目录后仍然能解析，
+/// 不核对本机路径与研究编号就会把别人的历史当成自己的。
+fn ensure_source_belongs_to(source: &StudySource, study_dir: &Path) -> Result<()> {
+    let study = colm_kernel::manifest::absolute(study_dir)
+        .with_context(|| format!("cannot resolve Study directory {}", study_dir.display()))?;
+    let recorded = colm_kernel::manifest::absolute(Path::new(&source.local_study))
+        .context("cannot resolve the local Study recorded in the persisted remote Study source")?;
+    ensure!(
+        recorded == study,
+        "the persisted remote Study source belongs to another local Study"
+    );
+    ensure!(
+        study.file_name().and_then(|name| name.to_str()) == Some(source.study_id.as_str()),
+        "the persisted remote Study source belongs to another Study identity"
+    );
+    ensure!(
+        study_under_project(
+            &source.remote_study,
+            std::slice::from_ref(&source.remote_project)
+        ),
+        "the persisted remote Study root is outside its recorded project"
+    );
+    Ok(())
+}
+
 /// 读持久来源并把它与当前本机清单、那份取回证据交叉核对，重建出可复用的记录。
 ///
 /// 不能只看来源自洽：来源是普通 JSON，归档后它成了唯一入口。必须确认它属于这份本机研究、
@@ -329,45 +436,10 @@ fn read_source(
         )
     })?)
     .context("cannot parse the persisted remote Study source")?;
-    ensure!(
-        source.schema == 1,
-        "unsupported persisted remote Study source schema"
-    );
-    check_study_location(
-        &source.host,
-        &source.root,
-        &source.job,
-        &source.remote_project,
-    )?;
-    job::check_id(&source.engine)?;
+    check_source_shape(&source)?;
+    // 写回要连服务器；记录里的 password 认证要求调用方先把凭据放进本进程。
     colm_remote::auth::check_connection(source.ssh_auth.as_ref())?;
-    ensure!(
-        matches!(source.scheduler.as_str(), "bare" | "slurm" | "pbs" | "lsf"),
-        "invalid recorded scheduler in the persisted remote Study source"
-    );
-    ensure!(
-        source.scheduler == "bare"
-            || source
-                .scheduler_id
-                .as_deref()
-                .is_some_and(|id| !id.is_empty()),
-        "recorded scheduler job ID is missing from the persisted remote Study source"
-    );
-    ensure!(
-        Path::new(&source.local_study) == Path::new(&manifest.root),
-        "the persisted remote Study source belongs to another local Study"
-    );
-    ensure!(
-        source.study_id == manifest.id,
-        "the persisted remote Study source belongs to another Study identity"
-    );
-    ensure!(
-        study_under_project(
-            &source.remote_study,
-            std::slice::from_ref(&source.remote_project)
-        ),
-        "the persisted remote Study root is outside its recorded project"
-    );
+    ensure_source_belongs_to(&source, study_dir)?;
     let evidence_path = study_dir.join(EVIDENCE);
     let evidence_bytes = std::fs::read(&evidence_path).with_context(|| {
         format!(
