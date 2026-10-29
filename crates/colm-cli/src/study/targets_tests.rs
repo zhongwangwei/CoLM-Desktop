@@ -212,6 +212,180 @@ fn domain_means_weight_land_area_and_skip_ocean_cells() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 改动前 `domain_mean_series` 的整场读法：`read_file_1d` 读完整月再 `chunks`。
+/// 只作为逐位对照的参考实现留在测试里，生产代码已经改成逐条记录读。
+fn whole_field_domain_means(case: &Path, variable: &str) -> (Vec<i64>, Vec<f64>) {
+    let files = history_files(case).unwrap();
+    let stream = crate::files_with_variables(&files, &[variable]).unwrap();
+    let first = netcdf::open(&stream[0]).unwrap();
+    let weights = crate::read_file_1d(&first, &stream[0], "landarea").unwrap();
+    drop(first);
+    let mut times = Vec::new();
+    let mut values = Vec::new();
+    for path in &stream {
+        let file = netcdf::open(path).unwrap();
+        let minutes = crate::read_file_1d(&file, path, "time").unwrap();
+        let field = crate::read_file_1d(&file, path, variable).unwrap();
+        times.extend(colm_hist::time::unix_seconds(&minutes));
+        for record in field.chunks(weights.len()) {
+            let (mut sum, mut area) = (0.0, 0.0);
+            for (value, weight) in record.iter().zip(&weights) {
+                if value.is_finite() && weight.is_finite() && *weight > 0.0 {
+                    sum += value * weight;
+                    area += weight;
+                }
+            }
+            values.push(if area > 0.0 { sum / area } else { f64::NAN });
+        }
+    }
+    (times, values)
+}
+
+/// #13：模型格点场必须在解码前按时间窗丢掉整条记录。旧实现先用
+/// `read_file_1d` 把整月场读成 `Vec<f64>` 再 `chunks` 过滤；这里用可注入的读取统计
+/// 确认新实现只解码窗口内那一条，而不是"读了再丢"。
+#[test]
+fn model_grid_reads_only_records_inside_the_window() {
+    let root = scratch("grid-records");
+    // 窗口外那两条故意给极大值：旧实现会把它们读进内存再丢掉，新实现根本不解码。
+    let case = gridded_case(&root, |day, row, column| {
+        if day == 0 {
+            1.0e30
+        } else {
+            (10 * day + 2 * row + column) as f64
+        }
+    });
+    let window = (JAN1 + DAY, JAN1 + 2 * DAY);
+    let mut stats = crate::RecordReadStats::default();
+    let model = ModelGrid::read_counted(&case, "f_lfevpa", TargetPeriod::Daily, window, &mut stats)
+        .unwrap();
+    assert_eq!(stats.records, 1, "只有窗口内那一条记录被解码");
+    assert_eq!(
+        stats.values, 4,
+        "一条记录只有 2×2 个值，而不是整个文件的 3×2×2"
+    );
+    assert_eq!(
+        stats.max_record_values, 4,
+        "单次解码的规模必须是一条记录，不是整场"
+    );
+    assert_eq!(
+        model.means.keys().copied().collect::<Vec<_>>(),
+        vec![JAN1 + DAY]
+    );
+    let means = model.means[&(JAN1 + DAY)]
+        .iter()
+        .map(PeriodAggregate::mean)
+        .collect::<Vec<_>>();
+    assert_eq!(means, [10.0, 11.0, 12.0]);
+    // 完整时间轴仍要读：覆盖率分母来自完整轴，不能因为跳读记录就把步长算错。
+    assert_eq!(model.step, Some(DAY));
+
+    // 完全在窗外：一条都不解码，步长也不能因此变成未知。
+    let mut empty = crate::RecordReadStats::default();
+    let outside = ModelGrid::read_counted(
+        &case,
+        "f_lfevpa",
+        TargetPeriod::Daily,
+        (JAN1 + 10 * DAY, JAN1 + 12 * DAY),
+        &mut empty,
+    )
+    .unwrap();
+    assert_eq!(empty.records, 0);
+    assert!(outside.means.is_empty());
+    assert_eq!(outside.step, Some(DAY));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #13：全区平均同样逐条读、在线累积（输出本身要覆盖整个文件，不能跳读）。
+/// 统计证明单次解码的规模是一条记录；数值与旧实现逐位相同。
+#[test]
+fn domain_means_read_one_record_at_a_time_and_match_the_whole_field_algorithm() {
+    let root = scratch("mean-records");
+    let case = gridded_case(&root, |day, row, column| (day + 2 * row + column) as f64);
+    let mut stats = crate::RecordReadStats::default();
+    let (time, values, units) = domain_mean_series_counted(&case, "f_lfevpa", &mut stats)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats.records, 3);
+    assert_eq!(stats.values, 12);
+    assert_eq!(
+        stats.max_record_values, 4,
+        "必须一次一条记录，不能一次读整月"
+    );
+    assert_eq!(units, None);
+
+    let (reference_time, reference_values) = whole_field_domain_means(&case, "f_lfevpa");
+    assert_eq!(time, reference_time);
+    assert_eq!(values, reference_values, "逐条累积不得改变任何一位");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #13：逐条读取也要保留旧 `read_file_1d` 的 `_FillValue` → NaN 转换，
+/// 否则缺测会被当成 -9999 进入平均。
+#[test]
+fn history_missing_markers_stay_missing_when_read_as_records() {
+    let root = scratch("grid-markers");
+    let case = root.join("case");
+    let history = case.join("out/grid/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'grid'\n/\n",
+    )
+    .unwrap();
+    let mut file = netcdf::create(history.join("grid_hist_2003-01.nc")).unwrap();
+    file.add_unlimited_dimension("time").unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 1).unwrap();
+    let put = |file: &mut netcdf::FileMut, name: &str, dims: &[&str], data: &[f64]| {
+        file.add_variable::<f64>(name, dims)
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    };
+    put(&mut file, "lat", &["lat"], &[10.5]);
+    put(&mut file, "lon", &["lon"], &[100.5]);
+    put(&mut file, "lat_s", &["lat"], &[10.0]);
+    put(&mut file, "lat_n", &["lat"], &[11.0]);
+    put(&mut file, "lon_w", &["lon"], &[100.0]);
+    put(&mut file, "lon_e", &["lon"], &[101.0]);
+    put(&mut file, "landarea", &["lat", "lon"], &[1.0]);
+    let mut time = file.add_variable::<i32>("time", &["time"]).unwrap();
+    time.put_values(
+        &[
+            model_minutes(JAN1 + DAY) as i32,
+            model_minutes(JAN1 + 2 * DAY) as i32,
+        ],
+        ..,
+    )
+    .unwrap();
+    let mut field = file
+        .add_variable::<f64>("f_lfevpa", &["time", "lat", "lon"])
+        .unwrap();
+    field.put_attribute("_FillValue", -9999.0).unwrap();
+    field.put_values(&[-9999.0, 5.0], ..).unwrap();
+
+    let window = (JAN1, JAN1 + 2 * DAY);
+    let mut stats = crate::RecordReadStats::default();
+    let model = ModelGrid::read_counted(&case, "f_lfevpa", TargetPeriod::Daily, window, &mut stats)
+        .unwrap();
+    assert_eq!(stats.records, 2);
+    assert_eq!(
+        model.means[&JAN1][0].count, 0,
+        "_FillValue 不能变成 -9999 参与平均"
+    );
+    assert_eq!(model.means[&(JAN1 + DAY)][0].count, 1);
+    assert_eq!(model.means[&(JAN1 + DAY)][0].mean(), 5.0);
+
+    let mut mean_stats = crate::RecordReadStats::default();
+    let (_, values, _) = domain_mean_series_counted(&case, "f_lfevpa", &mut mean_stats)
+        .unwrap()
+        .unwrap();
+    assert!(values[0].is_nan(), "缺测记录不能参与全区平均");
+    assert_eq!(values[1], 5.0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn gauge_text_files_are_read_by_day_and_skip_headers() {
     let root = scratch("gauge");
@@ -506,6 +680,72 @@ fn gauge_csv_keeps_empty_columns_and_treats_missing_codes_as_missing() {
     assert!(values[1].is_nan(), "-9999 是缺测码");
     assert!((values[2] - 5.0).abs() < 1e-12);
     assert!(values[3].is_nan(), "NA 是缺测码");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #14：缺测码必须按数值判，不能按字符串精确匹配。同一个 -9999 有 `-9999.00`、
+/// `-9999.000`、`-9.999e3` 等写法；按字符串匹配时它们会被当成有限值进入指标。
+#[test]
+fn gauge_missing_codes_are_recognised_by_value_not_spelling() {
+    for text in [
+        "-9999",
+        "-9999.0",
+        "-9999.00",
+        "-9999.000",
+        "-9.999e3",
+        "-999",
+        "-999.0",
+        "-999.9",
+        "nan",
+        "NaN",
+        "na",
+        "N/A",
+        "null",
+        "",
+        "   ",
+    ] {
+        assert!(parse_gauge_value(text).is_nan(), "{text:?} 应判为缺测");
+    }
+    // 正常值（含 0、1.5、-50）以及"接近但不是缺测码"的值都不能被误杀。
+    for (text, expected) in [
+        ("0", 0.0),
+        ("1.5", 1.5),
+        ("-50", -50.0),
+        ("  42.25  ", 42.25),
+        ("-9998.99", -9998.99),
+    ] {
+        let value = parse_gauge_value(text);
+        assert!(value.is_finite(), "{text:?} 是有效值");
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "{text:?}: 期望 {expected}，实际 {value}"
+        );
+    }
+}
+
+/// #14 端到端：CSV 里这些浮点写法的缺测码都要变成 NaN，正常值与它们混排时不受影响。
+#[test]
+fn gauge_csv_missing_codes_in_float_formats_stay_missing() {
+    let root = scratch("gauge-csv-formats");
+    let csv = root.join("gauge.csv");
+    std::fs::write(
+        &csv,
+        "date,discharge\n\
+         2003-01-01,-9999.00\n\
+         2003-01-02,-9.999e3\n\
+         2003-01-03,-999.0\n\
+         2003-01-04,-9999.000\n\
+         2003-01-05,0\n\
+         2003-01-06,1.5\n\
+         2003-01-07,-50\n",
+    )
+    .unwrap();
+    let (time, values) = read_gauge(&csv, None).unwrap();
+    assert_eq!(time.len(), 7);
+    assert!(values[..4].iter().all(|value| value.is_nan()));
+    assert_eq!(values[4], 0.0);
+    assert_eq!(values[5], 1.5);
+    assert_eq!(values[6], -50.0);
     std::fs::remove_dir_all(root).unwrap();
 }
 

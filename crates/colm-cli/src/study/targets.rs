@@ -426,6 +426,18 @@ pub(super) fn gauge_pairs(case: &Path, target: &TargetSpec, window: Window) -> R
 /// 不确定性分析在格点算例上的输出：每个时刻全区按陆地面积（`landarea`）加权的平均。
 /// 变量不是 `time × lat × lon` 的格点场时返回 `None`（交给原来的标量读法）。
 pub(super) fn domain_mean_series(case: &Path, variable: &str) -> Result<Option<DomainSeries>> {
+    domain_mean_series_counted(case, variable, &mut crate::RecordReadStats::default())
+}
+
+/// [`domain_mean_series`] 的逐记录版本；`stats` 供测试确认单次解码的规模是一条记录。
+///
+/// 旧实现先 `read_file_1d` 把整月场读成 `Vec<f64>` 再按格子 `chunks`：全球逐时
+/// 1800×3600×744×8 B ≈ 38.6 GB/月，直接 OOM。这里在线累积，每条记录算完即可丢弃。
+fn domain_mean_series_counted(
+    case: &Path,
+    variable: &str,
+    stats: &mut crate::RecordReadStats,
+) -> Result<Option<DomainSeries>> {
     let files = history_files(case)?;
     let stream = crate::files_with_variables(&files, &[variable])?;
     let first =
@@ -448,23 +460,44 @@ pub(super) fn domain_mean_series(case: &Path, variable: &str) -> Result<Option<D
     for path in &stream {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let minutes = crate::read_file_1d(&file, path, "time")?;
-        let field = crate::read_file_1d(&file, path, variable)?;
-        ensure!(
-            !weights.is_empty() && field.len() == minutes.len() * weights.len(),
-            "{variable} in {} does not match its land-area grid",
-            path.display()
-        );
-        times.extend(colm_hist::time::unix_seconds(&minutes));
-        for record in field.chunks(weights.len()) {
-            let (mut sum, mut area) = (0.0, 0.0);
-            for (value, weight) in record.iter().zip(&weights) {
-                if value.is_finite() && weight.is_finite() && *weight > 0.0 {
-                    sum += value * weight;
-                    area += weight;
-                }
-            }
-            values.push(if area > 0.0 { sum / area } else { f64::NAN });
+        // 旧实现用 `field.len()` 挡格点不匹配；逐条读没有整场长度，改为核对各维长度。
+        {
+            let field = file
+                .variable(variable)
+                .with_context(|| format!("{} has no variable {variable}", path.display()))?;
+            let lengths = field
+                .dimensions()
+                .iter()
+                .map(|dim| dim.len())
+                .collect::<Vec<_>>();
+            ensure!(
+                !weights.is_empty()
+                    && lengths.len() == 3
+                    && lengths[0] == minutes.len()
+                    && lengths[1] * lengths[2] == weights.len(),
+                "{variable} in {} does not match its land-area grid",
+                path.display()
+            );
         }
+        let file_stats = crate::read_file_records(
+            &file,
+            path,
+            variable,
+            |_| true,
+            |_, record| {
+                let (mut sum, mut area) = (0.0, 0.0);
+                for (value, weight) in record.iter().zip(&weights) {
+                    if value.is_finite() && weight.is_finite() && *weight > 0.0 {
+                        sum += value * weight;
+                        area += weight;
+                    }
+                }
+                values.push(if area > 0.0 { sum / area } else { f64::NAN });
+                Ok(())
+            },
+        )?;
+        stats.merge(file_stats);
+        times.extend(colm_hist::time::unix_seconds(&minutes));
     }
     Ok(Some((times, values, units)))
 }
@@ -588,7 +621,30 @@ struct ModelGrid {
 }
 
 impl ModelGrid {
-    fn read(case: &Path, variable: &str, period: TargetPeriod, (from, to): Window) -> Result<Self> {
+    fn read(case: &Path, variable: &str, period: TargetPeriod, window: Window) -> Result<Self> {
+        Self::read_counted(
+            case,
+            variable,
+            period,
+            window,
+            &mut crate::RecordReadStats::default(),
+        )
+    }
+
+    /// [`ModelGrid::read`] 的可观察版本：`stats` 记下每个文件实际解码了多少条记录。
+    ///
+    /// 为什么逐条读：旧实现先 `read_file_1d` 把整月场读成 `Vec<f64>` 再
+    /// `chunks(rows*columns)` 过滤；1800×3600×744×8 B ≈ 38.6 GB/月，全球逐时输出
+    /// 直接 OOM。现在 `keep` 在解码前按时间窗丢掉整条记录，只有窗口内的记录进内存。
+    /// `all_times` 仍读完整时间轴：覆盖率的分母必须由完整轴估计，不能用跳读后的
+    /// 记录反推。
+    fn read_counted(
+        case: &Path,
+        variable: &str,
+        period: TargetPeriod,
+        (from, to): Window,
+        stats: &mut crate::RecordReadStats,
+    ) -> Result<Self> {
         let files = history_files(case)?;
         let stream = crate::files_with_variables(&files, &[variable])?;
         let first = netcdf::open(&stream[0])
@@ -633,31 +689,46 @@ impl ModelGrid {
             let file =
                 netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
             let minutes = crate::read_file_1d(&file, path, "time")?;
-            let field = crate::read_file_1d(&file, path, variable)?;
-            ensure!(
-                field.len() == minutes.len() * rows * columns,
-                "{variable} in {} does not match its grid",
-                path.display()
-            );
             let times = colm_hist::time::unix_seconds(&minutes);
             all_times.extend(times.iter().copied());
-            for (end, record) in times.into_iter().zip(field.chunks(rows * columns)) {
-                // history 的时间是时段末；归段与样本时刻都按"时段末减 1 秒"统一。
-                let end = end - 1;
-                let start = period_start(end, period);
-                if start < from || start >= to {
-                    continue;
-                }
-                let slot = sums
-                    .entry(start)
-                    .or_insert_with(|| vec![PeriodAggregate::default(); cells.len()]);
-                for (index, (row, column)) in cells.iter().enumerate() {
-                    let value = record[row * columns + column];
-                    if value.is_finite() {
-                        slot[index].add(value, end - start);
-                    }
-                }
+            // 旧实现靠 `field.len()` 挡格点不匹配；逐条读没有整场长度可用，
+            // 改为核对每个文件的各维长度，报错信息保持不变。
+            {
+                let field = file
+                    .variable(variable)
+                    .with_context(|| format!("{} has no variable {variable}", path.display()))?;
+                let lengths = field
+                    .dimensions()
+                    .iter()
+                    .map(|dim| dim.len())
+                    .collect::<Vec<_>>();
+                ensure!(
+                    lengths == [minutes.len(), rows, columns],
+                    "{variable} in {} does not match its grid",
+                    path.display()
+                );
             }
+            let keep = |index: usize| {
+                let start = period_start(times[index] - 1, period);
+                start >= from && start < to
+            };
+            let file_stats =
+                crate::read_file_records(&file, path, variable, keep, |index, record| {
+                    // history 的时间是时段末；归段与样本时刻都按"时段末减 1 秒"统一。
+                    let end = times[index] - 1;
+                    let start = period_start(end, period);
+                    let slot = sums
+                        .entry(start)
+                        .or_insert_with(|| vec![PeriodAggregate::default(); cells.len()]);
+                    for (slot_index, (row, column)) in cells.iter().enumerate() {
+                        let value = record[row * columns + column];
+                        if value.is_finite() {
+                            slot[slot_index].add(value, end - start);
+                        }
+                    }
+                    Ok(())
+                })?;
+            stats.merge(file_stats);
         }
         Ok(Self {
             cells,
@@ -939,18 +1010,37 @@ fn read_gauge_text(path: &Path) -> Result<(Vec<i64>, Vec<f64>)> {
     Ok((time, values))
 }
 
-/// 文本流量值：空字段与常见缺测码一律当缺测，不当 0 或 -9999 参与指标。
+/// 文本流量值：空字段、`nan/na/n/a/null` 与常见缺测码一律当缺测，不当 0 或 -9999 参与指标。
+///
+/// 缺测码必须按**数值**判，不能按字符串精确匹配：`-9999.00`、`-9999.000`、`-9.999e3`、
+/// `-999.0` 都是同一个缺测值的不同写法，旧实现只匹配字面量 `-9999`/`-9999.0` 等，
+/// 这些写法会被当成有限的 -9999/-999 进入指标。先 `parse::<f64>()` 再按数值比较，
+/// 浮点比较带相对容差，避免十进制表示误差漏判。
 fn parse_gauge_value(text: &str) -> f64 {
     let text = text.trim();
     if text.is_empty()
         || matches!(
             text.to_ascii_lowercase().as_str(),
-            "-9999" | "-9999.0" | "-999" | "-999.9" | "nan" | "na" | "n/a" | "null"
+            "nan" | "na" | "n/a" | "null"
         )
     {
         return f64::NAN;
     }
-    text.parse::<f64>().unwrap_or(f64::NAN)
+    let Ok(value) = text.parse::<f64>() else {
+        return f64::NAN;
+    };
+    if !value.is_finite() || is_gauge_missing_code(value) {
+        return f64::NAN;
+    }
+    value
+}
+
+/// 流量文件的缺测码：-9999、-999、-999.9。用相对容差而不是 `==`，
+/// 让 `-9999.0000000001` 这类写法也按缺测处理，同时不误伤 -9998.99。
+fn is_gauge_missing_code(value: f64) -> bool {
+    [-9999.0, -999.0, -999.9]
+        .into_iter()
+        .any(|sentinel| (value - sentinel).abs() < 1e-9 * sentinel.abs().max(1.0))
 }
 
 /// `YYYY-MM-DD`、`YYYY/MM/DD`，可带 ` HH:MM[:SS]` 或 `THH:MM[:SS]`、可带时区后缀。

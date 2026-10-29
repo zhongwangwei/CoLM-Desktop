@@ -6228,6 +6228,88 @@ fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
     Ok(values)
 }
 
+/// 逐条记录读取时实际解码了多少数据。只给测试观察"窗口外的记录有没有被解码 /
+/// 每次解码的规模"，不测内存占用（分配器行为不稳定，不能当断言）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecordReadStats {
+    /// 真正解码的记录数。
+    pub records: usize,
+    /// 真正解码的元素总数。
+    pub values: usize,
+    /// 单次解码的最大元素数：等于一条时间记录的长度，而不是整月的场。
+    pub max_record_values: usize,
+}
+
+impl RecordReadStats {
+    /// 跨多个 history 文件累计。
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.records += other.records;
+        self.values += other.values;
+        self.max_record_values = self.max_record_values.max(other.max_record_values);
+    }
+}
+
+/// 逐条记录读取一个以时间作第一维的变量，把每条记录交给 `visit`。
+///
+/// 为什么不能 `get_values::<f64, _>(..)`：全球逐时 history 一个月是
+/// 1800×3600×744×8 B ≈ 38.6 GB，整月一次解码直接 OOM。这里每次只把一条记录读进
+/// 复用的 buffer；`keep` 在解码**之前**筛记录，窗口外的记录连 `_FillValue` 转换
+/// 都不做。`read_file_1d` 保留给真正的小变量（时间轴、经纬度、landarea）。
+///
+/// 调用方保证第一维是时间（本函数的记录下标就是该维下标）。
+pub(crate) fn read_file_records<K, F>(
+    f: &netcdf::File,
+    path: &Path,
+    name: &str,
+    mut keep: K,
+    mut visit: F,
+) -> Result<RecordReadStats>
+where
+    K: FnMut(usize) -> bool,
+    F: FnMut(usize, &[f64]) -> Result<()>,
+{
+    let variable = f
+        .variable(name)
+        .with_context(|| format!("{} has no variable {name}", path.display()))?;
+    let dims = variable.dimensions();
+    let Some(time) = dims.first() else {
+        bail!("{name} in {} has no dimensions", path.display());
+    };
+    let records = time.len();
+    // 一条记录的长度：除时间维以外各维长度的乘积。不要乘上时间维，
+    // 否则又变成整场读取。
+    let record_values = dims[1..].iter().map(|dim| dim.len()).product::<usize>();
+    let markers = variable_missing_markers(&variable);
+    let mut stats = RecordReadStats::default();
+    // 窗口完全落在文件外时不必为一条记录分配 buffer。
+    let mut buffer: Option<Vec<f64>> = None;
+    for index in 0..records {
+        if !keep(index) {
+            continue;
+        }
+        let record = buffer.get_or_insert_with(|| vec![0.0; record_values]);
+        // 用 `Extent::Index` 把时间维钉在一条记录上，其余维全取。
+        let mut extents = Vec::with_capacity(dims.len());
+        extents.push(netcdf::Extent::Index(index));
+        extents.extend(dims[1..].iter().map(|_| netcdf::Extent::from(..)));
+        variable.get_values_into(record, extents).with_context(|| {
+            format!("cannot read {name} record {index} from {}", path.display())
+        })?;
+        for value in record.iter_mut() {
+            // 与 `read_file_1d` 一致：只把缺测标记换成 NaN，Inf 留给调用方按
+            // `is_finite` 判掉（两者的终值处理规则相同）。
+            if markers.contains(value) {
+                *value = f64::NAN;
+            }
+        }
+        stats.records += 1;
+        stats.values += record_values;
+        stats.max_record_values = stats.max_record_values.max(record_values);
+        visit(index, record)?;
+    }
+    Ok(stats)
+}
+
 fn cmd_forcing_table_probe(file: &Path, json: bool) -> Result<()> {
     let probe = colm_forcing::probe_table(file)?;
     if json {
