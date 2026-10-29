@@ -464,6 +464,10 @@ CONTAINS
       ENDIF
 ! ==== FIX 2026-08-16 #4b END ====
 
+! (Upstream's FIX #4b set these only for ozone-off runs; the unconditional
+!  initialisation above covers both branches.)
+
+      fht  = 0.     !integral of profile function for heat
       fht  = 0.     !integral of profile function for heat
       fqt  = 0.     !integral of profile function for moisture
 

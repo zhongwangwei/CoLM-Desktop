@@ -115,6 +115,7 @@ CONTAINS
    USE MOD_Precision
    USE MOD_Vars_Global
    USE MOD_Const_PFT
+   USE MOD_Ozone, only: ozone_pft_of_lct
    USE MOD_Const_Physical, only: denh2o,roverg,hvap,hsub,rgas,cpair,&
                                  stefnc,denice,tfrz,vonkar,grav,cpliq,cpice
    USE MOD_FrictionVelocity
@@ -744,7 +745,7 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
          rstfacsun_out = rstfac
          rstfacsha_out = rstfac
 
-         CALL LeafTemperature(ipatch,1,deltim,csoilc   ,dewmx       ,htvp        ,&
+         CALL LeafTemperature(ipatch,ozone_pft_of_lct(patchclass(ipatch)),deltim,csoilc   ,dewmx       ,htvp        ,&
                  lai         ,sai         ,htop        ,hbot        ,sqrtdi      ,&
                  effcon      ,vmax25      ,c3c4        ,slti        ,hlti        ,shti        ,&
                  hhti        ,trda        ,trdm        ,trop        ,g1          ,&
@@ -1059,6 +1060,9 @@ ENDIF
       ENDDO
 
       ! Calculate end index of natrue PFTs
+      ! FIX upstream-bugs #4: pn 只在循环里赋值，ps > pe 时未定义，下面
+      ! `DEF_USE_PC .and. pn.ge.ps` 读到的是未初始化内存。
+      pn = ps - 1
       DO i = ps, pe
          pn = i
          p = pftclass(i)
@@ -1086,7 +1090,33 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
       etrsha_p   (ps:pe) = 0.
       gssun_p    (ps:pe) = 0.
       gssha_p    (ps:pe) = 0.
+! ==== FIX 2026-08-16: initialize pft-loop arrays that the PC path skips ====
+! For LULC_IGBP_PC cases the pft loop above is skipped by CYCLE, so rootflux_p,
+! rootr_p, etrc_p, rstfac_p (and their sun/sha copies) were never assigned before
+! being passed into LeafTemperaturePC -> uninitialized heap memory entered the
+! plant-hydraulics solver. Initialize them explicitly.
+! ==== FIX 2026-08-16 BEGIN: initialize pft-loop arrays that the PC path skips ====
+! For LULC_IGBP_PC cases, the pft loop above is skipped by CYCLE, so rootflux_p,
+! rootr_p, etrc_p, rstfac_p (and their sun/sha copies) were NEVER assigned before
+! being passed into LeafTemperaturePC -> uninitialized heap memory entered the
+! plant-hydraulics solver, causing run-dependent (case-dependent) tiny differences
+! in canopy fluxes (ulrad/olrg ~1e-5 W/m2). Initialize them explicitly.
+      rootflux_p (:,ps:pe) = 0.
+      rootflux_p (:,ps:pe) = 0.
+      rootr_p    (:,ps:pe) = 0.
+      etrc_p       (ps:pe) = 0.
+      rstfac_p     (ps:pe) = 1.
+      rstfacsun_p  (ps:pe) = 1.
+      rstfacsha_p  (ps:pe) = 1.
+      fsun_p(ps:pe) = (1. - exp(-min(extkb_p(ps:pe)*lai_p(ps:pe),40.))) &
+                    / max(min(extkb_p(ps:pe)*lai_p(ps:pe),40.), 1.e-6)
+      DO i = ps, pe
+         IF (coszen<=0.0 .or. sabv_p(i)<1.) fsun_p(i) = 0.5
+      ENDDO
 
+! ==== FIX 2026-08-16 END ====
+
+      fcover     (ps:pe) = pftfrac(ps:pe) / sum(pftfrac(ps:pe))
       fcover     (ps:pe) = pftfrac(ps:pe) / sum(pftfrac(ps:pe))
       z0m_p      (ps:pe) = (1.-fsno)*zlnd + fsno*zsno
       z0m                = sum( z0m_p (ps:pe)*pftfrac(ps:pe) )

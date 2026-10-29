@@ -79,6 +79,11 @@ CONTAINS
             allocate (forc_prl    (numpatch) ) ! large scale precipitation [mm/s]
             allocate (forc_rain   (numpatch) ) ! rain [mm/s]
             allocate (forc_snow   (numpatch) ) ! snow [mm/s]
+            ! FIX upstream-bugs #47: forc_rain/forc_snow 只由 CoLMMAIN 逐 patch 写，
+            ! 被 forc mask 遮住的 patch 从不执行，accumulate_fluxes 会把未初始化内存
+            ! 累加进 a_rain/a_snow。从 0 开始。
+            forc_rain(:) = 0._r8
+            forc_snow(:) = 0._r8
             allocate (forc_psrf   (numpatch) ) ! atmospheric pressure at the surface [pa]
             allocate (forc_pbot   (numpatch) ) ! atm bottom level pressure (or reference height) (pa)
 #ifdef HYPERSPECTRAL
@@ -95,6 +100,10 @@ CONTAINS
             allocate (forc_hgt_q  (numpatch) ) ! observational height of humidity [m]
             allocate (forc_rhoair (numpatch) ) ! air density [kg/m3]
             allocate (forc_ozone  (numpatch) ) ! air density [kg/m3]
+            ! FIX upstream-bugs #70: 不开 DEF_USE_OZONEDATA 时 forc_ozone 只由某个
+            ! patch 第一次 CalcOzoneStress 赋值，而 acc1d(forc_ozone, a_ozone) 每步每个
+            ! patch 都跑。从 spval 开始，让 acc1d 跳过从没跑过 LeafTemperature 的 patch。
+            forc_ozone(:) = spval
 
             allocate (forc_hpbl   (numpatch) ) ! atmospheric boundary layer height [m]
 

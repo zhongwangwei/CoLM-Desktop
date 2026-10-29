@@ -1079,6 +1079,12 @@ CONTAINS
                ! (a saturated column exfiltrating to the surface); booking all of
                ! it as evaporation removed up to ~24x the host's evaporated water
                ! from the tracer pool. The rest is ordinary exfiltration.
+               ! FIX upstream-bugs #78: only the qseva deficit leaves layer 1 as
+               ! evaporation. Negative qinfl can be far larger than qseva*deltim
+               ! (a saturated column exfiltrating to the surface); booking all of
+               ! it as evaporation removed up to ~24x the host's evaporated water
+               ! from the tracer pool. The rest is ordinary exfiltration.
+               top_soil_evap_water = min(top_boundary_out_water, eff_qseva * deltim)
                top_soil_evap_water = min(top_boundary_out_water, eff_qseva * deltim)
                top_exfil_water = top_boundary_out_water - top_soil_evap_water
                   ! The host takes qseva from layer 1 before root uptake, so
@@ -1216,6 +1222,11 @@ CONTAINS
          ! evaporation (see below), but surface_base_water is built from the
          ! final wdsrf/rsur and already contains it. Leave it out of the
          ! evaporating pool too, or the evaporated tracer is diluted.
+         ! FIX upstream-bugs #79: exfiltration joins the pool only after this
+         ! evaporation (see below), but surface_base_water is built from the
+         ! final wdsrf/rsur and already contains it. Leave it out of the
+         ! evaporating pool too, or the evaporated tracer is diluted.
+         evap_base_water = surface_base_water
          evap_base_water = surface_base_water
          IF (flood_water <= 0._r8 .and. top_exfil_water > 0._r8) &
             evap_base_water = max(surface_base_water - top_exfil_water, 0._r8)

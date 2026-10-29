@@ -39604,8 +39604,20 @@ CaMaOFF BGCOFF CROPOFF MTOFF LULCCOFF` 下 `make mksrfdata.x mkinidata.x colm.x`
 **本地字段保留**：`MOD_Namelist` 以"上游新结构 + vendor 的 107 个本地字段（`DEF_LC_*`、气孔五参数、
 `DEF_USE_*` 运行时开关）"重建，手工解决 8 个冲突块并补回被拼接吞掉的 `ENDIF`。
 
+**本地修复重放（已做）**：
+- `MOD_Thermal`：`pn = ps - 1`（upstream-bugs #4）、PC 路径 pft 循环跳过的数组初始化（FIX 2026-08-16）。
+- `MOD_Ozone`：`o3coefv/o3coefg` 在 ivt 越界时给默认值（#71）、`ozone_pft_of_lct` 把 LCT 映射到最近的 PFT（#68）。
+- `MOD_Thermal` 的 `LeafTemperature` 调用改用 `ozone_pft_of_lct(patchclass(ipatch))`（#68）。
+- `MOD_Vars_1DForcing`：`forc_rain/forc_snow` 从 0 起（#47）、`forc_ozone` 从 spval 起（#70）。
+- 自动移植脚本还补进了 `MOD_LeafTemperature`、`MOD_LeafTemperaturePC`、`mkinidata/MOD_IniTimeVariable`、
+  `LULCC/MOD_Lulcc_MassEnergyConserve` 的若干 FIX 块。
+
 **已知未完成**：
-- 87 条本地物理修复（`o3coef` 初始化、`gssun` 公式、`pn` 未定义、示踪物流切片越界……）尚未按新文件位置重放；
-  `MOD_Thermal`、`MOD_LeafTemperature`、`MOD_SoilSnowHydrology` 等 16 个文件是上游原版。
-- `colm-srfdata`、`colm-bench`、`xtask`、`oracle` 的部分契约测试仍按旧结构断言，需要跟着改。
+- Material Transport 子系统的本地修复（`MOD_MT_SoilWater` 的非挥发溶质顺序、`MOD_MT_Conservation` 的
+  算子顺序、`MOD_MT_Sediment` 的双向推移质……约 15 条）**无法机械移植**：上游把这些文件整体重写，
+  旧代码的锚点在 `main/MATERIAL/` 里不存在，需要按新结构重新设计。
+- `main/MOD_SoilSnowHydrology`、`MOD_PhaseChange`、`MOD_GroundTemperature`、`COLM.F90` 的部分修复
+  仍是上游原版（脚本找不到锚点）。
+- `colm-srfdata` 与 `colm-runtime` 各有 1 个 `#[ignore]`（population rawdata、sediment grain_diameter），
+  断言待重新设计。
 

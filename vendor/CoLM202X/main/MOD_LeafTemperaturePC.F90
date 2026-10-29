@@ -548,6 +548,8 @@ CONTAINS
 #endif
       ! When there is no vegetation in this Plant Community Patch, RETURN
       IF (.not. is_vegetated_patch) THEN
+! ==== FIX 2026-10-05 #75 END ====
+         RETURN
          RETURN
       ENDIF
 

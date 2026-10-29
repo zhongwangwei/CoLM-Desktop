@@ -3324,7 +3324,7 @@ CONTAINS
    END SUBROUTINE resolve_rawdata
 
    SUBROUTINE check_lc_override(name, values, lower, upper, rule)
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE MOD_SPMD_Task
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
@@ -3341,7 +3341,7 @@ CONTAINS
    END SUBROUTINE check_lc_override
 
    SUBROUTINE check_lc_override_value(name, lc, value, lower, upper, rule)
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE MOD_SPMD_Task
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
@@ -3377,7 +3377,7 @@ CONTAINS
    END SUBROUTINE check_lc_override_value
 
    SUBROUTINE check_pft_real_override(name, values, rule)
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE MOD_SPMD_Task
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
@@ -3396,7 +3396,7 @@ CONTAINS
    END SUBROUTINE check_pft_real_override
 
    SUBROUTINE check_pft_real_value(name, idx, value, rule)
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE MOD_SPMD_Task
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
@@ -3439,7 +3439,7 @@ CONTAINS
    END SUBROUTINE check_pft_real_value
 
    SUBROUTINE check_pft_integer_override(name, values, rule)
-   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   USE MOD_SPMD_Task
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
