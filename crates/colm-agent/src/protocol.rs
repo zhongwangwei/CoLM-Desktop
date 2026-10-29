@@ -87,10 +87,14 @@ pub enum Inbound {
         retrieval: Option<crate::retrieval::RetrievalSettings>,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
+    /// `request_id`（A3）由界面生成并在 `turn_started` 里原样回显，用来确认这一轮被接受；
+    /// None = 旧界面，不要求对齐。
     UserMessage {
         text: String,
         #[serde(default)]
         context: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     ApprovalDecision {
         id: String,
@@ -141,6 +145,12 @@ pub enum Outbound {
     Ready {
         session: String,
         model: String,
+    },
+    /// A3：这一轮真正开始处理（所有拒绝分支之后、任何模型请求之前）只发一次。
+    /// `request_id` 与 `user_message.request_id` 原样对应；旧界面/旧 agent 可为 None。
+    TurnStarted {
+        #[serde(default)]
+        request_id: Option<String>,
     },
     AssistantDelta {
         text: String,

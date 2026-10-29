@@ -850,6 +850,9 @@ fn docs_index_status_events_match_the_agent_outbound_shape() {
                 Some("published generation 1730000000000")
             );
         }
+        colm_agent_protocol::Outbound::TurnStarted { .. } => {
+            panic!("expected docs_index_status")
+        }
     }
     // 最小事件：scope/generation/indexed_at/detail 都可缺省（disabled、旧事件都没有这些）。
     let minimal: colm_agent_protocol::Outbound = serde_json::from_value(json!({
@@ -877,6 +880,9 @@ fn docs_index_status_events_match_the_agent_outbound_shape() {
             assert_eq!(generation, None);
             assert_eq!(indexed_at_unix_ms, None);
             assert_eq!(detail, None);
+        }
+        colm_agent_protocol::Outbound::TurnStarted { .. } => {
+            panic!("expected docs_index_status")
         }
     }
 }
@@ -911,6 +917,13 @@ mod colm_agent_protocol {
             external: Choice,
             #[serde(default)]
             retrieval: Retrieval,
+        },
+        UserMessage {
+            text: String,
+            #[serde(default)]
+            context: Option<String>,
+            #[serde(default)]
+            request_id: Option<String>,
         },
         ReconcileEffects {
             ids: Vec<String>,
@@ -954,6 +967,10 @@ mod colm_agent_protocol {
     #[serde(tag = "type", rename_all = "snake_case")]
     #[allow(dead_code)]
     pub enum Outbound {
+        TurnStarted {
+            #[serde(default)]
+            request_id: Option<String>,
+        },
         DocsIndexStatus {
             backend: String,
             enabled: bool,
@@ -1704,4 +1721,87 @@ fn open_url_only_accepts_http_and_https() {
     // 命令对非法链接直接报错，绝不把它交给系统打开（合法链接不在测试里真的弹浏览器）。
     assert!(assistant_open_url("file:///etc/passwd".into()).is_err());
     assert!(assistant_open_url("javascript:alert(1)".into()).is_err());
+}
+
+// ---- A3：turn/request id 对齐 ----
+
+#[test]
+fn user_message_json_carries_request_id_and_rejects_invalid_ids() {
+    // 与 agent 同规则：None 兼容旧调用；Some 必须 1–128 字符且无控制字符。
+    assert_eq!(normalize_request_id(None).unwrap(), None);
+    assert_eq!(
+        normalize_request_id(Some("turn-1-abcd".into())).unwrap(),
+        Some("turn-1-abcd".to_owned())
+    );
+    assert!(normalize_request_id(Some("x".repeat(129))).is_err());
+    assert!(normalize_request_id(Some("bad\nid".into())).is_err());
+    assert!(normalize_request_id(Some("   ".into())).is_err());
+
+    let message = user_message_message(
+        "hello".into(),
+        Some("context".into()),
+        Some("turn-1-abcd".into()),
+    );
+    assert_eq!(message["type"], "user_message");
+    assert_eq!(message["text"], "hello");
+    assert_eq!(message["context"], "context");
+    assert_eq!(message["request_id"], "turn-1-abcd");
+    // 协议镜像按真实字段读取（字段名/类型漂移会在这里红）。
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
+    match parsed {
+        colm_agent_protocol::Inbound::UserMessage {
+            text,
+            context,
+            request_id,
+        } => {
+            assert_eq!(text, "hello");
+            assert_eq!(context.as_deref(), Some("context"));
+            assert_eq!(request_id.as_deref(), Some("turn-1-abcd"));
+        }
+        _ => panic!("user message must parse as Inbound::UserMessage"),
+    }
+    // 旧调用（None）：字段下发 null；旧 agent 读没有 request_id 的 JSON 也按 None 兼容。
+    let legacy = user_message_message("hello".into(), None, None);
+    assert!(legacy["request_id"].is_null());
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(legacy).unwrap();
+    match parsed {
+        colm_agent_protocol::Inbound::UserMessage {
+            context,
+            request_id,
+            ..
+        } => {
+            assert!(context.is_none());
+            assert!(request_id.is_none());
+        }
+        _ => panic!("legacy user message must parse"),
+    }
+    let old: colm_agent_protocol::Inbound =
+        serde_json::from_value(json!({"type":"user_message","text":"hi"})).unwrap();
+    match old {
+        colm_agent_protocol::Inbound::UserMessage { request_id, .. } => {
+            assert!(request_id.is_none());
+        }
+        _ => panic!("old user message must parse"),
+    }
+}
+
+#[test]
+fn turn_started_event_shape_is_stable_and_request_id_is_optional() {
+    let parsed: colm_agent_protocol::Outbound =
+        serde_json::from_value(json!({"type":"turn_started","request_id":"turn-7"})).unwrap();
+    match parsed {
+        colm_agent_protocol::Outbound::TurnStarted { request_id } => {
+            assert_eq!(request_id.as_deref(), Some("turn-7"));
+        }
+        _ => panic!("turn_started must parse as Outbound::TurnStarted"),
+    }
+    // 旧 agent 没有 request_id 字段时按 None 读，前端可把它当作“未对齐”处理。
+    let parsed: colm_agent_protocol::Outbound =
+        serde_json::from_value(json!({"type":"turn_started"})).unwrap();
+    match parsed {
+        colm_agent_protocol::Outbound::TurnStarted { request_id } => {
+            assert!(request_id.is_none());
+        }
+        _ => panic!("turn_started without request_id must parse"),
+    }
 }

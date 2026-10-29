@@ -2089,21 +2089,49 @@ pub async fn assistant_start(
     }
 }
 
+/// A3：turn 的 `request_id` 校验（与 agent 同规则）。None = 旧界面，允许；Some 时必须是
+/// 1–128 个字符且不含控制字符；空白串按非法处理。
+fn normalize_request_id(request_id: Option<String>) -> Result<Option<String>, String> {
+    let Some(request_id) = request_id else {
+        return Ok(None);
+    };
+    if request_id.trim().is_empty()
+        || request_id.chars().count() > 128
+        || request_id.chars().any(char::is_control)
+    {
+        return Err("requestId 不合法：需为 1–128 个字符且不含控制字符".into());
+    }
+    Ok(Some(request_id))
+}
+
+fn user_message_message(
+    text: String,
+    context: Option<String>,
+    request_id: Option<String>,
+) -> Value {
+    json!({
+        "type": "user_message",
+        "text": text,
+        "context": context,
+        "request_id": request_id,
+    })
+}
+
 #[tauri::command]
 pub fn assistant_send(
     app: tauri::AppHandle,
     process: tauri::State<'_, AssistantProcess>,
     text: String,
     context: Option<String>,
+    request_id: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("消息是空的".into());
     }
+    // A3：非法 request id 在发消息前拒绝，错误带上具体原因；None（旧调用）保持兼容。
+    let request_id = normalize_request_id(request_id)?;
     require_egress_acknowledged(&load_assistant_settings(&app)?)?;
-    send(
-        &process,
-        &json!({ "type": "user_message", "text": text, "context": context }),
-    )
+    send(&process, &user_message_message(text, context, request_id))
 }
 
 #[tauri::command]

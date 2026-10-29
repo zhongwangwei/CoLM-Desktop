@@ -205,6 +205,7 @@ impl Session {
             event,
             Outbound::AssistantDelta { .. }
                 | Outbound::ReasoningDelta { .. }
+                | Outbound::TurnStarted { .. }
                 | Outbound::TaskState { .. }
         ) {
             return Ok(());

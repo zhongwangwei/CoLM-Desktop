@@ -451,6 +451,7 @@ fn chat(
                         &Inbound::UserMessage {
                             text: line.into(),
                             context: None,
+                            request_id: None,
                         },
                     )?;
                     busy = true;
@@ -517,6 +518,7 @@ fn chat(
                             &Inbound::UserMessage {
                                 text,
                                 context: None,
+                                request_id: None,
                             },
                         )?;
                         busy = true;
@@ -647,6 +649,7 @@ fn chat(
                     eprintln!("Error: {message}");
                 }
                 Outbound::ReasoningDelta { .. }
+                | Outbound::TurnStarted { .. }
                 | Outbound::Usage { .. }
                 | Outbound::Context { .. }
                 // 副作用结局是给审计与恢复用的结构信息；终端里已有 ok/failed 卡片，不重复显示。

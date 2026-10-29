@@ -795,6 +795,21 @@ fn usage_for_turn(
     }
 }
 
+/// A3：turn 的 `request_id` 校验（Tauri 与 agent 同规则）。None = 旧界面，允许；
+/// Some 时必须是 1–128 个字符且不含控制字符，空白串按非法处理。
+fn normalize_request_id(request_id: Option<String>) -> Result<Option<String>, String> {
+    let Some(request_id) = request_id else {
+        return Ok(None);
+    };
+    if request_id.trim().is_empty()
+        || request_id.chars().count() > 128
+        || request_id.chars().any(char::is_control)
+    {
+        return Err("request_id must be 1-128 characters without control characters".into());
+    }
+    Ok(Some(request_id))
+}
+
 /// U04：`reconcile_effects` 的 id 校验（与窗口进程同一套规则）：非空、去重、最多 32 个、
 /// 每个 ≤160 字符且不含控制字符。非法时返回错误事件，不写审计。
 fn normalize_reconcile_ids(ids: &[String]) -> Result<Vec<String>, String> {
@@ -1211,7 +1226,20 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 cancel.store(true, Ordering::SeqCst);
                 let _ = decision_tx.send(("*".into(), Decision::Deny(Some("cancelled".into()))));
             }
-            Inbound::UserMessage { text, context } => {
+            Inbound::UserMessage {
+                text,
+                context,
+                request_id,
+            } => {
+                // A3：非法 request id 在碰任何状态之前拒绝：不置 busy、不写 task_start/
+                // messages、不发 turn_started，也不进入模型。非法请求不写审计。
+                let request_id = match normalize_request_id(request_id) {
+                    Ok(request_id) => request_id,
+                    Err(message) => {
+                        emitter.emit_unaudited(Outbound::Error { message });
+                        continue;
+                    }
+                };
                 if busy.swap(true, Ordering::SeqCst) {
                     emitter.emit(Outbound::Error {
                         message: "still answering the previous message".into(),
@@ -1271,6 +1299,11 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     emitter.emit(Outbound::Error { message });
                     continue;
                 }
+                // A3：所有拒绝分支（未配置、会话上限）都已过去，这一轮现在真正开始；
+                // 在任何模型请求/工具执行之前只发一次 turn_started，request_id 原样回显。
+                emitter.emit(Outbound::TurnStarted {
+                    request_id: request_id.clone(),
+                });
                 cancel.store(false, Ordering::SeqCst);
                 let reconciliation =
                     session
@@ -2226,6 +2259,62 @@ mod tests {
         let late = session.task_snapshot(false).unwrap().unwrap();
         assert!(!late.requires_reconciliation);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ---- A3：turn/request id 对齐 ----
+
+    #[test]
+    fn request_ids_are_validated_and_the_turn_started_event_echoes_them() {
+        // None（旧界面）允许；合法 id 原样保留；空/空白/超长/控制字符拒绝。
+        assert_eq!(normalize_request_id(None).unwrap(), None);
+        assert_eq!(
+            normalize_request_id(Some("turn-12-abcd".into())).unwrap(),
+            Some("turn-12-abcd".to_owned())
+        );
+        assert_eq!(
+            normalize_request_id(Some("x".repeat(128))).unwrap(),
+            Some("x".repeat(128))
+        );
+        assert!(normalize_request_id(Some("x".repeat(129))).is_err());
+        assert!(normalize_request_id(Some("bad\nid".into())).is_err());
+        assert!(normalize_request_id(Some("   ".into())).is_err());
+        // 协议形状：tag turn_started，request_id 原样/null。
+        let started = Outbound::TurnStarted {
+            request_id: Some("turn-12-abcd".into()),
+        };
+        let value = serde_json::to_value(&started).unwrap();
+        assert_eq!(value["type"], "turn_started");
+        assert_eq!(value["request_id"], "turn-12-abcd");
+        let without = serde_json::to_value(Outbound::TurnStarted { request_id: None }).unwrap();
+        assert_eq!(without["type"], "turn_started");
+        assert!(without["request_id"].is_null());
+        // 旧 JSON（没有 request_id 字段）也能读。
+        let parsed: Outbound = serde_json::from_value(json!({"type":"turn_started"})).unwrap();
+        assert_eq!(parsed, Outbound::TurnStarted { request_id: None });
+    }
+
+    #[test]
+    fn turn_started_events_are_not_written_to_the_audit_journal() {
+        let root = std::env::temp_dir().join(format!("colm-turn-started-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::new(Some(&root), "system").unwrap();
+        session
+            .push(Message::User {
+                content: "hello".into(),
+            })
+            .unwrap();
+        session
+            .audit(&Outbound::TurnStarted {
+                request_id: Some("turn-1".into()),
+            })
+            .unwrap();
+        // 会话/审计目录里没有 turn_started 记录，只有正常的 task_start。
+        let audit =
+            std::fs::read_to_string(root.join("sessions").join(&session.id).join("audit.jsonl"))
+                .unwrap();
+        assert!(!audit.contains("turn_started"), "{audit}");
+        assert!(audit.contains("task_start"), "{audit}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // ---- U05：失败轮的模型请求用量不漏账 ----
