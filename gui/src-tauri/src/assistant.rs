@@ -4,14 +4,18 @@
 //! `assistant-keys.json`（三个平台一样，Unix 上 0600），文件格式由 `colm-agent` 管：窗口进程只在
 //! “保存 Key”那一刻经 stdin 把它交过去，Key 不回传前端。
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
+
+use crate::sidecar::{register_child, ChildOwner};
 
 /// 运行中的 `colm-agent`。
 #[derive(Default)]
@@ -367,6 +371,68 @@ fn default_retrieval_timeout_ms() -> u64 {
     1500
 }
 
+/// 历史仓库数据设置（U01/U02）：范围用于告诉模型该用哪份历史；两个路径是用户自己已有的
+/// Desktop / 官方 CoLM 检出目录。`auto` 交给 CLI 的默认仓库缓存；`selected` 表示当前页面/冻结
+/// 模型选中的源码。路径为 null 表示让 CLI 用 `history-root/repos/<key>`。旧 `assistant.json`
+/// 没有这个对象时整份按默认值加载。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistorySettings {
+    /// "auto"|"selected"|"desktop"|"upstream"|"both"；默认 auto。
+    #[serde(default = "default_history_scope")]
+    pub scope: String,
+    /// 用户选择的 Desktop 本地仓库绝对路径；None = 用 CLI 默认的 history-root 缓存。
+    #[serde(default)]
+    pub desktop_path: Option<String>,
+    /// 用户选择的官方 CoLM 本地仓库绝对路径；None = 用 CLI 默认的 history-root 缓存。
+    #[serde(default)]
+    pub upstream_path: Option<String>,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            scope: default_history_scope(),
+            desktop_path: None,
+            upstream_path: None,
+        }
+    }
+}
+
+fn default_history_scope() -> String {
+    "auto".into()
+}
+
+const HISTORY_SCOPES: [&str; 5] = ["auto", "selected", "desktop", "upstream", "both"];
+
+impl HistorySettings {
+    /// 明显错误先挡住：范围必须是约定枚举；路径要么 null，要么绝对且是现有目录。
+    /// 这里不要求一定是 git 根（CLI 会用仓库身份核验），也不做网络访问。
+    fn validate(&self) -> Result<(), String> {
+        if !HISTORY_SCOPES.contains(&self.scope.as_str()) {
+            return Err(format!("历史仓库范围只能是 {}", HISTORY_SCOPES.join("、")));
+        }
+        for (label, path) in [
+            ("Desktop", &self.desktop_path),
+            ("官方 CoLM", &self.upstream_path),
+        ] {
+            let Some(path) = path else { continue };
+            if path.is_empty()
+                || path.chars().count() > 4096
+                || path.chars().any(char::is_control)
+                || !Path::new(path).is_absolute()
+            {
+                return Err(format!(
+                    "{label} 历史仓库路径须为绝对路径、不能含控制字符（留空由 CLI 使用默认缓存）"
+                ));
+            }
+            if !Path::new(path).is_dir() {
+                return Err(format!("{label} 历史仓库路径不存在或不是目录：{path}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 助手设置（不含 Key），存在配置目录的 `assistant.json`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantSettings {
@@ -413,6 +479,9 @@ pub struct AssistantSettings {
     /// Xerj 文档检索（可选，应用级）：关闭时完全不访问本机 Xerj。
     #[serde(default)]
     pub retrieval: RetrievalSettings,
+    /// 历史仓库数据范围与用户已有的 Desktop/官方 CoLM 检出路径（U01/U02）。
+    #[serde(default)]
+    pub history: HistorySettings,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -505,6 +574,7 @@ impl Default for AssistantSettings {
             session_token_limit: default_session_token_limit(),
             backend: default_backend(),
             retrieval: RetrievalSettings::default(),
+            history: HistorySettings::default(),
             egress_acknowledged: None,
             external: Default::default(),
         }
@@ -965,6 +1035,7 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
         return Err("会话上限过大".into());
     }
     validate_retrieval(&settings.retrieval)?;
+    settings.history.validate()?;
     for (backend, choice) in &settings.external {
         if !matches!(backend.as_str(), "codex" | "claude_code" | "opencode") {
             return Err(format!("没有这个外部后端：{backend}"));
@@ -1529,6 +1600,10 @@ pub(crate) fn configure_message(
         "session_turn_limit": settings.session_turn_limit,
         "session_token_limit": settings.session_token_limit,
         "backend": settings.backend,
+        // U02：agent 在本进程内把这两个路径设成 COLM_HISTORY_*，它启动的 colm-cli 会使用
+        // 用户选择的检出；scope 随每条 user_message 的 context 原样下发，不在这里重复。
+        "history_desktop_path": settings.history.desktop_path,
+        "history_upstream_path": settings.history.upstream_path,
         "external": settings.external.get(&settings.backend).cloned().unwrap_or_default(),
         // 检索是应用级设置，与用哪个后端回答无关；关闭时也照常下发，agent 用 enabled=false 跳过。
         "retrieval": {
@@ -1544,6 +1619,287 @@ pub(crate) fn configure_message(
         "docs_root": docs_root,
         "model_context": model_context,
     })
+}
+
+// ---- U01：历史仓库状态与同步（本机 git 只读查询 + 用户显式同步） ----
+
+/// `history-sync --repository` 只接受注册仓库；`selected` 是查询范围，不是同步目标（CLI 契约）。
+const HISTORY_SYNC_REPOSITORIES: [&str; 3] = ["desktop", "colm_upstream", "both"];
+/// `history-repos` 只读本机缓存与 git 状态，正常远小于一秒；30s 只是防挂死。
+const HISTORY_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+/// `history-sync` 可能 fetch/clone 两个仓库；超过就按组终止并明确报超时，不无限等网络。
+const HISTORY_SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+/// stderr 摘要上限：git 的错误输出可能很长，界面只需要关键原因。
+const HISTORY_STDERR_SUMMARY_CHARS: usize = 600;
+/// stdout 读取上限：history JSON 含提交信息但应有界；4 MiB 足够，避免异常输出撑爆内存。
+const HISTORY_STDOUT_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 同一时刻只允许一个同步：两个并发 fetch/clone 会互相踩 `repos` 缓存。
+static HISTORY_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 同步互斥的 RAII 守卫：命令返回/panic 时都会复位，不会把功能永久锁死。
+struct HistorySyncGuard;
+
+impl HistorySyncGuard {
+    fn begin() -> Result<Self, String> {
+        HISTORY_SYNC_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "已经有一个历史仓库同步在进行，请等它结束或先停止它".to_string())?;
+        Ok(Self)
+    }
+}
+
+impl Drop for HistorySyncGuard {
+    fn drop(&mut self) {
+        HISTORY_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+fn history_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let root = data_dir(app)?.join("history");
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    Ok(root)
+}
+
+/// 参数逐个经过 `Command::arg`（绝不拼 shell）；路径已在设置校验里限定为绝对的现存目录。
+fn history_cli_command(
+    cli: &Path,
+    action: &str,
+    root: &Path,
+    history: &HistorySettings,
+    repository: Option<&str>,
+    offline: bool,
+) -> Command {
+    let mut process = Command::new(cli);
+    process.arg(action).arg("--history-root").arg(root);
+    if let Some(repository) = repository {
+        process.arg("--repository").arg(repository);
+    }
+    if let Some(path) = history.desktop_path.as_deref() {
+        process.arg("--desktop-path").arg(path);
+    }
+    if let Some(path) = history.upstream_path.as_deref() {
+        process.arg("--upstream-path").arg(path);
+    }
+    if offline {
+        process.arg("--offline");
+    }
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    colm_kernel::run::top_level_sidecar(&mut process);
+    process
+}
+
+fn history_stderr_summary(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        return String::new();
+    }
+    let mut summary: String = stderr.chars().take(HISTORY_STDERR_SUMMARY_CHARS).collect();
+    if stderr.chars().count() > HISTORY_STDERR_SUMMARY_CHARS {
+        summary.push('…');
+    }
+    summary
+}
+
+fn read_bounded(mut reader: impl std::io::Read) -> String {
+    let mut bytes = Vec::new();
+    let _ = reader
+        .by_ref()
+        .take(HISTORY_STDOUT_LIMIT_BYTES)
+        .read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn history_status_line(status: &std::process::ExitStatus) -> String {
+    status.code().map_or_else(
+        || "terminated by signal".to_string(),
+        |code| format!("exit code {code}"),
+    )
+}
+
+/// 跑一次 `history-*`：登记成 [`ChildOwner::HistorySync`]（停止按钮/关窗能按组终止），带超时；
+/// 失败把 CLI 的 stderr 摘要带回去，而不是只报 exit code。
+fn run_history_cli(action: &str, command: Command, timeout: Duration) -> Result<Value, String> {
+    let mut command = command;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot start colm-cli {action}: {e}"))?;
+    let guard = register_child(child.id(), ChildOwner::HistorySync);
+    let stdout = child.stdout.take().ok_or("colm-cli stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("colm-cli stderr unavailable")?;
+    let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
+    let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
+    let deadline = Instant::now() + timeout;
+    let mut exit = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit = Some(status);
+                break;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let _ = crate::sidecar::terminate_process_tree(child.id());
+                let _ = child.wait();
+                return Err(format!("cannot wait for colm-cli {action}: {error}"));
+            }
+        }
+    }
+    let Some(status) = exit else {
+        // 超时：按进程组终止（它自己也会起 git 子进程），回收读线程后给出 stderr 摘要。
+        let _ = crate::sidecar::terminate_process_tree(child.id());
+        let _ = child.wait();
+        let stderr = stderr_reader.join().unwrap_or_default();
+        let _ = stdout_reader.join();
+        let summary = history_stderr_summary(&stderr);
+        return Err(format!(
+            "colm-cli {action} timed out after {}s{}",
+            timeout.as_secs(),
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!("; stderr: {summary}")
+            }
+        ));
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if !status.success() {
+        if guard.stopped() {
+            return Err("历史仓库操作已停止".into());
+        }
+        let summary = history_stderr_summary(&stderr);
+        return Err(if summary.is_empty() {
+            format!(
+                "colm-cli {action} failed ({})",
+                history_status_line(&status)
+            )
+        } else {
+            format!(
+                "colm-cli {action} failed ({}): {summary}",
+                history_status_line(&status)
+            )
+        });
+    }
+    let mut value: Value = serde_json::from_str(&stdout).map_err(|e| {
+        let summary = history_stderr_summary(&stderr);
+        format!(
+            "unexpected colm-cli {action} output: {e}{}",
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!("; stderr: {summary}")
+            }
+        )
+    })?;
+    // 成功时 git 也可能有 stderr 警告：作为截断摘要附在结果里，不假装只有纯 JSON。
+    if !stderr.trim().is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("cli_stderr".into(), json!(history_stderr_summary(&stderr)));
+        }
+    }
+    Ok(value)
+}
+
+/// `history-repos`：只读本机缓存与已有检出，不 fetch/clone、不联网。
+fn history_status_blocking(
+    cli: &Path,
+    root: &Path,
+    history: &HistorySettings,
+) -> Result<Value, String> {
+    let command = history_cli_command(cli, "history-repos", root, history, Some("both"), false);
+    let mut value = run_history_cli("history-repos", command, HISTORY_STATUS_TIMEOUT)?;
+    // CLI 也会带 history_root；界面显示以窗口进程解析的绝对目录为准。
+    let Some(object) = value.as_object_mut() else {
+        return Err("unexpected colm-cli history-repos output: expected a JSON object".into());
+    };
+    object.insert("history_root".into(), json!(root.display().to_string()));
+    Ok(value)
+}
+
+/// `history-sync`：显式 fetch/clone（`offline=true` 时 CLI 只做本地发现，不 fetch/clone）。
+fn history_sync_blocking(
+    cli: &Path,
+    root: &Path,
+    history: &HistorySettings,
+    repository: &str,
+    offline: bool,
+) -> Result<Value, String> {
+    if !HISTORY_SYNC_REPOSITORIES.contains(&repository) {
+        return Err(format!(
+            "history-sync 的仓库只能是 {}",
+            HISTORY_SYNC_REPOSITORIES.join("、")
+        ));
+    }
+    let command = history_cli_command(
+        cli,
+        "history-sync",
+        root,
+        history,
+        Some(repository),
+        offline,
+    );
+    run_history_cli("history-sync", command, HISTORY_SYNC_TIMEOUT)
+}
+
+/// U01：读两个历史仓库的本机状态（只读；不联网、不启动代理进程）。返回 CLI JSON +
+/// `history_root`（绝对路径字符串）；CLI 失败时错误里带截断的 stderr。
+#[tauri::command]
+pub async fn assistant_history_status(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // history 命令不依赖模型服务配置，只校验这两个路径本身，避免 API 设置有问题时整块不可用。
+        let settings = assistant_settings(app.clone());
+        settings.history.validate()?;
+        let root = history_root(&app)?;
+        history_status_blocking(&crate::sidecar::resolve_cli(), &root, &settings.history)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// U01：显式同步历史仓库。`repository` 只能是 desktop / colm_upstream / both；同一时间只允许
+/// 一个同步（重复调用在启动任何进程前就返回明确错误），子进程可被停止按钮/关窗按进程组终止。
+#[tauri::command]
+pub async fn assistant_history_sync(
+    app: tauri::AppHandle,
+    repository: String,
+    offline: bool,
+) -> Result<Value, String> {
+    if !HISTORY_SYNC_REPOSITORIES.contains(&repository.as_str()) {
+        return Err(format!(
+            "history-sync 的仓库只能是 {}",
+            HISTORY_SYNC_REPOSITORIES.join("、")
+        ));
+    }
+    let guard = HistorySyncGuard::begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let settings = assistant_settings(app.clone());
+        settings.history.validate()?;
+        let root = history_root(&app)?;
+        history_sync_blocking(
+            &crate::sidecar::resolve_cli(),
+            &root,
+            &settings.history,
+            &repository,
+            offline,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// U01：停止当前历史仓库查询/同步。登记在 sidecar 的 [`ChildOwner::HistorySync`] 下，按进程组
+/// 终止，和关窗时的 `cancel_detached_children` 走同一条路径。返回终止的进程数（0 = 没有在跑的）。
+#[tauri::command]
+pub fn assistant_history_cancel() -> Result<usize, String> {
+    crate::sidecar::cancel_history_sync_children()
 }
 
 /// 启动（或重新配置）助手。进程不在就起一个，并把它的每行输出作为 `assistant://event` 发给前端。

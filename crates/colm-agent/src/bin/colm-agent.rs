@@ -741,7 +741,21 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
         if line.trim().is_empty() {
             continue;
         }
-        let message: Inbound = match serde_json::from_str(&line) {
+        let raw: Value = match serde_json::from_str(&line) {
+            Ok(raw) => raw,
+            Err(error) => {
+                emitter.emit(Outbound::Error {
+                    message: format!("unreadable request: {error}"),
+                });
+                continue;
+            }
+        };
+        // U02：协议枚举没有历史仓库路径字段；先在原始 configure JSON 上取出并设成本进程环境变量，
+        // 之后本进程启动的 colm-cli 会继承（Tauri 每次 assistant_start 都会重新下发）。
+        if raw["type"] == "configure" {
+            apply_history_path_env(&raw);
+        }
+        let message: Inbound = match serde_json::from_value(raw) {
             Ok(message) => message,
             Err(error) => {
                 emitter.emit(Outbound::Error {
@@ -1322,6 +1336,25 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
     Ok(())
 }
 
+/// U02：把 configure 里的历史仓库路径设进本进程环境变量。agent 自己起 `colm-cli` 时继承这两个
+/// 变量，CLI 用它覆盖 `history-root/repos/<key>`（`COLM_HISTORY_DESKTOP_PATH` /
+/// `COLM_HISTORY_UPSTREAM_PATH`，见 colm-cli 的 `PathOverrides`）。字段缺省或空串时清掉，避免
+/// 换设置后仍沿用上一次的路径；不覆盖 offline/同步语义（那是命令参数）。
+fn apply_history_path_env(configure: &Value) {
+    for (env, key) in [
+        ("COLM_HISTORY_DESKTOP_PATH", "history_desktop_path"),
+        ("COLM_HISTORY_UPSTREAM_PATH", "history_upstream_path"),
+    ] {
+        match configure[key]
+            .as_str()
+            .filter(|path| !path.trim().is_empty())
+        {
+            Some(path) => std::env::set_var(env, path),
+            None => std::env::remove_var(env),
+        }
+    }
+}
+
 /// 转发口与它的处理方：第一次用外部后端时才打开。
 type SharedBridge = Arc<Mutex<Option<(BridgeServer, Arc<AgentBridge>)>>>;
 
@@ -1876,5 +1909,45 @@ mod tests {
         let mut invalid = model;
         invalid.source_dir = PathBuf::from("relative/source");
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn configure_history_paths_become_cli_environment_and_are_cleared_when_unset() {
+        // 环境变量是进程级的，测试间串行设置/清理，避免其它用例读到残留值。
+        let key_desktop = "COLM_HISTORY_DESKTOP_PATH";
+        let key_upstream = "COLM_HISTORY_UPSTREAM_PATH";
+        let cleanup = || {
+            std::env::remove_var(key_desktop);
+            std::env::remove_var(key_upstream);
+        };
+        cleanup();
+        apply_history_path_env(&json!({
+            "type": "configure",
+            "history_desktop_path": "/repos/CoLM-Desktop",
+            "history_upstream_path": "/repos/CoLM",
+        }));
+        assert_eq!(
+            std::env::var(key_desktop).as_deref(),
+            Ok("/repos/CoLM-Desktop")
+        );
+        assert_eq!(std::env::var(key_upstream).as_deref(), Ok("/repos/CoLM"));
+        // 下一次 configure 只给 Desktop：upstream 必须清掉，不能沿用上一次的路径。
+        apply_history_path_env(&json!({
+            "type": "configure",
+            "history_desktop_path": "/repos/CoLM-Desktop2",
+            "history_upstream_path": null,
+        }));
+        assert_eq!(
+            std::env::var(key_desktop).as_deref(),
+            Ok("/repos/CoLM-Desktop2")
+        );
+        assert!(std::env::var(key_upstream).is_err());
+        // 空串同样视为未设置。
+        apply_history_path_env(&json!({
+            "type": "configure",
+            "history_desktop_path": "  ",
+        }));
+        assert!(std::env::var(key_desktop).is_err());
+        cleanup();
     }
 }

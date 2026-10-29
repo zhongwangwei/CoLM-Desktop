@@ -1109,6 +1109,8 @@ pub(crate) enum ChildOwner {
     Bench,
     /// 历史记录里"按记录设置重跑"：真的把整段模型跑一遍。同一时间只跑一件。
     Replay,
+    /// U01 历史仓库同步（`history-sync`，可能 fetch/clone 两个仓库）。同一时间只跑一件。
+    HistorySync,
 }
 
 fn detached_children() -> &'static Mutex<HashMap<u32, (ChildOwner, bool)>> {
@@ -1213,6 +1215,11 @@ pub fn cancel_preparation() -> Result<usize, String> {
 #[tauri::command]
 pub fn history_replay_cancel() -> Result<usize, String> {
     cancel_children_where(|owner| *owner == ChildOwner::Replay)
+}
+
+/// 停掉正在跑的历史仓库同步（U01 `assistant_history_sync`）。返回终止的进程数；0 表示没有在跑的。
+pub(crate) fn cancel_history_sync_children() -> Result<usize, String> {
+    cancel_children_where(|owner| *owner == ChildOwner::HistorySync)
 }
 
 /// 历史重跑专用的 [`capture_async`]：它真的跑整段模型，原来走不登记的 `capture_untracked`：没有停止、关窗

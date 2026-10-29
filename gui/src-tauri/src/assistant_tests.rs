@@ -1229,3 +1229,361 @@ fn the_managed_xerj_data_directory_is_scoped_to_the_pinned_release() {
             .collect::<String>()
     );
 }
+
+// ---- U01/U02：历史仓库状态/同步命令与设置传递 ----
+
+#[test]
+fn history_settings_default_validate_and_old_settings_load() {
+    let settings = AssistantSettings::default();
+    assert_eq!(settings.history.scope, "auto");
+    assert!(settings.history.desktop_path.is_none());
+    assert!(settings.history.upstream_path.is_none());
+    assert!(validate_settings(&settings).is_ok());
+    // 旧 assistant.json 没有 history 对象：整份按默认值加载。
+    let old: AssistantSettings =
+        serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
+            .unwrap();
+    assert_eq!(old.history, HistorySettings::default());
+    // 范围是固定枚举。
+    for scope in ["auto", "selected", "desktop", "upstream", "both"] {
+        let with_scope = AssistantSettings {
+            history: HistorySettings {
+                scope: scope.into(),
+                ..HistorySettings::default()
+            },
+            ..AssistantSettings::default()
+        };
+        assert!(validate_settings(&with_scope).is_ok(), "{scope}");
+    }
+    for scope in ["", "all", "Auto", " desktop"] {
+        let with_scope = AssistantSettings {
+            history: HistorySettings {
+                scope: scope.into(),
+                ..HistorySettings::default()
+            },
+            ..AssistantSettings::default()
+        };
+        assert!(validate_settings(&with_scope).is_err(), "{scope}");
+    }
+    // 路径要么 null，要么绝对且是现有目录；不要求是 git 根（CLI 用仓库身份核验）。
+    let root = std::env::temp_dir().join(format!("colm-history-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let existing = root.display().to_string();
+    let with = |desktop: Option<String>, upstream: Option<String>| AssistantSettings {
+        history: HistorySettings {
+            scope: "auto".into(),
+            desktop_path: desktop,
+            upstream_path: upstream,
+        },
+        ..AssistantSettings::default()
+    };
+    assert!(validate_settings(&with(Some(existing.clone()), None)).is_ok());
+    assert!(validate_settings(&with(None, Some(existing.clone()))).is_ok());
+    assert!(validate_settings(&with(Some("repos/CoLM-Desktop".into()), None)).is_err());
+    let missing = root.join("does-not-exist").display().to_string();
+    assert!(validate_settings(&with(Some(missing), None)).is_err());
+    let file = root.join("not-a-directory");
+    std::fs::write(&file, "x").unwrap();
+    assert!(validate_settings(&with(None, Some(file.display().to_string()))).is_err());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn configure_carries_history_repository_paths_and_old_agents_ignore_them() {
+    let mut settings = AssistantSettings::default();
+    settings.history.desktop_path = Some("/repos/CoLM-Desktop".into());
+    settings.history.upstream_path = Some("/repos/CoLM".into());
+    let message = configure_message(&settings, "/p", None, None, None);
+    assert_eq!(message["history_desktop_path"], "/repos/CoLM-Desktop");
+    assert_eq!(message["history_upstream_path"], "/repos/CoLM");
+    // 没有设置时下发 null（agent 会清掉上一条 configure 留下的 COLM_HISTORY_*）。
+    let unset = configure_message(&AssistantSettings::default(), "/p", None, None, None);
+    assert!(unset["history_desktop_path"].is_null());
+    assert!(unset["history_upstream_path"].is_null());
+    // 协议镜像里还没有这两个字段：旧 agent 读 configure 时必须忽略未知字段而不是整条拒绝。
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
+    assert!(matches!(
+        parsed,
+        colm_agent_protocol::Inbound::Configure { .. }
+    ));
+}
+
+#[test]
+fn history_cli_arguments_are_ordered_and_never_go_through_a_shell() {
+    let history = HistorySettings {
+        scope: "auto".into(),
+        desktop_path: Some("/tmp/desktop repo's checkout".into()),
+        upstream_path: Some("/tmp/upstream".into()),
+    };
+    let command = history_cli_command(
+        std::path::Path::new("/tmp/colm-cli"),
+        "history-sync",
+        std::path::Path::new("/data/history"),
+        &history,
+        Some("both"),
+        true,
+    );
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "history-sync",
+            "--history-root",
+            "/data/history",
+            "--repository",
+            "both",
+            "--desktop-path",
+            "/tmp/desktop repo's checkout",
+            "--upstream-path",
+            "/tmp/upstream",
+            "--offline",
+        ]
+    );
+    // 含空格与引号的路径仍是一个参数；offline=false 时不带 --offline。
+    let online = history_cli_command(
+        std::path::Path::new("/tmp/colm-cli"),
+        "history-sync",
+        std::path::Path::new("/data/history"),
+        &history,
+        Some("desktop"),
+        false,
+    );
+    let online: Vec<String> = online
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(!online.iter().any(|arg| arg == "--offline"));
+    assert!(online.iter().any(|arg| arg == "desktop"));
+    // 没有选路径时不带对应 flag，CLI 用 history-root/repos/<key> 默认缓存。
+    let defaults = history_cli_command(
+        std::path::Path::new("/tmp/colm-cli"),
+        "history-repos",
+        std::path::Path::new("/data/history"),
+        &HistorySettings::default(),
+        Some("both"),
+        false,
+    );
+    let defaults: Vec<String> = defaults
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(!defaults.iter().any(|arg| arg == "--desktop-path"));
+    assert!(!defaults.iter().any(|arg| arg == "--upstream-path"));
+}
+
+#[test]
+fn history_sync_rejects_unknown_repositories_before_spawning_anything() {
+    let error = history_sync_blocking(
+        std::path::Path::new("/definitely/missing/colm-cli"),
+        std::path::Path::new("/definitely/missing/history"),
+        &HistorySettings::default(),
+        "selected",
+        false,
+    )
+    .unwrap_err();
+    assert!(error.contains("history-sync 的仓库只能是"), "{error}");
+}
+
+#[test]
+fn history_sync_guard_allows_only_one_sync_at_a_time() {
+    let first = HistorySyncGuard::begin().unwrap();
+    assert!(HistorySyncGuard::begin().is_err());
+    drop(first);
+    // 守卫释放后可以再次开始（命令返回/失败/panic 都会释放）。
+    let second = HistorySyncGuard::begin().unwrap();
+    drop(second);
+}
+
+/// U01 的子进程登记表是进程级静态表：并行跑这些用例时，取消用例会误杀别的用例的假 CLI。
+/// 需要起 history 子进程的用例串行执行（仅测试用）。
+#[cfg(unix)]
+static HISTORY_CHILD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn history_fake_cli(dir: &std::path::Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-colm-cli");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+fn history_temp_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-history-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn history_status_reads_cli_json_and_attaches_the_resolved_history_root() {
+    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let dir = history_temp_dir("status");
+    let args_file = dir.join("args");
+    let cli = history_fake_cli(
+        &dir,
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"history_root\":\"/from-cli\",\"repos\":{{\"desktop\":{{\"state\":\"ready\"}}}}}}'",
+            args_file.display()
+        ),
+    );
+    let desktop = dir.join("desktop-repo");
+    std::fs::create_dir_all(&desktop).unwrap();
+    let history = HistorySettings {
+        scope: "auto".into(),
+        desktop_path: Some(desktop.display().to_string()),
+        upstream_path: None,
+    };
+    let value = history_status_blocking(&cli, &dir, &history).unwrap();
+    assert_eq!(value["repos"]["desktop"]["state"], "ready");
+    // 窗口进程解析的绝对目录覆盖 CLI 汇报的路径（两者都应指向同一目录，GUI 显示以这里为准）。
+    assert_eq!(value["history_root"], dir.display().to_string());
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "history-repos",
+            "--history-root",
+            dir.to_str().unwrap(),
+            "--repository",
+            "both",
+            "--desktop-path",
+            desktop.to_str().unwrap(),
+        ]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn history_sync_passes_repository_and_the_offline_switch_through() {
+    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let dir = history_temp_dir("sync");
+    let args_file = dir.join("args");
+    let cli = history_fake_cli(
+        &dir,
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"actions\":{{\"desktop\":\"offline\"}},\"repos\":{{}}}}'",
+            args_file.display()
+        ),
+    );
+    let history = HistorySettings::default();
+    let value = history_sync_blocking(&cli, &dir, &history, "desktop", true).unwrap();
+    assert_eq!(value["actions"]["desktop"], "offline");
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "history-sync",
+            "--history-root",
+            dir.to_str().unwrap(),
+            "--repository",
+            "desktop",
+            "--offline",
+        ]
+    );
+    // offline=false 时不带 --offline（在线同步由 CLI 自己 fetch/clone）。
+    let value = history_sync_blocking(&cli, &dir, &history, "both", false).unwrap();
+    assert_eq!(value["actions"]["desktop"], "offline");
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    assert!(!args.lines().any(|line| line == "--offline"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn history_cli_errors_carry_a_truncated_stderr_summary_not_just_an_exit_code() {
+    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let dir = history_temp_dir("errors");
+    let identity = history_fake_cli(
+        &dir,
+        "printf '%s\\n' 'identity check failed: desktop repository is not CoLM-Desktop' >&2\nexit 3",
+    );
+    let error = history_status_blocking(&identity, &dir, &HistorySettings::default()).unwrap_err();
+    assert!(error.contains("identity check failed"), "{error}");
+    assert!(error.contains("exit code 3"), "{error}");
+    // 超长 stderr 必须截断，不能把整段 git 输出塞回界面。
+    let noisy = history_fake_cli(
+        &dir,
+        &format!("printf '%s\\n' '{}' >&2\nexit 4", "x".repeat(5000)),
+    );
+    let error = history_status_blocking(&noisy, &dir, &HistorySettings::default()).unwrap_err();
+    assert!(error.chars().count() < 1200, "{}", error.chars().count());
+    assert!(error.contains('…'), "{error}");
+    // 输出不是 JSON 时给出可定位的错误，而不是只报退出码。
+    let garbage = history_fake_cli(&dir, "printf '%s\\n' 'not json'");
+    let error = history_status_blocking(&garbage, &dir, &HistorySettings::default()).unwrap_err();
+    assert!(
+        error.contains("unexpected colm-cli history-repos output"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn history_cli_timeout_kills_the_process_group_and_reports_it() {
+    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let dir = history_temp_dir("timeout");
+    let cli = history_fake_cli(&dir, "sleep 30");
+    let command = history_cli_command(
+        &cli,
+        "history-sync",
+        &dir,
+        &HistorySettings::default(),
+        Some("both"),
+        true,
+    );
+    let started = std::time::Instant::now();
+    let error = run_history_cli("history-sync", command, Duration::from_millis(300)).unwrap_err();
+    assert!(error.contains("timed out after 0s"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn history_cancel_terminates_a_registered_sync_and_reports_stopped() {
+    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let dir = history_temp_dir("cancel");
+    let cli = history_fake_cli(&dir, "sleep 30");
+    let worker = {
+        let cli = cli.clone();
+        let dir = dir.clone();
+        std::thread::spawn(move || history_status_blocking(&cli, &dir, &HistorySettings::default()))
+    };
+    // 等子进程登记进 sidecar（登记发生在 spawn 之后），再走命令的取消入口。
+    let mut cancelled = 0;
+    for _ in 0..100 {
+        if let Ok(count) = assistant_history_cancel() {
+            if count > 0 {
+                cancelled = count;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(
+        cancelled >= 1,
+        "the fake history child was never registered"
+    );
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(error.contains("已停止"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
