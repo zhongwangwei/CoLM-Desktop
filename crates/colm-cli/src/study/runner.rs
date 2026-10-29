@@ -221,6 +221,14 @@ pub struct ApplyPreviewRow {
     pub new: String,
 }
 
+/// 支持哈希算法版本标签。哈希覆盖的内容一变就必须换这里的版本号：旧结果靠它
+/// 才能被识别出来，而不是被当成"模型/观测支持变了"静默拒绝。
+///
+/// 旧结果没有 `support_hash_algorithm` 字段（反序列化为空串），空串表示"升级前/未知
+/// 算法"。未知算法不能与新算法静默比较：同一份支持在不同算法下必然算出不同的哈希。
+const SUPPORT_HASH_ALGORITHM_AGGREGATE: &str = "aggregate-period-identity-v1";
+const SUPPORT_HASH_ALGORITHM_PAIR: &str = "pair-v1";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TargetResult {
     key: String,
@@ -238,6 +246,14 @@ struct TargetResult {
     observation_mean: f64,
     #[serde(default)]
     support_hash: String,
+    /// 生成 [`Self::support_hash`] 的算法标签。按行记录而不是放到 [`TaskResult`]：
+    /// 同一个任务里可以同时有聚合目标（`aggregate-period-identity-v1`）和非聚合目标
+    /// （`pair-v1`），任务级单个标签会掩盖差异。
+    ///
+    /// 空串（旧结果缺字段）不写回，旧结果文件保持原样；比较时见
+    /// [`support_hash_algorithm_mismatch`]。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    support_hash_algorithm: String,
     /// 日/月聚合时段的有效观测覆盖率统计；不做聚合的目标没有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coverage_mean: Option<f64>,
@@ -266,6 +282,10 @@ struct OutputSummary {
     max: f64,
 }
 
+/// 一个成员在一个站点上的全部目标结果。
+///
+/// 支持哈希算法记在每行 [`TargetResult`] 上：同一任务可以同时包含聚合目标和非聚合目标，
+/// 任务级单个标签会掩盖差异，所以这里不设算法字段。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TaskResult {
     member: String,
@@ -307,6 +327,9 @@ struct ObjectiveMetricRow {
     observation_mean: f64,
     #[serde(default)]
     support_hash: String,
+    /// 同 [`TargetResult::support_hash_algorithm`]：汇总表里也要能看出哈希口径是否升级。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    support_hash_algorithm: String,
     /// 日/月聚合时段的有效观测覆盖率统计；不做聚合的目标没有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coverage_mean: Option<f64>,
@@ -1924,6 +1947,8 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     }
 
     let mut members = super::generation::reconcile_tasks(&manifest, &mut state)?;
+    // 旧研究续跑会直接复用 Succeeded 的基线；旧算法基线不能和新候选比较，先退回队列。
+    requeue_legacy_baseline_tasks(&manifest, &mut state, options.retry_failed)?;
     state.status = StudyStatus::Running;
     super::checkpoint::write_next(&checkpoint_dir, &state)?;
     let available = std::thread::available_parallelism()
@@ -2361,6 +2386,144 @@ fn baseline_tasks_succeeded(manifest: &Manifest, state: &StudyState) -> bool {
             .get(&super::state::task_id("m000000", site))
             .is_some_and(|task| task.status == TaskStatus::Succeeded)
     })
+}
+
+/// 旧结果是否带当前算法的标签：空串表示字段引入前写下的结果。
+fn result_uses_legacy_support_algorithm(result: &TaskResult) -> bool {
+    result
+        .calibration
+        .iter()
+        .chain(&result.validation)
+        .any(|row| row.support_hash_algorithm.is_empty())
+}
+
+/// 本轮是否还会写下新算法的支持哈希：未完成/可重试的候选任务，或 DE 还有下一代。
+fn has_future_support_work(manifest: &Manifest, state: &StudyState, retry_failed: bool) -> bool {
+    let unfinished = state.tasks.values().any(|task| {
+        if task.member == "m000000" {
+            return false;
+        }
+        match task.status {
+            TaskStatus::Pending | TaskStatus::Materialized | TaskStatus::Queued => true,
+            TaskStatus::Failed | TaskStatus::Interrupted => retry_failed,
+            TaskStatus::Succeeded | TaskStatus::Cancelled | TaskStatus::NeedsReview => false,
+            // `run` 前面已经拒绝 Running/Evaluating；这里保守当作还会产出新结果。
+            TaskStatus::Running | TaskStatus::Evaluating => true,
+        }
+    });
+    if unfinished {
+        return true;
+    }
+    manifest.spec.kind == StudyKind::Tuning
+        && manifest.spec.method == StudyMethod::DifferentialEvolution
+        && manifest
+            .spec
+            .budget
+            .generations
+            .is_some_and(|generations| state.generation < generations)
+        && !(manifest.spec.budget.patience > 0
+            && state.no_improvement_generations >= manifest.spec.budget.patience)
+}
+
+/// 是否已经有候选写下了新算法结果（说明基线与候选已经跨算法，必须重跑基线）。
+fn has_new_algorithm_candidate(manifest: &Manifest, state: &StudyState) -> bool {
+    state.tasks.values().any(|task| {
+        task.member != "m000000"
+            && task.status == TaskStatus::Succeeded
+            && read_task_result(manifest, &task.member, &task.site)
+                .map(|result| {
+                    result
+                        .calibration
+                        .iter()
+                        .chain(&result.validation)
+                        .any(|row| !row.support_hash_algorithm.is_empty())
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// 支持哈希算法升级后，旧基线结果不能与新算法的候选比较。
+///
+/// 二选一里选择"把旧基线任务退回 Queued、由本轮调度自动重跑"，否决"直接拒绝"：
+/// 拒绝后没有任何命令能把 Succeeded 的基线重跑一遍，用户只能手动删 `results/tasks`
+/// 或重建研究；基线只有一个成员 × 站点数，重跑代价远小于让每个候选都报同一句
+/// "支持不同"再自己猜原因。退回 Queued 后 `baseline_tasks_succeeded` 自然为 false，
+/// 调优研究会在跑候选前先补基线；`Succeeded -> Queued` 也是 `valid_transition` 允许的。
+///
+/// 只在"真的还会有新算法结果要比较"时重跑：若所有任务都已完成且全是旧算法，整套
+/// 旧结果彼此仍是同一算法、内部自洽，单独重跑基线反而会让所有缓存候选失配。旧候选
+/// 自身在比较时会收到"候选是旧算法，请重跑该候选"的明确提示，不静默通过。
+fn requeue_legacy_baseline_tasks(
+    manifest: &Manifest,
+    state: &mut StudyState,
+    retry_failed: bool,
+) -> Result<bool> {
+    if manifest.spec.targets.is_empty() {
+        return Ok(false);
+    }
+    let baseline = "m000000";
+    let legacy_sites = manifest
+        .spec
+        .base_cases
+        .iter()
+        .filter(|site| {
+            state
+                .tasks
+                .get(&super::state::task_id(baseline, site))
+                .is_some_and(|task| task.status == TaskStatus::Succeeded)
+        })
+        .filter(|site| {
+            read_task_result(manifest, baseline, site)
+                .map(|result| result_uses_legacy_support_algorithm(&result))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if legacy_sites.is_empty() {
+        return Ok(false);
+    }
+    if !has_future_support_work(manifest, state, retry_failed)
+        && !has_new_algorithm_candidate(manifest, state)
+    {
+        // 没有新算法的结果要比较：整套缓存结果仍是同一旧算法、内部自洽，不重跑基线。
+        // 但仍要留下诊断，用户看到"旧算法"才知道以后加候选前必须先重跑基线。
+        for site in &legacy_sites {
+            push_warning_once(
+                state,
+                format!(
+                    "{baseline} / {site}: support hash algorithm was upgraded; the cached baseline uses the legacy support hash algorithm and cannot be compared with new-algorithm candidates (cached results from the same legacy algorithm stay comparable); rerun the baseline under the current algorithm before adding candidates"
+                ),
+            );
+        }
+        return Ok(false);
+    }
+    for site in &legacy_sites {
+        let id = super::state::task_id(baseline, site);
+        // 走 `set_task` 而不是直接改字段：Succeeded→Queued 是合法迁移，这里顺便把这条
+        // 不变量钉住；以后若收紧了迁移规则，会在这里明确报错而不是留下坏状态。
+        state.set_task(baseline, site, TaskStatus::Queued)?;
+        {
+            let task = state
+                .tasks
+                .get_mut(&id)
+                .with_context(|| format!("missing tuning baseline task for {site}"))?;
+            task.stage = None;
+            task.objective = None;
+            task.validation_objective = None;
+            task.process = None;
+            task.reason = Some(
+                "support hash algorithm was upgraded; rerun the baseline under the current algorithm before comparing candidates (the cached baseline has no support hash algorithm label)"
+                    .into(),
+            );
+        }
+        push_warning_once(
+            state,
+            format!(
+                "{baseline} / {site}: support hash algorithm was upgraded; the cached baseline uses the legacy support hash algorithm and was marked for rerun (rerun the baseline under the current algorithm before comparing candidates)"
+            ),
+        );
+    }
+    Ok(true)
 }
 
 fn ensure_tuning_baseline_ready(manifest: &Manifest, state: &StudyState) -> Result<()> {
@@ -3535,62 +3698,72 @@ fn target_result(
             }
         },
     };
-    let (support_hash, pairs, value, observation_sd, model_mean, observation_mean, coverage) =
-        if let Some(aggregate) = aggregate {
-            let model = row.model.as_ref().with_context(|| {
-                format!(
-                    "target {} ({}) did not return full paired model values",
-                    target.key, target.variable
-                )
-            })?;
-            let paired =
-                super::targets::aggregate_pairs(time, model, obs, aggregate, coverage_interval)?;
-            let coverage = Some((
-                paired.coverage.iter().sum::<f64>() / paired.coverage.len().max(1) as f64,
-                paired
-                    .coverage
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min),
-                paired.dropped,
-            ));
-            let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
+    let (
+        support_hash,
+        support_hash_algorithm,
+        pairs,
+        value,
+        observation_sd,
+        model_mean,
+        observation_mean,
+        coverage,
+    ) = if let Some(aggregate) = aggregate {
+        let model = row.model.as_ref().with_context(|| {
+            format!(
+                "target {} ({}) did not return full paired model values",
+                target.key, target.variable
+            )
+        })?;
+        let paired =
+            super::targets::aggregate_pairs(time, model, obs, aggregate, coverage_interval)?;
+        let coverage = Some((
+            paired.coverage.iter().sum::<f64>() / paired.coverage.len().max(1) as f64,
+            paired
+                .coverage
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min),
+            paired.dropped,
+        ));
+        let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
                 format!(
                     "target {} ({}) has fewer than two {aggregate:?} means with enough data for {site} in the {period} window",
                     target.key, target.variable
                 )
             })?;
-            let value = match target.metric {
-                ObjectiveMetric::Nrmse => metrics.rmse,
-                ObjectiveMetric::Mae => metrics.mae,
-                ObjectiveMetric::AbsBias => metrics.bias,
-                ObjectiveMetric::Nse => metrics.nse,
-                ObjectiveMetric::Kge => metrics.kge,
-                ObjectiveMetric::R2 => metrics.r2,
-                ObjectiveMetric::R => metrics.correlation,
-            };
-            (
-                // 聚合后的观测均值可能因为模型缺测缩小支持而碰巧不变，支持哈希必须覆盖
-                // 每时段原始的观测有限样本数/配对样本数（见 `targets::PeriodIdentity`）。
-                super::targets::aggregate_support_hash(&paired.identity, &paired.obs),
-                metrics.n,
-                value,
-                metrics.obs_sd,
-                metrics.model_mean,
-                metrics.obs_mean,
-                coverage,
-            )
-        } else {
-            (
-                pair_support_hash(time, obs),
-                row.n,
-                metric_value(&row, target.metric),
-                row.obs_sd,
-                row.model_mean,
-                row.obs_mean,
-                None,
-            )
+        let value = match target.metric {
+            ObjectiveMetric::Nrmse => metrics.rmse,
+            ObjectiveMetric::Mae => metrics.mae,
+            ObjectiveMetric::AbsBias => metrics.bias,
+            ObjectiveMetric::Nse => metrics.nse,
+            ObjectiveMetric::Kge => metrics.kge,
+            ObjectiveMetric::R2 => metrics.r2,
+            ObjectiveMetric::R => metrics.correlation,
         };
+        (
+            // 聚合后的观测均值可能因为模型缺测缩小支持而碰巧不变，支持哈希必须覆盖
+            // 每时段原始的观测有限样本数/配对样本数（见 `targets::PeriodIdentity`）。
+            super::targets::aggregate_support_hash(&paired.identity, &paired.obs),
+            SUPPORT_HASH_ALGORITHM_AGGREGATE,
+            metrics.n,
+            value,
+            metrics.obs_sd,
+            metrics.model_mean,
+            metrics.obs_mean,
+            coverage,
+        )
+    } else {
+        (
+            pair_support_hash(time, obs),
+            SUPPORT_HASH_ALGORITHM_PAIR,
+            row.n,
+            metric_value(&row, target.metric),
+            row.obs_sd,
+            row.model_mean,
+            row.obs_mean,
+            None,
+        )
+    };
     let (coverage_mean, coverage_min, periods_dropped) = match coverage {
         Some((mean, min, dropped)) if min.is_finite() => (Some(mean), Some(min), Some(dropped)),
         _ => (None, None, None),
@@ -3624,6 +3797,7 @@ fn target_result(
         model_mean,
         observation_mean,
         support_hash,
+        support_hash_algorithm: support_hash_algorithm.into(),
         coverage_mean,
         coverage_min,
         periods_dropped,
@@ -3716,6 +3890,7 @@ fn paired_target_result(
         model_mean: metrics.model_mean,
         observation_mean: metrics.obs_mean,
         support_hash: super::targets::aggregate_support_hash(&paired.identity, &paired.obs),
+        support_hash_algorithm: SUPPORT_HASH_ALGORITHM_AGGREGATE.into(),
         coverage_mean,
         coverage_min,
         // 格点/水文站的聚合不做覆盖率门槛（观测产品本来就有缺测），所以没有丢掉的时段。
@@ -4019,6 +4194,41 @@ fn validate_task_result(
     Ok(())
 }
 
+/// 候选与基线的支持哈希是否来自同一版算法；不同则返回"算法升级需重跑"的明确原因。
+///
+/// 空标签是旧结果（字段引入前写下）：当时哈希覆盖的内容无法证明与当前算法一致。
+/// 这里必须在比较 `support_hash` 之前拦下——否则只会报"模型/观测支持不同"，用户会去查
+/// 变量、缺测和时段，实际原因只是代码升级换了哈希口径。
+fn support_hash_algorithm_mismatch(
+    candidate: &TargetResult,
+    baseline: &TargetResult,
+) -> Option<String> {
+    let candidate_algorithm = candidate.support_hash_algorithm.as_str();
+    let baseline_algorithm = baseline.support_hash_algorithm.as_str();
+    if candidate_algorithm == baseline_algorithm {
+        return None;
+    }
+    let describe = |algorithm: &str| {
+        if algorithm.is_empty() {
+            "the legacy (unversioned) support hash algorithm".to_string()
+        } else {
+            format!("support hash algorithm {algorithm}")
+        }
+    };
+    if candidate_algorithm.is_empty() {
+        // 候选本身是升级前写下的缓存结果：重跑基线救不了它，必须重跑该候选。
+        return Some(format!(
+            "was scored with the legacy (unversioned) support hash algorithm, but the baseline uses {}; rerun this candidate under the current algorithm before comparing",
+            describe(baseline_algorithm)
+        ));
+    }
+    Some(format!(
+        "uses {}, but the baseline uses {}; the support hash algorithm was upgraded, so rerun the baseline under the current algorithm before comparing candidates (a hash from the old algorithm cannot be compared with one from the new one)",
+        describe(candidate_algorithm),
+        describe(baseline_algorithm)
+    ))
+}
+
 fn comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Result<()> {
     let mut baseline_rows = BTreeMap::new();
     for row in &baseline.calibration {
@@ -4028,6 +4238,9 @@ fn comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResult) -> Resu
         let base = baseline_rows
             .get(&(row.period.as_str(), row.key.as_str()))
             .with_context(|| format!("baseline missing target {} / {}", row.period, row.key))?;
+        if let Some(reason) = support_hash_algorithm_mismatch(row, base) {
+            bail!("target {} / {} {reason}", row.period, row.key);
+        }
         if row.pairs != base.pairs || row.support_hash != base.support_hash {
             // 聚合目标的支持哈希覆盖每时段的原始样本数：候选模型缺值缩了支持、日均却碰巧
             // 相同也会在这里判不可比。报错带上计数与哈希前缀，免得用户只看到一句"不一样"。
@@ -4054,6 +4267,9 @@ fn validation_comparable_to_baseline(candidate: &TaskResult, baseline: &TaskResu
         let base = baseline_rows
             .get(row.key.as_str())
             .with_context(|| format!("baseline missing validation target {}", row.key))?;
+        if let Some(reason) = support_hash_algorithm_mismatch(row, base) {
+            bail!("validation target {} {reason}", row.key);
+        }
         if row.pairs != base.pairs || row.support_hash != base.support_hash {
             bail!(
                 "validation target {} uses different model-observation support than baseline (candidate {} pairs, hash {}; baseline {} pairs, hash {}); check that both runs wrote the same variable over the same raw times — missing/NaN model samples shrink the support even when the aggregated means match",
@@ -5035,7 +5251,9 @@ pub(super) fn write_objective_tables_to(
         ));
     }
     write_bytes(&results.join("objectives.csv"), objectives.as_bytes())?;
-    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings\n");
+    // 新列放在末尾：旧列的顺序/下标不变，旧读者按表头取列仍能工作；值也走 `csv_cell`
+    // （将来算法标签若带逗号也不会破坏表）。
+    let mut metrics = String::from("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings,support_hash_algorithm\n");
     let mut metric_rows = Vec::new();
     for task in state
         .tasks
@@ -5054,7 +5272,7 @@ pub(super) fn write_objective_tables_to(
             // 多条警告合成一格；`csv_cell` 负责引号/逗号/换行转义，警告原文里这些都可能有。
             let warnings = csv_cell(&row.warnings.join("; "));
             metrics.push_str(&format!(
-                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&task.member),
                 csv_cell(&row.site),
                 csv_cell(&row.period),
@@ -5078,6 +5296,7 @@ pub(super) fn write_objective_tables_to(
                     .unwrap_or_default(),
                 number(row.space_coverage),
                 warnings,
+                csv_cell(&row.support_hash_algorithm),
             ));
             metric_rows.push(ObjectiveMetricRow {
                 member: task.member.clone(),
@@ -5095,6 +5314,7 @@ pub(super) fn write_objective_tables_to(
                 model_mean: row.model_mean,
                 observation_mean: row.observation_mean,
                 support_hash: row.support_hash.clone(),
+                support_hash_algorithm: row.support_hash_algorithm.clone(),
                 coverage_mean: row.coverage_mean,
                 coverage_min: row.coverage_min,
                 periods_dropped: row.periods_dropped,
@@ -6362,6 +6582,7 @@ mod tests {
             model_mean: 5.0,
             observation_mean: 4.5,
             support_hash: pair_support_hash(&support, &obs),
+            support_hash_algorithm: SUPPORT_HASH_ALGORITHM_PAIR.into(),
             coverage_mean: None,
             coverage_min: None,
             periods_dropped: None,
@@ -6492,6 +6713,184 @@ mod tests {
             vec![1.0, 99.0, 3.0],
         )];
         assert!(comparable_to_baseline(&validation_mismatch, &baseline).is_ok());
+    }
+
+    fn task_result(
+        member: &str,
+        calibration: Vec<TargetResult>,
+        validation: Vec<TargetResult>,
+    ) -> TaskResult {
+        TaskResult {
+            member: member.into(),
+            site: "site".into(),
+            outputs: Vec::new(),
+            calibration,
+            validation,
+            validation_errors: Vec::new(),
+        }
+    }
+
+    /// 旧结果缺 `support_hash_algorithm`：与新算法候选比较时必须说"算法升级、重跑基线"，
+    /// 不能落到"支持不同"让用户去查模型缺测/观测变量。
+    #[test]
+    fn a_legacy_baseline_is_incomparable_to_a_new_candidate_with_rerun_guidance() {
+        let mut baseline = aggregated_task_result(true);
+        let mut candidate = aggregated_task_result(true);
+        for row in baseline.calibration.iter_mut() {
+            row.support_hash_algorithm.clear();
+        }
+        let error = comparable_to_baseline(&candidate, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("support hash algorithm was upgraded"),
+            "{error}"
+        );
+        assert!(
+            error.contains("rerun the baseline under the current algorithm"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("different model-observation support"),
+            "{error}"
+        );
+
+        // 验证期走同一套判定。
+        baseline.validation = vec![target_row("validation", vec![3, 4])];
+        baseline.validation[0].support_hash_algorithm.clear();
+        candidate.validation = vec![target_row("validation", vec![3, 4])];
+        let error = validation_comparable_to_baseline(&candidate, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("support hash algorithm was upgraded"),
+            "{error}"
+        );
+        assert!(
+            error.contains("rerun the baseline under the current algorithm"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("different model-observation support"),
+            "{error}"
+        );
+    }
+
+    /// 同一算法下支持不同仍是"支持不同"：版本标签不能把真实的支持缺失掩盖掉。
+    #[test]
+    fn same_algorithm_with_different_support_still_reports_support_difference() {
+        let baseline = task_result(
+            "m000000",
+            vec![target_row("calibration", vec![1, 2, 3])],
+            Vec::new(),
+        );
+        let different_support = task_result(
+            "m000001",
+            vec![target_row("calibration", vec![1, 2, 4])],
+            Vec::new(),
+        );
+        let error = comparable_to_baseline(&different_support, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("different model-observation support"),
+            "{error}"
+        );
+        // 同一算法、同一支持：通过。
+        comparable_to_baseline(
+            &task_result("m000001", baseline.calibration.clone(), Vec::new()),
+            &baseline,
+        )
+        .unwrap();
+    }
+
+    fn task_state(member: &str, site: &str, status: TaskStatus) -> crate::study::state::TaskState {
+        crate::study::state::TaskState {
+            member: member.into(),
+            site: site.into(),
+            case_dir: format!("/unused/{member}/{site}"),
+            status,
+            stage: None,
+            reason: None,
+            objective: None,
+            validation_objective: None,
+            process: None,
+        }
+    }
+
+    /// 旧研究续跑：旧算法基线在还有新候选要跑时必须退回队列并给出提示，而不是被直接复用；
+    /// 整套结果都还是旧算法、且没有新结果要写时保持自洽，不单独重跑基线。
+    #[test]
+    fn a_legacy_baseline_is_requeued_only_when_new_results_still_need_comparison() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-legacy-baseline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manifest = tuning_manifest(&root);
+        let mut calibration = target_row("calibration", vec![1, 2]);
+        calibration.support_hash_algorithm.clear();
+        let mut validation = target_row("validation", vec![3, 4]);
+        validation.support_hash_algorithm.clear();
+        write_json(
+            &task_result_path(&manifest, "m000000", "site"),
+            &task_result(
+                "m000000",
+                vec![calibration.clone()],
+                vec![validation.clone()],
+            ),
+        )
+        .unwrap();
+
+        let mut pending = StudyState::new(
+            "s".into(),
+            [
+                task_state("m000000", "site", TaskStatus::Succeeded),
+                task_state("m000001", "site", TaskStatus::Pending),
+            ],
+        )
+        .unwrap();
+        assert!(requeue_legacy_baseline_tasks(&manifest, &mut pending, false).unwrap());
+        let baseline = &pending.tasks["m000000/site"];
+        assert_eq!(baseline.status, TaskStatus::Queued);
+        assert!(baseline
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("rerun the baseline under the current algorithm"));
+        assert!(pending
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("support hash algorithm was upgraded")));
+        // 退回队列后调优研究会在跑候选前先补基线。
+        assert!(!baseline_tasks_succeeded(&manifest, &pending));
+
+        // 旧基线 + 旧候选、没有新任务：整套结果仍是同一旧算法，保持原状。
+        write_json(
+            &task_result_path(&manifest, "m000001", "site"),
+            &task_result("m000001", vec![calibration], vec![validation]),
+        )
+        .unwrap();
+        let mut finished = StudyState::new(
+            "s".into(),
+            [
+                task_state("m000000", "site", TaskStatus::Succeeded),
+                task_state("m000001", "site", TaskStatus::Succeeded),
+            ],
+        )
+        .unwrap();
+        assert!(!requeue_legacy_baseline_tasks(&manifest, &mut finished, false).unwrap());
+        assert_eq!(finished.tasks["m000000/site"].status, TaskStatus::Succeeded);
+        // 不重跑也要留诊断：以后加新候选前必须先重跑旧算法基线。
+        assert!(finished
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("support hash algorithm was upgraded")));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -8522,6 +8921,7 @@ mod tests {
                         &(0..12).collect::<Vec<_>>(),
                         &(0..12).map(|v| v as f64).collect::<Vec<_>>(),
                     ),
+                    support_hash_algorithm: SUPPORT_HASH_ALGORITHM_PAIR.into(),
                     coverage_mean: None,
                     coverage_min: None,
                     periods_dropped: None,
@@ -8552,13 +8952,20 @@ mod tests {
             "Qle: no units attribute, assuming canonical units W/m2"
         );
         assert!(
-            csv.starts_with("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings\n"),
+            csv.starts_with("member,site,period,target,variable,metric,weight,min_pairs,pairs,value,observation_sd,loss,model_mean,observation_mean,coverage_mean,coverage_min,periods_dropped,space_coverage,warnings,support_hash_algorithm\n"),
             "{csv:?}"
         );
         assert!(
             csv.contains("\"Qle: no units attribute, assuming canonical units W/m2\""),
             "{csv:?}"
         );
+        // 新增的算法列在末尾：旧列顺序不变，值也在 JSON/CSV 两处一致。
+        assert_eq!(
+            rows[0]["support_hash_algorithm"],
+            SUPPORT_HASH_ALGORITHM_PAIR
+        );
+        // 目标名里带换行，不能用 `lines()` 找"第二行"；整张表最后一格是新列。
+        assert!(csv.ends_with(",pair-v1\n"), "{csv:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -10370,6 +10777,7 @@ esac
         row.pairs = paired.support.len();
         row.support_hash =
             crate::study::targets::aggregate_support_hash(&paired.identity, &paired.obs);
+        row.support_hash_algorithm = SUPPORT_HASH_ALGORITHM_AGGREGATE.into();
         TaskResult {
             member: "m000001".into(),
             site: "site".into(),
@@ -10665,6 +11073,7 @@ esac
         let row = target_result(&case, &observation, "site", &target, false, 1).unwrap();
         // history 一条记录就是一天的均值：4 天 = 4 对，不能再按日平均一次。
         assert_eq!(row.pairs, 4);
+        assert_eq!(row.support_hash_algorithm, SUPPORT_HASH_ALGORITHM_PAIR);
         assert!(row.value.abs() < 1e-12, "{}", row.value);
         assert!(
             row.coverage_mean.is_none(),
@@ -10850,6 +11259,10 @@ esac
         // 反例的前提：聚合后指标、均值、时段数全都一样，只有原始样本数减半。
         assert_eq!(baseline_row.pairs, 3);
         assert_eq!(candidate_row.pairs, 3);
+        assert_eq!(
+            baseline_row.support_hash_algorithm,
+            SUPPORT_HASH_ALGORITHM_AGGREGATE
+        );
         assert_eq!(baseline_row.value, candidate_row.value);
         assert_eq!(baseline_row.model_mean, candidate_row.model_mean);
         assert_eq!(
@@ -11005,10 +11418,18 @@ esac
         });
         let result: TaskResult = serde_json::from_value(legacy).unwrap();
         assert!(result.calibration[0].warnings.is_empty());
+        // 旧结果没有算法标签：空串表示"升级前/未知算法"，比较时会被当成需要重跑的基线。
+        assert!(result.calibration[0].support_hash_algorithm.is_empty());
         let written = serde_json::to_value(&result).unwrap();
         assert!(
             written["calibration"][0].get("warnings").is_none(),
             "空警告不能写回旧结果，否则旧结果文件会被改写"
+        );
+        assert!(
+            written["calibration"][0]
+                .get("support_hash_algorithm")
+                .is_none(),
+            "空算法标签不能写回旧结果，否则旧结果文件会被改写"
         );
     }
 }
