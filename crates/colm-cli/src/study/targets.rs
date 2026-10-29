@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 
-use super::spec::{TargetPeriod, TargetSource, TargetSpec};
+use super::spec::{GridMatching, TargetPeriod, TargetSource, TargetSpec};
 
 /// 配好对的样本。`support` 标识每一对（时段与格子），用来核对候选成员与基线比的是同一批观测。
 #[derive(Debug, Default, PartialEq)]
@@ -70,11 +70,15 @@ pub(super) struct PeriodIdentity {
 
 /// 一条序列（模型或观测）在一个时段里的原始支持：和、有限样本数与时刻摘要。
 /// 格点/水文站分开聚合两侧，必须把这份中间量留到配对时才可能判断支持是否一致。
+///
+/// `weight` 是 pixel-overlap 匹配的重叠面积权重和；in-cell、站点、模型路径恒为 0，
+/// 此时 [`PeriodAggregate::mean`] 退回旧的 `sum / count`，逐位不变。
 #[derive(Debug, Default, Clone, Copy)]
 struct PeriodAggregate {
     sum: f64,
     count: usize,
     digest: u64,
+    weight: f64,
 }
 
 impl PeriodAggregate {
@@ -84,8 +88,21 @@ impl PeriodAggregate {
         self.digest = mix_sample_time(self.digest, offset_seconds);
     }
 
+    /// 面积加权版本：`sum` 记住 `value * weight`，均值改由权重和归一。
+    /// 摘要同时滚进权重，否则重叠面积不同、均值又碰巧相同的两组配对会得到同一支持身份。
+    fn add_weighted(&mut self, value: f64, offset_seconds: i64, weight: f64) {
+        self.sum += value * weight;
+        self.weight += weight;
+        self.count += 1;
+        self.digest = mix_weighted_sample(self.digest, offset_seconds, weight);
+    }
+
     fn mean(&self) -> f64 {
-        self.sum / self.count as f64
+        if self.weight > 0.0 {
+            self.sum / self.weight
+        } else {
+            self.sum / self.count as f64
+        }
     }
 }
 
@@ -121,6 +138,16 @@ fn splitmix64(value: u64) -> u64 {
 /// 所以不需要顺序无关；滚动哈希保证多记/少记任何一个样本都会改变摘要。
 fn mix_sample_time(digest: u64, offset_seconds: i64) -> u64 {
     digest.rotate_left(11).wrapping_mul(0x0000_0100_0000_01b3) ^ splitmix64(offset_seconds as u64)
+}
+
+/// 加权路径的样本摘要：时刻与重叠面积权重都要滚进去。
+///
+/// 与 [`mix_sample_time`] 刻意用不同的位移/常数，这样即使权重恰好是 1，pixel-overlap
+/// 也不会与 in-cell 得到同一个摘要 —— 两种匹配方式本身就不该被判为"同一批支持"。
+fn mix_weighted_sample(digest: u64, offset_seconds: i64, weight: f64) -> u64 {
+    digest.rotate_left(23).wrapping_mul(0x0000_0100_0000_01b3)
+        ^ splitmix64(offset_seconds as u64)
+        ^ splitmix64(weight.to_bits())
 }
 
 /// 模型侧与观测侧时刻摘要的合并。两侧各自的样本数已经单独记下，这里只负责让
@@ -206,6 +233,49 @@ fn axis_spacing(values: &[f64], circular: bool) -> Option<f64> {
     gaps.get(gaps.len() / 2).copied()
 }
 
+/// 观测像元的半格边界：按中位间距 `d` 生成 `[center - d/2, center + d/2]`。
+///
+/// 为什么用中位间距而不是相邻坐标的中点：不规则轴（如变间距产品）上两者不同，但
+/// pixel-overlap 只要求一个可解释、对所有像元一致的像元尺度；中位间距在规则网格上与
+/// 相邻中点完全一致，在不规则轴上也不会被个别极端间距带偏。纬度升/降序都规范化成
+/// `south < north`；经度归一到 [-180, 180)，跨日界线的像元于是写成 `west > east`，
+/// 宽度一律交给 [`crate::lon_width`] 的环形公式。
+fn half_pixel_bounds(values: &[f64], circular: bool) -> Option<Vec<(f64, f64)>> {
+    let spacing = axis_spacing(values, circular)?;
+    let half = spacing / 2.0;
+    let wrap = |value: f64| (value + 180.0).rem_euclid(360.0) - 180.0;
+    Some(
+        values
+            .iter()
+            .map(|&center| {
+                let (low, high) = (center - half, center + half);
+                if circular {
+                    (wrap(low), wrap(high))
+                } else {
+                    (low.min(high), low.max(high))
+                }
+            })
+            .collect(),
+    )
+}
+
+/// 两个经度区间（可跨日界线，`west > east`）在环上的重叠宽度（度）。
+///
+/// `offset` 把 B 的起点换算到 A 的环上；B 最多只可能绕回一次（宽度 ≤ 360），
+/// 所以拆成 `[offset, 360)` 与 `[0, offset + width_b - 360)` 两段分别与 A 的
+/// `[0, width_a)` 求交。直接相减会在 B 跨越 0/360 时把重叠算成负数或整圈。
+fn lon_overlap_degrees(west_a: f64, east_a: f64, west_b: f64, east_b: f64) -> f64 {
+    let width_a = crate::lon_width(west_a, east_a);
+    let width_b = crate::lon_width(west_b, east_b);
+    let offset = (west_b - west_a).rem_euclid(360.0);
+    let end = offset + width_b;
+    let mut overlap = (width_a.min(end) - offset).max(0.0);
+    if end > 360.0 {
+        overlap += width_a.min(end - 360.0).max(0.0);
+    }
+    overlap
+}
+
 /// 一组格边界跨度的中位数；任一边界无效时返回 `None`，免得用半张网格推出错误的尺度。
 fn median_span(spans: impl Iterator<Item = f64>) -> Option<f64> {
     let mut spans = spans.collect::<Vec<_>>();
@@ -220,8 +290,8 @@ fn median_span(spans: impl Iterator<Item = f64>) -> Option<f64> {
 ///
 /// #17 的背景：in-cell 匹配只认格心落在模型格里的观测像元。观测产品比模型格粗时，
 /// 一个模型格往往收不到任何格心，`space_coverage` 会静默偏低，用户却只看到"覆盖差"
-/// 不知道是产品分辨率的问题。这里只提示，不恢复无界最近邻、也不做重采样 —— 最近邻会
-/// 把域外观测配上（审计 P1-2），重采样还没实现；两者都不能在告警里假装已经做了。
+/// 不知道是产品分辨率的问题。这里只提示，不恢复无界最近邻 —— 最近邻会把域外观测
+/// 配上（审计 P1-2）。pixel-overlap 是显式 opt-in 的替代方案，所以告警末尾指向它。
 fn coarse_observation_warning(
     key: &str,
     observation: &Path,
@@ -237,13 +307,22 @@ fn coarse_observation_warning(
         (true, true) => "lat/lon",
     };
     Some(format!(
-        "target {key}: the observation product {} has {:.3}° (lat) × {:.3}° (lon) pixels, coarser than the model grid resolution {:.3}° × {:.3}° ({axes} axis). Only observation pixels whose centres fall inside a model cell are matched (in-cell matching, no regridding), so space_coverage will be understated. Use a finer observation product, or resample by pixel boundaries once that is implemented (resampling is not implemented).",
+        "target {key}: the observation product {} has {:.3}° (lat) × {:.3}° (lon) pixels, coarser than the model grid resolution {:.3}° × {:.3}° ({axes} axis). Only observation pixels whose centres fall inside a model cell are matched (in-cell matching), so space_coverage will be understated. Use a finer observation product, or set matching = pixel-overlap to match by pixel boundaries with area weights.",
         observation.display(),
         obs.0,
         obs.1,
         model.0,
         model.1
     ))
+}
+
+/// pixel-overlap 匹配的诊断：这是用户显式选择的配对方式，不是"覆盖率被低估"的问题，
+/// 所以不再发 in-cell 那条告警，只说明面积加权怎么算、覆盖率按什么口径数。
+fn pixel_overlap_warning(key: &str, observation: &Path) -> String {
+    format!(
+        "target {key}: matching the observation product {} to the model grid by area-weighted pixel-overlap matching (matching = pixel-overlap). Each model cell averages the observation pixels overlapping it, weighted by the overlap area (latitude overlap × circular longitude overlap); space_coverage counts every model cell with a positive-area overlap instead of only those containing a pixel centre.",
+        observation.display()
+    )
 }
 
 /// 预检阶段模型网格分辨率只能从 `case.nml` 声明值来：那时还没有 history 可读格边界。
@@ -388,6 +467,7 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
         scale,
         offset,
         period,
+        matching,
     }) = &target.source
     else {
         bail!("target {} is not a gridded-product target", target.key);
@@ -395,10 +475,10 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
     let obs = GridObservation::open(Path::new(path), variable)?;
     let period = period.unwrap_or_else(|| obs.natural_period());
     let model = ModelGrid::read(case, &target.variable, period, window)?;
-    let (cells, space_coverage) = model.cells_with_observations(&obs)?;
+    let (cells, space_coverage) = model.cells_with_observations(&obs, *matching)?;
     ensure!(
         !cells.is_empty(),
-        "target {}: no model cell contains an observation from {}; the observation product does not overlap the model grid, so nothing can be compared",
+        "target {}: no model cell is covered by an observation from {}; the observation product does not overlap the model grid, so nothing can be compared",
         target.key,
         path
     );
@@ -407,18 +487,33 @@ pub(super) fn grid_pairs(case: &Path, target: &TargetSpec, window: Window) -> Re
         .iter()
         .map(|(_, matched)| matched.clone())
         .collect::<Vec<_>>();
-    let obs_means = obs.period_means(&obs_cells, period, window, *scale, *offset)?;
+    let obs_means = obs.period_means(&obs_cells, period, window, *scale, *offset, *matching)?;
     let mut paired = Paired {
         space_coverage: Some(space_coverage),
         ..Default::default()
     };
-    // #17：观测产品比模型格粗时，in-cell 匹配只认格心，space_coverage 会静默偏低。
-    // 这里只把口径写进目标警告；不改变配对方式（不做最近邻、不重采样）。
-    if let (Some(obs_spacing), Some(model_resolution)) = (obs.pixel_spacing(), model.resolution()) {
-        if let Some(warning) =
-            coarse_observation_warning(&target.key, Path::new(path), obs_spacing, model_resolution)
-        {
-            paired.warnings.push(warning);
+    match matching {
+        // #17：观测产品比模型格粗时，in-cell 匹配只认格心，space_coverage 会静默偏低。
+        // 这里只把口径写进目标警告；不改变配对方式（不做最近邻）。pixel-overlap 已按
+        // 边界加权，粗产品告警不成立，改为一条说明配对口径的诊断。
+        GridMatching::InCell => {
+            if let (Some(obs_spacing), Some(model_resolution)) =
+                (obs.pixel_spacing(), model.resolution())
+            {
+                if let Some(warning) = coarse_observation_warning(
+                    &target.key,
+                    Path::new(path),
+                    obs_spacing,
+                    model_resolution,
+                ) {
+                    paired.warnings.push(warning);
+                }
+            }
+        }
+        GridMatching::PixelOverlap => {
+            paired
+                .warnings
+                .push(pixel_overlap_warning(&target.key, Path::new(path)));
         }
     }
     for (start, model_cells) in &model.means {
@@ -630,7 +725,9 @@ pub(super) fn preflight_observation(
         case_root.join(path)
     };
     let (time, warnings) = match source {
-        TargetSource::Grid { variable, .. } => {
+        TargetSource::Grid {
+            variable, matching, ..
+        } => {
             ensure!(
                 planned.contains(&target.variable),
                 "target {}: the case does not write {} to its history",
@@ -638,16 +735,23 @@ pub(super) fn preflight_observation(
                 target.variable
             );
             let observation = GridObservation::open(&path, variable)?;
-            let warnings = match (
-                observation.pixel_spacing(),
-                declared_model_resolution(case_root),
-            ) {
-                (Some(spacing), Some(resolution)) => {
-                    coarse_observation_warning(&target.key, &path, spacing, resolution)
-                        .into_iter()
-                        .collect()
+            // pixel-overlap 是用户显式选择的边界匹配：in-cell 那条"粗产品导致覆盖率
+            // 被低估"的预检告警在这里不成立，不能照着报。
+            let warnings = match matching {
+                GridMatching::PixelOverlap => Vec::new(),
+                GridMatching::InCell => {
+                    match (
+                        observation.pixel_spacing(),
+                        declared_model_resolution(case_root),
+                    ) {
+                        (Some(spacing), Some(resolution)) => {
+                            coarse_observation_warning(&target.key, &path, spacing, resolution)
+                                .into_iter()
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    }
                 }
-                _ => Vec::new(),
             };
             (observation.time, warnings)
         }
@@ -716,8 +820,19 @@ fn period_means_1d(
     sums
 }
 
-/// 有观测覆盖的模型格子：`(模型格子下标, 落在这个格子里的观测格 (行, 列))`。
-type CoveredCells = (usize, Vec<(usize, usize)>);
+/// 一个参与某个模型格平均的观测像元。
+///
+/// in-cell 匹配的权重恒为 1（每个像元对格子的贡献与旧实现一致）；pixel-overlap
+/// 用重叠面积（纬度重叠 × 环形经度重叠，单位度²）作权重。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ObsPixel {
+    row: usize,
+    column: usize,
+    weight: f64,
+}
+
+/// 有观测覆盖的模型格子：`(模型格子下标, 落在这个格子里的观测像元及权重)`。
+type CoveredCells = (usize, Vec<ObsPixel>);
 
 /// 模型的格点场按时段平均：`means[时段起点][格子]`，只含有陆地面积的格子（顺序同 `cells`）。
 struct ModelGrid {
@@ -867,13 +982,27 @@ impl ModelGrid {
         })
     }
 
-    /// 每个模型格子对应的观测格子：只认观测格心落在模型格子里的（观测比模型细时求平均）。
+    /// 每个模型格子对应的观测像元。
+    ///
+    /// `InCell`（旧行为）：只认观测格心落在模型格子里的（观测比模型细时求平均），权重恒 1；
+    /// `PixelOverlap`（#17，opt-in）：按像元边界重叠面积加权，因此 1° 粗像元能覆盖它身下
+    /// 每一个 0.5° 模型格，而不是只配格心所在的那一个。
     ///
     /// 审计 P1-2：原来一个都没有时无条件取最近邻，模型在华南、观测只覆盖欧洲也会"配上"，
     /// 指标看起来正常却没有任何意义。现在没有格内观测的模型格直接排除，并返回
     /// "有观测的模型格 / 全部陆地格"的比例，供结果与预检报告覆盖情况。
-    fn cells_with_observations(&self, obs: &GridObservation) -> Result<(Vec<CoveredCells>, f64)> {
+    fn cells_with_observations(
+        &self,
+        obs: &GridObservation,
+        matching: GridMatching,
+    ) -> Result<(Vec<CoveredCells>, f64)> {
         let wrap = |value: f64| (value + 180.0).rem_euclid(360.0) - 180.0;
+        // 像元边界只在 pixel-overlap 路径需要。in-cell 不碰它：单点产品（推不出像元
+        // 尺度）在 in-cell 下仍按旧行为可用，不能因为新增能力而拒绝旧设定。
+        let pixel_bounds = match matching {
+            GridMatching::InCell => None,
+            GridMatching::PixelOverlap => Some(obs.pixel_bounds()?),
+        };
         let mut out = Vec::with_capacity(self.cells.len());
         for (index, &(row, column)) in self.cells.iter().enumerate() {
             let (south, north) = self.lat_bounds[row];
@@ -882,25 +1011,58 @@ impl ModelGrid {
             // 跨日界线的最后一列 `lon_e = -180` 会写成 east < west，直接相减得到负宽度，
             // 下面 `rem_euclid < width` 永远不成立，整列观测会被静默丢掉。
             let width = crate::lon_width(wrap(west), east);
-            let rows = obs
-                .lat
-                .iter()
-                .enumerate()
-                .filter(|(_, lat)| **lat >= south && **lat < north)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let columns = obs
-                .lon
-                .iter()
-                .enumerate()
-                .filter(|(_, lon)| (wrap(**lon) - wrap(west)).rem_euclid(360.0) < width)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let matched = rows
-                .iter()
-                .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
-                .collect::<Vec<_>>();
-            // 只保留格内有观测的格子；空出来就是"这片模型区域没有观测"，不拿最近邻顶上。
+            let matched = match &pixel_bounds {
+                None => {
+                    let rows = obs
+                        .lat
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, lat)| **lat >= south && **lat < north)
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    let columns = obs
+                        .lon
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, lon)| (wrap(**lon) - wrap(west)).rem_euclid(360.0) < width)
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    rows.iter()
+                        .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
+                        .map(|(row, column)| ObsPixel {
+                            row,
+                            column,
+                            weight: 1.0,
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Some((lat_bounds, lon_bounds)) => {
+                    // 经度两端都归一化到同一个环上，跨日界线的像元在两边都写成 west > east。
+                    let west = wrap(west);
+                    let east = wrap(east);
+                    let mut matched = Vec::new();
+                    for (obs_row, &(obs_south, obs_north)) in lat_bounds.iter().enumerate() {
+                        let lat_overlap = north.min(obs_north) - south.max(obs_south);
+                        // 只在边界上擦过（面积 0）的不算覆盖，否则 space_coverage 会虚高。
+                        if lat_overlap <= 0.0 {
+                            continue;
+                        }
+                        for (obs_column, &(obs_west, obs_east)) in lon_bounds.iter().enumerate() {
+                            let weight =
+                                lat_overlap * lon_overlap_degrees(west, east, obs_west, obs_east);
+                            if weight > 0.0 {
+                                matched.push(ObsPixel {
+                                    row: obs_row,
+                                    column: obs_column,
+                                    weight,
+                                });
+                            }
+                        }
+                    }
+                    matched
+                }
+            };
+            // 只保留有观测覆盖的格子；空出来就是"这片模型区域没有观测"，不拿最近邻顶上。
             if !matched.is_empty() {
                 out.push((index, matched));
             }
@@ -913,6 +1075,10 @@ impl ModelGrid {
         Ok((out, coverage))
     }
 }
+
+/// 观测像元的边界：`(lat 边界, lon 边界)`，每个轴一组 `(low, high)`。
+/// 经度已归一到 [-180, 180)，跨日界线时 `low > high`，宽度见 [`crate::lon_width`]。
+type PixelBounds = (Vec<(f64, f64)>, Vec<(f64, f64)>);
 
 /// 格点观测产品：`time × lat × lon` 的一个变量。只读要用到的纬度带，逐个时刻读，全球产品也不整个载入。
 struct GridObservation {
@@ -932,6 +1098,22 @@ impl GridObservation {
             axis_spacing(&self.lat, false)?,
             axis_spacing(&self.lon, true)?,
         ))
+    }
+
+    /// pixel-overlap 匹配用的像元边界（经纬各一组，见 [`half_pixel_bounds`]）。
+    ///
+    /// 单点产品、重复坐标或含非有限值的轴推不出像元尺度：这里明确报错，而不是悄悄
+    /// 退回 in-cell —— 那会把用户显式选择的面积加权换成另一种配对，指标却看起来正常。
+    fn pixel_bounds(&self) -> Result<PixelBounds> {
+        let context = |axis: &str| {
+            format!(
+                "cannot derive {axis} pixel boundaries for pixel-overlap matching in {}: the axis needs at least two finite coordinates with distinct spacing (a single-point product has no pixel extent); use matching = in-cell",
+                self.path.display()
+            )
+        };
+        let lat = half_pixel_bounds(&self.lat, false).with_context(|| context("lat"))?;
+        let lon = half_pixel_bounds(&self.lon, true).with_context(|| context("lon"))?;
+        Ok((lat, lon))
     }
 
     fn open(path: &Path, variable: &str) -> Result<Self> {
@@ -995,13 +1177,17 @@ impl GridObservation {
     }
 
     /// 各模型格子在各时段的观测平均：`[时段起点][格子]`，已换成模型单位。
+    ///
+    /// in-cell 走旧的无权累加（`add`），pixel-overlap 把像元的重叠面积权重交给
+    /// `add_weighted`；两条路径的和、均值与摘要定义不同，不能混用。
     fn period_means(
         &self,
-        cells: &[Vec<(usize, usize)>],
+        cells: &[Vec<ObsPixel>],
         period: TargetPeriod,
         (from, to): Window,
         scale: f64,
         offset: f64,
+        matching: GridMatching,
     ) -> Result<BTreeMap<i64, Vec<PeriodAggregate>>> {
         let file = netcdf::open(&self.path)
             .with_context(|| format!("cannot open {}", self.path.display()))?;
@@ -1019,7 +1205,7 @@ impl GridObservation {
             attribute("scale_factor").unwrap_or(1.0),
             attribute("add_offset").unwrap_or(0.0),
         );
-        let rows = cells.iter().flatten().map(|(row, _)| *row);
+        let rows = cells.iter().flatten().map(|pixel| pixel.row);
         let (Some(low), Some(high)) = (rows.clone().min(), rows.max()) else {
             return Ok(BTreeMap::new());
         };
@@ -1037,13 +1223,18 @@ impl GridObservation {
                 .entry(start)
                 .or_insert_with(|| vec![PeriodAggregate::default(); cells.len()]);
             for (cell, members) in cells.iter().enumerate() {
-                for &(row, column) in members {
-                    let raw = slab[(row - low) * width + column];
+                for pixel in members {
+                    let raw = slab[(pixel.row - low) * width + pixel.column];
                     if markers.contains(&raw) || !raw.is_finite() {
                         continue;
                     }
                     let value = (raw * packing_scale + packing_offset) * scale + offset;
-                    slot[cell].add(value, t - start);
+                    match matching {
+                        GridMatching::InCell => slot[cell].add(value, t - start),
+                        GridMatching::PixelOverlap => {
+                            slot[cell].add_weighted(value, t - start, pixel.weight);
+                        }
+                    }
                 }
             }
         }

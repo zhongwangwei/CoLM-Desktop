@@ -1229,6 +1229,55 @@ fn a_spec_handed_to_an_older_program_drops_parent_study_and_optionally_include_b
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// #17：旧修订的 `colm-cli` 只会 in-cell 匹配。`pixel-overlap` 是新增的执行语义，
+/// 剥字段（像 `parent_study` 那样）会悄悄换成另一种配对 —— 必须明确拒绝，不能照建。
+/// `in-cell` 是旧行为：缺省不留键，显式写了也整键删掉，旧程序（`deny_unknown_fields`）照读。
+#[test]
+fn a_spec_asking_for_pixel_overlap_is_refused_for_an_older_program() {
+    let root = temp("delegate-pixel-overlap");
+    let write = |name: &str, matching: serde_json::Value| -> PathBuf {
+        let path = root.join(name);
+        let mut source = serde_json::json!({"kind": "grid", "path": "/obs.nc", "variable": "E"});
+        if !matching.is_null() {
+            source["matching"] = matching;
+        }
+        let spec = serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "base_cases": ["case"],
+            "parameters": [{"name": "DEF_TUNING_CNFAC", "sample_min": 0.4, "sample_max": 0.6}],
+            "targets": [{
+                "key": "et", "variable": "f_lfevpa", "from": 0, "to": 3600,
+                "source": source
+            }],
+            "budget": {"population": 4, "generations": 1}
+        });
+        std::fs::write(&path, serde_json::to_vec(&spec).unwrap()).unwrap();
+        path
+    };
+
+    let overlap = write("overlap.json", "pixel-overlap".into());
+    let error = spec_for_older_program(&overlap, false).unwrap_err();
+    assert!(error.to_string().contains("pixel-overlap"), "{error}");
+    assert!(error.to_string().contains("in-cell"), "{error}");
+
+    for (name, matching) in [
+        ("default.json", serde_json::Value::Null),
+        ("in-cell.json", "in-cell".into()),
+    ] {
+        let spec = write(name, matching);
+        let stripped = spec_for_older_program(&spec, false).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stripped).unwrap()).unwrap();
+        assert!(
+            value["targets"][0]["source"].get("matching").is_none(),
+            "交给旧程序的设定不能带 matching 键: {value}"
+        );
+        std::fs::remove_file(&stripped).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `study-compare` 读版本身份时也要能穿过 GUI 归档：活动记录被改名后，取回时写下的
 /// 持久来源还在，比较页必须仍显示提交时的修改版，而不是退回“官方版”。
 #[test]

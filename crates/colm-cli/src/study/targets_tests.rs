@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::study::spec::GridMatching;
+
 fn scratch(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "colm-targets-{name}-{}-{}",
@@ -726,10 +728,8 @@ fn a_coarser_observation_product_warns_that_space_coverage_is_understated() {
         warning.contains("space_coverage will be understated"),
         "{warning}"
     );
-    assert!(
-        warning.contains("resampling is not implemented"),
-        "{warning}"
-    );
+    // 告警要给可行动的替代方案：显式 opt-in 的边界加权匹配。
+    assert!(warning.contains("matching = pixel-overlap"), "{warning}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1486,6 +1486,303 @@ fn point_lookup_matches_the_wrapping_last_global_column() {
     assert_eq!(
         crate::history_cell(&file, &path, "lat", "lon", (179.75, 10.5)).unwrap(),
         (0, 1)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------- #17 像元边界匹配
+
+/// 与 [`grid_target`] 同一份观测，但显式要求按像元边界重叠面积加权（`pixel-overlap`）。
+fn pixel_overlap_target(observation: &Path) -> TargetSpec {
+    serde_json::from_value(serde_json::json!({
+        "key": "et", "variable": "f_lfevpa", "from": JAN1, "to": JAN1 + 3 * DAY,
+        "source": {"kind": "grid", "path": observation, "variable": "E", "matching": "pixel-overlap"}
+    }))
+    .unwrap()
+}
+
+/// 1 × 2 的日界线算例：经向格是 178–179.5、179.5–180（第二格写作 `lon_e = -180`）。
+fn dateline_case(root: &Path) -> PathBuf {
+    let case = root.join("case");
+    let history = case.join("out/dateline/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'dateline'\n/\n",
+    )
+    .unwrap();
+    let mut file = netcdf::create(history.join("dateline_hist_2003-01.nc")).unwrap();
+    file.add_dimension("time", 2).unwrap();
+    file.add_dimension("lat", 1).unwrap();
+    file.add_dimension("lon", 2).unwrap();
+    let put = |file: &mut netcdf::FileMut, name: &str, dims: &[&str], data: &[f64]| {
+        file.add_variable::<f64>(name, dims)
+            .unwrap()
+            .put_values(data, ..)
+            .unwrap();
+    };
+    put(&mut file, "lat", &["lat"], &[10.5]);
+    put(&mut file, "lat_s", &["lat"], &[10.0]);
+    put(&mut file, "lat_n", &["lat"], &[11.0]);
+    put(&mut file, "lon_w", &["lon"], &[178.0, 179.5]);
+    put(&mut file, "lon_e", &["lon"], &[179.5, -180.0]);
+    put(&mut file, "landarea", &["lat", "lon"], &[1.0, 1.0]);
+    let mut time = file.add_variable::<i32>("time", &["time"]).unwrap();
+    time.put_values(
+        &[
+            model_minutes(JAN1 + DAY) as i32,
+            model_minutes(JAN1 + 2 * DAY) as i32,
+        ],
+        ..,
+    )
+    .unwrap();
+    file.add_variable::<f64>("f_lfevpa", &["time", "lat", "lon"])
+        .unwrap()
+        .put_values(&[10.0, 20.0, 30.0, 40.0], ..)
+        .unwrap();
+    case
+}
+
+/// 1° 粗像元正好覆盖 4 个 0.5° 模型格：pixel-overlap 下每格权重 1/4、加权均值就是粗像元值，
+/// 空间覆盖率 100%；同场景 in-cell 只认格心，覆盖率跌到 4/16。
+#[test]
+fn pixel_overlap_matches_coarse_pixels_to_every_covered_model_cell() {
+    let root = scratch("overlap-coarse");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-coarse.nc");
+    write_grid_observation(
+        &observation,
+        3,
+        &[10.5, 11.5],
+        &[100.5, 101.5],
+        |day, row, column| (1000 * (day + 1) + 10 * row + column) as f64,
+    );
+    let window = (JAN1, JAN1 + 3 * DAY);
+
+    let in_cell = grid_pairs(&case, &grid_target(&observation), window).unwrap();
+    assert_eq!(in_cell.model.len(), 12);
+    assert!((in_cell.space_coverage.unwrap() - 4.0 / 16.0).abs() < 1e-12);
+
+    let overlap = grid_pairs(&case, &pixel_overlap_target(&observation), window).unwrap();
+    assert_eq!(overlap.model.len(), 3 * 16);
+    assert_eq!(overlap.space_coverage, Some(1.0));
+    let mut expected_model = Vec::new();
+    let mut expected_obs = Vec::new();
+    for day in 0..3 {
+        for row in 0..4 {
+            for column in 0..4 {
+                expected_model.push((10 * day + 2 * row + column) as f64);
+                expected_obs.push((1000 * (day + 1) + 10 * (row / 2) + column / 2) as f64);
+            }
+        }
+    }
+    assert_eq!(overlap.model, expected_model);
+    assert_eq!(overlap.obs, expected_obs);
+    assert_eq!(overlap.warnings.len(), 1, "{:?}", overlap.warnings);
+    assert!(
+        overlap.warnings[0].contains("area-weighted pixel-overlap matching"),
+        "{:?}",
+        overlap.warnings
+    );
+    // pixel-overlap 不再发 in-cell 那条"格心/不做重采样"的告警。
+    assert!(
+        !overlap.warnings[0].contains("in-cell matching"),
+        "{:?}",
+        overlap.warnings
+    );
+
+    let obs = GridObservation::open(&observation, "E").unwrap();
+    let model = ModelGrid::read(&case, "f_lfevpa", TargetPeriod::Daily, window).unwrap();
+    let (cells, coverage) = model
+        .cells_with_observations(&obs, GridMatching::PixelOverlap)
+        .unwrap();
+    assert_eq!(cells.len(), 16);
+    assert_eq!(coverage, 1.0);
+    for (_, members) in &cells {
+        assert_eq!(members.len(), 1);
+        assert!((members[0].weight - 0.25).abs() < 1e-12);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 像元边界落在模型格中间：每格只盖住两个像元各一半（权重 0.5），加权均值是两像元的平均。
+#[test]
+fn pixel_overlap_weights_half_covered_cells_by_their_area() {
+    let root = scratch("overlap-half");
+    let case = gridded_case(&root, |day, row, column| {
+        (10 * day + 2 * row + column) as f64
+    });
+    let observation = root.join("obs-half.nc");
+    write_grid_observation(
+        &observation,
+        3,
+        &[10.0, 11.0, 12.0],
+        &[100.5, 101.5],
+        |day, row, column| (100 * (day + 1) + 10 * row + column) as f64,
+    );
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let paired = grid_pairs(&case, &pixel_overlap_target(&observation), window).unwrap();
+
+    let obs = GridObservation::open(&observation, "E").unwrap();
+    let model = ModelGrid::read(&case, "f_lfevpa", TargetPeriod::Daily, window).unwrap();
+    let (cells, coverage) = model
+        .cells_with_observations(&obs, GridMatching::PixelOverlap)
+        .unwrap();
+    assert_eq!(cells.len(), 3, "只有三块陆地");
+    assert_eq!(coverage, 1.0);
+    let members = &cells[0].1;
+    assert_eq!(members.len(), 2);
+    for member in members {
+        assert!((member.weight - 0.5).abs() < 1e-12, "{member:?}");
+    }
+    assert_eq!(
+        paired.model,
+        [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0]
+    );
+    assert_eq!(
+        paired.obs,
+        [105.0, 106.0, 115.0, 205.0, 206.0, 215.0, 305.0, 306.0, 315.0]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 跨日界线像元在 `-180..180` 与 `0..360` 两种写法下必须配出同一结果：像元边界归一化后
+/// 写成 `west > east`，环形宽度仍是 0.5。
+#[test]
+fn pixel_overlap_handles_dateline_pixels_in_both_longitude_conventions() {
+    let root = scratch("overlap-dateline");
+    let case = dateline_case(&root);
+    let window = (JAN1, JAN1 + 2 * DAY);
+    for (label, lons) in [("180", [179.75, -179.75]), ("0-360", [179.75, 180.25])] {
+        let observation = root.join(format!("obs-{label}.nc"));
+        write_grid_observation(&observation, 2, &[10.5, 11.5], &lons, |day, row, column| {
+            (100 * (day + 1) + 10 * row + column) as f64
+        });
+        let obs = GridObservation::open(&observation, "E").unwrap();
+        let (_, lon_bounds) = obs.pixel_bounds().unwrap();
+        assert!(
+            lon_bounds[0].0 > lon_bounds[0].1,
+            "跨日界线像元要写成 west > east: {lon_bounds:?}"
+        );
+        assert!((crate::lon_width(lon_bounds[0].0, lon_bounds[0].1) - 0.5).abs() < 1e-12);
+        let paired = grid_pairs(&case, &pixel_overlap_target(&observation), window).unwrap();
+        // 只有跨日界线那一列（像元 0）盖住模型格：纬度 10..11、经度 179.5..180。
+        assert_eq!(paired.model, [20.0, 40.0], "{label}");
+        assert_eq!(paired.obs, [100.0, 200.0], "{label}");
+        assert_eq!(paired.space_coverage, Some(0.5), "{label}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 单点产品没有像元尺度：pixel-overlap 必须明确报错（in-cell 仍是它的旧用法），
+/// 不能悄悄退回 in-cell 改变语义。
+#[test]
+fn pixel_overlap_needs_two_coordinates_to_derive_pixel_boundaries() {
+    let root = scratch("overlap-single");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-single.nc");
+    write_grid_observation(&observation, 3, &[10.25], &[100.25], |day, _, _| {
+        (10 * day) as f64
+    });
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let error = grid_pairs(&case, &pixel_overlap_target(&observation), window).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("pixel-overlap"), "{message}");
+    assert!(message.contains("in-cell"), "{message}");
+    // in-cell 仍然接受单点产品（旧行为）。
+    let paired = grid_pairs(&case, &grid_target(&observation), window).unwrap();
+    assert_eq!(paired.model.len(), 3);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 支持身份必须把重叠面积权重折进去：空间常数场下加权均值、样本数都不变，
+/// 只有权重分配不同时仍要判为不同的支持。
+#[test]
+fn pixel_overlap_support_identity_changes_when_only_the_weights_change() {
+    let root = scratch("overlap-identity");
+    let case = gridded_case(&root, |day, _, _| (100 * (day + 1)) as f64);
+    let aligned = root.join("obs-aligned.nc");
+    write_grid_observation(
+        &aligned,
+        3,
+        &[10.0, 11.0, 12.0],
+        &[100.0, 101.0, 102.0],
+        |day, _, _| (100 * (day + 1)) as f64,
+    );
+    let shifted = root.join("obs-shifted.nc");
+    write_grid_observation(
+        &shifted,
+        3,
+        &[10.0, 11.0, 12.0],
+        &[100.25, 101.25, 102.25],
+        |day, _, _| (100 * (day + 1)) as f64,
+    );
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let first = grid_pairs(&case, &pixel_overlap_target(&aligned), window).unwrap();
+    let second = grid_pairs(&case, &pixel_overlap_target(&shifted), window).unwrap();
+    assert_eq!(first.obs, second.obs, "常数场的加权均值不变");
+    assert_eq!(first.identity.len(), second.identity.len());
+    assert_eq!(first.identity[0].obs_finite, second.identity[0].obs_finite);
+    assert_eq!(first.identity[0].paired, second.identity[0].paired);
+    assert_ne!(
+        aggregate_support_hash(&first.identity, &first.obs),
+        aggregate_support_hash(&second.identity, &second.obs),
+        "权重不同必须得到不同的支持身份"
+    );
+    let again = grid_pairs(&case, &pixel_overlap_target(&aligned), window).unwrap();
+    assert_eq!(
+        aggregate_support_hash(&first.identity, &first.obs),
+        aggregate_support_hash(&again.identity, &again.obs)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// in-cell 是旧行为：权重恒 1、只配格心落入的格子。这里锁住旧支持哈希，
+/// 任何在 in-cell 路径上顺手加权或改摘要顺序的改动都会让黄金值变化。
+#[test]
+fn in_cell_matching_keeps_the_legacy_coverage_and_support_hash() {
+    let root = scratch("in-cell-golden");
+    let case = gridded_half_degree_case(&root);
+    let observation = root.join("obs-coarse.nc");
+    write_grid_observation(
+        &observation,
+        3,
+        &[10.5, 11.5],
+        &[100.5, 101.5],
+        |day, row, column| (1000 * (day + 1) + 10 * row + column) as f64,
+    );
+    let window = (JAN1, JAN1 + 3 * DAY);
+    let paired = grid_pairs(&case, &grid_target(&observation), window).unwrap();
+    assert_eq!(paired.model.len(), 12);
+    assert!((paired.space_coverage.unwrap() - 4.0 / 16.0).abs() < 1e-12);
+    assert_eq!(
+        aggregate_support_hash(&paired.identity, &paired.obs),
+        "9604baf2a12b0881748dc28fd6be23f71e2c7cd2e388eaecfbe0d3a874b7b5bc",
+        "in-cell 支持哈希必须与改动前逐位相同"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 预检对显式 pixel-overlap 不该再报"产品比模型格粗"：那正是这种匹配要解决的问题。
+#[test]
+fn pixel_overlap_preflight_does_not_warn_about_coarse_pixels() {
+    let root = scratch("overlap-preflight");
+    let case = gridded_half_degree_case(&root);
+    let planned = ["f_lfevpa"].into_iter().map(String::from).collect();
+    let coarse = root.join("obs-coarse.nc");
+    write_grid_observation(&coarse, 3, &[10.5, 11.5], &[100.5, 101.5], |_, _, _| 1.0);
+    assert_eq!(
+        preflight_observation(&case, &grid_target(&coarse), &planned)
+            .unwrap()
+            .len(),
+        1,
+        "in-cell 仍要提示覆盖率被低估"
+    );
+    assert!(
+        preflight_observation(&case, &pixel_overlap_target(&coarse), &planned)
+            .unwrap()
+            .is_empty(),
+        "pixel-overlap 已按边界匹配，粗产品告警不再成立"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

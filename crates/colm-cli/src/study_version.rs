@@ -902,6 +902,39 @@ fn spec_for_older_program(spec_file: &Path, drop_include_baseline: bool) -> Resu
             }
         }
     }
+    // pixel-overlap 是这一轮新增的**执行语义**（#17），不是审计元数据。旧修订的
+    // `colm-cli` 只会 in-cell，剥字段会悄悄换成另一种配对，指标看起来正常却不可复现。
+    // 所以显式拒绝；in-cell 是旧行为，缺省不写、显式写了也整键删掉（旧程序不认这个键）。
+    if let Some(targets) = value
+        .get_mut("targets")
+        .and_then(|targets| targets.as_array_mut())
+    {
+        for target in targets {
+            let key = target
+                .get("key")
+                .and_then(|key| key.as_str())
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let Some(source) = target.get_mut("source").and_then(|s| s.as_object_mut()) else {
+                continue;
+            };
+            if source.get("kind").and_then(|kind| kind.as_str()) != Some("grid") {
+                continue;
+            }
+            match source.get("matching").and_then(|m| m.as_str()) {
+                Some("in-cell") => {
+                    source.remove("matching");
+                }
+                Some("pixel-overlap") => bail!(
+                    "target {key}: matching = pixel-overlap needs area-weighted pixel-boundary matching, which the model version's older colm-cli cannot reproduce (it only supports in-cell matching); rebuild this version on the current code, or set matching = in-cell"
+                ),
+                Some(other) => bail!(
+                    "target {key}: unknown grid matching {other:?}; this colm-cli supports in-cell and pixel-overlap, and an older program cannot reproduce anything else"
+                ),
+                None => {}
+            }
+        }
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

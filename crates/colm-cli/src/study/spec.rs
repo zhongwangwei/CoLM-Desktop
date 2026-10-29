@@ -335,6 +335,25 @@ pub struct TargetSpec {
     pub aggregate: Option<TargetPeriod>,
 }
 
+/// 观测像元与模型格的匹配方式（#17）。
+///
+/// `InCell` 是旧行为：只认观测像元的格心落在哪个模型格里，像元比模型格粗时
+/// `space_coverage` 会偏低；`PixelOverlap` 是 opt-in 的按像元边界重叠面积加权。
+/// 默认 `InCell` 且不序列化，旧 spec 的 `spec_sha256` 与不认这个字段的旧程序都不受影响。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GridMatching {
+    #[default]
+    InCell,
+    PixelOverlap,
+}
+
+impl GridMatching {
+    fn is_in_cell(&self) -> bool {
+        matches!(self, Self::InCell)
+    }
+}
+
 /// 格点算例（流域、区域、全球）的率定目标。`TargetSpec::variable` 的含义随种类变：
 /// `Station` 是站点观测的标准名（`Qle` 一类，与单点相同）；`Grid` 与 `Gauge` 是模型 history 变量名。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -354,6 +373,9 @@ pub enum TargetSource {
         /// 逐日还是逐月平均后比；不写按观测的时间间隔定。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         period: Option<TargetPeriod>,
+        /// 像元与模型格的匹配方式。不写就是 in-cell（旧行为），不序列化。
+        #[serde(default, skip_serializing_if = "GridMatching::is_in_cell")]
+        matching: GridMatching,
     },
     /// 区域里的通量站（PLUMBER2 格式的观测文件），比站点所在那一格的模拟。格点算例按世界时跑，
     /// PLUMBER2 的观测是当地标准时：`utc_offset` 是观测时间比世界时早几小时（中国的站是 8）。
@@ -1304,6 +1326,7 @@ mod tests {
             scale: 1.0,
             offset: 0.0,
             period: None,
+            matching: GridMatching::InCell,
         });
         let error = validate_spec(&tuning_spec(vec![target])).unwrap_err();
         assert!(
@@ -1458,6 +1481,54 @@ mod tests {
 
         let spec = tuning_spec(vec![tuning_target("Qle", false)]);
         validate_target_site_coverage(&spec, &["A".into(), "B".into()]).unwrap();
+    }
+
+    /// #17：旧 spec 没有 `matching` 字段，必须解析成 in-cell；默认值也不序列化，
+    /// 这样旧研究的 `spec_sha256`、以及不认这个字段的旧程序都保持原样。显式写
+    /// `in-cell` 与缺省是同一份设定（旧行为），`pixel-overlap` 是 opt-in。
+    #[test]
+    fn grid_matching_defaults_to_in_cell_and_pixel_overlap_round_trips() {
+        let legacy = serde_json::json!({
+            "key": "et", "variable": "f_lfevpa", "from": 0, "to": 10,
+            "source": {"kind": "grid", "path": "/obs.nc", "variable": "E"}
+        });
+        let target: TargetSpec = serde_json::from_value(legacy.clone()).unwrap();
+        let Some(TargetSource::Grid { matching, .. }) = &target.source else {
+            panic!("expected a gridded source");
+        };
+        assert_eq!(*matching, GridMatching::InCell);
+        let serialized = serde_json::to_value(&target).unwrap();
+        assert!(
+            serialized["source"].get("matching").is_none(),
+            "默认 in-cell 不序列化，旧 spec_sha256 不变: {serialized}"
+        );
+        let mut explicit = legacy;
+        explicit["source"]["matching"] = "in-cell".into();
+        let explicit_target: TargetSpec = serde_json::from_value(explicit).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&explicit_target).unwrap(),
+            serde_json::to_vec(&target).unwrap(),
+            "显式 in-cell 与缺省必须序列化成同一份设定"
+        );
+
+        let mut overlap = serde_json::to_value(&target).unwrap();
+        overlap["source"]["matching"] = "pixel-overlap".into();
+        let target: TargetSpec = serde_json::from_value(overlap).unwrap();
+        let Some(TargetSource::Grid { matching, .. }) = &target.source else {
+            panic!("expected a gridded source");
+        };
+        assert_eq!(*matching, GridMatching::PixelOverlap);
+        let value = serde_json::to_value(&target).unwrap();
+        assert_eq!(value["source"]["matching"], "pixel-overlap");
+        let again: TargetSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(again.source, target.source);
+
+        // 拼错的匹配方式不能静默退回 in-cell。
+        let typo = serde_json::json!({
+            "key": "et", "variable": "f_lfevpa", "from": 0, "to": 10,
+            "source": {"kind": "grid", "path": "/obs.nc", "variable": "E", "matching": "pixeloverlap"}
+        });
+        assert!(serde_json::from_value::<TargetSpec>(typo).is_err());
     }
 }
 
