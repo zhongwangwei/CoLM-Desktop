@@ -1275,7 +1275,9 @@ mod tests {
         // 与冻结时一样克隆到相对路径：Git for Windows 不接受 verbatim 的绝对目标路径（CI 实测）。
         assert!(std::process::Command::new("git")
             .args(["clone", "-q", "--local"])
-            .arg(std::path::absolute(&repo).unwrap())
+            // 不能传 std::path::absolute()：Windows 上它带 `\\?\` verbatim 前缀，
+            // Git for Windows 不接受（CI windows 实测）。夹具里的 repo 本来就是绝对路径。
+            .arg(&repo)
             .arg("src")
             .current_dir(&cached)
             .status()
@@ -2005,7 +2007,9 @@ fn attach_network(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
             .into_iter()
             .map(|path| {
                 Ok(colm_model::Asset {
-                    relative_path: path.to_string_lossy().into_owned(),
+                    // 资产路径是跨平台清单（服务器/旧版本都会读），必须用 /；
+                    // Windows 的 PathBuf 显示成 `\`，直接写进去会被 validate::relative 拒绝。
+                    relative_path: path.to_string_lossy().replace('\\', "/"),
                     sha256: colm_kernel::sha256_hex(&std::fs::read(staging.join(path))?),
                 })
             })
@@ -2330,7 +2334,7 @@ fn stage_study_network(
         assets: assets
             .into_iter()
             .map(|(relative_path, sha256)| colm_model::Asset {
-                relative_path: relative_path.to_string_lossy().into_owned(),
+                relative_path: relative_path.to_string_lossy().replace('\\', "/"),
                 sha256,
             })
             .collect(),

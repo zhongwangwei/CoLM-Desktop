@@ -80,9 +80,11 @@ pub(crate) fn parse_mapping(text: &str) -> Result<Mapping> {
         Path::new(local).is_absolute() && remote.starts_with('/'),
         "--map needs two absolute paths, got {text}"
     );
+    // 内部统一成 POSIX 分隔符：Windows 上 `--map C:\data=...` 与设定里的路径比较时
+    // 反斜杠会让「按路径分量比前缀」永远不命中（CI windows 实测）。
     Ok(Mapping {
-        local: trim_slash(local).to_owned(),
-        remote: trim_slash(remote).to_owned(),
+        local: trim_slash(&local.replace('\\', "/")).to_owned(),
+        remote: trim_slash(&remote.replace('\\', "/")).to_owned(),
     })
 }
 

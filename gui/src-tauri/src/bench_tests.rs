@@ -1,5 +1,11 @@
 use super::*;
 
+/// 状态 JSON 里的路径由原生目录 + 记录里的 POSIX 相对路径拼成，Windows 上两种分隔符会混在
+/// 一行；断言按分隔符归一后比较，而不是比较字符串原文。
+fn same_path(actual: &str, expected: &std::path::Path) -> bool {
+    actual.replace('\\', "/") == expected.to_string_lossy().replace('\\', "/")
+}
+
 fn temp(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("colm-bench-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -206,7 +212,7 @@ fn new_style_projects_bind_the_report_to_the_last_success_not_the_last_run() {
     let list = projects(&root);
     assert_eq!(list.len(), 2);
     let fresh = list.iter().find(|row| row["name"] == "fresh").unwrap();
-    assert_eq!(fresh["report"].as_str().unwrap(), report.to_string_lossy());
+    assert!(same_path(fresh["report"].as_str().unwrap(), &report));
     assert_eq!(fresh["latest_run"]["run_id"], second.id());
     assert_eq!(fresh["latest_run"]["state"], "failed");
     assert_eq!(fresh["latest_run"]["report"], Value::Null);
@@ -215,10 +221,10 @@ fn new_style_projects_bind_the_report_to_the_last_success_not_the_last_run() {
         .unwrap()
         .contains("check 失败"));
     assert_eq!(fresh["latest_success"]["run_id"], first.id());
-    assert_eq!(
+    assert!(same_path(
         fresh["latest_success"]["report"].as_str().unwrap(),
-        report.to_string_lossy()
-    );
+        &report
+    ));
     // 配置显示的是最新一次运行的冻结文本（B 提交的那份），不是项目根的历史配置。
     assert_eq!(
         fresh["config"].as_str().unwrap(),
@@ -260,12 +266,12 @@ fn the_status_list_reads_the_output_dir_recorded_in_the_run() {
         .into_iter()
         .find(|row| row["name"] == "custom")
         .unwrap();
-    assert_eq!(row["report"].as_str().unwrap(), report.to_string_lossy());
+    assert!(same_path(row["report"].as_str().unwrap(), &report));
     assert_eq!(row["latest_run"]["state"], "succeeded");
-    assert_eq!(
+    assert!(same_path(
         row["latest_success"]["report"].as_str().unwrap(),
-        report.to_string_lossy()
-    );
+        &report
+    ));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -301,13 +307,13 @@ fn a_flat_fetched_mirror_finds_its_report_through_its_run_record() {
         .into_iter()
         .find(|row| row["name"] == "cmp@host")
         .unwrap();
-    assert_eq!(row["report"].as_str().unwrap(), report.to_string_lossy());
+    assert!(same_path(row["report"].as_str().unwrap(), &report));
     assert_eq!(row["latest_run"]["run_id"], "bench-run-1-2");
     assert_eq!(row["latest_success"]["run_id"], "bench-run-1-2");
-    assert_eq!(
+    assert!(same_path(
         row["latest_success"]["report"].as_str().unwrap(),
-        report.to_string_lossy()
-    );
+        &report
+    ));
     let _ = std::fs::remove_dir_all(&root);
 }
 

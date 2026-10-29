@@ -321,7 +321,7 @@ fn features_come_from_the_frozen_inputs_after_the_source_case_changed() {
 
     let prepared = prepare_study(&fixture.study).unwrap();
     assert_eq!(
-        prepared.base_root,
+        prepared.base_root.canonicalize().unwrap(),
         fixture.frozen.canonicalize().unwrap(),
         "the frozen input root recorded at creation must win over the source project"
     );

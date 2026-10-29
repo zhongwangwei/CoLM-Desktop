@@ -505,9 +505,11 @@ fn new_run_id(unix: u64) -> String {
 
 /// 报告在运行目录里记相对路径：整个 `openbench/` 目录搬家后，指针仍然指向报告。
 fn relative_to(base: &Path, path: &Path) -> String {
+    // 相对路径要写进 meta/latest-success.json，服务器（Linux）会按 `/` 解析；Windows 上
+    // 用原生反斜杠会让远程取回把报告当成分隔符不同的另一个路径（CI windows 实测）。
     path.strip_prefix(base)
-        .map(|relative| relative.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -731,7 +733,9 @@ pub(crate) fn normalize_output_dir(raw: &str) -> Result<String, String> {
             "不能是运行目录本身（{text}），请指定一个子目录（例如 output）"
         ));
     }
-    Ok(normalized.to_string_lossy().into_owned())
+    // meta/配置里的相对路径用 POSIX 分隔符：服务器端与旧版本都按 `/` 解析，Windows 的
+    // PathBuf 显示成 `\` 会让两边不一致（CI windows 实测）。
+    Ok(normalized.to_string_lossy().replace('\\', "/"))
 }
 
 /// 去掉 YAML 行尾注释：`#` 只有不在引号里、且前面是空白（或在行首）时才是注释。
