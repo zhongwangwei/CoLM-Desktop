@@ -1003,10 +1003,50 @@ fn comparison_inputs(study_dir: &Path) -> Result<study::model::StudyInputIdentit
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error).context("cannot inspect Study remote submission"),
     }
-    local_comparison_inputs(study_dir)
+    local_comparison_inputs(study_dir, &[])
 }
 
-fn local_comparison_inputs(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+/// best 与 baseline 固定核验；`--member` 指定的成员追加在后面。去重并拒绝 best/baseline：
+/// 它们本来就在固定核验范围里，再要一次只会让证据里的 `kind` 说不清。
+fn comparison_members(
+    manifest: &study::spec::Manifest,
+    state: &study::state::StudyState,
+    selected: &[String],
+) -> Result<Vec<String>> {
+    let best = state
+        .best_member
+        .as_deref()
+        .context("Study has no best member")?;
+    let baseline = manifest
+        .members
+        .iter()
+        .find(|member| member.baseline)
+        .context("Study has no baseline member")?
+        .id
+        .clone();
+    let mut members = vec![best.to_owned()];
+    if baseline != best {
+        members.push(baseline);
+    }
+    for id in selected {
+        anyhow::ensure!(
+            manifest.members.iter().any(|member| &member.id == id),
+            "unknown Study member {id}"
+        );
+        anyhow::ensure!(
+            !members.contains(id),
+            "Study member {id} is the best or baseline member; it is already verified without \
+             --member"
+        );
+        members.push(id.clone());
+    }
+    Ok(members)
+}
+
+fn local_comparison_inputs(
+    study_dir: &Path,
+    selected: &[String],
+) -> Result<study::model::StudyInputIdentity> {
     let manifest = study::engine::status(study_dir)?;
     let state = study::checkpoint::load_latest::<study::state::StudyState>(
         &study_dir.join("checkpoints/state"),
@@ -1026,35 +1066,131 @@ fn local_comparison_inputs(study_dir: &Path) -> Result<study::model::StudyInputI
         ),
         "Study is not in a verified finished state"
     );
-    let best = state
-        .best_member
-        .as_deref()
-        .context("Study has no best member")?;
-    let baseline = manifest
-        .members
-        .iter()
-        .find(|member| member.baseline)
-        .context("Study has no baseline member")?;
-    let members = if baseline.id == best {
-        vec![best]
-    } else {
-        vec![best, baseline.id.as_str()]
-    };
-    let before = study::runner::evidence_file_snapshot(&manifest, &state, &members)?;
+    let members = comparison_members(&manifest, &state, selected)?;
+    let member_refs = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let before = study::runner::evidence_file_snapshot(&manifest, &state, &member_refs)?;
     study::engine::verify_frozen_inputs(&manifest)?;
     let inputs = study::model::verified_inputs(&manifest)?;
-    for member in &members {
+    for member in &member_refs {
         study::runner::verify_member_evidence(&manifest, &state, member)?;
     }
     anyhow::ensure!(
-        before == study::runner::evidence_file_snapshot(&manifest, &state, &members)?,
+        before == study::runner::evidence_file_snapshot(&manifest, &state, &member_refs)?,
         "Study comparison inputs or outputs changed during verification"
     );
     Ok(inputs)
 }
 
+/// 解析 `study-verify-comparison --member`：单值或逗号分隔。空项立刻报错，重复项去重。
+///
+/// 为什么由服务器解析而不是客户端拼好：`--member` 是服务器命令契约的一部分，旧引擎会把它
+/// 当成未知参数忽略（本程序的参数解析器接受任意 `--flag value`），所以空列表绝不能悄悄变成
+/// “没请求成员”——那正是要拒绝的弱核验。
+pub(crate) fn parse_selected_members(raw: Option<&str>) -> Result<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut selected: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let id = part.trim();
+        anyhow::ensure!(!id.is_empty(), "--member needs a non-empty Study member id");
+        if !selected.iter().any(|existing| existing == id) {
+            selected.push(id.to_owned());
+        }
+    }
+    Ok(selected)
+}
+
+/// 有序的「相对路径 + 内容哈希」摘要；服务器证据里的成员条目与结果树都用它。
+pub(crate) fn tree_digest(files: &std::collections::BTreeMap<String, String>) -> String {
+    let mut text = String::new();
+    for (path, sha256) in files {
+        text.push_str(path);
+        text.push('\0');
+        text.push_str(sha256);
+        text.push('\n');
+    }
+    colm_kernel::sha256_hex(text.as_bytes())
+}
+
+/// 一个成员自己的结果文件与评估身份在结果树里的摘要。
+///
+/// 两端都从同一份 `results_sha256` 计算：客户端拿它把服务器证据里的成员条目绑回本机下载的
+/// 字节，不用再信任服务器多给的字段。空表示结果树里没有该成员的评估证据。
+pub(crate) fn member_evidence_digest(
+    results_sha256: &std::collections::BTreeMap<String, String>,
+    member_id: &str,
+) -> Option<String> {
+    let tasks = format!("tasks/{member_id}/");
+    let proofs = format!("provenance/{member_id}/");
+    let files = results_sha256
+        .iter()
+        .filter(|(path, _)| path.starts_with(&tasks) || path.starts_with(&proofs))
+        .map(|(path, sha256)| (path.clone(), sha256.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    (!files.is_empty()).then(|| tree_digest(&files))
+}
+
+/// `--member` 指定成员自己的证据条目。
+///
+/// 服务器像最优点和基线一样核验了这些成员：任务成功、结果树哈希、评估身份、参数/样本哈希与
+/// 目标源内容（`local_comparison_inputs` 里的 `verify_member_evidence`）。条目只陈述“该成员的
+/// 分数被现场重算并核对过”这一层；比较结论仍只排 best+baseline，所以 `metrics_recomputed`
+/// 保持 false，不把成员写回的证据冒充成版本比较的指标重算。
+fn selected_member_entries(
+    manifest: &study::spec::Manifest,
+    state: &study::state::StudyState,
+    results_sha256: &std::collections::BTreeMap<String, String>,
+    selected: &[String],
+) -> Result<Vec<serde_json::Value>> {
+    let best = state.best_member.as_deref();
+    let baseline = manifest
+        .members
+        .iter()
+        .find(|member| member.baseline)
+        .map(|member| member.id.as_str());
+    selected
+        .iter()
+        .map(|id| {
+            anyhow::ensure!(
+                manifest.members.iter().any(|member| &member.id == id),
+                "unknown Study member {id}"
+            );
+            anyhow::ensure!(
+                best != Some(id.as_str()) && baseline != Some(id.as_str()),
+                "Study member {id} is the best or baseline member; it is already verified without \
+                 --member"
+            );
+            let candidate = state.candidates.get(id).with_context(|| {
+                format!("Study member {id} has no recorded candidate objective; its score cannot be verified")
+            })?;
+            let evidence_sha256 = member_evidence_digest(results_sha256, id).with_context(|| {
+                format!("Study member {id} has no evaluation evidence in the results tree")
+            })?;
+            Ok(serde_json::json!({
+                "id": id,
+                "kind": "selected",
+                "scores": {
+                    "feasible": candidate.feasible,
+                    "calibration": candidate.calibration,
+                    "validation": candidate.validation,
+                },
+                "evidence_sha256": evidence_sha256,
+                "metrics_recomputed": false,
+            }))
+        })
+        .collect()
+}
+
 /// Executed by the bound remote job's CLI, never accepted as a frontend assertion.
-pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::Value> {
+///
+/// `member` 是 `--member` 的原值（可选，逗号分隔）。不传时逐字节保持旧证据形状：只有 best 与
+/// baseline 被核验，JSON 里也不出现 `members`，旧客户端照旧可读。
+pub(crate) fn local_comparison_evidence(
+    study_dir: &Path,
+    member: Option<&str>,
+) -> Result<serde_json::Value> {
+    let selected = parse_selected_members(member)?;
     let state = study::checkpoint::load_latest::<study::state::StudyState>(
         &study_dir.join("checkpoints/state"),
     )?
@@ -1062,18 +1198,10 @@ pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::
     .payload;
     let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&state)?);
     let manifest = study::engine::status(study_dir)?;
-    let best = state
-        .best_member
-        .as_deref()
-        .context("Study has no best member")?;
-    let baseline = manifest
-        .members
-        .iter()
-        .find(|member| member.baseline)
-        .context("Study has no baseline")?;
-    let members = vec![best, baseline.id.as_str()];
-    let files_before = study::runner::evidence_file_snapshot(&manifest, &state, &members)?;
-    let inputs = local_comparison_inputs(study_dir)?;
+    let members = comparison_members(&manifest, &state, &selected)?;
+    let member_refs = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let files_before = study::runner::evidence_file_snapshot(&manifest, &state, &member_refs)?;
+    let inputs = local_comparison_inputs(study_dir, &selected)?;
     let results_sha256 = comparison_results_sha256(study_dir)?;
     let after = study::checkpoint::load_latest::<study::state::StudyState>(
         &study_dir.join("checkpoints/state"),
@@ -1089,12 +1217,13 @@ pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::
         "Study scientific inputs changed during comparison verification"
     );
     anyhow::ensure!(
-        files_before == study::runner::evidence_file_snapshot(&manifest, &after, &members)?,
+        files_before == study::runner::evidence_file_snapshot(&manifest, &after, &member_refs)?,
         "Study raw outputs or evaluation evidence changed during comparison verification"
     );
+    let member_entries = selected_member_entries(&manifest, &state, &results_sha256, &selected)?;
     let pin = pinned(study_dir)?;
     let revision = pin.as_ref().and_then(|pin| pin.model_revision.as_ref());
-    Ok(serde_json::json!({
+    let evidence = serde_json::json!({
         "schema":1,
         "study_id":manifest.id,
         "root":manifest.root,
@@ -1109,7 +1238,20 @@ pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::
         "forcing_content_policy":"excluded-v1",
         "forcing_contents_verified":false,
         "results_sha256":results_sha256,
-    }))
+    });
+    Ok(attach_selected_members(evidence, member_entries))
+}
+
+/// 只为显式请求的成员追加 `members`。空列表时不写这个键：旧调用方按旧形状读证据，新增字段
+/// 只在服务器确实多做了一层核验时出现，不能被误解成“成员列表为空也算核验过”。
+fn attach_selected_members(
+    mut evidence: serde_json::Value,
+    member_entries: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    if !member_entries.is_empty() {
+        evidence["members"] = serde_json::Value::Array(member_entries);
+    }
+    evidence
 }
 
 pub(crate) fn comparison_results_sha256(

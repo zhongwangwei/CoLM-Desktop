@@ -261,8 +261,9 @@ usage:
   colm-cli study-result <study-dir> --path <result.json>
   colm-cli study-verified-side <study-dir>
                    # 只读返回单侧研究的版本、成绩与已核对的完整输入证据（schema 1 JSON）
-  colm-cli study-verify-comparison <study-dir>
-                   # 只读核验本地研究证据，供远程比较检查使用（schema 1 JSON）
+  colm-cli study-verify-comparison <study-dir> [--member <id>[,<id>...]]
+                   # 只读核验本地研究证据，供远程比较检查使用（schema 1 JSON）；
+                   # --member 让指定成员也按 best/baseline 的标准核验原始输出
                    # 读取并校验单个成员结果
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
@@ -839,7 +840,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "study-verify-comparison" => println!(
             "{}",
             serde_json::to_string(&study_version::local_comparison_evidence(
-                &opts.positional_case()?
+                &opts.positional_case()?,
+                opts.get("--member").as_deref()
             )?)?
         ),
         "study-result" => print!(

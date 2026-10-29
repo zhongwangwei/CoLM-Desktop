@@ -1811,3 +1811,151 @@ fn a_pin_whose_program_is_missing_is_refused_with_an_actionable_error() {
     assert!(text.contains("restore"), "{text}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------- 服务器按成员核验（--member）
+//
+// 写回用户选择的成员时，服务器必须像 best/baseline 一样核验该成员自己的原始输出。证据条目
+// 在这里单独测形状与绑定关系：完整的 `local_comparison_evidence` 需要一次真实模型运行，太重。
+
+#[test]
+fn selected_members_are_parsed_from_the_command_line_list() {
+    assert!(parse_selected_members(None).unwrap().is_empty());
+    assert_eq!(parse_selected_members(Some("m1")).unwrap(), vec!["m1"]);
+    // 逗号列表按出现顺序、去空白、去重。
+    assert_eq!(
+        parse_selected_members(Some(" m1, m2 ,m1")).unwrap(),
+        vec!["m1", "m2"]
+    );
+    // 空项是调用错误，不能被服务器静默当成“没请求成员”。
+    assert!(parse_selected_members(Some("m1,,m2")).is_err());
+    assert!(parse_selected_members(Some(" ")).is_err());
+}
+
+fn comparison_manifest(members: &[(&str, bool)]) -> study::spec::Manifest {
+    let spec = serde_json::json!({
+        "kind": "tuning",
+        "method": "differential-evolution",
+        "base_cases": ["site"],
+        "observations": {"site": "obs.nc"},
+        "parameters": [],
+        "budget": {"population": 4, "generations": 1},
+    });
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "id": "s",
+        "root": "/tmp/s",
+        "created_unix": 0,
+        "spec": spec,
+        "members": members
+            .iter()
+            .map(|(id, baseline)| serde_json::json!({
+                "id": id,
+                "generation": 0,
+                "candidate_index": 0,
+                "baseline": baseline,
+                "parameters": {},
+            }))
+            .collect::<Vec<_>>(),
+        "provenance": {
+            "app_version": "test",
+            "kernel_id": "test",
+            "spec_sha256": "test",
+            "samples_sha256": "test",
+            "required_targets_sha256": "test",
+            "outputs_sha256": "test",
+            "base_case_fingerprints": {},
+            "observation_sha256": {},
+        },
+    }))
+    .unwrap()
+}
+
+fn comparison_state(manifest: &study::spec::Manifest, best: &str) -> study::state::StudyState {
+    let mut state = study::state::StudyState::new(manifest.id.clone(), std::iter::empty()).unwrap();
+    state.best_member = Some(best.to_owned());
+    let mut calibration = 0.0;
+    for member in &manifest.members {
+        calibration += 1.0;
+        state.candidates.insert(
+            member.id.clone(),
+            study::state::CandidateState {
+                generation: 0,
+                feasible: true,
+                calibration: Some(calibration),
+                validation: Some(calibration + 0.5),
+                reason: None,
+            },
+        );
+    }
+    state
+}
+
+fn comparison_results() -> std::collections::BTreeMap<String, String> {
+    [
+        ("tasks/m000000/site.json", "c"),
+        ("tasks/m000001/site.json", "a"),
+        ("provenance/m000001/site.json", "b"),
+        ("tasks/m000002/site.json", "d"),
+        ("provenance/m000002/site.json", "e"),
+    ]
+    .into_iter()
+    .map(|(path, seed)| (path.to_owned(), seed.repeat(64)))
+    .collect()
+}
+
+#[test]
+fn a_selected_member_entry_carries_scores_evidence_digest_and_no_metric_claim() {
+    let manifest =
+        comparison_manifest(&[("m000000", true), ("m000001", false), ("m000002", false)]);
+    let state = comparison_state(&manifest, "m000001");
+    let results = comparison_results();
+    let entries =
+        selected_member_entries(&manifest, &state, &results, &["m000002".to_owned()]).unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["id"], "m000002");
+    assert_eq!(entry["kind"], "selected");
+    assert_eq!(entry["scores"]["feasible"], true);
+    assert_eq!(entry["scores"]["calibration"], 3.0);
+    assert_eq!(entry["scores"]["validation"], 3.5);
+    // 条目绑定该成员自己的任务结果与评估身份，不覆盖 best/baseline 的文件。
+    assert_eq!(
+        entry["evidence_sha256"],
+        member_evidence_digest(&results, "m000002").unwrap()
+    );
+    assert_ne!(
+        entry["evidence_sha256"],
+        serde_json::json!(tree_digest(&results))
+    );
+    assert_eq!(entry["metrics_recomputed"], false);
+}
+
+#[test]
+fn selected_member_entry_refuses_unknown_best_and_baseline_members() {
+    let manifest = comparison_manifest(&[("m000000", true), ("m000001", false)]);
+    let state = comparison_state(&manifest, "m000001");
+    let results = comparison_results();
+    let unknown =
+        selected_member_entries(&manifest, &state, &results, &["m999999".to_owned()]).unwrap_err();
+    assert!(format!("{unknown:#}").contains("unknown Study member m999999"));
+    let best =
+        selected_member_entries(&manifest, &state, &results, &["m000001".to_owned()]).unwrap_err();
+    assert!(format!("{best:#}").contains("already verified without --member"));
+    let baseline =
+        selected_member_entries(&manifest, &state, &results, &["m000000".to_owned()]).unwrap_err();
+    assert!(format!("{baseline:#}").contains("already verified without --member"));
+}
+
+#[test]
+fn comparison_evidence_without_selected_members_keeps_the_old_shape() {
+    let old = serde_json::json!({"schema": 1, "results_sha256": {}});
+    assert_eq!(attach_selected_members(old.clone(), Vec::new()), old);
+    assert!(attach_selected_members(old, Vec::new())
+        .get("members")
+        .is_none());
+    let with_member = attach_selected_members(
+        serde_json::json!({"schema": 1}),
+        vec![serde_json::json!({"id": "m000002", "kind": "selected"})],
+    );
+    assert_eq!(with_member["members"][0]["id"], "m000002");
+}

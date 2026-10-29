@@ -67,20 +67,53 @@ fn pending_and_comparison_paths_stay_within_the_bound_job() {
         &record,
         "/data/colm/s/abc/.colm/studies/s1",
         std::slice::from_ref(&record.remote_project),
+        None,
     )
     .unwrap();
     assert!(command.contains("'/data/colm/engine/abc123/bin/colm-cli' study-verify-comparison '/data/colm/s/abc/.colm/studies/s1'"));
+    assert!(!command.contains("--member"));
     assert!(!command.contains("study-run"));
+    // 选定成员时服务器命令必须带上 --member，不能只查 best/baseline。
+    let command = comparison_command(
+        &record,
+        "/data/colm/s/abc/.colm/studies/s1",
+        std::slice::from_ref(&record.remote_project),
+        Some("m000003"),
+    )
+    .unwrap();
+    assert!(
+        command.ends_with(
+            "study-verify-comparison '/data/colm/s/abc/.colm/studies/s1' --member m000003\n"
+        ),
+        "{command}"
+    );
+    assert!(comparison_command(
+        &record,
+        "/data/colm/s/abc/.colm/studies/s1",
+        std::slice::from_ref(&record.remote_project),
+        Some("m000003; rm -rf /"),
+    )
+    .is_err());
+    // 没有空白也可能注入：只放行字母数字与 `-`/`_`。
+    assert!(comparison_command(
+        &record,
+        "/data/colm/s/abc/.colm/studies/s1",
+        std::slice::from_ref(&record.remote_project),
+        Some("m000003;reboot"),
+    )
+    .is_err());
     assert!(comparison_command(
         &record,
         "/other/studies/s1",
-        std::slice::from_ref(&record.remote_project)
+        std::slice::from_ref(&record.remote_project),
+        None
     )
     .is_err());
     assert!(comparison_command(
         &record,
         "/data/colm/s/abc/.colm/studies/../../outside",
-        std::slice::from_ref(&record.remote_project)
+        std::slice::from_ref(&record.remote_project),
+        None
     )
     .is_err());
 }
@@ -1263,6 +1296,10 @@ struct FakeStudyRemote {
     root: Option<String>,
     study_status: Value,
     comparison_evidence: Option<Value>,
+    /// 模拟服务器 CLI 拒绝 `--member`（旧引擎的 usage/unknown-argument 错误）。
+    comparison_failure: Option<String>,
+    /// 每次 `comparison_evidence` 收到的成员参数：用来断言 best/baseline 不带、选定成员带。
+    comparison_members: std::cell::RefCell<Vec<Option<String>>>,
     files: std::collections::BTreeMap<String, String>,
     reads: std::cell::RefCell<Vec<String>>,
 }
@@ -1295,7 +1332,18 @@ impl StudyRemote for FakeStudyRemote {
         Ok(self.study_status.clone())
     }
 
-    fn comparison_evidence(&self, _record: &StudyRecord, _study_root: &str) -> Result<Value> {
+    fn comparison_evidence(
+        &self,
+        _record: &StudyRecord,
+        _study_root: &str,
+        member: Option<&str>,
+    ) -> Result<Value> {
+        self.comparison_members
+            .borrow_mut()
+            .push(member.map(str::to_owned));
+        if let Some(message) = &self.comparison_failure {
+            bail!("{message}");
+        }
         self.comparison_evidence
             .clone()
             .context("the fake server has no comparison evidence")
@@ -1376,6 +1424,8 @@ fn remote_fetched_study(method: &str) -> RemoteStudyFixture {
         root: Some(fixture.remote_root.clone()),
         study_status: fixture.remote.clone(),
         comparison_evidence: None,
+        comparison_failure: None,
+        comparison_members: std::cell::RefCell::new(Vec::new()),
         files,
         reads: std::cell::RefCell::new(Vec::new()),
     };
@@ -1882,9 +1932,7 @@ fn tuning_fetched_study() -> TuningRemoteFixture {
     for member in &manifest.members {
         write_tuning_member_result(&local, &remote_root, &member.id);
     }
-    let results_sha256 =
-        serde_json::to_value(crate::study_version::comparison_results_sha256(&local).unwrap())
-            .unwrap();
+    let results_sha256 = crate::study_version::comparison_results_sha256(&local).unwrap();
     let mut server_state = state.clone();
     for task in server_state.tasks.values_mut() {
         task.case_dir = format!("{remote_root}/members/{}/site", task.member);
@@ -1894,6 +1942,11 @@ fn tuning_fetched_study() -> TuningRemoteFixture {
     // `to_vec(&state_value)` 冒充同一份字节。
     let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&server_state).unwrap());
     let input_identity = study::model::verified_inputs(&manifest).unwrap();
+    // 支持 `--member` 的服务器会附带该成员自己的证据条目；分数取自同一份服务器状态，
+    // 摘要按服务器结果树算——与真实命令的输出保持同一形状。
+    let selected_candidate = state.candidates.get(&selected).unwrap();
+    let selected_evidence =
+        crate::study_version::member_evidence_digest(&results_sha256, &selected).unwrap();
     let evidence = json!({
         "schema": 1,
         "root": remote_root,
@@ -1907,6 +1960,17 @@ fn tuning_fetched_study() -> TuningRemoteFixture {
         "results_sha256": results_sha256,
         "forcing_content_policy": "excluded-v1",
         "forcing_contents_verified": false,
+        "members": [{
+            "id": selected,
+            "kind": "selected",
+            "scores": {
+                "feasible": selected_candidate.feasible,
+                "calibration": selected_candidate.calibration,
+                "validation": selected_candidate.validation,
+            },
+            "evidence_sha256": selected_evidence,
+            "metrics_recomputed": false,
+        }],
     });
     let record = StudyRecord {
         ssh_auth: None,
@@ -1936,6 +2000,8 @@ fn tuning_fetched_study() -> TuningRemoteFixture {
         root: Some(remote_root),
         study_status: Value::Null,
         comparison_evidence: Some(evidence),
+        comparison_failure: None,
+        comparison_members: std::cell::RefCell::new(Vec::new()),
         files,
         reads: std::cell::RefCell::new(Vec::new()),
     };
@@ -2030,6 +2096,12 @@ fn add_tuning_target_source(fixture: &mut TuningRemoteFixture, contents: &[u8]) 
         crate::study_version::comparison_results_sha256(&fixture.local).unwrap(),
     )
     .unwrap();
+    // 结果字节变了，成员证据摘要也必须跟着服务器结果树重算，否则会在“未绑定结果文件”处拒绝。
+    let results: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(evidence["results_sha256"].clone()).unwrap();
+    evidence["members"][0]["evidence_sha256"] = serde_json::json!(
+        crate::study_version::member_evidence_digest(&results, &fixture.selected).unwrap()
+    );
 }
 
 #[test]
@@ -2059,6 +2131,11 @@ fn a_non_best_member_is_verified_against_server_state_results_and_samples() {
     let verified =
         verified_study_member_with(&fixture.local, &fixture.selected, Some(&fixture.fake)).unwrap();
     assert_eq!(verified.member.id, fixture.selected);
+    // 非 best/baseline 成员必须让服务器按成员核验，而不是只查 state 分数。
+    assert_eq!(
+        fixture.fake.comparison_members.borrow().as_slice(),
+        &[Some(fixture.selected.clone())]
+    );
     // 服务器状态里的分数被核验并随证据带出（不是只查任务成功）。
     assert!(verified.objective.is_some(), "{:?}", verified.objective);
     assert_eq!(
@@ -2067,13 +2144,13 @@ fn a_non_best_member_is_verified_against_server_state_results_and_samples() {
     );
     assert_eq!(
         verified.evidence["verification"]["member_scope"],
-        "server-state-score+result-tree+samples"
+        "server-selected-member-evidence"
     );
     assert!(
         verified.evidence["verification"]["note"]
             .as_str()
             .unwrap()
-            .contains("not independently recomputed"),
+            .contains("same member-evidence check"),
         "{}",
         verified.evidence["verification"]
     );
@@ -2100,6 +2177,8 @@ fn the_best_member_is_still_marked_as_having_its_metric_recomputed() {
     let verified =
         verified_study_member_with(&fixture.local, &fixture.best, Some(&fixture.fake)).unwrap();
     assert_eq!(verified.member.id, fixture.best);
+    // best 不走按成员核验的新参数：旧服务器命令与旧证据形状保持不变。
+    assert_eq!(fixture.fake.comparison_members.borrow().as_slice(), &[None]);
     assert_eq!(
         verified.evidence["verification"]["metrics_recomputed"],
         true
@@ -2109,6 +2188,95 @@ fn the_best_member_is_still_marked_as_having_its_metric_recomputed() {
         "best-or-baseline-metrics"
     );
     assert!(verified.evidence["verification"]["note"].is_null());
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn an_old_server_evidence_without_member_entries_still_serves_best_and_baseline() {
+    let fixture = tuning_fetched_study();
+    // 旧引擎的 schema 1 证据没有 `members` 字段：best/baseline 写回必须照常可读。
+    let mut evidence = fixture.fake.comparison_evidence.clone().unwrap();
+    evidence.as_object_mut().unwrap().remove("members");
+    let fake = FakeStudyRemote {
+        comparison_evidence: Some(evidence),
+        ..fixture.fake
+    };
+    verified_study_member_with(&fixture.local, &fixture.best, Some(&fake)).unwrap();
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn selected_member_writeback_refuses_a_server_without_member_evidence() {
+    let fixture = tuning_fetched_study();
+    // 旧服务器引擎会接受并忽略 `--member`，返回的仍是只有 best+baseline 的旧证据。
+    let mut evidence = fixture.fake.comparison_evidence.clone().unwrap();
+    evidence.as_object_mut().unwrap().remove("members");
+    let fake = FakeStudyRemote {
+        comparison_evidence: Some(evidence),
+        ..fixture.fake
+    };
+    let error =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("predates per-member comparison verification"),
+        "{text}"
+    );
+    assert!(
+        text.contains("write back the best or baseline member"),
+        "{text}"
+    );
+    // 客户端确实把 --member 送给了服务器；是服务器的旧证据里没有条目，所以拒绝。
+    assert_eq!(
+        fake.comparison_members.borrow().as_slice(),
+        &[Some(fixture.selected.clone())]
+    );
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn a_server_that_rejects_the_member_argument_is_reported_as_outdated() {
+    let fixture = tuning_fetched_study();
+    let fake = FakeStudyRemote {
+        comparison_failure: Some(
+            "colm-cli: unknown argument --member\nusage: colm-cli study-verify-comparison \
+             <study-dir>"
+                .into(),
+        ),
+        ..fixture.fake
+    };
+    let error =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fake)).unwrap_err();
+    let text = format!("{error:#}");
+    // 明确拒绝并给可行动说明，而不是静默退回弱核验。
+    assert!(
+        text.contains("predates per-member comparison verification"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Upgrade or rebuild the remote engine"),
+        "{text}"
+    );
+    assert!(text.contains("unknown argument"), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn selected_member_evidence_must_be_bound_to_the_verified_result_tree() {
+    let fixture = tuning_fetched_study();
+    let mut evidence = fixture.fake.comparison_evidence.clone().unwrap();
+    evidence["members"][0]["evidence_sha256"] = json!("0".repeat(64));
+    let fake = FakeStudyRemote {
+        comparison_evidence: Some(evidence),
+        ..fixture.fake
+    };
+    let error =
+        verified_study_member_with(&fixture.local, &fixture.selected, Some(&fake)).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("not bound to its verified result files"),
+        "{text}"
+    );
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
@@ -2142,6 +2310,26 @@ fn a_tuning_member_without_a_server_objective_cannot_be_written_back() {
     let text = format!("{error:#}");
     assert!(text.contains("records no objective"), "{text}");
     assert!(text.contains(&fixture.selected), "{text}");
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn local_comparison_evidence_rejects_unknown_and_already_verified_members() {
+    let fixture = tuning_fetched_study();
+    let unknown = crate::study_version::local_comparison_evidence(&fixture.local, Some("m999999"))
+        .unwrap_err();
+    assert!(format!("{unknown:#}").contains("unknown Study member m999999"));
+    let best = format!(
+        "{:#}",
+        crate::study_version::local_comparison_evidence(&fixture.local, Some(&fixture.best))
+            .unwrap_err()
+    );
+    assert!(best.contains("already verified without --member"), "{best}");
+    // 旧调用（不传 --member）不会落在成员参数检查上：这个 fixture 没有真实执行证据，预期报
+    // 输入/证据错误，但不能是 --member 相关错误。
+    let error = crate::study_version::local_comparison_evidence(&fixture.local, None).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(!text.contains("--member"), "{text}");
     std::fs::remove_dir_all(fixture.root).unwrap();
 }
 

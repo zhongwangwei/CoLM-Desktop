@@ -1330,6 +1330,7 @@ fn comparison_command(
     record: &StudyRecord,
     study_root: &str,
     projects: &[String],
+    member: Option<&str>,
 ) -> Result<String> {
     check_study_location(
         &record.host,
@@ -1342,8 +1343,22 @@ fn comparison_command(
         study_under_project(study_root, projects),
         "comparison Study root differs from its submitted project"
     );
+    // 成员 id 来自本机冻结清单（用户可改 manifest.json），拼进远端命令前只放行字母数字与
+    // `-`/`_`：这条命令最终交给服务器的 shell，空白、分号、`$` 都能变成命令注入。
+    if let Some(member) = member {
+        ensure!(
+            !member.is_empty()
+                && member
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "invalid Study member id for server verification"
+        );
+    }
+    let member_flag = member
+        .map(|member| format!(" --member {member}"))
+        .unwrap_or_default();
     Ok(format!(
-        "{identity}\nCOLM_AUDIT_BY_PARENT=1 {cli} study-verify-comparison {study}\n",
+        "{identity}\nCOLM_AUDIT_BY_PARENT=1 {cli} study-verify-comparison {study}{member_flag}\n",
         identity = cancel_identity_script(record)?,
         cli = quote(&format!(
             "{}/bin/colm-cli",
@@ -1379,9 +1394,14 @@ fn scoped_comparison_evidence(
     .context("server CLI does not provide readable scoped Study evidence")
 }
 
-fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
+fn server_comparison_evidence(
+    ssh: &Ssh,
+    record: &StudyRecord,
+    study_root: &str,
+    member: Option<&str>,
+) -> Result<Value> {
     let projects = project_spellings(ssh, record)?;
-    let command = comparison_command(record, study_root, &projects)?;
+    let command = comparison_command(record, study_root, &projects, member)?;
     let cli = format!(
         "{}/bin/colm-cli",
         engine::engine_dir(&record.root, &record.engine)
@@ -1433,6 +1453,97 @@ fn ensure_evidence_kind(evidence: &Value, kind: study::spec::StudyKind) -> Resul
             Ok(())
         }
     }
+}
+
+/// 旧服务器引擎（不认识 `study-verify-comparison --member`）的拒绝理由。
+///
+/// 本程序的参数解析接受任意 `--flag value`，所以旧引擎很可能**成功**返回一份没有成员条目的
+/// 旧证据，而不是报 unknown argument。两种表现都归结到这一句可行动说明，绝不退回只看 state
+/// 分数的弱核验。
+const OUTDATED_MEMBER_ENGINE: &str =
+    "the server's colm-cli cannot verify the selected Study member the way it verifies the best \
+     member and the baseline: it either rejected or silently ignored `study-verify-comparison \
+     --member`, and returned no member evidence. The remote engine predates per-member comparison \
+     verification. Upgrade or rebuild the remote engine snapshot and submit the Study again, or \
+     write back the best or baseline member instead; refusing to fall back to the weaker \
+     state-only check";
+
+fn outdated_member_engine(error: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{OUTDATED_MEMBER_ENGINE} (server said: {error:#})")
+}
+
+/// 服务器把 `--member` 当成未知参数时，部分 CLI 会以 usage 错误退出。旧引擎若默默忽略它，
+/// 则走 [`verify_selected_member_evidence`] 的缺条目拒绝。
+fn looks_like_unknown_argument(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "unknown argument",
+        "unexpected argument",
+        "unrecognized argument",
+        "unknown option",
+        "invalid option",
+        "usage:",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+/// 写入用户选择的成员前，服务器必须像 best/baseline 一样核验该成员自己的原始输出。
+///
+/// 只认服务器命令返回的成员条目：条目里的分数必须与同一份证据里的检查点一致，`evidence_sha256`
+/// 必须等于用 `results_sha256` 里该成员任务结果/评估身份重算出的摘要。这样成员条目被绑回服务器
+/// 核验过的结果树（客户端还会把本机下载字节与同一份 `results_sha256` 对齐），而不是多信一个字段。
+fn verify_selected_member_evidence(evidence: &Value, member_id: &str) -> Result<()> {
+    let entry = evidence
+        .get("members")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["id"].as_str() == Some(member_id))
+        });
+    let Some(entry) = entry else {
+        bail!("{OUTDATED_MEMBER_ENGINE}");
+    };
+    ensure!(
+        entry["kind"] == "selected",
+        "the server's evidence for Study member {member_id} is not a selected-member entry"
+    );
+    ensure!(
+        entry["metrics_recomputed"] == false,
+        "the server's selected-member evidence claims a comparison metric recomputation it cannot \
+         attribute to this member"
+    );
+    let state: study::state::StudyState = serde_json::from_value(evidence["state"].clone())
+        .context("the server Study state is not readable here")?;
+    let candidate = state.candidates.get(member_id).with_context(|| {
+        format!(
+            "the server Study state records no objective for member {member_id}; its score cannot \
+             be verified"
+        )
+    })?;
+    ensure!(
+        entry["scores"]["feasible"] == json!(candidate.feasible)
+            && entry["scores"]["calibration"] == serde_json::to_value(candidate.calibration)?
+            && entry["scores"]["validation"] == serde_json::to_value(candidate.validation)?,
+        "the server's evidence for Study member {member_id} disagrees with its checkpoint scores"
+    );
+    let results: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(evidence["results_sha256"].clone())
+            .context("the server result file hashes are not readable")?;
+    let digest =
+        crate::study_version::member_evidence_digest(&results, member_id).with_context(|| {
+            format!(
+            "the server comparison evidence contains no verified result files for Study member \
+             {member_id}; its outputs were not verified like the best member and the baseline"
+        )
+        })?;
+    ensure!(
+        entry["evidence_sha256"].as_str() == Some(digest.as_str()),
+        "the server's evidence for Study member {member_id} is not bound to its verified result \
+         files; fetch the Study again before writing the member into a model version"
+    );
+    Ok(())
 }
 
 /// 目标观测的绝对路径在各机器上都不同：比较设计前把服务器清单里的目标源路径换成本机清单里同键目标的
@@ -1684,15 +1795,9 @@ fn result_tree_inventory(root: &Path) -> Result<std::collections::BTreeMap<Strin
 }
 
 /// 有序的「相对路径 + 内容哈希」摘要；每个成员的结果树和整棵结果树都用它。
+/// 实现放在 `study_version` 里，服务器证据的成员条目与客户端核对共用同一份算法。
 fn tree_digest(files: &std::collections::BTreeMap<String, String>) -> String {
-    let mut text = String::new();
-    for (path, sha256) in files {
-        text.push_str(path);
-        text.push('\0');
-        text.push_str(sha256);
-        text.push('\n');
-    }
-    colm_kernel::sha256_hex(text.as_bytes())
+    crate::study_version::tree_digest(files)
 }
 
 fn ensure_same_result_tree(
@@ -2038,7 +2143,15 @@ pub(crate) trait StudyRemote {
     fn study_root(&self, record: &StudyRecord) -> Result<Option<String>>;
     fn study_status(&self, record: &StudyRecord, study_root: &str) -> Result<Value>;
     /// 率定的服务器现场比较证据；不确定性研究没有这条命令。
-    fn comparison_evidence(&self, record: &StudyRecord, study_root: &str) -> Result<Value>;
+    ///
+    /// `member` 非空时服务器还要核验该成员自己的原始输出（与 best/baseline 同一套成员证据）。
+    /// best/baseline 保持 `None`，旧服务器命令与旧证据形状照旧。
+    fn comparison_evidence(
+        &self,
+        record: &StudyRecord,
+        study_root: &str,
+        member: Option<&str>,
+    ) -> Result<Value>;
     /// 读服务器上的小文本文件（只用于核对样本/成员参数，不拉 history）。
     fn read_text_file(&self, path: &str) -> Result<String>;
 }
@@ -2060,8 +2173,13 @@ impl StudyRemote for Ssh {
         remote_study_status(self, record, study_root)
     }
 
-    fn comparison_evidence(&self, record: &StudyRecord, study_root: &str) -> Result<Value> {
-        server_comparison_evidence(self, record, study_root)
+    fn comparison_evidence(
+        &self,
+        record: &StudyRecord,
+        study_root: &str,
+        member: Option<&str>,
+    ) -> Result<Value> {
+        server_comparison_evidence(self, record, study_root, member)
     }
 
     fn read_text_file(&self, path: &str) -> Result<String> {
@@ -2115,11 +2233,15 @@ impl RemoteVerification {
 
 /// 在原始输出所在的服务器上核验研究：作业成功、研究身份、成员集合/冻结输入、证据与结果树哈希。
 /// 不下载 history；失败按"服务器不可达 / 作业没成功 / 研究没建出来 / 证据不符"给可行动错误。
+///
+/// `selected` 是本次要写回的非 best/baseline 成员：服务器命令必须同样核验它自己的原始输出，
+/// 否则拒绝（见 [`OUTDATED_MEMBER_ENGINE`]）。取回/比较路径传 `None`，行为与旧调用一致。
 fn remote_study_verification(
     manifest: &study::spec::Manifest,
     record: &StudyRecord,
     state: &study::state::StudyState,
     remote: &dyn StudyRemote,
+    selected: Option<&str>,
 ) -> Result<RemoteVerification> {
     remote.verify_identity(record).with_context(|| {
         format!(
@@ -2156,9 +2278,18 @@ fn remote_study_verification(
     match manifest.spec.kind {
         study::spec::StudyKind::Tuning => {
             let evidence = remote
-                .comparison_evidence(record, &remote_root)
+                .comparison_evidence(record, &remote_root, selected)
+                .map_err(|error| match selected {
+                    // 旧引擎把 --member 当未知参数时，把 CLI 的 usage 错误换成同样可行动的
+                    // “需要升级/重建远程引擎”说明，而不是当成普通 SSH 失败。
+                    Some(_) if looks_like_unknown_argument(&error) => outdated_member_engine(error),
+                    _ => error,
+                })
                 .context("cannot verify the original member outputs on the server")?;
             let identity = verified_evidence(manifest, record, &remote_root, state, &evidence)?;
+            if let Some(member) = selected {
+                verify_selected_member_evidence(&evidence, member)?;
+            }
             verify_result_tree(
                 &Path::new(&manifest.root).join("results"),
                 &evidence["results_sha256"],
@@ -2214,7 +2345,7 @@ fn remote_study_verification(
 pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
     let (manifest, record, state) = verified_comparison_inputs(study_dir)?;
     let ssh = Ssh::new(&record.host)?;
-    let verified = remote_study_verification(&manifest, &record, &state, &ssh)?;
+    let verified = remote_study_verification(&manifest, &record, &state, &ssh, None)?;
     verified.input_identity(&manifest)
 }
 
@@ -2371,7 +2502,13 @@ fn verified_study_member_remote(
     let member = study::runner::resolve_apply_member(study_dir, &manifest, member_id)?;
     let state =
         study::runner::status_state(study_dir)?.context("Study has no evaluated member state")?;
-    let server = remote_study_verification(&manifest, record, &state, remote)?;
+    // 用户选择写回的成员若不是 best/baseline，服务器必须像核验它们一样核验这个成员自己的
+    // 原始输出；best/baseline 继续走旧命令（不带 --member），保持旧证据形状。
+    let selected_member = (manifest.spec.kind == study::spec::StudyKind::Tuning
+        && !member.baseline
+        && state.best_member.as_deref() != Some(member.id.as_str()))
+    .then_some(member.id.as_str());
+    let server = remote_study_verification(&manifest, record, &state, remote, selected_member)?;
     // 服务器状态（已核对与本机检查点一致）里这个成员的任务必须全部成功；否则没有可写回的原始输出。
     for site in &manifest.spec.base_cases {
         let task = server
@@ -2432,10 +2569,9 @@ fn verified_study_member_remote(
     } else {
         "server-study-status+fetch-evidence"
     };
-    // 率定服务器命令只重算 best+baseline 的指标。别的成员写回时仍核验服务器状态分数、
-    // 该成员结果文件哈希与样本字节，但明确标出指标没有现场重算；不把这条证据冒充成
-    // “best 级”比较。扩展服务器命令要同步改 CLI 契约并照顾旧引擎，这里先用现有证据
-    // 能核到的成员身份（结果树+state 分数+samples），把边界写进证据。
+    // 服务器命令对 best+baseline 重算指标；用户指定的其它成员现在也必须在服务器上按同一套
+    // 成员证据核验（`--member`），否则写回会被拒绝。指标重算字段仍保持 false：版本比较的结论
+    // 只排 best+baseline，不把“成员证据已核验”冒充成“比较指标已重算”。
     let best = server.state.best_member.as_deref();
     let baseline = manifest
         .members
@@ -2446,15 +2582,26 @@ fn verified_study_member_remote(
         && (best == Some(member.id.as_str()) || baseline == Some(member.id.as_str()));
     let member_scope = match manifest.spec.kind {
         study::spec::StudyKind::Tuning if metrics_recomputed => "best-or-baseline-metrics",
+        study::spec::StudyKind::Tuning if selected_member.is_some() => {
+            "server-selected-member-evidence"
+        }
         study::spec::StudyKind::Tuning => "server-state-score+result-tree+samples",
         study::spec::StudyKind::Uncertainty => "server-status+fetch-evidence-artifacts",
     };
-    let note = (manifest.spec.kind == study::spec::StudyKind::Tuning && !metrics_recomputed)
-        .then_some(
+    let note = match manifest.spec.kind {
+        study::spec::StudyKind::Tuning if selected_member.is_some() => Some(
+            "the server verified this selected member's task output, result-tree hashes, \
+             evaluation identity, sample parameters and recorded score with the same \
+             member-evidence check used for the best member and the baseline; the version \
+             comparison still ranks only best+baseline, so metrics_recomputed stays false",
+        ),
+        study::spec::StudyKind::Tuning if !metrics_recomputed => Some(
             "the server comparison recomputes metrics for the best member and the baseline only; \
              this member's objective, result files and sample parameters are bound to the fetched \
              server evidence, but its metric was not independently recomputed on the server",
-        );
+        ),
+        _ => None,
+    };
     let evidence = json!({
         "schema": 1,
         "location": {
@@ -3462,7 +3609,7 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
                             .context("the server Study manifest is not readable here")?;
                     ensure_remote_target_sources(&manifest, &remote_manifest)?;
                 }
-                server_comparison_evidence(&ssh, &record, &remote_root).and_then(|evidence| {
+                server_comparison_evidence(&ssh, &record, &remote_root, None).and_then(|evidence| {
                     verified_evidence(&manifest, &record, &remote_root, &typed, &evidence)?;
                     verify_result_tree(&tmp.join("results"), &evidence["results_sha256"])?;
                     Ok(evidence)
