@@ -1084,13 +1084,33 @@ fn valid_opencode_model(model: &str) -> bool {
         && !model.contains(['?', '#', '\\'])
 }
 
+/// 读取助手设置。文件不存在 = 首次使用，返回默认值；存在但读取/解析失败时返回带路径和
+/// 错误摘要的可报告错误 —— 不能静默用默认值，否则下一次保存会把用户原文件覆盖掉（U05）。
+fn load_settings_file(path: &Path) -> Result<AssistantSettings, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<AssistantSettings>(&text).map_err(|error| {
+            format!(
+                "助手设置文件无法解析：{}（{error}）。原文件未改动，请修正或备份后重试。",
+                path.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(AssistantSettings::default())
+        }
+        Err(error) => Err(format!(
+            "无法读取助手设置文件 {}：{error}。原文件未改动。",
+            path.display()
+        )),
+    }
+}
+
+fn load_assistant_settings(app: &tauri::AppHandle) -> Result<AssistantSettings, String> {
+    load_settings_file(&settings_path(app)?)
+}
+
 #[tauri::command]
-pub fn assistant_settings(app: tauri::AppHandle) -> AssistantSettings {
-    settings_path(&app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+pub fn assistant_settings(app: tauri::AppHandle) -> Result<AssistantSettings, String> {
+    load_assistant_settings(&app)
 }
 
 #[tauri::command]
@@ -1098,6 +1118,8 @@ pub fn assistant_save_settings(
     app: tauri::AppHandle,
     settings: AssistantSettings,
 ) -> Result<(), String> {
+    // 先按原文件读一次：解析失败就拒绝保存，绝不把用户手改坏的配置静默覆盖掉。
+    load_assistant_settings(&app)?;
     validate_settings(&settings)?;
     let path = settings_path(&app)?;
     let event = crate::history::start(
@@ -1304,7 +1326,7 @@ pub async fn assistant_xerj_node(
     action: String,
 ) -> Result<Value, String> {
     validate_xerj_node_action(&action)?;
-    let settings = assistant_settings(app.clone());
+    let settings = load_assistant_settings(&app)?;
     match action.as_str() {
         "status" => Ok(managed.status_value(&settings)),
         "start" => {
@@ -1323,7 +1345,8 @@ pub async fn assistant_xerj_node(
             .await
             .map_err(|e| e.to_string())?;
             result?;
-            Ok(managed.status_value(&assistant_settings(app)))
+            let refreshed = load_assistant_settings(&app)?;
+            Ok(managed.status_value(&refreshed))
         }
         "stop" => {
             managed.stop();
@@ -1853,8 +1876,8 @@ fn history_sync_blocking(
 #[tauri::command]
 pub async fn assistant_history_status(app: tauri::AppHandle) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // history 命令不依赖模型服务配置，只校验这两个路径本身，避免 API 设置有问题时整块不可用。
-        let settings = assistant_settings(app.clone());
+        // history 命令不依赖模型服务配置，但设置文件本身读坏时要明确报错而不是静默用默认值。
+        let settings = load_assistant_settings(&app)?;
         settings.history.validate()?;
         let root = history_root(&app)?;
         history_status_blocking(&crate::sidecar::resolve_cli(), &root, &settings.history)
@@ -1880,7 +1903,7 @@ pub async fn assistant_history_sync(
     let guard = HistorySyncGuard::begin()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        let settings = assistant_settings(app.clone());
+        let settings = load_assistant_settings(&app)?;
         settings.history.validate()?;
         let root = history_root(&app)?;
         history_sync_blocking(
@@ -1913,7 +1936,7 @@ pub async fn assistant_start(
     case_dir: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
 ) -> Result<(), String> {
-    let mut settings = assistant_settings(app.clone());
+    let mut settings = load_assistant_settings(&app)?;
     validate_settings(&settings)?;
     require_egress_acknowledged(&settings)?;
     // managed 模式：先把应用自己的 Xerj 节点拉起来、把应用自管的 key 交给 agent，再把实际
@@ -2076,7 +2099,7 @@ pub fn assistant_send(
     if text.trim().is_empty() {
         return Err("消息是空的".into());
     }
-    require_egress_acknowledged(&assistant_settings(app))?;
+    require_egress_acknowledged(&load_assistant_settings(&app)?)?;
     send(
         &process,
         &json!({ "type": "user_message", "text": text, "context": context }),
@@ -2126,6 +2149,122 @@ pub fn assistant_cancel(process: tauri::State<'_, AssistantProcess>) -> Result<(
 #[tauri::command]
 pub fn assistant_new_session(process: tauri::State<'_, AssistantProcess>) -> Result<(), String> {
     send(&process, &json!({ "type": "new_session" }))
+}
+
+// ---- U04：未知副作用明确核对 / U03：用系统浏览器打开来源链接 ----
+
+const RECONCILE_MAX_IDS: usize = 32;
+const RECONCILE_MAX_ID_CHARS: usize = 160;
+
+/// 与 agent 侧同一套规则：非空、去重、最多 32 个、每个 ≤160 字符且不含控制字符。
+fn validate_reconcile_ids(ids: &[String]) -> Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Err("需要至少一个待核对的动作 id".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut normalized = Vec::new();
+    for id in ids {
+        if id.is_empty()
+            || id.chars().count() > RECONCILE_MAX_ID_CHARS
+            || id.chars().any(char::is_control)
+        {
+            return Err("待核对动作的 id 不合法".into());
+        }
+        if seen.insert(id.clone()) {
+            normalized.push(id.clone());
+        }
+    }
+    if normalized.len() > RECONCILE_MAX_IDS {
+        return Err(format!("一次最多核对 {RECONCILE_MAX_IDS} 个动作"));
+    }
+    Ok(normalized)
+}
+
+fn reconcile_effects_message(ids: &[String], note: Option<&str>) -> Value {
+    json!({"type":"reconcile_effects","ids":ids,"note":note})
+}
+
+/// U04：用户明确核对“未知副作用”动作。命令只把核对声明交给 agent（agent 写审计、重算任务
+/// 快照并回发 TaskState），不重跑工具、不改历史。参数先在窗口进程校验；非法时不写 action audit。
+#[tauri::command]
+pub fn assistant_reconcile_effects(
+    process: tauri::State<'_, AssistantProcess>,
+    ids: Vec<String>,
+    note: Option<String>,
+) -> Result<(), String> {
+    let ids = validate_reconcile_ids(&ids)?;
+    let event = crate::history::start(
+        "assistant_reconcile_effects",
+        None,
+        json!({"ids": ids, "note_present": note.is_some()}),
+    )?;
+    let result = send(&process, &reconcile_effects_message(&ids, note.as_deref()));
+    finish_assistant_action(&event, result)
+}
+
+/// U03：回答里的来源链接用系统默认浏览器打开。只接受 http/https（长度 ≤2048、无控制字符）；
+/// 其它协议（file/javascript/data 等）一律拒绝，不把本地路径或任意协议交给系统。
+#[tauri::command]
+pub fn assistant_open_url(url: String) -> Result<(), String> {
+    let url = validate_http_url(&url)?;
+    open_external_url(&url)
+}
+
+fn validate_http_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err("链接是空的".into());
+    }
+    if url.chars().count() > 2048 {
+        return Err("链接超过 2048 字符".into());
+    }
+    if url.chars().any(char::is_control) {
+        return Err("链接含控制字符".into());
+    }
+    let parsed = tauri::Url::parse(url).map_err(|_| "链接不是有效的网址".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("只能打开 http/https 链接".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("链接缺少主机名".into());
+    }
+    Ok(url.to_owned())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn open_external_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    let status = std::process::Command::new(program)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("cannot open link: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("could not open link: {status}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_external_url(url: &str) -> Result<(), String> {
+    // `cmd /C start "" <url>` 交给系统按默认浏览器打开；URL 作为独立 argv，不拼 shell 字符串。
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()
+        .map_err(|e| format!("cannot open link: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("could not open link: {status}"))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_external_url(_url: &str) -> Result<(), String> {
+    Err("opening links is unsupported on this platform".into())
 }
 
 #[cfg(test)]

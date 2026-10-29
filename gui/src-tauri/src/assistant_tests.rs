@@ -912,6 +912,11 @@ mod colm_agent_protocol {
             #[serde(default)]
             retrieval: Retrieval,
         },
+        ReconcileEffects {
+            ids: Vec<String>,
+            #[serde(default)]
+            note: Option<String>,
+        },
         DocsIndex {
             action: DocsIndexAction,
         },
@@ -1586,4 +1591,117 @@ fn history_cancel_terminates_a_registered_sync_and_reports_stopped() {
     let error = worker.join().unwrap().unwrap_err();
     assert!(error.contains("已停止"), "{error}");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- U03/U04/U05：打开来源链接、明确核对未知副作用、设置读取错误 ----
+
+#[test]
+fn settings_loading_reports_parse_errors_without_rewriting_the_file() {
+    let dir = std::env::temp_dir().join(format!("colm-settings-load-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // 文件不存在 = 首次使用：默认设置，不是错误。
+    let missing = dir.join("missing.json");
+    assert_eq!(
+        load_settings_file(&missing).unwrap(),
+        AssistantSettings::default()
+    );
+    // 正常文件原样读出；旧文件缺 history 等新字段按 serde default 兼容。
+    let settings = AssistantSettings {
+        model: "deepseek-v4-pro".into(),
+        history: HistorySettings {
+            scope: "both".into(),
+            desktop_path: None,
+            upstream_path: None,
+        },
+        ..AssistantSettings::default()
+    };
+    let valid = dir.join("valid.json");
+    std::fs::write(&valid, serde_json::to_string(&settings).unwrap()).unwrap();
+    assert_eq!(load_settings_file(&valid).unwrap(), settings);
+    let legacy = dir.join("legacy.json");
+    std::fs::write(
+        &legacy,
+        r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_settings_file(&legacy).unwrap().history,
+        HistorySettings::default()
+    );
+    // 坏文件：报错包含路径，且原文件保持原样（保存前会先经过同一读取函数，解析失败就不覆盖）。
+    let broken = dir.join("broken.json");
+    let original = b"{ this is not valid json".to_vec();
+    std::fs::write(&broken, &original).unwrap();
+    let error = load_settings_file(&broken).unwrap_err();
+    assert!(
+        error.contains("无法解析") || error.contains("parse"),
+        "{error}"
+    );
+    assert!(error.contains(&broken.display().to_string()), "{error}");
+    assert_eq!(std::fs::read(&broken).unwrap(), original);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn assistant_settings_command_is_fallible_so_parse_errors_can_be_reported() {
+    // 类型层面的契约：命令返回 Result，前端必须处理错误而不是永远拿到默认设置。
+    let command: fn(tauri::AppHandle) -> Result<AssistantSettings, String> = assistant_settings;
+    let _ = command;
+}
+
+#[test]
+fn reconcile_effects_ids_are_validated_and_the_message_matches_the_agent_protocol() {
+    assert!(validate_reconcile_ids(&[]).is_err());
+    assert!(validate_reconcile_ids(&["".into()]).is_err());
+    assert!(validate_reconcile_ids(&["bad\nid".into()]).is_err());
+    assert!(validate_reconcile_ids(&[format!("c{}", "x".repeat(160))]).is_err());
+    // 去重且保持首次出现顺序。
+    let ids = validate_reconcile_ids(&["b".into(), "a".into(), "b".into()]).unwrap();
+    assert_eq!(ids, ["b", "a"]);
+    let too_many: Vec<String> = (0..33).map(|index| format!("id-{index}")).collect();
+    assert!(validate_reconcile_ids(&too_many).is_err());
+    let message = reconcile_effects_message(&ids, Some("checked: no job submitted"));
+    assert_eq!(message["type"], "reconcile_effects");
+    assert_eq!(message["ids"], json!(["b", "a"]));
+    assert_eq!(message["note"], "checked: no job submitted");
+    // agent 协议镜像能读懂这条 inbound（字段名/类型漂移会在这里红）。
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
+    match parsed {
+        colm_agent_protocol::Inbound::ReconcileEffects { ids, note } => {
+            assert_eq!(ids, ["b", "a"]);
+            assert_eq!(note.as_deref(), Some("checked: no job submitted"));
+        }
+        _ => panic!("reconcile message must parse as Inbound::ReconcileEffects"),
+    }
+    // note 省略时下发 null；serde default 让旧版可读。
+    let no_note = reconcile_effects_message(&ids, None);
+    assert!(no_note["note"].is_null());
+}
+
+#[test]
+fn open_url_only_accepts_http_and_https() {
+    for good in [
+        "https://example.com/a?b=1#c",
+        "http://127.0.0.1:8080/x",
+        "  https://api.deepseek.com  ",
+    ] {
+        assert!(validate_http_url(good).is_ok(), "{good}");
+    }
+    for bad in [
+        "",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "data:text/html,<b>x</b>",
+        "ftp://example.com/x",
+        "https://",
+        "https://e.com/\nX",
+    ] {
+        assert!(validate_http_url(bad).is_err(), "{bad}");
+    }
+    let long = format!("https://example.com/{}", "x".repeat(2100));
+    assert!(validate_http_url(&long).is_err());
+    // 命令对非法链接直接报错，绝不把它交给系统打开（合法链接不在测试里真的弹浏览器）。
+    assert!(assistant_open_url("file:///etc/passwd".into()).is_err());
+    assert!(assistant_open_url("javascript:alert(1)".into()).is_err());
 }

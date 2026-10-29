@@ -115,6 +115,14 @@ pub enum Inbound {
     /// 续接一个存过的会话（读回历史，接着聊）。已经是当前会话或没存过时留在当前会话；
     /// 都以 `ready`（带当前会话号）回复。
     ResumeSession { id: String },
+    /// U04：用户已明确核对某些“未知副作用”动作。只记录“已核对”声明与备注；不表示动作成功，
+    /// 不改写原始 effect_unknown 证据（审计里原有 tool_outcome/tool_result 保留），也不重跑工具。
+    /// `ids` 由 agent 校验与去重（非空、≤32、单个 ≤160 字符且不含控制字符）。
+    ReconcileEffects {
+        ids: Vec<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// 查询或刷新文档检索索引状态（只在应用设置里触发，不暴露给 LLM）。
     DocsIndex {
         /// "status" | "refresh"；其它值由 agent 报可读错误。

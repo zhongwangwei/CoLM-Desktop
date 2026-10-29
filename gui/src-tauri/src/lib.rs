@@ -280,6 +280,8 @@ pub fn run() {
             assistant_approve,
             assistant_cancel,
             assistant_new_session,
+            assistant_reconcile_effects,
+            assistant_open_url,
             assistant_history_status,
             assistant_history_sync,
             assistant_history_cancel,

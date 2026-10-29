@@ -187,6 +187,18 @@ impl Session {
         .with_context(|| format!("cannot write {}", path.display()))
     }
 
+    /// U04：记录用户对“未知副作用”动作的明确核对。只追加一条审计记录；不改历史消息、
+    /// 不删除原始 effect_unknown 证据、不重跑任何操作。任务快照在下次 `task_snapshot` 时重算。
+    pub fn record_reconciliation(&self, ids: &[String], note: Option<&str>) -> Result<()> {
+        self.append(
+            "audit.jsonl",
+            &json!({
+                "at_ms": now_ms() as u64,
+                "event": {"type": "effects_reconciled", "ids": ids, "note": note},
+            }),
+        )
+    }
+
     pub fn audit(&self, event: &Outbound) -> Result<()> {
         // 流式增量太碎，审计里不记；其余事件都记。
         if matches!(

@@ -30,6 +30,10 @@ pub struct TaskAction {
     /// 取值：unconfirmed（没有结果事件）、not_started、success、failed、effect_unknown。
     pub state: String,
     pub result: Option<String>,
+    /// 用户已在审计里明确核对过这条“未知副作用”（U04，`effects_reconciled` 记录）。
+    /// 只影响“是否还要求核对”，不改 `effect`：原始 effect_unknown 证据保留，便于追溯。
+    #[serde(default)]
+    pub reconciled: bool,
     /// 结局是否已由审计事件确定。进程中断时保持 false；不写进任务快照（GUI 只关心 effect）。
     #[serde(skip)]
     pub settled: bool,
@@ -100,7 +104,11 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                 .map(|task| {
                     task.actions
                         .into_iter()
-                        .filter(|action| action.mutating && action.effect.needs_reconciliation())
+                        .filter(|action| {
+                            action.mutating
+                                && action.effect.needs_reconciliation()
+                                && !action.reconciled
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -129,6 +137,7 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                     effect: ToolEffect::EffectUnknown,
                     state: "unconfirmed".into(),
                     result: None,
+                    reconciled: false,
                     settled: false,
                 });
             }
@@ -165,6 +174,26 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                     }
                 }
             }
+            Some("effects_reconciled") => {
+                // 只有用户明确核对记录能清掉“未知副作用”：新任务轮次、普通 tool_outcome
+                // 和迟到的失败结果都不行（同一调用明确的成功 tool_result 仍按既有规则更新
+                // 结局）。匹配 id 且仍未知的动作标 reconciled，但 effect 保持 effect_unknown
+                // （原始证据不销毁）。
+                let ids: Vec<&str> = event["ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                for action in &mut task.actions {
+                    if !action.reconciled
+                        && ids.contains(&action.id.as_str())
+                        && action.effect.needs_reconciliation()
+                    {
+                        action.reconciled = true;
+                    }
+                }
+            }
             Some("turn_done") => {
                 task.state = "answered".into();
                 task.phase = "report".into();
@@ -180,10 +209,9 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                 action.effect = ToolEffect::EffectUnknown;
             }
         }
-        task.requires_reconciliation = task
-            .actions
-            .iter()
-            .any(|action| action.mutating && action.effect.needs_reconciliation());
+        task.requires_reconciliation = task.actions.iter().any(|action| {
+            action.mutating && action.effect.needs_reconciliation() && !action.reconciled
+        });
         if resumed && task.state == "running" {
             task.state = "interrupted".into();
         }
@@ -199,6 +227,27 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
 }
 
 impl TaskSnapshot {
+    /// 发给 GUI 的任务快照（`Outbound::TaskState`）。`effect_unknown_actions` 只列仍未
+    /// reconciled 的未知副作用；完整动作列表照旧携带，便于界面显示“已核对”标记而不销毁证据。
+    pub fn state_json(&self) -> Value {
+        let unknown: Vec<&TaskAction> = self
+            .actions
+            .iter()
+            .filter(|action| {
+                action.mutating && action.effect.needs_reconciliation() && !action.reconciled
+            })
+            .collect();
+        json!({
+            "goal": self.goal,
+            "state": self.state,
+            "phase": self.phase,
+            "requires_reconciliation": self.requires_reconciliation,
+            "next_step": self.next_step,
+            "actions": self.actions,
+            "effect_unknown_actions": unknown,
+        })
+    }
+
     pub fn recovery_context(&self) -> Option<String> {
         // 回答过、也没有待核对动作时，恢复上下文没有信息量。
         if self.state == "answered" && !self.requires_reconciliation {
@@ -208,7 +257,9 @@ impl TaskSnapshot {
         let unknown: Vec<_> = self
             .actions
             .iter()
-            .filter(|action| action.mutating && action.effect.needs_reconciliation())
+            .filter(|action| {
+                action.mutating && action.effect.needs_reconciliation() && !action.reconciled
+            })
             .collect();
         let recent: Vec<_> = self.actions.iter().rev().take(12).collect();
         Some(format!(
@@ -580,5 +631,103 @@ mod tests {
             );
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    /// U04：只有审计里新的 `effects_reconciled` 记录能清掉未知副作用；无关 id 不清，
+    /// 原始 `effect_unknown` 证据与动作 body 都不销毁。
+    #[test]
+    fn explicit_reconciliation_clears_only_named_unknown_effects() {
+        let root = data_root("reconcile");
+        let session = session_in(&root, "run the case");
+        session
+            .audit(&tool_call("run", "run_case", Tier::Act))
+            .unwrap();
+        session
+            .audit(&outcome("run", "run_case", ToolEffect::EffectUnknown))
+            .unwrap();
+        session.audit(&turn_done()).unwrap();
+        let dir = session_dir(&root, &session);
+        assert!(load(&dir, true).unwrap().unwrap().requires_reconciliation);
+
+        // 无关 id：仍要求核对。
+        session
+            .record_reconciliation(&["other-call".to_owned()], None)
+            .unwrap();
+        let untouched = load(&dir, true).unwrap().unwrap();
+        assert!(untouched.requires_reconciliation);
+        assert!(!untouched.actions[0].reconciled);
+
+        // 匹配 id：标记 reconciled，effect 保持 effect_unknown。
+        session
+            .record_reconciliation(&["run".to_owned()], Some("checked: no job was submitted"))
+            .unwrap();
+        let cleared = load(&dir, true).unwrap().unwrap();
+        assert!(!cleared.requires_reconciliation);
+        assert!(cleared.actions[0].reconciled);
+        assert_eq!(cleared.actions[0].effect, ToolEffect::EffectUnknown);
+        assert!(cleared.recovery_context().is_none());
+        // 发给 GUI 的快照只列仍未 reconciled 的未知副作用。
+        let state = cleared.state_json();
+        assert_eq!(state["requires_reconciliation"], false);
+        assert_eq!(state["effect_unknown_actions"], serde_json::json!([]));
+        assert_eq!(state["actions"][0]["reconciled"], true);
+        assert_eq!(state["actions"][0]["effect"], "effect_unknown");
+
+        // 审计行格式：at_ms + event{type,ids,note}；旧 tool_outcome 证据还在。
+        let journal = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        let records: Vec<Value> = journal
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let last = records.last().unwrap();
+        assert!(last["at_ms"].as_u64().is_some(), "{last}");
+        assert_eq!(last["event"]["type"], "effects_reconciled");
+        assert_eq!(last["event"]["ids"], serde_json::json!(["run"]));
+        assert_eq!(last["event"]["note"], "checked: no job was submitted");
+        assert!(records.iter().any(|record| {
+            record["event"]["type"] == "tool_outcome"
+                && record["event"]["effect"] == "effect_unknown"
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// U04：新任务轮次不能清除未知副作用；核对之后迟到的 tool_outcome/tool_result
+    /// 也不能让它复活（否则 banner 会反复出现）。
+    #[test]
+    fn a_new_turn_keeps_unknown_effects_and_late_outcomes_cannot_resurrect_them() {
+        let root = data_root("reconcile-late");
+        let mut session = session_in(&root, "run the case");
+        session
+            .audit(&tool_call("run", "run_case", Tier::Act))
+            .unwrap();
+        session
+            .audit(&outcome("run", "run_case", ToolEffect::EffectUnknown))
+            .unwrap();
+        session.audit(&turn_done()).unwrap();
+        // 新问题 + 新回答：未知副作用跨轮保留。
+        session
+            .push(Message::User {
+                content: "what should I do next?".into(),
+            })
+            .unwrap();
+        session.audit(&turn_done()).unwrap();
+        let carried = load(&session_dir(&root, &session), true).unwrap().unwrap();
+        assert!(carried.requires_reconciliation);
+        assert!(carried.actions.iter().any(|action| action.id == "run"));
+        // 明确核对之后才解除。
+        session
+            .record_reconciliation(&["run".to_owned()], None)
+            .unwrap();
+        // 核对之后迟到的结构化结局（仍是 effect_unknown）与乱序结果都不能复活待核对。
+        session
+            .audit(&outcome("run", "run_case", ToolEffect::EffectUnknown))
+            .unwrap();
+        session
+            .audit(&result("run", "run_case", false, "late failure text"))
+            .unwrap();
+        let late = load(&session_dir(&root, &session), true).unwrap().unwrap();
+        assert!(!late.requires_reconciliation);
+        assert!(late.actions.iter().all(|action| action.reconciled));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
