@@ -1812,6 +1812,220 @@ fn a_pin_whose_program_is_missing_is_refused_with_an_actionable_error() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// ---------------------------------------------------------------- 写回成员：pin 到别的程序时只放行 best/baseline
+//
+// 上一批给 `study-verify-comparison` 加了 `--member`；研究 pin 到旧 `colm-cli` 时
+// `study-save-version`/`model-import-study` 被整条转交，旧程序不会带这个 flag，非 best/baseline
+// 成员就退回只读检查点的旧核验。父进程探测不到 pin 的能力，但能从研究 manifest/状态确认请求的
+// 成员是不是 best/baseline：不是就拒绝，免得把弱核验的结果写进模型版本。
+
+fn member_write_back_opts(command: &str, study: &Path, member: Option<&str>) -> crate::Opts {
+    let study = study.to_string_lossy().into_owned();
+    let mut flags = Vec::new();
+    let member_flag = || member.map(|member| ("--member".to_owned(), member.to_owned()));
+    match command {
+        "study-save-version" => {
+            if let Some(flag) = member_flag() {
+                flags.push(flag);
+            }
+            flags.push(("--name".into(), "v1".into()));
+        }
+        "model-import-study" => {
+            flags.push(("--study-dir".into(), study.clone()));
+            flags.push(("--model-id".into(), "draft".into()));
+            flags.push(("--expected-generation".into(), "1".into()));
+            if let Some(flag) = member_flag() {
+                flags.push(flag);
+            }
+        }
+        other => panic!("test does not know {other}"),
+    }
+    crate::Opts {
+        positional: if command == "study-save-version" {
+            vec![study]
+        } else {
+            Vec::new()
+        },
+        flags,
+    }
+}
+
+/// 按真实文件形状写研究 manifest 与检查点：判定只读这两份 JSON。
+fn write_member_identity(study: &Path, best: &str) -> study::spec::Manifest {
+    let manifest =
+        comparison_manifest(&[("m000000", true), ("m000001", false), ("m000002", false)]);
+    std::fs::write(
+        study.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let state = comparison_state(&manifest, best);
+    study::checkpoint::write_next(&study.join("checkpoints/state"), &state).unwrap();
+    manifest
+}
+
+/// pin 不同、请求的成员既不是 best 也不是 baseline：旧程序只会按旧路径核验，必须在起子进程前拒绝。
+#[cfg(unix)]
+#[test]
+fn a_non_best_member_written_back_through_a_pinned_program_is_refused() {
+    for command in ["study-save-version", "model-import-study"] {
+        let root = temp(&format!("pin-cli-member-refuse-{command}"));
+        let log = root.join("args.log");
+        let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+        let study = pinned_study(&root, cli);
+        write_member_identity(&study, "m000001");
+        let opts = member_write_back_opts(command, &study, Some("m000002"));
+        let reason = refusal(command, &opts);
+        assert!(
+            reason.contains("model-version program snow"),
+            "{command}: {reason}"
+        );
+        assert!(
+            reason.contains("does not verify a member other than best or baseline"),
+            "{command}: {reason}"
+        );
+        assert!(reason.contains("m000002"), "{command}: {reason}");
+        assert!(
+            reason.contains("rebuild the Study with the current program"),
+            "{command}: {reason}"
+        );
+        assert!(!log.exists(), "{command}: 拒绝时不该启动任何程序");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 未指定成员、字面量 `best`、状态里的 best、manifest 里的 baseline：旧程序本来就走这些路径，
+/// 保持整条转交（参数原样、父进程标记照旧）。
+#[cfg(unix)]
+#[test]
+fn best_baseline_and_unspecified_members_still_run_on_the_pinned_program() {
+    for command in ["study-save-version", "model-import-study"] {
+        for member in [None, Some("best"), Some("m000001"), Some("m000000")] {
+            let tag = member.unwrap_or("unspecified");
+            let root = temp(&format!("pin-cli-member-delegate-{command}-{tag}"));
+            let log = root.join("args.log");
+            let cli = fake_cli(
+                &root,
+                &format!("printf '%s\\n' \"$@\" > '{}'\n", log.display()),
+            );
+            let study = pinned_study(&root, cli.clone());
+            write_member_identity(&study, "m000001");
+            let opts = member_write_back_opts(command, &study, member);
+            let program = delegated_program(command, &opts);
+            assert_eq!(program, cli, "{command} / {tag}");
+            assert_eq!(
+                run_pinned_command(&program, command, &opts, None).unwrap(),
+                0,
+                "{command} / {tag}"
+            );
+            let args: Vec<String> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                args,
+                pinned_command_args(command, &opts),
+                "{command} / {tag}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+}
+
+/// 不确定性研究没有"最优成员"语义，旧 pin 程序也不会对它做 best/baseline 比较；
+/// 非 baseline 成员写回仍应整条交给 pin 程序，不能被率定守卫误拒。
+#[cfg(unix)]
+#[test]
+fn an_uncertainty_member_write_back_still_runs_on_the_pinned_program() {
+    for command in ["study-save-version", "model-import-study"] {
+        let root = temp(&format!("pin-cli-member-uncertainty-{command}"));
+        let log = root.join("args.log");
+        let cli = fake_cli(&root, &format!("printf ran > '{}'\n", log.display()));
+        let study = pinned_study(&root, cli.clone());
+        write_member_identity(&study, "m000001");
+        let manifest_path = study.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["spec"]["kind"] = serde_json::json!("uncertainty");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let opts = member_write_back_opts(command, &study, Some("m000002"));
+        let program = delegated_program(command, &opts);
+        assert_eq!(program, cli, "{command}");
+        assert_eq!(
+            run_pinned_command(&program, command, &opts, None).unwrap(),
+            0,
+            "{command}"
+        );
+        assert!(log.exists(), "{command}: 委托路径应真正启动程序");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// pin 等于当前程序或没有 pin：没有身份差异，选中的成员也由当前程序自己核验。
+#[test]
+fn a_selected_member_write_back_stays_local_without_a_foreign_pin() {
+    let current = std::env::current_exe().unwrap();
+    for command in ["study-save-version", "model-import-study"] {
+        let root = temp(&format!("pin-cli-member-local-{command}"));
+        let study = pinned_study(&root, current.clone());
+        assert_local(
+            command,
+            &member_write_back_opts(command, &study, Some("m000002")),
+        );
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_local(
+            command,
+            &member_write_back_opts(command, &plain, Some("m000002")),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 状态缺失（或读不出 best）时无法确认成员身份：宁可拒绝，也不能让旧程序按弱核验照跑。
+#[cfg(unix)]
+#[test]
+fn a_selected_member_without_study_state_is_refused() {
+    for command in ["study-save-version", "model-import-study"] {
+        let root = temp(&format!("pin-cli-member-nostate-{command}"));
+        let log = root.join("args.log");
+        let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+        let study = pinned_study(&root, cli);
+        let opts = member_write_back_opts(command, &study, Some("m000002"));
+        let reason = refusal(command, &opts);
+        assert!(
+            reason.contains("cannot confirm from the Study state"),
+            "{command}: {reason}"
+        );
+        assert!(reason.contains("best or baseline"), "{command}: {reason}");
+        assert!(reason.contains("m000002"), "{command}: {reason}");
+        assert!(!log.exists(), "{command}: 拒绝时不该启动任何程序");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 父进程交出来的程序已带 `DELEGATED_ENV`：即使成员不是 best/baseline 也不能再转交一次。
+#[cfg(unix)]
+#[test]
+fn a_parent_marker_also_stops_a_selected_member_write_back() {
+    let root = temp("pin-cli-member-loop");
+    let log = root.join("args.log");
+    let cli = fake_cli(&root, &format!("printf 'ran\\n' > '{}'\n", log.display()));
+    let study = pinned_study(&root, cli);
+    write_member_identity(&study, "m000001");
+    let opts = member_write_back_opts("study-save-version", &study, Some("m000002"));
+    let _guard = DelegatedEnv::set();
+    assert_local("study-save-version", &opts);
+    assert!(!log.exists(), "父进程交出来的程序不能再转交一次");
+    drop(_guard);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ---------------------------------------------------------------- 服务器按成员核验（--member）
 //
 // 写回用户选择的成员时，服务器必须像 best/baseline 一样核验该成员自己的原始输出。证据条目

@@ -270,7 +270,117 @@ fn ensure_pinned_program(pin: &Pinned) -> Result<()> {
     Ok(())
 }
 
-/// 单研究命令：pin 为空或就是当前程序时本地执行，否则交给 pin 的程序。
+/// 写回研究成员的两条命令。成员都放在 `--member` 里，缺省由命令自己解析成 `best`。
+const MEMBER_WRITE_BACK_COMMANDS: [&str; 2] = ["study-save-version", "model-import-study"];
+
+/// manifest 里与成员身份有关的两项：研究 id（核对检查点属于同一个研究）与基线成员。
+struct ManifestIdentity {
+    id: Option<String>,
+    baseline: Option<String>,
+    kind: Option<String>,
+}
+
+/// 只扫 manifest 的 `id` 与 `members[].baseline`，不反序列化整份 `StudySpec`：manifest 由 pin 时
+/// 那份程序写成，字段可能比当前结构旧；为了一个布尔位把 spec 整份校验一遍，会把“能确认的基线”
+/// 读成“读不出来”，进而多拒绝一类本来安全的写回。
+fn manifest_identity(study_dir: &Path) -> ManifestIdentity {
+    let value = std::fs::read_to_string(study_dir.join("manifest.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let Some(value) = value else {
+        return ManifestIdentity {
+            id: None,
+            baseline: None,
+            kind: None,
+        };
+    };
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let baseline = value
+        .get("members")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|members| {
+            members.iter().find_map(|member| {
+                if member.get("baseline").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return None;
+                }
+                member
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+        });
+    let kind = value
+        .get("spec")
+        .and_then(|spec| spec.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    ManifestIdentity { id, baseline, kind }
+}
+
+/// 检查点里记的最优成员。manifest 读得到 id 时要求与检查点一致：复用或搬来的检查点不能替
+/// 另一个研究作证，宁可当作读不出 best。
+fn best_member_in_state(study_dir: &Path, manifest_id: Option<&str>) -> Option<String> {
+    let loaded = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )
+    .ok()??;
+    if manifest_id.is_some_and(|id| id != loaded.payload.study_id) {
+        return None;
+    }
+    loaded.payload.best_member
+}
+
+/// 旧程序不会按成员在服务器上核验：`--member` 是上一批给当前程序加的。
+///
+/// 研究 pin 到别的 `colm-cli` 时整条命令会被转交，那个程序只走 best/baseline 的旧路径。请求
+/// 别的成员时不能把“旧程序照跑”当成核验成功，必须在起子进程、读 SSH 凭据之前拒绝：写回的是
+/// 模型版本，弱核验的后果要等到复现结果不对才发现。best/baseline 与未指定成员保持原有转交。
+fn member_write_back_refusal(
+    command: &str,
+    opts: &crate::Opts,
+    study_dir: &Path,
+    pin: &Pinned,
+) -> Option<String> {
+    if !MEMBER_WRITE_BACK_COMMANDS.contains(&command) {
+        return None;
+    }
+    // 未指定成员由旧程序解析成 best；字面量 `best` 也由它当场解析，不需要这里的检查点。
+    let member = opts.get("--member")?;
+    if member == "best" {
+        return None;
+    }
+    let identity = manifest_identity(study_dir);
+    if identity.kind.as_deref() == Some("uncertainty") {
+        // 不确定性研究本来就没有"最优成员"语义，远程按成员核验只服务率定；
+        // 旧 pin 程序对它的成员写回不做 best/baseline 比较，不应因此拒绝。
+        return None;
+    }
+    if identity.baseline.as_deref() == Some(member.as_str()) {
+        return None;
+    }
+    let best = best_member_in_state(study_dir, identity.id.as_deref());
+    if best.as_deref() == Some(member.as_str()) {
+        return None;
+    }
+    Some(if best.is_some() {
+        format!(
+            "this Study is bound to the model-version program {}, which does not verify a member other than best or baseline on the server (the current program would pass it as --member, but the pinned program is not given that flag); member {member} would therefore be written back after the weaker state-only verification; write back the best or baseline member instead, or rebuild the Study with the current program and run it again",
+            pin.name
+        )
+    } else {
+        format!(
+            "cannot confirm from the Study state at {} whether member {member} is the best or baseline member (the state is missing, unreadable, or records no best member); this Study is bound to the model-version program {}, which only verifies best and baseline members on the server, so writing back another member would silently use the weaker state-only verification; restore the Study state, write back the best or baseline member, or rebuild the Study with the current program and run it again",
+            study_dir.join("checkpoints/state").display(),
+            pin.name
+        )
+    })
+}
+
+/// 单研究命令：pin 为空或就是当前程序时本地执行；否则先看写回成员是否旧程序能按成员核验，
+/// 再决定整条转交还是拒绝。
 fn single_study_decision(
     command: &str,
     opts: &crate::Opts,
@@ -286,6 +396,9 @@ fn single_study_decision(
         return Ok(PinnedCommand::Local);
     }
     ensure_pinned_program(&pin)?;
+    if let Some(reason) = member_write_back_refusal(command, opts, &study_dir, &pin) {
+        return Ok(PinnedCommand::Refuse(reason));
+    }
     Ok(PinnedCommand::Delegate(pin.cli))
 }
 
