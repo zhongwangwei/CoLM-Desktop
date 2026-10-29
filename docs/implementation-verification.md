@@ -39414,3 +39414,37 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 验证（真实执行）：`cargo test -q -p colm-cli --bin colm-cli study_version -- --test-threads=1` **49 passed**；`--bin colm-cli -- --test-threads=1` **792 passed**；`study_cli_tuning` **24 passed**；clippy `-D warnings` exit 0；fmt clean。未运行真实旧 CLI 二进制/真实 SSH。
 
 遗留：旧 pin 程序的能力无法从父进程探测，因此对"旧 pin + best/baseline 写回"仍按委托处理（旧程序对该路径的核验语义不变）；uncertainty 例外依据 manifest `spec.kind`，旧 manifest 缺 `spec` 时仍保守拒绝显式非 baseline 成员。
+
+## 研究页第十二批：粗观测产品警告、SOURCE-only 证据核对、verified-side 凭据转发（2026-10-29）
+
+接第十一批。收尾 #17 的可安全部分与两处身份/凭据遗留。
+
+### 1 粗分辨率观测产品在 in-cell 匹配下给出警告（#17 部分）
+
+- 旧行为：观测产品像元比模型格粗时，in-cell 匹配只认"格心落入"，大量模型格配不上观测，`space_coverage` 静默偏低；用户只看到覆盖差，不知道是产品尺度问题。审计刻意不做无界最近邻，但也没有提示。
+- 新行为：`targets` 增加 `axis_spacing`（中位间距，0/非有限/重复坐标返回 None）、`median_span`、`declared_model_resolution`（解析 case 的 model grid resolution）与 `coarse_observation_warning`；`ObservationSource::pixel_spacing()`/`ModelGrid::resolution()` 提供观测像元尺度与模型格尺度。格点/水文站目标在**预检与运行时**（`preflight_observation`、目标结果路径）比较两者：观测任一轴粗于模型格时产生可行动警告（"the observation product … coarser than the model grid resolution … only in-cell matching, no regridding, so space_coverage will be understated; use a finer product, or resample by pixel boundaries once implemented"）。警告进入 `TargetResult.warnings` 与研究级诊断通道，`runner` 预检也会在 stderr 打 `warning:`；不拒绝研究（避免破坏旧研究），不恢复最近邻，不实现重采样。
+- 规则/单点产品：间距不可算（维度不足、重复坐标、非有限）时跳过，不误报；单点观测不崩溃。
+- 测试（targets 25→30）：1° 观测 + 0.5° 模型格 → 警告与如实 `space_coverage`；0.1° 观测不告警；单点/不规则不崩溃。
+
+### 2 SOURCE-only 模型版本身份按证据核对
+
+- 旧行为（上批遗留）：活动 RECORD 缺失时 `recorded_model_version`/`study-compare` 读持久 SOURCE，但只校验形状/归属，不核对 evidence 哈希；来源是普通 JSON，可被编辑/复制，只看形状就能把任意 provenance 当成历史。
+- 新行为：`optional_source` 返回 `SourceEvidenceStatus{Verified, Unavailable}`；`read_source_evidence` 与写回路径共用只读校验（evidence 文件哈希、服务器研究根）。**关键语义修正**：evidence 里的 `study_id` 是**服务器上**那份研究的 id，而 `StudySource.study_id` 是**本机**研究 id，两者本来就不同；来源新增可选 `remote_study_id`（从 evidence.study_id 记录），证据核对时与它比较，旧来源没有该字段时只核对证据哈希与服务器根（不误拒旧数据）。证据缺失/不可读 → 身份仍可读但状态为 `Unavailable` 并在读取路径打 warning，不静默当作已验证；写回路径（`read_source`）仍要求证据完整并硬性拒绝。
+- 测试：source+evidence 一致 → Verified；哈希不符拒绝；root/服务器研究 id 不符拒绝（含无 remote_study_id 的旧来源兼容）；证据缺失允许只读但标记未验证。
+
+### 3 study-verified-side 的 stdin 凭据转发
+
+- `command_reads_stdin_auth` 从"remote-* + replay"扩展到含 `study-verified-side`：该命令在活动记录存在时会现场连服务器核验，且属于 `PINNED_CLI_COMMANDS`（pin 到别的 CLI 时整条由子进程执行）；父进程若不转发 stdin 上的一次性凭据，子进程只能 BatchMode，password 认证失败（与 P1-8 同类）。`study-verify-comparison`/`study-compare` 只读本机证据/记录，不建 SSH，明确不读凭据。
+- 测试：命令集合断言（7 条读、3 条不读）、委托时凭据原样送一行后关闭 stdin（子进程读到 EOF 不挂住）。
+
+### 本轮验证（真实执行）
+
+- CLI：`cargo test -q -p colm-cli --bin colm-cli -- --test-threads=1` **802 passed**；`remote_study_tests` **71 passed**；`study::targets` **30 passed**；`study_version` **49 passed**；`study_cli_tuning` **24 passed**；`cargo clippy -p colm-cli --all-targets -- -D warnings` exit 0；两侧 `cargo fmt --all --check` clean。
+- 过程中修正：`axis_spacing` 的 `!(gap > 0.0)` 触发 clippy `neg_cmp_op_on_partial_ord`，改为 `partial_cmp`；SOURCE-only 证据核对初版误把本地 study_id 与服务器 evidence.study_id 比较，导致 fake-server 集成测试红，改为记录/比较 `remote_study_id`（兼容旧来源）。
+- 未运行：真实粗分辨率产品文件（合成 1°/0.5°/0.1° 夹具）、真实 SSH 服务器、真实 Tauri 窗口。
+
+### 遗留
+
+- #17 只做到"显式警告"，按像元边界重采样/面积加权仍未实现（能力项，需产品决策与 spec/UI 变更）。
+- 旧服务器引擎不支持 `--member` 时仍拒绝按成员写回（不降级）。
+- 启动前已存在陈旧裸锁的 observer 窄窗口；`metrics_recomputed` 对 selected 保持 false（任务约定）。
