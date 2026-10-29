@@ -39208,3 +39208,40 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - Tauri workspace：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **563 passed / 0 failed / 1 ignored**。
 - 前端：`npm run typecheck`、`npm run lint`、`npm run format:check` exit 0；`npm test` → **1245 passed / 0 failed**；`xtask check-gui` → 260 registered / 222 called，声明事件均有 emitter/listener；`npm run contract` 重新生成 260 条契约。
 - 未运行：真实窗口目视、真实 GitHub 网络同步、真实模型 API；U03–U05 留待下一轮。
+
+## AI 易用性 U03–U05（2026-10-29，历史证据复核报告 U03–U05）
+
+### U03 历史证据卡
+
+- AssistantPanel 的 tool 消息对 `source_history`/`commit_details`/`commit_pull_requests` 解析结构化结果，渲染“短答案 + 可展开证据卡”；失败/非 JSON/非历史工具保留原 JSON `pre` 回退。
+- source_history：query/source mode/source_dir、各 repo endpoint ref@短 SHA、identity、history_object；locations 文件:行；commits 作者时间/提交者时间分列、summary、reason status/excerpt 原样（标“原文候选，不是动机结论”）；cross state/basis/upstream/desktop/candidates/notes（verified 只来自正式 Git trailer）；limits/truncated。
+- commit_details：repository/identity、source_path/history_path、短 SHA/parents、双时间、完整 message、reason candidates（来源+链接）、files/hunks diff（限行）、可疑相对路径不给打开按钮。
+- commit_pull_requests：repository/commit/fetched_at/offline/from_cache/complete/page(total/returned/next_cursor)/notices/errors；每 PR number/title/state/merged_at/author/head/evidence_id、reason/coverage、comments 完整性；`detail_unverified` 明确“未核验≠未关联”；提示一次只返回一页、用 next_cursor/body_offset/comments_cursor 继续，不声称一次读完全部。
+- 安全/打开：本地文件路径只从结构化字段拼接并拒绝绝对/`..`/控制字符后走 `open_path`；PR/证据 URL 只走新命令 `assistant_open_url`（仅 http/https、≤2048、无控制字符；macOS open/Linux xdg-open/Windows cmd start，独立 argv）。
+- 测试：`historyEvidence` 三类工具典型 JSON、reason 三状态、cross 三态、truncated、非 JSON 回退、可疑路径拒绝；react-dom/server 渲染断言；`assistant_open_url` 仅接受 http/https/超长/控制字符测试。
+- 未覆盖：原生窗口目视；对真实历史工具输出端到端（测试 JSON 按当前 Rust 输出契约构造）；Windows 打开分支未实跑。
+
+### U04 未知副作用明确核对
+
+- 协议：`Inbound::ReconcileEffects { ids, note? }`（tag `reconcile_effects`）；ids 非空、去重、≤32、每个 ≤160 字符且无控制字符。非法请求 agent 只发未审计错误事件，不写审计、不改任务状态。
+- 审计：新增 `Session::record_reconciliation`，只追加 `{"at_ms":…,"event":{"type":"effects_reconciled","ids":[…],"note":…}}`；不删旧 tool_outcome/结果证据、不改历史、不重跑工具。
+- 快照：`TaskAction.reconciled`（serde default）；load 识别 effects_reconciled，仅把匹配 id 且 effect 未知的动作标 reconciled，**effect 仍保留 effect_unknown**；requires_reconciliation 与 recovery.effect_unknown_actions 只算未 reconciled；新任务轮次只带走未 reconciled，迟到 tool_outcome 不能复活；任务快照新增 effect_unknown_actions（actions 带 reconciled）。
+- bin：收到即校验→写审计→重算快照→立即发 TaskState，不重启/不调模型；Tauri `assistant_reconcile_effects(ids, note)` 校验 + action audit + send inbound。
+- 前端：requires_reconciliation=true 时对话区顶部“执行结果待核对”横幅，列出 effect_unknown_actions（可展开参数/结果，含本地绝对路径时打开运行输出）、备注、标记已核对；busy 防重复；成功等待后端 TaskState 清横幅、失败保留并显示双语错误；普通 delta/tool_result/新轮不清横幅，只有新 task_state（requires=false）隐藏；只提交未 reconciled 的旧 action id。
+- 测试：session_tasks（`explicit_reconciliation_clears_only_named_unknown_effects`、`a_new_turn_keeps_unknown_effects_and_late_outcomes_cannot_resurrect_them`）；bin（id 校验/去重/上限、写审计并只清指定动作、新轮不能清但 reconcile 可以、hand-written JSONL 冒烟：初始 requires=true/effect_unknown_actions 有 run，核对后 requires=false/actions[0].reconciled=true/原始 effect 保留/空 ids 不写审计）；Tauri 命令校验与协议镜像；前端横幅渲染/失败保留/命令参数/普通事件不清除。
+- 未覆盖：真实窗口点击/目视；真实崩溃或 panic 产生的 effect_unknown 端到端（用审计 JSONL 夹具模拟）；跨进程重启后的 GUI 核对流程。
+
+### U05 小修
+
+- usage：bin 侧 `UsageRecorder/RecordedProvider` 逐次模型请求记账；成功路径仍用 outcome.usage（数值不变），失败/取消轮补记已发生请求后再上抛，可续接读回并计入会话上限；外部后端原本不经此路径，未改变。测试：失败轮已发生请求仍计数、成功路径不重复计。
+- 设置读取：新增 `load_assistant_settings`：文件不存在=默认；存在但读取/解析失败返回含绝对路径与摘要的错误且不覆盖原文件；`assistant_settings` 改为可失败命令，`assistant_save_settings` 保存前先读取保真。测试：坏文件报错且字节不变、命令类型契约、旧文件 default 兼容。
+- 预算错误文案：中英改为“被拦住的这次模型请求没有发往模型服务（本轮较早的请求可能已经发送）”。
+- 待发送消息确认：新增 `eventBelongsToTurn`，显式 turn/request ID 优先、无 ID 时只接受轮内事件白名单（task_state/docs_index_status/ready/exited/error 不算接受），迟到旧事件不再把新消息误标为已接受。
+- 未覆盖：Outbound 协议当前没有 turn/request ID 字段，前端已优先读取但实际走“轮内事件白名单”兜底；若要严格 ID 对齐需后端在 UserMessage/TurnStarted 引入 request ID；未做原生窗口测试。
+
+### 本轮验证（真实执行）
+
+- 根 workspace：fmt/clippy exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3268 passed / 0 failed / 16 ignored**（agent lib 389 +1 ignored、bins 15）。
+- Tauri：fmt/clippy exit 0；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **567 passed / 0 failed / 1 ignored**（一次无关 xerj 端口竞态单独复跑通过）。
+- 前端：typecheck/lint/format:check exit 0；`npm test` → **1263 passed / 0 failed**；`npm run contract` 生成 262 条命令；`xtask check-gui` → 262 registered / 224 called / 26 dynamic，声明事件均有 emitter/listener。
+- 未运行：真实窗口目视、真实历史仓库/GitHub、真实模型 API/外部后端、Windows 打开/核对分支；S01/S02 已在上一轮交付。
