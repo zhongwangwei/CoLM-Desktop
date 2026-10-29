@@ -39161,3 +39161,24 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - 归档后 study-compare / recorded_model_version 仍只读活动记录。
 - #9b 裸锁 PID 复用残余风险（带 run_id 的锁已安全）。
 - #17 粗分辨率观测重采样属能力项。
+
+## Study 证据 S01–S02（2026-10-29，历史证据复核报告 S01–S02）
+
+### S01 checkpoint 聚合分数不再掩盖明细结果缺失
+
+- 背景：`read_recorded_results` 已收集缺失/解析失败，但存在 candidate checkpoint 时 `comparison_period` 直接走候选记录分支，只返回 status/score/targets，summary 与 calibration diagnostic 看不到具体缺失文件。
+- 新行为：candidate 分支接收 `missing` 与站点数，calibration/validation 的 recorded/unavailable/partial 分支都输出 `score_origin:"checkpoint"`、`details_status:"complete"|"missing_or_partial"`、`missing_result_files`（≤8 条，形如 `m000001/site: cannot parse …/results/tasks/m000001/site.json`）、`missing_result_file_count`、`sites_recorded`、`sites_total`。聚合分保持（引擎候选记录仍权威，不重打分/重跑/重选 best）；极端 8KB 兜底也保留 score 来源、details 状态、站点计数与第一条缺失文件。agent 的 `study_evidence_core` 透传这些字段；calibration diagnostic 的 study 步骤在明细不完整时标 partial 并列出具体缺失条目，`reverified:false` 不替代具体原因。
+- 回归：CLI `evidence_checkpoint_scores_expose_missing_result_file_details`（保留 checkpoint 分数 0.4/0.9、删除/损坏一个 member/site 结果 → details 字段与具体文件、sites 0/1、基线 complete 1/1、reverified=false 并存）；agent `evidence_core_keeps_checkpoint_result_file_details`、`checkpoint_missing_details_survive_summary_and_calibration_diagnostic`（summary 与真实 registry calibration diagnostic 都保留分数、details 与 missing 条目）。
+- 未覆盖：缺失只来自证据读取失败，不重新比对 result 文件内容与 checkpoint 身份（属重核验范畴，本任务不重验）；CLI/core 列表分别限 8/2 条，其余仅计数；未跑真实远程 Study/模拟。
+
+### S02 极端证据压缩保留 legacy workspace 身份
+
+- 背景：`slim_identity` 只留 status/version/code hash/reason，把 legacy remote workspace 的 name/head/base_commit 删掉；证据核心超 3000 bytes 时无法说明来自哪个工作区/提交。
+- 新行为：`slim_identity` 按身份类型保留最小字段：study_record 保留 status/source/name/head/base_commit/version{id,revision}/code_source_sha256/revision_recorded/reason；current_selection 保留 status/source/name/head/base_commit/version/code_source_sha256/reason；comparison 不变；文本按类型限长。非极端 `model_version_core` 补 source，保证 legacy 身份进入 minimal 分支。legacy remote workspace 压缩后仍带 name/head/base_commit；frozen 仍带 version/revision/hash；unknown 保留 reason。
+- 回归：`slim_identity_keeps_legacy_workspace_frozen_and_unknown_identity`、`evidence_core_minimal_budget_keeps_legacy_workspace_identity`（大 source_paths/reason 触发 truncated+notice 的 minimal 分支后身份仍在）。
+- 未覆盖：legacy 身份只有 name/head/base_commit（remote record 无冻结 revision id/source hash），与当前 frozen 选择比较仍为 unknown；超长字段截断保留 `…`；未实机跑远程 Study。
+
+### 本轮验证（真实执行）
+
+- `cargo fmt --all --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **38 个测试二进制，3260 passed / 0 failed / 16 ignored**（`colm-cli` 758；`colm-agent` 387 passed + 1 ignored live smoke）。
+- 未运行：真实远程 Study/科学模拟、真实模型 API；GUI 未改；U01–U05 留待下一轮。
