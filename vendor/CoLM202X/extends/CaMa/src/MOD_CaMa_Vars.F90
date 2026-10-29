@@ -30,12 +30,11 @@ MODULE MOD_CaMa_Vars
    USE MOD_DataType
    USE PARKIND1,                 only: JPRB
    USE MOD_SpatialMapping
-   USE YOS_CMF_INPUT,            only: RMIS, DMIS,LSEDIMENT,CSETFILE
+   USE YOS_CMF_INPUT,            only: LSEDIMENT,CSETFILE
    USE MOD_Vars_Global,          only: spval
-   USE YOS_CMF_INPUT,            ONLY: LOGNAM
    USE CMF_CTRL_SED_MOD,         ONLY: nsed, sDiam, d2sedout_avg, d2sedcon, d2sedinp_avg, d2bedout_avg, d2netflw_avg, d2layer
 
-   real(r8) :: nacc
+   real(r8) :: nacc                                        ! accumulated land time [s]
    real(r8), allocatable         :: a_rnof_cama (:)        ! on worker : total runoff [mm/s]
    type(block_data_real8_2d)     :: f_rnof_cama            ! on IO     : total runoff [mm/s]
    real(r8), allocatable         :: runoff_2d (:,:)        ! on Master : total runoff [mm/s]
@@ -51,7 +50,6 @@ MODULE MOD_CaMa_Vars
    real(r8), allocatable         :: dirrig_day(:)
    type(block_data_real8_2d)     :: f_dirrig_cama          ! on IO     : total runoff [mm/s]
    real(r8), allocatable         :: dirrig_2d (:,:)        ! on Master : total runoff [mm/s]
-   real(r8), allocatable         :: dirrig_2d_orig (:,:)
    !!!!!!!!!!!! added by shulei
 
    !!!!!!!!!!!! added by shulei
@@ -96,8 +94,6 @@ MODULE MOD_CaMa_Vars
 
    type (grid_concat_type)       :: cama_gather            ! gather grid
 
-   type(block_data_real8_2d)     :: IO_Effdepth            ! inundation to water depth [m]
-   type(block_data_real8_2d)     :: IO_Effarea             ! inundation to water area [m2]
 
    type history_var_cama_type
       logical :: rivout       = .false.
@@ -181,16 +177,15 @@ CONTAINS
 
       !allocate cama-flood variables on worker
       IF (p_is_worker) THEN
-         IF (numpatch > 0 .OR. CSETFILE=='NONE') THEN
-            allocate (a_rnof_cama(numpatch))
-            allocate (a_fevpg_fld(numpatch))
-            allocate (a_finfg_fld(numpatch))
-            allocate (a_dirrig_cama(numpatch))
-            allocate (a_prcp_cama(numpatch))
-            IF(CSETFILE=='NONE') allocate(a_prcp_time(numpatch))
-         ENDIF
+         allocate (a_rnof_cama(numpatch))
+         allocate (a_fevpg_fld(numpatch))
+         allocate (a_finfg_fld(numpatch))
+         allocate (a_dirrig_cama(numpatch))
+         allocate (a_prcp_cama(numpatch))
+         allocate (a_prcp_time(numpatch))
+      ELSE
+         allocate (a_prcp_time(0))
       ENDIF
-      IF(CSETFILE=='NONE'.AND..NOT.p_is_worker) allocate(a_prcp_time(0))
 
    END SUBROUTINE allocate_acc_cama_fluxes
 
@@ -212,13 +207,11 @@ CONTAINS
    IMPLICIT NONE
 
       IF (p_is_worker) THEN
-         IF (numpatch > 0 .OR. CSETFILE=='NONE') THEN
-            deallocate (a_rnof_cama)
-            deallocate (a_prcp_cama)
-            deallocate (a_fevpg_fld)
-            deallocate (a_finfg_fld)
-            deallocate (a_dirrig_cama)
-         ENDIF
+         deallocate (a_rnof_cama)
+         deallocate (a_prcp_cama)
+         deallocate (a_fevpg_fld)
+         deallocate (a_finfg_fld)
+         deallocate (a_dirrig_cama)
       ENDIF
       IF(allocated(a_prcp_time)) deallocate(a_prcp_time)
 
@@ -283,34 +276,24 @@ CONTAINS
 
    IMPLICIT NONE
 
-      real(r8), optional, intent(in) :: deltim
+      real(r8), intent(in) :: deltim
       logical :: valid_patch(numpatch)
       integer :: i
 
       IF (p_is_worker) THEN
          IF (numpatch > 0) THEN
-            IF(CSETFILE=='NONE')THEN
-               IF(.NOT.PRESENT(deltim)) ERROR STOP 'CaMa: missing coupling time step'
-               valid_patch=.true.
-               IF(DEF_forcing%has_missing_value) valid_patch=forcmask_pch
-               nacc=nacc+deltim
-               CALL acc1d_cama(rnof,a_rnof_cama,deltim,valid_patch)
-               IF(LSEDIMENT)THEN
-                  CALL acc1d_cama(forc_rain,a_prcp_cama,deltim,valid_patch)
-                  WHERE(valid_patch.AND.forc_rain/=spval) a_prcp_time=a_prcp_time+deltim
-               ENDIF
-               IF(LWEVAP) CALL acc1d_cama(fevpg_fld,a_fevpg_fld,deltim,valid_patch)
-               IF(LWINFILT) CALL acc1d_cama(finfg_fld,a_finfg_fld,deltim,valid_patch)
-               IF(LDAMIRR) CALL acc1d_cama(reservoirriver_demand,a_dirrig_cama,msk=valid_patch)
-            ELSE
-               nacc = nacc + 1
-               CALL acc1d_cama (rnof, a_rnof_cama)
-               CALL acc1d_cama (forc_rain, a_prcp_cama)
-               CALL acc1d_cama (fevpg_fld, a_fevpg_fld)
-               CALL acc1d_cama (finfg_fld, a_finfg_fld)
-               call acc1d_cama (reservoirriver_demand, a_dirrig_cama)
+            valid_patch=.true.
+            IF(DEF_forcing%has_missing_value) valid_patch=forcmask_pch
+            nacc=nacc+deltim
+            CALL acc1d_cama(rnof,a_rnof_cama,deltim,valid_patch)
+            IF(LSEDIMENT)THEN
+               CALL acc1d_cama(forc_rain,a_prcp_cama,deltim,valid_patch)
+               WHERE(valid_patch.AND.forc_rain/=spval) a_prcp_time=a_prcp_time+deltim
             ENDIF
-         ENDIF
+            IF(LWEVAP) CALL acc1d_cama(fevpg_fld,a_fevpg_fld,deltim,valid_patch)
+            IF(LWINFILT) CALL acc1d_cama(finfg_fld,a_finfg_fld,deltim,valid_patch)
+            IF(LDAMIRR) CALL acc1d_cama(reservoirriver_demand,a_dirrig_cama,msk=valid_patch)
+      ENDIF
       ENDIF
 
    END SUBROUTINE accumulate_cama_fluxes
@@ -523,7 +506,7 @@ CONTAINS
             'bifurcation channel discharge (sum over levels, attributed to the upstream cell)','m3/s')
          deallocate(pthflw_cell)
       ELSE IF(CSETFILE/='NONE')THEN
-         CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%pthflw, &
+      CALL flux_map_and_write_2d_cama(DEF_hist_cama_vars%pthflw, &
             real(D1PTHFLW_oAVG),file_hist,'pthflw',itime_in_file, &
             'bifurcation channel discharge ','m3/s')
       ENDIF
@@ -727,7 +710,7 @@ CONTAINS
          USE PARKIND1,       only: JPRM
          USE CMF_UTILS_MOD,  only: vecP2mapR
          USE MOD_NetCDFSerial,    only: ncio_write_serial_time, ncio_put_attr, ncio_var_exist
-         USE YOS_CMF_MAP,        only: I2NEXTX, I2NEXTY
+         USE YOS_CMF_MAP,        only: I2NEXTX
          IMPLICIT NONE
          logical, intent(in)          :: is_hist
          real(r8), intent(in)         ::  var_in (NSEQMAX, 1)
@@ -930,7 +913,7 @@ CONTAINS
 
    type(block_data_real8_2d) :: sumwt                          !sum of weight
    logical,  allocatable     :: filter(:)                      !filter for patchtype
-   logical :: volumes, newmode, credits
+   logical :: volumes, credits
    integer :: ip
    !----------------------- Dummy argument --------------------------------
    integer :: xblk, yblk, xloc, yloc
@@ -943,19 +926,16 @@ CONTAINS
       IF(PRESENT(integral)) volumes = integral
       credits = .false.
       IF(PRESENT(flood_sink)) credits = flood_sink
-      newmode=CSETFILE=='NONE'
-      IF(credits.AND..NOT.newmode) ERROR STOP 'CaMa: flood sink mapping requires NC mode'
       IF(PRESENT(valid_time).AND.(volumes.OR.credits)) ERROR STOP 'CaMa: valid time requires an intensive field'
       IF(p_is_master)THEN
-         MasterVar(:,:) = spval
-         IF(volumes.OR.newmode) MasterVar(:,:) = 0._r8
+         MasterVar(:,:) = 0._r8
       ENDIF
 
       IF (p_is_worker) THEN
-         IF(newmode.AND.numpatch>0.AND.nacc<=0._r8) ERROR STOP 'CaMa: empty flux window'
+         IF(numpatch>0.AND.nacc<=0._r8) ERROR STOP 'CaMa: empty flux window'
          IF(.NOT.PRESENT(valid_time))THEN
-            WHERE (WorkerVar /= spval)
-               WorkerVar = WorkerVar / nacc
+         WHERE (WorkerVar /= spval)
+            WorkerVar = WorkerVar / nacc
             ENDWHERE
          ENDIF
 
@@ -963,11 +943,8 @@ CONTAINS
             allocate (filter (numpatch))
 
             filter(:) = patchtype < 99
-            IF(newmode) filter=filter.AND.WorkerVar/=spval
-            IF(newmode.AND.PRESENT(valid_time)) filter=filter.AND.valid_time>0._r8
-            IF (.NOT.newmode.AND.DEF_forcing%has_missing_value) THEN
-               filter = filter .and. forcmask_pch
-            ENDIF
+            filter=filter.AND.WorkerVar/=spval
+            IF(PRESENT(valid_time)) filter=filter.AND.valid_time>0._r8
          ENDIF
       ENDIF
 
@@ -988,15 +965,15 @@ CONTAINS
          ENDIF
          CALL mg2p_cama%part2grid(flood_sink_part,IOVar)
       ELSE
-         CALL mp2g_cama%pset2grid (WorkerVar, IOVar, spv = spval, msk = filter)
+      CALL mp2g_cama%pset2grid (WorkerVar, IOVar, spv = spval, msk = filter)
       ENDIF
 
       IF (.NOT.volumes) THEN
-         IF (p_is_io) CALL allocate_block_data (gcama, sumwt)
+      IF (p_is_io) CALL allocate_block_data (gcama, sumwt)
          IF(PRESENT(valid_time))THEN
             CALL mp2g_cama%pset2grid(valid_time,sumwt,spv=spval,msk=filter)
          ELSE
-            CALL mp2g_cama%get_sumarea (sumwt, filter)
+      CALL mp2g_cama%get_sumarea (sumwt, filter)
          ENDIF
       ENDIF
 
@@ -1023,14 +1000,14 @@ CONTAINS
                               IOVar%blk(xblk,yblk)%val(xloc,yloc) = &
                                  IOVar%blk(xblk,yblk)%val(xloc,yloc) * 1.e3_r8
                            ENDIF
-                        ELSEIF (sumwt%blk(xblk,yblk)%val(xloc,yloc) > MERGE(0._r8,0.00001_r8,newmode)) THEN
+                        ELSEIF (sumwt%blk(xblk,yblk)%val(xloc,yloc) > 0._r8) THEN
                            IF (IOVar%blk(xblk,yblk)%val(xloc,yloc) /= spval) THEN
                               IOVar%blk(xblk,yblk)%val(xloc,yloc) &
                                  = IOVar%blk(xblk,yblk)%val(xloc,yloc) &
                                  / sumwt%blk(xblk,yblk)%val(xloc,yloc)
                            ENDIF
                         ELSE
-                           IOVar%blk(xblk,yblk)%val(xloc,yloc) = MERGE(0._r8,spval,newmode)
+                           IOVar%blk(xblk,yblk)%val(xloc,yloc) = 0._r8
                         ENDIF
                      ENDDO
                   ENDDO
@@ -1055,12 +1032,8 @@ CONTAINS
             allocate (rbuf(xcnt,ycnt))
             CALL mpi_recv (rbuf, xcnt * ycnt, MPI_DOUBLE, &
                isrc, 10011, p_comm_glb, p_stat, p_err)
-            IF(newmode)THEN
-               MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
-                  ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
-            ELSE
-               MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
-            ENDIF
+            MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+               ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
 
             deallocate (rbuf)
          ENDDO
@@ -1205,12 +1178,8 @@ CONTAINS
             allocate (rbuf(xcnt,ycnt))
             CALL mpi_recv (rbuf, xcnt * ycnt, MPI_DOUBLE, &
                isrc, 10011, p_comm_glb, p_stat, p_err)
-            IF(CSETFILE=='NONE')THEN
-               MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
-                  ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
-            ELSE
-               MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt) = rbuf
-            ENDIF
+            MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+               ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1) = rbuf
             deallocate (rbuf)
          ENDDO
 
@@ -1298,12 +1267,8 @@ CONTAINS
                   ycnt = cama_gather%ysegs(iyseg)%cnt
 
                   allocate (sbuf (xcnt,ycnt))
-                  IF(CSETFILE=='NONE')THEN
-                     sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
-                        ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
-                  ELSE
-                     sbuf = MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt)
-                  ENDIF
+                  sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                     ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
                   smesg = (/ixseg, iyseg/)
                   CALL mpi_send (smesg, 2, MPI_INTEGER, &
                      gblock%pio(iblk,jblk), 10000, p_comm_glb, p_err)
@@ -1398,12 +1363,8 @@ CONTAINS
                   ycnt = cama_gather%ysegs(iyseg)%cnt
 
                   allocate (sbuf (xcnt,ycnt))
-                  IF(CSETFILE=='NONE')THEN
-                     sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
-                        ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
-                  ELSE
-                     sbuf = MasterVar(xdsp+1:xdsp+xcnt,ydsp+1:ydsp+ycnt)
-                  ENDIF
+                  sbuf = MasterVar(cama_master_cols(xdsp,xcnt,size(MasterVar,1)), &
+                     ydsp+cama_gather%ilat0:ydsp+cama_gather%ilat0+ycnt-1)
                   smesg = (/ixseg, iyseg/)
                   CALL mpi_send (smesg, 2, MPI_INTEGER, &
                      gblock%pio(iblk,jblk), 10000, p_comm_glb, p_err)

@@ -22,7 +22,7 @@ CONTAINS
 SUBROUTINE CMF_CALC_STONXT
 USE CMF_COUPLING_BUDGET_MOD, ONLY: sinks_prepaid
 USE PARKIND1,           ONLY: JPIM, JPRB, JPRD
-USE YOS_CMF_INPUT,      ONLY: LGDWDLY,   DT,  LWEVAP, LLEVEE, LROSPLIT, LWINFILT, CSETFILE
+USE YOS_CMF_INPUT,      ONLY: LGDWDLY,   DT,  LWEVAP, LLEVEE, LROSPLIT, LWINFILT
 USE YOS_CMF_MAP,        ONLY: NSEQALL
 USE YOS_CMF_PROG,       ONLY: D2RIVOUT,  D2FLDOUT,  P2RIVSTO,  P2FLDSTO,  D2RUNOFF, P2LEVSTO
 USE YOS_CMF_PROG,       ONLY: P2GDWSTO,  D2GDWRTN,  D2ROFSUB,  D2WEVAP,D2WINFILT
@@ -85,19 +85,7 @@ DO ISEQ=1, NSEQALL
   P2RIVSTO(ISEQ,1) = P2RIVSTO(ISEQ,1) + DRIVROF
   P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) + DFLDROF
 
-  IF (CSETFILE=='NONE') THEN
-    IF (LWINFILT .AND. .NOT.sinks_prepaid) THEN
-      DWINFILTEX = MIN(REAL(P2FLDSTO(ISEQ,1),KIND=JPRB),DT*D2WINFILT(ISEQ,1))
-      P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) - DWINFILTEX
-      D2WINFILTEX(ISEQ,1) = DWINFILTEX/DT
-    ENDIF
-    IF (LWEVAP .AND. .NOT.sinks_prepaid) THEN
-      DWEVAPEX = MIN(REAL(P2FLDSTO(ISEQ,1),KIND=JPRB),DT*D2WEVAP(ISEQ,1))
-      P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) - DWEVAPEX
-      D2WEVAPEX(ISEQ,1) = DWEVAPEX/DT
-    ENDIF
-  ELSE
-  IF (LWEVAP) THEN
+  IF (LWEVAP .AND. .NOT.sinks_prepaid) THEN
     !! Find out amount of water to be extracted from flooplain reservoir
     !! Assuming "potential water evaporation", multiplied by flood area fraction
     !! Limited by total amount of flooplain storage 
@@ -106,7 +94,7 @@ DO ISEQ=1, NSEQALL
     D2WEVAPEX(ISEQ,1) = DWEVAPEX/DT ! keept for output as flux 
   ENDIF 
 
-  IF (LWINFILT) THEN
+  IF (LWINFILT .AND. .NOT.sinks_prepaid) THEN
     !! Find out amount of water to be extracted from flooplain reservoir
     !! Assuming " water re-infiltration", multiplied by flood area fraction
     !! Limited by total amount of flooplain storage 
@@ -114,7 +102,6 @@ DO ISEQ=1, NSEQALL
     P2FLDSTO(ISEQ,1) = P2FLDSTO(ISEQ,1) - DWINFILTEX 
     D2WINFILTEX(ISEQ,1) = DWINFILTEX/DT ! keept for output as flux 
   ENDIF 
-  ENDIF
   D2STORGE(ISEQ,1)=REAL( P2RIVSTO(ISEQ,1)+P2FLDSTO(ISEQ,1), KIND=JPRB)
   IF( LLEVEE ) D2STORGE(ISEQ,1) = REAL( D2STORGE(ISEQ,1)+P2LEVSTO(ISEQ,1), KIND=JPRB)
   P0GLBSTONEW=P0GLBSTONEW+D2STORGE(ISEQ,1)

@@ -42,3 +42,10 @@
    DEF_forcing%timelog  = 'instant' 'instant' 'instant' 'forward' 'instant' 'instant' 'forward' 'forward'
    DEF_forcing%tintalgo = 'linear' 'linear' 'linear' 'nearest' 'linear' 'linear' 'coszen' 'linear'
 /
+
+! The isotope fields of IsoGSM (prate1sfc/prate2sfc, spfh12m/spfh22m) are
+! material forcing and are set per species in the &nl_colm_mt_forcing
+! groups of the isotope parameter file (run/standard_isotope_parameter.nml).
+! The former DEF_forcing%precipitation_O18_* / precipitation_H2_* /
+! water_vapor_O18_* / water_vapor_H2_* entries were removed: they are not
+! members of DEF_forcing, so reading this file stopped with a namelist error.

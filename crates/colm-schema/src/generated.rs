@@ -153,7 +153,7 @@ pub static FIELDS: &[Field] = &[
     Field { name: "DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT", kind: FieldKind::Logical, default: Default::Logical(true), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &["GridRiverLakeFlow"], line: 409 },
     Field { name: "DEF_GridRiverLake_FloodFeedback", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 410 },
     Field { name: "DEF_GridRiverLake_FloodInfiltMax", kind: FieldKind::Real, default: Default::Real("5._r8"), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 411 },
-    Field { name: "DEF_USE_LEVEE", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 412 },
+    Field { name: "DEF_USE_LEVEE", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &["GridRiverLakeFlow"], line: 412 },
     Field { name: "DEF_USE_BIFURCATION", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 413 },
     Field { name: "DEF_USE_TRACER", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 427 },
     Field { name: "DEF_TRACER_USE_FRACTIONATION", kind: FieldKind::Logical, default: Default::Logical(false), doc: None, arity: None, owner: None, group: Some("nl_colm"), values: &[], requires: &[], line: 428 },

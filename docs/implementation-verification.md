@@ -39498,3 +39498,83 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 - `pixel-overlap` 是 opt-in：默认仍 in-cell，不做"按分辨率自动选择"；单点/无法定界的粗产品仍只能用 in-cell（pixel-overlap 明确报错）。
 - 旧冻结 CLI 不能运行 pixel-overlap（创建/回退时明确拒绝，需用当前程序重建）。
 - 面积权重按"重叠面积（度²）"计算，未做纬度 cos 面积修正；对纬向跨度的相对权重无影响，但与真实面积比例在极区不完全一致（记录在案，若要做全球产品加权可再加 cos(lat)）。
+
+## 上游核对：zhongwangwei/CoLM202X 到 7d2fca93（2026-10-29）
+
+**范围**：fork 上次并入的是 `1d7f3b25`（第 719 轮，#28 分汊子步长保护）。此后 fork 的 `master` 累积了
+256 个非 merge 提交、280 个文件、+33786/−40891 行，末端 `7d2fca93`（含一次 `upstream/master` 合并）。
+上游这份快照在本机独立编译通过：`gfortran 16.1.0` + `open-mpi 5.0.9` + `netcdf-fortran 4.6.3`，
+`create_defineh.bash SinglePoint LULC_IGBP CaMaOFF CROPOFF` 后 `make -j1` 全部目标成功。
+（并行 `make -j10` 会在开头因 Makefile 缺依赖抢跑，与上游逻辑无关。）
+
+**三块主体改动**：
+
+1. **Material Transport 重构**（最大一块）。`main/TRACER/` 整体迁到 `main/MATERIAL/`
+   （`GENERIC_WATER` / `FAMILY_ISOTOPE` / `FAMILY_SOLUTE` / `FAMILY_PARTICLE` / `FAMILY_GAS`），
+   259 个标识符机械改名（`trc_*`→`mt_*`、`itrc`→`imt`、`ntracers`→`nmts`，字符串字面量保留），
+   编译宏 `TRACER` 改名 `MaterialTransport`，并与 `CATCHMENT`、`URBAN_MODEL` 编译期互斥。
+   namelist 从"一个 `DEF_USE_TRACER` + 一组 `DEF_TRACER_*`"拆成按物料的开关：`DEF_USE_ISOTOPE`、
+   `DEF_USE_METHANE`、`DEF_SOLUTE_NAMES`、`DEF_SEDIMENT_PARAM_FILE`，参数前缀 `DEF_ISO_*`/`DEF_MT_*`，
+   定义落在新文件 `main/MATERIAL/MOD_MT_Namelist.F90`（`share/MOD_Namelist.F90` 里只剩一句注释）。
+   新增 NH4/NO3 溶质、BGC 淋溶与间接 N2O；history/restart 字段名同步改名。
+2. **colm30 / urban / rawdata**。新增 `DEF_rawdata` namelist 与 `run/rawdata/colm2024*.nml`、`colm30m.nml`、
+   `colm500m.nml`；`mksrfdata/Aggregation_Urban` 签名重写（25 个 grid 参数，多分辨率城市数据）；
+   新增多网格请求数据模块、30m/500m 城市数据、遥感冠层结构 `DEF_RS_CROWN_STRUCTURE`、
+   CoLM2024 rawdata 新旧目录兼容（上游 PR #515）。
+3. **汇流 / CaMa / 其它**。六个汇流缺陷修复、分汊结果与进程数无关、蓄量 dt 门限；CaMa 耦合重写
+   （区域域、NC 模式洪水收支、重启精确、SimpleOcean 摄氏度）；截获方案 8 的 CoLM2024 实现；
+   BGC 火模块开发；`gmt2local` 参数类型统一；若干小修复。
+
+**本轮并入 vendor 的文件（24 个）**：
+
+- **CaMa（12）**：`extends/CaMa/src/` 的 `cmf_calc_diag_mod`、`cmf_calc_stonxt_mod`、
+  `cmf_ctrl_forcing_mod`、`cmf_ctrl_maps_mod`、`cmf_ctrl_restart_mod`、`cmf_ctrl_sed_mod`、
+  `cmf_ctrl_time_mod`、`cmf_drv_control_mod`、`MOD_CaMa_colmCaMa`、`MOD_CaMa_Vars`，
+  以及 `include/Makeoptions.land.gnu`、`include/Makeoptions.SYSU-BaiduBoat.gnu` 与
+  `run/CaMa/*.nml` 的 `CGRDARE` 示例配置。
+- **BGC（3）**：`MOD_BGC_driver`、`MOD_BGC_Veg_CNFireBase`、`MOD_BGC_Veg_CNFireLi2016`（火模块）。
+  `CNFireLi2016` 保留了 vendor 的本地清理：上游把 `smp_node` 的矩阵势计算又加回来，但它的唯一用途
+  在下面已被注释，是 #504 之后的死代码，继续删。
+- **其它（9）**：`postprocess/RiverHistConcatenate`（多进程下 `read_namelist` 的集合通信顺序）、
+  `run/forcing/CRA40.nml` 与 `IsoGSM.nml`（`missing_value_name` 前缀、u 风插值）、
+  `run/examples/SiteSYSUAtmos_IGBP_VG.nml`。
+
+**未并入，及理由**：
+
+| 未并入 | 理由 |
+|---|---|
+| `main/MATERIAL/` 全部、`main/TRACER/` 的下游改名 | vendor 的特色是把 `TRACER` 等编译期宏展开成运行时开关（813 处 `IF (DEF_USE_*)`、452 处 TRACER 守卫）。上游这轮换了目录、259 个标识符与全部 namelist 键，重放改造要逐文件三方合并 249 个文件；schema/hist 生成表的源也换成了 `MOD_MT_Namelist`，牵动 Rust 402 处与 GUI 311 处引用 |
+| `mksrfdata/` 的 colm30/rawdata 重构 | 引用新的 `DEF_rawdata`、`DEF_USE_ESACCI`、`DEF_USE_GLC30`；`Aggregation_Urban` 换了签名，配套的 `MKSRFDATA.F90` 又引用 MT，拆不开 |
+| `main/HYDRO/` 的汇流修复 | `MOD_Grid_RiverLakeNetwork`、`MOD_Grid_RiverLakeTimeVars`、`MOD_Grid_RiverLakeBifurcation` 都在 vendor MT 模块的依赖表里（`USE` 了 `MOD_Grid_RiverLakeNetwork` 45 处）；同步它们会改掉 MT 依赖的类型与接口，MT 编译失败。新版还引入 `MOD_Grid_ReservoirUpstream` |
+| `main/MOD_Forcing`、`MOD_Thermal`、`MOD_Const_LC/PFT`、`MOD_Vars_TimeInvariants`、`MOD_NetCDFVector`、`share/MOD_Utils`、`MOD_SPMD_Task`、`MOD_Pixelset` 等 21 个共享模块 | 同上：MT 模块 `USE` 它们，改一个就带出接口不一致 |
+| `main/URBAN/*`、`main/MOD_Irrigation` | 上游 `0dddecd8` 把 `gmt2local` 的参数类型改成一致，`MOD_Utils` 在 MT 依赖表里不能同步，两边只能一起留在旧签名 |
+| `mkinidata/*` | 上游给 `InitTimeVar` 加了参数，调用方 `MOD_Initialize` 又引用 `DEF_RS_CROWN_STRUCTURE`、`DEF_rawdata`，只能整块迁 |
+| LULCC、`MOD_Ozone`、`MOD_Lake`、`MOD_NewSnow`、`MOD_Runoff`、`MOD_Albedo*` 等 | 逐个试过三方合并：多处在「vendor 的运行时开关」与「上游已改写成 MT 结构」之间无法机械对齐，合并后编译不过（`crtario_p`/`zwt_init_` 一类）。
+
+**验证**：
+
+- **vendor 编译**：临时快照里 `create_defineh.bash SinglePoint LULC_IGBP CaMaOFF CROPOFF` +
+  `make mksrfdata.x mkinidata.x colm.x`，退出码 0（23:09 重新链接 `run/colm.x`）。
+- **上游同步断言**：`oracle/scripts/test_upstream_f48_sync.py` PASS、`test_gridriver_restart_sentinel.py` PASS。
+- **生成表**：`gen-schema` 重跑后 `colm-schema` drift 通过。唯一变化是 CaMa 里
+  `IF(DEF_Reservoir_Method/=0)` 不再与 `DEF_USE_LEVEE` 同处一个条件，usage 扫描把
+  `DEF_USE_LEVEE` 的 `requires` 记成 `["GridRiverLakeFlow"]` —— 与它只在河湖汇流下生效一致。
+  `colm-hist`、`colm-core` 的 landcover/co2 drift、`colm-namelist` roundtrip(5) 都通过。
+- **既有失败（与本轮无关）**：`colm-schema --test curated` 的
+  `model_schemes_expose_complete_discrete_choices_to_the_gui`（`DEF_Reservoir_Method` 生成值是
+  `["0","1","2"]`、测试写的是 `["0","1"]`）与 `vendor/CoLM202X/tests/test_makefile_builddir_static.py`
+  的 21 条，在 stash 掉本轮改动后同样失败。
+- **引擎测试**：见提交正文的 `Tested:`。
+
+**后续同步 material transport 的路线**（下一轮按这个做，不要按文件零散并）：
+
+1. 整批搬 `main/MATERIAL/` 与 `main/MATERIAL/MOD_MT_Namelist.F90`，删掉 `main/TRACER/`；
+2. 对引用了 `MOD_MT_*` 的 93 个文件做三方合并，`#ifdef MaterialTransport` 按 vendor 的规矩展开成
+   `IF (DEF_USE_*)` 或无条件；
+3. 改 `xtask` 的 `gen-schema` 读 `MOD_MT_Namelist.F90`（MT 字段已不在 `share/MOD_Namelist.F90`）；
+4. Rust：`DEF_USE_TRACER` 拆成 `DEF_USE_ISOTOPE`/`DEF_USE_METHANE`/`DEF_SOLUTE_NAMES`，
+   402 处 `DEF_TRACER_*` 引用与 GUI 的 311 处一起迁，旧算例要迁移表；
+5. colm30/rawdata 的前处理重构与 MT 一起做（`MKSRFDATA.F90` 两边都引用）。
+
+在此之前，`main/TRACER/` 与上游 `main/MATERIAL/` 是**有意分叉**：上游这批 MT 工作在其提交里
+自述为未完成（`quarantine`、`unfinished`、`revert`），vendor 这边保持与 Rust 引擎逐位核对过的旧实现。

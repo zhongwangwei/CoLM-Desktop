@@ -36,8 +36,8 @@ LSTG_ES  = .FALSE.                              ! true: for Vector Processor opt
 /
 &NDIMTIME
 CDIMINFO = "/share/home/dq013/zhwei/colm/data/cama_map/China_15min_dam/diminfo_15min_China.txt"                       ! text file for dimention information
-DT       = 21600                                                                            ! time step length (sec)
-IFRQ_INP = 6                                                                               ! input forcing update frequency (hour)
+DT       = 3600                                                                             ! time step length (sec)
+IFRQ_INP = 1                                                                               ! input forcing update frequency (hour)
 /
 &NPARAM
 PMANRIV  = 0.03D0                      ! manning coefficient river

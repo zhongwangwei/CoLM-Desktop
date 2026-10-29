@@ -36,8 +36,8 @@ LSTG_ES  = .FALSE.                              ! true: for Vector Processor opt
 /
 &NDIMTIME
 CDIMINFO = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/diminfo_US.txt"               ! text file for dimention information
-DT       = 21600                                                                            ! time step length (sec)
-IFRQ_INP = 6                                                                               ! input forcing update frequency (hour)
+DT       = 3600                                                                             ! time step length (sec)
+IFRQ_INP = 1                                                                               ! input forcing update frequency (hour)
 /
 &NPARAM
 PMANRIV  = 0.03D0                      ! manning coefficient river
@@ -68,6 +68,7 @@ EHOUR   = 00                        	!  hour       : will not gonna used in here
 LMAPCDF    = .FALSE.                ! * true for netCDF map input
 CNEXTXY    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/nextxy.bin"              ! river network nextxy
 CGRAREA    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/ctmare.bin"              ! catchment area
+CGRDARE    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/grdare.bin"              ! grid area
 CELEVTN    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/elevtn.bin"              ! bank top elevation
 CNXTDST    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/nxtdst.bin"              ! distance to next outlet
 CRIVLEN    = "/share/home/dq013/zhwei/colm/20240514/CaMa/map/US_0.25/rivlen.bin"              ! river channel length

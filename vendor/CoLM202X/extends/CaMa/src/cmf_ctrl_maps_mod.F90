@@ -304,8 +304,8 @@ ENDIF
 IF( CROUTINGNC=="NONE" )THEN
   WRITE(LOGNAM,*) 'CMF::RIVMAP_INIT: calc region'
   CALL CALC_REGION
-  WRITE(LOGNAM,*) 'CMF::RIVMAP_INIT: calculate 1d river sequence'
-  CALL CALC_1D_SEQ
+WRITE(LOGNAM,*) 'CMF::RIVMAP_INIT: calculate 1d river sequence'
+  CALL CALC_1D_SEQ                                  !! 2D map to 1D vector conversion. for faster calculation
 ENDIF
 
 WRITE(LOGNAM,*) '  NSEQRIV=',NSEQRIV
@@ -335,8 +335,8 @@ IF( LPTHOUT )THEN
     CALL READ_ROUTING_BIF_CDF
 #endif
   ELSE
-    CALL READ_BIFPARAM
-  ENDIF
+  CALL READ_BIFPARAM
+ENDIF
 ENDIF
 
 !DEALLOCATE( I2NEXTX,I2NEXTY,I2REGION )

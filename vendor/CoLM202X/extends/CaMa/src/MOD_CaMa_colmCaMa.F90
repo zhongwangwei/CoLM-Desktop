@@ -25,20 +25,19 @@ MODULE MOD_CaMa_colmCaMa
 
    USE MOD_Namelist
    USE MOD_CaMa_Vars
-   USE PARKIND1,                  only: JPRB, JPRM, JPIM
-   USE CMF_DRV_CONTROL_MOD,       only: CMF_DRV_INPUT,   CMF_DRV_INIT,    CMF_DRV_END
+   USE PARKIND1,                  only: JPRB, JPIM
+   USE CMF_DRV_CONTROL_MOD,       only: CMF_DRV_INPUT,   CMF_DRV_INIT
    USE CMF_DRV_ADVANCE_MOD,       only: CMF_DRV_ADVANCE
-   USE CMF_CTRL_FORCING_MOD,      only: CMF_FORCING_GET, CMF_FORCING_PUT, LINTERP
+   USE CMF_CTRL_FORCING_MOD,      only: LINTERP
    USE CMF_COUPLING_BUDGET_MOD,    only: budget_init, budget_publish, budget_runoff, budget_debit, &
                                            budget_set_strict, budget_unrouted, sinks_prepaid
    USE CMF_CTRL_PHYSICS_MOD,      only: CMF_PHYSICS_FLDSTG
-   USE CMF_CTRL_OUTPUT_MOD,       only: CMF_OUTPUT_INIT,CMF_OUTPUT_END,NVARSOUT,VAROUT
+   USE CMF_CTRL_OUTPUT_MOD,       only: NVARSOUT
    USE YOS_CMF_INPUT,             only: NXIN, NYIN, DT,DTIN,IFRQ_INP,LLEAPYR,NX,NY,RMIS,DMIS
-   USE MOD_Precision,             only: r8,r4
-   USE YOS_CMF_INPUT ,            only: LROSPLIT,LWEVAP,LWINFILT,LDAMIRR,CSETFILE,LSEDIMENT,LCOLMFEEDBACK
+   USE MOD_Precision,             only: r8
+   USE YOS_CMF_INPUT ,            only: LWEVAP,LWINFILT,LDAMIRR,CSETFILE,LSEDIMENT,LCOLMFEEDBACK
    USE YOS_CMF_MAP,               only: D1LON, D1LAT
    USE YOS_CMF_INPUT,             only: WEST,EAST,NORTH,SOUTH
-   USE YOS_CMF_INPUT,             ONLY: LOGNAM
 
    USE MOD_SPMD_Task
    USE CMF_CTRL_TIME_MOD
@@ -55,15 +54,11 @@ MODULE MOD_CaMa_colmCaMa
 
    USE CMF_CTRL_RESTART_MOD
    USE CMF_CTRL_SED_MOD,          only: CMF_SED_RESTART_WRITE,CMF_SED_FORCING_PUT
-   USE YOS_CMF_MAP,               only: R2GRDARE
    USE CMF_CTRL_OUTPUT_MOD,       only: CVNAMES,CVARSOUT
    IMPLICIT NONE
    !----------------------- Dummy argument --------------------------------
    integer I,J
-   integer(KIND=JPIM)              :: ISTEPX              ! total time step
-   integer(KIND=JPIM)              :: ISTEPADV            ! time step to be advanced within DRV_ADVANCE
-   real(r8),ALLOCATABLE            :: ZBUFF(:,:,:)        ! Buffer to store forcing runoff
-   real(r8),ALLOCATABLE            :: ZBUFF_2(:,:,:)        ! Buffer to store forcing runoff
+   real(r8),ALLOCATABLE            :: ZBUFF(:,:)          ! Buffer to store forcing runoff
    real(r8),ALLOCATABLE            :: ZBUFF_SED(:,:)        ! Buffer to store forcing sediment
    real(r8) :: coupling_elapsed=0._r8
    real(r8) :: runoff_unrouted=0._r8
@@ -81,6 +76,11 @@ MODULE MOD_CaMa_colmCaMa
    END INTERFACE
 #endif
 #ifdef GridRiverLakeFlow
+   ! [GridRiverLakeFlow] Grid flood feedback evaporates floodwater exactly like
+   ! CaMa flood feedback, so MOD_Thermal calls the same get_fldevp below instead
+   ! of a copy of it.  Without CaMa_Flood only get_fldevp is compiled here.
+   ! CaMa_Flood builds are unchanged: the two models cannot be defined together
+   ! (see the check above), so for them only the preprocessor lines differ.
    USE MOD_Namelist, only: DEF_USE_CBL_HEIGHT
    USE MOD_Precision, only: r8
    USE MOD_Qsadv
@@ -113,18 +113,22 @@ CONTAINS
       IF (p_is_master) THEN
          SELECT CASE(TRIM(DEF_UnitCatchment_file))
          CASE('', 'null', 'NULL', 'none', 'NONE')
-            CSETFILE = DEF_CaMa_Namelist
-            CALL CMF_DRV_INPUT
+         CSETFILE = DEF_CaMa_Namelist
+         !Namelist handling
+         CALL CMF_DRV_INPUT
+         ! Two-way coupling is switched on by DEF_CaMa_FloodFeedback, which also selects TOPMODEL runoff
+         IF((LWEVAP.NEQV.DEF_CaMa_FloodFeedback).OR.(LWINFILT.NEQV.DEF_CaMa_FloodFeedback)) &
+            ERROR STOP 'CaMa: LWEVAP and LWINFILT in the CaMa namelist must equal DEF_CaMa_FloodFeedback'
          CASE DEFAULT
-            IF(DEF_USE_LEVEE.OR.DEF_Reservoir_Method/=0) &
-               ERROR STOP 'CaMa NC mode: levee/reservoir require CaMa-specific parameters'
+            IF(DEF_Reservoir_Method/=0) &
+               ERROR STOP 'CaMa NC mode: reservoir requires CaMa-specific parameters'
             LCOLMFEEDBACK = DEF_CaMa_FloodFeedback
             CALL CMF_DRV_INPUT(DEF_UnitCatchment_file, DEF_CaMa_Restart_file)
             LPTHOUT = DEF_USE_BIFURCATION
             IF(LPTHOUT) CVARSOUT=TRIM(CVARSOUT)//',pthflw,pthout'
          END SELECT
          !get the time information from colm namelist
-         IF(CSETFILE/='NONE') DT = IFRQ_INP*3600
+         IF(CSETFILE/='NONE') DT = IFRQ_INP*3600                              ! time step of model simulation [sec]
          IF(IFRQ_INP<=0) ERROR STOP 'CaMa: invalid coupling interval'
          DTIN     = IFRQ_INP*3600                                              ! time step of input data [sec]
          SYEAR    = DEF_simulation_time%start_year                             ! start year
@@ -323,7 +327,7 @@ CONTAINS
       CALL mp2g_cama%build_arealweighted (gcama, landpatch) !build the mapping between cama and mpi
       CALL mg2p_cama%build_arealweighted (gcama, landpatch)
       CALL cama_gather%set (gcama)
-      IF(p_is_master .AND. CSETFILE=='NONE')THEN
+      IF(p_is_master)THEN
          allocate(exchange_area(NX,NY))
          DO j=1,NY
             DO i=1,NX
@@ -359,13 +363,11 @@ CONTAINS
          allocate (fevpg_2d  (NX,NY))
          allocate (finfg_2d  (NX,NY))
          !allocate data buffer for input forcing, flood fraction and flood depth
-         allocate (ZBUFF(NX,NY,2))
-         allocate (ZBUFF_2(NX,NY,2))
+         allocate (ZBUFF(NX,NY))
          allocate (ZBUFF_SED(NX,NY))
          allocate (fldfrc_tmp(NX,NY))
          allocate (flddepth_tmp(NX,NY))
          allocate (dirrig_2d (NX,NY))
-         allocate (dirrig_2d_orig (NX,NY))
          allocate (dirrig_cama (NX,NY))
          allocate (dirrig_cama_orig(NX,NY))
          allocate (dirrig_cama_unmt(NX,NY))
@@ -382,14 +384,12 @@ CONTAINS
          prcp_2d(:,:)      = 0.0
          fevpg_2d(:,:)     = 0.0 !evaporation in master processor
          finfg_2d(:,:)     = 0.0 !re-infiltration in master processor
-         ZBUFF(:,:,:)      = 0.0 !input forcing in master processor
-         ZBUFF_2(:,:,:)    = 0.0 !input forcing in master processor
+         ZBUFF(:,:)        = 0.0 !input forcing in master processor
          ZBUFF_SED(:,:)    = 0.0 !input forcing in master processor
          
          fldfrc_tmp(:,:)   = 0.0 !flood fraction in master processor
          flddepth_tmp(:,:) = 0.0 !flood depth in master processor
          dirrig_2d(:,:)    = 0.0 !deficit_irrigation in master processor
-         dirrig_2d_orig(:,:)     = 0.0 !deficit_irrigation in master processor
          dirrig_cama(:,:)        = 0.0 !deficit_irrigation in master processor
          dirrig_cama_orig(:,:)   = 0.0 !deficit_irrigation in master processor
          dirrig_cama_unmt(:,:)   = 0.0 !deficit_irrigation in master processor
@@ -426,88 +426,74 @@ CONTAINS
          withdrawal_dam_cama(:) =  0.0
          withdrawal_rof_cama(:) =  0.0
       ENDIF
-      IF(CSETFILE=='NONE')THEN
-         CALL mg2p_cama%allocate_part(flood_credit_part)
-         CALL mg2p_cama%allocate_part(flood_sink_part)
-         IF(p_is_worker) ALLOCATE(flood_credit(numpatch))
-         IF(p_is_worker)THEN
-            a_rnof_cama=1._r8
-            nacc=1._r8
-         ENDIF
-         CALL colm2cama_real8(a_rnof_cama,f_rnof_cama,runoff_2d,integral=.true.)
-         IF(p_is_master)THEN
-            ALLOCATE(coverage(NSEQMAX))
-            CALL budget_runoff(runoff_2d,coverage)
-            ncut_link=0
-            DO c=1,NSEQRIV
-               nextc=I1NEXT(c)
-               IF(nextc<=0) CYCLE
-               IF((coverage(c)>0._r8).EQV.(coverage(nextc)>0._r8)) CYCLE
-               IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a river link'
-               ncut_link=ncut_link+1
-            ENDDO
-            ncut_bif=0
-            IF(LPTHOUT)THEN
-               DO c=1,NSEQMAX
-                  IF(coverage(c)<=0._r8) CYCLE
-                  DO k=1,I1P_OUTN(c)
-                     IF(coverage(PTH_DOWN(I1P_OUT(c,k)))>0._r8) CYCLE
-                     IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a bifurcation'
-                     ncut_bif=ncut_bif+1
-                  ENDDO
-                  DO k=1,I1P_INFN(c)
-                     IF(coverage(PTH_UPST(I1P_INF(c,k)))>0._r8) CYCLE
-                     IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a bifurcation'
-                     ncut_bif=ncut_bif+1
-                  ENDDO
-               ENDDO
-            ENDIF
-            IF(ncut_link>0.OR.ncut_bif>0) WRITE(*,'(A,I0,A,I0)') &
-               ' WARNING: CaMa regional domain cuts river links: ',ncut_link, &
-               '; bifurcation ends: ',ncut_bif
-         ENDIF
-         CALL flush_acc_cama_fluxes()
-         coupling_elapsed=0._r8
-         IF(p_is_master)THEN
-            ALLOCATE(evap_debit(NSEQMAX),infil_debit(NSEQMAX))
-            runoff_unrouted=0._r8
-         ENDIF
-         IF(LWINFILT.OR.LWEVAP) CALL publish_flood_credit()
+      CALL mg2p_cama%allocate_part(flood_credit_part)
+      CALL mg2p_cama%allocate_part(flood_sink_part)
+      IF(p_is_worker) ALLOCATE(flood_credit(numpatch))
+      IF(p_is_worker)THEN
+         a_rnof_cama=1._r8
+         nacc=1._r8
       ENDIF
+      CALL colm2cama_real8(a_rnof_cama,f_rnof_cama,runoff_2d,integral=.true.)
+      IF(p_is_master)THEN
+         ALLOCATE(coverage(NSEQMAX))
+         CALL budget_runoff(runoff_2d,coverage)
+         ncut_link=0
+         DO c=1,NSEQRIV
+            nextc=I1NEXT(c)
+            IF(nextc<=0) CYCLE
+            IF((coverage(c)>0._r8).EQV.(coverage(nextc)>0._r8)) CYCLE
+            IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a river link'
+            ncut_link=ncut_link+1
+         ENDDO
+         ncut_bif=0
+         IF(LPTHOUT)THEN
+            DO c=1,NSEQMAX
+               IF(coverage(c)<=0._r8) CYCLE
+               DO k=1,I1P_OUTN(c)
+                  IF(coverage(PTH_DOWN(I1P_OUT(c,k)))>0._r8) CYCLE
+                  IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a bifurcation'
+                  ncut_bif=ncut_bif+1
+               ENDDO
+               DO k=1,I1P_INFN(c)
+                  IF(coverage(PTH_UPST(I1P_INF(c,k)))>0._r8) CYCLE
+                  IF(DEF_CaMa_StrictDomain) ERROR STOP 'CaMa: regional domain cuts a bifurcation'
+                  ncut_bif=ncut_bif+1
+               ENDDO
+            ENDDO
+         ENDIF
+         IF(ncut_link>0.OR.ncut_bif>0) WRITE(*,'(A,I0,A,I0)') &
+            ' WARNING: CaMa regional domain cuts river links: ',ncut_link, &
+            '; bifurcation ends: ',ncut_bif
+      ENDIF
+      CALL flush_acc_cama_fluxes()
+      coupling_elapsed=0._r8
+      IF(p_is_master)THEN
+         ALLOCATE(evap_debit(NSEQMAX),infil_debit(NSEQMAX))
+         runoff_unrouted=0._r8
+      ENDIF
+      IF(LWINFILT.OR.LWEVAP) CALL publish_flood_credit()
    END SUBROUTINE colm_CaMa_init
 
 !####################################################################
    SUBROUTINE colm_cama_drv(idate_sec,deltim,force_flush)
    IMPLICIT NONE
    integer, intent(in)  :: idate_sec     ! calendar (year, julian day, seconds)
-   real(r8), optional, intent(in) :: deltim
-   logical, optional, intent(in) :: force_flush
+   real(r8), intent(in) :: deltim        ! land time step [s]
+   logical,  intent(in) :: force_flush   ! exchange now, e.g. before a restart is written
    real(r8) :: dt_saved, dtin_saved, remaining
-   logical :: flush_window, newmode
-      newmode=CSETFILE=='NONE'
-      flush_window=.false.
-      IF(PRESENT(force_flush)) flush_window=force_flush
+
       !Accumulate cama-flood related flux variables
-      IF(newmode)THEN
-         IF(.NOT.PRESENT(deltim)) ERROR STOP 'CaMa: missing land time step'
-         IF(deltim<=0._r8.OR.MOD(NINT(deltim),60)/=0.OR.ABS(deltim-NINT(deltim))>1.e-8_r8) &
-            ERROR STOP 'CaMa: land time step must be a positive whole number of minutes'
-         coupling_elapsed=coupling_elapsed+deltim
-         CALL accumulate_cama_fluxes(deltim)
-      ELSE
-         CALL accumulate_cama_fluxes()
-      ENDIF
+      IF(deltim<=0._r8.OR.MOD(NINT(deltim),60)/=0.OR.ABS(deltim-NINT(deltim))>1.e-8_r8) &
+         ERROR STOP 'CaMa: land time step must be a positive whole number of minutes'
+      coupling_elapsed=coupling_elapsed+deltim
+      CALL accumulate_cama_fluxes(deltim)
       ! If the time is the same as the input time step of cama-flood
       IF  (MOD(idate_sec,3600*int(IFRQ_INP))==0 .OR. &
-           (newmode.AND.(coupling_elapsed>=3600._r8*IFRQ_INP.OR.flush_window))) THEN
-         ! Prepare sending the accumulated runoff flux varilble to cama model (master processor to worker processors)
-         CALL colm2cama_real8 (a_rnof_cama, f_rnof_cama, runoff_2d, integral=newmode)
+           coupling_elapsed>=3600._r8*IFRQ_INP .OR. force_flush) THEN
+         ! Prepare sending the accumulated runoff volume to cama model (master processor to worker processors)
+         CALL colm2cama_real8 (a_rnof_cama, f_rnof_cama, runoff_2d, integral=.true.)
          IF (LSEDIMENT) THEN
-            IF(CSETFILE=='NONE')THEN
-               CALL colm2cama_real8(a_prcp_cama,f_prcp_cama,prcp_2d,valid_time=a_prcp_time)
-            ELSE
-               CALL colm2cama_real8(a_prcp_cama,f_prcp_cama,prcp_2d)
-            ENDIF
+            CALL colm2cama_real8(a_prcp_cama,f_prcp_cama,prcp_2d,valid_time=a_prcp_time)
          ENDIF
          IF (LDAMIRR) THEN 
             ! Prepare sending the accumulated deficit irriggation varilble to cama model (master processor to worker processors)
@@ -521,51 +507,23 @@ CONTAINS
             CALL colmvar2cama_real8 (a_dirrig_cama, f_dirrig_cama, dirrig_2d)
          ENDIF
 
-         ! Prepare sending the accumulated inundation evaporation flux to cama model (master processor to worker processors)
-         ! only if the inundation evaporation is turned on
+         ! Inundation evaporation and re-infiltration taken by land from the published flood credit
          IF (LWEVAP) THEN
-            IF(newmode)THEN
-               CALL colm2cama_real8(a_fevpg_fld,f_fevpg_fld,fevpg_2d,integral=.true.,flood_sink=.true.)
-            ELSE
-               CALL colm2cama_real8 (a_fevpg_fld, f_fevpg_fld, fevpg_2d)
-            ENDIF
+            CALL colm2cama_real8(a_fevpg_fld,f_fevpg_fld,fevpg_2d,integral=.true.,flood_sink=.true.)
          ENDIF
-         ! Prepare sending the accumulated inundation re-infiltrition flux to cama model (master processor to worker processors)
-         ! only if the inundation re-infiltrition is turned on
          IF (LWINFILT) THEN
-            IF(newmode)THEN
-               CALL colm2cama_real8(a_finfg_fld,f_finfg_fld,finfg_2d,integral=.true.,flood_sink=.true.)
-            ELSE
-               CALL colm2cama_real8 (a_finfg_fld, f_finfg_fld, finfg_2d)
-            ENDIF
+            CALL colm2cama_real8(a_finfg_fld,f_finfg_fld,finfg_2d,integral=.true.,flood_sink=.true.)
          ENDIF
 
 
       ! Reset the accumulation variables
          CALL flush_acc_cama_fluxes
 
-         ! Initialize the variables unit for cama-flood input
          IF(p_is_master)THEN
-            IF(newmode)THEN
-               dt_saved=DT
-               dtin_saved=DTIN
-               DTIN=coupling_elapsed
-            ENDIF
-            ! Use vectorized operations for better performance
-            IF(newmode)THEN
-               ZBUFF(:,:,1) = runoff_2d(:,:)
-            ELSE
-               ZBUFF(:,:,1) = runoff_2d(:,:) * 1.0D-3
-            ENDIF
-            ZBUFF(:,:,2) = 0.0D0
-            
-            IF (LWEVAP) THEN
-               ZBUFF_2(:,:,1) = fevpg_2d(:,:) * 1.0D-3 ! mm/s -->m/s
-            ENDIF
-            
-            IF (LWINFILT) THEN
-               ZBUFF_2(:,:,2) = finfg_2d(:,:) * 1.0D-3  !mm/s -->m/s
-            ENDIF
+            dt_saved=DT
+            dtin_saved=DTIN
+            DTIN=coupling_elapsed
+            ZBUFF(:,:) = runoff_2d(:,:)   ! runoff volume rate [m3/s]
 
             IF (LSEDIMENT) THEN
                ZBUFF_SED(:,:) = prcp_2d(:,:) !* 1.0D-3 ! mm/s  
@@ -600,79 +558,46 @@ CONTAINS
                release_cama(:,:) = 0.0
                
                !!!!!withdraw water from runoff
-               IF(newmode)THEN
-                  release_cama_rof(:,:) = min(dirrig_cama(:,:), ZBUFF(:,:,1)*DTIN)
-               ELSE
-                  release_cama_rof(:,:) = min(dirrig_cama(:,:), ZBUFF(:,:,1)*R2GRDARE(:,:)*DTIN)
-               ENDIF
+               release_cama_rof(:,:) = min(dirrig_cama(:,:), ZBUFF(:,:)*DTIN)
                release_cama_rof(:,:) = max(0.0, release_cama_rof(:,:))
                dirrig_cama(:,:) = dirrig_cama(:,:) - release_cama_rof(:,:)
-               IF(newmode)THEN
-                  ZBUFF(:,:,1) = (ZBUFF(:,:,1)*DTIN - release_cama_rof(:,:))/DTIN
-               ELSE
-                  ZBUFF(:,:,1) = (ZBUFF(:,:,1)*R2GRDARE(:,:)*DTIN - release_cama_rof(:,:))/R2GRDARE(:,:)/DTIN
-               ENDIF
+               ZBUFF(:,:) = (ZBUFF(:,:)*DTIN - release_cama_rof(:,:))/DTIN
             ENDIF
             
             ! Simulating the hydrodynamics in continental-scale rivers
             ! ----------------------------------------------------------------------
 
-            ! Get the time step of cama-flood simulation
-            ISTEPADV=INT(DTIN/DT,JPIM)
-            ! Interporlate variables & send to CaMa-Flood
-            IF(newmode)THEN
-               IF(LWINFILT.OR.LWEVAP)THEN
-                  CALL budget_debit(fevpg_2d*DTIN,finfg_2d*DTIN,P2FLDSTO(:,1),evap_debit,infil_debit)
-                  IF(LWEVAP) D2WEVAPEX(:,1)=evap_debit/DTIN
-                  IF(LWINFILT) D2WINFILTEX(:,1)=infil_debit/DTIN
-                  sinks_prepaid=.true.
-                  CALL CMF_PHYSICS_FLDSTG()
-               ENDIF
+            ! Debit the land sinks from floodplain storage before routing
+            IF(LWINFILT.OR.LWEVAP)THEN
+               CALL budget_debit(fevpg_2d*DTIN,finfg_2d*DTIN,P2FLDSTO(:,1),evap_debit,infil_debit)
+               IF(LWEVAP) D2WEVAPEX(:,1)=evap_debit/DTIN
+               IF(LWINFILT) D2WINFILTEX(:,1)=infil_debit/DTIN
+               sinks_prepaid=.true.
+               CALL CMF_PHYSICS_FLDSTG()
             ENDIF
-            IF(newmode)THEN
-               CALL budget_runoff(ZBUFF(:,:,1),D2RUNOFF(:,1))
-               runoff_unrouted=runoff_unrouted+budget_unrouted()*DTIN
-               D2ROFSUB = 0._r8
-               IF(LWEVAP) D2WEVAP=0._r8
-               IF(LWINFILT) D2WINFILT=0._r8
-            ELSE
-               CALL CMF_FORCING_PUT(real(ZBUFF,kind=JPRB),real(ZBUFF_2,kind=JPRB))
-            ENDIF
+            ! Route the runoff volume to the catchments that receive it
+            CALL budget_runoff(ZBUFF(:,:),D2RUNOFF(:,1))
+            runoff_unrouted=runoff_unrouted+budget_unrouted()*DTIN
+            D2ROFSUB = 0._r8
+            IF(LWEVAP) D2WEVAP=0._r8
+            IF(LWINFILT) D2WINFILT=0._r8
             IF (LSEDIMENT) THEN
                CALL CMF_SED_FORCING_PUT(real(ZBUFF_SED,kind=JPRB))
             ENDIF
-            ! Advance CaMa-Flood model for ISTEPADV
-            IF(newmode)THEN
-               remaining=DTIN
-               DO WHILE(remaining>1.e-8_r8)
-                  DT=MIN(dt_saved,remaining)
-                  CALL CMF_DRV_ADVANCE(1)
-                  remaining=remaining-DT
-               ENDDO
-               DT=dt_saved
-               DTIN=dtin_saved
-               sinks_prepaid=.false.
-            ELSE
-               CALL CMF_DRV_ADVANCE(ISTEPADV)
-            ENDIF
-            ! Get the flood depth and flood fraction from cama-flood model
-            IF ((LWINFILT .or. LWEVAP).AND.CSETFILE/='NONE') THEN
-               CALL get_fldinfo()
-            ENDIF
+            ! Advance CaMa-Flood over the coupling window
+            remaining=DTIN
+            DO WHILE(remaining>1.e-8_r8)
+               DT=MIN(dt_saved,remaining)
+               CALL CMF_DRV_ADVANCE(1)
+               remaining=remaining-DT
+            ENDDO
+            DT=dt_saved
+            DTIN=dtin_saved
+            sinks_prepaid=.false.
          ENDIF
-         IF(newmode) coupling_elapsed=0._r8
-         ! Send the flood depth and flood fraction from master processors to worker processors
-         IF (LWINFILT .or. LWEVAP) THEN
-            IF(CSETFILE=='NONE')THEN
-               CALL publish_flood_credit()
-            ELSE
-               CALL cama2colm_real8 (flddepth_tmp, f_flddepth_cama, flddepth_cama)
-               CALL cama2colm_real8 (fldfrc_tmp,   f_fldfrc_cama,   fldfrc_cama  )
-
-               IF (p_is_worker) flddepth_cama=flddepth_cama*1000.D0
-               IF (p_is_worker) fldfrc_cama=fldfrc_cama/100.D0
-            ENDIF
-         ENDIF
+         coupling_elapsed=0._r8
+         ! Publish the floodplain storage as flood credit for land (master processors to worker processors)
+         IF (LWINFILT .or. LWEVAP) CALL publish_flood_credit()
 
          IF (LDAMIRR) THEN  
             IF (p_is_master) THEN
@@ -716,27 +641,23 @@ CONTAINS
 
       ! finalize CaMa-Flood
       CALL deallocate_acc_cama_Fluxes ()
-      IF(CSETFILE=='NONE')THEN
-         IF(p_is_master)THEN
-            IF(runoff_unrouted/=0._r8) WRITE(*,'(A,ES12.4,A)') &
-               ' CaMa unrouted land runoff: ',runoff_unrouted,' m3'
-            IF(ALLOCATED(evap_debit)) DEALLOCATE(evap_debit,infil_debit)
-         ENDIF
-         CALL mg2p_cama%deallocate_part(flood_credit_part)
-         CALL mg2p_cama%deallocate_part(flood_sink_part)
-         IF(ALLOCATED(flood_credit)) DEALLOCATE(flood_credit)
+      IF(p_is_master)THEN
+         IF(runoff_unrouted/=0._r8) WRITE(*,'(A,ES12.4,A)') &
+            ' CaMa unrouted land runoff: ',runoff_unrouted,' m3'
+         IF(ALLOCATED(evap_debit)) DEALLOCATE(evap_debit,infil_debit)
       ENDIF
+      CALL mg2p_cama%deallocate_part(flood_credit_part)
+      CALL mg2p_cama%deallocate_part(flood_sink_part)
+      IF(ALLOCATED(flood_credit)) DEALLOCATE(flood_credit)
       IF(p_is_master)THEN
          ! finalize CaMa-Flood
          deallocate(ZBUFF)
-         deallocate(ZBUFF_2)
          deallocate(ZBUFF_SED)
          deallocate (runoff_2d)
          deallocate (fevpg_2d)
          deallocate (finfg_2d)
          deallocate ( I2NEXTX )
          deallocate (dirrig_2d)
-         deallocate (dirrig_2d_orig)
          deallocate (dirrig_cama)
          deallocate (dirrig_cama_orig)
          deallocate (withdrawal_tmp)
@@ -771,11 +692,10 @@ CONTAINS
    character(LEN=*), intent(in) :: site
    character(LEN=*), intent(in) :: dir_restart
    ! Local variables
-   character(LEN=256) :: file_restart
    character(len=14)  :: cdate
    character(len=256) :: cyear         !character for lc_year
 
-      IF(CSETFILE=='NONE'.AND.coupling_elapsed>1.e-8_r8) ERROR STOP 'CaMa: restart requires a flushed coupling window'
+      IF(coupling_elapsed>1.e-8_r8) ERROR STOP 'CaMa: restart requires a flushed coupling window'
       ! land cover type year
       write(cyear,'(i4.4)') lc_year
       write(cdate,'(i4.4,"-",i3.3,"-",i5.5)') idate(1), idate(2), idate(3)
@@ -803,28 +723,23 @@ CONTAINS
    ! 2020.10.01  Zhongwang Wei @ SYSU
 
    USE YOS_CMF_INPUT,      only:  NX, NY !grid number
-   USE YOS_CMF_DIAG,       only:  D2FLDDPH,D2FLDFRC !1D vector data of flood depth and flood fraction
+   USE YOS_CMF_DIAG,       only:  D2FLDFRC !1D vector data of flood fraction
    USE YOS_CMF_MAP,        only:  D2GRAREA
-   USE YOS_CMF_PROG,       only:  P2FLDSTO
-   USE CMF_UTILS_MOD,      only:  vecP2mapP          !convert 1D vector data -> 2D map data (REAL*8)
+   USE YOS_CMF_PROG,       only:  P2RIVSTO, P2FLDSTO
 
    IMPLICIT NONE
-
-   !----------------------- Dummy argument --------------------------------
-   integer i,j
+   real(r8), allocatable :: rivsto(:), fldsto(:)
 
       !================================================
-      !! convert 1Dvector to 2Dmap
-      IF(CSETFILE=='NONE')THEN
-         CALL budget_publish(P2FLDSTO(:,1),D2FLDFRC(:,1)*D2GRAREA(:,1),flddepth_tmp,fldfrc_tmp)
-      ELSE
-         CALL vecP2mapP(real(D2FLDDPH,kind=JPRD),flddepth_tmp)
-         CALL vecP2mapP(real(D2FLDFRC,kind=JPRD),fldfrc_tmp)
-
-         WHERE (flddepth_tmp(:,:) < 0.0) flddepth_tmp(:,:) = 0.0
-         WHERE (fldfrc_tmp(:,:) < 0.0)   fldfrc_tmp(:,:)   = 0.0
-         WHERE (fldfrc_tmp(:,:) > 100.0) fldfrc_tmp(:,:)   = 100.0
-      ENDIF
+      ! Stage the current storage for the flooded area but keep the storage itself, so a restart
+      ! (which stages only the stored state) publishes the same credit as a continuous run
+      rivsto=P2RIVSTO(:,1)
+      fldsto=P2FLDSTO(:,1)
+      CALL CMF_PHYSICS_FLDSTG()
+      P2RIVSTO(:,1)=rivsto
+      P2FLDSTO(:,1)=fldsto
+      !! publish floodplain storage and flooded area on the land grid
+      CALL budget_publish(P2FLDSTO(:,1),D2FLDFRC(:,1)*D2GRAREA(:,1),flddepth_tmp,fldfrc_tmp)
    END SUBROUTINE get_fldinfo
 
    SUBROUTINE publish_flood_credit()
@@ -941,8 +856,6 @@ CONTAINS
    real(r8) :: z0mg          ! roughness length over ground, momentum [m]
    real(r8) :: z0hg          ! roughness length over ground, sensible heat [m]
    real(r8) :: z0qg          ! roughness length over ground, latent heat [m]
-
-   real, parameter :: zsice = 0.04  ! sea ice aerodynamic roughness length [m]
 
       !-----------------------------------------------------------------------
       ! Potential temperatur at the reference height

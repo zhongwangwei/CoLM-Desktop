@@ -122,8 +122,7 @@ CONTAINS
    real(r8),parameter :: topmod_vdcf = 2.0_r8
    integer m
 
-      tsoi17(i) = forc_t(i)  ! Temporarily use air temperature for tsoi17, need to revised later.
-                             ! (was a whole-array assignment: every patch got this patch's forc_t)
+      tsoi17 = forc_t(i)  ! Temporarily use air temperature for tsoi17, need to revised later.
       wf2    = 0.5        ! Temporarily set up, need to revise later.
 
       CALL julian2monthday(idate(1),idate(2),kmo,kda)
@@ -362,21 +361,13 @@ CONTAINS
                   IF (zwt(i) <= 0._r8) THEN
                      satfrac_fire = 1._r8
                   ELSE
-                     ! start above mu_twi, as in SurfaceRunoff_TOPMOD
-                     IF (topoweti(i) > mu_twi(i)) THEN
-                        eta_fire = topoweti(i)
-                     ELSE
-                        eta_fire = mu_twi(i) + alp_twi(i)*chi_twi(i)
-                     ENDIF
+                     eta_fire = topoweti(i)
                      gfun_fire = 0._r8
-                     ! GRATIO only defines P/Q for x >= 0 (it returns ANS = 2 and leaves QANS
-                     ! untouched for x < 0, i.e. topoweti < mu_twi): below the distribution's
-                     ! lower bound everything is saturated, which x = 0 gives (Q = 1).
                      DO niter_fire = 1, 20
                         CALL GRATIO(alp_twi(i)+1._r8, &
-                             MAX(0._r8, (eta_fire-mu_twi(i))/chi_twi(i)), pgr1_fire, qgr_fire, 0)
+                             (eta_fire-mu_twi(i))/chi_twi(i), pgr1_fire, qgr_fire, 0)
                         CALL GRATIO(alp_twi(i), &
-                             MAX(0._r8, (eta_fire-mu_twi(i))/chi_twi(i)), pgr0_fire, qgr_fire, 0)
+                             (eta_fire-mu_twi(i))/chi_twi(i), pgr0_fire, qgr_fire, 0)
                         gfun_fire = ((eta_fire-mu_twi(i))*pgr0_fire &
                              - chi_twi(i)*alp_twi(i)*pgr1_fire) / topmod_vdcf - zwt(i)
                         IF (ABS(gfun_fire) <= 1.e-6_r8 .OR. pgr0_fire <= 0._r8) EXIT
@@ -384,7 +375,7 @@ CONTAINS
                              (chi_twi(i)*alp_twi(i)*pgr1_fire + topmod_vdcf*zwt(i)) / pgr0_fire
                      ENDDO
                      CALL GRATIO(alp_twi(i), &
-                          MAX(0._r8, (eta_fire-mu_twi(i))/chi_twi(i)), pgr0_fire, qgr_fire, 0)
+                          (eta_fire-mu_twi(i))/chi_twi(i), pgr0_fire, qgr_fire, 0)
                      satfrac_fire = qgr_fire
                   ENDIF
                ENDIF

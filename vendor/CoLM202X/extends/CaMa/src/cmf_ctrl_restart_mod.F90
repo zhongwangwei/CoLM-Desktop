@@ -638,7 +638,7 @@ IF( REGIONTHIS==1 )THEN   !! write restart only on master node
   CALL NCERROR( NF90_DEF_VAR(NCID, 'time', NF90_DOUBLE, (/TIMEID/), VARID) ) 
   CALL NCERROR( NF90_PUT_ATT(NCID, VARID, 'long_name','time') )
   CALL NCERROR( NF90_PUT_ATT(NCID, VARID, 'units',CTIME) )
-
+  
   IF(CSETFILE=='NONE')THEN
     CALL NCERROR(NF90_DEF_VAR(NCID,'history_elapsed',NF90_DOUBLE,VARID=VARID))
     DO JH=1,14

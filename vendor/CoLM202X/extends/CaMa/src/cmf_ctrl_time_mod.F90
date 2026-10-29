@@ -178,7 +178,7 @@ IF (CSETFILE=="NONE") THEN
     ERROR STOP 'CaMa timestep count exceeds integer range'
   NSTEPS=CEILING(REAL(ELAPSED_SEC_8,KIND=JPRB)/DT,KIND=JPIM)
 ELSE
-  NSTEPS=int ( ( (KMINEND-KMINSTART)*60_JPIM ) / DT )
+  NSTEPS=int ( ( (KMINEND-KMINSTART)*60_JPIM ) / DT )      !!  (End - Start) / DT
 ENDIF
 
 WRITE(LOGNAM,*) 'NSTEPS    :',NSTEPS

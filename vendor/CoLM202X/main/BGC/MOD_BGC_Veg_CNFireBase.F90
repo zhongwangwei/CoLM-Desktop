@@ -413,8 +413,7 @@ CONTAINS
       !
       ! somc_fire is not connected to clm45 soil carbon pool, ie does not decrease
       ! soil carbon b/c clm45 soil carbon was very low in several peatland grids
-      ! borealat is in degrees (as dlat in CNFireArea); patchlatr is in radians
-      IF( patchlatr(i)*180._r8/(4._r8*atan(1._r8))  <  borealat)THEN
+      IF( patchlatr(i)  <  borealat)THEN
          somc_fire(i)= totsomc(i)*baf_peatf(i)*6.0_r8/33.9_r8
       ELSE
          somc_fire(i)= baf_peatf(i)*2.2e3_r8
