@@ -22,7 +22,7 @@ use anyhow::{bail, ensure, Result};
 use colm_core::tracer::{TracerSet, TRC_TINY};
 use colm_numeric::Contract;
 
-use super::bifurcation::{accumulate, Bifurcation};
+use super::bifurcation::Bifurcation;
 use super::levee::Levee;
 use super::network::RiverNetwork;
 
@@ -40,6 +40,14 @@ const LIMITER_SOFT_ITER: usize = 32;
 pub const V_DRY_OFF: f64 = 1.0e-6;
 /// `get_cell_volume` 的 `stage_restart_tol`。
 const STAGE_RESTART_TOL: f64 = 1.0e-5;
+/// `mt_dry_stat` 的第 1 列：交给拆分派送的干单元残水（`MOD_MT_RiverLake.F90:93-101`）。
+const DRY_STAT_PROCESSED: usize = 0;
+/// 第 2 列：真正送达接收方的量。
+const DRY_STAT_DELIVERED: usize = 1;
+/// 第 4 列：记成河口终端的汇。
+const DRY_STAT_SINK: usize = 3;
+/// `mt_dry_stat` 的列数（第 3 列是报告时现算的 pending 存量）。
+const DRY_STAT_COLUMNS: usize = 4;
 
 /// `[itrc][cell]` 的一组行。
 pub type Rows = Vec<Vec<f64>>;
@@ -98,7 +106,14 @@ pub struct RiverTracers {
     /// 有溶解度上限的溶质的固相（可见/堤内）；没有这类示踪物时为 `None`。
     pub solid: Option<(Rows, Rows)>,
     pub flux_out: Vec<Vec<f64>>,
+    /// 干单元清理里记成终端的汇（`mt_dry_drain`）；每次汇流调用后清零。
     pub dry_drain: Vec<Vec<f64>>,
+    /// `mt_dry_pending`：干单元残水在按实际出流面拆分后仍无处可送的那份，先挂在单元里，
+    /// 等下一个有水的子步放回 `mass`。
+    pub dry_pending: Vec<Vec<f64>>,
+    /// `mt_dry_stat`：累计的干单元账目。第 1/2/4 列见 [`DRY_STAT_PROCESSED`] 等；
+    /// 第 3 列（当前 pending 存量）是报告时现算的，不是累计值，所以不在这里。
+    pub dry_stat: Vec<Vec<f64>>,
     pub reactive_source: Vec<Vec<f64>>,
     /// 本汇流周期累计的径流示踪物与对应的水量（`acc_trc_inp`/`acc_rnof_ref`）。
     pub acc_inp: Vec<Vec<f64>>,
@@ -175,6 +190,8 @@ impl RiverTracers {
             solid,
             flux_out: zeros(),
             dry_drain: zeros(),
+            dry_pending: zeros(),
+            dry_stat: vec![vec![0.0; DRY_STAT_COLUMNS]; ntracers],
             reactive_source: zeros(),
             acc_inp: zeros(),
             acc_rnof_ref: vec![0.0; n],
@@ -530,8 +547,13 @@ impl RiverTracers {
                     hflux_stale[i] = cell.hflux;
                 }
             }
-            self.diag_accumulate(net, levee, &global, &current)?;
+            // 上游唯一的调用点（`MOD_MT_RiverLakeCoupling.F90:516/520`）传
+            // `allow_reverse_flow = .true.`：水的汇流在 Rust 侧没有关逆流的开关，所以这里恒为真。
+            self.diag_accumulate(net, levee, &global, &current, true)?;
         }
+        // `mt_riverlake_release_pending_drain`：汇流调用末尾把还没等到的方向残水放回库存，
+        // 这样 pending 永远不会跨重启/窗口边界丢，也不需要写进续跑文件。
+        self.release_dry_pending();
         // 汇流周期结束（`grid_riverlake_flow` 末尾）：径流参考水量与干单元流域汇清零
         // （`acc_trc_inp` 已在开始时并进缓冲）。
         self.acc_rnof_ref.fill(0.0);
@@ -539,6 +561,19 @@ impl RiverTracers {
             row.fill(0.0);
         }
         Ok(())
+    }
+
+    /// `mt_riverlake_release_pending_drain`：把待定的干单元残水放回可见库存。
+    fn release_dry_pending(&mut self) {
+        for itrc in self.transport() {
+            for i in 0..self.dry_pending[itrc].len() {
+                let pending = self.dry_pending[itrc][i];
+                if pending > TRC_TINY {
+                    self.mass[itrc][i] += pending;
+                    self.dry_pending[itrc][i] = 0.0;
+                }
+            }
+        }
     }
 
     /// `tracer_substep`（`do_bif` 由 `step.bif` 决定）。
@@ -574,15 +609,6 @@ impl RiverTracers {
             match levee {
                 Some(levee) => (levee.has[i_up], i_dn.is_some_and(|d| levee.has[d])),
                 None => (false, false),
-            }
-        };
-        // `push_bif_influx`（`mode = 'sum'`）：把路径值推给它的下游单元流域。
-        let push_influx = |bif: &Bifurcation, values: &[f64], out: &mut [f64]| {
-            for (slot, paths_in) in out.iter_mut().zip(&bif.incoming) {
-                *slot = 0.0;
-                for &p in paths_in {
-                    accumulate(slot, values[p]);
-                }
             }
         };
         for itrc in self.transport() {
@@ -622,6 +648,16 @@ impl RiverTracers {
                 let release = self.inp_buf[itrc][i].max(0.0);
                 self.inp_buf[itrc][i] -= release;
                 self.mass[itrc][i] += release;
+                // `mt_dry_pending`：干单元清理时无处可送的残水回到单元库存。上游只在活跃
+                // 子步（`ucatfilter` 且 `dt_i > 0`）释放；走完的河系留下的残水由汇流末尾的
+                // `mt_riverlake_release_pending_drain` 统一释放，所以不会跨重启丢。
+                if step.active[i] && dt_i > 0.0 {
+                    let pending = self.dry_pending[itrc][i];
+                    if pending > TRC_TINY {
+                        self.mass[itrc][i] += pending;
+                        self.dry_pending[itrc][i] = 0.0;
+                    }
+                }
                 // 有堤单元流域的堤内水（子步首）。
                 let leveed = levee
                     .filter(|levee| levee.has[i])
@@ -784,11 +820,11 @@ impl RiverTracers {
                     }
                 }
                 let mut recv = vec![0.0; n];
-                push_influx(bif, &dn_out_vis, &mut recv);
+                bif.push_influx(&dn_out_vis, &mut recv);
                 for i in 0..n {
                     out_mass[i] += recv[i];
                 }
-                push_influx(bif, &dn_out_lev, &mut recv);
+                bif.push_influx(&dn_out_lev, &mut recv);
                 for i in 0..n {
                     out_mass_lev[i] += recv[i];
                 }
@@ -1105,28 +1141,49 @@ impl RiverTracers {
         Ok(())
     }
 
-    /// `tracer_diag_accumulate_substep`：子步末状态下的干单元流域清理与 history 累加。
+    /// `mt_riverlake_diag_accumulate`（`MOD_MT_RiverLake.F90:768-1112`）：子步末状态下的
+    /// 干单元流域清理、残水按实际出流面拆分派送与 history 累加。
+    ///
+    /// 上游的 `present(hflux_fc_in)` 在 Rust 侧恒真（磁带总是记了面通量），所以没有
+    /// “整份残水记成终端汇”的那条分支：残水一律先按实际出流面拆分，只有河口终端的正向
+    /// 份额才落进 `dry_drain`。
+    ///
+    /// `reverse_allowed` 是上游的 `allow_reverse_flow`：关掉它时 `rev_send` 必须保持 0 ——
+    /// 否则正向份额（此时等于整份残水）会在下游的负值面通量上被再送一次。上游唯一的调用点
+    /// 恒传 `.true.`，参数留着是为了守住这条闸门。
     fn diag_accumulate(
         &mut self,
         net: &RiverNetwork,
         levee: Option<&Levee>,
         step: &GlobalSubstep,
         end: &[CellWater],
+        reverse_allowed: bool,
     ) -> Result<()> {
         let n = net.len();
+        if n == 0 {
+            return Ok(());
+        }
         let transport = self.transport();
+        let ntracers = self.set.len();
+        let volwater: Vec<f64> = (0..n)
+            .map(|i| cell_volume(net, levee, i, &end[i]))
+            .collect();
+        // 残水先逐单元流域收齐（上游 `mt_dry_split` 的累加），再逐示踪物派送。
+        let mut dry_split = vec![vec![0.0; n]; ntracers];
+        let mut any_split = false;
         for i in 0..n {
             let water = &end[i];
-            let volwater = cell_volume(net, levee, i, water);
             if self.solid.is_some() {
                 let protected = match (levee, water.levsto) {
                     (Some(levee), Some(levsto)) if levee.has[i] => levsto,
                     _ => 0.0,
                 };
-                self.equilibrate_cell(i, volwater, protected)?;
+                self.equilibrate_cell(i, volwater[i], protected)?;
             }
             let dt_i = step.dt[i];
-            if volwater <= V_DRY_OFF {
+            // 干单元清理只对还在汇流的单元流域做：走完的河系停在最后一个子步的水位与面通量上，
+            // 再清一遍会把已经结清的库存按陈旧通量重复记账（见下面 `active_flux`）。
+            if step.active[i] && dt_i > 0.0 && volwater[i] <= V_DRY_OFF {
                 for &itrc in &transport {
                     let tracer = &self.set.tracers[itrc];
                     let mass = self.mass[itrc][i];
@@ -1154,31 +1211,32 @@ impl RiverTracers {
                         self.inp_buf[itrc][i] = self.inp_buf[itrc][i].min(0.0);
                         continue;
                     }
+                    // 带符号的负径流欠账不是负的物理出流：只清正的有主残水，负债务留给
+                    // 以后同格的径流去抵消（`NEG_RUNOFF_DEBT`）。
                     let dry_drain = self.mass[itrc][i].max(0.0) + self.inp_buf[itrc][i].max(0.0);
                     if dry_drain > TRC_TINY {
-                        self.dry_drain[itrc][i] += dry_drain;
-                        if dt_i > 0.0 && step.active[i] {
-                            self.history.out[itrc][i] += dry_drain;
-                        }
+                        dry_split[itrc][i] += dry_drain;
+                        self.dry_stat[itrc][DRY_STAT_PROCESSED] += dry_drain;
+                        any_split = true;
                     }
                     self.mass[itrc][i] = 0.0;
                     self.inp_buf[itrc][i] = self.inp_buf[itrc][i].min(0.0);
                 }
             }
             for &itrc in &transport {
-                self.conc[itrc][i] = if volwater <= V_DRY_OFF {
+                self.conc[itrc][i] = if volwater[i] <= V_DRY_OFF {
                     0.0
                 } else {
-                    self.mass[itrc][i] / volwater
+                    self.mass[itrc][i] / volwater[i]
                 };
             }
             if !step.active[i] || dt_i <= 0.0 {
                 continue;
             }
             self.history.acctime[i] += dt_i;
-            if volwater > V_DRY_OFF {
+            if volwater[i] > V_DRY_OFF {
                 self.history.water_storage[i] =
-                    volwater.contract(dt_i, self.history.water_storage[i]);
+                    volwater[i].contract(dt_i, self.history.water_storage[i]);
             }
             let levsto = match (levee, water.levsto) {
                 (Some(levee), Some(levsto)) if levee.has[i] => Some(levsto),
@@ -1188,7 +1246,7 @@ impl RiverTracers {
                 self.history.levsto_water[i] = levsto.contract(dt_i, self.history.levsto_water[i]);
             }
             for &itrc in &transport {
-                if volwater > V_DRY_OFF {
+                if volwater[i] > V_DRY_OFF {
                     self.history.storage_mass[itrc][i] =
                         self.mass[itrc][i].contract(dt_i, self.history.storage_mass[itrc][i]);
                 }
@@ -1200,6 +1258,191 @@ impl RiverTracers {
                     self.flux_out[itrc][i].contract(dt_i, self.history.out[itrc][i]);
                 self.history.bifout[itrc][i] =
                     self.bif_net_saved[itrc][i].contract(dt_i, self.history.bifout[itrc][i]);
+            }
+        }
+        // 没有残水时下面的拆分派送是逐位无操作：省掉这批按网络长度分配的临时数组。
+        // 这对结果没有影响（上游只是照样走一遍全零的派送循环）。
+        if transport.is_empty() || !any_split {
+            return Ok(());
+        }
+        // `active_flux` 是本子步真正在汇流的单元流域的出口面通量；其余清零。走完的河系
+        // 保留着最后一个子步的面通量，直接拿来拆分会把残水送进早已结束的河系。
+        let active_flux: Vec<f64> = (0..n)
+            .map(|i| {
+                if step.active[i] && step.dt[i] > 0.0 {
+                    step.hflux[i]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        // 每个供体的逆流出流需求：上游单元流域负值面通量之和（`push_ups2ucat`）。
+        let mut rev_sum = vec![0.0; n];
+        if reverse_allowed {
+            let up_rev: Vec<f64> = active_flux.iter().map(|&flux| (-flux).max(0.0)).collect();
+            push_ups(net, &up_rev, &mut rev_sum);
+        }
+        // 分汊路径能送出的容量（`mt_bif_dry_prepare`）；不开分汊时全是 0。
+        let (bif_out, down_levee) = match step.bif {
+            Some((bif, layers)) => {
+                let capacity = bif.dry_capacity(levee, layers)?;
+                (capacity.gross, Some(capacity.down_levee))
+            }
+            None => (vec![0.0; n], None),
+        };
+        let mut out_total = vec![0.0; n];
+        for i in 0..n {
+            out_total[i] = active_flux[i].max(0.0) + rev_sum[i] + bif_out[i];
+        }
+        // 没有实际出流面的供体无处可送：留成 pending 库存（不是汇，不能丢）。
+        for i in 0..n {
+            if out_total[i] > TRC_TINY {
+                continue;
+            }
+            for &itrc in &transport {
+                if dry_split[itrc][i] <= TRC_TINY {
+                    continue;
+                }
+                self.dry_pending[itrc][i] += dry_split[itrc][i];
+                dry_split[itrc][i] = 0.0;
+            }
+        }
+        // 接收方按供体的总出流容量分摊（`donor_out` 是下游单元流域的 `out_total`）。
+        let mut donor_out = vec![0.0; n];
+        push_next(net, &out_total, 0.0, &mut donor_out);
+        for &itrc in &transport {
+            // N08：每条示踪物都要把发送缓冲清零，否则上一条示踪物留下的值会被当成本条的量。
+            let mut received_visible = vec![0.0; n];
+            let mut fwd_send = vec![0.0; n];
+            let mut rev_send = vec![0.0; n];
+            for i in 0..n {
+                let split = dry_split[itrc][i];
+                if split <= TRC_TINY {
+                    continue;
+                }
+                if out_total[i] > TRC_TINY {
+                    fwd_send[i] = split * active_flux[i].max(0.0) / out_total[i];
+                    // 河口终端的正向份额离开计算域，记成汇；其余正向份额送到下游单元流域。
+                    if net.next[i] < 0 {
+                        self.dry_drain[itrc][i] += fwd_send[i];
+                        self.dry_stat[itrc][DRY_STAT_SINK] += fwd_send[i];
+                    }
+                    // 排掉的残水在物理上是从本格正向面出去的，history 的出流项要算上它。
+                    // history 累加的是质量（不是通量），所以不再除 dt。
+                    if step.active[i] && step.dt[i] > 0.0 {
+                        self.history.out[itrc][i] += fwd_send[i];
+                    }
+                }
+                // `rev_send` 带的是整份残水，所以关掉逆流时必须保持 0：否则正向份额
+                // （此时等于整份）会在下游的负值面通量上被再送一次。
+                if reverse_allowed {
+                    rev_send[i] = split;
+                }
+            }
+            let mut fwd_recv = vec![0.0; n];
+            let mut rev_recv = vec![0.0; n];
+            push_ups(net, &fwd_send, &mut fwd_recv);
+            push_next(net, &rev_send, 0.0, &mut rev_recv);
+            for i in 0..n {
+                if fwd_recv[i] <= TRC_TINY && rev_recv[i] <= TRC_TINY {
+                    continue;
+                }
+                self.dry_stat[itrc][DRY_STAT_DELIVERED] += fwd_recv[i].max(0.0);
+                let vol_j = volwater[i];
+                let dt_j = step.dt[i];
+                // 顺流份额：上游单元流域推过来的和。
+                if fwd_recv[i] > TRC_TINY {
+                    self.mass[itrc][i] += fwd_recv[i];
+                    received_visible[i] += fwd_recv[i];
+                    self.conc[itrc][i] = if vol_j <= V_DRY_OFF {
+                        0.0
+                    } else {
+                        self.mass[itrc][i] / vol_j
+                    };
+                    if vol_j > V_DRY_OFF && dt_j > 0.0 {
+                        self.history.storage_mass[itrc][i] =
+                            fwd_recv[i].contract(dt_j, self.history.storage_mass[itrc][i]);
+                    }
+                }
+                // 逆流份额：接收方按自己那条负值面通量从供体的残水里拉。
+                if reverse_allowed
+                    && rev_recv[i] > TRC_TINY
+                    && active_flux[i] < 0.0
+                    && donor_out[i] > TRC_TINY
+                {
+                    let rev_share = rev_recv[i] * active_flux[i].abs() / donor_out[i];
+                    self.dry_stat[itrc][DRY_STAT_DELIVERED] += rev_share;
+                    if step.active[i] && dt_j > 0.0 {
+                        // 逆流面在平流账本里是负的（质量进入本格），history 按同一符号记。
+                        self.history.out[itrc][i] -= rev_share;
+                    }
+                    self.mass[itrc][i] += rev_share;
+                    received_visible[i] += rev_share;
+                    self.conc[itrc][i] = if vol_j <= V_DRY_OFF {
+                        0.0
+                    } else {
+                        self.mass[itrc][i] / vol_j
+                    };
+                    if vol_j > V_DRY_OFF && dt_j > 0.0 {
+                        self.history.storage_mass[itrc][i] =
+                            rev_share.contract(dt_j, self.history.storage_mass[itrc][i]);
+                    }
+                }
+            }
+            // 分汊派送（`mt_bif_dry_deliver`）。系数是每条路径上两端的残水份额。
+            if let (Some((bif, layers)), Some(down_levee)) = (step.bif, down_levee.as_deref()) {
+                let dry_coeff: Vec<f64> = (0..n)
+                    .map(|i| {
+                        if out_total[i] > TRC_TINY {
+                            dry_split[itrc][i] / out_total[i]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let delivery = bif.dry_deliver(levee, layers, down_levee, &dry_coeff)?;
+                for i in 0..n {
+                    received_visible[i] += delivery.visible[i];
+                    self.mass[itrc][i] += delivery.visible[i];
+                    self.levsto[itrc][i] += delivery.protected[i];
+                    self.dry_stat[itrc][DRY_STAT_DELIVERED] +=
+                        delivery.visible[i] + delivery.protected[i];
+                }
+                for i in 0..n {
+                    if !step.active[i] || step.dt[i] <= 0.0 {
+                        continue;
+                    }
+                    let vol_j = volwater[i];
+                    self.history.bifout[itrc][i] += delivery.history[i];
+                    self.conc[itrc][i] = if vol_j <= V_DRY_OFF {
+                        0.0
+                    } else {
+                        self.mass[itrc][i] / vol_j
+                    };
+                    if vol_j > V_DRY_OFF {
+                        self.history.storage_mass[itrc][i] = delivery.visible[i]
+                            .contract(step.dt[i], self.history.storage_mass[itrc][i]);
+                    }
+                    let levsto = match (levee, end[i].levsto) {
+                        (Some(levee), Some(levsto)) if levee.has[i] => levsto,
+                        _ => 0.0,
+                    };
+                    if levsto > V_DRY_OFF {
+                        self.history.levsto_mass[itrc][i] = delivery.protected[i]
+                            .contract(step.dt[i], self.history.levsto_mass[itrc][i]);
+                    }
+                }
+            }
+            // 干接收方没有载体浓度：把已经记账的转移留在 pending 库存里，等下一个活跃子步
+            // 再走水面输运，不沿同一条水面通量继续往下游链式送。
+            for i in 0..n {
+                if received_visible[i] <= TRC_TINY || volwater[i] > V_DRY_OFF {
+                    continue;
+                }
+                let pending_receipt = received_visible[i].min(self.mass[itrc][i]);
+                self.dry_pending[itrc][i] += pending_receipt;
+                self.mass[itrc][i] -= pending_receipt;
+                self.conc[itrc][i] = 0.0;
             }
         }
         Ok(())
@@ -1317,3 +1560,7 @@ impl RiverTracers {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tracer_tests.rs"]
+mod tracer_tests;

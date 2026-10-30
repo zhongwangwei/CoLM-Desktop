@@ -4,8 +4,8 @@
 //! 再经过三道限流：路径 5% 端点蓄量、逐层供水方蓄量、单元流域总出流。得到的净通量
 //! `hflux_sum` 加进汇流的 `sum_hflux_riv`。
 //!
-//! 只接单进程、无堤防、无水库的路径（调用方先拒绝其余组合）：这时所有下游单元流域都在本地，
-//! 上游跨进程的 `neg_pth`/`protected_*` 各项恒为 0。
+//! 只接单进程：所有下游单元流域都在本地，上游跨进程的 `neg_pth`/`protected_*` 各项恒为 0。
+//! 堤防与已建成水库由 `calc` 的可选参数处理。
 
 // 夹紧保留上游 `MAX(MIN(·))` 的次序；逐路径、逐单元流域的下标循环与上游 `DO` 循环对应。
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]
@@ -310,17 +310,15 @@ impl Bifurcation {
     }
 
     /// `available_storage_ucat`（无堤防、无水库，`volwater_ucat_valid` 恒真）。
+    ///
+    /// 由水位补算蓄量时必须和主机用同一条水位—蓄量曲线（`storage_from_stage`，
+    /// `MOD_Grid_RiverLakeBifurcation.F90:1234-1251`）。旧实现额外补了一块河槽棱柱
+    /// `rivare*(wdsrf-rivhgt)`，漫滩蓄量被高估，限流容量随之偏大。
     fn available_storage(net: &RiverNetwork, i: usize, wdsrf: f64, volwater: f64) -> f64 {
         if volwater > 0.0 || wdsrf <= STAGE_RESTART_TOL {
             volwater + 0.0
         } else {
-            // `storage_with_river_prism`：漫过河槽的部分按河槽面积补一块棱柱。
-            let curve = &net.curves[i];
-            let mut storage = curve.volume(wdsrf);
-            if wdsrf > curve.rivhgt {
-                storage = curve.rivare.contract(wdsrf - curve.rivhgt, storage);
-            }
-            storage.max(0.0)
+            net.curves[i].volume(wdsrf).max(0.0)
         }
     }
 
@@ -422,7 +420,7 @@ impl Bifurcation {
                 None => Self::available_storage(net, i, wdsrf[i], volwater[i]).max(0.0),
             })
             .collect();
-        // `available_protected_storage_ucat` 与堤内水面 `rivhgt + levdph`。
+        // `available_protected_storage_ucat` 与堤内水面。
         let protected: Vec<f64> = (0..n)
             .map(|i| {
                 if has_levee(i) && !is_reservoir(i) {
@@ -433,12 +431,11 @@ impl Bifurcation {
             })
             .collect();
         let protected_wdsrf: Vec<f64> = (0..n)
-            .map(|i| {
-                if has_levee(i) {
-                    net.curves[i].rivhgt + levee.expect("levee").levdph[i]
-                } else {
-                    wdsrf[i]
+            .map(|i| match levee {
+                Some(l) if l.levee.has[i] => {
+                    protected_stage(net, l.levee, i, l.levsto[i], l.levdph[i])
                 }
+                _ => wdsrf[i],
             })
             .collect();
         let use_protected = levee.is_some() && levels >= 2;
@@ -702,6 +699,176 @@ impl Bifurcation {
             active,
             lev_hflux_sum,
         }
+    }
+}
+
+/// 有堤单元流域的堤内水面（`MOD_Grid_RiverLakeBifurcation.F90:481-490`）。
+///
+/// 干堤内池没有水深，但它的池底在漫滩基准面之上：这时床面取 `rivhgt + levee_bashgt`。
+/// 恒用 `rivhgt + levdph` 会把干池的床面压回漫滩基准面，第 2 层及以上的界面水深偏小。
+fn protected_stage(net: &RiverNetwork, levee: &Levee, i: usize, levsto: f64, levdph: f64) -> f64 {
+    let curve = &net.curves[i];
+    if levsto <= 0.0 {
+        curve.rivhgt + levee.bashgt[i]
+    } else {
+        curve.rivhgt + levdph
+    }
+}
+
+/// `mt_bif_dry_prepare` 的出参（`MOD_MT_RiverLake.F90:1128-1162`）。
+pub(super) struct DryBifCapacity {
+    /// `bif_out`：每个单元流域通过分汊路径能送出的水通量（正向 + 反向容量）。
+    pub gross: Vec<f64>,
+    /// `bif_dn_levee`：路径下游端是否有堤，`0`/`1`；下游不在网络里时取推送填充值 0。
+    pub down_levee: Vec<f64>,
+}
+
+/// `mt_bif_dry_deliver` 的出参（`MOD_MT_RiverLake.F90:1164-1208`）。
+pub(super) struct DryBifDelivery {
+    /// `bif_add`：送进接收方可见侧的示踪物。
+    pub visible: Vec<f64>,
+    /// `bif_add_lev`：送进接收方堤内一侧的示踪物。
+    pub protected: Vec<f64>,
+    /// `bif_hist`：每个单元流域的净分汊示踪物通量（上游端为正、下游端为负）。
+    pub history: Vec<f64>,
+}
+
+impl Bifurcation {
+    /// `push_bif_influx`（`mode = 'sum'`）：把逐路径的值累加到它的下游单元流域。
+    pub(super) fn push_influx(&self, values: &[f64], out: &mut [f64]) {
+        for (slot, paths_in) in out.iter_mut().zip(&self.incoming) {
+            *slot = 0.0;
+            for &p in paths_in {
+                accumulate(slot, values[p]);
+            }
+        }
+    }
+
+    /// `mt_bif_dry_prepare`：干单元残水能从分汊路径送出去多少。
+    ///
+    /// 只有可见侧的残水参与分配：上游端在受保护层（第 2 层及以上且有堤）时不能从可见池往外送，
+    /// 下游端在受保护层时不能把残水收进可见池；反向通量的容量按同样的规则扣掉受保护端。
+    pub(super) fn dry_capacity(&self, levee: Option<&Levee>, q: &[f64]) -> Result<DryBifCapacity> {
+        let n = self.incoming.len();
+        let levels = self.levels;
+        let paths = self.paths();
+        ensure!(q.len() == paths * levels, "dry BIF pathway shape mismatch");
+        ensure!(
+            q.iter().all(|value| value.is_finite()),
+            "nonfinite dry BIF water flux"
+        );
+        let has_levee = |i: usize| levee.is_some_and(|levee| levee.has[i]);
+        let mut down_levee = vec![0.0; paths];
+        for (p, down) in self.down.iter().enumerate() {
+            down_levee[p] = if down.is_some_and(has_levee) {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        let mut gross = vec![0.0; n];
+        let mut reverse_path = vec![0.0; paths];
+        for p in 0..paths {
+            let u = self.upst[p];
+            ensure!(u < n, "dry BIF invalid upstream endpoint");
+            let up_levee = has_levee(u);
+            let dn_protected = down_levee[p] > 0.5;
+            for l in 0..levels {
+                let w = q[p * levels + l];
+                // 上游端受保护：正向流量从堤内池出，可见池的残水不能跟着走。
+                if !(l > 0 && up_levee) {
+                    accumulate(&mut gross[u], w.max(0.0));
+                }
+                // 下游端受保护：反向流量进的是堤内池，同样不算可见池的送出容量。
+                if !(l > 0 && dn_protected) {
+                    accumulate(&mut reverse_path[p], (-w).max(0.0));
+                }
+            }
+        }
+        let mut reverse_recv = vec![0.0; n];
+        self.push_influx(&reverse_path, &mut reverse_recv);
+        for (slot, &value) in gross.iter_mut().zip(&reverse_recv) {
+            *slot += value;
+        }
+        Ok(DryBifCapacity { gross, down_levee })
+    }
+
+    /// `mt_bif_dry_deliver`：把每条路径的残水送到两端。
+    ///
+    /// 正向（`q >= 0`）由上游端的残水系数扣款、按下游端是否受保护分进可见/堤内池；反向
+    /// （`q < 0`）由下游端的残水系数扣款、送进上游端。`history` 记的是净分汊通量（上游端为
+    /// 正、下游端为负），与子步里 `bif_net` 的符号约定一致。
+    pub(super) fn dry_deliver(
+        &self,
+        levee: Option<&Levee>,
+        q: &[f64],
+        down_levee: &[f64],
+        coefficient: &[f64],
+    ) -> Result<DryBifDelivery> {
+        let n = self.incoming.len();
+        let levels = self.levels;
+        let paths = self.paths();
+        ensure!(
+            q.len() == paths * levels && down_levee.len() == paths,
+            "dry BIF pathway shape mismatch"
+        );
+        ensure!(coefficient.len() >= n, "dry BIF coefficient shape mismatch");
+        let has_levee = |i: usize| levee.is_some_and(|levee| levee.has[i]);
+        let mut down_coeff = vec![0.0; paths];
+        let mut visible = vec![0.0; n];
+        let mut protected = vec![0.0; n];
+        let mut history = vec![0.0; n];
+        let mut vis_path = vec![0.0; paths];
+        let mut prot_path = vec![0.0; paths];
+        let mut hist_path = vec![0.0; paths];
+        for p in 0..paths {
+            let u = self.upst[p];
+            let up_levee = has_levee(u);
+            down_coeff[p] = self.down[p].map_or(0.0, |d| coefficient[d]);
+            for l in 0..levels {
+                let w = q[p * levels + l];
+                let up_protected = l > 0 && up_levee;
+                let dn_protected = l > 0 && down_levee[p] > 0.5;
+                let mut mass = 0.0;
+                if w >= 0.0 {
+                    if !up_protected {
+                        mass = w * coefficient[u];
+                    }
+                    if dn_protected {
+                        prot_path[p] += mass;
+                    } else {
+                        vis_path[p] += mass;
+                    }
+                } else {
+                    if !dn_protected {
+                        mass = w * down_coeff[p];
+                    }
+                    if up_protected {
+                        protected[u] -= mass;
+                    } else {
+                        visible[u] -= mass;
+                    }
+                }
+                history[u] += mass;
+                hist_path[p] += mass;
+            }
+        }
+        let mut vis_recv = vec![0.0; n];
+        let mut prot_recv = vec![0.0; n];
+        let mut hist_recv = vec![0.0; n];
+        self.push_influx(&vis_path, &mut vis_recv);
+        self.push_influx(&prot_path, &mut prot_recv);
+        self.push_influx(&hist_path, &mut hist_recv);
+        for i in 0..n {
+            visible[i] += vis_recv[i];
+            protected[i] += prot_recv[i];
+            history[i] -= hist_recv[i];
+        }
+        Ok(DryBifDelivery {
+            visible,
+            protected,
+            history,
+        })
     }
 }
 

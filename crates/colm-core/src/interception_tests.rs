@@ -38,6 +38,18 @@ fn scalar_canopy_interception_matches_current_fortran() {
     close(fluxes.retained_snow_kg_m2_s, 0.000_116_980_037_428_077_87);
     assert_eq!(fluxes.released_rain_kg_m2_s, 0.0);
     assert_eq!(fluxes.released_snow_kg_m2_s, 0.0);
+    // `CoLMMAIN.F90:914-915`：gross = qintr + max(qdrp,0) = input − 直接穿透 = input·fpi。
+    // rain = 0.001+0.0002+0.0001，lai+sai = 2.5，chil = 0.2 ⇒ fpi ≈ 0.1949667。
+    close(fluxes.gross_rain_kg_m2_s, 2.534_567_485_405_047_5e-4);
+    // 没有植被积雪时 qdrp_snow = 0，gross_snow 与 qintr_snow 相同。
+    close(fluxes.gross_snow_kg_m2_s, 1.169_800_377_879_252_8e-4);
+    // 旧写法 `max(0, qintr)` 漏掉排水项：这里恰好差一个 qdrp ≈ 1.82e-4。
+    assert!(
+        fluxes.gross_rain_kg_m2_s > fluxes.retained_rain_kg_m2_s.max(0.0) + 1.0e-5,
+        "gross interception must include canopy drainage: {} vs {}",
+        fluxes.gross_rain_kg_m2_s,
+        fluxes.retained_rain_kg_m2_s
+    );
 }
 
 #[test]
@@ -177,4 +189,105 @@ fn colm2024_capacity_follows_the_canopy_type() {
         0.1, 1.0, 0.5, 3.0, 0.0, 0.5, 5.0, 4.0, 3.0, 10, false, igbp,
     );
     assert_eq!(grass, 0.1 * 1.5);
+}
+
+#[test]
+fn negative_net_interception_still_counts_as_gross_interception() {
+    // 上游 CoLMMAIN.F90:914-915 的注释："Old-water unloading can make net interception
+    // negative."：冠层积雪卸出（qdrp_snow）由老积雪量驱动，可以超过本步降雪输入，
+    // 于是 qintr_snow < 0；旧写法 max(0,qintr) 会把整个截留记成 0，漏掉 tracer 需要的
+    // 融雪滴落量。gross = qintr + qdrp = 降雪输入 − 直接穿透（仍 > 0）。
+    let mut water = CanopyWater {
+        total_mm: 5.0,
+        rain_mm: 0.0,
+        snow_mm: 5.0,
+    };
+    // 积雪量低于冠层雪容量（48·0.1·2.5 = 12 mm）所以本步确实又截住一点雪；
+    // 暖叶面 + 大风让卸雪速率（5 mm·(FT+FV)）超过本步降雪输入，qintr_snow 变负。
+    let mut input = input();
+    input.vegetation_snow = true;
+    input.leaf_temperature_k = 300.0;
+    input.eastward_wind_m_s = 10.0;
+    input.northward_wind_m_s = 10.0;
+    let fluxes = intercept_canopy(input, &mut water).unwrap();
+    assert!(
+        fluxes.retained_snow_kg_m2_s < 0.0,
+        "expected negative net snow interception, got {}",
+        fluxes.retained_snow_kg_m2_s
+    );
+    assert!(
+        fluxes.gross_snow_kg_m2_s > 0.0,
+        "gross snow interception must stay positive: {}",
+        fluxes.gross_snow_kg_m2_s
+    );
+    assert!(
+        fluxes.gross_snow_kg_m2_s > fluxes.retained_snow_kg_m2_s,
+        "gross must add the unloading term: {} vs {}",
+        fluxes.gross_snow_kg_m2_s,
+        fluxes.retained_snow_kg_m2_s
+    );
+    // gross = 降雪输入 − 直接穿透 ≤ 降雪输入（snow rate = 0.0005+0.0001）。
+    assert!(
+        fluxes.gross_snow_kg_m2_s <= 0.0006,
+        "gross snow exceeds the snowfall input: {}",
+        fluxes.gross_snow_kg_m2_s
+    );
+}
+
+fn zero_fluxes() -> CanopyInterceptionFluxes {
+    CanopyInterceptionFluxes {
+        ground_rain_kg_m2_s: 0.0,
+        ground_snow_kg_m2_s: 0.0,
+        retained_kg_m2_s: 0.0,
+        retained_rain_kg_m2_s: 0.0,
+        retained_snow_kg_m2_s: 0.0,
+        released_rain_kg_m2_s: 0.0,
+        released_snow_kg_m2_s: 0.0,
+        gross_rain_kg_m2_s: 0.0,
+        gross_snow_kg_m2_s: 0.0,
+    }
+}
+
+#[test]
+fn pft_gross_interception_is_clamped_after_the_fraction_weighted_sum() {
+    // `CoLMMAIN.F90:914-915` 在 LEAF_interception_pftwrap 返回之后才取 max，即
+    // max(Σ qintr_i·f_i + Σ qdrp_i·f_i, 0)。旧 Rust 逐 PFT 先 max 再聚合会提前截断负项。
+    let zero = zero_fluxes();
+    let fractions = [0.5, 0.5];
+    let fluxes = [
+        CanopyInterceptionFluxes {
+            gross_rain_kg_m2_s: 100.0,
+            gross_snow_kg_m2_s: 4.0,
+            ..zero
+        },
+        CanopyInterceptionFluxes {
+            gross_rain_kg_m2_s: -120.0,
+            gross_snow_kg_m2_s: -6.0,
+            ..zero
+        },
+    ];
+    let rain =
+        crate::pft::pft_gross_sum(&fluxes, fractions.iter().copied(), |f| f.gross_rain_kg_m2_s);
+    let snow =
+        crate::pft::pft_gross_sum(&fluxes, fractions.iter().copied(), |f| f.gross_snow_kg_m2_s);
+    assert_eq!(rain, 0.0, "aggregate -10 must clamp to 0");
+    assert_eq!(snow, 0.0, "aggregate -1 must clamp to 0");
+    // 旧行为（逐 PFT 先 max）：0.5·100 = 50 与 0.5·4 = 2，会多算一截。
+    assert!(0.5 * 100.0 != rain);
+    assert!(0.5 * 4.0 != snow);
+
+    // 聚合后仍为正的场合也要证明顺序不同结果不同：(3−2)/2 = 0.5，旧行为 1.5。
+    let fluxes = [
+        CanopyInterceptionFluxes {
+            gross_rain_kg_m2_s: 3.0,
+            ..zero
+        },
+        CanopyInterceptionFluxes {
+            gross_rain_kg_m2_s: -2.0,
+            ..zero
+        },
+    ];
+    let rain =
+        crate::pft::pft_gross_sum(&fluxes, fractions.iter().copied(), |f| f.gross_rain_kg_m2_s);
+    assert_eq!(rain, 0.5);
 }

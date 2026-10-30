@@ -37,6 +37,13 @@ const EXCH_SHEARVEL_BLEND: f64 = 2.0 * EXCH_SHEARVEL_MIN;
 const EXCH_ZD_MAX: f64 = 100.0;
 const SED_BALANCE_ABS_TOL: f64 = 1.0e-10;
 const SED_BALANCE_REL_TOL: f64 = 1.0e-10;
+/// `SED_MIN_SUBSTEP_CARRIER`：供体水量不超过它就不参与子步数。近乎干涸的单元流域水量小到
+/// 除以它没有物理意义，却能把整个河系拖到子步上限（上游实测这类单元曾让 3 天 7920 步的算例
+/// 每小时只推进 2 步）。
+const SED_MIN_SUBSTEP_CARRIER: f64 = 1.0e-1;
+/// 泥沙材料子步上限。上游把超限当致命错误（N09：静默截断会违反“每个子步毛出流 ≤ 供体水量”
+/// 这个不变量），所以这里也是 `ensure!` 而不是钳位。
+const SED_MAX_SUBSTEPS: usize = 240;
 /// 不开堤防/分汊时续跑写的 schema。
 const SCHEMA_PLAIN: f64 = 2.0;
 /// 开堤防或分汊时的 schema（`SED_RESTART_SCHEMA_VERSION`）。
@@ -1250,8 +1257,51 @@ impl Sediment {
         }
     }
 
+    /// `calc_sediment_advection` 的毛出流 CFL 子步数（`nsub`）。
+    ///
+    /// 每个子步要满足“毛出流 ≤ 供体水量”，所以分母不只是本格正向出流：反向面排的是它下游
+    /// 单元流域的水，得先 `push_ups` 汇到真正的供体上再加本格正向出流。上游在河系通讯域上做
+    /// `MPI_MAX`（同一河系所有 rank 必须走同样多的子步，否则交换会错位）；Rust 单进程、全部
+    /// 单元流域都在本地，本地最大值就是河系最大值，不需要归约。
+    fn material_substep_count(
+        network: &RiverNetwork,
+        dt: f64,
+        rivout_signed: &[f64],
+        rivout_abs: &[f64],
+        rivsto_donor: &[f64],
+    ) -> Result<usize> {
+        let n = network.len();
+        let reverse_outgoing = (0..n)
+            .map(|i| (0.5 * (rivout_abs[i] - rivout_signed[i])).max(0.0))
+            .collect::<Vec<_>>();
+        let upstream_reverse = Self::push_ups(network, &reverse_outgoing, 1);
+        let mut nsub = 1usize;
+        for i in 0..n {
+            if rivsto_donor[i] > SED_MIN_SUBSTEP_CARRIER {
+                let donor_outgoing =
+                    upstream_reverse[i] + (0.5 * (rivout_abs[i] + rivout_signed[i])).max(0.0);
+                let cfl_ratio = donor_outgoing * dt / rivsto_donor[i];
+                // 上游只在 `cfl_ratio > nsub` 时更新，并用 `min(…, 241)` 挡住 `CEILING` 的
+                // 整数溢出；这里保持同样的次序，`SED_MAX_SUBSTEPS + 1` 是“超限”哨兵而非
+                // 允许值，下面统一报错。
+                if cfl_ratio > nsub as f64 {
+                    nsub = cfl_ratio.min(SED_MAX_SUBSTEPS as f64 + 1.0).ceil() as usize;
+                }
+            }
+        }
+        ensure!(
+            nsub <= SED_MAX_SUBSTEPS,
+            "sediment material substep requirement exceeds the {SED_MAX_SUBSTEPS} limit \
+             (nsub = {nsub})"
+        );
+        Ok(nsub.max(1))
+    }
+
     /// `calc_sediment_advection`（不开堤防/分汊）：两个流向都用同一份供体快照算面通量，
     /// 再一起散度更新。
+    ///
+    /// 区间按 [`Self::material_substep_count`] 细分（`nsub > 1` 时递归），每个子步重新求
+    /// 供体浓度，避免高换水算例里“一次供体快照”把同一区间的入流冲不出去而误截通量。
     #[allow(clippy::too_many_arguments)]
     fn advection(
         &mut self,
@@ -1263,6 +1313,23 @@ impl Sediment {
         rivsto_end: &[f64],
         joint: Option<&JointDonor>,
     ) -> Result<()> {
+        // 堤防/分汊路径从同一份期初存量里给各面预留份额，上游保持单步（全局子步循环会把
+        // 一个近干单元放大到整个河系，3 天算例每小时只推进 2 步，已回退），这里不细分。
+        if joint.is_none() {
+            let nsub =
+                Self::material_substep_count(network, dt, rivout_signed, rivout_abs, rivsto_donor)?;
+            if nsub > 1 {
+                return self.advection_substeps(
+                    network,
+                    dt,
+                    rivout_signed,
+                    rivout_abs,
+                    rivsto_donor,
+                    rivsto_end,
+                    nsub,
+                );
+            }
+        }
         let ns = self.p.nsed;
         let n = self.n();
         let solid = 1.0 - self.p.lambda;
@@ -1396,6 +1463,66 @@ impl Sediment {
                 change += -self.sedout[k] + sed_ups[k] - self.bedout[k] + bed_ups[k];
             }
             assert_balance("advection", i, mass_before[i], after, dt * change)?;
+        }
+        Ok(())
+    }
+
+    /// `calc_sediment_advection` 的子步递归（只在 `nsub > 1` 时进来）。
+    ///
+    /// 载体水量只有区间两个端点，子区间按与上游相同的线性端点插值（`FMA(span, frac, start)`）
+    /// 给出；子步结束时把四个速率积分回区间平均（N10：子步会把 `netflw_adv_step`/
+    /// `exch_d_adv_step`/`sedout`/`bedout` 覆写成它自己的速率，直接读最后一次等于把最后
+    /// 一个子步当整段）。子调用会自己按 `dt/nsub` 再算一次 `nsub`：落水段的插值载体可能
+    /// 仍装不下这个子步的毛出流，上游就在递归里继续细分。
+    #[allow(clippy::too_many_arguments)]
+    fn advection_substeps(
+        &mut self,
+        network: &RiverNetwork,
+        dt: f64,
+        rivout_signed: &[f64],
+        rivout_abs: &[f64],
+        rivsto_donor: &[f64],
+        rivsto_end: &[f64],
+        nsub: usize,
+    ) -> Result<()> {
+        let n = self.n();
+        let cells = n * self.p.nsed;
+        let dt_sub = dt / nsub as f64;
+        let mut netflw_int = vec![0.0; cells];
+        let mut exch_int = vec![0.0; cells];
+        let mut sedout_int = vec![0.0; cells];
+        let mut bedout_int = vec![0.0; cells];
+        let mut w_don = vec![0.0; n];
+        let mut w_end = vec![0.0; n];
+        for isub in 1..=nsub {
+            let frac_lo = (isub - 1) as f64 / nsub as f64;
+            let frac_hi = isub as f64 / nsub as f64;
+            for i in 0..n {
+                let span = rivsto_end[i] - rivsto_donor[i];
+                w_don[i] = span.contract(frac_lo, rivsto_donor[i]).max(0.0);
+                w_end[i] = span.contract(frac_hi, rivsto_donor[i]).max(0.0);
+            }
+            self.advection(
+                network,
+                dt_sub,
+                rivout_signed,
+                rivout_abs,
+                &w_don,
+                &w_end,
+                None,
+            )?;
+            for k in 0..cells {
+                netflw_int[k] = self.netflw_adv_step[k].contract(dt_sub, netflw_int[k]);
+                exch_int[k] = self.exch_d_adv_step[k].contract(dt_sub, exch_int[k]);
+                sedout_int[k] = self.sedout[k].contract(dt_sub, sedout_int[k]);
+                bedout_int[k] = self.bedout[k].contract(dt_sub, bedout_int[k]);
+            }
+        }
+        for k in 0..cells {
+            self.netflw_adv_step[k] = netflw_int[k] / dt;
+            self.exch_d_adv_step[k] = exch_int[k] / dt;
+            self.sedout[k] = sedout_int[k] / dt;
+            self.bedout[k] = bedout_int[k] / dt;
         }
         Ok(())
     }
@@ -2761,7 +2888,8 @@ impl Sediment {
         Ok(())
     }
 
-    /// `validate_sediment_checkpoint_state`：状态非负有限才写/读回续跑。
+    /// `validate_sediment_checkpoint_state`：状态非负有限、且停在已闭合的汇流窗口上，才允许
+    /// 写/读回续跑。
     fn validate_checkpoint(&self, context: &str) -> Result<()> {
         let ok = |values: &[f64]| values.iter().all(|v| v.is_finite() && *v >= 0.0);
         let finite = |values: &[f64]| values.iter().all(|v| v.is_finite());
@@ -2781,9 +2909,11 @@ impl Sediment {
                 a.floodarea,
                 a.protected_area,
             ]) && a.rivout.is_finite()
-                && !(a.time == 0.0 && a.rivsto_end != 0.0)
-                && !(a.time == 0.0 && a.rivsto_start != 0.0 && !a.pre_repartition_start)
-                && !(a.pre_repartition_start && a.time > 0.0)
+                // 上游共享校验器要求 `sed_acc_time == 0`（只支持在已完成的汇流窗口之间续跑）：
+                // 窗口中途的累加量没有闭合水量的语义，读回会得到一个拼不出本步水量的半窗。
+                && a.time == 0.0
+                && a.rivsto_end == 0.0
+                && (a.rivsto_start == 0.0 || a.pre_repartition_start)
                 && a.protected_start <= a.rivsto_start + SED_BALANCE_ABS_TOL
         });
         let bif = self.bif_acc.as_ref().is_none_or(|b| {
@@ -2813,7 +2943,7 @@ impl Sediment {
                 && ok(&self.a_shearvel)
                 && self.hist_acctime.is_finite()
                 && self.hist_acctime >= 0.0,
-            "ERROR: sediment checkpoint {context} contains non-finite or physically negative state."
+            "ERROR: sediment checkpoint {context} contains invalid state or an unfinished routing window."
         );
         Ok(())
     }

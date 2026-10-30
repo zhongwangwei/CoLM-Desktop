@@ -428,7 +428,9 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
     let source_catchment = PathBuf::from(required_string(&document, "DEF_UnitCatchment_file")?);
     let reservoir_method = namelist_i32(&document, "DEF_Reservoir_Method", 0)?;
-    let reservoir_parameters = if reservoir_method == 1 {
+    // 上游 `MOD_Initialize.F90:1744` 对 `DEF_Reservoir_Method > 0` 都写 `volresv`；
+    // 冷启动量在 `colm_init::gridriver` 里按方案取 `volresv_normal`（方法 2 = 0.5·ConVol）。
+    let reservoir_parameters = if reservoir_method > 0 {
         Some(colm_init::gridriver::reservoir_parameter_file(
             optional_string(&document, "DEF_ReservoirPara_file")?.as_deref(),
             &source_catchment,

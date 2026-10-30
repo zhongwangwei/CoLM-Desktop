@@ -1,7 +1,8 @@
 use super::*;
 
-fn root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("colm-region-clip-{}", std::process::id()));
+/// 每个测试一个独立目录：同一进程里的测试并行跑，共用 `pid` 目录会互相删树。
+fn root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("colm-region-clip-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root
@@ -119,7 +120,7 @@ fn source_tree(root: &Path) {
 
 #[test]
 fn existing_surface_clip_keeps_only_vectors_owned_by_selected_elements() {
-    let source = root();
+    let source = root("clip");
     source_tree(&source);
     let output = source.join("clipped");
 
@@ -159,5 +160,29 @@ fn existing_surface_clip_keeps_only_vectors_owned_by_selected_elements() {
         }
     ));
 
+    crate::remove_test_tree(source);
+}
+
+#[test]
+fn existing_surface_clip_reports_a_missing_mesh_index() {
+    // 上游 `MOD_RegionClip.F90:73-83` 对每个 land-cover 年要求 `mesh/<year>/mesh.nc`；
+    // 缺索引时报出缺哪个文件（而不是让下游在聚合拓扑时才失败）。
+    let source = root("mesh-index");
+    source_tree(&source);
+    std::fs::remove_file(source.join("mesh/2005/mesh.nc")).unwrap();
+    let error = clip_existing_surface(
+        &source,
+        source.join("clipped"),
+        SpatialBounds {
+            south: 0.0,
+            north: 1.0,
+            west: 0.0,
+            east: 1.0,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("mesh index"), "{error}");
+    assert!(error.contains("mesh/2005/mesh.nc"), "{error}");
     crate::remove_test_tree(source);
 }

@@ -698,12 +698,8 @@ fn run_spatial(
         (0..=2).contains(&reservoir_method),
         "unsupported reservoir operation method {reservoir_method}"
     );
-    // 上游本轮实现了 H22（method 2，CaMa-Flood PR124）；本引擎没有移植，仍然拒绝。
-    ensure!(
-        reservoir_method != 2,
-        "reservoir operation method 2 (H22, Hanazaki et al. 2022, CaMa-Flood PR124) is \
-         implemented upstream but is not ported to the Rust engine yet; use method 1"
-    );
+    // 方法 2 是 H22（Hanazaki et al. 2022，CaMa-Flood PR124 的 legacy LDAMH22），本引擎与
+    // 上游同实现：参数表要带 `dam_upreal`（km²），静态量在 `river::reservoir` 里按方法派生。
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
     // 示踪物：陆面输运、河湖输运、网格示踪物强迫、漫滩回馈的示踪物账、LULCC（SAT）的示踪物迁移

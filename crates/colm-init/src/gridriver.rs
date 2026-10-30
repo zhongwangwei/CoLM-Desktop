@@ -54,6 +54,8 @@ pub struct GridRiverColdStartConfig<'a> {
     pub date: RestartDate,
     pub bifurcation: bool,
     pub levee: bool,
+    /// `DEF_Reservoir_Method`（0 关，1 Funato，2 H22）：决定冷启动 `volresv`
+    /// 取哪个 `volresv_normal`（方法 2 = 0.5·ConVol）。
     pub reservoir_method: i32,
     pub reservoir_parameters: Option<&'a Path>,
     /// `DEF_UnitCatchment_regional`：区域网络文件（`unit_catchment` 也应指向它），水库 `dam_seq` 按它换号。
@@ -91,9 +93,13 @@ pub fn write_gridriver_cold_restart(
         (1..=366).contains(&config.date.julian_day) && config.date.seconds < 86_400,
         "GridRiverLake restart date is invalid"
     );
+    // 上游 mkinidata 对 `DEF_Reservoir_Method > 0` 都写 `volresv = volresv_normal`
+    // （`MOD_Initialize.F90:1744-1752`），方法 1/2 只是 `volresv_normal` 的算法不同；
+    // 其他取值在 `reservoir_init` 里本来就会被拒。
     ensure!(
-        matches!(config.reservoir_method, 0 | 1),
-        "Rust GridRiverLake cold restart currently supports base routing, levee, bifurcation, and reservoir method 1"
+        (0..=2).contains(&config.reservoir_method),
+        "unsupported reservoir operation method {}: GridRiverLake cold restart supports 0-2",
+        config.reservoir_method
     );
 
     let source = netcdf::open(config.unit_catchment).with_context(|| {
@@ -129,15 +135,19 @@ pub fn write_gridriver_cold_restart(
         .bifurcation
         .then(|| read_bifurcation_cold_state(&source, count))
         .transpose()?;
-    let reservoir = (config.reservoir_method == 1)
+    let reservoir = (config.reservoir_method > 0)
         .then(|| {
             read_reservoir_cold_state(
-                config
-                    .reservoir_parameters
-                    .context("GridRiverLake reservoir method 1 needs DEF_ReservoirPara_file")?,
+                config.reservoir_parameters.with_context(|| {
+                    format!(
+                        "GridRiverLake reservoir method {} needs DEF_ReservoirPara_file",
+                        config.reservoir_method
+                    )
+                })?,
                 count,
                 config.date.year,
                 config.regional,
+                config.reservoir_method,
             )
         })
         .transpose()?;
@@ -456,6 +466,7 @@ fn read_reservoir_cold_state(
     catchments: usize,
     start_year: i32,
     regional: Option<&Path>,
+    method: i32,
 ) -> Result<ReservoirColdState> {
     let file = netcdf::open(parameters).with_context(|| {
         format!(
@@ -521,7 +532,14 @@ fn read_reservoir_cold_state(
         );
         identity.extend([RESERVOIR_IDENTITY_VERSION, f64::from(sequence[index])]);
         volume.push(if start_year >= build_year[index] {
-            (0.7 * total).min(conservation)
+            // `volresv_normal` 的两个方案（`MOD_Grid_Reservoir.F90:378-392`）：
+            // 方法 1 = min(0.7·total, ConVol)，方法 2 = 0.5·ConVol。方法 1 的表达式
+            // 必须逐位保持原样（现有冷启动数值不动）。
+            match method {
+                1 => (0.7 * total).min(conservation),
+                2 => 0.5 * conservation,
+                other => unreachable!("reservoir method {other} was not validated"),
+            }
         } else {
             MISSING_RESERVOIR_VOLUME
         });

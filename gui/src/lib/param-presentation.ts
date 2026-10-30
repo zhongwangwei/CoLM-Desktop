@@ -1004,12 +1004,9 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   DEF_Reservoir_Method: {
     0: pair('关闭水库调度', 'Disable reservoir operation'),
     1: pair('河湖流改进水库调度', 'Improved river–lake reservoir operation'),
-    // 上游已有 H22（CaMa-Flood PR124），本引擎本轮没移植：标签要说明"上游有、这里没有"，
-    // 否则用户会以为选了就能跑，实际在运行前被 colm-rs 拒绝。
-    2: pair(
-      'H22 调度（上游已实现，本引擎未移植）',
-      'H22 scheme (implemented upstream, not ported here)',
-    ),
+    // H22（Hanazaki et al. 2022，CaMa-Flood PR124 的 legacy LDAMH22）。上游与引擎都已实现；
+    // 引擎要求参数表带 dam_upreal（坝以上集水面积），缺了会在读参数时报错。
+    2: pair('H22 调度（需要 dam_upreal 参数）', 'H22 scheme (requires dam_upreal)'),
   },
   DEF_wetland_finundation_scheme: {
     1: pair('湿地类型 / wetwat', 'Wetland type / wetwat'),

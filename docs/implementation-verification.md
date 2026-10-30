@@ -40399,6 +40399,11 @@ Rust 引擎（`crates/`）是独立重实现，凡是**盘上格式、命名、�
 健壮性。分类：*未移植功能*、*既有差异*（本轮之前就有，本轮上游改动使差距变大）、
 *不同设计*（Rust 用另一种方式满足意图）、*应修*。
 
+> **状态更新（2026-10-30 第三轮）**：本表是第二轮结束时的快照。维护者决定「按上游的来」后，
+> 第三轮已把 **#1、#2/#3、#4、#5、#7/#8、#9/#10、#11、#14（可落的部分）、#15** 在 Rust 引擎里落地，
+> **#13（LULCC 主机水重映射）** 因架构差异只做了设计记录。逐项实现、行号与验证边界见文末
+> 「Rust 引擎按上游语义对齐（第三轮）」。
+
 | # | 项 | 上游行为 | Rust | 严重度 | 分类 | 本轮 |
 |---|---|---|---|---|---|---|
 | 1 | H22 水库调度 | `MOD_Grid_Reservoir.F90` 实现 method 2 | `river/reservoir.rs` 明确拒绝 | B | 未移植（有意拒绝） | 文案说明，见 §8 |
@@ -40519,3 +40524,162 @@ Rust 引擎（`crates/`）是独立重实现，凡是**盘上格式、命名、�
    仅在 method 2/仅预处理，但这是推断而非实算证据）。`docs/upstream-bugs.md` 本轮未逐条
    复审（它的行号锚在一个更早的上游提交上），因此没有把任何条目挪进“已修”。
 8. **上游 6 个 CRLF 文件与 13 个 `.py`**：见 §6，是长期约定，不是遗留缺陷。
+
+## Rust 引擎按上游语义对齐（2026-10-30，第三轮，实测）
+
+维护者决定上一节 §9 的 15 项差异「按上游的来」。本轮把其中 13 项在 Rust 引擎里落地（#1、#2/#3、
+#4、#5、#7/#8、#9/#10、#11、#14 的可落部分、#15 核实并修复），**#13（LULCC 主机水重映射）**
+因 Rust 的 LULCC 是「分段重跑 mkinidata + SAT/MEC 映射」而不是上游的 in-process 驱动，只做设计
+记录（§5.1），单独一轮处理。
+
+### 0 方法与验证边界（重要）
+
+- **没有本地汇流/水库黄金数据**：`oracle/cases` 只有 CN-Cng / US-NR1-snow 单点算例，没有
+  unit-catchment/levee/bifurcation/reservoir 的真实算例；38 GB rawdata 与 PLUMBER2 也不够构造
+  水库算例。因此本轮全部移植都是「对照 `vendor/CoLM202X` 源码逐句移植 + 合成网络单测」，
+  **没有** 与 Fortran 内核的数值对照，也没有真实数据端到端跑。这与上游自己的做法一致：他们
+  这批回归夹具也是 local-only、不入库。
+- 单元测试的原则是不变量而不是复刻夹具：干单元质量守恒
+  `delivered + parked + outward == residue`、单子步路径逐位不变、`nsub` 公式/上限、边界值
+  （`vol == normal/flood/emerg`、`qin` 跨 `Qf`）、`spval` 语义、重启校验拒绝/接受。
+- 每条在下面的「验证」里列出新增测试与命令；每节末尾列 `Not-tested`。
+
+### 1 A 级：干单元残水迁移（#5）
+
+`crates/colm-runtime/src/river/tracer.rs`（+299 行）重写 `diag_accumulate` 的干单元清理：
+上游 `main/MATERIAL/GENERIC_WATER/MOD_MT_RiverLake.F90:768-1106`。
+
+- 新增 `dry_pending`（`mt_dry_pending` 库存）、`dry_stat`（列 1 排干 / 列 2 送达 / 列 4 终端汇）
+  与按调用重建的 `active_flux`：只有真正在本子步汇流的单元流域才参与清理与分摊，走完的河系
+  不会拿上一子步的陈旧面通量再清一次。
+- 残水不再整笔记成供体的终端汇：先收进 `dry_split`，再按
+  `out_total = max(active_flux,0) + push_ups(max(-active_flux,0)) + bif_out` 分摊——
+  正向份额 `split·max(active,0)/out_total`（只有 `ucat_next<=0` 的终端才记 `dry_drain`/`a_mt_out`
+  并进 `dry_stat(4)`），逆向份额按上游/下游面通量送到上游接收方并在接收方记成**负**的
+  `a_mt_out`，分汊出流走 `mt_bif_dry_prepare/deliver` 的 Rust 版（`bifurcation.rs`）。
+- `out_total <= tiny` 时留在 `dry_pending`（无处可送就不丢），下一活跃子步或本次汇流结束时
+  释放回 `mt_mass`（上游 `…:1490-1505`、`MOD_MT_RiverLakeCoupling.F90:620` 的 `release_pending_drain`）。
+- 关逆向流时 `rev_send` 必须为 0（正向份额已经是全部残水，否则同一份会送两次）；干接收方收到的
+  可见质量进 `dry_pending`；负的 `inp_buf` 债务保留；非有限或超出尘埃阈值的负质量停机。
+- 新增 `crates/colm-runtime/src/river/tracer_tests.rs`（11 个测试，`#[path]` 挂在 `tracer.rs`，
+  是仓库的兄弟测试文件惯例）：终端只记正向份额、混合正/逆向的 6=4+2 拆分与接收方负记账、
+  关逆向时不重复送、汇流两条上游支的 `rev_sum` 聚合、无出流面时挂起并释放、已结束河系不拿陈旧
+  通量清理、负 runoff 债务保留与非法质量停机、分汊正向/逆向携带、`replay` 释放 pending 并清
+  每次调用的汇、受保护分汊层不能带走可见残水。
+- `Not-tested`：与 Fortran 内核的数值对照、真实 levee/bifurcation 数据、水库接收方的干单元送达、
+  上游 `present(hflux_fc_in)=.false.` 分支（Rust 的磁带总有面通量，不可达，未实现为分支）。
+
+### 2 #7/#8 分汊/堤防几何（B 级）
+
+`crates/colm-runtime/src/river/bifurcation.rs`（+197 行）：
+
+- `storage_from_stage = max(floodplain_curve.volume(wdsrf), 0)` 取代旧的
+  `storage_with_river_prism`（上游 `MOD_Grid_RiverLakeBifurcation.F90:1226-1256`）：分汊限幅器必须
+  与主机用同一条水位—蓄量曲线，不能再额外补一块河槽棱柱。
+- 干燥保护池的床面：`levsto <= 0` 时用 `rivhgt + levee_bashgt`，否则 `rivhgt + levdph`
+  （上游 `…:481-490`）。
+- 新增 `dry_capacity`（`mt_bif_dry_prepare`）/`dry_deliver`（`mt_bif_dry_deliver`）/共享
+  `push_influx`（上游 `MOD_Grid_RiverLakeNetwork.F90:2480` 的 `push_bif_influx`）。
+- 测试（`bifurcation_tests.rs` +4）：漫滩曲线不补棱柱（旧算法在夹具上明显更大）、干燥保护池
+  床面、只计可见层的干分汊容量、干分汊投递按接收池（可见/受保护、逆向符号、history 符号）。
+- `Not-tested`：真实堤防/分汊地图上的完整水+分汊子步（只测了几何与 helper 层）。
+
+### 3 A 级：泥沙 CFL 子步（#2/#3）与重启窗口收紧（#4）
+
+`crates/colm-runtime/src/river/sediment.rs`（+140 行），上游
+`main/MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90:2292-2546`：
+
+- 新增 `Sediment::material_substep_count`：`reverse_outgoing = max(0,(rivout_abs-rivout_signed)/2)`
+  经上游求和推到下游、`donor_outgoing = push_ups(reverse_outgoing) + max(0,(rivout_abs+rivout_signed)/2)`、
+  `nsub = ceil(donor_outgoing·dt/rivsto)`。Rust 单进程，上游 `p_comm_rivsys` 的 MPI_MAX 退化成
+  「所有本地单元取最大」（单 rank 时与河系最大等价，代码注释写明）。
+- 上限 240 与上游 N09 一致是**硬报错**（`SED_MAX_SUBSTEPS`），不是静默夹取；近干单元
+  （`donor <= SED_MIN_SUBSTEP_CARRIER`）不参与，避免拖爆上限。
+- 递归与积分：`advection` 只对普通路径（无 levee/bif 联合）分派到 `advection_substeps`——
+  载水端点按 `FMA(span, frac, start)` 线性插值、以 `dt/nsub` 递归、`netflw/exch/sedout/bedout`
+  按 `Σ 速率·子区间` 积分再除以 `dt` 回到区间平均；`nsub == 1` 走原单步实现，**低周转结果逐位不变**。
+- **#4 契约收紧**：`validate_checkpoint` 现在要求 `a.time == 0`（上游 `…:3766-3790`，只允许在
+  完整汇流窗口之间重启）。读入旧的「窗口中途」Rust 泥沙重启会被拒绝——这是有意的行为变化。
+- 测试（`sediment_tests.rs` 6 个）：高周转 3 m³/s·1 s / 1 m³ ⇒ 3 个子步、1.5 ⇒ 2、低周转 ⇒ 1；
+  逆向面按供体计入分母（只用 `abs` 会算成 0/1）；240 硬限（241 拒绝、1e300 不整数溢出）；
+  低周转单步钉死手算值；`nsub=3` 的积分与显式循环逐位一致；重启窗口接受/拒绝。
+- `Not-tested`：与 Fortran 的数值对照、真实 NetCDF 泥沙重启往返、levee/bif 联合路径（上游也
+  保持单步，未重新验证）。
+
+### 4 H22 水库 method 2（#1）
+
+- `crates/colm-runtime/src/river/reservoir.rs`（+221 行）：方法 2 现在读参数表的 `dam_upreal`
+  （km²，缺失或长度不符即报错）、派生 `volume_flood = dam_ConVol`、`normal = 0.5·flood`、
+  `emergency = flood + 0.95·(total−flood)`、`h22_coeff = max(1 − (total−flood)·1e-6/(upreal·0.2), 0)`，
+  并实现上游 `MOD_Grid_Reservoir.F90:415-470` 的第二段调度（四段 + `qin >= Qf` 的两个子分支）。
+  方法 1 的静态量与调度完全不动（旧测试原样通过）。
+- `crates/colm-init/src/gridriver.rs`：冷启动接受 `0|1|2`，方法 2 初始 `volresv = 0.5·dam_ConVol`
+  （上游 `MOD_Grid_Reservoir.F90:386` 与 `MOD_Initialize.F90:1744-1752` 的 `volresv = volresv_normal`），
+  方法 1 的 `(0.7·total).min(conservation)` 逐字节不变；`mkinidata-rs.rs` 对 `method > 0` 都传参数表。
+- `crates/colm-runtime/src/bin/colm-rs.rs` 的运行时 H22 拒绝已删除（保留 `0..=2` 校验）；
+  `catchment/runtime.rs` 仍限 0|1（上游 `MOD_Catch_Reservoir.F90` 只实现方法 1，正确）。
+- GUI 参数标签从「H22 调度（上游已实现，本引擎未移植）」改为「H22 调度（需要 dam_upreal 参数）」
+  （双语）。
+- 测试：`reservoir_tests.rs`（边界 `vol == normal/flood/emerg`、`qin` 跨 `Qf`、方法 1 回归）、
+  `gridriver_tests.rs`（方法 −1/3 拒绝、方法 2 冷启动 `[2.5e6, −1e36]`、方法 1 仍 `[2.8e6, −1e36]`）。
+- `Not-tested`：没有 H22 参数表与水库算例，方法 2 没走过 `mkinidata-rs` + `colm-rs` 的端到端跑，
+  也没与 Fortran 对照。
+
+### 5 B/C 级：#9/#10、#11、#14、#15
+
+- **#9/#10 河道 history 缺测**（`river/history.rs`，上游 `MOD_Grid_RiverLakeHist.F90:426-471,500-555`）：
+  `acctime == 0` 的窗口现在对 `f_rivsto/f_fldsto/f_flddph/f_storge/f_sfcelv/levsto/levdph/bifout/
+  bifflw_lev` 写 `spval` 而不是 0；`f_floodfrc` 在 mean floodarea 为 `spval` 时也写缺测，不再拿
+  `-1e36` 当面积相除（原来会输出巨大负值）。测试在 `history_tests.rs`。
+- **#11 非挥发溶质的冰载体回收**（`colm-core/src/tracer/soil_water/wetland.rs`，上游
+  `MOD_MT_SoilWater.F90:3480-3494`）：冰载体消失而冰池还有该溶质时，按有无液相载体挪回液/固池、
+  清零冰池再平衡。测试在 `soil_water_tests.rs`。
+- **#14 区域裁剪诊断**（`colm-srfdata/src/region.rs`，上游 `MOD_RegionClip.F90:77-90`）：落了能落的
+  那条——网格索引越界时给出可操作的错误（`region_tests.rs`）。上游新加的「必需湖碳/甲烷 pH 字段
+  缺失」门控需要 `requires_lake_soilc`/`requires_spatial_ph` 这类 namelist 标志，而 Rust 的裁剪器
+  是字段无关设计、这些标志在 `mksrfdata-rs` 侧；要接得改 `clip_existing_surface` 的 API，本轮没接，
+  原因记录在此。
+- **#15 冠层总截获（核实为真差异并修复）**：上游 `CoLMMAIN.F90:914-915` 的
+  `gross = max(qintr + max(qdrp,0), 0)`（其中 `qintr` 可为负）对应 Rust 原来的
+  `max(0, qintr)`（正是上游 N02 修掉的旧式）。现在 `colm-core/src/interception.rs` 的
+  `gross = retained + drainage/dt` 不截断，PFT 路径在 `pftfrac` 加权聚合**之后**再截断
+  （`pft.rs` 的 `pft_gross_sum`），标量路径在 `standard_lct_step.rs` 的 CoLMMAIN 对应位置截断。
+  测试 3 条（1 条扩展 + 2 条新增：净截获为负时 `gross > 0`；PFT 聚合后才截断）。
+  **影响**：只影响 MT 开启时的示踪物降水/截获分账（净截获为负的老冠层冲洗场景），非 MT 运行不变。
+
+### 5.1 仍未做：#13 LULCC 主机水重映射（设计记录）
+
+上游 `MOD_MT_Lulcc.F90:216-470` 的 `mt_lulcc_host_sync` 在 in-process LULCC 重映射之后做：
+无源 patch 按主机水冷启动 material；每个有源 patch 的冠层、雪柱（整体比值 + 未溶解固相按新雪层
+分配）、土壤逐层液/冰、地表水按「重映射前旧主机水」的比值跟随；有溶解度上限的 material 再平衡
+冠层/各层/共享地表固相库（湿地水仅 patchtype==2）；before/after 差乘 patch 面积进 LULCC 质量账。
+
+Rust 的 LULCC 是分段重跑 mkinidata + SAT/MEC 映射（`colm-rs.rs` 的 `lulcc_transition`、
+`colm-init/src/lulcc.rs`、`lulcc_mec.rs`），没有 engine 内的 host sync 步骤，且没有现成的
+`src_water_2d/3d`（重映射前的旧主机水）。移植需要：在段切换拿到源水量、在写新年冷启动之前对
+tracer 池做上述跟随与再平衡、把质量差记进 LULCC 账，并先确认 Rust 的 MEC 雪层布局与上游一致。
+这是一次涉及 LULCC 数据流与 MEC 交互的设计改动，不属「照抄一个子程序」，单列一轮。
+
+### 6 本轮验证（真实执行）
+
+- `cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1` →
+  **38 个测试二进制、3360 passed / 17 failed**。17 个失败与第二轮完全相同、全部是本机沙箱拒绝
+  （`terminal` 的 pty/`kill`、`study::runner` 的进程检查、`colm-kernel` 的进程组探测、
+  `colm-workspace` 的 `sandbox-exec`/parity 子进程、`xerj_manager` 的端口）；被本轮的改动覆盖的
+  crate（`colm-core` 529、`colm-runtime` 250、`colm-init` 191、`colm-srfdata`）全绿。
+- `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、
+  GUI workspace 的 clippy/fmt、`cargo run -q -p xtask -- check-gui` → 全部干净（263 命令契约）。
+- 前端：`npm run typecheck` / `lint` / `format:check` / `npm test` → **1348 passed / 0 failed**。
+- 新增测试合计：`tracer_tests.rs` 11、`bifurcation_tests.rs` +4、`sediment_tests.rs` +6、
+  `reservoir_tests.rs` +6、`gridriver_tests.rs` +2、`history_tests.rs` +2、`soil_water_tests.rs` +1、
+  `region_tests.rs` +1、`interception_tests.rs` +2 与 1 条扩写。
+- **Not-tested（全轮）**：与 Fortran 内核的任何数值对照（无汇流/水库黄金数据）、真实数据端到端、
+  MPI 多进程（Rust 汇流单进程）。
+
+### 7 遗留
+
+- **#13 LULCC 主机水重映射**：如上，单独一轮。
+- **跨引擎续跑旁车格式**仍未对齐（第二轮 §8 的 `history_schema/...` vs `hacc_*`）：与本题无关，
+  仍待决定。
+- 本轮改动改变了 Rust 引擎在有干单元、高周转泥沙、负净截获、method 2 水库这些场景下的数值；
+  这些场景此前 Rust 与 Fortran 本来就不一致，改动方向是「更接近上游」，但没有数值对照证据。

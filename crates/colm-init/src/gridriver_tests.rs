@@ -187,12 +187,53 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
 }
 
 #[test]
-fn cold_restart_refuses_unimplemented_reservoir_methods() {
+fn cold_restart_rejects_unknown_reservoir_methods() {
+    // 方法 1/2 都对应上游一次实现；0 是关闭。其余取值在 reservoir_init 里也会被拒。
+    for method in [-1, 3] {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = temp_dir("features");
+        let unit_catchment = root.join("unitcatchment.nc");
+        write_unit_catchment(&unit_catchment);
+        let error = write_gridriver_cold_restart(GridRiverColdStartConfig {
+            unit_catchment: &unit_catchment,
+            restart_dir: &root.join("restart"),
+            case_name: "case",
+            land_cover_year: 2005,
+            date: RestartDate {
+                year: 2008,
+                julian_day: 1,
+                seconds: 0,
+            },
+            bifurcation: false,
+            levee: false,
+            reservoir_method: method,
+            reservoir_parameters: None,
+            regional: None,
+            compression_level: 1,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("unsupported reservoir operation method"),
+            "{error}"
+        );
+        assert!(!root.join("restart").exists());
+        crate::remove_test_tree(root);
+    }
+}
+
+#[test]
+fn cold_restart_method_two_starts_at_half_the_conservation_volume() {
+    // 上游 `MOD_Initialize.F90:1744-1752`：`volresv = volresv_normal`。方法 2 的
+    // `volresv_normal = 0.5·ConVol`（`MOD_Grid_Reservoir.F90:386`）；在这里
+    // ConVol = 5.0 MCM ⇒ 已建成的那座 2.5e6 m³，尚未建成的仍是 spval 标记。
     let _netcdf_guard = crate::netcdf_test_guard();
-    let root = temp_dir("features");
+    let root = temp_dir("reservoir-method2");
     let unit_catchment = root.join("unitcatchment.nc");
+    let parameters = root.join("reservoir.nc");
     write_unit_catchment(&unit_catchment);
-    let error = write_gridriver_cold_restart(GridRiverColdStartConfig {
+    write_reservoir_parameters(&parameters);
+    let restart = write_gridriver_cold_restart(GridRiverColdStartConfig {
         unit_catchment: &unit_catchment,
         restart_dir: &root.join("restart"),
         case_name: "case",
@@ -205,14 +246,28 @@ fn cold_restart_refuses_unimplemented_reservoir_methods() {
         bifurcation: false,
         levee: false,
         reservoir_method: 2,
-        reservoir_parameters: None,
+        reservoir_parameters: Some(&parameters),
         regional: None,
         compression_level: 1,
     })
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("reservoir method"));
-    assert!(!root.join("restart").exists());
+    .unwrap();
+
+    let file = netcdf::open(&restart.path).unwrap();
+    assert_eq!(
+        file.variable("gridriver_reservoir_identity")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [1.0, 2.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        file.variable("volresv")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        [2.5e6, -1.0e36]
+    );
+    drop(file);
     crate::remove_test_tree(root);
 }
 

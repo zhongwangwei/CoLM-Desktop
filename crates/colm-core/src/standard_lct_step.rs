@@ -1029,8 +1029,10 @@ pub fn standard_lct_snow_soil_step(
                 ldew_snow_old: tracer_scratch.ldew_snow_old,
                 sprinkler: input.energy.interception.sprinkler_irrigation_kg_m2_s,
                 // `xsc_out = xsc/deltim`；CoLM2014/2024 都不在截留里做冠层相变（`:514-515`）。
-                gross_intr_rain: interception.gross_rain_kg_m2_s,
-                gross_intr_snow: interception.gross_snow_kg_m2_s,
+                // `CoLMMAIN.F90:914-915` 在 patch 级取 `max(qintr+max(qdrp,0), 0)`；PFT 聚合
+                // 已在 `pft_gross_sum` 里夹过（这里是幂等），单柱路径由这里夹。
+                gross_intr_rain: interception.gross_rain_kg_m2_s.max(0.0),
+                gross_intr_snow: interception.gross_snow_kg_m2_s.max(0.0),
                 xsc_rain: interception.released_rain_kg_m2_s,
                 xsc_snow: interception.released_snow_kg_m2_s,
                 ldew_smelt_mass: 0.0,

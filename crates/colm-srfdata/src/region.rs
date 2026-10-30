@@ -4,7 +4,7 @@
 //! clipped tree keeps the original pixel/block lattice and selects whole mesh
 //! elements, just as the upstream routine does; it does not resample data.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -87,6 +87,7 @@ pub fn clip_existing_surface(
     let pixel_axes = read_pixel_axes(&pixel)?;
     let block_layout = read_block_layout(&block)?;
     let files = netcdf_files(source)?;
+    ensure_mesh_indexes(source, &files)?;
     let selections = mesh_selections(source, &files, &pixel_axes, bounds)?;
     ensure!(
         !selections.is_empty()
@@ -343,6 +344,35 @@ fn mesh_index(relative: &Path) -> bool {
             .parent()
             .and_then(Path::parent)
             .is_some_and(|parent| parent == Path::new("mesh"))
+}
+
+/// 上游 `MOD_RegionClip.F90:73-83` 对每个 land-cover 年都要求 `mesh/<year>/mesh.nc`：
+/// 先试 `mesh/<lc_year>/`，缺失再回退旧布局，最终 `clip_error('Missing mesh for requested
+/// land-cover year ...')`。Rust 这条路径不选年份、直接复制整棵树，但"有 mesh 块文件却没有
+/// `mesh.nc`"的树下游同样读不到 `nelm_blk`；按年份报出缺哪个文件，比让下游在聚合拓扑时
+/// 才失败更可操作。这里只查索引本身，不规定哪些向量文件"必须"存在——那是各 case 开关
+/// （如甲烷的 `lake_soilc_patches`）的知识，字段无关的 clipper 不持有。
+fn ensure_mesh_indexes(source: &Path, files: &[PathBuf]) -> Result<()> {
+    let mut years = BTreeSet::new();
+    for file in files {
+        let relative = file.strip_prefix(source)?;
+        if !mesh_block(relative) {
+            continue;
+        }
+        if let Some(year) = relative.components().nth(1) {
+            years.insert(year.as_os_str().to_owned());
+        }
+    }
+    for year in years {
+        let index = source.join("mesh").join(&year).join("mesh.nc");
+        ensure!(
+            index.is_file(),
+            "existing landdata is missing the mesh index {} for land-cover year {}; every mesh/<year>/ with block files needs mesh.nc",
+            index.display(),
+            Path::new(&year).display()
+        );
+    }
+    Ok(())
 }
 
 fn mesh_block(relative: &Path) -> bool {

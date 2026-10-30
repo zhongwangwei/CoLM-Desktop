@@ -122,6 +122,36 @@ fn patches_to_grid(routing: &RunoffRouting, values: &[f64], filter: &[bool]) -> 
     super::remap::patches_to_grid(routing, values, filter, SPVAL)
 }
 
+/// `WHERE (acctime_ucat > 0) a/acctime ELSEWHERE spval`（`MOD_Grid_RiverLakeHist.F90:457-464`
+/// 与 `:497-501`、`:524-527`、`:543-548`）。没累加过的单元流域上游写的是 `spval`，不是原始 0 —— 0 会被
+/// 当成"河道蓄量为 0、水面高程为 0 m"，落进 history 后既不是缺测也不是物理值。
+fn mean_or_missing(values: &[f64], acctime: &[f64]) -> Vec<f64> {
+    values
+        .iter()
+        .zip(acctime)
+        .map(|(&v, &t)| if t > 0.0 { v / t } else { SPVAL })
+        .collect()
+}
+
+/// `f_floodfrc`：`WHERE (topo_area > 0 .and. a_floodarea /= spval) a_floodarea/topo_area
+/// ELSEWHERE spval`（`MOD_Grid_RiverLakeHist.F90:423-430`）。
+///
+/// 关键是**先判缺测再除**：淹没面积均值是 `spval` 时直接除会得到 -1e36/area 这种"有限"的
+/// 巨大负值，history 里就再也认不出它是缺测了。
+fn flooded_fraction(floodarea: &[f64], area: &[f64]) -> Vec<f64> {
+    floodarea
+        .iter()
+        .zip(area)
+        .map(|(&flooded, &topo_area)| {
+            if flooded != SPVAL && topo_area > 0.0 {
+                flooded / topo_area
+            } else {
+                SPVAL
+            }
+        })
+        .collect()
+}
+
 impl RiverHistoryWriter {
     /// `hist_grid_riverlake_init`。`basic[p]` 是 `patchtype < 99 .and. patchmask`。
     pub fn new(
@@ -313,29 +343,12 @@ impl RiverHistoryWriter {
             .acctime
             .iter()
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let mean = |values: &[f64]| {
-            values
-                .iter()
-                .zip(&history.acctime)
-                .map(|(&v, &t)| if t > 0.0 { v / t } else { SPVAL })
-                .collect::<Vec<_>>()
-        };
-        let mean_or_keep = |values: &[f64]| {
-            values
-                .iter()
-                .zip(&history.acctime)
-                .map(|(&v, &t)| if t > 0.0 { v / t } else { v })
-                .collect::<Vec<_>>()
-        };
+        let mean = |values: &[f64]| mean_or_missing(values, &history.acctime);
         let wdsrf = mean(&history.wdsrf);
         let veloc = mean(&history.veloc);
         let discharge = mean(&history.discharge);
         let floodarea = mean(&history.floodarea);
-        let floodfrc = floodarea
-            .iter()
-            .zip(&network.area)
-            .map(|(&a, &area)| if area > 0.0 { a / area } else { SPVAL })
-            .collect::<Vec<_>>();
+        let floodfrc = flooded_fraction(&floodarea, &network.area);
         let rivermouth = discharge
             .iter()
             .zip(&network.next)
@@ -372,53 +385,46 @@ impl RiverHistoryWriter {
                 "f_rivsto",
                 "below-bank river channel storage",
                 "m^3",
-                mean_or_keep(&history.rivsto),
+                mean(&history.rivsto),
             ),
             (
                 "f_fldsto",
                 "visible overbank storage excluding levee-protected storage",
                 "m^3",
-                mean_or_keep(&history.fldsto),
+                mean(&history.fldsto),
             ),
             (
                 "f_flddph",
                 "visible river-side floodplain water depth excluding levee-protected depth",
                 "m",
-                mean_or_keep(&history.flddph),
+                mean(&history.flddph),
             ),
             (
                 "f_storge",
                 "total water storage (river+floodplain+levee)",
                 "m^3",
-                mean_or_keep(&history.storge),
+                mean(&history.storge),
             ),
             (
                 "f_sfcelv",
                 "water surface elevation",
                 "m",
-                mean_or_keep(&history.sfcelv),
+                mean(&history.sfcelv),
             ),
         ];
-        // `DEF_USE_LEVEE`：`WHERE (acctime_ucat > 0) a/acctime ELSEWHERE 0`。
+        // `DEF_USE_LEVEE`：`WHERE (acctime_ucat > 0) a/acctime ELSEWHERE spval`（`:497-501`）。
         if let (Some(levsto), Some(levdph)) = (&history.levsto, &history.levdph) {
-            let mean_or_zero = |values: &[f64]| {
-                values
-                    .iter()
-                    .zip(&history.acctime)
-                    .map(|(&v, &t)| if t > 0.0 { v / t } else { 0.0 })
-                    .collect::<Vec<_>>()
-            };
             unitcat.push((
                 "f_levsto",
                 "water storage in levee-protected area",
                 "m^3",
-                mean_or_zero(levsto),
+                mean(levsto),
             ));
             unitcat.push((
                 "f_levdph",
                 "water depth in levee-protected area",
                 "m",
-                mean_or_zero(levdph),
+                mean(levdph),
             ));
         }
         // `DEF_USE_BIFURCATION`：`f_bifout` 与路径层矩阵 `f_bifflw_lev`（逐路径按自己的累加时长平均）。
@@ -428,23 +434,17 @@ impl RiverHistoryWriter {
             &history.bifflw_lev,
             &history.bifflw_acctime,
         ) {
-            unitcat.push((
-                "f_bifout",
-                "net bifurcation outflow",
-                "m^3/s",
-                bifout
-                    .iter()
-                    .zip(&history.acctime)
-                    .map(|(&v, &t)| if t > 0.0 { v / t } else { 0.0 })
-                    .collect(),
-            ));
+            unitcat.push(("f_bifout", "net bifurcation outflow", "m^3/s", mean(bifout)));
             let levels = lev.len() / acctime.len().max(1);
-            let mean = lev
+            let bifflw_mean = lev
                 .chunks(levels.max(1))
                 .zip(acctime)
-                .flat_map(|(row, &t)| row.iter().map(move |&v| if t > 0.0 { v / t } else { 0.0 }))
+                .flat_map(|(row, &t)| {
+                    row.iter()
+                        .map(move |&v| if t > 0.0 { v / t } else { SPVAL })
+                })
                 .collect::<Vec<_>>();
-            bifflw = Some((levels, mean));
+            bifflw = Some((levels, bifflw_mean));
         }
         // 水库（`totalnumresv > 0`）：逐水库按 `acctime_resv` 平均，没累加时为 `spval`。
         let mut reservoirs = Vec::new();

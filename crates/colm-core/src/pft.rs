@@ -222,6 +222,20 @@ pub fn pft_sum(terms: impl IntoIterator<Item = (f64, f64)>) -> f64 {
         .fold(0.0, |sum, (value, fraction)| value.contract(fraction, sum))
 }
 
+/// `gross_intr_*` 的 PFT 聚合：先在 `pftfrac` 上求和，**再**取 max
+/// （`CoLMMAIN.F90:914-915` 在 `LEAF_interception_pftwrap` 返回之后才夹）。
+///
+/// 逐 PFT 先 `max(0, ·)` 再聚合（`MOD_LeafInterception.F90:532-533` 的 legacy 单柱输出）
+/// 会提前截断负的 qintr：雪卸出时某个 PFT 的 qintr 可以为负，聚合后本应与其他 PFT 抵消，
+/// 先夹就把这部分漏掉了。
+pub(crate) fn pft_gross_sum(
+    fluxes: &[CanopyInterceptionFluxes],
+    fractions: impl Iterator<Item = f64>,
+    select: fn(&CanopyInterceptionFluxes) -> f64,
+) -> f64 {
+    pft_sum(fluxes.iter().map(select).zip(fractions)).max(0.0)
+}
+
 /// `LEAF_interception_pftwrap`（`MOD_LeafInterception.F90:629-727`）。
 ///
 /// 逐 PFT 用自己的 `chil_p`/`lai_p`/`sai_p`/`tleaf_p` 跑一次 CoLM2014 截留，
@@ -258,8 +272,9 @@ pub(crate) fn intercept_pfts(
         retained_snow_kg_m2_s: sum(|f| f.retained_snow_kg_m2_s),
         released_rain_kg_m2_s: sum(|f| f.released_rain_kg_m2_s),
         released_snow_kg_m2_s: sum(|f| f.released_snow_kg_m2_s),
-        gross_rain_kg_m2_s: sum(|f| f.gross_rain_kg_m2_s),
-        gross_snow_kg_m2_s: sum(|f| f.gross_snow_kg_m2_s),
+        // `CoLMMAIN.F90:914-915`：gross 在 pftfrac 聚合之后才取 max，不能逐 PFT 先夹。
+        gross_rain_kg_m2_s: pft_gross_sum(&fluxes, patch.fractions(), |f| f.gross_rain_kg_m2_s),
+        gross_snow_kg_m2_s: pft_gross_sum(&fluxes, patch.fractions(), |f| f.gross_snow_kg_m2_s),
     };
     *patch_water = CanopyWater {
         total_mm: patch.sum(|column| column.leaf.canopy_water.total_mm),

@@ -819,3 +819,155 @@ fn exfiltration_through_several_layers_keeps_uniform_ratio() {
     close(acc.evap, acc.water_evap_gross, "evap");
     assert!(state.step[0].numerical_residual_step.abs() <= 1.0e-15);
 }
+
+#[test]
+fn nonvolatile_solute_leaves_an_exhausted_ice_carrier() {
+    // 上游 `MOD_MT_SoilWater.F90:3480-3494`：湿地水交换之后，若宿主冰已经没了
+    // （`max(wice,0) <= water_min_for_ratio`）而溶质还冻在冰相里，有液态载体就并入液相，
+    // 否则并进固相，然后把冰相池清零。用"同一场景只改宿主冰"的差分来证明搬运量，
+    // 避免把内部重新分配的中间值抄进断言。
+    let set = TracerSet {
+        tracers: vec![descriptor("Cl", TracerFamily::Solute)],
+    };
+    let s = soisno_slot;
+    let scen = Scenario::bare_soil();
+    let mut t_soisno = [280.0; SOISNO_LAYERS];
+    t_soisno[s(1)] = 285.0;
+    let porsl = [0.4; SOIL_LAYERS];
+    let mut dz = [0.0; SOISNO_LAYERS];
+    for j in 1..=NL {
+        dz[s(j)] = 0.05;
+    }
+
+    let run = |host_wice: [f64; SOISNO_LAYERS],
+               host_wliq: [f64; SOISNO_LAYERS],
+               ice: [f64; SOISNO_LAYERS]| {
+        let (wdsrf_bef, wetwat_bef, wa_bef) = (5.0, 300.0, 0.0);
+        let (qseva, qsdew, etr, rsur) = (1.0e-4, 2.0e-6, 3.0e-5, 1.0e-4);
+        let mut wresi = 0.0;
+        for j in 1..=NL {
+            wresi += (scen.wliq_bef[s(j)] - porsl[soil_slot(j)] * dz[s(j)] * 1000.0).max(0.0);
+        }
+        let pool_water = wdsrf_bef
+            + wa_bef
+            + wetwat_bef
+            + wresi
+            + (scen.pg_rain + qsdew + scen.qfros - qseva - scen.qsubl - etr) * DT;
+        let (wdsrf, wa) = (10.0, 0.0);
+        let wetwat = pool_water - wdsrf - wa - rsur * DT;
+        let ratios = [0.3];
+        let input = WetlandInput {
+            ipatch: 7,
+            deltim: DT,
+            snl: 0,
+            rsur,
+            qseva_in: qseva,
+            qsdew_in: qsdew,
+            qsubl_in: scen.qsubl,
+            qfros_in: scen.qfros,
+            qseva_soil: 0.0,
+            qsdew_soil: 0.0,
+            qsubl_soil: 0.0,
+            qfros_soil: 0.0,
+            qseva_snow: 0.0,
+            qsdew_snow: 0.0,
+            qsubl_snow: 0.0,
+            qfros_snow: 0.0,
+            etr,
+            sm: 0.0,
+            fsno: 0.0,
+            split_soilsnow: false,
+            wliq_soisno: &host_wliq,
+            wice_soisno: &host_wice,
+            wliq_soisno_bef: &scen.wliq_bef,
+            wice_soisno_bef: &scen.wice_bef,
+            wa,
+            wa_bef,
+            wdsrf,
+            wdsrf_bef,
+            wetwat,
+            wetwat_bef,
+            pg_rain: scen.pg_rain,
+            pg_snow: 0.0,
+            t_soisno: &t_soisno,
+            porsl: &porsl,
+            dz_soisno: &dz,
+            qflx_irrig_ground: 0.0,
+            forc_us: 1.0,
+            forc_vs: 1.0,
+            waterstorage_patch: Some(10.0),
+            snow_qout_layer: None,
+            forc_q: None,
+            forc_psrf: None,
+            tleaf: None,
+            lai: None,
+            rst: None,
+            ra: None,
+            dz_sno: None,
+            vapor_ratio: &ratios,
+            has_vapor: None,
+        };
+        let mut state = scen.state(&set, &ratios);
+        for (itrc, pools) in state.pools.iter_mut().enumerate() {
+            pools.wa = ratios[itrc] * wa_bef;
+            pools.wdsrf = ratios[itrc] * wdsrf_bef;
+            pools.wetwat = ratios[itrc] * wetwat_bef;
+            pools.wice_soisno = ice;
+        }
+        let before = state.clone();
+        tracer_wetland(
+            &set,
+            &mut state,
+            TracerPhysics::default(),
+            &no_diffusion(),
+            &input,
+        )
+        .unwrap();
+        (before, state)
+    };
+
+    let mut ice = [0.0; SOISNO_LAYERS];
+    for j in 1..=NL {
+        ice[s(j)] = 0.3 * scen.wice_bef[s(j)];
+    }
+
+    // 第 2 层：WATER 之后宿主冰为 0，但液相还在 ⇒ 冰相溶质并入液相。
+    let mut host_wice = scen.wice_bef;
+    host_wice[s(2)] = 0.0;
+    let (before_a, after_a) = run(host_wice, scen.wliq_bef, ice);
+    let (_, after_b) = run(scen.wice_bef, scen.wliq_bef, ice);
+    let p = &after_a.pools[0];
+    assert_eq!(p.wice_soisno[s(2)], 0.0, "ice carrier pool not cleared");
+    assert_eq!(
+        p.solid_soisno[s(2)],
+        after_b.pools[0].solid_soisno[s(2)],
+        "solute with a liquid carrier went solid"
+    );
+    let liquid_recovered = p.wliq_soisno[s(2)] - after_b.pools[0].wliq_soisno[s(2)];
+    assert!(
+        (liquid_recovered - 0.3 * scen.wice_bef[s(2)]).abs() < 1.0e-12,
+        "recovered {liquid_recovered} instead of the stranded ice solute"
+    );
+    assert_closed(&before_a, &after_a, 0, false);
+
+    // 第 5 层：宿主冰与液态水都没了 ⇒ 冰相溶质并入固相。
+    let mut host_wliq = scen.wliq_bef;
+    host_wliq[s(5)] = 0.0;
+    let mut stranded = ice;
+    stranded[s(5)] = 0.25;
+    let (before_c, after_c) = run(scen.wice_bef, host_wliq, stranded);
+    let (_, after_d) = run(scen.wice_bef, host_wliq, ice);
+    let p = &after_c.pools[0];
+    assert_eq!(p.wice_soisno[s(5)], 0.0);
+    assert_eq!(
+        p.solid_soisno[s(5)] - after_d.pools[0].solid_soisno[s(5)],
+        0.25,
+        "solute without any liquid carrier did not go solid"
+    );
+    assert_eq!(
+        p.wliq_soisno[s(5)],
+        after_d.pools[0].wliq_soisno[s(5)],
+        "solute moved into a missing liquid carrier"
+    );
+    assert_closed(&before_c, &after_c, 0, false);
+}

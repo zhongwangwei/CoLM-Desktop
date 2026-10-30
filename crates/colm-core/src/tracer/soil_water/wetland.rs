@@ -593,6 +593,21 @@ pub fn tracer_wetland(
         check(p.wa, input.wa, "wetland end")?;
         for j in lb..=nl {
             let slot = soisno_slot(j);
+            // 宿主冰已经没了（WATER 里融完/升华完）但非挥发溶质还冻在冰相里：把它收回到
+            // 液相（有液态载体时）或固相，再清空冰相池。上游 `MOD_MT_SoilWater.F90:3479-3494`
+            // 就是这段；少了它，溶质会挂在一个不存在的载体上，后面的 `equilibrate` 按
+            // `wliq` 分配时既不算液相也不再进收支，等于凭空丢质量。
+            if nonvolatile
+                && p.wice_soisno[slot] > TRC_TINY
+                && input.wice_soisno[slot].max(0.0) <= TRC_WATER_MIN_FOR_RATIO
+            {
+                if input.wliq_soisno[slot].max(0.0) > TRC_WATER_MIN_FOR_RATIO {
+                    p.wliq_soisno[slot] += p.wice_soisno[slot];
+                } else {
+                    p.solid_soisno[slot] += p.wice_soisno[slot];
+                }
+                p.wice_soisno[slot] = 0.0;
+            }
             tracer.equilibrate_dissolved(
                 input.wliq_soisno[slot].max(0.0),
                 &mut p.wliq_soisno[slot],
