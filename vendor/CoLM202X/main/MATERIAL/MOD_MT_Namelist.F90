@@ -350,6 +350,14 @@ CONTAINS
       IF (DEF_MT_BALANCE_ABORT_NBAD < 0 .or. DEF_MT_RESID_ABORT_NBAD < 0 .or. &
           DEF_MT_LULCC_ABORT_NBAD < 0) CALL CoLM_Stop ('Invalid DEF_MT_*_ABORT_NBAD.')
 
+#ifdef CATCHMENT
+      ! vendor 的 MT 始终编译（没有 MaterialTransport 宏），上游的
+      ! `#if (defined MaterialTransport) && (defined CATCHMENT)` 编译期拒绝无法照搬。
+      ! 单元流域内核本身可以构建，但材料输运与它不兼容，在这里运行时拒绝。
+      IF (mt_any_enabled ()) &
+         CALL CoLM_Stop ('MaterialTransport does not support the catchment (unit-catchment) grid (CATCHMENT).')
+#endif
+
    END SUBROUTINE check_settings
 
 

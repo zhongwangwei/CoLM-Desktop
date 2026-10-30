@@ -39728,9 +39728,11 @@ Fortran 里剩下需要「有没有物运移在跑」的地方统一改成 `nmts
   消息补上"class 0 全量 = 上一年的地类没读到"的提示；`CoLMDRIVER` 删掉从不启用的 OpenMP
   patch 循环。
 
-`MOD_MT_Conservation` 与 `CoLMMAIN` 的 `#ifndef CatchLateralFlow` 分支按上游删除：vendor 的 MT
-始终编译，`MOD_MT_Defs.F90` 的 `#if (defined CATCHMENT)` 已经让 catchment 内核在建时就报错，
-那条分支永远到不了。
+`MOD_MT_Conservation` 与 `CoLMMAIN` 的 `#ifndef CatchLateralFlow` 分支按上游删除。上游用
+`#if (defined MaterialTransport) && (defined CATCHMENT)` 编译期拒绝这个组合；vendor 的 MT
+始终编译、没有那个宏，于是改成 `MOD_MT_Namelist.F90` 的 `check_settings` 里运行时拒绝
+（`#ifdef CATCHMENT` 且 `mt_any_enabled()` → `CoLM_Stop`）。catchment 内核本身照常构建，
+MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchment`。
 
 ### 2 Rust 侧的命名收口
 
@@ -39766,10 +39768,9 @@ Fortran 里剩下需要「有没有物运移在跑」的地方统一改成 `nmts
 
 ### 本轮验证（真实执行）
 
-- Fortran：`build_kernel.sh default /tmp/colm-mt-final2`、`build_kernel.sh latlon /tmp/colm-mt-final2`
-  均 exit 0（产物齐全）。`build_kernel.sh catchment` 在 `MOD_MT_Defs.o` 上按预期报
-  `MaterialTransport does not support the catchment (unit-catchment) grid`——vendor 的 MT 始终
-  编译，这条 `#error` 就是"catchment 内核不支持"的表达（见遗留）。
+- Fortran：`build_kernel.sh default /tmp/colm-mt-final3`、`build_kernel.sh latlon /tmp/colm-mt-final3`、
+  `build_kernel.sh catchment /tmp/colm-mt-final3` 均 exit 0（catchment 内核在 MT 关掉时正常构建；
+  `#ifdef CATCHMENT` 且 `mt_any_enabled()` 的组合由 `check_settings` 在启动时停机）。
 - Rust：`cargo test --workspace --lib --bins -- --test-threads=1` **3329 passed / 0 failed**；
   `cargo test -p colm-cli -- --test-threads=1` **811 passed**；GUI 后端
   `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` **582 passed**。
@@ -39784,8 +39785,7 @@ Fortran 里剩下需要「有没有物运移在跑」的地方统一改成 `nmts
 
 ### 遗留
 
-- `build_kernel.sh` 仍列出 catchment 预设，但该内核现在必失败（`MOD_MT_Defs.F90` 的 `#error`）。
-  要恢复 catchment 内核，得先把 MT 改回可关闭的编译期开关，或把这条换成 `mt_any_enabled()` 的
-  运行时拒绝；Rust 入口已有对应的 `check_catchment` 拒绝。
 - `oracle/nml-unread.snapshot` 仍是旧审计脚本的产物、里面仍是旧名，没有测试消费，本轮未重生成。
 - 相态回填只做到与上游同构，尚未在真实 IsoGSM 文件上做逐位对照。
+- catchment 内核现在能构建，但 MT + CATCHMENT 的运行时拒绝只覆盖 `check_settings` 这一条入口；
+  没有用真实 catchment 算例端到端验证这条停机。

@@ -93,21 +93,16 @@
   vendor 也从不定义 `OPENMP`，是死代码）。
 - `CoLMMAIN.F90` / `MOD_MT_Conservation.F90`：`mt_balance_check` 与收支/签名核对里
   `#ifndef CatchLateralFlow` 的 catchment 专用分支整段删除，统一按"有汇流出流"的形式调用。
-  上游用编译期 `#error` 拒绝 `MaterialTransport + CATCHMENT`；vendor 的 MT 始终编译，所以这个
-  组合由入口拒绝（Rust 的 `check_catchment`：`catchment lateral flow with material transport is
-  not ported`）。`CoLMMAIN` 其余 5 处 `#ifndef CatchLateralFlow` 上游也保留，照抄。
+  上游用编译期 `#error` 拒绝 `MaterialTransport + CATCHMENT`；vendor 的 MT 始终编译，无法照搬
+  编译期判断，改成 `MOD_MT_Namelist.F90` 的 `check_settings` 里运行时拒绝
+  （`#ifdef CATCHMENT` 且 `mt_any_enabled()` → `CoLM_Stop`）。catchment 内核本身照常构建。
+  Rust 入口另有 `check_catchment`（`catchment lateral flow with material transport is not ported`）。
+  `CoLMMAIN` 其余 5 处 `#ifndef CatchLateralFlow` 上游也保留，照抄。
 - `run/standard_nh4_parameter.nml`、`run/standard_no3_parameter.nml`：EF5 开关按新语义改。
 
 **唯一不跟随上游的改动**：
 
 - `include/define.h` 仍让 `CATCHMENT` 关闭 `GridRiverLakeFlow`。
-- `main/MATERIAL/MOD_MT_Defs.F90` 的守卫在上一轮去宏时被收成 `#if (defined CATCHMENT)`（上游是
-  `#if (defined MaterialTransport) && (defined CATCHMENT)`）。因为 vendor 的 MT 始终编译，
-  这在效果上等于"catchment（单元流域）内核一律构建失败"，与上游"MT + CATCHMENT 不支持"一致：
-  `build_kernel.sh catchment` 会在 `MOD_MT_Defs.o` 上报
-  `MaterialTransport does not support the catchment (unit-catchment) grid`。构建脚本仍列出该预设，
-  但目前必失败——若以后要恢复 catchment 内核，需要先把 MT 改回可关闭的编译期开关，
-  或把这条换成 `mt_any_enabled()` 的运行时拒绝。
 
 **同一轮里补齐的上游改名（Rust 侧）**：上游 7d2fca93 已把 MT 的重启变量从 `trc_*` 改成
 `mt_*`、history 输出从 `f_trc_*` 改成 `f_mt_*`（`a_trc_*` 累加器与 `tracer_*` 内部函数上游仍保留）。

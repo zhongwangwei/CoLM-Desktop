@@ -1,8 +1,8 @@
 #include <define.h>
 
-#if (defined CATCHMENT)
-#error "MaterialTransport does not support the catchment (unit-catchment) grid (CATCHMENT); use GRID or UNSTRUCTURED (vector)."
-#endif
+! 上游在这里用 `#if (defined MaterialTransport) && (defined CATCHMENT)` 编译期拒绝。
+! vendor 的 MT 始终编译（没有 MaterialTransport 宏），所以 catchment 内核照常构建，
+! 组合的拒绝移到 MOD_MT_Namelist.F90 的 check_settings（mt_any_enabled 时 CoLM_Stop）。
 
 MODULE MOD_MT_Defs
 
