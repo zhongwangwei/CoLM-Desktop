@@ -4478,6 +4478,13 @@ CONTAINS
       IF (allocated(a_netflw     )) deallocate(a_netflw     )
       IF (allocated(a_layer      )) deallocate(a_layer      )
       IF (allocated(a_shearvel   )) deallocate(a_shearvel   )
+      ! The history-window snapshot is allocated lazily in
+      ! grid_sediment_snapshot_hist and must not outlive the module state.
+      IF (allocated(sedhistsnap_con)) deallocate(sedhistsnap_con, sedhistsnap_out, sedhistsnap_bed, &
+         sedhistsnap_inp, sedhistsnap_net, sedhistsnap_lay, sedhistsnap_shear)
+      sedhistsnap_valid   = .false.
+      sedhistsnap_acctime = 0._r8
+      sed_hist_acctime    = 0._r8
    END SUBROUTINE grid_sediment_final
 
 END MODULE MOD_MT_Sediment

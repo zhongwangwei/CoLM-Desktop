@@ -17,6 +17,7 @@ fn isotope(name: &str, ref_ratio: f64) -> TracerDescriptor {
         vapor_default_conc: 0.0,
         max_dissolved_conc: f64::MAX,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }

@@ -40,12 +40,14 @@ pub struct PrecipInput {
     pub waterstorage_before: Option<f64>,
 }
 
-/// `tracer_precip`。`precip_ratio[itrc]` 是本步本 patch 的降水比值
-/// （`tracer_forcing_precip_value`）。
+/// `mt_precip`。`rain_ratio[itrc]` / `snow_ratio[itrc]` 是本步本 patch 的雨/雪比值
+/// （`tracer_forcing_rain_value` / `tracer_forcing_snow_value`）。两者只在强迫记录近干时
+/// 不同（见 `MOD_MT_Forcing` 的相态回填），其余情况相同，所以单比值配置逐位不变。
 pub fn tracer_precip(
     set: &TracerSet,
     state: &mut PatchTracerState,
-    precip_ratio: &[f64],
+    rain_ratio: &[f64],
+    snow_ratio: &[f64],
     input: &PrecipInput,
 ) {
     let dt = input.deltim;
@@ -56,8 +58,9 @@ pub fn tracer_precip(
         if !tracer.uses_land_water_transport() {
             continue;
         }
-        let r_input = precip_ratio[itrc];
-        let mut storage_ratio = r_input;
+        let r_rain = rain_ratio[itrc];
+        let r_snow = snow_ratio[itrc];
+        let mut storage_ratio = r_rain;
         let pools = &mut state.pools[itrc];
         tracer.equilibrate_dissolved(
             input.ldew_rain_old.max(0.0),
@@ -67,7 +70,10 @@ pub fn tracer_precip(
         let canopy_trc_beg = (pools.ldew_rain + pools.ldew_snow) + pools.canopy_solid;
 
         let acc = &mut state.acc[itrc];
-        acc.precip = dt.contract((input.forc_snow + input.forc_rain) * r_input, acc.precip);
+        // 上游把整场降水记到雪的比值上，再对雨补一项修正；两者相同时第二项恰为 0，
+        // 所以只用单一比值的配置逐位不变。
+        acc.precip = dt.contract((input.forc_snow + input.forc_rain) * r_snow, acc.precip);
+        acc.precip += input.forc_rain * (r_rain - r_snow) * dt;
 
         // 喷灌取自 `waterstorage`：内部转移，不进大气输入。
         if input.sprinkler > TRC_TINY {
@@ -101,10 +107,10 @@ pub fn tracer_precip(
             input
                 .forc_rain
                 .max(0.0)
-                .contract(r_input, storage_ratio * sprinkler_rate)
+                .contract(r_rain, storage_ratio * sprinkler_rate)
                 / rain_total
         } else {
-            r_input
+            r_rain
         };
 
         // 0. 冠层相变：先融后冻。
@@ -112,25 +118,25 @@ pub fn tracer_precip(
         let mut snow_old = input.ldew_snow_old.max(0.0);
         let smelt = input.ldew_smelt_mass.max(0.0).min(snow_old);
         if smelt > 0.0 {
-            let r_snow = if snow_old > TRC_TINY {
+            let r_snow_pool = if snow_old > TRC_TINY {
                 pools.ldew_snow / snow_old
             } else {
-                r_input
+                r_snow
             };
-            pools.ldew_snow = (-r_snow).contract(smelt, pools.ldew_snow).max(0.0);
-            pools.ldew_rain = r_snow.contract(smelt, pools.ldew_rain);
+            pools.ldew_snow = (-r_snow_pool).contract(smelt, pools.ldew_snow).max(0.0);
+            pools.ldew_rain = r_snow_pool.contract(smelt, pools.ldew_rain);
             snow_old -= smelt;
             rain_old += smelt;
         }
         let frzc = input.ldew_frzc_mass.max(0.0).min(rain_old);
         if frzc > 0.0 {
-            let r_rain = if rain_old > TRC_TINY {
+            let r_rain_pool = if rain_old > TRC_TINY {
                 pools.ldew_rain / rain_old
             } else {
-                r_input
+                r_rain
             };
-            pools.ldew_rain = (-r_rain).contract(frzc, pools.ldew_rain).max(0.0);
-            pools.ldew_snow = r_rain.contract(frzc, pools.ldew_snow);
+            pools.ldew_rain = (-r_rain_pool).contract(frzc, pools.ldew_rain).max(0.0);
+            pools.ldew_snow = r_rain_pool.contract(frzc, pools.ldew_snow);
             rain_old -= frzc;
             snow_old += frzc;
         }
@@ -184,7 +190,7 @@ pub fn tracer_precip(
             input.gross_intr_snow,
             input.forc_snow,
             input.pg_snow,
-            r_input,
+            r_snow,
             dt,
             DripCap::Mixed,
         );
@@ -200,7 +206,7 @@ pub fn tracer_precip(
         );
         let canopy_trc_end = (pools.ldew_rain + pools.ldew_snow) + pools.canopy_solid;
         let canopy_input =
-            (dt * rain_total).contract(r_rain_input, (dt * input.forc_snow.max(0.0)) * r_input);
+            (dt * rain_total).contract(r_rain_input, (dt * input.forc_snow.max(0.0)) * r_snow);
         let canopy_resid = (((canopy_trc_end - canopy_trc_beg) - canopy_input) + trc_rain_ground)
             + trc_snow_ground;
         if canopy_resid.abs() > TRC_TINY {

@@ -9,7 +9,7 @@ MODULE MOD_MT_NitrogenN2O
 ! module for the factor and applies it to the incoming mass.
 !
 ! The factor comes from the solute's own parameter file
-! (DEF_SOLUTE%n2o_ef5).  A positive DEF_MT_N2O_EF5_NH4/NO3 in
+! (DEF_SOLUTE%n2o_ef5).  A non-negative DEF_MT_N2O_EF5_NH4/NO3 in
 ! &nl_colm_material overrides it, which makes sensitivity runs possible
 ! without editing the parameter files.  Any other solute gets 0 and its
 ! transport is untouched, so configurations without NH4/NO3 (or with the
@@ -45,10 +45,12 @@ CONTAINS
       SELECT CASE (lname)
       CASE ('nh4')
          mt_n2o_ef5_for = tracers(imt)%n2o_ef5
-         IF (DEF_MT_N2O_EF5_NH4 > 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NH4
+         ! Any value >= 0 is a deliberate override, so 0 switches the
+         ! conversion off; the -1 default means "use the parameter file".
+         IF (DEF_MT_N2O_EF5_NH4 >= 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NH4
       CASE ('no3')
          mt_n2o_ef5_for = tracers(imt)%n2o_ef5
-         IF (DEF_MT_N2O_EF5_NO3 > 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NO3
+         IF (DEF_MT_N2O_EF5_NO3 >= 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NO3
       END SELECT
 
    END FUNCTION mt_n2o_ef5_for

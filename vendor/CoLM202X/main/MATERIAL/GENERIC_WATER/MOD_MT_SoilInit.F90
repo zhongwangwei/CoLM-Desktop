@@ -148,6 +148,11 @@ CONTAINS
 
       IF (allocated(delta_patch)) deallocate(delta_patch)
       IF (allocated(soil_z)) deallocate(soil_z)
+      ! delta_grid carries a FINAL procedure, but release it explicitly so the
+      ! IO ranks return the block memory before this routine returns instead
+      ! of waiting for the finalizer at scope exit.  The call is idempotent:
+      ! the later finalizer sees blk already deallocated.
+      IF (p_is_io) CALL block_data_real8_3d_free_mem(delta_grid)
 
    END SUBROUTINE tracer_soil_init_from_file
 

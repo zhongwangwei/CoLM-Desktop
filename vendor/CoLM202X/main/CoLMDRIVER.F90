@@ -26,7 +26,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_LandUrban, only: patch2urban
    USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_BGC
    USE MOD_Forcing, only: forcmask_pch
-   USE omp_lib
    USE MOD_MT_LandPhase, only: mt_resolve_step, mt_lake_step, &
       mt_wetland_decomp, mt_soil_step, mt_report
    USE MOD_MT_Defs, only: nmts
@@ -70,11 +69,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
 ! ======================================================================
 
       CALL mt_resolve_step (istep_in, istep_local)
-#ifdef OPENMP
-!$OMP PARALLEL DO NUM_THREADS(OPENMP) &
-!$OMP PRIVATE(i, m, u, k, steps_in_one_deltim, deltim_phy) &
-!$OMP SCHEDULE(STATIC, 1)
-#endif
 
       DO i = 1, numpatch
 
@@ -392,9 +386,6 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ENDIF
 
       ENDDO
-#ifdef OPENMP
-!$OMP END PARALLEL DO
-#endif
 
       CALL mt_report ()
 END SUBROUTINE CoLMDRIVER

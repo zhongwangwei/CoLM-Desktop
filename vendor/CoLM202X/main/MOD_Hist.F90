@@ -373,6 +373,17 @@ CONTAINS
             IF (numpatch > 0) THEN
                allocate (filter_crop (numpatch))
                allocate (filter_irrig (numpatch))
+               ! filter_irrig is only recomputed inside IF (DEF_USE_IRRIGATION),
+               ! but 'irrigarea' is written unconditionally further down.  With
+               ! irrigation off the array therefore reached get_sumarea
+               ! uninitialised: the reported irrigation area came out of whatever
+               ! bit patterns the heap held, which made it differ between
+               ! otherwise identical runs with different river switches or
+               ! different MPI decomposition (while croparea, whose filter is
+               ! always computed, stayed bit-identical).  Zero is the correct
+               ! answer when irrigation is disabled.
+               filter_crop  (:) = .false.
+               filter_irrig (:) = .false.
             ENDIF
 #endif
          ENDIF

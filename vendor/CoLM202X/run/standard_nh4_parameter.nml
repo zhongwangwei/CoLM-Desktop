@@ -32,8 +32,9 @@
     ! 'on' to force it.  The BGC files are unchanged when it is off.
     !
     ! Indirect N2O: DEF_SOLUTE%n2o_ef5 below sets this solute's factor
-    ! [kg N2O-N per kg N reaching the river]; a positive
-    ! DEF_MT_N2O_EF5_NH4 in &nl_colm_material overrides it.  The conversion
+    ! [kg N2O-N per kg N reaching the river]; a non-negative
+    ! DEF_MT_N2O_EF5_NH4 in &nl_colm_material overrides it (0 turns the
+    ! conversion off for this solute).  The conversion
     ! is applied once, at the land-to-river entry, and the
     ! removed nitrogen leaves to the atmosphere as N2O-N (the water is
     ! unchanged, so the river mass balance stays closed).  Reference values

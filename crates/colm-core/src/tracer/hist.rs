@@ -285,7 +285,7 @@ pub enum TracerScope {
 pub enum PatchFilter {
     /// `patchtype < 99`。
     Land,
-    /// `patchtype == 2`（只给 `f_trc_conc_wetwat_*`）。
+    /// `patchtype == 2`（只给 `f_mt_conc_wetwat_*`）。
     Wetland,
 }
 
@@ -441,79 +441,79 @@ use TracerScope::{Isotope, NonIsotope, NonvolatileSolute, Transport};
 /// `tracer_hist_out` 逐示踪物写出的全部变量，按写出顺序。
 #[rustfmt::skip]
 pub const TRACER_HISTORY_VARIABLES: [TracerHistoryVariable; 28] = [
-    var(Id::DeltaPrecip, "f_trc_delta_precip_", Surface, PRECIP_KEYS, Isotope, FLUX_DELTA,
+    var(Id::DeltaPrecip, "f_mt_delta_precip_", Surface, PRECIP_KEYS, Isotope, FLUX_DELTA,
         Plain("precipitation plus dew/frost deposition tracer delta"), PERMIL,
         "a_trc_precip / a_water_precip"),
-    var(Id::DeltaRunoff, "f_trc_delta_runoff_", Surface, &["rnof"], Isotope, FLUX_DELTA,
+    var(Id::DeltaRunoff, "f_mt_delta_runoff_", Surface, &["rnof"], Isotope, FLUX_DELTA,
         Plain("total runoff tracer delta"), PERMIL, "a_trc_rnof / a_water_rnof"),
-    var(Id::DeltaEvap, "f_trc_delta_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
+    var(Id::DeltaEvap, "f_mt_delta_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("evapotranspiration tracer delta"), PERMIL, "a_trc_evap / a_water_evap_gross"),
-    var(Id::EvapMass, "f_trc_evap_mass_", Surface, &["fevpa"], Isotope, Mean,
+    var(Id::EvapMass, "f_mt_evap_mass_", Surface, &["fevpa"], Isotope, Mean,
         Plain("signed evapotranspiration tracer mass"), AMOUNT, "a_trc_evap / nac"),
-    var(Id::DeltaSoilevap, "f_trc_delta_soilevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
+    var(Id::DeltaSoilevap, "f_mt_delta_soilevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("soil/surface evaporation tracer delta"), PERMIL, "a_trc_soilevap / a_water_soilevap"),
-    var(Id::DeltaCanopyevap, "f_trc_delta_canopyevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
+    var(Id::DeltaCanopyevap, "f_mt_delta_canopyevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("canopy evaporation tracer delta"), PERMIL, "a_trc_canopyevap / a_water_canopyevap"),
-    var(Id::DeltaSubl, "f_trc_delta_subl_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
+    var(Id::DeltaSubl, "f_mt_delta_subl_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("sublimation tracer delta"), PERMIL, "a_trc_subl / a_water_subl"),
-    var(Id::DeltaWetlandEvap, "f_trc_delta_wetland_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
+    var(Id::DeltaWetlandEvap, "f_mt_delta_wetland_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("wetland evaporation/sublimation tracer delta"), PERMIL,
         "a_trc_wetland_evap / a_water_wetland_evap"),
-    var(Id::DeltaTransp, "f_trc_delta_transp_", Surface, &["etr"], Isotope, FLUX_DELTA,
+    var(Id::DeltaTransp, "f_mt_delta_transp_", Surface, &["etr"], Isotope, FLUX_DELTA,
         Plain("transpiration tracer delta"), PERMIL, "a_trc_transp / a_water_transp"),
-    var(Id::DeltaTranspSrc, "f_trc_delta_transp_src_", Surface, &["etr"], Isotope, FLUX_DELTA,
+    var(Id::DeltaTranspSrc, "f_mt_delta_transp_src_", Surface, &["etr"], Isotope, FLUX_DELTA,
         Plain("transpiration source/xylem tracer delta"), PERMIL, "a_trc_transp_src / a_water_transp"),
-    var(Id::LeafDeltaE, "f_trc_leaf_delta_e_", Surface, &["etr"], Isotope, AreaState,
+    var(Id::LeafDeltaE, "f_mt_leaf_delta_e_", Surface, &["etr"], Isotope, AreaState,
         Plain("leaf evaporation-site NSS delta, area-weighted state"), PERMIL,
         "trc_leaf_delta_e (state, not accumulated)"),
-    var(Id::LeafDeltaB, "f_trc_leaf_delta_b_", Surface, &["etr"], Isotope, STORE_DELTA,
+    var(Id::LeafDeltaB, "f_mt_leaf_delta_b_", Surface, &["etr"], Isotope, STORE_DELTA,
         Plain("bulk leaf-water NSS delta, leaf-water-mole weighted"), PERMIL,
         "R(trc_leaf_delta_b)*trc_leaf_water_moles / trc_leaf_water_moles (state)"),
-    var(Id::ConcPrecip, "f_trc_conc_precip_", Surface, PRECIP_KEYS, NonIsotope, Ratio,
+    var(Id::ConcPrecip, "f_mt_conc_precip_", Surface, PRECIP_KEYS, NonIsotope, Ratio,
         SoluteNote("precipitation plus dew/frost deposition tracer concentration",
             ", dew/frost adding water only"), Units::RatioUnits,
         "a_trc_precip / a_water_precip"),
-    var(Id::ConcRunoff, "f_trc_conc_runoff_", Surface, &["rnof"], NonIsotope, Ratio,
+    var(Id::ConcRunoff, "f_mt_conc_runoff_", Surface, &["rnof"], NonIsotope, Ratio,
         Plain("total runoff tracer concentration"), Units::RatioUnits, "a_trc_rnof / a_water_rnof"),
-    var(Id::VaporExchange, "f_trc_vapor_exchange_", Surface, &["fevpa"], Isotope, Mean,
+    var(Id::VaporExchange, "f_mt_vapor_exchange_", Surface, &["fevpa"], Isotope, Mean,
         Plain("zero-water-flux equilibrium vapour exchange, signed"), AMOUNT,
         "a_trc_vapor_exchange / nac"),
-    var(Id::SurfaceResidue, "f_trc_surface_residue_", Surface, &["wdsrf"], NonvolatileSolute, Mean,
+    var(Id::SurfaceResidue, "f_mt_surface_residue_", Surface, &["wdsrf"], NonvolatileSolute, Mean,
         Plain("immobile surface tracer residue"), AMOUNT, "a_trc_surface_residue_mass / nac"),
-    var(Id::SubsurfaceResidue, "f_trc_subsurface_residue_", Surface, &["wa"], NonvolatileSolute,
+    var(Id::SubsurfaceResidue, "f_mt_subsurface_residue_", Surface, &["wa"], NonvolatileSolute,
         Mean, Plain("immobile subsurface tracer residue"), AMOUNT,
         "a_trc_subsurface_residue_mass / nac"),
-    var(Id::LayerDryInventory, "f_trc_layer_dry_inventory_", Surface, &["wliq_soisno"],
+    var(Id::LayerDryInventory, "f_mt_layer_dry_inventory_", Surface, &["wliq_soisno"],
         NonvolatileSolute, Mean, Plain("dry snow/soil layer tracer inventory"), AMOUNT,
         "a_trc_layer_dry_mass / nac"),
-    var(Id::SolidInventory, "f_trc_solid_inventory_", Surface, &["wliq_soisno"], NonvolatileSolute,
+    var(Id::SolidInventory, "f_mt_solid_inventory_", Surface, &["wliq_soisno"], NonvolatileSolute,
         Mean, Plain("precipitated solid tracer inventory"), AMOUNT, "a_trc_solid_mass / nac"),
-    var(Id::ConcLdew, "f_trc_conc_ldew_", Surface, &["ldew"], Transport, Ratio,
+    var(Id::ConcLdew, "f_mt_conc_ldew_", Surface, &["ldew"], Transport, Ratio,
         RatioWord("canopy tracer "), Units::RatioUnits, "a_trc_ldew_mass / a_water_ldew"),
-    var(Id::ConcSoisno, "f_trc_conc_soisno_", SoilSnow, &["wliq_soisno"], Transport, LayerRatio,
+    var(Id::ConcSoisno, "f_mt_conc_soisno_", SoilSnow, &["wliq_soisno"], Transport, LayerRatio,
         RatioWord("soil/snow layer tracer "), Units::RatioUnits,
         "a_trc_snow_mass/a_water_snow (j<=0), a_trc_soil_mass/a_water_soil (j>=1)"),
-    var(Id::ConcSnowpack, "f_trc_conc_snowpack_", Surface, &["scv"], Transport, Ratio,
+    var(Id::ConcSnowpack, "f_mt_conc_snowpack_", Surface, &["scv"], Transport, Ratio,
         RatioWord("total snowpack tracer "), Units::RatioUnits,
         "(a_trc_scv_mass + sum a_trc_snow_mass) / (a_water_scv + sum a_water_snow)"),
-    var(Id::DeltaSnowpack, "f_trc_delta_snowpack_", Surface, &["scv"], Isotope, STORE_DELTA,
+    var(Id::DeltaSnowpack, "f_mt_delta_snowpack_", Surface, &["scv"], Isotope, STORE_DELTA,
         Plain("total snowpack tracer delta"), PERMIL,
         "(a_trc_scv_mass + sum a_trc_snow_mass) / (a_water_scv + sum a_water_snow)"),
-    var(Id::ConcWa, "f_trc_conc_wa_", Surface, &["wa"], Transport, Ratio,
+    var(Id::ConcWa, "f_mt_conc_wa_", Surface, &["wa"], Transport, Ratio,
         RatioWord("aquifer tracer "), Units::RatioUnits,
         "isotope: a_trc_aquifer_actual_mass / a_water_aquifer_actual; else a_trc_wa_mass / a_water_wa"),
-    var(Id::ConcWaDebt, "f_trc_conc_wa_debt_", Surface, &["wa"], Transport, Ratio,
+    var(Id::ConcWaDebt, "f_mt_conc_wa_debt_", Surface, &["wa"], Transport, Ratio,
         RatioWord("aquifer debt tracer "), Units::RatioUnits,
         "a_trc_wa_debt_mass / a_water_wa_debt"),
-    var(Id::ConcWdsrf, "f_trc_conc_wdsrf_", Surface, &["wdsrf"], Transport, Ratio,
+    var(Id::ConcWdsrf, "f_mt_conc_wdsrf_", Surface, &["wdsrf"], Transport, Ratio,
         RatioWord("surface water tracer "), Units::RatioUnits, "a_trc_wdsrf_mass / a_water_wdsrf"),
     TracerHistoryVariable {
         patch_filter: PatchFilter::Wetland,
-        ..var(Id::ConcWetwat, "f_trc_conc_wetwat_", Surface, &["wetwat"], Transport, Ratio,
+        ..var(Id::ConcWetwat, "f_mt_conc_wetwat_", Surface, &["wetwat"], Transport, Ratio,
             RatioWord("wetland pool tracer "), Units::RatioUnits,
             "a_trc_wetwat_mass / a_water_wetwat")
     },
-    var(Id::ConcScv, "f_trc_conc_scv_", Surface, &["scv"], Transport, Ratio,
+    var(Id::ConcScv, "f_mt_conc_scv_", Surface, &["scv"], Transport, Ratio,
         RatioWord("thin-snow (scv) tracer "), Units::RatioUnits, "a_trc_scv_mass / a_water_scv"),
 ];
 
@@ -535,7 +535,7 @@ pub enum PatchTerm {
 }
 
 /// 二维变量在一个 patch 上的原始取值。`nac` 是 `MOD_Vars_1DAccFluxes` 的累加次数。
-/// 三维的 `f_trc_conc_soisno_*` 用 [`soisno_layer_pairs`]。
+/// 三维的 `f_mt_conc_soisno_*` 用 [`soisno_layer_pairs`]。
 pub fn patch_term(
     variable: &TracerHistoryVariable,
     tracer: &TracerDescriptor,
@@ -605,11 +605,11 @@ pub fn patch_term(
         Id::ConcWdsrf => pair(acc.wdsrf_mass, water.wdsrf),
         Id::ConcWetwat => pair(acc.wetwat_mass, water.wetwat),
         Id::ConcScv => pair(acc.scv_mass, water.scv),
-        Id::ConcSoisno => panic!("f_trc_conc_soisno_* is 3-D; use soisno_layer_pairs"),
+        Id::ConcSoisno => panic!("f_mt_conc_soisno_* is 3-D; use soisno_layer_pairs"),
     }
 }
 
-/// `tracer_hist_out` 为 `f_trc_conc_soisno_*` 拼的逐层 (质量, 水量)，层 -4..10；
+/// `tracer_hist_out` 为 `f_mt_conc_soisno_*` 拼的逐层 (质量, 水量)，层 -4..10；
 /// 累计水量 `<= tiny` 的层两者都是 `spval`。
 pub fn soisno_layer_pairs(itrc: usize, state: &PatchTracerState) -> [(f64, f64); SOISNO_LAYERS] {
     let acc = &state.acc[itrc];
@@ -692,7 +692,7 @@ pub fn single_point_value(
     }
 }
 
-/// 单点 `f_trc_conc_soisno_*`（`soilsnow` 维 -4..10）。
+/// 单点 `f_mt_conc_soisno_*`（`soilsnow` 维 -4..10）。
 pub fn single_point_soisno(
     itrc: usize,
     state: &PatchTracerState,
@@ -805,7 +805,7 @@ impl GridCell {
         }
     }
 
-    /// 三维 `f_trc_conc_soisno_*` 的一层贡献（映射初值是 spval：不合格的层不入图）。
+    /// 三维 `f_mt_conc_soisno_*` 的一层贡献（映射初值是 spval：不合格的层不入图）。
     pub fn add_layer(&mut self, mass: f64, water: f64, area: f64, patch_ok: bool) {
         if !(patch_ok && water > TRC_TINY && mass != SPVAL) {
             return;

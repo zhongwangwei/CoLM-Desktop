@@ -24,6 +24,7 @@ fn descriptor(name: &str, owner: StateOwner, max_dissolved_conc: f64) -> TracerD
         vapor_default_conc: 1.0,
         max_dissolved_conc,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }

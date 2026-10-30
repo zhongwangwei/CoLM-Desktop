@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::methane::MethaneSetup;
 use crate::tracer::{ensure_dimension, put_array_f64, put_array_i32, put_scalar_i32};
 
-/// `trc_hist_schema`。
+/// `mt_hist_schema`。
 const SCHEMA: i32 = 1;
 
 /// 一个累加器在状态里的位置。
@@ -213,18 +213,18 @@ pub fn write(path: &Path, tracers: &SidecarTracers<'_>) -> Result<()> {
             .flatten()
             .collect();
         let ntracers = set.len();
-        put_scalar_i32(&mut file, "trc_hist_schema", SCHEMA)?;
-        put_scalar_i32(&mut file, "trc_hist_count", i32::try_from(ntracers)?)?;
+        put_scalar_i32(&mut file, "mt_hist_schema", SCHEMA)?;
+        put_scalar_i32(&mut file, "mt_hist_count", i32::try_from(ntracers)?)?;
         ensure_dimension(
             &mut file,
-            "trc_hist_descriptor_field",
+            "mt_hist_descriptor_field",
             colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
         )?;
-        ensure_dimension(&mut file, "trc_hist_descriptor_row", ntracers)?;
+        ensure_dimension(&mut file, "mt_hist_descriptor_row", ntracers)?;
         put_array_i32(
             &mut file,
-            "trc_hist_descriptor",
-            &["trc_hist_descriptor_row", "trc_hist_descriptor_field"],
+            "mt_hist_descriptor",
+            &["mt_hist_descriptor_row", "mt_hist_descriptor_field"],
             &identity,
         )?;
         let mut patches = tracers.patches.clone();
@@ -341,8 +341,8 @@ fn check_descriptor(file: &netcdf::File, set: &TracerSet) -> Result<()> {
         );
         Ok(variable.get_value::<i32, _>(())?)
     };
-    let schema = scalar("trc_hist_schema")?;
-    let count = scalar("trc_hist_count")?;
+    let schema = scalar("mt_hist_schema")?;
+    let count = scalar("mt_hist_count")?;
     if schema != SCHEMA || usize::try_from(count).ok() != Some(set.len()) {
         bail!("incompatible or incomplete generic land-tracer history sidecar");
     }
@@ -352,7 +352,7 @@ fn check_descriptor(file: &netcdf::File, set: &TracerSet) -> Result<()> {
         .flatten()
         .collect();
     let variable = file
-        .variable("trc_hist_descriptor")
+        .variable("mt_hist_descriptor")
         .context("incompatible or incomplete generic land-tracer history sidecar")?;
     let lens: Vec<usize> = variable.dimensions().iter().map(|dim| dim.len()).collect();
     ensure!(

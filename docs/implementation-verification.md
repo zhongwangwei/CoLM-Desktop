@@ -39704,3 +39704,88 @@ Fortran 里剩下需要「有没有物运移在跑」的地方统一改成 `nmts
 - 上游新增 `DEF_MT_FORCING_MIN_PRECIP` / `DEF_MT_FORCING_MEMORY_PRECIP`（近干阈值与雪相回退），
   Rust 的 `tracer_forcing` 仍用旧的常量 `1e-7`，也还没有"记住上一次雪比值"的相态回退；
   这是新功能，不属于改名迁移。
+
+## 上游 7d2fca93→ddb7bc1a 并入与 MT 命名收口（2026-10-30）
+
+接上一节。先把上游又前进的三个提交并入 vendor，再把上一轮漏掉的命名迁移与残留的相态回填
+一并收口。
+
+### 1 上游三个修复提交
+
+- `6a5e8985` N2O 重启死锁：`MOD_MT_RiverLake` 用只在 worker 上分配的 `mt_n2o_source` 守着五处
+  集合调用，master/IO 秩不进集合、跑到第一个 history 窗口边界就挂死（"stops after 48 steps"）。
+  条件测试移进叶子过程，`f_mt_n2o_flux_*` 与 `mt_hist_n2o_*` 始终写出。同提交把
+  `DEF_NH4_LEACHING_MODE` 改回文档与参数文件一直用的 `DEF_NH4_LEACHING`，并把
+  `DEF_MT_N2O_EF5_NH4/NO3` 的默认值从 0 改成 -1（"未设置"），`>= 0` 才算覆盖，0 才能关闭换算。
+  描述符指纹同时加入 `n2o_ef5`（第 9 个实数）。
+- `3645f1fa` 重启后 material history 窗口从零开始：重启里的 `mt_hist_*` 行总是整窗（写在窗口
+  关闭步的末尾、早于 history 冲刷），恢复它会让重启后的第一个窗口把旧窗口再算一遍
+  （day2 报成两日均值）。行仍照常写出，只是不再读回。
+- `ddb7bc1a` `MOD_Hist` 的 `filter_crop`/`filter_irrig` 在分配处清零：`irrigarea` 无条件写出，
+  灌溉关闭时掩码从未赋值，报出的面积随堆布局变化（不同汇流开关差 39–42 个格点）。
+- 其余小项：`MOD_Grid_RiverLakeFlow` 的 `zgrad_dn` 在 -99/-10 分支置 0；`MOD_MT_Sediment` 的
+  history 快照在 final 释放；`MOD_MT_SoilInit` 显式释放 IO 秩块缓冲；`MOD_MT_Lulcc` 的停机
+  消息补上"class 0 全量 = 上一年的地类没读到"的提示；`CoLMDRIVER` 删掉从不启用的 OpenMP
+  patch 循环。
+
+`MOD_MT_Conservation` 与 `CoLMMAIN` 的 `#ifndef CatchLateralFlow` 分支按上游删除：vendor 的 MT
+始终编译，`MOD_MT_Defs.F90` 的 `#if (defined CATCHMENT)` 已经让 catchment 内核在建时就报错，
+那条分支永远到不了。
+
+### 2 Rust 侧的命名收口
+
+上游 7d2fca93 的改名范围是目录/模块/宏、namelist 键、**重启变量与 history 输出变量**；
+`tracer_is_isotope` 这类内部函数名与 `a_trc_*` 累加器上游仍保留。上一轮只改到前两项，本轮补齐：
+
+- 重启变量 `trc_land_*` / `trc_forcing_*` / `trc_river_*` / `trc_mass_*` 等 → `mt_*`（与上游
+  `MOD_MT_Rest` / `MOD_MT_RiverLake` 的写出逐个对应）。
+- history 输出 28 个 `f_trc_*` → `f_mt_*`（`colm-core/src/tracer/hist.rs`、`river/history.rs`）。
+- history 旁车 `trc_hist_schema/count/descriptor*` → `mt_hist_*`（本地扩展，上游没有这组变量）。
+
+生成表随之重生成：`gen-schema` 964 字段（`DEF_NH4_LEACHING`、EF5 默认 -1）、`gen-histmap`
+724 变量 / 586 开关；`parameter-audit` 产物同步。
+
+### 3 强迫缓存的 schema 2 与雨雪相态回填
+
+- 缓存 schema 升到 2，新增 `mt_forcing_precip_reliable`（1 = 记住值来自
+  total > `DEF_MT_FORCING_MEMORY_PRECIP` 的记录）。schema 1 仍可读，按"全部可靠"处理。
+- `GriddedTracerForcing` 把"本步值"与"记住值"分开：`precip_step` 只在本步有效时更新；
+  `precip` 只在可靠记录时更新；`precip_status` 保留 VALID/NEAR_DRY/INVALID，近干阈值改用
+  namelist 的 `DEF_MT_FORCING_MIN_PRECIP`（默认 5e-6，原来硬编码 1e-7）。
+- 相态回填（`mt_forc_phase_fill`：同位素且同时有降水与蒸汽强迫）：还没有可靠记录的 patch，
+  记住值取 `alpha_ice_vap_deposition(T) · vapor`；雨在近干时取 `alpha_liq_vap(T) · vapor`，
+  雪保持记住值。雨雪两列在 `update_values` 末尾一次算好，没有相态回填的物种两列相同。
+  因此默认配置（单比值）逐位不变：`acc.precip` 的第二项 `forc_rain·(R_rain−R_snow)·dt` 恰为 0。
+- `colm-core` 的调用链跟着分相：`TracerStepContext` 的 `precip_ratio` 拆成 `rain_ratio` /
+  `snow_ratio`；`tracer_precip` 用雨的比值做混合与喷灌、雪的比值做雪段与输入记账；土壤水用
+  rain（上游 `tracer_forcing_rain_value`）；冰川/湖泊特殊 patch 用 snow 作 `R_precip`、rain 作
+  修正项（`mixed_box` 新增 `rain_mass` 与 `r_rain`）。
+- LULCC 迁移按上游：只有可靠记录贡献继承的雪记忆（先把降水比值乘 reliable），reliable 独立
+  按面积映射，再按可靠来源面积归一化、无可靠来源回到配置默认值，最后二值化。
+- 描述符指纹加入 `n2o_ef5`；solute 参数文件解析新增该字段，校验范围 [0,1)。
+
+### 本轮验证（真实执行）
+
+- Fortran：`build_kernel.sh default /tmp/colm-mt-final2`、`build_kernel.sh latlon /tmp/colm-mt-final2`
+  均 exit 0（产物齐全）。`build_kernel.sh catchment` 在 `MOD_MT_Defs.o` 上按预期报
+  `MaterialTransport does not support the catchment (unit-catchment) grid`——vendor 的 MT 始终
+  编译，这条 `#error` 就是"catchment 内核不支持"的表达（见遗留）。
+- Rust：`cargo test --workspace --lib --bins -- --test-threads=1` **3329 passed / 0 failed**；
+  `cargo test -p colm-cli -- --test-threads=1` **811 passed**；GUI 后端
+  `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` **582 passed**。
+- 生成表与契约：`cargo test -p colm-schema --test drift`、`-p colm-hist --test drift`、
+  `-p colm-core --test drift_landcover`、`-p colm-core --test drift_co2`、
+  `-p colm-namelist --test roundtrip`、`-p oracle --test histmap` 全过；
+  `cargo run -p xtask -- check-gui` 262 条命令契约通过。
+- 前端：`npm run typecheck` / `lint` / `format:check` 全过；`npm test` **1275 passed**。
+- 风格：两个 workspace 的 `cargo clippy --all-targets -- -D warnings` 与 `cargo fmt --all --check` 全过。
+- 未运行：真实 IsoGSM 强迫文件上的相态回填、真实 catchment 内核、端到端 pair run、
+  旧（schema 1）重启文件的跨版本续跑。
+
+### 遗留
+
+- `build_kernel.sh` 仍列出 catchment 预设，但该内核现在必失败（`MOD_MT_Defs.F90` 的 `#error`）。
+  要恢复 catchment 内核，得先把 MT 改回可关闭的编译期开关，或把这条换成 `mt_any_enabled()` 的
+  运行时拒绝；Rust 入口已有对应的 `check_catchment` 拒绝。
+- `oracle/nml-unread.snapshot` 仍是旧审计脚本的产物、里面仍是旧名，没有测试消费，本轮未重生成。
+- 相态回填只做到与上游同构，尚未在真实 IsoGSM 文件上做逐位对照。

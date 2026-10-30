@@ -748,6 +748,10 @@ CONTAINS
                   ! assume: 1. downstream river bed is equal to this river bed.
                   !         2. downstream water surface is equal to this river depth.
                   !         3. downstream water velocity is equal to this velocity.
+                  ! No downstream face exists, so its pressure (zgrad) contribution
+                  ! is zero; leaving it unset fed an uninitialised value into
+                  ! push_ups2ucat_sum -> sum_zgrad_riv.
+                  zgrad_dn(i) = 0.
 
                   veloc_riv(i) = max(veloc_riv(i), 0.)
 
@@ -791,6 +795,8 @@ CONTAINS
                ELSEIF (ucat_next(i) == -10) THEN ! inland depression
                   hflux_fc(i) = 0
                   mflux_fc(i) = 0
+                  ! No outflow face; keep the upstream pressure sum deterministic.
+                  zgrad_dn(i) = 0.
                ENDIF
 
                sum_hflux_riv(i) = sum_hflux_riv(i) + hflux_fc(i)

@@ -31,6 +31,7 @@ fn descriptor(name: &str, family: TracerFamily) -> TracerDescriptor {
         vapor_default_conc: 0.0,
         max_dissolved_conc: f64::MAX,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }
@@ -95,7 +96,7 @@ fn the_tracer_window_round_trips_with_the_upstream_layout() {
     let water = file.variable("a_water_snow").unwrap();
     assert_eq!(water.dimensions().len(), 2);
     assert_eq!(
-        file.variable("trc_hist_count")
+        file.variable("mt_hist_count")
             .unwrap()
             .get_value::<i32, _>(())
             .unwrap(),

@@ -2245,7 +2245,6 @@ CONTAINS
    SUBROUTINE mt_riverlake_read_restart (file_restart, found_restart, missing_mask)
 
    USE MOD_Vector_ReadWrite
-   USE MOD_Grid_RiverLakeHistState, only: acctime_ucat
    USE MOD_Grid_RiverLakeNetwork, only: numucat, totalnumucat, ucat_data_address, &
       ucat_gdid, ucat_next
    USE MOD_Grid_RiverLakeLevee, only: has_levee_bf => has_levee
@@ -2262,7 +2261,7 @@ CONTAINS
 
    integer :: imt
    integer :: ii_bf, itrc_bf
-   logical :: network_meta_matches, field_present, hist_complete, hist_time_present
+   logical :: network_meta_matches, field_present
    logical :: has_transport_tracer, descriptor_compatible
    character(len=64) :: varname
    real(r8), allocatable :: tmpvec(:)
@@ -2432,28 +2431,21 @@ CONTAINS
       CALL vector_read_and_scatter(file_restart, tmpvec, numucat, 'acc_rnof_ref', ucat_data_address)
       IF (p_is_worker .and. numucat > 0) acc_rnof_ref(:) = tmpvec(:)
 
-      ! History is one unit: partial optional legacy rows must not be mixed
-      ! with a full-window denominator or with another row's history window.
-      hist_complete = .true.
-      DO imt = 1, nmts
-         IF (.not. mt_uses_generic_water(imt)) CYCLE
-         write(varname, '(A,A)') 'mt_hist_stor_', trim(tracer_names(imt))
-         CALL probe_riverlake_restart_vector(file_restart, trim(varname), .false., field_present)
-         hist_complete = hist_complete .and. field_present
-         write(varname, '(A,A)') 'mt_hist_levsto_', trim(tracer_names(imt))
-         CALL probe_riverlake_restart_vector(file_restart, trim(varname), .false., field_present)
-         hist_complete = hist_complete .and. field_present
-         write(varname, '(A,A)') 'mt_hist_out_', trim(tracer_names(imt))
-         CALL probe_riverlake_restart_vector(file_restart, trim(varname), .false., field_present)
-         hist_complete = hist_complete .and. field_present
-         write(varname, '(A,A)') 'mt_hist_bifout_', trim(tracer_names(imt))
-         CALL probe_riverlake_restart_vector(file_restart, trim(varname), .false., field_present)
-         hist_complete = hist_complete .and. field_present
-      ENDDO
-      CALL probe_riverlake_restart_vector(file_restart, 'mt_hist_water_storage', .false., field_present)
-      hist_complete = hist_complete .and. field_present
-      CALL probe_riverlake_restart_vector(file_restart, 'mt_hist_levsto_water', .false., field_present)
-      hist_complete = hist_complete .and. field_present
+      ! History window: always start a fresh one after a restart.
+      !
+      ! The host never restores its history window (MOD_HistAccRestart's
+      ! save_history_acc_restart has no caller, so no sidecar is ever written
+      ! and hist_init opens a new window at the model start).  This routine
+      ! used to restore the rows persisted below, which made the first
+      ! post-restart window cover the old window as well: a daily restart then
+      ! reported mean(day1, day2) instead of day2 (verified bitwise, and the
+      ! river inflow was identical, so only the window denominator differed).
+      ! Restoring them is also unsafe in principle, because the restart is
+      ! written at the end of the closing step, BEFORE the history flush of
+      ! that window, so the rows always carry a complete window.
+      !
+      ! The rows are still written (schema unchanged) so a restart file keeps a
+      ! self-contained description of the window that ended there.
       IF (p_is_worker) THEN
          a_trc_storage_mass = 0._r8
          a_water_storage = 0._r8
@@ -2462,44 +2454,10 @@ CONTAINS
          a_trc_out = 0._r8
          a_trc_bifout = 0._r8
          a_trc_acctime = 0._r8
+         IF (allocated(mt_n2o_source)) mt_n2o_source = 0._r8
       ENDIF
-      IF (.not. hist_complete) THEN
-         IF (p_is_master) WRITE(*,'(A)') &
-            '  NOTE mt_riverlake_read_restart: legacy material history starts a post-restart window.'
-      ELSE
-      DO imt = 1, nmts
-         IF (.not. mt_uses_generic_water(imt)) CYCLE
-         write(varname, '(A,A)') 'mt_hist_stor_', trim(tracer_names(imt))
-         CALL read_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_storage_mass, imt=imt)
-         write(varname, '(A,A)') 'mt_hist_levsto_', trim(tracer_names(imt))
-         CALL read_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_levsto_mass, imt=imt)
-         write(varname, '(A,A)') 'mt_hist_out_', trim(tracer_names(imt))
-         CALL read_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_out, imt=imt)
-         write(varname, '(A,A)') 'mt_hist_bifout_', trim(tracer_names(imt))
-         CALL read_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_bifout, imt=imt)
-         IF (allocated(mt_n2o_source)) THEN
-            write(varname, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
-            CALL probe_riverlake_restart_vector(file_restart, trim(varname), .false., hist_time_present)
-            IF (hist_time_present) THEN
-               CALL read_mt_hist_acc (file_restart, trim(varname), acc2=mt_n2o_source, imt=imt)
-            ELSE
-               ! Restarts written before the N2O diagnostic carry no numerator;
-               ! start its window at zero instead of failing the reader.
-               mt_n2o_source(imt, :) = 0._r8
-            ENDIF
-         ENDIF
-      ENDDO
-      CALL read_mt_hist_acc (file_restart, 'mt_hist_water_storage', acc1=a_water_storage)
-      CALL read_mt_hist_acc (file_restart, 'mt_hist_levsto_water', acc1=a_levsto_water)
-      CALL probe_riverlake_restart_vector(file_restart, 'mt_hist_acctime', .false., hist_time_present)
-      IF (hist_time_present) THEN
-         CALL read_mt_hist_acc (file_restart, 'mt_hist_acctime', acc1=a_trc_acctime)
-      ELSEIF (p_is_worker .and. allocated(acctime_ucat)) THEN
-         ! Transitional files with all six numerators but no local clock used
-         ! the water history clock; preserve that complete window on upgrade.
-         a_trc_acctime = acctime_ucat
-      ENDIF
-      ENDIF
+      IF (p_is_master) WRITE(*,'(A)') &
+         '  NOTE mt_riverlake_read_restart: the material history window starts at the restart.'
 
       ! Reject corrupt loaded rows before the levee-configuration migration can
       ! fold protected mass into the visible pool and thereby hide its origin.
@@ -2671,10 +2629,8 @@ CONTAINS
          CALL write_mt_hist_acc(file, trim(name), acc2=a_trc_out, imt=imt)
          write(name, '(A,A)') 'mt_hist_bifout_', trim(tracer_names(imt))
          CALL write_mt_hist_acc(file, trim(name), acc2=a_trc_bifout, imt=imt)
-         IF (allocated(mt_n2o_source)) THEN
-            write(name, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
-            CALL write_mt_hist_acc(file, trim(name), acc2=mt_n2o_source, imt=imt)
-         ENDIF
+         write(name, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
+         CALL write_mt_hist_acc(file, trim(name), acc2=mt_n2o_source, imt=imt)
       ENDDO
       CALL write_mt_hist_acc(file, 'mt_hist_water_storage', acc1=a_water_storage)
       CALL write_mt_hist_acc(file, 'mt_hist_levsto_water', acc1=a_levsto_water)
@@ -2714,16 +2670,14 @@ CONTAINS
          CALL read_mt_hist_acc(file, trim(name), acc2=a_trc_out, imt=imt)
          write(name, '(A,A)') 'mt_hist_bifout_', trim(tracer_names(imt))
          CALL read_mt_hist_acc(file, trim(name), acc2=a_trc_bifout, imt=imt)
-         IF (allocated(mt_n2o_source)) THEN
-            write(name, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
-            CALL probe_riverlake_restart_vector(file, trim(name), .false., present_on_disk)
-            IF (present_on_disk) THEN
-               CALL read_mt_hist_acc(file, trim(name), acc2=mt_n2o_source, imt=imt)
-            ELSE
-               ! Older sidecars predate the N2O diagnostic; start its window
-               ! at zero instead of failing the whole history transaction.
-               mt_n2o_source(imt, :) = 0._r8
-            ENDIF
+         write(name, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
+         CALL probe_riverlake_restart_vector(file, trim(name), .false., present_on_disk)
+         IF (present_on_disk) THEN
+            CALL read_mt_hist_acc(file, trim(name), acc2=mt_n2o_source, imt=imt)
+         ELSEIF (allocated(mt_n2o_source)) THEN
+            ! Older sidecars predate the N2O diagnostic; start its window
+            ! at zero instead of failing the whole history transaction.
+            mt_n2o_source(imt, :) = 0._r8
          ENDIF
       ENDDO
       CALL read_mt_hist_acc(file, 'mt_hist_water_storage', acc1=a_water_storage)
@@ -2895,10 +2849,8 @@ CONTAINS
          CALL write_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_out, imt=imt)
          write(varname, '(A,A)') 'mt_hist_bifout_', trim(tracer_names(imt))
          CALL write_mt_hist_acc (file_restart, trim(varname), acc2=a_trc_bifout, imt=imt)
-         IF (allocated(mt_n2o_source)) THEN
-            write(varname, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
-            CALL write_mt_hist_acc (file_restart, trim(varname), acc2=mt_n2o_source, imt=imt)
-         ENDIF
+         write(varname, '(A,A)') 'mt_hist_n2o_', trim(tracer_names(imt))
+         CALL write_mt_hist_acc (file_restart, trim(varname), acc2=mt_n2o_source, imt=imt)
       ENDDO
       CALL write_mt_hist_acc (file_restart, 'mt_hist_water_storage', acc1=a_water_storage)
       CALL write_mt_hist_acc (file_restart, 'mt_hist_levsto_water', acc1=a_levsto_water)
@@ -3066,29 +3018,28 @@ CONTAINS
             longname = trim(longname), &
             units = trim(flux_units))
 
-         ! --- Nitrogen converted to N2O at the river entry (design A) ---
-         ! Same window denominator as the outflux above; kg N/s.  The row is
-         ! always written (interior values may be zero) so a configured EF5
-         ! is visible in the history rather than silently absent.
-         IF (allocated(mt_n2o_source)) THEN
-            IF (p_is_worker .and. numucat > 0) THEN
-               tmpvec(:) = spval
-               DO i = 1, numucat
-                  IF (i <= size(a_trc_acctime)) THEN
-                     IF (a_trc_acctime(i) > 0._r8) &
-                        tmpvec(i) = mt_n2o_source(imt, i) / a_trc_acctime(i)
-                  ENDIF
-               ENDDO
-               WHERE (abs(tmpvec) < mt_hist_fp_dust) tmpvec = 0._r8
-            ENDIF
-
-            write(varname, '(A,A)') 'f_mt_n2o_flux_', trim(tracer_names(imt))
-            write(longname, '(A,A,A)') 'N2O-N emitted at river entry (', &
-               trim(tracer_names(imt)), ')'
-            CALL route_hist_write_ucat (tmpvec, trim(varname), &
-               longname = trim(longname), &
-               units = 'kg N/s')
+         ! The row is always written (interior values may be zero) so a
+         ! configured EF5 is visible in the history rather than silently
+         ! absent.  route_hist_write_ucat is collective: master/IO ranks must
+         ! enter it too, so it is NOT guarded by allocated(mt_n2o_source)
+         ! (that array exists only on workers and only for numucat > 0).
+         IF (p_is_worker .and. numucat > 0) THEN
+            tmpvec(:) = spval
+            DO i = 1, numucat
+               IF (i <= size(a_trc_acctime)) THEN
+                  IF (a_trc_acctime(i) > 0._r8) &
+                     tmpvec(i) = mt_n2o_source(imt, i) / a_trc_acctime(i)
+               ENDIF
+            ENDDO
+            WHERE (abs(tmpvec) < mt_hist_fp_dust) tmpvec = 0._r8
          ENDIF
+
+         write(varname, '(A,A)') 'f_mt_n2o_flux_', trim(tracer_names(imt))
+         write(longname, '(A,A,A)') 'N2O-N emitted at river entry (', &
+            trim(tracer_names(imt)), ')'
+         CALL route_hist_write_ucat (tmpvec, trim(varname), &
+            longname = trim(longname), &
+            units = 'kg N/s')
 
          IF (DEF_USE_LEVEE) THEN
             ! --- Protected-side tracer storage behind levees ---

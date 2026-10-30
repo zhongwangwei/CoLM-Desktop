@@ -64,8 +64,7 @@ module MOD_MT_Methane_Physics
 	! Worst host-water/inundation disagreement seen so far, as a fraction of
 	! pore volume, and whether the one-shot warning has been emitted. Module
 	! state rather than an argument because the report is per run, not per
-	! patch; the driver's patch loop is not OpenMP-parallel (CoLMDRIVER.F90),
-	! so a plain saved scalar is safe here.
+	! patch.
 	real(r8) :: host_water_max_resid = 0._r8
 	real(r8) :: host_water_reported  = 0._r8
 	logical  :: host_water_warned    = .false.

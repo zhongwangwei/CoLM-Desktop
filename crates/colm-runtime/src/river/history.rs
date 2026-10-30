@@ -738,7 +738,7 @@ impl RiverHistoryWriter {
 
 impl RiverHistoryWriter {
     /// `write_tracer_history`：每个输运示踪物的浓度（水量加权）、同位素 δ、出流，开堤防时
-    /// 堤内储量与其 δ（`trc_hist_fp_dust = 1e-12` 的显示清理只作用于输出）。
+    /// 堤内储量与其 δ（`mt_hist_fp_dust = 1e-12` 的显示清理只作用于输出）。
     fn tracer_fields(
         &self,
         tracers: &super::tracer::RiverTracers,
@@ -802,14 +802,14 @@ impl RiverHistoryWriter {
                 })
                 .collect();
             out.push((
-                format!("f_trc_conc_{name}"),
+                format!("f_mt_conc_{name}"),
                 format!("tracer {word} ({name})"),
                 conc_units,
                 dust(conc),
             ));
             if delta {
                 out.push((
-                    format!("f_trc_delta_{name}"),
+                    format!("f_mt_delta_{name}"),
                     format!("tracer delta ({name})"),
                     "permil".to_owned(),
                     ratio_delta(&h.storage_mass[itrc], &h.water_storage),
@@ -827,21 +827,21 @@ impl RiverHistoryWriter {
                     .collect()
             };
             out.push((
-                format!("f_trc_flux_{name}"),
+                format!("f_mt_flux_{name}"),
                 format!("tracer outflux ({name})"),
                 flux_units.to_owned(),
                 dust(per_time(&h.out[itrc])),
             ));
             if levee {
                 out.push((
-                    format!("f_trc_levsto_{name}"),
+                    format!("f_mt_levsto_{name}"),
                     format!("protected-side levee tracer storage ({name})"),
                     mass_units.to_owned(),
                     dust(per_time(&h.levsto_mass[itrc])),
                 ));
                 if delta {
                     out.push((
-                        format!("f_trc_levdelta_{name}"),
+                        format!("f_mt_levdelta_{name}"),
                         format!("protected-side levee tracer delta ({name})"),
                         "permil".to_owned(),
                         ratio_delta(&h.levsto_mass[itrc], &h.levsto_water),
@@ -850,7 +850,7 @@ impl RiverHistoryWriter {
             }
             if bifurcation {
                 out.push((
-                    format!("f_trc_bifout_{name}"),
+                    format!("f_mt_bifout_{name}"),
                     format!("tracer net bifurcation outflux ({name})"),
                     flux_units.to_owned(),
                     dust(per_time(&h.bifout[itrc])),

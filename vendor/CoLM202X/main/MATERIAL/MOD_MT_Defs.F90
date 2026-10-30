@@ -256,7 +256,7 @@ CONTAINS
          IF (only_transport .and. .not. mt_uses_generic_water(imt)) CYCLE
          iidentity = iidentity + 1
          descriptor = ''
-         WRITE(descriptor, '(A,"|",A,"|",A,"|",4(I0,"|"),8(ES24.16E3,"|"))') &
+         WRITE(descriptor, '(A,"|",A,"|",A,"|",4(I0,"|"),9(ES24.16E3,"|"))') &
             trim(tracers(imt)%name), trim(tracers(imt)%category), &
             trim(tracers(imt)%unit_kind), tracers(imt)%family_id, &
             tracers(imt)%state_owner, tracers(imt)%reaction_mode, &
@@ -264,7 +264,7 @@ CONTAINS
             tracers(imt)%ref_ratio, tracers(imt)%init_delta, &
             tracers(imt)%init_conc, tracers(imt)%precip_default_conc, &
             tracers(imt)%vapor_default_conc, tracers(imt)%max_dissolved_conc, &
-            tracers(imt)%decay_rate
+            tracers(imt)%decay_rate, tracers(imt)%n2o_ef5
          DO k = 1, len(descriptor)
             identity(k, iidentity) = iachar(descriptor(k:k))
          ENDDO

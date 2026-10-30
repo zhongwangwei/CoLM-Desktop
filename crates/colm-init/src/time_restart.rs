@@ -1062,9 +1062,9 @@ pub fn write_empty_land_tracer_transaction(
     let mut file =
         netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
     for (name, value) in [
-        ("trc_land_restart_complete", 1_i32),
-        ("trc_land_restart_schema", 5),
-        ("trc_land_transport_count", 0),
+        ("mt_land_restart_complete", 1_i32),
+        ("mt_land_restart_schema", 5),
+        ("mt_land_transport_count", 0),
     ] {
         let mut variable = match file.variable_mut(name) {
             Some(variable) => variable,
@@ -1072,9 +1072,9 @@ pub fn write_empty_land_tracer_transaction(
         };
         variable.put_value(value, ())?;
     }
-    let mut variable = match file.variable_mut("trc_aquifer_mixing_water_mm") {
+    let mut variable = match file.variable_mut("mt_aquifer_mixing_water_mm") {
         Some(variable) => variable,
-        None => file.add_variable::<f64>("trc_aquifer_mixing_water_mm", &[])?,
+        None => file.add_variable::<f64>("mt_aquifer_mixing_water_mm", &[])?,
     };
     variable.put_value(aquifer_mixing_water_mm, ())?;
     Ok(())

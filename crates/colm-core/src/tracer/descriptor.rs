@@ -60,6 +60,10 @@ pub struct TracerDescriptor {
     pub vapor_default_conc: f64,
     pub max_dissolved_conc: f64,
     pub reactive_decay_rate: f64,
+    /// `DEF_SOLUTE%n2o_ef5`：进入河道时换算成 N2O-N 的间接排放因子 [kg N2O-N/kg N]。
+    /// 默认 0（不换算）；只有它进描述符指纹（上游 `tracer_build_descriptor_identity` 的
+    /// 第 9 个实数），改了它旧重启就不再匹配。
+    pub n2o_ef5: f64,
     pub charge: i32,
 }
 
@@ -77,6 +81,8 @@ pub struct TracerParameterOverrides {
     pub vapor_default_conc: Option<f64>,
     pub max_dissolved_conc: Option<f64>,
     pub decay_rate: Option<f64>,
+    /// `DEF_SOLUTE%n2o_ef5`（`MOD_MT_Solute.F90:85-115`）。
+    pub n2o_ef5: Option<f64>,
     pub charge: Option<i32>,
 }
 
@@ -211,6 +217,7 @@ impl TracerSet {
                 vapor_default_conc: init_delta,
                 max_dissolved_conc: HUGE,
                 reactive_decay_rate: 0.0,
+                n2o_ef5: 0.0,
                 charge: 0,
             };
             set_category_defaults(&mut tracer);
@@ -232,6 +239,7 @@ impl TracerSet {
                 vapor_default_conc: 0.0,
                 max_dissolved_conc: HUGE,
                 reactive_decay_rate: 0.0,
+                n2o_ef5: 0.0,
                 charge: 0,
             };
             set_category_defaults(&mut tracer);
@@ -254,6 +262,7 @@ impl TracerSet {
                 vapor_default_conc: 0.0,
                 max_dissolved_conc: HUGE,
                 reactive_decay_rate: 0.0,
+                n2o_ef5: 0.0,
                 charge: 0,
             };
             set_category_defaults(&mut tracer);
@@ -276,6 +285,7 @@ impl TracerSet {
                 vapor_default_conc: 0.0,
                 max_dissolved_conc: HUGE,
                 reactive_decay_rate: 0.0,
+                n2o_ef5: 0.0,
                 charge: 0,
             };
             set_category_defaults(&mut tracer);
@@ -330,7 +340,7 @@ impl TracerSet {
         // `register_tracer_provider`（`tracer_lifecycle_init` 里编进来的 provider）：注册时以 provider
         // 的声明覆盖 `reaction_mode`。CH4 声明 `REACTION_PROVIDER`
         // （`MOD_Tracer_Reactive_Methane.F90:102`），SEDIMENT 声明 `REACTION_NONE`。它进
-        // 描述符指纹（history 旁车的 `trc_hist_descriptor`）。
+        // 描述符指纹（history 旁车的 `mt_hist_descriptor`）。
         for tracer in &mut tracers {
             if matches!(
                 tracer.name.trim().to_ascii_uppercase().as_str(),
@@ -371,7 +381,7 @@ impl TracerSet {
     }
 
     /// `tracer_build_descriptor_identity(identity)`（不限输运示踪物）：history 旁车的
-    /// `trc_hist_descriptor` 每个注册示踪物一行。
+    /// `mt_hist_descriptor` 每个注册示踪物一行。
     pub fn descriptor_identity_all(&self) -> Vec<[i32; DESCRIPTOR_IDENTITY_WIDTH]> {
         self.tracers
             .iter()
@@ -485,6 +495,7 @@ impl TracerDescriptor {
             self.vapor_default_conc,
             self.max_dissolved_conc,
             self.reactive_decay_rate,
+            self.n2o_ef5,
         ] {
             text.push_str(&format_es24_16e3(value));
             text.push('|');
@@ -609,6 +620,9 @@ fn apply_overrides(tracer: &mut TracerDescriptor, overrides: &TracerParameterOve
     if let Some(value) = overrides.decay_rate {
         tracer.reactive_decay_rate = value;
     }
+    if let Some(value) = overrides.n2o_ef5 {
+        tracer.n2o_ef5 = value;
+    }
     if let Some(value) = overrides.charge {
         tracer.charge = value;
     }
@@ -725,6 +739,7 @@ fn validate(tracer: &mut TracerDescriptor, use_bgc: bool) -> Result<()> {
         ("vapor_default_conc", tracer.vapor_default_conc),
         ("max_dissolved_conc", tracer.max_dissolved_conc),
         ("reactive_decay_rate", tracer.reactive_decay_rate),
+        ("n2o_ef5", tracer.n2o_ef5),
     ] {
         if !value.is_finite() {
             fail(field, "must be finite")?;
@@ -780,6 +795,10 @@ fn validate(tracer: &mut TracerDescriptor, use_bgc: bool) -> Result<()> {
     }
     if tracer.max_dissolved_conc < HUGE && !tracer.is_solute() {
         fail("max_dissolved_conc", "is valid only for solute tracers")?;
+    }
+    // `MOD_MT_Solute.F90:114-115`：只有溶质会从参数文件读它，范围 [0,1)。
+    if tracer.is_solute() && !(0.0..1.0).contains(&tracer.n2o_ef5) {
+        fail("n2o_ef5", "must be in [0,1)")?;
     }
     if tracer.reactive_decay_rate > 0.0
         && !(tracer.is_solute() || tracer.family == TracerFamily::Unresolved)

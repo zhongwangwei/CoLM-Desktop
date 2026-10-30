@@ -584,6 +584,11 @@ CONTAINS
                 abs(source(c) - target(c)) > 1.e-10_r8 * max(source(c), target(c))) THEN
                WRITE(*,'(A,I0,A,I0,2(A,ES16.8))') 'MT LULCC element=', old_sorted(os), &
                   ' class=', c, ' source_area_m2=', source(c), ' target_area_m2=', target(c)
+               IF (c == 0 .and. source(c) <= 0._r8) &
+                  WRITE(*,'(A)') '  hint: a transfer trace that puts all area in class 0 ' // &
+                     'means the previous-year land cover was never read; ' // &
+                     'mksrfdata MAKE_LulccTransferTrace needs the 5x5 RG blocks of the ' // &
+                     'landcover dataset and silently fills zeros when they are absent.'
                CALL CoLM_stop('MT LULCC source-class physical area mismatch')
             ENDIF
          ENDDO

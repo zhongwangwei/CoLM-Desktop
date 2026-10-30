@@ -441,12 +441,8 @@ CONTAINS
          step_rsub   = a_trc_rsub(imt, ipatch) - snap_rsub(imt, ipatch)
          step_qinfl  = a_trc_qinfl(imt, ipatch) - snap_qinfl(imt, ipatch)
          step_qcharge = a_trc_qcharge(imt, ipatch) - snap_qcharge(imt, ipatch)
-         step_rnof   = 0._r8
-         step_output = step_evap
-#ifndef CatchLateralFlow
          step_rnof   = a_trc_rnof(imt, ipatch) - snap_rnof(imt, ipatch)
-         step_output = step_output + step_rnof
-#endif
+         step_output = step_evap + step_rnof
          step_input_check = step_input
          step_output_check = step_output
 
@@ -564,12 +560,10 @@ CONTAINS
                signature_scale = max(signature_scale, abs(step_input), abs(water_input * R_init), &
                   abs(step_evap), abs(water_evap * R_init))
             ENDIF
-#ifndef CatchLateralFlow
             IF (present(water_rnof_in)) THEN
                signature_error = max(signature_error, abs(rnof_minus_water_R))
                signature_scale = max(signature_scale, abs(step_rnof), abs(water_rnof * R_init))
             ENDIF
-#endif
          ENDIF
          signature_tol = mt_balance_abs_tol + mt_balance_rel_tol * signature_scale
          IF (fixed_signature_step .and. signature_error > signature_tol) THEN

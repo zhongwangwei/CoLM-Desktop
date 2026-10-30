@@ -1082,7 +1082,7 @@ impl HistoryBuffers {
     }
 }
 
-/// 示踪物 history 文件里的一个变量（`tracer_hist_out` 写的 `f_trc_*_<name>`）：调用方已算好
+/// 示踪物 history 文件里的一个变量（`mt_hist_out` 写的 `f_mt_*_<name>`）：调用方已算好
 /// 每条记录、每个 patch（分层量再乘 15 层）的值。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TracerFileVariable {

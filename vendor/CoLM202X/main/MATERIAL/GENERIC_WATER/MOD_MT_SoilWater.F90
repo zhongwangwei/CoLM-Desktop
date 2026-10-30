@@ -317,9 +317,7 @@ CONTAINS
       real(r8) :: transp_ratio, remove_ratio, R_vapor
       ! True only around the exposed-soil-surface evaporation calls, so
       ! evap_cg_inputs applies the resistance-weighted soil kinetic law there
-      ! without touching snow-layer or surface-water evaporation.  Declared
-      ! WITHOUT an initialiser on purpose: an initialised local would acquire
-      ! an implicit SAVE and be shared between OpenMP threads.
+      ! without touching snow-layer or surface-water evaporation.
       logical  :: kinetic_on_soil_surface
       real(r8) :: diff_liquid, d_eff_up, d_eff_dn, diff_transfer
       real(r8) :: diff_face(snl+1:nl_soil), diff_out(snl+1:nl_soil), diff_scale(snl+1:nl_soil)

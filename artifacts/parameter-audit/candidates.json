@@ -6811,8 +6811,8 @@
     "status": "editable-common"
   },
   {
-    "id": "case:DEF_NH4_LEACHING_MODE",
-    "raw_key": "DEF_NH4_LEACHING_MODE",
+    "id": "case:DEF_NH4_LEACHING",
+    "raw_key": "DEF_NH4_LEACHING",
     "scope": "case-scalar",
     "source_location": "MOD_Namelist.F90:51",
     "status": "editable-common"
@@ -6898,161 +6898,161 @@
     "id": "case:DEF_MT_N2O_EF5_NH4",
     "raw_key": "DEF_MT_N2O_EF5_NH4",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:114",
+    "source_location": "MOD_Namelist.F90:117",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_MT_N2O_EF5_NO3",
     "raw_key": "DEF_MT_N2O_EF5_NO3",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:115",
+    "source_location": "MOD_Namelist.F90:118",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_MT_USE_SOIL_INIT",
     "raw_key": "DEF_MT_USE_SOIL_INIT",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:116",
+    "source_location": "MOD_Namelist.F90:119",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_MT_SOIL_INIT_FILE",
     "raw_key": "DEF_MT_SOIL_INIT_FILE",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:117",
+    "source_location": "MOD_Namelist.F90:120",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_MT_SOIL_INIT_VARS",
     "raw_key": "DEF_MT_SOIL_INIT_VARS",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:118",
+    "source_location": "MOD_Namelist.F90:121",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_USE_FRACTIONATION",
     "raw_key": "DEF_ISO_USE_FRACTIONATION",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:121",
+    "source_location": "MOD_Namelist.F90:124",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_KINETIC_SCHEME",
     "raw_key": "DEF_ISO_KINETIC_SCHEME",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:122",
+    "source_location": "MOD_Namelist.F90:125",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_ICE_SUPERSAT_SLOPE",
     "raw_key": "DEF_ISO_ICE_SUPERSAT_SLOPE",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:123",
+    "source_location": "MOD_Namelist.F90:126",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_CG_RELHUM_MAX",
     "raw_key": "DEF_ISO_CG_RELHUM_MAX",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:124",
+    "source_location": "MOD_Namelist.F90:127",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_OPEN_WATER_KINETIC",
     "raw_key": "DEF_ISO_OPEN_WATER_KINETIC",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:125",
+    "source_location": "MOD_Namelist.F90:128",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_SUBL_SKIN_MM",
     "raw_key": "DEF_ISO_SUBL_SKIN_MM",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:126",
+    "source_location": "MOD_Namelist.F90:129",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_SOIL_KINETIC",
     "raw_key": "DEF_ISO_SOIL_KINETIC",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:127",
+    "source_location": "MOD_Namelist.F90:130",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_SOIL_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_DIFFUSION",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:128",
+    "source_location": "MOD_Namelist.F90:131",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:129",
+    "source_location": "MOD_Namelist.F90:132",
     "status": "editable-common"
   },
   {
     "id": "case:DEF_ISO_CANOPY_EQUILIBRATION",
     "raw_key": "DEF_ISO_CANOPY_EQUILIBRATION",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:130",
+    "source_location": "MOD_Namelist.F90:133",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_SNOWMELT_EQUILIBRATION",
     "raw_key": "DEF_ISO_SNOWMELT_EQUILIBRATION",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:131",
+    "source_location": "MOD_Namelist.F90:134",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "raw_key": "DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:132",
+    "source_location": "MOD_Namelist.F90:135",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "raw_key": "DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:133",
+    "source_location": "MOD_Namelist.F90:136",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_NSS_LEAF_RB",
     "raw_key": "DEF_ISO_NSS_LEAF_RB",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:134",
+    "source_location": "MOD_Namelist.F90:137",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_REF_RATIO_H2_18O",
     "raw_key": "DEF_ISO_REF_RATIO_H2_18O",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:137",
+    "source_location": "MOD_Namelist.F90:140",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_INIT_DELTA_H2_18O",
     "raw_key": "DEF_ISO_INIT_DELTA_H2_18O",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:138",
+    "source_location": "MOD_Namelist.F90:141",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_REF_RATIO_HDO",
     "raw_key": "DEF_ISO_REF_RATIO_HDO",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:139",
+    "source_location": "MOD_Namelist.F90:142",
     "status": "editable-expert"
   },
   {
     "id": "case:DEF_ISO_INIT_DELTA_HDO",
     "raw_key": "DEF_ISO_INIT_DELTA_HDO",
     "scope": "case-scalar",
-    "source_location": "MOD_Namelist.F90:140",
+    "source_location": "MOD_Namelist.F90:143",
     "status": "editable-expert"
   },
   {
@@ -8340,126 +8340,126 @@
     "id": "process:tracer:DEF_ISO_USE_FRACTIONATION",
     "raw_key": "DEF_ISO_USE_FRACTIONATION",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:121",
+    "source_location": "MOD_MT_Namelist.F90:124",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_KINETIC_SCHEME",
     "raw_key": "DEF_ISO_KINETIC_SCHEME",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:122",
+    "source_location": "MOD_MT_Namelist.F90:125",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_ICE_SUPERSAT_SLOPE",
     "raw_key": "DEF_ISO_ICE_SUPERSAT_SLOPE",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:123",
+    "source_location": "MOD_MT_Namelist.F90:126",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_CG_RELHUM_MAX",
     "raw_key": "DEF_ISO_CG_RELHUM_MAX",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:124",
+    "source_location": "MOD_MT_Namelist.F90:127",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_OPEN_WATER_KINETIC",
     "raw_key": "DEF_ISO_OPEN_WATER_KINETIC",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:125",
+    "source_location": "MOD_MT_Namelist.F90:128",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_SUBL_SKIN_MM",
     "raw_key": "DEF_ISO_SUBL_SKIN_MM",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:126",
+    "source_location": "MOD_MT_Namelist.F90:129",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_SOIL_KINETIC",
     "raw_key": "DEF_ISO_SOIL_KINETIC",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:127",
+    "source_location": "MOD_MT_Namelist.F90:130",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_SOIL_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_DIFFUSION",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:128",
+    "source_location": "MOD_MT_Namelist.F90:131",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:129",
+    "source_location": "MOD_MT_Namelist.F90:132",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_CANOPY_EQUILIBRATION",
     "raw_key": "DEF_ISO_CANOPY_EQUILIBRATION",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:130",
+    "source_location": "MOD_MT_Namelist.F90:133",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_SNOWMELT_EQUILIBRATION",
     "raw_key": "DEF_ISO_SNOWMELT_EQUILIBRATION",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:131",
+    "source_location": "MOD_MT_Namelist.F90:134",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "raw_key": "DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:132",
+    "source_location": "MOD_MT_Namelist.F90:135",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "raw_key": "DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:133",
+    "source_location": "MOD_MT_Namelist.F90:136",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_NSS_LEAF_RB",
     "raw_key": "DEF_ISO_NSS_LEAF_RB",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:134",
+    "source_location": "MOD_MT_Namelist.F90:137",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_REF_RATIO_H2_18O",
     "raw_key": "DEF_ISO_REF_RATIO_H2_18O",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:137",
+    "source_location": "MOD_MT_Namelist.F90:140",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_INIT_DELTA_H2_18O",
     "raw_key": "DEF_ISO_INIT_DELTA_H2_18O",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:138",
+    "source_location": "MOD_MT_Namelist.F90:141",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_REF_RATIO_HDO",
     "raw_key": "DEF_ISO_REF_RATIO_HDO",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:139",
+    "source_location": "MOD_MT_Namelist.F90:142",
     "status": "editable-expert"
   },
   {
     "id": "process:tracer:DEF_ISO_INIT_DELTA_HDO",
     "raw_key": "DEF_ISO_INIT_DELTA_HDO",
     "scope": "process-file",
-    "source_location": "MOD_MT_Namelist.F90:140",
+    "source_location": "MOD_MT_Namelist.F90:143",
     "status": "editable-expert"
   },
   {

@@ -38214,14 +38214,14 @@
   },
   {
     "catalog_version": 2,
-    "id": "case:DEF_NH4_LEACHING_MODE",
-    "raw_key": "DEF_NH4_LEACHING_MODE",
+    "id": "case:DEF_NH4_LEACHING",
+    "raw_key": "DEF_NH4_LEACHING",
     "aliases": [
-      "DEF_NH4_LEACHING_MODE",
-      "def_nh4_leaching_mode"
+      "DEF_NH4_LEACHING",
+      "def_nh4_leaching"
     ],
-    "label_zh": "DEF NH4 LEACHING MODE",
-    "label_en": "DEF NH4 LEACHING MODE",
+    "label_zh": "DEF NH4 LEACHING",
+    "label_en": "DEF NH4 LEACHING",
     "section": "示踪剂",
     "subgroup": null,
     "subgroup_zh": "示踪剂",
@@ -38248,8 +38248,8 @@
     "recommended_scale": null,
     "source_location": "MOD_Namelist.F90:51",
     "doc": null,
-    "doc_zh": "CoLM 配置字段 DEF_NH4_LEACHING_MODE。",
-    "doc_en": "CoLM configuration field DEF_NH4_LEACHING_MODE."
+    "doc_zh": "CoLM 配置字段 DEF_NH4_LEACHING。",
+    "doc_en": "CoLM configuration field DEF_NH4_LEACHING."
   },
   {
     "catalog_version": 2,
@@ -38700,7 +38700,7 @@
     "unit": null,
     "visibility": "editable-expert",
     "activation": [],
-    "default": "0._r8",
+    "default": "-1._r8",
     "default_provider": "MOD_Namelist.F90 declaration",
     "validation": {
       "min": null,
@@ -38714,7 +38714,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:114",
+    "source_location": "MOD_Namelist.F90:117",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_MT_N2O_EF5_NH4。",
     "doc_en": "CoLM configuration field DEF_MT_N2O_EF5_NH4."
@@ -38739,7 +38739,7 @@
     "unit": null,
     "visibility": "editable-expert",
     "activation": [],
-    "default": "0._r8",
+    "default": "-1._r8",
     "default_provider": "MOD_Namelist.F90 declaration",
     "validation": {
       "min": null,
@@ -38753,7 +38753,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:115",
+    "source_location": "MOD_Namelist.F90:118",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_MT_N2O_EF5_NO3。",
     "doc_en": "CoLM configuration field DEF_MT_N2O_EF5_NO3."
@@ -38792,7 +38792,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:116",
+    "source_location": "MOD_Namelist.F90:119",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_MT_USE_SOIL_INIT。",
     "doc_en": "CoLM configuration field DEF_MT_USE_SOIL_INIT."
@@ -38831,7 +38831,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:117",
+    "source_location": "MOD_Namelist.F90:120",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_MT_SOIL_INIT_FILE。",
     "doc_en": "CoLM configuration field DEF_MT_SOIL_INIT_FILE."
@@ -38870,7 +38870,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:118",
+    "source_location": "MOD_Namelist.F90:121",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_MT_SOIL_INIT_VARS。",
     "doc_en": "CoLM configuration field DEF_MT_SOIL_INIT_VARS."
@@ -38909,7 +38909,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:121",
+    "source_location": "MOD_Namelist.F90:124",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_USE_FRACTIONATION。",
     "doc_en": "CoLM configuration field DEF_ISO_USE_FRACTIONATION."
@@ -38951,7 +38951,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:122",
+    "source_location": "MOD_Namelist.F90:125",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_KINETIC_SCHEME。",
     "doc_en": "CoLM configuration field DEF_ISO_KINETIC_SCHEME."
@@ -38990,7 +38990,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:123",
+    "source_location": "MOD_Namelist.F90:126",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_ICE_SUPERSAT_SLOPE。",
     "doc_en": "CoLM configuration field DEF_ISO_ICE_SUPERSAT_SLOPE."
@@ -39029,7 +39029,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:124",
+    "source_location": "MOD_Namelist.F90:127",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_CG_RELHUM_MAX。",
     "doc_en": "CoLM configuration field DEF_ISO_CG_RELHUM_MAX."
@@ -39071,7 +39071,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:125",
+    "source_location": "MOD_Namelist.F90:128",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_OPEN_WATER_KINETIC。",
     "doc_en": "CoLM configuration field DEF_ISO_OPEN_WATER_KINETIC."
@@ -39110,7 +39110,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:126",
+    "source_location": "MOD_Namelist.F90:129",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_SUBL_SKIN_MM。",
     "doc_en": "CoLM configuration field DEF_ISO_SUBL_SKIN_MM."
@@ -39152,7 +39152,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:127",
+    "source_location": "MOD_Namelist.F90:130",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_SOIL_KINETIC。",
     "doc_en": "CoLM configuration field DEF_ISO_SOIL_KINETIC."
@@ -39191,7 +39191,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:128",
+    "source_location": "MOD_Namelist.F90:131",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_SOIL_DIFFUSION。",
     "doc_en": "CoLM configuration field DEF_ISO_SOIL_DIFFUSION."
@@ -39230,7 +39230,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:129",
+    "source_location": "MOD_Namelist.F90:132",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_SOIL_VAPOR_DIFFUSION。",
     "doc_en": "CoLM configuration field DEF_ISO_SOIL_VAPOR_DIFFUSION."
@@ -39269,7 +39269,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:130",
+    "source_location": "MOD_Namelist.F90:133",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_CANOPY_EQUILIBRATION。",
     "doc_en": "CoLM configuration field DEF_ISO_CANOPY_EQUILIBRATION."
@@ -39308,7 +39308,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:131",
+    "source_location": "MOD_Namelist.F90:134",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_SNOWMELT_EQUILIBRATION。",
     "doc_en": "CoLM configuration field DEF_ISO_SNOWMELT_EQUILIBRATION."
@@ -39347,7 +39347,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:132",
+    "source_location": "MOD_Namelist.F90:135",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_NSS_LEAF_WATER_PER_LAI。",
     "doc_en": "CoLM configuration field DEF_ISO_NSS_LEAF_WATER_PER_LAI."
@@ -39386,7 +39386,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:133",
+    "source_location": "MOD_Namelist.F90:136",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_NSS_LEAF_PATH_LENGTH。",
     "doc_en": "CoLM configuration field DEF_ISO_NSS_LEAF_PATH_LENGTH."
@@ -39425,7 +39425,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:134",
+    "source_location": "MOD_Namelist.F90:137",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_NSS_LEAF_RB。",
     "doc_en": "CoLM configuration field DEF_ISO_NSS_LEAF_RB."
@@ -39464,7 +39464,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:137",
+    "source_location": "MOD_Namelist.F90:140",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_REF_RATIO_H2_18O。",
     "doc_en": "CoLM configuration field DEF_ISO_REF_RATIO_H2_18O."
@@ -39503,7 +39503,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:138",
+    "source_location": "MOD_Namelist.F90:141",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_INIT_DELTA_H2_18O。",
     "doc_en": "CoLM configuration field DEF_ISO_INIT_DELTA_H2_18O."
@@ -39542,7 +39542,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:139",
+    "source_location": "MOD_Namelist.F90:142",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_REF_RATIO_HDO。",
     "doc_en": "CoLM configuration field DEF_ISO_REF_RATIO_HDO."
@@ -39581,7 +39581,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_Namelist.F90:140",
+    "source_location": "MOD_Namelist.F90:143",
     "doc": null,
     "doc_zh": "CoLM 配置字段 DEF_ISO_INIT_DELTA_HDO。",
     "doc_en": "CoLM configuration field DEF_ISO_INIT_DELTA_HDO."
@@ -47237,7 +47237,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:121",
+    "source_location": "MOD_MT_Namelist.F90:124",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_USE_FRACTIONATION。",
     "doc_en": "Case-local process parameter DEF_ISO_USE_FRACTIONATION."
@@ -47278,7 +47278,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:122",
+    "source_location": "MOD_MT_Namelist.F90:125",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_KINETIC_SCHEME。",
     "doc_en": "Case-local process parameter DEF_ISO_KINETIC_SCHEME."
@@ -47319,7 +47319,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:123",
+    "source_location": "MOD_MT_Namelist.F90:126",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_ICE_SUPERSAT_SLOPE。",
     "doc_en": "Case-local process parameter DEF_ISO_ICE_SUPERSAT_SLOPE."
@@ -47360,7 +47360,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:124",
+    "source_location": "MOD_MT_Namelist.F90:127",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_CG_RELHUM_MAX。",
     "doc_en": "Case-local process parameter DEF_ISO_CG_RELHUM_MAX."
@@ -47401,7 +47401,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:125",
+    "source_location": "MOD_MT_Namelist.F90:128",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_OPEN_WATER_KINETIC。",
     "doc_en": "Case-local process parameter DEF_ISO_OPEN_WATER_KINETIC."
@@ -47442,7 +47442,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:126",
+    "source_location": "MOD_MT_Namelist.F90:129",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_SUBL_SKIN_MM。",
     "doc_en": "Case-local process parameter DEF_ISO_SUBL_SKIN_MM."
@@ -47483,7 +47483,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:127",
+    "source_location": "MOD_MT_Namelist.F90:130",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_SOIL_KINETIC。",
     "doc_en": "Case-local process parameter DEF_ISO_SOIL_KINETIC."
@@ -47524,7 +47524,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:128",
+    "source_location": "MOD_MT_Namelist.F90:131",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_SOIL_DIFFUSION。",
     "doc_en": "Case-local process parameter DEF_ISO_SOIL_DIFFUSION."
@@ -47565,7 +47565,7 @@
     "supports_log_range": false,
     "structural_parameter": true,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:129",
+    "source_location": "MOD_MT_Namelist.F90:132",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_SOIL_VAPOR_DIFFUSION。",
     "doc_en": "Case-local process parameter DEF_ISO_SOIL_VAPOR_DIFFUSION."
@@ -47606,7 +47606,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:130",
+    "source_location": "MOD_MT_Namelist.F90:133",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_CANOPY_EQUILIBRATION。",
     "doc_en": "Case-local process parameter DEF_ISO_CANOPY_EQUILIBRATION."
@@ -47647,7 +47647,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:131",
+    "source_location": "MOD_MT_Namelist.F90:134",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_SNOWMELT_EQUILIBRATION。",
     "doc_en": "Case-local process parameter DEF_ISO_SNOWMELT_EQUILIBRATION."
@@ -47688,7 +47688,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:132",
+    "source_location": "MOD_MT_Namelist.F90:135",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_NSS_LEAF_WATER_PER_LAI。",
     "doc_en": "Case-local process parameter DEF_ISO_NSS_LEAF_WATER_PER_LAI."
@@ -47729,7 +47729,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:133",
+    "source_location": "MOD_MT_Namelist.F90:136",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_NSS_LEAF_PATH_LENGTH。",
     "doc_en": "Case-local process parameter DEF_ISO_NSS_LEAF_PATH_LENGTH."
@@ -47770,7 +47770,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:134",
+    "source_location": "MOD_MT_Namelist.F90:137",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_NSS_LEAF_RB。",
     "doc_en": "Case-local process parameter DEF_ISO_NSS_LEAF_RB."
@@ -47811,7 +47811,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:137",
+    "source_location": "MOD_MT_Namelist.F90:140",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_REF_RATIO_H2_18O。",
     "doc_en": "Case-local process parameter DEF_ISO_REF_RATIO_H2_18O."
@@ -47852,7 +47852,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:138",
+    "source_location": "MOD_MT_Namelist.F90:141",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_INIT_DELTA_H2_18O。",
     "doc_en": "Case-local process parameter DEF_ISO_INIT_DELTA_H2_18O."
@@ -47893,7 +47893,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:139",
+    "source_location": "MOD_MT_Namelist.F90:142",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_REF_RATIO_HDO。",
     "doc_en": "Case-local process parameter DEF_ISO_REF_RATIO_HDO."
@@ -47934,7 +47934,7 @@
     "supports_log_range": false,
     "structural_parameter": false,
     "recommended_scale": null,
-    "source_location": "MOD_MT_Namelist.F90:140",
+    "source_location": "MOD_MT_Namelist.F90:143",
     "doc": null,
     "doc_zh": "算例本地过程参数 DEF_ISO_INIT_DELTA_HDO。",
     "doc_en": "Case-local process parameter DEF_ISO_INIT_DELTA_HDO."

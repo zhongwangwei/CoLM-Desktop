@@ -2789,7 +2789,7 @@ impl Sediment {
         let joint = self.levee.is_some() || self.bif_acc.is_some();
         if !any {
             ensure!(
-                !(joint && has("trc_river_restart_complete")),
+                !(joint && has("mt_river_restart_complete")),
                 "ERROR: levee/bifurcation sediment restart requires a complete sediment transaction."
             );
             return Ok(false);

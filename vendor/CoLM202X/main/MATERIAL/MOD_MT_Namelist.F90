@@ -48,7 +48,7 @@ MODULE MOD_MT_Namelist
    ! 'auto' (default) turns it on exactly when DEF_SOLUTE_NAMES contains NH4;
    ! 'on'/'off' force the choice.  Only meaningful with BGC.  Off leaves the
    ! upstream BGC results bit-identical.
-   character(len=16)  :: DEF_NH4_LEACHING_MODE = 'auto'
+   character(len=16)  :: DEF_NH4_LEACHING = 'auto'
    logical            :: DEF_USE_NH4_LEACHING  = .false.
    ! 'NAME:path' entries separated by ',' or ';', or plain paths in the
    ! order of DEF_SOLUTE_NAMES. A solute without a file uses code defaults.
@@ -87,9 +87,12 @@ MODULE MOD_MT_Namelist
    ! RMSE 7.2).  Must be >= DEF_MT_FORCING_MIN_PRECIP when phase fill is used.
    real(r8)           :: DEF_MT_FORCING_MEMORY_PRECIP = 2.e-5_r8
    ! Indirect N2O emission factors for the nitrogen solutes at the land-to-
-   ! river entry [kg N2O-N per kg N entering the river].  0 disables the
+   ! river entry [kg N2O-N per kg N entering the river].  The default -1
+   ! means "not set": the factor then comes from the solute parameter file
+   ! (DEF_SOLUTE%n2o_ef5).  Any value >= 0 overrides it, so 0 disables the
    ! conversion for that species, which leaves every result bit-identical
-   ! to a build without this option.
+   ! to a build without this option (a 0 default would be indistinguishable
+   ! from "unset" and could never switch the conversion off).
    !
    ! Reference values (IPCC 2019 Refinement, Vol. 4 Ch. 11, Table 11.3):
    !   EF5g = 0.006  groundwater / surface drainage
@@ -111,8 +114,8 @@ MODULE MOD_MT_Namelist
    ! long the water resides, and it must not be applied again along the
    ! river.  Suggested use: start with the river component (0.0025) and use
    ! 0.006 / 0.011 as sensitivity bounds.
-   real(r8)           :: DEF_MT_N2O_EF5_NH4 = 0._r8
-   real(r8)           :: DEF_MT_N2O_EF5_NO3 = 0._r8
+   real(r8)           :: DEF_MT_N2O_EF5_NH4 = -1._r8
+   real(r8)           :: DEF_MT_N2O_EF5_NO3 = -1._r8
    logical            :: DEF_MT_USE_SOIL_INIT   = .false.
    character(len=256) :: DEF_MT_SOIL_INIT_FILE  = 'null'
    character(len=256) :: DEF_MT_SOIL_INIT_VARS  = ''
@@ -170,7 +173,7 @@ CONTAINS
          DEF_MT_BALANCE_ABORT_NBAD, DEF_MT_RESID_ABORT_NBAD, DEF_MT_LULCC_ABORT_NBAD, &
          DEF_MT_AQUIFER_MIXING_WATER_MM, DEF_MT_FORCING_MIN_PRECIP, &
          DEF_MT_FORCING_MEMORY_PRECIP, DEF_MT_USE_SOIL_INIT, DEF_MT_SOIL_INIT_FILE, DEF_MT_SOIL_INIT_VARS, &
-         DEF_MT_N2O_EF5_NH4, DEF_MT_N2O_EF5_NO3, DEF_USE_SEDIMENT, DEF_NH4_LEACHING_MODE
+         DEF_MT_N2O_EF5_NH4, DEF_MT_N2O_EF5_NO3, DEF_USE_SEDIMENT, DEF_NH4_LEACHING
 
       namelist /nl_colm_isotope_parameter/ DEF_ISO_USE_FRACTIONATION, &
          DEF_ISO_KINETIC_SCHEME, DEF_ISO_ICE_SUPERSAT_SLOPE, DEF_ISO_CG_RELHUM_MAX, &
@@ -234,7 +237,7 @@ CONTAINS
       CALL mpi_bcast (DEF_SEDIMENT_PARAM_FILE       ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_SEDIMENT              ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_NH4_LEACHING          ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_NH4_LEACHING_MODE         ,16  ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_NH4_LEACHING              ,16  ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_USE_METHANE               ,1   ,mpi_logical   ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_METHANE_PARAM_FILE        ,256 ,mpi_character ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_MT_BALANCE_ABORT_NBAD     ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
@@ -292,9 +295,13 @@ CONTAINS
          CALL CoLM_Stop ('DEF_MT_FORCING_MIN_PRECIP must be >= 0.')
       IF (.not. (DEF_MT_FORCING_MEMORY_PRECIP >= 0._r8)) &
          CALL CoLM_Stop ('DEF_MT_FORCING_MEMORY_PRECIP must be >= 0.')
-      IF (DEF_MT_N2O_EF5_NH4 < 0._r8 .or. DEF_MT_N2O_EF5_NH4 >= 1._r8 .or. &
-          DEF_MT_N2O_EF5_NO3 < 0._r8 .or. DEF_MT_N2O_EF5_NO3 >= 1._r8) &
-         CALL CoLM_Stop ('DEF_MT_N2O_EF5_NH4/NO3 must be in [0,1).')
+      ! -1 is the "not set" sentinel (use the solute parameter file); any
+      ! other accepted value is a real emission factor in [0,1).
+      IF ((DEF_MT_N2O_EF5_NH4 < 0._r8 .and. DEF_MT_N2O_EF5_NH4 /= -1._r8) .or. &
+          DEF_MT_N2O_EF5_NH4 >= 1._r8 .or. &
+          (DEF_MT_N2O_EF5_NO3 < 0._r8 .and. DEF_MT_N2O_EF5_NO3 /= -1._r8) .or. &
+          DEF_MT_N2O_EF5_NO3 >= 1._r8) &
+         CALL CoLM_Stop ('DEF_MT_N2O_EF5_NH4/NO3 must be -1 (unset) or in [0,1).')
 
       SELECT CASE (trim(adjustl(DEF_ISO_KINETIC_SCHEME)))
       CASE ('CAPPA2003', 'Cappa2003', 'cappa2003')
@@ -347,7 +354,7 @@ CONTAINS
 
 
    SUBROUTINE resolve_nh4_leaching ()
-   ! Turn DEF_NH4_LEACHING_MODE into the logical read by BGC.  'auto'
+   ! Turn DEF_NH4_LEACHING into the logical read by BGC.  'auto'
    ! enables species-resolved NH4 leaching exactly when DEF_SOLUTE_NAMES
    ! contains a standalone NH4 token; 'on'/'off' force it.  The test is
    ! case-insensitive and tolerant of spaces around the commas.
@@ -359,7 +366,7 @@ CONTAINS
    integer :: i, k, pos, n
    logical :: left_ok, right_ok
 
-      mode = adjustl(DEF_NH4_LEACHING_MODE)
+      mode = adjustl(DEF_NH4_LEACHING)
       CALL mt_lower_case (mode)
 
       SELECT CASE (trim(mode))

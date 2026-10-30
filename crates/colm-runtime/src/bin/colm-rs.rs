@@ -1576,6 +1576,7 @@ fn run_spatial_segment(
             let mut forcing = colm_runtime::spatial::tracer_forcing::GriddedTracerForcing::new(
                 forcing_config,
                 &tracer.set,
+                &tracer.physics,
                 patch_count,
                 string_field(document, "DEF_Forcing_Interp_Method")?,
                 runtime.forcing_config(),
@@ -1586,13 +1587,13 @@ fn run_spatial_segment(
                 let restart = colm_init::RestartFile::open(&files.time)?;
                 let loadable =
                     colm_runtime::tracer::land_tracer_restart_loadable(&restart, &tracer.set);
-                if let Some((precip, vapor)) = colm_runtime::tracer::read_forcing_cache(
+                if let Some((precip, vapor, reliable)) = colm_runtime::tracer::read_forcing_cache(
                     &restart,
                     loadable,
                     forcing.config().vars.len(),
                     forcing.identity(),
                 )? {
-                    forcing.restore(first, &precip, &vapor)?;
+                    forcing.restore(first, &precip, &vapor, reliable.as_deref())?;
                 }
                 first += patches.len();
             }
@@ -3705,11 +3706,21 @@ fn lulcc_transition(
             Ok((set, real_field(document, "DEF_MT_AQUIFER_MIXING_WATER_MM")?))
         })
         .transpose()?;
-    // 示踪物强迫的"最近有效值"缓存（`tracer_forcing_lulcc_remap`）：默认比值与旧侧的 `subfrc`。
+    // 示踪物强迫的"最近有效值"缓存（`tracer_forcing_lulcc_remap`）：默认比值、相态回填
+    // 标志（只有它们的雪记忆按可靠来源加权）与旧侧的 `subfrc`。
     let forcing_defaults = match &land_tracers {
         Some(_) => colm_runtime::tracer::TracerRuntime::from_document(document)?
             .filter(|runtime| runtime.forcing_specs.iter().any(|specs| !specs.is_empty()))
-            .map(|runtime| (runtime.precip_ratio.clone(), runtime.vapor_ratio.clone())),
+            .map(|runtime| {
+                (
+                    runtime.precip_ratio.clone(),
+                    runtime.vapor_ratio.clone(),
+                    colm_runtime::spatial::tracer_forcing::phase_fill_flags(
+                        &runtime.set,
+                        &runtime.forcing_specs,
+                    ),
+                )
+            }),
         None => None,
     };
     let old_subfrc = match forcing_defaults {
@@ -4095,19 +4106,19 @@ fn lulcc_transition(
             .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
             let cache = match (&forcing_defaults, &old, &old_subfrc) {
                 (
-                    Some((precip_default, vapor_default)),
+                    Some((precip_default, vapor_default, phase_fill)),
                     Some((old_const, old_time, old_patches)),
                     Some(subfrc),
                 ) => {
                     let nvars = usize::try_from(
                         old_time
-                            .integers("trc_forcing_cache_count")?
+                            .integers("mt_forcing_cache_count")?
                             .first()
                             .copied()
                             .unwrap_or(0),
                     )?;
                     let identity = old_time
-                        .integers("trc_forcing_cache_identity")?
+                        .integers("mt_forcing_cache_identity")?
                         .iter()
                         .map(|&v| i32::try_from(v))
                         .collect::<Result<Vec<_>, _>>()?;
@@ -4134,10 +4145,50 @@ fn lulcc_transition(
                             lccpct.as_deref(),
                         )
                     };
-                    let precip =
-                        remap(old_time.floats("trc_forcing_precip_last")?, precip_default)?;
-                    let vapor = remap(old_time.floats("trc_forcing_vapor_last")?, vapor_default)?;
-                    Some((nvars, identity, precip, vapor))
+                    let precip_old = old_time.floats("mt_forcing_precip_last")?;
+                    let vapor_old = old_time.floats("mt_forcing_vapor_last")?;
+                    // schema 1 的重启没有 `reliable` 行：当时每个有效记录都进记住值，按可靠处理。
+                    let schema = old_time
+                        .integers("mt_forcing_cache_schema")
+                        .ok()
+                        .and_then(|values| values.first().copied())
+                        .unwrap_or(1);
+                    let reliable_old = if schema >= 2 {
+                        old_time.floats("mt_forcing_precip_reliable")?.to_vec()
+                    } else {
+                        vec![1.0; precip_old.len()]
+                    };
+                    let ns = precip_default.len();
+                    // `mt_forcing_lulcc_remap`：只有可靠记录贡献继承来的雪记忆，
+                    // 所以先把降水比值乘上可靠性再按面积映射。
+                    let mut precip_scaled = precip_old.to_vec();
+                    for (slot, value) in precip_scaled.iter_mut().enumerate() {
+                        if phase_fill.get(slot % ns).copied().unwrap_or(false) {
+                            *value *= reliable_old[slot];
+                        }
+                    }
+                    let mut precip = remap(&precip_scaled, precip_default)?;
+                    let vapor = remap(vapor_old, vapor_default)?;
+                    let mut reliable = remap(&reliable_old, &vec![0.0; ns])?;
+                    // 按可靠来源面积归一化；没有可靠来源的 patch 回到配置默认值。
+                    for np in 0..new_class.len() {
+                        for (k, &default) in precip_default.iter().enumerate() {
+                            if !phase_fill.get(k).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            let slot = np * ns + k;
+                            if reliable[slot] > 0.0 {
+                                precip[slot] /= reliable[slot];
+                                reliable[slot] = 1.0;
+                            } else {
+                                precip[slot] = default;
+                            }
+                        }
+                    }
+                    for value in reliable.iter_mut() {
+                        *value = if *value >= 0.5 { 1.0 } else { 0.0 };
+                    }
+                    Some((nvars, identity, precip, vapor, reliable))
                 }
                 _ => None,
             };
@@ -4155,15 +4206,16 @@ fn lulcc_transition(
                 *mixing,
                 cache
                     .as_ref()
-                    .map(
-                        |(nvars, identity, precip, vapor)| colm_runtime::tracer::ForcingCache {
+                    .map(|(nvars, identity, precip, vapor, reliable)| {
+                        colm_runtime::tracer::ForcingCache {
                             nvars: *nvars,
                             ntracers: set.len(),
                             identity: std::sync::Arc::new(identity.clone()),
                             precip,
                             vapor,
-                        },
-                    )
+                            reliable,
+                        }
+                    })
                     .as_ref(),
                 &colm_runtime::tracer::RestartStateCheck {
                     wa: &wa,

@@ -26,7 +26,8 @@ fn effective_variably_saturated_flow(document: &Document) -> Result<bool> {
 /// `LAND_TRACER_RESTART_SCHEMA_VERSION`。
 const LAND_TRACER_RESTART_SCHEMA: i32 = 5;
 /// `TRC_FORC_CACHE_SCHEMA`。
-const FORCING_CACHE_SCHEMA: i32 = 1;
+/// `MT_FORC_CACHE_SCHEMA`：schema 2 多出 `mt_forcing_precip_reliable`。
+const FORCING_CACHE_SCHEMA: i32 = 2;
 
 /// `DEF_ISOTOPE_PARAM_FILE` 指向的 `&nl_colm_isotope_parameter`。
 ///
@@ -174,6 +175,7 @@ fn read_solute_parameter_file(path: &str) -> Result<Option<TracerParameterOverri
         vapor_default_conc: real_field("vapor_default_conc")?,
         max_dissolved_conc: real_field("max_dissolved_conc")?,
         decay_rate: real_field("decay_rate")?,
+        n2o_ef5: real_field("n2o_ef5")?,
         charge,
     }))
 }
@@ -198,6 +200,10 @@ pub struct TracerRuntime {
     pub vegetation_snow: bool,
     pub variably_saturated_flow: bool,
     pub aquifer_mixing_water_mm: f64,
+    /// `DEF_MT_FORCING_MIN_PRECIP` / `DEF_MT_FORCING_MEMORY_PRECIP`（相态回填的近干与
+    /// 可靠记录阈值）。
+    pub min_precip: f64,
+    pub memory_precip: f64,
     /// `DEF_MT_BALANCE_ABORT_NBAD`、`DEF_MT_RESID_ABORT_NBAD`。
     pub balance_abort_nbad: i32,
     pub resid_abort_nbad: i32,
@@ -321,6 +327,16 @@ impl TracerRuntime {
                 document,
                 "DEF_MT_AQUIFER_MIXING_WATER_MM",
             )?,
+            min_precip: {
+                let value = crate::physics::real(document, "DEF_MT_FORCING_MIN_PRECIP")?;
+                anyhow::ensure!(value >= 0.0, "DEF_MT_FORCING_MIN_PRECIP must be >= 0.");
+                value
+            },
+            memory_precip: {
+                let value = crate::physics::real(document, "DEF_MT_FORCING_MEMORY_PRECIP")?;
+                anyhow::ensure!(value >= 0.0, "DEF_MT_FORCING_MEMORY_PRECIP must be >= 0.");
+                value
+            },
             balance_abort_nbad: i32::try_from(integer(document, "DEF_MT_BALANCE_ABORT_NBAD")?)?,
             resid_abort_nbad: i32::try_from(integer(document, "DEF_MT_RESID_ABORT_NBAD")?)?,
             tracker: Default::default(),
@@ -340,6 +356,8 @@ impl TracerRuntime {
             &self.physics,
             &self.forcing_specs,
             totals,
+            self.min_precip,
+            self.memory_precip,
         )?;
         anyhow::ensure!(
             totals.is_some() || !config.enabled(),
@@ -362,7 +380,8 @@ impl TracerRuntime {
             physics: self.physics,
             soil_options: self.soil_options,
             canopy_equilibration: self.canopy_equilibration,
-            precip_ratio: &self.precip_ratio,
+            rain_ratio: &self.precip_ratio,
+            snow_ratio: &self.precip_ratio,
             vapor_ratio: &self.vapor_ratio,
             has_vapor: &self.has_vapor,
             runtime_forced: &self.runtime_forced,
@@ -570,11 +589,14 @@ pub fn glacier_end_of_step(
     output: &colm_core::GlacierStepOutput,
     deltim: f64,
     forcing: &colm_core::RuntimeForcing,
-    ratios: Option<(&[f64], &[f64])>,
+    ratios: Option<(&[f64], &[f64], &[f64])>,
 ) -> Result<()> {
     use colm_core::tracer::{special_patches, step::pack_soisno};
-    let (precip_ratio, vapor_ratio) =
-        ratios.unwrap_or((&runtime.precip_ratio, &runtime.vapor_ratio));
+    let (rain_ratio, snow_ratio, vapor_ratio) = ratios.unwrap_or((
+        &runtime.precip_ratio,
+        &runtime.precip_ratio,
+        &runtime.vapor_ratio,
+    ));
     let t_grnd = state.surface_temperature_k();
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
@@ -624,7 +646,8 @@ pub fn glacier_end_of_step(
                 wliq_soisno: &wliq,
                 wice_soisno: &wice,
                 subl_skin_mm: runtime.soil_options.subl_skin_mm,
-                precip_ratio,
+                rain_ratio,
+                snow_ratio,
                 vapor_ratio,
                 runtime_forced: &runtime.runtime_forced,
                 catch_lateral_flow: false,
@@ -646,12 +669,15 @@ pub fn lake_end_of_step(
     deltim: f64,
     forcing: &colm_core::RuntimeForcing,
     dynamic_lake: bool,
-    ratios: Option<(&[f64], &[f64])>,
+    ratios: Option<(&[f64], &[f64], &[f64])>,
     hist_sample: bool,
 ) -> Result<()> {
     use colm_core::tracer::{special_patches, step::pack_soisno};
-    let (precip_ratio, vapor_ratio) =
-        ratios.unwrap_or((&runtime.precip_ratio, &runtime.vapor_ratio));
+    let (rain_ratio, snow_ratio, vapor_ratio) = ratios.unwrap_or((
+        &runtime.precip_ratio,
+        &runtime.precip_ratio,
+        &runtime.vapor_ratio,
+    ));
     let t_grnd = state.surface_temperature_k();
     let Some(track) = state.tracer.as_deref_mut() else {
         return Ok(());
@@ -707,7 +733,8 @@ pub fn lake_end_of_step(
                 use_dynamic_lake: dynamic_lake,
                 subl_skin_mm: runtime.soil_options.subl_skin_mm,
                 hist_sample,
-                precip_ratio,
+                rain_ratio,
+                snow_ratio,
                 vapor_ratio,
                 runtime_forced: &runtime.runtime_forced,
                 catch_lateral_flow: false,
@@ -728,34 +755,35 @@ type LayerSetter = fn(&mut TracerPools) -> &mut [f64; SOISNO_LAYERS];
 
 /// 上游 `write_land_tracer_restart` 的写出顺序（`trc_wa` 之后插 `trc_aquifer_ref_*`）。
 const CANOPY_FIELDS: [(&str, PatchField); 2] = [
-    ("trc_ldew_rain", |p| p.ldew_rain),
-    ("trc_ldew_snow", |p| p.ldew_snow),
+    ("mt_ldew_rain", |p| p.ldew_rain),
+    ("mt_ldew_snow", |p| p.ldew_snow),
 ];
 const LAYER_FIELDS: [(&str, LayerField); 3] = [
-    ("trc_wliq_soisno", |p| &p.wliq_soisno),
-    ("trc_wice_soisno", |p| &p.wice_soisno),
-    ("trc_solid_soisno", |p| &p.solid_soisno),
+    ("mt_wliq_soisno", |p| &p.wliq_soisno),
+    ("mt_wice_soisno", |p| &p.wice_soisno),
+    ("mt_solid_soisno", |p| &p.solid_soisno),
 ];
 const TAIL_FIELDS: [(&str, PatchField); 15] = [
-    ("trc_wdsrf", |p| p.wdsrf),
-    ("trc_wetwat", |p| p.wetwat),
-    ("trc_surface_residue", |p| p.surface_residue),
-    ("trc_subsurface_residue", |p| p.subsurface_residue),
-    ("trc_canopy_solid", |p| p.canopy_solid),
-    ("trc_surface_solid", |p| p.surface_solid),
-    ("trc_subsurface_solid", |p| p.subsurface_solid),
-    ("trc_waterstorage_solid", |p| p.waterstorage_solid),
-    ("trc_scv", |p| p.scv),
-    ("trc_waterstorage", |p| p.waterstorage),
-    ("trc_leaf_delta_e", |p| p.leaf_delta_e),
-    ("trc_leaf_delta_b", |p| p.leaf_delta_b),
-    ("trc_leaf_peclet", |p| p.leaf_peclet),
-    ("trc_leaf_water_moles", |p| p.leaf_water_moles),
-    ("trc_leaf_iso_storage", |p| p.leaf_iso_storage),
+    ("mt_wdsrf", |p| p.wdsrf),
+    ("mt_wetwat", |p| p.wetwat),
+    ("mt_surface_residue", |p| p.surface_residue),
+    ("mt_subsurface_residue", |p| p.subsurface_residue),
+    ("mt_canopy_solid", |p| p.canopy_solid),
+    ("mt_surface_solid", |p| p.surface_solid),
+    ("mt_subsurface_solid", |p| p.subsurface_solid),
+    ("mt_waterstorage_solid", |p| p.waterstorage_solid),
+    ("mt_scv", |p| p.scv),
+    ("mt_waterstorage", |p| p.waterstorage),
+    ("mt_leaf_delta_e", |p| p.leaf_delta_e),
+    ("mt_leaf_delta_b", |p| p.leaf_delta_b),
+    ("mt_leaf_peclet", |p| p.leaf_peclet),
+    ("mt_leaf_water_moles", |p| p.leaf_water_moles),
+    ("mt_leaf_iso_storage", |p| p.leaf_iso_storage),
 ];
 
 /// `tracer_forcing_write_restart` 要写的一段缓存：指纹与这些 patch 的最近一次有效比值
 /// （`[patch * ntracers + itrc]`）。没有示踪物强迫变量时 `nvars = 0`，只写计数。
+/// `reliable` 是 schema 2 的 `mt_forcing_precip_reliable`（1 = 记住值来自可靠记录）。
 #[derive(Debug, Clone)]
 pub struct ForcingCache<'a> {
     pub nvars: usize,
@@ -763,6 +791,7 @@ pub struct ForcingCache<'a> {
     pub identity: std::sync::Arc<Vec<i32>>,
     pub precip: &'a [f64],
     pub vapor: &'a [f64],
+    pub reliable: &'a [f64],
 }
 
 impl<'a> ForcingCache<'a> {
@@ -771,7 +800,8 @@ impl<'a> ForcingCache<'a> {
         let range = patches.start * self.ntracers..patches.end * self.ntracers;
         ForcingCache {
             precip: &self.precip[range.clone()],
-            vapor: &self.vapor[range],
+            vapor: &self.vapor[range.clone()],
+            reliable: &self.reliable[range],
             identity: std::sync::Arc::clone(&self.identity),
             ..*self
         }
@@ -983,33 +1013,33 @@ pub fn write_land_tracer_restart(
         let mut file =
             netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
         let ntransport = transport.len();
-        put_scalar_i32(&mut file, "trc_land_restart_complete", 0)?;
+        put_scalar_i32(&mut file, "mt_land_restart_complete", 0)?;
         put_scalar_i32(
             &mut file,
-            "trc_land_restart_schema",
+            "mt_land_restart_schema",
             LAND_TRACER_RESTART_SCHEMA,
         )?;
         put_scalar_i32(
             &mut file,
-            "trc_land_transport_count",
+            "mt_land_transport_count",
             i32::try_from(ntransport)?,
         )?;
         put_scalar_f64(
             &mut file,
-            "trc_aquifer_mixing_water_mm",
+            "mt_aquifer_mixing_water_mm",
             aquifer_mixing_water_mm,
         )?;
         ensure_dimension(
             &mut file,
-            "trc_land_descriptor_field",
+            "mt_land_descriptor_field",
             DESCRIPTOR_IDENTITY_WIDTH,
         )?;
-        ensure_dimension(&mut file, "trc_land_transport", ntransport)?;
+        ensure_dimension(&mut file, "mt_land_transport", ntransport)?;
         let identity: Vec<i32> = set.descriptor_identity().into_iter().flatten().collect();
         put_array_i32(
             &mut file,
-            "trc_land_descriptor_identity",
-            &["trc_land_transport", "trc_land_descriptor_field"],
+            "mt_land_descriptor_identity",
+            &["mt_land_transport", "mt_land_descriptor_field"],
             &identity,
         )?;
         let patch_field = |field: PatchField| -> Vec<f64> {
@@ -1022,7 +1052,7 @@ pub fn write_land_tracer_restart(
             put_array_f64(
                 &mut file,
                 name,
-                &["patch", "trc_land_transport"],
+                &["patch", "mt_land_transport"],
                 &patch_field(*field),
             )?;
         }
@@ -1038,35 +1068,35 @@ pub fn write_land_tracer_restart(
             put_array_f64(
                 &mut file,
                 name,
-                &["patch", "soilsnow", "trc_land_transport"],
+                &["patch", "soilsnow", "mt_land_transport"],
                 &values,
             )?;
         }
         put_array_f64(
             &mut file,
-            "trc_wa",
-            &["patch", "trc_land_transport"],
+            "mt_wa",
+            &["patch", "mt_land_transport"],
             &patch_field(|p| p.wa),
         )?;
         let reference: Vec<f64> = states.iter().map(|state| state.aquifer_ref_water).collect();
-        put_array_f64(&mut file, "trc_aquifer_ref_water", &["patch"], &reference)?;
+        put_array_f64(&mut file, "mt_aquifer_ref_water", &["patch"], &reference)?;
         put_array_f64(
             &mut file,
-            "trc_aquifer_ref_mass",
-            &["patch", "trc_land_transport"],
+            "mt_aquifer_ref_mass",
+            &["patch", "mt_land_transport"],
             &patch_field(|p| p.aquifer_ref_mass),
         )?;
         for (name, field) in &TAIL_FIELDS {
             put_array_f64(
                 &mut file,
                 name,
-                &["patch", "trc_land_transport"],
+                &["patch", "mt_land_transport"],
                 &patch_field(*field),
             )?;
         }
-        put_scalar_i32(&mut file, "trc_forcing_cache_schema", FORCING_CACHE_SCHEMA)?;
+        put_scalar_i32(&mut file, "mt_forcing_cache_schema", FORCING_CACHE_SCHEMA)?;
         let nvars = cache.map_or(0, |cache| cache.nvars);
-        put_scalar_i32(&mut file, "trc_forcing_cache_count", i32::try_from(nvars)?)?;
+        put_scalar_i32(&mut file, "mt_forcing_cache_count", i32::try_from(nvars)?)?;
         if let Some(cache) = cache.filter(|cache| cache.nvars > 0) {
             anyhow::ensure!(
                 cache.precip.len() == states.len() * cache.ntracers,
@@ -1082,31 +1112,37 @@ pub fn write_land_tracer_restart(
             );
             ensure_dimension(
                 &mut file,
-                "trc_forcing_id_field",
+                "mt_forcing_id_field",
                 crate::spatial::tracer_forcing::ID_WIDTH,
             )?;
-            ensure_dimension(&mut file, "trc_forcing_id_var", cache.nvars + 1)?;
-            ensure_dimension(&mut file, "trc_forcing_species", cache.ntracers)?;
+            ensure_dimension(&mut file, "mt_forcing_id_var", cache.nvars + 1)?;
+            ensure_dimension(&mut file, "mt_forcing_species", cache.ntracers)?;
             put_array_i32(
                 &mut file,
-                "trc_forcing_cache_identity",
-                &["trc_forcing_id_var", "trc_forcing_id_field"],
+                "mt_forcing_cache_identity",
+                &["mt_forcing_id_var", "mt_forcing_id_field"],
                 &cache.identity,
             )?;
             put_array_f64(
                 &mut file,
-                "trc_forcing_precip_last",
-                &["patch", "trc_forcing_species"],
+                "mt_forcing_precip_last",
+                &["patch", "mt_forcing_species"],
                 cache.precip,
             )?;
             put_array_f64(
                 &mut file,
-                "trc_forcing_vapor_last",
-                &["patch", "trc_forcing_species"],
+                "mt_forcing_vapor_last",
+                &["patch", "mt_forcing_species"],
                 cache.vapor,
             )?;
+            put_array_f64(
+                &mut file,
+                "mt_forcing_precip_reliable",
+                &["patch", "mt_forcing_species"],
+                cache.reliable,
+            )?;
         }
-        put_scalar_i32(&mut file, "trc_land_restart_complete", 1)?;
+        put_scalar_i32(&mut file, "mt_land_restart_complete", 1)?;
     }
     Ok(())
 }
@@ -1122,7 +1158,7 @@ pub fn land_tracer_restart_loadable(restart: &colm_init::RestartFile, set: &Trac
             .and_then(|values| values.first().copied())
     };
     let identity_matches = || -> bool {
-        let Ok(stored) = restart.integers("trc_land_descriptor_identity") else {
+        let Ok(stored) = restart.integers("mt_land_descriptor_identity") else {
             return false;
         };
         let expected: Vec<i64> = set
@@ -1133,21 +1169,25 @@ pub fn land_tracer_restart_loadable(restart: &colm_init::RestartFile, set: &Trac
             .collect();
         stored == expected.as_slice()
     };
-    scalar("trc_land_restart_complete") == Some(1)
-        && scalar("trc_land_restart_schema") == Some(i64::from(LAND_TRACER_RESTART_SCHEMA))
-        && scalar("trc_land_transport_count") == Some(transport.len() as i64)
+    scalar("mt_land_restart_complete") == Some(1)
+        && scalar("mt_land_restart_schema") == Some(i64::from(LAND_TRACER_RESTART_SCHEMA))
+        && scalar("mt_land_transport_count") == Some(transport.len() as i64)
         && (transport.is_empty() || identity_matches())
 }
 
 /// `tracer_forcing_read_restart`：续跑读到了示踪物事务（`loadable`）时，校验强迫缓存的
-/// schema、计数与指纹，返回这些 patch 的 `(precip, vapor)` 最近一次有效比值（`[patch * ntracers + itrc]`）；
-/// 没有强迫变量时返回 `None`。
+/// schema、计数与指纹，返回这些 patch 的 `(precip, vapor, reliable)`（`[patch * ntracers + itrc]`）；
+/// 没有强迫变量时返回 `None`。schema 1 没有 `reliable` 行，返回 `None`，由调用方按可靠处理。
+/// `read_forcing_cache` 的返回值：`(precip, vapor, reliable)`。schema 1 的重启没有
+/// `reliable` 行，第三项为 `None`（按可靠处理）。
+pub type ForcingCacheRestart = (Vec<f64>, Vec<f64>, Option<Vec<f64>>);
+
 pub fn read_forcing_cache(
     restart: &colm_init::RestartFile,
     loadable: bool,
     nvars: usize,
     identity: &[i32],
-) -> Result<Option<(Vec<f64>, Vec<f64>)>> {
+) -> Result<Option<ForcingCacheRestart>> {
     if !loadable {
         return Ok(None);
     }
@@ -1158,10 +1198,10 @@ pub fn read_forcing_cache(
             .and_then(|values| values.first().copied())
     };
     let (schema, count) = (
-        scalar("trc_forcing_cache_schema"),
-        scalar("trc_forcing_cache_count"),
+        scalar("mt_forcing_cache_schema"),
+        scalar("mt_forcing_cache_count"),
     );
-    match (schema, count) {
+    let schema = match (schema, count) {
         (None, None) => {
             anyhow::ensure!(
                 nvars == 0,
@@ -1169,17 +1209,21 @@ pub fn read_forcing_cache(
             );
             return Ok(None);
         }
-        (Some(schema), Some(count)) => anyhow::ensure!(
-            schema == i64::from(FORCING_CACHE_SCHEMA) && count == nvars as i64,
-            "tracer forcing cache configuration differs from restart"
-        ),
+        (Some(schema), Some(count)) => {
+            // schema 1 仍可读（`mt_forcing_read_restart` 的同一规则）。
+            anyhow::ensure!(
+                (schema == i64::from(FORCING_CACHE_SCHEMA) || schema == 1) && count == nvars as i64,
+                "tracer forcing cache configuration differs from restart"
+            );
+            schema
+        }
         _ => anyhow::bail!("incomplete or malformed tracer forcing cache restart"),
-    }
+    };
     if nvars == 0 {
         return Ok(None);
     }
     let stored = restart
-        .integers("trc_forcing_cache_identity")
+        .integers("mt_forcing_cache_identity")
         .context("incomplete or malformed tracer forcing cache restart")?;
     anyhow::ensure!(
         stored.len() == identity.len()
@@ -1190,14 +1234,24 @@ pub fn read_forcing_cache(
         "tracer forcing cache configuration differs from restart"
     );
     let precip = restart
-        .floats("trc_forcing_precip_last")
+        .floats("mt_forcing_precip_last")
         .context("incomplete or malformed tracer forcing cache restart")?
         .to_vec();
     let vapor = restart
-        .floats("trc_forcing_vapor_last")
+        .floats("mt_forcing_vapor_last")
         .context("incomplete or malformed tracer forcing cache restart")?
         .to_vec();
-    Ok(Some((precip, vapor)))
+    let reliable = if schema == 1 {
+        None
+    } else {
+        Some(
+            restart
+                .floats("mt_forcing_precip_reliable")
+                .context("incomplete or malformed tracer forcing cache restart")?
+                .to_vec(),
+        )
+    };
+    Ok(Some((precip, vapor, reliable)))
 }
 
 /// `read_land_tracer_restart` 的判定与读入：已提交（`complete = 1`）、schema 5、
@@ -1232,33 +1286,33 @@ pub fn read_land_tracer_restart(
             Ok(())
         };
     let setters: [(&str, PatchSetter); 19] = [
-        ("trc_ldew_rain", |p, v| p.ldew_rain = v),
-        ("trc_ldew_snow", |p, v| p.ldew_snow = v),
-        ("trc_wa", |p, v| p.wa = v),
-        ("trc_aquifer_ref_mass", |p, v| p.aquifer_ref_mass = v),
-        ("trc_wdsrf", |p, v| p.wdsrf = v),
-        ("trc_wetwat", |p, v| p.wetwat = v),
-        ("trc_surface_residue", |p, v| p.surface_residue = v),
-        ("trc_subsurface_residue", |p, v| p.subsurface_residue = v),
-        ("trc_canopy_solid", |p, v| p.canopy_solid = v),
-        ("trc_surface_solid", |p, v| p.surface_solid = v),
-        ("trc_subsurface_solid", |p, v| p.subsurface_solid = v),
-        ("trc_waterstorage_solid", |p, v| p.waterstorage_solid = v),
-        ("trc_scv", |p, v| p.scv = v),
-        ("trc_waterstorage", |p, v| p.waterstorage = v),
-        ("trc_leaf_delta_e", |p, v| p.leaf_delta_e = v),
-        ("trc_leaf_delta_b", |p, v| p.leaf_delta_b = v),
-        ("trc_leaf_peclet", |p, v| p.leaf_peclet = v),
-        ("trc_leaf_water_moles", |p, v| p.leaf_water_moles = v),
-        ("trc_leaf_iso_storage", |p, v| p.leaf_iso_storage = v),
+        ("mt_ldew_rain", |p, v| p.ldew_rain = v),
+        ("mt_ldew_snow", |p, v| p.ldew_snow = v),
+        ("mt_wa", |p, v| p.wa = v),
+        ("mt_aquifer_ref_mass", |p, v| p.aquifer_ref_mass = v),
+        ("mt_wdsrf", |p, v| p.wdsrf = v),
+        ("mt_wetwat", |p, v| p.wetwat = v),
+        ("mt_surface_residue", |p, v| p.surface_residue = v),
+        ("mt_subsurface_residue", |p, v| p.subsurface_residue = v),
+        ("mt_canopy_solid", |p, v| p.canopy_solid = v),
+        ("mt_surface_solid", |p, v| p.surface_solid = v),
+        ("mt_subsurface_solid", |p, v| p.subsurface_solid = v),
+        ("mt_waterstorage_solid", |p, v| p.waterstorage_solid = v),
+        ("mt_scv", |p, v| p.scv = v),
+        ("mt_waterstorage", |p, v| p.waterstorage = v),
+        ("mt_leaf_delta_e", |p, v| p.leaf_delta_e = v),
+        ("mt_leaf_delta_b", |p, v| p.leaf_delta_b = v),
+        ("mt_leaf_peclet", |p, v| p.leaf_peclet = v),
+        ("mt_leaf_water_moles", |p, v| p.leaf_water_moles = v),
+        ("mt_leaf_iso_storage", |p, v| p.leaf_iso_storage = v),
     ];
     for (name, setter) in setters {
         read_patch(name, &mut states, setter)?;
     }
     let layer_setters: [(&str, LayerSetter); 3] = [
-        ("trc_wliq_soisno", |p| &mut p.wliq_soisno),
-        ("trc_wice_soisno", |p| &mut p.wice_soisno),
-        ("trc_solid_soisno", |p| &mut p.solid_soisno),
+        ("mt_wliq_soisno", |p| &mut p.wliq_soisno),
+        ("mt_wice_soisno", |p| &mut p.wice_soisno),
+        ("mt_solid_soisno", |p| &mut p.solid_soisno),
     ];
     for (name, layers) in layer_setters {
         let values = restart.floats(name)?;
@@ -1275,10 +1329,10 @@ pub fn read_land_tracer_restart(
             }
         }
     }
-    let reference = restart.floats("trc_aquifer_ref_water")?;
+    let reference = restart.floats("mt_aquifer_ref_water")?;
     anyhow::ensure!(
         reference.len() == patches,
-        "trc_aquifer_ref_water has an unexpected size"
+        "mt_aquifer_ref_water has an unexpected size"
     );
     for (state, &value) in states.iter_mut().zip(reference) {
         state.aquifer_ref_water = value;

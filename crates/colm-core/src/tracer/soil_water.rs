@@ -207,8 +207,8 @@ pub struct SoilWaterInput<'a> {
     pub rsub_source_aquifer: Option<f64>,
     /// `permeable_soil_trc(1:nl_soil)`（`WATER_VSF` 的 `permeable_soil_out`）。
     pub permeable_soil: Option<&'a [bool; SOIL_LAYERS]>,
-    /// 逐示踪物的 `tracer_forcing_precip_value(itrc, ipatch)`。
-    pub precip_ratio: &'a [f64],
+    /// 逐示踪物的 `tracer_forcing_rain_value(itrc, ipatch)`。
+    pub rain_ratio: &'a [f64],
     /// 逐示踪物的 `tracer_forcing_vapor_value(itrc, ipatch)`。
     pub vapor_ratio: &'a [f64],
     /// 逐示踪物的 `tracer_forcing_has_vapor(itrc, ipatch)`（`None` 即都没有）。
@@ -264,7 +264,7 @@ pub fn tracer_soil_water(
         MAX_SNOW_LAYERS
     );
     ensure!(
-        input.precip_ratio.len() >= set.len() && input.vapor_ratio.len() >= set.len(),
+        input.rain_ratio.len() >= set.len() && input.vapor_ratio.len() >= set.len(),
         "tracer_soil_water: forcing ratios do not cover {} tracers",
         set.len()
     );
@@ -381,7 +381,7 @@ pub fn tracer_soil_water(
                 stage,
             )
         };
-        let r_precip = input.precip_ratio[itrc];
+        let r_precip = input.rain_ratio[itrc];
         let mut soil_resid_trc = 0.0;
         let mut soil_resid_water = 0.0;
         let mut water_shadow = [0.0; SOIL_LAYERS];

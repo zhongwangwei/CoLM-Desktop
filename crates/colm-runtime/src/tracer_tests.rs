@@ -110,22 +110,25 @@ fn the_forcing_cache_round_trips_and_checks_its_identity() {
     let identity = std::sync::Arc::new(vec![7; crate::spatial::tracer_forcing::ID_WIDTH * 2]);
     let precip = [0.5, 0.25];
     let vapor = [0.125, 0.0625];
+    let reliable = [1.0, 0.0];
     let cache = ForcingCache {
         nvars: 1,
         ntracers: 1,
         identity: std::sync::Arc::clone(&identity),
         precip: &precip,
         vapor: &vapor,
+        reliable: &reliable,
     };
     write_land_tracer_restart(&path, &set, &refs, -1.0, Some(&cache), &NO_HOST_CHECK).unwrap();
     let restart = colm_init::RestartFile::open(&path).unwrap();
     let loadable = land_tracer_restart_loadable(&restart, &set);
     assert!(loadable);
-    let (p, v) = read_forcing_cache(&restart, loadable, 1, &identity)
+    let (p, v, r) = read_forcing_cache(&restart, loadable, 1, &identity)
         .unwrap()
         .unwrap();
     assert_eq!(p, precip);
     assert_eq!(v, vapor);
+    assert_eq!(r, Some(reliable.to_vec()));
     // 配置变了（变量数或指纹不同）就停机，与上游一致。
     assert!(read_forcing_cache(&restart, loadable, 2, &identity).is_err());
     let mut other = (*identity).clone();

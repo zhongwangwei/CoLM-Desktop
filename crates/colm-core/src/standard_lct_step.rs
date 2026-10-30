@@ -2343,7 +2343,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             rsub_source_surface: Some(diag.subsurface_source_surface_mm),
             rsub_source_aquifer: Some(diag.subsurface_source_aquifer_mm),
             permeable_soil: Some(&permeable),
-            precip_ratio: ctx.precip_ratio,
+            rain_ratio: ctx.rain_ratio,
             vapor_ratio: ctx.vapor_ratio,
             has_vapor: Some(ctx.has_vapor),
         },

@@ -169,6 +169,8 @@ fn quarantine_carrierless_pools(tracer: &TracerDescriptor, pools: &mut TracerPoo
 struct BoxWater {
     /// 计入示踪物输入的大气降水（水体为 `atm_precip_mass`，冰川为 `precip_mass`）。
     atm_precip_mass: f64,
+    /// 其中的雨量（上游 `rain_mass`）：相态回填时雨按 `R_rain` 补一项修正。
+    rain_mass: f64,
     /// 水体的湖亏补水（按箱内比值补），冰川为 `None`。
     deficit_mass: Option<f64>,
     rnof_mass: f64,
@@ -241,11 +243,13 @@ impl SpecialFrac {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mixed_box(
     tracer: &TracerDescriptor,
     frac: &SpecialFrac,
     pools: &mut TracerPools,
     storage_beg: f64,
+    r_rain: f64,
     r_precip: f64,
     r_vapor: f64,
     box_water: &BoxWater,
@@ -268,19 +272,21 @@ fn mixed_box(
     } else {
         (r_vapor, r_vapor)
     };
-    // `FMA(R_frost, dep_ice, FMA(precip, R_precip, R_dew*dep_liq))`。
+    // `FMA(R_frost, dep_ice, FMA(precip, R_precip, R_dew*dep_liq))`，再加雨的修正项。
+    // 雨雪比值相同时修正项恰为 0，与旧的单比值实现逐位相同。
     let mut trc_input = r_frost.contract(
         box_water.dep_ice_mass,
         box_water
             .atm_precip_mass
             .contract(r_precip, r_dew * box_water.dep_liq_mass),
     );
+    trc_input += box_water.rain_mass * (r_rain - r_precip);
     // 水体的湖亏补水按箱内比值：`FMA(R_pool, deficit, ...)`；冰川没有这一项。
     if let Some(deficit_mass) = box_water.deficit_mass {
         let r_pool = if water_beg > TRC_WATER_MIN_FOR_RATIO {
             (storage_beg - trc_held_storage).max(0.0) / water_beg
         } else {
-            r_precip
+            r_rain
         };
         trc_input = r_pool.contract(deficit_mass, trc_input);
     }
@@ -416,6 +422,7 @@ fn account_tracer(
     itrc: usize,
     state: &mut PatchTracerState,
     runtime_forced: bool,
+    r_rain: f64,
     r_precip: f64,
     r_vapor: f64,
     box_water: &BoxWater,
@@ -440,6 +447,7 @@ fn account_tracer(
             frac,
             &mut state.pools[itrc],
             storage_beg,
+            r_rain,
             r_precip,
             r_vapor,
             box_water,
@@ -518,8 +526,10 @@ pub struct GlacierInput<'a> {
     pub wice_soisno: &'a [f64; SOISNO_LAYERS],
     /// `DEF_ISO_SUBL_SKIN_MM`。
     pub subl_skin_mm: f64,
-    /// `tracer_forcing_precip_value(itrc, ipatch)`，逐示踪物。
-    pub precip_ratio: &'a [f64],
+    /// `tracer_forcing_rain_value(itrc, ipatch)`，逐示踪物。
+    pub rain_ratio: &'a [f64],
+    /// `tracer_forcing_snow_value(itrc, ipatch)`，逐示踪物（上游 `R_precip`）。
+    pub snow_ratio: &'a [f64],
     /// `tracer_forcing_vapor_value(itrc, ipatch)`，逐示踪物。
     pub vapor_ratio: &'a [f64],
     /// `trc_runtime_forced(itrc)`。
@@ -604,6 +614,7 @@ pub fn tracer_glacier_patch(
     };
     let box_water = BoxWater {
         atm_precip_mass: precip_mass,
+        rain_mass: (input.prc_rain + input.prl_rain) * dt,
         deficit_mass: None,
         rnof_mass,
         evap_liq_mass,
@@ -629,7 +640,8 @@ pub fn tracer_glacier_patch(
             itrc,
             state,
             input.runtime_forced[itrc],
-            input.precip_ratio[itrc],
+            input.rain_ratio[itrc],
+            input.snow_ratio[itrc],
             input.vapor_ratio[itrc],
             &box_water,
             snl_trc,
@@ -717,8 +729,10 @@ pub struct WaterbodyInput<'a> {
     pub subl_skin_mm: f64,
     /// `waterbody_hist_sample`（CoLMDRIVER 在子步循环里只让最后一个子步累加 history）。
     pub hist_sample: bool,
-    /// `tracer_forcing_precip_value(itrc, ipatch)`，逐示踪物。
-    pub precip_ratio: &'a [f64],
+    /// `tracer_forcing_rain_value(itrc, ipatch)`，逐示踪物。
+    pub rain_ratio: &'a [f64],
+    /// `tracer_forcing_snow_value(itrc, ipatch)`，逐示踪物（上游 `R_precip`）。
+    pub snow_ratio: &'a [f64],
     /// `tracer_forcing_vapor_value(itrc, ipatch)`，逐示踪物。
     pub vapor_ratio: &'a [f64],
     /// `trc_runtime_forced(itrc)`。
@@ -805,6 +819,7 @@ pub fn tracer_waterbody_patch(
     };
     let box_water = BoxWater {
         atm_precip_mass,
+        rain_mass: input.forc_rain * dt,
         deficit_mass: Some(deficit_mass),
         rnof_mass,
         evap_liq_mass,
@@ -830,7 +845,8 @@ pub fn tracer_waterbody_patch(
             itrc,
             state,
             input.runtime_forced[itrc],
-            input.precip_ratio[itrc],
+            input.rain_ratio[itrc],
+            input.snow_ratio[itrc],
             input.vapor_ratio[itrc],
             &box_water,
             input.snl,

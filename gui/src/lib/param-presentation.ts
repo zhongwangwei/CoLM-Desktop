@@ -318,7 +318,7 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_SOLUTE_NAMES: pair('溶质名称', 'Solute names'),
   DEF_SOLUTE_PARAM_FILES: pair('溶质参数文件', 'Solute parameter files'),
   DEF_SEDIMENT_PARAM_FILE: pair('泥沙参数文件', 'Sediment parameter file'),
-  DEF_NH4_LEACHING_MODE: pair('铵盐淋溶模式', 'Ammonium leaching mode'),
+  DEF_NH4_LEACHING: pair('铵盐淋溶模式', 'Ammonium leaching mode'),
   DEF_ISO_USE_FRACTIONATION: pair('启用同位素分馏', 'Enable isotope fractionation'),
   DEF_ISO_KINETIC_SCHEME: pair('气液动理分馏方案', 'Gas–liquid kinetic fractionation'),
   DEF_ISO_OPEN_WATER_KINETIC: pair('开阔水面动理分馏方案', 'Open-water kinetic fractionation'),

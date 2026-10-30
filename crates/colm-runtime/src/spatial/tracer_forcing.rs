@@ -28,15 +28,28 @@ use super::mapping::AreaWeightedMapping;
 
 /// `TRACER_FORCING_MAX`。
 pub const TRACER_FORCING_MAX: usize = 8;
-/// `trc_forc_min_prcp`、`trc_forc_min_q`、`trc_forc_max_abs`。
-const MIN_PRECIP: f64 = 1.0e-7;
+/// `trc_forc_min_prcp` 已换成 namelist 参数 `DEF_MT_FORCING_MIN_PRECIP`（默认 5e-6）；
+/// `trc_forc_min_q`、`trc_forc_max_abs` 仍是常量。
 const MIN_Q: f64 = 1.0e-12;
 const MAX_ABS: f64 = 1.0e10;
+/// `DEF_MT_FORCING_MIN_PRECIP`、`DEF_MT_FORCING_MEMORY_PRECIP` 的声明默认值
+/// （`MOD_MT_Namelist.F90:78/88`）。
+pub const DEFAULT_MIN_PRECIP: f64 = 5.0e-6;
+pub const DEFAULT_MEMORY_PRECIP: f64 = 2.0e-5;
 /// `trc_delta_sanity_max`。
 const DELTA_SANITY_MAX: f64 = 2.0e3;
-/// `TRC_FORC_CACHE_SCHEMA`、`TRC_FORC_ID_WIDTH`。
-pub const CACHE_SCHEMA: i32 = 1;
+/// `MT_FORC_CACHE_SCHEMA`、`MT_FORC_ID_WIDTH`。schema 2 多出 `mt_forcing_precip_reliable`；
+/// schema 1 的重启仍可读，其中的"记住值"当时就是最近一个有效记录，按可靠处理。
+pub const CACHE_SCHEMA: i32 = 2;
 pub const ID_WIDTH: usize = 8 + 6 * 256;
+
+/// `DECODE_INVALID` / `DECODE_NEAR_DRY` / `DECODE_VALID`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeStatus {
+    Invalid,
+    NearDry,
+    Valid,
+}
 
 /// `tracer_forcing_spec_type`（字段已按上游规范化：`role`/`tintalgo`/`input_mode` 小写、全部左对齐）。
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +348,15 @@ pub struct ForcingConfig {
     pub runtime_forced: Vec<bool>,
     /// `tracer_forcing_vapor_configured`（`tracer_forcing_has_vapor` 恒为真的那部分）。
     pub vapor_configured: Vec<bool>,
+    /// `tracer_forcing_precip_configured`。
+    pub precip_configured: Vec<bool>,
+    /// `mt_forc_phase_fill`：既是同位素、又同时有降水与蒸汽强迫的物种。只有它们
+    /// 在近干记录时按相态分别回填（雨=与蒸汽平衡的液相，雪=记住的可靠比值）。
+    pub phase_fill: Vec<bool>,
+    /// `DEF_MT_FORCING_MIN_PRECIP`：低于它按 near-dry 处理、不用重/总比值。
+    pub min_precip: f64,
+    /// `DEF_MT_FORCING_MEMORY_PRECIP`：高于它才被记住为雪的回落比值。
+    pub memory_precip: f64,
 }
 
 impl ForcingConfig {
@@ -378,11 +400,17 @@ pub fn configure(
     physics: &TracerPhysics,
     specs: &[Vec<ForcingSpec>],
     totals: Option<&MainTotals>,
+    min_precip: f64,
+    memory_precip: f64,
 ) -> Result<ForcingConfig> {
     let n = set.len();
     let mut config = ForcingConfig {
         runtime_forced: vec![false; n],
         vapor_configured: vec![false; n],
+        precip_configured: vec![false; n],
+        phase_fill: vec![false; n],
+        min_precip,
+        memory_precip,
         ..ForcingConfig::default()
     };
     for (itrc, tracer) in set.tracers.iter().enumerate() {
@@ -446,8 +474,42 @@ pub fn configure(
         );
         config.runtime_forced[itrc] = has[0] || has[1];
         config.vapor_configured[itrc] = has[1];
+        config.precip_configured[itrc] = has[0];
+        // `mt_forcing_allocate_state`：只有"同位素 + 降水强迫 + 蒸汽强迫"才做相态回填。
+        config.phase_fill[itrc] = tracer.is_isotope() && has[0] && has[1];
     }
+    // `MOD_MT_Forcing.F90:1024`：做相态回填时回落阈值必须不低于近干阈值。
+    ensure!(
+        !config.phase_fill.iter().any(|&fill| fill) || memory_precip >= min_precip,
+        "DEF_MT_FORCING_MEMORY_PRECIP must be >= DEF_MT_FORCING_MIN_PRECIP for phase fill."
+    );
     Ok(config)
+}
+
+/// `mt_forc_phase_fill` 的独立判定：同位素且同时配置了 precip 与 vapor 强迫。
+///
+/// `configure` 在遍历变量时用同一条件；LULCC 迁移没有主强迫 totals、不能跑完整
+/// `configure`，所以单独暴露这条判定，保证两处一致。
+pub fn phase_fill_flags(set: &TracerSet, specs: &[Vec<ForcingSpec>]) -> Vec<bool> {
+    set.tracers
+        .iter()
+        .enumerate()
+        .map(|(itrc, tracer)| {
+            if !tracer.is_isotope() || !tracer.uses_land_water_transport() {
+                return false;
+            }
+            let has = |role: &str| {
+                specs.get(itrc).is_some_and(|list| {
+                    list.iter().any(|spec| {
+                        spec.role.trim_end() == role
+                            && token_present(&spec.fprefix)
+                            && token_present(&spec.vname)
+                    })
+                })
+            };
+            has("precip") && has("vapor")
+        })
+        .collect()
 }
 
 /// `tracer_forcing_ensure_total`。
@@ -520,9 +582,27 @@ pub struct GriddedTracerForcing {
     ntracers: usize,
     ref_ratio: Vec<f64>,
     isotope: Vec<bool>,
-    /// `trc_forc_precip_value`、`trc_forc_vapor_value`（最近一次有效值）。
+    /// `mt_forc_precip_value`、`mt_forc_vapor_value`（记住值：最近一个可靠记录。
+    /// 同位素 + 双相强迫时，冷启动或新 patch 先放"冰-汽沉积平衡"估计）。
     pub precip: Vec<f64>,
     pub vapor: Vec<f64>,
+    /// `mt_forc_precip_step`：本步有效的降水比值（`has_precip` 为真处）。
+    precip_step: Vec<f64>,
+    /// `mt_forc_precip_reliable`：1 表示记住值来自 total > `MEMORY_PRECIP` 的记录。
+    pub precip_reliable: Vec<f64>,
+    /// `mt_forc_has_precip` / `mt_forc_has_vapor`。
+    has_precip: Vec<bool>,
+    has_vapor: Vec<bool>,
+    /// `mt_forc_precip_status` / `mt_forc_vapor_status`。
+    precip_status: Vec<DecodeStatus>,
+    vapor_status: Vec<DecodeStatus>,
+    /// 本步按相态算好的雨/雪比值（`tracer_forcing_rain_value` / `_snow_value`）。
+    /// 非相态回填时两者都等于记住值，与旧实现逐位相同。
+    rain: Vec<f64>,
+    snow: Vec<f64>,
+    /// 相态回填要的 `tracer_alpha_*_vap` 与 `tracer_alpha_ice_vap_deposition`。
+    physics: TracerPhysics,
+    descriptors: Vec<colm_core::tracer::descriptor::TracerDescriptor>,
     /// 重启指纹要的主强迫原文：`DEF_Forcing_Interp_Method`。
     interp_method: String,
     /// `tracer_forcing_identity`（构造时按主强迫配置算好）。
@@ -542,6 +622,7 @@ impl GriddedTracerForcing {
     pub fn new(
         config: ForcingConfig,
         set: &TracerSet,
+        physics: &TracerPhysics,
         patches: usize,
         interp_method: String,
         main: &GriddedForcingConfig,
@@ -562,6 +643,7 @@ impl GriddedTracerForcing {
             .iter()
             .map(|t| t.vapor_default_ratio())
             .collect();
+        let state = ntracers * patches;
         let mut forcing = Self {
             brackets: vec![Bracket::default(); config.vars.len()],
             config,
@@ -574,6 +656,20 @@ impl GriddedTracerForcing {
             vapor: (0..patches)
                 .flat_map(|_| vapor_default.iter().copied())
                 .collect(),
+            precip_step: vec![0.0; state],
+            precip_reliable: vec![0.0; state],
+            has_precip: vec![false; state],
+            has_vapor: vec![false; state],
+            precip_status: vec![DecodeStatus::Invalid; state],
+            vapor_status: vec![DecodeStatus::Invalid; state],
+            rain: (0..patches)
+                .flat_map(|_| precip_default.iter().copied())
+                .collect(),
+            snow: (0..patches)
+                .flat_map(|_| precip_default.iter().copied())
+                .collect(),
+            physics: *physics,
+            descriptors: set.tracers.clone(),
             interp_method,
             identity: std::sync::Arc::default(),
         };
@@ -589,6 +685,7 @@ impl GriddedTracerForcing {
             identity: std::sync::Arc::clone(&self.identity),
             precip: &self.precip,
             vapor: &self.vapor,
+            reliable: &self.precip_reliable,
         }
     }
 
@@ -596,22 +693,37 @@ impl GriddedTracerForcing {
         &self.config
     }
 
-    /// 第 `patch` 个 patch 的 `(precip, vapor)` 比值（逐示踪物）。
-    pub fn ratios(&self, patch: usize) -> (&[f64], &[f64]) {
+    /// 第 `patch` 个 patch 的 `(rain, snow, vapor)` 比值（逐示踪物）。
+    ///
+    /// 上游 `tracer_forcing_rain_value` / `_snow_value`：没有相态回填的物种两者都取记住值，
+    /// 所以这个接口在旧配置下与原来的单一 `precip` 逐位相同。
+    pub fn ratios(&self, patch: usize) -> (&[f64], &[f64], &[f64]) {
         let range = patch * self.ntracers..(patch + 1) * self.ntracers;
-        (&self.precip[range.clone()], &self.vapor[range])
+        (
+            &self.rain[range.clone()],
+            &self.snow[range.clone()],
+            &self.vapor[range],
+        )
     }
 
     /// `read_tracer_forcing`：读上下界、插值、`grid2pset`、解码并更新最近一次有效值。
+    /// `air_temperature` 是本步逐 patch 的 `forc_t`，相态回填的平衡分馏系数用它。
     pub fn step(
         &mut self,
         now: CalendarTime,
         forcing: &GriddedForcing,
         mapping: &AreaWeightedMapping,
+        air_temperature: &[f64],
     ) -> Result<()> {
         if !self.config.enabled() {
             return Ok(());
         }
+        // `tracer_forcing_prepare_step`：每步先清本步的有效标志与解码状态；
+        // 记住值（`precip`/`vapor`）跨步保留。
+        self.has_precip.fill(false);
+        self.has_vapor.fill(false);
+        self.precip_status.fill(DecodeStatus::Invalid);
+        self.vapor_status.fill(DecodeStatus::Invalid);
         let now = Stamp::from_calendar(now);
         let mut patch_values: Vec<Vec<f64>> = Vec::with_capacity(self.config.vars.len());
         for iv in 0..self.config.vars.len() {
@@ -669,7 +781,7 @@ impl GriddedTracerForcing {
                 .collect();
             patch_values.push(mapped);
         }
-        self.update_values(&patch_values);
+        self.update_values(&patch_values, air_temperature);
         Ok(())
     }
 
@@ -731,42 +843,146 @@ impl GriddedTracerForcing {
     }
 
     /// `tracer_forcing_update_values`：逐变量、逐 patch 解码；有效才覆盖。
-    fn update_values(&mut self, patch_values: &[Vec<f64>]) {
-        for (iv, var) in self.config.vars.iter().enumerate() {
+    ///
+    /// 与旧实现的差别全在这里：有效值分"本步值"（`precip_step`）与"记住值"（`precip`），
+    /// 记住值只在可靠记录（total > `MEMORY_PRECIP`）时更新；最后按相态算出雨/雪两列。
+    fn update_values(&mut self, patch_values: &[Vec<f64>], air_temperature: &[f64]) {
+        let vars = self.config.vars.clone();
+        for (iv, var) in vars.iter().enumerate() {
             let Some(itrc) = var.itrc else {
                 continue;
             };
             for (ip, &raw) in patch_values[iv].iter().enumerate() {
                 let total = var.total.map(|t| patch_values[t][ip]);
-                let Some(value) = self.decode(var, itrc, raw, total) else {
-                    continue;
-                };
+                let (value, status) = self.decode(var, itrc, raw, total);
                 let slot = ip * self.ntracers + itrc;
                 match var.stream {
-                    Stream::Precip => self.precip[slot] = value,
-                    Stream::Vapor => self.vapor[slot] = value,
+                    Stream::Precip => self.precip_status[slot] = status,
+                    Stream::Vapor => self.vapor_status[slot] = status,
+                    Stream::TotalPrecip | Stream::TotalVapor => {}
+                }
+                let Some(value) = value else {
+                    continue;
+                };
+                match var.stream {
+                    Stream::Precip => {
+                        self.precip_step[slot] = value;
+                        self.has_precip[slot] = true;
+                        if self.reliable_record(var, total) {
+                            self.precip[slot] = value;
+                            self.precip_reliable[slot] = 1.0;
+                        }
+                    }
+                    Stream::Vapor => {
+                        self.vapor[slot] = value;
+                        self.has_vapor[slot] = true;
+                    }
                     Stream::TotalPrecip | Stream::TotalVapor => {}
                 }
             }
         }
+        // 冷启动或 LULCC 后的新 patch 还没见过可靠记录：记住值取"从强迫蒸汽凝华出来的冰"
+        // 的平衡比值（Jouzel-Merlivat），每步更新，而不是固定的默认比值。
+        if self.ntracers == 0 {
+            return;
+        }
+        let patches = self.precip.len() / self.ntracers;
+        for itrc in 0..self.ntracers {
+            if !self.config.phase_fill.get(itrc).copied().unwrap_or(false) {
+                continue;
+            }
+            let tracer = &self.descriptors[itrc];
+            for ip in 0..patches {
+                let slot = ip * self.ntracers + itrc;
+                if self.precip_reliable[slot] > 0.5 {
+                    continue;
+                }
+                let temp = air_temperature.get(ip).copied().unwrap_or(0.0);
+                let value = self.physics.alpha_ice_vap_deposition(tracer, temp) * self.vapor[slot];
+                if value.abs() < MAX_ABS && value > TRC_TINY {
+                    self.precip[slot] = value;
+                }
+            }
+        }
+        self.update_phase_ratios(air_temperature);
     }
 
-    /// `tracer_forcing_decode_value`：返回有效值，无效（含近干）为 `None`。
-    fn decode(&self, var: &ForcingVar, itrc: usize, raw: f64, total: Option<f64>) -> Option<f64> {
+    /// `tracer_forcing_rain_value` / `_snow_value` 的逐步预计算。
+    ///
+    /// 有相态回填时：本步记录有效则雨雪都取本步值；只有"近干"时雨取与蒸汽平衡的液相、
+    /// 雪取记住值；解码无效时两者都保持记住值。没有相态回填的物种两者都等于记住值，
+    /// 与旧实现逐位相同。
+    fn update_phase_ratios(&mut self, air_temperature: &[f64]) {
+        if self.ntracers == 0 {
+            return;
+        }
+        let patches = self.precip.len() / self.ntracers;
+        for ip in 0..patches {
+            let temp = air_temperature.get(ip).copied().unwrap_or(0.0);
+            for itrc in 0..self.ntracers {
+                let slot = ip * self.ntracers + itrc;
+                let remembered = self.precip[slot];
+                let (mut rain, mut snow) = (remembered, remembered);
+                if self.config.phase_fill.get(itrc).copied().unwrap_or(false) {
+                    if self.has_precip[slot] {
+                        rain = self.precip_step[slot];
+                        snow = self.precip_step[slot];
+                    } else if self.precip_status[slot] == DecodeStatus::NearDry {
+                        let value = self.physics.alpha_liq_vap(&self.descriptors[itrc], temp)
+                            * self.vapor[slot];
+                        if value.abs() < MAX_ABS && value > TRC_TINY {
+                            rain = value;
+                        }
+                    }
+                }
+                self.rain[slot] = rain;
+                self.snow[slot] = snow;
+            }
+        }
+    }
+
+    /// `tracer_forcing_reliable_record`：相态回填的物种，重/总比值只有在
+    /// total > `MEMORY_PRECIP` 时才值得记住（刚过近干阈值的记录 d-excess 仍然很吵）。
+    fn reliable_record(&self, var: &ForcingVar, total: Option<f64>) -> bool {
+        let Some(itrc) = var.itrc else {
+            return true;
+        };
+        if !self.config.phase_fill.get(itrc).copied().unwrap_or(false) {
+            return true;
+        }
+        if !matches!(var.mode, Mode::HeavyOverTotal | Mode::NormalizedOverTotal) {
+            return true;
+        }
+        total.is_some_and(|total| total > self.config.memory_precip)
+    }
+
+    /// `tracer_forcing_decode_value`：返回有效值与解码状态（无效 / 近干 / 有效）。
+    fn decode(
+        &self,
+        var: &ForcingVar,
+        itrc: usize,
+        raw: f64,
+        total: Option<f64>,
+    ) -> (Option<f64>, DecodeStatus) {
         let valid = |x: f64| x.abs() < MAX_ABS;
         let value = match var.mode {
             Mode::HeavyOverTotal | Mode::NormalizedOverTotal => {
-                let total = total?;
+                let Some(total) = total else {
+                    return (None, DecodeStatus::Invalid);
+                };
                 if !valid(total) {
-                    return None;
+                    return (None, DecodeStatus::Invalid);
                 }
                 let min_total = if var.stream == Stream::Precip {
-                    MIN_PRECIP
+                    self.config.min_precip
                 } else {
                     MIN_Q
                 };
-                if total <= min_total || !valid(raw) || raw < 0.0 {
-                    return None;
+                if total <= min_total {
+                    return (None, DecodeStatus::NearDry);
+                }
+                if !valid(raw) || raw < 0.0 {
+                    return (None, DecodeStatus::Invalid);
                 }
                 let value = raw / total;
                 if var.mode == Mode::NormalizedOverTotal {
@@ -777,7 +993,7 @@ impl GriddedTracerForcing {
             }
             Mode::Delta => {
                 if !valid(raw) {
-                    return None;
+                    return (None, DecodeStatus::Invalid);
                 }
                 if self.isotope[itrc] {
                     delta_to_ratio(raw, self.ref_ratio[itrc])
@@ -787,22 +1003,22 @@ impl GriddedTracerForcing {
             }
             Mode::Value => {
                 if !valid(raw) {
-                    return None;
+                    return (None, DecodeStatus::Invalid);
                 }
                 raw
             }
         };
         if self.isotope[itrc] {
             if value <= TRC_TINY {
-                return None;
+                return (None, DecodeStatus::Invalid);
             }
             if ratio_to_delta(value, self.ref_ratio[itrc]).abs() > DELTA_SANITY_MAX {
-                return None;
+                return (None, DecodeStatus::Invalid);
             }
         } else if value < 0.0 {
-            return None;
+            return (None, DecodeStatus::Invalid);
         }
-        Some(value)
+        (Some(value), DecodeStatus::Valid)
     }
 
     /// `tracer_forcing_identity`：`(TRC_FORC_ID_WIDTH, n+1)` 的整数指纹，按 Fortran 列序展平。
@@ -859,12 +1075,27 @@ impl GriddedTracerForcing {
     }
 
     /// `tracer_forcing_read_restart` 读回的最近一次有效值（`patches` 个 patch 起自 `first`）。
-    pub fn restore(&mut self, first: usize, precip: &[f64], vapor: &[f64]) -> Result<()> {
+    ///
+    /// `reliable` 为 `None` 表示 schema 1 的重启：当时每个有效记录都会更新记住值，
+    /// 所以整段按可靠处理（上游 `mt_forcing_read_restart` 的同一规则）。
+    pub fn restore(
+        &mut self,
+        first: usize,
+        precip: &[f64],
+        vapor: &[f64],
+        reliable: Option<&[f64]>,
+    ) -> Result<()> {
         let start = first * self.ntracers;
         ensure!(
             precip.len() == vapor.len() && start + precip.len() <= self.precip.len(),
             "tracer forcing cache restart has an unexpected size"
         );
+        if let Some(reliable) = reliable {
+            ensure!(
+                reliable.len() == precip.len() && reliable.iter().all(|&v| v == 0.0 || v == 1.0),
+                "non-finite or invalid tracer forcing cache restart"
+            );
+        }
         for (itrc, tracer_isotope) in self.isotope.iter().enumerate() {
             let column = |values: &[f64]| {
                 values
@@ -886,6 +1117,9 @@ impl GriddedTracerForcing {
         }
         self.precip[start..start + precip.len()].copy_from_slice(precip);
         self.vapor[start..start + vapor.len()].copy_from_slice(vapor);
+        for slot in start..start + precip.len() {
+            self.precip_reliable[slot] = reliable.map_or(1.0, |values| values[slot - start]);
+        }
         Ok(())
     }
 }

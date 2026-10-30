@@ -25,8 +25,11 @@ pub struct TracerStepContext<'a> {
     pub soil_options: SoilWaterOptions,
     /// `DEF_ISO_CANOPY_EQUILIBRATION`。
     pub canopy_equilibration: f64,
-    /// 逐示踪物的 `tracer_forcing_precip_value`/`tracer_forcing_vapor_value`。
-    pub precip_ratio: &'a [f64],
+    /// 逐示踪物的 `tracer_forcing_rain_value`/`_snow_value`/`_vapor_value`。
+    ///
+    /// 没有相态回填的物种雨雪两列相同（都等于记住的降水比值），与旧的单列实现逐位一致。
+    pub rain_ratio: &'a [f64],
+    pub snow_ratio: &'a [f64],
     pub vapor_ratio: &'a [f64],
     /// 逐示踪物的 `tracer_forcing_has_vapor`（配置了 vapor 强迫即为真）。
     pub has_vapor: &'a [bool],
@@ -125,7 +128,13 @@ pub fn after_interception(
             runtime_forced: ctx.runtime_forced,
         },
     );
-    tracer_precip(ctx.set, &mut track.state, ctx.precip_ratio, precip);
+    tracer_precip(
+        ctx.set,
+        &mut track.state,
+        ctx.rain_ratio,
+        ctx.snow_ratio,
+        precip,
+    );
     Ok(())
 }
 

@@ -105,7 +105,15 @@ fn over_total_inputs_register_their_total_first() {
     let set = isotope_set(&path);
     let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
-    let config = configure(&set, &physics, &specs, Some(&totals())).unwrap();
+    let config = configure(
+        &set,
+        &physics,
+        &specs,
+        Some(&totals()),
+        DEFAULT_MIN_PRECIP,
+        DEFAULT_MEMORY_PRECIP,
+    )
+    .unwrap();
     let streams: Vec<_> = config.vars.iter().map(|v| v.stream).collect();
     assert_eq!(
         streams,
@@ -132,7 +140,15 @@ fn mismatched_total_timing_is_rejected() {
     let set = isotope_set(&path);
     let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
-    assert!(configure(&set, &physics, &specs, Some(&totals())).is_err());
+    assert!(configure(
+        &set,
+        &physics,
+        &specs,
+        Some(&totals()),
+        DEFAULT_MIN_PRECIP,
+        DEFAULT_MEMORY_PRECIP
+    )
+    .is_err());
 }
 
 #[test]
@@ -141,11 +157,18 @@ fn decoding_keeps_the_last_valid_ratio() {
     let set = isotope_set(&path);
     let specs = load_specs(&set, &isotope_files(&path)).unwrap();
     let physics = TracerPhysics::default();
-    let config = configure(&set, &physics, &specs, Some(&totals())).unwrap();
+    let config = configure(
+        &set,
+        &physics,
+        &specs,
+        Some(&totals()),
+        DEFAULT_MIN_PRECIP,
+        DEFAULT_MEMORY_PRECIP,
+    )
+    .unwrap();
     let main = isogsm_main();
     let mut forcing =
-        GriddedTracerForcing::new(config, &set, 3, "arealweight".into(), &main).unwrap();
-    let default = forcing.precip[0];
+        GriddedTracerForcing::new(config, &set, &physics, 3, "arealweight".into(), &main).unwrap();
     // patch 0 有效、patch 1 近干、patch 2 缺测（填充值）。
     let values = vec![
         vec![1.0e-4, 1.0e-8, 9.999e20],
@@ -153,18 +176,39 @@ fn decoding_keeps_the_last_valid_ratio() {
         vec![1.0e-2, 1.0e-2, 1.0e-2],
         vec![0.98e-2, 0.98e-2, 0.98e-2],
     ];
-    forcing.update_values(&values);
+    forcing.update_values(&values, &[280.0; 3]);
     let r = 2.0052e-3;
     assert_eq!(forcing.precip[0], 0.99e-4 / 1.0e-4 * r);
+    // O18 是"同位素 + 降水 + 蒸汽"：近干/缺测的 patch 还没见过可靠记录，
+    // 记住值改由冰-汽沉积平衡估计（上游 `mt_forcing_update_values` 的末段），
+    // 不再停在描述符默认值上。
+    let deposition = physics.alpha_ice_vap_deposition(&set.tracers[0], 280.0);
+    // 近干 patch 的蒸汽强迫仍然有效，估计值用本步蒸汽比值。
+    let expected = deposition * forcing.vapor[2];
     assert_eq!(
-        forcing.precip[2], default,
-        "near-dry keeps the previous ratio"
+        forcing.precip[2], expected,
+        "near-dry takes the deposition-equilibrium estimate"
     );
+    // 缺测 patch 的蒸汽本步仍然有效，估计值同样用本步蒸汽比值。
+    let expected_fill = deposition * forcing.vapor[4];
     assert_eq!(
-        forcing.precip[4], default,
-        "fill value keeps the previous ratio"
+        forcing.precip[4], expected_fill,
+        "fill value keeps the deposition-equilibrium estimate"
     );
+    // 雨雪两相：有效记录两者都取本步值；近干时雨取与蒸汽平衡的液相、雪取记住值。
+    let (rain, snow, _) = forcing.ratios(1);
+    assert_eq!(
+        rain[0],
+        physics.alpha_liq_vap(&set.tracers[0], 280.0) * forcing.vapor[2]
+    );
+    assert_eq!(snow[0], expected);
+    let (rain, snow, _) = forcing.ratios(0);
+    assert_eq!(rain[0], 0.99e-4 / 1.0e-4 * r);
+    assert_eq!(snow[0], 0.99e-4 / 1.0e-4 * r);
     assert_eq!(forcing.vapor[0], 0.98e-2 / 1.0e-2 * r);
+    // HDO 只有降水强迫、没有相态回填：雨雪两列都等于记住值（与旧的单列实现一致）。
+    assert_eq!(rain[1], set.tracers[1].precip_default_ratio());
+    assert_eq!(snow[1], rain[1]);
     assert_eq!(
         forcing.vapor[1],
         set.tracers[1].vapor_default_ratio(),
@@ -199,8 +243,24 @@ fn main_totals_and_identity_follow_the_main_forcing() {
     let totals = MainTotals::from_config(&main);
     assert_eq!(totals.precip.1, "pratesfc");
     assert_eq!(totals.precip.3, "forward");
-    let config = configure(&set, &TracerPhysics::default(), &specs, Some(&totals)).unwrap();
-    let forcing = GriddedTracerForcing::new(config, &set, 2, "arealweight".into(), &main).unwrap();
+    let config = configure(
+        &set,
+        &TracerPhysics::default(),
+        &specs,
+        Some(&totals),
+        DEFAULT_MIN_PRECIP,
+        DEFAULT_MEMORY_PRECIP,
+    )
+    .unwrap();
+    let forcing = GriddedTracerForcing::new(
+        config,
+        &set,
+        &TracerPhysics::default(),
+        2,
+        "arealweight".into(),
+        &main,
+    )
+    .unwrap();
     let id = forcing.identity();
     assert_eq!(id.len(), ID_WIDTH * 5);
     assert_eq!(&id[..8], &[4, 2, 1980, 1, 1, 1, 3, 0]);

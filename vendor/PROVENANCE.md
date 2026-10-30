@@ -68,3 +68,49 @@
 
 - `mksrfdata/Aggregation_Urban.F90`：LCZ 原来不请求像元面积，沿用人口那一循环最后一个城市 patch 的面积，材料参数差最后几位、MPI 下随进程划分变。
   现在与 NCAR 方案一样按 patch 请求面积。详见 `docs/upstream-bugs.md` 第 86 条。
+
+### 2026-10-30：并入上游 `7d2fca93..ddb7bc1a`（N2O 死锁、history 窗口、掩码初始化）
+
+基线是先前的 `7d2fca93` 并入；这三个提交逐个三方应用，共 16 个文件，其中 12 个与上游该基线
+逐行一致、可直接套用补丁：
+
+- `MOD_MT_RiverLake.F90`：N2O 累加器只在 worker 上分配，却被用来守五处集合调用，跑到第一个
+  history 窗口边界就挂死；现在条件测试移进叶子过程，`f_mt_n2o_flux_*` 与 `mt_hist_n2o_*` 始终写出。
+  同时**重启后不再恢复** `mt_hist_stor/levsto/out/bifout/acctime`：重启写在窗口关闭步的末尾，
+  行总是整窗，恢复会让重启后的第一个窗口把旧窗口再算一遍（上游实测 day2 报成两日均值）。
+- `MOD_MT_Defs.F90`：描述符指纹加入 `n2o_ef5`（9 个实数），旧重启因此不再匹配、按冷启动处理。
+- `MOD_NH4_LEACHING_MODE` → `DEF_NH4_LEACHING`（文档、参数文件与停机消息一直用后者，照文档写会让
+  namelist 读取失败）；`DEF_MT_N2O_EF5_NH4/NO3` 默认从 0 改为 -1（未设置），`>= 0` 才算覆盖，
+  0 才是"关闭换算"。
+- `MOD_Hist.F90`：`filter_crop`/`filter_irrig` 在分配处清零。`irrigarea` 无条件写出，但灌溉关闭时
+  掩码从不赋值，报出来的面积随堆布局变化（不同汇流开关差 39–42 个格点）。
+- `MOD_Grid_RiverLakeFlow.F90`：`zgrad_dn` 在 -99（出口）与 -10（内陆洼地）分支置 0，此前未初始化
+  的值被 `push_ups2ucat_sum` 收进 `sum_zgrad_riv`。
+- `MOD_MT_Sediment.F90` / `MOD_MT_SoilInit.F90` / `MOD_MT_Lulcc.F90` / `MOD_MT_Methane_Physics.F90` /
+  `MOD_MT_SoilWater.F90`：final 时释放 history 快照、显式释放 IO 秩的块缓冲、LULCC 报错补上
+  "class 0 全量"的成因提示，以及两处过时注释。
+- `CoLMDRIVER.F90`：删除 `USE omp_lib` 与 `#ifdef OPENMP` 的 patch 循环（MT 的模块态不是线程安全的；
+  vendor 也从不定义 `OPENMP`，是死代码）。
+- `CoLMMAIN.F90` / `MOD_MT_Conservation.F90`：`mt_balance_check` 与收支/签名核对里
+  `#ifndef CatchLateralFlow` 的 catchment 专用分支整段删除，统一按"有汇流出流"的形式调用。
+  上游用编译期 `#error` 拒绝 `MaterialTransport + CATCHMENT`；vendor 的 MT 始终编译，所以这个
+  组合由入口拒绝（Rust 的 `check_catchment`：`catchment lateral flow with material transport is
+  not ported`）。`CoLMMAIN` 其余 5 处 `#ifndef CatchLateralFlow` 上游也保留，照抄。
+- `run/standard_nh4_parameter.nml`、`run/standard_no3_parameter.nml`：EF5 开关按新语义改。
+
+**唯一不跟随上游的改动**：
+
+- `include/define.h` 仍让 `CATCHMENT` 关闭 `GridRiverLakeFlow`。
+- `main/MATERIAL/MOD_MT_Defs.F90` 的守卫在上一轮去宏时被收成 `#if (defined CATCHMENT)`（上游是
+  `#if (defined MaterialTransport) && (defined CATCHMENT)`）。因为 vendor 的 MT 始终编译，
+  这在效果上等于"catchment（单元流域）内核一律构建失败"，与上游"MT + CATCHMENT 不支持"一致：
+  `build_kernel.sh catchment` 会在 `MOD_MT_Defs.o` 上报
+  `MaterialTransport does not support the catchment (unit-catchment) grid`。构建脚本仍列出该预设，
+  但目前必失败——若以后要恢复 catchment 内核，需要先把 MT 改回可关闭的编译期开关，
+  或把这条换成 `mt_any_enabled()` 的运行时拒绝。
+
+**同一轮里补齐的上游改名（Rust 侧）**：上游 7d2fca93 已把 MT 的重启变量从 `trc_*` 改成
+`mt_*`、history 输出从 `f_trc_*` 改成 `f_mt_*`（`a_trc_*` 累加器与 `tracer_*` 内部函数上游仍保留）。
+vendor 的 Fortran 已随之更新；Rust 引擎此前还写旧名，本轮改名并加 `mt_forcing_cache_schema = 2`
+与 `mt_forcing_precip_reliable`，同时落地 `DEF_MT_FORCING_MIN_PRECIP` / `MEMORY_PRECIP`
+驱动的雨雪相态回填。

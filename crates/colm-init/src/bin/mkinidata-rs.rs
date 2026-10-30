@@ -2170,7 +2170,7 @@ mod tests {
                 .unwrap(),
             [2.8e6]
         );
-        assert!(file.variable("trc_river_restart_complete").is_none());
+        assert!(file.variable("mt_river_restart_complete").is_none());
         drop(file);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -29,6 +29,7 @@ pub(crate) fn descriptor(family: TracerFamily, ref_ratio: f64, init_conc: f64) -
         vapor_default_conc: init_conc,
         max_dissolved_conc: f64::MAX,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }

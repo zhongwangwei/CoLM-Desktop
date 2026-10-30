@@ -1509,7 +1509,6 @@ SUBROUTINE CoLMMAIN ( &
          IF (patchtype == 0) fevpa_trc = fevpa - fevpg_fld
 #endif
          CALL mt_apply_decay(ipatch, snl, nl_soil, deltim)
-#ifndef CatchLateralFlow
          CALL mt_balance_check(ipatch, snl, nl_soil, deltim, xerr_tracer, &
             patchtype_in = patchtype, water_err_in = errorw, &
             water_dS_in = endwb - totwb + flood_input_trc * deltim, &
@@ -1522,20 +1521,6 @@ SUBROUTINE CoLMMAIN ( &
             , flood_heterogeneous_in = LWINFILT .and. patchtype == 0 &
 #endif
             )
-#else
-         CALL mt_balance_check(ipatch, snl, nl_soil, deltim, xerr_tracer, &
-            patchtype_in = patchtype, water_err_in = errorw, &
-            water_dS_in = endwb - totwb + flood_input_trc * deltim, &
-            water_input_in = (forc_prc + forc_prl + flood_input_trc) * deltim, &
-            water_output_in = fevpa_trc * deltim, &
-            water_evap_in = fevpa_trc * deltim, &
-            water_rnof_in = 0._r8 &
-#ifdef GridRiverLakeFlow
-            ! flood water may carry a river signature: no fixed-signature check
-            , flood_heterogeneous_in = LWINFILT .and. patchtype == 0 &
-#endif
-            )
-#endif
 
          CALL mt_hist_accumulate(ipatch, snl, maxsnl, nl_soil, ldew_rain, ldew_snow, &
             wliq_soisno(snl+1:nl_soil), wice_soisno(snl+1:nl_soil), &

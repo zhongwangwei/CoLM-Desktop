@@ -345,8 +345,15 @@ impl SpatialRuntime {
                     None => map_to_patches(&self.mapping, &self.forcing, &cells),
                 };
                 // `read_tracer_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
+                // 相态回填的平衡分馏系数用本步逐 patch 气温（上游 `forc_t`）。
                 if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
-                    tracer_forcing.step(clock.forcing_time, &self.forcing, &self.mapping)?;
+                    let air_temperature: Vec<f64> = patch_forcing.iter().map(|p| p.t).collect();
+                    tracer_forcing.step(
+                        clock.forcing_time,
+                        &self.forcing,
+                        &self.mapping,
+                        &air_temperature,
+                    )?;
                 }
                 let surface_calendar_day = orbital_calendar_day(clock.end_time, true, 0.0)?;
                 let seconds_of_day = crate::seconds_of_day(clock.end_time)?;

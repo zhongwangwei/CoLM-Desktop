@@ -28,6 +28,7 @@ fn descriptor(name: &str, family: TracerFamily) -> TracerDescriptor {
         vapor_default_conc: 0.0,
         max_dissolved_conc: f64::MAX,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }
@@ -235,7 +236,7 @@ impl Scenario {
             rsub_source_surface: None,
             rsub_source_aquifer: None,
             permeable_soil: None,
-            precip_ratio: ratios,
+            rain_ratio: ratios,
             vapor_ratio: ratios,
             has_vapor: None,
         }
@@ -434,7 +435,7 @@ fn snowpack_and_solute_vapor_diffusion_close_the_budget() {
     input.t_soisno = Some(&temps);
     input.forc_psrf = Some(9.0e4);
     let solute_ratios = [0.0];
-    input.precip_ratio = &solute_ratios;
+    input.rain_ratio = &solute_ratios;
     input.vapor_ratio = &solute_ratios;
     tracer_soil_water(
         &solute_only,

@@ -274,7 +274,7 @@ pub struct StandardLctStepBinding<'a> {
     /// 漫滩回馈发布给这个土壤 patch 的淹没水深与比例（只有空间算例开了回馈时才有）。
     pub flood: Option<colm_core::flood_evaporation::FloodPatchInput>,
     /// 网格示踪物强迫给这个 patch 的 `(precip, vapor)` 比值（逐示踪物）；`None` 用运行时的默认比值。
-    pub tracer_ratios: Option<(&'a [f64], &'a [f64])>,
+    pub tracer_ratios: Option<(&'a [f64], &'a [f64], &'a [f64])>,
     /// 漫滩回馈发布给这个 patch 的水量（mm，`flood_credit_patch*1000`）与其中的示踪物
     /// （`flood_tracer_credit_patch(:,ipatch)`）；没开回馈或没有输运示踪物时为 `None`。
     pub flood_tracer: Option<(f64, &'a [f64])>,
@@ -2672,8 +2672,9 @@ impl StandardLctRestartTemplate {
             snicar: self.snicar_step_input(),
             tracer: self.tracer.as_ref().map(|(runtime, _)| {
                 let mut context = runtime.context();
-                if let Some((precip, vapor)) = binding.tracer_ratios {
-                    context.precip_ratio = precip;
+                if let Some((rain, snow, vapor)) = binding.tracer_ratios {
+                    context.rain_ratio = rain;
+                    context.snow_ratio = snow;
                     context.vapor_ratio = vapor;
                 }
                 context.flood = binding

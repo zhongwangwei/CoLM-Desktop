@@ -29,6 +29,7 @@ fn descriptor(family: TracerFamily, ref_ratio: f64, init_conc: f64) -> TracerDes
         vapor_default_conc: init_conc,
         max_dissolved_conc: f64::MAX,
         reactive_decay_rate: 0.0,
+        n2o_ef5: 0.0,
         charge: 0,
     }
 }
@@ -81,6 +82,8 @@ fn mixed_box_matches_fortran_kernel() {
         pools.subsurface_residue = a[1];
         let box_water = BoxWater {
             atm_precip_mass: a[5],
+            // 该夹具只测雨雪同比值的情形；相态修正项恒为 0。
+            rain_mass: 0.0,
             deficit_mass: Some(a[6]),
             rnof_mass: a[13],
             evap_liq_mass: a[11],
@@ -107,6 +110,7 @@ fn mixed_box_matches_fortran_kernel() {
             },
             &mut pools,
             a[0],
+            a[2],
             a[2],
             a[3],
             &box_water,
@@ -247,7 +251,8 @@ fn waterbody_input<'a>(
         use_dynamic_lake: false,
         subl_skin_mm: 1.0,
         hist_sample,
-        precip_ratio: ratios,
+        rain_ratio: ratios,
+        snow_ratio: ratios,
         vapor_ratio: ratios,
         runtime_forced: forced,
         catch_lateral_flow: false,
@@ -365,7 +370,8 @@ fn glacier_folds_layered_snow_and_rejects_aquifer_reference() {
         wliq_soisno: &water.wliq,
         wice_soisno: &water.wice,
         subl_skin_mm: 1.0,
-        precip_ratio: &ratios,
+        rain_ratio: &ratios,
+        snow_ratio: &ratios,
         vapor_ratio: &ratios,
         runtime_forced: &forced,
         catch_lateral_flow: false,
