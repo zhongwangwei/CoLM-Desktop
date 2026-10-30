@@ -41009,3 +41009,21 @@ F→F 的逐位相同说明旁车/重启机制本身是精确的；两个跨引�
   额外变量组未在网格端到端里覆盖（本轮算例三者都关）。
 - 本机运行目录：`tmp/rivgrid-small`（Fortran 基准）、`tmp/rivsmall-f2r3`/`-nosc`（F→R 与藏旁车对照）、
   `tmp/rsmall-r1`、`tmp/rsmall-r2f`、`tmp/rsmall-seg2f`（R→F 与参考），不入库。
+
+### 补测：Rust 引擎多进程 SPMD 的旁车路径（同一算例，2026-10-31）
+
+前一节把「Rust 多进程 SPMD 旁车」标成 Not-tested（本地 CLI 默认拒绝）。CLI 的门槛其实只看
+`COLM_MPIEXEC` 是否配置：本机把它设成系统 `mpiexec` 后，`--engine rust --ranks 2` 可以跑
+（colm-rs 不链接 MPI，rank 由启动器给的环境决定，进程间靠文件系统协作）。
+
+- F→R（2 rank）：Rust 从 Fortran 的 2005-002 重启+旁车续跑到 004，读回窗口
+  `hacc_nac=144`（48+96）——与单进程 Rust 结果**逐位相同**：陆面 history 140/140、unitcat
+  history 16/16 变量完全一致，说明旁车读回与块划分无关。
+- R→F（Fortran 读 Rust-SPMD 写的东西）：把这组 2-rank Rust 写的 004 重启+逐块旁车交给
+  grouped Fortran 续跑 1 天，Fortran 正常读入并写出 005 旁车 `hacc_nac=192`（144+48）。
+- 用法注意：本地跑 Rust 多进程必须 `COLM_MPIEXEC=$(which mpiexec)`（CLI 的提示写的是
+  "remote launcher"，但门槛只是这个变量存在）；真正集群上的 srun 启动未在本轮验证。
+
+本轮至此，河湖旁车在**四种组合**下都有实测：Fortran 写→Rust 单进程读、Fortran 写→Rust 2-rank
+读、Rust 单进程写→Fortran 读、Rust 2-rank 写→Fortran 读；F→F 分段与连续的逐位对照作为精确性
+基准。
