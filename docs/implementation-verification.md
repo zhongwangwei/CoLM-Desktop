@@ -39943,3 +39943,24 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 真实 OpenBench 3.0.8：合成层维度站点 history → PREPARE → 页面生成配置 → check/run 全通（见上）。
 - 本批未改 `gui/src-tauri`；GUI 全量测试沿用上一批 586 passed 的结论。
 - 未运行：真实 CoLM 内核 + PLUMBER2 数据产出的 history（目前是合成 CoLM 风格 history）；小时级多年层变量的 PREPARE 内存实测；真实浏览器刷新后的草稿恢复（layout harness 覆盖）；常驻任务栏（UX ③）尚未开始。
+
+
+## 真实 CoLM 内核 + PLUMBER2 + PREPARE + OpenBench 3.0.8 全链路（2026-10-30）
+
+补上此前所有"合成数据"验证之外的最后一段：真实内核跑出的 history 经页面同一套 PREPARE/配置/OpenBench 3.0.8 评估，并顺带量了层变量保留后的真实内存。
+
+**环境与命令**：
+- PLUMBER2 数据在 `/Volumes/Data/Data/PLUMBER2s`；内核用已构建的 `kernels/default`（`--engine fortran --preprocessors fortran`；Rust sidecar 没 stage，`--engine rust`/默认 preprocessors 会报 `colm-rs`/`mksrfdata-rs` 缺失，与本链路无关但记下）。
+- `colm-cli new --site PLUMBER2s/Sitedata/AT-Neu_…_site.nc --met PLUMBER2s/Forcing/AT-Neu_…_Met.nc --start 2002-01-01 --end 2004-12-31`（默认 1 年预热，history 覆盖 2003–2004）→ `colm-cli run <case> --kernel kernels/default --engine fortran --preprocessors fortran` **exit 0**，"CoLM Execution Completed"，实际 35 s。
+- 产出 `out/AT-Neu/history/AT-Neu_hist_2003-01.nc … 2004-12.nc` 共 24 个月度文件、17,544 个逐小时步、117 个随时间变变量；`inspect.py` 判 `spatial_type=station`、`patch=1`、`tim_res=Hour`、`comparable=true`，其中 `layered_variables` 含 `f_wliq_soisno`、`f_t_soisno`、`f_wice_soisno`、`f_h2osoi`、`f_rootr`、`f_t_lake`、`f_lake_icefrac`（真实数据走通了层变量保留路径），`unsupported_variables` 只剩 `f_alb`(band/rtyp)、`f_qlayer`(soilinterface)、`f_vegwp`(vegnodes)、`f_sensors`(sensor)。
+- PREPARE（页面同款脚本、同一参数）：**1.89 s**，输出 `(time=17544, soilsnow=15, soil=10, lake=10)`，7 个层变量连同层坐标保留、4 个类别维变量按预期跳过；**峰值 RSS 360,235,008 B ≈ 344 MiB**（2 年逐小时、115 变量、单站点）。这给上一节"保留层变量抬高内存"一个真实量级：此规模远不构成问题；按步数线性外推 10 年逐小时约 1.7 GiB、30 年约 5 GiB，超长序列仍需注意，必要时再收窄保留变量或分块写。
+- 参考数据：FLUXNET2015/PLUMBER2 原始观测是 30 分钟，为了与 CoLM 小时标签（区间终点 `:30`）对齐，验证时把 `Qle_cor`/`Qh_cor` 按小时均值聚合后把整点标签 +30 min，写成自定义 stn 参考数据集（`Lead_PLUMBER2_Hour`，fulllist 绝对路径）；这是**验证夹具**，不是页面行为。
+- 配置仍由页面真实 `buildOpenbenchConfig` 生成：两个 stn 模拟（同一份 AT-Neu history，第二个仅为让 comparison 有 ≥2 模拟）、`tim_res Hour`、`data_type stn`、`data_groupby single`、`model CoLM2024`、fulllist=页面算出的 `sim/<键>.csv`；`comparison [Taylor_Diagram, HeatMap]`、`statistics [Mean, Mann_Kendall_Trend_Test]`、metrics/scores。
+- OpenBench 3.0.8 `check` ✓（2 参考×2 模拟、Comparison/Statistics: True）→ `run --force` **exit 0**，"Evaluation complete"。
+
+**结果**（真实模型 vs 真实观测）：
+- 评估 status `ok`；`Latent_Heat`：RMSE 43.62、correlation 0.919、bias 2.00、Overall_Score 0.837；`Sensible_Heat`：RMSE 43.54、correlation 0.470、bias −4.02、Overall_Score 0.646（逐小时 2003–2004，单站 AT-Neu；数值只用于证明链路能算，不作为科学结论）。
+- 产出完整：`metrics/`、`scores/`、`comparisons/Taylor_Diagram`（jpg+csv）、`comparisons/HeatMap/scenarios_Overall_Score_comparison.{jpg,csv}`、`reports/evaluation_report_standalone.html`。
+- 与前面 smoke 观察一致：station 模拟的 `statistics` 在 OpenBench 3.0.8 下没有产出也没有报错——统计阶段对 station 的支持范围归 OpenBench 管，页面只如实写 items。
+
+**结论**：真实 CoLM 内核 → history → PREPARE（层变量保留）→ 页面生成配置 → OpenBench 3.0.8 评估/比较/报告，全链路在真实数据上跑通；此前"未在真实 CoLM history 上验证"的缺口关闭。仍未覆盖：真实**多模型/多站点**比较的科学解读、comparison 图质量、远程 SSH 端到端、超长序列（>10 年逐小时）的 PREPARE 内存策略。
