@@ -564,3 +564,30 @@ it('parses a per-simulation model profile and station ID', () => {
   );
   assert.match(parsed.config!.simulations[0]!.fulllist ?? '', /AT_Neu_official\.csv$/);
 });
+
+it('rejects hand-edited statistics methods that OpenBench 3.0.8 cannot run', () => {
+  const text = generated({ statisticsItems: ['Mean'], simulations: [basin, site] });
+  // 生成器本身会拒绝 Basic；这里模拟用户手改 YAML 把它塞回来，运行前必须拦。
+  const basic = text.replace('items: ["Mean"]', 'items: ["Mean", "Basic"]');
+  const basicConfig = parseOpenbenchConfig(basic).config!;
+  const basicProblems = structuralProblems(
+    { machine, ...base, simulations: [basin, site] },
+    basicConfig,
+  );
+  assert.ok(
+    basicProblems.some(([zh, en]) => /Basic/.test(zh) && /Basic/.test(en)),
+    JSON.stringify(basicProblems),
+  );
+
+  // Three_Cornered_Hat 只有 1 个格点模拟：nX=2<3，运行器必报错，手改也要拦。
+  const tch = text.replace('items: ["Mean"]', 'items: ["Three_Cornered_Hat"]');
+  const tchConfig = parseOpenbenchConfig(tch).config!;
+  const tchProblems = structuralProblems(
+    { machine, ...base, simulations: [basin, site] },
+    tchConfig,
+  );
+  assert.ok(
+    tchProblems.some(([zh]) => /Three_Cornered_Hat/.test(zh)),
+    JSON.stringify(tchProblems),
+  );
+});

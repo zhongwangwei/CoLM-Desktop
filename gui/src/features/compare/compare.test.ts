@@ -22,6 +22,10 @@ import {
   jobEnded,
   jobUncertain,
   layerVariableProblems,
+  statisticsMethodWarnings,
+  statisticsReferenceWarning,
+  STATISTICS_SCHEMA_ITEMS,
+  STATISTICS_ITEMS,
   statisticsStationWarning,
   parseExtent,
   parseReferences,
@@ -1269,4 +1273,71 @@ it('warns when statistics are selected but every simulation is a station', () =>
   });
   const row = summary.find((item) => item.label[1] === 'Statistical tests');
   assert.match(row?.value ?? '', /station-only/);
+});
+
+it('offers only the statistics methods OpenBench 3.0.8 can actually run', () => {
+  // schema 仍合法（手改配置按全量校验），但页面不再提供必然失败的方法。
+  assert.ok(!STATISTICS_ITEMS.includes('Basic'));
+  assert.ok(!STATISTICS_ITEMS.includes('False_Discovery_Rate'));
+  assert.ok(STATISTICS_SCHEMA_ITEMS.includes('Basic'));
+  assert.ok(STATISTICS_SCHEMA_ITEMS.includes('False_Discovery_Rate'));
+  assert.throws(
+    () =>
+      buildOpenbenchConfig({
+        ...base,
+        variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+        statisticsItems: ['Basic'],
+      }),
+    /Basic/,
+  );
+  assert.throws(
+    () =>
+      buildOpenbenchConfig({
+        ...base,
+        variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+        statisticsItems: ['False_Discovery_Rate'],
+      }),
+    /False_Discovery_Rate/,
+  );
+});
+
+it('requires two gridded simulations for Three_Cornered_Hat', () => {
+  // OpenBench 3.0.8: nX = 格点来源数 + 1 个参考；1 个格点模拟时 nX=2<3 直接 raise（实测报错文案）。
+  const gridOnlyOne = {
+    ...base,
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [basin],
+  };
+  assert.throws(
+    () => buildOpenbenchConfig({ ...gridOnlyOne, statisticsItems: ['Three_Cornered_Hat'] }),
+    /Two|two gridded|至少两个格点|Two_Cornered|Three_Cornered/,
+  );
+  const twoGrids = { ...gridOnlyOne, simulations: [basin, { ...basin, label: 'hb draft 3' }] };
+  const built = buildOpenbenchConfig({ ...twoGrids, statisticsItems: ['Three_Cornered_Hat'] });
+  assert.match(built.config, /Three_Cornered_Hat/);
+});
+
+it('warns about unusable statistics methods and station-only references', () => {
+  const oneGrid = { ...base, simulations: [basin] };
+  assert.equal(statisticsMethodWarnings(oneGrid.simulations, ['Three_Cornered_Hat']).length, 1);
+  assert.equal(
+    statisticsMethodWarnings(
+      { ...base, simulations: [basin, { ...basin, label: 'hb draft 3' }] }.simulations,
+      ['Three_Cornered_Hat'],
+    ).length,
+    0,
+  );
+  assert.equal(statisticsMethodWarnings(oneGrid.simulations, ['Basic']).length, 1);
+
+  const stationRef = [{ name: 'PLUMBER2', data_type: 'stn', variables: ['Latent_Heat'] }];
+  const gridRef = [{ name: 'ILAMB', data_type: 'grid', variables: ['Latent_Heat'] }];
+  const design = {
+    ...base,
+    variables: { Latent_Heat: 'PLUMBER2' },
+    simulations: [basin],
+    statisticsItems: ['Mean'],
+  };
+  assert.match(statisticsReferenceWarning(design, stationRef)?.[1] ?? '', /station references/);
+  assert.equal(statisticsReferenceWarning(design, gridRef), null);
+  assert.equal(statisticsReferenceWarning({ ...design, statisticsItems: [] }, stationRef), null);
 });

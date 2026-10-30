@@ -16,6 +16,7 @@ import {
   designFingerprint,
   layerVariableProblems,
   simulationKey,
+  KNOWN_BROKEN_STATISTICS_ITEMS,
   VALID_COMPARISON_ITEMS,
   VALID_STATISTICS_ITEMS,
   type BenchSite,
@@ -1089,6 +1090,27 @@ export function structuralProblems(design: EvaluationDesign, config: EffectiveCo
         `模拟 ${simulation.key} 的站点清单路径被改了（应为 ${expectedList}）。站点文件由后端按页面选中的目录准备，手改路径会读到旧数据；请把 root_dir/fulllist 改回去或重新生成评估配置。`,
         `The station list path of simulation ${simulation.key} was edited (expected ${expectedList}). The backend prepares that file from the folder picked on the page, so a hand-edited path reads stale data; restore root_dir/fulllist or regenerate the evaluation configuration.`,
       ]);
+  }
+  // statistics：手改配置选到 OpenBench 3.0.8 配置驱动统计跑不了的方法，或 Three_Cornered_Hat 的
+  // 格点模拟不够（nX = 格点来源 + 参考，nX<3 直接 raise），都会在统计阶段失败；生成路径已拦，
+  // 这里守住手改文本，避免"页面说能跑、运行才报错"。
+  if (config.statistics.enabled) {
+    for (const name of config.statistics.items ?? []) {
+      const issue = KNOWN_BROKEN_STATISTICS_ITEMS[name];
+      if (issue)
+        problems.push([
+          `配置里的统计方法 ${name} 在 OpenBench 3.0.8 下会失败：${issue[0]}`,
+          `Statistics item ${name} fails under OpenBench 3.0.8: ${issue[1]}`,
+        ]);
+    }
+    if ((config.statistics.items ?? []).includes('Three_Cornered_Hat')) {
+      const gridSims = design.simulations.filter((sim) => sim.info.spatial).length;
+      if (gridSims < 2)
+        problems.push([
+          '配置里的 Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 3.0.8 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
+          'Three_Cornered_Hat in the configuration needs at least two gridded simulations: OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3.',
+        ]);
+    }
   }
   return problems;
 }

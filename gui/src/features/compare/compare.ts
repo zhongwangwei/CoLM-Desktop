@@ -679,7 +679,7 @@ export const COMPARISON_ITEM_CHOICES = COMPARISON_ITEMS.filter(
  * `_source`）+ check.py 的 `_BASIC_ANALYSIS_ITEMS` {Basic,Mean,Median,Max,Min,Sum} +
  * 单独放行的 False_Discovery_Rate。统计阶段是独立分析，页面默认不启用（opt-in）。
  */
-export const STATISTICS_ITEMS = [
+export const STATISTICS_SCHEMA_ITEMS = [
   'Basic',
   'Mann_Kendall_Trend_Test',
   'Correlation',
@@ -697,7 +697,34 @@ export const STATISTICS_ITEMS = [
   'Min',
   'Sum',
 ] as const;
-export const VALID_STATISTICS_ITEMS = new Set<string>(STATISTICS_ITEMS);
+
+/**
+ * OpenBench 3.0.8 由配置生成的统计里跑不了的方法（源码 + 实测都有据）：
+ * - `Basic`：`Mod_Statistics.scenarios_Basic_analysis` 会调用 `make_Basic(output_file, …)`，但运行器的
+ *   `stat_basic` 不存在（只有 stat_mean/median/max/min/sum），`run_analysis` 在方法不存在时只警告并返回
+ *   None，随后 `make_Basic(None)` 抛 xarray "did not find a match in any of xarray's IO backends"。
+ * - `False_Discovery_Rate`：适配器把它当单源方法生成 `<var>_<sim>_dir` 等条目，运行器却按
+ *   `<source>1`/`<source>2` 读取，实测必报 KeyError `'<var>_<grid_sim>1_dir'`。
+ * 这两项仍是 OpenBench schema 的合法名字（手改配置/未来版本），所以校验仍接受，但页面不再提供勾选、
+ * 生成器会明确拒绝，避免用户选了必然失败的阶段。
+ */
+export const KNOWN_BROKEN_STATISTICS_ITEMS: Record<string, [string, string]> = {
+  Basic: [
+    'OpenBench 3.0.8 的配置驱动统计没有实现 Basic（运行器只有 Mean/Median/Max/Min/Sum），选中后统计阶段会报错。',
+    'OpenBench 3.0.8 does not implement Basic in its config-driven statistics (only Mean/Median/Max/Min/Sum exist); selecting it makes the statistics phase fail.',
+  ],
+  False_Discovery_Rate: [
+    'OpenBench 3.0.8 的 False_Discovery_Rate 与配置适配器的数据条目不匹配（适配器给单源条目、运行器按双源读取），选中后统计阶段会报 KeyError。',
+    'OpenBench 3.0.8’s False_Discovery_Rate expects two-source entries that the config adapter does not emit; selecting it fails with a KeyError in the statistics phase.',
+  ],
+};
+
+/** 页面可勾选的统计方法（schema 合法、且在 3.0.8 配置驱动统计里能跑的）。 */
+export const STATISTICS_ITEMS: string[] = STATISTICS_SCHEMA_ITEMS.filter(
+  (name) => !(name in KNOWN_BROKEN_STATISTICS_ITEMS),
+);
+/** 解析手改配置时的合法集合：仍按 OpenBench schema 全收，运行前再由 structuralProblems 拦必然失败项。 */
+export const VALID_STATISTICS_ITEMS = new Set<string>(STATISTICS_SCHEMA_ITEMS);
 
 /**
  * 类别/结构维度变量预检：模拟的变量覆盖把标准变量映射到了 `unsupported_variables` 里的 NetCDF 变量时，
@@ -765,6 +792,57 @@ export function statisticsStationWarning(simulations: BenchSimulation[]): [strin
   return [
     'OpenBench 3.0.8 的统计检验阶段基于格点场：当前只有单点模拟，不会产出统计结果（实测无输出、也不报错）。需要统计结果的话，请至少加入一个格点模拟。',
     'OpenBench 3.0.8 computes statistics on gridded fields: with station simulations only, this phase produces no output (observed silently). Add at least one gridded simulation to get statistics.',
+  ];
+}
+
+/**
+ * 选中的统计方法本身不可用的提示（页面已不提供勾选，主要给旧草稿/手改配置）：已知跑不了的方法，
+ * 以及 Three_Cornered_Hat 需要 nX≥3——OpenBench 3.0.8 用"格点数 + 1 个参考"算 nX，所以至少要两个
+ * 格点模拟（实测 1 个格点模拟时运行器直接报 "requires at least 3 datasets; got nX=2"）。
+ */
+export function statisticsMethodWarnings(
+  simulations: BenchSimulation[],
+  selected: string[],
+): [string, string][] {
+  const warnings: [string, string][] = [];
+  for (const name of [...new Set(selected.filter(Boolean))]) {
+    const issue = KNOWN_BROKEN_STATISTICS_ITEMS[name];
+    if (issue) warnings.push(issue);
+  }
+  if (selected.includes('Three_Cornered_Hat')) {
+    const gridSims = simulations.filter((sim) => sim.info.spatial).length;
+    if (gridSims < 2)
+      warnings.push([
+        'Three_Cornered_Hat 需要至少两个格点模拟（OpenBench 3.0.8 的 nX = 格点数 + 1 个参考，nX<3 会直接报错）。',
+        'Three_Cornered_Hat needs at least two gridded simulations (OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3).',
+      ]);
+  }
+  return warnings;
+}
+
+/**
+ * 统计阶段只用**格点参考数据**（适配器跳过 data_type=stn 的参考/模拟）。有格点模拟、但所选变量的参考
+ * 全是单点时，该阶段不会产出结果；页面能读到参考登记表的 data_type，所以提前说明。
+ */
+export function statisticsReferenceWarning(
+  design: ComparisonDesign,
+  references: BenchReference[],
+): [string, string] | null {
+  if (!(design.statisticsItems ?? []).filter(Boolean).length) return null;
+  if (!design.simulations.some((sim) => sim.info.spatial)) return null;
+  const byName = new Map(references.map((reference) => [reference.name, reference]));
+  let checked = 0;
+  for (const variable of Object.keys(design.variables)) {
+    const refs = design.variables[variable];
+    const names = (Array.isArray(refs) ? refs : [refs]).filter(Boolean);
+    if (!names.length) continue;
+    checked += 1;
+    if (names.some((name) => byName.get(name)?.data_type !== 'stn')) return null;
+  }
+  if (!checked) return null;
+  return [
+    'OpenBench 3.0.8 的统计检验只使用格点参考数据（适配器会跳过单点参考/单点模拟）：当前所选的参考都是单点，统计阶段不会产出结果。',
+    'OpenBench 3.0.8 statistics only use gridded references (the adapter skips station references and simulations): all selected references are station data, so the statistics phase produces no output.',
   ];
 }
 
@@ -863,7 +941,7 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
       );
   }
   const statisticsItems = [...new Set((design.statisticsItems ?? []).filter(Boolean))];
-  for (const name of statisticsItems)
+  for (const name of statisticsItems) {
     if (!VALID_STATISTICS_ITEMS.has(name))
       throw new Error(
         bilingual(
@@ -871,6 +949,19 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
           `OpenBench 3.0.8 does not support the statistics item ${name}`,
         ),
       );
+    const issue = KNOWN_BROKEN_STATISTICS_ITEMS[name];
+    if (issue) throw new Error(bilingual(issue[0], issue[1]));
+  }
+  if (statisticsItems.includes('Three_Cornered_Hat')) {
+    const gridSims = design.simulations.filter((sim) => sim.info.spatial).length;
+    if (gridSims < 2)
+      throw new Error(
+        bilingual(
+          'Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 3.0.8 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
+          'Three_Cornered_Hat needs at least two gridded simulations: OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3.',
+        ),
+      );
+  }
   // 层维度变量在生成配置前就拒绝：制备阶段只会跳过它们，等到 check 失败太晚（C05）。
   const layerIssues = layerVariableProblems(design);
   if (layerIssues.length)

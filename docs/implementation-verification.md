@@ -40026,3 +40026,25 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 **本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1298 passed / 0 failed**；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
 
 **仍未覆盖**：真实 SSH 上壳→页面停止路径的端到端；真实窗口视觉；远程 focus 指向已清理报告的错误路径没有真实环境用例；statistics 在"格点+单点混合"时的产出范围没有逐个方法验证（当前只提示纯单点这一确定场景）。
+
+
+## OpenBench 3.0.8 统计方法逐个验证与页面收口（2026-10-30）
+
+用页面真实生成器产出"2 个格点模拟 + 格点参考 + 全部 16 个 statistics 方法"的配置，在 OpenBench 3.0.8（smoke fixture，全局 Python/xarray 2025.11）上 `check` 通过后实际 `run`；对有问题的方法再用最小配置复现。结论同时来自 3.0.8 源码（`config/adapter.py` 的 `build_statistics_context`、`core/statistics/Mod_Statistics.py`）。
+
+**实测结果（16 个方法一次跑）**：
+- 产出文件的 14 个：Mann_Kendall_Trend_Test、Correlation、Standard_Deviation、Functional_Response、Z_Score（按 3.0.8 设计只有 nc、无图）、Three_Cornered_Hat（2 个格点模拟时 nX=3）、Hellinger_Distance、Partial_Least_Squares_Regression、ANOVA、Mean、Median、Max、Min、Sum。
+- `Basic` 失败：`scenarios_Basic_analysis` 调 `make_Basic(output_file, …)`，但运行器没有 `stat_basic`（`stat_Basic.py` 只有 mean/median/max/min/sum），`run_analysis` 只 warning 并返回 None，随后 `make_Basic(None)` 抛 xarray "did not find a match in any of xarray's currently installed IO backends"。不是环境缺 netCDF4（实测已装 1.7.3）。
+- `False_Discovery_Rate` 失败：适配器把它当**单源**方法生成 `<var>_<sim>_dir` 条目，运行器却按 `<source>1`/`<source>2` 双源读取，实测 KeyError `'Latent_Heat_grid_A1_dir'`。
+- 额外确认：`Three_Cornered_Hat` 用 1 个格点模拟复现，运行器报 `Three Cornered Hat method requires at least 3 datasets; got nX=2 for source 'Latent_Heat_OpenBench_Smoke_ILAMB_monthly'`——适配器里 nX = 格点模拟数 + 1 个参考，所以页面至少要 2 个格点模拟。
+- 数据源规则（源码确认）：适配器跳过 `data_type=stn` 的参考与模拟；所有变量都没有格点来源时方法拿到的 data_source 为空，纯单点配置因此静默无输出（与本仓库真实 PLUMBER2 链路观察一致）。
+
+**页面/配置收口**：
+- `STATISTICS_SCHEMA_ITEMS` 保留 schema 全量 16 个（解析手改 YAML 仍合法）；`STATISTICS_ITEMS` 只留可跑的 14 个给 UI 勾选；`KNOWN_BROKEN_STATISTICS_ITEMS` 带双语原因。
+- 生成器 `buildOpenbenchConfig`：选中 Basic/False_Discovery_Rate 直接拒绝；选 Three_Cornered_Hat 但格点模拟 <2 直接拒绝。
+- 手改 YAML 由 `structuralProblems` 在同两类情况下给出可行动错误（不能靠"生成时拦"绕过）。
+- 页面提示（统计多选下方 warning + Field hint）：纯单点模拟、参考数据全是单点（`statisticsReferenceWarning`，按登记表 data_type 判断）、Basic/FDR 不在可选项里的原因、Three_Cornered_Hat 的格点模拟要求；摘要行继续带纯单点 caveat。
+
+**本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1302 passed / 0 failed**（compare 套件 65 passed，含新增 4 例方法规则/参考类型告警与手改拦截）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
+
+**未覆盖**：OpenBench 专用 venv 的依赖版本可能不同（Basic 的失败路径由缺实现导致，与 xarray 版本无关；FDR 是适配器/运行器契约不一致，也与依赖无关）；混合"格点+单点参考"时哪些变量能出统计只做了规则判断，没有逐个方法组合验证；Basic/FDR 在未来 OpenBench 版本可能修复，页面只保证 3.0.8 下不误导。

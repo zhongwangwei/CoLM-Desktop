@@ -24,6 +24,8 @@ import {
   COMPARISON_ITEM_CHOICES,
   DEFAULT_COMPARISON_ITEMS,
   STATISTICS_ITEMS,
+  statisticsMethodWarnings,
+  statisticsReferenceWarning,
   statisticsStationWarning,
   comparableVariables,
   commonYears,
@@ -1161,6 +1163,13 @@ export default function ComparePage() {
   const layerWarnings = layerVariableWarnings(formDesign);
   // statistics 阶段只在格点场上产图：纯单点比较选了方法时提前说明，别让用户以为漏跑了。
   const stationStatisticsWarning = statisticsStationWarning(formDesign.simulations);
+  // 已知跑不了的方法/格点模拟不足/参考全是单点：都在统计多选下方提前说清楚（生成时同样会拦）。
+  const referenceStatisticsWarning = statisticsReferenceWarning(formDesign, references);
+  const statisticsWarnings: [string, string][] = [
+    ...(stationStatisticsWarning ? [stationStatisticsWarning] : []),
+    ...statisticsMethodWarnings(formDesign.simulations, statisticsItems),
+    ...(referenceStatisticsWarning ? [referenceStatisticsWarning] : []),
+  ];
   // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
   const design = designFingerprint(formDesign);
@@ -2404,8 +2413,8 @@ export default function ComparePage() {
                   <Field
                     label={t('统计检验', 'Statistical tests')}
                     hint={t(
-                      'OpenBench 独立的统计检验阶段（statistics），默认不启用；勾选的方法才写进配置。方法需要的数据（指标/评分/站点序列）不满足时 OpenBench check 会明确报错。',
-                      'OpenBench has an independent statistical-analysis phase (statistics), disabled by default; only ticked methods are written. openbench check reports when a method lacks the data it needs (metrics/scores/station series).',
+                      'OpenBench 独立的统计检验阶段（statistics），默认不启用；勾选的方法才写进配置。Basic 与 False_Discovery_Rate 在 OpenBench 3.0.8 的配置驱动统计里跑不了（运行器缺实现/数据条目不匹配），因此不在可选项里；Three_Cornered_Hat 需要至少两个格点模拟。统计只用格点参考数据，纯单点或参考全是单点时会没有结果。',
+                      'OpenBench’s independent statistical-analysis phase (statistics), disabled by default; only ticked methods are written. Basic and False_Discovery_Rate cannot run in OpenBench 3.0.8 config-driven statistics (missing implementation / mismatched data entries), so they are not offered; Three_Cornered_Hat needs at least two gridded simulations. Statistics only use gridded references, so station-only designs or station-only references produce no output.',
                     )}
                   >
                     <div className="button-row">
@@ -2437,9 +2446,13 @@ export default function ComparePage() {
                         </label>
                       ))}
                     </div>
-                    {statisticsItems.length > 0 && stationStatisticsWarning && (
+                    {statisticsItems.length > 0 && statisticsWarnings.length > 0 && (
                       <Notice tone="warning">
-                        {t(stationStatisticsWarning[0], stationStatisticsWarning[1])}
+                        <ul>
+                          {statisticsWarnings.map(([zh, en]) => (
+                            <li key={en}>{t(zh, en)}</li>
+                          ))}
+                        </ul>
                       </Notice>
                     )}
                   </Field>
