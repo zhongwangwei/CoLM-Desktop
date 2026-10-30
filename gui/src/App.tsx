@@ -33,6 +33,9 @@ import AboutDialog, { betaNote } from './components/AboutDialog';
 import ConfirmHost from './components/ConfirmHost';
 import StartCover from './components/StartCover';
 import { readStored, writeStored } from './lib/storage';
+import { useBenchTasks } from './lib/bench-task-context';
+import { invoke } from './lib/ipc';
+import BenchTaskBar from './components/BenchTaskBar';
 import type { AppState } from './lib/types';
 const ProjectPage = lazy(() => import('./features/projects/ProjectPage'));
 const CasesPage = lazy(() => import('./features/cases/CasesPage'));
@@ -293,6 +296,25 @@ export default function App() {
     return () => window.removeEventListener('resize', resize);
   }, []);
   const { state, update, navigate } = useApp();
+  // 比较任务跨路由可见（UX ③）：页面只镜像进度，真正提交/等待仍由比较页负责。
+  const benchTasks = useBenchTasks();
+  const stopBenchTask = (task: {
+    host: string;
+    job?: string | null;
+    id: string;
+    state: string;
+  }) => {
+    if (task.state !== 'running') return;
+    // 页面自己的"停止"按钮仍是最完整的取消路径；这里只在壳上点了停止时做一次最小请求，
+    // 没拿到远程作业号就不猜，交给页面里的活动作业保护处理。
+    const request =
+      task.host && task.job
+        ? invoke('bench_remote_cancel', { host: task.host, job: task.job })
+        : task.host
+          ? Promise.resolve()
+          : invoke('bench_cancel');
+    void request.catch(() => {}).finally(() => benchTasks.clear(task.id));
+  };
   // 助手面板收起时保持挂载：否则正在跑的回答会被卸载 cleanup 取消，对话也随组件状态丢掉。
   // 第一次打开才加载，之后用 hidden 收起，和 researchKept 同一做法。
   const [assistantMounted, setAssistantMounted] = useState(state.assistantOpen);
@@ -396,6 +418,13 @@ export default function App() {
   );
   const main = (
     <>
+      <BenchTaskBar
+        tasks={benchTasks.tasks}
+        t={tr}
+        onReturn={() => navigate('compare')}
+        onStop={stopBenchTask}
+        onDismiss={(task) => benchTasks.clear(task.id)}
+      />
       <div className="notifications" aria-live="polite">
         {state.notices.map((message, index) => (
           <Notice

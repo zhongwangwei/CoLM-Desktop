@@ -39964,3 +39964,25 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 与前面 smoke 观察一致：station 模拟的 `statistics` 在 OpenBench 3.0.8 下没有产出也没有报错——统计阶段对 station 的支持范围归 OpenBench 管，页面只如实写 items。
 
 **结论**：真实 CoLM 内核 → history → PREPARE（层变量保留）→ 页面生成配置 → OpenBench 3.0.8 评估/比较/报告，全链路在真实数据上跑通；此前"未在真实 CoLM history 上验证"的缺口关闭。仍未覆盖：真实**多模型/多站点**比较的科学解读、comparison 图质量、远程 SSH 端到端、超长序列（>10 年逐小时）的 PREPARE 内存策略。
+
+
+## 跨路由常驻比较任务条（UX ③ 第 1+2 步，2026-10-30）
+
+比较页原来把运行 promise、进度、最近运行/报告都放在页面组件里，切到别的路由就卸载；这几步把"正在跑什么"提到壳上，页面仍是唯一提交者。
+
+**实现**：
+- `gui/src/lib/bench-task.ts`（纯函数 + 单测）：任务 `{id, host, project, label, kind, startedAt, phase:[zh,en], job?, state:running/done/failed/interrupted, report?, error?}`；`begin` 对同机器+同项目只保留最新一条（旧的标 interrupted），最多 6 条；`update/finish/clear`；`visibleBenchTasks` 让 running 常显、结束项留 5 分钟；`markInterruptedBenchTasks` 在应用重启时把上次 running 标成 interrupted（本机任务不可能跨进程继续）；`parse/serialize` 逐条容错并持久化到 `colm.benchTasks`。
+- `gui/src/lib/bench-task-context.tsx`：`BenchTasksProvider` 包在 `main.tsx`，负责 localStorage 读写与启动标记；默认 context 是全套 no-op，所以页面在没有壳/测试里也能渲染。**页面仍自己持有提交锁和等待逻辑，任务条只是镜像。**
+- `gui/src/components/BenchTaskBar.tsx` + `App.tsx`：壳上常驻一行式状态条（任意路由可见）：`评估 · 名称 @ 机器` + 阶段 + 已等时间（秒表 `aria-hidden`，避免读屏每秒重播）+ 阶段 `aria-live`；运行中给"回到比较页 / 停止"，结束给"查看结果 / 关闭"。停止是壳上的最小回退：本机调 `bench_cancel`、远程有作业号时调 `bench_remote_cancel`，没有作业号就不猜（活动作业保护留给页面）；本批没有新增 Tauri 命令（contract 仍 262/224）。
+- `ComparePage.tsx` 接线：快照/结构校验通过后 `begin`（提交前不建任务），阶段跟随真实步骤（提交运行 → 检查并运行 / 等待服务器调度 → 服务器评估中 / 排队中），远程把作业号写进任务；本机成功 `finish done` 并带报告路径，远程成功 `finish done`，失败/取消 `finish failed`；**离开页面让轮询停下（LEFT）标 interrupted 而不是 failed**（远程作业可能还在服务器上跑）。
+- 测试：`lib/bench-task.test.ts` 5 例（去重/更新/收尾/可见窗口/重启标记/坏记录容错）；layout 整页 harness 增加任务条调用记录，断言真实 run 会 `begin:comparison` 且成功时 `finish:done`；GUI-07 系列抽函数上下文补 `benchTasks/benchTaskId/LEFT` no-op 默认值。
+
+**本轮验证（真实执行）**：
+- `node ../scripts/test-react.mjs` → **1294 passed / 0 failed**；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用，未新增命令）。
+- 本批只改前端（`gui/src/**`），未改 `gui/src-tauri`；无新契约、无 Rust 质量门变化。
+
+**仍未做/下一步**：
+1. "查看结果"目前只回到比较页，没有按任务自动打开/聚焦那次运行的报告（页面项目表已能显示 latest_run/latest_success 并取回）；要做得把 pending focus（host/project/run_id）带过去，并处理远程取回。
+2. 离开页面期间任务完成没有全局通知，只在状态条上显示"已完成"（保留 5 分钟）；可在壳上 push 一条 notice。
+3. 壳上停止只是最小回退，页面自己的停止路径（取消确认/不确定状态处理）没有被注册给壳；离开页面后远程作业的停止语义还需要真实 SSH 验证。
+4. 状态条没有专门的组件渲染测试（靠整页 harness + tsc/lint）；视觉/窄屏表现未在真实窗口看过。

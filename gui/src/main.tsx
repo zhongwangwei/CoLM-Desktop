@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { Component, type ReactNode } from 'react';
 import App from './App';
 import { AppProvider } from './lib/app-state';
+import { BenchTasksProvider } from './lib/bench-task-context';
 import './styles.css';
 import { normalizeBrowserLocale } from './lib/browser-locale';
 import { readStored } from './lib/storage';
@@ -29,7 +30,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <AppProvider>
-        <App />
+        <BenchTasksProvider>
+          <App />
+        </BenchTasksProvider>
       </AppProvider>
     </ErrorBoundary>
   </StrictMode>,

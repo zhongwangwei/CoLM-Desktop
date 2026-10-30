@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
+import { useBenchTasks } from '../../lib/bench-task-context';
 import { usePageContract } from '../../lib/guide';
 import { invoke, invokeJson, listen } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
@@ -245,6 +246,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export default function ComparePage() {
   const { state } = useApp();
+  // 跨路由可见的比较任务（UX ③）：页面负责真实提交/等待，任务条只镜像阶段与结果。
+  const benchTasks = useBenchTasks();
+  const benchTaskId = useRef('');
   const en = state.language === 'en';
   const t = (zh: string, english: string) => (en ? english : zh);
   const shown = (e: unknown) => {
@@ -594,6 +598,13 @@ export default function ComparePage() {
         // 用户换去看别的机器了：日志不写进新页面；身份还持久化着，回来时接着核对。
         if (!stillCurrent(machine, epoch)) return { state: 'detached' };
         setLog(reply.status.log_tail.split('\n').filter(Boolean));
+        if (benchTaskId.current)
+          benchTasks.update(benchTaskId.current, {
+            phase:
+              reply.status.state === 'running'
+                ? ['服务器评估中', 'Running on the server']
+                : ['排队中', 'Queued'],
+          });
         const end = remoteJobTerminal(reply);
         if (end === 'succeeded') {
           settleJob(machine, identity, 'succeeded');
@@ -1351,86 +1362,116 @@ export default function ComparePage() {
         at: new Date().toISOString(),
       };
       const project = comparisonName(name);
-      // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
-      setConfigSaving(true);
+      benchTaskId.current = benchTasks.begin({
+        host,
+        project,
+        label: name,
+        kind: 'run',
+        phase: ['提交运行', 'Submitting'],
+      });
       try {
-        if (!remote) {
-          const result = await invokeJson<{
-            report: string | null;
+        // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
+        setConfigSaving(true);
+        try {
+          if (!remote) {
+            benchTasks.update(benchTaskId.current, {
+              phase: ['检查并运行', 'Checking and running'],
+            });
+            const result = await invokeJson<{
+              report: string | null;
+              run_id?: string;
+              config_sha?: string;
+              state?: string;
+              latest_success?: unknown;
+            }>('bench_run', {
+              name: project,
+              config: frozen.config,
+              sites: frozen.sites,
+              refRoot: scanDir || null,
+            });
+            // bench_run 会先把配置写进比较项目目录，再跑评估；能返回就说明这一版已写盘。
+            setWrittenFingerprint(frozen.fingerprint);
+            setLastRun({
+              runId: result.run_id ?? '',
+              configSha: result.config_sha ?? '',
+              fingerprint: frozen.fingerprint,
+              at: frozen.at,
+              report: result.report,
+            });
+            if (result.report) await view(result.report);
+            showRunNotice(
+              result.run_id
+                ? t(
+                    `评估完成（运行 ${result.run_id}）`,
+                    `Evaluation finished (run ${result.run_id})`,
+                  )
+                : t('评估完成', 'Evaluation finished'),
+              frozen.fingerprint,
+            );
+            // 配置已经写进项目目录并跑完，草稿不再算"未完成"；失败/取消路径不清，留给用户恢复。
+            store(compareDraftKey(host), '');
+            benchTasks.finish(benchTaskId.current, { state: 'done', report: result.report });
+            return;
+          }
+          // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
+          const machine = host;
+          // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
+          assertNoUnresolvedJob(machine);
+          const submitted = await invokeJson<{
+            job: string;
+            /** 正常是调度系统的提交结果；提交回执丢失但按作业号有界重查确认已接受/无法判断时是字符串 "unconfirmed"。 */
+            submitted?: unknown;
+            /** 远程 run 身份 == 作业号：服务器在 <project>/runs/<id>/ 冻结这次运行的配置。 */
             run_id?: string;
             config_sha?: string;
-            state?: string;
-            latest_success?: unknown;
-          }>('bench_run', {
+          }>('bench_remote_run', {
+            host: machine,
             name: project,
             config: frozen.config,
             sites: frozen.sites,
             refRoot: scanDir || null,
           });
-          // bench_run 会先把配置写进比较项目目录，再跑评估；能返回就说明这一版已写盘。
+          // 回执丢了不等于提交失败：后端已按作业号确认/继续跟踪，这里照常 watch（不能报错或重复提交）。
+          if (submitted.submitted === 'unconfirmed')
+            setNotice(
+              t(
+                '服务器没有确认收到提交回执，已按作业号继续跟踪；若一直查不到记录，稍后再提交。',
+                'The server did not confirm receiving the submission; tracking continues by job id. If no record ever appears, submit again later.',
+              ),
+            );
+          // 远程提交被接受时后端已在服务器上写好这一版配置；成功/失败的运行都不影响"已写盘"。
           setWrittenFingerprint(frozen.fingerprint);
-          setLastRun({
-            runId: result.run_id ?? '',
-            configSha: result.config_sha ?? '',
-            fingerprint: frozen.fingerprint,
-            at: frozen.at,
-            report: result.report,
+          benchTasks.update(benchTaskId.current, {
+            phase: ['等待服务器调度', 'Waiting for the scheduler'],
+            job: submitted.job,
           });
-          if (result.report) await view(result.report);
-          showRunNotice(
-            result.run_id
-              ? t(`评估完成（运行 ${result.run_id}）`, `Evaluation finished (run ${result.run_id})`)
-              : t('评估完成', 'Evaluation finished'),
-            frozen.fingerprint,
-          );
-          // 配置已经写进项目目录并跑完，草稿不再算"未完成"；失败/取消路径不清，留给用户恢复。
-          store(compareDraftKey(host), '');
-          return;
+          const runId = submitted.run_id ?? submitted.job;
+          const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
+          await afterWatch(machine, outcome, () => fetchReport(machine, project, runId));
+          if (outcome.state === 'succeeded') {
+            store(compareDraftKey(host), '');
+            benchTasks.finish(benchTaskId.current, { state: 'done' });
+            setLastRun({
+              runId,
+              configSha: submitted.config_sha ?? '',
+              fingerprint: frozen.fingerprint,
+              at: frozen.at,
+              report: null,
+            });
+            showRunNotice(t('评估完成', 'Evaluation finished'), frozen.fingerprint);
+          }
+        } finally {
+          setConfigSaving(false);
         }
-        // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
-        const machine = host;
-        // 未核对终态的已有作业：不重复提交，先核对或停止（GUI-07 的活动任务保护）。
-        assertNoUnresolvedJob(machine);
-        const submitted = await invokeJson<{
-          job: string;
-          /** 正常是调度系统的提交结果；提交回执丢失但按作业号有界重查确认已接受/无法判断时是字符串 "unconfirmed"。 */
-          submitted?: unknown;
-          /** 远程 run 身份 == 作业号：服务器在 <project>/runs/<id>/ 冻结这次运行的配置。 */
-          run_id?: string;
-          config_sha?: string;
-        }>('bench_remote_run', {
-          host: machine,
-          name: project,
-          config: frozen.config,
-          sites: frozen.sites,
-          refRoot: scanDir || null,
+      } catch (error) {
+        // 任务条只存原文；页面自己的错误区仍用 shown() 做双语。离开页面让轮询停下（LEFT）不是运行失败：
+        // 远程作业可能还在服务器上跑，标 interrupted 让用户回来再核对。
+        const message = String(error).replace(/^Error: /, '');
+        benchTasks.finish(benchTaskId.current, {
+          state: message === LEFT ? 'interrupted' : 'failed',
+          error: message,
         });
-        // 回执丢了不等于提交失败：后端已按作业号确认/继续跟踪，这里照常 watch（不能报错或重复提交）。
-        if (submitted.submitted === 'unconfirmed')
-          setNotice(
-            t(
-              '服务器没有确认收到提交回执，已按作业号继续跟踪；若一直查不到记录，稍后再提交。',
-              'The server did not confirm receiving the submission; tracking continues by job id. If no record ever appears, submit again later.',
-            ),
-          );
-        // 远程提交被接受时后端已在服务器上写好这一版配置；成功/失败的运行都不影响"已写盘"。
-        setWrittenFingerprint(frozen.fingerprint);
-        const runId = submitted.run_id ?? submitted.job;
-        const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
-        await afterWatch(machine, outcome, () => fetchReport(machine, project, runId));
-        if (outcome.state === 'succeeded') {
-          store(compareDraftKey(host), '');
-          setLastRun({
-            runId,
-            configSha: submitted.config_sha ?? '',
-            fingerprint: frozen.fingerprint,
-            at: frozen.at,
-            report: null,
-          });
-          showRunNotice(t('评估完成', 'Evaluation finished'), frozen.fingerprint);
-        }
-      } finally {
-        setConfigSaving(false);
+        throw error;
       }
     });
   // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。

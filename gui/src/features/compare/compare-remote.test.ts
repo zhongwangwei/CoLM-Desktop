@@ -48,10 +48,17 @@ function declaration(name: string): string {
 }
 
 function execute<T>(name: string, context: Record<string, unknown>): T {
+  // watch() 现在还会镜像跨路由任务条；这些用例不关心状态条，给 no-op 默认值。
+  const withDefaults = {
+    benchTasks: { begin: () => '', update: () => {}, finish: () => {}, clear: () => {} },
+    benchTaskId: { current: '' },
+    LEFT: 'compare page left',
+    ...context,
+  };
   const code = ts.transpileModule(`${declaration(name)}; return ${name};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  return new Function(...Object.keys(context), code)(...Object.values(context)) as T;
+  return new Function(...Object.keys(withDefaults), code)(...Object.values(withDefaults)) as T;
 }
 
 const t = (_zh: string, english: string) => english;

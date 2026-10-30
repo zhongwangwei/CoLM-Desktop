@@ -58,6 +58,8 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     setNotice: () => {},
     setConfigSaving: () => {},
     setWrittenFingerprint: () => {},
+    benchTasks: { begin: () => '', update: () => {}, finish: () => {}, clear: () => {} },
+    benchTaskId: { current: '' },
     store: () => {},
     compareDraftKey: (host: string) => `colm.compareDraft@${host}`,
     showRunNotice: () => {},

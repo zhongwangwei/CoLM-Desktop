@@ -4055,3 +4055,36 @@ table input {
   border-radius: var(--r-sm);
   background: #fff;
 }
+
+/* 比较任务条（UX ③）：壳上一行式状态，不抢页面内容；窄屏允许换行。 */
+.bench-task-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 8px;
+}
+.bench-task-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #d6d6d6);
+  border-radius: 6px;
+  font-size: 0.9em;
+}
+.bench-task-phase {
+  font-weight: 600;
+}
+.bench-task-waited {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.bench-task-error {
+  color: var(--danger, #b3261e);
+}
+.bench-task-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}

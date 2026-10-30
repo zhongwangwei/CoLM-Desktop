@@ -54,6 +54,9 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     setNotice: () => {},
     setConfigSaving: () => {},
     setWrittenFingerprint: () => {},
+    benchTasks: { begin: () => '', update: () => {}, finish: () => {}, clear: () => {} },
+    benchTaskId: { current: '' },
+    LEFT: 'compare page left',
     store: () => {},
     compareDraftKey: (host: string) => `colm.compareDraft@${host}`,
     showRunNotice: () => {},
@@ -260,6 +263,22 @@ function pageHarness(
     Fragment: 'Fragment',
   };
   const useApp = () => ({ state: { language: 'en', cases: [] } });
+  // 跨路由任务条在整页 harness 里记录调用即可；reducer/provider 的测试在 bench-task.test.ts。
+  const benchCalls: string[] = [];
+  const useBenchTasks = () => ({
+    tasks: [],
+    begin: (input: { project: string }) => {
+      benchCalls.push(`begin:${input.project}`);
+      return 'task-1';
+    },
+    update: (_id: string, patch: { phase?: [string, string] }) => {
+      benchCalls.push(`update:${patch.phase?.[0] ?? ''}`);
+    },
+    finish: (_id: string, outcome: { state: string }) => {
+      benchCalls.push(`finish:${outcome.state}`);
+    },
+    clear: () => {},
+  });
   const usePageContract = (value: Contract) => {
     contract = value;
   };
@@ -268,6 +287,7 @@ function pageHarness(
     ...compareConfig,
     React,
     useApp,
+    useBenchTasks,
     usePageContract,
     useState,
     useRef,
@@ -407,6 +427,7 @@ function pageHarness(
     configTextarea,
     badgeState,
     localValue: (key: string) => disk.get(key) ?? '',
+    benchCalls: () => [...benchCalls],
     summaryText,
     addVariable,
     deferRun,
@@ -557,6 +578,12 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
   await page.settle();
   assert.equal(page.badgeState(), 'saved');
   assert.match(text(page.nodes()), /Evaluation finished/);
+  // 页面把这次 run 登记进跨路由任务条，并在成功时收尾（UX ③ 的页面侧接线）。
+  assert.ok(
+    page.benchCalls().some((call) => call.startsWith('begin:comparison')),
+    'run is mirrored',
+  );
+  assert.ok(page.benchCalls().includes('finish:done'), 'successful run finishes the mirror');
   // 运行提交成功后这一版配置已经写进比较项目目录，徽标才显示"已写盘"。
   assert.match(badgeLabels()?.saved ?? '', /Written to the project folder/);
   const runCall = page.calls.find((call) => call.command === 'bench_run');
