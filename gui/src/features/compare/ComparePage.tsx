@@ -26,6 +26,8 @@ import {
   comparableVariables,
   commonYears,
   comparisonDir,
+  compareDraftHasContent,
+  compareDraftKey,
   comparisonName,
   configInvalidation,
   configSaveState,
@@ -36,6 +38,10 @@ import {
   inspectFamilyNote,
   inspectWarningText,
   jobContacted,
+  layerVariableWarnings,
+  parseCompareDraft,
+  type CompareDraft,
+  type CompareDraftPick,
   jobEnded,
   jobUncertain,
   parseReferences,
@@ -261,10 +267,12 @@ export default function ComparePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  // U-05：运行/保存评估配置后的成功提示记着"针对哪一版设计"，设置一改就清掉，避免旧的"评估完成"继续挂着。
+  // U-05：运行/生成配置后的成功提示记着"针对哪一版设计"，设置一改就清掉，避免旧的"评估完成"继续挂着。
   const [runNotice, setRunNotice] = useState('');
-  // U-05：评估配置正在提交（后端写 openbench.yaml）时徽标显示"正在保存"。
+  // U-05：评估配置正在提交（后端写 openbench.yaml）时徽标显示"正在写入"。
   const [configSaving, setConfigSaving] = useState(false);
+  // 配置真正写进比较项目目录的那一版指纹：只有提交成功才记。徽标据此区分"页内已生成"与"已写盘"。
+  const [writtenFingerprint, setWrittenFingerprint] = useState('');
   const [log, setLog] = useState<string[]>([]);
   const [source, setSource] = useState<'pypi' | 'local'>('pypi');
   const [localSource, setLocalSource] = useState('');
@@ -291,6 +299,12 @@ export default function ComparePage() {
   const [comparisonItems, setComparisonItems] = useState<string[]>([...DEFAULT_COMPARISON_ITEMS]);
   // OpenBench 独立统计检验阶段（statistics）：默认不启用，勾选方法后才写进配置。
   const [statisticsItems, setStatisticsItems] = useState<string[]>([]);
+  // 上次离开页面时留下的草稿：只在打开页面时提示恢复（显式按钮），绝不自动覆盖当前页面。
+  // 草稿只含页面输入，不含运行状态/报告；按机器分开存。
+  const [draftOffer, setDraftOffer] = useState<CompareDraft | null>(() => {
+    const draft = parseCompareDraft(stored(compareDraftKey(stored('colm.benchHost'))));
+    return draft && compareDraftHasContent(draft) ? draft : null;
+  });
   const [metricOptions, setMetricOptions] = useState<MetricOption[]>(FALLBACK_METRICS);
   const [scoreOptions, setScoreOptions] = useState<MetricOption[]>(FALLBACK_SCORES);
   const [dialog, setDialog] = useState<RegisterDialog>(null);
@@ -411,6 +425,53 @@ export default function ComparePage() {
     }
     return next;
   };
+  // 草稿自动保存：只存页面输入（不含运行状态/报告）。有"待恢复"提示时先不写，避免把用户还没决定
+  // 恢复的旧草稿覆盖掉；提交运行期间也不写，避免把正在写的配置当成草稿。
+  useEffect(() => {
+    if (busy || draftOffer) return;
+    const draft: CompareDraft = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      host,
+      name,
+      from,
+      to,
+      timRes,
+      gridRes,
+      chosen,
+      weight,
+      minYear,
+      timeAlignment,
+      numCores,
+      metrics,
+      scores,
+      comparisonItems,
+      statisticsItems,
+      yaml,
+      picks: picks as CompareDraftPick[],
+    };
+    store(compareDraftKey(host), compareDraftHasContent(draft) ? JSON.stringify(draft) : '');
+  }, [
+    busy,
+    draftOffer,
+    host,
+    picks,
+    name,
+    from,
+    to,
+    timRes,
+    gridRes,
+    chosen,
+    weight,
+    minYear,
+    timeAlignment,
+    numCores,
+    metrics,
+    scores,
+    comparisonItems,
+    statisticsItems,
+    yaml,
+  ]);
   useEffect(() => {
     void invokeJson<{ servers: { host: string }[] }>('remote_config')
       .then((config) => setServers(config.servers.map((s) => s.host)))
@@ -1081,8 +1142,11 @@ export default function ComparePage() {
     statisticsItems,
   });
   const machine = { host, openbenchRoot: status?.root ?? '', refRoot: scanDir };
-  // 表单设计：`保存评估配置` 生成配置与站点清单时用它（GUI-04）。
+  // 表单设计：`生成配置` 生成配置与站点清单时用它（GUI-04）。
   const formDesign: EvaluationDesign = { machine, ...comparisonDesign() };
+  // 层维度变量不再在生成前拒绝：打开文件时保留层维度，OpenBench CoLM2024 profile 用 compute 消费；
+  // 但用户显式映射的 varname 若 profile 不认识，OpenBench check 才会报错，所以这里只提示不阻断。
+  const layerWarnings = layerVariableWarnings(formDesign);
   // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
   const design = designFingerprint(formDesign);
@@ -1190,6 +1254,33 @@ export default function ComparePage() {
   const simSpatial =
     simForm.dataType === 'grid' ||
     (simForm.dataType === 'auto' && (simForm.probe?.spatial ?? false));
+  const restoreDraft = () => {
+    const draft = draftOffer;
+    if (!draft) return;
+    setPicks(draft.picks as unknown as Pick[]);
+    setName(draft.name);
+    setFrom(draft.from);
+    setTo(draft.to);
+    setTimRes(draft.timRes);
+    setGridRes(draft.gridRes);
+    setChosen(draft.chosen);
+    setWeight(draft.weight);
+    setMinYear(draft.minYear);
+    setTimeAlignment(draft.timeAlignment);
+    setNumCores(draft.numCores);
+    setMetrics(draft.metrics);
+    setScores(draft.scores);
+    setComparisonItems(draft.comparisonItems);
+    setStatisticsItems(draft.statisticsItems);
+    setYaml(draft.yaml);
+    setDraftOffer(null);
+    setError('');
+    setRunNotice('');
+  };
+  const discardDraft = () => {
+    setDraftOffer(null);
+    store(compareDraftKey(host), '');
+  };
   const generate = () => {
     try {
       const inputs = comparisonDesign();
@@ -1225,8 +1316,8 @@ export default function ComparePage() {
       if (!snapshot)
         throw new Error(
           t(
-            '还没有生成评估配置：先点「保存评估配置」，摘要、指纹和提交都绑定那一份快照。',
-            'No evaluation configuration yet: save one first; the summary, fingerprint and submission all bind to that snapshot.',
+            '还没有生成评估配置：先点「生成配置」，摘要、指纹和提交都绑定那一份快照。',
+            'No evaluation configuration yet: generate one first; the summary, fingerprint and submission all bind to that snapshot.',
           ),
         );
       if (snapshotStale(snapshot, formDesign))
@@ -1276,6 +1367,8 @@ export default function ComparePage() {
             sites: frozen.sites,
             refRoot: scanDir || null,
           });
+          // bench_run 会先把配置写进比较项目目录，再跑评估；能返回就说明这一版已写盘。
+          setWrittenFingerprint(frozen.fingerprint);
           setLastRun({
             runId: result.run_id ?? '',
             configSha: result.config_sha ?? '',
@@ -1290,6 +1383,8 @@ export default function ComparePage() {
               : t('评估完成', 'Evaluation finished'),
             frozen.fingerprint,
           );
+          // 配置已经写进项目目录并跑完，草稿不再算"未完成"；失败/取消路径不清，留给用户恢复。
+          store(compareDraftKey(host), '');
           return;
         }
         // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
@@ -1318,10 +1413,13 @@ export default function ComparePage() {
               'The server did not confirm receiving the submission; tracking continues by job id. If no record ever appears, submit again later.',
             ),
           );
+        // 远程提交被接受时后端已在服务器上写好这一版配置；成功/失败的运行都不影响"已写盘"。
+        setWrittenFingerprint(frozen.fingerprint);
         const runId = submitted.run_id ?? submitted.job;
         const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
         await afterWatch(machine, outcome, () => fetchReport(machine, project, runId));
         if (outcome.state === 'succeeded') {
+          store(compareDraftKey(host), '');
           setLastRun({
             runId,
             configSha: submitted.config_sha ?? '',
@@ -1541,6 +1639,22 @@ export default function ComparePage() {
           </p>
         </div>
       </header>
+      {draftOffer && (
+        <Notice tone="info">
+          <p>
+            {t(
+              '上次离开前，这个页面还有一份没跑完的配置草稿（只存在本机，不含运行状态和报告）。要恢复吗？',
+              'This page kept an unfinished configuration draft from your last visit (stored on this computer; no run state or report). Restore it?',
+            )}
+          </p>
+          <div className="button-row">
+            <Button onClick={restoreDraft}>{t('恢复草稿', 'Restore draft')}</Button>
+            <Button variant="ghost" onClick={discardDraft}>
+              {t('丢弃草稿', 'Discard draft')}
+            </Button>
+          </div>
+        </Notice>
+      )}
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
       <div data-compare-section="environment">
@@ -2375,16 +2489,27 @@ export default function ComparePage() {
               </ul>
               <h3 className="study-subhead">{t('评估配置', 'Evaluation configuration')}</h3>
               <div className="button-row">
-                <SaveBadge state={configState} t={t} />
+                <SaveBadge
+                  state={configState}
+                  t={t}
+                  labels={{
+                    dirty: t('有未生成的修改', 'Changes not generated'),
+                    saving: t('正在写入项目目录', 'Writing to the project folder'),
+                    saved:
+                      configState === 'saved' && writtenFingerprint === effectiveFingerprint
+                        ? t('已写入项目目录', 'Written to the project folder')
+                        : t('已生成（未写盘）', 'Generated (not on disk)'),
+                  }}
+                />
                 <p className="muted study-hint">
                   {t(
-                    '配置先只保存在本页（可以手工修改）；「保存评估配置」生成配置文本，运行时写入比较项目目录。',
-                    'The configuration first lives on this page (and can be edited); “Save evaluation configuration” generates the text and running writes it into the comparison project folder.',
+                    '「生成配置」只在页面里生成文本（可以手工修改）；点「检查并运行」时才写入比较项目目录。',
+                    '“Generate configuration” only produces the text on this page (editable); the configuration is written into the comparison project folder when you check and run.',
                   )}
                 </p>
                 <ActionButton
                   action="compare-generate"
-                  label={t('保存评估配置', 'Save evaluation configuration')}
+                  label={t('生成配置', 'Generate configuration')}
                   disabled={busy || !ok.length}
                   run={regenerate}
                 />
@@ -2468,7 +2593,9 @@ export default function ComparePage() {
                               (v) => `${p.label}: ${v.name}`,
                             ),
                           )
-                          .join('；')}。如果比较需要它们，要先支持层维度选择或聚合。`,
+                          .join(
+                            '；',
+                          )}。土层/积雪层/湖泊层变量（soil/soilsnow/lake）不在这里：它们会保留层维度，交给 OpenBench 模型 profile 的 compute 处理。`,
                         `These variables have dimensions beyond a station/surface evaluation and are skipped when preparing station files (not silently: the log names them): ${ok
                           .flatMap((p) =>
                             (p.info.unsupported_variables ?? []).map(
@@ -2477,8 +2604,17 @@ export default function ComparePage() {
                           )
                           .join(
                             '; ',
-                          )}. Supporting layer selection or aggregation is needed before they can be compared.`,
+                          )}. Soil/snow/lake layer variables are not in this list: their layer dimensions are kept for the OpenBench model profile's compute.`,
                       )}
+                    </Notice>
+                  )}
+                  {layerWarnings.length > 0 && (
+                    <Notice tone="info">
+                      <ul>
+                        {layerWarnings.map(([zh, en]) => (
+                          <li key={en}>{t(zh, en)}</li>
+                        ))}
+                      </ul>
                     </Notice>
                   )}
                   {missingExtent.length > 0 && (
@@ -2519,7 +2655,7 @@ export default function ComparePage() {
                       title={
                         !generatedConfig
                           ? t(
-                              '还没有生成评估配置：先点「保存评估配置」',
+                              '还没有生成评估配置：先点「生成配置」',
                               'No evaluation configuration yet: save one first',
                             )
                           : staleSnapshot

@@ -8,9 +8,10 @@ stdout 的 JSON / stderr 的错误 / 并出来的 NetCDF 与站点清单：
     python3 scripts/test-bench-scripts.py
 
 每类用例对应比较页审查报告里的一个现状缺陷：
-主 history 与 tracer 同目录、每天一个文件、逐年文件、patch=2、单格 lat×lon 网格、
-element 向量、土层变量、同目录混前缀、0–360 经度、跨日界线（含中心 180° 的 1×1 格）、
-缺坐标 + 经纬度覆盖、站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：
+主 history 与 tracer 同目录、每天一个文件、逐年文件、patch=2（含诊断文案）、单格 lat×lon 网格、
+element 向量、层维度变量（soilsnow/soil/lake 保留给 OpenBench profile compute，类别维仍跳过）、
+同目录混前缀、0–360 经度、跨日界线（含中心 180° 的 1×1 格）、缺坐标 + 经纬度覆盖、
+站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：
 单时刻读频率元数据（source=metadata）、元数据与实测冲突以实测为准、亚小时输出粗化成 Hour、
 6 小时/8 天档位、2/4 小时与 6 小时不落错档（R08）、以及落不到任何档位的步长明确报错；
 R06 的非公历日历：cftime 解码出的 noleap/360_day 时间轴仍要能采样步长与判频率，制备端也要能
@@ -161,12 +162,15 @@ def write_station(
     patch=1,
     coordinate=(20.5, 110.25),
     extra_sizes=None,
+    extra_coords=None,
     attrs=None,
     time_attrs=None,
 ):
     """站点文件：patch 维 + 0 维 lat/lon（与 CoLM 的写出方式一致），变量维度是 time/patch/层。
 
     attrs / time_attrs 用来在 dataset 全局属性或 time 变量属性上造频率元数据（C04 用例）。
+    extra_coords 造像 CoLM 那样的层维度坐标变量（ncio_write_colm_dimension 把 soilsnow/soil/lake
+    写成 1-D 坐标，值就是层号），层维度保留后输出必须原样带着它们。
     """
     sizes = {"time": np.asarray(time_values).size}
     if patch is not None:
@@ -177,7 +181,10 @@ def write_station(
     for name, dims in variables.items():
         shape = tuple(sizes[dim] for dim in dims)
         data[name] = (dims, np.arange(max(1, int(np.prod(shape))), dtype=float).reshape(shape))
-    dataset = xr.Dataset(data, coords={"time": np.asarray(time_values)})
+    coords = {"time": np.asarray(time_values)}
+    if extra_coords:
+        coords.update(extra_coords)
+    dataset = xr.Dataset(data, coords=coords)
     if attrs:
         dataset.attrs.update(attrs)
     if time_attrs:
@@ -862,7 +869,8 @@ def single_cell_dateline_grid_is_resolved_and_rejected(workdir):
 
 @test
 def multi_patch_is_rejected_explicitly(workdir):
-    """patch=2：探测报 patch 类型与原因；制备明确报错，不许 squeeze 崩。"""
+    """patch=2：探测报 patch 类型与完整原因（没有 patch 类型/面积/权重、OpenBench 不能逐 patch 加权）；
+    制备明确报错，不许 squeeze 崩。"""
     folder = os.path.join(workdir, "history")
     write_station(
         os.path.join(folder, "Patchy_hist_2000-01.nc"),
@@ -875,6 +883,14 @@ def multi_patch_is_rejected_explicitly(workdir):
     assert info["patch"] == 2, info["patch"]
     assert info["comparable"] is False
     assert any(blocker["code"] == "multi_patch" for blocker in info["blockers"]), info["blockers"]
+    # 诊断要解释"为什么不能干脆取第一个 patch"：history 只有数值变量，没有 patch 类型/面积/权重，
+    # OpenBench 也没有逐 patch 选择/加权的入口。只写 "supports a single patch only" 会被用户当成
+    # 待补的功能而不是无法从这份数据做比较。
+    blocker = next(entry for entry in info["blockers"] if entry["code"] == "multi_patch")
+    message = blocker["message"]
+    assert "2 patches" in message, message
+    assert "no patch type/area/weight" in message, message
+    assert "cannot select or weight" in message, message
     stderr = prepare_stderr(folder, info["prefix"], workdir)
     assert "patch=2" in stderr and "multi-patch" in stderr, stderr
 
@@ -893,36 +909,105 @@ def element_vector_is_unstructured(workdir):
 
 
 @test
-def layered_variables_are_reported_and_skipped(workdir):
-    """土层/类别维变量：探测列进 unsupported_variables；制备打印跳过原因，不静默丢。"""
+def layered_variables_are_kept_for_profile_compute(workdir):
+    """层维度变量（soilsnow/soil/lake）保留给 OpenBench CoLM2024 profile 的 compute；类别维仍跳过。
+
+    OpenBench 3.0.8 的 CoLM2024 profile 用 `compute:` 从 `f_wliq_soisno.isel(soilsnow=5:13)` 算
+    Root_Zone_Soil_Moisture/Surface_Soil_Moisture：制备若像旧实现那样把层变量整个跳过，站点合并
+    文件里没有 f_wliq_soisno，profile compute 就读不到。这里按 CoLM 真实写法造（soilsnow 是
+    ncio_write_colm_dimension 写的 1-D 坐标变量、20 层），锁住三件事：探测把层变量放
+    layered_variables 而不是 unsupported_variables；制备保留层维度/坐标/数值；band 类维度仍跳过并打印。
+    """
     folder = os.path.join(workdir, "history")
+    soilsnow = np.arange(1, 21)
     write_station(
         os.path.join(folder, "Layered_hist_2000-01.nc"),
         times("2000-01-01T00:30", 2, 60),
         {
             "f_xy_t": ("time", "patch"),
-            "f_wliq_soisno": ("time", "patch", "soil"),
+            "f_wliq_soisno": ("time", "patch", "soilsnow"),
+            "f_t_soisno": ("time", "patch", "soilsnow"),
             "f_alb": ("time", "patch", "rtyp", "band"),
         },
-        extra_sizes={"soil": 10, "rtyp": 2, "band": 2},
+        extra_sizes={"soilsnow": 20, "rtyp": 2, "band": 2},
+        extra_coords={"soilsnow": soilsnow},
     )
     info = inspect(folder)
-    names = [entry["name"] for entry in info["unsupported_variables"]]
-    assert "f_wliq_soisno" in names, info["unsupported_variables"]
-    assert "f_alb" in names, info["unsupported_variables"]
-    extra = {entry["name"]: entry["extra_dims"] for entry in info["unsupported_variables"]}
-    assert extra["f_wliq_soisno"] == ["soil"], extra
-    assert extra["f_alb"] == ["rtyp", "band"], extra
+    layered = {entry["name"]: entry["dims"] for entry in info["layered_variables"]}
+    assert set(layered) == {"f_wliq_soisno", "f_t_soisno"}, layered
+    assert layered["f_wliq_soisno"] == ["time", "patch", "soilsnow"], layered
+    assert layered["f_t_soisno"] == ["time", "patch", "soilsnow"], layered
+    # 层变量不再是"制备会丢的变量"：unsupported_variables 里只剩类别维的 f_alb。
+    unsupported = {entry["name"]: entry["extra_dims"] for entry in info["unsupported_variables"]}
+    assert set(unsupported) == {"f_alb"}, unsupported
+    assert unsupported["f_alb"] == ["rtyp", "band"], unsupported
+    # variables 仍列全部随时间变的变量，供前端做变量映射。
     dims = {entry["name"]: entry["dims"] for entry in info["variables"]}
-    assert dims["f_wliq_soisno"] == ["time", "patch", "soil"], dims
+    assert dims["f_wliq_soisno"] == ["time", "patch", "soilsnow"], dims
     assert info["comparable"] is True
 
     result, out_nc, _ = prepare_ok(folder, info["prefix"], workdir)
-    assert "f_wliq_soisno" in result.stdout and "skipped" in result.stdout, result.stdout
+    # 保留的层变量要在日志里能看见（不是静默保留），被丢的 band 变量仍逐个打印原因。
+    assert "f_wliq_soisno" in result.stdout and "kept" in result.stdout, result.stdout
+    skipped_lines = "\n".join(line for line in result.stdout.splitlines() if "skipped" in line)
+    assert "f_alb" in skipped_lines and "f_wliq_soisno" not in skipped_lines, result.stdout
     with xr.open_dataset(out_nc) as merged:
-        assert "f_wliq_soisno" not in merged.data_vars, variable_names(merged)
         assert "f_xy_t" in merged.data_vars, variable_names(merged)
+        assert "f_wliq_soisno" in merged.data_vars, variable_names(merged)
+        assert "f_t_soisno" in merged.data_vars, variable_names(merged)
+        assert "f_alb" not in merged.data_vars, variable_names(merged)
         assert merged.sizes["time"] == 2
+        # 层维度与坐标原样保留：OpenBench profile compute 按位置 isel(soilsnow=5:13) 取层。
+        assert merged["f_wliq_soisno"].dims == ("time", "soilsnow"), merged["f_wliq_soisno"].dims
+        assert merged.sizes["soilsnow"] == 20, dict(merged.sizes)
+        assert np.array_equal(merged["soilsnow"].values, soilsnow), merged["soilsnow"].values
+        # 数值是夹具的连续编号：第 0 时刻第 6 层 = 5，第 1 时刻第 13 层 = 32。
+        expected = np.arange(2 * 20, dtype=float).reshape(2, 20)
+        assert np.array_equal(merged["f_wliq_soisno"].transpose("time", "soilsnow").values, expected)
+        assert merged["f_wliq_soisno"].values[0, 5] == 5.0
+        assert merged["f_wliq_soisno"].values[1, 12] == 32.0
+
+
+@test
+def layered_variables_survive_multi_file_merge(workdir):
+    """层变量跨文件排序/拼接/重复时刻按变量合并时不能丢维度或层坐标。
+
+    真实 history 是每月/每天一个文件，同一时刻可能出现在两个文件里、各自带不同变量。旧实现把层
+    变量整个跳过，这条路径没暴露过；保留层维度后要保证 xr.concat(join="outer") 与
+    merge_duplicate_times 的 merge(join="outer", compat="no_conflicts") 在层维度/层坐标上对齐。
+    """
+    folder = os.path.join(workdir, "history")
+    soilsnow = np.arange(1, 21)
+    # 文件名序：`..._2000-01-02.nc` 排在 `..._2000-01.nc` 前面（'-' < '.'），时间序相反。
+    write_station(
+        os.path.join(folder, "LayerMerge_hist_2000-01.nc"),
+        np.array(["2000-01-01T00:30", "2000-01-02T00:30"], dtype="datetime64[s]"),
+        {"f_wliq_soisno": ("time", "patch", "soilsnow")},
+        extra_sizes={"soilsnow": 20},
+        extra_coords={"soilsnow": soilsnow},
+    )
+    write_station(
+        os.path.join(folder, "LayerMerge_hist_2000-01-02.nc"),
+        np.array(["2000-01-02T00:30", "2000-01-03T00:30"], dtype="datetime64[s]"),
+        {"f_t_soisno": ("time", "patch", "soilsnow")},
+        extra_sizes={"soilsnow": 20},
+        extra_coords={"soilsnow": soilsnow},
+    )
+    result, out_nc, _ = prepare_ok(folder, "LayerMerge_hist_", workdir)
+    assert "3 steps" in result.stdout, result.stdout
+    with xr.open_dataset(out_nc) as merged:
+        assert merged.sizes["time"] == 3, dict(merged.sizes)
+        assert merged.sizes["soilsnow"] == 20, dict(merged.sizes)
+        assert np.array_equal(merged["soilsnow"].values, soilsnow), merged["soilsnow"].values
+        water = merged["f_wliq_soisno"].transpose("time", "soilsnow").values
+        temperature = merged["f_t_soisno"].transpose("time", "soilsnow").values
+        expected = np.arange(2 * 20, dtype=float).reshape(2, 20)
+        # 中间时刻两个文件都有：水来自早文件 t0/t1 两行，温度来自晚文件 t1/t2 两行。
+        assert np.array_equal(water[0], expected[0]) and np.array_equal(water[1], expected[1]), water
+        assert np.array_equal(temperature[1], expected[0]), temperature
+        assert np.array_equal(temperature[2], expected[1]), temperature
+        assert np.isnan(water[2]).all(), water[2]
+        assert np.isnan(temperature[0]).all(), temperature[0]
 
 
 @test

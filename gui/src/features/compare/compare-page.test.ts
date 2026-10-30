@@ -57,6 +57,9 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     stillCurrent: () => true,
     setNotice: () => {},
     setConfigSaving: () => {},
+    setWrittenFingerprint: () => {},
+    store: () => {},
+    compareDraftKey: (host: string) => `colm.compareDraft@${host}`,
     showRunNotice: () => {},
     ...context,
   };

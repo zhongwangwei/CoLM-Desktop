@@ -36,8 +36,11 @@
 - 非公历日历（noleap、360_day…）经 xarray 解出来是 cftime 对象，不是 datetime64：排序、步长、
   年份都要走日历感知的分支（cftime 相减给 datetime.timedelta），不能 np.diff 后除 timedelta64，
   那会抛裸 TypeError；同一目录混不同日历/标准日历则明确拒绝（R06）。
-- 土层/积雪层/类别维（soil、soilsnow、lake、band…）超出站点评估的 {time,patch}：不能静默丢掉，
-  要逐个列进 unsupported_variables，制备时再明确打印跳过原因。
+- 土层/积雪层/湖泊层维度（soil、soilsnow、lake）的变量不是"制备会丢的变量"：OpenBench 3.0.8
+  的 CoLM2024 profile 用 `compute:` 直接从原始层变量算地表量（`f_wliq_soisno.isel(soilsnow=5:13)`
+  → Root_Zone_Soil_Moisture 等），制备会原样保留这些维度，所以单独报进 `layered_variables`
+  （界面据此提示"profile 可能 compute/需要层处理"）。其它超出站点评估 {time,patch} 的维度
+  （band、rtyp、vegnodes 等）仍逐个列进 `unsupported_variables`，制备时跳过。
 """
 
 import glob
@@ -82,6 +85,13 @@ SUPPORTED_DIMS = {
     "unstructured": {"time", "element"},
     "unknown": {"time"},
 }
+
+# CoLM histmap 的层维度（colm-hist/src/generated.rs 的 soi/soilsnow/lake 三套）。它们不是制备会丢的
+# 维度：OpenBench 3.0.8 的 CoLM2024 profile 在 model_catalog.yaml 里用 `compute:` 从原始层变量算
+# 地表量（`f_wliq_soisno.isel(soilsnow=5:13)` → Root_Zone_Soil_Moisture 等），PREPARE 会原样保留
+# 这些维度写进站点合并文件。带这些额外维度的变量单独报进 layered_variables，不混进
+# unsupported_variables——后者在前端被当成"变量映射命中就会被制备跳过"，层变量不该再触发那个拒绝。
+LAYER_DIMS = ("soilsnow", "soil", "lake")
 
 # 只归一化经度用；纬度不绕圈。
 DAY_SECONDS = 86400.0
@@ -791,6 +801,7 @@ def inspect(folder, prefix_argument):
         patch = int(first.sizes["patch"]) if "patch" in first.sizes else None
         variables = []
         unsupported = []
+        layered = []
         supported = SUPPORTED_DIMS.get(spatial_type, {"time"})
         for name in first.data_vars:
             var = first[name]
@@ -798,16 +809,21 @@ def inspect(folder, prefix_argument):
                 continue
             variables.append({"name": name, "dims": [str(dim) for dim in var.dims]})
             extra = [str(dim) for dim in var.dims if dim not in supported]
-            if extra:
-                unsupported.append(
-                    {
-                        "name": name,
-                        "dims": [str(dim) for dim in var.dims],
-                        "extra_dims": extra,
-                        "reason": f"dimensions {', '.join(extra)} are beyond "
-                        f"{{{', '.join(sorted(supported))}}}",
-                    }
-                )
+            if not extra:
+                continue
+            if all(dim in LAYER_DIMS for dim in extra):
+                # 层维度由 OpenBench profile 的 compute 消费，PREPARE 会保留维度；不是"制备会丢"的变量。
+                layered.append({"name": name, "dims": [str(dim) for dim in var.dims]})
+                continue
+            unsupported.append(
+                {
+                    "name": name,
+                    "dims": [str(dim) for dim in var.dims],
+                    "extra_dims": extra,
+                    "reason": f"dimensions {', '.join(extra)} are beyond "
+                    f"{{{', '.join(sorted(supported))}}}",
+                }
+            )
         lon = lat = None
         extent = resolution = None
         crossing = False
@@ -830,8 +846,13 @@ def inspect(folder, prefix_argument):
         blockers.append(
             {
                 "code": "multi_patch",
-                "message": f"the history has {patch} patches per grid cell; "
-                "the station comparison supports a single patch only",
+                # 为什么不能"取第一个 patch 就行"：history 只有逐 patch 的数值变量，没有 patch 的
+                # 类型/面积/权重这类元数据变量，OpenBench 的站点条目也没有逐 patch 选择/加权的入口；
+                # 合成一个平均站点会把不同地表的通量混在一起，所以这里只阻断、不猜一个聚合方式。
+                "message": f"the history has {patch} patches per grid cell; the files carry no "
+                "patch type/area/weight variable and OpenBench has no per-patch selection or "
+                "weighting, so the station comparison cannot select or weight patches and "
+                "supports a single patch only",
             }
         )
     elif spatial_type == "unstructured":
@@ -892,6 +913,10 @@ def inspect(folder, prefix_argument):
         "reason": "; ".join(blocker["message"] for blocker in blockers) if blockers else None,
         "blockers": blockers,
         "variables": variables,
+        # 带 soilsnow/soil/lake 额外维度的变量（[{name, dims}]）：制备会原样保留维度，OpenBench
+        # CoLM2024 profile 的 compute 直接读；前端提示"profile 可能 compute/需要层处理"，不要当成
+        # unsupported_variables 那种"映射命中就会丢"的变量。
+        "layered_variables": layered,
         "unsupported_variables": unsupported,
         "warnings": warnings,
     }

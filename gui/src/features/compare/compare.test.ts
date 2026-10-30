@@ -8,10 +8,14 @@ import {
   commonYears,
   comparisonDir,
   comparisonName,
+  compareDraftHasContent,
+  compareDraftKey,
+  parseCompareDraft,
   configInvalidation,
   configSaveState,
   defaultGridRes,
   designFingerprint,
+  layerVariableWarnings,
   evaluationSummary,
   formatExtent,
   jobContacted,
@@ -1176,4 +1180,70 @@ it('carries a per-simulation model profile and station ID', () => {
     }).profile,
     'CoLM2024',
   );
+});
+
+it('parses a comparison draft and refuses unreadable records', () => {
+  const draft = {
+    version: 1,
+    savedAt: '2026-10-30T01:00:00Z',
+    host: 'serverA',
+    name: 'draft compare',
+    from: '2003',
+    to: '2004',
+    timRes: 'Month',
+    gridRes: '',
+    chosen: { Latent_Heat: ['ERA5LAND_LowRes'] },
+    weight: '',
+    minYear: '1',
+    timeAlignment: '',
+    numCores: '',
+    metrics: ['bias'],
+    scores: ['Overall_Score'],
+    comparisonItems: [],
+    statisticsItems: [],
+    yaml: '',
+    picks: [{ dir: '/p/x/history', label: 'x', info: null }],
+  };
+  const parsed = parseCompareDraft(JSON.stringify(draft));
+  assert.ok(parsed);
+  assert.equal(parsed.name, 'draft compare');
+  assert.equal(parsed.picks[0]?.dir, '/p/x/history');
+  assert.deepEqual(parsed.chosen.Latent_Heat, ['ERA5LAND_LowRes']);
+  assert.equal(compareDraftKey('serverA'), 'colm.compareDraft@serverA');
+  // 坏 JSON、版本不对、picks 不是数组都当没有草稿；空草稿不值得提示恢复。
+  assert.equal(parseCompareDraft('not json'), null);
+  assert.equal(parseCompareDraft(JSON.stringify({ ...draft, version: 2 })), null);
+  assert.equal(parseCompareDraft(JSON.stringify({ ...draft, picks: 'x' })), null);
+  assert.equal(compareDraftHasContent(parsed), true);
+  assert.equal(
+    compareDraftHasContent({ ...parsed, picks: [], yaml: '', name: 'comparison', chosen: {} }),
+    false,
+  );
+});
+
+it('warns instead of blocking when a variable maps to a layered NetCDF variable', () => {
+  // R07 的旧行为是生成前硬拒绝（说制备会跳过）；现在层维度变量由 PREPARE 保留、OpenBench profile 的
+  // compute 消费，页面只给一条可读提示，不再替 OpenBench 决定能不能用。
+  const layered: BenchSimulation = {
+    ...site,
+    info: {
+      ...site.info,
+      layered_variables: [{ name: 'f_wliq_soisno', dims: ['time', 'patch', 'soilsnow'] }],
+    },
+    variables: { Latent_Heat: { varname: 'f_wliq_soisno', varunit: 'kg m-2' } },
+  };
+  const design: ComparisonDesign = {
+    ...base,
+    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+    simulations: [layered],
+  };
+  const warnings = layerVariableWarnings(design);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]![1], /layered f_wliq_soisno/);
+  assert.match(warnings[0]![1], /OpenBench model profile computes/);
+  // 生成配置仍然放行（varname 原样写入），是否可用交给 openbench check。
+  const built = buildOpenbenchConfig(design);
+  assert.match(built.config, /varname: "f_wliq_soisno"/);
+  // 没有按层变量映射时没有提示。
+  assert.deepEqual(layerVariableWarnings({ ...base, simulations: [site] }), []);
 });

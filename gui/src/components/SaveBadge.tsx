@@ -7,13 +7,16 @@ import { saveStateText, type SaveState } from '../lib/save-status';
 export function SaveBadge({
   state,
   t,
+  labels,
 }: {
   state: SaveState;
   t: (zh: string, en: string) => string;
+  /** 页面可以换掉通用三态文案：比较页的 saved 只表示"页内已生成"，还没写进项目目录。 */
+  labels?: Partial<Record<SaveState, string>>;
 }) {
   return (
     <span className={`badge save-badge is-${state}`} data-save-state={state}>
-      {saveStateText(state, t)}
+      {labels?.[state] ?? saveStateText(state, t)}
     </span>
   );
 }

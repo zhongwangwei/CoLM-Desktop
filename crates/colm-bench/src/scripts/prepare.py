@@ -15,8 +15,12 @@ LON/LAT 可选：history 文件里没有坐标时必须给（两者要么都给�
   PREFIX（INSPECT 给的 `<case>_hist_`）之后必须紧跟 YYYY[-MM[-DD]]。
 - 跨文件拼接前先按时间排序，再去重；同一时刻出现在不同文件里、各自带不同变量时按坐标合并
   （变量取非 NaN 值），不再产生重复时刻或半 NaN 记录。
-- 只并维度不超过 {time, patch} 的变量（土壤层/积雪层/类别维的变量会让内存从 360 MB 涨到 17 GB，
-  实测 AT-Neu 48 个文件十分钟没完）。被跳过的变量逐个打印原因，不静默丢。
+- 变量按维度分两类：额外维度只有层维度（soilsnow、soil、lake）的**保留**（带维度写进站点合并
+  文件），其它额外维度（band、rtyp、vegnodes、ens…）的跳过并逐个打印原因。层变量不能丢：
+  OpenBench 3.0.8 的 CoLM2024 profile 用 `compute:` 从 `f_wliq_soisno.isel(soilsnow=5:13)` 这类
+  原始层变量算 Root_Zone_Soil_Moisture/Surface_Soil_Moisture，旧实现把层变量全跳过，profile
+  就读不到。代价是峰值内存随层变量数×层数增长（早期实测把层/类别维变量全并进来时 AT-Neu 48 个
+  文件 360 MB→17 GB 十分钟没完），所以只放行层维度，类别维仍跳过。
 - patch 只有 1 个时 squeeze 掉；>1 个（多 patch 单点）明确报错——旧实现直接 squeeze 崩。
 - 格点与 element 向量文件不能当站点文件制备，明确报错而不是过滤完变量后 KeyError: time。
 - 经纬度优先用命令行覆盖值（文件缺坐标时也能制备）；否则读文件里的单点坐标。
@@ -56,6 +60,12 @@ except ImportError:  # pragma: no cover - 装了 xarray 的机器通常也有；
 MAIN_FILE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?\.nc$")
 HIST_MARK = "_hist_"
 UNSTRUCTURED_DIMS = ("element", "ncol", "cell", "mesh")
+# 站点合并要原样保留的层维度（与 inspect.py 的 LAYER_DIMS 同一口径）：OpenBench 3.0.8 的
+# CoLM2024 profile 在 model_catalog.yaml 里用 `compute:` 从原始层变量算地表量，例如
+# `f_wliq_soisno.isel(soilsnow=5:13)` → Root_Zone_Soil_Moisture / Surface_Soil_Moisture。
+# 制备若把这些变量跳过，profile compute 在站点文件里找不到变量。其余额外维度
+# （band/rtyp/vegnodes/ens/sensor…）在站点评估里没有对应语义，继续跳过并打印。
+LAYER_DIMS = ("soilsnow", "soil", "lake")
 # 输出时间轴只沿用首文件这几项编码：units/calendar 是 cftime 序列化的全部依据，dtype 保持原数值类型。
 # 压缩与分块参数绑定首文件的时间轴形状，合并后长度已经变了，搬过来没有意义。
 TIME_ENCODING_KEYS = ("units", "calendar", "dtype")
@@ -134,7 +144,13 @@ def coordinate_value(dataset, name):
 
 
 def read_part(path, patch_size):
-    """读一个文件的「只随时间变」的变量；返回 (dataset, 被跳过的变量->原因)。"""
+    """读一个文件的「站点合并要保留的变量」；返回 (dataset, 被跳过的变量->原因)。
+
+    保留判据与 inspect.py 的 layered_variables 同一口径：维度只有 time/patch，或额外维度全部落在
+    层维度 {soilsnow, soil, lake} 上。层变量必须带维度保留——OpenBench 3.0.8 的 CoLM2024 profile
+    用 compute 从原始层变量算地表量，制备丢掉它们 profile 就读不到；层维度不 squeeze。
+    band/rtyp/vegnodes 这类其它额外维度在站点评估里没有对应语义，跳过并逐个打印原因。
+    """
     skipped = {}
     with xr.open_dataset(path) as dataset:
         if "time" not in dataset.variables:
@@ -149,14 +165,15 @@ def read_part(path, patch_size):
             if "time" not in variable.dims:
                 continue
             extra = [str(dim) for dim in variable.dims if dim not in ("time", "patch")]
-            if extra:
+            if extra and not all(dim in LAYER_DIMS for dim in extra):
                 skipped[name] = extra
                 continue
             keep.append(name)
         if not keep:
             raise SystemExit(
-                f"{path} has no variable that varies only with time/patch; "
-                f"cannot build a station file (skipped {', '.join(skipped) or 'none'})"
+                f"{path} has no variable that varies only with time/patch or the layer dimensions "
+                f"({', '.join(LAYER_DIMS)}); cannot build a station file "
+                f"(skipped {', '.join(skipped) or 'none'})"
             )
         part = dataset[keep]
         if "patch" in part.sizes:
@@ -266,6 +283,8 @@ def merge_duplicate_times(dataset):
     这里按时刻分组，用 `compat="no_conflicts"` 合并同名变量：只有一边有值的补齐，
     两边都有且不一致时报错（不替用户挑一个）。分组键与 `sorted(groups)` 直接用时刻对象：
     同一日历的 cftime 可哈希、可比较（混日历已由 check_shared_time_axis 在合并前拒绝）。
+    保留的层维度变量也走这里：每片是 (time=1, 层…) 的切片，merge 的 join="outer" 负责把层维度
+    与层坐标对齐，no_conflicts 只比较同名变量在共同位置上的值。
     """
     index = dataset.indexes["time"]
     groups = {}
@@ -394,12 +413,25 @@ def prepare(folder, prefix, out_nc, out_csv, station, lon_argument, lat_argument
         writer.writerow([station, start, end, f"{lon:.6f}", f"{lat:.6f}", out_nc])
 
     print(f"{station}: {len(files)} files, {merged.sizes['time']} steps, {len(merged.data_vars)} variables")
+    # 层变量是故意保留的（OpenBench profile compute 的输入），要在日志里说清楚，别让用户以为它们
+    # 和以前一样被跳过了；被跳过的类别维变量仍逐个打印原因。
+    kept_layers = sorted(
+        f"{name}({', '.join(str(dim) for dim in merged[name].dims if str(dim) != 'time')})"
+        for name in merged.data_vars
+        if any(str(dim) != "time" for dim in merged[name].dims)
+    )
+    if kept_layers:
+        print(
+            f"kept {len(kept_layers)} layer variable(s) with their layer dimensions for the "
+            f"OpenBench profile compute: {', '.join(kept_layers)}"
+        )
     if skipped:
         detail = ", ".join(
             f"{name}({', '.join(sorted(extra))})" for name, extra in sorted(skipped.items())
         )
         print(
-            f"skipped {len(skipped)} variable(s) whose dimensions go beyond time/patch: {detail}"
+            f"skipped {len(skipped)} variable(s) whose dimensions go beyond time/patch and the "
+            f"{'/'.join(LAYER_DIMS)} layer dimensions: {detail}"
         )
     return merged
 

@@ -116,9 +116,13 @@ fn embedded_bench_scripts_stay_plain_lf_python() {
     // 这些 JSON 字段与参数位置是窗口进程/CLI 与脚本之间的契约，改名要两侧一起改。
     // tim_res_source 现在可能是 time/metadata/filename，tim_res_metadata 是新增的元数据值：
     // 前端按这两个字段提示"分辨率来源"和"元数据与实测冲突"，缺一个就退化成静默。
+    // layered_variables 是带 soilsnow/soil/lake 层维度的变量（制备会保留维度，OpenBench CoLM2024
+    // profile 的 compute 直接读），前端据此提示层处理；它和 unsupported_variables（制备会跳过）
+    // 是两种不同语义，字段名丢了会让层变量重新被当成"映射就会丢"。
     for field in [
         "spatial_type",
         "unsupported_variables",
+        "layered_variables",
         "crosses_dateline",
         "families",
         "tim_res_source",
@@ -127,6 +131,18 @@ fn embedded_bench_scripts_stay_plain_lf_python() {
         assert!(
             INSPECT_SCRIPT.contains(&format!("\"{field}\"")),
             "inspect.py no longer reports {field}"
+        );
+    }
+    // 层维度保留口径必须两边一致：inspect 报 layered_variables、prepare 保留同名维度，任何一边
+    // 改回"全跳过"都会让 OpenBench profile compute 读不到 f_wliq_soisno 这类变量。
+    for dim in ["soilsnow", "soil", "lake"] {
+        assert!(
+            INSPECT_SCRIPT.contains(&format!("\"{dim}\"")),
+            "inspect.py no longer knows the {dim} layer dimension"
+        );
+        assert!(
+            PREPARE_SCRIPT.contains(&format!("\"{dim}\"")),
+            "prepare.py no longer keeps the {dim} layer dimension"
         );
     }
     assert!(

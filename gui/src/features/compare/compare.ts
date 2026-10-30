@@ -45,7 +45,10 @@ export interface HistoryInfo {
   reason?: string | null;
   blockers?: { code: string; message: string }[];
   variables?: { name: string; dims: string[] }[];
-  /** 超出站点评估维度（土层/积雪层/类别等）的变量：制备时会被跳过，运行前要能看到。 */
+  /** 带土层/积雪层/湖泊层维度（soil/soilsnow/lake）的变量：制备会保留维度，OpenBench profile 的
+   * `compute` 可直接消费；页面只提示"映射到它能否用取决于 profile"，不再运行前拒绝。 */
+  layered_variables?: { name: string; dims: string[] }[];
+  /** 超出站点评估维度、且不属于层维度的变量（band/rtyp/vegnodes 等）：制备时会被跳过，运行前要能看到。 */
   unsupported_variables?: { name: string; dims: string[]; reason: string }[];
   warnings?: string[];
 }
@@ -697,7 +700,7 @@ export const STATISTICS_ITEMS = [
 export const VALID_STATISTICS_ITEMS = new Set<string>(STATISTICS_ITEMS);
 
 /**
- * 层/类别维度变量预检：模拟的变量覆盖把标准变量映射到了 `unsupported_variables` 里的 NetCDF 变量时，
+ * 类别/结构维度变量预检：模拟的变量覆盖把标准变量映射到了 `unsupported_variables` 里的 NetCDF 变量时，
  * 制备站点文件会跳过它（不是静默丢，但运行到 check 才发现太晚）。运行/生成前明确拒绝，并指出是哪个
  * 模拟的哪个变量、什么维度（审查报告 C05：预检时明确拒绝，而不是制备成功但变量没了）。
  */
@@ -723,6 +726,33 @@ export function layerVariableProblems(design: ComparisonDesign): [string, string
     }
   }
   return problems;
+}
+
+/**
+ * 层维度变量提示（不是阻断）：用户显式把标准变量映射到带 soilsnow/soil/lake 维的 NetCDF 变量时，
+ * 站点合并文件会原样保留这些维度；能不能用取决于 OpenBench 模型 profile 里有没有对应的 compute/层处理
+ * （3.0.8 的 CoLM2024 profile 对 Root_Zone_Soil_Moisture 等确实有）。错误的 varname 到运行阶段才会报
+ * "找不到变量"，所以这里保留一条可读提示，但不再像 R07 那样把整次比较提前拒绝。
+ */
+export function layerVariableWarnings(design: ComparisonDesign): [string, string][] {
+  const warnings: [string, string][] = [];
+  for (const simulation of design.simulations) {
+    const layered = new Map(
+      (simulation.info.layered_variables ?? []).map((variable) => [variable.name, variable.dims]),
+    );
+    if (!layered.size) continue;
+    for (const [variable, mapping] of Object.entries(simulation.variables ?? {})) {
+      if (!(variable in design.variables)) continue;
+      const varname = mapping.varname?.trim();
+      if (!varname || !layered.has(varname)) continue;
+      const dims = (layered.get(varname) ?? []).join(', ');
+      warnings.push([
+        `变量 ${variable} 在模拟「${simulation.label}」里映射到带层维度的 ${varname}（维度 ${dims}）：站点文件会保留这些维度，只有 OpenBench 模型 profile 对该变量有 compute/层处理时才可用；否则 OpenBench check 会报找不到变量。`,
+        `Variable ${variable} maps to the layered ${varname} (dims ${dims}) in simulation “${simulation.label}”: the station file keeps these dimensions, so it only works when the OpenBench model profile computes this variable from them; otherwise openbench check reports the variable is missing.`,
+      ]);
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -1121,6 +1151,115 @@ export function configSaveState(args: {
   // （审查报告：只改 YAML 后徽标仍是 saved）。
   if (args.yaml !== args.generated.config) return 'dirty';
   return 'saved';
+}
+
+/**
+ * 比较页草稿：只保存页面输入（模拟、站点、变量、指标/评分、comparison/statistics 选项、手改 YAML），
+ * 不包含运行状态与报告。离开页面再回来时由用户显式选择是否恢复，避免自动覆盖当前页面。
+ */
+export interface CompareDraftPick {
+  dir: string;
+  label: string;
+  info: HistoryInfo | null;
+  variables?: Record<string, { varname: string; varunit: string }>;
+  dataGroupby?: string | null;
+  gridRes?: number | null;
+  profile?: string | null;
+  stationId?: string | null;
+}
+
+export interface CompareDraft {
+  version: 1;
+  savedAt: string;
+  host: string;
+  name: string;
+  from: string;
+  to: string;
+  timRes: string;
+  gridRes: string;
+  chosen: Record<string, string[]>;
+  weight: string;
+  minYear: string;
+  timeAlignment: string;
+  numCores: string;
+  metrics: string[];
+  scores: string[];
+  comparisonItems: string[];
+  statisticsItems: string[];
+  yaml: string;
+  picks: CompareDraftPick[];
+}
+
+/** 草稿按机器分开存：同一套节点/参考数据在不同服务器上不是同一份输入。 */
+export function compareDraftKey(host: string): string {
+  return `colm.compareDraft@${host}`;
+}
+
+function stringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) return null;
+  return value as string[];
+}
+
+/** 读 localStorage 里的草稿；坏记录当没有（宁可不恢复，也不用一条读不懂的数据挡住页面）。 */
+export function parseCompareDraft(text: string): CompareDraft | null {
+  if (!text.trim()) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const draft = raw as Record<string, unknown>;
+  if (draft.version !== 1 || !Array.isArray(draft.picks)) return null;
+  const pickOk = draft.picks.every(
+    (pick) =>
+      !!pick &&
+      typeof pick === 'object' &&
+      typeof (pick as Record<string, unknown>).dir === 'string' &&
+      typeof (pick as Record<string, unknown>).label === 'string',
+  );
+  const arrays: Record<string, string[]> = {};
+  for (const key of ['metrics', 'scores', 'comparisonItems', 'statisticsItems']) {
+    const value = stringArray(draft[key]);
+    if (!value) return null;
+    arrays[key] = value;
+  }
+  const chosen = draft.chosen;
+  if (!chosen || typeof chosen !== 'object' || Array.isArray(chosen)) return null;
+  const chosenOk = Object.values(chosen as Record<string, unknown>).every(
+    (refs) => stringArray(refs) !== null,
+  );
+  if (!pickOk || !chosenOk) return null;
+  return {
+    version: 1,
+    savedAt: typeof draft.savedAt === 'string' ? draft.savedAt : '',
+    host: typeof draft.host === 'string' ? draft.host : '',
+    name: typeof draft.name === 'string' ? draft.name : 'comparison',
+    from: typeof draft.from === 'string' ? draft.from : '',
+    to: typeof draft.to === 'string' ? draft.to : '',
+    timRes: typeof draft.timRes === 'string' ? draft.timRes : 'Day',
+    gridRes: typeof draft.gridRes === 'string' ? draft.gridRes : '',
+    chosen: chosen as Record<string, string[]>,
+    weight: typeof draft.weight === 'string' ? draft.weight : '',
+    minYear: typeof draft.minYear === 'string' ? draft.minYear : '1',
+    timeAlignment: typeof draft.timeAlignment === 'string' ? draft.timeAlignment : '',
+    numCores: typeof draft.numCores === 'string' ? draft.numCores : '',
+    metrics: arrays.metrics!,
+    scores: arrays.scores!,
+    comparisonItems: arrays.comparisonItems!,
+    statisticsItems: arrays.statisticsItems!,
+    yaml: typeof draft.yaml === 'string' ? draft.yaml : '',
+    picks: draft.picks as CompareDraftPick[],
+  };
+}
+
+/** 草稿里有没有值得提示恢复的内容：空页面/只有默认值时不打扰。 */
+export function compareDraftHasContent(draft: CompareDraft): boolean {
+  if (draft.picks.length > 0) return true;
+  if (draft.yaml.trim()) return true;
+  if (Object.values(draft.chosen).some((refs) => refs.length > 0)) return true;
+  return draft.name.trim() !== '' && draft.name !== 'comparison';
 }
 
 /** 选中的模拟共同覆盖的年份（评估年份的缺省）；没有交集时为 null。 */

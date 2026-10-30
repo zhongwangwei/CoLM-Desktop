@@ -53,6 +53,9 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     stillCurrent: () => true,
     setNotice: () => {},
     setConfigSaving: () => {},
+    setWrittenFingerprint: () => {},
+    store: () => {},
+    compareDraftKey: (host: string) => `colm.compareDraft@${host}`,
     showRunNotice: () => {},
   };
   const withDefaults = { ...defaults, ...context };
@@ -136,18 +139,22 @@ function pageHarness(
     localStatus?: Record<string, unknown>;
   } = {},
 ) {
+  const seed: Record<string, string> = {
+    'colm.openbenchRefRoot': '/refs',
+    ...options.seed,
+  };
+  // 页面会往 localStorage 写草稿/机器选择：这里保留一份内存副本，测试才能断言"写了什么"而不是只看内存状态。
+  const disk = new Map<string, string>();
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
     value: {
-      getItem: (key: string) => {
-        const seed: Record<string, string> = {
-          'colm.openbenchRefRoot': '/refs',
-          ...options.seed,
-        };
-        return seed[key] ?? null;
+      getItem: (key: string) => disk.get(key) ?? seed[key] ?? null,
+      setItem: (key: string, value: string) => {
+        disk.set(key, value);
       },
-      setItem: () => {},
-      removeItem: () => {},
+      removeItem: (key: string) => {
+        disk.delete(key);
+      },
     },
   });
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
@@ -399,6 +406,7 @@ function pageHarness(
     setField,
     configTextarea,
     badgeState,
+    localValue: (key: string) => disk.get(key) ?? '',
     summaryText,
     addVariable,
     deferRun,
@@ -496,15 +504,21 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
   await page.mount();
   await page.press('compare-add-folder');
   await page.addVariable();
-  // 未保存配置：SaveBadge 是"有未保存修改"。
+  // 还没生成配置：徽标说的是"有未生成的修改"，不是"未保存"（配置还没写盘这件事要分开说）。
   assert.equal(page.badgeState(), 'dirty');
+  const badgeLabels = () =>
+    page.nodes().find((node) => node.type === 'SaveBadge')?.props.labels as
+      Record<string, string> | undefined;
+  assert.match(badgeLabels()?.dirty ?? '', /Changes not generated/);
   assert.equal(
     page.actions().find((action) => action.id === 'compare-generate')?.label,
-    'Save evaluation configuration',
+    'Generate configuration',
   );
 
   await page.press('compare-generate');
   assert.equal(page.badgeState(), 'saved');
+  // 生成只写页面文本；运行前不能说"已写盘"。
+  assert.match(badgeLabels()?.saved ?? '', /Generated \(not on disk\)/);
   const textarea = page.configTextarea();
   assert.ok(textarea, 'configuration text after saving');
   const config = String(textarea.props.value);
@@ -543,6 +557,8 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
   await page.settle();
   assert.equal(page.badgeState(), 'saved');
   assert.match(text(page.nodes()), /Evaluation finished/);
+  // 运行提交成功后这一版配置已经写进比较项目目录，徽标才显示"已写盘"。
+  assert.match(badgeLabels()?.saved ?? '', /Written to the project folder/);
   const runCall = page.calls.find((call) => call.command === 'bench_run');
   assert.ok(runCall);
   assert.equal(runCall.args?.config, config, 'running submits exactly the saved configuration');
@@ -1221,4 +1237,94 @@ test('U-04: older successful runs stay reachable from the run history', async ()
     ),
     "viewing from the history opens that run's report, not the latest file on disk",
   );
+});
+
+test('U-06: leaving the page keeps a draft and returning offers an explicit restore', async () => {
+  const draft = {
+    version: 1,
+    savedAt: '2026-10-30T01:00:00Z',
+    host: '',
+    name: 'restored compare',
+    from: '2003',
+    to: '2004',
+    timRes: 'Month',
+    gridRes: '0.5',
+    chosen: { Latent_Heat: ['ERA5LAND_LowRes'] },
+    weight: '',
+    minYear: '1',
+    timeAlignment: '',
+    numCores: '',
+    metrics: ['bias'],
+    scores: ['Overall_Score'],
+    comparisonItems: ['Taylor_Diagram'],
+    statisticsItems: ['Mean'],
+    yaml: '',
+    picks: [
+      {
+        dir: probedGrid.history_dir,
+        label: 'hb',
+        info: probedGrid,
+        dataGroupby: 'Month',
+        gridRes: 0.5,
+      },
+    ],
+  };
+  const page = pageHarness({
+    seed: { 'colm.compareDraft@': JSON.stringify(draft) },
+  });
+  await page.mount();
+  assert.match(text(page.nodes()), /Restore draft/);
+  await page.pressLabel('Restore draft');
+  const summary = page.summaryText();
+  assert.match(summary, /\/ob\/projects\/restored_compare/);
+  assert.match(summary, /Lagrange|Month/);
+  assert.match(summary, /Latent_Heat/);
+  assert.equal(text(page.nodes()).includes('Restore draft'), false);
+});
+
+test('U-06: discarding the draft removes it and leaves the page empty', async () => {
+  const draft = JSON.stringify({
+    version: 1,
+    savedAt: '',
+    host: '',
+    name: 'stale draft',
+    from: '',
+    to: '',
+    timRes: 'Day',
+    gridRes: '',
+    chosen: {},
+    weight: '',
+    minYear: '1',
+    timeAlignment: '',
+    numCores: '',
+    metrics: [],
+    scores: [],
+    comparisonItems: [],
+    statisticsItems: [],
+    yaml: '',
+    picks: [{ dir: '/p/x/history', label: 'x', info: null }],
+  });
+  const page = pageHarness({ seed: { 'colm.compareDraft@': draft } });
+  await page.mount();
+  await page.pressLabel('Discard draft');
+  assert.equal(page.localValue('colm.compareDraft@'), '');
+  assert.equal(text(page.nodes()).includes('Discard draft'), false);
+  assert.equal(page.summaryText().includes('stale draft'), false);
+});
+
+test('U-06: page inputs are written to a per-machine draft as they change', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.addVariable();
+  const raw = page.localValue('colm.compareDraft@');
+  assert.ok(raw, 'the page writes a draft after the first input');
+  const draft = JSON.parse(raw) as {
+    picks: { dir: string }[];
+    chosen: Record<string, string[]>;
+    name: string;
+  };
+  assert.equal(draft.picks[0]?.dir, probedGrid.history_dir);
+  assert.deepEqual(draft.chosen.Latent_Heat, ['ERA5LAND_LowRes']);
+  assert.equal(draft.name, 'comparison');
 });

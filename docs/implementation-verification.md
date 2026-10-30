@@ -39904,3 +39904,42 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 3. `buildOpenbenchConfig` 给站点模拟算的 `fulllist` 是 `<projectDir>/sim/<模拟键>.csv`，与 OpenBench 的 `data_type: stn` + 绝对 `fulllist` 契约一致；模拟键仍是 `simulationKey(label)`，所以 station 列表名跟报告显示名无关。
 
 **未覆盖**：真实 CoLM history 经 PREPARE 合并后的文件跑 OpenBench 全链路（fixture 用的是 smoke 自带 netCDF；PREPARE 产物由 `scripts/test-bench-scripts.py` 的 34 例合成数据覆盖）；真实 PLUMBER2/ILAMB 全量数据；comparison/statistics 图的科学质量评估；远程 SSH 目标。
+
+
+## 层维度变量交给 OpenBench profile compute + 保存/草稿 UX（2026-10-30）
+
+按作者确认的口径：层维度不另造页面选层/加权语义，交给 OpenBench 3.0.8 CoLM2024 profile 已有的 `compute`；多 patch 维持明确拒绝并补足诊断。
+
+### 1 层维度变量：PREPARE 保留维度，OpenBench profile 消费
+
+- 依据：CoLM histmap 层变量维度是 `soilsnow`/`soil`/`lake`（`crates/colm-hist/src/generated.rs`，如 `wliq_soisno`、`t_soisno`）；OpenBench 3.0.8 `model_catalog.yaml` 的 CoLM2024 profile 里 `Root_Zone_Soil_Moisture`、`Surface_Soil_Moisture` 等就是 `compute:` 从 `f_wliq_soisno.isel(soilsnow=…)` 算出来的（含 CoLM 层厚常数）。所以"选哪几层/怎么加权"本来就在 OpenBench profile 里，页面不该再造一套。
+- `inspect.py`：新增 `layered_variables: [{name,dims}]`（额外维全部 ⊆ {soilsnow, soil, lake} 的变量）；纯层变量不再进 `unsupported_variables`（后者只留 band/rtyp/vegnodes 等真正会在制备时被跳过的维度）。`variables`/`comparable`/`blockers` 语义不变。
+- `prepare.py`：`read_part` 对额外维 ⊆ {soilsnow, soil, lake} 的变量**保留**（层维度与层坐标不 squeeze/不丢），其它额外维仍跳过并打印；多文件 concat 与重复时刻 `no_conflicts` 合并带层维度可用。日志新增 `kept N layer variable(s) … for the OpenBench profile compute` 与新的 skipped 措辞。
+- 页面：`layerVariableProblems` 继续只拦 `unsupported_variables`（结构维），新增 `layerVariableWarnings` —— 用户把标准变量显式映射到带层维的 varname 时给一条 info 提示（"站点文件会保留维度，能否用取决于 profile 的 compute/层处理；否则 openbench check 会报找不到变量"），不再在生成前拒绝。旧的"层变量会被跳过/需要支持层选择或聚合"文案同步改掉。
+- 真实 OpenBench 3.0.8 端到端（本节的硬证据）：用合成 CoLM 站点 history（24 个月度文件，`f_wliq_soisno`/`f_t_soisno` dims=(time,patch,soilsnow=20)）跑 PREPARE，输出合并 NC 里层变量变 `(time, soilsnow)` 且层坐标保留（`isel(soilsnow=5:13)` 形状 `(24, 8)`）；用页面真实 `buildOpenbenchConfig` 生成 stn 配置（model CoLM2024、单站点、参考数据用合成的 `Root_Zone_Soil_Moisture` stn 数据集）→ `openbench check` ✓、`openbench run --force` **exit 0**、"Evaluation complete"，产出指标 jpg/csv 与 `evaluation_report*.html`，evaluation status `ok`。数值核对：按 profile 表达式，合成层值 1…20 时 root-zone 值 = (6+…+12+13×0.31)/1000 = 0.06703，参考 0.25 → bias = −0.18297，与实际 CSV 完全一致——证明 compute 用的确实是 PREPARE 保留的 `f_wliq_soisno`，而不是 fallback `f_h2osoi`。
+- 已知风险：保留层变量会抬高 PREPARE 峰值内存（旧实现跳过层变量有一部分就是为避免"小时×多年×多层"膨胀）；当前对单站点合成数据无感，真实长序列未实测，后续若撞上可只保留 profile 真正需要的层变量或改分块写。另：profile 的 compute 表达式假设 CoLM 默认层数/层序；换土壤方案/层数的历史可能索引错位（属 OpenBench profile 版本问题，不是页面能替它判断的）。
+
+### 2 多 patch：维持拒绝，补足诊断
+
+- `inspect.py` 的 `multi_patch` blocker 文案补上：patch 数、history 里没有 patch 类型/面积/权重变量、OpenBench 没有逐 patch 选择/加权，因此站点比较只能单 patch。仍是 blocking（`comparable=false`），PREPARE 的 patch>1 拒绝不变；不猜"按面积加权"或"取第 N 个 patch"。
+
+### 3 保存/运行按钮语义（UX ①）
+
+- 旧问题：按钮叫"保存评估配置"，但只在页面里生成文本；徽标生成后显示"已保存"，而真正写 `<projectDir>/openbench.yaml` 是运行时（审查报告曾复现误导）。
+- 现在：按钮改名"生成配置"；`SaveBadge` 支持按页面覆盖三态文案，比较页显示"有未生成的修改 / 正在写入项目目录 / 已生成（未写盘） / 已写入项目目录"，最后一个状态由提交成功后记录的 `writtenFingerprint` 决定；提示语明确"生成只在页面里，检查并运行时才写入比较项目目录"。assistant 设置页沿用原三态文案。
+- 测试：layout 回归断言改名后的按钮、生成后徽标是"未写盘"、运行成功后才是"已写入项目目录"。
+
+### 4 草稿离页恢复（UX ②）
+
+- 新增 `CompareDraft`（只存页面输入：模拟/变量/指标/评分/comparison/statistics/选项/手改 YAML；不含运行状态/报告），按机器存 `colm.compareDraft@<host>`；页面输入变化时自动写（提交运行中不写）。
+- 下次进页面若有草稿且与空页面不同，显示横幅"恢复草稿 / 丢弃草稿"（显式操作，不自动覆盖）；恢复不碰运行中的作业与报告；成功运行后清草稿（配置已写盘并完成），失败/取消保留。
+- 测试：layout 三个用例（自动写/恢复/丢弃）+ compare.test 的解析/坏记录/空草稿判断；harness 的 localStorage 增加可观察的内存副本。
+
+### 本轮验证（真实执行）
+
+- 脚本：`python3 scripts/test-bench-scripts.py` → **35 passed / 0 failed**（新增层变量保留、跨文件层合并、patch 文案断言；原 34 例含 cftime 全过）。
+- 根 workspace：`cargo test -q -p colm-bench --lib` → 7 passed；`cargo clippy -p colm-bench --all-targets -- -D warnings` 干净；`git diff --check` 干净。
+- 前端：`test-react.mjs` → **1289 passed / 0 failed**（比较页 6 个测试文件 122 例）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用，本批未改命令签名）。
+- 真实 OpenBench 3.0.8：合成层维度站点 history → PREPARE → 页面生成配置 → check/run 全通（见上）。
+- 本批未改 `gui/src-tauri`；GUI 全量测试沿用上一批 586 passed 的结论。
+- 未运行：真实 CoLM 内核 + PLUMBER2 数据产出的 history（目前是合成 CoLM 风格 history）；小时级多年层变量的 PREPARE 内存实测；真实浏览器刷新后的草稿恢复（layout harness 覆盖）；常驻任务栏（UX ③）尚未开始。

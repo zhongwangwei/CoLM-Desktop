@@ -516,8 +516,8 @@ function parseYamlSubset(text: string, problems: Problem[]): Yaml {
   const lines = sourceLines(text, problems);
   if (!lines.length) {
     problems.push([
-      '配置是空的。先点"保存评估配置"生成一份，再改。',
-      'The configuration is empty. Generate one first with “Save evaluation configuration”, then edit it.',
+      '配置是空的。先点"生成配置"生成一份，再改。',
+      'The configuration is empty. Generate one first with “Generate configuration”, then edit it.',
     ]);
     return null;
   }
