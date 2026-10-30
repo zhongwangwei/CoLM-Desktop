@@ -41083,3 +41083,47 @@ F→F 的逐位相同说明旁车/重启机制本身是精确的；两个跨引�
    其余以 Fortran 为准；确认为 Rust bug 的修 Rust，确认为上游 bug 的维持并记录。
 4. 多 node：本机只能模拟 grouped 多 rank；7920 工作站（96 核）尚未装 Fortran/MPI 工具链，
    多 node 版本需要先在那台机器上准备内核与数据。
+
+## 物质输送变量名对账：material 文件与元数据对齐上游（2026-10-31，第九轮）
+
+维护者点名要核对「特别是物质输送的变量名」。这轮用一个**开了溶质（NO3）的区域格点算例**
+（上一节的 1° 3×3 河湖算例，`&nl_colm_material` 加 `DEF_SOLUTE_NAMES='NO3'`，Rust 重跑
+mkinidata）把两侧的 history/重启逐项对了一遍。
+
+### 发现并修正的两处
+
+1. **material history 文件名**：Fortran 写 `<case>_hist_material_<date>.nc`
+   （`MOD_Hist.F90:339`），Rust 写的是 `<case>_hist_tracer_<date>.nc`。Rust 侧
+   （`colm-runtime/history.rs`、`colm-hist/history.rs`、CLI 测试）统一改成上游的
+   `_hist_material_`；改后两引擎输出文件集合完全相同：`_hist_`、`_hist_material_`、
+   `_hist_unitcat_`。
+2. **material 变量的 `long_name`/`units`**：变量名本来就一致（`f_mt_conc_*/f_mt_*_inventory_*`
+   + 物质名，30 个变量、顺序也相同），但 Rust 的元数据用 "tracer" 字样，上游用 "material"：
+   例如 units `tracer amount/m2` 对 `material amount/m2`，long_name `canopy tracer
+   concentration` 对 `canopy material concentration`。`colm-core/src/tracer/hist.rs` 的模板
+   统一改成 material 后，逐变量比对 **units/long_name 0 处不一致**。
+3. **窗口变量只在 material 文件里**：上游只在 `file_hist_material` 写
+   `history_window_seconds`/`history_window_end_minutes`（`MOD_Hist.F90:346-361`），Rust 原来
+   在主 history 也写这两个变量。已从主 history 的缓冲里去掉（material 文件照旧保留）。
+
+### 验证（同一算例，Fortran grouped 3 rank vs Rust 1 rank）
+
+- 两边 history 变量名集合完全一致：主 history 142/142、material 30/30、unitcat 16/16；
+- material 文件的变量顺序一致、units/long_name 逐项一致；重启里 MT 元数据
+  （`mt_land_restart_complete/schema/transport_count/aquifer_mixing_water_mm`）变量名一致；
+- material 数值：本算例 NO3 无源（初始浓度 0、无沉降），两边逐位相同，**不能当作物理一致性
+  证据**，只说明布局/元数据对齐；
+- 主 history 数值仍有 93/140 个变量不同（河湖量与陆面辐射链，和上一节同源）——数值归因是
+  下一轮的事；
+- 唯一剩下的格式差异：**主 history 的变量排列顺序**不同（142 个变量里 123 个位置不同，
+  名字/元数据/维度都一致）。原因是 Rust 按模块分组 declare、上游按 `MOD_Hist` 代码顺序写。
+  下游都按名字读，暂记为 cosmetic；要完全对齐需要按生成表的顺序重排 declare。
+- 站点同位素路径：Fortran 明确拒绝 `material runtime forcing does not support
+  DEF_forcing%dataset=POINT`，所以同位素的变量名对账必须用格点强迫；本轮的溶质格点算例覆盖了
+  同一套 `f_mt_*` 命名模板（同位素与溶质只差 long_name 里的 ratio 词与 units）。
+
+### 测试
+
+`colm-core` 529、`colm-runtime` 258+4、`colm-hist` 79、`colm-cli` 串行 812 passed（10 个
+`study::runner` 失败是本机沙箱的进程检查/信号限制，与本次改动无关）；clippy `-D warnings`、
+两个 workspace 的 fmt 通过。

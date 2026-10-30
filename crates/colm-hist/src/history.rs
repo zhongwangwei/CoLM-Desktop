@@ -515,7 +515,7 @@ impl HistoryBuffers {
         Ok(())
     }
 
-    /// 示踪物 history 文件（`<case>_hist_tracer_<cdate>.nc`）：网格骨架、`time` 与两个窗口
+    /// 示踪物 history 文件（`<case>_hist_material_<cdate>.nc`）：网格骨架、`time` 与两个窗口
     /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`mt_hist_out`
     /// 对每个输运示踪物才加变量）。
     pub fn write_tracer_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -1096,7 +1096,7 @@ pub struct TracerFileVariable {
 }
 
 impl HistoryBuffers {
-    /// 单点示踪物 history 文件（`<case>_hist_tracer_<cdate>.nc`）：与主文件同样的维度与坐标，
+    /// 单点示踪物 history 文件（`<case>_hist_material_<cdate>.nc`）：与主文件同样的维度与坐标，
     /// 但没有 `sensor` 维，变量只有示踪物量。网格写出走 [`Self::write_tracer_skeleton`]。
     pub fn write_tracer_file(
         &self,

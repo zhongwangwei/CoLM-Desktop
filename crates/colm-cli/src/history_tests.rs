@@ -25,7 +25,7 @@ fn auxiliary_history_files_are_separate_streams() {
     let files = [
         "/tmp/Case_hist_2001-01.nc",
         "/tmp/Case_hist_2001-02.nc",
-        "/tmp/Case_hist_tracer_2001-01.nc",
+        "/tmp/Case_hist_material_2001-01.nc",
         "/tmp/Case_hist_cama_2001-01.nc",
     ]
     .into_iter()
@@ -597,7 +597,7 @@ fn main_and_tracer_history_keep_separate_time_axes() {
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
     );
     write_history_nc(
-        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &d.join("AT-Neu_hist_material_2010-01.nc"),
         &[
             ("time", &[1.0, 2.0]),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),
@@ -619,7 +619,7 @@ fn mixed_main_and_tracer_series_read_from_their_own_files() {
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
     );
     write_history_nc(
-        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &d.join("AT-Neu_hist_material_2010-01.nc"),
         &[
             ("time", &[1.0, 2.0]),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),
@@ -642,7 +642,7 @@ fn history_catalog_includes_main_and_tracer_variables() {
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
     );
     write_history_nc(
-        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &d.join("AT-Neu_hist_material_2010-01.nc"),
         &[
             ("time", &[1.0, 2.0]),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),
@@ -758,7 +758,7 @@ fn evaluation_catalog_sees_methane_in_tracer_history() {
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
     );
     write_history_nc(
-        &d.join("AT-Neu_hist_tracer_2010-01.nc"),
+        &d.join("AT-Neu_hist_material_2010-01.nc"),
         &[
             ("time", &[1.0, 2.0]),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),
@@ -1449,7 +1449,7 @@ fn series_window_reads_main_and_tracer_streams_with_their_own_variables() {
         &[("time", &minutes), ("f_rnet", &[10.0, 20.0, 30.0])],
     );
     write_history_nc(
-        &d.join("Case_hist_tracer_2003-01.nc"),
+        &d.join("Case_hist_material_2003-01.nc"),
         &[
             ("time", &minutes),
             ("f_methane_surf_flux_tot", &[3.0, 4.0, 5.0]),
@@ -1483,7 +1483,7 @@ fn series_window_refuses_streams_with_different_time_axes() {
         &[("time", &main_minutes), ("f_rnet", &[10.0, 20.0])],
     );
     write_history_nc(
-        &d.join("Case_hist_tracer_2003-01.nc"),
+        &d.join("Case_hist_material_2003-01.nc"),
         &[
             ("time", &tracer_minutes),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),

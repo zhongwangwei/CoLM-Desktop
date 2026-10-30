@@ -3636,8 +3636,9 @@ impl HistorySession {
         Ok((tick_of(end)? == record.write_at_tick).then(|| record.clone()))
     }
 
-    /// 有材料运移（`mt_any_enabled`）：主 history 多写 `history_window_seconds = nac*deltim` 与
-    /// `history_window_end_minutes`，并另写 `<case>_hist_tracer_<cdate>.nc`
+    /// 有材料运移（`mt_any_enabled`）：**材料文件**（`<case>_hist_material_<cdate>.nc`）写
+    /// `history_window_seconds = nac*deltim` 与 `history_window_end_minutes`；上游只往材料文件写
+    /// 这两个窗口变量（`MOD_Hist.F90:346-361` 的 `file_hist_material`），主 history 不带它们。
     /// （`MOD_Hist.F90:319-358`，只在 `HistForm == 'Gridded'` 时写窗口变量）。
     pub fn with_tracer_history(mut self, time_step_seconds: Option<f64>) -> Result<Self> {
         if time_step_seconds.is_some() {
@@ -4934,7 +4935,7 @@ impl HistorySession {
             .with_context(|| format!("cannot create {}", self.directory.display()))?;
         let path = self
             .directory
-            .join(format!("{}_hist_tracer_{suffix}.nc", self.stem));
+            .join(format!("{}_hist_material_{suffix}.nc", self.stem));
         buffer.write_tracer_file(&path, &variables)?;
         Ok(Some(path))
     }
@@ -5066,9 +5067,6 @@ impl HistorySession {
         if self.dynamic_lake {
             buffer.declare(&["dz_lake"])?;
             buffer.undeclare("lake_deficit");
-        }
-        if self.tracer_time_step_seconds.is_some() {
-            buffer.enable_windows();
         }
         // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`（`MOD_Hist.F90:538`）。
         // `DEF_USE_OZONESTRESS`：`f_o3uptakesun/sha`（`MOD_Hist.F90:545-553`）；`f_xy_ozone` 写在
@@ -5233,16 +5231,6 @@ impl HistorySession {
                 )
             })?,
         )?;
-        if let Some(deltim) = self.tracer_time_step_seconds {
-            // `history_window_seconds = max(nac,0)*deltim`；末时刻 `minutes_since_1900(idate)
-            // + mod(sec,60)/60`。
-            let steps = means.first().map_or(0, |means| means.steps);
-            let minutes = colm_hist::time::minutes_from_1900(end.year)
-                + (i64::from(end.julian_day) - 1) * 1440
-                + i64::from(end.seconds / 60);
-            let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
-            buffer.set_window(record.record, steps as f64 * deltim, end_minutes)?;
-        }
         // 逐 patch 的写入清单并行生成（只读缓冲、各自查名字），再按 patch 次序落进缓冲：
         // 与逐个直写逐位相同，见 `colm_hist::history::PatchWrites`。
         let split = means_are_split(self.accumulators.len());
@@ -5334,7 +5322,7 @@ impl HistorySession {
         if self.tracer_time_step_seconds.is_some() && self.tracer_variables.is_none() {
             buffer.write_tracer_skeleton(
                 self.directory
-                    .join(format!("{}_hist_tracer_{suffix}.nc", self.stem)),
+                    .join(format!("{}_hist_material_{suffix}.nc", self.stem)),
             )?;
         }
         Ok(path)

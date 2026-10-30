@@ -399,7 +399,7 @@ fn run() -> Result<()> {
     let mut session = history_session(&config, &outputs)?
         .map(|session| session.with_patches(templates.len()))
         .transpose()?;
-    // 开示踪物时另写 `<case>_hist_tracer_<cdate>.nc`（没有输运示踪物时只有文件骨架）。
+    // 开示踪物时另写 `<case>_hist_material_<cdate>.nc`（没有输运示踪物时只有文件骨架）。
     if let Some(tracer) = &tracer_runtime {
         let patch_types = templates
             .iter()

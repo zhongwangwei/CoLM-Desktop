@@ -187,8 +187,11 @@ fn variable_table_names_units_and_scopes() {
         ]
     );
     let ldew = history_variable(TracerHistId::ConcLdew);
-    assert_eq!(ldew.long_name(hdo), "canopy tracer heavy/total ratio (HDO)");
-    assert_eq!(ldew.long_name(cl), "canopy tracer concentration (Cl)");
+    assert_eq!(
+        ldew.long_name(hdo),
+        "canopy material heavy/total ratio (HDO)"
+    );
+    assert_eq!(ldew.long_name(cl), "canopy material concentration (Cl)");
     assert_eq!(ldew.units(hdo), "R");
     assert_eq!(ldew.units(cl), "material/water");
     let precip = history_variable(TracerHistId::DeltaPrecip);
@@ -196,13 +199,13 @@ fn variable_table_names_units_and_scopes() {
     assert!(!precip.enabled(|key| key == "rnof"));
     assert_eq!(
         precip.long_name(hdo),
-        "precipitation plus dew/frost deposition tracer delta (HDO)"
+        "precipitation plus dew/frost deposition material delta (HDO)"
     );
     // 露霜不带不挥发溶质：Cl 的名字里写明。
     let conc = history_variable(TracerHistId::ConcPrecip);
     assert_eq!(
         conc.long_name(cl),
-        "precipitation plus dew/frost deposition tracer concentration, dew/frost adding water only (Cl)"
+        "precipitation plus dew/frost deposition material concentration, dew/frost adding water only (Cl)"
     );
     assert_eq!(
         history_variable(TracerHistId::ConcSoisno).dims,
