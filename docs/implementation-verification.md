@@ -39986,3 +39986,23 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 2. 离开页面期间任务完成没有全局通知，只在状态条上显示"已完成"（保留 5 分钟）；可在壳上 push 一条 notice。
 3. 壳上停止只是最小回退，页面自己的停止路径（取消确认/不确定状态处理）没有被注册给壳；离开页面后远程作业的停止语义还需要真实 SSH 验证。
 4. 状态条没有专门的组件渲染测试（靠整页 harness + tsc/lint）；视觉/窄屏表现未在真实窗口看过。
+
+
+## 任务条收尾：完成回跳自动打开报告 + 离开页面期间的完成通知（2026-10-30）
+
+补上 UX ③ 上一批列的 1、2 两项（都只改 `gui/src/**`，不动 Tauri 命令/契约）。
+
+**1 完成回跳（pending focus）**
+- 任务存储新增一次性 focus：`{host, project, runId?, report?}`（`bench-task.ts` 的 `BenchTaskFocus`）；context 用 ref 保存 `focus/peekFocus/consumeFocus`，不触发多余渲染，也不进 localStorage（它只是一次导航意图）。
+- 壳上任务条"查看结果/回到比较页"改为 `App.openBenchTask(task)`：先记 focus（本机 done 带报告绝对路径；远程带作业号=run_id；失败/中断只带 host/project），再 `navigate('compare')`。
+- 比较页新增一次性消费 effect：同机器时本机直接 `view(report)` 打开**那次运行冻结目录里的报告**、远程用 `fetchReport(host, project, runId)` 按 run 取回（不是重新扫项目目录）；跨机器先 `setHostState(focus.host)`，host 变化后 effect 自动再试一次；取回失败把原因写进页面错误区（不静默、本机旧报告保留）。effect 依赖 `[host, status]`，不会每次渲染重跑（整页 harness 的 settle 会因此报 "did not stabilize"）。
+- 测试：整页 harness 新增 `focus` 输入与 focus 桩（可观察消费），两例——本机按给定报告路径调 `bench_report`（断言路径就是那次 run 的）；远程按 `host/name/runId` 调 `bench_remote_fetch`。
+
+**2 离开页面期间的完成/失败通知**
+- `bench-task.ts` 新增纯文案 `benchTaskNotice(task, t)`：done → "评估完成：<名字>"、failed → "评估失败：<名字>"，其它状态不提示。
+- App 壳 effect：任务从 running 变成 done/failed 且当前路由不是 compare 时，push 一条全局 notice（比较页里页面自己已有成功提示，不重复）。`notifiedBenchTasks` 初始化时把已结束的任务记为"已通知"，避免应用重开后把历史完成项重播一遍。
+- 测试：`benchTaskNotice` 单测（done/failed 有文案，running/interrupted 为 null）。
+
+**本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1297 passed / 0 failed**（比较套件 + 任务条单测 130 例最终复核全过）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。本批未改 `gui/src-tauri`，无 Rust 门变化。
+
+**仍未覆盖**：真实 SSH 远端运行→停止→取报告的端到端；真实窗口里任务条的视觉/窄屏表现；壳上停止仍是最小回退（页面自己的取消确认语义没注册给壳）；远程 focus 的"该 run 报告已被清理"场景只有错误路径代码，没有真实环境用例。

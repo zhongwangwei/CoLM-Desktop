@@ -34,6 +34,7 @@ import ConfirmHost from './components/ConfirmHost';
 import StartCover from './components/StartCover';
 import { readStored, writeStored } from './lib/storage';
 import { useBenchTasks } from './lib/bench-task-context';
+import { benchTaskNotice } from './lib/bench-task';
 import { invoke } from './lib/ipc';
 import BenchTaskBar from './components/BenchTaskBar';
 import type { AppState } from './lib/types';
@@ -298,6 +299,45 @@ export default function App() {
   const { state, update, navigate } = useApp();
   // 比较任务跨路由可见（UX ③）：页面只镜像进度，真正提交/等待仍由比较页负责。
   const benchTasks = useBenchTasks();
+  // 任务条点"查看结果/回到比较页"：先把要打开的结果记成一次性的 focus，再切页；比较页挂载后消费。
+  const openBenchTask = (task: {
+    host: string;
+    project: string;
+    job?: string | null;
+    state: string;
+    report?: string | null;
+  }) => {
+    benchTasks.focus({
+      host: task.host,
+      project: task.project,
+      runId: task.job ?? null,
+      report: !task.host && task.state === 'done' ? (task.report ?? null) : null,
+    });
+    navigate('compare');
+  };
+  // 离开比较页期间任务结束：壳上 push 一条全局提示（在比较页里页面自己已有完成提示，不重复）。
+  const notifiedBenchTasks = useRef(
+    new Set(benchTasks.tasks.filter((task) => task.state !== 'running').map((task) => task.id)),
+  );
+  useEffect(() => {
+    const seen = notifiedBenchTasks.current;
+    const fresh = benchTasks.tasks.filter(
+      (task) =>
+        !seen.has(task.id) &&
+        state.route !== 'compare' &&
+        (task.state === 'done' || task.state === 'failed'),
+    );
+    if (!fresh.length) return;
+    for (const task of fresh) seen.add(task.id);
+    update((old) => ({
+      notices: [
+        ...old.notices.slice(-4),
+        ...fresh
+          .map((task) => benchTaskNotice(task, (zh, en) => (state.language === 'en' ? en : zh)))
+          .filter((message): message is string => !!message),
+      ],
+    }));
+  }, [benchTasks.tasks, state.route, state.language, update]);
   const stopBenchTask = (task: {
     host: string;
     job?: string | null;
@@ -421,7 +461,7 @@ export default function App() {
       <BenchTaskBar
         tasks={benchTasks.tasks}
         t={tr}
-        onReturn={() => navigate('compare')}
+        onReturn={openBenchTask}
         onStop={stopBenchTask}
         onDismiss={(task) => benchTasks.clear(task.id)}
       />

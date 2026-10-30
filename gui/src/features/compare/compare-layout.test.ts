@@ -140,6 +140,8 @@ function pageHarness(
     seed?: Record<string, string>;
     remoteStatus?: Record<string, unknown>;
     localStatus?: Record<string, unknown>;
+    /** 从任务条回到比较页时要打开的结果（一次性 focus）。 */
+    focus?: { host: string; project: string; runId?: string | null; report?: string | null } | null;
   } = {},
 ) {
   const seed: Record<string, string> = {
@@ -201,6 +203,8 @@ function pageHarness(
         return probedGrid;
       case 'bench_run':
         return pendingRun ? pendingRun.promise : { report: null };
+      case 'bench_remote_fetch':
+        return { report: null, run_id: null, config_sha: null, state: 'succeeded' };
       default:
         return null;
     }
@@ -265,6 +269,7 @@ function pageHarness(
   const useApp = () => ({ state: { language: 'en', cases: [] } });
   // 跨路由任务条在整页 harness 里记录调用即可；reducer/provider 的测试在 bench-task.test.ts。
   const benchCalls: string[] = [];
+  const benchFocus = { current: options.focus ?? null };
   const useBenchTasks = () => ({
     tasks: [],
     begin: (input: { project: string }) => {
@@ -278,6 +283,15 @@ function pageHarness(
       benchCalls.push(`finish:${outcome.state}`);
     },
     clear: () => {},
+    focus: (next: typeof benchFocus.current) => {
+      benchFocus.current = next;
+    },
+    peekFocus: () => benchFocus.current,
+    consumeFocus: () => {
+      const next = benchFocus.current;
+      benchFocus.current = null;
+      return next;
+    },
   });
   const usePageContract = (value: Contract) => {
     contract = value;
@@ -1354,4 +1368,42 @@ test('U-06: page inputs are written to a per-machine draft as they change', asyn
   assert.equal(draft.picks[0]?.dir, probedGrid.history_dir);
   assert.deepEqual(draft.chosen.Latent_Heat, ['ERA5LAND_LowRes']);
   assert.equal(draft.name, 'comparison');
+});
+
+test('U-06: returning from the task bar opens the finished local report once', async () => {
+  const page = pageHarness({
+    focus: {
+      host: '',
+      project: 'comparison',
+      runId: null,
+      report: '/ob/projects/comparison/runs/r1/reports/evaluation_report.html',
+    },
+  });
+  await page.mount();
+  assert.ok(
+    page.calls.some(
+      (call) =>
+        call.command === 'bench_report' &&
+        call.args?.path === '/ob/projects/comparison/runs/r1/reports/evaluation_report.html',
+    ),
+    'the focus opens that run report, not a re-scan of the project folder',
+  );
+});
+
+test('U-06: returning from a server task fetches that run report by run id', async () => {
+  const page = pageHarness({
+    seed: { 'colm.benchHost': 'serverA' },
+    focus: { host: 'serverA', project: 'cmp_server', runId: 'bench-run-9' },
+  });
+  await page.mount();
+  assert.ok(
+    page.calls.some(
+      (call) =>
+        call.command === 'bench_remote_fetch' &&
+        call.args?.host === 'serverA' &&
+        call.args?.name === 'cmp_server' &&
+        call.args?.runId === 'bench-run-9',
+    ),
+    'the remote focus asks the server for that run specifically',
+  );
 });

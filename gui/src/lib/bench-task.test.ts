@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  benchTaskNotice,
   beginBenchTask,
   clearBenchTask,
   finishBenchTask,
@@ -97,4 +98,19 @@ test('persisted tasks round-trip and unreadable rows are dropped one by one', ()
   assert.equal(parseBenchTasks('{"a":1}').length, 0);
   const mixed = JSON.stringify([task, { id: 1 }, { ...task, kind: 'other' }]);
   assert.equal(parseBenchTasks(mixed).length, 1);
+});
+
+test('finished tasks produce a shell notice only for done/failed', () => {
+  const t = (zh: string, en: string) => en;
+  const base = beginBenchTask([], { ...input, id: 'a' }, 1000).tasks[0]!;
+  assert.equal(benchTaskNotice({ ...base, state: 'running' }, t), null);
+  assert.match(
+    benchTaskNotice({ ...base, state: 'done' }, t) ?? '',
+    /Evaluation finished: comparison/,
+  );
+  assert.match(
+    benchTaskNotice({ ...base, state: 'failed' }, t) ?? '',
+    /Evaluation failed: comparison/,
+  );
+  assert.equal(benchTaskNotice({ ...base, state: 'interrupted' }, t), null);
 });

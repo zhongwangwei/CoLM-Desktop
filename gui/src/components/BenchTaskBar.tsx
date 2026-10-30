@@ -20,7 +20,7 @@ export default function BenchTaskBar({
 }: {
   tasks: BenchTask[];
   t: (zh: string, en: string) => string;
-  onReturn: () => void;
+  onReturn: (task: BenchTask) => void;
   onStop: (task: BenchTask) => void;
   onDismiss: (task: BenchTask) => void;
 }) {
@@ -70,7 +70,7 @@ export default function BenchTaskBar({
           <span className="bench-task-actions">
             {task.state === 'running' && (
               <>
-                <Button variant="ghost" onClick={() => onReturn()}>
+                <Button variant="ghost" onClick={() => onReturn(task)}>
                   {t('回到比较页', 'Back to Compare')}
                 </Button>
                 <Button variant="ghost" onClick={() => onStop(task)}>
@@ -80,7 +80,7 @@ export default function BenchTaskBar({
             )}
             {task.state !== 'running' && (
               <>
-                <Button variant="ghost" onClick={() => onReturn()}>
+                <Button variant="ghost" onClick={() => onReturn(task)}>
                   {task.state === 'done'
                     ? t('查看结果', 'View result')
                     : t('回到比较页', 'Back to Compare')}

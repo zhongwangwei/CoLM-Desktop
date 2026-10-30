@@ -1523,6 +1523,27 @@ export default function ComparePage() {
   };
   // 核对"暂时失联"作业的终态（GUI-07）：只查一次。仍在运行就更新最后确认状态、不结束跟踪；
   // 查到终态才清活动记录（写进历史）；还是查不到就保留身份并把新的原因显示出来。
+  // 任务条带来的"打开这次结果"意图：只消费一次；跨机器先切过去，host 变化后这个 effect 会再跑。
+  const consumedBenchFocus = useRef(false);
+  useEffect(() => {
+    if (consumedBenchFocus.current) return;
+    const focus = benchTasks.peekFocus();
+    if (!focus) return;
+    if (focus.host !== host) {
+      setHostState(focus.host);
+      return;
+    }
+    consumedBenchFocus.current = true;
+    benchTasks.consumeFocus();
+    if (focus.report) void view(focus.report);
+    else if (focus.host)
+      void fetchReport(focus.host, focus.project, focus.runId ?? undefined).catch((error) => {
+        // 取报告失败不能静默：页面已有的错误区显示后端给出的原因（本机旧报告仍在）。
+        setError(shown(error));
+      });
+    // 只在进入页面/切换机器（status 就绪）时试一次；focus 是一次性意图，不需要跟着每次渲染重跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host, status]);
   const checkUnsettled = () =>
     task(async () => {
       const current = unsettled;

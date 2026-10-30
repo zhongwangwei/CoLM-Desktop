@@ -18,6 +18,7 @@ import {
   serializeBenchTasks,
   updateBenchTask,
   type BenchTask,
+  type BenchTaskFocus,
   type BenchTaskInput,
 } from './bench-task';
 import { readStored, writeStored } from './storage';
@@ -37,6 +38,10 @@ export interface BenchTaskSink {
     },
   ) => void;
   clear: (id: string) => void;
+  /** 记下"回到比较页后打开这次结果"的意图；由 App 的任务条设置，比较页挂载后消费一次。 */
+  focus: (focus: BenchTaskFocus | null) => void;
+  peekFocus: () => BenchTaskFocus | null;
+  consumeFocus: () => BenchTaskFocus | null;
 }
 
 /**
@@ -48,6 +53,9 @@ const noop: BenchTaskSink = {
   update: () => {},
   finish: () => {},
   clear: () => {},
+  focus: () => {},
+  peekFocus: () => null,
+  consumeFocus: () => null,
 };
 
 const BenchTaskContext = createContext<{ tasks: BenchTask[] } & BenchTaskSink>({
@@ -79,7 +87,18 @@ export function BenchTasksProvider({ children }: { children: ReactNode }) {
   const clear = useCallback((id: string) => {
     setTasks((old) => clearBenchTask(old, id));
   }, []);
-  const value = { tasks, begin, update, finish, clear };
+  // focus 是"下一次进比较页要打开哪次结果"，只活在一次导航里；用 ref 保持它不触发多余渲染。
+  const pendingFocus = useRef<BenchTaskFocus | null>(null);
+  const focus = useCallback((next: BenchTaskFocus | null) => {
+    pendingFocus.current = next;
+  }, []);
+  const peekFocus = useCallback(() => pendingFocus.current, []);
+  const consumeFocus = useCallback(() => {
+    const next = pendingFocus.current;
+    pendingFocus.current = null;
+    return next;
+  }, []);
+  const value = { tasks, begin, update, finish, clear, focus, peekFocus, consumeFocus };
   return <BenchTaskContext.Provider value={value}>{children}</BenchTaskContext.Provider>;
 }
 

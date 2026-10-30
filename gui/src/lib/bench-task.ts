@@ -25,6 +25,28 @@ export interface BenchTask {
   error?: string | null;
 }
 
+/** 从任务条点"回到比较页"要打开的那次结果：页面挂载后消费一次。 */
+export interface BenchTaskFocus {
+  host: string;
+  project: string;
+  /** 远程作业号（= run_id）；本机为空。 */
+  runId?: string | null;
+  /** 本机报告路径；远程报告要重新取回，不带路径。 */
+  report?: string | null;
+}
+
+/** 任务结束时壳上显示的一句话（页面自己不在前台时用）；运行中不提示。 */
+export function benchTaskNotice(
+  task: BenchTask,
+  t: (zh: string, en: string) => string,
+): string | null {
+  if (task.state === 'done')
+    return t(`评估完成：${task.label}`, `Evaluation finished: ${task.label}`);
+  if (task.state === 'failed')
+    return t(`评估失败：${task.label}`, `Evaluation failed: ${task.label}`);
+  return null;
+}
+
 /** 只保留最近若干条；完成的留在状态条上几分钟让用户看见。 */
 export const BENCH_TASKS_KEY = 'colm.benchTasks';
 const DONE_LINGER_MS = 5 * 60 * 1000;
