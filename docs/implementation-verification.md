@@ -41420,3 +41420,32 @@ MC 侧车、重启；3 rank 与 4 rank 两组独立配置都成立）。同轮�
 - Rust：1 vs 2 vs 4 rank（本机 `COLM_MPIEXEC` 多进程）逐位相同。
 - 未做：Rust 跨物理节点（Rust SPMD 用 `COLM_MPIEXEC` 启动，理论上可接到集群 launcher，
   但还没有在 tms 集群上装 Rust 工具链）；6 rank 远端挂起问题。
+
+## WATER_2014（VSF 关闭）分支的对照：站点基本逐位、格点有一处真实分叉（2026-10-31，第十五轮）
+
+继续"找还没跟上的上游改动"。先把 9 月旧快照与当前 vendor 的陆面模块 diff 了一遍
+（`MOD_SoilSnowHydrology` 632 行、`MOD_THERMAL` 250 行、`MOD_LeafTemperature` 149 行），
+重点是新增的数值逻辑。查到 `WATER_2014`/`WATER_VSF` 都新增了"露水按顶层孔隙容量截断、
+新霜把超容量的液态水挤到地表"这一段（`MOD_SoilSnowHydrology.F90:484-516`）；核对 Rust：
+`water_2014.rs::absorb_condensation` 与 `variably_saturated_flow.rs` 里都已实现，**没有遗漏**。
+`MOD_SnowFraction` 只是把指数改成运行时 `DEF_TUNING_SNOW_COVER_EXPONENT`，Rust 已按参数化实现。
+
+于是用**关掉 VSF**（显式 `DEF_USE_VariablySaturatedFlow = .false.`，走 `WATER_2014`）的算例
+做对照：
+
+- **站点（CN-Cng，2 天）**：`golden-compare --tolerances` 只剩 **1 项**（`f_qinfl` 近零值），
+  即 WATER_2014 站点路径基本逐位一致。
+- **格点（同一 9 单元格点河湖算例，2 天，关 VSF）**：57 个 tier2 项。把逐 patch 状态拆开看，
+  差异集中在 **e095_n40 的 patch 7**（`patchclass=16` 裸土/稀疏植被、`patchtype=0`）：
+  day1 重启（002）该 patch 的 `wliq/wice/t_soisno` 与 Fortran 差 **1e-13**，
+  day2（003）却变成 `wliq` 差 **1.97 kg/m²**、`wice` 差 2.94、`t_soisno` 差 0.26 K；
+  而且**定性相反**：Fortran 该 patch 的 `smp = smpmin = -10`（干），Rust 的 `smp` 是
+  ~1e8 的正值（饱和），`zwt` 差 0.26 m。
+- 同 patch 在 **VSF 打开**的对照里两边一致到 1e-7 量级 ⇒ 这是 `WATER_2014` 分支特有的、
+  某个离散分支在 day1→day2 之间翻转，不是公共代码问题。
+
+这是一处**真实待修**的分叉（用户配置里 VSF 默认因 van Genuchten 自动打开，所以常规算例不受
+影响；但显式关 VSF 的 Campbell/城市/裸土组合会踩到）。下一步最小复现：从 002 重启再跑 1 天
+（关 VSF）只复现单日分叉，然后在 `soilwater` 入口打印该 patch 的 `vol_liq/vol_ice/eff_porosity/
+smp/hk/icefrac/porsl/bsw/psi0/hksati` 与 `qinfl/etr`，对照 Rust 同位置；重点怀疑
+"干土 → 饱和"那一步的 `smp` 初值或 `soilwater` 的边界分支（`smpmin` 截断 vs 饱和）。
