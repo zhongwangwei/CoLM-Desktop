@@ -2903,6 +2903,97 @@ fn lulcc_patch_areas(
         .collect()
 }
 
+/// 一个 restart 里的主机水（上游 `mt_lulcc_host_sync` 的 `src_water_2d/3d` 与紧随其后的主机数组）。
+///
+/// 逐 patch 调一次 NetCDF 会重复解压，这里先把每个变量整段取出来；`soilsnow` 行按
+/// `wliq_soisno(maxsnl+1:nl_soil)` 的次序直接对应 [`colm_core::tracer::SOISNO_LAYERS`]。
+struct HostWaterFile {
+    row: usize,
+    ldew: Vec<f64>,
+    ldew_rain: Vec<f64>,
+    ldew_snow: Vec<f64>,
+    wdsrf: Vec<f64>,
+    wetwat: Vec<f64>,
+    wa: Vec<f64>,
+    tleaf: Vec<f64>,
+    scv: Vec<f64>,
+    waterstorage: Option<Vec<f64>>,
+    wliq: Vec<f64>,
+    wice: Vec<f64>,
+}
+
+impl HostWaterFile {
+    fn open(file: &colm_init::RestartFile) -> Result<Self> {
+        use colm_core::tracer::SOISNO_LAYERS;
+        let row = file.dimension("soilsnow")?;
+        ensure!(
+            row == SOISNO_LAYERS,
+            "LULCC host water has {row} soilsnow layers, expected {SOISNO_LAYERS}"
+        );
+        let wliq = file.floats("wliq_soisno")?.to_vec();
+        let wice = file.floats("wice_soisno")?.to_vec();
+        ensure!(
+            wice.len() == wliq.len() && wliq.len() % row == 0,
+            "LULCC host water phases disagree"
+        );
+        let scalar = |name: &str| -> Result<Vec<f64>> { Ok(file.patch_scalars(name)?.to_vec()) };
+        Ok(Self {
+            row,
+            ldew: scalar("ldew")?,
+            ldew_rain: scalar("ldew_rain")?,
+            ldew_snow: scalar("ldew_snow")?,
+            wdsrf: scalar("wdsrf")?,
+            wetwat: scalar("wetwat")?,
+            wa: scalar("wa")?,
+            tleaf: scalar("tleaf")?,
+            scv: scalar("scv")?,
+            waterstorage: file
+                .contains("waterstorage")
+                .then(|| scalar("waterstorage"))
+                .transpose()?,
+            wliq,
+            wice,
+        })
+    }
+
+    fn patches(&self) -> usize {
+        self.ldew.len()
+    }
+
+    fn host_water(&self, patch: usize, patch_type: i64) -> colm_init::lulcc_host::HostWater {
+        let mut water = colm_init::lulcc_host::HostWater::zeroed();
+        water.patch_type = patch_type;
+        water.ldew = self.ldew[patch];
+        water.ldew_rain = self.ldew_rain[patch];
+        water.ldew_snow = self.ldew_snow[patch];
+        water.wdsrf = self.wdsrf[patch];
+        water.wetwat = self.wetwat[patch];
+        water.wa = self.wa[patch];
+        water.tleaf = self.tleaf[patch];
+        water.waterstorage = self.waterstorage.as_ref().map(|values| values[patch]);
+        let start = patch * self.row;
+        water.wliq_soisno[..self.row].copy_from_slice(&self.wliq[start..start + self.row]);
+        water.wice_soisno[..self.row].copy_from_slice(&self.wice[start..start + self.row]);
+        water.with_thin_snow(self.scv[patch].max(0.0))
+    }
+}
+
+/// 上游 `mt_lulcc_host_sync` 末尾的两行诊断（进程号在这里没有意义：单进程/块内调用）。
+fn report_lulcc_host_sync(outcome: &colm_init::lulcc_host::HostFollowOutcome) {
+    if outcome.cold_started > 0 {
+        println!(
+            " MT LULCC: {} new patches without a source patch cold-started from the host water",
+            outcome.cold_started
+        );
+    }
+    if outcome.followed > 0 {
+        println!(
+            " MT LULCC: {} patches with material set to follow host water the host did not carry over by area",
+            outcome.followed
+        );
+    }
+}
+
 /// `remap_land_tracer_lulcc_state`：每个新 patch 先取 `allocate_Material_Vars` 的分配值，再按方案搬旧池。
 ///
 /// * SAT（没有 `lccpct_patches`）：同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）整份抄过来。
@@ -2915,15 +3006,19 @@ fn lulcc_patch_areas(
 /// 同位素且开了含水层混合（变饱和流、`DEF_MT_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
 /// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
 // 按新 patch 下标 `np` 同时索引多张表，照上游的 `DO np` 写。
-#[allow(clippy::needless_range_loop)]
+// 形参逐一对应上游 `remap_land_mt_lulcc_state` 的输入（新/旧侧、主机水、MEC 账与开关），
+// 拆成结构体只是换个地方传，不会让数据流更清楚。
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 fn lulcc_land_tracers(
     set: &colm_core::tracer::TracerSet,
     aquifer_mixing: bool,
     new: &colm_init::lulcc::SatSide<'_>,
     new_patch_type: &[i64],
+    new_host: &colm_init::RestartFile,
     old: Option<(colm_init::lulcc::SatSide<'_>, &colm_init::RestartFile)>,
     mec: Option<TracerMec>,
     abort_nbad: i64,
+    host_options: colm_init::lulcc_host::HostFollowOptions,
 ) -> Result<Vec<colm_core::tracer::PatchTracerState>> {
     use colm_core::tracer::{PatchTracerState, TracerPools};
     const TINY: f64 = f64::MIN_POSITIVE;
@@ -2931,22 +3026,76 @@ fn lulcc_land_tracers(
     let mut states: Vec<PatchTracerState> = (0..nnew)
         .map(|_| PatchTracerState::allocated(set))
         .collect();
+    // 新 patch 的主机水与"旧主机水按同一套权重搬过来"的源水量；`sourced` 是上游的
+    // `patch_has_source`：没有源的新 patch 按主机水冷启动材料。
+    let new_host_file = HostWaterFile::open(new_host)?;
+    ensure!(
+        new_host_file.patches() == nnew,
+        "LULCC host water has {} patches, expected {nnew}",
+        new_host_file.patches()
+    );
+    let new_water: Vec<_> = (0..nnew)
+        .map(|np| new_host_file.host_water(np, new_patch_type[np]))
+        .collect();
+    let mut sourced = vec![false; nnew];
+    let mut src_water = vec![colm_init::lulcc_host::HostWater::zeroed(); nnew];
+    let host_had_old = old.is_some();
     let mut any_reference = false;
     if let Some((old, old_time)) = old {
         let old_states =
             colm_runtime::tracer::read_land_tracer_restart(old_time, set, old.patch_class.len())?
                 .context("the old year's restart has no committed land tracer state")?;
         any_reference = old_states.iter().any(|state| state.aquifer_ref_water > 0.0);
+        let old_host_file = HostWaterFile::open(old_time)?;
+        ensure!(
+            old_host_file.patches() == old.patch_class.len(),
+            "the old year's host water has {} patches, expected {}",
+            old_host_file.patches(),
+            old.patch_class.len()
+        );
+        let old_water: Vec<_> = (0..old.patch_class.len())
+            .map(|op| old_host_file.host_water(op, 0))
+            .collect();
         match mec {
             None => {
                 for (n, o) in colm_init::lulcc::match_patches(new, &old)? {
                     states[n].pools.clone_from(&old_states[o].pools);
                     states[n].aquifer_ref_water = old_states[o].aquifer_ref_water;
+                    sourced[n] = true;
+                    src_water[n] = old_water[o].clone();
+                    src_water[n].patch_type = new_patch_type[n];
                 }
+                // 非 MEC 没有转移份额与面积，上游不记质量账（`sync_area` 全 0）。
+                let outcome = colm_init::lulcc_host::follow_host_water(
+                    set,
+                    &mut states,
+                    &new_water,
+                    &src_water,
+                    &sourced,
+                    &[],
+                    host_options,
+                )?;
+                report_lulcc_host_sync(&outcome);
             }
             Some(mec) => {
                 lulcc_check_inventory_transfer(new, &old, &mec)?;
                 let nold = old.patch_class.len();
+                // `remap_land_mt_lulcc_state` 把旧主机水用与材料相同的面积权重搬到新 patch 上。
+                let src_remap = |get: &dyn Fn(&colm_init::lulcc_host::HostWater) -> f64,
+                                 list: &[(usize, f64)],
+                                 denom: f64,
+                                 fallback: Option<usize>|
+                 -> f64 {
+                    if !list.is_empty() {
+                        list.iter()
+                            .fold(0.0, |v, &(op, w)| w.contract(get(&old_water[op]), v))
+                            / denom
+                    } else if let Some(op) = fallback {
+                        get(&old_water[op])
+                    } else {
+                        0.0
+                    }
+                };
                 let lcc = |np: usize, c: i64| mec.lccpct[np][c as usize].max(0.0);
                 // `lulcc_target_class_area(np, c)`。
                 let target = |np: usize, c: i64| -> f64 {
@@ -3059,6 +3208,23 @@ fn lulcc_land_tracers(
                     let (mass_w, mass_denom) = weights(np, false);
                     let (int_w, int_denom) = weights(np, true);
                     let src = fallback(np);
+                    sourced[np] = !mass_w.is_empty() || src.is_some();
+                    let mut host_src = colm_init::lulcc_host::HostWater::zeroed();
+                    host_src.patch_type = new_patch_type[np];
+                    host_src.ldew = src_remap(&|h| h.ldew, &mass_w, mass_denom, src);
+                    host_src.ldew_rain = src_remap(&|h| h.ldew_rain, &mass_w, mass_denom, src);
+                    host_src.ldew_snow = src_remap(&|h| h.ldew_snow, &mass_w, mass_denom, src);
+                    host_src.wdsrf = src_remap(&|h| h.wdsrf, &mass_w, mass_denom, src);
+                    host_src.wetwat = src_remap(&|h| h.wetwat, &mass_w, mass_denom, src);
+                    host_src.wa = src_remap(&|h| h.wa, &mass_w, mass_denom, src);
+                    host_src.thin_snow = src_remap(&|h| h.thin_snow, &mass_w, mass_denom, src);
+                    host_src.wliq_soisno = std::array::from_fn(|slot| {
+                        src_remap(&|h| h.wliq_soisno[slot], &mass_w, mass_denom, src)
+                    });
+                    host_src.wice_soisno = std::array::from_fn(|slot| {
+                        src_remap(&|h| h.wice_soisno[slot], &mass_w, mass_denom, src)
+                    });
+                    src_water[np] = host_src;
                     // 一个量的重映射：`new = 0`，依旧 patch 次序 `FMA(w, old, new)`，再除分母；
                     // 没有权重时取同类型旧 patch，再没有就保持分配值。
                     let remap = |get: &dyn Fn(&mut PatchTracerState) -> f64,
@@ -3120,6 +3286,17 @@ fn lulcc_land_tracers(
                         current,
                     );
                 }
+                // `mt_lulcc_host_sync`：让材料跟随主机水；质量变化记进 LULCC 账。
+                let outcome = colm_init::lulcc_host::follow_host_water(
+                    set,
+                    &mut states,
+                    &new_water,
+                    &src_water,
+                    &sourced,
+                    &mec.new_area,
+                    host_options,
+                )?;
+                report_lulcc_host_sync(&outcome);
                 lulcc_check_land_water_mass(
                     set,
                     &old_states,
@@ -3127,9 +3304,22 @@ fn lulcc_land_tracers(
                     &states,
                     &mec.new_area,
                     abort_nbad,
+                    &outcome.change,
                 )?;
             }
         }
+    }
+    if !host_had_old {
+        let outcome = colm_init::lulcc_host::follow_host_water(
+            set,
+            &mut states,
+            &new_water,
+            &src_water,
+            &sourced,
+            &[],
+            host_options,
+        )?;
+        report_lulcc_host_sync(&outcome);
     }
     let require_reference = aquifer_mixing
         && set
@@ -3165,6 +3355,7 @@ fn lulcc_check_land_water_mass(
     new_states: &[colm_core::tracer::PatchTracerState],
     new_area: &[f64],
     abort_nbad: i64,
+    host_change: &[f64],
 ) -> Result<()> {
     use colm_core::tracer::{PatchTracerState, TracerPools};
     const TINY: f64 = f64::MIN_POSITIVE;
@@ -3246,8 +3437,11 @@ fn lulcc_check_land_water_mass(
         if !tracer.uses_land_water_transport() {
             continue;
         }
+        // 上游 `assert_lulcc_land_water_mass_conserved(mass_before + host_change, mass_after)`：
+        // 跟随主机水有意改变了材料质量，先记进账再判守恒。
         let scale = before[itrc].abs().max(after[itrc].abs()).max(1.0);
-        if (after[itrc] - before[itrc]).abs() > (1.0e-10 * scale).max(1.0e-8) {
+        let expected = before[itrc] + host_change[itrc];
+        if (after[itrc] - expected).abs() > (1.0e-10 * scale).max(1.0e-8) {
             bad += 1;
         }
     }
@@ -4079,6 +4273,8 @@ fn lulcc_transition(
             .join(time_name(&new_label, years.new, block));
         std::fs::create_dir_all(path.parent().expect("a restart path has a parent"))?;
         cold.write_with(&path, &overrides)?;
+        // 合并后的新一年重启就是 `mt_lulcc_host_sync` 眼里的"主机水"。
+        let merged = colm_init::RestartFile::open(&path)?;
         if let Some(cold_pft) = &cold_pft {
             cold_pft.write_with(&colm_runtime::pft::pft_restart_path(&path)?, &pft_overrides)?;
         }
@@ -4104,6 +4300,7 @@ fn lulcc_transition(
                     urban_class: None,
                 },
                 new_const.integers("patchtype")?,
+                &merged,
                 old.as_ref()
                     .map(|(old_const, old_time, old_patches)| -> Result<_> {
                         Ok((
@@ -4131,6 +4328,13 @@ fn lulcc_transition(
                     _ => None,
                 },
                 integer_field(document, "DEF_MT_LULCC_ABORT_NBAD")?,
+                colm_init::lulcc_host::HostFollowOptions {
+                    vegetation_snow: case.physics.vegetation_snow,
+                    cold_start: colm_core::tracer::TracerColdStart {
+                        variably_saturated_flow: case.physics.variably_saturated_flow,
+                        aquifer_mixing_water_mm: *mixing,
+                    },
+                },
             )
             .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
             let cache = match (&forcing_defaults, &old, &old_subfrc) {

@@ -40822,3 +40822,64 @@ GRIDBASED + PC 区域算例，带 `mesh.nc`）——把本仓库 `vendor/CoLM202
   算例并写这个键——这属于产品行为改动，留待单独一轮决定。
 - 本次验证用的远程副本、日志、算例都在 tms17l 的
   `/tera11/zhwei/Personal/CoLM/colm-desktop/sync-rivtest/`（不入库）。
+
+## 第五轮 §9 的 #13 落地：LULCC 主机水重映射后的材料跟随（2026-10-31，第六轮）
+
+### 上游语义（代码级对照）
+
+- `main/MATERIAL/MOD_MT_Lulcc.F90:76-201`：`mt_lulcc_remap` 在新一年冷启动之后调用
+  `remap_land_mt_lulcc_state`，把旧主机水按 `HW_*` 行与逐层液相/冰相打包
+  （`HW_LDEW/HW_LDEW_RAIN/HW_LDEW_SNOW/HW_WDSRF/HW_THIN_SNOW`，`host_water_old_2d/3d`）。
+- `main/MATERIAL/MOD_MT_Vars.F90:493-640`：`remap_land_mt_lulcc_state` 用**与材料池相同**的
+  权重把旧主机水搬到新 patch（`src_water_2d/3d`），再调 `host_sync`；收尾按
+  `assert_lulcc_land_water_mass_conserved(mass_before + host_change + carrier_change, mass_after)`
+  判守恒。
+- `main/MATERIAL/MOD_MT_Lulcc.F90:216-470`：`mt_lulcc_host_sync` 逐 patch：
+  1. 记 `mt_patch_land_water_mass` 作 before；
+  2. 没有源 patch 的新 patch 调 `mt_init_from_water`（按主机水冷启动材料）；
+  3. 每个用到通用水的材料：湿地水 `mt_wetwat` 先清零，`patchtype==2` 时
+     `max(wetwat,0)*R_init`；然后 `follow_host_water`：
+     冠层（`DEF_VEG_SNOW` 时雨/雪两池分别跟随，否则按总 `ldew` 跟随）、雪柱整体
+     （任一层或前置雪变则按柱比值重标，固相按新雪层水量重分，没雪层并到第一层土壤）、
+     土壤逐层液/冰相、`wdsrf`、有溶解度上限的材料按 `mt_canopy_parts` 的有效冠层液相
+     与"湿地水+ponded 水共享地表固相库"再平衡；
+  4. before/after 差乘 patch 面积进 `change`，并打印 `ncold`/`nfollow` 两行诊断。
+
+### Rust 落点
+
+- 新增 `crates/colm-init/src/lulcc_host.rs`：
+  - `HostWater`（`HW_*` + `wliq_soisno/wice_soisno` 按 `soisno_slot` 的 15 层布局）、
+    `HostFollowOptions`（`vegetation_snow` 与冷启动开关）；
+  - `follow_host_water`：逐条复刻上面的 3、4 步，返回 `cold_started/followed/change`；
+    冷启动直接复用已有的 `PatchTracerState::init_from_water`（它就是
+    `mt_init_from_water` 的移植，含 `scv` 只在 `snl==0` 时冷启动、`wa` 的符号水量
+    与含水层参考水量等规则）；
+  - `canopy_parts` 复刻 `mt_canopy_parts`（`FREEZING_K` 用 `colm_core::FREEZING_K`）。
+- `crates/colm-runtime/src/bin/colm-rs.rs`：
+  - 新增 `HostWaterFile`：从**合并后的新一年重启**读主机水（`soilsnow` 行必须等于
+    `SOISNO_LAYERS`，逐变量整段读，避免逐 patch 反复解压）；
+  - `lulcc_land_tracers` 增加 `new_host`（合并重启）与 `HostFollowOptions`：
+    SAT 路径的 `src` 取 1:1 配对旧 patch 的主机水；MEC 路径按与材料相同的
+    `mass_w/mass_denom` 权重把旧主机水逐仓室搬到新 patch（对应上游
+    `remap2d_mass/remap3d_mass`）；`sourced` 对应上游 `patch_has_source`；
+    `lulcc_transition` 在 `cold.write_with` 之后打开合并重启传进来；
+  - 质量判据改为 `before + host_change == after`（对应上游
+    `mass_before + host_change`），SAT 路径没有转移份额/面积，跟随但不记账、
+    不做守恒判据（与上游非 MEC 分支一致）；诊断按上游措辞打印 `MT LULCC: …`。
+
+### 验证
+
+- 单元测试 `crates/colm-init/src/lulcc_host_tests.rs`（10 个）：无源 patch 按主机水冷启动；
+  `DEF_VEG_SNOW` 开/关时冠层跟随；雪柱并入前置雪后整柱重标并把这些固相并到第一层土壤；
+  土壤液/冰相分别跟随；`wdsrf` 跟随；湿地水按冷启动比值重置；溶解度上限的冠层与
+  "湿地+ponded 共享地表固相库"重平衡；`change` 等于质量差乘面积；阈值以下的差异不动。
+- `cargo test -p colm-init --lib`：201 passed（含新增 10 个）；`cargo test -p colm-runtime
+  --lib --bins`：256 + 4 passed；`cargo clippy -p colm-init -p colm-runtime --all-targets
+  -- -D warnings` 与两个 workspace 的 `cargo fmt --all --check` 通过。
+- **Not-tested**：没有用真实 LULCC 数据跑过——需要连续两个土地覆盖年份的 mksrfdata
+  栅格前处理（本机没有 rawdata；tms17l 上那次 0.25° 区域前处理本轮仍未跑完）。跨年
+  端到端（含 MEC 方案的雪层重分、PFT/PC 冠层重建与随后的材料跟随）都还没有实测证据；
+  SAT 与 MEC 两条 `src` 权重路径、以及和两个引擎各自 MEC 雪层布局的一致性，只由上面的
+  单测与代码对照支撑。等有真实 LULCC 算例后应补：相邻两年各跑一年、对比换年步的
+  材料池与历史、并核对 `MT LULCC: …` 两行诊断的计数。
+- 本轮之前记录在 §5.1 的"#13 仍未做"到此为止，以本节为准。
