@@ -40932,3 +40932,18 @@ Rust 裁剪器是字段无关设计而没接。这次按上游补齐：
 | 14 区域裁剪诊断+门控 | 已实现 | 见本节；`region_tests.rs` 4 条 |
 | 15 冠层总截获 | 已实现 | `interception.rs`/`pft.rs`；`interception_tests.rs` |
 | — 全轮 Not-tested | — | 与 Fortran 内核的数值对照（无河湖/水库黄金数据）、真实 LULCC 跨年算例、真实 BGC+甲烷缺输入源树；这些都在各自小节标了 Not-tested |
+
+收口轮的本机验证（2026-10-31，真实执行）：
+
+- `cargo test -p colm-core --lib` 529 passed（含 #5/#11/#15/泥沙的物理单测）；
+- `cargo test -p colm-runtime --lib --bins` 256 + 4 passed（含 #1/#2/#3/#7/#8/#9/#10 与
+  `lulcc_land_tracers` 的新数据流）；
+- `cargo test -p colm-init --lib` 201 passed（含 #13 的 10 条 `lulcc_host` 单测）；
+- `cargo test -p colm-srfdata --lib -- --test-threads=1` 279 passed、
+  `cargo test -p colm-srfdata --bin mksrfdata-rs -- --test-threads=1` 49 passed（含 #14 的 3 条门控）；
+- 四张生成表的 drift 测试（`colm-schema`、`colm-hist`、`colm-core` 的 landcover/co2）全过；
+  `cargo clippy --workspace --all-targets -- -D warnings` 与两个 workspace 的 `cargo fmt --all
+  --check` 通过。
+- 全轮 **Not-tested** 维持各节的记录：与 Fortran 内核的数值对照、真实 LULCC 跨年算例、
+  真实 BGC+甲烷缺输入源树；`vendor/` 的网格端到端实测（第五/六轮）仍卡在 0.25° 区域前处理的
+  耗时上，河湖旁车的跨实现对读仍待补。
