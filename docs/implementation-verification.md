@@ -41519,3 +41519,27 @@ day2 01:30（51 步、2295 条记录）。结论分三点：
 （调用链 `standard_lct_energy_step → ground_temperature → phase_change` 上都能拿到），
 F 端同样用 `mdbg_call` 与已知 block/patch 数换算；然后再对同一 patch 比较
 `absorb_condensation` 前后的顶层 `wliq/wice`，即可判定是冷凝/霜分支还是雪-土再分配。
+
+### 重要更正：`DEF_USE_VariablySaturatedFlow=.false.` 在 VG 土壤下被**强制置真**（同轮）
+
+给 `WATER_2014` 的顶层液/冰打点（`COLM_WATER_DEBUG`）后重编、跑 51 步却**一条记录都没有**。
+查日志发现根因：
+
+```
+Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.
+```
+
+上游在 van Genuchten 土壤模型下强制 VSF 开（`CoLMMAIN` 的自动逻辑）；Rust 也在
+`physics.rs:200` 同样处理：`variably_saturated_flow = logical(...) || !campbell`。
+我们算例没有显式设 Campbell，所以：
+
+- 第 8–11 轮里所有标着"VSF off / WATER_2014 分支"的格点对照，**实际两边都走 WATER_VSF**；
+- 上一轮定位到的"e095_n40 patch 7 在第 51 步液/冰分配差 7.7e-7"因此属于 **VSF 分支**，
+  不是 `WATER_2014`；`WATER_2014` 打点不触发正好印证了这一点；
+- 站点那组"VSF off 几乎一致（1 项）"的对照同样是 VSF-on 的结果，结论不变，但分支归属要
+  改正。
+
+**更正后的下一步**：要真正测 WATER_2014 必须同时设 `DEF_USE_Campbell_SOIL_MODEL=.true.`
+（或给 Campbell 土壤数据）；而当前要追的分叉在 **`WATER_VSF` / `variably_saturated_flow.rs`**，
+应在 VSF 子步内对同一 patch 打印顶层 `wliq/wice`、`imelt`/相变、`qinfl` 与迭代计数，
+用第 50 步重启状态做无歧义配对（该状态逐位已知）。
