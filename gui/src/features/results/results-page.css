@@ -581,3 +581,28 @@
   min-width: 52px;
   text-align: right;
 }
+
+/* 地图色标模式：自动（每帧 min/max）/ 固定（锁定切换时刻的范围）。 */
+.grid-map-scale-mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.grid-map-scale-mode .button {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.grid-map-scale-mode .button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.grid-map-scale-mode > span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
