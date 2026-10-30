@@ -41365,3 +41365,58 @@ f_rnet       0          1.2e-4   1e-7..2e-5   （最后 1.5e-1）
 `tfrz` 比较、`qinfl` 的干/湿分支、`wice` 相变分配），不是移植遗漏；要彻底消除只能让每一步
 的舍入方向逐位一致（收益递减），实际判据是分层容差（站点三黄金目前 4/23/51 项、都只剩
 近零量或 1e-4 量级；网格算例 39 项、最大相对差 5e-4）。
+
+## 多 node vs 单节点并行：tms17 集群上逐位一致（2026-10-31，第十四轮）
+
+接上一轮的"远端多 node 卡在重启写出"，这轮把它跑通了，并拿到**逐位相同**的判据。
+
+### 上一轮 EACCES 的根因与绕过
+
+给 `ncio_create_file` 的 `nf90_create` 加上 `trace='create: '//filename` 后重编（远端源码，
+不入库），多 node 3 rank 立刻报出具体文件：
+
+```
+Netcdf error: Permission denied create:
+  /home/zhwei/run-6n2/out//rivsmall/restart/2005-002-00000/rivsmall_restart_2005-002-00000_lc2005_e095_n35.nc
+```
+
+即日界重启写出的第一步 `nf90_create`。查证：目录/文件的 owner 与 uid（1026）在所有节点一致、
+且事后目录是 775 可写；同目录下 rank0 的 gridriver 文件也写成功了。**绕过方式**是让所有节点
+共享的重启日期目录在起跑前就存在并 `chmod 777`：
+
+```bash
+mkdir -p out/rivsmall/restart/2005-00{2,3,4}-00000
+chmod 777 out/rivsmall/restart/2005-00*-00000
+```
+
+之后多 node 跑完 144 步并写出全部文件。判断：上游重启写出的目录创建缺少跨 rank 的
+集合屏障/显式 chmod，NFS 下非 master rank 在目录刚创建时偶发看不到写权限；建议上游在
+`mkdir` 后加 barrier + `chmod`（或由 master 建目录后再广播）。第二次对照：同一对节点上
+2 rank 的独立 netCDF4 写程序是成功的，所以不是 NFS/HDF5 整体不可用。
+
+另一个远端怪象：**跑完最后一步、写完输出后 mpirun 在收尾阶段挂住**（`timeout` 杀掉时
+日志里是 `mpirun: Forwarding signal 18 to job`）。因此所有远端多 node 结果都按"输出文件已
+写全"为准，比较用 rsync 回本机后的 netCDF 逐变量判等（不比较带 `create_time` 的字节）。
+
+### 判据：同一份 OpenMPI 内核、同一算例、同一 rank 数
+
+远端 `tms02/tms03`（OpenMPI 4.0.3、gfortran 9.4）上重编 grouped `latlon`，算例是同一个
+9 单元格点河湖算例（2 天，144 步，river on），landdata/restart 都是本机 Rust 预处理产物：
+
+| 配置 | history 变量 | 主 restart（4 个块文件） | gridriver restart | river 旁车 | hist 旁车×4 |
+|---|---|---|---|---|---|
+| **3 rank**：`tms02:3` vs `tms02:2,tms03:1` | 0/113 不同 | 0/72 不同 ×4 | 0/10 | 0/10 | 0/130 ×4 |
+| **4 rank**：`tms02:4` vs `tms02:2,tms03:2` | 0/109 不同 | 0/72 不同 ×4 | 0/10 | 0/10 | 0/130 ×4 |
+
+⇒ **单节点并行与跨节点并行在同一 rank 数下逐位一致**（Fortran grouped SPMD，含河湖汇流、
+MC 侧车、重启；3 rank 与 4 rank 两组独立配置都成立）。同轮还确认：远端单节点 **6 rank**
+仍会在第一天日界后挂住（本机 Mac 6 rank 正常），属远端 OpenMPI/NFS 的收尾问题，不影响
+上面同 rank 数的单/多 node 判据。
+
+### 目前的分层结论（并行一致性）
+
+- Fortran：grouped 3 vs 6 rank（本机 river-off 与单步汇流）逐位相同；grouped 3 vs flat 1
+  逐位相同；**同 rank 数下 1 节点 vs 2 节点逐位相同（3 rank、4 rank 两组）**。
+- Rust：1 vs 2 vs 4 rank（本机 `COLM_MPIEXEC` 多进程）逐位相同。
+- 未做：Rust 跨物理节点（Rust SPMD 用 `COLM_MPIEXEC` 启动，理论上可接到集群 launcher，
+  但还没有在 tms 集群上装 Rust 工具链）；6 rank 远端挂起问题。
