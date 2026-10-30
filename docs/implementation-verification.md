@@ -39882,3 +39882,25 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 4. 跨日界线格点：OpenBench 的 [西,东] 无法表达环绕范围，保持明确拒绝。
 5. UX：草稿离页恢复、保存/运行按钮语义拆分、常驻任务栏、CoLM2024 之外的 profile 管理入口（本批只做了手填 profile）。
 6. 远程镜像仍没有 run 列表（`runs=[]`），旧式镜像项目也没有 run 身份；报告仍由 latest_run/latest_success 提供。
+
+
+## 真实 OpenBench 3.0.8 端到端验证：比较页生成的 comparison/statistics 配置（2026-10-30）
+
+第五批接入 statistics 后，页面的 `comparison`/`statistics` 段只在源码层面对过 3.0.8；这里补真实运行。
+
+**方法**：把 `OpenBench` 仓库的 `v3.0.8` tag 导出到 `/tmp/openbench-308`（`git archive v3.0.8 | tar -x`），用 3.0.8 自带的 smoke fixture（`PYTHONPATH=/tmp/openbench-308/src python3 -m openbench smoke-test --work-dir /tmp/ob-smoke --keep`，会解出 4 个参考数据集与 grid/stn 模拟数据）；配置不是手写的，而是用页面真实生成器 `buildOpenbenchConfig(design)` 生成（tsx 直接 import `gui/src/features/compare/compare.ts`），写入临时工作目录后跑 `openbench check` 与 `openbench run --force`。运行时 `HOME`/`OPENBENCH_HOME` 指向 fixture 的 home（参考数据登记表），`OPENBENCH_REF_ROOT` 指向 fixture 的参考根，`PYTHONPATH` 指向 3.0.8；`MPLBACKEND=Agg`。
+
+**网格配置（2 个 grid 模拟，profile CoLM2024）**：`project.years [2004,2005]`、`tim_res Month`、两个变量、metrics/scores、`comparison.items = [Taylor_Diagram, HeatMap]`、`statistics.items = [Mann_Kendall_Trend_Test, Mean]`。
+- `openbench check`：✓ Config valid（schema 通过；`Comparison: True`、`Statistics: True`；模型 profile `CoLM2024` 被 3.0.8 识别）。
+- `openbench run --force`：**exit 0**，"Evaluation complete"，实际产出 `comparisons/Taylor_Diagram/`（每个变量的 `.jpg` + `.csv`）、`comparisons/HeatMap/scenarios_Overall_Score_comparison.{jpg,csv}`、`statistics/Mean/*.nc + .jpg`、`statistics/Mann_Kendall_Trend_Test/*.nc + tau/Trend .jpg`。证明页面生成的 comparison 与 statistics 段不是"能解析"而是能真正驱动两个阶段出图/出表。
+
+**站点配置（2 个 stn 模拟，profile CoLM2024）**：每个模拟覆写 `Latent_Heat→f_lfevpa`、`Sensible_Heat→f_fsena`（W m-2），`fulllist` 用生成器算出的绝对路径（把 smoke 的 station_case.csv 复制成 `station_<键>.csv`），两个模拟各带全站点；`comparison.items = [Taylor_Diagram, HeatMap]`、`statistics.items = [Mean]`。
+- `openbench check`：✓ Config valid（站点清单、fulllist 绝对路径、变量覆盖都被接受）；`openbench run --force` **exit 0**，"Evaluation complete"，产出 `comparisons/Taylor_Diagram/`（含按 station 拆分的 csv + 合并 jpg）与 `comparisons/HeatMap`，metrics/scores 正常。
+- 观察：这个配置里 station 模拟的 `statistics.Mean` 在 3.0.8 下**没有产出 statistics 目录也没有报错**（同一生成器的 grid 配置有输出）。统计阶段对 station 的支持范围以 OpenBench 为准；页面只负责写配置，不替它兜底。
+
+**验证中踩到/确认的三点**（记录以免下次重复排查）：
+1. smoke fixture 的登记表 `root_dir` 已带数据集子目录（如 `Reference/Initial_test/ILAMB`），变量 `sub_dir` 又写 `ILAMB/Latent_Heat/FLUXCOM`，只有在配置里有 `reference.data_root` 时才不重复。页面生成器**故意不写** `data_root`：生产里内置登记表的路径是 `${OPENBENCH_REF_ROOT}/…`、用户登记的是绝对 `root_dir`，OpenBench 无 `data_root` 时回退 `root_dir` 正好对上。验证时把 fixture catalog 的 `sub_dir` 改成相对 `root_dir` 才跑通——这是 fixture 的布局假设，不是生成器缺陷。
+2. station 变量名必须用 CoLM history 的真实名字（`f_lfevpa`/`f_fsena`）；第一次误用 `Qle_cor` 时 OpenBench 报 `Variable 'Qle_cor' not found in station data` 并把站点全 skip，最终 `Station processing failed for 2/2 sim station(s)`。说明站点变量覆盖写错会在 check 后的 run 阶段才炸，页面只能保证把用户填的 varname 原样带过去。
+3. `buildOpenbenchConfig` 给站点模拟算的 `fulllist` 是 `<projectDir>/sim/<模拟键>.csv`，与 OpenBench 的 `data_type: stn` + 绝对 `fulllist` 契约一致；模拟键仍是 `simulationKey(label)`，所以 station 列表名跟报告显示名无关。
+
+**未覆盖**：真实 CoLM history 经 PREPARE 合并后的文件跑 OpenBench 全链路（fixture 用的是 smoke 自带 netCDF；PREPARE 产物由 `scripts/test-bench-scripts.py` 的 34 例合成数据覆盖）；真实 PLUMBER2/ILAMB 全量数据；comparison/statistics 图的科学质量评估；远程 SSH 目标。
