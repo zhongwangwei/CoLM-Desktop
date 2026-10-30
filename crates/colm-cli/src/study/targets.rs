@@ -264,6 +264,36 @@ fn half_pixel_bounds(values: &[f64], circular: bool) -> Option<Vec<(f64, f64)>> 
 /// `offset` 把 B 的起点换算到 A 的环上；B 最多只可能绕回一次（宽度 ≤ 360），
 /// 所以拆成 `[offset, 360)` 与 `[0, offset + width_b - 360)` 两段分别与 A 的
 /// `[0, width_a)` 求交。直接相减会在 B 跨越 0/360 时把重叠算成负数或整圈。
+/// 两个纬度区间在球面上的重叠面积因子（弧度制，经度已单独乘）：Δsin(lat)。
+///
+/// pixel-overlap 的权重必须反映真实面积：等经度宽的像元在高纬比赤道小，若只用
+/// `lat_overlap * lon_overlap`（度²），高纬像元会被系统性高估，全球产品的格均值会偏向
+/// 高纬。这里用球面纬度带面积 `sin(north) - sin(south)`，经度重叠仍用环形宽度。
+fn spherical_row_area(south: f64, north: f64) -> f64 {
+    let (south, north) = (south.clamp(-90.0, 90.0), north.clamp(-90.0, 90.0));
+    let (south, north) = (south.min(north), south.max(north));
+    (north.to_radians().sin() - south.to_radians().sin()).abs()
+}
+
+/// 模型格与观测像元的重叠面积（球面，无量纲，经度弧度 × Δsin(lat)）。
+///
+/// 用 `(south, north)`/`(west, east)` 两个区间元组而不是四个标量，避免八个参数
+/// 把调用处写成一行天书（clippy 也会拒）。
+fn spherical_overlap_area(
+    lat_a: (f64, f64),
+    lon_a: (f64, f64),
+    lat_b: (f64, f64),
+    lon_b: (f64, f64),
+) -> f64 {
+    let south = lat_a.0.max(lat_b.0);
+    let north = lat_a.1.min(lat_b.1);
+    if north <= south {
+        return 0.0;
+    }
+    spherical_row_area(south, north)
+        * lon_overlap_degrees(lon_a.0, lon_a.1, lon_b.0, lon_b.1).to_radians()
+}
+
 fn lon_overlap_degrees(west_a: f64, east_a: f64, west_b: f64, east_b: f64) -> f64 {
     let width_a = crate::lon_width(west_a, east_a);
     let width_b = crate::lon_width(west_b, east_b);
@@ -1042,14 +1072,15 @@ impl ModelGrid {
                     let east = wrap(east);
                     let mut matched = Vec::new();
                     for (obs_row, &(obs_south, obs_north)) in lat_bounds.iter().enumerate() {
-                        let lat_overlap = north.min(obs_north) - south.max(obs_south);
-                        // 只在边界上擦过（面积 0）的不算覆盖，否则 space_coverage 会虚高。
-                        if lat_overlap <= 0.0 {
-                            continue;
-                        }
+                        // 只在边界上擦过（面积 0）的不算覆盖，否则 space_coverage 会虚高；
+                        // 权重用球面重叠面积，高纬像元不会被按度² 高估。
                         for (obs_column, &(obs_west, obs_east)) in lon_bounds.iter().enumerate() {
-                            let weight =
-                                lat_overlap * lon_overlap_degrees(west, east, obs_west, obs_east);
+                            let weight = spherical_overlap_area(
+                                (south, north),
+                                (west, east),
+                                (obs_south, obs_north),
+                                (obs_west, obs_east),
+                            );
                             if weight > 0.0 {
                                 matched.push(ObsPixel {
                                     row: obs_row,

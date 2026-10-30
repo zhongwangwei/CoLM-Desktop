@@ -1577,7 +1577,16 @@ fn pixel_overlap_matches_coarse_pixels_to_every_covered_model_cell() {
         }
     }
     assert_eq!(overlap.model, expected_model);
-    assert_eq!(overlap.obs, expected_obs);
+    let close = |a: &[f64], b: &[f64]| {
+        assert_eq!(a.len(), b.len());
+        for (actual, expected) in a.iter().zip(b) {
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "{actual} vs {expected}: weighted mean of identical pixels must stay exact"
+            );
+        }
+    };
+    close(&overlap.obs, &expected_obs);
     assert_eq!(overlap.warnings.len(), 1, "{:?}", overlap.warnings);
     assert!(
         overlap.warnings[0].contains("area-weighted pixel-overlap matching"),
@@ -1598,9 +1607,17 @@ fn pixel_overlap_matches_coarse_pixels_to_every_covered_model_cell() {
         .unwrap();
     assert_eq!(cells.len(), 16);
     assert_eq!(coverage, 1.0);
-    for (_, members) in &cells {
+    for (index, (_, members)) in cells.iter().enumerate() {
         assert_eq!(members.len(), 1);
-        assert!((members[0].weight - 0.25).abs() < 1e-12);
+        // 权重是球面重叠面积：半度格在逐行纬度上的 Δsin(lat) × 0.5° 经度。
+        let row = index / 4;
+        let expected = super::spherical_row_area(10.0 + 0.5 * row as f64, 10.5 + 0.5 * row as f64)
+            * 0.5f64.to_radians();
+        assert!(
+            (members[0].weight - expected).abs() < 1e-15,
+            "row {row}: {} vs {expected}",
+            members[0].weight
+        );
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1632,18 +1649,50 @@ fn pixel_overlap_weights_half_covered_cells_by_their_area() {
     assert_eq!(coverage, 1.0);
     let members = &cells[0].1;
     assert_eq!(members.len(), 2);
-    for member in members {
-        assert!((member.weight - 0.5).abs() < 1e-12, "{member:?}");
-    }
+    // 模型格 10–11°N 被 9.5–10.5 与 10.5–11.5 两个观测像元各盖一半；球面面积不同，
+    // 权重按 Δsin(lat) 变化，不能再断言两个 0.5。
+    let lon = 1f64.to_radians();
+    let w_low = super::spherical_row_area(10.0, 10.5) * lon;
+    let w_high = super::spherical_row_area(10.5, 11.0) * lon;
+    assert!((members[0].weight - w_low).abs() < 1e-15, "{members:?}");
+    assert!((members[1].weight - w_high).abs() < 1e-15, "{members:?}");
+    assert_ne!(members[0].weight, members[1].weight);
     assert_eq!(
         paired.model,
         [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0]
     );
-    assert_eq!(
-        paired.obs,
-        [105.0, 106.0, 115.0, 205.0, 206.0, 215.0, 305.0, 306.0, 315.0]
-    );
+    // 观测值随纬度行变化，加权均值必须按球面面积算，不能再用等权平均的整数。
+    for (model, actual) in paired.model.iter().zip(&paired.obs) {
+        let value = *model as usize;
+        let day = value / 10;
+        let row = (value % 10) / 2;
+        let column = value % 2;
+        let low = super::spherical_row_area(10.0 + row as f64, 10.5 + row as f64);
+        let high = super::spherical_row_area(10.5 + row as f64, 11.0 + row as f64);
+        let obs_low = 100.0 * (day + 1) as f64 + 10.0 * row as f64 + column as f64;
+        let obs_high = 100.0 * (day + 1) as f64 + 10.0 * (row + 1) as f64 + column as f64;
+        let expected = (obs_low * low + obs_high * high) / (low + high);
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "model {model}: {actual} vs {expected}"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 面积权重必须随纬度收缩：1° 纬度带在 60°N 的面积约是赤道的 cos(60.5°)/cos(0.5°)。
+/// 只用 lat×lon 的度² 会让高纬像元被系统性高估，全球产品的格均值偏向高纬。
+#[test]
+fn pixel_overlap_weights_shrink_with_the_sphere_towards_the_poles() {
+    let equator = super::spherical_row_area(0.0, 1.0);
+    let north = super::spherical_row_area(60.0, 61.0);
+    let expected = 60.5f64.to_radians().cos() / 0.5f64.to_radians().cos();
+    assert!(
+        ((north / equator) - expected).abs() < 1e-4,
+        "{} vs {expected}",
+        north / equator
+    );
+    assert!(north < equator * 0.51, "高纬面积权重必须明显更小");
 }
 
 /// 跨日界线像元在 `-180..180` 与 `0..360` 两种写法下必须配出同一结果：像元边界归一化后
@@ -1720,7 +1769,13 @@ fn pixel_overlap_support_identity_changes_when_only_the_weights_change() {
     let window = (JAN1, JAN1 + 3 * DAY);
     let first = grid_pairs(&case, &pixel_overlap_target(&aligned), window).unwrap();
     let second = grid_pairs(&case, &pixel_overlap_target(&shifted), window).unwrap();
-    assert_eq!(first.obs, second.obs, "常数场的加权均值不变");
+    assert_eq!(first.obs.len(), second.obs.len());
+    for (a, b) in first.obs.iter().zip(&second.obs) {
+        assert!(
+            (a - b).abs() < 1e-9,
+            "常数场的加权均值不变（浮点归一化会有 1e-15 级差别）: {a} vs {b}"
+        );
+    }
     assert_eq!(first.identity.len(), second.identity.len());
     assert_eq!(first.identity[0].obs_finite, second.identity[0].obs_finite);
     assert_eq!(first.identity[0].paired, second.identity[0].paired);
