@@ -40122,3 +40122,36 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **601 passed / 0 failed / 1 ignored**；`cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` 干净；改动文件 rustfmt 干净。新增按钮 `result-fetch-all` 已加入助手审计白名单（既有 `every_fixed_commit_button_is_an_audited_target` 测试守住）。
 - 前端：`node ../scripts/check-gui.mjs --self-test` 与 `check-gui.mjs` 通过；`node ../scripts/test-react.mjs` → **1336 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全过。
 - **Not-tested**：真实 SSH 远程部分取回/补取端到端（用临时目录 + 单测覆盖状态与路由，未连真服务器）；取消比较没有独立入口（只随条件变更/换页面取消未领取项）；失败列表用现有 Notice/ul 样式，未加专用 CSS；旧后端无 `local_results` 时非远程运行按 complete 回退（无法区分「本机没结果」）；缺测端点恰好已有抽样点时复用原行、只补另一端。
+
+## LLM 运行位置底线：禁止在天河上直接运行 DeepSeek 等 LLM（2026-10-30）
+
+用户底线：软件无论如何不能在天河上直接运行 DeepSeek 等 LLM；限制对象是 LLM 模型服务端点（不含普通远程模拟/训练）。实现为保存与启动两层校验 + 设置页确认闸门。
+
+### 端点分类与硬拒绝（`gui/src-tauri/src/llm_guard.rs`）
+
+- `classify_llm_endpoint(base_url)`：URL 必须 http/https 且有 host，否则 Err。
+  - 官方云精确 host（api.deepseek.com、api.openai.com、api.anthropic.com、api.x.ai、open.bigmodel.cn、generativelanguage.googleapis.com、api.moonshot.cn、dashscope.aliyuncs.com；忽略大小写/端口，不做子域通配）→ `allowed`。
+  - host 或原始 URL 小写包含 `tianhe`/`天河`/`th2`/`th-` → `blocked`，message 明确“检测到模型服务端点疑似位于天河…软件底线…”，**不可确认绕过**。
+  - 其它自定义域名/内网 IP/localhost/未知域 → `needs_confirmation`。
+- `normalize_endpoint`：scheme/host 小写、去默认端口、去尾部 `/`、丢弃 query/fragment（与前端同形，含 IPv6）。确认值必须与规范化 base_url 精确相等。
+- `external_endpoint_hints`：检查 `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`/`OPENAI_API_BASE`/`OLLAMA_HOST`；命中天河标记直接拒绝，错误只带变量名与 host，不回显完整值（可能含凭据）。
+- 范围说明：只限 LLM 模型请求端点；普通远程模拟/训练不受影响。
+
+### 设置字段与两层校验
+
+- `AssistantSettings` 新增 `model_endpoint_ack: Option<String>`（已确认的精确端点）与 `external_llm_ack: bool`，旧配置 serde default 兼容。
+- `assistant_save_settings` 写盘前校验：blocked 拒绝；needs_confirmation 且 ack 不精确匹配拒绝；external 后端未确认拒绝。`assistant_start` 构造 Configure/起进程前重复同一校验，并检查外部后端环境提示；不是前端禁用可绕过的逻辑。
+- 新命令 `assistant_llm_endpoint_guard(base_url)` 返回 `{verdict,host,known_public,matched_tianhe,message}` 供界面展示；保存/启动仍重复校验。
+
+### 设置页确认闸门
+
+- 打开/后端/base_url 变化时调用 guard：blocked 显示红色底线提示、保存按钮禁用且保存前再拒绝（无绕过入口）；needs_confirmation 显示必选复选框，勾选后把规范化 base_url 写为 ack，地址/服务商改变即清空；allowed 显示官方云说明并清除旧 ack。
+- 外部后端（Codex/Claude Code/OpenCode）：显示必选“已确认其模型服务不在天河上运行 LLM”，保存 `external_llm_ack=true`；切回 builtin 不强制。后端启动时还会检查环境变量端点提示。
+- 文案双语；确认字段是应用级，不写入 provider profile。
+
+### 测试与验证（真实执行）
+
+- 隔离 worktree（origin/main 44508c72 + 本组 8 个文件）：根 fmt/clippy exit 0；`cargo test --workspace --lib --bins -- --test-threads=1` → **3330 passed / 0 failed / 16 ignored**；Tauri fmt/clippy exit 0，`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **595 passed / 0 failed / 1 ignored**。
+- 前端：typecheck/lint/format:check exit 0；`npm test` → **1286 passed / 0 failed**；`npm run contract` 生成 263 条（新增 assistant_llm_endpoint_guard）；`xtask check-gui` → 263 registered / 225 called / 26 dynamic，事件均有 emitter/listener。
+- 新增测试：llm_guard 7（官方云、天河子域/路径/大小写、自定义/loopback 需确认、畸形 URL、规范化精确比较、环境提示分类且不回显值、无法解析含天河仍 blocked）；assistant 6（guard 命令形状、blocked/未确认/ack 匹配、外部后端确认与 blocked 环境提示、save/start 两层校验、旧设置默认）；前端 settings-llm-guard 11（blocked 不调用 onSave、自定义必确认、ack 规范化、改 URL 清 ack、allowed 清旧 ack、外部后端确认、guard 失败拦截、未知 verdict 保守、规范化与后端同形、旧设置默认、双语渲染）。
+- 未覆盖：真实窗口目视/真实后端联调；外部后端的端点若只写在 CLI 配置文件中（非环境变量）无法自动检测，依赖用户确认项；未激活 api_profiles 中的旧天河端点不逐个校验，恢复为当前 base_url 时会被同一 guard 拦截；Windows 未实跑（纯字符串/URL 逻辑）。
