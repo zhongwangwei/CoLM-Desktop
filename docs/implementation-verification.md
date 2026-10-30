@@ -41593,3 +41593,29 @@ vol_liq*(zwt-zi_prev))/1000 + wresi`）与 Rust 的对应段
 另外仓库已有记录表明 **Campbell + VSF-off** 配置两侧可以到 0 项 tier 外（
 `docs` 中的 second_config 结果），说明真正要跑 WATER_2014 的对照必须用 Campbell 算例，
 不能用 van Genuchten 算例硬关 VSF。
+
+### VSF 分叉的定案：Newton 收敛路径差（9/≈4660 子步），不是公式 bug（同轮续）
+
+用上游自带的计数做最终判定：`DEF_USE_CoLMDEBUG = .true.` 时
+`print_VSF_iteration_stat_info` 每步打印 `implicit / explicit(wet2dry)` 子步数；
+Rust `richards_solver` 的 `VariableSaturatedRichardsState` 也记录
+`implicit_steps / explicit_steps / wet_to_dry_steps`（同一套语义），临时按调用打印后求和。
+同一算例（river-off、VSF-on、flat 1 rank、51 步，输入逐位一致）：
+
+| 计数（51 步合计） | Fortran | Rust |
+|---|---|---|
+| 隐含收敛子步 `implicit` | 1897 | **1906** |
+| 撞迭代上限降级 `explicit` | 1156 | 1156 |
+| "湿转干"提前退出 `wet2dry` | 1607 | 1607 |
+
+即：**显式回退与湿转干两类降级两边完全一致，只有 9 个（约 0.2%）子步的
+"收敛/不收敛"判定不同**。这正是上一节顶层残余 `vol_liq≈4.4e-8`（< `RICHARDS_TOLERANCE=8e-8`）
+的来源：Newton 在容差边缘因 1 ulp 级舍入落到不同一侧，随后 7.7e-7 的液/冰分配差在几天内放大。
+
+**结论**：
+- 这是**迭代求解器收敛路径的跨实现差异**，两边都不算错——9 个子步的差异都发生在
+  `|f2_norm|` 贴近 `tol_richards*dt` 的位置，属于 tier2 迭代量应有的量级；
+- 判定哪边"对"没有意义；按仓库的 tier2 政策，这类差异的判据是**迭代计数 + 回退次数**，
+  而回退次数（explicit/wet2dry）两边完全相同，隐式计数差 0.2%；
+- 此前 1–2 天窗口里 1e-4~2.94 的放大差，根因就是这 9 个子步的 7.7e-7 种子，不是公式错误；
+  进一步"修"只能把 Newton 的每次浮点运算连同容差比较都逐位复刻（收益递减、且非政策要求）。
