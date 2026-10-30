@@ -41138,3 +41138,36 @@ mkinidata）把两侧的 history/重启逐项对了一遍。
 再 rsync 仓库 + 自制的小算例（先把强迫场裁到区域，避免搬 GB 级全球强迫）过去，做
 **多 rank / 多 node** 的并行一致性验证。真正的多 node 还缺第二台已布好工具链的机器；
 tms17l 上已有 Fortran 工具链与 /shr03 数据，可以作为第二节点候选。
+
+## 数值归因进展：单步反照率的谱段重分配 + Rust 4 rank 一致性（2026-10-31，第十轮）
+
+### 站点：单步差异已经落到"谱段"上
+
+从同一份冷启动重启只跑 1 个 1800 s 步（站点 CN-Cng）：
+
+- 入射辐射四个分量（`f_solvd/solvi/solnd/solni`）两引擎**完全相同**；
+- 宽带反射/吸收几乎一致：`f_sr` 25.1018 vs 25.0889（0.05%）、`f_sabg` 41.075 vs 41.096（0.05%）；
+- 但 `f_alb`（band×rtyp 四分量）逐分量差 1–2%，且**符号按谱段相反**：
+
+| 分量 | Fortran | Rust | 相对差 |
+|---|---|---|---|
+| vis direct | 0.20517 | 0.20983 | +2.3% |
+| vis diffuse | 0.47721 | 0.47169 | −1.2% |
+| nir direct | 0.18323 | 0.18574 | +1.4% |
+| nir diffuse | 0.40231 | 0.39934 | −0.7% |
+
+- 已排除：LAI/SAI/`fsno`/`scv`/`snowdp` 完全一致；IGBP class 10 的叶光学常数
+  （`chil`/`rhol_vis`/`rhol_nir`/`taul_vis`/`taul_nir`）两引擎表**逐个相同**；地面反照率
+  公式（`alb_s_inc`、min(…, dry)）与土壤反射率读取也一致；`ssw` 差 4e-5 量级、`ldew` 差 6e-6 mm。
+- 结论：差异在 **band 分辨的冠层/地面光学路径**（two-stream 的输入或 rad type 组合），不是
+  状态差。下一轮需要给 Fortran 侧加中间量打印（`albg`/`albv`/`tran`/`ssun`/`ssha` 与
+  `rho/tau` 实际入参）与 Rust 同位置的中间量逐分量对照，才能判哪边对。
+- 这也修正了此前"反照率差异来自上游状态"的说法：在**同一状态**下单步就已经有谱段差，
+  状态漂移只是后续放大。
+
+### 并行一致性：Rust 1 rank vs 4 rank 也逐位相同
+
+同一 9 单元格点算例（river-off），Rust 引擎用 `COLM_MPIEXEC=$(which mpiexec)` 分别以 1 rank
+和 4 rank 续跑：history **135/135 变量逐位相同**。加上上一节的 Fortran grouped 3/6 rank
+逐位相同、grouped 3 vs flat 1 逐位相同、Rust 1 vs 2 rank 逐位相同，"多 rank / 单 rank"
+这一层目前没有数值差；真正的**多 node**仍待 7920/tms17l 双节点就绪（见上一节探测）。
