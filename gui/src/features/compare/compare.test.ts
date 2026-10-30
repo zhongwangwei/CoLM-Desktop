@@ -336,6 +336,8 @@ const simForm = (patch: Partial<SimulationFormValues> = {}): SimulationFormValue
   to: '',
   dataGroupby: '',
   gridRes: '',
+  profile: 'CoLM2024',
+  stationId: '',
   lon: '',
   lat: '',
   extent: '',
@@ -1116,4 +1118,62 @@ it('uses one internal name for the OpenBench project and the comparison folder',
     assert.equal(projectName, comparisonName(name), name);
     assert.equal(comparisonDir('/ob', name).split('/').pop(), comparisonName(name), name);
   }
+});
+
+it('writes the statistics phase only when methods are selected', () => {
+  const built = buildOpenbenchConfig({
+    ...base,
+    statisticsItems: ['Mann_Kendall_Trend_Test', 'Mean'],
+  });
+  assert.ok(
+    built.config.includes(
+      'statistics:\n  enabled: true\n  items: ["Mann_Kendall_Trend_Test", "Mean"]',
+    ),
+    built.config,
+  );
+  assert.doesNotMatch(buildOpenbenchConfig({ ...base, statisticsItems: [] }).config, /statistics:/);
+  assert.throws(
+    () => buildOpenbenchConfig({ ...base, statisticsItems: ['Not_A_Stat'] }),
+    /OpenBench 3\.0\.8/,
+  );
+});
+
+it('carries a per-simulation model profile and station ID', () => {
+  const custom: BenchSimulation = { ...site, profile: 'CoLM2024_DEV', stationId: 'AT-Neu' };
+  const built = buildOpenbenchConfig({
+    ...base,
+    variables: { Latent_Heat: 'ERA5' },
+    simulations: [custom],
+  });
+  assert.match(built.config, /model: CoLM2024_DEV/);
+  assert.deepEqual(
+    built.sites.map((entry) => entry.station),
+    ['AT-Neu'],
+  );
+  // 默认 profile 仍写裸 CoLM2024（配置文本格式不变）。
+  assert.match(
+    buildOpenbenchConfig({ ...base, variables: { Latent_Heat: 'ERA5' }, simulations: [site] })
+      .config,
+    /model: CoLM2024/,
+  );
+  // 表单往返保留两个覆盖值；空值回落默认。
+  const form = simulationFormForPick({
+    dir: '/d',
+    label: 'x',
+    info: site.info,
+    profile: 'CoLM2024_DEV',
+    stationId: 'AT-Neu',
+  });
+  assert.equal(form.profile, 'CoLM2024_DEV');
+  assert.equal(form.stationId, 'AT-Neu');
+  assert.equal(
+    simulationFormForPick({
+      dir: '/d',
+      label: 'x',
+      info: site.info,
+      profile: null,
+      stationId: null,
+    }).profile,
+    'CoLM2024',
+  );
 });

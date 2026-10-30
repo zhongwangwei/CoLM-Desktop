@@ -130,7 +130,11 @@ type Contract = {
 };
 
 function pageHarness(
-  options: { seed?: Record<string, string>; remoteStatus?: Record<string, unknown> } = {},
+  options: {
+    seed?: Record<string, string>;
+    remoteStatus?: Record<string, unknown>;
+    localStatus?: Record<string, unknown>;
+  } = {},
 ) {
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
@@ -164,7 +168,7 @@ function pageHarness(
       case 'remote_config':
         return { servers: [] };
       case 'bench_status':
-        return readyStatus;
+        return options.localStatus ?? readyStatus;
       case 'bench_remote_status':
         return options.remoteStatus ?? readyStatus;
       case 'bench_remote_references':
@@ -801,6 +805,7 @@ test('U-04: summary, frozen station list and the run submission all come from on
     metrics: ['bias'],
     scores: ['Overall_Score'],
     comparisonItems: [],
+    statisticsItems: [],
     comparisonDir: compare.comparisonDir,
   });
   const machine = { host: 'serverA', openbenchRoot: '/ob', refRoot: '/refs' };
@@ -1148,4 +1153,72 @@ test('R12: a remote project row shows the last run failure instead of "no run re
   assert.match(shown, /last run: failed/);
   assert.match(shown, /bench-run-42/);
   assert.match(shown, /check failed: boom/);
+});
+
+test('U-04: older successful runs stay reachable from the run history', async () => {
+  const page = pageHarness({
+    localStatus: {
+      ...readyStatus,
+      projects: [
+        {
+          name: 'cmp',
+          report: '/ob/projects/cmp/runs/r2/output/run/reports/evaluation_report.html',
+          latest_run: {
+            run_id: 'r2',
+            state: 'succeeded',
+            report: '/ob/projects/cmp/runs/r2/output/run/reports/evaluation_report.html',
+            created_at: '2026-10-30T01:00:00Z',
+            finished_at: '2026-10-30T01:02:00Z',
+            config_sha: 'a'.repeat(64),
+            error: null,
+          },
+          latest_success: {
+            run_id: 'r2',
+            config_sha: 'a'.repeat(64),
+            report: '/ob/projects/cmp/runs/r2/output/run/reports/evaluation_report.html',
+            finished_at: '2026-10-30T01:02:00Z',
+          },
+          runs: [
+            {
+              run_id: 'r2',
+              state: 'succeeded',
+              report: '/ob/projects/cmp/runs/r2/output/run/reports/evaluation_report.html',
+              created_at: '2026-10-30T01:00:00Z',
+              finished_at: '2026-10-30T01:02:00Z',
+              config_sha: 'a'.repeat(64),
+              error: null,
+            },
+            {
+              run_id: 'r1',
+              state: 'failed',
+              report: null,
+              created_at: '2026-10-30T00:00:00Z',
+              finished_at: '2026-10-30T00:05:00Z',
+              config_sha: 'b'.repeat(64),
+              error: 'check failed: boom',
+            },
+          ],
+        },
+      ],
+    },
+  });
+  await page.mount();
+  const shown = text(page.nodes());
+  assert.match(shown, /Run history/);
+  assert.match(shown, /r2/);
+  assert.match(shown, /check failed: boom/);
+  const view = page
+    .nodes()
+    .find((node) => node.type === 'Button' && text(node) === 'View this report');
+  assert.ok(view, 'the succeeded older run offers its own report');
+  (view.props.onClick as () => void)();
+  await page.settle();
+  assert.ok(
+    page.calls.some(
+      (call) =>
+        call.command === 'bench_report' &&
+        call.args?.path === '/ob/projects/cmp/runs/r2/output/run/reports/evaluation_report.html',
+    ),
+    "viewing from the history opens that run's report, not the latest file on disk",
+  );
 });

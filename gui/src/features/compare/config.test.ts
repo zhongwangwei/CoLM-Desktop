@@ -131,12 +131,12 @@ it('refuses edits the page cannot honestly summarize', () => {
   assert.equal(reversed.config, null);
   assert.ok(reversed.problems.length);
 
-  // comparison 现在受支持；真正超出页面格式的顶层键（如 statistics）仍然拒绝。
+  // comparison/statistics 现在受支持；真正超出页面格式的顶层键仍然拒绝。
   const unknownTop = parseOpenbenchConfig(
-    generated().replace('evaluation:', 'statistics:\n  enabled: true\nevaluation:'),
+    generated().replace('evaluation:', 'forcing:\n  enabled: true\nevaluation:'),
   );
   assert.equal(unknownTop.config, null);
-  assert.match(unknownTop.problems[0]![0], /statistics/);
+  assert.match(unknownTop.problems[0]![0], /forcing/);
 
   const unknownSim = parseOpenbenchConfig(
     generated().replace('    tim_res: Hour', '    tim_res: Hour\n    grid_res: 0.5'),
@@ -519,4 +519,48 @@ it('R03: refuses output directories that are absolute, escape the run directory 
     configFingerprint(design, parseOpenbenchConfig(pristine).config!),
     'a different output directory is a different effective input',
   );
+});
+
+it('parses and summarises the statistics phase', () => {
+  const text = generated({ statisticsItems: ['Mann_Kendall_Trend_Test', 'Mean'] });
+  const parsed = parseOpenbenchConfig(text);
+  assert.deepEqual(parsed.problems, []);
+  assert.deepEqual(parsed.config!.statistics, {
+    enabled: true,
+    items: ['Mann_Kendall_Trend_Test', 'Mean'],
+  });
+  const row =
+    effectiveSummary(design, parsed.config!).find((item) => item.label[1] === 'Statistical tests')
+      ?.value ?? '';
+  assert.match(row, /Mann_Kendall_Trend_Test/);
+
+  // 不写 statistics = 关闭（OpenBench 默认）；未知方法、enabled 配空 items 明确拒绝。
+  assert.deepEqual(parseOpenbenchConfig(generated()).config!.statistics, {
+    enabled: false,
+    items: null,
+  });
+  const unknown = text.replace(
+    'items: ["Mann_Kendall_Trend_Test", "Mean"]',
+    'items: ["Not_A_Stat"]',
+  );
+  assert.equal(parseOpenbenchConfig(unknown).config, null);
+  const empty = text.replace('items: ["Mann_Kendall_Trend_Test", "Mean"]', 'items: []');
+  assert.equal(parseOpenbenchConfig(empty).config, null);
+});
+
+it('parses a per-simulation model profile and station ID', () => {
+  const text = generated({
+    variables: { Latent_Heat: 'ERA5' },
+    simulations: [
+      { ...site, profile: 'CoLM2024_DEV', stationId: 'AT-Neu' },
+      { ...basin, profile: 'CoLM2024_DEV' },
+    ],
+  });
+  const parsed = parseOpenbenchConfig(text);
+  assert.deepEqual(parsed.problems, []);
+  assert.deepEqual(
+    parsed.config!.simulations.map((simulation) => simulation.model),
+    ['CoLM2024_DEV', 'CoLM2024_DEV'],
+  );
+  assert.match(parsed.config!.simulations[0]!.fulllist ?? '', /AT_Neu_official\.csv$/);
 });

@@ -17,6 +17,7 @@ import {
   layerVariableProblems,
   simulationKey,
   VALID_COMPARISON_ITEMS,
+  VALID_STATISTICS_ITEMS,
   type BenchSite,
   type EvaluationDesign,
   type EvaluationSummaryItem,
@@ -91,6 +92,8 @@ export interface EffectiveConfig {
   scores: string[] | null;
   /** 跨模拟比较（`comparison` 段）。配置没写这一段时 enabled=false、items=null（OpenBench 默认关闭）。 */
   comparison: { enabled: boolean; items: string[] | null };
+  /** 统计检验（`statistics` 段）。未写时 enabled=false、items=null（OpenBench 默认关闭）。 */
+  statistics: { enabled: boolean; items: string[] | null };
 }
 
 export interface ParsedConfig {
@@ -114,6 +117,7 @@ const TOP_LEVEL_KEYS = new Set([
   'metrics',
   'scores',
   'comparison',
+  'statistics',
 ]);
 
 function isMap(value: Yaml | undefined): value is { [key: string]: Yaml } {
@@ -960,6 +964,37 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
       comparison = { enabled: root.comparison.enabled === true, items };
     }
   }
+  // statistics 段：与 comparison 同型的 opt-in 段；方法名按 OpenBench 3.0.8 statistic_nml +
+  // _BASIC_ANALYSIS_ITEMS + False_Discovery_Rate 校验，写错就拒绝而不是等 OpenBench check。
+  let statistics: EffectiveConfig['statistics'] = { enabled: false, items: null };
+  if (root.statistics != null) {
+    if (!isMap(root.statistics))
+      problems.push(['statistics 应该是一个配置块。', 'statistics should be a block.']);
+    else {
+      rejectUnknownKeys(root.statistics, new Set(['enabled', 'items']), 'statistics', problems);
+      if (root.statistics.enabled != null && typeof root.statistics.enabled !== 'boolean')
+        problems.push([
+          'statistics.enabled 应该是 true 或 false。',
+          'statistics.enabled should be true or false.',
+        ]);
+      const items =
+        root.statistics.items == null
+          ? null
+          : stringListField(root.statistics.items, 'statistics.items', problems);
+      if (root.statistics.enabled === true && items && items.length === 0)
+        problems.push([
+          'statistics.enabled 为 true 但 items 是空的；一个方法都不选就把整段删掉。',
+          'statistics.enabled is true but statistics.items is empty; drop the whole block when no method is selected.',
+        ]);
+      for (const item of items ?? [])
+        if (!VALID_STATISTICS_ITEMS.has(item))
+          problems.push([
+            `不是 OpenBench 3.0.8 支持的统计方法：${item}`,
+            `OpenBench 3.0.8 does not support the statistics item ${item}`,
+          ]);
+      statistics = { enabled: root.statistics.enabled === true, items };
+    }
+  }
   if (problems.length) return null;
   if (!name || !timRes || !years || !variables) return null;
   return {
@@ -982,6 +1017,7 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
     metrics,
     scores,
     comparison,
+    statistics,
   };
 }
 
@@ -1248,6 +1284,16 @@ export function effectiveSummary(
             : bilingual('默认 Taylor_Diagram, HeatMap', 'defaults Taylor_Diagram, HeatMap')
         }]`
       : bilingual('未启用（comparison.enabled=false）', 'disabled (comparison.enabled=false)'),
+  });
+  items.push({
+    label: ['统计检验', 'Statistical tests'],
+    value: config.statistics.enabled
+      ? `${bilingual('已启用', 'enabled')} · ${bilingual('方法', 'items')} [${
+          config.statistics.items
+            ? config.statistics.items.join(', ')
+            : bilingual('默认', 'defaults')
+        }]`
+      : bilingual('未启用（statistics.enabled=false）', 'disabled (statistics.enabled=false)'),
   });
   const advanced = [
     config.project.weight ? `weight=${config.project.weight}` : '',

@@ -53,6 +53,10 @@ pub(crate) const DEFAULT_OUTPUT_DIR: &str = "output";
 /// 不能让一份日志把状态文件撑大。
 const ERROR_LIMIT: usize = 4_000;
 
+/// 列历史运行时单个 `meta.json` 的大小上限。正常 meta 只有几 KB（失败原因已截断到 4000 字符），
+/// 超过这个数的一定不是我们写出来的：读它只会白占内存，跳过即可。
+const META_LIST_BYTES_LIMIT: u64 = 1024 * 1024;
+
 /// 一次运行的状态。取消也是 `failed`（meta 里记"已停止"）：`bench_run` 的返回契约里
 /// 只有 running/succeeded/failed 三种，读取的一方不必再记一个新状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,10 +207,11 @@ impl RunRecord {
         &self.dir
     }
 
-    /// 本次运行自己 `output/` 下记录的报告；失败/进行中的运行没有。
-    /// 只认 meta 里记下的相对路径 —— 报告只在运行成功时写进 meta，绝不会指向别的运行。
+    /// 本次运行自己输出根下记录的报告；失败/进行中的运行没有。
+    /// 只认 meta 里记下的**安全相对路径** —— 报告只在运行成功时写进 meta，绝不会指向别的运行；
+    /// 被改过或写坏的 meta 也指不到运行目录之外。
     pub(crate) fn report_path(&self) -> Option<PathBuf> {
-        let relative = self.meta.report.as_deref()?;
+        let relative = safe_run_relative_path(self.meta.report.as_deref()?)?;
         let path = self.dir.join(relative);
         path.is_file().then_some(path)
     }
@@ -292,6 +297,119 @@ pub(crate) fn flat_run(project_dir: &Path) -> Option<RunRecord> {
     Some(RunRecord {
         dir: project_dir.to_path_buf(),
         meta,
+    })
+}
+
+/// meta 里记的报告路径只能是运行目录内的普通相对路径：绝对路径、盘符、`..`、`.` 都不认。
+/// 一份被改过（或被旧版本写坏）的 meta 不能把状态页指向运行目录之外。
+fn safe_run_relative_path(relative: &str) -> Option<&Path> {
+    let path = Path::new(relative);
+    (!path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_))))
+    .then_some(path)
+}
+
+/// `list_runs` 输出的一行，字段与前端 `ProjectRun` 一致；排序键另外带着。
+struct ListedRun {
+    created_unix: u64,
+    run_id: String,
+    json: Value,
+}
+
+/// 列历史运行时只解析需要的字段：一条坏 meta 不该让同目录其它 run 从列表里消失，
+/// 缺 `created_unix` 的旧记录按 0 降级（仍列出来，只是排最后）。
+#[derive(Deserialize)]
+struct ListedMeta {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    state: Option<RunState>,
+    #[serde(default)]
+    report: Option<String>,
+    #[serde(default)]
+    finished_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    created_unix: Option<u64>,
+    #[serde(default)]
+    config_sha: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// 一个比较项目最近的历史运行：最新在前（`created_unix` 降序、同秒 run_id 降序），最多 `limit` 条。
+/// 字段与前端 `ProjectRun` 一致：`run_id/state/report/finished_at/created_at/config_sha/error`。
+///
+/// `report` 只有该次运行 `succeeded`、meta 里记的是安全相对路径、且文件还在时才给**绝对路径**：
+/// 报告被手工删掉、或 meta 被改过指向运行目录外，一律 null —— 界面不会拿到打不开或指向别处的路径。
+/// 坏 meta / 超大文件跳过；旧目录（含远程镜像）没有 `runs/` 返回空数组，不迁移也不破坏。
+pub(crate) fn list_runs(project_dir: &Path, limit: usize) -> Vec<Value> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(project_dir.join(RUNS_DIR)) else {
+        return Vec::new();
+    };
+    let mut runs = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| listed_run(&entry.path()))
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| {
+        right
+            .created_unix
+            .cmp(&left.created_unix)
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    runs.truncate(limit);
+    runs.into_iter().map(|run| run.json).collect()
+}
+
+/// 读一条运行记录。返回 `None` 只影响这一条（缺 meta、坏 JSON、超大、没有可归类的 state）。
+fn listed_run(run_dir: &Path) -> Option<ListedRun> {
+    let meta_path = run_dir.join(META_FILE);
+    let metadata = std::fs::metadata(&meta_path).ok()?;
+    if !metadata.is_file() || metadata.len() > META_LIST_BYTES_LIMIT {
+        return None;
+    }
+    let text = std::fs::read_to_string(&meta_path).ok()?;
+    let meta = serde_json::from_str::<ListedMeta>(&text).ok()?;
+    // 没有 state 的记录前端没法归类（running/succeeded/failed 三选一）：跳过这一条。
+    let state = meta.state?;
+    let dir_name = run_dir.file_name()?.to_string_lossy().into_owned();
+    // 目录名是运行身份的第一真相；meta 里的 run_id 缺了或被清空时用它兜底。
+    let run_id = if meta.run_id.trim().is_empty() {
+        dir_name
+    } else {
+        meta.run_id
+    };
+    let report = if state == RunState::Succeeded {
+        meta.report
+            .as_deref()
+            .and_then(safe_run_relative_path)
+            .map(|relative| run_dir.join(relative))
+            .filter(|path| path.is_file())
+    } else {
+        // 失败/进行中的运行即使 meta 里残留了路径，也不当可打开的报告（半份 HTML 不算结果）。
+        None
+    };
+    let created_unix = meta.created_unix.unwrap_or(0);
+    let json = json!({
+        "run_id": run_id.clone(),
+        "state": state.as_str(),
+        "report": report,
+        "finished_at": meta.finished_at,
+        "created_at": meta.created_at,
+        "config_sha": meta.config_sha,
+        "error": meta.error,
+    });
+    Some(ListedRun {
+        created_unix,
+        run_id,
+        json,
     })
 }
 

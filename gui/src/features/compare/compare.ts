@@ -60,6 +60,10 @@ export interface BenchSimulation {
   /** 手动登记时覆盖自动推断的分组/原生分辨率。 */
   dataGroupby?: string | null;
   gridRes?: number | null;
+  /** OpenBench 模型 profile；缺省/空 = CoLM2024。 */
+  profile?: string | null;
+  /** 单点模拟的站点 ID（与参考数据里的站点比对）；缺省 = 从 history 前缀去掉 `_hist_` 推导。 */
+  stationId?: string | null;
 }
 
 /**
@@ -97,6 +101,10 @@ export interface SimulationFormValues {
   to: string;
   dataGroupby: string;
   gridRes: string;
+  /** OpenBench 模型 profile；默认 CoLM2024（页面按需覆盖）。 */
+  profile: string;
+  /** 单点模拟的站点 ID；空 = 从 history 前缀推导。 */
+  stationId: string;
   /** 单点坐标（度）：读取概况没给出或需要手填时用。 */
   lon: string;
   lat: string;
@@ -115,6 +123,8 @@ export type SimulationField =
   | 'to'
   | 'dataGroupby'
   | 'gridRes'
+  | 'profile'
+  | 'stationId'
   | 'lon'
   | 'lat'
   | 'extent'
@@ -208,6 +218,24 @@ export function validateSimulation(
       field: 'timRes',
       message: ['时间分辨率不能为空。', 'The time resolution cannot be empty.'],
     };
+  // 模型 profile：OpenBench 的 `model:` 字段；空值会让配置缺这个键，必须显式给。
+  const profile = values.profile.trim();
+  if (!profile)
+    return {
+      field: 'profile',
+      message: [
+        '模型 profile 不能为空（默认 CoLM2024）。',
+        'The model profile cannot be empty (default CoLM2024).',
+      ],
+    };
+  if (!/^[A-Za-z0-9_.-]+$/.test(profile))
+    return {
+      field: 'profile',
+      message: [
+        '模型 profile 只能用字母、数字、_、. 和 -。',
+        'The model profile may only use letters, digits, _, . and -.',
+      ],
+    };
   const gridRes = numberInput(values.gridRes);
   if (gridRes === 'invalid' || (typeof gridRes === 'number' && gridRes <= 0))
     return {
@@ -226,6 +254,18 @@ export function validateSimulation(
       ],
     };
   const spatial = auto ? (probe?.spatial ?? false) : values.dataType === 'grid';
+  // 站点 ID：后端 valid_station 的约束（≤80 字符，不能有逗号/引号/换行）；空 = 从前缀推导。
+  if (!spatial && values.stationId.trim()) {
+    const station = values.stationId.trim();
+    if (station.length > 80 || /[,"\n\r]/.test(station))
+      return {
+        field: 'stationId',
+        message: [
+          '站点 ID 不能超过 80 字符，也不能含逗号、引号或换行。',
+          'The station ID must be at most 80 characters and cannot contain commas, quotes or line breaks.',
+        ],
+      };
+  }
   if (spatial) {
     if (values.extent.trim() && !parseExtent(values.extent))
       return {
@@ -425,6 +465,8 @@ export function simulationFormForPick(pick: {
   variables?: Record<string, { varname: string; varunit: string }>;
   dataGroupby?: string | null;
   gridRes?: number | null;
+  profile?: string | null;
+  stationId?: string | null;
 }): {
   dir: string;
   label: string;
@@ -436,6 +478,8 @@ export function simulationFormForPick(pick: {
   to: string;
   dataGroupby: string;
   gridRes: string;
+  profile: string;
+  stationId: string;
   lon: string;
   lat: string;
   extent: string;
@@ -452,6 +496,8 @@ export function simulationFormForPick(pick: {
     from: info ? String(info.syear) : '',
     to: info ? String(info.eyear) : '',
     dataGroupby: pick.dataGroupby ?? info?.data_groupby ?? '',
+    profile: pick.profile?.trim() || 'CoLM2024',
+    stationId: pick.stationId ?? '',
     gridRes:
       pick.gridRes != null
         ? String(pick.gridRes)
@@ -626,6 +672,31 @@ export const COMPARISON_ITEM_CHOICES = COMPARISON_ITEMS.filter(
 );
 
 /**
+ * OpenBench 3.0.8 `statistics.items` 的合法方法名：figlib.yaml 的 statistic_nml（名字去掉
+ * `_source`）+ check.py 的 `_BASIC_ANALYSIS_ITEMS` {Basic,Mean,Median,Max,Min,Sum} +
+ * 单独放行的 False_Discovery_Rate。统计阶段是独立分析，页面默认不启用（opt-in）。
+ */
+export const STATISTICS_ITEMS = [
+  'Basic',
+  'Mann_Kendall_Trend_Test',
+  'Correlation',
+  'Standard_Deviation',
+  'Functional_Response',
+  'Z_Score',
+  'Three_Cornered_Hat',
+  'Hellinger_Distance',
+  'Partial_Least_Squares_Regression',
+  'False_Discovery_Rate',
+  'ANOVA',
+  'Mean',
+  'Median',
+  'Max',
+  'Min',
+  'Sum',
+] as const;
+export const VALID_STATISTICS_ITEMS = new Set<string>(STATISTICS_ITEMS);
+
+/**
  * 层/类别维度变量预检：模拟的变量覆盖把标准变量映射到了 `unsupported_variables` 里的 NetCDF 变量时，
  * 制备站点文件会跳过它（不是静默丢，但运行到 check 才发现太晚）。运行/生成前明确拒绝，并指出是哪个
  * 模拟的哪个变量、什么维度（审查报告 C05：预检时明确拒绝，而不是制备成功但变量没了）。
@@ -677,6 +748,8 @@ export interface ComparisonDesign {
   scores?: string[];
   /** 跨模拟比较（OpenBench comparison 阶段）要生成的图表；空/不传 = 不写这一段（默认关闭）。 */
   comparisonItems?: string[];
+  /** OpenBench 统计检验阶段（statistics）的方法；空/不传 = 不写这一段（默认关闭）。 */
+  statisticsItems?: string[];
 }
 
 /** 评估发生在哪台机器、哪个 OpenBench 安装、哪个参考数据根下。 */
@@ -746,6 +819,15 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
         ),
       );
   }
+  const statisticsItems = [...new Set((design.statisticsItems ?? []).filter(Boolean))];
+  for (const name of statisticsItems)
+    if (!VALID_STATISTICS_ITEMS.has(name))
+      throw new Error(
+        bilingual(
+          `不是 OpenBench 3.0.8 支持的统计方法：${name}`,
+          `OpenBench 3.0.8 does not support the statistics item ${name}`,
+        ),
+      );
   // 层维度变量在生成配置前就拒绝：制备阶段只会跳过它们，等到 check 失败太晚（C05）。
   const layerIssues = layerVariableProblems(design);
   if (layerIssues.length)
@@ -792,7 +874,10 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
   const sites: BenchSite[] = [];
   design.simulations.forEach((sim, i) => {
     const key = keys[i]!;
-    lines.push(`  ${key}:`, '    model: CoLM2024');
+    // 模型 profile 默认 CoLM2024；用户可换（OpenBench check 会校验 profile 是否存在）。
+    const profile = sim.profile?.trim() || 'CoLM2024';
+    const model = /^[A-Za-z0-9_.-]+$/.test(profile) ? profile : quote(profile);
+    lines.push(`  ${key}:`, `    model: ${model}`);
     if (sim.info.spatial) {
       const groupby =
         sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'Month');
@@ -808,7 +893,8 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     } else {
       // 站点 ID 用站点自己的名字（history 前缀去掉 `_hist_`，如 AT-Neu）：OpenBench 按 ID 和参考数据里的站点
       // 对上，整理过的键（AT_Neu）对不上。
-      const station = sim.info.prefix.replace(/_hist_$/, '') || key;
+      // 站点 ID：页面可显式覆盖（模型版本/前缀与观测站点 ID 不必同名）；空则沿用旧规则从前缀推导。
+      const station = sim.stationId?.trim() || sim.info.prefix.replace(/_hist_$/, '') || key;
       // 编辑模拟弹窗允许修正经纬度：界面显示的是这组值，实际计算也必须用它，而不是再读文件里的旧值。
       sites.push({
         id: key,
@@ -854,6 +940,13 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
       'comparison:',
       '  enabled: true',
       `  items: [${comparisonItems.map(quote).join(', ')}]`,
+    );
+  // 统计检验阶段：页面明确勾选的方法才写；一个都不勾就不写这一段（OpenBench 默认关闭）。
+  if (statisticsItems.length)
+    lines.push(
+      'statistics:',
+      '  enabled: true',
+      `  items: [${statisticsItems.map(quote).join(', ')}]`,
     );
   return { config: `${lines.join('\n')}\n`, sites, missingExtent };
 }
@@ -923,6 +1016,10 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
       value: [
         sim.label,
         kind,
+        sim.profile?.trim() || 'CoLM2024',
+        ...(sim.stationId?.trim()
+          ? [`${bilingual('站点 ID', 'station ID')} ${sim.stationId.trim()}`]
+          : []),
         sim.info.prefix,
         `${sim.info.syear}–${sim.info.eyear}`,
         groupby,
@@ -986,6 +1083,13 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
             '未启用（一个图表都没选，或模拟少于两个）',
             'disabled (no chart selected, or fewer than two simulations)',
           ),
+  });
+  const statisticsChosen = [...new Set((design.statisticsItems ?? []).filter(Boolean))];
+  items.push({
+    label: ['统计检验', 'Statistical tests'],
+    value: statisticsChosen.length
+      ? `${bilingual('已启用', 'enabled')} [${statisticsChosen.join(', ')}]`
+      : bilingual('未启用（一项都没勾）', 'disabled (no method selected)'),
   });
   const advanced = [
     design.weight ? `weight=${design.weight}` : '',

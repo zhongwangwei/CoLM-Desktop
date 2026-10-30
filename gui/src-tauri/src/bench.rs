@@ -33,6 +33,10 @@ use crate::sidecar::{register_child, ChildOwner};
 /// 在软件里直接显示的报告大小上限；独立报告把图嵌在 HTML 里，更大的交给浏览器打开。
 const INLINE_REPORT_LIMIT: u64 = 40 * 1024 * 1024;
 
+/// 状态页每个比较项目带上的历史运行条数：够看清"哪次成功、哪次失败"，又不至于每次刷新都把
+/// 项目下所有 meta.json 读一遍（报告仍以 latest-success 为准，历史只用来追溯旧报告/配置）。
+const PROJECT_RUNS_LIMIT: usize = 20;
+
 /// 取消返回的固定文字：前端按它把错误识别成"已停止"（Stopped），措辞不能改。
 const STOPPED: &str = "已停止";
 
@@ -320,6 +324,9 @@ fn project_json(dir: &Path) -> Value {
         "report": report,
         "latest_success": success.as_ref().map(|success| success.to_json(dir)),
         "latest_run": latest.as_ref().map(|run| run.to_json()),
+        // 历史运行（最新在前）：前端据此列出每次运行的身份与报告，旧的成功报告在后续失败后仍可打开。
+        // 纯状态数据，命令签名与 contract 都不变。
+        "runs": bench_runs::list_runs(dir, PROJECT_RUNS_LIMIT),
         "modified": modified,
     })
 }

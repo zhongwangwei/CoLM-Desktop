@@ -79,6 +79,8 @@ type Pick = {
   variables?: Record<string, { varname: string; varunit: string }>;
   dataGroupby?: string | null;
   gridRes?: number | null;
+  profile?: string | null;
+  stationId?: string | null;
   error?: string;
 };
 const probedGrid: HistoryInfo = {
@@ -107,6 +109,8 @@ const baseForm = (patch: Partial<Form> = {}): Form => ({
   to: '',
   dataGroupby: '',
   gridRes: '',
+  profile: 'CoLM2024',
+  stationId: '',
   lon: '',
   lat: '',
   extent: '',
@@ -830,4 +834,43 @@ test('the pure comparison design helpers the page relies on are the ones under t
     projectDir: '/ob/projects/x',
   };
   assert.match(buildOpenbenchConfig(design).config, /data_type: grid/);
+});
+
+test('saving a simulation keeps the model profile and station ID overrides', () => {
+  const form = baseForm({
+    dir: '/p/AT-Neu/history',
+    dataType: 'stn',
+    prefix: 'AT-Neu_hist_',
+    from: '2003',
+    to: '2006',
+    profile: 'CoLM2024_DEV',
+    stationId: 'AT-Neu',
+  });
+  const result = saveSimulationRun(form);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.picks[0]!.profile, 'CoLM2024_DEV');
+  assert.equal(result.picks[0]!.stationId, 'AT-Neu');
+});
+
+test('the simulation form rejects an empty profile or an unsafe station ID', () => {
+  const emptyProfile = saveSimulationRun(
+    baseForm({ dir: '/d', dataType: 'stn', from: '2003', to: '2006', profile: '' }),
+  );
+  assert.equal(emptyProfile.issues[0]?.field, 'profile');
+
+  const badProfile = saveSimulationRun(
+    baseForm({ dir: '/d', dataType: 'stn', from: '2003', to: '2006', profile: 'bad profile' }),
+  );
+  assert.equal(badProfile.issues[0]?.field, 'profile');
+
+  const badStation = saveSimulationRun(
+    baseForm({
+      dir: '/d',
+      dataType: 'stn',
+      from: '2003',
+      to: '2006',
+      stationId: 'AT,Neu',
+    }),
+  );
+  assert.equal(badStation.issues[0]?.field, 'stationId');
 });

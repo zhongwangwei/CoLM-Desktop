@@ -39842,3 +39842,43 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 3. OpenBench `statistics` 阶段（统计检验）仍未接入。
 4. 草稿离页恢复、保存/运行按钮语义拆分、常驻任务栏、站点 ID 与模型 profile 独立选择、CoLM2024 仍固定写。
 5. 旧式镜像/旧项目没有 run 身份，取回仍走旧路径；远程 status 的 latest_run 目前只到"最近一次运行"，没有历史运行列表。
+
+
+## 比较页第五批：统计检验阶段、模型 profile/站点 ID、本机历史运行列表（2026-10-30）
+
+继续第四批列出的能力项里不需要科学口径的部分；层维度、多 patch、element、跨日界线仍按前批结论保持"运行前明确拒绝"，等作者定口径后再动（见文末）。
+
+### 1 OpenBench 统计检验阶段（statistics）接入
+
+- 旧行为：配置不生成 `statistics` 段，OpenBench 的独立统计检验阶段永远关闭；页面也没有入口。
+- 新行为：比较页高级设置新增"统计检验"多选（默认不启用/opt-in，勾选的方法才写配置），生成器在勾选非空时写 `statistics: {enabled: true, items: [...]}`，方法名按 OpenBench 3.0.8 的 figlib `statistic_nml` + `_BASIC_ANALYSIS_ITEMS` {Basic,Mean,Median,Max,Min,Sum} + 单独放行的 False_Discovery_Rate 在本地校验；有效配置解析器接受 statistics 段并做同名校验（未知方法、enabled 配空 items 明确拒绝），摘要/指纹/手改后的完成提示随段变化。需要指标/评分的统计方法缺数据时由 OpenBench check 报错（不做本地猜测）。
+- 测试：compare.test 生成/未知方法拒绝；config.test 生成→解析→摘要回环、关闭默认、未知方法/空 items 拒绝。
+
+### 2 模型 profile 与站点 ID 独立选择
+
+- 旧行为：配置固定写 `model: CoLM2024`；单点站点 ID 固定从 history 前缀去掉 `_hist_` 推导，改报告显示名无法解决 `AT-Neu_v2_hist_` → 站点 `AT-Neu_v2` 对不上观测 `AT-Neu`。
+- 新行为：每个模拟可单独填"模型 profile"（默认 CoLM2024；装了别的 profile 时可用，名字由 openbench check 校验）和单点"站点 ID"（空=沿用前缀推导；按后端 valid_station 约束校验 ≤80 字符且不含逗号/引号/换行）。两个值进入生成配置（model 行、站点清单 station）与摘要；空 profile/非法名字在保存时按字段报错。
+- 测试：compare.test 自定义 profile/station ID 写入配置与 sites、默认 profile 仍写裸 CoLM2024、表单往返；compare-page.test 保存保留覆盖值、空 profile/非法 profile/非法站点 ID 的字段报错；config.test 解析自定义 profile。
+
+### 3 本机历史运行列表（原审查 #5 验收闭环）
+
+- 旧行为：项目行只显示最近一次运行/最近成功报告；A 成功、B 失败后能看 A 的报告，但**无法在软件里选看更早某次运行的报告**（只能靠文件系统）。
+- 新行为：`bench_status.projects[]` 每项增加 `runs: [...]`（最多 20 条，`created_unix` 降序、同秒 run_id 降序；字段与前端 ProjectRun 一致）。`report` 只有 succeeded、meta 里是安全相对路径（拒绝绝对路径/`..`/`.`）且文件仍存在时给绝对路径；失败带 meta 截断 error；坏 JSON/缺 meta/>1 MiB/无 state 的 run 跳过不影响其它，旧目录/远程镜像 `runs=[]`。前端"报告"区新增折叠的"历史运行"列表：每次运行显示 run id/状态/时间，成功的 run 提供"查看这次报告"（直接打开该 run 冻结目录里的报告，而不是当前磁盘上的最新文件），失败显示原因。
+- 测试：bench_runs_tests +3（排序截断、报告可见性与路径安全、坏 meta 降级/旧项目空数组）、bench_tests +1（projects().runs 与 list_runs 一致、旧目录/镜像为空）、compare-layout 新增历史运行 UI 回归（含点击"查看这次报告"调 bench_report 的路径断言）。
+
+### 本轮验证（真实执行）
+
+- 前端：`check-gui.mjs --self-test` 0、`check-gui.mjs` 0（**262 命令 / 224 调用**，本批未改命令签名/契约）；`test-react.mjs` **1284 passed / 0 failed**；比较页 6 个测试文件 **117 passed**（新增统计/模型 profile/站点 ID/历史运行用例）；`tsc --noEmit` 0 error；`eslint src/features/compare`、`prettier --check src/features/compare` 干净。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib -- --test-threads=1` → **586 passed / 0 failed / 1 ignored**（bench 过滤 52 passed，含 4 个新历史运行测试）；clippy `--all-targets -- -D warnings` 干净；改动文件 rustfmt 干净。
+- 根 workspace：本批未改 `crates/*`/`oracle`/`xtask`，沿用第四批结论。
+- `git diff --check` 干净；未重生成 contract（Tauri 命令参数未变）。
+- 未运行：真实 OpenBench 统计检验阶段（本机无 OpenBench 环境；statistics 段按 3.0.8 源码 schema/方法名校验，未实际跑过统计图/表）、真实非默认模型 profile（需要装了对应 profile 的 OpenBench）、真实窗口点击历史运行列表、真实多 run 并发/大目录状态刷新性能。
+
+### 遗留（需要作者定口径/产品决策，未擅自动）
+
+1. 层维度（soil/snow/类别）变量：现在运行前明确拒绝。要支持需定语义（按层号选一层 / 按深度或厚度加权 / 只允许地表层），并同步改 PREPARE 与配置变量映射（OpenBench 3.0.8 的变量覆盖本身没有"选层"字段，需在制备端选出单层或聚合）。
+2. 多 patch：CoLM 的 patch 是瓦片（地类/城市/水体）；需要定"按面积权重合并 / 只允许单 patch / 选择某个 patch 类型"，历史文件里是否有可用权重也待确认。
+3. element/非结构网格：OpenBench 站点与规则格点都表达不了，保持明确拒绝（除非先转规则网格）。
+4. 跨日界线格点：OpenBench 的 [西,东] 无法表达环绕范围，保持明确拒绝。
+5. UX：草稿离页恢复、保存/运行按钮语义拆分、常驻任务栏、CoLM2024 之外的 profile 管理入口（本批只做了手填 profile）。
+6. 远程镜像仍没有 run 列表（`runs=[]`），旧式镜像项目也没有 run 身份；报告仍由 latest_run/latest_success 提供。

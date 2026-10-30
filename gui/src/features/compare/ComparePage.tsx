@@ -22,6 +22,7 @@ import {
   buildOpenbenchConfig,
   COMPARISON_ITEM_CHOICES,
   DEFAULT_COMPARISON_ITEMS,
+  STATISTICS_ITEMS,
   comparableVariables,
   commonYears,
   comparisonDir,
@@ -77,6 +78,8 @@ type Project = {
     report: string | null;
     finished_at: string | null;
   } | null;
+  /** 最近若干次运行（新→旧）：历史运行列表/查看旧成功报告用；旧项目没有 runs/ 时为空。 */
+  runs?: ProjectRun[];
 };
 /** 本机（`bench_status`）与服务器（`bench_remote_status`）的状态；服务器那份没有 uv 的路径，多了平台与下载工具。 */
 type Status = {
@@ -104,6 +107,10 @@ type Pick = {
   variables?: Record<string, { varname: string; varunit: string }>;
   dataGroupby?: string | null;
   gridRes?: number | null;
+  /** OpenBench 模型 profile（缺省 CoLM2024）。 */
+  profile?: string | null;
+  /** 单点模拟的站点 ID 覆盖（空 = 从 history 前缀推导）。 */
+  stationId?: string | null;
 };
 /**
  * 登记/编辑模拟的表单。保存相关字段就是 `SimulationFormValues`；`probe` 保存完整探测结果，
@@ -197,6 +204,8 @@ const emptySimForm = (): SimForm => ({
   to: '',
   dataGroupby: '',
   gridRes: '',
+  profile: 'CoLM2024',
+  stationId: '',
   lon: '',
   lat: '',
   extent: '',
@@ -280,6 +289,8 @@ export default function ComparePage() {
   // OpenBench 的跨模拟比较阶段（comparison.enabled）：默认用 OpenBench 自己的两个默认图表；
   // 一个都不勾表示不启用。写进配置后由 OpenBench 生成 comparisons/ 下的图。
   const [comparisonItems, setComparisonItems] = useState<string[]>([...DEFAULT_COMPARISON_ITEMS]);
+  // OpenBench 独立统计检验阶段（statistics）：默认不启用，勾选方法后才写进配置。
+  const [statisticsItems, setStatisticsItems] = useState<string[]>([]);
   const [metricOptions, setMetricOptions] = useState<MetricOption[]>(FALLBACK_METRICS);
   const [scoreOptions, setScoreOptions] = useState<MetricOption[]>(FALLBACK_SCORES);
   const [dialog, setDialog] = useState<RegisterDialog>(null);
@@ -959,6 +970,8 @@ export default function ComparePage() {
           variables,
           dataGroupby: null,
           gridRes: null,
+          profile: simForm.profile.trim() || 'CoLM2024',
+          stationId: simForm.stationId.trim() || null,
         };
         if (editingAt >= 0)
           return old.map((p, i) => (i === editingAt ? { ...p, ...next, error: undefined } : p));
@@ -1053,6 +1066,8 @@ export default function ComparePage() {
       variables: p.variables,
       dataGroupby: p.dataGroupby,
       gridRes: p.gridRes,
+      profile: p.profile,
+      stationId: p.stationId,
     })),
     projectDir: comparisonDir(status?.root ?? '', name),
     gridRes: Number(gridRes) || null,
@@ -1063,6 +1078,7 @@ export default function ComparePage() {
     metrics,
     scores,
     comparisonItems,
+    statisticsItems,
   });
   const machine = { host, openbenchRoot: status?.root ?? '', refRoot: scanDir };
   // 表单设计：`保存评估配置` 生成配置与站点清单时用它（GUI-04）。
@@ -2202,6 +2218,43 @@ export default function ComparePage() {
                       ))}
                     </div>
                   </Field>
+                  <Field
+                    label={t('统计检验', 'Statistical tests')}
+                    hint={t(
+                      'OpenBench 独立的统计检验阶段（statistics），默认不启用；勾选的方法才写进配置。方法需要的数据（指标/评分/站点序列）不满足时 OpenBench check 会明确报错。',
+                      'OpenBench has an independent statistical-analysis phase (statistics), disabled by default; only ticked methods are written. openbench check reports when a method lacks the data it needs (metrics/scores/station series).',
+                    )}
+                  >
+                    <div className="button-row">
+                      <Button
+                        variant="ghost"
+                        onClick={() => setStatisticsItems([...STATISTICS_ITEMS])}
+                      >
+                        {t('全选', 'All')}
+                      </Button>
+                      <Button variant="ghost" onClick={() => setStatisticsItems([])}>
+                        {t('清空（不启用）', 'Clear (disable)')}
+                      </Button>
+                    </div>
+                    <div className="metric-options">
+                      {STATISTICS_ITEMS.map((name) => (
+                        <label key={name} className="param-check">
+                          <input
+                            type="checkbox"
+                            checked={statisticsItems.includes(name)}
+                            onChange={(e) =>
+                              setStatisticsItems((old) =>
+                                e.target.checked
+                                  ? [...old, name]
+                                  : old.filter((item) => item !== name),
+                              )
+                            }
+                          />
+                          <span>{name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </Field>
                 </div>
               </Advanced>
 
@@ -2659,6 +2712,34 @@ export default function ComparePage() {
             ) : (
               <p className="muted">{t('还没有比较。', 'No comparisons yet.')}</p>
             )}
+            {status?.projects.some((p) => (p.runs?.length ?? 0) > 1) && (
+              <details className="study-fold" data-compare-run-history>
+                <summary>{t('历史运行', 'Run history')}</summary>
+                {status.projects
+                  .filter((p) => (p.runs?.length ?? 0) > 1)
+                  .map((p) => (
+                    <div key={p.name} data-compare-project-runs={p.name}>
+                      <h4 className="study-subhead">{p.name}</h4>
+                      <ul className="compare-status">
+                        {p.runs!.map((run) => (
+                          <li key={run.run_id}>
+                            <strong>{run.run_id}</strong> · {run.state}
+                            {run.finished_at ? ` · ${run.finished_at}` : ''}
+                            {run.report && (
+                              <Button onClick={() => void task(() => view(run.report!))}>
+                                {t('查看这次报告', 'View this report')}
+                              </Button>
+                            )}
+                            {run.state === 'failed' && run.error && (
+                              <span className="muted"> — {shown(run.error)}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+              </details>
+            )}
             <div className="button-row">
               <ActionButton
                 action="compare-load-report"
@@ -2949,6 +3030,41 @@ export default function ComparePage() {
               onChange={(e) => setSimForm((old) => ({ ...old, timRes: e.target.value }))}
             />
           </Field>
+          <Field
+            label={t('模型 profile', 'Model profile')}
+            hint={simHint(
+              'profile',
+              t(
+                'OpenBench 的 model 字段（默认 CoLM2024）；装了别的模型 profile 时可改，OpenBench check 会校验名字。',
+                'The OpenBench model field (default CoLM2024); change it when another model profile is installed — openbench check validates the name.',
+              ),
+            )}
+          >
+            <Input
+              data-sim-field="profile"
+              value={simForm.profile}
+              onChange={(e) => setSimForm((old) => ({ ...old, profile: e.target.value }))}
+            />
+          </Field>
+          {!simSpatial && (
+            <Field
+              label={t('站点 ID（可选）', 'Station ID (optional)')}
+              hint={simHint(
+                'stationId',
+                t(
+                  '与参考数据里的站点 ID 比对；留空则从 history 前缀去掉 _hist_ 推导。改报告显示名不影响它。',
+                  'Matched against the station ID in the reference data; leave empty to derive it from the history prefix. The display name does not affect it.',
+                ),
+              )}
+            >
+              <Input
+                data-sim-field="stationId"
+                value={simForm.stationId}
+                placeholder={simForm.prefix.replace(/_hist_$/, '')}
+                onChange={(e) => setSimForm((old) => ({ ...old, stationId: e.target.value }))}
+              />
+            </Field>
+          )}
           <Field label={t('起始年', 'From year')} hint={simHint('from')}>
             <Input
               type="number"

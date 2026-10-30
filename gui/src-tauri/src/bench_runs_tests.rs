@@ -107,12 +107,52 @@ fn write_run_meta(project: &Path, run_id: &str, created_unix: u64, state: RunSta
         report: None,
         error: None,
     };
+    write_listed_meta(&dir, &meta);
+    dir
+}
+
+/// 手工写一份带报告/失败原因的 meta：测 `runs[]` 的报告可见性，不必真的跑一次运行。
+fn write_run_with_report(
+    project: &Path,
+    run_id: &str,
+    created_unix: u64,
+    state: RunState,
+    report: Option<&str>,
+    error: Option<&str>,
+) -> PathBuf {
+    let dir = project.join(RUNS_DIR).join(run_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = RunMeta {
+        run_id: run_id.to_owned(),
+        project: "cmp".to_owned(),
+        created_at: iso8601_utc(created_unix),
+        created_unix,
+        finished_at: Some(iso8601_utc(created_unix + 5)),
+        finished_unix: Some(created_unix + 5),
+        state,
+        config_sha: "abc".to_owned(),
+        ref_root: None,
+        sites: Vec::new(),
+        machine: Machine::default(),
+        output_dir: DEFAULT_OUTPUT_DIR.to_owned(),
+        report: report.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+    write_listed_meta(&dir, &meta);
+    dir
+}
+
+fn write_listed_meta(run_dir: &Path, meta: &RunMeta) {
     std::fs::write(
-        dir.join(META_FILE),
-        serde_json::to_string_pretty(&meta).unwrap(),
+        run_dir.join(META_FILE),
+        serde_json::to_string_pretty(meta).unwrap(),
     )
     .unwrap();
-    dir
+}
+
+/// JSON 里的路径由原生目录拼接，Windows 上两种分隔符会混在一行；断言按分隔符归一后比较。
+fn same_path(actual: &str, expected: &Path) -> bool {
+    actual.replace('\\', "/") == expected.to_string_lossy().replace('\\', "/")
 }
 
 #[test]
@@ -666,5 +706,236 @@ fn a_flat_mirror_with_a_run_record_is_not_treated_as_a_legacy_project() {
     let record = flat_run(&mirror).unwrap();
     assert_eq!(record.meta(), &meta);
     assert_eq!(record.report_path().as_deref(), Some(report.as_path()));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn list_runs_is_newest_first_and_capped() {
+    let base = temp("list-order");
+    let project = project_dir(&base);
+    // 25 条不同时刻的运行，状态混着来：列表按时间排，不按状态挑。
+    for index in 0..25u64 {
+        let state = match index % 3 {
+            0 => RunState::Succeeded,
+            1 => RunState::Failed,
+            _ => RunState::Running,
+        };
+        write_run_meta(
+            &project,
+            &format!("20260101T0000{index:02}Z-1-{index:06}"),
+            1_700_000_000 + index,
+            state,
+        );
+    }
+    // 同一秒的两条：run_id（时间戳+补零序号）大的在前。
+    let same_second_early = "20260102T000000Z-1-000001";
+    let same_second_late = "20260102T000000Z-1-000002";
+    write_run_meta(&project, same_second_early, 1_700_000_100, RunState::Failed);
+    write_run_meta(
+        &project,
+        same_second_late,
+        1_700_000_100,
+        RunState::Succeeded,
+    );
+
+    let mut expected = (0..25u64)
+        .map(|index| {
+            (
+                1_700_000_000 + index,
+                format!("20260101T0000{index:02}Z-1-{index:06}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.push((1_700_000_100, same_second_early.to_owned()));
+    expected.push((1_700_000_100, same_second_late.to_owned()));
+    expected.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let expected = expected
+        .iter()
+        .take(20)
+        .map(|(_, run_id)| run_id.as_str())
+        .collect::<Vec<_>>();
+    let actual = list_runs(&project, 20)
+        .iter()
+        .map(|run| run["run_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    // limit=0 一条都不要；给大了就是全部（27 条）。
+    assert_eq!(list_runs(&project, 0), Vec::<Value>::new());
+    assert_eq!(list_runs(&project, 100).len(), 27);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn list_runs_only_links_the_report_of_a_succeeded_run_that_still_lives_inside_it() {
+    let base = temp("list-report");
+    let project = project_dir(&base);
+    let relative_report = "output/cmp/reports/evaluation_report_standalone.html";
+    // 成功且报告文件还在：给绝对路径。
+    let ok = write_run_with_report(
+        &project,
+        "run-ok",
+        500,
+        RunState::Succeeded,
+        Some(relative_report),
+        None,
+    );
+    std::fs::create_dir_all(ok.join("output/cmp/reports")).unwrap();
+    let report = ok.join(relative_report);
+    std::fs::write(&report, "<p>ok</p>").unwrap();
+    // 成功但报告文件被手工删掉：null。
+    write_run_with_report(
+        &project,
+        "run-gone",
+        400,
+        RunState::Succeeded,
+        Some("output/cmp/reports/gone.html"),
+        None,
+    );
+    // 失败：即使 meta 残留路径、那个半份 HTML 也还在，也不当可打开的报告。
+    let failed = write_run_with_report(
+        &project,
+        "run-failed",
+        300,
+        RunState::Failed,
+        Some("output/cmp/reports/evaluation_report.html"),
+        Some("check 失败（exit status: 1）：\nboom"),
+    );
+    std::fs::create_dir_all(failed.join("output/cmp/reports")).unwrap();
+    std::fs::write(
+        failed.join("output/cmp/reports/evaluation_report.html"),
+        "<p>half</p>",
+    )
+    .unwrap();
+    // 绝对路径（即使指向真实存在的文件）与 `..` 逃逸都不认。
+    let outside = base.join("outside.html");
+    std::fs::write(&outside, "outside").unwrap();
+    write_run_with_report(
+        &project,
+        "run-absolute",
+        200,
+        RunState::Succeeded,
+        Some(outside.to_str().unwrap()),
+        None,
+    );
+    let escaped = format!("../run-ok/{relative_report}");
+    write_run_with_report(
+        &project,
+        "run-dotdot",
+        100,
+        RunState::Succeeded,
+        Some(&escaped),
+        None,
+    );
+
+    let runs = list_runs(&project, 20);
+    assert_eq!(runs.len(), 5);
+    assert_eq!(runs[0]["run_id"], "run-ok");
+    let by_id = |run_id: &str| {
+        runs.iter()
+            .find(|run| run["run_id"] == run_id)
+            .unwrap_or_else(|| panic!("{run_id} 不在列表里"))
+    };
+    // 前端 ProjectRun 的每个字段都在。
+    for key in [
+        "run_id",
+        "state",
+        "report",
+        "finished_at",
+        "created_at",
+        "config_sha",
+        "error",
+    ] {
+        assert!(by_id("run-ok").get(key).is_some(), "缺少字段 {key}");
+    }
+    assert_eq!(by_id("run-ok")["state"], "succeeded");
+    assert!(same_path(
+        by_id("run-ok")["report"].as_str().unwrap(),
+        &report
+    ));
+    assert_eq!(by_id("run-ok")["created_at"], iso8601_utc(500));
+    assert_eq!(by_id("run-ok")["finished_at"], iso8601_utc(505));
+    assert_eq!(by_id("run-ok")["config_sha"], "abc");
+    assert_eq!(by_id("run-ok")["error"], Value::Null);
+    assert_eq!(by_id("run-gone")["report"], Value::Null);
+    assert_eq!(by_id("run-failed")["report"], Value::Null);
+    assert!(by_id("run-failed")["error"]
+        .as_str()
+        .unwrap()
+        .contains("check 失败"));
+    assert_eq!(by_id("run-absolute")["report"], Value::Null);
+    assert_eq!(by_id("run-dotdot")["report"], Value::Null);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn list_runs_skips_bad_meta_and_degrades_old_records_without_losing_the_rest() {
+    let base = temp("list-bad");
+    let project = project_dir(&base);
+    write_run_meta(&project, "good", 100, RunState::Succeeded);
+    let runs_dir = project.join(RUNS_DIR);
+    // 坏 JSON、缺 meta、超大文件、runs/ 下的普通文件：都跳过，但不能影响别的 run。
+    let bad = runs_dir.join("bad");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join(META_FILE), "{ not json").unwrap();
+    std::fs::create_dir_all(runs_dir.join("in-progress")).unwrap();
+    let huge = runs_dir.join("huge");
+    std::fs::create_dir_all(&huge).unwrap();
+    std::fs::write(
+        huge.join(META_FILE),
+        "x".repeat((META_LIST_BYTES_LIMIT + 1) as usize),
+    )
+    .unwrap();
+    std::fs::write(runs_dir.join("stray"), "x").unwrap();
+    // 缺 created_unix/created_at/finished_at 的旧 meta：降级为 0 排最后，但字段不丢。
+    let legacy = runs_dir.join("legacy");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(
+        legacy.join(META_FILE),
+        json!({
+            "run_id": "legacy",
+            "project": "cmp",
+            "state": "failed",
+            "config_sha": "old-sha",
+            "error": "旧版失败原因",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let runs = list_runs(&project, 20);
+    let ids = runs
+        .iter()
+        .map(|run| run["run_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["good", "legacy"]);
+    let legacy = &runs[1];
+    assert_eq!(legacy["state"], "failed");
+    assert_eq!(legacy["error"], "旧版失败原因");
+    assert_eq!(legacy["config_sha"], "old-sha");
+    assert_eq!(legacy["created_at"], Value::Null);
+    assert_eq!(legacy["finished_at"], Value::Null);
+    assert_eq!(legacy["report"], Value::Null);
+
+    // meta 里的 run_id 为空时用目录名兜底（目录名才是运行身份）。
+    let unnamed = runs_dir.join("dir-name-is-the-id");
+    std::fs::create_dir_all(&unnamed).unwrap();
+    std::fs::write(
+        unnamed.join(META_FILE),
+        json!({"run_id": "", "state": "running", "created_unix": 1}).to_string(),
+    )
+    .unwrap();
+    let runs = list_runs(&project, 20);
+    let ids = runs
+        .iter()
+        .map(|run| run["run_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["good", "dir-name-is-the-id", "legacy"]);
+    assert_eq!(runs[1]["state"], "running");
+    assert_eq!(runs[1]["report"], Value::Null);
+
+    // 旧目录没有 runs/：空数组，不是错误。
+    let old = base.join("projects").join("old-style");
+    std::fs::create_dir_all(&old).unwrap();
+    assert!(list_runs(&old, 20).is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }

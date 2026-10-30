@@ -529,3 +529,59 @@ fn process_exists(pid: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+/// 历史运行列表：状态页每项的 `runs` 与 `list_runs` 完全一致（不各算一套）；旧目录/远程镜像
+/// 没有 `runs/` 时是空数组，前端不必区分"没有历史"和"读取失败"。
+#[test]
+fn projects_expose_the_recent_runs_history_list() {
+    let root = temp("status-runs-history");
+    let project = root.join("projects/fresh");
+    let mut first =
+        crate::bench_runs::RunSnapshot::create(&project, "fresh", "cfg: first\n", &[], None)
+            .unwrap();
+    let reports = first.dir().join("output/fresh/reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    let report = reports.join("evaluation_report_standalone.html");
+    std::fs::write(&report, "<p>fresh</p>").unwrap();
+    first.succeed(first.discover_report().as_deref()).unwrap();
+    // 失败的第二跑：error 保留、report=null，并排在成功那次前面。
+    let mut second =
+        crate::bench_runs::RunSnapshot::create(&project, "fresh", "cfg: second\n", &[], None)
+            .unwrap();
+    second.fail("check 失败（exit status: 1）：\nboom").unwrap();
+
+    let row = projects(&root)
+        .into_iter()
+        .find(|row| row["name"] == "fresh")
+        .unwrap();
+    let runs = row["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0]["run_id"], second.id());
+    assert_eq!(runs[0]["state"], "failed");
+    assert_eq!(runs[0]["report"], Value::Null);
+    assert!(runs[0]["error"].as_str().unwrap().contains("check 失败"));
+    assert_eq!(runs[1]["run_id"], first.id());
+    assert_eq!(runs[1]["state"], "succeeded");
+    assert!(same_path(runs[1]["report"].as_str().unwrap(), &report));
+    // 与纯列表函数一致（同一份后端数据）。
+    assert_eq!(
+        row["runs"],
+        json!(crate::bench_runs::list_runs(&project, 20))
+    );
+
+    // 旧目录（`runs/` 不存在）与远程镜像：空数组。
+    let legacy = root.join("projects/legacy");
+    std::fs::create_dir_all(legacy.join("output/old/reports")).unwrap();
+    std::fs::write(legacy.join("openbench.yaml"), "legacy").unwrap();
+    std::fs::write(
+        legacy.join("output/old/reports/evaluation_report.html"),
+        "old",
+    )
+    .unwrap();
+    let legacy_row = projects(&root)
+        .into_iter()
+        .find(|row| row["name"] == "legacy")
+        .unwrap();
+    assert_eq!(legacy_row["runs"], json!([]));
+    let _ = std::fs::remove_dir_all(&root);
+}
