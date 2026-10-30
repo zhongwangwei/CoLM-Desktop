@@ -41171,3 +41171,71 @@ tms17l 上已有 Fortran 工具链与 /shr03 数据，可以作为第二节点�
 和 4 rank 续跑：history **135/135 变量逐位相同**。加上上一节的 Fortran grouped 3/6 rank
 逐位相同、grouped 3 vs flat 1 逐位相同、Rust 1 vs 2 rank 逐位相同，"多 rank / 单 rank"
 这一层目前没有数值差；真正的**多 node**仍待 7920/tms17l 双节点就绪（见上一节探测）。
+
+## 冠层湿雪散射：上游改了公式，Rust 停在旧语义（2026-10-31，第十一轮）
+
+上一轮把单步反照率差定位到"band 分辨的光学路径"后，这轮做定向仪器化把它钉死：给
+Fortran `albland`（`MOD_Albedo.F90` 末尾）和 Rust `surface_optics::albland` 各加一段
+`COLM_ALB_DEBUG` 环境变量门控的中间量输出（临时，构建完即回退 vendor），在站点黄金算例
+上跑 1 个 1800 s 步，得到 50 个白天调用的逐分量对照。
+
+### 证据：输入逐位相同，输出差 1–2%
+
+每个调用点两边的 `chil`、`rho/tau` 四分量、`lai`、`sai`、`fwet_snow`、`czen`、
+`albg/albsoi`、地面温度全部逐位相同（`d=0`），但 `twostream` 的输出不同：
+
+```
+alb   F 0.2907011931 0.1942806091 0.6086175785 0.4034314086
+      R 0.303599xxxx 0.197952xxxx 0.593078xxxx 0.398917xxxx   (最大差 1.55e-2)
+tran  F 0.1580524794 0.6430706533 …   R 0.1474439157 0.6388512697 …
+```
+
+### 根因：上游把湿雪散射的分子从"新 scat"改回"旧 scat"
+
+对比 `.omx/evidence/current-pc-original-20260918-v1/source/main/MOD_Albedo.F90`（旧快照）与
+当前 vendor：
+
+```fortran
+! 旧（Rust 一直按它实现，docs 里的 GIMPLE 注释也是这份代码的编译结果）
+scat   = (1.-fwet_snow)*scat + fwet_snow*scat_sno(iw)
+upscat = ((1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno) / scat
+beta0  = ((1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno ) / scat
+
+! 当前 vendor（上游后来改的）
+scat_new = (1.-fwet_snow)*scat + fwet_snow*scat_sno(iw)
+upscat   = ((1.-fwet_snow)*scat*upscat + fwet_snow*scat_sno(iw)*upscat_sno) / scat_new
+beta0    = ((1.-fwet_snow)*scat*beta0  + fwet_snow*scat_sno(iw)*beta0_sno ) / scat_new
+scat     = scat_new
+```
+
+旧代码先把 `scat` 覆盖掉，分子用的自然是新值；新代码用 `scat_new` 且分子保留**旧** `scat`。
+Rust（`crates/colm-core/src/radiation.rs` 的 `vegetation_snow` 分支）停在旧语义，所以只要
+`DEF_VEG_SNOW`（默认开）且 `fwet_snow > 0`，反照率就系统性偏 1–2% —— 站点、格点、雪窗全都中，
+这也是上一轮"宽带通量对上、四分量对不上"的来源（可见/近红外权重不同）。
+
+### 修复与验证
+
+Rust 改成上游当前语义（`old_scattering` 参与两个分子，`scat_new` 只做最后赋值）后：
+
+- 同一批 50 个调用的 `alb`/`tran`/`ssun`/`ssha`/`ssoi` 与 Fortran 对齐到 **≤1.7e-16**（只剩末位）；
+- 站点黄金（CN-Cng，264 步）：tier2 之外 **59 → 4** 项（`f_qinfl` 近零通量 15/264 个值、
+  `f_vegwp` 4/1056、`f_wdsrf` 1/264、`f_zwt` 1/264，最大相对差 ~4.5e-5）；
+- 湿窗（CN-Cng-wet）：tier2 23 项，最大 `f_vegwp` 相对差 ~1.6e-4、`f_wliq_soisno` ~5e-5；
+- 雪窗（US-NR1-snow）：tier2 51 项，最大 `f_h2osoi` 相对差 ~3e-3、`f_wliq_soisno` ~3e-3；
+- 格点河湖算例日切续跑：`f_alb` 最大差从 8.6e-2 降到 **5.8e-6**，`f_sr` 0.00077、
+  `f_rnet` 0.00059；剩余大项是 `f_floodarea`（26%）、`f_discharge`（3.4%）、`f_zwt`（3.6%）
+  —— 这些是洪水/河道量，不再是辐射链。
+
+### 测试参照的更新：旧的 `CN-Cng-noon` 快照属于旧公式
+
+`runtime_albland_reproduces_the_fortran_noon_restart` 原来拿 `oracle/work/CN-Cng-noon`
+的旧重启当参照（那是旧公式内核生成的），修复后该测试不再闭合。这轮用当前内核把该算例重算到
+2008-01-11 12:00，按新重启的**输入与输出**整组更新参照（并注明旧值属于上游改公式之前），
+测试重新通过。**教训**：凡是在注释里写"GIMPLE 是 …"，必须同时记下它对应的上游 commit；
+上游源码一改，编译结果的等价性就不再有意义。
+
+Tested: 站点/湿窗/雪窗三个黄金算例的 Fortran↔Rust `golden-compare --tolerances`；1 步
+`COLM_ALB_DEBUG` 仪器化对照（50 个白天调用）；`cargo test -p colm-core --lib` 529 通过；
+`cargo test -p colm-runtime --lib --bins` 4 通过；`cargo test --workspace --lib --bins`
+（唯一失败是既有的沙箱 pty 测试）；`cargo clippy --workspace --all-targets -- -D warnings`；
+两个 workspace 的 `cargo fmt --all --check`。

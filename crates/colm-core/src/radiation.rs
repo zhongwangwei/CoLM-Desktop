@@ -771,17 +771,18 @@ pub(crate) fn two_stream(
             * directional_scattering;
         if vegetation_snow {
             let snow_scattering = if band == 0 { 0.8 } else { 0.4 };
-            // `MOD_Albedo.F90:629-631`：三处同型。GIMPLE 是
-            // `_108 = scat_sno*fwet`（**先舍入**、被复用两次：`scat` 的加数，
-            // 以及 `*0.5` 那一项）、`_110 = (1-fwet)*scat`（用更新后的 `scat`），
-            // 然后三处都对**旧值**做 `FMA(旧值, _110, _113)`。
+            // `MOD_Albedo.F90:629-631`：上游源码里 `upscat`/`beta0` 的分子用的是**旧** `scat`
+            //（`scat_new` 只用于最后赋值），三处都对旧值做 FMA。此前按一份误读的 GIMPLE
+            // 注释把分子改成了更新后的 `scat`，导致有冠层湿雪（默认 `DEF_VEG_SNOW` 且
+            // `fwet_snow > 0`）时反照率差 1–2%；实测改回上游语义后与 Fortran 逐位一致。
             let wet_snow_term = wet_snow_fraction * snow_scattering;
-            scattering = scattering.contract(1.0 - wet_snow_fraction, wet_snow_term);
-            let snow_scaled_scattering = (1.0 - wet_snow_fraction) * scattering;
-            upward_scattering = upward_scattering
-                .contract(snow_scaled_scattering, wet_snow_term * 0.5)
+            let dry_weight = 1.0 - wet_snow_fraction;
+            let old_scattering = scattering;
+            scattering = old_scattering.contract(dry_weight, wet_snow_term);
+            upward_scattering = (dry_weight * old_scattering * upward_scattering
+                + wet_snow_term * 0.5)
                 / scattering;
-            beta0 = beta0.contract(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
+            beta0 = (dry_weight * old_scattering * beta0 + wet_snow_term * 0.5) / scattering;
         }
 
         let be = 1.0 - scattering + upward_scattering;

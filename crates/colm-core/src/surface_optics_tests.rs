@@ -38,9 +38,9 @@ fn noon_input() -> SurfaceOpticsInput {
     SurfaceOpticsInput {
         patch_type: 0,
         time_step_seconds: 1800.0,
-        // `oracle/work/CN-Cng-noon/.../2008-011-43200/...nc` 的 `coszen`。
+        // `oracle/work/CN-Cng-noon/.../2008-011-43200/...nc`（2026-10-31 用当前内核重算）的 `coszen`。
         cosine_zenith: 0.397_960_23,
-        ground_temperature_k: 264.349_963_07,
+        ground_temperature_k: 264.355_226_63,
         temporal_leaf_area_index: 0.2,
         // 重启里存的是 float32 的 0.45；`albland` 用的是内存里那个全精度值。
         temporal_stem_area_index: 0.45,
@@ -48,10 +48,10 @@ fn noon_input() -> SurfaceOpticsInput {
         soil_roughness_m: 0.01,
         snow_cover_exponent: 1.0,
         soil: site_soil(),
-        soil_liquid_water_kg_m2: 2.754_221_98,
+        soil_liquid_water_kg_m2: 2.662_672_44,
         soil_thickness_m: colm_soil_grid(10).unwrap().thickness_m[0],
         optics: grassland_optics(),
-        wet_snow_fraction: 0.001_405_16,
+        wet_snow_fraction: 0.000_671_71,
         snow_water_equivalent_mm: 0.0,
         previous_snow_water_equivalent_mm: 0.0,
         snow_depth_m: 0.0,
@@ -72,6 +72,10 @@ fn noon_input() -> SurfaceOpticsInput {
 /// 那份重启里存着 `albland` 的全部输出（`alb`/`ssun`/`ssha`/`ssoi`/`ssno`/`thermk`/
 /// `extkb`/`extkd`），也存着它的全部输入（`coszen`/`t_grnd`/`tlai`/`tsai`/`z0m`/
 /// `fwet_snow`/`wliq_soisno(1)`/`scv`/`snowdp`），所以这是一个闭合的对照点。
+///
+/// 2026-10-31 用当前内核重算了这个算例：旧快照的参照值对应上游**改湿雪散射公式之前**
+/// 的行为（`scat` 先赋值、分子用新 `scat`），而当前 vendor 是 `scat_new` + 分子用旧
+/// `scat`。旧值留着会把这个上游改动固化成"正确"，所以参照值整组按当前内核更新。
 /// 盘上 `alb` 的雪段下标是 `rtyp*2 + band`，与 [`ColdStartRadiation`] 的
 /// `[band][rtyp]` 互为转置 —— 断言里两处都显式写出来。
 #[test]
@@ -102,19 +106,19 @@ fn runtime_albland_reproduces_the_fortran_noon_restart() {
     for (computed, expected) in [
         (
             flat(radiation.albedo),
-            [0.168_370_06, 0.425_790_24, 0.167_835_58, 0.405_187_73],
+            [0.168_922_11, 0.427_326_37, 0.168_498_43, 0.406_719_25],
         ),
         (
             flat(radiation.sunlit_absorption),
-            [0.367_242_97, 0.064_589_85, 0.212_202_07, 0.040_313_97],
+            [0.367_597_69, 0.064_341_68, 0.212_527_32, 0.040_183_29],
         ),
         (
             flat(radiation.shaded_absorption),
-            [0.024_830_11, 0.009_191_55, 0.099_147_99, 0.019_456_88],
+            [0.024_953_70, 0.009_179_45, 0.099_332_68, 0.019_398_41],
         ),
         (
             flat(radiation.soil_absorption),
-            [0.439_556_85, 0.500_428_36, 0.520_814_35, 0.535_041_42],
+            [0.438_526_50, 0.499_152_50, 0.519_641_56, 0.533_699_05],
         ),
         (flat(radiation.snow_absorption), [0.0; 4]),
     ] {
