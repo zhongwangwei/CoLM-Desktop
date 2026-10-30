@@ -482,6 +482,14 @@ pub struct AssistantSettings {
     /// 历史仓库数据范围与用户已有的 Desktop/官方 CoLM 检出路径（U01/U02）。
     #[serde(default)]
     pub history: HistorySettings,
+    /// 天河 LLM 底线：用户确认“当前 base_url 不在天河上运行 LLM”时保存的规范化端点。
+    /// 端点改变后必须重新确认；后端用规范化后的 exact match 二次校验（不能只在界面上做）。
+    #[serde(default)]
+    pub model_endpoint_ack: Option<String>,
+    /// 天河 LLM 底线：用户确认外部后端（Codex/Claude Code/OpenCode）不会在天河上
+    /// 直接运行 DeepSeek 等 LLM。
+    #[serde(default)]
+    pub external_llm_ack: bool,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
@@ -575,6 +583,8 @@ impl Default for AssistantSettings {
             backend: default_backend(),
             retrieval: RetrievalSettings::default(),
             history: HistorySettings::default(),
+            model_endpoint_ack: None,
+            external_llm_ack: false,
             egress_acknowledged: None,
             external: Default::default(),
         }
@@ -945,6 +955,80 @@ pub(crate) fn require_egress_acknowledged(settings: &AssistantSettings) -> Resul
     Ok(())
 }
 
+/// 天河 LLM 底线（用户明确要求）：保存设置、启动助手都必须先过这里，任何模型/工具参数都
+/// 无法关闭它。`builtin` 端点按 host 分类；`external` 后端检查它会读取的环境变量并核对
+/// 用户确认项。
+fn validate_model_endpoint(settings: &AssistantSettings) -> Result<(), String> {
+    validate_model_endpoint_with(settings, &crate::llm_guard::external_endpoint_hints())
+}
+
+/// 供测试注入 hints 的版本（不依赖进程环境）。
+pub(crate) fn validate_model_endpoint_with(
+    settings: &AssistantSettings,
+    hints: &[crate::llm_guard::ExternalHint],
+) -> Result<(), String> {
+    use crate::llm_guard::{classify_llm_endpoint, normalize_endpoint, Verdict};
+    if settings.backend == "builtin" {
+        let guard = classify_llm_endpoint(&settings.base_url)?;
+        match guard.verdict {
+            Verdict::Blocked => return Err(guard.message),
+            Verdict::NeedsConfirmation => {
+                let normalized = normalize_endpoint(&settings.base_url)?;
+                if settings.model_endpoint_ack.as_deref().map(str::trim)
+                    != Some(normalized.as_str())
+                {
+                    return Err(format!(
+                        "{} 请在设置里勾选“该端点不在天河上运行 LLM”后再保存或启动。",
+                        guard.message
+                    ));
+                }
+            }
+            Verdict::Allowed => {}
+        }
+        return Ok(());
+    }
+    // 外部后端（Codex/Claude Code/OpenCode）会继承进程环境，模型端点可能由这些变量决定。
+    let blocked: Vec<&crate::llm_guard::ExternalHint> = hints
+        .iter()
+        .filter(|hint| hint.verdict == Verdict::Blocked)
+        .collect();
+    if !blocked.is_empty() {
+        let details = blocked
+            .iter()
+            .map(|hint| match &hint.host {
+                Some(host) => format!("{}（{host}）", hint.variable),
+                None => hint.variable.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(format!(
+            "检测到外部后端的模型服务端点疑似位于天河：{details}。软件底线：禁止在天河上直接运行 DeepSeek 等 LLM；请清除对应的环境变量或改用官方云服务。"
+        ));
+    }
+    if !settings.external_llm_ack {
+        return Err(
+            "使用外部后端前，请确认这些外部工具不会在天河上直接运行 DeepSeek 等 LLM（设置里的确认项）。"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// 保存设置前的完整校验：格式 + 天河 LLM 底线。blocked 端点不得落盘；
+/// needs_confirmation 端点必须带规范化后的精确确认。
+fn validate_for_save(settings: &AssistantSettings) -> Result<(), String> {
+    validate_settings(settings)?;
+    validate_model_endpoint(settings)
+}
+
+/// 启动前的完整校验：格式、天河 LLM 底线、数据外发确认。保存过的设置可能被手工改过或来自
+/// 旧版本，每次启动/构造 Configure 前都必须重新走一遍（不是只在保存时检查）。
+fn validate_for_start(settings: &AssistantSettings) -> Result<(), String> {
+    validate_settings(settings)?;
+    validate_model_endpoint(settings)?;
+    require_egress_acknowledged(settings)
+}
+
 /// Xerj 文档检索的格式校验（与 `crates/colm-agent/src/retrieval.rs` 的 `validate` 同一套规则）。
 /// 只连本机回环的 http，且必须写明端口：9200 不是 http 的默认端口，漏写端口会打到别的服务上。
 /// 即使当前关闭也校验 —— 关着时存进非法值、等到打开才发现就太晚了。
@@ -1120,7 +1204,8 @@ pub fn assistant_save_settings(
 ) -> Result<(), String> {
     // 先按原文件读一次：解析失败就拒绝保存，绝不把用户手改坏的配置静默覆盖掉。
     load_assistant_settings(&app)?;
-    validate_settings(&settings)?;
+    // 天河 LLM 底线：blocked 或未确认的端点不得落盘（不能靠界面检查绕过）。
+    validate_for_save(&settings)?;
     let path = settings_path(&app)?;
     let event = crate::history::start(
         "assistant_settings",
@@ -1937,8 +2022,8 @@ pub async fn assistant_start(
     model_revision: Option<colm_model::VersionRef>,
 ) -> Result<(), String> {
     let mut settings = load_assistant_settings(&app)?;
-    validate_settings(&settings)?;
-    require_egress_acknowledged(&settings)?;
+    // 天河 LLM 底线与数据外发确认都在这里再校验一次（设置可能被手工改过或来自旧版本）。
+    validate_for_start(&settings)?;
     // managed 模式：先把应用自己的 Xerj 节点拉起来、把应用自管的 key 交给 agent，再把实际
     // endpoint 写进 configure。失败不阻断助手：保留 enabled，让 agent 报 not_connected 并回退。
     if settings.retrieval.enabled && settings.retrieval.mode == "managed" {
@@ -2228,6 +2313,14 @@ pub fn assistant_reconcile_effects(
     )?;
     let result = send(&process, &reconcile_effects_message(&ids, note.as_deref()));
     finish_assistant_action(&event, result)
+}
+
+/// 天河 LLM 底线：前端设置页按 base_url 调用，得到 classified 结果以显示“允许/需确认/禁止”。
+/// 纯分类、无副作用；保存与启动仍会在后端重复校验（这个命令不是放行开关）。
+#[tauri::command]
+pub fn assistant_llm_endpoint_guard(base_url: String) -> Result<Value, String> {
+    let guard = crate::llm_guard::classify_llm_endpoint(&base_url)?;
+    serde_json::to_value(guard).map_err(|error| error.to_string())
 }
 
 /// U03：回答里的来源链接用系统默认浏览器打开。只接受 http/https（长度 ≤2048、无控制字符）；

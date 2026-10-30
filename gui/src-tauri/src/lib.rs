@@ -23,6 +23,7 @@ mod history;
 mod history_delete;
 mod histvars;
 mod live_runs;
+mod llm_guard;
 mod model;
 mod observation;
 mod project;
@@ -282,6 +283,7 @@ pub fn run() {
             assistant_new_session,
             assistant_reconcile_effects,
             assistant_open_url,
+            assistant_llm_endpoint_guard,
             assistant_history_status,
             assistant_history_sync,
             assistant_history_cancel,

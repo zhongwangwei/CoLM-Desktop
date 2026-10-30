@@ -1805,3 +1805,174 @@ fn turn_started_event_shape_is_stable_and_request_id_is_optional() {
         _ => panic!("turn_started without request_id must parse"),
     }
 }
+
+// ---- 天河 LLM 底线（模型服务端点护栏） ----
+
+fn builtin_endpoint(base_url: &str, ack: Option<&str>) -> AssistantSettings {
+    AssistantSettings {
+        base_url: base_url.into(),
+        model_endpoint_ack: ack.map(str::to_owned),
+        ..AssistantSettings::default()
+    }
+}
+
+#[test]
+fn llm_endpoint_guard_command_classifies_official_custom_and_tianhe_endpoints() {
+    let allowed = assistant_llm_endpoint_guard("https://api.deepseek.com/v1".into()).unwrap();
+    assert_eq!(allowed["verdict"], "allowed");
+    assert_eq!(allowed["host"], "api.deepseek.com");
+    assert_eq!(allowed["known_public"], true);
+    assert_eq!(allowed["matched_tianhe"], false);
+    assert!(allowed["message"].as_str().is_some());
+
+    let confirm = assistant_llm_endpoint_guard("https://api.example.com/v1".into()).unwrap();
+    assert_eq!(confirm["verdict"], "needs_confirmation");
+    assert_eq!(confirm["host"], "api.example.com");
+    assert!(confirm["message"].as_str().unwrap().contains("确认"));
+
+    let blocked = assistant_llm_endpoint_guard("https://tianhe.example.com/v1".into()).unwrap();
+    assert_eq!(blocked["verdict"], "blocked");
+    assert_eq!(blocked["host"], "tianhe.example.com");
+    assert_eq!(blocked["matched_tianhe"], true);
+    assert!(blocked["message"].as_str().unwrap().contains("禁止在天河"));
+
+    // 格式不合法直接报错（前端显示原始错误），不会得到 verdict。
+    assert!(assistant_llm_endpoint_guard("ftp://api.deepseek.com".into()).is_err());
+    assert!(assistant_llm_endpoint_guard("not a url".into()).is_err());
+    assert!(assistant_llm_endpoint_guard("".into()).is_err());
+}
+
+#[test]
+fn model_endpoint_guard_blocks_tianhe_and_requires_exact_normalized_confirmation() {
+    // 官方云端点放行，不需要确认。
+    assert!(validate_model_endpoint_with(&AssistantSettings::default(), &[]).is_ok());
+    // 天河：硬拒绝；即使把同样的端点写进确认值也不能绕过。
+    let tianhe = builtin_endpoint(
+        "https://tianhe.example.com/v1",
+        Some("https://tianhe.example.com/v1"),
+    );
+    let error = validate_model_endpoint_with(&tianhe, &[]).unwrap_err();
+    assert!(error.contains("禁止在天河"), "{error}");
+    // 自定义端点：没有确认 → 拒绝，并提示勾选确认。
+    let custom = builtin_endpoint("https://Custom.Example.com/v1/", None);
+    let error = validate_model_endpoint_with(&custom, &[]).unwrap_err();
+    assert!(error.contains("确认"), "{error}");
+    // 确认值必须与规范化后的 base_url 完全一致（小写 host、去尾斜杠）。
+    let mut acked = custom.clone();
+    acked.model_endpoint_ack = Some("https://custom.example.com/v1".into());
+    assert!(validate_model_endpoint_with(&acked, &[]).is_ok());
+    // 端点改变后旧确认失效。
+    acked.base_url = "https://custom.example.com/v2".into();
+    assert!(validate_model_endpoint_with(&acked, &[]).is_err());
+    // 未规范化的确认值（尾斜杠）不算匹配。
+    let mut slash = builtin_endpoint(
+        "https://custom.example.com/v1",
+        Some("https://custom.example.com/v1/"),
+    );
+    assert!(validate_model_endpoint_with(&slash, &[]).is_err());
+    slash.model_endpoint_ack = Some("https://custom.example.com/v1".into());
+    assert!(validate_model_endpoint_with(&slash, &[]).is_ok());
+    // 本机回环/内网端点同样需要用户确认。
+    assert!(validate_model_endpoint_with(
+        &builtin_endpoint("http://127.0.0.1:11434/v1", None),
+        &[]
+    )
+    .is_err());
+    // 解析不了的地址直接报错，不会给出“待确认”后放行。
+    assert!(validate_model_endpoint_with(&builtin_endpoint("not a url", None), &[]).is_err());
+}
+
+#[test]
+fn external_backends_require_llm_confirmation_and_reject_blocked_environment_hints() {
+    use crate::llm_guard::external_endpoint_hints_with;
+    let codex = |ack: bool| AssistantSettings {
+        backend: "codex".into(),
+        external_llm_ack: ack,
+        ..AssistantSettings::default()
+    };
+    let error = validate_model_endpoint_with(&codex(false), &[]).unwrap_err();
+    assert!(error.contains("确认"), "{error}");
+    assert!(validate_model_endpoint_with(&codex(true), &[]).is_ok());
+    // 环境变量里的 blocked 端点优先于用户确认：勾选了也拒绝。
+    let blocked = external_endpoint_hints_with(|name| {
+        (name == "OPENAI_BASE_URL").then(|| "https://tianhe.example.com/v1".to_owned())
+    });
+    let error = validate_model_endpoint_with(&codex(true), &blocked).unwrap_err();
+    assert!(error.contains("天河"), "{error}");
+    assert!(error.contains("OPENAI_BASE_URL"), "{error}");
+    // 官方云/待确认的环境变量不会触发 blocked 拒绝；external_llm_ack 仍然是必要条件。
+    let benign = external_endpoint_hints_with(|name| {
+        (name == "ANTHROPIC_BASE_URL").then(|| "https://api.anthropic.com".to_owned())
+    });
+    assert!(validate_model_endpoint_with(&codex(true), &benign).is_ok());
+    assert!(validate_model_endpoint_with(&codex(false), &benign).is_err());
+}
+
+#[test]
+fn save_level_validation_rejects_blocked_and_unconfirmed_endpoints_but_accepts_acked_ones() {
+    // 官方云：保存通过。
+    assert!(validate_for_save(&AssistantSettings::default()).is_ok());
+    // 天河：blocked，硬拒绝（确认值也救不了）。
+    let tianhe = builtin_endpoint(
+        "https://tianhe.example.com/v1",
+        Some("https://tianhe.example.com/v1"),
+    );
+    assert!(validate_for_save(&tianhe).is_err());
+    // 自定义端点未确认：拒绝保存。
+    let custom = builtin_endpoint("https://api.example.com/v1", None);
+    assert!(validate_for_save(&custom).is_err());
+    // 确认值与规范化端点一致：允许保存。
+    let mut acked = custom.clone();
+    acked.model_endpoint_ack = Some("https://api.example.com/v1".into());
+    assert!(validate_for_save(&acked).is_ok());
+    // 旧确认不能覆盖新端点。
+    acked.base_url = "https://api.example.com/v2".into();
+    assert!(validate_for_save(&acked).is_err());
+}
+
+#[test]
+fn start_level_validation_rejects_blocked_or_unconfirmed_llm_endpoints() {
+    let mut official = AssistantSettings {
+        web_search: false,
+        ..AssistantSettings::default()
+    };
+    official.egress_acknowledged = Some(egress_target(&official));
+    assert!(validate_for_start(&official).is_ok());
+
+    let mut tianhe = builtin_endpoint("https://th2.example.com/v1", None);
+    tianhe.web_search = false;
+    tianhe.egress_acknowledged = Some(egress_target(&tianhe));
+    let error = validate_for_start(&tianhe).unwrap_err();
+    assert!(error.contains("禁止在天河"), "{error}");
+
+    let mut custom = builtin_endpoint("https://api.example.com/v1", None);
+    custom.web_search = false;
+    custom.egress_acknowledged = Some(egress_target(&custom));
+    let error = validate_for_start(&custom).unwrap_err();
+    assert!(error.contains("确认"), "{error}");
+
+    custom.model_endpoint_ack = Some("https://api.example.com/v1".into());
+    assert!(validate_for_start(&custom).is_ok());
+}
+
+#[test]
+fn old_settings_without_llm_ack_fields_load_with_conservative_defaults() {
+    let old: AssistantSettings =
+        serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
+            .unwrap();
+    assert_eq!(old.model_endpoint_ack, None);
+    assert!(!old.external_llm_ack);
+    // 官方云默认端点不需要确认，guard 放行；旧配置可继续加载。
+    assert!(validate_model_endpoint_with(&old, &[]).is_ok());
+    // 新字段能往返序列化。
+    let mut acked = old.clone();
+    acked.model_endpoint_ack = Some("https://api.deepseek.com".into());
+    acked.external_llm_ack = true;
+    let round: AssistantSettings =
+        serde_json::from_value(serde_json::to_value(&acked).unwrap()).unwrap();
+    assert_eq!(
+        round.model_endpoint_ack.as_deref(),
+        Some("https://api.deepseek.com")
+    );
+    assert!(round.external_llm_ack);
+}
