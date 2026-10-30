@@ -41293,3 +41293,75 @@ Rust 的 `river/network.rs` 还按旧实现：`j >= 0` 时取 `(rivwth[j] + rivw
 **教训（连续两次）**：湿雪散射（上一轮）和出口宽度（本轮）都是"上游改了、Rust 停在旧实现"。
 以后每次 vendor 同步都应把 `main/` 与 `HYDRO/` 里新增的 `Bug fix`/`was the …` 注释当对照清单，
 逐条确认 Rust 已跟；不能只看接口和命名。
+
+## 多 node 并行一致性的第一次尝试：tms17 集群（2026-10-31，第十三轮）
+
+维护者要求"多 node 版本和单节点并行也要一致"。这轮把验证环境从本机 Mac 扩到 tms17 集群，
+结果分两半：**计算侧能跑、I/O 侧在多 node 下卡住**；如实记录。
+
+### 集群现状（实测）
+
+- 登录节点 `tms17`（`ssh tms17`，240 核）与计算节点 `tms01`–`tms08`（各 96 核），
+  `/home` 是 `land01:/home` 的 NFSv4、世界可共享；`/shr03` 是 `data01` 的 NFS，含
+  `CoLMrawdata`/`CoLM_Forcing`/`CoLMruntime`（JRA3Q 2005 文件齐全，命名与本地一致）。
+- **MPI 不统一**：`tms02`/`tms03` 是 OpenMPI 4.0.3（gfortran 9.4、Ubuntu 20.04），
+  `tms01`/`tms04`–`tms08` 是 MPICH 3.3.2，`tms17` 是 MPICH 4.2.0。跨实现不能混跑，
+  所以多 node 只能选同构子集：`tms02+tms03`（OpenMPI）。
+- 节点间 ssh 的 host key 会互相覆盖（`known_hosts` 在共享 NFS 上）且主机名/IP 有变化，
+  用 `mpirun --mca plm_rsh_args "-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"`
+  绕开；NetCDF/HDF5 在 NFS 上写需要 `HDF5_USE_FILE_LOCKING=FALSE` 且必须用
+  `mpirun -x HDF5_USE_FILE_LOCKING` 传给远端 rank。
+
+### 做的验证（真实执行）
+
+1. 把 `vendor/CoLM202X` + `oracle/scripts` rsync 过去，`COLM_GIT_SHA=local-sync` 覆盖
+   git 溯源；远端构建成功：`tms17` 上 MPICH 版 `default`/`latlon`（grouped），
+   `tms03` 上 OpenMPI 版 `latlon`（grouped，`latlon-omp=0`）。
+2. 把 9 单元格点河湖算例（本机 Rust 预处理产物）rsync 过去，路径改到
+   `/home/zhwei/...`、强迫改到 `/shr03/CoLM_Forcing/JRA3Q/`。
+3. **能跑通**：`tms02` 单节点 **3 rank grouped** → 144 步完成、写出
+   `rivsmall_hist_2005-01.nc` 与 002–004 重启（日志到 `TIMESTEP = 144`）。
+4. **多 node 卡住**：`tms02:2,tms03:1` 的 3 rank 跑完第一天后，在日界重启写出时报
+   `Netcdf error: Permission denied`（`2005-002-00000` 目录里只有 rank0 写的
+   `gridriver` 文件，主重启文件缺失）；`HDF5_USE_FILE_LOCKING=FALSE` 已确认传到两个
+   rank（`mpirun -x` + `env` 验证），仍复现。river-off 同类算例多 node 也超时（无 history）。
+5. **单 node 6 rank 在远端也卡**：同一天界处超时（本机 Mac 单机 6 rank 可正常跑完），
+   说明阻塞点是"远端 NFS + 多进程 netCDF 写"，不是 node 数量本身。
+6. 排查性对照：同一对节点上跑一个 2-rank 的 netCDF 写小程序（`nf90_create` 到
+   `/home/zhwei/nc2.nc`）**成功**（两个 rank 都打印 ok，文件 104 B）。所以不是
+   NFS/HDF5 写入本身不可用，而是 CoLM 重启写出路径在多 node 下失败，具体是哪个
+   `nf90_*` 调用还未定位（`nccheck` 只打印 `strerror`，不带文件名）。
+
+### 目前结论与下一步
+
+- **已证明**（本机 + 集群）：Fortran grouped 3 vs 6 rank（river-off 与单步汇流）逐位相同、
+  grouped 3 vs flat 1 逐位相同；Rust 1/2/4 rank 逐位相同；tms17 单节点 3 rank grouped
+  能完成 144 步并把结果写到 NFS。⇒ "单节点并行（同 node 多 rank）"分层是稳的。
+- **未完成**：真正跨 node 的一致性。阻塞在远端 CoLM 重启/输出写在多 node 下失败
+  （EACCES 或挂起）。下一步先给 `MOD_NetCDFSerial` 的 `nccheck` 加重启路径 trace
+  （把文件名带进错误信息），定位是哪一个文件/哪一次 `nf90_create`；也可以换
+  `tms04–tms08`（同构 MPICH 3.3.2）重编内核再试，排除 OpenMPI 侧原因。
+- 跨机器结果**不做逐位比较**：远端用 gfortran 13.3/9.4 与 `-fno-tree-vectorize`，
+  和本机 Apple gfortran 16 的内核不是同一份二进制；多 node 验证的判据只能是
+  **同一内核、同一算例、同一 rank 数**下，单 node 与多 node 的 restart/history 逐位相同。
+
+## 陆面残余差异的起始点：第 7 小时的一次离散跳变（同轮）
+
+站点/格点的辐射链修干净后，剩下的陆面差异（`f_wliq_soisno`/`f_wice_soisno`/`f_h2osoi`/
+`f_t_soisno`/`f_zwt`）是从"机器精度"起步、随后放大的。用冷启动 001 的小时级 history
+定位到**第 7 个记录（07:00 前后，日出/结霜时段）出现一次离散跳变**：
+
+```
+记录序号      0..6        7        8..23        ...
+f_wliq       ~1e-13    4.6e-6   1e-6..2e-4    （2 天后 4.7e-1）
+f_wice       ~1e-13    4.2e-6   1e-6..5e-6
+f_h2osoi     ~1e-15    2.0e-8   1e-9..2e-6
+f_t_soisno   0          2.9e-6   1e-7..1e-5
+f_rnet       0          1.2e-4   1e-7..2e-5   （最后 1.5e-1）
+```
+
+跳变幅度与霜/露/相变阈值同量级，之后是这些状态的慢漂移，而不是某个变量持续发散。
+判断：这属于**两个忠实实现各自在阈值附近的舍入落在不同分支**（`tl`/`t_soisno` 与
+`tfrz` 比较、`qinfl` 的干/湿分支、`wice` 相变分配），不是移植遗漏；要彻底消除只能让每一步
+的舍入方向逐位一致（收益递减），实际判据是分层容差（站点三黄金目前 4/23/51 项、都只剩
+近零量或 1e-4 量级；网格算例 39 项、最大相对差 5e-4）。
