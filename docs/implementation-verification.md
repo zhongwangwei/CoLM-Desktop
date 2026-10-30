@@ -41567,3 +41567,29 @@ flat 1 rank 跑 51 步。两边各 2142/2040 条记录（VSF 只对部分 patch 
 `residual_water_kg_m2` 与 `:4860-4890` 的回填）对 ipatch 31 打印 `eff_porosity/vol_liq/
 is_permeable/wresi/回填前后 wliq`，与 Rust 同位置逐项比；7.7e-7 与 `dz*denh2o*vol_liq` 的
 舍入量级一致，很可能是**不渗透层的 `wresi` 处理差异**，而不是新的物理公式。
+
+### ipatch 31 的 7.7e-7：不在回填公式，落在 Richards 求解器内部（同轮续）
+
+对照上游 `WATER_VSF` 的回填段（`MOD_SoilSnowHydrology.F90:1186-1202`：
+`IF (is_permeable(j)) ... IF (zwtmm < sp_zi(j)) ... wliq = denh2o*(eff*(zi-zwt) +
+vol_liq*(zwt-zi_prev))/1000 + wresi`）与 Rust 的对应段
+（`variably_saturated_flow.rs:4851-4897`）：
+
+- 分支条件、`is_permeable`、`eff_porosity/vol_liq` 的夹取、`wresi = wliq - dz*denh2o*vol_liq`
+  以及回填后的 `+ wresi` 都一致（Rust 只把和的加数顺序换成了 FMA 形式，属 1 ulp 级）；
+- 顶层 `wliq` 的出入量级核算：入口 `wliq=1.49984046e-2`、`dz≈1.7513e-2`、`denh2o*dz≈17.51`，
+  `vol_liq≈8.56e-4`。出口 Fortran 的 7.7015e-7 kg/m² 对应 `vol_liq≈4.4e-8`，Rust 的 -1e-21
+  对应 `vol_liq≈0` —— 两者都是**求解器回填之后的残余体积分数**，不是回填算式的舍入差
+  （回填公式本身只会产生 ~1e-18 kg/m² 的差）。
+- 这两个数都远低于 `RICHARDS_WATER_TOLERANCE = 8e-8`（无量纲）与
+  `richards_water_tolerance = 1e-3 mm` 的水量容差，符合"Newton 迭代在容差内停在不同位置"的
+  特征；仓库里此前的记录也提示过 `MAX_ITERS_RICHARDS=10` 与显式回退（降级）是 VSF 移植的
+  敏感点。
+
+下一步：在 `soil_water_vertical_movement` 调用点对 ipatch 31 打印
+`niter / 是否降级为显式步 / 最终残差 / dt_explicit`，与 Fortran 的
+`SUBROUTINE soil_water_vertical_movement` 同位置对照；如果迭代次数或回退不一致，那就是
+**求解器收敛路径差**（可以按 solver tolerance 解释，判据从逐位改成"迭代计数+残差"）。
+另外仓库已有记录表明 **Campbell + VSF-off** 配置两侧可以到 0 项 tier 外（
+`docs` 中的 second_config 结果），说明真正要跑 WATER_2014 的对照必须用 Campbell 算例，
+不能用 van Genuchten 算例硬关 VSF。
