@@ -167,6 +167,12 @@ export const commandContract = {
       "rust_type": "Option<String>"
     }
   },
+  "assistant_llm_endpoint_guard": {
+    "baseUrl": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "assistant_open_url": {
     "url": {
       "required": true,

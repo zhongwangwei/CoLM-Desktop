@@ -54,6 +54,13 @@ export interface Settings extends ApiProfile {
   retrieval: RetrievalSettings;
   /** 只读历史仓库的默认查询范围（应用级）；旧配置缺字段时按 auto/null/null。 */
   history: HistorySettings;
+  /**
+   * 已确认不在天河上的精确模型服务端点（规范化 base_url）；null = 未确认。
+   * 只对当时那个地址有效：base_url 一改就清空，后端 save/start 会再次校验。
+   */
+  model_endpoint_ack: string | null;
+  /** 外部后端（Codex / Claude Code / OpenCode）：用户已确认其实际使用的模型服务不在天河上。 */
+  external_llm_ack: boolean;
   egress_acknowledged: string | null;
   external: Record<string, { model: string | null; effort: string | null }>;
 }
@@ -85,6 +92,8 @@ export const defaultSettings: Settings = {
     timeout_ms: 1500,
   },
   history: { ...defaultHistorySettings },
+  model_endpoint_ack: null,
+  external_llm_ack: false,
   egress_acknowledged: null,
   external: {},
 };
@@ -2032,4 +2041,86 @@ export function localPathsInAction(action: TaskEffectAction, limit = 5): string[
     if (!paths.includes(path)) paths.push(path);
   }
   return paths;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 天河 LLM 底线：模型请求端点的确认护栏
+//
+// 只约束“LLM 模型请求端点”，不影响普通远程模拟。后端 save/start 还会二次校验；前端这里
+// 尽量在写盘前拦住，避免把违反底线的设置写入。
+// ---------------------------------------------------------------------------------------------
+
+export type LlmEndpointVerdict = 'allowed' | 'needs_confirmation' | 'blocked';
+
+/** `assistant_llm_endpoint_guard({baseUrl})` 的返回；未知 verdict 按 needs_confirmation 保守处理。 */
+export interface LlmEndpointGuard {
+  verdict?: string | null;
+  host?: string | null;
+  known_public?: boolean | null;
+  matched_tianhe?: boolean | null;
+  message?: string | null;
+}
+
+export const TIANHE_LLM_POLICY_ZH =
+  '这是软件底线：禁止在天河上直接运行 DeepSeek 等 LLM。请改用官方云服务或其他机器。';
+export const TIANHE_LLM_POLICY_EN =
+  'This is a hard policy: DeepSeek and other LLMs must not be run directly on Tianhe. Use an official cloud service or another machine.';
+export const LLM_ENDPOINT_CONFIRM_ZH = '我确认该模型服务端点不在天河上运行 DeepSeek 等 LLM';
+export const LLM_ENDPOINT_CONFIRM_EN =
+  'I confirm this model service endpoint does not run DeepSeek or other LLMs on Tianhe';
+export const EXTERNAL_LLM_CONFIRM_ZH =
+  '我确认该外部后端实际使用的模型服务不在天河上运行 DeepSeek 等 LLM';
+export const EXTERNAL_LLM_CONFIRM_EN =
+  'I confirm the model service actually used by this external backend does not run DeepSeek or other LLMs on Tianhe';
+export const LLM_SCOPE_NOTE_ZH = '只限制 LLM 模型请求端点，不影响普通远程模拟。';
+export const LLM_SCOPE_NOTE_EN =
+  'Only LLM model request endpoints are restricted; ordinary remote simulations are not affected.';
+
+/**
+ * 端点确认的规范化形式，必须与后端 `llm_guard::normalize_endpoint` 同形：scheme/host 小写、
+ * 忽略默认端口、去掉路径末尾斜杠，丢弃 query/fragment。ack 只对精确地址有效，保存时
+ * base_url 与 ack 都用这个值，后端的 exact match 才能通过。
+ */
+export function normalizeModelEndpoint(baseUrl: string | null | undefined): string {
+  const text = (baseUrl ?? '').trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    const path = url.pathname.replace(/\/+$/, '');
+    return `${url.protocol}//${url.host}${path}`;
+  } catch {
+    // 解析不了（用户正在输入）时退回去空白/末尾斜杠，保存前 guard 会再拒绝非法地址。
+    return text.replace(/\/+$/, '');
+  }
+}
+
+export interface LlmEndpointDecision {
+  /** 归一化后的当前模型端点。 */
+  endpoint: string;
+  /** 未知/缺省的 guard verdict 按 needs_confirmation 保守处理（不当作 allowed）。 */
+  verdict: LlmEndpointVerdict;
+  /** 用户是否已确认过这个精确端点（ack 规范化后相等）。 */
+  confirmed: boolean;
+  /** 保存时应写入的 model_endpoint_ack：只有 needs_confirmation 且已确认才写当前端点。 */
+  ack: string | null;
+}
+
+/** 保存前根据 guard + 已登记 ack 判定：allowed 可保存、needs_confirmation 必须确认、blocked 禁止。 */
+export function llmEndpointDecision(
+  guard: LlmEndpointGuard | null | undefined,
+  baseUrl: string | null | undefined,
+  ack: string | null | undefined,
+): LlmEndpointDecision {
+  const endpoint = normalizeModelEndpoint(baseUrl);
+  const verdict: LlmEndpointVerdict =
+    guard?.verdict === 'allowed' || guard?.verdict === 'blocked'
+      ? guard.verdict
+      : 'needs_confirmation';
+  const confirmed = endpoint !== '' && normalizeModelEndpoint(ack) === endpoint;
+  return {
+    endpoint,
+    verdict,
+    confirmed,
+    ack: verdict === 'needs_confirmation' && confirmed ? endpoint : null,
+  };
 }

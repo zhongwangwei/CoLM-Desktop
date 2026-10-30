@@ -11,7 +11,9 @@ import {
   historyRepositoryLabel,
   historySettingsOf,
   historySyncSummary,
+  llmEndpointDecision,
   managedNodeText,
+  normalizeModelEndpoint,
   parseApiOptions,
   providerId,
   retrievalSettingsProblem,
@@ -24,7 +26,16 @@ import {
   withChoice,
   withContextWindowCleared,
   withHistoryPath,
+  EXTERNAL_LLM_CONFIRM_EN,
+  EXTERNAL_LLM_CONFIRM_ZH,
+  LLM_ENDPOINT_CONFIRM_EN,
+  LLM_ENDPOINT_CONFIRM_ZH,
+  LLM_SCOPE_NOTE_EN,
+  LLM_SCOPE_NOTE_ZH,
+  TIANHE_LLM_POLICY_EN,
+  TIANHE_LLM_POLICY_ZH,
   type AgentEvent,
+  type LlmEndpointGuard,
   type HistoryReposStatus,
   type HistoryRepository,
   type HistorySyncResult,
@@ -99,6 +110,9 @@ export default function AssistantSettings({
   const syncCancelled = useRef(false);
   // 双击/重复点击时 state 还没刷新，用 ref 挡住第二次逐仓库同步。
   const syncRunning = useRef(false);
+  // 天河 LLM 底线：当前端点 guard 结果；blocked 时保存禁用，错误展示在安全区。
+  const [endpointGuard, setEndpointGuard] = useState<LlmEndpointGuard | null>(null);
+  const [endpointGuardError, setEndpointGuardError] = useState('');
   const [models, setModels] = useState<ModelChoice[]>([]);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -183,10 +197,46 @@ export default function AssistantSettings({
     // loadHistoryStatus 每次渲染都是新函数，不能进依赖；只在挂载（打开设置）时读一次，之后靠按钮/同步刷新。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // 天河 LLM 底线：端点或后端变化时问后端 guard（打开设置也会跑一次）。未知/失败的 verdict
+  // 由保存流程保守拦下；这里只负责展示。新 effect 放最后。
+  useEffect(() => {
+    if (!hasBackend() || draft.backend !== 'builtin') {
+      setEndpointGuard(null);
+      setEndpointGuardError('');
+      return;
+    }
+    const baseUrl = normalizeModelEndpoint(draft.base_url);
+    if (!baseUrl) {
+      setEndpointGuard(null);
+      setEndpointGuardError('');
+      return;
+    }
+    let active = true;
+    invoke<LlmEndpointGuard>('assistant_llm_endpoint_guard', { baseUrl })
+      .then((guard) => {
+        if (!active) return;
+        setEndpointGuard(guard);
+        setEndpointGuardError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setEndpointGuard(null);
+        setEndpointGuardError(settingsError(error));
+      });
+    return () => {
+      active = false;
+    };
+    // guard 是纯只读检查；url/后端/打开状态变化时重查。settingsError 每次渲染都是新函数，不进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.base_url, draft.backend]);
   function patch(value: Partial<Settings>) {
     // 字段一改就清掉上一次"设置已保存"的成功提示，避免过时成功状态（U-05 / U-07）。
     setStatus('');
     setDraft((old) => ({ ...old, ...value }));
+  }
+  /** 改模型服务地址：旧的端点确认只对精确地址有效，必须清空 ack（改回也不自动恢复）。 */
+  function patchServiceUrl(value: string) {
+    patch({ ...withContextWindowCleared(draft, { base_url: value }), model_endpoint_ack: null });
   }
   function patchRetrieval(value: Partial<RetrievalSettings>) {
     setStatus('');
@@ -198,7 +248,7 @@ export default function AssistantSettings({
     setOptions(JSON.stringify(settings.api_options, null, 2));
     setStatus(t('已放弃未保存的修改。', 'Unsaved changes discarded.'));
   }
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<unknown>) {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
@@ -429,6 +479,16 @@ export default function AssistantSettings({
       ];
   // "实际发送"按已保存设置算，不能用 draft：草稿换服务后、保存前发送仍走旧值（U-07）。
   const sending = sendingSummary(settings, state.language);
+  // 天河 LLM 底线：当前草稿端点的确认判定。未知/缺省 verdict 按 needs_confirmation 保守处理。
+  const endpointDecision = llmEndpointDecision(
+    endpointGuard,
+    draft.base_url,
+    draft.model_endpoint_ack ?? null,
+  );
+  const endpointBlocked = endpointGuard?.verdict === 'blocked';
+  const endpointConfirmRequired = endpointDecision.verdict === 'needs_confirmation';
+  const externalBackend = draft.backend !== 'builtin';
+  const externalAcknowledged = draft.external_llm_ack === true;
   const customProvider = builtin && providerId(draft) === 'custom';
   const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
   const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
@@ -453,11 +513,103 @@ export default function AssistantSettings({
             );
             return;
           }
-          patch(withContextWindowCleared(draft, { base_url: e.target.value }));
+          patchServiceUrl(e.target.value);
         }}
       />
     </Field>
   );
+  /**
+   * 保存设置（天河 LLM 底线前置校验）：
+   * - builtin：保存前再问一次 guard（草稿可能改过地址，避免用过期结果）。blocked 直接拒绝、不写盘；
+   *   needs_confirmation 必须已勾选确认，保存 ack=规范化后的精确 base_url；allowed 清空 ack。
+   * - 外部后端：应用不知道实际端点，必须 external_llm_ack；失败/拒绝原样显示，不把违反底线的设置写入。
+   * - 既有 Key/数值/检索校验保持不变。
+   */
+  async function saveDraft(): Promise<Settings> {
+    if (key) throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
+    // Xerj 的 Key 也是"输入框里有内容"= 还没登记；保存会重启助手，先让用户登记或清空。
+    if (retrievalMode === 'external' && retrievalKey)
+      throw new Error(t('请先登记或清空 Xerj Key。', 'Register or clear the Xerj key first.'));
+    if (
+      ![draft.max_output_tokens, draft.timeout_seconds].every(
+        (n) => Number.isSafeInteger(n) && n > 0,
+      ) ||
+      !(
+        draft.context_window === null ||
+        (Number.isSafeInteger(draft.context_window) &&
+          draft.context_window >= 1024 &&
+          draft.context_window <= 10_000_000)
+      ) ||
+      ![draft.session_turn_limit, draft.session_token_limit].every(
+        (n) => Number.isSafeInteger(n) && n >= 0,
+      )
+    )
+      throw new Error(
+        t(
+          '输出上限和超时必须是正整数；上下文窗口须为 1024–10000000 的整数或留空；会话上限必须是非负整数。',
+          'Output limit and timeout must be positive integers; the context window must be an integer between 1024 and 10000000 or blank; session limits must be non-negative integers.',
+        ),
+      );
+    // 检索关闭也校验格式：开/关之间切换不应因为存了非法值才发现。
+    const retrievalProblem = retrievalSettingsProblem(draft.retrieval, state.language);
+    if (retrievalProblem) throw new Error(retrievalProblem);
+    // 二进制路径的首尾空白不代表路径本身；空串按"自动探测"归一成 null，别把空白存进设置。
+    const retrieval: RetrievalSettings = {
+      ...draft.retrieval,
+      binary_path: draft.retrieval.binary_path?.trim() || null,
+      endpoint: draft.retrieval.endpoint.trim(),
+    };
+
+    let baseUrl = draft.base_url;
+    let modelEndpointAck: string | null = null;
+    if (draft.backend === 'builtin') {
+      baseUrl = normalizeModelEndpoint(draft.base_url);
+      const guard = await invoke<LlmEndpointGuard>('assistant_llm_endpoint_guard', { baseUrl });
+      setEndpointGuard(guard);
+      setEndpointGuardError('');
+      const decision = llmEndpointDecision(guard, baseUrl, draft.model_endpoint_ack ?? null);
+      if (decision.verdict === 'blocked')
+        throw new Error(t(TIANHE_LLM_POLICY_ZH, TIANHE_LLM_POLICY_EN));
+      if (decision.verdict === 'needs_confirmation' && !decision.confirmed)
+        throw new Error(
+          t(
+            '请先勾选确认该模型服务端点不在天河上运行 DeepSeek 等 LLM。',
+            'Confirm first that this model service endpoint does not run DeepSeek or other LLMs on Tianhe.',
+          ),
+        );
+      modelEndpointAck = decision.ack;
+    } else if (draft.external_llm_ack !== true) {
+      throw new Error(
+        t(
+          '请先勾选确认该外部后端实际使用的模型服务不在天河上运行 DeepSeek 等 LLM。',
+          'Confirm first that the model service actually used by this external backend does not run DeepSeek or other LLMs on Tianhe.',
+        ),
+      );
+    }
+
+    const next = settingsForSave(
+      rememberProfile({
+        ...draft,
+        base_url: baseUrl,
+        model_endpoint_ack: modelEndpointAck,
+        external_llm_ack: draft.external_llm_ack === true,
+        retrieval,
+        api_options: parseApiOptions(options),
+      }),
+      settings,
+    );
+    setSaving(true);
+    try {
+      await onSave(next);
+    } finally {
+      setSaving(false);
+    }
+    // 保存后的归一化值（trim/空串转 null）直接成为草稿，避免刚保存完又显示"未保存修改"。
+    setDraft(next);
+    setOptions(JSON.stringify(next.api_options, null, 2));
+    setStatus(t('设置已保存，下次发送时生效。', 'Settings saved; they apply to the next message.'));
+    return next;
+  }
   return (
     <section aria-label={t('助手设置', 'Assistant settings')} className="space-y-3">
       {/* 草稿与已保存设置分开说清楚：徽标给状态，这一行给"现在真正发往哪里"（U-07）。 */}
@@ -479,6 +631,88 @@ export default function AssistantSettings({
               'Messages go to the service and model above; changes below take effect after saving.',
             )}
       </p>
+      {/* 天河 LLM 底线：blocked 禁止且不提供绕过；自定义端点必须确认；外部后端确认其模型服务不在天河。 */}
+      {hasBackend() && (
+        <section
+          aria-label={t('模型服务端点底线', 'Model service endpoint policy')}
+          className="space-y-1 rounded border p-2"
+        >
+          <strong>{t('模型服务端点（天河底线）', 'Model service endpoint (Tianhe policy)')}</strong>
+          {externalBackend ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  '外部后端（Codex / Claude Code / OpenCode）使用它们自己的模型服务，应用无法读取实际端点。',
+                  'External backends (Codex / Claude Code / OpenCode) use their own model services; the app cannot read the actual endpoint.',
+                )}
+              </p>
+              <label className="flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={externalAcknowledged}
+                  disabled={disabled || busy || !hasBackend()}
+                  onChange={(e) => patch({ external_llm_ack: e.target.checked })}
+                />{' '}
+                {t(EXTERNAL_LLM_CONFIRM_ZH, EXTERNAL_LLM_CONFIRM_EN)}
+              </label>
+            </>
+          ) : endpointGuardError ? (
+            <Notice tone="error">{endpointGuardError}</Notice>
+          ) : !endpointGuard ? (
+            <p className="text-xs text-muted-foreground">
+              {t('正在检查模型端点…', 'Checking the model endpoint…')}
+            </p>
+          ) : endpointBlocked ? (
+            <Notice tone="error">
+              <p>{t(TIANHE_LLM_POLICY_ZH, TIANHE_LLM_POLICY_EN)}</p>
+              {endpointGuard.host && (
+                <p className="text-xs">
+                  {t('识别到的端点：', 'Matched endpoint: ')}
+                  {endpointGuard.host}
+                </p>
+              )}
+              {endpointGuard.message && <p className="text-xs">{endpointGuard.message}</p>}
+            </Notice>
+          ) : endpointConfirmRequired ? (
+            <Notice tone="warning">
+              <p>
+                {t(
+                  '这个模型端点不是已知的官方云服务。请先确认它不在天河上运行 DeepSeek 等 LLM，再保存设置。',
+                  'This model endpoint is not a known official cloud service. Confirm it does not run DeepSeek or other LLMs on Tianhe before saving.',
+                )}
+              </p>
+              {endpointGuard.host && (
+                <p className="text-xs">
+                  {t('端点：', 'Endpoint: ')}
+                  {endpointGuard.host}
+                </p>
+              )}
+              <label className="flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={endpointDecision.confirmed}
+                  disabled={disabled || busy || !hasBackend()}
+                  onChange={(e) =>
+                    patch({
+                      model_endpoint_ack: e.target.checked ? endpointDecision.endpoint : null,
+                    })
+                  }
+                />{' '}
+                {t(LLM_ENDPOINT_CONFIRM_ZH, LLM_ENDPOINT_CONFIRM_EN)}
+              </label>
+            </Notice>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {t(
+                '官方云服务：不需要额外确认。',
+                'Official cloud service: no extra confirmation needed.',
+              )}
+              {endpointGuard.host ? ` · ${endpointGuard.host}` : ''}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">{t(LLM_SCOPE_NOTE_ZH, LLM_SCOPE_NOTE_EN)}</p>
+        </section>
+      )}
       <fieldset disabled={disabled || busy || !hasBackend()} className="space-y-3">
         <Field label={t('运行后端', 'Backend')}>
           <Select
@@ -522,7 +756,8 @@ export default function AssistantSettings({
                       { ...draft, api_options: parseApiOptions(options) },
                       e.target.value,
                     );
-                    setDraft(next);
+                    // 切服务商等于换端点：旧端点的确认不能沿用。
+                    setDraft({ ...next, model_endpoint_ack: null });
                     setOptions(JSON.stringify(next.api_options, null, 2));
                   } catch (error) {
                     setStatus(String(error));
@@ -1201,68 +1436,7 @@ export default function AssistantSettings({
           </Button>
         </Advanced>
         <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={() =>
-              void run(async () => {
-                if (key)
-                  throw new Error(t('请先登记或清空 Key。', 'Register or clear the key first.'));
-                // Xerj 的 Key 也是"输入框里有内容"= 还没登记；保存会重启助手，先让用户登记或清空。
-                // managed 模式的 Key 由应用管理，外部模式残留的输入不影响保存。
-                if (retrievalMode === 'external' && retrievalKey)
-                  throw new Error(
-                    t('请先登记或清空 Xerj Key。', 'Register or clear the Xerj key first.'),
-                  );
-                if (
-                  ![draft.max_output_tokens, draft.timeout_seconds].every(
-                    (n) => Number.isSafeInteger(n) && n > 0,
-                  ) ||
-                  !(
-                    draft.context_window === null ||
-                    (Number.isSafeInteger(draft.context_window) &&
-                      draft.context_window >= 1024 &&
-                      draft.context_window <= 10_000_000)
-                  ) ||
-                  ![draft.session_turn_limit, draft.session_token_limit].every(
-                    (n) => Number.isSafeInteger(n) && n >= 0,
-                  )
-                )
-                  throw new Error(
-                    t(
-                      '输出上限和超时必须是正整数；上下文窗口须为 1024–10000000 的整数或留空；会话上限必须是非负整数。',
-                      'Output limit and timeout must be positive integers; the context window must be an integer between 1024 and 10000000 or blank; session limits must be non-negative integers.',
-                    ),
-                  );
-                // 检索关闭也校验格式：开/关之间切换不应因为存了非法值才发现。
-                const retrievalProblem = retrievalSettingsProblem(draft.retrieval, state.language);
-                if (retrievalProblem) throw new Error(retrievalProblem);
-                // 二进制路径的首尾空白不代表路径本身；空串按"自动探测"归一成 null，别把空白存进设置。
-                const retrieval: RetrievalSettings = {
-                  ...draft.retrieval,
-                  binary_path: draft.retrieval.binary_path?.trim() || null,
-                  endpoint: draft.retrieval.endpoint.trim(),
-                };
-                const next = settingsForSave(
-                  rememberProfile({ ...draft, retrieval, api_options: parseApiOptions(options) }),
-                  settings,
-                );
-                setSaving(true);
-                try {
-                  await onSave(next);
-                } finally {
-                  setSaving(false);
-                }
-                // 保存后的归一化值（trim/空串转 null）直接成为草稿，避免刚保存完又显示"未保存修改"。
-                setDraft(next);
-                setOptions(JSON.stringify(next.api_options, null, 2));
-                setStatus(
-                  t(
-                    '设置已保存，下次发送时生效。',
-                    'Settings saved; they apply to the next message.',
-                  ),
-                );
-              })
-            }
-          >
+          <Button disabled={endpointBlocked} onClick={() => void run(saveDraft)}>
             {t('保存设置', 'Save settings')}
           </Button>
           <Button variant="ghost" disabled={!dirty} onClick={discardDraft}>
