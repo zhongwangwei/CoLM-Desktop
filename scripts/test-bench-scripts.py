@@ -1336,5 +1336,25 @@ def main():
     return 1 if failures else 0
 
 
+
+@test
+def large_history_memory_warning_is_thresholded(workdir):
+    """长序列合并前的内存提示：小数据不打印，超过阈值给出实测标定的可行动文案。
+
+    不在夹具里造 256 MiB NetCDF（太慢），只加载脚本模块直接测纯函数；端到端路径由现有
+    34 例小夹具保证不会误报（它们都远低于阈值）。实测标定：AT-Neu 真实 history 2 年逐小时
+    峰值 RSS ≈ 344 MiB、10 年 ≈ 863 MiB（输出 NC 128 MiB），所以阈值取 256 MiB ≈ 20 年。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("prepare_under_test", PREPARE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.large_history_warning(1024) is None
+    assert module.large_history_warning(module.LARGE_HISTORY_WARNING_BYTES) is None
+    warning = module.large_history_warning(module.LARGE_HISTORY_WARNING_BYTES + 1)
+    assert warning is not None and warning.startswith("warning:"), warning
+    assert "MiB" in warning and "peak RSS" in warning and "10 years" in warning, warning
+
 if __name__ == "__main__":
     sys.exit(main())

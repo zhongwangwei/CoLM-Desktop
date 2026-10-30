@@ -40048,3 +40048,19 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 **本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1302 passed / 0 failed**（compare 套件 65 passed，含新增 4 例方法规则/参考类型告警与手改拦截）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
 
 **未覆盖**：OpenBench 专用 venv 的依赖版本可能不同（Basic 的失败路径由缺实现导致，与 xarray 版本无关；FDR 是适配器/运行器契约不一致，也与依赖无关）；混合"格点+单点参考"时哪些变量能出统计只做了规则判断，没有逐个方法组合验证；Basic/FDR 在未来 OpenBench 版本可能修复，页面只保证 3.0.8 下不误导。
+
+
+## 长序列 PREPARE 内存实测与阈值提示（2026-10-30）
+
+层变量保留后 PREPARE 的峰值内存一直是已知风险（旧实现跳过层/类别变量一部分就是怕膨胀）。这里用真实内核跑长 history 量了实际量级。
+
+**实测**（PLUMBER2 AT-Neu，`colm-cli new --start 2002-01-01 --end 2012-12-31`，Fortran 内核；1 年预热，history 覆盖 2003–2012）：
+- 120 个月度文件、**87,672 个逐小时步**、119 个变量（PREPARE 保留 115 个，其中 7 个层变量：f_wliq_soisno/f_t_soisno/f_wice_soisno/f_h2osoi/f_rootr/f_t_lake/f_lake_icefrac；band/rtyp/sensor 等 4 个类别维变量按预期跳过）。
+- `prepare.py`：真实 **5.47 s**，峰值 RSS **904,921,088 B ≈ 863 MiB**，输出站点 NC **128 MiB**。
+- 与之前 2 年逐小时（17,544 步，115 变量）的 344 MiB 对比：约 **150 MiB 基线 + 65 MiB/年（逐小时、这套变量）**。按此外推 30 年 ≈ 2.1 GiB、100 年 ≈ 6.6 GiB——10 年量级无压力，超长序列需要留意；输出文件本身 128 MiB，内存主要是分片全 load + concat/去重/写盘的数倍复制。
+
+**收口**：`prepare.py` 新增 `LARGE_HISTORY_WARNING_BYTES = 256 MiB` 和 `large_history_warning(nbytes)`：合并结果体积超过阈值时打印一条可行动 warning（带上面 2 年/10 年实测值，建议缩短时段或在上游关掉不用的 history 变量），小数据不打扰；调用点在 `merge_files` 之后、写盘之前。没有改合并/写盘算法（流式写盘代价大、当前 10 年可接受）。
+
+**验证（真实执行）**：`python3 scripts/test-bench-scripts.py` → **36 passed / 0 failed**（新增阈值纯函数用例；原有 35 例含层变量/cftime 全过）；`cargo test -q -p colm-bench --lib` 7 passed；`cargo clippy -p colm-bench --all-targets -- -D warnings` 干净；`git diff --check` 干净。
+
+**未覆盖**：>20 年历史的端到端 warning 路径（阈值纯函数有单测，端到端只在小夹具上验证不会误报）；Linux/远程服务器的内存表现；压缩/分块写盘优化（若要进一步降峰值，需要改 PREPARE 的 streaming 写入）。
