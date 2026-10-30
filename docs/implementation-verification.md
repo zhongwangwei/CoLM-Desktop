@@ -41543,3 +41543,27 @@ Note: DEF_USE_VariablySaturatedFlow is automaticlly set to .true.
 （或给 Campbell 土壤数据）；而当前要追的分叉在 **`WATER_VSF` / `variably_saturated_flow.rs`**，
 应在 VSF 子步内对同一 patch 打印顶层 `wliq/wice`、`imelt`/相变、`qinfl` 与迭代计数，
 用第 50 步重启状态做无歧义配对（该状态逐位已知）。
+
+### 分叉钉到 WATER_VSF 的 ipatch 31 顶层液/冰分配（同轮续）
+
+按更正后的方案给 **`WATER_VSF`** 打点（`COLM_VSF_DEBUG`：入口/出口的 10 层 `wliq/wice`、
+`qinfl/rsur/rnof/zwt/wdsrf/wa/wetwat`；Rust 在 `variably_saturated_flow_step` 同位置），
+flat 1 rank 跑 51 步。两边各 2142/2040 条记录（VSF 只对部分 patch 调用），按**入口 10 层
+`wliq/wice` 向量**配对（入口状态在第 50 步逐位一致），得到：
+
+- 一对 **入口差 3.2e-13、出口差 7.702e-7** 的记录，Fortran `ipatch = 31`、patchtype 0：
+  - 入口（两边一致）：顶层 `wliq=1.49984046e-2`、`wice=4.73073609`；
+  - 出口：顶层 `wliq` F=`7.7015e-7` vs R=`-1.3e-21`（≈0）；
+    `wice` F=`4.69913209` vs R=`4.69913286`（R 多 7.7e-7）；
+  - 其余 9 层完全一致，`qinfl`（-8.332447e-6）、`rsur/rnof/zwt/wdsrf/wa/wetwet` 全部一致，
+    顶层总水量两边差 6.5e-13。
+- 即：**分叉在 `WATER_VSF` 内部**，是顶层"残留液态水"的去向不同——Fortran 留下 7.7e-7
+  kg/m² 的液膜，Rust 把它全部并入冰（顶层液态≈0），能量/温度这一步还一致。
+- 另有 3 对（`ipatch` 47/15/11）出口差 1e-5~1e-4，但它们的入口状态只能在更晚的步匹配到
+  相同值，疑为后续步的累积/重复入口配对，待加步内序号后复核。
+
+下一步非常具体：在 VSF 的"残余水/润湿锋"段（上游 `wresi = wliq - dz*denh2o*vol_liq` 的
+`is_permeable` 分支，Rust 对应 `variably_saturated_flow.rs:4500-4530` 的
+`residual_water_kg_m2` 与 `:4860-4890` 的回填）对 ipatch 31 打印 `eff_porosity/vol_liq/
+is_permeable/wresi/回填前后 wliq`，与 Rust 同位置逐项比；7.7e-7 与 `dz*denh2o*vol_liq` 的
+舍入量级一致，很可能是**不渗透层的 `wresi` 处理差异**，而不是新的物理公式。
