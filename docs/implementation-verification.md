@@ -41619,3 +41619,57 @@ Rust `richards_solver` 的 `VariableSaturatedRichardsState` 也记录
   而回退次数（explicit/wet2dry）两边完全相同，隐式计数差 0.2%；
 - 此前 1–2 天窗口里 1e-4~2.94 的放大差，根因就是这 9 个子步的 7.7e-7 种子，不是公式错误；
   进一步"修"只能把 Newton 的每次浮点运算连同容差比较都逐位复刻（收益递减、且非政策要求）。
+
+## 收尾：本轮"Fortran↔Rust 对账 + 并行一致性"目标的证据汇总（2026-10-31）
+
+按维护者的要求，把这次对账的判据、结论与遗留项集中列出（详细过程见上文的各轮小节）。
+
+### 1. 站点与格点的结果差异、原因、哪边对
+
+**修掉的真实跨实现 bug（Rust 侧，均以当前上游为准）：**
+
+1. **冠层湿雪散射**（`radiation.rs`）：上游已改成 `scat_new` + 分子用旧 `scat`，Rust 停在
+   旧实现（分子用新 `scat`）。修复后单步 50 个 `albland` 调用与 Fortran 对齐到 ≤1.7e-16；
+   站点黄金 tier2 外从 **59 项降到 4 项**，格点 `f_alb` 最大差从 8.6e-2 降到 5.8e-6。
+2. **汇流出口宽度**（`river/network.rs`）：上游改成"本格河宽"，Rust 停在"本格与下游平均"。
+   修复后单次汇流 `wdsrf` 差 2.83 m → **4.6e-14**，冷启动 2 天 `f_discharge` 差 1.5e2 → 1e-12
+   量级，月度河湖网格的 discharge/flood/depth/velocity 不再进差异前 10。
+
+**剩余差异的量化（都可解释、且都在分层容差内/迭代量级）：**
+
+- 站点三个黄金算例（CN-Cng / CN-Cng-wet / US-NR1-snow）：tier0/tier1 全过，tier2 外分别
+  **4 / 23 / 51** 项，且都是近零量（`f_qinfl` 1e-20 级）或 1e-4~3e-3 的迭代量；
+- 格点河湖算例：**39/140** 项 tier2 外，最大相对差 ~5e-4（`f_zwt` 3.6%、`f_wice` 4.7e-4）；
+- **原因定案**：以最典型的 `e095_n40 patch 7` 为例，第 50 步状态逐位一致，第 51 步顶层
+  液/冰分配差 7.7e-7（总水量守恒、温度一致），一路追到 `WATER_VSF` 顶层残余体积分数
+  `4.4e-8`（< `RICHARDS_TOLERANCE=8e-8`），最终用求解器计数判定：
+  implicit **1897 vs 1906**、explicit **1156 vs 1156**、wet2dry **1607 vs 1607**
+  ⇒ 只有约 0.2% 的子步在容差边缘因舍入落到不同一侧，**属迭代收敛路径差，不是公式错**；
+  哪边"对"无意义，按 tier2 政策以迭代/回退计数为准，而回退次数完全相同。
+
+### 2. 变量名（特别是物质输送）
+
+- 主 history / material / unitcat 三个文件的变量名集合两引擎完全一致；
+- MT 文件后缀从 Rust 的 `_hist_tracer_` 对齐为上游 `_hist_material_`；
+- MT 变量的 `units`/`long_name` 从 "tracer" 字样对齐为上游 "material"（逐变量 0 处不一致）；
+- `history_window_seconds/end_minutes` 只在 material 文件写（上游口径）；
+- 重启里的 MT 元数据变量名一致；
+- 唯一 cosmetic 差异：主 history 变量**排列顺序**不同（名字/元数据/维度一致），未改。
+
+### 3. 并行一致性（多 node vs 单节点）
+
+- **Fortran grouped SPMD，同 rank 数下 1 节点 vs 2 节点逐位相同**：
+  3 rank（`tms02:3` vs `tms02:2+tms03:1`）与 4 rank（`tms02:4` vs `tms02:2+tms03:2`），
+  历史 113/109 个变量、全部 restart/旁车文件逐位一致（tms17 集群，OpenMPI 4.0.3）；
+- 本机：Fortran grouped 3 vs 6 rank、grouped vs flat-1 逐位相同；Rust 1 vs 2 vs 4 rank 逐位相同；
+- 远端 6 rank 单节点在收尾阶段挂住（OpenMPI/NFS teardown，环境问题，不影响同 rank 判据）。
+
+### 4. 遗留项（不阻塞本目标结论）
+
+- `WATER_2014` 分支的对照需要在 **Campbell 土壤**下做（仓库既有记录 Campbell+VSF-off 为
+  0 项 tier 外）；van Genuchten 下两个引擎都会强制 VSF on（两边一致）；
+- Rust 跨物理节点：Rust SPMD 用 `COLM_MPIEXEC` 启动、分解只依赖 rank 数（已验 1/2/4 rank
+  逐位一致），但集群上还没有 Rust 工具链，未做跨节点实跑；
+- 7920 工作站只有 gfortran+netCDF-C，缺 netCDF-Fortran/MPI；已探测到可用
+  `apt-get download` 免 root 方案，但最终多 node 验证在 tms17 集群完成；
+- 主 history 变量顺序（cosmetic）。
