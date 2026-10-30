@@ -269,7 +269,7 @@ pub struct RiverModel {
     /// `DEF_USE_BIFURCATION`：分汊路径，以及把全网当成一个河系的拓扑（分汊跨河系，
     /// 上游这时把所有河系同步到同一子步长）。
     pub bifurcation: Option<(bifurcation::Bifurcation, network::RiverSystem)>,
-    /// `DEF_Reservoir_Method = 1`：网络里的水库参数。
+    /// `DEF_Reservoir_Method = 1`：网络里的水库参数（方案 2 H22 上游已实现、本引擎未移植）。
     pub reservoir: Option<reservoir::Reservoir>,
     /// `DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT`：子步长再加一道「不让流向反转」的限制。
     pub momentum_dt_limit: bool,

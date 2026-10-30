@@ -9,7 +9,7 @@
 //! GIMPLE（不分馏）：
 //! * `wresi_j = max(FNMA(porsl*dz, 1000, wliq_bef), 0)`；
 //! * `pool_water`、`pool_tracer` 严格自左向右累加；
-//! * 露/霜输入 `pool + q_dew*R` 先舍入，再 `FMA(q_frost, R, ·)`，`a_trc_precip` 同形；
+//! * 露/霜输入 `pool + q_dew*R` 先舍入，再 `FMA(q_frost, R, ·)`，`a_mt_precip` 同形；
 //! * 湿地蒸发+升华的示踪物 `FMA(pool_ratio, q_evap, pool_ratio*q_subl)`（不单独舍入蒸发量）；
 //! * `trc_wa = FMS(actual(wa), pool_ratio, ref_mass)`；
 //! * 径流 `trc_rsur_local = (rsur*dt)*pool_ratio` 不舍入：三个累加器都是 `.FMA`，

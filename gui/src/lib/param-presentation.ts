@@ -1004,9 +1004,11 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   DEF_Reservoir_Method: {
     0: pair('关闭水库调度', 'Disable reservoir operation'),
     1: pair('河湖流改进水库调度', 'Improved river–lake reservoir operation'),
+    // 上游已有 H22（CaMa-Flood PR124），本引擎本轮没移植：标签要说明"上游有、这里没有"，
+    // 否则用户会以为选了就能跑，实际在运行前被 colm-rs 拒绝。
     2: pair(
-      '保留方案（Hanazaki 等 2022，未实现）',
-      'Reserved scheme (Hanazaki et al. 2022, not implemented)',
+      'H22 调度（上游已实现，本引擎未移植）',
+      'H22 scheme (implemented upstream, not ported here)',
     ),
   },
   DEF_wetland_finundation_scheme: {

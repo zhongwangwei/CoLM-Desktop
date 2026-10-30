@@ -140,7 +140,7 @@ CONTAINS
       real(r8) :: zi_soisno_m(maxsnl:nl_soil)
 
       ! Runtime activation: only execute methane_driver when CH4 is
-      ! registered as a reactive tracer in the namelist. Lake CH4 is
+      ! registered as a reactive material in the namelist. Lake CH4 is
       ! handled inside WATERBODY substeps; this path is soil/wetland CH4.
       run_methane = .false.
       is_rice_paddy = .false.

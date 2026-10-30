@@ -2,7 +2,7 @@
 
 MODULE MOD_MT_Methane
 !=======================================================================
-! CH4 reactive-tracer implementation behind the generic reactive dispatch.
+! CH4 reactive-material implementation behind the generic reactive dispatch.
 !=======================================================================
 
    USE MOD_Precision
@@ -11,9 +11,9 @@ MODULE MOD_MT_Methane
    USE MPI
    USE MOD_SPMD_Task, only: p_comm_glb, p_err
 #endif
-   USE MOD_MT_Defs, only: tracer_param_file_for_index, tracer_lower, &
+   USE MOD_MT_Defs, only: material_param_file_for_index, material_lower, &
       FAMILY_GAS, STATE_OWNER_PROVIDER, REACTION_PROVIDER
-   USE MOD_MT_Lifecycle, only: tracer_lifecycle_hooks_type, register_mt_provider
+   USE MOD_MT_Lifecycle, only: material_lifecycle_hooks_type, register_mt_provider
    USE MOD_MT_Methane_Const, only: DEF_file_GIEMS, DEF_wetland_finundation_scheme
    USE MOD_Vars_TimeInvariants, only: patchtype, patchlatr, patchlonr
    USE MOD_MT_Methane_Registry, only: igas_ch4
@@ -70,9 +70,9 @@ CONTAINS
    SUBROUTINE ch4_register_mt_provider ()
 
       IMPLICIT NONE
-      type(tracer_lifecycle_hooks_type) :: hooks
+      type(material_lifecycle_hooks_type) :: hooks
 
-      hooks = tracer_lifecycle_hooks_type()
+      hooks = material_lifecycle_hooks_type()
       hooks%land_init            => ch4_reactive_init
       hooks%land_read_restart    => ch4_reactive_read_restart
       hooks%land_write_restart   => ch4_reactive_write_restart
@@ -223,8 +223,8 @@ CONTAINS
 
       logical :: found
 
-      CALL tracer_param_file_for_index (igas_ch4, 'CH4,METHANE', file_param, found)
-      use_param = found .and. len_trim(file_param) > 0 .and. trim(tracer_lower(file_param)) /= 'null'
+      CALL material_param_file_for_index (igas_ch4, 'CH4,METHANE', file_param, found)
+      use_param = found .and. len_trim(file_param) > 0 .and. trim(material_lower(file_param)) /= 'null'
       IF (.not. use_param) THEN
          CALL CoLM_stop (' ***** ERROR: CH4 requires DEF_METHANE_PARAM_FILE to include a CH4 parameter file')
       ENDIF
@@ -667,13 +667,13 @@ CONTAINS
 
       IMPLICIT NONE
 
-      ! Generic tracer conservation is reported unconditionally from
-      ! MOD_MT_LandPhase::mt_report so non-CH4 tracer runs are covered too.
+      ! Generic material conservation is reported unconditionally from
+      ! MOD_MT_LandPhase::mt_report so non-CH4 material runs are covered too.
 
       ! The host-water residual reduce stays on this per-timestep path on
       ! purpose. mt_report is reached only under CoLM.F90's IF (p_is_worker),
       ! so p_comm_worker is exactly the set of ranks that get here -- the one
-      ! property that matters for a collective. The enclosing tracer_balance_report
+      ! property that matters for a collective. The enclosing material_balance_report
       ! already performs four p_comm_worker collectives per call, so one more
       ! reduce of a single double adds no new synchronisation point. Moving it to
       ! ch4_reactive_final was tried and reverted: land_final is reachable from

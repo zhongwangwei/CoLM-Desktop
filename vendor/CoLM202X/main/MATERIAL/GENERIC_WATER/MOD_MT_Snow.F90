@@ -30,8 +30,8 @@ CONTAINS
 
       integer  :: imt, j
       real(r8) :: R_snow_step, R_layer, d_wice, snow_mass_step
-      real(r8) :: total_tracer, layer_water, ice_water, liq_water
-      real(r8) :: ice_tracer, liq_tracer, moved
+      real(r8) :: total_material, layer_water, ice_water, liq_water
+      real(r8) :: ice_material, liq_material, moved
 
       IF (nmts <= 0) RETURN
 
@@ -51,7 +51,7 @@ CONTAINS
          ! unconditionally reset mt_scv. A non-zero residual here means
          ! somebody else wrote mt_scv while snl_old<0 (a real bug
          ! upstream, not a simple rounding artefact). Flag it once per
-	         ! tracer per occurrence so the root cause can be traced; Cases
+	         ! material per occurrence so the root cause can be traced; Cases
 	         ! B/C now fold any residual into the top snow layer before reset.
          IF (snl_old < 0 .and. abs(mt_scv(imt, ipatch)) > mt_tiny) THEN
             write(*,'(A,I8,A,I3,A,E12.5)') &
@@ -62,11 +62,11 @@ CONTAINS
 
          IF (snl_old == 0 .and. snl < 0) THEN
             ! Case A: First snow layer just created from accumulated scv.
-            ! Partition the accumulated snow tracer across the new layer's
+            ! Partition the accumulated snow material across the new layer's
             ! ice/liquid pools.  Do not put all mt_scv into ice and then add
-            ! liquid tracer again; that duplicates tracer mass when the first
+            ! liquid material again; that duplicates material mass when the first
             ! layer is born with liquid water.
-            total_tracer = mt_scv(imt, ipatch) + mt_pg_snow_ground(imt, ipatch)
+            total_material = mt_scv(imt, ipatch) + mt_pg_snow_ground(imt, ipatch)
             j = snl + 1  ! = 0
             ice_water = 0._r8
             liq_water = 0._r8
@@ -78,12 +78,12 @@ CONTAINS
             ENDIF
             layer_water = ice_water + liq_water
             IF (layer_water <= mt_tiny) layer_water = max(scv, mt_tiny)
-            R_layer = total_tracer / layer_water
-            ice_tracer = min(max(ice_water * R_layer, 0._r8), max(total_tracer, 0._r8))
-            liq_tracer = min(max(liq_water * R_layer, 0._r8), max(total_tracer - ice_tracer, 0._r8))
-            IF (ice_water <= mt_tiny .and. liq_water <= mt_tiny) ice_tracer = max(total_tracer, 0._r8)
-            mt_wice_soisno(imt, j, ipatch) = ice_tracer
-            mt_wliq_soisno(imt, j, ipatch) = liq_tracer
+            R_layer = total_material / layer_water
+            ice_material = min(max(ice_water * R_layer, 0._r8), max(total_material, 0._r8))
+            liq_material = min(max(liq_water * R_layer, 0._r8), max(total_material - ice_material, 0._r8))
+            IF (ice_water <= mt_tiny .and. liq_water <= mt_tiny) ice_material = max(total_material, 0._r8)
+            mt_wice_soisno(imt, j, ipatch) = ice_material
+            mt_wliq_soisno(imt, j, ipatch) = liq_material
             ! Clear mt_scv: all transferred to the snow layer
             mt_scv(imt, ipatch) = 0._r8
 
@@ -92,7 +92,7 @@ CONTAINS
             ! This is a less common case (snow pack growing a new layer).
             ! R_snow_step is correct ONLY when the new layer's mass came from
             ! fresh snowfall this step. SnowLayersCombineDivide handles
-            ! split/combine via dedicated tracer hooks (see file-end
+            ! split/combine via dedicated material hooks (see file-end
             ! comment), so reaching this branch via re-distribution would
             ! quietly use fresh-snow R on existing-pack water and erase the
             ! aged R signal. A CoLMDEBUG warning fires when the new
@@ -131,7 +131,7 @@ CONTAINS
             ! Do not route through mt_scv here: once layered snow exists,
             ! the water-side pg_snow increment goes directly into the top
             ! snow ice layer. A previous scv -> d_wice-gated -> clear path
-            ! could silently drop ground-snow tracer if mt_precip's
+            ! could silently drop ground-snow material if mt_precip's
             ! canopy residual correction and the water increment differed by
             ! more than mt_tiny.
             j = snl + 1
@@ -186,7 +186,7 @@ CONTAINS
          ! Warm wetland under layered snow: newsnow (as in the host) adds the
          ! whole scv, i.e. the water of all snow layers, to wetwat with
          ! variably saturated flow and sets scv = 0, but keeps the layers.
-         ! The tracer follows the water: the layers keep their tracer and the
+         ! The material follows the water: the layers keep their material and the
          ! same amount is added to wetwat, booked as a numerical source.
          IF (patchtype == 2 .and. snl < 0 .and. snl_old < 0 .and. scv < mt_tiny .and. &
              DEF_USE_VariablySaturatedFlow) THEN
@@ -207,8 +207,8 @@ CONTAINS
       ENDDO
    END SUBROUTINE mt_newsnow
 
-   ! tracer_snow_layer_adj was removed: the prior post-hoc redistribution
-   ! (total-tracer / total-water share) homogenised the snow column every
+   ! material_snow_layer_adj was removed: the prior post-hoc redistribution
+   ! (total-material / total-water share) homogenised the snow column every
    ! time snowlayerscombine / snowlayersdivide fired, erasing vertical
    ! isotope gradients that the model is otherwise supposed to preserve.
    ! The fix carries mt_wliq / mt_wice / mt_scv through the exact same

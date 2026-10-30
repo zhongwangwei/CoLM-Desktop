@@ -12,6 +12,12 @@
 - 2026-10-30 追平上游 `7d2fca93`（此前后者在 `1d7f3b25`）：`1d7f3b25..7d2fca93` 之间 256 个提交、
   280 个文件，主体是 MaterialTransport 重构、colm30/rawdata 前处理重构与汇流/CaMa 修复。
   下游的 `main/TRACER/` 目录被 `main/MATERIAL/` 整体取代。
+- 2026-10-30（同日第二轮）再追平上游 `e766527a`：`ddb7bc1a..e766527a` **22 个提交**、
+  上游动过 **70 个文件**——其中 64 个有内容改动、6 个只是上游把行尾从 LF 复原回 CRLF（内容
+  一字未变，见下）。主体是 MaterialTransport 的汇流/泥沙/重启/history 窗口修复、全局
+  `tracer*`→`material*` 改名、H22 水库方案与 mksrfdata 区域裁剪修复。比对与逐条取舍见
+  `docs/implementation-verification.md`「上游 e766527a 并入」一节；本文件下面只记改变了
+  对外约定的部分。
 
 ## 本地改动在哪里查
 
@@ -109,3 +115,38 @@
 vendor 的 Fortran 已随之更新；Rust 引擎此前还写旧名，本轮改名并加 `mt_forcing_cache_schema = 2`
 与 `mt_forcing_precip_reliable`，同时落地 `DEF_MT_FORCING_MIN_PRECIP` / `MEMORY_PRECIP`
 驱动的雨雪相态回填。
+
+### 2026-10-30（第二轮）：material 命名收口、history 旁车落盘、H22 水库
+
+并入上游 `ddb7bc1a..e766527a`。**旧算例/旧参数文件必须迁移**的项：
+
+- 参数文件：`DEF_SOLUTE%unit_kind` 的取值 `'tracer_per_water'` → `'material_per_water'`
+  （上游 `6a38f68f` 全量改名，不保留旧值；照旧写法写会让参数校验失败）。`run/` 下的样例
+  已随之更新，GUI/Rust 侧同步改名。
+- history 累加器旁车（`main/MOD_HistAccRestart.F90` 写的 sidecar）：字段名 `a_trc_*` →
+  `a_mt_*`；读回时**按字段**回退旧名（`hacc_read_name`：新名不存在才读 `a_trc_*`），所以
+  旧旁车仍可读，新旁车只有新名。旁车现在真的会被写：`save_history_acc_restart` 有了调用点，
+  且窗口在重启时已完整就不写；读回丢弃“完整窗口”、只恢复“部分窗口”，material 河沙/泥沙
+  history 行跟着主机同一个判定（`hist_acc_window_restored`）。
+- `DEF_Reservoir_Method = 2`（H22，CaMa-Flood v4 PR124）从“保留未实现”变成真正可用，
+  要求 `DEF_ReservoirPara_file` 里有 `dam_upreal [km2]`；方法 1 结果逐位不变（上游声明）。
+  旧算例若写了 `DEF_Reservoir_Method = 2`，此前会在 `reservoir_init` 停机，现在会真跑。
+- `Makefile` 的 material-transport 依赖边按上游 `e17ce149` 精简为 16 条。上游是按
+  `MaterialTransport` 宏条件编译推导的；vendor 的 MT 始终编译、对象表也不同，因此这一条
+  必须靠实建验证：`default` / `latlon` / `catchment` 三条预设串行 `make` 全部通过（见
+  `docs/implementation-verification.md`）。
+
+**同一轮里没有跟随上游的项（有意）**：
+
+- `include/define.h` 保持本地版本：上游这一轮只改了第 13 节注释里的一个词
+  （`land runoff tracers` → `materials`），而 vendor 的整段 13 是“编译期宏→运行时开关”的
+  说明文档，替换掉它会把这条约定丢掉。
+- 上游 `95485682` 把 6 个文件的 CRLF 行尾复原（`main/BGC/MOD_BGC_Veg_CNFireBase.F90`、
+  `...CNFireLi2016.F90`、`main/MOD_OrbCosazi.F90`、`MOD_dataSpec_PDB.F90`、
+  `MOD_prospect_DB.F90`、`MOD_tav_abs.F90`）。vendor 保持 LF：仓库 `.gitattributes` 把整棵树
+  钉成 `eol=lf`，多条逐字节测试依赖它。内容与上游逐字节一致（忽略行尾）。
+- 上游 `.gitignore`（`e0315e26` 把上游自己的 `/docs/`、`/tests` 两条本地规则去掉）不覆盖
+  vendor 的 `.gitignore`：这里保留 `/tests`、`*.py`、`docs/*.docx` 等本地规则。
+- 上游强制跟踪的 13 个 `.py`（`extends/CaMa/` 下 12 个 + `preprocess/Forcings/GDAS_GPCP/
+  step2_Merge_Data.py`）在 vendor 里一直不存在：vendor `.gitignore` 有 `*.py`。本轮不改变这
+  一约定，13 个文件也不参与任何内核构建。

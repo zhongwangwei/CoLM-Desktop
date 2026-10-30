@@ -328,12 +328,45 @@ fn run() -> Result<()> {
         let restart = colm_init::RestartFile::open(&files.time)?;
         templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
     }
-    restore_sidecar_tracers(
-        &mut templates,
+    // `read_history_acc_restart`（`CoLM.F90:376`）：先判重启点上的历史窗口是否完整 ——
+    // 完整窗口丢弃、首窗口从重启开始，只有不完整窗口才续接；材料历史跟同一判决。
+    let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
+        frequency: config.history_frequency,
+        urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
+        urban_patches: templates
+            .iter()
+            .filter(|template| template.urban.is_some())
+            .count(),
+        pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
+            || logical_field(&document, "DEF_USE_PC")?,
+        bgc: templates[0].physics.bgc.is_some(),
+        crop: templates[0]
+            .physics
+            .bgc
+            .is_some_and(|switches| switches.crop),
+        river_lake_flow: false,
+    };
+    let urban_flags = templates
+        .iter()
+        .map(|template| template.urban.is_some())
+        .collect::<Vec<_>>();
+    let sidecar_window = colm_runtime::history_sidecar::read_sidecar(
+        &restarts.initial,
         &history_sidecar_path(&restarts.initial)?,
-        patch_count,
-        |_, template| template.patch,
+        &sidecar_config,
+        &urban_flags,
+        config.start,
+        config.timestep_seconds,
     )?;
+    // 示踪物/CH4 累加器与主机共用同一个窗口判决：窗口被丢弃时不读回它们。
+    if sidecar_window.as_ref().is_some_and(|read| read.restored) {
+        restore_sidecar_tracers(
+            &mut templates,
+            &history_sidecar_path(&restarts.initial)?,
+            patch_count,
+            |_, template| template.patch,
+        )?;
+    }
     // `Opt_Baseflow_init` 无论开不开优化都先建 `ParaOpt/`（`MOD_Opt_Baseflow.F90:40-42`）。
     let para_opt = layout.out().join(&name).join("restart/ParaOpt");
     std::fs::create_dir_all(&para_opt)
@@ -361,8 +394,6 @@ fn run() -> Result<()> {
     } else {
         None
     };
-    let template = &templates[0];
-
     // 会话从**配置**开（窗口、站点、步长、频率都在里面），要在 `open` 消费掉
     // 配置之前建好 —— 而它自己不带 forcing，所以先后没有别的影响。
     let mut session = history_session(&config, &outputs)?
@@ -382,40 +413,16 @@ fn run() -> Result<()> {
             )
         });
     }
-    let sidecar_config = colm_runtime::history_sidecar::SidecarConfig {
-        frequency_code: history_frequency_code(config.history_frequency),
-        urban_run: logical_field(&document, "DEF_URBAN_RUN")?,
-        urban_patches: templates
-            .iter()
-            .filter(|template| template.urban.is_some())
-            .count(),
-        pft_or_pc: logical_field(&document, "DEF_USE_PFT")?
-            || logical_field(&document, "DEF_USE_PC")?,
-        bgc: template.physics.bgc.is_some(),
-        crop: template.physics.bgc.is_some_and(|switches| switches.crop),
-        river_lake_flow: false,
-    };
-    // `read_history_acc_restart`（`CoLM.F90:376`）：续跑重启带着未写完的历史区间时接着累加。
-    let urban_flags = templates
-        .iter()
-        .map(|template| template.urban.is_some())
-        .collect::<Vec<_>>();
-    let initial_window = colm_runtime::history_sidecar::read_sidecar(
-        &restarts.initial,
-        &history_sidecar_path(&restarts.initial)?,
-        &sidecar_config,
-        &urban_flags,
-    )?;
-    if let Some(window) =
-        initial_window.filter(|windows| windows.first().is_some_and(|window| window.steps > 0))
-    {
+    // 续跑重启带着未写完的历史区间时接着累加。
+    if let Some(read) = sidecar_window.filter(|read| read.restored) {
         let session = session.as_mut().context(
             "the restart carries an open history window, but this run writes no history",
         )?;
-        session.restore(window)?;
+        session.restore(read.windows)?;
     }
     let history_restart = HistoryRestart {
         config: sidecar_config,
+        time_step_seconds: config.timestep_seconds,
         window: session.as_ref().map(HistorySession::window_handle),
         tracer_raw: session.as_ref().map(HistorySession::tracer_raw_handle),
         urban: urban_flags,
@@ -447,6 +454,8 @@ fn run() -> Result<()> {
             )?),
             None => None,
         };
+    // `run_snow` 写终点续跑时要用终点日期判断历史窗口是否已经完整。
+    let run_end = config.end;
     let mut runtime = PointRuntime::open(config)?;
     if let Some(downscaling) = downscaling {
         runtime = runtime.with_downscaling(downscaling);
@@ -464,6 +473,7 @@ fn run() -> Result<()> {
         outputs.periodic.as_ref(),
         session,
         &history_restart,
+        run_end,
     )?;
     println!(
         "colm-rs: {} step(s) on patch(es) {:?}; wrote {}",
@@ -685,12 +695,14 @@ fn run_spatial(
     }
     let reservoir_method = integer_field(&document, "DEF_Reservoir_Method")?;
     ensure!(
-        reservoir_method <= 2,
+        (0..=2).contains(&reservoir_method),
         "unsupported reservoir operation method {reservoir_method}"
     );
+    // 上游本轮实现了 H22（method 2，CaMa-Flood PR124）；本引擎没有移植，仍然拒绝。
     ensure!(
         reservoir_method != 2,
-        "reservoir operation method 2 (Hanazaki et al. 2022) is reserved but not implemented yet"
+        "reservoir operation method 2 (H22, Hanazaki et al. 2022, CaMa-Flood PR124) is \
+         implemented upstream but is not ported to the Rust engine yet; use method 1"
     );
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
@@ -1945,6 +1957,7 @@ fn run_spatial_segment(
                 &river.network,
                 river.levee.as_ref(),
                 &mut tracers,
+                Some(&river.history),
             )?;
             if !loaded {
                 // `is_built_resv_init`：起始年份下已建成的水库。
@@ -2153,7 +2166,7 @@ fn run_spatial_segment(
                         .transpose()?,
                 )
                 .map(|session| {
-                    // 有输运示踪物或 CH4 provider 时写变量（`tracer_hist_out` 与
+                    // 有输运示踪物或 CH4 provider 时写变量（`mt_hist_out` 与
                     // `methane_reactive_history`），否则只有文件骨架。
                     match tracer_runtime.as_ref().filter(|t| {
                         t.has_transport()
@@ -2254,7 +2267,7 @@ fn run_spatial_segment(
     // 每份续跑文件旁都写历史累加器旁车（`write_history_acc_restart`），空间构建是 schema 2。
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
-            frequency_code: history_frequency_code(config.history_frequency),
+            frequency: config.history_frequency,
             urban_run: logical_field(document, "DEF_URBAN_RUN")?,
             urban_patches: templates
                 .iter()
@@ -2267,6 +2280,7 @@ fn run_spatial_segment(
             crop: physics.bgc.is_some_and(|switches| switches.crop),
             river_lake_flow: !catchment,
         },
+        time_step_seconds: config.timestep_seconds,
         window: history
             .as_ref()
             .map(|history| history.session.window_handle()),
@@ -2279,32 +2293,39 @@ fn run_spatial_segment(
             .collect(),
     };
     // `read_history_acc_restart`：续跑重启带着未写完的历史区间时接着累加（每块一份旁车，按块拼接）。
+    // 重启点上的完整窗口读回即丢弃（`restored = false`），那一块从头开窗；材料历史跟同一判决。
     let mut restored = Vec::with_capacity(patch_count);
     let mut open_window = false;
+    let mut window_restored = false;
     for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
-        // 示踪物部分按块读回（块内顺序即旁车顺序）。
-        restore_sidecar_tracers(
-            &mut templates[patches.clone()],
-            &history_sidecar_path(&files.time)?,
-            patches.len(),
-            |position, _| position,
-        )?;
-        match colm_runtime::history_sidecar::read_sidecar(
+        let sidecar = colm_runtime::history_sidecar::read_sidecar(
             &files.time,
             &history_sidecar_path(&files.time)?,
             &history_restart.config,
             &history_restart.urban[patches.clone()],
-        )? {
-            Some(windows) if windows.first().is_some_and(|window| window.steps > 0) => {
+            config.start,
+            config.timestep_seconds,
+        )?;
+        let block_restored = sidecar.as_ref().is_some_and(|read| read.restored);
+        window_restored |= block_restored;
+        match sidecar {
+            Some(read) if block_restored => {
                 ensure!(
-                    windows.len() == patches.len(),
+                    read.windows.len() == patches.len(),
                     "the history sidecar of {} holds {} patches for a block of {}",
                     files.time.display(),
-                    windows.len(),
+                    read.windows.len(),
                     patches.len()
                 );
+                // 示踪物部分与主机在同一判决下：完整窗口不读回，否则会续接一个已关闭的窗口。
+                restore_sidecar_tracers(
+                    &mut templates[patches.clone()],
+                    &history_sidecar_path(&files.time)?,
+                    patches.len(),
+                    |position, _| position,
+                )?;
                 open_window = true;
-                restored.extend(windows);
+                restored.extend(read.windows);
             }
             _ => restored.extend(std::iter::repeat_n(
                 colm_runtime::history_sidecar::HistoryWindow::default(),
@@ -2318,6 +2339,23 @@ fn run_spatial_segment(
             .context("the restart carries an open history window, but this run writes no history")?
             .session
             .restore(restored)?;
+    }
+    // `CoLM.F90:452-462`：主机判决为假时，河道与泥沙的材料历史行也要清零重开 —— 它们的
+    // 累加器在各自 `read_restart` 里已经读回，完整窗口的那一份必须丢掉，否则分段跑的第一个
+    // 窗口会把上一个窗口再算一遍。河道水量旁车读回了（`acctime` 有值）也算"恢复了"，
+    // 上游 `hist_acc_window_restored` 在 `river_sums` 读回后置真。
+    let river_window_restored = runtime
+        .river()
+        .is_some_and(|river| river.history.acctime.iter().any(|&value| value > 0.0));
+    if !(window_restored || river_window_restored) {
+        if let Some(river) = runtime.river_mut() {
+            if let Some(tracers) = river.tracers.as_mut() {
+                tracers.drop_hist_window();
+            }
+            if let Some(sediment) = river.sediment.as_mut() {
+                sediment.drop_hist_window();
+            }
+        }
     }
     let mut states: Vec<StandardLctSnowSoilState> = templates
         .iter()
@@ -2876,7 +2914,7 @@ fn lulcc_patch_areas(
         .collect()
 }
 
-/// `remap_land_tracer_lulcc_state`：每个新 patch 先取 `allocate_Tracer_Vars` 的分配值，再按方案搬旧池。
+/// `remap_land_tracer_lulcc_state`：每个新 patch 先取 `allocate_Material_Vars` 的分配值，再按方案搬旧池。
 ///
 /// * SAT（没有 `lccpct_patches`）：同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）整份抄过来。
 /// * MEC（`lulcc_inventory_trace` 加新旧面积）：广延量按面积守恒加权 —— 旧 patch `op` 转给新 patch `np`
@@ -3687,7 +3725,7 @@ fn lulcc_transition(
         .concat();
     let history_restart = HistoryRestart {
         config: colm_runtime::history_sidecar::SidecarConfig {
-            frequency_code: history_frequency_code(years.history_frequency),
+            frequency: years.history_frequency,
             urban_run: logical_field(document, "DEF_URBAN_RUN")?,
             urban_patches: new_urban.iter().filter(|&&is_urban| is_urban).count(),
             pft_or_pc: case.physics.use_pft || case.physics.use_pc,
@@ -3695,6 +3733,8 @@ fn lulcc_transition(
             crop: false,
             river_lake_flow: true,
         },
+        // 过渡这一步历史区间已关（`window: None`），步数恒为 0，完整性判据用不到。
+        time_step_seconds: 0.0,
         window: None,
         tracer_raw: None,
         urban: new_urban,
@@ -4231,6 +4271,7 @@ fn lulcc_transition(
             Some(patches.clone()),
             false,
             None,
+            times.new,
         )?;
         written.push(path);
     }
@@ -4462,6 +4503,7 @@ fn write_block_restarts(
                 Some(patches.clone()),
                 river_required,
                 sidecar_tracers(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
+                end_time,
             )?;
             Ok(path)
         };
@@ -4495,7 +4537,15 @@ fn write_block_restarts(
             .map(|((block, files), periodic)| write_block((block, files), periodic))
             .collect::<Result<Vec<_>>>()?
     };
-    if let (Some(history), true, true) = (river_history, river_required, write_river_history) {
+    // 窗口已完整时不写旁车：`mark_history_restart_with_river` 已经跳过主旁车，
+    // 河道旁车是它的一部分（上游 `save_history_acc_restart` 在写 `write_sidecar` 之前返回）。
+    let window_closed = history_window_complete(history, end_time)?;
+    if let (Some(history), true, true, false) = (
+        river_history,
+        river_required,
+        write_river_history,
+        window_closed,
+    ) {
         // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
         let label = date_label(normalized_day_end(end_time));
         let base = periodic
@@ -4968,6 +5018,7 @@ struct RunSummary {
 
 /// 积雪分支：同一个窗口，内核换成 `standard_lct_snow_soil_step`，
 /// 续跑写出多带雪段与四个雪标量。
+#[allow(clippy::too_many_arguments)]
 fn run_snow(
     runtime: &mut PointRuntime,
     templates: &[StandardLctRestartTemplate],
@@ -4976,6 +5027,7 @@ fn run_snow(
     periodic: Option<&PeriodicRestarts>,
     session: Option<HistorySession>,
     history_restart: &HistoryRestart,
+    run_end: CalendarTime,
 ) -> Result<RunSummary> {
     let mut states: Vec<StandardLctSnowSoilState> = templates
         .iter()
@@ -5015,6 +5067,7 @@ fn run_snow(
                         &path,
                         history_restart,
                         sidecar_tracers(templates, states)?.as_ref(),
+                        step.clock.end_time,
                     )?;
                 }
             }
@@ -5044,6 +5097,7 @@ fn run_snow(
         restart_out,
         history_restart,
         sidecar_tracers(templates, &states)?.as_ref(),
+        run_end,
     )?;
     Ok(RunSummary {
         steps,
@@ -5172,6 +5226,8 @@ fn append_tracer_restart(
 /// 写续跑文件时要附带的历史累加器信息（`land_history_restart.inc`）。
 struct HistoryRestart {
     config: colm_runtime::history_sidecar::SidecarConfig,
+    /// 模型的步长 [s]：与窗口自然长度比较，判断重启点上的窗口是否已经完整。
+    time_step_seconds: f64,
     /// 当前历史区间的原始累加状态；没开 history 时为 `None`（恒为空窗口）。
     window:
         Option<std::sync::Arc<std::sync::Mutex<Vec<colm_runtime::history_sidecar::HistoryWindow>>>>,
@@ -5190,18 +5246,6 @@ fn history_sidecar_path(restart: &Path) -> Result<PathBuf> {
     Ok(restart.with_file_name(colm_runtime::history::history_sidecar_name(name)?))
 }
 
-fn history_frequency_code(frequency: colm_hist::schedule::HistoryFrequency) -> u8 {
-    use colm_hist::schedule::HistoryFrequency as F;
-    match frequency {
-        F::None => 0,
-        F::Timestep => 1,
-        F::Hourly => 2,
-        F::Daily => 3,
-        F::Monthly => 4,
-        F::Yearly => 5,
-    }
-}
-
 /// 上游每写一份续跑文件，都同时写历史累加器旁车 `<case>_restart_hist_<date>_<block>.nc`
 /// （`write_history_acc_restart` + `complete_history_acc_restart`），并在主重启末尾写
 /// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
@@ -5210,12 +5254,37 @@ fn mark_history_restart(
     restart: &Path,
     history: &HistoryRestart,
     tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
+    date: CalendarTime,
 ) -> Result<()> {
-    mark_history_restart_with_river(restart, history, None, false, tracers)
+    mark_history_restart_with_river(restart, history, None, false, tracers, date)
+}
+
+/// 重启点上的历史窗口是否已经完整（`save_history_acc_restart` 的判据）。
+///
+/// 完整窗口不写旁车、也不给主重启打 `history_sidecar_required`：上游读回时反正会丢弃它，
+/// 而旁车是 patch 分辨率的全部累加器（全球算例数百 MB）。只有真正跨重启的不完整窗口才写。
+fn history_window_complete(history: &HistoryRestart, date: CalendarTime) -> Result<bool> {
+    let steps = history
+        .window
+        .as_ref()
+        .map(|window| {
+            window
+                .lock()
+                .expect("history window lock")
+                .first()
+                .map_or(0, |window| window.steps)
+        })
+        .unwrap_or(0);
+    colm_runtime::history_sidecar::window_is_complete(
+        history.config.frequency,
+        history.time_step_seconds,
+        date,
+        steps,
+    )
 }
 
 /// `read_history_acc_restart` 的示踪物部分：区间跨过重启时，用旁车里的累加器覆盖起跑状态
-/// （示踪物的 `a_trc_*`/`a_water_*` 只在旁车里；CH4 的累加量覆盖续跑文件读回的那份）。
+/// （示踪物的 `a_mt_*`/`a_water_*` 只在旁车里；CH4 的累加量覆盖续跑文件读回的那份）。
 /// `file_patches` 是旁车的 patch 数，`index` 给出模板在旁车里的位置。
 fn restore_sidecar_tracers(
     templates: &mut [StandardLctRestartTemplate],
@@ -5316,7 +5385,23 @@ fn mark_history_restart_with_river(
     block: Option<std::ops::Range<usize>>,
     river_required: bool,
     tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
+    date: CalendarTime,
 ) -> Result<()> {
+    // 重启点已经是一个完整窗口：不写旁车，也不打要求旁车的标记（读回时会被丢弃）。
+    if history_window_complete(history, date)? {
+        // 主重启是从上一份续跑复制来的，可能带着旧的 `history_sidecar_required`；这次故意
+        // 不写旁车，必须把旧标记清零，否则下一次分段跑会要求一份不存在的旁车。
+        let mut primary = netcdf::append(restart)
+            .with_context(|| format!("cannot reopen {}", restart.display()))?;
+        if let Some(mut marker) = primary.variable_mut("history_sidecar_required") {
+            let patches = marker
+                .dimensions()
+                .first()
+                .map_or(1, |dimension| dimension.len());
+            marker.put_values(&vec![0.0; patches], ..)?;
+        }
+        return Ok(());
+    }
     let mut windows = history
         .window
         .as_ref()

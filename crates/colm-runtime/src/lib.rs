@@ -665,7 +665,7 @@ impl PointRuntime {
                 }
                 session.set_element_surface(None);
             }
-            // `tracer_hist_out` 与 `flush_Tracer_Acc`：同一 `hist_out` 里、主 history 之后。
+            // `mt_hist_out` 与 `flush_Material_Acc`：同一 `hist_out` 里、主 history 之后。
             if let Some(path) =
                 session.push_tracer(step.clock.end_time, step.clock.is_spinup, states)?
             {

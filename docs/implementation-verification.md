@@ -40197,3 +40197,325 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 前端：`node ../scripts/test-react.mjs` → **1348 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全过；`check-gui.mjs --self-test` 与契约检查通过。
 - 真实网格算例（4×5 网格 24 步）：`series --from/--to` 取 13 步，`area_mean=['f_rnet']`，区域平均与 Python 按同一纬度余弦权重复算的最大差 5.3e-15（浮点求和顺序）。
 - **Not-tested**：真实 SSH 远程 series 窗口读取（本地逻辑与 RecordReadStats 断言覆盖，未连真服务器）；地图与时序光标/评估窗口的联动（本批只做固定色标）；完整 CSV 导出的后端流式写出（仍由前端在拿到数据后生成）；地图 DOM 渲染级测试（只有纯函数单测）；curve 的 `stale` 分支页面级只覆盖条件变更前的短暂窗口（window/variable 变化仍清曲线，未改既有行为）。
+
+## 上游 e766527a 并入：22 个提交的比对、三方合并与取舍（2026-10-30，实测）
+
+接同日上一节（`7d2fca93→ddb7bc1a`）。上游当天又前进了 22 个提交，主体是
+MaterialTransport 的汇流/泥沙/重启/history 窗口修复、全局 `tracer*`→`material*` 改名、
+H22 水库方案与 mksrfdata 区域裁剪修复。本轮把 `vendor/CoLM202X` 从 `ddb7bc1a` 追到
+`e766527a`，并把「哪些跟、哪些不跟、为什么」逐条记下来。
+
+### 1 比对方法与总量
+
+三方比对，不是两方 diff：上游基线 `ddb7bc1a`（base）、本地快照（ours，含全部本地偏差）、
+上游新 HEAD `e766527a`（theirs）。所有比较前把 CRLF 规范化成 LF——仓库 `.gitattributes`
+把整棵树钉成 `eol=lf`，直接比字节会把上游 6 个文件的 CRLF 复原误报成内容改动。
+
+上游 `e766527a` 共 613 个跟踪文件，逐个分类：
+
+| 类别 | 数量 | 含义 |
+|---|---|---|
+| SAME | 344 | 上游没动、本地也没动 |
+| LOCAL_ONLY | 192 | 本地有偏差（运行时开关等），上游这一轮没动 |
+| CONFLICT | 59 | **两边都动过**：本地偏差 + 上游改动 |
+| UPSTREAM_ONLY | 5 | 上游改动、本地无偏差，可直接套用 |
+| VENDOR_MISSING | 13 | 上游跟踪、vendor 一直不跟踪（见 §6） |
+
+上游这一轮动过 **70 个文件**：64 个有内容改动（59 CONFLICT + 5 UPSTREAM_ONLY），另 6 个只是
+上游 `95485682` 把行尾从 LF 复原回 CRLF、内容一字未变（规范化后落进 SAME）。64 个的合并结果：
+
+- 5 个直接套用；
+- 47 个三方合并无文本冲突（本地偏差与上游改动不在同一 hunk）；
+- **12 个有文本冲突，共 60 个 hunk**，逐条人工决定（§3）。
+
+最终 `git diff --shortstat vendor/`：**62 files changed, 4789 insertions(+), 4003 deletions(-)**。
+
+### 2 上游这 22 个提交在做什么
+
+按主题分组（括号内为提交）：
+
+- **MaterialTransport 汇流/泥沙/重启/history 正确性**（`87bb707c`、`080c2d57`、`200368fe`
+  + `4ac7d7b0`（revert 对）、`6a38f68f`、`4446918a`、`6d0615d6`、`3d23f88f`、`71b0a310`、
+  `fcc1e86a`）：干单元残水按上游汇流分组记账而不是记终端汇；泥沙 CFL 子步数按
+  `p_comm_rivsys` 统一（`200368fe` 的按 `p_comm_worker` 版本被 revert，最终由 `6a38f68f`
+  以 river-system 口径重做）；子步载体端点改成每次调用的局部数组（原来的 SAVE 缓冲被
+  递归调用覆盖）；`sedout/bedout` 按子步积分；`momen_riv` 在 ±20 m/s 速度钳位触发时重算；
+  冷启动正水位零体积占位保留到蓄量重建；重启窗口、空 rank、干/湿边界各自的库存与 history
+  快照；有限溶解度溶质在 LULCC 水重映射后按载体重新平衡；内陆洼地（`ucat_next == -10`）
+  按内部单元处理。
+- **全局 `tracer*`→`material*` 改名收口**（`6a38f68f`、`34718388`，以及 `99ef44c1` 对
+  `conc_trcr_c/conc_trcr_n` 误改名的回退）：`main/`、`share/`、`mksrfdata/`、`mkinidata/`、
+  `include/` 下 2837 处标识符；`unit_kind` 字面量 `'tracer_per_water'`→`'material_per_water'`；
+  history 旁车字段 `a_trc_*`→`a_mt_*`（读回时按字段回退旧名）；`a_trc_*` 以外的
+  `tracer_*` 内部函数名在部分位置保留（上游明确保留的就不再改名）。
+- **H22 水库方案**（`b32485eb` + `124e631f`）：`DEF_Reservoir_Method = 2` 从“保留未实现”
+  变成 CaMa-Flood PR124 的 H22 实现（逐水库纳雨面积系数 `dam_upreal`、四段 H22 调度规则、
+  0.95 紧急阈值），并修 PR124 自身“R_VolUpa(IDAM) 在循环里反复覆盖最后一个元素”的单行
+  缺陷；`main/HYDRO/MOD_Grid_Reservoir.F90` 不再对 method 2 停机。
+- **mksrfdata 区域裁剪**（`059ae817`、`cdce2be6`、`15686f6c`、`1e70d7a4`）：复用块尺寸不
+  兼容时先拒绝再写、INT64 二/三维向量裁剪保精度；scheme-8 冠层几何按 patch/PFT 掩码裁剪、
+  六字段地形湿度族完整保留；裁剪失败时把缺失文件/字段名通过 `clip_error` 报出来，NetCDF
+  打开失败带文件与字段上下文；删掉 AAS river-lake 实验套件（只影响上游自己的 `run/`）。
+- **构建与仓库卫生**（`e17ce149`、`e766527a`、`95485682`、`e0315e26`）：把 material-transport
+  的 make 依赖边从 63 行精简到 16 条（按 `MaterialTransport` 宏条件编译推导）；CaMa 分支
+  仍链接未改名的 tracer 源；复原 6 个文件的 CRLF；把上游 `.gitignore` 恢复成上游版本。
+
+**对非 MT 默认算例的影响**：`MOD_Thermal`/`MOD_LeafTemperature`/`MOD_LeafTemperaturePC`/
+`MOD_SnowLayersCombineDivide` 的改动全部是 MT 诊断量（`canopy_smelt/frzc`、`qphs_*`、
+`raw_mt_*`、雪层 MT 池）的声明与传参；`H22` 只在 `DEF_Reservoir_Method = 2` 时生效（上游
+自测 method 1 逐位不变）；`MOD_RegionClip` 只影响 mksrfdata 预处理；其余在
+`#ifdef MaterialTransport` 或运行时 MT 开关内。所以**默认（MT 全关、无水库）单点/格点结果预期
+逐位不变**。一个例外要说清：`MOD_Grid_RiverLakeFlow.F90` 的内陆洼地（`ucat_next == -10`）那段，
+上游把“已经算好的 `depression_capacity`（有建成水库时是水库库容）”作为蓄量上限和终值，
+而 vendor 旧代码在调用后把 `volwater` 重置回 `topo_rivstomax(i)`——**有 method 1 建成水库且有
+内陆洼地单元时结果会变**，这是上游的修复（原来主机用库容、材料侧用河道地形上限，两边不一致）。
+本轮没有重跑黄金回归来另证“默认算例逐位不变”（见 §11）。
+
+### 3 12 个文件、60 个冲突 hunk 的决定
+
+统一策略：**采用上游代码，把 `#ifdef MaterialTransport`（及
+`#if (defined MaterialTransport) && …`）展开成无条件代码**——vendor 的 MATERIAL 模块始终编译、
+family 开关在运行时；真正保留的编译期宏（`CATCHMENT`、`GridRiverLakeFlow`、`SinglePoint`、
+`CaMa_Flood`、`USEMPI`、`CROP`、`LULC_*`、`URBAN_MODEL`）照旧。逐文件：
+
+| 文件 | hunk | 决定 |
+|---|---|---|
+| `include/define.h` | 1 | 保留 vendor 的整段「编译期宏→运行时开关」说明。上游本轮只改了其中一行注释（`tracers`→`materials`），而 vendor 已经把整节改写成文档。 |
+| `.gitignore` | 1 | 保留 vendor 本地规则（`/tests`、`*.py`、`docs/*.docx`、`!/tests/…lifecycle…`）。上游 `e0315e26` 是把它自己仓库的两条本地规则删掉。 |
+| `main/MOD_Hist.F90` | 8 | 采用上游：`flush_Tracer_Acc`→`flush_Material_Acc`、`file_last/…_hist_tracer`→`…_material`、`hist_acc_final_snapshot` 改逻辑函数并用返回值门控 MT 快照；去掉守卫。保留本地“`history_window_seconds` 只在 hist_out 局部声明一次”的写法（上游把它放进 MT 守卫内，vendor 展开后会重复声明）。 |
+| `main/MOD_HistAccRestart.F90` | 1 | 采用上游 `allocate_Material_Vars` 注释与改名；旁车字段全部 `a_mt_*`，旧名只读回退。 |
+| `main/CoLM.F90` | 6 | 采用上游：`hist_acc_window_restored` + `mt_riverlake_drop_hist_window`/`mt_sediment_drop_hist_window` 整块（保留 `#ifdef GridRiverLakeFlow`）；`itrc_cama`→`imt_cama`（本地 CaMa 警告块同步改名）；`tracer_loaded_restart/…_restart_file`→`material_…`；旁车保存注释与语义用上游版本。 |
+| `main/CoLMMAIN.F90` | 12 | 采用上游全部 `*_trc`→`*_mt` 改名与 `imt_loc`；采用上游 WATER_VSF 的 MT 关键字实参表；去掉本地 `IF (nmts > 0)` 包装（上游展开后就是无条件赋值，标量置零开销可忽略，且与文件中其它无条件 MT 调用一致）；本地 `ldew_rain/snow_old` 赋值同步改名。 |
+| `main/HYDRO/MOD_Grid_Reservoir.F90` | 1 | 采用上游：删掉 method 2 的“未实现”停机，改为 `DEF_Reservoir_Method /= 1 .and. /= 2` 才报错。 |
+| `main/HYDRO/MOD_Grid_RiverLakeFlow.F90` | 1 | 采用上游：内陆洼地排空用 `depression_capacity`（含水库库容）替代 `topo_rivstomax(i)`，`mt_rlc_inland_depression` 调用无条件保留。 |
+| `main/MOD_LeafTemperature.F90` | 3 | `raw_trc_out`→`raw_mt_out`；采用上游 MT 诊断注释。保留本地 `rstfacsun/rstfacsha` 的 `intent(inout)` 声明（植物水力学会更新它们）。 |
+| `main/MOD_LeafTemperaturePC.F90` | 4 | 同上；本地已有的三个 MT 诊断声明保留一处（上游守卫内那份不重复引入），早返回分支里本地补的 `raw_mt_out=0` 赋值保留。 |
+| `main/MOD_SnowLayersCombineDivide.F90` | 8 | 采用上游 `zwtrc_*`→`zwmt_*`、`strc_*`→`smt_*`（不只是后缀：`strc_`→`smt_`）与 `nmt`/`imt` 声明。 |
+| `main/MOD_Thermal.F90` | 14 | 采用上游 MT 诊断声明与全部调用点改名；保留本地把 `flddepth/fldfrc/fevpg_fld` 声明放在后面的布局（同一组哑元声明，声明顺序不参与 positional 关联）；保留本地 `DEF_VEG_SNOW` 关闭时按 tleaf 重切 per-PFT 雨雪的修复。 |
+
+### 4 机械合并的盲区：合并后必须补的三类问题
+
+三方合并只能保住“两边都改过、按 hunk 对齐”的内容，上游**新写**的行和跨 hunk 的预处理结构
+它管不到。本轮实测踩到三类，全部已修：
+
+1. **孤儿预处理行**。删掉 `#ifdef MaterialTransport` 之后，对端的 `#else`/`#endif` 会作为
+   “公共行”留在结果里：`main/MOD_Thermal.F90` 有 11 处（3 组 `#else`+非 MT 调用行+`#endif`、
+   5 个落单 `#endif`）。修法是把它们删掉，然后对**整个** work 树做 `#if*`/`#else`/`#endif`
+   配平扫描（0 异常）。这类问题编译器一般会报，但报的位置离原因很远。
+2. **重复实参尾巴**。`main/CoLMMAIN.F90` 的 WATER_VSF 调用里，上游 `#ifdef` 的 `#else`
+   分支实参（`qflx_irrig_drip =…, qflx_irrig_paddy =…)`）被当成公共行保留，`CALL` 在 MT 实参
+   表的 `)` 处提前闭合，gfortran 报 `Unclassifiable statement`。删掉那两行。
+3. **上游新代码没经过本地 transform**（本轮两处，`mksrfdata/MOD_RegionClip.F90`）：
+   - 新的 scheme-8 `cstructure` 目录创建写成 `CALL system('mkdir -p …')`。vendor 早已把所有
+     `CALL system('mkdir -p'/'cp')` 换成 `MOD_Filesystem::make_directory/copy_file`（Windows
+     上没有 `mkdir -p`，且路径里的空格/引号没有转义）。→ 改成 `make_directory`。
+   - 新的冠层 cstructure `_pfts` 裁剪块带 `#if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)`。
+     vendor 的子网格结构是运行时开关（PFT/PC 代码始终编译）。→ 改成
+     `IF (DEF_USE_PFT .or. DEF_USE_PC) THEN … ENDIF`，与同文件 `pctpft` 段一致。
+   教训：**上游每次新增的代码都要按本地 transform 逐类过一遍**（运行时开关、路径可移植性、
+   本地修复），不能只看冲突。
+
+### 5 机械核对：上游的改动没丢、本地的修复没丢
+
+合并不是靠“看着对”。三组机械核对：
+
+1. **上游每条新增行都在 vendor 里**：对 70 个文件逐文件取上游 diff 的 `+` 行（排除纯
+   `#if/#else/#endif` 与含 `MaterialTransport`/`tracer`/`trc` 的行——这些正是策略性改写的
+   对象），在 vendor 全文里找。**67/70 文件全中，3 个文件各有一条解释项**：
+   - `include/define.h`：§3 的注释替换（有意）；
+   - `main/MOD_LeafTemperaturePC.F90`：`raw_mt_out` 声明在本地是无注释的那一行（声明在，注释
+     用上游措辞）；
+   - `main/MOD_Thermal.F90`：上游写成 `raw_mt_out=raw_mt_p(i))`，vendor 保留上一轮的实参
+     顺序 `raw_mt_out=raw_mt_p(i), &` + `ipft_index=i)`（都是关键字实参，语义相同；两条预设
+     内核实建验证过）。
+2. **本地修复标记行 0 丢失**：把 HEAD 版 vendor 里所有带 `FIX 2026…`、`Local fix`、
+   `vendor fix`、`上游`、`本仓库` 等标记的注释行与合并后逐行比对，缺失 0 行。
+3. **预处理配平 0 异常**：work 树全部 `.F90` 的 `#if*`/`#endif` 栈配平扫描通过。
+4. **内容差异只剩已知本地偏差**：抽查改动最大的几个 MT 文件，vendor 与上游的差异只剩
+   “去掉 `MaterialTransport` 守卫/条件”这一类；例如 `MOD_MT_RiverLake.F90`、
+   `MOD_MT_Vars.F90` 与上游只差 `#ifdef MaterialTransport`/`#endif` 两行，
+   `MOD_MT_Sediment.F90` 只差 `#if (defined MaterialTransport) && (defined GridRiverLakeFlow)`
+   vs `#if (defined GridRiverLakeFlow)` 一行。
+
+### 6 有意不跟随上游的项
+
+- `include/define.h`：见 §3。
+- **6 个 CRLF 文件的 LF 保持**：上游 `95485682` 把 `main/BGC/MOD_BGC_Veg_CNFireBase.F90`、
+  `main/BGC/MOD_BGC_Veg_CNFireLi2016.F90`、`main/MOD_OrbCosazi.F90`、
+  `main/MOD_dataSpec_PDB.F90`、`main/MOD_prospect_DB.F90`、`main/MOD_tav_abs.F90` 的 CRLF
+  复原（上游自己的 text-mode 往返把它们变成了 LF）。vendor 侧这 6 个文件内容与上游一致、
+  行尾保持 LF：仓库的 namelist 往返与四张生成表逐字节测试都假定工作树是 LF。
+- **13 个 `.py` 不入库**：`extends/CaMa/{map/src/src_dam/script,preprocess/dam}` 下 12 个 +
+  `preprocess/Forcings/GDAS_GPCP/step2_Merge_Data.py`。vendor `.gitignore` 有 `*.py`，这些文件
+  自入库副本以来就不跟踪，也不参与任何内核构建。
+- **`.gitignore`**：保留 vendor 本地规则。
+- **`Makefile` 依赖表**：这里**跟随**了上游的精简（63→16 条边），但上游是按
+  `MaterialTransport` 宏条件编译推导的，vendor 的 MT 始终编译、对象表也不同，所以这条必须
+  靠实建验证，不能只信上游的推导（见 §8）。
+
+### 7 生成表、命名契约与参数审计
+
+- `cargo run -p xtask -- gen-schema`：**字段集合与默认值无变化**，只有 `line:` 行号整体 +1
+  （`share/MOD_Namelist.F90` 只多了一行注释）。`gen-histmap`：**变量/开关无变化**，行号 +5
+  （`main/MOD_Hist.F90` 的改动）。`gen-landcover`/`gen-co2mlo`：源未变，产物不变。
+  `DEF_Reservoir_Method` 的 allowed values 早已是 `["0","1","2"]`，无需改。
+- 四个 drift 测试（schema/histmap/landcover/co2）与 `oracle --test histmap` 全过；
+  55 份真实 namelist 往返逐字节全过（含本轮改过的两份 Amazon 示例与 chloride 参数文件）。
+- `cargo run -p xtask -- parameter-audit` 重生成：只有 `candidates.json`/`catalog.json` 变化，
+  `catalog.json` 里 solute 的 `unit_kind` 默认值从 `'tracer_per_water'` 变成
+  `'material_per_water'`，全仓库 `artifacts/` 里已无旧字面量。
+
+### 8 Rust / GUI 侧的契约跟进
+
+Rust 引擎（`crates/`）是独立重实现，凡是**盘上格式、命名、持久化语义**的契约变更都必须跟着改，
+否则两个实现对同一个重启/旁车/参数文件互相读不懂。本轮跟进的项：
+
+- **history 累加器旁车字段名**：`a_trc_*` → `a_mt_*`（44 项），读回**逐字段**回退旧名
+  （`tracer_sidecar.rs`）。回退判据只看变量是否存在（与上游 `hacc_read_name` +
+  `ncio_vector_exist` 一致），形状校验按读到的名字做；旧旁车可以混着新旧名。
+- **`unit_kind` 字面量**：`'tracer_per_water'` → `'material_per_water'`
+  （`colm-core/src/tracer/descriptor.rs` 的默认值与校验白名单、GUI 的参数展示与测试）。
+  不保留旧字面量的接受——与 Fortran 的 `materials(imt)%unit_kind` 校验一致，旧 solute
+  参数文件必须改。
+- **history 窗口旁车语义**：`history_sidecar.rs` 增加窗口长度推导
+  （`DEF_HIST_FREQ`，TIMESTEP/HOURLY/DAILY 与 MONTHLY/YEARLY 边界），读回返回“是否恢复了
+  部分窗口”；写旁车时窗口在重启点已完整就不写（`colm-rs.rs`）；`river/restart.rs` 只在
+  部分窗口时恢复 `mt_hist_*` 行，`river/tracer.rs` / `river/sediment.rs` 提供
+  `drop_hist_window`，由主机判定驱动——与上游 `CoLM.F90` 的
+  `hist_acc_window_restored`/`mt_riverlake_drop_hist_window` 同一个规则，避免三份 history
+  窗口不一致（`080c2d57` 的核心）。
+- **`DEF_Reservoir_Method = 2`（H22）**：**有意不移植**。拒绝，但把原因写清楚：上游已实现，
+  移植需要 `dam_upreal` 参数与 `volresv_flood`/`resv_h22_coeff` 两套静态量；只抄调度公式
+  而没有参数会得到一条“看起来正常、实际不是 H22”的出流曲线，比明确拒绝更糟。用到 H22 的
+  算例必须先走 Fortran 内核。`DEF_Reservoir_Method` 的 schema 白名单本来就是 0/1/2，未改。
+- 其余改名（`flush_Material_Acc`、`allocate_Material_Vars`、`file_hist_material` 等）是
+  Fortran 模块内部符号，Rust 无对应物；`TransferTraceReadin` 是上游改名的误伤，保持原名。
+
+### 9 Rust 引擎与上游语义差异清单（本轮比对结果，未移植项登记）
+
+这一节是「差异立刻找出原因」的落盘：逐项对上上游 `e766527a` 的语义，给出 Rust 侧
+`file:line`、后果、严重度与处理。严重度：**A** = 默认（无分汊/无堤防）算例或受支持配置的
+数值会不同；**B** = 只在有堤防/分汊/水库/区域裁剪时不同，或只影响输出；**C** = 诊断/格式/
+健壮性。分类：*未移植功能*、*既有差异*（本轮之前就有，本轮上游改动使差距变大）、
+*不同设计*（Rust 用另一种方式满足意图）、*应修*。
+
+| # | 项 | 上游行为 | Rust | 严重度 | 分类 | 本轮 |
+|---|---|---|---|---|---|---|
+| 1 | H22 水库调度 | `MOD_Grid_Reservoir.F90` 实现 method 2 | `river/reservoir.rs` 明确拒绝 | B | 未移植（有意拒绝） | 文案说明，见 §8 |
+| 2 | 泥沙 CFL 子步 | `nsub=ceil(donor_outgoing·dt/rivsto)`，上限 240，递归子区间并积分 `netflw/exch/sedout/bedout` | 每个形态区间只做一次交换，无 `nsub` | **A** | 既有差异 | 登记，未移植 |
+| 3 | 泥沙子步分母 | 总出流 = 本格正向 + 上游反向面 | 只用 `rivout_abs` | A（随 #2） | 未移植 | 登记 |
+| 4 | 泥沙重启窗口校验 | 要求 `sed_acc_time == 0`（窗口已闭合） | 允许窗口中途 | C | 应修 | 登记 |
+| 5 | 干单元残水迁移 | 按 fwd/rev/分汊拆分，留在 `mt_dry_pending`，只有正向份额记入出流 history | 整笔记为终端汇、记在本格 | **A** | 既有差异 | 登记 |
+| 6 | material history 窗口跨重启 | 部分窗口恢复、完整窗口丢弃，河沙/泥沙跟随主机判定 | 原为“总是新开窗口” | B | — | **已修** |
+| 7 | 分汊蓄量几何 | `storage_from_stage`（只用漫滩曲线） | 旧 `storage_with_river_prism`（多补一块河槽棱柱） | B | 应修 | 登记 |
+| 8 | 分汊干燥保护池的床面 | `rivhgt + levee_bashgt` | 恒为 `rivhgt + levdph` | B | 应修 | 登记 |
+| 9 | 河道 history 缺测值 | 空窗口写 `spval` | 写 0 / 保留原值 | B | 应修 | 登记 |
+| 10 | `f_floodfrc` 的缺测均值 | 均值 `= spval` 时输出缺测 | 把 `-1e36` 当面积相除，输出巨大负值 | B | 应修（明显的垃圾值） | 登记 |
+| 11 | 非挥发溶质的冰载体回收 | 冰载体消失时把冰池挪回液/固池 | 无这段 | B | 未移植 | 登记 |
+| 12 | 旁车字段名/旧名回退 | `a_mt_*` 写、旧名逐字段读 | 原为只写 `a_trc_*` | C | — | **已修** |
+| 13 | LULCC 后主机水重映射的再平衡 | `mt_lulcc_host_sync`：湿 patch 限定、冠层/土壤/雪/地表固液再平衡 | Rust 的 LULCC 是分段重跑 mkinidata（SAT）设计，无同构步骤 | B | 不同设计 + 未移植 | 需设计决定 |
+| 14 | 区域裁剪的缺输入诊断 | `clip_error` 报缺失文件/字段名，NetCDF 打开失败带上下文 | `colm-srfdata/src/region.rs` 字段无关地全量裁剪，无“必需字段”诊断 | C | 不同设计（诊断未移植） | 登记 |
+| 15 | 冠层总截获 | `max(qintr + max(qdrp,0), 0)`（允许净截获为负） | Rust 在自身截获步里给出 `max(0, retained)`，无 `qdrp` 项 | B? | **需核实** | 不动作，标注 |
+
+**已核实“不算差异”的项**（避免下次重复分析）：上游这批 MPI/集合修复（`p_comm_rivsys`
+归约、`hist_acc_window_restored` 与 `mt_dry_stat` 的 allreduce、空 rank 分配）在 Rust 侧 N/A
+——Rust 的汇流没有 MPI（单进程）；冷启动正水位零体积占位在 Rust 的
+`river/mod.rs::rebuild_volwater` 里已按阶段重建体积，不需要上游那个 CYCLE；上游“history 快照
+每步都拍”的缺陷在 Rust 侧不存在（Rust 在重启时直接写活累加器，本轮只补了
+`snapshot_hist_at_end` 对应的那半）；`mt_hist_*` 与 `a_mt_*` 的 Fortran 侧改名对 Rust 内部状态
+无影响（Rust 内部本来就叫 `mt_*`）。
+
+**处理原则**：本轮只做契约层（盘上格式/命名/持久化语义，见 §8）。#2/#3/#5 是真正的
+数值差异，属于 Rust 引擎的汇流/泥沙移植工程，需要专门的黄金对照与回归，不能顺手改；
+#4/#7/#8/#9/#10/#11 是局部修复，登记在案、按 compare-analyst 的建议顺序跟进
+（先 #5，再 #2/#3，再 #9/#10，再 #7/#8/#11/#4）。#13 需要先决定“SAT 分段路径是否等价”，
+#15 需要先核实，二者都不在未证明的情况下改代码。
+
+### 10 本轮验证（真实执行）
+
+**vendor 构建**（改完后、在最终 vendor 树上）：
+
+- `./oracle/scripts/build_kernel.sh default tmp/kernels-sync` → exit 0
+- `./oracle/scripts/build_kernel.sh latlon tmp/kernels-sync` → exit 0（`GridRiverLakeFlow` 开，
+  `MOD_MT_RiverLake`/`MOD_MT_Sediment` 等汇流+材料模块真正参与编译）
+- `./oracle/scripts/build_kernel.sh catchment tmp/kernels-sync` → exit 0
+- 三条都产出 `colm.x`/`mksrfdata.x`/`mkinidata.x` + `manifest.json`。中途试过在同一输出目录
+  并发跑，`latlon` 报 `kernel source changed during compilation`（脚本的源码指纹校验发现我
+  当时还在改 `MOD_RegionClip.F90`）——这是提示不是错误，改完后重新串行构建全过。
+
+**生成表与契约**：
+
+- `cargo test -p colm-schema --test drift` / `-p colm-hist --test drift` /
+  `-p colm-core --test drift_landcover` / `-p colm-core --test drift_co2` → 各 1 passed
+- `cargo test -p oracle --test histmap` → 5 passed
+- `cargo test -p colm-namelist --test roundtrip` → 5 passed（55 份真实 namelist 逐字节）
+- `cargo run -q -p xtask -- check-gui` → 263 命令注册 / 225 被调用（26 个走解析后的动态名），
+  263 条契约通过；每个声明的事件都有 emitter 与 listener
+- `cargo run -q -p xtask -- parameter-audit` → 1369 个描述符，仅 `candidates.json`/`catalog.json` 变化
+
+**Rust 工作区**：
+
+- `cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1` →
+  **38 个测试二进制、3327 passed / 18 failed**。18 个失败全部是本运行环境的沙箱拒绝，与本次
+  改动无关（详见下表，被改动的 `colm-core`/`colm-runtime`/`colm-hist`/`colm-schema`/
+  `colm-namelist`/`oracle`/`xtask` 全绿）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- `cargo fmt --all --check` → 干净
+
+| 失败所在 | 数量 | 原因 |
+|---|---|---|
+| `colm-agent` | 2 | `terminal::tests::aborted_password_input…` 需要 pty/`kill`（沙箱 `Operation not permitted`）；`tools::history::commit_pull_requests…` 需要取在线缓存 |
+| `colm-cli` | 10 | `study::runner` 的锁/进程检查：`cannot inspect Study scheduler process`（沙箱禁止进程探测） |
+| `colm-kernel` | 1 | `run_tests::a_top_level_sidecar_leads_its_own_process_group`：`probe process group: Operation not permitted` |
+| `colm-workspace` | 5 | `sandbox-exec: sandbox_apply: Operation not permitted`（嵌套沙箱被拒）；`parity`/`build` 的用例经 `sandbox::wrap` 起子进程，同因失败 |
+
+这些用例在仓库文档里已有同类记录（`docs/implementation-verification.md` 第 36750/36769/37510 条
+区域：沙箱里 `kill`/`/bin/ps`/`sandbox-exec` 被拒），在仓库外跑应为绿。**证据边界**：本机沙箱
+里无法证明“它们本来绿”，但可以证明它们与本次改动无关——失败集中在 4 个本次一行未改的 crate，
+失败信息全是权限拒绝，且被改动的 crate 全绿。
+
+**GUI**：
+
+- 前端（`gui/`）：`npm run typecheck`、`npm run lint`、`npm run format:check` 全过；
+  `npm test` → **1348 passed / 0 failed**
+- 后端（`gui/src-tauri`）：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` →
+  **592 passed / 9 failed**：7 个 `sidecar_tests` 的 “the … has a known image”（进程可执行路径
+  探测被沙箱拒）、2 个 `xerj_manager_tests` 的端口 `9200` 被占用（`Address already in use`），
+  均为环境项
+- `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` 与
+  `cargo fmt --all --check --manifest-path gui/src-tauri/Cargo.toml` → 干净
+
+**静态守卫脚本（`oracle/scripts/*.py`，不属 cargo 测试）**：
+
+- 过：`test_physics_audit.py`（physics audit regressions PASS）、`test_ensure_native_kernels.py`
+  （8 tests OK）、`test_kernel_source_copy.py`（PASS）
+- **既有红**（与本次无关，见 §11）：`test_kernel_filesystem.py`（`mkinidata/MOD_UnitCatchmentRegional.F90`
+  里的 `CALL execute_command_line('mkdir -p …')`，该文件本轮未改、HEAD 同样存在）、
+  `test_upstream_f48_sync.py`（断言 `MOD_Hydro_SoilWater.F90` 里旧表达式出现 2 次，该文件本轮未改、
+  HEAD 里本来就是 0 次——上一轮同步时没同步更新这条守卫）。
+
+### 11 遗留与未覆盖
+
+1. **Rust 引擎的物理差异**（§9 表）：#2/#3 泥沙 CFL 子步、#5 干单元残水迁移是真正的数值差异
+   （A 级），#4/#7/#8/#9/#10/#11 是局部修复（B/C 级），#13 需要设计决定，#15 需要先核实。
+   本轮只做契约层，这些没有改；按 compare-analyst 的建议顺序跟进（先 #5，再 #2/#3，
+   再 #9/#10，再 #7/#8/#11/#4）。
+2. **history 旁车格式与 Fortran 不互通**：Rust 的旁车标记是
+   `history_schema/history_freq/history_nac/history_complete`（照上游**已删的**
+   `include/land_history_restart.inc` 移植），而活的上游 `MOD_HistAccRestart.F90` 写
+   `hacc_complete/hacc_freq/hacc_nac/hacc_river`。所以 Rust 写的主机旁车 Fortran 读不懂、
+   反之亦然（材料旁车 `a_mt_*` 那一半本轮已对齐）。改名是一次持久化格式迁移，影响所有既有
+   Rust 重启，本轮没做，**需要单独决定要不要迁移**。
+3. **H22 水库（method 2）只在 Fortran 内核可用**：Rust 引擎明确拒绝（见 §8）。
+4. **两条既有红守卫**（§10 末），都不是本轮引入；按维护者「不为 CI 红改代码」的约定只登记。
+5. **本地保存的过时中间产物**：`tmp/colm-sync-20261030/work/` 是合并中间树（不入库），
+   它与最终 vendor 差两处合并后修补（`CoLMMAIN` 重复的 `#else` 实参尾巴、`MOD_Thermal` 的
+   孤儿预处理行）；若以后复用 work/ 做下一次同步，这两处修补要重做，或直接从 vendor 起算。
+6. **`Makefile` 有 4 条多余的 MT 依赖边**（`MOD_Grid_RiverLakeLevee.o`、
+   `MOD_Grid_ReservoirUpstream.o`、`MOD_MT_Methane_AccFlux.o`、`MOD_MT_Methane_Physics.o`
+   仍出现在 vendor 自己的 `OBJS_*` 块里）：目标都存在，无害，未删。
+7. **未跑真实数据端到端**：本运行没有 PLUMBER2 环境变量，没有跑真实 MT/汇流算例；没有做
+   “默认 MT 全关算例与旧内核逐位相同”的实算对照（理由是 §2 列出的改动全部在 MT 开关内/
+   仅在 method 2/仅预处理，但这是推断而非实算证据）。`docs/upstream-bugs.md` 本轮未逐条
+   复审（它的行号锚在一个更早的上游提交上），因此没有把任何条目挪进“已修”。
+8. **上游 6 个 CRLF 文件与 13 个 `.py`**：见 §6，是长期约定，不是遗留缺陷。

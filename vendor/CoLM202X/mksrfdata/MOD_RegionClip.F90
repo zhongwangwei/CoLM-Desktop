@@ -50,7 +50,10 @@ CONTAINS
 #endif
    logical, allocatable :: pftmask  (:)
 
-   integer :: month, YY, itime, Julian_day, nsl, ilc
+   integer :: month, YY, itime, Julian_day, nsl, ilc, ifield
+   character(len=3), parameter :: canopy_fields(3) = ['ncd', 'ncw', 'bcw']
+   character(len=8), parameter :: twi_fields(6) = &
+      [character(len=8) :: 'mean_twi', 'fsatmax', 'fsatdcf', 'alp_twi', 'chi_twi', 'mu_twi']
    integer :: start_year, end_year
    character(len=1) :: c1
    character(len=2) :: c2, cx
@@ -79,10 +82,8 @@ CONTAINS
 #if defined URBAN_MODEL || defined HYPERSPECTRAL
       CALL clip_error('RegionClip does not support URBAN_MODEL or HYPERSPECTRAL surface data')
 #endif
-      IF (DEF_Interception_scheme == 8 .or. &
-          (DEF_Runoff_SCHEME == 0 .and. DEF_TOPMOD_method /= 0) .or. &
-          DEF_USE_Forcing_Downscaling .or. DEF_USE_Forcing_Downscaling_Simple) &
-         CALL clip_error('RegionClip does not support canopy-structure, topographic-wetness or downscaling surface data')
+      IF (DEF_USE_Forcing_Downscaling .or. DEF_USE_Forcing_Downscaling_Simple) &
+         CALL clip_error('RegionClip does not support downscaling surface data')
 
       IF (p_is_master) THEN
          IF (trim(adjustl(dir_landdata_in)) == trim(adjustl(dir_landdata_out))) THEN
@@ -412,6 +413,28 @@ CONTAINS
                   ENDIF
                ENDIF
 
+               IF (DEF_Interception_scheme == 8) THEN
+                  ! 与全部其它目录一样走 make_directory：CALL system('mkdir -p')
+                  ! 在 Windows 上不可用，且路径里的空格/引号在这里没有转义。
+                  CALL make_directory(trim(dir_landdata_out)//'/cstructure/'//lc_cyear)
+                  DO ifield = 1, size(canopy_fields)
+                     file_in = trim(dir_landdata_in)//'/cstructure/'//trim(input_year)//'/'// &
+                        canopy_fields(ifield)//'_patches.nc'
+                     file_out = trim(dir_landdata_out)//'/cstructure/'//lc_cyear//'/'// &
+                        canopy_fields(ifield)//'_patches.nc'
+                     CALL clip_vector(file_in, file_out, iblk, jblk, canopy_fields(ifield)//'_patches', patchmask)
+                     ! 上游这里是 #if (defined LULC_IGBP_PFT || defined LULC_IGBP_PC)；
+                     ! 本构建把子网格结构做成运行时开关，PFT/PC 代码始终编译。
+                     IF (DEF_USE_PFT .or. DEF_USE_PC) THEN
+                        file_in = trim(dir_landdata_in)//'/cstructure/'//trim(input_year)//'/'// &
+                           canopy_fields(ifield)//'_pfts.nc'
+                        file_out = trim(dir_landdata_out)//'/cstructure/'//lc_cyear//'/'// &
+                           canopy_fields(ifield)//'_pfts.nc'
+                        CALL clip_vector(file_in, file_out, iblk, jblk, canopy_fields(ifield)//'_pfts', pftmask)
+                     ENDIF
+                  ENDDO
+               ENDIF
+
                ! lake depth
                CALL make_directory(trim(dir_landdata_out) // '/lakedepth/' // lc_cyear)
                file_in  = trim(dir_landdata_in)  // '/lakedepth/' // trim(input_year) // '/lakedepth_patches.nc'
@@ -639,6 +662,15 @@ CONTAINS
                file_in = trim(dir_landdata_in)//'/topography/'//trim(input_year)//'/sloperatio_patches.nc'
                file_out = trim(dir_landdata_out)//'/topography/'//lc_cyear//'/sloperatio_patches.nc'
                CALL clip_vector(file_in, file_out, iblk, jblk, 'sloperatio_patches', patchmask)
+               IF (DEF_Runoff_SCHEME == 0 .and. DEF_TOPMOD_method /= 0) THEN
+                  DO ifield = 1, size(twi_fields)
+                     file_in = trim(dir_landdata_in)//'/topography/'//trim(input_year)//'/'// &
+                        trim(twi_fields(ifield))//'_patches.nc'
+                     file_out = trim(dir_landdata_out)//'/topography/'//lc_cyear//'/'// &
+                        trim(twi_fields(ifield))//'_patches.nc'
+                     CALL clip_vector(file_in, file_out, iblk, jblk, trim(twi_fields(ifield))//'_patches', patchmask)
+                  ENDDO
+               ENDIF
                file_in = trim(dir_landdata_in)//'/soil/'//trim(input_year)//'/soiltexture_patches.nc'
                file_out = trim(dir_landdata_out)//'/soil/'//lc_cyear//'/soiltexture_patches.nc'
                CALL clip_vector(file_in, file_out, iblk, jblk, 'soiltext_patches', patchmask)
@@ -785,7 +817,7 @@ CONTAINS
    character(len=256) :: input, output
    integer :: ncidin,  ncidout
    integer :: varidin, varidout
-   integer :: vlen_in, vlen_out, xtype, ndims, id, i1, i2, natts, iatt
+   integer :: vlen_in, vlen_out, xtype, ndims, id, i1, i2, natts, iatt, dimlen_out, dimlen_expected
    character(len=256) :: attname
    logical :: fexists, dim_exist
    integer, allocatable :: dimids (:), dimlens (:)
@@ -800,7 +832,11 @@ CONTAINS
    integer, allocatable :: data_i4_out3 (:,:,:)
 
    integer*8, allocatable :: data_i8_in1  (:)
+   integer*8, allocatable :: data_i8_in2  (:,:)
+   integer*8, allocatable :: data_i8_in3  (:,:,:)
    integer*8, allocatable :: data_i8_out1 (:)
+   integer*8, allocatable :: data_i8_out2 (:,:)
+   integer*8, allocatable :: data_i8_out3 (:,:,:)
 
    real(r8), allocatable :: data_r8_in1 (:)
    real(r8), allocatable :: data_r8_in2 (:,:)
@@ -811,23 +847,33 @@ CONTAINS
    real(r8), allocatable :: data_r8_out3 (:,:,:)
 
       ! Zero selected entries have no vector block file in the producer contract.
-      IF (count(vecmask) == 0) RETURN
+      CALL get_filename_block (file_out, iblk, jblk, output)
+      IF (count(vecmask) == 0) THEN
+         inquire (file=trim(output), exist=fexists)
+         IF (fexists) CALL clip_error('Output dimension mismatch: '//trim(output)//' [empty selection]')
+         RETURN
+      ENDIF
 
       CALL get_filename_block (file_in,  iblk, jblk, input )
-      CALL get_filename_block (file_out, iblk, jblk, output)
 
       write(*,*) 'Copy and clip ', trim(varname), ' from ', trim(input), ' to ', trim(output)
 
-      IF (.not. ncio_var_exist(input, varname)) THEN
-         write(*,*) 'Variable ', trim(varname), ' in ', trim(input), ' not found.'
-      ENDIF
+      inquire (file=trim(input), exist=fexists)
+      IF (.not. fexists) CALL clip_error('Missing required block file: '//trim(input)//' [field '//trim(varname)//']')
 
       vlen_in  = size (vecmask)
       vlen_out = count(vecmask)
 
-      CALL nccheck( nf90_open (trim(input), NF90_NOWRITE, ncidin) )
-      CALL nccheck( nf90_inq_varid (ncidin, trim(varname), varidin) )
+      CALL nccheck( nf90_open (trim(input), NF90_NOWRITE, ncidin), &
+         'RegionClip required field '//trim(varname)//' in '//trim(input) )
+      IF (nf90_inq_varid(ncidin, trim(varname), varidin) /= NF90_NOERR) THEN
+         CALL nccheck(nf90_close(ncidin))
+         CALL clip_error('Missing required field: '//trim(varname)//' in '//trim(input))
+      ENDIF
       CALL nccheck( nf90_inquire_variable (ncidin, varidin, xtype = xtype, ndims = ndims) )
+      IF (ndims < 1 .or. ndims > 3 .or. &
+          (xtype /= NF90_INT .and. xtype /= NF90_INT64 .and. xtype /= NF90_DOUBLE)) &
+         CALL clip_error('Unsupported vector type/rank: '//trim(input))
       allocate (dimids   (ndims))
       allocate (dimnames (ndims))
       allocate (dimlens  (ndims))
@@ -836,13 +882,25 @@ CONTAINS
          CALL nccheck( nf90_inquire_dimension (ncidin, dimids(id), dimnames(id), dimlens(id)) )
       ENDDO
       IF (dimlens(ndims) /= vlen_in) CALL clip_error('Vector/mask length mismatch: '//trim(input))
-      IF (ndims > 3 .or. (xtype /= NF90_INT .and. xtype /= NF90_INT64 .and. xtype /= NF90_DOUBLE)) &
-         CALL clip_error('Unsupported vector type/rank: '//trim(input))
       CALL nccheck( nf90_close (ncidin) )
 
       inquire (file=trim(output), exist=fexists)
       IF (.not. fexists) THEN
          CALL ncio_create_file (output)
+      ELSE
+         ! Validate every existing dimension before changing a reused block file.
+         CALL nccheck( nf90_open (trim(output), NF90_NOWRITE, ncidout) )
+         DO id = 1, ndims
+            IF (nf90_inq_dimid(ncidout, trim(dimnames(id)), dimids(id)) /= NF90_NOERR) CYCLE
+            CALL nccheck(nf90_inquire_dimension(ncidout, dimids(id), len=dimlen_out))
+            dimlen_expected = dimlens(id)
+            IF (id == ndims) dimlen_expected = vlen_out
+            IF (dimlen_out /= dimlen_expected) THEN
+               CALL nccheck(nf90_close(ncidout))
+               CALL clip_error('Output dimension mismatch: '//trim(output)//' ['//trim(dimnames(id))//']')
+            ENDIF
+         ENDDO
+         CALL nccheck( nf90_close (ncidout) )
       ENDIF
 
       DO id = 1, ndims
@@ -937,6 +995,18 @@ CONTAINS
 
             deallocate (data_i4_in2 )
             deallocate (data_i4_out2)
+         ELSEIF (xtype == NF90_INT64) THEN
+            allocate (data_i8_in2 (dimlens(1),vlen_in))
+            CALL nccheck( nf90_get_var (ncidin, varidin, data_i8_in2) )
+
+            allocate (data_i8_out2 (dimlens(1),vlen_out))
+            DO i1 = 1, dimlens(1)
+               data_i8_out2(i1,:) = pack(data_i8_in2(i1,:), vecmask)
+            ENDDO
+            CALL nccheck( nf90_put_var (ncidout, varidout, data_i8_out2) )
+
+            deallocate (data_i8_in2 )
+            deallocate (data_i8_out2)
          ELSEIF (xtype == NF90_DOUBLE) THEN
             allocate (data_r8_in2 (dimlens(1),vlen_in))
             CALL nccheck( nf90_get_var (ncidin,  varidin , data_r8_in2) )
@@ -966,6 +1036,20 @@ CONTAINS
 
             deallocate (data_i4_in3 )
             deallocate (data_i4_out3)
+         ELSEIF (xtype == NF90_INT64) THEN
+            allocate (data_i8_in3 (dimlens(1),dimlens(2),vlen_in))
+            CALL nccheck( nf90_get_var (ncidin, varidin, data_i8_in3) )
+
+            allocate (data_i8_out3 (dimlens(1),dimlens(2),vlen_out))
+            DO i1 = 1, dimlens(1)
+               DO i2 = 1, dimlens(2)
+                  data_i8_out3(i1,i2,:) = pack(data_i8_in3(i1,i2,:), vecmask)
+               ENDDO
+            ENDDO
+            CALL nccheck( nf90_put_var (ncidout, varidout, data_i8_out3) )
+
+            deallocate (data_i8_in3 )
+            deallocate (data_i8_out3)
          ELSEIF (xtype == NF90_DOUBLE) THEN
             allocate (data_r8_in3 (dimlens(1),dimlens(2),vlen_in))
             CALL nccheck( nf90_get_var (ncidin,  varidin , data_r8_in3) )

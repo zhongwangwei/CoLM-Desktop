@@ -11,8 +11,17 @@ fn scratch_directory(tag: &str) -> std::path::PathBuf {
 
 fn config() -> SidecarConfig {
     SidecarConfig {
-        frequency_code: 4,
+        frequency: HistoryFrequency::Monthly,
         ..SidecarConfig::default()
+    }
+}
+
+/// 一个"月中"的重启时刻：MONTHLY 窗口在这里算不出长度，不会被判成完整窗口。
+fn mid_month() -> CalendarTime {
+    CalendarTime {
+        year: 2010,
+        julian_day: 46,
+        seconds: 0,
     }
 }
 
@@ -149,10 +158,11 @@ fn a_written_sidecar_reads_back_the_same_window() {
     assert_eq!(dims, ["patch", "d2_a_alb", "d1_a_alb"]);
     drop(file);
 
-    let read = read_sidecar(&primary, &sidecar, &config(), &[])
+    let read = read_sidecar(&primary, &sidecar, &config(), &[], mid_month(), 1800.0)
         .unwrap()
         .unwrap();
-    assert_eq!(read, vec![window()]);
+    assert_eq!(read.windows, vec![window()]);
+    assert!(read.restored);
 }
 
 /// 区间与重启对齐时旁车只有四个标记，读回是空窗口。
@@ -180,10 +190,11 @@ fn an_aligned_sidecar_holds_only_the_markers() {
             "history_complete"
         ]
     );
-    let read = read_sidecar(&primary, &sidecar, &config(), &[])
+    let read = read_sidecar(&primary, &sidecar, &config(), &[], mid_month(), 1800.0)
         .unwrap()
         .unwrap();
-    assert_eq!(read, vec![HistoryWindow::default()]);
+    assert_eq!(read.windows, vec![HistoryWindow::default()]);
+    assert!(!read.restored);
 }
 
 /// 上游的几道校验：缺旁车而主重启要求它、历史频率变了、缺累加器，都报错；
@@ -197,9 +208,11 @@ fn inconsistent_sidecars_are_refused() {
         file.add_dimension("patch", 1).unwrap();
     }
     let sidecar = directory.join("s.nc");
-    assert!(read_sidecar(&primary, &sidecar, &config(), &[])
-        .unwrap()
-        .is_none());
+    assert!(
+        read_sidecar(&primary, &sidecar, &config(), &[], mid_month(), 1800.0)
+            .unwrap()
+            .is_none()
+    );
 
     {
         let mut file = netcdf::append(&primary).unwrap();
@@ -208,14 +221,14 @@ fn inconsistent_sidecars_are_refused() {
             .put_values(&[1.0], ..)
             .unwrap();
     }
-    assert!(read_sidecar(&primary, &sidecar, &config(), &[]).is_err());
+    assert!(read_sidecar(&primary, &sidecar, &config(), &[], mid_month(), 1800.0).is_err());
 
     write_sidecar(&sidecar, 1, &config(), &[window()]).unwrap();
     let daily = SidecarConfig {
-        frequency_code: 3,
+        frequency: HistoryFrequency::Daily,
         ..config()
     };
-    let error = read_sidecar(&primary, &sidecar, &daily, &[]).unwrap_err();
+    let error = read_sidecar(&primary, &sidecar, &daily, &[], mid_month(), 1800.0).unwrap_err();
     assert!(error.to_string().contains("frequency changed"), "{error}");
 
     // 旁车按草地写、续跑按 BGC 读：BGC 的累加器缺席。
@@ -223,7 +236,7 @@ fn inconsistent_sidecars_are_refused() {
         bgc: true,
         ..config()
     };
-    let error = read_sidecar(&primary, &sidecar, &bgc, &[]).unwrap_err();
+    let error = read_sidecar(&primary, &sidecar, &bgc, &[], mid_month(), 1800.0).unwrap_err();
     assert!(
         error
             .to_string()
@@ -239,7 +252,7 @@ fn river_lake_builds_write_schema_two() {
     let directory = scratch_directory("river");
     let sidecar = directory.join("s.nc");
     let river = SidecarConfig {
-        frequency_code: 3,
+        frequency: HistoryFrequency::Daily,
         river_lake_flow: true,
         ..SidecarConfig::default()
     };
@@ -310,10 +323,116 @@ fn urban_accumulators_follow_the_urban_patches_of_a_block() {
     assert_eq!(t_room.get_values::<f64, _>(..).unwrap(), vec![67920.0]);
     drop(file);
 
-    let read = read_sidecar(&primary, &sidecar, &urban_config, &flags)
+    let read = read_sidecar(
+        &primary,
+        &sidecar,
+        &urban_config,
+        &flags,
+        mid_month(),
+        1800.0,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(read.windows[1], windows[1]);
+    assert_eq!(read.windows[0], window());
+    assert!(!read.windows[2].sums.contains_key("t_room"));
+}
+
+#[test]
+fn window_seconds_follows_the_upstream_calendar() {
+    let at = |year: i32, julian_day: u16| CalendarTime {
+        year,
+        julian_day,
+        seconds: 0,
+    };
+    // 非边界频率直接给定长窗口；none 定不下来。
+    assert_eq!(
+        window_seconds(HistoryFrequency::Timestep, 1800.0, at(2010, 46)).unwrap(),
+        1800.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::Hourly, 1800.0, at(2010, 46)).unwrap(),
+        3600.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::Daily, 1800.0, at(2010, 46)).unwrap(),
+        86_400.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::None, 1800.0, at(2010, 46)).unwrap(),
+        -1.0
+    );
+    // MONTHLY 只在每月 1 日算得出：窗口是上一个月，2 月按上一年判闰。
+    assert_eq!(
+        window_seconds(HistoryFrequency::Monthly, 1800.0, at(2010, 46)).unwrap(),
+        -1.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::Monthly, 1800.0, at(2010, 32)).unwrap(),
+        31.0 * 86_400.0
+    );
+    // 2012-03-01 结束的窗口是 2012 年 2 月（闰年 29 天）。
+    assert_eq!(
+        window_seconds(HistoryFrequency::Monthly, 1800.0, at(2012, 61)).unwrap(),
+        29.0 * 86_400.0
+    );
+    // 2011-01-01 结束的窗口是 2010 年（365 天）；2013-01-01 是 2012 年（366 天）。
+    assert_eq!(
+        window_seconds(HistoryFrequency::Yearly, 1800.0, at(2011, 1)).unwrap(),
+        365.0 * 86_400.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::Yearly, 1800.0, at(2013, 1)).unwrap(),
+        366.0 * 86_400.0
+    );
+    // 不在 1 月 1 日的 YEARLY 定不下来：1 月里别的日子也不行（上游判的是儒略日 1）。
+    assert_eq!(
+        window_seconds(HistoryFrequency::Yearly, 1800.0, at(2011, 46)).unwrap(),
+        -1.0
+    );
+    assert_eq!(
+        window_seconds(HistoryFrequency::Yearly, 1800.0, at(2011, 10)).unwrap(),
+        -1.0
+    );
+}
+
+/// 重启点上的完整窗口读回时被丢弃：不续接，`restored = false`，下游的材料历史窗口跟着重开。
+#[test]
+fn a_complete_window_is_discarded_on_read() {
+    let directory = scratch_directory("complete");
+    let primary = directory.join("p.nc");
+    netcdf::create(&primary)
+        .unwrap()
+        .add_dimension("patch", 1)
+        .unwrap();
+    let sidecar = directory.join("s.nc");
+    let daily = SidecarConfig {
+        frequency: HistoryFrequency::Daily,
+        ..SidecarConfig::default()
+    };
+    // 重启落在 00:00、48 步 × 1800 s = 86400 s：一个完整日窗口。
+    let midnight = CalendarTime {
+        year: 2010,
+        julian_day: 46,
+        seconds: 0,
+    };
+    write_sidecar(&sidecar, 1, &daily, &[window()]).unwrap();
+    let read = read_sidecar(&primary, &sidecar, &daily, &[], midnight, 1800.0)
         .unwrap()
         .unwrap();
-    assert_eq!(read[1], windows[1]);
-    assert_eq!(read[0], window());
-    assert!(!read[2].sums.contains_key("t_room"));
+    assert!(!read.restored);
+    assert_eq!(read.windows, vec![HistoryWindow::default()]);
+
+    // 半日累加（24 × 1800 s）不是完整窗口：续接。判据只看日期，与当天的秒数无关
+    // （上游 `hacc_window_seconds` 的 jdate 只有年月日）。
+    let partial = HistoryWindow {
+        steps: 24,
+        ..window()
+    };
+    write_sidecar(&sidecar, 1, &daily, std::slice::from_ref(&partial)).unwrap();
+    let read = read_sidecar(&primary, &sidecar, &daily, &[], midnight, 1800.0)
+        .unwrap()
+        .unwrap();
+    assert!(read.restored);
+    assert_eq!(read.windows, vec![partial]);
 }

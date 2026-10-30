@@ -74,7 +74,7 @@ CONTAINS
                       ,flddepth      ,fldfrc        ,fevpg_fld                    &
 #endif
                       ,canopy_smelt_mass_th, canopy_frzc_mass_th                  ,&
-                       qphs_thaw_lay_th, qphs_frzc_lay_th, raw_trc_th             &
+                       qphs_thaw_lay_th, qphs_frzc_lay_th, raw_mt_th             &
                        )
 
 !=======================================================================
@@ -268,11 +268,12 @@ CONTAINS
    real(r8), intent(in) :: &
        sabg_snow_lyr(lb:1)        ! snow layer absorption
 
-   real(r8), intent(out), optional :: canopy_smelt_mass_th ! canopy snow->rain mass [mm]
-   real(r8), intent(out), optional :: canopy_frzc_mass_th  ! canopy rain->snow mass [mm]
-   real(r8), intent(out), optional :: qphs_thaw_lay_th(lb:nl_soil) ! ice->liquid mass [mm]
-   real(r8), intent(out), optional :: qphs_frzc_lay_th(lb:nl_soil) ! liquid->ice mass [mm]
-   real(r8), intent(out), optional :: raw_trc_th ! reference-to-canopy moisture resistance [s/m]
+   ! Diagnostics for material transport only; not used by the host.
+   real(r8), intent(out), optional :: canopy_smelt_mass_th          ! canopy snow melted [mm]
+   real(r8), intent(out), optional :: canopy_frzc_mass_th           ! canopy water frozen [mm]
+   real(r8), intent(out), optional :: qphs_thaw_lay_th(lb:nl_soil)  ! ice melted per layer [mm]
+   real(r8), intent(out), optional :: qphs_frzc_lay_th(lb:nl_soil)  ! water frozen per layer [mm]
+   real(r8), intent(out), optional :: raw_mt_th                    ! moisture resistance [s/m]
 
        ! state variables (2)
    real(r8), intent(inout) :: &
@@ -501,8 +502,8 @@ CONTAINS
    real(r8), allocatable :: assimsha_p    (:)
    real(r8), allocatable :: etrsha_p      (:)
    real(r8), allocatable :: dheatl_p      (:)
-   real(r8) :: canopy_smelt_mass_local, canopy_frzc_mass_local, raw_trc_local, raw_trc_pc
-   real(r8), allocatable :: canopy_smelt_mass_p_local(:), canopy_frzc_mass_p_local(:), raw_trc_p(:)
+   real(r8) :: canopy_smelt_mass_local, canopy_frzc_mass_local, raw_mt_local, raw_mt_pc
+   real(r8), allocatable :: canopy_smelt_mass_p_local(:), canopy_frzc_mass_p_local(:), raw_mt_p(:)
 
 
 !=======================================================================
@@ -538,14 +539,13 @@ CONTAINS
 
       canopy_smelt_mass_local = 0._r8
       canopy_frzc_mass_local  = 0._r8
-      raw_trc_local           = 0._r8
-      raw_trc_pc              = 0._r8
+      raw_mt_local           = 0._r8
+      raw_mt_pc              = 0._r8
       IF (present(canopy_smelt_mass_th)) canopy_smelt_mass_th = 0._r8
       IF (present(canopy_frzc_mass_th))  canopy_frzc_mass_th  = 0._r8
       IF (present(qphs_thaw_lay_th)) qphs_thaw_lay_th(:) = 0._r8
       IF (present(qphs_frzc_lay_th)) qphs_frzc_lay_th(:) = 0._r8
-      IF (present(raw_trc_th)) raw_trc_th = 0._r8
-
+      IF (present(raw_mt_th)) raw_mt_th = 0._r8
       emis   = 0.;  z0m    = 0.
       zol    = 0.;  rib    = 0.
       ustar  = 0.;  qstar  = 0.
@@ -685,7 +685,7 @@ ENDIF
                          taux,tauy,fseng,fseng_soil,fseng_snow, &
                          fevpg,fevpg_soil,fevpg_snow,tref,qref, &
                          z0m_g,z0h_g,zol_g,rib_g,ustar_g,qstar_g,tstar_g,fm_g,fh_g,fq_g, &
-                         raw_out=raw_trc_local)
+                         raw_out=raw_mt_local)
 
       obu_g = forc_hgt_u / zol_g
 
@@ -756,8 +756,7 @@ IF ( patchtype==0.and.DEF_USE_LCT .or. patchtype>0 ) THEN
                  smp         ,hk(1:)      ,hksati(1:)  ,rootflux(1:)              &
                 ,canopy_smelt_mass_out=canopy_smelt_mass_local, &
                  canopy_frzc_mass_out =canopy_frzc_mass_local, &
-                 raw_trc_out=raw_trc_local                     &
-                 )
+                 raw_mt_out=raw_mt_local)
       ELSE
          tleaf         = forc_t
          laisun        = 0.
@@ -825,10 +824,10 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
       allocate ( dheatl_p         (ps:pe) )
       allocate ( canopy_smelt_mass_p_local(ps:pe) )
       allocate ( canopy_frzc_mass_p_local (ps:pe) )
-      allocate ( raw_trc_p(ps:pe) )
+      allocate ( raw_mt_p(ps:pe) )
       canopy_smelt_mass_p_local(:) = 0._r8
       canopy_frzc_mass_p_local (:) = 0._r8
-      raw_trc_p(:) = 0._r8
+      raw_mt_p(:) = 0._r8
       ! Keep the per-PFT rain/snow split of canopy water consistent when DEF_VEG_SNOW
       ! is off (formerly only in TRACER builds).
       IF (.not. DEF_VEG_SNOW) THEN
@@ -981,7 +980,7 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
                  smp             ,hk(1:)          ,hksati(1:)      ,rootflux_p(1:,i)                &
                 ,canopy_smelt_mass_out=canopy_smelt_mass_p_local(i), &
                  canopy_frzc_mass_out =canopy_frzc_mass_p_local (i), &
-                 raw_trc_out=raw_trc_p(i),                           &
+                 raw_mt_out=raw_mt_p(i),                           &
                  ipft_index=i)
          ELSE
 
@@ -993,7 +992,7 @@ IF (patchtype==0 .and. (DEF_USE_PFT .or. DEF_USE_PC)) THEN
                                taux_p(i),tauy_p(i),fseng_p(i),fseng_soil_p(i),fseng_snow_p(i), &
                                fevpg_p(i),fevpg_soil_p(i),fevpg_snow_p(i),tref_p(i),qref_p(i), &
                                z0m_p(i),z0h_g,zol_p(i),rib_p(i),ustar_p(i),&
-                               qstar_p(i),tstar_p(i),fm_p(i),fh_p(i),fq_p(i),raw_out=raw_trc_p(i))
+                               qstar_p(i),tstar_p(i),fm_p(i),fh_p(i),fq_p(i),raw_out=raw_mt_p(i))
 
             tleaf_p      (i) = forc_t
             gssun_p      (i) = 0.
@@ -1117,8 +1116,7 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
          rootflux_p(:,:)                                                                  &
         ,canopy_smelt_mass_p_out=canopy_smelt_mass_p_local(ps:pe),&
          canopy_frzc_mass_p_out =canopy_frzc_mass_p_local (ps:pe),&
-         raw_trc_out=raw_trc_pc                                  &
-         )
+         raw_mt_out=raw_mt_pc                                  )
 
       dlrad_p      (ps:pe) = dlrad
       ulrad_p      (ps:pe) = ulrad
@@ -1144,7 +1142,7 @@ IF ( DEF_USE_PC .and. pn.ge.ps ) THEN
       fm_p         (ps:pe) = fm
       fh_p         (ps:pe) = fh
       fq_p         (ps:pe) = fq
-      raw_trc_p    (ps:pe) = raw_trc_pc
+      raw_mt_p    (ps:pe) = raw_mt_pc
 ENDIF
 
       pe = patch_pft_e(ipatch)
@@ -1202,7 +1200,7 @@ ENDIF
       dheatl        = sum( dheatl_p    (ps:pe)*pftfrac(ps:pe) )
       canopy_smelt_mass_local = sum( canopy_smelt_mass_p_local(ps:pe)*pftfrac(ps:pe) )
       canopy_frzc_mass_local  = sum( canopy_frzc_mass_p_local (ps:pe)*pftfrac(ps:pe) )
-      raw_trc_local           = sum( raw_trc_p(ps:pe)*pftfrac(ps:pe) )
+      raw_mt_local           = sum( raw_mt_p(ps:pe)*pftfrac(ps:pe) )
 IF (DEF_USE_OZONESTRESS)THEN
       o3uptakesun   = sum(o3uptakesun_p(ps:pe)*pftfrac(ps:pe) )
       o3uptakesha   = sum(o3uptakesha_p(ps:pe)*pftfrac(ps:pe) )
@@ -1263,14 +1261,13 @@ END IF
       deallocate ( dheatl_p    )
       deallocate ( canopy_smelt_mass_p_local )
       deallocate ( canopy_frzc_mass_p_local  )
-      deallocate ( raw_trc_p )
+      deallocate ( raw_mt_p )
 
 ENDIF
 
       IF (present(canopy_smelt_mass_th)) canopy_smelt_mass_th = canopy_smelt_mass_local
       IF (present(canopy_frzc_mass_th))  canopy_frzc_mass_th  = canopy_frzc_mass_local
-      IF (present(raw_trc_th)) raw_trc_th = raw_trc_local
-
+      IF (present(raw_mt_th)) raw_mt_th = raw_mt_local
 #if (defined CaMa_Flood) || (defined GridRiverLakeFlow)
 #ifdef CaMa_Flood
       IF (CSETFILE == 'NONE' .and. LWEVAP .and. patchtype == 0 .and. &

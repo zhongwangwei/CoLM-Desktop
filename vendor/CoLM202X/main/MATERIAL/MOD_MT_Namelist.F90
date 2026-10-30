@@ -72,8 +72,8 @@ MODULE MOD_MT_Namelist
    ! 1e-6..2e-6, 3-8% at 2e-6..5e-6, at most 0.5% above 5e-6; 5e-6 leaves
    ! 1.2-1.5% of the precipitation mass to the fallback.  For isotopes with
    ! a vapour forcing the fallback is rain in equilibrium with the vapour and
-   ! snow at the last reliable ratio (tracer_forcing_rain_value /
-   ! tracer_forcing_snow_value in MOD_MT_Forcing); otherwise the last valid
+   ! snow at the last reliable ratio (material_forcing_rain_value /
+   ! material_forcing_snow_value in MOD_MT_Forcing); otherwise the last valid
    ! ratio (the default ratio before the first one).
    real(r8)           :: DEF_MT_FORCING_MIN_PRECIP = 5.e-6_r8
    ! Total precipitation rate [kg m-2 s-1] above which a record is remembered

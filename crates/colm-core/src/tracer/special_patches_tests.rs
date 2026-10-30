@@ -2,7 +2,7 @@
 //!
 //! `BOX_CASES`/`SYNC_CASES` 来自 `harness.F90`：`tracer_waterbody_patch` 的混合箱算式
 //! （调用真实的 `MOD_Tracer_EvapLimit`）与 `sync_tracer_patch_ratio` 的同位素含水层式、
-//! `tracer_hist_out` 的叶水伪质量，原样抄写后用内核编译选项编译。其 GIMPLE 的
+//! `mt_hist_out` 的叶水伪质量，原样抄写后用内核编译选项编译。其 GIMPLE 的
 //! `trc_input` 为 `FMA(R_pool, deficit, FMA(R_frost, dep_ice, FMA(atm, R_precip, R_dew*dep_liq)))`，
 //! 含水层为 `FMS(wa + ref_water, R, ref_mass)`，与内核 dump 相同。
 
@@ -20,7 +20,12 @@ fn descriptor(family: TracerFamily, ref_ratio: f64, init_conc: f64) -> TracerDes
         family,
         state_owner: StateOwner::GenericWater,
         reaction_mode: ReactionMode::None,
-        unit_kind: if isotope { "ratio" } else { "tracer_per_water" }.to_owned(),
+        unit_kind: if isotope {
+            "ratio"
+        } else {
+            "material_per_water"
+        }
+        .to_owned(),
         mol_weight: 18.0,
         ref_ratio,
         init_delta: 0.0,

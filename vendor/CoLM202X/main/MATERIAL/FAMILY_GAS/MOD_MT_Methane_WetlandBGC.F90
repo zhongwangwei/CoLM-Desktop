@@ -8,7 +8,7 @@ MODULE MOD_MT_Methane_WetlandBGC
 !
 !  Upstream CoLM runs the BGC soil cascade on soil patches only, so a
 !  wetland patch has no heterotrophic respiration for methane production.
-!  CoLM202X (MOD_Tracer_Reactive_BgcShim) ran the cascade on the wetland
+!  CoLM202X (MOD_Material_Reactive_BgcShim) ran the cascade on the wetland
 !  column of the host BGC arrays and updated those pools, which changes the
 !  host BGC state, restart and history of every wetland patch.  Here the
 !  host is left as upstream has it: the wetland carbon and nitrogen pools

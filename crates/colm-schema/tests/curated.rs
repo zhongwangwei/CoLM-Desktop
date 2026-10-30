@@ -356,8 +356,8 @@ fn model_schemes_expose_complete_discrete_choices_to_the_gui() {
         ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
         ("DEF_TOPMOD_method", &["0", "1", "2"]),
         ("DEF_NDEP_FREQUENCY", &["1", "2"]),
-        // 上游 7d2fca93 的 MOD_Grid_Reservoir.F90 新增 method 2
-        // （`IF (DEF_Reservoir_Method == 2)`），所以下拉框从 0/1 变 0/1/2。
+        // 方案 2（H22，CaMa-Flood PR124）上游本轮已实现，所以下拉框仍是 0/1/2；
+        // 本引擎没移植它，运行时按"实现于上游、此处未移植"拒绝（见 `river::reservoir`）。
         ("DEF_Reservoir_Method", &["0", "1", "2"]),
         (
             "DEF_wetland_finundation_scheme",

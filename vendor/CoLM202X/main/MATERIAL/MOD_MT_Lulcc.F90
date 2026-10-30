@@ -22,7 +22,7 @@ MODULE MOD_MT_Lulcc
 ! and new patch areas element by element, so a remap that could not conserve
 ! mass stops the run instead of silently creating or losing material.
 !
-! Moved here from the fork's MOD_Lulcc_Driver (#ifdef TRACER blocks).
+! Moved here from the fork's MOD_Lulcc_Driver (#ifdef MATERIAL blocks).
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
@@ -215,15 +215,17 @@ CONTAINS
    USE MOD_SPMD_Task, only: p_iam_glb
    USE MOD_LandPatch, only: numpatch
    USE MOD_Namelist,  only: DEF_VEG_SNOW
+   USE MOD_Vars_TimeInvariants, only: patchtype
+   USE MOD_MT_Precip, only: mt_canopy_parts
    USE MOD_Vars_Global, only: maxsnl, nl_soil
    USE MOD_Vars_TimeVariables, only: ldew, ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
-                                     wa, wdsrf, wetwat, scv
-   USE MOD_MT_Defs,   only: nmts, mt_uses_generic_water, tracer_init_water_ratio, &
+                                     wa, wdsrf, wetwat, scv, tleaf
+   USE MOD_MT_Defs,   only: nmts, mt_uses_generic_water, material_init_water_ratio, &
                             mt_water_min_for_ratio
    USE MOD_MT_Vars,   only: mt_wetwat, mt_surface_solid, mt_patch_land_water_mass, &
                             mt_ldew_rain, mt_ldew_snow, mt_wliq_soisno, mt_wice_soisno, &
-                            mt_scv, mt_wdsrf, mt_solid_soisno
-   USE MOD_MT_Solute, only: mt_equilibrate_dissolved
+                            mt_scv, mt_wdsrf, mt_solid_soisno, mt_canopy_solid
+   USE MOD_MT_Solute, only: mt_equilibrate_dissolved, mt_has_dissolved_limit
    USE MOD_MT_Rest,   only: mt_init_from_water
    IMPLICIT NONE
 
@@ -259,10 +261,9 @@ CONTAINS
          followed = .false.
          DO imt = 1, nmts
             IF (.not. mt_uses_generic_water(imt)) CYCLE
-            R_init = tracer_init_water_ratio(imt)
-            mt_wetwat(imt,ip) = max(wetwat(ip), 0._r8) * R_init
-            CALL mt_equilibrate_dissolved (imt, max(wetwat(ip), 0._r8), &
-               mt_wetwat(imt,ip), mt_surface_solid(imt,ip))
+            R_init = material_init_water_ratio(imt)
+            mt_wetwat(imt,ip) = 0._r8
+            IF (patchtype(ip) == 2) mt_wetwat(imt,ip) = max(wetwat(ip), 0._r8) * R_init
             CALL follow_host_water (imt, ip, R_init, followed)
          ENDDO
          IF (followed) nfollow = nfollow + 1
@@ -306,7 +307,8 @@ CONTAINS
          logical,  intent(inout) :: followed
          integer  :: j, k
          logical  :: snow_differs
-         real(r8) :: w_src, pool_before, ratio, thin_new, solid, wsnow
+         real(r8) :: w_src, ratio, thin_new, solid, wsnow
+         real(r8) :: canopy_liquid, canopy_snow, surface_water, surface_mass, wetland_water
 
          ! Canopy. Without DEF_VEG_SNOW the material splits the total
          ! ldew into its rain and snow pools itself (MOD_MT_Precip), so
@@ -381,10 +383,34 @@ CONTAINS
          ENDDO
 
          ! Surface water.
-         pool_before = mt_wdsrf(imt,ip)
          CALL follow_pool (mt_wdsrf(imt,ip), src_water_2d(HW_WDSRF,ip), wdsrf(ip), R_init, followed)
-         IF (mt_wdsrf(imt,ip) /= pool_before) CALL mt_equilibrate_dissolved (imt, &
-            max(wdsrf(ip), 0._r8), mt_wdsrf(imt,ip), mt_surface_solid(imt,ip))
+         ! Remapping can leave solid material beside an undersaturated liquid
+         ! even when its water amount is unchanged. Rebalance each final pool.
+         IF (mt_has_dissolved_limit(imt)) THEN
+            CALL mt_canopy_parts(ldew(ip), ldew_rain(ip), ldew_snow(ip), tleaf(ip), &
+               canopy_liquid, canopy_snow)
+            CALL mt_equilibrate_dissolved(imt, max(canopy_liquid, 0._r8), &
+               mt_ldew_rain(imt,ip), mt_canopy_solid(imt,ip))
+            DO j = maxsnl+1, nl_soil
+               CALL mt_equilibrate_dissolved(imt, max(wliq_soisno(j,ip), 0._r8), &
+                  mt_wliq_soisno(imt,j,ip), mt_solid_soisno(imt,j,ip))
+            ENDDO
+
+            ! Wetland water and ponded water share one surface solid store;
+            ! solve their combined capacity once, rather than in pool order.
+            wetland_water = 0._r8
+            IF (patchtype(ip) == 2) wetland_water = max(wetwat(ip), 0._r8)
+            surface_water = max(wdsrf(ip), 0._r8) + wetland_water
+            surface_mass = mt_wdsrf(imt,ip) + mt_wetwat(imt,ip)
+            CALL mt_equilibrate_dissolved(imt, surface_water, surface_mass, mt_surface_solid(imt,ip))
+            IF (surface_water > mt_water_min_for_ratio) THEN
+               mt_wdsrf(imt,ip) = surface_mass * max(wdsrf(ip), 0._r8) / surface_water
+               mt_wetwat(imt,ip) = surface_mass * wetland_water / surface_water
+            ELSE
+               mt_wdsrf(imt,ip) = 0._r8
+               mt_wetwat(imt,ip) = 0._r8
+            ENDIF
+         ENDIF
       END SUBROUTINE follow_host_water
 
    END SUBROUTINE mt_lulcc_host_sync

@@ -29,7 +29,7 @@ fn solute_identity_matches_the_fortran_restart() {
     .unwrap();
     // 溶质的代码默认值：mol_weight=0、ref_ratio=1、init_delta=0（上游 `tracer_defs_init`）。
     // 最后一个是 `n2o_ef5`（上游 6a5e8985 把它加进指纹，默认 0）。
-    let expected = "sol1|solute|tracer_per_water|2|1|0|0| 0.0000000000000000E+000| \
+    let expected = "sol1|solute|material_per_water|2|1|0|0| 0.0000000000000000E+000| \
                     1.0000000000000000E+000| 0.0000000000000000E+000| 1.0000000000000000E+000| \
                     2.0000000000000000E+000| 5.0000000000000000E-001| 1.7976931348623157E+308| \
                     0.0000000000000000E+000| 0.0000000000000000E+000|";

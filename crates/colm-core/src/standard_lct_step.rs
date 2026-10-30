@@ -1261,7 +1261,7 @@ pub fn standard_lct_snow_soil_step(
             },
         )?;
         // `CoLMMAIN.F90:1101-1107`：THERMAL 之后先清零本 patch 的漫滩蒸发示踪物，土壤 patch 有
-        // 漫滩蒸发时按 Craig-Gordon 算洪水水池的示踪物损失（不进陆面 `a_trc_evap`）。
+        // 漫滩蒸发时按 Craig-Gordon 算洪水水池的示踪物损失（不进陆面 `a_mt_evap`）。
         track.flood_exchange = match ctx.flood {
             Some(flood) => {
                 let fevpg = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);

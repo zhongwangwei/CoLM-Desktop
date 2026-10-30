@@ -69,7 +69,7 @@ CONTAINS
                hpbl, &
                qintr_rain ,qintr_snow ,t_precip   ,hprl       ,&
                dheatl     ,smp        ,hk         ,hksati     ,&
-               rootflux   ,canopy_smelt_mass_p_out, canopy_frzc_mass_p_out, raw_trc_out )
+               rootflux   ,canopy_smelt_mass_p_out, canopy_frzc_mass_p_out, raw_mt_out )
 
 !=======================================================================
 !
@@ -261,9 +261,9 @@ CONTAINS
         qref,          &! 2 m height air specific humidity
         rootflux(nl_soil,ps:pe)    ! root water uptake from different layers
 
-   real(r8), dimension(ps:pe), intent(out), optional :: canopy_smelt_mass_p_out ! snow->rain mass [mm]
-   real(r8), dimension(ps:pe), intent(out), optional :: canopy_frzc_mass_p_out  ! rain->snow mass [mm]
-   real(r8), intent(out), optional :: raw_trc_out
+   real(r8), dimension(ps:pe), intent(out), optional :: canopy_smelt_mass_p_out ! canopy snow melted [mm]
+   real(r8), dimension(ps:pe), intent(out), optional :: canopy_frzc_mass_p_out  ! canopy water frozen [mm]
+   real(r8), intent(out), optional :: raw_mt_out
 
    real(r8), dimension(ps:pe), intent(out) :: &
         z0mpc,         &! z0m for individual PFT
@@ -275,6 +275,7 @@ CONTAINS
         etr,           &! transpiration rate [mm/s]
         hprl,          &! precipitation sensible heat from canopy
         dheatl          ! vegetation heat change [W/m2]
+
    real(r8), intent(inout) :: &
         z0m,           &! effective roughness [m]
         zol,           &! dimensionless height (z/L) used in Monin-Obukhov theory
@@ -539,7 +540,7 @@ CONTAINS
 
       IF (present(canopy_smelt_mass_p_out)) canopy_smelt_mass_p_out(:) = 0._r8
       IF (present(canopy_frzc_mass_p_out))  canopy_frzc_mass_p_out(:)  = 0._r8
-      IF (present(raw_trc_out)) raw_trc_out = 0._r8
+      IF (present(raw_mt_out)) raw_mt_out = 0._r8
       ! When there is no vegetation in this Plant Community Patch, RETURN
       IF (.not. is_vegetated_patch) THEN
 ! ==== FIX 2026-10-05 #75 BEGIN: the intent(out) outputs were left unassigned on this
@@ -554,7 +555,7 @@ CONTAINS
          etr(:)    = 0.
          hprl(:)   = 0.
          dheatl(:) = 0.
-         IF (present(raw_trc_out)) raw_trc_out = 0._r8
+         IF (present(raw_mt_out)) raw_mt_out = 0._r8
 ! ==== FIX 2026-10-05 #75 END ====
          RETURN
       ENDIF
@@ -2082,7 +2083,7 @@ ENDIF
 
       tref = thm + vonkar/(fh-fht)*dth * (fh2m/vonkar - fh/vonkar)
       qref =  qm + vonkar/(fq-fqt)*dqh * (fq2m/vonkar - fq/vonkar)
-      IF (present(raw_trc_out)) raw_trc_out = max(raw, 0._r8)
+      IF (present(raw_mt_out)) raw_mt_out = max(raw, 0._r8)
 
    END SUBROUTINE LeafTemperaturePC
 !----------------------------------------------------------------------

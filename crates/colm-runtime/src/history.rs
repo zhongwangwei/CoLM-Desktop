@@ -3215,7 +3215,7 @@ pub struct HistorySession {
     /// 有材料运移（`mt_any_enabled`，网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
     /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
     tracer_time_step_seconds: Option<f64>,
-    /// 有输运示踪物时的示踪物 history（`tracer_hist_out`），见 [`Self::with_tracer_variables`]。
+    /// 有输运示踪物时的示踪物 history（`mt_hist_out`），见 [`Self::with_tracer_variables`]。
     tracer_variables: Option<TracerHistoryState>,
     /// 闸门 3（`DEF_hist_vars`）：开会话时取 [`install_selection`] 装好的那一份。
     selection: Option<std::sync::Arc<colm_hist::selection::HistorySelection>>,
@@ -4476,7 +4476,7 @@ impl HistorySession {
         Ok(written)
     }
 
-    /// 打开示踪物 history（有输运示踪物时；`tracer_hist_out`）。
+    /// 打开示踪物 history（有输运示踪物时；`mt_hist_out`）。
     pub fn with_tracer_variables(
         mut self,
         set: colm_core::tracer::TracerSet,
@@ -4499,8 +4499,8 @@ impl HistorySession {
         self
     }
 
-    /// 一步结束、主 history 已推进之后调用（`hist_out` 里的 `tracer_hist_out` 与
-    /// `flush_Tracer_Acc`）。预热期直接返回，既不计步也不清零（上游 `hist_out` 提前返回）。
+    /// 一步结束、主 history 已推进之后调用（`hist_out` 里的 `mt_hist_out` 与
+    /// `flush_Material_Acc`）。预热期直接返回，既不计步也不清零（上游 `hist_out` 提前返回）。
     pub fn push_tracer(
         &mut self,
         end: CalendarTime,
@@ -4571,7 +4571,7 @@ impl HistorySession {
             let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
             buffer.set_window(record.record, nac * deltim, end_minutes)?;
         }
-        // 文件里的变量：逐示踪物、逐表项（同 `tracer_hist_out` 的写出顺序）。
+        // 文件里的变量：逐示踪物、逐表项（同 `mt_hist_out` 的写出顺序）。
         let mut index = 0;
         for itrc in tracer.set.transport_indices() {
             let descriptor = &tracer.set.tracers[itrc];
@@ -4716,7 +4716,7 @@ impl HistorySession {
                     continue;
                 }
                 if let Some(grid) = grid.as_ref() {
-                    // `tracer_hist_out` 的网格支：`sumarea` 用陆面 `filter`（`patchtype < 99`，
+                    // `mt_hist_out` 的网格支：`sumarea` 用陆面 `filter`（`patchtype < 99`，
                     // `patchmask` 在 Rust 空间运行里恒真），分子按各变量自己的 `filter`，
                     // `pset2grid` 按 patch 序、再按份序累加。
                     let mut cells = vec![hist::GridCell::default(); columns * width];

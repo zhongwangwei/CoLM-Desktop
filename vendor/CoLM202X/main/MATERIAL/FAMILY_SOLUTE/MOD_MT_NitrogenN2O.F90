@@ -25,7 +25,7 @@ MODULE MOD_MT_NitrogenN2O
 !-----------------------------------------------------------------------
 
    USE MOD_Precision
-   USE MOD_MT_Defs, only: nmts, tracers, tracer_lower
+   USE MOD_MT_Defs, only: nmts, materials, material_lower
    USE MOD_MT_Namelist, only: DEF_MT_N2O_EF5_NH4, DEF_MT_N2O_EF5_NO3
    IMPLICIT NONE
    PUBLIC :: mt_n2o_ef5_for
@@ -41,15 +41,15 @@ CONTAINS
       mt_n2o_ef5_for = 0._r8
       IF (imt < 1 .or. imt > nmts) RETURN
 
-      lname = tracer_lower(trim(tracers(imt)%name))
+      lname = material_lower(trim(materials(imt)%name))
       SELECT CASE (lname)
       CASE ('nh4')
-         mt_n2o_ef5_for = tracers(imt)%n2o_ef5
+         mt_n2o_ef5_for = materials(imt)%n2o_ef5
          ! Any value >= 0 is a deliberate override, so 0 switches the
          ! conversion off; the -1 default means "use the parameter file".
          IF (DEF_MT_N2O_EF5_NH4 >= 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NH4
       CASE ('no3')
-         mt_n2o_ef5_for = tracers(imt)%n2o_ef5
+         mt_n2o_ef5_for = materials(imt)%n2o_ef5
          IF (DEF_MT_N2O_EF5_NO3 >= 0._r8) mt_n2o_ef5_for = DEF_MT_N2O_EF5_NO3
       END SELECT
 

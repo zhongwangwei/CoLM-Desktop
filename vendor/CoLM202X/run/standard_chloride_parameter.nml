@@ -19,7 +19,7 @@
     ! the bulk-water phase bookkeeping; brine rejection, salt precipitation,
     ! ion activity and electroneutrality are not modelled.
     ! Every field is optional; the code defaults are 0, except
-    ! unit_kind = 'tracer_per_water' and no dissolved limit.
+    ! unit_kind = 'material_per_water' and no dissolved limit.
     ! ------------------------------------------------------------------
     DEF_SOLUTE%unit_kind           = 'mass_fraction'
     DEF_SOLUTE%mol_weight          = 35.453     ! [g/mol]

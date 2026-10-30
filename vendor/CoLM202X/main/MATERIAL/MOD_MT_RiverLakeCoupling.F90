@@ -23,15 +23,15 @@ MODULE MOD_MT_RiverLakeCoupling
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist
-   USE MOD_MT_Defs, only: nmts, mt_uses_generic_water, tracer_is_nonvolatile_solute
+   USE MOD_MT_Defs, only: nmts, mt_uses_generic_water, material_is_nonvolatile_solute
    USE MOD_MT_Solute, only: mt_has_dissolved_limit, mt_equilibrate_dissolved
    USE MOD_MT_RiverLake
    USE MOD_MT_Lifecycle, only: mt_lifecycle_route_has_active, mt_lifecycle_route_init, &
       mt_lifecycle_route_read_restart, mt_lifecycle_route_forcing_put, &
       mt_lifecycle_route_diag_accumulate, mt_lifecycle_route_calc, &
       mt_lifecycle_route_sediment_bif_accumulate, mt_lifecycle_route_sediment_levee_repartition, &
-      mt_lifecycle_route_final, tracer_lifecycle_has_levee_flood_publisher, &
-      tracer_lifecycle_has_flood_publisher, mt_lifecycle_publish_levee_flood_patch, &
+      mt_lifecycle_route_final, material_lifecycle_has_levee_flood_publisher, &
+      material_lifecycle_has_flood_publisher, mt_lifecycle_publish_levee_flood_patch, &
       mt_lifecycle_publish_flood_patch
    IMPLICIT NONE
 
@@ -325,7 +325,7 @@ CONTAINS
          DO imt = 1, nmts
             IF (.not. mt_uses_generic_water(imt)) CYCLE
             mt_mass_bef(imt) = pool_total(imt)
-            mt_mass_inp(imt) = sum(acc_trc_inp(imt,:))
+            mt_mass_inp(imt) = sum(acc_mt_inp(imt,:))
          ENDDO
       ENDIF
 #endif
@@ -333,8 +333,8 @@ CONTAINS
       IF (numucat > 0) THEN
          DO imt = 1, nmts
             IF (.not. mt_uses_generic_water(imt)) CYCLE
-            mt_inp_buf(imt,:) = mt_inp_buf(imt,:) + acc_trc_inp(imt,:)
-            acc_trc_inp(imt,:) = 0._r8
+            mt_inp_buf(imt,:) = mt_inp_buf(imt,:) + acc_mt_inp(imt,:)
+            acc_mt_inp(imt,:) = 0._r8
          ENDDO
       ENDIF
 
@@ -358,7 +358,7 @@ CONTAINS
       IF (present(with_input)) THEN
          IF (with_input) THEN
             CALL mt_riverlake_levee_repartition (i, vis_bef, lev_bef, vis_aft, lev_aft, &
-               pending_trc_pool = mt_inp_buf(:,i))
+               pending_mt_pool = mt_inp_buf(:,i))
             RETURN
          ENDIF
       ENDIF
@@ -493,6 +493,7 @@ CONTAINS
 
    USE MOD_Grid_RiverLakeNetwork,  only: numucat, topo_area, floodplain_curve, levee_frc_data
    USE MOD_Grid_RiverLakeTimeVars, only: wdsrf_ucat, volresv, volwater_ucat, veloc_riv
+   USE MOD_Grid_RiverLakeBifurcation, only: bif_hflux_lev
    USE MOD_Grid_RiverLakeLevee,    only: has_levee, levsto, levdph
    IMPLICIT NONE
 
@@ -507,14 +508,22 @@ CONTAINS
    logical  :: leveed
 
       IF (.not. p_is_worker) RETURN
-      IF (nmts <= 0 .or. numucat <= 0) RETURN
+      IF (nmts <= 0) RETURN
+      IF (numucat <= 0 .and. .not. DEF_USE_BIFURCATION) RETURN
 
       IF (allocated(volresv)) volresv_mt = volresv
-      CALL mt_riverlake_diag_accumulate (dt_all, irivsys, ucatfilter, wdsrf_ucat, &
+      IF (DEF_USE_BIFURCATION) THEN
+         CALL mt_riverlake_diag_accumulate (dt_all, irivsys, ucatfilter, wdsrf_ucat, &
          volresv_mt, ucat2resv_mt, is_built_resv, hflux_fc_in = hflux_fc, &
-         allow_reverse_flow = (.not. DEF_USE_BIFURCATION .and. .not. DEF_USE_LEVEE))
+         allow_reverse_flow = .true., bif_hflux_lev_in = bif_hflux_lev)
+      ELSE
+         CALL mt_riverlake_diag_accumulate (dt_all, irivsys, ucatfilter, wdsrf_ucat, &
+         volresv_mt, ucat2resv_mt, is_built_resv, hflux_fc_in = hflux_fc, &
+         allow_reverse_flow = .true.)
+      ENDIF
+      IF (numucat <= 0) RETURN
 
-      IF (tracer_lifecycle_has_flood_publisher() .or. tracer_lifecycle_has_levee_flood_publisher()) THEN
+      IF (material_lifecycle_has_flood_publisher() .or. material_lifecycle_has_levee_flood_publisher()) THEN
          ! CoLM202X total_floodarea / total_flooddepth / levee_floodarea of
          ! the last substep.  The area is the one of the river history
          ! (a leveed cell takes the levee result even when it is zero).
@@ -673,7 +682,7 @@ CONTAINS
          ENDIF
 
          IF (numucat > 0) THEN
-            IF (allocated(acc_trc_inp))   acc_trc_inp   = 0._r8
+            IF (allocated(acc_mt_inp))   acc_mt_inp   = 0._r8
             IF (allocated(acc_rnof_ref))  acc_rnof_ref  = 0._r8
             IF (allocated(mt_dry_drain)) mt_dry_drain = 0._r8
          ENDIF
@@ -705,8 +714,8 @@ CONTAINS
    integer :: i
    logical :: levee_pub, flood_pub
 
-      levee_pub = tracer_lifecycle_has_levee_flood_publisher()
-      flood_pub = tracer_lifecycle_has_flood_publisher()
+      levee_pub = material_lifecycle_has_levee_flood_publisher()
+      flood_pub = material_lifecycle_has_flood_publisher()
       IF (.not. (levee_pub .or. flood_pub)) RETURN
       CALL ensure_publish_arrays (numucat)
 
@@ -784,7 +793,7 @@ CONTAINS
    IMPLICIT NONE
 
    integer :: imt
-   logical :: has_flood_tracer
+   logical :: has_flood_material
 
       IF (.not. p_is_worker) RETURN
 
@@ -792,11 +801,11 @@ CONTAINS
          flood_mt_evap_patch, flood_mt_land_patch, &
          flood_visible_mt_uc, flood_protected_mt_uc)
 
-      has_flood_tracer = .false.
+      has_flood_material = .false.
       DO imt = 1, nmts
-         IF (mt_uses_generic_water(imt)) has_flood_tracer = .true.
+         IF (mt_uses_generic_water(imt)) has_flood_material = .true.
       ENDDO
-      IF (.not. has_flood_tracer) RETURN
+      IF (.not. has_flood_material) RETURN
 
       allocate (flood_mt_credit_patch(nmts,numpatch), flood_mt_evap_patch(nmts,numpatch), &
          flood_mt_land_patch(nmts,numpatch), &
@@ -871,12 +880,12 @@ CONTAINS
 
    real(r8), parameter :: MISSING = -1.e30_r8
    integer :: imt, iside
-   real(r8), allocatable :: density(:), grid_tracer(:), patch_tracer(:)
+   real(r8), allocatable :: density(:), grid_material(:), patch_material(:)
 
       IF (.not. p_is_worker) RETURN
       IF (.not. allocated(flood_visible_mt_uc)) RETURN
 
-      allocate (density(numucat), grid_tracer(numinpm), patch_tracer(numpatch))
+      allocate (density(numucat), grid_material(numinpm), patch_material(numpatch))
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
          DO iside = 1, 2
@@ -891,27 +900,27 @@ CONTAINS
                      density = flood_protected_mt_uc(imt,:) / max(push_inpm2ucat%sum_area, tiny(1._r8))
                ENDIF
             ENDIF
-            CALL worker_push_data (push_ucat2inpm, density, grid_tracer, fillvalue=0._r8, mode='sum')
+            CALL worker_push_data (push_ucat2inpm, density, grid_material, fillvalue=0._r8, mode='sum')
             WHERE (flood_grid_area > 0._r8)
-               grid_tracer = grid_tracer / max(flood_grid_area, tiny(1._r8))
+               grid_material = grid_material / max(flood_grid_area, tiny(1._r8))
             ELSEWHERE
-               grid_tracer = 0._r8
+               grid_material = 0._r8
             END WHERE
             IF (numpatch > 0) THEN
-               CALL worker_remap_data_grid2pset (remap_patch2inpm, grid_tracer, &
-                  patch_tracer, fillvalue=MISSING, mode='average')
-               WHERE (patch_tracer == MISSING) patch_tracer = 0._r8
+               CALL worker_remap_data_grid2pset (remap_patch2inpm, grid_material, &
+                  patch_material, fillvalue=MISSING, mode='average')
+               WHERE (patch_material == MISSING) patch_material = 0._r8
                IF (iside == 1) THEN
-                  flood_mt_credit_patch(imt,:) = patch_tracer
+                  flood_mt_credit_patch(imt,:) = patch_material
                ELSE
                   ! [m] -> [mm], as flood_credit_patch*1000 is the water credit [mm]
                   flood_mt_credit_patch(imt,:) = 1000._r8 * &
-                     (flood_mt_credit_patch(imt,:) + patch_tracer)
+                     (flood_mt_credit_patch(imt,:) + patch_material)
                ENDIF
             ENDIF
          ENDDO
       ENDDO
-      deallocate (density, grid_tracer, patch_tracer)
+      deallocate (density, grid_material, patch_material)
 
    END SUBROUTINE mt_rlc_flood_publish_push
 
@@ -938,20 +947,20 @@ CONTAINS
    real(r8), intent(in) :: flood_protected_uc(:)   ! published protected flood water [m^3]
 
    integer  :: i, j, imt
-   real(r8) :: patch_area, tracer_cell_debit, ledger_tol
-   real(r8) :: water_credit, tracer_credit, vapor_loss, positive_loss, vapor_gain
-   real(r8) :: infiltrated_fraction, evaporated_fraction, tracer_after
+   real(r8) :: patch_area, material_cell_debit, ledger_tol
+   real(r8) :: water_credit, material_credit, vapor_loss, positive_loss, vapor_gain
+   real(r8) :: infiltrated_fraction, evaporated_fraction, material_after
    real(r8), allocatable :: ratio_patch(:), ratio_grid(:), ratio_uc(:)
    real(r8), allocatable :: gain_patch(:), coefficient_uc(:), gain_uc(:)
-   real(r8), allocatable :: tracer_exchange_ledger(:,:)   ! (land, vapour, river donor)
+   real(r8), allocatable :: material_exchange_ledger(:,:)   ! (land, vapour, river donor)
 
       IF (.not. p_is_worker) RETURN
       IF (.not. allocated(flood_visible_mt_uc)) RETURN
 
       allocate (ratio_patch(numpatch), ratio_grid(numinpm), ratio_uc(numucat))
       allocate (gain_patch(numpatch), coefficient_uc(numucat), gain_uc(numucat))
-      allocate (tracer_exchange_ledger(3,nmts))
-      tracer_exchange_ledger = 0._r8
+      allocate (material_exchange_ledger(3,nmts))
+      material_exchange_ledger = 0._r8
 
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
@@ -960,17 +969,17 @@ CONTAINS
          DO i = 1, numpatch
             water_credit = flood_credit_patch(i)*1000._r8
             IF (water_credit <= 0._r8) CYCLE
-            tracer_credit = flood_mt_credit_patch(imt,i)
+            material_credit = flood_mt_credit_patch(imt,i)
             vapor_loss = flood_mt_evap_patch(imt,i)
             IF (.not. ieee_is_finite(vapor_loss)) &
                CALL CoLM_stop('grid flood feedback: nonfinite isotope vapor exchange')
             positive_loss = max(vapor_loss,0._r8)
             vapor_gain = max(-vapor_loss,0._r8)
-            ledger_tol = max(1.e-12_r8, 1.e-10_r8*abs(tracer_credit))
-            IF (positive_loss > tracer_credit+ledger_tol) &
+            ledger_tol = max(1.e-12_r8, 1.e-10_r8*abs(material_credit))
+            IF (positive_loss > material_credit+ledger_tol) &
                CALL CoLM_stop('grid flood feedback: isotope evaporation overdrew material')
             evaporated_fraction = 0._r8
-            IF (tracer_credit > 0._r8) evaporated_fraction = min(1._r8,positive_loss/tracer_credit)
+            IF (material_credit > 0._r8) evaporated_fraction = min(1._r8,positive_loss/material_credit)
             infiltrated_fraction = 0._r8
             IF (flood_infil_acc(i) > 0._r8) THEN
                IF (water_credit <= flood_evap_acc(i)) THEN
@@ -984,24 +993,24 @@ CONTAINS
                CALL CoLM_stop('grid flood feedback: material infiltration overdraft')
             infiltrated_fraction = min(1._r8,max(0._r8,infiltrated_fraction))
             ratio_patch(i) = evaporated_fraction + (1._r8-evaporated_fraction)*infiltrated_fraction
-            IF (mt_has_dissolved_limit(imt) .and. tracer_credit > 0._r8) &
-               ratio_patch(i) = min(1._r8,max(0._r8,flood_mt_land_patch(imt,i)/tracer_credit))
+            IF (mt_has_dissolved_limit(imt) .and. material_credit > 0._r8) &
+               ratio_patch(i) = min(1._r8,max(0._r8,flood_mt_land_patch(imt,i)/material_credit))
             gain_patch(i) = vapor_gain*(1._r8-infiltrated_fraction)/water_credit
             patch_area = sum(remap_patch2inpm%areapart(i)%val)*1.e-3_r8
             IF (mt_has_dissolved_limit(imt)) THEN
                IF (flood_mt_land_patch(imt,i) < -ledger_tol .or. &
                    flood_mt_land_patch(imt,i) > &
-                   (tracer_credit-vapor_loss)*infiltrated_fraction + ledger_tol) &
+                   (material_credit-vapor_loss)*infiltrated_fraction + ledger_tol) &
                   CALL CoLM_stop('grid flood feedback: finite solute input exceeds donor exchange')
             ELSE
                IF (abs(flood_mt_land_patch(imt,i) - &
-                   (tracer_credit-vapor_loss)*infiltrated_fraction) > &
-                   max(1.e-12_r8,1.e-10_r8*max(abs(tracer_credit),abs(flood_mt_land_patch(imt,i))))) &
+                   (material_credit-vapor_loss)*infiltrated_fraction) > &
+                   max(1.e-12_r8,1.e-10_r8*max(abs(material_credit),abs(flood_mt_land_patch(imt,i))))) &
                   CALL CoLM_stop('grid flood feedback: land material input differs from donor exchange')
             ENDIF
-            tracer_exchange_ledger(1,imt) = tracer_exchange_ledger(1,imt) + &
+            material_exchange_ledger(1,imt) = material_exchange_ledger(1,imt) + &
                flood_mt_land_patch(imt,i)*patch_area
-            tracer_exchange_ledger(2,imt) = tracer_exchange_ledger(2,imt) + vapor_loss*patch_area
+            material_exchange_ledger(2,imt) = material_exchange_ledger(2,imt) + vapor_loss*patch_area
          ENDDO
 
          ! fraction of the published material taken, per unit catchment
@@ -1022,7 +1031,7 @@ CONTAINS
 
          ! vapour gained by the flood water still in the river (isotopes only)
          gain_uc = 0._r8
-         IF (.not. tracer_is_nonvolatile_solute(imt)) THEN
+         IF (.not. material_is_nonvolatile_solute(imt)) THEN
             ratio_grid = 0._r8
             IF (numpatch > 0) CALL worker_remap_data_pset2grid (remap_patch2inpm, gain_patch, ratio_grid, &
                fillvalue=0._r8, filter=flood_credit_patch>0._r8)
@@ -1038,46 +1047,46 @@ CONTAINS
          ENDIF
 
          DO j = 1, numucat
-            tracer_after = mt_mass(imt,j) - coefficient_uc(j)*flood_visible_mt_uc(imt,j) &
+            material_after = mt_mass(imt,j) - coefficient_uc(j)*flood_visible_mt_uc(imt,j) &
                + gain_uc(j)*flood_visible_uc(j)
-            IF (tracer_after < -1.e-10_r8*max(1._r8,mt_mass(imt,j))) &
+            IF (material_after < -1.e-10_r8*max(1._r8,mt_mass(imt,j))) &
                CALL CoLM_stop('grid flood feedback: negative visible material')
-            tracer_cell_debit = coefficient_uc(j)*flood_visible_mt_uc(imt,j) &
-               - gain_uc(j)*flood_visible_uc(j) + min(tracer_after,0._r8)
-            mt_mass(imt,j) = max(0._r8,tracer_after)
-            tracer_after = mt_levsto(imt,j) - coefficient_uc(j)*flood_protected_mt_uc(imt,j) &
+            material_cell_debit = coefficient_uc(j)*flood_visible_mt_uc(imt,j) &
+               - gain_uc(j)*flood_visible_uc(j) + min(material_after,0._r8)
+            mt_mass(imt,j) = max(0._r8,material_after)
+            material_after = mt_levsto(imt,j) - coefficient_uc(j)*flood_protected_mt_uc(imt,j) &
                + gain_uc(j)*flood_protected_uc(j)
-            IF (tracer_after < -1.e-10_r8*max(1._r8,mt_levsto(imt,j))) &
+            IF (material_after < -1.e-10_r8*max(1._r8,mt_levsto(imt,j))) &
                CALL CoLM_stop('grid flood feedback: negative protected material')
-            tracer_cell_debit = tracer_cell_debit + coefficient_uc(j)*flood_protected_mt_uc(imt,j) &
-               - gain_uc(j)*flood_protected_uc(j) + min(tracer_after,0._r8)
-            mt_levsto(imt,j) = max(0._r8,tracer_after)
-            tracer_exchange_ledger(3,imt) = tracer_exchange_ledger(3,imt) + tracer_cell_debit
+            material_cell_debit = material_cell_debit + coefficient_uc(j)*flood_protected_mt_uc(imt,j) &
+               - gain_uc(j)*flood_protected_uc(j) + min(material_after,0._r8)
+            mt_levsto(imt,j) = max(0._r8,material_after)
+            material_exchange_ledger(3,imt) = material_exchange_ledger(3,imt) + material_cell_debit
          ENDDO
       ENDDO
 
 #ifdef USEMPI
-      CALL mpi_allreduce (MPI_IN_PLACE, tracer_exchange_ledger, 3*nmts, MPI_REAL8, &
+      CALL mpi_allreduce (MPI_IN_PLACE, material_exchange_ledger, 3*nmts, MPI_REAL8, &
          MPI_SUM, p_comm_worker, p_err)
 #endif
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
-         ledger_tol = max(1.e-8_r8, 1.e-10_r8*maxval(abs(tracer_exchange_ledger(:,imt))))
-         IF (abs(tracer_exchange_ledger(1,imt)+tracer_exchange_ledger(2,imt) - &
-                tracer_exchange_ledger(3,imt)) > ledger_tol) &
+         ledger_tol = max(1.e-8_r8, 1.e-10_r8*maxval(abs(material_exchange_ledger(:,imt))))
+         IF (abs(material_exchange_ledger(1,imt)+material_exchange_ledger(2,imt) - &
+                material_exchange_ledger(3,imt)) > ledger_tol) &
             CALL CoLM_stop('grid flood feedback: land/river material exchange ledger mismatch')
          IF (p_iam_worker == p_root .and. flood_mt_ledger_reports < 5 .and. &
-             tracer_exchange_ledger(1,imt) > 0._r8) THEN
+             material_exchange_ledger(1,imt) > 0._r8) THEN
             write(*,'(A,I0,4(1X,ES16.8))') 'Grid flood material land/vapor/donor/residual:', imt, &
-               tracer_exchange_ledger(1,imt), tracer_exchange_ledger(2,imt), &
-               tracer_exchange_ledger(3,imt), &
-               tracer_exchange_ledger(1,imt)+tracer_exchange_ledger(2,imt)-tracer_exchange_ledger(3,imt)
+               material_exchange_ledger(1,imt), material_exchange_ledger(2,imt), &
+               material_exchange_ledger(3,imt), &
+               material_exchange_ledger(1,imt)+material_exchange_ledger(2,imt)-material_exchange_ledger(3,imt)
             flood_mt_ledger_reports = flood_mt_ledger_reports + 1
          ENDIF
       ENDDO
 
       deallocate (ratio_patch, ratio_grid, ratio_uc, gain_patch, coefficient_uc, gain_uc, &
-         tracer_exchange_ledger)
+         material_exchange_ledger)
 
    END SUBROUTINE mt_rlc_flood_debit
 

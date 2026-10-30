@@ -47,6 +47,9 @@ MODULE MOD_HistAccRestart
 
    PUBLIC :: read_history_acc_restart
    PUBLIC :: save_history_acc_restart
+   ! .true. when the reader actually restored a PARTIAL window; the material
+   ! river history follows the same decision so the two never disagree.
+   PUBLIC :: hist_acc_window_restored
    PUBLIC :: hist_acc_final_snapshot
 
    integer, parameter :: HACC_WRITE = 1
@@ -55,10 +58,15 @@ MODULE MOD_HistAccRestart
    ! date of a sidecar already written by hist_acc_final_snapshot
    integer :: snapshot_date(3) = -1
 
+   ! Set by read_history_acc_restart: .true. only when a partial window was
+   ! restored.  A complete window is discarded, and then every material
+   ! history window must start at the restart as well.
+   logical :: hist_acc_window_restored = .false.
+
 CONTAINS
 
    !-----------------------------------------------------------------------
-   SUBROUTINE hist_acc_final_snapshot (idate, deltim, itstamp, etstamp)
+   logical FUNCTION hist_acc_final_snapshot (idate, deltim, itstamp, etstamp)
 
    ! Called by hist_out after the sums of this step are accumulated. At the
    ! last step of the run, when the history window is not complete, hist_out
@@ -76,6 +84,7 @@ CONTAINS
    integer :: jdate(3)
    logical :: window_end
 
+      hist_acc_final_snapshot = .false.
       IF (itstamp < etstamp) RETURN
 
       SELECT CASE (trim(adjustl(DEF_HIST_FREQ)))
@@ -98,8 +107,9 @@ CONTAINS
       CALL adj2begin (jdate)
       CALL write_sidecar (jdate)
       snapshot_date = jdate
+      hist_acc_final_snapshot = .true.
 
-   END SUBROUTINE hist_acc_final_snapshot
+   END FUNCTION hist_acc_final_snapshot
 
    !-----------------------------------------------------------------------
    SUBROUTINE save_history_acc_restart (jdate)
@@ -107,11 +117,31 @@ CONTAINS
    ! Called right after WRITE_TimeVariables with the same date.
 
    USE MOD_LandPatch, only: landpatch
+   USE MOD_Namelist, only: DEF_simulation_time
    IMPLICIT NONE
 
    integer, intent(in) :: jdate(3)
 
    character(len=256) :: file
+   real(r8) :: window_seconds, window_nac
+
+      ! Nothing to carry over when the window is complete at this restart: the
+      ! reader would discard it (see read_history_acc_restart), and the sidecar
+      ! holds every accumulator at patch resolution, so writing it would cost
+      ! hundreds of MB per restart for nothing.
+      ! nac is maintained on workers; all ranks must take the same return.
+      window_nac = 0._r8
+      IF (p_is_worker) window_nac = nac
+#ifdef USEMPI
+      CALL mpi_allreduce (MPI_IN_PLACE, window_nac, 1, MPI_REAL8, MPI_MAX, p_comm_glb, p_err)
+#endif
+      window_seconds = hacc_window_seconds (jdate)
+      IF (window_seconds > 0._r8 .and. window_nac > 0._r8 .and. &
+          window_nac * DEF_simulation_time%timestep >= window_seconds - &
+          0.5_r8 * DEF_simulation_time%timestep) THEN
+         snapshot_date = -1
+         RETURN
+      ENDIF
 
       IF (any(snapshot_date /= jdate)) CALL write_sidecar (jdate)
       snapshot_date = -1
@@ -122,20 +152,71 @@ CONTAINS
    END SUBROUTINE save_history_acc_restart
 
    !-----------------------------------------------------------------------
+   real(r8) FUNCTION hacc_window_seconds (jdate)
+
+   ! Length in seconds of the history window that ended at jdate, or -1 when
+   ! the frequency does not pin it down (TIMESTEP is handled by the caller's
+   ! tolerance, MONTHLY/YEARLY only when the restart sits on the boundary).
+
+   USE MOD_Namelist, only: DEF_HIST_FREQ, DEF_simulation_time
+   USE MOD_TimeManager, only: julian2monthday
+   IMPLICIT NONE
+
+   integer, intent(in) :: jdate(3)
+
+   integer :: month, mday, year, mprev, yprev
+   integer :: mdays(12) = (/31,28,31,30,31,30,31,31,30,31,30,31/)
+
+      hacc_window_seconds = -1._r8
+      SELECT CASE (trim(adjustl(DEF_HIST_FREQ)))
+      CASE ('TIMESTEP')
+         hacc_window_seconds = DEF_simulation_time%timestep
+      CASE ('HOURLY')
+         hacc_window_seconds = 3600._r8
+      CASE ('DAILY')
+         hacc_window_seconds = 86400._r8
+      CASE ('MONTHLY')
+         CALL julian2monthday (jdate(1), jdate(2), month, mday)
+         IF (mday == 1) THEN
+            year = jdate(1)
+            mprev = month - 1
+            IF (mprev == 0) THEN
+               mprev = 12
+               year = year - 1
+            ENDIF
+            IF (mprev == 2) THEN
+               mdays(2) = 28
+               IF (mod(year,4) == 0 .and. (mod(year,100) /= 0 .or. mod(year,400) == 0)) mdays(2) = 29
+            ENDIF
+            hacc_window_seconds = real(mdays(mprev), r8) * 86400._r8
+         ENDIF
+      CASE ('YEARLY')
+         IF (jdate(2) == 1) THEN
+            yprev = jdate(1) - 1
+            hacc_window_seconds = 365._r8 * 86400._r8
+            IF (mod(yprev,4) == 0 .and. (mod(yprev,100) /= 0 .or. mod(yprev,400) == 0)) &
+               hacc_window_seconds = 366._r8 * 86400._r8
+         ENDIF
+      END SELECT
+
+   END FUNCTION hacc_window_seconds
+
+   !-----------------------------------------------------------------------
    SUBROUTINE read_history_acc_restart (jdate)
 
    ! Called once at the start of a run, after hist_init and the river-lake
    ! initialization, with the date of the restart that was read.
 
-   USE MOD_Namelist, only: DEF_HIST_FREQ
+   USE MOD_Namelist, only: DEF_HIST_FREQ, DEF_simulation_time
    USE MOD_LandPatch, only: landpatch, numpatch
    IMPLICIT NONE
 
    integer, intent(in) :: jdate(3)
 
    character(len=256) :: file
-   real(r8) :: vmin, vmax
+   real(r8) :: vmin, vmax, window_seconds
 
+      hist_acc_window_restored = .false.
       CALL sidecar_filename (jdate, file)
 
       IF (.not. any_block_exists (file)) THEN
@@ -175,9 +256,25 @@ CONTAINS
          CALL CoLM_stop ()
       ENDIF
 
+      ! A window that is already complete at the restart point has been, or
+      ! will be, written out by the run that produced this restart: a daily
+      ! restart at midnight always carries a full day.  Restoring it would make
+      ! the first window after the restart cover two windows (a split run then
+      ! reports mean(window1, window2) instead of window2).  Only a genuinely
+      ! partial window -- a restart in the middle of one -- is restored.
+      window_seconds = hacc_window_seconds (jdate)
+      IF (window_seconds > 0._r8 .and. vmin > 0._r8 .and. &
+          vmin * DEF_simulation_time%timestep >= window_seconds - &
+          0.5_r8 * DEF_simulation_time%timestep) THEN
+         IF (p_is_master) write(*,'(A)') &
+            'Note: the restart closes a complete history window; the history window starts at the restart.'
+         RETURN
+      ENDIF
+
       IF (vmin > 0._r8) THEN
          IF (p_is_worker) nac = vmin
          CALL hacc_fields (file, HACC_READ)
+         hist_acc_window_restored = .true.
 #ifdef EXTERNAL_LAKE
          IF (p_is_master) write(*,'(A)') &
             'Warning: external-lake history accumulators are not restored; their first window is partial.'
@@ -187,7 +284,17 @@ CONTAINS
 #ifdef GridRiverLakeFlow
       CALL require_var (file, 'hacc_river', landpatch, 'patch', 1, 0, 0)
       CALL read_marker (file, 'hacc_river', vmin, vmax)
-      IF (vmax > 0._r8) CALL river_sums (trim(file)//'.river', HACC_READ)
+      IF (vmax > 0._r8) THEN
+         CALL river_sums (trim(file)//'.river', HACC_READ)
+         hist_acc_window_restored = .true.
+      ENDIF
+#endif
+
+      ! Every rank must reach the same verdict: the material river history
+      ! drops its restored window when this is .false.
+#ifdef USEMPI
+      CALL mpi_allreduce (MPI_IN_PLACE, hist_acc_window_restored, 1, MPI_LOGICAL, &
+         MPI_LAND, p_comm_glb, p_err)
 #endif
 
    END SUBROUTINE read_history_acc_restart
@@ -810,53 +917,53 @@ CONTAINS
       CALL hacc_field1d (file, mode, 'nac_dt', nac_dt, landpatch, 'patch')
       ! <<< fields from allocate_acc_fluxes
 
-      ! Material sums (MOD_MT_Vars, allocate_Tracer_Vars). After a cold
+      ! Material sums (MOD_MT_Vars, allocate_Material_Vars). After a cold
       ! start of the materials the saved sums belong to another state (or
       ! another species list) and are not read; their window starts again.
       IF (mode == HACC_WRITE .or. mt_land_restart_loaded) THEN
-         CALL hacc_field2d (file, mode, 'a_trc_precip', a_trc_precip, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_vapor_exchange', a_trc_vapor_exchange, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_precip', a_mt_precip, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_vapor_exchange', a_mt_vapor_exchange, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_precip', a_water_precip, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_evap', a_trc_evap, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_evap', a_mt_evap, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_evap_gross', a_water_evap_gross, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_transp', a_trc_transp, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_transp_src', a_trc_transp_src, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_transp', a_mt_transp, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_transp_src', a_mt_transp_src, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_transp', a_water_transp, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_soilevap', a_trc_soilevap, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_soilevap', a_mt_soilevap, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_soilevap', a_water_soilevap, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_canopyevap', a_trc_canopyevap, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_canopyevap', a_mt_canopyevap, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_canopyevap', a_water_canopyevap, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_subl', a_trc_subl, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_subl', a_mt_subl, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_subl', a_water_subl, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_wetland_evap', a_trc_wetland_evap, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_wetland_evap', a_mt_wetland_evap, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_wetland_evap', a_water_wetland_evap, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_rsur', a_trc_rsur, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_rsub', a_trc_rsub, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_rnof', a_trc_rnof, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_rsur', a_mt_rsur, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_rsub', a_mt_rsub, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_rnof', a_mt_rnof, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_rnof', a_water_rnof, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_qinfl', a_trc_qinfl, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_qcharge', a_trc_qcharge, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_ldew_mass', a_trc_ldew_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_qinfl', a_mt_qinfl, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_qcharge', a_mt_qcharge, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_ldew_mass', a_mt_ldew_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_ldew', a_water_ldew, landpatch, 'patch')
-         CALL hacc_field3d (file, mode, 'a_trc_soil_mass', a_trc_soil_mass, landpatch, 'patch')
+         CALL hacc_field3d (file, mode, 'a_mt_soil_mass', a_mt_soil_mass, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_soil', a_water_soil, landpatch, 'patch')
-         CALL hacc_field3d (file, mode, 'a_trc_snow_mass', a_trc_snow_mass, landpatch, 'patch')
+         CALL hacc_field3d (file, mode, 'a_mt_snow_mass', a_mt_snow_mass, landpatch, 'patch')
          CALL hacc_field2d (file, mode, 'a_water_snow', a_water_snow, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_wa_mass', a_trc_wa_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_wa_mass', a_mt_wa_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_wa', a_water_wa, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_wa_debt_mass', a_trc_wa_debt_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_wa_debt_mass', a_mt_wa_debt_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_wa_debt', a_water_wa_debt, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_aquifer_actual', a_water_aquifer_actual, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_aquifer_actual_mass', a_trc_aquifer_actual_mass, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_wdsrf_mass', a_trc_wdsrf_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_aquifer_actual_mass', a_mt_aquifer_actual_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_wdsrf_mass', a_mt_wdsrf_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_wdsrf', a_water_wdsrf, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_wetwat_mass', a_trc_wetwat_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_wetwat_mass', a_mt_wetwat_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_wetwat', a_water_wetwat, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_surface_residue_mass', a_trc_surface_residue_mass, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_subsurface_residue_mass', a_trc_subsurface_residue_mass, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_layer_dry_mass', a_trc_layer_dry_mass, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_solid_mass', a_trc_solid_mass, landpatch, 'patch')
-         CALL hacc_field2d (file, mode, 'a_trc_scv_mass', a_trc_scv_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_surface_residue_mass', a_mt_surface_residue_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_subsurface_residue_mass', a_mt_subsurface_residue_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_layer_dry_mass', a_mt_layer_dry_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_solid_mass', a_mt_solid_mass, landpatch, 'patch')
+         CALL hacc_field2d (file, mode, 'a_mt_scv_mass', a_mt_scv_mass, landpatch, 'patch')
          CALL hacc_field1d (file, mode, 'a_water_scv', a_water_scv, landpatch, 'patch')
       ELSEIF (p_is_master) THEN
          write(*,*) 'Note: materials were cold-started; their history window starts at the model start.'
@@ -986,6 +1093,25 @@ CONTAINS
    END SUBROUTINE hacc_field1d
 
    !-----------------------------------------------------------------------
+   FUNCTION hacc_read_name (file, name, pixelset) RESULT (read_name)
+
+   USE MOD_Pixelset, only: pixelset_type
+   USE MOD_NetCDFVector, only: ncio_vector_exist
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: file, name
+   type(pixelset_type), intent(in) :: pixelset
+   character(len=:), allocatable :: read_name
+
+      read_name = name
+      IF (index(name, 'a_mt_') /= 1) RETURN
+      ! Prefer the new field globally, even when only some blocks contain it.
+      ! require_var must reject an incomplete/corrupt new field, not read stale data.
+      IF (.not. ncio_vector_exist(file, name, pixelset)) read_name = 'a_trc_'//name(6:)
+
+   END FUNCTION hacc_read_name
+
+   !-----------------------------------------------------------------------
    SUBROUTINE hacc_field2d (file, mode, name, var, pixelset, vecname)
 
    USE MOD_Namelist, only: DEF_REST_CompressLevel
@@ -998,6 +1124,7 @@ CONTAINS
    real(r8), allocatable, intent(inout) :: var (:,:)
    type(pixelset_type),   intent(in)    :: pixelset
 
+   character(len=:), allocatable :: read_name
    integer :: n(1)
    real(r8), allocatable :: empty (:,:)
 
@@ -1018,8 +1145,9 @@ CONTAINS
             deallocate (empty)
          ENDIF
       ELSE
-         CALL require_var (file, name, pixelset, vecname, 2, n(1), 0)
-         CALL ncio_read_vector (file, name, n(1), pixelset, var)
+         read_name = hacc_read_name (file, name, pixelset)
+         CALL require_var (file, read_name, pixelset, vecname, 2, n(1), 0)
+         CALL ncio_read_vector (file, read_name, n(1), pixelset, var)
       ENDIF
 
    END SUBROUTINE hacc_field2d
@@ -1037,6 +1165,7 @@ CONTAINS
    real(r8), allocatable, intent(inout) :: var (:,:,:)
    type(pixelset_type),   intent(in)    :: pixelset
 
+   character(len=:), allocatable :: read_name
    integer :: n(2)
    real(r8), allocatable :: empty (:,:,:)
 
@@ -1058,8 +1187,9 @@ CONTAINS
             deallocate (empty)
          ENDIF
       ELSE
-         CALL require_var (file, name, pixelset, vecname, 3, n(1), n(2))
-         CALL ncio_read_vector (file, name, n(1), n(2), pixelset, var)
+         read_name = hacc_read_name (file, name, pixelset)
+         CALL require_var (file, read_name, pixelset, vecname, 3, n(1), n(2))
+         CALL ncio_read_vector (file, read_name, n(1), n(2), pixelset, var)
       ENDIF
 
    END SUBROUTINE hacc_field3d

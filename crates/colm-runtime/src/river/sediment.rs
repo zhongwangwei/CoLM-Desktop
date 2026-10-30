@@ -650,6 +650,21 @@ impl BifWaterAcc {
     }
 }
 
+/// `sedhistsnap_*`：运行终点停在历史窗口中间时、`flush_sediment_history` 之前的原始行。
+///
+/// 续跑写在终点历史冲刷之后，没有这份快照就会把清零的行当窗口存进续跑。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SedimentHistory {
+    pub hist_acctime: f64,
+    pub a_sedcon: Vec<f64>,
+    pub a_sedout: Vec<f64>,
+    pub a_bedout: Vec<f64>,
+    pub a_sedinp: Vec<f64>,
+    pub a_netflw: Vec<f64>,
+    pub a_layer: Vec<f64>,
+    pub a_shearvel: Vec<f64>,
+}
+
 /// 泥沙状态、诊断与累加（`grid_sediment_init` 之后的模块量）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sediment {
@@ -694,6 +709,8 @@ pub struct Sediment {
     pub a_netflw: Vec<f64>,
     pub a_layer: Vec<f64>,
     pub a_shearvel: Vec<f64>,
+    /// 运行终点的历史原始行（`mt_sediment_snapshot_hist_acc`），写续跑时优先用它。
+    pub raw_history_at_end: Option<SedimentHistory>,
 }
 
 /// `assert_sediment_mass_balance`。
@@ -868,6 +885,7 @@ impl Sediment {
             a_netflw: zeros.clone(),
             a_layer: zeros,
             a_shearvel: vec![0.0; n],
+            raw_history_at_end: None,
             p,
         };
         sediment.cold_start(network);
@@ -2486,6 +2504,31 @@ impl Sediment {
         out
     }
 
+    /// `mt_sediment_snapshot_hist_acc`：留一份冲刷前的历史原始行（只在终点不满窗口时调）。
+    ///
+    /// 每次都重拍、不靠"已经有效就跳过"的缓存：上游旧实现的缓存会让重启后的下一个续跑继续
+    /// 写第一天的旧拷贝，而不是当前累加和。
+    pub fn snapshot_hist_at_end(&mut self) {
+        self.raw_history_at_end = Some(SedimentHistory {
+            hist_acctime: self.hist_acctime,
+            a_sedcon: self.a_sedcon.clone(),
+            a_sedout: self.a_sedout.clone(),
+            a_bedout: self.a_bedout.clone(),
+            a_sedinp: self.a_sedinp.clone(),
+            a_netflw: self.a_netflw.clone(),
+            a_layer: self.a_layer.clone(),
+            a_shearvel: self.a_shearvel.clone(),
+        });
+    }
+
+    /// `mt_sediment_drop_hist_window`：丢掉从续跑读回的历史窗口，从重启处重新开窗。
+    ///
+    /// 主机判出"重启点上的窗口已经完整"时调（`hist_acc_window_restored = .false.`）。
+    pub fn drop_hist_window(&mut self) {
+        self.flush_history();
+        self.raw_history_at_end = None;
+    }
+
     /// `flush_sediment_history`。
     pub fn flush_history(&mut self) {
         for values in [
@@ -2523,6 +2566,12 @@ impl Sediment {
         self.validate_checkpoint("write")?;
         let n = self.n();
         let (ns, nl) = (self.p.nsed, self.p.totlyrnum);
+        // 终点不满窗口时历史行已经被 `flush_sediment_history` 清零，续跑要写冲刷前的快照
+        // （上游 `sedhistsnap_valid` 支）；其他时候写当前累加行。
+        let history = self.raw_history_at_end.as_ref();
+        let history_row = |live: &[f64], pick: fn(&SedimentHistory) -> &[f64], s: usize| {
+            Self::row(history.map_or(live, pick), ns, s)
+        };
         let mut file =
             netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
         let mut vector = |name: &str, values: &[f64]| -> Result<()> {
@@ -2676,31 +2725,37 @@ impl Sediment {
         for s in 0..ns {
             vector(
                 &format!("a_sedcon_{}", s + 1),
-                &Self::row(&self.a_sedcon, ns, s),
+                &history_row(&self.a_sedcon, |history| &history.a_sedcon, s),
             )?;
             vector(
                 &format!("a_sedout_{}", s + 1),
-                &Self::row(&self.a_sedout, ns, s),
+                &history_row(&self.a_sedout, |history| &history.a_sedout, s),
             )?;
             vector(
                 &format!("a_bedout_{}", s + 1),
-                &Self::row(&self.a_bedout, ns, s),
+                &history_row(&self.a_bedout, |history| &history.a_bedout, s),
             )?;
             vector(
                 &format!("a_sedinp_{}", s + 1),
-                &Self::row(&self.a_sedinp, ns, s),
+                &history_row(&self.a_sedinp, |history| &history.a_sedinp, s),
             )?;
             vector(
                 &format!("a_netflw_{}", s + 1),
-                &Self::row(&self.a_netflw, ns, s),
+                &history_row(&self.a_netflw, |history| &history.a_netflw, s),
             )?;
             vector(
                 &format!("a_layer_{}", s + 1),
-                &Self::row(&self.a_layer, ns, s),
+                &history_row(&self.a_layer, |history| &history.a_layer, s),
             )?;
         }
-        vector("a_shearvel", &self.a_shearvel)?;
-        vector("sed_hist_acctime_vec", &scalar(self.hist_acctime))?;
+        vector(
+            "a_shearvel",
+            history.map_or(&self.a_shearvel, |history| &history.a_shearvel),
+        )?;
+        vector(
+            "sed_hist_acctime_vec",
+            &scalar(history.map_or(self.hist_acctime, |history| history.hist_acctime)),
+        )?;
         vector("sed_restart_complete_meta", &scalar(1.0))?;
         file.close()?;
         Ok(())
@@ -3038,6 +3093,8 @@ impl Sediment {
             .first()
             .copied()
             .unwrap_or(0.0);
+        // 读回的是"窗口累加行"本身；终点快照只用于写，读路径不能残留。
+        self.raw_history_at_end = None;
         self.validate_checkpoint("read")?;
         Ok(true)
     }

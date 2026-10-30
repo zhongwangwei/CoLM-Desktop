@@ -5,7 +5,7 @@
 //! 雨、雪示踪物分别交给土壤水与新雪过程。
 //!
 //! 收缩形状取自 `MOD_Tracer_Precip.F90` 的 GIMPLE：
-//! * `a_trc_precip = FMA(deltim, (forc_snow+forc_rain)*R, a)`；
+//! * `a_mt_precip = FMA(deltim, (forc_snow+forc_rain)*R, a)`；
 //! * `R_rain_input = FMA(max(forc_rain,0), R, sprinkler*ratio) / rain_total`；
 //! * 相变 `FNMA(R_pre, m, from)`、`FMA(R_pre, m, to)`；
 //! * `trc_mixed = FMA(R, intercepted, trc - trc_xsc)`、`trc_ldew = max(FNMA(R_mixed, drip, trc_mixed), 0)`；

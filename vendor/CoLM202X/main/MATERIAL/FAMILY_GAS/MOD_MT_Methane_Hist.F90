@@ -15,7 +15,7 @@ CONTAINS
       nl_soil, forcing_has_missing_value, forcmask_pch)
    USE MOD_MT_Hist, only: HistForm, write_history_variable_2d, write_history_variable_3d, &
       write_history_mt_ratio_2d
-   USE MOD_MT_Defs, only: tracer_lower
+   USE MOD_MT_Defs, only: material_lower
    USE MOD_HistGridded
    USE MOD_DataType
    USE MOD_LandPatch, only: numpatch
@@ -1132,12 +1132,12 @@ CONTAINS
 
    logical FUNCTION methane_history_selector_is_off (raw_selector)
 
-      USE MOD_MT_Defs, only: tracer_lower
+      USE MOD_MT_Defs, only: material_lower
       IMPLICIT NONE
       character(len=*), intent(in) :: raw_selector
       character(len=len(raw_selector)) :: selector
 
-      selector = tracer_lower(adjustl(trim(raw_selector)))
+      selector = material_lower(adjustl(trim(raw_selector)))
       SELECT CASE (trim(selector))
       CASE ('none', 'off', 'false', '.false.')
          methane_history_selector_is_off = .true.
@@ -1149,7 +1149,7 @@ CONTAINS
 
    logical FUNCTION methane_history_all_land_only (raw_selector)
 
-      USE MOD_MT_Defs, only: tracer_lower
+      USE MOD_MT_Defs, only: material_lower
       IMPLICIT NONE
       character(len=*), intent(in) :: raw_selector
       character(len=len(raw_selector)) :: list, token
@@ -1162,7 +1162,7 @@ CONTAINS
          n = n + 1
          list(n:n) = raw_selector(i:i)
       ENDDO
-      list = tracer_lower(list)
+      list = material_lower(list)
       methane_history_all_land_only = .false.
       IF (len_trim(list) == 0) RETURN
 

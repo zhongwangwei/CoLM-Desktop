@@ -2,12 +2,12 @@
 
 MODULE MOD_MT_Methane_BgcLink
 !=======================================================================
-! BGC coupling bridge for the methane reactive tracer.
+! BGC coupling bridge for the methane reactive material.
 !
 ! This is the single place where Methane reaches into BGC internals.
 ! CoLM202X stores the required carbon fluxes in pool/PFT-level arrays, so
 ! this bridge reconstructs patch-level inputs for Methane without moving
-! tracer-specific fields back into MOD_BGC_* modules.
+! material-specific fields back into MOD_BGC_* modules.
 !=======================================================================
 
    USE MOD_Precision

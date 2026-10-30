@@ -12,12 +12,12 @@ MODULE MOD_MT_Hist
 #ifdef SinglePoint
    USE MOD_HistSingle
 #endif
-   USE MOD_MT_Defs, only: nmts, tracers, mass_to_delta, mt_tiny, &
+   USE MOD_MT_Defs, only: nmts, materials, mass_to_delta, mt_tiny, &
       mt_delta_sanity_max, mt_flux_water_min_for_delta, mt_water_min_for_delta, &
       mt_water_min_for_ratio, &
-      tracer_uses_delta_diagnostics, mt_uses_generic_water, &
-      tracer_concentration_units, tracer_is_nonvolatile_solute, tracer_is_isotope, &
-      tracer_aquifer_actual_water, tracer_aquifer_actual_mass
+      material_uses_delta_diagnostics, mt_uses_generic_water, &
+      material_concentration_units, material_is_nonvolatile_solute, material_is_isotope, &
+      material_aquifer_actual_water, material_aquifer_actual_mass
    USE MOD_MT_Vars
 
    IMPLICIT NONE
@@ -55,7 +55,7 @@ CONTAINS
       real(r8), intent(in) :: wliq_soisno(snl+1:nl_soil)
       real(r8), intent(in) :: wice_soisno(snl+1:nl_soil)
       ! Post-step pool states paired with the existing canopy/soil/snow args.
-      ! These feed four additional per-pool tracer-ratio diagnostics in
+      ! These feed four additional per-pool material-ratio diagnostics in
       ! MOD_Hist (f_mt_conc_wa / wdsrf / wetwat / scv). Without them the
       ! aquifer, surface water, wetland and pre-layer thin-snow δ values are
       ! only observable in the restart file — which rarely matches the
@@ -63,7 +63,7 @@ CONTAINS
       real(r8), intent(in) :: wa, wdsrf, wetwat, scv
 
       integer :: imt, j, jsnow
-      real(r8) :: layer_water, layer_tracer, actual_aquifer_water, actual_aquifer_mass
+      real(r8) :: layer_water, layer_material, actual_aquifer_water, actual_aquifer_mass
 
       IF (nmts <= 0) RETURN
 
@@ -71,7 +71,7 @@ CONTAINS
       a_water_ldew(ipatch) = a_water_ldew(ipatch) + (ldew_rain + ldew_snow)
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
-         a_trc_ldew_mass(imt, ipatch) = a_trc_ldew_mass(imt, ipatch) &
+         a_mt_ldew_mass(imt, ipatch) = a_mt_ldew_mass(imt, ipatch) &
             + mt_ldew_rain(imt, ipatch) + mt_ldew_snow(imt, ipatch)
       ENDDO
 
@@ -81,12 +81,12 @@ CONTAINS
          a_water_soil(j, ipatch) = a_water_soil(j, ipatch) + layer_water
          DO imt = 1, nmts
             IF (.not. mt_uses_generic_water(imt)) CYCLE
-            layer_tracer = mt_wliq_soisno(imt, j, ipatch) + mt_wice_soisno(imt, j, ipatch)
-            IF (tracer_is_nonvolatile_solute(imt) .and. &
+            layer_material = mt_wliq_soisno(imt, j, ipatch) + mt_wice_soisno(imt, j, ipatch)
+            IF (material_is_nonvolatile_solute(imt) .and. &
                 layer_water <= mt_water_min_for_ratio) THEN
-               a_trc_layer_dry_mass(imt, ipatch) = a_trc_layer_dry_mass(imt, ipatch) + layer_tracer
+               a_mt_layer_dry_mass(imt, ipatch) = a_mt_layer_dry_mass(imt, ipatch) + layer_material
             ELSE
-               a_trc_soil_mass(imt, j, ipatch) = a_trc_soil_mass(imt, j, ipatch) + layer_tracer
+               a_mt_soil_mass(imt, j, ipatch) = a_mt_soil_mass(imt, j, ipatch) + layer_material
             ENDIF
          ENDDO
       ENDDO
@@ -103,14 +103,14 @@ CONTAINS
             DO imt = 1, nmts
                IF (.not. mt_uses_generic_water(imt)) CYCLE
                layer_water = wliq_soisno(j) + wice_soisno(j)
-               layer_tracer = mt_wliq_soisno(imt, j, ipatch) + mt_wice_soisno(imt, j, ipatch)
-               IF (tracer_is_nonvolatile_solute(imt) .and. &
+               layer_material = mt_wliq_soisno(imt, j, ipatch) + mt_wice_soisno(imt, j, ipatch)
+               IF (material_is_nonvolatile_solute(imt) .and. &
                    layer_water <= mt_water_min_for_ratio) THEN
-                  a_trc_layer_dry_mass(imt, ipatch) = &
-                     a_trc_layer_dry_mass(imt, ipatch) + layer_tracer
+                  a_mt_layer_dry_mass(imt, ipatch) = &
+                     a_mt_layer_dry_mass(imt, ipatch) + layer_material
                ELSE
-                  a_trc_snow_mass(imt, jsnow, ipatch) = &
-                     a_trc_snow_mass(imt, jsnow, ipatch) + layer_tracer
+                  a_mt_snow_mass(imt, jsnow, ipatch) = &
+                     a_mt_snow_mass(imt, jsnow, ipatch) + layer_material
                ENDIF
             ENDDO
          ENDDO
@@ -122,7 +122,7 @@ CONTAINS
             ! from concentration diagnostics to avoid tiny-denominator deltas.
             IF (wa > 1._r8) a_water_wa(ipatch) = a_water_wa(ipatch) + wa
             IF (wa < -1._r8) a_water_wa_debt(ipatch) = a_water_wa_debt(ipatch) - wa
-            actual_aquifer_water = tracer_aquifer_actual_water(wa, mt_aquifer_ref_water(ipatch))
+            actual_aquifer_water = material_aquifer_actual_water(wa, mt_aquifer_ref_water(ipatch))
             IF (mt_aquifer_ref_water(ipatch) > 0._r8 .and. &
                 actual_aquifer_water > mt_water_min_for_ratio) &
                a_water_aquifer_actual(ipatch) = a_water_aquifer_actual(ipatch) + actual_aquifer_water
@@ -132,49 +132,49 @@ CONTAINS
          a_water_wetwat(ipatch) = a_water_wetwat(ipatch) + wetwat
          ! CoLM's `scv` is total snow water equivalent even after layered
          ! snow exists, but `mt_scv` only mirrors the pre-layer thin-snow
-         ! pool. Once snl<0, tracer mass lives in mt_wliq/mt_wice snow
+         ! pool. Once snl<0, material mass lives in mt_wliq/mt_wice snow
          ! layers and is diagnosed via f_mt_conc_soisno_*; do not pair
-         ! that total scv water with the thin-snow tracer denominator.
+         ! that total scv water with the thin-snow material denominator.
          IF (snl == 0 .and. scv > mt_tiny) THEN
             a_water_scv(ipatch) = a_water_scv(ipatch) + scv
          ENDIF
          DO imt = 1, nmts
             IF (.not. mt_uses_generic_water(imt)) CYCLE
-            IF (tracer_is_isotope(imt) .and. mt_aquifer_ref_water(ipatch) > 0._r8 .and. &
+            IF (material_is_isotope(imt) .and. mt_aquifer_ref_water(ipatch) > 0._r8 .and. &
                 actual_aquifer_water > mt_water_min_for_ratio) THEN
-               actual_aquifer_mass = tracer_aquifer_actual_mass(mt_wa(imt, ipatch), &
+               actual_aquifer_mass = material_aquifer_actual_mass(mt_wa(imt, ipatch), &
                   mt_aquifer_ref_mass(imt, ipatch))
-               a_trc_aquifer_actual_mass(imt, ipatch) = &
-                  a_trc_aquifer_actual_mass(imt, ipatch) + actual_aquifer_mass
-               IF (wa < -1._r8) a_trc_wa_debt_mass(imt, ipatch) = &
-                  a_trc_wa_debt_mass(imt, ipatch) - wa * actual_aquifer_mass / actual_aquifer_water
+               a_mt_aquifer_actual_mass(imt, ipatch) = &
+                  a_mt_aquifer_actual_mass(imt, ipatch) + actual_aquifer_mass
+               IF (wa < -1._r8) a_mt_wa_debt_mass(imt, ipatch) = &
+                  a_mt_wa_debt_mass(imt, ipatch) - wa * actual_aquifer_mass / actual_aquifer_water
             ELSE
-            IF (tracer_is_isotope(imt) .and. wa > 1._r8) &
-               a_trc_aquifer_actual_mass(imt, ipatch) = &
-                  a_trc_aquifer_actual_mass(imt, ipatch) + mt_wa(imt, ipatch)
+            IF (material_is_isotope(imt) .and. wa > 1._r8) &
+               a_mt_aquifer_actual_mass(imt, ipatch) = &
+                  a_mt_aquifer_actual_mass(imt, ipatch) + mt_wa(imt, ipatch)
             IF (wa > 1._r8) THEN
-               a_trc_wa_mass(imt, ipatch) = a_trc_wa_mass(imt, ipatch) + mt_wa(imt, ipatch)
+               a_mt_wa_mass(imt, ipatch) = a_mt_wa_mass(imt, ipatch) + mt_wa(imt, ipatch)
             ENDIF
                IF (wa < -1._r8) THEN
-                  a_trc_wa_debt_mass(imt, ipatch) = a_trc_wa_debt_mass(imt, ipatch) &
+                  a_mt_wa_debt_mass(imt, ipatch) = a_mt_wa_debt_mass(imt, ipatch) &
                      + max(-mt_wa(imt, ipatch), 0._r8)
                ENDIF
             ENDIF
-            a_trc_wdsrf_mass (imt, ipatch) = a_trc_wdsrf_mass (imt, ipatch) + mt_wdsrf (imt, ipatch)
-         a_trc_wetwat_mass(imt, ipatch) = a_trc_wetwat_mass(imt, ipatch) + mt_wetwat(imt, ipatch)
-         a_trc_surface_residue_mass(imt, ipatch) = a_trc_surface_residue_mass(imt, ipatch) + &
+            a_mt_wdsrf_mass (imt, ipatch) = a_mt_wdsrf_mass (imt, ipatch) + mt_wdsrf (imt, ipatch)
+         a_mt_wetwat_mass(imt, ipatch) = a_mt_wetwat_mass(imt, ipatch) + mt_wetwat(imt, ipatch)
+         a_mt_surface_residue_mass(imt, ipatch) = a_mt_surface_residue_mass(imt, ipatch) + &
             mt_surface_residue(imt, ipatch)
-         a_trc_subsurface_residue_mass(imt, ipatch) = a_trc_subsurface_residue_mass(imt, ipatch) + &
+         a_mt_subsurface_residue_mass(imt, ipatch) = a_mt_subsurface_residue_mass(imt, ipatch) + &
             mt_subsurface_residue(imt, ipatch)
-         a_trc_solid_mass(imt, ipatch) = a_trc_solid_mass(imt, ipatch) + &
+         a_mt_solid_mass(imt, ipatch) = a_mt_solid_mass(imt, ipatch) + &
             mt_canopy_solid(imt, ipatch) + mt_surface_solid(imt, ipatch) + &
             mt_subsurface_solid(imt, ipatch) + mt_waterstorage_solid(imt, ipatch)
          DO j = max(snl + 1, lbound(mt_solid_soisno, 2)), nl_soil
-            a_trc_solid_mass(imt, ipatch) = a_trc_solid_mass(imt, ipatch) + &
+            a_mt_solid_mass(imt, ipatch) = a_mt_solid_mass(imt, ipatch) + &
                mt_solid_soisno(imt, j, ipatch)
          ENDDO
          IF (snl == 0 .and. scv > mt_tiny) THEN
-            a_trc_scv_mass(imt, ipatch) = a_trc_scv_mass(imt, ipatch) + mt_scv(imt, ipatch)
+            a_mt_scv_mass(imt, ipatch) = a_mt_scv_mass(imt, ipatch) + mt_scv(imt, ipatch)
          ENDIF
       ENDDO
    END SUBROUTINE mt_hist_accumulate
@@ -187,7 +187,7 @@ CONTAINS
    USE MOD_SPMD_Task, only: p_is_worker
    USE MOD_Vars_TimeInvariants, only: patchtype, patchmask
    USE MOD_Namelist, only: DEF_hist_vars
-   USE MOD_MT_Lifecycle, only: tracer_lifecycle_land_history
+   USE MOD_MT_Lifecycle, only: material_lifecycle_land_history
 
    IMPLICIT NONE
 
@@ -220,7 +220,7 @@ CONTAINS
             character(len=128) :: mt_longname
             character(len=32)  :: mt_ratio_word, mt_ratio_units
             real(r8) :: delta_loc, leaf_R_loc
-            integer :: itrc_loc, ip_loc, j_loc, jsnow_loc
+            integer :: imt_loc, ip_loc, j_loc, jsnow_loc
 #ifdef SinglePoint
             logical :: site_hist_writeback_saved
 #endif
@@ -264,7 +264,7 @@ CONTAINS
                   allocate (leaf_water_pat  (0))
                ENDIF
 
-               DO itrc_loc = 1, nmts
+               DO imt_loc = 1, nmts
                   IF (p_is_worker) THEN
                      IF (numpatch > 0) THEN
                         filter(:) = patchtype < 99
@@ -272,46 +272,46 @@ CONTAINS
                         filter = filter .and. patchmask
                      ENDIF
                   ENDIF
-                  IF (.not. mt_uses_generic_water(itrc_loc)) CYCLE
+                  IF (.not. mt_uses_generic_water(imt_loc)) CYCLE
                   ! The pool diagnostics below are named f_mt_conc_* for every
-                  ! tracer, but for isotopes they hold a heavy/total ratio, not
+                  ! material, but for isotopes they hold a heavy/total ratio, not
                   ! a concentration -- unlike the flux diagnostics, which split
                   ! into f_mt_delta_* and f_mt_conc_* by category. The names
                   ! are kept because renaming them would silently drop these
                   ! fields from every existing DEF_hist_vars list and break
                   ! analysis scripts, so long_name has to carry the distinction:
                   ! say what the ratio is OF, not just that it is one.
-                  IF (tracer_uses_delta_diagnostics(itrc_loc)) THEN
+                  IF (material_uses_delta_diagnostics(imt_loc)) THEN
                      mt_ratio_word  = 'heavy/total ratio'
                      mt_ratio_units = 'R'
                   ELSE
                      mt_ratio_word  = 'concentration'
-                     mt_ratio_units = tracer_concentration_units(itrc_loc)
+                     mt_ratio_units = material_concentration_units(imt_loc)
                   ENDIF
 
-                  IF (tracer_uses_delta_diagnostics(itrc_loc)) THEN
-                     write(mt_varname , '(A,A)') 'f_mt_delta_precip_', trim(tracers(itrc_loc)%name)
+                  IF (material_uses_delta_diagnostics(imt_loc)) THEN
+                     write(mt_varname , '(A,A)') 'f_mt_delta_precip_', trim(materials(imt_loc)%name)
                      ! a_water_precip also books dew/frost deposition (MOD_MT_Evapo,
                      ! MOD_MT_SoilWater), so say so in the name.
                      write(mt_longname, '(A,A,A)') 'precipitation plus dew/frost deposition material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_mt_delta_2d (DEF_hist_vars%xy_prc .or. DEF_hist_vars%xy_prl, &
-                        a_trc_precip(itrc_loc, :), a_water_precip(itrc_loc, :), &
-                        tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                        a_mt_precip(imt_loc, :), a_water_precip(imt_loc, :), &
+                        materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                         itime_in_file, filter, trim(mt_longname), 'permil', &
                         water_min_override = mt_flux_water_min_for_delta)
 
-                     write(mt_varname , '(A,A)') 'f_mt_delta_runoff_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)') 'f_mt_delta_runoff_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'total runoff material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_mt_delta_2d (DEF_hist_vars%rnof, &
-                        a_trc_rnof(itrc_loc, :), a_water_rnof(itrc_loc, :), &
-                        tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                        a_mt_rnof(imt_loc, :), a_water_rnof(imt_loc, :), &
+                        materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                         itime_in_file, filter, trim(mt_longname), 'permil', &
                         water_min_override = mt_flux_water_min_for_delta)
 
                      ! --- Evapotranspiration flux delta ---
-                     ! Pair a_trc_evap with gross evaporative water so the
+                     ! Pair a_mt_evap with gross evaporative water so the
                      ! denominator never goes near zero from dew/frost
                      ! cancellation (a_fevpa is the net flux; not valid as a
                      ! delta denominator). write_history_mt_delta_2d
@@ -319,77 +319,77 @@ CONTAINS
                      ! once at the end -- preserving the
                      ! mass_to_delta(sum(mass), sum(water)) invariant
                      ! documented in MOD_MT_Defs.F90.
-                     write(mt_varname , '(A,A)')   'f_mt_delta_evap_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_evap_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'evapotranspiration material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%fevpa, &
-                           a_trc_evap(itrc_loc, :), a_water_evap_gross(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_evap(imt_loc, :), a_water_evap_gross(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
-                     write(mt_varname , '(A,A)')   'f_mt_evap_mass_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_evap_mass_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'signed evapotranspiration material mass (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%fevpa, &
-                        a_trc_evap(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_evap(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
 
-                     write(mt_varname , '(A,A)')   'f_mt_delta_soilevap_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_soilevap_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'soil/surface evaporation material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%fevpa, &
-                           a_trc_soilevap(itrc_loc, :), a_water_soilevap(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_soilevap(imt_loc, :), a_water_soilevap(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
-                     write(mt_varname , '(A,A)')   'f_mt_delta_canopyevap_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_canopyevap_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'canopy evaporation material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%fevpa, &
-                           a_trc_canopyevap(itrc_loc, :), a_water_canopyevap(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_canopyevap(imt_loc, :), a_water_canopyevap(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
-                     write(mt_varname , '(A,A)')   'f_mt_delta_subl_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_subl_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'sublimation material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%fevpa, &
-                           a_trc_subl(itrc_loc, :), a_water_subl(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_subl(imt_loc, :), a_water_subl(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
-                     write(mt_varname , '(A,A)')   'f_mt_delta_wetland_evap_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_wetland_evap_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'wetland evaporation/sublimation material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%fevpa, &
-                           a_trc_wetland_evap(itrc_loc, :), a_water_wetland_evap(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_wetland_evap(imt_loc, :), a_water_wetland_evap(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
                      ! --- Transpiration-only flux delta ---
                      ! write_history_mt_delta_2d does sum-then-divide on
                      ! the grid; no per-patch delta needed here.
-                     write(mt_varname , '(A,A)')   'f_mt_delta_transp_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_transp_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'transpiration material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%etr, &
-                           a_trc_transp(itrc_loc, :), a_water_transp(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_transp(imt_loc, :), a_water_transp(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
                      ! --- Transpiration source/xylem delta before NSS storage exchange ---
-                     write(mt_varname , '(A,A)')   'f_mt_delta_transp_src_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_delta_transp_src_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'transpiration source/xylem material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                         CALL write_history_mt_delta_2d (DEF_hist_vars%etr, &
-                           a_trc_transp_src(itrc_loc, :), a_water_transp(itrc_loc, :), &
-                           tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                           a_mt_transp_src(imt_loc, :), a_water_transp(imt_loc, :), &
+                           materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                            itime_in_file, filter, trim(mt_longname), 'permil', &
                            water_min_override = mt_flux_water_min_for_delta)
 
@@ -403,7 +403,7 @@ CONTAINS
                   ! pool delta.
                   IF (p_is_worker) THEN
                      DO ip_loc = 1, numpatch
-                        delta_loc = mt_leaf_delta_e(itrc_loc, ip_loc)
+                        delta_loc = mt_leaf_delta_e(imt_loc, ip_loc)
                         IF (delta_loc /= spval .and. &
                             abs(delta_loc) <= mt_delta_sanity_max) THEN
                            mt_delta_flux(ip_loc) = delta_loc
@@ -412,9 +412,9 @@ CONTAINS
                         ENDIF
                      ENDDO
                   ENDIF
-                  write(mt_varname , '(A,A)')   'f_mt_leaf_delta_e_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_leaf_delta_e_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(A,A,A)') 'leaf evaporation-site NSS delta, area-weighted state (', &
-                     trim(tracers(itrc_loc)%name), ')'
+                     trim(materials(imt_loc)%name), ')'
                   CALL write_history_variable_2d (DEF_hist_vars%etr, &
                      mt_delta_flux, file_hist, trim(mt_varname), itime_in_file, &
                      sumarea, filter, trim(mt_longname), 'permil', acc_num = ones_arr)
@@ -432,57 +432,57 @@ CONTAINS
                   ! water > mt_water_min_for_delta drops them.
                   IF (p_is_worker) THEN
                      DO ip_loc = 1, numpatch
-                        delta_loc = mt_leaf_delta_b(itrc_loc, ip_loc)
+                        delta_loc = mt_leaf_delta_b(imt_loc, ip_loc)
                         IF (delta_loc /= spval .and. &
                             abs(delta_loc) <= mt_delta_sanity_max .and. &
-                            mt_leaf_water_moles(itrc_loc, ip_loc) > 0._r8) THEN
+                            mt_leaf_water_moles(imt_loc, ip_loc) > 0._r8) THEN
                            leaf_R_loc = (1._r8 + delta_loc * 1.0e-3_r8) * &
-                                        tracers(itrc_loc)%ref_ratio
+                                        materials(imt_loc)%ref_ratio
                            leaf_mass_pat (ip_loc) = leaf_R_loc * &
-                                                    mt_leaf_water_moles(itrc_loc, ip_loc)
-                           leaf_water_pat(ip_loc) = mt_leaf_water_moles(itrc_loc, ip_loc)
+                                                    mt_leaf_water_moles(imt_loc, ip_loc)
+                           leaf_water_pat(ip_loc) = mt_leaf_water_moles(imt_loc, ip_loc)
                         ELSE
                            leaf_mass_pat (ip_loc) = spval
                            leaf_water_pat(ip_loc) = 0._r8
                         ENDIF
                      ENDDO
                   ENDIF
-                  write(mt_varname , '(A,A)')   'f_mt_leaf_delta_b_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_leaf_delta_b_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(A,A,A)') 'bulk leaf-water NSS delta, leaf-water-mole weighted (', &
-                     trim(tracers(itrc_loc)%name), ')'
+                     trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_delta_2d (DEF_hist_vars%etr, &
                      leaf_mass_pat, leaf_water_pat, &
-                     tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                     materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                      itime_in_file, filter, trim(mt_longname), 'permil')
                   ENDIF
 
-                  ! Species-owned tracers (for example CH4) were filtered by
+                  ! Species-owned materials (for example CH4) were filtered by
                   ! mt_uses_generic_water above and write history
                   ! through callbacks. Solutes, decaying or not, keep these
                   ! water-pool diagnostics.
-                  IF (.not. tracer_uses_delta_diagnostics(itrc_loc)) THEN
-                     write(mt_varname , '(A,A)') 'f_mt_conc_precip_', trim(tracers(itrc_loc)%name)
+                  IF (.not. material_uses_delta_diagnostics(imt_loc)) THEN
+                     write(mt_varname , '(A,A)') 'f_mt_conc_precip_', trim(materials(imt_loc)%name)
                      ! a_water_precip also books dew/frost deposition, which carries no
                      ! nonvolatile solute: dew-only periods read 0, not missing.
-                     IF (tracer_is_nonvolatile_solute(itrc_loc)) THEN
+                     IF (material_is_nonvolatile_solute(imt_loc)) THEN
                         write(mt_longname, '(A,A,A)') &
                            'precipitation plus dew/frost deposition material concentration, dew/frost adding water only (', &
-                           trim(tracers(itrc_loc)%name), ')'
+                           trim(materials(imt_loc)%name), ')'
                      ELSE
                         write(mt_longname, '(A,A,A)') &
                            'precipitation plus dew/frost deposition material concentration (', &
-                           trim(tracers(itrc_loc)%name), ')'
+                           trim(materials(imt_loc)%name), ')'
                      ENDIF
                      CALL write_history_mt_ratio_2d (DEF_hist_vars%xy_prc .or. DEF_hist_vars%xy_prl, &
-                        a_trc_precip(itrc_loc, :), a_water_precip(itrc_loc, :), &
+                        a_mt_precip(imt_loc, :), a_water_precip(imt_loc, :), &
                         file_hist, trim(mt_varname), itime_in_file, filter, &
                         trim(mt_longname), trim(mt_ratio_units))
 
-                     write(mt_varname , '(A,A)') 'f_mt_conc_runoff_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)') 'f_mt_conc_runoff_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'total runoff material concentration (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_mt_ratio_2d (DEF_hist_vars%rnof, &
-                        a_trc_rnof(itrc_loc, :), a_water_rnof(itrc_loc, :), &
+                        a_mt_rnof(imt_loc, :), a_water_rnof(imt_loc, :), &
                         file_hist, trim(mt_varname), itime_in_file, filter, &
                         trim(mt_longname), trim(mt_ratio_units))
                   ENDIF
@@ -490,68 +490,68 @@ CONTAINS
                   ! Two-way equilibrium exchange with atmospheric vapour.
                   ! Written as a MASS, not a delta: it carries no water
                   ! flux by construction (zero net water, non-zero net
-                  ! tracer), so there is nothing to normalise a delta by.
+                  ! material), so there is nothing to normalise a delta by.
                   ! Signed -- positive means net uptake by the surface.
-                  IF (tracer_uses_delta_diagnostics(itrc_loc) .and. &
-                      allocated(a_trc_vapor_exchange)) THEN
+                  IF (material_uses_delta_diagnostics(imt_loc) .and. &
+                      allocated(a_mt_vapor_exchange)) THEN
                      write(mt_varname , '(A,A)') 'f_mt_vapor_exchange_', &
-                        trim(tracers(itrc_loc)%name)
+                        trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') &
                         'zero-water-flux equilibrium vapour exchange, signed (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%fevpa, &
-                        a_trc_vapor_exchange(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_vapor_exchange(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
                   ENDIF
 
-                  ! Waterless residue is an areal tracer inventory, not a
+                  ! Waterless residue is an areal material inventory, not a
                   ! concentration. Tie its output to the existing surface-water
                   ! history switch until history namelist gains a dedicated key.
-                  IF (tracer_is_nonvolatile_solute(itrc_loc)) THEN
-                     write(mt_varname , '(A,A)') 'f_mt_surface_residue_', trim(tracers(itrc_loc)%name)
+                  IF (material_is_nonvolatile_solute(imt_loc)) THEN
+                     write(mt_varname , '(A,A)') 'f_mt_surface_residue_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'immobile surface material residue (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%wdsrf, &
-                        a_trc_surface_residue_mass(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_surface_residue_mass(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
 
-                     write(mt_varname , '(A,A)') 'f_mt_subsurface_residue_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)') 'f_mt_subsurface_residue_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'immobile subsurface material residue (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%wa, &
-                        a_trc_subsurface_residue_mass(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_subsurface_residue_mass(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
 
-                     write(mt_varname , '(A,A)') 'f_mt_layer_dry_inventory_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)') 'f_mt_layer_dry_inventory_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'dry snow/soil layer material inventory (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%wliq_soisno, &
-                        a_trc_layer_dry_mass(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_layer_dry_mass(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
 
-                     write(mt_varname , '(A,A)') 'f_mt_solid_inventory_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)') 'f_mt_solid_inventory_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'precipitated solid material inventory (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_variable_2d (DEF_hist_vars%wliq_soisno, &
-                        a_trc_solid_mass(itrc_loc, :), file_hist, trim(mt_varname), &
+                        a_mt_solid_mass(imt_loc, :), file_hist, trim(mt_varname), &
                         itime_in_file, sumarea, filter, trim(mt_longname), 'material amount/m2')
                   ENDIF
 
                   ! --- Canopy ratio ---
-                  write(mt_varname , '(A,A)')   'f_mt_conc_ldew_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_ldew_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'canopy material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_ratio_2d (DEF_hist_vars%ldew, &
-                     a_trc_ldew_mass(itrc_loc, :), a_water_ldew, &
+                     a_mt_ldew_mass(imt_loc, :), a_water_ldew, &
                      file_hist, trim(mt_varname), itime_in_file, &
                      filter, trim(mt_longname), trim(mt_ratio_units))
 
                   ! --- Soil + snow combined ratio ---
                   ! Snow accumulator is keyed by jsnow = j - maxsnl (positive);
-                  ! soil accumulator is keyed by j (1..nl_soil). Map tracer
+                  ! soil accumulator is keyed by j (1..nl_soil). Map material
                   ! mass and water separately, then divide on the history grid.
                   ! This avoids area-fraction dilution when a grid cell has
-                  ! multiple patch fractions with different tracer signatures.
+                  ! multiple patch fractions with different material signatures.
                   IF (p_is_worker) THEN
                      mt_mass_soisno = spval
                      water_soisno    = spval
@@ -560,104 +560,104 @@ CONTAINS
                            jsnow_loc = j_loc - maxsnl
                            IF (a_water_snow(jsnow_loc, ip_loc) > mt_tiny) THEN
                               mt_mass_soisno(j_loc, ip_loc) = &
-                                 a_trc_snow_mass(itrc_loc, jsnow_loc, ip_loc)
+                                 a_mt_snow_mass(imt_loc, jsnow_loc, ip_loc)
                               water_soisno(j_loc, ip_loc) = a_water_snow(jsnow_loc, ip_loc)
                            ENDIF
                         ENDDO
                         DO j_loc = 1, nl_soil
                            IF (a_water_soil(j_loc, ip_loc) > mt_tiny) THEN
                               mt_mass_soisno(j_loc, ip_loc) = &
-                                 a_trc_soil_mass(itrc_loc, j_loc, ip_loc)
+                                 a_mt_soil_mass(imt_loc, j_loc, ip_loc)
                               water_soisno(j_loc, ip_loc) = a_water_soil(j_loc, ip_loc)
                            ENDIF
                         ENDDO
                      ENDDO
                   ENDIF
-                  write(mt_varname , '(A,A)')   'f_mt_conc_soisno_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_soisno_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'soil/snow layer material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_ratio_3d (DEF_hist_vars%wliq_soisno, &
                      mt_mass_soisno, water_soisno, file_hist, trim(mt_varname), itime_in_file, &
                      'soilsnow', maxsnl+1, nl_soil-maxsnl, filter, &
                      trim(mt_longname), trim(mt_ratio_units))
 
                   ! --- Total snowpack ratio/delta ---
-                  ! CoLM's water-side scv is total SWE, while tracer_scv is
+                  ! CoLM's water-side scv is total SWE, while material_scv is
                   ! only the pre-layer thin-snow pool. Build a formal snowpack
-                  ! diagnostic from the same pieces that own tracer mass:
+                  ! diagnostic from the same pieces that own material mass:
                   ! layered snow accumulators plus thin-snow scv accumulators.
                   ! This keeps f_mt_conc_scv_* as a thin-snow diagnostic and
-                  ! prevents the old thin-tracer / total-SWE denominator mix.
+                  ! prevents the old thin-material / total-SWE denominator mix.
                   IF (p_is_worker) THEN
-                     snowpack_mass_pat(:)  = a_trc_scv_mass(itrc_loc, :)
+                     snowpack_mass_pat(:)  = a_mt_scv_mass(imt_loc, :)
                      snowpack_water_pat(:) = a_water_scv(:)
                      DO ip_loc = 1, numpatch
                         DO jsnow_loc = 1, abs(maxsnl)
                            snowpack_mass_pat(ip_loc) = snowpack_mass_pat(ip_loc) &
-                              + a_trc_snow_mass(itrc_loc, jsnow_loc, ip_loc)
+                              + a_mt_snow_mass(imt_loc, jsnow_loc, ip_loc)
                            snowpack_water_pat(ip_loc) = snowpack_water_pat(ip_loc) &
                               + a_water_snow(jsnow_loc, ip_loc)
                         ENDDO
                      ENDDO
                   ENDIF
 
-                  write(mt_varname , '(A,A)')   'f_mt_conc_snowpack_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_snowpack_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'total snowpack material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_ratio_2d (DEF_hist_vars%scv, &
                      snowpack_mass_pat, snowpack_water_pat, &
                      file_hist, trim(mt_varname), itime_in_file, &
                      filter, trim(mt_longname), trim(mt_ratio_units))
 
-                  IF (tracer_uses_delta_diagnostics(itrc_loc)) THEN
-                     write(mt_varname , '(A,A)')   'f_mt_delta_snowpack_', trim(tracers(itrc_loc)%name)
+                  IF (material_uses_delta_diagnostics(imt_loc)) THEN
+                     write(mt_varname , '(A,A)')   'f_mt_delta_snowpack_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(A,A,A)') 'total snowpack material delta (', &
-                        trim(tracers(itrc_loc)%name), ')'
+                        trim(materials(imt_loc)%name), ')'
                      CALL write_history_mt_delta_2d (DEF_hist_vars%scv, &
                         snowpack_mass_pat, snowpack_water_pat, &
-                        tracers(itrc_loc)%ref_ratio, file_hist, trim(mt_varname), &
+                        materials(imt_loc)%ref_ratio, file_hist, trim(mt_varname), &
                         itime_in_file, filter, trim(mt_longname), 'permil')
                   ENDIF
 
                   ! --- Aquifer (wa) ratio ---
                   ! wa can be negative during wetland aquifer-debt episodes;
                   ! the mt_wetland redistribution keeps signed arithmetic.
-                  write(mt_varname , '(A,A)')   'f_mt_conc_wa_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_wa_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'aquifer material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
-                     IF (tracer_is_isotope(itrc_loc)) THEN
+                     ' (', trim(materials(imt_loc)%name), ')'
+                     IF (material_is_isotope(imt_loc)) THEN
                         CALL write_history_mt_ratio_2d (DEF_hist_vars%wa, &
-                           a_trc_aquifer_actual_mass(itrc_loc, :), a_water_aquifer_actual, &
+                           a_mt_aquifer_actual_mass(imt_loc, :), a_water_aquifer_actual, &
                            file_hist, trim(mt_varname), itime_in_file, &
                            filter, trim(mt_longname), trim(mt_ratio_units))
                      ELSE
                         CALL write_history_mt_ratio_2d (DEF_hist_vars%wa, &
-                           a_trc_wa_mass(itrc_loc, :), a_water_wa, &
+                           a_mt_wa_mass(imt_loc, :), a_water_wa, &
                            file_hist, trim(mt_varname), itime_in_file, &
                            filter, trim(mt_longname), trim(mt_ratio_units))
                      ENDIF
 
-                     write(mt_varname , '(A,A)')   'f_mt_conc_wa_debt_', trim(tracers(itrc_loc)%name)
+                     write(mt_varname , '(A,A)')   'f_mt_conc_wa_debt_', trim(materials(imt_loc)%name)
                      write(mt_longname, '(5A)') 'aquifer debt material ', trim(mt_ratio_word), &
-                        ' (', trim(tracers(itrc_loc)%name), ')'
+                        ' (', trim(materials(imt_loc)%name), ')'
                      CALL write_history_mt_ratio_2d (DEF_hist_vars%wa, &
-                        a_trc_wa_debt_mass(itrc_loc, :), a_water_wa_debt, &
+                        a_mt_wa_debt_mass(imt_loc, :), a_water_wa_debt, &
                         file_hist, trim(mt_varname), itime_in_file, &
                         filter, trim(mt_longname), trim(mt_ratio_units))
 
                   ! --- Surface water (wdsrf) ratio ---
-                  write(mt_varname , '(A,A)')   'f_mt_conc_wdsrf_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_wdsrf_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'surface water material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_ratio_2d (DEF_hist_vars%wdsrf, &
-                     a_trc_wdsrf_mass(itrc_loc, :), a_water_wdsrf, &
+                     a_mt_wdsrf_mass(imt_loc, :), a_water_wdsrf, &
                      file_hist, trim(mt_varname), itime_in_file, &
                      filter, trim(mt_longname), trim(mt_ratio_units))
 
                   ! --- Wetland pool (wetwat) ratio ---
-                  write(mt_varname , '(A,A)')   'f_mt_conc_wetwat_', trim(tracers(itrc_loc)%name)
+                  write(mt_varname , '(A,A)')   'f_mt_conc_wetwat_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'wetland pool material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   IF (p_is_worker) THEN
                      IF (numpatch > 0) THEN
                         filter(:) = patchtype == 2
@@ -668,7 +668,7 @@ CONTAINS
                      ENDIF
                   ENDIF
                   CALL write_history_mt_ratio_2d (DEF_hist_vars%wetwat, &
-                     a_trc_wetwat_mass(itrc_loc, :), a_water_wetwat, &
+                     a_mt_wetwat_mass(imt_loc, :), a_water_wetwat, &
                      file_hist, trim(mt_varname), itime_in_file, &
                      filter, trim(mt_longname), trim(mt_ratio_units))
 
@@ -683,15 +683,15 @@ CONTAINS
                   ! --- Pre-layer thin snow (scv) ratio ---
                   ! Only meaningful when snl==0 (accumulated snow below
                   ! layer-creation threshold). CoLM's water-side scv remains
-                  ! total SWE after layered snow exists, but tracer mass then
+                  ! total SWE after layered snow exists, but material mass then
                   ! lives in mt_wliq/mt_wice snow layers; the accumulator
                   ! therefore filters out snl<0 states so this ratio cannot
-                  ! divide thin-snow tracer by total layered-snow SWE.
-                  write(mt_varname , '(A,A)')   'f_mt_conc_scv_', trim(tracers(itrc_loc)%name)
+                  ! divide thin-snow material by total layered-snow SWE.
+                  write(mt_varname , '(A,A)')   'f_mt_conc_scv_', trim(materials(imt_loc)%name)
                   write(mt_longname, '(5A)') 'thin-snow (scv) material ', trim(mt_ratio_word), &
-                     ' (', trim(tracers(itrc_loc)%name), ')'
+                     ' (', trim(materials(imt_loc)%name), ')'
                   CALL write_history_mt_ratio_2d (DEF_hist_vars%scv, &
-                     a_trc_scv_mass(itrc_loc, :), a_water_scv, &
+                     a_mt_scv_mass(imt_loc, :), a_water_scv, &
                      file_hist, trim(mt_varname), itime_in_file, &
                      filter, trim(mt_longname), trim(mt_ratio_units))
 
@@ -702,7 +702,7 @@ CONTAINS
                            leaf_mass_pat, leaf_water_pat)
             ENDIF
 
-      CALL tracer_lifecycle_land_history (file_hist, itime_in_file, sumarea, filter, &
+      CALL material_lifecycle_land_history (file_hist, itime_in_file, sumarea, filter, &
          nl_soil, forcing_has_missing_value, forcmask_pch)
 
 #ifdef SinglePoint
@@ -720,7 +720,7 @@ CONTAINS
    ! NEC January IsoGSM run gave f_mt_conc_wdsrf = 0 (delta -1000) where
    ! the accumulated surface water was 1e-17..1e-14 mm.
    SUBROUTINE write_history_mt_ratio_2d ( is_hist, &
-         tracer_mass_acc, water_acc, file_hist, varname, itime_in_file, &
+         material_mass_acc, water_acc, file_hist, varname, itime_in_file, &
          filter, longname, units)
 
    USE MOD_Block
@@ -730,7 +730,7 @@ CONTAINS
    IMPLICIT NONE
 
    logical, intent(in) :: is_hist
-   real(r8), intent(in) :: tracer_mass_acc(:)
+   real(r8), intent(in) :: material_mass_acc(:)
    real(r8), intent(in) :: water_acc(:)
    character(len=*), intent(in) :: file_hist
    character(len=*), intent(in) :: varname
@@ -739,10 +739,10 @@ CONTAINS
    character(len=*), intent(in) :: longname
    character(len=*), intent(in) :: units
 
-   real(r8), allocatable :: tracer_map_vec(:)
+   real(r8), allocatable :: material_map_vec(:)
    real(r8), allocatable :: water_map_vec(:)
    real(r8), allocatable :: ratio_vec(:)
-   type(block_data_real8_2d) :: tracer_xy_2d
+   type(block_data_real8_2d) :: material_xy_2d
    type(block_data_real8_2d) :: water_xy_2d
    type(block_data_real8_2d) :: ratio_xy_2d
    integer :: ip, iblkme, xblk, yblk, xloc, yloc
@@ -754,8 +754,8 @@ CONTAINS
          allocate(ratio_vec(size(water_acc)))
          ratio_vec = spval
          DO ip = 1, size(water_acc)
-            IF (abs(water_acc(ip)) > mt_water_min_for_delta .and. tracer_mass_acc(ip) /= spval) THEN
-               ratio_vec(ip) = tracer_mass_acc(ip) / water_acc(ip)
+            IF (abs(water_acc(ip)) > mt_water_min_for_delta .and. material_mass_acc(ip) /= spval) THEN
+               ratio_vec(ip) = material_mass_acc(ip) / water_acc(ip)
             ENDIF
          ENDDO
          CALL single_write_2d (ratio_vec, file_hist, varname, itime_in_file, &
@@ -766,34 +766,34 @@ CONTAINS
 #endif
 #ifdef UNSTRUCTURED
       IF (HistForm == 'Vector') THEN
-         CALL write_history_mt_ratio_vector_2d (tracer_mass_acc, water_acc, &
+         CALL write_history_mt_ratio_vector_2d (material_mass_acc, water_acc, &
             file_hist, varname, itime_in_file, filter, longname, units)
          RETURN
       ENDIF
 #endif
       IF (HistForm /= 'Gridded') RETURN
 
-      allocate(tracer_map_vec(size(tracer_mass_acc)))
+      allocate(material_map_vec(size(material_mass_acc)))
       allocate(water_map_vec(size(water_acc)))
-      tracer_map_vec = 0._r8
+      material_map_vec = 0._r8
       water_map_vec = 0._r8
 
       IF (p_is_worker) THEN
          DO ip = 1, size(water_acc)
-            IF (abs(water_acc(ip)) > mt_water_min_for_delta .and. tracer_mass_acc(ip) /= spval) THEN
-               tracer_map_vec(ip) = tracer_mass_acc(ip)
+            IF (abs(water_acc(ip)) > mt_water_min_for_delta .and. material_mass_acc(ip) /= spval) THEN
+               material_map_vec(ip) = material_mass_acc(ip)
                water_map_vec(ip) = water_acc(ip)
             ENDIF
          ENDDO
       ENDIF
 
       IF (p_is_io) THEN
-         CALL allocate_block_data (ghist, tracer_xy_2d)
+         CALL allocate_block_data (ghist, material_xy_2d)
          CALL allocate_block_data (ghist, water_xy_2d)
          CALL allocate_block_data (ghist, ratio_xy_2d)
       ENDIF
 
-      CALL mp2g_hist%pset2grid (tracer_map_vec, tracer_xy_2d, spv = spval, msk = filter)
+      CALL mp2g_hist%pset2grid (material_map_vec, material_xy_2d, spv = spval, msk = filter)
       CALL mp2g_hist%pset2grid (water_map_vec, water_xy_2d, spv = spval, msk = filter)
 
       IF (p_is_io) THEN
@@ -804,10 +804,10 @@ CONTAINS
             DO yloc = 1, ghist%ycnt(yblk)
                DO xloc = 1, ghist%xcnt(xblk)
                   IF (water_xy_2d%blk(xblk,yblk)%val(xloc,yloc) /= spval .and. &
-                      tracer_xy_2d%blk(xblk,yblk)%val(xloc,yloc) /= spval .and. &
+                      material_xy_2d%blk(xblk,yblk)%val(xloc,yloc) /= spval .and. &
                       abs(water_xy_2d%blk(xblk,yblk)%val(xloc,yloc)) > mt_tiny) THEN
                      ratio_xy_2d%blk(xblk,yblk)%val(xloc,yloc) = &
-                        tracer_xy_2d%blk(xblk,yblk)%val(xloc,yloc) &
+                        material_xy_2d%blk(xblk,yblk)%val(xloc,yloc) &
                         / water_xy_2d%blk(xblk,yblk)%val(xloc,yloc)
                   ELSE
                      ratio_xy_2d%blk(xblk,yblk)%val(xloc,yloc) = spval
@@ -821,14 +821,14 @@ CONTAINS
       CALL hist_write_var_real8_2d (file_hist, varname, ghist, itime_in_file, &
          ratio_xy_2d, compress, longname, units)
 
-      deallocate(tracer_map_vec)
+      deallocate(material_map_vec)
       deallocate(water_map_vec)
 
    END SUBROUTINE write_history_mt_ratio_2d
 
 
    SUBROUTINE write_history_mt_ratio_3d ( is_hist, &
-         tracer_mass_acc, water_acc, file_hist, varname, itime_in_file, &
+         material_mass_acc, water_acc, file_hist, varname, itime_in_file, &
          dim1name, lb1, ndim1, filter, longname, units)
 
    USE MOD_Block
@@ -839,7 +839,7 @@ CONTAINS
    IMPLICIT NONE
 
    logical, intent(in) :: is_hist
-   real(r8), intent(in) :: tracer_mass_acc(:,:)
+   real(r8), intent(in) :: material_mass_acc(:,:)
    real(r8), intent(in) :: water_acc(:,:)
    character(len=*), intent(in) :: file_hist
    character(len=*), intent(in) :: varname
@@ -850,9 +850,9 @@ CONTAINS
    character(len=*), intent(in) :: longname
    character(len=*), intent(in) :: units
 
-   real(r8), allocatable :: tracer_map_vec(:,:)
+   real(r8), allocatable :: material_map_vec(:,:)
    real(r8), allocatable :: water_map_vec(:,:)
-   type(block_data_real8_3d) :: tracer_xy_3d
+   type(block_data_real8_3d) :: material_xy_3d
    type(block_data_real8_3d) :: water_xy_3d
    type(block_data_real8_3d) :: ratio_xy_3d
    integer :: ip, i1, iblkme, xblk, yblk, xloc, yloc
@@ -863,17 +863,17 @@ CONTAINS
       IF (.not. is_hist) RETURN
 #ifdef SinglePoint
       IF (HistForm == 'Single') THEN
-         lb_vec = lbound(tracer_mass_acc, 1)
-         ub_vec = ubound(tracer_mass_acc, 1)
+         lb_vec = lbound(material_mass_acc, 1)
+         ub_vec = ubound(material_mass_acc, 1)
          allocate(ratio_vec(lb_vec:ub_vec, size(water_acc, 2)))
          ratio_vec = spval
          DO ip = 1, size(water_acc, 2)
             DO i1 = lb_vec, ub_vec
-               IF (abs(water_acc(i1, ip)) > mt_water_min_for_delta .and. tracer_mass_acc(i1, ip) /= spval) THEN
+               IF (abs(water_acc(i1, ip)) > mt_water_min_for_delta .and. material_mass_acc(i1, ip) /= spval) THEN
                   ! single_write_3d divides by nac internally like ordinary
                   ! accumulated variables. Ratio is already a final diagnostic,
                   ! so pre-scale here to leave the written value unchanged.
-                  ratio_vec(i1, ip) = tracer_mass_acc(i1, ip) / water_acc(i1, ip) * real(nac, r8)
+                  ratio_vec(i1, ip) = material_mass_acc(i1, ip) / water_acc(i1, ip) * real(nac, r8)
                ENDIF
             ENDDO
          ENDDO
@@ -885,7 +885,7 @@ CONTAINS
 #endif
 #ifdef UNSTRUCTURED
       IF (HistForm == 'Vector') THEN
-         CALL write_history_mt_ratio_vector_3d (tracer_mass_acc, water_acc, &
+         CALL write_history_mt_ratio_vector_3d (material_mass_acc, water_acc, &
             file_hist, varname, itime_in_file, dim1name, lb1, ndim1, filter, &
             longname, units)
          RETURN
@@ -893,18 +893,18 @@ CONTAINS
 #endif
       IF (HistForm /= 'Gridded') RETURN
 
-      lb_vec = lbound(tracer_mass_acc, 1)
-      ub_vec = ubound(tracer_mass_acc, 1)
-      allocate(tracer_map_vec(lb_vec:ub_vec, size(tracer_mass_acc, 2)))
+      lb_vec = lbound(material_mass_acc, 1)
+      ub_vec = ubound(material_mass_acc, 1)
+      allocate(material_map_vec(lb_vec:ub_vec, size(material_mass_acc, 2)))
       allocate(water_map_vec  (lb_vec:ub_vec, size(water_acc, 2)))
-      tracer_map_vec = spval
+      material_map_vec = spval
       water_map_vec  = spval
 
       IF (p_is_worker) THEN
          DO ip = 1, size(water_acc, 2)
             DO i1 = lb_vec, ub_vec
-               IF (water_acc(i1, ip) > mt_water_min_for_delta .and. tracer_mass_acc(i1, ip) /= spval) THEN
-                  tracer_map_vec(i1, ip) = tracer_mass_acc(i1, ip)
+               IF (water_acc(i1, ip) > mt_water_min_for_delta .and. material_mass_acc(i1, ip) /= spval) THEN
+                  material_map_vec(i1, ip) = material_mass_acc(i1, ip)
                   water_map_vec  (i1, ip) = water_acc(i1, ip)
                ENDIF
             ENDDO
@@ -912,12 +912,12 @@ CONTAINS
       ENDIF
 
       IF (p_is_io) THEN
-         CALL allocate_block_data (ghist, tracer_xy_3d, ndim1, lb1)
+         CALL allocate_block_data (ghist, material_xy_3d, ndim1, lb1)
          CALL allocate_block_data (ghist, water_xy_3d,   ndim1, lb1)
          CALL allocate_block_data (ghist, ratio_xy_3d,   ndim1, lb1)
       ENDIF
 
-      CALL mp2g_hist%pset2grid (tracer_map_vec, tracer_xy_3d, spv = spval, msk = filter)
+      CALL mp2g_hist%pset2grid (material_map_vec, material_xy_3d, spv = spval, msk = filter)
       CALL mp2g_hist%pset2grid (water_map_vec,   water_xy_3d, spv = spval, msk = filter)
 
       IF (p_is_io) THEN
@@ -929,10 +929,10 @@ CONTAINS
                DO xloc = 1, ghist%xcnt(xblk)
                   DO i1 = ratio_xy_3d%lb1, ratio_xy_3d%ub1
                      IF (water_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) /= spval .and. &
-                         tracer_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) /= spval .and. &
+                         material_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) /= spval .and. &
                          water_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) > mt_tiny) THEN
                         ratio_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) = &
-                           tracer_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) &
+                           material_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) &
                            / water_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc)
                      ELSE
                         ratio_xy_3d%blk(xblk,yblk)%val(i1,xloc,yloc) = spval
@@ -947,14 +947,14 @@ CONTAINS
       CALL hist_write_var_real8_3d (file_hist, varname, dim1name, ghist, &
          itime_in_file, ratio_xy_3d, compress, longname, units)
 
-      deallocate(tracer_map_vec)
+      deallocate(material_map_vec)
       deallocate(water_map_vec)
 
    END SUBROUTINE write_history_mt_ratio_3d
 
 
    SUBROUTINE write_history_mt_delta_2d ( is_hist, &
-         tracer_mass_acc, water_acc, ref_ratio, file_hist, varname, itime_in_file, &
+         material_mass_acc, water_acc, ref_ratio, file_hist, varname, itime_in_file, &
          filter, longname, units, water_min_override)
 
    USE MOD_Block
@@ -964,7 +964,7 @@ CONTAINS
    IMPLICIT NONE
 
    logical, intent(in) :: is_hist
-   real(r8), intent(in) :: tracer_mass_acc(:)
+   real(r8), intent(in) :: material_mass_acc(:)
    real(r8), intent(in) :: water_acc(:)
    real(r8), intent(in) :: ref_ratio
    character(len=*), intent(in) :: file_hist
@@ -975,10 +975,10 @@ CONTAINS
       character(len=*), intent(in) :: units
       real(r8), intent(in), optional :: water_min_override
 
-      real(r8), allocatable :: tracer_map_vec(:)
+      real(r8), allocatable :: material_map_vec(:)
       real(r8), allocatable :: water_map_vec(:)
       real(r8), allocatable :: delta_vec(:)
-      type(block_data_real8_2d) :: tracer_xy_2d
+      type(block_data_real8_2d) :: material_xy_2d
       type(block_data_real8_2d) :: water_xy_2d
       type(block_data_real8_2d) :: delta_xy_2d
       integer :: ip, iblkme, xblk, yblk, xloc, yloc
@@ -993,8 +993,8 @@ CONTAINS
          allocate(delta_vec(size(water_acc)))
          delta_vec = spval
          DO ip = 1, size(water_acc)
-            IF (water_acc(ip) > water_min .and. tracer_mass_acc(ip) /= spval) THEN
-               delta_loc = mass_to_delta(tracer_mass_acc(ip), water_acc(ip), ref_ratio)
+            IF (water_acc(ip) > water_min .and. material_mass_acc(ip) /= spval) THEN
+               delta_loc = mass_to_delta(material_mass_acc(ip), water_acc(ip), ref_ratio)
                IF (delta_loc /= spval .and. abs(delta_loc) <= mt_delta_sanity_max) THEN
                   delta_vec(ip) = delta_loc
                ENDIF
@@ -1008,35 +1008,35 @@ CONTAINS
 #endif
 #ifdef UNSTRUCTURED
       IF (HistForm == 'Vector') THEN
-         CALL write_history_mt_delta_vector_2d (tracer_mass_acc, water_acc, ref_ratio, &
+         CALL write_history_mt_delta_vector_2d (material_mass_acc, water_acc, ref_ratio, &
             file_hist, varname, itime_in_file, filter, longname, units, water_min)
          RETURN
       ENDIF
 #endif
       IF (HistForm /= 'Gridded') RETURN
 
-      allocate(tracer_map_vec(size(tracer_mass_acc)))
+      allocate(material_map_vec(size(material_mass_acc)))
          allocate(water_map_vec(size(water_acc)))
-         tracer_map_vec = 0._r8
+         material_map_vec = 0._r8
          water_map_vec = 0._r8
 
          IF (p_is_worker) THEN
             DO ip = 1, size(water_acc)
                IF (water_acc(ip) > water_min .and. &
-                   tracer_mass_acc(ip) /= spval) THEN
-               tracer_map_vec(ip) = tracer_mass_acc(ip)
+                   material_mass_acc(ip) /= spval) THEN
+               material_map_vec(ip) = material_mass_acc(ip)
                water_map_vec(ip) = water_acc(ip)
             ENDIF
          ENDDO
       ENDIF
 
       IF (p_is_io) THEN
-         CALL allocate_block_data (ghist, tracer_xy_2d)
+         CALL allocate_block_data (ghist, material_xy_2d)
          CALL allocate_block_data (ghist, water_xy_2d)
          CALL allocate_block_data (ghist, delta_xy_2d)
       ENDIF
 
-      CALL mp2g_hist%pset2grid (tracer_map_vec, tracer_xy_2d, spv = spval, msk = filter)
+      CALL mp2g_hist%pset2grid (material_map_vec, material_xy_2d, spv = spval, msk = filter)
       CALL mp2g_hist%pset2grid (water_map_vec, water_xy_2d, spv = spval, msk = filter)
 
       IF (p_is_io) THEN
@@ -1048,7 +1048,7 @@ CONTAINS
                DO xloc = 1, ghist%xcnt(xblk)
                   IF (water_xy_2d%blk(xblk,yblk)%val(xloc,yloc) > mt_tiny) THEN
                      delta_loc = mass_to_delta( &
-                        tracer_xy_2d%blk(xblk,yblk)%val(xloc,yloc), &
+                        material_xy_2d%blk(xblk,yblk)%val(xloc,yloc), &
                         water_xy_2d%blk(xblk,yblk)%val(xloc,yloc), &
                         ref_ratio)
                      IF (delta_loc /= spval .and. abs(delta_loc) <= mt_delta_sanity_max) THEN
@@ -1068,17 +1068,17 @@ CONTAINS
       CALL hist_write_var_real8_2d (file_hist, varname, ghist, itime_in_file, &
          delta_xy_2d, compress, longname, units)
 
-      deallocate(tracer_map_vec)
+      deallocate(material_map_vec)
       deallocate(water_map_vec)
 
    END SUBROUTINE write_history_mt_delta_2d
 
 #ifdef UNSTRUCTURED
-   SUBROUTINE write_history_mt_ratio_vector_2d (tracer_mass_acc, water_acc, &
+   SUBROUTINE write_history_mt_ratio_vector_2d (material_mass_acc, water_acc, &
       file_hist, varname, itime_in_file, filter, longname, units)
 
       IMPLICIT NONE
-      real(r8), intent(in) :: tracer_mass_acc(:)
+      real(r8), intent(in) :: material_mass_acc(:)
       real(r8), intent(in) :: water_acc(:)
       character(len=*), intent(in) :: file_hist
       character(len=*), intent(in) :: varname
@@ -1087,16 +1087,16 @@ CONTAINS
       character(len=*), intent(in) :: longname
       character(len=*), intent(in) :: units
 
-      CALL write_history_mt_vector_2d (tracer_mass_acc, water_acc, 0._r8, &
+      CALL write_history_mt_vector_2d (material_mass_acc, water_acc, 0._r8, &
          .false., mt_water_min_for_delta, file_hist, varname, itime_in_file, filter, &
          longname, units)
    END SUBROUTINE write_history_mt_ratio_vector_2d
 
-   SUBROUTINE write_history_mt_delta_vector_2d (tracer_mass_acc, water_acc, &
+   SUBROUTINE write_history_mt_delta_vector_2d (material_mass_acc, water_acc, &
       ref_ratio, file_hist, varname, itime_in_file, filter, longname, units, water_min)
 
       IMPLICIT NONE
-      real(r8), intent(in) :: tracer_mass_acc(:)
+      real(r8), intent(in) :: material_mass_acc(:)
       real(r8), intent(in) :: water_acc(:)
       real(r8), intent(in) :: ref_ratio
       character(len=*), intent(in) :: file_hist
@@ -1107,12 +1107,12 @@ CONTAINS
       character(len=*), intent(in) :: units
       real(r8), intent(in) :: water_min
 
-      CALL write_history_mt_vector_2d (tracer_mass_acc, water_acc, ref_ratio, &
+      CALL write_history_mt_vector_2d (material_mass_acc, water_acc, ref_ratio, &
          .true., water_min, file_hist, varname, itime_in_file, filter, &
          longname, units)
    END SUBROUTINE write_history_mt_delta_vector_2d
 
-   SUBROUTINE write_history_mt_vector_2d (tracer_mass_acc, water_acc, ref_ratio, &
+   SUBROUTINE write_history_mt_vector_2d (material_mass_acc, water_acc, ref_ratio, &
       write_delta, water_min, file_hist, varname, itime_in_file, filter, longname, units)
 
       USE MOD_SPMD_Task
@@ -1122,7 +1122,7 @@ CONTAINS
       USE MOD_LandPatch, only: elm_patch
       IMPLICIT NONE
 
-      real(r8), intent(in) :: tracer_mass_acc(:)
+      real(r8), intent(in) :: material_mass_acc(:)
       real(r8), intent(in) :: water_acc(:)
       real(r8), intent(in) :: ref_ratio
       logical, intent(in) :: write_delta
@@ -1157,14 +1157,14 @@ CONTAINS
                   allocate(mask(istt:iend), frac(istt:iend))
                   IF (write_delta) THEN
                      mask = (water_acc(istt:iend) > water_min) .and. &
-                        (tracer_mass_acc(istt:iend) /= spval) .and. filter(istt:iend)
+                        (material_mass_acc(istt:iend) /= spval) .and. filter(istt:iend)
                   ELSE
                      mask = (abs(water_acc(istt:iend)) > water_min) .and. &
-                        (tracer_mass_acc(istt:iend) /= spval) .and. filter(istt:iend)
+                        (material_mass_acc(istt:iend) /= spval) .and. filter(istt:iend)
                   ENDIF
                   IF (any(mask)) THEN
                      frac = elm_patch%subfrc(istt:iend)
-                     mt_local(iset) = sum(frac * tracer_mass_acc(istt:iend), mask = mask)
+                     mt_local(iset) = sum(frac * material_mass_acc(istt:iend), mask = mask)
                      water_local(iset) = sum(frac * water_acc(istt:iend), mask = mask)
                   ENDIF
                   deallocate(mask, frac)
@@ -1256,7 +1256,7 @@ CONTAINS
 #endif
    END SUBROUTINE write_history_mt_vector_2d
 
-   SUBROUTINE write_history_mt_ratio_vector_3d (tracer_mass_acc, water_acc, &
+   SUBROUTINE write_history_mt_ratio_vector_3d (material_mass_acc, water_acc, &
       file_hist, varname, itime_in_file, dim1name, lb1, ndim1, filter, longname, units)
 
       USE MOD_SPMD_Task
@@ -1266,7 +1266,7 @@ CONTAINS
       USE MOD_LandPatch, only: elm_patch
       IMPLICIT NONE
 
-      real(r8), intent(in) :: tracer_mass_acc(lb1:,:)
+      real(r8), intent(in) :: material_mass_acc(lb1:,:)
       real(r8), intent(in) :: water_acc(lb1:,:)
       character(len=*), intent(in) :: file_hist
       character(len=*), intent(in) :: varname
@@ -1301,9 +1301,9 @@ CONTAINS
                   DO i1 = lb1, ub1
                      k = i1 - lb1 + 1
                      mask = (abs(water_acc(i1, istt:iend)) > mt_water_min_for_delta) .and. &
-                        (tracer_mass_acc(i1, istt:iend) /= spval) .and. filter(istt:iend)
+                        (material_mass_acc(i1, istt:iend) /= spval) .and. filter(istt:iend)
                      IF (any(mask)) THEN
-                        mt_local(k, iset) = sum(frac * tracer_mass_acc(i1, istt:iend), mask = mask)
+                        mt_local(k, iset) = sum(frac * material_mass_acc(i1, istt:iend), mask = mask)
                         water_local(k, iset) = sum(frac * water_acc(i1, istt:iend), mask = mask)
                      ENDIF
                   ENDDO

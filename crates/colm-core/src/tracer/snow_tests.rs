@@ -15,7 +15,7 @@ fn descriptor(name: &str, owner: StateOwner, max_dissolved_conc: f64) -> TracerD
         family: TracerFamily::Solute,
         state_owner: owner,
         reaction_mode: ReactionMode::None,
-        unit_kind: "tracer_per_water".to_owned(),
+        unit_kind: "material_per_water".to_owned(),
         mol_weight: 18.0,
         ref_ratio: 1.0,
         init_delta: 0.0,

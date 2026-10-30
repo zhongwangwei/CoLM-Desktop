@@ -500,6 +500,7 @@ MODULE MOD_Namelist
    character(len=256) :: DEF_ReservoirPara_file    = 'null'
 
    logical  :: DEF_USE_EstimatedRiverDepth  = .true.
+   ! Grid reservoirs: 0 = off, 1 = Funato, 2 = H22 (CaMa-Flood PR124 implementation).
    integer  :: DEF_Reservoir_Method         = 0
    real(r8) :: DEF_GRIDBASED_ROUTING_MAX_DT = 3600.
    logical  :: DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT = .false.

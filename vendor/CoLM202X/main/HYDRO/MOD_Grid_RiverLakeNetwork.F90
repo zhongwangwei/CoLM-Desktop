@@ -1282,11 +1282,12 @@ CONTAINS
                ENDDO
             ENDDO
 
-            allocate (bedelv_next (numucat))
-            allocate (outletwth   (numucat))
-
          ENDIF
       ENDIF
+
+      ! Inactive ranks also pass these arrays to assumed-shape arguments.
+      allocate (bedelv_next (numucat))
+      allocate (outletwth   (numucat))
 
       CALL worker_push_data (push_next2ucat, topo_rivelv, bedelv_next, fillvalue = spval)
       CALL worker_push_data (push_next2ucat, topo_rivwth, outletwth  , fillvalue = spval)
@@ -1413,6 +1414,8 @@ CONTAINS
       ENDIF
 #endif
 
+
+      IF (.not. allocated(allups_mask_ucat)) allocate (allups_mask_ucat (0))
 
       IF (allocated (uc_up2down   )) deallocate (uc_up2down   )
       IF (allocated (nups_nst     )) deallocate (nups_nst     )
@@ -1699,6 +1702,14 @@ CONTAINS
             IF (present(idata1d)) allocate (idata1d (0))
          ENDIF
 
+      ENDIF
+
+      ! Master releases its global input above; IO ranks never read it.
+      ! Keep legal actual arguments for the subsequent all-rank push calls.
+      IF (.not. p_is_worker) THEN
+         IF (present(rdata1d)) allocate (rdata1d (0))
+         IF (present(rdata2d)) allocate (rdata2d (ndim1,0))
+         IF (present(idata1d)) allocate (idata1d (0))
       ENDIF
 
       CALL mpi_barrier (p_comm_glb, p_err)

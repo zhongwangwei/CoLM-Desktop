@@ -319,7 +319,7 @@ contains
 		!------------------- total and concentration variables ------------------------------
 		real(r8), intent(inout) :: &
 			totcol_methane               , & ! total methane in soil column (mol/m2)
-			grnd_methane_cond           , & ! tracer conductance for boundary layer [m/s]
+			grnd_methane_cond           , & ! material conductance for boundary layer [m/s]
 			conc_o2  (1:nl_soil)    , & ! O2 conc in each soil layer (mol/m3)
 			conc_methane (1:nl_soil)        ! CH4 conc in each soil layer (mol/m3)
 		!!!! --------------------------------------------------------------------------------------------------------
@@ -384,8 +384,8 @@ contains
 		real(r8), intent(inout) :: &
 			totcol_methane_unsat         , & ! total methane in soil column (unsaturated) (mol/m2)
 			totcol_methane_sat           , & ! total methane in soil column (saturated) (mol/m2)
-			grnd_methane_cond_unsat     , & ! tracer conductance for boundary layer (unsaturated) [m/s]
-			grnd_methane_cond_sat       , & ! tracer conductance for boundary layer (saturated) [m/s]
+			grnd_methane_cond_unsat     , & ! material conductance for boundary layer (unsaturated) [m/s]
+			grnd_methane_cond_sat       , & ! material conductance for boundary layer (saturated) [m/s]
 			conc_o2_unsat (1:nl_soil), & ! O2 conc in unsaturated soil layer (mol/m3)
 			conc_o2_sat   (1:nl_soil), & ! O2 conc in saturated soil layer (mol/m3)
 			conc_methane_unsat(1:nl_soil), & ! CH4 conc in unsaturated soil layer (mol/m3)
@@ -411,7 +411,7 @@ contains
 
 		real(r8), intent(inout) :: &
 			totcol_methane_lake           , & ! lake sediment CH4 column stock (mol/m2)
-			grnd_methane_cond_lake       , & ! lake tracer conductance (m/s)
+			grnd_methane_cond_lake       , & ! lake material conductance (m/s)
 			conc_o2_lake      (1:nl_soil), & ! lake O2 concentration (mol/m3)
 			conc_methane_lake (1:nl_soil), & ! lake CH4 concentration (mol/m3)
 			lake_water_ch4_stock          , & ! well-mixed water CH4 inventory (mol/m2)
@@ -482,7 +482,7 @@ contains
 		logical  :: methane_cold_start      ! true only when no valid previous CH4 inundation state exists
 		real(r8) :: finundated_default      ! host/routing inundation before component diagnostics
 		logical  :: store_patch_diagnostics ! suppress direct patch writes for component solves
-		real(r8) :: grnd_methane_cond_base  ! current aerodynamic tracer conductance [m/s]
+		real(r8) :: grnd_methane_cond_base  ! current aerodynamic material conductance [m/s]
 		real(r8) :: totcolch4_bef
 		real(r8) :: totcolch4_bef_sat
 		real(r8) :: totcolch4_bef_unsat
@@ -1465,7 +1465,7 @@ contains
 		! nitrification O2 demand and excluding any anoxia-inflated potential O2 demand.
 		! co2_decomp_depth is intentionally not rescaled by the O2 competition
 		! limiter in methane_tran; treat it as a carbon-source diagnostic rather
-		! than a prognostic O2-limited CO2 tracer.  CH4 oxidation produces CO2 at
+		! than a prognostic O2-limited CO2 material.  CH4 oxidation produces CO2 at
 		! 1:1 molar ratio. Explicit CO2 aerenchyma transport is not prognosed
 		! here, so it is diagnosed as zero.
 		co2_oxid_depth_unsat   = methane_oxid_depth_unsat
@@ -2348,7 +2348,7 @@ contains
 			rootr    (1:nl_soil)   , &! effective fraction of roots in each soil layer (SMS method only)
 			! rootr here for effective per-layer transpiration, which may not be the same as rootfr
 			etr                    , &! transpiration rate [mm/s]
-			grnd_methane_cond_base     , &! base tracer conductance before snow/pond resistance [m/s]
+			grnd_methane_cond_base     , &! base material conductance before snow/pond resistance [m/s]
 
 			c_atm(3)               , &! CH4, O2, CO2 atmospheric conc  (mol/m3)
 
@@ -2441,7 +2441,7 @@ contains
 			t_soisno (maxsnl+1:nl_soil)    , &! soil temperature (Kelvin)
 			rootfr   (1:nl_soil)   , &! fraction of roots in each soil layer
 			rootr    (1:nl_soil)   , &! root resistance of a layer, all layers sum to 1
-			grnd_methane_cond_base     , &! base tracer conductance before snow/pond resistance [m/s]
+			grnd_methane_cond_base     , &! base material conductance before snow/pond resistance [m/s]
 			etr                    , &! transpiration rate [mm/s]
 
 			annsum_npp             , &! annual sum NPP (g C/m2/yr)

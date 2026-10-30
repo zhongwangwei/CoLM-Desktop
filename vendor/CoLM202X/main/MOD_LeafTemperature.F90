@@ -60,7 +60,7 @@ CONTAINS
               hpbl       ,&
               qintr_rain ,qintr_snow ,t_precip   ,hprl       ,dheatl     ,smp        ,&
               hk         ,hksati     ,rootflux   ,ipft_index                          &
-             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_trc_out               )
+             ,canopy_smelt_mass_out, canopy_frzc_mass_out, raw_mt_out               )
 
 !=======================================================================
 ! !DESCRIPTION:
@@ -268,15 +268,15 @@ CONTAINS
         gssun,      &! stomata conductance of sunlit leaf
         gssha,      &! stomata conductance of shaded leaf
         rootflux(1:nl_soil)  ! root water uptake from different layers
-
    ! Read the caller's soil water stress factors; plant hydraulics may update them.
    real(r8), intent(inout) :: &
         rstfacsun,  &! factor of soil water stress to transpiration on sunlit leaf
         rstfacsha    ! factor of soil water stress to transpiration on shaded leaf
 
-   real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow->rain mass [mm]
-   real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy rain->snow mass [mm]
-   real(r8), intent(out), optional :: raw_trc_out            ! reference-to-canopy moisture resistance [s/m]
+   ! Diagnostics for material transport only; not used by the host.
+   real(r8), intent(out), optional :: canopy_smelt_mass_out ! canopy snow melted this step [mm]
+   real(r8), intent(out), optional :: canopy_frzc_mass_out  ! canopy water frozen this step [mm]
+   real(r8), intent(out), optional :: raw_mt_out           ! moisture resistance raw [s/m]
 
    real(r8), intent(inout) :: &
         assimsun,   &! sunlit leaf assimilation rate [umol co2 /m**2/ s] [+]
@@ -1295,7 +1295,7 @@ ENDIF
 !-----------------------------------------------------------------------
       tref = thm + vonkar/(fh-fht)*dth * (fh2m/vonkar - fh/vonkar)
       qref =  qm + vonkar/(fq-fqt)*dqh * (fq2m/vonkar - fq/vonkar)
-      IF (present(raw_trc_out)) raw_trc_out = max(raw, 0._r8)
+      IF (present(raw_mt_out)) raw_mt_out = max(raw, 0._r8)
 
    END SUBROUTINE LeafTemperature
 !----------------------------------------------------------------------

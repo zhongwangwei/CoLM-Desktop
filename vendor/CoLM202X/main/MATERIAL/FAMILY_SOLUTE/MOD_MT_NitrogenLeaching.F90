@@ -19,9 +19,9 @@ MODULE MOD_MT_NitrogenLeaching
 ! This module deliberately does NOT change BGC physics: it reads the
 ! fluxes BGC already removed from its mineral-N pools and books the same
 ! mass as an external solute input on the receiving water pathway.
-! Sub-surface leaching enters the base-flow bookkeeping (a_trc_rsub),
-! surface runoff enters a_trc_rsur; both are added to the river hand-off
-! (mt_rnof_step) and to a_trc_bgc_leach so the material balance check
+! Sub-surface leaching enters the base-flow bookkeeping (a_mt_rsub),
+! surface runoff enters a_mt_rsur; both are added to the river hand-off
+! (mt_rnof_step) and to a_mt_bgc_leach so the material balance check
 ! counts them as input without treating them as precipitation.
 !
 ! Units: BGC fluxes are gN m-3 s-1 per soil layer, so the mass moved in
@@ -38,9 +38,9 @@ MODULE MOD_MT_NitrogenLeaching
    USE MOD_Namelist,           only: DEF_USE_NITRIF
    USE MOD_BGC_Vars_1DFluxes,  only: sminn_leached_vr, smin_nh4_leached_vr, &
                                      smin_no3_leached_vr, smin_no3_runoff_vr
-   USE MOD_MT_Defs,            only: nmts, tracers, tracer_lower, tracer_is_solute
-   USE MOD_MT_Vars,            only: mt_rnof_step, a_trc_rsub, a_trc_rsur, &
-                                     a_trc_rnof, a_trc_bgc_leach
+   USE MOD_MT_Defs,            only: nmts, materials, material_lower, material_is_solute
+   USE MOD_MT_Vars,            only: mt_rnof_step, a_mt_rsub, a_mt_rsur, &
+                                     a_mt_rnof, a_mt_bgc_leach
 
    IMPLICIT NONE
    PUBLIC :: mt_bgc_n_leaching
@@ -61,8 +61,8 @@ CONTAINS
       IF (nmts <= 0) RETURN
 
       DO imt = 1, nmts
-         IF (.not. tracer_is_solute(imt)) CYCLE
-         lname = tracer_lower(trim(tracers(imt)%name))
+         IF (.not. material_is_solute(imt)) CYCLE
+         lname = material_lower(trim(materials(imt)%name))
          IF (lname /= 'nh4' .and. lname /= 'no3') CYCLE
 
          sub_mass    = 0._r8
@@ -102,13 +102,13 @@ CONTAINS
          runoff_mass = runoff_mass / 1000._r8
          IF (sub_mass + runoff_mass <= 0._r8) CYCLE
 
-         a_trc_rsub     (imt,ipatch) = a_trc_rsub     (imt,ipatch) + sub_mass
-         a_trc_rsur     (imt,ipatch) = a_trc_rsur     (imt,ipatch) + runoff_mass
-         a_trc_rnof     (imt,ipatch) = a_trc_rnof     (imt,ipatch) &
+         a_mt_rsub     (imt,ipatch) = a_mt_rsub     (imt,ipatch) + sub_mass
+         a_mt_rsur     (imt,ipatch) = a_mt_rsur     (imt,ipatch) + runoff_mass
+         a_mt_rnof     (imt,ipatch) = a_mt_rnof     (imt,ipatch) &
                                      + sub_mass + runoff_mass
          mt_rnof_step   (imt,ipatch) = mt_rnof_step   (imt,ipatch) &
                                      + sub_mass + runoff_mass
-         a_trc_bgc_leach(imt,ipatch) = a_trc_bgc_leach(imt,ipatch) &
+         a_mt_bgc_leach(imt,ipatch) = a_mt_bgc_leach(imt,ipatch) &
                                      + sub_mass + runoff_mass
       ENDDO
 

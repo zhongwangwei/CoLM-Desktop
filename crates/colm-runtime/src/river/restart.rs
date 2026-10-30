@@ -603,7 +603,8 @@ pub fn write_river_tracers(
         }
     }
     vector(&mut file, "acc_rnof_ref", &tracers.acc_rnof_ref)?;
-    let h = &tracers.history;
+    // 终点不满窗口时历史行已经被冲刷清零，续跑要用冲刷前的快照（`histsnap`）。
+    let h = tracers.history_for_restart();
     for &itrc in &transport {
         let name = tracers.set.tracers[itrc].name.trim().to_owned();
         vector(
@@ -630,7 +631,7 @@ pub fn write_river_tracers(
         "mt_river_descriptor_field",
         colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
     )?;
-    file.add_dimension("mt_river_transport_tracer", identity.len())?;
+    file.add_dimension("mt_river_transport_material", identity.len())?;
     scalar(
         &mut file,
         "mt_river_descriptor_count",
@@ -639,7 +640,7 @@ pub fn write_river_tracers(
     let flat = identity.iter().flatten().copied().collect::<Vec<i32>>();
     file.add_variable::<i32>(
         "mt_river_descriptor_identity",
-        &["mt_river_transport_tracer", "mt_river_descriptor_field"],
+        &["mt_river_transport_material", "mt_river_descriptor_field"],
     )?
     .put_values(&flat, ..)?;
     scalar(&mut file, "mt_river_restart_schema", RIVER_TRACER_SCHEMA)?;
@@ -656,6 +657,7 @@ pub fn read_river_tracers(
     network: &RiverNetwork,
     levee: Option<&super::levee::Levee>,
     tracers: &mut super::tracer::RiverTracers,
+    water_history: Option<&super::RiverHistory>,
 ) -> Result<bool> {
     let malformed = "malformed/incomplete river tracer restart descriptor metadata";
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
@@ -745,11 +747,50 @@ pub fn read_river_tracers(
         tracers.acc_inp[itrc] = vector(&format!("mt_accinp_{name}"), true)?.expect("required");
     }
     tracers.acc_rnof_ref = vector("acc_rnof_ref", true)?.expect("required");
-    // 上游 3645f1fa：重启后**总是新开** history 窗口，不再读回 `mt_hist_*` 累加行。
-    // 重启写在窗口关闭步的末尾、早于该窗口的 history 冲刷，行里永远是整窗；
-    // 读回来会让重启后的第一个窗口把旧窗口再算一遍（day2 报成两日均值）。
-    // 行仍然照常写出，重启文件保留"到此为止的窗口"这一自描述。
-    tracers.history.reset();
+    // 材料历史行：整组成套存在才恢复（上游 `hist_complete` 的逐变量探针）。重启落在窗口中间
+    // 时续接这一窗，第一个记录才与不中断的运行一致；落在窗口边界上时调用方随后会按
+    // `hist_acc_window_restored = .false.` 调 `drop_hist_window` 丢掉这份完整窗口。
+    // 缺任何一行都整组不读：半套行配上整窗分母会算错均值，不如从重启处重开。
+    let mut hist_complete = true;
+    for &itrc in &transport {
+        let name = tracers.set.tracers[itrc].name.trim().to_owned();
+        for prefix in [
+            "mt_hist_stor_",
+            "mt_hist_levsto_",
+            "mt_hist_out_",
+            "mt_hist_bifout_",
+        ] {
+            hist_complete = hist_complete && file.variable(&format!("{prefix}{name}")).is_some();
+        }
+    }
+    hist_complete = hist_complete
+        && file.variable("mt_hist_water_storage").is_some()
+        && file.variable("mt_hist_levsto_water").is_some();
+    if hist_complete {
+        for &itrc in &transport {
+            let name = tracers.set.tracers[itrc].name.trim().to_owned();
+            tracers.history.storage_mass[itrc] =
+                vector(&format!("mt_hist_stor_{name}"), true)?.expect("required");
+            tracers.history.levsto_mass[itrc] =
+                vector(&format!("mt_hist_levsto_{name}"), true)?.expect("required");
+            tracers.history.out[itrc] =
+                vector(&format!("mt_hist_out_{name}"), true)?.expect("required");
+            tracers.history.bifout[itrc] =
+                vector(&format!("mt_hist_bifout_{name}"), true)?.expect("required");
+        }
+        tracers.history.water_storage = vector("mt_hist_water_storage", true)?.expect("required");
+        tracers.history.levsto_water = vector("mt_hist_levsto_water", true)?.expect("required");
+        // 老文件没有材料自己的时钟（上游过渡期）：退回水量历史时钟 `acctime_ucat`。
+        tracers.history.acctime = match file.variable("mt_hist_acctime") {
+            Some(_) => vector("mt_hist_acctime", true)?.expect("required"),
+            None => match water_history {
+                Some(history) => history.acctime.clone(),
+                None => vec![0.0; n],
+            },
+        };
+    } else {
+        tracers.history.reset();
+    }
     tracers.validate_for_restart()?;
     // 当前配置下没有堤的单元流域：堤内池并回可见池（开了堤防才有 `has_levee`）。
     if let Some(levee) = levee {

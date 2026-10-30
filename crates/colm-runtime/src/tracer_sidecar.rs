@@ -1,10 +1,15 @@
 //! history 旁车里的示踪物部分：区间跨过重启时，上游在主机累加器之后再写
-//! `tracer_history_write`（`tracer_land_history_restart.inc`：描述符身份 + 44 个
-//! `a_trc_*`/`a_water_*`），再走生命周期钩子（CH4 的 `write_methane_accflux_restart`）。
-//! 读回时（`read_history_acc_restart`）先核对描述符，再整组读回并要求全部有限。
+//! `tracer_history_write`（描述符身份 + 44 个 `a_mt_*`/`a_water_*`），再走生命周期钩子
+//! （CH4 的 `write_methane_accflux_restart`）。读回时（`read_history_acc_restart`）先核对
+//! 描述符，再整组读回并要求全部有限。
+//!
+//! 上游把示踪物（TRACER）整体改名成材料（MATERIAL）时把盘上字段一并改成 `a_mt_*`，
+//! 但给读回留了逐字段的旧名回退（`MOD_HistAccRestart.F90` 的 `hacc_read_name`：
+//! 新名不存在时读 `a_trc_*`）。回退是**逐字段**的，不是整组：旧旁车里可以混着新旧名。
+//! 判据只看变量在不在（上游 `ncio_vector_exist` 同样只看存在性），形状校验仍按读到的名字做。
 //!
 //! 盘上布局照 `ncio_write_vector`：逐示踪物量是 `(patch, d1 = ntracers)`，逐层的
-//! `a_trc_soil_mass`/`a_trc_snow_mass` 是 `(patch, d2 = 层, d1 = ntracers)`，按 patch 的
+//! `a_mt_soil_mass`/`a_mt_snow_mass` 是 `(patch, d2 = 层, d1 = ntracers)`，按 patch 的
 //! 水量是 `(patch)` 或 `(patch, d1 = 层)`。雪层下标 `jsnow - 1 = soisno_slot(j)`。
 
 use anyhow::{bail, ensure, Context, Result};
@@ -34,76 +39,76 @@ enum Slot {
 
 /// `tracer_history_manifest` 的 44 项，顺序即上游写出顺序。
 const FIELDS: [(&str, Slot); 44] = [
-    ("a_trc_precip", Slot::Tracer(|a| &mut a.precip)),
+    ("a_mt_precip", Slot::Tracer(|a| &mut a.precip)),
     (
-        "a_trc_vapor_exchange",
+        "a_mt_vapor_exchange",
         Slot::Tracer(|a| &mut a.vapor_exchange),
     ),
     ("a_water_precip", Slot::Tracer(|a| &mut a.water_precip)),
-    ("a_trc_evap", Slot::Tracer(|a| &mut a.evap)),
+    ("a_mt_evap", Slot::Tracer(|a| &mut a.evap)),
     (
         "a_water_evap_gross",
         Slot::Tracer(|a| &mut a.water_evap_gross),
     ),
-    ("a_trc_transp", Slot::Tracer(|a| &mut a.transp)),
-    ("a_trc_transp_src", Slot::Tracer(|a| &mut a.transp_src)),
+    ("a_mt_transp", Slot::Tracer(|a| &mut a.transp)),
+    ("a_mt_transp_src", Slot::Tracer(|a| &mut a.transp_src)),
     ("a_water_transp", Slot::Tracer(|a| &mut a.water_transp)),
-    ("a_trc_soilevap", Slot::Tracer(|a| &mut a.soilevap)),
+    ("a_mt_soilevap", Slot::Tracer(|a| &mut a.soilevap)),
     ("a_water_soilevap", Slot::Tracer(|a| &mut a.water_soilevap)),
-    ("a_trc_canopyevap", Slot::Tracer(|a| &mut a.canopyevap)),
+    ("a_mt_canopyevap", Slot::Tracer(|a| &mut a.canopyevap)),
     (
         "a_water_canopyevap",
         Slot::Tracer(|a| &mut a.water_canopyevap),
     ),
-    ("a_trc_subl", Slot::Tracer(|a| &mut a.subl)),
+    ("a_mt_subl", Slot::Tracer(|a| &mut a.subl)),
     ("a_water_subl", Slot::Tracer(|a| &mut a.water_subl)),
-    ("a_trc_wetland_evap", Slot::Tracer(|a| &mut a.wetland_evap)),
+    ("a_mt_wetland_evap", Slot::Tracer(|a| &mut a.wetland_evap)),
     (
         "a_water_wetland_evap",
         Slot::Tracer(|a| &mut a.water_wetland_evap),
     ),
-    ("a_trc_rsur", Slot::Tracer(|a| &mut a.rsur)),
-    ("a_trc_rsub", Slot::Tracer(|a| &mut a.rsub)),
-    ("a_trc_rnof", Slot::Tracer(|a| &mut a.rnof)),
+    ("a_mt_rsur", Slot::Tracer(|a| &mut a.rsur)),
+    ("a_mt_rsub", Slot::Tracer(|a| &mut a.rsub)),
+    ("a_mt_rnof", Slot::Tracer(|a| &mut a.rnof)),
     ("a_water_rnof", Slot::Tracer(|a| &mut a.water_rnof)),
-    ("a_trc_qinfl", Slot::Tracer(|a| &mut a.qinfl)),
-    ("a_trc_qcharge", Slot::Tracer(|a| &mut a.qcharge)),
-    ("a_trc_ldew_mass", Slot::Tracer(|a| &mut a.ldew_mass)),
+    ("a_mt_qinfl", Slot::Tracer(|a| &mut a.qinfl)),
+    ("a_mt_qcharge", Slot::Tracer(|a| &mut a.qcharge)),
+    ("a_mt_ldew_mass", Slot::Tracer(|a| &mut a.ldew_mass)),
     ("a_water_ldew", Slot::Water(|w| &mut w.ldew)),
-    ("a_trc_soil_mass", Slot::TracerSoil),
+    ("a_mt_soil_mass", Slot::TracerSoil),
     ("a_water_soil", Slot::WaterSoil),
-    ("a_trc_snow_mass", Slot::TracerSnow),
+    ("a_mt_snow_mass", Slot::TracerSnow),
     ("a_water_snow", Slot::WaterSnow),
-    ("a_trc_wa_mass", Slot::Tracer(|a| &mut a.wa_mass)),
+    ("a_mt_wa_mass", Slot::Tracer(|a| &mut a.wa_mass)),
     ("a_water_wa", Slot::Water(|w| &mut w.wa)),
-    ("a_trc_wa_debt_mass", Slot::Tracer(|a| &mut a.wa_debt_mass)),
+    ("a_mt_wa_debt_mass", Slot::Tracer(|a| &mut a.wa_debt_mass)),
     ("a_water_wa_debt", Slot::Water(|w| &mut w.wa_debt)),
     (
         "a_water_aquifer_actual",
         Slot::Water(|w| &mut w.aquifer_actual),
     ),
     (
-        "a_trc_aquifer_actual_mass",
+        "a_mt_aquifer_actual_mass",
         Slot::Tracer(|a| &mut a.aquifer_actual_mass),
     ),
-    ("a_trc_wdsrf_mass", Slot::Tracer(|a| &mut a.wdsrf_mass)),
+    ("a_mt_wdsrf_mass", Slot::Tracer(|a| &mut a.wdsrf_mass)),
     ("a_water_wdsrf", Slot::Water(|w| &mut w.wdsrf)),
-    ("a_trc_wetwat_mass", Slot::Tracer(|a| &mut a.wetwat_mass)),
+    ("a_mt_wetwat_mass", Slot::Tracer(|a| &mut a.wetwat_mass)),
     ("a_water_wetwat", Slot::Water(|w| &mut w.wetwat)),
     (
-        "a_trc_surface_residue_mass",
+        "a_mt_surface_residue_mass",
         Slot::Tracer(|a| &mut a.surface_residue_mass),
     ),
     (
-        "a_trc_subsurface_residue_mass",
+        "a_mt_subsurface_residue_mass",
         Slot::Tracer(|a| &mut a.subsurface_residue_mass),
     ),
     (
-        "a_trc_layer_dry_mass",
+        "a_mt_layer_dry_mass",
         Slot::Tracer(|a| &mut a.layer_dry_mass),
     ),
-    ("a_trc_solid_mass", Slot::Tracer(|a| &mut a.solid_mass)),
-    ("a_trc_scv_mass", Slot::Tracer(|a| &mut a.scv_mass)),
+    ("a_mt_solid_mass", Slot::Tracer(|a| &mut a.solid_mass)),
+    ("a_mt_scv_mass", Slot::Tracer(|a| &mut a.scv_mass)),
     ("a_water_scv", Slot::Water(|w| &mut w.scv)),
 ];
 
@@ -276,16 +281,12 @@ pub fn read(
     let mut restored = RestoredTracers::default();
     if let Some(set) = set.filter(|set| set.transport_indices().next().is_some()) {
         let ntracers = set.len();
-        let missing: Vec<&str> = FIELDS
+        // 逐字段解析读回名（`hacc_read_name`），缺任何一个都整组拒绝：这些累加和必须成套，
+        // 半套读回来等于把一部分示踪物的区间悄悄截断。
+        let read_names: Vec<(&str, std::borrow::Cow<'_, str>, Slot)> = FIELDS
             .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| file.variable(name).is_none())
-            .collect();
-        ensure!(
-            missing.is_empty(),
-            "generic land-tracer history missing from active restart window ({})",
-            missing.join(", ")
-        );
+            .map(|&(name, slot)| Ok((name, read_name(&file, name)?, slot)))
+            .collect::<Result<_>>()?;
         check_descriptor(&file, set)?;
         let mut accumulators = vec![
             PatchAccumulators {
@@ -294,9 +295,11 @@ pub fn read(
             };
             patches
         ];
-        for (name, slot) in FIELDS {
+        for (name, stored, slot) in read_names {
             let (dims, width) = shape(name, slot, ntracers);
-            let variable = file.variable(name).expect("presence checked above");
+            let variable = file
+                .variable(stored.as_ref())
+                .expect("presence checked by read_name");
             let actual: Vec<(String, usize)> = variable
                 .dimensions()
                 .iter()
@@ -309,13 +312,13 @@ pub fn read(
                     .iter()
                     .map(|(_, len)| len)
                     .eq(expected.iter().map(|(_, len)| len)),
-                "{name} in {} has shape {actual:?}, expected {expected:?}",
+                "{stored} in {} has shape {actual:?}, expected {expected:?}",
                 sidecar.display()
             );
             let values = variable.get_values::<f64, _>(..)?;
             ensure!(
                 values.iter().all(|x| x.is_finite()),
-                "non-finite generic land-tracer history accumulator"
+                "non-finite generic land-tracer history accumulator ({stored})"
             );
             for (patch, target) in accumulators.iter_mut().enumerate() {
                 target.set(slot, &values[patch * width..(patch + 1) * width]);
@@ -327,6 +330,31 @@ pub fn read(
         restored.methane = crate::methane::read_accflux_sidecar(&file, setup, patches)?;
     }
     Ok(restored)
+}
+
+/// `hacc_read_name`：`a_mt_*` 优先，变量不在时回退到旧名 `a_trc_*`。
+///
+/// 上游的判据是 `ncio_vector_exist`，只看变量存在、不看形状 —— 新名存在但形状坏了要
+/// 让后面的形状校验报错，不能回退去读旧名里可能过期的数据，所以这里同样只判存在。
+/// 回退只对 `a_mt_` 前缀生效；`a_water_*` 没有改过名。
+fn read_name<'a>(file: &netcdf::File, name: &'a str) -> Result<std::borrow::Cow<'a, str>> {
+    if file.variable(name).is_some() {
+        return Ok(std::borrow::Cow::Borrowed(name));
+    }
+    match name.strip_prefix("a_mt_") {
+        Some(rest) => {
+            let legacy = format!("a_trc_{rest}");
+            if file.variable(&legacy).is_some() {
+                Ok(std::borrow::Cow::Owned(legacy))
+            } else {
+                bail!(
+                    "generic land-tracer history missing from active restart window ({name}, \
+                     nor legacy {legacy})"
+                )
+            }
+        }
+        None => bail!("generic land-tracer history missing from active restart window ({name})"),
+    }
 }
 
 /// `tracer_history_descriptor(file, .false.)`：schema、示踪物数与逐行身份都要对上。

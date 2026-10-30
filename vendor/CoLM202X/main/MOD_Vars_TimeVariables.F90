@@ -1259,20 +1259,20 @@ ENDIF
       CALL ncio_write_vector (file_restart, 'fh   ', 'patch', landpatch, fh   , compress) ! integral of profile FUNCTION for heat
       CALL ncio_write_vector (file_restart, 'fq   ', 'patch', landpatch, fq   , compress) ! integral of profile FUNCTION for moisture
          IF (allocated(ldew_rain)) THEN
-            IF (.not. p_is_worker) CALL CoLM_stop ('tracer restart patch state on non-worker')
-            IF (numpatch < 0) CALL CoLM_stop ('invalid tracer restart patch count')
+            IF (.not. p_is_worker) CALL CoLM_stop ('material restart patch state on non-worker')
+            IF (numpatch < 0) CALL CoLM_stop ('invalid material restart patch count')
             IF (.not. allocated(ldew_snow) .or. .not. allocated(wliq_soisno) .or. &
                 .not. allocated(wice_soisno) .or. .not. allocated(wa) .or. &
                 .not. allocated(wdsrf) .or. .not. allocated(wetwat) .or. &
-                .not. allocated(scv)) CALL CoLM_stop ('incomplete tracer restart water state')
+                .not. allocated(scv)) CALL CoLM_stop ('incomplete material restart water state')
             IF (size(ldew_rain) /= numpatch .or. size(ldew_snow) /= numpatch .or. &
                 size(wa) /= numpatch .or. size(wdsrf) /= numpatch .or. &
                 size(wetwat) /= numpatch .or. size(scv) /= numpatch .or. &
                 size(wliq_soisno,1) /= nl_soil-maxsnl .or. size(wliq_soisno,2) /= numpatch .or. &
                 size(wice_soisno,1) /= nl_soil-maxsnl .or. size(wice_soisno,2) /= numpatch) &
-                CALL CoLM_stop ('tracer restart water shape mismatch')
+                CALL CoLM_stop ('material restart water shape mismatch')
             IF (allocated(waterstorage)) THEN
-               IF (size(waterstorage) /= numpatch) CALL CoLM_stop ('tracer restart waterstorage shape mismatch')
+               IF (size(waterstorage) /= numpatch) CALL CoLM_stop ('material restart waterstorage shape mismatch')
                CALL write_mt_restart_all(file_restart, maxsnl, nl_soil, numpatch, &
                   ldew_rain, ldew_snow, wliq_soisno, wice_soisno, wa, wdsrf, wetwat, scv, &
                   compress, waterstorage)
@@ -1282,7 +1282,7 @@ ENDIF
             ENDIF
          ELSE
             IF (p_is_worker) THEN
-               IF (numpatch /= 0) CALL CoLM_stop ('missing tracer restart patch state on worker')
+               IF (numpatch /= 0) CALL CoLM_stop ('missing material restart patch state on worker')
             ENDIF
             CALL write_mt_restart_all(file_restart, maxsnl, nl_soil, 0, &
                empty_patch, empty_patch, empty_soilsnow, empty_soilsnow, &

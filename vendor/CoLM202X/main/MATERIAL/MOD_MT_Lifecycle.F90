@@ -2,14 +2,14 @@
 
 MODULE MOD_MT_Lifecycle
 !=======================================================================
-! One lifecycle row per configured tracer. Provider names are resolved
-! once during initialization; phase dispatch thereafter uses tracer index.
+! One lifecycle row per configured material. Provider names are resolved
+! once during initialization; phase dispatch thereafter uses material index.
 !=======================================================================
 
    USE MOD_Precision
    USE MOD_DataType, only: block_data_real8_2d
    USE MOD_SPMD_Task, only: CoLM_stop, p_is_master
-   USE MOD_MT_Defs, only: nmts, tracers, tracer_upper, tracer_index_for_name, &
+   USE MOD_MT_Defs, only: nmts, materials, material_upper, material_index_for_name, &
       FAMILY_UNRESOLVED, FAMILY_ISOTOPE, FAMILY_SOLUTE, &
       FAMILY_PARTICLE, FAMILY_GAS, STATE_OWNER_UNKNOWN, &
       STATE_OWNER_GENERIC_WATER, STATE_OWNER_PROVIDER, &
@@ -133,7 +133,7 @@ MODULE MOD_MT_Lifecycle
       END SUBROUTINE lifecycle_route_history_if
    end interface
 
-   type, PUBLIC :: tracer_lifecycle_hooks_type
+   type, PUBLIC :: material_lifecycle_hooks_type
       procedure(lifecycle_land_init_if), pointer, nopass :: land_init => null()
       procedure(lifecycle_read_restart_if), pointer, nopass :: land_read_restart => null()
       procedure(lifecycle_land_write_restart_if), pointer, nopass :: land_write_restart => null()
@@ -163,23 +163,23 @@ MODULE MOD_MT_Lifecycle
       procedure(lifecycle_route_history_if), pointer, nopass :: route_history => null()
       procedure(lifecycle_noarg_if), pointer, nopass :: route_flush_history => null()
       procedure(lifecycle_noarg_if), pointer, nopass :: route_final => null()
-   end type tracer_lifecycle_hooks_type
+   end type material_lifecycle_hooks_type
 
-   type(tracer_lifecycle_hooks_type), allocatable, save :: lifecycle(:)
+   type(material_lifecycle_hooks_type), allocatable, save :: lifecycle(:)
    character(len=32), allocatable, save :: provider_name(:)
 
-   PUBLIC :: tracer_lifecycle_init, tracer_lifecycle_validate, mt_lifecycle_reset
-   PUBLIC :: tracer_lifecycle_report_registry
+   PUBLIC :: material_lifecycle_init, material_lifecycle_validate, mt_lifecycle_reset
+   PUBLIC :: material_lifecycle_report_registry
    PUBLIC :: register_mt_provider
-   PUBLIC :: tracer_lifecycle_size, tracer_lifecycle_has_provider, tracer_lifecycle_provider
-   PUBLIC :: tracer_lifecycle_land_init, tracer_lifecycle_land_final
-   PUBLIC :: tracer_lifecycle_lake_step, tracer_lifecycle_wetland_decomp, tracer_lifecycle_soil_step
-   PUBLIC :: tracer_lifecycle_land_report, tracer_lifecycle_land_read_restart, tracer_lifecycle_land_write_restart
-   PUBLIC :: tracer_lifecycle_land_history, tracer_lifecycle_land_flush_acc_fluxes
-   PUBLIC :: tracer_lifecycle_land_history_sidecar
-   PUBLIC :: tracer_lifecycle_land_accumulate_fluxes, mt_lifecycle_land_save_lulcc_state
+   PUBLIC :: material_lifecycle_size, material_lifecycle_has_provider, material_lifecycle_provider
+   PUBLIC :: material_lifecycle_land_init, material_lifecycle_land_final
+   PUBLIC :: material_lifecycle_lake_step, material_lifecycle_wetland_decomp, material_lifecycle_soil_step
+   PUBLIC :: material_lifecycle_land_report, material_lifecycle_land_read_restart, material_lifecycle_land_write_restart
+   PUBLIC :: material_lifecycle_land_history, material_lifecycle_land_flush_acc_fluxes
+   PUBLIC :: material_lifecycle_land_history_sidecar
+   PUBLIC :: material_lifecycle_land_accumulate_fluxes, mt_lifecycle_land_save_lulcc_state
    PUBLIC :: mt_lifecycle_land_remap_lulcc_state, mt_lifecycle_land_reload_lulcc_inputs
-   PUBLIC :: tracer_lifecycle_has_levee_flood_publisher, tracer_lifecycle_has_flood_publisher
+   PUBLIC :: material_lifecycle_has_levee_flood_publisher, material_lifecycle_has_flood_publisher
    PUBLIC :: mt_lifecycle_publish_levee_flood_patch, mt_lifecycle_publish_flood_patch
    PUBLIC :: mt_lifecycle_route_has_active, mt_lifecycle_route_init, mt_lifecycle_route_final
    PUBLIC :: mt_lifecycle_route_read_restart, mt_lifecycle_route_write_restart
@@ -192,17 +192,17 @@ CONTAINS
    ! register_providers is mt_register_providers (MT_RegisterProviders.F90),
    ! passed in by the caller so that this module, linked into mkinidata too,
    ! does not reference the providers built with the main objects.
-   SUBROUTINE tracer_lifecycle_init (register_providers)
+   SUBROUTINE material_lifecycle_init (register_providers)
       procedure(lifecycle_noarg_if) :: register_providers
       IF (allocated(lifecycle)) RETURN
-      IF (nmts > 0 .and. .not. allocated(tracers)) &
+      IF (nmts > 0 .and. .not. allocated(materials)) &
          CALL lifecycle_error ('descriptor table is not initialized')
       allocate(lifecycle(nmts), provider_name(nmts))
       provider_name = ''
       CALL register_providers ()
-      CALL tracer_lifecycle_validate ()
-      CALL tracer_lifecycle_report_registry ()
-   END SUBROUTINE tracer_lifecycle_init
+      CALL material_lifecycle_validate ()
+      CALL material_lifecycle_report_registry ()
+   END SUBROUTINE material_lifecycle_init
 
    SUBROUTINE mt_lifecycle_reset ()
       IF (allocated(lifecycle)) deallocate(lifecycle)
@@ -213,102 +213,102 @@ CONTAINS
       declared_owner, declared_reaction, hooks, imt)
       character(len=*), intent(in) :: name, aliases, provider
       integer, intent(in) :: declared_family, declared_owner, declared_reaction
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
       integer, intent(out) :: imt
 
       integer :: i
 
       imt = 0
       IF (.not. allocated(lifecycle) .or. .not. allocated(provider_name)) &
-         CALL lifecycle_error ('provider registration requires tracer_lifecycle_init')
+         CALL lifecycle_error ('provider registration requires material_lifecycle_init')
       CALL validate_provider_declaration (name, aliases, provider, declared_family, &
          declared_owner, declared_reaction)
       IF (.not. lifecycle_hooks_present(hooks)) &
          CALL lifecycle_error ('compiled provider has no lifecycle hooks')
 
-      imt = tracer_index_for_name(name, aliases)
+      imt = material_index_for_name(name, aliases)
       IF (imt == 0) RETURN
       IF (len_trim(provider_name(imt)) > 0) &
          CALL lifecycle_error ('duplicate provider attachment for configured material')
 
       DO i = 1, nmts
          IF (len_trim(provider_name(i)) > 0 .and. &
-             trim(tracer_upper(provider_name(i))) == trim(tracer_upper(provider))) THEN
+             trim(material_upper(provider_name(i))) == trim(material_upper(provider))) THEN
             CALL lifecycle_error ('duplicate provider identity')
          ENDIF
       ENDDO
 
-      IF (tracers(imt)%family_id == FAMILY_UNRESOLVED) THEN
-         tracers(imt)%family_id = declared_family
-      ELSEIF (tracers(imt)%family_id /= declared_family) THEN
+      IF (materials(imt)%family_id == FAMILY_UNRESOLVED) THEN
+         materials(imt)%family_id = declared_family
+      ELSEIF (materials(imt)%family_id /= declared_family) THEN
          CALL lifecycle_error ('provider family does not match configured material family')
       ENDIF
 
-      tracers(imt)%state_owner = declared_owner
-      tracers(imt)%reaction_mode = declared_reaction
-      tracers(imt)%category = family_label(declared_family)
+      materials(imt)%state_owner = declared_owner
+      materials(imt)%reaction_mode = declared_reaction
+      materials(imt)%category = family_label(declared_family)
       IF (declared_owner == STATE_OWNER_PROVIDER .and. declared_family /= FAMILY_PARTICLE) &
-         tracers(imt)%unit_kind = 'species_owned'
+         materials(imt)%unit_kind = 'species_owned'
       IF (declared_owner == STATE_OWNER_GENERIC_WATER .and. &
-          trim(tracers(imt)%unit_kind) == 'species_owned') &
-         tracers(imt)%unit_kind = 'tracer_per_water'
+          trim(materials(imt)%unit_kind) == 'species_owned') &
+         materials(imt)%unit_kind = 'material_per_water'
 
       provider_name(imt) = trim(provider)
       lifecycle(imt) = hooks
    END SUBROUTINE register_mt_provider
 
-   SUBROUTINE tracer_lifecycle_validate ()
+   SUBROUTINE material_lifecycle_validate ()
       integer :: i
 
       IF (.not. allocated(lifecycle) .or. .not. allocated(provider_name)) &
          CALL lifecycle_error ('lifecycle registry is not initialized')
       IF (size(lifecycle) /= nmts .or. size(provider_name) /= nmts) &
          CALL lifecycle_error ('lifecycle registry size does not match descriptor table')
-      IF (nmts > 0 .and. .not. allocated(tracers)) &
+      IF (nmts > 0 .and. .not. allocated(materials)) &
          CALL lifecycle_error ('descriptor table is not initialized')
 
       DO i = 1, nmts
-         IF ((trim(tracer_upper(tracers(i)%name)) == 'CH4' .or. &
-              trim(tracer_upper(tracers(i)%name)) == 'METHANE') .and. &
+         IF ((trim(material_upper(materials(i)%name)) == 'CH4' .or. &
+              trim(material_upper(materials(i)%name)) == 'METHANE') .and. &
              len_trim(provider_name(i)) == 0) THEN
             CALL lifecycle_error ('CH4 requires its compiled gas provider')
          ENDIF
 
-         IF (tracers(i)%state_owner == STATE_OWNER_UNKNOWN) &
+         IF (materials(i)%state_owner == STATE_OWNER_UNKNOWN) &
             CALL lifecycle_error ('material state owner remains unresolved')
-         IF ((tracers(i)%family_id == FAMILY_GAS .or. &
-              tracers(i)%family_id == FAMILY_PARTICLE .or. &
-              tracers(i)%state_owner == STATE_OWNER_PROVIDER .or. &
-              tracers(i)%reaction_mode == REACTION_PROVIDER) .and. &
+         IF ((materials(i)%family_id == FAMILY_GAS .or. &
+              materials(i)%family_id == FAMILY_PARTICLE .or. &
+              materials(i)%state_owner == STATE_OWNER_PROVIDER .or. &
+              materials(i)%reaction_mode == REACTION_PROVIDER) .and. &
              len_trim(provider_name(i)) == 0) THEN
             CALL lifecycle_error ('provider-owned material has no compiled provider')
          ENDIF
-         IF ((tracers(i)%family_id == FAMILY_GAS .or. &
-              tracers(i)%family_id == FAMILY_PARTICLE) .and. &
-             tracers(i)%state_owner /= STATE_OWNER_PROVIDER) THEN
+         IF ((materials(i)%family_id == FAMILY_GAS .or. &
+              materials(i)%family_id == FAMILY_PARTICLE) .and. &
+             materials(i)%state_owner /= STATE_OWNER_PROVIDER) THEN
             CALL lifecycle_error ('gas and particle families require provider-owned state')
          ENDIF
-         IF ((tracers(i)%family_id == FAMILY_ISOTOPE .or. &
-              tracers(i)%family_id == FAMILY_PARTICLE) .and. &
-             tracers(i)%reaction_mode /= REACTION_NONE) &
+         IF ((materials(i)%family_id == FAMILY_ISOTOPE .or. &
+              materials(i)%family_id == FAMILY_PARTICLE) .and. &
+             materials(i)%reaction_mode /= REACTION_NONE) &
             CALL lifecycle_error ('isotope and particle reaction shape is not applicable')
-         IF (tracers(i)%reaction_mode == REACTION_FIRST_ORDER .and. &
-             (tracers(i)%family_id /= FAMILY_SOLUTE .or. &
-              tracers(i)%state_owner /= STATE_OWNER_GENERIC_WATER)) &
+         IF (materials(i)%reaction_mode == REACTION_FIRST_ORDER .and. &
+             (materials(i)%family_id /= FAMILY_SOLUTE .or. &
+              materials(i)%state_owner /= STATE_OWNER_GENERIC_WATER)) &
             CALL lifecycle_error ('first-order reaction requires generic-water solute state')
-         IF (tracers(i)%family_id == FAMILY_GAS .and. &
+         IF (materials(i)%family_id == FAMILY_GAS .and. &
              .not. lifecycle_gas_hooks_complete(lifecycle(i))) &
             CALL lifecycle_error ('gas provider is missing required land lifecycle hooks')
-         IF (tracers(i)%family_id == FAMILY_PARTICLE .and. &
+         IF (materials(i)%family_id == FAMILY_PARTICLE .and. &
              .not. lifecycle_particle_hooks_complete(lifecycle(i))) &
             CALL lifecycle_error ('particle provider is missing required route lifecycle hooks')
-         IF (tracers(i)%reaction_mode == REACTION_PROVIDER .and. &
+         IF (materials(i)%reaction_mode == REACTION_PROVIDER .and. &
              .not. lifecycle_reaction_hooks_present(lifecycle(i))) &
             CALL lifecycle_error ('reaction provider is missing a reaction-step hook')
       ENDDO
-   END SUBROUTINE tracer_lifecycle_validate
+   END SUBROUTINE material_lifecycle_validate
 
-   SUBROUTINE tracer_lifecycle_report_registry ()
+   SUBROUTINE material_lifecycle_report_registry ()
       integer :: i
       character(len=32) :: provider, hook_groups
 
@@ -321,32 +321,32 @@ CONTAINS
          IF (len_trim(provider_name(i)) > 0) provider = trim(provider_name(i))
          hook_groups = lifecycle_hook_groups(lifecycle(i))
          WRITE (*,'(A,I0,A,A,A,A,A,A,A,A,A,A,A,A)') &
-            '  [', i, '] name=', trim(tracers(i)%name), &
-            ' family=', trim(family_label(tracers(i)%family_id)), &
-            ' owner=', trim(owner_label(tracers(i)%state_owner)), &
-            ' reaction=', trim(reaction_label(tracers(i)%reaction_mode)), &
+            '  [', i, '] name=', trim(materials(i)%name), &
+            ' family=', trim(family_label(materials(i)%family_id)), &
+            ' owner=', trim(owner_label(materials(i)%state_owner)), &
+            ' reaction=', trim(reaction_label(materials(i)%reaction_mode)), &
             ' provider=', trim(provider), ' hooks=', trim(hook_groups)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_report_registry
+   END SUBROUTINE material_lifecycle_report_registry
 
-   integer FUNCTION tracer_lifecycle_size ()
-      tracer_lifecycle_size = 0
-      IF (allocated(lifecycle)) tracer_lifecycle_size = size(lifecycle)
-   END FUNCTION tracer_lifecycle_size
+   integer FUNCTION material_lifecycle_size ()
+      material_lifecycle_size = 0
+      IF (allocated(lifecycle)) material_lifecycle_size = size(lifecycle)
+   END FUNCTION material_lifecycle_size
 
-   logical FUNCTION tracer_lifecycle_has_provider (imt)
+   logical FUNCTION material_lifecycle_has_provider (imt)
       integer, intent(in) :: imt
-      tracer_lifecycle_has_provider = lifecycle_row_registered(imt)
-   END FUNCTION tracer_lifecycle_has_provider
+      material_lifecycle_has_provider = lifecycle_row_registered(imt)
+   END FUNCTION material_lifecycle_has_provider
 
-   FUNCTION tracer_lifecycle_provider (imt) RESULT(provider)
+   FUNCTION material_lifecycle_provider (imt) RESULT(provider)
       integer, intent(in) :: imt
       character(len=32) :: provider
       provider = ''
       IF (lifecycle_row_registered(imt)) provider = provider_name(imt)
-   END FUNCTION tracer_lifecycle_provider
+   END FUNCTION material_lifecycle_provider
 
-   SUBROUTINE tracer_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
+   SUBROUTINE material_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
       integer, intent(in) :: numpatch, lc_year, jdate(3)
       character(len=*), intent(in) :: casename, dir_restart, dir_landdata
       character(len=*), intent(in), optional :: file_restart
@@ -356,9 +356,9 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%land_init)) &
             CALL lifecycle(i)%land_init(numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_init
+   END SUBROUTINE material_lifecycle_land_init
 
-   SUBROUTINE tracer_lifecycle_land_read_restart (file_restart)
+   SUBROUTINE material_lifecycle_land_read_restart (file_restart)
       character(len=*), intent(in) :: file_restart
       integer :: i
       IF (.not. allocated(lifecycle)) RETURN
@@ -366,9 +366,9 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%land_read_restart)) &
             CALL lifecycle(i)%land_read_restart(file_restart)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_read_restart
+   END SUBROUTINE material_lifecycle_land_read_restart
 
-   SUBROUTINE tracer_lifecycle_land_write_restart (file_restart, compress)
+   SUBROUTINE material_lifecycle_land_write_restart (file_restart, compress)
       character(len=*), intent(in) :: file_restart
       integer, intent(in) :: compress
       integer :: i
@@ -377,9 +377,9 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%land_write_restart)) &
             CALL lifecycle(i)%land_write_restart(file_restart, compress)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_write_restart
+   END SUBROUTINE material_lifecycle_land_write_restart
 
-   SUBROUTINE tracer_lifecycle_lake_step (istep_local, ipatch, idate, deltim_phy, isub, nsub)
+   SUBROUTINE material_lifecycle_lake_step (istep_local, ipatch, idate, deltim_phy, isub, nsub)
       integer, intent(in) :: istep_local, ipatch, idate(3), isub, nsub
       real(r8), intent(in) :: deltim_phy
       integer :: i
@@ -388,9 +388,9 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%lake_step)) &
             CALL lifecycle(i)%lake_step(istep_local, ipatch, idate, deltim_phy, isub, nsub)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_lake_step
+   END SUBROUTINE material_lifecycle_lake_step
 
-   SUBROUTINE tracer_lifecycle_wetland_decomp (ipatch, deltim)
+   SUBROUTINE material_lifecycle_wetland_decomp (ipatch, deltim)
       integer, intent(in) :: ipatch
       real(r8), intent(in) :: deltim
       integer :: i
@@ -399,9 +399,9 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%wetland_decomp)) &
             CALL lifecycle(i)%wetland_decomp(ipatch, deltim)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_wetland_decomp
+   END SUBROUTINE material_lifecycle_wetland_decomp
 
-   SUBROUTINE tracer_lifecycle_soil_step (istep_local, ipatch, idate, deltim)
+   SUBROUTINE material_lifecycle_soil_step (istep_local, ipatch, idate, deltim)
       integer, intent(in) :: istep_local, ipatch, idate(3)
       real(r8), intent(in) :: deltim
       integer :: i
@@ -410,26 +410,26 @@ CONTAINS
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%soil_step)) &
             CALL lifecycle(i)%soil_step(istep_local, ipatch, idate, deltim)
       ENDDO
-   END SUBROUTINE tracer_lifecycle_soil_step
+   END SUBROUTINE material_lifecycle_soil_step
 
-   SUBROUTINE tracer_lifecycle_land_report ()
+   SUBROUTINE material_lifecycle_land_report ()
       integer :: i
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%report)) CALL lifecycle(i)%report()
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_report
+   END SUBROUTINE material_lifecycle_land_report
 
-   SUBROUTINE tracer_lifecycle_land_flush_acc_fluxes ()
+   SUBROUTINE material_lifecycle_land_flush_acc_fluxes ()
       integer :: i
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%flush_acc_fluxes)) &
             CALL lifecycle(i)%flush_acc_fluxes()
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_flush_acc_fluxes
+   END SUBROUTINE material_lifecycle_land_flush_acc_fluxes
 
-   SUBROUTINE tracer_lifecycle_land_history_sidecar (file_hist_acc, writing)
+   SUBROUTINE material_lifecycle_land_history_sidecar (file_hist_acc, writing)
       character(len=*), intent(in) :: file_hist_acc
       logical, intent(in) :: writing
       integer :: i
@@ -444,18 +444,18 @@ CONTAINS
                CALL lifecycle(i)%land_history_sidecar_read(file_hist_acc)
          ENDIF
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_history_sidecar
+   END SUBROUTINE material_lifecycle_land_history_sidecar
 
-   SUBROUTINE tracer_lifecycle_land_accumulate_fluxes ()
+   SUBROUTINE material_lifecycle_land_accumulate_fluxes ()
       integer :: i
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%accumulate_fluxes)) &
             CALL lifecycle(i)%accumulate_fluxes()
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_accumulate_fluxes
+   END SUBROUTINE material_lifecycle_land_accumulate_fluxes
 
-   SUBROUTINE tracer_lifecycle_land_history (file_hist, itime_in_file, sumarea, filter, &
+   SUBROUTINE material_lifecycle_land_history (file_hist, itime_in_file, sumarea, filter, &
       nl_soil, forcing_has_missing_value, forcmask_pch)
       character(len=*), intent(in) :: file_hist
       integer, intent(in) :: itime_in_file, nl_soil
@@ -510,7 +510,7 @@ CONTAINS
          ENDIF
       ENDDO
       deallocate(callback_filter)
-   END SUBROUTINE tracer_lifecycle_land_history
+   END SUBROUTINE material_lifecycle_land_history
 
    SUBROUTINE mt_lifecycle_land_save_lulcc_state ()
       integer :: i
@@ -546,29 +546,29 @@ CONTAINS
       ENDDO
    END SUBROUTINE mt_lifecycle_land_reload_lulcc_inputs
 
-   logical FUNCTION tracer_lifecycle_has_levee_flood_publisher ()
+   logical FUNCTION material_lifecycle_has_levee_flood_publisher ()
       integer :: i
-      tracer_lifecycle_has_levee_flood_publisher = .false.
+      material_lifecycle_has_levee_flood_publisher = .false.
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%publish_levee_flood)) THEN
-            tracer_lifecycle_has_levee_flood_publisher = .true.
+            material_lifecycle_has_levee_flood_publisher = .true.
             RETURN
          ENDIF
       ENDDO
-   END FUNCTION tracer_lifecycle_has_levee_flood_publisher
+   END FUNCTION material_lifecycle_has_levee_flood_publisher
 
-   logical FUNCTION tracer_lifecycle_has_flood_publisher ()
+   logical FUNCTION material_lifecycle_has_flood_publisher ()
       integer :: i
-      tracer_lifecycle_has_flood_publisher = .false.
+      material_lifecycle_has_flood_publisher = .false.
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%publish_flood)) THEN
-            tracer_lifecycle_has_flood_publisher = .true.
+            material_lifecycle_has_flood_publisher = .true.
             RETURN
          ENDIF
       ENDDO
-   END FUNCTION tracer_lifecycle_has_flood_publisher
+   END FUNCTION material_lifecycle_has_flood_publisher
 
    SUBROUTINE mt_lifecycle_publish_levee_flood_patch (fldfrc_patch)
       real(r8), intent(in) :: fldfrc_patch(:)
@@ -590,14 +590,14 @@ CONTAINS
       ENDDO
    END SUBROUTINE mt_lifecycle_publish_flood_patch
 
-   SUBROUTINE tracer_lifecycle_land_final ()
+   SUBROUTINE material_lifecycle_land_final ()
       integer :: i
       IF (.not. allocated(lifecycle)) RETURN
       DO i = 1, size(lifecycle)
          IF (lifecycle_row_registered(i) .and. associated(lifecycle(i)%land_final)) &
             CALL lifecycle(i)%land_final()
       ENDDO
-   END SUBROUTINE tracer_lifecycle_land_final
+   END SUBROUTINE material_lifecycle_land_final
 
    logical FUNCTION mt_lifecycle_route_has_active ()
       integer :: i
@@ -744,7 +744,7 @@ CONTAINS
    END FUNCTION lifecycle_row_registered
 
    logical FUNCTION lifecycle_hooks_present (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
 
       lifecycle_hooks_present = associated(hooks%land_init) .or. &
          associated(hooks%land_read_restart) .or. associated(hooks%land_write_restart) .or. &
@@ -759,7 +759,7 @@ CONTAINS
    END FUNCTION lifecycle_hooks_present
 
    logical FUNCTION lifecycle_route_hooks_present (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
 
       lifecycle_route_hooks_present = associated(hooks%route_init) .or. &
          associated(hooks%route_read_restart) .or. associated(hooks%route_write_restart) .or. &
@@ -769,14 +769,14 @@ CONTAINS
    END FUNCTION lifecycle_route_hooks_present
 
    logical FUNCTION lifecycle_gas_hooks_complete (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
       lifecycle_gas_hooks_complete = associated(hooks%land_init) .and. &
          associated(hooks%land_read_restart) .and. associated(hooks%land_write_restart) .and. &
          associated(hooks%land_history) .and. associated(hooks%land_final)
    END FUNCTION lifecycle_gas_hooks_complete
 
    logical FUNCTION lifecycle_particle_hooks_complete (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
       lifecycle_particle_hooks_complete = associated(hooks%route_init) .and. &
          associated(hooks%route_read_restart) .and. associated(hooks%route_write_restart) .and. &
          associated(hooks%route_calc) .and. associated(hooks%route_history) .and. &
@@ -784,7 +784,7 @@ CONTAINS
    END FUNCTION lifecycle_particle_hooks_complete
 
    logical FUNCTION lifecycle_reaction_hooks_present (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
       lifecycle_reaction_hooks_present = associated(hooks%lake_step) .or. &
          associated(hooks%wetland_decomp) .or. associated(hooks%soil_step)
    END FUNCTION lifecycle_reaction_hooks_present
@@ -835,7 +835,7 @@ CONTAINS
    END FUNCTION reaction_label
 
    character(len=32) FUNCTION lifecycle_hook_groups (hooks)
-      type(tracer_lifecycle_hooks_type), intent(in) :: hooks
+      type(material_lifecycle_hooks_type), intent(in) :: hooks
       logical :: has_land, has_reaction, has_route
 
       has_land = associated(hooks%land_init) .or. associated(hooks%land_read_restart) .or. &
@@ -912,9 +912,9 @@ CONTAINS
          IF (end_pos >= start_pos) THEN
             IF (len_trim(adjustl(aliases(start_pos:end_pos))) > len(item)) &
                CALL lifecycle_error ('provider alias exceeds material-name length')
-            item = tracer_upper(adjustl(trim(aliases(start_pos:end_pos))))
+            item = material_upper(adjustl(trim(aliases(start_pos:end_pos))))
             IF (len_trim(item) > 0) THEN
-               IF (trim(item) == trim(tracer_upper(name))) &
+               IF (trim(item) == trim(material_upper(name))) &
                   CALL lifecycle_error ('duplicate provider name in alias list')
                DO j = 1, nseen
                   IF (trim(item) == trim(seen(j))) CALL lifecycle_error ('duplicate provider alias')

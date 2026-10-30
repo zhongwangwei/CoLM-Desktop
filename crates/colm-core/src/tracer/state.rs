@@ -48,7 +48,7 @@ pub struct TracerPools {
 }
 
 impl TracerPools {
-    /// `allocate_Tracer_Vars` 的初值：全 0，`leaf_peclet = 1`，叶水 δ 取 `init_delta`。
+    /// `allocate_Material_Vars` 的初值：全 0，`leaf_peclet = 1`，叶水 δ 取 `init_delta`。
     pub fn allocated(init_delta: f64) -> Self {
         Self {
             ldew_rain: 0.0,
@@ -92,7 +92,7 @@ pub struct TracerStep {
     pub numerical_water_step: f64,
 }
 
-/// 逐示踪物的 history 累加器（`a_trc_*` 与按示踪物分的 `a_water_*`）。
+/// 逐示踪物的 history 累加器（`a_mt_*` 与按示踪物分的 `a_water_*`）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TracerAccumulators {
     pub precip: f64,
@@ -169,7 +169,7 @@ pub struct PatchTracerState {
 }
 
 impl PatchTracerState {
-    /// 新分配的状态（`allocate_Tracer_Vars`）。
+    /// 新分配的状态（`allocate_Material_Vars`）。
     pub fn allocated(set: &TracerSet) -> Self {
         let n = set.len();
         Self {
@@ -191,7 +191,7 @@ impl PatchTracerState {
         }
     }
 
-    /// `flush_Tracer_Acc`：history 写出后清零累加器与本步临时量。
+    /// `flush_Material_Acc`：history 写出后清零累加器与本步临时量。
     pub fn flush_accumulators(&mut self) {
         for acc in &mut self.acc {
             *acc = TracerAccumulators::default();

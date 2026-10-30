@@ -516,13 +516,13 @@ impl HistoryBuffers {
     }
 
     /// 示踪物 history 文件（`<case>_hist_tracer_<cdate>.nc`）：网格骨架、`time` 与两个窗口
-    /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`tracer_hist_out`
+    /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`mt_hist_out`
     /// 对每个输运示踪物才加变量）。
     pub fn write_tracer_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
         self.write_tracer_gridded(path.as_ref(), &[])
     }
 
-    /// 网格示踪物文件（`tracer_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
+    /// 网格示踪物文件（`mt_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
     /// 网格窗口的值，二维 `(time, lat, lon)`、分层 `(time, soilsnow, lat, lon)`；`values` 按
     /// `(record, [layer,] cell)` 行主序，`cell = ilat*nlon + ilon`。
     /// 向量写出的示踪物文件（`HistForm = 'Vector'`）：单元维与主向量文件相同，但没有 `sensor` 维、

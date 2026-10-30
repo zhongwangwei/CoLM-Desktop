@@ -1,7 +1,7 @@
 //! 示踪物 history（`MOD_Tracer_Hist`）：步末累加与写出前的取值。
 //!
 //! [`tracer_hist_accumulate`] 是上游同名例程（CoLMMAIN 与冰川/水体 patch 调用）；
-//! [`TRACER_HISTORY_VARIABLES`] 按 `tracer_hist_out` 的写出顺序列出每个变量的名字、
+//! [`TRACER_HISTORY_VARIABLES`] 按 `mt_hist_out` 的写出顺序列出每个变量的名字、
 //! 维度、`DEF_hist_vars` 开关、long_name/units 与所用累加器；写出前的数值由
 //! [`single_point_value`]/[`single_point_soisno`]（`HistForm == 'Single'`，`patch` 维）
 //! 与 [`GridCell`]（`HistForm == 'Gridded'`，面积加权）给出。NetCDF 由运行时写。
@@ -10,7 +10,7 @@
 //! DELTA DIAGNOSTIC INVARIANT）：网格上质量与水量各自 `Σ area*v`，再相除。
 //!
 //! GIMPLE（`MOD_Tracer_Hist.F90`、`MOD_SpatialMapping.F90`、`MOD_Tracer_Defs.F90`）：
-//! * 累加全部是源码顺序的独立加法，`a_trc_wa_debt_mass - (wa*m)/w`；
+//! * 累加全部是源码顺序的独立加法，`a_mt_wa_debt_mass - (wa*m)/w`；
 //! * 叶水 `R_b = FMA(delta_b, 1e-3, 1)*ref_ratio`，`mass = R_b*moles`；
 //! * `mass_to_delta = ((m/w)/ref - 1)*1000` 独立舍入；
 //! * 单点三维比值 `((m/w)*nac)/nac`（`single_write_3d` 内部再除 `nac`）；
@@ -198,14 +198,17 @@ pub fn mass_to_delta(trc_mass: f64, water_mass: f64, ref_ratio: f64) -> f64 {
     }
 }
 
-/// `tracer_concentration_units`。
+/// `material_concentration_units`（旧名 `tracer_concentration_units`）。
+///
+/// 缺省单位随 MATERIAL 改名从 `tracer/water` 变成 `material/water`：它写进历史变量的
+/// `units` 属性，留旧名会让下游按"示踪物"去找单位。
 pub fn concentration_units(tracer: &TracerDescriptor) -> &'static str {
     match tracer.unit_kind.trim() {
         "ratio" => "R",
         "mass_fraction" => "kg/kg water",
         "volume_fraction" => "m3/m3 water",
         "species_owned" => "species-owned",
-        _ => "tracer/water",
+        _ => "material/water",
     }
 }
 
@@ -438,31 +441,31 @@ use TracerHistId as Id;
 use TracerHistKind::{AreaState, LayerRatio, Mean, Ratio};
 use TracerScope::{Isotope, NonIsotope, NonvolatileSolute, Transport};
 
-/// `tracer_hist_out` 逐示踪物写出的全部变量，按写出顺序。
+/// `mt_hist_out` 逐示踪物写出的全部变量，按写出顺序。
 #[rustfmt::skip]
 pub const TRACER_HISTORY_VARIABLES: [TracerHistoryVariable; 28] = [
     var(Id::DeltaPrecip, "f_mt_delta_precip_", Surface, PRECIP_KEYS, Isotope, FLUX_DELTA,
         Plain("precipitation plus dew/frost deposition tracer delta"), PERMIL,
-        "a_trc_precip / a_water_precip"),
+        "a_mt_precip / a_water_precip"),
     var(Id::DeltaRunoff, "f_mt_delta_runoff_", Surface, &["rnof"], Isotope, FLUX_DELTA,
-        Plain("total runoff tracer delta"), PERMIL, "a_trc_rnof / a_water_rnof"),
+        Plain("total runoff tracer delta"), PERMIL, "a_mt_rnof / a_water_rnof"),
     var(Id::DeltaEvap, "f_mt_delta_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
-        Plain("evapotranspiration tracer delta"), PERMIL, "a_trc_evap / a_water_evap_gross"),
+        Plain("evapotranspiration tracer delta"), PERMIL, "a_mt_evap / a_water_evap_gross"),
     var(Id::EvapMass, "f_mt_evap_mass_", Surface, &["fevpa"], Isotope, Mean,
-        Plain("signed evapotranspiration tracer mass"), AMOUNT, "a_trc_evap / nac"),
+        Plain("signed evapotranspiration tracer mass"), AMOUNT, "a_mt_evap / nac"),
     var(Id::DeltaSoilevap, "f_mt_delta_soilevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
-        Plain("soil/surface evaporation tracer delta"), PERMIL, "a_trc_soilevap / a_water_soilevap"),
+        Plain("soil/surface evaporation tracer delta"), PERMIL, "a_mt_soilevap / a_water_soilevap"),
     var(Id::DeltaCanopyevap, "f_mt_delta_canopyevap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
-        Plain("canopy evaporation tracer delta"), PERMIL, "a_trc_canopyevap / a_water_canopyevap"),
+        Plain("canopy evaporation tracer delta"), PERMIL, "a_mt_canopyevap / a_water_canopyevap"),
     var(Id::DeltaSubl, "f_mt_delta_subl_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
-        Plain("sublimation tracer delta"), PERMIL, "a_trc_subl / a_water_subl"),
+        Plain("sublimation tracer delta"), PERMIL, "a_mt_subl / a_water_subl"),
     var(Id::DeltaWetlandEvap, "f_mt_delta_wetland_evap_", Surface, &["fevpa"], Isotope, FLUX_DELTA,
         Plain("wetland evaporation/sublimation tracer delta"), PERMIL,
-        "a_trc_wetland_evap / a_water_wetland_evap"),
+        "a_mt_wetland_evap / a_water_wetland_evap"),
     var(Id::DeltaTransp, "f_mt_delta_transp_", Surface, &["etr"], Isotope, FLUX_DELTA,
-        Plain("transpiration tracer delta"), PERMIL, "a_trc_transp / a_water_transp"),
+        Plain("transpiration tracer delta"), PERMIL, "a_mt_transp / a_water_transp"),
     var(Id::DeltaTranspSrc, "f_mt_delta_transp_src_", Surface, &["etr"], Isotope, FLUX_DELTA,
-        Plain("transpiration source/xylem tracer delta"), PERMIL, "a_trc_transp_src / a_water_transp"),
+        Plain("transpiration source/xylem tracer delta"), PERMIL, "a_mt_transp_src / a_water_transp"),
     var(Id::LeafDeltaE, "f_mt_leaf_delta_e_", Surface, &["etr"], Isotope, AreaState,
         Plain("leaf evaporation-site NSS delta, area-weighted state"), PERMIL,
         "trc_leaf_delta_e (state, not accumulated)"),
@@ -472,49 +475,49 @@ pub const TRACER_HISTORY_VARIABLES: [TracerHistoryVariable; 28] = [
     var(Id::ConcPrecip, "f_mt_conc_precip_", Surface, PRECIP_KEYS, NonIsotope, Ratio,
         SoluteNote("precipitation plus dew/frost deposition tracer concentration",
             ", dew/frost adding water only"), Units::RatioUnits,
-        "a_trc_precip / a_water_precip"),
+        "a_mt_precip / a_water_precip"),
     var(Id::ConcRunoff, "f_mt_conc_runoff_", Surface, &["rnof"], NonIsotope, Ratio,
-        Plain("total runoff tracer concentration"), Units::RatioUnits, "a_trc_rnof / a_water_rnof"),
+        Plain("total runoff tracer concentration"), Units::RatioUnits, "a_mt_rnof / a_water_rnof"),
     var(Id::VaporExchange, "f_mt_vapor_exchange_", Surface, &["fevpa"], Isotope, Mean,
         Plain("zero-water-flux equilibrium vapour exchange, signed"), AMOUNT,
-        "a_trc_vapor_exchange / nac"),
+        "a_mt_vapor_exchange / nac"),
     var(Id::SurfaceResidue, "f_mt_surface_residue_", Surface, &["wdsrf"], NonvolatileSolute, Mean,
-        Plain("immobile surface tracer residue"), AMOUNT, "a_trc_surface_residue_mass / nac"),
+        Plain("immobile surface tracer residue"), AMOUNT, "a_mt_surface_residue_mass / nac"),
     var(Id::SubsurfaceResidue, "f_mt_subsurface_residue_", Surface, &["wa"], NonvolatileSolute,
         Mean, Plain("immobile subsurface tracer residue"), AMOUNT,
-        "a_trc_subsurface_residue_mass / nac"),
+        "a_mt_subsurface_residue_mass / nac"),
     var(Id::LayerDryInventory, "f_mt_layer_dry_inventory_", Surface, &["wliq_soisno"],
         NonvolatileSolute, Mean, Plain("dry snow/soil layer tracer inventory"), AMOUNT,
-        "a_trc_layer_dry_mass / nac"),
+        "a_mt_layer_dry_mass / nac"),
     var(Id::SolidInventory, "f_mt_solid_inventory_", Surface, &["wliq_soisno"], NonvolatileSolute,
-        Mean, Plain("precipitated solid tracer inventory"), AMOUNT, "a_trc_solid_mass / nac"),
+        Mean, Plain("precipitated solid tracer inventory"), AMOUNT, "a_mt_solid_mass / nac"),
     var(Id::ConcLdew, "f_mt_conc_ldew_", Surface, &["ldew"], Transport, Ratio,
-        RatioWord("canopy tracer "), Units::RatioUnits, "a_trc_ldew_mass / a_water_ldew"),
+        RatioWord("canopy tracer "), Units::RatioUnits, "a_mt_ldew_mass / a_water_ldew"),
     var(Id::ConcSoisno, "f_mt_conc_soisno_", SoilSnow, &["wliq_soisno"], Transport, LayerRatio,
         RatioWord("soil/snow layer tracer "), Units::RatioUnits,
-        "a_trc_snow_mass/a_water_snow (j<=0), a_trc_soil_mass/a_water_soil (j>=1)"),
+        "a_mt_snow_mass/a_water_snow (j<=0), a_mt_soil_mass/a_water_soil (j>=1)"),
     var(Id::ConcSnowpack, "f_mt_conc_snowpack_", Surface, &["scv"], Transport, Ratio,
         RatioWord("total snowpack tracer "), Units::RatioUnits,
-        "(a_trc_scv_mass + sum a_trc_snow_mass) / (a_water_scv + sum a_water_snow)"),
+        "(a_mt_scv_mass + sum a_mt_snow_mass) / (a_water_scv + sum a_water_snow)"),
     var(Id::DeltaSnowpack, "f_mt_delta_snowpack_", Surface, &["scv"], Isotope, STORE_DELTA,
         Plain("total snowpack tracer delta"), PERMIL,
-        "(a_trc_scv_mass + sum a_trc_snow_mass) / (a_water_scv + sum a_water_snow)"),
+        "(a_mt_scv_mass + sum a_mt_snow_mass) / (a_water_scv + sum a_water_snow)"),
     var(Id::ConcWa, "f_mt_conc_wa_", Surface, &["wa"], Transport, Ratio,
         RatioWord("aquifer tracer "), Units::RatioUnits,
-        "isotope: a_trc_aquifer_actual_mass / a_water_aquifer_actual; else a_trc_wa_mass / a_water_wa"),
+        "isotope: a_mt_aquifer_actual_mass / a_water_aquifer_actual; else a_mt_wa_mass / a_water_wa"),
     var(Id::ConcWaDebt, "f_mt_conc_wa_debt_", Surface, &["wa"], Transport, Ratio,
         RatioWord("aquifer debt tracer "), Units::RatioUnits,
-        "a_trc_wa_debt_mass / a_water_wa_debt"),
+        "a_mt_wa_debt_mass / a_water_wa_debt"),
     var(Id::ConcWdsrf, "f_mt_conc_wdsrf_", Surface, &["wdsrf"], Transport, Ratio,
-        RatioWord("surface water tracer "), Units::RatioUnits, "a_trc_wdsrf_mass / a_water_wdsrf"),
+        RatioWord("surface water tracer "), Units::RatioUnits, "a_mt_wdsrf_mass / a_water_wdsrf"),
     TracerHistoryVariable {
         patch_filter: PatchFilter::Wetland,
         ..var(Id::ConcWetwat, "f_mt_conc_wetwat_", Surface, &["wetwat"], Transport, Ratio,
             RatioWord("wetland pool tracer "), Units::RatioUnits,
-            "a_trc_wetwat_mass / a_water_wetwat")
+            "a_mt_wetwat_mass / a_water_wetwat")
     },
     var(Id::ConcScv, "f_mt_conc_scv_", Surface, &["scv"], Transport, Ratio,
-        RatioWord("thin-snow (scv) tracer "), Units::RatioUnits, "a_trc_scv_mass / a_water_scv"),
+        RatioWord("thin-snow (scv) tracer "), Units::RatioUnits, "a_mt_scv_mass / a_water_scv"),
 ];
 
 /// 查表。
@@ -609,7 +612,7 @@ pub fn patch_term(
     }
 }
 
-/// `tracer_hist_out` 为 `f_mt_conc_soisno_*` 拼的逐层 (质量, 水量)，层 -4..10；
+/// `mt_hist_out` 为 `f_mt_conc_soisno_*` 拼的逐层 (质量, 水量)，层 -4..10；
 /// 累计水量 `<= tiny` 的层两者都是 `spval`。
 pub fn soisno_layer_pairs(itrc: usize, state: &PatchTracerState) -> [(f64, f64); SOISNO_LAYERS] {
     let acc = &state.acc[itrc];

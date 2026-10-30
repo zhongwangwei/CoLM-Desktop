@@ -29,7 +29,7 @@
 //!   回流比值 `(FMA(excess, R_dep, rgt*(rrw-excess)/rgw))/rrw`；回流 `trc += (-e)*R` 是
 //!   `.FNMA`、积水回流 `.FMA`，`root_return_tracer_total` 同形；上限检查
 //!   `FMA(excess, R_dep, rgt) + max(1e-9|R|, 1e-12)`。
-//! * 雪顶层：霜 `trc_wice = FMA(dt, max(q,0)*R, trc_wice)`，`a_trc_precip` 同形，
+//! * 雪顶层：霜 `trc_wice = FMA(dt, max(q,0)*R, trc_wice)`，`a_mt_precip` 同形，
 //!   `a_water_precip += max(q,0)*dt` 与 `water_ice_pool` 共用这次舍入；露的示踪物
 //!   `dt*(max(q,0)*R)` 先舍入，`a_water_precip = FMA(dt, max(q,0), a)`；液池
 //!   `FMA(dt, FMA(fsno, pg_rain, max(qsdew,0)), wliq_bef)`。
@@ -37,11 +37,11 @@
 //!   `gwat_evap = max(FMS(dt, max(qseva,0), top_soil_evap) - …, 0)`；分开时
 //!   `trc_pool = FMA(trc_pg_rain, 1-fsno, trc_wdsrf+trc_gwat_snow)`；
 //!   `pending = max(FNMA(dt, late_ratio*max(qinfl,0), trc_pool), 0)`；负入渗的
-//!   `a_trc_qinfl = FMA(dt, ratio_layer(1)*qinfl, a)`，正入渗 `dt*(late_ratio*qinfl)` 先舍入
-//!   （同时进 `a_trc_qinfl` 与第 1 层）；`water_shadow(1) = FMA(dt, qinfl, ·)`。
+//!   `a_mt_qinfl = FMA(dt, ratio_layer(1)*qinfl, a)`，正入渗 `dt*(late_ratio*qinfl)` 先舍入
+//!   （同时进 `a_mt_qinfl` 与第 1 层）；`water_shadow(1) = FMA(dt, qinfl, ·)`。
 //! * 界面：`water_shadow(j) = FNMA(dt, qlayer, ·)`、`water_shadow(j+1) = FMA(dt, qlayer, ·)`，
 //!   示踪物通量 `dt*(q*R)` 先舍入；`qcharge` 两支的 `water_shadow(nl)` 都是 `FNMA(dt, q, ·)`。
-//! * 晚到积水的露 `pending = FMA(dew, R, pending)`，`a_trc_precip` 同形；第 1 层露/霜的
+//! * 晚到积水的露 `pending = FMA(dew, R, pending)`，`a_mt_precip` 同形；第 1 层露/霜的
 //!   `a_water_precip` 与 `water_shadow(1)` 是 `FMA(dt, q, ·)`。
 //! * 孤儿质量 `FNMA(actual_water, aquifer_ratio, actual_mass)`；灌溉储水的最后平衡用
 //!   `max(FNMA(dt, max(irrig,0), waterstorage), 0)`。
@@ -1505,7 +1505,7 @@ pub fn tracer_soil_water(
     Ok(())
 }
 
-/// 地下径流的三处累加（`a_trc_rsub`、`a_trc_rnof`、`trc_rnof_step`）。
+/// 地下径流的三处累加（`a_mt_rsub`、`a_mt_rnof`、`trc_rnof_step`）。
 fn book_rsub(state: &mut PatchTracerState, itrc: usize, flux: f64) {
     let acc = &mut state.acc[itrc];
     acc.rsub += flux;
@@ -1513,7 +1513,7 @@ fn book_rsub(state: &mut PatchTracerState, itrc: usize, flux: f64) {
     state.step[itrc].rnof_step += flux;
 }
 
-/// 地表径流的三处累加（`a_trc_rsur`、`a_trc_rnof`、`trc_rnof_step`）。
+/// 地表径流的三处累加（`a_mt_rsur`、`a_mt_rnof`、`trc_rnof_step`）。
 fn book_rsur(state: &mut PatchTracerState, itrc: usize, flux: f64) {
     let acc = &mut state.acc[itrc];
     acc.rsur = flux + acc.rsur;

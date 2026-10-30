@@ -3,10 +3,10 @@
 MODULE MOD_MT_Rest
 
    USE MOD_Precision
-   USE MOD_MT_Defs, only: nmts, tracer_init_water_ratio, mt_tiny, &
-      mt_water_min_for_ratio, tracers, tracer_uses_delta_diagnostics, mt_uses_generic_water, &
-      tracer_is_nonvolatile_solute, tracer_is_isotope, tracer_aquifer_isotope_state_valid, &
-      tracer_build_descriptor_identity, TRACER_DESCRIPTOR_IDENTITY_WIDTH
+   USE MOD_MT_Defs, only: nmts, material_init_water_ratio, mt_tiny, &
+      mt_water_min_for_ratio, materials, material_uses_delta_diagnostics, mt_uses_generic_water, &
+      material_is_nonvolatile_solute, material_is_isotope, material_aquifer_isotope_state_valid, &
+      material_build_descriptor_identity, MATERIAL_DESCRIPTOR_IDENTITY_WIDTH
    USE MOD_MT_Solute, only: mt_equilibrate_dissolved
    USE MOD_MT_Vars
    USE MOD_LandPatch, only: landpatch
@@ -17,17 +17,17 @@ MODULE MOD_MT_Rest
    USE MOD_NetCDFSerial, only: ncio_var_exist, ncio_inquire_varsize, ncio_read_serial, &
       ncio_write_serial, ncio_define_dimension
    USE MOD_NetCDFVector, only: ncio_read_vector, ncio_write_vector
-   USE MOD_MT_Lifecycle, only: tracer_lifecycle_land_write_restart
-   USE MOD_MT_Forcing, only: tracer_forcing_write_restart
+   USE MOD_MT_Lifecycle, only: material_lifecycle_land_write_restart
+   USE MOD_MT_Forcing, only: material_forcing_write_restart
    USE MOD_SPMD_Task, only: CoLM_stop
 
    IMPLICIT NONE
 
    integer, parameter :: LAND_MT_RESTART_SCHEMA_VERSION = 5
-   integer, parameter :: LAND_MT_DESCRIPTOR_FIELDS = TRACER_DESCRIPTOR_IDENTITY_WIDTH
+   integer, parameter :: LAND_MT_DESCRIPTOR_FIELDS = MATERIAL_DESCRIPTOR_IDENTITY_WIDTH
    real(r8), parameter :: LAND_MT_RESTART_NEGATIVE_DUST = 1.0e-12_r8
 
-   PRIVATE :: tracer_dim_matches, land_mt_descriptor_matches, &
+   PRIVATE :: material_dim_matches, land_mt_descriptor_matches, &
       write_land_mt_descriptor_metadata, write_land_mt_transaction_marker, &
       land_transport_mt_count, read_transport_patch_field, &
       read_transport_soilsnow_field, pack_transport_patch, &
@@ -58,7 +58,7 @@ CONTAINS
    ! read past the buffer. Detect the mismatch up front so the caller
    ! can fall back to mt_init_from_water instead of crashing.
    !-------------------------------------------------------------------
-   logical FUNCTION tracer_dim_matches (file_restart, varname, expect_soilsnow, patch_only)
+   logical FUNCTION material_dim_matches (file_restart, varname, expect_soilsnow, patch_only)
 #ifdef USEMPI
       USE MOD_SPMD_Task, only: p_is_io, p_comm_glb, p_err, &
          MPI_IN_PLACE, MPI_INTEGER, MPI_SUM
@@ -68,7 +68,7 @@ CONTAINS
       IMPLICIT NONE
       character(len=*), intent(in) :: file_restart, varname
       ! Optional second-dimension size (soilsnow extent = nl_soil-maxsnl).
-      ! When present, tracer_dim_matches additionally requires
+      ! When present, material_dim_matches additionally requires
       ! varsize(2) == expect_soilsnow; this guards against a restart
       ! written with different maxsnl / nl_soil values, which would
       ! otherwise pass the row-count-only check and then silently misalign
@@ -90,7 +90,7 @@ CONTAINS
 
       ! Vector restart files are split by block via get_filename_block().
       ! Checking the unsuffixed base filename makes hot starts look like
-      ! old/missing tracer restarts and silently reinitializes NSS state.
+      ! old/missing material restarts and silently reinitializes NSS state.
       IF (p_is_io) THEN
          counts(1) = landpatch%nblkgrp
          DO iblkgrp = 1, landpatch%nblkgrp
@@ -123,9 +123,9 @@ CONTAINS
       CALL mpi_allreduce(MPI_IN_PLACE, counts, 3, MPI_INTEGER, MPI_SUM, p_comm_glb, p_err)
 #endif
 
-      tracer_dim_matches = ntransport > 0 .and. counts(1) > 0 .and. &
+      material_dim_matches = ntransport > 0 .and. counts(1) > 0 .and. &
          counts(2) == counts(1) .and. counts(3) == 0
-   END FUNCTION tracer_dim_matches
+   END FUNCTION material_dim_matches
 
    logical FUNCTION land_mt_descriptor_matches (file_restart, state_present, restart_schema)
 #ifdef USEMPI
@@ -160,11 +160,11 @@ CONTAINS
       require_isotope_reference = .false.
       IF (DEF_USE_VariablySaturatedFlow) THEN
          DO imt = 1, nmts
-            IF (mt_uses_generic_water(imt) .and. tracer_is_isotope(imt)) &
+            IF (mt_uses_generic_water(imt) .and. material_is_isotope(imt)) &
                require_isotope_reference = .true.
          ENDDO
       ENDIF
-      CALL tracer_build_descriptor_identity(expected, transport_only=.true.)
+      CALL material_build_descriptor_identity(expected, transport_only=.true.)
 
       IF (p_is_io) THEN
          DO iblkgrp = 1, landpatch%nblkgrp
@@ -182,7 +182,7 @@ CONTAINS
             ! when every block is old: the caller cold-starts the entire generic
             ! land domain before any vector scatter.
             IF (.not. has_commit) THEN
-               ! A pre-transactional file is an old generic tracer restart
+               ! A pre-transactional file is an old generic material restart
                ! only if it actually carries a generic prognostic pool.
                IF (ncio_var_exist(fileblock, 'mt_wa', readflag=.false.)) &
                   counts(6) = counts(6) + 1
@@ -465,7 +465,7 @@ CONTAINS
       integer, allocatable :: identity(:,:)
       character(len=256) :: fileblock
 
-      CALL tracer_build_descriptor_identity(identity, transport_only=.true.)
+      CALL material_build_descriptor_identity(identity, transport_only=.true.)
       IF (p_is_io) THEN
          DO iblkgrp = 1, landpatch%nblkgrp
             iblk = landpatch%xblkgrp(iblkgrp)
@@ -689,12 +689,12 @@ CONTAINS
       require_isotope_reference = .false.
       IF (DEF_USE_VariablySaturatedFlow) THEN
          DO imt = 1, nmts
-            IF (mt_uses_generic_water(imt) .and. tracer_is_isotope(imt)) &
+            IF (mt_uses_generic_water(imt) .and. material_is_isotope(imt)) &
                require_isotope_reference = .true.
          ENDDO
       ENDIF
       IF (p_is_worker) THEN
-#ifdef TRACER_SIGNED_SOIL_DEBT_EXPERIMENT
+#ifdef MATERIAL_SIGNED_SOIL_DEBT_EXPERIMENT
          IF (allocated(mt_wliq_soisno)) THEN
             IF (any(mt_wliq_soisno < 0._r8)) &
                CALL CoLM_stop('signed soil debt: rejected checkpoint; direct-kernel experiment only')
@@ -745,8 +745,8 @@ CONTAINS
                IF (.not. mt_uses_generic_water(imt)) CYCLE
                DO ip = 1, min(size(mt_aquifer_ref_water), size(mt_aquifer_ref_mass, 2))
                   expected_refmass = 0._r8
-                  IF (tracer_is_isotope(imt)) &
-                     expected_refmass = mt_aquifer_ref_water(ip) * tracers(imt)%ref_ratio
+                  IF (material_is_isotope(imt)) &
+                     expected_refmass = mt_aquifer_ref_water(ip) * materials(imt)%ref_ratio
                   IF (.not. ieee_is_finite(expected_refmass)) THEN
                      invalid_counts(7) = invalid_counts(7) + 1
                   ELSEIF (abs(mt_aquifer_ref_mass(imt, ip) - expected_refmass) > &
@@ -760,11 +760,11 @@ CONTAINS
             IF (allocated(mt_wa) .and. allocated(mt_aquifer_ref_water) .and. &
                 allocated(mt_aquifer_ref_mass)) THEN
                DO imt = 1, nmts
-                  IF (.not. tracer_is_isotope(imt)) CYCLE
+                  IF (.not. material_is_isotope(imt)) CYCLE
                   IF (.not. mt_uses_generic_water(imt)) CYCLE
                   DO ip = 1, min(size(wa), size(mt_wa, 2))
-                     IF (.not. tracer_aquifer_isotope_state_valid(wa(ip), mt_wa(imt, ip), &
-                           tracers(imt)%ref_ratio, mt_aquifer_ref_water(ip), &
+                     IF (.not. material_aquifer_isotope_state_valid(wa(ip), mt_wa(imt, ip), &
+                           materials(imt)%ref_ratio, mt_aquifer_ref_water(ip), &
                            mt_aquifer_ref_mass(imt, ip))) &
                         invalid_counts(6) = invalid_counts(6) + 1
                   ENDDO
@@ -874,7 +874,7 @@ CONTAINS
       ENDIF
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
-         R_init = tracer_init_water_ratio(imt)
+         R_init = material_init_water_ratio(imt)
          DO ip = 1, numpatch
             IF (present(patch_mask)) THEN
                IF (.not. patch_mask(ip)) CYCLE
@@ -893,18 +893,18 @@ CONTAINS
             ! aquifer-debt state (wa<0, recorded by the wetland branch at
             ! MOD_SoilSnowHydrology.F90:1200-1203) starts with a matching
             ! mt_wa<0. Without this the first wetland recovery step after a
-            ! cold tracer-start would see pool_water = wa_bef + inputs but
-            ! pool_tracer = 0 + inputs*R_atm (mt_wa_bef was clamped to 0),
+            ! cold material-start would see pool_water = wa_bef + inputs but
+            ! pool_material = 0 + inputs*R_atm (mt_wa_bef was clamped to 0),
             ! producing a 2× over-concentration in the recovered wetwat.
             ! wdsrf/wetwat stay with max(.,0) since WATER_VSF never leaves
             ! them negative by construction (overflow case L1196-1207).
-            IF (tracer_is_isotope(imt) .and. DEF_USE_VariablySaturatedFlow .and. &
+            IF (material_is_isotope(imt) .and. DEF_USE_VariablySaturatedFlow .and. &
                 DEF_MT_AQUIFER_MIXING_WATER_MM > 0._r8) THEN
                IF (.not. allocated(patchtype)) CALL CoLM_stop('missing patchtype for isotope aquifer reference')
                IF (ip > size(patchtype)) CALL CoLM_stop('missing patchtype for isotope aquifer reference')
                IF (patchtype(ip) == 0 .or. patchtype(ip) == 2) THEN
                   mt_aquifer_ref_water(ip) = DEF_MT_AQUIFER_MIXING_WATER_MM
-                  mt_aquifer_ref_mass(imt, ip) = mt_aquifer_ref_water(ip) * tracers(imt)%ref_ratio
+                  mt_aquifer_ref_mass(imt, ip) = mt_aquifer_ref_water(ip) * materials(imt)%ref_ratio
                   IF (wa(ip) + mt_aquifer_ref_water(ip) < 0._r8) &
                      CALL CoLM_stop('negative isotope aquifer mixing water at cold start')
                ENDIF
@@ -941,9 +941,9 @@ CONTAINS
                   EXIT
                ENDIF
             ENDDO
-            ! mt_scv holds the pre-layer snow tracer pool. It is only
+            ! mt_scv holds the pre-layer snow material pool. It is only
             ! populated when snl==0 (thin snow, no layer yet); once a
-            ! snow layer is created, tracer lives in mt_wice/wliq and
+            ! snow layer is created, material lives in mt_wice/wliq and
             ! mt_scv stays zero.
             IF (snl_local == 0) THEN
                mt_scv(imt, ip) = max(scv(ip), 0._r8) * R_init
@@ -985,7 +985,7 @@ CONTAINS
       IF (ntransport <= 0) THEN
          ! Provider-owned species have their own lifecycle restart callbacks.
          ! Validate any present transaction (marker=0/partial remains fatal),
-         ! but do not create or consume zero-length generic tracer dimensions.
+         ! but do not create or consume zero-length generic material dimensions.
          found_restart = .true.
          RETURN
       ENDIF
@@ -993,12 +993,12 @@ CONTAINS
       ! A missing commit marker is a legacy checkpoint and causes a coherent
       ! cold start.  Once a marker exists, the descriptor checker rejects
       ! incomplete metadata/transactions; a complete descriptor for another
-      ! tracer configuration is safe but incompatible and also cold-starts.
+      ! material configuration is safe but incompatible and also cold-starts.
       IF (.not. descriptor_matches) THEN
          active_isotope = .false.
          IF (DEF_USE_VariablySaturatedFlow) THEN
             DO imt = 1, nmts
-               IF (mt_uses_generic_water(imt) .and. tracer_is_isotope(imt)) &
+               IF (mt_uses_generic_water(imt) .and. material_is_isotope(imt)) &
                   active_isotope = .true.
             ENDDO
          ENDIF
@@ -1015,56 +1015,56 @@ CONTAINS
       ! Finish all collective probes before the first vector read so no worker
       ! can observe a partially scattered checkpoint.
       restart_complete = .true.
-      field_matches = tracer_dim_matches(file_restart, 'mt_ldew_rain')
+      field_matches = material_dim_matches(file_restart, 'mt_ldew_rain')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_ldew_snow')
+      field_matches = material_dim_matches(file_restart, 'mt_ldew_snow')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_wliq_soisno', &
+      field_matches = material_dim_matches(file_restart, 'mt_wliq_soisno', &
                                          expect_soilsnow=nl_soil-maxsnl)
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_wice_soisno', &
+      field_matches = material_dim_matches(file_restart, 'mt_wice_soisno', &
                                          expect_soilsnow=nl_soil-maxsnl)
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_solid_soisno', &
+      field_matches = material_dim_matches(file_restart, 'mt_solid_soisno', &
                                          expect_soilsnow=nl_soil-maxsnl)
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_wa')
+      field_matches = material_dim_matches(file_restart, 'mt_wa')
       restart_complete = restart_complete .and. field_matches
       IF (restart_schema == LAND_MT_RESTART_SCHEMA_VERSION) THEN
-         field_matches = tracer_dim_matches(file_restart, 'mt_aquifer_ref_water', patch_only=.true.)
+         field_matches = material_dim_matches(file_restart, 'mt_aquifer_ref_water', patch_only=.true.)
          restart_complete = restart_complete .and. field_matches
-         field_matches = tracer_dim_matches(file_restart, 'mt_aquifer_ref_mass')
+         field_matches = material_dim_matches(file_restart, 'mt_aquifer_ref_mass')
          restart_complete = restart_complete .and. field_matches
       ENDIF
-      field_matches = tracer_dim_matches(file_restart, 'mt_wdsrf')
+      field_matches = material_dim_matches(file_restart, 'mt_wdsrf')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_wetwat')
+      field_matches = material_dim_matches(file_restart, 'mt_wetwat')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_surface_residue')
+      field_matches = material_dim_matches(file_restart, 'mt_surface_residue')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_subsurface_residue')
+      field_matches = material_dim_matches(file_restart, 'mt_subsurface_residue')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_canopy_solid')
+      field_matches = material_dim_matches(file_restart, 'mt_canopy_solid')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_surface_solid')
+      field_matches = material_dim_matches(file_restart, 'mt_surface_solid')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_subsurface_solid')
+      field_matches = material_dim_matches(file_restart, 'mt_subsurface_solid')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_waterstorage_solid')
+      field_matches = material_dim_matches(file_restart, 'mt_waterstorage_solid')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_scv')
+      field_matches = material_dim_matches(file_restart, 'mt_scv')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_waterstorage')
+      field_matches = material_dim_matches(file_restart, 'mt_waterstorage')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_leaf_delta_e')
+      field_matches = material_dim_matches(file_restart, 'mt_leaf_delta_e')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_leaf_delta_b')
+      field_matches = material_dim_matches(file_restart, 'mt_leaf_delta_b')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_leaf_peclet')
+      field_matches = material_dim_matches(file_restart, 'mt_leaf_peclet')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_leaf_water_moles')
+      field_matches = material_dim_matches(file_restart, 'mt_leaf_water_moles')
       restart_complete = restart_complete .and. field_matches
-      field_matches = tracer_dim_matches(file_restart, 'mt_leaf_iso_storage')
+      field_matches = material_dim_matches(file_restart, 'mt_leaf_iso_storage')
       restart_complete = restart_complete .and. field_matches
       IF (.not. restart_complete) &
          CALL CoLM_stop('incomplete or malformed committed generic land material restart')
@@ -1111,12 +1111,12 @@ CONTAINS
 
    !-------------------------------------------------------------------
    ! Rebuild only mt_scv from the current scv state, leaving every
-   ! other tracer pool as-is. Used after read_land_mt_restart when
+   ! other material pool as-is. Used after read_land_mt_restart when
    ! the restart file was otherwise complete but lacked mt_scv (old
    ! format). Uses the same snl-from-water heuristic as
    ! mt_init_from_water to decide when mt_scv is meaningful.
    !-------------------------------------------------------------------
-   SUBROUTINE tracer_init_scv_from_water (numpatch, maxsnl, nl_soil, &
+   SUBROUTINE material_init_scv_from_water (numpatch, maxsnl, nl_soil, &
       wliq_soisno, wice_soisno, scv)
       IMPLICIT NONE
       integer,  intent(in) :: numpatch, maxsnl, nl_soil
@@ -1131,7 +1131,7 @@ CONTAINS
 
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
-         R_init = tracer_init_water_ratio(imt)
+         R_init = material_init_water_ratio(imt)
          DO ip = 1, numpatch
             snl_local = 0
             DO j = 0, maxsnl + 1, -1
@@ -1148,9 +1148,9 @@ CONTAINS
             ENDIF
          ENDDO
       ENDDO
-   END SUBROUTINE tracer_init_scv_from_water
+   END SUBROUTINE material_init_scv_from_water
 
-   SUBROUTINE tracer_init_waterstorage_from_ratio (numpatch, maxsnl, nl_soil, &
+   SUBROUTINE material_init_waterstorage_from_ratio (numpatch, maxsnl, nl_soil, &
       ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
       wa, wdsrf, wetwat, scv, waterstorage)
       IMPLICIT NONE
@@ -1166,14 +1166,14 @@ CONTAINS
       real(r8), intent(in) :: waterstorage(numpatch)
 
       integer  :: imt, ip, j, snl_local
-      real(r8) :: R_init, ratio, water_ref, tracer_ref, aquifer_water_ref, aquifer_mass_ref
+      real(r8) :: R_init, ratio, water_ref, material_ref, aquifer_water_ref, aquifer_mass_ref
 
       IF (nmts <= 0) RETURN
       IF (.not. allocated(mt_waterstorage)) RETURN
 
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
-         R_init = tracer_init_water_ratio(imt)
+         R_init = material_init_water_ratio(imt)
          DO ip = 1, numpatch
             snl_local = 0
             DO j = 0, maxsnl + 1, -1
@@ -1185,14 +1185,14 @@ CONTAINS
             ENDDO
             aquifer_water_ref = max(wa(ip), 0._r8)
             aquifer_mass_ref = max(mt_wa(imt, ip), 0._r8)
-            IF (tracer_is_isotope(imt) .and. mt_aquifer_ref_water(ip) > 0._r8) THEN
+            IF (material_is_isotope(imt) .and. mt_aquifer_ref_water(ip) > 0._r8) THEN
                aquifer_water_ref = max(wa(ip) + mt_aquifer_ref_water(ip), 0._r8)
                aquifer_mass_ref = max(mt_wa(imt, ip) + mt_aquifer_ref_mass(imt, ip), 0._r8)
             ENDIF
             water_ref = max(ldew_rain(ip), 0._r8) + max(ldew_snow(ip), 0._r8) &
                       + aquifer_water_ref + max(wdsrf(ip), 0._r8) &
                       + max(wetwat(ip), 0._r8) + max(scv(ip), 0._r8)
-            tracer_ref = max(mt_ldew_rain(imt, ip), 0._r8) &
+            material_ref = max(mt_ldew_rain(imt, ip), 0._r8) &
                        + max(mt_ldew_snow(imt, ip), 0._r8) &
                        + aquifer_mass_ref &
                        + max(mt_wdsrf(imt, ip), 0._r8) &
@@ -1200,12 +1200,12 @@ CONTAINS
                        + max(mt_scv(imt, ip), 0._r8)
             DO j = snl_local + 1, nl_soil
                water_ref = water_ref + max(wliq_soisno(j, ip), 0._r8)
-               tracer_ref = tracer_ref + max(mt_wliq_soisno(imt, j, ip), 0._r8)
+               material_ref = material_ref + max(mt_wliq_soisno(imt, j, ip), 0._r8)
                water_ref = water_ref + max(wice_soisno(j, ip), 0._r8)
-               tracer_ref = tracer_ref + max(mt_wice_soisno(imt, j, ip), 0._r8)
+               material_ref = material_ref + max(mt_wice_soisno(imt, j, ip), 0._r8)
             ENDDO
             IF (water_ref > mt_water_min_for_ratio) THEN
-               ratio = tracer_ref / water_ref
+               ratio = material_ref / water_ref
             ELSE
                ratio = R_init
             ENDIF
@@ -1214,9 +1214,9 @@ CONTAINS
                mt_waterstorage(imt, ip), mt_waterstorage_solid(imt, ip))
          ENDDO
       ENDDO
-   END SUBROUTINE tracer_init_waterstorage_from_ratio
+   END SUBROUTINE material_init_waterstorage_from_ratio
 
-   SUBROUTINE tracer_enforce_solubility_from_water (numpatch, maxsnl, nl_soil, &
+   SUBROUTINE material_enforce_solubility_from_water (numpatch, maxsnl, nl_soil, &
       ldew_rain, wliq_soisno, wa, wdsrf, wetwat, waterstorage)
       integer, intent(in) :: numpatch, maxsnl, nl_soil
       real(r8), intent(in) :: ldew_rain(numpatch)
@@ -1225,7 +1225,7 @@ CONTAINS
       real(r8), intent(in), optional :: waterstorage(numpatch)
 
       integer :: imt, ip, j
-      real(r8) :: surface_water, surface_tracer
+      real(r8) :: surface_water, surface_material
 
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
@@ -1237,12 +1237,12 @@ CONTAINS
                   mt_wliq_soisno(imt, j, ip), mt_solid_soisno(imt, j, ip))
             ENDDO
             surface_water = max(wdsrf(ip), 0._r8) + max(wetwat(ip), 0._r8)
-            surface_tracer = mt_wdsrf(imt, ip) + mt_wetwat(imt, ip)
-            CALL mt_equilibrate_dissolved(imt, surface_water, surface_tracer, &
+            surface_material = mt_wdsrf(imt, ip) + mt_wetwat(imt, ip)
+            CALL mt_equilibrate_dissolved(imt, surface_water, surface_material, &
                mt_surface_solid(imt, ip))
             IF (surface_water > mt_water_min_for_ratio) THEN
-               mt_wdsrf(imt, ip) = surface_tracer * max(wdsrf(ip), 0._r8) / surface_water
-               mt_wetwat(imt, ip) = surface_tracer * max(wetwat(ip), 0._r8) / surface_water
+               mt_wdsrf(imt, ip) = surface_material * max(wdsrf(ip), 0._r8) / surface_water
+               mt_wetwat(imt, ip) = surface_material * max(wetwat(ip), 0._r8) / surface_water
             ELSE
                mt_wdsrf(imt, ip) = 0._r8
                mt_wetwat(imt, ip) = 0._r8
@@ -1255,7 +1255,7 @@ CONTAINS
             ENDIF
          ENDDO
       ENDDO
-   END SUBROUTINE tracer_enforce_solubility_from_water
+   END SUBROUTINE material_enforce_solubility_from_water
 
    SUBROUTINE write_land_mt_restart (file_restart, maxsnl, nl_soil, numpatch, &
       ldew_rain, ldew_snow, wliq_soisno, wice_soisno, wa, wdsrf, wetwat, scv, waterstorage)
@@ -1435,7 +1435,7 @@ CONTAINS
          'patch', landpatch, restart_patch, DEF_REST_CompressLevel)
 
       deallocate(restart_patch)
-      CALL tracer_forcing_write_restart(file_restart)
+      CALL material_forcing_write_restart(file_restart)
       CALL write_land_mt_transaction_marker(file_restart, 1)
    END SUBROUTINE write_land_mt_restart
 
@@ -1463,7 +1463,7 @@ CONTAINS
             ldew_rain, ldew_snow, wliq_soisno, wice_soisno, wa, wdsrf, wetwat, scv)
       ENDIF
 
-      CALL tracer_lifecycle_land_write_restart(file_restart, compress)
+      CALL material_lifecycle_land_write_restart(file_restart, compress)
 
    END SUBROUTINE write_mt_restart_all
 

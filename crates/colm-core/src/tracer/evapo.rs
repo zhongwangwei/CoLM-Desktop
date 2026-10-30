@@ -1,11 +1,11 @@
 //! THERMAL 之后的蒸散示踪物（`MOD_Tracer_Evapo`）。
 //!
 //! [`tracer_evapo`] 比较 THERMAL 前后的冠层与雪+土各层水量：减少的是蒸发/升华（按
-//! 有限水池损失离开，记进 `a_trc_evap` 及分类累加器），增加的是露/霜（带水汽比值进入，
-//! 记进 `a_trc_precip`）；冠层与各层的融化/冻结是内部转移，先按 THERMAL 报告的相变
+//! 有限水池损失离开，记进 `a_mt_evap` 及分类累加器），增加的是露/霜（带水汽比值进入，
+//! 记进 `a_mt_precip`）；冠层与各层的融化/冻结是内部转移，先按 THERMAL 报告的相变
 //! 质量搬运示踪物。雪层（`j < 1`）只做相变，大气交换由后面的 `snowwater` 镜像；
 //! 深层（`j > 1`）的残差不是大气通量，记成数值残差。
-//! [`tracer_flood_evap_loss`] 是洪水水池的蒸发损失（不进陆面 `a_trc_evap`）。
+//! [`tracer_flood_evap_loss`] 是洪水水池的蒸发损失（不进陆面 `a_mt_evap`）。
 //! [`tracer_snow_melt_carry`] 是 CoLMMAIN 紧随其后的无雪层 `scv` 融化携带。
 //!
 //! 分馏（`tracer_fractionation_active`）时蒸发按 Craig-Gordon、凝结按平衡（冰面 JM84 有效）
@@ -14,7 +14,7 @@
 //! 收缩形状取自 `MOD_Tracer_Evapo.F90` 的 GIMPLE：
 //! * 冠层露/霜：`trc_flux = d_external * ratio` 单独舍入后两处相加（不收缩）；
 //! * 第 1 层露/霜：`trc_wliq = FMA(trc_flux, ratio, trc_wliq)`、
-//!   `a_trc_precip = FMA(trc_flux, ratio, a_trc_precip)`（`trc_wice` 同）；
+//!   `a_mt_precip = FMA(trc_flux, ratio, a_mt_precip)`（`trc_wice` 同）；
 //! * `r_max = ref_ratio * (1 + 2000/1000)` 折成 `ref_ratio * 3.0`；
 //! * 洪水蒸发的风速 `sqrt(FMA(us, us, vs*vs))`（分馏路径）；
 //! * 其余相加相减均按源码从左到右独立舍入。
@@ -214,7 +214,7 @@ pub fn tracer_evapo(
         );
 
         // 湿叶与环境水汽的双向平衡交换（净水通量为零、示踪物通量非零，记进单独的
-        // `a_trc_vapor_exchange`；只对液相，`:248-262`）。
+        // `a_mt_vapor_exchange`；只对液相，`:248-262`）。
         if input.canopy_equilibration > 0.0
             && physics.fractionation_active(tracer)
             && !tracer.is_nonvolatile_solute()

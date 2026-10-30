@@ -3,7 +3,7 @@
 MODULE MOD_MT_Isotope_Registry
 
    USE MOD_Precision
-   USE MOD_MT_Defs, only: tracers, nmts, tracer_is_isotope, mt_tiny, tracer_lower
+   USE MOD_MT_Defs, only: materials, nmts, material_is_isotope, mt_tiny, material_lower
    USE MOD_SPMD_Task, only: CoLM_stop
 
    IMPLICIT NONE
@@ -128,7 +128,7 @@ CONTAINS
       find_registered_isotope_by_name = 0
       IF (.not. allocated(isotope_physics)) RETURN
       DO i = 1, n_isotope_physics
-         IF (trim(tracer_lower(isotope_physics(i)%name)) == trim(tracer_lower(name))) THEN
+         IF (trim(material_lower(isotope_physics(i)%name)) == trim(material_lower(name))) THEN
             find_registered_isotope_by_name = i
             RETURN
          ENDIF
@@ -142,11 +142,11 @@ CONTAINS
 
       find_isotope_physics = 0
       IF (imt < 1 .or. imt > nmts) RETURN
-      IF (.not. allocated(tracers)) RETURN
-      IF (.not. tracer_is_isotope(imt)) RETURN
+      IF (.not. allocated(materials)) RETURN
+      IF (.not. material_is_isotope(imt)) RETURN
       IF (.not. allocated(isotope_physics)) RETURN
 
-      lname = tracer_lower(trim(tracers(imt)%name))
+      lname = material_lower(trim(materials(imt)%name))
       DO i = 1, n_isotope_physics
          IF (isotope_name_matches(lname, isotope_physics(i)%name_patterns)) THEN
             find_isotope_physics = i
@@ -154,10 +154,10 @@ CONTAINS
          ENDIF
       ENDDO
 
-      IF (tracers(imt)%ref_ratio > 0._r8) THEN
+      IF (materials(imt)%ref_ratio > 0._r8) THEN
          DO i = 1, n_isotope_physics
             IF (isotope_physics(i)%ref_ratio_hint <= mt_tiny) CYCLE
-            IF (abs(tracers(imt)%ref_ratio - isotope_physics(i)%ref_ratio_hint) / &
+            IF (abs(materials(imt)%ref_ratio - isotope_physics(i)%ref_ratio_hint) / &
                 isotope_physics(i)%ref_ratio_hint < isotope_physics(i)%ref_ratio_tolerance) THEN
                find_isotope_physics = i
                RETURN
@@ -246,7 +246,7 @@ CONTAINS
       integer :: comma
 
       isotope_name_matches = .false.
-      rest = tracer_lower(trim(patterns))
+      rest = material_lower(trim(patterns))
       DO WHILE (len_trim(rest) > 0)
          comma = index(rest, ',')
          IF (comma > 0) THEN

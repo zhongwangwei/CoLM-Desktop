@@ -15,12 +15,12 @@ MODULE MOD_MT_LandPhase
    USE MOD_MT_SoilInit
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: DEF_USE_IRRIGATION
-   USE MOD_MT_Lifecycle, only: tracer_lifecycle_init, &
-      tracer_lifecycle_land_init, tracer_lifecycle_land_final, &
-      tracer_lifecycle_lake_step, &
-      tracer_lifecycle_wetland_decomp, tracer_lifecycle_soil_step, &
-      tracer_lifecycle_land_report, tracer_lifecycle_land_flush_acc_fluxes, &
-      tracer_lifecycle_land_accumulate_fluxes, tracer_lifecycle_land_read_restart
+   USE MOD_MT_Lifecycle, only: material_lifecycle_init, &
+      material_lifecycle_land_init, material_lifecycle_land_final, &
+      material_lifecycle_lake_step, &
+      material_lifecycle_wetland_decomp, material_lifecycle_soil_step, &
+      material_lifecycle_land_report, material_lifecycle_land_flush_acc_fluxes, &
+      material_lifecycle_land_accumulate_fluxes, material_lifecycle_land_read_restart
 
    IMPLICIT NONE
    PRIVATE
@@ -31,11 +31,11 @@ MODULE MOD_MT_LandPhase
       END SUBROUTINE mt_register_providers
    END INTERFACE
 
-   ! Land-side multi-phase TRACER facade. Keeps the implementation split
+   ! Land-side multi-phase MATERIAL facade. Keeps the implementation split
    ! across physics modules but exposes one import surface per host, so
-   ! drivers do not USE every low-level tracer module directly. NOTE: this
+   ! drivers do not USE every low-level material module directly. NOTE: this
    ! is a facade, not the engine -- per-step driving lives in the called
-   ! modules. River/lake ROUTING tracers are driven separately in HYDRO
+   ! modules. River/lake ROUTING materials are driven separately in HYDRO
    ! (MOD_Grid_RiverLakeFlow -> MOD_MT_Lifecycle) and are NOT re-exported
    ! here. PUBLIC declarations below are grouped by consuming host phase.
 
@@ -86,19 +86,19 @@ CONTAINS
       logical, intent(out), optional :: loaded_restart
       character(len=*), intent(out), optional :: restart_file
 
-      character(len=256) :: file_restart_trc
+      character(len=256) :: file_restart_mt
       character(len=14)  :: cdate_restart
       character(len=256) :: cyear_restart
-      real(r8), allocatable :: tracer_dummy_patch(:)
-      real(r8), allocatable :: tracer_dummy_soisno(:,:)
+      real(r8), allocatable :: material_dummy_patch(:)
+      real(r8), allocatable :: material_dummy_soisno(:,:)
       logical :: have_patch_state
       logical :: have_waterstorage
 
       write(cyear_restart,'(i4.4)') lc_year
       write(cdate_restart,'(i4.4,"-",i3.3,"-",i5.5)') jdate(1), jdate(2), jdate(3)
-      file_restart_trc = trim(dir_restart)//'/'//trim(cdate_restart)//'/'//trim(casename)// &
+      file_restart_mt = trim(dir_restart)//'/'//trim(cdate_restart)//'/'//trim(casename)// &
                          '_restart_'//trim(cdate_restart)//'_lc'//trim(cyear_restart)//'.nc'
-      IF (present(restart_file)) restart_file = file_restart_trc
+      IF (present(restart_file)) restart_file = file_restart_mt
       IF (present(loaded_restart)) loaded_restart = .false.
 
       have_patch_state = present(ldew_rain) .and. present(ldew_snow) .and. &
@@ -114,38 +114,38 @@ CONTAINS
          have_waterstorage = DEF_USE_IRRIGATION .and. present(waterstorage)
          IF (have_waterstorage) have_waterstorage = allocated(waterstorage)
          IF (have_waterstorage) THEN
-            CALL tracer_init_from_arrays (numpatch, maxsnl, nl_soil, &
+            CALL material_init_from_arrays (numpatch, maxsnl, nl_soil, &
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
-               wa, wdsrf, wetwat, scv, file_restart_trc, waterstorage, &
+               wa, wdsrf, wetwat, scv, file_restart_mt, waterstorage, &
                init_month=init_month, lc_year=lc_year, jdate=jdate, &
                casename=casename, dir_restart=dir_restart, dir_landdata=dir_landdata, &
                loaded_restart=loaded_restart)
          ELSE
-            CALL tracer_init_from_arrays (numpatch, maxsnl, nl_soil, &
+            CALL material_init_from_arrays (numpatch, maxsnl, nl_soil, &
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
-               wa, wdsrf, wetwat, scv, file_restart_trc, init_month=init_month, &
+               wa, wdsrf, wetwat, scv, file_restart_mt, init_month=init_month, &
                lc_year=lc_year, jdate=jdate, casename=casename, &
                dir_restart=dir_restart, dir_landdata=dir_landdata, loaded_restart=loaded_restart)
          ENDIF
       ELSE
          ! Vector restart I/O is collective over IO/worker groups. Non-worker
          ! ranks do not own patch water arrays, but they must still enter the
-         ! TRACER init path so vector restart reads can complete.
-         allocate(tracer_dummy_patch(0))
-         allocate(tracer_dummy_soisno(maxsnl+1:nl_soil, 0))
-         CALL tracer_init_from_arrays (0, maxsnl, nl_soil, &
-            tracer_dummy_patch, tracer_dummy_patch, &
-            tracer_dummy_soisno, tracer_dummy_soisno, &
-            tracer_dummy_patch, tracer_dummy_patch, tracer_dummy_patch, &
-            tracer_dummy_patch, file_restart_trc, init_month=init_month, &
+         ! MATERIAL init path so vector restart reads can complete.
+         allocate(material_dummy_patch(0))
+         allocate(material_dummy_soisno(maxsnl+1:nl_soil, 0))
+         CALL material_init_from_arrays (0, maxsnl, nl_soil, &
+            material_dummy_patch, material_dummy_patch, &
+            material_dummy_soisno, material_dummy_soisno, &
+            material_dummy_patch, material_dummy_patch, material_dummy_patch, &
+            material_dummy_patch, file_restart_mt, init_month=init_month, &
             lc_year=lc_year, jdate=jdate, casename=casename, &
             dir_restart=dir_restart, dir_landdata=dir_landdata, loaded_restart=loaded_restart)
-         deallocate(tracer_dummy_patch, tracer_dummy_soisno)
+         deallocate(material_dummy_patch, material_dummy_soisno)
       ENDIF
 
    END SUBROUTINE mt_land_init
 
-   SUBROUTINE tracer_init_from_arrays (numpatch, maxsnl, nl_soil, &
+   SUBROUTINE material_init_from_arrays (numpatch, maxsnl, nl_soil, &
       ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
       wa, wdsrf, wetwat, scv, file_restart, waterstorage, init_month, &
       lc_year, jdate, casename, dir_restart, dir_landdata, loaded_restart)
@@ -182,21 +182,21 @@ CONTAINS
       ! the new numpatch. Without this the allocate() call would trip
       ! Fortran's "already allocated" runtime check, OR the save-level
       ! snap_* arrays in MOD_MT_Conservation would keep the old
-      ! numpatch and then misalign with the new tracer arrays.
-      CALL tracer_lifecycle_land_final ()
-      CALL deallocate_Tracer_Vars()
+      ! numpatch and then misalign with the new material arrays.
+      CALL material_lifecycle_land_final ()
+      CALL deallocate_Material_Vars()
       CALL deallocate_mt_conservation()
-      CALL tracer_defs_init()
+      CALL material_defs_init()
       CALL mt_solute_read_parameters()
-      CALL tracer_defs_validate()
-      CALL tracer_lifecycle_init (mt_register_providers)
+      CALL material_defs_validate()
+      CALL material_lifecycle_init (mt_register_providers)
       IF (present(loaded_restart)) loaded_restart = .false.
       IF (present(lc_year) .and. present(jdate) .and. present(casename) .and. &
           present(dir_restart) .and. present(dir_landdata)) THEN
-         CALL tracer_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
+         CALL material_lifecycle_land_init (numpatch, lc_year, jdate, casename, dir_restart, dir_landdata, file_restart)
       ENDIF
       IF (nmts <= 0) RETURN
-      CALL allocate_Tracer_Vars(numpatch, maxsnl, nl_soil)
+      CALL allocate_Material_Vars(numpatch, maxsnl, nl_soil)
       found_restart = .false.
       scv_missing   = .false.
       waterstorage_missing = .false.
@@ -208,7 +208,7 @@ CONTAINS
       ! The control/master rank does not own vector restart blocks, so
       ! read_land_mt_restart can only make a local decision there.
       ! Make restart usability global before any cold-start path that
-      ! contains MPI collectives, including tracer soil initialisation.
+      ! contains MPI collectives, including material soil initialisation.
       CALL mpi_allreduce(MPI_IN_PLACE, found_restart, 1, MPI_LOGICAL, &
          MPI_LAND, p_comm_glb, p_err)
       CALL mpi_allreduce(MPI_IN_PLACE, scv_missing, 1, MPI_LOGICAL, &
@@ -232,38 +232,38 @@ CONTAINS
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
                wa, wdsrf, wetwat, scv)
          ENDIF
-         CALL tracer_soil_init_from_file(soil_init_month, numpatch, maxsnl, nl_soil, &
+         CALL material_soil_init_from_file(soil_init_month, numpatch, maxsnl, nl_soil, &
             wliq_soisno, wice_soisno)
       ELSE
          IF (waterstorage_missing .and. present(waterstorage)) THEN
-            CALL tracer_init_waterstorage_from_ratio(numpatch, maxsnl, nl_soil, &
+            CALL material_init_waterstorage_from_ratio(numpatch, maxsnl, nl_soil, &
                ldew_rain, ldew_snow, wliq_soisno, wice_soisno, &
                wa, wdsrf, wetwat, scv, waterstorage)
          ENDIF
          IF (scv_missing) THEN
             ! Old-format restart: every other pool loaded from file, only
             ! mt_scv needs to be rebuilt from the hydrology scv.
-            CALL tracer_init_scv_from_water(numpatch, maxsnl, nl_soil, &
+            CALL material_init_scv_from_water(numpatch, maxsnl, nl_soil, &
                wliq_soisno, wice_soisno, scv)
          ENDIF
       ENDIF
       ! Provider-owned state has its own restart schema and must not be gated
       ! by the generic land-water descriptor.  Each provider probes its own
       ! mandatory fields and no-ops when the checkpoint has no provider state.
-      IF (present(file_restart)) CALL tracer_lifecycle_land_read_restart(file_restart)
+      IF (present(file_restart)) CALL material_lifecycle_land_read_restart(file_restart)
       ! A committed restart already contains every dissolved/solid pool. Do not
       ! re-equilibrate it: that also mixes the distinct wetland/surface pools.
       ! Legacy/incompatible checkpoints take the cold-start branch above.
       IF (.not. found_restart) THEN
          IF (present(waterstorage)) THEN
-            CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
+            CALL material_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
                ldew_rain, wliq_soisno, wa, wdsrf, wetwat, waterstorage)
          ELSE
-            CALL tracer_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
+            CALL material_enforce_solubility_from_water(numpatch, maxsnl, nl_soil, &
                ldew_rain, wliq_soisno, wa, wdsrf, wetwat)
          ENDIF
       ENDIF
-   END SUBROUTINE tracer_init_from_arrays
+   END SUBROUTINE material_init_from_arrays
 
    SUBROUTINE mt_resolve_step (istep_in, istep_local)
 
@@ -286,7 +286,7 @@ CONTAINS
       integer,  intent(in) :: isub
       integer,  intent(in) :: nsub
 
-      CALL tracer_lifecycle_lake_step (istep_local, ipatch, idate, deltim_phy, isub, nsub)
+      CALL material_lifecycle_lake_step (istep_local, ipatch, idate, deltim_phy, isub, nsub)
 
    END SUBROUTINE mt_lake_step
 
@@ -296,7 +296,7 @@ CONTAINS
       integer, intent(in) :: ipatch
       real(r8), intent(in) :: deltim
 
-      CALL tracer_lifecycle_wetland_decomp (ipatch, deltim)
+      CALL material_lifecycle_wetland_decomp (ipatch, deltim)
 
    END SUBROUTINE mt_wetland_decomp
 
@@ -308,7 +308,7 @@ CONTAINS
       integer,  intent(in) :: idate(3)
       real(r8), intent(in) :: deltim
 
-      CALL tracer_lifecycle_soil_step (istep_local, ipatch, idate, deltim)
+      CALL material_lifecycle_soil_step (istep_local, ipatch, idate, deltim)
 
    END SUBROUTINE mt_soil_step
 
@@ -316,8 +316,8 @@ CONTAINS
 
       IMPLICIT NONE
 
-      CALL tracer_balance_report ()
-      CALL tracer_lifecycle_land_report ()
+      CALL material_balance_report ()
+      CALL material_lifecycle_land_report ()
 
    END SUBROUTINE mt_report
 
@@ -325,7 +325,7 @@ CONTAINS
 
       IMPLICIT NONE
 
-      CALL tracer_lifecycle_land_flush_acc_fluxes ()
+      CALL material_lifecycle_land_flush_acc_fluxes ()
 
    END SUBROUTINE mt_flush_acc_fluxes
 
@@ -333,13 +333,13 @@ CONTAINS
 
       IMPLICIT NONE
 
-      CALL tracer_lifecycle_land_accumulate_fluxes ()
+      CALL material_lifecycle_land_accumulate_fluxes ()
 
    END SUBROUTINE mt_accumulate_fluxes
 
    SUBROUTINE mt_land_final ()
-      CALL tracer_lifecycle_land_final ()
-      CALL deallocate_Tracer_Vars()
+      CALL material_lifecycle_land_final ()
+      CALL deallocate_Material_Vars()
       CALL deallocate_mt_conservation()
    END SUBROUTINE mt_land_final
 

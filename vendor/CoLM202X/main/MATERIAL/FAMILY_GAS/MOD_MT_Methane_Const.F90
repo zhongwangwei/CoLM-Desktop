@@ -64,7 +64,7 @@ MODULE MOD_MT_Methane_Const
 !=======================================================================
 	USE MOD_Precision
 	USE MOD_SPMD_Task, only: CoLM_Stop, p_is_master
-	USE MOD_MT_Defs, only: tracer_lower
+	USE MOD_MT_Defs, only: material_lower
 	USE, INTRINSIC :: ieee_arithmetic, only: ieee_is_finite
 
 	IMPLICIT NONE
@@ -84,7 +84,7 @@ MODULE MOD_MT_Methane_Const
 	character(len=256) :: DEF_file_GIEMS = 'null'
 
 	!------------------------------------------------------------------
-	! Constants for the Methane reactive tracer
+	! Constants for the Methane reactive material
 	!------------------------------------------------------------------
 	! Note some of these constants are also used in CNNitrifDenitrifMod
 
@@ -144,9 +144,9 @@ MODULE MOD_MT_Methane_Const
 
    type Methane_type
       ! ---------------------------------------------------- CH4 species controls ----------------------------------------------------
-      ! These controls are private to the CH4 reactive tracer and are read from
+      ! These controls are private to the CH4 reactive material and are read from
       ! standard_ch4_parameter.nml with the rest of DEF_METHANE.  Keep the main
-      ! nl_colm namelist species-neutral; it should only map reactive tracer
+      ! nl_colm namelist species-neutral; it should only map reactive material
       ! names to parameter files via DEF_METHANE_PARAM_FILE.
       character(len=32) :: inundation_mode = 'hybrid'
       logical :: enable_rice_paddy = .false.
@@ -569,7 +569,7 @@ CONTAINS
 
 	      character(len=32) :: mode
 
-	      mode = tracer_lower(adjustl(trim(DEF_METHANE%inundation_mode)))
+	      mode = material_lower(adjustl(trim(DEF_METHANE%inundation_mode)))
 
 	      ! Reset only hydrology-mode-owned switches before dispatch so repeated
 	      ! calls cannot retain a previous mode.  Biome production, redox,
@@ -1105,7 +1105,7 @@ CONTAINS
       ENDIF
       IF (DEF_METHANE%use_transient_atm_methane .and. &
           (len_trim(DEF_METHANE%atm_methane_file) == 0 .or. &
-           trim(tracer_lower(adjustl(DEF_METHANE%atm_methane_file))) == 'null')) THEN
+           trim(material_lower(adjustl(DEF_METHANE%atm_methane_file))) == 'null')) THEN
          IF (p_is_master) write(6,*) &
             '***** ERROR: transient atmospheric CH4 requires atm_methane_file.'
          bad = .true.
@@ -1146,7 +1146,7 @@ CONTAINS
       methane_history_accumulation_mode = 0
       IF (.not. DEF_METHANE%write_ch4_history) RETURN
 
-      selector = tracer_lower(adjustl(trim(DEF_METHANE%ch4_history_vars)))
+      selector = material_lower(adjustl(trim(DEF_METHANE%ch4_history_vars)))
       SELECT CASE (trim(selector))
       CASE ('none', 'off', 'false', '.false.')
          methane_history_accumulation_mode = 0
@@ -1170,8 +1170,8 @@ CONTAINS
       methane_history_enabled = .false.
       IF (.not. DEF_METHANE%write_ch4_history) RETURN
 
-      list = tracer_lower(adjustl(trim(DEF_METHANE%ch4_history_vars)))
-      v    = tracer_lower(adjustl(trim(varname)))
+      list = material_lower(adjustl(trim(DEF_METHANE%ch4_history_vars)))
+      v    = material_lower(adjustl(trim(varname)))
 
       ! History gates are queried dozens of times per history write.  Cache
       ! the normalized selector/list so custom comma lists do not get reparsed

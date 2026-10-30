@@ -2,7 +2,7 @@
 
 MODULE MOD_MT_Methane_State
 !=======================================================================
-! Methane reactive-tracer state and restart fields.
+! Methane reactive-material state and restart fields.
 !=======================================================================
 
    USE MOD_Precision
@@ -244,7 +244,7 @@ MODULE MOD_MT_Methane_State
 	real(r8), allocatable :: co2_aere_tot         (:) ! total CO2 aerenchyma diagnostic (mol/m2/s)
 	real(r8), allocatable :: co2_net_tot          (:) ! net diagnosed CO2 source from CH4 module (mol/m2/s)
    real(r8), allocatable :: totcol_methane             (:) ! total methane in soil column, start of timestep (mol/m2)
-	real(r8), allocatable :: grnd_methane_cond         (:) ! effective tracer conductance incl. snow/pond resistance (m/s)
+	real(r8), allocatable :: grnd_methane_cond         (:) ! effective material conductance incl. snow/pond resistance (m/s)
    real(r8), allocatable :: conc_o2             (:,:) ! O2 conc in each soil layer (mol/m3)
 	real(r8), allocatable :: conc_methane            (:,:) ! CH4 conc in each soil layer (mol/m3)
    !!!! --------------------------------------------------------------------------------------------------------
@@ -323,8 +323,8 @@ MODULE MOD_MT_Methane_State
    real(r8), allocatable :: totcol_methane_unsat             (:)  ! total methane in soil column, start (unsaturated)     (mol/m2)
    real(r8), allocatable :: totcol_methane_sat               (:)  ! total methane in soil column, start (saturated)       (mol/m2)
 
-   real(r8), allocatable :: grnd_methane_cond_unsat         (:)  ! effective tracer conductance incl. snow/pond (unsaturated) (m/s)
-   real(r8), allocatable :: grnd_methane_cond_sat           (:)  ! effective tracer conductance incl. snow/pond (saturated) (m/s)
+   real(r8), allocatable :: grnd_methane_cond_unsat         (:)  ! effective material conductance incl. snow/pond (unsaturated) (m/s)
+   real(r8), allocatable :: grnd_methane_cond_sat           (:)  ! effective material conductance incl. snow/pond (saturated) (m/s)
 
    real(r8), allocatable :: conc_o2_unsat             (:,:)  ! O2 concentration in each soil layer (unsaturated)    (mol/m3)
    real(r8), allocatable :: conc_o2_sat               (:,:)  ! O2 concentration in each soil layer (saturated)      (mol/m3)
@@ -2735,7 +2735,7 @@ CONTAINS
       ! Concentrations, conductances, fractions, rates, and rolling diagnostics
       ! are remapped as intensive fields.  Column stocks and total per-area
       ! source/flux diagnostics are remapped as area-mass fields when both old
-      ! and new patch areas are available, matching land-water tracer LULCC
+      ! and new patch areas are available, matching land-water material LULCC
       ! semantics for extensive per-area pools.
       CALL remap1d_mass(lulcc_totcol_methane_old,       totcol_methane)
       CALL remap1d_mass(lulcc_co2_decomp_tot_old,       co2_decomp_tot)

@@ -20,7 +20,12 @@ pub(crate) fn descriptor(family: TracerFamily, ref_ratio: f64, init_conc: f64) -
         family,
         state_owner: StateOwner::GenericWater,
         reaction_mode: ReactionMode::None,
-        unit_kind: if isotope { "ratio" } else { "tracer_per_water" }.to_owned(),
+        unit_kind: if isotope {
+            "ratio"
+        } else {
+            "material_per_water"
+        }
+        .to_owned(),
         mol_weight: 18.0,
         ref_ratio,
         init_delta: 0.0,

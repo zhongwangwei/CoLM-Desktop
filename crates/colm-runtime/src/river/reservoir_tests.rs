@@ -53,3 +53,19 @@ fn a_dam_counts_from_its_build_year() {
     assert!(r.is_built(0, 1990));
     assert_eq!(r.identity(), vec![1.0, 1.0]);
 }
+
+#[test]
+fn method_two_is_rejected_with_the_upstream_status() {
+    // 上游本轮实现了 H22（`DEF_Reservoir_Method = 2`），本引擎不移植；报错必须说清这一点，
+    // 而不是退回旧的"reserved"措辞（那会和 vendor 里的 Fortran 状态矛盾）。
+    let error = check_method(2).unwrap_err().to_string();
+    assert!(error.contains("implemented upstream"), "{error}");
+    assert!(error.contains("not ported"), "{error}");
+    assert!(error.contains("method 1"), "{error}");
+    assert!(check_method(1).is_ok());
+    // 0 由调用方在进 `reservoir_init` 之前挡掉（上游同样不在 `> 0` 之外调用它）。
+    assert_eq!(
+        check_method(3).unwrap_err().to_string(),
+        "unsupported reservoir operation method 3"
+    );
+}

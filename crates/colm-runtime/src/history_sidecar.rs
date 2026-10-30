@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_core::{is_leap_year, month_day, month_lengths, CalendarTime};
+use colm_hist::schedule::HistoryFrequency;
 
 use crate::history_manifest::MANIFEST;
 
@@ -77,10 +79,10 @@ impl ManifestEntry {
 }
 
 /// 决定哪些累加器被分配的运行配置。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SidecarConfig {
-    /// `history_acc_freq()`：`DEF_HIST_FREQ` 的代码（none 0、TIMESTEP 1 … YEARLY 5）。
-    pub frequency_code: u8,
+    /// `DEF_HIST_FREQ`：决定旁车标记里的频率代码，也决定一个窗口有多少秒。
+    pub frequency: HistoryFrequency,
     /// `DEF_URBAN_RUN`：旁车多定义一个 `urban` 维。
     pub urban_run: bool,
     /// `numurban`：本算例的城市 patch 数。
@@ -91,6 +93,34 @@ pub struct SidecarConfig {
     /// 内核编进了 `GridRiverLakeFlow`（空间构建）：`history_schema = 2`，并多一个
     /// `history_river_required`（河道累加器有值时为 1，另写河道旁车）。
     pub river_lake_flow: bool,
+}
+
+impl Default for SidecarConfig {
+    /// `DEF_HIST_FREQ` 的缺省是 `none`。
+    fn default() -> Self {
+        Self {
+            frequency: HistoryFrequency::None,
+            urban_run: false,
+            urban_patches: 0,
+            pft_or_pc: false,
+            bgc: false,
+            crop: false,
+            river_lake_flow: false,
+        }
+    }
+}
+
+/// `freq_code(DEF_HIST_FREQ)`：旁车标记 `history_freq` 的取值。
+pub fn frequency_code(frequency: HistoryFrequency) -> u8 {
+    use HistoryFrequency as F;
+    match frequency {
+        F::None => 0,
+        F::Timestep => 1,
+        F::Hourly => 2,
+        F::Daily => 3,
+        F::Monthly => 4,
+        F::Yearly => 5,
+    }
 }
 
 /// 一个累加器的原始和。
@@ -116,6 +146,60 @@ pub struct HistoryWindow {
 /// 只为旁车累加，写平均时跳过。
 pub fn is_window_key(name: &str) -> bool {
     MANIFEST.iter().any(|entry| entry.window_key() == name)
+}
+
+/// `hacc_window_seconds`：以 `date` 结束的那个 history 窗口的秒数；频率定不下来时 `-1`。
+///
+/// MONTHLY/YEARLY 只有在重启落在窗口边界上（每月 1 日 / 1 月 1 日）才算得出长度：那时窗口
+/// 正好是上一个月/上一年（闰月、闰年按上一个月/上一年算）。不在边界上返回 `-1`，调用方据此
+/// 不判"完整"——一个落在月中的日重启当然可能已经攒满一个月的步数，但那不是完整窗口。
+pub fn window_seconds(
+    frequency: HistoryFrequency,
+    time_step_seconds: f64,
+    date: CalendarTime,
+) -> Result<f64> {
+    use HistoryFrequency as F;
+    let (month, day) = month_day(date)?;
+    Ok(match frequency {
+        F::None => -1.0,
+        F::Timestep => time_step_seconds,
+        F::Hourly => 3_600.0,
+        F::Daily => 86_400.0,
+        F::Monthly if day == 1 => {
+            let (year, previous) = if month == 1 {
+                (date.year - 1, 12)
+            } else {
+                (date.year, month - 1)
+            };
+            f64::from(month_lengths(year)[usize::from(previous) - 1]) * 86_400.0
+        }
+        // 上游判的是 jdate(2) == 1（儒略日 1 = 1 月 1 日），不是"1 月的任何一天"。
+        F::Yearly if date.julian_day == 1 => {
+            f64::from(if is_leap_year(date.year - 1) {
+                366
+            } else {
+                365
+            }) * 86_400.0
+        }
+        F::Monthly | F::Yearly => -1.0,
+    })
+}
+
+/// 重启点上的窗口是否已经完整：`save_history_acc_restart` 据此不写旁车，
+/// `read_history_acc_restart` 据此丢弃读到的窗口。
+///
+/// 判据用的是上游的半步容差（`window_nac * timestep >= window - timestep/2`）：重启时刻通常
+/// 落在步末，窗口长度不必整除步长（月长不是步长的整数倍），差半步以内都算同一个窗口。
+pub fn window_is_complete(
+    frequency: HistoryFrequency,
+    time_step_seconds: f64,
+    date: CalendarTime,
+    steps: usize,
+) -> Result<bool> {
+    let seconds = window_seconds(frequency, time_step_seconds, date)?;
+    Ok(seconds > 0.0
+        && steps > 0
+        && steps as f64 * time_step_seconds >= seconds - 0.5 * time_step_seconds)
 }
 
 /// 本配置下被分配的清单项（上游 `local(i) = 1` 的那些），按清单顺序。
@@ -171,7 +255,7 @@ pub fn write_sidecar_with_river(
     let schema = if config.river_lake_flow { 2.0 } else { 1.0 };
     for (field, value) in [
         ("history_schema", schema),
-        ("history_freq", f64::from(config.frequency_code)),
+        ("history_freq", f64::from(frequency_code(config.frequency))),
         ("history_nac", window.steps as f64),
     ] {
         file.add_variable::<f64>(field, &["patch"])?
@@ -274,23 +358,44 @@ fn field_values(entry: &ManifestEntry, window: &HistoryWindow) -> Result<Vec<f64
     Ok(values)
 }
 
+/// 读回的历史窗口与"真的恢复了没有"的判决（上游 `hist_acc_window_restored`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadWindow {
+    /// 每个 patch 一份；完整窗口被丢弃时是全新空窗口。
+    pub windows: Vec<HistoryWindow>,
+    /// 只在真的续接了**不完整**的陆面窗口时为真；完整窗口读回后为假。
+    /// 河道累加器旁车另读（上游在 `river_sums` 读回后也会把它置真），由调用方取或。
+    pub restored: bool,
+}
+
 /// 读旁车（`read_history_acc_restart`），逐项照上游的校验。
 ///
 /// - 旁车不存在：主重启要求旁车（`history_sidecar_required`）就报错，否则是旧式重启，
 ///   返回 `None`（上游只打一行警告）。
 /// - 标记不全、未提交（`history_complete /= 1`）、历史频率变了、`nac` 不是非负整数：报错。
 /// - `nac = 0`：返回空窗口；`nac > 0`：按本配置的清单读回全部已分配的累加器，缺一个就报错。
+/// - 重启点上的窗口已经完整（[`window_is_complete`]）：**丢弃**，返回空窗口且 `restored = false`。
+///   完整窗口在重启时已经被（或将要被）写进历史文件，续接它会让重启后的第一个窗口覆盖两个
+///   窗口（分段跑报 mean(window1, window2) 而不是 window2）。只有中途重启的不完整窗口才续接。
+///   判定在读取累加器之前，与上游一致：完整窗口里那些字段坏没坏都不影响判决。
 pub fn read_sidecar(
     primary: &Path,
     sidecar: &Path,
     config: &SidecarConfig,
     urban: &[bool],
-) -> Result<Option<Vec<HistoryWindow>>> {
+    date: CalendarTime,
+    time_step_seconds: f64,
+) -> Result<Option<ReadWindow>> {
     let required = {
         let file =
             netcdf::open(primary).with_context(|| format!("cannot open {}", primary.display()))?;
-        let marked = file.variable("history_sidecar_required").is_some();
-        marked
+        // 标记可能从上一份续跑原样复制过来：只有值为 1 才要求旁车，被清零的旧标记不算。
+        file.variable("history_sidecar_required")
+            .is_some_and(|marker| {
+                marker
+                    .get_values::<f64, _>(..)
+                    .is_ok_and(|values| values.contains(&1.0))
+            })
     };
     if !sidecar.is_file() {
         ensure!(
@@ -344,7 +449,7 @@ pub fn read_sidecar(
     ensure!(
         marker("history_freq")?
             .iter()
-            .all(|&value| value == f64::from(config.frequency_code)),
+            .all(|&value| value == f64::from(frequency_code(config.frequency))),
         "history frequency changed across the land restart {}",
         sidecar.display()
     );
@@ -367,8 +472,17 @@ pub fn read_sidecar(
         };
         patches
     ];
+    if window_is_complete(config.frequency, time_step_seconds, date, nac as usize)? {
+        return Ok(Some(ReadWindow {
+            windows: vec![HistoryWindow::default(); patches],
+            restored: false,
+        }));
+    }
     if nac == 0.0 {
-        return Ok(Some(windows));
+        return Ok(Some(ReadWindow {
+            windows,
+            restored: false,
+        }));
     }
     for entry in allocated_fields(config) {
         let variable = file.variable(entry.name).with_context(|| {
@@ -426,7 +540,10 @@ pub fn read_sidecar(
             }
         }
     }
-    Ok(Some(windows))
+    Ok(Some(ReadWindow {
+        windows,
+        restored: true,
+    }))
 }
 
 #[cfg(test)]

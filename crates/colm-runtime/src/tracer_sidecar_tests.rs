@@ -1,4 +1,4 @@
-//! 旁车示踪物部分的往返：44 个累加器的盘上布局与描述符校验。
+//! 旁车示踪物部分的往返：44 个累加器的盘上布局、描述符校验与旧名回退。
 
 use super::*;
 use colm_core::tracer::{ReactionMode, StateOwner, TracerDescriptor, TracerFamily};
@@ -86,9 +86,9 @@ fn the_tracer_window_round_trips_with_the_upstream_layout() {
     )
     .unwrap();
 
-    // 盘上：`a_trc_soil_mass` 是 (patch, d2 = 层, d1 = 示踪物)，示踪物变化最快。
+    // 盘上：`a_mt_soil_mass` 是 (patch, d2 = 层, d1 = 示踪物)，示踪物变化最快。
     let file = netcdf::open(&path).unwrap();
-    let soil = file.variable("a_trc_soil_mass").unwrap();
+    let soil = file.variable("a_mt_soil_mass").unwrap();
     let lens: Vec<usize> = soil.dimensions().iter().map(|d| d.len()).collect();
     assert_eq!(lens, [2, SOIL_LAYERS, 2]);
     let values = soil.get_values::<f64, _>(..).unwrap();
@@ -144,4 +144,130 @@ fn a_closed_window_or_another_tracer_set_is_handled() {
     host_sidecar(&closed, 1, 0.0);
     let restored = read(&closed, Some(&set), None, 1).unwrap();
     assert!(restored.tracers.is_none());
+}
+
+/// 旁车复制一份、`a_mt_*` 全换成旧名 `a_trc_*`：模拟 MATERIAL 改名前的旁车文件。
+fn legacy_copy(source: &Path, target: &Path) {
+    let source = netcdf::open(source).unwrap();
+    let mut target = netcdf::create(target).unwrap();
+    let mut defined = std::collections::HashSet::new();
+    for variable in source.variables() {
+        let name = variable.name();
+        let dims: Vec<(String, usize)> = variable
+            .dimensions()
+            .iter()
+            .map(|dim| (dim.name(), dim.len()))
+            .collect();
+        for (dim, len) in &dims {
+            if defined.insert(dim.clone()) {
+                target.add_dimension(dim, *len).unwrap();
+            }
+        }
+        let legacy = name
+            .strip_prefix("a_mt_")
+            .map_or_else(|| name.clone(), |rest| format!("a_trc_{rest}"));
+        let dim_names: Vec<&str> = dims.iter().map(|(dim, _)| dim.as_str()).collect();
+        match variable.vartype() {
+            netcdf::types::NcVariableType::Int(_) => {
+                let mut written = target.add_variable::<i32>(&legacy, &dim_names).unwrap();
+                if dims.is_empty() {
+                    let value = variable.get_value::<i32, _>(()).unwrap();
+                    written.put_value(value, ()).unwrap();
+                } else {
+                    let values = variable.get_values::<i32, _>(..).unwrap();
+                    written.put_values(&values, ..).unwrap();
+                }
+            }
+            netcdf::types::NcVariableType::Float(_) => {
+                let mut written = target.add_variable::<f64>(&legacy, &dim_names).unwrap();
+                if dims.is_empty() {
+                    let value = variable.get_value::<f64, _>(()).unwrap();
+                    written.put_value(value, ()).unwrap();
+                } else {
+                    let values = variable.get_values::<f64, _>(..).unwrap();
+                    written.put_values(&values, ..).unwrap();
+                }
+            }
+            other => panic!("unexpected sidecar type {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_legacy_a_trc_names_are_read_one_field_at_a_time() {
+    let set = TracerSet {
+        tracers: vec![
+            descriptor("HDO", TracerFamily::Isotope),
+            descriptor("Cl", TracerFamily::Solute),
+        ],
+    };
+    let states = [filled_state(&set, 0.0), filled_state(&set, 1000.0)];
+    let path = temp_file("legacy-source");
+    host_sidecar(&path, 2, 3.0);
+    write(
+        &path,
+        &SidecarTracers {
+            set: Some(&set),
+            patches: states.iter().map(PatchAccumulators::of).collect(),
+            methane: None,
+        },
+    )
+    .unwrap();
+    let legacy = temp_file("legacy-names");
+    legacy_copy(&path, &legacy);
+    assert!(
+        netcdf::open(&legacy)
+            .unwrap()
+            .variable("a_mt_precip")
+            .is_none(),
+        "the legacy copy must not keep the new names"
+    );
+    // 整份旧名旁车照样读得回来，值与原名那份逐位相同。
+    let restored = read(&legacy, Some(&set), None, 2).unwrap();
+    for (patch, state) in states.iter().enumerate() {
+        assert_eq!(restored.tracers.as_ref().unwrap()[patch].tracers, state.acc);
+    }
+
+    // 混一半新名：新名存在时必须读新名，其余字段仍回退旧名。维名沿用了复制前那份，
+    // 读回只按长度校验，所以直接挂到已有维上。
+    let mut mixed = netcdf::append(&legacy).unwrap();
+    mixed
+        .add_variable::<f64>("a_mt_precip", &["patch", "d1_a_mt_precip"])
+        .unwrap()
+        .put_values(&[777.0, 888.0, 999.0, 1000.0], ..)
+        .unwrap();
+    drop(mixed);
+    let restored = read(&legacy, Some(&set), None, 2).unwrap();
+    let tracers = restored.tracers.as_ref().unwrap();
+    assert_eq!(tracers[0].tracers[0].precip, 777.0);
+    assert_eq!(tracers[0].tracers[1].precip, 888.0);
+    assert_eq!(tracers[1].tracers[0].precip, 999.0);
+    assert_eq!(tracers[1].tracers[1].precip, 1000.0);
+    // 其余字段仍来自旧名。
+    assert_eq!(tracers[0].tracers[0].evap, states[0].acc[0].evap);
+}
+
+#[test]
+fn the_read_name_falls_back_per_field() {
+    let path = temp_file("read-name");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("patch", 1).unwrap();
+    file.add_variable::<f64>("a_trc_precip", &["patch"])
+        .unwrap();
+    file.add_variable::<f64>("a_water_precip", &["patch"])
+        .unwrap();
+    drop(file);
+    let file = netcdf::open(&path).unwrap();
+    // 新名不在、旧名在：逐字段回退。没改过名的 `a_water_*` 照旧。
+    assert_eq!(read_name(&file, "a_mt_precip").unwrap(), "a_trc_precip");
+    assert_eq!(
+        read_name(&file, "a_water_precip").unwrap(),
+        "a_water_precip"
+    );
+    // 新旧名都不在：报错里两个名字都要有，方便对出是哪一段旁车缺字段。
+    let error = read_name(&file, "a_mt_evap").unwrap_err().to_string();
+    assert!(
+        error.contains("a_mt_evap") && error.contains("a_trc_evap"),
+        "{error}"
+    );
 }

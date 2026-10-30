@@ -161,6 +161,11 @@ impl SpatialRuntime {
         self.river.as_ref().map(|(river, _)| river)
     }
 
+    /// 可变的河道模型：历史窗口判决为"丢了完整窗口"时用来清掉读回的材料历史累加行。
+    pub fn river_mut(&mut self) -> Option<&mut crate::river::RiverModel> {
+        self.river.as_mut().map(|(river, _)| river)
+    }
+
     /// 接上网格河湖汇流（`GridRiverLakeFlow`）。`included` 是 `filter_rnof`。
     pub fn with_river(
         mut self,
@@ -653,8 +658,17 @@ impl SpatialRuntime {
                             staging.river.as_ref(),
                             staging.session.pending_record(clock.end_time)?,
                         ) {
+                            // `MOD_Hist.F90:270`：终点不满窗口时先留原始窗口再写这条记录。河道水量、
+                            // 河道材料行与泥沙行是同一个窗口，一起留（上游三处 snapshot 由同一个
+                            // `hist_acc_final_snapshot` 返回值守着）。
                             if !record.natural_boundary {
                                 river.raw_history_at_end = Some(river.history.clone());
+                                if let Some(tracers) = river.tracers.as_mut() {
+                                    tracers.snapshot_hist_at_end();
+                                }
+                                if let Some(sediment) = river.sediment.as_mut() {
+                                    sediment.snapshot_hist_at_end();
+                                }
                             }
                             writer.write_record(
                                 &river.network,
@@ -711,7 +725,7 @@ impl SpatialRuntime {
                             self.catchment.as_ref(),
                         )?;
                     }
-                    // `tracer_hist_out`：主 history 之后；预热期不计步也不清零（会话里处理）。
+                    // `mt_hist_out`：主 history 之后；预热期不计步也不清零（会话里处理）。
                     if let Some(path) = history.session.push_tracer(
                         clock.end_time,
                         clock.is_spinup,

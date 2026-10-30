@@ -44,7 +44,7 @@ const STAGE_RESTART_TOL: f64 = 1.0e-5;
 /// `[itrc][cell]` 的一组行。
 pub type Rows = Vec<Vec<f64>>;
 
-/// 河道示踪物的 history 累加器（`a_trc_*`，每次写 history 后清零）。
+/// 河道示踪物的 history 累加器（`a_mt_*`，每次写 history 后清零）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiverTracerHistory {
     pub storage_mass: Vec<Vec<f64>>,
@@ -107,6 +107,9 @@ pub struct RiverTracers {
     pub inp_buf: Vec<Vec<f64>>,
     pub bif_net_saved: Vec<Vec<f64>>,
     pub history: RiverTracerHistory,
+    /// `mt_riverlake_snapshot_hist_acc`：运行终点停在窗口中间时，history 冲刷之前的原始行。
+    /// 续跑写在冲刷之后，没有这份快照就会把已清零的行当窗口存下去。
+    pub raw_history_at_end: Option<RiverTracerHistory>,
     /// 限幅迭代统计（`tracer_limiter_stats`）。
     pub limiter_calls: usize,
     pub limiter_iter_sum: usize,
@@ -178,6 +181,7 @@ impl RiverTracers {
             inp_buf: zeros(),
             bif_net_saved: zeros(),
             history: RiverTracerHistory::zeros(ntracers, n),
+            raw_history_at_end: None,
             limiter_calls: 0,
             limiter_iter_sum: 0,
             limiter_iter_peak: 0,
@@ -188,6 +192,28 @@ impl RiverTracers {
 
     fn transport(&self) -> Vec<usize> {
         self.set.transport_indices().collect()
+    }
+
+    /// `mt_riverlake_snapshot_hist_acc`：留一份冲刷前的材料历史原始行（只在终点不满窗口时调）。
+    ///
+    /// 上游这个快照每次重拍、不靠"已经有效就跳过"的缓存：旧实现那样会让重启后的下一个续跑
+    /// 继续写第一天的旧拷贝，而不是当前累加和。
+    pub fn snapshot_hist_at_end(&mut self) {
+        self.raw_history_at_end = Some(self.history.clone());
+    }
+
+    /// `mt_riverlake_drop_hist_window`：丢掉从续跑读回的材料历史窗口，从重启处重新开窗。
+    ///
+    /// 主机判出"重启点上的窗口已经完整"时调（`hist_acc_window_restored = .false.`）：
+    /// 完整窗口已经在重启前由历史文件写出，续接它会让重启后的第一个窗口覆盖两个窗口。
+    pub fn drop_hist_window(&mut self) {
+        self.history.reset();
+        self.raw_history_at_end = None;
+    }
+
+    /// 写续跑用的材料历史行：终点快照优先（`mt_riverlake_write_restart` 的 `histsnap_valid` 支）。
+    pub fn history_for_restart(&self) -> &RiverTracerHistory {
+        self.raw_history_at_end.as_ref().unwrap_or(&self.history)
     }
 
     /// `tracer_input_from_runoff`（带陆面示踪物）：`depth[i] = (rnof_uc*1e-3)*deltime` [m3]，

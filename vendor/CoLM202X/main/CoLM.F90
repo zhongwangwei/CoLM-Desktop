@@ -30,7 +30,15 @@ PROGRAM CoLM
    USE MOD_Vars_1DAccFluxes
    USE MOD_Forcing
    USE MOD_Hist
-   USE MOD_HistAccRestart, only: read_history_acc_restart, save_history_acc_restart
+   USE MOD_HistAccRestart, only: read_history_acc_restart, save_history_acc_restart, &
+      hist_acc_window_restored
+#ifdef GridRiverLakeFlow
+   USE MOD_MT_RiverLake, only: mt_riverlake_drop_hist_window
+   ! MOD_MT_Sediment exists only with the grid river-lake flow (it USEs
+   ! GridRiverLakeFlow-only modules), so it is guarded like every other
+   ! reference to it in the tree.
+   USE MOD_MT_Sediment, only: mt_sediment_drop_hist_window
+#endif
    USE MOD_CheckEquilibrium
    USE MOD_TimeManager
    USE MOD_RangeCheck
@@ -152,13 +160,13 @@ PROGRAM CoLM
    integer :: bgc_data_year   ! start year of the ndep/fire data, sdate(1) as upstream
    integer :: month, mday, year_p, month_p, mday_p, month_prev, mday_prev
    integer :: n_spinupcycle, i_spinupcycle, istep
-#ifdef CaMa_Flood
-   integer :: itrc_cama
-#endif
    logical :: is_spinup
    logical :: lulcc_in_spinup = .false. ! LulccDriver ran during the current spinup cycle
-   logical :: tracer_loaded_restart
-   character(len=256) :: tracer_restart_file
+#ifdef CaMa_Flood
+   integer :: imt_cama
+#endif
+   logical :: material_loaded_restart
+   character(len=256) :: material_restart_file
 
    type(timestamp) :: ststamp, itstamp, etstamp, ptstamp, time_prev
 
@@ -345,7 +353,7 @@ PROGRAM CoLM
       CALL mt_land_init (numpatch, maxsnl, nl_soil, s_month, lc_year, jdate, &
          casename, dir_restart, dir_landdata, ldew_rain, ldew_snow, wliq_soisno, &
          wice_soisno, wa, wdsrf, wetwat, scv, waterstorage, &
-         loaded_restart=tracer_loaded_restart, restart_file=tracer_restart_file)
+         loaded_restart=material_loaded_restart, restart_file=material_restart_file)
 
       ! Read in SNICAR optical and aging parameters
       IF (DEF_USE_SNICAR) THEN
@@ -371,7 +379,7 @@ PROGRAM CoLM
       CALL allocate_1D_Forcing ()
       CALL forcing_init (dir_forcing, deltim, ststamp, lc_year, etstamp)
       CALL mt_forcing_init (gforc, numpatch)
-      CALL mt_forcing_read_restart (tracer_restart_file, tracer_loaded_restart)
+      CALL mt_forcing_read_restart (material_restart_file, material_loaded_restart)
       CALL allocate_2D_Forcing (gforc)
 
       ! Initialize history data module
@@ -389,7 +397,7 @@ PROGRAM CoLM
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif
       IF (p_is_master .and. nmts > 0) THEN
-         IF (any([(mt_uses_generic_water(itrc_cama), itrc_cama = 1, nmts)])) &
+         IF (any([(mt_uses_generic_water(imt_cama), imt_cama = 1, nmts)])) &
             write(*,'(A)') 'WARNING: CaMa_Flood does not route land runoff tracers; they leave at the land boundary.'
       ENDIF
 #endif
@@ -444,6 +452,15 @@ PROGRAM CoLM
 #endif
 
       CALL read_history_acc_restart (jdate)
+      ! The material river and sediment histories must live on the same window
+      ! as the host's: when the sidecar reader dropped a complete window, drop
+      ! the restored material rows as well.  A partial window is kept by all.
+      IF (.not. hist_acc_window_restored) THEN
+#ifdef GridRiverLakeFlow
+         CALL mt_riverlake_drop_hist_window ()
+         CALL mt_sediment_drop_hist_window ()
+#endif
+      ENDIF
 
       CALL ParaOpt_init (jdate, lc_year)
 
@@ -662,8 +679,10 @@ PROGRAM CoLM
             ELSE
                CALL WRITE_TimeVariables (jdate, lc_year,  casename, dir_restart)
             ENDIF
-            ! History-accumulator sidecar next to the restart just written; the
-            ! snapshot taken at the terminal step is reused when the dates match.
+            ! History-accumulator sidecar, written with the restart it belongs
+            ! to.  Its reader discards a window that is already complete at
+            ! this point (a daily restart always is), so only a restart in the
+            ! middle of a window continues that window.
             CALL save_history_acc_restart (jdate)
 
 #if (defined CaMa_Flood)

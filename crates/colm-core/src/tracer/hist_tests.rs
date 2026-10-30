@@ -29,7 +29,7 @@ fn two_tracers() -> TracerSet {
     TracerSet {
         tracers: vec![
             descriptor(TracerFamily::Isotope, "HDO", "ratio"),
-            descriptor(TracerFamily::Solute, "Cl", "tracer_per_water"),
+            descriptor(TracerFamily::Solute, "Cl", "material_per_water"),
         ],
     }
 }
@@ -190,7 +190,7 @@ fn variable_table_names_units_and_scopes() {
     assert_eq!(ldew.long_name(hdo), "canopy tracer heavy/total ratio (HDO)");
     assert_eq!(ldew.long_name(cl), "canopy tracer concentration (Cl)");
     assert_eq!(ldew.units(hdo), "R");
-    assert_eq!(ldew.units(cl), "tracer/water");
+    assert_eq!(ldew.units(cl), "material/water");
     let precip = history_variable(TracerHistId::DeltaPrecip);
     assert!(precip.enabled(|key| key == "xy_prl"));
     assert!(!precip.enabled(|key| key == "rnof"));

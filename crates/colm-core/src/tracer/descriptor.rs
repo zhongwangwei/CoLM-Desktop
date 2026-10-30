@@ -565,7 +565,7 @@ fn param_equal(a: &str, b: &str) -> bool {
 
 /// `set_tracer_category_defaults`。
 fn set_category_defaults(tracer: &mut TracerDescriptor) {
-    tracer.unit_kind = "tracer_per_water".to_owned();
+    tracer.unit_kind = "material_per_water".to_owned();
     tracer.charge = 0;
     tracer.max_dissolved_conc = HUGE;
     tracer.family = TracerFamily::Unresolved;
@@ -726,7 +726,7 @@ fn validate(tracer: &mut TracerDescriptor, use_bgc: bool) -> Result<()> {
     }
     if !matches!(
         tracer.unit_kind.as_str(),
-        "ratio" | "tracer_per_water" | "mass_fraction" | "volume_fraction" | "species_owned"
+        "ratio" | "material_per_water" | "mass_fraction" | "volume_fraction" | "species_owned"
     ) {
         fail("unit_kind", "unsupported unit convention")?;
     }

@@ -457,8 +457,8 @@ pub(super) struct SnowOutcome {
 /// 第 0b 节（雪顶层的霜/升华/雨/露/蒸发）与第 0c 节（逐层渗流）；只在 `snl < 0` 时调用。
 ///
 /// GIMPLE 形状（两处相同，除霜量见 [`FrostShape`]）：
-/// * 霜的示踪物 `trc_wice = FMA(dt, max(q,0)*R, trc_wice)`，`a_trc_precip` 同形；
-/// * 露的示踪物 `dt*(max(q,0)*R)` 先舍入（同时加到 `trc_wliq` 与 `a_trc_precip`），
+/// * 霜的示踪物 `trc_wice = FMA(dt, max(q,0)*R, trc_wice)`，`a_mt_precip` 同形；
+/// * 露的示踪物 `dt*(max(q,0)*R)` 先舍入（同时加到 `trc_wliq` 与 `a_mt_precip`），
 ///   `a_water_precip = FMA(dt, max(q,0), a)`；
 /// * 液池 `water_liq_pool = FMA(dt, FMA(fsno, pg_rain, max(qsdew,0)), wliq_bef)`（分开时），
 ///   否则 `FMA(dt, max(qsdew,0)+pg_rain, wliq_bef)`；

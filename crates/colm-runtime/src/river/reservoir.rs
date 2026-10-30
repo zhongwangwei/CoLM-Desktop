@@ -3,6 +3,11 @@
 //! 参数表（`DEF_ReservoirPara_file`，通常就是单元流域文件）里每座坝有所在单元流域 `dam_seq`、
 //! 建成年份与库容、流量参数。网络里出现的坝按参数表行序编号（续跑里 `volresv` 的次序，
 //! `resv_global_id`）。调度用 CaMa-Flood v4.20 的四段方案（Funato et al.）。
+//!
+//! `DEF_Reservoir_Method = 2`（H22，Hanazaki et al. 2022，CaMa-Flood PR124 的 LDAMH22）上游
+//! 本轮已实现，本引擎**没有移植**：它要读 `dam_upreal`、另建 `volresv_flood`/`resv_h22_coeff`
+//! 两套静态量，只照抄调度公式而没有这套参数会退化成另一条曲线而不是 H22。所以照旧拒绝，
+//! 只是把话说清楚（见 [`check_method`]）。
 
 use colm_numeric::Contract;
 use std::path::Path;
@@ -52,6 +57,22 @@ fn read<T: netcdf::NcTypeDescriptor + Copy>(
         .with_context(|| format!("cannot read {name} from {}", path.display()))
 }
 
+/// `reservoir_init` 的方案检查：上游 `MOD_Grid_Reservoir.F90` 现在接受 1（Funato）与 2（H22）。
+///
+/// 2 的调度公式上游已经实现，但本引擎没有移植它需要的 `dam_upreal` 参数与
+/// `volresv_flood`/`resv_h22_coeff` 静态量，照旧拒绝并说明原因 —— 静默按 1 跑会给出
+/// 一条看似正常、实际不是 H22 的出流曲线。
+fn check_method(method: i64) -> Result<()> {
+    match method {
+        1 => Ok(()),
+        2 => bail!(
+            "reservoir operation method 2 (H22, Hanazaki et al. 2022, CaMa-Flood PR124) is \
+             implemented upstream but is not ported to the Rust engine yet; use method 1"
+        ),
+        other => bail!("unsupported reservoir operation method {other}"),
+    }
+}
+
 impl Reservoir {
     /// `reservoir_init`（单进程、全球网络）。
     pub fn read(path: &Path, network: &RiverNetwork, method: i64) -> Result<Self> {
@@ -66,14 +87,7 @@ impl Reservoir {
         method: i64,
         regional: Option<&Path>,
     ) -> Result<Self> {
-        if method == 2 {
-            bail!(
-                "reservoir operation method 2 (Hanazaki et al. 2022) is reserved but not implemented yet"
-            );
-        }
-        if method != 1 {
-            bail!("unsupported reservoir operation method {method}");
-        }
+        check_method(method)?;
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let grand_id = read::<i32>(&file, "dam_GRAND_ID", path)?;
         let mut dam_seq_all = read::<i32>(&file, "dam_seq", path)?;
