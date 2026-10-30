@@ -5917,8 +5917,71 @@ struct SeriesBody {
     downsampled: bool,
     time: Vec<i64>,
     vars: std::collections::BTreeMap<String, Vec<Option<f64>>>,
+    /// 每个变量的连续缺测区间（Unix 秒，`[start, end)`），取的是**完整时序**里的缺测段，
+    /// 不随绘图点上限抽稀而消失。前端在图上按这些边界断线。
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    gaps: std::collections::BTreeMap<String, Vec<[i64; 2]>>,
+    /// gaps 是否因为数量过多被截断（只保留前 `MAX_GAP_RANGES_PER_SERIES` 段）。
+    #[serde(skip_serializing_if = "is_false")]
+    gaps_truncated: bool,
     /// `time` 数组属于哪个钟（局部时/UTC 的区分不能靠前端猜）。
     time_basis: time_basis::TimeBasisJson,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// 每个变量最多回传多少段缺测区间：再多的缺口画在 2400 点的图上也没有分辨意义，
+/// 但必须让前端知道被截断了（`gaps_truncated`），不能装作没有缺测。
+const MAX_GAP_RANGES_PER_SERIES: usize = 400;
+
+/// 窗口过滤后的时间下标，`series_indices_multi` 与缺测段计算共用同一选择，
+/// 免得分叉成两种「什么算在窗口里」。
+fn window_indices(unix: &[i64], from: Option<i64>, to: Option<i64>) -> Vec<usize> {
+    unix.iter()
+        .enumerate()
+        .filter(|(_, time)| from.is_none_or(|start| **time >= start))
+        .filter(|(_, time)| to.is_none_or(|end| **time <= end))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 完整时序里的连续缺测段，Unix 秒 `[start, end)`；`end` 用缺口后的第一条记录，
+/// 末尾缺口用最后一条记录 + 一个步长（没有更多信息可推断真实结束时刻）。
+fn missing_ranges(unix: &[i64], values: &[f64], window: &[usize]) -> (Vec<[i64; 2]>, bool) {
+    let mut ranges: Vec<[i64; 2]> = Vec::new();
+    let mut truncated = false;
+    let mut open: Option<usize> = None;
+    for &index in window {
+        let finite = values.get(index).is_some_and(|value| value.is_finite());
+        if finite {
+            if let Some(first) = open.take() {
+                if ranges.len() == MAX_GAP_RANGES_PER_SERIES {
+                    truncated = true;
+                } else {
+                    ranges.push([unix[first], unix[index]]);
+                }
+            }
+        } else if open.is_none() {
+            open = Some(index);
+        }
+    }
+    if let Some(first) = open {
+        let last = *window.last().expect("window holds the first missing index");
+        let step = window
+            .len()
+            .checked_sub(2)
+            .map(|previous| unix[last] - unix[window[previous]])
+            .filter(|step| *step > 0)
+            .unwrap_or(1);
+        if ranges.len() == MAX_GAP_RANGES_PER_SERIES {
+            truncated = true;
+        } else {
+            ranges.push([unix[first], unix[last].saturating_add(step)]);
+        }
+    }
+    (ranges, truncated)
 }
 
 #[cfg(test)]
@@ -5939,13 +6002,7 @@ fn series_indices_multi(
     to: Option<i64>,
     max_points: Option<usize>,
 ) -> Vec<usize> {
-    let candidates: Vec<usize> = unix
-        .iter()
-        .enumerate()
-        .filter(|(_, time)| from.is_none_or(|start| **time >= start))
-        .filter(|(_, time)| to.is_none_or(|end| **time <= end))
-        .map(|(index, _)| index)
-        .collect();
+    let candidates = window_indices(unix, from, to);
     let Some(limit) = max_points.map(|value| value.max(3)) else {
         return candidates;
     };
@@ -6059,11 +6116,19 @@ fn cmd_series(
     }
     let series = raw.values().map(Vec::as_slice).collect::<Vec<_>>();
     let indexes = series_indices_multi(&unix, &series, from, to, max_points);
-    let source_n = unix
-        .iter()
-        .filter(|time| from.is_none_or(|start| **time >= start))
-        .filter(|time| to.is_none_or(|end| **time <= end))
-        .count();
+    let window = window_indices(&unix, from, to);
+    let source_n = window.len();
+    // 缺测段按完整时序算（不是抽稀后的 2400 点）：否则 2400 点上限一压，
+    // 中间连续缺测就只剩两侧有效点直接连线，图上会凭空出现一段连续曲线。
+    let mut gaps = std::collections::BTreeMap::new();
+    let mut gaps_truncated = false;
+    for v in &names {
+        let (ranges, truncated) = missing_ranges(&unix, &raw[*v], &window);
+        gaps_truncated |= truncated;
+        if !ranges.is_empty() {
+            gaps.insert((*v).to_owned(), ranges);
+        }
+    }
     let basis = time_basis::resolve(case)?;
     let body = SeriesBody {
         area_mean,
@@ -6082,6 +6147,8 @@ fn cmd_series(
                 (name, selected)
             })
             .collect(),
+        gaps,
+        gaps_truncated,
         time_basis: time_basis::json(basis.0, basis.1),
     };
     let json = serde_json::to_string(&body)? + "\n";

@@ -1230,3 +1230,70 @@ fn metric_utc_model_applies_the_observation_origin_offset_once() {
         row.rmse
     );
 }
+
+// ---------------------------------------------------------------- 缺测段与 2400 点上限
+
+#[test]
+fn display_limit_does_not_erase_missing_gaps() {
+    // 100001 条半小时记录，中间连续缺 21 条；2400 点上限下原来的极值抽稀
+    // 会把缺测段整个删掉，图上两侧有效点直接连线。
+    let unix = (0..100_001i64)
+        .map(|index| index * 1800)
+        .collect::<Vec<_>>();
+    let mut values = vec![1.0; unix.len()];
+    for value in &mut values[50_000..50_021] {
+        *value = f64::NAN;
+    }
+    let window = super::window_indices(&unix, None, None);
+    let (ranges, truncated) = super::missing_ranges(&unix, &values, &window);
+    assert_eq!(
+        ranges,
+        vec![[unix[50_000], unix[50_021]]],
+        "the 21-record gap must survive as one range"
+    );
+    assert!(!truncated);
+    let sampled = super::series_indices_multi(&unix, &[values.as_slice()], None, None, Some(2400));
+    assert!(sampled.len() <= 2400);
+    // 抽稀后的点都在缺口之外，仅靠被选中的点画不出缺口 —— 这正是要额外带 gaps 的原因。
+    assert!(sampled
+        .iter()
+        .all(|piece| *piece < 50_000 || *piece >= 50_021));
+}
+
+#[test]
+fn missing_gaps_cover_trailing_and_whole_windows() {
+    let unix = (0..6i64).map(|index| index * 1800).collect::<Vec<_>>();
+    let mut trailing = vec![1.0; 6];
+    trailing[4] = f64::NAN;
+    trailing[5] = f64::NAN;
+    let window = super::window_indices(&unix, None, None);
+    let (ranges, _) = super::missing_ranges(&unix, &trailing, &window);
+    assert_eq!(ranges, vec![[unix[4], unix[5] + 1800]]);
+
+    let all_missing = vec![f64::NAN; 6];
+    let (ranges, _) = super::missing_ranges(&unix, &all_missing, &window);
+    assert_eq!(ranges, vec![[unix[0], unix[5] + 1800]]);
+}
+
+#[test]
+fn missing_gaps_follow_the_window_and_are_capped() {
+    let unix = (0..2000i64).map(|index| index * 1800).collect::<Vec<_>>();
+    let mut values = vec![1.0; unix.len()];
+    for value in &mut values[..] {
+        *value = f64::NAN;
+    }
+    // 交替有效/缺测：每个有限点之间都是一段缺口，数量超过上限。
+    for index in (0..2000).step_by(2) {
+        values[index] = 1.0;
+    }
+    let window = super::window_indices(&unix, None, None);
+    let (ranges, truncated) = super::missing_ranges(&unix, &values, &window);
+    assert!(truncated, "more gaps than the cap must set the flag");
+    assert_eq!(ranges.len(), super::MAX_GAP_RANGES_PER_SERIES);
+    assert!(ranges.iter().all(|[start, end]| start < end));
+    assert!(ranges.iter().all(|[start, _]| *start >= unix[0]));
+    // 只保留前 400 段：截断后的区间仍应落在完整窗口内。
+    assert!(ranges
+        .iter()
+        .all(|[_, end]| *end <= unix[unix.len() - 1] + 1800));
+}
