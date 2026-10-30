@@ -41239,3 +41239,57 @@ Tested: 站点/湿窗/雪窗三个黄金算例的 Fortran↔Rust `golden-compare
 `cargo test -p colm-runtime --lib --bins` 4 通过；`cargo test --workspace --lib --bins`
 （唯一失败是既有的沙箱 pty 测试）；`cargo clippy --workspace --all-targets -- -D warnings`；
 两个 workspace 的 `cargo fmt --all --check`。
+
+## 汇流出口宽度：上游修了，Rust 还停在旧的平均宽度（2026-10-31，第十二轮）
+
+上一轮把站点反照率钉到 `twostream` 后，这轮转网格河湖算例。先用小时级 history 把差异的时间结构
+看清楚（为避免把 MONTHLY 旁车套到 HOURLY 窗口上，从**冷启动 001** 起跑、`DEF_HIST_FREQ='HOURLY'`）：
+
+- 陆面/辐射量第一小时就对齐到机器精度（`f_alb` 2e-16、`f_rnet` 0），随后缓慢漂移；
+- **河湖量第一小时就差**（`f_discharge` 151 m³/s、`f_floodarea` 1.5 km²、`f_wdpth_ucat` 0.11 m），
+  且不随时间放大——说明不是累积误差；
+- 从 002 重启只跑 **1 步**（不触发汇流）时，两引擎 `gridriver` 状态的 5 个变量逐位相同 ⇒
+  读回、`rebuild_volwater`、陆面耦合都没问题；
+- 把 `DEF_GRIDBASED_ROUTING_MAX_DT` 改成 1800 让第一步就汇流，从 002 的暖状态跑到
+  `2005-002-01800`：一次汇流后 `wdsrf` 差 2.83 m、`volwater` 差 6.45e6 m³ ⇒ 差异在**汇流算法本身**；
+- 并行一致性对照：同一路由步 Fortran grouped 3 rank vs 6 rank 的 `gridriver` 状态**逐位相同**，
+  排除进程分解，Fortran 侧作为参照是确定的。
+
+### 根因：上游把出口宽度从"本格与下游平均"改成本格河宽
+
+`MOD_Grid_RiverLakeNetwork.F90:1296-1320` 现在写着：
+
+> Outlet width is the width of this cell's own channel (it was the mean of this
+> and the downstream channel), as in CaMa-Flood … Where a narrow tributary (~5 m)
+> enters a wide river or lake (~2000 m) the mean width was hundreds of times the
+> cell's own width, the effective length topo_rivare/outletwth only tens of
+> metres, and the outflow flipped sign every other substep: a 1e-13 velocity
+> perturbation grew to O(1) within a day … With the own width … the discharge of
+> the 10 largest river mouths averaged over 30 days is 0-13% lower, the river
+> storage up to 1.6% higher.
+
+代码里 `WHERE (ucat_next > 0) outletwth = topo_rivwth; ELSEWHERE outletwth = topo_rivwth`。
+Rust 的 `river/network.rs` 还按旧实现：`j >= 0` 时取 `(rivwth[j] + rivwth[i]) * 0.5`。
+于是**第一个汇流子步**就分叉，且窄支流处出流不稳（上游注释里的 1e-13→O(1) 放大在 Rust 侧同样存在）。
+
+### 修复与验证
+
+`outletwth = rivwth`（本格河宽，所有单元流域一致）。
+
+| 验证 | 修前 | 修后 |
+|---|---|---|
+| 单次汇流（002 暖状态 1 步）`wdsrf` | 2.83 m | **4.6e-14** |
+| 同上 `veloc_riv` | 1.84e-1 | **9.4e-15** |
+| 冷启动小时级 2 天 `f_discharge`（首/末记录） | 1.5e2 / 2.3e2 | **1.6e-12 / 1.2e-5** |
+| 同上 `f_floodarea` | 1.5 / 9.6 | **5.3e-15 / 1.2e-6** |
+| 同上 `f_wdpth_ucat_regrid` | 0.11 / 0.13 | **7.8e-16 / 6.6e-9** |
+| 同上 `f_veloc_riv_regrid` | 6.2e-3 / 1.6e-2 | **1.7e-16 / 6.3e-10** |
+| 月度河湖网格（002→004 续跑）`f_discharge`/`f_floodarea`/`f_wdpth`/`f_veloc` | 3.4% / 26% / 5.3% / 4.4% | 已不在差异前 10（均 <1e-4 相对） |
+
+修复后该网格算例的剩余差异**全部回到陆面**：`f_zwt` 3.6%、`f_wice_soisno` 4.7e-4、
+`f_wliq_soisno` 1.2e-4、`f_h2osoi` 9.2e-5、`f_rnet` 5.9e-5、`f_sr*` 4.5e-5 量级，
+且从同一重启出发缓慢增长——属于陆面水文/迭代的收敛路径差，不再是汇流移植缺陷。
+
+**教训（连续两次）**：湿雪散射（上一轮）和出口宽度（本轮）都是"上游改了、Rust 停在旧实现"。
+以后每次 vendor 同步都应把 `main/` 与 `HYDRO/` 里新增的 `Bug fix`/`was the …` 注释当对照清单，
+逐条确认 Rust 已跟；不能只看接口和命名。

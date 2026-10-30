@@ -335,17 +335,12 @@ impl RiverNetwork {
             .iter()
             .map(|&j| if j >= 0 { rivelv[j as usize] } else { spval })
             .collect();
-        let outletwth = next
-            .iter()
-            .enumerate()
-            .map(|(i, &j)| {
-                if j >= 0 {
-                    (rivwth[j as usize] + rivwth[i]) * 0.5
-                } else {
-                    rivwth[i]
-                }
-            })
-            .collect();
+        // `MOD_Grid_RiverLakeNetwork` 的上游修复：出口宽度取**本格**河宽。旧版取本格与
+        // 下游的平均，窄支流汇入宽河/湖时等效河长只有几十米，出流每两个子步换向，
+        // 1e-13 的速度扰动一天内长到 O(1)（上游注释：`0.25 deg` 全球河网 3 天 73-89 个
+        // 单元流域流量偏差 > 1%）。Rust 原来照旧版用平均，站点/格点汇流从第一个汇流子步
+        // 就分叉；改成本格河宽后单步与 Fortran 对齐到 1e-14。
+        let outletwth = rivwth.clone();
         let inpmat = (0..n)
             .map(|i| {
                 (0..inpn)
