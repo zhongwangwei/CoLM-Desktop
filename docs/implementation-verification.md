@@ -40155,3 +40155,45 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 前端：typecheck/lint/format:check exit 0；`npm test` → **1286 passed / 0 failed**；`npm run contract` 生成 263 条（新增 assistant_llm_endpoint_guard）；`xtask check-gui` → 263 registered / 225 called / 26 dynamic，事件均有 emitter/listener。
 - 新增测试：llm_guard 7（官方云、天河子域/路径/大小写、自定义/loopback 需确认、畸形 URL、规范化精确比较、环境提示分类且不回显值、无法解析含天河仍 blocked）；assistant 6（guard 命令形状、blocked/未确认/ack 匹配、外部后端确认与 blocked 环境提示、save/start 两层校验、旧设置默认）；前端 settings-llm-guard 11（blocked 不调用 onSave、自定义必确认、ack 规范化、改 URL 清 ack、allowed 清旧 ack、外部后端确认、guard 失败拦截、未知 verdict 保守、规范化与后端同形、旧设置默认、双语渲染）。
 - 未覆盖：真实窗口目视/真实后端联调；外部后端的端点若只写在 CLI 配置文件中（非环境变量）无法自动检测，依赖用户确认项；未激活 api_profiles 中的旧天河端点不逐个校验，恢复为当前 base_url 时会被同一 guard 拦截；Windows 未实跑（纯字符串/URL 逻辑）。
+
+## 结果页第三批修复：时序窗口流式读取、地图色标、选择器与状态（2026-10-30，实测）
+
+第三批只做性能与操作层：让「小窗口」真的只解码窗口内的记录、让地图色标跨时间可读、把区域变量补进时序页选择器、并把加载/空/失败/待更新从“一句话空态”里拆开。Rust 侧只改 `series` 路径；GUI Rust 进程（`gui/src-tauri`）本批未改。
+
+### 1 `series` 改为按时间窗口逐记录解码（`crates/colm-cli/src/{main,history_grid}.rs`）
+
+- 旧路径 `cmd_series` 用 `read_history_many` 把每个请求变量**整份**读进内存，格点变量再对整场做区域平均——只看一天或只画 2400 点也要先分配全年（全球格点一年就是 GB 量级）数组。审计 P2-8 指出 720×1440×365 双精度 ≈ 3.03 GB，且这还没算其它变量与中间数据。
+- 新路径复用仓库已有的 `read_file_records`（逐记录解码、`keep` 在解码**之前**筛、复用一条记录的 buffer）：
+  - 全局时间轴仍整读（纯 `time` 变量，11 年半小时也只有 ~1.5 MB），换算窗口下标；
+  - 变量按 `history_streams` 分配到所属 stream，并逐值验证其它 stream 的时间轴与主轴一致（否则保留原来的 "history streams use different time axes for …" 报错）；
+  - 标量序列逐记录取 `record[0]`；`(time, lat, lon)` 格点变量逐记录用纬度余弦权重求区域平均（复用同一套权重/算法，数值不变）；剖面等多维变量维持旧报错；
+  - 窗口完全落在文件外时不解码任何记录（`RecordReadStats.records = 0`）。
+- 验收用 `RecordReadStats` 直接断言：2 文件共 100 条标量、窗口 51 条 → `records=51, max_record_values=1`；4×5 格点 100 条、窗口 10 条 → `records=10, max_record_values=20`（单条记录元素数，不是整场 2000）、数值等于对全量数组调用 `area_mean` 的对应切片；主+tracer 双 stream 各取一变量仍可读；窗口外返回空。
+- 输出契约未变：`time/gaps/source_n/n/downsampled/vars/area_mean/time_basis` 与旧实现逐值一致（另用 `oracle/work/generated` 真实算例核对：264 点与直接读 NetCDF 逐值一致，窗口切片一致，`--max-points 50` 选点与旧桶算法 Python 复刻一致）。
+- 有意收紧：全局轴取主 stream；含请求变量的其它 stream 必须与它一致。旧实现以“第一个含该变量的 stream”为参考，因此只有 cama/unitcat 变量且轴不同时以前能出图，现在会明确报错（按审计口径，宁可报错也不画错轴）。
+
+### 2 地图固定/自动色标（`gui/src/features/results/GridMap.tsx`）
+
+- 旧行为每帧用当帧 `data.min/max` 着色：跨时间步同一颜色代表不同数值，无法比较空间格局。
+- 新行为「自动色标（每帧 min/max）」/「固定色标」切换：固定时锁定当前帧范围并显示 `low–high + 单位`，换时间步不再重算；换变量/数据源重置（不同单位不可比），解除固定保留上次范围。固定 + 当前帧全缺测时画布保持空白、图例继续显示固定范围并说明“色标沿用上次锁定”，绝不把整图涂成一色；切到固定时若当前帧尚未载入，则在首个有效帧补锁（注释写明取舍）。
+- 范围/映射逻辑抽成可测纯函数 `colorRange / colorFraction / scaleValueText`，新增 `GridMap.test.ts` 5 个用例（固定跨帧不变、自动随帧、非有限回退、clamp、文本格式）；时间轴/`time_basis`/slider 对齐逻辑未动。
+
+### 3 区域变量补进时序页选择器（`gui/src/features/results/ResultsPage.tsx`）
+
+- 旧时序页变量下拉只筛 `kind === 'series'`，区域模拟的 `grid` 变量在总览有、时序页为零个选项，且显示裸变量名。审计 §二第一条。
+- 改为统一走 `chartVariables(catalog.variables)` + `variableOption(item, en)`（统一显示名、保留原始变量名与单位）；扫过其余选择器，已无第二处只筛 series。
+
+### 4 加载/空/失败/待更新分开（`ResultsPage.tsx`）
+
+- 新增 `curveStateOf` 纯 helper（none/idle/loading/error/stale/empty/ready），曲线区按状态显示不同文案与操作：读取中、错误原文 + 重试（`plot`）、条件已改待更新 + 刷新、窗口内无数据、尚未开始；曲线读失败不再占用整页 error 通道，也不再冒充“正在读取”。
+- 运行清单拆出 `runsLoading/runsError`：读取中显示「正在读取运行清单…」，失败显示错误 + 重试，只有成功且为空才显示「尚无已记录运行」。
+- 单站评估表/多站比较表在条件变更后**保留旧快照**并显示「条件已更改，以下结果待更新」；导出仍由 `exportGate` 禁用。源/算例切换仍清空快照。这是为了让审计要求的“待更新”真的可见：旧行为一改条件就清空表，用户看到的是空表而不是过期结果。
+- 图表缺测断线沿用第二批的 `gaps` 契约，本批未改。
+
+### 本轮验证（真实执行）
+
+- `cargo test -p colm-cli --bins -- --test-threads=1` → **822 passed / 0 failed**（含 6 个新窗口读取测试；中途一次并行跑出现 10 个 `study::runner` 沙箱进程检查失败，单独重跑与随后全量重跑均 0 失败，确认是环境抖动不是回归）。
+- `cargo clippy -p colm-cli --all-targets -- -D warnings` 干净；`cargo fmt --all --check` 干净。
+- 前端：`node ../scripts/test-react.mjs` → **1348 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全过；`check-gui.mjs --self-test` 与契约检查通过。
+- 真实网格算例（4×5 网格 24 步）：`series --from/--to` 取 13 步，`area_mean=['f_rnet']`，区域平均与 Python 按同一纬度余弦权重复算的最大差 5.3e-15（浮点求和顺序）。
+- **Not-tested**：真实 SSH 远程 series 窗口读取（本地逻辑与 RecordReadStats 断言覆盖，未连真服务器）；地图与时序光标/评估窗口的联动（本批只做固定色标）；完整 CSV 导出的后端流式写出（仍由前端在拿到数据后生成）；地图 DOM 渲染级测试（只有纯函数单测）；curve 的 `stale` 分支页面级只覆盖条件变更前的短暂窗口（window/variable 变化仍清曲线，未改既有行为）。
