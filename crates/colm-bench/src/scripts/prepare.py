@@ -21,6 +21,9 @@ LON/LAT 可选：history 文件里没有坐标时必须给（两者要么都给�
 - 格点与 element 向量文件不能当站点文件制备，明确报错而不是过滤完变量后 KeyError: time。
 - 经纬度优先用命令行覆盖值（文件缺坐标时也能制备）；否则读文件里的单点坐标。
 - 站点清单用 csv.writer 写：站点名或输出路径含逗号/引号时不会被拆成七列。
+- 非公历日历（noleap、360_day…）经 xarray 解出来是 cftime 对象，不是 datetime64：文件排序、
+  重复时刻分组、CSV 年份都要走日历感知的分支，输出时间轴的 units/calendar 编码从首文件搬过去。
+  同一目录混日历、或混标准日历与 cftime，明确报错（与 INSPECT 的探测判据一致）。
 """
 
 import csv
@@ -42,10 +45,20 @@ if __name__ == "__main__" and "__file__" in globals():
 import numpy as np
 import xarray as xr
 
+try:
+    # 非公历日历（noleap/360_day…）由 xarray 解成 cftime 对象；与 inspect.py 一样按可选依赖处理：
+    # 标准日历的机器没装它也必须能制备，is_cftime_values 就是恒 False。
+    import cftime
+except ImportError:  # pragma: no cover - 装了 xarray 的机器通常也有；没有时只影响非公历文件
+    cftime = None
+
 # 主 history 的文件名后缀：DEF_HIST_groupby 只产生这三种（colm-hist/src/schedule.rs）。
 MAIN_FILE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?\.nc$")
 HIST_MARK = "_hist_"
 UNSTRUCTURED_DIMS = ("element", "ncol", "cell", "mesh")
+# 输出时间轴只沿用首文件这几项编码：units/calendar 是 cftime 序列化的全部依据，dtype 保持原数值类型。
+# 压缩与分块参数绑定首文件的时间轴形状，合并后长度已经变了，搬过来没有意义。
+TIME_ENCODING_KEYS = ("units", "calendar", "dtype")
 
 
 def normalize_lon(value):
@@ -151,12 +164,108 @@ def read_part(path, patch_size):
         return part.load(), skipped
 
 
+def is_cftime_values(values):
+    """时间轴的取值是不是 cftime 对象。
+
+    xarray 只在 time:calendar 是非标准日历（noleap、360_day…）时才解成 cftime 对象，标准日历
+    仍是 datetime64。这里与 inspect.py 的同名判断刻意重复：两个脚本在本机走 `python -c`、在
+    服务器走 heredoc，各自是一份完整源码，没有可共享的模块；判据必须一致，否则探测端说能用、
+    制备端却另走一条路。cftime 是可选依赖，没装时恒 False。
+    """
+    return (
+        cftime is not None
+        and values.dtype.kind == "O"
+        and values.size > 0
+        and isinstance(values.ravel()[0], cftime.datetime)
+    )
+
+
+def time_year(value):
+    """时间点的年份。
+
+    cftime 没有 datetime64 表示（360_day 的 2 月 30 日也不是合法公历日期，不能先转 datetime64
+    再取年份），只能读 .year；datetime64 沿用原来的 str(...)[:4]，站点清单的年份写法不变。
+    """
+    if cftime is not None and isinstance(value, cftime.datetime):
+        return int(value.year)
+    return int(str(value)[:4])
+
+
+def time_axis_kind(dataset):
+    """时间轴的解码表示："datetime64" 或 "cftime"；其他类型明确拒绝，不猜成 datetime64。"""
+    values = np.asarray(dataset["time"].values)
+    if values.dtype.kind == "M":
+        return "datetime64"
+    if is_cftime_values(values):
+        return "cftime"
+    raise SystemExit(
+        f"time variable does not decode to datetime64 or cftime ({values.dtype}); "
+        "check the time:units/calendar attributes"
+    )
+
+
+def check_shared_time_axis(parts):
+    """合并前确认所有文件共用一条时间轴；混日期/混日历明确拒绝。
+
+    为什么先验再排：`np.datetime64(cftime)` 对 noleap 会把日期悄悄按公历解释（闰年语义就没了），
+    对 360_day 的 2 月 30 日直接 `ValueError: Invalid date (2000,2,30)`；不同日历的"同一天"也
+    不是同一时刻，xarray 会在 sortby 里抛 `TypeError: cannot compare ... (different calendars)`。
+    inspect.py 已在探测端按同一判据拒绝（R06），制备端再守一次，用户拿到的是可行动的错误，不是栈。
+    """
+    kinds = set()
+    calendars = set()
+    for part in parts:
+        kind = time_axis_kind(part)
+        kinds.add(kind)
+        if kind == "cftime":
+            calendars.add(str(part["time"].values.ravel()[0].calendar))
+    if len(kinds) > 1:
+        raise SystemExit(
+            "the main history files mix standard-calendar datetime64 with non-standard cftime "
+            "time axes; they cannot be ordered on one axis — keep one calendar per history"
+        )
+    if len(calendars) > 1:
+        raise SystemExit(
+            f"the main history files use different calendars ({', '.join(sorted(calendars))}); "
+            "they cannot share one time axis — keep one calendar per history"
+        )
+
+
+def first_time(dataset):
+    """文件里的最早时刻，用来给文件排序。
+
+    同一日历的 cftime 对象可直接比较（就是 Python 对象比较），numpy datetime64 也一样；调用前
+    check_shared_time_axis 已保证所有文件是同一种解码表示/日历，所以这些排序键可以互相比较。
+    """
+    values = np.asarray(dataset["time"].values)
+    if values.dtype.kind == "O":
+        return min(values.ravel())
+    return values.min()
+
+
+def copy_time_encoding(dataset, encoding, attrs):
+    """把首文件 time 变量的 units/calendar/dtype 编码与缺失属性搬到合并结果上。
+
+    为什么必须显式搬：解码时 xarray 把 units/calendar 从属性移进 encoding；合并后的时间变量若
+    没有它们，旧版 xarray 无法把 cftime 编码回 NetCDF 时间轴，新版会按合并后的时间轴另猜一套
+    units（实测：首文件 `days since 2000-12-31 00:30:00` 被换成 `days since 2000-12-30T00:30:00`，
+    参考时刻丢了）。首文件有、合并结果缺的属性（long_name 等）补回去，避免输出文件少元数据。
+    """
+    for key in TIME_ENCODING_KEYS:
+        value = encoding.get(key)
+        if value is not None:
+            dataset["time"].encoding[key] = value
+    for key, value in attrs.items():
+        dataset["time"].attrs.setdefault(key, value)
+
+
 def merge_duplicate_times(dataset):
     """同一时刻在多个文件里出现（不同变量或部分重复文件）：按坐标合并成一条记录。
 
     xarray 的 concat 会把重复时刻原样留下（6 条记录 3 个唯一时刻、主变量一半 NaN）；
     这里按时刻分组，用 `compat="no_conflicts"` 合并同名变量：只有一边有值的补齐，
-    两边都有且不一致时报错（不替用户挑一个）。
+    两边都有且不一致时报错（不替用户挑一个）。分组键与 `sorted(groups)` 直接用时刻对象：
+    同一日历的 cftime 可哈希、可比较（混日历已由 check_shared_time_axis 在合并前拒绝）。
     """
     index = dataset.indexes["time"]
     groups = {}
@@ -174,7 +283,7 @@ def merge_duplicate_times(dataset):
 
 
 def merge_files(files, patch_size):
-    """按时间排序、去重后合并；返回 (合并结果, 被跳过变量->原因, 文件数)。"""
+    """按时间排序、去重后合并；返回 (合并结果, 被跳过变量->原因)。"""
     skipped = {}
     parts = []
     for path in files:
@@ -182,7 +291,9 @@ def merge_files(files, patch_size):
         for name, extra in file_skipped.items():
             skipped.setdefault(name, set()).update(extra)
         parts.append(part)
-    parts.sort(key=lambda dataset: np.datetime64(dataset["time"].values.min()))
+    # 先验日历再排序：同一解码表示/日历下 first_time 的键才可比较；混用要给可行动的错误。
+    check_shared_time_axis(parts)
+    parts.sort(key=first_time)
     merged = xr.concat(
         parts,
         dim="time",
@@ -245,6 +356,9 @@ def prepare(folder, prefix, out_nc, out_csv, station, lon_argument, lat_argument
                 "lat/lon); pass LON LAT if it is a station"
             )
         file_lon, file_lat = read_coordinates(first)
+        # 首文件的 time 编码/属性：合并结果要靠它们把 cftime 时间轴写回 NetCDF（见 copy_time_encoding）。
+        time_encoding = dict(first["time"].encoding)
+        time_attrs = dict(first["time"].attrs)
     if override is not None:
         lon, lat = override
     elif file_lon is not None and file_lat is not None:
@@ -256,6 +370,8 @@ def prepare(folder, prefix, out_nc, out_csv, station, lon_argument, lat_argument
         )
 
     merged, skipped = merge_files(files, patch_size)
+    # 先补回时间轴编码再写：cftime 没有 datetime64 的数值表示，units/calendar 丢了就写不出可解码的时间轴。
+    copy_time_encoding(merged, time_encoding, time_attrs)
     # 文件里若把 lat/lon 存成坐标（而不是 0 维数据变量），先去掉，统一写我们确认过的那一对。
     merged = merged.drop_vars(["lat", "lon"], errors="ignore")
     merged["lat"] = np.float64(lat)
@@ -267,9 +383,9 @@ def prepare(folder, prefix, out_nc, out_csv, station, lon_argument, lat_argument
     os.makedirs(os.path.dirname(out_nc) or ".", exist_ok=True)
     merged.to_netcdf(out_nc)
 
-    times = np.sort(merged["time"].values)
-    start = int(str(times.min())[:4])
-    end = int(str(times.max())[:4])
+    times = np.asarray(merged["time"].values)
+    start = time_year(times.min())
+    end = time_year(times.max())
     out_csv = os.path.abspath(out_csv)
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
     with open(out_csv, "w", newline="", encoding="utf-8") as handle:

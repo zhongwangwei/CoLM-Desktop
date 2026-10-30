@@ -98,9 +98,19 @@ pub(super) fn status(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 状态行里失败原因的上限（字符）。`FINISH_SCRIPT` 已把 meta.error 截到 [`RUN_ERROR_LIMIT`]，这里再收窄：
+/// 状态页一行一个项目，一条很长的失败原因会把整份状态输出撑大（每个项目都走同一条 ssh stdout）。
+const STATUS_ERROR_LIMIT: u32 = 1_200;
+
 /// 状态脚本（经 ssh 跑，输出由 [`parse_status`] 解析）。抽出来是为了能在本地 bash 沙箱里真跑：
 /// 新式比较的报告只在 `runs/<run_id>/output` 里，靠 `latest-success.json` 找到；旧的 `output/` 扫描
 /// 只能给没有 `runs/` 的旧项目用，否则会把上一次运行的报告当成这一次的（C07）。
+///
+/// C07 的远程验收还差"最近一次运行"：只有 `latest-success` 时，B 失败后状态页永远显示"还没有运行
+/// 记录"，看不到失败原因，也看不到正在跑的那次。所以新式项目行在既有 5 段之后再扫一遍
+/// `runs/*/meta.json`，按 `created_unix` 选最新的一次，追加 7 段诊断字段。
+/// 解析只依赖 POSIX 工具（sed/tr/cut）：环境可能已经被 `remote-bench-uninstall` 删掉，不能指望
+/// `jq` 或专用 Python；meta 由我们自己写（indent=2），字符串字段一定在一行内。
 fn status_script(root: &str) -> String {
     format!(
         r#"OB={ob}
@@ -112,32 +122,92 @@ if [ -x "$OB/env/bin/python" ]; then
 {env}echo "python=$("$OB/env/bin/python" --version 2>&1)"
 echo "openbench=$("$OB/env/bin/python" -c 'import openbench; print(openbench.__version__)' 2>/dev/null)"
 fi
+# 状态一行一个项目、用 | 分列。字段里再出现 |、CR 或 JSON 里转义出来的 \n 都会破坏分列/分行，
+# 统一清掉；\n/\t 换成空格、\" 还原成引号，让失败原因在单行里还能读（只用于诊断，不保证逐字节还原）。
+status_clean() {{
+  tr -d '|\r' | sed 's/\\n/ /g; s/\\t/ /g; s/\\"/"/g'
+}}
 for d in "$OB"/projects/*/; do
   [ -d "$d" ] || continue
   pname=$(basename "$d")
+  pdir=${{d%/}}
   report=
-  if [ -d "$d/runs" ]; then
+  if [ -d "$pdir/runs" ]; then
+    # 上一次成功运行只认指针：报告与"取回"都以它为准，失败的重跑不覆盖它。
     rid=
     csha=
     fat=
-    if [ -f "$d/latest-success.json" ]; then
-      rid=$(sed -n 's/^ *"run_id": *"\([^"]*\)".*/\1/p' "$d/latest-success.json" | head -n 1)
-      rel=$(sed -n 's/^ *"report": *"\([^"]*\)".*/\1/p' "$d/latest-success.json" | head -n 1)
-      csha=$(sed -n 's/^ *"config_sha": *"\([^"]*\)".*/\1/p' "$d/latest-success.json" | head -n 1)
-      fat=$(sed -n 's/^ *"finished_at": *"\([^"]*\)".*/\1/p' "$d/latest-success.json" | head -n 1)
+    if [ -f "$pdir/latest-success.json" ]; then
+      rid=$(sed -n 's/^ *"run_id": *"\([^"]*\)".*/\1/p' "$pdir/latest-success.json" | head -n 1)
+      rel=$(sed -n 's/^ *"report": *"\([^"]*\)".*/\1/p' "$pdir/latest-success.json" | head -n 1)
+      csha=$(sed -n 's/^ *"config_sha": *"\([^"]*\)".*/\1/p' "$pdir/latest-success.json" | head -n 1)
+      fat=$(sed -n 's/^ *"finished_at": *"\([^"]*\)".*/\1/p' "$pdir/latest-success.json" | head -n 1)
       case "$rid" in ''|*[!A-Za-z0-9._-]*) rid=;; esac
-      if [ -n "$rid" ] && [ -n "$rel" ] && [ -f "$d/runs/$rid/$rel" ]; then report="$d/runs/$rid/$rel"; fi
+      if [ -n "$rid" ] && [ -n "$rel" ] && [ -f "$pdir/runs/$rid/$rel" ]; then report="$pdir/runs/$rid/$rel"; fi
     fi
-    echo "project=$pname|$report|$rid|$csha|$fat"
+    # 最近一次运行（不管成败）：失败原因/进行中要在状态页上看得见。
+    # created_unix 是数字，直接用 test 的数值比较；乱序目录、字典序都不作数。同秒时保持 glob 顺序
+    # （目录名字典序）里的第一次，结果稳定可复现。
+    # 数字位数设上限，坏 meta 里的天文数字不会让 test 溢出报错。
+    newest=
+    newest_unix=
+    for meta in "$pdir"/runs/*/meta.json; do
+      [ -f "$meta" ] || continue
+      created=$(sed -n 's/^ *"created_unix": *\([0-9][0-9]*\).*$/\1/p' "$meta" | head -n 1)
+      case "$created" in ''|*[!0-9]*) continue ;; esac
+      if [ "${{#created}}" -gt 12 ]; then continue; fi
+      if [ -z "$newest_unix" ] || [ "$created" -gt "$newest_unix" ]; then
+        newest=$meta
+        newest_unix=$created
+      fi
+    done
+    lrid=
+    lstate=
+    lcsha=
+    lcat=
+    lfat=
+    lrep=
+    lerr=
+    if [ -n "$newest" ]; then
+      run_dir=${{newest%/meta.json}}
+      lrid=$(sed -n 's/^ *"run_id": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+      case "$lrid" in ''|*[!A-Za-z0-9._-]*) lrid= ;; esac
+      lstate=$(sed -n 's/^ *"state": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+      case "$lstate" in running|succeeded|failed) ;; *) lstate= ;; esac
+      # 缺 run_id/state 的 meta（写坏了、风格不对）当作没有这次运行：不替它编一个身份或终态。
+      if [ -n "$lrid" ] && [ -n "$lstate" ]; then
+        lcsha=$(sed -n 's/^ *"config_sha": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+        lcat=$(sed -n 's/^ *"created_at": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+        lfat=$(sed -n 's/^ *"finished_at": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+        # 报告只信成功运行自己 meta 里记的相对路径，而且必须是运行目录内现存的普通文件：
+        # 坏 meta 写成绝对路径或 .. 时不能让它指到别处。
+        if [ "$lstate" = succeeded ]; then
+          rel=$(sed -n 's/^ *"report": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+          case "$rel" in ''|/*|*..*) rel= ;; esac
+          if [ -n "$rel" ] && [ -f "$run_dir/$rel" ]; then lrep="$run_dir/$rel"; fi
+        fi
+        lerr=$(sed -n 's/^ *"error": *"\(.*\)".*$/\1/p' "$newest" | head -n 1)
+      else
+        lrid=
+        lstate=
+      fi
+    fi
+    lcsha=$(printf '%s' "$lcsha" | status_clean)
+    lcat=$(printf '%s' "$lcat" | status_clean)
+    lfat=$(printf '%s' "$lfat" | status_clean)
+    lrep=$(printf '%s' "$lrep" | status_clean)
+    lerr=$(printf '%s' "$lerr" | status_clean | cut -c 1-{limit})
+    echo "project=$pname|$report|$rid|$csha|$fat|$lrid|$lstate|$lcsha|$lcat|$lfat|$lrep|$lerr"
     continue
   fi
-  report=$(ls "$d"output/*/reports/evaluation_report_standalone.html "$d"output/*/reports/evaluation_report.html 2>/dev/null | head -n 1)
+  report=$(ls "$pdir"/output/*/reports/evaluation_report_standalone.html "$pdir"/output/*/reports/evaluation_report.html 2>/dev/null | head -n 1)
   echo "project=$pname|$report"
 done
 true
 "#,
         ob = quote(root),
         env = program_env(root),
+        limit = STATUS_ERROR_LIMIT,
     )
 }
 
@@ -176,13 +246,21 @@ fn parse_status(root: &str, text: &str) -> serde_json::Value {
             "python" => set(&mut out, "python"),
             "openbench" => set(&mut out, "openbench"),
             "project" => {
-                // 旧式项目只有 `名字|报告`；新式项目在后面续上最新成功运行的身份。
+                // 旧式项目只有 `名字|报告`；新式项目在后面续上最新成功运行的身份，
+                // 再往后是最近一次运行（不管成败）的诊断字段。
                 let mut fields = value.split('|');
                 let name = fields.next().unwrap_or_default();
                 let report = fields.next().unwrap_or_default();
                 let run_id = fields.next().unwrap_or_default();
                 let config_sha = fields.next().unwrap_or_default();
                 let finished_at = fields.next().unwrap_or_default();
+                let latest_run_id = fields.next().unwrap_or_default();
+                let latest_run_state = fields.next().unwrap_or_default();
+                let latest_run_config_sha = fields.next().unwrap_or_default();
+                let latest_run_created_at = fields.next().unwrap_or_default();
+                let latest_run_finished_at = fields.next().unwrap_or_default();
+                let latest_run_report = fields.next().unwrap_or_default();
+                let latest_run_error = fields.next().unwrap_or_default();
                 let report = (!report.is_empty()).then_some(report);
                 let mut entry = json!({ "name": name, "report": report });
                 if !run_id.is_empty() {
@@ -191,6 +269,28 @@ fn parse_status(root: &str, text: &str) -> serde_json::Value {
                         "config_sha": config_sha,
                         "report": report,
                         "finished_at": (!finished_at.is_empty()).then_some(finished_at),
+                    });
+                }
+                // 最近一次运行与前端 `ProjectRun` 同形（本机状态页的 `latest_run` 也是这样 JSON 化的）：
+                // 七个键全给，缺的写 null，前端不用再判"这个键有没有"。
+                // state 只认三种终态/进行态；缺了或读不懂说明 meta 坏了，整条不给 —— 不能替它编一个
+                // "running" 或 "succeeded" 去误导状态页（这是诊断信息，宁缺毋滥）。
+                let latest_run_state = match latest_run_state {
+                    "running" | "succeeded" | "failed" => latest_run_state,
+                    _ => "",
+                };
+                if !latest_run_id.is_empty() && !latest_run_state.is_empty() {
+                    entry["latest_run"] = json!({
+                        "run_id": latest_run_id,
+                        "state": latest_run_state,
+                        "report": (!latest_run_report.is_empty()).then_some(latest_run_report),
+                        "finished_at": (!latest_run_finished_at.is_empty())
+                            .then_some(latest_run_finished_at),
+                        "created_at": (!latest_run_created_at.is_empty())
+                            .then_some(latest_run_created_at),
+                        "config_sha": (!latest_run_config_sha.is_empty())
+                            .then_some(latest_run_config_sha),
+                        "error": (!latest_run_error.is_empty()).then_some(latest_run_error),
                     });
                 }
                 projects.push(entry);

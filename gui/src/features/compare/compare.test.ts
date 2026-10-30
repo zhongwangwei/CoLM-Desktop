@@ -7,6 +7,7 @@ import {
   comparableVariables,
   commonYears,
   comparisonDir,
+  comparisonName,
   configInvalidation,
   configSaveState,
   defaultGridRes,
@@ -1104,4 +1105,15 @@ it('maps the remote run-identity errors into English', () => {
     /no snapshot for run bench-run-9/,
   );
   assert.match(benchErrorText('服务器上的运行记录读不懂：bad json')[1], /cannot be read: bad json/);
+});
+
+it('uses one internal name for the OpenBench project and the comparison folder', () => {
+  // R11 遗留：ASCII 名以下划线/数字开头时，旧实现 project.name 用 simulationKey（sim_ 前缀/去首尾下划线），
+  // 比较目录用 comparisonName → 两者分叉；现在统一成 comparisonName。
+  for (const name of ['versions vs flux', '2026 run', '_draft', '123', 'AT-Neu_vs_draft2']) {
+    const built = buildOpenbenchConfig({ ...base, name });
+    const projectName = /name: "([^"]+)"/.exec(built.config)?.[1];
+    assert.equal(projectName, comparisonName(name), name);
+    assert.equal(comparisonDir('/ob', name).split('/').pop(), comparisonName(name), name);
+  }
 });

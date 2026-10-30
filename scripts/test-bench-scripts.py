@@ -13,7 +13,8 @@ element 向量、土层变量、同目录混前缀、0–360 经度、跨日界�
 缺坐标 + 经纬度覆盖、站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：
 单时刻读频率元数据（source=metadata）、元数据与实测冲突以实测为准、亚小时输出粗化成 Hour、
 6 小时/8 天档位、2/4 小时与 6 小时不落错档（R08）、以及落不到任何档位的步长明确报错；
-R06 的非公历日历：cftime 解码出的 noleap/360_day 时间轴仍要能采样步长与判频率。
+R06 的非公历日历：cftime 解码出的 noleap/360_day 时间轴仍要能采样步长与判频率，制备端也要能
+排序/去重/保留 units+calendar 编码/按日历读 CSV 年份，混日历或混标准与 cftime 明确报错。
 """
 
 import csv
@@ -1004,6 +1005,146 @@ def prepare_sorts_and_merges_overlapping_times(workdir):
         # 中间那一秒两个文件都有：t 来自第一个文件、q 来自第二个，都要是非 NaN。
         assert np.isfinite(values_t[1]) and np.isfinite(values_q[1]), (values_t, values_q)
         assert np.isnan(values_q[0]) and np.isnan(values_t[2]), (values_t, values_q)
+
+
+@test
+def non_gregorian_history_is_prepared(workdir):
+    """R06 遗留：非公历（noleap/360_day）主 history 的制备要能真正跑通。
+
+    旧实现 `parts.sort(key=lambda d: np.datetime64(d["time"].values.min()))` 只认 datetime64：
+    noleap 的日期会被悄悄按公历解释，360_day 的 2 月 30 日不是合法公历日期，实测直接
+    `ValueError: Invalid date (2000,2,30)`。这里每个日历造两个文件、文件名序与时间序相反、
+    中间留一个重复时刻（各带不同变量），端到端验证：输出可 reopen、时间轴有序去重、日历/units
+    沿用输入、CSV 起止年按日历读，tracer 族照旧不参与合并。
+    """
+    if cftime is None:
+        raise AssertionError(
+            "the non-Gregorian regression needs cftime; install it (pip install cftime)"
+        )
+    cases = (
+        {
+            "calendar": "noleap",
+            # 文件名序：`..._2000-12-31.nc` 排在 `..._2000-12.nc` 前面（'-' < '.'），时间序相反。
+            "early": ("Cal_hist_2000-12.nc", (2000, 12, 30, 0, 30), "f_xy_t"),
+            "late": ("Cal_hist_2000-12-31.nc", (2000, 12, 31, 0, 30), "f_xy_q"),
+            "start_year": 2000,
+            "end_year": 2001,
+        },
+        {
+            "calendar": "360_day",
+            # 2 月 30 日只在 360_day 存在：旧实现在这里把 cftime 喂给 np.datetime64 就崩。
+            "early": ("Cal_hist_2000-02.nc", (2000, 2, 29, 0, 30), "f_xy_t"),
+            "late": ("Cal_hist_2000-02-15.nc", (2000, 2, 30, 0, 30), "f_xy_q"),
+            "start_year": 2000,
+            "end_year": 2000,
+        },
+    )
+    for case in cases:
+        calendar = case["calendar"]
+        folder = os.path.join(workdir, f"history-{calendar}")
+        early_name, early_start, early_var = case["early"]
+        late_name, late_start, late_var = case["late"]
+        write_station(
+            os.path.join(folder, early_name),
+            cftime_axis(calendar, early_start, 2, 1440),
+            {early_var: ("time", "patch")},
+        )
+        write_station(
+            os.path.join(folder, late_name),
+            cftime_axis(calendar, late_start, 2, 1440),
+            {late_var: ("time", "patch")},
+        )
+        # 同目录的 tracer 族：只顺带确认非公历路径没改坏主族识别（tracer 文件名里也有 _hist_）。
+        tracer_suffix = early_name[len("Cal_hist_") :]
+        write_station(
+            os.path.join(folder, "Cal_hist_tracer_" + tracer_suffix),
+            cftime_axis(calendar, early_start, 2, 1440),
+            {"f_trc_co2": ("time", "patch")},
+        )
+        # 输出要沿用首文件（prepare 的 files[0]，即文件名序第一个主族文件）的 time 编码；
+        # 两个主族文件里名字较小的那个就是它（tracer 以 `tracer_` 开头，排在数字后缀之后）。
+        first_by_name = os.path.join(folder, min(early_name, late_name))
+        with xr.open_dataset(first_by_name) as source:
+            source_units = source["time"].encoding["units"]
+            source_calendar = source["time"].encoding["calendar"]
+
+        result, out_nc, out_csv = prepare_ok(
+            folder, "Cal_hist_", os.path.join(workdir, f"sim-{calendar}")
+        )
+        assert "3 steps" in result.stdout, result.stdout
+        expected = cftime_axis(calendar, early_start, 3, 1440)
+        with xr.open_dataset(out_nc) as merged:
+            assert merged.sizes["time"] == 3, dict(merged.sizes)
+            assert "patch" not in merged.sizes, dict(merged.sizes)
+            assert "f_trc_co2" not in merged.data_vars, variable_names(merged)
+            values = merged["time"].values
+            assert values.dtype.kind == "O", values.dtype
+            assert list(values) == list(expected), (calendar, values, expected)
+            encoding = merged["time"].encoding
+            assert encoding.get("calendar") == source_calendar, (calendar, encoding)
+            # units 的参考时刻/单位要沿用首文件：换一套参考时刻时同一时刻的换算值会不同。
+            for probe in expected:
+                assert cftime.date2num(probe, encoding["units"], calendar) == cftime.date2num(
+                    probe, source_units, calendar
+                ), (calendar, encoding["units"], source_units)
+            values_t = merged[early_var].values.ravel()
+            values_q = merged[late_var].values.ravel()
+            # 中间那一刻两个文件都有：t 来自早文件、q 来自晚文件，合并后都应是真实值。
+            assert np.isfinite(values_t[0]) and np.isfinite(values_t[1]), values_t
+            assert np.isfinite(values_q[1]) and np.isfinite(values_q[2]), values_q
+            assert np.isnan(values_q[0]) and np.isnan(values_t[2]), (values_t, values_q)
+        with open(out_csv, newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+        assert len(rows) == 2 and len(rows[1]) == 6, rows
+        assert rows[1][1] == str(case["start_year"]), (calendar, rows[1])
+        assert rows[1][2] == str(case["end_year"]), (calendar, rows[1])
+
+
+@test
+def mixing_calendars_or_decodings_is_rejected_by_prepare(workdir):
+    """同一主族混日历、或混标准日历与 cftime：制备要在排序前明确报错，不是 sortby 里抛裸 TypeError。
+
+    inspect.py 已按同一判据在探测端拒绝（R06）；这里守住制备端：错误要点名日历/两种解码表示，
+    且不能写出半成品 NC。
+    """
+    if cftime is None:
+        raise AssertionError(
+            "the non-Gregorian regression needs cftime; install it (pip install cftime)"
+        )
+    mixed = os.path.join(workdir, "history-mixed-calendars")
+    write_station(
+        os.path.join(mixed, "Mix_hist_2000.nc"),
+        cftime_axis("noleap", (2000, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    write_station(
+        os.path.join(mixed, "Mix_hist_2001.nc"),
+        cftime_axis("360_day", (2001, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    result, out_nc, _ = prepare(mixed, "Mix_hist_", os.path.join(workdir, "out-mixed-calendars"))
+    stderr = failed(result, "prepare with mixed calendars")
+    assert "different calendars" in stderr, stderr
+    assert "noleap" in stderr and "360_day" in stderr, stderr
+    assert "Traceback" not in stderr and "TypeError" not in stderr, stderr
+    assert not os.path.exists(out_nc), "a failed prepare must not leave a half-written NetCDF"
+
+    mixed = os.path.join(workdir, "history-mixed-decoding")
+    write_station(
+        os.path.join(mixed, "Mix_hist_2000.nc"),
+        times("2000-01-01T00:00", 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    write_station(
+        os.path.join(mixed, "Mix_hist_2001.nc"),
+        cftime_axis("noleap", (2001, 1, 1, 0, 0), 2, 360),
+        {"f_xy_t": ("time", "patch")},
+    )
+    result, out_nc, _ = prepare(mixed, "Mix_hist_", os.path.join(workdir, "out-mixed-decoding"))
+    stderr = failed(result, "prepare with mixed datetime64/cftime")
+    assert "mix standard-calendar datetime64" in stderr, stderr
+    assert "Traceback" not in stderr and "TypeError" not in stderr, stderr
+    assert not os.path.exists(out_nc), "a failed prepare must not leave a half-written NetCDF"
 
 
 @test

@@ -129,12 +129,17 @@ type Contract = {
   details?: Record<string, unknown>;
 };
 
-function pageHarness() {
+function pageHarness(
+  options: { seed?: Record<string, string>; remoteStatus?: Record<string, unknown> } = {},
+) {
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
     value: {
       getItem: (key: string) => {
-        const seed: Record<string, string> = { 'colm.openbenchRefRoot': '/refs' };
+        const seed: Record<string, string> = {
+          'colm.openbenchRefRoot': '/refs',
+          ...options.seed,
+        };
         return seed[key] ?? null;
       },
       setItem: () => {},
@@ -160,6 +165,14 @@ function pageHarness() {
         return { servers: [] };
       case 'bench_status':
         return readyStatus;
+      case 'bench_remote_status':
+        return options.remoteStatus ?? readyStatus;
+      case 'bench_remote_references':
+        return referenceList;
+      case 'bench_remote_metric_options':
+        return metricOptions;
+      case 'bench_remote_inspect':
+        return probedGrid;
       case 'bench_references':
         if (firstReferenceFailure) {
           firstReferenceFailure = false;
@@ -1105,4 +1118,34 @@ test('U-05: editing a variable row in the simulation dialog keeps the row identi
     .nodes()
     .find((node) => node.type === 'Input' && node.props['data-sim-field'] === 'variables');
   assert.equal(edited?.props.value, 'Latent_Heat');
+});
+
+test('R12: a remote project row shows the last run failure instead of "no run recorded"', async () => {
+  const page = pageHarness({
+    seed: { 'colm.benchHost': 'serverA' },
+    remoteStatus: {
+      ...readyStatus,
+      projects: [
+        {
+          name: 'qfo_era5',
+          report: null,
+          latest_run: {
+            run_id: 'bench-run-42',
+            state: 'failed',
+            report: null,
+            created_at: '2026-10-30T01:00:00Z',
+            finished_at: '2026-10-30T01:02:00Z',
+            config_sha: 'a'.repeat(64),
+            error: 'check failed: boom',
+          },
+          latest_success: null,
+        },
+      ],
+    },
+  });
+  await page.mount();
+  const shown = text(page.nodes());
+  assert.match(shown, /last run: failed/);
+  assert.match(shown, /bench-run-42/);
+  assert.match(shown, /check failed: boom/);
 });

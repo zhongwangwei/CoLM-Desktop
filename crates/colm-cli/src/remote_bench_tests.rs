@@ -573,6 +573,28 @@ fn a_successful_remote_run_freezes_its_snapshot_and_moves_the_success_pointer() 
     );
     assert!(latest["finished_at"].as_str().unwrap().ends_with('Z'));
     assert!(latest["finished_unix"].as_u64().unwrap() > 0);
+    // 状态页的"最近一次运行"也从同一次运行的 meta 里读（不是只有 latest-success）：
+    // 这条把真实 FINISH_SCRIPT 写出来的 meta 与 status_script/parse_status 串起来验一遍。
+    let (ok, text, status_err) = bash_script(&status_script(&sandbox.root_text()));
+    assert!(ok, "{status_err}");
+    let status = parse_status(&sandbox.root_text(), &text);
+    let row = status["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["name"] == "versions_vs_flux")
+        .unwrap();
+    assert_eq!(row["latest_success"]["run_id"], id, "{row}");
+    let latest_run = &row["latest_run"];
+    assert_eq!(latest_run["run_id"], id, "{latest_run}");
+    assert_eq!(latest_run["state"], "succeeded", "{latest_run}");
+    assert_eq!(latest_run["config_sha"], config_sha, "{latest_run}");
+    assert!(
+        latest_run["report"].as_str().unwrap().ends_with(&format!(
+            "/runs/{id}/output/demo/reports/evaluation_report_standalone.html"
+        )),
+        "成功运行的报告是运行目录里的绝对路径：{latest_run}"
+    );
     // 占位与锁都释放（锁内核对所有权后删）。
     assert!(!project.join(".active-job").exists());
     assert!(!project.join(".active-job.lock").exists());
@@ -664,6 +686,28 @@ fn a_failed_remote_run_writes_only_its_own_meta_and_keeps_the_success_pointer() 
     assert!(error.contains("boom: metric missing"), "{error}");
     // 上次成功的指针一个字节都没动。
     assert_eq!(read(&project.join("latest-success.json")), previous);
+    // 状态页能看到这次失败：latest_run 来自真实 FINISH_SCRIPT 写出的 meta，原因与身份都在
+    // （只有 latest-success 的话这里还会显示"还没有运行记录"）。
+    let (ok, text, status_err) = bash_script(&status_script(&sandbox.root_text()));
+    assert!(ok, "{status_err}");
+    let status = parse_status(&sandbox.root_text(), &text);
+    let row = status["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["name"] == "versions_vs_flux")
+        .unwrap();
+    assert!(row["report"].is_null(), "失败没有报告：{row}");
+    assert_eq!(row["latest_success"]["run_id"], "bench-run-0", "{row}");
+    let latest_run = &row["latest_run"];
+    assert_eq!(latest_run["run_id"], id, "{latest_run}");
+    assert_eq!(latest_run["state"], "failed", "{latest_run}");
+    let status_error = latest_run["error"].as_str().unwrap();
+    assert!(
+        status_error.contains("这次运行失败（退出码 3）")
+            && status_error.contains("boom: metric missing"),
+        "{status_error}"
+    );
     assert!(!project.join(".active-job").exists());
 }
 
@@ -1569,9 +1613,267 @@ fn the_status_script_finds_reports_through_the_success_pointer_only() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// ---- 状态页的"最近一次运行"：失败/进行中也要看得见（C07 远程侧补全） ----
+
+/// 写一次运行的 `meta.json`。运行作业体与 `FINISH_SCRIPT` 写的都是 indent=2 的 JSON，
+/// `status_script` 按行取字段依赖这个格式（真实运行里不会出现别的排版）。
+#[cfg(unix)]
+fn write_run_meta(run_dir: &Path, meta: serde_json::Value) {
+    std::fs::create_dir_all(run_dir).unwrap();
+    std::fs::write(
+        run_dir.join(RUN_META_FILE),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_status_script_reports_the_newest_run_and_its_failure_reason() {
+    let base = temp_dir("status-latest-run");
+    let projects = base.join("projects");
+
+    // 先成功后失败的新式项目：B（失败）的 created_unix 最大，目录名字典序却居中——
+    // 无论实现取 glob 的第一个还是最后一个，都会选错成 A（成功）或 C（进行中）。
+    let mixed = projects.join("cmp_mixed");
+    let report_rel = "output/demo/reports/evaluation_report_standalone.html";
+    write_run_meta(
+        &mixed.join("runs/bench-run-a"),
+        json!({
+            "run_id": "bench-run-a",
+            "project": "cmp_mixed",
+            "created_at": "2026-10-26T00:00:00Z",
+            "created_unix": 100,
+            "finished_at": "2026-10-26T00:01:00Z",
+            "finished_unix": 160,
+            "state": "succeeded",
+            "config_sha": "sha-a",
+            "output_dir": "output",
+            "report": report_rel,
+        }),
+    );
+    std::fs::create_dir_all(mixed.join("runs/bench-run-a/output/demo/reports")).unwrap();
+    std::fs::write(mixed.join("runs/bench-run-a").join(report_rel), "<p>a</p>").unwrap();
+    std::fs::write(
+        mixed.join(LATEST_SUCCESS_FILE),
+        serde_json::to_string_pretty(&json!({
+            "run_id": "bench-run-a",
+            "config_sha": "sha-a",
+            "report": report_rel,
+            "finished_at": "2026-10-26T00:01:00Z",
+            "finished_unix": 160,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // B 失败：error 里带 | 和（JSON 转义后的）换行，状态行必须仍是可解析的一行。
+    write_run_meta(
+        &mixed.join("runs/bench-run-b"),
+        json!({
+            "run_id": "bench-run-b",
+            "project": "cmp_mixed",
+            "created_at": "2026-10-27T00:00:00Z",
+            "created_unix": 300,
+            "finished_at": "2026-10-27T00:05:00Z",
+            "finished_unix": 600,
+            "state": "failed",
+            "config_sha": "sha-b",
+            "output_dir": "output",
+            "report": null,
+            "error": "这次运行失败（退出码 1）；输出末尾：\nTraceback (most recent call last):\n  File \"demo.py\", line 3 | boom",
+        }),
+    );
+    // C 进行中：unix 居中，不该被选成最新；进行中的运行也没有报告/结束时间。
+    write_run_meta(
+        &mixed.join("runs/bench-run-c"),
+        json!({
+            "run_id": "bench-run-c",
+            "project": "cmp_mixed",
+            "created_at": "2026-10-26T12:00:00Z",
+            "created_unix": 200,
+            "state": "running",
+            "config_sha": "sha-c",
+            "output_dir": "output",
+        }),
+    );
+
+    // 只有一个进行中的新式项目：状态页要能显示"最近运行：进行中"。
+    let running = projects.join("cmp_running");
+    write_run_meta(
+        &running.join("runs/bench-run-live"),
+        json!({
+            "run_id": "bench-run-live",
+            "created_at": "2026-10-28T00:00:00Z",
+            "created_unix": 400,
+            "state": "running",
+            "config_sha": "sha-live",
+            "output_dir": "output",
+        }),
+    );
+
+    // 旧 meta 缺字段：能取到多少给多少，不能让整页状态打挂。
+    let sparse = projects.join("cmp_sparse");
+    write_run_meta(
+        &sparse.join("runs/bench-run-sparse"),
+        json!({
+            "run_id": "bench-run-sparse",
+            "state": "succeeded",
+            "created_unix": 500,
+        }),
+    );
+
+    // 坏 meta / 位数离谱的 created_unix / 没有 meta 的 run 目录：都不报错，也都不编造一次运行。
+    let broken = projects.join("cmp_broken");
+    std::fs::create_dir_all(broken.join("runs/bench-run-bad")).unwrap();
+    std::fs::write(broken.join("runs/bench-run-bad/meta.json"), "这不是 JSON\n").unwrap();
+    write_run_meta(
+        &broken.join("runs/bench-run-huge"),
+        json!({
+            "run_id": "bench-run-huge",
+            "state": "failed",
+            "created_unix": 12_345_678_901_234_567_890u64,
+        }),
+    );
+    std::fs::create_dir_all(broken.join("runs/bench-run-empty")).unwrap();
+
+    // 旧式项目：没有 runs/，latest_run 必须缺省，报告仍按旧的 output/ 扫描。
+    let legacy = projects.join("legacy");
+    std::fs::create_dir_all(legacy.join("output/demo/reports")).unwrap();
+    std::fs::write(
+        legacy.join("output/demo/reports/evaluation_report.html"),
+        "<p>legacy</p>",
+    )
+    .unwrap();
+
+    // 失败原因很长：状态行里要再截断（一行一个项目的输出不能被一条日志撑爆）。
+    let long = projects.join("cmp_long_error");
+    write_run_meta(
+        &long.join("runs/bench-run-long"),
+        json!({
+            "run_id": "bench-run-long",
+            "state": "failed",
+            "created_unix": 600,
+            "config_sha": "sha-long",
+            "error": format!("{}|tail", "x".repeat(5_000)),
+        }),
+    );
+
+    let (success, text, err) = bash_script(&status_script(&base.to_string_lossy()));
+    assert!(success, "{err}");
+    let value = parse_status(&base.to_string_lossy(), &text);
+    let find = |name: &str| {
+        value["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    // 每个项目恰好一行：error 里的换行/| 不能多分出一行或一列。
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("project="))
+            .count(),
+        6,
+        "{text}"
+    );
+
+    let mixed_row = find("cmp_mixed");
+    assert_eq!(
+        mixed_row["latest_success"]["run_id"], "bench-run-a",
+        "latest_success 仍指向最后一次成功：{mixed_row}"
+    );
+    assert!(
+        mixed_row["report"]
+            .as_str()
+            .unwrap()
+            .contains("/runs/bench-run-a/output/demo/reports/evaluation_report_standalone.html"),
+        "{mixed_row}"
+    );
+    let run = &mixed_row["latest_run"];
+    assert_eq!(run["run_id"], "bench-run-b", "{run}");
+    assert_eq!(run["state"], "failed", "{run}");
+    assert_eq!(run["config_sha"], "sha-b", "{run}");
+    assert_eq!(run["created_at"], "2026-10-27T00:00:00Z", "{run}");
+    assert_eq!(run["finished_at"], "2026-10-27T00:05:00Z", "{run}");
+    assert!(run["report"].is_null(), "{run}");
+    let error = run["error"].as_str().unwrap();
+    assert!(
+        error.contains("这次运行失败") && error.contains("Traceback") && error.contains("demo.py"),
+        "{error}"
+    );
+    assert!(!error.contains('|'), "| 会破坏状态行的分列：{error}");
+    assert!(!error.contains("\\n"), "JSON 转义的换行要换成空格：{error}");
+
+    // 进行中的运行：有身份、没有报告/结束时间/失败原因。
+    let live = find("cmp_running")["latest_run"].clone();
+    for key in [
+        "run_id",
+        "state",
+        "report",
+        "finished_at",
+        "created_at",
+        "config_sha",
+        "error",
+    ] {
+        assert!(live.get(key).is_some(), "latest_run 缺 {key}：{live}");
+    }
+    assert_eq!(live["run_id"], "bench-run-live", "{live}");
+    assert_eq!(live["state"], "running", "{live}");
+    assert_eq!(live["config_sha"], "sha-live", "{live}");
+    assert!(live["report"].is_null(), "{live}");
+    assert!(
+        live["finished_at"].is_null() && live["error"].is_null(),
+        "{live}"
+    );
+
+    // 缺字段的旧 meta：退化为可解析的子集，不整条丢掉也不编造。
+    let sparse_run = find("cmp_sparse")["latest_run"].clone();
+    assert_eq!(sparse_run["run_id"], "bench-run-sparse", "{sparse_run}");
+    assert_eq!(sparse_run["state"], "succeeded", "{sparse_run}");
+    assert!(sparse_run["config_sha"].is_null(), "{sparse_run}");
+    assert!(sparse_run["created_at"].is_null(), "{sparse_run}");
+    assert!(sparse_run["finished_at"].is_null(), "{sparse_run}");
+    assert!(sparse_run["report"].is_null(), "{sparse_run}");
+
+    // 坏 meta 一律当没有：不报错，也不能把坏数字/坏 JSON 当成一次运行。
+    assert!(
+        find("cmp_broken")["latest_run"].is_null(),
+        "{}",
+        find("cmp_broken")
+    );
+    // 旧式项目没有 latest_run。
+    let legacy_row = find("legacy");
+    assert!(
+        legacy_row["report"]
+            .as_str()
+            .unwrap()
+            .contains("/legacy/output/demo/reports/evaluation_report.html"),
+        "{legacy_row}"
+    );
+    assert!(legacy_row["latest_run"].is_null(), "{legacy_row}");
+
+    // 很长的失败原因被截到上限，且末尾不会因为截断多出 |。
+    let long_error = find("cmp_long_error")["latest_run"]["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        long_error.len(),
+        STATUS_ERROR_LIMIT as usize,
+        "{long_error}"
+    );
+    assert!(!long_error.contains('|'), "{long_error}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn server_status_lines_become_the_same_shape_as_the_local_status() {
-    let text = "uname=Linux x86_64\ncurl=/usr/bin/curl\nsha=/usr/bin/sha256sum\nuv=0.12.5\npython=Python 3.12.14\nopenbench=3.0.8\nproject=a|/srv/ob/projects/a/runs/x/output/a/reports/evaluation_report_standalone.html|bench-run-x|abc123|2026-10-28T00:00:00Z\nproject=b|\nproject=c|/srv/ob/projects/c/output/c/reports/evaluation_report.html\n";
+    // a：有 latest-success，也有最近一次失败运行（追加 7 段）；d：只有运行号没有 state（坏记录，
+    // 整条 latest_run 不给）；b/c：旧式/无运行记录。
+    let text = "uname=Linux x86_64\ncurl=/usr/bin/curl\nsha=/usr/bin/sha256sum\nuv=0.12.5\npython=Python 3.12.14\nopenbench=3.0.8\nproject=a|/srv/ob/projects/a/runs/x/output/a/reports/evaluation_report_standalone.html|bench-run-x|abc123|2026-10-28T00:00:00Z|bench-run-y|failed|def456|2026-10-27T00:00:00Z|2026-10-27T00:05:00Z|/srv/ob/projects/a/runs/y/output/a/reports/evaluation_report.html|boom\nproject=b|\nproject=c|/srv/ob/projects/c/output/c/reports/evaluation_report.html\nproject=d|/srv/ob/projects/d/output/d/reports/evaluation_report.html|bench-run-d|sha-d|2026-10-28T00:00:00Z|bench-run-partial\n";
     let value = parse_status("/srv/ob", text);
     assert_eq!(value["platform"], "linux-x86_64");
     assert_eq!(value["uv_version"], "0.12.5");
@@ -1586,11 +1888,47 @@ fn server_status_lines_become_the_same_shape_as_the_local_status() {
         value["projects"][0]["latest_success"]["config_sha"],
         "abc123"
     );
+    // 最近一次运行与前端 `ProjectRun` 同形：七个键都在，缺的写 null。
+    let run = &value["projects"][0]["latest_run"];
+    for key in [
+        "run_id",
+        "state",
+        "report",
+        "finished_at",
+        "created_at",
+        "config_sha",
+        "error",
+    ] {
+        assert!(run.get(key).is_some(), "latest_run 缺 {key}：{run}");
+    }
+    assert_eq!(run["run_id"], "bench-run-y", "{run}");
+    assert_eq!(run["state"], "failed", "{run}");
+    assert_eq!(run["config_sha"], "def456", "{run}");
+    assert_eq!(run["created_at"], "2026-10-27T00:00:00Z", "{run}");
+    assert_eq!(run["finished_at"], "2026-10-27T00:05:00Z", "{run}");
+    assert_eq!(
+        run["report"], "/srv/ob/projects/a/runs/y/output/a/reports/evaluation_report.html",
+        "{run}"
+    );
+    assert_eq!(run["error"], "boom", "{run}");
+    // 旧式项目/无运行记录：latest_run 缺省。
     assert!(value["projects"][1]["report"].is_null());
     assert!(value["projects"][1]["latest_success"].is_null());
+    assert!(value["projects"][1]["latest_run"].is_null());
     assert_eq!(
         value["projects"][2]["report"],
         "/srv/ob/projects/c/output/c/reports/evaluation_report.html"
+    );
+    assert!(value["projects"][2]["latest_run"].is_null());
+    // 运行号在但 state 缺（手改坏的行）：宁可不显示，也不替它编一个进行中/成功。
+    assert_eq!(
+        value["projects"][3]["latest_success"]["run_id"],
+        "bench-run-d"
+    );
+    assert!(
+        value["projects"][3]["latest_run"].is_null(),
+        "{}",
+        value["projects"][3]
     );
     // 什么都没装：版本都是空的，平台照报。
     let empty = parse_status("/srv/ob", "uname=Linux aarch64\ncurl=\nsha=\n");

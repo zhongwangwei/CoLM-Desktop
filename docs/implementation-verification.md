@@ -39799,3 +39799,46 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 影响：`pixel-overlap` 是上一批刚引入的 opt-in 语义，尚无已发布研究依赖其旧权重；in-cell 旧研究完全不受影响。
 
 验证（真实执行）：`cargo test -q -p colm-cli --bin colm-cli study::targets -- --test-threads=1` **38 passed**；全量 CLI bin、integration、study_version、clippy/fmt 结果见本轮提交。未运行真实全球产品；合成夹具覆盖赤道/中纬/跨日界线几何。
+
+
+## 比较页第四批：非公历制备路径、远程最近运行诊断、内部命名统一（2026-10-30）
+
+接第三批（f0059ee）的"未完成产品语义"里可执行的三项；层维度/多 patch/element/草稿恢复/常驻任务栏/站点 ID 与 profile 独立选择等需要科学或产品取舍，未动。
+
+### 1 非公历 history 现在能真正制备（R06 遗留）
+
+- 旧行为：INSPECT 已能探测 noleap/360_day（cftime），但 `prepare.py` 仍写死 datetime64：文件间排序 `np.datetime64(cftime)` 在 noleap 上会把日期按公历解释（闰年语义丢失）、在 360_day 的 2 月 30 日直接 `ValueError: Invalid date (2000,2,30)`；即使不崩，合并后的时间轴没有 units/calendar 也无法可靠写回。
+- 新行为：`prepare.py` 增加可选 cftime 导入与日历感知 helper（与 inspect.py 判据刻意重复，理由：本机 `python -c` 与服务器 heredoc 各是一份完整源码，无共享模块；两端判据必须一致）。
+  - `check_shared_time_axis`：合并前拒绝"混标准 datetime64 与 cftime"及"混不同日历（noleap, 360_day…）"，给可行动错误，不再抛裸 TypeError；
+  - `first_time` 用日历内可直接比较的时刻对象排序，替换 `np.datetime64(...)`；
+  - `copy_time_encoding` 把首文件 time 的 `units/calendar/dtype`（以及缺失 attrs）搬到合并结果再 `to_netcdf`，老版 xarray 也能写回可解码时间轴（实测不搬时 xarray 会把参考时刻重猜成另一套 units）；
+  - CSV 的 SYEAR/EYEAR 对 cftime 读 `.year`（360_day 的 2-30 不是合法公历日期，不能先转 datetime64）；标准日历保持旧写法。
+- 测试：`scripts/test-bench-scripts.py` +2 → **34 passed**。`non_gregorian_history_is_prepared` 覆盖 noleap（跨年 2000→2001）与 360_day（含 2-30）各两个主族文件（文件名序与时间序相反）、中间重复时刻按变量合并、tracer 族不参与、输出可重开且 calendar/units 与输入等价、CSV 年份；`mixing_calendars_or_decodings_is_rejected_by_prepare` 覆盖混日历/混解码明确报错且失败不留半成品 NC。真实生产调用路径（`python -c` 与 stdin heredoc）另做了手工冒烟。
+- 已知边界：未在 OpenBench 专用 venv 的 xarray 版本上跑（显式搬 encoding 即是给老版本的兜底）；标准日历路径现在也保留首文件 units/dtype（解码值不变）；cftime 是可选依赖，未装时非公历文件在 open 阶段即失败（与 inspect 一致）。
+
+### 2 远程比较状态返回 latest_run（C07 远程侧验收缺口）
+
+- 旧行为：远程项目行只有 `latest_success`，失败/进行中的重跑在页面上不可见，永远显示"还没有运行记录"；前端 `ProjectRun` 类型和报告表其实早已支持 `latest_run`。
+- 新行为：`status_script` 对新式项目扫描 `runs/*/meta.json`，用 POSIX `test` 数值比较 `created_unix` 选最新一次运行，项目行从 5 段扩到 12 段（旧式项目仍是 2 段，解析向后兼容）；`report` 只在 succeeded 且 meta.report 指向运行目录内现存相对路径时给出绝对路径；`error` 清理 `|`/换行并截断 1200 字符；坏 meta、缺字段、无 meta 均跳过不报错。`parse_status` 输出与前端 `ProjectRun` 逐字段一致的 `latest_run`；Tauri `bench_remote_status` 原样透传，无需改；前端报告表因此能显示"last run: failed/job id/原因"。
+- 测试：`remote_bench_tests` 新增 newest-run 选择（成功+失败+进行中、created_unix 与目录字典序乱序）、坏 meta/巨大数字/无 meta、旧式项目、超长含 `|` error、以及接真 `FINISH_SCRIPT` 产物的 status→parse 端到端；前端新增 R12 layout 回归（远程失败运行显示 last run: failed + run id + 原因）。
+
+### 3 内部命名统一（R11 遗留）
+
+- `project.name` 改用 `comparisonName(design.name)`，与后端比较目录完全一致：下划线/数字开头名字不再一个被改成 `sim_exp`、另一个比较目录叫 `_exp`（OpenBench 只要求 project.name 是简单目录名，已按 3.0.8 源码确认）。ASCII 合法名的结果不变；新增回归覆盖 `versions vs flux`/`2026 run`/`_draft`/`123`/`AT-Neu_vs_draft2` 的 config project.name 与 comparisonDir basename 逐字相等。
+
+### 本轮验证（真实执行）
+
+- 前端：`node ../scripts/check-gui.mjs --self-test` 0、`check-gui.mjs` 0（**262 命令 / 224 调用**）；`test-react.mjs` **1277 passed / 0 failed**；`tsc --noEmit` 0 error；`eslint src/features/compare`、`prettier --check src/features/compare` 干净。
+- GUI/Tauri：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib -- --test-threads=1` → **582 passed / 0 failed / 1 ignored**；clippy `-D warnings` 干净。注：同一套件默认并行跑的一次出现 1 个未定位 flaky 失败（未看到测试名，随后默认并行与串行各重跑均全绿），与本次改动没有对应关系（本批未改 GUI Rust 代码）。
+- 根 workspace：`cargo test -p colm-cli --bin colm-cli remote_bench` → **47 passed**；`cargo test -p colm-bench --lib` → 7 passed；`cargo clippy -p colm-bench -p colm-cli --all-targets -- -D warnings` → 0 warning；改动 Rust 文件 `rustfmt --edition 2021 --check` 干净。
+- 脚本：`python3 scripts/test-bench-scripts.py` → **34 passed / 0 failed**（32 旧 + 2 非公历）。
+- `git diff --check` 干净。
+- 未运行：真实 OpenBench 运行（含真实非公历 history 的端到端比较）、真实 SSH/调度器、OpenBench 专用 venv 的 xarray/cftime 版本；`cargo test -p colm-cli` 默认并行跑会因本机 HDF5/NetCDF 环境出现 history/flux 等无关失败（串行全绿，属既有本机问题）。
+
+### 遗留（需要产品/科学取舍，未擅自动）
+
+1. 层维度（soil/snow/类别）仍只做运行前拒绝，未支持深度选择/聚合；多 patch、element 向量仍明确不支持。
+2. 跨日界线格点仍明确拒绝（OpenBench 的 [西,东] 表达不了环绕范围）。
+3. OpenBench `statistics` 阶段（统计检验）仍未接入。
+4. 草稿离页恢复、保存/运行按钮语义拆分、常驻任务栏、站点 ID 与模型 profile 独立选择、CoLM2024 仍固定写。
+5. 旧式镜像/旧项目没有 run 身份，取回仍走旧路径；远程 status 的 latest_run 目前只到"最近一次运行"，没有历史运行列表。

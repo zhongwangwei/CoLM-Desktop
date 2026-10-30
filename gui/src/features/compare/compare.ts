@@ -764,7 +764,9 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
   const lines = [
     '# CoLM Desktop 生成；可以先改再运行。',
     'project:',
-    `  name: ${quote(simulationKey(design.name))}`,
+    // OpenBench 的 project.name 决定输出子目录；它必须和后端比较目录（comparisonName）一致，
+    // 否则页面/报告里的"项目"与磁盘上的 projects/<名字> 对不上（R11 遗留的命名差异）。
+    `  name: ${quote(comparisonName(design.name))}`,
     '  output_dir: ./output',
     `  years: [${from}, ${to}]`,
     `  tim_res: ${design.timRes}`,
