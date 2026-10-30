@@ -49,6 +49,9 @@ function initialization() {
     versionId: 'official',
     revision: 1,
     completedRunCase: undefined,
+    latestCompletedRun: { current: undefined },
+    // 运行清单读回来后才由 preferredRun 决定默认选中哪条（这里没有任何运行，保持空）。
+    preferredRun: () => '',
     observationEdited: { current: false },
     automaticObservation: { current: '' },
     automaticEvaluation: { current: '' },
@@ -174,10 +177,10 @@ test('a server run is read in place, and fetching takes only that run', async ()
   const walk = (node: ts.Node) => {
     if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect')
       bodies.push(node.arguments[0].getText(source));
-    if (ts.isFunctionDeclaration(node) && node.name?.getText(source) === 'fetchSelectedRun')
+    if (ts.isFunctionDeclaration(node) && node.name?.getText(source) === 'fetchRemoteResults')
       fetchBody = node
         .getText(source)
-        .replace(/^async function fetchSelectedRun/, 'async function');
+        .replace(/^async function fetchRemoteResults/, 'async function');
     ts.forEachChild(node, walk);
   };
   walk(source);
@@ -224,7 +227,8 @@ test('a server run is read in place, and fetching takes only that run', async ()
       runs = value;
     },
   });
-  await fetch();
+  // 默认取回：只取回这一次运行（all=false，不覆盖本机同名新文件）。
+  await fetch(false);
   assert.deepEqual(calls, [
     {
       command: 'remote_fetch',
@@ -233,6 +237,18 @@ test('a server run is read in place, and fetching takes only that run', async ()
     { command: 'model_case_runs', args: { dir: '/case' } },
   ]);
   assert.deepEqual(runs, []);
-  // 按钮只在真取回时写"正在取回…"，结束后复原。
-  assert.deepEqual(fetching, [true, false]);
+  // 部分取回后补全走同一个命令，只是 all/overwriteNewer 变成 true。
+  calls.length = 0;
+  runs = undefined;
+  await fetch(true);
+  assert.deepEqual(calls, [
+    {
+      command: 'remote_fetch',
+      args: { case: '/case/runs/r1', host: null, all: true, overwriteNewer: true },
+    },
+    { command: 'model_case_runs', args: { dir: '/case' } },
+  ]);
+  assert.deepEqual(runs, []);
+  // 按钮只在真取回时写"正在取回…"，每次结束都复原。
+  assert.deepEqual(fetching, [true, false, true, false]);
 });

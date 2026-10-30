@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
 import * as seriesHelpers from './series';
+import * as chartHelpers from './chart-data';
 import * as overviewHelpers from './result-overview';
 import * as variableLabels from './variable-labels';
 import * as analysisHelpers from './analysis-state';
@@ -23,6 +24,15 @@ const residual = {
   source_n: 2,
   n: 2,
   downsampled: false,
+};
+/** 抽样后的序列：2 与 3 之间那段缺测在抽样里整段消失，只剩 gaps 里的区间。 */
+const gapped = {
+  time: [1, 2, 3, 4],
+  vars: { f_lfevpa: [100, 200, 300, 400] },
+  source_n: 100001,
+  n: 4,
+  downsampled: true,
+  gaps: { f_lfevpa: [[1.5, 2.5]] as [number, number][] },
 };
 const diagnostic = {
   schema: 1,
@@ -45,7 +55,16 @@ function harness(
   delayedSeries?: Promise<unknown>,
   openError = '',
   initialCase = '/case',
-  options: { remoteRun?: boolean; withBack?: boolean } = {},
+  options: {
+    remoteRun?: boolean;
+    withBack?: boolean;
+    /** 远程运行的本机结果状态（部分取回等）。 */
+    localResults?: Record<string, unknown>;
+    /** 这些观测路径的 metrics 调用会失败（可被测试实时清空，用来模拟重试成功）。 */
+    failingObs?: string[];
+    /** 抽样序列带缺测区间（验证图上的断线）。 */
+    gaps?: boolean;
+  } = {},
 ) {
   let selectedCase = initialCase;
   const opened: string[] = [],
@@ -69,6 +88,10 @@ function harness(
     a?.length === b.length && a.every((x, i) => Object.is(x, b[i]));
   const invokeJson = async (command: string, args: Record<string, unknown>) => {
     requests.push({ command, args });
+    if (command === 'remote_fetch') return null;
+    // 比较重试用例：先让这些观测失败，测试里清空列表后同样的路径会返回指标。
+    if (command === 'metrics' && options.failingObs?.includes(String(args.obs)))
+      throw Error('no readable history for this run');
     if (command === 'model_case_runs' && args.dir === '/empty') return [];
     if (command === 'model_case_runs' && args.dir === '/othercase')
       return [
@@ -86,7 +109,13 @@ function harness(
           run_case: '/case/.colm/runs/a',
           version: { id: 'official', revision: 2 },
           status: 'succeeded',
-          ...(options.remoteRun ? { server: 'server', outputs_local: false } : {}),
+          ...(options.remoteRun
+            ? {
+                server: 'server',
+                outputs_local: false,
+                ...(options.localResults ? { local_results: options.localResults } : {}),
+              }
+            : {}),
         },
       ];
     if (command === 'model_project_runs')
@@ -109,7 +138,7 @@ function harness(
         end: 2,
         variables: [{ name: 'f_lfevpa', kind: 'series', units: 'W/m²', dimensions: [] }],
       };
-    if (command === 'series') return delayedSeries ?? normal;
+    if (command === 'series') return delayedSeries ?? (options.gaps ? gapped : normal);
     if (command === 'evaluation_catalog') return [{ name: 'Qle', available: true }];
     // 单站评估：只有 /obs/single.nc 这条路径返回一行指标，避免自动评估等用例拿到假数据。
     if (command === 'metrics' && args.obs === '/obs/single.nc')
@@ -132,6 +161,21 @@ function harness(
           correction_reason: 'Qle_cor missing',
           coverage: 0.6,
           coverage_min: 0.25,
+        },
+      ];
+    // 比较重试用例：这条观测重试成功时返回一行指标（失败时上面的 failingObs 分支先命中）。
+    if (command === 'metrics' && args.obs === '/obs/b.nc')
+      return [
+        {
+          name: 'Qle',
+          n: 2,
+          rmse: 3,
+          mae: 2,
+          bias: 1,
+          r2: 1,
+          correlation: 1,
+          nse: 1,
+          kge: 1,
         },
       ];
     if (command === 'energy_summary') return diagnostic;
@@ -161,6 +205,7 @@ function harness(
   };
   const env: Record<string, unknown> = {
     ...seriesHelpers,
+    ...chartHelpers,
     ...overviewHelpers,
     ...variableLabels,
     ...analysisHelpers,
@@ -169,6 +214,9 @@ function harness(
     invokeJson,
     invoke: invokeJson,
     hasBackend: () => true,
+    // 页面源码里的报错/失败原因走 bilingual（import 被剥掉）；测试按中文返回。
+    bilingual: (zh: string) => zh,
+    utcSeconds: (value: string) => Date.parse(value) / 1000,
     defaultObservation: async () => '',
     timeTicks: () => [],
     uPlot: () => {},
@@ -987,4 +1035,133 @@ test('the comparison shows a per-station RMSE bar chart', async () => {
   );
   assert.equal(bars.length, 1, 'one bar per compared run');
   assert.ok(String((bars[0].props.style as { width?: string }).width).endsWith('%'));
+});
+
+test('a downsampled stretch with no samples is drawn as a break, not a smooth line', async () => {
+  const h = harness(false, undefined, '', '/case', { gaps: true });
+  await h.render();
+  const chart = h.charts()[0] as { labels: string[]; data: (number | null)[][] } | undefined;
+  assert.ok(chart, 'the sampled series is charted');
+  // 缺测区间的起止时刻各插一行 null：5 与 6 之间的 21 个缺测点不再被降采样抹掉。
+  assert.deepEqual(chart.data, [
+    [1, 1.5, 2, 2.5, 3, 4],
+    [100, null, 200, null, 300, 400],
+  ]);
+  assert.deepEqual(chart.labels, ['Simulation']);
+});
+
+test('a partial local fetch says what is local and offers fetching the full history', async () => {
+  const h = harness(false, undefined, '', '/case', {
+    remoteRun: true,
+    localResults: {
+      status: 'partial',
+      files: 3,
+      vars: ['Qle', 'Qh'],
+      from: '2008-01-01T00:00:00Z',
+      to: '2008-06-01T00:00:00Z',
+      scientific_verified: false,
+    },
+  });
+  await h.render();
+  const rendered = JSON.stringify(h.tree());
+  assert.ok(
+    rendered.includes('Local results partial'),
+    'the identity badge must not claim a complete local result',
+  );
+  for (const text of [
+    'Only part of the results',
+    'Qle',
+    'Qh',
+    '2008-01',
+    '2008-06',
+    'not scientifically verified',
+  ])
+    assert.ok(rendered.includes(text), `the banner explains ${text}`);
+  const full = actionById(h, 'result-fetch-all');
+  assert.equal(full?.kind, 'commit');
+  assert.equal(full?.enabled, true);
+  assert.ok(actionById(h, 'result-fetch'), 'the per-run fetch button stays');
+  const scans = () => h.requests.filter((request) => request.command === 'model_case_runs').length;
+  const before = scans();
+  // 部分取回只能用「取回全部历史」补全：all/overwriteNewer 都要为 true。
+  await h.action('result-fetch-all');
+  assert.deepEqual(
+    h.requests.filter((request) => request.command === 'remote_fetch').at(-1)?.args,
+    {
+      case: '/case/.colm/runs/a',
+      host: null,
+      all: true,
+      overwriteNewer: true,
+    },
+  );
+  assert.ok(scans() > before, 'the run list refreshes so local_results can be re-read');
+});
+
+test('a complete local fetch offers no fetch buttons, but an invalid folder keeps the banner', async () => {
+  const complete = harness(false, undefined, '', '/case', {
+    remoteRun: true,
+    localResults: { status: 'complete', files: 12 },
+  });
+  await complete.render();
+  assert.equal(actionById(complete, 'result-fetch'), undefined);
+  assert.equal(actionById(complete, 'result-fetch-all'), undefined);
+  assert.ok(JSON.stringify(complete.tree()).includes('Local results complete'));
+
+  const invalid = harness(false, undefined, '', '/case', {
+    remoteRun: true,
+    localResults: { status: 'invalid', files: 0 },
+  });
+  await invalid.render();
+  assert.ok(JSON.stringify(invalid.tree()).includes('local result folder is invalid'));
+  assert.equal(
+    actionById(invalid, 'result-fetch-all'),
+    undefined,
+    'an invalid folder has nothing to top up',
+  );
+});
+
+test('a failed comparison entry is listed without losing the successful rows, and retry recomputes only it', async () => {
+  const failing = ['/obs/b.nc'];
+  const h = harness(true, undefined, '', '/case', { failingObs: failing });
+  await h.render();
+  const cells = (node: unknown): string[] => {
+    if (Array.isArray(node)) return node.flatMap(cells);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    if (element.type === 'td')
+      return [String((element.props.children ?? []).filter((x) => x != null).join(''))];
+    return cells(element.props?.children);
+  };
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  h.field('comparison-sources')!.set!(
+    '/case/.colm/runs/a | /obs/compare.nc\n/othercase/runs/b | /obs/b.nc',
+  );
+  await h.render();
+  await h.action('compare-sites');
+  const metricCalls = () =>
+    h.requests.filter(
+      (request) => request.command === 'metrics' && request.args.obs !== '/obs/single.nc',
+    );
+  assert.equal(metricCalls().length, 2, 'both entries are attempted');
+  assert.ok(!cellError(h), 'one failed station does not turn the whole comparison into an error');
+  assert.ok(cells(h.tree()).includes('f_lfevpa'), 'the successful row stays');
+  const rendered = JSON.stringify(h.tree());
+  assert.ok(rendered.includes('1 run(s) produced no metrics'));
+  assert.ok(rendered.includes('/obs/b.nc'));
+  assert.ok(rendered.includes('no readable history for this run'));
+  assert.equal(actionById(h, 'retry-comparison-failures')?.enabled, true);
+  // 重试只重算失败项；成功后合并进同一张表，失败列表消失。
+  failing.length = 0;
+  const before = metricCalls().length;
+  await h.action('retry-comparison-failures');
+  const retried = metricCalls().slice(before);
+  assert.equal(retried.length, 1, 'only the failed entry is recomputed');
+  assert.equal(retried[0].args.obs, '/obs/b.nc');
+  assert.ok(!JSON.stringify(h.tree()).includes('produced no metrics'));
+  assert.ok(cells(h.tree()).includes('Qle'), 'the retried row is merged into the snapshot');
+  assert.ok(!cellError(h), 'a successful retry leaves no error notice');
 });

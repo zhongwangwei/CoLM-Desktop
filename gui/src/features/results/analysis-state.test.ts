@@ -178,3 +178,21 @@ test('comparison csv keeps row order and falls back to the entry observation', (
   assert.match(lines[2], /\/other\/runs\/b/);
   assert.match(lines[2], /\/obs\/b\.nc/, 'observation falls back to the snapshot entry');
 });
+
+test('comparison failures are recorded beside the rows and never exported as metric rows', () => {
+  const result = comparisonResult();
+  result.failures = [
+    { runCase: '/other/runs/b', obs: '/obs/b.nc', error: 'history missing' },
+    {
+      runCase: '/third/runs/c',
+      obs: '/obs/c.nc',
+      error: 'cancelled before it started',
+      cancelled: true,
+    },
+  ];
+  const csv = comparisonCsv(result);
+  assert.equal(csv.split('\n').length, 2, 'a failed run has no metric row to export');
+  assert.ok(!csv.includes('history missing'));
+  assert.ok(!csv.includes('/other/runs/b'), 'request entries do not fabricate rows');
+  assert.equal(result.failures.length, 2, 'failures stay on the snapshot for the page to list');
+});

@@ -1,6 +1,6 @@
 import { bilingual } from '../../lib/bilingual';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { sameSeries } from './chart-data';
+import { insertGapMarkers, sameSeries } from './chart-data';
 import uPlot from 'uplot';
 import { timeTicks } from './time-ticks';
 import { utcSeconds } from '../../lib/dates';
@@ -12,6 +12,7 @@ import { Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../comp
 import { ActionButton } from '../../components/ActionButton';
 import {
   boundedMap,
+  boundedMapSettled,
   download,
   fullEnergyStats,
   fullSeriesCsv,
@@ -40,6 +41,7 @@ import {
   exportGate,
   fresh,
   singleKey,
+  type ComparisonFailure,
   type ComparisonRequest,
   type ComparisonResult,
   type EvaluationAvailability,
@@ -66,6 +68,17 @@ type Catalog = {
   end: number;
   variables: CatalogVariable[];
 };
+/** 本机结果目录的状态。`partial` 表示只按所选变量/月份取回过一部分（旁边有 `.colm-fetch.json` 标记）。 */
+type LocalResultsStatus = 'missing' | 'invalid' | 'partial' | 'complete';
+/** 后端给每条运行记录算出的本机结果状态；旧后端没有这个字段。 */
+type LocalResults = {
+  status: LocalResultsStatus;
+  files?: number;
+  vars?: string[] | null;
+  from?: string | null;
+  to?: string | null;
+  scientific_verified?: boolean;
+};
 type Run = RecordedRun & {
   run_id?: string;
   id?: string;
@@ -73,6 +86,8 @@ type Run = RecordedRun & {
   /** Server runs: the server, and whether their outputs were fetched to this computer. */
   server?: string | null;
   outputs_local?: boolean;
+  /** 本机已有的结果（部分取回不再算完整，见 remote-fetch 的 `.colm-fetch.json`）。 */
+  local_results?: LocalResults;
   [key: string]: unknown;
 };
 /** `model_project_runs` 返回的一条可比较运行（带所属站点，供多站点比较选择器分组）。 */
@@ -82,8 +97,175 @@ type ProjectRun = Run & {
   case_name: string;
   finished_ms?: number | null;
 };
+/**
+ * 运行的本机结果状态。旧后端/旧台账记录只有 `outputs_local`（布尔），按「有结果=complete、
+ * 明确取回失败=false=missing」回退；新后端以 `local_results.status` 为准。
+ */
+function statusOf(run: Run | undefined): LocalResultsStatus {
+  const status = run?.local_results?.status;
+  if (status === 'missing' || status === 'invalid' || status === 'partial' || status === 'complete')
+    return status;
+  return run?.outputs_local === false ? 'missing' : 'complete';
+}
+/** 只跑到预处理的运行（mksrfdata/mkinidata）没有模拟结果，不能当默认结果。 */
+function preparedOnly(run: Run): boolean {
+  const provenance = run.provenance;
+  const stage =
+    provenance && typeof provenance === 'object'
+      ? (provenance as { stage?: unknown }).stage
+      : undefined;
+  return stage === 'mksrfdata' || stage === 'mkinidata';
+}
+/** 能作为默认结果的运行：真的成功/完成、不是 legacy 占位、也不是只跑到预处理。 */
+function usableRun(run: Run): boolean {
+  if (!run.run_case || run.legacy === true || run.needs_reconciliation) return false;
+  if (run.status !== 'succeeded' && run.status !== 'completed') return false;
+  return !preparedOnly(run);
+}
+/**
+ * 结果页默认选中哪条运行（旧实现只按数组顺序取第一条有 run_case 的，会停在 legacy 占位或
+ * 只跑到预处理的运行上，打开结果页就是空的）。顺序：
+ * ① 刚跑完的那条（若在清单里且可用）；② 最新的、本机结果完整或结果在服务器上可远程读的成功运行；
+ * ③ 最新的成功运行（本地结果可能缺，页面会提示取回）；④ 第一条非占位运行（只用于显示错误/诊断）。
+ */
+function preferredRun(
+  runs: Run[],
+  justCompleted?: string,
+  preferredVersion?: { id?: string; revision?: number },
+): string {
+  const usable = runs.filter(usableRun);
+  const completed = justCompleted
+    ? usable.find((run) => run.run_case === justCompleted)
+    : undefined;
+  if (completed?.run_case) return completed.run_case;
+  // 从某个修订打开结果页时先选这个修订的运行：版本页/模拟页带过来的上下文
+  // 不应默默跳到别的修订（旧实现的 version 匹配层在这里恢复，但仍要求运行可用）。
+  if (preferredVersion?.id) {
+    const current = usable.find(
+      (run) =>
+        run.version?.id === preferredVersion.id &&
+        run.version?.revision === preferredVersion.revision,
+    );
+    if (current?.run_case) return current.run_case;
+  }
+  const withOutput = usable.find((run) => statusOf(run) === 'complete' || !!run.server);
+  if (withOutput?.run_case) return withOutput.run_case;
+  if (usable[0]?.run_case) return usable[0].run_case;
+  const fallback = runs.find((run) => run.run_case && run.legacy !== true && !preparedOnly(run));
+  return fallback?.run_case || '';
+}
+/**
+ * 结果身份区里的「本机结果」徽标：部分取回要显式标出来，不能让它看起来像完整结果
+ * （审计 P2-7：远程只取回一部分后，页面按完整本机结果显示）。
+ */
+function localResultsLabel(run: Run, en: boolean): string {
+  const results = run.local_results;
+  const files = typeof results?.files === 'number' && results.files > 0 ? results.files : undefined;
+  const status = statusOf(run);
+  if (status === 'complete') return en ? 'Local results complete' : '本机结果完整';
+  if (status === 'partial')
+    return en
+      ? `Local results partial${files ? ` · ${files} file(s)` : ''}`
+      : `本机结果部分取回${files ? ` · ${files} 个文件` : ''}`;
+  if (status === 'invalid') return en ? 'Local result folder invalid' : '本地结果目录无效';
+  return en ? 'No local results' : '本机无结果';
+}
+
 /** 多站点比较的一行：一个运行副本 + 它的观测文件。 */
 type ComparisonEntry = { run: ProjectRun; obs: string };
+/** 运行目录 `<算例>/runs/<编号>` 的所属算例：比较时只查这些算例，不再扫全项目。 */
+function caseDirOfRunPath(runCase: string) {
+  const parts = runCase.replace(/[\\/]+$/, '').split(/[\\/]/);
+  const at = parts.lastIndexOf('runs');
+  return at > 0 ? parts.slice(0, at).join('/') : null;
+}
+/**
+ * 比较条目 → 参与比较的运行记录。项目运行清单已一次查回来就直接核对；不在清单里的
+ * （跨项目/手填路径）只按运行目录反推所属算例、查那一个算例，不再扫全项目。
+ */
+async function comparisonSources(entries: ComparisonEntry[], knownRuns: Run[]): Promise<Run[]> {
+  let sources: Run[] = knownRuns;
+  const unknown = entries.filter(
+    (entry) => !sources.some((run) => run.run_case === entry.run.run_case),
+  );
+  if (unknown.length) {
+    const dirs = [...new Set(unknown.map((entry) => caseDirOfRunPath(entry.run.run_case)))].filter(
+      (dir): dir is string => !!dir,
+    );
+    const inventories = await boundedMap(dirs, 2, (dir) =>
+      invokeJson<Run[]>('model_case_runs', { dir }).catch(() => []),
+    );
+    sources = [...sources, ...inventories.flat()];
+  }
+  return sources;
+}
+/**
+ * 单个条目的比较指标。比较与「重试失败项」共用同一份参数构造：条件和窗口都读比较时的
+ * `request` 快照，不读重试时界面上的新输入。成功的行带上站点与观测，供表格/CSV 用。
+ */
+async function comparisonMetricsFor(
+  entry: ComparisonEntry,
+  request: ComparisonRequest,
+  sources: Run[],
+  window: (from: string, to: string) => { from: number | null; to: number | null },
+): Promise<Metric[]> {
+  const values = await invokeJson<Metric[]>('metrics', {
+    case: entry.run.run_case,
+    obs: entry.obs.trim(),
+    spinup: Number(request.spinup),
+    corrected: request.corrected,
+    summaryOnly: true,
+    pairVars: null,
+    maxPoints: 2400,
+    ...window(request.from, request.to),
+  });
+  return values.map((value) => ({
+    ...value,
+    site: entry.run.run_case,
+    comparison_obs: entry.obs.trim(),
+    provenance: sources.find((run) => run.run_case === entry.run.run_case) ?? entry.run,
+  }));
+}
+/** 失败行的原因：被取消的条目根本没有后端错误，要说明是「还没开始」，不能冒充计算失败。 */
+function comparisonFailureReason(error: unknown, cancelled: boolean): string {
+  if (cancelled)
+    return bilingual(
+      '取消：条件或页面已改变，这一项还没开始计算',
+      'Cancelled before it started: conditions or page changed',
+    );
+  return error instanceof Error ? error.message : String(error);
+}
+/**
+ * 把并发池的 settled 结果拆成成功的指标行与失败行（都按条目顺序）。
+ * 单条失败不再 reject 整个比较：成功的行照旧进表，失败的只登记原因并在页面上列出。
+ */
+function splitSettledComparison(
+  entries: ComparisonEntry[],
+  settled: { value?: Metric[]; error?: unknown; cancelled?: boolean }[],
+): { rows: Metric[]; failures: ComparisonFailure[] } {
+  const rows: Metric[] = [];
+  const failures: ComparisonFailure[] = [];
+  settled.forEach((outcome, index) => {
+    const entry = entries[index];
+    const runCase = entry.run.run_case;
+    const obs = entry.obs.trim();
+    if (outcome.cancelled) {
+      failures.push({
+        runCase,
+        obs,
+        error: comparisonFailureReason(undefined, true),
+        cancelled: true,
+      });
+      return;
+    }
+    if (outcome.error !== undefined) {
+      failures.push({ runCase, obs, error: comparisonFailureReason(outcome.error, false) });
+      return;
+    }
+    rows.push(...(outcome.value ?? []));
+  });
+  return { rows, failures };
+}
 type BaselineComparison = {
   same_design: boolean;
   better?: string | null;
@@ -380,6 +562,8 @@ export default function ResultsPage({
     done: number;
     total: number;
   } | null>(null);
+  // 进度属于哪一次比较/重试：旧任务晚返回既不能改新任务的进度，finally 也只清自己那一份。
+  const comparisonTaskId = useRef(0);
   // 跨项目比较：手填一个运行目录（不在当前项目的清单里）。
   const [externalRun, setExternalRun] = useState('');
   // 90 个站点时运行列表很长：按站点/运行/版本搜索，并可只看结果还在服务器上的运行。
@@ -416,6 +600,7 @@ export default function ResultsPage({
   const comparisonFreshKey = comparisonKey(comparisonRequest);
   const singleRows = singleResult?.rows ?? [];
   const comparisonMetrics = comparisonResult?.rows ?? [];
+  const comparisonFailures = comparisonResult?.failures ?? [];
   const metrics = multiStation ? comparisonMetrics : singleRows;
   const singleFresh = singleResult !== null && fresh(singleResult, selectionKey);
   const comparisonFresh = comparisonResult !== null && fresh(comparisonResult, comparisonFreshKey);
@@ -463,17 +648,7 @@ export default function ResultsPage({
       .then((data) => {
         if (!cancelled && stationTarget.current === caseDir) {
           setRuns(data);
-          setSource(
-            data.find((r) => r.run_case === latestCompletedRun.current)?.run_case ||
-              data.find(
-                (r) =>
-                  r.run_case && r.version?.id === versionId && r.version?.revision === revision,
-              )?.run_case ||
-              // A ledger-imported legacy placeholder points at the case itself and has no output.
-              data.find((r) => r.run_case && r.version)?.run_case ||
-              data.find((r) => r.run_case)?.run_case ||
-              '',
-          );
+          setSource(preferredRun(data, latestCompletedRun.current, { id: versionId, revision }));
         }
       })
       .catch((e) => {
@@ -661,8 +836,15 @@ export default function ResultsPage({
   };
   // 结果还在服务器上的运行，变量表和曲线由后端改在服务器上读（`remote-read`），只传回算好的数据；
   // 要 NetCDF 文件或评估指标时才按需取回这一个站点、这一次运行（一个站点约 0.5 GB）。
-  const awaitingFetch = !!selectedRun?.server && selectedRun.outputs_local === false;
-  async function fetchSelectedRun() {
+  // 部分取回（local_results.status=partial）也走这里：本机那部分不能当完整结果用。
+  const selectedStatus = statusOf(selectedRun);
+  const awaitingFetch = !!selectedRun?.server && selectedStatus !== 'complete';
+  /**
+   * 取回本机结果。`all=false` 只取这一次运行、按服务器设置里的变量/月份（默认行为）；
+   * `all=true` 取完整历史：部分取回后再补全，`overwriteNewer` 允许覆盖本机同名旧文件。
+   * 完成后重新读运行记录，让 `local_results` 与取回按钮随状态更新。
+   */
+  async function fetchRemoteResults(all: boolean) {
     const target = source,
       dir = caseDir;
     setFetching(true);
@@ -671,8 +853,8 @@ export default function ResultsPage({
         await invokeJson('remote_fetch', {
           case: target,
           host: null,
-          all: false,
-          overwriteNewer: false,
+          all,
+          overwriteNewer: all,
         });
         const data = await invokeJson<Run[]>('model_case_runs', { dir });
         if (current() && stationTarget.current === dir) setRuns(data);
@@ -681,19 +863,22 @@ export default function ResultsPage({
       setFetching(false);
     }
   }
-  const windowArgs = useCallback(() => {
-    const parse = (value: string) => {
-      if (!value) return null;
-      const n = utcSeconds(value);
-      if (!Number.isFinite(n)) throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
-      return n;
-    };
-    const a = parse(from),
-      b = parse(to);
-    if (a !== null && b !== null && a >= b)
-      throw new Error(bilingual('开始时间要早于结束时间', 'Start must precede end'));
-    return { from: a, to: b };
-  }, [from, to]);
+  const windowArgs = useCallback(
+    (fromValue: string = from, toValue: string = to) => {
+      const parse = (value: string) => {
+        if (!value) return null;
+        const n = utcSeconds(value);
+        if (!Number.isFinite(n)) throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
+        return n;
+      };
+      const a = parse(fromValue),
+        b = parse(toValue);
+      if (a !== null && b !== null && a >= b)
+        throw new Error(bilingual('开始时间要早于结束时间', 'Start must precede end'));
+      return { from: a, to: b };
+    },
+    [from, to],
+  );
   const readSeries = useCallback(
     async function readSeries(vars: string, maxPoints: number | null = 2400) {
       const args = { case: source, vars, ...windowArgs(), maxPoints };
@@ -823,6 +1008,10 @@ export default function ResultsPage({
         setDiagnostic(data);
       }
     });
+  /**
+   * 多站比较：逐条算指标。单条失败只记进 failures，不再让整次比较抛错、把已经算成功的行一起丢掉
+   * （审计 P2-6：90 个站点里有 1 个读不到 history，整页就只剩一条错误）。
+   */
   const compare = () =>
     task(async (current) => {
       const entries = comparisonEntries;
@@ -848,69 +1037,118 @@ export default function ResultsPage({
             'Every run needs an observation file; fill the shared one and apply it to all rows',
           ),
         );
-      // 项目运行清单已经一次查回来了就直接核对；不在清单里的（跨项目/手填路径）只按运行目录反推
-      // 所属算例、查那一个算例，不再扫全项目。
-      let sources: Run[] = projectRuns;
-      const unknown = entries.filter(
-        (entry) => !sources.some((run) => run.run_case === entry.run.run_case),
-      );
-      if (unknown.length) {
-        const dirs = [
-          ...new Set(
-            unknown
-              .map((entry) => caseDirOfRunPath(entry.run.run_case))
-              .filter((dir): dir is string => !!dir),
-          ),
-        ];
-        const inventories = await boundedMap(dirs, 2, (dir) =>
-          invokeJson<Run[]>('model_case_runs', { dir }).catch(() => []),
-        );
-        if (!live()) return [];
-        sources = [...sources, ...inventories.flat()];
-      }
+      const sources = await comparisonSources(entries, projectRuns);
+      if (!live()) return [];
       for (const entry of entries) {
         if (!sources.some((r) => r.run_case === entry.run.run_case))
           throw new Error(`Not a recorded run copy: ${entry.run.run_case}`);
       }
+      // 进度绑定本次任务 id：旧任务既不能推进新任务的进度，也不能在 finally 里清掉它。
+      comparisonTaskId.current++;
+      const taskId = comparisonTaskId.current;
+      const advance = () => {
+        if (comparisonTaskId.current === taskId && live())
+          setComparisonProgress((previous) =>
+            previous ? { ...previous, done: previous.done + 1 } : previous,
+          );
+      };
       setComparisonProgress({ done: 0, total: entries.length });
       // 远程每行一次 SSH；10 个会话的上限内 6 路并行，90 个站点时比 4 路更快。
       try {
-        const rows = await boundedMap(entries, 6, async (entry) => {
-          const values = await invokeJson<Metric[]>('metrics', {
-            case: entry.run.run_case,
-            obs: entry.obs.trim(),
-            spinup: Number(request.spinup),
-            corrected: request.corrected,
-            summaryOnly: true,
-            pairVars: null,
-            maxPoints: 2400,
-            ...windowArgs(),
-          });
-          if (live())
-            setComparisonProgress((previous) =>
-              previous ? { ...previous, done: previous.done + 1 } : previous,
-            );
-          return values.map((v) => ({
-            ...v,
-            site: entry.run.run_case,
-            comparison_obs: entry.obs.trim(),
-            provenance: sources.find((r) => r.run_case === entry.run.run_case) ?? entry.run,
-          }));
+        const settled = await boundedMapSettled(
+          entries,
+          6,
+          async (entry) => {
+            try {
+              return await comparisonMetricsFor(entry, request, sources, windowArgs);
+            } finally {
+              // 失败也要计数，否则「3/10」会停在 2/10 直到整批结束。
+              advance();
+            }
+          },
+          () => !live(),
+        );
+        if (!live()) return [];
+        // 全失败也保留快照：界面要能列出每条的原因并重试，而不是只剩一条整页错误。
+        const { rows, failures } = splitSettledComparison(entries, settled);
+        setComparisonResult({
+          scope: 'multi',
+          id: comparisonKey(request),
+          request,
+          rows,
+          failures,
+          completedAt: Date.now(),
         });
-        if (live()) {
-          setComparisonResult({
-            scope: 'multi',
-            id: comparisonKey(request),
-            request,
-            rows: rows.flat(),
-            failures: [],
-            completedAt: Date.now(),
-          });
-        }
-        return rows.flat();
+        return rows;
       } finally {
-        // 与进度绑定：旧任务失败/晚返回不能在页面上留下"计算中"。
-        if (live()) setComparisonProgress(null);
+        if (comparisonTaskId.current === taskId) setComparisonProgress(null);
+      }
+    });
+  /**
+   * 只重算快照里失败/取消的条目：成功行原样保留，合并后发布同一 key、新 completedAt 的快照。
+   * 条件一律读快照 request（重试时界面上的窗口/清单可能已经改过），观测也按失败行里记的原观测。
+   */
+  const retryFailedComparison = () =>
+    task(async (current) => {
+      const snapshot = comparisonResult;
+      if (!snapshot || !snapshot.failures.length) return [];
+      // 快照必须是当前条件下的结果；否则按钮虽被禁用，也不能让旧快照被当成新条件的比较。
+      if (!comparisonFresh)
+        throw new Error(
+          bilingual(
+            '比较条件已改：重新运行比较后才能重试失败项',
+            'Comparison conditions changed; run the comparison again before retrying',
+          ),
+        );
+      const request = snapshot.request;
+      requestSeq.current.multi++;
+      const token = requestSeq.current.multi;
+      const live = () => current() && requestSeq.current.multi === token;
+      const retryEntries: ComparisonEntry[] = snapshot.failures.map((failure) => ({
+        run: {
+          run_case: failure.runCase,
+          case_dir: '',
+          case_name: '',
+          status: 'recorded',
+        } as ProjectRun,
+        obs: failure.obs,
+      }));
+      const sources = await comparisonSources(retryEntries, projectRuns);
+      if (!live()) return [];
+      comparisonTaskId.current++;
+      const taskId = comparisonTaskId.current;
+      const advance = () => {
+        if (comparisonTaskId.current === taskId && live())
+          setComparisonProgress((previous) =>
+            previous ? { ...previous, done: previous.done + 1 } : previous,
+          );
+      };
+      setComparisonProgress({ done: 0, total: retryEntries.length });
+      try {
+        const settled = await boundedMapSettled(
+          retryEntries,
+          6,
+          async (entry) => {
+            try {
+              return await comparisonMetricsFor(entry, request, sources, windowArgs);
+            } finally {
+              advance();
+            }
+          },
+          () => !live(),
+        );
+        if (!live()) return [];
+        const retried = splitSettledComparison(retryEntries, settled);
+        const next = {
+          ...snapshot,
+          rows: [...snapshot.rows, ...retried.rows],
+          failures: retried.failures,
+          completedAt: Date.now(),
+        };
+        setComparisonResult(next);
+        return next.rows;
+      } finally {
+        if (comparisonTaskId.current === taskId) setComparisonProgress(null);
       }
     });
   function exportMessage(result: Awaited<ReturnType<typeof download>>) {
@@ -1088,13 +1326,13 @@ export default function ResultsPage({
     );
     if (run.server)
       parts.push(
-        run.outputs_local === false
+        statusOf(run) === 'complete'
           ? en
-            ? 'outputs on server'
-            : '结果在服务器上'
-          : en
             ? 'outputs fetched locally'
-            : '结果已取回本机',
+            : '结果已取回本机'
+          : en
+            ? 'outputs on server'
+            : '结果在服务器上',
       );
     if (run.finished_ms)
       parts.push(new Date(run.finished_ms).toLocaleString(en ? 'en-US' : 'zh-CN'));
@@ -1104,7 +1342,8 @@ export default function ResultsPage({
   function visibleProjectRuns(runs: ProjectRun[]) {
     const query = comparisonQuery.trim().toLowerCase();
     return runs.filter((run) => {
-      if (comparisonServerOnly && !(run.server && run.outputs_local === false)) return false;
+      // 部分取回也还在服务器上可读（remote-read 按本机结果不完整时仍走服务器）。
+      if (comparisonServerOnly && !(run.server && statusOf(run) !== 'complete')) return false;
       if (!query) return true;
       const version = run.version ? `${run.version.id}@${run.version.revision}` : '';
       return [run.case_name, run.case_dir, run.run_case, run.operation_id, version, run.status]
@@ -1125,12 +1364,6 @@ export default function ResultsPage({
       groups.set(key, group);
     }
     return [...groups.entries()].map(([dir, group]) => ({ dir, ...group }));
-  }
-  /** 运行目录 `<算例>/runs/<编号>` 的所属算例：比较时只查这些算例，不再扫全项目。 */
-  function caseDirOfRunPath(runCase: string) {
-    const parts = runCase.replace(/[\\/]+$/, '').split(/[\\/]/);
-    const at = parts.lastIndexOf('runs');
-    return at > 0 ? parts.slice(0, at).join('/') : null;
   }
   function addExternalComparisonRun() {
     const path = externalRun.trim();
@@ -1388,9 +1621,23 @@ export default function ResultsPage({
       },
     },
   });
-  const chart =
-    displayedSeries &&
-    ([displayedSeries.time, ...Object.values(displayedSeries.vars)] as uPlot.AlignedData);
+  // 缺测断线：降采样会把一小段缺测整段抹平（2400 点里 21 个缺测可能一个都不剩），把每个 gap 的
+  // 起止时刻插成 null 行再交给 uPlot。图上点数上限仍是后端抽样给的 2400，这里只补标记行。
+  // 缺测标记只应补在合法的 series 上：列长不一致时退回未加标记的数据，宁可图不完美，
+  // 不因为一个坏响应把整页渲染打崩。
+  const aligned = displayedSeries
+    ? (() => {
+        try {
+          return insertGapMarkers(displayedSeries.time, displayedSeries.vars, displayedSeries.gaps);
+        } catch {
+          return {
+            time: displayedSeries.time,
+            columns: Object.values(displayedSeries.vars),
+          };
+        }
+      })()
+    : null;
+  const chart = aligned && ([aligned.time, ...aligned.columns] as uPlot.AlignedData);
   const variableInfo = catalog?.variables.find((item) => item.name === variable);
   const finding = overviewFinding(selectedMetric, variable, en);
   const validPairs = !!selectedMetric && selectedMetric.n > 0;
@@ -1401,6 +1648,34 @@ export default function ResultsPage({
     : (comparisonVariables[0] ?? '');
   const comparisonRows = metrics.filter((metric) => metric.name === comparisonMetricName);
   const comparisonMax = Math.max(...comparisonRows.map((metric) => Math.abs(metric.rmse ?? 0)), 0);
+  // 「本机部分结果」横幅要如实说出取了哪些变量/月份、有没有过科学核验，不能只说「数据在服务器上」。
+  const localResults = selectedRun?.local_results;
+  const partialVars = (localResults?.vars ?? [])
+    .filter((name): name is string => typeof name === 'string' && name.trim() !== '')
+    .slice(0, 6);
+  const monthOf = (value: string | null | undefined) => {
+    if (typeof value !== 'string' || !value) return '';
+    return /^\d{4}-\d{2}/.test(value) ? value.slice(0, 7) : value;
+  };
+  const partialRange = [monthOf(localResults?.from), monthOf(localResults?.to)]
+    .filter(Boolean)
+    .join(' — ');
+  const partialFiles =
+    typeof localResults?.files === 'number' && localResults.files > 0
+      ? localResults.files
+      : undefined;
+  const partialVerifiedZh =
+    localResults?.scientific_verified === true
+      ? '已通过科学核验'
+      : localResults?.scientific_verified === false
+        ? '未通过科学核验'
+        : '科学核验状态未知';
+  const partialVerifiedEn =
+    localResults?.scientific_verified === true
+      ? 'scientifically verified'
+      : localResults?.scientific_verified === false
+        ? 'not scientifically verified'
+        : 'scientific verification unknown';
   return (
     <div className="page-stack results-page">
       <header className="results-heading">
@@ -1431,6 +1706,14 @@ export default function ResultsPage({
             >
               {overviewRunStatus(selectedRun, en)}
             </span>
+            {selectedRun && (selectedRun.local_results || selectedRun.server) && (
+              <span
+                className={`result-badge local-results ${selectedStatus === 'complete' ? 'completed' : ''}`}
+              >
+                <NavIcon name="data" />
+                {localResultsLabel(selectedRun, en)}
+              </span>
+            )}
           </div>
         </div>
         <ActionButton
@@ -1558,19 +1841,40 @@ export default function ResultsPage({
       </div>
       {awaitingFetch && (
         <Notice>
-          {tr(
-            `数据在服务器 ${selectedRun?.server ?? ''} 上：变量、曲线和评估指标都在服务器上计算，只传回要显示的数据，每次几秒。要 NetCDF 文件时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
-            `Data stays on ${selectedRun?.server ?? ''}: variables, curves and evaluation metrics are computed there and only the displayed values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files.`,
-          )}
+          {selectedStatus === 'partial'
+            ? tr(
+                `本机只有部分结果${partialFiles !== undefined ? `（${partialFiles} 个文件）` : ''}：变量 ${partialVars.length ? partialVars.join('、') : '未知'}${partialRange ? `，月份 ${partialRange}` : ''}；${partialVerifiedZh}。先在服务器上计算，或取回完整历史后再把它当完整结果分析。`,
+                `Only part of the results are on this computer${partialFiles !== undefined ? ` (${partialFiles} files)` : ''}: variables ${partialVars.length ? partialVars.join(', ') : 'unknown'}${partialRange ? `, months ${partialRange}` : ''}; ${partialVerifiedEn}. Keep computing on the server, or fetch the full history before treating this as a complete result.`,
+              )
+            : selectedStatus === 'invalid'
+              ? tr(
+                  '本地结果目录无效：没有可读的 history 文件。请重新取回结果，或检查运行目录里的 out/ 是否被删除。',
+                  'The local result folder is invalid: no readable history files. Fetch the results again, or check that out/ under the run folder was not deleted.',
+                )
+              : tr(
+                  `数据在服务器 ${selectedRun?.server ?? ''} 上：变量、曲线和评估指标都在服务器上计算，只传回要显示的数据，每次几秒。要 NetCDF 文件时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
+                  `Data stays on ${selectedRun?.server ?? ''}: variables, curves and evaluation metrics are computed there and only the displayed values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files.`,
+                )}
           <ActionButton
             action="result-fetch"
             label={tr('取回结果', 'Fetch results')}
             kind="commit"
             disabled={busy}
-            run={fetchSelectedRun}
+            run={() => fetchRemoteResults(false)}
           >
             {fetching ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}
           </ActionButton>
+          {(selectedStatus === 'partial' || selectedStatus === 'missing') && (
+            <ActionButton
+              action="result-fetch-all"
+              label={tr('取回全部历史', 'Fetch full history')}
+              kind="commit"
+              disabled={busy}
+              run={() => fetchRemoteResults(true)}
+            >
+              {fetching ? tr('正在取回…', 'Fetching…') : tr('取回全部历史', 'Fetch full history')}
+            </ActionButton>
+          )}
         </Notice>
       )}
       {source && !selectedRun?.version && (
@@ -2576,6 +2880,45 @@ export default function ResultsPage({
                 'No valid metrics yet. Observations are required.',
               )}
             </p>
+          )}
+          {tab === 'comparison' && !!comparisonFailures.length && (
+            <div className="results-comparison-failures">
+              <h3>
+                {tr(
+                  `${comparisonFailures.length} 个运行没有算出指标`,
+                  `${comparisonFailures.length} run(s) produced no metrics`,
+                )}
+              </h3>
+              <ul>
+                {comparisonFailures.map((failure) => (
+                  <li key={`${failure.runCase}\u0000${failure.obs}`}>
+                    <strong>{runLabel(failure.runCase)}</strong>
+                    <small title={failure.runCase}>{failure.runCase}</small>
+                    <span title={failure.obs}>
+                      {tr('观测', 'Observation')}:{failure.obs.split(/[\\/]/).at(-1) || '—'}
+                    </span>
+                    <span>{failure.error}</span>
+                  </li>
+                ))}
+              </ul>
+              {!comparisonFresh && (
+                <p className="muted">
+                  {tr(
+                    '比较条件已改：重新运行比较后才能重试这些失败项。',
+                    'Comparison conditions changed; run the comparison again before retrying these failures.',
+                  )}
+                </p>
+              )}
+              <ActionButton
+                action="retry-comparison-failures"
+                label={tr('重试失败项', 'Retry failed runs')}
+                kind="click"
+                disabled={busy || !comparisonFresh}
+                run={retryFailedComparison}
+              >
+                {tr('重试失败项', 'Retry failed runs')}
+              </ActionButton>
+            </div>
           )}
           {!multiStation &&
             evaluation

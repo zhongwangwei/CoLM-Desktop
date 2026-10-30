@@ -79,11 +79,16 @@ export interface SingleResult<R extends AnalysisRow = AnalysisRow> {
   completedAt: number;
 }
 
-/** 多站点比较里某个运行失败的原因（当前批次只记录，不阻断其他行）。 */
+/** 多站点比较里某个运行失败的原因（只记录，不阻断其他行）。 */
 export interface ComparisonFailure {
   runCase: string;
   obs: string;
   error: string;
+  /**
+   * 条件已改/页面已切换时，并发池把**还没开始**的条目直接标成取消：它们没有真正的后端错误，
+   * 也不该被当成「算过但失败」，重试时要重算。`error` 仍带一句可显示的说明。
+   */
+  cancelled?: boolean;
 }
 
 /** 多站点比较结果：条件 + 行 + 逐行失败。 */

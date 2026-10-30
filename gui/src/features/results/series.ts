@@ -9,6 +9,14 @@ export interface SeriesData {
   n: number;
   downsampled: boolean;
   /**
+   * 抽样后仍然缺测的时段，Unix 秒的半开区间 [start, end)。
+   *
+   * 2400 点抽样会把连续的缺测记录整段跳过，抽样结果里一点痕迹都没有，图上就会用直线
+   * 连过缺测段。Rust 在 series 响应里把缺测区间单独给出来，前端据此在图上断线。
+   * 旧版 sidecar 的响应没有这个字段，缺失时按“没有缺测”处理（不能凭空造断点）。
+   */
+  gaps?: Record<string, [number, number][]>;
+  /**
    * 时间数值的基准。旧版 sidecar 的响应没有这个字段，此时按模型钟处理，
    * 导出不会把它们冒称成 UTC。
    */
@@ -80,6 +88,40 @@ export async function boundedMap<T, R>(
       }
     }),
   );
+  return output;
+}
+/**
+ * boundedMap 的“不抛”版本：多站比较时单站失败不能丢掉其它站的成功结果。
+ * 输出与 items 按下标对齐；每项独立捕获错误。shouldStop 只拦还没领取的项，
+ * 已经在飞的请求照常等它结束（取消不是 abort，不能假装它没发生）。
+ */
+export async function boundedMapSettled<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+  shouldStop?: () => boolean,
+): Promise<Array<{ value?: R; error?: unknown; cancelled?: boolean }>> {
+  const output: Array<{ value?: R; error?: unknown; cancelled?: boolean }> = new Array(
+    items.length,
+  );
+  let index = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+      while (index < items.length) {
+        if (shouldStop?.()) break;
+        const at = index++;
+        try {
+          output[at] = { value: await fn(items[at]) };
+        } catch (error) {
+          // 失败只落在这一项上，由调用方决定怎么展示/重试。
+          output[at] = { error };
+        }
+      }
+    }),
+  );
+  // 被取消的项从未进入过 fn，不能算成功也不能算失败。
+  for (let at = 0; at < items.length; at++)
+    if (output[at] === undefined) output[at] = { cancelled: true };
   return output;
 }
 export function download(name: string, text: string, type = 'application/json') {

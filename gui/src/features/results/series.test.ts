@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   boundedMap,
+  boundedMapSettled,
   fullEnergyStats,
   fullSeriesCsv,
   parentRuns,
@@ -82,6 +83,104 @@ describe('result scientific integrity', () => {
       series: { source_n: 2 },
     } as EnergyDiagnostic;
     assert.throws(() => fullEnergyStats(invalid), /Invalid/);
+  });
+});
+
+describe('settled comparison pool', () => {
+  it('keeps every successful result in source order while respecting the limit', async () => {
+    let active = 0,
+      max = 0;
+    const results = await boundedMapSettled([5, 1, 4, 2, 3], 2, async (value) => {
+      active++;
+      max = Math.max(max, active);
+      await new Promise((resolve) => setTimeout(resolve, value));
+      active--;
+      return value * 2;
+    });
+    assert.equal(max, 2);
+    assert.deepEqual(results, [
+      { value: 10 },
+      { value: 2 },
+      { value: 8 },
+      { value: 4 },
+      { value: 6 },
+    ]);
+  });
+  it('records a failed site without rejecting the other sites', async () => {
+    let started = 0;
+    const results = await boundedMapSettled([1, 2, 3, 4], 1, async (value) => {
+      started++;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      if (value === 2) throw new Error(`site ${value} failed`);
+      return value;
+    });
+    assert.equal(started, 4);
+    assert.deepEqual(results[0], { value: 1 });
+    assert.match(String((results[1].error as Error).message), /site 2 failed/);
+    assert.equal(results[1].value, undefined);
+    assert.deepEqual(results[2], { value: 3 });
+    assert.deepEqual(results[3], { value: 4 });
+  });
+  it('stops claiming items after shouldStop and leaves the rest cancelled', async () => {
+    let calls = 0,
+      stop = false;
+    const results = await boundedMapSettled(
+      [0, 1, 2, 3, 4, 5],
+      2,
+      async (value) => {
+        calls++;
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        if (calls === 2) stop = true;
+        return value;
+      },
+      () => stop,
+    );
+    // 已经在飞的两项必须等它们真正结束，不能假装取消。
+    assert.equal(calls, 2);
+    assert.deepEqual(results.slice(0, 2), [{ value: 0 }, { value: 1 }]);
+    assert.deepEqual(results.slice(2), [
+      { cancelled: true },
+      { cancelled: true },
+      { cancelled: true },
+      { cancelled: true },
+    ]);
+  });
+  it('starts nothing when cancelled before the pool begins', async () => {
+    let calls = 0;
+    const results = await boundedMapSettled(
+      [1, 2, 3],
+      2,
+      async (value) => {
+        calls++;
+        return value;
+      },
+      () => true,
+    );
+    assert.equal(calls, 0);
+    assert.deepEqual(results, [{ cancelled: true }, { cancelled: true }, { cancelled: true }]);
+  });
+  it('runs serially at limit 1 and fully in parallel when the limit covers all items', async () => {
+    let active = 0,
+      serialMax = 0;
+    await boundedMapSettled([1, 2, 3], 1, async () => {
+      active++;
+      serialMax = Math.max(serialMax, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+    });
+    assert.equal(serialMax, 1);
+    let parallelActive = 0,
+      parallelMax = 0;
+    await boundedMapSettled([1, 2, 3, 4], 99, async () => {
+      parallelActive++;
+      parallelMax = Math.max(parallelMax, parallelActive);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      parallelActive--;
+    });
+    assert.equal(parallelMax, 4);
+  });
+  it('resolves an empty item list', async () => {
+    assert.deepEqual(await boundedMapSettled([], 2, async () => 1), []);
   });
 });
 

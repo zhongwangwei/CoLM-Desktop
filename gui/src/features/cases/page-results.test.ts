@@ -16,7 +16,7 @@ import {
   parameterContextKey,
   sameParameterContextIdentity,
 } from '../studies/parameter-context-cache';
-import { boundedMap } from '../results/series';
+import { boundedMap, boundedMapSettled } from '../results/series';
 import { comparisonCsv, comparisonKey, exportGate } from '../results/analysis-state';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
@@ -395,45 +395,300 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
   assert.equal(downloads.length, 0, 'a late response does not download a different selection');
 });
 
-test('a comparison whose conditions change mid-flight cannot publish its stale rows', async () => {
+const resultRun = (index: number) => ({
+  run_case: `/case/runs/${index}`,
+  case_dir: '/case',
+  case_name: 'case',
+  status: 'succeeded',
+});
+const resultMetric = (index: number) => ({
+  name: 'Qle',
+  n: 2,
+  rmse: index + 1,
+  mae: 1,
+  bias: 0,
+  r2: 1,
+  correlation: 1,
+  nse: 1,
+  kge: 1,
+});
+/**
+ * ResultsPage 多站比较/重试的共享上下文：从页面源码抽出真实回调（比对/合并/失败分类/进度绑定），
+ * 只有 metrics 网络层由用例给。这样测的是页面真实逻辑，而不是测试里重写一遍。
+ */
+function comparisonPage(
+  metricRows: (
+    args: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>[]> | Record<string, unknown>[],
+  options: {
+    entries?: number[];
+    requestSeq?: { current: { single: number; multi: number } };
+  } = {},
+) {
   const page = '../results/ResultsPage.tsx';
-  const published: unknown[] = [];
-  const raw = [
-    { name: 'Qle', n: 1, rmse: 1, mae: 1, bias: 0, r2: 1, correlation: 1, nse: 1, kge: 1 },
-  ];
-  const requestSeq = { current: { single: 0, multi: 0 } };
-  const run = {
-    run_case: '/case/runs/a',
-    case_dir: '/case',
-    case_name: 'case',
-    status: 'succeeded',
-  };
-  const compare = callback(page, 'compare', {
-    task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
-    comparisonEntries: [{ run, obs: '/obs/a.nc' }],
-    projectRuns: [run],
+  const indexes = options.entries ?? [0, 1, 2];
+  const runs = indexes.map((index) => resultRun(index));
+  const comparisonEntries = runs.map((run, at) => ({ run, obs: `/obs/${indexes[at]}.nc` }));
+  const requestSeq = options.requestSeq ?? { current: { single: 0, multi: 0 } };
+  const published: Record<string, unknown>[] = [];
+  const progress: unknown[] = [];
+  const requests: Record<string, unknown>[] = [];
+  const busy: boolean[] = [];
+  const lock = { current: false };
+  let progressState: unknown = null;
+  const task = callback(page, 'task', {
+    lock,
+    epoch: { current: 1 },
+    setBusy: (value: boolean) => busy.push(value),
+    setError: () => {},
+  });
+  const comparisonSources = callback(page, 'comparisonSources', {
+    projectRuns: runs,
+    caseDirOfRunPath: () => null,
+    boundedMap,
+    invokeJson: async () => [],
+  });
+  const comparisonMetricsFor = callback(page, 'comparisonMetricsFor', {
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      requests.push({ command, ...args });
+      return metricRows(args);
+    },
+    windowArgs: () => ({ from: null, to: null }),
+  });
+  const comparisonFailureReason = callback(page, 'comparisonFailureReason', {
+    bilingual: (zh: string) => zh,
+  });
+  const splitSettledComparison = callback(page, 'splitSettledComparison', {
+    comparisonFailureReason,
+  });
+  const common = {
+    task,
+    comparisonEntries,
+    projectRuns: runs,
     from: '',
     to: '',
     spinup: '0',
     corrected: false,
     requestSeq,
+    comparisonTaskId: { current: 0 },
     comparisonKey,
-    boundedMap,
-    // 计算进行中条件变了（例如换了窗口/编辑了清单）：请求序号前进，这份结果必须作废。
-    invokeJson: async () => {
-      requestSeq.current.multi++;
-      return raw;
-    },
+    boundedMapSettled,
+    comparisonSources,
+    comparisonMetricsFor,
+    comparisonFailureReason,
+    splitSettledComparison,
     windowArgs: () => ({ from: null, to: null }),
-    caseDirOfRunPath: () => null,
-    setComparisonProgress: () => {},
-    setComparisonResult: (value: unknown) => published.push(value),
+    setComparisonProgress: (value: unknown) => {
+      progressState =
+        typeof value === 'function'
+          ? (value as (previous: unknown) => unknown)(progressState)
+          : value;
+      progress.push(progressState);
+    },
+    setComparisonResult: (value: unknown) => published.push(value as Record<string, unknown>),
+    bilingual: (zh: string) => zh,
+  };
+  return {
+    task,
+    runs,
+    requests,
+    published,
+    progress,
+    busy,
+    lock,
+    requestSeq,
+    compare: callback(page, 'compare', common),
+    retry: (comparisonFresh: boolean, snapshot?: unknown) =>
+      callback(page, 'retryFailedComparison', {
+        ...common,
+        comparisonResult: snapshot ?? published.at(-1) ?? null,
+        comparisonFresh,
+      }),
+  };
+}
+
+test('a comparison whose conditions change mid-flight cannot publish its stale rows', async () => {
+  const requestSeq = { current: { single: 0, multi: 0 } };
+  const page = comparisonPage(
+    () => {
+      // 计算进行中条件变了（例如换了窗口/编辑了清单）：请求序号前进，这份结果必须作废。
+      requestSeq.current.multi++;
+      return [resultMetric(0)];
+    },
+    { entries: [0], requestSeq },
+  );
+  const rows = (await page.compare()) as Record<string, unknown>[];
+  assert.deepEqual(rows, [], 'a stale comparison returns no rows to its caller');
+  assert.equal(
+    page.published.length,
+    0,
+    'a late comparison cannot overwrite the current scope state',
+  );
+  assert.equal(page.progress.at(-1), null, 'its own progress is cleared even when stale');
+});
+
+test('a failed station keeps the successful comparison rows and is listed for retry', async () => {
+  const page = comparisonPage((args) => {
+    if (args.obs === '/obs/1.nc') throw new Error('history missing');
+    return [resultMetric(Number(String(args.obs).match(/\d/)?.[0] ?? 0))];
+  });
+  const rows = (await page.compare()) as Record<string, unknown>[];
+  assert.equal(rows.length, 2, 'the failed station no longer discards the successful rows');
+  assert.deepEqual(
+    rows.map((row) => row.site),
+    ['/case/runs/0', '/case/runs/2'],
+  );
+  assert.equal(page.published.length, 1);
+  const snapshot = page.published[0] as {
+    id: string;
+    rows: Record<string, unknown>[];
+    failures: { runCase: string; obs: string; error: string; cancelled?: boolean }[];
+    completedAt: number;
+  };
+  assert.equal(snapshot.rows.length, 2);
+  assert.equal(snapshot.failures.length, 1);
+  assert.equal(snapshot.failures[0].runCase, '/case/runs/1');
+  assert.equal(snapshot.failures[0].obs, '/obs/1.nc');
+  assert.match(snapshot.failures[0].error, /history missing/);
+  assert.equal(snapshot.failures[0].cancelled, undefined, 'a real backend error is not a cancel');
+  assert.equal(typeof snapshot.completedAt, 'number');
+  // task 收尾：按钮不再忙、锁已释放、进度不属于任何任务了。
+  assert.equal(page.busy.at(-1), false);
+  assert.deepEqual(page.lock.current, false);
+  assert.equal(page.progress.at(-1), null);
+});
+
+test('retry recomputes only the failed comparison entries and merges them into the snapshot', async () => {
+  const failing = new Set(['/obs/1.nc']);
+  const page = comparisonPage((args) => {
+    if (failing.has(String(args.obs))) throw new Error('history missing');
+    return [resultMetric(1)];
+  });
+  await page.compare();
+  const first = page.published.at(-1)!;
+  assert.equal((first.failures as unknown[]).length, 1);
+  const firstCompletedAt = first.completedAt as number;
+  // 条件已经改掉的快照不允许重试（按钮此时也是灰的）。
+  const requestsBeforeStale = page.requests.length;
+  await assert.rejects(page.retry(false)(), /条件已改/);
+  assert.equal(page.requests.length, requestsBeforeStale, 'a stale retry does not call metrics');
+  failing.clear();
+  const requestedBefore = page.requests.length;
+  const retryRows = (await page.retry(true)()) as Record<string, unknown>[];
+  const retried = page.requests.slice(requestedBefore);
+  assert.equal(retried.length, 1, 'only the failed entry is recomputed');
+  assert.equal(retried[0].obs, '/obs/1.nc');
+  assert.equal(retryRows.length, 3, 'retried rows merge with the rows kept from the first run');
+  const next = page.published.at(-1)!;
+  assert.equal(next.id, first.id, 'the retried snapshot keeps the same comparison key');
+  assert.deepEqual(next.failures, []);
+  assert.equal((next.rows as unknown[]).length, 3);
+  assert.ok((next.completedAt as number) >= firstCompletedAt);
+  assert.equal(page.progress.at(-1), null);
+});
+
+test('cancelling a comparison stops claiming entries that have not started', async () => {
+  const requestSeq = { current: { single: 0, multi: 0 } };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const page = comparisonPage(
+    async () => {
+      calls++;
+      await gate;
+      return [resultMetric(calls)];
+    },
+    { entries: [0, 1, 2, 3, 4, 5, 6, 7], requestSeq },
+  );
+  const pending = page.compare();
+  // 让 6 路并发把前 6 条都领走（已在飞）；后 2 条还没开始。
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 6, 'the concurrency limit claims six entries');
+  requestSeq.current.multi++;
+  release();
+  const rows = (await pending) as unknown[];
+  assert.deepEqual(rows, []);
+  assert.equal(calls, 6, 'the remaining entries are never claimed after the conditions change');
+  assert.equal(page.published.length, 0);
+  assert.equal(page.progress.at(-1), null, 'a cancelled task still clears its own progress');
+});
+
+test('cancelled comparison entries are recorded as cancelled failures, not backend errors', () => {
+  const page = '../results/ResultsPage.tsx';
+  const failureReason = callback(page, 'comparisonFailureReason', {
     bilingual: (zh: string) => zh,
   });
-  const rows = (await compare()) as Record<string, unknown>[];
+  const split = callback(page, 'splitSettledComparison', {
+    comparisonFailureReason: failureReason,
+  });
+  const entries = [
+    { run: resultRun(0), obs: '/obs/0.nc' },
+    { run: resultRun(1), obs: '/obs/1.nc' },
+    { run: resultRun(2), obs: '/obs/2.nc' },
+  ];
+  const { rows, failures } = split(entries, [
+    { value: [resultMetric(0)] },
+    { cancelled: true },
+    { error: new Error('boom') },
+  ]) as unknown as {
+    rows: Record<string, unknown>[];
+    failures: { runCase: string; obs: string; error: string; cancelled?: boolean }[];
+  };
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].site, '/case/runs/a');
-  assert.equal(published.length, 0, 'a late comparison cannot overwrite the current scope state');
+  assert.equal(failures.length, 2);
+  assert.equal(failures[0].runCase, '/case/runs/1');
+  assert.equal(failures[0].cancelled, true);
+  assert.match(failures[0].error, /取消/);
+  assert.equal(failures[1].cancelled, undefined);
+  assert.match(failures[1].error, /boom/);
+});
+
+test('the default result prefers a successful run whose outputs are really available', () => {
+  const page = '../results/ResultsPage.tsx';
+  const statusOf = callback(page, 'statusOf', {}) as unknown as (run: unknown) => string;
+  const preparedOnly = callback(page, 'preparedOnly', {}) as unknown as (run: unknown) => boolean;
+  const usableRun = callback(page, 'usableRun', { preparedOnly }) as unknown as (
+    run: unknown,
+  ) => boolean;
+  const preferredRun = callback(page, 'preferredRun', {
+    statusOf,
+    usableRun,
+    preparedOnly,
+  }) as unknown as (runs: unknown[], justCompleted?: string) => string;
+  // 旧后端：只有 outputs_local 时按 complete/missing 回退；新后端 local_results 优先。
+  assert.equal(statusOf({}), 'complete');
+  assert.equal(statusOf({ outputs_local: false }), 'missing');
+  assert.equal(statusOf({ outputs_local: false, local_results: { status: 'partial' } }), 'partial');
+  assert.equal(statusOf({ local_results: { status: 'invalid' } }), 'invalid');
+  assert.equal(statusOf({ outputs_local: true, local_results: { status: 'missing' } }), 'missing');
+  const runs = [
+    // legacy 占位（指向算例本身、没有结果）与只跑到预处理的运行都不能当默认。
+    { run_case: '/case', legacy: true, status: 'needs_reconciliation', version: null },
+    { run_case: '/case/runs/prep', status: 'succeeded', provenance: { stage: 'mksrfdata' } },
+    { run_case: '/case/runs/failed', status: 'failed' },
+    // 更新的成功运行本机却没有结果、也不在服务器上：默认应退到更早但结果完整的运行。
+    { run_case: '/case/runs/newer', status: 'succeeded', outputs_local: false },
+    { run_case: '/case/runs/complete', status: 'succeeded' },
+  ];
+  assert.equal(preferredRun(runs), '/case/runs/complete');
+  // 刚跑完的运行优先（若它本身可用）。
+  assert.equal(preferredRun(runs, '/case/runs/newer'), '/case/runs/newer');
+  assert.equal(preferredRun(runs, '/case/runs/failed'), '/case/runs/complete');
+  // 结果还在服务器上的运行可远程读，也可当默认。
+  assert.equal(
+    preferredRun([{ run_case: '/case/runs/remote', status: 'succeeded', server: 'hpc' }]),
+    '/case/runs/remote',
+  );
+  // 只有占位/预处理运行时不选任何一条（页面会显示"尚无已记录的运行"）。
+  assert.equal(
+    preferredRun([
+      { run_case: '/case', legacy: true, status: 'needs_reconciliation' },
+      { run_case: '/case/runs/prep', status: 'succeeded', provenance: { stage: 'mkinidata' } },
+    ]),
+    '',
+  );
 });
 
 test('comparison export refuses a stale snapshot and writes the snapshot conditions', async () => {
