@@ -61,7 +61,9 @@ pub use pft::{
     crop_pft_pctshared, CropLandPatchTopology, PftFractionInput, PftIndexInput, PftIndexState,
     PftPatchKind, PftPatchMode, PftTopology, IGBP_CROPLAND,
 };
-pub use region::{clip_existing_surface, SpatialBounds};
+pub use region::{
+    clip_existing_surface, ensure_region_requirements, RegionRequirements, SpatialBounds,
+};
 pub use site::{
     append_single_point_hyperspectral_albedo,
     append_single_point_hyperspectral_albedo_with_compression,

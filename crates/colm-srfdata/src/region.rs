@@ -346,6 +346,108 @@ fn mesh_index(relative: &Path) -> bool {
             .is_some_and(|parent| parent == Path::new("mesh"))
 }
 
+/// 上游 `MOD_RegionClip.F90:459-478` 的"必需输入"门控：甲烷要湖泊土壤碳
+/// （`DEF_METHANE%allowlakeprod`）或空间 pH（`DEF_METHANE%use_spatial_ph`）时，源树
+/// `soil/<year>/` 下对应 per-block 文件必须齐全，缺了就报出与上游同义的可操作错误，
+/// 而不是让裁剪后的树在运行期才失败。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionRequirements {
+    /// `Aggregation_LakeSoilC` 的产物（`lake_soilc_patches`）。
+    pub lake_soilc: bool,
+    /// `Aggregation_MethanePH` 的产物（`methane_ph_patches`）。
+    pub spatial_ph: bool,
+}
+
+impl RegionRequirements {
+    /// 两个开关都没开时不需要检查。
+    pub fn is_empty(self) -> bool {
+        !self.lake_soilc && !self.spatial_ph
+    }
+}
+
+/// 上游 `MOD_Block.F90:590-617` 的块名（经向 `w|e` + 3 位、纬向 `s|n` + 2 位，如 `w180_s90`）。
+fn block_suffix(relative: &Path) -> Option<String> {
+    let stem = relative.file_stem()?.to_str()?;
+    let mut parts = stem.rsplit('_');
+    let latitude = parts.next()?;
+    let longitude = parts.next()?;
+    let digits = |text: &str| text.chars().all(|c| c.is_ascii_digit());
+    let latitude_ok = latitude.len() == 3
+        && matches!(latitude.as_bytes().first(), Some(b's' | b'n'))
+        && digits(&latitude[1..]);
+    let longitude_ok = longitude.len() == 4
+        && matches!(longitude.as_bytes().first(), Some(b'w' | b'e'))
+        && digits(&longitude[1..]);
+    (latitude_ok && longitude_ok).then(|| format!("{longitude}_{latitude}"))
+}
+
+/// 检查裁剪源树的甲烷必需输入（上游 `MOD_RegionClip.F90:459-478`）。
+///
+/// 候选目录由上游同样会裁剪的土壤反照率 per-block 向量反推（`soil_s_v_alb_patches*`）——
+/// 这样既不会把 `soil/` 下的无关子目录当成 LC 年，也不会在"看起来不是 landdata 树"的
+/// 源上凭空报缺文件（那种源会在裁剪别处先失败）。
+pub fn ensure_region_requirements(
+    source: impl AsRef<Path>,
+    requirements: RegionRequirements,
+) -> Result<()> {
+    if requirements.is_empty() {
+        return Ok(());
+    }
+    let source = source.as_ref();
+    let files = netcdf_files(source)?;
+    const ANCHORS: [&str; 4] = [
+        "soil_s_v_alb_patches",
+        "soil_d_v_alb_patches",
+        "soil_s_n_alb_patches",
+        "soil_d_n_alb_patches",
+    ];
+    let mut candidates: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for file in &files {
+        let relative = file.strip_prefix(source)?;
+        let Some(parent) = relative.parent() else {
+            continue;
+        };
+        let stem = relative.file_stem().and_then(|stem| stem.to_str());
+        if !stem.is_some_and(|stem| ANCHORS.iter().any(|anchor| stem.starts_with(anchor))) {
+            continue;
+        }
+        let entry = candidates.entry(parent.to_path_buf()).or_default();
+        if let Some(suffix) = block_suffix(relative) {
+            entry.insert(suffix);
+        }
+    }
+    for (directory, suffixes) in candidates {
+        for (name, required) in [
+            ("lake_soilc_patches", requirements.lake_soilc),
+            ("methane_ph_patches", requirements.spatial_ph),
+        ] {
+            if !required {
+                continue;
+            }
+            if suffixes.is_empty() {
+                // 不分支的源树：上游同样按无后缀文件名读写。
+                let path = source.join(&directory).join(format!("{name}.nc"));
+                ensure!(path.is_file(), "{}", missing_requirement(name, &path));
+            } else {
+                for suffix in &suffixes {
+                    let path = source.join(&directory).join(format!("{name}_{suffix}.nc"));
+                    ensure!(path.is_file(), "{}", missing_requirement(name, &path));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn missing_requirement(name: &str, path: &Path) -> String {
+    let what = if name == "lake_soilc_patches" {
+        "lake carbon"
+    } else {
+        "methane pH"
+    };
+    format!("Missing required {what}: {}", path.display())
+}
+
 /// 上游 `MOD_RegionClip.F90:73-83` 对每个 land-cover 年都要求 `mesh/<year>/mesh.nc`：
 /// 先试 `mesh/<lc_year>/`，缺失再回退旧布局，最终 `clip_error('Missing mesh for requested
 /// land-cover year ...')`。Rust 这条路径不选年份、直接复制整棵树，但"有 mesh 块文件却没有

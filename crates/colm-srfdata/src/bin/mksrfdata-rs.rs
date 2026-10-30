@@ -4552,6 +4552,9 @@ fn materialize_case(args: &[String]) -> Result<()> {
             "--soil-hyper-albedo-dir is unavailable with USE_srfdata_from_larger_region because the copied landdata already owns its spectral fields"
         );
         let destination = command.destination.clone();
+        // 上游把甲烷的必需输入检查放在裁剪循环里（`MOD_RegionClip.F90:459-478`），
+        // 这里放在写输出之前，缺文件时不会留下半棵 landdata。
+        colm_srfdata::ensure_region_requirements(&command.source, command.requirements)?;
         clip_existing_surface(command.source, command.destination, command.bounds)?;
         println!("clipped existing surface data to {}", destination.display());
         return Ok(());
@@ -4642,6 +4645,8 @@ struct SpatialExistingSurfaceCommand {
     source: PathBuf,
     destination: PathBuf,
     bounds: SpatialBounds,
+    /// 甲烷要 mksrfdata 额外生成的两个输入（`MKSRFDATA.F90:154-160`）。
+    requirements: colm_srfdata::RegionRequirements,
 }
 
 fn spatial_existing_surface_command(
@@ -4677,6 +4682,8 @@ fn spatial_existing_surface_command(
     );
     let output = PathBuf::from(case_string(&document, "DEF_dir_output")?);
     let case_name = case_string(&document, "DEF_CASE_NAME")?;
+    // 与 `MKSRFDATA.F90:154-160` 相同：只在 BGC+甲烷时读参数文件，其余情况两个开关都是假。
+    let methane = colm_srfdata::methane_preprocessing::requirements(&document, namelist)?;
     Ok(Some(SpatialExistingSurfaceCommand {
         source: PathBuf::from(case_string(&document, "DEF_dir_existing_srfdata")?),
         destination: output.join(case_name).join("landdata"),
@@ -4685,6 +4692,10 @@ fn spatial_existing_surface_command(
             north: case_f64(&document, "DEF_domain%edgen")?,
             west: case_f64(&document, "DEF_domain%edgew")?,
             east: case_f64(&document, "DEF_domain%edgee")?,
+        },
+        requirements: colm_srfdata::RegionRequirements {
+            lake_soilc: methane.lake_soil_carbon,
+            spatial_ph: methane.spatial_ph,
         },
     }))
 }

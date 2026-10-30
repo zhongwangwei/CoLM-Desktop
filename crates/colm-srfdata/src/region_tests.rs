@@ -186,3 +186,100 @@ fn existing_surface_clip_reports_a_missing_mesh_index() {
     assert!(error.contains("mesh/2005/mesh.nc"), "{error}");
     crate::remove_test_tree(source);
 }
+
+#[test]
+fn region_requirements_report_missing_lake_carbon_by_block() {
+    // 上游 `MOD_RegionClip.F90:459-478`：甲烷要湖泊土壤碳时，缺块文件就报
+    // `Missing required lake carbon: <file>`，而不是让运行期才发现。
+    let source = root("require-lake");
+    source_tree(&source);
+    vector(
+        &source.join("soil/2005/soil_s_v_alb_patches_e000_n00.nc"),
+        "patch",
+        "soil_s_v_alb_patches",
+        &[0.1],
+    );
+    let error = ensure_region_requirements(
+        &source,
+        RegionRequirements {
+            lake_soilc: true,
+            spatial_ph: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Missing required lake carbon"), "{error}");
+    assert!(
+        error.contains("soil/2005/lake_soilc_patches_e000_n00.nc"),
+        "{error}"
+    );
+    crate::remove_test_tree(source);
+}
+
+#[test]
+fn region_requirements_report_missing_methane_ph_by_block() {
+    let source = root("require-ph");
+    source_tree(&source);
+    vector(
+        &source.join("soil/2005/soil_s_v_alb_patches_e000_n00.nc"),
+        "patch",
+        "soil_s_v_alb_patches",
+        &[0.1],
+    );
+    vector(
+        &source.join("soil/2005/lake_soilc_patches_e000_n00.nc"),
+        "patch",
+        "lake_soilc_patches",
+        &[1.0],
+    );
+    let error = ensure_region_requirements(
+        &source,
+        RegionRequirements {
+            lake_soilc: true,
+            spatial_ph: true,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Missing required methane pH"), "{error}");
+    assert!(
+        error.contains("soil/2005/methane_ph_patches_e000_n00.nc"),
+        "{error}"
+    );
+    crate::remove_test_tree(source);
+}
+
+#[test]
+fn region_requirements_pass_when_the_inputs_are_present_or_not_needed() {
+    let source = root("require-ok");
+    source_tree(&source);
+    vector(
+        &source.join("soil/2005/soil_s_v_alb_patches_e000_n00.nc"),
+        "patch",
+        "soil_s_v_alb_patches",
+        &[0.1],
+    );
+    // 不需要时即使文件缺也不报。
+    ensure_region_requirements(&source, RegionRequirements::default()).unwrap();
+    vector(
+        &source.join("soil/2005/lake_soilc_patches_e000_n00.nc"),
+        "patch",
+        "lake_soilc_patches",
+        &[1.0],
+    );
+    vector(
+        &source.join("soil/2005/methane_ph_patches_e000_n00.nc"),
+        "patch",
+        "methane_ph_patches",
+        &[6.5],
+    );
+    ensure_region_requirements(
+        &source,
+        RegionRequirements {
+            lake_soilc: true,
+            spatial_ph: true,
+        },
+    )
+    .unwrap();
+    crate::remove_test_tree(source);
+}

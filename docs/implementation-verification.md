@@ -40883,3 +40883,52 @@ GRIDBASED + PC 区域算例，带 `mesh.nc`）——把本仓库 `vendor/CoLM202
   单测与代码对照支撑。等有真实 LULCC 算例后应补：相邻两年各跑一年、对比换年步的
   材料池与历史、并核对 `MT LULCC: …` 两行诊断的计数。
 - 本轮之前记录在 §5.1 的"#13 仍未做"到此为止，以本节为准。
+
+## §9 的 #14 补齐：区域裁剪的甲烷必需输入门控（2026-10-31）
+
+第三轮只落了 #14 里"网格索引越界报可操作错误"那半条，剩下的"必需湖碳/甲烷 pH 字段缺失"因为
+Rust 裁剪器是字段无关设计而没接。这次按上游补齐：
+
+- 上游：`MKSRFDATA.F90:154-160` 在 `DEF_USE_BGC` 时调
+  `methane_preprocessing_requirements`（`main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Preprocessing.F90:18-46`，
+  读 CH4 参数文件的 `DEF_METHANE%allowlakeprod`/`use_spatial_ph`），把两个开关传给
+  `srfdata_region_clip`；裁剪器在 `MOD_RegionClip.F90:459-478` 对每个 LC 年、每个块文件
+  `soil/<year>/lake_soilc_patches_<blk>.nc` 与 `methane_ph_patches_<blk>.nc` 做存在性检查，
+  缺了就 `clip_error('Missing required lake carbon/methane pH: …')`。
+- Rust：`colm-srfdata/src/region.rs` 新增 `RegionRequirements { lake_soilc, spatial_ph }` 与
+  `ensure_region_requirements(source, requirements)`：
+  - 开关为假时什么都不做（与上游非 BGC 分支等价）；
+  - 候选目录由上游同样必剪的土壤反照率 per-block 向量（`soil_s_v_alb_patches*`）反推，
+    不会把 `soil/` 下无关子目录当成 LC 年；
+  - 块名按上游 `MOD_Block.F90:590-617` 的格式（`w|e`+3 位 `_` `s|n`+2 位）从文件名解析，
+    逐块检查；不分支的源树按无后缀文件名检查（上游 legacy 布局也走单文件）；
+  - 错误文字与上游一致（`Missing required lake carbon:` / `Missing required methane pH:`），
+    并在**写输出之前**检查，缺文件不会留下半棵 landdata。
+- `mksrfdata-rs`：`spatial_existing_surface_command` 现在用
+  `colm_srfdata::methane_preprocessing::requirements` 算开关（它与上游
+  `methane_preprocessing_requirements` 一一对应：`DEF_USE_BGC` + `DEF_USE_METHANE`，参数文件
+  `DEF_METHANE_PARAM_FILE`），存进 `SpatialExistingSurfaceCommand::requirements`；
+  `USE_srfdata_from_larger_region` 分支在 `clip_existing_surface` 之前调用检查。
+- 测试：`region_tests.rs` 新增 3 条（缺湖碳按块报路径、缺甲烷 pH 按块报路径、齐全或不需要时不报）；
+  `cargo test -p colm-srfdata --lib -- --test-threads=1` 279 passed（parallel 运行 31 个失败是
+  本机 HDF5/NetCDF 并发锁问题，串行是仓库既定的跑法）；`cargo test -p colm-srfdata --bin
+  mksrfdata-rs -- --test-threads=1` 49 passed；clippy `-D warnings`、两个 workspace 的 fmt 通过。
+- **Not-tested**：没有真实的 BGC+甲烷、且源树缺湖碳/pH 的算例（也没有不分支的源树）可跑；
+  文件命名与门控只由单测和上游代码对照支撑。§9 表里 #14 的"登记"到此改为已实现（含门控）。
+
+### 十五项收口情况（对照 §9 表）
+
+| # | 状态 | 证据/边界 |
+|---|---|---|
+| 1 H22 method 2 | 已实现 | `reservoir.rs` 静态量+调度、`colm-init` 冷启动 `0.5*ConVol`；单测在 `reservoir_tests.rs`/`gridriver_tests.rs` |
+| 2/#3 泥沙 CFL 子步 | 已实现 | `sediment.rs` `material_substep_count`/`advection_substeps`；`sediment_tests.rs` |
+| 4 泥沙重启窗口 | 已实现 | 只接受 `a.time==0`；`sediment_tests.rs` |
+| 5 干单元残水迁移 | 已实现 | `tracer.rs` 干单元拆分/统计；`tracer_tests.rs` |
+| 6/#12（前几轮） | 已实现 | 见前面对应小节 |
+| 7/#8 分汊/堤防几何 | 已实现 | `bifurcation.rs`/`river/mod.rs` `storage_from_stage`/`levee_bashgt`；对应 `*_tests.rs` |
+| 9/#10 河道 history 缺测/f_floodfrc | 已实现 | `river/history.rs` spval；`history_tests.rs` |
+| 11 溶质冰载体回收 | 已实现 | `soil_water/wetland.rs`；`soil_water_tests.rs` |
+| 13 LULCC 主机水重映射 | 已实现 | 见上一节；`lulcc_host.rs` 10 条单测 |
+| 14 区域裁剪诊断+门控 | 已实现 | 见本节；`region_tests.rs` 4 条 |
+| 15 冠层总截获 | 已实现 | `interception.rs`/`pft.rs`；`interception_tests.rs` |
+| — 全轮 Not-tested | — | 与 Fortran 内核的数值对照（无河湖/水库黄金数据）、真实 LULCC 跨年算例、真实 BGC+甲烷缺输入源树；这些都在各自小节标了 Not-tested |
