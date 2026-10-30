@@ -41027,3 +41027,59 @@ F→F 的逐位相同说明旁车/重启机制本身是精确的；两个跨引�
 本轮至此，河湖旁车在**四种组合**下都有实测：Fortran 写→Rust 单进程读、Fortran 写→Rust 2-rank
 读、Rust 单进程写→Fortran 读、Rust 2-rank 写→Fortran 读；F→F 分段与连续的逐位对照作为精确性
 基准。
+
+## Rust↔Fortran 一致性对账启动：站点/格点算例、并行一致性（2026-10-31，第八轮）
+
+维护者要求「比较结果差异、找出原因、判断哪边是对的、直到一致」，站点与格点都要试，并且
+多 node/单节点并行也要一致。这一轮先把可重复的对账跑道搭起来，并给出第一组量化结果。
+
+### 站点：黄金算例（CN-Cng 2008-01-01→11，PLUMBER2 强迫）
+
+流程（可重复）：`golden-run CN-Cng --kernel <default>` 生成 Fortran 基准到
+`oracle/work/CN-Cng`；把它整份复制成 `oracle/work/CN-Cng-rust`（只改 `DEF_dir_output`）；
+用同一份 Fortran 预处理产物以 `--engine rust --preprocessors fortran --stage colm` 跑 Rust；
+再用 `golden-compare --tolerances oracle/tolerances.toml` 对账。
+
+- **变量名**：两边 history 变量名**完全一致**（127/127，无 only-Fortran/only-Rust）；
+  站点算例没有开物质输送，MT 变量名的核对留给下一步的开示踪物算例。
+- **数值**：`tier2` 之外 **59 项**（tier0/tier1 全过）。典型量级：
+  `f_tref` 最大差 0.014 K（0.005%）、`f_ldew` 4.6e-5、`f_qinfl` 在接近零的通量处出现变号
+  （1.6e-3 vs -1.8e-3 mm/s）、`f_wdsrf_inst` ~2 mm、`f_sr*` 0.2–0.4 W m⁻²、`f_alb` 在
+  单步对照里就有 5.5e-3 的绝对差；`f_zwt` 有 0 vs 0.49 m 的结构性差（49/264 个时刻）。
+- **单步定位**：从同一份冷启动重启只跑 **1 个 1800 s 步**，差异即已出现（`f_alb` 2.2%、
+  `f_sr*` 1–2%），说明不是跨步累积，而是**单步内的辐射/反照率与地表层求解**差异；
+  与 docs 里既有结论一致：`twostream` 给定输入的输出此前已验到逐位相同，差异来自
+  输入侧（地面反照率、`fwet_snow`、叶温/冠层持水这条 tier2 迭代链）。
+- 注意：**黄金本身跨编译器重建也不是逐位稳定的**（同一内核重跑与 golden 在 tier2 上差
+  ~1e-9 量级），所以跨引擎不能拿「逐位」当目标；判据只能是「分层容差 + 逐项归因」。
+
+### 格点：同一个区域河湖算例（1° 3×3，JRA3Q 2005-01）
+
+- 陆面 history 变量名一致（140/140，另有 `hist_unitcat` 16–17 项两引擎同名）。
+- 从**同一份 Fortran 002 重启**续跑一天：Fortran 与 Rust 的 003 状态在 `ssoi/ssno/ssha`
+  （地面/雪吸收份额）差 14%、`alb` 差 8.6%、其余状态 ≤0.4%（wliq 0.14%）——与站点结论
+  同一条辐射/反照率链；history 层面 92–93/140 个变量有差，河湖量因窗口平均放大量级。
+- 精确性基准：Fortran 连续跑与在日界切开的续跑，142/142 陆面 history 变量 + 17/17
+  unitcat 变量**逐位相同**（旁车/重启机制本身没有问题）。
+
+### 并行一致性（river-off 的 9 单元格点算例）
+
+| 配置 | 结果 |
+|---|---|
+| grouped SPMD 3 rank vs 6 rank | 135/135 变量**逐位相同** |
+| grouped 3 rank vs flat 1 rank | 135/135 变量**逐位相同** |
+| flat 2 rank / 4 rank | 跑到写 history/重启时 `NetCDF: HDF error` 退出（多 rank 并发写文件的已知限制；不是数值差异） |
+| Rust 1 rank vs 2 rank（河湖算例，`COLM_MPIEXEC` 启动） | 140/140 陆面 + 16/16 unitcat **逐位相同** |
+| Fortran grouped 3 rank ↔ Rust 2 rank 的河湖旁车 | 双向读回都通过（nac 144→192 等，见上一节） |
+
+### 下一步（本轮未完成，目标保持 active）
+
+1. 把 59 项 tier2 差异逐项归类：结构性（`f_zwt`、`f_qinfl` 变号）优先查；辐射/反照率链
+   （`alb`/`sr*`/`sab*`/`rnet`）追到输入侧的具体差异（地面反照率的土壤湿度项、`fwet_snow`、
+   `fsno`）；迭代类（`tref`/`qref`/`tstar`/`zol`）确认是否只是求解器收敛路径差异。
+2. 开一个带物质输送（同位素/溶质）的站点或格点算例，核对 **MT 历史变量名与上游一致**，
+   缺失的按上游原名补。
+3. 判断每一项哪边对：以本仓库 docs/upstream-bugs.md 里已登记的「Rust 有意修上游 bug」为准，
+   其余以 Fortran 为准；确认为 Rust bug 的修 Rust，确认为上游 bug 的维持并记录。
+4. 多 node：本机只能模拟 grouped 多 rank；7920 工作站（96 核）尚未装 Fortran/MPI 工具链，
+   多 node 版本需要先在那台机器上准备内核与数据。
