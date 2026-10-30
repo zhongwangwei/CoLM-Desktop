@@ -1,10 +1,16 @@
-//! 历史累加器续跑旁车（上游 `include/land_history_restart.inc`）。
+//! 历史累加器续跑旁车（上游 `main/MOD_HistAccRestart.F90`）。
 //!
-//! 每写一份续跑文件，上游同时写 `<case>_restart_hist_<cdate>_<block>.nc`：
-//! `history_schema = 1`、`history_freq`、`history_nac`，区间跨过重启（`nac > 0`）时再按
+//! 每写一份续跑文件，同时写 `<case>_restart_hist_<cdate>_<block>.nc`：先写标记
+//! `hacc_complete = 0`、`hacc_freq`、`hacc_nac`，区间跨过重启（`nac > 0`）时再按
 //! [`MANIFEST`] 顺序转存全部**已分配**的累加器（`nac_ln`、`nac_dt` 与 `a_*` 原始累加和，
-//! 从未累加过的是 `spval`），最后 `history_complete = 1`。续跑方读回后，区间内的平均与
+//! 从未累加过的是 `spval`）；河湖构建最后写 `hacc_river`（有河道累加量时为 1，另写
+//! `<旁车基名>.river`），全部落盘后把 `hacc_complete` 改成 1。续跑方读回后，区间内的平均与
 //! 不中断的运行逐位相同。
+//!
+//! 标记名与上游一致，所以 Fortran 与 Rust 可以互读对方写的旁车（累加器名 `a_us`…、维度名
+//! `d1_<name>`/`d2_<name>`、`.river` 文件名本来就已经相同）。旧 Rust 旁车用
+//! `history_schema`/`history_freq`/`history_nac`/`history_complete`/`history_river_required`，
+//! 读回时逐标记回退；新格式优先。
 //!
 //! 字段的分配条件与形状由 `oracle/scripts/gen_hist_manifest.py` 从上游生成（[`MANIFEST`]），
 //! 这里只做读写与校验。
@@ -90,8 +96,8 @@ pub struct SidecarConfig {
     pub pft_or_pc: bool,
     pub bgc: bool,
     pub crop: bool,
-    /// 内核编进了 `GridRiverLakeFlow`（空间构建）：`history_schema = 2`，并多一个
-    /// `history_river_required`（河道累加器有值时为 1，另写河道旁车）。
+    /// 内核编进了 `GridRiverLakeFlow`（空间构建）：旁车多一个 `hacc_river`（河道累加器
+    /// 有值时为 1，另写河道旁车），读回时要求它与 `.river` 一起成套。
     pub river_lake_flow: bool,
 }
 
@@ -110,7 +116,7 @@ impl Default for SidecarConfig {
     }
 }
 
-/// `freq_code(DEF_HIST_FREQ)`：旁车标记 `history_freq` 的取值。
+/// `freq_code(DEF_HIST_FREQ)`：旁车标记 `hacc_freq` 的取值。
 pub fn frequency_code(frequency: HistoryFrequency) -> u8 {
     use HistoryFrequency as F;
     match frequency {
@@ -209,7 +215,21 @@ pub fn allocated_fields(
     MANIFEST.iter().filter(move |entry| entry.allocated(config))
 }
 
-/// 写旁车（`write_history_acc_restart` + `complete_history_acc_restart`）。
+/// 旁车标记（上游 `MOD_HistAccRestart.F90`）。本轮起 Rust 也写这套名字。
+const HACC_COMPLETE: &str = "hacc_complete";
+const HACC_FREQ: &str = "hacc_freq";
+const HACC_NAC: &str = "hacc_nac";
+/// 只在河湖构建里写：本窗口有河道累加量时为 1（`.river` 里另存求和）。
+const HACC_RIVER: &str = "hacc_river";
+
+/// 旧 Rust 旁车的标记。只用于读回兼容，不再写出。
+const LEGACY_SCHEMA: &str = "history_schema";
+const LEGACY_COMPLETE: &str = "history_complete";
+const LEGACY_FREQ: &str = "history_freq";
+const LEGACY_NAC: &str = "history_nac";
+const LEGACY_RIVER: &str = "history_river_required";
+
+/// 写旁车（上游 `write_sidecar` + `save_history_acc_restart` 的完成标记）。
 ///
 /// `patches` 是主重启的 `patch` 维长度；`windows` 每个 patch 一份（多作物单点），区间为空时可以只给
 /// 一份（各 patch 的 `nac` 相同）。累加器按 patch 拼接：`patch` 是最外层维，每个 patch 的值连续。
@@ -232,9 +252,26 @@ fn urban_units(config: &SidecarConfig, urban: &[bool]) -> usize {
     }
 }
 
-/// [`write_sidecar`]；空间构建（`river_lake_flow`）另写 `history_river_required`：河道累加器
-/// （`acctime_ucat`）有值时为 1，调用方同时写河道旁车（`<sidecar 基名>.river`）。
+/// [`write_sidecar`]；空间构建（`river_lake_flow`）另写 `hacc_river`：河道累加器
+/// （`acctime_ucat`）有值时为 1，调用方写完 `<sidecar 基名>.river` 后再落完成标记。
 pub fn write_sidecar_with_river(
+    path: &Path,
+    patches: usize,
+    config: &SidecarConfig,
+    windows: &[HistoryWindow],
+    river_required: bool,
+    urban: &[bool],
+) -> Result<()> {
+    write_sidecar_uncommitted(path, patches, config, windows, river_required, urban)?;
+    commit_sidecar(path)
+}
+
+/// 上游 `write_sidecar`：先写 `hacc_complete = 0`、`hacc_freq`、`hacc_nac`，再写累加器，
+/// 河湖构建最后写 `hacc_river`。完成标记见 [`commit_sidecar`]。
+///
+/// 拆成两步是崩溃安全的一半，也和上游一致：被 kill 的运行留下 `hacc_complete = 0`，读回方
+/// 按上游规则警告后从重启处重新开窗，而不是拿半份累加器续跑。
+pub fn write_sidecar_uncommitted(
     path: &Path,
     patches: usize,
     config: &SidecarConfig,
@@ -252,11 +289,11 @@ pub fn write_sidecar_with_river(
         file.add_dimension("urban", urban_units(config, urban))?;
     }
     let per_patch = |value: f64| vec![value; patches];
-    let schema = if config.river_lake_flow { 2.0 } else { 1.0 };
+    // 上游顺序：完成标记先写 0（最后才改 1），再频率与样本数。
     for (field, value) in [
-        ("history_schema", schema),
-        ("history_freq", f64::from(frequency_code(config.frequency))),
-        ("history_nac", window.steps as f64),
+        (HACC_COMPLETE, 0.0),
+        (HACC_FREQ, f64::from(frequency_code(config.frequency))),
+        (HACC_NAC, window.steps as f64),
     ] {
         file.add_variable::<f64>(field, &["patch"])?
             .put_values(&per_patch(value), ..)?;
@@ -306,9 +343,8 @@ pub fn write_sidecar_with_river(
                 .with_context(|| format!("cannot write {}", entry.name))?;
         }
     }
-    // `river_active`：河道累加器（`acctime_ucat`）有值才为 1。
     if config.river_lake_flow {
-        file.add_variable::<f64>("history_river_required", &["patch"])?
+        file.add_variable::<f64>(HACC_RIVER, &["patch"])?
             .put_values(&per_patch(if river_required { 1.0 } else { 0.0 }), ..)?;
     } else {
         ensure!(
@@ -316,9 +352,26 @@ pub fn write_sidecar_with_river(
             "only river-lake builds carry river history"
         );
     }
-    // 上游先写 0、全部转存完再改成 1（`complete_history_acc_restart`）；落盘结果只有 1。
-    file.add_variable::<f64>("history_complete", &["patch"])?
-        .put_values(&per_patch(1.0), ..)?;
+    file.close()?;
+    Ok(())
+}
+
+/// 上游 `save_history_acc_restart` 的最后一步：把 `hacc_complete` 从 0 改成 1。
+///
+/// 必须在全部内容（含 `<sidecar>.river` 的河道求和）落盘之后调；读回方只认 1。
+pub fn commit_sidecar(path: &Path) -> Result<()> {
+    let mut file =
+        netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
+    let patches = file
+        .dimension_len("patch")
+        .with_context(|| format!("{} has no patch dimension", path.display()))?;
+    let mut marker = file
+        .variable_mut(HACC_COMPLETE)
+        .with_context(|| format!("{} has no {HACC_COMPLETE} marker", path.display()))?;
+    marker
+        .put_values(&vec![1.0; patches], ..)
+        .with_context(|| format!("cannot complete {}", path.display()))?;
+    drop(marker);
     file.close()?;
     Ok(())
 }
@@ -368,11 +421,100 @@ pub struct ReadWindow {
     pub restored: bool,
 }
 
+/// 旁车盘上格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarFormat {
+    /// 上游 `MOD_HistAccRestart.F90` 的 `hacc_*`（本轮起 Rust 也写这套）。
+    Upstream,
+    /// 旧 Rust 旁车（`history_schema`/`history_complete`），只读。
+    Legacy,
+}
+
+impl SidecarFormat {
+    /// 新名 `hacc_complete` 优先；没有它时旧 Rust 的 `history_schema`/`history_complete`
+    /// 才算旧格式。两者都没有的是不认识的标记集。
+    fn detect(file: &netcdf::File) -> Option<Self> {
+        if file.variable(HACC_COMPLETE).is_some() {
+            Some(Self::Upstream)
+        } else if file.variable(LEGACY_SCHEMA).is_some() || file.variable(LEGACY_COMPLETE).is_some()
+        {
+            Some(Self::Legacy)
+        } else {
+            None
+        }
+    }
+
+    fn complete(self) -> &'static str {
+        match self {
+            Self::Upstream => HACC_COMPLETE,
+            Self::Legacy => LEGACY_COMPLETE,
+        }
+    }
+
+    fn freq(self) -> &'static str {
+        match self {
+            Self::Upstream => HACC_FREQ,
+            Self::Legacy => LEGACY_FREQ,
+        }
+    }
+
+    fn nac(self) -> &'static str {
+        match self {
+            Self::Upstream => HACC_NAC,
+            Self::Legacy => LEGACY_NAC,
+        }
+    }
+
+    fn river(self) -> &'static str {
+        match self {
+            Self::Upstream => HACC_RIVER,
+            Self::Legacy => LEGACY_RIVER,
+        }
+    }
+}
+
+/// 读一个标记向量：必须是 `(patch)` 上的 f64、值全部有限。
+///
+/// 形状与有限性照上游 `require_var` + `read_marker`（非有限标记上游直接 `CoLM_stop`）；
+/// 值本身的语义（提交、频率、样本数）由调用方判。
+fn read_marker(file: &netcdf::File, name: &str, path: &Path) -> Result<Vec<f64>> {
+    let variable = file
+        .variable(name)
+        .with_context(|| format!("{} has no {name} marker", path.display()))?;
+    ensure!(
+        variable.dimensions().len() == 1 && variable.dimensions()[0].name() == "patch",
+        "{name} in {} is not a (patch) marker vector",
+        path.display()
+    );
+    let values = variable
+        .get_values::<f64, _>(..)
+        .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "non-finite {name} in {}",
+        path.display()
+    );
+    Ok(values)
+}
+
+/// 上游对这些情况都只是 `write(*,...)` 警告后从重启处重新开窗（不停机）：
+/// 缺/未提交完成标记、频率变了、标记集对不上。
+fn warn_ignored(path: &Path, reason: &str) {
+    eprintln!(
+        "Warning: ignoring the history-accumulator restart {} ({reason}); \
+         the history window starts at the restart.",
+        path.display()
+    );
+}
+
 /// 读旁车（`read_history_acc_restart`），逐项照上游的校验。
 ///
-/// - 旁车不存在：主重启要求旁车（`history_sidecar_required`）就报错，否则是旧式重启，
-///   返回 `None`（上游只打一行警告）。
-/// - 标记不全、未提交（`history_complete /= 1`）、历史频率变了、`nac` 不是非负整数：报错。
+/// - 旁车不存在：主重启要求旁车（Rust-only 的 `history_sidecar_required`）就报错，否则返回
+///   `None`（上游只打一行警告）。
+/// - 标记集不认识、缺完成标记、完成标记不是 1、频率变了：**警告后返回 `None`**，调用方从
+///   重启处重新开窗（上游同样不停机）。主重启标了 required 时这些属于自家文件损坏，报错。
+/// - 新格式 `hacc_freq`/`hacc_nac`（旧格式 `history_freq`/`history_nac`）缺失、形状不对、
+///   非有限、`nac` 不是同一个非负整数：报错（上游这里 `require_var`/`read_marker` 会停机）。
 /// - `nac = 0`：返回空窗口；`nac > 0`：按本配置的清单读回全部已分配的累加器，缺一个就报错。
 /// - 重启点上的窗口已经完整（[`window_is_complete`]）：**丢弃**，返回空窗口且 `restored = false`。
 ///   完整窗口在重启时已经被（或将要被）写进历史文件，续接它会让重启后的第一个窗口覆盖两个
@@ -408,52 +550,46 @@ pub fn read_sidecar(
     }
     let file =
         netcdf::open(sidecar).with_context(|| format!("cannot open {}", sidecar.display()))?;
-    let markers = [
-        "history_schema",
-        "history_freq",
-        "history_nac",
-        "history_complete",
-    ];
-    ensure!(
-        markers.iter().all(|name| file.variable(name).is_some()),
-        "incomplete land-history restart sidecar {}",
-        sidecar.display()
-    );
-    let marker = |name: &str| -> Result<Vec<f64>> {
-        let values: Vec<f64> = file
-            .variable(name)
-            .context("checked above")?
-            .get_values(..)
-            .with_context(|| format!("cannot read {name} from {}", sidecar.display()))?;
+    let Some(format) = SidecarFormat::detect(&file) else {
+        // 不认识的标记集（例如别的实现、或上游更早/更晚的格式）：上游对缺完成标记的旁车是
+        // 警告后重开窗；主重启标了 required 的旁车一定是 Rust 自己写的，这时标记对不上是损坏。
         ensure!(
-            values.iter().all(|value| value.is_finite()),
-            "non-finite {name} in {}",
-            sidecar.display()
+            !required,
+            "{} carries no recognised history-accumulator markers, but {} marks it required",
+            sidecar.display(),
+            primary.display()
         );
-        Ok(values)
+        warn_ignored(sidecar, "no recognised hacc_* or legacy marker set");
+        return Ok(None);
     };
-    ensure!(
-        marker("history_schema")?
-            .iter()
-            .all(|&value| value == if config.river_lake_flow { 2.0 } else { 1.0 }),
-        "unsupported land-history sidecar schema in {}",
-        sidecar.display()
-    );
-    ensure!(
-        marker("history_complete")?
-            .iter()
-            .all(|&value| value == 1.0),
-        "incomplete land-history sidecar commit marker in {}",
-        sidecar.display()
-    );
-    ensure!(
-        marker("history_freq")?
-            .iter()
-            .all(|&value| value == f64::from(frequency_code(config.frequency))),
-        "history frequency changed across the land restart {}",
-        sidecar.display()
-    );
-    let counts = marker("history_nac")?;
+    if file.variable(format.complete()).is_none() {
+        // 旧格式才可能只有 `history_schema` 而没有完成标记：那是被 kill 的运行留下的半成品。
+        warn_ignored(sidecar, "no completion marker");
+        return Ok(None);
+    }
+    let complete = read_marker(&file, format.complete(), sidecar)?;
+    if complete.iter().any(|&value| value != 1.0) {
+        warn_ignored(sidecar, "the completion marker is not 1");
+        return Ok(None);
+    }
+    // 频率变了：上游警告后重开窗（要求 `hacc_freq` 存在且形状对，缺失算损坏）。
+    let expected_freq = f64::from(frequency_code(config.frequency));
+    let freq = read_marker(&file, format.freq(), sidecar)?;
+    if freq.iter().any(|&value| value != expected_freq) {
+        warn_ignored(sidecar, "DEF_HIST_FREQ changed across the restart");
+        return Ok(None);
+    }
+    if format == SidecarFormat::Legacy {
+        // 旧 Rust 用 `history_schema` 编码构建类型（1 非河湖、2 河湖）；构建变了整组累加器
+        // 的含义就变了，按与"频率变了"同样的方式丢弃。
+        let expected_schema = if config.river_lake_flow { 2.0 } else { 1.0 };
+        let schema = read_marker(&file, LEGACY_SCHEMA, sidecar)?;
+        if schema.iter().any(|&value| value != expected_schema) {
+            warn_ignored(sidecar, "the build changed across the restart");
+            return Ok(None);
+        }
+    }
+    let counts = read_marker(&file, format.nac(), sidecar)?;
     let Some(&nac) = counts.first() else {
         bail!("{} has no patches", sidecar.display());
     };
@@ -465,13 +601,12 @@ pub fn read_sidecar(
         sidecar.display()
     );
     let patches = counts.len();
-    let mut windows = vec![
-        HistoryWindow {
-            steps: nac as usize,
-            ..HistoryWindow::default()
-        };
-        patches
-    ];
+    // 河湖构建要求 `hacc_river` 成套存在；缺失说明这份旁车是别的构建写的（上游这时
+    // `require_var` 会停机，这里按"标记集对不上"警告后重开窗，不中止分段跑）。
+    if config.river_lake_flow && file.variable(format.river()).is_none() {
+        warn_ignored(sidecar, "the sidecar has no river-accumulator marker");
+        return Ok(None);
+    }
     if window_is_complete(config.frequency, time_step_seconds, date, nac as usize)? {
         return Ok(Some(ReadWindow {
             windows: vec![HistoryWindow::default(); patches],
@@ -480,10 +615,17 @@ pub fn read_sidecar(
     }
     if nac == 0.0 {
         return Ok(Some(ReadWindow {
-            windows,
+            windows: vec![HistoryWindow::default(); patches],
             restored: false,
         }));
     }
+    let mut windows = vec![
+        HistoryWindow {
+            steps: nac as usize,
+            ..HistoryWindow::default()
+        };
+        patches
+    ];
     for entry in allocated_fields(config) {
         let variable = file.variable(entry.name).with_context(|| {
             format!(
@@ -544,6 +686,35 @@ pub fn read_sidecar(
         windows,
         restored: true,
     }))
+}
+
+/// 该旁车是否要求读回 `<sidecar>.river` 的河道求和。
+///
+/// 上游判据是 `hacc_river` 的 `active > 0`（旧 Rust 是 `history_river_required = 1`）；
+/// 未提交、标记集不认识、或不是河湖构建写的旁车返回 `false` —— 上游这些情况也根本
+/// 不会去读 `.river`。
+pub fn sidecar_river_required(sidecar: &Path) -> Result<bool> {
+    if !sidecar.is_file() {
+        return Ok(false);
+    }
+    let file =
+        netcdf::open(sidecar).with_context(|| format!("cannot open {}", sidecar.display()))?;
+    let Some(format) = SidecarFormat::detect(&file) else {
+        return Ok(false);
+    };
+    if file.variable(format.complete()).is_none()
+        || read_marker(&file, format.complete(), sidecar)?
+            .iter()
+            .any(|&value| value != 1.0)
+    {
+        return Ok(false);
+    }
+    match file.variable(format.river()) {
+        Some(_) => Ok(read_marker(&file, format.river(), sidecar)?
+            .iter()
+            .any(|&value| value > 0.0)),
+        None => Ok(false),
+    }
 }
 
 #[cfg(test)]

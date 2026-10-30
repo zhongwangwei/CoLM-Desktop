@@ -1889,18 +1889,11 @@ fn run_spatial_segment(
             &network,
             reservoir.as_ref(),
         )?;
-        // `restore_river_history_acc_restart`：陆面旁车标记 `history_river_required = 1` 时读回河道累加。
+        // `restore_river_history_acc_restart`：陆面旁车的 `hacc_river`（旧 Rust 是
+        // `history_river_required`）为 1 时读回河道累加。
         let river_history = {
             let sidecar = history_sidecar_path(&block_files[0].time)?;
-            let required = sidecar.is_file()
-                && netcdf::open(&sidecar)
-                    .ok()
-                    .and_then(|file| {
-                        file.variable("history_river_required")
-                            .map(|v| v.get_values::<f64, _>(..))
-                    })
-                    .transpose()?
-                    .is_some_and(|marker| marker.contains(&1.0));
+            let required = colm_runtime::history_sidecar::sidecar_river_required(&sidecar)?;
             if required {
                 let river_file = segment
                     .input
@@ -4468,6 +4461,30 @@ fn write_block_restarts(
     let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
     let river_required =
         river_history.is_some_and(|history| history.acctime.iter().any(|&t| t > 0.0));
+    // 上游顺序：河道求和（`.river`）先落盘，各块旁车的 `hacc_complete` 才改成 1
+    // （`write_sidecar` → `.river` → `complete_history_acc_restart`）。
+    // 窗口已完整时两者都不写：`mark_history_restart_with_river` 已经跳过主旁车，
+    // 河道旁车是它的一部分（上游 `save_history_acc_restart` 在写 `write_sidecar` 之前返回）。
+    let window_closed = history_window_complete(history, end_time)?;
+    if let (Some(summed), true, true, false) = (
+        river_history,
+        river_required,
+        write_river_history,
+        window_closed,
+    ) {
+        // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
+        let label = date_label(normalized_day_end(end_time));
+        let base = periodic
+            .first()
+            .context("a spatial run has at least one block")?
+            .directory
+            .join(&label)
+            .join(format!(
+                "{}_restart_hist_{label}.nc.river",
+                periodic[0].name
+            ));
+        colm_runtime::river::restart::write_river_history(&base, summed)?;
+    }
     let write_block =
         |((_, patches), files): (&(String, std::ops::Range<usize>), &RestartStateFiles),
          periodic: &PeriodicRestarts|
@@ -4533,28 +4550,6 @@ fn write_block_restarts(
             .map(|((block, files), periodic)| write_block((block, files), periodic))
             .collect::<Result<Vec<_>>>()?
     };
-    // 窗口已完整时不写旁车：`mark_history_restart_with_river` 已经跳过主旁车，
-    // 河道旁车是它的一部分（上游 `save_history_acc_restart` 在写 `write_sidecar` 之前返回）。
-    let window_closed = history_window_complete(history, end_time)?;
-    if let (Some(history), true, true, false) = (
-        river_history,
-        river_required,
-        write_river_history,
-        window_closed,
-    ) {
-        // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
-        let label = date_label(normalized_day_end(end_time));
-        let base = periodic
-            .first()
-            .context("a spatial run has at least one block")?
-            .directory
-            .join(&label)
-            .join(format!(
-                "{}_restart_hist_{label}.nc.river",
-                periodic[0].name
-            ));
-        colm_runtime::river::restart::write_river_history(&base, history)?;
-    }
     Ok(written)
 }
 
@@ -5243,9 +5238,9 @@ fn history_sidecar_path(restart: &Path) -> Result<PathBuf> {
 }
 
 /// 上游每写一份续跑文件，都同时写历史累加器旁车 `<case>_restart_hist_<date>_<block>.nc`
-/// （`write_history_acc_restart` + `complete_history_acc_restart`），并在主重启末尾写
-/// `history_sidecar_required = 1`（`mark_history_acc_restart`）。区间跨过重启时旁车带全部
-/// 已分配的累加器（[`colm_runtime::history_sidecar`]）。
+/// （`write_sidecar` → 全部累加器 → `hacc_complete = 1`，标记名与上游一致，Fortran 可直接读），
+/// 并在主重启末尾写 Rust-only 的 `history_sidecar_required = 1`（Fortran 忽略它）。区间跨过
+/// 重启时旁车带全部已分配的累加器（[`colm_runtime::history_sidecar`]）。
 fn mark_history_restart(
     restart: &Path,
     history: &HistoryRestart,
@@ -5373,7 +5368,7 @@ fn sidecar_tracers<'a>(
     }))
 }
 
-/// [`mark_history_restart`]；空间构建另带 `history_river_required`。
+/// [`mark_history_restart`]；空间构建另带 `hacc_river`。
 /// `block` 是这个续跑文件在全部 patch 里的区间（多分块空间算例）；`None` 为整份窗口。
 fn mark_history_restart_with_river(
     restart: &Path,
@@ -5414,7 +5409,9 @@ fn mark_history_restart_with_river(
         Some(block) if history.urban.len() > 1 => &history.urban[block.clone()],
         _ => &history.urban[..],
     };
-    colm_runtime::history_sidecar::write_sidecar_with_river(
+    // 上游分两步：`write_sidecar` 先落 `hacc_complete = 0` 与全部累加器，调用方写完
+    // `.river` 求和后再把完成标记改成 1。示踪物部分也是旁车的一部分，必须在完成标记之前写。
+    colm_runtime::history_sidecar::write_sidecar_uncommitted(
         &sidecar,
         patches,
         &history.config,
@@ -5467,6 +5464,8 @@ fn mark_history_restart_with_river(
             None => colm_runtime::tracer_sidecar::write(&sidecar, tracers)?,
         }
     }
+    // `complete_history_acc_restart`：全部内容（含 `.river`）落盘后才认这一窗。
+    colm_runtime::history_sidecar::commit_sidecar(&sidecar)?;
     let mut primary =
         netcdf::append(restart).with_context(|| format!("cannot reopen {}", restart.display()))?;
     // 续跑起点本身就是带标记的续跑文件时，写出是从它复制来的，标记已经在了。

@@ -786,7 +786,7 @@ impl SpatialRuntime {
                         if due {
                             // 河道 history 累加器在 root 写记录时被 `RiverHistoryWriter` 清零；
                             // worker 没有 writer，必须在这里清成同一状态，否则块旁车的
-                            // `history_river_required` 会与 root 不一致（实测 e110 旁车 1 vs 0）。
+                            // `hacc_river` 会与 root 不一致（实测 e110 旁车 1 vs 0）。
                             if let Some((river, _)) = self.river.as_mut() {
                                 if !exchange.is_root() && raw_at_end {
                                     river.raw_history_at_end = Some(river.history.clone());

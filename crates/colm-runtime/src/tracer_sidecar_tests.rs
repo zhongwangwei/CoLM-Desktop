@@ -36,8 +36,18 @@ fn descriptor(name: &str, family: TracerFamily) -> TracerDescriptor {
     }
 }
 
-/// 主机部分的最小旁车：`patch` 维与 `history_nac`。
+/// 主机部分的最小旁车：`patch` 维与 `hacc_nac` 标记。
 fn host_sidecar(path: &Path, patches: usize, nac: f64) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("patch", patches).unwrap();
+    file.add_variable::<f64>("hacc_nac", &["patch"])
+        .unwrap()
+        .put_values(&vec![nac; patches], ..)
+        .unwrap();
+}
+
+/// 旧 Rust 旁车用 `history_nac` 标记；读回要能认。
+fn legacy_host_sidecar(path: &Path, patches: usize, nac: f64) {
     let mut file = netcdf::create(path).unwrap();
     file.add_dimension("patch", patches).unwrap();
     file.add_variable::<f64>("history_nac", &["patch"])
@@ -270,4 +280,25 @@ fn the_read_name_falls_back_per_field() {
         error.contains("a_mt_evap") && error.contains("a_trc_evap"),
         "{error}"
     );
+}
+
+#[test]
+fn the_legacy_history_nac_marker_still_opens_the_tracer_window() {
+    let set = TracerSet {
+        tracers: vec![descriptor("Cl", TracerFamily::Solute)],
+    };
+    let states = [filled_state(&set, 0.0)];
+    let path = temp_file("legacy-nac");
+    legacy_host_sidecar(&path, 1, 2.0);
+    write(
+        &path,
+        &SidecarTracers {
+            set: Some(&set),
+            patches: states.iter().map(PatchAccumulators::of).collect(),
+            methane: None,
+        },
+    )
+    .unwrap();
+    let restored = read(&path, Some(&set), None, 1).unwrap();
+    assert_eq!(restored.tracers.as_ref().unwrap()[0].tracers, states[0].acc);
 }

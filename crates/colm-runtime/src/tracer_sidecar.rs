@@ -207,7 +207,8 @@ pub struct RawTracers {
 /// history 会话与续跑写出共享的终点快照。
 pub type RawTracersHandle = std::sync::Arc<std::sync::Mutex<Option<Vec<RawTracers>>>>;
 
-/// 区间跨过重启时把示踪物部分追加进刚写好的旁车（主机累加器之后、`history_complete` 不变）。
+/// 区间跨过重启时把示踪物部分追加进刚写好的旁车（主机累加器之后、完成标记 `hacc_complete`
+/// 置 1 之前 —— 上游 `write_sidecar` 里的 `tracer_history_write` 也是这个位置）。
 pub fn write(path: &Path, tracers: &SidecarTracers<'_>) -> Result<()> {
     let mut file =
         netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
@@ -258,7 +259,8 @@ pub struct RestoredTracers {
     pub methane: Option<Vec<CoreAccumulator>>,
 }
 
-/// 旁车区间开着（`history_nac > 0`）时读回示踪物部分；旁车不存在或区间已关返回空。
+/// 旁车区间开着（`hacc_nac > 0`，旧 Rust 旁车是 `history_nac`）时读回示踪物部分；
+/// 旁车不存在或区间已关返回空。
 /// 主机部分的标记校验由 [`crate::history_sidecar::read_sidecar`] 负责。
 pub fn read(
     sidecar: &Path,
@@ -271,7 +273,11 @@ pub fn read(
     }
     let file =
         netcdf::open(sidecar).with_context(|| format!("cannot open {}", sidecar.display()))?;
-    let Some(nac) = file.variable("history_nac") else {
+    // 主机样本数标记：新格式 `hacc_nac`，旧 Rust 旁车 `history_nac`（本轮起只写新名）。
+    let Some(nac) = file
+        .variable("hacc_nac")
+        .or_else(|| file.variable("history_nac"))
+    else {
         return Ok(RestoredTracers::default());
     };
     let nac = nac.get_values::<f64, _>(..)?;

@@ -40683,3 +40683,79 @@ tracer 池做上述跟随与再平衡、把质量差记进 LULCC 账，并先确
   仍待决定。
 - 本轮改动改变了 Rust 引擎在有干单元、高周转泥沙、负净截获、method 2 水库这些场景下的数值；
   这些场景此前 Rust 与 Fortran 本来就不一致，改动方向是「更接近上游」，但没有数值对照证据。
+
+## history 旁车标记对齐上游 `hacc_*` 与 Fortran↔Rust 对读实测（2026-10-30，第四轮）
+
+维护者在两个选项里选了「对齐」：Rust 的 history 累加器旁车（`<重启名>_restart_hist_<日期>.nc`）
+改成写上游的 `hacc_*` 标记，同时保留「先读新名、读不到再读旧名」的回退，旧的 Rust 旁车仍可读。
+这一节把改动和端到端对读证据一起记下来，替代第二轮 §11 第 2 条「两边旁车互不通用、需要决定」。
+
+### 1 改了什么
+
+上游活格式（`vendor/CoLM202X/main/MOD_HistAccRestart.F90`）：
+
+- `write_sidecar`（`:303-359`）先写 `hacc_complete = 0`、`hacc_freq`（`freq_code(DEF_HIST_FREQ)`）、
+  `hacc_nac`，再按清单写全部已分配累加器（变量名 `a_*`、维度 `d1_a_*`/`d2_a_*`）；河湖构建多写
+  `hacc_river`（1 = 本窗口有河道累加量）并把河道和写到 `<旁车基名>.river`；
+  `save_history_acc_restart`（`:115-152`）最后把 `hacc_complete` 改成 1，窗口已完整时连旁车都不写。
+- `read_history_acc_restart`（`:205-300`）要求 `hacc_complete` 存在且为 1，再要求 `hacc_freq`、
+  `hacc_nac`、河湖构建的 `hacc_river`；缺失/不完整/频率不符 → 打一行 warning、忽略旁车、窗口从
+  重启处重新开始（不中止模型）。
+
+Rust 侧（`crates/colm-runtime/src/history_sidecar.rs`、`bin/colm-rs.rs`）：
+
+- 只写上游名：`write_sidecar_uncommitted`（先写 `hacc_complete=0`/`hacc_freq`/`hacc_nac`、
+  再累加器、再 `hacc_river`）→ 写完 `.river` 与 tracer 段之后 `commit_sidecar` 把
+  `hacc_complete` 翻成 1；不再写 `history_schema/history_freq/history_nac/history_complete/
+  history_river_required`。
+- 读：先认 `hacc_*`，逐标记回退旧 Rust 名（含 `history_schema` 1/2 的构建标记），所以旧旁车
+  仍可读；缺失/不完整/频率不符/未知标记集 → warning + 新开窗口；**本格式**的坏形状/非有限值
+  仍然报错。`hacc_river=1` 取代原来的 `history_river_required` 语义。
+- 主重启里的 Rust 专用标记 `history_sidecar_required` 保留（Fortran 不读它，无害）。
+- 累加器变量名、`d1_`/`d2_` 维度名、`.river` 文件名本来就与上游一致，本轮没有动。
+- 测试（`history_sidecar_tests.rs`）：写出的标记集与 `hacc_complete` 0→1 顺序、变量顺序与
+  `(patch)` 形状、`a_alb(patch,d2,d1)` 布局、不再出现 `history_*` 标记；手写的 Fortran 布局
+  夹具（含真实 `.river` 和）读出 `restored=true`/`steps=48`；旧 Rust 布局仍可读；未知/不完整
+  标记集与频率变化是 warning+新窗口；坏的新格式标记仍报错。
+
+### 2 端到端对读实测（真实执行，CN-Cng 单点算例）
+
+做法：用 `colm-cli new` 从 `examples/` 造一个 CN-Cng 单点算例，`DEF_HIST_FREQ='MONTHLY'`、
+`DEF_WRST_FREQ='DAILY'`、步长 1800 s，跑 1 天就会在日末写一个「月窗口只累积了 48 步」的旁车；
+再用同步后的内核（`tmp/kernels-sync/default`）和 Rust 引擎（`target/debug/colm-rs`）分段跑，
+把最后一条 history 记录（96 步窗口平均）与不中断的连续跑对照。命令形如：
+
+```
+COLM_HISTORY_DB=$PWD/tmp/hacc/ledger.sqlite3 \
+target/debug/colm-cli run tmp/hacc-B --kernel tmp/kernels-sync/default \
+  --engine rust --preprocessors fortran --stage colm --force 0
+```
+
+**Fortran 真写的旁车**（`tmp/hacc-case/out/CN-Cng/restart/2008-002-00000/CN-Cng_restart_hist_2008-002-00000_w180_s90.nc`，
+894 KB，不入库）：`ncdump -h/v` 显示 `hacc_complete=1`、`hacc_freq=4`（MONTHLY）、`hacc_nac=48`、
+129 个变量（`a_us`…`nac_ln`/`nac_dt`），无 `hacc_river`（非河湖构建），rank-3 布局
+`a_alb(patch, d2_a_alb, d1_a_alb)`。Rust 新读路径直接读它：`restored=true`、`nac=48`、
+116 个累加和（`nac_ln=1`、`nac_dt=17`）。Rust 用同一窗口写出的旁车与它逐变量名、逐维度、
+逐值相同（只有变量**定义顺序**不同，名字寻址的 netCDF 读者不关心）。
+
+| 对照 | 结果 |
+|---|---|
+| Fortran 连续 2 天（A）vs Fortran 分段续跑（D，F→F） | **126/126 变量逐位相同**（对照试验，证明分段/旁车链路本身无损） |
+| A vs Rust 从 Fortran 第 2 天重启续跑（B，F→R） | 全部窗口平均量在 **1.8e-6 相对量级**内（`f_taux` 2.96e-7/0.164、`f_fsena` 7.9e-4/114）；说明 Rust **恢复了** Fortran 旁车窗口（若忽略旁车会得到 48 步平均，差异是 O(1) 级） |
+| Rust 写旁车（C1，1 天）→ Fortran 续跑（C2，R→F）vs 同一重启但**把旁车挪走**（C2b） | C2 与 C2b 有 **84/126 变量**在 O(1) 量级不同（`f_qinfl` 2.97、`f_fevpl` 2.74、`f_wice_soisno` 0.79…），证明 Fortran **确实用了** Rust 写的窗口；C2 的 Fortran 日志里没有 `no history-accumulator restart` 这行，C2b 里有一行（被忽略、重开窗口） |
+| C2（R→F）vs A（F 连续） | 20/126 变量 >1e-4 相对差（最大 `f_srvd` 1.35e-2），属引擎差异（见下），与旁车无关 |
+
+**顺带实测到的一个独立事实**（不是本轮改动引入）：这个配置下 **Fortran 连续 2 天与 Rust 连续 2 天
+本身就不逐位相同**——71/126 变量有差异，28 个超过 1e-4 相对（最大 `f_srvd` 2.1e-2、`f_zerr`
+4.6e-2）。也就是说仓库里「CN-Cng 逐位一致」的说法只对当时那组对照口径成立，跨引擎续跑/对照时
+只能用容差。这条单列，供后续引擎对齐轮使用。
+
+### 3 边界与遗留
+
+- 对读用的是**单点、非河湖构建**算例：`hacc_river`/`<旁车>.river` 的真实 Fortran 旁车对读没有
+  用真实河湖算例验证（只有 Rust 侧合成的 `.river` 夹具）；SPMD 多块旁车的命名/提交路径也未端到端
+  验证（同一代码路径，无算例）。
+- 894 KB 的真实 Fortran 旁车不提交；上面 §2 的命令可以从 `examples/` 复现。
+- 对读依赖的算例、内核与日志在 `tmp/hacc*`（不入库）。
+- **模型数值影响**：对齐只改旁车盘上标记名与读写语义；不跨重启的运行完全不受影响，跨重启运行在
+  「窗口完整/部分」的判定与原来一致，变化的是「别的实现写的旁车现在能读了」。
