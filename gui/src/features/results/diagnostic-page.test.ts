@@ -34,6 +34,14 @@ const gapped = {
   downsampled: true,
   gaps: { f_lfevpa: [[1.5, 2.5]] as [number, number][] },
 };
+/** 所选窗口内一条记录都没有。 */
+const emptySeries = {
+  time: [] as number[],
+  vars: { f_lfevpa: [] as (number | null)[] },
+  source_n: 0,
+  n: 0,
+  downsampled: false,
+};
 const diagnostic = {
   schema: 1,
   expression: 'Rnet-Qh-Qle-Qg',
@@ -64,6 +72,14 @@ function harness(
     failingObs?: string[];
     /** 抽样序列带缺测区间（验证图上的断线）。 */
     gaps?: boolean;
+    /** 目录里再加一个区域（grid）变量，检查时序页变量下拉。 */
+    gridVariable?: boolean;
+    /** 读序列会失败；测试里删掉这个字段后重试成功。 */
+    seriesFailure?: string;
+    /** 读回来的序列在窗口内没有数据。 */
+    seriesEmpty?: boolean;
+    /** 读运行清单会失败；测试里删掉这个字段后重试成功。 */
+    runsFailure?: string;
   } = {},
 ) {
   let selectedCase = initialCase;
@@ -89,6 +105,10 @@ function harness(
   const invokeJson = async (command: string, args: Record<string, unknown>) => {
     requests.push({ command, args });
     if (command === 'remote_fetch') return null;
+    // 运行清单读取失败的链路：测试删掉 options.runsFailure 后，同一个重试动作会成功。
+    if (command === 'model_case_runs' && options.runsFailure) throw Error(options.runsFailure);
+    // 曲线读取失败的链路：测试删掉 options.seriesFailure 后，重试按钮会取到真实数据。
+    if (command === 'series' && options.seriesFailure) throw Error(options.seriesFailure);
     // 比较重试用例：先让这些观测失败，测试里清空列表后同样的路径会返回指标。
     if (command === 'metrics' && options.failingObs?.includes(String(args.obs)))
       throw Error('no readable history for this run');
@@ -136,9 +156,22 @@ function harness(
         steps: 2,
         start: 1,
         end: 2,
-        variables: [{ name: 'f_lfevpa', kind: 'series', units: 'W/m²', dimensions: [] }],
+        variables: [
+          { name: 'f_lfevpa', kind: 'series', units: 'W/m²', dimensions: [] },
+          ...(options.gridVariable
+            ? [
+                {
+                  name: 'f_tref',
+                  kind: 'grid',
+                  units: 'K',
+                  dimensions: ['time', 'lat', 'lon'],
+                },
+              ]
+            : []),
+        ],
       };
-    if (command === 'series') return delayedSeries ?? (options.gaps ? gapped : normal);
+    if (command === 'series')
+      return delayedSeries ?? (options.seriesEmpty ? emptySeries : options.gaps ? gapped : normal);
     if (command === 'evaluation_catalog') return [{ name: 'Qle', available: true }];
     // 单站评估：只有 /obs/single.nc 这条路径返回一行指标，避免自动评估等用例拿到假数据。
     if (command === 'metrics' && args.obs === '/obs/single.nc')
@@ -1164,4 +1197,126 @@ test('a failed comparison entry is listed without losing the successful rows, an
   assert.ok(!JSON.stringify(h.tree()).includes('produced no metrics'));
   assert.ok(cells(h.tree()).includes('Qle'), 'the retried row is merged into the snapshot');
   assert.ok(!cellError(h), 'a successful retry leaves no error notice');
+});
+
+test('the time-series variable picker offers regional variables with readable labels', async () => {
+  const h = harness(false, undefined, '', '/case', { gridVariable: true });
+  await h.render();
+  await h.tab('series');
+  const nodes = (
+    node: unknown,
+  ): { type: unknown; props: Record<string, unknown> & { children?: unknown[] } }[] => {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as {
+      type: unknown;
+      props: Record<string, unknown> & { children?: unknown[] };
+    };
+    return [element, ...nodes(element.props?.children)];
+  };
+  const options = nodes(h.tree()).filter((element) => element.type === 'option');
+  assert.ok(options.some((option) => option.props.value === 'f_lfevpa'));
+  // 区域（grid）变量在总览下拉能选，时序页原来只筛 kind==='series' 就看不到；现在统一。
+  const grid = options.find((option) => option.props.value === 'f_tref');
+  assert.ok(grid, 'regional (grid) variables are selectable on the time-series page');
+  const label = String((grid.props.children as unknown[]).join(''));
+  assert.match(label, /2m air temperature/, 'the unified readable label replaces the bare name');
+  assert.match(label, /f_tref/, 'the raw variable name stays visible for NetCDF cross-checking');
+  assert.match(label, /K/, 'units stay visible next to the label');
+});
+
+test('a failed curve read shows its error and a retry instead of a spinner', async () => {
+  const options: { seriesFailure?: string } = { seriesFailure: 'cannot read history' };
+  const h = harness(false, undefined, '', '/case', options);
+  await h.render();
+  const rendered = JSON.stringify(h.tree());
+  assert.ok(rendered.includes('cannot read history'), 'the curve area shows the actual error');
+  assert.ok(
+    !rendered.includes('Reading simulation results'),
+    'a failed read is not reported as a permanent spinner',
+  );
+  const retry = actionById(h, 'result-curve-retry');
+  assert.ok(retry, 'the curve area offers a retry');
+  assert.equal(retry.enabled, true);
+  delete options.seriesFailure;
+  await h.action('result-curve-retry');
+  assert.ok(!JSON.stringify(h.tree()).includes('cannot read history'));
+  assert.ok(h.charts().length, 'the retried read draws the curve');
+});
+
+test('the curve area separates a pending read from a window with no data', async () => {
+  let finish!: (value: unknown) => void;
+  const pending = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const h = harness(false, pending);
+  await h.render();
+  assert.ok(
+    JSON.stringify(h.tree()).includes('Reading simulation results'),
+    'the read is still in flight',
+  );
+  finish(normal);
+  await h.render();
+  assert.ok(h.charts().length, 'the finished read draws the curve');
+
+  const empty = harness(false, undefined, '', '/case', { seriesEmpty: true });
+  await empty.render();
+  const text = JSON.stringify(empty.tree());
+  assert.ok(
+    text.includes('No curve data in the selected window'),
+    'an empty window says so instead of pretending to load',
+  );
+  assert.equal(empty.charts().length, 0);
+});
+
+test('a failed run list shows the error and retries instead of claiming there are no runs', async () => {
+  const options: { runsFailure?: string } = { runsFailure: 'ledger is locked' };
+  const h = harness(false, undefined, '', '/case', options);
+  await h.render();
+  const rendered = JSON.stringify(h.tree());
+  assert.ok(rendered.includes('ledger is locked'), 'the actual failure is shown');
+  assert.ok(!rendered.includes('No recorded run'), 'a read failure is not "there are no runs"');
+  const retry = actionById(h, 'result-runs-retry');
+  assert.ok(retry, 'the run list offers a retry');
+  assert.equal(retry.enabled, true);
+  delete options.runsFailure;
+  await h.action('result-runs-retry');
+  const after = JSON.stringify(h.tree());
+  assert.ok(!after.includes('ledger is locked'));
+  assert.ok(!after.includes('No recorded run'));
+  assert.ok(h.charts().length, 'the retried run list leads to a chart');
+});
+
+test('a condition change keeps the previous metrics visible as pending update', async () => {
+  const h = harness(true);
+  await h.render();
+  await h.tab('evaluation');
+  h.field('result-observation')!.set!('/obs/single.nc');
+  await h.render();
+  await h.action('evaluate-observations');
+  const before = JSON.stringify(h.tree());
+  assert.ok(before.includes('Qle'), 'the evaluation row is rendered');
+  assert.ok(!before.includes('pending update'));
+  // 改评估窗口：旧表保留并标成「待更新」，而不是变成"还没有结果"的空态。
+  h.field('result-from')!.set!('2008-01-01T00:00');
+  await h.render();
+  const after = JSON.stringify(h.tree());
+  assert.ok(after.includes('pending update'), 'the table says its conditions changed');
+  assert.ok(after.includes('Qle'), 'the previous rows stay visible with the pending note');
+});
+
+test('a comparison condition change marks the previous table as pending update', async () => {
+  const h = harness(true);
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  h.field('comparison-sources')!.set!('/case/.colm/runs/a | /obs/compare.nc');
+  await h.render();
+  await h.action('compare-sites');
+  assert.ok(!JSON.stringify(h.tree()).includes('pending update'));
+  h.field('result-from')!.set!('2008-01-01T00:00');
+  await h.render();
+  const after = JSON.stringify(h.tree());
+  assert.ok(after.includes('pending update'));
+  assert.ok(after.includes('f_lfevpa'), 'the previous comparison rows stay visible');
 });

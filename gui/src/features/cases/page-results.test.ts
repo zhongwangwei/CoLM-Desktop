@@ -1148,7 +1148,8 @@ test('automatic result preview requires the current catalog and rejects late rep
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const shown: unknown[] = [],
-    errors: unknown[] = [];
+    errors: unknown[] = [],
+    seriesErrors: unknown[] = [];
   let reads = 0;
   let resolve!: (value: unknown) => void;
   const pending = new Promise((resolveData) => {
@@ -1162,12 +1163,18 @@ test('automatic result preview requires the current catalog and rejects late rep
     variable: 'f_lfevpa',
     catalogKey: '/current',
     selectedSeriesKey: 'current-series',
+    en: false,
     readSeries: () => {
       reads++;
       return pending;
     },
     setSeries: (value: unknown) => shown.push(value),
     setSeriesKey: (value: unknown) => shown.push(value),
+    // 曲线读取状态与整页 error 分开：失败只写进曲线区（seriesError），不占整页错误通道。
+    setSeriesError: (value: unknown) => seriesErrors.push(value),
+    setSeriesLoading: () => {},
+    // 页面源码里的错误翻译（import 被剥掉）要作为自由变量补进 context。
+    readErrorText: (error: unknown) => String(error),
     setError: (value: unknown) => errors.push(value),
   };
   const effect = (extra: Record<string, unknown>) => {
@@ -1185,11 +1192,54 @@ test('automatic result preview requires the current catalog and rejects late rep
   await pending;
   await Promise.resolve();
   assert.deepEqual(shown, []);
-  assert.deepEqual(errors, []);
+  assert.deepEqual(errors, [], 'a cancelled preview does not use the whole-page error channel');
+  assert.ok(!seriesErrors.some(Boolean), 'and reports no curve error');
   effect({ readSeries: async () => ({ time: [1], vars: { f_lfevpa: [2] } }) })();
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(shown.at(-1), 'current-series');
+  // 读取失败写进曲线区自己的错误状态，页面据此显示错误原文和重试，而不是一直“正在读取”。
+  effect({
+    readSeries: async () => {
+      throw new Error('history missing for this window');
+    },
+  })();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.match(String(seriesErrors.at(-1)), /history missing for this window/);
+});
+
+test('the curve area distinguishes loading, failure, stale, empty and ready states', () => {
+  const page = '../results/ResultsPage.tsx';
+  const state = callback(page, 'curveStateOf', {}) as unknown as (input: {
+    hasRequest: boolean;
+    hasSeries: boolean;
+    fresh: boolean;
+    hasData: boolean;
+    loading: boolean;
+    error: string;
+    manual: boolean;
+  }) => string;
+  const base = {
+    hasRequest: true,
+    hasSeries: false,
+    fresh: false,
+    hasData: false,
+    loading: false,
+    error: '',
+    manual: false,
+  };
+  assert.equal(state({ ...base, hasRequest: false }), 'none', 'no run/variable yet');
+  assert.equal(state({ ...base, error: 'boom' }), 'error', 'a failure is not a spinner');
+  // 条件已改的旧曲线要先说「待更新」，不能一直显示正在读取。
+  assert.equal(state({ ...base, hasSeries: true, loading: true }), 'stale');
+  assert.equal(state({ ...base, hasSeries: true, fresh: true, hasData: true }), 'ready');
+  assert.equal(state({ ...base, hasSeries: true, fresh: true, hasData: false }), 'empty');
+  assert.equal(state({ ...base, loading: true }), 'loading');
+  // 时序页要用户点「绘制时序」：还没点之前是 idle，不是加载中。
+  assert.equal(state({ ...base, manual: true }), 'idle');
+  assert.equal(state({ ...base, manual: false }), 'loading');
 });
 
 test('result time-window changes clear sampled curves while observation edits preserve the simulation', () => {
@@ -1227,6 +1277,9 @@ test('result time-window changes clear sampled curves while observation edits pr
     setSeriesKey: (value: string) => {
       key = value;
     },
+    // 清曲线时也清掉曲线区自己的读取状态（否则旧错误会挂在新条件上）。
+    setSeriesError: noop,
+    setSeriesLoading: noop,
     setSingleResult: noop,
     setDiagnostic: noop,
   };

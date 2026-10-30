@@ -59,6 +59,9 @@ function initialization() {
     invokeJson: async () => [],
     setObs: (value: string) => written.push(value),
     setRuns: noop,
+    // 运行清单自己的读取状态（读取中/失败可重试），与整页 error 分开。
+    setRunsLoading: noop,
+    setRunsError: noop,
     setSource: noop,
     setCatalog: noop,
     setSeries: noop,

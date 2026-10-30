@@ -1,5 +1,5 @@
 import { bilingual } from '../../lib/bilingual';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { insertGapMarkers, sameSeries } from './chart-data';
 import uPlot from 'uplot';
 import { timeTicks } from './time-ticks';
@@ -169,6 +169,34 @@ function localResultsLabel(run: Run, en: boolean): string {
       : `本机结果部分取回${files ? ` · ${files} 个文件` : ''}`;
   if (status === 'invalid') return en ? 'Local result folder invalid' : '本地结果目录无效';
   return en ? 'No local results' : '本机无结果';
+}
+/** 曲线区的显示状态；`none`=还没选运行/变量，`idle`=手动读取的页签还没点读。 */
+type CurveState = 'none' | 'idle' | 'loading' | 'error' | 'stale' | 'empty' | 'ready';
+/**
+ * 曲线区该显示哪种状态（审计 §五.2）。旧实现把「还没开始读」「正在读」「读失败」
+ * 「窗口里没有数据」「条件改了还没重读」都写成同一句「正在读取真实模拟结果…」，
+ * 读失败时看起来像永远卡在加载。优先级：没请求 → 错误 → 旧条件数据 → 读取中 → 空/就绪。
+ */
+function curveStateOf(input: {
+  /** 有运行且有变量，才谈得上读曲线。 */
+  hasRequest: boolean;
+  /** 已有一份曲线数据（可能属于旧条件，变量下拉换过但还没重读）。 */
+  hasSeries: boolean;
+  /** 数据对象的条件与当前界面一致。 */
+  fresh: boolean;
+  /** 数据对象里的时间轴非空。 */
+  hasData: boolean;
+  loading: boolean;
+  error: string;
+  /** overview 自动读；时序页要用户点「绘制时序」才读，未点时不冒充加载中。 */
+  manual: boolean;
+}): CurveState {
+  if (!input.hasRequest) return 'none';
+  if (input.error) return 'error';
+  if (input.hasSeries && !input.fresh) return 'stale';
+  if (input.loading) return 'loading';
+  if (input.hasSeries) return input.hasData ? 'ready' : 'empty';
+  return input.manual ? 'idle' : 'loading';
 }
 
 /** 多站点比较的一行：一个运行副本 + 它的观测文件。 */
@@ -523,6 +551,9 @@ export default function ResultsPage({
   if (tab !== 'comparison' && tab !== 'report') lastStationTab.current = tab;
   const multiStation = tab === 'comparison';
   const [runs, setRuns] = useState<Run[]>([]);
+  // 运行清单的读取状态要能区分「还在读」「真没有」「读失败」：原来三者都落到「尚无运行」或空白。
+  const [runsLoading, setRunsLoading] = useState(!!caseDir);
+  const [runsError, setRunsError] = useState('');
   const [source, setSource] = useState('');
   const completedRunCase =
     state.running?.[caseDir]?.status === 'succeeded' ? state.running[caseDir]?.run_case : undefined;
@@ -550,6 +581,9 @@ export default function ResultsPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [series, setSeries] = useState<SeriesData | null>(null);
+  // 曲线区的读取状态独立于整页 error：曲线读失败要留在曲线区显示原因和重试（审计 §五.2）。
+  const [seriesLoading, setSeriesLoading] = useState(false);
+  const [seriesError, setSeriesError] = useState('');
   const [diagnostic, setDiagnostic] = useState<EnergyDiagnostic | null>(null);
   // 多站点比较：选中运行（有序，每行一个观测文件）+ 项目里可比较的运行清单（一次 IPC 查完）。
   const [comparisonEntries, setComparisonEntries] = useState<ComparisonEntry[]>([]);
@@ -634,6 +668,8 @@ export default function ResultsPage({
     setCorrected(false);
     setComparisonEntries([]);
     setError('');
+    setRunsError('');
+    setRunsLoading(!!caseDir);
     let cancelled = false;
     if (!caseDir) return;
     void defaultObservation(caseDir)
@@ -652,7 +688,11 @@ export default function ResultsPage({
         }
       })
       .catch((e) => {
-        if (!cancelled && stationTarget.current === caseDir) setError(String(e));
+        // 运行清单读失败要单独显示并可重试：混进整页 error 会让人以为算例坏了，也看不出能重试。
+        if (!cancelled && stationTarget.current === caseDir) setRunsError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled && stationTarget.current === caseDir) setRunsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -703,27 +743,30 @@ export default function ResultsPage({
       requestEpoch.current++;
     };
   }, [source, caseDir, versionId, revision]);
-  // 单站评估的输入条件变化：作废在途的单站请求并清掉旧快照（旧结果不能冒充新条件下的结果）。
+  // 单站评估的输入条件变化：作废在途的单站请求，但**保留上一次的快照**并在表上方标「待更新」。
+  // 直接清空会让「条件已改」和「从没算过」看起来一样；导出仍由 exportGate 按条件一致性挡住。
   useEffect(() => {
     epoch.current++;
     requestSeq.current.single++;
-    setSingleResult(null);
     setDiagnostic(null);
   }, [source, obs, from, to, spinup, corrected]);
-  // 多站比较的条件是"有序运行清单 + 窗口 + spinup + 订正"：改任一项都作废旧比较快照；
-  // 编辑比较清单不应再清掉单站结果（旧实现共用 metrics 时正是这样串掉的）。
+  // 多站比较的条件是"有序运行清单 + 窗口 + spinup + 订正"：改任一项都作废在途比较；
+  // 同样保留旧快照给「待更新」提示，只清掉属于旧条件的进度。编辑比较清单不再清掉单站结果。
   useEffect(() => {
     requestSeq.current.multi++;
-    setComparisonResult(null);
     setComparisonProgress(null);
   }, [from, to, spinup, corrected, comparisonEntries]);
   useEffect(() => {
     setSeries(null);
     setSeriesKey('');
+    setSeriesError('');
+    setSeriesLoading(false);
   }, [from, to]);
   useEffect(() => {
     epoch.current++;
     setSeries(null);
+    setSeriesError('');
+    setSeriesLoading(false);
   }, [variable]);
   useEffect(() => {
     let cancelled = false;
@@ -897,7 +940,13 @@ export default function ResultsPage({
   );
   useEffect(() => {
     let cancelled = false;
-    if (tab !== 'overview' || !source || !variable || catalogKey !== source) return;
+    if (tab !== 'overview' || !source || !variable || catalogKey !== source) {
+      // 不在本页签/本条件下自动读曲线时，不能把上一次的「读取中」留在页面上。
+      setSeriesLoading(false);
+      return;
+    }
+    setSeriesError('');
+    setSeriesLoading(true);
     void readSeries(variable)
       .then((data) => {
         if (!cancelled && stationTarget.current === caseDir) {
@@ -906,20 +955,35 @@ export default function ResultsPage({
         }
       })
       .catch((error) => {
-        if (!cancelled && stationTarget.current === caseDir) setError(String(error));
+        // 曲线读失败留在曲线区显示原因和重试入口，不再占用整页 error 通道。
+        if (!cancelled && stationTarget.current === caseDir)
+          setSeriesError(readErrorText(error, en));
+      })
+      .finally(() => {
+        if (!cancelled && stationTarget.current === caseDir) setSeriesLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [readSeries, source, variable, selectedSeriesKey, tab, catalogKey, caseDir]);
+  }, [readSeries, source, variable, selectedSeriesKey, tab, catalogKey, caseDir, en]);
   const plot = () =>
     task(async (current) => {
-      const data = await readSeries(variable);
-      if (current()) {
-        setSeries(data);
-        setSeriesKey(selectedSeriesKey);
+      setSeriesError('');
+      setSeriesLoading(true);
+      try {
+        const data = await readSeries(variable);
+        if (current()) {
+          setSeries(data);
+          setSeriesKey(selectedSeriesKey);
+        }
+        return data;
+      } catch (error) {
+        // 手动刷新失败也留在曲线区，task 才不会把它再报成一条整页错误。
+        if (current()) setSeriesError(readErrorText(error, en));
+        return undefined;
+      } finally {
+        if (current()) setSeriesLoading(false);
       }
-      return data;
     });
   const evaluate = () =>
     task(async (current) => {
@@ -1676,6 +1740,84 @@ export default function ResultsPage({
       : localResults?.scientific_verified === false
         ? 'not scientifically verified'
         : 'scientific verification unknown';
+  // 曲线区状态：overview 自动读，时序页手动读（未点之前是 idle，不是 loading）。
+  const curveStatus = curveStateOf({
+    hasRequest: !!source && !!variable,
+    hasSeries: !!series,
+    fresh: seriesKey === selectedSeriesKey,
+    hasData: !!series && series.time.length > 0,
+    loading: seriesLoading,
+    error: seriesError,
+    manual: tab === 'series',
+  });
+  // 已算完但条件又改了：旧表保留给「待更新」提示，而不是变成“没有结果”的空态。
+  const resultsPendingUpdate =
+    (tab === 'evaluation' && singleResult !== null && !singleFresh) ||
+    (tab === 'comparison' && comparisonResult !== null && !comparisonFresh);
+  /** 曲线区非就绪状态的文案：失败给「重试」，条件已改给「刷新曲线」，其余各自说明原因。 */
+  function curvePanelNotice(state: CurveState): ReactNode {
+    if (state === 'error')
+      return (
+        <div className="results-chart-empty">
+          <p>{seriesError}</p>
+          <ActionButton
+            action="result-curve-retry"
+            label={tr('重试读取曲线', 'Retry reading the curve')}
+            kind="click"
+            disabled={busy}
+            run={plot}
+          >
+            {tr('重试', 'Retry')}
+          </ActionButton>
+        </div>
+      );
+    if (state === 'stale')
+      return (
+        <div className="results-chart-empty">
+          <p>
+            {tr('条件已更改，曲线待更新。', 'Conditions changed; the curve is pending update.')}
+          </p>
+          <ActionButton
+            action="result-curve-refresh"
+            label={tr('刷新曲线', 'Refresh curve')}
+            kind="click"
+            disabled={busy}
+            run={plot}
+          >
+            {tr('刷新曲线', 'Refresh curve')}
+          </ActionButton>
+        </div>
+      );
+    if (state === 'empty')
+      return (
+        <div className="results-chart-empty">
+          {tr(
+            '所选时段内没有可显示的曲线数据（可能整段缺测或不在历史文件里）。',
+            'No curve data in the selected window (missing throughout or not in the history files).',
+          )}
+        </div>
+      );
+    if (state === 'loading')
+      return (
+        <div className="results-chart-empty">
+          {tr('正在读取真实模拟结果…', 'Reading simulation results…')}
+        </div>
+      );
+    if (state === 'idle')
+      return (
+        <div className="results-chart-empty">
+          {tr(
+            '点「绘制时序」读取当前变量与时段。',
+            'Select Plot series to read the current variable and window.',
+          )}
+        </div>
+      );
+    return (
+      <div className="results-chart-empty">
+        {tr('运行完成后，在这里查看曲线。', 'The simulation curve appears here after a run.')}
+      </div>
+    );
+  }
   return (
     <div className="page-stack results-page">
       <header className="results-heading">
@@ -1896,7 +2038,26 @@ export default function ResultsPage({
         </Notice>
       )}
       {exportNotice && <Notice>{exportNotice}</Notice>}
-      {!source && (
+      {runsLoading && (
+        <p role="status" className="muted">
+          {tr('正在读取运行清单…', 'Reading recorded runs…')}
+        </p>
+      )}
+      {!runsLoading && !!runsError && (
+        <Notice tone="error">
+          {runsError}
+          <ActionButton
+            action="result-runs-retry"
+            label={tr('重试读取运行清单', 'Retry reading recorded runs')}
+            kind="click"
+            disabled={busy}
+            run={() => setStationRetry((previous) => previous + 1)}
+          >
+            {tr('重试', 'Retry')}
+          </ActionButton>
+        </Notice>
+      )}
+      {!runsLoading && !runsError && !source && (
         <Notice>
           {tr('尚无已记录的运行。请先运行当前算例。', 'No recorded run. Run this case first.')}
         </Notice>
@@ -2012,7 +2173,7 @@ export default function ResultsPage({
                 labels={[tr('模拟', 'Simulation'), tr('观测', 'Observation')]}
                 theme={state.theme}
               />
-            ) : chart && seriesKey === selectedSeriesKey ? (
+            ) : curveStatus === 'ready' && chart ? (
               <ScienceChart
                 compact
                 data={chart}
@@ -2020,14 +2181,7 @@ export default function ResultsPage({
                 theme={state.theme}
               />
             ) : (
-              <div className="results-chart-empty">
-                {source
-                  ? tr('正在读取真实模拟结果…', 'Reading simulation results…')
-                  : tr(
-                      '运行完成后，在这里查看曲线。',
-                      'The simulation curve appears here after a run.',
-                    )}
-              </div>
+              curvePanelNotice(curveStatus)
             )}
             {isGridCatalog(catalog?.variables ?? []) && (
               <p className="results-sampling">
@@ -2608,13 +2762,13 @@ export default function ResultsPage({
                   setSeries(null);
                 }}
               >
-                {catalog?.variables
-                  .filter((v) => v.kind === 'series' && v.name !== 'time')
-                  .map((v) => (
-                    <option key={v.name} value={v.name}>
-                      {v.name} [{v.units}]
-                    </option>
-                  ))}
+                {/* 与总览/契约字段共用 chartVariables + variableOption：区域（grid）变量也能画区域平均，
+                    原来这里只筛 kind==='series'，时序页看不到区域变量，标签还是裸变量名。 */}
+                {chartVariables(catalog?.variables ?? []).map((item) => (
+                  <option key={item.name} value={item.name}>
+                    {variableOption(item, en)}
+                  </option>
+                ))}
               </Select>
             </Field>
           )}
@@ -2754,22 +2908,58 @@ export default function ResultsPage({
               )}
             </>
           )}
-          {chart && (tab === 'series' || tab === 'diagnostics') && (
-            <>
-              <ScienceChart
-                data={chart}
-                labels={Object.keys(displayedSeries!.vars)}
-                theme={state.theme}
-              />
-              <p>
-                {tr(
-                  `${displayedSeries!.n}/${displayedSeries!.source_n} 个点${displayedSeries!.downsampled ? '（已抽样）' : ''}`,
-                  `${displayedSeries!.n}/${displayedSeries!.source_n} points${displayedSeries!.downsampled ? ' (sampled)' : ''}`,
-                )}{' '}
-                · {tr('时间基准', 'Time basis')}: {timeBasisLabel(timeBasisOf(displayedSeries), en)}
-              </p>
-            </>
-          )}
+          {tab === 'diagnostics' &&
+            (diagnostic?.series && diagnostic.series.time.length && chart ? (
+              <>
+                <ScienceChart
+                  data={chart}
+                  labels={Object.keys(displayedSeries!.vars)}
+                  theme={state.theme}
+                />
+                <p>
+                  {tr(
+                    `${displayedSeries!.n}/${displayedSeries!.source_n} 个点${displayedSeries!.downsampled ? '（已抽样）' : ''}`,
+                    `${displayedSeries!.n}/${displayedSeries!.source_n} points${displayedSeries!.downsampled ? ' (sampled)' : ''}`,
+                  )}{' '}
+                  · {tr('时间基准', 'Time basis')}:
+                  {timeBasisLabel(timeBasisOf(displayedSeries), en)}
+                </p>
+              </>
+            ) : (
+              <div className="results-chart-empty">
+                {busy
+                  ? tr('正在统计能量通量残差…', 'Summarizing the energy flux residual…')
+                  : diagnostic
+                    ? tr(
+                        '诊断序列在所选时段内没有数据。',
+                        'The diagnostic series has no data in the window.',
+                      )
+                    : tr(
+                        '点「统计能量通量残差」后在这里看曲线。',
+                        'Run the residual summary to see its curve here.',
+                      )}
+              </div>
+            ))}
+          {tab === 'series' &&
+            (curveStatus === 'ready' && chart ? (
+              <>
+                <ScienceChart
+                  data={chart}
+                  labels={Object.keys(displayedSeries!.vars)}
+                  theme={state.theme}
+                />
+                <p>
+                  {tr(
+                    `${displayedSeries!.n}/${displayedSeries!.source_n} 个点${displayedSeries!.downsampled ? '（已抽样）' : ''}`,
+                    `${displayedSeries!.n}/${displayedSeries!.source_n} points${displayedSeries!.downsampled ? ' (sampled)' : ''}`,
+                  )}{' '}
+                  · {tr('时间基准', 'Time basis')}:
+                  {timeBasisLabel(timeBasisOf(displayedSeries), en)}
+                </p>
+              </>
+            ) : (
+              curvePanelNotice(curveStatus)
+            ))}
         </Card>
       )}
       {(tab === 'evaluation' || tab === 'comparison') && (
@@ -2782,14 +2972,6 @@ export default function ResultsPage({
                   `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'} (${timeBasisText}), skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
                 )}
               </p>
-              {comparisonResult && !comparisonFresh && (
-                <Notice tone="warning">
-                  {tr(
-                    '显示的是上一次比较结果；条件已改，重新运行比较后才能导出。',
-                    'Showing the previous comparison; conditions changed, re-run the comparison before exporting.',
-                  )}
-                </Notice>
-              )}
               <ActionButton
                 action="export-comparison-csv"
                 label={tr('导出比较指标 CSV', 'Export comparison metrics as CSV')}
@@ -2800,6 +2982,14 @@ export default function ResultsPage({
                 {tr('导出比较指标 CSV', 'Export comparison CSV')}
               </ActionButton>
             </div>
+          )}
+          {resultsPendingUpdate && (
+            <Notice tone="warning">
+              {tr(
+                '条件已更改，以下结果待更新；重新运行前导出保持禁用。',
+                'Conditions changed: the results below are pending update, and export stays disabled until they are re-run.',
+              )}
+            </Notice>
           )}
           <table>
             <thead>
