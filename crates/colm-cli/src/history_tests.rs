@@ -1297,3 +1297,262 @@ fn missing_gaps_follow_the_window_and_are_capped() {
         .iter()
         .all(|[_, end]| *end <= unix[unix.len() - 1] + 1800));
 }
+
+// ---------------------------------------------------------------- 按窗口逐记录读取（批次 3）
+
+/// 逐记录的格点 history：`f_grid(time, lat, lon)`，`lat` 坐标写进文件（区域平均要用）。
+fn write_grid_history_nc(
+    path: &std::path::Path,
+    minutes: &[f64],
+    lat: &[f64],
+    nlon: usize,
+    values: &[f64],
+) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", minutes.len()).unwrap();
+    file.add_dimension("lat", lat.len()).unwrap();
+    file.add_dimension("lon", nlon).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_values(minutes, ..).unwrap();
+    let mut latitudes = file.add_variable::<f64>("lat", &["lat"]).unwrap();
+    latitudes.put_values(lat, ..).unwrap();
+    let mut field = file
+        .add_variable::<f64>("f_grid", &["time", "lat", "lon"])
+        .unwrap();
+    field.put_values(values, ..).unwrap();
+}
+
+/// 剖面 history：`f_profile(time, patch)` —— 不是能画的时间序列，旧路径会报错。
+fn write_profile_history_nc(path: &std::path::Path, minutes: &[f64], patch: usize, values: &[f64]) {
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("time", minutes.len()).unwrap();
+    file.add_dimension("patch", patch).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_values(minutes, ..).unwrap();
+    let mut field = file
+        .add_variable::<f64>("f_profile", &["time", "patch"])
+        .unwrap();
+    field.put_values(values, ..).unwrap();
+}
+
+fn hourly_minutes(count: usize) -> Vec<f64> {
+    (0..count)
+        .map(|index| 56_802_240.0 + index as f64 * 60.0)
+        .collect()
+}
+
+#[test]
+fn series_window_reads_only_records_inside_the_window() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-scalar");
+    let minutes = hourly_minutes(100);
+    let values: Vec<f64> = (0..100).map(|index| index as f64).collect();
+    write_history_nc(
+        &d.join("Case_hist_2003-01.nc"),
+        &[("time", &minutes[..60]), ("f_scalar", &values[..60])],
+    );
+    write_history_nc(
+        &d.join("Case_hist_2003-02.nc"),
+        &[("time", &minutes[60..]), ("f_scalar", &values[60..])],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    // 旧路径：整场读；新路径：只读窗口。两者的窗口切片必须逐值一致。
+    let full = super::read_history_many(&files, &["time", "f_scalar"]).unwrap();
+    let unix = colm_hist::time::unix_seconds(&full["time"]);
+    let from = unix[20];
+    let to = unix[70];
+    let window =
+        super::read_series_window(&files, &["f_scalar"], &unix, Some(from), Some(to)).unwrap();
+
+    assert_eq!(window.window, (20..=70).collect::<Vec<usize>>());
+    assert_eq!(window.vars["f_scalar"], full["f_scalar"][20..=70].to_vec());
+    // 窗口 20..=70 共 51 条；单条记录只有 1 个值。
+    assert_eq!(window.stats.records, 51);
+    assert_eq!(window.stats.max_record_values, 1);
+    assert_eq!(window.stats.values, 51);
+    assert!(window.area_mean.is_empty());
+
+    // 抽稀：窗口局部下标与旧整场下标必须选出同一批时间点。
+    let old_indexes = super::series_indices_multi(
+        &unix,
+        &[full["f_scalar"].as_slice()],
+        Some(from),
+        Some(to),
+        Some(30),
+    );
+    let candidates = (0..window.window.len()).collect::<Vec<_>>();
+    let local_indexes =
+        super::sample_series(&candidates, &[window.vars["f_scalar"].as_slice()], Some(30));
+    let mapped = local_indexes
+        .iter()
+        .map(|&index| window.window[index])
+        .collect::<Vec<_>>();
+    assert_eq!(old_indexes, mapped);
+}
+
+#[test]
+fn series_window_area_means_grids_record_by_record() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-grid");
+    let minutes = hourly_minutes(100);
+    let lat = [-60.0, -20.0, 20.0, 60.0];
+    let nlon = 5usize;
+    let mut values = Vec::with_capacity(100 * lat.len() * nlon);
+    for record in 0..100 {
+        for (row, _) in lat.iter().enumerate() {
+            for column in 0..nlon {
+                values.push(record as f64 + row as f64 * 0.5 + column as f64 * 0.1);
+            }
+        }
+    }
+    let split = 50;
+    let cell = lat.len() * nlon;
+    write_grid_history_nc(
+        &d.join("Case_hist_2003-01.nc"),
+        &minutes[..split],
+        &lat,
+        nlon,
+        &values[..split * cell],
+    );
+    write_grid_history_nc(
+        &d.join("Case_hist_2003-02.nc"),
+        &minutes[split..],
+        &lat,
+        nlon,
+        &values[split * cell..],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let full = super::read_history_many(&files, &["time", "f_grid"]).unwrap();
+    let unix = colm_hist::time::unix_seconds(&full["time"]);
+    // 对照：旧整场区域平均的对应切片。
+    let expected = crate::history_grid::area_mean(&full["f_grid"], &lat, nlon);
+    // 窗口跨两个文件（文件边界在 50），确认逐文件 keep 偏移没有错位。
+    let window =
+        super::read_series_window(&files, &["f_grid"], &unix, Some(unix[45]), Some(unix[54]))
+            .unwrap();
+
+    assert_eq!(window.area_mean, ["f_grid"]);
+    assert_eq!(window.vars["f_grid"], expected[45..=54].to_vec());
+    assert_eq!(window.stats.records, 10);
+    // 单条记录是 4×5 的场，而不是整场（100×20）。
+    assert_eq!(window.stats.max_record_values, cell);
+    assert_eq!(window.stats.values, 10 * cell);
+}
+
+#[test]
+fn series_window_reads_main_and_tracer_streams_with_their_own_variables() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-streams");
+    let minutes = hourly_minutes(3);
+    write_history_nc(
+        &d.join("Case_hist_2003-01.nc"),
+        &[("time", &minutes), ("f_rnet", &[10.0, 20.0, 30.0])],
+    );
+    write_history_nc(
+        &d.join("Case_hist_tracer_2003-01.nc"),
+        &[
+            ("time", &minutes),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0, 5.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let unix = colm_hist::time::unix_seconds(&super::read_history(&files, "time").unwrap());
+    let window = super::read_series_window(
+        &files,
+        &["f_rnet", "f_methane_surf_flux_tot"],
+        &unix,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(window.vars["f_rnet"], [10.0, 20.0, 30.0]);
+    assert_eq!(window.vars["f_methane_surf_flux_tot"], [3.0, 4.0, 5.0]);
+    // 两个变量各自解码 3 条记录；统计是跨变量累计的。
+    assert_eq!(window.stats.records, 6);
+}
+
+#[test]
+fn series_window_refuses_streams_with_different_time_axes() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-stream-mismatch");
+    let main_minutes = hourly_minutes(2);
+    // tracer 的时间轴与主输出不同：旧实现同样拒绝拼接。
+    let tracer_minutes = [main_minutes[0], main_minutes[1] + 60.0];
+    write_history_nc(
+        &d.join("Case_hist_2003-01.nc"),
+        &[("time", &main_minutes), ("f_rnet", &[10.0, 20.0])],
+    );
+    write_history_nc(
+        &d.join("Case_hist_tracer_2003-01.nc"),
+        &[
+            ("time", &tracer_minutes),
+            ("f_methane_surf_flux_tot", &[3.0, 4.0]),
+        ],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let unix = colm_hist::time::unix_seconds(&super::read_history(&files, "time").unwrap());
+    let error = super::read_series_window(
+        &files,
+        &["f_rnet", "f_methane_surf_flux_tot"],
+        &unix,
+        None,
+        None,
+    )
+    .expect_err("streams with different time axes must not be concatenated");
+    assert!(
+        error
+            .to_string()
+            .contains("history streams use different time axes for"),
+        "{error}"
+    );
+}
+
+#[test]
+fn series_window_outside_the_requested_window_reads_nothing() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-empty");
+    let minutes = hourly_minutes(100);
+    let values: Vec<f64> = (0..100).map(|index| index as f64).collect();
+    write_history_nc(
+        &d.join("Case_hist_2003-01.nc"),
+        &[("time", &minutes[..60]), ("f_scalar", &values[..60])],
+    );
+    write_history_nc(
+        &d.join("Case_hist_2003-02.nc"),
+        &[("time", &minutes[60..]), ("f_scalar", &values[60..])],
+    );
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let full = super::read_history_many(&files, &["time", "f_scalar"]).unwrap();
+    let unix = colm_hist::time::unix_seconds(&full["time"]);
+    let window = super::read_series_window(
+        &files,
+        &["f_scalar"],
+        &unix,
+        Some(unix[0] - 7_200),
+        Some(unix[0] - 3_600),
+    )
+    .unwrap();
+    assert!(window.window.is_empty());
+    assert!(window.vars["f_scalar"].is_empty());
+    assert_eq!(window.stats.records, 0);
+    assert_eq!(window.stats.max_record_values, 0);
+}
+
+#[test]
+fn series_window_rejects_profile_variables_with_the_old_message() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let d = tmp("series-window-profile");
+    let minutes = hourly_minutes(4);
+    let values = vec![1.0; 4 * 3];
+    write_profile_history_nc(&d.join("Case_hist_2003-01.nc"), &minutes, 3, &values);
+    let files = super::history_files(d.parent().unwrap()).unwrap();
+    let unix = colm_hist::time::unix_seconds(&minutes);
+    let error = super::read_series_window(&files, &["f_profile"], &unix, None, None)
+        .expect_err("profile variables must not become time series");
+    let message = error.to_string();
+    assert!(
+        message.contains("is not a (time, patch) series"),
+        "{message}"
+    );
+    assert!(message.contains("12 values for 4 time steps"), "{message}");
+}

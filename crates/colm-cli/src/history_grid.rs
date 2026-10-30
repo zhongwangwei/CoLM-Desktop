@@ -95,7 +95,10 @@ pub(crate) fn grid_weights(files: &[PathBuf], name: &str) -> Result<Option<(Vec<
     Ok(Some((latitudes(&file, &lat_dim, nlat), nlon)))
 }
 
-/// `series` 遇到格点变量时：把它变成区域平均序列。不是格点变量就返回 `None`，由调用方照旧报错。
+/// 整场版本的区域平均：`series` 已改成逐记录读（`crate::read_series_window`），
+/// 生产路径不再整场读；只剩 `history_grid_tests` 拿它给逐记录结果做数值对账，
+/// 所以只在测试构建里编译。
+#[cfg(test)]
 pub(crate) fn area_mean_series(
     files: &[PathBuf],
     name: &str,

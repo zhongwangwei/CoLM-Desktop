@@ -5949,18 +5949,32 @@ fn window_indices(unix: &[i64], from: Option<i64>, to: Option<i64>) -> Vec<usize
 
 /// 完整时序里的连续缺测段，Unix 秒 `[start, end)`；`end` 用缺口后的第一条记录，
 /// 末尾缺口用最后一条记录 + 一个步长（没有更多信息可推断真实结束时刻）。
+///
+/// `series` 改成只保留窗口内的值后，生产路径用 [`missing_ranges_in_window`] 直接算；
+/// 这个整场入口只剩 `history_tests` 的缺测段测试在用，故只在测试构建里编译。
+#[cfg(test)]
 fn missing_ranges(unix: &[i64], values: &[f64], window: &[usize]) -> (Vec<[i64; 2]>, bool) {
+    let window_unix = window.iter().map(|&index| unix[index]).collect::<Vec<_>>();
+    let window_values = window
+        .iter()
+        .map(|&index| values.get(index).copied().unwrap_or(f64::NAN))
+        .collect::<Vec<_>>();
+    missing_ranges_in_window(&window_unix, &window_values)
+}
+
+/// [`missing_ranges`] 的窗口局部版本：`series` 现在只有窗口内的值，不再保留整场数组。
+fn missing_ranges_in_window(window_unix: &[i64], values: &[f64]) -> (Vec<[i64; 2]>, bool) {
     let mut ranges: Vec<[i64; 2]> = Vec::new();
     let mut truncated = false;
     let mut open: Option<usize> = None;
-    for &index in window {
+    for index in 0..window_unix.len() {
         let finite = values.get(index).is_some_and(|value| value.is_finite());
         if finite {
             if let Some(first) = open.take() {
                 if ranges.len() == MAX_GAP_RANGES_PER_SERIES {
                     truncated = true;
                 } else {
-                    ranges.push([unix[first], unix[index]]);
+                    ranges.push([window_unix[first], window_unix[index]]);
                 }
             }
         } else if open.is_none() {
@@ -5968,17 +5982,18 @@ fn missing_ranges(unix: &[i64], values: &[f64], window: &[usize]) -> (Vec<[i64; 
         }
     }
     if let Some(first) = open {
-        let last = *window.last().expect("window holds the first missing index");
-        let step = window
+        // `open` 只在遍历到某个下标时被置上，所以窗口至少有一条记录。
+        let last = window_unix.len() - 1;
+        let step = window_unix
             .len()
             .checked_sub(2)
-            .map(|previous| unix[last] - unix[window[previous]])
+            .map(|previous| window_unix[last] - window_unix[previous])
             .filter(|step| *step > 0)
             .unwrap_or(1);
         if ranges.len() == MAX_GAP_RANGES_PER_SERIES {
             truncated = true;
         } else {
-            ranges.push([unix[first], unix[last].saturating_add(step)]);
+            ranges.push([window_unix[first], window_unix[last].saturating_add(step)]);
         }
     }
     (ranges, truncated)
@@ -6003,11 +6018,20 @@ fn series_indices_multi(
     max_points: Option<usize>,
 ) -> Vec<usize> {
     let candidates = window_indices(unix, from, to);
+    sample_series(&candidates, values, max_points)
+}
+
+/// 在已选好的候选下标上按极值抽稀：每个桶保留每条序列的最小/最大点。
+///
+/// `candidates` 是 `values` 的下标（升序）。抽稀只决定"画哪些点"，指标仍来自完整配对；
+/// `series` 的窗口路径把候选换成窗口内局部下标，桶算法本身不变，所以两条路径选出的
+/// 时间点逐值一致。
+fn sample_series(candidates: &[usize], values: &[&[f64]], max_points: Option<usize>) -> Vec<usize> {
     let Some(limit) = max_points.map(|value| value.max(3)) else {
-        return candidates;
+        return candidates.to_vec();
     };
     if candidates.len() <= limit {
-        return candidates;
+        return candidates.to_vec();
     }
     // Reserve min/max slots for every requested variable in each bucket. Most GUI
     // requests contain one series; diagnostics request several, and choosing extrema
@@ -6049,10 +6073,312 @@ fn series_indices_multi(
     selected
 }
 
+/// `series` 的窗口读取结果：只保留窗口内的记录，顺序与 [`window_indices`] 一致。
+///
+/// 旧实现先 `read_history_many` 把整年/全球数组读进内存再切片：全球 0.25° 逐时
+/// 一个月的场就是 38 GB，而结果页一次只画一个窗口（默认 2400 点）。这里改成
+/// 逐记录解码，窗口外的记录连 `_FillValue` 转换都不做。
+#[derive(Debug)]
+pub(crate) struct SeriesWindow {
+    /// 窗口在完整时间轴上的下标（升序；`window_indices` 只按上下界过滤，因此连续）。
+    pub window: Vec<usize>,
+    /// 每个变量的窗口内值，长度等于 `window`；格点变量已换成逐记录区域平均。
+    pub vars: std::collections::BTreeMap<String, Vec<f64>>,
+    /// 这些变量是逐记录纬度余弦区域平均，不是单点序列。
+    pub area_mean: Vec<String>,
+    /// 真正解码了多少记录；只有测试读它（确认窗口外没有被读），生产路径不消费。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub stats: RecordReadStats,
+}
+
+/// 一个变量的窗口内结果，或它为什么不能当序列画。
+enum WindowVariable {
+    Decoded {
+        values: Vec<f64>,
+        area_mean: bool,
+    },
+    /// 数值个数（旧路径的长度检查口径）；由调用方按变量顺序报同一条错。
+    NotASeries {
+        values: usize,
+    },
+}
+
+/// 按窗口逐记录读取 `series` 请求的变量，格点变量逐记录算区域平均。
+///
+/// `unix` 是主 history stream 的完整时间轴（`series` 的 x 轴口径，也是 `from/to`
+/// 的窗口口径，闭区间）。变量可以分布在不同 stream（主/tracer/unitcat），但每个
+/// stream 的时间轴必须与 `unix` 一致 —— 不一致时沿用旧 `read_history_many` 的报错，
+/// 不能把两条时间轴拼成一条曲线。
+pub(crate) fn read_series_window(
+    files: &[PathBuf],
+    names: &[&str],
+    unix: &[i64],
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<SeriesWindow> {
+    let window = window_indices(unix, from, to);
+    // `record_in_window` 用首尾比较代替逐条查找，前提是窗口是连续下标区间
+    // （`window_indices` 只按上下界过滤递增时间轴）。以后若把窗口改成跳选，
+    // 这里必须先炸，不能静默漏读中间记录。
+    debug_assert!(window.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    let first_file = files.first().context("no history files")?;
+    // 与旧 `read_history_many_at` 一样：按 `history_streams` 顺序、只看每个 stream
+    // 首文件是否声明该变量；同名变量只认第一个包含它的 stream。
+    let ordered = names
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut found = std::collections::BTreeSet::new();
+    let mut plans: Vec<(Vec<PathBuf>, Vec<&str>)> = Vec::new();
+    for stream in history_streams(files) {
+        let first = stream.first().expect("empty streams were removed");
+        let file =
+            netcdf::open(first).with_context(|| format!("cannot open {}", first.display()))?;
+        let stream_vars = ordered
+            .iter()
+            .copied()
+            .filter(|name| !found.contains(*name) && file.variable(name).is_some())
+            .collect::<Vec<_>>();
+        if stream_vars.is_empty() {
+            continue;
+        }
+        found.extend(stream_vars.iter().copied());
+        plans.push((stream, stream_vars));
+    }
+    if let Some(missing) = ordered.iter().find(|name| !found.contains(**name)) {
+        bail!("{} has no variable {}", first_file.display(), missing);
+    }
+
+    let mut stats = RecordReadStats::default();
+    let mut outcomes = std::collections::BTreeMap::<String, WindowVariable>::new();
+    for (stream, stream_vars) in &plans {
+        let counts = stream_time_counts(stream, unix, &stream_vars.join(", "))?;
+        let offsets = stream_file_offsets(&counts);
+        for name in stream_vars {
+            let outcome = read_window_variable(
+                files,
+                stream,
+                &offsets,
+                name,
+                &window,
+                unix.len(),
+                &mut stats,
+            )?;
+            outcomes.insert((*name).to_owned(), outcome);
+        }
+    }
+
+    // 按变量顺序（`cmd_series` 已排序）复现旧的逐变量检查与 area_mean 列表顺序：
+    // 旧路径整场读完后先按这个顺序把格点场换成区域平均，再按同一顺序报
+    // "not a (time, patch) series"。
+    let mut vars = std::collections::BTreeMap::new();
+    let mut area_mean = Vec::new();
+    for name in &ordered {
+        match outcomes
+            .remove(*name)
+            .expect("every requested name was assigned to a stream")
+        {
+            WindowVariable::Decoded {
+                values,
+                area_mean: is_area_mean,
+            } => {
+                if is_area_mean {
+                    area_mean.push((*name).to_owned());
+                }
+                vars.insert((*name).to_owned(), values);
+            }
+            WindowVariable::NotASeries { values } => bail!(
+                "{name} has {values} values for {} time steps; it is not a (time, patch) series",
+                unix.len()
+            ),
+        }
+    }
+    Ok(SeriesWindow {
+        window,
+        vars,
+        area_mean,
+        stats,
+    })
+}
+
+/// 一个 stream 里每个文件的记录数；同时校验拼出来的时间轴与主时间轴逐值一致。
+fn stream_time_counts(stream: &[PathBuf], unix: &[i64], label: &str) -> Result<Vec<usize>> {
+    let mut counts = Vec::with_capacity(stream.len());
+    let mut offset = 0usize;
+    for path in stream {
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let time = read_file_1d(&file, path, "time")?;
+        counts.push(time.len());
+        let expected = unix.get(offset..offset + time.len());
+        let same = expected
+            .is_some_and(|expected| colm_hist::time::unix_seconds(&time).as_slice() == expected);
+        ensure!(same, "history streams use different time axes for {label}");
+        offset += time.len();
+    }
+    ensure!(
+        offset == unix.len(),
+        "history streams use different time axes for {label}"
+    );
+    Ok(counts)
+}
+
+/// 每个文件的第一条记录在 stream 时间轴上的全局下标。
+fn stream_file_offsets(counts: &[usize]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(counts.len());
+    let mut total = 0usize;
+    for count in counts {
+        offsets.push(total);
+        total += count;
+    }
+    offsets
+}
+
+/// 这个文件里哪些本地记录落在窗口内。
+///
+/// `window` 由 [`window_indices`] 生成，而它只按上下界过滤递增时间轴，所以窗口是
+/// 连续区间 —— 比较首尾即可，不必对每条记录做一次查找。
+fn record_in_window(window: &[usize], offset: usize) -> impl Fn(usize) -> bool + '_ {
+    let bounds = window.first().zip(window.last());
+    move |index| {
+        let Some((first, last)) = bounds else {
+            return false;
+        };
+        let global = offset + index;
+        global >= *first && global <= *last
+    }
+}
+
+/// 判定变量是不是格点场，并把窗口内的值逐记录解码出来。
+///
+/// 标量序列（每条记录一个值）直接取 `record[0]`；`(time, lat, lon)` 场逐记录算
+/// 纬度余弦区域平均（与整场 [`history_grid::area_mean`] 数值一致）。其它多维变量
+/// （剖面等）保持旧行为：不画、报 "not a (time, patch) series"。
+fn read_window_variable(
+    files: &[PathBuf],
+    stream: &[PathBuf],
+    offsets: &[usize],
+    name: &str,
+    window: &[usize],
+    time_steps: usize,
+    stats: &mut RecordReadStats,
+) -> Result<WindowVariable> {
+    let first =
+        netcdf::open(&stream[0]).with_context(|| format!("cannot open {}", stream[0].display()))?;
+    let dimensions = first
+        .variable(name)
+        .with_context(|| format!("{} has no variable {name}", stream[0].display()))?
+        .dimensions()
+        .iter()
+        .map(|dimension| (dimension.name(), dimension.len()))
+        .collect::<Vec<_>>();
+    drop(first);
+    let grid = history_grid::grid_shape(&dimensions);
+
+    // 只读维度元数据：每条记录的元素数、总记录数、总元素数。窗口外的记录不在这里解码。
+    let mut records = 0usize;
+    let mut record_lengths = Vec::with_capacity(stream.len());
+    let mut total_values = 0usize;
+    for path in stream {
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{} has no variable {name}", path.display()))?;
+        let dims = variable.dimensions();
+        let Some(time) = dims.first() else {
+            bail!("{name} in {} has no dimensions", path.display());
+        };
+        let record_length = dims[1..]
+            .iter()
+            .map(|dimension| dimension.len())
+            .product::<usize>();
+        records += time.len();
+        record_lengths.push(record_length);
+        total_values = total_values.saturating_add(record_length.saturating_mul(time.len()));
+    }
+
+    match grid {
+        Some(_) => {
+            let Some((lat, nlon)) = history_grid::grid_weights(files, name)? else {
+                bail!("{name} is not a (time, lat, lon) grid variable");
+            };
+            let cell = lat.len() * nlon;
+            ensure!(
+                record_lengths.iter().all(|length| *length == cell),
+                "{name} does not have exactly one {}×{nlon} grid per time step",
+                lat.len()
+            );
+            if records != time_steps {
+                return Ok(WindowVariable::NotASeries { values: records });
+            }
+            let values = read_window_records(stream, offsets, name, window, stats, |record| {
+                history_grid::area_mean(record, &lat, nlon)[0]
+            })?;
+            Ok(WindowVariable::Decoded {
+                values,
+                area_mean: true,
+            })
+        }
+        None if record_lengths.iter().all(|length| *length == 1) => {
+            if records != time_steps {
+                return Ok(WindowVariable::NotASeries {
+                    values: total_values,
+                });
+            }
+            let values =
+                read_window_records(stream, offsets, name, window, stats, |record| record[0])?;
+            Ok(WindowVariable::Decoded {
+                values,
+                area_mean: false,
+            })
+        }
+        None => Ok(WindowVariable::NotASeries {
+            values: total_values,
+        }),
+    }
+}
+
+/// 逐文件、逐记录把窗口内的值取出来；`value_of` 决定一条记录变成一个数还是一个区域平均。
+fn read_window_records<F>(
+    stream: &[PathBuf],
+    offsets: &[usize],
+    name: &str,
+    window: &[usize],
+    stats: &mut RecordReadStats,
+    mut value_of: F,
+) -> Result<Vec<f64>>
+where
+    F: FnMut(&[f64]) -> f64,
+{
+    let mut values = Vec::with_capacity(window.len());
+    if window.is_empty() {
+        return Ok(values);
+    }
+    for (path, offset) in stream.iter().zip(offsets) {
+        let keep = record_in_window(window, *offset);
+        let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let file_stats = read_file_records(&file, path, name, keep, |_, record| {
+            values.push(value_of(record));
+            Ok(())
+        })?;
+        stats.merge(file_stats);
+    }
+    ensure!(
+        values.len() == window.len(),
+        "read {} window records for {name}, expected {}",
+        values.len(),
+        window.len()
+    );
+    Ok(values)
+}
+
 /// 把 history 里的若干条序列导出成 JSON，供 GUI 画图。
 ///
 /// GUI 进程**不链接 netcdf** —— 让它去读 history 会把整个 HDF5 拖进窗口进程。
 /// 所以数值由这里（sidecar）读出来，以 JSON 过边界。
+///
+/// 读法：先用小变量 `time` 拿完整时间轴，再按 `from/to` 窗口逐记录解码
+/// （[`read_series_window`]），格点变量逐记录算区域平均。旧实现整场读再切片，
+/// 小窗口也会把全年/全球数组读进内存（审计 P2-8）。
 ///
 /// 时间轴给的是 **Unix 秒**，因为 uPlot 的 x 轴默认就是这个。但注意
 /// PLUMBER2 是**地方时**（算例里 `greenwich = .false.`），所以这些秒数是
@@ -6084,60 +6410,52 @@ fn cmd_series(
     if names.contains(&"time") {
         bail!("time is always returned as the x axis and must not be listed in --vars");
     }
-    let mut wanted = vec!["time"];
-    wanted.extend(names.iter().copied());
-    let mut raw = read_history_many(&hists, &wanted)?;
-    let t_min = raw.remove("time").expect("time was requested");
-    // 换算住在 colm-hist::time —— 那个模块已经拥有「两种时间轴」这件事，
-    // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
-    let unix = colm_hist::time::unix_seconds(&t_min);
-
-    // 格点变量（区域模拟）画区域平均：按纬度余弦加权，缺测不参与。
-    let mut area_mean = Vec::new();
-    for v in &names {
-        if raw[*v].len() != unix.len() {
-            if let Some(mean) = history_grid::area_mean_series(&hists, v, &raw[*v])? {
-                raw.insert((*v).to_owned(), mean);
-                area_mean.push((*v).to_owned());
-            }
-        }
-    }
-    for v in &names {
-        let values = &raw[*v];
-        if values.len() != unix.len() {
-            // 剖面变量是 (time, patch, soil) 之类，长度是时间步的数倍。
-            // 它们要另一种画法，本轮不做 —— 但要说清楚而不是画出一条乱线。
-            bail!(
-                "{v} has {} values for {} time steps; it is not a (time, patch) series",
-                values.len(),
-                unix.len()
-            );
-        }
-    }
-    let series = raw.values().map(Vec::as_slice).collect::<Vec<_>>();
-    let indexes = series_indices_multi(&unix, &series, from, to, max_points);
-    let window = window_indices(&unix, from, to);
-    let source_n = window.len();
+    // 全局时间轴只读一次小变量 `time`（整条轴很小）；变量本体按窗口逐记录解码，
+    // 窗口外的一年/一个全球场不再进内存。
+    let time = read_history(&hists, "time")?;
+    let unix = colm_hist::time::unix_seconds(&time);
+    let series_window = read_series_window(&hists, &names, &unix, from, to)?;
+    let source_n = series_window.window.len();
+    // 抽稀在窗口局部下标上做：候选就是 `0..source_n`，桶算法与旧路径完全相同，
+    // 选出的极值点逐值一致，只是不再持有整场数组。
+    let candidates = (0..source_n).collect::<Vec<_>>();
+    let indexes = {
+        let series = names
+            .iter()
+            .map(|name| series_window.vars[*name].as_slice())
+            .collect::<Vec<_>>();
+        sample_series(&candidates, &series, max_points)
+    };
+    let window_unix = series_window
+        .window
+        .iter()
+        .map(|&index| unix[index])
+        .collect::<Vec<_>>();
     // 缺测段按完整时序算（不是抽稀后的 2400 点）：否则 2400 点上限一压，
     // 中间连续缺测就只剩两侧有效点直接连线，图上会凭空出现一段连续曲线。
     let mut gaps = std::collections::BTreeMap::new();
     let mut gaps_truncated = false;
-    for v in &names {
-        let (ranges, truncated) = missing_ranges(&unix, &raw[*v], &window);
+    for name in &names {
+        let (ranges, truncated) =
+            missing_ranges_in_window(&window_unix, &series_window.vars[*name]);
         gaps_truncated |= truncated;
         if !ranges.is_empty() {
-            gaps.insert((*v).to_owned(), ranges);
+            gaps.insert((*name).to_owned(), ranges);
         }
     }
     let basis = time_basis::resolve(case)?;
     let body = SeriesBody {
-        area_mean,
+        area_mean: series_window.area_mean,
         files: hists.len(),
         source_n,
         n: indexes.len(),
         downsampled: indexes.len() < source_n,
-        time: indexes.iter().map(|&index| unix[index]).collect(),
-        vars: raw
+        time: indexes
+            .iter()
+            .map(|&index| unix[series_window.window[index]])
+            .collect(),
+        vars: series_window
+            .vars
             .into_iter()
             .map(|(name, values)| {
                 let selected = indexes
