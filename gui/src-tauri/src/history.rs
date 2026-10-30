@@ -282,6 +282,7 @@ fn assistant_ui_event(
                     | "export-report"
                     | "export-comparison-csv"
                     | "result-fetch"
+                    | "result-fetch-all"
                     | "resource-build"
                     | "resource-save"
                     | "resource-save-case"
@@ -1206,6 +1207,7 @@ mod tests {
             "export-series-data",
             "export-report",
             "result-fetch",
+            "result-fetch-all",
             "resource-build",
             "resource-workspace-submit",
             "version-fix-drift",

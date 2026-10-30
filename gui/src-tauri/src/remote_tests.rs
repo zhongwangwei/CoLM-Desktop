@@ -1185,8 +1185,32 @@ fn a_server_run_is_read_on_the_server_until_its_results_are_fetched() {
     assert_eq!(
         results_on_server(&case),
         None,
-        "fetched results are read locally"
+        "fully fetched results are read locally"
     );
+    // 部分取回本机只有所选变量与月份：继续在服务器上读，不能当完整本机结果（审计 P2-7）。
+    std::fs::write(
+        run.join(".colm-fetch.json"),
+        r#"{"vars":"TLAI","from":"2011-01","to":"2011-01","files":1,"scientific_verified":false}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        results_on_server(&case).as_deref(),
+        Some("tianhe"),
+        "a partial fetch still reads the server"
+    );
+    // 本地目录无效（history 里没有 .nc，例如取回中断过）也回服务器读。
+    std::fs::remove_file(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-01.nc")).unwrap();
+    std::fs::write(run.join("out/AU-Cpr/history/broken.txt"), "").unwrap();
+    assert_eq!(results_on_server(&case).as_deref(), Some("tianhe"));
+    std::fs::remove_file(run.join(".colm-fetch.json")).unwrap();
+    assert_eq!(
+        results_on_server(&case).as_deref(),
+        Some("tianhe"),
+        "no marker but no .nc is still an invalid local directory"
+    );
+    // 重新完整取回后读本机。
+    std::fs::write(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-02.nc"), "").unwrap();
+    assert_eq!(results_on_server(&case), None);
     std::fs::remove_dir_all(&run).unwrap();
 }
 
@@ -1249,6 +1273,14 @@ fn evaluation_runs_where_both_the_results_and_the_observation_are() {
     std::fs::write(dir.join("out/US-MMS/history/h.nc"), "").unwrap();
     assert_eq!(evaluation_server(case, local_obs.to_str().unwrap()), None);
     assert_eq!(evaluation_server(case, server_obs).as_deref(), Some("7920"));
+    // 部分取回：本机只有所选变量与月份，观测在本机也去服务器算（审计 P2-7）。
+    std::fs::write(dir.join(".colm-fetch.json"), r#"{"vars":"Qle","files":1}"#).unwrap();
+    assert_eq!(
+        evaluation_server(case, local_obs.to_str().unwrap()).as_deref(),
+        Some("7920"),
+        "partial local results are evaluated on the server"
+    );
+    std::fs::remove_file(dir.join(".colm-fetch.json")).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

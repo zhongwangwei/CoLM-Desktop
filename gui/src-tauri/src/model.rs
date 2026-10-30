@@ -713,14 +713,25 @@ fn case_run_rows(source: &Path, ledger: &colm_history::History) -> Result<Vec<Va
             row["status"] = json!(event.status);
             row["needs_reconciliation"] = json!(operation.needs_reconciliation);
             row["finished_ms"] = json!(operation.finished_ms);
-            // 服务器运行在提交时就建好了本机运行目录（只有配置），结果要取回才有。结果页据此提示去取回，
-            // 而不是去读一个还没有的 history（天河 2026-10-19：AU-Cpr 跑完了，结果页报 "no history"）。
-            if let Some(run_case) = row["run_case"].as_str().map(PathBuf::from) {
+            // 每个有运行目录的记录都带上本机结果状态：结果页要区分“没取回 / 本地目录无效 / 只取回
+            // 一部分 / 完整”。以前只按 history 非空判断，`remote-fetch --vars/--from/--to` 的部分取回
+            // 也被算成完整本机结果，图上静默缺变量、缺月份（审计 P2-7）。
+            if let Some(run_case) = row["run_case"]
+                .as_str()
+                .filter(|run_case| !run_case.is_empty())
+                .map(PathBuf::from)
+            {
+                let local = local_results(&run_case);
+                let complete = local.status == "complete";
+                row["local_results"] = json!(local);
+                // 服务器运行在提交时就建好了本机运行目录（只有配置），结果要取回才有。结果页据此提示去取回，
+                // 而不是去读一个还没有的 history（天河 2026-10-19：AU-Cpr 跑完了，结果页报 "no history"）。
                 if event.location.as_deref() == Some("remote")
                     || run_case.join(".colm-remote.json").is_file()
                 {
                     row["server"] = json!(event.host);
-                    row["outputs_local"] = json!(has_local_history(&run_case));
+                    // 旧前端只认这个布尔值：部分取回不再算“本机有完整结果”，提示去把结果取全。
+                    row["outputs_local"] = json!(complete);
                 }
             }
             rows.push(row);
@@ -747,29 +758,10 @@ pub async fn model_project_runs(dirs: Vec<String>) -> Result<Vec<Value>, String>
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| source.display().to_string());
-        let Ok(mut runs) = case_run_rows(&source, &ledger) else {
+        let Ok(runs) = case_run_rows(&source, &ledger) else {
             continue;
         };
-        runs.sort_by_key(|row| std::cmp::Reverse(row["finished_ms"].as_i64().unwrap_or(0)));
-        for mut row in runs.into_iter().take(20) {
-            if row["legacy"].as_bool() == Some(true)
-                || row["needs_reconciliation"].as_bool() == Some(true)
-            {
-                continue;
-            }
-            if !matches!(row["status"].as_str(), Some("succeeded" | "completed")) {
-                continue;
-            }
-            if row["run_case"].as_str().is_none_or(str::is_empty) {
-                continue;
-            }
-            // 只跑到预处理的运行没有模拟结果，不能进多站点比较。
-            if matches!(
-                row["provenance"]["stage"].as_str(),
-                Some("mksrfdata" | "mkinidata")
-            ) {
-                continue;
-            }
+        for mut row in comparable_run_rows(runs) {
             row["case_dir"] = json!(source.display().to_string());
             row["case_name"] = json!(case_name);
             rows.push(row);
@@ -778,14 +770,153 @@ pub async fn model_project_runs(dirs: Vec<String>) -> Result<Vec<Value>, String>
     rows.sort_by_key(|row| std::cmp::Reverse(row["finished_ms"].as_i64().unwrap_or(0)));
     Ok(rows)
 }
-/// 本机运行目录里有没有取回来的历史输出（`out/<算例>/history/` 里至少一个文件）。
-pub(crate) fn has_local_history(run_case: &Path) -> bool {
-    std::fs::read_dir(run_case.join("out")).is_ok_and(|cases| {
-        cases.flatten().any(|case| {
-            std::fs::read_dir(case.path().join("history"))
-                .is_ok_and(|mut files| files.next().is_some())
-        })
-    })
+
+/// 多站点比较的候选运行：先剔掉不能比较的，再按最近 20 条截断。
+///
+/// 顺序不能反：以前先 `take(20)` 再过滤，站点最近 20 条全是失败/只跑到预处理的运行时，
+/// 更早的成功运行一条都进不了比较清单，比较页看起来“这个站点没有可用结果”（审计 §二）。
+fn comparable_run_rows(mut rows: Vec<Value>) -> Vec<Value> {
+    rows.retain(|row| {
+        row["legacy"].as_bool() != Some(true)
+            && row["needs_reconciliation"].as_bool() != Some(true)
+            && matches!(row["status"].as_str(), Some("succeeded" | "completed"))
+            && row["run_case"]
+                .as_str()
+                .is_some_and(|run_case| !run_case.is_empty())
+            // 只跑到预处理的运行没有模拟结果，不能进多站点比较。
+            && !matches!(
+                row["provenance"]["stage"].as_str(),
+                Some("mksrfdata" | "mkinidata")
+            )
+    });
+    rows.sort_by_key(|row| std::cmp::Reverse(row["finished_ms"].as_i64().unwrap_or(0)));
+    rows.truncate(20);
+    rows
+}
+
+/// 本机“只取回了一部分”的标记，由 `colm-cli remote-fetch --vars/--from/--to` 写入；完整取回时删掉。
+const FETCH_MARK: &str = ".colm-fetch.json";
+
+/// 一个运行目录在本机的结果状态（结果页据此决定读本机还是读服务器）。
+///
+/// `files` 是本机实际数到的 `.nc` 数，不是取回标记里记的那次取回数——本机还可能留着更早取回的
+/// 别的月份/变量的文件。partial 的 `vars/from/to/scientific_verified` 来自取回标记，标记缺键时按
+/// `None`/`false`（旧版本标记没有 `scientific_verified`）。
+#[derive(serde::Serialize)]
+pub(crate) struct LocalResults {
+    pub(crate) status: &'static str,
+    pub(crate) files: usize,
+    pub(crate) vars: Option<Vec<String>>,
+    pub(crate) from: Option<String>,
+    pub(crate) to: Option<String>,
+    pub(crate) scientific_verified: Option<bool>,
+}
+
+/// `run_case/out/<算例>/history` 一层里的普通 `.nc` 文件数；`found` 表示至少存在一个 history 目录。
+///
+/// 只看一层：history 下的子目录不是历史输出（`colm-cli` 只往这一层写文件）。
+fn history_inventory(run_case: &Path) -> (bool, usize) {
+    let mut found = false;
+    let mut files = 0;
+    let Ok(cases) = std::fs::read_dir(run_case.join("out")) else {
+        return (false, 0);
+    };
+    for case in cases.flatten() {
+        let history = case.path().join("history");
+        if !history.is_dir() {
+            continue;
+        }
+        found = true;
+        let Ok(entries) = std::fs::read_dir(&history) else {
+            continue;
+        };
+        files += entries
+            .flatten()
+            .filter(|entry| {
+                let path = entry.path();
+                path.is_file() && path.extension().is_some_and(|extension| extension == "nc")
+            })
+            .count();
+    }
+    (found, files)
+}
+
+/// 取回标记只在部分取回时存在。文件在但读不出来也按部分取回处理：宁可多提示“本机数据不全”，
+/// 不能把可能缺变量、缺月份的结果报成完整（审计 P2-7 处理的正是这个方向）。
+fn fetch_marker(run_case: &Path) -> Option<Value> {
+    let path = run_case.join(FETCH_MARK);
+    if !path.is_file() {
+        return None;
+    }
+    Some(
+        std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(Value::Null),
+    )
+}
+
+/// `remote-fetch --vars` 在标记里是逗号分隔的字符串；也接受数组（手工改过的标记）。
+fn fetch_var_names(marker: &Value) -> Option<Vec<String>> {
+    match marker.get("vars")? {
+        Value::String(text) => Some(
+            text.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        Value::Array(names) => Some(
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+pub(crate) fn local_results(run_case: &Path) -> LocalResults {
+    let (found, files) = history_inventory(run_case);
+    let Some(marker) = fetch_marker(run_case) else {
+        // 没有取回标记：有 .nc 就是完整本机结果；history 目录在但没 .nc（取回/运行中断过）
+        // 是无效目录；两者都没有才是从未取回（服务器上跑完还没取回的本机运行目录只有配置）。
+        let status = if files > 0 {
+            "complete"
+        } else if found {
+            "invalid"
+        } else {
+            "missing"
+        };
+        return LocalResults {
+            status,
+            files,
+            vars: None,
+            from: None,
+            to: None,
+            scientific_verified: None,
+        };
+    };
+    // 标记在但一个 .nc 都没有：取回/目录中断过，同样是无效目录，不能当“从未取回”去提示。
+    if files == 0 {
+        return LocalResults {
+            status: "invalid",
+            files,
+            vars: None,
+            from: None,
+            to: None,
+            scientific_verified: None,
+        };
+    }
+    LocalResults {
+        status: "partial",
+        files,
+        vars: fetch_var_names(&marker),
+        from: marker["from"].as_str().map(str::to_owned),
+        to: marker["to"].as_str().map(str::to_owned),
+        scientific_verified: Some(marker["scientific_verified"].as_bool().unwrap_or(false)),
+    }
 }
 
 /// Existing result/sidebar consumers retain their envelope while runs come from the ledger.
@@ -1036,15 +1167,147 @@ mod tests {
         let run = std::env::temp_dir().join(format!("colm-local-history-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&run);
         std::fs::create_dir_all(&run).unwrap();
-        assert!(!has_local_history(&run), "configuration only, as submitted");
+        assert_eq!(
+            local_results(&run).status,
+            "missing",
+            "configuration only, as submitted"
+        );
         std::fs::create_dir_all(run.join("out/AU-Cpr/history")).unwrap();
-        assert!(
-            !has_local_history(&run),
+        assert_eq!(
+            local_results(&run).status,
+            "invalid",
             "an empty history folder is not a result"
         );
         std::fs::write(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-01.nc"), "").unwrap();
-        assert!(has_local_history(&run));
+        let complete = local_results(&run);
+        assert_eq!(complete.status, "complete");
+        assert_eq!(complete.files, 1);
+        assert_eq!(complete.vars, None, "a full fetch leaves no selection");
+        // 部分取回留标记：状态是 partial，带取回时选的变量与月份（审计 P2-7）。
+        std::fs::write(
+            run.join(".colm-fetch.json"),
+            r#"{"vars":"TLAI,TSTOM","from":"2011-01","to":"2011-03","files":1,"scientific_verified":false}"#,
+        )
+        .unwrap();
+        let partial = local_results(&run);
+        assert_eq!(partial.status, "partial");
+        assert_eq!(partial.files, 1);
+        assert_eq!(
+            partial.vars,
+            Some(vec!["TLAI".to_string(), "TSTOM".to_string()])
+        );
+        assert_eq!(partial.from.as_deref(), Some("2011-01"));
+        assert_eq!(partial.to.as_deref(), Some("2011-03"));
+        assert_eq!(partial.scientific_verified, Some(false));
+        // 前端按这些字段名读（`Run.local_results`）；名字变了就是破坏 IPC 契约。
+        assert_eq!(
+            serde_json::to_value(&partial).unwrap(),
+            json!({
+                "status": "partial",
+                "files": 1,
+                "vars": ["TLAI", "TSTOM"],
+                "from": "2011-01",
+                "to": "2011-03",
+                "scientific_verified": false,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&complete).unwrap(),
+            json!({
+                "status": "complete",
+                "files": 1,
+                "vars": null,
+                "from": null,
+                "to": null,
+                "scientific_verified": null,
+            })
+        );
+        // 旧版标记没有这些键：缺键按 None/false，不能把解析失败当完整结果。
+        std::fs::write(run.join(".colm-fetch.json"), "{}").unwrap();
+        let sparse = local_results(&run);
+        assert_eq!(sparse.status, "partial");
+        assert_eq!(sparse.vars, None);
+        assert_eq!(sparse.from, None);
+        assert_eq!(sparse.to, None);
+        assert_eq!(sparse.scientific_verified, Some(false));
+        // 标记在、.nc 没了（取回中断/目录被清空）：无效目录，不是“从未取回”。
+        std::fs::remove_file(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-01.nc")).unwrap();
+        assert_eq!(local_results(&run).status, "invalid");
         std::fs::remove_dir_all(&run).unwrap();
+    }
+
+    #[test]
+    fn only_real_history_files_count_as_local_results() {
+        let run = std::env::temp_dir().join(format!(
+            "colm-local-inventory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(run.join("out/A/history/nested")).unwrap();
+        std::fs::create_dir_all(run.join("out/B/history")).unwrap();
+        // 子目录与别的扩展名都不是历史输出；多个算例目录的 .nc 合在一起数。
+        std::fs::write(run.join("out/A/history/nested/inside.nc"), "").unwrap();
+        std::fs::write(run.join("out/A/history/notes.txt"), "").unwrap();
+        assert_eq!(local_results(&run).status, "invalid");
+        std::fs::write(run.join("out/A/history/A_hist_2011-01.nc"), "").unwrap();
+        std::fs::write(run.join("out/B/history/B_hist_2011-01.nc"), "").unwrap();
+        let results = local_results(&run);
+        assert_eq!(results.status, "complete");
+        assert_eq!(results.files, 2);
+        std::fs::remove_dir_all(&run).unwrap();
+    }
+
+    #[test]
+    fn recent_failures_do_not_crowd_out_older_successful_comparison_runs() {
+        let run = |status: &str, finished_ms: i64, index: usize| {
+            json!({
+                "run_case": format!("/runs/{status}-{index}"),
+                "status": status,
+                "finished_ms": finished_ms,
+                "legacy": false,
+                "needs_reconciliation": false,
+                "provenance": {"stage": "run"},
+            })
+        };
+        // 最近 20 条全失败、更早的 5 条成功：旧实现先 take(20) 再过滤，一条成功运行都留不下。
+        let mut rows: Vec<Value> = (0..20)
+            .map(|index: usize| run("failed", 1_000 + index as i64, index))
+            .collect();
+        rows.extend((0..5).map(|index: usize| run("succeeded", index as i64, index)));
+        let kept = comparable_run_rows(rows);
+        assert_eq!(kept.len(), 5);
+        assert!(kept.iter().all(|row| row["status"] == "succeeded"));
+        assert_eq!(
+            kept[0]["finished_ms"],
+            json!(4),
+            "newest successful run first"
+        );
+
+        // 逐条过滤：legacy、待核对、非成功、没有运行目录、只跑到预处理。
+        let kept = comparable_run_rows(vec![
+            run("succeeded", 1, 0),
+            json!({"run_case":"/runs/x","status":"succeeded","finished_ms":2,"legacy":true,"provenance":{"stage":"run"}}),
+            json!({"run_case":"/runs/x","status":"succeeded","finished_ms":3,"needs_reconciliation":true,"provenance":{"stage":"run"}}),
+            json!({"run_case":"/runs/x","status":"completed","finished_ms":4,"provenance":{"stage":"mksrfdata"}}),
+            json!({"run_case":"","status":"succeeded","finished_ms":5,"provenance":{"stage":"run"}}),
+            json!({"run_case":"/runs/x","status":"running","finished_ms":6,"provenance":{"stage":"run"}}),
+            json!({"run_case":"/runs/y","status":"completed","finished_ms":7,"provenance":{"stage":"run"}}),
+        ]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0]["finished_ms"], json!(7));
+        assert_eq!(kept[1]["finished_ms"], json!(1));
+
+        // 成功运行多于 20 条时仍只留最近 20 条。
+        let rows: Vec<Value> = (0..25)
+            .map(|index| run("succeeded", index as i64, index))
+            .collect();
+        let kept = comparable_run_rows(rows);
+        assert_eq!(kept.len(), 20);
+        assert_eq!(kept[0]["finished_ms"], json!(24));
+        assert_eq!(kept[19]["finished_ms"], json!(5));
     }
 
     #[test]

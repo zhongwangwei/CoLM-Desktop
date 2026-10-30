@@ -1883,11 +1883,15 @@ pub async fn remote_load(app: tauri::AppHandle, host: String) -> Result<Value, S
     .await
 }
 
-/// 结果还在服务器上、本机没取回的运行目录：返回它的服务器。结果页对这样的运行改在服务器上读
-/// （`colm-cli remote-read`），只把算好的 JSON 传回来；取回过的照旧读本机。
+/// 结果还在服务器上、本机没有完整结果的运行目录：返回它的服务器。结果页对这样的运行改在服务器上读
+/// （`colm-cli remote-read`），只把算好的 JSON 传回来；完整取回的照旧读本机。
+///
+/// 部分取回（`.colm-fetch.json` 还在）本机也有一份，但只有所选变量与月份；把它当完整结果读会在图上
+/// 静默缺变量、缺月份（审计 P2-7）。所以只有本机结果是 `complete` 才留在本机读，其余状态
+/// （missing/partial/invalid）都回服务器读。
 pub(crate) fn results_on_server(case: &str) -> Option<String> {
     let dir = std::path::Path::new(case);
-    if crate::model::has_local_history(dir) {
+    if crate::model::local_results(dir).status == "complete" {
         return None;
     }
     let record: Value =
@@ -1897,6 +1901,9 @@ pub(crate) fn results_on_server(case: &str) -> Option<String> {
 
 /// 评估该在哪台服务器上算：结果还在服务器上；或者结果已取回、但观测文件只在服务器上（服务器项目的默认观测是
 /// 服务器路径，本机打不开）。本机运行、或观测在本机的，返回 `None`，照旧在本机算。
+///
+/// 本机结果不是 `complete`（部分取回/目录无效）时由 `results_on_server` 判到服务器：本机那份数据本身
+/// 就缺变量、缺月份，在本机评估会把缺数据当成真值（审计 P2-7）。
 pub(crate) fn evaluation_server(case: &str, obs: &str) -> Option<String> {
     if let Some(host) = results_on_server(case) {
         return Some(host);
