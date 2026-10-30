@@ -42,6 +42,10 @@ export interface BenchTaskSink {
   focus: (focus: BenchTaskFocus | null) => void;
   peekFocus: () => BenchTaskFocus | null;
   consumeFocus: () => BenchTaskFocus | null;
+  /** 页面还活着时把它自己的"停止"逻辑借给壳；页面卸载/收尾后清掉，壳退回最小后端取消。 */
+  registerStop: (id: string, handler: (() => void) | null) => void;
+  /** 有页面注册的处理器就调用并返回 true；否则返回 false 让调用方走后端回退。 */
+  stopTask: (id: string) => boolean;
 }
 
 /**
@@ -56,6 +60,8 @@ const noop: BenchTaskSink = {
   focus: () => {},
   peekFocus: () => null,
   consumeFocus: () => null,
+  registerStop: () => {},
+  stopTask: () => false,
 };
 
 const BenchTaskContext = createContext<{ tasks: BenchTask[] } & BenchTaskSink>({
@@ -98,7 +104,29 @@ export function BenchTasksProvider({ children }: { children: ReactNode }) {
     pendingFocus.current = null;
     return next;
   }, []);
-  const value = { tasks, begin, update, finish, clear, focus, peekFocus, consumeFocus };
+  const stopHandlers = useRef(new Map<string, () => void>());
+  const registerStop = useCallback((id: string, handler: (() => void) | null) => {
+    if (handler) stopHandlers.current.set(id, handler);
+    else stopHandlers.current.delete(id);
+  }, []);
+  const stopTask = useCallback((id: string) => {
+    const handler = stopHandlers.current.get(id);
+    if (!handler) return false;
+    handler();
+    return true;
+  }, []);
+  const value = {
+    tasks,
+    begin,
+    update,
+    finish,
+    clear,
+    focus,
+    peekFocus,
+    consumeFocus,
+    registerStop,
+    stopTask,
+  };
   return <BenchTaskContext.Provider value={value}>{children}</BenchTaskContext.Provider>;
 }
 

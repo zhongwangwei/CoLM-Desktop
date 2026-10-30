@@ -22,6 +22,7 @@ import {
   jobEnded,
   jobUncertain,
   layerVariableProblems,
+  statisticsStationWarning,
   parseExtent,
   parseReferences,
   parseRemoteJob,
@@ -1246,4 +1247,26 @@ it('warns instead of blocking when a variable maps to a layered NetCDF variable'
   assert.match(built.config, /varname: "f_wliq_soisno"/);
   // 没有按层变量映射时没有提示。
   assert.deepEqual(layerVariableWarnings({ ...base, simulations: [site] }), []);
+});
+
+it('warns when statistics are selected but every simulation is a station', () => {
+  const stationOnly = { ...site, info: { ...site.info, spatial: false } };
+  const warning = statisticsStationWarning([stationOnly]);
+  assert.ok(warning);
+  assert.match(warning[1], /station simulations only/);
+  assert.match(warning[1], /gridded simulation/);
+  assert.equal(
+    statisticsStationWarning([{ ...site, info: { ...site.info, spatial: true } }]),
+    null,
+  );
+  assert.equal(statisticsStationWarning([]), null);
+  // 运行前摘要也带同一句提醒，避免"选了统计但没结果"看不出原因。
+  const summary = evaluationSummary({
+    machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+    ...base,
+    simulations: [stationOnly],
+    statisticsItems: ['Mean'],
+  });
+  const row = summary.find((item) => item.label[1] === 'Statistical tests');
+  assert.match(row?.value ?? '', /station-only/);
 });

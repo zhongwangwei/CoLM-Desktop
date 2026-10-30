@@ -40006,3 +40006,23 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 **本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1297 passed / 0 failed**（比较套件 + 任务条单测 130 例最终复核全过）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。本批未改 `gui/src-tauri`，无 Rust 门变化。
 
 **仍未覆盖**：真实 SSH 远端运行→停止→取报告的端到端；真实窗口里任务条的视觉/窄屏表现；壳上停止仍是最小回退（页面自己的取消确认语义没注册给壳）；远程 focus 的"该 run 报告已被清理"场景只有错误路径代码，没有真实环境用例。
+
+
+## 任务条停止语义与纯单点统计提示（2026-10-30）
+
+补两个不需要科学口径的遗留：壳上"停止"优先走页面自己的完整取消路径；以及只选统计检验但全是单点模拟时提前说明不会产出结果。
+
+**1 壳上停止优先用页面的取消语义**
+- task context 新增 `registerStop(id, handler|null)` / `stopTask(id)`（provider 用 ref map 保存）；比较页在 `run` 登记任务后把页面自己的 `stop` 注册给壳，本机成功、远程成功、失败/取消/离开页面的收尾路径都会注销。
+- App 的 `stopBenchTask` 先 `benchTasks.stopTask(task.id)`：页面还活着时由页面处理取消确认、`request_accepted`、失联/不确定态和提示；只有页面已卸载/已收尾（注册已清）才退回原来的最小后端请求（`bench_cancel` / 有作业号时 `bench_remote_cancel`）并清任务。这样壳上"停止"不再是另一套取消语义。
+- 测试：整页 harness 的 `useBenchTasks` 桩记录 `stop-register`/`stop-clear`，在"summary/saved configuration/run"用例里断言运行期间注册、收尾注销。
+
+**2 纯单点模拟选 statistics 的前置提示**
+- 新增 `statisticsStationWarning(simulations)`：当所选模拟全部是单点（且没有格点）时返回双语提示；比较页在统计检验多选下方显示 warning："OpenBench 3.0.8 的统计检验阶段基于格点场：当前只有单点模拟，不会产出统计结果（实测无输出、也不报错）。需要统计结果请至少加入一个格点模拟。"
+- 运行前摘要的"统计检验"行在 enabled 且纯单点时追加同一句提醒，避免用户以为漏跑。
+- 依据：真实 OpenBench 3.0.8 链路（PLUMBER2 AT-Neu，站点评测 + `statistics [Mean, Mann_Kendall_Trend_Test]`）实测 `statistics/` 目录没有产出、进程也不报错；smoke 的格点配置同方法有输出。
+- 测试：compare.test 单测（纯单点有提示、含格点/空列表为 null、摘要行带 station-only 文案）。
+
+**本轮验证（真实执行）**：`node ../scripts/test-react.mjs` → **1298 passed / 0 failed**；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
+
+**仍未覆盖**：真实 SSH 上壳→页面停止路径的端到端；真实窗口视觉；远程 focus 指向已清理报告的错误路径没有真实环境用例；statistics 在"格点+单点混合"时的产出范围没有逐个方法验证（当前只提示纯单点这一确定场景）。

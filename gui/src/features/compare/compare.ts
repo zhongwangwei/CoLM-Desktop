@@ -756,6 +756,19 @@ export function layerVariableWarnings(design: ComparisonDesign): [string, string
 }
 
 /**
+ * statistics 阶段的前置提示：OpenBench 3.0.8 的统计检验在格点场上算，只有单点模拟时该阶段
+ * 实测不产出任何结果、也不报错（本仓库真实链路验证过）。页面不阻止用户选，只提前说明会白选。
+ */
+export function statisticsStationWarning(simulations: BenchSimulation[]): [string, string] | null {
+  const usable = simulations.filter((sim) => sim.info && sim.info.comparable !== false);
+  if (!usable.length || usable.some((sim) => sim.info.spatial)) return null;
+  return [
+    'OpenBench 3.0.8 的统计检验阶段基于格点场：当前只有单点模拟，不会产出统计结果（实测无输出、也不报错）。需要统计结果的话，请至少加入一个格点模拟。',
+    'OpenBench 3.0.8 computes statistics on gridded fields: with station simulations only, this phase produces no output (observed silently). Add at least one gridded simulation to get statistics.',
+  ];
+}
+
+/**
  * 生成 `openbench.yaml` 与站点清单所需的全部输入。`MachineIdentity` 之外的字段全进配置文本；
  * 同一份比较输入换机器/换参考数据根后就是另一次评估，指纹（`designFingerprint`）因此分开算。
  */
@@ -1115,10 +1128,19 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
           ),
   });
   const statisticsChosen = [...new Set((design.statisticsItems ?? []).filter(Boolean))];
+  const statisticsStationsOnly =
+    design.simulations.length > 0 && design.simulations.every((sim) => !sim.info.spatial);
   items.push({
     label: ['统计检验', 'Statistical tests'],
     value: statisticsChosen.length
-      ? `${bilingual('已启用', 'enabled')} [${statisticsChosen.join(', ')}]`
+      ? `${bilingual('已启用', 'enabled')} [${statisticsChosen.join(', ')}]${
+          statisticsStationsOnly
+            ? ` · ${bilingual(
+                'OpenBench 3.0.8 对纯单点模拟不产出统计结果',
+                'OpenBench 3.0.8 produces no statistics for station-only simulations',
+              )}`
+            : ''
+        }`
       : bilingual('未启用（一项都没勾）', 'disabled (no method selected)'),
   });
   const advanced = [

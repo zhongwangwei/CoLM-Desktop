@@ -50,7 +50,15 @@ function declaration(name: string): string {
 function execute<T>(name: string, context: Record<string, unknown>): T {
   // watch() 现在还会镜像跨路由任务条；这些用例不关心状态条，给 no-op 默认值。
   const withDefaults = {
-    benchTasks: { begin: () => '', update: () => {}, finish: () => {}, clear: () => {} },
+    benchTasks: {
+      begin: () => '',
+      update: () => {},
+      finish: () => {},
+      clear: () => {},
+      registerStop: () => {},
+      stopTask: () => false,
+    },
+    stop: () => {},
     benchTaskId: { current: '' },
     LEFT: 'compare page left',
     ...context,

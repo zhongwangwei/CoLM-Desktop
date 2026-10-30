@@ -24,6 +24,7 @@ import {
   COMPARISON_ITEM_CHOICES,
   DEFAULT_COMPARISON_ITEMS,
   STATISTICS_ITEMS,
+  statisticsStationWarning,
   comparableVariables,
   commonYears,
   comparisonDir,
@@ -1158,6 +1159,8 @@ export default function ComparePage() {
   // 层维度变量不再在生成前拒绝：打开文件时保留层维度，OpenBench CoLM2024 profile 用 compute 消费；
   // 但用户显式映射的 varname 若 profile 不认识，OpenBench check 才会报错，所以这里只提示不阻断。
   const layerWarnings = layerVariableWarnings(formDesign);
+  // statistics 阶段只在格点场上产图：纯单点比较选了方法时提前说明，别让用户以为漏跑了。
+  const stationStatisticsWarning = statisticsStationWarning(formDesign.simulations);
   // 设计指纹覆盖生成配置与运行所依赖的全部输入（含 pick.info 里的前缀/类型/年份/分组/范围/分辨率），
   // 只改目录名和显示名之外的东西也会变（GUI-04）。
   const design = designFingerprint(formDesign);
@@ -1369,6 +1372,7 @@ export default function ComparePage() {
         kind: 'run',
         phase: ['提交运行', 'Submitting'],
       });
+      benchTasks.registerStop(benchTaskId.current, stop);
       try {
         // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
         setConfigSaving(true);
@@ -1411,6 +1415,7 @@ export default function ComparePage() {
             // 配置已经写进项目目录并跑完，草稿不再算"未完成"；失败/取消路径不清，留给用户恢复。
             store(compareDraftKey(host), '');
             benchTasks.finish(benchTaskId.current, { state: 'done', report: result.report });
+            benchTasks.registerStop(benchTaskId.current, null);
             return;
           }
           // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
@@ -1451,6 +1456,7 @@ export default function ComparePage() {
           if (outcome.state === 'succeeded') {
             store(compareDraftKey(host), '');
             benchTasks.finish(benchTaskId.current, { state: 'done' });
+            benchTasks.registerStop(benchTaskId.current, null);
             setLastRun({
               runId,
               configSha: submitted.config_sha ?? '',
@@ -1471,6 +1477,7 @@ export default function ComparePage() {
           state: message === LEFT ? 'interrupted' : 'failed',
           error: message,
         });
+        benchTasks.registerStop(benchTaskId.current, null);
         throw error;
       }
     });
@@ -2430,6 +2437,11 @@ export default function ComparePage() {
                         </label>
                       ))}
                     </div>
+                    {statisticsItems.length > 0 && stationStatisticsWarning && (
+                      <Notice tone="warning">
+                        {t(stationStatisticsWarning[0], stationStatisticsWarning[1])}
+                      </Notice>
+                    )}
                   </Field>
                 </div>
               </Advanced>

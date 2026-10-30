@@ -54,7 +54,15 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     setNotice: () => {},
     setConfigSaving: () => {},
     setWrittenFingerprint: () => {},
-    benchTasks: { begin: () => '', update: () => {}, finish: () => {}, clear: () => {} },
+    benchTasks: {
+      begin: () => '',
+      update: () => {},
+      finish: () => {},
+      clear: () => {},
+      registerStop: () => {},
+      stopTask: () => false,
+    },
+    stop: () => {},
     benchTaskId: { current: '' },
     LEFT: 'compare page left',
     store: () => {},
@@ -283,6 +291,10 @@ function pageHarness(
       benchCalls.push(`finish:${outcome.state}`);
     },
     clear: () => {},
+    registerStop: (_id: string, handler: (() => void) | null) => {
+      benchCalls.push(handler ? 'stop-register' : 'stop-clear');
+    },
+    stopTask: () => false,
     focus: (next: typeof benchFocus.current) => {
       benchFocus.current = next;
     },
@@ -598,6 +610,9 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
     'run is mirrored',
   );
   assert.ok(page.benchCalls().includes('finish:done'), 'successful run finishes the mirror');
+  // 运行期间把页面自己的"停止"注册给壳，收尾时注销，壳才不会退回最小后端取消。
+  assert.ok(page.benchCalls().includes('stop-register'), 'page stop handler is registered');
+  assert.ok(page.benchCalls().includes('stop-clear'), 'page stop handler is cleared after the run');
   // 运行提交成功后这一版配置已经写进比较项目目录，徽标才显示"已写盘"。
   assert.match(badgeLabels()?.saved ?? '', /Written to the project folder/);
   const runCall = page.calls.find((call) => call.command === 'bench_run');
