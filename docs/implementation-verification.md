@@ -40064,3 +40064,23 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 **验证（真实执行）**：`python3 scripts/test-bench-scripts.py` → **36 passed / 0 failed**（新增阈值纯函数用例；原有 35 例含层变量/cftime 全过）；`cargo test -q -p colm-bench --lib` 7 passed；`cargo clippy -p colm-bench --all-targets -- -D warnings` 干净；`git diff --check` 干净。
 
 **未覆盖**：>20 年历史的端到端 warning 路径（阈值纯函数有单测，端到端只在小夹具上验证不会误报）；Linux/远程服务器的内存表现；压缩/分块写盘优化（若要进一步降峰值，需要改 PREPARE 的 streaming 写入）。
+
+
+## 混合参考与纯单点参考的 statistics 实测（2026-10-30）
+
+验证页面 `statisticsReferenceWarning` 的判据（"任一所选参考非 stn 就不提示"）与 OpenBench 3.0.8 实际行为一致。
+
+**配置 A：混合参考**（smoke fixture，2 个格点模拟；Latent_Heat/Sensible_Heat 各挂 ILAMB(grid) + PLUMBER2(stn) 两个参考；`statistics [Mean, Mann_Kendall_Trend_Test, Correlation]`）：
+- check ✓（Reference data 4 sources for 2 variables，Evaluation tasks 8 = 4 参考 × 2 模拟），run **exit 0**，"Evaluation complete"。
+- statistics 三个方法都产出（Mean 8 文件、MKT 12、Correlation 8），文件名只含 `ILAMB`（格点参考），**不含 PLUMBER2**；站点参考照常参与 evaluation。
+- 即：混合参考下统计阶段只用格点参考，页面不提示是正确的。
+
+**配置 B：参考全是单点**（2 个格点模拟，唯一参考 PLUMBER2(stn)，`statistics [Mean]`）：
+- check ✓，run **exit 0** 且 "Evaluation complete"，evaluation 正常出结果；
+- 但 `statistics/` 目录不存在、日志里没有 statistics 阶段行——**静默跳过**，正是页面 `statisticsReferenceWarning` 提示的场景（"参考全是单点，统计阶段不会产出结果"）。
+
+**收口**：无需改产品行为，只把混合场景锁进测试（`statisticsReferenceWarning(…, [stn ref, grid ref]) === null`），并在函数注释里记录上面两条实测；纯单点参考的 warning 已有单测与页面展示。
+
+**验证（真实执行）**：`node ../scripts/test-react.mjs` → **1302 passed / 0 failed**（compare 套件 44 passed）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
+
+**未覆盖**：混合参考下 evaluation 的站点/格点配对细节（由 `oracle` metrics 测试覆盖，不在本页）；不同 tim_res 参考混合时的重采样行为；更多参考组合（>2）。

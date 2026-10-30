@@ -823,6 +823,11 @@ export function statisticsMethodWarnings(
 /**
  * 统计阶段只用**格点参考数据**（适配器跳过 data_type=stn 的参考/模拟）。有格点模拟、但所选变量的参考
  * 全是单点时，该阶段不会产出结果；页面能读到参考登记表的 data_type，所以提前说明。
+ *
+ * 实测（OpenBench 3.0.8，smoke fixture）：同一变量同时挂 ILAMB（grid）与 PLUMBER2（stn）两个参考时，
+ * evaluation 两组都算（8 个任务），statistics 只产出 ILAMB 的结果、文件名里没有 PLUMBER2，进程正常；
+ * 只有 PLUMBER2（stn）参考时 statistics 目录不存在、日志里也没有该阶段、run 仍 exit 0。所以混合参考
+ * 只要有一个格点参考就不提示，纯单点参考才提示——与这里"任一参考非 stn 即通过"的判据一致。
  */
 export function statisticsReferenceWarning(
   design: ComparisonDesign,

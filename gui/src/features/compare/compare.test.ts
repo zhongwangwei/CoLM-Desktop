@@ -1339,5 +1339,11 @@ it('warns about unusable statistics methods and station-only references', () => 
   };
   assert.match(statisticsReferenceWarning(design, stationRef)?.[1] ?? '', /station references/);
   assert.equal(statisticsReferenceWarning(design, gridRef), null);
+  // 混合参考：OpenBench 只用格点参考算统计，站点参考仍参与评估；页面不提示（实测配置 4 参考时正常）。
+  const mixedDesign = {
+    ...design,
+    variables: { Latent_Heat: ['PLUMBER2', 'ILAMB'] },
+  };
+  assert.equal(statisticsReferenceWarning(mixedDesign, [...stationRef, ...gridRef]), null);
   assert.equal(statisticsReferenceWarning({ ...design, statisticsItems: [] }, stationRef), null);
 });
