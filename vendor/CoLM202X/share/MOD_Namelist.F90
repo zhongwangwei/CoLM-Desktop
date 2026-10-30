@@ -1806,6 +1806,28 @@ CONTAINS
          ENDIF
          close(10)
 
+#ifndef SinglePoint
+         ! 上游在这里无条件读 rawdata namelist（默认 './rawdata/colm2024.nml'，它假定用户从
+         ! run/ 启动）；Desktop 把 cwd 设成算例目录，而站点算例的 rawdata 来自 site.nc、
+         ! 算例里从不写 DEF_rawdata_namelist。SinglePoint 构建用不到这些栅格，跳过；
+         ! GRID/UNSTRUCTURED 构建与上游一致地读，缺文件就明确停机而不是让 gname 落成 'null'。
+         open(10, status='OLD', file=trim(DEF_rawdata_namelist), form="FORMATTED")
+         read(10, nml=nl_colm_rawdata, iostat=ierr)
+         IF (ierr /= 0) THEN
+            CALL CoLM_Stop (' ***** ERROR: Problem reading namelist: '// trim(DEF_rawdata_namelist))
+         ENDIF
+         close(10)
+
+         ! to get the file name of rawdata namelist file full path
+         DEF_rawdata_namelist = get_basename(trim(DEF_rawdata_namelist))
+
+         CALL resolve_rawdata()
+
+         IF ( trim(DEF_rawdata%landcover%fname) == "LC30m.GLC" ) THEN
+            DEF_USE_GLC30 = .true.
+         ENDIF
+#endif
+
          open(10, status='OLD', file=trim(DEF_forcing_namelist), form="FORMATTED")
          read(10, nml=nl_colm_forcing, iostat=ierr, iomsg=iomesg)
          IF (ierr /= 0) THEN

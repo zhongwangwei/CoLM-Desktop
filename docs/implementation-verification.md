@@ -40759,3 +40759,66 @@ target/debug/colm-cli run tmp/hacc-B --kernel tmp/kernels-sync/default \
 - 对读依赖的算例、内核与日志在 `tmp/hacc*`（不入库）。
 - **模型数值影响**：对齐只改旁车盘上标记名与读写语义；不跨重启的运行完全不受影响，跨重启运行在
   「窗口完整/部分」的判定与原来一致，变化的是「别的实现写的旁车现在能读了」。
+
+## 网格算例端到端实测暴露的合并回退：`&nl_colm_rawdata` 读取整段被吞（2026-10-30，第五轮）
+
+为了补测「河湖构建的 `hacc_river`/`.river` 旁车跨实现对读」和网格/SPMD 路径，本轮真正跑了一个
+**网格 + 河湖汇流**算例（不是单点）：用维护者在 tms17l 上的专属路径——
+数据 `/shr03/{CoLMrawdata,CoLMruntime,CoLM_Forcing}`、算例工作区
+`/tera11/zhwei/Personal/CoLM/colm-desktop/`（其中 `000/` 是 96–104°E、37–43°N、0.25° 的
+GRIDBASED + PC 区域算例，带 `mesh.nc`）——把本仓库 `vendor/CoLM202X` 同步过去、在那边编
+`latlon` 内核（Linux + OpenMPI），跑 `mksrfdata → mkinidata → colm`。
+
+### 1 发现：网格 mksrfdata 必然崩，单点却正常
+
+- 现象：`mksrfdata` 在打印区域信息后 **SIGSEGV**；gdb 显示
+  `pixel_assimilate_latlon(nlat=0, nlon=0)` ← `pixel%assimilate_grid(grid_patch)`
+  （`MKSRFDATA.F90:317`）——`grid_patch` 没被初始化。
+- 根因：`grid_patch%define_by_name(trim(DEF_rawdata%landcover%gname))` 拿到的是默认
+  **`'null'`**。`DEF_rawdata%*` 只在 `share/MOD_Namelist.F90` 的 `read_namelist` 里读完
+  `&nl_colm_rawdata` 后由 `resolve_rawdata()` 填充，而 vendor 的 `read_namelist`
+  **整段没有读 rawdata namelist**（只剩声明、`resolve_rawdata` 定义与 `DEF_USE_GLC30` 声明，没有调用点）。
+- 归因：不是本轮同步引入。`git log -G"nml=nl_colm_rawdata"` 定位到 **`c6c17d11`**
+  （「Replace vendor/CoLM202X with upstream 7d2fca93 and port the build/table layer」）整份替换时
+  吞掉的；上游 base/theirs 的 `read_namelist` 里都有这段（`theirs:1473-1489`）。它一直没被发现，
+  因为：内核只编译不跑、站点算例走 `SinglePoint` 分支（读 `site.nc`，不需要 rawdata 栅格）、
+  本仓库此前**没有任何网格 mksrfdata 的端到端测试**（原始文档也把「没有 COLM_RAWDATA 栅格」列为
+  本机限制）。这是「声明/过程体被吞」那类合并事故的又一例（见上一节「合并里必须手工收口的几类损坏」）。
+- 旁证：把 `DEF_rawdata_namelist` 显式写进算例也没用——因为**读它的代码不存在**。
+
+### 2 修复：按上游补回读取块，站点构建走本地守卫
+
+`share/MOD_Namelist.F90` 的 `read_namelist` 在读完 `&nl_colm` 之后、读 `&nl_colm_forcing` 之前
+补回上游那段：打开 `DEF_rawdata_namelist` → `read(10, nml=nl_colm_rawdata)`（失败 `CoLM_Stop`）→
+`DEF_rawdata_namelist = get_basename(...)` → `CALL resolve_rawdata()` →
+`LC30m.GLC` 时置 `DEF_USE_GLC30`。与上游唯一的差别是**外层加 `#ifndef SinglePoint`**：
+
+- 上游假定从 `run/` 启动，默认相对路径 `./rawdata/colm2024.nml` 恰好存在；
+- Desktop 把内核 cwd 设成**算例目录**，站点算例从不写 `DEF_rawdata_namelist`，也不该为了
+  站点预处理去要求一个 rawdata namelist（站点数据来自 `site.nc`）；
+- 所以站点构建跳过这段（行为与修复前一致），GRID/UNSTRUCTURED 构建与上游一致地读，
+  缺文件时给明确的 `Problem reading namelist: …` 停机，而不是让 `gname` 落成 `'null'` 再段错误。
+
+### 3 顺带记录的两个环境事实
+
+- **远程 OpenMPI 会被 `-ffpe-trap` 误伤**：`kernels-remote`（带
+  `-ffpe-trap=invalid,zero,overflow`）在 `CALL mpi_init` 里直接 `SIGFPE`（
+  `MOD_SPMD_Task.F90:155`）。为跑通实测，在**远程那份副本**的 `include/Makeoptions.github` 里去掉
+  `-ffpe-trap` 后重编；陷阱开关只影响「异常时是否立刻停」，不改变算术结果。仓库里的预设不改。
+- **构建路径**：`build_kernel.sh` 需要 `vendor/CoLM202X` + `oracle/scripts/{build_kernel.sh,
+  kernel-presets.config,ensure_native_kernels.py}`（`python3`/`gfortran`/`make`/`mpifort`/
+  `nf-config` 都要在 PATH），站点与网格预设走同一脚本；远程用 `rsync` 同步 `vendor` + 这三个脚本
+  即可，不需要 Rust 工具链（`--fingerprint` 只算源码 sha）。
+
+### 4 状态与遗留
+
+- 修复后远程 `latlon` 内核重编通过；`mksrfdata` 已越过崩溃点（`Total: 768 elements.` → 
+  `Filtering pixels ...`），但在 `/shr03` 上读全球 rawdata 的 0.25° PC 预处理很慢，本轮没跑完，
+  **河湖 `hacc_river`/`.river` 的跨实现对读仍未完成**（待它跑完后补：Fortran 写河湖旁车 → 本地
+  Rust 读；Rust 写 → 远程 Fortran 续跑；以及 SPMD 多块路径）。
+- **Desktop 的网格算例构造器仍不写 `DEF_rawdata_namelist`**：GUI/`colm-cli spatial-new` 只写
+  `DEF_dir_rawdata`。修复后网格算例会在 `read_namelist` 明确停机（不再是段错误），但要让桌面端
+  网格算例开箱能跑，还需要在造例时把 rawdata namelist（`run/rawdata/colm2024.nml` 的内容）落进
+  算例并写这个键——这属于产品行为改动，留待单独一轮决定。
+- 本次验证用的远程副本、日志、算例都在 tms17l 的
+  `/tera11/zhwei/Personal/CoLM/colm-desktop/sync-rivtest/`（不入库）。
