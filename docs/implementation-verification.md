@@ -40084,3 +40084,41 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 **验证（真实执行）**：`node ../scripts/test-react.mjs` → **1302 passed / 0 failed**（compare 套件 44 passed）；`tsc --noEmit` 0 error；`eslint src`、`prettier --check src` 干净；`check-gui.mjs` 0（262 命令 / 224 调用）。只改 `gui/src/**`，未改 `gui/src-tauri`。
 
 **未覆盖**：混合参考下 evaluation 的站点/格点配对细节（由 `oracle` metrics 测试覆盖，不在本页）；不同 tim_res 参考混合时的重采样行为；更多参考组合（>2）。
+
+## 结果页第二批修复：比较失败隔离、部分取回识别、默认运行与缺测断线（2026-10-30，实测）
+
+承接第一批（单站/多站快照分离、区间配对、观测语义、时间基准）。第二批只做可靠性：让「部分成功、部分取回、缺测、默认选中」这四类中间状态在界面上如实呈现，不再被当成完整或整体失败。仍然只改结果页链路；研究页/比较页/助手页不动。
+
+### 1 多站比较：一个站点失败不再丢掉其他站点的成功结果（`gui/src/features/results/{series,ResultsPage,analysis-state}.ts*`）
+
+- 旧实现用 `boundedMap`（Promise.all 语义）：A 成功、B 失败、C 延迟成功时整体 reject，页面 busy=false、进度停在 2/3、结果行为空，C 的后台请求还在跑；进度自增不与任务绑定，重试时旧任务还能写新进度。审计 P2-6 的三个表现全部核对成立。
+- 新实现 `boundedMapSettled`：每项独立 settled，单站失败只记 `{error}` 不 reject；`shouldStop()` 只在**领取新项前**检查（已在飞的请求等它真实结束，不假装取消），未领取项标 `cancelled`。比较结果把成功行与失败/取消行一起放进 `ComparisonResult`；进度用 `comparisonTaskId` 绑定（非本任务 id 或已切换条件时不更新，finally 只清自己的 id）；全失败也发布快照（空 rows + 全部 failures），不再 throw 丢快照。
+- UI：比较表下列出失败行（运行/观测/原因）+「重试失败项」；重试只重算失败/取消条目，条件全部读快照 `request`（不读界面当前输入），成功后合并进已有行、清空对应失败，发布同 key 新 `completedAt` 快照；快照不 fresh 时按钮禁用并说明原因。这同时满足审计要求的「提供重试失败项」「旧任务不污染新进度」。
+- 前端测试从 1302 增至 **1336 passed / 0 failed**：A成功/B失败/C成功 → rows=2、failures=1、busy=false、progress=null；条件变更取消后未领取项不被调用、不 publish；重试只 invoke 失败项并合并。
+
+### 2 远程部分取回不再被当成「本地完整结果」（`gui/src-tauri/src/{model,remote}.rs`、前端 ResultsPage）
+
+- 旧 `has_local_history` 只看 `out/*/history` 下**是否有任意条目**：一个无关文件或子目录也算「有结果」，`all:false` 的变量子集取回也被算成完整；之后 `results_on_server` 不再用服务器，缺变量/月份直接读不到。CLI 早已把部分取回的变量、窗口写进 `.colm-fetch.json`，结果路由却没用。
+- 新 `local_results(run_case) -> LocalResults`：只数 `out/*/history` **一层内的普通 `.nc`**；无目录/条目→`missing`，有条目但 0 个 nc（或标记在而文件没了）→`invalid`，有 nc 且有 `.colm-fetch.json` →`partial`（带 `vars`/`from`/`to`/`scientific_verified`/实际 `files`），有 nc 无标记→`complete`。每个运行行都带 `local_results`；远程行的 `outputs_local` 收紧为 `status=="complete"`（旧前端兼容）。
+- 路由：只有本地 `complete` 才读本机；`partial`/`invalid`/`missing` 且有 `.colm-remote.json` 时继续 `remote-read`（series/catalog/map/energy-summary/evaluation 自动生效），所以「部分取回后仍能访问远程其他变量」——审计验收条件。
+- 前端：`awaitingFetch` 按 `local_results.status` 判断；横幅区分「仅远程 / 本地部分数据（含文件数、变量、月份范围、是否通过科学核验）/ 本地目录无效」；身份徽标同样显示；`partial`/`missing` 时额外给「取回全部历史」入口（`remote_fetch all:true, overwriteNewer:true`，`all=true` 会跳过服务器 fetch_vars 过滤取全量），完成后重读 `model_case_runs`。
+- 验证：GUI Rust `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **601 passed / 0 failed / 1 ignored**（model 新增 2 个状态/过滤测试；remote_tests 新增 partial/invalid/complete 与「partial + 本机观测仍在服务器评估」用例）；前端 partial 横幅/取回参数用例通过。
+
+### 3 默认运行选择与比较清单：先筛可用，再截取（前端 `preferredRun`、GUI `comparable_run_rows`）
+
+- 旧默认选择可能选中最新失败运行、仅预处理运行或 legacy 占位；旧比较清单先 `take(20)` 再过滤，最近 20 条都失败时较早的成功运行被隐藏（审计 §二）。
+- 新 `preferredRun`：①刚跑完的运行 ②当前版本修订对应且可用的运行（恢复旧有的 version 匹配层；从某个修订打开结果页不应默默跳到别的修订）③最新 succeeded|completed 且本机 `complete` 或服务器可读 ④最新 succeeded|completed ⑤第一条非 legacy/非 mksrfdata+mkinidata 预处理运行。legacy 与仅预处理运行在任何层都不作为默认。
+- `comparable_run_rows`：**先过滤**（legacy/needs_reconciliation/status∉succeeded|completed/run_case 空/仅预处理）**再按 finished_ms 倒序取 20**；单测覆盖「最新 20 条全失败、较早 5 条成功 → 保留 5 条」。
+
+### 4 2400 点上限不再抹掉缺测段（Rust `series` 响应 + 前端 `insertGapMarkers`）
+
+- 旧抽稀只保每桶有限值的 min/max：100001 点、2400 点上限、中间连续缺测 21 点时，抽稀后缺测点保留 0 个，缺测两侧的有效点在图上直接连线；半小时序列上这等于 10.5 小时缺测消失（审计 P2-5 实测数字复现）。
+- 新：Rust `series` 响应新增 `gaps: {变量: [[startUnix, endUnix), …]}`，按**完整时序**（抽稀前、窗口内）计算，每变量上限 400 段并带 `gaps_truncated`；末尾缺口用「最后一条 + 一个步长」。前端 `insertGapMarkers` 把每个缺口的起止时刻插成全列 null 的标记行再交给 uPlot（不替其它变量编造值）；缺口整段在显示范围外则跳过，端点在窗口外只补范围内那一端；列长不一致时退回未加标记数据，避免坏响应打崩整页。2400 点上限与 `n/source_n` 文案不变。
+- 实测：合成 5000 条 TIMESTEP 记录、中间 21 条 NaN → 响应 `n=1201, downsampled=true, source_n=5000`，`gaps={"f_rnet":[[1203647400,1203685200]]}`（正好 21×1800 s），抽稀点落在缺口内的全为 null；Rust 3 条 gap 单测 + 前端 7 条 insert 单测（含 100001/2400/21 场景）。
+
+### 本轮验证（真实执行）
+
+- `cargo test -p colm-cli --bins -- --test-threads=1` → **816 passed / 0 failed**（含 3 条缺测段契约测试）；`cargo clippy -p colm-cli --all-targets -- -D warnings` 干净；`cargo fmt --all --check` 干净。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` → **601 passed / 0 failed / 1 ignored**；`cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` 干净；改动文件 rustfmt 干净。新增按钮 `result-fetch-all` 已加入助手审计白名单（既有 `every_fixed_commit_button_is_an_audited_target` 测试守住）。
+- 前端：`node ../scripts/check-gui.mjs --self-test` 与 `check-gui.mjs` 通过；`node ../scripts/test-react.mjs` → **1336 passed / 0 failed**；`tsc --noEmit`、`eslint src`、`prettier --check src` 全过。
+- **Not-tested**：真实 SSH 远程部分取回/补取端到端（用临时目录 + 单测覆盖状态与路由，未连真服务器）；取消比较没有独立入口（只随条件变更/换页面取消未领取项）；失败列表用现有 Notice/ul 样式，未加专用 CSS；旧后端无 `local_results` 时非远程运行按 complete 回退（无法区分「本机没结果」）；缺测端点恰好已有抽样点时复用原行、只补另一端。
