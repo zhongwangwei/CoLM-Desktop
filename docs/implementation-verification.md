@@ -39497,7 +39497,7 @@ HTTP 往返并略降前 3 命中**；关键词对短参数名/短语本来就精
 
 - `pixel-overlap` 是 opt-in：默认仍 in-cell，不做"按分辨率自动选择"；单点/无法定界的粗产品仍只能用 in-cell（pixel-overlap 明确报错）。
 - 旧冻结 CLI 不能运行 pixel-overlap（创建/回退时明确拒绝，需用当前程序重建）。
-- 面积权重按"重叠面积（度²）"计算，未做纬度 cos 面积修正；对纬向跨度的相对权重无影响，但与真实面积比例在极区不完全一致（记录在案，若要做全球产品加权可再加 cos(lat)）。
+- 面积权重最初按"度²"实现；随后改为球面面积（经度弧度 × Δsin(lat)），见下一节。
 
 ## 上游核对：zhongwangwei/CoLM202X 到 7d2fca93（2026-10-29）
 
@@ -39789,3 +39789,13 @@ MT 与它不兼容这一点由运行时守住；Rust 入口另有 `check_catchme
 - 相态回填只做到与上游同构，尚未在真实 IsoGSM 文件上做逐位对照。
 - catchment 内核现在能构建，但 MT + CATCHMENT 的运行时拒绝只覆盖 `check_settings` 这一条入口；
   没有用真实 catchment 算例端到端验证这条停机。
+
+## 研究页第十五批：pixel-overlap 面积权重改为球面面积（2026-10-30）
+
+接第十四批。`pixel-overlap` 初版用"lat 重叠度数 × lon 重叠度数"作权重，本质是等经纬度网格的度²；同样 1°×1° 的像元在高纬的真实面积只有赤道的 cos(lat) 倍，全球产品里高纬像元会被系统性高估，格均值偏向高纬。
+
+- `targets.rs` 新增 `spherical_row_area(south, north) = |sin(north) - sin(south)|`（弧度、夹到 ±90°）与 `spherical_overlap_area`：重叠面积 = 环形经度重叠（弧度）× Δsin(lat)。`cells_with_observations` 的 pixel-overlap 权重改用它；in-cell 路径不涉及权重，逐位不变（黄金 support hash 仍为 `9604baf2…`）。
+- 测试：新增 `pixel_overlap_weights_shrink_with_the_sphere_towards_the_poles`（60–61°N 的面积约为赤道 0–1° 的 cos(60.5°)/cos(0.5°)，且明显更小）；更新粗像元/半格/身份测试为球面权重下的解析期望与浮点容差（加权均值相同像素值时只允许 1e-9 级归一化误差）。
+- 影响：`pixel-overlap` 是上一批刚引入的 opt-in 语义，尚无已发布研究依赖其旧权重；in-cell 旧研究完全不受影响。
+
+验证（真实执行）：`cargo test -q -p colm-cli --bin colm-cli study::targets -- --test-threads=1` **38 passed**；全量 CLI bin、integration、study_version、clippy/fmt 结果见本轮提交。未运行真实全球产品；合成夹具覆盖赤道/中纬/跨日界线几何。
