@@ -41474,3 +41474,25 @@ smp/hk/icefrac/porsl/bsw/psi0/hksati` 与 `qinfl/etr`，对照 Rust 同位置；
 试过用 `DEF_USE_SUPERCOOL_WATER=.false.` 做 A/B：该配置下 Fortran 内核（带
 `-ffpe-trap=invalid,zero,overflow`）在第一步就 abort（`Errorcode: 1`，无 CoLM 文本消息），
 这条 A/B 路走不通；要么临时去掉 trap 重编，要么直接打点。
+
+### meltf 定向打点：调用层大部分逐位一致，但需要 patch 标识才能定到那一格（同轮）
+
+为了把上一节的"第 51 步相变分配差 7.7e-7"钉到具体分支，给 Fortran `MOD_PhaseChange:meltf`
+（`COLM_MELT_DEBUG` 门控，末尾打印 `imelt`、`t_soisno/前`、`wliq/wice` 前后、`xm/hm`、`sm/xmf`、
+`hs/hs_soil/hs_snow/dhsdT/fsno/scv/snowdp`）和 Rust `phase_change.rs`（同字段）各加了临时输出，
+用 **flat 1 rank** 的 gridriver-off、VSF-off 算例跑 51 步（结束后即回退两边改动，不入库）。
+
+- 两边都是 2295 条记录 = 51 步 × 45 patch；Rust 的 patch 级调用是并行写的，
+  直接追加会**交错丢换行**（已用互斥锁验证：加锁后行数正确），因此不能按行号配。
+- 按"输入签名"（`patchtype/lb/nl` + `prevT` + `wliq0/wice0`）配对后：第 50、51 步的绝大多数
+  patch 在温度、液态/冰量上仍然一致到 **1e-13**；第 51 步只有少数记录配不上
+  （最小距离 1e-5~1e-3），但配对本身也可能被"同一地类、相邻格点状态几乎相同"的 patch
+  干扰 —— **没有 patch 全局标识就无法确定是哪一个**，这是下一步必须先补的（在 Fortran
+  调用点把 `ipatch` 或块内下标传进来，Rust 侧带上全局 patch 序号）。
+- 排除项：`hm` 在 Rust 侧没有保留（dump 里填 0），`xm` 在 Fortran 里雪/顶层事后会被
+  `heatr` 改写、不等于 `wice0-wicePost`，两者都不能直接逐项比；能比的是
+  `prevT/Tpost/wliq0/wice0/wliqP/wiceP/imelt`。
+
+结论：**meltf 本身没有看到系统性公式差**；第 51 步的分叉要么是某个 patch 上游（thermals/
+snow 步）的输入差，要么是 meltf 的某个分支只在那一格触发。要定案，先加 patch 标识，
+再对那一条记录逐字段对比。
