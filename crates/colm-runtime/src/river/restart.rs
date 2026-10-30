@@ -380,6 +380,13 @@ fn history_fields(history: &RiverHistory) -> [&Vec<f64>; 10] {
 
 /// 河道 history 旁车 `<陆面旁车基名>.river`（区间跨过重启且 `acctime_ucat` 有值时写）。
 pub fn write_river_history(path: &Path, history: &RiverHistory) -> Result<()> {
+    // 上游先 `mkdir -p` 再写（`MOD_HistAccRestart` 由 `write_restart` 建目录）；Rust 的
+    // `.river` 旁车在**主重启之前**写，日期目录还不一定存在（实测新建算例的第一次日重启
+    // 会因此报 netcdf error(13) 而不是写失败以外的线索）。
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     let n = history.acctime.len();
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;

@@ -74,3 +74,18 @@ fn flood_fraction_is_spval_when_its_flood_area_is_missing() {
         "a missing flood area was divided instead of masked: {fraction:?}"
     );
 }
+
+#[test]
+fn the_river_history_writer_creates_a_missing_restart_date_directory() {
+    let root = std::env::temp_dir().join(format!("colm-river-hist-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let path = root
+        .join("2026-10-31-00000")
+        .join("case_restart_hist_2026-10-31-00000.nc.river");
+    let history = crate::river::RiverHistory::zeros_for(3, false, None, None);
+    crate::river::restart::write_river_history(&path, &history).unwrap();
+    assert!(path.is_file());
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(file.dimension("ucatch").unwrap().len(), 3);
+    std::fs::remove_dir_all(&root).unwrap();
+}

@@ -443,14 +443,21 @@ fn write_gridriver_namelist_restart(namelist: &Path, run: &SpatialNamelistRun) -
     // Rust 的 mksrfdata 拿不到面积映射，在这里生成（第 547 轮）。
     let regional = namelist_bool(&document, "DEF_UnitCatchment_regional", false)?;
     let unit_catchment = if regional {
+        // 上游写在 `<DEF_dir_output>/<case>/riverlake/` 下，不是 `landdata/` 下
+        // （见 `regional_file` 的注释）。
+        let case_dir = run
+            .landdata
+            .parent()
+            .context("landdata has no case directory")?;
         let (kept, systems) = colm_init::unitcatchment_regional::build(
             &source_catchment,
+            case_dir,
             &run.landdata,
             run.land_cover_year,
             namelist_bool(&document, "DEF_USE_BIFURCATION", false)?,
             namelist_bool(&document, "DEF_USE_LULCC", false)?,
         )?;
-        let file = colm_init::unitcatchment_regional::regional_file(&run.landdata);
+        let file = colm_init::unitcatchment_regional::regional_file(case_dir);
         println!(
             "Regional unit-catchment network: {kept} unit catchments in {systems} river systems, written to {}",
             file.display()

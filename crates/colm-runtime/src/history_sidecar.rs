@@ -282,6 +282,10 @@ pub fn write_sidecar_uncommitted(
     let window = windows
         .first()
         .context("the history sidecar needs at least one window")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     let mut file =
         netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
     file.add_dimension("patch", patches)?;

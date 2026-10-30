@@ -27,9 +27,12 @@ const SEQ_DIM: &str = "nseqmax";
 const PATH_DIM: &str = "npthout";
 const DAM_DIM: &str = "dam_ndams";
 
-/// `regional_unitcatchment_file`：`trim(DEF_dir_landdata) // '/riverlake/unitcatchment_regional.nc'`。
-pub fn regional_file(landdata: &Path) -> PathBuf {
-    landdata.join(REGIONAL_SUFFIX)
+/// `regional_unitcatchment_file`（`share/MOD_Namelist.F90:3945`）：
+/// `trim(DEF_dir_output) // '/' // trim(DEF_CASE_NAME) // REGIONAL_UNITCATCHMENT_SUFFIX`，
+/// 即放在**算例目录**下而不是 `landdata/` 下（`mkinidata/MOD_UnitCatchmentRegional.F90:17`
+/// 的注释与运行期 `get_unitcatchment_file` 都是这个位置）。
+pub fn regional_file(case_dir: &Path) -> PathBuf {
+    case_dir.join(REGIONAL_SUFFIX)
 }
 
 /// 汇流输入网格的大小（`nx`/`ny` 维）。
@@ -272,6 +275,11 @@ pub fn subset_write(
     touched: &[bool],
     bif_closure: bool,
 ) -> Result<(usize, usize)> {
+    // 上游先 `mkdir -p` 再写（`MOD_UnitCatchmentRegional.F90:157`）。
+    if let Some(parent) = file_out.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     let source =
         netcdf::open(file_in).with_context(|| format!("cannot open {}", file_in.display()))?;
     let length = |name: &str| source.dimension(name).map(|d| d.len());
@@ -587,6 +595,7 @@ pub fn verify_coverage(landdata: &Path, year: i32, regional: &Path, source: &Pat
 /// 带上了塔里木与华北，116 个河系里 39 个在区域里一个单元流域都没有）；一端在外的通道直接丢掉。
 pub fn build(
     unitcatchment_file: &Path,
+    case_dir: &Path,
     landdata: &Path,
     year: i32,
     bifurcation: bool,
@@ -598,7 +607,7 @@ pub fn build(
     // written regional file is merged by marking its selected source catchments'
     // inpmat cells touched, then rebuilding the same union.
     if merge_existing {
-        let regional = regional_file(landdata);
+        let regional = regional_file(case_dir);
         if regional.is_file() {
             let src = netcdf::open(unitcatchment_file)
                 .with_context(|| format!("cannot open {}", unitcatchment_file.display()))?;
@@ -644,7 +653,7 @@ pub fn build(
     }
     subset_write(
         unitcatchment_file,
-        &regional_file(landdata),
+        &regional_file(case_dir),
         nlon,
         nlat,
         &touched,

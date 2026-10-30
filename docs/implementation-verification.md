@@ -40947,3 +40947,65 @@ Rust 裁剪器是字段无关设计而没接。这次按上游补齐：
 - 全轮 **Not-tested** 维持各节的记录：与 Fortran 内核的数值对照、真实 LULCC 跨年算例、
   真实 BGC+甲烷缺输入源树；`vendor/` 的网格端到端实测（第五/六轮）仍卡在 0.25° 区域前处理的
   耗时上，河湖旁车的跨实现对读仍待补。
+
+## 网格+河湖算例的 Fortran↔Rust 旁车对读（2026-10-31，第七轮，真实跑通）
+
+前几轮把「河湖 `hacc_river`/`.river` 跨实现对读」标成 Not-tested，原因是本机没有可跑的区域网格+河湖算例。
+这一轮从零造了一个并跑通了全链路。
+
+### 算例与运行方式（全部在本机）
+
+- `colm-cli mesh-new --grid-kind latlon --nlon 360 --nlat 180 --west 98.5 --east 100.5 --south 38.5
+  --north 40.5` 的 3×3 = 9 个 1° 单元窗口（16.7 MB 级 landdata）；`spatial-new` 生成算例后补
+  `DEF_USE_LCT`、`DEF_rawdata_namelist`、`DEF_USE_GridRiverLakeFlow`、`DEF_UnitCatchment_regional`、
+  `DEF_WRST_FREQ='DAILY'`、`DEF_HIST_FREQ='MONTHLY'`。强迫 JRA3Q 2005-01。
+- 前处理用 **Rust** 的 `mksrfdata-rs`/`mkinidata-rs`（Fortran mksrfdata 在本机/远端都因全球 rawdata
+  循环太慢而放弃，实测 CPU 打满 >1 小时）；模型用 **Fortran `colm.x`**，内核为
+  `COLM_SPMD_MODE=grouped` 的 latlon（见下）。
+- 输出：陆面 history + `hist_unitcat`、日重启 2005-001…004、每个日重启的旁车
+  `..._restart_hist_<label>_<blk>.nc`（`hacc_complete/hacc_freq/hacc_nac/hacc_river`）与
+  `..._restart_hist_<label>.nc.river`（1726 个单元流域的 `hist_*` 累加量）。
+
+### 对读结果
+
+| 方向 | 做法 | 结果 |
+|---|---|---|
+| F→R | Rust 从 Fortran 的 2005-002 日重启+旁车续跑 2 天 | Rust 读回旁车：写出的 004 旁车 `hacc_nac=144`（Fortran 002 是 48 + 新 96）；把 002 旁车藏掉重跑则 `nac=96`，两条 history 有 **111/140** 个变量不同 |
+| R→F | Rust 冷启动跑第 1 天，Fortran 从 Rust 的 002 重启+旁车续跑 1 天 | Fortran 正常读入 Rust 的重启与旁车，写出的 003 旁车 `hacc_nac=96`（Rust 002 的 48 + 新 48），与「Fortran 自己一天」的参考同值；两条 history 93/140 个变量不同（跨引擎物理差异） |
+| F→F 对照 | Fortran 连续 001→004 vs Fortran 在 002 切开续跑 | **142/142 陆面 history 变量、17/17 unitcat history 变量逐位相同** |
+| 多块 SPMD | grouped SPMD 3 rank 写/读每块旁车 | Rust 单进程读 Fortran 的逐块旁车（F→R）、grouped Fortran 读 Rust 写的旁车（R→F）都通过 |
+
+F→F 的逐位相同说明旁车/重启机制本身是精确的；两个跨引擎方向的差异是**物理/数值实现差异**（与此前单点
+实测的 1e-6…1e-2 级差异同源，河湖量在 10–50 量级上放大），不是旁车格式问题。跨引擎方向没有逐位一致
+的诉求，也没有为此调容差。
+
+### 本轮定位并修掉的三个真问题
+
+1. **Flat SPMD 内核 + 河湖 IO 死锁**（不是慢，是真的挂住）。`sample` 显示 `colm.x` 卡在
+   `readin_riverlake_parameter → vector_read_matrix_and_scatter → MPI_Send`；`mkinidata.x` 卡在
+   `unitcatchment_regional_build` 的 `MPI_Recv`/`MPI_Barrier`。原因是这些上游 scatter/gather 子程序
+   按「io rank 与 worker rank 分离」写：Flat SPMD 下 rank 0 同时是 io/worker/master，master 分支先
+   `MPI_Recv` 等自己（或等一个永远不会发出的 send），即自通信死锁；1 rank 与 2 rank 都复现。改用
+   grouped SPMD 内核（`COLM_SPMD_MODE=grouped`，3 rank：io 0 + worker 1 + master 2）后同一算例
+   **9 秒跑完 144 步**。仓库随包的 spatial 预设默认 flat，因此「flat 内核 + `GridRiverLakeFlow`」这条
+   组合目前不可用；要跑河湖必须用 grouped 内核（或由维护者决定是否给 vendor 的 scatter 加 flat 快路径）。
+   记录在案，不在本轮改 vendor 的并发语义。
+2. **Rust 区域单元流域文件路径与上游不一致**（跨预处理/跨引擎互操作 bug）：上游
+   `regional_unitcatchment_file`（`MOD_Namelist.F90:3945`）在 `<DEF_dir_output>/<case>/riverlake/`，
+   Rust 的 `regional_file` 写在 `<landdata>/riverlake/`，且 colm-rs 也按后者读。结果 Fortran 引擎读
+   Rust 预处理出的算例时报 `riverlake/unitcatchment_regional.nc does not exist`。已改为算例根目录
+   （`unitcatchment_regional::regional_file(case_dir)`，mkinidata-rs 用 `landdata.parent()`，colm-rs
+   的两处读取同步改），并补单测。
+3. **Rust 写 `.river`/旁车时不建日期目录**：新建算例第一次日重启先写旁车、后写主重启，日期目录还不
+   存在，`netcdf::create` 报 `error(13) Permission denied`（ENOENT 被 NetCDF 的报错掩盖）。在
+   `river::restart::write_river_history` 与 `history_sidecar::write_sidecar_uncommitted` 里补
+   `create_dir_all(parent)`，并各加一条单测。
+
+### 验证边界
+
+- **Not-tested**：Rust 引擎的多进程 SPMD 旁车路径（本地 colm-rs 只支持单进程，多进程仅在远程由
+  `COLM_MPIEXEC` 启动，本机无法验证）；flat-SPMD 内核的河湖运行（死锁，本轮改用 grouped）；
+  LULCC/真实观测数据上的河湖旁车；`DEF_USE_BIFURCATION`/levee/reservoir 打开时的 `.river`
+  额外变量组未在网格端到端里覆盖（本轮算例三者都关）。
+- 本机运行目录：`tmp/rivgrid-small`（Fortran 基准）、`tmp/rivsmall-f2r3`/`-nosc`（F→R 与藏旁车对照）、
+  `tmp/rsmall-r1`、`tmp/rsmall-r2f`、`tmp/rsmall-seg2f`（R→F 与参考），不入库。

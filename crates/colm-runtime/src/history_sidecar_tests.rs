@@ -776,3 +776,22 @@ fn corrupt_new_markers_are_still_rejected() {
     }
     assert!(read_sidecar(&primary, &missing_freq, &config(), &[], mid_month(), 1800.0).is_err());
 }
+
+#[test]
+fn the_sidecar_writer_creates_a_missing_restart_date_directory() {
+    // 实测：新建算例的第一次日重启会先写 `.river`/主旁车、后写主重启；日期目录还没建时
+    // `netcdf::create` 报 error(13)（ENOENT 被 NetCDF 显示成 Permission denied）。
+    let root = scratch_directory("missing-date-dir");
+    let path = root
+        .join("2026-10-31-00000")
+        .join("case_restart_hist_2026-10-31-00000_w180_s90.nc");
+    let windows = vec![window()];
+    write_sidecar_with_river(&path, 1, &config(), &windows, false, &[false]).unwrap();
+    let file = netcdf::open(&path).unwrap();
+    let complete = file
+        .variable("hacc_complete")
+        .unwrap()
+        .get_values::<f64, _>(..)
+        .unwrap();
+    assert_eq!(complete, [1.0]);
+}

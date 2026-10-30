@@ -2747,7 +2747,7 @@ fn check_spatial_lulcc(
 /// 区域模式下的区域网络文件（水库 `dam_seq` 按它的 `seq_src_index` 换号）；否则 `None`。
 fn regional_catchment(document: &Document, out: &Path) -> Result<Option<std::path::PathBuf>> {
     Ok(logical_field(document, "DEF_UnitCatchment_regional")?
-        .then(|| colm_init::unitcatchment_regional::regional_file(&out.join("landdata"))))
+        .then(|| colm_init::unitcatchment_regional::regional_file(out)))
 }
 
 /// `get_unitcatchment_file`（`share/MOD_Namelist.F90:2884-2895`）：区域模式读 landdata 下裁好的区域网络，
@@ -2758,7 +2758,7 @@ fn unit_catchment_file(document: &Document, out: &Path, year: i32) -> Result<std
         return Ok(source);
     }
     let landdata = out.join("landdata");
-    let regional = colm_init::unitcatchment_regional::regional_file(&landdata);
+    let regional = colm_init::unitcatchment_regional::regional_file(out);
     colm_init::unitcatchment_regional::verify(&regional, &source)?;
     colm_init::unitcatchment_regional::verify_coverage(&landdata, year, &regional, &source)?;
     Ok(regional)

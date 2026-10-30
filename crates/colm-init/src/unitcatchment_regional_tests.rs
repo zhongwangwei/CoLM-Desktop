@@ -77,3 +77,14 @@ fn cut_selects_along_one_axis() {
     // 沿第 1 轴取第 2 列。
     assert_eq!(cut(&values, &[3, 2], Some((1, &[2]))), vec![2, 4, 6]);
 }
+
+#[test]
+fn regional_file_lives_under_the_case_directory_not_landdata() {
+    // 上游 `regional_unitcatchment_file`（`share/MOD_Namelist.F90:3945`）：
+    // `<DEF_dir_output>/<case>/riverlake/unitcatchment_regional.nc`。
+    let path = super::regional_file(std::path::Path::new("/cases/rivgrid"));
+    assert_eq!(
+        path,
+        std::path::Path::new("/cases/rivgrid/riverlake/unitcatchment_regional.nc")
+    );
+}
