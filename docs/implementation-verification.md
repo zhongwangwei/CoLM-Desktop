@@ -41127,3 +41127,14 @@ mkinidata）把两侧的 history/重启逐项对了一遍。
 `colm-core` 529、`colm-runtime` 258+4、`colm-hist` 79、`colm-cli` 串行 812 passed（10 个
 `study::runner` 失败是本机沙箱的进程检查/信号限制，与本次改动无关）；clippy `-D warnings`、
 两个 workspace 的 fmt 通过。
+
+### 7920 工作站可用性探测（同轮）
+
+`ssh 7920` 通（T7920，96 核、750 GB 内存、Ubuntu resolute）。工具链现状：`gfortran-15`
+（`/usr/bin/gfortran`）与 netCDF-C 开发包在，但 **没有 netCDF-Fortran（`libnetcdff`/`nf-config`）、
+没有 MPI（`mpifort`/`mpiexec`/OpenMPI）**；`sudo` 需要交互密码。好消息是外网可用、
+`apt-get download` 免 root 可用（已实测下载到 `libnetcdff-dev`、`openmpi-bin`、`libopenmpi-dev`
+的 .deb），因此下一轮可以 `dpkg -x` 解到 `~/opt`、拼出用户态 netCDF-Fortran + MPI 工具链，
+再 rsync 仓库 + 自制的小算例（先把强迫场裁到区域，避免搬 GB 级全球强迫）过去，做
+**多 rank / 多 node** 的并行一致性验证。真正的多 node 还缺第二台已布好工具链的机器；
+tms17l 上已有 Fortran 工具链与 /shr03 数据，可以作为第二节点候选。
