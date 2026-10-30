@@ -41449,3 +41449,28 @@ MC 侧车、重启；3 rank 与 4 rank 两组独立配置都成立）。同轮�
 （关 VSF）只复现单日分叉，然后在 `soilwater` 入口打印该 patch 的 `vol_liq/vol_ice/eff_porosity/
 smp/hk/icefrac/porsl/bsw/psi0/hksati` 与 `qinfl/etr`，对照 Rust 同位置；重点怀疑
 "干土 → 饱和"那一步的 `smp` 初值或 `soilwater` 的边界分支（`smpmin` 截断 vs 饱和）。
+
+### WATER_2014 patch 分叉的步级定位（同轮续）
+
+用"从 001 冷启动连续跑到 day2 的第 N 步、比较该 patch 的重启状态"做二分（每步 1800 s，
+重启目录名给出精确的结束时刻），在 e095_n40 patch 7 上得到：
+
+| 总步数（001 起） | 结束时刻 | patch7 最大差 |
+|---|---|---|
+| 50 | day2 01:00 | 3.1e-13 |
+| **51** | **day2 01:30** | **7.7e-07（首次出现）** |
+| 52 | day2 02:00 | 1.09e-01（t_soisno 顶层跳 0.109 K） |
+| 57 | day2 04:00 | 1.0e-02 |
+| 96 | day3 00:00 | 2.94 |
+
+第 51 步的差异是**顶层土壤液/冰分配**：`wliq_soisno` 少 7.7e-7、`wice_soisno` 多 7.7e-7，
+两者之和逐位不变；`t_soisno`、`a_*` 通量累加、`smp/hk` 都还一致。到第 52 步顶层 `t_soisno`
+才跳 0.109 K，随后 `smp` 出现"干（smpmin=-10）↔ 饱和（~1e8 mm）"的定性分叉，day2 结束时
+`wliq` 差 1.97 kg/m²。
+
+即：**种子是一次相变分配（meltf）的 7.7e-7 差**，不是状态/强迫差；下一步应在第 51 步给
+`MOD_PhaseChange:meltf` 与实际 `wliq/wice/t_soisno/psl/qsdew/qfros` 入参打点，与 Rust
+`phase_change.rs` 同位置对照（重点 `imelt` 判定、`supercool` 上限与顶层 `j==1` 的雪薄分支）。
+试过用 `DEF_USE_SUPERCOOL_WATER=.false.` 做 A/B：该配置下 Fortran 内核（带
+`-ffpe-trap=invalid,zero,overflow`）在第一步就 abort（`Errorcode: 1`，无 CoLM 文本消息），
+这条 A/B 路走不通；要么临时去掉 trap 重编，要么直接打点。
