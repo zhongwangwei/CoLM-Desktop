@@ -41496,3 +41496,26 @@ smp/hk/icefrac/porsl/bsw/psi0/hksati` 与 `qinfl/etr`，对照 Rust 同位置；
 结论：**meltf 本身没有看到系统性公式差**；第 51 步的分叉要么是某个 patch 上游（thermals/
 snow 步）的输入差，要么是 meltf 的某个分支只在那一格触发。要定案，先加 patch 标识，
 再对那一条记录逐字段对比。
+
+### meltf 打点（第二轮）：调用序号 + 输出层对齐，meltf 不是已证实的源头（同轮续）
+
+给上一节的打点补了两样东西：Fortran 端 `mdbg_call` 调用序号（随 dump 写出），Rust 端
+`AtomicUsize` 调用序号；两边都是 **flat 1 rank**、river-off、VSF-off 的同一算例跑到
+day2 01:30（51 步、2295 条记录）。结论分三点：
+
+1. **按调用序号对不齐**：F 的 `patch_in_step` 与 R 的序号是两套顺序（patch 处理顺序不同），
+   第 1 步就 45/45 对不上 —— 只能按输入签名配对，这使上一轮"配对歧义"问题依旧。
+2. 按签名配对成功的那批记录里，**第 49–51 步的所有输出（`Tpost/wliqP/wiceP`）差都 ≤1e-11**；
+   也就是说 meltf 的调用本身并没有出现 7.7e-7 量级的差。
+3. 同一算例该步结束的重启确实复现了分叉：`wliq_soisno` 与 `wice_soisno` 各差 **7.7e-7**
+   且**和不变**，`t_soisno`/`snowdp`/`scv`/`wdsrf` 都一致（只有 `alb/ssoi` 因反照率输入
+   各差 1.76e-8）。即分叉是"**总水量不变、只把液/冰重新分配**"的操作产生的，而 meltf 已经
+   基本被排除；剩下嫌疑是 `WATER_2014` 的 `absorb_condensation`（露/霜）或雪-土之间的
+   `relocate_soil_frost_ice`/`snowwater` 一侧，或打点配对把分叉那一格配错了。
+4. 未配对记录（每步 5–7 条）的距离在 1e-10~2e-4，既有真差也有"同一地类、相邻格点状态
+   几乎相同"造成的配对冲突，**没有全局 patch 标识就无法区分**。
+
+下一步（明确）：把 patch 全局序号穿到 Rust 的 `PhaseChangeInput`/或 `GroundTemperatureInput`
+（调用链 `standard_lct_energy_step → ground_temperature → phase_change` 上都能拿到），
+F 端同样用 `mdbg_call` 与已知 block/patch 数换算；然后再对同一 patch 比较
+`absorb_condensation` 前后的顶层 `wliq/wice`，即可判定是冷凝/霜分支还是雪-土再分配。
