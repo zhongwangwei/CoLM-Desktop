@@ -41953,3 +41953,14 @@ tier2 外、差异 1e-4~1e-5 相对，正是这个口径差，不是物理差异
 
 **更正上一节的结论**：此前把"主 history 的河道量差异"归因于 unitcat 窗口，是错的 —— 窗口只影响
 旁车文件；主 history 的河道差异是模型状态差异（绝对值很小，汇流放大后相对量才变大）。
+
+### 用对齐内核重新生成三份 golden（2026-10-31，同轮续）
+
+按"不把向量化内核的字节当基准"的结论，用**对齐内核**（`kernels/default`，`-O2 +
+-fno-tree-vectorize`，GCC 16.1）重跑并 `--write-golden`：
+
+- `oracle/golden/{CN-Cng,CN-Cng-wet,US-NR1-snow}_hist_*.nc` 三份更新；
+- `oracle/golden/kernel-manifest.json` 随之更新，记录产出工具链；
+- 复验：同一内核重跑三份，与 golden 的**所有变量逐位相同**（无形状/数值差）；
+- Rust 当前输出对新的 golden：tier2 外 **CN-Cng 4 / CN-Cng-wet 23 / US-NR1-snow 64**，
+  与对齐内核 Fortran 对 Rust 的计数一致（旧 golden 由向量化/旧编译器产出，不能再用作基准）。
