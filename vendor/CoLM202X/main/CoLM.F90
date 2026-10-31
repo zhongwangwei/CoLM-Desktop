@@ -200,6 +200,16 @@ PROGRAM CoLM
       CALL ncio_initialize ()
       CALL read_namelist (nlfile)
 
+#ifdef FLAT_SPMD
+      ! 本仓库的 FLAT_SPMD 路径只维护单进程：多 rank 时上游大量按
+      ! master/worker 互斥写的 I/O（restart/history/网络汇总）会并发写同一文件、
+      ! 或把 tag=2 的消息留在队列里（表现为 HDF error / MPI_ERR_RANK）。
+      ! 与其静默产生错误结果或挂死，在启动时明确拒绝；多 rank 请用 grouped。
+      IF (p_np_glb > 1) THEN
+         CALL CoLM_stop ('FLAT_SPMD kernels run one process per case; rebuild with COLM_SPMD_MODE=grouped for multi-rank runs')
+      ENDIF
+#endif
+
 #ifndef SinglePoint
       IF (trim(DEF_DS_precipitation_adjust_scheme) == 'III') THEN
          CALL CoLM_stop ('Precipitation scheme III is unavailable: this build has no Python MPI server ranks.')

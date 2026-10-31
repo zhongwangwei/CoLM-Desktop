@@ -1457,6 +1457,33 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      ! FLAT_SPMD 下 rank0 既是 master 又是 worker：原来的 IF (p_is_worker) /
+      ! ELSEIF (p_is_master) 会让每个 rank（含 rank0）都发消息、却没有人收，
+      ! 消息留在队里，后续 tag=2 的读取会把它当成协议消息而报 MPI_ERR_RANK。
+      ! 这里让 rank0 就地处理自己的份额、只从远端 rank 收。
+      IF (p_is_master) THEN
+         IF (remap%num_grid > 0) CALL mark (remap%ids_me)
+      ELSE
+         ng = remap%num_grid
+         CALL mpi_send (ng, 1, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+         IF (ng > 0) CALL mpi_send (remap%ids_me, ng, MPI_INTEGER, p_address_master, mpi_tag_data, &
+            p_comm_glb, p_err)
+      ENDIF
+      IF (p_is_master) THEN
+         DO iworker = 1, p_np_glb-1
+            CALL mpi_recv (ng, 1, MPI_INTEGER, p_address_worker(iworker), mpi_tag_mesg, p_comm_glb, &
+               p_stat, p_err)
+            IF (ng > 0) THEN
+               allocate (ids (ng))
+               CALL mpi_recv (ids, ng, MPI_INTEGER, p_address_worker(iworker), mpi_tag_data, &
+                  p_comm_glb, p_stat, p_err)
+               CALL mark (ids)
+               deallocate (ids)
+            ENDIF
+         ENDDO
+      ENDIF
+#else
       IF (p_is_worker) THEN
          ng = remap%num_grid
          CALL mpi_send (ng, 1, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -1475,6 +1502,7 @@ CONTAINS
             ENDIF
          ENDDO
       ENDIF
+#endif
 #else
       IF (remap%num_grid > 0) CALL mark (remap%ids_me)
 #endif

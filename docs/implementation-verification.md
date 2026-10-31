@@ -41997,3 +41997,31 @@ send 给自己**，匹配的 recv 在同一线程后面的 master 分支里，�
 - 补丁不改变站点路径的数值：用打过补丁的 vendor 重建 `kernels/default` 并重生成三份
   golden，三份 golden 与补丁前**逐变量相同**（0 处差异），`kernel-manifest.json` 刷新为
   新源码/二进制指纹；Rust 对新 golden 仍为 tier2 外 4 / 23 / 64。
+
+### flat 多 rank 的后续：找到第二处同类缺陷，并决定显式拒绝多进程（2026-10-31，同轮续）
+
+修好矩阵 I/O 自发送后，flat 2 rank 仍在河网读取处报 `MPI_ERR_RANK`。静态审计所有
+"能进 flat 构建、且用 `mpi_tag_mesg`(tag=2) 发送"的位置，锁定
+`MOD_Grid_RiverLakeNetwork:check_regional_coverage`：它用
+`IF (p_is_worker) … ELSEIF (p_is_master)` 发送/接收；flat 下 rank0 同时是 worker 和
+master，于是**每个 rank 都发、没有人收**。留下的 1-int 消息随后被矩阵读取当成协议消息
+（收到 `isrc=ng` 的残留值，再按它去 recv 就越界），与插桩看到的 `isrc=64` 一致。
+
+给这段加 `FLAT_SPMD` 分支（rank0 就地 mark 自己的份额、只从远端 rank 收）后，flat 2 rank
+能跑完 48 步，但**在写 restart 时报 `Netcdf error: NetCDF: HDF error`** —— 上游单文件
+restart/history 写出同样假设 master/worker 互斥，flat 多 rank 会并发写同一文件。
+
+结论：**本仓库的 FLAT_SPMD 只维护单进程**（它本来就是本地扩展、上游没有）。与其逐个
+重写上游的分布式 I/O，在启动时显式拒绝多进程：
+
+```
+FLAT_SPMD kernels run one process per case; rebuild with COLM_SPMD_MODE=grouped for multi-rank runs
+```
+
+**验证**：
+- flat 单进程河湖算例：8 秒完成（与 grouped 结果逐变量相同）；
+- flat 2 rank：启动即给出上面这句明确错误（两个 rank 都打印），不再挂死或写出坏文件；
+- grouped 3 rank 用带全部补丁的内核重跑：主 history 与补丁前**0 处差异**；
+- 站点内核重建后二进制 `built_with` 与 golden 记录**完全相同**（FLAT_SPMD 代码不参与站点编译），
+  重生成的三份 golden 变量内容与上一提交**逐变量相同**，`kernel-manifest.json` 刷新；
+  Rust 对 golden 仍为 4/23/64。
