@@ -41793,3 +41793,24 @@ patch" 的物理并行还需更大的多 block 算例**（例如 0.1° 下经度
 结合前面的 rank/节点扫描，Rust 并行三层（线程级、进程级 SPMD、外层算例并发）里前两层的
 可调维度现在都有逐字节证据：**线程数、写线程数、rank 数、节点数都不改变输出字节**。
 未测的是这几种维度的组合（例如 8 rank × 8 线程，或多 block 大算例下的线程扩展性）。
+
+## 远端 6 rank 复测与多 block 大算例（bd，2026-10-31）
+
+此前 tms17 上 6 rank 单节点在收尾阶段挂住、原因未定；bd 现成的 `uuu` 算例只有 **4 个
+landpatch block**，SPMD 直接拒绝 6 进程（`4 landpatch blocks cannot be split over
+6 processes`），所以先在 bd 上新建了一个多 block 算例再复测：
+
+- **算例**：0.1° 区域 100–115°E、25–40°N（`colm-cli mesh-new` 生成 150×150 网格），
+  PC 子网格，`colm-cli spatial-new` 建算例，Rust 预处理（`mksrfdata-rs` / `mkinidata-rs`，
+  借既有 Fortran kernel manifest 走 `colm-cli run --preprocessors rust`）→ **42,208 patch、
+  9 个 block**（3×3 个 5°×5° 块），1 天量级共 52 步。
+- **配置**：base1（单进程）、r2（2 rank/1 节点）、r4（4 rank/1 节点）、r6（6 rank/1 节点）、
+  r6n2（6 rank/2 节点，3/节点）、r6n3（6 rank/3 节点，2/节点），Intel MPI
+  `mpirun -bootstrap lsf`，同一二进制、同一输入。
+- **结果**：六种配置每次都写 **30 个输出文件**（1 history + 29 restart/旁车），
+  sha256 清单两两**逐字节相同**（`spmdtest/logs/case6-manifest.{base1,r2,r4,r6,r6n2,r6n3}.txt`）。
+  6 rank 单节点、6 rank 跨 2 节点、6 rank 跨 3 节点都正常 `CoLM Execution Completed.`，
+  **tms17 上曾出现的 6-rank 挂起在 bd 上未复现**。
+- 这次 rank 分块不是平凡的：9 个 block 分给 6 个 rank（每个 rank 1–2 个 block，rank0
+  本地 2 个 block、8,570 patch），确实走了"各 rank 各算一部分 patch、每步全量交换"的路径。
+- 位置：`spmdtest/case6/{case,shared,run-*}`；日志 `spmdtest/logs/case6.*.log`。
