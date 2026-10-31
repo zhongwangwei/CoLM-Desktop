@@ -41857,3 +41857,31 @@ block 的装配阶段，进程仍存活、日志不再前进），已中止；�
   环境/构建与 `MOD_SpatialMapping` 某处（很可能是 `DO WHILE`/`insert_into_sorted_list`
   的数据相关死循环）相互作用，需要下一轮用调试内核（打印循环计数）定位。
 格点 39/140 的对齐后数字因此**仍未取到**，不能拿旧数字当结论；站点三条结论不受影响。
+
+### 格点卡死定位与对齐内核首测（2026-10-31，同轮续）
+
+lldb attach 到卡住的 `colm.x`，栈是：
+
+```
+MOD_GridRiverLakeVectorIO:vector_read_matrix_and_scatter
+  -> PMPI_Send -> ompi_request_wait_completion
+```
+
+即**已知的 flat-SPMD 河湖参数读取死锁**（flat 模式下 master 的 send 没有匹配的 worker
+recv），与 `MOD_SpatialMapping` 计算和本轮 `-fno-tree-vectorize` 都无关。用
+`COLM_SPMD_MODE=grouped` 重建对齐 `latlon` 内核后，同一算例 `mpiexec -n 3` **12 秒完成**；
+3 rank 与 6 rank 的 history 逐变量相同（仅 NetCDF 文件头字节差异），并行一致性在 aligned
+内核下保持。
+
+**对齐后格点首测**（`tmp/grid-grouped-f` Fortran grouped 3 rank vs `tmp/grid-grouped-r`
+Rust 单进程；9 格点冬季 2005-01 河湖算例，`DEF_HIST_FREQ=MONTHLY` 所以只有 1 条记录，
+134 个共同变量）：tier2 外 **58 项**；前几名 `f_wliq_soisno` maxrel 1.06e-1、
+`f_wice_soisno` 3.69e-1、`f_zwt` 4.05e-1、`f_h2osoi` 1.18e-1、`f_alb` 1.8e-2、
+辐射链 1–4e-2（绝对量很小）。这与之前引用的"39/140、最大相对差 5e-4"**不是同一测量口径**
+（旧数字来自另一窗口/另一套变量筛选），不能直接比较；且该算例正是已经定案的
+"第 51 步 VSF 顶层液/冰分配敏感"算例（`f_wliq/f_wice/f_zwt` 正是其敏感量，见上文
+"VSF 分叉"各节），所以这 58 项的主因仍是已记录的 VSF 冻结/相变迭代路径差，而不是新 bug。
+
+**下一步**：换一个**夏季/非冻结**窗口（强迫场有全年数据，用 mkinidata 生成 7 月起点的
+restart）重测同一 9 格点河湖算例，区分"冻结期 VSF 敏感"与"全年基准差异"；同时把格点
+history 里的坐标变量补进 tolerance 表，才能直接用 `golden-compare` 出可复现的 140 项口径。
