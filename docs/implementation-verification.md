@@ -42095,3 +42095,12 @@ flat 拒绝。
 - 限制（记录在案）：**分馏（fractionation）路径未测** —— 它要求材料强迫（vapor 组），
   而站点 `DEF_forcing%dataset=POINT` 不支持材料强迫；要覆盖分馏需要格点强迫 + MT forcing
   文件，留待后续。
+
+### 物质输送数值对拍后的补充验证（2026-10-31，同轮续）
+
+- 四张生成表的 drift 测试、namelist 往返、histmap 全过（`colm-schema/hist/core` drift、
+  `colm-namelist --test roundtrip`、`oracle --test histmap`）；
+- tms17 的 6-rank 单节点旧问题本轮尝试复测，但直接在登录节点 `mpiexec -n 6` 启动时
+  240 秒内没有输出任何 TIMESTEP（超时被 SIGKILL），与早期"跑完 48 步后卡在收尾"的
+  现象不一致，属于**启动阶段就受阻**；登录节点不适合做这类复测，需要正规节点分配后
+  再测。该问题仍保持"未定论"。
