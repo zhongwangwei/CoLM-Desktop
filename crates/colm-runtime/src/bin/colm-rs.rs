@@ -1774,6 +1774,12 @@ fn run_spatial_segment(
             real_field(document, "DEF_domain%edges")?,
             real_field(document, "DEF_domain%edgen")?,
         );
+        // 上游只在 `FLAT_SPMD` 构建下把 unitcat 旁车截到 `DEF_domain`，grouped 构建写全球；
+        // Rust 单进程默认对齐 flat 行为。跨引擎对拍 grouped Fortran 时用
+        // `COLM_UNITCAT_HISTORY_WINDOW=global` 打开全球窗口（只影响 unitcat 旁车）。
+        let unitcat_global = std::env::var("COLM_UNITCAT_HISTORY_WINDOW")
+            .map(|value| value.eq_ignore_ascii_case("global"))
+            .unwrap_or(false);
         let river_writer = if vector_history && writes_history {
             Some(
                 colm_runtime::river::history::RiverHistoryWriter::new(
@@ -1784,6 +1790,7 @@ fn run_spatial_segment(
                     out.join("history"),
                     name,
                 )?
+                .with_global_unitcat_window(unitcat_global)
                 .with_domain(domain),
             )
         } else {
@@ -1798,7 +1805,11 @@ fn run_spatial_segment(
                         out.join("history"),
                         name,
                     )
-                    .map(|writer| writer.with_domain(domain))
+                    .map(|writer| {
+                        writer
+                            .with_global_unitcat_window(unitcat_global)
+                            .with_domain(domain)
+                    })
                 })
                 .transpose()?
         };

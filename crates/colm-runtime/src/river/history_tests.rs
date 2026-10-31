@@ -1,4 +1,4 @@
-use super::{domain_window, flooded_fraction, mean_or_missing, SPVAL};
+use super::{domain_window, flooded_fraction, mean_or_missing, unitcat_window, SPVAL};
 
 fn axes() -> (Vec<f64>, Vec<f64>) {
     // 全球 15′ 格心：经度自西向东，纬度自北向南。
@@ -88,4 +88,19 @@ fn the_river_history_writer_creates_a_missing_restart_date_directory() {
     let file = netcdf::open(&path).unwrap();
     assert_eq!(file.dimension("ucatch").unwrap().len(), 3);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn the_global_unitcat_window_keeps_the_whole_grid() {
+    // 上游 grouped 构建写全球 unitcat 旁车（`route_hist_window` 只在 FLAT_SPMD 里截窗）；
+    // 区域窗口仍是默认，给 Rust 单进程用。
+    let (lon, lat) = axes();
+    assert_eq!(
+        unitcat_window(&lon, &lat, (96.25, 104.25, 37.75, 43.25), false),
+        domain_window(&lon, &lat, (96.25, 104.25, 37.75, 43.25))
+    );
+    assert_eq!(
+        unitcat_window(&lon, &lat, (96.25, 104.25, 37.75, 43.25), true),
+        (0, 0, 1440, 720)
+    );
 }

@@ -60,6 +60,11 @@ pub struct RiverHistoryWriter {
     /// unitcat 文件的输出窗口（`route_hist_window`）：格心落在模拟范围里的 15′ 格子，0 起的
     /// `(x0, y0, nlon, nlat)`，与陆面 history 对齐。河系照旧整条汇流，窗口外的只是不写。
     window: (usize, usize, usize, usize),
+    /// 比较用开关：上游只在 `FLAT_SPMD` 构建下把 unitcat 窗口截到 `DEF_domain`，
+    /// grouped 构建写**全球**。Rust 单进程引擎默认对齐 flat（截窗）；跨引擎对拍 grouped
+    /// Fortran 时用 `COLM_UNITCAT_HISTORY_WINDOW=global` 打开全球窗口（只改 unitcat 旁车，
+    /// 不改主 history 的河道量）。
+    unitcat_global: bool,
     /// 全球 15′ 网格的格心（窗口按它截取）。
     lon_all: Vec<f64>,
     lat_all: Vec<f64>,
@@ -72,6 +77,21 @@ pub struct RiverHistoryWriter {
     /// `vector_gather_map2grid_and_write` 的无 `itime` 分支，上游在那里传的是重启文件的级别
     /// （`MOD_Vector_ReadWrite.F90:357-358`）。
     pub rest_compress_level: u8,
+}
+
+/// unitcat 文件的输出窗口：默认按上游 flat 行为截到模型范围；`global` 时写全球
+/// （grouped 构建的行为）。
+fn unitcat_window(
+    lon: &[f64],
+    lat: &[f64],
+    bounds: (f64, f64, f64, f64),
+    global: bool,
+) -> (usize, usize, usize, usize) {
+    if global {
+        (0, 0, lon.len(), lat.len())
+    } else {
+        domain_window(lon, lat, bounds)
+    }
 }
 
 /// `route_hist_window`：格心严格落在 `(west, east, south, north)` 里的连续下标段（`lat` 自北向南）。
@@ -240,6 +260,7 @@ impl RiverHistoryWriter {
             lon,
             lat,
             window,
+            unitcat_global: false,
             reservoir_ids: None,
             // namelist 默认值（`MOD_Namelist.F90:750-751`）；调用方按算例覆盖。
             hist_compress_level: 1,
@@ -247,9 +268,15 @@ impl RiverHistoryWriter {
         })
     }
 
+    /// 比较用：让 unitcat 旁车写全球窗口（上游 grouped 构建的行为）。
+    pub fn with_global_unitcat_window(mut self, global: bool) -> Self {
+        self.unitcat_global = global;
+        self
+    }
+
     /// unitcat 文件只写模拟范围（`DEF_domain`）里的格子，与陆面 history 对齐。
     pub fn with_domain(mut self, bounds: (f64, f64, f64, f64)) -> Self {
-        let window = domain_window(&self.lon_all, &self.lat_all, bounds);
+        let window = unitcat_window(&self.lon_all, &self.lat_all, bounds, self.unitcat_global);
         let (x0, y0, nx, ny) = window;
         self.lon = self.lon_all[x0..x0 + nx].to_vec();
         self.lat = self.lat_all[y0..y0 + ny].to_vec();

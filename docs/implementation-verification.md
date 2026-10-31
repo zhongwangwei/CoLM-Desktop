@@ -41932,3 +41932,24 @@ tier2 外、差异 1e-4~1e-5 相对，正是这个口径差，不是物理差异
 下一步要么让 Rust 在需要时也写 grouped 的全球 unitcat 窗口（增加开关），要么用
 **flat Fortran** 做河道对照 —— 后者目前被已知的 flat 河湖 IO 死锁挡住（`vector_read_matrix_and_scatter`
 的 MPI send），属上游/vendor 层问题，需维护者决定是否修。
+
+### Rust 引擎新增可选"global unitcat 窗口"（2026-10-31，同轮续）
+
+为让两引擎的河道量能在**同一口径**下比较，给 Rust 引擎加了开关：
+
+- 默认保持上游 **flat** 行为：unitcat 旁车截到 `DEF_domain`；
+- 设 `COLM_UNITCAT_HISTORY_WINDOW=global` 时写全球 720×1440（上游 **grouped** 构建的行为）；
+- 只影响 `<case>_hist_unitcat_*.nc`，**不改主 history**（实测两个模式的主 history 变量完全相同）；
+- 实现：`RiverHistoryWriter::with_global_unitcat_window`（`river/history.rs`），构造处读环境变量
+  （`bin/colm-rs.rs`）；单测 `the_global_unitcat_window_keeps_the_whole_grid`。
+
+**同口径验证（夏季 9 格点河湖算例）**：
+- unitcat 静态量（`lat_ucat/lon_ucat/mask_complete_upstream`）与 grouped Fortran **逐位相同**；
+- **只跑 1 步**时，两边 unitcat 全部动态量也**逐位相同**；
+- 跑到 3 天，动态河道量开始分歧并随天数增大：`f_discharge` 绝对差
+  4.7e-2 → 5.8e-2 → 6.4e-1（相对 ~1e-3），`f_floodfrc` 7.8e-7 → 3.8e-6，
+  `f_floodarea` 497 → 1306 → 2444（`f_floodfrc` 的绝对值很小，floodarea 单位大）。
+  即：**前一步一致、之后由陆面径流的小差异经汇流放大**，属已记录的状态差异传播，不是窗口口径问题。
+
+**更正上一节的结论**：此前把"主 history 的河道量差异"归因于 unitcat 窗口，是错的 —— 窗口只影响
+旁车文件；主 history 的河道差异是模型状态差异（绝对值很小，汇流放大后相对量才变大）。
