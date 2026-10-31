@@ -41906,3 +41906,29 @@ history 里的坐标变量补进 tolerance 表，才能直接用 `golden-compare
   并不是跨步放大出来的 —— 说明种子在**起始状态/首小时累积窗口**这一层，值得下一步
   用 1 步重启对比与首小时 history 窗口对齐来定位；在定位之前，grid 的"46/58 项"仍
   按"待查的日尺度敏感量"记录，不能算作已归因的移植误差。
+
+### 首小时种子定位与 unitcat history 窗口差异（2026-10-31，同轮续）
+
+**一步重启对比**（夏季 2005-07-01 只跑 1 个 1800 s 步，两边都写
+`restart/2005-182-01800`）：陆面状态基本一致 —— `wliq_soisno` 差 1.9e-5 kg/m²、
+`hk` 1.7e-6、`smp` 差 1.6e-2（干燥区诊断量，对 wliq 敏感），反照率分量 2e-16（舍入级）；
+**河道重启（`*_gridriver_*`）逐变量完全相同**。也就是说首小时 history 的差异不是
+"起始状态不同"或"河道状态不同"，而是从第一步 VSF 求解的舍入级差异在 history 输出层放大。
+
+**结构性发现：unitcat history 的网格窗口取决于编译期 SPMD 模式。**
+上游 `MOD_Grid_RiverLakeHistRoute:route_hist_window` 只在 `#ifdef FLAT_SPMD` 下把
+unitcat 输出截到 `DEF_domain`，grouped 构建下写**全球** 720×1440：
+- 我们 05:16 能跑完的格点算例与 grouped 对齐内核跑的算例，unitcat 文件都是
+  `lat_ucat=720, lon_ucat=1440`（全球）；
+- **Rust 引擎写的是截到模拟范围的 12×12 区域窗口**（与上游 flat 行为一致，因为 Rust
+  没有进程内 SPMD 分片）。
+因此 **grouped Fortran vs Rust 的河道量比较不是同一口径**：主 history 里河道量由
+unitcat 场重网格化而来，全球窗口与区域窗口的映射/权重不同，夏季窗口里 5/5 河道变量
+tier2 外、差异 1e-4~1e-5 相对，正是这个口径差，不是物理差异。
+
+按变量类别拆开对齐后的 tier2 外计数（同一份数据）：
+- 冬季：陆面 **57/127**、河道 1/5；
+- 夏季：陆面 **41/127**、河道 5/5（河道为口径差；陆面是 VSF/迭代舍入放大）。
+下一步要么让 Rust 在需要时也写 grouped 的全球 unitcat 窗口（增加开关），要么用
+**flat Fortran** 做河道对照 —— 后者目前被已知的 flat 河湖 IO 死锁挡住（`vector_read_matrix_and_scatter`
+的 MPI send），属上游/vendor 层问题，需维护者决定是否修。
