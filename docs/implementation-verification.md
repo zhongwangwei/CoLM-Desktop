@@ -42078,3 +42078,20 @@ flat 拒绝。
   改动（unitcat 窗口开关等）默认路径下不改变任何输出，跨节点/rank 数一致性保持。
 - 同时用新守卫编译验证了 flat `unstructured` 与 flat `catchment` 预设（均通过；
   运行期需要本地没有的 catchment/unstructured 算例数据，暂未做运行时验证）。
+
+### 物质输送的数值对拍（同位素，2026-10-31，同轮续）
+
+此前 MT 只核对过变量名/元数据（NO3 无源、数值恒为零，不能算物理一致）。这轮用
+**CN-Cng 站点算例 + `&nl_colm_material` 打开 H2_18O 同位素**，让降水/蒸发真正搬运材料：
+
+- 配置：`DEF_USE_ISOTOPE=.true.`、`DEF_ISOTOPE_SPECIES='H2_18O'`、
+  `DEF_MT_AQUIFER_MIXING_WATER_MM=1.0`（VSF 下同位素要求正值），
+  `DEF_ISO_USE_FRACTIONATION=.false.`（分馏需要 `&nl_colm_mt_forcing` 的 vapor 组，
+  而站点 POINT 强迫不支持材料强迫，见下）；11 天、264 条记录；
+- 两个引擎都正常完成，输出 `<case>_hist_material_2008-01.nc`；
+- **数值**：32 个 material 变量名/维/顺序一致，**全部在 tier2 内（0 项超出）**；
+  动态量非平凡（例如 `f_mt_evap_mass_H2_18O` 在 1.6e-5~3.5e-4 变化），最大差
+  7.2e-15；`f_mt_delta_*` 诊断最大差 3.2e-12。
+- 限制（记录在案）：**分馏（fractionation）路径未测** —— 它要求材料强迫（vapor 组），
+  而站点 `DEF_forcing%dataset=POINT` 不支持材料强迫；要覆盖分馏需要格点强迫 + MT forcing
+  文件，留待后续。
