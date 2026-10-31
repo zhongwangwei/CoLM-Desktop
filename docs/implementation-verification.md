@@ -42057,3 +42057,24 @@ FLAT_SPMD does not support material transport; rebuild with COLM_SPMD_MODE=group
 数据同化（`DataAssimilation`）没有被本仓库任何内核预设编译（`create_defineh.bash` 与
 `build_kernel.sh` 都不定义该宏），因此不需要额外门禁；如果以后新增 DA 预设，需要同样加
 flat 拒绝。
+
+### 用最新 HEAD 的 Rust 引擎复验跨节点一致性（2026-10-31，同轮续）
+
+会话早期在 bd 上的跨节点验证用的是当时的源码快照；此后 Rust 侧又加了
+`COLM_UNITCAT_HISTORY_WINDOW` 等改动，因此用**当前 HEAD** 重新上传、编译并在
+`spmdtest/case6`（0.1°、42,208 patch、9 block、河湖开）上重跑整套：
+
+| 配置 | 节点 | rank |
+|---|---|---|
+| base1 | 1 | 1 |
+| r4 | 1 | 4 |
+| r6 | 1 | 6 |
+| r6n2 | 2 | 6（3+3） |
+| r6n3 | 3 | 6（2+2+2） |
+
+结果：
+- 每种配置 30 个输出文件（history + restart/旁车），**两两逐字节相同**；
+- 与**旧二进制**（会话早期同一算例）的 manifest 对比也**全部相同** —— 最新 Rust
+  改动（unitcat 窗口开关等）默认路径下不改变任何输出，跨节点/rank 数一致性保持。
+- 同时用新守卫编译验证了 flat `unstructured` 与 flat `catchment` 预设（均通过；
+  运行期需要本地没有的 catchment/unstructured 算例数据，暂未做运行时验证）。
