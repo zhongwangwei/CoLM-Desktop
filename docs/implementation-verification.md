@@ -41733,3 +41733,43 @@ Rust `richards_solver` 的 `VariableSaturatedRichardsState` 也记录
 
 **未验证**：Tauri 安装包（`.app`/dmg）未重打；未开真实窗口点界面。本轮没有行为改动，只有产物
 重建与文案对齐。
+
+## Rust 跨物理节点实测（bd，LSF + Intel MPI，2026-10-31）
+
+用户指出 bd 可用于 Rust 跨节点测试（GUI 的 remote.json 里已有 bd 的路径与工具链记录），
+本轮在 bd 上把 **当前 HEAD 的 Rust 引擎** 编好并做了多配置对拍。
+
+**环境（实测）**：`bd` = `dq013@211.66.130.146`，登录节点 mgt01（CentOS 8）；
+调度 LSF（`bsub` 在 `/opt/ibm/lsfsuite/lsf/10.1/.../bin`，非登录 shell 要先
+`source /etc/profile`）；Rust 1.97.1 在 `~/.cargo`；`hdf5-metno-src` 要求 CMake ≥ 3.26，
+系统 3.11.4 会失败，必须把 conda 的 `/share/home/dq013/miniconda3-3.12/bin` 放到 PATH 最前；
+Intel MPI 2021.3 在 `/share/apps/lico/intel/oneapi/mpi/2021.3.0`，`mpirun -bootstrap lsf`
+（`module load` 在非交互 ssh 下不生效，直接设 PATH/I_MPI_ROOT/LD_LIBRARY_PATH）。
+构建：`git archive HEAD | gzip` 上传到 `spmdtest/src`，`cargo build --release --locked
+-p colm-runtime --bin colm-rs`，**5m23s** 完成（target 在 `spmdtest/target`）。
+
+**算例**：直接复用 bd 上已有的 `uuu` 区域算例（96.25–104.25°E、37.75–43.25°N、0.25°，
+121 个 patch，mkinidata 产物从旧运行拷入），截成 1 天（2003-02-01→02）以减少排队时间。
+
+**五种并行配置（同一份输入、同一二进制；输出 15 个文件：history 2 + restart/旁车 13）**：
+
+| 配置 | 节点 | 进程数 | 结果 |
+|---|---|---|---|
+| A 单进程（不经 mpirun） | 1 | 1 | 基线 |
+| B `mpirun -n 1` | 1 | 1 | 逐字节 = A |
+| C `mpirun -n 4` | 1（ptile=4） | 4 | 逐字节 = A |
+| D `mpirun -n 4` | 2（node078×2 + node011×2） | 4 | 逐字节 = A |
+| E `mpirun -n 2` | 2（node078 + node011） | 2 | 逐字节 = A |
+
+`sha256` 清单见 `spmdtest/logs/manifest.{A,B,C,D,E}.txt`，**15/15 文件全部相同**
+（A=B=C=D=E）。注意：该算例 landdata 只有 **1 个 block**，所以 rank 分块是平凡的
+（只有 rank0 真正持有 patch，其余 rank 参与 all-gather/barrier 与 IO）；跨节点的 TCP
+rendezvous、每步全量交换与按 rank 的重启/旁车写出路径都被走到，但**"多个 rank 各算一部分
+patch" 的物理并行还需更大的多 block 算例**（例如 0.1° 下经度 ≥72 格或纬度 ≥36 格的区域）。
+
+**顺带修掉的真实 bug（bd 上踩到）**：复用输出目录时，上一次被 kill 的作业会留下
+`.colm-spmd/endpoint`，worker 读到旧端点后一直连旧端口（实测 worker 连 `:46185`、root 在
+`:41525` 等），多进程启动挂死。修复（`crates/colm-spmd/src/lib.rs`）：root 写端点前先删掉
+残留文件；worker **每轮重读端点**而不是钉住第一次读到的地址。新增回归测试
+`a_worker_follows_a_rendezvous_that_root_rewrites`。在 bd 上故意写入过期端点再跑 D，
+作业正常完成，且输出与 A 仍 **15/15 逐字节相同**（`logs/manifest.Dfix.txt`）。

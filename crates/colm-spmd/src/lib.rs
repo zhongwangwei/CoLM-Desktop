@@ -149,6 +149,9 @@ impl Comms {
             .map(str::to_owned)
             .or_else(default_host)
             .unwrap_or_else(|| "127.0.0.1".to_owned());
+        // 上一次运行（可能被 kill 掉）留下的端点文件指向旧端口。worker 先读到它就会一直
+        // 连旧地址；先删掉能把窗口缩到最小，剩下的竞态由 worker 每轮重读端点兜底。
+        let _ = std::fs::remove_file(rendezvous);
         write_rendezvous(rendezvous, &host, port)?;
 
         let deadline = Instant::now() + timeout;
@@ -214,26 +217,11 @@ impl Comms {
 
     fn worker_with_timeout(rendezvous: &Path, info: RankInfo, timeout: Duration) -> Result<Self> {
         let deadline = Instant::now() + timeout;
-        let (host, port) = loop {
-            match std::fs::read_to_string(rendezvous) {
-                Ok(text) => {
-                    let mut lines = text.lines();
-                    let host = lines.next().unwrap_or_default().trim().to_owned();
-                    let port = lines
-                        .next()
-                        .unwrap_or_default()
-                        .trim()
-                        .parse::<u16>()
-                        .with_context(|| {
-                            format!("rendezvous file {} is malformed", rendezvous.display())
-                        })?;
-                    ensure!(
-                        !host.is_empty(),
-                        "rendezvous file {} has an empty host",
-                        rendezvous.display()
-                    );
-                    break (host, port);
-                }
+        // 每轮都重新读端点文件。被 kill 掉的旧运行会留下指向旧端口的端点文件；若只在开头
+        // 读一次、之后一直重试同一个地址，root 覆盖文件后 worker 仍然连不上（bd 上实测挂死）。
+        let mut stream = loop {
+            let (host, port) = match read_endpoint(rendezvous) {
+                Ok(endpoint) => endpoint,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     ensure!(
                         Instant::now() < deadline,
@@ -242,17 +230,37 @@ impl Comms {
                         rendezvous.display()
                     );
                     std::thread::sleep(CONNECT_RETRY);
+                    continue;
                 }
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("cannot read the rendezvous file {}", rendezvous.display())
                     })
                 }
+            };
+            let address = format!("{host}:{port}");
+            match TcpStream::connect(&address) {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    ensure!(
+                        Instant::now() < deadline,
+                        "timed out after {} s connecting to {address} (rendezvous file {})",
+                        timeout.as_secs(),
+                        rendezvous.display()
+                    );
+                    std::thread::sleep(CONNECT_RETRY);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot connect to {address}"))
+                }
             }
         };
-        let address = format!("{host}:{port}");
-        let stream = connect_with_retry(&address, deadline, timeout)?;
-        let mut stream = stream;
+        stream
+            .set_read_timeout(Some(timeout))
+            .context("cannot set the read timeout")?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .context("cannot set the write timeout")?;
         write_handshake(&mut stream, info.rank(), info.size())?;
         read_ack(&mut stream)
             .with_context(|| format!("rank 0 did not acknowledge rank {}", info.rank()))?;
@@ -425,31 +433,32 @@ fn write_rendezvous(path: &Path, host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
-fn connect_with_retry(address: &str, deadline: Instant, timeout: Duration) -> Result<TcpStream> {
-    loop {
-        match TcpStream::connect(address) {
-            Ok(stream) => {
-                stream
-                    .set_read_timeout(Some(timeout))
-                    .context("cannot set the read timeout")?;
-                stream
-                    .set_write_timeout(Some(timeout))
-                    .context("cannot set the write timeout")?;
-                return Ok(stream);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                ensure!(
-                    Instant::now() < deadline,
-                    "timed out after {} s connecting to {address}",
-                    timeout.as_secs()
-                );
-                std::thread::sleep(CONNECT_RETRY);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot connect to {address}"))
-            }
-        }
+/// 读 root 写下的 `host\nport\n`。`NotFound` 原样返回，由调用方决定继续等还是报超时。
+fn read_endpoint(rendezvous: &Path) -> std::io::Result<(String, u16)> {
+    let text = std::fs::read_to_string(rendezvous)?;
+    let mut lines = text.lines();
+    let host = lines.next().unwrap_or_default().trim().to_owned();
+    if host.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("rendezvous file {} has an empty host", rendezvous.display()),
+        ));
     }
+    let port = lines
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<u16>()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "rendezvous file {} is malformed: {error}",
+                    rendezvous.display()
+                ),
+            )
+        })?;
+    Ok((host, port))
 }
 
 fn write_handshake(stream: &mut TcpStream, rank: usize, size: usize) -> Result<()> {

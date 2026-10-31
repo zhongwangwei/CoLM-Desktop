@@ -171,3 +171,42 @@ fn root_times_out_when_a_worker_never_connects() {
     );
     let _ = std::fs::remove_dir_all(rendezvous.parent().unwrap());
 }
+
+fn unused_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a scratch port");
+    listener.local_addr().expect("read the scratch port").port()
+}
+
+#[test]
+fn a_worker_follows_a_rendezvous_that_root_rewrites() {
+    let rendezvous = scratch_rendezvous("stale-endpoint");
+    // 上一次运行（被 kill）会留下指向旧端口的端点文件。worker 先读到它时不能一直连旧地址，
+    // 要随 root 覆盖的新端点重连 —— bd 上真实挂死过（worker 连 46185，root 在 41525 等）。
+    std::fs::write(&rendezvous, format!("127.0.0.1\n{}\n", unused_port()))
+        .expect("write the stale endpoint");
+    let worker = {
+        let rendezvous = rendezvous.clone();
+        std::thread::spawn(move || {
+            let info = RankInfo::new(1, 2).unwrap();
+            let mut comms =
+                Comms::open_with_timeout(&rendezvous, info, None, Duration::from_secs(10))?;
+            comms.barrier()?;
+            Ok::<_, anyhow::Error>(comms)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let info = RankInfo::new(0, 2).unwrap();
+    let mut root = Comms::open_with_timeout(
+        &rendezvous,
+        info,
+        Some("127.0.0.1"),
+        Duration::from_secs(10),
+    )
+    .expect("root must open even when a stale endpoint file exists");
+    root.barrier().unwrap();
+    worker
+        .join()
+        .unwrap()
+        .expect("worker must follow the rewritten endpoint");
+    let _ = std::fs::remove_dir_all(rendezvous.parent().unwrap());
+}
