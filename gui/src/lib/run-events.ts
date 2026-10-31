@@ -63,6 +63,21 @@ export function applyRunEvent(
         ? 'succeeded'
         : 'failed';
     if (payload.reason) next.error = String(payload.reason);
+    // 本机运行结束时后端不再发进度事件：最后一个 `run://progress` 往往落在总数之前
+    // （2026-10-31 实测 1536 步的短算例停在 1304/1536 = 84%），界面上的进度条就一直是
+    // 未满格。成功结束把进度补到计划总数；失败/取消保留停下的位置，那是判断"在哪一步断掉"
+    // 的唯一线索。远程进度的形状不同（嵌在 `progress.remote` 里），这里不动。
+    const progress = next.progress;
+    if (
+      !payload.cancelled &&
+      Number(payload.code) === 0 &&
+      next.location !== 'remote' &&
+      progress &&
+      typeof progress.step === 'number' &&
+      typeof progress.total_steps === 'number' &&
+      progress.step < progress.total_steps
+    )
+      next.progress = { ...progress, step: progress.total_steps };
   }
   return next;
 }

@@ -138,3 +138,51 @@ test('remote start records its operation without switching location to local', (
   assert.equal(run?.location, 'remote');
   assert.equal(run?.operation_id, 'operation');
 });
+
+test('a successful local completion fills the progress bar to the planned step total', () => {
+  // 2026-10-31 实测：1536 步的本机算例跑完时 chip 已是"运行完成"，
+  // 但最后一个 run://progress 是 1304/1536（84%），进度条一直停在未满格。
+  const running = applyRunEvent(undefined, 'run://started', { case: '/case', run_id: 'run' })!;
+  const progressed = applyRunEvent(running, 'run://progress', {
+    case: '/case',
+    run_id: 'run',
+    stage: 'colm',
+    step: 1304,
+    total_steps: 1536,
+  })!;
+  const done = applyRunEvent(progressed, 'run://done', { case: '/case', run_id: 'run', code: 0 })!;
+  assert.equal(done.progress?.step, 1536);
+  assert.equal(done.status, 'succeeded');
+  // 失败/取消保留停下的位置，界面要能看出在哪一步断掉。
+  const failed = applyRunEvent(progressed, 'run://done', {
+    case: '/case',
+    run_id: 'run',
+    code: 1,
+  })!;
+  assert.equal(failed.progress?.step, 1304);
+  const cancelled = applyRunEvent(progressed, 'run://done', {
+    case: '/case',
+    run_id: 'run',
+    code: 0,
+    cancelled: true,
+  })!;
+  assert.equal(cancelled.progress?.step, 1304);
+  // 远程进度嵌在 progress.remote 里，不在这里改。
+  const remote = applyRunEvent(undefined, 'run://started', {
+    case: '/remote',
+    run_id: 'remote',
+    location: 'remote',
+  })!;
+  const remoteProgress = applyRunEvent(remote, 'run://progress', {
+    case: '/remote',
+    run_id: 'remote',
+    step: 3,
+    total_steps: 9,
+  })!;
+  const remoteDone = applyRunEvent(remoteProgress, 'run://done', {
+    case: '/remote',
+    run_id: 'remote',
+    code: 0,
+  })!;
+  assert.equal(remoteDone.progress?.step, 3);
+});
