@@ -14,7 +14,7 @@ MODULE MOD_MT_Defs
       DEF_USE_METHANE, DEF_METHANE_PARAM_FILE, &
       DEF_MT_AQUIFER_MIXING_WATER_MM, &
       DEF_ISO_USE_FRACTIONATION, DEF_ISO_REF_RATIO_H2_18O, DEF_ISO_INIT_DELTA_H2_18O, &
-      DEF_ISO_REF_RATIO_HDO, DEF_ISO_INIT_DELTA_HDO
+      DEF_ISO_REF_RATIO_HDO, DEF_ISO_INIT_DELTA_HDO, mt_any_enabled
    USE, INTRINSIC :: IEEE_ARITHMETIC, only: ieee_is_finite
 
    IMPLICIT NONE
@@ -286,6 +286,15 @@ CONTAINS
       character(len=32), allocatable :: iso_tokens(:), sol_tokens(:)
 
       CALL mt_read_namelist ()
+
+#ifdef FLAT_SPMD
+      ! 本仓库的 FLAT_SPMD 只维护单进程、且没有验证材料输送：material history 与
+      ! 河湖/示踪物重启仍按上游 master/worker 互斥收发，flat 下会向自己发送而
+      ! 无人接收。启动时明确拒绝，避免挂死或留下错配消息。
+      IF (mt_any_enabled()) THEN
+         CALL CoLM_stop ('FLAT_SPMD does not support material transport; rebuild with COLM_SPMD_MODE=grouped')
+      ENDIF
+#endif
 
       IF (allocated(materials)) RETURN   ! already initialised (e.g. by earlier all-rank call)
 

@@ -42040,3 +42040,20 @@ master/worker 假设影响的组合，启动时显式拒绝而不是让它们留
 
 flat `unstructured` 内核已用该守卫编过（编译通过）。flat 支持面因此明确为：
 **单进程、gridded history、无材料输送/无数据同化**；多进程和其余特性走 grouped。
+
+### flat 的材料输送门禁（2026-10-31，同轮续）
+
+材料输送（isotope/solute/methane/sediment）的 history 与重启收发同样按上游
+master/worker 互斥编写，flat 单进程会向自己发送而无人接收。已在
+`MOD_MT_Defs:material_defs_init`（`mt_read_namelist` 之后）加 flat 门禁：
+
+```
+FLAT_SPMD does not support material transport; rebuild with COLM_SPMD_MODE=grouped
+```
+
+实测：flat 1 rank 正常算例不受影响；同算例在 `&nl_colm_material` 里打开
+`DEF_SOLUTE_NAMES='CL'` 后，flat 启动即给出上面这句错误。
+
+数据同化（`DataAssimilation`）没有被本仓库任何内核预设编译（`create_defineh.bash` 与
+`build_kernel.sh` 都不定义该宏），因此不需要额外门禁；如果以后新增 DA 预设，需要同样加
+flat 拒绝。
