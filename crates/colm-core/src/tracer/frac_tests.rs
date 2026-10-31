@@ -155,3 +155,43 @@ fn nss_returns_source_ratio_when_inactive() {
     assert_eq!(out.new_peclet, 1.0);
     assert_eq!(out.new_leaf_moles, 0.0);
 }
+
+/// 上游的 NSS 历史项只读**上一时刻的叶水整体** δb（`prev_w*(δb-δx)`），
+/// 不再读蒸发端元 δe、也不乘 Péclet。这条单测用"只改 prev_delta_e"与
+/// "只改 prev_delta_b"两种输入把两种写法区分开：改 δe 不应影响结果，改 δb 必须影响。
+#[test]
+fn nss_memory_reads_the_previous_bulk_leaf_delta_only() {
+    let physics = TracerPhysics {
+        fractionation: true,
+        ..TracerPhysics::default()
+    };
+    let tracer = isotope("O18", RSMOW_18O);
+    let leaf_moles = 2.0 * 0.12 * 55.5;
+    let input = |prev_delta_e: f64, prev_delta_b: f64| NssInput {
+        source_ratio: RSMOW_18O,
+        vapor_ratio: RSMOW_18O * 0.99,
+        temp_k: 290.0,
+        relhum: 0.6,
+        psrf: 1.0e5,
+        transp_water: 0.1,
+        deltim: 1800.0,
+        leaf_area: 2.0,
+        aerodynamic_resistance: 50.0,
+        stomatal_resistance: 100.0,
+        prev_delta_e,
+        prev_delta_b,
+        prev_peclet: 0.5,
+        prev_leaf_moles: leaf_moles,
+    };
+    let base = physics.transpiration_nss_ratio(&tracer, &input(-10.0, -10.0));
+    let other_e = physics.transpiration_nss_ratio(&tracer, &input(-50.0, -10.0));
+    let other_b = physics.transpiration_nss_ratio(&tracer, &input(-10.0, -30.0));
+    assert_eq!(
+        base.new_delta_e, other_e.new_delta_e,
+        "the old evaporation end member must not enter the memory term"
+    );
+    assert_ne!(
+        base.new_delta_e, other_b.new_delta_e,
+        "the old bulk leaf delta is the memory term"
+    );
+}

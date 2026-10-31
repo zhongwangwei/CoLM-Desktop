@@ -42173,3 +42173,25 @@ seconds=0`）比较，永远不相等 → 全部步都跑过、却没有一步�
 这是一处**已确认的 MT 实现差异**，不是 host 残差；下一步应逐函数对读
 `material_alpha_kinetic_leaf`、`material_jm84_effective_alpha`、叶片水 NSS 与
 `f_mt_delta_evap` 的定义，判定哪一边符合上游并修 Rust（或记录上游 bug）。
+
+### NSS 历史项对齐上游（2026-10-31，同轮续）
+
+对读 Fortran `material_transpiration_nss_ratio` 与 Rust
+`TracerPhysics::transpiration_nss_ratio`，发现 Rust 的历史项还是**旧写法**：
+`prev_p * prev_w * (prev_delta_e - delta_x)`，而上游已经改成
+`prev_w * (prev_delta_b - delta_x)`：
+
+- 存的是上一时刻的**叶水整体** δb，不是蒸发端元 δe，也不再乘 Péclet；
+- `prev_w` 一律取当前叶水诊断尺寸 W（LAI·nss_leaf_water_per_lai），因为 LAI 变化时
+  叶水保持同位素比值、只改变尺寸；旧写法把 LAI 阶跃当成储量变化（上游在 NEC 例子中
+  实测到 +530~+1700‰ 的错误）。
+
+已把 Rust 改成上游公式，并加单测
+`nss_memory_reads_the_previous_bulk_leaf_delta_only`：只改 `prev_delta_e` 不改变结果、
+改 `prev_delta_b` 必须改变结果。`colm-core` 530 项测试通过。
+
+**但**在 host 逐位一致的一步对照里，Rust 与 Fortran 的 `f_mt_leaf_delta_e/b`、
+`delta_evap` 仍差 0.45~2.8‰（改动前后数值完全一样；这一步 `prev_leaf_moles` 为真，
+说明差异不在历史项）。下一步是给两边 NSS 加同格式的输入/输出探针（xylem ratio、
+vapor ratio、tleaf、relhum、ra、rst、transp、prev 状态、αk、peclet），在同一
+patch/step 上逐项对读，定位是输入取法还是 `alpha_k`/液态扩散系数不同。

@@ -437,20 +437,15 @@ impl TracerPhysics {
         let peclet = peclet.max(0.0).min(1.0);
         out.new_peclet = peclet;
 
-        let (prev_w, prev_e, prev_p) = if input.prev_leaf_moles > TRC_TINY {
-            let leaf_moles_ratio = input.prev_leaf_moles / leaf_moles.max(TRC_TINY);
-            let prev_w = if leaf_moles_ratio > 0.25 && leaf_moles_ratio < 4.0 {
-                input.prev_leaf_moles
-            } else {
-                leaf_moles
-            };
-            (
-                prev_w,
-                input.prev_delta_e,
-                input.prev_peclet.max(0.0).min(1.0),
-            )
+        // 上游（`material_transpiration_nss_ratio`）把历史项定义为
+        // `prev_w * (prev_delta_b - delta_x)`：存的是**上一时刻的叶水整体** δb，
+        // 不是蒸发端元 δe，也不再乘 Péclet。W = LAI * nss_leaf_water_per_lai 是诊断
+        // 尺寸而非宿主水量，LAI 变化时叶水按当前 W 取上一状态（否则 LAI 阶跃会被当成
+        // 同位素储量变化，上游在 NEC 例子上实测到 +530~+1700‰ 的错误）。
+        let (prev_w, prev_bulk_delta) = if input.prev_leaf_moles > TRC_TINY {
+            (leaf_moles, input.prev_delta_b)
         } else {
-            (leaf_moles, delta_x, peclet)
+            (leaf_moles, delta_x)
         };
 
         let gross_moles = transp_moles / one_minus_h;
@@ -467,7 +462,7 @@ impl TracerPhysics {
         let relax_b = (alpha_k * alpha_eq) / gross_moles;
         let denom = (leaf_moles * relax_b).contract(peclet, 1.0);
         out.new_delta_e = if denom > TRC_TINY {
-            let memory = (prev_p * prev_w) * (prev_e - delta_x);
+            let memory = prev_w.contract(prev_bulk_delta, -delta_x);
             let numerator = (leaf_moles * peclet).contract(delta_x, memory);
             numerator.contract(relax_b, delta_es) / denom
         } else {
