@@ -2377,6 +2377,7 @@ fn run_spatial_segment(
         || runtime.river().is_some()
         || logical_field(document, "DEF_Optimize_Baseflow")?;
     runtime = runtime.with_patch_outputs_required(patch_outputs_required);
+    let window_end = clock_style_end(config.end);
     let steps = runtime.run(
         &templates,
         &mut states,
@@ -2388,7 +2389,7 @@ fn run_spatial_segment(
                 carry.merge(source);
             }
             let step = steps[0];
-            let need_snapshots = step.clock.write_restart || step.clock.end_time == config.end;
+            let need_snapshots = step.clock.write_restart || step.clock.end_time == window_end;
             let snapshots = if need_snapshots {
                 Some(
                     states
@@ -2410,7 +2411,7 @@ fn run_spatial_segment(
                             // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
                             snapshot.lai_refreshed = step.clock.update_lai
                                 && !(segment.end == SegmentEnd::Lulcc
-                                    && step.clock.end_time == config.end);
+                                    && step.clock.end_time == window_end);
                             Ok(snapshot)
                         })
                         .collect::<Result<Vec<_>>>()?,
@@ -2475,7 +2476,7 @@ fn run_spatial_segment(
                     }
                 }
             }
-            if step.clock.end_time == config.end {
+            if step.clock.end_time == window_end {
                 last = snapshots;
             }
             Ok(())
@@ -6244,6 +6245,36 @@ fn normalized_day_end(time: CalendarTime) -> CalendarTime {
             julian_day: time.julian_day + 1,
             seconds: 0,
             ..time
+        }
+    }
+}
+
+/// `colm_core::RuntimeClock` 把 `sec = 0` 的窗口终点改写成**前一天 86400 秒**
+/// （上游 `adj2end` 的表示），逐 step 的 `clock.end_time` 也用这一种表示。
+/// 拿它和原始 `config.end`（sec = 0）比较永远不相等：`DEF_simulation_time%end_sec=0`
+/// 的算例会跑完全部步却报 "the window produced no step"，1 天窗口的 MT 算例就是这么
+/// 暴露的。把 `config.end` 换成时钟的表示后再比较；写文件用的日期仍走
+/// `normalized_day_end`（进位的次日 0 秒）。
+fn clock_style_end(time: CalendarTime) -> CalendarTime {
+    if time.seconds != 0 {
+        return time;
+    }
+    if time.julian_day > 1 {
+        CalendarTime {
+            julian_day: time.julian_day - 1,
+            seconds: 86_400,
+            ..time
+        }
+    } else {
+        // 跨年时要用**上一年**的天数：2004-01-01 的 sec=0 终点落在 2003 年第 365 天，
+        // 而 2005-01-01 落在闰年 2004 的第 366 天。
+        let previous_year = time.year - 1;
+        let previous_leap =
+            previous_year % 4 == 0 && (previous_year % 100 != 0 || previous_year % 400 == 0);
+        CalendarTime {
+            year: previous_year,
+            julian_day: if previous_leap { 366 } else { 365 },
+            seconds: 86_400,
         }
     }
 }

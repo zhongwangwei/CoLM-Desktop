@@ -42104,3 +42104,45 @@ flat 拒绝。
   240 秒内没有输出任何 TIMESTEP（超时被 SIGKILL），与早期"跑完 48 步后卡在收尾"的
   现象不一致，属于**启动阶段就受阻**；登录节点不适合做这类复测，需要正规节点分配后
   再测。该问题仍保持"未定论"。
+
+### Rust 的午夜窗口终点 bug（`DEF_simulation_time%end_sec = 0`，2026-10-31，同轮续）
+
+为了隔离 MT 数值差异，把格点算例改成 1 天窗口（`end_day=2, end_sec=0`）。Fortran 正常
+跑 48 步；Rust 同样打印 48 步却报
+`the window produced no step, so there is no evolved state to write back`（exit 1）。
+
+根因：`RuntimeClock` 用上游 `adj2end` 的表示，把 `sec=0` 的终点改写成**前一天 86400 秒**
+（`end_style`），逐 step 的 `clock.end_time` 也是这个表示；而 `colm-rs` 在
+`step.clock.end_time == config.end` 处拿它与**原始**的 `config.end`（`julian_day=2,
+seconds=0`）比较，永远不相等 → 全部步都跑过、却没有一步被认作终点，状态写不回去。
+`end_sec=86400` 的常规算例不受影响（两种表示恰好相同），所以之前没暴露。
+
+修法：在 `colm-rs` 里加 `clock_style_end`，把 `config.end` 换成时钟表示后用于三处终点
+判断（`need_snapshots`、`lai_refreshed`、`last = snapshots`）；写文件仍然用
+`normalized_day_end`（进位的次日 0 秒）。顺带处理跨年（要用**上一年**的天数：2004-01-01
+的 0 秒终点落在 2003 年第 365 天，2005-01-01 落在闰年 2004 的第 366 天）。
+
+验证：
+- 新增两个单测（跨年天数边界 + 用 `RuntimeClock` 实跑确认最后一步 `end_time` 等于
+  `clock_style_end`）；
+- 1 天非 MT 格点算例 Rust 现在 48 步正常完成，续跑目录 `2005-002-00000` 与 Fortran 同名；
+- 1 天 MT 同位素算例 Rust 也能完成（修复前直接报上面那条错误）。
+
+### MT 分馏路径（格点同位素 + 合成 delta 强迫）尝试与结论（2026-10-31，同轮续）
+
+为覆盖分馏，搭了一个 1° 3×3 格点同位素算例：
+
+- 在 `tmp/mt-iso-forcing/` 里用符号链接接上 JRA3Q 主强迫，另写合成
+  `IsoGSM_prate_YYYY_MM.nc` / `IsoGSM_Q_YYYY_MM.nc`（两份 delta 常量：降水 -10‰、水汽 -15‰，
+  网格沿用 JRA3Q 480×960，只留 2 个时间片）；
+- `&nl_colm_material` 打开 H2_18O、`DEF_ISO_USE_FRACTIONATION=.true.`、aquifer mixing=1 mm；
+  `&nl_colm_isotope_parameter` + `&nl_colm_mt_forcing` 放在参数文件里，
+  role=`precip`/`vapor`、`forcing_input_mode='delta'`；
+- Fortran grouped 3 rank 与 Rust 1 process 都能跑完（1 天/3 天两种窗口）。
+
+数值结论（1 天窗口，host 残差本身只有 1e-6 级）：material 的**质量/通量类**变量差 ~1e-7
+（`f_mt_evap_mass` 最大 2.2e-7），浓度类 ~1e-7~1e-5；但 `f_mt_delta_*`/leaf delta 在
+1~6‰、`delta_subl` 到 47‰ —— 这些是**两个近零量相除**的诊断量，host 水量差 1e-6 就会把
+比值放大到 O(1)。因此只能说"质量记账在 host 残差水平上一致"，**分馏实现的逐位一致性仍未
+证明**；要证明它需要 host 完全一致的对照（例如固定 host 状态回放）或更大的示踪信号算例。
+这一点保持"未定论"，不要把它当成 FLAT/MT 的回归依据。

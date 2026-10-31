@@ -126,3 +126,74 @@ fn spmd_rendezvous_path_is_unique_per_slurm_job_and_step() {
     });
     assert_eq!(custom, std::path::PathBuf::from("/shared/endpoint"));
 }
+
+/// 实测过的上游行为：`DEF_simulation_time%end_sec = 0` 时，Fortran 的
+/// `2005-01-01 00:00 → 2005-01-02 00:00` 窗口跑 48 个 30 分钟步，最后一步的
+/// `end_time` 在 `RuntimeClock` 里记成「1 月 1 日 86400 秒」。逐个 step 的
+/// `end_time` 必须用同一种表示去比较，否则窗口跑完也认为没跑过任何一步。
+#[test]
+fn a_midnight_window_end_is_compared_in_the_clock_representation() {
+    use colm_core::{CalendarTime, RuntimeClock};
+
+    let start = CalendarTime {
+        year: 2005,
+        julian_day: 1,
+        seconds: 0,
+    };
+    let end = CalendarTime {
+        year: 2005,
+        julian_day: 2,
+        seconds: 0,
+    };
+    let clock_end = clock_style_end(end);
+    assert_eq!(
+        clock_end,
+        CalendarTime {
+            year: 2005,
+            julian_day: 1,
+            seconds: 86_400
+        }
+    );
+
+    let mut clock = RuntimeClock::new(start, end, start, 1800.0, 0).unwrap();
+    let mut last = None;
+    while let Some(step) = clock.next_step() {
+        last = Some(step.end_time);
+    }
+    assert_eq!(
+        last,
+        Some(clock_end),
+        "the window must end at the clock's own representation"
+    );
+}
+
+/// 年初的 `sec = 0` 终点要落到上一年的最后一天 86400 秒（闰年 366）。
+#[test]
+fn a_new_year_midnight_end_falls_back_to_the_previous_year() {
+    let end = CalendarTime {
+        year: 2004,
+        julian_day: 1,
+        seconds: 0,
+    };
+    assert_eq!(
+        clock_style_end(end),
+        CalendarTime {
+            year: 2003,
+            julian_day: 365,
+            seconds: 86_400
+        }
+    );
+    let leap_end = CalendarTime {
+        year: 2005,
+        julian_day: 1,
+        seconds: 0,
+    };
+    assert_eq!(
+        clock_style_end(leap_end),
+        CalendarTime {
+            year: 2004,
+            julian_day: 366,
+            seconds: 86_400
+        }
+    );
+}
