@@ -42195,3 +42195,21 @@ seconds=0`）比较，永远不相等 → 全部步都跑过、却没有一步�
 说明差异不在历史项）。下一步是给两边 NSS 加同格式的输入/输出探针（xylem ratio、
 vapor ratio、tleaf、relhum、ra、rst、transp、prev 状态、αk、peclet），在同一
 patch/step 上逐项对读，定位是输入取法还是 `alpha_k`/液态扩散系数不同。
+
+### NSS 输入探针：调用次数本身就不一样（2026-10-31，同轮续）
+
+给两边 NSS 加了同格式的 `NSSDBG` 探针（Fortran `MOD_MT_Frac`、Rust `frac.rs`，
+`COLM_DEBUG_NSS` 开关；读完已删除，vendor 未留改动），用 host 一致的 1 步窗口对照：
+
+- **Fortran 一次 30 分钟步调用 NSS 22 次；Rust 只有 2 次**（换成 2 步窗口则是 38 vs 18）。
+  两边 host 逐位一致，所以这不是"哪些 patch 有蒸腾"的差别，而是**进入 NSS 的判定/调用路径
+  不同** —— Rust 对绝大多数 patch 根本没算非稳态叶水，叶水 δ 自然停在初值/源端，
+  这正是 history 里 `f_mt_leaf_delta_e` 差到 9.97‰ 的主因。
+- 唯一一条输入逐位相同的记录（`prev_leaf_moles=0`，src/vap/tk/rh/psrf/lai/ra/rst 全同）：
+  Fortran 输出 `δe=δb=-11.6684‰`（用了 4.32e-10 的储量倾向），Rust 输出 `δe=δb=-11.6711‰`
+  （等于源端 δ，说明它走了储量跳变 fallback 把倾向清零）。两边 `peclet`、`leaf_moles`
+  一致，差异在调用路径/储量分支，不是 α 或扩散系数公式。
+
+下一步：在两边 caller 侧按 patch 打印"是否满足 `transp_frac_active`、是否传入
+tleaf/forc_q/forc_psrf/lai/rst、是否 allocated(mt_leaf_delta_e)"，找出 Rust 少算的 patch
+集合，再修 Rust 的调用条件或 step 路径。
