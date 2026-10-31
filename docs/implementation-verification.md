@@ -41931,7 +41931,12 @@ tier2 外、差异 1e-4~1e-5 相对，正是这个口径差，不是物理差异
 - 夏季：陆面 **41/127**、河道 5/5（河道为口径差；陆面是 VSF/迭代舍入放大）。
 下一步要么让 Rust 在需要时也写 grouped 的全球 unitcat 窗口（增加开关），要么用
 **flat Fortran** 做河道对照 —— 后者目前被已知的 flat 河湖 IO 死锁挡住（`vector_read_matrix_and_scatter`
-的 MPI send），属上游/vendor 层问题，需维护者决定是否修。
+的 MPI send）。**更正：这不是上游问题** —— `FLAT_SPMD` 是本仓库自己加的并行路径（提交
+`11258846` 起；上游 CoLM-SYSU-integration 没有这个宏，见第 462 轮记录），flat 模式下
+rank0 同时是 master 和 worker，本仓库的 flat 分支让 rank0 向自己阻塞发送大消息、而接收在
+其后的 master 分支里，形成自发送死锁。因此**不应上报上游**，应在本地修：flat 模式下让
+rank0 直接就地拷贝自己的份额（不经过 MPI），master 的接收循环只数远端 worker；同类
+`vector_*` 读写路径需要一起审计。
 
 ### Rust 引擎新增可选"global unitcat 窗口"（2026-10-31，同轮续）
 
