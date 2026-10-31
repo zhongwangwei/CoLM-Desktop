@@ -41814,3 +41814,30 @@ landpatch block**，SPMD 直接拒绝 6 进程（`4 landpatch blocks cannot be s
 - 这次 rank 分块不是平凡的：9 个 block 分给 6 个 rank（每个 rank 1–2 个 block，rank0
   本地 2 个 block、8,570 patch），确实走了"各 rank 各算一部分 patch、每步全量交换"的路径。
 - 位置：`spmdtest/case6/{case,shared,run-*}`；日志 `spmdtest/logs/case6.*.log`。
+
+## 为什么站点黄金的差异看起来变大：本机默认内核漏了对齐标志（2026-10-31）
+
+维护者指出站点 tier2 外 4/23/51、格点 39/140 仍偏大。复查发现**这不是 Rust 侧的新差异**，
+而是本机默认 Fortran 内核没有对齐：
+
+- 当前 Mac 是 Homebrew GCC **16.1.0**（arm64）。`-O2` 会做自动向量化/重结合；`build_kernel.sh`
+  里"关向量化以对齐 Rust 标量 libm"的那段只对 **Linux x86_64** 生效（`uname -s = Linux`），
+  macOS arm64 走了默认 `-O2`（向量化）。
+- 用默认内核重跑三份黄金（`golden-run <case> --kernel kernels/default`）再与当前 Rust 输出对账：
+  CN-Cng **59** 项、CN-Cng-wet **69** 项（更早的 wet 23 此刻也变成 69）；
+- 用 `COLM_KERNEL_EXTRA_FFLAGS=-fno-tree-vectorize` 重建生产内核后，同样三份算例：
+  **CN-Cng 4 项、CN-Cng-wet 23 项、US-NR1-snow 64 项**（tier2 外），恢复到此前记录的
+  4/23/51 量级；
+- 直接对照还证明：`-O0` 内核与 Rust 只差 2 项 tier2，而 `-O2`（向量化）内核与 Rust 差 59/69 项
+  —— 差异几乎全部来自 Fortran 侧的向量化代码生成，而不是 Rust 的移植。
+
+**修复**：`oracle/scripts/build_kernel.sh` 把 `-fno-tree-vectorize` 的适用平台从
+Linux x86_64 扩展到 **Linux/Darwin 全部架构**（`COLM_KERNEL_VECTORIZE=1` 仍可显式保留向量化），
+本机 `kernels/default` 已按新脚本重建；三份黄金重量后恢复 4/23/64（snow 64 与旧 51 的差别
+来自 GCC 16 与旧版编译器的代码生成差异，量级相同）。
+
+**需要维护者决定**：`oracle/golden/*.nc` 现有三份是在**向量化**内核下生成的，与对齐内核的
+输出不再逐位一致（tier2 有 59/69 项量级差异）。若要继续用黄金做 Rust 对账，建议用对齐内核
+重新生成三份 golden 与 `oracle/golden/kernel-manifest.json`（属多文件、会更新验证基准，
+按仓库规矩先报方案）。格点 39/140 也需要用对齐后的 `latlon` 内核重测（此前 39/140 很可能同样
+混入了向量化差异），本轮正在重编 `kernels/latlon` 后复测。

@@ -345,9 +345,14 @@ fi
 # 整天 159 个变量逐位一致（docs/implementation-verification.md 第 649 轮）。
 # COLM_KERNEL_VECTORIZE=1 保留向量化（要速度、不要与 Rust 对拍时）。
 EXTRA_FF=""
-if [ "$(uname -s)" = Linux ] && [ "${COLM_KERNEL_VECTORIZE:-}" != 1 ]; then
-  case "$(uname -m)" in
-    x86_64|amd64) EXTRA_FF="-fno-tree-vectorize" ;;
+# 对齐 Rust 的标量运算：任何平台都关自动向量化（GCC 12+ 的 -O2 就会向量化，
+# 循环里的 exp/log/pow 被换成向量版 libm，与 Rust 调的标量 libm 差 1 ULP；
+# 且在 macOS arm64 上 GCC 16 的 -O2 向量化/重结合会让站点黄金与 Rust 的差异
+# 从 tier2 的 4/23 项放大到 59/69 项 —— 实测见 docs/implementation-verification.md）。
+# 需要速度不要对拍时用 COLM_KERNEL_VECTORIZE=1。
+if [ "${COLM_KERNEL_VECTORIZE:-}" != 1 ]; then
+  case "$(uname -s)" in
+    Linux|Darwin) EXTRA_FF="-fno-tree-vectorize" ;;
   esac
 fi
 # COLM_KERNEL_EXTRA_FFLAGS：额外的编译选项，原样追加（调试和对拍用）。
