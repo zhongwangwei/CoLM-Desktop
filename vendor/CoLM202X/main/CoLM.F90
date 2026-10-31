@@ -208,6 +208,13 @@ PROGRAM CoLM
       IF (p_np_glb > 1) THEN
          CALL CoLM_stop ('FLAT_SPMD kernels run one process per case; rebuild with COLM_SPMD_MODE=grouped for multi-rank runs')
       ENDIF
+#if (defined UNSTRUCTURED || defined CATCHMENT)
+      ! 向量 history 的写出仍按上游 master/worker 收发，flat 单进程下会向自己
+      ! 发送而不接收（消息遗留）；这些内核请用 gridded history 或 grouped 构建。
+      IF (DEF_HISTORY_IN_VECTOR) THEN
+         CALL CoLM_stop ('FLAT_SPMD does not support DEF_HISTORY_IN_VECTOR; set it to .false. or rebuild with COLM_SPMD_MODE=grouped')
+      ENDIF
+#endif
 #endif
 
 #ifndef SinglePoint

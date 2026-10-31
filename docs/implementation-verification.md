@@ -42025,3 +42025,18 @@ FLAT_SPMD kernels run one process per case; rebuild with COLM_SPMD_MODE=grouped 
 - 站点内核重建后二进制 `built_with` 与 golden 记录**完全相同**（FLAT_SPMD 代码不参与站点编译），
   重生成的三份 golden 变量内容与上一提交**逐变量相同**，`kernel-manifest.json` 刷新；
   Rust 对 golden 仍为 4/23/64。
+
+### flat 模式的最后边界（2026-10-31，同轮续）
+
+在"单进程 + 无材料输送 + gridded history"之外，flat 构建还有两类会被上游
+master/worker 假设影响的组合，启动时显式拒绝而不是让它们留下错配消息：
+
+- `DEF_HISTORY_IN_VECTOR=.true.`（只对 UNSTRUCTURED / CATCHMENT 内核）：向量 history
+  写出仍是 master/worker 收发，flat 单进程会向自己发送而无人接收 → 直接
+  `CoLM_stop`，提示改用 gridded history 或 grouped；
+- 材料输送（`DEF_USE_ISOTOPE` / `DEF_USE_METHANE` / `DEF_SOLUTE_NAMES`）与数据同化的
+  flat 组合**尚未验证**，使用者应改用 grouped；本轮没有给它们加运行时门（它们的
+  namelist 模块不在主程序里，需要单独接线）。
+
+flat `unstructured` 内核已用该守卫编过（编译通过）。flat 支持面因此明确为：
+**单进程、gridded history、无材料输送/无数据同化**；多进程和其余特性走 grouped。
