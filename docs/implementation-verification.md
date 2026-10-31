@@ -41840,4 +41840,7 @@ Linux x86_64 扩展到 **Linux/Darwin 全部架构**（`COLM_KERNEL_VECTORIZE=1`
 输出不再逐位一致（tier2 有 59/69 项量级差异）。若要继续用黄金做 Rust 对账，建议用对齐内核
 重新生成三份 golden 与 `oracle/golden/kernel-manifest.json`（属多文件、会更新验证基准，
 按仓库规矩先报方案）。格点 39/140 也需要用对齐后的 `latlon` 内核重测（此前 39/140 很可能同样
-混入了向量化差异），本轮正在重编 `kernels/latlon` 后复测。
+混入了向量化差异）。`kernels/latlon` 已按新脚本重建，但本机 Fortran 格点算例在
+"Making areal weighted mapping between pixel set and grid" 一段停住超过 20 分钟（72×36=2592 个
+block 的装配阶段，进程仍存活、日志不再前进），已中止；格点重测留待下一轮（先确认该装配阶段
+为何变慢，再取对齐后的 39/140 数字）。
