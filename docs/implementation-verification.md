@@ -41773,3 +41773,23 @@ patch" 的物理并行还需更大的多 block 算例**（例如 0.1° 下经度
 残留文件；worker **每轮重读端点**而不是钉住第一次读到的地址。新增回归测试
 `a_worker_follows_a_rendezvous_that_root_rewrites`。在 bd 上故意写入过期端点再跑 D，
 作业正常完成，且输出与 A 仍 **15/15 逐字节相同**（`logs/manifest.Dfix.txt`）。
+
+## 线程级并行不变性：`RAYON_NUM_THREADS` 1/2/4/8 与 `COLM_RESTART_WRITERS` 1/4（2026-10-31）
+
+补上之前"线程数只有零散实测"的缺口。Rust 引擎的共享内存并行有两处可调：`RAYON_NUM_THREADS`
+（patch 推进、河网按单元并行、history 汇总）和 `COLM_RESTART_WRITERS`（restart 写线程池，默认 4）。
+同一个算例、同一份输入、同一 `colm-rs` 二进制，只改这两个环境变量：
+
+**本地 `rivsmall`**（48 patch、4 block、河湖流开、96 步 = 1 天）：六次运行
+`RAYON_NUM_THREADS=1/2/4/8` 与 `COLM_RESTART_WRITERS=1/4`，每次输出 22 个文件
+（2 history + 20 restart/旁车），`shasum -a 256` 清单**两两逐字节相同**
+（`tmp/thr-sweep/manifest.{t1,t2,t4,t8,w1,w4}.txt`）。
+
+**bd `uuu` 区域**（121 patch、河湖流开、96 步 = 1 天，release 二进制）：同样六种配置
+（`RAYON_NUM_THREADS=1/2/4/8`、`COLM_RESTART_WRITERS=1/4`），每次 15 个输出文件
+（2 history + 13 restart/旁车），sha256 清单**两两逐字节相同**
+（`spmdtest/logs/thread-manifest.{t1,t2,t4,t8,w1,w4}.txt`；LSF 作业 235756，单节点 8 槽）。
+
+结合前面的 rank/节点扫描，Rust 并行三层（线程级、进程级 SPMD、外层算例并发）里前两层的
+可调维度现在都有逐字节证据：**线程数、写线程数、rank 数、节点数都不改变输出字节**。
+未测的是这几种维度的组合（例如 8 rank × 8 线程，或多 block 大算例下的线程扩展性）。
