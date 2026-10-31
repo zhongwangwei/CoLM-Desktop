@@ -41844,3 +41844,16 @@ Linux x86_64 扩展到 **Linux/Darwin 全部架构**（`COLM_KERNEL_VECTORIZE=1`
 "Making areal weighted mapping between pixel set and grid" 一段停住超过 20 分钟（72×36=2592 个
 block 的装配阶段，进程仍存活、日志不再前进），已中止；格点重测留待下一轮（先确认该装配阶段
 为何变慢，再取对齐后的 39/140 数字）。
+
+**格点重测遇阻（同轮）**：对齐后 `kernels/latlon` 重建完成，但本机 Fortran 格点算例
+（river 开，`DEF_UnitCatchment_regional=.true.`）在
+`Making areal weighted mapping between pixel set and grid: 720 grids in latitude 1440 ...`
+之后不再前进：
+- 进程存活、`lsof` 看不到数据文件句柄（卡在计算而非 I/O）；
+- 用 05:16 曾 9 秒跑完的同一个算例副本（`tmp/kern-test`）复现同样卡住；
+- 用 `COLM_KERNEL_VECTORIZE=1` 的旧构建方式重建 `latlon` 再跑，**仍然卡在同一位置**
+  ——排除今天 `-fno-tree-vectorize` 改动导致；
+- 同一份 landdata、同一 namelist（只差输出路径）在 05:16 能跑完，说明是当前
+  环境/构建与 `MOD_SpatialMapping` 某处（很可能是 `DO WHILE`/`insert_into_sorted_list`
+  的数据相关死循环）相互作用，需要下一轮用调试内核（打印循环计数）定位。
+格点 39/140 的对齐后数字因此**仍未取到**，不能拿旧数字当结论；站点三条结论不受影响。
