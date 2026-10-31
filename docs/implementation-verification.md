@@ -41673,3 +41673,63 @@ Rust `richards_solver` 的 `VariableSaturatedRichardsState` 也记录
 - 7920 工作站只有 gfortran+netCDF-C，缺 netCDF-Fortran/MPI；已探测到可用
   `apt-get download` 免 root 方案，但最终多 node 验证在 tms17 集群完成；
 - 主 history 变量顺序（cosmetic）。
+
+## GUI 产物随引擎源码重建（2026-10-31）
+
+**触发**：引擎侧连续几轮（上游 e766527a 同步、river/sediment/reservoir 移植、材料 history 改名、
+湿雪散射、汇流河宽等）只改了 `crates/` 与 `vendor/`，GUI 侧仍是 10-28 的产物：
+`gui/src-tauri/binaries/` 的 6 个 release sidecar 与 `colm-build-source.json`、
+`gui/src-tauri/engine/` 的源码包和 docs 快照。GUI 的"官方程序必须由当前源码编译"校验因此会失败
+（`colm-cli` 的 `verify_build_stamp`），冻结模型/运行身份这类操作会被拒。
+
+**检查结论（实测）**：
+
+- 旧 stamp 的 `source_sha256 = e4307f37…`，与当前源码不符。重建后 staged `colm-cli` 的
+  `model-list` 报出 official `source_sha256 = 443abf74…`，与新的 `colm-build-source.json`
+  完全一致，身份校验重新成立。
+- `docs/knowledge-sources.json` 绑定的 10 个源文件里 5 个字节已变（`colm-case/src/parameters/mod.rs`、
+  `tuning.rs`、`colm-hist/src/obs.rs`、`colm-runtime/src/history.rs`、`MOD_Hist.F90`）。逐条核对
+  知识卡引用的符号与口径仍成立（`set_lct_energy_fluxes`/`set_lct_balance_errors`/
+  `validate_case_parameter_activity`/GPP 换算 `1e6/12.011`/`f_gpp`、`f_assim`、`f_xerr`、`f_zerr`
+  等输出名都在），才用 `scripts/bind-knowledge.py --reviewed` 重绑，`--check` 复验 `matched`。
+- 比较页（GUI 功能）内嵌的两个 Python 脚本与回归测试仍写 `<case>_hist_tracer_`，而引擎已把材料
+  文件统一改名为 `<case>_hist_material_`（第 9e3cc60c 轮）。族识别本来就按文件名通用（旧的
+  `_hist_tracer_` 文件仍会作为独立族报出来），所以只改注释、报错提示与测试夹具，不改行为。
+- 命令契约 263 条、`check-gui` 无 diff；前端 `typecheck/lint/format:check` 与 1348 个测试全过；
+  后端 594 passed / 7 个既有沙箱失败（`sidecar_tests` 的进程可执行路径探测被拒，与既有记录同因）。
+- `history-variables.ts` 的 40 条手工 `long_name` 与 `colm-hist` 生成表有 23 处不同，核对后判定
+  为界面刻意的更好措辞（引擎原文含 "the error of water banace" 这类拼写），不是漂移，保持不动。
+
+**做什么**：
+
+1. 删除 `vendor/CoLM202X/libcolm.a` 这条**目标已不存在的未跟踪软链**（vendor Makefile `make lib`
+   的产物）。`source_content_sha256` 遍历快照时会解析每条软链，断链直接报
+   `source link is broken or cyclic`，`stage-sidecar` 第一步就失败。
+2. `scripts/bind-knowledge.py --reviewed` 重绑知识，`docs/knowledge-sources.json` 入库。
+3. `cargo run -p xtask -- stage-sidecar`：重编并暂存 6 个 release sidecar（`colm-cli` 23.8 MB、
+   `mksrfdata-rs` 8.4 MB、`mkinidata-rs` 8.9 MB、`colm-rs` 29.7 MB、`colm-agent` 9.2 MB、
+   `colm-mcp` 5.5 MB），重写 `gui/src-tauri/binaries/colm-build-source.json`，重打
+   `gui/src-tauri/engine/colm-src.tar.gz`（1556 文件、17.8 MB、snapshot `94a05eb93df4a237`）
+   并刷新 `gui/src-tauri/engine/docs`（26 份文档与 `docs/` 逐字节一致，`knowledge-sources.json`
+   的 sha256 相同）；xerj 固定 release 未变、幂等跳过。
+4. 比较页脚本与回归测试的 tracer→material 文案/夹具对齐。
+
+**验证（真实执行）**：
+
+- `python3 scripts/test-bench-scripts.py` → 36 passed / 0 failed
+- `cargo test -p colm-bench --lib` → 7 passed
+- `cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1` → 3382 passed / 17 failed；
+  17 个全部是既有沙箱限制（`colm-agent` 1 个要 pty、`colm-cli` 10 个 `study::runner` 进程探测、
+  `colm-kernel` 1 个、`colm-workspace` 5 个嵌套 `sandbox-exec`），本轮改动的 `colm-bench` 全绿
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- `cargo fmt --all --check` → 干净
+- GUI 后端：`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib -- --test-threads=1` →
+  594 passed / 7 failed / 1 ignored（7 个均为既有沙箱项，`sidecar_tests` 的 "the … has a known image"）
+- GUI 后端 `cargo fmt --all --check --manifest-path gui/src-tauri/Cargo.toml` 与
+  `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings` → 干净
+- GUI 前端：`npm run typecheck`、`npm run lint`、`npm run format:check` 通过；`npm test` →
+  1348 passed / 0 failed
+- `cargo run -q -p xtask -- check-gui` → 263 registered / 225 called（26 个解析后的动态名）全过
+
+**未验证**：Tauri 安装包（`.app`/dmg）未重打；未开真实窗口点界面。本轮没有行为改动，只有产物
+重建与文案对齐。

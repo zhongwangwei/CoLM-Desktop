@@ -10,8 +10,9 @@ LON/LAT 可选：history 文件里没有坐标时必须给（两者要么都给�
 
 为什么这么并（对比页审查第 2、4 条）：
 
-- 同一个 history 目录里常有 tracer/unitcat/basin 等族。旧实现 `prefix + "*.nc"` 会把
-  `<case>_hist_tracer_<date>.nc` 也并进来，同一时刻出现两次、主变量一半 NaN。这里只并主族：
+- 同一个 history 目录里常有 material（旧版引擎写 tracer）/unitcat/basin 等族。旧实现
+  `prefix + "*.nc"` 会把 `<case>_hist_material_<date>.nc`（旧版 `<case>_hist_tracer_<date>.nc`）
+  也并进来，同一时刻出现两次、主变量一半 NaN。这里只并主族：
   PREFIX（INSPECT 给的 `<case>_hist_`）之后必须紧跟 YYYY[-MM[-DD]]。
 - 跨文件拼接前先按时间排序，再去重；同一时刻出现在不同文件里、各自带不同变量时按坐标合并
   （变量取非 NaN 值），不再产生重复时刻或半 NaN 记录。
@@ -111,7 +112,7 @@ def main_files(folder, prefix):
         prefix += "_"
     if not prefix.endswith("_hist_"):
         if HIST_MARK in prefix:
-            # 传进来的像 `<case>_hist_tracer_`：这不是主族前缀，直接说清楚。
+            # 传进来的像 `<case>_hist_material_`（旧版 `_hist_tracer_`）：这不是主族前缀，直接说清楚。
             raise SystemExit(
                 f"prepare only merges the main history family; {prefix!r} is not a "
                 f"<case>{HIST_MARK} prefix"

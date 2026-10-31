@@ -11,8 +11,9 @@
 
 为什么这么判（每一条都是实测踩出来的）：
 
-- 目录里可能同时有主 history 与 tracer/unitcat/basin/restart 等族。`*_hist_*.nc` 通配会把
-  `<case>_hist_tracer_<date>.nc` 也吃进来；旧实现按时间把两族拼在一起，得到 6 条记录 3 个唯一时刻、
+- 目录里可能同时有主 history 与 material（旧版引擎写 tracer）/unitcat/basin/restart 等族。
+  `*_hist_*.nc` 通配会把 `<case>_hist_material_<date>.nc`（旧版 `<case>_hist_tracer_<date>.nc`）
+  也吃进来；旧实现按时间把两族拼在一起，得到 6 条记录 3 个唯一时刻、
   主变量一半 NaN。文件名里 `_hist_` 之后紧跟日期（YYYY/YYYY-MM/YYYY-MM-DD）的才是主 history。
 - 时间分辨率不能只看第一个文件的前两条记录：每天一个文件时每文件只有一条记录，旧逻辑落到默认
   月级；逐年数据也会被误判 Month。这里把主族所有文件的 time 采样出来排序取中位步长。
@@ -174,7 +175,7 @@ def normalize_lon(value):
 def parse_name(path):
     """文件名 -> (前缀, 族名, 日期后缀)；不是 `*_hist_*.nc` 的返回 None。
 
-    族名 "main" 是主 history（`_hist_` 后紧跟日期），其余是 tracer/unitcat/basin…
+    族名 "main" 是主 history（`_hist_` 后紧跟日期），其余是 material/tracer/unitcat/basin…
     这些族单独报告，不参与探测与制备。
     """
     base = os.path.basename(path)
@@ -692,7 +693,7 @@ def grid_geometry(dataset):
 
 
 def family_report(folder, entries):
-    """每一族单独报告：主族之外（tracer/unitcat/…）在界面里要能看见，不参与探测。"""
+    """每一族单独报告：主族之外（material/tracer/unitcat/…）在界面里要能看见，不参与探测。"""
     groups = {}
     for path, prefix, family, suffix in entries:
         groups.setdefault((prefix, family), []).append(path)
@@ -701,7 +702,7 @@ def family_report(folder, entries):
         paths = sorted(paths)
         entry = {"family": family, "prefix": prefix, "files": len(paths), "syear": None, "eyear": None}
         try:
-            # 其他族只报范围：读首尾两个文件的 time 就够，没必要把几百个 tracer 文件全打开。
+            # 其他族只报范围：读首尾两个文件的 time 就够，没必要把几百个材料族文件全打开。
             # cftime 的年份只能读 .year（没有 datetime64 表示），所以统一走 time_year。
             start = time_year(file_times(paths[0])[0])
             end = time_year(file_times(paths[-1])[-1])

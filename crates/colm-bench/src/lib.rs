@@ -238,7 +238,7 @@ for category, name in [("physical", "land"), ("physical", "coastline"), ("physic
 /// 为什么这么并：单点算例的 history 是每月一个文件，OpenBench 的站点模拟要一个站一个文件。只并只随时间
 /// 变的地表变量（维度只有 `time`、`patch`）：带上土壤层、积雪层这些维度一起并，实测 AT-Neu 48 个文件
 /// 吃到 17 GB 内存十分钟还没完；只并地表变量 9.5 秒、360 MB。被跳过的变量逐个打印原因，不静默丢。
-/// 目录里的 tracer/unitcat 等文件族不参与合并（同一天两族拼一起会出现重复时刻、主变量一半 NaN）。
+/// 目录里的 material/tracer/unitcat 等文件族不参与合并（同一天两族拼一起会出现重复时刻、主变量一半 NaN）。
 /// 脚本本体在 `src/scripts/prepare.py`，测试同 [`INSPECT_SCRIPT`]。
 pub const PREPARE_SCRIPT: &str = include_str!("scripts/prepare.py");
 

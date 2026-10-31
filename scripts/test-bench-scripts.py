@@ -8,7 +8,7 @@ stdout 的 JSON / stderr 的错误 / 并出来的 NetCDF 与站点清单：
     python3 scripts/test-bench-scripts.py
 
 每类用例对应比较页审查报告里的一个现状缺陷：
-主 history 与 tracer 同目录、每天一个文件、逐年文件、patch=2（含诊断文案）、单格 lat×lon 网格、
+主 history 与材料（material）同目录、每天一个文件、逐年文件、patch=2（含诊断文案）、单格 lat×lon 网格、
 element 向量、层维度变量（soilsnow/soil/lake 保留给 OpenBench profile compute，类别维仍跳过）、
 同目录混前缀、0–360 经度、跨日界线（含中心 180° 的 1×1 格）、缺坐标 + 经纬度覆盖、
 站点名/路径带逗号、跨文件重复时刻按变量合并；C04 的频率判定：
@@ -269,18 +269,18 @@ def write_vector(path, time_values, elements=3):
 # ---------------------------------------------------------------- 用例
 
 @test
-def main_and_tracer_families(workdir):
-    """同一目录里主 history 与 tracer：只探测/并主族，tracer 单独报告，时刻不重复。"""
+def main_and_material_families(workdir):
+    """同一目录里主 history 与材料族：只探测/并主族，material 单独报告，时刻不重复。"""
     folder = os.path.join(workdir, "history")
     hourly = times("2000-01-01T00:30", 3, 60)
     february = times("2000-02-01T00:30", 3, 60)
     write_station(os.path.join(folder, "AT-Neu_hist_2000-01.nc"), hourly, {"f_xy_t": ("time", "patch")})
     write_station(os.path.join(folder, "AT-Neu_hist_2000-02.nc"), february, {"f_xy_t": ("time", "patch")})
     write_station(
-        os.path.join(folder, "AT-Neu_hist_tracer_2000-01.nc"), hourly, {"f_trc_co2": ("time", "patch")}
+        os.path.join(folder, "AT-Neu_hist_material_2000-01.nc"), hourly, {"f_trc_co2": ("time", "patch")}
     )
     write_station(
-        os.path.join(folder, "AT-Neu_hist_tracer_2000-02.nc"), february, {"f_trc_co2": ("time", "patch")}
+        os.path.join(folder, "AT-Neu_hist_material_2000-02.nc"), february, {"f_trc_co2": ("time", "patch")}
     )
 
     info = inspect(folder)
@@ -292,8 +292,8 @@ def main_and_tracer_families(workdir):
     assert info["data_groupby"] == "Month", info["data_groupby"]
     assert [entry["name"] for entry in info["variables"]] == ["f_xy_t"], info["variables"]
     families = {entry["family"]: entry for entry in info["families"]}
-    assert set(families) == {"main", "tracer"}, families
-    assert families["tracer"]["files"] == 2, families
+    assert set(families) == {"main", "material"}, families
+    assert families["material"]["files"] == 2, families
     assert info["comparable"] is True
     assert info["syear"] == 2000 and info["eyear"] == 2000
 
@@ -1100,7 +1100,7 @@ def non_gregorian_history_is_prepared(workdir):
     noleap 的日期会被悄悄按公历解释，360_day 的 2 月 30 日不是合法公历日期，实测直接
     `ValueError: Invalid date (2000,2,30)`。这里每个日历造两个文件、文件名序与时间序相反、
     中间留一个重复时刻（各带不同变量），端到端验证：输出可 reopen、时间轴有序去重、日历/units
-    沿用输入、CSV 起止年按日历读，tracer 族照旧不参与合并。
+    沿用输入、CSV 起止年按日历读，材料（material）族照旧不参与合并。
     """
     if cftime is None:
         raise AssertionError(
@@ -1139,15 +1139,15 @@ def non_gregorian_history_is_prepared(workdir):
             cftime_axis(calendar, late_start, 2, 1440),
             {late_var: ("time", "patch")},
         )
-        # 同目录的 tracer 族：只顺带确认非公历路径没改坏主族识别（tracer 文件名里也有 _hist_）。
-        tracer_suffix = early_name[len("Cal_hist_") :]
+        # 同目录的材料族：只顺带确认非公历路径没改坏主族识别（材料文件名里也有 _hist_）。
+        material_suffix = early_name[len("Cal_hist_") :]
         write_station(
-            os.path.join(folder, "Cal_hist_tracer_" + tracer_suffix),
+            os.path.join(folder, "Cal_hist_material_" + material_suffix),
             cftime_axis(calendar, early_start, 2, 1440),
             {"f_trc_co2": ("time", "patch")},
         )
         # 输出要沿用首文件（prepare 的 files[0]，即文件名序第一个主族文件）的 time 编码；
-        # 两个主族文件里名字较小的那个就是它（tracer 以 `tracer_` 开头，排在数字后缀之后）。
+        # 两个主族文件里名字较小的那个就是它（material 以 `material_` 开头，排在数字后缀之后）。
         first_by_name = os.path.join(folder, min(early_name, late_name))
         with xr.open_dataset(first_by_name) as source:
             source_units = source["time"].encoding["units"]
@@ -1266,16 +1266,16 @@ def grid_history_is_not_prepared_as_station(workdir):
 
 
 @test
-def only_tracer_files_report_family_error(workdir):
-    """目录里只有 tracer 文件：报「没有主 history」并列出发现了哪些族，不静默当空目录。"""
+def only_material_files_report_family_error(workdir):
+    """目录里只有材料文件：报「没有主 history」并列出发现了哪些族，不静默当空目录。"""
     folder = os.path.join(workdir, "history")
     write_station(
-        os.path.join(folder, "Only_hist_tracer_2000-01.nc"),
+        os.path.join(folder, "Only_hist_material_2000-01.nc"),
         times("2000-01-01T00:30", 2, 60),
         {"f_trc_co2": ("time", "patch")},
     )
     stderr = inspect_stderr(folder)
-    assert "no main history files" in stderr and "tracer" in stderr, stderr
+    assert "no main history files" in stderr and "material" in stderr, stderr
 
 
 @test
