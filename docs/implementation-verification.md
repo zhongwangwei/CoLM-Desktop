@@ -41969,3 +41969,31 @@ rank0 直接就地拷贝自己的份额（不经过 MPI），master 的接收循
 - 复验：同一内核重跑三份，与 golden 的**所有变量逐位相同**（无形状/数值差）；
 - Rust 当前输出对新的 golden：tier2 外 **CN-Cng 4 / CN-Cng-wet 23 / US-NR1-snow 64**，
   与对齐内核 Fortran 对 Rust 的计数一致（旧 golden 由向量化/旧编译器产出，不能再用作基准）。
+
+### 修 flat 模式的河湖矩阵 I/O 自发送死锁（2026-10-31，同轮续）
+
+更正上一节的归因后按本地修复：`FLAT_SPMD` 是本仓库自己的并行路径，rank0 在 flat 下
+**同时是 master 和 worker**，而 `MOD_Grid_RiverLakeVectorIO` 的两个矩阵 I/O 例程
+（`vector_gather_matrix_to_master`、`vector_read_matrix_and_scatter`）沿用了上游 grouped
+的"master 不参与计算"假设：rank0 在 worker 分支把自己那份较大的 `global_id`/矩阵**阻塞
+send 给自己**，匹配的 recv 在同一线程后面的 master 分支里，形成自发送死锁。
+
+**修法**（`vendor/CoLM202X/main/HYDRO/MOD_Grid_RiverLakeVectorIO.F90`，全部用
+`#ifdef FLAT_SPMD` 分支，grouped 路径一字未动）：
+- flat 下 rank0 的份额**就地处理**：gather 直接 `wdata(:, id) = matrix(:,k)`，scatter 直接
+  `matrix(:,k) = rdata(:,id)`，不再经过 MPI；
+- 其余 rank 仍按原协议发送/接收；
+- master 的接收循环在 flat 下只数**远端** rank（`p_np_glb-1`），grouped 下仍数
+  `p_np_worker`。
+
+**验证**（对齐 flat `latlon` 内核，冬季 9 格点河湖算例）：
+- flat **1 rank**：`mpiexec -n 1` 从卡死变为 **12 秒完成**；与 grouped 3 rank 的结果对比：
+  - 主 history（142 个变量）**逐变量完全相同**；
+  - unitcat 旁车按上游语义分别截窗（flat 12×12 / grouped 720×1440），**重叠窗口内
+    所有动态量完全相同**。
+- flat **2 rank**：不再死锁，但在后面的网格分发阶段报 `MPI_ERR_RANK: invalid rank`
+  （另一处 flat 多 rank 的窗口问题，本轮未展开）；**多 rank 仍建议用 grouped**。
+- grouped 3 rank 用带补丁的内核重跑，主 history 与补丁前**逐变量相同**（0 处差异）。
+- 补丁不改变站点路径的数值：用打过补丁的 vendor 重建 `kernels/default` 并重生成三份
+  golden，三份 golden 与补丁前**逐变量相同**（0 处差异），`kernel-manifest.json` 刷新为
+  新源码/二进制指纹；Rust 对新 golden 仍为 tier2 外 4 / 23 / 64。

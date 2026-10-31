@@ -48,6 +48,28 @@ CONTAINS
       ENDIF
 
 #ifdef USEMPI
+#ifdef FLAT_SPMD
+      ! FLAT_SPMD 下 rank0 既是 master 又是 worker，不能把同一份数据 send 给自己
+      ! （大消息是 rendezvous 协议，会永远等不到后面的 recv）；自己的份额直接本地填。
+      IF (p_is_master) THEN
+         DO ipth = 1, ncol_local
+            IF (global_id(ipth) < 1 .or. global_id(ipth) > ncol_global) THEN
+               CALL CoLM_stop ('vector_gather_matrix_to_master: global_id out of range')
+            ENDIF
+            wdata(:, global_id(ipth)) = matrix(:, ipth)
+         ENDDO
+      ENDIF
+      IF (.not. p_is_master) THEN
+         mesg = (/p_iam_glb, ncol_local/)
+         CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+         IF (ncol_local > 0) THEN
+            CALL mpi_send (global_id, ncol_local, MPI_INTEGER, &
+               p_address_master, mpi_tag_mesg + 1, p_comm_glb, p_err)
+            CALL mpi_send (matrix, nrow*ncol_local, MPI_REAL8, &
+               p_address_master, mpi_tag_data, p_comm_glb, p_err)
+         ENDIF
+      ENDIF
+#else
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, ncol_local/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -58,9 +80,14 @@ CONTAINS
                p_address_master, mpi_tag_data, p_comm_glb, p_err)
          ENDIF
       ENDIF
+#endif
 
       IF (p_is_master) THEN
+#ifdef FLAT_SPMD
+         DO iwork = 1, p_np_glb-1
+#else
          DO iwork = 0, p_np_worker-1
+#endif
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 
@@ -145,6 +172,30 @@ CONTAINS
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 
+#ifdef FLAT_SPMD
+      ! FLAT_SPMD 下 rank0 既是 master 又是 worker：自己那份直接从 rdata 就地取，
+      ! 不能等自己 send/recv（大消息会自锁）；其余 rank 照常发请求、收数据。
+      IF (p_is_master) THEN
+         DO ipth = 1, ncol_local
+            IF (global_id(ipth) < 1 .or. global_id(ipth) > ncol_global) THEN
+               CALL CoLM_stop ('vector_read_matrix_and_scatter: global_id out of range')
+            ENDIF
+            matrix(:, ipth) = rdata(:, global_id(ipth))
+         ENDDO
+      ENDIF
+      IF (.not. p_is_master) THEN
+         mesg = (/p_iam_glb, ncol_local/)
+         CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
+
+         IF (ncol_local > 0) THEN
+            CALL mpi_send (global_id, ncol_local, MPI_INTEGER, &
+               p_address_master, mpi_tag_mesg + 1, p_comm_glb, p_err)
+
+            CALL mpi_recv (matrix, nrow*ncol_local, MPI_REAL8, p_address_master, &
+               mpi_tag_data, p_comm_glb, p_stat, p_err)
+         ENDIF
+      ENDIF
+#else
       IF (p_is_worker) THEN
          mesg = (/p_iam_glb, ncol_local/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
@@ -157,9 +208,14 @@ CONTAINS
                mpi_tag_data, p_comm_glb, p_stat, p_err)
          ENDIF
       ENDIF
+#endif
 
       IF (p_is_master) THEN
+#ifdef FLAT_SPMD
+         DO iwork = 1, p_np_glb-1
+#else
          DO iwork = 0, p_np_worker-1
+#endif
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
 
