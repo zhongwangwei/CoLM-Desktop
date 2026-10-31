@@ -42146,3 +42146,30 @@ seconds=0`）比较，永远不相等 → 全部步都跑过、却没有一步�
 比值放大到 O(1)。因此只能说"质量记账在 host 残差水平上一致"，**分馏实现的逐位一致性仍未
 证明**；要证明它需要 host 完全一致的对照（例如固定 host 状态回放）或更大的示踪信号算例。
 这一点保持"未定论"，不要把它当成 FLAT/MT 的回归依据。
+
+### MT 分馏：host 一致的一步对照暴露真实实现差异（2026-10-31，同轮续）
+
+上一节的 1 天/3 天对照里，host 状态本身在 1e-6 级不同，分馏诊断量被近零分母放大，
+说不清是 host 还是 MT 的差异。这轮做了一个能隔离两边的对照：
+
+1. 用 Fortran 先跑**一步**（2005-01-01 00:30），把它写出的 restart
+   （`2005-001-01800`，含 MT 状态）同时交给两个引擎；
+2. 两个引擎都从这份**逐位相同的 host 状态**跑一步到 01:00；
+3. 再比 history。
+
+结果非常有区分度：
+
+- **主 history**：135 个变量里只有 `f_alb` 的 3 个点差 2.2e-16 —— host 数值实现
+  （含一步内的辐射/水文）实际上**逐位一致**；
+- **material history**：质量/浓度类差得很小（`f_mt_evap_mass` 3.4e-7、
+  `f_mt_conc_soisno` 5.3e-8、`f_mt_conc_ldew` 8.3e-6、`f_mt_delta_precip` 2.4e-8），
+  但**强度诊断量明显不同**：`f_mt_leaf_delta_e_H2_18O` 最大 **9.97‰**、
+  `f_mt_leaf_delta_b` 2.8‰、`f_mt_delta_evap` 0.89‰、`f_mt_delta_soilevap` 0.90‰。
+
+即：host 相同、平衡分馏系数公式也相同（O18：`exp(1137/T² − 0.4156/T − 0.0020667)`，
+两边一致），差异出在**分馏动力学/非稳态叶片水/诊断量定义**这一段（Rust
+`crates/colm-core/src/tracer/frac.rs` 与 Fortran
+`MATERIAL/FAMILY_ISOTOPE/MOD_MT_Frac.F90` + `MOD_MT_Isotope_O18/HDO` 的逐步对读）。
+这是一处**已确认的 MT 实现差异**，不是 host 残差；下一步应逐函数对读
+`material_alpha_kinetic_leaf`、`material_jm84_effective_alpha`、叶片水 NSS 与
+`f_mt_delta_evap` 的定义，判定哪一边符合上游并修 Rust（或记录上游 bug）。
