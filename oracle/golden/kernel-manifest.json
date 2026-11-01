@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "source_sha256": "71963a40e558463cfd2126c3670eda2ebe6efc329cc17451a40fc7eb156792ce",
+  "source_sha256": "ca83af348fcf72b6bbb071fa192b69d20eb8d8c3471b81e83a7337a86a0cf19d",
   "preset": "default",
   "platform": "Darwin-arm64",
   "colm_git_sha": "95851a6a",
@@ -12,8 +12,8 @@
   "netcdf_fortran": "4.6.3",
   "hdf5": "1.14.6",
   "sha256": {
-    "mksrfdata": "ee3052115db8f55713c74f08048767824e11965a455fb1ce25ad63f130f3bf5d",
-    "mkinidata": "2041bb808851914c34b6bcb8a7bff3daa16cca2f62070f43b1a9e0016e42ec36",
-    "colm":      "8d04d67fa3a901cbf6355cc6f2ec7cd780bc61b91a2b25beaab67bd7004d4281"
+    "mksrfdata": "a4b1526854e2bea793d2121fa081b3263f7644591b8780b40699e54f4946f1a4",
+    "mkinidata": "69724135efd42c1ba3981a2df89a2089f40919fdefff56a63659d9eea0038499",
+    "colm":      "5284f522b53ef6361a6332649f94e9a82731414b9043f8b76b994cdd1dd98e24"
   }
 }

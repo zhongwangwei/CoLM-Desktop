@@ -42648,3 +42648,36 @@ patchtype)` facade：内部顺序与桌面原 driver 完全相同（`mt_wetland_
    `MKSRFDATA/RegionClip` 的甲烷 facade（port4 已用上游版本），跑三预设 + 三黄金。
 3. 临时树/脚本：`/tmp/port4`（可构建候选）、`/tmp/fix_arg_guards.py`、`/tmp/conv-master-tree`、
    `/tmp/conv-e766-tree`、`/tmp/colm202x-sync` 分支 `conv-master-fixed`/`desktop-vendor3`。
+
+### `f_frcsat` 近饱和病态：一格 ULP 把诊断量翻成 0.95（2026-11-01，goal round 4）
+
+**症状。** 把宿主层切到上游 4c28107 版本后（`/tmp/port4`，物理状态与旧树一致到 1e-12），
+三站点里 `f_frcsat` 有 5/264 个逐时值超差（`1.0` 对 `0.977622`、`0.805712` 对 `0.783334`），
+其余 126 个变量最大差 1.08e-8。逐样本打印（`Runoff_SimpleVIC` 入口的 `w_int/wsat_int/frcsat`）
+后定位：同一个 `w_int == wsat_int` 的叫用，旧树算出 `1.0`，新树算出 `0.955244`。
+
+**根因。** `frcsat = 1 - (1 - w_int/wsat_int)**(BVIC/(1+BVIC))` 在近饱和时
+`1 - w_int/wsat_int` 只剩 1~2 个 ULP；`BVIC≈0.09` 时指数把 `2^-52` 放大成
+`2^-52^0.086 ≈ 0.045`。所以**任何宿主重构带来的末位舍入变化**都会让这个诊断量在
+`1.0/0.955` 之间翻转——不是水文解变了（`wliq/wice/t_soisno` 逐时差 ≤1e-12）。
+`Runoff_XinAnJiang` 的 `frcsat` 是同一个病态式子。
+
+**证据链。** 旧黄金自己也带着假值：US-NR1-snow 第 0 条 `0.7122865` 是
+`(0.951844 + 0.4727289)/2`，其中 `0.951844` 就是首步 `w_int==wsat_int` 时幂运算放大的假
+"未饱和"；修正后应为 `(1.0 + 0.4727289)/2 = 0.7363644`。
+
+**修法。** 两条产流支在 `w_int` 已按 `eff_porosity` 剪到 `[0,wsat]` 之后，若
+`wsat_int - w_int <= 1e-12*wsat_int` 就直接把 `frcsat` 记为 `1.0`（Fortran
+`MOD_Runoff.F90` 的 `saturated_gap_tolerance`；Rust `runoff.rs` 的
+`SATURATED_GAP_TOLERANCE` 一一对应，并新增回归测试
+`near_saturated_storage_is_reported_as_fully_saturated`）。土壤水/径流本身不受影响：
+Fortran 侧相同表达式只在 `watin > 0` 时参与入渗，且这条阈值只改诊断输出。
+
+**验证。**
+- 重生成三黄金：**只有 `f_frcsat` 变化**——CN-Cng 2 个逐时值、US-NR1-snow 3 个、
+  CN-Cng-wet 0 个；其余 126 变量逐位不变；
+- `cargo test -p colm-core --lib`：540 passed；四张 drift 表、`tier-check`（127 变量全有层级）全绿；
+- Rust 引擎对**新**黄金：CN-Cng 的失败项从 2（`f_qinfl`、`f_frcsat`）降到 **1**
+  （只剩已知的近零 `f_qinfl` 变号），`f_frcsat` 已逐值一致。
+- 该修正同时移除了上游宿主层整圈移植的最后一个已知数值阻塞：`/tmp/port4` 的
+  `f_frcsat` 翻转不再出现（逐样本残差 ≤1e-11，落在 tier2 内）。

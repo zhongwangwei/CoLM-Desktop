@@ -300,7 +300,7 @@ pub fn xinanjiang_runoff(
     let shape = ((elevation_standard_deviation_m - 100.0)
         / (elevation_standard_deviation_m + 1000.0))
         .clamp(0.01, 0.5);
-    let saturated_fraction = 1.0 - (1.0 - water / capacity).lpow(shape / (1.0 + shape));
+    let saturated_fraction = saturated_area_fraction(water, capacity, shape / (1.0 + shape));
     let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
     if input_depth <= 0.0 {
         return Ok(StorageRunoffState {
@@ -386,6 +386,26 @@ pub fn simple_vic_subsurface_runoff(input: SimpleVicSubsurfaceInput<'_>) -> Resu
     Ok(runoff)
 }
 
+/// 判断诊断上"算饱和"的相对孔隙容量阈值。
+///
+/// **为什么需要它。** Fortran 的 `Runoff_SimpleVIC`/`Runoff_XinAnJiang` 里，
+/// `frcsat = 1 - (1 - w/wsat)**e` 在近饱和时 `1 - w/wsat` 只剩几个 ULP，
+/// 幂运算把它放大成 ~0.95 的假"未饱和"值：实测宿主的浮点顺序差 1 ULP，
+/// `f_frcsat` 就在 1.0 与 0.955 之间翻转（同一状态、同一式子）。上游 4c 的
+/// 组织重构正好带来这种末位差，golden 因此变红。两侧都把相对差距在阈值内的
+/// 状态视为饱和（`frcsat = 1`），让这个诊断量对宿主重构的舍入顺序不敏感；
+/// 土壤水/径流状态本身不走这条阈值（Fortran 侧只有 `watin > 0` 时才进公式）。
+const SATURATED_GAP_TOLERANCE: f64 = 1e-12;
+
+/// `frcsat = 1 - (1 - w/wsat)**e`，近饱和时按饱和处理（见 [`SATURATED_GAP_TOLERANCE`]）。
+fn saturated_area_fraction(water: f64, capacity: f64, exponent: f64) -> f64 {
+    if capacity > 0.0 && capacity - water <= SATURATED_GAP_TOLERANCE * capacity {
+        1.0
+    } else {
+        1.0 - (1.0 - water / capacity).lpow(exponent)
+    }
+}
+
 /// `Runoff_SimpleVIC` 与 `Runoff_XinAnJiang` **不是**同一条式子，所以这个只能给
 /// SimpleVIC 用（见 [`xinanjiang_runoff`] 的说明）。`bvic` 是上游的 `BVIC` 本身，
 /// 不再从 `exponent` 反解 —— `exponent/(1-exponent)` 只有 43% 的输入能原样还原
@@ -396,7 +416,7 @@ fn storage_distribution_runoff(
     capacity: f64,
     bvic: f64,
 ) -> Result<StorageRunoffState> {
-    let saturated_fraction = 1.0 - (1.0 - water / capacity).lpow(bvic / (1.0 + bvic));
+    let saturated_fraction = saturated_area_fraction(water, capacity, bvic / (1.0 + bvic));
     let input_depth = input.water_input_mm_s * input.time_step_seconds / 1000.0;
     if input_depth <= 0.0 {
         return Ok(StorageRunoffState {

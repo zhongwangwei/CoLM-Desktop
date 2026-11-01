@@ -367,3 +367,32 @@ fn topmodel_gamma_rejects_a_restart_without_twi_parameters() {
     .unwrap_err();
     assert!(error.to_string().contains("chi_twi"), "{error}");
 }
+
+#[test]
+fn near_saturated_storage_is_reported_as_fully_saturated() {
+    // `frcsat = 1 - (1-w/wsat)**e` 在 `1-w/wsat` 只剩几个 ULP 时会把这点舍入
+    // 噪声放大成 ~0.95 的假"未饱和"。宿主的浮点求积顺序换一下（上游 4c 的
+    // 重构就是这样）frcsat 就在 1.0/0.955 之间翻转，golden 会红。阈值内的
+    // 近饱和状态必须按饱和报 1.0，与 `MOD_Runoff.F90` 的
+    // `saturated_gap_tolerance` 一一对应。
+    let effective_porosity = [0.45_f64; 6];
+    let layer_thickness_m = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+    // 每层只比孔隙容量少一个 ULP 量级：总量与容量在求和舍入后仍在阈值内。
+    let liquid_volume_fraction = effective_porosity.map(|porosity| porosity * (1.0 - f64::EPSILON));
+    let state = simple_vic_runoff(
+        StorageRunoffInput {
+            layer_thickness_m: &layer_thickness_m,
+            effective_porosity: &effective_porosity,
+            liquid_volume_fraction: &liquid_volume_fraction,
+            water_input_mm_s: 0.0,
+            time_step_seconds: 1800.0,
+        },
+        0.5,
+    )
+    .expect("near-saturated storage is valid");
+    assert_eq!(state.saturated_fraction, 1.0);
+
+    // 远离饱和的状态仍走原式，不能被阈值吞掉。
+    let state = simple_vic_runoff(storage_input(), 0.5).expect("normal storage is valid");
+    assert!(state.saturated_fraction < 1.0);
+}

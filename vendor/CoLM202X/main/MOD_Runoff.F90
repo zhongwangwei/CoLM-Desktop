@@ -19,6 +19,9 @@ MODULE MOD_Runoff
 
 !-----------------------------------------------------------------------
 
+   ! 近饱和诊断阈值，见 Runoff_SimpleVIC 里 f_frcsat 的注释。
+   real(r8), parameter :: saturated_gap_tolerance = 1.e-12_r8
+
 CONTAINS
 
    SUBROUTINE SurfaceRunoff_TOPMOD (nl_soil,wimp,porsl,psi0,hksati,&
@@ -265,7 +268,13 @@ CONTAINS
       w_int = max(min(w_int, wsat_int), 0.)
 
       IF (present(frcsat)) THEN
-         frcsat = 1.-(1.-w_int/wsat_int)**(btopo/(1.+btopo))
+         ! 与 Runoff_SimpleVIC 同一个近饱和病态：1.-w_int/wsat_int 只剩几个 ulp 时
+         ! 幂运算会把它放大成假"未饱和"，把相对差距在阈值内的状态按饱和处理。
+         IF (wsat_int > 0._r8 .and. wsat_int - w_int <= saturated_gap_tolerance*wsat_int) THEN
+            frcsat = 1._r8
+         ELSE
+            frcsat = 1.-(1.-w_int/wsat_int)**(btopo/(1.+btopo))
+         ENDIF
       ENDIF
 
       IF (watin <= 0.) THEN
@@ -325,8 +334,18 @@ CONTAINS
 
       InfilExpFac = BVIC / ( 1.0 + BVIC )
 
+      ! 近饱和时 1.-w_int/wsat_int 只剩 1~2 个 ulp，幂运算会把这点舍入噪声
+      ! 放大成 ~0.95 的假"未饱和"值（实测：宿主重构带来的末位差异就让 frcsat
+      ! 在 1.0 与 0.955 之间翻转）。w_int 已按 eff_porosity 剪到 [0,wsat]，
+      ! 这里把相对差距在 1e-12 以内的状态按饱和处理。诊断量因此对宿主重构
+      ! 的浮点顺序不敏感；土壤水/径流状态不受影响（相同表达式只在 watin>0 时
+      ! 参与入渗计算，且不经过这条阈值）。
       IF (present(frcsat)) THEN
-         frcsat = 1.-(1.-w_int/wsat_int)**InfilExpFac
+         IF (wsat_int > 0._r8 .and. wsat_int - w_int <= saturated_gap_tolerance*wsat_int) THEN
+            frcsat = 1._r8
+         ELSE
+            frcsat = 1.-(1.-w_int/wsat_int)**InfilExpFac
+         ENDIF
       ENDIF
 
       IF (watin <= 0.) THEN
