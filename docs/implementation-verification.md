@@ -42262,3 +42262,17 @@ tleaf/forc_q/forc_psrf/lai/rst、是否 allocated(mt_leaf_delta_e)"，找出 Rus
 
 即叶水 NSS 这条链已经对齐；剩余 0.42‰ 的蒸发 δ 与 1.2e-7 的蒸发通量差是下一步
 （蒸发端元 / Craig-Gordon 比值在近零通量处的路径）。
+
+### 剩余蒸发 δ 差异的分解（2026-11-01，同轮续）
+
+NSS 闸门修好后，host 一致一步对照里只剩 11 个 material 变量有差异，最大的是
+`f_mt_delta_evap`/`delta_soilevap` 0.42‰。用 1 步窗口（`nac=1`）把 δ 拆成两侧隐含的
+"毛蒸发水量"和"示踪物蒸发质量"：
+
+- 隐含毛蒸发水量相对差 **2.3e-6**（分母几乎一致）；
+- 示踪物蒸发质量相对差 **2.9e-4**（分子差一个量级更大）。
+
+所以剩余差异来自**示踪物蒸发通量本身**（蒸发路径的移除比值/Craig-Gordon 端元），
+不是 history 的 δ 定义或水分母。下一步：在同一 patch 上对读蒸发端元
+（`material_craig_gordon_evap_ratio` / Rust `craig_gordon_evap_ratio`、动力学阻力与
+`a_mt_evap` 的记账），定位近零通量下的 3e-4 相对差。
