@@ -42414,3 +42414,47 @@ restart 真正互相接续，需要给 `tracer_sidecar::read` 加 Fortran 布局
 --no-fail-fast`）除既有沙箱环境失败（进程镜像名/PTY/网络缓存）外全部通过；
 GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 项通过，`check-gui`
 263 条命令契约全部匹配。
+
+## 上游 4c28107 模块化盘点的结论与同步方案（2026-11-01）
+
+维护者指出上游 SYSU 的 CoLM 最近做了模块化整理。核对确认：上游是 fork
+`zhongwangwei/CoLM202X`（不是 CoLM-SYSU/CoLM 的公开 master——后者 HEAD `ac659a3d`
+还是 CoLM2024 时代的树，没有 `main/MATERIAL/`）。fork 的 master 在 vendor 基线
+`e766527a` 之后又有 4 个提交，HEAD `4c28107`（2026-11-01）：
+
+1. `8de029c` **把材料输送职责移出上游宿主例程**（91 文件，+7872/−2016）：
+   - 新增 11 个 `main/MATERIAL/MOD_MT_*` 模块：`MOD_MT_Runtime`（land/forcing/
+     history/lulcc/final 的 facade）、`MOD_MT_HostHistory`、`MOD_MT_HistoryRestart`、
+     `MOD_MT_SnowHost`、`MOD_MT_SnowRemap`、`MOD_MT_SurfaceData`、
+     `MOD_MT_CanopyDiagnostics`、`MOD_MT_HydroDiagnostics`、`MOD_MT_ThermalDiagnostics`、
+     `MOD_MT_LandWork`、`FAMILY_SOLUTE/MOD_MT_BGC_NH4`；
+   - 新增 `main/MATERIAL/Makefile.material`：VPATH、`OBJS_MT_CONFIG`、以及 30 余条
+     module 依赖边；
+   - 宿主例程（`CoLM/CoLMDRIVER/CoLMMAIN/Hist/HistAccRestart/Hydro_SoilWater/
+     Ground*/*Leaf*/PhaseChange/Snow*/Thermal/BGC*/MKSRFDATA/RegionClip` 等 36 个文件）
+     改为调用 MATERIAL facade；
+   - 新增 `tests/material_host_cleanup/`（25 个 Python/F90 检查：宿主不得再内联材料
+     逻辑）与 `tests/material_naming/`（history/inventory 命名检查）；
+   - `mksrfdata/Aggregation_LakeSoilC.F90` 删除；`Aggregation_MethanePH.F90` 改名为
+     `main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_Aggregation.F90`。
+2. `311482d` CI GNU 编译器矩阵的 module 兼容；3. `ed23d5c` 把内部清理笔记移出发布树；
+4. `4c28107` CI 最新镜像的 GNU 矩阵。
+
+**同步方案（下轮按此执行，不做零散修补）**：
+
+- 三方合并仓库：base=`e766527a`、ours=vendor 当前树、theirs=`4c28107`，
+  已实测 41 新增 / 36 修改 / 1 删除 / 1 改名，**29 个文件冲突**（BGC 六个、
+  CoLM/CoLMDRIVER/CoLMMAIN、Hist/HistAccRestart、Hydro_SoilWater、Leaf*、
+  PhaseChange、Snow*、Thermal、Ground*、Vars_*、MKSRFDATA/RegionClip、
+  MOD_MT_Hist/LandPhase/Methane_Aggregation）。
+- 采用「保留上游 `#ifdef MaterialTransport` 守卫 + 构建统一定义该宏」的策略：
+  桌面版本来就"材料模块始终编译、运行期 family 开关决定跑不跑"，定义宏等价于把
+  守卫展开，后续上游同步不必再逐处改守卫；只需把其余运行期宏
+  （BGC/CoLMDEBUG/Campbell/URBAN_MODEL/PFT/PC 等）继续转成运行期开关。
+- 自动转换器 `upstream2vendor.py` 原型已能处理简单与复合守卫，但在 8 个文件里
+  产生过结构损坏（多/少 `#endif`、`END SUBROUTINE` 不匹配），因此**不能整批盲转**：
+  需逐文件人工收口（上一轮 `2f21ae55` 同类工作 60 处手工 hunk），修补后重建
+  `default/latlon/crop` 三个预设、重生成四张表、重跑 golden 与
+  `tests/material_host_cleanup` 检查。
+- 本轮为避免把 `main` 留在不可构建状态：vendor 已还原到 `e766527a`；Rust 侧的
+  内部改名（`848fca7e`）与跨引擎旁车互通（`125061bb`）已先落地。
