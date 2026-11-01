@@ -42369,3 +42369,27 @@ Fortran 的 `*_restart_hist_*` 旁车按上游写 `a_mt_*`/`a_water_*`，没有 
 （比较累计量时会因此出现假差异；叶水这类瞬时状态不受影响）。要让两引擎的
 restart 真正互相接续，需要给 `tracer_sidecar::read` 加 Fortran 布局回退
 （按 `a_mt_*` 名字与 `(patch, ntracers)` 形状读、跳过描述符校验）。
+
+### 跨引擎 restart 旁车互通（2026-11-01，同轮续）
+
+上一节发现的"Fortran 写的 history 旁车 Rust 读不了"已修：
+
+- 上游 Fortran 的 `*_restart_hist_*` 只有 `a_mt_*`/`a_water_*`（维度恰好也是
+  `(patch, d1_<name>, d2_<name>)`），没有 Rust 私有描述符
+  `mt_hist_schema`/`mt_hist_count`/`mt_hist_descriptor`；
+- `tracer_sidecar::read` 现在检测到没有 `mt_hist_schema` 时走**上游布局回退**：
+  按名字（含 `a_trc_*` 旧名回退）与 `(patch, d1/d2)` 形状整组读 44 个累加器；
+  字段不齐或形状不符则打印警告并冷启动窗口，而不是硬报错；
+- 有 `mt_hist_schema` 的 Rust 旁车仍走原来的描述符校验，行为不变。
+
+验证（12 步 host 重同步链，每步都从 Fortran 刚写的 restart + 旁车起步）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 主 history 最大差 | 有量级差异（Rust 冷启动窗口） | **≤1e-16** |
+| `f_mt_leaf_delta_e` | 1e-11 级（叶水已对齐） | ≤1e-11 |
+| `f_mt_delta_evap` | 冷启动假差异（~0.1-30‰） | **≤1e-10‰** |
+| `f_mt_evap_mass` | ~1e-4 | **≤1e-15** |
+
+新增单测 `an_upstream_fortran_sidecar_is_read_by_field_name`：写一份只有上游字段的
+旁车再读回，逐字段与预期累加器相等。

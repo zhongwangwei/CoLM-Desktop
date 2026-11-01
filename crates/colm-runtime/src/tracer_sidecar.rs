@@ -286,6 +286,29 @@ pub fn read(
     }
     let mut restored = RestoredTracers::default();
     if let Some(set) = set.filter(|set| set.transport_indices().next().is_some()) {
+        // 上游 Fortran 写的旁车只有 `a_mt_*`/`a_water_*`，没有 Rust 的 `mt_hist_*`
+        // 私有描述符；按上游盘上布局整组读回，让两引擎的 restart 能互相接续。
+        if file.variable("mt_hist_schema").is_none() {
+            if methane.is_some() {
+                bail!(
+                    "cross-engine material history sidecar with methane accumulators is not supported"
+                );
+            }
+            if let Some(accumulators) = read_upstream_accumulators(&file, set, patches)? {
+                restored.tracers = Some(accumulators);
+            } else if let Some(name) = FIELDS
+                .iter()
+                .map(|&(name, _)| name)
+                .find(|name| read_name_opt(&file, name).is_none())
+            {
+                eprintln!(
+                    "material history sidecar {} is missing upstream field {name}; \
+                     starting the material history window from zero",
+                    sidecar.display()
+                );
+            }
+            return Ok(restored);
+        }
         let ntracers = set.len();
         // 逐字段解析读回名（`hacc_read_name`），缺任何一个都整组拒绝：这些累加和必须成套，
         // 半套读回来等于把一部分示踪物的区间悄悄截断。
@@ -344,23 +367,67 @@ pub fn read(
 /// 让后面的形状校验报错，不能回退去读旧名里可能过期的数据，所以这里同样只判存在。
 /// 回退只对 `a_mt_` 前缀生效；`a_water_*` 没有改过名。
 fn read_name<'a>(file: &netcdf::File, name: &'a str) -> Result<std::borrow::Cow<'a, str>> {
-    if file.variable(name).is_some() {
-        return Ok(std::borrow::Cow::Borrowed(name));
+    if let Some(stored) = read_name_opt(file, name) {
+        return Ok(stored);
     }
     match name.strip_prefix("a_mt_") {
-        Some(rest) => {
-            let legacy = format!("a_trc_{rest}");
-            if file.variable(&legacy).is_some() {
-                Ok(std::borrow::Cow::Owned(legacy))
-            } else {
-                bail!(
-                    "generic land-tracer history missing from active restart window ({name}, \
-                     nor legacy {legacy})"
-                )
-            }
-        }
+        Some(rest) => bail!(
+            "generic land-tracer history missing from active restart window ({name}, nor legacy \
+             a_trc_{rest})"
+        ),
         None => bail!("generic land-tracer history missing from active restart window ({name})"),
     }
+}
+
+fn read_name_opt<'a>(file: &netcdf::File, name: &'a str) -> Option<std::borrow::Cow<'a, str>> {
+    if file.variable(name).is_some() {
+        return Some(std::borrow::Cow::Borrowed(name));
+    }
+    name.strip_prefix("a_mt_")
+        .map(|rest| format!("a_trc_{rest}"))
+        .filter(|legacy| file.variable(legacy).is_some())
+        .map(std::borrow::Cow::Owned)
+}
+
+/// 读上游 Fortran 布局的 44 个累加器（没有 Rust 的 `mt_hist_*` 描述符）。
+/// 字段不齐或形状与 `(patch, d1/d2)` 不符时返回 `None`，调用方把窗口当冷启动。
+fn read_upstream_accumulators(
+    file: &netcdf::File,
+    set: &TracerSet,
+    patches: usize,
+) -> Result<Option<Vec<PatchAccumulators>>> {
+    let ntracers = set.len();
+    let mut accumulators = vec![
+        PatchAccumulators {
+            tracers: vec![TracerAccumulators::default(); ntracers],
+            water: WaterAccumulators::default(),
+        };
+        patches
+    ];
+    for &(name, slot) in &FIELDS {
+        let Some(stored) = read_name_opt(file, name) else {
+            return Ok(None);
+        };
+        let (dims, width) = shape(name, slot, ntracers);
+        let variable = file
+            .variable(stored.as_ref())
+            .expect("presence checked by read_name_opt");
+        let actual: Vec<usize> = variable.dimensions().iter().map(|dim| dim.len()).collect();
+        let mut expected = vec![patches];
+        expected.extend(dims.iter().map(|(_, len)| *len));
+        if actual != expected {
+            return Ok(None);
+        }
+        let values = variable.get_values::<f64, _>(..)?;
+        ensure!(
+            values.iter().all(|x| x.is_finite()),
+            "non-finite generic land-tracer history accumulator ({stored})"
+        );
+        for (patch, target) in accumulators.iter_mut().enumerate() {
+            target.set(slot, &values[patch * width..(patch + 1) * width]);
+        }
+    }
+    Ok(Some(accumulators))
 }
 
 /// `tracer_history_descriptor(file, .false.)`：schema、示踪物数与逐行身份都要对上。

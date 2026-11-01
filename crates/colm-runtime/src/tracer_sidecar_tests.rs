@@ -302,3 +302,51 @@ fn the_legacy_history_nac_marker_still_opens_the_tracer_window() {
     let restored = read(&path, Some(&set), None, 1).unwrap();
     assert_eq!(restored.tracers.as_ref().unwrap()[0].tracers, states[0].acc);
 }
+
+/// 上游 Fortran 写的旁车只有 `a_mt_*`/`a_water_*`、没有 `mt_hist_*` 私有描述符；
+/// 读取应回退到上游布局（按名字、`(patch, d1/d2)` 形状整组读回）。
+#[test]
+fn an_upstream_fortran_sidecar_is_read_by_field_name() {
+    let set = TracerSet {
+        tracers: vec![descriptor("H2_18O", TracerFamily::Isotope)],
+    };
+    let patches = 2;
+    let path = temp_file("upstream-layout");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("patch", patches).unwrap();
+    let mut defined = std::collections::HashSet::new();
+    let mut expected = vec![
+        PatchAccumulators {
+            tracers: vec![TracerAccumulators::default(); set.len()],
+            water: WaterAccumulators::default(),
+        };
+        patches
+    ];
+    for (index, &(name, slot)) in FIELDS.iter().enumerate() {
+        let (dims, width) = shape(name, slot, set.len());
+        for (dim, len) in &dims {
+            if defined.insert(dim.clone()) {
+                file.add_dimension(dim, *len).unwrap();
+            }
+        }
+        let mut names = vec!["patch"];
+        names.extend(dims.iter().map(|(dim, _)| dim.as_str()));
+        let values: Vec<f64> = (0..patches * width)
+            .map(|k| (index * 1000 + k) as f64)
+            .collect();
+        let mut variable = file.add_variable::<f64>(name, &names).unwrap();
+        variable.put_values(&values, ..).unwrap();
+        for (patch, accumulators) in expected.iter_mut().enumerate() {
+            accumulators.set(slot, &values[patch * width..(patch + 1) * width]);
+        }
+    }
+    let mut nac = file.add_variable::<f64>("hacc_nac", &["patch"]).unwrap();
+    nac.put_values(&vec![1.0; patches], ..).unwrap();
+    drop(file);
+
+    let restored = read(&path, Some(&set), None, patches).unwrap();
+    let read_back = restored
+        .tracers
+        .expect("upstream layout should be restored");
+    assert_eq!(read_back, expected);
+}
