@@ -172,6 +172,9 @@ CONTAINS
       real(r8), intent(in) :: etroot_actual(1:nl_soil)
       real(r8), intent(in) :: etroot_aquifer
 
+      ! NSS 蒸腾下限（mm/step）：比宿主舍入噪声高、比任何有物理意义的蒸腾低。
+      real(r8), parameter :: nss_min_transp_mm = 1.0e-12_r8
+
       ! Combined drip + flood + paddy irrigation rate (mm/s). WATER_VSF
       ! adds this to gwat at MOD_SoilSnowHydrology.F90:828-832 AFTER the
       ! qseva subtraction, so post-WATER wdsrf + rsur*dt + qlayer(0)*dt
@@ -585,7 +588,12 @@ CONTAINS
             xylem_ratio = return_ratio
             transp_ratio = return_ratio
          ENDIF
-               IF (transp_frac_active .and. &
+               ! 上游用 `transp_water_total > mt_tiny`(1e-30) 做 NSS 闸门，夜间
+               ! 蒸腾只剩宿主舍入噪声（1e-14~1e-15），两套实现会因此进入不同的
+               ! patch 集合，叶水 δ 相差可达 10‰。NSS 在 1e-12 mm/step 以下的
+               ! 蒸腾上没有物理意义，这里用同一个物理下限把噪声挡掉；通量记账
+               ! 仍用原来的 transp_frac_active。
+               IF (transp_frac_active .and. transp_water_total > nss_min_transp_mm .and. &
                    present(tleaf_frac) .and. present(forc_q_frac) .and. present(forc_psrf_frac) .and. &
                    present(lai_frac) .and. present(rst_frac) .and. allocated(mt_leaf_delta_e)) THEN
                tleaf_use = tleaf_frac

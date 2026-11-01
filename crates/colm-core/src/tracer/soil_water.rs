@@ -75,6 +75,8 @@ pub use wetland::{tracer_wetland, WetlandInput};
 
 /// `spval`。
 const SPVAL: f64 = -1.0e36;
+/// NSS 蒸腾下限（mm/step）：与 Fortran `nss_min_transp_mm` 同一个物理闸门。
+const NSS_MIN_TRANSP_MM: f64 = 1.0e-12;
 
 /// 本模块读的 namelist 开关（`MOD_Namelist`）。
 ///
@@ -553,7 +555,7 @@ pub fn tracer_soil_water(
         }
         // 叶片非稳态（NSS）蒸腾比值（`:539-563`）。
         if let (true, Some(tleaf), Some(forc_q), Some(forc_psrf), Some(lai), Some(rst)) = (
-            transp_frac_active,
+            transp_frac_active && transp_water_total > NSS_MIN_TRANSP_MM,
             input.tleaf,
             input.forc_q,
             input.forc_psrf,

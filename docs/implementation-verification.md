@@ -42234,3 +42234,31 @@ tleaf/forc_q/forc_psrf/lai/rst、是否 allocated(mt_leaf_delta_e)"，找出 Rus
 下一步：在同一 patch/step 上按层打印两边 `etroot_actual` / `transpiration_actual_mm`
 （以及 cascade、return flow 的中间量），确认哪一边的派生方式符合上游（`etroot_actual`
 是级联后的逐层实际吸水量），修 Rust 的诊断派生，而不是改 NSS 公式或闸门阈值。
+
+### NSS 闸门：用共同的物理下限消掉宿主噪声（2026-11-01，同轮续）
+
+上一节确认"哪些 patch 进入 NSS"由近零蒸腾的宿主噪声决定。上游闸门是
+`transp_water_total > mt_tiny`（1e-30），而夜间蒸腾只剩 1e-14~1e-15 的舍入噪声，
+两套 host 实现在这个量级上本来就不同（Fortran 1e-14 正、Rust 1e-15 有符号相消），
+于是 NSS 的 patch 集合不同、叶水 δ 差到 10‰。
+
+修法：两边都加同一个**物理下限**（不是改上游阈值语义，而是把纯噪声挡在 NSS 之外）：
+
+- Fortran `MOD_MT_SoilWater:mt_soil_water`：`nss_min_transp_mm = 1.0e-12_r8`，
+  NSS 条件加 `transp_water_total > nss_min_transp_mm`；通量记账仍用原来的
+  `transp_frac_active`；
+- Rust `tracer_soil_water`：同一个常量 `NSS_MIN_TRANSP_MM = 1e-12`，加到 NSS 的
+  元组匹配条件里。
+
+验证（host 逐位一致的一步对照）：
+
+| 变量 | 修前 | 修后 |
+|---|---|---|
+| 主 history 差异 | `f_alb` 3 点 2.2e-16 | **0 个变量** |
+| `f_mt_leaf_delta_e` | 9.97‰ | **1.7e-6‰** |
+| `f_mt_leaf_delta_b` | 2.82‰ | **2.7e-3‰** |
+| `f_mt_evap_mass` | 3.4e-7 | 1.2e-7 |
+| `f_mt_delta_evap`/`delta_soilevap` | 0.89‰ | **0.42‰** |
+
+即叶水 NSS 这条链已经对齐；剩余 0.42‰ 的蒸发 δ 与 1.2e-7 的蒸发通量差是下一步
+（蒸发端元 / Craig-Gordon 比值在近零通量处的路径）。
