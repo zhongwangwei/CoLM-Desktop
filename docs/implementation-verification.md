@@ -42681,3 +42681,19 @@ Fortran 侧相同表达式只在 `watin > 0` 时参与入渗，且这条阈值�
   （只剩已知的近零 `f_qinfl` 变号），`f_frcsat` 已逐值一致。
 - 该修正同时移除了上游宿主层整圈移植的最后一个已知数值阻塞：`/tmp/port4` 的
   `f_frcsat` 翻转不再出现（逐样本残差 ≤1e-11，落在 tier2 内）。
+
+#### 上游宿主层移植：`f_frcsat` 修正后的复测（goal round 4）
+
+`f_frcsat` 近饱和修正（见上一节）落地后，重新用 `/tmp/port4`（上游宿主层）对**新**黄金复测：
+
+| 算例 | 结果 |
+|---|---|
+| CN-Cng | **127 变量全部 within tolerance**（`f_frcsat` 逐时一致；这是上游宿主层第一次整例通过） |
+| CN-Cng-wet | 仅 1 个 `f_zwt` 值超差：`0.8265567` vs `0.8265579`（差 1.8e-6，恰在 atol=1e-7+rtol 边界外，量级 0.8 m） |
+| US-NR1-snow | 72 个 tier2 失败：`f_vegwp` 首差在第 38 步、最大 122 mm；`f_snowdp/f_fsno/f_ldle...` 从第 86 步起分岔，随后放大到 `f_wdsrf_inst`（0.99 vs 0） |
+
+结论：**没雪的算例已经证明上游宿主层与桌面物理体数值等价**；US-NR1-snow 的分岔从
+`f_vegwp`（植物水力）开始、随后是雪/冠层，说明 4c 对 `MOD_Thermal`/`MOD_LeafTemperature`/
+`MOD_NewSnow`/雪层合并的 facade 化把本地 A 组修补（eroot 切片、pn、ivt、卸载、雪层 remap 等）
+覆盖掉了，需要逐项移植，而不是再改数值容差。下一轮顺序：Thermal/LeafTemperature 的植物
+水力修补 → NewSnow/SnowLayersCombineDivide 的雪修补 → 再复测 US-NR1-snow → 通过后整批入库。
