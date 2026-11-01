@@ -42759,3 +42759,49 @@ Fortran restart/const），逐记录**逐位**比两引擎，并给 Fortran `MOD
 **给后续的判据**：跨引擎对齐应看"首个分歧步 + 迭代/回退计数"，而不是月窗口 tier2 项数；
 若要进一步缩小，优先方向是 snow 日出短波链（`coszen`/`solad`/反照率）与 wet 的 PHS
 `rstfac` 链，而不是调容差。1 步窗口（此前记录 127 变量全过）与 4 天逐位对比是有效证据。
+
+## C 方案启动：保留 always-on 材料，把 plumbing 移植进上游带守卫的 facade 结构（2026-11-02）
+
+维护者选定 C 方案。目标：**宿主层用 4c28107 的带 `#ifdef MaterialTransport` 守卫结构，
+构建时定义该宏（材料层始终编译、运行期 family 开关决定跑不跑），同时保留本地 A 组物理
+修补与自己的材料实现**。
+
+目前已完成的机械层（全部在临时树 `/tmp/fusion2`，未入库）：
+
+1. **守卫保留转换器** `/tmp/conv_keep.py`（由 `conv_drop.py` 改）：与旧转换器的唯一区别是
+   不再把 `defined(MaterialTransport)` 化简为 1，守卫原样保留，构建时由
+   `include/define.h` 里的 `#define MaterialTransport` 打开；
+2. 已转换整棵 4c 树（395 个 F90）到 `/tmp/conv4c-keep`，并套用
+   `/tmp/fix_arg_guards.py`（参数表守卫 16 文件 124 行）；
+3. **import 修复器** `/tmp/fix_namelist_imports.py`：转换后运行期开关
+   （`DEF_USE_BGC/PFT/PC/CoLMDEBUG/...`）出现在没有 `USE MOD_Namelist` 的作用域里，
+   自动补 import（处理续行；80+ 处）；
+4. 先只采纳核心宿主文件 25 个（`CoLM/CoLMDRIVER/CoLMMAIN`、`Thermal/GroundFluxes/
+   GroundTemperature/PhaseChange/Leaf*/SoilSnowHydrology/SnowLayersCombineDivide/
+   Hist*/Vars_1D*`、`Hydro_SoilWater/Grid_RiverLakeHist` 及材料编排模块
+   `MOD_MT_LandPhase/Hist/Rest/RiverLakeCoupling/Snow/NitrogenLeaching`），其余先保留桌面版；
+5. 解决的材料/宿主 plumbing 冲突（记录给下一轮）：
+   - `MOD_MT_LandPhase.o` 的依赖边需显式 `MOD_Vars_1DAccFluxes.o: MOD_MT_LandPhase.o`
+     （上游靠 OBJS_MAIN 列表顺序，Make 并行下不保证）；
+   - `MOD_MT_NitrogenLeaching` 的 `MaterialTransport && BGC` 守卫放宽为
+     `MaterialTransport`（BGC 在桌面版是运行期开关）；
+   - `WATER_2014` 需要补回桌面 A 组可选参数
+     （`defer_surface_ice_overflow, topoweti, alp_twi, chi_twi, mu_twi`）的签名，
+     否则 `MOD_Urban_Hydrology` 的旧调用点编译不过；
+   - `MOD_SoilSnowHydrology` 里 Campbell/VG 两份 `nprms` 声明合并为 5；
+   - `MOD_HistAccRestart` 需要的 `nac_frcsat` 已从 `MOD_Vars_1DFluxes` 移到
+     `MOD_MT_HostHistory`。
+6. **融合树已能 build=0**（default 预设，mksrfdata/mkinidata/colm 全链）。
+
+**当前数值状态**（融合树 vs 现有黄金，材料运行期关闭）：
+
+| 算例 | tier2 外变量 | 主要来源 |
+|---|---|---|
+| CN-Cng | **7** | 历史层语义：`f_t_lake/f_lake_icefrac/f_wetwat/f_wetwat_inst/f_wetzwt` 的 spval 有效性、`f_gssun/f_gssha` 量纲（差 1e6） |
+| CN-Cng-wet | 55 | 上述历史层 + 未搬回的 A 组物理（露水/霜冰、卸载、TOPMODEL 等） |
+| US-NR1-snow | 88 | 同上，雪/植物水力链放大 |
+
+**下一轮顺序**：① 把桌面 `MOD_Hist/HistAccRestart/MT_Hist` 的历史语义修补移植到上游
+adopted 版本（先把 CN-Cng 拉回 0 项）；② 按 Thermal/LeafInterception → SoilSnowHydrology
+（dew/frost/TOPMODEL/VIC）→ Hydro_SoilWater 的顺序搬 A 组物理；③ 三预设构建 + 三站点
+黄金；④ 最后再评估 material-on 行为与我们的材料 bug 修复是否需要在上游编排模块里补。
