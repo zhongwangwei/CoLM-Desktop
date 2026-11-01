@@ -1770,12 +1770,15 @@ MODULE MOD_Const_PFT
 
    ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: Init_PFT_Const
+   PUBLIC :: representative_pft_of_lct
 
 CONTAINS
 
    SUBROUTINE Init_PFT_Const
 
-   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL, DEF_USE_PC, DEF_USE_PFT, &
+   USE MOD_Const_LC, only: Set_LCT_Vmax25_Vgm
+
+   USE MOD_Namelist, only: DEF_USE_Campbell_SOIL_MODEL, DEF_USE_PC, DEF_USE_PFT, DEF_USE_LCT, &
       PFT_OVERRIDE_SLOTS, PFT_OVERRIDE_UNSET, PFT_OVERRIDE_INT_UNSET, &
 #define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) VAR, &
 #define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) VAR, &
@@ -1784,6 +1787,8 @@ CONTAINS
 #undef PFT_OVERRIDE_REAL
       DEF_CASE_NAME
    IMPLICIT NONE
+
+   integer :: lc
 
       ! vmax25_p / lambda_p: two vegetation parameters "temporarily tuned
       ! to match the VGM model (soil too wet)" -- used to be two
@@ -1854,6 +1859,15 @@ CONTAINS
                 ,1000.,  1000., 1000.,  1000., 1000.,  1000., 1000.&
 #endif
                 /)
+      ENDIF
+
+      ! LCT（USGS/IGBP）的地类表只有一套 Vcmax（Bonan 2010，Campbell 校准）。VG 土壤下
+      ! 用代表 PFT 的 VG 值覆盖，否则 LCT 默认光合高 2 倍（upstream-bugs #84）；
+      ! 用户显式的 DEF_LC_VMAX25(lc) 由 Set_LCT_Vmax25_Vgm 跳过，不会被覆盖。
+      IF (.not. DEF_USE_Campbell_SOIL_MODEL .and. DEF_USE_LCT) THEN
+         DO lc = 1, N_land_classification
+            CALL Set_LCT_Vmax25_Vgm (lc, vmax25_p(representative_pft_of_lct(lc)))
+         ENDDO
       ENDIF
 
       ! rhol_vis_p/rhol_nir_p/taul_vis_p/taul_nir_p: leaf optical properties
@@ -1938,6 +1952,38 @@ ENDIF
 
 
    END SUBROUTINE Init_PFT_Const
+
+   ! LCT 地类没有 PFT 编号。臭氧胁迫（upstream-bugs #68）与 VG 土壤下的 Vcmax
+   ! 校准（#84）都按“代表 PFT”取值：同一生活型/叶习性里最接近的 PFT，裸地、
+   ! 水体、冰雪取 0。表在 IGBP/USGS 两套地类上分别给出；不在表内的类取 0。
+   ! 这是**唯一**一份表，MOD_Ozone 的 ozone_pft_of_lct 也调用它。
+   integer FUNCTION representative_pft_of_lct (lc) RESULT(ivt)
+
+   IMPLICIT NONE
+   integer, intent(in) :: lc
+
+#ifdef LULC_USGS
+   ! 0 ocean, 1 urban, 2-6 cropland and mosaics, 7 grassland, 8 shrubland,
+   ! 9 mixed shrub/grass, 10 savanna, 11 DBF, 12 DNF, 13 EBF, 14 ENF, 15 mixed,
+   ! 16 water, 17 herbaceous wetland, 18 wooded wetland, 19 barren,
+   ! 20 herbaceous tundra, 21 wooded tundra, 22 mixed tundra, 23 bare tundra, 24 ice
+   integer, parameter :: map(0:24) = (/ 0, 13, 15, 15, 15, 15, 15, 13, 10, 10, 14, &
+                                        7,  3,  4,  1,  1,  0, 13,  7,  0, 12, 11, 12, 0, 0 /)
+#else
+   ! 0 ocean, 1 ENF, 2 EBF, 3 DNF, 4 DBF, 5 mixed, 6 closed shrub, 7 open shrub,
+   ! 8 woody savanna, 9 savanna, 10 grassland, 11 wetland, 12 cropland, 13 urban,
+   ! 14 cropland mosaic, 15 snow/ice, 16 barren, 17 water
+   integer, parameter :: map(0:17) = (/ 0, 1, 4, 3, 7, 1, 9, 10, 7, 14, 13, 13, 15, &
+                                        13, 15, 0, 0, 0 /)
+#endif
+
+      IF (lc >= lbound(map,1) .and. lc <= ubound(map,1)) THEN
+         ivt = map(lc)
+      ELSE
+         ivt = 0
+      ENDIF
+
+   END FUNCTION representative_pft_of_lct
 
    SUBROUTINE apply_pft_real_override(values, target, scale)
    IMPLICIT NONE

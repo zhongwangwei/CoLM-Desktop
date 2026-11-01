@@ -723,8 +723,12 @@ MODULE MOD_Const_LC
    ! land cover mapping look-up table
    integer :: LC_Map(0:255)
 
+   ! 用户显式给了 DEF_LC_VMAX25(lc) 的类；VG 校准不覆盖这些类。
+   logical, PRIVATE :: vmax25_lc_override_given(0:N_land_classification) = .false.
+
    ! PUBLIC MEMBER FUNCTIONS:
    PUBLIC :: Init_LC_Const
+   PUBLIC :: Set_LCT_Vmax25_Vgm
 
 CONTAINS
 
@@ -734,6 +738,8 @@ CONTAINS
    IMPLICIT NONE
 
    integer :: i, nsl
+
+      vmax25_lc_override_given (:) = .false.
 
 #ifdef LULC_USGS
       patchtypes (:) = patchtypes_usgs (:)
@@ -954,7 +960,10 @@ ENDIF
          IF (DEF_LC_TAUL_NIR(lc) /= LC_OVERRIDE_UNSET) tau(2,1,lc) = DEF_LC_TAUL_NIR(lc)
          IF (DEF_LC_TAUS_VIS(lc) /= LC_OVERRIDE_UNSET) tau(1,2,lc) = DEF_LC_TAUS_VIS(lc)
          IF (DEF_LC_TAUS_NIR(lc) /= LC_OVERRIDE_UNSET) tau(2,2,lc) = DEF_LC_TAUS_NIR(lc)
-         IF (DEF_LC_VMAX25(lc) /= LC_OVERRIDE_UNSET) vmax25     (lc) = DEF_LC_VMAX25(lc) * 1.e-6_r8
+         IF (DEF_LC_VMAX25(lc) /= LC_OVERRIDE_UNSET) THEN
+            vmax25     (lc) = DEF_LC_VMAX25(lc) * 1.e-6_r8
+            vmax25_lc_override_given (lc) = .true.
+         ENDIF
          IF (DEF_LC_EFFCON(lc) /= LC_OVERRIDE_UNSET) effcon(lc) = DEF_LC_EFFCON(lc)
          IF (DEF_LC_C3C4(lc) /= -1) c3c4(lc) = DEF_LC_C3C4(lc)
          IF (DEF_LC_RESPCP(lc) /= LC_OVERRIDE_UNSET) respcp(lc) = DEF_LC_RESPCP(lc)
@@ -985,6 +994,21 @@ ENDIF
       ENDDO
 
    END SUBROUTINE apply_lc_overrides
+
+   ! LCT + van Genuchten 的 Vcmax 校准（upstream-bugs #84）：地类表只有一套
+   ! Campbell 校准值，这里用代表 PFT 的 VG 值覆盖；用户显式 DEF_LC_VMAX25(lc)
+   ! 的类保持用户值。只由 Init_PFT_Const 在 VG + LCT 时调用。
+   SUBROUTINE Set_LCT_Vmax25_Vgm (lc, value)
+
+   IMPLICIT NONE
+   integer, intent(in) :: lc
+   real(r8), intent(in) :: value   ! [mol CO2/m2/s]
+
+      IF (lc < 1 .or. lc > N_land_classification) RETURN
+      IF (vmax25_lc_override_given(lc)) RETURN
+      vmax25(lc) = value
+
+   END SUBROUTINE Set_LCT_Vmax25_Vgm
 
 END MODULE MOD_Const_LC
 ! ---------- EOP ------------

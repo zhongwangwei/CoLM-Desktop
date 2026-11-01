@@ -1986,11 +1986,9 @@ CONTAINS
          IF (DEF_USE_LCT) THEN
             DEF_FAST_PC  = .false.
             DEF_SOLO_PFT = .false.
-            IF (.not. DEF_USE_Campbell_SOIL_MODEL) THEN
-               write(*,*) '                  *****                  '
-               write(*,*) 'Note: Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme.'
-               DEF_RSS_SCHEME = 0
-            ENDIF
+            ! upstream-bugs #84: 以前这里在 VG 土壤下强制关掉土壤表面阻力
+            ! （DEF_RSS_SCHEME = 0），LCT 默认因此低估 Qle、高估 GPP。那条强制
+            ! 规则已删除，DEF_RSS_SCHEME 用 namelist 的值（默认 1）。
          ENDIF
 
          IF (DEF_USE_PFT) THEN

@@ -181,13 +181,9 @@ pub const LCT_SIMILARITY_10M_VARIABLES: [&str; 4] = ["us10m", "vs10m", "fm10m", 
 /// 本仓库对应 `StandardLctEnergyOutput::soil_surface_resistance_s_m`。
 /// 本算例（Campbell 土壤）用的是**方案 1**（`rss = dsl/dg`）。
 ///
-/// **注意方案 0 那条例外：** `MOD_Namelist.F90:1948-1950` 在
-/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把 `DEF_RSS_SCHEME` **强制置 0**
-/// （"Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme"）。
-/// 本仓库目前只从算例/默认读这个字段，不复制那条强制规则 ——
-/// 所以在 VG 土壤算例上两边会分叉（上游 0、本仓库仍按文档里的档位算）。
-/// 这里先按 Campbell 算例（强制规则不触发）对齐，例外本身记在
-/// `docs/implementation-verification.md`。
+/// upstream-bugs #84 之后 `MOD_Namelist.F90` 不再在 LCT + VG 下把
+/// `DEF_RSS_SCHEME` 强制置 0；本层按 namelist/声明默认值算（默认 1），
+/// 与 Fortran 一致。
 pub const LCT_SOIL_RESISTANCE_VARIABLES: [&str; 1] = ["rss"];
 
 /// 本层能填的**冠层截留**量，三项。

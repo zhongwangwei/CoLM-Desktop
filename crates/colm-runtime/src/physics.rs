@@ -221,7 +221,7 @@ pub fn land_physics_parameters(
     // 上游 `apply_lc_overrides` 只在 `DEF_USE_LCT` 时生效，PFT/PC 下读了也不用；2026-10-21 起 vendor 改成
     // 逐地类、各种尺度都生效（原来只在单点、只改 `SITE_landtype` 一类）。`DEF_LC_C3C4` 是整数列，哨兵是
     // `-1`，只许 0/1（`MOD_Namelist.F90` 的 `any(DEF_LC_C3C4 ...)` 检查）。
-    let (land_class_overrides, plant_hydraulic_overrides) = if selected[0] == "DEF_USE_LCT" {
+    let (mut land_class_overrides, plant_hydraulic_overrides) = if selected[0] == "DEF_USE_LCT" {
         colm_init::land_class::land_class_overrides(
             document,
             colm_core::land_cover_classes(land_cover_scheme),
@@ -229,6 +229,22 @@ pub fn land_physics_parameters(
     } else {
         Default::default()
     };
+    // upstream-bugs #84：LCT 地类表只有一套 Campbell 校准的 Vcmax（Bonan 2010），
+    // 在 VG 土壤下默认光合高约 2 倍。用代表 PFT 的 VG 校准值补上，映射表与
+    // 臭氧的 `ozone_pft_of_lct` 共用（`colm_core::lct_ozone_vegetation_type`）；
+    // 用户显式的 `DEF_LC_VMAX25(lc)` 已经读进 override 表，这里不覆盖。
+    if selected[0] == "DEF_USE_LCT" && !campbell {
+        for class in 1..=colm_core::land_cover_classes(land_cover_scheme) {
+            if land_class_overrides.for_class(class).vmax25_umol.is_some() {
+                continue;
+            }
+            let pft = colm_core::lct_ozone_vegetation_type(land_cover_scheme, class);
+            let value = colm_case::pft::default_value("DEF_PFT_VMAX25", pft as u8, false, false)?;
+            if let Some(value) = value {
+                land_class_overrides.class_mut(class).vmax25_umol = Some(value);
+            }
+        }
+    }
     // 城市算例也一样：城市 patch 用城市地类那一行（`CoLMMAIN_Urban` 收的是 `vmax25(m)` 一类），
     // 自然 patch 用各自地类；2026-10-21 与 Fortran 逐位核对后放开（原来拒绝）。
     // 这里曾有一张"设了非默认值就拒绝"的表（`oracle/nml-unread.snapshot` 里会改变物理、而运行期不读的
@@ -313,7 +329,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_precip_phase_discrimination_scheme",
         )?)?,
-        surface_resistance_scheme: soil_surface_resistance_scheme(document, campbell, use_pft)?,
+        surface_resistance_scheme: scheme_index(document, "DEF_RSS_SCHEME", 0, 5)?,
         stress_scheme: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         surface_layer_scheme: if logical(document, "DEF_USE_CBL_HEIGHT")? {
             SurfaceLayerScheme::LargeEddy
@@ -484,31 +500,6 @@ fn stomata(document: &Document, urban_run: bool) -> Result<StomataOptions> {
 
 /// 字段的有效值：算例里写了就用算例的，否则用 `colm-schema` 的声明默认值。
 ///
-/// `DEF_RSS_SCHEME`，含上游那条**与 Campbell 绑定**的强制规则。
-///
-/// `MOD_Namelist.F90:1946-1950`：在 `DEF_USE_LCT` 分支里，
-/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把 `DEF_RSS_SCHEME` **强制置 0**，
-/// 并打印 "Soil resistance is automaticlly turned off for VG soil + USGS|IGBP scheme"。
-/// 也就是 van Genuchten 土壤下土壤表面阻力恒为 0，算例里写什么都不算数。
-///
-/// **`DEF_USE_LCT` 那道门在本仓库恒成立**：`LandCoverScheme` 只有 `Usgs`/`Igbp`
-/// 两种地类分类，没有 PFT/PC 子网格，运行时走的也只有 standard-LCT 这一条链。
-/// 所以这里只需要判 Campbell。
-/// `MOD_Namelist.F90:1860-1867`：只有 **LCT** 在 van Genuchten 土壤下把
-/// `DEF_RSS_SCHEME` 强制置 0（"Soil resistance is automaticlly turned off for VG soil +
-/// USGS|IGBP scheme"）；PFT/PC 保留 namelist 值，默认 1。3-PFT AT-Neu 算例漏掉这一条时
-/// 第一条 history 的 `f_rss` 是 0 对 Fortran 的 0.00885。
-fn soil_surface_resistance_scheme(
-    document: &Document,
-    campbell: bool,
-    use_pft: bool,
-) -> Result<i32> {
-    if !campbell && !use_pft {
-        return Ok(0);
-    }
-    scheme_index(document, "DEF_RSS_SCHEME", 0, 5)
-}
-
 /// 每一档都在**类型**上钉住 schema 的声明类型：`DEF_RSS_SCHEME` 在 schema 里是
 /// 整数，算例里写成 `1.0` 就该报错，而不是被 `as_f64` 悄悄收下。
 /// schema 不认识这个路径同样报错 —— 那说明字段名拼错了，而继续走下去只会拿到

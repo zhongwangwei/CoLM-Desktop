@@ -42,8 +42,8 @@ fn golden_case(name: &str) -> Document {
 /// 恰好一个为真，默认是 LCT。以前**根本不读这三个开关** —— 一个选 PFT/PC 的算例会一路
 /// 按 LCT 跑完，算式对、结构错、不报错。
 ///
-/// 子网格还牵动 `DEF_RSS_SCHEME`：`:1860-1867` 只在 LCT 下把 VG 土壤的土壤表面阻力关掉，
-/// PFT/PC 保留 namelist 值（默认 1）。
+/// upstream-bugs #84 之后不再有“LCT + VG 强制关土壤阻力”的规则，三者的
+/// `DEF_RSS_SCHEME` 都取 namelist 值（默认 1）。
 #[test]
 fn subgrid_switches_select_pft_or_pc_and_keep_soil_resistance() {
     let pft = land_physics_parameters(
@@ -64,7 +64,7 @@ fn subgrid_switches_select_pft_or_pc_and_keep_soil_resistance() {
     assert_eq!(pc.surface_resistance_scheme, 1);
     let lct = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert!(!lct.use_pft && !lct.use_pc);
-    assert_eq!(lct.surface_resistance_scheme, 0);
+    assert_eq!(lct.surface_resistance_scheme, 1);
     // 两个或三个同时为真也要报错（上游 `CoLM_stop`）。
     let error = land_physics_parameters(
         &case_with("DEF_USE_LCT=.true.\nDEF_USE_PFT=.true."),
@@ -95,10 +95,9 @@ fn an_empty_case_maps_every_declared_default() {
         physics.precipitation_scheme,
         PrecipitationPhaseScheme::WetBulb
     );
-    // `DEF_RSS_SCHEME` 声明默认 1，但空算例是 van Genuchten 土壤，
-    // 于是上游那条与 Campbell 绑定的强制规则把它压到 **0**
-    // （`MOD_Namelist.F90:1946-1950`）。下面另有一条断言证明 Campbell 时不压。
-    assert_eq!(physics.surface_resistance_scheme, 0);
+    // upstream-bugs #84：不再有 LCT + VG 的强制规则，默认算例的
+    // `DEF_RSS_SCHEME` 就是 schema 的声明默认值 1。
+    assert_eq!(physics.surface_resistance_scheme, 1);
     assert_eq!(physics.stress_scheme, 1);
     assert_eq!(physics.surface_layer_scheme, SurfaceLayerScheme::Standard);
     // 声明默认是 4，而 Balland-Arp 在枚举里排第四。
@@ -438,23 +437,24 @@ fn fortran_real_literals_parse_with_suffixes_and_d_exponents() {
     assert!(parse_fortran_real("not a number").is_err());
 }
 
-/// `DEF_RSS_SCHEME` 只在 van Genuchten 土壤上被强制置 0。
+/// upstream-bugs #84：`DEF_RSS_SCHEME` 不再按 Campbell/VG 或 LCT 被强制改写。
 ///
-/// 上游 `MOD_Namelist.F90:1946-1950`：`DEF_USE_LCT` 分支里，
-/// `DEF_USE_Campbell_SOIL_MODEL` 为假时把它压到 0（"Soil resistance is
-/// automaticlly turned off for VG soil + USGS|IGBP scheme"）。
-/// 这条测试钉住的是**条件性**：只断言"VG 时是 0"抓不住一个无条件覆盖，
-/// 所以同一份算例再打开 Campbell，必须回到 namelist/默认写的那个值。
+/// 旧 vendor 在 `DEF_USE_LCT` + van Genuchten 下把它强制置 0（"Soil resistance is
+/// automaticlly turned off for VG soil + USGS|IGBP scheme"），默认 LCT 算例因此
+/// 低估 Qle、高估 GPP。现在三件事各自保留 namelist/声明默认值：
+/// 空算例（VG + LCT）是 1，显式写 3 就是 3，Campbell 下也不压。
 #[test]
-fn the_soil_resistance_scheme_is_forced_to_zero_only_for_van_genuchten() {
+fn the_soil_resistance_scheme_is_no_longer_forced() {
     use colm_namelist::parse;
 
-    // 空算例：VG，默认 1 → 被压到 0。
     let vg = land_physics_parameters(&empty_case(), LandCoverScheme::Igbp, HEIGHTS).unwrap();
     assert_eq!(vg.hydraulic_model, HydraulicModel::VanGenuchten);
-    assert_eq!(vg.surface_resistance_scheme, 0);
+    assert_eq!(vg.surface_resistance_scheme, 1);
 
-    // 同一份算例 + Campbell：不压，用文档里的值。
+    let explicit_vg = parse("&nl_colm\n  DEF_RSS_SCHEME = 3\n/\n").unwrap();
+    let physics = land_physics_parameters(&explicit_vg, LandCoverScheme::Igbp, HEIGHTS).unwrap();
+    assert_eq!(physics.surface_resistance_scheme, 3);
+
     let campbell =
         parse("&nl_colm\n  DEF_USE_Campbell_SOIL_MODEL = .true.\n  DEF_RSS_SCHEME = 3\n/\n")
             .unwrap();
@@ -588,7 +588,11 @@ fn land_class_overrides_are_read_per_class() {
         physics.land_class_overrides.for_class(10).vmax25_umol,
         Some(60.0)
     );
-    assert_eq!(physics.land_class_overrides.for_class(3).vmax25_umol, None);
+    // #84：没有用户覆盖的类拿到代表 PFT 的 VG 校准值（class 3 → PFT 3 = 34.1）。
+    assert_eq!(
+        physics.land_class_overrides.for_class(3).vmax25_umol,
+        Some(34.1)
+    );
     assert_eq!(
         physics
             .plant_hydraulic_overrides

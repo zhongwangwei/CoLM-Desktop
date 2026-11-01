@@ -63,7 +63,8 @@ pub struct OzoneParameters {
     pub use_data: bool,
 }
 
-/// `ozone_pft_of_lct`（upstream-bugs 第 68 条，两侧都已修）：LCT patch 的臭氧参数取哪个 PFT。
+/// `ozone_pft_of_lct` / `representative_pft_of_lct`（upstream-bugs #68/#84，两侧都已修）：
+/// LCT patch 的臭氧参数与 VG 土壤下的 Vcmax 校准都按这张“代表 PFT”表取值。
 ///
 /// 按生活型与叶习性取最接近的 PFT；没有植被的地类取 0（裸地，`o3coefv = o3coefg = 1`）；
 /// 混交林保留原来的 1。表外的地类号也取 0。
