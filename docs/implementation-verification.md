@@ -42458,3 +42458,45 @@ GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 �
   `tests/material_host_cleanup` 检查。
 - 本轮为避免把 `main` 留在不可构建状态：vendor 已还原到 `e766527a`；Rust 侧的
   内部改名（`848fca7e`）与跨引擎旁车互通（`125061bb`）已先落地。
+
+### 4c28107 同步试验的实测结果（2026-11-01，下一轮从这里接手）
+
+本轮把「整批追平 4c28107」真正跑了一遍，结论是**不能靠机械转换收口**，原因和可复用资产如下：
+
+- **3 方合并仓库**：base=`e766527a` 的上游原树、ours=`e766527a`+本仓库全部本地改动、
+  theirs=`4c28107` 的原树。先用「编译期守卫 → 运行期开关」转换器分别转换 base 与
+  theirs（关键修正：`#if` 展开成 `IF` 时必须补换行、`defined(MaterialTransport) &&
+  defined(BGC)` 这类复合条件要先消去 `MaterialTransport` 再按运行期表达式处理、
+  声明块里的守卫只删不包 IF），转换后两棵树预处理器括号**完全平衡**。
+- **冲突从 29 个降到 9 个**，且只剩转换风格差异：`CoLMDRIVER/CoLMMAIN` 的
+  `#endif`/`END IF` 对、`MOD_MT_LandPhase` 的 `#ifdef BGC` 对 `IF (DEF_USE_BGC)`、
+  `Aggregation_MethaneAggregation` 的 `RangeCheck` 守卫、`MOD_GroundTemperature`/
+  `MOD_PhaseChange` 热诊断参数块、`MOD_Vars_1DFluxes` 的 PFT 守卫——
+  说明「转换 + 三方合并」这条路本身可行。
+- **卡点不是合并，而是 4c28107 的宿主例程与本地修补不可同时自动满足**：4c 把材料
+  职责移出宿主时，宿主版本里**不含**本仓库这一个月叠加的宿主人身修补，例如
+  `MOD_SoilSnowHydrology` 的 `defer_surface_ice_overflow`/TOPMODEL 可选参数、
+  露水容量与冻结超额分支，`MOD_LeafInterception` 的 satcap/卸载/相态修复，
+  `CoLMMAIN` 的 FIX #50 spinup rewind、`MOD_Hist*` 的本地 history 续写等。
+  先用 theirs 解冲突会得到「声明被移走、过程体还在用」的混合文件，编译报
+  `not a DUMMY variable`、`More actual than formal arguments` 等；退回 ours 又把
+  4c 的 facade 接线拆掉。逐文件试错 8 轮后确认没有自动收敛路径。
+- **统计**：上游改动的 36 个 F90 里，本仓库相对「e766 原树」的差异有 1147 个 hunk
+  （绝大多数是宏→运行期开关的写法差异，带 FIX/缺陷标记的只有 8 个），所以也无法
+  用「只挑 FIX hunk 应用」自动完成。
+- **因此本轮的落点是**：保留已提交的两项成果（跨引擎旁车互通 `125061bb`、内部
+  改名 `848fca7e`），vendor 还原到 `e766527a` 并重新验证：
+  `build_kernel.sh default` exit=0；`CN-Cng`、`US-NR1-snow`、`CN-Cng-wet` 三个
+  站点黄金全部 `within tolerance: 127 variables`（tier0=23/tier1=8/tier2=97、
+  tier3=0）；四张生成表 drift、namelist roundtrip、histmap 全绿。
+- **下一轮的正确做法**（顺序不能反）：
+  1. 用上面转换后的 3 方合并起手，9 个冲突逐个按「保留 4c facade 接线 + 把本地
+     宿主修补补回」手工解；
+  2. 先做 `CoLM/CoLMDRIVER/CoLMMAIN`（facade 与 FIX #50 都在这里）、再做
+     `Hist*`、`MATERIAL/MOD_MT_*`、`HYDRO`，最后做 `Leaf*/PhaseChange/Snow*/
+     Ground*/Thermal/SoilSnowHydrology` 这些本地修补密集的宿主；
+  3. Makefile 用 4c 的 `main/MATERIAL/Makefile.material` 接线并把本仓库的
+     `MOD_Filesystem/CoLM_Mkdir` 目标并回去；
+  4. 重建 `default/latlon/crop` 三预设、重生成表与黄金 provenance，移植
+     `tests/material_host_cleanup` 与 `tests/material_naming` 两组检查；
+  5. 若上游继续在 4c 之后改，重复上述流程，不要退回整树替换。
