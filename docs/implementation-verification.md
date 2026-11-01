@@ -42593,3 +42593,20 @@ tier-check 之前不会报漏项）。
   PhaseChange/Ground* → SoilSnowHydrology/Hydro_SoilWater（把 dew/frost/TOPMODEL 修补
   改写为 `water_diag`）→ MKSRFDATA/RegionClip；每步在 `/tmp/colmsync` 的合并分支上
   编译，最后复制回 vendor 做 `diff -r --exclude=.git` 验收，再重建三预设与黄金。
+
+### 4c28107 facade 接入构建 + CoLM 编排迁移（2026-11-01 夜，round 2）
+
+- **构建接线**：11 个 `MOD_MT_*` 新模块按上游的 OBJS 分配进 Makefile（SHARED/BASIC/MAIN），
+  并 `include main/MATERIAL/Makefile.material` 取得上游依赖边；`MOD_MT_SurfaceData` 同时
+  供 mksrfdata/mkinidata 使用。**三个预设全部构建成功**：default、latlon（flat MPI）、
+  crop，均 exit=0；链接后 `colm.x` 从 6.24 MB 增至 6.29 MB（新增模块）。
+- **CoLM.F90 迁移**：编排从旧的直接 `mt_land_init/mt_forcing_*/mt_land_final` 调用切到
+  上游 `MOD_MT_Runtime` 的 facade（land/forcing/history restore/lulcc/final/registry）；
+  本地 FIX #50 的预热回卷块保留，内部调用改成 `mt_runtime_lulcc_forcing_save/restore`。
+  冲突中丢失的 `lulcc_in_spinup` 声明补回。
+- **数值验证**：切 facade 后 `CN-Cng`、`CN-Cng-wet`、`US-NR1-snow` 三站点仍
+  `127 variables within tolerance`（tier3=0），说明 init/final/forcing 的 facade 化与
+  桌面 CoLMMAIN 的逐步材料调用兼容；`CoLMDRIVER`/`CoLMMAIN` 暂留桌面实现。
+- **剩余**：宿主圈其余 13 个文件（CoLMDRIVER/CoLMMAIN/Hist*/Leaf*/Thermal/PhaseChange/
+  Ground*/SoilSnowHydrology/Hydro_SoilWater/MKSRFDATA/RegionClip）仍需一次性改写；
+  `MOD_MT_LandPhase` 等材料模块目前仍是桌面版，`mt_land_after_bgc` 等上游新入口尚未接。

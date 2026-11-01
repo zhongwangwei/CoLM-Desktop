@@ -167,3 +167,21 @@ vendor 的 Fortran 已随之更新；Rust 引擎此前还写旧名，本轮改�
   （桌面 Makefile 未列它们的对象），只是把上游源码快照入库存档，供下一步接线。
 - 迁移方案、差距清单与验收方式见 `docs/implementation-verification.md`
   "上游 4c28107 模块化盘点的结论与同步方案" 及后续段落。
+
+## 2026-11-01：facade 模块进入构建，CoLM 编排切到 MOD_MT_Runtime
+
+在上一节"入库但未接线"的基础上，把 4c28107 的 11 个 `MOD_MT_*` 新模块接入 Makefile
+（按上游的分配：`MOD_MT_SurfaceData` 进 OBJS_SHARED，`Hydro/Thermal/CanopyDiagnostics`、
+`SnowRemap`、`HostHistory`、`BGC_NH4`、`LandWork`、`HistoryRestart` 进 OBJS_BASIC，
+`SnowHost`/`Runtime` 进 OBJS_MAIN；并 `include main/MATERIAL/Makefile.material` 取得上游
+的依赖边）。它们与桌面宿主层的旧接口**可以同时编译/链接**（已实测 default/latlon/crop
+三预设均 exit=0）。
+
+同时把 `main/CoLM.F90` 的编排切到上游 `MOD_MT_Runtime` facade：`mt_runtime_land_init`/
+`forcing_init`/`history_restore`/`lulcc_forcing_save|restore`/`land_final`/`registry_final`；
+本地 FIX #50（LULCC 下预热回卷回退土地覆盖）保留，并把其中的旧 `mt_forcing_*` 调用改为
+对应的 runtime facade。`CoLMDRIVER`/`CoLMMAIN` 仍保留桌面实现——逐程序步的材料调用暂
+不换，等宿主圈一次性重写。
+
+验证：三站点黄金在切 facade 后仍 `within tolerance`（127 变量，tier3=0）；
+default/latlon/crop 三预设全部构建成功。

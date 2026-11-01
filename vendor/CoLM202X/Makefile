@@ -73,6 +73,7 @@ OBJS_SHARED =    \
 				  MOD_ElmVector.o              \
 				  MOD_HRUVector.o              \
 				  MOD_MeshFilter.o             \
+				 MOD_MT_SurfaceData.o             \
 				  MOD_RegionClip.o
 
 $(filter-out CoLM_Mkdir.o,${OBJS_SHARED}) : %.o : %.F90 ${HEADER}
@@ -83,6 +84,8 @@ CoLM_Mkdir.o: share/CoLM_Mkdir.c | mkdir_build
 	${CC} ${CFLAGS} -c -o .bld/$@ $<
 
 OBJS_SHARED_T = $(addprefix .bld/,${OBJS_SHARED})
+
+include main/MATERIAL/Makefile.material
 
 # Material transport settings, also read by mksrfdata (methane surface data);
 # every file is empty unless MaterialTransport is defined.
@@ -239,6 +242,14 @@ OBJS_BASIC =    \
 				 MOD_Catch_RiverLakeNetwork.o    \
 				 MOD_Catch_Reservoir.o           \
 				 MOD_VicParaReadin.o             \
+				 MOD_MT_HydroDiagnostics.o        \
+				 MOD_MT_ThermalDiagnostics.o      \
+				 MOD_MT_CanopyDiagnostics.o       \
+				 MOD_MT_SnowRemap.o               \
+				 MOD_MT_HostHistory.o             \
+				 MOD_MT_BGC_NH4.o                 \
+				 MOD_MT_LandWork.o                \
+				 MOD_MT_HistoryRestart.o          \
 				 MOD_Initialize.o
 
 
@@ -482,6 +493,8 @@ OBJS_MAIN = \
 				MOD_Lulcc_Driver.o                        \
 				CoLMDRIVER.o                              \
 				CoLMMAIN.o                                \
+				 MOD_MT_SnowHost.o                \
+				 MOD_MT_Runtime.o                 \
 				CoLM.o
 
 $(OBJS_MAIN) : %.o : %.F90 ${HEADER} ${OBJS_SHARED} ${OBJS_BASIC}
