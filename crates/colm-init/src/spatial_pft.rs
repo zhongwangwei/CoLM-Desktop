@@ -1538,9 +1538,9 @@ fn derive_spatial_bgc_state(
     let equilibrium = cn_initial_state
         .map(|path| read_spatial_cn_equilibrium(path, config, patches, pfts))
         .transpose()?;
-    // Desktop 用 family 开关（`mt_any_enabled`）替代上游的 TRACER 编译期门。
-    // Wetland BGC initialization is independent of tracer count and CH4 selection.
-    let use_tracer = colm_namelist::material::any_enabled(document)?;
+    // Desktop 用 family 开关（`mt_any_enabled`）替代上游的 MATERIAL 编译期门。
+    // Wetland BGC initialization is independent of material count and CH4 selection.
+    let use_material = colm_namelist::material::any_enabled(document)?;
     let states = (0..patches.class.len())
         .map(|patch| {
             let indices = &pft_to_patch[patch];
@@ -1582,7 +1582,7 @@ fn derive_spatial_bgc_state(
                 .map(|layer| soil.get(crate::SoilField::BulkDensity, layer, patch))
                 .collect::<Vec<_>>();
             let wetland_organic_matter_density_kg_m3 =
-                (use_tracer && patch_kind[patch] == 2 && equilibrium.is_some()).then(|| {
+                (use_material && patch_kind[patch] == 2 && equilibrium.is_some()).then(|| {
                     (0..soil.layers)
                         .map(|layer| soil.get(crate::SoilField::OmDensity, layer, patch))
                         .collect::<Vec<_>>()
@@ -1590,7 +1590,7 @@ fn derive_spatial_bgc_state(
             derive_cold_start_bgc_state(BgcColdStartInput {
                 soil_thickness_m: &soil_thickness_m,
                 soil_bulk_density_kg_m3: &soil_bulk_density_kg_m3,
-                soil_bgc_active: patch_kind[patch] == 0 || (use_tracer && patch_kind[patch] == 2),
+                soil_bgc_active: patch_kind[patch] == 0 || (use_material && patch_kind[patch] == 2),
                 pft: BgcPftColdStartInput {
                     class: &class,
                     fraction: &fraction,

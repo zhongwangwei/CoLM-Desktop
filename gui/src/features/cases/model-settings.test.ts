@@ -410,7 +410,7 @@ test('upstream choices close processes they invalidate, and the newest side of a
     { subgrid: 'PFT', compiledCrop: true },
   );
   assert.deepEqual(r.closed, []);
-  // 选择 Campbell 关闭示踪；关闭变饱和流同样关闭示踪。
+  // 选择 Campbell 关闭材料；关闭变饱和流同样关闭材料。
   r = exclusionPatch(
     { DEF_USE_ISOTOPE: on },
     { DEF_USE_Campbell_SOIL_MODEL: on },

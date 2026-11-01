@@ -224,7 +224,7 @@ test('frozen model cards write case fields directly and leave the selected revis
   assert.equal(h.changes.length, 0);
 });
 
-test('tracer choice opens species configuration before saving, including incompatible saved definitions', async () => {
+test('material choice opens species configuration before saving, including incompatible saved definitions', async () => {
   for (const enabled of [false, true]) {
     const h = harness();
     h.props.source = { kind: 'frozen', version: { id: 'official', revision: 5 } };
@@ -244,20 +244,20 @@ test('tracer choice opens species configuration before saving, including incompa
     };
     h.render();
     const c = await h.resolve();
-    const tracer = c.fields.find((field) => field.id === 'setup-tracer')!;
+    const material = c.fields.find((field) => field.id === 'setup-material')!;
     assert.ok(
-      tracer.options!.some((option) => option.value === '.true.' && option.label === '选择示踪剂'),
+      material.options!.some((option) => option.value === '.true.' && option.label === '选择材料'),
     );
-    await tracer.set('.true.');
-    // 界面上示踪剂没有单独的"设置"按钮，再次进入就是再选一次"选择示踪剂"（第 737 轮起清单与界面一致）。
-    assert.ok(!c.actions.some((action) => action.id === 'setup-tracer-settings'));
-    await tracer.set('.true.');
-    assert.deepEqual(opened, ['tracer', 'tracer']);
+    await material.set('.true.');
+    // 界面上材料没有单独的"设置"按钮，再次进入就是再选一次"选择材料"（第 737 轮起清单与界面一致）。
+    assert.ok(!c.actions.some((action) => action.id === 'setup-material-settings'));
+    await material.set('.true.');
+    assert.deepEqual(opened, ['material', 'material']);
     assert.deepEqual(patches, []);
     assert.equal(h.props.environment.caseValues.DEF_USE_METHANE, enabled ? '.true.' : '.false.');
     h.props.disabled = true;
     h.render();
-    assert.throws(() => tracer.set('.true.'), /locked|stale|不可修改|已切换/i);
+    assert.throws(() => material.set('.true.'), /locked|stale|不可修改|已切换/i);
   }
 });
 

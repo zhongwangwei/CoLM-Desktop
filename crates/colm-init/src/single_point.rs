@@ -2681,7 +2681,7 @@ fn single_point_bgc_state(
 ) -> Result<Option<crate::BgcColdStartState>> {
     let config = run.static_run.static_config();
     let kind = patch_type(config.land_cover, surface.land_class)?;
-    let use_tracer = colm_namelist::material::any_enabled(document)?;
+    let use_material = colm_namelist::material::any_enabled(document)?;
     let class = pft.map_or(&[][..], |pft| pft.class.as_slice());
     let fraction = pft.map_or(&[][..], |pft| pft.fraction.as_slice());
     Ok(if run.bgc {
@@ -2707,7 +2707,7 @@ fn single_point_bgc_state(
         let input = |index: std::ops::Range<usize>| BgcColdStartInput {
             soil_thickness_m: thickness,
             soil_bulk_density_kg_m3: soil.field(SoilField::BulkDensity),
-            soil_bgc_active: kind == 0 || (use_tracer && kind == 2),
+            soil_bgc_active: kind == 0 || (use_material && kind == 2),
             pft: BgcPftColdStartInput {
                 class: &class[index.clone()],
                 fraction: &fraction[index.clone()],
@@ -2718,7 +2718,7 @@ fn single_point_bgc_state(
             },
             runtime_cn_state: runtime_cn_state.as_ref(),
             runtime_vegetation_carbon: None,
-            wetland_organic_matter_density_kg_m3: (use_tracer && kind == 2)
+            wetland_organic_matter_density_kg_m3: (use_material && kind == 2)
                 .then_some(soil.field(SoilField::OmDensity)),
             use_nitrification: run.nitrification,
         };

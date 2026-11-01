@@ -37,7 +37,7 @@ pub struct MethanePreprocessing {
 
 /// Mirror `methane_preprocessing_requirements` without treating every BGC
 /// case as methane.  上游 7d2fca93 之后甲烷由 `DEF_USE_METHANE` 单独打开，
-/// 参数文件就是 `DEF_METHANE_PARAM_FILE`（不再是 `DEF_TRACER_PARAM_FILES` 里的
+/// 参数文件就是 `DEF_METHANE_PARAM_FILE`（不再是 `@@DEF_MATERIAL_@@PARAM_FILES` 里的
 /// `CH4:` 映射）。
 pub fn requirements(
     document: &colm_namelist::Document,

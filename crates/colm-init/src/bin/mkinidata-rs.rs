@@ -236,10 +236,10 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     if let Some(path) = files.urban {
         wrote(&path);
     }
-    // 任一 family 打开（`mt_any_enabled`）：时间重启带空材料事务（mkinidata 不注册示踪物）。
+    // 任一 family 打开（`mt_any_enabled`）：时间重启带空材料事务（mkinidata 不注册材料）。
     let document = parse(&std::fs::read_to_string(&run.namelist)?)?;
     if colm_namelist::material::any_enabled(&document)? {
-        colm_init::write_empty_land_tracer_transaction(
+        colm_init::write_empty_land_material_transaction(
             &time.common.block,
             namelist_f64(&document, "DEF_MT_AQUIFER_MIXING_WATER_MM", -1.0)?,
         )?;
@@ -320,8 +320,8 @@ struct SpatialNamelistRun {
     /// LCT（含城市）的 `DEF_LC_X(lc)`：先按 24 格读，地类方案定了再查是否越界。
     land_classes: colm_core::LandClassOverrideTable,
     snicar: Option<SnicarInitialization>,
-    /// 任一 family 打开（`mt_any_enabled`）：`Some(DEF_MT_AQUIFER_MIXING_WATER_MM)`，时间重启带空示踪物事务。
-    tracer_mixing_water_mm: Option<f64>,
+    /// 任一 family 打开（`mt_any_enabled`）：`Some(DEF_MT_AQUIFER_MIXING_WATER_MM)`，时间重启带空材料事务。
+    material_mixing_water_mm: Option<f64>,
 }
 
 /// 空间冷启动的调用开关。参数已到 clippy 的 7 个上限，聚成一个结构体而不是
@@ -599,8 +599,8 @@ fn write_spatial_urban_namelist_block(
     if let Some(path) = files.urban {
         wrote(&path);
     }
-    if let Some(mixing) = run.tracer_mixing_water_mm {
-        colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
+    if let Some(mixing) = run.material_mixing_water_mm {
+        colm_init::write_empty_land_material_transaction(&time.common.block, mixing)?;
     }
     wrote(&time.common.block);
     if let Some(file) = da {
@@ -680,8 +680,8 @@ fn write_spatial_lct_namelist_block(
         .transpose()?;
     wrote(&files.constants);
     wrote(&files.block);
-    if let Some(mixing) = run.tracer_mixing_water_mm {
-        colm_init::write_empty_land_tracer_transaction(&time.block, mixing)?;
+    if let Some(mixing) = run.material_mixing_water_mm {
+        colm_init::write_empty_land_material_transaction(&time.block, mixing)?;
     }
     wrote(&time.block);
     if let Some(file) = da {
@@ -749,8 +749,8 @@ fn write_spatial_pft_namelist_block(
         wrote(&files.constants);
         wrote(&files.block);
     }
-    if let Some(mixing) = run.tracer_mixing_water_mm {
-        colm_init::write_empty_land_tracer_transaction(&time.common.block, mixing)?;
+    if let Some(mixing) = run.material_mixing_water_mm {
+        colm_init::write_empty_land_material_transaction(&time.common.block, mixing)?;
     }
     wrote(&time.common.block);
     if let Some(file) = da {
@@ -939,7 +939,7 @@ fn spatial_namelist_run_with_subgrid(
             colm_core::LandClassOverrideTable::new()
         },
         snicar,
-        tracer_mixing_water_mm: if colm_namelist::material::any_enabled(&document)? {
+        material_mixing_water_mm: if colm_namelist::material::any_enabled(&document)? {
             Some(namelist_f64(
                 &document,
                 "DEF_MT_AQUIFER_MIXING_WATER_MM",

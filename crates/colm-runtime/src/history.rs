@@ -3187,8 +3187,8 @@ pub struct HistorySession {
     /// 运行终点那条不在自然边界上的记录写出**之前**的窗口：上游此时先存原始窗口
     /// （`MOD_Hist.F90:265-274`），写完历史、清零之后的重启不再重存。
     raw_at_end: Option<Vec<crate::history_sidecar::HistoryWindow>>,
-    /// 同一时刻示踪物与 CH4 累加器的原始值（它们存在 patch 状态里，写完最后一条就清零）。
-    tracer_raw_at_end: crate::tracer_sidecar::RawTracersHandle,
+    /// 同一时刻材料与 CH4 累加器的原始值（它们存在 patch 状态里，写完最后一条就清零）。
+    material_raw_at_end: crate::material_sidecar::RawMaterialsHandle,
     /// 多 patch 单点本步的网格元近地面诊断（见 [`element_surface_input`]）；单 patch 为 `None`。
     element_surface: Option<colm_core::HistoryDiagnostics>,
     /// `DEF_USE_Dynamic_Wetland`：`f_wetwat` 改写 `wdsrf` 的平均（由 `push_lct_snow` 现场给出）。
@@ -3213,10 +3213,10 @@ pub struct HistorySession {
     /// 本步那条记录的逐 patch 量（[`Self::stage_patch_field`]）。
     staged_patch: Vec<(&'static str, Vec<f64>, Vec<bool>)>,
     /// 有材料运移（`mt_any_enabled`，网格写出）：步长 [s]。打开时每条记录多写窗口变量，并另写
-    /// 示踪物 history 文件（见 [`Self::with_tracer_history`]）。
-    tracer_time_step_seconds: Option<f64>,
-    /// 有输运示踪物时的示踪物 history（`mt_hist_out`），见 [`Self::with_tracer_variables`]。
-    tracer_variables: Option<TracerHistoryState>,
+    /// 材料 history 文件（见 [`Self::with_material_history`]）。
+    material_time_step_seconds: Option<f64>,
+    /// 有输运材料时的材料 history（`mt_hist_out`），见 [`Self::with_material_variables`]。
+    material_variables: Option<MaterialHistoryState>,
     /// 闸门 3（`DEF_hist_vars`）：开会话时取 [`install_selection`] 装好的那一份。
     selection: Option<std::sync::Arc<colm_hist::selection::HistorySelection>>,
     /// 下一次 `push` 的覆盖量（[`Self::set_overrides`]）。
@@ -3244,10 +3244,10 @@ pub fn install_selection(selection: colm_hist::selection::HistorySelection) -> R
         .map_err(|_| anyhow::anyhow!("the history selection is installed twice"))
 }
 
-/// 示踪物 history 的调度与当前文件（与主 history 同一份记录表，自己计步）。
+/// 材料 history 的调度与当前文件（与主 history 同一份记录表，自己计步）。
 #[derive(Debug)]
-struct TracerHistoryState {
-    set: colm_core::tracer::TracerSet,
+struct MaterialHistoryState {
+    set: colm_core::material::MaterialSet,
     /// 各 patch 的 `patchtype`（`filter`）。
     patch_types: Vec<i32>,
     /// CH4 `core` history 要不要累加、写出（`methane_history_accumulation_mode == 1`）。
@@ -3259,7 +3259,7 @@ struct TracerHistoryState {
     open: Option<(
         String,
         HistoryBuffers,
-        Vec<colm_hist::history::TracerFileVariable>,
+        Vec<colm_hist::history::MaterialFileVariable>,
     )>,
 }
 
@@ -3276,9 +3276,9 @@ impl HistorySession {
         std::sync::Arc::clone(&self.window)
     }
 
-    /// 运行终点的示踪物/CH4 累加器快照（见 `tracer_raw_at_end` 字段）；写续跑旁车的一方取走。
-    pub fn tracer_raw_handle(&self) -> crate::tracer_sidecar::RawTracersHandle {
-        std::sync::Arc::clone(&self.tracer_raw_at_end)
+    /// 运行终点的材料/CH4 累加器快照（见 `material_raw_at_end` 字段）；写续跑旁车的一方取走。
+    pub fn material_raw_handle(&self) -> crate::material_sidecar::RawMaterialsHandle {
+        std::sync::Arc::clone(&self.material_raw_at_end)
     }
 
     /// `forcmask_pch`：被强迫缺测遮蔽的 patch 在写网格/向量均值时整个跳过。
@@ -3475,8 +3475,9 @@ impl HistorySession {
             .iter()
             .map(HistoryAccumulator::from_window)
             .collect();
-        if let (Some(tracer), Some(window)) = (self.tracer_variables.as_mut(), windows.first()) {
-            tracer.steps = window.steps;
+        if let (Some(material), Some(window)) = (self.material_variables.as_mut(), windows.first())
+        {
+            material.steps = window.steps;
         }
         *self.window.lock().expect("history window lock") = windows;
         Ok(())
@@ -3520,7 +3521,7 @@ impl HistorySession {
                 dimensions.patch
             ])),
             raw_at_end: None,
-            tracer_raw_at_end: std::sync::Arc::default(),
+            material_raw_at_end: std::sync::Arc::default(),
             element_surface: None,
             dynamic_wetland: false,
             forcing_mask: None,
@@ -3532,8 +3533,8 @@ impl HistorySession {
             patch_field_names: Vec::new(),
             vector_statics: Vec::new(),
             staged_patch: Vec::new(),
-            tracer_time_step_seconds: None,
-            tracer_variables: None,
+            material_time_step_seconds: None,
+            material_variables: None,
             selection: SELECTION.get().cloned(),
             pending_overrides: None,
             snapshot_this_step: true,
@@ -3565,7 +3566,7 @@ impl HistorySession {
         self
     }
 
-    /// 条件版 [`Self::with_streaming`]：示踪物窗口还没有流式支持，那里保持整组写。
+    /// 条件版 [`Self::with_streaming`]：材料窗口还没有流式支持，那里保持整组写。
     pub fn with_streaming_if(mut self, streaming: bool) -> Self {
         self.stream = streaming;
         self
@@ -3588,7 +3589,7 @@ impl HistorySession {
         self.bgc = other.bgc;
         self.dynamic_wetland = other.dynamic_wetland;
         self.dynamic_lake = other.dynamic_lake;
-        self.tracer_time_step_seconds = other.tracer_time_step_seconds;
+        self.material_time_step_seconds = other.material_time_step_seconds;
     }
 
     /// root 的全局会话：装上从各 rank 收来的原始累加器（按全局 patch 顺序），随后
@@ -3640,14 +3641,14 @@ impl HistorySession {
     /// `history_window_seconds = nac*deltim` 与 `history_window_end_minutes`；上游只往材料文件写
     /// 这两个窗口变量（`MOD_Hist.F90:346-361` 的 `file_hist_material`），主 history 不带它们。
     /// （`MOD_Hist.F90:319-358`，只在 `HistForm == 'Gridded'` 时写窗口变量）。
-    pub fn with_tracer_history(mut self, time_step_seconds: Option<f64>) -> Result<Self> {
+    pub fn with_material_history(mut self, time_step_seconds: Option<f64>) -> Result<Self> {
         if time_step_seconds.is_some() {
             ensure!(
                 self.grid.is_some(),
-                "the tracer history windows are only written for gridded history"
+                "the material history windows are only written for gridded history"
             );
         }
-        self.tracer_time_step_seconds = time_step_seconds;
+        self.material_time_step_seconds = time_step_seconds;
         Ok(self)
     }
 
@@ -4461,13 +4462,13 @@ impl HistorySession {
     /// 情况下这里只是把缓冲区写出。
     pub fn finish(&mut self) -> Result<Vec<PathBuf>> {
         let mut written = self.finish_main()?;
-        if let Some(path) = self.finish_tracer()? {
+        if let Some(path) = self.finish_material()? {
             written.push(path);
         }
         Ok(written)
     }
 
-    /// 只落盘主 history 当前的分组（推进过程中换组、组满时用；示踪物文件由 [`Self::push_tracer`]
+    /// 只落盘主 history 当前的分组（推进过程中换组、组满时用；材料文件由 [`Self::push_material`]
     /// 自己在组满时写）。
     fn finish_main(&mut self) -> Result<Vec<PathBuf>> {
         let mut written = Vec::new();
@@ -4477,19 +4478,19 @@ impl HistorySession {
         Ok(written)
     }
 
-    /// 打开示踪物 history（有输运示踪物时；`mt_hist_out`）。
-    pub fn with_tracer_variables(
+    /// 打开材料 history（有输运材料时；`mt_hist_out`）。
+    pub fn with_material_variables(
         mut self,
-        set: colm_core::tracer::TracerSet,
+        set: colm_core::material::MaterialSet,
         patch_types: Vec<i32>,
         methane_core: bool,
     ) -> Self {
-        // 示踪物文件的平均用主 history 的 `nac`：续跑接着累加时（先 `restore` 了窗口）从那里接上。
+        // 材料文件的平均用主 history 的 `nac`：续跑接着累加时（先 `restore` 了窗口）从那里接上。
         let steps = self
             .accumulators
             .first()
             .map_or(0, |accumulator| accumulator.steps);
-        self.tracer_variables = Some(TracerHistoryState {
+        self.material_variables = Some(MaterialHistoryState {
             set,
             patch_types,
             methane_core,
@@ -4502,39 +4503,39 @@ impl HistorySession {
 
     /// 一步结束、主 history 已推进之后调用（`hist_out` 里的 `mt_hist_out` 与
     /// `flush_Material_Acc`）。预热期直接返回，既不计步也不清零（上游 `hist_out` 提前返回）。
-    pub fn push_tracer(
+    pub fn push_material(
         &mut self,
         end: CalendarTime,
         is_spinup: bool,
         states: &mut [colm_core::StandardLctSnowSoilState],
     ) -> Result<Option<PathBuf>> {
-        use colm_core::tracer::hist;
-        // `forcmask_pch`：示踪物历史的各 `filter` 都与上它（`MOD_Tracer_Hist.F90:229/261/644/657`）。
+        use colm_core::material::hist;
+        // `forcmask_pch`：材料历史的各 `filter` 都与上它（`MOD_Material_Hist.F90:229/261/644/657`）。
         let forcing_mask = self.forcing_mask.clone();
         let forcmask_ok = |patch: usize| {
             forcing_mask
                 .as_ref()
                 .is_none_or(|mask| mask.get(patch).copied().unwrap_or(true))
         };
-        let Some(tracer) = self.tracer_variables.as_mut() else {
+        let Some(material) = self.material_variables.as_mut() else {
             return Ok(None);
         };
         if is_spinup {
             return Ok(None);
         }
-        tracer.steps += 1;
-        let methane_core = tracer.methane_core;
-        // CH4 `core` history：每步累加（`accumulate_methane_fluxes`），与示踪物同在预热期之后。
+        material.steps += 1;
+        let methane_core = material.methane_core;
+        // CH4 `core` history：每步累加（`accumulate_methane_fluxes`），与材料同在预热期之后。
         // 不写 CH4 history 时上游也不累加（`methane_history_accumulation_mode == 0`）。
         for (patch, state) in states.iter_mut().enumerate().filter(|_| methane_core) {
             if let Some(bgc) = state.bgc.as_deref_mut() {
                 if let Some(methane) = bgc.methane.as_deref() {
                     bgc.methane_acc
-                        .accumulate(methane, tracer.patch_types[patch]);
+                        .accumulate(methane, material.patch_types[patch]);
                 }
             }
         }
-        let Some(record) = self.records.get(tracer.cursor).cloned() else {
+        let Some(record) = self.records.get(material.cursor).cloned() else {
             return Ok(None);
         };
         if tick_of(end)? != record.write_at_tick {
@@ -4545,50 +4546,50 @@ impl HistorySession {
             .iter()
             .filter(|scheduled| scheduled.suffix == record.suffix)
             .count();
-        if tracer.open.as_ref().map(|(suffix, _, _)| suffix) != Some(&record.suffix) {
+        if material.open.as_ref().map(|(suffix, _, _)| suffix) != Some(&record.suffix) {
             let mut buffer = HistoryBuffers::new(self.dimensions, self.site, records_in_group);
             if let Some(grid) = &self.grid {
                 buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
-                // 网格的示踪物文件与主文件一样带窗口变量（`MOD_Hist.F90:319-361`）。
-                if self.tracer_time_step_seconds.is_some() {
+                // 网格的材料文件与主文件一样带窗口变量（`MOD_Hist.F90:319-361`）。
+                if self.material_time_step_seconds.is_some() {
                     buffer.enable_windows();
                 }
             }
             if let Some(vector) = &self.vector {
                 buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
             }
-            tracer.open = Some((record.suffix.clone(), buffer, Vec::new()));
+            material.open = Some((record.suffix.clone(), buffer, Vec::new()));
         }
-        let nac = tracer.steps as f64;
+        let nac = material.steps as f64;
         let patches = states.len();
         let grid = self.grid.clone();
         let vector = self.vector.clone();
-        let (_, buffer, variables) = tracer.open.as_mut().expect("just opened");
+        let (_, buffer, variables) = material.open.as_mut().expect("just opened");
         buffer.set_time(record.record, i32::try_from(record.label_minutes)?)?;
-        if let (Some(deltim), true) = (self.tracer_time_step_seconds, grid.is_some()) {
+        if let (Some(deltim), true) = (self.material_time_step_seconds, grid.is_some()) {
             let minutes = colm_hist::time::minutes_from_1900(end.year)
                 + (i64::from(end.julian_day) - 1) * 1440
                 + i64::from(end.seconds / 60);
             let end_minutes = minutes as f64 + f64::from(end.seconds % 60) / 60.0;
             buffer.set_window(record.record, nac * deltim, end_minutes)?;
         }
-        // 文件里的变量：逐示踪物、逐表项（同 `mt_hist_out` 的写出顺序）。
+        // 文件里的变量：逐材料、逐表项（同 `mt_hist_out` 的写出顺序）。
         let mut index = 0;
-        for itrc in tracer.set.transport_indices() {
-            let descriptor = &tracer.set.tracers[itrc];
-            for variable in hist::TRACER_HISTORY_VARIABLES.iter() {
+        for itrc in material.set.transport_indices() {
+            let descriptor = &material.set.materials[itrc];
+            for variable in hist::MATERIAL_HISTORY_VARIABLES.iter() {
                 let applies = match variable.scope {
-                    hist::TracerScope::Isotope => descriptor.is_isotope(),
-                    hist::TracerScope::NonIsotope => !descriptor.is_isotope(),
-                    hist::TracerScope::NonvolatileSolute => descriptor.is_nonvolatile_solute(),
-                    hist::TracerScope::Transport => true,
+                    hist::MaterialScope::Isotope => descriptor.is_isotope(),
+                    hist::MaterialScope::NonIsotope => !descriptor.is_isotope(),
+                    hist::MaterialScope::NonvolatileSolute => descriptor.is_nonvolatile_solute(),
+                    hist::MaterialScope::Transport => true,
                 };
                 if !applies {
                     continue;
                 }
-                let layered = matches!(variable.dims, hist::TracerHistDims::SoilSnow);
+                let layered = matches!(variable.dims, hist::MaterialHistDims::SoilSnow);
                 let width = if layered {
-                    colm_core::tracer::SOISNO_LAYERS
+                    colm_core::material::SOISNO_LAYERS
                 } else {
                     1
                 };
@@ -4599,7 +4600,7 @@ impl HistorySession {
                     (None, None) => patches,
                 };
                 if variables.len() == index {
-                    variables.push(colm_hist::history::TracerFileVariable {
+                    variables.push(colm_hist::history::MaterialFileVariable {
                         name: variable.variable_name(descriptor),
                         long_name: variable.long_name(descriptor),
                         units: variable.units(descriptor).to_owned(),
@@ -4609,21 +4610,21 @@ impl HistorySession {
                 }
                 let file_variable = &mut variables[index];
                 if let Some(vector) = vector.as_ref() {
-                    // `MOD_Tracer_Hist` 的 `Vector` 支（`write_history_tracer_vector_2d/3d` 与
-                    // `aggregate_to_vector_and_write_2d`）：比值/δ 先在单元里对示踪物量与水量各做
+                    // `MOD_Material_Hist` 的 `Vector` 支（`write_history_material_vector_2d/3d` 与
+                    // `aggregate_to_vector_and_write_2d`）：比值/δ 先在单元里对材料量与水量各做
                     // `sum(subfrc*x, mask)` 再相除；均值类按 `subfrc` 加权平均。`filter` 是变量自己的。
-                    let track = |patch: usize| -> Result<&colm_core::tracer::PatchTracerState> {
+                    let track = |patch: usize| -> Result<&colm_core::material::PatchMaterialState> {
                         states[patch]
-                            .tracer
+                            .material
                             .as_deref()
                             .map(|track| &track.state)
-                            .context("a tracer history needs every patch to carry tracer state")
+                            .context("a material history needs every patch to carry material state")
                     };
                     let tracks = (0..patches).map(track).collect::<Result<Vec<_>>>()?;
                     let keep = |p: usize| {
                         variable
                             .patch_filter
-                            .admits(tracer.patch_types[p], forcmask_ok(p), true)
+                            .admits(material.patch_types[p], forcmask_ok(p), true)
                     };
                     let ref_ratio = descriptor.ref_ratio;
                     let elements = columns;
@@ -4640,14 +4641,14 @@ impl HistorySession {
                                 |p| pairs[p][layer],
                                 |p| {
                                     let (mass, water) = pairs[p][layer];
-                                    water.abs() > colm_core::tracer::TRC_TINY
+                                    water.abs() > colm_core::material::TRC_TINY
                                         && mass != colm_core::MISSING
                                         && keep(p)
                                 },
                             );
                             for (element, (mass, water)) in sums.into_iter().enumerate() {
                                 file_variable.values[base + element * width + layer] =
-                                    if water.abs() > colm_core::tracer::TRC_TINY {
+                                    if water.abs() > colm_core::material::TRC_TINY {
                                         mass / water
                                     } else {
                                         colm_core::MISSING
@@ -4664,8 +4665,8 @@ impl HistorySession {
                             hist::PatchTerm::Scalar(_) => (colm_core::MISSING, 0.0),
                         };
                         let values: Vec<f64> = match variable.kind {
-                            hist::TracerHistKind::Ratio | hist::TracerHistKind::LayerRatio => {
-                                let threshold = colm_core::tracer::TRC_TINY;
+                            hist::MaterialHistKind::Ratio | hist::MaterialHistKind::LayerRatio => {
+                                let threshold = colm_core::material::TRC_TINY;
                                 vector
                                     .pair_sums(pair, |p| {
                                         let (mass, water) = pair(p);
@@ -4683,7 +4684,7 @@ impl HistorySession {
                                     })
                                     .collect()
                             }
-                            hist::TracerHistKind::Delta { water_min } => vector
+                            hist::MaterialHistKind::Delta { water_min } => vector
                                 .pair_sums(pair, |p| {
                                     let (mass, water) = pair(p);
                                     water > water_min && mass != colm_core::MISSING && keep(p)
@@ -4701,15 +4702,16 @@ impl HistorySession {
                                     colm_core::MISSING
                                 })
                                 .collect(),
-                            hist::TracerHistKind::Mean | hist::TracerHistKind::AreaState => vector
-                                .aggregate(
+                            hist::MaterialHistKind::Mean | hist::MaterialHistKind::AreaState => {
+                                vector.aggregate(
                                     |p| match terms[p] {
                                         hist::PatchTerm::Scalar(value) => value,
                                         hist::PatchTerm::Pair { .. } => colm_core::MISSING,
                                     },
                                     keep,
                                     false,
-                                ),
+                                )
+                            }
                         };
                         file_variable.values[base..base + elements].copy_from_slice(&values);
                     }
@@ -4722,11 +4724,10 @@ impl HistorySession {
                     // `pset2grid` 按 patch 序、再按份序累加。
                     let mut cells = vec![hist::GridCell::default(); columns * width];
                     for (patch, state) in states.iter().enumerate() {
-                        let track = state
-                            .tracer
-                            .as_deref()
-                            .context("a tracer history needs every patch to carry tracer state")?;
-                        let patch_type = tracer.patch_types[patch];
+                        let track = state.material.as_deref().context(
+                            "a material history needs every patch to carry material state",
+                        )?;
+                        let patch_type = material.patch_types[patch];
                         let land =
                             hist::PatchFilter::Land.admits(patch_type, forcmask_ok(patch), true);
                         let patch_ok =
@@ -4768,19 +4769,19 @@ impl HistorySession {
                 }
                 for (patch, state) in states.iter().enumerate() {
                     let track = state
-                        .tracer
+                        .material
                         .as_deref()
-                        .context("a tracer history needs every patch to carry tracer state")?;
+                        .context("a material history needs every patch to carry material state")?;
                     let patch_ok = variable.patch_filter.admits(
-                        tracer.patch_types[patch],
+                        material.patch_types[patch],
                         forcmask_ok(patch),
                         true,
                     );
                     if layered {
                         let values = hist::single_point_soisno(itrc, &track.state, nac, patch_ok);
                         let base =
-                            (record.record * patches + patch) * colm_core::tracer::SOISNO_LAYERS;
-                        file_variable.values[base..base + colm_core::tracer::SOISNO_LAYERS]
+                            (record.record * patches + patch) * colm_core::material::SOISNO_LAYERS;
+                        file_variable.values[base..base + colm_core::material::SOISNO_LAYERS]
                             .copy_from_slice(&values);
                     } else {
                         file_variable.values[record.record * patches + patch] =
@@ -4797,7 +4798,7 @@ impl HistorySession {
                 index += 1;
             }
         }
-        // CH4 `core` 变量（`methane_reactive_history`，排在示踪物变量之后）：单点 patch 维。
+        // CH4 `core` 变量（`methane_reactive_history`，排在材料变量之后）：单点 patch 维。
         let has_methane = methane_core
             && states.iter().any(|state| {
                 state
@@ -4816,7 +4817,7 @@ impl HistorySession {
             };
             for (k, (name, long_name, units, _)) in template.iter().enumerate() {
                 if variables.len() == index + k {
-                    variables.push(colm_hist::history::TracerFileVariable {
+                    variables.push(colm_hist::history::MaterialFileVariable {
                         name: (*name).to_owned(),
                         long_name: (*long_name).to_owned(),
                         units: (*units).to_owned(),
@@ -4829,7 +4830,7 @@ impl HistorySession {
             // `with_filter`），与 `pset2grid(msk = filter)` 跳过它们等价。
             let mut per_patch = Vec::with_capacity(patches);
             for (patch, state) in states.iter().enumerate() {
-                let patch_type = tracer.patch_types[patch];
+                let patch_type = material.patch_types[patch];
                 // `methane_patch_active_mask`：湿地、（非 `only_wetland` 时的）土壤与有稻田的土壤。
                 let active = state
                     .bgc
@@ -4894,11 +4895,11 @@ impl HistorySession {
         if !record.natural_boundary {
             let raw = states
                 .iter()
-                .map(|state| crate::tracer_sidecar::RawTracers {
-                    tracer: state
-                        .tracer
+                .map(|state| crate::material_sidecar::RawMaterials {
+                    material: state
+                        .material
                         .as_deref()
-                        .map(|track| crate::tracer_sidecar::PatchAccumulators::of(&track.state)),
+                        .map(|track| crate::material_sidecar::PatchAccumulators::of(&track.state)),
                     methane: state
                         .bgc
                         .as_deref()
@@ -4906,29 +4907,29 @@ impl HistorySession {
                         .map(|bgc| bgc.methane_acc),
                 })
                 .collect();
-            *self.tracer_raw_at_end.lock().expect("tracer raw lock") = Some(raw);
+            *self.material_raw_at_end.lock().expect("material raw lock") = Some(raw);
         }
         for state in states.iter_mut() {
-            if let Some(track) = state.tracer.as_deref_mut() {
+            if let Some(track) = state.material.as_deref_mut() {
                 track.state.flush_accumulators();
             }
             if let Some(bgc) = state.bgc.as_deref_mut() {
                 bgc.methane_acc = colm_core::methane::driver::CoreAccumulator::default();
             }
         }
-        tracer.cursor += 1;
-        tracer.steps = 0;
+        material.cursor += 1;
+        material.steps = 0;
         if record.record + 1 == records_in_group {
-            return self.finish_tracer();
+            return self.finish_material();
         }
         Ok(None)
     }
 
-    fn finish_tracer(&mut self) -> Result<Option<PathBuf>> {
-        let Some(tracer) = self.tracer_variables.as_mut() else {
+    fn finish_material(&mut self) -> Result<Option<PathBuf>> {
+        let Some(material) = self.material_variables.as_mut() else {
             return Ok(None);
         };
-        let Some((suffix, buffer, variables)) = tracer.open.take() else {
+        let Some((suffix, buffer, variables)) = material.open.take() else {
             return Ok(None);
         };
         std::fs::create_dir_all(&self.directory)
@@ -4936,7 +4937,7 @@ impl HistorySession {
         let path = self
             .directory
             .join(format!("{}_hist_material_{suffix}.nc", self.stem));
-        buffer.write_tracer_file(&path, &variables)?;
+        buffer.write_material_file(&path, &variables)?;
         Ok(Some(path))
     }
 
@@ -5147,8 +5148,8 @@ impl HistorySession {
                 "streaming history needs a grid; enable streaming only for gridded history"
             );
             ensure!(
-                self.tracer_time_step_seconds.is_none(),
-                "streaming history with tracer windows is not supported yet"
+                self.material_time_step_seconds.is_none(),
+                "streaming history with material windows is not supported yet"
             );
             let total = self.record_count(&record.suffix);
             let mut buffer = self.prepare_buffer(&means, 1)?;
@@ -5319,8 +5320,8 @@ impl HistorySession {
             .directory
             .join(format!("{}_hist_{suffix}.nc", self.stem));
         buffer.write(&path)?;
-        if self.tracer_time_step_seconds.is_some() && self.tracer_variables.is_none() {
-            buffer.write_tracer_skeleton(
+        if self.material_time_step_seconds.is_some() && self.material_variables.is_none() {
+            buffer.write_material_skeleton(
                 self.directory
                     .join(format!("{}_hist_material_{suffix}.nc", self.stem)),
             )?;

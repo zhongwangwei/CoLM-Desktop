@@ -42393,3 +42393,24 @@ restart 真正互相接续，需要给 `tracer_sidecar::read` 加 Fortran 布局
 
 新增单测 `an_upstream_fortran_sidecar_is_read_by_field_name`：写一份只有上游字段的
 旁车再读回，逐字段与预期累加器相等。
+
+### 内部命名统一：tracer → material（2026-11-01，同轮续）
+
+上游把 TRACER 整体改名为 MATERIAL 后，Rust 只统一了盘上/用户可见的名字；这轮把
+**内部标识**也全部改成 material：
+
+- 模块/文件：`colm-core/src/tracer/` → `material/`、`tracer_sidecar.rs` →
+  `material_sidecar.rs`、`tracer.rs`/`tracer_tests.rs`/`river/tracer*.rs`/
+  `spatial/tracer_forcing*.rs`/`colm-namelist/src/tracer_files*.rs` 全部改名；
+- 类型/函数/变量：`TracerSet`/`TracerDescriptor`/`TracerAccumulators`/`TracerPools`/
+  `TracerPhysics`… → `Material*`，`tracer_*` → `material_*`，`TRC_*`/`trc_*` 仍保留
+  （它们是历史缩写、与盘上 `a_trc_*` 旧名回退和上游 `trc` 诊断名对应，不属于对外命名）；
+- GUI 前后端与文案：`tracer`→`material`，中文"示踪剂/示踪物"→"材料"；
+- **刻意保留**的历史/兼容字符串：上游旧开关名 `DEF_USE_TRACER`、旁车旧名回退
+  `a_trc_*`（只读）、以及 `COLM_*` 环境变量名。
+
+验证：两个 workspace `cargo check`/`clippy -D warnings`/`fmt --check` 全过；
+引擎 workspace 单测（`HDF5_USE_FILE_LOCKING=FALSE cargo test --workspace --lib --bins
+--no-fail-fast`）除既有沙箱环境失败（进程镜像名/PTY/网络缓存）外全部通过；
+GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 项通过，`check-gui`
+263 条命令契约全部匹配。

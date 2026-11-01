@@ -273,11 +273,11 @@ pub struct StandardLctStepBinding<'a> {
     pub partial_pressures_pa: Option<(f64, f64)>,
     /// 漫滩回馈发布给这个土壤 patch 的淹没水深与比例（只有空间算例开了回馈时才有）。
     pub flood: Option<colm_core::flood_evaporation::FloodPatchInput>,
-    /// 网格示踪物强迫给这个 patch 的 `(precip, vapor)` 比值（逐示踪物）；`None` 用运行时的默认比值。
-    pub tracer_ratios: Option<(&'a [f64], &'a [f64], &'a [f64])>,
-    /// 漫滩回馈发布给这个 patch 的水量（mm，`flood_credit_patch*1000`）与其中的示踪物
-    /// （`flood_tracer_credit_patch(:,ipatch)`）；没开回馈或没有输运示踪物时为 `None`。
-    pub flood_tracer: Option<(f64, &'a [f64])>,
+    /// 网格材料强迫给这个 patch 的 `(precip, vapor)` 比值（逐材料）；`None` 用运行时的默认比值。
+    pub material_ratios: Option<(&'a [f64], &'a [f64], &'a [f64])>,
+    /// 漫滩回馈发布给这个 patch 的水量（mm，`flood_credit_patch*1000`）与其中的材料
+    /// （`flood_material_credit_patch(:,ipatch)`）；没开回馈或没有输运材料时为 `None`。
+    pub flood_material: Option<(f64, &'a [f64])>,
 }
 
 /// 原时间重启里续跑需要用到的变量：**只存本 patch 的那一块**（[`RestartFile::patch_block`]），
@@ -1050,11 +1050,11 @@ pub struct StandardLctRestartTemplate {
     pub bgc: Option<crate::bgc_step::BgcRuntime>,
     /// `DEF_USE_IRRIGATION` 的起跑灌溉状态（[`Self::with_irrigation`] 装上）。
     pub irrigation: Option<colm_core::IrrigationState>,
-    /// 有材料运移（`mt_any_enabled`）且有输运材料：共享配置与本 patch 的起跑示踪物状态
-    /// （[`Self::with_tracer`] 装上）。
-    pub tracer: Option<(
-        std::sync::Arc<crate::tracer::TracerRuntime>,
-        colm_core::tracer::PatchTracerState,
+    /// 有材料运移（`mt_any_enabled`）且有输运材料：共享配置与本 patch 的起跑材料状态
+    /// （[`Self::with_material`] 装上）。
+    pub material: Option<(
+        std::sync::Arc<crate::material::MaterialRuntime>,
+        colm_core::material::PatchMaterialState,
     )>,
     /// 本 patch 在网格元里的面积份额 `elm_patch%subfrc`：单 patch 为 1，多作物单点是归一化的
     /// `pctcrop`（`MOD_SingleSrfdata.F90:1490-1493`）。只用于网格元的近地面诊断聚合。
@@ -1619,7 +1619,7 @@ fn assemble(
         pft: None,
         bgc: None,
         irrigation: None,
-        tracer: None,
+        material: None,
         patch_fraction: 1.0,
         patch,
         worker_patch: patch,
@@ -1772,16 +1772,16 @@ impl StandardLctRestartTemplate {
         Ok(self)
     }
 
-    /// 挂上示踪物（`land_tracer_init`）：土壤（含 PFT/PC）、简单城市、湿地、冰川、湖。
+    /// 挂上材料（`land_material_init`）：土壤（含 PFT/PC）、简单城市、湿地、冰川、湖。
     /// 装了城市模型的 patch 拒绝 —— 上游 `CoLMDRIVER.F90:90-93` 自己也停机。
-    pub fn with_tracer(
+    pub fn with_material(
         mut self,
-        runtime: std::sync::Arc<crate::tracer::TracerRuntime>,
-        initial: colm_core::tracer::PatchTracerState,
+        runtime: std::sync::Arc<crate::material::MaterialRuntime>,
+        initial: colm_core::material::PatchMaterialState,
     ) -> Result<Self> {
         ensure!(
             matches!(self.patch_type, 0..=4) && self.urban.is_none(),
-            "tracer bookkeeping is wired only for patches without the urban model \
+            "material bookkeeping is wired only for patches without the urban model \
              (patchtype 0-4; upstream stops on full urban too); this one has patchtype {}",
             self.patch_type
         );
@@ -1789,7 +1789,7 @@ impl StandardLctRestartTemplate {
             runtime.variably_saturated_flow,
             "upstream requires DEF_USE_VariablySaturatedFlow for material transport"
         );
-        self.tracer = Some((runtime, initial));
+        self.material = Some((runtime, initial));
         Ok(self)
     }
 
@@ -2447,8 +2447,8 @@ impl StandardLctRestartTemplate {
                 .snicar
                 .as_ref()
                 .map(|snicar| Box::new(snicar.initial.clone())),
-            tracer: self.tracer.as_ref().map(|(_, initial)| {
-                Box::new(colm_core::tracer::step::PatchTracerTrack::new(
+            material: self.material.as_ref().map(|(_, initial)| {
+                Box::new(colm_core::material::step::PatchMaterialTrack::new(
                     initial.clone(),
                 ))
             }),
@@ -2670,19 +2670,19 @@ impl StandardLctRestartTemplate {
             },
             soil_water: self.input(binding).water,
             snicar: self.snicar_step_input(),
-            tracer: self.tracer.as_ref().map(|(runtime, _)| {
+            material: self.material.as_ref().map(|(runtime, _)| {
                 let mut context = runtime.context();
-                if let Some((rain, snow, vapor)) = binding.tracer_ratios {
+                if let Some((rain, snow, vapor)) = binding.material_ratios {
                     context.rain_ratio = rain;
                     context.snow_ratio = snow;
                     context.vapor_ratio = vapor;
                 }
                 context.flood = binding
-                    .flood_tracer
-                    .map(|(water_credit_mm, tracer_credit)| {
-                        colm_core::tracer::step::FloodTracerCredit {
+                    .flood_material
+                    .map(|(water_credit_mm, material_credit)| {
+                        colm_core::material::step::FloodMaterialCredit {
                             water_credit_mm,
-                            tracer_credit,
+                            material_credit,
                         }
                     });
                 context

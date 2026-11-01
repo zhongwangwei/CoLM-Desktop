@@ -725,11 +725,11 @@ pub(super) struct DryBifCapacity {
 
 /// `mt_bif_dry_deliver` 的出参（`MOD_MT_RiverLake.F90:1164-1208`）。
 pub(super) struct DryBifDelivery {
-    /// `bif_add`：送进接收方可见侧的示踪物。
+    /// `bif_add`：送进接收方可见侧的材料。
     pub visible: Vec<f64>,
-    /// `bif_add_lev`：送进接收方堤内一侧的示踪物。
+    /// `bif_add_lev`：送进接收方堤内一侧的材料。
     pub protected: Vec<f64>,
-    /// `bif_hist`：每个单元流域的净分汊示踪物通量（上游端为正、下游端为负）。
+    /// `bif_hist`：每个单元流域的净分汊材料通量（上游端为正、下游端为负）。
     pub history: Vec<f64>,
 }
 

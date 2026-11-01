@@ -1,4 +1,4 @@
-//! `MOD_Tracer_Reactive_Methane_BgcLink`：从 BGC 状态汇总甲烷要的碳输入，步末把甲烷碳从
+//! `MOD_Material_Reactive_Methane_BgcLink`：从 BGC 状态汇总甲烷要的碳输入，步末把甲烷碳从
 //! 分解呼吸里扣出来（`decomp_hr`、`er`）。
 
 use anyhow::{ensure, Result};
@@ -27,7 +27,7 @@ fn safe(x: f64) -> f64 {
     }
 }
 
-/// `tracer_ch4_bgc_patch_inputs` 的输出。
+/// `material_ch4_bgc_patch_inputs` 的输出。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BgcInputs {
     pub crootfr: [f64; NL_SOIL],
@@ -45,7 +45,7 @@ pub struct BgcInputs {
     pub pot_f_nit_vr: [f64; NL_SOIL],
 }
 
-/// `tracer_ch4_bgc_patch_inputs`：`rootfr` 是土地覆盖级的根分布（`rootfr_lc(:, patchclass)`），
+/// `material_ch4_bgc_patch_inputs`：`rootfr` 是土地覆盖级的根分布（`rootfr_lc(:, patchclass)`），
 /// `pftfrac` 是 patch 内各 PFT 的面积份额，`dz_soi` 是静态土层厚度。
 pub fn patch_inputs(
     m: &MethaneConfig,
@@ -270,7 +270,7 @@ pub fn biome_redoxlag(
     rice.blend(nonrice, m.redoxlag_rice_paddy)
 }
 
-/// `tracer_ch4_bgc_finalize_step`（土壤 patch）：BGC 的池损失仍是全部异养呼吸 `total_hr`，
+/// `material_ch4_bgc_finalize_step`（土壤 patch）：BGC 的池损失仍是全部异养呼吸 `total_hr`，
 /// 只把 CO2 那一份（`total_hr + catomw*net_methane`）发布到 `decomp_hr`/`er`。
 pub fn finalize(
     bgc: &mut BgcState,
@@ -441,7 +441,7 @@ pub fn rice_days_since_harvest(bgc: &BgcState, pft: &PftInputs<'_>, jday: i32, y
     -1
 }
 
-/// `tracer_ch4_bgc_component_veg_inputs` 的结果：按土壤/水稻分量的植被输入。
+/// `material_ch4_bgc_component_veg_inputs` 的结果：按土壤/水稻分量的植被输入。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComponentVeg {
     pub fraction: [f64; 2],
@@ -454,7 +454,7 @@ pub struct ComponentVeg {
     pub ready: [bool; 2],
 }
 
-/// `tracer_ch4_bgc_component_veg_inputs`：把 patch 的 PFT 按是否稻田分到两个分量，各自按面积平均。
+/// `material_ch4_bgc_component_veg_inputs`：把 patch 的 PFT 按是否稻田分到两个分量，各自按面积平均。
 /// 任一 PFT 的量非法、或面积和超过 1 时两分量都不就绪（`ready` 全假）。
 ///
 /// GIMPLE：`lai = FMA(frac, lai_p, ·)`，`agnpp/bgnpp/rr = FMA(x_pft, frac, ·)`，

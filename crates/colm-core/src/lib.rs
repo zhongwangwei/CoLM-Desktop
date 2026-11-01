@@ -150,6 +150,7 @@ pub mod land_cover_generated;
 pub mod leaf_temperature;
 pub mod leaf_temperature_pc;
 pub mod linear;
+pub mod material;
 pub mod methane;
 pub mod monin_obukhov;
 pub mod net_solar;
@@ -178,7 +179,6 @@ pub mod surface_optics;
 pub mod thermal_properties;
 pub mod thermal_water;
 pub mod time_state;
-pub mod tracer;
 pub mod urban;
 pub mod urban_bem;
 pub mod urban_flux;
@@ -484,14 +484,14 @@ pub use variably_saturated_flow::{
     VariableSaturatedFluxAllInput, VariableSaturatedHomogeneousFluxInput,
     VariableSaturatedInterfaceFlux, VariableSaturatedInterfaceFluxInput,
     VariableSaturatedLevelCoordinate, VariableSaturatedLevelPerturbation,
-    VariableSaturatedLevelPerturbationInput, VariableSaturatedRainfallPerturbation,
-    VariableSaturatedRichardsInput, VariableSaturatedRichardsState,
-    VariableSaturatedSaturatedZoneAllInput, VariableSaturatedSaturatedZoneAllState,
-    VariableSaturatedSaturatedZoneFluxInput, VariableSaturatedSoilWaterInput,
-    VariableSaturatedSoilWaterOutput, VariableSaturatedSoilWaterState,
-    VariableSaturatedSublevelInput, VariableSaturatedSublevelState,
-    VariableSaturatedTopTransitiveFlux, VariableSaturatedTopTransitiveFluxInput,
-    VariableSaturatedTracerDiagnostics, VariableSaturatedWaterBalance,
+    VariableSaturatedLevelPerturbationInput, VariableSaturatedMaterialDiagnostics,
+    VariableSaturatedRainfallPerturbation, VariableSaturatedRichardsInput,
+    VariableSaturatedRichardsState, VariableSaturatedSaturatedZoneAllInput,
+    VariableSaturatedSaturatedZoneAllState, VariableSaturatedSaturatedZoneFluxInput,
+    VariableSaturatedSoilWaterInput, VariableSaturatedSoilWaterOutput,
+    VariableSaturatedSoilWaterState, VariableSaturatedSublevelInput,
+    VariableSaturatedSublevelState, VariableSaturatedTopTransitiveFlux,
+    VariableSaturatedTopTransitiveFluxInput, VariableSaturatedWaterBalance,
     VariableSaturatedWaterBalanceInput,
 };
 pub use vegetation::{

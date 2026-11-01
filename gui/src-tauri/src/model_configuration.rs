@@ -30,7 +30,7 @@ pub(crate) fn query(
         .map_err(|e| e.to_string())?,
         None => colm_namelist::parse("").map_err(|e| e.to_string())?,
     };
-    // 旧算例打开配置面板前先迁移示踪字段，界面直接显示新 family 字段。
+    // 旧算例打开配置面板前先迁移材料字段，界面直接显示新 family 字段。
     crate::config::migrate_legacy_material(&mut doc);
     for (key, raw) in case_values.unwrap_or_default() {
         let field = colm_schema::find(&key).ok_or_else(|| format!("unknown case field: {key}"))?;
@@ -317,11 +317,11 @@ fn confirmed_gate(
         return true;
     }
     gate_switch(reason).is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
-        // 示踪剂拆成 family 后，隐藏理由不再点名某个字段，父闸门要按子字段所属 family 反查。
+        // 材料拆成 family 后，隐藏理由不再点名某个字段，父闸门要按子字段所属 family 反查。
         || matches!(
             reason,
-            Some("需要先启用任一种示踪物") | Some("当前没有启用同位素，不使用水同位素参数")
-        ) && tracer_parent_gate(field.name)
+            Some("需要先启用任一种材料") | Some("当前没有启用同位素，不使用水同位素参数")
+        ) && material_parent_gate(field.name)
             .is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
         || forced_by_explicit_switch(reason, doc, have, kernel)
 }
@@ -362,7 +362,7 @@ fn forced_by_explicit_switch(
 fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
     match reason {
         Some("河湖流已关闭") => Some("DEF_USE_GridRiverLakeFlow"),
-        // 示踪剂拆成 family 开关后没有单一父字段，隐藏由 field_runtime_state 的派生判定负责。
+        // 材料拆成 family 开关后没有单一父字段，隐藏由 field_runtime_state 的派生判定负责。
         Some("需要先启用城市模型") => Some("DEF_URBAN_RUN"),
         Some("需要 BGC") | Some("需要先启用 BGC") => Some("DEF_USE_BGC"),
         Some("需要先启用土壤初始场") => Some("DEF_USE_SoilInit"),
@@ -379,9 +379,9 @@ fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
 
 // Presentation dependencies stay available even when runtime rules return no disabling reason.
 // An absent parent is deliberately not treated as an enabled catalog default.
-/// 示踪剂拆成 family 后，父字段按 family 选择。溶质没有布尔开关（由名单非空启用），
+/// 材料拆成 family 后，父字段按 family 选择。溶质没有布尔开关（由名单非空启用），
 /// 通用 MT 参数也不属于某个 family，二者不设父闸门。
-fn tracer_parent_gate(name: &str) -> Option<&'static str> {
+fn material_parent_gate(name: &str) -> Option<&'static str> {
     let upper = name.to_ascii_uppercase();
     if upper.starts_with("DEF_ISO_")
         || upper.starts_with("DEF_ISOTOPE_")
@@ -446,7 +446,7 @@ fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'sta
             Some("DEF_USE_PLANTHYDRAULICS")
         }
         _ if name.starts_with("DEF_GridRiverLake_") => Some("DEF_USE_GridRiverLakeFlow"),
-        _ if field_section(name, field.group) == Some("示踪剂") => tracer_parent_gate(name),
+        _ if field_section(name, field.group) == Some("材料") => material_parent_gate(name),
         _ if field_section(name, field.group) == Some("城市") => Some("DEF_URBAN_RUN"),
         _ => gate_switch(reason),
     };
@@ -500,7 +500,7 @@ fn process_files(
         // 甲烷 family 是否引用这份资产：只看它自己的参数文件字段，其他 family 的文件不参与。
         let explicit_mapping = matches!(doc.get("DEF_METHANE_PARAM_FILE"), Some(NmlValue::Str(_)));
         let active = explicit_mapping.then(|| {
-            tracer_param_file(doc, |name, _| {
+            material_param_file(doc, |name, _| {
                 matches!(name.to_ascii_uppercase().as_str(), "CH4" | "METHANE")
             })
             .as_deref()
@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_parents_remain_discoverable_and_explicit_tracer_bgc_gates_disable() {
+    fn unknown_parents_remain_discoverable_and_explicit_material_bgc_gates_disable() {
         let (root, _, draft) = fixture();
         let result = query(
             &root,
@@ -1394,9 +1394,9 @@ mod tests {
         let stage = root.join("stage");
         std::fs::create_dir(&stage).unwrap();
         let bytes = b"&nl_colm_solute_parameter\nDEF_SOLUTE%init_conc=1.\n/\n";
-        std::fs::write(stage.join("tracer.nml"), bytes).unwrap();
+        std::fs::write(stage.join("material.nml"), bytes).unwrap();
         draft.overlay.process_files.push(Asset {
-            relative_path: "tracer.nml".into(),
+            relative_path: "material.nml".into(),
             sha256: colm_kernel::sha256_hex(bytes),
         });
         let generation = draft.generation;
@@ -1424,10 +1424,10 @@ mod tests {
             before
         );
         assert_eq!(
-            std::fs::read(revision_dir.join("tracer.nml")).unwrap(),
+            std::fs::read(revision_dir.join("material.nml")).unwrap(),
             bytes
         );
-        std::fs::write(revision_dir.join("tracer.nml"), b"changed").unwrap();
+        std::fs::write(revision_dir.join("material.nml"), b"changed").unwrap();
         assert!(query(
             &root,
             ConfigurationSource::Frozen {

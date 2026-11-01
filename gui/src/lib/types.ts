@@ -90,7 +90,7 @@ export type CaseProfile = {
   urban: boolean;
   bgc: boolean;
   crop: boolean;
-  tracer?: boolean;
+  material?: boolean;
   kernel_preset: string | null;
   engine?: string;
   run_host?: string | null;

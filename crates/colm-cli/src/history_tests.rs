@@ -589,9 +589,9 @@ fn declared_history_missing_values_are_not_returned_as_data() {
 }
 
 #[test]
-fn main_and_tracer_history_keep_separate_time_axes() {
+fn main_and_material_history_keep_separate_time_axes() {
     let _netcdf_guard = super::netcdf_test_guard();
-    let d = tmp("tracer-time");
+    let d = tmp("material-time");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
@@ -611,9 +611,9 @@ fn main_and_tracer_history_keep_separate_time_axes() {
 }
 
 #[test]
-fn mixed_main_and_tracer_series_read_from_their_own_files() {
+fn mixed_main_and_material_series_read_from_their_own_files() {
     let _netcdf_guard = super::netcdf_test_guard();
-    let d = tmp("tracer-mixed");
+    let d = tmp("material-mixed");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
@@ -634,9 +634,9 @@ fn mixed_main_and_tracer_series_read_from_their_own_files() {
 }
 
 #[test]
-fn history_catalog_includes_main_and_tracer_variables() {
+fn history_catalog_includes_main_and_material_variables() {
     let _netcdf_guard = super::netcdf_test_guard();
-    let d = tmp("tracer-history-catalog");
+    let d = tmp("material-history-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
@@ -750,9 +750,9 @@ fn evaluation_plan_uses_case_and_kernel_without_history_files() {
 }
 
 #[test]
-fn evaluation_catalog_sees_methane_in_tracer_history() {
+fn evaluation_catalog_sees_methane_in_material_history() {
     let _netcdf_guard = super::netcdf_test_guard();
-    let d = tmp("tracer-catalog");
+    let d = tmp("material-catalog");
     write_history_nc(
         &d.join("AT-Neu_hist_2010-01.nc"),
         &[("time", &[1.0, 2.0]), ("f_rnet", &[10.0, 20.0])],
@@ -1440,7 +1440,7 @@ fn series_window_area_means_grids_record_by_record() {
 }
 
 #[test]
-fn series_window_reads_main_and_tracer_streams_with_their_own_variables() {
+fn series_window_reads_main_and_material_streams_with_their_own_variables() {
     let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("series-window-streams");
     let minutes = hourly_minutes(3);
@@ -1476,8 +1476,8 @@ fn series_window_refuses_streams_with_different_time_axes() {
     let _netcdf_guard = super::netcdf_test_guard();
     let d = tmp("series-window-stream-mismatch");
     let main_minutes = hourly_minutes(2);
-    // tracer 的时间轴与主输出不同：旧实现同样拒绝拼接。
-    let tracer_minutes = [main_minutes[0], main_minutes[1] + 60.0];
+    // material 的时间轴与主输出不同：旧实现同样拒绝拼接。
+    let material_minutes = [main_minutes[0], main_minutes[1] + 60.0];
     write_history_nc(
         &d.join("Case_hist_2003-01.nc"),
         &[("time", &main_minutes), ("f_rnet", &[10.0, 20.0])],
@@ -1485,7 +1485,7 @@ fn series_window_refuses_streams_with_different_time_axes() {
     write_history_nc(
         &d.join("Case_hist_material_2003-01.nc"),
         &[
-            ("time", &tracer_minutes),
+            ("time", &material_minutes),
             ("f_methane_surf_flux_tot", &[3.0, 4.0]),
         ],
     );

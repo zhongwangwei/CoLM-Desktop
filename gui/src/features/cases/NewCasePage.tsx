@@ -52,10 +52,10 @@ import {
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import {
   caseFieldVisible,
-  appendTracerFamily,
-  applyTracerSelection,
-  tracerRows,
-  tracerKeys,
+  appendMaterialFamily,
+  applyMaterialSelection,
+  materialRows,
+  materialKeys,
   unquote,
   type ConfigurationField,
 } from '../versions/configuration-options';
@@ -121,10 +121,10 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
     };
   if (isMethaneSite(s))
     return {
-      badge: t('甲烷 / 示踪', 'Methane / Tracer'),
+      badge: t('甲烷 / 材料', 'Methane / Material'),
       desc: t('草地甲烷过程 (FLUXNET-CH4)', 'Grassland methane (FLUXNET-CH4)'),
       adaptHint: t(
-        '点击选择：自动开启 BGC 与甲烷示踪，采用 PFT/PC 和 van Genuchten',
+        '点击选择：自动开启 BGC 与甲烷材料，采用 PFT/PC 和 van Genuchten',
         'Select: enables BGC and methane tracing with PFT/PC and van Genuchten',
       ),
       activeHint: t('✓ 当前已选定 · 甲烷过程已配置', '✓ Selected · Methane processes configured'),
@@ -1229,28 +1229,28 @@ export default function NewCasePage() {
         return;
       }
       try {
-        const inheritedTracers = state.version?.overlay
+        const inheritedMaterials = state.version?.overlay
           ? Object.fromEntries(
-              tracerKeys.flatMap((key) => {
+              materialKeys.flatMap((key) => {
                 const value = modelSettingValue(state.version!.overlay, key);
                 return value === null ? [] : [[key, value]];
               }),
             )
           : {};
         const existing = {
-          physics: { ...inheritedTracers, ...caseValues },
+          physics: { ...inheritedMaterials, ...caseValues },
           parameters: [],
           process_files: [],
         };
-        const previousRows = tracerRows(existing);
+        const previousRows = materialRows(existing);
         if (previousRows.length > 100)
           throw new Error(
             t(
-              '超过100个示踪物的定义，请先在示踪设置中核对；未更改算例。',
-              'Definitions exceeding 100 tracers must be reviewed in tracer settings; the case was not changed.',
+              '超过100个材料的定义，请先在材料设置中核对；未更改算例。',
+              'Definitions exceeding 100 materials must be reviewed in material settings; the case was not changed.',
             ),
           );
-        const rows = appendTracerFamily(previousRows, 'methane').map((row) =>
+        const rows = appendMaterialFamily(previousRows, 'methane').map((row) =>
           row.TYPES.toLowerCase() === 'gas' &&
           /^(ch4|methane)$/i.test(row.NAMES) &&
           /^(null|none)?$/i.test(unquote(row.PARAM_FILES).trim())
@@ -1264,8 +1264,8 @@ export default function NewCasePage() {
         )
           throw new Error(
             t(
-              '已有 CH4 定义类型不是 gas，请先在示踪设置中修正。',
-              'The existing CH4 definition is not gas; correct it in tracer settings first.',
+              '已有 CH4 定义类型不是 gas，请先在材料设置中修正。',
+              'The existing CH4 definition is not gas; correct it in material settings first.',
             ),
           );
         const generatedMethaneDefault =
@@ -1279,7 +1279,7 @@ export default function NewCasePage() {
             (asset) => asset.relative_path === 'standard_methane_parameter.nml',
           );
         methaneValues = {
-          ...applyTracerSelection(existing, schema, rows).physics,
+          ...applyMaterialSelection(existing, schema, rows).physics,
           ...(generatedMethaneDefault ? { DEF_USE_Dynamic_Wetland: '.false.' } : {}),
           DEF_USE_BGC: '.true.',
           DEF_USE_Campbell_SOIL_MODEL: '.false.',

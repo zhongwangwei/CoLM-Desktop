@@ -13,5 +13,5 @@ pub mod runtime;
 // 经纬网格与面积加权映射在 colm-init 里（mkinidata 的 `build_arealweighted`/`grid2pset` 也用同一份）。
 pub use colm_init::spatial_grid as grid;
 pub use colm_init::spatial_mapping as mapping;
+pub mod material_forcing;
 pub mod topology;
-pub mod tracer_forcing;

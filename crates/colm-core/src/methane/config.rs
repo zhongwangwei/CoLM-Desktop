@@ -1,4 +1,4 @@
-//! `MOD_Tracer_Reactive_Methane_Const`：常数、`&nl_colm_methane_parameter` 的读入与校验、
+//! `MOD_Material_Reactive_Methane_Const`：常数、`&nl_colm_methane_parameter` 的读入与校验、
 //! 淹没方案（`configure_methane_inundation_mode`）。字段表见 [`super::config_generated`]。
 
 use anyhow::{bail, ensure, Context, Result};
@@ -94,7 +94,7 @@ pub struct InundationMode {
 
 impl MethaneParameters {
     /// 从参数文件全文解析并校验（`read_methane_namelist` + `validate_methane_namelist`）：只读
-    /// `&nl_colm_methane_parameter` 这一组，别的组（如示踪物元数据）不管。引擎与 GUI 共用。
+    /// `&nl_colm_methane_parameter` 这一组，别的组（如材料元数据）不管。引擎与 GUI 共用。
     pub fn from_parameter_text(source: &str) -> Result<Self> {
         use colm_namelist::{Segment, Value};
         let mut lines = source.lines();

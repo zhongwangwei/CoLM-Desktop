@@ -17,6 +17,8 @@ pub mod history_sidecar;
 pub mod hybrid;
 pub mod hybrid_climate;
 pub mod irrigation;
+pub mod material;
+pub mod material_sidecar;
 pub mod methane;
 pub mod multi_patch;
 pub mod ozone;
@@ -25,8 +27,6 @@ pub mod physics;
 pub mod river;
 pub mod spatial;
 pub mod spmd;
-pub mod tracer;
-pub mod tracer_sidecar;
 
 use std::path::{Path, PathBuf};
 
@@ -601,7 +601,7 @@ impl PointRuntime {
                     optimizer.as_ref().map(|optimizer| optimizer.scale(index)),
                 )?);
             }
-            crate::tracer::report_after_patches(templates)?;
+            crate::material::report_after_patches(templates)?;
             // `hist_out` 在 `itstamp <= ptstamp` 时直接返回（`MOD_Hist.F90:225`），连累加都不做：
             // 预热期（含每一轮重复）不产生 history。步末 `itstamp <= ptstamp` 与本步
             // `is_spinup` 在步长整除预热区间时是同一件事。
@@ -667,7 +667,7 @@ impl PointRuntime {
             }
             // `mt_hist_out` 与 `flush_Material_Acc`：同一 `hist_out` 里、主 history 之后。
             if let Some(path) =
-                session.push_tracer(step.clock.end_time, step.clock.is_spinup, states)?
+                session.push_material(step.clock.end_time, step.clock.is_spinup, states)?
             {
                 files.push(path);
             }
@@ -684,7 +684,7 @@ impl PointRuntime {
             )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
             on_step(step, states, &views)?;
-            crate::tracer::clamp_restart_dust_after_step(
+            crate::material::clamp_restart_dust_after_step(
                 step.clock.write_restart,
                 templates,
                 states,
@@ -764,7 +764,7 @@ impl PointRuntime {
                 refresh_lai(step, template, next)?;
                 outputs.push(output);
             }
-            crate::tracer::report_after_patches(templates)?;
+            crate::material::report_after_patches(templates)?;
             optimize_baseflow(
                 optimizer.as_mut(),
                 step,
@@ -775,7 +775,7 @@ impl PointRuntime {
             )?;
             let views = outputs.iter().map(PatchOutput::view).collect::<Vec<_>>();
             on_step(step, states, &views)?;
-            crate::tracer::clamp_restart_dust_after_step(
+            crate::material::clamp_restart_dust_after_step(
                 step.clock.write_restart,
                 templates,
                 states,
@@ -945,8 +945,8 @@ fn lct_binding(
         )? * 1.0e-6,
         partial_pressures_pa: None,
         flood: None,
-        tracer_ratios: None,
-        flood_tracer: None,
+        material_ratios: None,
+        flood_material: None,
     })
 }
 
@@ -1184,9 +1184,9 @@ fn advance_patch(
 ) -> Result<PatchOutput> {
     // `scvold`：上游在 `newsnow` **之前**把 `scv` 抄一份（`CoLMMAIN.F90:814`）。
     let previous_snow_water_equivalent_mm = state.snow.water_equivalent_kg_m2;
-    // 示踪物收支检查要的 `totwb`（与 history 的步首总水量同一个式子）。
-    let tracer_initial_total = template
-        .tracer
+    // 材料收支检查要的 `totwb`（与 history 的步首总水量同一个式子）。
+    let material_initial_total = template
+        .material
         .as_ref()
         .map(|_| initial_total_water_mm(template, state));
     // `update_ozone_data(itstamp, deltim)`：`CoLMDRIVER` 之前。
@@ -1212,15 +1212,15 @@ fn advance_patch(
     if template.patch_type == 3 {
         let output = colm_core::glacier_snow_step(input, state)?;
         update_non_soil_bgc(state)?;
-        if let Some((tracer, _)) = &template.tracer {
-            crate::tracer::glacier_end_of_step(
-                tracer,
+        if let Some((material, _)) = &template.material {
+            crate::material::glacier_end_of_step(
+                material,
                 template.worker_ipatch(),
                 state,
                 &output,
                 deltim,
                 &step.forcing,
-                binding.tracer_ratios,
+                binding.material_ratios,
             )?;
         }
         template.prepare_surface_optics(
@@ -1298,12 +1298,12 @@ fn advance_patch(
                 // 干湖子步：与下面单步的干湖分支相同，`totwb` 取本子步开头的。
                 if lake.site.is_dry(state) {
                     let initial_total = initial_total_water_mm(&sub, state);
-                    let tracer_total = sub.tracer.as_ref().map(|_| initial_total);
+                    let material_total = sub.material.as_ref().map(|_| initial_total);
                     input.energy.ground_temperature.is_dry_lake = true;
                     let output = colm_core::standard_lct_snow_soil_step(input, state)?;
-                    if let (Some((tracer, _)), Some(total)) = (&sub.tracer, tracer_total) {
-                        crate::tracer::end_of_step(
-                            tracer,
+                    if let (Some((material, _)), Some(total)) = (&sub.material, material_total) {
+                        crate::material::end_of_step(
+                            material,
                             template.worker_ipatch(),
                             template.patch_type,
                             state,
@@ -1321,7 +1321,7 @@ fn advance_patch(
                         &output,
                     );
                     sub.prepare_surface_optics(state, optics)?;
-                    // `tracer_lake_step` 照常跟在这个子步的 `CoLMMAIN` 之后（干湖支在里面判）。
+                    // `material_lake_step` 照常跟在这个子步的 `CoLMMAIN` 之后（干湖支在里面判）。
                     if let Some(bgc) = &template.bgc {
                         bgc.lake_methane(
                             idate,
@@ -1346,16 +1346,16 @@ fn advance_patch(
                     continue;
                 }
                 let output = colm_core::lake_snow_step(input, lake.site, state)?;
-                if let Some((tracer, _)) = &template.tracer {
-                    crate::tracer::lake_end_of_step(
-                        tracer,
+                if let Some((material, _)) = &template.material {
+                    crate::material::lake_end_of_step(
+                        material,
                         template.worker_ipatch(),
                         state,
                         &output,
                         sub.physics.timestep_seconds,
                         &step.forcing,
                         lake.site.dynamic,
-                        binding.tracer_ratios,
+                        binding.material_ratios,
                         isub == substeps,
                     )?;
                 }
@@ -1410,9 +1410,10 @@ fn advance_patch(
             input.energy.ground_temperature.is_dry_lake = true;
             let output = colm_core::standard_lct_snow_soil_step(input, state)?;
             update_non_soil_bgc(state)?;
-            if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
-                crate::tracer::end_of_step(
-                    tracer,
+            if let (Some((material, _)), Some(total)) = (&template.material, material_initial_total)
+            {
+                crate::material::end_of_step(
+                    material,
                     template.worker_ipatch(),
                     template.patch_type,
                     state,
@@ -1422,7 +1423,7 @@ fn advance_patch(
                     total,
                 )?;
             }
-            // 重建湖层只改几何与湖温，不搬水，示踪物不动。
+            // 重建湖层只改几何与湖温，不搬水，材料不动。
             colm_core::refill_dry_lake(state)?;
             // `albland` 仍按 patchtype 4 取湖面反照率，`t_soisno_(1)` 这时是土温（只有 SNICAR 读）。
             let optics = surface_optics_step(
@@ -1452,16 +1453,16 @@ fn advance_patch(
         }
         let output = colm_core::lake_snow_step(input, lake.site, state)?;
         update_non_soil_bgc(state)?;
-        if let Some((tracer, _)) = &template.tracer {
-            crate::tracer::lake_end_of_step(
-                tracer,
+        if let Some((material, _)) = &template.material {
+            crate::material::lake_end_of_step(
+                material,
                 template.worker_ipatch(),
                 state,
                 &output,
                 deltim,
                 &step.forcing,
                 lake.site.dynamic,
-                binding.tracer_ratios,
+                binding.material_ratios,
                 true,
             )?;
         }
@@ -1490,7 +1491,7 @@ fn advance_patch(
             step.forcing.air_temperature_k,
             template.physics.variably_saturated_flow,
         );
-        // `tracer_lake_step`（`CoLMDRIVER.F90:231-232`）：`CoLMMAIN` 返回之后（非土壤清零之后）跑湖泊甲烷。
+        // `material_lake_step`（`CoLMDRIVER.F90:231-232`）：`CoLMMAIN` 返回之后（非土壤清零之后）跑湖泊甲烷。
         if let Some(bgc) = &template.bgc {
             bgc.lake_methane(
                 idate,
@@ -1510,9 +1511,9 @@ fn advance_patch(
         return Ok(PatchOutput::Lake(Box::new(output)));
     }
     let output = colm_core::standard_lct_snow_soil_step(input, state)?;
-    if let (Some((tracer, _)), Some(total)) = (&template.tracer, tracer_initial_total) {
-        crate::tracer::end_of_step(
-            tracer,
+    if let (Some((material, _)), Some(total)) = (&template.material, material_initial_total) {
+        crate::material::end_of_step(
+            material,
             template.worker_ipatch(),
             template.patch_type,
             state,

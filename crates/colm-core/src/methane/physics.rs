@@ -1,4 +1,4 @@
-//! `MOD_Tracer_Reactive_Methane_Physics` 的叶子例程：Henry 定律、CH4/O2 的气液分相、三对角求解。
+//! `MOD_Material_Reactive_Methane_Physics` 的叶子例程：Henry 定律、CH4/O2 的气液分相、三对角求解。
 //!
 //! 下标约定：`soisno` 数组长 [`SOISNO`]，`j`（`maxsnl+1..=nl_soil`）存在 `j - MAXSNL - 1`；
 //! 纯土壤数组长 [`NL_SOIL`]，`j`（`1..=nl_soil`）存在 `j - 1`；`k_h_cc(0:nl_soil, ngases)`

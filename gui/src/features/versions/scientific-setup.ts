@@ -40,16 +40,16 @@ const extra = [
     ['.false.', '关闭', 'Off'],
   ],
 }));
-// 上游把 DEF_USE_TRACER 拆成 isotope / methane / sediment 三个开关（溶质由名单非空启用），
-// 卡片仍保留一个聚合入口：显示值 = 任一 family 开启；点击开只会打开示踪设置面板让人选 family。
-const tracerKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT', 'DEF_SOLUTE_NAMES'];
-const tracerControl = {
-  id: 'tracer',
-  zh: '示踪过程',
-  en: 'Tracer processes',
-  keys: tracerKeys,
+// 上游把 @@DEF_USE_MATERIAL@@ 拆成 isotope / methane / sediment 三个开关（溶质由名单非空启用），
+// 卡片仍保留一个聚合入口：显示值 = 任一 family 开启；点击开只会打开材料设置面板让人选 family。
+const materialKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT', 'DEF_SOLUTE_NAMES'];
+const materialControl = {
+  id: 'material',
+  zh: '材料过程',
+  en: 'Material processes',
+  keys: materialKeys,
   choices: [
-    ['.true.', '选择示踪物', 'Choose tracers'],
+    ['.true.', '选择材料', 'Choose materials'],
     ['.false.', '关闭', 'Off'],
   ] as [string, string, string][],
 };
@@ -62,10 +62,10 @@ const order = [
   'DEF_USE_BGC',
   'DEF_URBAN_RUN',
   'crop',
-  'tracer',
+  'material',
 ];
 const controls = order.map((id) =>
-  [...foundationControls, ...extra, tracerControl].find((c) => c.id === id)!,
+  [...foundationControls, ...extra, materialControl].find((c) => c.id === id)!,
 );
 export const setupHandledKeys = controls.flatMap((c) => c.keys);
 export function setupChoices(
@@ -104,11 +104,11 @@ export function setupChoices(
       .split(',')
       .map((v) => unquote(v.trim()).toLowerCase())
       .filter(Boolean);
-  // 聚合示踪状态：任一 family 开关开启，或溶质名单非空。
+  // 聚合材料状态：任一 family 开关开启，或溶质名单非空。
   const methane = on('DEF_USE_METHANE'),
     sediment = on('DEF_USE_SEDIMENT'),
     isotope = on('DEF_USE_ISOTOPE'),
-    tracerOn = () => methane || sediment || isotope || list('DEF_SOLUTE_NAMES').length > 0;
+    materialOn = () => methane || sediment || isotope || list('DEF_SOLUTE_NAMES').length > 0;
   const activeFiles =
     context?.process_files.filter((f) => f.verified && f.active_methane_asset === true) ?? [];
   const methaneModes = activeFiles
@@ -133,32 +133,32 @@ export function setupChoices(
         .keys.every((k) => fields.some((f) => f.name === k && !f.derived))
     )
       return bilingual('当前版本没有可写字段', 'No writable field in this version');
-    if (tracerOn() && id !== 'tracer') {
+    if (materialOn() && id !== 'material') {
       if (methane && id === 'DEF_USE_BGC' && v === '.false.')
         return bilingual(
-          '请先关闭甲烷示踪或修改 CH4 定义',
-          'Disable methane tracers or change the CH4 definition first',
+          '请先关闭甲烷材料或修改 CH4 定义',
+          'Disable methane materials or change the CH4 definition first',
         );
       if (isotope && id === 'DEF_USE_LULCC' && v === '.true.')
         return bilingual(
-          '请先关闭同位素示踪或修改 isotope 类型',
-          'Disable isotope tracers or change the isotope type first',
+          '请先关闭同位素材料或修改 isotope 类型',
+          'Disable isotope materials or change the isotope type first',
         );
       if (id === 'DEF_USE_GridRiverLakeFlow' && v === '.false.') {
         if (sediment)
           return bilingual(
-            '请先关闭河道泥沙示踪或修改 SEDIMENT 定义',
-            'Disable sediment tracers or change SEDIMENT first',
+            '请先关闭河道泥沙材料或修改 SEDIMENT 定义',
+            'Disable sediment materials or change SEDIMENT first',
           );
         if (methane && methaneRiver)
           return bilingual(
-            '请先修改甲烷 routing/hybrid 淹没方案或关闭示踪',
-            'Change methane routing/hybrid inundation or disable tracers first',
+            '请先修改甲烷 routing/hybrid 淹没方案或关闭材料',
+            'Change methane routing/hybrid inundation or disable materials first',
           );
         if (methane && !methaneKnown)
           return bilingual(
-            '待核对：当前活动甲烷文件及淹没方案尚未确认；可先关闭示踪',
-            'Pending: active methane asset and inundation mode are unverified; disable tracers first',
+            '待核对：当前活动甲烷文件及淹没方案尚未确认；可先关闭材料',
+            'Pending: active methane asset and inundation mode are unverified; disable materials first',
           );
       }
     }
@@ -189,10 +189,10 @@ export function setupChoices(
     if (
       v === '.false.' &&
       id === 'DEF_USE_VariablySaturatedFlow' &&
-      tracerOn() &&
+      materialOn() &&
       !environment.autoClose
     )
-      return bilingual('请先关闭示踪过程', 'Disable tracers first');
+      return bilingual('请先关闭材料过程', 'Disable materials first');
     if (v === '.false.') return '';
     if (id !== 'crop') {
       const blocked = (
@@ -209,8 +209,8 @@ export function setupChoices(
           )
         );
     }
-    if (id === 'soil' && v === 'Campbell' && tracerOn() && !environment.autoClose)
-      return bilingual('请先关闭示踪过程', 'Disable tracers first');
+    if (id === 'soil' && v === 'Campbell' && materialOn() && !environment.autoClose)
+      return bilingual('请先关闭材料过程', 'Disable materials first');
     if (
       isSite(environment) &&
       ((id === 'DEF_USE_BGC' && on('DEF_URBAN_RUN')) ||
@@ -253,12 +253,12 @@ export function setupChoices(
           'Pending: choose a grid or build configuration',
         );
     }
-    if (id === 'DEF_URBAN_RUN' && tracerOn())
-      return bilingual('请先关闭示踪过程', 'Disable tracers first');
-    if (id === 'tracer') {
+    if (id === 'DEF_URBAN_RUN' && materialOn())
+      return bilingual('请先关闭材料过程', 'Disable materials first');
+    if (id === 'material') {
       if (methane && (displayValue('DEF_USE_BGC') !== '.true.' || !['PFT', 'PC'].includes(subgrid)))
         return bilingual(
-          '甲烷示踪需要先开启 BGC 并选择 PFT/PC',
+          '甲烷材料需要先开启 BGC 并选择 PFT/PC',
           'Methane requires BGC and PFT/PC first',
         );
       if (isotope && displayValue('DEF_USE_LULCC') === '.true.')
@@ -295,11 +295,11 @@ export function setupChoices(
         environment.kernel?.macros.some((m) => m.toUpperCase() === 'OPENMP')
       )
         return bilingual(
-          'OpenMP 编译配置不支持示踪',
-          'OpenMP build configurations do not support tracers',
+          'OpenMP 编译配置不支持材料',
+          'OpenMP build configurations do not support materials',
         );
       if (environment.grid === 'catchment' || environment.kernel?.macros.includes('CATCHMENT'))
-        return bilingual('流域网格不支持示踪', 'Catchment grid does not support tracers');
+        return bilingual('流域网格不支持材料', 'Catchment grid does not support materials');
     }
     if (['DEF_USE_LULCC', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_regional'].includes(id)) {
       if (isSite(environment))
@@ -367,8 +367,8 @@ export function setupChoices(
             ? displayedSoil
             : c.id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG'
               ? '.true.'
-              : c.id === 'tracer'
-                ? tracerOn()
+              : c.id === 'material'
+                ? materialOn()
                   ? '.true.'
                   : '.false.'
                 : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
@@ -426,9 +426,9 @@ export function applySetupRequest(
     return setModelOption(overlay, fields, planting, request.value);
   }
   const foundation = foundationControls.find((c) => c.id === request.id);
-  if (request.id === 'tracer' && !foundation) {
+  if (request.id === 'material' && !foundation) {
     // 聚合入口：关闭时三个 family 开关都写 .false.，并清空溶质名单；
-    // 打开时由界面转到示踪设置面板选择 family，这里只在什么都没选时给同位素一个默认起点。
+    // 打开时由界面转到材料设置面板选择 family，这里只在什么都没选时给同位素一个默认起点。
     if (value === '.false.') {
       let next = overlay;
       for (const key of ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'])

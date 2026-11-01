@@ -315,21 +315,17 @@ fn rewrite_namelist(
             continue;
         }
         if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-            let rewritten =
-                colm_namelist::tracer_files::rewrite_param_files(
-                    trimmed,
-                    |path| match place_input(path)? {
-                        Placed::Remote(remote) => {
-                            if under(&remote, trim_slash(remote_case)).is_none() {
-                                staged.remote_inputs.push(remote.clone());
-                            }
-                            Ok(remote)
+            let rewritten = colm_namelist::material_files::rewrite_param_files(trimmed, |path| {
+                match place_input(path)? {
+                    Placed::Remote(remote) => {
+                        if under(&remote, trim_slash(remote_case)).is_none() {
+                            staged.remote_inputs.push(remote.clone());
                         }
-                        _ => bail!(
-                            "process parameter file {path} is outside the case and not mapped"
-                        ),
-                    },
-                )?;
+                        Ok(remote)
+                    }
+                    _ => bail!("process parameter file {path} is outside the case and not mapped"),
+                }
+            })?;
             document.set(&field, Value::Str(rewritten))?;
             continue;
         }

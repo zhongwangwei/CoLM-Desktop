@@ -1,4 +1,4 @@
-//! CH4 provider 的运行时接线：从 CH4 示踪物的参数文件读 `&nl_colm_methane_parameter`，
+//! CH4 provider 的运行时接线：从 CH4 材料的参数文件读 `&nl_colm_methane_parameter`，
 //! 组装 patch 的静态量，每步在 BGC 之后调用 [`colm_core::methane::driver::soil_step`]。
 
 use anyhow::{ensure, Context, Result};
@@ -15,29 +15,30 @@ pub struct MethaneSetup {
     pub dynamic_wetland: bool,
 }
 
-/// 注册的 CH4 provider 示踪物（`gas` 类、名字 `CH4`/`METHANE`）。
-pub fn is_methane_tracer(tracer: &colm_core::tracer::TracerDescriptor) -> bool {
-    tracer.category == "gas"
+/// 注册的 CH4 provider 材料（`gas` 类、名字 `CH4`/`METHANE`）。
+pub fn is_methane_material(material: &colm_core::material::MaterialDescriptor) -> bool {
+    material.category == "gas"
         && matches!(
-            tracer.name.trim().to_ascii_uppercase().as_str(),
+            material.name.trim().to_ascii_uppercase().as_str(),
             "CH4" | "METHANE"
         )
 }
 
-/// `ch4_reactive_init` 的配置部分：找到 CH4 示踪物、读它的参数文件、解析淹没方案。
-/// 没开示踪物或没有 CH4 示踪物时返回 `None`。`grid_river` 是内核有没有网格河湖汇流。
+/// `ch4_reactive_init` 的配置部分：找到 CH4 材料、读它的参数文件、解析淹没方案。
+/// 没开材料或没有 CH4 材料时返回 `None`。`grid_river` 是内核有没有网格河湖汇流。
 pub fn setup_from_document(document: &Document, grid_river: bool) -> Result<Option<MethaneSetup>> {
-    let Some(set) = crate::tracer::tracer_set_from_document(document)? else {
+    let Some(set) = crate::material::material_set_from_document(document)? else {
         return Ok(None);
     };
-    let Some(index) = set.tracers.iter().position(is_methane_tracer) else {
+    let Some(index) = set.materials.iter().position(is_methane_material) else {
         return Ok(None);
     };
-    let files = crate::tracer::param_files_from_document(document)?;
-    let path = colm_core::tracer::descriptor::param_file_for_index(&files, &set.tracers, index)?
-        .context(
-            "the CH4 material has no parameter file; methane needs &nl_colm_methane_parameter",
-        )?;
+    let files = crate::material::param_files_from_document(document)?;
+    let path =
+        colm_core::material::descriptor::param_file_for_index(&files, &set.materials, index)?
+            .context(
+                "the CH4 material has no parameter file; methane needs &nl_colm_methane_parameter",
+            )?;
     let mut params = read_parameters(&path)?;
     // CH4 history：Rust 只移植了 `core` 那 18 个量。`diagnostic`/`all`/逐个列名会让上游多写变量，
     // 这里明确拒绝，免得两个引擎的输出悄悄不同。
@@ -92,7 +93,7 @@ impl HostArrays {
         state: &colm_core::StandardLctSnowSoilState,
         output: &colm_core::StandardLctSnowSoilOutput,
     ) -> Result<Self> {
-        use colm_core::tracer::step::pack_soisno;
+        use colm_core::material::step::pack_soisno;
         let nl = colm_core::methane::physics::NL_SOIL;
         let fixed = |values: &[f64], name: &str| -> Result<[f64; 10]> {
             values
@@ -163,7 +164,7 @@ pub fn host_inputs<'a>(
 impl HostArrays {
     /// 湖泊 patch：根吸水廓线只进通气组织，湖的饱和相不跑它，取 0。
     pub fn from_lake_state(state: &colm_core::StandardLctSnowSoilState) -> Result<Self> {
-        use colm_core::tracer::step::pack_soisno;
+        use colm_core::material::step::pack_soisno;
         let nl = colm_core::methane::physics::NL_SOIL;
         let fixed = |values: &[f64], name: &str| -> Result<[f64; 10]> {
             values
@@ -356,7 +357,7 @@ pub fn history_selector_fingerprint(params: &MethaneParameters) -> i64 {
     )
 }
 
-/// `ch4_reactive_write_restart`：把甲烷状态与 history 累加量追加进已写好空示踪物事务的
+/// `ch4_reactive_write_restart`：把甲烷状态与 history 累加量追加进已写好空材料事务的
 /// 陆面时间重启（`patch`、`soil` 维已在）。
 pub fn write_restart(
     path: &std::path::Path,
@@ -366,7 +367,7 @@ pub fn write_restart(
         &colm_core::methane::driver::CoreAccumulator,
     )],
 ) -> Result<()> {
-    use crate::tracer::{ensure_dimension, put_array_f64};
+    use crate::material::{ensure_dimension, put_array_f64};
     use colm_core::methane::config::{COMP_RICE, COMP_SOIL};
     use colm_core::methane::physics::NL_SOIL;
     let mut file =
@@ -569,7 +570,7 @@ pub struct RestartedPatch {
     pub accumulator: colm_core::methane::driver::CoreAccumulator,
 }
 
-/// `ch4_reactive_read_restart`（`MOD_Tracer_Reactive_Methane.F90`）：时间重启里没有任何甲烷量时
+/// `ch4_reactive_read_restart`（`MOD_Material_Reactive_Methane.F90`）：时间重启里没有任何甲烷量时
 /// 冷启动（返回 `None`）。只接受本版本写的事务（schema 5、`ch4_restart_complete = 1`）：旧 schema
 /// 的迁移与非严格修补没有移植，遇到就停下。严格读时上游把任何非法或负的预报量当损坏拒绝，
 /// 合法文件上其余 `WHERE` 修补都是恒等，唯一例外是导度 `<= 0` 换成默认值。
@@ -919,7 +920,7 @@ pub fn write_accflux(
     setup: &MethaneSetup,
     accumulators: &[&colm_core::methane::driver::CoreAccumulator],
 ) -> Result<()> {
-    use crate::tracer::{ensure_dimension, put_array_f64};
+    use crate::material::{ensure_dimension, put_array_f64};
     use colm_core::methane::physics::NL_SOIL;
     let n = accumulators.len();
     ensure_dimension(file, "soil", NL_SOIL)?;

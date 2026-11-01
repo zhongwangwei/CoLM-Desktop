@@ -1,4 +1,4 @@
-//! GIEMS-MC 月淹没比例（`MOD_Tracer_Reactive_Methane_GIEMS`，方案 5 `satellite`/`giems`）。
+//! GIEMS-MC 月淹没比例（`MOD_Material_Reactive_Methane_GIEMS`，方案 5 `satellite`/`giems`）。
 //!
 //! 每个 patch 取最近像元的一条月序列（1992-01 起 348 个月，`real(r4)`），再由它算 12 个月的
 //! 气候态（`real(r8)` 累加）。运行期在数据年份内取当月值，年份之外退到气候态。

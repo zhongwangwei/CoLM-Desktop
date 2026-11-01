@@ -29,8 +29,8 @@ pub struct SpatialRuntime {
     river: Option<(crate::river::RiverModel, Vec<bool>)>,
     /// LULCC 年末那一步的终点：这一步不重读 LAI（见 [`SpatialRuntime::defer_lai_refresh_at`]）。
     deferred_lai_refresh: Option<colm_core::CalendarTime>,
-    /// 网格示踪物强迫（`read_tracer_forcing`）。
-    tracer_forcing: Option<super::tracer_forcing::GriddedTracerForcing>,
+    /// 网格材料强迫（`read_material_forcing`）。
+    material_forcing: Option<super::material_forcing::GriddedMaterialForcing>,
     /// `forcmask_pch`：足迹不全落在缺测格上的 patch 为真。为假的 patch 整步跳过
     /// （`CoLMDRIVER.F90:78` 的 `CYCLE`），状态不动、不出通量。
     forcing_mask: Vec<bool>,
@@ -79,7 +79,7 @@ impl SpatialRuntime {
             baseflow_optimizer: None,
             river: None,
             deferred_lai_refresh: None,
-            tracer_forcing: None,
+            material_forcing: None,
             forcing_mask,
             downscaling: None,
             catchment: None,
@@ -137,21 +137,21 @@ impl SpatialRuntime {
         Ok(self)
     }
 
-    /// 接上网格示踪物强迫（只在配置了示踪物强迫变量时）。
-    pub fn with_tracer_forcing(
+    /// 接上网格材料强迫（只在配置了材料强迫变量时）。
+    pub fn with_material_forcing(
         mut self,
-        forcing: super::tracer_forcing::GriddedTracerForcing,
+        forcing: super::material_forcing::GriddedMaterialForcing,
     ) -> Self {
-        self.tracer_forcing = Some(forcing);
+        self.material_forcing = Some(forcing);
         self
     }
 
-    /// 网格示踪物强迫的运行态（写续跑用）。
-    pub fn tracer_forcing(&self) -> Option<&super::tracer_forcing::GriddedTracerForcing> {
-        self.tracer_forcing.as_ref()
+    /// 网格材料强迫的运行态（写续跑用）。
+    pub fn material_forcing(&self) -> Option<&super::material_forcing::GriddedMaterialForcing> {
+        self.material_forcing.as_ref()
     }
 
-    /// 主强迫配置（示踪物强迫的重启指纹要用）。
+    /// 主强迫配置（材料强迫的重启指纹要用）。
     pub fn forcing_config(&self) -> &super::forcing::GriddedForcingConfig {
         self.forcing.config()
     }
@@ -258,7 +258,7 @@ impl SpatialRuntime {
             &[Option<PatchStepOutput<'_>>],
             &[crate::PatchOutputCarry],
             Option<&crate::river::RiverModel>,
-            Option<&crate::tracer::ForcingCache<'_>>,
+            Option<&crate::material::ForcingCache<'_>>,
             Option<&crate::catchment::runtime::CatchmentRuntime>,
         ) -> Result<()>,
     {
@@ -326,11 +326,11 @@ impl SpatialRuntime {
                 let co2 =
                     colm_core::monthly_co2_ppm(self.co2_scenario, clock.forcing_time.year, month)?
                         * 1.0e-6;
-                // 上一步把时钟回卷到了起点（`CoLM.F90:711-724`）：`forcing_reset` 与 `tracer_forcing_reset`。
+                // 上一步把时钟回卷到了起点（`CoLM.F90:711-724`）：`forcing_reset` 与 `material_forcing_reset`。
                 if clock.spinup_cycle > spinup_cycle {
                     self.forcing.reset();
-                    if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
-                        tracer_forcing.reset();
+                    if let Some(material_forcing) = self.material_forcing.as_mut() {
+                        material_forcing.reset();
                     }
                 }
                 spinup_cycle = clock.spinup_cycle;
@@ -349,11 +349,11 @@ impl SpatialRuntime {
                     )?,
                     None => map_to_patches(&self.mapping, &self.forcing, &cells),
                 };
-                // `read_tracer_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
+                // `read_material_forcing (jdate, dir_forcing)`：紧跟 `read_forcing`。
                 // 相态回填的平衡分馏系数用本步逐 patch 气温（上游 `forc_t`）。
-                if let Some(tracer_forcing) = self.tracer_forcing.as_mut() {
+                if let Some(material_forcing) = self.material_forcing.as_mut() {
                     let air_temperature: Vec<f64> = patch_forcing.iter().map(|p| p.t).collect();
-                    tracer_forcing.step(
+                    material_forcing.step(
                         clock.forcing_time,
                         &self.forcing,
                         &self.mapping,
@@ -403,12 +403,12 @@ impl SpatialRuntime {
                 // patch 之间在一步之内互不依赖：每个只读本步强迫与共享的只读数据、只改自己的状态，
                 // 所以用 rayon 并行推进（`RAYON_NUM_THREADS` 控制线程数，相当于 OpenMP）。`collect`
                 // 保持 patch 次序，之后的汇流、漫滩交换与历史累加仍按原次序串行，结果逐位不变。
-                // 示踪物收支追踪器只记计数与最坏值；最坏值恰好相等时报告里写哪个 patch 可能随调度
+                // 材料收支追踪器只记计数与最坏值；最坏值恰好相等时报告里写哪个 patch 可能随调度
                 // 变化，只影响诊断文字。
                 let forcing_mask = &self.forcing_mask;
                 let coordinates = &self.coordinates;
                 let river = self.river.as_ref().map(|(river, _)| river);
-                let tracer_forcing = self.tracer_forcing.as_ref();
+                let material_forcing = self.material_forcing.as_ref();
                 let scales = optimizer.as_ref();
                 // 被遮蔽的 patch 没有输出（`None`）。
                 let (mut outputs, carries): (Vec<Option<PatchOutput>>, Vec<crate::PatchOutputCarry>) =
@@ -464,14 +464,14 @@ impl SpatialRuntime {
                                             fraction: flood.fraction[flood_offset + index],
                                             infiltration_max_mm_day: flood.infiltration_max_mm_day,
                                         }),
-                                    tracer_ratios: tracer_forcing.map(|forcing| forcing.ratios(index)),
-                                    flood_tracer: river
+                                    material_ratios: material_forcing.map(|forcing| forcing.ratios(index)),
+                                    flood_material: river
                                         .and_then(|river| river.flood.as_ref())
                                         .and_then(|flood| {
-                                            flood.tracer.as_ref().map(|tracer| {
+                                            flood.material.as_ref().map(|material| {
                                                 (
                                                     flood.credit[flood_offset + index] * 1000.0,
-                                                    tracer.credit_patch[flood_offset + index]
+                                                    material.credit_patch[flood_offset + index]
                                                         .as_slice(),
                                                 )
                                             })
@@ -496,8 +496,8 @@ impl SpatialRuntime {
                         .into_iter()
                         .unzip();
                 // （`CNFireArea` 原来对 `tsoi17` 整列赋值、需在此广播；upstream-bugs 第 61 条已修，各 patch 只写自己的。）
-                // `tracer_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
-                crate::tracer::report_after_patches(templates)?;
+                // `material_report`：一步里所有 patch 推进完之后（`CoLMDRIVER.F90:392-393`）。
+                crate::material::report_after_patches(templates)?;
                 timer.mark("patches");
                 // `CoLM.F90:544-546`：`lateral_flow (idate(1), deltim)`，预热期也做。
                 if let Some(catchment) = self.catchment.as_mut() {
@@ -582,30 +582,30 @@ impl SpatialRuntime {
                                     flood.evap_mm_s[index] = evaporation;
                                     flood.infil_mm_s[index] = infiltration;
                                 }
-                                // `flood_tracer_evap/land_patch`：走 CoLMMAIN 的 patch 本步写过，其余停在
+                                // `flood_material_evap/land_patch`：走 CoLMMAIN 的 patch 本步写过，其余停在
                                 // 发布时清的 0。
-                                if let Some(tracer) = flood.tracer.as_mut() {
+                                if let Some(material) = flood.material.as_mut() {
                                     for (index, state) in next_states.iter().enumerate() {
                                         if let Some(exchange) = state
-                                            .tracer
+                                            .material
                                             .as_deref()
                                             .and_then(|track| track.flood_exchange.as_ref())
                                         {
-                                            tracer.evap_patch[index].clone_from(&exchange.evap);
-                                            tracer.land_patch[index].clone_from(&exchange.land);
+                                            material.evap_patch[index].clone_from(&exchange.evap);
+                                            material.land_patch[index].clone_from(&exchange.land);
                                         }
                                     }
                                 }
                             }
                             // `grid_riverlake_flow(idate(1), …)`：`TICKTIME` 之后的年份，即本步末。
-                            // `trc_rnof_step(itrc, ipatch)`：本步每个 patch 的径流示踪物 [R*mm]。
-                            let tracer_runoff = river.tracers.as_ref().map(|tracers| {
-                                (0..tracers.set.len())
+                            // `trc_rnof_step(itrc, ipatch)`：本步每个 patch 的径流材料 [R*mm]。
+                            let material_runoff = river.materials.as_ref().map(|materials| {
+                                (0..materials.set.len())
                                     .map(|itrc| {
                                         next_states
                                             .iter()
                                             .map(|state| {
-                                                state.tracer.as_deref().map_or(0.0, |track| {
+                                                state.material.as_deref().map_or(0.0, |track| {
                                                     track.state.step[itrc].rnof_step
                                                 })
                                             })
@@ -623,7 +623,7 @@ impl SpatialRuntime {
                             timer.mark("river gather");
                             river.step(
                                 &local_runoff,
-                                tracer_runoff.as_deref(),
+                                material_runoff.as_deref(),
                                 precip.as_deref(),
                                 included,
                                 time_step_seconds,
@@ -663,8 +663,8 @@ impl SpatialRuntime {
                             // `hist_acc_final_snapshot` 返回值守着）。
                             if !record.natural_boundary {
                                 river.raw_history_at_end = Some(river.history.clone());
-                                if let Some(tracers) = river.tracers.as_mut() {
-                                    tracers.snapshot_hist_at_end();
+                                if let Some(materials) = river.materials.as_mut() {
+                                    materials.snapshot_hist_at_end();
                                 }
                                 if let Some(sediment) = river.sediment.as_mut() {
                                     sediment.snapshot_hist_at_end();
@@ -674,7 +674,7 @@ impl SpatialRuntime {
                                 &river.network,
                                 &river.routing,
                                 &mut river.history,
-                                river.tracers.as_mut(),
+                                river.materials.as_mut(),
                                 river.sediment.as_mut(),
                                 &record,
                                 clock.end_time,
@@ -726,7 +726,7 @@ impl SpatialRuntime {
                         )?;
                     }
                     // `mt_hist_out`：主 history 之后；预热期不计步也不清零（会话里处理）。
-                    if let Some(path) = history.session.push_tracer(
+                    if let Some(path) = history.session.push_material(
                         clock.end_time,
                         clock.is_spinup,
                         &mut next_states,
@@ -822,7 +822,10 @@ impl SpatialRuntime {
                     .par_iter()
                     .map(|output| output.as_ref().map(PatchOutput::view))
                     .collect::<Vec<_>>();
-                let cache = self.tracer_forcing.as_ref().map(|forcing| forcing.cache());
+                let cache = self
+                    .material_forcing
+                    .as_ref()
+                    .map(|forcing| forcing.cache());
                 on_step(
                     &steps,
                     &next_states,
@@ -836,7 +839,7 @@ impl SpatialRuntime {
                 // 回调之后已经没人引用，直接并行释放（0.1° 全球实测 “other” 占 32%）。
                 outputs.par_iter_mut().for_each(|slot| *slot = None);
                 timer.mark("lai, optimizer, restarts");
-                crate::tracer::clamp_restart_dust_after_step(
+                crate::material::clamp_restart_dust_after_step(
                     steps[0].clock.write_restart,
                     templates,
                     &mut next_states,

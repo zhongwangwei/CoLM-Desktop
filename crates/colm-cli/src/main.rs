@@ -6106,7 +6106,7 @@ enum WindowVariable {
 /// 按窗口逐记录读取 `series` 请求的变量，格点变量逐记录算区域平均。
 ///
 /// `unix` 是主 history stream 的完整时间轴（`series` 的 x 轴口径，也是 `from/to`
-/// 的窗口口径，闭区间）。变量可以分布在不同 stream（主/tracer/unitcat），但每个
+/// 的窗口口径，闭区间）。变量可以分布在不同 stream（主/material/unitcat），但每个
 /// stream 的时间轴必须与 `unix` 一致 —— 不一致时沿用旧 `read_history_many` 的报错，
 /// 不能把两条时间轴拼成一条曲线。
 pub(crate) fn read_series_window(
@@ -8158,7 +8158,7 @@ fn read_history_many_from(
 }
 
 /// Read scalar history variables from the file series that actually contains them.
-/// Main and tracer history are separate NetCDF series with duplicate timestamps; do
+/// Main and material history are separate NetCDF series with duplicate timestamps; do
 /// not concatenate both just because both names match `*_hist_*.nc`.
 fn read_history_many(
     files: &[PathBuf],

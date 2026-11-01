@@ -9,8 +9,8 @@
 //! 汇流满一个间隔后再发布一次。堤防：堤内蓄量作为受保护的漫滩水量一并发布与扣账；
 //! 水库：已建成水库的可见水量取库容，扣账后 `volwater_ucat` 跟着库容走。
 //!
-//! 输运示踪物（[`FloodTracers`]）：发布时可见漫滩水按 `trc_mass` 的比例、堤内按 `trc_levsto`
-//! 折到 patch；陆面报回蒸发损失与随入渗进土壤的量，扣账时按比例从河道示踪物里扣，并核对
+//! 输运材料（[`FloodMaterials`]）：发布时可见漫滩水按 `trc_mass` 的比例、堤内按 `trc_levsto`
+//! 折到 patch；陆面报回蒸发损失与随入渗进土壤的量，扣账时按比例从河道材料里扣，并核对
 //! 陆面/大气/河道三方的账。
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 // `!(x < y)` 照搬上游判据，保留 NaN 的比较语义
@@ -22,10 +22,10 @@ use anyhow::{bail, ensure, Result};
 use colm_numeric::Contract;
 
 use super::levee::Levee;
+use super::material::RiverMaterials;
 use super::network::{RiverNetwork, RunoffRouting};
 use super::remap::{catchments_to_inpm, grid_to_patches, inpm_to_catchments, patches_to_grid};
 use super::reservoir::Reservoir;
-use super::tracer::RiverTracers;
 use super::RiverState;
 
 /// 发布与扣账要看到的河道选项：堤防几何，以及水库表与当前年份（判断是否已建成）。
@@ -68,31 +68,31 @@ pub struct FloodFeedback {
     pub infil_period: f64,
     /// `DEF_GridRiverLake_FloodInfiltMax`（mm/day），陆面再入渗的上限。
     pub infiltration_max_mm_day: f64,
-    /// 有输运示踪物时的示踪物账。
-    pub tracer: Option<FloodTracers>,
+    /// 有输运材料时的材料账。
+    pub material: Option<FloodMaterials>,
 }
 
-/// 漫滩回馈的示踪物账（`flood_*_tracer_*`）。单元流域侧 `[itrc][cell]`，patch 侧 `[patch][itrc]`。
+/// 漫滩回馈的材料账（`flood_*_material_*`）。单元流域侧 `[itrc][cell]`，patch 侧 `[patch][itrc]`。
 #[derive(Debug, Clone)]
-pub struct FloodTracers {
-    /// `flood_visible_tracer_uc`、`flood_protected_tracer_uc`。
+pub struct FloodMaterials {
+    /// `flood_visible_material_uc`、`flood_protected_material_uc`。
     visible_uc: Vec<Vec<f64>>,
     protected_uc: Vec<Vec<f64>>,
-    /// `flood_tracer_credit_patch`：发布给 patch 的示踪物（mm·比值）。
+    /// `flood_material_credit_patch`：发布给 patch 的材料（mm·比值）。
     pub credit_patch: Vec<Vec<f64>>,
-    /// `flood_tracer_evap_patch`、`flood_tracer_land_patch`：陆面这一步报回来的。
+    /// `flood_material_evap_patch`、`flood_material_land_patch`：陆面这一步报回来的。
     pub evap_patch: Vec<Vec<f64>>,
     pub land_patch: Vec<Vec<f64>>,
 }
 
-impl FloodTracers {
-    pub fn new(ntracers: usize, catchments: usize, patches: usize) -> Self {
+impl FloodMaterials {
+    pub fn new(nmaterials: usize, catchments: usize, patches: usize) -> Self {
         Self {
-            visible_uc: vec![vec![0.0; catchments]; ntracers],
-            protected_uc: vec![vec![0.0; catchments]; ntracers],
-            credit_patch: vec![vec![0.0; ntracers]; patches],
-            evap_patch: vec![vec![0.0; ntracers]; patches],
-            land_patch: vec![vec![0.0; ntracers]; patches],
+            visible_uc: vec![vec![0.0; catchments]; nmaterials],
+            protected_uc: vec![vec![0.0; catchments]; nmaterials],
+            credit_patch: vec![vec![0.0; nmaterials]; patches],
+            evap_patch: vec![vec![0.0; nmaterials]; patches],
+            land_patch: vec![vec![0.0; nmaterials]; patches],
         }
     }
 }
@@ -128,7 +128,7 @@ impl FloodFeedback {
             evap_period: 0.0,
             infil_period: 0.0,
             infiltration_max_mm_day,
-            tracer: None,
+            material: None,
         }
     }
 
@@ -144,7 +144,7 @@ impl FloodFeedback {
         }
     }
 
-    /// `publish_flood_feedback`（无示踪物）。
+    /// `publish_flood_feedback`（无材料）。
     ///
     /// 已建成水库的库容若还是 `spval`，上游在这里就由水深补上（`volresv` 的副作用）。
     pub fn publish(
@@ -153,20 +153,20 @@ impl FloodFeedback {
         routing: &RunoffRouting,
         state: &mut RiverState,
         context: FloodContext<'_>,
-        mut river_tracers: Option<&mut RiverTracers>,
+        mut river_materials: Option<&mut RiverMaterials>,
     ) -> Result<()> {
         let n = network.len();
         let mut fraction_uc = vec![0.0; n];
         self.visible_uc.fill(0.0);
         self.protected_uc.fill(0.0);
         self.reservoir_uc.fill(None);
-        if let Some(tracer) = self.tracer.as_mut() {
+        if let Some(material) = self.material.as_mut() {
             for rows in [
-                &mut tracer.visible_uc,
-                &mut tracer.protected_uc,
-                &mut tracer.credit_patch,
-                &mut tracer.evap_patch,
-                &mut tracer.land_patch,
+                &mut material.visible_uc,
+                &mut material.protected_uc,
+                &mut material.credit_patch,
+                &mut material.evap_patch,
+                &mut material.land_patch,
             ] {
                 for row in rows.iter_mut() {
                     row.fill(0.0);
@@ -195,9 +195,9 @@ impl FloodFeedback {
                 Some(_) => state.levsto.as_ref().expect("levee state")[i].max(0.0),
                 None => 0.0,
             };
-            // `equilibrate_river_tracer_cell`（只在有溶解度上限的溶质时有固相）。
-            if let Some(tracers) = river_tracers.as_deref_mut() {
-                tracers.equilibrate_cell(i, visible, protected)?;
+            // `equilibrate_river_material_cell`（只在有溶解度上限的溶质时有固相）。
+            if let Some(materials) = river_materials.as_deref_mut() {
+                materials.equilibrate_cell(i, visible, protected)?;
             }
             let fraction = match leveed {
                 Some(levee) => levee.fldstg(network, i, visible + protected).fldfrc,
@@ -212,15 +212,16 @@ impl FloodFeedback {
             self.visible_uc[i] = (visible - network.rivstomax[i]).max(0.0);
             self.protected_uc[i] = protected;
             fraction_uc[i] = fraction.min(1.0);
-            if let (Some(tracer), Some(tracers)) = (self.tracer.as_mut(), river_tracers.as_deref())
+            if let (Some(material), Some(materials)) =
+                (self.material.as_mut(), river_materials.as_deref())
             {
-                for itrc in 0..tracer.visible_uc.len() {
+                for itrc in 0..material.visible_uc.len() {
                     if visible > 0.0 {
-                        tracer.visible_uc[itrc][i] =
-                            tracers.mass[itrc][i].max(0.0) * (self.visible_uc[i] / visible);
+                        material.visible_uc[itrc][i] =
+                            materials.mass[itrc][i].max(0.0) * (self.visible_uc[i] / visible);
                     }
                     if protected > 0.0 {
-                        tracer.protected_uc[itrc][i] = tracers.levsto[itrc][i].max(0.0);
+                        material.protected_uc[itrc][i] = materials.levsto[itrc][i].max(0.0);
                     }
                 }
             }
@@ -271,9 +272,11 @@ impl FloodFeedback {
                 0.0
             };
         }
-        // 示踪物：可见与堤内两份各自按密度推到网格、按网格面积归一、再平均到 patch，
+        // 材料：可见与堤内两份各自按密度推到网格、按网格面积归一、再平均到 patch，
         // `credit = 1000*(可见 + 堤内)`（不截负，与水量不同）。
-        if let (Some(tracer), Some(tracers)) = (self.tracer.as_mut(), river_tracers.as_deref()) {
+        if let (Some(material), Some(materials)) =
+            (self.material.as_mut(), river_materials.as_deref())
+        {
             let to_patches = |values: &[f64]| -> Vec<f64> {
                 let mut grid = catchments_to_inpm(routing, &density_of(values), 0.0, false);
                 for (value, &area) in grid.iter_mut().zip(&self.grid_area) {
@@ -285,13 +288,13 @@ impl FloodFeedback {
                 }
                 unmissing(grid_to_patches(routing, &grid, MISSING, true))
             };
-            for (itrc, descriptor) in tracers.set.tracers.iter().enumerate() {
+            for (itrc, descriptor) in materials.set.materials.iter().enumerate() {
                 if !descriptor.uses_land_water_transport() {
                     continue;
                 }
-                let visible = to_patches(&tracer.visible_uc[itrc]);
-                let protected = to_patches(&tracer.protected_uc[itrc]);
-                for (p, credit) in tracer.credit_patch.iter_mut().enumerate() {
+                let visible = to_patches(&material.visible_uc[itrc]);
+                let protected = to_patches(&material.protected_uc[itrc]);
+                for (p, credit) in material.credit_patch.iter_mut().enumerate() {
                     credit[itrc] = 1000.0 * (visible[p] + protected[p]);
                 }
             }
@@ -299,7 +302,7 @@ impl FloodFeedback {
         Ok(())
     }
 
-    /// `debit_flood_feedback`（无示踪物）：返回扣掉的蒸发与入渗水量（m³）。
+    /// `debit_flood_feedback`（无材料）：返回扣掉的蒸发与入渗水量（m³）。
     pub fn debit(
         &mut self,
         network: &RiverNetwork,
@@ -307,7 +310,7 @@ impl FloodFeedback {
         state: &mut RiverState,
         context: FloodContext<'_>,
         repartitions: &mut Vec<(usize, [f64; 4])>,
-        mut river_tracers: Option<&mut RiverTracers>,
+        mut river_materials: Option<&mut RiverMaterials>,
     ) -> Result<(f64, f64)> {
         for p in 0..self.credit.len() {
             ensure!(
@@ -374,9 +377,10 @@ impl FloodFeedback {
             fraction_sum.iter().all(|&f| f <= 1.0 + 1.0e-10),
             "grid flood feedback: donor overdraft"
         );
-        if let (Some(tracer), Some(tracers)) = (self.tracer.as_ref(), river_tracers.as_deref_mut())
+        if let (Some(material), Some(materials)) =
+            (self.material.as_ref(), river_materials.as_deref_mut())
         {
-            self.debit_tracers(tracer, tracers, routing, &filter)?;
+            self.debit_materials(material, materials, routing, &filter)?;
         }
         for j in 0..n {
             // 乘积在分支前算好、各分支共用，所以减法不收缩。
@@ -397,13 +401,13 @@ impl FloodFeedback {
                     .contract(fraction_sum[j], *levsto)
                     .max(0.0);
             }
-            // `equilibrate_river_tracer_cell(j, volwater_ucat(j), levsto)`：扣账之后、重新分区之前。
-            if let Some(tracers) = river_tracers.as_deref_mut() {
+            // `equilibrate_river_material_cell(j, volwater_ucat(j), levsto)`：扣账之后、重新分区之前。
+            if let Some(materials) = river_materials.as_deref_mut() {
                 let protected = match leveed {
                     Some(_) => state.levsto.as_ref().expect("levee state")[j],
                     None => 0.0,
                 };
-                tracers.equilibrate_cell(j, state.volwater[j], protected)?;
+                materials.equilibrate_cell(j, state.volwater[j], protected)?;
             }
             if fraction_sum[j] > 0.0 {
                 match (leveed, self.reservoir_uc[j]) {
@@ -424,9 +428,9 @@ impl FloodFeedback {
                             stage.levsto,
                         ];
                         repartitions.push((j, water));
-                        // `levee_tracer_repartition`（不带待释放的径流示踪物）。
-                        if let Some(tracers) = river_tracers.as_deref_mut() {
-                            tracers.levee_repartition(j, water, false)?;
+                        // `levee_material_repartition`（不带待释放的径流材料）。
+                        if let Some(materials) = river_materials.as_deref_mut() {
+                            materials.levee_repartition(j, water, false)?;
                         }
                     }
                     (_, Some(r)) => {
@@ -446,13 +450,13 @@ impl FloodFeedback {
         Ok((volumes[0], volumes[1]))
     }
 
-    /// `debit_flood_feedback` 的示踪物段（`MOD_Grid_RiverLakeFlow.F90:1842-1957`）：逐示踪物
-    /// 按 patch 的"蒸发 + 剩余部分里的入渗"份额推回单元流域，从可见与堤内两份示踪物里扣，
+    /// `debit_flood_feedback` 的材料段（`MOD_Grid_RiverLakeFlow.F90:1842-1957`）：逐材料
+    /// 按 patch 的"蒸发 + 剩余部分里的入渗"份额推回单元流域，从可见与堤内两份材料里扣，
     /// 大气同位素吸收按水量比例回补；最后核对陆面 + 大气 = 河道扣掉的量。
-    fn debit_tracers(
+    fn debit_materials(
         &self,
-        tracer: &FloodTracers,
-        tracers: &mut RiverTracers,
+        material: &FloodMaterials,
+        materials: &mut RiverMaterials,
         routing: &RunoffRouting,
         filter: &[bool],
     ) -> Result<()> {
@@ -469,8 +473,8 @@ impl FloodFeedback {
             }
             inpm_to_catchments(routing, &grid, n, 0.0, false)
         };
-        for itrc in 0..tracers.set.len() {
-            let descriptor = &tracers.set.tracers[itrc];
+        for itrc in 0..materials.set.len() {
+            let descriptor = &materials.set.materials[itrc];
             if !descriptor.uses_land_water_transport() {
                 continue;
             }
@@ -483,22 +487,22 @@ impl FloodFeedback {
                 if water_credit <= 0.0 {
                     continue;
                 }
-                let tracer_credit = tracer.credit_patch[i][itrc];
-                let vapor_loss = tracer.evap_patch[i][itrc];
-                let land = tracer.land_patch[i][itrc];
+                let material_credit = material.credit_patch[i][itrc];
+                let vapor_loss = material.evap_patch[i][itrc];
+                let land = material.land_patch[i][itrc];
                 ensure!(
                     vapor_loss.is_finite(),
                     "grid flood feedback: nonfinite isotope vapor exchange"
                 );
                 let positive_loss = vapor_loss.max(0.0);
                 let vapor_gain = (-vapor_loss).max(0.0);
-                let ledger_tol = (1.0e-10 * tracer_credit.abs()).max(1.0e-12);
+                let ledger_tol = (1.0e-10 * material_credit.abs()).max(1.0e-12);
                 ensure!(
-                    !(tracer_credit + ledger_tol < positive_loss),
-                    "grid flood feedback: isotope evaporation overdrew tracer"
+                    !(material_credit + ledger_tol < positive_loss),
+                    "grid flood feedback: isotope evaporation overdrew material"
                 );
-                let evaporated = if tracer_credit > 0.0 {
-                    (positive_loss / tracer_credit).min(1.0)
+                let evaporated = if material_credit > 0.0 {
+                    (positive_loss / material_credit).min(1.0)
                 } else {
                     0.0
                 };
@@ -515,13 +519,13 @@ impl FloodFeedback {
                 }
                 ensure!(
                     !(infiltrated > 1.0 + 1.0e-10),
-                    "grid flood feedback: tracer infiltration overdraft"
+                    "grid flood feedback: material infiltration overdraft"
                 );
                 let infiltrated = infiltrated.max(0.0).min(1.0);
                 // `ratio = FMA(1 - evaporated, infiltrated, evaporated)`。
                 ratio_patch[i] = (1.0 - evaporated).contract(infiltrated, evaporated);
-                if limited && tracer_credit > 0.0 {
-                    ratio_patch[i] = (land / tracer_credit).max(0.0).min(1.0);
+                if limited && material_credit > 0.0 {
+                    ratio_patch[i] = (land / material_credit).max(0.0).min(1.0);
                 }
                 gain_patch[i] = vapor_gain * (1.0 - infiltrated) / water_credit;
                 let patch_area: f64 = routing.patch_parts[i]
@@ -529,17 +533,17 @@ impl FloodFeedback {
                     .map(|&(_, area)| area)
                     .sum::<f64>()
                     * 1.0e-3;
-                let exchanged = (tracer_credit - vapor_loss) * infiltrated;
+                let exchanged = (material_credit - vapor_loss) * infiltrated;
                 if limited {
                     ensure!(
                         !(land < -ledger_tol || land > exchanged + ledger_tol),
                         "grid flood feedback: finite solute input exceeds donor exchange"
                     );
                 } else {
-                    let tol = (1.0e-10 * tracer_credit.abs().max(land.abs())).max(1.0e-12);
+                    let tol = (1.0e-10 * material_credit.abs().max(land.abs())).max(1.0e-12);
                     ensure!(
                         !((land - exchanged).abs() > tol),
-                        "grid flood feedback: land tracer input differs from donor exchange"
+                        "grid flood feedback: land material input differs from donor exchange"
                     );
                 }
                 ledger[0] = land.contract(patch_area, ledger[0]);
@@ -572,34 +576,34 @@ impl FloodFeedback {
                     .collect()
             };
             for j in 0..n {
-                let mass = tracers.mass[itrc][j];
-                let after = mass - coefficient[j] * tracer.visible_uc[itrc][j]
+                let mass = materials.mass[itrc][j];
+                let after = mass - coefficient[j] * material.visible_uc[itrc][j]
                     + gain[j] * self.visible_uc[j];
                 ensure!(
                     !(after < -1.0e-10 * mass.max(1.0)),
-                    "grid flood feedback: negative visible tracer"
+                    "grid flood feedback: negative visible material"
                 );
-                let mut debit = coefficient[j] * tracer.visible_uc[itrc][j]
+                let mut debit = coefficient[j] * material.visible_uc[itrc][j]
                     - gain[j] * self.visible_uc[j]
                     + after.min(0.0);
-                tracers.mass[itrc][j] = after.max(0.0);
-                let levsto = tracers.levsto[itrc][j];
-                let after = levsto - coefficient[j] * tracer.protected_uc[itrc][j]
+                materials.mass[itrc][j] = after.max(0.0);
+                let levsto = materials.levsto[itrc][j];
+                let after = levsto - coefficient[j] * material.protected_uc[itrc][j]
                     + gain[j] * self.protected_uc[j];
                 ensure!(
                     !(after < -1.0e-10 * levsto.max(1.0)),
-                    "grid flood feedback: negative protected tracer"
+                    "grid flood feedback: negative protected material"
                 );
-                debit = debit + coefficient[j] * tracer.protected_uc[itrc][j]
+                debit = debit + coefficient[j] * material.protected_uc[itrc][j]
                     - gain[j] * self.protected_uc[j]
                     + after.min(0.0);
-                tracers.levsto[itrc][j] = after.max(0.0);
+                materials.levsto[itrc][j] = after.max(0.0);
                 ledger[2] += debit;
             }
             let tol = (1.0e-10 * ledger.iter().fold(0.0f64, |m, v| m.max(v.abs()))).max(1.0e-8);
             ensure!(
                 !((ledger[0] + ledger[1] - ledger[2]).abs() > tol),
-                "grid flood feedback: land/river tracer exchange ledger mismatch (tracer {})",
+                "grid flood feedback: land/river material exchange ledger mismatch (material {})",
                 itrc + 1
             );
         }

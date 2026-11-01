@@ -195,7 +195,7 @@ fn colm2024_capacity_follows_the_canopy_type() {
 fn negative_net_interception_still_counts_as_gross_interception() {
     // 上游 CoLMMAIN.F90:914-915 的注释："Old-water unloading can make net interception
     // negative."：冠层积雪卸出（qdrp_snow）由老积雪量驱动，可以超过本步降雪输入，
-    // 于是 qintr_snow < 0；旧写法 max(0,qintr) 会把整个截留记成 0，漏掉 tracer 需要的
+    // 于是 qintr_snow < 0；旧写法 max(0,qintr) 会把整个截留记成 0，漏掉 material 需要的
     // 融雪滴落量。gross = qintr + qdrp = 降雪输入 − 直接穿透（仍 > 0）。
     let mut water = CanopyWater {
         total_mm: 5.0,

@@ -18,8 +18,8 @@
 
 use anyhow::{ensure, Result};
 
-use colm_core::tracer::{
-    soisno_slot, PatchTracerState, TracerColdStart, TracerPools, TracerSet, WaterInventory,
+use colm_core::material::{
+    soisno_slot, MaterialColdStart, MaterialPools, MaterialSet, PatchMaterialState, WaterInventory,
     MAX_SNOW_LAYERS, SOIL_LAYERS, SOISNO_LAYERS, TRC_WATER_MIN_FOR_RATIO,
 };
 
@@ -99,7 +99,7 @@ pub struct HostFollowOptions {
     /// （材料自己的降水过程会把总量拆回雨/雪）。
     pub vegetation_snow: bool,
     /// 没有源 patch 的新 patch 冷启动材料时用的全局开关（变饱和流与含水层混合水量）。
-    pub cold_start: TracerColdStart,
+    pub cold_start: MaterialColdStart,
 }
 
 /// 一次跟随主机水的结果。
@@ -109,15 +109,15 @@ pub struct HostFollowOutcome {
     pub cold_started: usize,
     /// 有任何仓室跟随主机水重标过的 patch 数（上游打印的 `nfollow`）。
     pub followed: usize,
-    /// 逐示踪物的质量变化（每单位面积乘 patch 面积；`areas` 为空时全 0）。
+    /// 逐材料的质量变化（每单位面积乘 patch 面积；`areas` 为空时全 0）。
     pub change: Vec<f64>,
 }
 
-/// 一个 patch 的材料总量（上游 `mt_patch_land_water_mass`，逐示踪物）。
-fn patch_land_water_mass(set: &TracerSet, state: &PatchTracerState) -> Vec<f64> {
+/// 一个 patch 的材料总量（上游 `mt_patch_land_water_mass`，逐材料）。
+fn patch_land_water_mass(set: &MaterialSet, state: &PatchMaterialState) -> Vec<f64> {
     let mut total = vec![0.0; set.len()];
-    for (itrc, tracer) in set.tracers.iter().enumerate() {
-        if !tracer.uses_land_water_transport() {
+    for (itrc, material) in set.materials.iter().enumerate() {
+        if !material.uses_land_water_transport() {
             continue;
         }
         let pools = &state.pools[itrc];
@@ -127,7 +127,7 @@ fn patch_land_water_mass(set: &TracerSet, state: &PatchTracerState) -> Vec<f64> 
 }
 
 /// 上游 `mt_patch_land_water_mass` 的加法次序。
-fn matrix_sum(pools: &TracerPools) -> f64 {
+fn matrix_sum(pools: &MaterialPools) -> f64 {
     let mut total = 0.0;
     total += pools.ldew_rain;
     total += pools.ldew_snow;
@@ -202,8 +202,8 @@ fn canopy_parts(
 /// 注意：这里会**改写** `states`，调用方应在它之前留好"重映射后"的材料快照用于质量账
 /// （本函数自己按 `areas` 计算出 `change`，直接交给上游 `before + change == after` 的判据）。
 pub fn follow_host_water(
-    set: &TracerSet,
-    states: &mut [PatchTracerState],
+    set: &MaterialSet,
+    states: &mut [PatchMaterialState],
     new: &[HostWater],
     src: &[HostWater],
     sourced: &[bool],
@@ -249,11 +249,11 @@ pub fn follow_host_water(
         // 雪层 j = -maxsnl..0 在 soilsnow 行的下标是 0..MAX_SNOW_LAYERS（见 soisno_slot）。
         let snow_new: [f64; MAX_SNOW_LAYERS] =
             std::array::from_fn(|layer| host_new.wliq_soisno[layer] + host_new.wice_soisno[layer]);
-        for (itrc, tracer) in set.tracers.iter().enumerate() {
-            if !tracer.uses_land_water_transport() {
+        for (itrc, material) in set.materials.iter().enumerate() {
+            if !material.uses_land_water_transport() {
                 continue;
             }
-            let r_init = tracer.init_water_ratio();
+            let r_init = material.init_water_ratio();
             let pools = &mut states[np].pools[itrc];
 
             // 湿地水：主机不把它抄回来，每个 patch 都回到冷启动值。
@@ -362,7 +362,7 @@ pub fn follow_host_water(
 
             // 有溶解度上限的材料：按最终池子的有效液相再平衡，湿地水与 ponded 水
             // 共享一个地表固相库，合并求一次容量再按水量比拆回。
-            if tracer.has_dissolved_limit() {
+            if material.has_dissolved_limit() {
                 let (canopy_liquid, _) = canopy_parts(
                     host_new.ldew,
                     host_new.ldew_rain,
@@ -370,13 +370,13 @@ pub fn follow_host_water(
                     host_new.tleaf,
                     options.vegetation_snow,
                 );
-                tracer.equilibrate_dissolved(
+                material.equilibrate_dissolved(
                     canopy_liquid.max(0.0),
                     &mut pools.ldew_rain,
                     &mut pools.canopy_solid,
                 );
                 for slot in 0..SOISNO_LAYERS {
-                    tracer.equilibrate_dissolved(
+                    material.equilibrate_dissolved(
                         host_new.wliq_soisno[slot].max(0.0),
                         &mut pools.wliq_soisno[slot],
                         &mut pools.solid_soisno[slot],
@@ -389,7 +389,7 @@ pub fn follow_host_water(
                 };
                 let surface_water = host_new.wdsrf.max(0.0) + wetland_water;
                 let mut surface_mass = pools.wdsrf + pools.wetwat;
-                tracer.equilibrate_dissolved(
+                material.equilibrate_dissolved(
                     surface_water,
                     &mut surface_mass,
                     &mut pools.surface_solid,

@@ -364,7 +364,7 @@ test('model setup captures only the dimensions that can invalidate earlier wizar
     crop: false,
     urban: false,
     bgc: false,
-    tracer: false,
+    material: false,
     revision: 'official#2',
   });
   const processes = modelSetup({
@@ -376,7 +376,7 @@ test('model setup captures only the dimensions that can invalidate earlier wizar
     },
   });
   assert.deepEqual(
-    [processes.crop, processes.urban, processes.bgc, processes.tracer],
+    [processes.crop, processes.urban, processes.bgc, processes.material],
     [true, true, true, true],
   );
 });

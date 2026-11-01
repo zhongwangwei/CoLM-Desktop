@@ -9,9 +9,9 @@ fn root() -> PathBuf {
 
 #[test]
 fn methane_provider_registration_is_not_guarded_by_the_removed_bgc_macro() {
-    // 上游 7d2fca93 把 provider 注册从 include/tracer_lifecycle_providers.inc
+    // 上游 7d2fca93 把 provider 注册从 include/material_lifecycle_providers.inc
     // 挪到了 main/MATERIAL/MT_RegisterProviders.F90，入口名也从
-    // ch4_register_tracer_provider 改成 ch4_register_mt_provider。
+    // ch4_register_material_provider 改成 ch4_register_mt_provider。
     let providers = std::fs::read_to_string(
         root().join("vendor/CoLM202X/main/MATERIAL/MT_RegisterProviders.F90"),
     )

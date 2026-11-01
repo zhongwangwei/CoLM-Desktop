@@ -157,7 +157,7 @@ fn wetwat_is_writable_for_static_and_dynamic_wetland_cases() {
 }
 
 #[test]
-fn tracer_configuration_lists_methane_history_variables() {
+fn material_configuration_lists_methane_history_variables() {
     if !have_kernel("default") {
         return;
     }
@@ -170,7 +170,7 @@ fn tracer_configuration_lists_methane_history_variables() {
     let methane = vars
         .iter()
         .find(|v| v.name == "methane_surf_flux_tot")
-        .expect("methane variable from TRACER writer");
+        .expect("methane variable from MATERIAL writer");
     assert!(
         !methane.settable,
         "CH4 history is controlled outside DEF_hist_vars"

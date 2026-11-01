@@ -19,7 +19,7 @@ export interface HistoryInfo {
   resolution?: number | null;
   /** history 文件按年/月/日切，还是 single；OpenBench 用它找文件。 */
   data_groupby?: string | null;
-  /** 目录里的文件族（主 history 之外还有 tracer/unitcat 等时不参与探测，只是报告出来）。 */
+  /** 目录里的文件族（主 history 之外还有 material/unitcat 等时不参与探测，只是报告出来）。 */
   families?: {
     family: string;
     prefix: string;
@@ -441,7 +441,7 @@ export function inspectWarningText(info: { warnings?: string[] }): [string, stri
 }
 
 /**
- * 主 history 之外的文件族（tracer/unitcat/…）：不参与比较，但要在界面里说明存在，
+ * 主 history 之外的文件族（material/unitcat/…）：不参与比较，但要在界面里说明存在，
  * 避免用户以为这些时刻也进了站点文件。
  */
 export function inspectFamilyNote(info: {

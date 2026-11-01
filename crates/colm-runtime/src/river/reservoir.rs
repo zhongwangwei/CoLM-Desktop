@@ -363,7 +363,7 @@ impl Reservoir {
                 0.5 * qn + (vol - normal) / (flood - normal) * (qf - qn)
             } else {
                 // 上游是 `(...)**2`（整数指数）：GIMPLE 里就是自乘，不能换成 libm pow
-                // （见 `colm-core/src/tracer/frac.rs` 关于 `**2` 的约定）。
+                // （见 `colm-core/src/material/frac.rs` 关于 `**2` 的约定）。
                 let ratio = (vol - normal) / (emergency - normal);
                 0.5 * qn + ratio * ratio * (qf - qn)
             }

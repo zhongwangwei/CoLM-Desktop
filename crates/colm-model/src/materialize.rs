@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// 算例里四个 family 参数文件字段的冻结资产引用。
 ///
-/// 上游 7d2fca93 把 `DEF_TRACER_PARAM_FILES` 拆成同位素/溶质/泥沙/甲烷四条字段
+/// 上游 7d2fca93 把 `@@DEF_MATERIAL_@@PARAM_FILES` 拆成同位素/溶质/泥沙/甲烷四条字段
 /// （`colm_namelist::material::PARAM_FILE_FIELDS`）。这里逐字段把算例选的文件解析成
 /// 已冻结资产，保持"选择归算例、字节归版本"的边界；返回要写回文档的 `(字段, 值)`。
 pub fn case_process_reference_fields(
@@ -60,7 +60,7 @@ pub fn case_process_reference_fields(
         };
         let paths_of = |value: &str| -> Result<Vec<String>> {
             if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-                colm_namelist::tracer_files::param_file_paths(value)
+                colm_namelist::material_files::param_file_paths(value)
             } else {
                 let trimmed = value.trim();
                 Ok(
@@ -114,7 +114,7 @@ pub fn case_process_reference_fields(
             Ok(path.to_owned())
         };
         let rewritten = if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-            colm_namelist::tracer_files::rewrite_param_files(raw, map)?
+            colm_namelist::material_files::rewrite_param_files(raw, map)?
         } else {
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
@@ -292,7 +292,7 @@ impl Registry {
                     continue;
                 };
                 if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-                    colm_namelist::tracer_files::rewrite_param_files(raw, &mut stage_file)?;
+                    colm_namelist::material_files::rewrite_param_files(raw, &mut stage_file)?;
                 } else {
                     let trimmed = raw.trim();
                     if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null") {
@@ -613,7 +613,7 @@ impl Registry {
                             .context("missing process file")?;
                         validation::relative(file)?;
                         // 版本没带这份文件、只记了改动：改到算例自己的那份上（复制进运行目录的算例 .nml）。
-                        // 算例没用这个示踪物时没有这份文件，改动不起作用。
+                        // 算例没用这个材料时没有这份文件，改动不起作用。
                         if !destination.join(file).exists() {
                             ensure!(
                                 !frozen

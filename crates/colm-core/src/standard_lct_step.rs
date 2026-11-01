@@ -172,8 +172,8 @@ pub struct StandardLctSnowSoilState {
     pub irrigation: Option<Box<crate::IrrigationState>>,
     /// `DEF_USE_SNICAR`：雪粒径、雪中气溶胶与分层吸收；关闭时 `None`。
     pub snicar: Option<Box<crate::SnicarColumnState>>,
-    /// 任一 family 打开且注册了陆面输运材料：本 patch 的示踪物状态；否则 `None`。
-    pub tracer: Option<Box<crate::tracer::step::PatchTracerTrack>>,
+    /// 任一 family 打开且注册了陆面输运材料：本 patch 的材料状态；否则 `None`。
+    pub material: Option<Box<crate::material::step::PatchMaterialTrack>>,
 }
 
 impl StandardLctSnowSoilState {
@@ -293,8 +293,8 @@ pub struct StandardLctSnowSoilInput<'a> {
     pub soil_water: Water2014SoilInput<'a>,
     /// `DEF_USE_SNICAR` 打开时的表与本步气溶胶沉降；与状态里的 `snicar` 同有同无。
     pub snicar: Option<crate::SnicarStepInput<'a>>,
-    /// 示踪物记账的配置与本步强迫比值；与状态里的 `tracer` 同有同无。
-    pub tracer: Option<crate::tracer::step::TracerStepContext<'a>>,
+    /// 材料记账的配置与本步强迫比值；与状态里的 `material` 同有同无。
+    pub material: Option<crate::material::step::MaterialStepContext<'a>>,
 }
 
 /// Results from one linked active-snow energy and water step.
@@ -943,7 +943,7 @@ pub fn standard_lct_soil_step(
 /// compaction, combining, and division.
 ///
 /// This is the regular-soil LCT branch with an existing snow column and without
-/// `DEF_SPLIT_SOILSNOW`. Split soil/snow, SNICAR aerosols, and tracers remain
+/// `DEF_SPLIT_SOILSNOW`. Split soil/snow, SNICAR aerosols, and materials remain
 /// separate source branches.
 /// 一步「能长雪」的 standard-LCT 更新 —— **这是通用入口**，`snow.layer_count` 可以为 0。
 ///
@@ -998,24 +998,24 @@ pub fn standard_lct_snow_soil_step(
     }
     remember_snow_ice_fraction(&mut state.snow);
     ensure!(
-        input.tracer.is_some() == state.tracer.is_some(),
-        "the tracer configuration and the tracer state must be present together"
+        input.material.is_some() == state.material.is_some(),
+        "the material configuration and the material state must be present together"
     );
-    let mut tracer_scratch = crate::tracer::step::TracerStepScratch {
+    let mut material_scratch = crate::material::step::MaterialStepScratch {
         // `CoLMMAIN.F90:787-789`：截留之前的冠层水。
         ldew_rain_old: state.energy.leaf.canopy_water.rain_mm,
         ldew_snow_old: state.energy.leaf.canopy_water.snow_mm,
         ..Default::default()
     };
     let prepared = prepare_energy(input.energy, &mut state.energy)?;
-    if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
+    if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
         let interception = &prepared.interception;
         let precipitation = &prepared.precipitation;
-        crate::tracer::step::after_interception(
+        crate::material::step::after_interception(
             ctx,
             track,
             state.snow.layer_count,
-            &crate::tracer::PrecipInput {
+            &crate::material::PrecipInput {
                 deltim: input.energy.interception.time_step_seconds,
                 forc_rain: precipitation.convective_rain_kg_m2_s
                     + precipitation.large_scale_rain_kg_m2_s,
@@ -1025,8 +1025,8 @@ pub fn standard_lct_snow_soil_step(
                 pg_snow: interception.ground_snow_kg_m2_s,
                 ldew_rain: state.energy.leaf.canopy_water.rain_mm,
                 ldew_snow: state.energy.leaf.canopy_water.snow_mm,
-                ldew_rain_old: tracer_scratch.ldew_rain_old,
-                ldew_snow_old: tracer_scratch.ldew_snow_old,
+                ldew_rain_old: material_scratch.ldew_rain_old,
+                ldew_snow_old: material_scratch.ldew_snow_old,
                 sprinkler: input.energy.interception.sprinkler_irrigation_kg_m2_s,
                 // `xsc_out = xsc/deltim`；CoLM2014/2024 都不在截留里做冠层相变（`:514-515`）。
                 // `CoLMMAIN.F90:914-915` 在 patch 级取 `max(qintr+max(qdrp,0), 0)`；PFT 聚合
@@ -1047,8 +1047,9 @@ pub fn standard_lct_snow_soil_step(
     // 按这个雪盖拆分 —— AT-Neu 1 月第 159 步（第一个有雪层又有日照的步）用新雪盖拆出
     // `sabg_soil` 0.2807 对 Fortran 0.2828。
     let net_solar_snow_fraction = state.snow.ground_snow_fraction;
-    tracer_scratch.snl_before_new_snow = state.snow.layer_count;
-    tracer_scratch.wice_snow_before = std::array::from_fn(|slot| state.snow.ice_water_kg_m2[slot]);
+    material_scratch.snl_before_new_snow = state.snow.layer_count;
+    material_scratch.wice_snow_before =
+        std::array::from_fn(|slot| state.snow.ice_water_kg_m2[slot]);
     let new_snow = add_new_snow(
         NewSnowInput {
             patch_type: input.energy.ground_temperature.patch_type,
@@ -1069,22 +1070,22 @@ pub fn standard_lct_snow_soil_step(
     )?;
     // 湿地暖地面上的新雪直接并进 `wetwat`（`MOD_NewSnow.F90:79-81`，仅 VSF）。
     state.soil_water.wetland_water_mm += new_snow.wetland_water_added_mm;
-    if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
+    if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
         let snl = state.snow.layer_count;
-        let snl_old = tracer_scratch.snl_before_new_snow;
+        let snl_old = material_scratch.snl_before_new_snow;
         let top = (snl < 0).then(|| {
             let slot = crate::snow::snow_layer_slot(snl + 1);
-            crate::tracer::snow::NewSnowTop {
+            crate::material::snow::NewSnowTop {
                 wliq: state.snow.liquid_water_kg_m2[slot],
                 wice: state.snow.ice_water_kg_m2[slot],
-                wice_before: tracer_scratch.wice_snow_before[slot],
+                wice_before: material_scratch.wice_snow_before[slot],
             }
         });
-        crate::tracer::step::after_new_snow(
+        crate::material::step::after_new_snow(
             ctx,
             track,
-            &mut tracer_scratch,
-            &crate::tracer::snow::NewSnowInput {
+            &mut material_scratch,
+            &crate::material::snow::NewSnowInput {
                 patchtype: input.energy.ground_temperature.patch_type,
                 snl,
                 snl_old,
@@ -1178,24 +1179,24 @@ pub fn standard_lct_snow_soil_step(
     }
     split_canopy_water_before_thermal(input.energy, &mut state.energy);
     // `flood_evap_temp_trc = t_soisno(lb)`（split 与漫滩回馈同开已在上面拒绝）。
-    tracer_scratch.flood_evap_temp_k = if state.snow.layer_count < 0 {
+    material_scratch.flood_evap_temp_k = if state.snow.layer_count < 0 {
         state.snow.temperature_k[crate::snow::snow_layer_slot(state.snow.layer_count + 1)]
     } else {
         state.soil_temperature_k[0]
     };
-    if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
-        crate::tracer::step::before_thermal(
+    if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
+        crate::material::step::before_thermal(
             ctx,
             track,
-            &mut tracer_scratch,
+            &mut material_scratch,
             state.energy.leaf.leaf_temperature_k,
             state.energy.leaf.canopy_water.rain_mm,
             state.energy.leaf.canopy_water.snow_mm,
-            crate::tracer::step::pack_soisno(
+            crate::material::step::pack_soisno(
                 &state.snow.liquid_water_kg_m2,
                 &state.soil_water.liquid_water_kg_m2,
             ),
-            crate::tracer::step::pack_soisno(
+            crate::material::step::pack_soisno(
                 &state.snow.ice_water_kg_m2,
                 &state.soil_water.ice_water_kg_m2,
             ),
@@ -1224,27 +1225,29 @@ pub fn standard_lct_snow_soil_step(
         );
     }
     sync_snow_soil_state(&energy.ground, snow_layers, state);
-    if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
-        let wliq = crate::tracer::step::pack_soisno(
+    if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
+        let wliq = crate::material::step::pack_soisno(
             &state.snow.liquid_water_kg_m2,
             &state.soil_water.liquid_water_kg_m2,
         );
-        let wice = crate::tracer::step::pack_soisno(
+        let wice = crate::material::step::pack_soisno(
             &state.snow.ice_water_kg_m2,
             &state.soil_water.ice_water_kg_m2,
         );
         // `MOD_PhaseChange.F90:308-311`：逐层 `max(wice0-wice, 0)`、`max(wice-wice0, 0)`。
-        let thaw: [f64; crate::tracer::SOISNO_LAYERS] =
-            std::array::from_fn(|slot| (tracer_scratch.wice_old[slot] - wice[slot]).max(0.0));
-        let freeze: [f64; crate::tracer::SOISNO_LAYERS] =
-            std::array::from_fn(|slot| (wice[slot] - tracer_scratch.wice_old[slot]).max(0.0));
-        let t_soisno =
-            crate::tracer::step::pack_soisno(&state.snow.temperature_k, &state.soil_temperature_k);
-        crate::tracer::step::after_thermal(
+        let thaw: [f64; crate::material::SOISNO_LAYERS] =
+            std::array::from_fn(|slot| (material_scratch.wice_old[slot] - wice[slot]).max(0.0));
+        let freeze: [f64; crate::material::SOISNO_LAYERS] =
+            std::array::from_fn(|slot| (wice[slot] - material_scratch.wice_old[slot]).max(0.0));
+        let t_soisno = crate::material::step::pack_soisno(
+            &state.snow.temperature_k,
+            &state.soil_temperature_k,
+        );
+        crate::material::step::after_thermal(
             ctx,
             track,
-            &mut tracer_scratch,
-            &crate::tracer::step::AfterThermalHost {
+            &mut material_scratch,
+            &crate::material::step::AfterThermalHost {
                 deltim: input.energy.interception.time_step_seconds,
                 snl: state.snow.layer_count,
                 ldew_rain: state.energy.leaf.canopy_water.rain_mm,
@@ -1262,21 +1265,21 @@ pub fn standard_lct_snow_soil_step(
                 scv: state.snow.water_equivalent_kg_m2,
             },
         )?;
-        // `CoLMMAIN.F90:1101-1107`：THERMAL 之后先清零本 patch 的漫滩蒸发示踪物，土壤 patch 有
-        // 漫滩蒸发时按 Craig-Gordon 算洪水水池的示踪物损失（不进陆面 `a_mt_evap`）。
+        // `CoLMMAIN.F90:1101-1107`：THERMAL 之后先清零本 patch 的漫滩蒸发材料，土壤 patch 有
+        // 漫滩蒸发时按 Craig-Gordon 算洪水水池的材料损失（不进陆面 `a_mt_evap`）。
         track.flood_exchange = match ctx.flood {
             Some(flood) => {
                 let fevpg = energy.flood.map_or(0.0, |flood| flood.evaporation_mm_s);
                 let evap = if input.energy.ground_temperature.patch_type == 0 && fevpg > 0.0 {
-                    crate::tracer::evapo::tracer_flood_evap_loss(
+                    crate::material::evapo::material_flood_evap_loss(
                         ctx.set,
                         ctx.physics,
                         ctx.vapor_ratio,
-                        flood.tracer_credit,
-                        &crate::tracer::evapo::FloodEvapInput {
+                        flood.material_credit,
+                        &crate::material::evapo::FloodEvapInput {
                             water_credit: flood.water_credit_mm,
                             water_evap: fevpg * input.energy.interception.time_step_seconds,
-                            temp_k: tracer_scratch.flood_evap_temp_k,
+                            temp_k: material_scratch.flood_evap_temp_k,
                             forc_q: input.energy.forcing.specific_humidity,
                             forc_psrf: input.energy.forcing.surface_pressure_pa,
                             forc_us: input.energy.forcing.eastward_wind_m_s,
@@ -1286,7 +1289,7 @@ pub fn standard_lct_snow_soil_step(
                 } else {
                     vec![0.0; ctx.set.len()]
                 };
-                Some(crate::tracer::step::FloodTracerExchange {
+                Some(crate::material::step::FloodMaterialExchange {
                     evap,
                     land: vec![0.0; ctx.set.len()],
                 })
@@ -1372,11 +1375,11 @@ pub fn standard_lct_snow_soil_step(
         &mut state.snow,
         &mut state.soil_water,
     )?;
-    if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
-        tracer_after_water(TracerAfterWater {
+    if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
+        material_after_water(MaterialAfterWater {
             ctx,
             track,
-            scratch: &tracer_scratch,
+            scratch: &material_scratch,
             input: &input,
             snow: &state.snow,
             soil_water: &state.soil_water,
@@ -1419,10 +1422,10 @@ pub fn standard_lct_snow_soil_step(
         liquid_water_kg_m2: state.soil_water.liquid_water_kg_m2[0],
         ice_water_kg_m2: state.soil_water.ice_water_kg_m2[0],
     };
-    // 示踪物的雪层合并/分裂在宿主调用之后按调用之前的水侧状态重放同样的判定
+    // 材料的雪层合并/分裂在宿主调用之后按调用之前的水侧状态重放同样的判定
     // （`CoLMMAIN.F90:1346-1425`，只在 `snl < 0` 时调用）。
     let combine_snapshot =
-        (state.snow.layer_count < 0).then(|| crate::tracer::snow::SnowCombineInput {
+        (state.snow.layer_count < 0).then(|| crate::material::snow::SnowCombineInput {
             snl: state.snow.layer_count,
             wice: std::array::from_fn(|slot| state.snow.ice_water_kg_m2[slot]),
             dz: std::array::from_fn(|slot| state.snow.thickness_m[slot]),
@@ -1439,34 +1442,37 @@ pub fn standard_lct_snow_soil_step(
     state.soil_water.liquid_water_kg_m2[0] = soil_surface.liquid_water_kg_m2;
     state.soil_water.ice_water_kg_m2[0] = soil_surface.ice_water_kg_m2;
     if let (Some(ctx), Some(track), Some(snapshot)) = (
-        input.tracer.as_ref(),
-        state.tracer.as_deref_mut(),
+        input.material.as_ref(),
+        state.material.as_deref_mut(),
         combine_snapshot.as_ref(),
     ) {
-        let outcome =
-            crate::tracer::snow::tracer_snow_layers_combine(ctx.set, &mut track.state, snapshot);
+        let outcome = crate::material::snow::material_snow_layers_combine(
+            ctx.set,
+            &mut track.state,
+            snapshot,
+        );
         ensure!(
             outcome.snl == state.snow.layer_count,
-            "tracer snow combine replayed snl={} but the water side has {}",
+            "material snow combine replayed snl={} but the water side has {}",
             outcome.snl,
             state.snow.layer_count
         );
     }
     if state.snow.layer_count < 0 {
-        let divide_snapshot = crate::tracer::snow::SnowDivideInput {
+        let divide_snapshot = crate::material::snow::SnowDivideInput {
             snl: state.snow.layer_count,
             dz: std::array::from_fn(|slot| state.snow.thickness_m[slot]),
         };
         crate::divide_snow_layers_with_aerosols(&mut state.snow, aerosols)?;
-        if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
-            let snl = crate::tracer::snow::tracer_snow_layers_divide(
+        if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
+            let snl = crate::material::snow::material_snow_layers_divide(
                 ctx.set,
                 &mut track.state,
                 &divide_snapshot,
             );
             ensure!(
                 snl == state.snow.layer_count,
-                "tracer snow divide replayed snl={snl} but the water side has {}",
+                "material snow divide replayed snl={snl} but the water side has {}",
                 state.snow.layer_count
             );
         }
@@ -1480,7 +1486,7 @@ pub fn standard_lct_snow_soil_step(
             temperature_k: state.soil_temperature_k[0],
             ice_water_kg_m2: state.soil_water.ice_water_kg_m2[0],
         };
-        let relocation_snapshot = crate::tracer::snow::FrostRelocationInput {
+        let relocation_snapshot = crate::material::snow::FrostRelocationInput {
             snl: state.snow.layer_count,
             porsl1: top.porosity,
             dz1: top.thickness_m,
@@ -1493,8 +1499,8 @@ pub fn standard_lct_snow_soil_step(
             state.snicar.as_deref_mut(),
         );
         state.soil_water.ice_water_kg_m2[0] = top.ice_water_kg_m2;
-        if let (Some(ctx), Some(track)) = (input.tracer.as_ref(), state.tracer.as_deref_mut()) {
-            crate::tracer::snow::tracer_relocate_soil_frost_ice(
+        if let (Some(ctx), Some(track)) = (input.material.as_ref(), state.material.as_deref_mut()) {
+            crate::material::snow::material_relocate_soil_frost_ice(
                 ctx.set,
                 &mut track.state,
                 &relocation_snapshot,
@@ -2075,11 +2081,11 @@ fn same(left: f64, right: f64) -> bool {
 #[path = "standard_lct_step_tests.rs"]
 mod standard_lct_step_tests;
 
-/// [`tracer_after_water`] 的宿主量。
-struct TracerAfterWater<'a, 'b> {
-    ctx: &'a crate::tracer::step::TracerStepContext<'b>,
-    track: &'a mut crate::tracer::step::PatchTracerTrack,
-    scratch: &'a crate::tracer::step::TracerStepScratch,
+/// [`material_after_water`] 的宿主量。
+struct MaterialAfterWater<'a, 'b> {
+    ctx: &'a crate::material::step::MaterialStepContext<'b>,
+    track: &'a mut crate::material::step::PatchMaterialTrack,
+    scratch: &'a crate::material::step::MaterialStepScratch,
     input: &'a StandardLctSnowSoilInput<'b>,
     snow: &'a RuntimeSnowColumn,
     soil_water: &'a Water2014SoilState,
@@ -2089,24 +2095,24 @@ struct TracerAfterWater<'a, 'b> {
     split_fluxes: Option<crate::SplitThermalWaterFluxes>,
     snow_melt_kg_m2_s: f64,
     leaf_temperature_k: f64,
-    /// `etr`（只进 `tracer_wetland`）。
+    /// `etr`（只进 `material_wetland`）。
     transpiration_kg_m2_s: f64,
     /// `rst`、`raw_trc`（THERMAL 的参考高度到冠层/地面的水汽阻抗）、`rss`：分馏用。
     stomatal_resistance_s_m: f64,
     moisture_resistance_s_m: f64,
     soil_surface_resistance_s_m: f64,
-    /// `fevpg_fld`（漫滩蒸发，mm/s）：入渗示踪物要扣掉蒸发后剩下的水池。
+    /// `fevpg_fld`（漫滩蒸发，mm/s）：入渗材料要扣掉蒸发后剩下的水池。
     flood_evaporation_mm_s: f64,
     pg_rain: f64,
     pg_snow: f64,
 }
 
-/// WATER 之后（`CoLMMAIN.F90:1238-1330`）：非动态湿地走 `tracer_wetland`，其余
-/// `tracer_soil_water`。上游的示踪物要求
+/// WATER 之后（`CoLMMAIN.F90:1238-1330`）：非动态湿地走 `material_wetland`，其余
+/// `material_soil_water`。上游的材料要求
 /// `DEF_USE_VariablySaturatedFlow`，所以诊断量都来自 `WATER_VSF`。
-fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
-    use crate::tracer::{MAX_SNOW_LAYERS, SOIL_LAYERS};
-    let TracerAfterWater {
+fn material_after_water(host: MaterialAfterWater<'_, '_>) -> Result<()> {
+    use crate::material::{MAX_SNOW_LAYERS, SOIL_LAYERS};
+    let MaterialAfterWater {
         ctx,
         track,
         scratch,
@@ -2129,10 +2135,13 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
     } = host;
     let dt = input.energy.interception.time_step_seconds;
     let snl = snow.layer_count;
-    let wliq =
-        crate::tracer::step::pack_soisno(&snow.liquid_water_kg_m2, &soil_water.liquid_water_kg_m2);
-    let wice = crate::tracer::step::pack_soisno(&snow.ice_water_kg_m2, &soil_water.ice_water_kg_m2);
-    let t_soisno = crate::tracer::step::pack_soisno(&snow.temperature_k, soil_temperature_k);
+    let wliq = crate::material::step::pack_soisno(
+        &snow.liquid_water_kg_m2,
+        &soil_water.liquid_water_kg_m2,
+    );
+    let wice =
+        crate::material::step::pack_soisno(&snow.ice_water_kg_m2, &soil_water.ice_water_kg_m2);
+    let t_soisno = crate::material::step::pack_soisno(&snow.temperature_k, soil_temperature_k);
     let to_array = |values: &[f64]| -> Result<[f64; SOIL_LAYERS]> {
         values.try_into().map_err(|_| {
             anyhow::anyhow!("expected {SOIL_LAYERS} soil layers, got {}", values.len())
@@ -2154,13 +2163,13 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         .irrigation
         .map_or(0.0, |irr| (irr.drip_mm_s + irr.flood_mm_s) + irr.paddy_mm_s);
     if input.soil_water.patch_type == 2 && !input.soil_water.dynamic_wetland {
-        let dz_soisno = crate::tracer::step::pack_soisno(&snow.thickness_m, &dz_soi);
-        return crate::tracer::soil_water::tracer_wetland(
+        let dz_soisno = crate::material::step::pack_soisno(&snow.thickness_m, &dz_soi);
+        return crate::material::soil_water::material_wetland(
             ctx.set,
             &mut track.state,
             ctx.physics,
             &ctx.soil_options,
-            &crate::tracer::soil_water::WetlandInput {
+            &crate::material::soil_water::WetlandInput {
                 ipatch: 0,
                 deltim: dt,
                 snl,
@@ -2214,8 +2223,8 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         );
     }
     let diag = anyhow::Context::context(
-        water.soil.tracer.as_ref(),
-        "tracer bookkeeping needs the WATER_VSF diagnostics (DEF_USE_VariablySaturatedFlow)",
+        water.soil.material.as_ref(),
+        "material bookkeeping needs the WATER_VSF diagnostics (DEF_USE_VariablySaturatedFlow)",
     )?;
     let qlayer: [f64; SOIL_LAYERS + 1] = water
         .soil
@@ -2231,7 +2240,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected {SOIL_LAYERS} permeability flags"))?;
-    // `CoLMMAIN.F90:1252-1268`：入渗的漫滩水按"发布的示踪物减去蒸发损失、再按入渗占蒸发后
+    // `CoLMMAIN.F90:1252-1268`：入渗的漫滩水按"发布的材料减去蒸发损失、再按入渗占蒸发后
     // 剩余水量的份额"带进土壤；有溶解度上限的溶质另截在 `max_dissolved_conc*qinfl_fld*deltim`。
     // GIMPLE 全是逐条舍入（`(tc - te) * (qinfl*dt / (credit*1e3 - fevpg*dt))`）。
     let qinfl_fld = water.soil.flood_infiltration_mm_s;
@@ -2246,18 +2255,18 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
                     let uncovered = water_credit.max(1.0) * 1.0e-12 < qinfl_fld * dt;
                     ensure!(
                         !uncovered,
-                        "grid flood feedback: infiltration without published tracer credit"
+                        "grid flood feedback: infiltration without published material credit"
                     );
                 } else {
                     let share = (qinfl_fld * dt) / (water_credit - evaporated);
                     for (itrc, value) in values.iter_mut().enumerate() {
-                        *value = (flood.tracer_credit[itrc] - exchange.evap[itrc]) * share;
+                        *value = (flood.material_credit[itrc] - exchange.evap[itrc]) * share;
                     }
-                    for (itrc, tracer) in ctx.set.tracers.iter().enumerate() {
-                        if tracer.has_dissolved_limit() {
+                    for (itrc, material) in ctx.set.materials.iter().enumerate() {
+                        if material.has_dissolved_limit() {
                             values[itrc] = values[itrc]
                                 .max(0.0)
-                                .min(qinfl_fld * tracer.max_dissolved_conc * dt);
+                                .min(qinfl_fld * material.max_dissolved_conc * dt);
                         }
                     }
                 }
@@ -2266,19 +2275,19 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
         }
         _ => None,
     };
-    let qcharge = crate::tracer::soil_water::qcharge_trc(
+    let qcharge = crate::material::soil_water::qcharge_trc(
         soil_water.aquifer_water_mm,
         scratch.wa_old,
         diag.transpiration_aquifer_mm,
         diag.subsurface_source_aquifer_mm,
         dt,
     );
-    let outcome = crate::tracer::soil_water::tracer_soil_water(
+    let outcome = crate::material::soil_water::material_soil_water(
         ctx.set,
         &mut track.state,
         ctx.physics,
         &ctx.soil_options,
-        &crate::tracer::soil_water::SoilWaterInput {
+        &crate::material::soil_water::SoilWaterInput {
             ipatch: 0,
             deltim: dt,
             snl,
@@ -2335,7 +2344,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             dz_soi: Some(&dz_soi),
             porsl: Some(&porsl),
             dz_sno: Some(&dz_sno),
-            flood_tracer_input: flood_input.as_deref(),
+            flood_material_input: flood_input.as_deref(),
             flood_infil_water: flood_input.as_ref().map(|_| qinfl_fld * dt),
             etroot_surface: Some(diag.transpiration_surface_mm),
             dew_overflow: Some(diag.dew_overflow_mm),
@@ -2350,7 +2359,7 @@ fn tracer_after_water(host: TracerAfterWater<'_, '_>) -> Result<()> {
             has_vapor: Some(ctx.has_vapor),
         },
     );
-    // `flood_tracer_land_patch(:,ipatch) = flood_input_tracer`（`:1340-1341`）。
+    // `flood_material_land_patch(:,ipatch) = flood_input_material`（`:1340-1341`）。
     if let (Some(exchange), Some(values)) = (track.flood_exchange.as_mut(), flood_input) {
         exchange.land = values;
     }

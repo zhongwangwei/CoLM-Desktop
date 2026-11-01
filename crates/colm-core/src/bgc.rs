@@ -147,7 +147,7 @@ pub struct BgcPftColdStartInput<'a> {
 pub struct BgcColdStartInput<'a> {
     pub soil_thickness_m: &'a [f64],
     pub soil_bulk_density_kg_m3: &'a [f64],
-    /// Natural soil or a TRACER wetland: eligible for CN source copy and soil summary.
+    /// Natural soil or a MATERIAL wetland: eligible for CN source copy and soil summary.
     /// Other patches retain allocation/default state even when global CN input exists.
     pub soil_bgc_active: bool,
     pub pft: BgcPftColdStartInput<'a>,
@@ -156,7 +156,7 @@ pub struct BgcColdStartInput<'a> {
     /// initialization supplies one source value per PFT; a single-point run
     /// continues to use `runtime_cn_state.vegetation_carbon`.
     pub runtime_vegetation_carbon: Option<&'a [BgcVegetationCarbon]>,
-    /// Optional TRACER wetland OM density by soil layer; `Some` enables the
+    /// Optional MATERIAL wetland OM density by soil layer; `Some` enables the
     /// original wetland CN fallback only when a runtime CN state is present.
     pub wetland_organic_matter_density_kg_m3: Option<&'a [f64]>,
     pub use_nitrification: bool,

@@ -58,7 +58,7 @@ pub fn hist_vars(
     let macros: std::collections::BTreeSet<&str> =
         k.manifest.macros.iter().map(String::as_str).collect();
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
-    // 旧算例的 CH4 开关还在 `DEF_USE_TRACER`/`DEF_TRACER_NAMES` 里；不迁移的话
+    // 旧算例的 CH4 开关还在 `@@DEF_USE_MATERIAL@@`/`@@DEF_MATERIAL_@@NAMES` 里；不迁移的话
     // 打开旧算例时 methane history 会被判成未启用。
     crate::config::migrate_legacy_material(&mut doc);
 
@@ -143,14 +143,14 @@ pub fn hist_vars(
         });
     }
     if truth("DEF_USE_METHANE") {
-        // 没有开关的这些变量都是 CH4 history（`MOD_Tracer_Reactive_Methane_Hist`）：写不写、写哪些由
+        // 没有开关的这些变量都是 CH4 history（`MOD_Material_Reactive_Methane_Hist`）：写不写、写哪些由
         // CH4 参数文件的 `write_ch4_history`/`ch4_history_vars` 决定，规则与引擎共用 `colm_hist::methane`。
         let methane = dir.as_ref().and_then(|dir| {
             crate::config::methane_history_settings(&doc, std::path::Path::new(dir))
         });
         let methane_state = |name: &str| -> (bool, Option<bool>, Option<String>) {
             let Some((write, vars)) = &methane else {
-                return (false, Some(false), Some("需要 CH4 甲烷示踪物".into()));
+                return (false, Some(false), Some("需要 CH4 甲烷材料".into()));
             };
             match colm_hist::methane::methane_history_mode(*write, vars) {
                 0 => (

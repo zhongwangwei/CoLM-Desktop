@@ -283,7 +283,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
     })
 }
 
-/// 四个 family 的参数文件字段（上游 7d2fca93 把 `DEF_TRACER_PARAM_FILES` 拆开）。
+/// 四个 family 的参数文件字段（上游 7d2fca93 把 `@@DEF_MATERIAL_@@PARAM_FILES` 拆开）。
 fn is_material_param_field(field: &str) -> bool {
     colm_namelist::material::PARAM_FILE_FIELDS
         .iter()
@@ -592,20 +592,20 @@ impl ForcingExclusions {
                 index += 1;
                 let path = resolve(case, &name);
                 if path.is_file() {
-                    let tracer = colm_namelist::parse(&std::fs::read_to_string(path)?)?;
-                    for key in tracer
+                    let material = colm_namelist::parse(&std::fs::read_to_string(path)?)?;
+                    for key in material
                         .paths()
                         .into_iter()
                         .filter(|key| key.to_ascii_lowercase().contains("fprefix"))
                     {
-                        if let Some(value) = tracer.get(&key) {
+                        if let Some(value) = material.get(&key) {
                             out.settings.insert(
-                                format!("tracer:{index}:{}", key.to_ascii_lowercase()),
+                                format!("material:{index}:{}", key.to_ascii_lowercase()),
                                 value.to_string(),
                             );
                         }
                     }
-                    out.add_document(&tracer, &base);
+                    out.add_document(&material, &base);
                 }
             }
         }
@@ -967,7 +967,7 @@ fn is_comparison_physics(key: &str) -> bool {
             | "DEF_HIGHRESURBAN_ALBEDO"
     ) || matches!(
         colm_case::parameters::field_section(field.name, field.group),
-        Some("水热过程" | "生态与生地化" | "示踪剂" | "城市" | "河道与水库" | "数据同化")
+        Some("水热过程" | "生态与生地化" | "材料" | "城市" | "河道与水库" | "数据同化")
     )
 }
 
@@ -1101,7 +1101,7 @@ pub(crate) fn full_inputs_with_progress(
         if is_material_param_field(&lower) {
             if let Some(raw) = string_value(value) {
                 let paths = if lower == "def_solute_param_files" {
-                    colm_namelist::tracer_files::param_file_paths(raw)?
+                    colm_namelist::material_files::param_file_paths(raw)?
                 } else {
                     let trimmed = raw.trim();
                     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
@@ -1113,7 +1113,7 @@ pub(crate) fn full_inputs_with_progress(
                 for (index, path) in paths.into_iter().enumerate() {
                     add(
                         &mut out,
-                        format!("model:tracer:{index}"),
+                        format!("model:material:{index}"),
                         &resolve(case, path.trim_matches(['\'', '"'])),
                         "model",
                         progress,

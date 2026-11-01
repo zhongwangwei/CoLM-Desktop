@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use colm_core::tracer::TRC_TINY;
+use colm_core::material::TRC_TINY;
 use colm_hist::history::{set_history_compression, set_window_chunking, HistoryGrid};
 use colm_hist::schedule::ScheduledRecord;
 
@@ -70,7 +70,7 @@ pub struct RiverHistoryWriter {
     lat_all: Vec<f64>,
     /// 开水库时的 `dam_GRAND_ID`（按水库序号），建 unitcat 文件骨架时写成 `resv_GRAND_ID`。
     pub reservoir_ids: Option<Vec<i32>>,
-    /// `DEF_HIST_CompressLevel`：unitcat 文件里逐时间量（河道量、分汊矩阵、示踪物/泥沙量、水库量）
+    /// `DEF_HIST_CompressLevel`：unitcat 文件里逐时间量（河道量、分汊矩阵、材料/泥沙量、水库量）
     /// 的 deflate 级别（`route_hist_write_*` → `ncio_write_serial_time(..., DEF_HIST_CompressLevel)`）。
     pub hist_compress_level: u8,
     /// `DEF_REST_CompressLevel`：无时间维的 `mask_complete_upstream` 走
@@ -349,22 +349,26 @@ impl RiverHistoryWriter {
         network: &RiverNetwork,
         routing: &RunoffRouting,
         history: &mut RiverHistory,
-        tracers: Option<&mut super::tracer::RiverTracers>,
+        materials: Option<&mut super::material::RiverMaterials>,
         sediment: Option<&mut super::sediment::Sediment>,
         record: &ScheduledRecord,
         end: colm_core::CalendarTime,
         session: &mut crate::history::HistorySession,
     ) -> Result<()> {
         let n = network.len();
-        let mut tracer_fields = tracers
+        let mut material_fields = materials
             .as_deref()
-            .map(|tracers| {
-                self.tracer_fields(tracers, history.levsto.is_some(), history.bifout.is_some())
+            .map(|materials| {
+                self.material_fields(
+                    materials,
+                    history.levsto.is_some(),
+                    history.bifout.is_some(),
+                )
             })
             .unwrap_or_default();
-        // `tracer_lifecycle_route_write_history`：泥沙的 unitcat 量（`write_sediment_history`）。
+        // `material_lifecycle_route_write_history`：泥沙的 unitcat 量（`write_sediment_history`）。
         if let Some(sediment) = sediment.as_deref() {
-            tracer_fields.extend(sediment.history_fields());
+            material_fields.extend(sediment.history_fields());
         }
         let window_seconds = history
             .acctime
@@ -503,7 +507,7 @@ impl RiverHistoryWriter {
             window_seconds,
             &unitcat,
             bifflw,
-            &tracer_fields,
+            &material_fields,
             &reservoirs,
         )?;
 
@@ -540,8 +544,8 @@ impl RiverHistoryWriter {
                 session.stage_patch_field(name, values, filter.clone())?;
             }
             history.reset();
-            if let Some(tracers) = tracers {
-                tracers.history.reset();
+            if let Some(materials) = materials {
+                materials.history.reset();
             }
             if let Some(sediment) = sediment {
                 sediment.flush_history();
@@ -598,11 +602,11 @@ impl RiverHistoryWriter {
         }
         debug_assert_eq!(history.acctime.len(), n);
         history.reset();
-        // `flush_acc_fluxes_riverlake` 同时清零示踪物累加（`tracer_flush_acc`）。
-        if let Some(tracers) = tracers {
-            tracers.history.reset();
+        // `flush_acc_fluxes_riverlake` 同时清零材料累加（`material_flush_acc`）。
+        if let Some(materials) = materials {
+            materials.history.reset();
         }
-        // `tracer_lifecycle_route_flush_history`。
+        // `material_lifecycle_route_flush_history`。
         if let Some(sediment) = sediment {
             sediment.flush_history();
         }
@@ -618,7 +622,7 @@ impl RiverHistoryWriter {
         window_seconds: f64,
         fields: &[(&str, &str, &str, Vec<f64>)],
         bifflw: Option<(usize, Vec<f64>)>,
-        tracer_fields: &[(String, String, String, Vec<f64>)],
+        material_fields: &[(String, String, String, Vec<f64>)],
         reservoirs: &[(&str, &str, &str, Vec<f64>)],
     ) -> Result<()> {
         std::fs::create_dir_all(&self.directory)
@@ -729,8 +733,8 @@ impl RiverHistoryWriter {
                 .context("f_bifflw_lev disappeared")?
                 .put_values(&values, (t..t + 1, .., ..))?;
         }
-        // `write_tracer_history`：二维 unitcat 量（属性同主量），在分汊矩阵之后、水库之前定义。
-        for (name, long_name, units, values) in tracer_fields {
+        // `write_material_history`：二维 unitcat 量（属性同主量），在分汊矩阵之后、水库之前定义。
+        for (name, long_name, units, values) in material_fields {
             if first {
                 let mut variable =
                     file.add_variable::<f64>(name, &["time", "lat_ucat", "lon_ucat"])?;
@@ -764,11 +768,11 @@ impl RiverHistoryWriter {
 }
 
 impl RiverHistoryWriter {
-    /// `write_tracer_history`：每个输运示踪物的浓度（水量加权）、同位素 δ、出流，开堤防时
+    /// `write_material_history`：每个输运材料的浓度（水量加权）、同位素 δ、出流，开堤防时
     /// 堤内储量与其 δ（`mt_hist_fp_dust = 1e-12` 的显示清理只作用于输出）。
-    fn tracer_fields(
+    fn material_fields(
         &self,
-        tracers: &super::tracer::RiverTracers,
+        materials: &super::material::RiverMaterials,
         levee: bool,
         bifurcation: bool,
     ) -> Vec<(String, String, String, Vec<f64>)> {
@@ -780,21 +784,21 @@ impl RiverHistoryWriter {
                 .map(|x| if x.abs() < DUST { 0.0 } else { x })
                 .collect()
         };
-        let h = &tracers.history;
+        let h = &materials.history;
         let n = h.acctime.len();
         let mut out = Vec::new();
-        for itrc in tracers.set.transport_indices() {
-            let tracer = &tracers.set.tracers[itrc];
-            let name = tracer.name.trim();
-            let delta = tracer.is_isotope();
+        for itrc in materials.set.transport_indices() {
+            let material = &materials.set.materials[itrc];
+            let name = material.name.trim();
+            let delta = material.is_isotope();
             let (word, conc_units, mass_units, flux_units) = if delta {
                 ("ratio", "R".to_owned(), "R*m3", "R*m3/s")
             } else {
                 (
                     "concentration",
-                    colm_core::tracer::hist::concentration_units(tracer).to_owned(),
-                    "tracer",
-                    "tracer/s",
+                    colm_core::material::hist::concentration_units(material).to_owned(),
+                    "material",
+                    "material/s",
                 )
             };
             let ratio_delta = |mass: &[f64], water: &[f64]| -> Vec<f64> {
@@ -803,14 +807,14 @@ impl RiverHistoryWriter {
                         if self.allups_mask[i] < 0.5 || h.acctime[i] <= 0.0 {
                             return SPVAL;
                         }
-                        if water[i] <= DELTA_VMIN * h.acctime[i] || tracer.ref_ratio <= TRC_TINY {
+                        if water[i] <= DELTA_VMIN * h.acctime[i] || material.ref_ratio <= TRC_TINY {
                             return SPVAL;
                         }
                         let ratio = mass[i] / water[i];
                         if ratio <= TRC_TINY {
                             return SPVAL;
                         }
-                        let delta = (ratio / tracer.ref_ratio - 1.0) * 1000.0;
+                        let delta = (ratio / material.ref_ratio - 1.0) * 1000.0;
                         if delta.abs() <= SANITY {
                             delta
                         } else {
@@ -830,14 +834,14 @@ impl RiverHistoryWriter {
                 .collect();
             out.push((
                 format!("f_mt_conc_{name}"),
-                format!("tracer {word} ({name})"),
+                format!("material {word} ({name})"),
                 conc_units,
                 dust(conc),
             ));
             if delta {
                 out.push((
                     format!("f_mt_delta_{name}"),
-                    format!("tracer delta ({name})"),
+                    format!("material delta ({name})"),
                     "permil".to_owned(),
                     ratio_delta(&h.storage_mass[itrc], &h.water_storage),
                 ));
@@ -855,21 +859,21 @@ impl RiverHistoryWriter {
             };
             out.push((
                 format!("f_mt_flux_{name}"),
-                format!("tracer outflux ({name})"),
+                format!("material outflux ({name})"),
                 flux_units.to_owned(),
                 dust(per_time(&h.out[itrc])),
             ));
             if levee {
                 out.push((
                     format!("f_mt_levsto_{name}"),
-                    format!("protected-side levee tracer storage ({name})"),
+                    format!("protected-side levee material storage ({name})"),
                     mass_units.to_owned(),
                     dust(per_time(&h.levsto_mass[itrc])),
                 ));
                 if delta {
                     out.push((
                         format!("f_mt_levdelta_{name}"),
-                        format!("protected-side levee tracer delta ({name})"),
+                        format!("protected-side levee material delta ({name})"),
                         "permil".to_owned(),
                         ratio_delta(&h.levsto_mass[itrc], &h.levsto_water),
                     ));
@@ -878,7 +882,7 @@ impl RiverHistoryWriter {
             if bifurcation {
                 out.push((
                     format!("f_mt_bifout_{name}"),
-                    format!("tracer net bifurcation outflux ({name})"),
+                    format!("material net bifurcation outflux ({name})"),
                     flux_units.to_owned(),
                     dust(per_time(&h.bifout[itrc])),
                 ));

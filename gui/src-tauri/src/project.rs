@@ -722,7 +722,7 @@ fn real_input_dir(dir: String) -> String {
 
 /// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，分类优先算例显式选择、
 /// 建例记录，最后回退上次内核；作物看内核 CROP 宏或建例播种日字段（`DEF_USE_CROP`
-/// 只是宏的只读反映，建例时不写）；甲烷看示踪物名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
+/// 只是宏的只读反映，建例时不写）；甲烷看材料名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
 pub(crate) fn case_profile(
     text: &str,
     spatial: bool,

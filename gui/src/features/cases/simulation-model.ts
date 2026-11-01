@@ -98,7 +98,7 @@ export type ModelSetup = {
   crop: boolean;
   urban: boolean;
   bgc: boolean;
-  tracer: boolean;
+  material: boolean;
   /** 模型修订身份 `id#revision`：换修订会改变模型物理开关与所需数据。 */
   revision: string;
 };
@@ -119,7 +119,7 @@ export function modelSetup(input: {
     crop: cropEnabled(physics),
     urban: enabled('DEF_URBAN_RUN'),
     bgc: enabled('DEF_USE_BGC'),
-    tracer:
+    material:
       enabled('DEF_USE_ISOTOPE') ||
       enabled('DEF_USE_METHANE') ||
       enabled('DEF_USE_SEDIMENT') ||
@@ -377,7 +377,7 @@ export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>
   if (isSiteConfiguration(field.name)) return 3;
   if (isForcingScheme(field.name)) return 3;
   if (
-    ['水热过程', '生态与生地化', '河道与水库', '数据同化', '示踪剂', '城市'].includes(field.section)
+    ['水热过程', '生态与生地化', '河道与水库', '数据同化', '材料', '城市'].includes(field.section)
   )
     return 4;
   if (

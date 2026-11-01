@@ -72,7 +72,7 @@ test('ordered setup displays defaults without creating overrides', () => {
       'DEF_USE_BGC',
       'DEF_URBAN_RUN',
       'crop',
-      'tracer',
+      'material',
     ],
   );
   assert.equal(options[0].value, 'vG');
@@ -103,12 +103,12 @@ test('upstream edits reject active incompatible children without changing the or
   assert.deepEqual(o, before);
   o = apply(o, 'crop', '.false.');
   o = apply(o, 'DEF_USE_BGC', '.false.');
-  let tracer = apply(overlay(), 'tracer', '.true.');
-  assert.throws(() => apply(tracer, 'soil', 'Campbell'), /tracers/);
-  assert.throws(() => apply(tracer, 'DEF_URBAN_RUN', '.true.'), /tracers/);
-  assert.throws(() => apply(tracer, 'DEF_USE_VariablySaturatedFlow', '.false.'), /Campbell/);
-  tracer = apply(tracer, 'tracer', '.false.');
-  assert.equal(apply(tracer, 'soil', 'Campbell').physics.DEF_USE_Campbell_SOIL_MODEL, '.true.');
+  let material = apply(overlay(), 'material', '.true.');
+  assert.throws(() => apply(material, 'soil', 'Campbell'), /materials/);
+  assert.throws(() => apply(material, 'DEF_URBAN_RUN', '.true.'), /materials/);
+  assert.throws(() => apply(material, 'DEF_USE_VariablySaturatedFlow', '.false.'), /Campbell/);
+  material = apply(material, 'material', '.false.');
+  assert.equal(apply(material, 'soil', 'Campbell').physics.DEF_USE_Campbell_SOIL_MODEL, '.true.');
 });
 test('case scalar foundations migrate precisely and preserve unrelated child parameters', () => {
   const o = overlay();
@@ -159,7 +159,7 @@ test('crop accepts standard defaults and verified candidate macro; off preserves
   assert.equal(apply(o, 'crop', '.false.').physics.DEF_TUNING_CROP_EXTRA, '9');
   assert.equal(o.physics.DEF_TUNING_CROP_PLANTING_DAY, '120');
 });
-test('river, tracer and LULCC honor scenario and capability prerequisites and schema', () => {
+test('river, material and LULCC honor scenario and capability prerequisites and schema', () => {
   const o = overlay();
   assert.throws(() =>
     apply(o, 'DEF_USE_GridRiverLakeFlow', '.true.', { ...environment, domain: 'single' }),
@@ -168,7 +168,7 @@ test('river, tracer and LULCC honor scenario and capability prerequisites and sc
     () => apply(o, 'DEF_USE_GridRiverLakeFlow', '.true.', { ...environment, kernel: undefined }),
     /Pending/,
   );
-  assert.throws(() => apply(o, 'tracer', '.true.', { ...environment, grid: 'catchment' }));
+  assert.throws(() => apply(o, 'material', '.true.', { ...environment, grid: 'catchment' }));
   assert.throws(() =>
     apply(o, 'DEF_USE_LULCC', '.true.', { ...environment, classification: 'USGS' }),
   );
@@ -180,10 +180,10 @@ test('river, tracer and LULCC honor scenario and capability prerequisites and sc
   );
 });
 
-test('site domain with null grid supports explicit tracer and crop choices and blocks urban BGC', () => {
+test('site domain with null grid supports explicit material and crop choices and blocks urban BGC', () => {
   const env = { ...environment, domain: 'site', grid: null };
   let o = overlay();
-  assert.equal(apply(o, 'tracer', '.true.', env).physics.DEF_USE_ISOTOPE, '.true.');
+  assert.equal(apply(o, 'material', '.true.', env).physics.DEF_USE_ISOTOPE, '.true.');
   o = apply(o, 'DEF_USE_BGC', '.true.', env);
   assert.equal(apply(o, 'crop', '120', env).physics.DEF_TUNING_CROP_PLANTING_DAY, '120');
   assert.throws(() => apply(o, 'DEF_URBAN_RUN', '.true.', env), /BGC/);
@@ -235,7 +235,7 @@ test('crop shows off when no planting day is set, including after choosing off',
   assert.equal(value(o), '.false.');
 });
 
-test('active tracer providers protect BGC, routing and LULCC upstream changes', () => {
+test('active material providers protect BGC, routing and LULCC upstream changes', () => {
   const o = overlay();
   o.physics.DEF_USE_METHANE = '.true.';
   o.physics.DEF_USE_BGC = '.true.';
@@ -249,7 +249,7 @@ test('active tracer providers protect BGC, routing and LULCC upstream changes', 
   o.physics.DEF_USE_ISOTOPE = '.true.';
   assert.throws(() => apply(o, 'DEF_USE_LULCC', '.true.'), /isotope|同位素/);
   assert.equal(
-    apply(apply(o, 'tracer', '.false.'), 'DEF_USE_LULCC', '.true.').physics.DEF_USE_LULCC,
+    apply(apply(o, 'material', '.false.'), 'DEF_USE_LULCC', '.true.').physics.DEF_USE_LULCC,
     '.true.',
   );
 });
@@ -312,7 +312,7 @@ test('verified active methane inundation modes protect river while unknown remai
   assert.throws(() => call('wetwat', true, null), /Pending|待核对/);
   assert.throws(() => call('unknown'), /Pending|待核对/);
   assert.equal(
-    apply(apply(o, 'tracer', '.false.'), 'DEF_USE_GridRiverLakeFlow', '.false.').physics
+    apply(apply(o, 'material', '.false.'), 'DEF_USE_GridRiverLakeFlow', '.false.').physics
       .DEF_USE_GridRiverLakeFlow,
     '.false.',
   );
@@ -435,21 +435,21 @@ test('enabling LULCC atomically enforces monthly and annually changing LAI', () 
   assert.equal(o.physics.DEF_LAI_CHANGE_YEARLY, undefined);
 });
 
-test('tracer eligibility uses displayed defaults and runtime VG semantics without adding overrides', () => {
+test('material eligibility uses displayed defaults and runtime VG semantics without adding overrides', () => {
   const draft: Overlay = { physics: {}, parameters: [], process_files: [] };
   const before = structuredClone(draft);
   const choices = setupChoices(draft, fields, environment);
   assert.equal(choices.find((c) => c.id === 'soil')?.value, 'vG');
   assert.equal(choices.find((c) => c.id === 'DEF_USE_VariablySaturatedFlow')?.value, '.true.');
-  assert.equal(choices.find((c) => c.id === 'tracer')?.choices[0].reason, '');
+  assert.equal(choices.find((c) => c.id === 'material')?.choices[0].reason, '');
   assert.deepEqual(draft, before);
   draft.physics.DEF_USE_VariablySaturatedFlow = '.false.';
-  assert.equal(apply(draft, 'tracer', '.true.').physics.DEF_USE_ISOTOPE, '.true.');
+  assert.equal(apply(draft, 'material', '.true.').physics.DEF_USE_ISOTOPE, '.true.');
   draft.physics.DEF_USE_Campbell_SOIL_MODEL = '.true.';
-  assert.throws(() => apply(draft, 'tracer', '.true.'), /van Genuchten/);
+  assert.throws(() => apply(draft, 'material', '.true.'), /van Genuchten/);
   draft.physics.DEF_USE_Campbell_SOIL_MODEL = '.false.';
   draft.physics.DEF_URBAN_RUN = '.true.';
-  assert.throws(() => apply(draft, 'tracer', '.true.'), /urban/);
+  assert.throws(() => apply(draft, 'material', '.true.'), /urban/);
 });
 
 // 与后端 config_tests.rs 共用的判例（第 736 轮）：后端会拒、内核会停机的组合，前端卡片必须先拦；

@@ -1262,7 +1262,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
 const dataGroups = [
   ['bgc', 'DEF_USE_BGC', 'DEF_file_cn_init'],
   ['river', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_file'],
-  ['tracer', 'DEF_USE_ISOTOPE', 'DEF_MT_SOIL_INIT_FILE'],
+  ['material', 'DEF_USE_ISOTOPE', 'DEF_MT_SOIL_INIT_FILE'],
   ['urban', 'DEF_URBAN_RUN', 'DEF_URBAN_type_scheme'],
 ] as const;
 for (const name of ['NewCasePage', 'CasesPage'] as const)
@@ -3845,14 +3845,14 @@ const methaneSchema = [
     'DEF_USE_VariablySaturatedFlow',
     'DEF_USE_LULCC',
     'DEF_USE_Dynamic_Wetland',
-  ].map((name) => ({ ...field(name, '示踪剂', '.false.'), kind: 'Logical' })),
-  ...configuration.tracerKeys.map((name) => ({
-    ...field(name, '示踪剂', name.startsWith('DEF_USE_') ? '.false.' : "''"),
+  ].map((name) => ({ ...field(name, '材料', '.false.'), kind: 'Logical' })),
+  ...configuration.materialKeys.map((name) => ({
+    ...field(name, '材料', name.startsWith('DEF_USE_') ? '.false.' : "''"),
     kind: name.startsWith('DEF_USE_') ? 'Logical' : 'Character',
   })),
 ];
 for (const marked of ['name', 'site', 'observation']) {
-  test(`methane example selection configures BGC and a valid CH4 tracer from ${marked}`, async () => {
+  test(`methane example selection configures BGC and a valid CH4 material from ${marked}`, async () => {
     const methane = {
       ...site,
       name: marked === 'name' ? 'AT-Neu' : 'Methane-site',
@@ -3875,7 +3875,7 @@ for (const marked of ['name', 'site', 'observation']) {
     assert.equal(values.DEF_USE_VariablySaturatedFlow, '.true.');
     assert.equal(values.DEF_USE_LULCC, '.false.');
     assert.equal(values.DEF_URBAN_RUN, '.false.');
-    const rows = configuration.tracerRows({ physics: values, parameters: [], process_files: [] });
+    const rows = configuration.materialRows({ physics: values, parameters: [], process_files: [] });
     assert.equal(rows.length, 1);
     assert.equal(rows[0].NAMES, 'CH4');
     assert.equal(rows[0].TYPES, 'gas');
@@ -3892,7 +3892,7 @@ for (const marked of ['name', 'site', 'observation']) {
   });
 }
 
-test('methane example preserves PC and custom tracer metadata while removing crop leftovers', async () => {
+test('methane example preserves PC and custom material metadata while removing crop leftovers', async () => {
   const methane = { ...site, name: 'AT-Neu' };
   const p = page(
     'NewCasePage',
@@ -3926,7 +3926,7 @@ test('methane example preserves PC and custom tracer metadata while removing cro
   assert.equal(values.DEF_HIST_FREQ, "'DAILY'");
 });
 
-test('methane selection with missing tracer schema leaves the original site and settings untouched', async () => {
+test('methane selection with missing material schema leaves the original site and settings untouched', async () => {
   const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
   const p = page(
     'NewCasePage',
@@ -3945,7 +3945,7 @@ test('methane selection with missing tracer schema leaves the original site and 
   assert.deepEqual(p.state.version.overlay.physics, {});
 });
 
-test('selecting urban after methane disables BGC and tracers while retaining definitions', async () => {
+test('selecting urban after methane disables BGC and materials while retaining definitions', async () => {
   const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
   const urban = { ...site, name: 'AU-Preston', site_file: '/urban/site.nc', urban: true };
   const p = page(
@@ -3968,7 +3968,7 @@ test('selecting urban after methane disables BGC and tracers while retaining def
   assert.equal(values.DEF_METHANE_PARAM_FILE, "'standard_methane_parameter.nml'");
 });
 
-test('methane example retains inherited custom tracer scalar metadata without copying unrelated version flags', async () => {
+test('methane example retains inherited custom material scalar metadata without copying unrelated version flags', async () => {
   const methane = { ...site, name: 'AT-Neu' };
   const p = page('NewCasePage', { form, sites: [methane], step: 3 }, [methane], initialValues, {
     schema: methaneSchema,
@@ -3992,7 +3992,7 @@ test('methane example retains inherited custom tracer scalar metadata without co
   const values = (
     p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
   ).caseValues;
-  const rows = configuration.tracerRows({ physics: values, parameters: [], process_files: [] });
+  const rows = configuration.materialRows({ physics: values, parameters: [], process_files: [] });
   assert.deepEqual(
     rows.map((row) => [row.NAMES, row.TYPES]),
     [
@@ -4055,7 +4055,7 @@ for (const retained of ['new', 'missing-file', 'builtin-file', 'custom-file', 'c
   });
 }
 
-test('methane example rejects oversized tracer definitions without truncating or changing the selected site', async () => {
+test('methane example rejects oversized material definitions without truncating or changing the selected site', async () => {
   const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
   const caseValues = {
     DEF_USE_METHANE: '.true.',

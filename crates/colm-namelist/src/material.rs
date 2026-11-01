@@ -1,11 +1,11 @@
 //! 上游 7d2fca93 的 MaterialTransport 开关与参数文件字段。
 //!
-//! 上游把单一的 `DEF_USE_TRACER` 拆成了 family 开关（`MOD_MT_Namelist:mt_any_enabled`）：
+//! 上游把单一的 `@@DEF_USE_MATERIAL@@` 拆成了 family 开关（`MOD_MT_Namelist:mt_any_enabled`）：
 //! 同位素、泥沙、甲烷各有一个布尔量，溶质没有开关（`DEF_SOLUTE_NAMES` 非空即启用）。
 //! 这里只做**纯配置层**判定，不知道运行期注册了哪些材料；需要按注册表判断时用
-//! `colm_core::tracer::TracerSet`（family 由描述符带出来）。
+//! `colm_core::material::MaterialSet`（family 由描述符带出来）。
 //!
-//! 参数文件的字段也从一条 `DEF_TRACER_PARAM_FILES` 拆成四条，只有溶质仍然是一个列表
+//! 参数文件的字段也从一条 `@@DEF_MATERIAL_@@PARAM_FILES` 拆成四条，只有溶质仍然是一个列表
 //! （`DEF_SOLUTE_PARAM_FILES`），所以"取路径"要把单值和列表分开处理。
 
 use anyhow::{bail, Result};
@@ -50,13 +50,13 @@ pub fn any_enabled(document: &Document) -> Result<bool> {
 /// 一个参数文件字段里的全部路径（`null` 与空串都表示没有）。
 ///
 /// `DEF_SOLUTE_PARAM_FILES` 是 `,`/`;` 分隔的 `key:path` 列表，其余三个是单路径。
-/// 返回值不解析映射键，只取路径；需要键位对应时用 [`super::tracer_files`]。
+/// 返回值不解析映射键，只取路径；需要键位对应时用 [`super::material_files`]。
 pub fn param_file_paths(document: &Document, field: &str) -> Result<Vec<String>> {
     let Some(Value::Str(raw)) = document.get(field) else {
         return Ok(Vec::new());
     };
     if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-        return super::tracer_files::param_file_paths(raw);
+        return super::material_files::param_file_paths(raw);
     }
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {

@@ -31,11 +31,11 @@ function harness() {
     ['DEF_USE_RESERVOIR', '河道与水库'],
     ['DEF_URBAN_RUN', '城市'],
     ['DEF_URBAN_type_scheme', '城市'],
-    ...helpers.tracerKeys.map((k) => [k, '示踪剂']),
+    ...helpers.materialKeys.map((k) => [k, '材料']),
   ].map(([name, section]) => ({
     name,
     section,
-    kind: helpers.tracerKeys.includes(name)
+    kind: helpers.materialKeys.includes(name)
       ? name.startsWith('DEF_USE_')
         ? 'logical'
         : 'character'
@@ -305,30 +305,30 @@ test('late configuration responses cannot replace current version and guide only
   p.render();
   assert.equal(p.requests.at(-1)!.args.pftSelection, null);
 });
-test('tracer table accumulates incomplete rows locally, then applies valid aligned definitions atomically', async () => {
+test('material table accumulates incomplete rows locally, then applies valid aligned definitions atomically', async () => {
   const p = harness();
   p.render();
   let c = await p.settle();
-  c.actions.find((a) => a.id === 'configuration-tracers-add')!.run();
+  c.actions.find((a) => a.id === 'configuration-materials-add')!.run();
   c = p.render();
   assert.equal(p.changes.length, 0);
-  assert.throws(() => c.actions.find((a) => a.id === 'configuration-tracers-apply')!.run());
+  assert.throws(() => c.actions.find((a) => a.id === 'configuration-materials-apply')!.run());
   assert.equal(p.changes.length, 0);
-  c.fields.find((f) => f.id === 'configuration-tracer-0-NAMES')!.set('CH4');
+  c.fields.find((f) => f.id === 'configuration-material-0-NAMES')!.set('CH4');
   c = p.render();
-  c.fields.find((f) => f.id === 'configuration-tracer-0-TYPES')!.set('gas');
+  c.fields.find((f) => f.id === 'configuration-material-0-TYPES')!.set('gas');
   c = p.render();
-  assert.equal(c.fields.find((f) => f.id === 'configuration-tracer-0-TYPES')!.value, 'gas');
-  c.actions.find((a) => a.id === 'configuration-tracers-apply')!.run();
+  assert.equal(c.fields.find((f) => f.id === 'configuration-material-0-TYPES')!.value, 'gas');
+  c.actions.find((a) => a.id === 'configuration-materials-apply')!.run();
   assert.equal(p.changes.length, 1);
   assert.equal(p.props.overlay.physics.DEF_USE_METHANE, '.true.');
   assert.equal(p.props.overlay.physics.DEF_METHANE_PARAM_FILE, "'null'");
 });
-test('enabling BGC, rivers or tracer reopens previously collapsed children only on a new activation', async () => {
+test('enabling BGC, rivers or material reopens previously collapsed children only on a new activation', async () => {
   for (const [group, key] of [
     ['ecology', 'DEF_USE_BGC'],
     ['river', 'DEF_USE_GridRiverLakeFlow'],
-    ['tracer', 'DEF_USE_ISOTOPE'],
+    ['material', 'DEF_USE_ISOTOPE'],
   ]) {
     const p = harness();
     p.props.overlay = {
@@ -517,17 +517,17 @@ test('family cards stage missing names, types and process filenames, preserve cu
   isotope.run();
   c = p.render();
   assert.equal(p.changes.length, 0);
-  assert.equal(c.fields.find((f) => f.id === 'configuration-tracer-0-NAMES')?.value, 'H2_18O');
+  assert.equal(c.fields.find((f) => f.id === 'configuration-material-0-NAMES')?.value, 'H2_18O');
   assert.equal(
-    c.fields.find((f) => f.id === 'configuration-tracer-0-PARAM_FILES')?.value,
+    c.fields.find((f) => f.id === 'configuration-material-0-PARAM_FILES')?.value,
     'standard_isotope_parameter.nml',
   );
-  assert.equal(c.fields.find((f) => f.id === 'configuration-tracer-1-NAMES')?.value, 'HDO');
+  assert.equal(c.fields.find((f) => f.id === 'configuration-material-1-NAMES')?.value, 'HDO');
   assert.equal(c.actions.find((a) => a.id === 'configuration-family-isotope')?.enabled, false);
-  c.actions.find((a) => a.id === 'configuration-tracers-remove')!.run();
+  c.actions.find((a) => a.id === 'configuration-materials-remove')!.run();
   c = p.render();
   assert.equal(
-    c.fields.some((f) => f.id === 'configuration-tracer-1-NAMES'),
+    c.fields.some((f) => f.id === 'configuration-material-1-NAMES'),
     false,
   );
   assert.equal(p.changes.length, 0);
@@ -579,7 +579,7 @@ test('core runoff enum appears as choice cards while the visible guide shares th
   assert.throws(() => field.set('99'));
 });
 
-test('same-kernel scheme changes reload BGC tracer and PFT context and invalidate prior replies', async () => {
+test('same-kernel scheme changes reload BGC material and PFT context and invalidate prior replies', async () => {
   const h = harness();
   h.props.subgrid = 'IGBP';
   h.render();
@@ -670,7 +670,7 @@ test('simulation hides inactive process details and files without erasing retain
     p.requests.at(-1)!.resolve(response);
     for (let i = 0; i < 5; i++) await Promise.resolve();
     const c = p.render();
-    for (const group of ['river', 'urban', 'tracer']) {
+    for (const group of ['river', 'urban', 'material']) {
       const available = value === '.true.';
       assert.equal(
         c.actions.some((a) => a.id === `configuration-group-${group}`),
@@ -678,7 +678,7 @@ test('simulation hides inactive process details and files without erasing retain
       );
     }
     assert.equal(
-      p.nodes.some((n) => n.type === 'Card' && n.props.title === '示踪过程文件'),
+      p.nodes.some((n) => n.type === 'Card' && n.props.title === '材料过程文件'),
       value === '.true.',
     );
     assert.equal(
@@ -762,7 +762,7 @@ test('focused simulation editor stages the final typed value and explicit reset 
   let c = h.render();
   assert.equal(c.modal, true);
   assert.ok(!c.actions.some((a) => a.id === 'save-dialog'));
-  assert.ok(!c.fields.some((f) => f.id.includes('tracer') || f.id.includes('stomatal')));
+  assert.ok(!c.fields.some((f) => f.id.includes('material') || f.id.includes('stomatal')));
   const input = h.nodes.find((n) => n.type === 'Input' && n.props.value === '1')!;
   (input.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: '2' } });
   assert.deepEqual(patches.at(-1), { DEF_URBAN_type_scheme: '2' });
@@ -779,10 +779,10 @@ test('focused simulation editor stages the final typed value and explicit reset 
     '.false.',
   );
 });
-test('modal save readiness rejects invalid text and unapplied tracer definitions', async () => {
+test('modal save readiness rejects invalid text and unapplied material definitions', async () => {
   const h = harness();
   let ready = false;
-  h.props.process = 'tracer';
+  h.props.process = 'material';
   h.props.modalActions = [];
   h.props.onReady = (value) => {
     ready = value;
@@ -794,13 +794,13 @@ test('modal save readiness rejects invalid text and unapplied tracer definitions
   await new Promise((resolve) => setTimeout(resolve, 0));
   let c = h.render();
   assert.equal(ready, false);
-  await c.actions.find((a) => a.id === 'configuration-tracers-add')!.run();
+  await c.actions.find((a) => a.id === 'configuration-materials-add')!.run();
   c = h.render();
   assert.equal(ready, false);
   assert.ok(
     h.nodes.some((n) => n.type === 'Notice' && JSON.stringify(n.children).includes('先应用')),
   );
-  await c.actions.find((a) => a.id === 'configuration-tracers-remove')!.run();
+  await c.actions.find((a) => a.id === 'configuration-materials-remove')!.run();
   h.render();
   // Even an empty pending table must be applied explicitly before Save.
   assert.equal(ready, false);
@@ -865,13 +865,13 @@ test('simulation fractionation children stay hidden while queries are pending an
   for (const name of [parent, ...children])
     h.props.fields.push({
       name,
-      section: '示踪剂',
+      section: '材料',
       kind: name === parent ? 'logical' : 'character',
       default: name === parent ? '.false.' : schemes[name][0],
       values: schemes[name] ?? [],
       derived: false,
     });
-  h.props.process = 'tracer';
+  h.props.process = 'material';
   h.props.onCaseChange = () => assert.fail('visibility changes must not save');
   h.props.caseValues = {
     DEF_USE_ISOTOPE: '.true.',
@@ -945,14 +945,14 @@ test('isotope-only controls follow current species before queries or manual tabl
     h.props.fields.push(
       ...isotopeFields.map((name) => ({
         name,
-        section: '示踪剂',
+        section: '材料',
         kind: 'character',
         default: '',
         values: [],
         derived: false,
       })),
     );
-    h.props.process = 'tracer';
+    h.props.process = 'material';
     if (simulation) h.props.onCaseChange = () => assert.fail('visibility must not save');
     const saved = {
       DEF_USE_ISOTOPE: '.false.',
@@ -971,11 +971,11 @@ test('isotope-only controls follow current species before queries or manual tabl
     for (const name of isotopeFields) assert.equal(visible(name), false);
     c = await h.settle(); // Incomplete editable metadata must not expose isotope fields for CH4.
     for (const name of isotopeFields) assert.equal(visible(name), false);
-    c.fields.find((field) => field.id === 'configuration-tracer-0-TYPES')!.set('isotope');
+    c.fields.find((field) => field.id === 'configuration-material-0-TYPES')!.set('isotope');
     c = h.render();
     for (const name of isotopeFields) assert.equal(visible(name), true);
     for (const family of ['solute', 'particle', 'gas']) {
-      c.fields.find((field) => field.id === 'configuration-tracer-0-TYPES')!.set(family);
+      c.fields.find((field) => field.id === 'configuration-material-0-TYPES')!.set(family);
       c = h.render();
       for (const name of isotopeFields) assert.equal(visible(name), false);
     }
@@ -1688,9 +1688,9 @@ for (const outcome of ['select', 'cancel', 'switch', 'lock', 'unmount']) {
   });
 }
 
-function tracerModalHarness() {
+function materialModalHarness() {
   const h = harness();
-  h.props.process = 'tracer';
+  h.props.process = 'material';
   h.props.modalActions = [];
   h.props.engine = 'rust';
   h.props.subgrid = 'PFT';
@@ -1707,8 +1707,8 @@ function tracerModalHarness() {
   return h;
 }
 
-test('tracer process picker remains reachable while off and with unmet prerequisites', async () => {
-  const h = tracerModalHarness();
+test('material process picker remains reachable while off and with unmet prerequisites', async () => {
+  const h = materialModalHarness();
   h.props.overlay.physics.DEF_USE_ISOTOPE = '.false.';
   h.props.overlay.physics.DEF_USE_Campbell_SOIL_MODEL = '.true.';
   h.props.caseValues = { ...h.props.overlay.physics };
@@ -1732,9 +1732,12 @@ test('tracer process picker remains reachable while off and with unmet prerequis
   methane.run();
   h.render();
   c = await h.settle();
-  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-NAMES')?.value, 'CH4');
   assert.equal(
-    c.fields.find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')?.value,
+    c.fields.find((field) => field.id === 'configuration-material-0-NAMES')?.value,
+    'CH4',
+  );
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-material-0-PARAM_FILES')?.value,
     'standard_methane_parameter.nml',
   );
   assert.equal(h.changes.length, 0);
@@ -1742,8 +1745,8 @@ test('tracer process picker remains reachable while off and with unmet prerequis
   assert.match(JSON.stringify(h.nodes), /van Genuchten/);
 });
 
-test('tracer modal cannot save empty, malformed, or unapplied definitions', async () => {
-  const h = tracerModalHarness();
+test('material modal cannot save empty, malformed, or unapplied definitions', async () => {
+  const h = materialModalHarness();
   let ready = true;
   h.props.onReady = (value) => {
     ready = value;
@@ -1754,16 +1757,16 @@ test('tracer modal cannot save empty, malformed, or unapplied definitions', asyn
   c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
   c = h.render();
   assert.equal(ready, false);
-  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
   h.render();
   await h.settle();
   assert.equal(ready, true);
   // 再加一行同名的 CH4：名称必须唯一，保存前应报错。
-  c.actions.find((action) => action.id === 'configuration-tracers-add')!.run();
+  c.actions.find((action) => action.id === 'configuration-materials-add')!.run();
   c = h.render();
-  c.fields.find((field) => field.id === 'configuration-tracer-1-NAMES')!.set('CH4');
+  c.fields.find((field) => field.id === 'configuration-material-1-NAMES')!.set('CH4');
   c = h.render();
-  c.fields.find((field) => field.id === 'configuration-tracer-1-TYPES')!.set('gas');
+  c.fields.find((field) => field.id === 'configuration-material-1-TYPES')!.set('gas');
   h.render();
   await h.settle();
   assert.equal(ready, false);
@@ -1771,14 +1774,14 @@ test('tracer modal cannot save empty, malformed, or unapplied definitions', asyn
 });
 
 test('isotope modal retains parameter-file metadata and requires positive aquifer mixing water', async () => {
-  const h = tracerModalHarness();
+  const h = materialModalHarness();
   let ready = true;
   h.props.onReady = (value) => {
     ready = value;
   };
   h.props.fields.push({
     name: 'DEF_MT_AQUIFER_MIXING_WATER_MM',
-    section: '示踪剂',
+    section: '材料',
     kind: 'real',
     default: '0',
     values: [],
@@ -1788,12 +1791,12 @@ test('isotope modal retains parameter-file metadata and requires positive aquife
   let c = await h.settle();
   c.actions.find((action) => action.id === 'configuration-family-isotope')!.run();
   c = h.render();
-  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
   h.render();
   await h.settle();
   assert.equal(ready, false);
   assert.match(JSON.stringify(h.nodes), /含水层|aquifer/);
-  assert.equal(helpers.tracerRows(h.props.overlay)[0].TYPES, 'isotope');
+  assert.equal(helpers.materialRows(h.props.overlay)[0].TYPES, 'isotope');
   h.render();
   await h.settle();
   assert.equal(ready, false);
@@ -1807,12 +1810,12 @@ test('isotope modal retains parameter-file metadata and requires positive aquife
   assert.equal(ready, false);
 });
 
-test('tracer modal uses context defaults but explicit dependency conflicts still block saving', async () => {
-  const h = tracerModalHarness();
-  h.props.overlay = helpers.setTracerRows(
+test('material modal uses context defaults but explicit dependency conflicts still block saving', async () => {
+  const h = materialModalHarness();
+  h.props.overlay = helpers.setMaterialRows(
     h.props.overlay,
     h.props.fields,
-    helpers.appendTracerFamily([], 'methane'),
+    helpers.appendMaterialFamily([], 'methane'),
   );
   delete h.props.overlay.physics.DEF_USE_BGC;
   h.props.fields = h.props.fields.filter((field) => field.name !== 'DEF_USE_BGC');
@@ -1845,7 +1848,7 @@ test('tracer modal uses context defaults but explicit dependency conflicts still
 });
 
 test('unsupported isotope species show a repairable error without crashing the modal', async () => {
-  const h = tracerModalHarness();
+  const h = materialModalHarness();
   Object.assign(h.props.overlay.physics, {
     DEF_USE_ISOTOPE: '.true.',
     DEF_ISOTOPE_SPECIES: "'O18'",
@@ -1859,16 +1862,16 @@ test('unsupported isotope species show a repairable error without crashing the m
   let c = await h.settle();
   assert.equal(ready, false);
   assert.match(JSON.stringify(h.nodes), /H2_18O|HDO/);
-  c.fields.find((field) => field.id === 'configuration-tracer-0-NAMES')!.set('H2_18O');
+  c.fields.find((field) => field.id === 'configuration-material-0-NAMES')!.set('H2_18O');
   c = h.render();
-  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
   h.render();
   await h.settle();
-  assert.equal(helpers.tracerRows(h.props.overlay)[0].NAMES, 'H2_18O');
+  assert.equal(helpers.materialRows(h.props.overlay)[0].NAMES, 'H2_18O');
 });
 
-test('focused tracer presets stage one modal patch and become save-ready without Apply', async () => {
-  const h = tracerModalHarness();
+test('focused material presets stage one modal patch and become save-ready without Apply', async () => {
+  const h = materialModalHarness();
   h.props.overlay.physics.DEF_USE_BGC = '.false.';
   const patches: helpers.CaseOptionPatch[] = [];
   h.props.caseValues = { ...h.props.overlay.physics };
@@ -1893,8 +1896,8 @@ test('focused tracer presets stage one modal patch and become save-ready without
   assert.equal(ready, true);
 });
 
-test('focused tracer modal presents species and definitions before general process options', async () => {
-  const h = tracerModalHarness();
+test('focused material modal presents species and definitions before general process options', async () => {
+  const h = materialModalHarness();
   h.props.caseValues = { ...h.props.overlay.physics };
   h.props.onCaseChange = () => {};
   h.render();
@@ -1909,49 +1912,55 @@ test('focused tracer modal presents species and definitions before general proce
     }
   };
   visit(h.nodes.at(-1));
-  assert.deepEqual(sections.slice(0, 2), [
-    '先选择要追踪的物质',
-    '示踪物定义（每行对应同一个示踪物）',
-  ]);
+  assert.deepEqual(sections.slice(0, 2), ['先选择要追踪的物质', '材料定义（每行对应同一个材料）']);
 });
 
-test('individual tracer removal retains all other custom metadata until explicitly applied', async () => {
-  const h = tracerModalHarness();
-  const rows = helpers.appendTracerFamily(helpers.appendTracerFamily([], 'methane'), 'chloride');
+test('individual material removal retains all other custom metadata until explicitly applied', async () => {
+  const h = materialModalHarness();
+  const rows = helpers.appendMaterialFamily(
+    helpers.appendMaterialFamily([], 'methane'),
+    'chloride',
+  );
   rows[1].PARAM_FILES = '/server/custom-cl.nml';
-  h.props.overlay = helpers.setTracerRows(h.props.overlay, h.props.fields, rows);
+  h.props.overlay = helpers.setMaterialRows(h.props.overlay, h.props.fields, rows);
   h.render();
   let c = await h.settle();
-  c.actions.find((action) => action.id === 'configuration-tracer-0-remove')!.run();
+  c.actions.find((action) => action.id === 'configuration-material-0-remove')!.run();
   c = h.render();
   assert.equal(h.changes.length, 0);
-  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-NAMES')!.value, 'Cl');
   assert.equal(
-    c.fields.find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')!.value,
+    c.fields.find((field) => field.id === 'configuration-material-0-NAMES')!.value,
+    'Cl',
+  );
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-material-0-PARAM_FILES')!.value,
     '/server/custom-cl.nml',
   );
-  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
-  assert.deepEqual(helpers.tracerRows(h.props.overlay), [rows[1]]);
+  c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
+  assert.deepEqual(helpers.materialRows(h.props.overlay), [rows[1]]);
 });
 
 test('preset mixed with an existing solute row retains local rows for correction', async () => {
-  const h = tracerModalHarness();
-  const rows = helpers.appendTracerFamily([], 'chloride');
-  h.props.overlay = helpers.setTracerRows(h.props.overlay, h.props.fields, rows);
+  const h = materialModalHarness();
+  const rows = helpers.appendMaterialFamily([], 'chloride');
+  h.props.overlay = helpers.setMaterialRows(h.props.overlay, h.props.fields, rows);
   h.props.caseValues = { ...h.props.overlay.physics };
   h.render();
   let c = await h.settle();
   c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
   c = h.render();
-  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-1-NAMES')!.value, 'CH4');
   assert.equal(
-    c.fields.find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')!.value,
+    c.fields.find((field) => field.id === 'configuration-material-1-NAMES')!.value,
+    'CH4',
+  );
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-material-0-PARAM_FILES')!.value,
     'standard_chloride_parameter.nml',
   );
 });
 
 test('nonmodal methane selection enables BGC only when definitions are applied', async () => {
-  const h = tracerModalHarness();
+  const h = materialModalHarness();
   h.props.modalActions = undefined;
   h.props.overlay.physics.DEF_USE_BGC = '.false.';
   h.render();
@@ -1960,15 +1969,15 @@ test('nonmodal methane selection enables BGC only when definitions are applied',
   c = h.render();
   assert.equal(h.changes.length, 0);
   assert.equal(h.props.overlay.physics.DEF_USE_BGC, '.false.');
-  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
   assert.equal(h.changes.length, 1);
   assert.equal(h.props.overlay.physics.DEF_USE_BGC, '.true.');
-  assert.equal(helpers.tracerRows(h.props.overlay)[0].NAMES, 'CH4');
+  assert.equal(helpers.materialRows(h.props.overlay)[0].NAMES, 'CH4');
 });
 
 for (const site of ['scope', 'macro', 'spatial']) {
   test(`sediment picker enforces single-site restriction in native and guide controls: ${site}`, async () => {
-    const h = tracerModalHarness();
+    const h = materialModalHarness();
     h.props.caseScope = site === 'scope' ? 'site' : 'spatial';
     h.props.kernelMacros = site === 'macro' ? ['SiNgLePoInT'] : [];
     h.render();
@@ -1989,7 +1998,7 @@ for (const site of ['scope', 'macro', 'spatial']) {
     } else {
       action.run();
       assert.equal(
-        h.render().fields.find((field) => field.id === 'configuration-tracer-0-NAMES')!.value,
+        h.render().fields.find((field) => field.id === 'configuration-material-0-NAMES')!.value,
         'SEDIMENT',
       );
     }

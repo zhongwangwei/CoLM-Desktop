@@ -22,17 +22,17 @@ import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
   caseFieldVisible,
-  tracerFieldVisible,
+  materialFieldVisible,
   vicParameterDefault,
   caseOptionOverlay,
   caseOptionPatch,
   type CaseOptionPatch,
-  tracerFamilies,
-  tracerFamilyState,
-  tracerSetupIssues,
-  tracerProcessEnabled,
-  appendTracerFamily,
-  applyTracerSelection,
+  materialFamilies,
+  materialFamilyState,
+  materialSetupIssues,
+  materialProcessEnabled,
+  appendMaterialFamily,
+  applyMaterialSelection,
   setStomatalScheme,
   groupedField,
   unquote,
@@ -42,12 +42,12 @@ import {
   resetScopedOption,
   setProcessOption,
   resetProcessOption,
-  tracerTypes,
-  tracerLabels,
-  tracerColumns,
-  tracerKeys,
-  tracerRows,
-  setTracerRows,
+  materialTypes,
+  materialLabels,
+  materialColumns,
+  materialKeys,
+  materialRows,
+  setMaterialRows,
   type ConfigurationSource,
   type ConfigurationResult,
   type FamilyContext,
@@ -124,9 +124,9 @@ export default function ConfigurationOptions({
     [selectedPftIndex, setPftIndex] = useState(''),
     [processName, setProcessName] = useState(''),
     [importing, setImporting] = useState(false),
-    [tracerInput, setTracerInput] = useState<{
+    [materialInput, setMaterialInput] = useState<{
       key: string;
-      rows: ReturnType<typeof tracerRows>;
+      rows: ReturnType<typeof materialRows>;
     } | null>(null),
     [saving, setSaving] = useState(false),
     [pickingFile, setPickingFile] = useState(false);
@@ -203,14 +203,14 @@ export default function ConfigurationOptions({
   const parentValues = Object.fromEntries(
     Object.entries({
       ecology: 'DEF_USE_BGC',
-      tracer: 'tracer-process',
+      material: 'material-process',
       river: 'DEF_USE_GridRiverLakeFlow',
       urban: 'DEF_URBAN_RUN',
       subgrid: 'DEF_USE_LULCC',
     }).map(([id, name]) => [
       id,
-      name === 'tracer-process'
-        ? tracerProcessEnabled(overlay)
+      name === 'material-process'
+        ? materialProcessEnabled(overlay)
         : modelSettingValue(overlay, name)?.trim().toLowerCase() === '.true.',
     ]),
   );
@@ -232,9 +232,9 @@ export default function ConfigurationOptions({
       }));
     setSeenParents(parentSignature);
   }
-  const tracers = tracerInput?.key === sourceKey ? tracerInput.rows : null;
-  const setTracers = (rows: ReturnType<typeof tracerRows> | null) =>
-    setTracerInput(rows ? { key: sourceKey, rows } : null);
+  const materials = materialInput?.key === sourceKey ? materialInput.rows : null;
+  const setMaterials = (rows: ReturnType<typeof materialRows> | null) =>
+    setMaterialInput(rows ? { key: sourceKey, rows } : null);
   const current = useRef(request),
     savingNow = useRef(false),
     writable = useRef(false),
@@ -729,17 +729,17 @@ export default function ConfigurationOptions({
     'river',
     'ecology',
     'urban',
-    'tracer',
+    'material',
     'assimilation',
     'other',
   ].map((id) => modelSettingGroups.find((g) => g[0] === id)!);
   const caseProcessVisible = (id: string) =>
-    (!hideProcesses || !['ecology', 'tracer', 'river', 'urban'].includes(id)) &&
-    (!process || id !== 'tracer' || process === 'tracer') &&
-    (!onCaseChange || parentValues[id] === true || (id === 'tracer' && process === 'tracer'));
+    (!hideProcesses || !['ecology', 'material', 'river', 'urban'].includes(id)) &&
+    (!process || id !== 'material' || process === 'material') &&
+    (!onCaseChange || parentValues[id] === true || (id === 'material' && process === 'material'));
   // 同位素专属字段是否显示：编辑中的表格优先，其次看当前配置里的 family 开关。
-  const currentIsotope = tracers
-    ? tracers.some((row) => row.TYPES.toLowerCase() === 'isotope')
+  const currentIsotope = materials
+    ? materials.some((row) => row.TYPES.toLowerCase() === 'isotope')
     : (() => {
         const raw =
           overlay.physics.DEF_USE_ISOTOPE ??
@@ -750,7 +750,7 @@ export default function ConfigurationOptions({
           : raw.trim().toLowerCase() === '.true.';
       })();
   const groups = orderedGroups.map(([id, zh, english]) => {
-    if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
+    if (['river', 'urban', 'material'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
       .filter(
         (field) =>
@@ -762,7 +762,7 @@ export default function ConfigurationOptions({
           groupedField(field, catalog) &&
           !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
-      .filter((field) => tracerFieldVisible(field.name, currentIsotope))
+      .filter((field) => materialFieldVisible(field.name, currentIsotope))
       .filter(
         (field) =>
           (!onCaseChange &&
@@ -813,7 +813,7 @@ export default function ConfigurationOptions({
     if (
       !rows.length &&
       !(id === 'ecology' && showStomatal) &&
-      !(id === 'tracer' && (caseProcessVisible(id) || !onCaseChange))
+      !(id === 'material' && (caseProcessVisible(id) || !onCaseChange))
     )
       return null;
     if (process)
@@ -840,19 +840,19 @@ export default function ConfigurationOptions({
       </Advanced>
     );
   });
-  let storedTracers: ReturnType<typeof tracerRows>,
-    tracerError = '';
+  let storedMaterials: ReturnType<typeof materialRows>,
+    materialError = '';
   try {
-    storedTracers = tracerRows(overlay);
+    storedMaterials = materialRows(overlay);
   } catch (e) {
-    storedTracers = [];
-    tracerError = String(e);
+    storedMaterials = [];
+    materialError = String(e);
   }
-  const tracerOpen = caseProcessVisible('tracer') && open('tracer'),
-    table = tracers ?? storedTracers,
-    tracerFields = fields.filter((f) => tracerKeys.includes(f.name));
-  const tracerTooLarge = table.length > 100;
-  const tracerReady = !tracerTooLarge && !locked && ready && tracerFields.length > 0;
+  const materialOpen = caseProcessVisible('material') && open('material'),
+    table = materials ?? storedMaterials,
+    materialFields = fields.filter((f) => materialKeys.includes(f.name));
+  const materialTooLarge = table.length > 100;
+  const materialReady = !materialTooLarge && !locked && ready && materialFields.length > 0;
   const familyContext: FamilyContext = {
     subgrid,
     processFiles: values.process_files,
@@ -868,59 +868,59 @@ export default function ConfigurationOptions({
       }),
     ]),
   };
-  let checkedTracerOverlay = overlay;
-  let definitionError = tracers === null ? tracerError : '';
-  if (!definitionError && !tracerTooLarge && tracerFields.length) {
+  let checkedMaterialOverlay = overlay;
+  let definitionError = materials === null ? materialError : '';
+  if (!definitionError && !materialTooLarge && materialFields.length) {
     try {
-      checkedTracerOverlay = setTracerRows(overlay, fields, table);
+      checkedMaterialOverlay = setMaterialRows(overlay, fields, table);
     } catch (e) {
       definitionError = String(e);
     }
   }
-  const tracerIssues = definitionError
+  const materialIssues = definitionError
     ? []
-    : tracerSetupIssues(checkedTracerOverlay, familyContext);
-  const tracerValid = !definitionError && !tracerTooLarge && tracerIssues.length === 0;
+    : materialSetupIssues(checkedMaterialOverlay, familyContext);
+  const materialValid = !definitionError && !materialTooLarge && materialIssues.length === 0;
   const canSave =
     ready &&
     !error &&
-    tracers === null &&
+    materials === null &&
     !pickingFile &&
-    (process !== 'tracer' || (tracerFields.length > 0 && tracerValid));
+    (process !== 'material' || (materialFields.length > 0 && materialValid));
   useEffect(() => {
     onReady?.(canSave);
   }, [canSave, onReady]);
-  const stagedTracerModal = process === 'tracer' && !!modalActions && !!onCaseChange;
-  const familyVisible = tracerOpen;
+  const stagedMaterialModal = process === 'material' && !!modalActions && !!onCaseChange;
+  const familyVisible = materialOpen;
   const familyCards = familyVisible && (
     <Card
-      title={t('先选择要追踪的物质', 'Choose tracer families')}
+      title={t('先选择要追踪的物质', 'Choose material families')}
       description={t(
         '选择要追踪的物质，保留已有与自定义条目。预填名称、类型和内置过程文件名；请补齐必需的数值及文件路径，再应用定义。',
         'Choose what to trace. Existing and custom rows are retained; names, types and built-in process filenames are prefilled. Complete required numeric values and file paths, then apply the definitions.',
       )}
     >
       <div className="simulation-choice-grid">
-        {tracerFamilies.map((family) => {
-          const availability = tracerFamilyState(overlay, family.id, familyContext),
-            next = appendTracerFamily(table, family.id),
+        {materialFamilies.map((family) => {
+          const availability = materialFamilyState(overlay, family.id, familyContext),
+            next = appendMaterialFamily(table, family.id),
             already = next.length === table.length,
             singlepointSediment =
               family.id === 'sediment' &&
               (caseScope === 'site' ||
                 familyContext.kernelMacros?.some((macro) => macro.toLowerCase() === 'singlepoint')),
-            blocked = !tracerReady || already || singlepointSediment;
+            blocked = !materialReady || already || singlepointSediment;
           const add = () => {
             if (!familyVisible || blocked || current.current !== request)
               throw new Error('Family is unavailable or already present');
-            if (stagedTracerModal) {
+            if (stagedMaterialModal) {
               try {
-                write(() => applyTracerSelection(overlay, fields, next));
-                setTracers(null);
+                write(() => applyMaterialSelection(overlay, fields, next));
+                setMaterials(null);
               } catch {
-                setTracers(next);
+                setMaterials(next);
               }
-            } else setTracers(next);
+            } else setMaterials(next);
           };
           return (
             <ActionButton
@@ -968,42 +968,42 @@ export default function ConfigurationOptions({
         })}
       </div>
       <p className="muted">
-        {stagedTracerModal
+        {stagedMaterialModal
           ? t(
               '选择预设后暂存到此弹窗，点击“保存并启用”才保存。手动编辑或移除行后请应用定义；取消弹窗会放弃修改。',
               'Presets are staged in this dialog until Save and enable. Apply definitions after manual edits or removing rows; cancelling discards changes.',
             )
           : t(
-              '预填后尚未保存；编辑或移除行后请应用定义。关闭示踪开关不会删除已有定义。',
-              'Prefilled rows are not saved. Apply definitions after editing or removing rows. Turning tracers off preserves saved definitions.',
+              '预填后尚未保存；编辑或移除行后请应用定义。关闭材料开关不会删除已有定义。',
+              'Prefilled rows are not saved. Apply definitions after editing or removing rows. Turning materials off preserves saved definitions.',
             )}
       </p>
     </Card>
   );
-  function removeTracer(index: number) {
-    if (!tracerReady || !tracerOpen || current.current !== request)
-      throw new Error('Tracer editor is locked or stale');
-    setTracers(table.filter((_, rowIndex) => rowIndex !== index));
+  function removeMaterial(index: number) {
+    if (!materialReady || !materialOpen || current.current !== request)
+      throw new Error('Material editor is locked or stale');
+    setMaterials(table.filter((_, rowIndex) => rowIndex !== index));
   }
-  const tracerTable = tracerOpen && (
+  const materialTable = materialOpen && (
     <Card
-      title={t('示踪物定义（每行对应同一个示踪物）', 'Tracer definitions (aligned rows)')}
+      title={t('材料定义（每行对应同一个材料）', 'Material definitions (aligned rows)')}
       description={t(
-        '每行对应一个示踪物。参数文件可填写内置文件名或运行位置上的有效路径；数值列留空时使用内核及参数文件中的定义；水同位素需设置正的含水层混合水量。',
-        'Each row defines one tracer. Parameter files may use built-in filenames or valid paths on the run host. Empty numeric columns use kernel and parameter-file definitions; water isotopes require positive aquifer mixing water.',
+        '每行对应一个材料。参数文件可填写内置文件名或运行位置上的有效路径；数值列留空时使用内核及参数文件中的定义；水同位素需设置正的含水层混合水量。',
+        'Each row defines one material. Parameter files may use built-in filenames or valid paths on the run host. Empty numeric columns use kernel and parameter-file definitions; water isotopes require positive aquifer mixing water.',
       )}
     >
       {definitionError && <Notice tone="error">{definitionError}</Notice>}
-      {tracerIssues.map(([zh, english]) => (
+      {materialIssues.map(([zh, english]) => (
         <Notice key={zh} tone="warning">
           {t(zh, english)}
         </Notice>
       ))}
-      {tracerTooLarge && (
+      {materialTooLarge && (
         <Notice tone="warning">
           {t(
-            '超过100个示踪物的定义仅展示前100项，请通过原始字段编辑；此表不会覆盖完整定义。',
-            'Over 100 tracers: only the first 100 are shown. Edit the raw fields; this table cannot replace the full definition.',
+            '超过100个材料的定义仅展示前100项，请通过原始字段编辑；此表不会覆盖完整定义。',
+            'Over 100 materials: only the first 100 are shown. Edit the raw fields; this table cannot replace the full definition.',
           )}
         </Notice>
       )}
@@ -1011,8 +1011,8 @@ export default function ConfigurationOptions({
         <table>
           <thead>
             <tr>
-              {tracerColumns.map((c) => (
-                <th key={c}>{t(...tracerLabels[c])}</th>
+              {materialColumns.map((c) => (
+                <th key={c}>{t(...materialLabels[c])}</th>
               ))}
               <th>{t('操作', 'Actions')}</th>
             </tr>
@@ -1020,45 +1020,45 @@ export default function ConfigurationOptions({
           <tbody>
             {table.map((row, index) => (
               <tr key={index}>
-                {tracerColumns.map((column) => {
-                  const id = `configuration-tracer-${index}-${column}`,
+                {materialColumns.map((column) => {
+                  const id = `configuration-material-${index}-${column}`,
                     set = (value: string) => {
-                      if (!tracerReady) throw new Error('Tracer editor is locked');
-                      setTracers(
+                      if (!materialReady) throw new Error('Material editor is locked');
+                      setMaterials(
                         table.map((r, i) => (i === index ? { ...r, [column]: value } : r)),
                       );
                     };
                   controls.push({
                     id,
-                    label: `${index + 1} ${t(...tracerLabels[column])}`,
+                    label: `${index + 1} ${t(...materialLabels[column])}`,
                     value: row[column],
                     type: column === 'TYPES' ? 'choice' : 'text',
                     options:
                       column === 'TYPES'
-                        ? tracerTypes.map(([value, zh, english]) => ({
+                        ? materialTypes.map(([value, zh, english]) => ({
                             value,
                             label: t(zh, english),
                           }))
                         : undefined,
-                    disabled: !tracerReady,
+                    disabled: !materialReady,
                     set,
                   });
                   return (
                     <td key={column}>
                       {column === 'TYPES' ? (
                         <Select
-                          disabled={!tracerReady}
-                          aria-label={`${index + 1} ${t(...tracerLabels[column])}`}
+                          disabled={!materialReady}
+                          aria-label={`${index + 1} ${t(...materialLabels[column])}`}
                           value={row[column]}
                           onChange={(e) => set(e.target.value)}
                         >
                           <option value="">{t('选择类型', 'Choose type')}</option>
-                          {row[column] && !tracerTypes.some(([kind]) => kind === row[column]) && (
+                          {row[column] && !materialTypes.some(([kind]) => kind === row[column]) && (
                             <option value={row[column]}>
                               {row[column]} · {t('当前源码类型待核对', 'Source type pending')}
                             </option>
                           )}
-                          {tracerTypes.map(([value, zh, english]) => (
+                          {materialTypes.map(([value, zh, english]) => (
                             <option value={value} key={value}>
                               {t(zh, english)}
                             </option>
@@ -1066,7 +1066,7 @@ export default function ConfigurationOptions({
                         </Select>
                       ) : (
                         <Input
-                          disabled={!tracerReady}
+                          disabled={!materialReady}
                           aria-label={`${index + 1} ${column}`}
                           value={row[column]}
                           onChange={(e) => set(e.target.value)}
@@ -1077,10 +1077,10 @@ export default function ConfigurationOptions({
                 })}
                 <td>
                   <ActionButton
-                    action={`configuration-tracer-${index}-remove`}
+                    action={`configuration-material-${index}-remove`}
                     label={t(`移除 ${row.NAMES || index + 1}`, `Remove ${row.NAMES || index + 1}`)}
-                    disabled={!tracerReady}
-                    run={() => removeTracer(index)}
+                    disabled={!materialReady}
+                    run={() => removeMaterial(index)}
                     aria-label={t(
                       `移除 ${row.NAMES || index + 1}`,
                       `Remove ${row.NAMES || index + 1}`,
@@ -1096,40 +1096,40 @@ export default function ConfigurationOptions({
       </div>
       <div className="button-row">
         <ActionButton
-          action="configuration-tracers-add"
-          label={t('增加示踪物', 'Add tracer')}
-          disabled={!tracerReady}
+          action="configuration-materials-add"
+          label={t('增加材料', 'Add material')}
+          disabled={!materialReady}
           run={() =>
-            setTracers([
+            setMaterials([
               ...table,
-              Object.fromEntries(tracerColumns.map((c) => [c, ''])) as (typeof table)[number],
+              Object.fromEntries(materialColumns.map((c) => [c, ''])) as (typeof table)[number],
             ])
           }
         >
-          {t('增加示踪物', 'Add tracer')}
+          {t('增加材料', 'Add material')}
         </ActionButton>
         <ActionButton
-          action="configuration-tracers-remove"
+          action="configuration-materials-remove"
           label={t('移除末行', 'Remove last row')}
-          disabled={!tracerReady || !table.length}
-          run={() => setTracers(table.slice(0, -1))}
+          disabled={!materialReady || !table.length}
+          run={() => setMaterials(table.slice(0, -1))}
         >
           {t('移除末行', 'Remove last row')}
         </ActionButton>
         <ActionButton
-          action="configuration-tracers-apply"
-          label={t('应用示踪物定义', 'Apply tracer definitions')}
-          disabled={!tracerReady || tracers === null}
+          action="configuration-materials-apply"
+          label={t('应用材料定义', 'Apply material definitions')}
+          disabled={!materialReady || materials === null}
           run={() => {
-            write(() => applyTracerSelection(overlay, fields, table));
-            setTracers(null);
+            write(() => applyMaterialSelection(overlay, fields, table));
+            setMaterials(null);
           }}
         >
-          {t('应用示踪物定义', 'Apply tracer definitions')}
+          {t('应用材料定义', 'Apply material definitions')}
         </ActionButton>
       </div>
       <p>
-        {t('示踪物数量', 'Tracer count')}: {table.length}
+        {t('材料数量', 'Material count')}: {table.length}
       </p>
       <p>
         {t(
@@ -1139,8 +1139,8 @@ export default function ConfigurationOptions({
       </p>
     </Card>
   );
-  const assets = (caseProcessVisible('tracer') ? values.process_files : []).map((asset) => {
-    const isOpen = opened[`${sourceKey}:${asset.file}`] ?? tracerOpen;
+  const assets = (caseProcessVisible('material') ? values.process_files : []).map((asset) => {
+    const isOpen = opened[`${sourceKey}:${asset.file}`] ?? materialOpen;
     return (
       <Advanced
         key={asset.file}
@@ -1329,20 +1329,20 @@ export default function ConfigurationOptions({
       </Notice>
       {error && <Notice tone="error">{error}</Notice>}
       {!ready && <p>{t('正在查询配置条件…', 'Checking configuration conditions…')}</p>}
-      {!stagedTracerModal && groups}
+      {!stagedMaterialModal && groups}
       {familyCards}
-      {tracerTable}
-      {stagedTracerModal && groups}
-      {modalActions && tracers !== null && (
+      {materialTable}
+      {stagedMaterialModal && groups}
+      {modalActions && materials !== null && (
         <Notice>
           {t(
-            '请先应用示踪物定义，再保存设置。',
-            'Apply tracer definitions before saving settings.',
+            '请先应用材料定义，再保存设置。',
+            'Apply material definitions before saving settings.',
           )}
         </Notice>
       )}
-      {caseProcessVisible('tracer') && (
-        <Card title={t('示踪过程文件', 'Tracer process files')}>
+      {caseProcessVisible('material') && (
+        <Card title={t('材料过程文件', 'Material process files')}>
           {ready && !overlay.process_files.length && (
             <p className="muted">
               {t(

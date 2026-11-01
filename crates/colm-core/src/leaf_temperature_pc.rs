@@ -1537,7 +1537,7 @@ fn solve_canopy_air(
 
 /// `:1901-2038`（`DEF_Interception_scheme = 1` 与 `DEF_VEG_SNOW`）：叶面蒸发/凝结记账、
 /// 湿雪比例与冠层融化/冻结（Niu 2004 的叶温拉回）。返回冠层融化、冻结的质量
-/// （`qmelt*deltim`、`qfrz*deltim`，示踪物用；没有相变时为 0）。
+/// （`qmelt*deltim`、`qfrz*deltim`，材料用；没有相变时为 0）。
 fn update_pc_canopy_water(
     water: &mut CanopyWater,
     wet_snow_fraction: &mut f64,

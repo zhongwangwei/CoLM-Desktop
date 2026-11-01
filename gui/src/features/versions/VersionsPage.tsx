@@ -583,7 +583,7 @@ export default function VersionsPage() {
       setTab('changes');
     }
   }
-  // 专家把自己的参数文件整份带进版本，用文件自己的名字（标准示踪物参数不用导入，直接在修改参数里改）。
+  // 专家把自己的参数文件整份带进版本，用文件自己的名字（标准材料参数不用导入，直接在修改参数里改）。
   async function importConfigurationProcess() {
     await execute(async () => {
       if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
@@ -1324,8 +1324,8 @@ export default function VersionsPage() {
             <Card
               title={t('参数改值', 'Parameter overrides')}
               description={t(
-                '相对父版本改了的参数；没列出的沿用父版本的值。全局、地类（IGBP / USGS）、PFT、PC、示踪物与泥沙参数都在「修改参数」里按类型改。',
-                'Parameters changed from the parent; anything not listed keeps the parent’s value. Edit global, land-class (IGBP / USGS), PFT, PC, tracer and sediment parameters by type under “Edit parameters”.',
+                '相对父版本改了的参数；没列出的沿用父版本的值。全局、地类（IGBP / USGS）、PFT、PC、材料与泥沙参数都在「修改参数」里按类型改。',
+                'Parameters changed from the parent; anything not listed keeps the parent’s value. Edit global, land-class (IGBP / USGS), PFT, PC, material and sediment parameters by type under “Edit parameters”.',
               )}
             >
               <div className="button-row versions-card-actions">
@@ -1510,8 +1510,8 @@ export default function VersionsPage() {
               <Card
                 title={t('开关改值', 'Switch values')}
                 description={t(
-                  '以 namelist 值写下的改动（示踪物设置，或以前按过程改的参数）。全局参数在"修改参数"里改一次，就会换成参数改值。',
-                  'Changes stored as namelist values (tracer settings, or parameters changed by process before). Changing a global parameter under "Edit parameters" turns it into a parameter override.',
+                  '以 namelist 值写下的改动（材料设置，或以前按过程改的参数）。全局参数在"修改参数"里改一次，就会换成参数改值。',
+                  'Changes stored as namelist values (material settings, or parameters changed by process before). Changing a global parameter under "Edit parameters" turns it into a parameter override.',
                 )}
               >
                 <table className="versions-table">

@@ -192,7 +192,7 @@ pub struct IrrigationFields<'a> {
     pub standard_water_table_depth: &'a [f64],
 }
 
-/// All fields in one common (non-PFT/BGC/urban/tracer) time restart block.
+/// All fields in one common (non-PFT/BGC/urban/material) time restart block.
 #[derive(Debug, Clone, Copy)]
 pub struct TimeRestartInput<'a> {
     pub dimensions: TimeRestartDimensions,
@@ -1049,12 +1049,12 @@ fn put_patch_last_4d(
 #[path = "time_restart_tests.rs"]
 mod time_restart_tests;
 
-/// `write_land_tracer_restart` 在没有陆面输运示踪物时写的"空事务"
-/// （`MOD_Tracer_Rest.F90:1257-1267`、`:461-488`）：`trc_land_restart_complete`（先 0 后 1，
+/// `write_land_material_restart` 在没有陆面输运材料时写的"空事务"
+/// （`MOD_Material_Rest.F90:1257-1267`、`:461-488`）：`trc_land_restart_complete`（先 0 后 1，
 /// 落盘为 1）、`trc_land_restart_schema = 5`、`trc_land_transport_count = 0`、
 /// `trc_aquifer_mixing_water_mm = DEF_MT_AQUIFER_MIXING_WATER_MM`。
 /// 只要任一 family 打开（`mt_any_enabled`），冷启动与每份续跑的陆面时间重启都带这四个标量。
-pub fn write_empty_land_tracer_transaction(
+pub fn write_empty_land_material_transaction(
     path: impl AsRef<Path>,
     aquifer_mixing_water_mm: f64,
 ) -> Result<()> {

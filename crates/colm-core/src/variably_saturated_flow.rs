@@ -4416,13 +4416,13 @@ pub struct VariableSaturatedFlowOutput {
     pub balance_error_mm: f64,
     /// `qinfl_fld`：漫滩再入渗（按淹没比例折算，mm/s），报给河道扣账；没开回馈时为 0。
     pub flood_infiltration_mm_s: f64,
-    /// 只供示踪物记账的诊断（`WATER_VSF` 的可选输出）。
-    pub tracer: VariableSaturatedTracerDiagnostics,
+    /// 只供材料记账的诊断（`WATER_VSF` 的可选输出）。
+    pub material: VariableSaturatedMaterialDiagnostics,
 }
 
-/// `WATER_VSF` 只为示踪物导出的量（上游的 `*_trc` 实参）。
+/// `WATER_VSF` 只为材料导出的量（上游的 `*_trc` 实参）。
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct VariableSaturatedTracerDiagnostics {
+pub struct VariableSaturatedMaterialDiagnostics {
     /// `permeable_soil_out`。
     pub permeable: Vec<bool>,
     /// `qgtop_out`：交给土壤求解器的地表入流 [mm/s]（不透水表层亏损处理之后）。
@@ -4454,7 +4454,7 @@ fn layer_water_capacity_kg_m2(layer_thickness_m: f64, density_kg_m3: f64) -> f64
 /// Port of `MOD_SoilSnowHydrology:WATER_VSF`.
 ///
 /// 移植了土壤/城市（0、1）、动态湿地（2）与干湖（4，`is_dry_lake`）四支；
-/// 冰川、SNICAR、CaMa 洪水与示踪物一律显式拒绝。
+/// 冰川、SNICAR、CaMa 洪水与材料一律显式拒绝。
 ///
 /// 步骤顺序照抄上游：体积分数与冰 → 地表/地下产流 → 水位一致性修正 →
 /// [`soil_water_vertical_movement`] → 回填 `wliq_soisno` → 凝结 → 冰汇 →
@@ -4775,15 +4775,15 @@ pub fn variably_saturated_flow_step(
 
     // `:1176-1208` 不透水表层上的蒸发亏损（`qgtop < 0`）：先由积水承担，余下的从表层扣；
     // 冻结（`t <= tfrz` 且有冰）时先扣冰再扣液，否则先扣液再扣冰。
-    let mut tracer = VariableSaturatedTracerDiagnostics {
+    let mut material = VariableSaturatedMaterialDiagnostics {
         permeable: permeable.clone(),
-        ..VariableSaturatedTracerDiagnostics::default()
+        ..VariableSaturatedMaterialDiagnostics::default()
     };
     if !permeable[0] && ground_water_flux_mm_s < 0.0 {
         let deficit = -ground_water_flux_mm_s * dt;
         let surface_loss = state.surface_water_mm.max(0.0).min(deficit);
         if surface_loss > 0.0 {
-            tracer.impervious_surface_loss_mm += surface_loss;
+            material.impervious_surface_loss_mm += surface_loss;
             state.surface_water_mm = (state.surface_water_mm - surface_loss).max(0.0);
         }
         let soil_deficit = (deficit - surface_loss).max(0.0);
@@ -4806,12 +4806,12 @@ pub fn variably_saturated_flow_step(
                 };
             state.liquid_water_kg_m2[0] = (liquid - liquid_loss).max(0.0);
             state.ice_water_kg_m2[0] = (ice - ice_loss).max(0.0);
-            tracer.impervious_soil_evaporation_mm += liquid_loss;
-            tracer.impervious_soil_sublimation_mm += ice_loss;
+            material.impervious_soil_evaporation_mm += liquid_loss;
+            material.impervious_soil_sublimation_mm += ice_loss;
         }
         ground_water_flux_mm_s = 0.0;
     }
-    tracer.ground_flux_to_solver_mm_s = ground_water_flux_mm_s;
+    material.ground_flux_to_solver_mm_s = ground_water_flux_mm_s;
 
     let mut soil_state = VariableSaturatedSoilWaterState {
         ponding_depth_mm: state.surface_water_mm,
@@ -4908,13 +4908,13 @@ pub fn variably_saturated_flow_step(
             liquid -= frost_excess;
         }
         state.surface_water_mm += frost_excess;
-        tracer.frost_displaced_mm = frost_excess;
+        material.frost_displaced_mm = frost_excess;
         let mut dew_retained = 0.0;
         if dew_input > 0.0 {
             dew_retained = (dew_capacity - liquid).max(0.0).min(dew_input);
             liquid += dew_retained;
             state.surface_water_mm = (state.surface_water_mm + dew_input) - dew_retained;
-            tracer.dew_overflow_mm = dew_input - dew_retained;
+            material.dew_overflow_mm = dew_input - dew_retained;
         }
         state.liquid_water_kg_m2[0] = liquid;
         // `:1354`：`frost_excess + dew_input - dew_retained > 0` 时记下溢出带来的地表径流。
@@ -5002,7 +5002,7 @@ pub fn variably_saturated_flow_step(
     };
 
     if late_candidate > 0.0 {
-        tracer.late_runoff_mm = (surface_runoff_mm_s - runoff_before_late_mm_s).max(0.0) * dt;
+        material.late_runoff_mm = (surface_runoff_mm_s - runoff_before_late_mm_s).max(0.0) * dt;
     }
 
     // 冰阻抗：冻结层的导水率按含冰比例指数衰减。
@@ -5050,7 +5050,7 @@ pub fn variably_saturated_flow_step(
     state.matric_potential_mm = soil_state.matric_potential_mm.clone();
     state.hydraulic_conductivity_mm_s = hydraulic_conductivity_mm_s.clone();
 
-    let tracer = VariableSaturatedTracerDiagnostics {
+    let material = VariableSaturatedMaterialDiagnostics {
         transpiration_actual_mm: soil.transpiration_actual_mm.clone(),
         transpiration_aquifer_mm: soil.transpiration_aquifer_mm,
         ice_sink_kg_m2: ice_sink_kg_m2.clone(),
@@ -5058,7 +5058,7 @@ pub fn variably_saturated_flow_step(
         subsurface_source_layer_mm: soil.subsurface_source_layer_mm.clone(),
         subsurface_source_surface_mm: soil.subsurface_source_surface_mm,
         subsurface_source_aquifer_mm: soil.subsurface_source_aquifer_mm,
-        ..tracer
+        ..material
     };
     Ok(VariableSaturatedFlowOutput {
         water_input_mm_s: input.ground_water_flux_mm_s,
@@ -5078,7 +5078,7 @@ pub fn variably_saturated_flow_step(
         hydraulic_conductivity_mm_s,
         balance_error_mm: solver_balance_error_mm,
         flood_infiltration_mm_s,
-        tracer,
+        material,
     })
 }
 
@@ -5401,7 +5401,7 @@ pub fn soil_water_vertical_movement(
     // _102 = _100 + deficit`，**不**融合（旧内核的出货汇编是 `fmadd`）。CN-Cng 1 月第 57 步
     // 的 `zwt` 1 ULP 就是从这里来的（第 402 轮探针：`get_zwt_from_wa` 的入参 `-reswater` 已不同）。
     let water_exchange_mm = input.subsurface_runoff_mm_s * input.time_step_seconds + deficit_mm;
-    // 交换前后各层可见水量（示踪物记账用）：水位以上整层 `vliq*dz`，水位所在层与以下
+    // 交换前后各层可见水量（材料记账用）：水位以上整层 `vliq*dz`，水位所在层与以下
     // `FMA(vliq, max(zwt-zi(l-1),0), porsl*min(dz, zi(l)-zwt))`（`:352-358`）。
     let layer_volumes = |liquid: &[f64], water_table_depth_mm: f64| -> Vec<f64> {
         (0..nlev)

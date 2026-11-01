@@ -170,7 +170,7 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
         // 认出**所有** history 写出例程，不是只认 `write_history_variable*`。
         // 实测两个源文件里出现过的例程名只有五个：
         // `write_history_variable_{2d,3d,4d,urb_2d}` 与
-        // `write_history_tracer_ratio_2d`（甲烷模块按「稻区面积强度」写的那一个）。
+        // `write_history_material_ratio_2d`（甲烷模块按「稻区面积强度」写的那一个）。
         // 按更窄的前缀匹配会把它整条漏掉 —— 漏报正是这张表最不能犯的错：
         // GUI 会说「这个内核产不出」，而内核明明写得出来。
         if t.contains("CALL write_history_") {
@@ -833,15 +833,15 @@ mod tests {
         );
     }
 
-    /// 甲烷模块的「稻区面积强度」诊断走 `write_history_tracer_ratio_2d`，例程名里
+    /// 甲烷模块的「稻区面积强度」诊断走 `write_history_material_ratio_2d`，例程名里
     /// 没有 `_variable` 段。按更窄的前缀匹配会整条漏掉，所以这条测试把它钉在
     /// 提取器的覆盖面上（`f_methane_surf_flux_rice_intensive` 曾在 618 个写出点
     /// 之外）。
     #[test]
-    fn a_tracer_ratio_write_site_is_a_history_write_site() {
+    fn a_material_ratio_write_site_is_a_history_write_site() {
         let vars = extract(&corpus(
             "IF (DEF_RICE) THEN\n\
-             CALL write_history_tracer_ratio_2d (.true., &\n\
+             CALL write_history_material_ratio_2d (.true., &\n\
                 hist_ch4_rice_flux_mean, hist_ch4_rice_area_frac, file_hist, &\n\
                 'f_methane_surf_flux_rice_intensive', itime_in_file, filter, &\n\
                 'rice-paddy CH4 surface flux; paddy-area intensive', 'mol/m2/s')\n\
@@ -851,7 +851,7 @@ mod tests {
         let ratio = vars
             .iter()
             .find(|v| v.name == "methane_surf_flux_rice_intensive")
-            .expect("the tracer ratio writer must count as a history write site");
+            .expect("the material ratio writer must count as a history write site");
         assert_eq!(ratio.runtime.as_deref(), Some("DEF_RICE"));
     }
 

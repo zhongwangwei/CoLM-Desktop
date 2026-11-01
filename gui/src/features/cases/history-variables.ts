@@ -393,7 +393,7 @@ export function historyPreset(
  */
 export function historyBlockedReason(reason: string, en: boolean): string {
   if (!en) return reason;
-  if (reason === '需要 CH4 甲烷示踪物') return 'Requires the CH4 methane tracer';
+  if (reason === '需要 CH4 甲烷材料') return 'Requires the CH4 methane material';
   const kernel = /^本内核未编入：需要 (.+)$/.exec(reason);
   if (kernel) return `Not compiled into this kernel: requires ${kernel[1]}`;
   const needs = /^需要 (.+)$/.exec(reason);

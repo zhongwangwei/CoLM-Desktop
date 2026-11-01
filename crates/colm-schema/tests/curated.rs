@@ -117,7 +117,7 @@ fn vendored_source_keeps_upstream_numeric_fixes() {
         "LULC_IGBP_PC",
         "BGC",
         "LULCC",
-        "TRACER",
+        "MATERIAL",
         "Campbell_SOIL_MODEL",
         "vanGenuchten_Mualem_SOIL_MODEL",
         "LATERAL_FLOW",

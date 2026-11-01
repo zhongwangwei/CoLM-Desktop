@@ -444,7 +444,7 @@ export default function ModelSettings({
             disabled={disabled || loading}
             onCaseChange={onCaseChange}
             hasSettings={(id, states) =>
-              id === 'tracer' ||
+              id === 'material' ||
               fields.some(
                 (field) =>
                   processSettingOwner(field, states) === id &&
@@ -657,7 +657,7 @@ function ProcessSettingsDialog({
   lockedNow.current = disabled;
   const titles: Record<string, [string, string]> = {
     DEF_USE_BGC: ['BGC 设置', 'BGC settings'],
-    tracer: ['选择示踪剂与配置', 'Choose and configure tracers'],
+    material: ['选择材料与配置', 'Choose and configure materials'],
     DEF_USE_GridRiverLakeFlow: ['河湖流与水库设置', 'River and reservoir settings'],
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
@@ -669,8 +669,8 @@ function ProcessSettingsDialog({
   };
   const title = titles[process] ?? ['过程设置', 'Process settings'];
   const saveLabel =
-    process === 'tracer'
-      ? t('保存并启用示踪', 'Save and enable tracers')
+    process === 'material'
+      ? t('保存并启用材料', 'Save and enable materials')
       : t('保存设置', 'Save settings');
   useEffect(() => {
     live.current = true;
@@ -726,11 +726,11 @@ function ProcessSettingsDialog({
       )}
     >
       {error && <Notice tone="error">{error}</Notice>}
-      {process === 'tracer' && (
+      {process === 'material' && (
         <Notice>
           {t(
-            '先选择水同位素、甲烷、氯离子或河道泥沙，并完善相关参数；手工修改定义表后请先应用定义。保存时一起启用示踪，取消不会打开示踪开关或更改已有定义。',
-            'Choose water isotopes, methane, chloride or river sediment and complete their settings. Apply any manual table edits first. Saving enables tracers together; cancelling keeps the switch and existing definitions unchanged.',
+            '先选择水同位素、甲烷、氯离子或河道泥沙，并完善相关参数；手工修改定义表后请先应用定义。保存时一起启用材料，取消不会打开材料开关或更改已有定义。',
+            'Choose water isotopes, methane, chloride or river sediment and complete their settings. Apply any manual table edits first. Saving enables materials together; cancelling keeps the switch and existing definitions unchanged.',
           )}
         </Notice>
       )}

@@ -1,6 +1,6 @@
 //! 河道续跑文件 `<case>_restart_gridriver_<date>_lc<year>.nc`（`READ/WRITE_GridRiverLakeTimeVars`）。
 //!
-//! schema 2（无水库、示踪物）：标记、`gridriver_ucatch_identity`、
+//! schema 2（无水库、材料）：标记、`gridriver_ucatch_identity`、
 //! `wdsrf_ucat`、`veloc_riv`、`acctime_rnof`、`acc_rnof_uc`、`volwater_ucat`；
 //! 开堤防时再加 `levsto`（`gridriver_restart_feature_levee = 1`），开分汊时再加
 //! `wdsrf_ucat_prev` 与路径的 `bif_path_signature`、`pth_veloc`、`pth_momen`
@@ -502,15 +502,15 @@ pub fn read_river_history(
     })
 }
 
-/// `RIVER_TRACER_RESTART_SCHEMA_VERSION`。
-const RIVER_TRACER_SCHEMA: i32 = 2;
+/// `RIVER_MATERIAL_RESTART_SCHEMA_VERSION`。
+const RIVER_MATERIAL_SCHEMA: i32 = 2;
 
-/// `write_tracer_restart`：在河道续跑文件末尾追加示踪物事务（先 `complete = 0`，网络元数据、
-/// 逐示踪物的质量/待释放/累计输入/堤内池（有溶解度上限的另带固相），共享的 `acc_rnof_ref`，
-/// history 累加行，最后写描述符并 `complete = 1`）。没有输运示踪物时写空事务。
-/// `write_tracer_restart` 在只有 provider 示踪物（没有通用输运）时：提交一个空事务，
-/// 以后加上输运示踪物的续跑能干净地冷启动，而不是把它当成写到一半的事务。
-pub fn write_empty_river_tracers(path: &Path) -> Result<()> {
+/// `write_material_restart`：在河道续跑文件末尾追加材料事务（先 `complete = 0`，网络元数据、
+/// 逐材料的质量/待释放/累计输入/堤内池（有溶解度上限的另带固相），共享的 `acc_rnof_ref`，
+/// history 累加行，最后写描述符并 `complete = 1`）。没有输运材料时写空事务。
+/// `write_material_restart` 在只有 provider 材料（没有通用输运）时：提交一个空事务，
+/// 以后加上输运材料的续跑能干净地冷启动，而不是把它当成写到一半的事务。
+pub fn write_empty_river_materials(path: &Path) -> Result<()> {
     let mut file =
         netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
     let mut scalar = |name: &str, value: i32| -> Result<()> {
@@ -524,19 +524,19 @@ pub fn write_empty_river_tracers(path: &Path) -> Result<()> {
     };
     scalar("mt_river_restart_complete", 0)?;
     scalar("mt_river_descriptor_count", 0)?;
-    scalar("mt_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+    scalar("mt_river_restart_schema", RIVER_MATERIAL_SCHEMA)?;
     scalar("mt_river_restart_complete", 1)?;
     file.close()?;
     Ok(())
 }
 
-pub fn write_river_tracers(
+pub fn write_river_materials(
     path: &Path,
     network: &RiverNetwork,
-    tracers: &mut super::tracer::RiverTracers,
+    materials: &mut super::material::RiverMaterials,
     compression_level: u8,
 ) -> Result<()> {
-    let identity = tracers.set.descriptor_identity();
+    let identity = materials.set.descriptor_identity();
     let mut file =
         netcdf::append(path).with_context(|| format!("cannot reopen {}", path.display()))?;
     let scalar = |file: &mut netcdf::FileMut, name: &str, value: i32| -> Result<()> {
@@ -551,12 +551,12 @@ pub fn write_river_tracers(
     if identity.is_empty() {
         scalar(&mut file, "mt_river_restart_complete", 0)?;
         scalar(&mut file, "mt_river_descriptor_count", 0)?;
-        scalar(&mut file, "mt_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+        scalar(&mut file, "mt_river_restart_schema", RIVER_MATERIAL_SCHEMA)?;
         scalar(&mut file, "mt_river_restart_complete", 1)?;
         file.close()?;
         return Ok(());
     }
-    tracers.validate_for_restart()?;
+    materials.validate_for_restart()?;
     scalar(&mut file, "mt_river_restart_complete", 0)?;
     let vector = |file: &mut netcdf::FileMut, name: &str, values: &[f64]| -> Result<()> {
         let mut variable = file.add_variable::<f64>(name, &["ucatch"])?;
@@ -579,28 +579,28 @@ pub fn write_river_tracers(
         .map(|&next| f64::from(if next >= 0 { next + 1 } else { next }))
         .collect::<Vec<_>>();
     vector(&mut file, "mt_ucat_next_meta", &next)?;
-    let transport = tracers.set.transport_indices().collect::<Vec<_>>();
+    let transport = materials.set.transport_indices().collect::<Vec<_>>();
     for &itrc in &transport {
-        let tracer = &tracers.set.tracers[itrc];
-        let name = tracer.name.trim();
-        vector(&mut file, &format!("mt_mass_{name}"), &tracers.mass[itrc])?;
+        let material = &materials.set.materials[itrc];
+        let name = material.name.trim();
+        vector(&mut file, &format!("mt_mass_{name}"), &materials.mass[itrc])?;
         vector(
             &mut file,
             &format!("mt_inpbuf_{name}"),
-            &tracers.inp_buf[itrc],
+            &materials.inp_buf[itrc],
         )?;
         vector(
             &mut file,
             &format!("mt_accinp_{name}"),
-            &tracers.acc_inp[itrc],
+            &materials.acc_inp[itrc],
         )?;
         vector(
             &mut file,
             &format!("mt_levsto_{name}"),
-            &tracers.levsto[itrc],
+            &materials.levsto[itrc],
         )?;
-        if tracer.has_dissolved_limit() {
-            let (solid, levsto_solid) = tracers.solid.as_ref().context("solid pools")?;
+        if material.has_dissolved_limit() {
+            let (solid, levsto_solid) = materials.solid.as_ref().context("solid pools")?;
             vector(&mut file, &format!("mt_solid_{name}"), &solid[itrc])?;
             vector(
                 &mut file,
@@ -609,11 +609,11 @@ pub fn write_river_tracers(
             )?;
         }
     }
-    vector(&mut file, "acc_rnof_ref", &tracers.acc_rnof_ref)?;
+    vector(&mut file, "acc_rnof_ref", &materials.acc_rnof_ref)?;
     // 终点不满窗口时历史行已经被冲刷清零，续跑要用冲刷前的快照（`histsnap`）。
-    let h = tracers.history_for_restart();
+    let h = materials.history_for_restart();
     for &itrc in &transport {
-        let name = tracers.set.tracers[itrc].name.trim().to_owned();
+        let name = materials.set.materials[itrc].name.trim().to_owned();
         vector(
             &mut file,
             &format!("mt_hist_stor_{name}"),
@@ -636,7 +636,7 @@ pub fn write_river_tracers(
     vector(&mut file, "mt_hist_acctime", &h.acctime)?;
     file.add_dimension(
         "mt_river_descriptor_field",
-        colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
+        colm_core::material::DESCRIPTOR_IDENTITY_WIDTH,
     )?;
     file.add_dimension("mt_river_transport_material", identity.len())?;
     scalar(
@@ -650,23 +650,23 @@ pub fn write_river_tracers(
         &["mt_river_transport_material", "mt_river_descriptor_field"],
     )?
     .put_values(&flat, ..)?;
-    scalar(&mut file, "mt_river_restart_schema", RIVER_TRACER_SCHEMA)?;
+    scalar(&mut file, "mt_river_restart_schema", RIVER_MATERIAL_SCHEMA)?;
     scalar(&mut file, "mt_river_restart_complete", 1)?;
     file.close()?;
     Ok(())
 }
 
-/// `read_tracer_restart`：续跑里有完整、描述符相符的河道示踪物事务就读回并返回真；没有提交标记
+/// `read_material_restart`：续跑里有完整、描述符相符的河道材料事务就读回并返回真；没有提交标记
 /// （旧格式或 mkinidata 写的初始续跑）、描述符不符时返回假（调用方按水量冷启动）。读回后
 /// 当前配置下没有堤的单元流域把堤内池并回可见池。
-pub fn read_river_tracers(
+pub fn read_river_materials(
     path: &Path,
     network: &RiverNetwork,
     levee: Option<&super::levee::Levee>,
-    tracers: &mut super::tracer::RiverTracers,
+    materials: &mut super::material::RiverMaterials,
     water_history: Option<&super::RiverHistory>,
 ) -> Result<bool> {
-    let malformed = "malformed/incomplete river tracer restart descriptor metadata";
+    let malformed = "malformed/incomplete river material restart descriptor metadata";
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let Some(complete) = file.variable("mt_river_restart_complete") else {
         return Ok(false);
@@ -682,8 +682,8 @@ pub fn read_river_tracers(
         .context(malformed)?
         .get_value(..)?;
     ensure!((0..=1000).contains(&count), "{malformed}");
-    let expected = tracers.set.descriptor_identity();
-    if schema != 1 && schema != RIVER_TRACER_SCHEMA {
+    let expected = materials.set.descriptor_identity();
+    if schema != 1 && schema != RIVER_MATERIAL_SCHEMA {
         return Ok(false);
     }
     if count == 0 {
@@ -694,7 +694,7 @@ pub fn read_river_tracers(
         .context(malformed)?
         .get_values::<i32, _>(..)?;
     ensure!(
-        identity.len() == count as usize * colm_core::tracer::DESCRIPTOR_IDENTITY_WIDTH,
+        identity.len() == count as usize * colm_core::material::DESCRIPTOR_IDENTITY_WIDTH,
         "{malformed}"
     );
     let flat = expected.iter().flatten().copied().collect::<Vec<i32>>();
@@ -708,12 +708,12 @@ pub fn read_river_tracers(
                 let values = variable.get_values::<f64, _>(..)?;
                 ensure!(
                     values.len() == n,
-                    "incomplete or malformed committed river tracer restart ({name})"
+                    "incomplete or malformed committed river material restart ({name})"
                 );
                 Ok(Some(values))
             }
             None if required => {
-                bail!("incomplete or malformed committed river tracer restart ({name})")
+                bail!("incomplete or malformed committed river material restart ({name})")
             }
             None => Ok(None),
         }
@@ -731,36 +731,36 @@ pub fn read_river_tracers(
     });
     ensure!(
         matches,
-        "river/lake tracer restart belongs to a different catchment network"
+        "river/lake material restart belongs to a different catchment network"
     );
     let numucat = vector("mt_numucat_meta", true)?.expect("required");
     ensure!(
         numucat.iter().all(|&v| v.round() as usize == n),
-        "river/lake tracer restart catchment-count metadata is inconsistent"
+        "river/lake material restart catchment-count metadata is inconsistent"
     );
-    let transport = tracers.set.transport_indices().collect::<Vec<_>>();
+    let transport = materials.set.transport_indices().collect::<Vec<_>>();
     for &itrc in &transport {
-        let tracer = tracers.set.tracers[itrc].clone();
-        let name = tracer.name.trim().to_owned();
-        tracers.mass[itrc] = vector(&format!("mt_mass_{name}"), true)?.expect("required");
-        tracers.inp_buf[itrc] = vector(&format!("mt_inpbuf_{name}"), true)?.expect("required");
-        tracers.levsto[itrc] = vector(&format!("mt_levsto_{name}"), true)?.expect("required");
-        if schema >= 2 && tracer.has_dissolved_limit() {
-            let (solid, levsto_solid) = tracers.solid.as_mut().context("solid pools")?;
+        let material = materials.set.materials[itrc].clone();
+        let name = material.name.trim().to_owned();
+        materials.mass[itrc] = vector(&format!("mt_mass_{name}"), true)?.expect("required");
+        materials.inp_buf[itrc] = vector(&format!("mt_inpbuf_{name}"), true)?.expect("required");
+        materials.levsto[itrc] = vector(&format!("mt_levsto_{name}"), true)?.expect("required");
+        if schema >= 2 && material.has_dissolved_limit() {
+            let (solid, levsto_solid) = materials.solid.as_mut().context("solid pools")?;
             solid[itrc] = vector(&format!("mt_solid_{name}"), true)?.expect("required");
             levsto_solid[itrc] =
                 vector(&format!("mt_levsto_solid_{name}"), true)?.expect("required");
         }
-        tracers.acc_inp[itrc] = vector(&format!("mt_accinp_{name}"), true)?.expect("required");
+        materials.acc_inp[itrc] = vector(&format!("mt_accinp_{name}"), true)?.expect("required");
     }
-    tracers.acc_rnof_ref = vector("acc_rnof_ref", true)?.expect("required");
+    materials.acc_rnof_ref = vector("acc_rnof_ref", true)?.expect("required");
     // 材料历史行：整组成套存在才恢复（上游 `hist_complete` 的逐变量探针）。重启落在窗口中间
     // 时续接这一窗，第一个记录才与不中断的运行一致；落在窗口边界上时调用方随后会按
     // `hist_acc_window_restored = .false.` 调 `drop_hist_window` 丢掉这份完整窗口。
     // 缺任何一行都整组不读：半套行配上整窗分母会算错均值，不如从重启处重开。
     let mut hist_complete = true;
     for &itrc in &transport {
-        let name = tracers.set.tracers[itrc].name.trim().to_owned();
+        let name = materials.set.materials[itrc].name.trim().to_owned();
         for prefix in [
             "mt_hist_stor_",
             "mt_hist_levsto_",
@@ -775,20 +775,20 @@ pub fn read_river_tracers(
         && file.variable("mt_hist_levsto_water").is_some();
     if hist_complete {
         for &itrc in &transport {
-            let name = tracers.set.tracers[itrc].name.trim().to_owned();
-            tracers.history.storage_mass[itrc] =
+            let name = materials.set.materials[itrc].name.trim().to_owned();
+            materials.history.storage_mass[itrc] =
                 vector(&format!("mt_hist_stor_{name}"), true)?.expect("required");
-            tracers.history.levsto_mass[itrc] =
+            materials.history.levsto_mass[itrc] =
                 vector(&format!("mt_hist_levsto_{name}"), true)?.expect("required");
-            tracers.history.out[itrc] =
+            materials.history.out[itrc] =
                 vector(&format!("mt_hist_out_{name}"), true)?.expect("required");
-            tracers.history.bifout[itrc] =
+            materials.history.bifout[itrc] =
                 vector(&format!("mt_hist_bifout_{name}"), true)?.expect("required");
         }
-        tracers.history.water_storage = vector("mt_hist_water_storage", true)?.expect("required");
-        tracers.history.levsto_water = vector("mt_hist_levsto_water", true)?.expect("required");
+        materials.history.water_storage = vector("mt_hist_water_storage", true)?.expect("required");
+        materials.history.levsto_water = vector("mt_hist_levsto_water", true)?.expect("required");
         // 老文件没有材料自己的时钟（上游过渡期）：退回水量历史时钟 `acctime_ucat`。
-        tracers.history.acctime = match file.variable("mt_hist_acctime") {
+        materials.history.acctime = match file.variable("mt_hist_acctime") {
             Some(_) => vector("mt_hist_acctime", true)?.expect("required"),
             None => match water_history {
                 Some(history) => history.acctime.clone(),
@@ -796,9 +796,9 @@ pub fn read_river_tracers(
             },
         };
     } else {
-        tracers.history.reset();
+        materials.history.reset();
     }
-    tracers.validate_for_restart()?;
+    materials.validate_for_restart()?;
     // 当前配置下没有堤的单元流域：堤内池并回可见池（开了堤防才有 `has_levee`）。
     if let Some(levee) = levee {
         for i in 0..n {
@@ -806,10 +806,10 @@ pub fn read_river_tracers(
                 continue;
             }
             for &itrc in &transport {
-                tracers.mass[itrc][i] += tracers.levsto[itrc][i];
-                tracers.levsto[itrc][i] = 0.0;
-                if tracers.set.tracers[itrc].has_dissolved_limit() {
-                    if let Some((solid, levsto_solid)) = tracers.solid.as_mut() {
+                materials.mass[itrc][i] += materials.levsto[itrc][i];
+                materials.levsto[itrc][i] = 0.0;
+                if materials.set.materials[itrc].has_dissolved_limit() {
+                    if let Some((solid, levsto_solid)) = materials.solid.as_mut() {
                         solid[itrc][i] += levsto_solid[itrc][i];
                         levsto_solid[itrc][i] = 0.0;
                     }
@@ -817,6 +817,6 @@ pub fn read_river_tracers(
             }
         }
     }
-    tracers.validate_for_restart()?;
+    materials.validate_for_restart()?;
     Ok(true)
 }

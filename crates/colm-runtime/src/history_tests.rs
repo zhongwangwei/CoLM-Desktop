@@ -125,8 +125,8 @@ fn binding() -> StandardLctStepBinding<'static> {
         co2_volume_fraction: 385.04e-6,
         partial_pressures_pa: None,
         flood: None,
-        tracer_ratios: None,
-        flood_tracer: None,
+        material_ratios: None,
+        flood_material: None,
     }
 }
 
@@ -1265,7 +1265,7 @@ fn unassigned_saturated_fraction_still_counts_in_the_grid_denominator() {
         root_uptake_amount_mm: Vec::new(),
         matric_potential_mm: Vec::new(),
         hydraulic_conductivity_mm_s: Vec::new(),
-        tracer: None,
+        material: None,
     };
     let mut accumulator = HistoryAccumulator::default();
     set_lct_fluxes(&mut accumulator, 0, &water, true).unwrap();

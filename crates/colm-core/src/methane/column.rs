@@ -1,4 +1,4 @@
-//! `methane`（`MOD_Tracer_Reactive_Methane_Physics`）：一个分量列的一步。
+//! `methane`（`MOD_Material_Reactive_Methane_Physics`）：一个分量列的一步。
 //!
 //! 淹没比例 → 饱和/非饱和两相浓度按面积变化重分配 → 年度累加 → 两相各自
 //! `split → prod → oxid → ebul → aere → tran` → 按淹没比例合并 → 列收支检查。

@@ -192,7 +192,7 @@ fn destructive_click(args: &Value) -> bool {
                 | "resource-discard"
                 | "process-settings-cancel"
                 | "multisite-clear"
-                | "configuration-tracers-remove"
+                | "configuration-materials-remove"
                 | "configuration-stomatal-reset"
                 | "prep-stop"
                 | "new-scan-stop"

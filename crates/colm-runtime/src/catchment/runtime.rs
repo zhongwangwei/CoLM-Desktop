@@ -223,7 +223,7 @@ impl CatchmentRuntime {
             .first()
             .context("a catchment case has at least one patch")?
             .physics;
-        let grid = colm_init::colm_soil_grid(colm_core::tracer::state::SOIL_LAYERS)?;
+        let grid = colm_init::colm_soil_grid(colm_core::material::state::SOIL_LAYERS)?;
         let params = SubsurfaceParams {
             deltime: setup.time_step_seconds,
             ice_impedance: physics.soil_ice_impedance,

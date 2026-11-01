@@ -158,7 +158,7 @@ fn upgrade_legacy_stomatal_records(overlay: &mut Overlay) {
 
 /// Only actual coefficients belong to a model; selecting existing schemes is case configuration.
 ///
-/// 上游 7d2fca93 把示踪物拆成 MaterialTransport：物理系数前缀是 `DEF_ISO_*` / `DEF_MT_*`
+/// 上游 7d2fca93 把材料拆成 MaterialTransport：物理系数前缀是 `DEF_ISO_*` / `DEF_MT_*`
 /// （`DEF_ISO_USE_FRACTIONATION` 一类开关除外，它们不是 Real）。family 开关、名单与参数
 /// 文件字段都是算例选择，不属于模型。
 pub fn is_model_field(key: &str) -> bool {
@@ -373,7 +373,7 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
             "parameter duplicated in physics"
         );
         if let Some(file) = &record.scope_instance.process_file {
-            // 不带文件的改动只能记在示踪物标准参数文件上，运行时改到算例自己的那份；限定文件名和组，
+            // 不带文件的改动只能记在材料标准参数文件上，运行时改到算例自己的那份；限定文件名和组，
             // 免得拼错的文件名或放错组的参数静默地不起作用。
             if !overlay
                 .process_files
@@ -392,7 +392,7 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
                         &record.raw_key,
                         group
                     ),
-                    "process override has no frozen process asset and is not a standard tracer parameter of {file}"
+                    "process override has no frozen process asset and is not a standard material parameter of {file}"
                 );
             }
         }
@@ -444,7 +444,7 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
         if let Value::Str(raw) = literal(text)? {
             // `DEF_SOLUTE_PARAM_FILES` 是列表，其余三个是单路径；统一拆成路径再逐条核对资产。
             let paths = if key.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
-                colm_namelist::tracer_files::param_file_paths(&raw)?
+                colm_namelist::material_files::param_file_paths(&raw)?
             } else {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {

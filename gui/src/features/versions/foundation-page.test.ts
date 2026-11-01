@@ -696,7 +696,7 @@ test('saved drafts can return while unsaved model edits keep the return button l
   assert.ok(!p.calls.some((call) => call.command === 'model_freeze'));
 });
 
-test('tracer and sediment parameters live in the parameter dialog, not a separate block', async () => {
+test('material and sediment parameters live in the parameter dialog, not a separate block', async () => {
   const p = page('PFT');
   await p.mount();
   assert.ok(!p.elements.some((e) => e.type === 'ConfigurationOptions'));

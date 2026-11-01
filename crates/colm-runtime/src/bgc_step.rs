@@ -662,7 +662,7 @@ pub struct BgcRuntime {
     pub deltim: f64,
     /// `DEF_USE_IRRIGATION`（CROP）的设置；灌溉状态本身在 patch 状态上。
     pub irrigation: Option<colm_core::IrrigationSettings>,
-    /// CH4 provider（注册了 CH4 示踪物时）：配置与本 patch 的静态量。
+    /// CH4 provider（注册了 CH4 材料时）：配置与本 patch 的静态量。
     pub methane: Option<(
         crate::methane::MethaneSetup,
         colm_core::methane::driver::MethaneSite,
@@ -857,7 +857,7 @@ impl BgcRuntime {
         self.update_data(begin, idate, bgc)
     }
 
-    /// 湖泊 patch 的甲烷（`tracer_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在第
+    /// 湖泊 patch 的甲烷（`material_lake_step` → `ch4_impl_lake_step`）：`CoLMMAIN` 之后、在第
     /// `isub`/`nsub` 个水体子步里以子步步长跑；`nsub > 1` 时诊断量按时间加权平均（`mean`）。
     /// 动态湖：本子步物理之后 `wdsrf < 100 .or. zwt > 0` 时走干湖支
     /// （[`colm_core::methane::driver::dry_lake_substep`]），不论这个子步跑的是湖面还是土壤物理。
@@ -949,8 +949,8 @@ impl BgcRuntime {
             .context("a BGC patch needs its BGC state")?;
         self.update_data(begin, idate, &mut bgc)?;
         if self.patch_type != 0 {
-            // 湿地 CH4（`CoLMDRIVER.F90:245-247`）：`tracer_wetland_decomp` 借土壤分解级联算逐层
-            // 异养呼吸，`tracer_soil_step` 跑甲烷，finalize 按这一步的分解通量直接推进分解池。
+            // 湿地 CH4（`CoLMDRIVER.F90:245-247`）：`material_wetland_decomp` 借土壤分解级联算逐层
+            // 异养呼吸，`material_soil_step` 跑甲烷，finalize 按这一步的分解通量直接推进分解池。
             if let (2, Some((setup, site))) = (self.patch_type, &self.methane) {
                 let physics = self.wetland_physics(idate, deltim, state);
                 colm_core::bgc_wetland::wetland_decomp(&mut bgc, &physics, self.switches, deltim);
@@ -1022,7 +1022,7 @@ impl BgcRuntime {
             bgc_driver(&mut step, &mut record)?;
         }
         self.write_back(&physics, state)?;
-        // `tracer_soil_step`（`CoLMDRIVER.F90:246-248`）：`bgc_driver` 之后跑甲烷，改写
+        // `material_soil_step`（`CoLMDRIVER.F90:246-248`）：`bgc_driver` 之后跑甲烷，改写
         // `decomp_hr`/`er`。
         if let Some((setup, site)) = &self.methane {
             let mut patch = bgc

@@ -201,7 +201,7 @@ pub struct GriddedForcingConfig {
     pub directory: PathBuf,
     pub(super) variables: Vec<Variable>,
     pub(super) groupby: GroupBy,
-    /// `DEF_forcing%groupby`、`timelog`、`tintalgo` 的原文（示踪物强迫的重启指纹逐字符记它们）。
+    /// `DEF_forcing%groupby`、`timelog`、`tintalgo` 的原文（材料强迫的重启指纹逐字符记它们）。
     pub(super) groupby_text: String,
     pub(super) timelog_text: Vec<String>,
     pub(super) tintalgo_text: Vec<String>,
@@ -418,7 +418,7 @@ impl GriddedForcingConfig {
     }
 
     /// `metreadLBUB` 的那一处：预热期且开了 `DEF_USE_ClimForcing_for_Spinup` 时年份串换成 `'clim'`。
-    /// 其余调用（`metread_latlon`、缺测值、示踪物强迫）不传 `is_spinup`，用真实年份。
+    /// 其余调用（`metread_latlon`、缺测值、材料强迫）不传 `is_spinup`，用真实年份。
     pub(super) fn file_name_for(
         &self,
         year: i32,
@@ -457,7 +457,7 @@ impl GriddedForcingConfig {
         self.lower_record_for(now, &self.variables[variable])
     }
 
-    /// `setstampLB` 对任意一个变量配置（示踪物强迫的 `tracer_forcing_setstamp_LB` 同式）。
+    /// `setstampLB` 对任意一个变量配置（材料强迫的 `material_forcing_setstamp_LB` 同式）。
     pub(super) fn lower_record_for(
         &self,
         now: Stamp,
@@ -548,7 +548,7 @@ impl GriddedForcingConfig {
         self.upper_record_for(upper, &self.variables[variable])
     }
 
-    /// `setstampUB` 对任意一个变量配置（`tracer_forcing_setstamp_UB` 同式）。
+    /// `setstampUB` 对任意一个变量配置（`material_forcing_setstamp_UB` 同式）。
     pub(super) fn upper_record_for(&self, upper: Stamp, v: &Variable) -> Result<(i32, i32, usize)> {
         let (mut year, day, mut sec) = (upper.year, upper.day, upper.sec);
         match self.groupby {

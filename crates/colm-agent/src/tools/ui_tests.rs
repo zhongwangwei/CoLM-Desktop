@@ -114,7 +114,7 @@ fn ui_tools_forward_to_the_window_and_only_set_and_commit_need_approval() {
         assert!(!UiCommit.session_allowance_for(&args), "{target}");
     }
     // 仍可按会话放行的普通提交（例如读取/轻量设置）保持原行为。
-    for target in ["result-fetch", "configuration-tracers-apply"] {
+    for target in ["result-fetch", "configuration-materials-apply"] {
         let args = json!({ "target": target, "purpose": "x" });
         assert_eq!(UiCommit.tier_for(&args), Tier::Act, "{target}");
         assert!(UiCommit.session_allowance_for(&args), "{target}");

@@ -1,7 +1,7 @@
-//! 甲烷 provider（`MOD_Tracer_Reactive_Methane_*`）：CLM4.5 CH4 模型的 CoLM 移植。
+//! 甲烷 provider（`MOD_Material_Reactive_Methane_*`）：CLM4.5 CH4 模型的 CoLM 移植。
 //!
 //! 只在打开 `DEF_USE_METHANE` 并注册了 `gas` 类 CH4 材料、并开 BGC 时运行；每个 patch 在
-//! `bgc_driver` 之后调用，结果经 `tracer_ch4_bgc_finalize_step` 回写 BGC 的
+//! `bgc_driver` 之后调用，结果经 `material_ch4_bgc_finalize_step` 回写 BGC 的
 //! `decomp_hr`/`er`。
 //!
 //! 写法与 Fortran 逐句对应：`!(x < 0.0)` 保留 NaN 的比较语义，不改写成 `clamp`/区间判断，

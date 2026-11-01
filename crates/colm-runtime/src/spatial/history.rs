@@ -41,7 +41,7 @@ impl HistoryGridConfig {
     }
 }
 
-/// `DEF_HIST_CompressLevel`：网格、向量、示踪物与 unitcat history 的 deflate 级别（netCDF 只认 0..=9）。
+/// `DEF_HIST_CompressLevel`：网格、向量、材料与 unitcat history 的 deflate 级别（netCDF 只认 0..=9）。
 pub fn hist_compress_level(case: &colm_namelist::Document) -> Result<u8> {
     let level = crate::required_integer(case, "DEF_HIST_CompressLevel")?;
     ensure!(

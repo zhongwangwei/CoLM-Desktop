@@ -923,7 +923,7 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
 }
 
 #[test]
-fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
+fn single_point_scalar_consumes_material_cn_and_vegetation_snow_flag() {
     let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-init-scalar-cn-vegsnow-{}",
@@ -938,7 +938,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
     wetland.land_class = 11;
     let run = scalar_nonvegetated_run(
         &root,
-        "wetland-cn-tracer",
+        "wetland-cn-material",
         SinglePointSubgrid::Pft,
         true,
         true,
@@ -947,7 +947,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
     );
     let files = write_single_point_scalar_cold_time_restarts(&run, &wetland, 2, None).unwrap();
     assert_eq!(files.pft, None);
-    let bgc = netcdf::open(files.bgc.expect("wetland tracer BGC output").block).unwrap();
+    let bgc = netcdf::open(files.bgc.expect("wetland material BGC output").block).unwrap();
     let carbon = values_f64(&bgc, "decomp_cpools_vr");
     assert_eq!(carbon[0], 1000.0);
     assert_eq!(carbon[1], 1001.0);
@@ -961,16 +961,16 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
     zero_single_point_cn_carbon_pools(&empty_cn);
     for subgrid in [SinglePointSubgrid::Pft, SinglePointSubgrid::Pc] {
         for (class, kind) in [(11, 2), (17, 4)] {
-            for tracer in [false, true] {
+            for material in [false, true] {
                 let mut surface = single_point_restart_surface();
                 surface.land_class = class;
-                let label = format!("cn-elig-{subgrid:?}-{class}-{tracer}");
+                let label = format!("cn-elig-{subgrid:?}-{class}-{material}");
                 let run = scalar_nonvegetated_run(
                     &root,
                     &label,
                     subgrid,
                     true,
-                    tracer,
+                    material,
                     Some(&empty_cn),
                     None,
                 );
@@ -980,7 +980,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
                 assert_eq!(files.pft, None);
                 let bgc = netcdf::open(files.bgc.expect("BGC output").block).unwrap();
                 let carbon = values_f64(&bgc, "decomp_cpools_vr");
-                if class == 11 && tracer {
+                if class == 11 && material {
                     assert_eq!(carbon[0], 1798.0, "{label} wetland OM fallback");
                 } else {
                     assert_eq!(carbon[0], -1.0e36, "{label} inactive CN must stay missing");
@@ -2176,7 +2176,7 @@ fn scalar_nonvegetated_run(
     name: &str,
     subgrid: SinglePointSubgrid,
     bgc: bool,
-    tracer: bool,
+    material: bool,
     cn: Option<&std::path::Path>,
     snow: Option<(&std::path::Path, bool)>,
 ) -> SinglePointColdStartRun {
@@ -2211,7 +2211,7 @@ fn scalar_nonvegetated_run(
         logical(pft),
         logical(pc),
         logical(bgc),
-        logical(tracer),
+        logical(material),
     );
     if let Some(cn) = cn {
         text.push_str(&format!(

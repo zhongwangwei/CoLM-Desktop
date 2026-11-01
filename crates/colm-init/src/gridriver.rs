@@ -71,8 +71,8 @@ pub struct GridRiverColdStartFile {
 
 /// Write the schema-v2 GridRiverLake cold state consumed by a matching CoLM kernel.
 ///
-/// Native `mkinidata` does not initialize route tracers, so its cold file has
-/// no tracer transaction. The runtime detects that absence and seeds tracer
+/// Native `mkinidata` does not initialize route materials, so its cold file has
+/// no material transaction. The runtime detects that absence and seeds material
 /// state from water. Bifurcation, levee, and reservoir state cold-start to
 /// their native values here.
 pub fn write_gridriver_cold_restart(

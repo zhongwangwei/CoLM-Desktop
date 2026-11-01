@@ -1,4 +1,4 @@
-//! 湿地 CH4 的 BGC 耦合（`MOD_Tracer_Reactive_BgcShim.F90` 与 `tracer_ch4_bgc_finalize_step` 的湿地支）：
+//! 湿地 CH4 的 BGC 耦合（`MOD_Material_Reactive_BgcShim.F90` 与 `material_ch4_bgc_finalize_step` 的湿地支）：
 //! 湿地 patch 没有 PFT、不跑 `bgc_driver`，CH4 只借土壤分解级联算出逐层异养呼吸；步末再按
 //! 这一步的分解通量直接推进分解池（`apply_direct`）并做非植被的状态汇总。
 //!
@@ -177,7 +177,7 @@ fn wetland_matrix_accumulators(s: &mut BgcState, deltim: f64) {
     }
 }
 
-/// `tracer_ch4_bgc_finalize_step` 的湿地前半：`CDecompStateUpdate(.., .true.)`、
+/// `material_ch4_bgc_finalize_step` 的湿地前半：`CDecompStateUpdate(.., .true.)`、
 /// `SoilBiogeochemNDecompStateUpdate(.., .true.)` 与 `CNDriverSummarizeNonvegetatedSoilStates`。
 pub fn wetland_state_update(
     s: &mut BgcState,

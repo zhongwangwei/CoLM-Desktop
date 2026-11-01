@@ -42,7 +42,7 @@ pub struct BgcState {
     /// [`IRRIGATION_DIAGNOSTICS`] 的当前值：CROP 内核分配为整型 spval（−9999），作物汇总
     /// （`MOD_BGC_CNSummary.F90:429` 起）把 `irrig_method_p` 写进来，跨步保留。
     pub irrigation_diagnostics: [f64; 8],
-    /// CH4 provider 的 patch 状态（注册了 `gas` 类 CH4 示踪物时才有）。
+    /// CH4 provider 的 patch 状态（注册了 `gas` 类 CH4 材料时才有）。
     pub methane: Option<Box<crate::methane::driver::MethanePatch>>,
     /// CH4 `core` history 的累加量（`a_*` 与 `a_methane_acc_num`）。
     pub methane_acc: crate::methane::driver::CoreAccumulator,

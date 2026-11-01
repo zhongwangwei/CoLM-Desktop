@@ -17,8 +17,8 @@ use anyhow::{bail, Context, Result};
 /// 这是对「调用点被守」的一个近似——不完美（见 `curated`），但一次覆盖
 /// 一批字段，且随上游加文件自动跟上。
 ///
-/// **没有 `main/MATERIAL/` 条目。** 原来的 `main/TRACER/` 曾经在这里（宏开着才编得进去），
-/// 但材料运移（MaterialTransport，上游 7d2fca93 前的 TRACER）改成运行时开关后，
+/// **没有 `main/MATERIAL/` 条目。** 原来的 `main/MATERIAL/` 曾经在这里（宏开着才编得进去），
+/// 但材料运移（MaterialTransport，上游 7d2fca93 前的 MATERIAL）改成运行时开关后，
 /// 这个目录下的模块永远编译进去，不再有对应的编译期宏——目录本身不再暗示任何 `requires`。
 /// `DEF_ISO_*` / `DEF_MT_*` / `DEF_SOLUTE_*` 字段现在在每个内核下都可设，用户自己用
 /// family 开关（`DEF_USE_ISOTOPE` / `DEF_USE_METHANE` / `DEF_SOLUTE_NAMES`，

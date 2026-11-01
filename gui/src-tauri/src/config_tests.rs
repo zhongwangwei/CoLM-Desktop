@@ -133,7 +133,7 @@ fn a_value_of_the_wrong_type_is_refused_before_it_reaches_the_file() {
 }
 
 #[test]
-fn tracer_case_csv_values_reject_nonfinite_and_malformed_numbers() {
+fn material_case_csv_values_reject_nonfinite_and_malformed_numbers() {
     for field in [] {
         assert!(!colm_model::is_model_field(field));
         let input = format!("&nl_colm\n{field}=''\n/\n");
@@ -315,13 +315,13 @@ fn related_changes_land_atomically_in_every_case() {
 #[test]
 fn runtime_contracts_are_checked_before_batch_write() {
     let dirs = batch(
-        "contract-tracer",
+        "contract-material",
         &["&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_USE_Campbell_SOIL_MODEL=.true.\n/\n"],
     );
     let before = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
     let err = set_batch(dirs.clone(), "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap_err();
     assert!(
-        err.contains("示踪剂") && err.contains("van Genuchten"),
+        err.contains("材料") && err.contains("van Genuchten"),
         "{err}"
     );
     assert_eq!(
@@ -336,7 +336,7 @@ fn runtime_contracts_are_checked_before_batch_write() {
     let err = set_batch(dirs, "DEF_HIST_FREQ".into(), "MONTHLY".into()).unwrap_err();
     assert!(err.contains("DEF_USE_LCT"), "{err}");
 
-    // 水同位素属于通用 TRACER，不依赖 BGC；只有 CH4 需要 PFT/PC 的碳氮池。变饱和流下要一份正的
+    // 水同位素属于通用 MATERIAL，不依赖 BGC；只有 CH4 需要 PFT/PC 的碳氮池。变饱和流下要一份正的
     // 含水层混合水量。
     let dirs = batch(
         "contract-isotope",
@@ -415,40 +415,40 @@ fn every_model_fatal_runtime_combination_is_rejected_before_write() {
         (
             "methane-no-bgc",
             "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_METHANE=.true.\n/\n",
-            "甲烷示踪剂",
+            "甲烷材料",
         ),
         (
-            "tracer-campbell",
+            "material-campbell",
             "&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_ISOTOPE=.true.\n DEF_USE_Campbell_SOIL_MODEL=.true.\n/\n",
             "van Genuchten",
         ),
         (
-            "tracer-negative",
+            "material-negative",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_MT_BALANCE_ABORT_NBAD=-1\n/\n",
             "非负整数",
         ),
         (
-            "tracer-relative-humidity",
+            "material-relative-humidity",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_ISO_CG_RELHUM_MAX=1.0\n/\n",
             "严格位于 0 与 1",
         ),
         (
-            "tracer-snow-equilibrium",
+            "material-snow-equilibrium",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_ISO_SNOWMELT_EQUILIBRATION=1.1\n/\n",
             "SNOWMELT_EQUILIBRATION",
         ),
         (
-            "tracer-canopy-equilibrium",
+            "material-canopy-equilibrium",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_ISO_CANOPY_EQUILIBRATION=-0.1\n/\n",
             "CANOPY_EQUILIBRATION",
         ),
         (
-            "tracer-sublimation-skin",
+            "material-sublimation-skin",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_ISO_SUBL_SKIN_MM=-0.1\n/\n",
             "SUBL_SKIN_MM",
         ),
         (
-            "tracer-supersaturation",
+            "material-supersaturation",
             "&nl_colm\n DEF_USE_ISOTOPE=.true.\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.\n DEF_ISO_ICE_SUPERSAT_SLOPE=-0.1\n/\n",
             "ICE_SUPERSAT_SLOPE",
         ),
@@ -836,7 +836,7 @@ fn methane_wizard_stages_safe_single_point_parameters() {
 }
 
 #[test]
-fn existing_case_tracer_defaults_commit_only_after_candidate_validation() {
+fn existing_case_material_defaults_commit_only_after_candidate_validation() {
     for (family, kind, filename) in [
         ("Cl", "solute", "standard_chloride_parameter.nml"),
         ("CH4", "gas", "standard_methane_parameter.nml"),
@@ -845,7 +845,7 @@ fn existing_case_tracer_defaults_commit_only_after_candidate_validation() {
         // 所以这里按真实算例补上新组，`colm_model` 的插入才找得到落点。
         let case_text = format!("{SAMPLE}&nl_colm_material\n/\n");
         let dirs = batch(
-            &format!("existing-tracer-{family}"),
+            &format!("existing-material-{family}"),
             &[case_text.as_str(), case_text.as_str()],
         );
         let source = std::path::Path::new(&dirs[0]);
@@ -920,7 +920,7 @@ fn existing_case_tracer_defaults_commit_only_after_candidate_validation() {
                 &official.version,
                 source,
                 &work.join("preview"),
-                "tracer-preview",
+                "material-preview",
                 &patches,
                 &[],
             )
@@ -962,8 +962,8 @@ fn existing_case_tracer_defaults_commit_only_after_candidate_validation() {
 }
 
 #[test]
-fn tracer_staging_preserves_existing_files_when_adding_a_family() {
-    let dir = batch("tracer-stage-preserve", &[SAMPLE]).remove(0);
+fn material_staging_preserves_existing_files_when_adding_a_family() {
+    let dir = batch("material-stage-preserve", &[SAMPLE]).remove(0);
     let case = std::path::Path::new(&dir);
     let existing = [
         "standard_methane_parameter.nml",
@@ -973,7 +973,7 @@ fn tracer_staging_preserves_existing_files_when_adding_a_family() {
     for file in existing {
         std::fs::write(case.join(file), format!("! user-edited {file}\n")).unwrap();
     }
-    // 上游把四种示踪物的文件拆成 family 字段：同位素/甲烷/泥沙各一份单文件，溶质仍是名单。
+    // 上游把四种材料的文件拆成 family 字段：同位素/甲烷/泥沙各一份单文件，溶质仍是名单。
     let fields = [
         ("DEF_METHANE_PARAM_FILE", "standard_methane_parameter.nml"),
         ("DEF_ISOTOPE_PARAM_FILE", "standard_isotope_parameter.nml"),
@@ -989,7 +989,7 @@ fn tracer_staging_preserves_existing_files_when_adding_a_family() {
         value: value.into(),
     })
     .collect::<Vec<_>>();
-    super::stage_tracer_parameters(&dir, &fields, None, (None, None)).unwrap();
+    super::stage_material_parameters(&dir, &fields, None, (None, None)).unwrap();
     for file in existing {
         assert_eq!(
             std::fs::read_to_string(case.join(file)).unwrap(),
@@ -1000,15 +1000,15 @@ fn tracer_staging_preserves_existing_files_when_adding_a_family() {
     assert!(colm_namelist::parse(&std::fs::read_to_string(chloride).unwrap()).is_ok());
     // A removed default is generated again, while the other files stay untouched.
     std::fs::remove_file(case.join(existing[0])).unwrap();
-    super::stage_tracer_parameters(&dir, &fields, None, (None, None)).unwrap();
+    super::stage_material_parameters(&dir, &fields, None, (None, None)).unwrap();
     assert!(std::fs::read_to_string(case.join(existing[0]))
         .unwrap()
         .contains("'wetwat'"));
 }
 
 #[test]
-fn tracer_staging_only_updates_explicit_process_parameters() {
-    let dir = batch("tracer-stage-edits", &[SAMPLE]).remove(0);
+fn material_staging_only_updates_explicit_process_parameters() {
+    let dir = batch("material-stage-edits", &[SAMPLE]).remove(0);
     let case = std::path::Path::new(&dir);
     let ch4 = case.join("standard_methane_parameter.nml");
     let chloride = case.join("standard_chloride_parameter.nml");
@@ -1029,9 +1029,9 @@ fn tracer_staging_only_updates_explicit_process_parameters() {
 }
 
 #[test]
-fn tracer_staging_does_not_create_arbitrary_parameter_paths() {
-    let dir = batch("tracer-stage-paths", &[SAMPLE]).remove(0);
-    super::stage_tracer_parameters(
+fn material_staging_does_not_create_arbitrary_parameter_paths() {
+    let dir = batch("material-stage-paths", &[SAMPLE]).remove(0);
+    super::stage_material_parameters(
         &dir,
         &[FieldChange {
             path: "DEF_SOLUTE_PARAM_FILES".into(),
@@ -1048,8 +1048,8 @@ fn tracer_staging_does_not_create_arbitrary_parameter_paths() {
 
 #[cfg(unix)]
 #[test]
-fn tracer_staging_rejects_symlink_targets_without_writing_external_files() {
-    let dir = batch("tracer-stage-symlink", &[SAMPLE]).remove(0);
+fn material_staging_rejects_symlink_targets_without_writing_external_files() {
+    let dir = batch("material-stage-symlink", &[SAMPLE]).remove(0);
     let case = std::path::Path::new(&dir);
     let target = case.join("user-owned.nml");
     std::fs::write(&target, "user-owned contents").unwrap();
@@ -1084,7 +1084,7 @@ fn expert_process_parameters_are_read_from_case_local_files() {
         .iter()
         .find(|file| file.title == "standard_methane_parameter.nml")
         .expect("CH4 parameter file");
-    assert_eq!(ch4.section, "示踪剂");
+    assert_eq!(ch4.section, "材料");
     let q10 = ch4
         .entries
         .iter()
@@ -1278,7 +1278,7 @@ fn process_group_not_filename_decides_the_expert_page() {
     let opaque = std::path::Path::new(&dir).join("opaque_parameter.nml");
     std::fs::copy(source, &opaque).unwrap();
     let file = super::process_entries(&opaque, "opaque_parameter.nml".into()).unwrap();
-    assert_eq!(file.section, "示踪剂");
+    assert_eq!(file.section, "材料");
 }
 
 #[test]
@@ -1291,7 +1291,7 @@ fn process_group_comments_do_not_hide_insertable_defaults() {
     )
     .unwrap();
     let file = super::process_entries(&path, "commented_parameter.nml".into()).unwrap();
-    assert_eq!(file.section, "示踪剂");
+    assert_eq!(file.section, "材料");
     assert!(
         file.entries
             .iter()
@@ -3552,12 +3552,12 @@ fn runtime_contract_rejects_catchment_only_gaps_and_bad_compression() {
         let err = super::validate_runtime_contract(&doc, &dir, facts).unwrap_err();
         assert!(err.contains("流域网格") && err.contains(field), "{err}");
     }
-    // 示踪剂拆成 family 后没有单一字段可点名，流域网格的拦截只报「示踪剂」。
+    // 材料拆成 family 后没有单一字段可点名，流域网格的拦截只报「材料」。
     let doc =
         colm_namelist::parse("&nl_colm\n DEF_USE_LCT = .true.\n DEF_SOLUTE_NAMES = 'Cl'\n/\n")
             .unwrap();
     let err = super::validate_runtime_contract(&doc, &dir, facts).unwrap_err();
-    assert!(err.contains("流域网格") && err.contains("示踪剂"), "{err}");
+    assert!(err.contains("流域网格") && err.contains("材料"), "{err}");
     let doc =
         colm_namelist::parse("&nl_colm\n DEF_USE_LCT = .true.\n DEF_HIST_CompressLevel = 12\n/\n")
             .unwrap();
@@ -3934,7 +3934,7 @@ fn isotope_wizard_stages_parameter_files_without_the_forcing_group() {
     let text =
         std::fs::read_to_string(std::path::Path::new(&dir).join("standard_isotope_parameter.nml"))
             .unwrap();
-    // 不分馏：强迫组整组去掉（两个引擎都按没有示踪物强迫处理），示踪物元数据组保留。
+    // 不分馏：强迫组整组去掉（两个引擎都按没有材料强迫处理），材料元数据组保留。
     assert!(!text.contains("&nl_colm_mt_forcing"), "{text}");
     assert!(!text.contains("prate1sfc"), "{text}");
     assert!(text.contains("不分馏"), "{text}");
@@ -4012,7 +4012,7 @@ fn isotope_runtime_contract_rejects_unsafe_combinations() {
     )
     .unwrap();
     super::apply_fields(&dir, &gswp3).unwrap();
-    // 站点算例：示踪物强迫不支持 POINT，分馏没有同位素水汽可读；不分馏可以。
+    // 站点算例：材料强迫不支持 POINT，分馏没有同位素水汽可读；不分馏可以。
     let site = SAMPLE.replace("/\n", " SITE_fsitedata = 'site.nc'\n/\n");
     let dir = batch("iso-contract-site", &[&site]).remove(0);
     let err = super::apply_fields(&dir, &isotope_fields(true, "1000.0")).unwrap_err();
@@ -4021,7 +4021,7 @@ fn isotope_runtime_contract_rejects_unsafe_combinations() {
 }
 
 #[test]
-fn isotope_fields_follow_the_tracer_types() {
+fn isotope_fields_follow_the_material_types() {
     let mode = |states: &[FieldState], name: &str| {
         states
             .iter()
@@ -4059,7 +4059,7 @@ fn isotope_fields_follow_the_tracer_types() {
     ));
 }
 
-fn tracer_fields(rows: &[(&str, &str)]) -> Vec<FieldChange> {
+fn material_fields(rows: &[(&str, &str)]) -> Vec<FieldChange> {
     rows.iter()
         .map(|(path, value)| FieldChange {
             path: (*path).into(),
@@ -4073,7 +4073,7 @@ fn solute_wizard_writes_its_concentrations_into_the_parameter_file() {
     let dir = batch("wizard-solute", &[SAMPLE]).remove(0);
     super::apply_fields(
         &dir,
-        &tracer_fields(&[
+        &material_fields(&[
             ("DEF_SOLUTE_NAMES", "Cl"),
             (
                 "DEF_SOLUTE_PARAM_FILES",
@@ -4110,7 +4110,7 @@ fn solute_wizard_writes_its_concentrations_into_the_parameter_file() {
     for bad in ["-1", "abc"] {
         let err = super::apply_fields(
             &dir,
-            &tracer_fields(&[
+            &material_fields(&[
                 (
                     "DEF_SOLUTE_PARAM_FILES",
                     "Cl:standard_chloride_parameter.nml",
@@ -4125,7 +4125,7 @@ fn solute_wizard_writes_its_concentrations_into_the_parameter_file() {
 
 #[test]
 fn sediment_needs_a_spatial_case_with_grid_routing() {
-    let fields = tracer_fields(&[
+    let fields = material_fields(&[
         ("DEF_USE_SEDIMENT", ".true."),
         ("DEF_SEDIMENT_PARAM_FILE", "standard_sediment_parameter.nml"),
     ]);
@@ -4834,7 +4834,7 @@ fn per_type_parameters_list_a_default_for_every_class_or_plant_type() {
 }
 
 #[test]
-fn standard_tracer_parameters_list_numbers_a_version_may_change() {
+fn standard_material_parameters_list_numbers_a_version_may_change() {
     let files = standard_process_parameters().unwrap();
     let names: Vec<_> = files.iter().map(|f| f.file).collect();
     assert_eq!(
@@ -4851,7 +4851,7 @@ fn standard_tracer_parameters_list_numbers_a_version_may_change() {
         .find(|p| p.path == "DEF_SEDIMENT%grain_density")
         .unwrap();
     assert_eq!(density.value.parse::<f64>().unwrap(), 2650.0);
-    assert!(sediment.iter().all(|p| p.group != "nl_colm_tracer_forcing"));
+    assert!(sediment.iter().all(|p| p.group != "nl_colm_material_forcing"));
     let methane = of("standard_methane_parameter.nml");
     assert!(methane.iter().any(|p| p.path == "DEF_METHANE%q10methane"));
     // Switches and the cases' own choices stay with the case.
@@ -4985,13 +4985,13 @@ fn case_land_cover_reports_what_creation_wrote() {
 }
 
 #[test]
-fn legacy_tracer_fields_migrate_to_material_families() {
+fn legacy_material_fields_migrate_to_material_families() {
     let mut doc = colm_namelist::parse(
-        "&nl_colm\n DEF_USE_TRACER = .true.\n DEF_TRACER_NUM = 3\n \
-         DEF_TRACER_NAMES = 'HDO,CH4,SEDIMENT'\n \
-         DEF_TRACER_TYPES = 'isotope,gas,particle'\n \
-         DEF_TRACER_PARAM_FILES = 'HDO:hdo.nml,CH4:ch4.nml,SEDIMENT:sed.nml'\n \
-         DEF_TRACER_USE_FRACTIONATION = .true.\n /\n",
+        "&nl_colm\n @@DEF_USE_MATERIAL@@ = .true.\n @@DEF_MATERIAL_@@NUM = 3\n \
+         @@DEF_MATERIAL_@@NAMES = 'HDO,CH4,SEDIMENT'\n \
+         @@DEF_MATERIAL_@@TYPES = 'isotope,gas,particle'\n \
+         @@DEF_MATERIAL_@@PARAM_FILES = 'HDO:hdo.nml,CH4:ch4.nml,SEDIMENT:sed.nml'\n \
+         @@DEF_MATERIAL_@@USE_FRACTIONATION = .true.\n /\n",
     )
     .unwrap();
     assert!(super::migrate_legacy_material(&mut doc));
@@ -5021,7 +5021,7 @@ fn legacy_tracer_fields_migrate_to_material_families() {
     );
     // 分馏等 DEF_ISO_* 现在住在同位素参数文件，不迁进 case.nml。
     assert!(doc.get("DEF_ISO_USE_FRACTIONATION").is_none());
-    assert!(doc.get("DEF_USE_TRACER").is_none());
-    assert!(doc.get("DEF_TRACER_NAMES").is_none());
-    assert!(doc.get("DEF_TRACER_PARAM_FILES").is_none());
+    assert!(doc.get("@@DEF_USE_MATERIAL@@").is_none());
+    assert!(doc.get("@@DEF_MATERIAL_@@NAMES").is_none());
+    assert!(doc.get("@@DEF_MATERIAL_@@PARAM_FILES").is_none());
 }

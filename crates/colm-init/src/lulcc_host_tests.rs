@@ -1,16 +1,16 @@
 //! `lulcc_host` 的测试：上游 `mt_lulcc_host_sync` 的逐仓室规则。
 
 use super::*;
-use colm_core::tracer::{
-    soisno_slot, PatchTracerState, ReactionMode, StateOwner, TracerDescriptor, TracerFamily,
-    TracerSet, MAX_SNOW_LAYERS,
+use colm_core::material::{
+    soisno_slot, MaterialDescriptor, MaterialFamily, MaterialSet, PatchMaterialState, ReactionMode,
+    StateOwner, MAX_SNOW_LAYERS,
 };
 
-fn solute(init_conc: f64) -> TracerDescriptor {
-    TracerDescriptor {
+fn solute(init_conc: f64) -> MaterialDescriptor {
+    MaterialDescriptor {
         name: "NO3".to_owned(),
         category: "solute".to_owned(),
-        family: TracerFamily::Solute,
+        family: MaterialFamily::Solute,
         state_owner: StateOwner::GenericWater,
         reaction_mode: ReactionMode::None,
         unit_kind: "material_per_water".to_owned(),
@@ -27,18 +27,18 @@ fn solute(init_conc: f64) -> TracerDescriptor {
     }
 }
 
-fn set(tracers: Vec<TracerDescriptor>) -> TracerSet {
-    TracerSet { tracers }
+fn set(materials: Vec<MaterialDescriptor>) -> MaterialSet {
+    MaterialSet { materials }
 }
 
-fn state(set: &TracerSet) -> PatchTracerState {
-    PatchTracerState::allocated(set)
+fn state(set: &MaterialSet) -> PatchMaterialState {
+    PatchMaterialState::allocated(set)
 }
 
 fn options() -> HostFollowOptions {
     HostFollowOptions {
         vegetation_snow: false,
-        cold_start: TracerColdStart {
+        cold_start: MaterialColdStart {
             variably_saturated_flow: false,
             aquifer_mixing_water_mm: 0.0,
         },
@@ -245,9 +245,9 @@ fn wetland_water_restarts_at_the_cold_ratio_even_with_a_source_patch() {
 
 #[test]
 fn dissolved_limit_rebalances_canopy_and_the_shared_surface_store() {
-    let mut tracer = solute(1.0);
-    tracer.max_dissolved_conc = 0.5;
-    let set = set(vec![tracer]);
+    let mut material = solute(1.0);
+    material.max_dissolved_conc = 0.5;
+    let set = set(vec![material]);
     let mut states = vec![state(&set)];
     // 冠层：跟随之后材料比水量多，超出的进冠层固相。
     states[0].pools[0].ldew_rain = 2.0;

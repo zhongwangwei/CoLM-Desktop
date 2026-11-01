@@ -15,8 +15,8 @@
 
 pub mod document;
 pub mod material;
+pub mod material_files;
 pub mod parse;
-pub mod tracer_files;
 pub mod value;
 
 pub use document::Document;

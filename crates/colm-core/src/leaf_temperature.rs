@@ -197,7 +197,7 @@ pub struct LeafTemperatureState {
 pub struct LeafTemperatureOutput {
     pub wet_snow_fraction: f64,
     /// `canopy_smelt_mass_out`/`canopy_frzc_mass_out`：冠层雪→雨、雨→雪的相变质量 [mm]
-    /// （`qmelt*deltim`、`qfrz*deltim`，只在 `DEF_VEG_SNOW` 时非零；示踪物记账用）。
+    /// （`qmelt*deltim`、`qfrz*deltim`，只在 `DEF_VEG_SNOW` 时非零；材料记账用）。
     pub canopy_melt_mass_mm: f64,
     pub canopy_freeze_mass_mm: f64,
     pub eastward_stress_kg_m_s2: f64,
@@ -1182,7 +1182,7 @@ pub fn leaf_temperature(
         .wet_evaporation_temperature_slope
         .contract(final_temperature_change, last.wet_evaporation);
     // 负蒸腾（水汽进气孔）是叶面凝露，不是倒流的蒸腾：并入湿叶蒸发，蒸腾与根系吸水清零
-    // （`MOD_LeafTemperature.F90`，原来只在开示踪物时做，vendor 已解耦成无条件）。
+    // （`MOD_LeafTemperature.F90`，原来只在开材料时做，vendor 已解耦成无条件）。
     let dew_from_transpiration = updated_transpiration < 0.0;
     let transpiration = if dew_from_transpiration {
         wet_evaporation += updated_transpiration;
@@ -1380,8 +1380,8 @@ pub fn leaf_temperature(
         * input.ground_humidity_temperature_slope_k;
     let ground_flux_temperature_slope_w_m2_k = ground_latent_slope_kg_m2_s_k
         .contract(input.ground_latent_heat_j_kg, ground_sensible_slope_w_m2_k);
-    // **不**把 `etr` 夹到非负：`main/` 的非 TRACER 路径允许收尾后的 `etr = etr + etr_dtl*dtl`
-    // 为很小的负数（只有 TRACER 构建在 `:1107-1113` 把负值并进 `evplwet` 再置 0）。早先这里有
+    // **不**把 `etr` 夹到非负：`main/` 的非 MATERIAL 路径允许收尾后的 `etr = etr + etr_dtl*dtl`
+    // 为很小的负数（只有 MATERIAL 构建在 `:1107-1113` 把负值并进 `evplwet` 再置 0）。早先这里有
     // 一句 `max(0)`，AT-Neu 灌木地类 1 月第 647 条 Fortran `f_etr = -1.7e-14` 而 Rust 为 0。
     Ok(LeafTemperatureOutput {
         canopy_melt_mass_mm,

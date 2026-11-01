@@ -303,30 +303,30 @@ fn run() -> Result<()> {
             })
             .collect()
     })?;
-    // `land_tracer_init`（`CoLM.F90:339`）：注册示踪物；有输运示踪物时读续跑里的示踪物事务，
+    // `land_material_init`（`CoLM.F90:339`）：注册材料；有输运材料时读续跑里的材料事务，
     // 读不到（冷启动重启只有空事务）就按水量冷启动。
-    // `tracer_forcing_init`：POINT 不支持示踪物强迫变量（`MOD_Tracer_Forcing.F90`）。
-    let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(&document)?
-        .map(|mut tracer| -> Result<_> {
-            // 泥沙是河网汇流上的示踪物，单点内核不编进 `GridRiverLakeFlow`，上游没有它的 provider。
+    // `material_forcing_init`：POINT 不支持材料强迫变量（`MOD_Material_Forcing.F90`）。
+    let material_runtime = colm_runtime::material::MaterialRuntime::from_document(&document)?
+        .map(|mut material| -> Result<_> {
+            // 泥沙是河网汇流上的材料，单点内核不编进 `GridRiverLakeFlow`，上游没有它的 provider。
             ensure!(
-                !tracer
+                !material
                     .set
-                    .tracers
+                    .materials
                     .iter()
-                    .any(colm_runtime::river::sediment::is_sediment_tracer),
+                    .any(colm_runtime::river::sediment::is_sediment_material),
                 "SEDIMENT needs GridRiverLakeFlow, which single-point kernels do not build"
             );
-            tracer.configure_forcing(None)?;
-            Ok(std::sync::Arc::new(tracer))
+            material.configure_forcing(None)?;
+            Ok(std::sync::Arc::new(material))
         })
         .transpose()?;
-    if let Some(tracer) = tracer_runtime
+    if let Some(material) = material_runtime
         .as_ref()
-        .filter(|tracer| tracer.has_transport())
+        .filter(|material| material.has_transport())
     {
         let restart = colm_init::RestartFile::open(&files.time)?;
-        templates = attach_land_tracers(tracer, templates, &restart, patch_count)?;
+        templates = attach_land_materials(material, templates, &restart, patch_count)?;
     }
     // `read_history_acc_restart`（`CoLM.F90:376`）：先判重启点上的历史窗口是否完整 ——
     // 完整窗口丢弃、首窗口从重启开始，只有不完整窗口才续接；材料历史跟同一判决。
@@ -358,9 +358,9 @@ fn run() -> Result<()> {
         config.start,
         config.timestep_seconds,
     )?;
-    // 示踪物/CH4 累加器与主机共用同一个窗口判决：窗口被丢弃时不读回它们。
+    // 材料/CH4 累加器与主机共用同一个窗口判决：窗口被丢弃时不读回它们。
     if sidecar_window.as_ref().is_some_and(|read| read.restored) {
-        restore_sidecar_tracers(
+        restore_sidecar_materials(
             &mut templates,
             &history_sidecar_path(&restarts.initial)?,
             patch_count,
@@ -399,15 +399,15 @@ fn run() -> Result<()> {
     let mut session = history_session(&config, &outputs)?
         .map(|session| session.with_patches(templates.len()))
         .transpose()?;
-    // 开示踪物时另写 `<case>_hist_material_<cdate>.nc`（没有输运示踪物时只有文件骨架）。
-    if let Some(tracer) = &tracer_runtime {
+    // 开材料时另写 `<case>_hist_material_<cdate>.nc`（没有输运材料时只有文件骨架）。
+    if let Some(material) = &material_runtime {
         let patch_types = templates
             .iter()
             .map(|template| template.patch_type)
             .collect();
         session = session.map(|session| {
-            session.with_tracer_variables(
-                tracer.set.clone(),
+            session.with_material_variables(
+                material.set.clone(),
                 patch_types,
                 methane_core_history(&templates),
             )
@@ -424,7 +424,7 @@ fn run() -> Result<()> {
         config: sidecar_config,
         time_step_seconds: config.timestep_seconds,
         window: session.as_ref().map(HistorySession::window_handle),
-        tracer_raw: session.as_ref().map(HistorySession::tracer_raw_handle),
+        material_raw: session.as_ref().map(HistorySession::material_raw_handle),
         urban: urban_flags,
     };
     // 主循环的 `coszen`/`cosazi`/本地时间都读常数重启的 `patchlonr`/`patchlatr`（上游
@@ -702,21 +702,21 @@ fn run_spatial(
     // 上游同实现：参数表要带 `dam_upreal`（km²），静态量在 `river::reservoir` 里按方法派生。
     // 堤防、分汊、水库与漫滩回馈之间可以任意组合，也都可以与 LULCC 同开（漫滩回馈除外，
     // 上游自己拒绝，见上）。
-    // 示踪物：陆面输运、河湖输运、网格示踪物强迫、漫滩回馈的示踪物账、LULCC（SAT）的示踪物迁移
+    // 材料：陆面输运、河湖输运、网格材料强迫、漫滩回馈的材料账、LULCC（SAT）的材料迁移
     // 都已移植。还没接的组合在下面逐条拒绝，免得悄悄丢账。
-    let tracer_set = colm_runtime::tracer::tracer_set_from_document(&document)?;
+    let material_set = colm_runtime::material::material_set_from_document(&document)?;
     // CH4 provider：与单点同一条 `soil_step`。空间内核编进了网格河湖，所以 `routing`/`hybrid` 可用；
     // `satellite`（GIEMS）由 `methane_giems` 读入；`only_wetland` 与稻田改的活跃掩膜由 `soil_step`
     // 每步写进 `MethanePatch::history_active`。这里先解析一遍配置，坏配置在入口就停。
     colm_runtime::methane::setup_from_document(&document, grid_river)?;
-    // 输运示踪物跨 LULCC：陆面状态见 `lulcc_land_tracers`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
-    let methane_tracer = tracer_set.as_ref().is_some_and(|set| {
-        set.tracers
+    // 输运材料跨 LULCC：陆面状态见 `lulcc_land_materials`（SAT/MEC），强迫缓存见 `lulcc_forcing_cache`。
+    let methane_material = material_set.as_ref().is_some_and(|set| {
+        set.materials
             .iter()
-            .any(colm_runtime::methane::is_methane_tracer)
+            .any(colm_runtime::methane::is_methane_material)
     });
     ensure!(
-        !(methane_tracer && logical_field(&document, "DEF_USE_LULCC")?),
+        !(methane_material && logical_field(&document, "DEF_USE_LULCC")?),
         "methane with DEF_USE_LULCC: methane needs BGC, and upstream does not support LULCC with \
          BGC (MOD_Namelist stops too)"
     );
@@ -1138,10 +1138,10 @@ enum SegmentEnd {
 /// LULCC 临时文件（`restart/` 下）：旧年份的终态、不该留在 `restart/` 里的合并续跑、冷启动 namelist。
 const LULCC_SCRATCH: &str = "lulcc-scratch";
 
-/// 一段跑完时的河道终态：水量、示踪物与泥沙（后两者按开关有无）。
+/// 一段跑完时的河道终态：水量、材料与泥沙（后两者按开关有无）。
 type SegmentRiverEnd = (
     colm_runtime::river::RiverState,
-    Option<colm_runtime::river::tracer::RiverTracers>,
+    Option<colm_runtime::river::material::RiverMaterials>,
     Option<colm_runtime::river::sediment::Sediment>,
 );
 
@@ -1425,37 +1425,42 @@ fn run_spatial_segment(
         .collect();
     methane_wetland_fractions(&mut templates, &topology);
     methane_giems(document, &mut templates, || Ok(coordinates.clone()))?;
-    // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
-    // `tracer_forcing_init`：网格主强迫给出总降水/总比湿的配置。
-    let mut tracer_forcing_config = None;
+    // `land_material_init`：逐块读续跑里的材料事务（或按水量冷启动）。
+    // `material_forcing_init`：网格主强迫给出总降水/总比湿的配置。
+    let mut material_forcing_config = None;
     if spmd.is_some() {
         ensure!(
-            colm_runtime::tracer::TracerRuntime::from_document(document)?.is_none(),
-            "multi-process spatial runs do not support tracers yet"
+            colm_runtime::material::MaterialRuntime::from_document(document)?.is_none(),
+            "multi-process spatial runs do not support materials yet"
         );
     }
-    let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(document)?
-        .map(|mut tracer| -> Result<_> {
+    let material_runtime = colm_runtime::material::MaterialRuntime::from_document(document)?
+        .map(|mut material| -> Result<_> {
             let totals =
-                colm_runtime::spatial::tracer_forcing::MainTotals::from_config(&config.forcing);
-            tracer_forcing_config = Some(tracer.configure_forcing(Some(&totals))?);
-            Ok(std::sync::Arc::new(tracer))
+                colm_runtime::spatial::material_forcing::MainTotals::from_config(&config.forcing);
+            material_forcing_config = Some(material.configure_forcing(Some(&totals))?);
+            Ok(std::sync::Arc::new(material))
         })
         .transpose()?;
-    let empty_land_tracer = tracer_runtime
+    let empty_land_material = material_runtime
         .as_ref()
-        .filter(|tracer| !tracer.has_transport())
-        .map(|tracer| tracer.aquifer_mixing_water_mm);
-    if let Some(tracer) = tracer_runtime
+        .filter(|material| !material.has_transport())
+        .map(|material| material.aquifer_mixing_water_mm);
+    if let Some(material) = material_runtime
         .as_ref()
-        .filter(|tracer| tracer.has_transport())
+        .filter(|material| material.has_transport())
     {
         let mut attached = Vec::with_capacity(templates.len());
         let mut rest = templates.into_iter();
         for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
             let block: Vec<_> = rest.by_ref().take(patches.len()).collect();
             let restart = colm_init::RestartFile::open(&files.time)?;
-            attached.extend(attach_land_tracers(tracer, block, &restart, patches.len())?);
+            attached.extend(attach_land_materials(
+                material,
+                block,
+                &restart,
+                patches.len(),
+            )?);
         }
         templates = attached;
     }
@@ -1579,23 +1584,25 @@ fn run_spatial_segment(
         runtime = runtime.with_downscaling(settings, downscaling_patches)?;
     }
     runtime.apply_mapped_heights(&mut templates)?;
-    if let (Some(tracer), Some(forcing_config)) = (tracer_runtime.as_ref(), tracer_forcing_config) {
+    if let (Some(material), Some(forcing_config)) =
+        (material_runtime.as_ref(), material_forcing_config)
+    {
         if forcing_config.enabled() {
-            let mut forcing = colm_runtime::spatial::tracer_forcing::GriddedTracerForcing::new(
+            let mut forcing = colm_runtime::spatial::material_forcing::GriddedMaterialForcing::new(
                 forcing_config,
-                &tracer.set,
-                &tracer.physics,
+                &material.set,
+                &material.physics,
                 patch_count,
                 string_field(document, "DEF_Forcing_Interp_Method")?,
                 runtime.forcing_config(),
             )?;
-            // `tracer_forcing_read_restart`：续跑读到示踪物事务时一并读回最近一次有效比值。
+            // `material_forcing_read_restart`：续跑读到材料事务时一并读回最近一次有效比值。
             let mut first = 0;
             for ((_, patches), files) in topology.blocks.iter().zip(&block_files) {
                 let restart = colm_init::RestartFile::open(&files.time)?;
                 let loadable =
-                    colm_runtime::tracer::land_tracer_restart_loadable(&restart, &tracer.set);
-                if let Some((precip, vapor, reliable)) = colm_runtime::tracer::read_forcing_cache(
+                    colm_runtime::material::land_material_restart_loadable(&restart, &material.set);
+                if let Some((precip, vapor, reliable)) = colm_runtime::material::read_forcing_cache(
                     &restart,
                     loadable,
                     forcing.config().vars.len(),
@@ -1605,7 +1612,7 @@ fn run_spatial_segment(
                 }
                 first += patches.len();
             }
-            runtime = runtime.with_tracer_forcing(forcing);
+            runtime = runtime.with_material_forcing(forcing);
         }
     }
     if segment.end == SegmentEnd::Lulcc {
@@ -1942,21 +1949,21 @@ fn run_spatial_segment(
         river.momentum_dt_limit =
             logical_field(document, "DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT")?;
         river.storage_dt_limit = logical_field(document, "DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT")?;
-        // `river_lake_tracer_init` + `read_tracer_restart`/`tracer_init_from_water`
-        // （`grid_riverlake_flow_init`）：有输运示踪物时河道示踪物与陆面一起开。
-        if let Some(tracer) = tracer_runtime
+        // `river_lake_material_init` + `read_material_restart`/`material_init_from_water`
+        // （`grid_riverlake_flow_init`）：有输运材料时河道材料与陆面一起开。
+        if let Some(material) = material_runtime
             .as_ref()
-            .filter(|tracer| tracer.has_transport())
+            .filter(|material| material.has_transport())
         {
-            let mut tracers = colm_runtime::river::tracer::RiverTracers::new(
-                tracer.set.clone(),
+            let mut materials = colm_runtime::river::material::RiverMaterials::new(
+                material.set.clone(),
                 river.network.len(),
             );
-            let loaded = colm_runtime::river::restart::read_river_tracers(
+            let loaded = colm_runtime::river::restart::read_river_materials(
                 &river_start,
                 &river.network,
                 river.levee.as_ref(),
-                &mut tracers,
+                &mut materials,
                 Some(&river.history),
             )?;
             if !loaded {
@@ -1969,7 +1976,7 @@ fn run_spatial_segment(
                         })
                     })
                     .collect::<Vec<_>>();
-                tracers.cold_start(
+                materials.cold_start(
                     &river.network,
                     river.levee.as_ref(),
                     &river.state,
@@ -1977,10 +1984,10 @@ fn run_spatial_segment(
                     &built,
                 );
             }
-            river = river.with_tracers(tracers)?;
+            river = river.with_materials(materials)?;
         }
         // `grid_riverlake_flow_init`：回馈打开时立刻按读回的状态发布一次（Rust 不在 spinup 里汇流）。
-        // 上游在河湖示踪物初始化之后才分配回馈、发布，所以排在示踪物后面。
+        // 上游在河湖材料初始化之后才分配回馈、发布，所以排在材料后面。
         if logical_field(document, "DEF_GridRiverLake_FloodFeedback")? {
             let infiltration_max_mm_day = match document.get("DEF_GridRiverLake_FloodInfiltMax") {
                 Some(Value::Real { text }) => text
@@ -1997,28 +2004,28 @@ fn run_spatial_segment(
             // `grid_riverlake_flow_init(s_year, …)`：本次运行的起始年份。
             river = river.with_flood_feedback(infiltration_max_mm_day, config.start.year)?;
         }
-        river.empty_tracer_transaction = tracer_runtime.is_some();
+        river.empty_material_transaction = material_runtime.is_some();
         // CH4 provider 注册了 `publish_flood`/`publish_levee_flood`：每次汇流末把淹没比例推到 patch。
-        if tracer_runtime.as_ref().is_some_and(|tracer| {
-            tracer
+        if material_runtime.as_ref().is_some_and(|material| {
+            material
                 .set
-                .tracers
+                .materials
                 .iter()
-                .any(colm_runtime::methane::is_methane_tracer)
+                .any(colm_runtime::methane::is_methane_material)
         }) {
             river = river.with_methane_flood();
         }
-        // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 示踪物（河道泥沙）。
-        if let Some(set) = tracer_runtime.as_ref().map(|tracer| &tracer.set) {
+        // `grid_sediment_init` + `read_sediment_restart`：`SEDIMENT` provider 材料（河道泥沙）。
+        if let Some(set) = material_runtime.as_ref().map(|material| &material.set) {
             if let Some(index) = set
-                .tracers
+                .materials
                 .iter()
-                .position(colm_runtime::river::sediment::is_sediment_tracer)
+                .position(colm_runtime::river::sediment::is_sediment_material)
             {
-                let files = colm_runtime::tracer::param_files_from_document(document)?;
-                let param = colm_core::tracer::descriptor::param_file_for_index(
+                let files = colm_runtime::material::param_files_from_document(document)?;
+                let param = colm_core::material::descriptor::param_file_for_index(
                     &files,
-                    &set.tracers,
+                    &set.materials,
                     index,
                 )?
                 .context(
@@ -2159,24 +2166,24 @@ fn run_spatial_segment(
                 } else {
                     &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
                 })
-                .with_streaming_if(tracer_runtime.is_none())
-                .with_tracer_history(
+                .with_streaming_if(material_runtime.is_none())
+                .with_material_history(
                     material_transport_enabled(document)?
                         .then(|| real_field(document, "DEF_simulation_time%timestep"))
                         .transpose()?,
                 )
                 .map(|session| {
-                    // 有输运示踪物或 CH4 provider 时写变量（`mt_hist_out` 与
+                    // 有输运材料或 CH4 provider 时写变量（`mt_hist_out` 与
                     // `methane_reactive_history`），否则只有文件骨架。
-                    match tracer_runtime.as_ref().filter(|t| {
+                    match material_runtime.as_ref().filter(|t| {
                         t.has_transport()
                             || t.set
-                                .tracers
+                                .materials
                                 .iter()
-                                .any(colm_runtime::methane::is_methane_tracer)
+                                .any(colm_runtime::methane::is_methane_material)
                     }) {
-                        Some(tracer) => session.with_tracer_variables(
-                            tracer.set.clone(),
+                        Some(material) => session.with_material_variables(
+                            material.set.clone(),
                             templates
                                 .iter()
                                 .map(|template| template.patch_type)
@@ -2224,11 +2231,11 @@ fn run_spatial_segment(
                         statics,
                     )
                     .map(|session| {
-                        // 向量写出（没有窗口变量，所以不调 `with_tracer_history`）：开了示踪物就写示踪物文件（`MOD_Tracer_Hist` 的 `Vector` 支），
-                        // 没有输运示踪物也没有 CH4 时只有维与坐标。
-                        match tracer_runtime.as_ref() {
-                            Some(tracer) => session.with_tracer_variables(
-                                tracer.set.clone(),
+                        // 向量写出（没有窗口变量，所以不调 `with_material_history`）：开了材料就写材料文件（`MOD_Material_Hist` 的 `Vector` 支），
+                        // 没有输运材料也没有 CH4 时只有维与坐标。
+                        match material_runtime.as_ref() {
+                            Some(material) => session.with_material_variables(
+                                material.set.clone(),
                                 templates
                                     .iter()
                                     .map(|template| template.patch_type)
@@ -2284,9 +2291,9 @@ fn run_spatial_segment(
         window: history
             .as_ref()
             .map(|history| history.session.window_handle()),
-        tracer_raw: history
+        material_raw: history
             .as_ref()
-            .map(|history| history.session.tracer_raw_handle()),
+            .map(|history| history.session.material_raw_handle()),
         urban: templates
             .iter()
             .map(|template| template.urban.is_some())
@@ -2317,8 +2324,8 @@ fn run_spatial_segment(
                     read.windows.len(),
                     patches.len()
                 );
-                // 示踪物部分与主机在同一判决下：完整窗口不读回，否则会续接一个已关闭的窗口。
-                restore_sidecar_tracers(
+                // 材料部分与主机在同一判决下：完整窗口不读回，否则会续接一个已关闭的窗口。
+                restore_sidecar_materials(
                     &mut templates[patches.clone()],
                     &history_sidecar_path(&files.time)?,
                     patches.len(),
@@ -2349,8 +2356,8 @@ fn run_spatial_segment(
         .is_some_and(|river| river.history.acctime.iter().any(|&value| value > 0.0));
     if !(window_restored || river_window_restored) {
         if let Some(river) = runtime.river_mut() {
-            if let Some(tracers) = river.tracers.as_mut() {
-                tracers.drop_hist_window();
+            if let Some(materials) = river.materials.as_mut() {
+                materials.drop_hist_window();
             }
             if let Some(sediment) = river.sediment.as_mut() {
                 sediment.drop_hist_window();
@@ -2384,7 +2391,7 @@ fn run_spatial_segment(
         history.as_mut(),
         history_writer.as_mut(),
         exchange,
-        |steps, states, outputs, carries, river, tracer_cache, lateral| {
+        |steps, states, outputs, carries, river, material_cache, lateral| {
             for (carry, source) in diagnostics_carry.iter_mut().zip(carries) {
                 carry.merge(source);
             }
@@ -2432,8 +2439,8 @@ fn run_spatial_segment(
                         &history_restart,
                         river,
                         write_river_restart,
-                        tracer_cache,
-                        empty_land_tracer,
+                        material_cache,
+                        empty_land_material,
                     )?;
                     if let Some(river) = river {
                         if write_river_restart {
@@ -2446,16 +2453,16 @@ fn run_spatial_segment(
                                 river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
                                 rest_compression,
                             )?;
-                            if let Some(tracers) = river.tracers.as_ref() {
-                                colm_runtime::river::restart::write_river_tracers(
+                            if let Some(materials) = river.materials.as_ref() {
+                                colm_runtime::river::restart::write_river_materials(
                                     &path,
                                     &river.network,
-                                    &mut tracers.clone(),
+                                    &mut materials.clone(),
                                     rest_compression,
                                 )?;
                             }
-                            if river.tracers.is_none() && river.empty_tracer_transaction {
-                                colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+                            if river.materials.is_none() && river.empty_material_transaction {
+                                colm_runtime::river::restart::write_empty_river_materials(&path)?;
                             }
                             if let Some(sediment) = river.sediment.as_ref() {
                                 sediment.write_restart(&path, &river.network, rest_compression)?;
@@ -2511,10 +2518,10 @@ fn run_spatial_segment(
         runtime.river(),
         write_river_restart,
         runtime
-            .tracer_forcing()
+            .material_forcing()
             .map(|forcing| forcing.cache())
             .as_ref(),
-        empty_land_tracer,
+        empty_land_material,
     )?;
     if let Some(lateral) = runtime.catchment() {
         ensure!(
@@ -2544,16 +2551,16 @@ fn run_spatial_segment(
             river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
             rest_compression,
         )?;
-        if let Some(tracers) = river.tracers.as_ref() {
-            colm_runtime::river::restart::write_river_tracers(
+        if let Some(materials) = river.materials.as_ref() {
+            colm_runtime::river::restart::write_river_materials(
                 &path,
                 &river.network,
-                &mut tracers.clone(),
+                &mut materials.clone(),
                 rest_compression,
             )?;
         }
-        if river.tracers.is_none() && river.empty_tracer_transaction {
-            colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+        if river.materials.is_none() && river.empty_material_transaction {
+            colm_runtime::river::restart::write_empty_river_materials(&path)?;
         }
         if let Some(sediment) = river.sediment.as_ref() {
             sediment.write_restart(&path, &river.network, rest_compression)?;
@@ -2621,7 +2628,7 @@ fn run_spatial_segment(
     let river = runtime.river().map(|river| {
         (
             river.state.clone(),
-            river.tracers.clone(),
+            river.materials.clone(),
             river.sediment.clone(),
         )
     });
@@ -2726,8 +2733,8 @@ fn check_spatial_lulcc(
         !logical_field(document, "DEF_USE_BGC")?,
         "LULCC is not supported for BGC upstream (MOD_Namelist stops too)"
     );
-    // 城市：SAT 与 MEC 的城市段已移植。示踪物 + 城市模型上游在 `CoLMDRIVER.F90:89-92` 第一步就停机，
-    // Rust 在装配城市 patch 的示踪物时拒绝（`assembly.rs`），不再单列 LULCC 的拒绝。
+    // 城市：SAT 与 MEC 的城市段已移植。材料 + 城市模型上游在 `CoLMDRIVER.F90:89-92` 第一步就停机，
+    // Rust 在装配城市 patch 的材料时拒绝（`assembly.rs`），不再单列 LULCC 的拒绝。
     // 上游灌溉只在 `#ifdef CROP` 下按作物物候施水（`CoLMMAIN.F90:849-858`），要 BGC 作物状态；
     // 而 LULCC 与 BGC 上游互斥（见上），所以这个组合在上游走不到有意义的路径。
     ensure!(
@@ -2842,7 +2849,7 @@ fn lulcc_urban_layout(
 /// `lulcc_inventory_trace`（`MOD_Lulcc_Driver.F90:319-342`）：PFT（非 SOLO）或 FAST_PC 时把
 /// `patchtypes == 0` 的各类份额按类号次序加进第 1 类（从 0 起的顺序加法；FAST_PC 下作物两类
 /// 改加进 CROPLAND），其余类照抄；LCT 时原样返回。
-/// `tracer_forcing_lulcc_map` 的 `source_class` 求和是同一条加法链，所以两处都用这份。
+/// `material_forcing_lulcc_map` 的 `source_class` 求和是同一条加法链，所以两处都用这份。
 fn lulcc_inventory_trace(
     raw: Vec<Vec<f64>>,
     merge_soil_classes: bool,
@@ -2850,7 +2857,7 @@ fn lulcc_inventory_trace(
 ) -> Result<Vec<Vec<f64>>> {
     ensure!(
         raw.iter().flatten().all(|v| v.is_finite() && *v >= 0.0),
-        "TRACER LULCC invalid transfer trace"
+        "MATERIAL LULCC invalid transfer trace"
     );
     if !merge_soil_classes {
         return Ok(raw);
@@ -2859,7 +2866,7 @@ fn lulcc_inventory_trace(
     const CROPLAND: usize = 12;
     ensure!(
         raw.iter().all(|row| row.len() == IGBP_PATCHTYPES.len() + 1),
-        "TRACER LULCC transfer trace class count mismatch"
+        "MATERIAL LULCC transfer trace class count mismatch"
     );
     Ok(raw
         .into_iter()
@@ -2882,9 +2889,9 @@ fn lulcc_inventory_trace(
         .collect())
 }
 
-/// MEC 的示踪物重映射输入：每个新 patch 的来源地类份额（`lccpct_patches(np, 0:N)`）与
+/// MEC 的材料重映射输入：每个新 patch 的来源地类份额（`lccpct_patches(np, 0:N)`）与
 /// 新旧两侧 patch 的物理面积（`lulcc_patch_areas`，m²）。
-struct TracerMec {
+struct MaterialMec {
     lccpct: Vec<Vec<f64>>,
     new_area: Vec<f64>,
     old_area: Vec<f64>,
@@ -2918,7 +2925,7 @@ fn lulcc_patch_areas(
 /// 一个 restart 里的主机水（上游 `mt_lulcc_host_sync` 的 `src_water_2d/3d` 与紧随其后的主机数组）。
 ///
 /// 逐 patch 调一次 NetCDF 会重复解压，这里先把每个变量整段取出来；`soilsnow` 行按
-/// `wliq_soisno(maxsnl+1:nl_soil)` 的次序直接对应 [`colm_core::tracer::SOISNO_LAYERS`]。
+/// `wliq_soisno(maxsnl+1:nl_soil)` 的次序直接对应 [`colm_core::material::SOISNO_LAYERS`]。
 struct HostWaterFile {
     row: usize,
     ldew: Vec<f64>,
@@ -2936,7 +2943,7 @@ struct HostWaterFile {
 
 impl HostWaterFile {
     fn open(file: &colm_init::RestartFile) -> Result<Self> {
-        use colm_core::tracer::SOISNO_LAYERS;
+        use colm_core::material::SOISNO_LAYERS;
         let row = file.dimension("soilsnow")?;
         ensure!(
             row == SOISNO_LAYERS,
@@ -3006,14 +3013,14 @@ fn report_lulcc_host_sync(outcome: &colm_init::lulcc_host::HostFollowOutcome) {
     }
 }
 
-/// `remap_land_tracer_lulcc_state`：每个新 patch 先取 `allocate_Material_Vars` 的分配值，再按方案搬旧池。
+/// `remap_land_material_lulcc_state`：每个新 patch 先取 `allocate_Material_Vars` 的分配值，再按方案搬旧池。
 ///
 /// * SAT（没有 `lccpct_patches`）：同单元同类型的旧 patch（`fallback_source`，与 SAT 配对相同）整份抄过来。
 /// * MEC（`lulcc_inventory_trace` 加新旧面积）：广延量按面积守恒加权 —— 旧 patch `op` 转给新 patch `np`
 ///   的面积 `w = old_area(op)·target(np,c)/Σ_nq target(nq,c)`，`target(np,c) = new_area(np)·lcc(np,c)/Σ lcc(np,:)`，
 ///   和 `FMA(w, old, new)` 依旧 patch 次序累加后除以新面积；强度量（叶片 δ、Péclet）用来源面积权重
 ///   `lcc(np,c)·old_area(op)/Σ_同类 old_area` 加权平均。没有权重时退回同类型的旧 patch，再没有就保持分配值。
-///   之后核对每个输运示踪物的陆面水池质量守恒（`TRC_LULCC_BAL`）。
+///   之后核对每个输运材料的陆面水池质量守恒（`TRC_LULCC_BAL`）。
 ///
 /// 同位素且开了含水层混合（变饱和流、`DEF_MT_AQUIFER_MIXING_WATER_MM > 0`）时，上游另查：
 /// 特殊地类不能带参考水量，新建的土壤/湿地 patch 不能没有参考水量，否则停机。
@@ -3021,22 +3028,22 @@ fn report_lulcc_host_sync(outcome: &colm_init::lulcc_host::HostFollowOutcome) {
 // 形参逐一对应上游 `remap_land_mt_lulcc_state` 的输入（新/旧侧、主机水、MEC 账与开关），
 // 拆成结构体只是换个地方传，不会让数据流更清楚。
 #[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
-fn lulcc_land_tracers(
-    set: &colm_core::tracer::TracerSet,
+fn lulcc_land_materials(
+    set: &colm_core::material::MaterialSet,
     aquifer_mixing: bool,
     new: &colm_init::lulcc::SatSide<'_>,
     new_patch_type: &[i64],
     new_host: &colm_init::RestartFile,
     old: Option<(colm_init::lulcc::SatSide<'_>, &colm_init::RestartFile)>,
-    mec: Option<TracerMec>,
+    mec: Option<MaterialMec>,
     abort_nbad: i64,
     host_options: colm_init::lulcc_host::HostFollowOptions,
-) -> Result<Vec<colm_core::tracer::PatchTracerState>> {
-    use colm_core::tracer::{PatchTracerState, TracerPools};
+) -> Result<Vec<colm_core::material::PatchMaterialState>> {
+    use colm_core::material::{MaterialPools, PatchMaterialState};
     const TINY: f64 = f64::MIN_POSITIVE;
     let nnew = new.patch_class.len();
-    let mut states: Vec<PatchTracerState> = (0..nnew)
-        .map(|_| PatchTracerState::allocated(set))
+    let mut states: Vec<PatchMaterialState> = (0..nnew)
+        .map(|_| PatchMaterialState::allocated(set))
         .collect();
     // 新 patch 的主机水与"旧主机水按同一套权重搬过来"的源水量；`sourced` 是上游的
     // `patch_has_source`：没有源的新 patch 按主机水冷启动材料。
@@ -3054,9 +3061,12 @@ fn lulcc_land_tracers(
     let host_had_old = old.is_some();
     let mut any_reference = false;
     if let Some((old, old_time)) = old {
-        let old_states =
-            colm_runtime::tracer::read_land_tracer_restart(old_time, set, old.patch_class.len())?
-                .context("the old year's restart has no committed land tracer state")?;
+        let old_states = colm_runtime::material::read_land_material_restart(
+            old_time,
+            set,
+            old.patch_class.len(),
+        )?
+        .context("the old year's restart has no committed land material state")?;
         any_reference = old_states.iter().any(|state| state.aquifer_ref_water > 0.0);
         let old_host_file = HostWaterFile::open(old_time)?;
         ensure!(
@@ -3185,7 +3195,7 @@ fn lulcc_land_tracers(
                             && old.patch_class[op] == new.patch_class[np]
                     })
                 };
-                type Field = fn(&mut TracerPools) -> &mut f64;
+                type Field = fn(&mut MaterialPools) -> &mut f64;
                 const MASS: [Field; 16] = [
                     |p| &mut p.ldew_rain,
                     |p| &mut p.ldew_snow,
@@ -3209,7 +3219,8 @@ fn lulcc_land_tracers(
                     |p| &mut p.leaf_delta_b,
                     |p| &mut p.leaf_peclet,
                 ];
-                type Layers = fn(&mut TracerPools) -> &mut [f64; colm_core::tracer::SOISNO_LAYERS];
+                type Layers =
+                    fn(&mut MaterialPools) -> &mut [f64; colm_core::material::SOISNO_LAYERS];
                 const LAYERS: [Layers; 3] = [
                     |p| &mut p.wliq_soisno,
                     |p| &mut p.wice_soisno,
@@ -3239,10 +3250,10 @@ fn lulcc_land_tracers(
                     src_water[np] = host_src;
                     // 一个量的重映射：`new = 0`，依旧 patch 次序 `FMA(w, old, new)`，再除分母；
                     // 没有权重时取同类型旧 patch，再没有就保持分配值。
-                    let remap = |get: &dyn Fn(&mut PatchTracerState) -> f64,
+                    let remap = |get: &dyn Fn(&mut PatchMaterialState) -> f64,
                                  list: &[(usize, f64)],
                                  denom: f64,
-                                 old_states: &mut Vec<PatchTracerState>,
+                                 old_states: &mut Vec<PatchMaterialState>,
                                  current: f64|
                      -> f64 {
                         if !list.is_empty() {
@@ -3277,7 +3288,7 @@ fn lulcc_land_tracers(
                             );
                         }
                         for layers in LAYERS {
-                            for slot in 0..colm_core::tracer::SOISNO_LAYERS {
+                            for slot in 0..colm_core::material::SOISNO_LAYERS {
                                 let current = layers(&mut states[np].pools[itrc])[slot];
                                 layers(&mut states[np].pools[itrc])[slot] = remap(
                                     &|s| layers(&mut s.pools[itrc])[slot],
@@ -3335,9 +3346,9 @@ fn lulcc_land_tracers(
     }
     let require_reference = aquifer_mixing
         && set
-            .tracers
+            .materials
             .iter()
-            .any(|tracer| tracer.uses_land_water_transport() && tracer.is_isotope());
+            .any(|material| material.uses_land_water_transport() && material.is_isotope());
     if require_reference || any_reference {
         for (state, &patch_type) in states.iter().zip(new_patch_type) {
             let soil_or_wetland = patch_type == 0 || patch_type == 2;
@@ -3357,23 +3368,23 @@ fn lulcc_land_tracers(
     Ok(states)
 }
 
-/// `compute_*_lulcc_land_water_mass` + `assert_lulcc_land_water_mass_conserved`：逐输运示踪物把各陆面
+/// `compute_*_lulcc_land_water_mass` + `assert_lulcc_land_water_mass_conserved`：逐输运材料把各陆面
 /// 水池按面积求和（`FMA(pool, area, total)`，面积 ≤ tiny 的 patch 不计），前后之差超过
-/// `max(1e-8, 1e-10·max(|前|, |后|, 1))` 的示踪物个数多于 `DEF_MT_LULCC_ABORT_NBAD` 就停。
+/// `max(1e-8, 1e-10·max(|前|, |后|, 1))` 的材料个数多于 `DEF_MT_LULCC_ABORT_NBAD` 就停。
 fn lulcc_check_land_water_mass(
-    set: &colm_core::tracer::TracerSet,
-    old_states: &[colm_core::tracer::PatchTracerState],
+    set: &colm_core::material::MaterialSet,
+    old_states: &[colm_core::material::PatchMaterialState],
     old_area: &[f64],
-    new_states: &[colm_core::tracer::PatchTracerState],
+    new_states: &[colm_core::material::PatchMaterialState],
     new_area: &[f64],
     abort_nbad: i64,
     host_change: &[f64],
 ) -> Result<()> {
-    use colm_core::tracer::{PatchTracerState, TracerPools};
+    use colm_core::material::{MaterialPools, PatchMaterialState};
     const TINY: f64 = f64::MIN_POSITIVE;
-    let total = |states: &[PatchTracerState], areas: &[f64]| -> Vec<f64> {
+    let total = |states: &[PatchMaterialState], areas: &[f64]| -> Vec<f64> {
         let mut total = vec![0.0; set.len()];
-        let scalar: [fn(&TracerPools) -> f64; 14] = [
+        let scalar: [fn(&MaterialPools) -> f64; 14] = [
             |p| p.ldew_rain,
             |p| p.ldew_snow,
             |p| p.wa,
@@ -3389,7 +3400,7 @@ fn lulcc_check_land_water_mass(
             |p| p.waterstorage,
             |p| p.scv,
         ];
-        let layered: [fn(&TracerPools) -> &[f64; colm_core::tracer::SOISNO_LAYERS]; 3] =
+        let layered: [fn(&MaterialPools) -> &[f64; colm_core::material::SOISNO_LAYERS]; 3] =
             [|p| &p.wliq_soisno, |p| &p.wice_soisno, |p| &p.solid_soisno];
         // 上游的累加次序：ldew_rain, ldew_snow, wliq, wice, wa, aquifer_ref_mass, wdsrf, wetwat,
         // 两种残留, solid_soisno, 四种固相, waterstorage, scv。
@@ -3420,17 +3431,17 @@ fn lulcc_check_land_water_mass(
                 }
                 match item {
                     Ok(k) => {
-                        for (itrc, tracer) in set.tracers.iter().enumerate() {
-                            if tracer.uses_land_water_transport() {
+                        for (itrc, material) in set.materials.iter().enumerate() {
+                            if material.uses_land_water_transport() {
                                 total[itrc] =
                                     scalar[k](&state.pools[itrc]).contract(area, total[itrc]);
                             }
                         }
                     }
                     Err(k) => {
-                        for slot in 0..colm_core::tracer::SOISNO_LAYERS {
-                            for (itrc, tracer) in set.tracers.iter().enumerate() {
-                                if tracer.uses_land_water_transport() {
+                        for slot in 0..colm_core::material::SOISNO_LAYERS {
+                            for (itrc, material) in set.materials.iter().enumerate() {
+                                if material.uses_land_water_transport() {
                                     total[itrc] = layered[k](&state.pools[itrc])[slot]
                                         .contract(area, total[itrc]);
                                 }
@@ -3445,8 +3456,8 @@ fn lulcc_check_land_water_mass(
     let before = total(old_states, old_area);
     let after = total(new_states, new_area);
     let mut bad = 0;
-    for (itrc, tracer) in set.tracers.iter().enumerate() {
-        if !tracer.uses_land_water_transport() {
+    for (itrc, material) in set.materials.iter().enumerate() {
+        if !material.uses_land_water_transport() {
             continue;
         }
         // 上游 `assert_lulcc_land_water_mass_conserved(mass_before + host_change, mass_after)`：
@@ -3459,7 +3470,7 @@ fn lulcc_check_land_water_mass(
     }
     ensure!(
         bad <= abort_nbad,
-        "TRACER LULCC remap land-water mass conservation failed ({bad} tracer(s))"
+        "MATERIAL LULCC remap land-water mass conservation failed ({bad} material(s))"
     );
     Ok(())
 }
@@ -3471,7 +3482,7 @@ fn lulcc_check_land_water_mass(
 fn lulcc_check_inventory_transfer(
     new: &colm_init::lulcc::SatSide<'_>,
     old: &colm_init::lulcc::SatSide<'_>,
-    mec: &TracerMec,
+    mec: &MaterialMec,
 ) -> Result<()> {
     const TINY: f64 = f64::MIN_POSITIVE;
     const CLASSES: usize = 18;
@@ -3479,7 +3490,7 @@ fn lulcc_check_inventory_transfer(
         mec.lccpct.len() == new.patch_class.len()
             && mec.new_area.len() == new.patch_class.len()
             && mec.old_area.len() == old.patch_class.len(),
-        "TRACER LULCC inventory map shape mismatch"
+        "MATERIAL LULCC inventory map shape mismatch"
     );
     ensure!(
         mec.old_area
@@ -3491,7 +3502,7 @@ fn lulcc_check_inventory_transfer(
                 .iter()
                 .flatten()
                 .all(|v| v.is_finite() && *v >= 0.0),
-        "TRACER LULCC invalid inventory area or transfer trace"
+        "MATERIAL LULCC invalid inventory area or transfer trace"
     );
     let elements: std::collections::BTreeSet<i64> =
         old.element.iter().chain(new.element).copied().collect();
@@ -3506,7 +3517,7 @@ fn lulcc_check_inventory_transfer(
             .collect();
         ensure!(
             !olds.is_empty() && !news.is_empty(),
-            "TRACER LULCC element footprint changed"
+            "MATERIAL LULCC element footprint changed"
         );
         for &op in &olds {
             if mec.old_area[op] <= TINY {
@@ -3521,7 +3532,7 @@ fn lulcc_check_inventory_transfer(
             let rowsum: f64 = mec.lccpct[np].iter().sum();
             ensure!(
                 (rowsum - 1.0).abs() <= 1.0e-10,
-                "TRACER LULCC incomplete source trace"
+                "MATERIAL LULCC incomplete source trace"
             );
             for c in 0..CLASSES {
                 target[c] += mec.new_area[np] * mec.lccpct[np][c] / rowsum;
@@ -3531,20 +3542,20 @@ fn lulcc_check_inventory_transfer(
         let new_total: f64 = news.iter().map(|&np| mec.new_area[np]).sum();
         ensure!(
             (old_total - new_total).abs() <= 1.0e-10 * old_total.max(new_total).max(1.0),
-            "TRACER LULCC element physical footprint changed (element {element}: {old_total} vs {new_total} m2)"
+            "MATERIAL LULCC element physical footprint changed (element {element}: {old_total} vs {new_total} m2)"
         );
         for c in 0..CLASSES {
             ensure!(
                 (source[c] > 0.0) == (target[c] > 0.0)
                     && (source[c] - target[c]).abs() <= 1.0e-10 * source[c].max(target[c]),
-                "TRACER LULCC source-class physical area mismatch (element {element}, class {c})"
+                "MATERIAL LULCC source-class physical area mismatch (element {element}, class {c})"
             );
         }
     }
     Ok(())
 }
 
-/// `tracer_forcing_lulcc_map`（IGBP LCT：`source_class` 是恒等映射）。`old`/返回值是 `[patch][species]`
+/// `material_forcing_lulcc_map`（IGBP LCT：`source_class` 是恒等映射）。`old`/返回值是 `[patch][species]`
 /// 平铺；新 patch 先取默认比值。
 ///
 /// * MEC（有 `lccpct`）：同单元的旧 patch 以 `lcc(np, c_old)·subfrc(op)/Σ_同单元同类 subfrc` 加权；
@@ -3567,11 +3578,11 @@ fn lulcc_forcing_cache(
     let (nnew, nold) = (new_class.len(), old_class.len());
     ensure!(
         old.len() == nold * ns && old_area.len() == nold,
-        "tracer forcing LULCC map shape mismatch"
+        "material forcing LULCC map shape mismatch"
     );
     ensure!(
         old.iter().all(|v| v.is_finite()),
-        "tracer forcing LULCC old cache contains non-finite values"
+        "material forcing LULCC old cache contains non-finite values"
     );
     let class_area: Vec<f64> = (0..nold)
         .map(|op| {
@@ -3931,26 +3942,26 @@ fn lulcc_transition(
         // 过渡这一步历史区间已关（`window: None`），步数恒为 0，完整性判据用不到。
         time_step_seconds: 0.0,
         window: None,
-        tracer_raw: None,
+        material_raw: None,
         urban: new_urban,
     };
-    // 输运示踪物（`remap_land_tracer_lulcc_state` 的 SAT 形态，不带转移份额）。
-    let land_tracers = colm_runtime::tracer::tracer_set_from_document(document)?
+    // 输运材料（`remap_land_material_lulcc_state` 的 SAT 形态，不带转移份额）。
+    let land_materials = colm_runtime::material::material_set_from_document(document)?
         .filter(|set| set.transport_indices().next().is_some())
         .map(|set| -> Result<_> {
             Ok((set, real_field(document, "DEF_MT_AQUIFER_MIXING_WATER_MM")?))
         })
         .transpose()?;
-    // 示踪物强迫的"最近有效值"缓存（`tracer_forcing_lulcc_remap`）：默认比值、相态回填
+    // 材料强迫的"最近有效值"缓存（`material_forcing_lulcc_remap`）：默认比值、相态回填
     // 标志（只有它们的雪记忆按可靠来源加权）与旧侧的 `subfrc`。
-    let forcing_defaults = match &land_tracers {
-        Some(_) => colm_runtime::tracer::TracerRuntime::from_document(document)?
+    let forcing_defaults = match &land_materials {
+        Some(_) => colm_runtime::material::MaterialRuntime::from_document(document)?
             .filter(|runtime| runtime.forcing_specs.iter().any(|specs| !specs.is_empty()))
             .map(|runtime| {
                 (
                     runtime.precip_ratio.clone(),
                     runtime.vapor_ratio.clone(),
-                    colm_runtime::spatial::tracer_forcing::phase_fill_flags(
+                    colm_runtime::spatial::material_forcing::phase_fill_flags(
                         &runtime.set,
                         &runtime.forcing_specs,
                     ),
@@ -4293,7 +4304,7 @@ fn lulcc_transition(
         if let Some(cold_urban) = &cold_urban {
             cold_urban.write_with(&lulcc_urban_path(&path)?, &urban_overrides)?;
         }
-        if let Some((set, mixing)) = &land_tracers {
+        if let Some((set, mixing)) = &land_materials {
             let old = match old_topology.blocks.iter().find(|(old, _)| old == block) {
                 Some((_, old_patches)) => Some((
                     colm_init::RestartFile::open(const_path(years.old, block))?,
@@ -4302,7 +4313,7 @@ fn lulcc_transition(
                 )),
                 None => None,
             };
-            let states = lulcc_land_tracers(
+            let states = lulcc_land_materials(
                 set,
                 *mixing > 0.0 && case.physics.variably_saturated_flow,
                 &colm_init::lulcc::SatSide {
@@ -4328,7 +4339,7 @@ fn lulcc_transition(
                     .transpose()?,
                 // MEC：`lulcc_inventory_trace`（IGBP LCT 下就是 `lccpct_patches`）与新旧 patch 的物理面积。
                 match (mec.is_some(), old.as_ref()) {
-                    (true, Some((_, _, old_patches))) => Some(TracerMec {
+                    (true, Some((_, _, old_patches))) => Some(MaterialMec {
                         lccpct: lulcc_inventory_trace(
                             read_lulcc_transfer_trace(&landdata, years.new, block, patches.len())?,
                             merge_soil_classes,
@@ -4342,13 +4353,13 @@ fn lulcc_transition(
                 integer_field(document, "DEF_MT_LULCC_ABORT_NBAD")?,
                 colm_init::lulcc_host::HostFollowOptions {
                     vegetation_snow: case.physics.vegetation_snow,
-                    cold_start: colm_core::tracer::TracerColdStart {
+                    cold_start: colm_core::material::MaterialColdStart {
                         variably_saturated_flow: case.physics.variably_saturated_flow,
                         aquifer_mixing_water_mm: *mixing,
                     },
                 },
             )
-            .with_context(|| format!("cannot carry the tracers of block {block} over"))?;
+            .with_context(|| format!("cannot carry the materials of block {block} over"))?;
             let cache = match (&forcing_defaults, &old, &old_subfrc) {
                 (
                     Some((precip_default, vapor_default, phase_fill)),
@@ -4437,14 +4448,14 @@ fn lulcc_transition(
                 }
                 _ => None,
             };
-            // `write_land_tracer_restart` 同样先检查状态（`wa` 取冷启动时间重启里的值）。
+            // `write_land_material_restart` 同样先检查状态（`wa` 取冷启动时间重启里的值）。
             let wa = cold.floats("wa")?.to_vec();
             let patch_types = new_const
                 .integers("patchtype")?
                 .iter()
                 .map(|&t| i32::try_from(t))
                 .collect::<Result<Vec<_>, _>>()?;
-            colm_runtime::tracer::write_land_tracer_restart(
+            colm_runtime::material::write_land_material_restart(
                 &path,
                 set,
                 &states.iter().collect::<Vec<_>>(),
@@ -4452,9 +4463,9 @@ fn lulcc_transition(
                 cache
                     .as_ref()
                     .map(|(nvars, identity, precip, vapor, reliable)| {
-                        colm_runtime::tracer::ForcingCache {
+                        colm_runtime::material::ForcingCache {
                             nvars: *nvars,
-                            ntracers: set.len(),
+                            nmaterials: set.len(),
                             identity: std::sync::Arc::new(identity.clone()),
                             precip,
                             vapor,
@@ -4462,14 +4473,14 @@ fn lulcc_transition(
                         }
                     })
                     .as_ref(),
-                &colm_runtime::tracer::RestartStateCheck {
+                &colm_runtime::material::RestartStateCheck {
                     wa: &wa,
                     patch_types: &patch_types,
                     variably_saturated_flow: case.physics.variably_saturated_flow,
                 },
             )?;
         }
-        // 过渡这一步的历史区间已关，旁车不带示踪物部分。
+        // 过渡这一步的历史区间已关，旁车不带材料部分。
         mark_history_restart_with_river(
             &path,
             &history_restart,
@@ -4488,7 +4499,7 @@ fn lulcc_transition(
         let _ = std::fs::remove_dir(restart_root.join(&new_label));
     }
     // 3. 河道：网络不变，状态接着用。
-    let river = if let Some((mut state, river_tracers, sediment)) = river {
+    let river = if let Some((mut state, river_materials, sediment)) = river {
         let network = colm_runtime::river::network::RiverNetwork::read(&unit_catchment_file(
             document,
             out,
@@ -4538,21 +4549,21 @@ fn lulcc_transition(
             u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                 .context("DEF_REST_CompressLevel must fit 0..=9")?,
         )?;
-        // 河道示踪物：上游在内存里原样留着（`grid_riverlake_flow_lulcc` 不碰），续跑照常提交。
-        match river_tracers.as_ref() {
-            Some(tracers) => colm_runtime::river::restart::write_river_tracers(
+        // 河道材料：上游在内存里原样留着（`grid_riverlake_flow_lulcc` 不碰），续跑照常提交。
+        match river_materials.as_ref() {
+            Some(materials) => colm_runtime::river::restart::write_river_materials(
                 &path,
                 &network,
-                &mut tracers.clone(),
+                &mut materials.clone(),
                 u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
                     .context("DEF_REST_CompressLevel must fit 0..=9")?,
             )?,
             None if material_transport_enabled(document)? => {
-                colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+                colm_runtime::river::restart::write_empty_river_materials(&path)?;
             }
             None => {}
         }
-        // 泥沙同样留在内存里，LULCC 年末重写的河道续跑带着它（`tracer_lifecycle_route_write_restart`）。
+        // 泥沙同样留在内存里，LULCC 年末重写的河道续跑带着它（`material_lifecycle_route_write_restart`）。
         if let Some(sediment) = sediment.as_ref() {
             sediment.write_restart(
                 &path,
@@ -4562,7 +4573,7 @@ fn lulcc_transition(
             )?;
         }
         written.push(path);
-        Some((state, river_tracers, sediment))
+        Some((state, river_materials, sediment))
     } else {
         None
     };
@@ -4670,8 +4681,8 @@ fn write_block_restarts(
     history: &HistoryRestart,
     river: Option<&colm_runtime::river::RiverModel>,
     write_river_history: bool,
-    tracer_cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
-    empty_land_tracer: Option<f64>,
+    material_cache: Option<&colm_runtime::material::ForcingCache<'_>>,
+    empty_land_material: Option<f64>,
 ) -> Result<Vec<PathBuf>> {
     // `river_active`：河道 history 累加器（`acctime_ucat`）有值。
     let river_history = river.map(colm_runtime::river::RiverModel::history_for_restart);
@@ -4713,25 +4724,25 @@ fn write_block_restarts(
                 &files.time,
                 &path,
             )?;
-            append_tracer_restart(
+            append_material_restart(
                 &templates[patches.clone()],
                 &states[patches.clone()],
                 &path,
-                tracer_cache
+                material_cache
                     .map(|cache| cache.block(patches.clone()))
                     .as_ref(),
             )?;
-            // 开了示踪物却没有输运示踪物（例如只有 CH4 provider）：patch 上不挂示踪物状态，
-            // 上游仍提交一份空的陆面示踪物事务。
-            if let Some(mixing) = empty_land_tracer {
-                colm_init::write_empty_land_tracer_transaction(&path, mixing)?;
+            // 开了材料却没有输运材料（例如只有 CH4 provider）：patch 上不挂材料状态，
+            // 上游仍提交一份空的陆面材料事务。
+            if let Some(mixing) = empty_land_material {
+                colm_init::write_empty_land_material_transaction(&path, mixing)?;
             }
             mark_history_restart_with_river(
                 &path,
                 history,
                 Some(patches.clone()),
                 river_required,
-                sidecar_tracers(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
+                sidecar_materials(&templates[patches.clone()], &states[patches.clone()])?.as_ref(),
                 end_time,
             )?;
             Ok(path)
@@ -4818,7 +4829,7 @@ fn assemble_patch(
     if let Some(switches) = template.physics.bgc {
         let (mut bgc, irrigation) =
             assemble_bgc(document, files, patch, switches, spatial_patch.as_ref())?;
-        // `ch4_reactive_init`：注册了 CH4 示踪物时，BGC 之后跑甲烷（单点内核没有网格河湖汇流）。
+        // `ch4_reactive_init`：注册了 CH4 材料时，BGC 之后跑甲烷（单点内核没有网格河湖汇流）。
         // 空间内核编进了网格河湖（`routing`/`hybrid` 可用），单点内核没有。
         if let Some(setup) =
             colm_runtime::methane::setup_from_document(document, spatial_patch.is_some())?
@@ -5175,7 +5186,7 @@ fn assemble_bgc(
         monthly_ndep,
     )?;
     // `init_ndep_data_*(s_year, …)`、`init_fire_data(s_year)`：namelist 的起始年。上游原来用
-    // `sdate(1)`（经过 `adj2end`，00:00 的 1 月 1 日起步算上一年），只有开示踪物时读 `s_year`；
+    // `sdate(1)`（经过 `adj2end`，00:00 的 1 月 1 日起步算上一年），只有开材料时读 `s_year`；
     // vendor 已解耦成一律读 `s_year`。
     let ndep_start_year =
         i32::try_from(integer_field(document, "DEF_simulation_time%start_year")?)?;
@@ -5269,11 +5280,11 @@ fn run_snow(
                 let path = periodic.path(step.clock.end_time);
                 if path != restart_out {
                     write_evolved_restart(templates, states, &snapshots, restart_in, &path)?;
-                    append_tracer_restart(templates, states, &path, None)?;
+                    append_material_restart(templates, states, &path, None)?;
                     mark_history_restart(
                         &path,
                         history_restart,
-                        sidecar_tracers(templates, states)?.as_ref(),
+                        sidecar_materials(templates, states)?.as_ref(),
                         step.clock.end_time,
                     )?;
                 }
@@ -5299,11 +5310,11 @@ fn run_snow(
     };
     let last = last.context(NO_STEP)?;
     write_evolved_restart(templates, &states, &last, restart_in, restart_out)?;
-    append_tracer_restart(templates, &states, restart_out, None)?;
+    append_material_restart(templates, &states, restart_out, None)?;
     mark_history_restart(
         restart_out,
         history_restart,
-        sidecar_tracers(templates, &states)?.as_ref(),
+        sidecar_materials(templates, &states)?.as_ref(),
         run_end,
     )?;
     Ok(RunSummary {
@@ -5312,11 +5323,11 @@ fn run_snow(
     })
 }
 
-/// `write_tracer_restart_all`：有输运示踪物时把示踪物事务追加进刚写好的陆面续跑文件。
-/// `land_tracer_init`：给一份续跑文件里的各 patch 挂上示踪物状态。续跑里的示踪物事务可用就读
+/// `write_material_restart_all`：有输运材料时把材料事务追加进刚写好的陆面续跑文件。
+/// `land_material_init`：给一份续跑文件里的各 patch 挂上材料状态。续跑里的材料事务可用就读
 /// （`template.patch` 是该文件里的行，`count` 是行数），否则按水量冷启动。
-fn attach_land_tracers(
-    tracer: &std::sync::Arc<colm_runtime::tracer::TracerRuntime>,
+fn attach_land_materials(
+    material: &std::sync::Arc<colm_runtime::material::MaterialRuntime>,
     templates: Vec<StandardLctRestartTemplate>,
     restart: &colm_init::RestartFile,
     count: usize,
@@ -5325,19 +5336,19 @@ fn attach_land_tracers(
         .into_iter()
         .map(|template| {
             let state = template.snow_state();
-            let wliq = colm_core::tracer::step::pack_soisno(
+            let wliq = colm_core::material::step::pack_soisno(
                 &state.snow.liquid_water_kg_m2,
                 &state.soil_water.liquid_water_kg_m2,
             );
-            let wice = colm_core::tracer::step::pack_soisno(
+            let wice = colm_core::material::step::pack_soisno(
                 &state.snow.ice_water_kg_m2,
                 &state.soil_water.ice_water_kg_m2,
             );
-            let initial = tracer.initial_state(
+            let initial = material.initial_state(
                 restart,
                 template.patch,
                 count,
-                colm_core::tracer::WaterInventory {
+                colm_core::material::WaterInventory {
                     patch_type: template.patch_type,
                     ldew_rain: state.energy.leaf.canopy_water.rain_mm,
                     ldew_snow: state.energy.leaf.canopy_water.snow_mm,
@@ -5350,7 +5361,7 @@ fn attach_land_tracers(
                     waterstorage: None,
                 },
             )?;
-            template.with_tracer(std::sync::Arc::clone(tracer), initial)
+            template.with_material(std::sync::Arc::clone(material), initial)
         })
         .collect()
 }
@@ -5364,24 +5375,24 @@ fn methane_core_history(templates: &[StandardLctRestartTemplate]) -> bool {
         .is_none_or(|(setup, _)| setup.params.history_accumulation_mode() == 1)
 }
 
-fn append_tracer_restart(
+fn append_material_restart(
     templates: &[StandardLctRestartTemplate],
     states: &[StandardLctSnowSoilState],
     path: &Path,
-    cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
+    cache: Option<&colm_runtime::material::ForcingCache<'_>>,
 ) -> Result<()> {
-    if let Some((tracer, _)) = templates
+    if let Some((material, _)) = templates
         .first()
-        .and_then(|template| template.tracer.as_ref())
+        .and_then(|template| template.material.as_ref())
     {
         let tracks = states
             .iter()
             .map(|state| {
                 state
-                    .tracer
+                    .material
                     .as_deref()
                     .map(|track| &track.state)
-                    .context("every patch of a tracer run carries tracer state")
+                    .context("every patch of a material run carries material state")
             })
             .collect::<Result<Vec<_>>>()?;
         let wa: Vec<f64> = states
@@ -5392,20 +5403,20 @@ fn append_tracer_restart(
             .iter()
             .map(|template| template.patch_type)
             .collect();
-        colm_runtime::tracer::write_land_tracer_restart(
+        colm_runtime::material::write_land_material_restart(
             path,
-            &tracer.set,
+            &material.set,
             &tracks,
-            tracer.aquifer_mixing_water_mm,
+            material.aquifer_mixing_water_mm,
             cache,
-            &colm_runtime::tracer::RestartStateCheck {
+            &colm_runtime::material::RestartStateCheck {
                 wa: &wa,
                 patch_types: &patch_types,
-                variably_saturated_flow: tracer.variably_saturated_flow,
+                variably_saturated_flow: material.variably_saturated_flow,
             },
         )?;
     }
-    // `tracer_lifecycle_land_write_restart`：CH4 provider 的状态接在示踪物事务之后。
+    // `material_lifecycle_land_write_restart`：CH4 provider 的状态接在材料事务之后。
     let methane = templates
         .first()
         .and_then(|template| template.bgc.as_ref())
@@ -5438,8 +5449,8 @@ struct HistoryRestart {
     /// 当前历史区间的原始累加状态；没开 history 时为 `None`（恒为空窗口）。
     window:
         Option<std::sync::Arc<std::sync::Mutex<Vec<colm_runtime::history_sidecar::HistoryWindow>>>>,
-    /// 运行终点（非自然边界）清零前的示踪物/CH4 累加器；有值时旁车用它而不是状态里的。
-    tracer_raw: Option<colm_runtime::tracer_sidecar::RawTracersHandle>,
+    /// 运行终点（非自然边界）清零前的材料/CH4 累加器；有值时旁车用它而不是状态里的。
+    material_raw: Option<colm_runtime::material_sidecar::RawMaterialsHandle>,
     /// 每个 patch 是不是城市（城市累加器排在旁车的 `urban` 维上），全部分块按装配顺序。
     urban: Vec<bool>,
 }
@@ -5460,10 +5471,10 @@ fn history_sidecar_path(restart: &Path) -> Result<PathBuf> {
 fn mark_history_restart(
     restart: &Path,
     history: &HistoryRestart,
-    tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
+    materials: Option<&colm_runtime::material_sidecar::SidecarMaterials<'_>>,
     date: CalendarTime,
 ) -> Result<()> {
-    mark_history_restart_with_river(restart, history, None, false, tracers, date)
+    mark_history_restart_with_river(restart, history, None, false, materials, date)
 }
 
 /// 重启点上的历史窗口是否已经完整（`save_history_acc_restart` 的判据）。
@@ -5490,10 +5501,10 @@ fn history_window_complete(history: &HistoryRestart, date: CalendarTime) -> Resu
     )
 }
 
-/// `read_history_acc_restart` 的示踪物部分：区间跨过重启时，用旁车里的累加器覆盖起跑状态
-/// （示踪物的 `a_mt_*`/`a_water_*` 只在旁车里；CH4 的累加量覆盖续跑文件读回的那份）。
+/// `read_history_acc_restart` 的材料部分：区间跨过重启时，用旁车里的累加器覆盖起跑状态
+/// （材料的 `a_mt_*`/`a_water_*` 只在旁车里；CH4 的累加量覆盖续跑文件读回的那份）。
 /// `file_patches` 是旁车的 patch 数，`index` 给出模板在旁车里的位置。
-fn restore_sidecar_tracers(
+fn restore_sidecar_materials(
     templates: &mut [StandardLctRestartTemplate],
     sidecar: &Path,
     file_patches: usize,
@@ -5502,7 +5513,10 @@ fn restore_sidecar_tracers(
     let Some(first) = templates.first() else {
         return Ok(());
     };
-    let set = first.tracer.as_ref().map(|(tracer, _)| tracer.set.clone());
+    let set = first
+        .material
+        .as_ref()
+        .map(|(material, _)| material.set.clone());
     let setup = first
         .bgc
         .as_ref()
@@ -5512,14 +5526,14 @@ fn restore_sidecar_tracers(
         return Ok(());
     }
     let restored =
-        colm_runtime::tracer_sidecar::read(sidecar, set.as_ref(), setup.as_ref(), file_patches)?;
+        colm_runtime::material_sidecar::read(sidecar, set.as_ref(), setup.as_ref(), file_patches)?;
     for (position, template) in templates.iter_mut().enumerate() {
         let at = index(position, template);
         if let (Some(accumulators), Some((_, state))) =
-            (restored.tracers.as_ref(), template.tracer.as_mut())
+            (restored.materials.as_ref(), template.material.as_mut())
         {
             let patch = &accumulators[at];
-            state.acc = patch.tracers.clone();
+            state.acc = patch.materials.clone();
             state.water_acc = patch.water.clone();
         }
         if let (Some(accumulators), Some(bgc)) = (restored.methane.as_ref(), template.bgc.as_mut())
@@ -5530,17 +5544,17 @@ fn restore_sidecar_tracers(
     Ok(())
 }
 
-/// 旁车的示踪物部分（`tracer_history_write` + 生命周期钩子）要的累加器：有输运示踪物或 CH4
+/// 旁车的材料部分（`material_history_write` + 生命周期钩子）要的累加器：有输运材料或 CH4
 /// provider 时才有，取自各 patch 状态。
-fn sidecar_tracers<'a>(
+fn sidecar_materials<'a>(
     templates: &'a [StandardLctRestartTemplate],
     states: &[StandardLctSnowSoilState],
-) -> Result<Option<colm_runtime::tracer_sidecar::SidecarTracers<'a>>> {
-    use colm_runtime::tracer_sidecar::PatchAccumulators;
+) -> Result<Option<colm_runtime::material_sidecar::SidecarMaterials<'a>>> {
+    use colm_runtime::material_sidecar::PatchAccumulators;
     let first = templates.first();
     let set = first
-        .and_then(|template| template.tracer.as_ref())
-        .map(|(tracer, _)| &tracer.set);
+        .and_then(|template| template.material.as_ref())
+        .map(|(material, _)| &material.set);
     let setup = first
         .and_then(|template| template.bgc.as_ref())
         .and_then(|bgc| bgc.methane.as_ref())
@@ -5553,10 +5567,10 @@ fn sidecar_tracers<'a>(
             .iter()
             .map(|state| {
                 state
-                    .tracer
+                    .material
                     .as_deref()
                     .map(|track| PatchAccumulators::of(&track.state))
-                    .context("every patch of a tracer run carries tracer state")
+                    .context("every patch of a material run carries material state")
             })
             .collect::<Result<Vec<_>>>()?,
         None => Vec::new(),
@@ -5577,7 +5591,7 @@ fn sidecar_tracers<'a>(
         )),
         None => None,
     };
-    Ok(Some(colm_runtime::tracer_sidecar::SidecarTracers {
+    Ok(Some(colm_runtime::material_sidecar::SidecarMaterials {
         set,
         patches,
         methane,
@@ -5591,7 +5605,7 @@ fn mark_history_restart_with_river(
     history: &HistoryRestart,
     block: Option<std::ops::Range<usize>>,
     river_required: bool,
-    tracers: Option<&colm_runtime::tracer_sidecar::SidecarTracers<'_>>,
+    materials: Option<&colm_runtime::material_sidecar::SidecarMaterials<'_>>,
     date: CalendarTime,
 ) -> Result<()> {
     // 重启点已经是一个完整窗口：不写旁车，也不打要求旁车的标记（读回时会被丢弃）。
@@ -5626,7 +5640,7 @@ fn mark_history_restart_with_river(
         _ => &history.urban[..],
     };
     // 上游分两步：`write_sidecar` 先落 `hacc_complete = 0` 与全部累加器，调用方写完
-    // `.river` 求和后再把完成标记改成 1。示踪物部分也是旁车的一部分，必须在完成标记之前写。
+    // `.river` 求和后再把完成标记改成 1。材料部分也是旁车的一部分，必须在完成标记之前写。
     colm_runtime::history_sidecar::write_sidecar_uncommitted(
         &sidecar,
         patches,
@@ -5635,31 +5649,31 @@ fn mark_history_restart_with_river(
         river_required,
         urban,
     )?;
-    // 区间跨过重启（`window_active`）时旁车再带示踪物部分；运行终点（非自然边界）用清零前的快照。
-    if let Some(tracers) = tracers.filter(|_| windows.first().is_some_and(|w| w.steps > 0)) {
+    // 区间跨过重启（`window_active`）时旁车再带材料部分；运行终点（非自然边界）用清零前的快照。
+    if let Some(materials) = materials.filter(|_| windows.first().is_some_and(|w| w.steps > 0)) {
         let raw = history
-            .tracer_raw
+            .material_raw
             .as_ref()
-            .and_then(|raw| raw.lock().expect("tracer raw lock").clone());
+            .and_then(|raw| raw.lock().expect("material raw lock").clone());
         match raw {
             Some(raw) => {
                 let raw = match &block {
                     Some(block) if raw.len() > 1 => raw[block.clone()].to_vec(),
                     _ => raw,
                 };
-                let patches = match tracers.set {
+                let patches = match materials.set {
                     Some(_) => raw
                         .iter()
                         .map(|patch| {
                             patch
-                                .tracer
+                                .material
                                 .clone()
-                                .context("the raw tracer window lost a patch")
+                                .context("the raw material window lost a patch")
                         })
                         .collect::<Result<_>>()?,
                     None => Vec::new(),
                 };
-                let methane = match &tracers.methane {
+                let methane = match &materials.methane {
                     Some((setup, _)) => Some((
                         *setup,
                         raw.iter()
@@ -5670,14 +5684,14 @@ fn mark_history_restart_with_river(
                     )),
                     None => None,
                 };
-                let raw_tracers = colm_runtime::tracer_sidecar::SidecarTracers {
-                    set: tracers.set,
+                let raw_materials = colm_runtime::material_sidecar::SidecarMaterials {
+                    set: materials.set,
                     patches,
                     methane,
                 };
-                colm_runtime::tracer_sidecar::write(&sidecar, &raw_tracers)?;
+                colm_runtime::material_sidecar::write(&sidecar, &raw_materials)?;
             }
-            None => colm_runtime::tracer_sidecar::write(&sidecar, tracers)?,
+            None => colm_runtime::material_sidecar::write(&sidecar, materials)?,
         }
     }
     // `complete_history_acc_restart`：全部内容（含 `.river`）落盘后才认这一窗。
@@ -6378,7 +6392,7 @@ fn history_namelist_overrides(path: &Path) -> Result<Vec<(String, bool)>> {
 
 /// `mt_any_enabled`：有没有任何 family 的材料运移在跑。
 ///
-/// 上游 7d2fca93 把单一的 `DEF_USE_TRACER` 拆成四个 family 开关，纯配置层的判定
+/// 上游 7d2fca93 把单一的 `@@DEF_USE_MATERIAL@@` 拆成四个 family 开关，纯配置层的判定
 /// 放在 [`colm_namelist::material::any_enabled`]，这里只是个别名，免得每处都写全路径。
 fn material_transport_enabled(document: &Document) -> Result<bool> {
     colm_namelist::material::any_enabled(document)

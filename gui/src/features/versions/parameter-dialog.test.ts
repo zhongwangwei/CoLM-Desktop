@@ -276,7 +276,7 @@ test('the parameter dialog registers its own controls and closes through closeAc
   ])
     assert.ok(ids.includes(id), id);
   assert.equal(new Set(ids).size, ids.length, '同时显示的动作 id 不能重复');
-  // 示踪物与泥沙页签可以把专家自己的参数文件整份带进版本（写盘动作，按 commit 登记）。
+  // 材料与泥沙页签可以把专家自己的参数文件整份带进版本（写盘动作，按 commit 登记）。
   const process = dialogActions(true, true, 'process');
   assert.ok(process.includes('version-import-process'));
   assert.equal(new Set(process).size, process.length);

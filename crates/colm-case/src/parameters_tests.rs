@@ -14,7 +14,7 @@ fn catalog_counts_match_current_sources() {
     assert_eq!(parameters::land_cover_descriptors().len(), 88);
     assert_eq!(parameters::pft_descriptors().len(), 87);
     assert_eq!(parameters::pc_pft_descriptors().len(), 87);
-    // 上游 7d2fca93 把通用 tracer_parameter_type 换成按 species 的
+    // 上游 7d2fca93 把通用 material_parameter_type 换成按 species 的
     // solute_parameter_type（9 项）加 MOD_MT_Namelist 的 18 个 DEF_ISO_* 模块变量，
     // 过程参数从 170 涨到 187。
     assert_eq!(parameters::process_descriptors().len(), 187);

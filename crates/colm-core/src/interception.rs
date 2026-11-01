@@ -49,9 +49,9 @@ pub struct CanopyInterceptionFluxes {
     pub released_snow_kg_m2_s: f64,
     /// `gross_intr_rain`/`gross_intr_snow`：`qintr + max(qdrp, 0)`，**未夹紧**
     /// （`CoLMMAIN.F90:914-915` 在单柱/PFT 聚合之后才取 `max(..., 0)`）。
-    /// 标量调用点由示踪物消费端 `canopy_phase` 取 max；PFT 由 [`crate::pft::pft_gross_sum`]
+    /// 标量调用点由材料消费端 `canopy_phase` 取 max；PFT 由 [`crate::pft::pft_gross_sum`]
     /// 在 `pftfrac` 聚合之后取 max —— 逐 PFT 先取 max 会截断互相抵消的正负项。
-    /// 只给示踪物用。
+    /// 只给材料用。
     pub gross_rain_kg_m2_s: f64,
     pub gross_snow_kg_m2_s: f64,
 }
@@ -95,7 +95,7 @@ pub fn canopy_wetness(
             && water.snow_mm >= -CANOPY_WATER_ROUNDOFF_MM,
         "canopy wetness inputs are invalid"
     );
-    // `main/MOD_LeafTemperature.F90` 的 `dewfraction`（TRACER 关闭那一支）：三个覆盖度都是
+    // `main/MOD_LeafTemperature.F90` 的 `dewfraction`（MATERIAL 关闭那一支）：三个覆盖度都是
     // `((dewmxi/vegt)*depth)**.666666666666`，**先除再乘**（`dewmxi = 1/dewmx`、
     // `vegt = lsai`），雪分量的容量再除以 48，都没有容量闸门。
     //
@@ -130,7 +130,7 @@ pub fn canopy_wetness(
 ///
 /// 雨（与总量）覆盖度改为 `(depth/max(satcap_rain, 1e-10))**.666666666666`，`satcap_rain` 由调用方
 /// 给出（[`fwet_rain_capacity`]）；雪覆盖度不变，仍是 `((dewmxi/(48·vegt))·depth)**.666666666666`。
-/// 原来只在开示踪物时这样算，vendor 已解耦成无条件。城市模块仍用 [`canopy_wetness`]。
+/// 原来只在开材料时这样算，vendor 已解耦成无条件。城市模块仍用 [`canopy_wetness`]。
 pub fn canopy_wetness_with_capacity(
     leaf_area_index: f64,
     stem_area_index: f64,
@@ -522,7 +522,7 @@ pub fn intercept_canopy(
                     .sqrt()
                     / f77(1.56e5);
             // 卸雪速率 = 积雪量 [mm] ×（FV+FT）[1/s]（Niu & Yang 2004），不超过冠层现有积雪。
-            // 原写法把积雪量先除以步长，卸雪偏小一个步长的倍数；vendor 已改成示踪物那一支的写法。
+            // 原写法把积雪量先除以步长，卸雪偏小一个步长的倍数；vendor 已改成材料那一支的写法。
             let snow_store = water.snow_mm.max(0.0);
             let unloading_rate = (snow_store * (wind_unloading + temperature_unloading))
                 .min(snow_store / input.time_step_seconds + intercepted_snow_rate);
@@ -566,7 +566,7 @@ pub fn intercept_canopy(
     let retained_snow_kg_m2_s = snow_rate - through_snow_mm / input.time_step_seconds;
     // `CoLMMAIN.F90:914-915`：`gross_intr = max(qintr + max(qdrp,0), 0) = max(input - 直接穿透, 0)`。
     // `retained_*` 就是 qintr（旧冠层雪卸出时可负），`drainage_*` 就是 qdrp（已 >=0）。
-    // 这里返回**未夹紧**值：标量调用点由示踪物 `canopy_phase` 取 max；PFT 必须在 `pftfrac`
+    // 这里返回**未夹紧**值：标量调用点由材料 `canopy_phase` 取 max；PFT 必须在 `pftfrac`
     // 聚合之后才取 max（[`crate::pft::pft_gross_sum`]），逐 PFT 提前夹会把正负项截断。
     let gross_rain_kg_m2_s = retained_rain_kg_m2_s + drainage_rain_mm / input.time_step_seconds;
     let gross_snow_kg_m2_s = retained_snow_kg_m2_s + drainage_snow_mm / input.time_step_seconds;

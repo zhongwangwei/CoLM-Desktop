@@ -534,7 +534,7 @@ pub struct SnowToSoilTransfer {
     pub ice_water_kg_m2: f64,
 }
 
-/// Applies MOD_SnowLayersCombineDivide:snowlayerscombine without SNICAR or tracers.
+/// Applies MOD_SnowLayersCombineDivide:snowlayerscombine without SNICAR or materials.
 ///
 /// The upper soil node is an explicit argument because the upstream routine
 /// deposits vanished snow mass there rather than discarding it.
@@ -814,7 +814,7 @@ fn clear_snow_layers(state: &mut RuntimeSnowColumn) {
     state.interface_depth_m.fill(0.0);
 }
 
-/// Applies MOD_SnowLayersCombineDivide:snowlayersdivide without SNICAR or tracers.
+/// Applies MOD_SnowLayersCombineDivide:snowlayersdivide without SNICAR or materials.
 pub fn divide_snow_layers(state: &mut RuntimeSnowColumn) -> Result<()> {
     divide_snow_layers_with_aerosols(state, None)
 }

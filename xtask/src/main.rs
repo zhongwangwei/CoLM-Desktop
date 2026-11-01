@@ -251,7 +251,7 @@ fn parameter_audit() -> Result<()> {
     {
         bail!("unified catalog source coverage drifted; classify and regenerate the audit");
     }
-    // 过程参数从 170 涨到 187：MaterialTransport 把通用 tracer_parameter_type
+    // 过程参数从 170 涨到 187：MaterialTransport 把通用 material_parameter_type
     // 换成 solute_parameter_type（9 项）加 MOD_MT_Namelist 的 18 个 DEF_ISO_* 变量。
     if unique_lc < 39 || pft_overrides.len() != 87 || parameters::process_descriptors().len() != 187
     {
@@ -492,7 +492,7 @@ fn gen_histmap() -> Result<()> {
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
     let mut methane = hist::extract_at_least(&text, 100)?;
     for var in &mut methane {
-        // 上游把编译期 TRACER 宏拆成了运行时的 DEF_USE_METHANE（甲烷这一族）。
+        // 上游把编译期 MATERIAL 宏拆成了运行时的 DEF_USE_METHANE（甲烷这一族）。
         var.runtime = match var.runtime.take() {
             Some(runtime) => Some(format!("(DEF_USE_METHANE) .and. ({runtime})")),
             None => Some("DEF_USE_METHANE".to_string()),

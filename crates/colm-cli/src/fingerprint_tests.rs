@@ -651,14 +651,14 @@ fn a_hybrid_config_and_its_model_only_touch_the_colm_stage() {
 }
 
 #[test]
-fn forcing_exclusions_cover_cbl_tracers_and_overlapping_data_roots() {
+fn forcing_exclusions_cover_cbl_materials_and_overlapping_data_roots() {
     let root = temp_dir("all-forcing-excluded");
     let raw = root.join("raw");
     std::fs::create_dir(&raw).unwrap();
-    std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_dir_rawdata='raw'\nDEF_SOLUTE_PARAM_FILES='tracer.nml'\nSITE_fsitedata='raw/exact.nc'\n/\n").unwrap();
+    std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_dir_rawdata='raw'\nDEF_SOLUTE_PARAM_FILES='material.nml'\nSITE_fsitedata='raw/exact.nc'\n/\n").unwrap();
     std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='raw'\nforcing%fprefix(1)='met_'\nforcing%fprefix(2)='exact.nc'\nforcing%CBL_fprefix='cbl_'\n/\n").unwrap();
     std::fs::write(
-        root.join("tracer.nml"),
+        root.join("material.nml"),
         "&nl_colm_mt_forcing\nforcing_fprefix='ch4_', 'isotope_'\n/\n",
     )
     .unwrap();

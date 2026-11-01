@@ -527,7 +527,7 @@ fn expected_old_value_rejects_stale_parameter_edits() {
 }
 
 #[test]
-fn tracer_species_and_file_columns_are_case_owned_while_physics_is_a_model_field() {
+fn material_species_and_file_columns_are_case_owned_while_physics_is_a_model_field() {
     // 名字/物种/文件是算例选择（Character），不能作为模型参数写。
     for key in [
         "DEF_ISOTOPE_SPECIES",
@@ -579,7 +579,7 @@ fn tracer_species_and_file_columns_are_case_owned_while_physics_is_a_model_field
 }
 
 #[test]
-fn tracer_file_references_are_case_choices_while_assets_remain_frozen() {
+fn material_file_references_are_case_choices_while_assets_remain_frozen() {
     let key = "DEF_SOLUTE_PARAM_FILES";
     let mut overlay = Overlay::default();
     overlay.parameters.push(ParameterOverrideRecord {
@@ -1608,7 +1608,7 @@ fn process_record(file: &str, id: &str, key: &str, value: &str) -> ParameterOver
 }
 
 #[test]
-fn standard_tracer_parameters_can_change_without_carrying_the_file() {
+fn standard_material_parameters_can_change_without_carrying_the_file() {
     let accepted = |file: &str, id: &str, key: &str, value: &str| {
         let mut overlay = Overlay::default();
         overlay

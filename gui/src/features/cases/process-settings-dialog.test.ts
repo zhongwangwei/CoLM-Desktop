@@ -152,9 +152,9 @@ test('process dialog stages edits, discards on cancel or escape, and never disab
   }
 });
 
-test('tracer chooser stages enable intent without changing the saved switch and cancels atomically', async () => {
+test('material chooser stages enable intent without changing the saved switch and cancels atomically', async () => {
   for (const escape of [false, true]) {
-    const h = dialog('tracer');
+    const h = dialog('material');
     h.props.environment.caseValues.DEF_USE_METHANE = '.false.';
     h.props.environment.caseValues.DEF_USE_BGC = '.false.';
     const child = h.render();
@@ -179,8 +179,8 @@ test('tracer chooser stages enable intent without changing the saved switch and 
   }
 });
 
-test('tracer save commits enable and validated definitions together, preserving the draft on failure', async () => {
-  const h = dialog('tracer');
+test('material save commits enable and validated definitions together, preserving the draft on failure', async () => {
+  const h = dialog('material');
   h.props.environment.caseValues.DEF_USE_METHANE = '.false.';
   h.props.environment.caseValues.DEF_USE_BGC = '.false.';
   const changes = {
@@ -237,7 +237,7 @@ test('process dialog completes unchanged without empty save and stays open on fa
 });
 
 test('all process settings use save and cancel without the redundant close button', () => {
-  for (const process of ['PC', 'PFT', 'DEF_USE_BGC', 'tracer', 'crop']) {
+  for (const process of ['PC', 'PFT', 'DEF_USE_BGC', 'material', 'crop']) {
     const h = dialog();
     h.props.process = process;
     h.render();

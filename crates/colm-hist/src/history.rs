@@ -148,7 +148,7 @@ pub struct HistoryGrid {
     /// 同样只在建文件时写一次、但定义带 `time` 维的量（CROP 的 `croparea`、`irrigarea`：
     /// `hist_write_var_real8_2d(..., itime = 1, ...)`）。只写第 1 个时间槽，其余槽留 netCDF 默认填充值。
     pub first_record_statics: Vec<(String, String, String, Vec<f64>)>,
-    /// `DEF_HIST_CompressLevel`：逐时间的 history 量（主文件与示踪物文件）的 deflate 级别；
+    /// `DEF_HIST_CompressLevel`：逐时间的 history 量（主文件与材料文件）的 deflate 级别；
     /// `statics`/`first_record_statics` 照上游固定用 [`STATIC_COMPRESS_LEVEL`]。
     pub compress_level: u8,
 }
@@ -172,7 +172,7 @@ pub struct HistoryVector {
     pub elements: Vec<std::ops::Range<usize>>,
     /// `elm_patch%subfrc`：patch 在所在单元里的面积份额（单元内归一）。
     pub subfrc: Vec<f64>,
-    /// `DEF_HIST_CompressLevel`：向量文件（主文件与示踪物文件）里逐时间量的 deflate 级别。
+    /// `DEF_HIST_CompressLevel`：向量文件（主文件与材料文件）里逐时间量的 deflate 级别。
     /// 无时间维的单元静态量（`aggregate_to_vector_and_write_2d(itime = -1)`）虽然也传了这个级别，
     /// 但 `ncio_write_serial_real8_1d` 用标量 `dimid` 调 `nf90_def_var`，netcdf-fortran 的一维重载
     /// 不理 `deflate_level`，上游文件里它们是未压缩的连续存储，这里照样不压。
@@ -184,8 +184,8 @@ impl HistoryVector {
         self.elements.last().map_or(0, |range| range.end)
     }
 
-    /// `write_history_tracer_vector_2d/3d` 的单元求和：`keep(p)` 为真的 patch 上分别对
-    /// 示踪物量与水量做 `sum(frac*x, mask)`（按 patch 次序 `FMA(frac, x, acc)`）。没有 patch
+    /// `write_history_material_vector_2d/3d` 的单元求和：`keep(p)` 为真的 patch 上分别对
+    /// 材料量与水量做 `sum(frac*x, mask)`（按 patch 次序 `FMA(frac, x, acc)`）。没有 patch
     /// 计入的单元是 `(0, 0)`（上游的 `trc_local/water_local` 初值）。
     pub fn pair_sums(
         &self,
@@ -495,7 +495,7 @@ impl HistoryBuffers {
         Ok(())
     }
 
-    /// 打开示踪物模式的窗口变量（`history_window_seconds`/`history_window_end_minutes`）。
+    /// 打开材料模式的窗口变量（`history_window_seconds`/`history_window_end_minutes`）。
     pub fn enable_windows(&mut self) {
         self.windows = Some(vec![(0.0, 0.0); self.records]);
     }
@@ -515,23 +515,23 @@ impl HistoryBuffers {
         Ok(())
     }
 
-    /// 示踪物 history 文件（`<case>_hist_material_<cdate>.nc`）：网格骨架、`time` 与两个窗口
-    /// 变量。示踪物为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`mt_hist_out`
-    /// 对每个输运示踪物才加变量）。
-    pub fn write_tracer_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.write_tracer_gridded(path.as_ref(), &[])
+    /// 材料 history 文件（`<case>_hist_material_<cdate>.nc`）：网格骨架、`time` 与两个窗口
+    /// 变量。材料为 0 个时上游写出的就是这些（`MOD_Hist.F90:341-358`，`mt_hist_out`
+    /// 对每个输运材料才加变量）。
+    pub fn write_material_skeleton(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.write_material_gridded(path.as_ref(), &[])
     }
 
-    /// 网格示踪物文件（`mt_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
+    /// 网格材料文件（`mt_hist_out` 的 `Gridded` 支）：骨架同主文件，变量是调用方已聚合到
     /// 网格窗口的值，二维 `(time, lat, lon)`、分层 `(time, soilsnow, lat, lon)`；`values` 按
     /// `(record, [layer,] cell)` 行主序，`cell = ilat*nlon + ilon`。
-    /// 向量写出的示踪物文件（`HistForm = 'Vector'`）：单元维与主向量文件相同，但没有 `sensor` 维、
+    /// 向量写出的材料文件（`HistForm = 'Vector'`）：单元维与主向量文件相同，但没有 `sensor` 维、
     /// 也没有窗口变量；分层量是 `(time, element, soilsnow)`，值按 `[record][element][layer]` 排。
-    fn write_tracer_vector(
+    fn write_material_vector(
         &self,
         path: &Path,
         vector: &HistoryVector,
-        variables: &[TracerFileVariable],
+        variables: &[MaterialFileVariable],
     ) -> Result<()> {
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
@@ -592,11 +592,15 @@ impl HistoryBuffers {
         Ok(())
     }
 
-    fn write_tracer_gridded(&self, path: &Path, variables: &[TracerFileVariable]) -> Result<()> {
+    fn write_material_gridded(
+        &self,
+        path: &Path,
+        variables: &[MaterialFileVariable],
+    ) -> Result<()> {
         let grid = self
             .grid
             .as_ref()
-            .context("the tracer history file is only written for gridded history")?;
+            .context("the material history file is only written for gridded history")?;
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
         file.add_unlimited_dimension("time")?;
@@ -1082,10 +1086,10 @@ impl HistoryBuffers {
     }
 }
 
-/// 示踪物 history 文件里的一个变量（`mt_hist_out` 写的 `f_mt_*_<name>`）：调用方已算好
+/// 材料 history 文件里的一个变量（`mt_hist_out` 写的 `f_mt_*_<name>`）：调用方已算好
 /// 每条记录、每个 patch（分层量再乘 15 层）的值。
 #[derive(Debug, Clone, PartialEq)]
-pub struct TracerFileVariable {
+pub struct MaterialFileVariable {
     pub name: String,
     pub long_name: String,
     pub units: String,
@@ -1096,19 +1100,19 @@ pub struct TracerFileVariable {
 }
 
 impl HistoryBuffers {
-    /// 单点示踪物 history 文件（`<case>_hist_material_<cdate>.nc`）：与主文件同样的维度与坐标，
-    /// 但没有 `sensor` 维，变量只有示踪物量。网格写出走 [`Self::write_tracer_skeleton`]。
-    pub fn write_tracer_file(
+    /// 单点材料 history 文件（`<case>_hist_material_<cdate>.nc`）：与主文件同样的维度与坐标，
+    /// 但没有 `sensor` 维，变量只有材料量。网格写出走 [`Self::write_material_skeleton`]。
+    pub fn write_material_file(
         &self,
         path: impl AsRef<Path>,
-        variables: &[TracerFileVariable],
+        variables: &[MaterialFileVariable],
     ) -> Result<()> {
         let path = path.as_ref();
         if self.grid.is_some() {
-            return self.write_tracer_gridded(path, variables);
+            return self.write_material_gridded(path, variables);
         }
         if let Some(vector) = self.vector.clone() {
-            return self.write_tracer_vector(path, &vector, variables);
+            return self.write_material_vector(path, &vector, variables);
         }
         let mut file =
             netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;

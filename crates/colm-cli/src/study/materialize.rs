@@ -293,7 +293,7 @@ fn copy_process_parameters(
     for (field, raw) in raw_by_field {
         if field.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
             // 只换路径：键、`null` 占位与条目位置原样保留，否则按位置对应的溶质会错位。
-            let rewritten = colm_namelist::tracer_files::rewrite_param_files(&raw, map)?;
+            let rewritten = colm_namelist::material_files::rewrite_param_files(&raw, map)?;
             document.set(field, Value::Str(rewritten))?;
         } else {
             let trimmed = raw.trim();
@@ -630,7 +630,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// `null` 占位与 `;` 分隔：复制后位置不变，第 2 个示踪物仍对应 ch4 文件。
+    /// `null` 占位与 `;` 分隔：复制后位置不变，第 2 个材料仍对应 ch4 文件。
     #[test]
     fn parameter_file_positions_survive_materialization() {
         let root = std::env::temp_dir().join(format!(
@@ -656,7 +656,7 @@ mod tests {
         let Some(Value::Str(raw)) = doc.get("DEF_SOLUTE_PARAM_FILES") else {
             panic!("DEF_SOLUTE_PARAM_FILES missing: {text}");
         };
-        let entries = colm_namelist::tracer_files::param_file_entries(raw).unwrap();
+        let entries = colm_namelist::material_files::param_file_entries(raw).unwrap();
         assert_eq!(entries.len(), 3, "{raw}");
         assert!(entries[0].is_null(), "{raw}");
         // 按路径分量比较：Windows 上是反斜杠，且带盘符（`C:\…`，按位置条目处理）。
@@ -668,7 +668,7 @@ mod tests {
         assert!(
             matches!(
                 entries[2],
-                colm_namelist::tracer_files::ParamFileEntry::Keyed { key: "HDO", .. }
+                colm_namelist::material_files::ParamFileEntry::Keyed { key: "HDO", .. }
             ),
             "{raw}"
         );

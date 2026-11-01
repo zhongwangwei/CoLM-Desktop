@@ -1,4 +1,4 @@
-//! 河道泥沙（`MOD_Tracer_Particle_Sediment.F90`）：网格河湖汇流上的 provider 示踪物 `SEDIMENT`。
+//! 河道泥沙（`MOD_Material_Particle_Sediment.F90`）：网格河湖汇流上的 provider 材料 `SEDIMENT`。
 //!
 //! 每个陆面步把降水按面积汇进单元流域（`sediment_forcing_put`，降水强度的幂次在步内累加，
 //! 避免 Jensen 偏差）；汇流的每个子步累加流速平方、水深、蓄量端点、出口通量与淹没面积
@@ -51,11 +51,11 @@ const SCHEMA_JOINT: f64 = 5.0;
 /// `MOD_Const_Physical` 的 `grav`。
 const GRAV: f64 = 9.80616;
 
-/// 注册的泥沙 provider 示踪物（`register_tracer_provider('SEDIMENT', 'SED', 'sediment', …)`）。
-pub fn is_sediment_tracer(tracer: &colm_core::tracer::TracerDescriptor) -> bool {
-    tracer.category == "particle"
+/// 注册的泥沙 provider 材料（`register_material_provider('SEDIMENT', 'SED', 'sediment', …)`）。
+pub fn is_sediment_material(material: &colm_core::material::MaterialDescriptor) -> bool {
+    material.category == "particle"
         && matches!(
-            tracer.name.trim().to_ascii_uppercase().as_str(),
+            material.name.trim().to_ascii_uppercase().as_str(),
             "SEDIMENT" | "SED"
         )
 }

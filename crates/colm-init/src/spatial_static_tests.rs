@@ -1572,7 +1572,7 @@ fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
 }
 
 #[test]
-fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
+fn spatial_pft_and_pc_seed_only_material_wetland_cn_without_synthetic_pfts() {
     let _netcdf_guard = crate::netcdf_test_guard();
     use crate::MISSING;
     let root = temp_dir("wetland-cn");
@@ -1624,7 +1624,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
     write_cn_equilibrium(&cn);
     let namelist = root.join("case.nml");
     for mode in ["PFT", "PC"] {
-        for (label, tracer, use_cn, existing, expected) in [
+        for (label, material, use_cn, existing, expected) in [
             ("disabled", false, true, false, MISSING),
             ("disabled-existing", false, true, true, MISSING),
             ("disabled-no-cn", false, false, false, 0.0),
@@ -1651,7 +1651,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
             }
             let restart = root.join(format!("{mode}-{label}"));
             let logical = |value| if value { ".true." } else { ".false." };
-            std::fs::write(&namelist, format!("&nl_colm\nDEF_USE_PFT={}\nDEF_USE_PC={}\nDEF_USE_BGC=.true.\nDEF_USE_ISOTOPE={}\nDEF_USE_CN_INIT={}\nDEF_file_cn_init='{}'\n/\n", logical(mode=="PFT"), logical(mode=="PC"), logical(tracer), logical(use_cn), cn.display())).unwrap();
+            std::fs::write(&namelist, format!("&nl_colm\nDEF_USE_PFT={}\nDEF_USE_PC={}\nDEF_USE_BGC=.true.\nDEF_USE_ISOTOPE={}\nDEF_USE_CN_INIT={}\nDEF_file_cn_init='{}'\n/\n", logical(mode=="PFT"), logical(mode=="PC"), logical(material), logical(use_cn), cn.display())).unwrap();
             let mut config = crate::SpatialPftTimeConfig::new(
                 crate::SpatialPftStaticConfig::new(
                     &namelist, &landdata, &restart, "test", 2005, "w180_s90",
@@ -1680,9 +1680,9 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
             assert_eq!(&mineral[..10], &[10.0; 10]);
             assert_eq!(
                 &mineral[10..],
-                &[if !tracer && use_cn { MISSING } else { 10.0 }; 10]
+                &[if !material && use_cn { MISSING } else { 10.0 }; 10]
             );
-            if !tracer {
+            if !material {
                 assert_eq!(values_f64(&bgc, "totcolc").unwrap()[1], 0.0);
                 assert_eq!(
                     &values_f64(&bgc, "totsoiln_vr").unwrap()[10..],

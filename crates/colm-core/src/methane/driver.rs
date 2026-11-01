@@ -1,5 +1,5 @@
-//! `methane_driver` 的土壤与湿地 patch 路径（`MOD_Tracer_Reactive_Methane_Driver` +
-//! `MOD_Tracer_Reactive_Methane_Impl:ch4_impl_soil_step`），以及 `core` history 累加。
+//! `methane_driver` 的土壤与湿地 patch 路径（`MOD_Material_Reactive_Methane_Driver` +
+//! `MOD_Material_Reactive_Methane_Impl:ch4_impl_soil_step`），以及 `core` history 累加。
 //!
 //! 土壤 patch 的水稻比例为 0：只跑土壤分量，两分量合并（`aggregate_methane_columns`）在
 //! `ws = 1, wr = 0` 下对每个量都是恒等，所以聚合状态就是土壤分量。湿地 patch 不分分量，直接用
@@ -569,7 +569,7 @@ impl CoreAccumulator {
             };
             with_filter(value / 1.0, land)
         };
-        // 湖（`MOD_Tracer_Reactive_Methane_Hist.F90`）：`patchtype == 4 .and. allowlakeprod` 且有湖计数时
+        // 湖（`MOD_Material_Reactive_Methane_Hist.F90`）：`patchtype == 4 .and. allowlakeprod` 且有湖计数时
         // 用 `acc_num_lake` 覆盖；湿地/土壤/水稻三类保持 0。
         let lake_or = |lake_sum: f64, derived_value: f64| {
             if lake && land && self.acc_num_lake > 0.0 {
@@ -683,7 +683,7 @@ impl CoreAccumulator {
 /// GIMPLE（`repartition_phase_state`/`repartition_scalar`）：内层 `FMA(sat, h, (1-h)·unsat)`，
 /// 外层 `FMA(inner_old, old, delta·inner_other)/new`（反向是 `FMA(1-old, inner, delta·other)/(1-new)`）。
 /// 动态湖的干湖子步（`ch4_impl_lake_step` 的 `wdsrf < 100 .or. zwt > 0` 支 →
-/// `handle_methane_dry_lake_substep`，`MOD_Tracer_Reactive_Methane_State.F90:1071-1131`）。
+/// `handle_methane_dry_lake_substep`，`MOD_Material_Reactive_Methane_State.F90:1071-1131`）。
 ///
 /// - 先清过程诊断（`reset_methane_inactive_lake_diagnostics`）：各速率与通量归 0，三个地表导度回到
 ///   默认值，应激因子归 0；浓度与沉积层存量是预报量，不动。

@@ -126,7 +126,7 @@ export default function ScientificSetupCards({
     if (locked || writeLocked.current || current.current !== key)
       throw new Error(bilingual('配置不可修改或已切换', 'Configuration is locked or stale'));
     try {
-      if (request.id === 'tracer' && request.value === '.true.' && onOpenSettings) {
+      if (request.id === 'material' && request.value === '.true.' && onOpenSettings) {
         onOpenSettings(request.id);
         setError('');
         return;
@@ -194,17 +194,17 @@ export default function ScientificSetupCards({
     }
   }
   const cards = choices.map((control, index) => {
-    const tracerSetup = control.id === 'tracer' && !!onOpenSettings;
+    const materialSetup = control.id === 'material' && !!onOpenSettings;
     const settingsAvailable =
       !!onOpenSettings &&
       hasSettings(control.id, result?.fields) &&
-      (tracerSetup ||
+      (materialSetup ||
         (!!control.value &&
           control.value !== '.false.' &&
           !control.choices.find((choice) => choice.value === control.value)?.reason));
     const label = `${index + (includeSubgrid ? 1 : 2)}. ${t(control.zh, control.en)}`;
     const available = control.choices.filter(
-      (c) => !c.reason || (tracerSetup && c.value === '.true.'),
+      (c) => !c.reason || (materialSetup && c.value === '.true.'),
     );
     guideFields.push({
       id: `setup-${control.id}`,
@@ -214,7 +214,7 @@ export default function ScientificSetupCards({
       options: available.map((c) => ({
         value: c.value,
         label:
-          tracerSetup && c.value === '.true.' ? t('选择示踪剂', 'Choose tracers') : t(c.zh, c.en),
+          materialSetup && c.value === '.true.' ? t('选择材料', 'Choose materials') : t(c.zh, c.en),
       })),
       disabled: locked || !available.length,
       set: (value) => write({ id: control.id, value }),
@@ -241,19 +241,21 @@ export default function ScientificSetupCards({
               className="simulation-choice-card"
               variant={control.value === choice.value ? 'primary' : 'secondary'}
               aria-pressed={control.value === choice.value}
-              disabled={locked || (!!choice.reason && !(tracerSetup && choice.value === '.true.'))}
+              disabled={
+                locked || (!!choice.reason && !(materialSetup && choice.value === '.true.'))
+              }
               onClick={() => invoke({ id: control.id, value: choice.value })}
             >
               <strong>
-                {tracerSetup && choice.value === '.true.'
-                  ? t('选择示踪剂', 'Choose tracers')
+                {materialSetup && choice.value === '.true.'
+                  ? t('选择材料', 'Choose materials')
                   : t(choice.zh, choice.en)}
               </strong>
               {choice.reason && <small>{choice.reason}</small>}
             </Button>
           ))}
         </div>
-        {settingsAvailable && !tracerSetup && (
+        {settingsAvailable && !materialSetup && (
           <ActionButton
             action={`setup-${control.id}-settings`}
             label={t(
@@ -340,7 +342,7 @@ export default function ScientificSetupCards({
     title: t('按顺序配置模型结构', 'Configure model structure in order'),
     step: 'scientific-setup',
     fields: guideFields,
-    // 按钮自己登记（第 737 轮）。示踪剂的"设置"原来在清单里另有一条，界面上它是选项卡片本身。
+    // 按钮自己登记（第 737 轮）。材料的"设置"原来在清单里另有一条，界面上它是选项卡片本身。
     actions: [],
     status:
       error ||

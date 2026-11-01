@@ -20,7 +20,7 @@ fn default() -> BTreeSet<&'static str> {
 #[test]
 fn the_table_covers_every_live_write_site() {
     // 456 个 MOD_Hist.F90 变量 + 164 个 MaterialTransport/CH4 写出变量 + PR #504 的 104 个火诊断量。
-    // （上游 7d2fca93 把 tracer 子系统改名为 MaterialTransport 后，甲烷多了一个
+    // （上游 7d2fca93 把 material 子系统改名为 MaterialTransport 后，甲烷多了一个
     // co2_hr_methane，所以第二项从 163 涨到 164。）
     assert_eq!(all().len(), 620 + 104);
     for dead in ["cwddecomp", "cwdprod", "pdcorn", "pdwwheat"] {

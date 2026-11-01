@@ -14,12 +14,12 @@ import {
 import { IGBP, PFT, USGS } from './scope-labels';
 
 type TypeDefault = { index: number; value: number | null };
-/** 示踪物标准参数文件里版本能改的参数（后端 `standard_process_parameters`）。 */
+/** 材料标准参数文件里版本能改的参数（后端 `standard_process_parameters`）。 */
 type StandardFile = {
   file: string;
   parameters: { id: string; path: string; value: string; group: string; kind: string }[];
 };
-const tracerFiles: Record<string, [string, string]> = {
+const materialFiles: Record<string, [string, string]> = {
   'standard_sediment_parameter.nml': ['河道泥沙', 'River sediment'],
   'standard_methane_parameter.nml': ['甲烷 CH4', 'Methane CH4'],
   'standard_isotope_parameter.nml': ['水同位素', 'Water isotopes'],
@@ -33,21 +33,21 @@ const tracerFiles: Record<string, [string, string]> = {
 };
 /**
  * 材质输运共用的设置（DEF_ISO_/DEF_MT_/DEF_SOLUTE_*，如 Craig–Gordon 相对湿度上限、非稳态叶片水）：
- * 存法是普通 namelist 参数，但只跟示踪物有关，放在"示踪物与泥沙"页，不放全局参数。
+ * 存法是普通 namelist 参数，但只跟材料有关，放在"材料与泥沙"页，不放全局参数。
  */
-const sharedTracer = (key: string) =>
+const sharedMaterial = (key: string) =>
   /^DEF_(ISO_|ISOTOPE_|MT_|SOLUTE_|METHANE_|SEDIMENT_|USE_ISOTOPE$|USE_METHANE$|USE_SEDIMENT$)/i.test(
     key,
   );
 /** namelist 里的一组数显示成逗号隔开，和输入时的写法一样。 */
 const listText = (value: string) => value.trim().split(/\s+/).join(', ');
-const SHARED = 'shared-tracer-settings';
-const tracerGroups: Record<string, [string, string]> = {
+const SHARED = 'shared-material-settings';
+const materialGroups: Record<string, [string, string]> = {
   nl_colm_isotope_parameter: ['同位素参数', 'Isotope parameters'],
   nl_colm_methane_parameter: ['甲烷参数', 'Methane parameters'],
   nl_colm_sediment_parameter: ['泥沙参数', 'Sediment parameters'],
   nl_colm_solute_parameter: ['溶质参数', 'Solute parameters'],
-  nl_colm_tracer_parameter: ['通用示踪参数（旧）', 'Generic tracer parameters (legacy)'],
+  nl_colm_material_parameter: ['通用材料参数（旧）', 'Generic material parameters (legacy)'],
   nl_colm_mt_forcing: ['同位素强迫', 'Isotope forcing'],
 };
 
@@ -214,12 +214,12 @@ export default function ParameterDialog({
   const ofType = useMemo(
     () =>
       catalog.filter(
-        (d) => parameterType(d) === type && !(type === 'global' && sharedTracer(d.raw_key)),
+        (d) => parameterType(d) === type && !(type === 'global' && sharedMaterial(d.raw_key)),
       ),
     [catalog, type],
   );
-  const sharedTracerParams = catalog.filter(
-    (d) => parameterType(d) === 'global' && sharedTracer(d.raw_key),
+  const sharedMaterialParams = catalog.filter(
+    (d) => parameterType(d) === 'global' && sharedMaterial(d.raw_key),
   );
   const records = overlay.parameters;
   const globalPhysics = Object.keys(overlay.physics).filter((k) =>
@@ -227,14 +227,14 @@ export default function ParameterDialog({
       (d) => parameterType(d) === 'global' && d.raw_key.toLowerCase() === k.toLowerCase(),
     ),
   );
-  // 示踪物共用的设置算在"示踪物与泥沙"页上。
+  // 材料共用的设置算在"材料与泥沙"页上。
   const sharedChanged =
-    records.filter((r) => recordType(r) === 'global' && sharedTracer(r.raw_key)).length +
-    globalPhysics.filter(sharedTracer).length;
+    records.filter((r) => recordType(r) === 'global' && sharedMaterial(r.raw_key)).length +
+    globalPhysics.filter(sharedMaterial).length;
   const changedIn = (kind: ParameterType) =>
     kind === 'global'
-      ? records.filter((r) => recordType(r) === 'global' && !sharedTracer(r.raw_key)).length +
-        globalPhysics.filter((k) => !sharedTracer(k)).length
+      ? records.filter((r) => recordType(r) === 'global' && !sharedMaterial(r.raw_key)).length +
+        globalPhysics.filter((k) => !sharedMaterial(k)).length
       : records.filter((r) => recordType(r) === kind).length +
         (kind === 'process' ? sharedChanged : 0);
   const recordOf = (d: Descriptor, index?: number, file?: string) =>
@@ -339,27 +339,28 @@ export default function ParameterDialog({
     );
   };
   const changedCount = (d: Descriptor) => records.filter((r) => r.parameter_id === d.id).length;
-  // 示踪物（水同位素、甲烷、氯离子、河道泥沙）各自参数文件里的参数，放在修改参数里一起改，不再要先导入文件
-  // （2026-10-21 用户：示踪物与过程文件为什么不一起做到修改参数里，河道泥沙也要支撑，所有尺度都能用）。
+  // 材料（水同位素、甲烷、氯离子、河道泥沙）各自参数文件里的参数，放在修改参数里一起改，不再要先导入文件
+  // （2026-10-21 用户：材料与过程文件为什么不一起做到修改参数里，河道泥沙也要支撑，所有尺度都能用）。
   const tabs: [ParameterType, string][] = [
     ['global', t('全局参数', 'Global')],
     ['igbp', 'IGBP'],
     ['usgs', 'USGS'],
     ['pft', 'PFT'],
     ['pc', 'PC'],
-    ['process', t('示踪物与泥沙', 'Tracers and sediment')],
+    ['process', t('材料与泥沙', 'Materials and sediment')],
   ];
   // 可选的文件：标准参数文件，加上版本自己带着的其他参数文件。
   const ownFiles = overlay.process_files
     .map((a) => a.relative_path)
-    .filter((path) => !tracerFiles[path]);
-  // 河道泥沙排第一；共用设置排在各示踪物后面。
+    .filter((path) => !materialFiles[path]);
+  // 河道泥沙排第一；共用设置排在各材料后面。
   const standardFiles = [...(standard ?? [])].sort(
-    (a, b) => Object.keys(tracerFiles).indexOf(a.file) - Object.keys(tracerFiles).indexOf(b.file),
+    (a, b) =>
+      Object.keys(materialFiles).indexOf(a.file) - Object.keys(materialFiles).indexOf(b.file),
   );
   const fileChoices = [
     ...standardFiles.map((f) => f.file),
-    ...(sharedTracerParams.length ? [SHARED] : []),
+    ...(sharedMaterialParams.length ? [SHARED] : []),
     ...ownFiles,
   ];
   const chosenFile = processFile || fileChoices[0] || '';
@@ -618,8 +619,8 @@ export default function ParameterDialog({
           <>
             <p className="muted param-note">
               {t(
-                '各示踪物参数文件里的参数，标准值是 CoLM 随附的标准参数文件里的值。版本只记你改了的值，运行时改到算例自己的参数文件上：只在开了这个示踪物的模拟里起作用，河道泥沙还要开河道汇流；单点、区域、全球都一样。哪些示踪物参与模拟、甲烷淹没方案、溶质浓度在新建模拟里选。',
-                "Parameters in each tracer's parameter file; the standard values come from the files shipped with CoLM. The version records only the values you change, and they are applied to the case's own parameter file at run time: only simulations with that tracer on use them, and river sediment also needs river routing; the same at every scale. Which tracers run, the methane inundation scheme and solute concentrations are chosen when creating a simulation.",
+                '各材料参数文件里的参数，标准值是 CoLM 随附的标准参数文件里的值。版本只记你改了的值，运行时改到算例自己的参数文件上：只在开了这个材料的模拟里起作用，河道泥沙还要开河道汇流；单点、区域、全球都一样。哪些材料参与模拟、甲烷淹没方案、溶质浓度在新建模拟里选。',
+                "Parameters in each material's parameter file; the standard values come from the files shipped with CoLM. The version records only the values you change, and they are applied to the case's own parameter file at run time: only simulations with that material on use them, and river sediment also needs river routing; the same at every scale. Which materials run, the methane inundation scheme and solute concentrations are chosen when creating a simulation.",
               )}
             </p>
             <div className="param-mode" role="radiogroup">
@@ -635,8 +636,8 @@ export default function ParameterDialog({
                     action={`version-parameters-file-${file}`}
                     label={
                       file === SHARED
-                        ? t('所有示踪物共用', 'Shared by all tracers')
-                        : (tracerFiles[file]?.[en ? 1 : 0] ?? file)
+                        ? t('所有材料共用', 'Shared by all materials')
+                        : (materialFiles[file]?.[en ? 1 : 0] ?? file)
                     }
                     role="radio"
                     aria-checked={chosenFile === file}
@@ -644,8 +645,8 @@ export default function ParameterDialog({
                     run={() => setProcessFile(file)}
                   >
                     {file === SHARED
-                      ? t('所有示踪物共用', 'Shared by all tracers')
-                      : (tracerFiles[file]?.[en ? 1 : 0] ?? file)}
+                      ? t('所有材料共用', 'Shared by all materials')
+                      : (materialFiles[file]?.[en ? 1 : 0] ?? file)}
                     {count > 0 && <span className="param-count">{count}</span>}
                   </ActionButton>
                 );
@@ -675,7 +676,7 @@ export default function ParameterDialog({
                   </tr>
                 </thead>
                 <tbody>
-                  {sharedTracerParams.filter(matches).map((d) => (
+                  {sharedMaterialParams.filter(matches).map((d) => (
                     <tr key={d.id} title={docOf(d, en) || undefined}>
                       <td>
                         <strong>{label(d)}</strong>
@@ -710,7 +711,9 @@ export default function ParameterDialog({
                       ...(i === 0 || rows[i - 1]!.p.group !== p.group
                         ? [
                             <tr key={`group:${p.group}`} className="param-group">
-                              <td colSpan={4}>{tracerGroups[p.group]?.[en ? 1 : 0] ?? p.group}</td>
+                              <td colSpan={4}>
+                                {materialGroups[p.group]?.[en ? 1 : 0] ?? p.group}
+                              </td>
                             </tr>,
                           ]
                         : []),

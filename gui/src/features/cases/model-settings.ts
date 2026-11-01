@@ -20,7 +20,7 @@ export const modelSettingGroups = [
   ['soil', '土壤方案', 'Soil schemes'],
   ['water', '水热过程', 'Hydrothermal processes'],
   ['ecology', '生态与生地化', 'Ecology and biogeochemistry'],
-  ['tracer', '示踪剂', 'Tracers'],
+  ['material', '材料', 'Materials'],
   ['urban', '城市', 'Urban'],
   ['river', '河湖流与水库', 'River–lake flow and reservoirs'],
   ['assimilation', '数据同化', 'Data assimilation'],
@@ -83,7 +83,7 @@ export function modelSettingGroup(field: Pick<SchemaField, 'name' | 'section'>):
       {
         水热过程: 'water',
         生态与生地化: 'ecology',
-        示踪剂: 'tracer',
+        材料: 'material',
         城市: 'urban',
         河道与水库: 'river',
         数据同化: 'assimilation',
@@ -177,11 +177,11 @@ export function processSettingOwner(
   if (isForcingScheme(field.name)) return null;
   const roots: Record<string, string> = {
     DEF_USE_BGC: 'DEF_USE_BGC',
-    DEF_USE_ISOTOPE: 'tracer',
-    DEF_USE_METHANE: 'tracer',
-    DEF_USE_SEDIMENT: 'tracer',
-    DEF_SOLUTE_NAMES: 'tracer',
-    DEF_ISOTOPE_SPECIES: 'tracer',
+    DEF_USE_ISOTOPE: 'material',
+    DEF_USE_METHANE: 'material',
+    DEF_USE_SEDIMENT: 'material',
+    DEF_SOLUTE_NAMES: 'material',
+    DEF_ISOTOPE_SPECIES: 'material',
     DEF_URBAN_RUN: 'DEF_URBAN_RUN',
     DEF_USE_CROP: 'crop',
     DEF_USE_GRIDRIVERLAKEFLOW: 'DEF_USE_GridRiverLakeFlow',
@@ -207,7 +207,7 @@ export function processSettingOwner(
       field.name.toUpperCase(),
     )
   )
-    return 'tracer';
+    return 'material';
   if (field.name.toUpperCase().includes('URBAN')) return 'DEF_URBAN_RUN';
   if (
     [
@@ -229,7 +229,7 @@ export function processSettingOwner(
   return (
     (
       {
-        tracer: 'tracer',
+        material: 'material',
         urban: 'DEF_URBAN_RUN',
         river: 'DEF_USE_GridRiverLakeFlow',
       } as Record<string, string>
@@ -362,12 +362,12 @@ const processNames: Record<string, [string, string]> = {
   DEF_USE_GridRiverLakeFlow: ['河湖汇流', 'River-lake routing'],
   DEF_UnitCatchment_regional: ['区域单元汇流', 'Regional unit-catchment routing'],
   DEF_URBAN_RUN: ['城市过程', 'Urban processes'],
-  tracer: ['示踪剂过程', 'Tracer processes'],
+  material: ['材料过程', 'Material processes'],
 };
 /**
  * 上游选择（方案、分类、范围、网格、土壤方案、父过程）让某个已开启的过程失去物理前提时，
  * 把它一并关闭，返回补全后的 patch 与被关闭的过程。成对互斥（单点城市↔BGC、BGC↔LULCC、
- * 城市↔示踪、LULCC↔区域汇流）以本次 patch 中的选择为准，关闭另一项。
+ * 城市↔材料、LULCC↔区域汇流）以本次 patch 中的选择为准，关闭另一项。
  * 只处理物理互斥；内核能力、版本字段与待核对条件仍由卡片置灰说明，不擅自改配置。
  */
 export function exclusionPatch(
@@ -410,18 +410,18 @@ export function exclusionPatch(
     closed.push({ key, zh: nameZh, en: nameEn, reasonZh: zh, reasonEn: en });
     return true;
   };
-  // 示踪剂拆成 family 开关后没有单一字段；“示踪开着”= 任一 family 开或溶质名单非空。
-  const tracerFamilyKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'];
-  const tracerOn = () =>
-    tracerFamilyKeys.some((key) => on(key)) || (read('DEF_SOLUTE_NAMES') ?? '').trim() !== '';
-  const tracerTouched = () =>
-    tracerFamilyKeys.some((key) => touched(key)) || touched('DEF_SOLUTE_NAMES');
-  const closeTracers = (zh: string, en: string) => {
-    if (!tracerOn()) return false;
-    for (const key of tracerFamilyKeys) out[key] = '.false.';
+  // 材料拆成 family 开关后没有单一字段；“材料开着”= 任一 family 开或溶质名单非空。
+  const materialFamilyKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'];
+  const materialOn = () =>
+    materialFamilyKeys.some((key) => on(key)) || (read('DEF_SOLUTE_NAMES') ?? '').trim() !== '';
+  const materialTouched = () =>
+    materialFamilyKeys.some((key) => touched(key)) || touched('DEF_SOLUTE_NAMES');
+  const closeMaterials = (zh: string, en: string) => {
+    if (!materialOn()) return false;
+    for (const key of materialFamilyKeys) out[key] = '.false.';
     out.DEF_SOLUTE_NAMES = null;
-    const [nameZh, nameEn] = processNames.tracer;
-    closed.push({ key: 'tracer', zh: nameZh, en: nameEn, reasonZh: zh, reasonEn: en });
+    const [nameZh, nameEn] = processNames.material;
+    closed.push({ key: 'material', zh: nameZh, en: nameEn, reasonZh: zh, reasonEn: en });
     return true;
   };
   // 成对互斥：本次选择的一方保留，另一方关闭。
@@ -493,27 +493,27 @@ export function exclusionPatch(
           '汇水区网格不支持城市过程',
           'Catchment grids do not support urban processes',
         ),
-      // 示踪剂拆成 family 开关后没有单一字段；“关闭示踪”要把三个开关全关并清空溶质名单。
-      tracerOn() &&
+      // 材料拆成 family 开关后没有单一字段；“关闭材料”要把三个开关全关并清空溶质名单。
+      materialOn() &&
         on('DEF_URBAN_RUN') &&
-        (touched('DEF_URBAN_RUN') && !tracerTouched()
+        (touched('DEF_URBAN_RUN') && !materialTouched()
           ? close(
               'DEF_URBAN_RUN',
-              '示踪剂过程与城市过程互斥',
-              'Tracer and urban processes are mutually exclusive',
+              '材料过程与城市过程互斥',
+              'Material and urban processes are mutually exclusive',
             )
-          : closeTracers(
-              '示踪剂过程与城市过程互斥',
-              'Tracer and urban processes are mutually exclusive',
+          : closeMaterials(
+              '材料过程与城市过程互斥',
+              'Material and urban processes are mutually exclusive',
             )),
       (catchment ||
         read('DEF_USE_Campbell_SOIL_MODEL')?.trim().toLowerCase() === '.true.' ||
         read('DEF_USE_VariablySaturatedFlow')?.trim().toLowerCase() === '.false.') &&
-        closeTracers(
-          catchment ? '汇水区网格不支持示踪' : '示踪剂过程需要 van Genuchten 土壤方案与变饱和流',
+        closeMaterials(
+          catchment ? '汇水区网格不支持材料' : '材料过程需要 van Genuchten 土壤方案与变饱和流',
           catchment
-            ? 'Catchment grids do not support tracers'
-            : 'Tracers require the van Genuchten soil scheme with variably saturated flow',
+            ? 'Catchment grids do not support materials'
+            : 'Materials require the van Genuchten soil scheme with variably saturated flow',
         ),
     ].some(Boolean);
     if (!changed) break;
@@ -585,7 +585,7 @@ export function parameterLocation(
     DEF_USE_BGC: 'BGC',
     crop: t('作物设置', 'Crop settings'),
     DEF_URBAN_RUN: t('城市设置', 'Urban settings'),
-    tracer: t('示踪设置', 'Tracer settings'),
+    material: t('材料设置', 'Material settings'),
     DEF_USE_LULCC: t('土地覆盖变化设置', 'Land-cover change settings'),
     DEF_USE_GridRiverLakeFlow: t('汇流设置（按网格类型）', 'Routing settings (by grid type)'),
     PFT: t('PFT 专属设置', 'PFT settings'),

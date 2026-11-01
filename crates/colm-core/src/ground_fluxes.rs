@@ -83,7 +83,7 @@ pub struct GroundFluxState {
     pub momentum_integral: f64,
     pub heat_integral: f64,
     pub moisture_integral: f64,
-    /// `raw_out`：参考高度到地面的水汽阻抗 [s/m]（示踪物分馏的 `raw_trc`）。
+    /// `raw_out`：参考高度到地面的水汽阻抗 [s/m]（材料分馏的 `raw_trc`）。
     pub moisture_resistance_s_m: f64,
 }
 

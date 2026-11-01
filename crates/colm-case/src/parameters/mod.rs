@@ -19,7 +19,7 @@ pub enum ParameterScope {
     SnowLayer,
     UrbanClass,
     CropType,
-    TracerSpecies,
+    MaterialSpecies,
     ProcessFile,
     GlobalReadOnly,
 }
@@ -177,7 +177,7 @@ fn build_catalog() -> Vec<ParameterDescriptor> {
     out
 }
 
-/// 不在调优名单、但同样是"调系数"的字段：示踪剂的物理系数与超差停机阈值、漫滩入渗上限、
+/// 不在调优名单、但同样是"调系数"的字段：材料的物理系数与超差停机阈值、漫滩入渗上限、
 /// 汇流子步长。桌面端把它们和调优系数一起放在各页的专家模式里，常规模式只留开关、方案与路径。
 fn expert_coefficient(field: &colm_schema::Field) -> bool {
     let name = field.name;
@@ -444,7 +444,7 @@ fn process_family(group: &str) -> &'static str {
     } else if group.contains("sediment") {
         "sediment"
     } else {
-        "tracer"
+        "material"
     }
 }
 
@@ -550,7 +550,7 @@ fn section_en(section: &str) -> &'static str {
         "生态与生地化" => "Ecology and biogeochemistry",
         "河道与水库" => "Rivers and reservoirs",
         "数据同化" => "Data assimilation",
-        "示踪剂" => "Tracers",
+        "材料" => "Materials",
         "城市" => "Urban",
         "输出与重启" => "Output and restart",
         "输出变量" => "History variables",
@@ -640,12 +640,12 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
     if n.starts_with("SITE_") || n.starts_with("USE_SITE_") {
         return Some("站点");
     }
-    // 上游 7d2fca93 把 tracer 改名 MaterialTransport，字段前缀变成
+    // 上游 7d2fca93 把 material 改名 MaterialTransport，字段前缀变成
     // DEF_ISO_* / DEF_SOLUTE_* / DEF_MT_*，family 开关是 DEF_USE_ISOTOPE /
-    // DEF_USE_METHANE / DEF_USE_SEDIMENT；只认旧名字 TRACER 会让整组落进
+    // DEF_USE_METHANE / DEF_USE_SEDIMENT；只认旧名字 MATERIAL 会让整组落进
     // 「未分类」。
     if has(&[
-        "TRACER",
+        "MATERIAL",
         "ISOTOPE",
         "DEF_ISO_",
         "SOLUTE",
@@ -656,7 +656,7 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
         "GIEMS",
         "WETLAND_FINUNDATION",
     ]) {
-        return Some("示踪剂");
+        return Some("材料");
     }
     if n.starts_with("DEF_DA_") {
         return Some("数据同化");
@@ -806,7 +806,7 @@ pub fn field_section(name: &str, group: Option<&str>) -> Option<&'static str> {
 fn process_section(group: &str) -> &'static str {
     // 新组名：nl_colm_isotope_parameter / nl_colm_solute_parameter /
     // nl_colm_material / nl_colm_mt_forcing；旧的三组保留兼容。
-    if group.contains("tracer")
+    if group.contains("material")
         || group.contains("methane")
         || group.contains("sediment")
         || group.contains("isotope")
@@ -814,7 +814,7 @@ fn process_section(group: &str) -> &'static str {
         || group.contains("material")
         || group.contains("mt_forcing")
     {
-        "示踪剂"
+        "材料"
     } else {
         "水热过程"
     }
