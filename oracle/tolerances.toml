@@ -71,6 +71,11 @@ variables = [
   "f_etr", "f_etrsun", "f_etrsha",
   "f_assim", "f_assimsun", "f_assimsha",
   "f_gssun", "f_gssha", "f_rstfacsun", "f_rstfacsha",
+  # 臭氧胁迫（只在 DEF_USE_OZONESTRESS 打开时写出；默认黄金里没有这两个量）。
+  # 累积吸收量依赖叶温/气孔迭代，故归 tier2；2026-11-01 用夏天 CN-Cng-wet
+  # 臭氧算例实测 Fortran-vs-Rust：OZONEDATA 开 maxdiff 5.3e-7（量级 3.47，
+  # 相对 1.5e-7）、固定 100 ppbv 时 1.3e-6（量级 9.85，相对 1.3e-7）。
+  "f_o3uptakesun", "f_o3uptakesha",
   "f_tleaf", "f_t_grnd", "f_tref", "f_qref",
   "f_fgrnd", "f_taux", "f_tauy", "f_ustar", "f_ustar2",
   "f_tstar", "f_qstar", "f_rib", "f_zol", "f_us10m", "f_vs10m",

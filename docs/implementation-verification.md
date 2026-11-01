@@ -42440,6 +42440,10 @@ GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 �
 2. `311482d` CI GNU 编译器矩阵的 module 兼容；3. `ed23d5c` 把内部清理笔记移出发布树；
 4. `4c28107` CI 最新镜像的 GNU 矩阵。
 
+**基线澄清**：这里的 ours 是**当时的 vendor HEAD**（最后触碰 vendor 的提交
+`3d1eda3d` 及之后未提交的修补），不是历史提交 `47f8246b` —— 后者只是 2026-10-01
+把 TRACER 分支物理设为默认的那批改动，docs 只在解释 A 组来源时引用它。
+
 **同步方案（下轮按此执行，不做零散修补）**：
 
 - 三方合并仓库：base=`e766527a`、ours=vendor 当前树、theirs=`4c28107`，
@@ -42517,3 +42521,58 @@ GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 �
 - **验证**：`cargo test -p colm-core methane`（14 项，含两条新回归）；`cargo check -p colm-core -p colm-runtime`；
   两个 Fortran 文件按内核编译选项单编通过（`MOD_MT_Methane_Physics.o`、`MOD_MT_Methane_Impl.o`）。
   甲烷缺省关闭，所以三个站点黄金与内核缺省行为逐位不变；有积雪/湖泊甲烷算例的数值会变。
+
+## LCT + van Genuchten 校准（upstream-bugs #84）与臭氧链路 E2E（2026-11-01）
+
+### #84 的实现与黄金重生成
+
+LCT 地类表只有一套 Campbell 校准的 Vcmax，而 PFT/PC 用 VG 那套；同时 namelist 在
+LCT+VG 下强制 `DEF_RSS_SCHEME=0`。这次按维护者选的"完整修"落地：
+
+- `MOD_Const_PFT::representative_pft_of_lct` 成为**唯一**的 LCT→代表 PFT 映射
+  （IGBP 18 项 / USGS 25 项；第 68 条臭氧的映射并入这里，`MOD_Ozone` 只做转发）。
+- `Init_PFT_Const` 在 `DEF_USE_LCT .and. .not. DEF_USE_Campbell_SOIL_MODEL` 时，
+  对每个地类执行 `Set_LCT_Vmax25_Vgm(lc, vmax25_p(representative_pft_of_lct(lc)))`；
+  `MOD_Const_LC` 用 `vmax25_lc_override_given` 跳过用户显式 `DEF_LC_VMAX25(lc)`。
+- `share/MOD_Namelist.F90` 删掉 LCT+VG 强制 `DEF_RSS_SCHEME=0` 的块，土壤表面
+  阻力回到 namelist/声明默认 1。
+- Rust `physics.rs` 把同样的 VG 默认值注入 `land_class_overrides`（用户覆盖优先），
+  `DEF_RSS_SCHEME` 直接读算例；`physics_tests` 的"强制置 0"测试改为
+  "不再强制 + 显式值生效 + 无覆盖类拿到代表 PFT 的 VG 值"。
+
+**黄金重生成**（`kernels/default`，对齐内核 `-O2 -fno-tree-vectorize`，manifest
+`colm_git_sha=d06a00c4`）：旧 golden 对新内核在 `CN-Cng`/`US-NR1-snow`/`CN-Cng-wet`
+分别有 **68/84/62** 项 tier2 超差（校准量级）；按新物理 `--write-golden` 重生成后，
+同内核重跑三份均 `127 variables within tolerance`，tier3=0；
+`oracle/golden/kernel-manifest.json` 同步刷新。`tier-check` 仍覆盖全部 127 变量
+（`f_qcharge` 为运行期条件量）。
+
+**Rust 对新 golden**（`colm-rs` 同算例、同窗口）：
+
+| 算例 | tier2 外变量（新） | 改前基线 |
+|---|---|---|
+| CN-Cng | **2**（`f_qinfl`、`f_frcsat`，与改前同一组） | 4 |
+| CN-Cng-wet | **35** | 23 |
+| US-NR1-snow | **76** | 64 |
+
+`CN-Cng` 的一步窗口（Jan 1 00:00 → 00:30）Fortran 与 Rust **127 变量全部 within
+tolerance**（tier0=23 逐位），说明单步算式一致；月窗口增多的超差来自更非线性的
+Vcmax/RSS 对既有 step 级微小差异的放大，不是新的移植缺陷。
+
+### 臭氧链路端到端（Rust 不是"未移植"）
+
+`col m-core/src/ozone.rs`（`CalcOzoneStress` 逐位对照驱动）、`colm-runtime/src/ozone.rs`
+（`OZONE-setgrid.nc` 3 小时档）、`assembly/pft/history` 的重启与累加都已实现
+（30d5afe3 起；`docs/upstream-bugs.md` #5 旧文"Rust 尚未移植"已改正）。这次用
+`/Volumes/Data/CoLMruntime/Ozone/Global/OZONE-setgrid.nc` 跑 2008-07 的 CN-Cng-wet
+窗口做 E2E（临时算例，验证后删除）：
+
+| 配置 | `f_o3uptakesun` F/R max | `f_o3uptakesha` F/R max | 最大绝对差 |
+|---|---|---|---|
+| `DEF_USE_OZONEDATA=.true.` | 3.470639151 / 3.470638619 | 2.453458407 / 2.453457951 | 5.35e-7 / 4.57e-7（相对 1.5e-7） |
+| `.false.`（固定 100 ppbv） | 9.850670536 / 9.850669239 | 7.650985512 / 7.650984357 | 1.30e-6 / 1.16e-6（相对 1.3e-7） |
+
+冬季 `CN-Cng` 窗口两边吸收量都恒为 0（草地冬季无冠层吸收），不构成有效验证；
+夏季两个配置都真正走到了数据读取、`CalcOzoneStress`、累加与 history 写出。
+`oracle/tolerances.toml` 给两个臭氧累加量补了 tier2 归属（默认黄金里不含它们，
+tier-check 之前不会报漏项）。

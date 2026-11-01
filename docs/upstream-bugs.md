@@ -53,7 +53,7 @@
   **臭氧胁迫打开时**，一次运行的第一次调用读到的仍是未定义值（实测关闭时第 1 步 `etr` 小 4800 倍，
   打开时同源）。
 - **处理**：迭代前无条件置 1（臭氧打开时迭代后的 `CalcOzoneStress` 照常覆盖）。LCT（`MOD_LeafTemperature`）早已如此；
-  PC（`MOD_LeafTemperaturePC`）原来仍只在臭氧关闭时置 1，第 560 轮补齐。Rust 尚未移植臭氧胁迫，`DEF_USE_OZONESTRESS = .true.` 现在明确拒绝。
+  PC（`MOD_LeafTemperaturePC`）原来仍只在臭氧关闭时置 1，第 560 轮补齐。Rust 已移植臭氧胁迫（`colm-core/src/ozone.rs` + `colm-runtime/src/ozone.rs`）；2026-11-01 又用夏天臭氧数据做了 Fortran-vs-Rust E2E（见 implementation-verification）。
 
 ### 16. VIC 产流那一支不给 `frcsat` 赋值
 
@@ -817,7 +817,7 @@
   测试改为检查 schema 里所有字符字段的可选值都不超过声明长度。
 - **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`0077d685`）。
 
-### 84. LCT 模式加 van Genuchten 土壤没有校准：Vcmax 只有 Campbell 那一套，土壤阻抗又被强制关闭——未修
+### 84. LCT 模式加 van Genuchten 土壤没有校准：Vcmax 只有 Campbell 那一套，土壤阻抗又被强制关闭——已修
 
 - **位置**：
   - `main/MOD_Const_PFT.F90:1788-1840`：`vmax25_p` 按 `DEF_USE_Campbell_SOIL_MODEL` 分两套。van Genuchten 那套注释写着 "Temporarily tune Vegetation parameter to match VGM model (soil too wet)"，北方常绿针叶树（PFT 2）54 → 26.5、常绿阔叶 56 → 25.2，等等。
@@ -847,10 +847,24 @@
     - 官方缺 `include/Makeoptions.Mac-arm`，从 vendor 拷了一份。
     - `main/HYDRO/MOD_Hydro_VIC_Variables.F90:59` 的注释 `/**<` 没有收尾，cpp 会吞掉第 60 行的声明，补了 `*/`。
     - 官方 SinglePoint 开着 `URBAN_MODEL` 时只允许城市站点（`MOD_SingleSrfdata.F90:316-320`），非城市站点要用 `URBANOFF` 编。
-- **处理**：
-  - 未修，待维护者决定。可选做法：给 LCT 地类表加一套 VG 下的 `vmax25`（按各地类的主导 PFT 取 VG 值），以及重新评估 LCT 加 VG 时是否该关土壤阻抗。
-  - 两者都改变 LCT 默认算例的结果，要重做黄金回归。
-  - "保留阻抗"那一行用的是本地临时诊断版 colm-rs（`COLM_RS_DIAG_KEEP_RSS`，未提交）。
+- **修复**（第 729 轮，维护者选"完整修"）：
+  - `MOD_Const_PFT` 新增唯一的代表 PFT 映射 `representative_pft_of_lct`（IGBP/USGS 两张表，
+    与第 68 条臭氧的映射合并为一份；`MOD_Ozone::ozone_pft_of_lct` 直接调用它）。
+  - `Init_PFT_Const` 在 `DEF_USE_LCT` 且 van Genuchten 时，用
+    `vmax25_p(representative_pft_of_lct(lc))` 填 LCT 地类表的 `vmax25`；
+    用户显式的 `DEF_LC_VMAX25(lc)` 由 `MOD_Const_LC::Set_LCT_Vmax25_Vgm` 跳过。
+  - `MOD_Namelist.F90` 删除 LCT + VG 强制 `DEF_RSS_SCHEME = 0` 的整段（包括那句
+    "Soil resistance is automaticlly turned off..."）：土壤表面阻力改用 namelist
+    值/声明默认 1。
+  - Rust 端 `physics.rs` 用同一映射把 VG 校准值注入 `land_class_overrides`
+    （不动用户覆盖），`DEF_RSS_SCHEME` 直接读算例；`physics_tests` 改为断言
+    "不再强制、显式值生效、无覆盖的类拿到代表 PFT 的 VG 值"。
+- **影响与验证**：三份站点黄金按新物理重生成（旧 golden 对新内核有 68/84/62 项
+  tier2 超差，即校准量级）；新 golden 与同内核重跑逐变量 within tolerance。
+  Rust 对**新** golden：CN-Cng 2、CN-Cng-wet 35、US-NR1-snow 76 个 tier2 外变量
+  （改前基线 4/23/64；CN-Cng 一步窗口 Fortran/Rust 127 变量全部 within tolerance，
+  说明单步算式一致，差异来自多步非线性放大）。细节见
+  `docs/implementation-verification.md`。
 
 ### 85. 无雪时 tracer 调用传 `snow_qout_layer_trc(1:0)`，ifort `-check bounds` 停机——已修
 
