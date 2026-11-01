@@ -42619,3 +42619,32 @@ patchtype)` facade：内部顺序与桌面原 driver 完全相同（`mt_wetland_
 逐步调用合并为一次 facade 调用，`mt_lake_step` 继续用桌面的 `mt_resolve_step` 结果。
 三站点黄金仍 `127 variables within tolerance`。下一步是把 `CoLMMAIN` 的宿主-水/热/冠层
 调用改到上游 facade 类型（`water_diag`/`thermal_diag`/`canopy_diag`）。
+
+### 上游宿主层整圈移植的可行性实验（goal round 3，2026-11-01 深夜）
+
+在 `/tmp/port4` 里把宿主圈整体切到 4c28107 版本（上游 `CoLMMAIN`/`CoLMDRIVER`/材料模块/
+`MOD_Hydro_SoilWater` 的 `water_diag` 版，配合我们已迁好的 `CoLM.F90` facade、桌面
+`MOD_SoilSnowHydrology` 的物理体、`MOD_Runoff` 的 #16 修复、leaf 适配头），**编译链接通过**
+（default 树 build=0）。为走到这一步，转换器还需要两类修补：
+
+1. **参数表里的运行期开关守卫**：上游 `#ifdef vanGenuchten_Mualem_SOIL_MODEL` 位于
+   `CALL THERMAL(...)`/`CALL CoLMMAIN(...)` 的续行参数表中，转换器把它变成
+   `IF (DEF_USE_Campbell_SOIL_MODEL) THEN` 后 Fortran 语法非法。正确做法是**保留两侧参数、
+   删掉守卫行**（运行期两条分支的参数都要传），本轮用 `/tmp/fix_arg_guards.py` 处理了
+   `CoLMMAIN.F90`/`CoLMDRIVER.F90` 共 8 行。
+2. `ELSE IF` 被拆行（124 处）已在转换树里修复。
+
+**数值结果**：`mksrfdata/mkinidata/colm` 三段都能跑完；与黄金比，只有 `f_frcsat` 一处
+**输出**差异——5/264 个逐时值（例如 1.0 vs 0.9776220484113172，差值恒为 0.0223779516，
+即相邻两个样本之差），其余 126 个变量最大差 1.08e-8（`f_vegwp` 的舍入漂移），差值发生时
+`wliq/wice/t_soisno` 与黄金一致到 1e-12。说明上游宿主层与我们桌面的**物理状态等价**，
+差异集中在 `frcsat` 的历史采样/累加时序上（不是水文解）。
+
+**下一步（未完成，goal 保持 active）**：
+1. 在桌面 `MOD_Vars_1DAccFluxes`/上游 `MOD_MT_HostHistory` 两套累加里给 `frcsat` 加同样的
+   逐样本打印，定位那 5 个小时里是哪一步样本不同；若是 history 采样时序，按上游
+   `mt_land_finish_step` 的顺序移植，若是 `frcsat` 有效性标记，补回桌面版的 validity 逻辑。
+2. 消掉这 1 个变量后，把 `/tmp/port4` 的宿主文件整批复制进仓库 vendor，补齐
+   `MKSRFDATA/RegionClip` 的甲烷 facade（port4 已用上游版本），跑三预设 + 三黄金。
+3. 临时树/脚本：`/tmp/port4`（可构建候选）、`/tmp/fix_arg_guards.py`、`/tmp/conv-master-tree`、
+   `/tmp/conv-e766-tree`、`/tmp/colm202x-sync` 分支 `conv-master-fixed`/`desktop-vendor3`。
