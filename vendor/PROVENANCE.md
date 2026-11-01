@@ -150,3 +150,20 @@ vendor 的 Fortran 已随之更新；Rust 引擎此前还写旧名，本轮改�
 - 上游强制跟踪的 13 个 `.py`（`extends/CaMa/` 下 12 个 + `preprocess/Forcings/GDAS_GPCP/
   step2_Merge_Data.py`）在 vendor 里一直不存在：vendor `.gitignore` 有 `*.py`。本轮不改变这
   一约定，13 个文件也不参与任何内核构建。
+
+## 2026-11-01：纳入 4c28107 的材料模块源码（宿主层尚未接线）
+
+上游 fork `zhongwangwei/CoLM202X` 的 master 已到 `4c28107`（在 `e766527a` 之后 4 个提交，
+主体是 `8de029c` 把材料职责从宿主例程搬进 `main/MATERIAL`）。本轮先把**新增的 12 个
+源文件**按桌面转换风格（宏→运行期开关、ELSE IF 修复后的版本）入库：
+
+- `MOD_MT_Runtime/LandWork/HostHistory/HistoryRestart/SnowHost/SnowRemap/SurfaceData/
+  CanopyDiagnostics/HydroDiagnostics/ThermalDiagnostics`、`FAMILY_SOLUTE/MOD_MT_BGC_NH4`
+  与 `main/MATERIAL/Makefile.material`；
+- 宿主层（CoLM/CoLMDRIVER/CoLMMAIN/Hist*/Leaf*/Thermal/Ground*/PhaseChange/
+  SoilSnowHydrology/Hydro_SoilWater/MKSRFDATA/RegionClip）**仍保留桌面版**：4c 的
+  facade 化宿主与本地 A 组物理修补（露水/霜冰容量、雪卸载、TOPMODEL、土壤阻抗等）
+  写在互斥的签名上，必须整圈重写，不能逐文件替换；因此这批新模块目前**不参与编译**
+  （桌面 Makefile 未列它们的对象），只是把上游源码快照入库存档，供下一步接线。
+- 迁移方案、差距清单与验收方式见 `docs/implementation-verification.md`
+  "上游 4c28107 模块化盘点的结论与同步方案" 及后续段落。

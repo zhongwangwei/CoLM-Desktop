@@ -42576,3 +42576,20 @@ Vcmax/RSS 对既有 step 级微小差异的放大，不是新的移植缺陷。
 夏季两个配置都真正走到了数据读取、`CalcOzoneStress`、累加与 history 写出。
 `oracle/tolerances.toml` 给两个臭氧累加量补了 tier2 归属（默认黄金里不含它们，
 tier-check 之前不会报漏项）。
+
+### 4c28107 增量入库与宿主层接线的现状（2026-11-01 夜）
+
+把上游 4c28107 新增的 12 个 `main/MATERIAL` 源文件（转换器修正 `ELSE IF` 之后）复制进
+`vendor/CoLM202X`，并确认：
+- `build_kernel.sh default` exit=0；
+- 三个站点黄金仍 `within tolerance`（127 变量，tier3=0）；新增文件不在 Makefile 对象表里，
+  不改变内核；
+- 这些模块**尚未被宿主调用**：4c 的宿主 facade（`mt_runtime_*`/`mt_land_work`/
+  `mt_land_water_step`/`canopy_diag`/`thermal_diag`/`water_diag`）与本地 A 组物理修补
+  （`defer_surface_ice_overflow`、露水按孔隙截断、雪卸载、TOPMODEL `topoweti/eta`、
+  VIC `frcsat`、土壤阻抗等）落在互斥的签名上。逐一换文件会得到声明/过程体不一致的
+  混合体（试过 8 轮），必须对 15 个宿主文件做一次整圈改写。
+- 下一步顺序：CoLM/CoLMDRIVER/CoLMMAIN 的 facade 与 FIX #50 → Hist* → Leaf*/Thermal/
+  PhaseChange/Ground* → SoilSnowHydrology/Hydro_SoilWater（把 dew/frost/TOPMODEL 修补
+  改写为 `water_diag`）→ MKSRFDATA/RegionClip；每步在 `/tmp/colmsync` 的合并分支上
+  编译，最后复制回 vendor 做 `diff -r --exclude=.git` 验收，再重建三预设与黄金。
