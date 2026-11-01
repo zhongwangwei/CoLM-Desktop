@@ -506,7 +506,10 @@ impl TracerPhysics {
         let relax_b = (alpha_k * alpha_eq) / gross_moles;
         let denom = (leaf_moles * relax_b).contract(peclet, 1.0);
         out.new_delta_e = if denom > TRC_TINY {
-            let memory = prev_w.contract(prev_bulk_delta, -delta_x);
+            // 上游是 `prev_w * (prev_bulk_delta - delta_x)`；`contract` 的第三参是
+            // **加数**而不是乘数，写成 `prev_w.contract(prev_bulk_delta, -delta_x)` 会
+            // 变成 `prev_w*prev_bulk_delta - delta_x`（少了 prev_w），白天叶水 δ 被推飞。
+            let memory = prev_w * (prev_bulk_delta - delta_x);
             let numerator = (leaf_moles * peclet).contract(delta_x, memory);
             numerator.contract(relax_b, delta_es) / denom
         } else {

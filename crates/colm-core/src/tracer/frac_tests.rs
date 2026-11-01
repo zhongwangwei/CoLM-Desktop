@@ -219,3 +219,46 @@ fn ice_evaporation_keeps_the_source_ratio() {
     );
     assert_ne!(liquid, source, "liquid evaporation must still fractionate");
 }
+
+/// NSS 历史项 = `prev_w * (prev_delta_b - delta_x)`。`contract(self, mul, add)` 的
+/// 第三参是加数：旧写法 `prev_w.contract(prev_bulk_delta, -delta_x)` 实际算成
+/// `prev_w*prev_delta_b - delta_x`（少乘了 prev_w），白天一开车叶水 δ 就从 -4‰
+/// 跑到 +45‰。这条记录是真实算例里抓到的输入，用 Fortran 公式手算为 de≈-4.256。
+#[test]
+fn nss_memory_scales_the_whole_delta_difference_by_previous_leaf_water() {
+    let physics = TracerPhysics {
+        fractionation: true,
+        ..TracerPhysics::default()
+    };
+    let tracer = isotope("O18", 2.0052e-3);
+    let out = physics.transpiration_nss_ratio(
+        &tracer,
+        &NssInput {
+            source_ratio: 1.984_876_793_252_21e-3,
+            vapor_ratio: 1.975_121_999_999_999_7e-3,
+            temp_k: 2.658_987_711_799_665_6e2,
+            relhum: 2.827_466_878_339_320_3e-1,
+            psrf: 8.542_131_620_407_943e4,
+            transp_water: 2.866_734_528_028_658_2e-5,
+            deltim: 1800.0,
+            leaf_area: 4.246_168_195_946_219e-3,
+            aerodynamic_resistance: 1.988_212_787_811_53e1,
+            stomatal_resistance: 3.304_083_960_441_846e4,
+            prev_delta_e: -8.360_657_218_608_017,
+            prev_delta_b: -8.363_870_481_600_108,
+            prev_peclet: 1.0,
+            prev_leaf_moles: 2.828_377_818_793_525_7e-2,
+        },
+    );
+    assert!(out.new_delta_e < 0.0, "de ran away: {}", out.new_delta_e);
+    assert!(
+        (out.new_delta_e + 4.2561914273518795).abs() < 1e-9,
+        "de={}",
+        out.new_delta_e
+    );
+    assert!(
+        (out.new_delta_b + 4.384_062_252_210_381).abs() < 1e-9,
+        "db={}",
+        out.new_delta_b
+    );
+}

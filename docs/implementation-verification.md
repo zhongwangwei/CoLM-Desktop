@@ -42336,3 +42336,36 @@ leaf_iso_storage` 与 NSS 输出，判断是储量分支还是状态回写）。
 说明打印的参数与真正参与计算的参数不一致（可能有未打印的物理参数或状态来源不同，
 例如 restart 读入的叶水状态/`TracerPhysics` 字段），需要下一次用**更可靠的方式**
 （在 `NssInput` 构造处直接打印，并核对 restart 读到的 `mt_leaf_*`）再定位。
+
+### 白天叶水 δ 跑飞的根因：`contract` 第三参被当成乘数（2026-11-01，同轮续）
+
+上一节把问题缩到"单步、同一起点、白天"后，这轮找到根因并修掉：
+
+- Rust NSS 历史项写成了
+  `prev_w.contract(prev_bulk_delta, -delta_x)`。`cols_numeric::Contract` 的定义是
+  `self.contract(mul, add) = self*mul + add`，第三参是**加数**，所以这行实际算的是
+  `prev_w*prev_delta_b - delta_x`，比上游 `prev_w*(prev_bulk_delta - delta_x)`
+  **少乘了一个 prev_w**；
+- 夜里叶水 W 小、prev_w*δb 与 δx 量级相近时看不出来；白天 W 与 δ 都变大后误差被
+  放大，叶水 δ 从 -4‰ 一路被推到几十上百‰；
+- 真实算例抓到的一条输入（02:00 那一步）：修正前 Rust 输出 `de=+45.76`，修正后
+  `de=-4.256`，与 Fortran 公式手算值一致。
+
+**验证**：
+
+- 真实单步（02:00→02:30，同一 Fortran restart）：`f_mt_leaf_delta_e` 最大差
+  **1.5e-12**，`f_mt_leaf_delta_b` **0**；
+- 12 步 host 重同步链：`f_mt_leaf_delta_e` 最大差 **1e-11~1e-12**、
+  `f_mt_leaf_delta_b` ≤2e-13（修复前 970‰ 级）；
+- 新增回归单测 `nss_memory_scales_the_whole_delta_difference_by_previous_leaf_water`，
+  用真实记录断言 de/db，防止再次把加数当乘数。
+
+### 附带发现：跨引擎 MT history 旁车不互通（未修）
+
+重同步链上把 Fortran 写的 restart 交给 Rust 时，Rust 报
+`incompatible or incomplete generic land-tracer history sidecar: no mt_hist_schema`：
+Fortran 的 `*_restart_hist_*` 旁车按上游写 `a_mt_*`/`a_water_*`，没有 Rust 的
+`mt_hist_schema`/`mt_hist_count`/描述符身份。当前只能让 Rust 冷启动 history 窗口
+（比较累计量时会因此出现假差异；叶水这类瞬时状态不受影响）。要让两引擎的
+restart 真正互相接续，需要给 `tracer_sidecar::read` 加 Fortran 布局回退
+（按 `a_mt_*` 名字与 `(patch, ntracers)` 形状读、跳过描述符校验）。
