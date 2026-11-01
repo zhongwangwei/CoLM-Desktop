@@ -42697,3 +42697,34 @@ Fortran 侧相同表达式只在 `watin > 0` 时参与入渗，且这条阈值�
 `MOD_NewSnow`/雪层合并的 facade 化把本地 A 组修补（eroot 切片、pn、ivt、卸载、雪层 remap 等）
 覆盖掉了，需要逐项移植，而不是再改数值容差。下一轮顺序：Thermal/LeafTemperature 的植物
 水力修补 → NewSnow/SnowLayersCombineDivide 的雪修补 → 再复测 US-NR1-snow → 通过后整批入库。
+
+### 全链条最终验证矩阵（goal round 5，2026-11-01 深夜）
+
+本轮把「4c28107 同步 + 全链路验证」收口。同步策略最终定为：
+**入库上游最新源码快照（新增材料模块 + `Makefile.material`），facade 按可验证范围接入
+（`CoLM.F90` 的 runtime、`CoLMDRIVER` 的 `mt_land_after_bgc`），宿主物理层保留桌面实现**
+——理由见下；该状态下跑完整验证矩阵：
+
+| 链路 | 命令 | 结果 |
+|---|---|---|
+| 三预设构建 | `./oracle/scripts/build_kernel.sh default / latlon / crop` | 三个 exit=0，0 error |
+| 站点黄金 | `golden-run` + `golden-compare --tolerances oracle/tolerances.toml`（CN-Cng、CN-Cng-wet、US-NR1-snow） | 三份均 `127 variables within tolerance`，tier3=0 |
+| 生成表/闸门 | `colm-schema/colm-hist drift`、`colm-core drift_landcover/drift_co2`、`colm-namelist roundtrip`、`oracle histmap`、`tier-check` | 全绿；127 个 golden 变量都有层级 |
+| 引擎单测 | `HDF5_USE_FILE_LOCKING=FALSE cargo test -q --workspace --lib --bins --no-fail-fast` | 34 个 suite 全过；17 项失败全部是既有沙箱环境项（PTY/进程组/study runner 锁/parity 子进程/sandbox），无物理或 golden 相关 |
+| Rust↔Fortran | `colm-rs` CN-Cng vs 新黄金 | 只剩已知的近零 `f_qinfl` 变号；`f_frcsat` 已一致 |
+| 格式 | `cargo fmt --all -- --check` | 通过 |
+
+**为什么宿主物理层不整批换上游版本（结论，不再尝试）。** `/tmp/port4` 已把上游 4c 的
+`CoLMMAIN`/`CoLMDRIVER`/材料模块/`Hydro_SoilWater`(water_diag) 全部接上并通过编译；
+无雪算例 CN-Cng **127 变量全过**，证明 facade 化本身没有物理变化。但 US-NR1-snow 从
+第 0 步起就有 1e-22 量级差异（不同求和顺序），到第 84 步放大到 5e-9，第 86 步一次
+雪/植物水力阈值分支翻转后放大到 O(1)。逐文件核对过 Thermal/LeafTemperature/PC/
+GroundFluxes/Hydro 的候选版本，除已补回的 `DEF_VEG_SNOW` 冠层雨雪拆分块外没有丢失的
+本地物理修补——这是**上游重构改变浮点求和顺序**导致的混沌放大，不是缺补丁，逐位对齐
+不可行，而用容差放行又会掩盖真实回归。故 vendor 维持"上游源码 + 桌面宿主层"的混合态，
+这是本项目长期跟踪上游的既定策略（本地 A 组修补全部落在宿主层）。
+
+**本地 A 组修补在混合态的覆盖**：露水/霜冰容量、卸载、ldew 修复、湿冠层分数、
+TOPMODEL/SimpleVIC 参数、qcharge、frost 重定位、BGC 分解、history 无样本、积雪补雪、
+水力/含水层交换等均在 vendor 宿主层保留并由三站点黄金与 Rust 对拍守住；新增的
+`f_frcsat` 近饱和病态修正同时覆盖两个引擎。
