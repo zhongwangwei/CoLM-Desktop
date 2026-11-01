@@ -42213,3 +42213,24 @@ patch/step 上逐项对读，定位是输入取法还是 `alpha_k`/液态扩散�
 下一步：在两边 caller 侧按 patch 打印"是否满足 `transp_frac_active`、是否传入
 tleaf/forc_q/forc_psrf/lai/rst、是否 allocated(mt_leaf_delta_e)"，找出 Rust 少算的 patch
 集合，再修 Rust 的调用条件或 step 路径。
+
+### NSS patch 集合差异：根因在近零蒸腾的逐层诊断（2026-11-01，同轮续）
+
+给 Rust caller 加探针（`COLM_DEBUG_NSSCALL`，读完已删）后，1 步窗口里看到的不是公式问题：
+
+- Rust 的 `TRCSOILRAW` 显示 `etroot_actual` 逐层值只有 **1e-15 量级且有正有负**，
+  相抵消后 `transp_water_total = max(gross - return, 0)` 对绝大多数 patch 是 **0**，
+  于是 `transp_frac_active=false`，NSS 不调用（整步只 2 次）；
+- Fortran 在同一步对 **22 个 patch** 调用 NSS，其 `transp_water` 是 **1e-14 量级正值**
+  （同一时间、同一 host 状态，主 history 只差 `f_alb` 2e-16）；
+- 之前那条"输入逐位相同"的记录也印证了集合差异：Fortran 在该 patch **没跑** NSS，
+  叶水 δ 保持初值 -10‰；Rust **跑了** NSS，把它移到了 ~0。
+
+因此 `f_mt_leaf_delta_e` 的 9.97‰ 差异不是分馏公式，而是**哪些 patch 进入 NSS**：
+两边的逐层蒸腾诊断（Fortran `etroot_actual` / Rust `transpiration_actual_mm`）在
+近零通量处的取值/符号不同（1e-14 正 vs 1e-15 有符号相消），而 `> tiny` 的闸门把这个
+噪声级的差别放大成不同的 patch 集合。
+
+下一步：在同一 patch/step 上按层打印两边 `etroot_actual` / `transpiration_actual_mm`
+（以及 cascade、return flow 的中间量），确认哪一边的派生方式符合上游（`etroot_actual`
+是级联后的逐层实际吸水量），修 Rust 的诊断派生，而不是改 NSS 公式或闸门阈值。
