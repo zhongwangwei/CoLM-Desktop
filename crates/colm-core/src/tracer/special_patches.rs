@@ -210,17 +210,17 @@ struct SpecialFrac {
 }
 
 impl SpecialFrac {
-    fn evap_ratio(
+    /// 仿射形式（`R_E = slope*R + offset`）：上游对一步损失做精确积分。
+    fn evap_affine(
         &self,
         tracer: &TracerDescriptor,
         r_vapor: f64,
-        source_ratio: f64,
         temp_k: f64,
         from_ice: bool,
-    ) -> f64 {
+    ) -> (f64, f64) {
         let physics = self.physics;
         if !physics.fractionation_active(tracer) {
-            return source_ratio;
+            return (1.0, 0.0);
         }
         let alpha_k = if from_ice {
             physics.alpha_kinetic_craig_gordon(tracer, true)
@@ -231,15 +231,7 @@ impl SpecialFrac {
             }
         };
         let relhum = super::frac::surface_relhum(self.forc_q, self.forc_psrf, temp_k, from_ice);
-        physics.craig_gordon_evap_ratio(
-            tracer,
-            source_ratio,
-            r_vapor,
-            temp_k,
-            relhum,
-            alpha_k,
-            from_ice,
-        )
+        physics.craig_gordon_evap_affine(tracer, r_vapor, temp_k, relhum, alpha_k, from_ice)
     }
 }
 
@@ -295,9 +287,8 @@ fn mixed_box(
     let (trc_evap_liq, trc_evap_ice) = if nonvolatile {
         (0.0, 0.0)
     } else {
-        let evap_ratio = |source_ratio: f64, temp_k: f64, from_ice: bool| {
-            frac.evap_ratio(tracer, r_vapor, source_ratio, temp_k, from_ice)
-        };
+        let evap_affine =
+            |temp_k: f64, from_ice: bool| frac.evap_affine(tracer, r_vapor, temp_k, from_ice);
         // `tracer_ratio_cap`：分馏时 `ref_ratio*(1+2000/1000)`，否则 0。
         let ratio_cap = if active { tracer.ref_ratio * 3.0 } else { 0.0 };
         let liq = atmospheric_tracer_loss(
@@ -306,7 +297,7 @@ fn mixed_box(
             box_water.evap_liq_mass,
             box_water.t_grnd,
             false,
-            &evap_ratio,
+            &evap_affine,
             TRC_TINY,
             ratio_cap,
             nonvolatile,
@@ -320,7 +311,7 @@ fn mixed_box(
             box_water.evap_ice_mass,
             box_water.t_grnd,
             true,
-            &evap_ratio,
+            &evap_affine,
             TRC_TINY,
             ratio_cap,
             nonvolatile,

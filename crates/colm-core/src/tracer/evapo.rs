@@ -438,15 +438,14 @@ pub fn tracer_flood_evap_loss(
             .forc_us
             .contract(input.forc_us, input.forc_vs * input.forc_vs)
             .sqrt();
-        let evap_ratio = |source_ratio: f64, temp: f64, from_ice: bool| {
+        let evap_affine = |temp: f64, from_ice: bool| {
             if !active {
-                return source_ratio;
+                return (1.0, 0.0);
             }
             let relhum = super::frac::surface_relhum(input.forc_q, input.forc_psrf, temp, from_ice);
             let alpha_k = physics.alpha_kinetic_open_water(tracer, wind);
-            physics.craig_gordon_evap_ratio(
+            physics.craig_gordon_evap_affine(
                 tracer,
-                source_ratio,
                 vapor_ratio[itrc],
                 temp,
                 relhum,
@@ -460,7 +459,7 @@ pub fn tracer_flood_evap_loss(
             input.water_evap,
             input.temp_k,
             false,
-            &evap_ratio,
+            &evap_affine,
             TRC_TINY,
             r_max(tracer, active),
             false,
@@ -543,8 +542,7 @@ impl Frac<'_, '_> {
             return Ok(0.0);
         }
         let active = self.active();
-        let evap_ratio =
-            |source_ratio: f64, temp: f64, ice: bool| self.evap_ratio_for(source_ratio, temp, ice);
+        let evap_affine = |temp: f64, ice: bool| self.evap_affine_for(temp, ice);
         let r_max = r_max(self.tracer, active);
         Ok(if from_ice {
             skin_limited_tracer_loss(
@@ -554,7 +552,7 @@ impl Frac<'_, '_> {
                 self.input.subl_skin_mm,
                 temp_k,
                 from_ice,
-                &evap_ratio,
+                &evap_affine,
                 TRC_TINY,
                 r_max,
             )
@@ -565,28 +563,28 @@ impl Frac<'_, '_> {
                 water_loss,
                 temp_k,
                 from_ice,
-                &evap_ratio,
+                &evap_affine,
                 TRC_TINY,
                 r_max,
             )
         })
     }
 
-    /// 内部函数 `evap_ratio_for`：冠层与地表都用 `tracer_alpha_kinetic_craig_gordon`。
-    fn evap_ratio_for(&self, source_ratio: f64, temp_k: f64, from_ice: bool) -> f64 {
+    /// 内部函数 `evap_affine_for`：冠层与地表都用 `tracer_alpha_kinetic_craig_gordon`；
+    /// 上游把 Craig–Gordon 写成仿射形式后对一步损失做精确积分。
+    fn evap_affine_for(&self, temp_k: f64, from_ice: bool) -> (f64, f64) {
         if !self.active() {
-            return source_ratio;
+            return (1.0, 0.0);
         }
         let (Some(forc_q), Some(forc_psrf)) = (self.input.forc_q, self.input.forc_psrf) else {
-            return source_ratio;
+            return (1.0, 0.0);
         };
         let relhum = super::frac::surface_relhum(forc_q, forc_psrf, temp_k, from_ice);
         let alpha_k = self
             .physics
             .alpha_kinetic_craig_gordon(self.tracer, from_ice);
-        self.physics.craig_gordon_evap_ratio(
+        self.physics.craig_gordon_evap_affine(
             self.tracer,
-            source_ratio,
             self.r_atm,
             temp_k,
             relhum,

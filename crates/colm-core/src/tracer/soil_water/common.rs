@@ -308,19 +308,13 @@ impl<'a> TracerCtx<'a> {
             .equilibrium_deposition_ratio(self.tracer, self.r_atm, temp_k, from_ice)
     }
 
-    /// 内部函数 `evap_ratio_for`（Craig-Gordon）；`soil_surface` 即 `kinetic_on_soil_surface`。
-    pub fn evap_ratio_for(
-        &self,
-        source_ratio: f64,
-        temp_k: f64,
-        from_ice: bool,
-        soil_surface: bool,
-    ) -> f64 {
+    /// 同上，仿射形式（`R_E = slope*R + offset`）：上游对一步损失做精确积分。
+    pub fn evap_affine_for(&self, temp_k: f64, from_ice: bool, soil_surface: bool) -> (f64, f64) {
         if !self.active {
-            return source_ratio;
+            return (1.0, 0.0);
         }
         let (Some(forc_q), Some(forc_psrf)) = (self.forc_q, self.forc_psrf) else {
-            return source_ratio;
+            return (1.0, 0.0);
         };
         let relhum = surface_relhum(forc_q, forc_psrf, temp_k, from_ice);
         let alpha_k = match self.kinetics {
@@ -341,9 +335,8 @@ impl<'a> TracerCtx<'a> {
                 self.physics.alpha_kinetic_open_water(self.tracer, wind)
             }
         };
-        self.physics.craig_gordon_evap_ratio(
+        self.physics.craig_gordon_evap_affine(
             self.tracer,
-            source_ratio,
             self.r_atm,
             temp_k,
             relhum,
@@ -373,7 +366,7 @@ impl<'a> TracerCtx<'a> {
             water_loss,
             temp_k,
             from_ice,
-            &|source_ratio, t, ice| self.evap_ratio_for(source_ratio, t, ice, soil_surface),
+            &|t, ice| self.evap_affine_for(t, ice, soil_surface),
             TRC_TINY,
             r_max,
             self.nonvolatile,

@@ -309,11 +309,16 @@ impl TracerPhysics {
         if !self.fractionation_active(tracer) {
             return source_ratio;
         }
-        let alpha_eq = if from_ice {
-            self.alpha_ice_vap(tracer, temp_k)
-        } else {
-            self.alpha_liq_vap(tracer, temp_k)
-        };
+        // 上游 `material_craig_gordon_evap_ratio`：冰→汽（升华）不分馏，蒸汽按冰自身
+        // 的比值离开。冰内自扩散太慢、形不成分馏边界层，这是雪/冰升华的常用假设
+        // （Friedman et al. 1991；Moser & Stichler 1975）。对冰套 Craig–Gordon、且
+        // 雪面湿度接近冰面饱和（h 达到 DEF_ISO_CG_RELHUM_MAX=0.99）时，上游实测
+        // 2000–2004 IsoGSM 算例的雪面蒸汽 δ18O 到 -122‰、δD 到 -830‰，远超观测。
+        // 因此这里也必须先返回源端，不能走 α_ice。
+        if from_ice {
+            return source_ratio;
+        }
+        let alpha_eq = self.alpha_liq_vap(tracer, temp_k);
         if alpha_eq <= TRC_TINY || alpha_eq.is_nan() {
             return source_ratio;
         }
@@ -329,6 +334,45 @@ impl TracerPhysics {
             source_ratio
         } else {
             ratio
+        }
+    }
+
+    /// `material_craig_gordon_evap_affine`：Craig–Gordon 蒸发比值写成
+    /// `R_E = slope*R_s + offset` 的系数。上游用它在有限水池上做**精确积分**
+    /// （`material_evaporative_mt_loss`，Gonfiantini 1986 的干涸池解），
+    /// 而不是按 10% 池量显式子步——后者在近饱和（slope ~ 1/(1-h)）时会失稳，
+    /// 上游实测雪融池 δ18O 被推到 -969‰。分馏未启用、冰→汽或 α 非法时
+    /// 返回 `(1, 0)`，与上游一致。
+    pub fn craig_gordon_evap_affine(
+        &self,
+        tracer: &TracerDescriptor,
+        vapor_ratio: f64,
+        temp_k: f64,
+        relhum: f64,
+        alpha_k: f64,
+        from_ice: bool,
+    ) -> (f64, f64) {
+        if !self.fractionation_active(tracer) || from_ice {
+            return (1.0, 0.0);
+        }
+        let alpha_eq = self.alpha_liq_vap(tracer, temp_k);
+        if alpha_eq <= TRC_TINY || alpha_eq.is_nan() {
+            return (1.0, 0.0);
+        }
+        let alpha_k = alpha_k.max(TRC_TINY);
+        let h = relhum
+            .max(0.0)
+            .min(self.cg_relhum_max.min(0.999_999).max(0.0));
+        let one_minus_h = 1.0 - h;
+        if one_minus_h <= 0.0 {
+            return (1.0 / alpha_eq, 0.0);
+        }
+        let slope = 1.0 / (alpha_eq * alpha_k * one_minus_h);
+        let offset = (-h * vapor_ratio) / (alpha_k * one_minus_h);
+        if slope.is_nan() || offset.is_nan() {
+            (1.0, 0.0)
+        } else {
+            (slope, offset)
         }
     }
 

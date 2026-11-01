@@ -195,3 +195,27 @@ fn nss_memory_reads_the_previous_bulk_leaf_delta_only() {
         "the old bulk leaf delta is the memory term"
     );
 }
+
+/// 上游对冰→汽（升华）不分馏（`material_craig_gordon_evap_ratio` 的 `from_ice` 提前返回）。
+#[test]
+fn ice_evaporation_keeps_the_source_ratio() {
+    let physics = TracerPhysics {
+        fractionation: true,
+        ..TracerPhysics::default()
+    };
+    let tracer = isotope("O18", RSMOW_18O);
+    let source = RSMOW_18O * 0.99;
+    let from_ice =
+        physics.craig_gordon_evap_ratio(&tracer, source, RSMOW_18O * 0.995, 260.0, 0.9, 1.02, true);
+    assert_eq!(from_ice, source);
+    let liquid = physics.craig_gordon_evap_ratio(
+        &tracer,
+        source,
+        RSMOW_18O * 0.995,
+        260.0,
+        0.9,
+        1.02,
+        false,
+    );
+    assert_ne!(liquid, source, "liquid evaporation must still fractionate");
+}

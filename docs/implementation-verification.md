@@ -42276,3 +42276,45 @@ NSS 闸门修好后，host 一致一步对照里只剩 11 个 material 变量有
 不是 history 的 δ 定义或水分母。下一步：在同一 patch 上对读蒸发端元
 （`material_craig_gordon_evap_ratio` / Rust `craig_gordon_evap_ratio`、动力学阻力与
 `a_mt_evap` 的记账），定位近零通量下的 3e-4 相对差。
+
+### 有限水池蒸发的精确积分（Gonfiantini 1986，2026-11-01，同轮续）
+
+上一节把剩余 0.42‰ 的蒸发 δ 差归到"示踪物蒸发通量"。逐行对读发现 Rust
+`evap_limit.rs` 仍用**按 10% 池量切的显式子步（最多 80 步）**，而上游早已改成
+对仿射蒸发比值 `R_E = slope*R + offset` 的**精确积分**（干涸池解）：
+
+```
+x = ln(W1/W0), y = (slope-1)x
+R1 = R0 exp(y) + offset x (exp(y)-1)/y
+```
+
+上游注释记录了显式子步的失效：近饱和 `slope ~ 1/(1-h)` 很大，雪融池残余 δ18O
+被推到 -969‰（精确解 -25‰），两种同位素朝相反方向过冲。Rust 这次补齐：
+
+- `TracerPhysics::craig_gordon_evap_affine`：仿射系数（不分馏/冰→汽返回 (1,0)）；
+- `evap_limit.rs` 三个函数改用仿射回调并实现精确积分（保留 `r_max` 上限语义）；
+- evapo.rs / soil_water/common.rs / special_patches.rs 的调用点全部改为仿射回调；
+- 新增 5 个单测（解析解、offset、近饱和不发散、不分馏、r_max 上限）。
+
+**host 逐位一致的一步对照**（同一 Fortran restart，各跑 1 步）：
+
+| 变量 | 修复前 | 修复后 |
+|---|---|---|
+| `f_mt_delta_evap` | 0.42‰ | **9.6e-7‰** |
+| `f_mt_evap_mass` | 1.2e-7 | **2.8e-13** |
+| `f_mt_delta_soilevap` | 0.42‰ | **1.8e-11‰** |
+| `f_mt_conc_soisno` | 5.1e-8 | **5.1e-14** |
+| `f_mt_leaf_delta_e` | 1.7e-6‰ | 1.7e-6‰（不变） |
+
+### 新发现（未修）：多小时链上的叶水 δ 跑飞（2026-11-01，同轮续）
+
+用"每步都从 Fortran 刚写的 restart 起步、只跑 1 步"的 host 重同步链跑 24 步：
+
+- 主 history 差始终 ≤1e-3（host 基本同步）；
+- 夜间（0–3 时）material 差很小；
+- 日出后（第 4 步起）Rust 的 `f_mt_leaf_delta_e` 逐步放大到 **~970‰**，而 Fortran
+  稳定在 **~25‰**；`delta_evap` 差也升到 ~0.3‰。
+
+即：**单步、同一起点**时 NSS 输出一致（上表），但链式推进时 Rust 叶水状态会发散。
+根因尚未定位（下一步：对出现跑飞的小 LAI patch 逐步打印 `prev_delta_b/ploclet/
+leaf_iso_storage` 与 NSS 输出，判断是储量分支还是状态回写）。
