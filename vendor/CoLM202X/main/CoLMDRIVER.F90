@@ -27,12 +27,10 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Namelist, only: DEF_forcing, DEF_URBAN_RUN, DEF_USE_BGC
    USE MOD_Forcing, only: forcmask_pch
    USE MOD_MT_LandPhase, only: mt_resolve_step, mt_lake_step, &
-      mt_wetland_decomp, mt_soil_step, mt_report
+      mt_land_after_bgc, mt_report
    USE MOD_MT_Defs, only: nmts
    USE MOD_SPMD_Task, only: CoLM_stop
    USE MOD_MT_SpecialPatches, only: mt_waterbody_hist_sample
-   ! Reads the BGC leaching flux without changing BGC physics (see module).
-   USE MOD_MT_NitrogenLeaching, only: mt_bgc_n_leaching
 #ifdef HYPERSPECTRAL
   USE MOD_HighRes_Parameters
 #endif
@@ -239,14 +237,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
             !
             CALL bgc_driver (i,idate(1:3),deltim, patchlatr(i)*180/PI,patchlonr(i)*180/PI)
          ENDIF
-         CALL mt_wetland_decomp (i, deltim)
-         CALL mt_soil_step (istep_local, i, idate, deltim)
-#ifdef BGC
-         ! Book the BGC mineral-N leaching loss as an external solute input.
-         ! BGC physics is untouched; this only reads the flux it already
-         ! removed from sminn/smin_no3 and adds it to the runoff hand-off.
-         CALL mt_bgc_n_leaching (i, patchtype(i), deltim)
-#endif
+         CALL mt_land_after_bgc (istep_local, i, idate, deltim, patchtype(i))
       ENDIF
 
 

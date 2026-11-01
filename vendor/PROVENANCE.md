@@ -185,3 +185,10 @@ vendor 的 Fortran 已随之更新；Rust 引擎此前还写旧名，本轮改�
 
 验证：三站点黄金在切 facade 后仍 `within tolerance`（127 变量，tier3=0）；
 default/latlon/crop 三预设全部构建成功。
+
+## 2026-11-01：CoLMDRIVER 切到 mt_land_after_bgc facade
+
+在 `MOD_MT_LandPhase` 里补上游 4c 的 `mt_land_after_bgc` 入口（内部仍是桌面版的
+`mt_wetland_decomp` → `mt_soil_step` → 运行期 `IF (DEF_USE_BGC) CALL mt_bgc_n_leaching`，
+BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材料调用改走这个 facade；
+`mt_lake_step` 仍沿用桌面的 step 解析方式。三站点黄金仍 within tolerance。

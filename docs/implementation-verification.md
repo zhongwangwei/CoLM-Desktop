@@ -42610,3 +42610,12 @@ tier-check 之前不会报漏项）。
 - **剩余**：宿主圈其余 13 个文件（CoLMDRIVER/CoLMMAIN/Hist*/Leaf*/Thermal/PhaseChange/
   Ground*/SoilSnowHydrology/Hydro_SoilWater/MKSRFDATA/RegionClip）仍需一次性改写；
   `MOD_MT_LandPhase` 等材料模块目前仍是桌面版，`mt_land_after_bgc` 等上游新入口尚未接。
+
+### CoLMDRIVER 的 mt_land_after_bgc 迁移（round 2，同日）
+
+在 `MOD_MT_LandPhase` 增加上游 4c 的 `mt_land_after_bgc(istep_in, ipatch, idate, deltim,
+patchtype)` facade：内部顺序与桌面原 driver 完全相同（`mt_wetland_decomp` → `mt_soil_step`
+→ BGC 矿质氮淋失记账），BGC 判断保持 `IF (DEF_USE_BGC)` 运行期开关。`CoLMDRIVER` 的三处
+逐步调用合并为一次 facade 调用，`mt_lake_step` 继续用桌面的 `mt_resolve_step` 结果。
+三站点黄金仍 `127 variables within tolerance`。下一步是把 `CoLMMAIN` 的宿主-水/热/冠层
+调用改到上游 facade 类型（`water_diag`/`thermal_diag`/`canopy_diag`）。

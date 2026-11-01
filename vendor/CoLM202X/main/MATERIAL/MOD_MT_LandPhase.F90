@@ -56,6 +56,7 @@ MODULE MOD_MT_LandPhase
    !    these delegate to the methane family ------------------
    PUBLIC :: mt_resolve_step, mt_lake_step, mt_wetland_decomp
    PUBLIC :: mt_soil_step, mt_report
+   PUBLIC :: mt_land_after_bgc
 
    ! -- Acc-flux: called from MOD_Vars_1DAccFluxes -----------------------
    PUBLIC :: mt_flush_acc_fluxes, mt_accumulate_fluxes
@@ -311,6 +312,27 @@ CONTAINS
       CALL material_lifecycle_soil_step (istep_local, ipatch, idate, deltim)
 
    END SUBROUTINE mt_soil_step
+
+   ! BGC 之后的材料步（上游 4c 的 CoLMDRIVER facade 入口）：湿地分解 →
+   ! 土壤材料步 → 可选的 BGC 矿质氮淋失记账。桌面版 BGC 是运行期开关，
+   ! 这里用 IF (DEF_USE_BGC) 而不是编译期守卫。
+   SUBROUTINE mt_land_after_bgc (istep_in, ipatch, idate, deltim, patchtype)
+
+      USE MOD_Namelist, only: DEF_USE_BGC
+      USE MOD_MT_NitrogenLeaching, only: mt_bgc_n_leaching
+
+      IMPLICIT NONE
+      integer, intent(in), optional :: istep_in
+      integer, intent(in) :: ipatch, idate(3), patchtype
+      real(r8), intent(in) :: deltim
+      integer :: istep_local
+
+      CALL mt_resolve_step (istep_in, istep_local)
+      CALL mt_wetland_decomp (ipatch, deltim)
+      CALL mt_soil_step (istep_local, ipatch, idate, deltim)
+      IF (DEF_USE_BGC) CALL mt_bgc_n_leaching (ipatch, patchtype, deltim)
+
+   END SUBROUTINE mt_land_after_bgc
 
    SUBROUTINE mt_report ()
 
