@@ -42728,3 +42728,34 @@ GroundFluxes/Hydro 的候选版本，除已补回的 `DEF_VEG_SNOW` 冠层雨雪
 TOPMODEL/SimpleVIC 参数、qcharge、frost 重定位、BGC 分解、history 无样本、积雪补雪、
 水力/含水层交换等均在 vendor 宿主层保留并由三站点黄金与 Rust 对拍守住；新增的
 `f_frcsat` 近饱和病态修正同时覆盖两个引擎。
+
+### Rust↔Fortran 在湿/雪算例的 35/76 项差异：逐分子定位（2026-11-02）
+
+**问题**：`#84` 后站点黄金的 Rust-vs-Fortran 月窗口 tier2 外为 `CN-Cng 2 / CN-Cng-wet 35 /
+US-NR1-snow 76`。这轮把两个算例都换成 `DEF_HIST_FREQ = 'TIMESTEP'`（4 天，192 步，同一份
+Fortran restart/const），逐记录**逐位**比两引擎，并给 Fortran `MOD_Thermal` 与 Rust
+`root_uptake` 加了前 5 次调用的 `eroot` 输入/输出打点。
+
+**结果**：
+
+| 算例 | 首个逐位差异 | 首个非 `f_qinfl` 差异 | 内容 |
+|---|---|---|---|
+| CN-Cng-wet | 第 2 步，仅 `f_qinfl` | **第 4 步（02:00）** | `f_rstfacsun/rstfacsha` 相对差 ~3e-14、`f_etr` 1e-16：PHS 胁迫链的 1 ULP |
+| US-NR1-snow | 第 0 步，仅 `f_qinfl` | **第 12 步（06:00 日出）** | `f_sr/f_sabg/f_sabvsha` 各 1 ULP（~1e-16 相对） |
+
+- 两个算例在前 3 步（wet）/前 11 步（snow）**除了已知的 `f_qinfl` 之外全部逐位相同**；
+  8 步和 48 步窗口的整份 history 也只剩 `f_qinfl` 有差异；
+- `eroot` 打点显示第 1~2 次调用的输入数组与输出 `rstfac=1.0000000001`、`etrc=2.0000000002e-4`
+  在两侧**逐位相同**，所以 wet 的分叉不在 `eroot` 本身，而在其下游的
+  `PlantHydraulicStress_twoleaf` 迭代（`rstfac` 随后被 PHS 的 `gssun/gs0sun` 改写）；
+- snow 的种子在日出第一个非零短波记录上，1 ULP 的 `f_sr` 经反照率/温度链放大。
+
+**结论**（与文档里已定的 VSF Newton 收敛路径差同一性质）：月窗口的 35/76 项不是参数、
+分支或公式错误，而是**第 4/12 步的 1 ULP 种子经植物水力/辐射-温度阈值链放大**的结果。
+第 4 步的 `rstfac` 两侧都≈1.0、`f_etr` 两侧都是 1e-12 量级，属于 tier2 迭代量应有的
+差异；把月窗口压到 0 项需要逐位复刻 PHS Newton 与短波链的每次浮点运算（含 libm 与
+容差比较），收益递减且不符合仓库的 tier2 政策（迭代量以迭代计数/回退次数为准）。
+
+**给后续的判据**：跨引擎对齐应看"首个分歧步 + 迭代/回退计数"，而不是月窗口 tier2 项数；
+若要进一步缩小，优先方向是 snow 日出短波链（`coszen`/`solad`/反照率）与 wet 的 PHS
+`rstfac` 链，而不是调容差。1 步窗口（此前记录 127 变量全过）与 4 天逐位对比是有效证据。
