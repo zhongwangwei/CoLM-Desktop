@@ -13,6 +13,7 @@ use super::column::{self, ColumnInput, ColumnResult, ComponentState, LakeHost, L
 use super::config::{MethaneParameters, COMP_RICE, COMP_SOIL};
 use super::physics::{self, sn, MAXSNL, NL_SOIL, SOISNO, SPVAL};
 use crate::bgc_state::BgcState;
+use crate::material::MAX_SNOW_LAYERS;
 
 /// 一个 patch 的甲烷状态（续跑量 + 最近一步的诊断）。
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +125,9 @@ pub struct HostInputs<'a> {
     /// 湖泊 patch 的湖层与风；其余 patch 为 `None`。
     pub lake: Option<LakeHost<'a>>,
     pub dynamic_wetland: bool,
+    /// 宿主每步维护的雪层厚度 `dz_sno`（槽位 `sn(j)`）。甲烷的雪层空气比例
+    /// 必须用真实层厚，不能按各层质量把 `snowdp` 摊成均匀密度（upstream-bugs #81）。
+    pub snow_layer_thickness_m: [f64; MAX_SNOW_LAYERS],
 }
 
 /// `methane_soisno_geometry`：土层用静态深度，雪层厚度按各层质量分配 `snowdp`。
@@ -132,9 +136,8 @@ pub fn soisno_geometry(
     site: &MethaneSite,
     wliq: &[f64; SOISNO],
     wice: &[f64; SOISNO],
-    snowdp: f64,
+    snow_layer_thickness_m: &[f64; MAX_SNOW_LAYERS],
 ) -> (i32, [f64; SOISNO], [f64; SOISNO], [f64; SOISNO + 1]) {
-    use physics::{DENH2O, DENICE};
     let mut z = [0.0; SOISNO];
     let mut dz = [0.0; SOISNO];
     let mut zi = [0.0; SOISNO + 1];
@@ -155,20 +158,10 @@ pub fn soisno_geometry(
     }
     let lb = snl + 1;
     if snl < 0 {
-        let mut total = 0.0;
+        // 用宿主维护的真实 `dz_sno`；旧实现按质量比例摊 `snowdp`，冰壳与松雪
+        // 并存时各层空气比例相同，甲烷扩散的相选择（气相/液相）会整体错。
         for j in (lb..=0).rev() {
-            total += (wliq[sn(j)] + wice[sn(j)]).max(0.0);
-        }
-        for j in (lb..=0).rev() {
-            let mass = (wliq[sn(j)] + wice[sn(j)]).max(0.0);
-            let depth = if snowdp > 0.0 && total > 0.0 {
-                snowdp * mass / total
-            } else if mass > 0.0 {
-                wliq[sn(j)] / DENH2O + wice[sn(j)] / DENICE
-            } else {
-                0.0
-            };
-            dz[sn(j)] = depth.max(1.0e-12);
+            dz[sn(j)] = snow_layer_thickness_m[sn(j)].max(1.0e-12);
             z[sn(j)] = zi[zi_at(j)] - 0.5 * dz[sn(j)];
             zi[zi_at(j - 1)] = zi[zi_at(j)] - dz[sn(j)];
         }
@@ -237,7 +230,12 @@ pub fn soil_step(
         return Ok(());
     }
     patch.f_h2osfc = physics::f_h2osfc(&params.hydrology, site.slpratio, host.wdsrf);
-    let (snl, z, dz, zi) = soisno_geometry(site, host.wliq_soisno, host.wice_soisno, host.snowdp);
+    let (snl, z, dz, zi) = soisno_geometry(
+        site,
+        host.wliq_soisno,
+        host.wice_soisno,
+        &host.snow_layer_thickness_m,
+    );
     // `forc_*_eff`。
     let forc_t = sanitize(host.forc_t, |x| x < 150.0 || x > 350.0, 288.15);
     let forc_pbot = sanitize(host.forc_pbot, |x| x <= 0.0, 101325.0);

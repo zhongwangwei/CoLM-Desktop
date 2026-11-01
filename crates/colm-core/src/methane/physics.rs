@@ -293,6 +293,8 @@ pub struct ProdInput<'a> {
     pub microbial_prod_potential: &'a [f64; NL_SOIL],
     /// `biome_f_methane_patch(ipatch)`（`use_biome_f_methane` 且已分配时）。
     pub biome_f_methane: Option<f64>,
+    /// `deltim` [s]：湖泊沉积物一阶分解按 `1 - exp(-rate*dt)` 扣库存（upstream-bugs #82）。
+    pub deltim: f64,
 }
 
 /// `methane_prod` 的输出（mol/m3/s）。
@@ -339,14 +341,16 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
             continue;
         }
         if i.patchtype == 4 && m.allowlakeprod {
-            let mut base = m.lake_decomp_fact
-                * m.cnscalefactor
-                * i.lake_soilc[k].max(0.0)
-                * dz(k)
-                * q10lake_eff.lpow((t(k) - m.q10lakebase) / 10.0)
-                / CATOMW;
+            // 一阶分解：dt 内最多扣掉库存的 (1 - exp(-rate*dt))，调参把 k*dt 扫到 1
+            // 以上时不会凭空造碳（upstream-bugs #82）。缺省 rate*dt ~ 8e-8，与线性式
+            // 只差二阶项（实测 ~3e-8 相对）。
+            let stock_mol = i.lake_soilc[k].max(0.0) * dz(k) / CATOMW;
             let freeze = 1.0f64.min(0.0f64.max(t(k) - TFRZ + 1.0));
-            base *= freeze;
+            let rate = m.lake_decomp_fact
+                * m.cnscalefactor
+                * q10lake_eff.lpow((t(k) - m.q10lakebase) / 10.0)
+                * freeze;
+            let base = stock_mol * (1.0 - (-rate * i.deltim).exp()) / i.deltim;
             let fraction = if j > i.jwt {
                 m.f_methane.max(0.0).min(0.5)
             } else {

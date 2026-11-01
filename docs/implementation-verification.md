@@ -42500,3 +42500,20 @@ GUI 后端 592 项通过（9 个进程/端口类环境失败）、前端 1350 �
   4. 重建 `default/latlon/crop` 三预设、重生成表与黄金 provenance，移植
      `tests/material_host_cleanup` 与 `tests/material_naming` 两组检查；
   5. 若上游继续在 4c 之后改，重复上述流程，不要退回整树替换。
+
+## 甲烷两个遗留缺陷的修复（upstream-bugs #81、#82，2026-11-01）
+
+- **#81 雪层厚度**：`MOD_MT_Methane_Impl.F90:methane_soisno_geometry` 原先按各层质量
+  把 `snowdp` 摊成均匀密度，冰壳+松雪并存时 airfrac 全层相同（1 cm 冰壳 + 19 cm 松雪
+  真实 [0.02,0.90]，旧实现 [0.856,0.856]），而甲烷扩散在 `airfrac>0.05` 时走气相、
+  否则液相，差几个数量级。现在直接用宿主时间变量 `dz_sno`（`MOD_Vars_TimeVariables`
+  每步写回、进重启）；Rust 端 `HostInputs` 新增 `snow_layer_thickness_m`，
+  `soisno_geometry` 不再读 `snowdp`，测试用上述 1 cm/19 cm 组合断言 airfrac 两侧与
+  层厚原样保留。
+- **#82 湖泊碳分解上限**：产量改成一阶形式 `库存·(1−e^(−rate·dt))/dt`，`dt` 内分解量
+  不超过库存；`lake_decomp_fact` 调到 `rate·dt≫1` 时不再凭空造碳。缺省参数下
+  `rate·dt≈8e-8`，与原线性式只差二阶项（实测 ~3e-8 相对）。Rust `ProdInput` 增加
+  `deltim`，测试同时钉住「大 k 不超库存」与「缺省退化成线性」。
+- **验证**：`cargo test -p colm-core methane`（14 项，含两条新回归）；`cargo check -p colm-core -p colm-runtime`；
+  两个 Fortran 文件按内核编译选项单编通过（`MOD_MT_Methane_Physics.o`、`MOD_MT_Methane_Impl.o`）。
+  甲烷缺省关闭，所以三个站点黄金与内核缺省行为逐位不变；有积雪/湖泊甲烷算例的数值会变。

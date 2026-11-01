@@ -117,6 +117,18 @@ impl HostArrays {
     }
 }
 
+/// 宿主的 `dz_sno`（雪槽位顺序与 `pack_soisno` 的雪段一致）。甲烷雪层空气比例
+/// 必须用真实层厚（upstream-bugs #81），这里补齐到固定槽位。
+fn snow_layer_thickness(
+    state: &colm_core::StandardLctSnowSoilState,
+) -> [f64; colm_core::material::MAX_SNOW_LAYERS] {
+    let mut thickness = [0.0; colm_core::material::MAX_SNOW_LAYERS];
+    for (slot, value) in thickness.iter_mut().zip(state.snow.thickness_m.iter()) {
+        *slot = *value;
+    }
+    thickness
+}
+
 /// [`HostInputs`] 的其余标量。
 #[allow(clippy::too_many_arguments)]
 pub fn host_inputs<'a>(
@@ -158,6 +170,7 @@ pub fn host_inputs<'a>(
         pft,
         lake: None,
         dynamic_wetland,
+        snow_layer_thickness_m: snow_layer_thickness(state),
     }
 }
 
@@ -269,6 +282,7 @@ pub fn lake_host_inputs<'a>(
             forc_vs: forcing.northward_wind_m_s,
         }),
         dynamic_wetland,
+        snow_layer_thickness_m: snow_layer_thickness(state),
     })
 }
 

@@ -15,7 +15,7 @@ MODULE MOD_MT_Methane_Impl
    USE MOD_Vars_TimeInvariants, only: patchtype, patchclass, patchlonr, patchlatr, &
       slpratio, fsatmax, fsatdcf, lakedepth, dz_lake, bsw, porsl
    USE MOD_Vars_TimeVariables, only: t_soisno, t_grnd, wliq_soisno, wice_soisno, &
-      zwt, snowdp, wat, t_lake, lake_icefrac, wdsrf, wetwat, smp, lai, sai, rootr, ustar, fq
+      zwt, snowdp, dz_sno, wat, t_lake, lake_icefrac, wdsrf, wetwat, smp, lai, sai, rootr, ustar, fq
    USE MOD_Vars_1DForcing, only: forc_t, forc_pbot, forc_po2m, forc_pco2m, &
       forc_us, forc_vs
    USE MOD_Vars_1DFluxes, only: rsur, etr, frcsat
@@ -200,14 +200,12 @@ CONTAINS
       real(r8), intent(out) :: zi_soisno_m(maxsnl:nl_soil)
 
       integer  :: j_meth
-      real(r8) :: snow_mass_total_m
-      real(r8) :: snow_layer_mass_m
-      real(r8) :: snow_layer_depth_m
 
-      ! CoLMMAIN keeps soil+snow geometry as local work arrays, while
-      ! CoLMDRIVER only has persistent soil temperatures/water masses.
-      ! Reconstruct the geometry needed by the methane snow/soil diffusion
-      ! wrapper from persistent snow water state plus the canonical soil grid.
+      ! 雪层厚度用宿主每步维护的 `dz_sno`（时间变量、进重启）。旧实现按
+      ! 各层质量比例把 `snowdp` 摊成均匀密度，冰壳与松雪并存时空气比例
+      ! 全错（例如冰壳 1 cm + 松雪 19 cm，真实 [0.02, 0.90] 会被摊成
+      ! [0.856, 0.856]），而甲烷扩散在 airfrac>0.05 时走气相、否则液相，
+      ! 两者差几个数量级。见 upstream-bugs 第 81 条。
       z_soisno_m(maxsnl+1:0)  = 0._r8
       dz_soisno_m(maxsnl+1:0) = 0._r8
       zi_soisno_m(maxsnl:0)   = 0._r8
@@ -227,23 +225,8 @@ CONTAINS
       lb = snl_loc + 1
 
       IF (snl_loc < 0) THEN
-         snow_mass_total_m = 0._r8
          DO j_meth = 0, lb, -1
-            snow_mass_total_m = snow_mass_total_m + &
-               max(wliq_soisno(j_meth,ipatch) + wice_soisno(j_meth,ipatch), 0._r8)
-         ENDDO
-
-         DO j_meth = 0, lb, -1
-            snow_layer_mass_m = max(wliq_soisno(j_meth,ipatch) + wice_soisno(j_meth,ipatch), 0._r8)
-            IF (snowdp(ipatch) > 0._r8 .and. snow_mass_total_m > 0._r8) THEN
-               snow_layer_depth_m = snowdp(ipatch) * snow_layer_mass_m / snow_mass_total_m
-            ELSEIF (snow_layer_mass_m > 0._r8) THEN
-               snow_layer_depth_m = wliq_soisno(j_meth,ipatch)/denh2o + &
-                  wice_soisno(j_meth,ipatch)/denice
-            ELSE
-               snow_layer_depth_m = 0._r8
-            ENDIF
-            dz_soisno_m(j_meth) = max(snow_layer_depth_m, 1.e-12_r8)
+            dz_soisno_m(j_meth) = max(dz_sno(j_meth,ipatch), 1.e-12_r8)
             z_soisno_m(j_meth) = zi_soisno_m(j_meth) - 0.5_r8*dz_soisno_m(j_meth)
             zi_soisno_m(j_meth-1) = zi_soisno_m(j_meth) - dz_soisno_m(j_meth)
          ENDDO

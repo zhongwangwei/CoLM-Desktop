@@ -773,7 +773,7 @@
   改续跑格式，老续跑文件就读不进来了。新增单测 `bedload_scales_with_the_share_of_each_flow_direction`。
 - **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`401efae9`）。
 
-### 81. 甲烷模块按"均匀密度"重建雪层厚度——未修
+### 81. 甲烷模块按"均匀密度"重建雪层厚度——已修
 
 - **位置**：`main/TRACER/MOD_Tracer_Reactive_Methane_Impl.F90:240-256`（`dz = snowdp × 本层质量 / 总质量`）；
   用到它的是 `MOD_Tracer_Reactive_Methane_Physics.F90:3105-3118` 的雪层空气比例
@@ -783,10 +783,13 @@
 - **影响**：`airfrac > 0.05` 时用 Millington–Quirk 气相扩散，否则用液相扩散，两者差几个数量级。
   冰壳与松雪并存时（例如冰壳 1 cm、松雪 19 cm），真实空气比例 [0.02, 0.90] 重建后变成 [0.856, 0.856]：
   冰壳本该是扩散屏障，却按松雪算。审查报告里的数字只在这个层厚组合下成立，两层等厚时是 0.46。
-- **现状**：记录在案，待维护者决定。要改得把 `dz_sno` 传进甲烷 driver，vendor 与 Rust 同步。
-  有积雪的甲烷算例结果会变，属于物理改动。
+- **修复**（第 728 轮）：`methane_soisno_geometry` 直接用宿主时间变量 `dz_sno(lb:0,ipatch)`（进重启、
+  `CoLMMAIN` 每步写回）填雪层厚度，不再按质量摊 `snowdp`；Rust `soisno_geometry` 收
+  `HostInputs::snow_layer_thickness_m`（`RuntimeSnowColumn::thickness_m` 补齐到雪槽位），
+  `methane_snow_geometry_uses_the_host_layer_thickness` 用 1 cm 冰壳 + 19 cm 松雪钉住
+  airfrac 两侧（<0.1 / >0.8）。只改甲烷 + 有雪算例；缺省（甲烷关）逐位不变。
 
-### 82. 湖泊碳分解产量没有用库存设上限——未修
+### 82. 湖泊碳分解产量没有用库存设上限——已修
 
 - **位置**：`MOD_Tracer_Reactive_Methane_Physics.F90:1965-1984`（`base_decomp = lake_decomp_fact·cnscalefactor·C·dz·q10因子·freeze/catomw`，
   线性，不是指数衰减）；`:1583-1586` 事后只做 `lake_soilc = max(0, C − (CH4+CO2)·deltim·catomw)`。
@@ -794,8 +797,11 @@
 - **影响**：`k·dt·Q10 因子 > 1` 时凭空造碳。例如 k = 1e-3 s⁻¹、dt = 1800 s、C = 100 gC/m³ 时，产出 180、库存只扣 100，多出 80。
   缺省 `lake_decomp_fact = 9e-11`，`k·dt ≈ 1.6e-7`，实际不会触发；但校验只查非负
   （`MOD_Tracer_Reactive_Methane_Const.F90:1005`，Rust `methane/config.rs` 同），参数调优扫到大值时会进这个区间。
-- **现状**：记录在案，待维护者决定。可选做法有两种：一是给 `lake_decomp_fact` 加上限，让 `k·dt` 不超过 1；
-  二是把分解改成 `C·(1−exp(−k·dt))`。后者会改变缺省参数下的数值（差在 1e-14 量级），vendor 与 Rust 同步。
+- **修复**（第 728 轮，维护者选指数式）：`base_decomp = 库存·(1−e^(−rate·dt))/dt`，rate =
+  `lake_decomp_fact·cnscalefactor·Q10^((T−q10lakebase)/10)·freeze`。`dt` 内分解量 ≤ 库存，
+  `k·dt>1` 不再凭空造碳；缺省 `rate·dt≈8e-8`，与原线性式差二阶项（实测 ~3e-8 相对）。
+  Rust `physics::prod` 传 `ProdInput::deltim`；`lake_decomposition_never_exceeds_the_sediment_stock`
+  钉住「大 k 不超库存」与「缺省近似线性」两条。
 
 ### 83. `DEF_TRACER_OPEN_WATER_KINETIC` 的别名比声明长度长——已修
 

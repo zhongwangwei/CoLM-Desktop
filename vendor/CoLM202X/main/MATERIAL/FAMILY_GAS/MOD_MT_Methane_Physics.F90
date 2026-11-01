@@ -1938,6 +1938,8 @@ contains
 
 		real(r8) :: sif              ! (unitless) ratio applied to sat. prod. to account for seasonal inundation
 			real(r8) :: q10lake_eff      ! lake Q10 for sediment carbon decomposition
+			real(r8) :: carbon_stock_mol ! lake sediment carbon stock [mol C/m2]
+			real(r8) :: decomp_rate      ! first-order lake decomposition rate [1/s]
 			real(r8) :: lake_ch4_fraction
 			real(r8) :: carbon_decomp_depth
 			real(r8) :: legacy_methane_prod_depth
@@ -1988,11 +1990,15 @@ contains
 				cycle
 			endif
 			if (patchtype == 4 .and. DEF_METHANE%allowlakeprod) then
-				base_decomp = DEF_METHANE%lake_decomp_fact * DEF_METHANE%cnscalefactor * &
-					max(lake_soilc(j), 0._r8) * dz_soisno(j) * &
-					q10lake_eff**((t_soisno(j) - DEF_METHANE%q10lakebase) / 10._r8) / catomw
+				! 一阶分解：dt 内最多分解库存的 (1 - exp(-rate*dt))，所以调参把
+				! k*dt 扫大到 1 以上时也不会凭空造碳。缺省参数下 rate*dt ~ 8e-8，
+				! 与原来的线性产量只差二阶项（实测 ~3e-8 相对）。
+				carbon_stock_mol = max(lake_soilc(j), 0._r8) * dz_soisno(j) / catomw
 				freeze_factor = min(1._r8, max(0._r8, t_soisno(j) - tfrz + 1._r8))
-				base_decomp = base_decomp * freeze_factor
+				decomp_rate = DEF_METHANE%lake_decomp_fact * DEF_METHANE%cnscalefactor * &
+					q10lake_eff**((t_soisno(j) - DEF_METHANE%q10lakebase) / 10._r8) * &
+					freeze_factor
+				base_decomp = carbon_stock_mol * (1._r8 - exp(-decomp_rate*deltim)) / deltim
 				if (j > jwt) then
 					! Keep the anaerobic carbon split stoichiometrically bounded:
 					! 2CH2O -> CH4 + CO2 implies f_ch4 <= 0.5 of decomposed C.

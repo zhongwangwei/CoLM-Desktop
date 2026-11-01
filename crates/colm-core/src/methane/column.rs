@@ -692,6 +692,7 @@ pub fn methane(
                 lake_soilc: i.lake_soilc,
                 microbial_prod_potential: &microbial_zero,
                 biome_f_methane: i.biome_f_methane,
+                deltim,
             },
         );
         let (oxid, o2_oxid) = physics::oxid(
