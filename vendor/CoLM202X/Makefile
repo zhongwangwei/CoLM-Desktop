@@ -638,7 +638,7 @@ $(OBJS_POST1): | mkdir_build
 $(OBJS_POST2): | mkdir_build
 $(OBJS_POST3): | mkdir_build
 $(OBJS_POST4): | mkdir_build
-CoLM.o: MOD_CaMa_colmCaMa.o MOD_Catch_LateralFlow.o MOD_CheckEquilibrium.o MOD_DA_Main.o MOD_Forcing.o MOD_Grid_RiverLakeFlow.o MOD_Hist.o MOD_HistAccRestart.o MOD_HistWriteBack.o MOD_LightningData.o MOD_Lulcc_Driver.o MOD_MT_HostFixes.o MOD_MT_LandPhase.o MOD_Ozone.o MOD_ParameterOptimization.o MOD_Vars_1DAccFluxes.o MOD_Vars_2DForcing.o
+CoLM.o: MOD_CaMa_colmCaMa.o MOD_Catch_LateralFlow.o MOD_CheckEquilibrium.o MOD_DA_Main.o MOD_Forcing.o MOD_Grid_RiverLakeFlow.o MOD_Hist.o MOD_HistWriteBack.o MOD_LightningData.o MOD_Lulcc_Driver.o MOD_MT_Runtime.o MOD_Ozone.o MOD_ParameterOptimization.o MOD_Vars_1DAccFluxes.o MOD_Vars_2DForcing.o
 CoLMDRIVER.o: MOD_AssimStomataConductance.o MOD_Forcing.o MOD_Grid_RiverLakeFlow.o MOD_MT_LandPhase.o MOD_MT_SpecialPatches.o
 CoLMMAIN.o: MOD_CaMa_colmCaMa.o MOD_Glacier.o MOD_Grid_RiverLakeFlow.o MOD_Irrigation.o MOD_Lake.o MOD_LeafInterception.o MOD_MT_Hist.o MOD_MT_LandPhase.o MOD_MT_RiverLakeCoupling.o MOD_MT_SpecialPatches.o MOD_NetSolar.o MOD_NetSolar_Hyper.o MOD_NewSnow.o MOD_RainSnowTemp.o MOD_SimpleOcean.o MOD_SnowLayersCombineDivide.o MOD_SoilSnowHydrology.o MOD_Thermal.o
 CoLMMAIN_Urban.o: MOD_Lake.o MOD_LeafInterception.o MOD_NewSnow.o MOD_RainSnowTemp.o MOD_SnowLayersCombineDivide.o MOD_Urban_Hydrology.o MOD_Urban_LUCY.o MOD_Urban_NetSolar.o MOD_Urban_Thermal.o
@@ -665,7 +665,7 @@ MOD_Catch_WriteParameters.o: MOD_Catch_SubsurfaceFlow.o
 MOD_CatchmentDataReadin.o: MOD_Block.o MOD_DataType.o MOD_Grid.o MOD_NetCDFSerial.o MOD_SPMD_Task.o MOD_Utils.o
 MOD_CheckEquilibrium.o: MOD_Forcing.o
 MOD_Const_LC.o: MOD_Namelist.o MOD_Precision.o MOD_Vars_Global.o
-MOD_Const_PFT.o: MOD_Namelist.o MOD_Precision.o MOD_TimeManager.o MOD_Vars_Global.o
+MOD_Const_PFT.o: MOD_Const_LC.o MOD_Namelist.o MOD_Precision.o MOD_TimeManager.o MOD_Vars_Global.o
 MOD_Const_Physical.o: MOD_Precision.o
 MOD_CropReadin.o: MOD_Vars_TimeInvariants.o MOD_Vars_TimeVariables.o
 MOD_DA_Main.o: MOD_DA_Ensemble.o MOD_DA_SM.o MOD_DA_TWS.o
@@ -726,9 +726,11 @@ MOD_MT_Evapo.o: MOD_MT_EvapLimit.o MOD_MT_Forcing.o MOD_MT_Frac.o MOD_MT_Solute.
 MOD_MT_Forcing.o: MOD_MT_ForcingInput.o MOD_MT_Frac.o MOD_MT_Providers.o MOD_MT_Vars.o MOD_UserSpecifiedForcing.o MOD_Vars_1DForcing.o
 MOD_MT_Frac.o: MOD_MT_Isotope_Registry.o MOD_MT_Providers.o
 MOD_MT_Hist.o: MOD_HistGridded.o MOD_HistSingle.o MOD_HistVector.o MOD_Vars_1DAccFluxes.o
+MOD_MT_HistoryRestart.o: MOD_MT_HostHistory.o MOD_MT_Vars.o
 MOD_MT_HostFixes.o: MOD_HistGridded.o
 MOD_MT_Isotope_HDO.o: MOD_MT_Isotope_Registry.o
 MOD_MT_Isotope_O18.o: MOD_MT_Isotope_Registry.o
+MOD_MT_LandWork.o: MOD_MT_HydroDiagnostics.o MOD_MT_ThermalDiagnostics.o
 MOD_MT_Lulcc.o: MOD_Lulcc_TransferTraceReadin.o MOD_Lulcc_Vars_TimeInvariants.o MOD_Lulcc_Vars_TimeVariables.o
 MOD_MT_Methane.o: MOD_MT_Methane_AccFlux.o MOD_MT_Methane_GIEMS.o MOD_MT_Methane_Hist.o MOD_MT_Methane_Impl.o MOD_MT_Methane_Microbes.o MOD_MT_Methane_Physics.o MOD_MT_Methane_State.o MOD_MT_Methane_VegOverride.o MOD_MT_Methane_WetlandBGC.o MOD_MT_Methane_pH.o
 MOD_MT_Methane_AccFlux.o: MOD_MT_Methane_BgcLink.o MOD_MT_Methane_Microbes.o MOD_MT_Methane_State.o
@@ -746,11 +748,14 @@ MOD_MT_Precip.o: MOD_MT_Forcing.o MOD_MT_Solute.o MOD_MT_Vars.o
 MOD_MT_Providers.o: MOD_MT_Isotope_HDO.o MOD_MT_Isotope_O18.o
 MOD_MT_Rest.o: MOD_MT_Forcing.o MOD_MT_Lifecycle.o MOD_MT_Solute.o MOD_MT_Vars.o MOD_Vars_TimeInvariants.o
 MOD_MT_RiverLake.o: MOD_Grid_Reservoir.o MOD_Grid_RiverLakeHistRoute.o MOD_Grid_RiverLakeHistState.o MOD_Grid_RiverLakeLevee.o MOD_Grid_RiverLakeNetwork.o MOD_Grid_RiverLakeTimeVars.o MOD_MT_NitrogenN2O.o MOD_MT_Solute.o MOD_Vector_ReadWrite.o
+MOD_MT_Runtime.o: MOD_Forcing.o MOD_HistAccRestart.o MOD_MT_HostFixes.o MOD_MT_LandPhase.o
 MOD_MT_Sediment.o: MOD_Grid_RiverLakeBifurcation.o MOD_Grid_RiverLakeHistRoute.o MOD_Grid_RiverLakeLevee.o MOD_Grid_RiverLakeNetwork.o MOD_MT_Lifecycle.o MOD_Vector_ReadWrite.o
 MOD_MT_Snow.o: MOD_MT_Solute.o MOD_MT_Vars.o
+MOD_MT_SnowHost.o: MOD_SnowLayersCombineDivide.o
 MOD_MT_SoilInit.o: MOD_MT_Isotope_Registry.o MOD_MT_Providers.o MOD_MT_Vars.o
 MOD_MT_SoilWater.o: MOD_MT_EvapLimit.o MOD_MT_Forcing.o MOD_MT_Frac.o MOD_MT_Isotope_SoilFlow.o MOD_MT_Solute.o MOD_MT_Vars.o
 MOD_MT_SpecialPatches.o: MOD_MT_Hist.o
+MOD_MT_SurfaceData.o: MOD_Block.o
 MOD_MT_Vars.o: MOD_MT_Isotope_Lulcc.o MOD_MT_Solute.o
 MOD_Mesh.o: MOD_Block.o MOD_CatchmentDataReadin.o MOD_DataType.o MOD_Grid.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Pixel.o MOD_Precision.o MOD_SPMD_Task.o MOD_Utils.o
 MOD_MeshFilter.o: MOD_5x5DataReadin.o MOD_AggregationRequestData.o MOD_Block.o MOD_DataType.o MOD_Grid.o MOD_LandElm.o MOD_Mesh.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Precision.o MOD_SPMD_Task.o

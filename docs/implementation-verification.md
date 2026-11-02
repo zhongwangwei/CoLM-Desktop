@@ -43650,3 +43650,33 @@ drift 测试 4 个、core 542 测试全过。
 
 **遗留**：同位素分馏、甲烷、泥沙、BGC 的完整数值冒烟仍建议在格点强迫上另做一轮
 （站点 POINT 强迫不支持材料强迫）；甲烷/BGC 需要各自前处理数据。
+
+## 三向审计脚本化：`xtask audit-vendor`（2026-11-02 收尾轮）
+
+把上一轮的手工三向审计固化成命令，以后合并上游快照前后都能跑：
+
+```bash
+cargo run -p xtask -- audit-vendor --base <基准导入 rev> --fork <同步前桌面 rev> [--head HEAD] [--fail-on-found]
+```
+
+判定规则（`xtask/src/vendor_audit.rs`）：
+
+1. 取 `git diff -U0 base..fork -- vendor/CoLM202X` 的新增行（`fork` = 同步前桌面树）；
+2. 归一化：去掉 `!` 注释、折叠空白、转小写（Fortran 大小写/词间空白不敏感，4c 重构
+   经常只重排空白，第一版审计因此误报过 `MOD_Const_LC` 等）；
+3. 只保留功能行：非空、长度 > 20、不是 `real(/integer/logical/character/use/public/private`
+   声明行；
+4. **三向**判定：该行在 `base` 里已有（上游旧代码被重写）不报；归一化后在 `head`
+   能找到不报；剩下的才报"可能丢了的桌面补丁"；
+5. 重构路径 `TRACER/`（material always-on 已刻意删除）、`MATERIAL/`、`mksrfdata/`
+   不参与比对。
+
+对 2026-11-02 的 4c 合并实测（`--base 1deb5ee2 --fork 'd79ddcbf^'`）：报告 29 行/11 文件；
+**已恢复的 hydro、雪面冰/液分配、runoff/mapping/初值等补丁均不再命中**，剩余命中逐条
+核对后都属于已判定的重构类别（tracer 分支删除、ozone 映射重构、reservoir method 2
+上游已实现、`frcsat_vic` 旧签名哑元、`MJ79` 大小写等）。工具是**triage 入口**，
+不是自动修复器 —— 每次命中的最后判定仍要人工过一遍。
+
+顺带：恢复 hydro 文件后 `USE` 语句变化，`oracle/scripts/gen_fortran_deps.py` 重新生成了
+`vendor/CoLM202X/Makefile` 末尾的 192 行模块依赖块（该生成块由 `xtask` 的
+`fortran_deps` 测试守住）。默认/latlon/crop 三预设重建、三站点黄金、drift 测试全部通过。
