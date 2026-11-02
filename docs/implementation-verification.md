@@ -43689,8 +43689,9 @@ cargo run -p xtask -- audit-vendor --base <基准导入 rev> --fork <同步前�
 |---|---|---|---|---|
 | 同位素 H2_18O | `DEF_USE_ISOTOPE=.true.`、分馏关、aquifer mixing=1 | 完成（无 MT_SIG 硬失败） | 完成 | 32 变量全有；最大差 `f_mt_delta_*` **2.8e-12**（10‰ 量级）、`f_mt_evap_mass` **4.5e-16** |
 | 溶质 CL | `DEF_SOLUTE_NAMES='CL'`（参数用代码默认） | 完成 | 完成 | 24 变量全有；**0 个非零差（逐位一致）** |
+| 同位素 H2_18O（WATER_2014） | `DEF_USE_VariablySaturatedFlow=.false.` + 同上 | 完成（无 MT_SIG） | 完成 | 与 VSF 行相同量级：`f_mt_delta_*` 2.8e-12、`f_mt_evap_mass` 4.5e-16；host 127 变量 within tolerance |
 
-两种配置的 host history 都是 127 变量 within tolerance。结论：同位素与溶质两个材料族
+三种配置的 host history 都是 127 变量 within tolerance；WATER_2014 一行同时验证了材料层 `qinfl_mt` 的非 VSF 分支（该分支保留 4c 的扣减式）。结论：同位素与溶质两个材料族
 在恢复后的宿主补丁上数值自洽；分馏/甲烷/泥沙/BGC 需要格点强迫或各自前处理数据，
 本轮不覆盖（记录在案）。
 
