@@ -1223,10 +1223,17 @@ SUBROUTINE CoLMMAIN ( &
          ! parts taken from it.
          qcharge_mt = (wa - wa_old_mt + etroot_aquifer_mt + &
             max(rsub_source_aquifer_mt, 0._r8)) / max(deltim, mt_tiny)
-         ! The host qinfl also counts the ponding water that the aquifer
-         ! exchange took for roots and baseflow; those parts are booked by
-         ! etroot_surface and rsub_source_surface, so leave them out here.
-         qinfl_mt = qinfl - (etroot_surface_mt + rsub_source_surface_mt) / deltim
+         ! The desktop VSF patch reports qinfl already net of the ponding water
+         ! that the aquifer exchange took for roots and baseflow, so subtracting
+         ! the surface parts again would double-count them (the isotope/water
+         ! material signature check catches this as a flux mismatch).  The
+         ! non-VSF hydrological scheme keeps the upstream definition, where the
+         ! exchange is still inside the ponding change and has to be removed.
+         IF (DEF_USE_VariablySaturatedFlow) THEN
+            qinfl_mt = qinfl
+         ELSE
+            qinfl_mt = qinfl - (etroot_surface_mt + rsub_source_surface_mt) / deltim
+         ENDIF
 
          ! Tracer bookkeeping only; it does not write back to the water state.
          IF (nmts > 0) THEN

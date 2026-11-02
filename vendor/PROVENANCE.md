@@ -221,3 +221,11 @@ BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材
 `MOD_SpatialMapping` 的区域边缘行/列兜底、`MOD_Vars_TimeInvariants` 的
 `fsatmax/fsatdcv/topoweti/alp_twi/chi_twi/mu_twi/vic_*` 清零。
 其余缺失行经逐项核对属 material/tracer 重构或上游新实现，无需恢复。
+
+## 2026-11-02（续三）：恢复宿主补丁后的 MaterialTransport 适配
+
+恢复 `HYDRO/MOD_Hydro_SoilWater` 与 `MOD_SoilSnowHydrology` 的桌面补丁后，
+4c MaterialTransport 的 `qinfl_mt` 仍按 4c 语义再扣一次池水交换，构成双重扣减，
+同位素算例在第 55 步签名检查失败。修法：`CoLMMAIN` 在 `DEF_USE_VariablySaturatedFlow`
+打开时直接用桌面语义的 `qinfl`，非 VSF 保持原式。同位素 11 天两引擎通过，
+material 量差 ≤2.8e-12，三站点黄金数值不变。

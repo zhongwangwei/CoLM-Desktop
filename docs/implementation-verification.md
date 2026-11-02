@@ -43620,3 +43620,33 @@ drift 测试 4 个、core 542 测试全过。
 
 **遗留**：材料运行期族（BGC/同位素/甲烷）在恢复后的宿主补丁上做一次冒烟；
 下一步可把本次三向审计脚本化进 `xtask`，作为以后合并上游的常驻检查。
+
+## 材料运行期族冒烟：恢复宿主补丁后 qinfl_mt 双重扣减的修复（2026-11-02 收尾轮）
+
+按约定对恢复后的宿主补丁做材料族冒烟（CN-Cng + `&nl_colm_material` 开 H2_18O，
+`DEF_MT_AQUIFER_MIXING_WATER_MM=1`、分馏关，11 天 264 条记录）：
+
+- 4c 基线内核（恢复前）：正常完成；
+- 恢复 Fork 宿主补丁后：第 55 步 `MT_SIG hard failure`，
+  `evap_minus_water_R=6.04e-12 > tol=1.01e-12`；
+- 逐步二分：关 PHS 后通过；4c hydro + 投影单独（V2）通过；4c hydro + 池塘入渗记账（V）
+  仍失败 → 根因是 **pond_exchange 改变了 qinfl 的定义**，而材料层仍按 4c 语义再减一次
+  `etroot_surface + rsub_source_surface`。
+
+推导：4c `qinfl = qgtop-(Δdp)/dt`，材料要的"净入渗"= 4c qinfl − 池水被交换拿走的部分；
+桌面补丁后的 `qinfl = qgtop-(Δdp+pond_exchange)/dt` **已经**扣掉了这部分，材料再减就是双重扣减。
+修法（`CoLMMAIN.F90`）：VSF 打开时 `qinfl_mt = qinfl`；非 VSF 保持原式。
+
+**验证**：
+- 同位素算例两引擎都完整跑完（264 条 material 记录，32 个 material 变量名/维一致）；
+- material 数值：`f_mt_evap_mass_H2_18O` 最大差 4.5e-16、`f_mt_delta_*` 最大差 2.8e-12
+  （量级 10‰ 的诊断量）、`f_mt_conc_*` ≤5.6e-18，均属舍入级；
+- host history 127 变量 within tolerance（与材料关闭时一致）；
+- 三站点黄金重生成后**数值逐位不变**（材料关闭路径不受影响，只刷新 manifest）；
+- drift 测试 4 个、core 542 测试、默认/latlon/crop 三预设构建全部通过。
+
+**结论**：材料运行期族在恢复后的宿主物理上重新自洽；这条修复是"恢复 Fork 宿主补丁"
+与"4c MaterialTransport 记账"之间的适配层，不是新的物理改动。
+
+**遗留**：同位素分馏、甲烷、泥沙、BGC 的完整数值冒烟仍建议在格点强迫上另做一轮
+（站点 POINT 强迫不支持材料强迫）；甲烷/BGC 需要各自前处理数据。
