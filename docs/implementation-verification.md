@@ -43109,3 +43109,24 @@ GIMPLE 对齐方式改 Rust 表达式。
 **验证**：`cargo test -p colm-core --lib interception/leaf_temperature/leaf_temperature_pc/pft`
 （11/15/2/19 全过）；`cargo clippy -p colm-core --lib -- -D warnings`；`cargo fmt --all`；
 kernel 干净重建；`golden-run`+`golden-compare` 三站点全过；Rust 对最终黄金 1/35/76。
+
+### 雪窗短波种子再收窄：`netsolar` 分叉来自输入的 1 ULP 反照率（2026-11-02）
+
+按上一节计划给两侧 `netsolar` 出口打探针（雪窗 24 步、同一份初始数据）：
+
+- 前 8 次调用（第 1～8 步）的全部输出逐位相同；
+- **第 9 次调用（2013-04-09 04:00）第一次出现差异：`alb(1,2)` 差 1 ULP**
+  （Fortran `1.11675025996113397e-01` vs Rust `...383e-01`，相对 1.24e-16）；
+- `sabvsun/sabvsha/sabg/sr` 这四项在第 9 步仍是 0（夜间无短波），所以不影响历史；
+  到日出（第 11～12 步）同一份 1 ULP 反照率被乘进 `solv*`/`sr*`/`sab*`，
+  历史才在 record 11/12 露出 1e-14 量级差异——与"雪窗首个非 qinfl 差异在 record 11
+  的 `f_sr/f_sabg/f_sabvsha`"完全吻合。
+
+**结论**：雪窗种子**不在 `netsolar` 内部**，而是传入的**反照率状态**在夜里第 9 步就差了
+1 ULP。下一步探针应移到反照率计算（Fortran `MOD_Albedo` 的 LCT/雪路径 vs Rust
+`radiation.rs` 的 `cold_start_*`/two-stream 反照率）与它的输入（`fsno`、雪龄、
+土壤湿度、`coszen`），确认是哪一步表达式/输入差 1 ULP；本文件前面记录过
+"host 一致一步对照里 `f_alb` 3 个点差 2.2e-16"，本次可能是同一处残余。
+
+**过程卫生**：两侧探针已回滚，kernel 与 Rust 引擎重新构建干净（`DBGNS` 计数 0），
+`CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
