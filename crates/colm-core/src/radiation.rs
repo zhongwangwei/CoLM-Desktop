@@ -777,15 +777,18 @@ pub(crate) fn two_stream(
             let wet_snow_term = wet_snow_fraction * snow_scattering;
             let dry_weight = 1.0 - wet_snow_fraction;
             let old_scattering = scattering;
-            // `scat_new = (1-fwet)*scat + fwet*scat_sno` 的**湿润乘积**进 FMA、
-            // 干燥乘积先舍入：call 14（NIR）的位型证明这一方向。
-            scattering = wet_snow_fraction.contract(snow_scattering, dry_weight * old_scattering);
-            // GIMPLE（`MOD_Albedo.F90:630`）：`(1-fwet)*scat*upscat + fwet*scat_sno*upscat_sno`
-            // 的土壤（scat）乘积进 FMA、湿润项先舍入。
+            // 三处 FMA 方向由**干净参考内核**下的 24 步历史首分歧位置搜索确定
+            // （见 docs/implementation-verification.md 的 FMA 组合搜索一节）：
+            // * `scat_new` 平铺（不融合）；
+            // * `upscat`/`beta0` 的干燥乘积 `(1-fwet)*scat` 进 FMA，湿润项先舍入。
+            // 该组合让 US-NR1-snow 的 24 步 TIMESTEP 历史与 Fortran **逐位一致**
+            // （除已知的近零 `f_qinfl`），而其它组合首分歧在 record 11–14。
+            // 注意：给 Fortran 源码加探针会改变 GCC 的收缩决策，参考历史必须用
+            // 干净内核重新生成，不能用带探针的 build 做判据。
+            scattering = dry_weight * old_scattering + wet_snow_term;
             upward_scattering = (dry_weight * old_scattering)
                 .contract(upward_scattering, wet_snow_term * 0.5)
                 / scattering;
-            // 与 `upscat` 同一形状：`(1-fwet)*scat*beta0` 的第一个乘积进 FMA。
             beta0 = (dry_weight * old_scattering).contract(beta0, wet_snow_term * 0.5) / scattering;
         }
 

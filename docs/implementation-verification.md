@@ -43367,3 +43367,34 @@ within tolerance；本轮只新增本记录（工作树里另有 GUI 的并行�
 **过程卫生**：实验性 FMA 与所有探针已回滚（`radiation.rs`/`surface_optics.rs`/
 `MOD_Albedo.F90`），kernel 与 Rust 引擎干净重建（`DBGT8` 计数 0），core 542 测试通过，
 `CN-Cng` 黄金 127 变量 within tolerance；工作树里另有 GUI 并行改动，未触碰、未提交。
+
+### FMA 组合搜索（干净参考）：雪窗 24 步历史做到逐位一致（2026-11-02）
+
+**方法教训**：上一节"平铺组合会让历史变差"的结论是**错的**——当时对照的 Fortran 历史来自
+**带探针的内核**。给源码加 write/声明会改变 GCC 的收缩决策（同一函数里 FMA 取舍随周边代码变化），
+所以**参考历史必须用干净内核重新生成**；带探针 build 只能用来生成候选，不能当判据。
+
+**重新搜索**：固定 `mix_ground_albedo` 修复，对雪分支三处 FMA
+（scattering / upscat / beta0，各取 平铺、干燥乘积融合、湿润乘积融合）共 27 组，
+每组编译 Rust、跑 24 步 TIMESTEP 雪窗、与**干净内核**的 Fortran 历史比首分歧：
+
+| 组合（scat / upscat / beta0） | 24 步首分歧 | 非 qinfl 差异变量 |
+|---|---|---|
+| **plain / A / A** | **无（999）** | **0** |
+| B / A / A（上一版已提交） | record 14 | 4 |
+| 预修复版（7c421486） | record 11 | 13 |
+| 其余 24 组 | record 11–12 | 1–12 |
+
+即 **`scat_new` 平铺、`upscat` 与 `beta0` 的干燥乘积融合** 是与 Fortran 一致的组合：
+US-NR1-snow 24 步历史除已知的近零 `f_qinfl` 外**全部逐位一致**。
+
+**已应用该组合**。月窗口效果：
+- 雪窗首个非 `qinfl` 分歧：record 11 → **record 17**（`f_alb` 等）；变量数仍 86（后续种子放大）；
+- 湿窗不变（首个非 `qinfl` 仍在 record 236）；
+- 月窗口 tier2 计数仍 1/35/76。
+
+**验证**：`cargo test -p colm-core --lib` 542 通过、fmt/clippy 通过、`CN-Cng` 黄金
+127 变量 within tolerance；kernel 未改（干净版本）。
+
+**下一步**：record 17 的新首分歧（`f_alb/f_assim/...`），以及湿窗 236；继续用
+"干净参考 + 整条历史"作为判据。
