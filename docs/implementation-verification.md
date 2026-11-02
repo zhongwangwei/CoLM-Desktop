@@ -42988,3 +42988,29 @@ wrapper"是否是种子来源。
   为"首个分歧步 + 迭代/回退计数"，不是公式错误；
 - C 参考分支若将来要继续，只能逐位复刻上游宿主运算分组，收益递减；
 - GUI 测试套件与 CI 不在本轮默认工作流内（GUI 后端 `cargo check` 通过）。
+
+### Rust↔Fortran 种子继续定位：地面通量与植物水力输出已逐位相同（2026-11-02 下午）
+
+在"B 基线"上继续追湿窗月窗口 35 项的来源。做法是给两侧同一位置加临时探针
+（`DBGGF`、`DBGPHS`），用同一份 Fortran 初始数据跑 16 步 `TIMESTEP` 湿窗：
+
+1. **GroundFluxes 入口/出口**（Fortran `MOD_Thermal` 调用点 + Rust `ground_fluxes`）：
+   前 8 次调用的输入（`t_grnd/qg/dqgdT/rss/fsno/rhoair/thm/th/thv/qm/ur/z0m/zsno`）
+   **全部逐位相同**；输出（`zol/rib/ustar/tstar/qstar/fm/fh/fq/raw`）
+   **也全部逐位相同**。
+2. **PlantHydraulicStress**（Fortran `MOD_LeafTemperature` 调用点 + Rust
+   `leaf_temperature.rs`）：前 24 次调用的 `rstfacsun/rstfacsha/etrsun/etrsha/gssun/gssha/
+   rootflux(1)/rootflux(nl_soil)` **全部逐位相同**。
+3. 但 16 步历史第一条差异仍在第 3 条记录（第 4 步）：`f_zerr/f_fgrnd/f_lfevpa/f_fsena/
+   f_fsenl/f_rstfacsun/f_tstar/f_zol/f_wdsrf` 等，量级 1e-12～1e-15；整月跑完物理状态
+   （`wliq/t_soisno/zwt/vegwp/wdsrf`）会出现 1e-4～1e-2 的放大差异。
+
+**结论**：种子不在 `GroundFluxes` 和 `PlantHydraulicStress` 两个内核里（都已逐位相同），
+而在它们**下游的组装层**：`LeafTemperature`/`Thermal` 里由前两者结果拼出的
+`zol/tstar/qstar/tref/qref/rstfac` 等诊断，以及 `accumulate_fluxes` 的历史累加表达式；
+15 分钟窗口的 `wdsrf` 1e-15 级差异说明差异确实会反馈进状态。下一步应把探针移到
+`LeafTemperature`/`Thermal` 出口与 `accumulate_fluxes` 入口，定位具体表达式。
+
+**过程卫生**：所有探针已回滚（`git checkout --` 四个文件），三处 kernel/Rust 引擎
+重新构建干净（`strings kernels/default/colm.x | grep -c DBG` = 0），并重跑 `CN-Cng`
+黄金确认 `127 variables within tolerance`；本轮只新增本记录。
