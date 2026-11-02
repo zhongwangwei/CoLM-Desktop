@@ -779,7 +779,8 @@ ENDIF
 
    real(r8) :: err_solver, w_sum, wresi(1:nl_soil)
    real(r8) :: qgtop
-   real(r8) :: mt_wdsrf_pre, mt_wliq1_pre
+   real(r8) :: qgtop_deficit, imperv_surface_loss
+   real(r8) :: imperv_soil_deficit, imperv_liq_loss, imperv_ice_loss
    ! 本地始终编译的 TRACER/物运移分支需要的局部量（上游在本分支里用字面量
    ! 和不展开的写法，合并时声明块被上游版本覆盖，必须补回）。
    real(r8), parameter :: richards_water_tolerance = 1.e-3_r8
@@ -1152,21 +1153,34 @@ IF((patchtype<=1) .or. is_dry_lake &
       wdsrf = max(0., wdsrf)
 
       IF ((.not. is_permeable(1)) .and. (qgtop < 0.)) THEN
-         mt_wdsrf_pre = wdsrf
-         mt_wliq1_pre = wliq_soisno(1)
-         IF (wdsrf > 0) THEN
-            wdsrf = wdsrf + qgtop * deltim
-            IF (wdsrf < 0) THEN
-               wliq_soisno(1) = max(0., wliq_soisno(1) + wdsrf)
-               wdsrf = 0
-            ENDIF
-         ELSE
-            wliq_soisno(1) = max(0., wliq_soisno(1) + qgtop * deltim)
+         qgtop_deficit = -qgtop * deltim
+
+         imperv_surface_loss = min(max(wdsrf, 0._r8), qgtop_deficit)
+         IF (imperv_surface_loss > 0._r8) THEN
+            imperv_evap_wdsrf = imperv_evap_wdsrf + imperv_surface_loss
+            wdsrf = max(0._r8, wdsrf - imperv_surface_loss)
          ENDIF
-         ! The evaporation deficit is taken from ponding water first and then
-         ! from layer-1 liquid water, both clipped at zero by the host.
-         imperv_evap_wdsrf = mt_wdsrf_pre - wdsrf
-         imperv_evap_soil  = mt_wliq1_pre - wliq_soisno(1)
+
+         imperv_soil_deficit = max(qgtop_deficit - imperv_surface_loss, 0._r8)
+         IF (imperv_soil_deficit > 0._r8) THEN
+            imperv_liq_loss = 0._r8
+            imperv_ice_loss = 0._r8
+
+            IF (t_soisno(1) <= tfrz .and. wice_soisno(1) > 0._r8) THEN
+               imperv_ice_loss = min(max(wice_soisno(1), 0._r8), imperv_soil_deficit)
+               imperv_liq_loss = min(max(wliq_soisno(1), 0._r8), &
+                  max(imperv_soil_deficit - imperv_ice_loss, 0._r8))
+            ELSE
+               imperv_liq_loss = min(max(wliq_soisno(1), 0._r8), imperv_soil_deficit)
+               imperv_ice_loss = min(max(wice_soisno(1), 0._r8), &
+                  max(imperv_soil_deficit - imperv_liq_loss, 0._r8))
+            ENDIF
+
+            wliq_soisno(1) = max(0._r8, wliq_soisno(1) - imperv_liq_loss)
+            wice_soisno(1) = max(0._r8, wice_soisno(1) - imperv_ice_loss)
+            imperv_evap_soil = imperv_evap_soil + imperv_liq_loss
+            imperv_subl_soil = imperv_subl_soil + imperv_ice_loss
+         ENDIF
 
          qgtop = 0.
 

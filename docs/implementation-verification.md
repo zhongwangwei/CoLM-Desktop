@@ -43550,3 +43550,35 @@ kernel manifest 记录新源码状态。恢复只改 Fortran 宿主；Rust 代�
 `xm` 求解路径的差异；修好后雪窗应能像干/湿窗一样对齐。
 
 **状态**：HEAD 保持已提交的恢复+黄金刷新（`5d1dddae`）；本轮只新增本记录，未改代码。
+
+## 雪窗定案：第二条被 4c 合并丢失的补丁（不透水表层蒸发亏缺的冰/液分配）(2026-11-02)
+
+上一节把 step95 的液/冰差归到"Rust 侧相变实现"是**错的**。继续做输入/输出探针后确认：
+
+- 两引擎的 `phase_change`（`meltf`）输入逐位相同（`t/liq/ice/fact/brr/hs/fsno/qfros/qsubl/dz/psi0/bsw`），
+  输出也逐位相同（`liq=1.3559647826706405, ice=5.1674564808254697, imelt=2`）；
+- 差异发生在 `WATER_VSF` 里"不透水表层的蒸发亏缺"块：
+  - Rust：冻结（`t<=tfrz` 且 `wice>0`）时**先扣冰再扣液**（fork 语义）→
+    `wice 5.167456→5.033493`；
+  - 当前 vendor：4c 版本只扣液（`wliq 1.355965→1.222001`），**丢了 fork 的冰/液分配补丁**；
+  - 又和 hydro 一样：`git show d79ddcbf^` 的该块有 `imperv_subl_soil` 分配逻辑、
+    当前 HEAD 变成 liquid-only（`imperv_subl_soil` 注释还写着 "always zero"）。
+
+**修复**：把 `MOD_SoilSnowHydrology.F90` 的该块恢复为 4c 合并前的桌面版本
+（接口不变，`imperv_evap_wdsrf/imperv_evap_soil/imperv_subl_soil` 三个输出照旧）。
+
+**实测**：
+
+- 单步隔离（snow step95，同一 Fortran step94 重启）：顶层 `wliq/wice` 从差 0.13396 变成
+  **逐位相同**；
+- 三站点黄金重新生成后，Rust vs 新黄金：**CN-Cng / CN-Cng-wet / US-NR1-snow 全部
+  `within tolerance`（127 变量，tier2 全过）**；
+- 旧黄金 vs 新黄金只有 snow 的 77 个变量变化（干/湿窗黄金未变），说明本补丁只影响
+  冻结+不透水表层路径。
+
+**至此三个站点窗口全部对齐**，此前"残余属 VSF Newton 收敛路径差"的结论对湿窗已修正、
+对雪窗由本补丁解释。剩余工作：对 4c 合并做一次**系统性的 pre-sync↔HEAD 差异审计**
+（不只按注释 marker），找出是否还有同类静默丢失的补丁；材料运行期族冒烟。
+
+**过程卫生**：所有探针（Fortran `DBGPC/DBGVSF`、Rust `DBGPC/DBGVSF/DBGSYNC`）已回滚；
+kernel 三预设重建通过；HEAD 干净（仅 GUI/colm-agent 并行改动未触碰）。

@@ -206,3 +206,10 @@ BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材
 本轮把文件恢复为 `d79ddcbf^` 的桌面版本；接口与 4c 版本兼容，default/latlon/crop 三预设
 构建通过。恢复后 Rust 与 Fortran 的站点对拍为 0/0/77（此前 1/35/76），黄金已按恢复后的
 内核重新生成。细节与证据见 `docs/implementation-verification.md` 同轮小节。
+
+## 2026-11-02（续）：恢复 MOD_SoilSnowHydrology 的不透水表层冰/液分配补丁
+
+与 HYDRO 文件同类的 4c 合并回归：`WATER_VSF` 里"不透水表层蒸发亏缺"块被 4c 版本换成
+只扣液态水，丢了桌面补丁的"冻结时先扣冰再扣液"（以及 `imperv_subl_soil` 记账）。
+恢复为 `d79ddcbf^` 的桌面版本后，单步隔离逐位一致；三站点黄金重生成后 Rust
+全部 within tolerance（127 变量）。细节见 `docs/implementation-verification.md`。
