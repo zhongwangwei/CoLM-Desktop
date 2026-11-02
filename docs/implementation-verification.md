@@ -43014,3 +43014,32 @@ wrapper"是否是种子来源。
 **过程卫生**：所有探针已回滚（`git checkout --` 四个文件），三处 kernel/Rust 引擎
 重新构建干净（`strings kernels/default/colm.x | grep -c DBG` = 0），并重跑 `CN-Cng`
 黄金确认 `127 variables within tolerance`；本轮只新增本记录。
+
+### Rust↔Fortran 种子再收窄：LeafTemperature 出口第 4 步开始分叉（2026-11-02）
+
+在上一轮排掉 `GroundFluxes`（输入/输出前 8 次逐位相同）与
+`PlantHydraulicStress`（输出前 24 次逐位相同）之后，把探针移到两侧
+`LeafTemperature` 的出口，比较 `tl/etr/etrsun/etrsha/gssun/gssha/rst/rstfacsun/
+rstfacsha/fevpl/fsenl`，用同一份初始数据跑湿窗 16 步：
+
+- 第 1～3 次调用（第 1～3 步）：**11 个量全部逐位相同**；
+- 第 4 次调用（第 4 步）：**只有 `tl` 仍相同**，其余开始差：
+  `etr` 3.7e-14、`etrsun/etrsha` 4.9e-14、`gssun/gssha` 3.1e-14、`rst` 3.1e-14、
+  `rstfacsun/sha` 3.1e-14、`fevpl` 7.0e-15、`fsenl` 2.7e-15（相对量级）。
+
+**结论**：种子在 `LeafTemperature` 的**内部迭代**里——最终叶温 `tl` 收敛到同一个值，
+但迭代路径上的 `tlbef`/`dtl`/`rssun`/`gs0sun` 等末位不同，导致由它们派生的
+`etr/gssun/rstfac` 差 1e-14。这与"GroundFluxes/PHS 逐位相同"并不矛盾：两侧在
+第 4 步喂给叶温迭代的边界条件一致，是迭代内部某条能量平衡表达式的分组/融合不同。
+
+**下一步**：在 `LeafTemperature` 内部对第 4 次调用打迭代级探针（`tlbef`、每轮
+`dtl`、`rssun/rssha`、`gs0sun/gs0sha`），定位首个不同的迭代量，再按仓库既有
+GIMPLE 对齐方式改 Rust 表达式。
+
+**过程卫生**：`LeafTemperature` 两侧探针均已回滚，kernel 与 Rust 引擎重新构建干净
+（`strings kernels/default/colm.x | grep -c DBGLT` = 0），重跑 `CN-Cng` 黄金确认
+127 变量 within tolerance；仓库 HEAD 干净。
+
+> 注：本文件早前小节提到的 `/tmp/fusion2`、`/tmp/conv4c-keep` 等临时分支产物属于
+> 可被系统清理的临时目录，本轮已随系统清理消失；C 方案的架构、结论与复现做法都记录
+> 在本文件中，不依赖临时目录。
