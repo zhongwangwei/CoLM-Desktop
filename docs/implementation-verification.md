@@ -43181,3 +43181,32 @@ Fortran `MOD_Albedo:albland` 里 `twostream` 那一支 vs Rust
 
 **过程卫生**：两侧探针与实验性 FMA 均已回滚，kernel 与 Rust 引擎重新构建干净
 （`DBGTS` 计数 0），`CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
+
+### GIMPLE/RTL 取证尝试与 two-stream FMA 的差分验证（2026-11-02）
+
+为确认 `twostream` 雪分支的 FMA 选择，做了两件事：
+
+1. **保留构建树 + GIMPLE dump**：临时复制 `build_kernel.sh`（去掉 trap 删除）并加
+   `COLM_KERNEL_EXTRA_FFLAGS=-fdump-tree-optimized`，在 `/tmp/gimple-keep/build-default`
+   留下完整树与 `.bld/MOD_Albedo.F90.273t.optimized`。**GIMPLE 里没有 fma 语句**——
+   收缩发生在 RTL 展开阶段，GIMPLE 层看不到，所以"读 dump 确认 FMA"这条路在 gfortran 下
+   不成立；改为对 `MOD_Albedo.f90` 单独加 `-fdump-rtl-final` 重新编译，得到
+   `/tmp/MOD_Albedo_rtl.F90.371r.final`（329 条 fma 类指令），但 RTL dump 不带源行号，
+   仍需按常量/结构人工对照，成本高。
+
+2. **差分验证 FMA 假设**：上一节的候选
+   `(dry*scat).contract(upscat, wet*0.5)/scat_new` 在雪窗第一个真实调用上把
+   `upscat/ce/f1/m1/n1/n2/hh7/hh8/albv(1,2)` 全部对齐；进一步看 4 次调用：
+   - call 0、2、3 的 `scat/s1/albv(1,2)` **全部逐位相同**；
+   - **call 1 仍有 2 ULP 的 `scat` 差异**（`0.18332737278476190` vs `...188`），而
+     `scat` 只依赖 lai/sai/叶光学，不依赖这次 FMA ——说明 call 1 有**另一处输入级种子**
+     （很可能上一步 surface optics 写回的 lai/sai 或雪/湿比例）。
+   因此单个 FMA 修复不足以过雪窗，实验性改动未保留（见上一节）。
+
+**结论/下一步**：GIMPLE 层取证不可用、RTL 对照成本高；差分法能确认"某处 FMA"但不能证明
+唯一性。要继续需对 call 1 的输入（`lai/sai/wet_snow_fraction/scat` 依赖量）在两侧
+逐步打点，或接受当前对齐水平（湿窗已从第 4 步推迟到第 236 条记录；雪窗仍 76 项）。
+
+**过程卫生**：临时构建脚本 `_keep_kernel.sh` 已删除；`/tmp/gimple-keep` 等临时取证产物
+在提交后已清理，需要时按上面的命令重新生成；仓库工作树干净；探针/实验改动均已回滚，
+kernel 与 Rust 引擎为干净重建版本。
