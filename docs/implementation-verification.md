@@ -42909,3 +42909,36 @@ staging/累加），其余不变，重新构建并跑三站点：
 `mt_land_snow_normalize` 这些"宿主物理被搬进 material 模块"的 wrapper，以及
 `mt_land_finish_step`（当前已是薄壳）。若替换后仍不变，则逐文件把 adopted 宿主
 换回桌面版本做 bisect，定位到具体表达式顺序差异。
+
+### C 隔离实验第二轮：wrapper 剪枝不可行 + 残余差异归因（2026-11-02）
+
+**尝试**：把 `mt_work%prepare_snow/thermal/save_water` 与 `mt_canopy_lump/split` 在
+`mt_any_enabled()` 为假时直接 RETURN，期望验证"宿主物理被搬进 material 模块的
+wrapper"是否是种子来源。
+
+**结果**：构建通过，但三个算例的 `colm.x` 都在第一步崩溃（segfault）——adopted CoLMMAIN
+在后续调用里仍然使用这些 work 暂存数组（未初始化/未分配），说明这些 wrapper 不是
+"纯簿记"，不能简单剪枝；已还原，融合树回到可运行状态（CN-Cng 0、wet 1、snow 72）。
+
+**静态核对**（vendor 桌面文件 vs 融合树，逐行找"桌面独有的代码"）：
+- `MOD_LeafTemperature`：仅子程序签名不同，**A 组物理块全部在**；
+- `MOD_Thermal/GroundTemperature/PC/PhaseChange`：差异只有诊断参数/API；
+- `MOD_LeafInterception`：桌面版的**逐 PFT 顺序累加**
+  （`gross_rain_tmp = gross_rain_tmp + gross_rain_i*pftfrac(i)` 等 7 个量）
+  在融合树被上游的 `mt_drain_sum%accumulate(mt_canopy_drain, pftfrac(i))`
+  类型化累加器替代——这正是"数学等价、浮点累加顺序/分组可能变化"的典型位置；
+- `MOD_SoilSnowHydrology`/`MOD_Hydro_SoilWater`：桌面独有行都是水/材料诊断参数（API），
+  物理修补主体已搬回。
+
+**结论（C 实验收口）**：
+1. 材料簿记 facade 与 work wrapper 都不是种子来源（前者实测无影响，后者无法剪枝）；
+2. A 组物理块已基本搬齐，残余 1 ULP 更可能来自 adopted 宿主结构里**聚合/调用顺序**
+   的变化（例如 LeafInterception 类型化累加器、诊断 reset/构造、host 调用分组），
+   再被雪/植物水力阈值放大；
+3. 这与"上游自身前后一致"不矛盾：种子只在"上游宿主 + 桌面材料 + 本地补丁"这个
+   融合配置里出现，是 fork 组合差异，不是上游 bug；
+4. 因此 C 的定位保持为**参考分支**：主仓库继续用已验证混合态（B），不重生成黄金。
+
+**归档**：`/tmp/fusion2`（可构建可跑，CN-Cng 0 / wet 1 / snow 72）、
+`/tmp/conv4c-keep`、`/tmp/conv_keep.py`、`/tmp/fix_arg_guards.py`、
+`/tmp/fix_namelist_imports.py`、本文件前面各节。
