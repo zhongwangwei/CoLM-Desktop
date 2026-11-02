@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
 import type { StudyPick } from '../../lib/types';
 import { Button, Input, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import { parameterType, type Descriptor } from './model';
-import { literalNumber } from './ParameterDialog';
+import { literalNumber, typesOf } from './ParameterDialog';
 import { IGBP, PFT, USGS } from './scope-labels';
 
 type TypeDefault = { index: number; value: number | null };
@@ -56,6 +56,7 @@ export default function StudyPicks({
   catalog,
   en,
   disabled,
+  crops = false,
   onChange,
 }: {
   /** 记住选择用：草稿编号或版本的 id#revision。 */
@@ -63,6 +64,7 @@ export default function StudyPicks({
   catalog: Descriptor[];
   en: boolean;
   disabled: boolean;
+  crops?: boolean;
   onChange: (picks: StudyPick[]) => void;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
@@ -70,27 +72,42 @@ export default function StudyPicks({
   const [chosen, setChosen] = useState('');
   const [typeIndex, setTypeIndex] = useState(1);
   const [problem, setProblem] = useState('');
+  const picksRef = useRef(picks);
+  const ownerEpoch = useRef(0);
   useEffect(() => {
+    const epoch = ++ownerEpoch.current;
     const loaded = loadPicks(owner);
+    picksRef.current = loaded;
     setPicks(loaded);
     onChange(loaded);
+    return () => {
+      ownerEpoch.current = epoch + 1;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner]);
   const eligible = catalog.filter((d) => d.calibration_eligible && parameterType(d) !== 'process');
   const descriptor = eligible.find((d) => d.id === chosen);
   const kind = descriptor ? parameterType(descriptor) : 'global';
-  const types =
-    kind === 'igbp' ? IGBP : kind === 'usgs' ? USGS : PFT.filter(([id]) => id >= 1 && id <= 16);
+  const types = typesOf(kind, crops).filter(([id]) => id >= 1);
+  const typeProblem =
+    descriptor && kind !== 'global' && !types.some(([id]) => id === typeIndex)
+      ? t(
+          '当前类型已不可用，请重新选择地类或植物类型。',
+          'This type is no longer available. Choose a class or plant type again.',
+        )
+      : '';
   function commit(next: StudyPick[]) {
+    picksRef.current = next;
     setPicks(next);
     savePicks(owner, next);
     onChange(next);
   }
   async function add() {
-    if (!descriptor) return;
+    if (!descriptor || disabled || typeProblem) return;
+    const epoch = ownerEpoch.current;
     const perType = kind !== 'global';
     const index = perType ? typeIndex : null;
-    if (picks.some((p) => p.parameter_id === descriptor.id && p.index === index))
+    if (picksRef.current.some((p) => p.parameter_id === descriptor.id && p.index === index))
       return setProblem(t('这个参数已经在列表里了。', 'This parameter is already listed.'));
     let base = descriptor.default == null ? null : literalNumber(descriptor.default);
     if (perType) {
@@ -99,10 +116,13 @@ export default function StudyPicks({
       });
       base = defaults.find((d) => d.index === index)?.value ?? null;
     }
+    if (epoch !== ownerEpoch.current) return;
+    if (picksRef.current.some((p) => p.parameter_id === descriptor.id && p.index === index))
+      return setProblem(t('这个参数已经在列表里了。', 'This parameter is already listed.'));
     const [min, max] = defaultRange(descriptor, base);
     setProblem('');
     commit([
-      ...picks,
+      ...picksRef.current,
       {
         parameter_id: descriptor.id,
         raw_key: descriptor.raw_key,
@@ -165,13 +185,13 @@ export default function StudyPicks({
         <ActionButton
           action="version-study-pick-add"
           label={t('加入', 'Add')}
-          disabled={disabled || !descriptor}
+          disabled={disabled || !descriptor || !!typeProblem}
           run={() => void add().catch((e) => setProblem(String(e)))}
         >
           {t('加入', 'Add')}
         </ActionButton>
       </div>
-      {problem && <p className="param-problem">{problem}</p>}
+      {(typeProblem || problem) && <p className="param-problem">{typeProblem || problem}</p>}
       {picks.length === 0 ? (
         <p className="versions-empty">
           {t(

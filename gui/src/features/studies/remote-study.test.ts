@@ -8,6 +8,20 @@ import {
 } from './remote-study';
 
 describe('server study lifecycle', () => {
+  it('does not treat an authoritative never-submitted reply as an unresolved job', () => {
+    const reply = remoteStudyReply({
+      outcome: 'never_submitted',
+      recovery: {
+        outcome: 'not_submitted',
+        permissions: { submit: true },
+      },
+    });
+    const permissions = remoteStudyPermissions(null, null, reply);
+    assert.equal(permissions.exists, false);
+    assert.equal(permissions.submit, true);
+    assert.equal(permissions.poll, false);
+    assert.equal(permissions.close, false);
+  });
   it('blocks duplicate submission after uncertain transport and after restart', () => {
     assert.equal(remoteStudyPermissions(null, null, null).submit, true);
     assert.equal(

@@ -104,7 +104,7 @@ test('navigation rail keeps the main area on both narrow and wide windows', () =
 });
 
 test('assistant width inputs are clamped and invalid sizes do not produce negative layout', () => {
-  assert.equal(at(1440, { assistantOpen: true, assistantWidth: 1000 }).assistantWidth, 600);
+  assert.equal(at(2560, { assistantOpen: true, assistantWidth: 1000 }).assistantWidth, 960);
   assert.equal(at(1440, { assistantOpen: true, assistantWidth: 10 }).assistantWidth, 280);
   assert.equal(at(1440, { assistantOpen: true, assistantWidth: Number.NaN }).assistantWidth, 320);
   assert.equal(at(1440, { assistantOpen: true, assistantWidth: -50 }).assistantWidth, 280);
@@ -276,4 +276,27 @@ test('ShellNavigation keeps each navigation entry named for the icon rail', () =
   );
   assert.match(empty, /class="current-project is-empty"/);
   assert.match(empty, /None selected/);
+});
+
+// A stored width can exceed the displayed column; resize from the displayed edge, not that stale value.
+test('resizing from a clamped edge immediately narrows and widening preserves the main area', () => {
+  for (const width of [960, 1101, 1240, 1440]) {
+    const input = { viewportWidth: width, assistantOpen: true, assistantWidth: 600 };
+    const shown = shellLayout(input);
+    const narrowed = shellLayout({ ...input, assistantWidth: shown.assistantWidth - 16 });
+    assert.equal(narrowed.assistantWidth, shown.assistantWidth - 16);
+    const widened = shellLayout({ ...input, assistantWidth: narrowed.assistantWidth + 16 });
+    assert.equal(widened.assistantWidth, shown.assistantWidth);
+    if (shown.assistant === 'column') assert.ok(widened.mainWidth >= MIN_MAIN_WIDTH);
+    else assert.equal(widened.mainWidth, shown.mainWidth);
+  }
+});
+
+test('wide windows can expand the assistant beyond 600px without squeezing the main area', () => {
+  const expanded = at(2560, { assistantOpen: true, assistantWidth: 760 });
+  assert.equal(expanded.assistantWidth, 760);
+  assert.equal(at(2560, { assistantOpen: true, assistantWidth: 1200 }).assistantWidth, 960);
+  for (const width of [1101, 1240, 1440, 1920]) {
+    assert.ok(at(width, { assistantOpen: true, assistantWidth: 960 }).mainWidth >= MIN_MAIN_WIDTH);
+  }
 });

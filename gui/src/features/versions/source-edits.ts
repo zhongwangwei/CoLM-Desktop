@@ -5,6 +5,8 @@
  * 用 getter 而不是每次状态变化都往上抛一份快照：父组件在用户点按钮/导航的那一刻读到的必须是最新
  * 值；如果靠 React 状态同步，保存刚失败、文本框刚改一个字符这类瞬间会拿到上一帧的脏标记。
  */
+export type SourceSaveBlockedReason = 'unreadable' | 'conflict' | 'message';
+
 export type SourceEditState = {
   /** 有文本被改过但还没保存。 */
   readonly dirty: boolean;
@@ -14,6 +16,7 @@ export type SourceEditState = {
   readonly path: string | null;
   /** 现在保存能否成功（打开的是文本、且填写了"修改说明"）。 */
   readonly canSave: boolean;
+  readonly saveBlockedReason?: SourceSaveBlockedReason | null;
   save: () => Promise<boolean>;
   discard: () => void;
 };
@@ -36,6 +39,7 @@ export async function applySourceChoice(
     return true;
   }
   if (!state) return true;
+  if (!state.canSave) return false;
   return await state.save();
 }
 
@@ -48,5 +52,31 @@ export function sourceGuardReason(
   return t(
     '源码文件有未保存的修改，请先保存或放弃',
     'Source files have unsaved edits; save or discard them first',
+  );
+}
+
+export function sourceSaveBlockedText(
+  reason: SourceSaveBlockedReason | null | undefined,
+  en: boolean,
+): string {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  if (reason === 'conflict')
+    return t(
+      '当前源码与磁盘内容冲突，请先在「代码」页处理冲突。',
+      'The source conflicts with the file on disk. Resolve the conflict under the Code tab first.',
+    );
+  if (reason === 'unreadable')
+    return t(
+      '当前源码文件不可读取或不是文本文件，请先在「代码」页检查文件。',
+      'The source file is unreadable or is not text. Check the file under the Code tab first.',
+    );
+  if (reason === 'message')
+    return t(
+      '先在「代码」页签填写“修改说明”，才能保存源码文件。',
+      'Fill in the change message under the Code tab before saving the source file.',
+    );
+  return t(
+    '当前源码暂时不能保存，请在「代码」页查看原因。',
+    'The source cannot be saved right now. Check the Code tab for the reason.',
   );
 }

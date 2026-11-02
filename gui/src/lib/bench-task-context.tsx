@@ -27,7 +27,7 @@ export interface BenchTaskSink {
   begin: (input: BenchTaskInput) => string;
   update: (
     id: string,
-    patch: Partial<Pick<BenchTask, 'phase' | 'job' | 'report' | 'error'>>,
+    patch: Partial<Pick<BenchTask, 'phase' | 'job' | 'report' | 'error' | 'state'>>,
   ) => void;
   finish: (
     id: string,
@@ -40,6 +40,7 @@ export interface BenchTaskSink {
   clear: (id: string) => void;
   /** 记下"回到比较页后打开这次结果"的意图；由 App 的任务条设置，比较页挂载后消费一次。 */
   focus: (focus: BenchTaskFocus | null) => void;
+  focusRevision: number;
   peekFocus: () => BenchTaskFocus | null;
   consumeFocus: () => BenchTaskFocus | null;
   /** 页面还活着时把它自己的"停止"逻辑借给壳；页面卸载/收尾后清掉，壳退回最小后端取消。 */
@@ -58,6 +59,7 @@ const noop: BenchTaskSink = {
   finish: () => {},
   clear: () => {},
   focus: () => {},
+  focusRevision: 0,
   peekFocus: () => null,
   consumeFocus: () => null,
   registerStop: () => {},
@@ -93,10 +95,12 @@ export function BenchTasksProvider({ children }: { children: ReactNode }) {
   const clear = useCallback((id: string) => {
     setTasks((old) => clearBenchTask(old, id));
   }, []);
-  // focus 是"下一次进比较页要打开哪次结果"，只活在一次导航里；用 ref 保持它不触发多余渲染。
+  // 每次点击都通知比较页，包括已经停留在该页时。
+  const [focusRevision, setFocusRevision] = useState(0);
   const pendingFocus = useRef<BenchTaskFocus | null>(null);
   const focus = useCallback((next: BenchTaskFocus | null) => {
     pendingFocus.current = next;
+    setFocusRevision((revision) => revision + 1);
   }, []);
   const peekFocus = useCallback(() => pendingFocus.current, []);
   const consumeFocus = useCallback(() => {
@@ -122,6 +126,7 @@ export function BenchTasksProvider({ children }: { children: ReactNode }) {
     finish,
     clear,
     focus,
+    focusRevision,
     peekFocus,
     consumeFocus,
     registerStop,

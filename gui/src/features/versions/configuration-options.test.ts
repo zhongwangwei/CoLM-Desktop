@@ -925,3 +925,29 @@ test('nonmethane selections retain the existing BGC choice', () => {
     assert.equal(applyMaterialSelection(overlay, fields, solute).physics.DEF_USE_BGC, bgc);
   }
 });
+
+test('methane selection rejects LULCC from overrides or defaults without changing the overlay', () => {
+  const fields = [
+    ...materialKeys.map((k) => field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character')),
+    field('DEF_USE_BGC'),
+    field('DEF_USE_LULCC'),
+  ];
+  const rows = appendMaterialFamily([], 'methane');
+  for (const inherited of [false, true]) {
+    const overlay = empty();
+    const configured = fields.map((f) =>
+      f.name === 'DEF_USE_LULCC' ? { ...f, default: inherited ? '.true.' : '.false.' } : f,
+    );
+    if (!inherited) overlay.physics.DEF_USE_LULCC = '.true.';
+    const before = structuredClone(overlay);
+    assert.throws(() => applyMaterialSelection(overlay, configured, rows), /land-cover change/);
+    assert.deepEqual(overlay, before);
+    const imported = setMaterialRows(overlay, configured, rows);
+    imported.physics.DEF_USE_BGC = '.true.';
+    assert.ok(
+      materialSetupIssues(imported, { defaults: { DEF_USE_LULCC: '.true.' } }).some(([, en]) =>
+        en.includes('LULCC'),
+      ),
+    );
+  }
+});

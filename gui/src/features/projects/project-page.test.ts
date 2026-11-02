@@ -235,6 +235,7 @@ function home() {
     Notice: () => {},
     NavIcon: () => {},
     ProjectBatchRun: 'ProjectBatchRun',
+    projectVersion: async () => ({}),
     useApp: () => ({
       state,
       update: (patch: Partial<typeof state>) => Object.assign(state, patch),
@@ -534,6 +535,7 @@ test('opening a version only shows it; choosing it for simulations and freezing 
       draft: { id: 'draft-1' },
       // freeze 用 ref 里的最新草稿（源码保存会刷新 code.commit/generation）；这个用例没有源码缓冲区。
       draftNow: { current: { id: 'draft-1' } },
+      parameterPending: { current: false },
       t: (zh: string) => zh,
       notify: (message: string) => notices.push(message),
       dirtyNow: { current: false },
@@ -713,6 +715,9 @@ test('a broken recent-projects file does not stop a project from opening', async
     return null;
   };
   const loadProject = expression('loadProject', {
+    projectVersion: async () => {
+      throw new Error('pruned first revision must not block browsing');
+    },
     invoke,
     rememberProject: (roots: string[], root: string) => [root, ...roots],
     shownRoots: [],

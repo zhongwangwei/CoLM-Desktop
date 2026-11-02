@@ -26,6 +26,7 @@ test('result variables use the simulation page names, else the file long_name, e
     '感热通量（f_fsena） · W/m2',
   );
   assert.equal(variableOption(grid('f_xy_odd'), true), 'f_xy_odd');
+  assert.equal(variableOption(grid('f_fsena'), true), 'Sensible heat flux (f_fsena)');
 });
 
 test('only time-varying series and grids are listed, core variables first', () => {

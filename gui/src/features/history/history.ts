@@ -32,7 +32,11 @@ export function historyFilter(filter: Filter, offset = 0, limit = 30) {
     if (key === 'from' || key === 'to') {
       const time = new Date(value as string).getTime();
       if (!Number.isFinite(time)) throw new Error(bilingual('日期格式不对', 'Invalid date'));
-      result[key] = time;
+      // datetime-local 的分钟精度结束值包含这一整分钟。
+      result[key] =
+        key === 'to' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value as string)
+          ? time + 59_999
+          : time;
     } else if (key === 'includeRoutine') {
       if (value) result.includeRoutine = true;
     } else result[key] = value;
@@ -224,7 +228,7 @@ export function historySections(detail: HistoryDetail, en = false): HistorySecti
       en: 'Outcome',
       rows: [
         row('类型', 'Kind', operation.kind),
-        row('状态', 'Status', operation.status),
+        row('状态', 'Status', historyStatusLabel(operation.status, en)),
         row('阶段', 'Phase', historyPhaseLabel(operation.phase, en)),
         row('退出码', 'Exit code', status.exit_code ?? evidence.exit_code),
         row('开始时间', 'Started', time(operation.started_ms)),
@@ -557,6 +561,10 @@ export function pendingReason(operation: HistoryOperation, en = false, newer = f
 }
 export function historyStatusLabel(status: string, en = false): string {
   const labels: Record<string, [string, string]> = {
+    submitted: ['已提交', 'Submitted'],
+    queued: ['排队中', 'Queued'],
+    cancel_requested: ['已请求取消', 'Cancellation requested'],
+    needs_reconciliation: ['待核对', 'Needs verification'],
     running: ['运行中', 'Running'],
     succeeded: ['已完成', 'Completed'],
     completed_with_failures: ['部分失败', 'Partially failed'],

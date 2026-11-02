@@ -91,7 +91,7 @@ test('result export stays locked until native completion and distinguishes cance
     await Promise.resolve();
     assert.equal(h.busy, true);
     assert.equal(h.notice, '');
-    await assert.rejects(h.run(), /in progress/);
+    await assert.rejects(h.run(), /操作正在进行/);
     assert.equal(h.calls.length, 1);
     // 没有 time_basis 的旧响应按模型钟导出：不得出现 time_utc，也不得带 Z。
     const csv = String(h.calls[0][1]);

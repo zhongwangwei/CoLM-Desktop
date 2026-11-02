@@ -380,6 +380,7 @@ test('sync progress and outcome copy is bilingual', () => {
     { t: (zh: string, en: string) => en },
   );
   assert.match(outcomeText('success', []), /both repositories were updated/);
+  assert.match(outcomeText('offline', []), /no remote updates were fetched/);
   assert.match(outcomeText('partial', [{ repository: 'desktop' }]), /Partially failed/);
   assert.match(outcomeText('failed', []), /All failed/);
   assert.match(outcomeText('cancelled', []), /remaining repository steps were not started/);
@@ -389,6 +390,7 @@ test('sync progress and outcome copy is bilingual', () => {
   );
   assert.match(zhOutcome('partial', [{ repository: 'desktop' }]), /部分失败/);
   assert.match(zhOutcome('cancelled', []), /已停止同步/);
+  assert.match(zhOutcome('offline', []), /未拉取远程更新/);
 });
 
 test('picking an existing repository saves the path and re-reads status', async () => {
@@ -480,3 +482,34 @@ test('the settings panel renders both rows, separate times, progress and busy/er
     '忙时按钮禁用',
   );
 });
+
+for (const failed of [['desktop'], ['desktop', 'colm_upstream']]) {
+  test(`structured history errors report ${failed.length === 1 ? 'partial' : 'total'} failure`, async () => {
+    const harness = historyHarness({
+      respond: (command, args) => {
+        if (command === 'assistant_history_status') return statusPayload;
+        if (command === 'assistant_history_sync') {
+          const repository = String(args.repository);
+          return failed.includes(repository)
+            ? {
+                actions: { [repository]: 'error' },
+                repos: {
+                  [repository]: { last_attempt: { action: 'error', error: 'git fetch failed' } },
+                },
+              }
+            : syncResult(repository);
+        }
+      },
+    });
+    await harness.syncHistory(false);
+    assert.equal(harness.ui.outcome, failed.length === 1 ? 'partial' : 'failed');
+    assert.deepEqual(
+      harness.ui.failures,
+      failed.map((repository) => ({ repository, message: 'git fetch failed' })),
+    );
+    assert.equal(
+      harness.requests.filter((request) => request.command === 'assistant_history_sync').length,
+      2,
+    );
+  });
+}

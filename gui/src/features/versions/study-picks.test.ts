@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import type { StudyPick } from '../../lib/types';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { Descriptor } from './model';
+import { parameterType, type Descriptor } from './model';
+import { Button, Input, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { applyResearchSeed, type ParameterContext } from '../studies/study';
 const store = new Map<string, string>();
 Object.defineProperty(globalThis, 'localStorage', {
@@ -12,6 +17,7 @@ Object.defineProperty(globalThis, 'localStorage', {
     setItem: (k: string, v: string) => store.set(k, v),
   },
 });
+const { literalNumber, typesOf } = await import('./ParameterDialog');
 const { default: StudyPicks, defaultRange, loadPicks } = await import('./StudyPicks');
 
 const descriptor = (min: string | null, max: string | null) =>
@@ -107,4 +113,139 @@ test('the add button registers itself while removing a pick stays manual', () =>
   const picked = render('owner-picked');
   assert.ok(picked.includes('>Remove<'));
   assert.doesNotMatch(picked, /data-action="[^"]*remove/i);
+});
+
+function pickFunctions<T>(names: string[], context: Record<string, unknown>): T {
+  const source = ts.createSourceFile(
+    'StudyPicks.tsx',
+    readFileSync(new URL('./StudyPicks.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const found = new Map<string, string>();
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name)
+      found.set(node.name.text, node.getText(source).replace(/^export default /, ''));
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer)
+      found.set(node.name.text, `const ${node.name.text} = ${node.initializer.getText(source)};`);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const code = ts.transpileModule(names.map((name) => found.get(name)).join('\n'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  return new Function(...Object.keys(context), `${code}; return { ${names.join(', ')} };`)(
+    ...Object.values(context),
+  );
+}
+
+test('study plant types follow crop support and exclude type 16 without it', () => {
+  for (const crops of [false, true]) {
+    const { types } = pickFunctions<{ types: [number, string, string][] }>(['types'], {
+      kind: 'pft',
+      crops,
+      typesOf,
+    });
+    assert.equal(
+      types.some(([id]) => id === 16),
+      crops,
+    );
+    assert.ok(types.some(([id]) => id === 15));
+  }
+});
+
+test('late default-value responses merge current picks and cannot write into a different owner', async () => {
+  const picksRef: { current: StudyPick[] } = { current: [] };
+  const ownerEpoch = { current: 0 };
+  const pending: (() => void)[] = [];
+  const d = { ...descriptor(null, null), id: 'pft:x', raw_key: 'x', default: '2' };
+  const context = {
+    descriptor: d,
+    disabled: false,
+    typeProblem: '',
+    ownerEpoch,
+    kind: 'pft',
+    typeIndex: 1,
+    types: typesOf('pft', false),
+    picksRef,
+    literalNumber,
+    defaultRange,
+    setProblem: () => {},
+    setPicks: () => {},
+    savePicks: () => {},
+    onChange: () => {},
+    owner: 'A',
+    t: (_zh: string, en: string) => en,
+    invokeJson: () =>
+      new Promise((resolve) => pending.push(() => resolve([{ index: 1, value: 2 }]))),
+  };
+  const { add } = pickFunctions<{ add: () => Promise<void> }>(['commit', 'add'], context);
+  const first = add();
+  const other: StudyPick = {
+    parameter_id: 'other',
+    raw_key: 'other',
+    scheme: null,
+    index: null,
+    min: '1',
+    max: '2',
+    scale: 'linear',
+  };
+  picksRef.current = [other];
+  pending.shift()!();
+  await first;
+  assert.deepEqual(
+    picksRef.current.map((p) => p.parameter_id),
+    ['other', 'pft:x'],
+  );
+  picksRef.current = [];
+  const oldOwner = add();
+  ownerEpoch.current++;
+  pending.shift()!();
+  await oldOwner;
+  assert.deepEqual(
+    picksRef.current,
+    [],
+    'a response for A cannot modify the newly selected version',
+  );
+});
+
+test('disabling crops blocks the stale crop selection and choosing an available type restores Add', () => {
+  const catalog = [
+    { ...descriptor('0', '10'), id: 'pft:x', scope: 'pft-type', calibration_eligible: true },
+  ];
+  for (const [crops, index, blocked] of [
+    [false, 16, true],
+    [false, 15, false],
+    [true, 16, false],
+  ] as const) {
+    let cursor = 0;
+    const state = [[], 'pft:x', index, ''];
+    const { StudyPicks: render } = pickFunctions<{
+      StudyPicks: (props: unknown) => ReturnType<typeof createElement>;
+    }>(['StudyPicks'], {
+      React: { createElement },
+      useState: () => [state[cursor++], () => {}],
+      useRef: (value: unknown) => ({ current: value }),
+      useEffect: () => {},
+      parameterType,
+      typesOf,
+      Button,
+      Input,
+      Select,
+      ActionButton,
+    });
+    const html = renderToStaticMarkup(
+      render({
+        owner: 'crop-switch',
+        catalog,
+        crops,
+        en: true,
+        disabled: false,
+        onChange: () => {},
+      }),
+    );
+    assert.equal(/data-action="version-study-pick-add"[^>]*disabled/.test(html), blocked);
+    assert.equal(html.includes('This type is no longer available.'), blocked);
+  }
 });

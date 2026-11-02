@@ -1797,3 +1797,21 @@ fn tool_outcomes_use_structured_audit_values() {
         assert_eq!(round, event);
     }
 }
+
+#[test]
+fn knowledge_validation_failure_emits_no_effect_without_parsing_error_text() {
+    let registry = Registry::standard();
+    let args = serde_json::json!({"scope":{"kind":"app"},"title":"flux","markdown":"uncited",
+        "sources":[{"path":"crates/flux.rs","sha256":"a".repeat(64)}]})
+    .to_string();
+    let events = run_single_tool(
+        &registry,
+        call("k", "knowledge_update", &args),
+        vec![Decision::Approve],
+    );
+    assert_eq!(outcome_for(&events, "k"), ToolEffect::FailedNoEffect);
+    assert!(events.iter().any(
+        |event| matches!(event, Outbound::ToolResult {result,ok:false,..}
+        if result.contains("draft must cite source crates/flux.rs"))
+    ));
+}

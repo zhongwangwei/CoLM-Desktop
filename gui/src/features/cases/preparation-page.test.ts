@@ -382,6 +382,7 @@ test('starting a new operation clears the stale success card and keeps retry pos
     busy: boolean[] = [];
   const lock = { current: false };
   const work = pageCallback('work', {
+    registerCloseGuard: () => () => {},
     lock,
     setBusy: (value: boolean) => busy.push(value),
     setResult: (value: unknown) => shown.push(value),

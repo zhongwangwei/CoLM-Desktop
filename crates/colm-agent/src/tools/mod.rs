@@ -10,7 +10,7 @@ mod experience;
 mod fs;
 mod history;
 mod history_github;
-mod knowledge_drafts;
+pub(crate) mod knowledge_drafts;
 pub(crate) mod read;
 mod remote_workspace;
 pub mod ui;
@@ -628,3 +628,13 @@ pub fn selection_docs_snapshot(ctx: &ToolContext) -> Result<crate::retrieval::Do
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+/// A tool may return this only before its first possible state change.
+#[derive(Debug)]
+pub(crate) struct NoEffectError(pub anyhow::Error);
+impl std::fmt::Display for NoEffectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+impl std::error::Error for NoEffectError {}

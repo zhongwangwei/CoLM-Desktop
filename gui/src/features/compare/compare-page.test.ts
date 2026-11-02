@@ -6,6 +6,9 @@ import * as compareConfig from './config';
 import type { CompareSnapshot } from './config';
 import {
   buildOpenbenchConfig,
+  benchErrorText,
+  claimRemoteWatch,
+  parseCompareDraft,
   configInvalidation,
   designFingerprint,
   simulationFormForPick,
@@ -53,12 +56,21 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
   // GUI-05 之后页面函数会核对机器代次（hostEpoch/stillCurrent），有的还会写提示（setNotice）、
   // 标记评估配置的保存状态（U-05）；不关心这些的用例给一个"始终属于当前上下文"的默认值。
   const withDefaults = {
-    hostEpoch: { current: 0 },
     stillCurrent: () => true,
     setNotice: () => {},
     setConfigSaving: () => {},
     setWrittenFingerprint: () => {},
+    setDraftOffer: () => {},
+    claimRemoteWatch,
+    parseCompareDraft,
+    stored: () => '',
+    registerCloseGuard: () => () => {},
+    currentDraft: () => ({}),
+    completedDraft: { current: '' },
+    benchErrorText,
+    hostEpoch: { current: 0 },
     benchTasks: {
+      tasks: [],
       begin: () => '',
       update: () => {},
       finish: () => {},
@@ -675,95 +687,123 @@ test('running refuses a missing/stale snapshot and configurations that cannot ru
   assert.deepEqual(calls, [], 'nothing is sent to the backend for a configuration that cannot run');
 });
 
-test('a current configuration runs with exactly the effective config, frozen site list and fingerprint', async () => {
-  const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
-  const simulation = {
-    label: 'AT-Neu',
-    info: {
-      ...probedGrid,
-      history_dir: '/p/AT-Neu/history',
-      prefix: 'AT-Neu_hist_',
-      tim_res: 'Hour',
-      spatial: false,
-      extent: null,
-      lon: 11.3,
-      lat: 47.1,
-    },
-  };
-  const baseDesign: ComparisonDesign = {
-    name: 'comparison',
-    years: [2002, 2005],
-    timRes: 'Day',
-    variables: { Latent_Heat: 'ERA5LAND_LowRes' },
-    simulations: [simulation],
-    projectDir: '/ob/projects/comparison',
-  };
-  const built = buildOpenbenchConfig(baseDesign);
-  const formDesign: EvaluationDesign = {
-    machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
-    ...baseDesign,
-  };
-  const snapshot = snapshotFor(formDesign);
-  const notices: string[] = [];
-  const runs: unknown[] = [];
-  const run = execute<() => Promise<unknown>>('run', {
-    task: async (fn: () => Promise<unknown>) => fn(),
-    generated: { current: snapshot },
-    formDesign,
-    designFingerprint,
-    snapshotStale: compareConfig.snapshotStale,
-    parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
-    structuralProblems: compareConfig.structuralProblems,
-    configFingerprint: compareConfig.configFingerprint,
-    name: 'comparison',
-    t,
-    comparisonName: (comparison: string) => comparison,
-    remote: false,
-    // 后端返回 run 身份：页面必须把它记成这次运行的结果，而不是"目录里找到了一份报告"。
-    invokeJson: async (command: string, args: Record<string, unknown>) => {
-      calls.push({ command, args });
-      return { report: null, run_id: 'run-42', config_sha: 'abc123', state: 'succeeded' };
-    },
-    yaml: built.config,
-    sites: [],
-    scanDir: '/refs',
-    host: '',
-    view: async () => {},
-    setLastRun: (value: unknown) => runs.push(value),
-    showRunNotice: (message: string) => notices.push(message),
-    setConfigSaving: () => {},
-    watch: async () => ({}),
-    fetchReport: async () => {},
-  });
-  await run();
-  assert.equal(calls.length, 1);
-  // 提交的是快照冻结的站点清单 + 当前配置文本（这里 == 生成文本）；二者一起进指纹。
-  assert.deepEqual(calls[0]!.args, {
-    name: 'comparison',
-    config: built.config,
-    sites: snapshot.sites,
-    refRoot: '/refs',
-  });
-  const frozen = runs[0] as {
-    runId: string;
-    configSha: string;
-    fingerprint: string;
-    report: string | null;
-  };
-  assert.equal(frozen.runId, 'run-42');
-  assert.equal(frozen.configSha, 'abc123');
-  assert.equal(
-    frozen.fingerprint,
-    compareConfig.configFingerprint(
+for (const replaced of [false, true]) {
+  test(`local completion ${replaced ? 'preserves a reopened page draft' : 'clears its own draft and records the frozen result'}`, async () => {
+    const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
+    const simulation = {
+      label: 'AT-Neu',
+      info: {
+        ...probedGrid,
+        history_dir: '/p/AT-Neu/history',
+        prefix: 'AT-Neu_hist_',
+        tim_res: 'Hour',
+        spatial: false,
+        extent: null,
+        lon: 11.3,
+        lat: 47.1,
+      },
+    };
+    const baseDesign: ComparisonDesign = {
+      name: 'comparison',
+      years: [2002, 2005],
+      timRes: 'Day',
+      variables: { Latent_Heat: 'ERA5LAND_LowRes' },
+      simulations: [simulation],
+      projectDir: '/ob/projects/comparison',
+    };
+    const built = buildOpenbenchConfig(baseDesign);
+    const formDesign: EvaluationDesign = {
+      machine: { host: '', openbenchRoot: '/ob', refRoot: '/refs' },
+      ...baseDesign,
+    };
+    const snapshot = snapshotFor(formDesign);
+    const notices: string[] = [];
+    const runs: unknown[] = [];
+    const submittedDraft = parseCompareDraft(
+      JSON.stringify({
+        version: 1,
+        name: 'A',
+        picks: [],
+        metrics: [],
+        scores: [],
+        comparisonItems: [],
+        statisticsItems: [],
+        chosen: {},
+      }),
+    )!;
+    let saved = JSON.stringify(submittedDraft);
+    const replacement = JSON.stringify({ ...submittedDraft, name: 'B' });
+    const run = execute<() => Promise<unknown>>('run', {
+      stored: () => saved,
+      store: (_key: string, value: string) => {
+        saved = value;
+      },
+      currentDraft: () => submittedDraft,
+      stillCurrent: () => !replaced,
+      task: async (fn: () => Promise<unknown>) => fn(),
+      generated: { current: snapshot },
       formDesign,
-      compareConfig.parseOpenbenchConfig(built.config).config!,
-      snapshot.sites,
-    ),
-    'the recorded fingerprint covers the configuration and the frozen station list',
-  );
-  assert.equal(frozen.report, null);
-  assert.match(notices[0] ?? '', /Evaluation finished \(run run-42\)/);
-});
+      designFingerprint,
+      snapshotStale: compareConfig.snapshotStale,
+      parseOpenbenchConfig: compareConfig.parseOpenbenchConfig,
+      structuralProblems: compareConfig.structuralProblems,
+      configFingerprint: compareConfig.configFingerprint,
+      name: 'comparison',
+      t,
+      comparisonName: (comparison: string) => comparison,
+      remote: false,
+      // 后端返回 run 身份：页面必须把它记成这次运行的结果，而不是"目录里找到了一份报告"。
+      invokeJson: async (command: string, args: Record<string, unknown>) => {
+        calls.push({ command, args });
+        if (replaced) saved = replacement;
+        return { report: null, run_id: 'run-42', config_sha: 'abc123', state: 'succeeded' };
+      },
+      yaml: built.config,
+      sites: [],
+      scanDir: '/refs',
+      host: '',
+      view: async () => {},
+      setLastRun: (value: unknown) => runs.push(value),
+      showRunNotice: (message: string) => notices.push(message),
+      setConfigSaving: () => {},
+      watch: async () => ({}),
+      fetchReport: async () => {},
+    });
+    await run();
+    assert.equal(saved, replaced ? replacement : '');
+    if (replaced) {
+      assert.deepEqual(runs, [], 'unmounted page does not change visible results');
+      return;
+    }
+    assert.equal(calls.length, 1);
+    // 提交的是快照冻结的站点清单 + 当前配置文本（这里 == 生成文本）；二者一起进指纹。
+    assert.deepEqual(calls[0]!.args, {
+      name: 'comparison',
+      config: built.config,
+      sites: snapshot.sites,
+      refRoot: '/refs',
+    });
+    const frozen = runs[0] as {
+      runId: string;
+      configSha: string;
+      fingerprint: string;
+      report: string | null;
+    };
+    assert.equal(frozen.runId, 'run-42');
+    assert.equal(frozen.configSha, 'abc123');
+    assert.equal(
+      frozen.fingerprint,
+      compareConfig.configFingerprint(
+        formDesign,
+        compareConfig.parseOpenbenchConfig(built.config).config!,
+        snapshot.sites,
+      ),
+      'the recorded fingerprint covers the configuration and the frozen station list',
+    );
+    assert.equal(frozen.report, null);
+    assert.match(notices[0] ?? '', /Evaluation finished \(run run-42\)/);
+  });
+}
 
 test('a changed setting clears an untouched configuration but keeps a hand-edited one', () => {
   const placeholderSnapshot = (fingerprint: string, generatedText: string): CompareSnapshot => ({

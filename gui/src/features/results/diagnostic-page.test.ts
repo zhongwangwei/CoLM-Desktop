@@ -8,6 +8,7 @@ import * as overviewHelpers from './result-overview';
 import * as variableLabels from './variable-labels';
 import * as analysisHelpers from './analysis-state';
 import * as timeBasisHelpers from './time-basis';
+import { modelClockIso } from './time-ticks';
 import type { PageContract, UiAction } from '../../lib/guide';
 
 type Element = { type: string | { name: string }; props: Record<string, unknown> };
@@ -80,6 +81,10 @@ function harness(
     seriesEmpty?: boolean;
     /** 读运行清单会失败；测试里删掉这个字段后重试成功。 */
     runsFailure?: string;
+    catalogFailure?: string;
+    seriesData?: seriesHelpers.SeriesData;
+    diagnosticSeries?: seriesHelpers.SeriesData;
+    running?: Record<string, { status: string; run_case: string }>;
   } = {},
 ) {
   let selectedCase = initialCase;
@@ -109,6 +114,8 @@ function harness(
     if (command === 'model_case_runs' && options.runsFailure) throw Error(options.runsFailure);
     // 曲线读取失败的链路：测试删掉 options.seriesFailure 后，重试按钮会取到真实数据。
     if (command === 'series' && options.seriesFailure) throw Error(options.seriesFailure);
+    if (command === 'history_catalog' && options.catalogFailure)
+      throw Error(options.catalogFailure);
     // 比较重试用例：先让这些观测失败，测试里清空列表后同样的路径会返回指标。
     if (command === 'metrics' && options.failingObs?.includes(String(args.obs)))
       throw Error('no readable history for this run');
@@ -171,7 +178,11 @@ function harness(
         ],
       };
     if (command === 'series')
-      return delayedSeries ?? (options.seriesEmpty ? emptySeries : options.gaps ? gapped : normal);
+      return (
+        delayedSeries ??
+        options.seriesData ??
+        (options.seriesEmpty ? emptySeries : options.gaps ? gapped : normal)
+      );
     if (command === 'evaluation_catalog') return [{ name: 'Qle', available: true }];
     // 单站评估：只有 /obs/single.nc 这条路径返回一行指标，避免自动评估等用例拿到假数据。
     if (command === 'metrics' && args.obs === '/obs/single.nc')
@@ -211,7 +222,8 @@ function harness(
           kge: 1,
         },
       ];
-    if (command === 'energy_summary') return diagnostic;
+    if (command === 'energy_summary')
+      return { ...diagnostic, series: options.diagnosticSeries ?? diagnostic.series };
     // 多站点比较：每个"运行副本 | 观测"条目调一次 metrics；只在比较测试用的观测路径上返回一行指标，
     // 其他路径照旧抛错，免得把自动评估等用例的结果喂假装数据。
     if (command === 'metrics' && args.obs === '/obs/compare.nc')
@@ -252,6 +264,7 @@ function harness(
     utcSeconds: (value: string) => Date.parse(value) / 1000,
     defaultObservation: async () => '',
     timeTicks: () => [],
+    modelClockIso,
     uPlot: () => {},
     download: async (_name: string, text: string) => {
       exports.push(text);
@@ -274,7 +287,7 @@ function harness(
               { dir: '/empty', name: 'Empty' },
             ]
           : [{ dir: '/case' }],
-        running: {},
+        running: options.running ?? {},
       },
       navigate(route: string) {
         routes.push(route);
@@ -1081,6 +1094,88 @@ test('a downsampled stretch with no samples is drawn as a break, not a smooth li
     [100, null, 200, null, 300, 400],
   ]);
   assert.deepEqual(chart.labels, ['Simulation']);
+});
+
+test('truncated gap metadata hides sampled curves but preserves complete-series curves', async () => {
+  const h = harness(false, undefined, '', '/case', {
+    seriesData: { ...gapped, gaps_truncated: true },
+    diagnosticSeries: {
+      ...residual,
+      time: [1],
+      vars: { energy_residual: [3] },
+      n: 1,
+      downsampled: true,
+      gaps_truncated: true,
+    },
+  });
+  await h.render();
+  for (const tab of ['overview', 'series', 'diagnostics']) {
+    await h.tab(tab);
+    if (tab === 'diagnostics') await h.action('diagnose-closure');
+    assert.equal(h.charts().length, 0, `${tab} must not bridge unknown gaps`);
+    assert.match(JSON.stringify(h.tree()), /Too many missing-data intervals/);
+    assert.match(JSON.stringify(h.tree()), /Narrow the time window/);
+  }
+  const complete = harness(false, undefined, '', '/case', {
+    seriesData: { ...normal, gaps_truncated: true },
+  });
+  await complete.render();
+  assert.equal(complete.charts().length, 1, 'full records already retain every missing value');
+});
+
+test('a catalog failure after changing runs clears the old request instead of spinning', async () => {
+  const options: { catalogFailure?: string } = {};
+  const h = harness(false, undefined, '', '/case', options);
+  await h.render();
+  assert.equal(h.charts().length, 1);
+  options.catalogFailure = 'catalog unavailable';
+  await h.action('result-runs');
+  await h.action('result-run-0');
+  const rendered = JSON.stringify(h.tree());
+  assert.match(rendered, /catalog unavailable/);
+  assert.ok(!rendered.includes('Reading simulation results'));
+  assert.equal(h.charts().length, 0);
+});
+
+test('changing runs clears an old manual-series error even when the variable stays the same', async () => {
+  const options: { seriesFailure?: string } = { seriesFailure: 'old run failed' };
+  const h = harness(false, undefined, '', '/case', options);
+  await h.render();
+  await h.tab('series');
+  assert.match(JSON.stringify(h.tree()), /old run failed/);
+  delete options.seriesFailure;
+  await h.action('result-runs');
+  await h.action('result-run-0');
+  assert.ok(!JSON.stringify(h.tree()).includes('old run failed'));
+  assert.equal(actionById(h, 'result-curve-retry'), undefined);
+  assert.match(JSON.stringify(h.tree()), /Select Plot series/);
+});
+
+test('multi-station inventories refresh when a different station finishes a run', async () => {
+  const running: Record<string, { status: string; run_case: string }> = {};
+  const h = harness(true, undefined, '', '/case', { running });
+  await h.render();
+  h.field('result-scope')!.set!('multi');
+  await h.render();
+  const scans = () =>
+    h.requests.filter((request) => request.command === 'model_project_runs').length;
+  const before = scans();
+  running['/empty'] = { status: 'running', run_case: '/empty/runs/new' };
+  await h.render();
+  assert.equal(scans(), before, 'starting a run does not invalidate completed results');
+  running['/empty'].status = 'succeeded';
+  await h.render();
+  assert.equal(scans(), before + 1);
+});
+
+test('catalog dates retain the model clock without a false UTC suffix', async () => {
+  const h = harness();
+  await h.render();
+  await h.tab('catalog');
+  const rendered = JSON.stringify(h.tree());
+  assert.match(rendered, /1970-01-01T00:00:01\.000/);
+  assert.ok(!rendered.includes('1970-01-01T00:00:01.000Z'));
+  assert.match(rendered, /model clock/);
 });
 
 test('a partial local fetch says what is local and offers fetching the full history', async () => {

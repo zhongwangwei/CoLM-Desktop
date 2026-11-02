@@ -46,7 +46,7 @@ export const NARROW_VIEWPORT = 1240;
 /** 助手从分栏改成覆盖式抽屉的窗口宽度上限。 */
 export const ASSISTANT_DRAWER_BELOW = 1100;
 export const ASSISTANT_MIN_WIDTH = 280;
-export const ASSISTANT_MAX_WIDTH = 600;
+export const ASSISTANT_MAX_WIDTH = 960;
 export const ASSISTANT_DEFAULT_WIDTH = 320;
 /** 分栏时给主工作区留的最小宽度；不够就让位给抽屉，而不是继续缩字体/缩内容。 */
 export const MIN_MAIN_WIDTH = 560;

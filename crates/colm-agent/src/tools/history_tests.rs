@@ -2431,3 +2431,119 @@ fn commit_pull_requests_detail_reads_offline_complete_cache() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn source_history_online_fallback_respects_scope_permission_and_registry() {
+    let root = temp_dir("online-fallback");
+    let fake = FakeCli::new(&root);
+    let registry = crate::tools::Registry::standard();
+    let tool = registry.find("source_history").unwrap();
+    for requested in ["both", "desktop", "colm_upstream", "selected"] {
+        for desktop_missing in [false, true] {
+            for upstream_missing in [false, true] {
+                for network in [false, true] {
+                    for builtin in [false, true] {
+                        let mut input = history_source_fixture();
+                        input["query"]["source"]["source_dir"] = json!(root);
+                        for (key, missing) in [
+                            ("desktop", desktop_missing),
+                            ("colm_upstream", upstream_missing),
+                        ] {
+                            input["repos"][key] = json!({
+                                "history": if missing { "unavailable" } else { "verified" },
+                                "identity": {"state": if missing { "missing" } else { "verified" }},
+                                "owner": "evil", "repo": "injected", "url": "https://evil.example/steal",
+                                "endpoint": null, "commits": [], "errors": ["original diagnostic"]
+                            });
+                        }
+                        fake.set_track(&input);
+                        let mut ctx = pull_context(&root, Some("private-token"), builtin, network);
+                        ctx.cli = fake.cli.clone();
+                        let result = tool.call(&source_args(requested, "vcmax"), &ctx).unwrap();
+                        let mut any_fallback = false;
+                        for (key, missing, owner, repo) in [
+                            ("desktop", desktop_missing, "zhongwangwei", "CoLM-Desktop"),
+                            ("colm_upstream", upstream_missing, "CoLM-SYSU", "CoLM"),
+                        ] {
+                            let expected = missing && (requested == "both" || requested == key);
+                            let fallback = &result["repos"][key]["online_fallback"];
+                            assert_eq!(
+                                !fallback.is_null(),
+                                expected,
+                                "{requested}/{key}/{network}/{builtin}"
+                            );
+                            if expected {
+                                any_fallback = true;
+                                assert_eq!(
+                                    fallback["repository_url"],
+                                    format!("https://github.com/{owner}/{repo}")
+                                );
+                                assert_eq!(
+                                    fallback["metadata_url"],
+                                    format!("https://api.github.com/repos/{owner}/{repo}")
+                                );
+                                assert_eq!(fallback["network_enabled"], network);
+                                assert_eq!(
+                                    fallback["status"],
+                                    if network {
+                                        "not_checked"
+                                    } else {
+                                        "network_disabled"
+                                    }
+                                );
+                                let steps = fallback["next_steps"].to_string();
+                                if network {
+                                    for required in [
+                                        "default_branch",
+                                        "symbol",
+                                        "diff",
+                                        "author",
+                                        "SHA",
+                                        "pagination",
+                                        "frozen",
+                                    ] {
+                                        assert!(
+                                            steps.contains(required),
+                                            "missing {required}: {steps}"
+                                        );
+                                    }
+                                } else {
+                                    assert!(steps.contains("Do not"));
+                                }
+                                let text = fallback.to_string();
+                                assert!(!text.contains("evil"));
+                                assert!(!text.contains("private-token"));
+                                assert!(!text.contains(root.to_str().unwrap()));
+                            }
+                            let mut preserved = result["repos"][key].clone();
+                            preserved.as_object_mut().unwrap().remove("online_fallback");
+                            assert_eq!(preserved, input["repos"][key]);
+                        }
+                        assert_eq!(result["query"], input["query"]);
+                        assert_eq!(result["schema"], input["schema"]);
+                        if requested == "selected" {
+                            assert_eq!(result["source_context"]["kind"], "app");
+                        } else {
+                            assert_eq!(result["source_context"]["kind"], "repository");
+                        }
+                        if let Some(web) = &ctx.web {
+                            let hosts = web.allowed_hosts.lock().unwrap();
+                            let expected: std::collections::BTreeSet<String> =
+                                if network && any_fallback {
+                                    ["github.com", "api.github.com"]
+                                        .map(str::to_owned)
+                                        .into_iter()
+                                        .collect()
+                                } else {
+                                    Default::default()
+                                };
+                            assert_eq!(*hosts, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

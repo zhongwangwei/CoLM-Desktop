@@ -44,7 +44,14 @@ import {
   type RetrievalSettings,
   type XerjNodeStatus,
 } from './model';
-import { draftSaveState, sendingSummary, settingsDraftDirty } from './settings-draft';
+import {
+  draftSaveState,
+  equalJson,
+  sendingSummary,
+  settingsDraftDirty,
+  mergeSettingsDraft,
+  draftApiOptions,
+} from './settings-draft';
 
 export default function AssistantSettings({
   settings,
@@ -80,6 +87,7 @@ export default function AssistantSettings({
   }
   const lock = useRef(false);
   const [draft, setDraft] = useState(settings);
+  const savedBaseline = useRef(settings);
   const [options, setOptions] = useState(JSON.stringify(settings.api_options, null, 2));
   const [key, setKey] = useState('');
   const [hasKey, setHasKey] = useState<boolean | null>(null);
@@ -102,7 +110,7 @@ export default function AssistantSettings({
     offline: boolean;
   } | null>(null);
   const [syncOutcome, setSyncOutcome] = useState<
-    'success' | 'partial' | 'failed' | 'cancelled' | null
+    'success' | 'offline' | 'partial' | 'failed' | 'cancelled' | null
   >(null);
   const [syncFailures, setSyncFailures] = useState<
     { repository: HistoryRepository; message: string }[]
@@ -119,13 +127,18 @@ export default function AssistantSettings({
   // 只用于保存请求在飞时显示"正在保存"；发现模型、登记 Key 等操作不算保存设置。
   const [saving, setSaving] = useState(false);
   const request = useRef(0);
-  // 外部保存（例如选完历史仓库路径立即落盘，父级 settings 随之更新）只同步没有未保存修改的草稿：
-  // 有未保存修改时保留用户正在编辑的内容，别让一次路径保存冲掉整个表单（U-07）。
+  // 外部保存只替换未编辑字段；外发确认由已保存设置管理，不能被旧草稿撤销。
   useEffect(() => {
-    if (settingsDraftDirty(settings, draft, options)) return;
-    setDraft(settings);
-    setOptions(JSON.stringify(settings.api_options, null, 2));
-  }, [settings, draft, options]);
+    const previous = savedBaseline.current;
+    if (previous === settings) return;
+    savedBaseline.current = settings;
+    setDraft((old) => mergeSettingsDraft(previous, old, settings));
+    setOptions((old) =>
+      equalJson(draftApiOptions(old), previous.api_options)
+        ? JSON.stringify(settings.api_options, null, 2)
+        : old,
+    );
+  }, [settings]);
   // 状态字符串是生成时语言的文本，切换语言后清掉，避免英文界面残留中文。
   useEffect(() => {
     setStatus('');
@@ -343,10 +356,15 @@ export default function AssistantSettings({
   }
   /** U01：同步结束提示区分全部成功/部分失败/全部失败/已取消。 */
   function historySyncOutcomeText(
-    outcome: 'success' | 'partial' | 'failed' | 'cancelled' | null,
+    outcome: 'success' | 'offline' | 'partial' | 'failed' | 'cancelled' | null,
     failures: { repository: HistoryRepository }[],
   ) {
     if (!outcome) return '';
+    if (outcome === 'offline')
+      return t(
+        '离线检查完成：使用两个仓库的现有本地记录，未拉取远程更新。',
+        'Offline check completed: using existing local records for both repositories; no remote updates were fetched.',
+      );
     if (outcome === 'cancelled')
       return t(
         '已停止同步；剩余的仓库步骤没有发起。',
@@ -401,6 +419,15 @@ export default function AssistantSettings({
             offline,
           });
           actions[repository] = result.actions?.[repository] ?? (offline ? 'offline' : 'fetched');
+          if (actions[repository] === 'error' && !syncCancelled.current) {
+            const repo = result.repos?.[repository];
+            const message =
+              repo?.last_attempt?.error ||
+              repo?.errors?.join('; ') ||
+              t('仓库同步失败', 'Repository sync failed');
+            failures.push({ repository, message });
+            setSyncFailures([...failures]);
+          }
           latest = result;
           setHistoryResult(result);
           setHistoryStatus(result);
@@ -425,7 +452,10 @@ export default function AssistantSettings({
     try {
       setHistoryResult({ ...(latest ?? {}), actions });
       if (syncCancelled.current) setSyncOutcome('cancelled');
-      else if (failures.length === 0) setSyncOutcome('success');
+      else if (failures.length === 0)
+        setSyncOutcome(
+          Object.values(actions).every((action) => action === 'offline') ? 'offline' : 'success',
+        );
       else if (failures.length === repositories.length) setSyncOutcome('failed');
       else setSyncOutcome('partial');
       // 结束再刷一次，保证取消/最后一步之后的两行状态尽量新。
@@ -458,10 +488,14 @@ export default function AssistantSettings({
   /** U01：用后端文件夹选择器挑一个已有本地仓库，选中后立即保存路径。 */
   async function pickHistoryRepository(repository: HistoryRepository) {
     if (!hasBackend() || historyBusy || syncProgress) return;
-    const path = await invoke<string | null>('pick_folder', {
-      key: repository === 'desktop' ? 'assistant-history-desktop' : 'assistant-history-upstream',
-    });
-    if (path) await saveHistoryPath(repository, path);
+    try {
+      const path = await invoke<string | null>('pick_folder', {
+        key: repository === 'desktop' ? 'assistant-history-desktop' : 'assistant-history-upstream',
+      });
+      if (path) await saveHistoryPath(repository, path);
+    } catch (error) {
+      setHistoryError(settingsError(error));
+    }
   }
   const builtin = draft.backend === 'builtin';
   const model = builtin ? draft.model : draft.external[draft.backend]?.model || '';
@@ -492,6 +526,37 @@ export default function AssistantSettings({
   const customProvider = builtin && providerId(draft) === 'custom';
   const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
   const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
+  function docsIndexHint() {
+    if (!settings.retrieval.enabled)
+      return t(
+        '尚未启用 Xerj，文档查询使用普通关键词检索。',
+        'Xerj is disabled; document queries use basic keyword matching.',
+      );
+    if (!docsIndex)
+      return t(
+        '助手启动后自动准备当前模型的文档索引；也可查询状态。',
+        'The assistant prepares the current model’s document index when it starts; you can also check its status.',
+      );
+    if (docsIndex.state === 'ready')
+      return docsIndex.documents === 0 || docsIndex.chunks === 0
+        ? t(
+            '当前范围没有可检索的文档；回答仍需检查对应源码。',
+            'There are no searchable documents in the current scope; answers still need the corresponding source code.',
+          )
+        : t(
+            '文档索引已就绪；每次查询实际使用的检索方式和证据会显示在对话中。',
+            'The document index is ready; each query’s actual search method and evidence appear in the conversation.',
+          );
+    if (docsIndex.state === 'building' || docsIndex.state === 'pending')
+      return t(
+        '正在后台准备索引，可以继续提问；索引就绪前使用普通关键词检索。',
+        'The index is being prepared in the background. You can keep asking questions; document search uses basic keyword matching until it is ready.',
+      );
+    return t(
+      '当前索引不可用，文档查询会回退到普通关键词检索；原因见上方状态。',
+      'The current index is unavailable. Document queries fall back to basic keyword matching; see the status above for the reason.',
+    );
+  }
   // 旧后端保存的 retrieval 可能还没有 mode：按 external 呈现（与后端"缺字段按 external"一致）。
   const retrievalMode = draft.retrieval.mode === 'managed' ? 'managed' : 'external';
   // 旧后端保存的设置可能还没有 history：统一补默认值，界面不因缺字段崩掉。
@@ -757,7 +822,7 @@ export default function AssistantSettings({
                       e.target.value,
                     );
                     // 切服务商等于换端点：旧端点的确认不能沿用。
-                    setDraft({ ...next, model_endpoint_ack: null });
+                    patch({ ...next, model_endpoint_ack: null });
                     setOptions(JSON.stringify(next.api_options, null, 2));
                   } catch (error) {
                     setStatus(String(error));
@@ -833,7 +898,7 @@ export default function AssistantSettings({
             onChange={(e) =>
               builtin
                 ? patch(withContextWindowCleared(draft, { model: e.target.value }))
-                : setDraft(withChoice(draft, { model: e.target.value }))
+                : patch(withChoice(draft, { model: e.target.value }))
             }
           />
           <datalist id="assistant-model-choices">
@@ -851,7 +916,7 @@ export default function AssistantSettings({
             onChange={(e) =>
               builtin
                 ? patch(thinkSettings(e.target.value))
-                : setDraft(withChoice(draft, { effort: e.target.value }))
+                : patch(withChoice(draft, { effort: e.target.value }))
             }
           >
             {Array.from(new Set([...efforts, effort])).map((value) => (
@@ -887,142 +952,28 @@ export default function AssistantSettings({
             </p>
           </>
         )}
-        <Advanced title={t('高级设置', 'Advanced')}>
-          {builtin && !customProvider && serviceUrlField}
-          {builtin && (
-            <>
-              <Field label={t('接口格式', 'API format')}>
-                <Select
-                  value={draft.api_format}
-                  onChange={(e) =>
-                    patch(withContextWindowCleared(draft, { api_format: e.target.value }))
-                  }
-                >
-                  <option value="chat_completions">Chat Completions</option>
-                  <option value="responses">Responses</option>
-                  <option value="anthropic">Anthropic</option>
-                </Select>
-              </Field>
-              <Field
-                label={t('输出 token 上限', 'Maximum output tokens')}
-                unit={t('tokens', 'tokens')}
-                range={t('≥ 1 的整数', 'integer ≥ 1')}
-              >
-                <Input
-                  type="number"
-                  min={1}
-                  value={draft.max_output_tokens}
-                  onChange={(e) => patch({ max_output_tokens: Number(e.target.value) })}
-                />
-              </Field>
-              <Field
-                label={t('上下文窗口', 'Context window')}
-                hint={t(
-                  '内置 API 按这个窗口预留输入、输出和安全余量。留空时只对文档确认的 DeepSeek V4 模型自动取 1M；未知模型留空会在发送前要求填写，不会猜一个数。',
-                  'Built-in API requests reserve input, output and a safety margin against this window. Blank auto-resolves only for the documented DeepSeek V4 models (1M); for any unknown model a blank window asks you to fill it in before sending instead of guessing.',
-                )}
-                unit={t('tokens', 'tokens')}
-                range={t(
-                  '1024–10000000 的整数；留空 = 自动',
-                  'integer 1024–10000000; blank = auto',
-                )}
-              >
-                <Input
-                  type="number"
-                  min={1024}
-                  max={10_000_000}
-                  value={draft.context_window ?? ''}
-                  onChange={(e) =>
-                    patch({
-                      context_window: e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                />
-              </Field>
-              <Field
-                label={t('超时秒数', 'Timeout (seconds)')}
-                unit={t('秒', 'seconds')}
-                range={t('≥ 1 的整数', 'integer ≥ 1')}
-              >
-                <Input
-                  type="number"
-                  min={1}
-                  value={draft.timeout_seconds}
-                  onChange={(e) => patch({ timeout_seconds: Number(e.target.value) })}
-                />
-              </Field>
-              <Field label={t('额外 API 选项（JSON）', 'Additional API options (JSON)')}>
-                <textarea
-                  aria-label={t('额外 API 选项', 'Additional API options')}
-                  value={options}
-                  onChange={(e) => {
-                    setStatus('');
-                    setOptions(e.target.value);
-                  }}
-                />
-              </Field>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={draft.strict}
-                  onChange={(e) => patch({ strict: e.target.checked })}
-                />{' '}
-                {t('严格工具格式', 'Strict tool format')}
-              </label>
-            </>
-          )}
-          <Field
-            label={t('每会话最多轮数', 'Turns per conversation')}
-            hint={t(
-              '达到上限后开始新对话可继续。',
-              'After the limit, start a new conversation to continue.',
+        <div className="space-y-2 border-t pt-3">
+          <strong>{t('本机文档检索（Xerj）', 'Local document search (Xerj)')}</strong>
+          <p className="text-xs text-muted-foreground">
+            {t(
+              '在本机建立当前模型文档索引，帮助助手查找参数说明、过程原理和使用方法。适用于所有助手后端；索引保留在本机，回答时检索到的相关片段会作为上下文交给所选模型服务。关闭后使用普通关键词检索。',
+              'Index the current model’s documentation locally to help the assistant find parameter explanations, model processes and usage guidance. Works with every assistant backend. The index stays on this computer; retrieved passages are provided as context to the selected model service. When disabled, document search uses basic keyword matching.',
             )}
-            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
-          >
-            <Input
-              type="number"
-              min={0}
-              value={draft.session_turn_limit}
-              onChange={(e) => patch({ session_turn_limit: Number(e.target.value) })}
-            />
-          </Field>
-          <Field
-            label={t('每会话最多 token', 'Tokens per conversation')}
-            hint={t(
-              '累计 prompt + completion。每次调用模型都会把整段对话和工具说明重新计入一遍（一次约 1–2 万），一轮带工具调用常有好几次。',
-              'Cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
-            )}
-            unit={t('tokens', 'tokens')}
-            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
-          >
-            <Input
-              type="number"
-              min={0}
-              value={draft.session_token_limit}
-              onChange={(e) => patch({ session_token_limit: Number(e.target.value) })}
-            />
-          </Field>
-          <div className="space-y-2 border-t pt-3">
-            <strong>{t('文档检索（Xerj，可选）', 'Document search (Xerj, optional)')}</strong>
-            <p className="text-xs text-muted-foreground">
-              {t(
-                '应用级设置，与上面选的后端无关：回答可以引用本机 Xerj 里索引的文档。关闭时完全不访问 Xerj。',
-                'An application-level setting independent of the backend above: answers may cite documents indexed in a local Xerj. Nothing is sent to Xerj while this is off.',
-              )}
-            </p>
-            <label>
-              <input
-                type="checkbox"
-                checked={draft.retrieval.enabled}
-                onChange={(e) => patchRetrieval({ enabled: e.target.checked })}
-              />{' '}
-              {t('启用文档检索', 'Enable document search')}
-            </label>
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={draft.retrieval.enabled}
+              onChange={(e) => patchRetrieval({ enabled: e.target.checked })}
+            />{' '}
+            {t('启用文档检索', 'Enable document search')}
+          </label>
+          <Advanced title={t('文档检索连接设置', 'Document search connection settings')}>
             <Field
               label={t('接入方式', 'Connection mode')}
               hint={t(
-                'external 使用你自行运行的本机节点；managed 由应用启动并停止自己的 Xerj 进程。切换接入方式不会清掉已填的服务地址、索引名或已登记的 Key。',
-                'external uses a local node you run yourself; managed starts and stops the app’s own Xerj process. Switching modes does not clear the saved service URL, index name or registered key.',
+                '推荐由应用管理，无需单独安装或填写 Key。已有自行运行的本机节点时，可选择手动连接；切换方式会保留已有配置。',
+                'App management is recommended and needs no separate installation or key entry. Choose a manual connection if you already run a local node. Switching modes preserves your existing configuration.',
               )}
             >
               <Select
@@ -1032,13 +983,10 @@ export default function AssistantSettings({
                 }
               >
                 <option value="external">
-                  {t('使用已运行的本机节点（external）', 'Use a local node you run (external)')}
+                  {t('手动连接已有本机节点', 'Connect to an existing local node')}
                 </option>
                 <option value="managed">
-                  {t(
-                    '由应用启动并管理节点（managed）',
-                    'Let the app start and manage the node (managed)',
-                  )}
+                  {t('由应用自动管理（推荐）', 'Manage automatically (recommended)')}
                 </option>
               </Select>
             </Field>
@@ -1247,51 +1195,184 @@ export default function AssistantSettings({
                 onChange={(e) => patchRetrieval({ timeout_ms: Number(e.target.value) })}
               />
             </Field>
+          </Advanced>
+          <p className="text-xs text-muted-foreground" aria-live="polite">
+            {t('索引状态：', 'Index status: ')}
+            {!settings.retrieval.enabled ? (
+              retrievalStateText('disabled', state.language)
+            ) : docsIndex ? (
+              <>
+                {retrievalStateText(docsIndex.state || '', state.language)}
+                {typeof docsIndex.documents === 'number' &&
+                  ` · ${t('文档', 'documents')} ${docsIndex.documents}`}
+                {typeof docsIndex.chunks === 'number' &&
+                  ` · ${t('分块', 'chunks')} ${docsIndex.chunks}`}
+                {typeof docsIndex.generation === 'number' &&
+                  ` · ${t('索引代次', 'generation')} ${docsIndex.generation}`}
+                {docsIndex.detail ? ` · ${docsIndex.detail}` : ''}
+              </>
+            ) : (
+              t('尚未收到状态', 'No status received yet')
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground">{docsIndexHint()}</p>
+          {!equalJson(draft.retrieval, settings.retrieval) && (
             <p className="text-xs text-muted-foreground">
-              {t('索引状态：', 'Index status: ')}
-              {docsIndex ? (
-                <>
-                  {retrievalStateText(docsIndex.state || '', state.language)}
-                  {typeof docsIndex.documents === 'number' &&
-                    ` · ${t('文档', 'documents')} ${docsIndex.documents}`}
-                  {typeof docsIndex.chunks === 'number' &&
-                    ` · ${t('分块', 'chunks')} ${docsIndex.chunks}`}
-                  {typeof docsIndex.generation === 'number' &&
-                    ` · ${t('索引代次', 'generation')} ${docsIndex.generation}`}
-                  {docsIndex.detail ? ` · ${docsIndex.detail}` : ''}
-                </>
-              ) : (
-                t('还没收到状态；点“查询状态”获取。', 'No status yet; use "Check status".')
+              {t(
+                '检索设置尚未保存；上方显示当前已保存配置的状态。',
+                'Document search changes are not saved; the status above reflects the saved settings.',
               )}
             </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                onClick={() =>
-                  void run(async () => {
-                    await invoke('assistant_docs_index', { action: 'refresh' });
-                    setStatus(
-                      t(
-                        '已请求更新文档索引；状态见上方。',
-                        'Document index update requested; see the status above.',
-                      ),
-                    );
-                  })
-                }
-              >
-                {t('更新文档索引', 'Update document index')}
-              </Button>
-              <Button
-                onClick={() =>
-                  void run(async () => {
-                    await invoke('assistant_docs_index', { action: 'status' });
-                    setStatus(t('已请求索引状态。', 'Index status requested.'));
-                  })
-                }
-              >
-                {t('查询状态', 'Check status')}
-              </Button>
-            </div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={
+                !settings.retrieval.enabled || !equalJson(draft.retrieval, settings.retrieval)
+              }
+              onClick={() =>
+                void run(async () => {
+                  await invoke('assistant_docs_index', { action: 'refresh' });
+                  setStatus(
+                    t(
+                      '已请求更新文档索引；状态见上方。',
+                      'Document index update requested; see the status above.',
+                    ),
+                  );
+                })
+              }
+            >
+              {t('更新文档索引', 'Update document index')}
+            </Button>
+            <Button
+              disabled={
+                !settings.retrieval.enabled || !equalJson(draft.retrieval, settings.retrieval)
+              }
+              onClick={() =>
+                void run(async () => {
+                  await invoke('assistant_docs_index', { action: 'status' });
+                  setStatus(t('已请求索引状态。', 'Index status requested.'));
+                })
+              }
+            >
+              {t('查询状态', 'Check status')}
+            </Button>
           </div>
+        </div>
+        <Advanced title={t('高级设置', 'Advanced')}>
+          {builtin && !customProvider && serviceUrlField}
+          {builtin && (
+            <>
+              <Field label={t('接口格式', 'API format')}>
+                <Select
+                  value={draft.api_format}
+                  onChange={(e) =>
+                    patch(withContextWindowCleared(draft, { api_format: e.target.value }))
+                  }
+                >
+                  <option value="chat_completions">Chat Completions</option>
+                  <option value="responses">Responses</option>
+                  <option value="anthropic">Anthropic</option>
+                </Select>
+              </Field>
+              <Field
+                label={t('输出 token 上限', 'Maximum output tokens')}
+                unit={t('tokens', 'tokens')}
+                range={t('≥ 1 的整数', 'integer ≥ 1')}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  value={draft.max_output_tokens}
+                  onChange={(e) => patch({ max_output_tokens: Number(e.target.value) })}
+                />
+              </Field>
+              <Field
+                label={t('上下文窗口', 'Context window')}
+                hint={t(
+                  '内置 API 按这个窗口预留输入、输出和安全余量。留空时只对文档确认的 DeepSeek V4 模型自动取 1M；未知模型留空会在发送前要求填写，不会猜一个数。',
+                  'Built-in API requests reserve input, output and a safety margin against this window. Blank auto-resolves only for the documented DeepSeek V4 models (1M); for any unknown model a blank window asks you to fill it in before sending instead of guessing.',
+                )}
+                unit={t('tokens', 'tokens')}
+                range={t(
+                  '1024–10000000 的整数；留空 = 自动',
+                  'integer 1024–10000000; blank = auto',
+                )}
+              >
+                <Input
+                  type="number"
+                  min={1024}
+                  max={10_000_000}
+                  value={draft.context_window ?? ''}
+                  onChange={(e) =>
+                    patch({
+                      context_window: e.target.value === '' ? null : Number(e.target.value),
+                    })
+                  }
+                />
+              </Field>
+              <Field
+                label={t('超时秒数', 'Timeout (seconds)')}
+                unit={t('秒', 'seconds')}
+                range={t('≥ 1 的整数', 'integer ≥ 1')}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  value={draft.timeout_seconds}
+                  onChange={(e) => patch({ timeout_seconds: Number(e.target.value) })}
+                />
+              </Field>
+              <Field label={t('额外 API 选项（JSON）', 'Additional API options (JSON)')}>
+                <textarea
+                  aria-label={t('额外 API 选项', 'Additional API options')}
+                  value={options}
+                  onChange={(e) => {
+                    setStatus('');
+                    setOptions(e.target.value);
+                  }}
+                />
+              </Field>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={draft.strict}
+                  onChange={(e) => patch({ strict: e.target.checked })}
+                />{' '}
+                {t('严格工具格式', 'Strict tool format')}
+              </label>
+            </>
+          )}
+          <Field
+            label={t('每会话最多轮数', 'Turns per conversation')}
+            hint={t(
+              '达到上限后开始新对话可继续。',
+              'After the limit, start a new conversation to continue.',
+            )}
+            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
+          >
+            <Input
+              type="number"
+              min={0}
+              value={draft.session_turn_limit}
+              onChange={(e) => patch({ session_turn_limit: Number(e.target.value) })}
+            />
+          </Field>
+          <Field
+            label={t('每会话最多 token', 'Tokens per conversation')}
+            hint={t(
+              '累计 prompt + completion。每次调用模型都会把整段对话和工具说明重新计入一遍（一次约 1–2 万），一轮带工具调用常有好几次。',
+              'Cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
+            )}
+            unit={t('tokens', 'tokens')}
+            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
+          >
+            <Input
+              type="number"
+              min={0}
+              value={draft.session_token_limit}
+              onChange={(e) => patch({ session_token_limit: Number(e.target.value) })}
+            />
+          </Field>
           {/* U01：只读历史仓库数据（Desktop + CoLM 官方）。同步是显式动作，聊天永远不会自动触发。 */}
           <div className="space-y-2 border-t pt-3">
             <strong>{t('仓库数据（只读历史）', 'Repository data (read-only history)')}</strong>

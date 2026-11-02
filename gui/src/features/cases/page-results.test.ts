@@ -53,6 +53,7 @@ test('preparation callbacks retain native evidence and errors through both async
     errors: string[] = [];
   const lock = { current: false };
   const work = callback(prep, 'work', {
+    registerCloseGuard: () => () => {},
     lock,
     setBusy: () => {},
     setResult: (value: unknown) => shown.push(value),
@@ -81,6 +82,8 @@ test('preparation callbacks retain native evidence and errors through both async
     form: { dst: '/era5.nc', lat: '1', lon: '2' },
     num: () => 1,
     invoke: async () => downloaded,
+    setProduced: () => {},
+    setForm: () => {},
   });
   assert.equal(await execute(), downloaded);
   const report = { unresolved: 0, filled: 12 };
@@ -89,6 +92,8 @@ test('preparation callbacks retain native evidence and errors through both async
     slots: [],
     gapOptions: () => ({}),
     invoke: async () => report,
+    confirmOverwrite: (write: (overwrite: boolean) => Promise<unknown>) => write(false),
+    setProduced: () => {},
     setImported: () => {},
   });
   assert.deepEqual(await finish({ staged_path: '/stage', final_path: '/forcing.nc' }), {
@@ -109,6 +114,7 @@ test('stopping data preparation reads as a decision, not a failure', async () =>
     declined: string[] = [],
     notices: [string, boolean | undefined][] = [];
   const work = callback(prep, 'work', {
+    registerCloseGuard: () => () => {},
     lock: { current: false },
     setBusy: () => {},
     setResult: () => {},
@@ -295,6 +301,10 @@ test('resource and run reconciliation callbacks return the recorded failure to t
   };
   const remote = { host: 'server', job: 'j1', pending: true, needs_reconciliation: true };
   const reconcile = callback('../runs/RunPanel.tsx', 'remoteAction', {
+    host: 'server',
+    currentHost: { current: 'server' },
+    t: (_zh: string, en: string) => en,
+    cancelLock: { current: false },
     lock: { current: false },
     monitor: false,
     remotePermissions: remoteRunPermissions(remote),
@@ -390,7 +400,7 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
       ...context,
       task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => false),
     })(),
-    /selection changed/,
+    /分析条件已改变/,
   );
   assert.equal(downloads.length, 0, 'a late response does not download a different selection');
 });
@@ -1318,8 +1328,9 @@ test('preparation sends only active case or pending case settings to native data
   const run = async (preparation: ReturnType<typeof casePreparationOptions>, mode: string) => {
     const execute = callback(prep, 'execute', {
       // 做好的站点文件记下来，"用于新算例"带着它去新建模拟。
-      setProduced: (next: (old: Record<string, string>) => Record<string, string>) =>
-        produced.push(next({})),
+      setProduced: (
+        next: Record<string, string> | ((old: Record<string, string>) => Record<string, string>),
+      ) => produced.push(typeof next === 'function' ? next({}) : next),
       work: async (fn: () => Promise<unknown>) => fn(),
       state,
       preparation,
@@ -1432,6 +1443,8 @@ test('process saves refresh history availability in both directions without rese
       revision: 1,
       invoke: async (name: string) => (name === 'model_case_context' ? context : undefined),
       setModelContext: () => {},
+      setContextStale: () => {},
+      contextStaleRef: { current: false },
       setValues: (apply: (old: Record<string, string>) => Record<string, string>) => {
         drafts = apply(drafts);
       },
@@ -1471,4 +1484,231 @@ test('history refresh ignores a response after leaving the case', async () => {
     setContextReason: () => assert.fail('stale reason update'),
   });
   await refresh({ entry: { dir: '/old-preview' }, profile: {} }, request);
+});
+
+test('case save stays successful when either context or history refresh fails after writing', async () => {
+  for (const failure of ['context', 'history']) {
+    const request = { active: true };
+    const values = { DEF_field: 'new' };
+    let saved: unknown;
+    const notices: string[] = [];
+    const calls: string[] = [];
+    const save = callback('./CasesPage.tsx', 'save', {
+      dir: '/case',
+      epoch: { current: request },
+      work: async (fn: () => Promise<unknown>) => fn(),
+      periodProblem: () => null,
+      values,
+      saved: { DEF_field: 'old' },
+      forcingDirty: false,
+      forcingInput: null,
+      effectiveProfile: null,
+      state: { versionRef: null },
+      physics: {},
+      invoke: async (command: string) => {
+        calls.push(command);
+        if (command === 'model_case_context') {
+          if (failure === 'context') throw new Error('context unavailable');
+          return { entry: { dir: '/case' }, profile: {} };
+        }
+      },
+      setSaved: (next: unknown) => {
+        saved = next;
+      },
+      setExplicitValues: () => {},
+      setDateDraft: () => {},
+      setError: () => {},
+      setModelContext: () => {},
+      setContextStale: () => {},
+      contextStaleRef: { current: false },
+      versionId: 'official',
+      revision: 1,
+      refreshHistory: async () => {
+        throw new Error('history unavailable');
+      },
+      notify: (message: string) => notices.push(message),
+      t: (_zh: string, en: string) => en,
+    });
+    await save();
+    assert.deepEqual(saved, values);
+    assert.deepEqual(calls, ['case_data_save', 'model_case_context']);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /settings were saved, but refreshing the display failed/);
+    assert.match(notices[0], /no need to save again/);
+  }
+});
+
+for (const failure of ['write', 'context', 'history']) {
+  test(`case option changes distinguish a ${failure} failure from a completed save`, async () => {
+    const before = { DEF_flag: '.false.', DEF_removed: 'old', DEF_kept: 'keep' };
+    const local = { values: { ...before }, saved: { ...before }, explicit: { ...before } };
+    const request = { active: true };
+    const notices: string[] = [];
+    const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      dir: '/case',
+      editingDisabled: false,
+      dirty: false,
+      lock: { current: false },
+      t: (_zh: string, en: string) => en,
+      physics: {},
+      values: local.values,
+      effectiveProfile: {},
+      configurationKernel: undefined,
+      caseSimulationDomain,
+      exclusionPatch: () => ({ patch: { DEF_flag: '.true.', DEF_removed: null }, closed: [] }),
+      work: (fn: () => Promise<unknown>) => fn(),
+      epoch: { current: request },
+      state: { versionRef: {}, selectedCase: undefined },
+      versionId: 'official',
+      revision: 1,
+      invoke: async (name: string) => {
+        if (name === 'case_data_save' && failure === 'write') throw new Error('write failed');
+        if (name === 'model_case_context') {
+          assert.deepEqual(local.saved, { DEF_flag: '.true.', DEF_kept: 'keep' });
+          if (failure === 'context') throw new Error('context failed');
+          return { entry: { dir: '/case' }, profile: {} };
+        }
+      },
+      setModelContext: () => {},
+      setContextStale: () => {},
+      contextStaleRef: { current: false },
+      setValues: (apply: (old: typeof before) => typeof before) => {
+        local.values = apply(local.values);
+      },
+      setSaved: (apply: (old: typeof before) => typeof before) => {
+        local.saved = apply(local.saved);
+      },
+      setExplicitValues: (apply: (old: typeof before) => typeof before) => {
+        local.explicit = apply(local.explicit);
+      },
+      setError: () => {},
+      refreshHistory: async () => {
+        throw new Error('history failed');
+      },
+      notify: (message: string) => notices.push(message),
+    });
+    if (failure === 'write') {
+      await assert.rejects(change({ DEF_flag: '.true.' }), /write failed/);
+      assert.deepEqual(local, { values: before, saved: before, explicit: before });
+      assert.deepEqual(notices, []);
+    } else {
+      await change({ DEF_flag: '.true.' });
+      for (const value of Object.values(local))
+        assert.deepEqual(value, { DEF_flag: '.true.', DEF_kept: 'keep' });
+      assert.equal(notices.length, 1);
+      assert.match(notices[0], /settings were saved, but refreshing the display failed/);
+      assert.match(notices[0], new RegExp(`${failure} failed`));
+    }
+  });
+}
+
+test('ERA5 is auxiliary data and only finished table outputs seed new-case forcing', async () => {
+  let produced: Record<string, string> = { met: '/old.nc' };
+  let auxiliary = '';
+  const setProduced = (
+    next: Record<string, string> | ((old: Record<string, string>) => Record<string, string>),
+  ) => {
+    produced = typeof next === 'function' ? next(produced) : next;
+  };
+  const execute = callback(prep, 'execute', {
+    mode: 'era5',
+    form: { dst: '/era5.nc', start: '2001-01-01', end: '2002-01-01' },
+    work: async (fn: () => Promise<unknown>) => fn(),
+    num: () => 1,
+    invoke: async () => '/era5.nc',
+    setProduced,
+    setForm: (apply: (old: Record<string, string>) => Record<string, string>) => {
+      auxiliary = apply({}).era5;
+    },
+    t: (_zh: string, en: string) => en,
+  });
+  await execute();
+  assert.deepEqual(produced, {});
+  assert.equal(auxiliary, '/era5.nc');
+  const calls: Record<string, unknown>[] = [];
+  let confirmedPath = '';
+  const finish = callback(prep, 'finish', {
+    work: async (fn: () => Promise<unknown>) => fn(),
+    slots: [],
+    gapOptions: () => ({}),
+    confirmOverwrite: async (write: (overwrite: boolean) => Promise<unknown>, output: string) => {
+      confirmedPath = output;
+      return write(true);
+    },
+    invoke: async (_command: string, args: Record<string, unknown>) => {
+      calls.push(args);
+      return { unresolved: 0 };
+    },
+    setImported: () => {},
+    setProduced,
+    t: (_zh: string, en: string) => en,
+  });
+  await finish({
+    staged_path: '/staged.nc',
+    final_path: '/final.nc',
+    latitude: 30,
+    longitude: 120,
+  });
+  assert.equal(confirmedPath, '/final.nc');
+  assert.equal(calls[0].overwrite, true);
+  assert.equal(produced.met, '/final.nc');
+});
+
+test('preparation keeps its close guard registered for the task lifetime, including failure', async () => {
+  let guard: (() => string) | null = null;
+  const work = callback(prep, 'work', {
+    registerCloseGuard: (reason: () => string) => {
+      guard = reason;
+      return () => {
+        guard = null;
+      };
+    },
+    lock: { current: false },
+    setBusy: () => {},
+    setResult: () => {},
+    setError: () => {},
+    setDeclined: () => {},
+    notify: () => {},
+    t: (_zh: string, en: string) => en,
+  });
+  let finish: () => void = () => {};
+  const running = work(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  assert.equal(typeof guard, 'function');
+  assert.match(guard!(), /closing interrupts/);
+  finish();
+  await running;
+  assert.equal(guard, null);
+  await assert.rejects(
+    work(async () => {
+      throw new Error('write failed');
+    }),
+    /write failed/,
+  );
+  assert.equal(guard, null);
+});
+
+test('table finalization asks about the actual destination before retrying an overwrite', async () => {
+  const requests: boolean[] = [];
+  let question = '';
+  const confirmOverwrite = callback(prep, 'confirmOverwrite', {
+    form: { dst: '/table-output-directory' },
+    askConfirm: async (message: string) => {
+      question = message;
+      return true;
+    },
+    t: (_zh: string, en: string) => en,
+  });
+  const result = await confirmOverwrite(async (overwrite: boolean) => {
+    requests.push(overwrite);
+    if (!overwrite) throw new Error('产物已存在，未覆盖');
+    return 'written';
+  }, '/table-output-directory/station.nc');
+  assert.equal(result, 'written');
+  assert.deepEqual(requests, [false, true]);
+  assert.match(question, /station\.nc/);
 });

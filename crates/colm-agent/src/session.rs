@@ -6,6 +6,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -21,6 +22,7 @@ pub use tasks::TaskSnapshot;
 
 /// 会话累计用量的文件名（与 `messages.jsonl` 同目录）。
 const USAGE_FILE: &str = "usage.json";
+static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 只有自己能读的小文件，先写临时文件再换名。
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -44,6 +46,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 pub struct Session {
     pub id: String,
     dir: Option<PathBuf>,
+    directory_ready: AtomicBool,
     pub history: Vec<Message>,
     /// 本会话累计用量。
     pub usage: Usage,
@@ -59,11 +62,17 @@ fn now_ms() -> u128 {
 impl Session {
     /// 新会话；`data_dir` 为空时不落盘（测试）。
     pub fn new(data_dir: Option<&Path>, system_prompt: &str) -> Result<Self> {
-        let id = format!("{}-{}", now_ms(), std::process::id());
+        let id = format!(
+            "{}-{}-{}",
+            now_ms(),
+            std::process::id(),
+            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
         let dir = data_dir.map(|root| root.join("sessions").join(&id));
         Ok(Self {
             id,
             dir,
+            directory_ready: AtomicBool::new(false),
             history: vec![Message::System {
                 content: system_prompt.to_owned(),
             }],
@@ -97,6 +106,7 @@ impl Session {
         Ok(Self {
             id: id.to_owned(),
             dir: Some(dir),
+            directory_ready: AtomicBool::new(true),
             history,
             usage,
         })
@@ -107,7 +117,7 @@ impl Session {
         self.usage.prompt_tokens += usage.prompt_tokens;
         self.usage.completion_tokens += usage.completion_tokens;
         if let Some(dir) = &self.dir {
-            if dir.join("messages.jsonl").exists() {
+            if self.directory_ready.load(Ordering::Acquire) && dir.join("messages.jsonl").exists() {
                 let _ = write_private(
                     &dir.join(USAGE_FILE),
                     &serde_json::to_vec(&self.usage).unwrap_or_default(),
@@ -139,6 +149,7 @@ impl Session {
     pub fn task_snapshot(&self, resumed: bool) -> Result<Option<TaskSnapshot>> {
         self.dir
             .as_deref()
+            .filter(|_| self.directory_ready.load(Ordering::Acquire))
             .map(|dir| tasks::load(dir, resumed))
             .transpose()
             .map(Option::flatten)
@@ -149,6 +160,13 @@ impl Session {
         let Some(dir) = &self.dir else {
             return Ok(());
         };
+        if !self.directory_ready.load(Ordering::Acquire) {
+            std::fs::create_dir_all(dir.parent().expect("session directory has a parent"))?;
+            // Reserve lazily and exclusively: a reused ID must never append to older history.
+            std::fs::create_dir(dir)
+                .with_context(|| format!("cannot create new session {}", dir.display()))?;
+            self.directory_ready.store(true, Ordering::Release);
+        }
         let from = if dir.join("messages.jsonl").exists() {
             from
         } else {
@@ -171,11 +189,9 @@ impl Session {
         id: &str,
         experience_fingerprint: Option<&str>,
     ) -> Result<()> {
-        let Some(dir) = self
-            .dir
-            .as_ref()
-            .filter(|d| d.join("messages.jsonl").exists())
-        else {
+        let Some(dir) = self.dir.as_ref().filter(|d| {
+            self.directory_ready.load(Ordering::Acquire) && d.join("messages.jsonl").exists()
+        }) else {
             return Ok(());
         };
         let path = dir.join("backend.json");
@@ -221,7 +237,9 @@ impl Session {
             return Ok(());
         };
         // 还没落盘的会话不记审计（只开了面板没说话）。
-        if file != "messages.jsonl" && !dir.join("messages.jsonl").exists() {
+        if !self.directory_ready.load(Ordering::Acquire)
+            || (file != "messages.jsonl" && !dir.join("messages.jsonl").exists())
+        {
             return Ok(());
         }
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;

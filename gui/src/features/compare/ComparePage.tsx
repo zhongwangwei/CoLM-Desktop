@@ -13,12 +13,14 @@ import {
   effectiveSummary,
   freezeCompareSnapshot,
   parseOpenbenchConfig,
+  restoreCompareSnapshot,
   snapshotStale,
   structuralProblems,
   type CompareSnapshot,
 } from './config';
 import {
   benchErrorText,
+  claimRemoteWatch,
   benchLogText,
   buildOpenbenchConfig,
   COMPARISON_ITEM_CHOICES,
@@ -233,10 +235,13 @@ const stored = (key: string) => {
 };
 const store = (key: string, value: string) => {
   try {
-    if (value) globalThis.localStorage?.setItem(key, value);
-    else globalThis.localStorage?.removeItem(key);
+    const storage = globalThis.localStorage;
+    if (!storage) return false;
+    if (value) storage.setItem(key, value);
+    else storage.removeItem(key);
+    return true;
   } catch {
-    /* 存不下就只在这次会话里用 */
+    return false;
   }
 };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -248,7 +253,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 往往就在服务器上，拉回本机评估不现实）。
  */
 export default function ComparePage() {
-  const { state } = useApp();
+  const { state, registerCloseGuard } = useApp();
   // 跨路由可见的比较任务（UX ③）：页面负责真实提交/等待，任务条只镜像阶段与结果。
   const benchTasks = useBenchTasks();
   const benchTaskId = useRef('');
@@ -273,11 +278,12 @@ export default function ComparePage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [reportError, setReportError] = useState('');
   const [notice, setNotice] = useState('');
   // U-05：运行/生成配置后的成功提示记着"针对哪一版设计"，设置一改就清掉，避免旧的"评估完成"继续挂着。
   const [runNotice, setRunNotice] = useState('');
   // U-05：评估配置正在提交（后端写 openbench.yaml）时徽标显示"正在写入"。
-  const [configSaving, setConfigSaving] = useState(false);
+  const [configSaving, setConfigSaving] = useState('');
   // 配置真正写进比较项目目录的那一版指纹：只有提交成功才记。徽标据此区分"页内已生成"与"已写盘"。
   const [writtenFingerprint, setWrittenFingerprint] = useState('');
   const [log, setLog] = useState<string[]>([]);
@@ -312,6 +318,8 @@ export default function ComparePage() {
     const draft = parseCompareDraft(stored(compareDraftKey(stored('colm.benchHost'))));
     return draft && compareDraftHasContent(draft) ? draft : null;
   });
+  const draftHost = useRef(host);
+  const completedDraft = useRef('');
   const [metricOptions, setMetricOptions] = useState<MetricOption[]>(FALLBACK_METRICS);
   const [scoreOptions, setScoreOptions] = useState<MetricOption[]>(FALLBACK_SCORES);
   const [dialog, setDialog] = useState<RegisterDialog>(null);
@@ -379,7 +387,10 @@ export default function ComparePage() {
   const [unsettled, setUnsettled] = useState<{ job: ActiveJob; reason: string } | null>(null);
   const [lastJob, setLastJob] = useState<ActiveJob | null>(null);
   // GUI-08：正在取回的报告（机器 + 比较名）；同一份取回期间不重复触发。
-  const fetching = useRef<Set<string>>(new Set());
+  const fetching = useRef(
+    new Map<string, { epoch: number; owner: object; promise: Promise<void> }>(),
+  );
+  const reportSelection = useRef<object | null>(null);
   // 生成配置时冻结"设计 + 站点清单 + 文本 + 指纹"成同一份快照；摘要/指纹/运行都读它。
   // 配置文本本身不冻结（手改后运行时重新解析），但站点清单与设计不能再读当前表单（审查报告 R01）。
   const generated = useRef<CompareSnapshot | null>(null);
@@ -434,30 +445,76 @@ export default function ComparePage() {
   };
   // 草稿自动保存：只存页面输入（不含运行状态/报告）。有"待恢复"提示时先不写，避免把用户还没决定
   // 恢复的旧草稿覆盖掉；提交运行期间也不写，避免把正在写的配置当成草稿。
+  const currentDraft = (): CompareDraft => ({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    host,
+    name,
+    from,
+    to,
+    timRes,
+    gridRes,
+    chosen,
+    weight,
+    minYear,
+    timeAlignment,
+    numCores,
+    metrics,
+    scores,
+    comparisonItems,
+    statisticsItems,
+    yaml,
+    picks: picks as CompareDraftPick[],
+    snapshot: generated.current,
+  });
+
+  const saveDraft = (allowMatchingOffer = false) => {
+    if (busy || draftHost.current !== host) return false;
+    const draft = currentDraft();
+    const content = JSON.stringify({ ...draft, savedAt: '' });
+    if (
+      draftOffer &&
+      (!allowMatchingOffer || JSON.stringify({ ...draftOffer, savedAt: '' }) !== content)
+    )
+      return false;
+    return store(
+      compareDraftKey(host),
+      content !== completedDraft.current && compareDraftHasContent(draft)
+        ? JSON.stringify(draft)
+        : '',
+    );
+  };
+  const changeHost = (next: string) => {
+    if (next === host) return true;
+    if (busy || lock.current) return false;
+    const draft = currentDraft();
+    const content = JSON.stringify({ ...draft, savedAt: '' });
+    if (compareDraftHasContent(draft) && content !== completedDraft.current) {
+      if (draftOffer && JSON.stringify({ ...draftOffer, savedAt: '' }) !== content) {
+        setNotice(
+          t(
+            '当前输入与待恢复草稿不同，请先处理草稿再切换机器。',
+            'The current input differs from the offered draft. Resolve the draft before switching machines.',
+          ),
+        );
+        return false;
+      }
+      if (!saveDraft(true)) {
+        setNotice(
+          t(
+            '当前草稿未能保存，输入已保留；请先保存或清理存储空间再切换机器。',
+            'The draft could not be saved. Your input is kept; save it or free storage before switching machines.',
+          ),
+        );
+        return false;
+      }
+    }
+    setHostState(next);
+    return true;
+  };
   useEffect(() => {
-    if (busy || draftOffer) return;
-    const draft: CompareDraft = {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      host,
-      name,
-      from,
-      to,
-      timRes,
-      gridRes,
-      chosen,
-      weight,
-      minYear,
-      timeAlignment,
-      numCores,
-      metrics,
-      scores,
-      comparisonItems,
-      statisticsItems,
-      yaml,
-      picks: picks as CompareDraftPick[],
-    };
-    store(compareDraftKey(host), compareDraftHasContent(draft) ? JSON.stringify(draft) : '');
+    saveDraft();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     busy,
     draftOffer,
@@ -495,6 +552,14 @@ export default function ComparePage() {
   const task = async (fn: () => Promise<unknown>, done?: string) => {
     if (lock.current) return;
     lock.current = true;
+    const releaseCloseGuard = registerCloseGuard(() =>
+      !host
+        ? t(
+            '本机 OpenBench 操作正在执行，关闭会停止它。',
+            'A local OpenBench operation is running; closing stops it.',
+          )
+        : null,
+    );
     setBusy(true);
     setError('');
     setNotice('');
@@ -502,10 +567,12 @@ export default function ComparePage() {
       await fn();
       if (done) setNotice(done);
     } catch (e) {
+      if ((e as { reportFailure?: boolean })?.reportFailure) return;
       if (String(e).includes(LEFT)) return;
       if (benchErrorText(String(e))[0] === '已停止') setNotice(t('已停止', 'Stopped'));
       else setError(shown(e));
     } finally {
+      releaseCloseGuard();
       lock.current = false;
       setBusy(false);
       // 后台刷新用 quiet：本次操作已经给出了错误/提示，不能被刷新失败盖掉（GUI-05/08）。
@@ -526,6 +593,13 @@ export default function ComparePage() {
     const history = jobEnded(identity, end, new Date().toISOString(), reason);
     store(jobKey(machine), '');
     store(jobHistoryKey(machine), JSON.stringify(history));
+    if (identity.taskId) {
+      benchTasks.finish(identity.taskId, {
+        state: end === 'succeeded' ? 'done' : end === 'failed' ? 'failed' : 'interrupted',
+        error: reason || null,
+      });
+      benchTasks.registerStop(identity.taskId, null);
+    }
     if (hostRef.current !== machine) return;
     setUnsettled((old) => (old && old.job.job === identity.job ? null : old));
     setLastJob(history);
@@ -571,6 +645,7 @@ export default function ComparePage() {
   // GUI-07：只有服务器明确给出终态才清掉持久化身份；一次查询失败只标记"暂时无法确认"并保留身份。
   const watch = async (machine: string, active: ActiveJob): Promise<WatchOutcome> => {
     const epoch = hostEpoch.current;
+    const ownsWatch = claimRemoteWatch(machine);
     let identity: ActiveJob = {
       ...active,
       host: machine,
@@ -579,11 +654,30 @@ export default function ComparePage() {
       uncertain: false,
       lastError: undefined,
     };
+    if (identity.kind === 'run') {
+      // 已被用户关闭的任务条需要重新登记；新提交的任务可能还没完成 React 渲染。
+      if (active.submittedAt && !benchTasks.tasks.some((task) => task.id === identity.taskId))
+        identity.taskId = undefined;
+      identity.taskId ??=
+        benchTasks.tasks.find((task) => task.host === machine && task.job === identity.job)?.id ??
+        benchTasks.begin({
+          host: machine,
+          project: identity.name ?? '',
+          label: identity.name ?? identity.job,
+          kind: 'run',
+          job: identity.job,
+          phase: ['核对服务器作业', 'Checking the server job'],
+        });
+      benchTasks.update(identity.taskId, { state: 'running', error: null });
+      benchTasks.registerStop(identity.taskId, stop);
+    }
+    let terminal = false;
     job.current = identity;
     setActiveJob(identity);
     rememberJob(machine, identity);
     try {
       for (;;) {
+        if (!ownsWatch()) return { state: 'detached' };
         if (!alive.current) throw new Error(LEFT);
         let reply: RemoteJob;
         try {
@@ -593,22 +687,25 @@ export default function ComparePage() {
             lines: 80,
           });
         } catch (error) {
+          if (!ownsWatch()) return { state: 'detached' };
           // SSH/网络暂时不通：不能当成作业失败，更不能删掉它的身份 —— 远端可能还在跑（旧行为就是这样丢的）。
           const kept = markUncertain(machine, identity, String(error));
           if (!stillCurrent(machine, epoch)) return { state: 'detached' };
           return { state: 'uncertain', job: kept, reason: String(error) };
         }
+        if (!ownsWatch()) return { state: 'detached' };
         // 用户换去看别的机器了：日志不写进新页面；身份还持久化着，回来时接着核对。
         if (!stillCurrent(machine, epoch)) return { state: 'detached' };
         setLog(reply.status.log_tail.split('\n').filter(Boolean));
-        if (benchTaskId.current)
-          benchTasks.update(benchTaskId.current, {
+        if (identity.taskId)
+          benchTasks.update(identity.taskId, {
             phase:
               reply.status.state === 'running'
                 ? ['服务器评估中', 'Running on the server']
                 : ['排队中', 'Queued'],
           });
         const end = remoteJobTerminal(reply);
+        terminal = end !== null;
         if (end === 'succeeded') {
           settleJob(machine, identity, 'succeeded');
           return { state: 'succeeded', job: identity };
@@ -657,9 +754,15 @@ export default function ComparePage() {
         await sleep(3000);
       }
     } finally {
-      job.current = null;
-      stopping.current = false;
-      setActiveJob(null);
+      if (ownsWatch() && !terminal && identity.taskId) {
+        benchTasks.finish(identity.taskId, { state: 'interrupted' });
+        benchTasks.registerStop(identity.taskId, null);
+      }
+      if (ownsWatch()) {
+        job.current = null;
+        stopping.current = false;
+        setActiveJob(null);
+      }
     }
   };
   // watch 的结果 → task 的错误/提示语义：失败与取消抛错（task 统一显示），失联只提示并保留身份（GUI-07）。
@@ -679,6 +782,29 @@ export default function ComparePage() {
     }
     if (outcome.state === 'failed') throw new Error(outcome.error);
     if (outcome.state === 'cancelled') throw new Error('已停止');
+    if (outcome.job.kind === 'run' && outcome.job.submittedDraft) {
+      const submitted = outcome.job.submittedDraft;
+      const saved = parseCompareDraft(stored(compareDraftKey(machine)));
+      if (saved && JSON.stringify({ ...saved, savedAt: '' }) === submitted)
+        store(compareDraftKey(machine), '');
+      if (hostRef.current === machine && alive.current) {
+        completedDraft.current = submitted;
+        setDraftOffer((offered) =>
+          offered && JSON.stringify({ ...offered, savedAt: '' }) === submitted ? null : offered,
+        );
+        if (outcome.job.fingerprint) {
+          setWrittenFingerprint(outcome.job.fingerprint);
+          setLastRun({
+            runId: outcome.job.job,
+            configSha: outcome.job.configSha ?? '',
+            fingerprint: outcome.job.fingerprint,
+            at: outcome.job.submittedAt ?? new Date().toISOString(),
+            report: null,
+          });
+          showRunNotice(t('评估完成', 'Evaluation finished'), outcome.job.fingerprint);
+        }
+      }
+    }
     if (onSuccess) await onSuccess();
     return outcome;
   };
@@ -687,7 +813,10 @@ export default function ComparePage() {
   const assertNoUnresolvedJob = (machine: string) => {
     const pending = parseRemoteJob(stored(jobKey(machine)));
     if (!pending) return;
-    const what = pending.kind === 'run' && pending.name ? `比较 ${pending.name}` : '安装环境';
+    const what =
+      pending.kind === 'run' && pending.name
+        ? t(`比较 ${pending.name}`, `comparison ${pending.name}`)
+        : t('安装环境', 'environment installation');
     throw new Error(
       t(
         `服务器 ${machine} 上还有未确认终态的作业（${pending.job}，${what}）。先核对它的终态（或停止它），确认后才会提交新作业，避免重复写同一成果目录。`,
@@ -1090,6 +1219,31 @@ export default function ComparePage() {
     store('colm.benchHost', host);
     hostEpoch.current += 1;
     const epoch = hostEpoch.current;
+    draftHost.current = host;
+    completedDraft.current = '';
+    const draft = parseCompareDraft(stored(compareDraftKey(host)));
+    setDraftOffer(draft?.host === host && compareDraftHasContent(draft) ? draft : null);
+    setName('comparison');
+    setFrom('');
+    setTo('');
+    setTimRes('Day');
+    setGridRes('');
+    autoGridRes.current = '';
+    setWeight('');
+    setMinYear('1');
+    setTimeAlignment('');
+    setNumCores('');
+    setMetrics(['bias', 'RMSE', 'correlation']);
+    setScores(['Overall_Score']);
+    setComparisonItems([...DEFAULT_COMPARISON_ITEMS]);
+    setStatisticsItems([]);
+    setLastRun(null);
+    setReport(null);
+    setWrittenFingerprint('');
+    setRunNotice('');
+    setError('');
+    setReportError('');
+    setNotice('');
     setStatus(null);
     setReferences([]);
     setPicks([]);
@@ -1113,6 +1267,13 @@ export default function ComparePage() {
       return;
     }
     setUnsettled(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host]);
+  useEffect(() => {
+    // A 的轮询退出并释放锁后，再恢复 B；换机器不会取消远端作业。
+    if (busy || lock.current || !host) return;
+    const pending = parseRemoteJob(stored(jobKey(host)));
+    if (!pending || pending.uncertain) return;
     void task(async () => {
       const outcome = await watch(host, pending);
       await afterWatch(host, outcome, async () => {
@@ -1121,7 +1282,7 @@ export default function ComparePage() {
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host]);
+  }, [host, busy]);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -1132,7 +1293,7 @@ export default function ComparePage() {
   // GUI-04：生成配置与运行共用同一份完整评估设计（含机器/OpenBench/参考数据路径身份）。
   const comparisonDesign = (): ComparisonDesign => ({
     name,
-    years: [Number(from), Number(to)],
+    years: [from.trim() ? Number(from) : NaN, to.trim() ? Number(to) : NaN],
     timRes,
     variables: chosen,
     simulations: ok.map((p) => ({
@@ -1184,7 +1345,11 @@ export default function ComparePage() {
   const staleSnapshot = generatedConfig ? snapshotStale(generatedConfig, formDesign) : false;
   // 手改不能增删模拟或改单点站点清单路径：那些文件由后端按（冻结的）设计准备。
   const structureProblems = effectiveConfig
-    ? structuralProblems(generatedConfig?.design ?? formDesign, effectiveConfig)
+    ? structuralProblems(
+        generatedConfig?.design ?? formDesign,
+        effectiveConfig,
+        generatedConfig?.sites,
+      )
     : [];
   // 有效输入指纹 = 快照冻结的站点清单 + 当前文本解析出的完整配置。手改配置换指纹；改站点输入因快照
   // 过期而退回表单指纹，让完成提示/保存徽标也随改动失效。
@@ -1196,7 +1361,7 @@ export default function ComparePage() {
   // 运行期间用户还能改字段/改文本，完成提示回来时据此判断它是不是已经过时（U-05）。
   const latestEffective = useRef(effectiveFingerprint);
   latestEffective.current = effectiveFingerprint;
-  const yamlHandEdited = !!yaml && !!generatedConfig && yaml !== generatedConfig.generatedText;
+  const yamlHandEdited = !!yaml && (!generatedConfig || yaml !== generatedConfig.generatedText);
   // 生成配置之后表单又改过（但用户手写的内容还留着）：提示表单改动没有进入这份快照。
   const formChanged = staleSnapshot;
   // U-04：运行前条件摘要 = 冻结站点清单（站点输入）+ 当前解析出的有效配置（其余条件）；
@@ -1228,7 +1393,12 @@ export default function ComparePage() {
     generated: generatedConfig
       ? { fingerprint: generatedConfig.designFingerprint, config: generatedConfig.generatedText }
       : null,
-    submitting: configSaving,
+    submitting: !!configSaving && configSaving === yaml,
+    writtenFingerprint,
+    effectiveFingerprint:
+      effectiveConfig && !configProblems.length && !structureProblems.length
+        ? effectiveFingerprint
+        : null,
   });
   // 运行/保存成功提示只在同一份有效配置上有效；设置或文本一改就清掉（U-05）。
   const showRunNotice = (message: string, fingerprint: string) => {
@@ -1277,9 +1447,21 @@ export default function ComparePage() {
   const simSpatial =
     simForm.dataType === 'grid' ||
     (simForm.dataType === 'auto' && (simForm.probe?.spatial ?? false));
-  const restoreDraft = () => {
+  const restoreDraft = async () => {
     const draft = draftOffer;
-    if (!draft) return;
+    if (!draft || draft.host !== host) return;
+    const epoch = hostEpoch.current;
+    if (compareDraftHasContent(currentDraft())) {
+      const proceed = await askConfirm(
+        t(
+          '恢复草稿会覆盖当前页面的输入，继续？',
+          'Restoring this draft replaces the current page inputs. Continue?',
+        ),
+        { confirmLabel: t('恢复草稿', 'Restore draft') },
+      );
+      if (!proceed || !stillCurrent(host, epoch)) return;
+    }
+    generated.current = restoreCompareSnapshot(draft.snapshot, host);
     setPicks(draft.picks as unknown as Pick[]);
     setName(draft.name);
     setFrom(draft.from);
@@ -1360,7 +1542,7 @@ export default function ComparePage() {
           ),
         );
       const frozenConfig = parsedNow.config;
-      const mismatched = structuralProblems(snapshot.design, frozenConfig);
+      const mismatched = structuralProblems(snapshot.design, frozenConfig, snapshot.sites);
       if (mismatched.length)
         throw new Error(
           t(mismatched.map(([zh]) => zh).join('；'), mismatched.map(([, en]) => en).join('; ')),
@@ -1373,6 +1555,10 @@ export default function ComparePage() {
         fingerprint: configFingerprint(snapshot.design, frozenConfig, snapshot.sites),
         at: new Date().toISOString(),
       };
+      const submittedDraft = JSON.stringify({ ...currentDraft(), savedAt: '' });
+      const epoch = hostEpoch.current;
+      let succeeded = false;
+      let watching = false;
       const project = comparisonName(name);
       benchTaskId.current = benchTasks.begin({
         host,
@@ -1383,8 +1569,8 @@ export default function ComparePage() {
       });
       benchTasks.registerStop(benchTaskId.current, stop);
       try {
-        // U-05：提交期间配置正在写入比较项目目录，徽标显示"正在保存"。
-        setConfigSaving(true);
+        // 提交阶段单独显示；排队或执行期间不能推断配置仍在写盘。
+        setConfigSaving(remote ? frozen.config : '');
         try {
           if (!remote) {
             benchTasks.update(benchTaskId.current, {
@@ -1403,6 +1589,19 @@ export default function ComparePage() {
               refRoot: scanDir || null,
             });
             // bench_run 会先把配置写进比较项目目录，再跑评估；能返回就说明这一版已写盘。
+            succeeded = true;
+            benchTasks.finish(benchTaskId.current, { state: 'done', report: result.report });
+            benchTasks.registerStop(benchTaskId.current, null);
+            completedDraft.current = submittedDraft;
+            const savedDraft = parseCompareDraft(stored(compareDraftKey(host)));
+            if (savedDraft && JSON.stringify({ ...savedDraft, savedAt: '' }) === submittedDraft)
+              store(compareDraftKey(host), '');
+            if (!stillCurrent(host, epoch)) return;
+            setDraftOffer((offered) =>
+              offered && JSON.stringify({ ...offered, savedAt: '' }) === submittedDraft
+                ? null
+                : offered,
+            );
             setWrittenFingerprint(frozen.fingerprint);
             setLastRun({
               runId: result.run_id ?? '',
@@ -1411,7 +1610,6 @@ export default function ComparePage() {
               at: frozen.at,
               report: result.report,
             });
-            if (result.report) await view(result.report);
             showRunNotice(
               result.run_id
                 ? t(
@@ -1421,10 +1619,7 @@ export default function ComparePage() {
                 : t('评估完成', 'Evaluation finished'),
               frozen.fingerprint,
             );
-            // 配置已经写进项目目录并跑完，草稿不再算"未完成"；失败/取消路径不清，留给用户恢复。
-            store(compareDraftKey(host), '');
-            benchTasks.finish(benchTaskId.current, { state: 'done', report: result.report });
-            benchTasks.registerStop(benchTaskId.current, null);
+            if (result.report) await view(result.report);
             return;
           }
           // 配置、参考数据根目录与提交主机属于同一个上下文：这里都用渲染时的当前机器，切机器会先清配置（GUI-05）。
@@ -1453,19 +1648,38 @@ export default function ComparePage() {
                 'The server did not confirm receiving the submission; tracking continues by job id. If no record ever appears, submit again later.',
               ),
             );
-          // 远程提交被接受时后端已在服务器上写好这一版配置；成功/失败的运行都不影响"已写盘"。
-          setWrittenFingerprint(frozen.fingerprint);
+          // 排队回执不证明作业体已经写盘；停止显示提交中，等成功终态确认。
+          setConfigSaving('');
           benchTasks.update(benchTaskId.current, {
             phase: ['等待服务器调度', 'Waiting for the scheduler'],
             job: submitted.job,
           });
           const runId = submitted.run_id ?? submitted.job;
-          const outcome = await watch(machine, { job: submitted.job, kind: 'run', name: project });
-          await afterWatch(machine, outcome, () => fetchReport(machine, project, runId));
+          watching = true;
+          const outcome = await watch(machine, {
+            job: submitted.job,
+            kind: 'run',
+            name: project,
+            taskId: benchTaskId.current,
+            submittedDraft,
+            fingerprint: frozen.fingerprint,
+            configSha: submitted.config_sha,
+          });
+          succeeded = outcome.state === 'succeeded';
+          await afterWatch(machine, outcome);
           if (outcome.state === 'succeeded') {
-            store(compareDraftKey(host), '');
-            benchTasks.finish(benchTaskId.current, { state: 'done' });
-            benchTasks.registerStop(benchTaskId.current, null);
+            setWrittenFingerprint(frozen.fingerprint);
+            completedDraft.current = submittedDraft;
+            const savedDraft = parseCompareDraft(stored(compareDraftKey(host)));
+            if (savedDraft && JSON.stringify({ ...savedDraft, savedAt: '' }) === submittedDraft)
+              store(compareDraftKey(host), '');
+            if (!stillCurrent(host, epoch)) return;
+            setDraftOffer((offered) =>
+              offered && JSON.stringify({ ...offered, savedAt: '' }) === submittedDraft
+                ? null
+                : offered,
+            );
+
             setLastRun({
               runId,
               configSha: submitted.config_sha ?? '',
@@ -1474,92 +1688,124 @@ export default function ComparePage() {
               report: null,
             });
             showRunNotice(t('评估完成', 'Evaluation finished'), frozen.fingerprint);
+            await fetchReport(machine, project, runId);
           }
         } finally {
-          setConfigSaving(false);
+          setConfigSaving('');
         }
       } catch (error) {
         // 任务条只存原文；页面自己的错误区仍用 shown() 做双语。离开页面让轮询停下（LEFT）不是运行失败：
         // 远程作业可能还在服务器上跑，标 interrupted 让用户回来再核对。
         const message = String(error).replace(/^Error: /, '');
-        benchTasks.finish(benchTaskId.current, {
-          state: message === LEFT ? 'interrupted' : 'failed',
-          error: message,
-        });
-        benchTasks.registerStop(benchTaskId.current, null);
+        if (!watching && !succeeded)
+          benchTasks.finish(benchTaskId.current, {
+            state:
+              message === LEFT || benchErrorText(message)[0] === '已停止'
+                ? 'interrupted'
+                : 'failed',
+            error: message,
+          });
+        if (!watching) benchTasks.registerStop(benchTaskId.current, null);
         throw error;
       }
     });
   // 只取回报告、指标与配置；合并出来的站点文件和中间数据留在服务器上。
   // GUI-08：同一比较取回期间不重复触发；失败时已显示的报告原样保留，后端错误会说明本机旧报告
   // 仍是上次成功版本（`benchErrorText` 翻成当前语言给用户看）。
-  const fetchReport = async (machine: string, project: string, runId?: string) => {
-    // 同一比较的不同 run 可以各自取回（报告与冻结配置按 run 绑定），所以去重键带上 run。
+  const fetchReport = (machine: string, project: string, runId?: string): Promise<void> => {
     const key = `${machine}\n${project}\n${runId ?? ''}`;
-    if (fetching.current.has(key))
-      throw new Error(
-        t(
-          '这个比较的报告正在取回中，等这次取回结束后再试。',
-          'This comparison’s report is being fetched already; try again when that fetch finishes.',
-        ),
-      );
-    fetching.current.add(key);
+    const epoch = hostEpoch.current;
+    const existing = fetching.current.get(key);
+    if (existing?.epoch === epoch) {
+      reportSelection.current = existing.owner;
+      return existing.promise;
+    }
+    const owner = {};
+    reportSelection.current = owner;
+    const currentSelection = () =>
+      stillCurrent(machine, epoch) && reportSelection.current === owner;
+    const request = (async () => {
+      try {
+        const fetched = await invokeJson<{
+          report: string | null;
+          run_id?: string | null;
+          config_sha?: string | null;
+          state?: string | null;
+          legacy?: boolean;
+        }>('bench_remote_fetch', {
+          host: machine,
+          name: project,
+          ...(runId ? { runId } : {}),
+        });
+        if (!currentSelection()) return;
+        if (fetched.run_id)
+          setLastRun((old) => ({
+            runId: fetched.run_id!,
+            configSha: fetched.config_sha ?? '',
+            fingerprint: old?.fingerprint ?? '',
+            at: new Date().toISOString(),
+            report: fetched.report,
+          }));
+        if (fetched.report) {
+          await view(fetched.report, owner);
+          if (currentSelection()) setReportError('');
+        }
+      } catch (error) {
+        if (!currentSelection()) return;
+        const failure = Object.assign(new Error(shown(error)), { reportFailure: true });
+        setReportError(failure.message);
+        throw failure;
+      }
+    })();
+    const entry = { epoch, owner, promise: request };
+    fetching.current.set(key, entry);
+    void request
+      .finally(() => {
+        if (fetching.current.get(key) === entry) fetching.current.delete(key);
+      })
+      .catch(() => {});
+    return request;
+  };
+  const view = async (path: string, fetchOwner?: object) => {
+    const owner = fetchOwner ?? {};
+    if (!fetchOwner) reportSelection.current = owner;
+    const machine = host;
     const epoch = hostEpoch.current;
     try {
-      const fetched = await invokeJson<{
-        report: string | null;
-        run_id?: string | null;
-        config_sha?: string | null;
-        state?: string | null;
-        legacy?: boolean;
-      }>('bench_remote_fetch', {
-        host: machine,
-        name: project,
-        ...(runId ? { runId } : {}),
-      });
-      // 取回期间用户换看了别的机器：旧机器的报告不能显示到当前页面（GUI-05）。
-      if (!stillCurrent(machine, epoch)) return;
-      // 服务器随报告一起回来的 run 身份：页面在重载前也能说明"这份报告属于哪次运行"。
-      if (fetched.run_id)
-        setLastRun((old) => ({
-          runId: fetched.run_id!,
-          configSha: fetched.config_sha ?? '',
-          fingerprint: old?.fingerprint ?? '',
-          at: new Date().toISOString(),
-          report: fetched.report,
-        }));
-      if (fetched.report) await view(fetched.report);
-    } finally {
-      fetching.current.delete(key);
+      const html = await invoke<string>('bench_report', { path });
+      if (stillCurrent(machine, epoch) && reportSelection.current === owner) {
+        setReport({ path, html });
+        setReportError('');
+      }
+    } catch (error) {
+      if (stillCurrent(machine, epoch) && reportSelection.current === owner) {
+        const failure = Object.assign(new Error(shown(error)), { reportFailure: true });
+        setReportError(failure.message);
+        throw failure;
+      }
     }
-  };
-  const view = async (path: string) => {
-    const html = await invoke<string>('bench_report', { path });
-    setReport({ path, html });
   };
   // 核对"暂时失联"作业的终态（GUI-07）：只查一次。仍在运行就更新最后确认状态、不结束跟踪；
   // 查到终态才清活动记录（写进历史）；还是查不到就保留身份并把新的原因显示出来。
   // 任务条带来的"打开这次结果"意图：只消费一次；跨机器先切过去，host 变化后这个 effect 会再跑。
-  const consumedBenchFocus = useRef(false);
   useEffect(() => {
-    if (consumedBenchFocus.current) return;
     const focus = benchTasks.peekFocus();
     if (!focus) return;
     if (focus.host !== host) {
-      setHostState(focus.host);
+      if (busy || lock.current) return;
+      if (!changeHost(focus.host)) benchTasks.consumeFocus();
       return;
     }
-    consumedBenchFocus.current = true;
+    if (focus.intent !== 'track' && (busy || lock.current)) return;
     benchTasks.consumeFocus();
-    if (focus.report) void view(focus.report);
+    if (focus.intent === 'track') return;
+    if (focus.report) void view(focus.report).catch(() => {});
     else if (focus.host)
-      void fetchReport(focus.host, focus.project, focus.runId ?? undefined).catch((error) => {
-        // 取报告失败不能静默：页面已有的错误区显示后端给出的原因（本机旧报告仍在）。
-        setError(shown(error));
-      });
-    // 只在进入页面/切换机器（status 就绪）时试一次；focus 是一次性意图，不需要跟着每次渲染重跑。
+      void fetchReport(focus.host, focus.project, focus.runId ?? undefined).catch(() => {});
+    // 消费的是本次点击；后续点击会增加 focusRevision。
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host, status]);
+  }, [host, status, busy, benchTasks.focusRevision]);
   const checkUnsettled = () =>
     task(async () => {
       const current = unsettled;
@@ -1621,8 +1867,10 @@ export default function ComparePage() {
         setNotice(t('已确认作业已取消', 'The job was confirmed as cancelled'));
         return;
       }
-      if (current.job.kind === 'run' && current.job.name)
-        await fetchReport(machine, current.job.name, current.job.job);
+      await afterWatch(machine, { state: 'succeeded', job: current.job }, async () => {
+        if (current.job.kind === 'run' && current.job.name)
+          await fetchReport(machine, current.job.name, current.job.job);
+      });
       setNotice(t('已确认作业成功结束', 'The job was confirmed as finished successfully'));
     });
   // 重连并继续等（GUI-07）：和正常跟踪同一条路径，成功后自动取回报告；再失联就仍回到"待核对"。
@@ -1734,6 +1982,7 @@ export default function ComparePage() {
         </Notice>
       )}
       {error && <Notice tone="error">{error}</Notice>}
+      {reportError && <Notice tone="error">{reportError}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
       <div data-compare-section="environment">
         <Card
@@ -1744,7 +1993,7 @@ export default function ComparePage() {
           )}
         >
           <Field label={t('运行位置', 'Machine')}>
-            <Select value={host} disabled={busy} onChange={(e) => setHostState(e.target.value)}>
+            <Select value={host} disabled={busy} onChange={(e) => changeHost(e.target.value)}>
               <option value="">{t('本机', 'This computer')}</option>
               {[...new Set([...servers, ...(host ? [host] : [])])].map((value) => (
                 <option key={value} value={value}>
@@ -2581,11 +2830,11 @@ export default function ComparePage() {
                   t={t}
                   labels={{
                     dirty: t('有未生成的修改', 'Changes not generated'),
-                    saving: t('正在写入项目目录', 'Writing to the project folder'),
+                    saving: t('正在提交配置', 'Submitting configuration'),
                     saved:
                       configState === 'saved' && writtenFingerprint === effectiveFingerprint
                         ? t('已写入项目目录', 'Written to the project folder')
-                        : t('已生成（未写盘）', 'Generated (not on disk)'),
+                        : t('已生成（尚未确认写盘）', 'Generated (write not confirmed)'),
                   }}
                 />
                 <p className="muted study-hint">

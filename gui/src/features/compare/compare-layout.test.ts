@@ -7,6 +7,8 @@ import * as compareConfig from './config';
 import type { CompareSnapshot } from './config';
 import {
   benchErrorText,
+  claimRemoteWatch,
+  parseCompareDraft,
   buildOpenbenchConfig,
   comparisonName,
   designFingerprint,
@@ -49,12 +51,21 @@ function declaration(name: string): string {
 
 function execute<T>(name: string, context: Record<string, unknown>): T {
   const defaults = {
-    hostEpoch: { current: 0 },
     stillCurrent: () => true,
     setNotice: () => {},
     setConfigSaving: () => {},
     setWrittenFingerprint: () => {},
+    setDraftOffer: () => {},
+    claimRemoteWatch,
+    parseCompareDraft,
+    stored: () => '',
+    registerCloseGuard: () => () => {},
+    currentDraft: () => ({}),
+    completedDraft: { current: '' },
+    benchErrorText,
+    hostEpoch: { current: 0 },
     benchTasks: {
+      tasks: [],
       begin: () => '',
       update: () => {},
       finish: () => {},
@@ -147,9 +158,19 @@ function pageHarness(
   options: {
     seed?: Record<string, string>;
     remoteStatus?: Record<string, unknown>;
+    remoteJob?: (args?: Record<string, unknown>) => Promise<unknown>;
+    remoteFetch?: (args?: Record<string, unknown>) => Promise<unknown>;
+    runError?: string;
+    reportError?: string;
     localStatus?: Record<string, unknown>;
     /** 从任务条回到比较页时要打开的结果（一次性 focus）。 */
-    focus?: { host: string; project: string; runId?: string | null; report?: string | null } | null;
+    focus?: {
+      host: string;
+      project: string;
+      runId?: string | null;
+      report?: string | null;
+      intent?: 'track' | 'report';
+    } | null;
   } = {},
 ) {
   const seed: Record<string, string> = {
@@ -157,11 +178,11 @@ function pageHarness(
     ...options.seed,
   };
   // 页面会往 localStorage 写草稿/机器选择：这里保留一份内存副本，测试才能断言"写了什么"而不是只看内存状态。
-  const disk = new Map<string, string>();
+  const disk = new Map<string, string>(Object.entries(seed));
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
     value: {
-      getItem: (key: string) => disk.get(key) ?? seed[key] ?? null,
+      getItem: (key: string) => disk.get(key) ?? null,
       setItem: (key: string, value: string) => {
         disk.set(key, value);
       },
@@ -210,9 +231,19 @@ function pageHarness(
       case 'bench_inspect':
         return probedGrid;
       case 'bench_run':
+        if (options.runError) throw new Error(options.runError);
         return pendingRun ? pendingRun.promise : { report: null };
+      case 'bench_remote_job':
+        return options.remoteJob?.(args);
       case 'bench_remote_fetch':
-        return { report: null, run_id: null, config_sha: null, state: 'succeeded' };
+        return (
+          options.remoteFetch?.(args) ?? {
+            report: null,
+            run_id: null,
+            config_sha: null,
+            state: 'succeeded',
+          }
+        );
       default:
         return null;
     }
@@ -221,6 +252,7 @@ function pageHarness(
     calls.push({ command, args });
     if (command === 'pick_folder') return probedGrid.history_dir;
     if (command === 'open_path') return null;
+    if (command === 'bench_report' && options.reportError) throw new Error(options.reportError);
     return null;
   };
   const listen = async () => () => {};
@@ -274,12 +306,17 @@ function pageHarness(
     }),
     Fragment: 'Fragment',
   };
-  const useApp = () => ({ state: { language: 'en', cases: [] } });
+  const useApp = () => ({
+    state: { language: 'en', cases: [] },
+    registerCloseGuard: () => () => {},
+  });
   // 跨路由任务条在整页 harness 里记录调用即可；reducer/provider 的测试在 bench-task.test.ts。
   const benchCalls: string[] = [];
   const benchFocus = { current: options.focus ?? null };
+  let focusRevision = 0;
   const useBenchTasks = () => ({
     tasks: [],
+    focusRevision,
     begin: (input: { project: string }) => {
       benchCalls.push(`begin:${input.project}`);
       return 'task-1';
@@ -313,6 +350,7 @@ function pageHarness(
     ...compareConfig,
     React,
     useApp,
+    useCloseGuard: () => {},
     useBenchTasks,
     usePageContract,
     useState,
@@ -460,6 +498,11 @@ function pageHarness(
     setConfirm: (value: boolean) => {
       confirmAnswer = value;
     },
+    focus: async (next: typeof benchFocus.current) => {
+      benchFocus.current = next;
+      focusRevision++;
+      await settle();
+    },
     calls,
     contract: () => contract,
     setFirstReferenceFailure: () => {
@@ -565,7 +608,7 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
   await page.press('compare-generate');
   assert.equal(page.badgeState(), 'saved');
   // 生成只写页面文本；运行前不能说"已写盘"。
-  assert.match(badgeLabels()?.saved ?? '', /Generated \(not on disk\)/);
+  assert.match(badgeLabels()?.saved ?? '', /Generated \(write not confirmed\)/);
   const textarea = page.configTextarea();
   assert.ok(textarea, 'configuration text after saving');
   const config = String(textarea.props.value);
@@ -598,7 +641,7 @@ test('U-04/U-05: summary, saved configuration and the running task all come from
     .run();
   await Promise.resolve();
   page.render();
-  assert.equal(page.badgeState(), 'saving');
+  assert.equal(page.badgeState(), 'saved', 'runtime alone is not a config-write receipt');
   release({ report: null });
   await runPromise;
   await page.settle();
@@ -638,7 +681,7 @@ test('U-05: a run that finishes after the settings changed does not claim the ne
     .run();
   await Promise.resolve();
   page.render();
-  assert.equal(page.badgeState(), 'saving');
+  assert.equal(page.badgeState(), 'saved', 'runtime alone is not a config-write receipt');
   // 运行期间改设置：这次运行完成的是旧设计，旧成功提示不能挂到新设置上。
   await page.setField('compare-name', 'changed while running');
   release({ report: null });
@@ -1149,7 +1192,10 @@ test('GUI-07: fetching a report also surfaces the sidecar unfinished-job message
     refresh: async () => null,
   });
   const fetchReport = execute<(machine: string, project: string) => Promise<void>>('fetchReport', {
-    fetching: { current: new Set<string>() },
+    reportSelection: { current: null },
+    setReportError: (value: string) => errors.push(value),
+    shown,
+    fetching: { current: new Map() },
     hostEpoch: { current: 1 },
     stillCurrent: () => true,
     t: (_zh: string, english: string) => english,
@@ -1421,4 +1467,412 @@ test('U-06: returning from a server task fetches that run report by run id', asy
     ),
     'the remote focus asks the server for that run specifically',
   );
+});
+
+async function readyComparison(page: ReturnType<typeof pageHarness>) {
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.addVariable();
+  await page.press('compare-generate');
+}
+
+async function switchMachine(page: ReturnType<typeof pageHarness>, host: string) {
+  const picker = page
+    .nodes()
+    .find((node) => node.type === 'Select' && text(node).includes('This computer'));
+  assert.ok(picker);
+  (picker.props.onChange as (event: unknown) => void)({ target: { value: host } });
+  await page.settle();
+}
+
+test('switching machines preserves each draft and offers only the destination draft', async () => {
+  const page = pageHarness();
+  await readyComparison(page);
+  const local = page.localValue('colm.compareDraft@');
+  const other = { ...JSON.parse(local), host: 'B', name: 'B draft', yaml: '', snapshot: null };
+  globalThis.localStorage.setItem('colm.compareDraft@B', JSON.stringify(other));
+  await switchMachine(page, 'B');
+  assert.deepEqual(
+    { ...JSON.parse(page.localValue('colm.compareDraft@')), savedAt: '' },
+    { ...JSON.parse(local), savedAt: '' },
+  );
+  assert.equal(page.localValue('colm.compareDraft@B'), JSON.stringify(other));
+  await page.pressLabel('Restore draft');
+  assert.match(page.summaryText(), /B_draft/);
+  await switchMachine(page, '');
+  await page.pressLabel('Restore draft');
+  assert.doesNotMatch(page.summaryText(), /B_draft/);
+  assert.equal(page.actions().find((item) => item.id === 'compare-run')?.enabled, true);
+});
+
+test('completed inputs stay out of draft storage until the user edits them again', async () => {
+  const page = pageHarness();
+  await readyComparison(page);
+  await page.press('compare-run');
+  assert.equal(page.localValue('colm.compareDraft@'), '');
+  await page.settle();
+  assert.equal(page.localValue('colm.compareDraft@'), '');
+  await page.setField('compare-name', 'next comparison');
+  assert.equal(JSON.parse(page.localValue('colm.compareDraft@')).name, 'next comparison');
+});
+
+test('restoring an edited YAML retains its frozen inputs and can run the saved text', async () => {
+  const first = pageHarness();
+  await readyComparison(first);
+  const edited = String(first.configTextarea()!.props.value).replace(
+    'years: [2002, 2005]',
+    'years: [2003, 2004]',
+  );
+  (first.configTextarea()!.props.onChange as (event: unknown) => void)({
+    target: { value: edited },
+  });
+  await first.settle();
+  const saved = first.localValue('colm.compareDraft@');
+  const page = pageHarness({ seed: { 'colm.compareDraft@': saved } });
+  await page.mount();
+  await page.pressLabel('Restore draft');
+  assert.equal(page.configTextarea()!.props.value, edited);
+  await page.press('compare-run');
+  assert.equal(page.calls.find((item) => item.command === 'bench_run')?.args?.config, edited);
+});
+
+test('old draft YAML without a snapshot requires confirmation before replacement', async () => {
+  const first = pageHarness();
+  await readyComparison(first);
+  const old = JSON.parse(first.localValue('colm.compareDraft@'));
+  delete old.snapshot;
+  old.yaml += '\n# manually preserved\n';
+  const page = pageHarness({ seed: { 'colm.compareDraft@': JSON.stringify(old) } });
+  await page.mount();
+  await page.pressLabel('Restore draft');
+  await page.press('compare-generate');
+  assert.equal(
+    page.configTextarea()!.props.value,
+    old.yaml,
+    'declining confirmation preserves old YAML',
+  );
+  page.setConfirm(true);
+  await page.press('compare-generate');
+  assert.notEqual(page.configTextarea()!.props.value, old.yaml);
+});
+
+test('a local stop records interruption rather than a failed evaluation', async () => {
+  const page = pageHarness({ runError: '已停止' });
+  await readyComparison(page);
+  await page.press('compare-run');
+  assert.ok(page.benchCalls().includes('finish:interrupted'));
+  assert.ok(!page.benchCalls().includes('finish:failed'));
+  assert.match(text(page.nodes()), /Stopped/);
+});
+
+test('successful evaluation survives preview failure and task focus reports read errors', async () => {
+  const page = pageHarness({ reportError: 'report unavailable' });
+  await readyComparison(page);
+  const resolve = page.deferRun();
+  const running = page.press('compare-run');
+  resolve({ report: '/report.html', run_id: 'r1' });
+  await running;
+  assert.ok(page.benchCalls().includes('finish:done'));
+  assert.ok(!page.benchCalls().includes('finish:failed'));
+  assert.match(text(page.nodes()), /report unavailable/);
+  assert.equal(page.localValue('colm.compareDraft@'), '');
+  const focused = pageHarness({
+    reportError: 'missing focused report',
+    focus: { host: '', project: 'cmp', report: '/missing.html' },
+  });
+  await focused.mount();
+  assert.match(text(focused.nodes()), /missing focused report/);
+});
+
+test('blank evaluation years are rejected before configuration generation', async () => {
+  const page = pageHarness();
+  await readyComparison(page);
+  await page.setField('compare-from', '');
+  await page.setField('compare-to', '');
+  await page.press('compare-generate');
+  assert.match(text(page.nodes()), /positive integers/);
+  assert.ok(!page.calls.some((item) => item.command === 'bench_run'));
+});
+
+test('local operation close guard survives page departure until the promise settles', async () => {
+  const guards = new Set<() => string | null>();
+  let finish!: () => void;
+  const operation = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const task = execute<(fn: () => Promise<void>) => Promise<void>>('task', {
+    lock: { current: false },
+    host: '',
+    hostEpoch: { current: 0 },
+    setBusy: () => {},
+    setError: () => {},
+    setNotice: () => {},
+    refresh: async () => {},
+    registerCloseGuard: (guard: () => string | null) => {
+      guards.add(guard);
+      return () => guards.delete(guard);
+    },
+    t: (_zh: string, en: string) => en,
+  });
+  const pending = task(() => operation);
+  assert.equal(guards.size, 1, 'the operation owns its guard independently of component effects');
+  assert.match([...guards][0]!() ?? '', /local OpenBench operation/);
+  finish();
+  await pending;
+  assert.equal(guards.size, 0);
+});
+
+for (const same of [true, false]) {
+  test(`successful comparison ${same ? 'clears its matching offered draft' : 'preserves a different offered draft and confirms restoration'}`, async () => {
+    const first = pageHarness();
+    await readyComparison(first);
+    const draft = JSON.parse(first.localValue('colm.compareDraft@'));
+    if (!same) draft.name = 'older comparison';
+    const saved = JSON.stringify(draft);
+    const page = pageHarness({ seed: { 'colm.compareDraft@': saved } });
+    await readyComparison(page);
+    await page.press('compare-run');
+    if (same) {
+      assert.doesNotMatch(text(page.nodes()), /Restore draft/);
+      assert.equal(page.localValue('colm.compareDraft@'), '');
+      await page.settle();
+      assert.equal(page.localValue('colm.compareDraft@'), '');
+    } else {
+      assert.match(text(page.nodes()), /Restore draft/);
+      assert.equal(page.localValue('colm.compareDraft@'), saved);
+      const yaml = page.configTextarea()!.props.value;
+      await page.pressLabel('Restore draft');
+      assert.equal(page.configTextarea()!.props.value, yaml);
+      assert.match(text(page.nodes()), /Restore draft/);
+      page.setConfirm(true);
+      await page.pressLabel('Restore draft');
+      assert.match(page.summaryText(), /older_comparison/);
+      assert.doesNotMatch(text(page.nodes()), /Restore draft/);
+    }
+  });
+}
+
+test('written edited YAML is saved until its effective text or design changes', async () => {
+  const page = pageHarness();
+  await readyComparison(page);
+  const original = String(page.configTextarea()!.props.value);
+  const edited = original.replace('years: [2002, 2005]', 'years: [2003, 2004]');
+  const changeYaml = async (value: string) => {
+    (page.configTextarea()!.props.onChange as (event: unknown) => void)({ target: { value } });
+    await page.settle();
+  };
+  await changeYaml(edited);
+  assert.equal(page.badgeState(), 'dirty');
+  await page.press('compare-run');
+  assert.equal(page.badgeState(), 'saved');
+  await changeYaml(edited.replace('years: [2003, 2004]', 'years: [2004, 2005]'));
+  assert.equal(page.badgeState(), 'dirty');
+  await changeYaml(edited);
+  assert.equal(page.badgeState(), 'saved');
+  await page.setField('compare-name', 'changed design');
+  assert.equal(page.badgeState(), 'dirty');
+  await page.press('compare-generate');
+  assert.equal(
+    page.configTextarea()!.props.value,
+    edited,
+    'generated baseline still detects manual edits and asks before replacement',
+  );
+});
+
+test('repeated task focus on the mounted route opens each requested report', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.focus({ host: '', project: 'one', report: '/one.html' });
+  await page.focus({ host: '', project: 'two', report: '/two.html' });
+  assert.deepEqual(
+    page.calls.filter((c) => c.command === 'bench_report').map((c) => c.args?.path),
+    ['/one.html', '/two.html'],
+  );
+});
+
+test('switching task focus waits for the old watcher lock before restoring the destination job', async () => {
+  let finishA!: (reply: unknown) => void;
+  const replyA = new Promise((resolve) => {
+    finishA = resolve;
+  });
+  const page = pageHarness({
+    seed: {
+      'colm.benchHost': 'A',
+      'colm.benchJob@A': JSON.stringify({ job: 'a', kind: 'run', name: 'a' }),
+      'colm.benchJob@B': JSON.stringify({ job: 'b', kind: 'run', name: 'b' }),
+    },
+    remoteJob: async (args) =>
+      args?.host === 'A' ? replyA : { status: { state: 'finished', exit_code: 0, log_tail: '' } },
+  });
+  await page.mount();
+  await page.focus({ host: 'B', project: 'b' });
+  assert.equal(
+    page.calls.filter((c) => c.command === 'bench_remote_job').length,
+    1,
+    'busy A prevents the host switch',
+  );
+  finishA({ status: { state: 'finished', exit_code: 0, log_tail: '' } });
+  await page.settle();
+  assert.deepEqual(
+    page.calls.filter((c) => c.command === 'bench_remote_job').map((c) => c.args?.host),
+    ['A', 'B'],
+  );
+  assert.equal(page.localValue('colm.benchJob@A'), '', 'A finishes naturally before switching');
+  assert.equal(page.localValue('colm.benchJob@B'), '');
+});
+
+for (const manual of [false, true])
+  for (const changed of [false, true]) {
+    test(`${manual ? 'manual check' : 'recovered watch'} success ${changed ? 'preserves unrelated' : 'clears matching'} draft`, async () => {
+      const initial = pageHarness();
+      await initial.mount();
+      await initial.press('compare-add-folder');
+      const draft = { ...JSON.parse(initial.localValue('colm.compareDraft@')), host: 'A' };
+      const submittedDraft = JSON.stringify({ ...draft, savedAt: '' });
+      const kept = { ...draft, name: changed ? 'new input' : draft.name };
+      const page = pageHarness({
+        seed: {
+          'colm.benchHost': 'A',
+          'colm.compareDraft@A': JSON.stringify(kept),
+          'colm.benchJob@A': JSON.stringify({
+            job: 'a',
+            kind: 'run',
+            name: 'a',
+            submittedDraft,
+            uncertain: manual,
+            fingerprint: 'confirmed-input',
+          }),
+        },
+        remoteJob: async () => ({ status: { state: 'finished', exit_code: 0, log_tail: '' } }),
+      });
+      await page.mount();
+      if (manual) await page.pressLabel('Check final state');
+      await page.settle();
+      assert.equal(!!page.localValue('colm.compareDraft@A'), changed);
+      assert.equal(text(page.nodes()).includes('Restore draft'), changed);
+    });
+  }
+
+test('editing YAML during a local run shows dirty immediately', async () => {
+  const page = pageHarness();
+  await page.mount();
+  await page.press('compare-add-folder');
+  await page.addVariable();
+  await page.press('compare-generate');
+  const release = page.deferRun();
+  const running = page
+    .actions()
+    .find((action) => action.id === 'compare-run')!
+    .run();
+  await Promise.resolve();
+  page.render();
+  const textarea = page.configTextarea()!;
+  (textarea.props.onChange as (event: unknown) => void)({
+    target: { value: `${textarea.props.value}\n# edited during run` },
+  });
+  await page.settle();
+  assert.equal(page.badgeState(), 'dirty');
+  release({ report: null });
+  await running;
+  await page.settle();
+  // A comment does not change the effective input fingerprint, so completion can still confirm it.
+  assert.equal(page.badgeState(), 'saved');
+});
+
+for (const storageFails of [false, true]) {
+  test(`busy focus preserves newly edited YAML when storage ${storageFails ? 'fails' : 'succeeds'}`, async () => {
+    const page = pageHarness();
+    await readyComparison(page);
+    const resolve = page.deferRun();
+    const running = page.press('compare-run');
+    await page.settle();
+    const yaml = String(page.configTextarea()!.props.value) + '\n# edited while running';
+    (page.configTextarea()!.props.onChange as (event: unknown) => void)({
+      target: { value: yaml },
+    });
+    await page.settle();
+    if (storageFails) {
+      const storage = globalThis.localStorage;
+      const set = storage.setItem.bind(storage);
+      storage.setItem = (key, value) => {
+        if (key.startsWith('colm.compareDraft@')) throw new Error('quota');
+        set(key, value);
+      };
+    }
+    await page.focus({ host: 'B', project: 'b', intent: 'track' });
+    assert.equal(String(page.configTextarea()!.props.value), yaml, 'busy input is retained');
+    assert.equal(page.localValue('colm.benchHost'), '');
+    resolve({ report: null, run_id: 'r1' });
+    await running;
+    if (storageFails) {
+      assert.equal(page.localValue('colm.benchHost'), '');
+      assert.equal(String(page.configTextarea()!.props.value), yaml);
+      assert.match(text(page.nodes()), /draft could not be saved/);
+    } else {
+      assert.equal(page.localValue('colm.benchHost'), 'B');
+      assert.equal(JSON.parse(page.localValue('colm.compareDraft@')).yaml, yaml);
+    }
+  });
+}
+
+test('returning to a running task tracks it without fetching an unfinished report', async () => {
+  const page = pageHarness({
+    seed: { 'colm.benchHost': 'A' },
+    focus: { host: 'A', project: 'cmp', runId: 'running', intent: 'track' },
+  });
+  await page.mount();
+  await page.focus({ host: 'A', project: 'cmp', runId: 'running', intent: 'track' });
+  assert.equal(
+    page.calls.some((c) => c.command === 'bench_remote_fetch'),
+    false,
+  );
+});
+
+test('a successful report retry clears its own error without hiding a newer configuration error', async () => {
+  let finish!: (reply: unknown) => void;
+  const pending = new Promise((resolve) => {
+    finish = resolve;
+  });
+  let count = 0;
+  const initial = pageHarness();
+  await readyComparison(initial);
+  const draft = { ...JSON.parse(initial.localValue('colm.compareDraft@')), host: 'A' };
+  const page = pageHarness({
+    seed: { 'colm.benchHost': 'A', 'colm.compareDraft@A': JSON.stringify(draft) },
+    remoteFetch: async () => {
+      if (++count === 1) throw new Error('report fetch failed');
+      return pending;
+    },
+  });
+  await page.mount();
+  await page.pressLabel('Restore draft');
+  await page.focus({ host: 'A', project: 'cmp', runId: 'r1', intent: 'report' });
+  assert.match(text(page.nodes()), /report fetch failed/);
+  await page.focus({ host: 'A', project: 'cmp', runId: 'r1', intent: 'report' });
+  await page.setField('compare-from', '');
+  page.setConfirm(true);
+  await page.press('compare-generate');
+  assert.match(text(page.nodes()), /positive integers/);
+  finish({ report: '/report.html', run_id: 'r1' });
+  await page.settle();
+  assert.doesNotMatch(text(page.nodes()), /report fetch failed/);
+  assert.match(text(page.nodes()), /positive integers/);
+});
+
+test('switching focus never overwrites an offered draft with different current input', async () => {
+  const original = pageHarness();
+  await readyComparison(original);
+  const old = {
+    ...JSON.parse(original.localValue('colm.compareDraft@')),
+    name: 'older offered draft',
+  };
+  const raw = JSON.stringify(old);
+  const page = pageHarness({ seed: { 'colm.compareDraft@': raw } });
+  await readyComparison(page);
+  const yaml = String(page.configTextarea()!.props.value);
+  await page.focus({ host: 'B', project: 'b', intent: 'track' });
+  assert.equal(page.localValue('colm.benchHost'), '');
+  assert.equal(page.localValue('colm.compareDraft@'), raw);
+  assert.equal(String(page.configTextarea()!.props.value), yaml);
+  assert.match(text(page.nodes()), /Resolve the draft before switching/);
 });

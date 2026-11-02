@@ -1,7 +1,7 @@
 import { bilingual } from '../../lib/bilingual';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
 import { useEffect, useRef, useState } from 'react';
-import { useApp } from '../../lib/app-state';
+import { useApp, projectVersion } from '../../lib/app-state';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
@@ -149,7 +149,13 @@ export default function ProjectPage() {
     });
   }
   function openBatch() {
-    update({ projectView: { root: state.root, page: 'batch' } });
+    return work(async () => {
+      const model = state.chosenVersion
+        ? {}
+        : await projectVersion(state.versions, state.cases[0]?.dir);
+      if (!active.current) return;
+      update({ ...model, projectView: { root: state.root, page: 'batch' } });
+    });
   }
   async function chooseVersion(key: string) {
     return work(async () => {

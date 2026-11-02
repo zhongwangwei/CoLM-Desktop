@@ -94,3 +94,61 @@ test('BGC uses case scheme rather than stale version flags', () => {
     /writable/,
   );
 });
+
+test('parameter imports report contextual errors for malformed JSON and invalid record shapes', () => {
+  assert.throws(() => importParameters('{', [d], [], []), /Parameter import.*JSON/);
+  for (const text of ['null', '1', 'true', '"text"', '[null]', '[1]', '[{}]']) {
+    assert.throws(
+      () => importParameters(text, [d], [], []),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error instanceof TypeError, false);
+        assert.match(error.message, /Parameter import|records array/);
+        return true;
+      },
+      text,
+    );
+  }
+});
+
+test('parameter import validates field types with localized errors before building records', () => {
+  const record = makeRecord(d, '1', 1, '');
+  const fields = [{ name: 'x' } as never];
+  const invalid = [
+    ...[null, 42, {}].map((value) => ({ ...record, value })),
+    ...[42, {}].map((process_file) => ({
+      ...record,
+      scope_instance: { ...record.scope_instance, process_file },
+    })),
+    { ...record, parameter_id: 42 },
+    { ...record, raw_key: {} },
+    { ...record, scope_instance: [] },
+    ...[{ kind: 42 }, { scheme: {} }, { index: '1' }].map((scope) => ({
+      ...record,
+      scope_instance: { ...record.scope_instance, ...scope },
+    })),
+  ];
+  const previous = document.documentElement.lang;
+  try {
+    for (const [lang, message] of [
+      ['en', 'Parameter import failed: invalid parameter record'],
+      ['zh', '参数导入失败：参数记录格式不正确'],
+    ]) {
+      document.documentElement.lang = lang;
+      for (const row of invalid) {
+        assert.throws(
+          () => importParameters(JSON.stringify([row]), [d], fields, []),
+          (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.equal(error instanceof TypeError, false);
+            assert.equal(error.message, message);
+            return true;
+          },
+        );
+      }
+      assert.deepEqual(importParameters(JSON.stringify([record]), [d], fields, []), [record]);
+    }
+  } finally {
+    document.documentElement.lang = previous;
+  }
+});

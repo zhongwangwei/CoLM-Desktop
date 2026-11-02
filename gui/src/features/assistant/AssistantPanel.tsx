@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { invoke, invokeJson, listen, hasBackend, withTimeout } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { askConfirm } from '../../lib/confirm';
@@ -21,6 +21,7 @@ import {
   historySettingsOf,
   pendingReconciliation,
   providerId,
+  retrievalStateText,
   taskSnapshotOf,
   assistantModels,
   selectAssistantModel,
@@ -162,6 +163,8 @@ export default function AssistantPanel() {
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
   const [input, setInput] = useState('');
+  const inputRef = useRef(input);
+  inputRef.current = input;
   const [attachments, setAttachments] = useState<DocumentAttachment[]>([]);
   // 附件读取要按最新的附件列表算剩余字符数：异步读取期间旧渲染的闭包会漏掉刚加进来的文件。
   const attachmentsRef = useRef(attachments);
@@ -171,7 +174,10 @@ export default function AssistantPanel() {
   const turnSeq = useRef(0);
   // A3：每轮 stdin 请求 id（计数器 + 随机后缀），与后端 turn_started.request_id 对齐。
   const requestSeq = useRef(0);
+  const sendEpoch = useRef(0);
   const [attaching, setAttaching] = useState(false);
+  const deletingSessionRef = useRef(false);
+  const [deletingSession, setDeletingSession] = useState(false);
   const [attachNotice, setAttachNotice] = useState('');
   const [error, setError] = useState('');
   // 初始化状态分开存：核心设置失败要显式重试；输入历史只是辅助记忆，失败不挡发送（GUI-16）。
@@ -218,8 +224,21 @@ export default function AssistantPanel() {
   // 当前内置服务商是否登记过 Key；欢迎页据此给"去设置登记"的入口，而不是等发送后报英文错误。
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const session = useRef<string | null>(null);
+  const agentSession = useRef<string | null>(null);
+  const startupId = useRef<string | null>(null);
+  const sessionStart = useRef<{
+    id: string;
+    onReady?: () => void;
+    target: string | null;
+    skipConfigure: boolean;
+    ready?: boolean;
+    onSnapshot?: (task: AgentTaskSnapshot | null) => void;
+    onError?: (error: Error) => void;
+  } | null>(null);
   const conversationRequest = useRef(0);
+  const reviewEpoch = useRef<number | null>(null);
   const streamed = useRef(false);
+  const composing = useRef(false);
   const fresh = useRef(true);
   const grant = useRef<UiGrant | null>(null);
   const grantPage = useRef('');
@@ -250,6 +269,80 @@ export default function AssistantPanel() {
     runningRef.current = value;
     setRunning(value);
   }
+  function clearTaskReview() {
+    setTaskSnapshot(null);
+    setReconciling(false);
+    setReconcileNote('');
+    setReconcileNotice('');
+    setReconcileError('');
+  }
+  async function stop() {
+    const starting = sessionStart.current !== null;
+    const id = startupId.current;
+    sendEpoch.current++;
+    if (sessionStart.current?.onError) {
+      sessionStart.current.onError(new Error(t('已停止。', 'Stopped.')));
+    }
+    sessionStart.current = null;
+    if (starting) busy(false);
+    if (reviewEpoch.current !== null) {
+      reviewEpoch.current = null;
+      setReconciling(false);
+      busy(false);
+    }
+    try {
+      await invoke('assistant_cancel', { startupId: id });
+    } catch (error) {
+      if (starting && (error instanceof Error ? error.message : String(error)) === '助手还没有启动')
+        return;
+      throw error;
+    }
+  }
+  function handleInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (
+      event.defaultPrevented ||
+      composing.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    )
+      return;
+
+    if (
+      (event.key === 'ArrowUp' && event.currentTarget.selectionStart === 0) ||
+      (event.key === 'ArrowDown' && event.currentTarget.selectionEnd === input.length)
+    ) {
+      if (!history.current.length) return;
+      event.preventDefault();
+      if (historyIndex.current === null) historyDraft.current = input;
+      const next = historyInput(
+        history.current,
+        historyIndex.current,
+        historyDraft.current,
+        event.key === 'ArrowUp' ? -1 : 1,
+      );
+      historyIndex.current = next.index;
+      setInput(next.value);
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+    }
+  }
+  function handlePanelKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (
+      event.key !== 'Escape' ||
+      event.defaultPrevented ||
+      composing.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229 ||
+      !runningRef.current ||
+      app.current.assistantSettingsOpen
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    void perform(stop);
+  }
   async function perform(action: () => Promise<void>) {
     setError('');
     try {
@@ -274,18 +367,43 @@ export default function AssistantPanel() {
   useEffect(() => {
     if (!hasBackend()) return;
     let active = true;
+    const pendingSend = sendEpoch;
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
       // A3：只有匹配本轮 requestId 的 turn_started 才证明“消息已被模型接受”；IPC 确认只代表送达。
       // usage/context/tool_result/task_state 等即使属于本轮也不标记接受，迟到旧事件更不会。
       if (outgoing.current && eventBelongsToTurn(outgoing.current, event))
         outgoing.current = turnOutput(outgoing.current);
-      if (!active) return;
+      if (!active || (event.startup_id && event.startup_id !== startupId.current)) return;
       switch (event.type) {
-        case 'ready':
-          session.current = event.session || session.current;
+        case 'ready': {
+          const starting = sessionStart.current;
+          if (
+            !starting ||
+            !runningRef.current ||
+            !event.session ||
+            event.startup_id !== starting.id
+          )
+            break;
+          // configure 先报告进程原会话；resume/new_session 随后才报告目标会话。
+          if (starting.skipConfigure) {
+            starting.skipConfigure = false;
+            break;
+          }
+          if (starting.target && event.session !== starting.target) break;
+          agentSession.current = event.session;
           setModel(event.model || '');
+          if (!starting.onSnapshot) clearTaskReview();
+          setMessages((old) => old.filter((item) => item.kind !== 'task'));
+          session.current = event.session;
+          fresh.current = false;
+          if (starting.onSnapshot) starting.ready = true;
+          else {
+            sessionStart.current = null;
+            starting.onReady?.();
+          }
           break;
+        }
         case 'turn_started':
           // A3：turn_started 只用于标记本轮接受（上面已处理）；不清 busy、不写消息。
           break;
@@ -362,7 +480,18 @@ export default function AssistantPanel() {
           });
           break;
         }
-        case 'task_state':
+        case 'task_state': {
+          const starting = sessionStart.current;
+          if (starting?.onSnapshot && starting.ready && agentSession.current === starting.target) {
+            starting.onSnapshot(taskSnapshotOf(event.task));
+          }
+          // turn_done 后迟到的快照仍属于后台 agent，不能带进刚打开的另一个对话。
+          if (
+            (starting && !(starting.onSnapshot && starting.ready)) ||
+            fresh.current ||
+            agentSession.current !== session.current
+          )
+            break;
           setMessages((old) => [
             ...old.filter((item) => item.kind !== 'task'),
             { kind: 'task', task: event.task },
@@ -370,6 +499,7 @@ export default function AssistantPanel() {
           // U04：只有任务快照能把核对横幅清掉（requires_reconciliation=false）；其它事件一律不动。
           setTaskSnapshot(taskSnapshotOf(event.task));
           break;
+        }
         case 'usage':
           setUsage(`${event.prompt_tokens || 0} + ${event.completion_tokens || 0} tokens`);
           setSessionUsage({
@@ -392,10 +522,20 @@ export default function AssistantPanel() {
             source: event.window_source || null,
           });
           break;
-        case 'docs_index_status':
-          // 应用级索引状态；state 里的未知取值留给设置对话框原样显示。
+        case 'docs_index_status': {
+          const version = app.current.versionRef;
+          if (event.scope) {
+            const expected = version ? `${version.id}@${version.revision}` : null;
+            if (
+              expected
+                ? event.scope.kind !== 'model' || event.scope.name !== expected
+                : event.scope.kind !== 'app'
+            )
+              break;
+          }
           setDocsIndex(event as AgentEvent);
           break;
+        }
         case 'turn_done':
           if (!streamed.current && event.content)
             setMessages((old) => [...old, { kind: 'assistant', text: event.content }]);
@@ -406,6 +546,14 @@ export default function AssistantPanel() {
           setApproval(null);
           break;
         case 'error': {
+          sessionStart.current?.onError?.(
+            new Error(event.message || t('助手错误', 'Assistant error')),
+          );
+          if (sessionStart.current) {
+            sendEpoch.current++;
+            sessionStart.current = null;
+            startupId.current = null;
+          }
           busy(false);
           grant.current = null;
           setApproval(null);
@@ -431,6 +579,13 @@ export default function AssistantPanel() {
           break;
         }
         case 'exited':
+          agentSession.current = null;
+          sessionStart.current?.onError?.(
+            new Error(t('助手进程已退出', 'The assistant process exited.')),
+          );
+          if (sessionStart.current) sendEpoch.current++;
+          sessionStart.current = null;
+          startupId.current = null;
           busy(false);
           grant.current = null;
           setApproval(null);
@@ -459,9 +614,15 @@ export default function AssistantPanel() {
     })();
     return () => {
       active = false;
+      pendingSend.current++;
+      sessionStart.current?.onError?.(
+        new Error(t('助手面板已卸载', 'The assistant panel was closed.')),
+      );
+      sessionStart.current = null;
       unlisten?.();
       grant.current = null;
-      if (runningRef.current) void invoke('assistant_cancel', {}).catch(() => {});
+      if (runningRef.current)
+        void invoke('assistant_cancel', { startupId: startupId.current }).catch(() => {});
     };
     // 只在挂载时订阅一次；处理函数里的 t/errorText 读的是最新页面语言。
     // 初始化（含重试）是后面单独的 effect：重试只重读数据，绝不会再订阅一次，也就不会重复回答（GUI-16）。
@@ -523,6 +684,19 @@ export default function AssistantPanel() {
     // 只在挂载和用户点"重试"时执行；t/errorText 读的是最新页面语言。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initAttempt]);
+  useEffect(() => {
+    if (!hasBackend() || initPhase !== 'ready') return;
+    setDocsIndex(null);
+    if (!settings.retrieval.enabled || settings.retrieval.mode !== 'managed') return;
+    let active = true;
+    void invoke('assistant_xerj_node', { action: 'start' }).catch((error) => {
+      if (active)
+        setDocsIndex({ type: 'docs_index_status', state: 'not_connected', detail: String(error) });
+    });
+    return () => {
+      active = false;
+    };
+  }, [initPhase, settings.retrieval, state.versionRef?.id, state.versionRef?.revision]);
   /**
    * 输入历史是辅助数据（↑/↓ 记忆）：失败只给一条可重试的提示，不挡 ready、不占错误通道，
    * 更不能让助手对话框因此禁用到重启应用（GUI-16）。单独超时，避免 colm-cli 子进程卡住初始化。
@@ -608,18 +782,97 @@ export default function AssistantPanel() {
       setError(errorText(String(e)));
     }
   }
+  /** Resume without sending a model message; only the target ready + snapshot completes the handshake. */
+  async function resumeReviewSession(target: string) {
+    const id = newRequestId();
+    startupId.current = id;
+    let fail: (error: Error) => void = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      fail = reject;
+    });
+    const snapshot = new Promise<AgentTaskSnapshot | null>((resolve) => {
+      sessionStart.current = {
+        id,
+        target,
+        skipConfigure: true,
+        onSnapshot: resolve,
+        onError: (error) => fail(error),
+      };
+    });
+    const starting = sessionStart.current;
+    const page = app.current;
+    try {
+      const [, task] = await withTimeout(
+        Promise.race([
+          cancelled,
+          Promise.all([
+            invoke('assistant_start', {
+              startupId: id,
+              projectRoot: page.root,
+              kernelDir: guideState().kernelDir,
+              resume: target,
+              caseDir: page.selectedCase?.entry.dir || null,
+              modelRevision: page.versionRef,
+            }),
+            snapshot,
+          ]),
+        ]),
+        15000,
+        t('恢复待核对会话', 'restoring the conversation for review'),
+      );
+      return task;
+    } finally {
+      fail(new Error(t('会话恢复已结束', 'Session restore ended.')));
+      if (sessionStart.current === starting) sessionStart.current = null;
+    }
+  }
   /**
    * U04：把当前横幅里的旧动作 id 提交核对。只提交渲染时捕获的 ids，不把之后新任务的动作标掉；
    * 成功后不本地清横幅，等后端发来 requires_reconciliation=false 的 task_state。
    */
   async function reconcileEffects(ids: string[]) {
-    if (reconciling) return;
+    if (reconciling || runningRef.current || sessionStart.current) return;
+    const target = session.current;
+    if (!target) return;
+    const request = conversationRequest.current;
+    const epoch = ++sendEpoch.current;
+    reviewEpoch.current = epoch;
+    busy(true);
     setReconciling(true);
     setReconcileError('');
     setReconcileNotice('');
     try {
+      if (agentSession.current !== target) {
+        const task = await resumeReviewSession(target);
+        if (
+          request !== conversationRequest.current ||
+          epoch !== sendEpoch.current ||
+          session.current !== target
+        )
+          return;
+        const latest = pendingReconciliation(task);
+        const shown = pendingReconciliation(taskSnapshot);
+        if (
+          !latest.required ||
+          latest.ids.length !== ids.length ||
+          latest.ids.some((id) => !ids.includes(id)) ||
+          JSON.stringify(latest.actions) !== JSON.stringify(shown.actions)
+        ) {
+          throw new Error(
+            t(
+              '待核对动作已更新，请检查当前清单后重新核对。',
+              'Actions awaiting review changed. Check the current list and review again.',
+            ),
+          );
+        }
+      }
+      if (agentSession.current !== target)
+        throw new Error(
+          t('会话已变化，请重试核对。', 'The conversation changed. Please retry the review.'),
+        );
       const note = reconcileNote.trim();
       await invoke('assistant_reconcile_effects', { ids, note: note ? note : null });
+      if (request !== conversationRequest.current || reviewEpoch.current !== epoch) return;
       setReconcileNotice(
         t(
           '已提交核对；等后端确认后横幅会随新的任务快照消失。',
@@ -628,13 +881,18 @@ export default function AssistantPanel() {
       );
     } catch (e) {
       // 失败保留横幅：结果仍然未知，界面不能假装核对过。
-      setReconcileError(errorText(String(e)));
+      if (request === conversationRequest.current && reviewEpoch.current === epoch)
+        setReconcileError(errorText(String(e)));
     } finally {
-      setReconciling(false);
+      if (reviewEpoch.current === epoch) {
+        reviewEpoch.current = null;
+        if (request === conversationRequest.current) setReconciling(false);
+        if (epoch === sendEpoch.current) busy(false);
+      }
     }
   }
   async function attachDocument() {
-    if (runningRef.current || !ready) return;
+    if (deletingSessionRef.current || runningRef.current || !ready) return;
     // 记下这次读取属于哪个对话/草稿：读取期间可以切换对话，完成后必须核对身份（GUI-17）。
     const request = conversationRequest.current;
     try {
@@ -730,7 +988,7 @@ export default function AssistantPanel() {
       : '';
     const prompt = typed || fallback;
     // 附件还在读：先等它读完，否则这条消息不带附件就发出去了，读完的附件又挂到下一条上（GUI 审查 D-07）。
-    if (!prompt || runningRef.current || !ready || attaching) return;
+    if (!prompt || deletingSessionRef.current || runningRef.current || !ready || attaching) return;
     const documentText = attachments
       .map((attachment) => {
         const name = attachment.name.replaceAll('"', '');
@@ -749,23 +1007,46 @@ export default function AssistantPanel() {
       return;
     }
     busy(true);
+    const epoch = ++sendEpoch.current;
+    const newSession = fresh.current;
+    const targetSession = newSession ? null : session.current;
+    const id = newRequestId();
+    startupId.current = id;
+    const started = new Promise<void>((resolve, reject) => {
+      sessionStart.current = {
+        id,
+        target: targetSession,
+        skipConfigure: newSession || !!targetSession,
+        onReady: resolve,
+        onError: reject,
+      };
+    });
     setError('');
     setLimitReached(false);
     let sent: PendingTurn<DocumentAttachment> | null = null;
     try {
       const page = app.current;
       const identity = currentApprovalSnapshot();
-      await invoke('assistant_start', {
-        projectRoot: page.root,
-        kernelDir: guideState().kernelDir,
-        resume: fresh.current ? null : session.current,
-        caseDir: page.selectedCase?.entry.dir || null,
-        modelRevision: page.versionRef,
-      });
-      if (fresh.current) {
-        await invoke('assistant_new_session', {});
-        fresh.current = false;
-      }
+      await withTimeout(
+        Promise.all([
+          started,
+          (async () => {
+            await invoke('assistant_start', {
+              startupId: id,
+              projectRoot: page.root,
+              kernelDir: guideState().kernelDir,
+              resume: targetSession,
+              caseDir: page.selectedCase?.entry.dir || null,
+              modelRevision: page.versionRef,
+            });
+            if (epoch !== sendEpoch.current) return;
+            if (newSession) await invoke('assistant_new_session', { startupId: id });
+          })(),
+        ]),
+        15000,
+        t('启动助手', 'starting the assistant'),
+      );
+      if (epoch !== sendEpoch.current) return;
       if (identity !== currentApprovalSnapshot())
         throw new Error(
           t(
@@ -792,6 +1073,9 @@ export default function AssistantPanel() {
       });
       settleSendTurn(sent.id, true);
     } catch (e) {
+      if (epoch !== sendEpoch.current) return;
+      sessionStart.current = null;
+      startupId.current = null;
       busy(false);
       // 发送本身失败（例如后端拒绝）：刚显示的气泡撤回；草稿的去留由轮次状态决定（GUI-18）。
       if (sent) settleSendTurn(sent.id, false, e);
@@ -872,14 +1156,111 @@ export default function AssistantPanel() {
     update({ assistantSettingsOpen: false });
     return true;
   }
+  async function confirmConversationChange() {
+    if (attaching) return false;
+    const draft = inputRef.current;
+    const files = attachmentsRef.current;
+    if (!draft.trim() && !files.length) return true;
+    const discard = await askConfirm(
+      t(
+        '当前对话还有未发送的文字或附件。放弃这些草稿并切换对话？',
+        'This conversation has unsent text or attachments. Discard this draft and switch conversations?',
+      ),
+      {
+        confirmLabel: t('放弃草稿并切换', 'Discard and switch'),
+        cancelLabel: t('继续编辑', 'Keep editing'),
+        danger: true,
+      },
+    );
+    return discard && draft === inputRef.current && files === attachmentsRef.current;
+  }
+  async function deleteSession(item: Session) {
+    if (deletingSessionRef.current || runningRef.current || attaching) return;
+    deletingSessionRef.current = true;
+    setDeletingSession(true);
+    try {
+      const request = conversationRequest.current;
+      const selected = session.current;
+      const draft = inputRef.current;
+      const files = attachmentsRef.current;
+      const ok = await askConfirm(
+        t(
+          `删除会话"${item.title}"？对话记录会一起删掉，不能恢复。`,
+          `Delete the conversation "${item.title}"? Its messages are deleted too and cannot be restored.`,
+        ),
+        { confirmLabel: t('删除', 'Delete'), danger: true },
+      );
+      if (!ok) return;
+      if (selected === item.id && !(await confirmConversationChange())) return;
+      if (
+        runningRef.current ||
+        request !== conversationRequest.current ||
+        selected !== session.current ||
+        (selected === item.id && (draft !== inputRef.current || files !== attachmentsRef.current))
+      )
+        return;
+      await invoke('assistant_delete_session', { id: item.id });
+      setSessions((old) => old?.filter((value) => value.id !== item.id) || null);
+      if (request === conversationRequest.current && session.current === item.id) {
+        conversationRequest.current++;
+        startupId.current = null;
+        session.current = null;
+        fresh.current = true;
+        clearTaskReview();
+        if (draft === inputRef.current && files === attachmentsRef.current) {
+          setInput('');
+          setAttachments([]);
+          historyIndex.current = null;
+        }
+        setMessages([]);
+        setAttachNotice('');
+        setUsage('');
+        setSessionUsage({ turns: 0, tokens: 0 });
+        setUsagePending(false);
+        resetFollow();
+      } else if (request === conversationRequest.current) {
+        // Invalidate a transcript read started before its session was deleted.
+        conversationRequest.current++;
+      }
+      const inputs = await invoke<string[]>('assistant_input_history').catch(() => null);
+      if (inputs) history.current = inputs;
+    } finally {
+      deletingSessionRef.current = false;
+      setDeletingSession(false);
+    }
+  }
   /** 打开一个历史会话；请求带对话代次，迟到的 transcript 不写进当前会话（沿用 GUI-17 的代次约定）。 */
   async function openSession(item: Session) {
+    if (
+      deletingSessionRef.current ||
+      attaching ||
+      runningRef.current ||
+      item.id === session.current
+    )
+      return;
     const request = ++conversationRequest.current;
+    const draft = inputRef.current;
+    const files = attachmentsRef.current;
+    if (!(await confirmConversationChange()) || request !== conversationRequest.current) return;
+    sessionStart.current?.onError?.(new Error(t('会话已切换', 'The conversation changed.')));
     const transcript = await invokeJson<Message[]>('assistant_transcript', { id: item.id });
-    if (runningRef.current || request !== conversationRequest.current) return;
+    if (
+      deletingSessionRef.current ||
+      runningRef.current ||
+      request !== conversationRequest.current ||
+      draft !== inputRef.current ||
+      files !== attachmentsRef.current
+    )
+      return;
+    setInput('');
+    setAttachments([]);
+    historyIndex.current = null;
     session.current = item.id;
     fresh.current = false;
+    clearTaskReview();
     setMessages(transcript);
+    const task = [...transcript].reverse().find((item) => item.kind === 'task');
+    setTaskSnapshot(taskSnapshotOf(task?.task));
     setContextUsage(null);
     setLimitReached(false);
     setStepLimit(0);
@@ -965,7 +1346,7 @@ export default function AssistantPanel() {
     );
   }
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 border-l p-4">
+    <div className="flex h-full min-h-0 flex-col gap-3 border-l p-4" onKeyDown={handlePanelKeyDown}>
       <header className="flex items-center justify-between">
         <strong>{t('AI 助手', 'AI assistant')}</strong>
         <Button
@@ -989,9 +1370,12 @@ export default function AssistantPanel() {
               // 设置面板开着时它占住了对话区，点了看不出变化（2026-10-22 用户反馈"无反应"）：先收起设置；
               // 有未保存草稿时先确认，用户选择继续编辑就不切换（U-07）。
               if (!(await closeSettings())) return;
+              if (!(await confirmConversationChange())) return;
               conversationRequest.current++;
+              startupId.current = null;
               session.current = null;
               fresh.current = true;
+              clearTaskReview();
               grant.current = null;
               setMessages([]);
               setApproval(null);
@@ -1078,42 +1462,16 @@ export default function AssistantPanel() {
           {sessions.length === 0 && <p>{t('没有历史会话。', 'No saved conversations.')}</p>}
           {sessions.map((item) => (
             <div key={item.id} className="flex gap-2">
-              <Button disabled={running} onClick={() => void perform(() => openSession(item))}>
+              <Button
+                disabled={running || deletingSession}
+                onClick={() => void perform(() => openSession(item))}
+              >
                 {item.title} · {item.turns} {t('问', 'turns')}
               </Button>
               <Button
-                disabled={running}
+                disabled={running || deletingSession || attaching}
                 variant="ghost"
-                onClick={() =>
-                  void perform(async () => {
-                    // 删除会话连同对话、审计记录一起删掉，不能恢复：先确认（GUI 审查 D-05）。
-                    const ok = await askConfirm(
-                      t(
-                        `删除会话"${item.title}"？对话记录会一起删掉，不能恢复。`,
-                        `Delete the conversation "${item.title}"? Its messages are deleted too and cannot be restored.`,
-                      ),
-                      { confirmLabel: t('删除', 'Delete'), danger: true },
-                    );
-                    if (!ok) return;
-                    await invoke('assistant_delete_session', { id: item.id });
-                    setSessions((old) => old?.filter((value) => value.id !== item.id) || null);
-                    if (session.current === item.id) {
-                      session.current = null;
-                      fresh.current = true;
-                      conversationRequest.current++;
-                      setMessages([]);
-                      setAttachNotice('');
-                      setUsage('');
-                      setSessionUsage({ turns: 0, tokens: 0 });
-                      setUsagePending(false);
-                      resetFollow();
-                    }
-                    const inputs = await invoke<string[]>('assistant_input_history').catch(
-                      () => null,
-                    );
-                    if (inputs) history.current = inputs;
-                  })
-                }
+                onClick={() => void perform(() => deleteSession(item))}
               >
                 {t('删除', 'Delete')}
               </Button>
@@ -1137,6 +1495,17 @@ export default function AssistantPanel() {
         {view.title} · {state.versionRef?.id}@{state.versionRef?.revision} ·{' '}
         {model || selectedModel || t('默认模型', 'Default model')}
       </p>
+      {settings.retrieval.enabled && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {t('文档检索：', 'Document search: ')}
+          {docsIndex
+            ? retrievalStateText(docsIndex.state || 'unknown', state.language)
+            : t(
+                '助手连接时准备当前版本索引',
+                'Preparing the current version index when the assistant connects',
+              )}
+        </p>
+      )}
       {/* U04：未知副作用核对横幅在对话区顶部；只有 task_state 能把它去掉。 */}
       {review.required && (
         <TaskReviewBanner
@@ -1361,7 +1730,10 @@ export default function AssistantPanel() {
               `This turn reached its ${stepLimit || 40}-generation limit before completion. Existing actions and results are kept; Continue resumes in the same conversation without clearing earlier content.`,
             )}
           </p>
-          <Button disabled={running || !ready} onClick={() => void send(continuePrompt)}>
+          <Button
+            disabled={running || !ready || deletingSession}
+            onClick={() => void send(continuePrompt)}
+          >
             {t('继续', 'Continue')}
           </Button>
         </Notice>
@@ -1436,29 +1808,16 @@ export default function AssistantPanel() {
           setInput(e.target.value);
           historyIndex.current = null;
         }}
-        onKeyDown={(event) => {
-          if (
-            !event.nativeEvent.isComposing &&
-            ((event.key === 'ArrowUp' && event.currentTarget.selectionStart === 0) ||
-              (event.key === 'ArrowDown' && event.currentTarget.selectionEnd === input.length))
-          ) {
-            if (!history.current.length) return;
-            event.preventDefault();
-            if (historyIndex.current === null) historyDraft.current = input;
-            const next = historyInput(
-              history.current,
-              historyIndex.current,
-              historyDraft.current,
-              event.key === 'ArrowUp' ? -1 : 1,
-            );
-            historyIndex.current = next.index;
-            setInput(next.value);
-          }
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            void send();
-          }
+        onCompositionStart={() => {
+          composing.current = true;
         }}
+        onCompositionEnd={() => {
+          composing.current = false;
+        }}
+        onBlur={() => {
+          composing.current = false;
+        }}
+        onKeyDown={handleInputKeyDown}
       />
       {/* 附件用图标，发送/停止靠右：输入框下面一行只留三个动作，模型快捷选择在下一行。 */}
       <div className="flex flex-wrap items-center gap-2">
@@ -1472,7 +1831,9 @@ export default function AssistantPanel() {
           title={
             attaching ? t('正在读取文档…', 'Reading document…') : t('添加文档', 'Attach document')
           }
-          disabled={!ready || running || attaching || state.assistantSettingsOpen}
+          disabled={
+            !ready || running || attaching || deletingSession || state.assistantSettingsOpen
+          }
           onClick={() => void perform(attachDocument)}
         >
           <svg
@@ -1492,19 +1853,18 @@ export default function AssistantPanel() {
         <div className="ml-auto flex gap-2">
           <Button
             variant="primary"
-            disabled={!ready || running || attaching || (!input.trim() && !attachments.length)}
+            disabled={
+              !ready ||
+              running ||
+              attaching ||
+              deletingSession ||
+              (!input.trim() && !attachments.length)
+            }
             onClick={() => void send()}
           >
             {t('发送', 'Send')}
           </Button>
-          <Button
-            disabled={!running}
-            onClick={() =>
-              void perform(async () => {
-                await invoke('assistant_cancel', {});
-              })
-            }
-          >
+          <Button disabled={!running} onClick={() => void perform(stop)}>
             {t('停止', 'Stop')}
           </Button>
         </div>

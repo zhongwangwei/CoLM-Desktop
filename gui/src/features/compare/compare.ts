@@ -3,6 +3,15 @@ import type { SaveState } from '../../lib/save-status';
 import { remoteEndStatus } from '../runs/run-model';
 import { fingerprintOf } from './fingerprint';
 
+// Only the newest page polling a host may write its job identity and task controls.
+// One entry per host keeps ownership across route unmounts without retaining page closures.
+const remoteWatchOwners = new Map<string, symbol>();
+export function claimRemoteWatch(host: string): () => boolean {
+  const owner = Symbol();
+  remoteWatchOwners.set(host, owner);
+  return () => remoteWatchOwners.get(host) === owner;
+}
+
 /** `bench_inspect` 读出的一个 history 目录。 */
 export interface HistoryInfo {
   history_dir: string;
@@ -897,8 +906,13 @@ export interface EvaluationDesign extends ComparisonDesign {
  */
 export function buildOpenbenchConfig(design: ComparisonDesign) {
   const [from, to] = design.years;
-  if (!Number.isInteger(from) || !Number.isInteger(to) || from > to)
-    throw new Error(bilingual('评估年份要先小后大', 'The evaluation years must run forward'));
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < 1 || from > to)
+    throw new Error(
+      bilingual(
+        '评估年份须为正整数，开始年份不能晚于结束年份',
+        'The evaluation years must be positive integers and run forward',
+      ),
+    );
   // 变量与每模拟覆盖都按名字排序：输出顺序不随勾选先后变化，指纹（不区分对象键顺序）才和配置文本一一对应。
   const variables = Object.entries(design.variables)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -1261,10 +1275,14 @@ export function configSaveState(args: {
   currentFingerprint: string;
   generated: { fingerprint: string; config: string } | null;
   submitting: boolean;
+  writtenFingerprint?: string;
+  effectiveFingerprint?: string | null;
 }): SaveState {
-  if (args.submitting && args.yaml) return 'saving';
   if (!args.yaml || !args.generated || args.generated.fingerprint !== args.currentFingerprint)
     return 'dirty';
+  if (args.submitting) return 'saving';
+  if (args.effectiveFingerprint && args.writtenFingerprint === args.effectiveFingerprint)
+    return 'saved';
   // U-05 的补充：手改过的文本还没有写进比较项目目录（运行时才写），不能显示"已保存"
   // （审查报告：只改 YAML 后徽标仍是 saved）。
   if (args.yaml !== args.generated.config) return 'dirty';
@@ -1306,6 +1324,8 @@ export interface CompareDraft {
   statisticsItems: string[];
   yaml: string;
   picks: CompareDraftPick[];
+  /** 恢复时校验冻结输入，手改 YAML 仍独立保留。 */
+  snapshot?: unknown;
 }
 
 /** 草稿按机器分开存：同一套节点/参考数据在不同服务器上不是同一份输入。 */
@@ -1369,6 +1389,7 @@ export function parseCompareDraft(text: string): CompareDraft | null {
     statisticsItems: arrays.statisticsItems!,
     yaml: typeof draft.yaml === 'string' ? draft.yaml : '',
     picks: draft.picks as CompareDraftPick[],
+    snapshot: draft.snapshot,
   };
 }
 
@@ -1429,6 +1450,10 @@ export function comparisonName(name: string): string {
 export interface RemoteJobIdentity {
   job: string;
   kind: 'install' | 'run';
+  taskId?: string;
+  submittedDraft?: string;
+  fingerprint?: string;
+  configSha?: string;
   /** 比较项目名（kind === 'run'）：失联时说明这是哪次比较，确认成功后据此取回报告。 */
   name?: string;
   /** 作业属于哪台服务器：身份按机器分开存，核对时确认回来的是不是同一台。 */
@@ -1473,6 +1498,10 @@ export function parseRemoteJob(text: string | null | undefined): RemoteJobIdenti
     job,
     kind,
     name: textField('name'),
+    taskId: textField('taskId'),
+    submittedDraft: textField('submittedDraft'),
+    fingerprint: textField('fingerprint'),
+    configSha: textField('configSha'),
     host: textField('host'),
     submittedAt: textField('submittedAt'),
     lastState: textField('lastState'),

@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { defaultSettings, type Settings } from './model';
+import { defaultSettings, settingsForSave, type Settings } from './model';
 import {
+  mergeSettingsDraft,
   draftApiOptions,
   draftSaveState,
   equalJson,
@@ -226,4 +227,21 @@ test('the settings dialog renders the shared save badge and the saved sending ta
   assert.match(settingsSource.source.text, /sendingSummary\(settings, state\.language\)/);
   assert.match(settingsSource.source.text, /实际发送/);
   assert.match(settingsSource.source.text, /放弃修改/);
+});
+
+test('external acknowledgement merges into a dirty draft without reverting user edits', () => {
+  const baseline = { ...saved, egress_acknowledged: null };
+  const draft = { ...baseline, model: 'my unsaved model' };
+  const external = {
+    ...baseline,
+    egress_acknowledged: 'https://api.deepseek.com',
+    timeout_seconds: 123,
+  };
+  const merged = mergeSettingsDraft(baseline, draft, external);
+  assert.equal(settingsForSave(draft, external).egress_acknowledged, external.egress_acknowledged);
+  assert.equal(merged.model, 'my unsaved model');
+  assert.equal(merged.timeout_seconds, 123);
+  assert.equal(merged.egress_acknowledged, external.egress_acknowledged);
+  assert.equal(settingsDraftDirty(external, merged, optionsText), true);
+  assert.deepEqual(mergeSettingsDraft(baseline, baseline, external), external);
 });

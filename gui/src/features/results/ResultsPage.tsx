@@ -2,7 +2,7 @@ import { bilingual } from '../../lib/bilingual';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { insertGapMarkers, sameSeries } from './chart-data';
 import uPlot from 'uplot';
-import { timeTicks } from './time-ticks';
+import { modelClockIso, timeTicks } from './time-ticks';
 import { utcSeconds } from '../../lib/dates';
 import 'uplot/dist/uPlot.min.css';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
@@ -400,6 +400,7 @@ export function ScienceChart({
         width: Math.max(160, host.clientWidth),
         height: compact ? 220 : 300,
         legend: { show: !compact },
+        scales: { x: { time: true } },
         tzDate: (ts) => uPlot.tzDate(new Date(ts * 1000), 'Etc/UTC'),
         series: [
           {},
@@ -496,14 +497,18 @@ function metricFrequencyTitle(metric: Metric, en: boolean): string | undefined {
   ].filter((value): value is string => !!value && String(value).trim() !== '');
   return parts.length ? parts.join(' · ') : undefined;
 }
-function metricCoverageTitle(metric: Metric): string | undefined {
+function metricCoverageTitle(metric: Metric, en: boolean): string | undefined {
   const parts: string[] = [];
   if (typeof metric.coverage_min === 'number' && Number.isFinite(metric.coverage_min))
     parts.push(
-      `min ${Math.round((metric.coverage_min <= 1 ? metric.coverage_min * 100 : metric.coverage_min) * 10) / 10}%`,
+      `${en ? 'min' : '最低'} ${Math.round((metric.coverage_min <= 1 ? metric.coverage_min * 100 : metric.coverage_min) * 10) / 10}%`,
     );
   if (typeof metric.low_coverage_pairs === 'number' && metric.low_coverage_pairs > 0)
-    parts.push(`${metric.low_coverage_pairs} pair(s) below coverage`);
+    parts.push(
+      en
+        ? `${metric.low_coverage_pairs} pair(s) below coverage`
+        : `${metric.low_coverage_pairs} 对记录覆盖率不足`,
+    );
   return parts.length ? parts.join(' · ') : undefined;
 }
 export default function ResultsPage({
@@ -555,6 +560,8 @@ export default function ResultsPage({
   const [runsLoading, setRunsLoading] = useState(!!caseDir);
   const [runsError, setRunsError] = useState('');
   const [source, setSource] = useState('');
+  const runsGeneration = useRef(0);
+  const explicitRun = useRef('');
   const completedRunCase =
     state.running?.[caseDir]?.status === 'succeeded' ? state.running[caseDir]?.run_case : undefined;
   const latestCompletedRun = useRef(completedRunCase);
@@ -607,6 +614,11 @@ export default function ResultsPage({
   const [comparisonVariable, setComparisonVariable] = useState('');
   // 站点清单按内容做依赖：`state.cases` 每次渲染都可能是新数组，直接放进 effect 依赖会无限重查。
   const caseDirsKey = state.cases.map((entry) => entry.dir).join('\n');
+  const completedProjectRunsKey = (caseDirsKey ? caseDirsKey.split('\n') : [caseDir])
+    .map((dir) => state.running?.[dir])
+    .filter((run) => run?.status === 'succeeded')
+    .map((run) => run?.run_case ?? '')
+    .join('\n');
   // 两份结果都是「条件快照」：渲染与导出只读快照，不再共用一个 metrics 数组。
   const evaluation: EvaluationAvailability[] = singleResult?.evaluation ?? [];
   const singleRequest: SingleRequest = {
@@ -651,6 +663,8 @@ export default function ResultsPage({
     requestSeq.current.multi++;
     stationTarget.current = caseDir;
     cache.current.clear();
+    const generation = ++runsGeneration.current;
+    explicitRun.current = '';
     setRuns([]);
     setSource('');
     setCatalog(null);
@@ -682,17 +696,31 @@ export default function ResultsPage({
       .catch(() => {});
     void invokeJson<Run[]>('model_case_runs', { dir: caseDir })
       .then((data) => {
-        if (!cancelled && stationTarget.current === caseDir) {
+        if (
+          !cancelled &&
+          stationTarget.current === caseDir &&
+          generation === runsGeneration.current
+        ) {
           setRuns(data);
           setSource(preferredRun(data, latestCompletedRun.current, { id: versionId, revision }));
         }
       })
       .catch((e) => {
         // 运行清单读失败要单独显示并可重试：混进整页 error 会让人以为算例坏了，也看不出能重试。
-        if (!cancelled && stationTarget.current === caseDir) setRunsError(String(e));
+        if (
+          !cancelled &&
+          stationTarget.current === caseDir &&
+          generation === runsGeneration.current
+        )
+          setRunsError(String(e));
       })
       .finally(() => {
-        if (!cancelled && stationTarget.current === caseDir) setRunsLoading(false);
+        if (
+          !cancelled &&
+          stationTarget.current === caseDir &&
+          generation === runsGeneration.current
+        )
+          setRunsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -704,17 +732,30 @@ export default function ResultsPage({
   useEffect(() => {
     if (!caseDir || !completedRunCase) return;
     let cancelled = false;
+    const generation = ++runsGeneration.current;
+    setRunsLoading(true);
+    setRunsError('');
     void invokeJson<Run[]>('model_case_runs', { dir: caseDir })
       .then((data) => {
-        if (cancelled || stationTarget.current !== caseDir) return;
+        if (cancelled || stationTarget.current !== caseDir || generation !== runsGeneration.current)
+          return;
         setRuns(data);
-        if (data.some((r) => r.run_case === completedRunCase)) setSource(completedRunCase);
+        setSource(
+          data.some((r) => r.run_case === explicitRun.current)
+            ? explicitRun.current
+            : preferredRun(data, completedRunCase, { id: versionId, revision }),
+        );
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (!cancelled && generation === runsGeneration.current) setRunsError(String(error));
+      })
+      .finally(() => {
+        if (!cancelled && generation === runsGeneration.current) setRunsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [caseDir, completedRunCase]);
+  }, [caseDir, completedRunCase, versionId, revision]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
@@ -726,6 +767,10 @@ export default function ResultsPage({
     setComparisonResult(null);
     setDiagnostic(null);
     setCatalogKey('');
+    setVariable('');
+    setSeriesKey('');
+    setSeriesError('');
+    setSeriesLoading(false);
     if (!source) return;
     void invokeJson<Catalog>('history_catalog', { case: source })
       .then((data) => {
@@ -857,9 +902,9 @@ export default function ResultsPage({
     return () => {
       cancelled = true;
     };
-  }, [multiStation, caseDirsKey, caseDir]);
+  }, [multiStation, caseDirsKey, caseDir, completedProjectRunsKey]);
   async function task<T>(fn: (current: () => boolean) => Promise<T>): Promise<T> {
-    if (lock.current) throw new Error('Operation in progress');
+    if (lock.current) throw new Error(tr('操作正在进行，请稍候', 'Operation in progress'));
     lock.current = true;
     setBusy(true);
     setError('');
@@ -899,8 +944,21 @@ export default function ResultsPage({
           all,
           overwriteNewer: all,
         });
-        const data = await invokeJson<Run[]>('model_case_runs', { dir });
-        if (current() && stationTarget.current === dir) setRuns(data);
+        if (!current() || stationTarget.current !== dir) return;
+        const generation = ++runsGeneration.current;
+        setRunsLoading(true);
+        setRunsError('');
+        try {
+          const data = await invokeJson<Run[]>('model_case_runs', { dir });
+          if (current() && stationTarget.current === dir && generation === runsGeneration.current)
+            setRuns(data);
+        } catch (failure) {
+          if (current() && stationTarget.current === dir && generation === runsGeneration.current)
+            throw failure;
+        } finally {
+          if (current() && stationTarget.current === dir && generation === runsGeneration.current)
+            setRunsLoading(false);
+        }
       });
     } finally {
       setFetching(false);
@@ -1105,7 +1163,12 @@ export default function ResultsPage({
       if (!live()) return [];
       for (const entry of entries) {
         if (!sources.some((r) => r.run_case === entry.run.run_case))
-          throw new Error(`Not a recorded run copy: ${entry.run.run_case}`);
+          throw new Error(
+            tr(
+              `这不是已登记的运行副本：${entry.run.run_case}`,
+              `Not a recorded run copy: ${entry.run.run_case}`,
+            ),
+          );
       }
       // 进度绑定本次任务 id：旧任务既不能推进新任务的进度，也不能在 finally 里清掉它。
       comparisonTaskId.current++;
@@ -1232,7 +1295,10 @@ export default function ResultsPage({
         );
       const data = await readSeries(variable, null);
       const text = fullSeriesCsv(data, variable);
-      if (!current()) throw new Error('Analysis selection changed before the export');
+      if (!current())
+        throw new Error(
+          tr('导出前分析条件已改变，请重新导出', 'Analysis selection changed before the export'),
+        );
       const name = `${source.split(/[\\/]/).at(-1) || 'colm'}-${variable}.csv`.replace(
         /[<>:"/\\|?*\p{Cc}]/gu,
         '_',
@@ -1355,6 +1421,7 @@ export default function ResultsPage({
     if (!runs.some((run) => run.run_case === path))
       throw new Error(tr('该运行记录不可用', 'This recorded run is unavailable'));
     epoch.current++;
+    explicitRun.current = path;
     setSource(path);
     setRunChooser(false);
   }
@@ -1660,6 +1727,11 @@ export default function ResultsPage({
       set: (value) => setReportFormat(value as ReportFormat),
     });
   const displayedSeries = tab === 'diagnostics' ? diagnostic?.series : series;
+  const truncatedGaps = displayedSeries?.downsampled && displayedSeries.gaps_truncated;
+  const gapNotice = tr(
+    '缺测区间过多，抽样数据无法完整标出缺口，已暂停绘制曲线。请缩短时段后重新读取。',
+    'Too many missing-data intervals: sampled data cannot mark every gap, so this curve is hidden. Narrow the time window and read it again.',
+  );
   usePageContract({
     title: runChooser
       ? tr('选择运行', 'Choose a run')
@@ -1689,18 +1761,23 @@ export default function ResultsPage({
   // 起止时刻插成 null 行再交给 uPlot。图上点数上限仍是后端抽样给的 2400，这里只补标记行。
   // 缺测标记只应补在合法的 series 上：列长不一致时退回未加标记的数据，宁可图不完美，
   // 不因为一个坏响应把整页渲染打崩。
-  const aligned = displayedSeries
-    ? (() => {
-        try {
-          return insertGapMarkers(displayedSeries.time, displayedSeries.vars, displayedSeries.gaps);
-        } catch {
-          return {
-            time: displayedSeries.time,
-            columns: Object.values(displayedSeries.vars),
-          };
-        }
-      })()
-    : null;
+  const aligned =
+    displayedSeries && !truncatedGaps
+      ? (() => {
+          try {
+            return insertGapMarkers(
+              displayedSeries.time,
+              displayedSeries.vars,
+              displayedSeries.gaps,
+            );
+          } catch {
+            return {
+              time: displayedSeries.time,
+              columns: Object.values(displayedSeries.vars),
+            };
+          }
+        })()
+      : null;
   const chart = aligned && ([aligned.time, ...aligned.columns] as uPlot.AlignedData);
   const variableInfo = catalog?.variables.find((item) => item.name === variable);
   const finding = overviewFinding(selectedMetric, variable, en);
@@ -1756,6 +1833,7 @@ export default function ResultsPage({
     (tab === 'comparison' && comparisonResult !== null && !comparisonFresh);
   /** 曲线区非就绪状态的文案：失败给「重试」，条件已改给「刷新曲线」，其余各自说明原因。 */
   function curvePanelNotice(state: CurveState): ReactNode {
+    if (truncatedGaps) return <div className="results-chart-empty">{gapNotice}</div>;
     if (state === 'error')
       return (
         <div className="results-chart-empty">
@@ -2502,8 +2580,7 @@ export default function ResultsPage({
               `${catalog.files} 个文件 · ${catalog.steps} 个时间步`,
               `${catalog.files} files · ${catalog.steps} steps`,
             )}{' '}
-            · {new Date(catalog.start * 1000).toISOString()} —{' '}
-            {new Date(catalog.end * 1000).toISOString()} · {timeBasisText}
+            · {modelClockIso(catalog.start)} — {modelClockIso(catalog.end)} · {timeBasisText}
           </p>
           <table>
             <thead>
@@ -2927,17 +3004,19 @@ export default function ResultsPage({
               </>
             ) : (
               <div className="results-chart-empty">
-                {busy
-                  ? tr('正在统计能量通量残差…', 'Summarizing the energy flux residual…')
-                  : diagnostic
-                    ? tr(
-                        '诊断序列在所选时段内没有数据。',
-                        'The diagnostic series has no data in the window.',
-                      )
-                    : tr(
-                        '点「统计能量通量残差」后在这里看曲线。',
-                        'Run the residual summary to see its curve here.',
-                      )}
+                {truncatedGaps
+                  ? gapNotice
+                  : busy
+                    ? tr('正在统计能量通量残差…', 'Summarizing the energy flux residual…')
+                    : diagnostic
+                      ? tr(
+                          '诊断序列在所选时段内没有数据。',
+                          'The diagnostic series has no data in the window.',
+                        )
+                      : tr(
+                          '点「统计能量通量残差」后在这里看曲线。',
+                          'Run the residual summary to see its curve here.',
+                        )}
               </div>
             ))}
           {tab === 'series' &&
@@ -3044,7 +3123,7 @@ export default function ResultsPage({
                   ))}
                   <td title={metricQcTitle(m)}>{metricQcLabel(m, en)}</td>
                   <td title={metricCorrectionTitle(m)}>{metricCorrectionLabel(m, en)}</td>
-                  <td title={metricCoverageTitle(m)}>{metricCoverageText(m)}</td>
+                  <td title={metricCoverageTitle(m, en)}>{metricCoverageText(m)}</td>
                 </tr>
               ))}
             </tbody>
@@ -3128,7 +3207,7 @@ export default function ResultsPage({
                 <ScienceChart
                   key={m.name}
                   data={[m.time!, m.model!, m.obs!] as uPlot.AlignedData}
-                  labels={[`${m.name} model`, `${m.name} obs`]}
+                  labels={[`${m.name} ${tr('模拟', 'model')}`, `${m.name} ${tr('观测', 'obs')}`]}
                   theme={state.theme}
                 />
               ))}

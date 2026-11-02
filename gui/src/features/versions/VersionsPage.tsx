@@ -117,6 +117,7 @@ export default function VersionsPage() {
   }, [state.simulationReturn]);
   const [codeBusy, setCodeBusy] = useState(false),
     codeBusyNow = useRef(false);
+  const parameterPending = useRef(false);
   const dirtyNow = useRef(dirty);
   dirtyNow.current = dirty;
   draftNow.current = draft;
@@ -127,6 +128,7 @@ export default function VersionsPage() {
       !autoCreated.current.has(d.id) ||
       d.generation !== 1 ||
       dirtyNow.current ||
+      parameterPending.current ||
       d.code.workspace
     )
       return;
@@ -150,6 +152,10 @@ export default function VersionsPage() {
   }
   /** 切换版本/工作区前挡一下：未保存的源码缓冲区会随 CodeWorkspace 卸载一起丢（GUI-02）。 */
   function assertSourceSaved() {
+    if (parameterPending.current)
+      throw new Error(
+        t('参数输入尚未完成，请先修正参数表中的值', 'Finish or correct the parameter values first'),
+      );
     if (sourceState.current?.dirty)
       throw new Error(
         t(
@@ -159,6 +165,11 @@ export default function VersionsPage() {
       );
   }
   useNavigationGuard(() => {
+    if (parameterPending.current)
+      return t(
+        '参数输入尚未完成，请先修正参数表中的值',
+        'Finish or correct the parameter values first',
+      );
     if (dirtyNow.current)
       return t(
         '请先保存草稿或放弃本地修改后再离开',
@@ -343,6 +354,10 @@ export default function VersionsPage() {
     setStudyNotice('');
   }
   async function save(target = draft) {
+    if (parameterPending.current)
+      throw new Error(
+        t('参数输入尚未完成，请先修正参数表中的值', 'Finish or correct the parameter values first'),
+      );
     if (!target) throw new Error(t('没有当前草稿', 'No current draft'));
     // 保存中也是显式状态：写入期间的失败要保住 dirty（成功才清），徽标不能直接跳回"已保存"。
     setSaving(true);
@@ -393,6 +408,10 @@ export default function VersionsPage() {
     finish = true,
     useForRuns = true,
   ) {
+    if (parameterPending.current)
+      throw new Error(
+        t('参数输入尚未完成，请先修正参数表中的值', 'Finish or correct the parameter values first'),
+      );
     // 用 ref 里的最新草稿：进冻结前处理源码缓冲区的保存会刷新 code.commit 与 generation，闭包里
     // 发起点击时那一份 target 可能已经旧了（拿旧 generation 保存会被后端拒绝）。
     const current = draftNow.current ?? target;
@@ -446,6 +465,8 @@ export default function VersionsPage() {
   async function discardLocal() {
     if (!draft) return;
     const saved = await invokeJson<ModelDraft>('model_draft', { id: draft.id });
+    parameterPending.current = false;
+    setParamsOpen(false);
     setDraft(saved);
     dirtyNow.current = false;
     setDirty(false);
@@ -1719,6 +1740,7 @@ export default function VersionsPage() {
               <StudyPicks
                 owner={draft ? draft.id : viewing ? keyOf(viewing.version) : ''}
                 catalog={allowed}
+                crops={configurationKernel?.macros.includes('CROP') ?? false}
                 en={state.language === 'en'}
                 disabled={busy || codeBusy}
                 onChange={setPicks}
@@ -2021,6 +2043,9 @@ export default function VersionsPage() {
               if (open || !draft || manualStart.current !== draft.id) return;
               manualStart.current = null;
               if (!dirtyNow.current && !lock.current) leaveWorkbench();
+            }}
+            onPendingChange={(pending) => {
+              parameterPending.current = pending;
             }}
             catalog={allowed}
             overlay={shown.overlay}

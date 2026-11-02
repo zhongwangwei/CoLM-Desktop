@@ -209,7 +209,7 @@ impl Tool for SourceHistory {
         "source_history"
     }
     fn description(&self) -> &'static str {
-        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory; without a selected model the application source is resolved by the CLI), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. For repository=selected the result includes a source_handle: pass it to commit_details(repository=selected) to read the exact same source (required to continue reading a mutable workspace's local/not-yet-pushed commits; the handle expires when the assistant is reconfigured, so rerun source_history instead of guessing). Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
+        "Locate a variable or function in source and list the commits that changed it (git blame/log -G/-S plus commit-vs-parent hunks): repository=selected queries the verified frozen model source (or an explicit source directory; without a selected model the application source is resolved by the CLI), desktop the application repository, colm_upstream the official CoLM repository, both queries each side at its own ref/SHA. When registered repository history is unavailable, follow online_fallback using available web tools if network_enabled; local mirror absence is not evidence that public history is absent. Use it first for 'when/which commit/who changed X'; it also returns candidates when the same symbol appears in several scopes, uncommitted diffs separately, and history coverage/truncation. For repository=selected the result includes a source_handle: pass it to commit_details(repository=selected) to read the exact same source (required to continue reading a mutable workspace's local/not-yet-pushed commits; the handle expires when the assistant is reconfigured, so rerun source_history instead of guessing). Uncommitted edits have no commit, author time or PR. Commit messages are only evidence of motivation where explicitly written; otherwise say not_recorded."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -412,6 +412,40 @@ impl Tool for SourceHistory {
             value["source_handle"] = json!(handle);
         }
         value["source_context"] = context;
+        for (key, owner, repo) in [
+            ("desktop", DESKTOP_OWNER, DESKTOP_REPO),
+            ("colm_upstream", UPSTREAM_OWNER, UPSTREAM_REPO),
+        ] {
+            if (repository != "both" && repository != key)
+                || value["repos"][key]["history"] != "unavailable"
+            {
+                continue;
+            }
+            // Only registry constants may grant fetch access; CLI URLs are diagnostic data.
+            if ctx.github_network {
+                if let Some(web) = &ctx.web {
+                    if let Ok(mut hosts) = web.allowed_hosts.lock() {
+                        hosts.extend(["github.com".to_owned(), "api.github.com".to_owned()]);
+                    }
+                }
+            }
+            value["repos"][key]["online_fallback"] = json!({
+                "repository_url": format!("https://github.com/{owner}/{repo}"),
+                "metadata_url": format!("https://api.github.com/repos/{owner}/{repo}"),
+                "network_enabled": ctx.github_network,
+                "status": if ctx.github_network { "not_checked" } else { "network_disabled" },
+                "next_steps": if ctx.github_network {
+                    vec![
+                        "Use fetch_url or your backend's web tools to read metadata_url first and confirm default_branch; never guess main/master. Resolve an explicitly requested ref separately.",
+                        "Locate the symbol in this official repository, then inspect file history and commit diff to verify each change, author and full commit SHA; PR association alone cannot identify symbol changes.",
+                        "Follow pagination and state the checked ref/SHA, history coverage and truncation; no local history does not mean no public history.",
+                        "Public repository history is not the selected frozen model revision without an exact verified mapping. Do not send local paths, code contents or credentials in web queries.",
+                    ]
+                } else {
+                    vec!["Do not call online fallback tools while network is disabled; public history has not been checked."]
+                },
+            });
+        }
         Ok(value)
     }
 }

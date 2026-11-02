@@ -71,7 +71,10 @@ test('existing unreconciled records block duplicate submission for each selected
         ? finished(dir)
         : { record: record(dir), status: { state: 'running' } },
   });
-  await assert.rejects(q.run(), /previous server submission is not confirmed/);
+  await assert.rejects(
+    q.run(),
+    /上一次服务器提交尚未确认|previous server submission is not confirmed/,
+  );
   assert.deepEqual(q.submitted, ['a']);
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'b')?.state, 'unknown');
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'c')?.state, 'cancelled');
@@ -89,7 +92,10 @@ test('a previous submission still being reconciled is reported as unconfirmed, n
       status: { state: 'unknown' },
     }),
   });
-  await assert.rejects(q.run(), /previous server submission is not confirmed/);
+  await assert.rejects(
+    q.run(),
+    /上一次服务器提交尚未确认|previous server submission is not confirmed/,
+  );
   assert.deepEqual(q.submitted, []);
 });
 
@@ -150,7 +156,7 @@ test('a changed host, job or operation in an existing terminal record cannot aut
         record: { ...record(dir), operation_id: 'original', ...mismatch },
       }),
     });
-    await assert.rejects(q.run(), /identity changed/);
+    await assert.rejects(q.run(), /服务器作业身份已变化|server job identity changed/);
     assert.deepEqual(q.submitted, []);
     assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'a')?.state, 'unknown');
   }
@@ -392,4 +398,78 @@ test('rotation resumes after the last checked station and wraps at the end', () 
   assert.deepEqual(nextCheckBatch(['a', 'b', 'c'], 'gone', 2), { batch: ['a', 'b'], next: 'b' });
   // 站点数少于每批上限：一轮看完，下一轮仍从头开始。
   assert.deepEqual(nextCheckBatch(['a', 'b'], 'b', 5), { batch: ['a', 'b'], next: 'b' });
+});
+
+test('batch waiting is distinct from submitting and resets when complete', async () => {
+  const waiting: boolean[] = [];
+  await runRemoteBatch({
+    cases: ['a', 'b'],
+    workers: 2,
+    stopped: () => false,
+    record: async () => null,
+    submit: async (dir) => {
+      assert.equal(waiting.at(-1), false);
+      return { host: 'server', job: dir };
+    },
+    status: async (dir) => {
+      assert.equal(waiting.at(-1), true);
+      return { record: { host: 'server', job: dir }, status: { state: 'finished', exit_code: 0 } };
+    },
+    waiting: (value) => waiting.push(value),
+    wait: async () => {},
+    change: () => {},
+  });
+  assert.ok(waiting.includes(true));
+  assert.equal(waiting.at(-1), false);
+});
+
+test('retired manual reconciliation starts no further station checks or progress updates', async () => {
+  let stopped = false;
+  const calls: string[] = [];
+  const progress: number[] = [];
+  const result = await checkInBatches({
+    targets: ['a', 'b', 'c'],
+    limit: 1,
+    stopped: () => stopped,
+    check: async (dir) => {
+      calls.push(dir);
+      stopped = true;
+      return dir;
+    },
+    progress: (done) => progress.push(done),
+  });
+  assert.deepEqual(calls, ['a']);
+  assert.deepEqual(progress, []);
+  assert.deepEqual(result.results, []);
+});
+
+test('remote batch errors follow both Chinese and English UI languages', async () => {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  try {
+    for (const [lang, unconfirmed, changed] of [
+      ['zh', /上一次服务器提交尚未确认/, /服务器作业身份已变化/],
+      ['en', /previous server submission is not confirmed/, /server job identity changed/],
+    ] as const) {
+      Object.defineProperty(globalThis, 'document', {
+        value: { documentElement: { lang } },
+        configurable: true,
+        writable: true,
+      });
+      const pending = queue({
+        cases: ['a'],
+        record: async (dir) => record(dir),
+        status: async (dir) => ({ record: record(dir), status: { state: 'running' } }),
+      });
+      await assert.rejects(pending.run(), unconfirmed);
+      const mismatch = queue({
+        cases: ['a'],
+        record: async (dir) => record(dir),
+        status: async (dir) => ({ ...finished(dir), record: { ...record(dir), host: 'other' } }),
+      });
+      await assert.rejects(mismatch.run(), changed);
+    }
+  } finally {
+    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
 });

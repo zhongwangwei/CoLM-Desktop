@@ -10,9 +10,10 @@
 //!   副作用可能不完整，必须保留到明确核对。
 //!
 //! `effect_unknown` 会跨新回答、新任务保留：新问题不能证明上一次写到底有没有发生。
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
-use anyhow::{Context, Result};
+use crate::tools::read::knowledge::{digest, read};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -23,6 +24,8 @@ pub struct TaskAction {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub mutating: bool,
     /// 结构化副作用结局；还没读到决定性审计事件时按 `effect_unknown` 保守处理。
     pub effect: ToolEffect,
@@ -30,10 +33,12 @@ pub struct TaskAction {
     /// 取值：unconfirmed（没有结果事件）、not_started、success、failed、effect_unknown。
     pub state: String,
     pub result: Option<String>,
-    /// 用户已在审计里明确核对过这条“未知副作用”（U04，`effects_reconciled` 记录）。
-    /// 只影响“是否还要求核对”，不改 `effect`：原始 effect_unknown 证据保留，便于追溯。
+    /// 已由用户核对或系统存储证据核实；原始 effect_unknown 审计记录始终保留。
     #[serde(default)]
     pub reconciled: bool,
+    /// Storage proof from automatic verification, distinct from human scientific review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Value>,
     /// 结局是否已由审计事件确定。进程中断时保持 false；不写进任务快照（GUI 只关心 effect）。
     #[serde(skip)]
     pub settled: bool,
@@ -91,12 +96,203 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
     };
+    let mut proofs = BTreeMap::new();
+    let task = fold_audit(&text, resumed, &proofs);
+    let Some(pending) = task.as_ref().filter(|task| task.requires_reconciliation) else {
+        return Ok(task);
+    };
+    let Some(root) = dir.parent().and_then(Path::parent) else {
+        return Ok(task);
+    };
+    let events: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|record| record.get("event").cloned())
+        .collect();
+    for action in &pending.actions {
+        if action.name != "knowledge_update"
+            || !action.effect.needs_reconciliation()
+            || action.reconciled
+        {
+            continue;
+        }
+        // A duplicate ID is ambiguous. Never use truncated TaskAction.arguments.
+        let calls: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "tool_call" && event["id"].as_str() == Some(&action.id)
+            })
+            .collect();
+        let [call] = calls.as_slice() else { continue };
+        if call["name"] != "knowledge_update" || call["tier"] != "act" {
+            continue;
+        }
+        let Some(args) = call["arguments"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        else {
+            continue;
+        };
+        let binding = json!({"call_id":action.id,"name":action.name,
+            "arguments_sha256":digest(call["arguments"].as_str().unwrap().as_bytes())});
+        let proof = verification_receipt(dir, &binding, || {
+            crate::tools::knowledge_drafts::verify_effect(&root.join("knowledge"), &args)
+        });
+        if let Some(proof) = proof {
+            proofs.insert(action.id.clone(), proof);
+        }
+    }
+    // Re-fold the same journal snapshot, applying receipts before task carry-forward.
+    Ok(fold_audit(&text, resumed, &proofs))
+}
+
+fn apply_verifications(task: &mut TaskSnapshot, proofs: &BTreeMap<String, Value>) {
+    for action in &mut task.actions {
+        if action.name != "knowledge_update"
+            || !action.effect.needs_reconciliation()
+            || action.reconciled
+        {
+            continue;
+        }
+        if let Some(proof) = proofs.get(&action.id) {
+            if let Some(effect) = verified_effect(proof) {
+                action.effect = effect;
+                action.state = state_for(effect).into();
+                action.settled = true;
+                action.reconciled = true;
+                action.verification = Some(proof.clone());
+            }
+        }
+    }
+}
+
+fn verified_effect(proof: &Value) -> Option<ToolEffect> {
+    if proof["verified_by"] != "system" {
+        return None;
+    }
+    match proof["effect"].as_str() {
+        Some("completed")
+            if proof["entry_id"]
+                .as_str()
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()))
+                && proof["save_state"] == "saved"
+                && proof["scientifically_validated"] == false =>
+        {
+            Some(ToolEffect::Completed)
+        }
+        Some("failed_no_effect")
+            if proof["reason"].as_str().is_some_and(|s| !s.is_empty())
+                && proof["save_state"] == "not_saved" =>
+        {
+            Some(ToolEffect::FailedNoEffect)
+        }
+        _ => None,
+    }
+}
+
+fn read_receipt(path: &Path, binding: &Value) -> Result<Value> {
+    ensure!(
+        std::fs::symlink_metadata(path)?.file_type().is_file(),
+        "invalid verification receipt"
+    );
+    let row: Value = serde_json::from_slice(&read(path, 64 * 1024)?)?;
+    ensure!(
+        row["payload"]["binding"] == *binding
+            && row["sha256"].as_str()
+                == Some(digest(&serde_json::to_vec(&row["payload"])?).as_str()),
+        "invalid verification binding"
+    );
+    let proof = row["payload"]["proof"].clone();
+    ensure!(
+        verified_effect(&proof).is_some(),
+        "invalid verification proof"
+    );
+    Ok(proof)
+}
+
+/// Independent transcript readers never append to the agent's journal. Each request
+/// gets one immutable receipt, atomically published; concurrent verifiers read the winner.
+fn verification_receipt(
+    dir: &Path,
+    binding: &Value,
+    verify: impl FnOnce() -> Option<Value>,
+) -> Option<Value> {
+    // Session paths may originate from a transcript lookup; do not publish through
+    // symlinked session directories or a symlinked sessions container.
+    for directory in [dir, dir.parent()?] {
+        if !std::fs::symlink_metadata(directory)
+            .ok()?
+            .file_type()
+            .is_dir()
+        {
+            return None;
+        }
+    }
+    let receipts = dir.join("effect-verifications");
+    let target = receipts.join(format!(
+        "{}.json",
+        digest(&serde_json::to_vec(binding).ok()?)
+    ));
+    match std::fs::symlink_metadata(&receipts) {
+        Ok(meta) if !meta.file_type().is_dir() => return None,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        _ => {}
+    }
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => return read_receipt(&target, binding).ok(),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        _ => {}
+    }
+    let mut proof = verify()?;
+    proof["verified_by"] = json!("system");
+    let payload = json!({"binding":binding,"proof":proof,"at_ms":super::now_ms() as u64});
+    let row = json!({"sha256":digest(&serde_json::to_vec(&payload).ok()?),"payload":payload});
+    match std::fs::create_dir(&receipts) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    if !std::fs::symlink_metadata(&receipts)
+        .ok()?
+        .file_type()
+        .is_dir()
+    {
+        return None;
+    }
+    let temp = receipts.join(format!(".{}", crate::bridge::random_hex(16)));
+    let published = (|| -> Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&serde_json::to_vec(&row)?)?;
+        file.sync_all()?;
+        match std::fs::hard_link(&temp, &target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    })();
+    let _ = std::fs::remove_file(&temp);
+    published.ok()?;
+    read_receipt(&target, binding).ok()
+}
+
+fn fold_audit(text: &str, resumed: bool, proofs: &BTreeMap<String, Value>) -> Option<TaskSnapshot> {
     let mut task: Option<TaskSnapshot> = None;
     for line in text.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if let Some(goal) = record["task_start"]["goal"].as_str() {
+            if let Some(task) = task.as_mut() {
+                apply_verifications(task, proofs);
+            }
             // A new question cannot establish whether a previously interrupted write ran.
             // 有副作用但结局未知的动作必须跟着新任务走，直到审计里出现明确结果。
             let pending = task
@@ -132,12 +328,14 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                     id: event["id"].as_str().unwrap_or("").into(),
                     name: name.into(),
                     arguments: excerpt(event["arguments"].as_str().unwrap_or(""), 2000),
+                    summary: event["summary"].as_str().map(|text| excerpt(text, 512)),
                     // 没有 tier 的旧日志按有副作用处理：不知道能不能改状态时宁可多核对。
                     mutating: event["tier"].as_str() != Some("read"),
                     effect: ToolEffect::EffectUnknown,
                     state: "unconfirmed".into(),
                     result: None,
                     reconciled: false,
+                    verification: None,
                     settled: false,
                 });
             }
@@ -175,10 +373,8 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
                 }
             }
             Some("effects_reconciled") => {
-                // 只有用户明确核对记录能清掉“未知副作用”：新任务轮次、普通 tool_outcome
-                // 和迟到的失败结果都不行（同一调用明确的成功 tool_result 仍按既有规则更新
-                // 结局）。匹配 id 且仍未知的动作标 reconciled，但 effect 保持 effect_unknown
-                // （原始证据不销毁）。
+                // Human acknowledgement preserves the unknown effect. Automatic storage
+                // verification uses separate immutable receipts, never this shared journal.
                 let ids: Vec<&str> = event["ids"]
                     .as_array()
                     .into_iter()
@@ -203,27 +399,32 @@ pub(super) fn load(dir: &Path, resumed: bool) -> Result<Option<TaskSnapshot>> {
         }
     }
     if let Some(task) = task.as_mut() {
-        // 审计在结果事件之前截断（进程崩溃/被杀）：动作没有结局，按 effect_unknown 处理。
-        for action in &mut task.actions {
-            if !action.settled {
-                action.effect = ToolEffect::EffectUnknown;
-            }
-        }
-        task.requires_reconciliation = task.actions.iter().any(|action| {
-            action.mutating && action.effect.needs_reconciliation() && !action.reconciled
-        });
-        if resumed && task.state == "running" {
-            task.state = "interrupted".into();
-        }
-        task.next_step = if task.requires_reconciliation || task.state == "interrupted" {
-            "Inspect existing case/workspace/remote job status and output identity before continuing. Do not automatically repeat submissions, runs, downloads or file changes.".into()
-        } else if task.state == "failed" {
-            "Inspect the failed action and current state before retrying; a failed tool may have partial effects.".into()
-        } else {
-            "Tool completion and an answered message do not prove a scientific cause or an acceptance gate; check the recorded evidence.".into()
-        };
+        apply_verifications(task, proofs);
+        update_summary(task, resumed);
     }
-    Ok(task)
+    task
+}
+
+fn update_summary(task: &mut TaskSnapshot, resumed: bool) {
+    // 审计在结果事件之前截断（进程崩溃/被杀）：动作没有结局，按 effect_unknown 处理。
+    for action in &mut task.actions {
+        if !action.settled {
+            action.effect = ToolEffect::EffectUnknown;
+        }
+    }
+    task.requires_reconciliation = task.actions.iter().any(|action| {
+        action.mutating && action.effect.needs_reconciliation() && !action.reconciled
+    });
+    if resumed && task.state == "running" {
+        task.state = "interrupted".into();
+    }
+    task.next_step = if task.requires_reconciliation || task.state == "interrupted" {
+        "Inspect existing case/workspace/remote job status and output identity before continuing. Do not automatically repeat submissions, runs, downloads or file changes.".into()
+    } else if task.state == "failed" {
+        "Inspect the failed action and current state before retrying; a failed tool may have partial effects.".into()
+    } else {
+        "Tool completion and an answered message do not prove a scientific cause or an acceptance gate; check the recorded evidence.".into()
+    };
 }
 
 impl TaskSnapshot {
@@ -310,6 +511,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn action_summary_survives_truncated_arguments() {
+        let root = data_root("summary");
+        let session = session_in(&root, "inspect a saved draft");
+        session
+            .audit(&Outbound::ToolCall {
+                id: "summary-call".into(),
+                name: "knowledge_update".into(),
+                arguments: json!({"markdown":"x".repeat(3000), "title":"Vcmax"}).to_string(),
+                tier: Tier::Act,
+                summary: "保存知识草稿：Vcmax".into(),
+                preapproved: false,
+            })
+            .unwrap();
+        let task = session.task_snapshot(false).unwrap().unwrap();
+        assert_eq!(task.actions[0].arguments.chars().count(), 2000);
+        assert_eq!(
+            task.actions[0].summary.as_deref(),
+            Some("保存知识草稿：Vcmax")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn outcome(id: &str, name: &str, effect: ToolEffect) -> Outbound {
         Outbound::ToolOutcome {
             id: id.into(),
@@ -335,6 +559,297 @@ mod tests {
             limit_reached: false,
             step_limit: 40,
         }
+    }
+
+    #[test]
+    fn historical_long_knowledge_request_is_verified_on_transcript_and_resume() {
+        let root = data_root("knowledge-recovery");
+        let mut session = session_in(&root, "save knowledge");
+        let args = json!({"scope":{"kind":"app"},"title":"flux", "markdown":"long explanation ".repeat(200),
+            "sources":[{"path":"crates/flux.rs","sha256":"a".repeat(64)}]});
+        let mut call = tool_call("old", "knowledge_update", Tier::Act);
+        if let Outbound::ToolCall { arguments, .. } = &mut call {
+            *arguments = args.to_string();
+        }
+        session.audit(&call).unwrap();
+        session
+            .audit(&outcome(
+                "old",
+                "knowledge_update",
+                ToolEffect::EffectUnknown,
+            ))
+            .unwrap();
+        let dir = session_dir(&root, &session);
+        let before = fold_audit(
+            &std::fs::read_to_string(dir.join("audit.jsonl")).unwrap(),
+            true,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(before.requires_reconciliation);
+        assert_eq!(before.actions[0].arguments.chars().count(), 2000);
+        // Verification must leave even a torn agent journal byte-for-byte unchanged.
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("audit.jsonl"))
+            .unwrap()
+            .write_all(b"{torn")
+            .unwrap();
+        let original_journal = std::fs::read(dir.join("audit.jsonl")).unwrap();
+        let transcript = crate::session::transcript(&root, &session.id).unwrap();
+        assert_eq!(
+            original_journal,
+            std::fs::read(dir.join("audit.jsonl")).unwrap()
+        );
+        assert!(transcript
+            .iter()
+            .any(|item| matches!(item, crate::session::TranscriptItem::Task { .. })));
+        let after = session.task_snapshot(true).unwrap().unwrap();
+        assert!(!after.requires_reconciliation);
+        assert_eq!(after.actions[0].effect, ToolEffect::FailedNoEffect);
+        assert_eq!(
+            after.actions[0].verification.as_ref().unwrap()["verified_by"],
+            "system"
+        );
+        let journal = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        let resumed = Session::open(&root, &session.id, "system").unwrap();
+        assert!(
+            !resumed
+                .task_snapshot(true)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        assert_eq!(
+            journal,
+            std::fs::read_to_string(dir.join("audit.jsonl")).unwrap()
+        );
+        session
+            .push(Message::User {
+                content: "next".into(),
+            })
+            .unwrap();
+        assert!(
+            !session
+                .task_snapshot(false)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        assert!(session
+            .task_snapshot(false)
+            .unwrap()
+            .unwrap()
+            .actions
+            .is_empty());
+        // Reusing a call ID makes the audit ambiguous, so an old receipt cannot clear it.
+        session.audit(&call).unwrap();
+        assert!(
+            session
+                .task_snapshot(false)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_receipt_does_not_resolve_changed_arguments_for_the_same_call_id() {
+        let root = data_root("changed-verification-args");
+        let session = session_in(&root, "save");
+        let mut call = tool_call("same-id", "knowledge_update", Tier::Act);
+        let mut args = json!({"scope":{"kind":"app"},"title":"flux","markdown":"uncited",
+            "sources":[{"path":"a.rs","sha256":"a".repeat(64)}]});
+        if let Outbound::ToolCall { arguments, .. } = &mut call {
+            *arguments = args.to_string();
+        }
+        session.audit(&call).unwrap();
+        assert!(
+            !session
+                .task_snapshot(true)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        let path = session_dir(&root, &session).join("audit.jsonl");
+        let original = std::fs::read_to_string(&path).unwrap();
+        args["markdown"] = json!("a.rs cited now");
+        let updated = original
+            .lines()
+            .map(|line| {
+                let mut row: Value = serde_json::from_str(line).unwrap();
+                if row["event"]["type"] == "tool_call" {
+                    row["event"]["arguments"] = json!(args.to_string());
+                }
+                row.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, updated).unwrap();
+        assert!(
+            session
+                .task_snapshot(true)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_transcript_verifiers_do_not_write_the_agents_audit_journal() {
+        let root = data_root("verification-concurrency");
+        let session = std::sync::Arc::new(session_in(&root, "save"));
+        let mut call = tool_call("verify", "knowledge_update", Tier::Act);
+        if let Outbound::ToolCall { arguments, .. } = &mut call {
+            *arguments = json!({"title":"flux","markdown":"uncited", "scope":{"kind":"app"},
+                "sources":[{"path":"a.rs","sha256":"a".repeat(64)}]})
+            .to_string();
+        }
+        session.audit(&call).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let session = session.clone();
+                let root = &root;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..30 {
+                        let transcript = crate::session::transcript(root, &session.id).unwrap();
+                        assert!(transcript.iter().any(|item| matches!(item,
+                            crate::session::TranscriptItem::Task {task} if !task.requires_reconciliation)));
+                    }
+                });
+            }
+            let barrier = barrier.clone();
+            let session = session.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..60 {
+                    session.audit(&turn_done()).unwrap();
+                }
+            });
+        });
+        let dir = session_dir(&root, &session);
+        let journal = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        let rows = journal
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 62);
+        assert!(!rows
+            .iter()
+            .any(|row| row["event"]["type"] == "effects_reconciled"));
+        assert_eq!(
+            std::fs::read_dir(dir.join("effect-verifications"))
+                .unwrap()
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_session_or_sessions_container_cannot_publish_receipts() {
+        let root = data_root("symlink-session-receipt");
+        let real_root = root.join("real");
+        let session = session_in(&real_root, "save");
+        let real_dir = session_dir(&real_root, &session);
+        let binding =
+            json!({"call_id":"id","name":"knowledge_update","arguments_sha256":"a".repeat(64)});
+        let proof = || {
+            Some(
+                json!({"effect":"failed_no_effect","save_state":"not_saved","reason":"missing citation"}),
+            )
+        };
+        let session_link = real_root.join("sessions").join("123-456");
+        std::os::unix::fs::symlink(&real_dir, &session_link).unwrap();
+        assert!(verification_receipt(&session_link, &binding, proof).is_none());
+        assert!(!real_dir.join("effect-verifications").exists());
+        let other_root = root.join("other");
+        std::fs::create_dir_all(&other_root).unwrap();
+        std::os::unix::fs::symlink(real_root.join("sessions"), other_root.join("sessions"))
+            .unwrap();
+        assert!(verification_receipt(
+            &other_root.join("sessions").join(&session.id),
+            &binding,
+            proof
+        )
+        .is_none());
+        assert!(!real_dir.join("effect-verifications").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupted_unbound_or_symlink_receipts_cannot_clear_unknown_effects() {
+        let root = data_root("invalid-receipts");
+        std::fs::create_dir_all(&root).unwrap();
+        let binding =
+            json!({"call_id":"id","name":"knowledge_update","arguments_sha256":"a".repeat(64)});
+        let proof = || {
+            Some(
+                json!({"effect":"failed_no_effect","save_state":"not_saved","reason":"missing citation"}),
+            )
+        };
+        assert!(verification_receipt(&root, &binding, proof).is_some());
+        let target = root.join("effect-verifications").join(format!(
+            "{}.json",
+            digest(&serde_json::to_vec(&binding).unwrap())
+        ));
+        let original = std::fs::read(&target).unwrap();
+        std::fs::write(&target, b"{corrupt").unwrap();
+        assert!(verification_receipt(&root, &binding, proof).is_none());
+        let mut row: Value = serde_json::from_slice(&original).unwrap();
+        row["payload"]["binding"]["arguments_sha256"] = json!("b".repeat(64));
+        row["sha256"] = json!(digest(&serde_json::to_vec(&row["payload"]).unwrap()));
+        std::fs::write(&target, serde_json::to_vec(&row).unwrap()).unwrap();
+        assert!(verification_receipt(&root, &binding, proof).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&target).unwrap();
+            let elsewhere = root.join("original");
+            std::fs::write(&elsewhere, &original).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+            assert!(verification_receipt(&root, &binding, proof).is_none());
+            std::fs::remove_file(&target).unwrap();
+            std::fs::remove_dir(root.join("effect-verifications")).unwrap();
+            let other_dir = root.join("other");
+            std::fs::create_dir(&other_dir).unwrap();
+            std::os::unix::fs::symlink(&other_dir, root.join("effect-verifications")).unwrap();
+            assert!(verification_receipt(&root, &binding, proof).is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_does_not_guess_for_other_tools_incomplete_audit_or_duplicate_ids() {
+        let root = data_root("knowledge-unknown");
+        let session = session_in(&root, "save");
+        session
+            .audit(&tool_call("other", "write_text_file", Tier::Act))
+            .unwrap();
+        let mut incomplete = tool_call("partial", "knowledge_update", Tier::Act);
+        if let Outbound::ToolCall { arguments, .. } = &mut incomplete {
+            *arguments = "{truncated".into();
+        }
+        session.audit(&incomplete).unwrap();
+        session
+            .audit(&tool_call("duplicate", "knowledge_update", Tier::Act))
+            .unwrap();
+        session
+            .audit(&tool_call("duplicate", "knowledge_update", Tier::Act))
+            .unwrap();
+        let task = session.task_snapshot(true).unwrap().unwrap();
+        assert!(task.requires_reconciliation);
+        assert!(task
+            .actions
+            .iter()
+            .all(|action| !action.reconciled && action.verification.is_none()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

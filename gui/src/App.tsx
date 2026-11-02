@@ -7,15 +7,13 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
-import { assistantPanelWidth } from './lib/utils';
 import {
   ASSISTANT_MAX_WIDTH,
   ASSISTANT_MIN_WIDTH,
-  MIN_MAIN_WIDTH,
   drawerEscapeCloses,
   shellLayout,
 } from './lib/shell-layout';
-import { useApp } from './lib/app-state';
+import { useApp, useCloseGuard } from './lib/app-state';
 import {
   activeNavigation,
   currentProjectView,
@@ -34,7 +32,7 @@ import ConfirmHost from './components/ConfirmHost';
 import StartCover from './components/StartCover';
 import { readStored, writeStored } from './lib/storage';
 import { useBenchTasks } from './lib/bench-task-context';
-import { benchTaskNotice } from './lib/bench-task';
+import { benchTaskFocus, benchTaskNotice, type BenchTask } from './lib/bench-task';
 import { invoke } from './lib/ipc';
 import BenchTaskBar from './components/BenchTaskBar';
 import type { AppState } from './lib/types';
@@ -276,8 +274,8 @@ export function AppShell({
 
 export default function App() {
   const [viewport, setViewport] = useState(() => window.innerWidth);
-  const [assistantWidth, setAssistantWidth] = useState(() =>
-    assistantPanelWidth(Number(readStored('colm-ui-assistant-width')) || 320, window.innerWidth),
+  const [assistantWidth, setAssistantWidth] = useState(
+    () => Number(readStored('colm-ui-assistant-width')) || 320,
   );
   // 收起导航是长期偏好。
   const [navCollapsed, setNavCollapsed] = useState(() => readStored(NAV_RAIL_KEY) === 'true');
@@ -291,7 +289,6 @@ export default function App() {
   useEffect(() => {
     const resize = () => {
       setViewport(window.innerWidth);
-      setAssistantWidth((width) => assistantPanelWidth(width, window.innerWidth));
     };
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
@@ -299,20 +296,16 @@ export default function App() {
   const { state, update, navigate } = useApp();
   // 比较任务跨路由可见（UX ③）：页面只镜像进度，真正提交/等待仍由比较页负责。
   const benchTasks = useBenchTasks();
+  useCloseGuard(() =>
+    benchTasks.tasks.some((task) => !task.host && task.state === 'running')
+      ? state.language === 'en'
+        ? 'A local OpenBench operation is running; closing stops it.'
+        : '本机 OpenBench 操作正在执行，关闭会停止它。'
+      : null,
+  );
   // 任务条点"查看结果/回到比较页"：先把要打开的结果记成一次性的 focus，再切页；比较页挂载后消费。
-  const openBenchTask = (task: {
-    host: string;
-    project: string;
-    job?: string | null;
-    state: string;
-    report?: string | null;
-  }) => {
-    benchTasks.focus({
-      host: task.host,
-      project: task.project,
-      runId: task.job ?? null,
-      report: !task.host && task.state === 'done' ? (task.report ?? null) : null,
-    });
+  const openBenchTask = (task: BenchTask) => {
+    benchTasks.focus(benchTaskFocus(task));
     navigate('compare');
   };
   // 离开比较页期间任务结束：壳上 push 一条全局提示（在比较页里页面自己已有完成提示，不重复）。
@@ -322,13 +315,11 @@ export default function App() {
   useEffect(() => {
     const seen = notifiedBenchTasks.current;
     const fresh = benchTasks.tasks.filter(
-      (task) =>
-        !seen.has(task.id) &&
-        state.route !== 'compare' &&
-        (task.state === 'done' || task.state === 'failed'),
+      (task) => !seen.has(task.id) && (task.state === 'done' || task.state === 'failed'),
     );
     if (!fresh.length) return;
     for (const task of fresh) seen.add(task.id);
+    if (state.route === 'compare') return;
     update((old) => ({
       notices: [
         ...old.notices.slice(-4),
@@ -498,12 +489,14 @@ export default function App() {
       <AssistantPanel />
     </Suspense>
   ) : null;
-  // 拆分条只在分栏模式出现；宽度上限由 shellLayout 夹住，拖到头也不会把主区压到 MIN_MAIN_WIDTH 以下。
-  // aria-valuemax 用同一夹法算出来：原来沿用旧的 assistantPanelWidth，读屏报的可调上限会大于实际能到的宽度。
-  const columnMax = Math.max(
-    ASSISTANT_MIN_WIDTH,
-    Math.min(ASSISTANT_MAX_WIDTH, window.innerWidth - layout.sidebarWidth - MIN_MAIN_WIDTH),
-  );
+  const resizeWidth = (requested: number) =>
+    shellLayout({
+      viewportWidth: viewport,
+      assistantOpen: true,
+      navCollapsed,
+      assistantWidth: requested,
+    }).assistantWidth;
+  const columnMax = resizeWidth(ASSISTANT_MAX_WIDTH);
   const splitter = layout.splitter ? (
     <div
       className="assistant-splitter"
@@ -520,16 +513,11 @@ export default function App() {
         event.preventDefault();
         event.currentTarget.focus({ preventScroll: true });
         event.currentTarget.setPointerCapture(event.pointerId);
-        drag.current = { id: event.pointerId, x: event.clientX, width: assistantWidth };
+        drag.current = { id: event.pointerId, x: event.clientX, width: layout.assistantWidth };
       }}
       onPointerMove={(event) => {
         if (drag.current?.id === event.pointerId)
-          setAssistantWidth(
-            assistantPanelWidth(
-              drag.current.width + drag.current.x - event.clientX,
-              window.innerWidth,
-            ),
-          );
+          setAssistantWidth(resizeWidth(drag.current.width + drag.current.x - event.clientX));
       }}
       onPointerUp={(event) => {
         if (drag.current?.id === event.pointerId) {
@@ -548,13 +536,12 @@ export default function App() {
         if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
           event.preventDefault();
           setAssistantWidth(
-            assistantPanelWidth(
+            resizeWidth(
               event.key === 'Home'
                 ? ASSISTANT_MIN_WIDTH
                 : event.key === 'End'
                   ? ASSISTANT_MAX_WIDTH
-                  : assistantWidth + (event.key === 'ArrowLeft' ? 16 : -16),
-              window.innerWidth,
+                  : layout.assistantWidth + (event.key === 'ArrowLeft' ? 16 : -16),
             ),
           );
         }

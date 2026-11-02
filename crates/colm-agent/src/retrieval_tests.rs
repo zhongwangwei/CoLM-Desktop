@@ -1124,6 +1124,57 @@ fn build_success_creates_mapping_streams_bulk_verifies_then_publishes() {
 }
 
 #[test]
+fn query_aliases_cover_bilingual_process_terms_without_matching_identifier_substrings() {
+    for (query, expected) in [
+        ("最大羧化速率如何设置？", "vcmax vcmax25 vmax25"),
+        ("How is Vcmax used?", "vcmax25 vmax25 最大羧化速率"),
+        ("DEF_LC_VMAX25", "vcmax vcmax25 最大羧化速率"),
+        ("为什么光合作用偏低？", "photosynthesis"),
+        ("Photosynthesis", "光合作用"),
+        ("潜热", "latent heat"),
+        ("Sensible heat", "感热"),
+        ("水量闭合", "water closure"),
+        ("Energy closure", "能量闭合"),
+        ("vcmax Vcmax25 vmax25 最大羧化速率", ""),
+        ("notvcmax vcmax250 latent heating", ""),
+        ("", ""),
+        ("ET setting calibration notebook", ""),
+    ] {
+        assert_eq!(documentation_query_aliases(query), expected, "{query}");
+    }
+}
+
+#[test]
+fn bilingual_queries_keep_the_original_query_and_scope_filters() {
+    let (_docs, fake, handle, snapshot) = ready_handle(
+        "query-aliases",
+        &[("guide.md", "# Photosynthesis\nVcmax\n")],
+    );
+    let query = "为什么最大羧化速率影响光合作用？";
+    fake.push_candidate(Reply::ok_json(json!({"hits": {"hits": []}})));
+    assert!(handle.candidates(&snapshot, query, 5).unwrap().is_empty());
+    let body = fake.last_candidate_body();
+    let filters = &body["query"]["bool"]["filter"];
+    assert_eq!(filters[0]["term"]["scope_key"], snapshot.scope_key);
+    assert_eq!(
+        filters[1]["term"]["generation"],
+        handle.status()["generation"]
+    );
+    let matching = &body["query"]["bool"]["must"][0]["bool"];
+    assert_eq!(matching["minimum_should_match"], 1);
+    assert_eq!(matching["should"][0]["match"]["body"], query);
+    assert_eq!(matching["should"][1]["match"]["title"], query);
+    assert_eq!(
+        matching["should"][2]["match"]["body"],
+        "vcmax vcmax25 vmax25 photosynthesis"
+    );
+    assert_eq!(
+        matching["should"][3]["match"]["title"],
+        "vcmax vcmax25 vmax25 photosynthesis"
+    );
+}
+
+#[test]
 fn already_existing_index_is_accepted_by_error_type() {
     let fake = FakeTransport::new();
     fake.set_create(Reply::status(
@@ -2445,4 +2496,16 @@ fn repeated_document_paths_are_rejected_instead_of_overwriting_chunks() {
         handle.candidates(&snapshot, "body", 5),
         Err(RetrievalError::NotReady(_))
     ));
+}
+
+#[test]
+fn handle_reuse_requires_matching_configuration_and_key() {
+    let settings = enabled_settings();
+    let handle = Handle::new(settings.clone(), "private-test-key".into(), None);
+    assert!(handle.matches_configuration(&settings, "private-test-key"));
+    assert!(!handle.matches_configuration(&settings, "rotated-test-key"));
+    let mut changed = settings;
+    changed.index = "other-index".into();
+    assert!(!handle.matches_configuration(&changed, "private-test-key"));
+    assert!(!format!("{handle:?}").contains("private-test-key"));
 }

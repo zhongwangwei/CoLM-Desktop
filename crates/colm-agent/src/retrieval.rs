@@ -1080,6 +1080,39 @@ impl std::fmt::Debug for Handle {
     }
 }
 
+/// Query-only aliases from the parameter catalogue and CoLM process cards; never rewrite evidence.
+fn documentation_query_aliases(query: &str) -> String {
+    const GROUPS: &[&[&str]] = &[
+        &["vcmax", "vcmax25", "vmax25", "最大羧化速率"],
+        &["photosynthesis", "光合作用"],
+        &["latent heat", "潜热"],
+        &["sensible heat", "感热"],
+        &["water closure", "水量闭合"],
+        &["energy closure", "能量闭合"],
+    ];
+    let query = query.to_lowercase();
+    let contains = |term: &str| {
+        query.match_indices(term).any(|(start, _)| {
+            !term.is_ascii()
+                || (query[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_ascii_alphanumeric())
+                    && query[start + term.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_ascii_alphanumeric()))
+        })
+    };
+    GROUPS
+        .iter()
+        .filter(|group| group.iter().any(|term| contains(term)))
+        .flat_map(|group| group.iter().copied())
+        .filter(|term| !contains(term))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Handle {
     /// `new` 不发起任何网络请求：服务不可达、配置错误、索引缺失都只体现在状态里，助手启动不能被它拖住。
     pub fn new(settings: RetrievalSettings, api_key: String, emit: Option<StatusSink>) -> Self {
@@ -1113,6 +1146,11 @@ impl Handle {
 
     pub fn settings(&self) -> RetrievalSettings {
         self.inner.settings.clone()
+    }
+
+    /// Reuse a live index only while both its configuration and credential are unchanged.
+    pub fn matches_configuration(&self, settings: &RetrievalSettings, api_key: &str) -> bool {
+        &self.inner.settings == settings && self.inner.api_key == api_key
     }
 
     /// 内存状态 JSON。字段与 `Outbound::DocsIndexStatus` 一一对应；不含 key。
@@ -1239,6 +1277,15 @@ impl Handle {
             )));
         }
         let size = size.clamp(1, MAX_QUERY_RESULTS);
+        let mut matches = vec![
+            json!({"match": {"body": query}}),
+            json!({"match": {"title": query}}),
+        ];
+        let aliases = documentation_query_aliases(query);
+        if !aliases.is_empty() {
+            matches.push(json!({"match": {"body": aliases}}));
+            matches.push(json!({"match": {"title": aliases}}));
+        }
         let body = json!({
             "size": size,
             // 只取 _id/_score；路径与 hash 来自本地清单，绝不让索引自报。
@@ -1253,10 +1300,7 @@ impl Handle {
                     // 中文、中英混合都正常。语义仍是“body 或 title 必须命中”。
                     "must": [{
                         "bool": {
-                            "should": [
-                                {"match": {"body": query}},
-                                {"match": {"title": query}},
-                            ],
+                            "should": matches,
                             "minimum_should_match": 1,
                         }
                     }],

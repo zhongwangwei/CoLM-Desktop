@@ -1727,9 +1727,7 @@ fn validate_runtime_contract_at(
             if logical(doc, "DEF_ISO_USE_FRACTIONATION") {
                 // 分馏要读同位素水汽强迫（`MOD_Material_Forcing.F90:773-779`），材料强迫不支持 POINT。
                 if single {
-                    return Err(
-                        "同位素分馏要读同位素水汽强迫，单点没有材料强迫；请关掉分馏".into(),
-                    );
+                    return Err("同位素分馏要读同位素水汽强迫，单点没有材料强迫；请关掉分馏".into());
                 }
                 // 内置参数文件里的同位素强迫读 IsoGSM 的降水与比湿文件，要求主强迫也是 IsoGSM。
                 if let Some(dataset) = forcing_dataset(doc, case_dir) {
@@ -3732,7 +3730,10 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
     // 分馏等 DEF_ISO_* 现在住在同位素参数文件（&nl_colm_isotope_parameter），不能塞进 case.nml；
     // 那部分由「材料与泥沙」页的过程文件读取，旧文件的 DEF_MATERIAL% 组名仍能显示。
     for (old, new) in [
-        ("@@DEF_MATERIAL_@@USE_FRACTIONATION", "DEF_ISO_USE_FRACTIONATION"),
+        (
+            "@@DEF_MATERIAL_@@USE_FRACTIONATION",
+            "DEF_ISO_USE_FRACTIONATION",
+        ),
         ("@@DEF_MATERIAL_@@KINETIC_SCHEME", "DEF_ISO_KINETIC_SCHEME"),
         (
             "@@DEF_MATERIAL_@@ICE_SUPERSAT_SLOPE",
@@ -3767,9 +3768,18 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
             "DEF_ISO_NSS_LEAF_PATH_LENGTH",
         ),
         ("@@DEF_MATERIAL_@@NSS_LEAF_RB", "DEF_ISO_NSS_LEAF_RB"),
-        ("@@DEF_MATERIAL_@@BALANCE_ABORT_NBAD", "DEF_MT_BALANCE_ABORT_NBAD"),
-        ("@@DEF_MATERIAL_@@RESID_ABORT_NBAD", "DEF_MT_RESID_ABORT_NBAD"),
-        ("@@DEF_MATERIAL_@@LULCC_ABORT_NBAD", "DEF_MT_LULCC_ABORT_NBAD"),
+        (
+            "@@DEF_MATERIAL_@@BALANCE_ABORT_NBAD",
+            "DEF_MT_BALANCE_ABORT_NBAD",
+        ),
+        (
+            "@@DEF_MATERIAL_@@RESID_ABORT_NBAD",
+            "DEF_MT_RESID_ABORT_NBAD",
+        ),
+        (
+            "@@DEF_MATERIAL_@@LULCC_ABORT_NBAD",
+            "DEF_MT_LULCC_ABORT_NBAD",
+        ),
         (
             "@@DEF_MATERIAL_@@AQUIFER_MIXING_WATER_MM",
             "DEF_MT_AQUIFER_MIXING_WATER_MM",
@@ -3982,9 +3992,11 @@ fn material_param_file(
         if name.is_empty() || !pick(name, "solute") {
             continue;
         }
-        if let Ok(Some(file)) = colm_namelist::material_files::param_file_for(&files, index, |key| {
-            key.eq_ignore_ascii_case(name)
-        }) {
+        if let Ok(Some(file)) =
+            colm_namelist::material_files::param_file_for(&files, index, |key| {
+                key.eq_ignore_ascii_case(name)
+            })
+        {
             let file = file.trim_matches(['\'', '"']).to_string();
             return (!is_null_file(&file)).then_some(file);
         }

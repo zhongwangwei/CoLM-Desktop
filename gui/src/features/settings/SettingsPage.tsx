@@ -31,6 +31,10 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
             versions: withoutRevisions(old.versions, result.removed),
             version,
             ...(version ? { versionRef: version.version } : {}),
+            chosenVersion: old.chosenVersion
+              ? (selectionAfterPrune(old.versions, result.removed, old.chosenVersion)?.version ??
+                null)
+              : null,
           };
         });
         setMessage(

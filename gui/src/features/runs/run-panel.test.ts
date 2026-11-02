@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import {
   settleRuns,
+  activeRunTargets,
   endedRun,
   openRuns,
   remoteJobFacts,
@@ -109,6 +110,7 @@ function panel(
     state,
     latest,
     lock: { current: false },
+    cancelLock: { current: false },
     alive: { current: true },
     cancelledRun: { current: null as string | null },
     stoppedBatches: new Set<string>(),
@@ -120,6 +122,7 @@ function panel(
         ? undefined
         : (options.targets ?? ['/good', '/bad']),
     host: options.remote ? 'server' : '',
+    currentHost: { current: options.remote ? 'server' : '' },
     siteBatch: !!options.remote && !!options.remoteBatch && !options.single,
     stationConcurrency: options.stationConcurrency ?? 1,
     localSiteNow: false,
@@ -150,9 +153,12 @@ function panel(
     invokeJson: invoke,
     notify: options.notify ?? (() => {}),
     setBusy: () => {},
+    setBatchWaiting: () => {},
+    setCancelling: () => {},
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
     settleRuns,
+    activeRunTargets,
     eachLimited,
     runRemoteBatch: (args: Parameters<typeof runRemoteBatch>[0]) => {
       batchWorkers.push(args.workers);
@@ -180,7 +186,15 @@ function panel(
     ) => Promise<unknown>;
     openBatchRuns: () => string[];
   };
-  return { ...methods, state, calls, batchWorkers, latest, alive: context.alive };
+  return {
+    ...methods,
+    state,
+    calls,
+    batchWorkers,
+    latest,
+    alive: context.alive,
+    currentHost: context.currentHost,
+  };
 }
 
 test('one failed migration does not prevent healthy batch cases from running', async () => {
@@ -567,6 +581,16 @@ test('automatic server checks stay quiet and announce only the finish', async ()
       };
     },
   });
+  p.state.running['/good'] = {
+    case: '/good',
+    location: 'remote',
+    run_id: 'restored',
+    status: 'unknown',
+    running: true,
+    logs: [],
+    stages: {},
+    progress: { host: 'server' },
+  };
   await assert.rejects(p.remoteAction('remote_status', '/good', true), /ssh timeout/);
   assert.deepEqual(notices, [], 'a failed background check raises no notice');
   fail = false;
@@ -877,4 +901,151 @@ test('stop during a single remote submission interrupts the local submitting pro
   assert.deepEqual(call?.args, { case: '/good' });
   assert.ok(!p.calls.some((entry) => entry.command === 'cancel_runs'));
   assert.match(notices.join('\n'), /已中断提交/);
+});
+
+test('Stop covers every selected reopened station even when the first has finished', async () => {
+  const stopped = new Set<string>();
+  const p = panel({
+    remote: true,
+    remoteBatch: true,
+    targets: ['/good', '/bad', '/third'],
+    ipc: async (command, args) => {
+      const dir = String(args.case);
+      if (command === 'remote_cancel') {
+        stopped.add(dir);
+        return {};
+      }
+      if (command === 'remote_status')
+        return {
+          record: { host: 'server', job: `job-${dir}` },
+          status: { state: stopped.has(dir) ? 'lost' : 'running' },
+          ...(stopped.has(dir) ? { ended: 'cancelled' } : {}),
+        };
+      throw new Error(`Unexpected ${command}`);
+    },
+  });
+  for (const dir of ['/good', '/bad', '/third', '/unselected'])
+    p.state.running[dir] = {
+      case: dir,
+      location: 'remote',
+      run_id: `operation-${dir}`,
+      status: 'unknown',
+      running: dir !== '/good',
+      logs: [],
+      stages: {},
+      progress: { host: 'server' },
+    };
+  await p.cancel();
+  assert.deepEqual([...stopped].sort(), ['/bad', '/third']);
+  assert.equal(p.state.running['/bad'].status, 'cancelled');
+  assert.equal(p.state.running['/third'].status, 'cancelled');
+  assert.equal(p.state.running['/unselected'].running, true);
+});
+
+test('repeated Stop calls send only one cancellation request while it is pending', async () => {
+  let release!: (value: number) => void;
+  const p = panel({
+    remote: true,
+    ipc: async () =>
+      new Promise<number>((resolve) => {
+        release = resolve;
+      }),
+  });
+  const first = p.cancel();
+  await p.cancel();
+  assert.equal(p.calls.filter(({ command }) => command === 'cancel_remote_submission').length, 1);
+  release(1);
+  await first;
+});
+
+test('rejected server identity is neither counted as checked nor announced as finished', async () => {
+  const notices: string[] = [];
+  const p = panel({ remote: true, notify: (message) => notices.push(message) });
+  p.state.running['/good'] = {
+    case: '/good',
+    location: 'remote',
+    run_id: 'current',
+    operation_id: 'current-operation',
+    status: 'running',
+    running: true,
+    logs: [],
+    stages: {},
+    progress: { host: 'server', remote: { host: 'server', job: 'current-job' } },
+  };
+  assert.equal(await p.remoteAction('remote_status', '/good', true), undefined);
+  assert.equal(p.state.running['/good'].status, 'running');
+  assert.deepEqual(notices, []);
+});
+
+test('a manual server action blocked by an active submission explains why', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const notices: string[] = [];
+  const p = panel({ migrate: () => gate, notify: (message) => notices.push(message) });
+  const run = p.run();
+  await p.remoteAction('remote_status');
+  assert.match(notices.join('\n'), /另一项运行操作正在进行/);
+  assert.ok(!p.calls.some(({ command }) => command === 'remote_status'));
+  release();
+  await run;
+});
+
+test('English remote status summaries use English punctuation', () => {
+  const summary = remoteStatusSummary(
+    [
+      {
+        record: { host: 'server', job: 'job' },
+        status: { state: 'queued', detail: 'PENDING|Priority' },
+      },
+    ],
+    true,
+  );
+  assert.match(summary, /^Checked 1 server job\(s\): /);
+  assert.doesNotMatch(summary, /[：（）]/);
+});
+
+test('serialized preprocessing completion retains its stage when restored', () => {
+  const ledger = JSON.parse(
+    JSON.stringify({
+      '/case': {
+        operation_id: 'preprocess',
+        status: 'succeeded',
+        finished_ms: 10,
+        needs_reconciliation: false,
+        location: 'local',
+        host: null,
+        progress: {
+          stages: [
+            ['mksrfdata', 'ok'],
+            ['mkinidata', 'ok'],
+          ],
+        },
+      },
+    }),
+  );
+  assert.equal(restoredRuns(ledger, {})['/case'].requested_stage, 'mkinidata');
+});
+
+test('an old remote action does not invoke IPC after switching to local', async () => {
+  const p = panel({ remote: true });
+  p.latest.current['/good'] = {
+    case: '/good',
+    location: 'remote',
+    status: 'succeeded',
+    running: false,
+    logs: [],
+    stages: {},
+    progress: {
+      host: 'server',
+      remote: {
+        record: { host: 'server', job: 'old' },
+        status: { state: 'finished', exit_code: 0 },
+      },
+    },
+  };
+  p.currentHost.current = '';
+  await p.remoteAction('remote_fetch');
+  assert.deepEqual(p.calls, []);
 });

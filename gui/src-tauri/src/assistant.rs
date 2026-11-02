@@ -20,6 +20,7 @@ use crate::sidecar::{register_child, ChildOwner};
 /// 运行中的 `colm-agent`。
 #[derive(Default)]
 pub struct AssistantProcess {
+    startup: Mutex<Option<String>>,
     inner: Mutex<Option<(Child, ChildStdin)>>,
     ui_requests: Arc<Mutex<PendingUiRequests>>,
 }
@@ -92,6 +93,9 @@ fn register_ui_request(
 impl AssistantProcess {
     /// 应用退出时结束它（stdin 一关它就会自己退出）。
     pub fn stop(&self) {
+        if let Ok(mut startup) = self.startup.lock() {
+            *startup = None;
+        }
         if let Ok(mut guard) = self.inner.lock() {
             if let Ok(mut pending) = self.ui_requests.lock() {
                 pending.generation = pending.generation.wrapping_add(1);
@@ -133,6 +137,7 @@ impl AssistantProcess {
 /// - 用户已有的节点走 external 模式，这里不探测也不碰。
 #[derive(Default, Clone)]
 pub struct ManagedXerj {
+    lifecycle: Arc<Mutex<()>>,
     inner: Arc<Mutex<Option<crate::xerj_manager::ManagedNode>>>,
     /// 最近一次启动/停止/版本不符的原因，供设置面板解释；绝不含 key。
     detail: Arc<Mutex<Option<String>>>,
@@ -199,6 +204,11 @@ impl ManagedXerj {
         if settings.retrieval.mode != "managed" {
             return Ok(settings.retrieval.endpoint.clone());
         }
+        // Opening the panel and sending a message may prepare the same node concurrently.
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| "Xerj 节点启动锁失效".to_string())?;
         {
             let guard = self
                 .inner
@@ -254,6 +264,7 @@ impl ManagedXerj {
     }
 
     pub(crate) fn stop(&self) {
+        let _lifecycle = self.lifecycle.lock().ok();
         let node = self.inner.lock().ok().and_then(|mut guard| guard.take());
         if let Some(mut node) = node {
             if let Err(error) = node.stop() {
@@ -267,6 +278,7 @@ impl ManagedXerj {
     /// 供 `spawn_blocking` 使用的独立句柄（与 Tauri state 共享同一个节点与该节点内的 Arc）。
     pub(crate) fn handle(&self) -> Self {
         Self {
+            lifecycle: Arc::clone(&self.lifecycle),
             inner: Arc::clone(&self.inner),
             detail: Arc::clone(&self.detail),
         }
@@ -345,7 +357,7 @@ impl Default for RetrievalSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            mode: default_retrieval_mode(),
+            mode: "managed".into(),
             endpoint: default_retrieval_endpoint(),
             index: default_retrieval_index(),
             timeout_ms: default_retrieval_timeout_ms(),
@@ -2020,7 +2032,10 @@ pub async fn assistant_start(
     resume: Option<String>,
     case_dir: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
+    startup_id: Option<String>,
 ) -> Result<(), String> {
+    let startup_id = normalize_request_id(startup_id)?;
+    *process.startup.lock().map_err(|e| e.to_string())? = startup_id.clone();
     let mut settings = load_assistant_settings(&app)?;
     // 天河 LLM 底线与数据外发确认都在这里再校验一次（设置可能被手工改过或来自旧版本）。
     validate_for_start(&settings)?;
@@ -2044,6 +2059,12 @@ pub async fn assistant_start(
         Some(version) => Some(crate::model::assistant_context(version, case_dir.as_deref()).await?),
         None => None,
     };
+    // Keep the startup lock through the synchronous writes: superseded async preparation
+    // must not configure the process after a newer conversation has already started.
+    let current_startup = process.startup.lock().map_err(|e| e.to_string())?;
+    if startup_id.is_some() && *current_startup != startup_id {
+        return Err("assistant startup was cancelled or replaced".into());
+    }
     {
         let mut guard = process.inner.lock().map_err(|e| e.to_string())?;
         let alive = guard
@@ -2157,19 +2178,21 @@ pub async fn assistant_start(
     .flatten()
     .collect();
     let docs = docs_root(&starts).map(|d| d.display().to_string());
-    send(
-        &process,
-        &configure_message(
-            &settings,
-            &project_root,
-            kernel_dir.as_deref(),
-            docs.as_deref(),
-            model_context.as_ref(),
-        ),
-    )?;
+    let mut configure = configure_message(
+        &settings,
+        &project_root,
+        kernel_dir.as_deref(),
+        docs.as_deref(),
+        model_context.as_ref(),
+    );
+    configure["startup_id"] = json!(startup_id);
+    send(&process, &configure)?;
     // 续接界面上正显示的那段历史（重启进程后也接得上）。
     match resume.filter(|id| !id.is_empty()) {
-        Some(id) => send(&process, &json!({ "type": "resume_session", "id": id })),
+        Some(id) => send(
+            &process,
+            &json!({ "type": "resume_session", "id": id, "startup_id": startup_id }),
+        ),
         None => Ok(()),
     }
 }
@@ -2254,14 +2277,38 @@ pub fn assistant_approve(
     finish_assistant_action(&event, result)
 }
 
-#[tauri::command]
-pub fn assistant_cancel(process: tauri::State<'_, AssistantProcess>) -> Result<(), String> {
-    send(&process, &json!({ "type": "cancel" }))
+fn cancel_startup(process: &AssistantProcess, startup_id: Option<String>) -> Result<(), String> {
+    let startup_id = normalize_request_id(startup_id)?;
+    let mut current = process.startup.lock().map_err(|e| e.to_string())?;
+    if startup_id.is_some() && *current != startup_id {
+        return Ok(());
+    }
+    *current = None;
+    send(process, &json!({ "type": "cancel" }))
 }
 
 #[tauri::command]
-pub fn assistant_new_session(process: tauri::State<'_, AssistantProcess>) -> Result<(), String> {
-    send(&process, &json!({ "type": "new_session" }))
+pub fn assistant_cancel(
+    process: tauri::State<'_, AssistantProcess>,
+    startup_id: Option<String>,
+) -> Result<(), String> {
+    cancel_startup(&process, startup_id)
+}
+
+#[tauri::command]
+pub fn assistant_new_session(
+    process: tauri::State<'_, AssistantProcess>,
+    startup_id: Option<String>,
+) -> Result<(), String> {
+    let startup_id = normalize_request_id(startup_id)?;
+    let current_startup = process.startup.lock().map_err(|e| e.to_string())?;
+    if startup_id.is_some() && *current_startup != startup_id {
+        return Err("assistant startup was cancelled or replaced".into());
+    }
+    send(
+        &process,
+        &json!({ "type": "new_session", "startup_id": startup_id }),
+    )
 }
 
 // ---- U04：未知副作用明确核对 / U03：用系统浏览器打开来源链接 ----

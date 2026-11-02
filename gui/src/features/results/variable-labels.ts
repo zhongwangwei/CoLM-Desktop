@@ -24,7 +24,10 @@ export function variableTitle(name: string, en: boolean, longName?: string | nul
 export function variableOption(variable: CatalogVariable, en: boolean): string {
   const title = variableTitle(variable.name, en, variable.long_name);
   const units = variable.units?.trim();
-  const named = title === variable.name ? title : `${title}（${variable.name}）`;
+  const named =
+    title === variable.name
+      ? title
+      : `${title}${en ? ` (${variable.name})` : `（${variable.name}）`}`;
   return units && units !== '-' ? `${named} · ${units}` : named;
 }
 

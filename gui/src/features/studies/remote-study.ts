@@ -231,7 +231,11 @@ export function remoteStudyPermissions(
   pending: unknown,
   reply: RemoteStudyReply | null,
 ): RemoteStudyPermissions {
-  const exists = Boolean(record || pending || reply);
+  const recovery = reply?.recovery;
+  const exists =
+    recovery?.outcome === 'not_submitted' && recovery.permissions.submit
+      ? false
+      : Boolean(record || pending || reply);
   const state = reply?.status?.state;
   const terminal = state === 'finished' && Number.isInteger(reply?.status?.exit_code);
   const fetched = Boolean(record?.fetched_at || reply?.record?.fetched_at);
@@ -240,7 +244,6 @@ export function remoteStudyPermissions(
     reply?.record?.scientific_verified ??
     reply?.scientific_verified ??
     null;
-  const recovery = reply?.recovery;
   if (recovery) {
     // 有后端的分类就用它：失败阶段、可重提、可否归档、下一步文案都由同一处决定，
     // 前端不再自己猜 phase 字符串，避免两套逻辑分叉。

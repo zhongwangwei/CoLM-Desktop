@@ -23,6 +23,133 @@ fn assistant(content: &str, calls: &[(&str, &str)]) -> Message {
 }
 
 #[test]
+fn rapid_new_sessions_have_unique_ids_and_separate_histories() {
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..10_000 {
+        let session = Session::new(None, "rules").unwrap();
+        assert!(session.id.chars().all(|c| c.is_ascii_digit() || c == '-'));
+        assert!(ids.insert(session.id));
+    }
+
+    let root = temp_dir("rapid-unique-sessions");
+    let mut sessions: Vec<_> = (0..12)
+        .map(|_| Session::new(Some(&root), "rules").unwrap())
+        .collect();
+    assert!(!root.exists());
+    for (index, session) in sessions.iter_mut().enumerate() {
+        session
+            .push(Message::User {
+                content: format!("message {index}"),
+            })
+            .unwrap();
+    }
+    assert_eq!(list(&root).unwrap().len(), sessions.len());
+    for (index, session) in sessions.iter().enumerate() {
+        let reopened = Session::open(&root, &session.id, "rules").unwrap();
+        assert_eq!(reopened.history.len(), 2);
+        assert_eq!(
+            reopened.history[1],
+            Message::User {
+                content: format!("message {index}")
+            }
+        );
+        let items = transcript(&root, &session.id).unwrap();
+        let users: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::User { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, vec![format!("message {index}")]);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn new_session_refuses_existing_directory_without_changing_it() {
+    let root = temp_dir("session-id-collision");
+    let mut session = Session::new(Some(&root), "new rules").unwrap();
+    history_fixture(
+        &root,
+        &session.id,
+        1,
+        &[
+            Message::System {
+                content: "old rules".into(),
+            },
+            Message::User {
+                content: "old message".into(),
+            },
+        ],
+    );
+    let dir = root.join("sessions").join(&session.id);
+    let before = std::fs::read(dir.join("messages.jsonl")).unwrap();
+    assert!(session
+        .push(Message::User {
+            content: "new message".into()
+        })
+        .is_err());
+    // Retrying or emitting metadata must not adopt the unrelated history either.
+    assert!(session.persist_from(0).is_err());
+    session
+        .record_reconciliation(&["old-call".into()], None)
+        .unwrap();
+    session
+        .save_backend(crate::backend::BackendKind::ClaudeCode, "new-backend")
+        .unwrap();
+    session.add_usage(Usage {
+        prompt_tokens: 1,
+        completion_tokens: 2,
+    });
+    assert!(session.task_snapshot(true).unwrap().is_none());
+    assert_eq!(std::fs::read(dir.join("messages.jsonl")).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_two_part_session_id_can_be_resumed_and_appended() {
+    let root = temp_dir("legacy-session-id");
+    let id = "1700000000000-42";
+    history_fixture(
+        &root,
+        id,
+        1,
+        &[
+            Message::System {
+                content: "old rules".into(),
+            },
+            Message::User {
+                content: "old message".into(),
+            },
+        ],
+    );
+    let mut session = Session::open(&root, id, "current rules").unwrap();
+    session
+        .push(Message::User {
+            content: "continued".into(),
+        })
+        .unwrap();
+    let reopened = Session::open(&root, id, "current rules").unwrap();
+    assert_eq!(reopened.id, id);
+    assert_eq!(reopened.history.len(), 3);
+    assert_eq!(
+        reopened.history[1],
+        Message::User {
+            content: "old message".into()
+        }
+    );
+    assert_eq!(
+        reopened.history[2],
+        Message::User {
+            content: "continued".into()
+        }
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn sessions_are_written_on_the_first_message_and_can_be_resumed() {
     let root = temp_dir("resume");
     let mut session = Session::new(Some(&root), "prompt v1").unwrap();

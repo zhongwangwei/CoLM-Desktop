@@ -108,17 +108,20 @@ test('switching version or workspace is refused while source edits are unsaved',
     'function',
     {
       sourceState: { current: { dirty: true } },
+      parameterPending: { current: false },
       t: (zh: string) => zh,
     },
   );
   assert.throws(() => guard(), /源码文件有未保存的修改，请先保存或放弃/);
   const clean = evaluate<() => void>('./VersionsPage.tsx', 'assertSourceSaved', 'function', {
     sourceState: { current: { dirty: false } },
+    parameterPending: { current: false },
     t: (zh: string) => zh,
   });
   assert.doesNotThrow(() => clean());
   const empty = evaluate<() => void>('./VersionsPage.tsx', 'assertSourceSaved', 'function', {
     sourceState: { current: null },
+    parameterPending: { current: false },
     t: (zh: string) => zh,
   });
   assert.doesNotThrow(() => empty());
@@ -160,4 +163,60 @@ test('freezing first resolves unsaved source edits before taking the page lock',
   );
   assert.equal(await proceed(), true);
   assert.deepEqual(calls, ['ask:true', 'ask:true']);
+});
+
+test('unfinished parameter input blocks switching and protects an automatically created draft', () => {
+  const parameterPending = { current: true };
+  const guard = evaluate<() => void>('./VersionsPage.tsx', 'assertSourceSaved', 'function', {
+    sourceState: { current: null },
+    parameterPending,
+    t: (zh: string) => zh,
+  });
+  assert.throws(guard, /参数输入尚未完成/);
+  const drop = evaluate<() => void>('./VersionsPage.tsx', 'dropIfUntouched', 'function', {
+    parameterPending,
+    dirtyNow: { current: false },
+    draftNow: { current: { id: 'new', generation: 1, code: { workspace: null } } },
+    autoCreated: { current: new Set(['new']) },
+    invokeJson: () => assert.fail('unfinished input must not delete its draft'),
+  });
+  drop();
+});
+
+test('unfinished parameter input cannot be saved or frozen, and explicit discard clears it', async () => {
+  const parameterPending = { current: true };
+  for (const name of ['save', 'freeze']) {
+    const action = evaluate<(draft: object, unsaved: boolean) => Promise<unknown>>(
+      './VersionsPage.tsx',
+      name,
+      'function',
+      { parameterPending, t: (zh: string) => zh },
+    );
+    await assert.rejects(action({}, false), /参数输入尚未完成/);
+  }
+  const closed: boolean[] = [];
+  const discard = evaluate<() => Promise<void>>('./VersionsPage.tsx', 'discardLocal', 'function', {
+    parameterPending,
+    draft: { id: 'new' },
+    invokeJson: async () => ({ id: 'new' }),
+    setParamsOpen: (open: boolean) => closed.push(open),
+    setDraft: () => {},
+    dirtyNow: { current: true },
+    setDirty: () => {},
+  });
+  await discard();
+  assert.equal(parameterPending.current, false);
+  assert.deepEqual(closed, [false]);
+});
+
+test('discarding invalid parameter text does not delete a draft with valid edits', () => {
+  const drop = evaluate<() => void>('./VersionsPage.tsx', 'dropIfUntouched', 'function', {
+    parameterPending: { current: false },
+    dirtyNow: { current: true },
+    draftNow: { current: { id: 'new', generation: 1, code: { workspace: null } } },
+    autoCreated: { current: new Set(['new']) },
+    invokeJson: () =>
+      assert.fail('valid edits must keep their draft after invalid input is discarded'),
+  });
+  drop();
 });

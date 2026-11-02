@@ -413,7 +413,11 @@ export function exclusionPatch(
   // 材料拆成 family 开关后没有单一字段；“材料开着”= 任一 family 开或溶质名单非空。
   const materialFamilyKeys = ['DEF_USE_ISOTOPE', 'DEF_USE_METHANE', 'DEF_USE_SEDIMENT'];
   const materialOn = () =>
-    materialFamilyKeys.some((key) => on(key)) || (read('DEF_SOLUTE_NAMES') ?? '').trim() !== '';
+    materialFamilyKeys.some((key) => on(key)) ||
+    (read('DEF_SOLUTE_NAMES') ?? '')
+      .trim()
+      .replace(/^(['"])(.*)\1$/, '$2')
+      .trim() !== '';
   const materialTouched = () =>
     materialFamilyKeys.some((key) => touched(key)) || touched('DEF_SOLUTE_NAMES');
   const closeMaterials = (zh: string, en: string) => {
@@ -497,12 +501,12 @@ export function exclusionPatch(
       materialOn() &&
         on('DEF_URBAN_RUN') &&
         (touched('DEF_URBAN_RUN') && !materialTouched()
-          ? close(
-              'DEF_URBAN_RUN',
+          ? closeMaterials(
               '材料过程与城市过程互斥',
               'Material and urban processes are mutually exclusive',
             )
-          : closeMaterials(
+          : close(
+              'DEF_URBAN_RUN',
               '材料过程与城市过程互斥',
               'Material and urban processes are mutually exclusive',
             )),

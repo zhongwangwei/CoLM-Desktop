@@ -61,6 +61,8 @@ export default function CasesPage() {
   const [runPending, setRunPending] = useState(false);
   // 读设置失败（历史库被锁、目录暂时读不到）后能就地再读一次，不必切走算例再回来（GUI 审查 B-11）。
   const [loadFailed, setLoadFailed] = useState(false);
+  const [contextStale, setContextStale] = useState(false);
+  const contextStaleRef = useRef(false);
   const [reloadCount, setReloadCount] = useState(0);
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
@@ -164,6 +166,7 @@ export default function CasesPage() {
     };
   } | null>(null);
   const effectiveProfile =
+    !contextStale &&
     modelContext &&
     modelContext.dir === dir &&
     modelContext.id === versionId &&
@@ -212,11 +215,28 @@ export default function CasesPage() {
         modelRevision: state.versionRef,
         kernelDir: configurationKernel?.dir ?? null,
       });
-      const context = await invoke<{
-        entry: { dir: string };
-        profile: NonNullable<typeof modelContext>['profile'];
-      }>('model_case_context', { dir: target, modelRevision: state.versionRef });
-      if (request.active && epoch.current === request) {
+      if (!request.active || epoch.current !== request) return;
+      const apply = (old: Record<string, string>) => {
+        const next = { ...old };
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null) delete next[key];
+          else next[key] = value;
+        }
+        return next;
+      };
+      setValues(apply);
+      setSaved(apply);
+      setExplicitValues(apply);
+      setContextStale(true);
+      contextStaleRef.current = true;
+      setError('');
+      if (closed.length) notify(autoClosedText(closed, en));
+      try {
+        const context = await invoke<{
+          entry: { dir: string };
+          profile: NonNullable<typeof modelContext>['profile'];
+        }>('model_case_context', { dir: target, modelRevision: state.versionRef });
+        if (!request.active || epoch.current !== request) return;
         setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
         if (state.selectedCase?.entry.dir === target)
           update({
@@ -225,21 +245,19 @@ export default function CasesPage() {
               profile: { ...state.selectedCase.profile, ...context.profile },
             },
           });
-        const apply = (old: Record<string, string>) => {
-          const next = { ...old };
-          for (const [key, value] of Object.entries(patch)) {
-            if (value === null) delete next[key];
-            else next[key] = value;
-          }
-          return next;
-        };
-        setValues(apply);
-        setSaved(apply);
-        setExplicitValues(apply);
         await refreshHistory(context, request);
+        if (request.active && epoch.current === request) {
+          setContextStale(false);
+          contextStaleRef.current = false;
+        }
+      } catch (error) {
         if (!request.active || epoch.current !== request) return;
-        setError('');
-        if (closed.length) notify(autoClosedText(closed, en));
+        const warning = t(
+          `算例设置已保存，但刷新显示失败：${String(error)}。重新打开算例可重试读取，无需重新保存。`,
+          `Case settings were saved, but refreshing the display failed: ${String(error)}. Reopen the case to retry reading; no need to save again.`,
+        );
+        setError(warning);
+        notify(warning);
       }
     });
   }
@@ -311,6 +329,8 @@ export default function CasesPage() {
     setOptionStates([]);
     setError('');
     setLoadFailed(false);
+    setContextStale(false);
+    contextStaleRef.current = false;
     ++forcingSequence.current;
     setForcingInput(null);
     setSavedForcing(null);
@@ -530,17 +550,20 @@ export default function CasesPage() {
   }
   async function work(fn: () => Promise<unknown>) {
     if (lock.current) return;
+    const request = epoch.current;
     lock.current = true;
     setBusy(true);
     try {
       await fn();
     } catch (e) {
-      setError(String(e));
-      notify(String(e), true);
+      if (request.active && epoch.current === request) {
+        setError(String(e));
+        notify(String(e), true);
+      }
       throw e;
     } finally {
       lock.current = false;
-      setBusy(false);
+      if (request.active && epoch.current === request) setBusy(false);
     }
   }
   async function save() {
@@ -573,11 +596,30 @@ export default function CasesPage() {
             }
           : {}),
       });
-      const context = await invoke<{
-        entry: { dir: string };
-        profile: NonNullable<typeof modelContext>['profile'];
-      }>('model_case_context', { dir: target, modelRevision: state.versionRef });
-      if (id.active && epoch.current === id) {
+      if (!id.active || epoch.current !== id) return;
+      setSaved({ ...values });
+      if (forcingDirty && forcingInput) {
+        const input = { ...forcingInput, dataset: forcingTemplate || forcingInput.dataset };
+        setForcingInput(input);
+        setSavedForcing(input);
+        setForcingTemplate('');
+        setValues((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
+        setSaved((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
+      }
+      setExplicitValues((old) => ({
+        ...old,
+        ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
+      }));
+      setDateDraft({});
+      setContextStale(true);
+      contextStaleRef.current = true;
+      setError('');
+      try {
+        const context = await invoke<{
+          entry: { dir: string };
+          profile: NonNullable<typeof modelContext>['profile'];
+        }>('model_case_context', { dir: target, modelRevision: state.versionRef });
+        if (!id.active || epoch.current !== id) return;
         setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
         if (state.selectedCase?.entry.dir === target)
           update({
@@ -586,25 +628,22 @@ export default function CasesPage() {
               profile: { ...state.selectedCase.profile, ...context.profile },
             },
           });
-        setSaved({ ...values });
-        if (forcingDirty && forcingInput) {
-          const input = { ...forcingInput, dataset: forcingTemplate || forcingInput.dataset };
-          setForcingInput(input);
-          setSavedForcing(input);
-          setForcingTemplate('');
-          setValues((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
-          setSaved((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
-        }
-        setExplicitValues((old) => ({
-          ...old,
-          ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
-        }));
-        setDateDraft({});
         await refreshHistory(context, id);
+        if (id.active && epoch.current === id) {
+          setContextStale(false);
+          contextStaleRef.current = false;
+        }
+      } catch (error) {
         if (!id.active || epoch.current !== id) return;
-        setError('');
-        notify(t('算例设置已保存', 'Case settings saved'));
+        const warning = t(
+          `算例设置已保存，但刷新显示失败：${String(error)}。重新打开算例可重试读取，无需重新保存。`,
+          `Case settings were saved, but refreshing the display failed: ${String(error)}. Reopen the case to retry reading; no need to save again.`,
+        );
+        setError(warning);
+        notify(warning);
+        return;
       }
+      if (id.active && epoch.current === id) notify(t('算例设置已保存', 'Case settings saved'));
     });
   }
   const labels: Record<string, string> = {
@@ -680,6 +719,7 @@ export default function CasesPage() {
     }
   }
   function next() {
+    if (contextStaleRef.current) return;
     const issue = step >= 3 ? periodProblem() : null;
     if (issue) {
       setError(issue);
@@ -689,7 +729,9 @@ export default function CasesPage() {
     setStep((step + 1) as SimulationStep);
   }
   async function saveAndContinue() {
+    const request = epoch.current;
     await save();
+    if (!request.active || epoch.current !== request || contextStaleRef.current) return;
     setStep((step + 1) as SimulationStep);
   }
   // 研究从"新建修改版"进去（2026-10-21 研究不再单独占侧栏一项）。
@@ -839,7 +881,7 @@ export default function CasesPage() {
             simulation_step: step,
             ...(step >= 3 ? { period: { start, end } } : {}),
             case: state.selectedCase?.entry,
-            settings_saved: !busy && !error && !dirty,
+            settings_saved: !busy && !error && !dirty && !contextStale,
             ...(step === 3 && forcingInput ? { forcing: forcingProbe } : {}),
           }
         : undefined,
@@ -1040,10 +1082,11 @@ export default function CasesPage() {
             onChange={setStep}
           />
           {error && <Notice tone="error">{error}</Notice>}
-          {loadFailed && !busy && (
+          {(loadFailed || contextStale) && !busy && (
             <div className="flex gap-2">
               <ActionButton
                 action="case-reload"
+                disabled={dirty}
                 label={t('重新读取算例设置', 'Read the case settings again')}
                 run={() => setReloadCount((count) => count + 1)}
               />
@@ -1361,7 +1404,7 @@ export default function CasesPage() {
               onBusyChange={setRunPending}
               casePath={dir}
               effectiveProfile={effectiveProfile}
-              disabled={busy || dirty || !!error || !schema.length}
+              disabled={busy || dirty || contextStale || !!error || !schema.length}
               summary={{
                 name: state.selectedCase?.entry.name ?? '',
                 period: casePeriodText(values) || t('时段未读取', 'Period unavailable'),

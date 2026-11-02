@@ -214,6 +214,19 @@ export function restoreRunView(record: RunState | undefined, casePath: string): 
     total: typeof progress?.total_steps === 'number' ? progress.total_steps : undefined,
   };
 }
+/** A reopened batch has one ledger operation per station, so its selected cases define Stop. */
+export function activeRunTargets(
+  records: Record<string, RunState>,
+  casePath: string,
+  batchCases?: string[],
+): string[] {
+  if (batchCases) return [...new Set(batchCases)].filter((dir) => records[dir]?.running);
+  const id = records[casePath]?.run_id;
+  return id
+    ? Object.keys(records).filter((dir) => records[dir].run_id === id && records[dir].running)
+    : [casePath];
+}
+
 export function settleRuns(
   records: Record<string, RunState>,
   targets: string[],
@@ -262,6 +275,7 @@ export function restoredRuns(
       location: run.location === 'local' ? 'local' : 'remote',
       run_id: run.operation_id,
       operation_id: run.operation_id,
+      requested_stage: final?.stages?.at(-1)?.[0],
       // 停止的就是停止，不算失败（以前重开项目后，取消的站点都显示成"运行失败"）。
       status: ['succeeded', 'completed'].includes(run.status)
         ? 'succeeded'
@@ -431,14 +445,14 @@ export function remoteStatusSummary(results: unknown[], en = false): string {
       unconfirmed: ['未能确认', 'unconfirmed'],
     };
     const name = en ? names[kind][1] : names[kind][0];
-    const key = reason ? `${name}（${reason}）` : name;
+    const key = reason ? (en ? `${name} (${reason})` : `${name}（${reason}）`) : name;
     groups.set(key, (groups.get(key) ?? 0) + 1);
   }
   const parts = [...groups].map(([name, count]) => (en ? `${count} ${name}` : `${name} ${count}`));
   const head = en
     ? `Checked ${results.length} server job(s)`
     : `已核对 ${results.length} 个服务器作业`;
-  return parts.length ? `${head}：${parts.join(' · ')}` : head;
+  return parts.length ? `${head}${en ? ': ' : '：'}${parts.join(' · ')}` : head;
 }
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');

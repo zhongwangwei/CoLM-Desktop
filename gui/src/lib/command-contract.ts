@@ -121,6 +121,10 @@ export const commandContract = {
     "modelRevision": {
       "required": false,
       "rust_type": "Option<colm_model::VersionRef>"
+    },
+    "startupId": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "assistant_send": {
@@ -155,8 +159,18 @@ export const commandContract = {
       "rust_type": "Option<bool>"
     }
   },
-  "assistant_cancel": {},
-  "assistant_new_session": {},
+  "assistant_cancel": {
+    "startupId": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "assistant_new_session": {
+    "startupId": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "assistant_reconcile_effects": {
     "ids": {
       "required": true,

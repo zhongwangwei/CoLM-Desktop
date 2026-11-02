@@ -376,16 +376,24 @@ it('refusals before a turn starts are recognised so the input can be restored', 
   assert.equal(rejectedBeforeTurn('HTTP 500 from the model'), false);
 });
 
-it('defaults Xerj retrieval to an external node and keeps it out of provider profiles', () => {
+it('defaults Xerj retrieval to a managed node without enabling it or replacing saved external settings', () => {
   assert.deepEqual(defaultSettings.retrieval, {
     enabled: false,
-    mode: 'external',
+    mode: 'managed',
     binary_path: null,
     port: null,
     endpoint: 'http://127.0.0.1:9200',
     index: 'colm-docs-v1',
     timeout_ms: 1500,
   });
+  const external = {
+    ...defaultSettings,
+    retrieval: { ...defaultSettings.retrieval, mode: 'external' as const },
+  };
+  assert.equal(
+    settingsForSave(selectProvider(external, 'openai'), external).retrieval.mode,
+    'external',
+  );
   const saved = rememberProfile({
     ...defaultSettings,
     retrieval: {
@@ -476,7 +484,10 @@ it('validates Xerj retrieval settings with bilingual messages even when disabled
     assert.ok(retrievalSettingsProblem({ ...managed, port }, 'zh'), String(port));
   // external 模式不校验（也不理会）托管字段：切回去不应被上次 managed 的残留值挡住。
   assert.equal(
-    retrievalSettingsProblem({ ...base, binary_path: 'relative/xerj', port: 1 }, 'en'),
+    retrievalSettingsProblem(
+      { ...base, mode: 'external', binary_path: 'relative/xerj', port: 1 },
+      'en',
+    ),
     null,
   );
   // managed 仍要能通过整条保存校验（endpoint 是回退值，也必须合法）。
@@ -1077,33 +1088,34 @@ it('renders commit_pull_requests with pagination, reason candidates and unverifi
 });
 
 it('shows detail_unverified as unverified, never as unassociated', () => {
-  const evidence = historyEvidence(
-    'commit_pull_requests',
-    historyToolResult({
-      repository: { owner: 'o', repo: 'r', url: 'https://github.com/o/r' },
-      commit: 'b'.repeat(40),
+  const result = historyToolResult({
+    repository: { owner: 'o', repo: 'r', url: 'https://github.com/o/r' },
+    commit: 'b'.repeat(40),
+    offline: true,
+    from_cache: false,
+    complete: false,
+    pulls: [],
+    page: null,
+    detail_unverified: {
+      pr_number: 9,
+      unverified: true,
+      list_complete: false,
       offline: true,
       from_cache: false,
-      complete: false,
-      pulls: [],
-      page: null,
-      detail_unverified: {
-        pr_number: 9,
-        unverified: true,
-        list_complete: false,
-        offline: true,
-        from_cache: false,
-        reason: 'GitHub was not contacted (offline cache miss)',
-      },
-      notices: [],
-      errors: [],
-    }),
-    'zh',
-  );
+      reason: 'GitHub was not contacted (offline cache miss)',
+    },
+    notices: [],
+    errors: [],
+  });
+  const evidence = historyEvidence('commit_pull_requests', result, 'zh');
   assert.ok(evidence);
   const section = evidence!.sections.find((item) => item.title === '未核验的 PR 详情')!;
   assert.match(section.note!, /未核验 ≠ 未关联/);
   assert.match(section.note!, /offline cache miss/);
+  const english = historyEvidence('commit_pull_requests', result, 'en')!;
+  const englishNote = english.sections.find((item) => item.title === 'unverified PR detail')!.note!;
+  assert.match(englishNote, /unverified is not the same as unassociated; GitHub/);
+  assert.equal(englishNote.includes('；'), false);
   // 空 pulls 不能在没有完整列表时写成"没有关联"。
   const pulls = evidence!.sections.find((item) => item.title === '关联 PR')!;
   assert.match(pulls.note!, /只有完整读过的关联列表/);
@@ -1184,6 +1196,8 @@ it('summarises review actions and finds local paths without opening arbitrary UR
   assert.deepEqual(localPathsInAction(action), ['/cases/a', '/cases/a/output']);
   // 只提取绝对本地路径：URL 与相对路径不产生开文件请求。
   assert.deepEqual(localPathsInJsonText('{"a":"https://x/y","b":"rel/z"}'), []);
+  assert.deepEqual(localPathsInJsonText('URL: https://host/path and http://other/file'), []);
+  assert.deepEqual(localPathsInJsonText('File: /cases/a/output.nc'), ['/cases/a/output.nc']);
   assert.equal(formatUnixSeconds(1_790_000_000), '2026-09-21 14:13 UTC');
   assert.equal(formatUnixSeconds(0), '');
 });
@@ -1392,4 +1406,23 @@ it('A1: source_history repo rows include retention, including the missing case',
     (field) => field.label === 'current source retention',
   )!;
   assert.equal(upstreamRetention.value, 'not provided by the tool');
+});
+
+it('English history status and sync summaries use English punctuation', () => {
+  const lines = historyRepoLines(
+    { identity: { state: 'new-state' }, legacy_synced: { at_unix_ms: 1 }, checked_at_unix_ms: 1 },
+    'en',
+  );
+  assert.match(lines.state, /Unknown identity: /);
+  assert.match(lines.lastSync, /Legacy record: /);
+  assert.match(lines.lastSync, / \(as of .*\)$/);
+  assert.doesNotMatch(lines.lastSync, /[（）]/);
+  assert.match(lines.checkedAt, /Last checked: /);
+  const summary = historySyncSummary(
+    { actions: { desktop: 'fetched', colm_upstream: 'cloned' } },
+    'en',
+  );
+  assert.match(summary!.text, /^Sync result: /);
+  assert.match(summary!.text, /; /);
+  assert.doesNotMatch(JSON.stringify([lines, summary]), /[：；]/);
 });

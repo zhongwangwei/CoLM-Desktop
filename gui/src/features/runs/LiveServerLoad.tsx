@@ -22,22 +22,28 @@ export default function LiveServerLoad({
   const [busy, setBusy] = useState(false);
   // 来回切换服务器时，慢的那次回答不能盖住当前服务器的。
   const current = useRef(host);
+  const request = useRef(0);
   current.current = host;
   async function refresh() {
     const target = host;
+    const generation = ++request.current;
+    const isCurrent = () => current.current === target && request.current === generation;
     setBusy(true);
     try {
       const load = await invoke<ServerLoad>('remote_load', { host: target });
-      if (current.current === target) setReading({ host: target, at: Date.now(), load });
+      if (isCurrent()) setReading({ host: target, at: Date.now(), load });
     } catch (error) {
-      if (current.current === target)
-        setReading({ host: target, at: Date.now(), error: String(error) });
+      if (isCurrent()) setReading({ host: target, at: Date.now(), error: String(error) });
     } finally {
-      if (current.current === target) setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
   useEffect(() => {
+    const pendingRequest = request;
     if (host) void refresh();
+    return () => {
+      pendingRequest.current++;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
   const mine = reading.host === host;

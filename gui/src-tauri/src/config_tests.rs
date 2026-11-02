@@ -4851,7 +4851,9 @@ fn standard_material_parameters_list_numbers_a_version_may_change() {
         .find(|p| p.path == "DEF_SEDIMENT%grain_density")
         .unwrap();
     assert_eq!(density.value.parse::<f64>().unwrap(), 2650.0);
-    assert!(sediment.iter().all(|p| p.group != "nl_colm_material_forcing"));
+    assert!(sediment
+        .iter()
+        .all(|p| p.group != "nl_colm_material_forcing"));
     let methane = of("standard_methane_parameter.nml");
     assert!(methane.iter().any(|p| p.path == "DEF_METHANE%q10methane"));
     // Switches and the cases' own choices stay with the case.

@@ -1,5 +1,6 @@
 import { Button, Input, Notice } from '../../components/ui';
 import {
+  knowledgeSaveReview,
   localPathsInAction,
   taskActionOutput,
   taskActionTitle,
@@ -13,7 +14,7 @@ import {
 type Translate = (zh: string, en: string) => string;
 
 /**
- * U03 证据卡渲染：只显示 model.ts 里 `historyEvidence` 从结构化字段整理出的内容。
+ * 证据卡渲染：只显示 model.ts 里 `historyEvidence` 从结构化字段整理出的内容。
  * 缺字段显示“未提供/不可用”由构建器和这里共同保证；这里不做任何文本推断。
  */
 function EvidenceFieldView({
@@ -29,7 +30,10 @@ function EvidenceFieldView({
 }) {
   return (
     <div className="flex flex-wrap items-baseline gap-1 text-xs">
-      <span className="text-muted-foreground">{field.label}：</span>
+      <span className="text-muted-foreground">
+        {field.label}
+        {t('：', ': ')}
+      </span>
       {field.mono ? (
         <code className="select-all break-all">{field.value}</code>
       ) : (
@@ -141,7 +145,7 @@ function EvidenceSectionView({
   );
 }
 
-/** 历史工具结果的证据卡。折叠时只显示一行短答案，展开后按 section/item 展示结构化字段。 */
+/** 历史和文档检索结果的证据卡。折叠时只显示一行短答案，展开后按 section/item 展示结构化字段。 */
 export function EvidenceCardView({
   evidence,
   t,
@@ -196,56 +200,13 @@ export function TaskReviewBanner({
   t: Translate;
 }) {
   const actions = review.actions;
-  return (
-    <section
-      role="alert"
-      aria-label={t('执行结果待核对', 'Action result needs review')}
-      className="notice notice-warning space-y-2"
-    >
-      <strong>{t('执行结果待核对', 'Action result needs review')}</strong>
-      <p className="text-xs">
-        {t(
-          '有会修改状态的操作没有确定的结局；结果未知，不能用新回答自动清除。先查看实际运行/输出，再标记已核对。',
-          'Some state-changing actions have no confirmed outcome. The result is unknown and cannot be cleared by a new answer; inspect the actual run/output, then mark it reviewed.',
-        )}
-      </p>
-      {actions.length === 0 && (
-        <p className="text-xs text-muted-foreground">
-          {t(
-            '任务快照要求核对，但没有列出待核对动作；仍可用备注说明已查看的状态。',
-            'The task snapshot requires review but lists no actions; use the note to record what you checked.',
-          )}
-        </p>
-      )}
-      {actions.map((action, index) => {
-        const key = action.id ?? `action-${index}`;
-        const paths = localPathsInAction(action);
-        const output = taskActionOutput(action);
-        return (
-          <div key={key} className="space-y-1 rounded border p-2">
-            <strong className="text-xs">{taskActionTitle(action, language)}</strong>
-            {action.summary && <p className="text-xs">{action.summary}</p>}
-            <div className="flex flex-wrap gap-2">
-              {paths.map((path, pathIndex) => (
-                <Button key={path} variant="ghost" onClick={() => onOpenPath(path)}>
-                  {pathIndex === 0 ? t('查看运行/输出', 'View run/output') : t('打开', 'Open')}{' '}
-                  {path}
-                </Button>
-              ))}
-            </div>
-            {output && (
-              <details>
-                <summary className="cursor-pointer text-xs text-muted-foreground">
-                  {t('参数 / 结果原文', 'arguments / result')}
-                </summary>
-                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">
-                  {output}
-                </pre>
-              </details>
-            )}
-          </div>
-        );
-      })}
+  const knowledgeOnly =
+    actions.length > 0 && actions.every((action) => knowledgeSaveReview(action, language));
+  const title = knowledgeOnly
+    ? t('知识卡保存结果待核实', 'Knowledge card save needs verification')
+    : t('执行结果待核对', 'Action result needs review');
+  const reviewControls = (
+    <>
       <label className="flex flex-col gap-1 text-xs">
         <span>{t('核对备注（可选）', 'Review note (optional)')}</span>
         <Input
@@ -266,6 +227,87 @@ export function TaskReviewBanner({
           </span>
         )}
       </div>
+    </>
+  );
+  return (
+    <section role="alert" aria-label={title} className="notice notice-warning space-y-2">
+      <strong>{title}</strong>
+      <p className="text-xs">
+        {knowledgeOnly
+          ? t(
+              '程序会自动检查本地知识卡的保存记录。这里只核实是否保存，不代表科学内容已经审核；无法确认的结果会继续保留。',
+              'The app automatically checks local knowledge card save records. This verifies saving only, not scientific content; unconfirmed results remain visible.',
+            )
+          : t(
+              '有会修改状态的操作没有确定的结局；结果未知，不能用新回答自动清除。先查看实际运行/输出，再标记已核对。',
+              'Some state-changing actions have no confirmed outcome. The result is unknown and cannot be cleared by a new answer; inspect the actual run/output, then mark it reviewed.',
+            )}
+      </p>
+      {actions.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          {t(
+            '任务快照要求核对，但没有列出待核对动作；仍可用备注说明已查看的状态。',
+            'The task snapshot requires review but lists no actions; use the note to record what you checked.',
+          )}
+        </p>
+      )}
+      {actions.map((action, index) => {
+        const key = action.id ?? `action-${index}`;
+        const knowledge = knowledgeSaveReview(action, language);
+        const paths = knowledge ? [] : localPathsInAction(action);
+        const output = taskActionOutput(action);
+        return (
+          <div key={key} className="space-y-1 rounded border p-2">
+            <strong className="text-xs">
+              {knowledge?.target ?? taskActionTitle(action, language)}
+            </strong>
+            {knowledge ? (
+              <p className="text-xs">{knowledge.explanation}</p>
+            ) : (
+              action.summary && <p className="text-xs">{action.summary}</p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {paths.map((path, pathIndex) => (
+                <Button key={path} variant="ghost" onClick={() => onOpenPath(path)}>
+                  {pathIndex === 0 ? t('查看运行/输出', 'View run/output') : t('打开', 'Open')}{' '}
+                  {path}
+                </Button>
+              ))}
+            </div>
+            {(output || knowledge) && (
+              <details>
+                <summary className="cursor-pointer text-xs text-muted-foreground">
+                  {knowledge
+                    ? t('技术详情', 'Technical details')
+                    : t('参数 / 结果原文', 'arguments / result')}
+                </summary>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">
+                  {knowledge ? `${taskActionTitle(action, language)}\n\n${output}` : output}
+                </pre>
+              </details>
+            )}
+          </div>
+        );
+      })}
+      {knowledgeOnly ? (
+        <details>
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            {t(
+              '自动核实仍无法确定时，手动记录核查结果',
+              'If automatic verification is inconclusive, record a manual check',
+            )}
+          </summary>
+          <p className="my-2 text-xs">
+            {t(
+              '仅在已检查知识卡保存记录后使用。此操作记录你的核查，不会重试保存，也不代表科学内容通过审核。',
+              'Use only after checking the card save records. This records your check; it does not retry saving or approve the scientific content.',
+            )}
+          </p>
+          {reviewControls}
+        </details>
+      ) : (
+        reviewControls
+      )}
       {notice && <p className="text-xs">{notice}</p>}
       {error && <Notice tone="error">{error}</Notice>}
     </section>

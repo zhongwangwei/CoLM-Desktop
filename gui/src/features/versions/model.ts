@@ -126,21 +126,56 @@ export function importParameters(
   fields: ModelField[],
   assets: string[],
 ): ParameterOverride[] {
-  const data = JSON.parse(text);
-  const rows = Array.isArray(data) ? data : data.records;
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      bilingual('参数导入失败：文件不是有效的 JSON', 'Parameter import failed: invalid JSON'),
+    );
+  }
+  const rows = Array.isArray(data) ? data : data?.records;
   if (!Array.isArray(rows))
     throw new Error(bilingual('导入文件不对：应是参数记录的数组', 'Expected records array'));
   const seen = new Set<string>();
   return rows.map((raw: ParameterOverride) => {
+    if (
+      !raw ||
+      typeof raw !== 'object' ||
+      Array.isArray(raw) ||
+      typeof raw.parameter_id !== 'string' ||
+      !raw.parameter_id ||
+      typeof raw.raw_key !== 'string' ||
+      typeof raw.value !== 'string' ||
+      !raw.scope_instance ||
+      typeof raw.scope_instance !== 'object' ||
+      Array.isArray(raw.scope_instance) ||
+      typeof raw.scope_instance.kind !== 'string' ||
+      (raw.scope_instance.scheme != null && typeof raw.scope_instance.scheme !== 'string') ||
+      (raw.scope_instance.index != null && !Number.isInteger(raw.scope_instance.index)) ||
+      (raw.scope_instance.process_file != null &&
+        typeof raw.scope_instance.process_file !== 'string')
+    )
+      throw new Error(
+        bilingual(
+          '参数导入失败：参数记录格式不正确',
+          'Parameter import failed: invalid parameter record',
+        ),
+      );
     const descriptor = catalog.find((d) => d.id === raw.parameter_id);
     if (
       !descriptor ||
-      descriptor.raw_key.toLowerCase() !== String(raw.raw_key).toLowerCase() ||
+      descriptor.raw_key.toLowerCase() !== raw.raw_key.toLowerCase() ||
       descriptor.storage === 'read-only' ||
       (descriptor.storage === 'case-nml' &&
         !fields.some((f) => f.name.toLowerCase() === descriptor.raw_key.toLowerCase()))
     )
-      throw new Error(`Not a model parameter: ${raw.parameter_id}`);
+      throw new Error(
+        bilingual(
+          `不是模型参数：${raw.parameter_id}`,
+          `Not a model parameter: ${raw.parameter_id}`,
+        ),
+      );
     const record = makeRecord(
       descriptor,
       raw.value,

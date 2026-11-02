@@ -5,6 +5,8 @@ import ts from 'typescript';
 import * as compareConfig from './config';
 import {
   benchErrorText,
+  claimRemoteWatch,
+  parseCompareDraft,
   buildOpenbenchConfig,
   comparisonName,
   designFingerprint,
@@ -50,7 +52,25 @@ function declaration(name: string): string {
 function execute<T>(name: string, context: Record<string, unknown>): T {
   // watch() 现在还会镜像跨路由任务条；这些用例不关心状态条，给 no-op 默认值。
   const withDefaults = {
+    claimRemoteWatch,
+    setReportError: () => {},
+    reportSelection: { current: null },
+    shown: (error: unknown) => benchErrorText(String(error).replace(/^Error: /, ''))[1],
+    ...(name === 'afterWatch'
+      ? {}
+      : {
+          afterWatch: async (_machine: string, _outcome: unknown, success?: () => Promise<void>) =>
+            success?.(),
+        }),
+    parseCompareDraft,
+    stored: () => '',
+    registerCloseGuard: () => () => {},
+    currentDraft: () => ({}),
+    completedDraft: { current: '' },
+    benchErrorText,
+    hostEpoch: { current: 0 },
     benchTasks: {
+      tasks: [],
       begin: () => '',
       update: () => {},
       finish: () => {},
@@ -242,14 +262,16 @@ function fetchHarness() {
     hostEpoch,
   });
   const runs: unknown[] = [];
+  const reportErrors: string[] = [];
   const fetchReport = execute<(machine: string, project: string, runId?: string) => Promise<void>>(
     'fetchReport',
     {
-      fetching: { current: new Set<string>() },
+      fetching: { current: new Map() },
       hostEpoch,
       stillCurrent,
       t,
       invokeJson: ipc.invokeJson,
+      setReportError: (value: string) => reportErrors.push(value),
       // 页面的 setLastRun 支持函数式更新（取回后按服务器返回的 run 身份补记）。
       setLastRun: (value: unknown) => {
         const previous = runs.at(-1) ?? null;
@@ -266,17 +288,18 @@ function fetchHarness() {
     hostRef.current = machine;
     hostEpoch.current += 1;
   };
-  return { ipc, fetched, fetchReport, switchTo, runs };
+  return { ipc, fetched, fetchReport, switchTo, runs, reportErrors };
 }
 
-test('GUI-08: fetching the same comparison twice at once is refused with one backend call', async () => {
+test('GUI-08: concurrent fetches share one promise and one backend call', async () => {
   const h = fetchHarness();
   const first = h.fetchReport('A', 'cmp');
   await h.ipc.wait(0);
-  await assert.rejects(h.fetchReport('A', 'cmp'), /being fetched already/);
+  const duplicate = h.fetchReport('A', 'cmp');
+  assert.equal(duplicate, first);
   assert.equal(h.ipc.requests.length, 1, 'the duplicate never reaches the backend');
   await h.ipc.answer(0, { report: '/local/report.html' });
-  await first;
+  await Promise.all([first, duplicate]);
   assert.deepEqual(h.fetched, ['/local/report.html']);
   // 取回结束后可以再取：同一比较不会永久锁死。
   const again = h.fetchReport('A', 'cmp');
@@ -315,7 +338,7 @@ test('GUI-08: a failed fetch replaces no report and the old-version message is b
   const request = await h.ipc.wait(0);
   assert.equal(request.command, 'bench_remote_fetch');
   // 先挂上拒绝断言再让后端失败：页面里 rejection 立刻被 task 的 catch 接住，测试里不能留成未处理拒绝。
-  const rejected = assert.rejects(call, /旧报告未改动/);
+  const rejected = assert.rejects(call, /previous report on this computer is unchanged/);
   await h.ipc.fail(
     0,
     new Error(
@@ -374,9 +397,22 @@ test('GUI-05/08: a report fetched for the old machine is not shown after switchi
 
 type WatchHarness = ReturnType<typeof watchHarness>;
 
-function watchHarness(seed: Record<string, string> = {}) {
+function watchHarness(
+  seed: Record<string, string> = {},
+  shared?: {
+    storage: ReturnType<typeof memoryStorage>;
+    taskEvents: { id: string; state?: string; registered?: boolean }[];
+    benchTasks: {
+      tasks: { id: string; host: string; job: string }[];
+      begin: () => string;
+      update: (id: string, patch: { state?: string }) => unknown;
+      finish: (id: string, outcome: { state: string }) => unknown;
+      registerStop: (id: string, handler: unknown) => unknown;
+    };
+  },
+) {
   const ipc = controlledIpc();
-  const storage = memoryStorage(seed);
+  const storage = shared?.storage ?? memoryStorage(seed);
   const hostRef = { current: 'serverA' };
   const hostEpoch = { current: 1 };
   const jobRef = { current: null as unknown };
@@ -387,6 +423,15 @@ function watchHarness(seed: Record<string, string> = {}) {
   const notices: string[] = [];
   const unsettled: unknown[] = [];
   const lastJobs: unknown[] = [];
+  const taskEvents: { id: string; state?: string; registered?: boolean }[] =
+    shared?.taskEvents ?? [];
+  const benchTasks = shared?.benchTasks ?? {
+    tasks: [{ id: 'original-task', host: 'serverA', job: 'run-99' }],
+    begin: () => 'remote-task',
+    update: (id: string, patch: { state?: string }) => taskEvents.push({ id, ...patch }),
+    finish: (id: string, outcome: { state: string }) => taskEvents.push({ id, ...outcome }),
+    registerStop: (id: string, handler: unknown) => taskEvents.push({ id, registered: !!handler }),
+  };
   const jobKey = execute<(machine: string) => string>('jobKey', {});
   const jobHistoryKey = execute<(machine: string) => string>('jobHistoryKey', {});
   const stillCurrent = execute<(machine: string, epoch: number) => boolean>('stillCurrent', {
@@ -409,6 +454,7 @@ function watchHarness(seed: Record<string, string> = {}) {
   const settleJob = execute<
     (machine: string, identity: unknown, end: string, reason?: string) => void
   >('settleJob', {
+    benchTasks,
     store: storage.store,
     jobKey,
     jobHistoryKey,
@@ -435,6 +481,7 @@ function watchHarness(seed: Record<string, string> = {}) {
       | { state: 'detached' }
     >
   >('watch', {
+    benchTasks,
     hostEpoch,
     hostRef,
     stillCurrent,
@@ -468,6 +515,8 @@ function watchHarness(seed: Record<string, string> = {}) {
     notices,
     unsettled,
     lastJobs,
+    taskEvents,
+    benchTasks,
     watch,
   };
 }
@@ -1150,4 +1199,290 @@ test('R09: result-unknown is a distinct terminal state, never success/failure', 
   assert.equal(ended.end, 'unknown');
   assert.equal(ended.uncertain, false);
   assert.equal(parseRemoteJob(JSON.stringify(ended))?.end, 'unknown');
+});
+
+test('lost contact interrupts the task mirror, and reconnect finishes that same task', async () => {
+  const h = watchHarness();
+  const first = h.watch('serverA', {
+    job: 'run-99',
+    kind: 'run',
+    name: 'cmp',
+    taskId: 'original-task',
+  });
+  await h.ipc.fail(0, new Error('connection lost'));
+  await first;
+  assert.ok(
+    h.taskEvents.some((event) => event.id === 'original-task' && event.state === 'interrupted'),
+  );
+  assert.deepEqual(h.taskEvents.at(-1), { id: 'original-task', registered: false });
+  const saved = parseRemoteJob(h.storage.values['colm.benchJob@serverA']);
+  assert.equal(saved?.taskId, 'original-task');
+  const resumed = h.watch('serverA', saved!);
+  assert.ok(
+    h.taskEvents.some((event) => event.id === 'original-task' && event.state === 'running'),
+  );
+  await h.ipc.answer(1, jobReply('finished', { exit_code: 0 }));
+  await resumed;
+  assert.ok(h.taskEvents.some((event) => event.id === 'original-task' && event.state === 'done'));
+});
+
+test('a late report read cannot replace the report after A to B to A', async () => {
+  const ipc = controlledIpc();
+  const hostEpoch = { current: 1 };
+  const reports: unknown[] = [];
+  const view = execute<(path: string) => Promise<void>>('view', {
+    host: 'A',
+    hostEpoch,
+    stillCurrent: (machine: string, epoch: number) =>
+      machine === 'A' && epoch === hostEpoch.current,
+    invoke: ipc.invokeJson,
+    setReport: (report: unknown) => reports.push(report),
+  });
+  const reading = view('/A/report.html');
+  hostEpoch.current = 3;
+  await ipc.answer(0, '<html>old report</html>');
+  await reading;
+  assert.deepEqual(reports, []);
+});
+
+test('reconnecting after the interrupted task was dismissed registers a fresh task mirror', async () => {
+  const h = watchHarness();
+  h.benchTasks.tasks = [];
+  const watching = h.watch('serverA', {
+    job: 'run-99',
+    kind: 'run',
+    name: 'cmp',
+    taskId: 'dismissed-task',
+    submittedAt: '2026-11-02T00:00:00Z',
+    uncertain: true,
+  });
+  await h.ipc.answer(0, jobReply('finished', { exit_code: 0 }));
+  await watching;
+  assert.ok(h.taskEvents.some((event) => event.id === 'remote-task' && event.state === 'done'));
+  assert.ok(!h.taskEvents.some((event) => event.id === 'dismissed-task'));
+});
+
+for (const late of ['success', 'failure', 'ssh'] as const) {
+  test(`old watcher ${late} cannot overwrite a new instance's job and task ownership`, async () => {
+    const old = watchHarness();
+    const identity = {
+      job: 'run-99',
+      kind: 'run',
+      name: 'test',
+      taskId: 'original-task',
+      submittedAt: '2026-01-01',
+    };
+    const pendingOld = old.watch('serverA', identity);
+    await old.ipc.wait(0);
+    old.alive.current = false;
+    const fresh = watchHarness({}, old);
+    const pendingFresh = fresh.watch('serverA', identity);
+    await fresh.ipc.wait(0);
+    const before = { ...fresh.storage.values };
+    const eventCount = fresh.taskEvents.length;
+    if (late === 'ssh') await old.ipc.fail(0, new Error('late SSH failure'));
+    else await old.ipc.answer(0, jobReply('finished', { exit_code: late === 'success' ? 0 : 1 }));
+    assert.equal((await pendingOld).state, 'detached');
+    assert.deepEqual(fresh.storage.values, before, 'new watcher retains its persisted identity');
+    assert.deepEqual(
+      fresh.taskEvents.slice(eventCount),
+      [],
+      'old watcher cannot change running state or unregister the new stop handler',
+    );
+    await fresh.ipc.answer(0, jobReply('finished', { exit_code: 0 }));
+    assert.equal((await pendingFresh).state, 'succeeded');
+  });
+}
+
+test('run does not finish or unregister a task after delegating its lifecycle to watch', async () => {
+  const h = watchHarness();
+  h.alive.current = false;
+  let fresh: WatchHarness;
+  let resumed: ReturnType<WatchHarness['watch']>;
+  let countAtTakeover = 0;
+  const run = execute<() => Promise<unknown>>('run', {
+    task: (fn: () => Promise<unknown>) => fn(),
+    generated: { current: { design: {}, sites: [] } },
+    formDesign: {},
+    snapshotStale: () => false,
+    parseOpenbenchConfig: () => ({ config: {} }),
+    structuralProblems: () => [],
+    configFingerprint: () => 'fingerprint',
+    name: 'test',
+    comparisonName,
+    remote: true,
+    host: 'serverA',
+    yaml: '',
+    scanDir: '',
+    t,
+    assertNoUnresolvedJob: () => {},
+    setWrittenFingerprint: () => {},
+    setConfigSaving: () => {},
+    benchTasks: h.benchTasks,
+    invokeJson: async () => ({ job: 'run-99' }),
+    watch: (machine: string, identity: RemoteJobIdentity) => {
+      // The original watcher exits on unmount. Before run's catch resumes, a new page takes over.
+      const old = h.watch(machine, identity);
+      fresh = watchHarness({}, h);
+      resumed = fresh.watch(machine, { ...identity, submittedAt: '2026-01-01' });
+      countAtTakeover = fresh.taskEvents.length;
+      return old;
+    },
+  });
+  await assert.rejects(run(), /compare page left/);
+  assert.deepEqual(
+    h.taskEvents.slice(countAtTakeover),
+    [],
+    'outer catch cannot remove the new handler or finish its task',
+  );
+  await fresh!.ipc.answer(0, jobReply('finished', { exit_code: 0 }));
+  assert.equal((await resumed!).state, 'succeeded');
+});
+
+for (const receipt of ['accepted', 'unconfirmed']) {
+  test(`${receipt} remote submission clears submitting before watch without claiming written`, async () => {
+    const saving: unknown[] = [];
+    const written: string[] = [];
+    const run = execute<() => Promise<unknown>>('run', {
+      task: (fn: () => Promise<unknown>) => fn(),
+      generated: { current: { design: {}, sites: [] } },
+      formDesign: {},
+      snapshotStale: () => false,
+      parseOpenbenchConfig: () => ({ config: {} }),
+      structuralProblems: () => [],
+      configFingerprint: () => 'fp',
+      name: 'test',
+      comparisonName,
+      remote: true,
+      host: 'A',
+      yaml: 'yaml',
+      scanDir: '',
+      t,
+      assertNoUnresolvedJob: () => {},
+      setWrittenFingerprint: (value: string) => written.push(value),
+      setConfigSaving: (value: unknown) => saving.push(value),
+      setNotice: () => {},
+      invokeJson: async () => ({ job: 'run', submitted: receipt }),
+      watch: async () => {
+        assert.equal(saving.at(-1), '', 'network submission is over before long watch');
+        assert.deepEqual(written, []);
+        return { state: 'uncertain' };
+      },
+      afterWatch: async () => {},
+    });
+    await run();
+    assert.deepEqual(written, [], 'uncertain outcome cannot prove YAML exists');
+  });
+}
+
+test('a new host generation does not inherit or delete an old report request', async () => {
+  const h = fetchHarness();
+  const old = h.fetchReport('A', 'cmp', 'r1');
+  await h.ipc.wait(0);
+  h.switchTo('B');
+  h.switchTo('A');
+  const current = h.fetchReport('A', 'cmp', 'r1');
+  await h.ipc.wait(1);
+  assert.notEqual(current, old);
+  await h.ipc.answer(0, { report: '/old.html' });
+  await old;
+  assert.equal(
+    h.fetchReport('A', 'cmp', 'r1'),
+    current,
+    'old cleanup must not remove the current request',
+  );
+  assert.equal(h.ipc.requests.length, 2);
+  await h.ipc.answer(1, { report: '/current.html' });
+  await current;
+  assert.deepEqual(h.fetched, ['/current.html']);
+});
+
+test('retrying a failed fetch clears its report error after the actual report is opened', async () => {
+  const h = fetchHarness();
+  const failed = h.fetchReport('A', 'cmp', 'r1');
+  const rejecting = assert.rejects(failed, /offline/);
+  await h.ipc.fail(0, 'offline');
+  await rejecting;
+  assert.equal(h.reportErrors.at(-1), 'offline');
+  const retry = h.fetchReport('A', 'cmp', 'r1');
+  await h.ipc.answer(1, { report: '/new.html' });
+  await retry;
+  assert.equal(h.reportErrors.at(-1), '');
+});
+
+for (const late of ['success', 'failure'] as const) {
+  test(`same-host report selection ignores an older ${late} after a newer success`, async () => {
+    const h = fetchHarness();
+    const old = h.fetchReport('A', 'cmp', 'old');
+    const latest = h.fetchReport('A', 'cmp', 'latest');
+    await h.ipc.answer(1, { report: '/latest.html', run_id: 'latest' });
+    await latest;
+    if (late === 'success') await h.ipc.answer(0, { report: '/old.html', run_id: 'old' });
+    else await h.ipc.fail(0, 'old failure');
+    await old;
+    assert.deepEqual(h.fetched, ['/latest.html']);
+    assert.equal((h.runs.at(-1) as { runId: string }).runId, 'latest');
+    assert.deepEqual(h.reportErrors, ['']);
+  });
+}
+
+test('an old report success cannot clear the newer selected report failure', async () => {
+  const h = fetchHarness();
+  const old = h.fetchReport('A', 'cmp', 'old');
+  const latest = h.fetchReport('A', 'cmp', 'latest');
+  const failed = assert.rejects(latest, /new failure/);
+  await h.ipc.fail(1, 'new failure');
+  await failed;
+  await h.ipc.answer(0, { report: '/old.html', run_id: 'old' });
+  await old;
+  assert.deepEqual(h.fetched, []);
+  assert.deepEqual(h.runs, []);
+  assert.deepEqual(h.reportErrors, ['new failure']);
+});
+
+test('same-host A to B to A reselects the shared A request as the latest report', async () => {
+  const h = fetchHarness();
+  const first = h.fetchReport('A', 'cmp', 'run-A');
+  const second = h.fetchReport('A', 'cmp', 'run-B');
+  assert.equal(h.fetchReport('A', 'cmp', 'run-A'), first);
+  assert.equal(h.ipc.requests.length, 2);
+  await h.ipc.answer(1, { report: '/B.html', run_id: 'run-B' });
+  await second;
+  await h.ipc.answer(0, { report: '/A.html', run_id: 'run-A' });
+  await first;
+  assert.deepEqual(h.fetched, ['/A.html']);
+  assert.equal((h.runs.at(-1) as { runId: string }).runId, 'run-A');
+});
+
+test('standalone report reads and fetched reports share the latest selection', async () => {
+  const ipc = controlledIpc();
+  const reports: unknown[] = [];
+  const errors: string[] = [];
+  const context = {
+    reportSelection: { current: null },
+    host: 'A',
+    hostEpoch: { current: 1 },
+    stillCurrent: () => true,
+    invoke: ipc.invokeJson,
+    invokeJson: ipc.invokeJson,
+    setReport: (report: unknown) => reports.push(report),
+    setReportError: (error: string) => errors.push(error),
+    setLastRun: () => {},
+    fetching: { current: new Map() },
+  };
+  const view = execute<(path: string, owner?: object) => Promise<void>>('view', context);
+  const fetch = execute<(host: string, project: string, runId: string) => Promise<void>>(
+    'fetchReport',
+    { ...context, view },
+  );
+  const older = fetch('A', 'cmp', 'old');
+  await ipc.answer(0, { report: '/old.html', run_id: 'old' });
+  await ipc.wait(1);
+  const latest = view('/latest.html');
+  await ipc.answer(2, 'latest html');
+  await latest;
+  await ipc.fail(1, 'old read failed');
+  await older;
+  assert.deepEqual(reports, [{ path: '/latest.html', html: 'latest html' }]);
+  assert.deepEqual(errors, ['']);
 });

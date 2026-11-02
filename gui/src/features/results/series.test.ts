@@ -12,6 +12,7 @@ import {
   type ResultReport,
 } from './series';
 import type { TimeBasis } from './time-basis';
+import { plainError } from '../../lib/bilingual';
 describe('result scientific integrity', () => {
   it('uses backend full-record statistics rather than extrema-sampled means', () => {
     const report: EnergyDiagnostic = {
@@ -408,5 +409,88 @@ it('requests the real native or browser print path without claiming a PDF was sa
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else Reflect.deleteProperty(globalThis, key);
     }
+  }
+});
+
+describe('localized scientific validation errors', () => {
+  for (const lang of ['zh', 'en']) {
+    it(`reports invalid full-record exports and energy statistics in ${lang}`, () => {
+      const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      Object.defineProperty(globalThis, 'document', {
+        configurable: true,
+        value: { documentElement: { lang } },
+      });
+      try {
+        const series = {
+          time: [0],
+          vars: { residual: [1] },
+          source_n: 1,
+          n: 1,
+          downsampled: false,
+        };
+        const report: EnergyDiagnostic = {
+          schema: 1,
+          expression: 'Rnet-H-LE-G',
+          closure_assessed: false,
+          full_stats: {
+            basis: 'all_records_in_selected_window',
+            mean_kind: 'arithmetic_mean_of_common_finite_records',
+            status: 'computed',
+            source_n: 1,
+            n: 1,
+            missing: 0,
+            mean: 1,
+            units: 'W/m²',
+          },
+          series,
+          window: { from: null, to: null, end_inclusive: true, time_basis: 'model_history_clock' },
+          limitation: 'Storage is excluded',
+        };
+        const cases: [() => unknown, string, string][] = [
+          [
+            () => fullEnergyStats({ ...report, schema: 0 as never }),
+            '完整记录的能量统计不可用',
+            'Full-record energy statistics are unavailable',
+          ],
+          [
+            () => fullEnergyStats({ ...report, series: { ...series, source_n: 2 } }),
+            '完整记录的能量统计样本数不一致',
+            'Inconsistent full-record energy support',
+          ],
+          [
+            () => fullEnergyStats({ ...report, full_stats: { ...report.full_stats, mean: NaN } }),
+            '完整记录的能量统计结果无效',
+            'Invalid full-record energy statistic',
+          ],
+          [
+            () => fullSeriesCsv({ ...series, downsampled: true }, 'residual'),
+            '完整时序导出需要所选时间窗口内的全部记录，不能将抽样数据作为完整时序导出',
+            'The full-series export requires every selected-window record; sampled data cannot be exported as complete',
+          ],
+          [
+            () => fullSeriesCsv({ ...series, time: [NaN] }, 'residual'),
+            '完整时序中存在无效的记录时间',
+            'Invalid full-series record time',
+          ],
+          [
+            () => fullSeriesCsv({ ...series, vars: { residual: [Infinity] } }, 'residual'),
+            '完整时序中存在无效的记录数值',
+            'Invalid full-series record value',
+          ],
+        ];
+        for (const [validate, zh, en] of cases) {
+          const expected = lang === 'en' ? en : zh;
+          assert.throws(validate, (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.equal(error.message, expected);
+            assert.equal(plainError(String(error)), expected);
+            return true;
+          });
+        }
+      } finally {
+        if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument);
+        else Reflect.deleteProperty(globalThis, 'document');
+      }
+    });
   }
 });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useApp } from '../../lib/app-state';
+import { useApp, projectVersion } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
@@ -54,6 +54,7 @@ import {
   type HistoryDetail,
   type Filter,
 } from './history';
+import { askConfirm } from '../../lib/confirm';
 import './history-page.css';
 type Detail = HistoryDetail;
 type ClearPlan = {
@@ -107,7 +108,7 @@ type EvaluationVariable = {
   units?: string;
 };
 export default function HistoryPage({ casePath }: { casePath?: string }) {
-  const { state, openCase, update, navigate } = useApp();
+  const { state, openCase, update, navigate, registerCloseGuard } = useApp();
   const versionNames = Object.fromEntries(
     (state.versions ?? []).map((revision) => [revision.version.id, revision.name]),
   );
@@ -190,6 +191,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   const statusOptions = [
     ...new Set([
       '',
+      'submitted',
+      'queued',
+      'cancel_requested',
+      'needs_reconciliation',
       'running',
       'succeeded',
       'failed',
@@ -268,10 +273,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setGroup(null);
     setApplied(effectiveFilter);
   }
+  const detailRequest = useRef(0);
+  const selectedDetail = useRef(detail?.operation.operation_id);
+  selectedDetail.current = detail?.operation.operation_id;
   async function show(id: string) {
+    const request = ++detailRequest.current;
     const token = epoch.current;
     const value = await invokeJson<Detail>('history_detail', { id });
-    if (token.active && token === epoch.current) {
+    if (token.active && token === epoch.current && request === detailRequest.current) {
       setDetail(value);
       setDetailsOpen(false);
       setCompare('');
@@ -293,6 +302,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     // A multi-site project reopens on the page that creating its stations led to: the batch run
     // page with all of them, showing how they ended. Back from there is the wizard with every
     // step already filled in from what the project was created with.
+    const model =
+      path !== state.root || !state.chosenVersion
+        ? await projectVersion(state.versions, cases[0]?.dir)
+        : {};
     const seed = await invokeJson<WizardSeed>('project_wizard_seed', { root: path });
     const server = (
       await invokeJson<{ servers: Server[] }>('remote_config', {}).catch(() => ({
@@ -304,6 +317,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       root: path,
       cases,
       projectCasesOpen: true,
+      ...model,
       projectRunSettings: {
         root: path,
         cases: cases.map((entry) => entry.dir),
@@ -1714,14 +1728,73 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       disabled={busy}
                       run={() =>
                         action(async () => {
+                          const operation = detail.operation;
+                          const token = epoch.current;
+                          if (
+                            !(await askConfirm(
+                              t(
+                                `将按记录 ${operation.operation_id} 的冻结配置重新运行 ${operation.case_path ?? operation.operation_id}（${operation.version_id ?? '—'} @ ${operation.revision ?? '—'}，${operation.host ?? '本机'}）。这会实际运行模型并生成新结果，可能需要较长时间。继续？`,
+                                `Replay ${operation.case_path ?? operation.operation_id} using the frozen settings of ${operation.operation_id} (${operation.version_id ?? '—'} @ ${operation.revision ?? '—'}, ${operation.host ?? 'this computer'})? This runs the model and creates new results; it may take a long time.`,
+                              ),
+                              { confirmLabel: t('开始重跑', 'Start replay') },
+                            ))
+                          )
+                            return;
+                          if (
+                            !token.active ||
+                            token !== epoch.current ||
+                            selectedDetail.current !== operation.operation_id
+                          )
+                            return;
+                          const request = detailRequest.current;
                           setReplaying(true);
+                          const releaseCloseGuard = registerCloseGuard(() =>
+                            t(
+                              '历史重跑正在执行，关闭会停止它。',
+                              'A history replay is running; closing stops it.',
+                            ),
+                          );
                           try {
-                            setResult(
-                              await invokeJson('history_replay', {
-                                id: detail.operation.operation_id,
-                              }),
-                            );
+                            const result = await invokeJson('history_replay', {
+                              id: operation.operation_id,
+                            });
+                            if (
+                              token.active &&
+                              token === epoch.current &&
+                              selectedDetail.current === operation.operation_id
+                            )
+                              setResult(result);
+                            // A completed replay is committed even if refreshing its history fails.
+                            const [list, refreshed] = await Promise.allSettled([
+                              invokeJson<{ items: HistoryOperation[]; total: number }>(
+                                'history_list',
+                                {
+                                  filter: historyFilter(
+                                    scopedHistoryFilter(applied, casePath),
+                                    offset,
+                                  ),
+                                },
+                              ),
+                              invokeJson<Detail>('history_detail', { id: operation.operation_id }),
+                            ]);
+                            if (token.active && token === epoch.current) {
+                              if (list.status === 'fulfilled') setPage(list.value);
+                              if (
+                                refreshed.status === 'fulfilled' &&
+                                request === detailRequest.current &&
+                                selectedDetail.current === operation.operation_id
+                              )
+                                setDetail(refreshed.value);
+                              if (list.status === 'rejected' || refreshed.status === 'rejected')
+                                setError(
+                                  t(
+                                    '重跑已完成，但历史刷新失败；请重新打开记录。',
+                                    'Replay completed, but history could not refresh. Reopen the record.',
+                                  ),
+                                );
+                            }
                           } finally {
+                            releaseCloseGuard();
                             setReplaying(false);
                           }
                         })

@@ -45,6 +45,7 @@ import {
   nodePlanText,
   kindPathPrefill,
   spinupProblem,
+  defaultSpinupEnd,
   type ModelSetup,
   type SetupRecheck,
   type SimulationStep,
@@ -732,12 +733,21 @@ export default function NewCasePage() {
     setBuildProgress(null);
     if (!buildingOn) return;
     let current = true;
-    const poll = () =>
-      invoke<BuildProgress>('remote_engine_progress', { host: buildingOn })
-        .then((progress) => {
-          if (current) setBuildProgress(progress);
-        })
-        .catch(() => {});
+    let polling = false;
+    const poll = async () => {
+      if (!current || polling) return;
+      polling = true;
+      try {
+        const progress = await invoke<BuildProgress>('remote_engine_progress', {
+          host: buildingOn,
+        });
+        if (current) setBuildProgress(progress);
+      } catch {
+        // Keep the last confirmed progress until the server responds again.
+      } finally {
+        polling = false;
+      }
+    };
     void poll();
     const timer = setInterval(() => void poll(), 5000);
     return () => {
@@ -1214,7 +1224,11 @@ export default function NewCasePage() {
   }
   function selectSite(path: string, availableSites = sites) {
     const site = availableSites.find((item) => item.site_file === path);
-    if (!site || site.problem) return;
+    if (!site) return;
+    if (site.problem) {
+      setError(site.problem);
+      return;
+    }
     if (site.crop && !cropDefaults.DEF_TUNING_CROP_PLANTING_DAY) {
       setError(t('正在读取作物默认配置，请稍后选择。', 'Wait for crop defaults to load.'));
       return;
@@ -3101,15 +3115,16 @@ export default function NewCasePage() {
                         set('spinup_end', '');
                         setOption('DEF_simulation_time%spinup_repeat', '');
                       } else {
-                        const startYear = form.start ? Number(form.start.slice(0, 4)) : 0;
-                        const endYear = form.end ? Number(form.end.slice(0, 4)) : 0;
-                        // 预热在结束日当天 00:00 截止，默认取开始后一整年（次年 1 月 1 日）。
-                        const defaultCutoff =
-                          startYear && endYear && endYear > startYear
-                            ? `${startYear + 1}-01-01`
-                            : form.start
-                              ? `${form.start.slice(0, 7)}-15`
-                              : '';
+                        const defaultCutoff = defaultSpinupEnd(form.start, form.end);
+                        if (!defaultCutoff) {
+                          setError(
+                            t(
+                              '模拟时段内没有可用的预热截止日期，请先延长模拟时段。',
+                              'The simulation period has no valid spin-up cutoff; extend the period first.',
+                            ),
+                          );
+                          return;
+                        }
                         set('spinup_end', defaultCutoff);
                         setOption(
                           'DEF_simulation_time%spinup_repeat',

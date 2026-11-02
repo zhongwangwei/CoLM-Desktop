@@ -8,6 +8,7 @@ import {
   defaultSettings,
   egressTarget,
   historySettingsOf,
+  pendingReconciliation,
   rejectedBeforeTurn,
   taskSnapshotOf,
   withoutLastUser,
@@ -247,6 +248,9 @@ test('GUI-16: retrying initialization never subscribes to the event stream twice
     setError: () => {},
     grant: { current: null },
     runningRef: { current: false },
+    sendEpoch: { current: 0 },
+    startupId: { current: null as string | null },
+    sessionStart: { current: null },
     invoke: async () => undefined,
     outgoing: { current: null },
   });
@@ -306,6 +310,7 @@ function attachHarness(pick: () => Promise<Attachment | null>, charsLimit = 200_
     attachmentsRef.current = ui.attachments;
   };
   const attach = compileFunction<(hint?: unknown) => Promise<void>>('attachDocument', {
+    deletingSessionRef: { current: false },
     runningRef: { current: false },
     ready: true,
     conversationRequest,
@@ -428,6 +433,7 @@ test('GUI-17: consecutive reads append in order and use the latest attachment li
 test('GUI-17: sending stays blocked while a document is still being read', async () => {
   // 只提供 guard 之前用到的上下文：如果 guard 失效、继续走发送路径，就会 ReferenceError。
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
+    deletingSessionRef: { current: false },
     input: 'question',
     attachments: [],
     t: (_zh: string, en: string) => en,
@@ -442,7 +448,17 @@ test('GUI-17: sending stays blocked while a document is still being read', async
 // GUI-18：发送确认与拒绝事件按轮次处理
 // ---------------------------------------------------------------------------
 
-function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {}) {
+function sendHarness(
+  options: {
+    typed?: string;
+    attachments?: Attachment[];
+    start?: Promise<void>;
+    manualReady?: boolean;
+    newSession?: Promise<void>;
+    cancelError?: string;
+    versionRef?: { id: string; revision: number };
+  } = {},
+) {
   const typed = options.typed ?? 'hello';
   const initialAttachments = options.attachments ?? [];
   const ui = {
@@ -455,17 +471,33 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     contextUsage: null as Record<string, unknown> | null,
     docsIndex: null as AgentEvent | null,
     taskSnapshot: null as AgentTaskSnapshot | null,
+    reconciling: [] as boolean[],
   };
   const refs = {
     running: { current: false },
     outgoing: { current: null as PendingTurn<Attachment> | null },
+    sendEpoch: { current: 0 },
+    startupId: { current: null as string | null },
+    reviewEpoch: { current: null as number | null },
+    sessionStart: {
+      current: null as {
+        id: string;
+        onReady?: () => void;
+        target: string | null;
+        skipConfigure: boolean;
+        ready?: boolean;
+        onSnapshot?: (task: AgentTaskSnapshot | null) => void;
+        onError?: (error: Error) => void;
+      } | null,
+    },
     turnSeq: { current: 0 },
     history: { current: [] as string[] },
     historyIndex: { current: null as number | null },
     historyDraft: { current: '' },
     streamed: { current: false },
     fresh: { current: false },
-    session: { current: 'session' },
+    session: { current: 'session' as string | null },
+    agentSession: { current: 'session' },
     grant: { current: null },
     attachmentsRef: { current: initialAttachments },
     settingsRef: {
@@ -493,6 +525,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setUsage: (value: string) => {
       ui.usage = value;
     },
+    setModel: () => {},
     setSessionUsage: () => {},
     setUsagePending: (value: boolean) => {
       ui.usagePending = value;
@@ -515,6 +548,25 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
   const invoke = (command: string, args: Record<string, unknown> = {}) => {
     commands.push(command);
     invocations.push({ command, args });
+    if (command === 'assistant_start' && options.start) return options.start;
+    if (command === 'assistant_new_session' && options.newSession) return options.newSession;
+    if (command === 'assistant_cancel' && options.cancelError)
+      return Promise.reject(options.cancelError);
+    if (
+      command === 'assistant_start' &&
+      !options.manualReady &&
+      !options.start &&
+      !options.newSession
+    )
+      queueMicrotask(() => {
+        handleEvent({
+          type: 'ready',
+          session: refs.session.current || 'initial',
+          startup_id: args.startupId,
+        });
+        if (args.resume)
+          handleEvent({ type: 'ready', session: args.resume, startup_id: args.startupId });
+      });
     if (command === 'assistant_send') return ack.promise;
     return Promise.resolve(undefined);
   };
@@ -550,6 +602,8 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
   assert.ok(handlerSource, 'AssistantPanel.tsx defines the assistant event handler');
   const handleEvent = compileExpression<(event: Record<string, unknown>) => void>(handlerSource, {
     active: true,
+    startupId: refs.startupId,
+    sendEpoch: refs.sendEpoch,
     outgoing: refs.outgoing,
     turnOutput,
     rejectedBeforeTurn,
@@ -561,7 +615,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setError: updates.setError,
     errorText,
     t,
-    app: { current: { assistantSettingsOpen: false } },
+    app: { current: { assistantSettingsOpen: false, versionRef: options.versionRef } },
     busy: (value: boolean) => {
       refs.running.current = value;
     },
@@ -572,19 +626,34 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     setUsagePending: updates.setUsagePending,
     setContextUsage: updates.setContextUsage,
     setDocsIndex: updates.setDocsIndex,
+    setModel: updates.setModel,
     streamed: refs.streamed,
     appendDelta,
     setTaskSnapshot: (value: AgentTaskSnapshot | null) => {
       ui.taskSnapshot = value;
     },
     taskSnapshotOf,
+    fresh: refs.fresh,
+    session: refs.session,
+    agentSession: refs.agentSession,
+    runningRef: refs.running,
     eventBelongsToTurn,
+    sessionStart: refs.sessionStart,
+    clearTaskReview: () => {
+      ui.taskSnapshot = null;
+    },
   });
+  let requestSequence = 0;
   const send = compileFunction<(next?: string) => Promise<void>>('send', {
+    deletingSessionRef: { current: false },
+    withTimeout,
+    startupId: refs.startupId,
     input: typed,
     attachments: initialAttachments,
     t,
     runningRef: refs.running,
+    sendEpoch: refs.sendEpoch,
+    sessionStart: refs.sessionStart,
     ready: true,
     attaching: false,
     settingsRef: refs.settingsRef,
@@ -606,7 +675,7 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     invoke,
     guideState: () => ({ kernelDir: '/kernel' }),
     historySettingsOf,
-    newRequestId: () => 'turn-test-1',
+    newRequestId: () => `turn-test-${++requestSequence}`,
     fresh: refs.fresh,
     session: refs.session,
     streamed: refs.streamed,
@@ -620,8 +689,26 @@ function sendHarness(options: { typed?: string; attachments?: Attachment[] } = {
     refs,
     commands,
     invocations,
+    stop: compileFunction<() => Promise<void>>('stop', {
+      startupId: refs.startupId,
+      reviewEpoch: refs.reviewEpoch,
+      setReconciling: (value: boolean) => {
+        ui.reconciling.push(value);
+      },
+      sendEpoch: refs.sendEpoch,
+      sessionStart: refs.sessionStart,
+      invoke,
+      t,
+      busy: (value: boolean) => {
+        refs.running.current = value;
+      },
+    }),
     send,
-    handleEvent,
+    handleEvent: (event: Record<string, unknown>) =>
+      handleEvent({
+        ...(event.type === 'ready' ? { startup_id: refs.startupId.current } : {}),
+        ...event,
+      }),
     beginSendTurn,
     settleSendTurn,
     resolveAck: () => ack.resolve(undefined),
@@ -752,31 +839,77 @@ test('GUI-18: an IPC failure withdraws its own bubble, never an earlier one', as
   assert.equal(harness.refs.running.current, false);
 });
 
-function sessionHarness(loadTranscript: () => Promise<Message[]>) {
+function sessionHarness(
+  loadTranscript: () => Promise<Message[]>,
+  draft = { input: '', attachments: [] as Attachment[], discard: true },
+) {
   const state = {
+    input: draft.input,
+    attachments: draft.attachments,
     messages: [] as Message[],
     contextUsage: null as unknown,
     limitReached: true,
     stepLimit: 3,
     sessions: [{ id: 'other' }] as unknown,
     attachNotice: 'stale notice',
+    taskSnapshot: { requires_reconciliation: true } as AgentTaskSnapshot | null,
+    reconcileNote: 'old review',
+    reconcileNotice: 'old notice',
+    reconcileError: 'old error',
     usage: '5 + 5 tokens',
     sessionUsage: { turns: 5, tokens: 10 },
     usagePending: false,
     followed: 0,
   };
   const refs = {
+    deletingSession: { current: false },
+    input: { current: draft.input },
+    attachments: { current: draft.attachments },
+    historyIndex: { current: 3 as number | null },
     session: { current: null as string | null },
     fresh: { current: true },
     running: { current: false },
     conversationRequest: { current: 0 },
   };
   const open = compileFunction<(item: { id: string }) => Promise<void>>('openSession', {
+    deletingSessionRef: refs.deletingSession,
+    attaching: false,
+    confirmConversationChange: async () => draft.discard,
+    inputRef: refs.input,
+    attachmentsRef: refs.attachments,
+    setInput: (value: string) => {
+      state.input = value;
+    },
+    setAttachments: (value: Attachment[]) => {
+      state.attachments = value;
+    },
+    historyIndex: refs.historyIndex,
     conversationRequest: refs.conversationRequest,
     runningRef: refs.running,
+    sessionStart: { current: null },
+    t: (_zh: string, en: string) => en,
+    taskSnapshotOf,
+    setTaskSnapshot: (value: AgentTaskSnapshot | null) => {
+      state.taskSnapshot = value;
+    },
     invokeJson: loadTranscript,
     session: refs.session,
     fresh: refs.fresh,
+    clearTaskReview: compileFunction<() => void>('clearTaskReview', {
+      setReconciling: () => {},
+      setTaskSnapshot: (value: AgentTaskSnapshot | null) => {
+        state.taskSnapshot = value;
+      },
+      setReconcileNote: (value: string) => {
+        state.reconcileNote = value;
+      },
+      setReconcileNotice: (value: string) => {
+        state.reconcileNotice = value;
+      },
+      setReconcileError: (value: string) => {
+        state.reconcileError = value;
+      },
+    }),
     setMessages: (value: Message[]) => {
       state.messages = value;
     },
@@ -824,6 +957,10 @@ test('U-07: switching to a stored conversation clears its usage until that conve
   assert.deepEqual(harness.state.sessionUsage, { turns: 0, tokens: 0 });
   assert.equal(harness.state.usagePending, true, 'usage waits for this conversation');
   assert.equal(harness.state.attachNotice, '');
+  assert.equal(harness.state.taskSnapshot, null);
+  assert.equal(harness.state.reconcileNote, '');
+  assert.equal(harness.state.reconcileNotice, '');
+  assert.equal(harness.state.reconcileError, '');
   assert.equal(harness.state.followed, 1, 'the new conversation starts following the bottom');
 
   // 这一会话自己的 usage 事件到达后，"待加载"结束，显示的是它的数字。
@@ -1172,18 +1309,54 @@ test('U03: only open_path for local files and assistant_open_url for http(s) lin
   assert.equal(harness.calls.length, 3);
 });
 
-function reconcileHarness(options: { reject?: Error; note?: string } = {}) {
+function reconcileHarness(
+  options: { reject?: Error; note?: string; response?: Promise<void>; start?: Promise<void> } = {},
+) {
+  const panel = sendHarness();
   const calls: { command: string; args: Record<string, unknown> }[] = [];
   const state = {
-    reconciling: [] as boolean[],
+    reconciling: panel.ui.reconciling,
     error: '',
     notice: '',
   };
   const invoke = async (command: string, args: Record<string, unknown> = {}) => {
     calls.push({ command, args });
-    if (options.reject) throw options.reject;
+    if (command === 'assistant_start' && options.start) await options.start;
+    if (command === 'assistant_reconcile_effects') {
+      if (options.response) await options.response;
+      if (options.reject) throw options.reject;
+    }
   };
+  const conversationRequest = { current: 0 };
+  const resumeReviewSession = compileFunction<
+    (target: string) => Promise<AgentTaskSnapshot | null>
+  >('resumeReviewSession', {
+    startupId: panel.refs.startupId,
+    newRequestId: () => 'review-start',
+    sessionStart: panel.refs.sessionStart,
+    app: { current: { root: '/project', selectedCase: null, versionRef: null } },
+    guideState: () => ({ kernelDir: '/kernel' }),
+    invoke,
+    withTimeout,
+    t: (_zh: string, en: string) => en,
+  });
   const reconcileEffects = compileFunction<(ids: string[]) => Promise<void>>('reconcileEffects', {
+    conversationRequest,
+    reviewEpoch: panel.refs.reviewEpoch,
+    runningRef: panel.refs.running,
+    sessionStart: panel.refs.sessionStart,
+    session: panel.refs.session,
+    agentSession: panel.refs.agentSession,
+    sendEpoch: panel.refs.sendEpoch,
+    busy: (value: boolean) => {
+      panel.refs.running.current = value;
+    },
+    resumeReviewSession,
+    taskSnapshot: taskSnapshotOf({
+      requires_reconciliation: true,
+      effect_unknown_actions: [{ id: 'old-1' }],
+    }),
+    pendingReconciliation,
     reconciling: false,
     reconcileNote: options.note ?? '',
     setReconciling: (value: boolean) => {
@@ -1199,7 +1372,7 @@ function reconcileHarness(options: { reject?: Error; note?: string } = {}) {
     t: (_zh: string, en: string) => en,
     errorText: (message: string) => String(message).replace(/^Error: /, ''),
   });
-  return { calls, state, reconcileEffects };
+  return { calls, state, reconcileEffects, conversationRequest, panel };
 }
 
 test('U04: reconcile submits only the listed old action ids and keeps the banner on failure', async () => {
@@ -1223,6 +1396,8 @@ test('U04: banner comes from the task snapshot and normal turn events cannot cle
   const harness = sendHarness();
   const sending = harness.send();
   await settle();
+  harness.handleEvent({ type: 'ready', session: 'session' });
+  harness.handleEvent({ type: 'ready', session: 'session' });
   harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: true } });
   assert.equal(harness.ui.taskSnapshot?.requires_reconciliation, true);
   // 普通 tool_result / assistant_delta / 新消息都不改任务快照。
@@ -1266,4 +1441,949 @@ test('A3: only a matching turn_started accepts the message; late events keep it 
   assert.equal(harness.refs.outgoing.current?.phase, 'accepted');
   harness.resolveAck();
   await sending;
+});
+
+for (const phase of ['start', 'newSession'] as const) {
+  test(`stop during assistant ${phase} prevents the pending message from being sent`, async () => {
+    const pending = deferred<void>();
+    const harness = sendHarness({ [phase]: pending.promise });
+    harness.refs.fresh.current = phase === 'newSession';
+    const sending = harness.send();
+    await settle();
+    await harness.stop();
+    pending.resolve();
+    await sending;
+    assert.equal(harness.refs.sessionStart.current, null);
+    assert.equal(harness.commands.includes('assistant_send'), false);
+    assert.equal(harness.ui.messages.length, 0);
+    assert.equal(harness.ui.draft, 'hello');
+    assert.equal(harness.refs.running.current, false);
+  });
+}
+
+test('a late task snapshot cannot enter a different or new conversation', () => {
+  const harness = sendHarness();
+  harness.refs.session.current = 'other-conversation';
+  harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: true } });
+  assert.equal(harness.ui.taskSnapshot, null);
+  harness.refs.session.current = 'session';
+  harness.refs.fresh.current = true;
+  harness.handleEvent({ type: 'task_state', task: { requires_reconciliation: true } });
+  assert.equal(harness.ui.taskSnapshot, null);
+});
+
+for (const reject of [undefined, new Error('old failure')]) {
+  test(`a reconciliation reply after switching conversations is ignored (${reject ? 'failure' : 'success'})`, async () => {
+    const pending = deferred<void>();
+    const harness = reconcileHarness({ response: pending.promise, reject });
+    const reviewing = harness.reconcileEffects(['old-action']);
+    harness.conversationRequest.current++;
+    pending.resolve();
+    await reviewing;
+    assert.equal(harness.state.error, '');
+    assert.equal(harness.state.notice, '');
+    assert.deepEqual(harness.state.reconciling, [true]);
+  });
+}
+
+for (const restoredTask of [false, true]) {
+  for (const eventsFirst of [false, true]) {
+    test(`configure snapshots cannot replace the requested resume session (task=${restoredTask}, eventsFirst=${eventsFirst})`, async () => {
+      const start = deferred<void>();
+      const harness = sendHarness({ start: start.promise });
+      harness.refs.session.current = 'target-B';
+      const sending = harness.send();
+      if (!eventsFirst) {
+        start.resolve();
+        await settle();
+      }
+      harness.handleEvent({ type: 'ready', session: 'old-A' });
+      harness.handleEvent({
+        type: 'task_state',
+        task: { goal: 'old-A', requires_reconciliation: true },
+      });
+      assert.equal(harness.refs.session.current, 'target-B');
+      assert.equal(harness.ui.taskSnapshot, null);
+      harness.handleEvent({ type: 'ready', session: 'target-B' });
+      if (restoredTask) {
+        harness.handleEvent({
+          type: 'task_state',
+          task: { goal: 'target-B', requires_reconciliation: true },
+        });
+        assert.equal((harness.ui.taskSnapshot as AgentTaskSnapshot | null)?.goal, 'target-B');
+      } else assert.equal(harness.ui.taskSnapshot, null);
+      start.resolve();
+      await settle();
+      harness.resolveAck();
+      await sending;
+    });
+  }
+}
+for (const eventsFirst of [false, true]) {
+  test(`new session ignores configure snapshots regardless of IPC ordering (eventsFirst=${eventsFirst})`, async () => {
+    const start = deferred<void>();
+    const newSession = deferred<void>();
+    const harness = sendHarness({ start: start.promise, newSession: newSession.promise });
+    harness.refs.fresh.current = true;
+    const sending = harness.send();
+    if (!eventsFirst) {
+      start.resolve();
+      await settle();
+      newSession.resolve();
+      await settle();
+    }
+    harness.handleEvent({ type: 'ready', session: 'old-A' });
+    harness.handleEvent({
+      type: 'task_state',
+      task: { goal: 'old-A', requires_reconciliation: true },
+    });
+    assert.equal(harness.ui.taskSnapshot, null);
+    assert.equal(harness.refs.fresh.current, true);
+    if (eventsFirst) {
+      start.resolve();
+      await settle();
+    }
+    harness.handleEvent({ type: 'ready', session: 'new-B' });
+    harness.handleEvent({
+      type: 'task_state',
+      task: { goal: 'new-B', requires_reconciliation: true },
+    });
+    assert.equal(harness.refs.session.current, 'new-B');
+    assert.equal(harness.refs.fresh.current, false);
+    assert.equal((harness.ui.taskSnapshot as AgentTaskSnapshot | null)?.goal, 'new-B');
+    newSession.resolve();
+    await settle();
+    harness.resolveAck();
+    await sending;
+    assert.equal(
+      harness.invocations.find((item) => item.command === 'assistant_start')?.args.resume,
+      null,
+    );
+    assert.equal(
+      harness.commands.filter((command) => command === 'assistant_new_session').length,
+      1,
+    );
+  });
+}
+
+test('initial configure accepts the initial session and clears the previous review', async () => {
+  const harness = sendHarness();
+  harness.refs.session.current = null;
+  harness.ui.taskSnapshot = { goal: 'stale', requires_reconciliation: true } as AgentTaskSnapshot;
+  const sending = harness.send();
+  harness.handleEvent({ type: 'ready', session: 'initial' });
+  assert.equal(harness.refs.session.current, 'initial');
+  assert.equal(harness.ui.taskSnapshot, null);
+  harness.handleEvent({
+    type: 'task_state',
+    task: { goal: 'initial', requires_reconciliation: true },
+  });
+  assert.equal((harness.ui.taskSnapshot as AgentTaskSnapshot | null)?.goal, 'initial');
+  await settle();
+  harness.resolveAck();
+  await sending;
+});
+
+test('failed startup clears its pending session phase and preserves the draft', async () => {
+  const start = deferred<void>();
+  const harness = sendHarness({ start: start.promise });
+  const sending = harness.send();
+  start.reject(new Error('startup failed'));
+  await sending;
+  assert.equal(harness.refs.sessionStart.current, null);
+  assert.equal(harness.refs.running.current, false);
+  assert.equal(harness.ui.draft, 'hello');
+});
+
+test('historical task review appears before any message is sent', async () => {
+  const task = {
+    requires_reconciliation: true,
+    effect_unknown_actions: [{ id: 'history-action' }],
+  };
+  const harness = sessionHarness(async () => [{ kind: 'task', task }]);
+  await harness.open({ id: 'history' });
+  assert.deepEqual(pendingReconciliation(harness.state.taskSnapshot).ids, ['history-action']);
+  assert.equal(harness.state.taskSnapshot?.requires_reconciliation, true);
+});
+
+const reviewTask = { requires_reconciliation: true, effect_unknown_actions: [{ id: 'old-1' }] };
+
+function reviewHandshake(harness: ReturnType<typeof reconcileHarness>) {
+  harness.panel.handleEvent({ type: 'ready', session: 'session' });
+  harness.panel.handleEvent({ type: 'task_state', task: { requires_reconciliation: false } });
+  assert.equal(
+    harness.calls.filter((call) => call.command === 'assistant_reconcile_effects').length,
+    0,
+  );
+  harness.panel.handleEvent({ type: 'ready', session: 'history' });
+}
+
+test('historical review resumes its own session and waits for its snapshot, without sending a message', async () => {
+  const harness = reconcileHarness();
+  harness.panel.refs.session.current = 'history';
+  const reviewing = harness.reconcileEffects(['old-1']);
+  await settle();
+  assert.equal(harness.calls[0].args.resume, 'history');
+  reviewHandshake(harness);
+  assert.equal(harness.panel.refs.running.current, true);
+  assert.deepEqual(harness.state.reconciling, [true], 'target ready must not unlock review');
+  harness.panel.handleEvent({ type: 'task_state', task: reviewTask });
+  await reviewing;
+  assert.deepEqual(
+    harness.calls.map((call) => call.command),
+    ['assistant_start', 'assistant_reconcile_effects'],
+  );
+  assert.deepEqual(harness.calls[1].args.ids, ['old-1']);
+  assert.equal(harness.panel.refs.running.current, false);
+});
+
+test('historical review refreshes a changed action list without submitting stale ids', async () => {
+  const harness = reconcileHarness();
+  harness.panel.refs.session.current = 'history';
+  const reviewing = harness.reconcileEffects(['old-1']);
+  reviewHandshake(harness);
+  harness.panel.handleEvent({
+    type: 'task_state',
+    task: { ...reviewTask, effect_unknown_actions: [{ id: 'new-1' }] },
+  });
+  await reviewing;
+  assert.match(harness.state.error, /changed/);
+  assert.deepEqual(pendingReconciliation(harness.panel.ui.taskSnapshot).ids, ['new-1']);
+  assert.equal(harness.calls.length, 1);
+});
+
+for (const interruption of ['stop', 'error', 'exited', 'switch'] as const) {
+  test(`historical review ${interruption} cannot submit a late reconciliation`, async () => {
+    const harness = reconcileHarness();
+    harness.panel.refs.session.current = 'history';
+    const reviewing = harness.reconcileEffects(['old-1']);
+    if (interruption === 'stop') await harness.panel.stop();
+    else if (interruption === 'switch') {
+      harness.conversationRequest.current++;
+      harness.panel.refs.session.current = 'other';
+      harness.panel.refs.sessionStart.current?.onError?.(new Error('The conversation changed.'));
+    } else harness.panel.handleEvent({ type: interruption, message: 'restore failed' });
+    await reviewing;
+    harness.panel.handleEvent({ type: 'ready', session: 'history' });
+    harness.panel.handleEvent({ type: 'task_state', task: reviewTask });
+    assert.equal(harness.calls.length, 1);
+    assert.equal(harness.panel.refs.sessionStart.current, null);
+    assert.equal(harness.panel.refs.running.current, false);
+    assert.equal(harness.state.notice, '');
+  });
+}
+
+function keyboardEvent(key: string, options: Record<string, unknown> = {}) {
+  return {
+    key,
+    shiftKey: false,
+    defaultPrevented: false,
+    nativeEvent: { isComposing: false, keyCode: 0 },
+    currentTarget: { selectionStart: 1, selectionEnd: 1 },
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    stopPropagation() {
+      this.stopped = true;
+    },
+    ...options,
+  };
+}
+
+test('message keyboard preserves IME confirmation, Shift+Enter, and normal Enter sending', () => {
+  let sent = 0;
+  const composing = { current: false };
+  const keydown = compileFunction<(event: ReturnType<typeof keyboardEvent>) => void>(
+    'handleInputKeyDown',
+    {
+      composing,
+      input: '你好',
+      send: () => {
+        sent++;
+      },
+      history: { current: [] },
+    },
+  );
+  for (const nativeEvent of [
+    { isComposing: true, keyCode: 13 },
+    { isComposing: false, keyCode: 229 },
+  ]) {
+    const event = keyboardEvent('Enter', { nativeEvent });
+    keydown(event);
+    assert.equal(event.prevented, false);
+  }
+  composing.current = true;
+  keydown(keyboardEvent('Enter'));
+  composing.current = false;
+  keydown(keyboardEvent('Enter', { shiftKey: true }));
+  keydown(keyboardEvent('Enter', { defaultPrevented: true }));
+  assert.equal(sent, 0);
+  const event = keyboardEvent('Enter');
+  keydown(event);
+  assert.equal(sent, 1);
+  assert.equal(event.prevented, true);
+  assert.match(panelSource, /onCompositionStart/);
+  assert.match(panelSource, /onCompositionEnd/);
+  assert.match(panelSource, /onKeyDown=\{handleInputKeyDown\}/);
+});
+
+for (const phase of ['start', 'sent'] as const) {
+  test(`Escape stops the same assistant operation during ${phase}`, async () => {
+    const pending = deferred<void>();
+    const panel = sendHarness(phase === 'start' ? { start: pending.promise } : {});
+    const sending = panel.send();
+    await settle();
+    let stopping: Promise<void> | undefined;
+    const app = { current: { assistantSettingsOpen: false } };
+    const composing = { current: false };
+    const keydown = compileFunction<(event: ReturnType<typeof keyboardEvent>) => void>(
+      'handlePanelKeyDown',
+      {
+        runningRef: panel.refs.running,
+        app,
+        composing,
+        stop: panel.stop,
+        perform: (action: () => Promise<void>) => {
+          stopping = action();
+        },
+      },
+    );
+    keydown(keyboardEvent('Escape', { nativeEvent: { isComposing: true } }));
+    keydown(keyboardEvent('Escape', { nativeEvent: { keyCode: 229 } }));
+    keydown(keyboardEvent('Escape', { defaultPrevented: true }));
+    app.current.assistantSettingsOpen = true;
+    keydown(keyboardEvent('Escape'));
+    app.current.assistantSettingsOpen = false;
+    assert.equal(stopping, undefined);
+    const event = keyboardEvent('Escape');
+    keydown(event);
+    await stopping;
+    assert.equal(event.prevented, true);
+    assert.equal(event.stopped, true);
+    assert.equal(panel.commands.at(-1), 'assistant_cancel');
+    pending.resolve();
+    panel.resolveAck();
+    await sending;
+    if (phase === 'start') assert.ok(!panel.commands.includes('assistant_send'));
+  });
+}
+
+test('stopping review after its snapshot but before start IPC settles releases busy immediately', async () => {
+  const start = deferred<void>();
+  const harness = reconcileHarness({ start: start.promise });
+  harness.panel.refs.session.current = 'history';
+  const reviewing = harness.reconcileEffects(['old-1']);
+  reviewHandshake(harness);
+  harness.panel.handleEvent({ type: 'task_state', task: reviewTask });
+  await harness.panel.stop();
+  await reviewing;
+  assert.equal(harness.panel.refs.running.current, false);
+  assert.equal(harness.panel.refs.sessionStart.current, null);
+  assert.equal(harness.calls.length, 1);
+  start.resolve();
+  await settle();
+  assert.equal(harness.calls.length, 1, 'late start acknowledgement cannot submit the old review');
+});
+
+test('review notices changed details even when resumed action ids are reused', async () => {
+  const harness = reconcileHarness();
+  harness.panel.refs.session.current = 'history';
+  const reviewing = harness.reconcileEffects(['old-1']);
+  reviewHandshake(harness);
+  harness.panel.handleEvent({
+    type: 'task_state',
+    task: { ...reviewTask, effect_unknown_actions: [{ id: 'old-1', arguments: 'changed' }] },
+  });
+  await reviewing;
+  assert.match(harness.state.error, /changed/);
+  assert.equal(harness.calls.length, 1);
+});
+
+test('IME arrow keys cannot replace candidate text with input history', () => {
+  let changed = false;
+  const composing = { current: false };
+  const keydown = compileFunction<(event: ReturnType<typeof keyboardEvent>) => void>(
+    'handleInputKeyDown',
+    {
+      composing,
+      input: '你好',
+      history: { current: ['old message'] },
+      historyIndex: { current: null },
+      historyDraft: { current: '' },
+      historyInput: () => {
+        changed = true;
+        return { index: 0, value: 'old message' };
+      },
+      setInput: () => {
+        changed = true;
+      },
+      send: () => {},
+    },
+  );
+  for (const key of ['ArrowUp', 'ArrowDown']) {
+    for (const nativeEvent of [
+      { isComposing: true, keyCode: 0 },
+      { isComposing: false, keyCode: 229 },
+    ]) {
+      keydown(
+        keyboardEvent(key, { nativeEvent, currentTarget: { selectionStart: 0, selectionEnd: 2 } }),
+      );
+    }
+    composing.current = true;
+    keydown(keyboardEvent(key, { currentTarget: { selectionStart: 0, selectionEnd: 2 } }));
+    composing.current = false;
+  }
+  assert.equal(changed, false);
+});
+
+test('failed historical resume releases review without sending reconciliation', async () => {
+  const start = deferred<void>();
+  const harness = reconcileHarness({ start: start.promise });
+  harness.panel.refs.session.current = 'history';
+  const reviewing = harness.reconcileEffects(['old-1']);
+  start.reject(new Error('restore IPC failed'));
+  await reviewing;
+  assert.match(harness.state.error, /restore IPC failed/);
+  assert.equal(harness.panel.refs.sessionStart.current, null);
+  assert.equal(harness.panel.refs.running.current, false);
+  assert.equal(harness.calls.length, 1);
+});
+
+for (const resumed of [false, true]) {
+  for (const reject of [false, true]) {
+    test(`stop during ${resumed ? 'resumed' : 'direct'} review IPC releases busy and ignores late ${reject ? 'failure' : 'success'}`, async () => {
+      const response = deferred<void>();
+      const harness = reconcileHarness({ response: response.promise });
+      if (resumed) harness.panel.refs.session.current = 'history';
+      const reviewing = harness.reconcileEffects(['old-1']);
+      if (resumed) {
+        reviewHandshake(harness);
+        harness.panel.handleEvent({ type: 'task_state', task: reviewTask });
+      }
+      await settle();
+      assert.equal(harness.calls.at(-1)?.command, 'assistant_reconcile_effects');
+      assert.equal(harness.panel.refs.sessionStart.current, null);
+      await harness.panel.stop();
+      assert.equal(
+        harness.panel.refs.running.current,
+        false,
+        'stop releases the idle review immediately',
+      );
+      assert.equal(harness.state.reconciling.at(-1), false);
+      const sending = harness.panel.send();
+      await settle();
+      assert.equal(harness.panel.refs.running.current, true);
+      if (reject) response.reject(new Error('late review failure'));
+      else response.resolve();
+      await reviewing;
+      assert.equal(
+        harness.panel.refs.running.current,
+        true,
+        'old review cannot clear the new send',
+      );
+      assert.equal(harness.state.notice, '');
+      assert.equal(harness.state.error, '');
+      harness.panel.resolveAck();
+      await sending;
+    });
+  }
+}
+
+for (const cancelError of ['助手还没有启动', 'cancel pipe failed']) {
+  test(`stop during startup handles cancellation error: ${cancelError}`, async () => {
+    const start = deferred<void>();
+    const panel = sendHarness({ start: start.promise, cancelError });
+    const sending = panel.send();
+    await settle();
+    if (cancelError === '助手还没有启动') await panel.stop();
+    else await assert.rejects(panel.stop(), (error) => error === cancelError);
+    start.resolve();
+    await sending;
+    assert.equal(panel.commands.includes('assistant_send'), false);
+    assert.equal(panel.ui.draft, 'hello');
+    assert.equal(panel.ui.error, '');
+  });
+}
+
+test('stop outside startup preserves a missing-process error', async () => {
+  const panel = sendHarness({ cancelError: '助手还没有启动' });
+  await assert.rejects(panel.stop(), (error) => error === '助手还没有启动');
+});
+
+for (const mode of ['external', 'managed'] as const) {
+  for (const enabled of [false, true]) {
+    test(`document retrieval startup respects ${mode} enabled=${enabled} without a model request`, async () => {
+      const effect = effects.find((effect) => effect.body.includes("'assistant_xerj_node'"));
+      assert.ok(effect);
+      const commands: string[] = [];
+      const statuses: unknown[] = [];
+      const run = compileExpression<() => (() => void) | undefined>(effect.body, {
+        hasBackend: () => true,
+        initPhase: 'ready',
+        settings: { retrieval: { enabled, mode } },
+        setDocsIndex: (value: unknown) => statuses.push(value),
+        invoke: (command: string) => {
+          commands.push(command);
+          return Promise.reject('node unavailable');
+        },
+      });
+      const cleanup = run();
+      await settle();
+      assert.deepEqual(commands, enabled && mode === 'managed' ? ['assistant_xerj_node'] : []);
+      assert.deepEqual(
+        statuses.at(-1),
+        enabled && mode === 'managed'
+          ? { type: 'docs_index_status', state: 'not_connected', detail: 'node unavailable' }
+          : null,
+      );
+      cleanup?.();
+    });
+  }
+}
+
+test('a late node startup failure cannot replace a newer document retrieval status', async () => {
+  const effect = effects.find((effect) => effect.body.includes("'assistant_xerj_node'"));
+  assert.ok(effect);
+  const pending = deferred<void>();
+  const statuses: unknown[] = [];
+  const run = compileExpression<() => () => void>(effect.body, {
+    hasBackend: () => true,
+    initPhase: 'ready',
+    settings: { retrieval: { enabled: true, mode: 'managed' } },
+    setDocsIndex: (value: unknown) => statuses.push(value),
+    invoke: () => pending.promise,
+  });
+  const cleanup = run();
+  cleanup();
+  pending.reject('old node error');
+  await settle();
+  assert.deepEqual(statuses, [null]);
+});
+
+test('index status from an old model cannot appear as ready for the current selection', () => {
+  const panel = sendHarness({ versionRef: { id: 'official', revision: 131 } });
+  panel.handleEvent({
+    type: 'docs_index_status',
+    state: 'ready',
+    scope: { kind: 'model', name: 'official@130' },
+  });
+  assert.equal(panel.ui.docsIndex, null);
+  panel.handleEvent({
+    type: 'docs_index_status',
+    state: 'ready',
+    scope: { kind: 'app', name: 'app' },
+  });
+  assert.equal(panel.ui.docsIndex, null);
+  panel.handleEvent({
+    type: 'docs_index_status',
+    state: 'ready',
+    scope: { kind: 'model', name: 'official@131' },
+  });
+  assert.deepEqual(panel.ui.docsIndex, {
+    type: 'docs_index_status',
+    state: 'ready',
+    scope: { kind: 'model', name: 'official@131' },
+  });
+});
+
+test('application document index status rejects workspace search status', () => {
+  const panel = sendHarness();
+  panel.handleEvent({
+    type: 'docs_index_status',
+    state: 'ready',
+    scope: { kind: 'workspace', name: 'work' },
+  });
+  assert.equal(panel.ui.docsIndex, null);
+  const current = { type: 'docs_index_status', state: 'ready', scope: { kind: 'app', name: null } };
+  panel.handleEvent(current);
+  assert.deepEqual(panel.ui.docsIndex, current);
+});
+
+for (const failure of ['error', 'exited']) {
+  test(`startup ${failure} after IPC success settles the send and preserves its draft`, async () => {
+    const harness = sendHarness({ manualReady: true });
+    const sending = harness.send();
+    await settle();
+    const id = harness.refs.startupId.current;
+    harness.handleEvent({ type: 'ready', session: 'session', startup_id: id });
+    assert.equal(harness.commands.includes('assistant_send'), false);
+    harness.handleEvent({ type: failure, message: 'startup failed', startup_id: id });
+    await sending;
+    assert.equal(harness.commands.includes('assistant_send'), false);
+    assert.equal(harness.refs.sessionStart.current, null);
+    assert.equal(harness.refs.running.current, false);
+    assert.equal(harness.ui.draft, 'hello');
+  });
+}
+
+test('stopped startup events cannot bind or reject a new conversation handshake', async () => {
+  const harness = sendHarness({ manualReady: true });
+  const first = harness.send();
+  const oldId = harness.refs.startupId.current;
+  await harness.stop();
+  await first;
+  harness.refs.fresh.current = true;
+  harness.refs.session.current = null;
+  const second = harness.send();
+  const newId = harness.refs.startupId.current;
+  assert.notEqual(oldId, newId);
+  for (const event of [
+    { type: 'ready', session: 'old', startup_id: oldId },
+    { type: 'ready', session: 'legacy', startup_id: undefined },
+    { type: 'error', message: 'old error', startup_id: oldId },
+    { type: 'task_state', task: reviewTask, startup_id: oldId },
+  ])
+    harness.handleEvent(event);
+  assert.equal(harness.refs.session.current, null);
+  assert.equal(harness.refs.running.current, true);
+  assert.equal(harness.ui.taskSnapshot, null);
+  assert.equal(harness.refs.sessionStart.current?.skipConfigure, true);
+  harness.handleEvent({ type: 'ready', session: 'previous', startup_id: newId });
+  await settle();
+  assert.equal(harness.commands.includes('assistant_send'), false);
+  harness.handleEvent({ type: 'ready', session: 'new', startup_id: newId });
+  await settle();
+  assert.equal(harness.refs.session.current, 'new');
+  assert.equal(harness.commands.filter((command) => command === 'assistant_send').length, 1);
+  harness.resolveAck();
+  await second;
+});
+
+test('unsent text and attachments require an explicit discard before changing conversations', async () => {
+  for (const draft of [
+    { input: 'unfinished', attachments: [] },
+    { input: '', attachments: [attachment('A.txt')] },
+  ]) {
+    let answer = false;
+    let asked = 0;
+    const confirm = compileFunction<() => Promise<boolean>>('confirmConversationChange', {
+      inputRef: { current: draft.input },
+      attachmentsRef: { current: draft.attachments },
+      attaching: false,
+      t: (_zh: string, en: string) => en,
+      askConfirm: async () => {
+        asked++;
+        return answer;
+      },
+    });
+    assert.equal(await confirm(), false);
+    answer = true;
+    assert.equal(await confirm(), true);
+    assert.equal(asked, 2);
+  }
+});
+
+test('opening another session clears only an explicitly discarded draft and attachments', async () => {
+  const draft = { input: 'for session A', attachments: [attachment('A.pdf')], discard: false };
+  let loads = 0;
+  const harness = sessionHarness(async () => {
+    loads++;
+    return [];
+  }, draft);
+  await harness.open({ id: 'B' });
+  assert.equal(loads, 0);
+  assert.equal(harness.state.input, draft.input);
+  assert.deepEqual(harness.state.attachments, draft.attachments);
+  draft.discard = true;
+  await harness.open({ id: 'B' });
+  assert.equal(harness.refs.session.current, 'B');
+  assert.equal(harness.state.input, '');
+  assert.deepEqual(harness.state.attachments, []);
+  assert.equal(harness.refs.historyIndex.current, null);
+});
+
+test('typing while a history transcript loads keeps the draft and the original conversation', async () => {
+  const transcript = deferred<Message[]>();
+  const harness = sessionHarness(() => transcript.promise);
+  const opening = harness.open({ id: 'B' });
+  await settle();
+  harness.refs.input.current = 'new unsent text';
+  transcript.resolve([]);
+  await opening;
+  assert.equal(harness.refs.session.current, null);
+  assert.equal(harness.refs.input.current, 'new unsent text');
+});
+
+function deletionHarness(answers = [true, true], remove: () => Promise<void> = async () => {}) {
+  const state = {
+    input: 'draft',
+    attachments: [attachment('draft.txt')],
+    messages: ['old'],
+    sessions: [{ id: 'A' }, { id: 'B' }],
+    review: true,
+    notice: 'notice',
+    usage: 'usage',
+    usagePending: true,
+    sessionUsage: { turns: 1, tokens: 2 },
+    followed: 0,
+  };
+  const refs = {
+    input: { current: state.input },
+    attachments: { current: state.attachments },
+    session: { current: 'A' as string | null },
+    fresh: { current: false },
+    startupId: { current: 'startup' as string | null },
+    request: { current: 0 },
+    historyIndex: { current: 2 as number | null },
+    history: { current: ['old'] },
+    running: { current: false },
+  };
+  const calls: string[] = [];
+  const shared = {
+    attaching: false,
+    inputRef: refs.input,
+    attachmentsRef: refs.attachments,
+    t: (_zh: string, en: string) => en,
+    askConfirm: async () => {
+      calls.push('confirm');
+      return answers.shift() ?? false;
+    },
+  };
+  const context = {
+    deletingSessionRef: { current: false },
+    setDeletingSession: () => {},
+    ...shared,
+    confirmConversationChange: compileFunction('confirmConversationChange', shared),
+    runningRef: refs.running,
+    conversationRequest: refs.request,
+    session: refs.session,
+    fresh: refs.fresh,
+    startupId: refs.startupId,
+    historyIndex: refs.historyIndex,
+    history: refs.history,
+    invoke: async (command: string) => {
+      calls.push(command);
+      if (command === 'assistant_delete_session') return remove();
+      return ['updated'];
+    },
+    setSessions: (update: (old: typeof state.sessions) => typeof state.sessions) => {
+      state.sessions = update(state.sessions);
+    },
+    setInput: (value: string) => {
+      state.input = value;
+    },
+    setAttachments: (value: Attachment[]) => {
+      state.attachments = value;
+    },
+    clearTaskReview: () => {
+      state.review = false;
+    },
+    setMessages: (value: string[]) => {
+      state.messages = value;
+    },
+    setAttachNotice: (value: string) => {
+      state.notice = value;
+    },
+    setUsage: (value: string) => {
+      state.usage = value;
+    },
+    setSessionUsage: (value: typeof state.sessionUsage) => {
+      state.sessionUsage = value;
+    },
+    setUsagePending: (value: boolean) => {
+      state.usagePending = value;
+    },
+    resetFollow: () => {
+      state.followed++;
+    },
+  };
+  const run = (id = 'A') =>
+    compileFunction<(item: { id: string; title: string }) => Promise<void>>(
+      'deleteSession',
+      context,
+    )({ id, title: id });
+  return { state, refs, calls, context, run, snapshot: () => structuredClone({ state, refs }) };
+}
+
+for (const answers of [[false], [true, false]]) {
+  test(`cancel deletion at confirmation ${answers.length} preserves all conversation state`, async () => {
+    const h = deletionHarness([...answers]);
+    const before = h.snapshot();
+    await h.run();
+    assert.deepEqual(h.snapshot(), before);
+    assert.deepEqual(
+      h.calls,
+      answers.map(() => 'confirm'),
+    );
+  });
+}
+
+test('current session deletion waits for both confirmations and successful IPC before discarding', async () => {
+  const pending = deferred<void>();
+  const h = deletionHarness([true, true], () => pending.promise);
+  const before = h.snapshot();
+  const deleting = h.run();
+  await settle();
+  assert.deepEqual(h.snapshot(), before);
+  assert.deepEqual(h.calls, ['confirm', 'confirm', 'assistant_delete_session']);
+  pending.resolve();
+  await deleting;
+  assert.equal(h.refs.session.current, null);
+  assert.equal(h.refs.fresh.current, true);
+  assert.equal(h.refs.startupId.current, null);
+  assert.equal(h.refs.request.current, 1);
+  assert.equal(h.refs.historyIndex.current, null);
+  assert.equal(h.state.input, '');
+  assert.deepEqual(h.state.attachments, []);
+  assert.deepEqual(h.state.messages, []);
+  assert.equal(h.state.review, false);
+});
+
+test('delete IPC failure preserves session, draft, messages and review', async () => {
+  const h = deletionHarness([true, true], async () => {
+    throw new Error('disk error');
+  });
+  const before = h.snapshot();
+  await assert.rejects(h.run(), /disk error/);
+  assert.deepEqual(h.snapshot(), before);
+});
+
+test('deleting noncurrent session does not discard the current draft', async () => {
+  const h = deletionHarness([true]);
+  const before = h.snapshot();
+  await h.run('B');
+  before.state.sessions = [{ id: 'A' }];
+  before.refs.request.current++;
+  before.refs.history.current = ['updated'];
+  assert.deepEqual(h.snapshot(), before);
+  assert.deepEqual(h.calls, ['confirm', 'assistant_delete_session', 'assistant_input_history']);
+});
+
+test('deleting session cannot reset another conversation opened while IPC is pending', async () => {
+  const pending = deferred<void>();
+  const h = deletionHarness([true, true], () => pending.promise);
+  const deleting = h.run();
+  await settle();
+  h.refs.session.current = 'B';
+  h.refs.request.current++;
+  const before = h.snapshot();
+  pending.resolve();
+  await deleting;
+  before.state.sessions = [{ id: 'B' }];
+  before.refs.history.current = ['updated'];
+  assert.deepEqual(h.snapshot(), before);
+});
+
+test('new text and attachments entered during delete IPC survive successful deletion', async () => {
+  const pending = deferred<void>();
+  const h = deletionHarness([true, true], () => pending.promise);
+  const deleting = h.run();
+  await settle();
+  h.state.input = h.refs.input.current = 'new text';
+  h.state.attachments = h.refs.attachments.current = [attachment('new.txt')];
+  pending.resolve();
+  await deleting;
+  assert.equal(h.refs.session.current, null);
+  assert.equal(h.state.input, 'new text');
+  assert.deepEqual(h.state.attachments, [attachment('new.txt')]);
+  assert.equal(h.refs.historyIndex.current, 2);
+});
+
+test('attachment loading prevents deletion without invalidating attachment ownership', async () => {
+  const h = deletionHarness();
+  h.context.attaching = true;
+  const before = h.snapshot();
+  await h.run();
+  assert.deepEqual(h.snapshot(), before);
+  assert.deepEqual(h.calls, []);
+});
+
+test('switching identity during confirmation aborts deletion before IPC', async () => {
+  const h = deletionHarness();
+  const confirmation = deferred<boolean>();
+  h.context.askConfirm = () => confirmation.promise;
+  const deleting = h.run();
+  h.refs.session.current = 'B';
+  h.refs.request.current++;
+  const before = h.snapshot();
+  confirmation.resolve(true);
+  await deleting;
+  assert.deepEqual(h.snapshot(), before);
+  assert.equal(h.calls.includes('assistant_delete_session'), false);
+});
+
+test('pending deletion synchronously blocks attachment, send and duplicate deletion', async () => {
+  const pending = deferred<void>();
+  const h = deletionHarness([true, true], () => pending.promise);
+  const deleting = h.run();
+  await settle();
+  assert.equal(h.context.deletingSessionRef.current, true);
+  const attach = compileFunction<() => Promise<void>>('attachDocument', {
+    deletingSessionRef: h.context.deletingSessionRef,
+  });
+  const send = compileFunction<() => Promise<void>>('send', {
+    deletingSessionRef: h.context.deletingSessionRef,
+    input: 'new input',
+    attachments: [],
+  });
+  await attach();
+  await send();
+  await h.run();
+  assert.deepEqual(h.calls, ['confirm', 'confirm', 'assistant_delete_session']);
+  pending.resolve();
+  await deleting;
+  assert.equal(h.context.deletingSessionRef.current, false);
+});
+
+for (const outcome of ['cancel', 'failure']) {
+  test(`deletion lock is released on ${outcome}`, async () => {
+    const h = deletionHarness(outcome === 'cancel' ? [false] : [true, true], async () => {
+      throw new Error('failed');
+    });
+    if (outcome === 'cancel') await h.run();
+    else await assert.rejects(h.run(), /failed/);
+    assert.equal(h.context.deletingSessionRef.current, false);
+  });
+}
+
+for (const transcriptAfterDelete of [false, true]) {
+  test(`deletion prevents an earlier transcript from opening the deleted session (${transcriptAfterDelete ? 'after' : 'during'} deletion)`, async () => {
+    const transcript = deferred<Message[]>();
+    const pending = deferred<void>();
+    const opening = sessionHarness(() => transcript.promise);
+    opening.refs.session.current = 'A';
+    const loading = opening.open({ id: 'B' });
+    await settle();
+    const h = deletionHarness([true], () => pending.promise);
+    h.context.deletingSessionRef = opening.refs.deletingSession;
+    h.context.conversationRequest = opening.refs.conversationRequest;
+    h.context.session = opening.refs.session;
+    const deleting = h.run('B');
+    await settle();
+    if (transcriptAfterDelete) {
+      pending.resolve();
+      await deleting;
+    }
+    transcript.resolve([]);
+    await loading;
+    assert.equal(opening.refs.session.current, 'A');
+    if (!transcriptAfterDelete) {
+      pending.resolve();
+      await deleting;
+    }
+  });
+}
+
+test('opening history during deletion is blocked and becomes available after cancellation', async () => {
+  let loads = 0;
+  const opening = sessionHarness(async () => {
+    loads++;
+    return [];
+  });
+  opening.refs.session.current = 'A';
+  const h = deletionHarness();
+  const confirmation = deferred<boolean>();
+  h.context.deletingSessionRef = opening.refs.deletingSession;
+  h.context.askConfirm = () => confirmation.promise;
+  const deleting = h.run('B');
+  await opening.open({ id: 'B' });
+  assert.equal(loads, 0);
+  assert.equal(opening.refs.session.current, 'A');
+  confirmation.resolve(false);
+  await deleting;
+  await opening.open({ id: 'B' });
+  assert.equal(loads, 1);
+  assert.equal(opening.refs.session.current, 'B');
 });

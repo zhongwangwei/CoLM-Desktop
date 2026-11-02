@@ -413,14 +413,23 @@ export function applyMaterialSelection(
   fields: ModelField[],
   rows: ReturnType<typeof materialRows>,
 ): Overlay {
-  const next = setMaterialRows(overlay, fields, rows);
-  return rows.some(
+  const methane = rows.some(
     (row) =>
       ['ch4', 'methane'].includes(row.NAMES.trim().toLowerCase()) &&
       row.TYPES.trim().toLowerCase() === 'gas',
-  )
-    ? setModelOption(next, fields, 'DEF_USE_BGC', '.true.')
-    : next;
+  );
+  const lulcc =
+    modelSettingValue(overlay, 'DEF_USE_LULCC') ??
+    fields.find((field) => field.name === 'DEF_USE_LULCC')?.default;
+  if (methane && lulcc?.trim().toLowerCase() === '.true.')
+    throw new Error(
+      bilingual(
+        '甲烷需要 BGC，请先关闭土地覆盖变化',
+        'Methane requires BGC; disable land-cover change first',
+      ),
+    );
+  const next = setMaterialRows(overlay, fields, rows);
+  return methane ? setModelOption(next, fields, 'DEF_USE_BGC', '.true.') : next;
 }
 export function processListValues(raw: string): string[] {
   const values: string[] = [];
@@ -659,6 +668,11 @@ export function materialFamilyState(
         'Methane routing/hybrid inundation requires river/lake routing',
       );
     need('DEF_USE_BGC', true, '甲烷需要 BGC', 'Methane requires BGC');
+    if (flag('DEF_USE_LULCC') === true)
+      reasons.push([
+        '甲烷需要 BGC，不能与 LULCC 同开',
+        'Methane requires BGC and cannot run with LULCC',
+      ]);
     if (context.subgrid && !['PFT', 'PC'].includes(context.subgrid.toUpperCase()))
       reasons.push(['甲烷需要 PFT / PC', 'Methane requires PFT / PC']);
     else if (!context.subgrid) pending.push(['PFT / PC 结构待确认', 'PFT / PC structure pending']);

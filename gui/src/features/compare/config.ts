@@ -14,6 +14,7 @@
 import { bilingual } from '../../lib/bilingual';
 import {
   designFingerprint,
+  buildOpenbenchConfig,
   layerVariableProblems,
   simulationKey,
   KNOWN_BROKEN_STATISTICS_ITEMS,
@@ -829,11 +830,13 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
       typeof from !== 'number' ||
       typeof to !== 'number' ||
       !Number.isInteger(from) ||
-      !Number.isInteger(to)
+      !Number.isInteger(to) ||
+      from < 1 ||
+      to < 1
     )
       problems.push([
-        'project.years 应该是两个整数。',
-        'project.years should be two whole numbers.',
+        'project.years 应该是两个正整数。',
+        'project.years should be two positive whole numbers.',
       ]);
     else if (from > to)
       problems.push([
@@ -1044,7 +1047,11 @@ const separatorFor = (path: string) => (path.includes('\\') && !path.includes('/
  * 但不能增删模拟或改单点模拟的站点清单路径——那些文件是后端按页面选中的目录准备出来的，
  * 文本与页面不一致时运行只会读到错的数据，所以运行前明确拒绝（报告：不支持的输入要在运行前阻断）。
  */
-export function structuralProblems(design: EvaluationDesign, config: EffectiveConfig): Problem[] {
+export function structuralProblems(
+  design: EvaluationDesign,
+  config: EffectiveConfig,
+  sites?: BenchSite[],
+): Problem[] {
   const problems: Problem[] = [];
   // 页面选的变量若映射到制备会跳过的层/类别维度变量，运行前明确拒绝（C05）。
   for (const [zh, en] of layerVariableProblems(design)) problems.push([zh, en]);
@@ -1080,9 +1087,27 @@ export function structuralProblems(design: EvaluationDesign, config: EffectiveCo
       ]);
     }
   }
+  if (sites) {
+    const expectedSites = config.simulations
+      .filter((sim) => sim.dataType === 'stn')
+      .map((sim) => sim.key)
+      .sort();
+    const actualSites = sites.map((site) => site.id).sort();
+    if (JSON.stringify(expectedSites) !== JSON.stringify(actualSites))
+      problems.push([
+        '配置与冻结的站点清单不一致，请重新生成配置。',
+        'The configuration does not match the frozen station list; regenerate the configuration.',
+      ]);
+  }
   const sep = separatorFor(design.projectDir);
   const simDir = `${design.projectDir}${sep}sim`;
   for (const simulation of config.simulations) {
+    const expectedType = designByKey.get(simulation.key)?.info.spatial ? 'grid' : 'stn';
+    if (simulation.dataType !== expectedType)
+      problems.push([
+        `模拟 ${simulation.key} 的 data_type 必须是 ${expectedType}，与冻结的模拟和站点清单一致；请重新生成配置。`,
+        `Simulation ${simulation.key} must use data_type ${expectedType} to match the frozen simulation and station list; regenerate the configuration.`,
+      ]);
     if (simulation.dataType !== 'stn') continue;
     const expectedList = `${simDir}${sep}${simulation.key}.csv`;
     if (simulation.rootDir !== simDir || simulation.fulllist !== expectedList)
@@ -1183,6 +1208,29 @@ export function freezeCompareSnapshot(
     generatedText: built.config,
     fingerprint: configFingerprint(design, parsed.config, built.sites),
   };
+}
+
+/** 只恢复能从冻结设计重建并核对一致的快照；旧草稿的 YAML 仍保留，重新生成前须确认。 */
+export function restoreCompareSnapshot(value: unknown, host: string): CompareSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const saved = value as CompareSnapshot;
+  try {
+    if (
+      saved.design?.machine?.host !== host ||
+      typeof saved.design.machine.openbenchRoot !== 'string' ||
+      typeof saved.design.machine.refRoot !== 'string'
+    )
+      return null;
+    const rebuilt = freezeCompareSnapshot(saved.design, buildOpenbenchConfig(saved.design));
+    return saved.designFingerprint === rebuilt.designFingerprint &&
+      saved.generatedText === rebuilt.generatedText &&
+      saved.fingerprint === rebuilt.fingerprint &&
+      JSON.stringify(saved.sites) === JSON.stringify(rebuilt.sites)
+      ? rebuilt
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 快照是否过期：生成配置之后页面表单（站点目录/前缀/坐标、模拟集合、年份等）又改过。 */

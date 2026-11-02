@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   benchTaskNotice,
+  benchTaskFocus,
   beginBenchTask,
   clearBenchTask,
   finishBenchTask,
@@ -61,6 +62,16 @@ test('update/finish/clear only touch the requested task', () => {
   assert.deepEqual(clearBenchTask(done, 'missing'), done);
 });
 
+test('reconnecting a tracked task resets the finish timestamp and keeps its identity', () => {
+  const started = beginBenchTask([], { ...input, host: 'server', id: 'a' }, 1000).tasks;
+  const interrupted = finishBenchTask(started, 'a', { state: 'interrupted' }, 2000);
+  const resumed = updateBenchTask(interrupted, 'a', { state: 'running', error: null });
+  assert.equal(resumed[0].id, 'a');
+  assert.equal(resumed[0].state, 'running');
+  assert.equal(resumed[0].finishedAt, undefined);
+  assert.equal(visibleBenchTasks(resumed, 1_000_000).length, 1);
+});
+
 test('visible tasks keep running ones and done ones only for the linger window', () => {
   const started = beginBenchTask([], { ...input, id: 'a' }, 1000).tasks;
   const done = finishBenchTask(started, 'a', { state: 'done' }, 2000);
@@ -113,4 +124,18 @@ test('finished tasks produce a shell notice only for done/failed', () => {
     /Evaluation failed: comparison/,
   );
   assert.equal(benchTaskNotice({ ...base, state: 'interrupted' }, t), null);
+});
+
+test('task focus distinguishes tracking a running or failed job from opening completed results', () => {
+  const task = { host: 'A', project: 'cmp', job: 'r1', report: '/old/report' };
+  assert.deepEqual(benchTaskFocus({ ...task, state: 'running' }), {
+    intent: 'track',
+    host: 'A',
+    project: 'cmp',
+    runId: 'r1',
+    report: null,
+  });
+  assert.equal(benchTaskFocus({ ...task, state: 'failed' }).intent, 'track');
+  assert.equal(benchTaskFocus({ ...task, state: 'done' }).intent, 'report');
+  assert.equal(benchTaskFocus({ ...task, host: '', state: 'done' }).report, '/old/report');
 });

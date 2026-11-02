@@ -80,6 +80,7 @@ type AppContextValue = {
   update: (patch: AppPatch) => void;
   navigate: (route: Route, tab?: AppState['caseTab']) => boolean;
   registerNavigationGuard: (guard: NavigationGuard) => () => void;
+  registerCloseGuard: (guard: NavigationGuard) => () => void;
   notify: (message: string, error?: boolean) => void;
   /** 重新尝试启动期失败的阶段；封面上的"重试启动"用它。 */
   retryStartup: () => void;
@@ -100,6 +101,41 @@ export function useNavigationGuard(guard: NavigationGuard) {
   latest.current = guard;
   useLayoutEffect(() => registerNavigationGuard(() => latest.current()), [registerNavigationGuard]);
 }
+/** 本机后台任务可以跨页，退出应用前仍须确认。 */
+export function useCloseGuard(guard: NavigationGuard) {
+  const { registerCloseGuard } = useApp();
+  const latest = useRef(guard);
+  latest.current = guard;
+  useLayoutEffect(() => registerCloseGuard(() => latest.current()), [registerCloseGuard]);
+}
+/** Resolve a project's default before its batch settings can use the previous project's model. */
+export async function projectVersion(versions: FrozenRevision[], dir?: string) {
+  const latest = versions
+    .filter((v) => v.version.id === 'official')
+    .sort((a, b) => b.version.revision - a.version.revision)[0];
+  const binding = dir
+    ? await invokeJson<{ version: VersionRef }>('model_migrate_case', { dir }).catch(
+        async (error: unknown) => {
+          const missing = missingRevision(error);
+          const target = latest?.version;
+          if (!missing || !target) throw error;
+          if (!(await askToRebind(rebindQuestion(missing, target, bilingual))))
+            throw new Error(
+              bilingual(
+                '未改绑算例，未打开批量运行。',
+                'The case was not rebound; batch run was not opened.',
+              ),
+            );
+          return invokeJson<{ version: VersionRef }>('model_migrate_case', { dir, target });
+        },
+      )
+    : null;
+  const selected = binding && binding.version.id !== 'official' ? binding.version : latest?.version;
+  if (!selected)
+    throw new Error(bilingual('没有可用的模型版本', 'No model revision is available.'));
+  const version = await invokeJson<FrozenRevision>('model_get', selected);
+  return { version, versionRef: version.version };
+}
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState(initial);
   const current = useRef(state);
@@ -113,6 +149,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     promise: Promise<OpenedCase | null>;
   } | null>(null);
   const guards = useRef(new Set<NavigationGuard>());
+  const closeGuards = useRef(new Set<NavigationGuard>());
   // 最近项目的读改写排成一队（A-03）。
   const recentQueue = useRef<Promise<void>>(Promise.resolve());
   // 启动流程放在 effect 里（事件监听也一起），重试按钮通过这个 ref 重新调用同一次 boot。
@@ -124,7 +161,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const update = useCallback(
     (patch: AppPatch) =>
       setState((old) => {
-        const next = { ...old, ...(typeof patch === 'function' ? patch(old) : patch) };
+        const changes = typeof patch === 'function' ? patch(old) : patch;
+        const switching = changes.root !== undefined && changes.root !== old.root;
+        const official = switching
+          ? old.versions
+              .filter((v) => v.version.id === 'official')
+              .sort((a, b) => b.version.revision - a.version.revision)[0]
+          : undefined;
+        const selected = changes.versionRef
+          ? old.versions.find(
+              (v) =>
+                v.version.id === changes.versionRef!.id &&
+                v.version.revision === changes.versionRef!.revision,
+            )
+          : official;
+        const next = {
+          ...old,
+          ...(switching
+            ? {
+                chosenVersion: null,
+                selectedCase: null,
+                version: selected ?? null,
+                versionRef: official?.version ?? { id: 'official', revision: 1 },
+              }
+            : {}),
+          ...changes,
+        };
         current.current = next;
         return next;
       }),
@@ -148,6 +210,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     guards.current.add(guard);
     return () => {
       guards.current.delete(guard);
+    };
+  }, []);
+  const registerCloseGuard = useCallback((guard: NavigationGuard) => {
+    closeGuards.current.add(guard);
+    return () => {
+      closeGuards.current.delete(guard);
     };
   }, []);
   const retryStartup = useCallback(() => {
@@ -496,6 +564,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 versions: withoutRevisions(old.versions, removed),
                 version,
                 ...(version ? { versionRef: version.version } : {}),
+                chosenVersion: old.chosenVersion
+                  ? (selectionAfterPrune(old.versions, removed, old.chosenVersion)?.version ?? null)
+                  : null,
               };
             });
         });
@@ -584,11 +655,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void listen('app://close-requested', () => {
       if (askingClose.current) return;
       askingClose.current = true;
-      const reasons = closeReasons(guards.current, current.current.running, (count) =>
-        bilingual(
-          `有 ${count} 个本机模拟正在运行，关闭会停止它们。`,
-          `${count} local simulation${count > 1 ? 's are' : ' is'} running; closing stops ${count > 1 ? 'them' : 'it'}.`,
-        ),
+      const reasons = closeReasons(
+        [...guards.current, ...closeGuards.current],
+        current.current.running,
+        (count) =>
+          bilingual(
+            `有 ${count} 个本机模拟正在运行，关闭会停止它们。`,
+            `${count} local simulation${count > 1 ? 's are' : ' is'} running; closing stops ${count > 1 ? 'them' : 'it'}.`,
+          ),
       );
       const answer = reasons.length
         ? askConfirm(
@@ -620,6 +694,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         update,
         navigate,
         registerNavigationGuard,
+        registerCloseGuard,
         notify,
         retryStartup,
         refreshCases,

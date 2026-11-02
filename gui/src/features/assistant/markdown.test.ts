@@ -152,3 +152,15 @@ test('copyText writes the exact code block and reports a missing clipboard', asy
   assert.deepEqual(written, ['const x = 1;']);
   await assert.rejects(copyText('x', null), /clipboard/i);
 });
+
+test('adjacent ordered and unordered lists keep their own structure', () => {
+  const blocks = parseMarkdown('- first\n1. second\n2. third\n- fourth');
+  assert.deepEqual(
+    blocks.map((block) => block.kind === 'list' && [block.ordered, block.items.length]),
+    [
+      [false, 1],
+      [true, 2],
+      [false, 1],
+    ],
+  );
+});

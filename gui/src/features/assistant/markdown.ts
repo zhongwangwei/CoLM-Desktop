@@ -168,7 +168,7 @@ export function parseMarkdown(text: string): MarkdownBlock[] {
       const items: MarkdownInline[][] = [];
       while (at < lines.length) {
         const next = lines[at].match(LIST_ITEM);
-        if (!next) break;
+        if (!next || !!next[3] !== ordered) break;
         // 列表项里的缩进续行并进同一项，避免把换行当新块。
         let text = next[4];
         at++;

@@ -54,10 +54,7 @@ export default function BenchTaskBar({
                 ? t('已完成', 'Finished')
                 : task.state === 'failed'
                   ? t('失败', 'Failed')
-                  : t(
-                      '已中断（应用重启或任务被替换）',
-                      'Interrupted (app restarted or task replaced)',
-                    )}
+                  : t('已中断', 'Interrupted')}
           </span>
           {task.state === 'running' && (
             <span className="bench-task-waited" aria-hidden="true">

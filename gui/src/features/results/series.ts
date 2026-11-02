@@ -16,6 +16,8 @@ export interface SeriesData {
    * 旧版 sidecar 的响应没有这个字段，缺失时按“没有缺测”处理（不能凭空造断点）。
    */
   gaps?: Record<string, [number, number][]>;
+  /** 缺测区间达到响应上限；降采样曲线不能据此安全地连接剩余点。 */
+  gaps_truncated?: boolean;
   /**
    * 时间数值的基准。旧版 sidecar 的响应没有这个字段，此时按模型钟处理，
    * 导出不会把它们冒称成 UTC。
@@ -56,7 +58,9 @@ export function fullEnergyStats(report: EnergyDiagnostic) {
     summary.mean_kind !== 'arithmetic_mean_of_common_finite_records' ||
     summary.units !== 'W/m²'
   )
-    throw new Error('Full-record energy statistics are unavailable');
+    throw new Error(
+      bilingual('完整记录的能量统计不可用', 'Full-record energy statistics are unavailable'),
+    );
   if (
     ![summary.source_n, summary.n, summary.missing].every(
       (value) => Number.isSafeInteger(value) && value >= 0,
@@ -64,13 +68,17 @@ export function fullEnergyStats(report: EnergyDiagnostic) {
     summary.n + summary.missing !== summary.source_n ||
     report.series?.source_n !== summary.source_n
   )
-    throw new Error('Inconsistent full-record energy support');
+    throw new Error(
+      bilingual('完整记录的能量统计样本数不一致', 'Inconsistent full-record energy support'),
+    );
   if (
     summary.status === 'computed'
       ? summary.n === 0 || typeof summary.mean !== 'number' || !Number.isFinite(summary.mean)
       : summary.status !== 'unavailable' || summary.n !== 0 || summary.mean !== null
   )
-    throw new Error('Invalid full-record energy statistic');
+    throw new Error(
+      bilingual('完整记录的能量统计结果无效', 'Invalid full-record energy statistic'),
+    );
   return summary;
 }
 export async function boundedMap<T, R>(
@@ -204,7 +212,10 @@ export function fullSeriesCsv(data: SeriesData, variable: string) {
     data.vars[variable].length !== data.n
   )
     throw new Error(
-      'The full-series export requires every selected-window record; sampled data cannot be exported as complete',
+      bilingual(
+        '完整时序导出需要所选时间窗口内的全部记录，不能将抽样数据作为完整时序导出',
+        'The full-series export requires every selected-window record; sampled data cannot be exported as complete',
+      ),
     );
   // 导出必须如实：只有 utc 基准才写 time_utc/Z；地方标准时写钟面 model_time，
   // 偏移已记录时才额外换算一列真实 UTC；模型钟永远没有 time_utc。
@@ -217,10 +228,12 @@ export function fullSeriesCsv(data: SeriesData, variable: string) {
         : null;
   const rows = data.time.map((time, index) => {
     if (!Number.isFinite(time) || !Number.isFinite(new Date(time * 1000).getTime()))
-      throw new Error('Invalid full-series record time');
+      throw new Error(bilingual('完整时序中存在无效的记录时间', 'Invalid full-series record time'));
     const value = data.vars[variable][index];
     if (value !== null && (typeof value !== 'number' || !Number.isFinite(value)))
-      throw new Error('Invalid full-series record value');
+      throw new Error(
+        bilingual('完整时序中存在无效的记录数值', 'Invalid full-series record value'),
+      );
     const row: Record<string, unknown> = {
       unix_seconds: time,
       variable,

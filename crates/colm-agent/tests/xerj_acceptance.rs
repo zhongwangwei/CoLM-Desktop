@@ -132,6 +132,87 @@ fn write_chinese(dir: &Path, extra: Option<&str>) {
     std::fs::write(dir.join("中文说明.md"), text).unwrap();
 }
 
+/// Small cross-language corpus: the original keyword query has no lexical overlap with its source.
+#[test]
+fn bilingual_process_queries_retrieve_cross_language_sources() {
+    let Some(endpoint) = endpoint() else {
+        eprintln!("skipped: COLM_XERJ_ACCEPTANCE_ENDPOINT is not set");
+        return;
+    };
+    let settings = RetrievalSettings {
+        enabled: true,
+        endpoint,
+        index: unique_index("aliases"),
+        timeout_ms: 2_000,
+    };
+    let handle = retrieval::Handle::new(settings, acceptance_key(), None);
+    let root = temp_dir("aliases");
+    let cases = [
+        (
+            "最大羧化速率",
+            "capacity.md",
+            "# Carboxylation\nVcmax controls capacity.\n",
+        ),
+        (
+            "photosynthesis",
+            "carbon.md",
+            "# 叶片\n光合作用受光照限制。\n",
+        ),
+        (
+            "潜热",
+            "latent.md",
+            "# Flux\nLatent heat accompanies evaporation.\n",
+        ),
+        ("sensible heat", "sensible.md", "# 湍流\n感热与温差有关。\n"),
+        (
+            "水量闭合",
+            "water.md",
+            "# Conservation\nWater closure checks storage and fluxes.\n",
+        ),
+        (
+            "energy closure",
+            "energy.md",
+            "# 守恒\n能量闭合核对储存与通量。\n",
+        ),
+    ];
+    for (_, path, contents) in cases {
+        std::fs::write(root.join(path), contents).unwrap();
+    }
+    let snapshot = retrieval::collect_snapshot(
+        "alias-evaluation",
+        "selected-model",
+        &json!({"kind":"model", "name":"fixture@1"}),
+        &root,
+        "fixture-source",
+    )
+    .unwrap();
+    handle.ensure(snapshot.clone());
+    let status = wait_ready(&handle, Duration::from_secs(20));
+    assert_eq!(status["state"], "ready", "{status}");
+    let mut top3 = 0;
+    for (query, expected, contents) in cases {
+        assert!(
+            !contents.to_lowercase().contains(query),
+            "fixture must require alias recall"
+        );
+        let hits = handle.candidates(&snapshot, query, 3).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.relative_path == expected),
+            "{query}: {hits:?}"
+        );
+        top3 += 1;
+    }
+    for absent in ["qzxunmatched", "notvcmax", "vcmax250"] {
+        assert!(
+            handle.candidates(&snapshot, absent, 3).unwrap().is_empty(),
+            "{absent}"
+        );
+    }
+    println!("bilingual process fixture: keyword 0/6; Xerj aliases top3 {top3}/6");
+    handle.delete_index().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// 真实节点的索引生命周期：建索引、入库、查询（中英）、修改、删除、重连、清理。
 #[test]
 fn isolated_index_lifecycle_against_a_real_xerj_node() {

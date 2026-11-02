@@ -1363,3 +1363,57 @@ test('a server can be stored inside the app as a reusable case', async () => {
   // 保存结果与案例下拉项都已出现；案例不带本机凭据（后端负责清掉，这里核对请求没带密码字段）。
   assert.ok(!JSON.stringify(saved?.args).includes('password'));
 });
+
+test('refresh updates a pristine server editor and clears a deleted selection', async () => {
+  const page = harness();
+  await page.ready();
+  page.servers[0].name = 'external update';
+  await page.action('resource-refresh');
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-name')?.value,
+    'external update',
+  );
+  page.servers.splice(0, 1);
+  await page.action('resource-refresh');
+  assert.ok(!page.contract().fields.some((field) => field.id === 'resource-name'));
+});
+
+test('refresh preserves dirty server edits and requires explicit discard before overwriting external changes', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-name', 'my pending edit');
+  page.servers[0].name = 'external update';
+  page.restartEffect();
+  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+  page.render();
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-name')?.value,
+    'my pending edit',
+  );
+  await assert.rejects(page.action('resource-save'), /变更或删除/);
+  assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+  await page.action('resource-discard');
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-name')?.value,
+    'external update',
+  );
+  assert.equal(page.guard(), null);
+});
+
+test('discarding a dirty server deleted elsewhere clears the stale editor', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-name', 'pending edit');
+  page.servers.splice(0, 1);
+  page.restartEffect();
+  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
+  page.render();
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-name')?.value,
+    'pending edit',
+  );
+  await assert.rejects(page.action('resource-save'), /变更或删除/);
+  await page.action('resource-discard');
+  assert.ok(!page.contract().fields.some((field) => field.id === 'resource-name'));
+  assert.equal(page.guard(), null);
+});

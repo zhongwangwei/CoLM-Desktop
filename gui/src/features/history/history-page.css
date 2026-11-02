@@ -79,6 +79,12 @@
 .history-card-completed_with_failures {
   border-left-color: #b42318 !important;
 }
+.history-card-submitted,
+.history-card-queued {
+  border-left-color: #006b76 !important;
+}
+.history-card-cancel_requested,
+.history-card-needs_reconciliation,
 .history-card-pending {
   border-left-color: #c58a00 !important;
 }
@@ -175,6 +181,8 @@
   color: #16794a;
   background: #e6f5ed;
 }
+.history-status-submitted,
+.history-status-queued,
 .history-status-running {
   color: #006b76;
   background: #def4f3;
@@ -184,6 +192,8 @@
   color: #b42318;
   background: #fff0ed;
 }
+.history-status-cancel_requested,
+.history-status-needs_reconciliation,
 .history-status-pending {
   color: #8c5d00;
   background: #fff4d5;

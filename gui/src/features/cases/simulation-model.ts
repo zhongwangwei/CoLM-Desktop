@@ -491,6 +491,16 @@ export function newCaseRangeProblem(form: Record<string, string>, en = false): s
   }
   return null;
 }
+export function defaultSpinupEnd(start: string, end: string): string {
+  if (!validDate(start) || !validDate(end)) return '';
+  const nextYear = `${Number(start.slice(0, 4)) + 1}`.padStart(4, '0') + '-01-01';
+  if (validDate(nextYear) && nextYear > start && nextYear < end) return nextYear;
+  const nextDay = new Date(new Date(`${start}T00:00:00Z`).getTime() + 86400000)
+    .toISOString()
+    .slice(0, 10);
+  return nextDay > start && nextDay < end ? nextDay : '';
+}
+
 export function spinupProblem(
   start: string,
   end: string,
@@ -533,6 +543,12 @@ export function newCaseProblem(
         '请填写有效时段，结束日期不能早于开始日期。',
         'Choose valid dates with the end on or after the start.',
       );
+    if (
+      !form.timestep?.trim() ||
+      !Number.isFinite(Number(form.timestep)) ||
+      Number(form.timestep) <= 0
+    )
+      return t('时间步长须为正数。', 'The time step must be positive.');
     if (form.kind === 'site') {
       if (!form.site || !form.met)
         return t('请选择站点文件与强迫场文件。', 'Choose the site and forcing files.');
@@ -583,12 +599,6 @@ export function newCaseProblem(
             'Use an absolute forcing data path or the folder picker.',
           );
       }
-      if (
-        !form.timestep?.trim() ||
-        !Number.isFinite(Number(form.timestep)) ||
-        Number(form.timestep) <= 0
-      )
-        return t('时间步长须为正数。', 'The time step must be positive.');
     }
   }
   if (step === 3) return null;

@@ -26,6 +26,17 @@ test('filters preserve pagination and reject reversed dates', () => {
   assert.throws(() => historyFilter({ ...emptyFilter, from: '2026-02-01', to: '2026-01-01' }));
 });
 
+test('the history end minute includes its final millisecond and preserves explicit seconds', () => {
+  const minute = '2026-11-02T10:30';
+  assert.equal(
+    historyFilter({ ...emptyFilter, to: minute }).to,
+    new Date(minute).getTime() + 59_999,
+  );
+  assert.equal(historyFilter({ ...emptyFilter, from: minute }).from, new Date(minute).getTime());
+  const seconds = minute + ':12.345';
+  assert.equal(historyFilter({ ...emptyFilter, to: seconds }).to, new Date(seconds).getTime());
+});
+
 test('replay and comparison controls require frozen run metadata and reconciled outcomes', () => {
   const run = {
     kind: 'run',
@@ -546,4 +557,13 @@ test('every command the ledger records has a history label', async () => {
   assert.ok(commands.length > 50);
   for (const command of commands)
     assert.notEqual(historyKindLabel(command), command, `${command} has no label`);
+});
+
+test('server lifecycle statuses have localized labels', async () => {
+  const { historyStatusLabel } = await import('./history');
+  assert.equal(historyStatusLabel('submitted'), '已提交');
+  assert.equal(historyStatusLabel('queued'), '排队中');
+  assert.equal(historyStatusLabel('cancel_requested'), '已请求取消');
+  assert.equal(historyStatusLabel('needs_reconciliation'), '待核对');
+  assert.equal(historyStatusLabel('cancel_requested', true), 'Cancellation requested');
 });

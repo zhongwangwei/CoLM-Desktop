@@ -84,7 +84,7 @@ export const defaultSettings: Settings = {
   backend: 'builtin',
   retrieval: {
     enabled: false,
-    mode: 'external',
+    mode: 'managed',
     binary_path: null,
     port: null,
     endpoint: 'http://127.0.0.1:9200',
@@ -240,10 +240,25 @@ export function apiEfforts(id: string, model = '') {
   return [''];
 }
 export function parseApiOptions(text: string): Record<string, unknown> {
-  const options = JSON.parse(text.trim() || '{}');
+  let options: unknown;
+  try {
+    options = JSON.parse(text.trim() || '{}');
+  } catch {
+    throw new Error(
+      bilingual(
+        '额外 API 选项不是有效的 JSON；请检查引号、逗号和括号。',
+        'Extra API options contain invalid JSON; check quotes, commas and brackets.',
+      ),
+    );
+  }
   if (!options || typeof options !== 'object' || Array.isArray(options))
-    throw new Error('API options must be a JSON object');
-  return options;
+    throw new Error(
+      bilingual(
+        '额外 API 选项必须是 JSON 对象（例如 {}）。',
+        'Extra API options must be a JSON object (for example, {}).',
+      ),
+    );
+  return options as Record<string, unknown>;
 }
 
 // Incomplete inactive profiles remain in the open form; the backend only stores usable profiles.
@@ -263,7 +278,11 @@ export function completeProfiles(
 }
 
 export function settingsForSave(draft: Settings, previous: Settings): Settings {
-  let settings = { ...draft, api_profiles: completeProfiles(draft.api_profiles) };
+  let settings = {
+    ...draft,
+    egress_acknowledged: previous.egress_acknowledged,
+    api_profiles: completeProfiles(draft.api_profiles),
+  };
   if (settings.backend !== 'builtin' && !completeProfiles({ current: draft }).current) {
     const api =
       completeProfiles({ previous }).previous || selectProvider(defaultSettings, 'deepseek');
@@ -323,6 +342,7 @@ export interface ModelChoice {
   default_effort?: string;
 }
 export interface AgentEvent {
+  startup_id?: string;
   type: string;
   id?: string;
   action?: string;
@@ -772,6 +792,7 @@ export function historyRepositoryLabel(repository: string, language: string) {
   const t = (zh: string, en: string) => (language === 'en' ? en : zh);
   if (repository === 'desktop') return t('Desktop 仓库', 'Desktop repository');
   if (repository === 'colm_upstream') return t('CoLM 官方仓库', 'CoLM upstream repository');
+  if (repository === 'selected') return t('当前选定仓库', 'Selected repository');
   return repository;
 }
 
@@ -806,7 +827,8 @@ export function historyRepoLines(
   else if (identityState === 'verified' && shallow)
     state = t('部分历史（浅克隆）', 'Partial history (shallow clone)');
   else if (identityState === 'verified') state = t('已核验', 'Verified');
-  else state = `${t('身份未知', 'Unknown identity')}：${identityState ?? t('无记录', 'no record')}`;
+  else
+    state = `${t('身份未知', 'Unknown identity')}${t('：', ': ')}${identityState ?? t('无记录', 'no record')}`;
 
   const success = repo?.last_successful_sync;
   const legacy = repo?.legacy_synced;
@@ -815,20 +837,20 @@ export function historyRepoLines(
     : '';
   let lastSync: string;
   if (success && (successName || success.at_unix_ms))
-    lastSync = `${t('上次成功同步', 'Last successful sync')}：${successName}${
+    lastSync = `${t('上次成功同步', 'Last successful sync')}${t('：', ': ')}${successName}${
       success.at_unix_ms
         ? `${successName ? ' · ' : ''}${formatHistoryTime(success.at_unix_ms)}`
         : ''
     }`;
   else if (legacy)
-    lastSync = `${t('旧记录', 'Legacy record')}：${t(
+    lastSync = `${t('旧记录', 'Legacy record')}${t('：', ': ')}${t(
       '未证实同步成功',
       'not proof of a successful sync',
-    )}${legacy.at_unix_ms ? `（${t('截至', 'as of')} ${formatHistoryTime(legacy.at_unix_ms)}）` : ''}`;
+    )}${legacy.at_unix_ms ? `${t('（截至 ', ' (as of ')}${formatHistoryTime(legacy.at_unix_ms)}${t('）', ')')}` : ''}`;
   else lastSync = t('还没有成功同步记录', 'No successful sync recorded');
 
   const checkedAt = repo?.checked_at_unix_ms
-    ? `${t('上次检查', 'Last checked')}：${formatHistoryTime(repo.checked_at_unix_ms)}`
+    ? `${t('上次检查', 'Last checked')}${t('：', ': ')}${formatHistoryTime(repo.checked_at_unix_ms)}`
     : t('还没有检查记录', 'Not checked yet');
 
   const errors: string[] = [];
@@ -908,7 +930,7 @@ export function historySyncSummary(
   const prefix = failed
     ? t('同步结果（有失败）', 'Sync result (with failures)')
     : t('同步结果', 'Sync result');
-  return { text: `${prefix}：${parts.join('；')}`, failed };
+  return { text: `${prefix}${t('：', ': ')}${parts.join(t('；', '; '))}`, failed };
 }
 
 const EXTERNAL_BACKEND_LABELS: Record<string, { zh: string; en: string }> = {
@@ -1055,7 +1077,7 @@ function yesNo(value: boolean, language: string) {
   return language === 'en' ? (value ? 'yes' : 'no') : value ? '是' : '否';
 }
 function isAbsoluteLocalPath(text: string) {
-  return text.startsWith('/') || /^[A-Za-z]:[\\/]/.test(text);
+  return (text.startsWith('/') && !text.startsWith('//')) || /^[A-Za-z]:[\\/]/.test(text);
 }
 function isHttpUrl(text: string) {
   return /^https?:\/\/\S+$/i.test(text.trim());
@@ -1137,7 +1159,7 @@ export function localPathsInJsonText(text: string | null | undefined, limit = 5)
 }
 
 /**
- * 一个历史工具结果 → 证据卡模型。非历史工具、失败结果或非 JSON 文本返回 null，
+ * 历史或文档检索工具结果 → 证据卡模型。其他工具、失败结果或非 JSON 文本返回 null，
  * 调用方保留原来的原始 JSON 显示（绝不半解析后编造字段）。
  */
 export function historyEvidence(
@@ -1146,7 +1168,8 @@ export function historyEvidence(
   language: string,
 ): HistoryEvidence | null {
   const kind = historyToolKind(name);
-  if (!kind || typeof result !== 'string' || !result.trim()) return null;
+  const docs = /(?:^|__|[/.:])search_docs$/.test((name ?? '').trim());
+  if ((!kind && !docs) || typeof result !== 'string' || !result.trim()) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(result);
@@ -1156,6 +1179,7 @@ export function historyEvidence(
   const root = asRecord(parsed);
   if (!root) return null;
   const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  if (docs) return documentSearchEvidence(root, language, t);
   switch (kind) {
     case 'source_history':
       return sourceHistoryEvidence(root, language, t);
@@ -1164,6 +1188,106 @@ export function historyEvidence(
     case 'commit_pull_requests':
       return pullRequestsEvidence(root, language, t);
   }
+  return null;
+}
+
+function documentSearchEvidence(
+  root: JsonRecord,
+  language: string,
+  t: (zh: string, en: string) => string,
+): HistoryEvidence {
+  const retrieval = asRecord(root.retrieval);
+  const provenance = asRecord(root.provenance);
+  const scope = asRecord(root.scope) ?? asRecord(provenance?.scope);
+  const missing = t('未提供', 'Not provided');
+  const backend =
+    retrieval?.backend === 'xerj'
+      ? 'Xerj'
+      : retrieval?.backend === 'keyword'
+        ? t('关键词检索', 'Keyword search')
+        : asText(retrieval?.backend) || missing;
+  const scopeText =
+    [asText(scope?.kind), asText(scope?.name)].filter(Boolean).join(' · ') || missing;
+  const matches = asArray(root.matches)
+    .map(asRecord)
+    .filter((hit): hit is JsonRecord => !!hit);
+  const state = asText(retrieval?.state);
+  const fallback = asText(retrieval?.fallback_reason);
+  const fields = [
+    field(t('查询词', 'Query'), asText(root.query) || missing),
+    field(t('实际检索后端', 'Search backend used'), backend),
+    field(t('资料范围', 'Documentation scope'), scopeText),
+    field(
+      t('返回匹配数', 'Returned matches'),
+      Array.isArray(root.matches) ? String(matches.length) : missing,
+    ),
+  ];
+  if (state) fields.push(field(t('索引状态', 'Index status'), retrievalStateText(state, language)));
+  for (const [key, label] of [
+    ['candidates', t('Xerj 召回候选数', 'Xerj candidates retrieved')],
+    ['candidate_hits', t('截断前新增候选数', 'Candidate matches before result clipping')],
+    ['rejected_candidates', t('丢弃候选数', 'Candidates rejected')],
+  ]) {
+    const count = asNumber(retrieval?.[key]);
+    if (count !== null && Number.isInteger(count) && count >= 0)
+      fields.push(field(label, String(count)));
+  }
+  if (fallback) fields.push(field(t('降级原因', 'Fallback reason'), fallback));
+  if (asText(root.reason))
+    fields.push(field(t('资料说明', 'Documentation note'), asText(root.reason)));
+  const items = matches.map((hit): EvidenceItem => {
+    const file = asText(hit.file) || missing;
+    const line = asNumber(hit.line);
+    const hitFields = [field(t('文件', 'File'), file, { mono: true })];
+    if (line !== null) hitFields.push(field(t('行号', 'Line'), String(line)));
+    if (asText(hit.knowledge_status))
+      hitFields.push(field(t('知识有效性', 'Knowledge status'), asText(hit.knowledge_status)));
+    if (typeof hit.may_support_current_answer === 'boolean')
+      hitFields.push(
+        field(
+          t('可支持当前回答', 'May support this answer'),
+          yesNo(hit.may_support_current_answer, language),
+        ),
+      );
+    if (asText(hit.match)) hitFields.push(field(t('匹配类型', 'Match type'), asText(hit.match)));
+    const context = asArray(hit.context).filter((line): line is string => typeof line === 'string');
+    const path = historyFileOpenPath(provenance?.docs_root, hit.file);
+    return {
+      title: `${file}${line !== null ? `:${line}` : ''}`,
+      fields: hitFields,
+      detail: clip(context.length ? context.join('\n') : asText(hit.text), 8000),
+      detailLabel: t('查看检索原文', 'Show retrieved text'),
+      ...(path ? { path } : {}),
+    };
+  });
+  const summary = [
+    t('文档检索', 'Document search'),
+    backend,
+    scopeText,
+    Array.isArray(root.matches)
+      ? t(`返回 ${matches.length} 条匹配`, `${matches.length} matches returned`)
+      : missing,
+  ];
+  if (root.documentation_status === 'missing')
+    summary.push(t('缺少文档快照', 'Document snapshot missing'));
+  else if (retrieval?.backend === 'keyword' && state && state !== 'disabled')
+    summary.push(t('已降级', 'Fallback used'), retrievalStateText(state, language));
+  else if (state === 'disabled') summary.push(t('Xerj 未启用', 'Xerj disabled'));
+  if (root.truncated === true) summary.push(t('结果已截断', 'Results truncated'));
+  return {
+    summary: summary.join(' · '),
+    sections: [
+      {
+        title: t('本次文档检索', 'This document search'),
+        fields,
+        items,
+        note: t(
+          '匹配数表示工具返回的结果，不代表回答已引用；请结合版本和知识有效性核对原文。',
+          'Match counts describe tool results, not citations in the answer; check the version, knowledge status and original text.',
+        ),
+      },
+    ],
+  };
 }
 
 function commitReasonFields(
@@ -1326,7 +1450,9 @@ export function sourceRetentionFields(retention: unknown, language: string): Evi
   if (note) fields.push(field(t('保留状态说明', 'retention note'), note));
   const paths = asArray(record.paths).map(asText).filter(Boolean);
   if (paths.length)
-    fields.push(field(t('相关文件', 'retention paths'), clip(paths.slice(0, 5).join('；'), 600)));
+    fields.push(
+      field(t('相关文件', 'retention paths'), clip(paths.slice(0, 5).join(t('；', '; ')), 600)),
+    );
   return fields;
 }
 
@@ -1344,7 +1470,12 @@ function sourceHistoryEvidence(
   if (asText(query.symbol))
     overview.push(field(t('符号', 'symbol'), asText(query.symbol), { mono: true }));
   if (asText(query.repository))
-    overview.push(field(t('仓库参数', 'repository'), asText(query.repository)));
+    overview.push(
+      field(
+        t('仓库参数', 'repository'),
+        historyRepositoryLabel(asText(query.repository), language),
+      ),
+    );
   if (asText(query.path)) overview.push(field(t('路径过滤', 'path filter'), asText(query.path)));
   if (singletonSourceDir)
     overview.push(
@@ -1469,7 +1600,7 @@ function sourceHistoryEvidence(
         title: historyRepositoryLabel(key, language),
         fields,
         items,
-        note: notes.length ? notes.join('；') : undefined,
+        note: notes.length ? notes.join(t('；', '; ')) : undefined,
       });
   }
 
@@ -1535,7 +1666,7 @@ function sourceHistoryEvidence(
           ) ?? undefined,
       });
       if (notes.length)
-        items[items.length - 1].fields.push(field(t('说明', 'notes'), notes.join('；')));
+        items[items.length - 1].fields.push(field(t('说明', 'notes'), notes.join(t('；', '; '))));
     }
     sections.push({
       title: t('跨仓库对应', 'cross-repository links'),
@@ -1553,7 +1684,7 @@ function sourceHistoryEvidence(
     sections.push({
       title: t('范围与截断', 'limits and truncation'),
       fields: [field(t('截断', 'truncated'), yesNo(root.truncated === true, language))],
-      note: limits.join('；') || undefined,
+      note: limits.join(t('；', '; ')) || undefined,
     });
 
   const symbol = asText(query.symbol) || t('未提供符号', 'no symbol');
@@ -1689,7 +1820,7 @@ function commitDetailsEvidence(
 
   const notes = asArray(root.notes).map(asText).filter(Boolean);
   if (notes.length)
-    sections.push({ title: t('说明', 'notes'), fields: [], note: notes.join('；') });
+    sections.push({ title: t('说明', 'notes'), fields: [], note: notes.join(t('；', '; ')) });
 
   const summary =
     `${shortSha(sha)} ${asText(commit.summary)}`.trim() || t('提交详情', 'commit details');
@@ -1847,7 +1978,7 @@ function pullRequestsEvidence(
     sections.push({
       title: t('未核验的 PR 详情', 'unverified PR detail'),
       fields,
-      note: `${t('未核验 ≠ 未关联', 'unverified is not the same as unassociated')}；${asText(
+      note: `${t('未核验 ≠ 未关联', 'unverified is not the same as unassociated')}${t('；', '; ')}${asText(
         unverified.reason,
       )}`,
     });
@@ -1855,7 +1986,7 @@ function pullRequestsEvidence(
 
   const notices = asArray(root.notices).map(asText).filter(Boolean);
   if (notices.length)
-    sections.push({ title: t('提示', 'notices'), fields: [], note: notices.join('；') });
+    sections.push({ title: t('提示', 'notices'), fields: [], note: notices.join(t('；', '; ')) });
 
   const errors = asArray(root.errors)
     .map((value) => {
@@ -1892,7 +2023,7 @@ function pullRequestsEvidence(
     sections.push({
       title: t('如何继续读取', 'how to continue'),
       fields: [],
-      note: hints.join('；'),
+      note: hints.join(t('；', '; ')),
     });
   }
 
@@ -2016,7 +2147,36 @@ export function pendingReconciliation(
   return { required, actions, ids };
 }
 
-/** 待核对动作的标题：名字 + 身份 + 结构化结局，原样显示未知状态。 */
+/** 知识卡只核实保存结果，不能把落盘核实当作科学内容审核。 */
+export function knowledgeSaveReview(action: TaskEffectAction, language: string) {
+  if (!/(?:^|__|[/.:])knowledge_update$/.test((action.name ?? '').trim())) return null;
+  const t = (zh: string, en: string) => (language === 'en' ? en : zh);
+  let args: JsonRecord | null = null;
+  try {
+    args = asRecord(JSON.parse(action.arguments ?? '{}'));
+  } catch {
+    // 原始参数仍保留在技术详情中；无法读取时不猜测卡片身份。
+  }
+  const scope = asRecord(args?.scope);
+  const target =
+    [asText(args?.title), asText(scope?.name)].filter(Boolean).join(' · ') ||
+    action.summary?.trim();
+  const missingCitation = /^error: draft must cite source (.+)$/.exec(action.result ?? '');
+  return {
+    target: target || t('未提供卡片标题或版本', 'Card title or version not provided'),
+    explanation: missingCitation
+      ? t(
+          '保存前校验未通过：缺少来源引用，程序会核实本次是否写入。',
+          'Validation before saving failed: missing source citation. The app will check whether this attempt wrote a card.',
+        )
+      : t(
+          '尚未确认知识卡是否已保存；程序会自动检查本地保存记录。',
+          'The card save is not yet confirmed; the app automatically checks local save records.',
+        ),
+  };
+}
+
+/** 待核对动作的技术标题：名字 + 身份 + 结构化结局。 */
 export function taskActionTitle(action: TaskEffectAction, language: string): string {
   const t = (zh: string, en: string) => (language === 'en' ? en : zh);
   const parts = [

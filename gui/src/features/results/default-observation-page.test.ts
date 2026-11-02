@@ -41,6 +41,8 @@ function initialization() {
   const noop = () => {};
   const context = {
     epoch: { current: 0 },
+    runsGeneration: { current: 0 },
+    explicitRun: { current: '' },
     requestSeq: { current: { single: 0, multi: 0 } },
     stationTarget: { current: '/case' },
     stationRetry: { attempt: 0, error: '' },
@@ -159,6 +161,13 @@ test('finishing or starting a run keeps the chosen observations, window and metr
   let runs: unknown[] = [];
   // Only these names exist: touching observations, the window or metrics would throw.
   execute(refresh.body, {
+    runsGeneration: { current: 0 },
+    explicitRun: { current: '' },
+    setRunsLoading: () => {},
+    setRunsError: () => {},
+    preferredRun: (_runs: unknown, completed: string) => completed,
+    versionId: 'official',
+    revision: 1,
     caseDir: '/case',
     completedRunCase: '/case/runs/new',
     stationTarget: { current: '/case' },
@@ -194,7 +203,11 @@ test('a server run is read in place, and fetching takes only that run', async ()
   const fetching: boolean[] = [];
   const context = (runs: unknown[]) => ({
     setFetching: (value: boolean) => fetching.push(value),
+    setRunsLoading: noop,
+    setRunsError: noop,
     epoch: { current: 0 },
+    runsGeneration: { current: 0 },
+    explicitRun: { current: '' },
     stationTarget: { current: '/case' },
     caseDir: '/case',
     source: '/case/runs/r1',
@@ -212,6 +225,9 @@ test('a server run is read in place, and fetching takes only that run', async ()
     setDiagnostic: noop,
     setCatalogKey: noop,
     setVariable: noop,
+    setSeriesKey: noop,
+    setSeriesError: noop,
+    setSeriesLoading: noop,
   });
   const remote = { run_case: '/case/runs/r1', server: 'tianhe', outputs_local: false };
   // The backend reads it on the server (remote-read); the page asks for it like any other run.
@@ -252,6 +268,72 @@ test('a server run is read in place, and fetching takes only that run', async ()
     { command: 'model_case_runs', args: { dir: '/case' } },
   ]);
   assert.deepEqual(runs, []);
+  const waiting: ((rows: unknown[]) => void)[] = [];
+  const writes: unknown[] = [];
+  const raceContext = {
+    ...context([remote]),
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    invokeJson: async (command: string) =>
+      command === 'remote_fetch'
+        ? null
+        : new Promise<unknown[]>((resolve) => waiting.push(resolve)),
+    setRuns: (rows: unknown[]) => writes.push(rows),
+  };
+  const raceFetch = execute(fetchBody, raceContext);
+  const stale = raceFetch(false);
+  await tick();
+  raceContext.runsGeneration.current++;
+  waiting[0]([{ run_case: '/case/stale' }]);
+  await stale;
+  assert.deepEqual(writes, [], 'a newer run-list request supersedes the fetch refresh');
+  const fresh = raceFetch(false);
+  await tick();
+  waiting[1]([{ run_case: '/case/fresh' }]);
+  await fresh;
+  assert.deepEqual(writes, [[{ run_case: '/case/fresh' }]]);
   // 按钮只在真取回时写"正在取回…"，每次结束都复原。
-  assert.deepEqual(fetching, [true, false, true, false]);
+  assert.deepEqual(fetching, [true, false, true, false, true, false, true, false]);
+});
+
+test('a late initial run list cannot replace completed results or a manually chosen run', async () => {
+  for (const manual of ['', '/case/manual']) {
+    const h = initialization();
+    const pending: ((value: unknown[]) => void)[] = [];
+    let listed: unknown[] = [],
+      selected = '',
+      loading = false;
+    const context = {
+      ...h.context,
+      invokeJson: () => new Promise<unknown[]>((resolve) => pending.push(resolve)),
+      setRuns: (value: unknown[]) => {
+        listed = value;
+      },
+      setSource: (value: string) => {
+        selected = value;
+      },
+      setRunsLoading: (value: boolean) => {
+        loading = value;
+      },
+      preferredRun: (_runs: unknown, completed: string) => completed,
+      completedRunCase: '/case/new',
+    };
+    execute(
+      effects.find((effect) => effect.includes('defaultObservation(caseDir)'))!,
+      context,
+    )();
+    execute(
+      effects.find((effect) => effect.includes('!completedRunCase'))!,
+      context,
+    )();
+    context.explicitRun.current = manual;
+    const fresh = [{ run_case: '/case/new' }, { run_case: '/case/manual' }];
+    pending[1](fresh);
+    await tick();
+    assert.equal(selected, manual || '/case/new');
+    assert.equal(loading, false);
+    pending[0]([{ run_case: '/case/old' }]);
+    await tick();
+    assert.deepEqual(listed, fresh);
+    assert.equal(selected, manual || '/case/new');
+  }
 });

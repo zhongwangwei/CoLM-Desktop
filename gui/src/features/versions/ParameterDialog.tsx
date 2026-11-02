@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import type { Overlay } from '../../lib/types';
 import { Dialog, Input, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
@@ -154,6 +155,7 @@ export default function ParameterDialog({
   initialType = 'global',
   initialParameter = '',
   onImportProcessFile,
+  onPendingChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -167,11 +169,13 @@ export default function ParameterDialog({
   initialParameter?: string;
   /** 把自己的参数文件整份带进版本（专家用；标准文件不用导入）。 */
   onImportProcessFile?: () => void;
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const [type, setType] = useState<ParameterType>(initialType);
   const [query, setQuery] = useState('');
   const [onlyChanged, setOnlyChanged] = useState(false);
+  const [focusedParameter, setFocusedParameter] = useState('');
   const [mode, setMode] = useState<'parameter' | 'class'>('parameter');
   const [group, setGroup] = useState('');
   const [crops, setCrops] = useState(false);
@@ -200,8 +204,9 @@ export default function ParameterDialog({
   }, [open, type, standard]);
   useEffect(() => {
     setGroup('');
+    setFocusedParameter('');
     setChosen(initialParameter);
-    setProblem('');
+    setProblem([...invalidInputs.current.values()][0] ?? '');
     setTypeIndex(1);
     setMode('parameter');
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -221,6 +226,37 @@ export default function ParameterDialog({
   const sharedMaterialParams = catalog.filter(
     (d) => parameterType(d) === 'global' && sharedMaterial(d.raw_key),
   );
+  const [inputValues, setInputValues] = useState<Record<string, string>>({});
+  const invalidInputs = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (!open) return;
+    setInputValues({});
+    invalidInputs.current.clear();
+    setProblem('');
+    onPendingChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  async function changeOpen(next: boolean) {
+    if (!next && invalidInputs.current.size) {
+      if (
+        !(await askConfirm(
+          en
+            ? 'Discard invalid parameter input and close? Valid changes will be kept.'
+            : '放弃非法参数输入并关闭？已经有效写回的修改会保留。',
+          {
+            confirmLabel: en ? 'Discard invalid input and close' : '放弃非法输入并关闭',
+            cancelLabel: en ? 'Continue editing' : '继续编辑',
+          },
+        ))
+      )
+        return;
+      invalidInputs.current.clear();
+      setInputValues({});
+      setProblem('');
+      onPendingChange?.(false);
+    }
+    onOpenChange(next);
+  }
   const records = overlay.parameters;
   const globalPhysics = Object.keys(overlay.physics).filter((k) =>
     catalog.some(
@@ -249,6 +285,8 @@ export default function ParameterDialog({
   // 写一个格子：空值就是恢复默认。全局参数也可能以开关改值（按过程配置写的）的形式存在，一并换掉。
   function write(d: Descriptor, index: number, file: string, text: string) {
     if (!editable) return;
+    const inputKey = `${d.id}|${index}|${file}`;
+    setInputValues((values) => ({ ...values, [inputKey]: text }));
     const value = text.trim();
     const kind = parameterType(d);
     const perType = ['igbp', 'usgs', 'pft', 'pc'].includes(kind);
@@ -263,7 +301,10 @@ export default function ParameterDialog({
     if (value) {
       const issue = valueProblem(d, value, en);
       if (issue) {
-        setProblem(`${d.raw_key}: ${issue}`);
+        const message = `${d.raw_key}: ${issue}`;
+        invalidInputs.current.set(inputKey, message);
+        onPendingChange?.(true);
+        setProblem(message);
         return;
       }
       // 一组数统一写成逗号隔开的 namelist 写法。
@@ -280,7 +321,9 @@ export default function ParameterDialog({
             ),
           )
         : overlay.physics;
-    setProblem('');
+    invalidInputs.current.delete(inputKey);
+    onPendingChange?.(invalidInputs.current.size > 0);
+    setProblem([...invalidInputs.current.values()][0] ?? '');
     onChange({ ...overlay, parameters, physics });
   }
   async function defaultsFor(ids: string[]) {
@@ -323,15 +366,16 @@ export default function ParameterDialog({
         : (recordOf(d)?.value ?? physicsOf(d));
     return (
       <input
-        key={`${d.id}|${index}|${file}|${current ?? ''}`}
+        key={`${d.id}|${index}|${file}`}
         className={`param-input${current != null ? ' is-changed' : ''}`}
-        defaultValue={current ?? ''}
+        value={inputValues[`${d.id}|${index}|${file}`] ?? current ?? ''}
         placeholder={fallback}
         disabled={!editable}
         aria-label={`${d.raw_key} ${index}`}
-        onBlur={(e) => {
-          if ((current ?? '') !== e.target.value.trim()) write(d, index, file, e.target.value);
-        }}
+        aria-invalid={invalidInputs.current.has(`${d.id}|${index}|${file}`) || undefined}
+        onFocus={() => setFocusedParameter(d.id)}
+        onBlur={() => setFocusedParameter('')}
+        onChange={(e) => write(d, index, file, e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         }}
@@ -369,7 +413,7 @@ export default function ParameterDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={changeOpen}
       // 对话框自带的"关闭"也是助手能按的动作（第 737 轮）。
       closeAction="version-parameters-close"
       className="param-dialog"
@@ -482,7 +526,14 @@ export default function ParameterDialog({
             </thead>
             <tbody>
               {[...listed]
-                .filter((d) => !onlyChanged || recordOf(d) || physicsOf(d) != null)
+                .filter(
+                  (d) =>
+                    !onlyChanged ||
+                    d.id === focusedParameter ||
+                    [...invalidInputs.current.keys()].some((key) => key.startsWith(`${d.id}|`)) ||
+                    recordOf(d) ||
+                    physicsOf(d) != null,
+                )
                 .sort((a, b) =>
                   `${a.section}|${subgroup(a)}`.localeCompare(`${b.section}|${subgroup(b)}`),
                 )

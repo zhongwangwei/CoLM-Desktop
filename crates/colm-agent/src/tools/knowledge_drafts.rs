@@ -87,43 +87,83 @@ impl Tool for KnowledgeUpdate {
     }
     fn summary(&self, args: &Value) -> String {
         format!(
-            "保存待核对知识草稿：{}（保留历史，不修改正式资料）",
+            "保存知识草稿：{}（保留历史，不修改正式资料）",
             args["title"].as_str().unwrap_or_default()
         )
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        let selected = ctx.selected_context()?;
-        let ctx = &selected;
-        let root = ctx
-            .knowledge_root
-            .as_deref()
-            .context("knowledge draft store unavailable")?;
-        let title = req_str(args, "title")?.trim();
-        let markdown = req_str(args, "markdown")?.trim();
-        ensure!(
-            !title.is_empty() && title.chars().count() <= 120,
-            "title must contain 1..120 characters"
-        );
-        ensure!(
-            !markdown.is_empty() && markdown.chars().count() <= 12000,
-            "markdown must contain 1..12000 characters"
-        );
-        let supplied = evidence(&args["sources"])?;
-        ensure!(
-            (1..=16).contains(&supplied.len()),
-            "provide 1..16 unique sources"
-        );
-        for path in supplied.keys() {
-            ensure!(markdown.contains(path), "draft must cite source {path}");
-        }
-        let paths: Vec<String> = supplied.keys().cloned().collect();
-        let current = snapshot(ctx, &args["scope"], &paths)?;
-        ensure!(
-            supplied == evidence(&current["sources"])?,
-            "source changed since it was inspected; re-read and rewrite the draft"
-        );
-        save(root, &current["scope"], title, markdown, &supplied)
+        // Every error before save is known to precede the first write.
+        let prepared = (|| -> Result<_> {
+            let supplied = validate_request(args)?;
+            let selected = ctx.selected_context()?;
+            let root = selected
+                .knowledge_root
+                .clone()
+                .context("knowledge draft store unavailable")?;
+            let paths = supplied.keys().cloned().collect::<Vec<_>>();
+            let current = snapshot(&selected, &args["scope"], &paths)?;
+            ensure!(
+                supplied == evidence(&current["sources"])?,
+                "source changed since it was inspected; re-read and rewrite the draft"
+            );
+            Ok((root, current["scope"].clone(), supplied))
+        })()
+        .map_err(super::NoEffectError)?;
+        save(
+            &prepared.0,
+            &prepared.1,
+            req_str(args, "title")?.trim(),
+            req_str(args, "markdown")?.trim(),
+            &prepared.2,
+        )
     }
+}
+
+/// Pure pre-write checks can also prove an old request never reached save, without
+/// consulting source files that may have changed since the original call.
+fn validate_request(args: &Value) -> Result<BTreeMap<String, String>> {
+    let title = req_str(args, "title")?.trim();
+    let markdown = req_str(args, "markdown")?.trim();
+    ensure!(
+        !title.is_empty() && title.chars().count() <= 120,
+        "title must contain 1..120 characters"
+    );
+    ensure!(
+        !markdown.is_empty() && markdown.chars().count() <= 12000,
+        "markdown must contain 1..12000 characters"
+    );
+    let supplied = evidence(&args["sources"])?;
+    ensure!(
+        (1..=16).contains(&supplied.len()),
+        "provide 1..16 unique sources"
+    );
+    for path in supplied.keys() {
+        ensure!(markdown.contains(path), "draft must cite source {path}");
+    }
+    Ok(supplied)
+}
+
+/// Verify storage completion only: this never reviews or rewrites scientific content.
+pub(crate) fn verify_effect(root: &Path, args: &Value) -> Option<Value> {
+    let sources = match validate_request(args) {
+        Ok(sources) => sources,
+        Err(error) => {
+            return Some(
+                json!({"effect":"failed_no_effect", "save_state":"not_saved",
+            "reason":error.to_string()}),
+            )
+        }
+    };
+    let rows = records(root, &args["scope"]).ok()?;
+    let row = rows.iter().rev().find(|row| {
+        row["title"].as_str() == args["title"].as_str().map(str::trim)
+            && row["markdown"].as_str() == args["markdown"].as_str().map(str::trim)
+            && evidence(&row["sources"]).is_ok_and(|stored| stored == sources)
+    })?;
+    Some(
+        json!({"effect":"completed", "save_state":"saved", "entry_id":row["id"],
+        "scientifically_validated":false}),
+    )
 }
 
 fn evidence(value: &Value) -> Result<BTreeMap<String, String>> {
@@ -437,6 +477,15 @@ mod tests {
             .call(&json!({"scope":scope,"paths":["crates/flux.rs"]}), &ctx)
             .unwrap();
         assert_eq!(inspected["sources"][0]["sha256"], digest(b"old"));
+        // Errors after the write boundary remain conservatively unknown.
+        let blocked_store = temp.0.join("not-a-directory");
+        std::fs::write(&blocked_store, b"blocked").unwrap();
+        let blocked_ctx = ToolContext {
+            knowledge_root: Some(blocked_store),
+            ..ctx.clone()
+        };
+        let save_error = KnowledgeUpdate.call(&args, &blocked_ctx).unwrap_err();
+        assert!(!save_error.is::<super::super::NoEffectError>());
         let first = KnowledgeUpdate.call(&args, &ctx).unwrap();
         assert_eq!(
             search(&ctx, &scope, "flux").unwrap()[0]["status"],
@@ -458,6 +507,97 @@ mod tests {
             .get("markdown")
             .is_none());
     }
+    #[test]
+    fn missing_citation_is_typed_no_effect_and_recoverable_without_sources() {
+        let args = json!({"scope":{"kind":"app"},"title":"flux","markdown":"uncited explanation",
+            "sources":[{"path":"crates/flux.rs","sha256":digest(b"old")}]});
+        let error = KnowledgeUpdate
+            .call(&args, &ToolContext::default())
+            .unwrap_err();
+        assert!(error.is::<super::super::NoEffectError>());
+        assert!(error
+            .to_string()
+            .contains("draft must cite source crates/flux.rs"));
+        let temp = Temp::new();
+        let proof = verify_effect(&temp.0, &args).unwrap();
+        assert_eq!(proof["effect"], "failed_no_effect");
+        assert!(!temp.0.exists());
+    }
+
+    #[test]
+    fn persisted_completion_is_recovered_by_session_load_without_reexecuting_save() {
+        use crate::{
+            message::Message,
+            protocol::{Outbound, ToolEffect},
+            session::Session,
+        };
+        let temp = Temp::new();
+        let store = temp.0.join("knowledge");
+        let scope = json!({"kind":"app"});
+        let sources = BTreeMap::from([("a.rs".into(), digest(b"a"))]);
+        let saved = save(&store, &scope, "flux", "a.rs evidence", &sources).unwrap();
+        let mut session = Session::new(Some(&temp.0), "system").unwrap();
+        session
+            .push(Message::User {
+                content: "save".into(),
+            })
+            .unwrap();
+        session.audit(&Outbound::ToolCall {id:"saved".into(), name:"knowledge_update".into(),
+            arguments:json!({"scope":scope,"title":"flux","markdown":"a.rs evidence","sources":source_rows(&sources)}).to_string(),
+            tier:Tier::Act, summary:"save".into(), preapproved:false}).unwrap();
+        let reopened = Session::open(&temp.0, &session.id, "system").unwrap();
+        let task = reopened.task_snapshot(true).unwrap().unwrap();
+        assert!(!task.requires_reconciliation);
+        assert_eq!(task.actions[0].effect, ToolEffect::Completed);
+        assert_eq!(
+            task.actions[0].verification.as_ref().unwrap()["entry_id"],
+            saved["id"]
+        );
+        let stored = records(&store, &scope).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["status"], "draft_needs_review");
+        assert_eq!(stored[0]["may_support_current_answer"], false);
+    }
+
+    #[test]
+    fn recovery_requires_an_integral_exact_revision_and_never_reviews_it() {
+        let temp = Temp::new();
+        let scope = json!({"kind":"app"});
+        let sources = BTreeMap::from([("a".into(), digest(b"a")), ("b".into(), digest(b"b"))]);
+        let mut args = json!({"scope":scope,"title":" flux ","markdown":" a and b ",
+            "sources":[{"path":"b","sha256":digest(b"b")},{"path":"a","sha256":digest(b"a")}]});
+        assert!(verify_effect(&temp.0, &args).is_none());
+        let saved = save(&temp.0, &scope, "flux", "a and b", &sources).unwrap();
+        let proof = verify_effect(&temp.0, &args).unwrap();
+        assert_eq!(proof["entry_id"], saved["id"]);
+        assert_eq!(proof["scientifically_validated"], false);
+        assert_eq!(
+            records(&temp.0, &scope).unwrap()[0]["status"],
+            "draft_needs_review"
+        );
+        args["markdown"] = json!("a and b changed");
+        assert!(verify_effect(&temp.0, &args).is_none());
+        args["markdown"] = json!("a and b");
+        args["sources"][0]["sha256"] = json!(digest(b"changed"));
+        assert!(verify_effect(&temp.0, &args).is_none());
+        args["sources"][0]["sha256"] = json!(digest(b"b"));
+        let path = temp.0.join(format!(
+            "{}-{}.json",
+            namespace(&scope).unwrap(),
+            saved["id"].as_str().unwrap()
+        ));
+        let mut row: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        row["markdown"] = json!("tampered");
+        std::fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
+        assert!(verify_effect(&temp.0, &args).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("missing", &path).unwrap();
+            assert!(verify_effect(&temp.0, &args).is_none());
+        }
+    }
+
     #[test]
     fn schema_and_evidence_validation() {
         let tool = &tools()[0];

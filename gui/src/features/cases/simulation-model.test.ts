@@ -16,6 +16,7 @@ import {
   caseRangeKeys,
   simulationSteps,
   spinupProblem,
+  defaultSpinupEnd,
   validDate,
   modelSetup,
   setupRechecks,
@@ -32,6 +33,7 @@ const form = {
   start: '2008-01-01',
   end: '2008-01-11',
   runtime: '',
+  timestep: '1800',
 };
 test('dates reject calendar errors and edit only the selected date without resetting seconds or spinup', () => {
   assert.equal(validDate('2008-02-29'), true);
@@ -459,4 +461,28 @@ test('an engine change flags the range and review steps, never the data step', (
   assert.deepEqual(setupRechecks(before, fortran, 3, {}), []);
   // 切回同一个引擎不提示。
   assert.deepEqual(setupRechecks(before, before, 2, {}), []);
+});
+
+test('spin-up defaults are strictly inside the period or unavailable', () => {
+  for (const [start, end, expected] of [
+    ['2001-01-01', '2003-01-01', '2002-01-01'],
+    ['2001-06-20', '2001-06-30', '2001-06-21'],
+    ['2001-06-01', '2001-06-10', '2001-06-02'],
+    ['2001-12-31', '2002-01-01', ''],
+    ['2001-01-01', '2001-01-01', ''],
+    ['bad', '2001-01-01', ''],
+  ]) {
+    const cutoff = defaultSpinupEnd(start, end);
+    assert.equal(cutoff, expected);
+    if (cutoff) assert.equal(spinupProblem(start, end, cutoff, '1'), null);
+  }
+});
+
+test('single-site creation rejects empty, nonnumeric and nonpositive time steps', () => {
+  for (const timestep of ['', ' ', 'NaN', 'Infinity', '0', '-1'])
+    assert.match(
+      newCaseProblem({ ...form, timestep }, 3, undefined, {}, true) ?? '',
+      /time step must be positive/,
+    );
+  assert.equal(newCaseProblem({ ...form, timestep: '1800' }, 3, undefined, {}, true), null);
 });

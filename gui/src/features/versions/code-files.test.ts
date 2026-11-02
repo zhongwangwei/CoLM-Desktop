@@ -99,6 +99,8 @@ function operationContext(calls: Call[], invoke: (command: string, args: Call['a
   let changed = 0;
   const context = {
     busyRef: { current: false },
+    editedRef: { current: false },
+    conflictRef: { current: null },
     disabled: false,
     opEpoch: { current: 0 },
     contextRef: { current: 'ver-1\u0000\u0000' },
@@ -464,4 +466,125 @@ test('a slow file read cannot replace the file the user clicked last', async () 
   pending['a.F90']({ path: 'a.F90', text: 'a' });
   await first;
   assert.deepEqual(shown, ['b.F90']);
+});
+
+test('creating a file preserves the dirty buffer when discard is declined', async () => {
+  const calls: Call[] = [];
+  const harness = operationContext(calls, async () => ({}));
+  const { createFile } = run<{ createFile: () => Promise<boolean> }>(
+    extractFunctions(['act', 'createFile']),
+    {
+      ...harness.context,
+      editedRef: { current: true },
+      askConfirm: async () => false,
+      joinPath: (dir: string, name: string) => `${dir}/${name}`,
+      dir: 'src',
+      newPath: 'new.rs',
+      name: 'version',
+      setOpen: () => assert.fail('must keep the open buffer'),
+      setDraft: () => assert.fail('must keep the draft'),
+    },
+    ['createFile'],
+  );
+  assert.equal(await createFile(), false);
+  assert.deepEqual(calls, [], 'declining must not create an empty file either');
+});
+
+test('folder replacement and deletion preserve unrelated buffers and explicitly warn about unsaved text', async () => {
+  for (const operation of ['remove', 'replaceWithFolder'] as const) {
+    for (const path of ['src_x/file.rs', 'src/file.rs']) {
+      for (const confirm of [false, true]) {
+        const calls: Call[] = [];
+        const prompts: string[] = [];
+        const clears: unknown[] = [];
+        const harness = operationContext(calls, async () => ({}));
+        const methods = run<Record<typeof operation, (path: string) => Promise<boolean>>>(
+          extractFunctions(['act', 'affectsOpenFile', operation]),
+          {
+            ...harness.context,
+            name: 'version',
+            openRef: { current: { path } },
+            editedRef: { current: true },
+            askConfirm: async (message: string) => {
+              prompts.push(message);
+              return confirm;
+            },
+            invoke: async () => '/replacement',
+            setOpen: (file: unknown) => clears.push(file),
+            setDraft: () => {},
+            setConflict: () => {},
+          },
+          [operation],
+        );
+        assert.equal(await methods[operation]('src'), confirm);
+        assert.equal(calls.length, confirm ? 1 : 0);
+        assert.equal(clears.length, confirm && path === 'src/file.rs' ? 1 : 0);
+        assert.equal(prompts[0].includes('cannot be recovered'), path === 'src/file.rs');
+      }
+    }
+  }
+});
+
+test('saving an unresolved conflict does not send the stale baseline again', async () => {
+  const calls: Call[] = [];
+  const harness = operationContext(calls, async () => ({}));
+  const { save } = run<{ save: () => Promise<boolean> }>(
+    extractFunctions(['act', 'save']),
+    {
+      ...harness.context,
+      conflictRef: { current: { path: 'a.rs' } },
+      openRef: { current: { path: 'a.rs', text: 'old', hash: 'old-hash' } },
+      open: { path: 'a.rs' },
+    },
+    ['save'],
+  );
+  assert.equal(await save(), false);
+  assert.deepEqual(calls, []);
+});
+
+test('source save state reports live conflict and read failures before a missing message', () => {
+  const source = pageSource();
+  let initializer = '';
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === 'sourceState' &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer)
+    )
+      initializer = node.initializer.arguments[0].getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(initializer);
+  const openRef = { current: { path: 'a.F90', text: 'code' as string | null } };
+  const conflictRef = { current: null as unknown };
+  const latest = { current: { message: 'explain edit' } };
+  const context = {
+    openRef,
+    conflictRef,
+    latest,
+    editedRef: { current: true },
+    busyRef: { current: false },
+    saveRef: { current: async () => true },
+    discardRef: { current: () => {} },
+  };
+  const make = new Function(
+    ...Object.keys(context),
+    `${compile(`const create = ${initializer};`)} return create();`,
+  );
+  const state = make(...Object.values(context)) as import('./source-edits').SourceEditState;
+  assert.equal(state.canSave, true);
+  conflictRef.current = { path: 'a.F90' };
+  latest.current.message = '';
+  assert.equal(state.saveBlockedReason, 'conflict');
+  assert.equal(state.canSave, false);
+  conflictRef.current = null;
+  openRef.current.text = null;
+  assert.equal(state.saveBlockedReason, 'unreadable');
+  openRef.current.text = 'code';
+  assert.equal(state.saveBlockedReason, 'message');
+  latest.current.message = 'resolved';
+  assert.equal(state.saveBlockedReason, null);
+  assert.equal(state.canSave, true);
 });

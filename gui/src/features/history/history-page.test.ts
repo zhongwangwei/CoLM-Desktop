@@ -33,8 +33,15 @@ function harness(
   const updates: unknown[] = [];
   const opened: [string, string][] = [];
   const routes: string[] = [];
+  const confirmations: string[] = [];
+  let confirm = true;
   const env = {
     ...history,
+    projectVersion: async () => ({}),
+    askConfirm: async (message: string) => {
+      confirmations.push(message);
+      return confirm;
+    },
     download: async (content: string, name: string, type: string) => {
       downloads.push({ content, name, type });
     },
@@ -65,6 +72,7 @@ function harness(
     ),
     useApp: () => ({
       state: { language: 'en', running },
+      registerCloseGuard: () => () => {},
       update: (patch: unknown) => {
         updates.push(patch);
       },
@@ -184,6 +192,10 @@ function harness(
   requests.splice(0, requests.length - 1);
   return {
     requests,
+    confirmations,
+    decline: () => {
+      confirm = false;
+    },
     downloads,
     updates,
     opened,
@@ -207,6 +219,38 @@ const row = (id: string) => ({
   time_ms: null,
   case_path: '/case',
   location: 'local',
+});
+
+test('remote lifecycle statuses remain filterable when the current page is empty', async () => {
+  const h = harness();
+  h.requests[0].resolve({ items: [], total: 0 });
+  await h.settle();
+  for (const [status, label] of [
+    ['submitted', 'Submitted'],
+    ['queued', 'Queued'],
+    ['cancel_requested', 'Cancellation requested'],
+    ['needs_reconciliation', 'Needs verification'],
+  ]) {
+    const option = h.nodes().find((n) => n.type === 'option' && n.props.value === status);
+    assert.ok(option, `${status} is available without a matching row`);
+    assert.deepEqual(option.children, [label]);
+    const select = h
+      .nodes()
+      .find(
+        (n) => n.type === 'Select' && JSON.stringify(n.children).includes('needs_reconciliation'),
+      )!;
+    select.props.onChange({ target: { value: status } });
+    h.render();
+    h.nodes()
+      .find((n) => n.type === 'form')!
+      .props.onSubmit({ preventDefault() {} });
+    await h.settle();
+    const request = h.requests.at(-1)!;
+    assert.equal(request.command, 'history_list');
+    assert.equal(request.args.filter.status, status);
+    request.resolve({ items: [], total: 0 });
+    await h.settle();
+  }
 });
 
 test('record-only deletion confirms without a path, retries errors, and refreshes records', async () => {
@@ -849,4 +893,86 @@ test('clearing from inside a case asks for and clears only that case', async () 
   h.click('Confirm clearing records');
   const request = h.requests.find((r) => r.command === 'history_clear')!;
   assert.deepEqual(request.args, { cases: [], unconfirmed: false, case: '/p/CN-Cng' });
+});
+
+test('replay confirms its target and refreshes both history and selected detail after completion', async () => {
+  const h = harness();
+  const operation = { ...row('original'), version_id: 'soil', revision: '7', detail: {} };
+  h.requests[0].resolve({ items: [operation], total: 1 });
+  await h.settle();
+  h.openCard();
+  h.requests[1].resolve({ operation, events: [], related: [] });
+  await h.settle();
+  const replay = h.guide().actions.find((a) => a.id === 'history-replay')!;
+  const pending = replay.run();
+  await h.settle();
+  assert.match(h.confirmations[0], /\/case.*original.*soil @ 7/);
+  const request = h.requests.find((r) => r.command === 'history_replay')!;
+  assert.ok(request);
+  request.resolve({ completed: true });
+  await h.settle();
+  const list = h.requests.filter((r) => r.command === 'history_list').at(-1)!;
+  const detail = h.requests.filter((r) => r.command === 'history_detail').at(-1)!;
+  assert.notEqual(list, h.requests[0]);
+  assert.notEqual(detail, h.requests[1]);
+  list.resolve({ items: [row('new'), operation], total: 2 });
+  detail.resolve({ operation, events: [], related: [row('new')] });
+  await pending;
+  await h.settle();
+});
+
+test('declining replay sends no command', async () => {
+  const h = harness();
+  const operation = { ...row('original'), version_id: 'soil', revision: '7', detail: {} };
+  h.requests[0].resolve({ items: [operation], total: 1 });
+  await h.settle();
+  h.openCard();
+  h.requests[1].resolve({ operation, events: [], related: [] });
+  await h.settle();
+  h.decline();
+  await h
+    .guide()
+    .actions.find((a) => a.id === 'history-replay')!
+    .run();
+  assert.equal(
+    h.requests.some((r) => r.command === 'history_replay'),
+    false,
+  );
+});
+
+test('opening a single-case project delegates a pruned binding to openCase repair', async () => {
+  const source = ts.createSourceFile(
+    'HistoryPage.tsx',
+    readFileSync(new URL('./HistoryPage.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let declaration = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'openProject')
+      declaration = node.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const opened: string[] = [];
+  const context = {
+    state: { root: '/old', versions: [] },
+    invokeJson: async () => [{ dir: '/new/pruned' }],
+    update: () => {},
+    projectVersion: () => {
+      throw new Error('must not bypass openCase repair');
+    },
+    openCase: async (dir: string) => {
+      opened.push(dir);
+    },
+  };
+  const code = ts.transpileModule(declaration, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const open = new Function(...Object.keys(context), `${code}; return openProject`)(
+    ...Object.values(context),
+  );
+  await open('/new');
+  assert.deepEqual(opened, ['/new/pruned']);
 });

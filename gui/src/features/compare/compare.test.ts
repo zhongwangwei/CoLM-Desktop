@@ -971,7 +971,7 @@ it('maps the three evaluation-configuration save states used by SaveBadge', () =
   );
   assert.equal(
     configSaveState({ ...current, currentFingerprint: 'bbb', submitting: true }),
-    'saving',
+    'dirty',
   );
 });
 

@@ -718,3 +718,136 @@ test('closing asks about unsaved edits once each and about local runs, never abo
   assert.deepEqual(reasons, ['The case settings are not saved.', '1 local']);
   assert.deepEqual(closeReasons([], {}, String), []);
 });
+
+test('every project identity change clears its explicit model choice while honoring the opened model', () => {
+  const text = readFileSync(new URL('./app-state.tsx', import.meta.url), 'utf8');
+  const source = ts.createSourceFile(
+    'app-state.tsx',
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'update')
+      body = node.initializer!.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const official = { version: { id: 'official', revision: 3 } };
+  const custom = { version: { id: 'soil', revision: 2 } };
+  let state = {
+    root: '/a',
+    versions: [official, custom],
+    version: custom,
+    versionRef: custom.version,
+    chosenVersion: custom.version as typeof custom.version | null,
+    selectedCase: {} as unknown,
+  };
+  const current = { current: state };
+  const context = {
+    current,
+    useCallback: (f: unknown) => f,
+    setState: (f: (s: typeof state) => typeof state) => {
+      state = f(state);
+    },
+  };
+  const code = ts.transpileModule(`const update = ${body}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const update = new Function(...Object.keys(context), `${code}; return update`)(
+    ...Object.values(context),
+  );
+  update({ root: '/b', cases: [] });
+  assert.equal(state.chosenVersion, null);
+  assert.equal(state.selectedCase, null);
+  assert.deepEqual(state.versionRef, official.version);
+  update({ root: '/c', versionRef: custom.version, selectedCase: { dir: '/c/one' } });
+  assert.deepEqual(state.version, custom);
+  assert.deepEqual(state.versionRef, custom.version);
+  assert.deepEqual(state.selectedCase, { dir: '/c/one' });
+});
+
+test('project batch settings resolve the destination custom binding before opening', async () => {
+  const text = readFileSync(new URL('./app-state.tsx', import.meta.url), 'utf8');
+  const source = ts.createSourceFile(
+    'app-state.tsx',
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const declaration = source.statements.find(
+    (n) => ts.isFunctionDeclaration(n) && n.name?.text === 'projectVersion',
+  )!;
+  const calls: unknown[] = [];
+  const context = {
+    invokeJson: async (command: string, args: unknown) => {
+      calls.push([command, args]);
+      return command === 'model_migrate_case'
+        ? { version: { id: 'soil', revision: 2 } }
+        : { version: args };
+    },
+    bilingual: (_zh: string, en: string) => en,
+  };
+  const code = ts.transpileModule(declaration.getText(source).replace('export ', ''), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const resolve = new Function(...Object.keys(context), `${code}; return projectVersion`)(
+    ...Object.values(context),
+  );
+  const result = await resolve(
+    [{ version: { id: 'official', revision: 3 } }, { version: { id: 'soil', revision: 2 } }],
+    '/b/case',
+  );
+  assert.deepEqual(result.versionRef, { id: 'soil', revision: 2 });
+  assert.deepEqual(calls, [
+    ['model_migrate_case', { dir: '/b/case' }],
+    ['model_get', { id: 'soil', revision: 2 }],
+  ]);
+});
+
+test('batch opening repairs a pruned first binding only after the existing rebind confirmation', async () => {
+  const source = ts.createSourceFile(
+    'app-state.tsx',
+    readFileSync(new URL('./app-state.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const declaration = source.statements.find(
+    (n) => ts.isFunctionDeclaration(n) && n.name?.text === 'projectVersion',
+  )!;
+  const code = ts.transpileModule(declaration.getText(source).replace('export ', ''), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  for (const accepted of [false, true]) {
+    const writes: unknown[] = [],
+      questions: string[] = [];
+    const context = {
+      missingRevision,
+      rebindQuestion,
+      bilingual: (_zh: string, en: string) => en,
+      askToRebind: async (question: string) => {
+        questions.push(question);
+        return accepted;
+      },
+      invokeJson: async (command: string, args: { target?: VersionRef }) => {
+        if (command === 'model_get') return { version: args };
+        if (!args.target)
+          throw 'model revision official#2 is no longer in the model registry (unused old official revisions are tidied away); rebind the case to an available revision';
+        writes.push(args);
+        return { version: args.target };
+      },
+    };
+    const resolve = new Function(...Object.keys(context), `${code}; return projectVersion`)(
+      ...Object.values(context),
+    );
+    const result = resolve([{ version: { id: 'official', revision: 3 } }], '/project/first');
+    if (accepted) assert.deepEqual((await result).versionRef, { id: 'official', revision: 3 });
+    else await assert.rejects(result, /not rebound/);
+    assert.equal(questions.length, 1);
+    assert.equal(writes.length, accepted ? 1 : 0);
+  }
+});

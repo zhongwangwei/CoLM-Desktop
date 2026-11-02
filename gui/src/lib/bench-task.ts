@@ -27,12 +27,26 @@ export interface BenchTask {
 
 /** 从任务条点"回到比较页"要打开的那次结果：页面挂载后消费一次。 */
 export interface BenchTaskFocus {
+  /** Omitted by older callers that only requested completed results. */
+  intent?: 'track' | 'report';
   host: string;
   project: string;
   /** 远程作业号（= run_id）；本机为空。 */
   runId?: string | null;
   /** 本机报告路径；远程报告要重新取回，不带路径。 */
   report?: string | null;
+}
+
+export function benchTaskFocus(
+  task: Pick<BenchTask, 'host' | 'project' | 'state' | 'job' | 'report'>,
+): BenchTaskFocus {
+  return {
+    intent: task.state === 'done' ? 'report' : 'track',
+    host: task.host,
+    project: task.project,
+    runId: task.job ?? null,
+    report: !task.host && task.state === 'done' ? (task.report ?? null) : null,
+  };
 }
 
 /** 任务结束时壳上显示的一句话（页面自己不在前台时用）；运行中不提示。 */
@@ -99,9 +113,13 @@ export function beginBenchTask(
 export function updateBenchTask(
   tasks: BenchTask[],
   id: string,
-  patch: Partial<Pick<BenchTask, 'phase' | 'job' | 'report' | 'error'>>,
+  patch: Partial<Pick<BenchTask, 'phase' | 'job' | 'report' | 'error' | 'state'>>,
 ): BenchTask[] {
-  return tasks.map((task) => (task.id === id ? { ...task, ...patch } : task));
+  return tasks.map((task) =>
+    task.id === id
+      ? { ...task, ...patch, ...(patch.state === 'running' ? { finishedAt: undefined } : {}) }
+      : task,
+  );
 }
 
 export function finishBenchTask(

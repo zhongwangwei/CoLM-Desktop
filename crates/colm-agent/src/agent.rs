@@ -373,21 +373,25 @@ pub fn execute_tool(
     // 一个工具 panic 不能让整个助手进程卡死：捕获后变成一条错误结果，本轮继续。
     let outcome =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tool.call(&args, context)));
-    let (ok, text) = match outcome {
-        Ok(Ok(value)) => (true, result_text(&value)),
-        Ok(Err(error)) => (false, format!("error: {error:#}")),
+    let (ok, text, no_effect) = match outcome {
+        Ok(Ok(value)) => (true, result_text(&value), false),
+        Ok(Err(error)) => {
+            let no_effect = error.is::<crate::tools::NoEffectError>();
+            (false, format!("error: {error:#}"), no_effect)
+        },
         Err(_) => (
             false,
             "error: internal tool failure (the tool panicked); its effects may be incomplete; inspect the state before retrying".to_owned(),
+            false,
         ),
     };
-    // 副作用结局只由结构事实决定（工具是否真的被调用、tier 是否只读、返回是否成功），
+    // 副作用结局只由结构事实决定（只读、成功，或工具的写前校验标记），
     // 不从结果文本推断。只读工具失败不会改任何状态；有副作用工具在开始执行后失败，
     // 失败前可能已经做了一半，只能保守记为 effect_unknown，等恢复时先核对。
-    let effect = match (ok, tier) {
-        (true, _) => ToolEffect::Completed,
-        (false, Tier::Read) => ToolEffect::FailedNoEffect,
-        (false, _) => ToolEffect::EffectUnknown,
+    let effect = match (ok, tier, no_effect) {
+        (true, _, _) => ToolEffect::Completed,
+        (false, Tier::Read, _) | (false, _, true) => ToolEffect::FailedNoEffect,
+        (false, _, false) => ToolEffect::EffectUnknown,
     };
     // 先发结构化的结局，再发给人看的 `tool_result`：进程在这两条之间中断时，
     // 恢复逻辑已经知道该不该要求核对，而不是只看到一条没有语义的失败结果。

@@ -83,3 +83,13 @@ export function sendingSummary(
       saved.external[saved.backend]?.model || (language === 'en' ? 'default model' : '默认模型'),
   };
 }
+
+/** Merge saved updates against the last saved baseline, preserving fields the user edited. */
+export function mergeSettingsDraft(baseline: Settings, draft: Settings, saved: Settings): Settings {
+  const merged = { ...saved };
+  for (const key of Object.keys(draft) as (keyof Settings)[]) {
+    if (key !== 'egress_acknowledged' && !equalJson(draft[key], baseline[key]))
+      Object.assign(merged, { [key]: draft[key] });
+  }
+  return merged;
+}

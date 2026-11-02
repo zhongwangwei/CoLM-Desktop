@@ -229,7 +229,7 @@ export default function CodeFiles({
     act(
       async (stillCurrent) => {
         const file = openRef.current;
-        if (!file || file.text == null) return false;
+        if (!file || file.text == null || conflictRef.current) return false;
         const path = file.path;
         const textNow = draftRef.current;
         try {
@@ -394,9 +394,15 @@ export default function CodeFiles({
       get path() {
         return openRef.current?.path ?? null;
       },
-      get canSave() {
+      get saveBlockedReason() {
+        if (conflictRef.current) return 'conflict' as const;
         const file = openRef.current;
-        return !!file && file.text != null && latest.current.message.trim() !== '';
+        if (!file || file.text == null) return 'unreadable' as const;
+        if (!latest.current.message.trim()) return 'message' as const;
+        return null;
+      },
+      get canSave() {
+        return this.saveBlockedReason == null;
       },
       save: () => saveRef.current(),
       discard: () => discardRef.current(),
@@ -436,6 +442,17 @@ export default function CodeFiles({
     const path = joinPath(dir, newPath.trim());
     return act(
       async (stillCurrent) => {
+        if (
+          editedRef.current &&
+          !(await askConfirm(
+            t(
+              '新建并打开文件会放弃当前未保存的文本，且无法撤回。继续吗？',
+              'Creating and opening a file discards the current unsaved text, which cannot be recovered. Continue?',
+            ),
+            { danger: true },
+          ))
+        )
+          return false;
         // 新建走独立的 workspace_create_file：后端用 OpenOptions::create_new 原子拒绝重名（GUI-01）。
         const written = await invokeJson<{ hash?: string | null }>('workspace_create_file', {
           name,
@@ -486,6 +503,8 @@ export default function CodeFiles({
       },
       t(`已替换 ${path}`, `Replaced ${path}`),
     );
+  const affectsOpenFile = (path: string) =>
+    openRef.current?.path === path || !!openRef.current?.path.startsWith(`${path}/`);
   const replaceWithFolder = (path: string) =>
     act(
       async (stillCurrent) => {
@@ -494,8 +513,8 @@ export default function CodeFiles({
         if (
           !(await askConfirm(
             t(
-              `用所选文件夹整个替换 ${path}？原目录里的文件都会被换掉（改动可以撤回）。`,
-              `Replace ${path} entirely with the chosen folder? Every file in it is replaced (the change can be reverted).`,
+              `用所选文件夹整个替换 ${path}？原目录里的文件都会被换掉（磁盘改动可以撤回）。${affectsOpenFile(path) && editedRef.current ? '当前文件未保存的文本会丢失，无法撤回。' : ''}`,
+              `Replace ${path} entirely with the chosen folder? Every file in it is replaced (disk changes can be reverted).${affectsOpenFile(path) && editedRef.current ? ' Unsaved text in the current file will be lost and cannot be recovered.' : ''}`,
             ),
             { danger: true },
           ))
@@ -510,9 +529,11 @@ export default function CodeFiles({
           message: latest.current.message,
         });
         if (!stillCurrent()) return false;
-        setOpen(null);
-        setDraft('');
-        setConflict(null);
+        if (affectsOpenFile(path)) {
+          setOpen(null);
+          setDraft('');
+          setConflict(null);
+        }
         return true;
       },
       t(`已替换目录 ${path}`, `Replaced folder ${path}`),
@@ -522,7 +543,10 @@ export default function CodeFiles({
       async (stillCurrent) => {
         if (
           !(await askConfirm(
-            t(`删除 ${path}？（改动可以撤回）`, `Delete ${path}? (can be reverted)`),
+            t(
+              `删除 ${path}？（磁盘改动可以撤回）${affectsOpenFile(path) && editedRef.current ? '当前文件未保存的文本会丢失，无法撤回。' : ''}`,
+              `Delete ${path}? (disk changes can be reverted)${affectsOpenFile(path) && editedRef.current ? ' Unsaved text in the current file will be lost and cannot be recovered.' : ''}`,
+            ),
             {
               danger: true,
             },
@@ -535,7 +559,7 @@ export default function CodeFiles({
           message: latest.current.message,
         });
         if (!stillCurrent()) return false;
-        if (openRef.current?.path.startsWith(path)) {
+        if (affectsOpenFile(path)) {
           setOpen(null);
           setDraft('');
           setConflict(null);

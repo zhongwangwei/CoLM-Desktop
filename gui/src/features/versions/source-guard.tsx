@@ -1,6 +1,12 @@
 import { useState } from 'react';
 import { Button, Dialog } from '../../components/ui';
-import { applySourceChoice, type SourceChoice, type SourceEditState } from './source-edits';
+import {
+  applySourceChoice,
+  sourceSaveBlockedText,
+  type SourceChoice,
+  type SourceEditState,
+  type SourceSaveBlockedReason,
+} from './source-edits';
 
 /**
  * 源码未保存时的三选一。用于编译、冻结这类"必须用磁盘上代码"的动作之前：保存并继续 / 放弃修改并
@@ -10,12 +16,14 @@ export function UnsavedSourceDialog({
   open,
   en,
   canSave,
+  saveBlockedReason,
   saving,
   onChoose,
 }: {
   open: boolean;
   en: boolean;
   canSave: boolean;
+  saveBlockedReason?: SourceSaveBlockedReason | null;
   saving: boolean;
   onChoose: (choice: SourceChoice) => void;
 }) {
@@ -44,14 +52,7 @@ export function UnsavedSourceDialog({
           {t('取消', 'Cancel')}
         </Button>
       </div>
-      {!canSave && (
-        <p className="muted">
-          {t(
-            '先在「代码」页签填写“修改说明”，才能保存源码文件。',
-            'Fill in the change message under the Code tab before saving the source file.',
-          )}
-        </p>
-      )}
+      {!canSave && <p className="muted">{sourceSaveBlockedText(saveBlockedReason, en)}</p>}
     </Dialog>
   );
 }
@@ -92,6 +93,7 @@ export function useSourceChoicePrompt(en: boolean) {
       open={!!pending}
       en={en}
       canSave={pending?.state.canSave ?? false}
+      saveBlockedReason={pending?.state.saveBlockedReason}
       saving={saving}
       onChoose={choose}
     />

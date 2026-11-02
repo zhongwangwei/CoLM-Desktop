@@ -45,6 +45,7 @@ function page(total = false, snow = true) {
       state: { language: 'en', expert: false },
       notify: () => {},
       navigate: () => {},
+      registerCloseGuard: () => () => {},
     }),
     usePageContract: (value: Contract) => {
       contract = value;

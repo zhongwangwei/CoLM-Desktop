@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applySourceChoice, sourceGuardReason, type SourceEditState } from './source-edits';
+import {
+  applySourceChoice,
+  sourceGuardReason,
+  sourceSaveBlockedText,
+  type SourceEditState,
+} from './source-edits';
 
 function makeState(options: { dirty?: boolean; canSave?: boolean; saveResult?: boolean } = {}) {
   const calls: string[] = [];
@@ -63,4 +68,19 @@ test('the navigation guard names unsaved source edits in both languages', () => 
     sourceGuardReason(null, (zh) => zh),
     null,
   );
+});
+
+test('save and continue refuses a buffer with an unresolved conflict', async () => {
+  const { state, calls } = makeState({ canSave: false });
+  assert.equal(await applySourceChoice(state, 'save'), false);
+  assert.deepEqual(calls, []);
+});
+
+test('source save blockers identify conflicts and unreadable files instead of blaming the change message', () => {
+  assert.match(sourceSaveBlockedText('conflict', false), /冲突/);
+  assert.match(sourceSaveBlockedText('conflict', true), /conflict/);
+  assert.doesNotMatch(sourceSaveBlockedText('conflict', true), /change message/);
+  assert.match(sourceSaveBlockedText('unreadable', true), /unreadable/);
+  assert.match(sourceSaveBlockedText('message', false), /修改说明/);
+  assert.match(sourceSaveBlockedText(undefined, true), /reason/);
 });

@@ -1123,12 +1123,12 @@ fn session_limits_default_to_a_finite_budget_and_allow_unlimited_zero() {
 
 #[test]
 fn retrieval_managed_settings_load_old_files_and_validate_the_new_fields() {
-    // 旧 assistant.json 没有 retrieval：默认关闭且接入方式是 external。
+    // 没有 retrieval 的旧配置仍关闭；首次启用默认由应用托管。
     let old: AssistantSettings =
         serde_json::from_str(r#"{"base_url":"https://api.deepseek.com","model":"deepseek-flash"}"#)
             .unwrap();
     assert!(!old.retrieval.enabled);
-    assert_eq!(old.retrieval.mode, "external");
+    assert_eq!(old.retrieval.mode, "managed");
     assert_eq!(old.retrieval.binary_path, None);
     assert_eq!(old.retrieval.port, None);
     assert!(validate_settings(&AssistantSettings::default()).is_ok());
@@ -1202,7 +1202,13 @@ fn managed_xerj_settings_round_trip_and_status_is_explicit_without_a_key() {
 
     // external 模式：不探测、不启动用户节点，说明里写清楚。
     let managed = ManagedXerj::default();
-    let external = managed.status_value(&AssistantSettings::default());
+    let external = managed.status_value(&AssistantSettings {
+        retrieval: RetrievalSettings {
+            mode: "external".into(),
+            ..RetrievalSettings::default()
+        },
+        ..AssistantSettings::default()
+    });
     assert_eq!(external["mode"], "external");
     assert_eq!(external["running"], false);
     assert!(external["detail"]
@@ -1975,4 +1981,19 @@ fn old_settings_without_llm_ack_fields_load_with_conservative_defaults() {
         Some("https://api.deepseek.com")
     );
     assert!(round.external_llm_ack);
+}
+
+#[test]
+fn an_old_startup_cancel_cannot_clear_a_new_startup_owner() {
+    let process = AssistantProcess::default();
+    *process.startup.lock().unwrap() = Some("new".into());
+    assert!(cancel_startup(&process, Some("old".into())).is_ok());
+    assert_eq!(process.startup.lock().unwrap().as_deref(), Some("new"));
+    // A matching owner reaches send; no child is running in this fixture.
+    assert_eq!(
+        cancel_startup(&process, Some("new".into())).unwrap_err(),
+        "助手还没有启动"
+    );
+    assert_eq!(*process.startup.lock().unwrap(), None);
+    assert!(cancel_startup(&process, Some("new".into())).is_ok());
 }

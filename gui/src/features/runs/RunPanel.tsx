@@ -16,6 +16,7 @@ import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../comp
 import { ActionButton } from '../../components/ActionButton';
 import {
   compatibleKernel,
+  activeRunTargets,
   endedRun,
   openRuns,
   remoteJobFacts,
@@ -152,12 +153,14 @@ export default function RunPanel({
     ),
     [recovering, setRecovering] = useState(true),
     [busy, setBusy] = useState(false),
+    [cancelling, setCancelling] = useState(false),
     [serverBuild, setServerBuild] = useState<{
       progress: BuildProgress;
       since: number;
       now: number;
     } | null>(null),
     [monitor, setMonitor] = useState(false),
+    [batchWaiting, setBatchWaiting] = useState(false),
     // 打开远程结果时只做一次轻量的作业状态核对（确认不是只跑到预处理）；不再在打开前取回
     // 整个站点的 history —— 结果页会在服务器上读变量/曲线/指标，只把要显示的数据传回来。
     [openingResults, setOpeningResults] = useState(false),
@@ -188,9 +191,12 @@ export default function RunPanel({
   );
   const batchCount = batchCases?.length ?? 0;
   const lock = useRef(false),
+    cancelLock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
     currentCase = useRef(casePath),
+    currentHost = useRef(host),
+    restoreRequest = useRef(0),
     cancelledRun = useRef<string | null>(null),
     // 批量自动核对的轮转位置：上一轮最后核对的站点。下一轮从它后面接着取，保证前 8 个一直
     // 运行/失败时其余站点也能轮到（GUI-12）。
@@ -198,14 +204,14 @@ export default function RunPanel({
     // 上一轮自动核对还没跑完就不叠新的一轮：每批并发有上限，SSH 会话不能翻倍。
     batchPolling = useRef(false);
   currentCase.current = casePath;
+  currentHost.current = host;
   latest.current = state.running;
   const persisted = state.running[casePath];
-  // 单算例的服务器运行在"提交中"（还没拿到作业记录）也能停：停的是本机正在提交的那个进程。
-  const submittingRemote = persisted?.location === 'remote' && !persisted?.progress?.remote;
-  const canCancel =
-    !!persisted?.run_id &&
-    (persisted?.location === 'local' || !!batchCases || submittingRemote) &&
-    Object.values(state.running).some((run) => run.run_id === persisted.run_id && run.running);
+  // Stop remains available while the submission action holds its lock.
+  const canCancel = activeRunTargets(state.running, casePath, batchCases).some((dir) => {
+    const run = state.running[dir];
+    return run?.running && (run.location === 'local' || !!batchCases || !run.progress?.remote);
+  });
   const kernelMatches =
     !!effectiveProfile &&
     [effectiveProfile, ...Object.values(batchProfiles ?? {})].every(
@@ -218,11 +224,11 @@ export default function RunPanel({
     );
   const pending =
     busy ||
+    cancelling ||
     recovering ||
+    monitor ||
     !!persisted?.running ||
-    !!batchCases?.some(
-      (dir) => state.running[dir]?.running && state.running[dir]?.location !== 'remote',
-    );
+    !!batchCases?.some((dir) => state.running[dir]?.running);
   const resultCasePath = (batchCases ?? [casePath]).find((dir) => {
     const record = state.running[dir];
     return (
@@ -237,7 +243,11 @@ export default function RunPanel({
   const view = restoreRunView(persisted, casePath),
     remotePermissions = remoteRunPermissions(remote);
   // 单个算例在服务器上跑时，进度区也说清服务器在做什么、算到哪一天、作业在哪：和批量页的站点行一样。
-  const remoteRun = persisted?.location === 'remote' && !!remote;
+  const remoteHost =
+    (remote as { record?: { host?: string }; host?: string } | null)?.record?.host ??
+    (remote as { host?: string } | null)?.host ??
+    persisted?.progress?.host;
+  const remoteRun = host === remoteHost && persisted?.location === 'remote' && !!remote;
   const serverActivity = remoteRun ? remoteActivity(remote, en).text : '';
   const progressData = (
     remoteRun ? (remote as { progress?: unknown }).progress : persisted?.progress
@@ -274,7 +284,8 @@ export default function RunPanel({
         '正在核对服务器状态，完成后再查看结果。',
         'Server status is being checked; view the results when it finishes.',
       );
-    if ((!batchCases || !!host) && pending)
+    // 批量成员继续运行只锁配置；远程提交、恢复和停止期间仍等待操作完成。
+    if (recovering || cancelling || (!!host && busy && !batchWaiting) || (!batchCases && pending))
       return recovering
         ? t(
             '正在恢复运行记录，完成后再查看结果。',
@@ -314,10 +325,18 @@ export default function RunPanel({
   }, [notify, host, siteCasesOnly]);
   useEffect(() => {
     let current = true;
+    const request = ++restoreRequest.current;
+    const valid = () =>
+      current &&
+      alive.current &&
+      request === restoreRequest.current &&
+      currentCase.current === casePath &&
+      currentHost.current === host;
     setRecovering(true);
     setRemote(null);
-    const known = latest.current[casePath]?.progress?.remote;
-    if (known) setRemote(known);
+    let previousRun = latest.current[casePath];
+    const known = previousRun?.progress?.remote;
+    if (host && previousRun?.progress?.host === host && known) setRemote(known);
     // What each case's last run ended as is known from the ledger. A batch that finished is shown
     // finished, rather than as stations waiting to be re-checked on their server.
     let endedHere: LastRun | undefined;
@@ -326,7 +345,7 @@ export default function RunPanel({
       const last = await invokeJson<Record<string, LastRun>>('project_last_runs', { dirs }).catch(
         () => ({}) as Record<string, LastRun>,
       );
-      if (!current || !alive.current) return;
+      if (!valid()) return;
       endedHere = endedRun(last[casePath]) ? last[casePath] : undefined;
       update((old) => {
         const added = { ...restoredRuns(last, old.running), ...openRuns(last, old.running) };
@@ -334,10 +353,22 @@ export default function RunPanel({
       });
     };
     restoreEnded()
-      .then(() =>
-        invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath }),
-      )
+      .then(() => {
+        previousRun = latest.current[casePath];
+        return host && valid()
+          ? invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
+          : null;
+      })
       .then(async (rawRecord) => {
+        if (!valid()) return;
+        const previous = latest.current[casePath];
+        // A restored file must not replace a run started while the read was pending.
+        if (
+          previous?.run_id !== previousRun?.run_id ||
+          previous?.operation_id !== previousRun?.operation_id
+        )
+          return;
+        if (rawRecord && rawRecord.host !== host) rawRecord = null;
         // The job file outlives the run. When the ledger says the run ended, the file only gives
         // the server and job name, so fetching stays possible and nothing waits for a re-check.
         const record =
@@ -352,11 +383,13 @@ export default function RunPanel({
                 needs_reconciliation: false,
               }
             : rawRecord;
-        if (!current || !alive.current) return;
-        const previous = latest.current[casePath];
+        if (!valid()) return;
         setRemote(
           record ??
-            (previous?.location === 'remote' && previous.status === 'unknown'
+            (host &&
+            previous?.progress?.host === host &&
+            previous.location === 'remote' &&
+            previous.status === 'unknown'
               ? (previous.progress?.remote ?? {
                   status: { state: 'unknown' },
                   error: previous.error,
@@ -395,7 +428,10 @@ export default function RunPanel({
               provenance?: { ok?: boolean; stage?: string | null };
             }[]
           >('model_case_runs', { dir: casePath });
-          if (!current || !alive.current) return;
+          if (!valid()) return;
+          // Importing a legacy case can reveal an open remote job missing from the first ledger read.
+          if (!previous) await restoreEnded();
+          if (!valid()) return;
           const last = runs[0];
           if (
             last?.run_case &&
@@ -405,7 +441,20 @@ export default function RunPanel({
           )
             update((old) =>
               old.running[casePath]
-                ? {}
+                ? last.operation_id &&
+                  old.running[casePath].operation_id === last.operation_id &&
+                  !old.running[casePath].running
+                  ? {
+                      running: {
+                        ...old.running,
+                        [casePath]: {
+                          ...old.running[casePath],
+                          run_case: last.run_case,
+                          requested_stage: last.provenance?.stage,
+                        },
+                      },
+                    }
+                  : {}
                 : {
                     running: {
                       ...old.running,
@@ -427,17 +476,17 @@ export default function RunPanel({
         }
       })
       .catch((e) => {
-        if (current) notify(String(e), true);
+        if (valid()) notify(String(e), true);
       })
       .finally(() => {
-        if (current && alive.current) setRecovering(false);
+        if (valid()) setRecovering(false);
       });
     return () => {
       current = false;
     };
     // The batch list is a prop rebuilt on every render; the case path identifies the batch here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [casePath, notify, update]);
+  }, [casePath, host, notify, update]);
   useEffect(() => {
     setKernel(
       effectiveProfile
@@ -450,17 +499,16 @@ export default function RunPanel({
     );
   }, [state.kernels, effectiveProfile, state.version]);
   useEffect(() => {
-    if (typeof restoredHost !== 'string') setHost(initialHost ?? savedHost);
+    setHost(typeof restoredHost === 'string' ? restoredHost : (initialHost ?? savedHost));
   }, [casePath, savedHost, initialHost, restoredHost]);
   useEffect(() => {
     const progress = persisted?.progress;
-    if (!batchCases && typeof restoredHost === 'string') setHost(restoredHost);
-    if (progress?.remote) setRemote(progress.remote);
-  }, [persisted?.progress, batchCases, restoredHost]);
+    if (host && progress?.host === host && progress.remote) setRemote(progress.remote);
+  }, [persisted?.progress, host]);
   useEffect(() => {
-    onBusyChange?.(batchCases ? busy || recovering : pending);
+    onBusyChange?.(batchCases ? busy || recovering || monitor || cancelling : pending);
     return () => onBusyChange?.(false);
-  }, [pending, onBusyChange, batchCases, busy, recovering]);
+  }, [pending, onBusyChange, batchCases, busy, recovering, monitor, cancelling]);
   // 提交服务器运行前，登录节点要先编好引擎（软件更新后几分钟到十几分钟）。站点处在"提交中"时每 5 秒
   // 问一次服务器在不在编、编到哪了；在编就显示和新建模拟里一样的进度卡片。
   const submittingOn = submittingHost(host, batchCases ?? [casePath], state.running);
@@ -468,8 +516,11 @@ export default function RunPanel({
     setServerBuild(null);
     if (!submittingOn) return;
     let current = true;
-    const poll = () =>
-      invoke<BuildProgress>('remote_engine_progress', { host: submittingOn })
+    let polling = false;
+    const poll = async () => {
+      if (!current || polling) return;
+      polling = true;
+      await invoke<BuildProgress>('remote_engine_progress', { host: submittingOn })
         .then((progress) => {
           if (!current) return;
           const now = Date.now();
@@ -477,7 +528,11 @@ export default function RunPanel({
             progress?.engine ? { progress, since: old?.since ?? now, now } : null,
           );
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          polling = false;
+        });
+    };
     void poll();
     const timer = setInterval(() => void poll(), 5000);
     return () => {
@@ -552,6 +607,7 @@ export default function RunPanel({
         throw new Error(
           t('申请 CPU 数须为 1–1024 的整数', 'Requested CPUs must be an integer from 1 to 1024'),
         );
+      if (!host) setRemote(null);
       const runId = crypto.randomUUID();
       cancelledRun.current = null;
       const initial = Object.fromEntries(
@@ -634,6 +690,9 @@ export default function RunPanel({
             drivenBatches.add(runId);
             try {
               await runRemoteBatch({
+                waiting: (waiting) => {
+                  if (alive.current) setBatchWaiting(waiting);
+                },
                 cases: prepared,
                 // 站点批量按节点打包（`colm_remote::pack`）：同时跑多少由载体按节点核数决定，所以站点
                 // 一次全部交进服务器的队列。按"同时运行的站点数"一个个等着交时，land02 上 48 核的节点
@@ -734,9 +793,34 @@ export default function RunPanel({
     // The caller already holds the panel lock (the Check button checks several stations at once).
     held = false,
   ) {
-    const targetRemote = target === casePath ? remote : latest.current[target]?.progress?.remote;
+    if (!held && (lock.current || monitor || cancelLock.current)) {
+      if (!quiet)
+        notify(
+          t(
+            '另一项运行操作正在进行，请稍后重试。',
+            'Another run operation is in progress; try again shortly.',
+          ),
+        );
+      return;
+    }
+    const targetRun = latest.current[target];
+    if (
+      !alive.current ||
+      !host ||
+      currentHost.current !== host ||
+      targetRun?.location !== 'remote' ||
+      (target !== currentCase.current && !batchCases?.includes(target)) ||
+      (targetRun.progress?.host ??
+        (targetRun.progress?.remote as { record?: { host?: string }; host?: string } | undefined)
+          ?.record?.host ??
+        (targetRun.progress?.remote as { host?: string } | undefined)?.host) !== host
+    )
+      return;
+    const targetRemote =
+      targetRun.progress?.remote ??
+      (target === casePath && matchesRemoteRun(targetRun, remote) ? remote : null);
+    if (command !== 'remote_status' && !matchesRemoteRun(targetRun, targetRemote)) return;
     const permissions = remoteRunPermissions(targetRemote);
-    if (!held && (lock.current || monitor)) return;
     if (command === 'remote_cancel' && !permissions.cancel)
       throw new Error(
         bilingual('先核对服务器任务身份与运行状态', 'Reconcile job identity and state first'),
@@ -758,21 +842,11 @@ export default function RunPanel({
         command === 'remote_fetch' && typeof result.run_case === 'string'
           ? result.run_case
           : undefined;
+      if (!alive.current) return;
       if (command === 'remote_cancel' || command === 'remote_fetch')
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: target });
       const merged = reconcileRemoteRun(targetRemote, result);
-      // 迟到的核对响应可能是在作业结束之前发出的：已经知道结束（终态）的任务不能因旧响应回到
-      // 运行中。自动轮询和手动核对会同时发出状态请求，返回顺序不保证（GUI-12）。
-      const knownNow = latest.current[target]?.progress?.remote;
-      const regressed =
-        remoteRunPermissions(knownNow).terminal && !remoteRunPermissions(merged).terminal;
-      if (!regressed && alive.current && currentCase.current === target) setRemote(merged);
-      if (!regressed && quiet && remoteRunPermissions(merged).terminal && !permissions.terminal)
-        notify(
-          t('服务器作业已结束，可以取回结果。', 'The server job finished; results can be fetched.'),
-        );
-      update((old) => {
-        const previous = old.running[target];
+      const accepts = (previous: RunState | undefined) => {
         const known = previous?.progress?.remote as Record<string, unknown> | undefined;
         const knownRecord = (known?.record ?? known) as Record<string, unknown> | undefined;
         const observed = result.record as Record<string, unknown> | undefined;
@@ -796,10 +870,18 @@ export default function RunPanel({
           previous?.run_id !== expectedRunId ||
           (!matchesRemoteRun(previous, result) && !discovered)
         )
-          return {};
-        // 用 apply 时的最新状态再挡一次：两次核对之间另一个响应可能已经写入了终态。
-        if (remoteRunPermissions(known).terminal && !remoteRunPermissions(merged).terminal)
-          return {};
+          return false;
+        return !(remoteRunPermissions(known).terminal && !remoteRunPermissions(merged).terminal);
+      };
+      if (!accepts(latest.current[target])) return;
+      if (alive.current && currentCase.current === target) setRemote(merged);
+      if (quiet && remoteRunPermissions(merged).terminal && !permissions.terminal)
+        notify(
+          t('服务器作业已结束，可以取回结果。', 'The server job finished; results can be fetched.'),
+        );
+      update((old) => {
+        const previous = old.running[target];
+        if (!accepts(previous)) return {};
         const status = result.status as
           { state?: string; exit_code?: number; log_tail?: string } | undefined;
         const provenance = (result.record as { provenance?: { stage?: string | null } } | undefined)
@@ -896,7 +978,8 @@ export default function RunPanel({
   watchBatch.current = async () => {
     // 文档隐藏、面板正被提交/手动核对占着、或上一轮还没跑完时不叠加：每批并发有上限，SSH
     // 会话不能翻倍。后台核对用 `held` 调用，不抢面板锁；单个站点失败只记录，其他站点照常核对。
-    if (document.hidden || lock.current || monitor || batchPolling.current) return;
+    if (document.hidden || lock.current || monitor || cancelLock.current || batchPolling.current)
+      return;
     // 每轮从上次停下的位置接着取，取到末尾绕回开头：前几个一直运行或查询失败时，
     // 后面的站点也会在有限的 ⌈待核对数/每批上限⌉ 轮内被核对（GUI-12）。
     const { batch, next } = nextCheckBatch(
@@ -944,7 +1027,7 @@ export default function RunPanel({
         ? `${text.replace(/[。.]$/, '')}${t('。服务器：', '. Server: ')}${serverLoadSummary(load, en, partition)}`
         : text;
     };
-    if (lock.current || monitor) {
+    if (lock.current || monitor || cancelLock.current) {
       const standing = runCountsText(
         (batchCases ?? [casePath]).map((dir) => latest.current[dir]),
         en,
@@ -968,6 +1051,7 @@ export default function RunPanel({
       const checked = await checkInBatches({
         targets,
         limit: BATCH_CHECK_LIMIT,
+        stopped: () => !alive.current,
         check: (dir) => remoteAction('remote_status', dir, true, true),
         progress: (done, total) => {
           if (alive.current && total > 1)
@@ -980,6 +1064,7 @@ export default function RunPanel({
             });
         },
       });
+      if (!alive.current) return;
       const errors = checked.errors.map(({ error }) => String(error));
       for (const error of errors) notify(error, true);
       if (checked.results.length) say(await withLoad(remoteStatusSummary(checked.results, en)));
@@ -999,50 +1084,45 @@ export default function RunPanel({
     }
   }
   async function cancel() {
+    if (cancelLock.current) return;
+    cancelLock.current = true;
+    setCancelling(true);
     try {
-      const id = latest.current[casePath]?.run_id;
-      if (id) {
-        cancelledRun.current = id;
-        stoppedBatches.add(id);
+      const targets = activeRunTargets(latest.current, casePath, batchCases);
+      for (const dir of targets) {
+        const id = latest.current[dir]?.run_id;
+        if (id) {
+          cancelledRun.current = id;
+          stoppedBatches.add(id);
+        }
       }
-      const targets = id
-        ? Object.entries(latest.current)
-            .filter(([, run]) => run.run_id === id && run.running)
-            .map(([dir]) => dir)
-        : [casePath];
       if (host && batchCases) {
         let count = 0;
         let interrupted = 0;
         await eachLimited(targets, 5, async (dir) => {
+          if (!alive.current) return;
           const record = latest.current[dir]?.progress?.remote;
           // 还在提交的站点没有作业记录：停掉本机正在提交它的进程。原来直接跳过，之后仍会交上去，
           // 提示却说"已停止继续提交"（GUI 审查 runs #3）。
-          if (!record) {
+          if (!record && latest.current[dir]?.status !== 'unknown') {
             interrupted += await invoke<number>('cancel_remote_submission', { case: dir }).catch(
               () => 0,
             );
             return;
           }
           try {
-            let result = await invokeJson<Record<string, unknown>>('remote_status', { case: dir });
-            if (!matchesRemoteRun(latest.current[dir], result)) return;
+            const result = await remoteAction('remote_status', dir, true, true);
+            if (!result || !alive.current) return;
             if (remoteRunPermissions(result).cancel) {
               await invokeJson('remote_cancel', { case: dir });
               count++;
-              result = await invokeJson('remote_status', { case: dir });
+              await remoteAction('remote_status', dir, true, true);
             }
-            if (!matchesRemoteRun(latest.current[dir], result)) return;
-            const terminal = remoteRunPermissions(result).terminal;
-            if (id)
-              patchRun([dir], id, {
-                running: !terminal,
-                status: terminal ? remoteEndStatus(result) : 'unknown',
-                progress: { host, remote: result },
-              });
           } catch (error) {
-            notify(String(error), true);
+            if (alive.current) notify(String(error), true);
           }
         });
+        if (!alive.current) return;
         notify(
           t(
             `已停止继续提交（中断 ${interrupted} 个正在提交的站点），并向 ${count} 个服务器作业请求取消；已提交作业须核对终态。`,
@@ -1076,6 +1156,9 @@ export default function RunPanel({
     } catch (e) {
       notify(String(e), true);
       throw e;
+    } finally {
+      cancelLock.current = false;
+      if (alive.current) setCancelling(false);
     }
   }
   async function viewResults() {
@@ -1095,7 +1178,7 @@ export default function RunPanel({
       notify(blocked);
       return;
     }
-    if ((!batchCases || !!host) && lock.current) {
+    if ((!batchCases || (!!host && !batchWaiting)) && lock.current) {
       notify(
         t(
           '另一项服务器操作正在进行，完成后再点「查看站点结果」。',
@@ -1122,13 +1205,14 @@ export default function RunPanel({
       setOpeningResults(true);
       let statusRecord: unknown;
       try {
-        statusRecord = await remoteAction('remote_status', resultCasePath);
+        statusRecord = await remoteAction('remote_status', resultCasePath, false, batchWaiting);
       } catch {
         // remoteAction 已经提示了核对错误。
         return;
       } finally {
         setOpeningResults(false);
       }
+      if (!statusRecord) return;
       // 直接从这次核对返回的记录读阶段：`latest.current` 要等下一次渲染才带上刚写入的
       // requested_stage，在同一个异步调用里读会读到旧值（只会跑到预处理的运行会被放行）。
       const checked = statusRecord as {
@@ -1194,7 +1278,11 @@ export default function RunPanel({
               }
             : {},
         );
-        if (alive.current && currentCase.current === dir) setHost(value);
+        if (alive.current && currentCase.current === dir) {
+          currentHost.current = value;
+          setRemote(null);
+          setHost(value);
+        }
       });
     } catch {
       // action reports the failure; keep the previously saved host.
@@ -1234,12 +1322,22 @@ export default function RunPanel({
   }
   // 快速换服务器时，慢的那次回答不能盖掉当前服务器的，也不能提前收起"读取中"。
   const loadTarget = useRef(host);
+  const loadRequest = useRef(0);
   loadTarget.current = host;
+  useEffect(() => {
+    setLoadBusy(false);
+    const request = loadRequest;
+    return () => {
+      request.current++;
+    };
+  }, [host]);
   /** Reads how busy the server is; returns the load so a status check can summarise it. */
   async function refreshLoad(): Promise<ServerLoad | undefined> {
     const target = host;
     if (!target) return undefined;
-    const mine = () => alive.current && loadTarget.current === target;
+    const generation = ++loadRequest.current;
+    const mine = () =>
+      alive.current && loadTarget.current === target && loadRequest.current === generation;
     setLoadBusy(true);
     try {
       const load = await invoke<ServerLoad>('remote_load', { host: target });
@@ -1508,6 +1606,8 @@ export default function RunPanel({
     unknown: t('等待核对', 'Needs verification'),
     submitted: t('已提交', 'Submitted'),
     submitting: t('正在提交', 'Submitting'),
+    queued: t('排队中', 'Queued'),
+    lost: t('等待核对', 'Needs verification'),
   };
   const stageLabels: Record<string, string> = {
     'input-check': t('检查实际输入', 'Checking actual inputs'),
@@ -1745,7 +1845,8 @@ export default function RunPanel({
             <ActionButton
               action="run-cancel"
               kind="commit"
-              label={t('停止运行', 'Stop run')}
+              label={cancelling ? t('正在停止…', 'Stopping…') : t('停止运行', 'Stop run')}
+              disabled={cancelling}
               variant="danger"
               run={cancel}
             />
@@ -1841,61 +1942,66 @@ export default function RunPanel({
           )}
         </section>
       )}
-      {remote != null && (
-        <>
-          {remotePermissions.pending && (
-            <Notice tone="warning">
-              {t(
-                '提交身份尚未确认，先核对原作业。',
-                'Reconcile the original job; submission identity is unconfirmed.',
-              )}
-            </Notice>
-          )}
-          <div className="actions">
-            <ActionButton
-              action="remote-status"
-              label={t('核对服务器状态', 'Check server status')}
-              disabled={monitor}
-              run={() => checkServerStatus()}
-            />
-            <ActionButton
-              action="remote-cancel"
-              kind="commit"
-              label={t('取消任务', 'Cancel job')}
-              disabled={monitor || !remotePermissions.cancel}
-              run={() => remoteAction('remote_cancel')}
-            />
-            <ActionButton
-              action="remote-fetch"
-              kind="commit"
-              label={t('取回结果', 'Fetch results')}
-              disabled={monitor || !remotePermissions.fetch}
-              run={() => remoteAction('remote_fetch')}
-            />
-          </div>
-          {lastCheck && (
-            <p className="muted" role="status">
-              {t('上次核对', 'Last check')}{' '}
-              {new Date(lastCheck.at).toLocaleTimeString(en ? 'en-US' : 'zh-CN')}
-              {t('：', ': ')}
-              {lastCheck.text}
-            </p>
-          )}
-          <Advanced title={t('服务器作业详情', 'Server job details')}>
-            <dl className="simulation-review">
-              {remoteJobFacts(remote, en).map((fact) => (
-                <Fragment key={fact.label}>
-                  <dt>{fact.label}</dt>
-                  <dd>{fact.value}</dd>
-                </Fragment>
-              ))}
-            </dl>
-            <Advanced title={t('原始记录（排错用）', 'Raw record (for troubleshooting)')}>
-              <pre>{JSON.stringify(remote, null, 2)}</pre>
+      {host &&
+        remote != null &&
+        persisted?.location === 'remote' &&
+        remoteHost === host &&
+        (matchesRemoteRun(persisted, remote) ||
+          (persisted.progress?.host === host && persisted.status === 'unknown')) && (
+          <>
+            {remotePermissions.pending && (
+              <Notice tone="warning">
+                {t(
+                  '提交身份尚未确认，先核对原作业。',
+                  'Reconcile the original job; submission identity is unconfirmed.',
+                )}
+              </Notice>
+            )}
+            <div className="actions">
+              <ActionButton
+                action="remote-status"
+                label={t('核对服务器状态', 'Check server status')}
+                disabled={monitor}
+                run={() => checkServerStatus()}
+              />
+              <ActionButton
+                action="remote-cancel"
+                kind="commit"
+                label={t('取消任务', 'Cancel job')}
+                disabled={busy || monitor || cancelling || !remotePermissions.cancel}
+                run={() => remoteAction('remote_cancel')}
+              />
+              <ActionButton
+                action="remote-fetch"
+                kind="commit"
+                label={t('取回结果', 'Fetch results')}
+                disabled={busy || monitor || cancelling || !remotePermissions.fetch}
+                run={() => remoteAction('remote_fetch')}
+              />
+            </div>
+            {lastCheck && (
+              <p className="muted" role="status">
+                {t('上次核对', 'Last check')}{' '}
+                {new Date(lastCheck.at).toLocaleTimeString(en ? 'en-US' : 'zh-CN')}
+                {t('：', ': ')}
+                {lastCheck.text}
+              </p>
+            )}
+            <Advanced title={t('服务器作业详情', 'Server job details')}>
+              <dl className="simulation-review">
+                {remoteJobFacts(remote, en).map((fact) => (
+                  <Fragment key={fact.label}>
+                    <dt>{fact.label}</dt>
+                    <dd>{fact.value}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+              <Advanced title={t('原始记录（排错用）', 'Raw record (for troubleshooting)')}>
+                <pre>{JSON.stringify(remote, null, 2)}</pre>
+              </Advanced>
             </Advanced>
-          </Advanced>
-        </>
-      )}
+          </>
+        )}
     </Card>
   );
 }

@@ -78,6 +78,12 @@ function pageCallback(name: string, context: Record<string, unknown>) {
     true,
     ts.ScriptKind.TSX,
   );
+  context = {
+    statusPending: '',
+    setStatusPending: () => {},
+    statusRequest: { current: 0 },
+    ...context,
+  };
   let body: string | undefined;
   const visit = (node: ts.Node) => {
     if (
@@ -701,6 +707,7 @@ function researchPage(
   const updates: unknown[] = [];
   const routes: unknown[] = [];
   const notices: unknown[] = [];
+  let closeGuard: () => string | null = () => null;
   let cursor = 0,
     callbackCursor = 0,
     effectCursor = 0;
@@ -841,6 +848,9 @@ function researchPage(
     suggestedRange,
     useApp: () => app,
     useNavigationGuard: () => {},
+    useCloseGuard: (guard: () => string | null) => {
+      closeGuard = guard;
+    },
     usePageContract: (value: Contract) => {
       contract = value;
     },
@@ -883,9 +893,9 @@ function researchPage(
   const Page = new Function(...Object.keys(env), `${code}; return ResearchPage;`)(
     ...Object.values(env),
   ) as (props: { active?: boolean }) => Tree;
-  const render = () => {
+  const render = (active = true) => {
     cursor = callbackCursor = effectCursor = 0;
-    tree = Page({ active: true });
+    tree = Page({ active });
     while (pending.length) pending.shift()!();
     return tree;
   };
@@ -952,6 +962,7 @@ function researchPage(
     routes,
     notices,
     automatic,
+    closeReason: () => closeGuard(),
     render,
     press,
     settle,
@@ -1681,6 +1692,12 @@ it('switching the model revision while a study runs keeps its frozen design and 
   page.render();
   page.press('study-run');
   assert.equal(page.requests.at(-1)!.command, 'study_run');
+  page.render(false);
+  assert.match(
+    page.closeReason() ?? '',
+    /本机研究.*关闭会停止/,
+    'leaving the page does not remove the close warning',
+  );
   // 运行请求还在飞时切模型版本：正在跑的研究要留着它冻结的输入（manifest/spec）和任务目录。
   page.state.versionRef = { id: 'official', revision: 2 };
   page.render();
@@ -1697,7 +1714,12 @@ it('switching the model revision while a study runs keeps its frozen design and 
   );
   page.requests.at(-1)!.resolve({});
   await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  assert.notEqual(page.closeReason(), null, 'completion remains pending until the status is read');
+  page.requests.at(-1)!.resolve({ state: { status: 'Completed' }, results: [] });
+  await page.settle();
   assert.equal(stillOpen(), true, 'the study identity survives the revision switch');
+  assert.equal(page.closeReason(), null, 'a finished local run no longer blocks closing');
 });
 it('the home page lists one return-to-simulation action even though it shows two buttons', async () => {
   const page = await openCompletedStudy();
@@ -2516,6 +2538,162 @@ it('switching the model revision under the same case and kernel reads the parame
   assert.ok(row('DEF_TEST_R2'), 'the parameters read under revision 2 replace the old rows');
   assert.equal(row('DEF_TEST'), undefined, 'the old revision rows are gone');
 });
+for (const [name, change] of [
+  [
+    'case',
+    (page: ReturnType<typeof researchPage>) => {
+      page.state.selectedCase = { dir: '/p/site2', name: 'site2' };
+      page.render();
+    },
+  ],
+  [
+    'revision',
+    (page: ReturnType<typeof researchPage>) => {
+      page.state.versionRef = { id: 'official', revision: 2 };
+      page.render();
+    },
+  ],
+  [
+    'kernel',
+    (page: ReturnType<typeof researchPage>) => {
+      const fields = page.contract().fields as { id: string; set: (value: string) => void }[];
+      fields.find((field) => field.id === 'research-kernel')!.set('/kernels/other');
+    },
+  ],
+  [
+    'sites',
+    (page: ReturnType<typeof researchPage>) => {
+      const fields = page.contract().fields as { id: string; set: (value: string) => void }[];
+      fields.find((field) => field.id === 'research-case-/p/site2')!.set('true');
+    },
+  ],
+] as const) {
+  it(`applies cached parameter seeds and clears their notice after changing ${name}`, async () => {
+    const page = researchPage({
+      cases: [
+        { dir: '/p/site1', name: 'site1', spatial: false },
+        { dir: '/p/site2', name: 'site2', spatial: false },
+      ],
+    });
+    page.press('research-method-tuning');
+    page.press('research-step-2');
+    await page.settle();
+    page.requests
+      .find((r) => r.command === 'model_case_context')!
+      .resolve({ entry: { dir: '/p/site1' } });
+    await page.settle();
+    page.requests.find((r) => r.command === 'study_parameter_contexts')!.resolve([parameterRow()]);
+    await page.settle();
+    const requestCount = page.requests.length;
+    page.state.researchSeed = {
+      parameters: [{ parameter_id: 'test', index: null, min: '2', max: '4', scale: 'linear' }],
+    };
+    page.render();
+    await page.settle();
+    const box = page
+      .nodes()
+      .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+    assert.equal(box?.props.checked, true);
+    assert.equal(page.state.researchSeed, null, 'the consumed seed cannot leak into another study');
+    assert.equal(
+      page.requests.length,
+      requestCount,
+      'cached contexts do not need another backend read',
+    );
+    const hasSeedNotice = () =>
+      page
+        .nodes()
+        .some(
+          (node) =>
+            node.type === 'Notice' &&
+            JSON.stringify(node.children).includes('已勾上带来的 1 个参数'),
+        );
+    assert.equal(hasSeedNotice(), true);
+    change(page);
+    await page.settle();
+    assert.equal(
+      hasSeedNotice(),
+      false,
+      'a different parameter context clears the old seed notice',
+    );
+  });
+}
+it('removing a case drops only its observation row and keeps the selected case edits', async () => {
+  const page = researchPage({
+    cases: [
+      { dir: '/p/site1', name: 'site1', spatial: false },
+      { dir: '/p/site2', name: 'site2', spatial: false },
+    ],
+  });
+  page.press('research-method-tuning');
+  const field = (id: string) =>
+    (page.contract().fields as { id: string; value: string; set: (value: string) => void }[]).find(
+      (f) => f.id === id,
+    )!;
+  field('research-case-/p/site2').set('true');
+  await page.settle();
+  field('research-observations').set('site1 | /custom/one.nc\nsite2 | /custom/two.nc');
+  await page.settle();
+  field('research-case-/p/site2').set('false');
+  await page.settle();
+  assert.equal(field('research-observations').value, 'site1 | /custom/one.nc');
+});
+it('retains the path of a study created after the page context changed without adopting stale state', async () => {
+  const paths: string[] = [],
+    notices: string[] = [];
+  let current = true;
+  const create = pageCallback('create', {
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => current),
+    spec: () => ({}),
+    studyBaseline: { id: 'official', revision: 1 },
+    invoke: async (command: string) => {
+      if (command === 'study_create_json') {
+        current = false;
+        return '/p/.colm/studies/created';
+      }
+    },
+    setCreatedStudy: (path: string) => paths.push(path),
+    setStudyDir: () => assert.fail('a late create must not replace the newer page context'),
+    readStatus: () => assert.fail('a late create must not read into the newer page context'),
+    setRemoteReply: () => {},
+    notify: (message: string) => notices.push(message),
+    tr: (zh: string) => zh,
+  });
+  assert.equal(await create(), '/p/.colm/studies/created');
+  assert.deepEqual(paths, ['/p/.colm/studies/created']);
+  assert.match(notices.at(-1)!, /研究.*已创建.*\/p\/\.colm\/studies\/created/);
+});
+it('opens a saved creation result directly and clears its recovery entry only after it loads', async () => {
+  for (const fails of [false, true]) {
+    const loaded: unknown[] = [],
+      cleared: string[] = [],
+      opened: boolean[] = [];
+    const browse = pageCallback('browseStudy', {
+      task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+      epoch: { current: 1 },
+      invoke: () => assert.fail('a saved study path does not need the folder picker'),
+      readStatus: async (path: string, adopt: boolean) => {
+        loaded.push([path, adopt]);
+        if (fails) throw new Error('manifest unavailable');
+        return completedEnvelope();
+      },
+      setRemoteReply: () => {},
+      setResult: () => {},
+      setConfirmed: () => {},
+      setTab: () => {},
+      chooseSlot: () => {},
+      setError: () => {},
+      methodFromStudy,
+      setWorkbench: (value: boolean) => opened.push(value),
+      setCreatedStudy: (value: string) => cleared.push(value),
+    }) as unknown as (path: string) => Promise<unknown>;
+    if (fails) await assert.rejects(browse('/p/.colm/studies/created'), /manifest unavailable/);
+    else await browse('/p/.colm/studies/created');
+    assert.deepEqual(loaded, [['/p/.colm/studies/created', true]]);
+    assert.deepEqual(cleared, fails ? [] : ['']);
+    assert.deepEqual(opened, fails ? [] : [true]);
+  }
+});
 it('an uncertainty analysis prefills the whole period after warm-up and sends it as the analysis window', async () => {
   const filled: Record<string, string> = { from: '', to: '', valFrom: '', valTo: '' };
   const setter = (key: string) => (value: (old: string) => string) => {
@@ -3053,6 +3231,34 @@ async function openGridTargets(page: ReturnType<typeof researchPage>) {
   }
   await page.settle();
 }
+it('a seed for an uncached land class waits for its new parameter rows before being consumed', async () => {
+  const page = griddedResearchPage();
+  await openGridTargets(page);
+  page.state.researchSeed = {
+    parameters: [
+      { parameter_id: 'test', scheme: 'IGBP', index: 2, min: '2', max: '4', scale: 'linear' },
+    ],
+  };
+  page.press('research-step-2');
+  await page.settle();
+  assert.ok(page.state.researchSeed, 'the old cached rows cannot consume a new class seed');
+  page.requests
+    .filter((r) => r.command === 'model_case_context')
+    .at(-1)!
+    .resolve({ entry: { dir: '/p/region' } });
+  await page.settle();
+  const read = page.requests.filter((r) => r.command === 'study_parameter_contexts').at(-1)!;
+  assert.deepEqual(read.args.types, [2]);
+  read.resolve([
+    { ...parameterRow(), scope_instance: { kind: 'land-class', scheme: 'IGBP', index: 2 } },
+  ]);
+  await page.settle();
+  assert.equal(page.state.researchSeed, null);
+  const box = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  assert.equal(box?.props.checked, true);
+});
 function targetField(page: ReturnType<typeof researchPage>, label: string) {
   const found = page.nodes().find((node) => node.type === 'Field' && node.props.label === label);
   assert.ok(found, `field ${label} is rendered`);
@@ -3118,4 +3324,66 @@ it('station and gauge targets have no matching choice and switching back restore
   chooseInTarget(targetControl(page, '种类'), 'grid');
   page.render();
   assert.equal(targetControl(page, '匹配方式').props.value, 'in-cell', '切回格点恢复缺省匹配');
+});
+
+it('a completed run refreshes its own directory despite UI epochs without replacing another study', async () => {
+  for (const currentPath of ['/running', '/other']) {
+    const epoch = { current: 1 };
+    const shown: unknown[] = [];
+    const calls: unknown[] = [];
+    const read = pageCallback('readStatus', {
+      useCallback: (fn: unknown) => fn,
+      studyDir: '/running',
+      studyIdentity: { current: currentPath },
+      epoch,
+      invokeJson: async (_command: string, args: unknown) => {
+        calls.push(args);
+        epoch.current++;
+        return { state: { status: 'Completed' }, results: [] };
+      },
+      remoteStudyReply: (value: unknown) => value,
+      setEnvelope: (value: unknown) => shown.push(value),
+      setHost: () => {},
+      setMember: () => {},
+      setResultPath: () => {},
+      shownResultFiles,
+    }) as (path: string, adopt: boolean, completed: boolean) => Promise<unknown>;
+    await read('/running', false, true);
+    assert.deepEqual(calls, [{ studyDir: '/running' }]);
+    assert.equal(shown.length, currentPath === '/running' ? 1 : 0);
+  }
+});
+
+it('a late Ready poll cannot replace the final completed status or clear pending state again', async () => {
+  for (const finalRead of [false, true]) {
+    const pending: ((value: unknown) => void)[] = [];
+    const shown: unknown[] = [];
+    let cleared = 0;
+    const read = pageCallback('readStatus', {
+      useCallback: (fn: unknown) => fn,
+      studyDir: '/running',
+      studyIdentity: { current: '/running' },
+      epoch: { current: 1 },
+      statusRequest: { current: 0 },
+      invokeJson: () => new Promise((resolve) => pending.push(resolve)),
+      remoteStudyReply: (value: unknown) => value,
+      setEnvelope: (value: unknown) => shown.push(value),
+      setStatusPending: () => {
+        cleared++;
+      },
+      setHost: () => {},
+      setMember: () => {},
+      setResultPath: () => {},
+      shownResultFiles,
+    }) as (path: string, adopt: boolean, completed: boolean) => Promise<unknown>;
+    const oldPoll = read('/running', false, false);
+    const fresh = read('/running', false, finalRead);
+    pending[1]({ state: { status: 'Completed' }, results: [] });
+    await fresh;
+    pending[0]({ state: { status: 'Ready' }, results: [] });
+    await oldPoll;
+    assert.equal(shown.length, 1);
+    assert.equal((shown[0] as { state: { status: string } }).state.status, 'Completed');
+    assert.equal(cleared, 1);
+  }
 });

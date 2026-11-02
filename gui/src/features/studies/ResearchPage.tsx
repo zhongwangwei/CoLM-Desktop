@@ -4,7 +4,7 @@ import { ScienceChart } from '../results/ResultsPage';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { withCatalogLabels } from '../../lib/param-presentation';
-import { useApp, useNavigationGuard } from '../../lib/app-state';
+import { useApp, useCloseGuard, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
 import { Button, Card, Field, Input, Select, Notice, Advanced } from '../../components/ui';
@@ -354,6 +354,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [minPairs, setMinPairs] = useState('20');
   const [confirmed, setConfirmed] = useState(false);
   const [studyDir, setStudyDir] = useState('');
+  const studyIdentity = useRef(studyDir);
+  studyIdentity.current = studyDir;
+  const [createdStudy, setCreatedStudy] = useState('');
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
   // 派生设计（审计 P1-4）：来源研究与继承了什么。创建研究时写进 spec.parent_study；
   // 界面用它说明"这项研究从哪来、哪些设置是按来源研究继承的"。
@@ -396,11 +399,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [windowNote, setWindowNote] = useState<[string, string] | null>(null);
   const [busy, setBusy] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [statusPending, setStatusPending] = useState('');
   const [error, setError] = useState('');
   // 后端和校验器的报错原样显示，只去掉 String(error) 带出来的 "Error: "。
   const shownError = error.replace(/^Error: /, '');
   // 版本页带过来的参数勾上了几个（有的在这些算例里没有，比如算例里没有那个地类或植物类型）。
   const [seedNotice, setSeedNotice] = useState('');
+  useEffect(() => {
+    setSeedNotice('');
+  }, [studyDir, method, dir, versionId, revision, siteKey, kernel]);
   const [advanced, setAdvanced] = useState(false);
   const [slot, setSlot] = useState('pft');
   const [features, setFeatures] = useState('clim_tair, clim_vpd, clim_prec');
@@ -453,7 +460,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     runLock = useRef(false),
     // 暂停收尾期间点“恢复”：旧 start() 还占着 runLock，先记下意图，等它结束再启动（R27）。
     resumeRequested = useRef(false),
-    remoteRequest = useRef(0);
+    remoteRequest = useRef(0),
+    statusRequest = useRef(0);
   const shown = useRef(active);
   shown.current = active;
   const ai = tab === 'parameters' || tab === 'process';
@@ -469,6 +477,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           '研究操作正在执行，请等待当前操作完成。',
           'Wait for the current study operation to finish.',
         )
+      : null,
+  );
+  useCloseGuard(() =>
+    runLock.current && !host
+      ? tr('本机研究正在运行，关闭会停止它。', 'A local study is running; closing stops it.')
       : null,
   );
   const remotePermissions = remoteStudyPermissions(
@@ -544,6 +557,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     epoch.current++;
     setContexts([]);
     setParameters({});
+    const selected = new Set(
+      sites.map((path) =>
+        path
+          .replace(/[/\\]+$/, '')
+          .split(/[/\\]/)
+          .pop(),
+      ),
+    );
+    setObservations((old) =>
+      old
+        .split('\n')
+        .filter((line) => selected.has(line.split('|')[0]!.trim()))
+        .join('\n'),
+    );
     loadedFor.current = '';
     failedFor.current = '';
     setTypeChoices(null);
@@ -557,6 +584,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setConfirmed(false);
     }
     setFit(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [siteKey, kernel]);
   useEffect(() => {
     epoch.current++;
@@ -638,15 +666,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       .catch(() => {});
   };
   const readStatus = useCallback(
-    async (path = studyDir, adopt = false) => {
+    async (path = studyDir, adopt = false, completedRun = false) => {
       const token = epoch.current;
+      const sequence = ++statusRequest.current;
       const data = await invokeJson<Envelope>('study_status', { studyDir: path });
       const remote = remoteStudyReply({ record: data.remote }).record;
       const pending = remoteStudyReply({ record: data.remote_pending }).record;
       const safe = { ...data, remote, remote_pending: pending };
-      if (token === epoch.current) {
+      if (
+        sequence === statusRequest.current &&
+        ((token === epoch.current && !completedRun) ||
+          (completedRun && studyIdentity.current === path))
+      ) {
         if (adopt) setStudyDir(path);
         setEnvelope(safe);
+        setStatusPending((pending) => (pending === path ? '' : pending));
         if (remote?.host || pending?.host) setHost(remote?.host || pending?.host || '');
         // 打开一个没交过服务器的研究：不沿用上一个研究的服务器。原来留着旧的 host，一点运行就交到了旧集群
         //（GUI 审查 C-04）。要交服务器时用户在第 1 步重新选。
@@ -675,7 +709,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       !studyDir ||
       busy ||
       remotePermissions.exists ||
-      (!launching && envelope?.state?.status?.toLowerCase() !== 'running')
+      (!launching &&
+        statusPending !== studyDir &&
+        envelope?.state?.status?.toLowerCase() !== 'running')
     )
       return;
     let stopped = false;
@@ -699,6 +735,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     studyDir,
     busy,
     launching,
+    statusPending,
     remotePermissions.exists,
     envelope?.state?.status,
     readStatus,
@@ -770,19 +807,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           );
         });
         setContexts(withCatalogLabels(rows));
-        const seed = state.researchSeed?.parameters;
-        if (seed?.length) {
-          const picked = applyResearchSeed(rows, seed);
-          setParameters((old) => ({ ...old, ...picked }));
-          const matched = Object.keys(picked).length;
-          setSeedNotice(
-            tr(
-              `已勾上带来的 ${matched} 个参数${matched < seed.length ? `；另 ${seed.length - matched} 个在这些算例里没有（比如算例里没有那个地类或植物类型）` : ''}。`,
-              `Ticked ${matched} of the parameters brought along${matched < seed.length ? `; ${seed.length - matched} do not apply to these cases (for example, the class or plant type is absent)` : ''}.`,
-            ),
-          );
-          update({ researchSeed: null });
-        }
         failedFor.current = '';
       } else superseded();
       return rows;
@@ -1081,17 +1105,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     task(async (current) => {
       const plan = spec(true);
       await invoke('study_preflight_json', { ...plan, modelRevision: studyBaseline });
-      if (!current()) throw new Error('Context changed');
+      if (!current())
+        throw new Error(tr('研究设置已变化，请重新创建', 'Study settings changed; create again'));
       const path = await invoke<string>('study_create_json', {
         ...plan,
         modelRevision: studyBaseline,
       });
       if (current()) {
+        setCreatedStudy('');
         setRemoteReply(null);
         setStudyDir(path.trim());
         await readStatus(path.trim());
         notify(tr('研究任务已创建', 'Study created'));
-      } else notify(`Created study: ${path}`);
+      } else {
+        setCreatedStudy(path.trim());
+        notify(tr(`研究任务已创建：${path.trim()}`, `Study created: ${path.trim()}`));
+      }
       return path.trim();
     });
   // 已建好的研究按它冻结的编译配置运行。打开已有研究时页面上选的可能是别的配置（格点研究冻结的是格点
@@ -1103,7 +1132,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       ? frozenKernel
       : kernel;
   const start = async () => {
-    if (runLock.current || lock.current)
+    if (runLock.current || lock.current || statusPending === studyDir)
       throw new Error(
         tr('研究操作正在进行，请等它结束', 'A study operation is already in progress'),
       );
@@ -1163,7 +1192,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         }
         return submitted;
       }
-      const response = await invoke('study_run', {
+      await invoke('study_run', {
         studyDir,
         kernel,
         stream: true,
@@ -1182,9 +1211,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             `Study ${studyDir.split(/[/\\]/).pop()} finished running; open Research to see the results.`,
           ),
         );
-      if (token === epoch.current) return await readStatus();
-      return response;
+      setStatusPending(studyDir);
+      return await readStatus(studyDir, false, true);
     } catch (e) {
+      if (!host) {
+        setStatusPending(studyDir);
+        await readStatus(studyDir, false, true).catch(() => {});
+      }
       if (token === epoch.current) {
         // 后端把取消、失败都当错误返回一段 JSON（`study_cancelled`/`study_failed`），原来整段当红字显示
         //（GUI 审查 B-04）。取消是正常操作，只提示一句；失败只显示原因。
@@ -1340,6 +1373,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       remoteRequest.current++;
       const answer = await invokeJson('remote_study_close', { studyDir });
       if (current()) {
+        setCreatedStudy('');
         setRemoteReply(null);
         await readStatus();
         notify(
@@ -1399,14 +1433,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       await readStatus();
       return await readRemoteStatus();
     });
-  const browseStudy = () =>
+  const browseStudy = (savedPath?: string) =>
     task(async (current) => {
-      const path = await invoke<string | null>('pick_folder', { key: 'study-open' });
+      const path = savedPath ?? (await invoke<string | null>('pick_folder', { key: 'study-open' }));
       if (!path || !current()) return path;
       const token = ++epoch.current;
       try {
-        const loaded = await readStatus(path, true);
-        if (token === epoch.current) {
+        const reading = readStatus(path, true);
+        const sequence = statusRequest.current;
+        const loaded = await reading;
+        if (token === epoch.current && sequence === statusRequest.current) {
           setRemoteReply(null);
           setResult('');
           setConfirmed(false);
@@ -1415,6 +1451,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           if (loadedMethod === 'process') chooseSlot('soil_stress');
           else if (loadedMethod === 'parameters') chooseSlot('pft');
           setWorkbench(true);
+          setCreatedStudy('');
         }
         return loaded;
       } catch (error) {
@@ -2454,7 +2491,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           setError(String(e));
           throw e;
         }),
-      permissions.run && !!runKernel && confirmed && !launching && canConfirmSubmission,
+      permissions.run &&
+        !!runKernel &&
+        confirmed &&
+        !launching &&
+        statusPending !== studyDir &&
+        canConfirmSubmission,
       true,
     ),
     ...(!remotePermissions.exists
@@ -2741,6 +2783,47 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, spatialStudy, kernel, sites, typeChoices]);
+  useEffect(() => {
+    const seed = state.researchSeed?.parameters;
+    if (!seed || !workbench || step !== 2 || busy) return;
+    if (spatialStudy) {
+      if (!typeChoices) return;
+      const seededTypes = seed
+        .map((pick) => pick.index)
+        .filter((index): index is number => index != null && index >= 1 && index <= typeChoices.max)
+        .filter((index) => !typeChoices.present || typeChoices.present.includes(index));
+      if (seededTypes.some((index) => !types.includes(index))) {
+        setTypes([...new Set([...types, ...seededTypes])].sort((a, b) => a - b));
+        return;
+      }
+    }
+    // 种子属于这次进入研究的意图，缓存命中也要应用；旧身份或未完成的参数读取不能消费它。
+    if (loadedFor.current !== parameterContextKey(contextIdentity)) return;
+    const picked = applyResearchSeed(contexts, seed);
+    setParameters((old) => ({ ...old, ...picked }));
+    const matched = Object.keys(picked).length;
+    setSeedNotice(
+      tr(
+        `已勾上带来的 ${matched} 个参数${matched < seed.length ? `；另 ${seed.length - matched} 个在这些算例里没有（比如算例里没有那个地类或植物类型）` : ''}。`,
+        `Ticked ${matched} of the parameters brought along${matched < seed.length ? `; ${seed.length - matched} do not apply to these cases (for example, the class or plant type is absent)` : ''}.`,
+      ),
+    );
+    update({ researchSeed: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    state.researchSeed,
+    contexts,
+    workbench,
+    step,
+    busy,
+    types,
+    typeChoices,
+    siteKey,
+    kernel,
+    versionId,
+    revision,
+    spatialStudy,
+  ]);
   // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）。缓存身份含模型 ID 与修订号：
   // 同一算例、同一编译配置换成别的修订也要自动重读（GUI-14）；旧修订的迟到结果由 loadContexts 核对挡掉。
   // 格点算例要先读出类型（不选也能读：只有整算例的系数）。
@@ -3083,6 +3166,18 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       </p>
     );
   };
+  const createdStudyNotice = createdStudy && (
+    <Notice tone="success">
+      {tr('研究已创建，创建期间你切换了设置：', 'A study was created while you changed settings:')}{' '}
+      <span className="path">{createdStudy}</span>{' '}
+      <ActionButton
+        action="study-open-created"
+        label={tr('打开已创建的研究', 'Open the created study')}
+        disabled={busy || launching || unresolvedRemote}
+        run={() => browseStudy(createdStudy)}
+      />
+    </Notice>
+  );
   if (!workbench)
     return (
       <div className="research-home">
@@ -3110,6 +3205,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           </div>
         </header>
         {identitySummary()}
+        {createdStudyNotice}
         {error && <Notice tone="error">{shownError}</Notice>}
         {/* 率定、不确定性和 AI 都在项目的算例上跑；还没打开项目时先说清楚，不让人选了方法才发现没算例。 */}
         {!state.cases.length && (
@@ -3924,6 +4020,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         </div>
       </header>
       {identitySummary()}
+      {createdStudyNotice}
       <p className="study-context">
         {state.researchTarget ? (
           <>

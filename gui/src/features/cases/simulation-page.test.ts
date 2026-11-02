@@ -72,6 +72,7 @@ function page(
     navigate?: (route: string) => boolean;
     listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
+    context?: () => Promise<unknown>;
     forcingProbe?: (args: Record<string, unknown>) => Promise<unknown>;
     pickFolder?: string;
     forcingInput?: () => Promise<{ directory: string; dataset: string }>;
@@ -296,6 +297,7 @@ function page(
         case 'pick_file':
           return scannedSites[0]?.site_file ?? null;
         case 'model_case_context':
+          if (options.context) return options.context();
           return { entry: { dir: '/preview/site' }, profile: options.profile ?? {} };
         case 'hist_vars':
           return options.histories ?? [];
@@ -4875,4 +4877,176 @@ test('an engine change flags range and review, and creation waits for the review
   assert.equal(c.actions.find((action) => action.id === 'new-create')?.enabled, true);
   await p.click('new-create');
   assert.equal(p.calls.find((call) => call.command === 'new_case')?.args.engine, 'fortran');
+});
+
+test('typing a scanned site with a problem reports it and keeps the current site', async () => {
+  const broken = {
+    ...site,
+    name: 'broken',
+    site_file: '/broken.nc',
+    problem: 'Forcing coverage is invalid',
+  };
+  const p = page(
+    'NewCasePage',
+    { form, ownData: true, multiSiteEnabled: false, sites: [site, broken], step: 3 },
+    [site, broken],
+  );
+  await p.mount();
+  assert.doesNotThrow(() => p.set('new-site', broken.site_file));
+  const result = p.render();
+  assert.equal(result.fields.find((field) => field.id === 'new-site')?.value, site.site_file);
+  assert.ok(notices(p).some((text) => text.includes('Forcing coverage is invalid')));
+});
+
+test('remote engine progress never overlaps slow requests or applies progress after completion', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let ready: (value: unknown) => void = () => {};
+  let progress: (value: unknown) => void = () => {};
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute' },
+      ownData: true,
+      sites: [site],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [runServer],
+      prepare: () =>
+        new Promise((resolve) => {
+          ready = resolve;
+        }),
+      progress: () =>
+        new Promise((resolve) => {
+          progress = resolve;
+        }),
+    },
+  );
+  await p.mount();
+  t.mock.timers.tick(5000);
+  await p.settle();
+  assert.equal(p.calls.filter((call) => call.command === 'remote_engine_progress').length, 1);
+  t.mock.timers.tick(30000);
+  await p.settle();
+  assert.equal(p.calls.filter((call) => call.command === 'remote_engine_progress').length, 1);
+  ready({ ready: true, engine: { id: 'done', cached: false } });
+  await p.settle();
+  progress({ engine: 'old', done: 1, total: 100 });
+  await p.settle();
+  assert.ok(!p.elements.some((element) => element.type === 'EngineProgress'));
+});
+
+test('a saved case with failed context refresh stays blocked after Next and can reload without saving again', async () => {
+  let fail = false;
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    context: async () => {
+      if (fail) throw new Error('context temporarily unavailable');
+      return { entry: { dir: '/project/site' }, profile: {} };
+    },
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-start-date', '2000-02-01');
+  fail = true;
+  await p.click('case-save');
+  assert.equal(p.guard(), null, 'the disk write succeeded');
+  await p.click('case-next');
+  await p.goto('case-step-5');
+  assert.equal(p.element('RunPanel').props.disabled, true);
+  fail = false;
+  await p.click('case-reload');
+  await p.settle();
+  assert.equal(p.element('RunPanel').props.disabled, false);
+  assert.equal(p.calls.filter((call) => call.command === 'case_data_save').length, 1);
+});
+
+test('an old case operation cannot report errors or clear the new case loading state', async () => {
+  const source = ts.createSourceFile(
+    'CasesPage.tsx',
+    readFileSync(new URL('./CasesPage.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'work') body = node.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(body);
+  for (const unmounted of [false, true]) {
+    const original = { active: true };
+    const epoch = { current: original };
+    const busy: boolean[] = [];
+    const errors: string[] = [];
+    const context = {
+      epoch,
+      lock: { current: false },
+      setBusy: (value: boolean) => busy.push(value),
+      setError: (value: string) => errors.push(value),
+      notify: (value: string) => errors.push(value),
+    };
+    const code = ts.transpileModule(body, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const work = new Function(...Object.keys(context), `${code}; return work;`)(
+      ...Object.values(context),
+    ) as (fn: () => Promise<void>) => Promise<void>;
+    await assert.rejects(
+      work(async () => {
+        if (unmounted) original.active = false;
+        else epoch.current = { active: true };
+        throw new Error('old case failed');
+      }),
+      /old case failed/,
+    );
+    assert.deepEqual(errors, []);
+    assert.deepEqual(busy, [true]);
+  }
+});
+
+test('saving case A cannot advance case B after the awaited save returns', async () => {
+  const source = ts.createSourceFile(
+    'CasesPage.tsx',
+    readFileSync(new URL('./CasesPage.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'saveAndContinue')
+      body = node.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  for (const changed of [false, true]) {
+    const epoch = { current: { active: true } };
+    const steps: number[] = [];
+    let finish!: () => void;
+    const context = {
+      epoch,
+      contextStaleRef: { current: false },
+      step: 3,
+      setStep: (step: number) => steps.push(step),
+      save: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    };
+    const code = ts.transpileModule(body, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const next = new Function(...Object.keys(context), `${code}; return saveAndContinue;`)(
+      ...Object.values(context),
+    ) as () => Promise<void>;
+    const saving = next();
+    if (changed) epoch.current = { active: true };
+    finish();
+    await saving;
+    assert.deepEqual(steps, changed ? [] : [4]);
+  }
 });

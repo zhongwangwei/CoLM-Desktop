@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { reconcileRemoteRun, remoteEndStatus, remoteRunPermissions } from './run-model';
 
 type Remote = Record<string, unknown>;
@@ -18,6 +19,7 @@ export async function runRemoteBatch(options: {
   submit: (dir: string) => Promise<Remote>;
   status: (dir: string) => Promise<Remote>;
   change: (dir: string, state: string, remote?: Remote, error?: string) => void;
+  waiting?: (waiting: boolean) => void;
   wait?: () => Promise<void>;
   submitConcurrency?: number;
   pollConcurrency?: number;
@@ -53,13 +55,18 @@ export async function runRemoteBatch(options: {
         operation(after) !== undefined &&
         expected !== operation(after))
     )
-      throw new Error(`${dir}: server job identity changed`);
+      throw new Error(
+        `${dir}: ${bilingual('服务器作业身份已变化', 'server job identity changed')}`,
+      );
   }
   function publish(dir: string, result: Remote) {
     const permissions = remoteRunPermissions(result);
     options.change(dir, permissions.terminal ? remoteEndStatus(result) : 'submitted', result);
     if (permissions.terminal) active.delete(dir);
-    else if (!permissions.cancel) throw new Error(`${dir}: server job state is unconfirmed`);
+    else if (!permissions.cancel)
+      throw new Error(
+        `${dir}: ${bilingual('服务器作业状态尚未确认', 'server job state is unconfirmed')}`,
+      );
   }
   // One station: check what it already has, submit it, and take it into `active`. A failure is
   // recorded on the station and stops further submissions; jobs already running are still
@@ -75,7 +82,7 @@ export async function runRemoteBatch(options: {
         known = reconcileRemoteRun(record, status);
         if (!remoteRunPermissions(known).terminal)
           throw new Error(
-            `${dir}: the previous server submission is not confirmed yet; check its status before resubmitting`,
+            `${dir}: ${bilingual('上一次服务器提交尚未确认，请先核对状态再重新提交', 'the previous server submission is not confirmed yet; check its status before resubmitting')}`,
           );
       }
       if (options.stopped()) {
@@ -91,7 +98,9 @@ export async function runRemoteBatch(options: {
         known.pending ||
         known.needs_reconciliation
       )
-        throw new Error(`${dir}: submission identity is unconfirmed`);
+        throw new Error(
+          `${dir}: ${bilingual('提交身份尚未确认', 'submission identity is unconfirmed')}`,
+        );
       active.set(dir, known);
       options.change(dir, 'submitted', known);
     } catch (error) {
@@ -119,6 +128,7 @@ export async function runRemoteBatch(options: {
   try {
     while ((!failed && next < options.cases.length) || active.size || submitting.size) {
       if (options.stopped()) break;
+      options.waiting?.(false);
       while (
         !failed &&
         next < options.cases.length &&
@@ -139,6 +149,7 @@ export async function runRemoteBatch(options: {
         await Promise.race(submitting);
         continue;
       }
+      options.waiting?.(true);
       await wait();
       if (options.stopped()) break;
       const entries = [...active];
@@ -151,6 +162,7 @@ export async function runRemoteBatch(options: {
     }
   } finally {
     // Submissions already under way finish (and are recorded) before the rest are given up.
+    options.waiting?.(false);
     await Promise.allSettled([...submitting]);
     for (const dir of options.cases.slice(next)) options.change(dir, 'cancelled');
   }
@@ -191,18 +203,21 @@ export async function checkInBatches<T>(options: {
   limit: number;
   check: (dir: string) => Promise<T | null | undefined>;
   progress?: (done: number, total: number) => void;
+  stopped?: () => boolean;
 }): Promise<{ results: T[]; errors: { dir: string; error: unknown }[] }> {
   const results: T[] = [];
   const errors: { dir: string; error: unknown }[] = [];
   let done = 0;
   await eachLimited(options.targets, Math.max(1, Math.floor(options.limit)), async (dir) => {
+    if (options.stopped?.()) return;
     try {
       const result = await options.check(dir);
+      if (options.stopped?.()) return;
       if (result !== null && result !== undefined) results.push(result);
     } catch (error) {
       errors.push({ dir, error });
     }
-    options.progress?.(++done, options.targets.length);
+    if (!options.stopped?.()) options.progress?.(++done, options.targets.length);
   });
   return { results, errors };
 }

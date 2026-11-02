@@ -26,7 +26,10 @@ function render(
     selectedCase: {
       dir: '/case',
       entry: { name: '/case' },
-      profile: { run_host: savedHost ?? null, remote_directory: remoteDirectory ?? null },
+      profile: {
+        run_host: savedHost ?? (record?.location === 'remote' ? 'server' : null),
+        remote_directory: remoteDirectory ?? null,
+      },
     },
     language: 'zh',
     root: '/project',
@@ -91,7 +94,11 @@ function render(
       return command === 'remote_fetch'
         ? { run_case: '/run-copy' }
         : {
-            record: { host: 'server', job: 'job', provenance: { stage: remoteStage ?? null } },
+            record: {
+              host: 'server',
+              job: 'job',
+              provenance: { stage: remoteStage ?? null, operation_id: record?.operation_id },
+            },
             status: { state: 'finished', exit_code: 0 },
           };
     },
@@ -362,6 +369,7 @@ test('a completed remote result opens straight from the server, without download
     {
       ...success,
       location: 'remote',
+      operation_id: 'ledger-operation',
       run_case: undefined,
       progress: { host: 'server' },
     },
@@ -413,14 +421,10 @@ test('old remote status and fetch cannot replace a newer local result', async ()
     },
   };
   const page = render(local);
-  for (const button of [page.remoteStatus, page.remoteFetch]) {
-    assert.ok(button);
-    assert.equal(button.props.disabled, false);
-    (button.props.onClick as () => void)();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.strictEqual(page.state.running['/case'], local);
-  }
-  assert.deepEqual(page.calls, ['remote_status', 'remote_fetch', 'remote_status']);
+  assert.equal(page.remoteStatus, undefined);
+  assert.equal(page.remoteFetch, undefined);
+  assert.strictEqual(page.state.running['/case'], local);
+  assert.deepEqual(page.calls, []);
 });
 
 test('project batch results open the completed target instead of a previously selected case', async () => {
@@ -608,6 +612,41 @@ test('batch results remain available when the first station fails or another sta
   }
 });
 
+test('remote batch keeps completed station results available while another station locks configuration', async () => {
+  const page = render(
+    {
+      ...success,
+      location: 'remote',
+      progress: {
+        remote: {
+          record: { host: 'server', job: 'job' },
+          status: { state: 'finished', exit_code: 0 },
+        },
+      },
+    },
+    [],
+    undefined,
+    {
+      '/other': {
+        ...success,
+        case: '/other',
+        location: 'remote',
+        status: 'running',
+        running: true,
+      },
+    },
+    ['/case', '/other'],
+    'server',
+  );
+  assert.ok(page.next);
+  assert.equal(page.next.props.disabled, false);
+  const resources = page.elements.filter((el) => el.type === 'Input' && el.props.type === 'number');
+  assert.ok(resources.length > 0);
+  assert.ok(resources.every((el) => el.props.disabled === true));
+  await (page.next.props.onClick as () => Promise<void>)();
+  assert.deepEqual(page.routes, [['openCase', '/case', 'results']]);
+});
+
 test('batch resource preferences are retained without clicking Back', () => {
   const page = render(undefined, [], undefined, {}, ['/case', '/other']);
   const save = page.effects.find((effect) => effect.toString().includes('const preferences'));
@@ -640,7 +679,7 @@ test('batch opens the successful remote station on the server without downloadin
       },
     },
   };
-  const page = render(first, [], undefined, { '/other': other }, ['/case', '/other']);
+  const page = render(first, [], undefined, { '/other': other }, ['/case', '/other'], 'server');
   assert.ok(page.next);
   assert.equal(page.next.props.disabled, false);
   (page.next.props.onClick as () => void)();
@@ -834,4 +873,51 @@ test('a single server run shows what the server does, its step and date, the job
     'the latest log lines are visible without opening anything',
   );
   assert.ok(page.elements.some((el) => el.props.className === 'run-progress-activity'));
+});
+
+test('a remote batch with a finished first station still offers Stop and locks run settings', () => {
+  const first = { ...success, location: 'remote' as const };
+  const other = {
+    ...success,
+    case: '/other',
+    run_id: 'other-ledger-operation',
+    location: 'remote' as const,
+    running: true,
+    status: 'unknown',
+    progress: { host: 'server' },
+  };
+  const page = render(first, [], undefined, { '/other': other }, ['/case', '/other'], 'server');
+  assert.ok(page.stop, 'the unfinished second station keeps Stop visible');
+  assert.equal(page.stop.props.disabled, false);
+  assert.equal(page.location?.props.disabled, true);
+  const fields = page.elements.filter((element) => ['Input', 'Select'].includes(element.type));
+  assert.ok(fields.length > 1);
+  assert.ok(fields.every((element) => element.props.disabled === true));
+});
+
+test('provenance enriches the matching restored ledger run without replacing a newer run', async () => {
+  for (const operation_id of ['saved', 'newer']) {
+    const restored = JSON.parse(
+      JSON.stringify({
+        ...success,
+        operation_id,
+        run_id: operation_id,
+        run_case: undefined,
+        requested_stage: undefined,
+      }),
+    );
+    const page = render(restored, [
+      { ...completedHistory, provenance: { ok: true, stage: 'mkinidata' } },
+    ]);
+    await page.recover();
+    const current = page.state.running['/case'];
+    assert.equal(current.operation_id, operation_id);
+    if (operation_id === 'saved') {
+      assert.equal(current.requested_stage, 'mkinidata');
+      assert.equal(current.run_case, '/saved-run');
+      assert.equal(render(current).next, undefined);
+    } else {
+      assert.strictEqual(current, restored);
+    }
+  }
 });

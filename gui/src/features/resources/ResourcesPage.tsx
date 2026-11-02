@@ -91,6 +91,12 @@ export default function ResourcesPage() {
   const localDirty = localPathSignature(localData) !== localPathSignature(savedLocal);
   // refresh 在异步等待后还要知道"此刻"有没有未保存的本机路径；放进 deps 会让它换身份，
   // 进而让加载 effect 重跑、把正在编辑的值重新覆盖掉，所以只读 ref。
+  const editorRef = useRef({ editor, original, baseline, dirty });
+  editorRef.current = { editor, original, baseline, dirty };
+  const serverConflict =
+    !!editor &&
+    original !== null &&
+    JSON.stringify(servers.find((server) => server.host === original)) !== baseline;
   const localDirtyRef = useRef(false);
   localDirtyRef.current = localDirty;
   function navigationReason() {
@@ -166,6 +172,7 @@ export default function ResourcesPage() {
     setEditor(saved ? structuredClone(saved) : null);
     setBaseline(saved ? JSON.stringify(saved) : '');
     setSelected(saved ? `server:${saved.host}` : 'local');
+    setOriginal(saved?.host ?? null);
     setPassword('');
     setError('');
     clearFeedback();
@@ -183,6 +190,7 @@ export default function ResourcesPage() {
         if (!token.active || token !== epoch.current) return;
         setServers(config.servers);
         const cases = await invokeJson<ServerCase[]>('remote_cases').catch(() => []);
+        if (!token.active || token !== epoch.current) return;
         setServerCases(Array.isArray(cases) ? cases : []);
         // 刷新只在没有未保存的本机路径时重设输入与基线：否则一次后台刷新会静默覆盖用户刚改的目录。
         if (!localDirtyRef.current) {
@@ -203,6 +211,15 @@ export default function ResourcesPage() {
             setOriginal(first.host);
             setEditor(structuredClone(first));
             setBaseline(JSON.stringify(first));
+          }
+        } else {
+          const current = editorRef.current;
+          if (current.original !== null && !current.dirty) {
+            const fresh = config.servers.find((server) => server.host === current.original);
+            setEditor(fresh ? structuredClone(fresh) : null);
+            setBaseline(fresh ? JSON.stringify(fresh) : '');
+            setOriginal(fresh?.host ?? null);
+            setSelected(fresh ? `server:${fresh.host}` : 'local');
           }
         }
         // The servers are all this page needs: compute resources do not depend on which project is
@@ -258,6 +275,13 @@ export default function ResourcesPage() {
   const run = (key: string, fn: () => Promise<unknown>) => void execute(key, fn).catch(() => {});
   async function save() {
     if (!editor) return;
+    if (serverConflict)
+      throw new Error(
+        t(
+          '服务器配置已在别处变更或删除。请先放弃本页修改并载入最新配置，再重新编辑。',
+          'This server was changed or deleted elsewhere. Discard these edits to load the latest configuration, then edit again.',
+        ),
+      );
     if (!configLoaded)
       throw new Error(
         t(
@@ -279,7 +303,9 @@ export default function ResourcesPage() {
     setServers(next);
     setOriginal(editor.host);
     setSelected(`server:${editor.host}`);
-    setBaseline(JSON.stringify(editor));
+    const saved = next.find((server) => server.host === editor.host)!;
+    setEditor(structuredClone(saved));
+    setBaseline(JSON.stringify(saved));
   }
   /** 删除连接设置：只改本机保存的服务器清单，服务器上的文件和任务不动。 */
   async function deleteConnection() {
@@ -933,6 +959,14 @@ export default function ResourcesPage() {
         />
       </header>
       {busy && <Notice>{t('操作进行中…', 'Operation in progress…')}</Notice>}
+      {serverConflict && (
+        <Notice tone="warning">
+          {t(
+            '服务器配置已在别处变更或删除；当前输入已保留。请使用“放弃修改”载入最新配置后再编辑。',
+            'This server was changed or deleted elsewhere. Your edits are preserved. Use Discard edits to load the latest configuration before editing again.',
+          )}
+        </Notice>
+      )}
       {error && <Notice tone="error">{error}</Notice>}
       <Dialog
         open={deletingServer !== null}

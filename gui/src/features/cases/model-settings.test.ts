@@ -652,3 +652,21 @@ test('classification keeps site and forcing parameters in data settings', async 
     /模型版本/,
   );
 });
+
+test('material and urban exclusions preserve the side just enabled and ignore quoted empty solutes', async () => {
+  const { exclusionPatch } = await import('./model-settings');
+  const on = '.true.',
+    off = '.false.';
+  const context = { domain: 'site', subgrid: 'PFT' };
+  const urban = exclusionPatch({ DEF_USE_ISOTOPE: on }, { DEF_URBAN_RUN: on }, context);
+  assert.equal(urban.patch.DEF_URBAN_RUN, on);
+  assert.equal(urban.patch.DEF_USE_ISOTOPE, off);
+  const material = exclusionPatch({ DEF_URBAN_RUN: on }, { DEF_USE_ISOTOPE: on }, context);
+  assert.equal(material.patch.DEF_USE_ISOTOPE, on);
+  assert.equal(material.patch.DEF_URBAN_RUN, off);
+  for (const empty of ["''", '""', "'  '", '']) {
+    const unchanged = exclusionPatch({ DEF_URBAN_RUN: on, DEF_SOLUTE_NAMES: empty }, {}, context);
+    assert.deepEqual(unchanged.closed, []);
+    assert.equal(unchanged.patch.DEF_SOLUTE_NAMES, undefined);
+  }
+});

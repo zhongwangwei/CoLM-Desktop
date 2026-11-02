@@ -33,6 +33,7 @@ const base = {
     root: '/projects',
     name: 'batch',
     runtime: '/runtime',
+    timestep: '1800',
     landcover: 'IGBP',
     subgrid: 'PC',
   },
@@ -179,5 +180,16 @@ test('first-year replay accepts exactly one source year but per-site cutoff rema
   assert.throws(
     () => planMultiSites({ ...base, form: { ...base.form, engine: 'fortran' } }),
     /Rust/,
+  );
+});
+
+test('invalid anniversary messages follow the selected language', () => {
+  assert.throws(
+    () => firstYearCutoff('2000-02-29', true),
+    (error: Error) => /First-year/.test(error.message) && !/[\u4e00-\u9fff]/.test(error.message),
+  );
+  assert.throws(
+    () => firstYearCutoff('2000-02-29', false),
+    (error: Error) => /周年/.test(error.message) && !/First-year/.test(error.message),
   );
 });

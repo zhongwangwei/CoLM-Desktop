@@ -354,11 +354,18 @@ function PreparationResultView({
         'The site file is ready; use “Use for new case” below to continue with it.',
       ),
     );
-  if (summary.kind === 'forcing' || summary.kind === 'era5')
+  if (summary.kind === 'forcing')
     steps.push(
       t(
         '可在「项目」里打开算例运行，或点下方「用于新算例」带着这些文件继续。',
         'Open a case under Project to run it, or use “Use for new case” below to continue with these files.',
+      ),
+    );
+  if (summary.kind === 'era5')
+    steps.push(
+      t(
+        '已将下载目录设为 ERA5 辅助数据。切换到「修复缺测」或表格逐站修复后，再将完成的强迫场用于新算例；此目录不能直接作为站点强迫场。',
+        'The download directory is now selected as ERA5 auxiliary data. Repair missing forcing data or finalize table stations before using the completed forcing for a new case; this directory is not a site forcing file.',
       ),
     );
   if (summary.kind === 'observations')
@@ -384,7 +391,8 @@ function PreparationResultView({
     );
   if (
     !hasSelectedCase &&
-    (summary.kind === 'forcing' || summary.kind === 'era5' || summary.state === 'complete')
+    summary.kind !== 'era5' &&
+    (summary.kind === 'forcing' || summary.state === 'complete')
   )
     steps.push(
       t(
@@ -446,7 +454,7 @@ function PreparationResultView({
           {step}
         </p>
       ))}
-      {hasSelectedCase && onOpenRuns && (
+      {hasSelectedCase && onOpenRuns && summary.kind !== 'era5' && (
         <div className="actions">
           <Button onClick={onOpenRuns}>{t('去「检查并运行」', 'Go to “Review and run”')}</Button>
         </div>
@@ -460,7 +468,7 @@ function PreparationResultView({
   );
 }
 export default function PreparationPage() {
-  const { state, notify, navigate, update } = useApp();
+  const { state, notify, navigate, update, registerCloseGuard } = useApp();
   currentLang = state.language;
   const [imported, setImported] = useState<Imported[]>([]),
     [mode, setMode] = useState('netcdf'),
@@ -528,6 +536,12 @@ export default function PreparationPage() {
   async function work(fn: () => Promise<unknown>) {
     if (lock.current) return;
     lock.current = true;
+    const releaseCloseGuard = registerCloseGuard(() =>
+      t(
+        '数据准备正在执行，关闭会中断任务。',
+        'Data preparation is running; closing interrupts it.',
+      ),
+    );
     setBusy(true);
     // 新操作一开始就清掉旧结果：失败时页面上不能还挂着上一次的成功卡片。
     setResult(null);
@@ -562,12 +576,14 @@ export default function PreparationPage() {
       } else notify(String(e), true);
       throw e;
     } finally {
+      releaseCloseGuard();
       setBusy(false);
       lock.current = false;
     }
   }
   function changeMode(v: string) {
     setMode(v);
+    if (v === 'table' || v === 'era5' || v === 'observation') setProduced({});
     setImported([]);
     setProbe(null);
     setSlots([]);
@@ -678,15 +694,18 @@ export default function PreparationPage() {
     };
   }
   // 产物已存在时后端不覆盖（它可能正被某个算例引用）：问过再带 overwrite 重来。
-  async function confirmOverwrite<T>(write: (overwrite: boolean) => Promise<T>): Promise<T> {
+  async function confirmOverwrite<T>(
+    write: (overwrite: boolean) => Promise<T>,
+    output = form.dst,
+  ): Promise<T> {
     try {
       return await write(false);
     } catch (error) {
       if (!String(error).includes('产物已存在，未覆盖')) throw error;
       const ok = await askConfirm(
         t(
-          `输出文件已经存在：${form.dst}。覆盖会改掉引用它的算例所用的强迫场。要覆盖吗？`,
-          `The output file already exists: ${form.dst}. Overwriting changes the forcing of any case that uses it. Overwrite?`,
+          `输出文件已经存在：${output}。覆盖会改掉引用它的算例所用的强迫场。要覆盖吗？`,
+          `The output file already exists: ${output}. Overwriting changes the forcing of any case that uses it. Overwrite?`,
         ),
         { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
       );
@@ -760,6 +779,7 @@ export default function PreparationPage() {
           },
         });
         setImported(batch);
+        setProduced({});
         return batch;
       }
       if (mode === 'gaps')
@@ -784,6 +804,10 @@ export default function PreparationPage() {
     });
     if (done !== undefined) {
       if (mode === 'site') setProduced((p) => ({ ...p, site: output }));
+      if (mode === 'era5') {
+        setProduced({});
+        setForm((old) => ({ ...old, era5: output }));
+      }
       if (mode === 'netcdf' || mode === 'gaps') setProduced((p) => ({ ...p, met: output }));
     }
     return done;
@@ -802,7 +826,7 @@ export default function PreparationPage() {
     return stopped;
   }
   // 带着这一页做好的文件去新建模拟；原来什么都没做也能点，进去是空白向导（2026-10-22 用户实测）。
-  const canUse = !!produced.site || !!produced.met;
+  const canUse = !['era5', 'observation'].includes(mode) && (!!produced.site || !!produced.met);
   function useForNewCase() {
     if (!canUse) return false;
     update({
@@ -830,17 +854,22 @@ export default function PreparationPage() {
           units: s.wants,
           also_add: [],
         }));
-      const report = await invoke<{ unresolved: number }>('repair_forcing', {
-        src: item.staged_path,
-        dst: item.final_path,
-        slots: canonical,
-        options: {
-          ...gapOptions(),
-          latitude: item.latitude,
-          longitude: item.longitude,
-          utc_offset: item.timezone_offset_hours,
-        },
-      });
+      const report = await confirmOverwrite(
+        (overwrite) =>
+          invoke<{ unresolved: number }>('repair_forcing', {
+            src: item.staged_path,
+            dst: item.final_path,
+            slots: canonical,
+            options: {
+              ...gapOptions(),
+              latitude: item.latitude,
+              longitude: item.longitude,
+              utc_offset: item.timezone_offset_hours,
+            },
+            overwrite,
+          }),
+        item.final_path,
+      );
       if (report.unresolved)
         throw new Error(
           t(
@@ -849,6 +878,7 @@ export default function PreparationPage() {
           ),
         );
       setImported((items) => items.filter((x) => x.staged_path !== item.staged_path));
+      setProduced({ met: item.final_path });
       return { path: item.final_path, ...report };
     });
   }

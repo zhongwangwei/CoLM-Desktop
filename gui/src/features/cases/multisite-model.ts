@@ -23,11 +23,13 @@ export function siteDraft(site: Site): MultiSiteDraft {
   };
 }
 
-export function firstYearCutoff(start: string): string {
+export function firstYearCutoff(start: string, en = false): string {
   const cutoff = `${String(Number(start.slice(0, 4)) + 1).padStart(4, '0')}${start.slice(4)}`;
   if (!validDate(start) || !validDate(cutoff))
     throw new Error(
-      '第一年预热需要有效的周年日期；请改用分站点配置。 / First-year spinup requires a valid anniversary; use per-site settings.',
+      en
+        ? 'First-year spinup requires a valid anniversary; use per-site settings.'
+        : '第一年预热需要有效的周年日期；请改用分站点配置。',
     );
   return cutoff;
 }
@@ -96,7 +98,7 @@ export function planMultiSites({
     let cutoff = draft.spinup_end;
     if (mode === 'first-year') {
       try {
-        cutoff = firstYearCutoff(draft.start);
+        cutoff = firstYearCutoff(draft.start, en);
       } catch (error) {
         fail(String((error as Error).message), String((error as Error).message), draft.name);
       }

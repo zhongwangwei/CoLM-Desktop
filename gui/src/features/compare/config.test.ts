@@ -15,6 +15,7 @@ import {
   effectiveSummary,
   freezeCompareSnapshot,
   parseOpenbenchConfig,
+  restoreCompareSnapshot,
   snapshotStale,
   structuralProblems,
 } from './config';
@@ -590,4 +591,57 @@ it('rejects hand-edited statistics methods that OpenBench 3.0.8 cannot run', () 
     tchProblems.some(([zh]) => /Three_Cornered_Hat/.test(zh)),
     JSON.stringify(tchProblems),
   );
+});
+
+it('restores serialized snapshots and rejects a different machine or changed frozen inputs', () => {
+  const design: EvaluationDesign = {
+    ...base,
+    machine: { host: 'A', openbenchRoot: '/ob', refRoot: '/refs' },
+    simulations: base.simulations.map((simulation) => ({ ...simulation, variables: undefined })),
+  };
+  const snapshot = freezeCompareSnapshot(design, buildOpenbenchConfig(design));
+  const stored = JSON.parse(JSON.stringify(snapshot));
+  assert.equal(restoreCompareSnapshot(stored, 'A')?.designFingerprint, snapshot.designFingerprint);
+  assert.equal(restoreCompareSnapshot(stored, 'B'), null);
+  assert.equal(restoreCompareSnapshot({ ...stored, sites: [] }, 'A'), null);
+  assert.equal(restoreCompareSnapshot({ design: {} }, 'A'), null);
+});
+
+it('rejects zero and negative years in both generated and hand-edited configuration', () => {
+  const built = buildOpenbenchConfig(base);
+  for (const years of [
+    [0, 0],
+    [-1, 2005],
+  ] as [number, number][]) {
+    assert.throws(() => buildOpenbenchConfig({ ...base, years }), /positive integers/);
+    const parsed = parseOpenbenchConfig(
+      built.config.replace(/years: \[[^\]]+\]/, `years: [${years.join(', ')}]`),
+    );
+    assert.equal(parsed.config, null);
+    assert.ok(parsed.problems.some(([, english]) => english.includes('positive whole numbers')));
+  }
+});
+
+it('rejects changing frozen grid/station type even when station paths look valid', () => {
+  const config = parseOpenbenchConfig(generated()).config!;
+  const grid = config.simulations.find((s) => s.key === 'hb_draft_2')!;
+  grid.dataType = 'stn';
+  grid.rootDir = `${design.projectDir}/sim`;
+  grid.fulllist = `${grid.rootDir}/${grid.key}.csv`;
+  assert.ok(structuralProblems(design, config).some(([, en]) => en.includes('data_type grid')));
+  const station = config.simulations.find((s) => s.key === 'AT_Neu_official')!;
+  station.dataType = 'grid';
+  assert.ok(structuralProblems(design, config).some(([, en]) => en.includes('data_type stn')));
+});
+
+it('requires every station CSV to have exactly one frozen site input', () => {
+  const built = buildOpenbenchConfig(base);
+  const config = parseOpenbenchConfig(built.config).config!;
+  assert.deepEqual(structuralProblems(design, config, built.sites), []);
+  for (const sites of [[], [...built.sites, ...built.sites]])
+    assert.ok(
+      structuralProblems(design, config, sites).some(([, en]) =>
+        en.includes('frozen station list'),
+      ),
+    );
 });
