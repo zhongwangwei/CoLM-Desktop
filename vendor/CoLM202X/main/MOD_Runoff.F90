@@ -109,7 +109,14 @@ CONTAINS
 
          ELSE
 
-            eta = topoweti
+            ! Newton iteration must start above the distribution's lower bound mu_twi,
+            ! otherwise x = 0, pgr0 = 0 and the patch is taken as fully saturated
+            ! whatever zwt is. topoweti is the mean mu + alp*chi for consistent data.
+            IF (topoweti > mu_twi) THEN
+               eta = topoweti
+            ELSE
+               eta = mu_twi + alp_twi*chi_twi
+            ENDIF
             niter = 0
             DO WHILE (niter < 20)
                niter = niter + 1

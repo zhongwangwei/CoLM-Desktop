@@ -213,3 +213,11 @@ BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材
 只扣液态水，丢了桌面补丁的"冻结时先扣冰再扣液"（以及 `imperv_subl_soil` 记账）。
 恢复为 `d79ddcbf^` 的桌面版本后，单步隔离逐位一致；三站点黄金重生成后 Rust
 全部 within tolerance（127 变量）。细节见 `docs/implementation-verification.md`。
+
+## 2026-11-02（续二）：三向审计补回另外 3 条 fork 补丁
+
+用"基准导入 `1deb5ee2` → 4c 合并前桌面树 `d79ddcbf^` → 当前 HEAD"三向比对功能行，
+又确认三处静默丢失并恢复：`MOD_Runoff` 的 TOPMODEL Newton 起点兜底、
+`MOD_SpatialMapping` 的区域边缘行/列兜底、`MOD_Vars_TimeInvariants` 的
+`fsatmax/fsatdcv/topoweti/alp_twi/chi_twi/mu_twi/vic_*` 清零。
+其余缺失行经逐项核对属 material/tracer 重构或上游新实现，无需恢复。

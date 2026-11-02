@@ -43582,3 +43582,41 @@ kernel manifest 记录新源码状态。恢复只改 Fortran 宿主；Rust 代�
 
 **过程卫生**：所有探针（Fortran `DBGPC/DBGVSF`、Rust `DBGPC/DBGVSF/DBGSYNC`）已回滚；
 kernel 三预设重建通过；HEAD 干净（仅 GUI/colm-agent 并行改动未触碰）。
+
+## 系统性审计：4c 合并还丢了 3 条 fork 补丁（2026-11-02 收尾轮）
+
+前两处（hydro 补丁、不透水表层冰/液分配）是逐案挖出来的；本轮做**系统性审计**：
+把 fork 相对基准导入（`1deb5ee2`）新增的代码行，与 4c 合并前的桌面树（`d79ddcbf^`）
+和当前 HEAD 三向比对，筛出"fork 新增、但 HEAD 已消失"的功能行（排除 TRACER/ 与
+mksrfdata/ 的重构路径和声明行）。结果分两类：
+
+**确认为静默丢失、已恢复的（3 处）**：
+
+1. `MOD_Runoff.F90`（TOPMODEL Newton 起点）：fork 补丁在 `topoweti <= mu_twi` 时用
+   `eta = mu_twi + alp_twi*chi_twi` 兜底（否则 `pgr0 = 0`、任何 zwt 都判成全饱和）；
+   当前 HEAD 直接 `eta = topoweti`。已恢复。
+2. `MOD_SpatialMapping.F90`（区域边缘映射）：fork 补丁在 `yblk/xblk == 0`（区域分块外）
+   时用另一侧已覆盖的行/列兜底；HEAD 丢了这 4 行。已恢复。
+3. `MOD_Vars_TimeInvariants.F90`（常量重启初值）：`fsatmax/fsatdcf/topoweti/alp_twi/
+   chi_twi/mu_twi/vic_*` 只在部分 runoff/TOPMODEL 方案里赋值，fork 补丁在分配后清零，
+   避免把分配器残留写进 const restart；HEAD 丢了这几行。已恢复。
+
+**判定为重构/上游新功能、无需恢复的**（逐项核对过）：
+
+- `MOD_Ozone.F90` 的 LULC 映射已重构进 `MOD_Const_PFT::representative_pft_of_lct`；
+- `MOD_Hist.F90` 的 `filter_irrig` 清零已由当前实现（`filter_irrig(:) = .false.` + 注释）覆盖；
+- `MOD_Grid_Reservoir.F90` 的 method-2 停止检查已被上游真正的 Hanazaki 实现取代；
+- `MOD_Grid_RiverLakeFlow.F90` 的 `volwater_curve`/storage-dt 检查/速度截断都在，
+  消失的 `fields(...)` 行是 tracer 字段组，已由 material 重构接管；
+- `CoLMMAIN`/`CoLM.F90`/`MOD_LeafTemperaturePC`/`MOD_Vars_1DAccFluxes`/`MOD_Lulcc_Driver`
+  的缺失行全是 `DEF_USE_TRACER` 分支，material always-on 重构刻意删除；
+- `MOD_SoilSnowHydrology` 的 `frcsat_vic` 是旧调用签名的局部哑元，当前用 optional
+  `frcsat` 表达同一语义；
+- `MOD_Namelist` 的 `CASE ('MJ79', 'mj79')` 当前写作无空格版本，语义相同。
+
+**验证**：三预设重建 exit=0；重生成三站点黄金后**历史数值与上一提交逐位相同**
+（golden .nc 只是重写时间戳，已还原文件字节）；Rust vs 黄金仍 127 变量全过；
+drift 测试 4 个、core 542 测试全过。
+
+**遗留**：材料运行期族（BGC/同位素/甲烷）在恢复后的宿主补丁上做一次冒烟；
+下一步可把本次三向审计脚本化进 `xtask`，作为以后合并上游的常驻检查。
