@@ -43325,3 +43325,19 @@ RTL 阶段），依据是运行时逐位比对；后续若能拿到 RTL 对照�
 黄金全绿。
 
 **下一步**：record 14 的 `f_alb` 2.8e-17 与湿窗 record 236 种子。
+
+### record 14 的 `f_alb` 残差不在反照率计算里（2026-11-02）
+
+对 `albland` 出口（含冠层 two-stream，非 3.1 混合处）按调用打点，按 fsno 对齐后
+（Fortran call k ↔ Rust prepare_surface_optics call k+7）：**call 12～17 的
+`alb(1,1)/alb(1,2)/alb(2,1)/alb(2,2)` 全部逐位相同**（`lai/sai` 的差异是探针口径：
+Fortran 打印雪盖折算后的值，Rust 打印 temporal 原值）。
+
+但 24 步历史 record 14 的 `f_alb` 仍差：可见光直射 2.8e-17（≈2 ULP）、可见光漫射
+1.4e-17（1 ULP）。即**反照率计算本身在 12～17 步已逐位一致**，残差产生在之后的路径：
+候选是 Thermal/雪面吸收订正里对 `alb` 的再处理、或 history 写出前的聚合/快照路径，
+而不是 `albland`/two-stream。下一步应查 `MOD_Thermal` 里 `alb` 的使用/改写与 history
+写出时机（Rust 步末 prepare vs Fortran 步内计算，可能相差一步）。
+
+**过程卫生**：探针已回滚，kernel/Rust 引擎干净重建；`CN-Cng` 黄金复验 127 变量
+within tolerance；本轮只新增本记录（工作树里另有 GUI 的并行改动，与本轮无关，未触碰）。
