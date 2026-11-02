@@ -43491,3 +43491,40 @@ forcing 组合，使这个差异第一次越过可观测阈值。
 
 **最终状态**：Fortran 三站点黄金、core 542 测试、fmt/clippy 全绿；工作树干净
 （仅 GUI 并行改动未触碰）；所有探针/实验均已回滚。
+
+## 重大发现与修正：4c 同步丢失了 MOD_Hydro_SoilWater 的桌面补丁（2026-11-02）
+
+**发现过程**：为定位雪/湿窗口残余，给两侧 VSF 子步计数（`count_implicit/explicit/wet2dry`）
+并在单步隔离算例上对照，发现 Rust 的 `project_richards_liquid_water`（Richards 质量收支投影）
+与 PHS 两次水交换/`pond_exchange` 入渗记账在 vendored Fortran 中**根本不存在**：
+
+- `git show 1deb5ee2:vendor/.../MOD_Hydro_SoilWater.F90 | grep -c mass_budget` = **8**；
+- `git show d79ddcbf:...` 与 `HEAD:...` = **0**；`pond_exchange` 同样从 7 处降为 0。
+- 即上游 4c 合并提交 `d79ddcbf` 用 4c 版本替换了该文件，**静默丢掉了**第 477 轮定案为
+  "对全部算例无条件生效"的两条桌面宿主补丁（PHS 根系回水与基流分两次交换；
+  Richards 方程质量收支投影）。
+
+**修复**：把 `main/HYDRO/MOD_Hydro_SoilWater.F90` 恢复为 4c 合并前的桌面版本
+（`d79ddcbf^` 的内容；接口与 4c 版本逐字兼容，default/latlon/crop 三预设全部构建 exit=0）。
+
+**效果（同一份初始数据，Rust vs 恢复后的 Fortran）**：
+
+| 算例 | 恢复前 Rust vs 旧黄金 | 恢复后 Rust vs 新黄金 |
+|---|---|---|
+| CN-Cng | 1 项（`f_qinfl`） | **0 项（127 变量全过）** |
+| CN-Cng-wet | 35 项 | **0 项（127 变量全过）** |
+| US-NR1-snow | 76 项 | 77 项（新问题，见下） |
+
+旧黄金与新黄金的差异为 **1 / 35 / 72** 个变量——正好与恢复前的 Rust 残余同量级，
+说明此前湿窗残余/`xerr`/土壤水差异的主因就是**这两条补丁缺失**，而不是求解器收敛路径。
+因此本文件前面关于"湿窗 record236 属 VSF Newton 定案"的结论**已被修正**：恢复补丁后湿窗逐位一致。
+
+**黄金基线更新**：用恢复后的内核重新生成三站点黄金（数值变化属于恢复物理，不是放宽容差），
+kernel manifest 记录新源码状态。恢复只改 Fortran 宿主；Rust 代码未变。
+
+**后续**：
+1. 雪窗仍 77 项：新黄金下首个分歧在 record47，`f_fgrnd` 最高差 ~86 W/m²——量级远大于
+   已清除的 ULP 种子，需当作新的真实差异重新定位（下一步）；
+2. 按第 477 轮补丁清单审计其它宿主文件是否也丢了补丁（本次 marker 抽查中
+   `relocate_soil_frost_ice`/`defer_surface_ice_overflow`/`topoweti` 等都还在）；
+3. 材料运行期族（BGC/同位素/甲烷）在替换后的 hydro 文件上做一次快速冒烟。

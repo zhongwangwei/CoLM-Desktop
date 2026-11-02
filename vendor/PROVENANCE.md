@@ -192,3 +192,17 @@ default/latlon/crop 三预设全部构建成功。
 `mt_wetland_decomp` → `mt_soil_step` → 运行期 `IF (DEF_USE_BGC) CALL mt_bgc_n_leaching`，
 BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材料调用改走这个 facade；
 `mt_lake_step` 仍沿用桌面的 step 解析方式。三站点黄金仍 within tolerance。
+
+## 2026-11-02：恢复被 4c 合并丢失的 HYDRO/MOD_Hydro_SoilWater 桌面补丁
+
+`d79ddcbf`（上游 CoLM202X MaterialTransport 重构合并）把
+`main/HYDRO/MOD_Hydro_SoilWater.F90` 换成了 4c 版本，但该文件里有两类桌面宿主补丁
+（第 477 轮定案为"对所有算例无条件生效"）：
+
+- PHS 根系回水与基流分两次与含水层交换，并给入渗 `qinfl` 计入 `pond_exchange`；
+- Richards 方程质量收支投影（`project_richards_liquid_water`，水量平衡误差 1e-9→1e-16）。
+
+`git show 1deb5ee2` 里该文件有 8 处 `mass_budget`、7 处 `pond_exchange`，`d79ddcbf` 之后为 0。
+本轮把文件恢复为 `d79ddcbf^` 的桌面版本；接口与 4c 版本兼容，default/latlon/crop 三预设
+构建通过。恢复后 Rust 与 Fortran 的站点对拍为 0/0/77（此前 1/35/76），黄金已按恢复后的
+内核重新生成。细节与证据见 `docs/implementation-verification.md` 同轮小节。
