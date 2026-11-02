@@ -332,22 +332,37 @@ pub fn leaf_temperature(
     } else {
         0.0
     };
-    // `dewfraction(..., colm2024_rain_capacity_for_fwet(...))`：雨水容量取截留方案的值。
-    let wetness = crate::interception::canopy_wetness_with_capacity(
-        lai,
-        sai,
-        input.maximum_dew_mm,
-        state.canopy_water,
-        input.options.vegetation_snow,
-        crate::interception::fwet_rain_capacity(
-            input.maximum_dew_mm,
+    // `dewfraction` 的两种调用形状（`MOD_LeafTemperature.F90:504-510`）：只有
+    // `DEF_Interception_scheme == 8` 才把 CoLM2024 雨容量当 `satcap_rain_override`
+    // 传进去，其余方案走 `(dewmxi/vegt)*ldew` 的原始结合顺序。两者数学等价但舍入
+    // 不同——把 `dewmx*(lai+sai)` 当容量再除，湿窗第 4 步的 `fwet` 会差 1 ULP，
+    // 经 `etr_dtl`→叶温迭代放大成整月分叉。`colm2024` 为 `Some` 恰好就是方案 8
+    // （见 `CanopyInterceptionInput.colm2024` 的约定与 runtime 的构建）。
+    let wetness = if input.colm2024.is_some() {
+        crate::interception::canopy_wetness_with_capacity(
             lai,
             sai,
-            input.eastward_wind_m_s,
-            input.northward_wind_m_s,
-            input.colm2024,
-        ),
-    )?;
+            input.maximum_dew_mm,
+            state.canopy_water,
+            input.options.vegetation_snow,
+            crate::interception::fwet_rain_capacity(
+                input.maximum_dew_mm,
+                lai,
+                sai,
+                input.eastward_wind_m_s,
+                input.northward_wind_m_s,
+                input.colm2024,
+            ),
+        )?
+    } else {
+        crate::interception::canopy_wetness(
+            lai,
+            sai,
+            input.maximum_dew_mm,
+            state.canopy_water,
+            input.options.vegetation_snow,
+        )?
+    };
     let fwet = wetness.wet_fraction;
     let roughness = canopy_roughness(lsai, input.canopy_top_height_m, 1.0)?;
     let z0mv = roughness.momentum_roughness_m;

@@ -291,3 +291,33 @@ fn pft_gross_interception_is_clamped_after_the_fraction_weighted_sum() {
         crate::pft::pft_gross_sum(&fluxes, fractions.iter().copied(), |f| f.gross_rain_kg_m2_s);
     assert_eq!(rain, 0.5);
 }
+
+#[test]
+fn scheme_one_dewfraction_uses_the_plain_rounding_instead_of_the_capacity_fallback() {
+    // 上游只有 `DEF_Interception_scheme == 8` 才把 CoLM2024 雨容量当
+    // `satcap_rain_override`；方案 1 走 `(dewmxi/vegt)*ldew`。
+    // 两者数学等价，但把 `dewmx*(lai+sai)` 当容量再除会差 1 ULP：湿窗第 4 步
+    // `fwet` 因此差 1 ULP，经 `etr_dtl` → 叶温迭代放大成整月分叉。
+    // 这个测试锁住"方案 1 = plain 路径"在舍入上与容量兜底不同，防止再把
+    // `canopy_wetness_with_capacity` 无条件用回来。
+    let water = CanopyWater {
+        total_mm: 0.174_891_881_047_736_9,
+        rain_mm: 0.174_891_881_047_736_9,
+        snow_mm: 0.0,
+    };
+    let plain = canopy_wetness(1.8, 0.45, 0.1, water, true).unwrap();
+    let fallback_capacity = fwet_rain_capacity(
+        0.1,
+        1.8,
+        0.45,
+        3.421_689_873_308_203_3,
+        3.421_689_873_308_203_3,
+        None,
+    );
+    let capacity =
+        canopy_wetness_with_capacity(1.8, 0.45, 0.1, water, true, fallback_capacity).unwrap();
+    assert_ne!(
+        plain.wet_fraction.to_bits(),
+        capacity.wet_fraction.to_bits()
+    );
+}

@@ -43074,3 +43074,38 @@ GIMPLE 对齐方式改 Rust 表达式。
 
 **过程卫生**：所有探针已回滚，kernel 与 Rust 引擎重新构建干净（仅剩 vendor 自带的
 `DBGSTO` 字符串），重跑 `CN-Cng` 黄金确认 127 变量 within tolerance；HEAD 干净。
+
+### Rust↔Fortran 湿窗种子根因修复：dewfraction 的方案分支（2026-11-02）
+
+**根因**（用上一节的 satcap 探针逐项打印确认）：
+- 桌面 Fortran `MOD_LeafTemperature.F90:504-510` 的 `dewfraction` 调用分两支：
+  只有 `DEF_Interception_scheme == 8` 才把 CoLM2024 雨容量当 `satcap_rain_override`，
+  其余方案走 `(dewmxi/vegt)*ldew`；
+- Rust 的 `leaf_temperature.rs`（LCT）与 `leaf_temperature_pc.rs`（PC）都**无条件**走
+  `canopy_wetness_with_capacity`，方案 1 时容量退回 `dewmx*(lai+sai)`。
+  两者数学等价但舍入不同：`(1/dewmx/vegt)*ldew` vs `ldew/(dewmx*vegt)` 差 1 ULP
+  ——实测湿窗第 4 步 `fwet`：Fortran `0.845391924196753131`、Rust `...242`。
+- 这条 1 ULP 经 `etr_dtl`（迭代 1，1 ULP）→ 叶温能量迭代（迭代 4 的 `dtl` 放大到
+  2.6e-11）→ `etr/gssun/rstfac`（1e-14）→ 雪/植物水力阈值，最终放大成整月差异。
+
+**修复**：两处都改成与上游相同的分支——`colm2024` 为 `Some`（方案 8，契约见
+`CanopyInterceptionInput.colm2024`）时用容量路径，`None` 时用
+`canopy_wetness`（plain `(dewmxi/vegt)*ldew`）。新增回归测试
+`interception_tests::scheme_one_dewfraction_uses_the_plain_rounding_instead_of_the_capacity_fallback`
+锁住两条路径的舍入差异。
+
+**实测效果**
+- 湿窗 16 步逐记录对拍：修复前第 4 步起 23 个变量分叉；修复后**只剩已知的
+  `f_qinfl`**（第 2 条记录，近零变号），物理场逐位对齐；
+- 湿窗整月：首个非 `f_qinfl` 分歧从**第 3 条记录推迟到第 236 条**（264 条里最后 28 条），
+  月窗口 tier2 计数仍 35（晚期另一个种子放大），但 15 天物理场基本逐位一致；
+- CN-Cng 仍 1 项（`f_qinfl`），US-NR1-snow 仍 76 项（其首分歧在第 11 步短波，
+  是另一个与 dewfraction 无关的 1 ULP 种子）；
+- Fortran 三站点黄金仍全部 `127 variables within tolerance`。
+
+**下一步**：追雪窗第 11 步的短波 1 ULP 种子（`f_sabg/f_sabvsha/f_sr`），以及湿窗
+第 236 条记录附近的新种子；这两条都独立于本轮修复。
+
+**验证**：`cargo test -p colm-core --lib interception/leaf_temperature/leaf_temperature_pc/pft`
+（11/15/2/19 全过）；`cargo clippy -p colm-core --lib -- -D warnings`；`cargo fmt --all`；
+kernel 干净重建；`golden-run`+`golden-compare` 三站点全过；Rust 对最终黄金 1/35/76。

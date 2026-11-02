@@ -254,23 +254,33 @@ pub(crate) fn leaf_temperature_pc(
             // `dewfraction(..., colm2024_rain_capacity_for_fwet(dewmx,lai,sai,us,vs,htop(i),
             // pftclass(i),.true.,ncd_p(i),ncw_p(i),bcw_p(i)))`（`:655-660`）：方案 8 用逐 PFT 的冠层结构，
             // 否则 `dewmx·max(0, lai+sai)`。
-            let capacity = crate::interception::fwet_rain_capacity(
-                leaf.maximum_dew_mm,
-                lai[i],
-                sai[i],
-                leaf.eastward_wind_m_s,
-                leaf.northward_wind_m_s,
-                crate::pft::pft_colm2024(leaf.colm2024, &parameters[i])?,
-            );
-            fwet[i] = crate::interception::canopy_wetness_with_capacity(
-                lai[i],
-                sai[i],
-                leaf.maximum_dew_mm,
-                water,
-                vegetation_snow,
-                capacity,
-            )?
-            .wet_fraction;
+            let colm2024 = crate::pft::pft_colm2024(leaf.colm2024, &parameters[i])?;
+            let wetness = if colm2024.is_some() {
+                crate::interception::canopy_wetness_with_capacity(
+                    lai[i],
+                    sai[i],
+                    leaf.maximum_dew_mm,
+                    water,
+                    vegetation_snow,
+                    crate::interception::fwet_rain_capacity(
+                        leaf.maximum_dew_mm,
+                        lai[i],
+                        sai[i],
+                        leaf.eastward_wind_m_s,
+                        leaf.northward_wind_m_s,
+                        colm2024,
+                    ),
+                )?
+            } else {
+                crate::interception::canopy_wetness(
+                    lai[i],
+                    sai[i],
+                    leaf.maximum_dew_mm,
+                    water,
+                    vegetation_snow,
+                )?
+            };
+            fwet[i] = wetness.wet_fraction;
             sat[i] = Some(saturation_specific_humidity(tl[i], psrf)?);
         }
     }
