@@ -821,3 +821,21 @@ fn cold_ice_thermal_gap_retains_allocated_missing_without_a_canopy_solver() {
         assert_eq!(state.sunlit_absorption, [[0.0; 2]; 2]);
     }
 }
+
+#[test]
+fn ground_albedo_mixing_fuses_the_soil_product() {
+    // US-NR1-snow 第 2 步的实测输入/输出：Fortran `MOD_Albedo.F90:394` 的
+    // `albg = (1-fsno)*albsoi + fsno*albsno` 在 `albg(2,1)`（NIR 直射）上是
+    // `FMA(1-fsno, albsoi, fsno*albsno)`（土壤乘积融合、雪乘积先舍入）。
+    // 旧实现把直射列写成 FMA(fsno, albsno, (1-fsno)*albsoi)（雪乘积融合），
+    // 在下面这组输入上比 Fortran 低 1 ULP（...dbe vs ...dbf）。
+    let soil = [[f64::from_bits(0x3FD1EB851EB851EC); 2]; 2]; // 0.28
+    let snow = [[f64::from_bits(0x3FE93E887C3C8075); 2]; 2]; // 0.7888834406367226
+    let mixed = mix_ground_albedo(soil, snow, f64::from_bits(0x3FE25E5387F4A59A));
+    assert_eq!(mixed[1][0].to_bits(), 0x3FE24EB22BF30DBF);
+    let old_formula = snow[1][0].contract(
+        f64::from_bits(0x3FE25E5387F4A59A),
+        (1.0 - f64::from_bits(0x3FE25E5387F4A59A)) * soil[1][0],
+    );
+    assert_ne!(mixed[1][0].to_bits(), old_formula.to_bits());
+}

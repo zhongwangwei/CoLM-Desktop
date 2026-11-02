@@ -43236,3 +43236,39 @@ kernel 与 Rust 引擎为干净重建版本。
 **过程卫生**：探针全部回滚（`MOD_Albedo.F90`/`radiation.rs`/`snow.rs`），kernel 与 Rust
 引擎重新构建干净（`DBGTW` 计数 0），`CN-Cng` 黄金复验 127 变量 within tolerance；
 本轮只新增本记录。
+
+### 雪窗第二颗种子修复：地面反照率混合的 FMA 方向（2026-11-02）
+
+按上一节计划，对 `albland` 地面段打点（`albsoi/albsno/fsno/sag/czen` vs Rust
+`soil/snow/ground_snow_fraction/snow_age`）后得到：
+
+- 两侧 `albsoi(2,1)`、`albsno(2,1)`、`fsno`、`sag`、`czen` 在 8 次调用里**全部逐位相同**；
+- `albg(2,1)` 的 1 ULP 差异来自**混合公式**，不是分量。
+
+**位型差分**（US-NR1-snow 第 2 步输入：`fsno = 0x1.25e5387f4a59ap-1`、
+`soil = 0x1.1eb851eb851ecp-2`、`snow = 0x1.93e887c3c8075p-1`）：
+
+| 写法 | 结果 |
+|---|---|
+| `FMA(1-fsno, soil, fsno*snow)`（土壤乘积融合） | `0x1.24eb22bf30dbfp-1` |
+| `FMA(fsno, snow, (1-fsno)*soil)`（雪乘积融合，旧 Rust 直射列） | `0x1.24eb22bf30dbep-1` |
+| 平铺（不融合） | `0x1.24eb22bf30dbfp-1`（与 Fortran 同，但第 4 步就不成立） |
+| **Fortran `albg(2,1)`** | `0x1.24eb22bf30dbfp-1` |
+
+第 4 步能区分"土壤融合"与"平铺"（Fortran 等于融合写法），第 1 步能区分"土壤融合"与
+"雪融合"（Fortran 等于土壤融合）。即上游 `MOD_Albedo.F90:394`
+`albg = (1-fsno)*albsoi + fsno*albsno` 的直射列实际是 **`FMA(1-fsno, albsoi, fsno*albsno)`**，
+与散射列同一形状；旧 Rust 注释里"直射列向量化成 `.FMA(fsno, albsno, …)`"是误读。
+
+**修复**：`mix_ground_albedo` 两个列统一用 `(1-fsno).contract(soil, fsno*snow)`；
+新增回归测试 `ground_albedo_mixing_fuses_the_soil_product` 锁定该位型（并断言旧写法不同）。
+
+**效果**
+- 雪窗 24 步：首个非 `qinfl` 差异仍在 record 11，但量级下降（`f_sr` 1.4e-14 → 7.1e-15、
+  `f_sabvsha` 4.3e-14 → 7.1e-15）——说明 record 11 还有**第三颗种子**；
+- 月窗口 tier2 计数仍 1/35/76（其他种子主导首分歧位置）；
+- `cargo test -p colm-core --lib`：542 passed；fmt/clippy 通过；三站点 Fortran 黄金
+  127 变量 within tolerance。
+
+**下一步**：继续在 record 11 附近对 `netsolar`/two-stream 打点（修复后输入已变化），
+以及湿窗第 236 条记录的新种子。

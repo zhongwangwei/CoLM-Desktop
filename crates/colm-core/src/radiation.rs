@@ -611,19 +611,18 @@ pub fn mix_ground_albedo(
     snow: [[f64; RADIATION_TYPES]; BANDS],
     snow_fraction: f64,
 ) -> [[f64; RADIATION_TYPES]; BANDS] {
-    // `main/MOD_Albedo.F90:394` 的 `albg(:,:) = (1.-fsno)*albg(:,:) + fsno*albsno(:,:)`
-    // 被 GCC **拆成两半**：直射那一列（`albg(1:2,1)`，内存前 16 字节）向量化成
-    // `.FMA (fsno, albsno, (1-fsno)*albg)`；散射那一列是两条标量
-    // `.FMA (1-fsno, albg, fsno*albsno)` —— 熔进去的乘积正好相反。
+    // `main/MOD_Albedo.F90:394` 的 `albg(:,:) = (1.-fsno)*albg(:,:) + fsno*albsno(:,:)`。
+    // 逐位差分：直射列和散射列都对应**土壤乘积被收进 FMA、雪乘积先舍入**的写法
+    // （`FMA(1-fsno, albg, fsno*albsno)`）。此前把直射列按 `.FMA(fsno, albsno,
+    // (1-fsno)*albg)`（雪乘积融合）写，在 US-NR1-snow 第 2 步的
+    // `albg(2,1)` 上差 1 ULP：fsno=0.5740144400962663、soil=0.28、
+    // snow=0.7888834406367226 时，Fortran=`1.24eb22bf30dbfp-1`，
+    // 雪乘积融合=`...dbe`，土壤乘积融合=`...dbf`（与 Fortran 一致）。
     std::array::from_fn(|band| {
         std::array::from_fn(|radiation_type| {
             let soil = soil[band][radiation_type];
             let snow = snow[band][radiation_type];
-            if radiation_type == 0 {
-                snow.contract(snow_fraction, (1.0 - snow_fraction) * soil)
-            } else {
-                (1.0 - snow_fraction).contract(soil, snow_fraction * snow)
-            }
+            (1.0 - snow_fraction).contract(soil, snow_fraction * snow)
         })
     })
 }
