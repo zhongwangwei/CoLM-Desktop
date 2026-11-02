@@ -43130,3 +43130,27 @@ kernel 干净重建；`golden-run`+`golden-compare` 三站点全过；Rust 对�
 
 **过程卫生**：两侧探针已回滚，kernel 与 Rust 引擎重新构建干净（`DBGNS` 计数 0），
 `CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
+
+### 雪窗种子再收窄：第一个真实反照率调用的 `alb(1,2)` 差 1 ULP（2026-11-02）
+
+给两侧 `albland` 出口打探针（Fortran `MOD_Albedo.F90` / Rust `surface_optics.rs`）：
+
+- **调用对齐**：Rust 在步末做 surface optics，前 7 次调用是初始化/准备阶段
+  （`alb=1`、`fsno=0`），Rust 第 8 次 = Fortran 第 1 次真实调用；
+- 对齐后的第一个真实调用上，**只有 `alb(1,2)`（可见光漫射分量）差 1 ULP**
+  （Fortran `1.11675025996113397e-01` vs Rust `...383e-01`，相对 1.24e-16），
+  其余三个分量、`fsno`、`scv/scvold`、`sag`、`coszen` 等输入全部一致；
+- 探针里 Rust 的 `lai/sai` 显示差 5e-4 是**打印口径**问题（Rust 打的是
+  `temporal_leaf_area_index` 原始值，Fortran 打的是已乘 `vegetation_free_fraction` 的值），
+  不是物理差；
+- 这解释了 `netsolar` 探针的现象：Rust 的反照率在步末算、下一步才进 `netsolar`，
+  所以 `netsolar` 第一次看到 alb 差异是在 call 9（对应 Fortran 第 1 次真实 albedo 结果的生效步）。
+
+**结论**：雪窗种子最终落在 **LCT/雪反照率的可见光漫射分量 `alb(1,2)`** 上，即
+Fortran `MOD_Albedo:albland` 里 `twostream` 那一支 vs Rust
+`broadband_radiation_from_ground_using`/`two_stream` 的对应公式；下一步在该函数内部
+对读/打探针（`albv`/`tran`/`ssun`/`ssha` 的四个分量与中间量），定位具体表达式差。
+这是 1 ULP 级、单分量的舍入差，但经日出后的乘积进入 `f_sr/f_sabg/f_sabvsha`。
+
+**过程卫生**：两侧探针已回滚，kernel 与 Rust 引擎重新构建干净（`DBGALB` 计数 0），
+`CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
