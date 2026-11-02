@@ -43680,3 +43680,23 @@ cargo run -p xtask -- audit-vendor --base <基准导入 rev> --fork <同步前�
 顺带：恢复 hydro 文件后 `USE` 语句变化，`oracle/scripts/gen_fortran_deps.py` 重新生成了
 `vendor/CoLM202X/Makefile` 末尾的 192 行模块依赖块（该生成块由 `xtask` 的
 `fortran_deps` 测试守住）。默认/latlon/crop 三预设重建、三站点黄金、drift 测试全部通过。
+
+## 材料族冒烟补充（同位素 + 溶质）与 audit-vendor 自检（2026-11-02 收尾轮）
+
+**材料族冒烟**（当前 HEAD 内核 + Rust，CN-Cng 站点、11 天 264 条记录）：
+
+| 族 | 配置 | Fortran | Rust | material history 对比 |
+|---|---|---|---|---|
+| 同位素 H2_18O | `DEF_USE_ISOTOPE=.true.`、分馏关、aquifer mixing=1 | 完成（无 MT_SIG 硬失败） | 完成 | 32 变量全有；最大差 `f_mt_delta_*` **2.8e-12**（10‰ 量级）、`f_mt_evap_mass` **4.5e-16** |
+| 溶质 CL | `DEF_SOLUTE_NAMES='CL'`（参数用代码默认） | 完成 | 完成 | 24 变量全有；**0 个非零差（逐位一致）** |
+
+两种配置的 host history 都是 127 变量 within tolerance。结论：同位素与溶质两个材料族
+在恢复后的宿主补丁上数值自洽；分馏/甲烷/泥沙/BGC 需要格点强迫或各自前处理数据，
+本轮不覆盖（记录在案）。
+
+**audit-vendor 自检**：把 `--head` 指向恢复前的历史提交，工具确实能报出后来手工找回的
+全部补丁：`--head 5d1dddae^` → hydro 2 行 + snow 3 行 + mapping 4 行 + TimeInvariants 3 行
++ Runoff 2 行（共 40 行/15 文件）；`--head 5d1dddae` → 38 行/14 文件（hydro 已恢复）；
+当前 HEAD → 29 行/11 文件且全部是已人工判定的重构类别。工具的第一版只按注释 marker
+搜、归一化也不折叠空白，实际漏报了没有注释的补丁块（雪面冰/液分配）并误报重排代码 ——
+这条教训已写进工具的文档注释里。
