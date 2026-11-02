@@ -43341,3 +43341,29 @@ Fortran 打印雪盖折算后的值，Rust 打印 temporal 原值）。
 
 **过程卫生**：探针已回滚，kernel/Rust 引擎干净重建；`CN-Cng` 黄金复验 127 变量
 within tolerance；本轮只新增本记录（工作树里另有 GUI 的并行改动，与本轮无关，未触碰）。
+
+### 反例：按调用级探针调 FMA 会让整条历史变差（2026-11-02）
+
+记录 14 的 `f_alb` 源头进一步定位到 **albland call 8 / twostream 可见 call 8**：
+输入全同，输出 `albv11/albv12` 差 1–2 ULP；twostream 内部首个不同量是 `scat`
+（雪分支 `scat_new = (1-fwet)*scat + fwet*scat_sno`），随后 beta0/de/fe 也差。
+
+按"调用级探针逐项对齐"试了三组 FMA 方向：
+
+| 组合（scat / beta0 / upscat） | twostream call 7–9 | 24 步历史首分歧 |
+|---|---|---|
+| 已提交版本（b / A / A） | call8 有差异 | **record 14**（5 个变量） |
+| 平铺 / A / A | call 7–9 几乎全同（call9 仅 albv11 1 ULP） | **退回 record 11（18 个变量）** |
+| 平铺 / 平铺 / 平铺 | call8 仍差 beta0 等 | 未完成 |
+
+**结论**：**按单个调用点"探针全同"去选 FMA 会骗人**——平铺组合在 call 7–9 上更接近，
+却把更早（record 11 对应步骤）的种子重新引入，整条历史变差。已提交版本
+（scattering 用湿润乘积融合、beta0/upscat 用干燥乘积融合）仍是**按整条历史**评价下最好的组合，
+本轮实验全部回滚，不保留代码改动。
+
+**方法修正**：后续 FMA 选择必须用**24 步/月窗口历史首分歧位置**作为目标函数，
+而不是单个调用点的输出全同；探针只用来生成候选，不用来定案。
+
+**过程卫生**：实验性 FMA 与所有探针已回滚（`radiation.rs`/`surface_optics.rs`/
+`MOD_Albedo.F90`），kernel 与 Rust 引擎干净重建（`DBGT8` 计数 0），core 542 测试通过，
+`CN-Cng` 黄金 127 变量 within tolerance；工作树里另有 GUI 并行改动，未触碰、未提交。
