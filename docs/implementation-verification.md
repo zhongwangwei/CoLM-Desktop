@@ -42963,3 +42963,28 @@ wrapper"是否是种子来源。
 3. 要消除它只能逐位复刻上游重构后的每处运算分组（含 typed accumulator、诊断 reset、
    host 调用分组），属于重写上游重构本身；对月/季报告量影响 <1e-3（见上一节量化），
    因此 C 实验到此收口：**主仓库维持 B（已验证混合态），C 树归档为参考分支，不重生成黄金**。
+
+## 项目最终状态与验证矩阵（2026-11-02，goal 收口）
+
+主仓库（vendor 混合态）的最后一次全链路验证，HEAD 以本次提交为准：
+
+| 项目 | 命令 | 结果 |
+|---|---|---|
+| 三预设构建 | `./oracle/scripts/build_kernel.sh default / latlon / crop` | 三个 exit=0、0 error |
+| 三站点黄金 | `golden-run` + `golden-compare --tolerances oracle/tolerances.toml` | `CN-Cng`、`CN-Cng-wet`、`US-NR1-snow` 均 `127 variables within tolerance`（tier3=0） |
+| 黄金 provenance | 重生成后与旧黄金逐变量比对 | 数值不变（只有 `create_time`/manifest 元数据变化），manifest 记录最终源码 sha `ae33a0bb` |
+| 生成表/闸门 | 四张 drift 表、`colm-namelist roundtrip`(5)、`oracle histmap`(5)、`tier-check` | 全绿；127 个 golden 变量都有层级 |
+| 引擎单测 | `HDF5_USE_FILE_LOCKING=FALSE cargo test -q --workspace --lib --bins --no-fail-fast` | 34 个 suite 通过；17 项失败全部是既有沙箱环境项（PTY/进程组/study runner 锁/parity 子进程/sandbox），无物理或 golden 相关 |
+| 格式 | `cargo fmt --all -- --check` | 通过 |
+| Rust↔Fortran | `colm-rs` CN-Cng 对最终黄金 | 只剩已知的近零 `f_qinfl` 变号（9/264 个近零值） |
+
+**上游同步策略的最终定义**：vendor 保留"上游最新新增模块/构建布局 + 桌面宿主与材料层"的
+混合态；上游 4c 的宿主层整批 facade 化作为**参考分支**归档在 `/tmp/fusion2`
+（CN-Cng 0 项、CN-Cng-wet 1 项、US-NR1-snow 72 项；残余为被雪/植物水力阈值放大的
+1 ULP 执行顺序种子，月/季报告量影响 <1e-3）。不重生成黄金、不改容差。
+
+**遗留（非阻塞、已文档化）**：
+- Rust↔Fortran 在湿/雪月窗口的已知放大差异（`f_qinfl` 近零、VSF 收敛路径差），判定口径
+  为"首个分歧步 + 迭代/回退计数"，不是公式错误；
+- C 参考分支若将来要继续，只能逐位复刻上游宿主运算分组，收益递减；
+- GUI 测试套件与 CI 不在本轮默认工作流内（GUI 后端 `cargo check` 通过）。
