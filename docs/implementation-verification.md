@@ -43043,3 +43043,34 @@ GIMPLE 对齐方式改 Rust 表达式。
 > 注：本文件早前小节提到的 `/tmp/fusion2`、`/tmp/conv4c-keep` 等临时分支产物属于
 > 可被系统清理的临时目录，本轮已随系统清理消失；C 方案的架构、结论与复现做法都记录
 > 在本文件中，不依赖临时目录。
+
+### Rust↔Fortran 种子定位到 fwet（1 ULP）与 etr_dtl 的放大链（2026-11-02）
+
+在 `LeafTemperature` 内部按迭代打探针（同一份初始数据、湿窗 16 步，取第 4 次调用）：
+
+**迭代级结论**
+- 迭代 1～3：`tlbef`、`dtl_noadj`、`dtl`、`tl` 全部逐位相同；
+- 迭代 1：**唯一的真实差异是 `etr_dtl` 差 1 ULP**（7.59e-16 相对）；
+- 迭代 4：`dtl` 放大到 2.59e-11 相对，`fevpl/etr` 到 1e-14；
+- 迭代 6：`dtl` 到 1.19e-9 相对；最终 `tl` 仍收敛到同一个值。
+
+**操作数级结论**（同一调用、迭代 1）
+- 除 `fwet` 外全部逐位相同：`tlbef/dtl/tl/sabv/irab/fsenl/fevpl/fsenl_dtl/fevpl_dtl/
+  dirab_dtl/etr/clai/qintr_rain/qintr_snow/hvap/gs0sun/gs0sha/delta/rhoair/laisun/
+  laisha/rb/wtaq0/wt gq0/qsatl/qsatlDT`；
+- **`fwet` 差 1.31e-16（≈1 ULP）**：
+  Fortran `0.845391924196753131`，Rust `0.845391924196753242`；
+- `fwet` 的输入（`ldew=ldew_rain=0.174891881047736897`、`ldew_snow=0`、`dewmx=0.1`、
+  `lai=1.8`、`sai=0.45`、`us=vs=3.4216898733082033`）两侧**逐位相同**；
+- 因此 `etr_dtl` 的 1 ULP 来源于 `dewfraction` 内部：`(ldew_rain/max(satcap,1e-10))**0.666666666666`
+  这条路径（`satcap` 由 `canopy_storage_capacity_colm2024`/兜底算出）或幂运算本身，
+  而不是任何输入状态。**这是目前定位到的最上游种子**。
+- 注：`rssun/rssha` 两项的差异是探针变量口径不同（Fortran 侧是乘过 `laisun` 的叶尺度值，
+  Rust 侧打印的是未缩放的 `stomatal_resistance`），不是物理差；下一步按
+  `leaf_sunlit_resistance` 对齐打印。
+
+**下一步**：在 `dewfraction` 的调用点打印 `satcap`、`(ldew_rain/max(satcap,1e-10))` 与
+幂运算前后的值，确认是容量差 1 ULP 还是 `pow` 差 1 ULP；修好后重跑湿/雪整月对拍。
+
+**过程卫生**：所有探针已回滚，kernel 与 Rust 引擎重新构建干净（仅剩 vendor 自带的
+`DBGSTO` 字符串），重跑 `CN-Cng` 黄金确认 127 变量 within tolerance；HEAD 干净。
