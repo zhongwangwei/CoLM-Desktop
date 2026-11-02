@@ -43210,3 +43210,29 @@ Fortran `MOD_Albedo:albland` 里 `twostream` 那一支 vs Rust
 **过程卫生**：临时构建脚本 `_keep_kernel.sh` 已删除；`/tmp/gimple-keep` 等临时取证产物
 在提交后已清理，需要时按上面的命令重新生成；仓库工作树干净；探针/实验改动均已回滚，
 kernel 与 Rust 引擎为干净重建版本。
+
+### 雪窗第二颗种子：第 2 步的 NIR 直射地面反照率差 1 ULP（2026-11-02）
+
+按上一节计划继续对 call 1 的输入打点：
+
+1. **`snowfraction` 先排除**：两侧 `lai/sai/z0m/zlnd/scv/snowdp → wt/sigf/fsno`
+   前 16 次调用**全部逐位相同**，所以 call 1 的 `scat` 差异不来自雪盖/植被雪比例；
+2. **`twostream` 入口探针**：call 0 的输入全同；**call 1 只有 `albg(2,1)`
+   （近红外直射地面反照率）差 1 ULP**（Fortran `5.72106443251349961e-01` vs
+   Rust `...850e-01`），其余输入（`lai/sai/chil/green/fwet_snow/coszen/albg` 另外三个
+   分量/`rho`/`tau`）逐位相同。
+
+也就是说：雪窗里至少有两颗独立的种子——
+① call 0 的 `upscat` 内部 FMA（上一节，实验性修复可对齐但整案例无效）；
+② **call 1 的 `albg(2,1)` 输入**，来自 `albland` 的地面反照率合成：
+`albg = (1-fsno)*albsoi + fsno*albsno`（直接列 FMA 形状 Rust 已按 GIMPLE 对齐）。
+由于 `fsno` 已证明相同、`ssw` 依赖的 `wliq` 到第 10 步都逐位相同，嫌疑集中在
+**雪面 NIR 直射反照率 `albsno(2,1)`**（`sag` 雪龄更新与 `dralbl = dfalbl + 0.4*cff*(1-dfalbl)`
+这条链）或土壤反照率的 1 ULP 分支。
+
+**下一步**：在 `albland` 地面段打印 `albsoi(2,1)`、`albsno(2,1)`、`sag/age/dfalbl/cff/czf`
+（Rust 对应 `aged_snow_albedo` 的返回与 `soil_albedo`），确认是雪面还是土壤侧差 1 ULP。
+
+**过程卫生**：探针全部回滚（`MOD_Albedo.F90`/`radiation.rs`/`snow.rs`），kernel 与 Rust
+引擎重新构建干净（`DBGTW` 计数 0），`CN-Cng` 黄金复验 127 变量 within tolerance；
+本轮只新增本记录。
