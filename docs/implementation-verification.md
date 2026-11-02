@@ -42879,3 +42879,33 @@ Thermal/Leaf/PC/GroundFluxes/Hydro/Snow 的 A 组块已在），而是 adopted �
 
 **产物**：`/tmp/fusion2`（build=0、三实例结果如上）、`/tmp/port4`、`/tmp/conv4c-keep`、
 `/tmp/conv_keep.py`、`/tmp/fix_arg_guards.py`、`/tmp/fix_namelist_imports.py`。
+
+### C 隔离实验：材料簿记 facade 不是 1 ULP 种子的来源（2026-11-02 上午）
+
+按"B 基线 + C 隔离实验"的决定，在 `/tmp/fusion2` 上做了第一个隔离：
+把 adopted 上游 `MOD_MT_LandPhase` 的四个材料簿记入口
+（`mt_land_interception`/`mt_land_thermal_step`/`mt_land_water_step`/`mt_land_newsnow`）
+在 `mt_any_enabled()` 为假时**直接 RETURN**（材料运行期关闭的黄金算例里它们不再做任何
+staging/累加），其余不变，重新构建并跑三站点：
+
+| 算例 | 剪枝前 | 剪枝后 |
+|---|---|---|
+| CN-Cng | 0 项 | **0 项** |
+| CN-Cng-wet | 1 项（`f_zwt` 差 1.8e-6） | **1 项（同一值）** |
+| US-NR1-snow | 72 项 | **72 项（同一组）** |
+
+→ **结论：1 ULP 种子不是 `MOD_MT_LandPhase` 的材料簿记 staging 造成的。** 残余差异
+更可能来自 adopted 宿主文件本身（host extraction 后的表达式/调用组织与桌面宿主不同），
+或仍有个别本地补丁没搬完整；与"上游重构有 bug"无关（上游默认构建一致性已由维护者实测）。
+
+**已排除的假设**：
+1. 历史层语义（`MOD_Hist/HistAccRestart/MT_Hist`）——换回桌面版后 CN-Cng 的 5 项
+   lake/wet spval 差异清零；
+2. `gssun/gssha` 量纲——补回桌面 LeafTemperature 的诊断块后清零；
+3. `MOD_MT_LandPhase` 四个材料簿记 facade——本轮隔离显示无影响。
+
+**下一步**：对剩余 1 项（wet）与 72 项（snow）做同样的"调用级剪枝/替换"隔离，
+优先 `mt_work%prepare_thermal/prepare_snow`、`mt_canopy_split/lump`、
+`mt_land_snow_normalize` 这些"宿主物理被搬进 material 模块"的 wrapper，以及
+`mt_land_finish_step`（当前已是薄壳）。若替换后仍不变，则逐文件把 adopted 宿主
+换回桌面版本做 bisect，定位到具体表达式顺序差异。
