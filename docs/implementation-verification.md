@@ -43295,3 +43295,33 @@ RTL 阶段），依据是运行时逐位比对；后续若能拿到 RTL 对照�
 
 **下一步**：call 14 的 NIR 支种子（`upscat`/`scat` 的 NIR 份量或 `m3`/`sigma` 分支），
 以及湿窗 record 236 种子。
+
+### 雪窗 FMA 修复组：record 11 的种子消失，首分歧推到 record 14（2026-11-02）
+
+在"混合公式 + upscat FMA"之后继续对 NIR 支打点（twostream 调用 12～16）：
+
+1. **call 14 首次**在输入全同的情况下出现差异，首个不同中间量是 `scat`
+   （雪花分支 `scat_new = (1-fwet)*scat + fwet*scat_sno`）；
+2. 位型判定：该式应把**湿润乘积**收进 FMA、干燥乘积先舍入，即
+   `FMA(fwet, scat_sno, (1-fwet)*scat)`（旧 Rust 把干燥乘积融合，call 14 差 1 ULP）；
+   改成这一方向后，twostream 调用 **12～15 全部逐位相同**；
+3. call 16 又出现 `beta0/de` 差 1 ULP：`beta0` 的雪分支与 `upscat` 同形状，
+   改为 `FMA((1-fwet)*scat, beta0, fwet*scat_sno*0.5)` 后，**调用 12～16 全部逐位相同**。
+
+**效果（雪窗 24 步 TIMESTEP 对拍，同一初始数据）**
+
+| 阶段 | 首个非 `qinfl` 差异 | 差异变量数 |
+|---|---|---|
+| 修复前（仅混合公式） | record 11 | 13 |
+| + upscat FMA | record 11（幅度减半） | 11 |
+| + scattering/beta0 FMA | **record 14**（`f_alb` 2.8e-17） | **5** |
+
+即 record 11 的种子组被清掉；剩余首分歧在 record 14 的 `f_alb` 2.8e-17（几乎只是 1 ULP
+量级），随后 record 17 的 `f_sr/srvi`。月窗口 tier2 计数仍 1/35/76（月窗种子更靠后），
+但 24 步窗口的对齐显著改善。
+
+**取舍**：scattering/beta0 两处 FMA 由运行时逐位比对验证（多调用一致），仍无 GIMPLE
+直接证据；保留并记录置信度 medium。core 测试 542 通过、fmt/clippy 通过、三站点 Fortran
+黄金全绿。
+
+**下一步**：record 14 的 `f_alb` 2.8e-17 与湿窗 record 236 种子。

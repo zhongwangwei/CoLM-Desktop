@@ -777,13 +777,16 @@ pub(crate) fn two_stream(
             let wet_snow_term = wet_snow_fraction * snow_scattering;
             let dry_weight = 1.0 - wet_snow_fraction;
             let old_scattering = scattering;
-            scattering = old_scattering.contract(dry_weight, wet_snow_term);
+            // `scat_new = (1-fwet)*scat + fwet*scat_sno` 的**湿润乘积**进 FMA、
+            // 干燥乘积先舍入：call 14（NIR）的位型证明这一方向。
+            scattering = wet_snow_fraction.contract(snow_scattering, dry_weight * old_scattering);
             // GIMPLE（`MOD_Albedo.F90:630`）：`(1-fwet)*scat*upscat + fwet*scat_sno*upscat_sno`
             // 的土壤（scat）乘积进 FMA、湿润项先舍入。
             upward_scattering = (dry_weight * old_scattering)
                 .contract(upward_scattering, wet_snow_term * 0.5)
                 / scattering;
-            beta0 = (dry_weight * old_scattering * beta0 + wet_snow_term * 0.5) / scattering;
+            // 与 `upscat` 同一形状：`(1-fwet)*scat*beta0` 的第一个乘积进 FMA。
+            beta0 = (dry_weight * old_scattering).contract(beta0, wet_snow_term * 0.5) / scattering;
         }
 
         let be = 1.0 - scattering + upward_scattering;
