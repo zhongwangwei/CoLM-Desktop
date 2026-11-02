@@ -42942,3 +42942,24 @@ wrapper"是否是种子来源。
 **归档**：`/tmp/fusion2`（可构建可跑，CN-Cng 0 / wet 1 / snow 72）、
 `/tmp/conv4c-keep`、`/tmp/conv_keep.py`、`/tmp/fix_arg_guards.py`、
 `/tmp/fix_namelist_imports.py`、本文件前面各节。
+
+### C 逐分子验证：融合树 vs 桌面内核的种子时刻（2026-11-02，收尾）
+
+用 `TIMESTEP` 输出、同一份 Fortran 初始数据，把融合 `colm.x` 与仓库已验证内核逐记录逐位比：
+
+| 算例/窗口 | 首个非 `f_xerr` 差异 | 量级 |
+|---|---|---|
+| CN-Cng-wet，48 步（1 天） | 无（只有 `f_xerr` 6.7e-21） | 无状态差 |
+| CN-Cng-wet，192 步（4 天） | 第 70 步（约 07-02 11:00）：`f_zwt` 1.1e-9、`f_wliq_soisno` 4.5e-10、`f_h2osoi` 2.1e-12 | 舍入级 |
+| US-NR1-snow，48 步（1 天） | 第 16 步（约 08:00）：`f_zwt` 9.3e-13、`wliq/wice/h2osoi` 1e-14~1e-13；第 24 步 `f_scv` 2e-15，第 26 步通量 | 舍入级 |
+
+**结论**：
+1. 融合与桌面内核在前 1 天（wet）/前 15 步（snow）**几乎逐位相同**；种子出现在白天事件时刻，
+   量级 1e-13～1e-9（远小于物理尺度），随后在雪/植物水力/求解器阈值上放大到月窗口的 1/72 项。
+2. 结合上一轮静态核对（A 组物理块均已搬回；Thermal/Leaf/PC/Ground 差异都是诊断 API；
+   唯一实质分组差异是 LeafInterception 的逐 PFT 顺序累加被 `mt_drain_sum%accumulate` 替代），
+   可以确定：残余差异是**adopted 宿主结构的浮点执行顺序**在少数事件步产生的舍入种子，
+   不是缺补丁、不是上游 bug、也不是参数/公式错误。
+3. 要消除它只能逐位复刻上游重构后的每处运算分组（含 typed accumulator、诊断 reset、
+   host 调用分组），属于重写上游重构本身；对月/季报告量影响 <1e-3（见上一节量化），
+   因此 C 实验到此收口：**主仓库维持 B（已验证混合态），C 树归档为参考分支，不重生成黄金**。
