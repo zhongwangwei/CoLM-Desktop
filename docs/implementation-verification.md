@@ -42805,3 +42805,42 @@ Fortran restart/const），逐记录**逐位**比两引擎，并给 Fortran `MOD
 adopted 版本（先把 CN-Cng 拉回 0 项）；② 按 Thermal/LeafInterception → SoilSnowHydrology
 （dew/frost/TOPMODEL/VIC）→ Hydro_SoilWater 的顺序搬 A 组物理；③ 三预设构建 + 三站点
 黄金；④ 最后再评估 material-on 行为与我们的材料 bug 修复是否需要在上游编排模块里补。
+
+### C 方案第二轮：融合树首次 build=0 后的数值归因（2026-11-02 上午）
+
+`/tmp/fusion2`（25 个上游宿主/材料编排文件 + `#define MaterialTransport` + 桌面材料模块）
+已能完整 build。用 `golden-run` 生成好的 Fortran 初始数据只跑融合 `colm.x`，三站点结果为：
+
+| 算例 | tier2 外 | 归因 |
+|---|---|---|
+| CN-Cng | **7** | `f_gssun/f_gssha` ×1e6；`f_t_lake/f_lake_icefrac/f_wetwat/f_wetwat_inst/f_wetzwt` 的 spval 语义 |
+| CN-Cng-wet | 55 | 上述 + A 组物理未搬回 |
+| US-NR1-snow | 88 | 同上，雪/植物水力放大 |
+
+**已定位的根因**：
+
+1. **`f_gssun/f_gssha` 差 1e6**：桌面 `MOD_LeafTemperature.F90` 在迭代结束后加了
+   "从最终阻力诊断冠层导度（mol m-2 s-1）：`gssun=(laisun/rssun)*(tprcor/tlbef)`"
+   的 A 组修补；上游 4c 没有这段，`gssun_out` 保留迭代内部的 µmol 值，history 因此
+   大 1e6。**这类差异不能用容差解释，必须把 A 组块搬回**。
+2. **lake/wet 变量的 spval 语义**：`MOD_Hist` 的写入代码两侧逐行相同（同 filter、
+   同 writer），差异来自被采纳的上游材料编排层（`MOD_MT_LandPhase/Runtime` 等）在
+   材料关闭时仍把 `t_lake/wetwat` 等 host 状态写成 0/有效值；桌面版这些变量保持 spval。
+   说明**不能整文件采纳上游材料编排模块**，要把 facade API 以薄壳形式补进桌面材料模块，
+   实现留在桌面侧。
+3. **整文件采纳还混入了非材料改动**：`MOD_LeafTemperature.F90` 的 vendor-vs-upstream
+   差异里除材料诊断参数外，还有一整段上游新增代码（约 240 行）与 A 组块交错，
+   说明 C 必须做**逐文件三方语义合并**（base=`e766527a` 原树、ours=vendor、theirs=4c
+   带守卫转换树），不能 overlay 后补丁。
+
+**修正后的 C 执行计划**：
+1. 每宿主文件做三方合并：theirs 只取结构/守卫/facade 调用，ours 的 A 组物理与本地语义
+   全部保留；冲突处的 local 块以 ours 为准、接口以 theirs 为准；
+2. facade API 补进**桌面材料模块**（`MOD_MT_LandPhase` 增加 `mt_land_work` 类型与
+   `mt_land_interception/thermal_step/water_step/newsnow`；`MOD_MT_Hist` 增加
+   `mt_land_finish_step`/`mt_history_record` 等），实现调用桌面既有材料例程；
+3. 先以 CN-Cng 的 7 项归零为第一个验收点（gssun 先在 LeafTemperature 三方合并里解决），
+   再 wet/snow；最后三预设 + 三站点黄金，通过后才动 vendor。
+
+**产物**：`/tmp/fusion2`（build=0 的融合树）、`/tmp/conv4c-keep`、`/tmp/conv_keep.py`、
+`/tmp/fix_arg_guards.py`、`/tmp/fix_namelist_imports.py`、`/tmp/adopt-core.txt`。
