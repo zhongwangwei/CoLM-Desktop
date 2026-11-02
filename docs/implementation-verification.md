@@ -43154,3 +43154,30 @@ Fortran `MOD_Albedo:albland` 里 `twostream` 那一支 vs Rust
 
 **过程卫生**：两侧探针已回滚，kernel 与 Rust 引擎重新构建干净（`DBGALB` 计数 0），
 `CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
+
+### 雪窗种子继续下钻：two-stream 的 `upscat` 与一个未定论的 FMA（2026-11-02）
+
+给两侧 `twostream`/`two_stream` 打中间量探针（第一个真实反照率调用，band 1 = 可见光）：
+
+- **`upscat`（向上散射）差 1 ULP**（Fortran `2.03099515958078014e-01` vs Rust
+  `...986e-01`，相对 1.37e-16），并顺次传播到 `ce/f1/m1/n1/n2/hh7/hh8/albv(1,2)`；
+- 其余中间量（`scat/as/beta0/be/de/fe/psi/s1/s2/f2/m2`）逐位相同；
+- 也就是说，`alb(1,2)` 的种子在 **two-stream 的向上散射递推**，不是输入、不是地面反照率。
+
+**尝试过的一个 FMA 假设**：上游雪分支
+`upscat = ((1-fwet)*scat*upscat + fwet*scat_sno*upscat_sno)/scat_new`
+在 GCC 下很可能把第一个乘积收进 FMA。把 Rust 改成
+`(dry_weight*old_scattering).contract(upward_scattering, wet_snow_term*0.5)/scattering`
+后，第一个真实调用的全部中间量与 `albv(1,2)` **逐位一致**。
+
+**但整案例没解决**：24 步雪窗历史的首个非 `qinfl` 差异仍在 record 11，量级不减；
+探针还显示第 2 次调用有 18 个中间量不同——说明反照率链上**不止这一个种子**
+（可能对应不同分支/不同步的另几处 FMA 选择）。由于没有 GIMPLE 证据、整案例也无收益，
+这个实验性改动**已回滚**，不留在代码里。
+
+下一步：拿到 `MOD_Albedo:twostream` 的 `-fdump-tree-optimized` GIMPLE（需要一份带
+`.mod` 的临时构建树），逐条确认雪分支/漫射分支的 FMA 选择；同时检查第 2 次调用
+（Rust 与 Fortran 的 two-stream 调用序列是否存在一步偏移或 SNICAR/雪龄路径差异）。
+
+**过程卫生**：两侧探针与实验性 FMA 均已回滚，kernel 与 Rust 引擎重新构建干净
+（`DBGTS` 计数 0），`CN-Cng` 黄金复验 127 变量 within tolerance；本轮只新增本记录。
