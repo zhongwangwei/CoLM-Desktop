@@ -778,8 +778,10 @@ pub(crate) fn two_stream(
             let dry_weight = 1.0 - wet_snow_fraction;
             let old_scattering = scattering;
             scattering = old_scattering.contract(dry_weight, wet_snow_term);
-            upward_scattering = (dry_weight * old_scattering * upward_scattering
-                + wet_snow_term * 0.5)
+            // GIMPLE（`MOD_Albedo.F90:630`）：`(1-fwet)*scat*upscat + fwet*scat_sno*upscat_sno`
+            // 的土壤（scat）乘积进 FMA、湿润项先舍入。
+            upward_scattering = (dry_weight * old_scattering)
+                .contract(upward_scattering, wet_snow_term * 0.5)
                 / scattering;
             beta0 = (dry_weight * old_scattering * beta0 + wet_snow_term * 0.5) / scattering;
         }

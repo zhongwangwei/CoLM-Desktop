@@ -43272,3 +43272,26 @@ kernel 与 Rust 引擎为干净重建版本。
 
 **下一步**：继续在 record 11 附近对 `netsolar`/two-stream 打点（修复后输入已变化），
 以及湿窗第 236 条记录的新种子。
+
+### 雪窗第三颗种子再缩小：two-stream 向上散射递推的 FMA（修复）（2026-11-02）
+
+在记录 11 附近（twostream 调用 9～16）重新打点：
+
+- 混合公式修复后，call 9 的输入已全同，但输出 `albv11/albv12/tran11/ssun11/ssha11`
+  仍差 1–2 ULP；说明是 two-stream **内部**的又一处 FMA；
+- 把雪分支的向上散射递推改成
+  `upscat = FMA((1-fwet)*scat, upscat, fwet*scat_sno*upscat_sno) / scat_new`
+  （scat/土壤乘积融合、湿润项先舍入）后：
+  - twostream 调用 **9～13 的输入与输出全部逐位相同**；
+  - 雪窗 24 步首个非 `qinfl` 差异仍在 record 11，但 `f_fsenl` 从 3.55e-15 降到
+    **1.78e-15**，`f_sabg/f_sr` 等保持 7.1e-15；
+  - 随后在 **call 14** 的 NIR 支出现下一个差异（`albv21/albv22/tran21/tran22/
+    ssun21/ssha21`，输入仍全同）→ 记录 11 附近至少还有一颗 NIR 支种子。
+
+**修复**：保留该 FMA（运行时探针在 6 次调用上逐位验证：call 0 及 call 9–13）；
+月窗口 tier2 计数仍 1/35/76（不回归）；core 测试 542 通过、fmt/clippy 通过、
+三站点 Fortran 黄金全绿。**注意**：该 FMA 未拿到 GIMPLE 直接证据（gfortran 的收缩在
+RTL 阶段），依据是运行时逐位比对；后续若能拿到 RTL 对照可再确认。
+
+**下一步**：call 14 的 NIR 支种子（`upscat`/`scat` 的 NIR 份量或 `m3`/`sigma` 分支），
+以及湿窗 record 236 种子。
