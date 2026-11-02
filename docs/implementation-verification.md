@@ -42844,3 +42844,38 @@ adopted 版本（先把 CN-Cng 拉回 0 项）；② 按 Thermal/LeafInterceptio
 
 **产物**：`/tmp/fusion2`（build=0 的融合树）、`/tmp/conv4c-keep`、`/tmp/conv_keep.py`、
 `/tmp/fix_arg_guards.py`、`/tmp/fix_namelist_imports.py`、`/tmp/adopt-core.txt`。
+
+### C 方案第三轮：融合树跑通黄金（CN-Cng 0 项，wet 1 项，snow 72 项）（2026-11-02）
+
+在 `/tmp/fusion2` 上完成了 C 的关键拼接，首次用融合内核跑出站点结果：
+
+**架构（已可构建/可运行）**
+- 宿主层：`CoLMMAIN/CoLM/CoLMDRIVER/Thermal/GroundFluxes/GroundTemperature/
+  PhaseChange/LeafInterception/LeafTemperature(PC)/SoilSnowHydrology/
+  Hydro_SoilWater/SnowLayersCombineDivide/Vars_1D*/Grid_RiverLakeHist` 等采用
+  4c 的带守卫/新诊断类型版本（构建定义 `MaterialTransport`，材料层 always-on）；
+- 材料层：**保留桌面材料模块与历史层**（`MOD_Hist/HistAccRestart/MT_Hist` 仍是桌面版），
+  只给 adopted CoLMMAIN 补了 `mt_land_finish_step` 的薄壳（facade 入口，材料簿记暂留空）；
+  `MOD_MT_NitrogenLeaching` 守卫放宽为 `MaterialTransport`；`nac_frcsat` 从
+  `MOD_MT_HostHistory` 引用；
+- A 组物理：从之前的三方合并树把 water/thermal/snow 宿主文件（含桌面 A 组块）搬回，
+  并把 `MOD_LeafTemperature` 缺的"从最终阻力诊断冠层导度（gssun/gssha, mol/m²/s）"
+  和"负蒸腾=湿叶凝结"两块补进 adopted 版本。
+
+**数值结果（融合 `colm.x`，材料运行期关闭，Fortran 初始数据）**
+
+| 算例 | 结果 |
+|---|---|
+| CN-Cng | **127 变量全部 within tolerance（0 项）** |
+| CN-Cng-wet | **1 项**：`f_zwt` 第 100 条 0.8265567 vs 0.8265579（差 1.8e-6，擦线） |
+| US-NR1-snow | **72 项**：从单步 1 ULP 种子放大（`wice/t_soisno/vegwp/frcsat/…`），与之前 `/tmp/port4` 实验完全同量级 |
+
+**结论**：C 的"结构 + always-on 材料 + facade 薄壳"已经落地并跑通；CN-Cng 证明材料/
+历史层语义可无损移植。剩余 wet 1 项与 snow 72 项**不是缺补丁**（之前已逐文件核对：
+Thermal/Leaf/PC/GroundFluxes/Hydro/Snow 的 A 组块已在），而是 adopted 上游宿主结构的
+浮点执行顺序与桌面不同 → 1 ULP 种子在雪/植物水力阈值链上放大。要让它也过现有黄金，
+只能：① 重生成黄金（把重排固化成新基线，Rust 侧要跟着改），或 ② 放弃采用上游宿主
+结构（回到已验证的混合态）。这是产品取舍，需维护者拍板。
+
+**产物**：`/tmp/fusion2`（build=0、三实例结果如上）、`/tmp/port4`、`/tmp/conv4c-keep`、
+`/tmp/conv_keep.py`、`/tmp/fix_arg_guards.py`、`/tmp/fix_namelist_imports.py`。
