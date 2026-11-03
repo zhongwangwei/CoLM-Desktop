@@ -89,7 +89,125 @@ pub struct PixelAxes {
     pub lat_n: Vec<f64>,
 }
 
-/// Source-grid cell ownership for each emitted spatial pixel axis.
+/// Mesh 实际覆盖的 pixel 子网格（连续矩形 + 它在完整 lattice 里的偏移）。
+///
+/// 全球 0.1° 算例的完整 pixel lattice 是 86400×43200 个格点；reader 若按完整 lattice
+/// 分配稠密数组，单个 rank 就要几十 GB（bd 上 0.1° 全球 mksrfdata 被 OOM 杀死的根因）。
+/// 元素编号 / pixel 坐标仍是全局索引空间，只是把这些读取函数内部用到的稠密缓冲裁成
+/// mesh 真正覆盖的矩形；同一次读取的值与用完整 lattice 时逐位相同。
+#[derive(Debug, Clone)]
+pub struct PixelWindow {
+    pub pixel: PixelAxes,
+    /// 完整 lattice 里第一个 cell 的 0 起偏移。
+    pub x_offset: usize,
+    pub y_offset: usize,
+}
+
+impl PixelWindow {
+    pub fn is_empty(&self) -> bool {
+        self.pixel.lon_w.is_empty() || self.pixel.lat_s.is_empty()
+    }
+
+    pub fn width(&self) -> usize {
+        self.pixel.lon_w.len()
+    }
+
+    pub fn height(&self) -> usize {
+        self.pixel.lat_s.len()
+    }
+}
+
+impl PixelAxes {
+    pub fn window_for_mesh(&self, mesh: &FlatMesh) -> Result<PixelWindow> {
+        let mut min_x = usize::MAX;
+        let mut max_x = 0_usize;
+        let mut min_y = usize::MAX;
+        let mut max_y = 0_usize;
+        for element in 0..mesh.len() {
+            let (xs, ys) = mesh.pixels(element)?;
+            for (&x, &y) in xs.iter().zip(ys) {
+                let x = usize::try_from(x)?
+                    .checked_sub(1)
+                    .context("mesh longitude is zero")?;
+                let y = usize::try_from(y)?
+                    .checked_sub(1)
+                    .context("mesh latitude is zero")?;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+        if min_x == usize::MAX || min_y == usize::MAX {
+            return Ok(PixelWindow {
+                pixel: PixelAxes {
+                    edge_south: 0.0,
+                    edge_north: 0.0,
+                    edge_west: 0.0,
+                    edge_east: 0.0,
+                    lon_w: Vec::new(),
+                    lon_e: Vec::new(),
+                    lat_s: Vec::new(),
+                    lat_n: Vec::new(),
+                },
+                x_offset: 0,
+                y_offset: 0,
+            });
+        }
+        ensure!(
+            max_x < self.lon_w.len() && max_y < self.lat_s.len(),
+            "mesh pixels lie outside the spatial pixel lattice"
+        );
+        Ok(PixelWindow {
+            pixel: PixelAxes {
+                edge_south: self.lat_s[min_y],
+                edge_north: self.lat_n[max_y],
+                edge_west: self.lon_w[min_x],
+                edge_east: self.lon_e[max_x],
+                lon_w: self.lon_w[min_x..=max_x].to_vec(),
+                lon_e: self.lon_e[min_x..=max_x].to_vec(),
+                lat_s: self.lat_s[min_y..=max_y].to_vec(),
+                lat_n: self.lat_n[min_y..=max_y].to_vec(),
+            },
+            x_offset: min_x,
+            y_offset: min_y,
+        })
+    }
+}
+
+fn mesh_order_window<T: Copy>(
+    mesh: &FlatMesh,
+    window: &PixelWindow,
+    values: &[T],
+) -> Result<Vec<T>> {
+    let width = window.width();
+    let mut output = Vec::new();
+    for element in 0..mesh.len() {
+        let (xs, ys) = mesh.pixels(element)?;
+        for (&x, &y) in xs.iter().zip(ys) {
+            let x = usize::try_from(x)?
+                .checked_sub(1)
+                .context("mesh longitude is zero")?;
+            let y = usize::try_from(y)?
+                .checked_sub(1)
+                .context("mesh latitude is zero")?;
+            let x = x
+                .checked_sub(window.x_offset)
+                .context("mesh longitude is before the pixel window")?;
+            let y = y
+                .checked_sub(window.y_offset)
+                .context("mesh latitude is before the pixel window")?;
+            output.push(
+                *values
+                    .get(y * width + x)
+                    .context("mesh pixel lies outside the spatial pixel window")?,
+            );
+        }
+    }
+    Ok(output)
+}
+
+/// Source-grid cell ownership for each emitted spatial pixel axis./// Source-grid cell ownership for each emitted spatial pixel axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PixelSourceMapping {
     pub columns: Vec<Option<usize>>,
@@ -1010,6 +1128,11 @@ pub fn read_mesh_raster_time_f64(
         "{variable} in {} has fewer than {time} time slices",
         raster.display()
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let nlon = source.dimensions()[axes.longitude].len();
@@ -1028,7 +1151,7 @@ pub fn read_mesh_raster_time_f64(
     for global_y in latitude {
         pixel_values.extend(window.row(global_y, &longitude, nlon)?);
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+    mesh_order_window(mesh, &pixel_window, &pixel_values)
 }
 
 /// Read leading layers of a named `(soil, lat, lon)` raster in mesh-pixel order.
@@ -1055,6 +1178,11 @@ pub fn read_mesh_raster_layers_f64(
         "{variable} in {} has fewer than {layers} layers",
         raster.display()
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let mesh_pixels = (0..mesh.len())
@@ -1062,12 +1190,18 @@ pub fn read_mesh_raster_layers_f64(
         .sum::<Result<usize>>()?;
     let mut output = Vec::with_capacity(layers * mesh_pixels);
     // 层维在最内（`TWI.nc` 的 `twi(lat, lon, pixel)`，块 1200×1200×25）时，逐层逐行读会把
-    // 同一个大块反复解压上万次；改为按块对齐的瓦片一次读出所有层。
-    if axes.latitude == 0 && axes.longitude == 1 && axes.layer == 2 {
+    // 同一个大块反复解压上万次；改为按块对齐的瓦片一次读出所有层。但 dense 区域缓冲是
+    // `窗口行 × 列 × 层`，全球 0.1° 窗口会到几十 GB，超过阈值就退回逐层读。
+    let dense_region_values = latitude.len() * longitude.len() * layers;
+    if axes.latitude == 0
+        && axes.longitude == 1
+        && axes.layer == 2
+        && dense_region_values <= 64_000_000
+    {
         let region =
             read_region_layers_innermost(&source, layers, &latitude, &longitude, raw_grid.nlon)?;
         for layer_pixels in &region {
-            output.extend(mesh_order(mesh, pixel.lon_w.len(), layer_pixels)?);
+            output.extend(mesh_order_window(mesh, &pixel_window, layer_pixels)?);
         }
         return Ok(output);
     }
@@ -1087,7 +1221,7 @@ pub fn read_mesh_raster_layers_f64(
         for global_y in &latitude {
             pixels.extend(window.row(*global_y, &longitude, raw_grid.nlon)?);
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -1118,6 +1252,11 @@ pub fn read_mesh_coordinate_raster_pft_f64(
     let dimensions = source.dimensions();
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let source_x = pixel
         .lon_w
         .iter()
@@ -1156,7 +1295,7 @@ pub fn read_mesh_coordinate_raster_pft_f64(
                 );
             }
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -1216,6 +1355,11 @@ pub fn read_mesh_coordinate_raster_f64(
     let dimensions = source.dimensions();
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
     let mut rows = BTreeMap::new();
     let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
@@ -1233,7 +1377,7 @@ pub fn read_mesh_coordinate_raster_f64(
             );
         }
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+    mesh_order_window(mesh, &pixel_window, &pixels)
 }
 
 /// Read leading layers of a coordinate-addressed raster in mesh-pixel order.
@@ -1264,6 +1408,11 @@ pub fn read_mesh_coordinate_raster_layers_f64(
     );
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
     let mut output = Vec::with_capacity(
         layers
@@ -1290,7 +1439,7 @@ pub fn read_mesh_coordinate_raster_layers_f64(
                     )?);
             }
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -2023,6 +2172,11 @@ fn read_mesh_tiled_raster_pft_at_times(
     ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
     let tile_nlon = raw_grid.nlon / 72;
     let tile_nlat = raw_grid.nlat / 36;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let x_tiles = tile_axis(&longitude, tile_nlon);
@@ -2131,7 +2285,7 @@ fn read_mesh_tiled_raster_pft_at_times(
                 filled == pixel_count,
                 "5 degree PFT tiles did not cover the spatial pixel window"
             );
-            mesh_order(mesh, width, &grid)
+            mesh_order_window(mesh, &pixel_window, &grid)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(planes
@@ -2305,6 +2459,11 @@ fn read_mesh_open_raster<T: colm_h5chunk::Element>(
         raw_grid.nlat,
         raw_grid.nlon
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let window = RasterWindow::<T>::read(
@@ -2327,7 +2486,7 @@ fn read_mesh_open_raster<T: colm_h5chunk::Element>(
         );
         pixel_values.extend_from_slice(&row);
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+    mesh_order_window(mesh, &pixel_window, &pixel_values)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3446,6 +3605,11 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
     ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
     let tile_nlon = raw_grid.nlon / 72;
     let tile_nlat = raw_grid.nlat / 36;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let x_tiles = tile_axis(&longitude, tile_nlon);
@@ -3486,7 +3650,7 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .context("5 degree tiles did not cover the spatial pixel window")?;
-    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+    mesh_order_window(mesh, &pixel_window, &pixels)
 }
 
 fn tile_values<T: NcTypeDescriptor + Copy>(
@@ -3751,27 +3915,6 @@ fn tile_axes(
             tile_nlon
         ),
     }
-}
-
-fn mesh_order<T: Copy>(mesh: &FlatMesh, width: usize, pixel_values: &[T]) -> Result<Vec<T>> {
-    let mut values = Vec::new();
-    for element in 0..mesh.len() {
-        let (xs, ys) = mesh.pixels(element)?;
-        for (&x, &y) in xs.iter().zip(ys) {
-            let x = usize::try_from(x)?
-                .checked_sub(1)
-                .context("mesh longitude is zero")?;
-            let y = usize::try_from(y)?
-                .checked_sub(1)
-                .context("mesh latitude is zero")?;
-            values.push(
-                *pixel_values
-                    .get(y * width + x)
-                    .context("mesh pixel lies outside the spatial pixel grid")?,
-            );
-        }
-    }
-    Ok(values)
 }
 
 fn raw_longitudes(pixel: &PixelAxes, raw_grid: Grid) -> Vec<usize> {

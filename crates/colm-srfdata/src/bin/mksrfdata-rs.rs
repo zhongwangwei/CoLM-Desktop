@@ -278,6 +278,26 @@ fn write_landpatch_topology(
     }
 }
 
+/// 调试用：`COLM_SRFDATA_MEMORY_TRACE=1` 时打印当前进程 RSS，用来定位全球扇出的
+/// 内存峰值阶段（bd 上 0.1° 全球会 OOM，日志里需要知道死在哪个阶段）。
+fn trace_memory(stage: &str) {
+    if std::env::var_os("COLM_SRFDATA_MEMORY_TRACE").is_none() {
+        return;
+    }
+    let rss_kb = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|text| {
+            text.split_whitespace()
+                .nth(1)
+                .and_then(|pages| pages.parse::<u64>().ok())
+        })
+        .map(|pages| pages * 4);
+    match rss_kb {
+        Some(kb) => eprintln!("memory-trace {}: rss={} MB", stage, kb / 1024),
+        None => eprintln!("memory-trace {stage}: rss=unknown"),
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().context(usage())?;
@@ -473,6 +493,7 @@ fn catchment_lct_extra_raw_grids(land_cover: SiteMode, urban: bool) -> Vec<Grid>
 }
 
 fn materialize_spatial_pft(args: &[String]) -> Result<()> {
+    trace_memory("materialize_spatial_pft: enter");
     let mut args = parse_spatial_pft(args)?;
     let requested_year = args.year;
     if args.lulcc {
@@ -568,6 +589,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
+    trace_memory("pft: topology+patches built");
     if topology.mesh.is_empty() {
         if let Some(shard) = &args.shard {
             write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;
@@ -1258,6 +1280,7 @@ fn materialize_pft_monthly_vegetation(
 }
 
 fn materialize_spatial_lct(args: &[String]) -> Result<()> {
+    trace_memory("materialize_spatial_lct: enter");
     let mut args = parse_spatial_lct(args)?;
     let requested_year = args.year;
     if args.lulcc {
@@ -1375,6 +1398,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
+    trace_memory("lct: topology+patches built");
     if topology.mesh.is_empty() {
         if let Some(shard) = &args.shard {
             write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;

@@ -3196,3 +3196,63 @@ fn mesh_domain_uses_the_grid_frame_for_global_cases() {
     assert_eq!(domain.west, -180.0);
     assert_eq!(domain.east, 180.0);
 }
+
+#[test]
+fn pixel_window_reconstructs_the_same_mesh_values_as_the_full_lattice() {
+    let directory = temporary("pixel-window");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+    )
+    .unwrap();
+    let full = &topology.pixel;
+    let width = full.lon_w.len();
+    let height = full.lat_s.len();
+    // 用 (y * width + x) 当哨兵值，能唯一还原每个 pixel 的全局坐标。
+    let full_values: Vec<i64> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (y * width + x) as i64))
+        .collect();
+    let window = full.window_for_mesh(&topology.mesh).unwrap();
+    assert!(!window.is_empty());
+    let mut window_values = Vec::with_capacity(window.width() * window.height());
+    for y in 0..window.height() {
+        let global_y = y + window.y_offset;
+        for x in 0..window.width() {
+            let global_x = x + window.x_offset;
+            window_values.push(full_values[global_y * width + global_x]);
+        }
+    }
+    let reconstructed = mesh_order_window(&topology.mesh, &window, &window_values).unwrap();
+    let mut expected = Vec::new();
+    for element in 0..topology.mesh.len() {
+        let (xs, ys) = topology.mesh.pixels(element).unwrap();
+        for (&x, &y) in xs.iter().zip(ys) {
+            let x = usize::try_from(x).unwrap() - 1;
+            let y = usize::try_from(y).unwrap() - 1;
+            expected.push((y * width + x) as i64);
+        }
+    }
+    assert_eq!(reconstructed, expected);
+}
+
+#[test]
+fn pixel_window_skips_the_ocean_margin_outside_the_mesh() {
+    let directory = temporary("pixel-window-trim");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[0, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+    )
+    .unwrap();
+    let window = topology.pixel.window_for_mesh(&topology.mesh).unwrap();
+    assert!(window.width() <= topology.pixel.lon_w.len());
+    assert!(window.height() <= topology.pixel.lat_s.len());
+    assert!(
+        window.width() * window.height() <= topology.pixel.lon_w.len() * topology.pixel.lat_s.len()
+    );
+}
