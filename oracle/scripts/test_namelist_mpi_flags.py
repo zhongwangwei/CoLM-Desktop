@@ -74,8 +74,9 @@ end program
         executable = work / ("probe.exe" if os.name == "nt" else "probe")
         subprocess.run([compiler, "-fcheck=all", str(probe), "-o", str(executable)], cwd=work, check=True, timeout=30)
         # Open MPI 5 ignores the old OMPI mapping variable; MPICH rejects this flag.
-        version = subprocess.check_output([launcher, "--version"], text=True, timeout=10)
-        oversubscribe = ["--oversubscribe"] if "Open MPI" in version else []
+        # The compiler wrapper reports its version without PRRTE help-file metadata.
+        version = subprocess.run([compiler, "--showme:version"], capture_output=True, text=True, timeout=10)
+        oversubscribe = ["--oversubscribe"] if "Open MPI" in version.stdout else []
         result = subprocess.run([launcher, *oversubscribe, "-n", "3", str(executable)], cwd=work,
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (result.stdout, result.stderr)
