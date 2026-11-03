@@ -344,6 +344,31 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo fmt --all --check
 
+      - name: Verify Windows app and test manifests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: gui/src-tauri
+        run: |
+          cargo build --locked --bin colm-desktop-gui
+          if ($LASTEXITCODE -ne 0) { throw 'Windows app build failed' }
+          $mt = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/mt.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $mt) { throw 'Windows SDK manifest tool was not found' }
+          $executables = @(Get-Item target/debug/colm-desktop-gui.exe) +
+            @(Get-ChildItem target/debug/deps/colm_desktop_gui_lib-*.exe)
+          if ($executables.Count -lt 2) { throw 'App and unit-test executables are required' }
+          foreach ($executable in $executables) {
+            $manifest = Join-Path $env:RUNNER_TEMP "$($executable.Name).manifest"
+            & $mt "-inputresource:$($executable.FullName);#1" "-out:$manifest"
+            if ($LASTEXITCODE -ne 0) { throw "Missing embedded manifest: $executable" }
+            [xml]$xml = Get-Content -Raw $manifest
+            $controls = $xml.SelectSingleNode("//*[local-name()='assemblyIdentity' and @name='Microsoft.Windows.Common-Controls']")
+            if ($null -eq $controls -or $controls.version -ne '6.0.0.0') {
+              throw "Common Controls v6 dependency is missing: $executable"
+            }
+            Write-Output "Common Controls v6 manifest verified: $($executable.Name)"
+          }
+
       - name: Diagnose Windows GUI loader failures
         if: failure() && runner.os == 'Windows'
         shell: pwsh

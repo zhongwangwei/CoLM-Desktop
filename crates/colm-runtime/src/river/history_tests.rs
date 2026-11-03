@@ -87,6 +87,7 @@ fn the_river_history_writer_creates_a_missing_restart_date_directory() {
     assert!(path.is_file());
     let file = netcdf::open(&path).unwrap();
     assert_eq!(file.dimension("ucatch").unwrap().len(), 3);
+    file.close().unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -43830,10 +43830,37 @@ AU-Preston 三个输入已以 SHA256 核对本机/服务器一致，无上传。
 实际发现的 RSS 契约错误已修复：UrbanTHERMAL 的 rss 在 Fortran 是局部变量，Rust 不再将该值
 回写宿主诊断、标准重启或历史；保留原宿主 RSS（冷启动为缺失值）。内部土壤阻力和蒸发计算不变。
 城市写回测试 1/1、实际 NetCDF 历史及非城市 RSS 测试 27/27、runtime Clippy 通过；
-初始配对快照未包含这项修复，最终 Rust 将在同一输入上重新运行，对照只读原始 Fortran 产物。
+初始配对快照未包含这项修复；下述复跑已在同一输入上执行，对照只读原始 Fortran 产物。
 
 另补齐 20 个城市输出的既有 tier 分类：LUCY 规定通量 2 项为 tier1，求解状态相关热通量和温度
 18 项为 tier2。没有修改原有分类、atol/rtol、求解器下限或黄金文件；比较器 10/10 测试及 Clippy
 通过，RSS 填充值/实际数值错配仍被拒绝。这项分类只补完变量覆盖，不代表长期误差已获验收。
 
 最终报告分别列出严格逐位、既有 tier、守恒残差及观测技能；不为让任务变绿而修改阈值或生成物。
+
+
+### 第四轮最终复跑与真实 CI 证据
+
+- Linux 最终定向作业 `codex-59f1b93736b147a5ae76f12e58571025` 成功退出，
+  `bash .final-rss-close-tests.sh` 的探针实际构建、8 项 C API 故障检查、27 项历史、
+  30 项装配、10 项比较器测试及相关 Clippy/fmt 全部通过。源码清单 SHA256 为
+  `e75010a4dedae0cf2a58fd08c0776a2881dfadde082eaa5266ca26f151663624`；
+  证据 `/tmp/colm-final-rss-close-evidence/verification.json`。
+- 实际 Rust 1.85.1 编译暴露 lopdf 0.42 的不兼容 let-chain。保留其嵌套深度安全修复，
+  只将一处条件链改写为嵌套 if；89 个发布文件有完整上游 SHA 校验，许可和来源说明随库保留。
+  不降级至存在 RUSTSEC-2026-0187 的旧版本。PDF 提取 2/2、来源与 MSRV 守卫 2/2 通过。
+  真实 CI 的 Engine 1.85.1 和 GUI 1.88.0 均成功，分别见
+  [engine job](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41631359342/job/125901450855)、
+  [GUI job](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41631359342/job/125901451039)。
+- 修复后的城市复跑 `codex-4f2f53d2b95441b6a76949582bf2a502` 完成模拟和指标计算，
+  严格比较最终退出 1。源码基于 `9d09dfabd87479c794e4c26e7abdf4ceab2a8b3e`，
+  参考 Fortran 指纹 `7f5e2b3b14c6ac5f3cbd9607d26959c776dbda0351562ae020871f0d7bb3a729`。
+  537 对输出无缺失；132 个月历史均有逐位差异，120 个月超出现有 tier 门槛。
+  最早超差在 1994-06-02 03:30 UTC，感热差约 0.01336 W/m²，允许值约 8.48e-6 W/m²。
+  RSS 填充值契约修复已在实际输出中确认；首步城市重启 68 项一致，但标准重启的
+  qref/qstar/rst 已有差异，尚未证明后续放大原因。证据 `/tmp/colm-city-final-evidence/` 和
+  `/tmp/colm-city-final-first-failure.txt`。没有放宽阈值或将此结果记为长期验收通过。
+- 草稿 [PR #67](https://github.com/zhongwangwei/CoLM-Desktop/pull/67) 用独立分支运行真实 Windows CI。
+  原工作分支与暂存树保持不变；五个无关数据报告未提交。Windows 测试已检出未关闭的测试文件句柄、
+  GUI 单元测试缺少 Common Controls v6 清单，以及 Linux MPI 启动器版本探测与旧静态测试问题，
+  分别修复并继续验证。公开草稿不代表 Windows 全部通过或允许合并。
