@@ -215,12 +215,15 @@ fn the_server_state_is_rewritten_to_this_study() {
             "m3/siteA": { "member": "m3", "site": "siteA", "case_dir": "/srv/p/.colm/studies/s-remote-other/members/m3/siteA", "status": "failed" }
         }
     });
-    let local = Path::new("/Users/me/p/.colm/studies/s-local");
-    let moved = transplant_state(state, "s-local", "/srv/p/.colm/studies/s-remote", local);
+    let local = Path::new("project")
+        .join(".colm")
+        .join("studies")
+        .join("s-local");
+    let moved = transplant_state(state, "s-local", "/srv/p/.colm/studies/s-remote", &local);
     assert_eq!(moved["study_id"], "s-local");
     assert_eq!(
         moved["tasks"]["m1/siteA"]["case_dir"],
-        json!(local.join("members/m1/siteA"))
+        json!(local.join("members").join("m1").join("siteA"))
     );
     assert!(moved["tasks"]["m1/siteA"].get("process").is_none());
     assert_eq!(moved["tasks"]["m2/siteA"]["case_dir"], "/elsewhere/m2");

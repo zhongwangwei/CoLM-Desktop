@@ -245,9 +245,9 @@ pub(crate) fn case_identity(path: &std::path::Path) -> Option<serde_json::Value>
         identity["inode"] = serde_json::json!(metadata.ino());
     }
     #[cfg(not(unix))]
-    if identity.get("created_ns").is_none() {
+    {
         // A reusable path/name alone must never authorize deleting a directory.
-        return None;
+        identity.get("created_ns")?;
     }
     Some(identity)
 }

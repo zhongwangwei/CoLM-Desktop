@@ -479,6 +479,7 @@ fn history_missing_markers_stay_missing_when_read_as_records() {
         .unwrap();
     field.put_attribute("_FillValue", -9999.0).unwrap();
     field.put_values(&[-9999.0, 5.0], ..).unwrap();
+    file.close().unwrap();
 
     let window = (JAN1, JAN1 + 2 * DAY);
     let mut stats = crate::RecordReadStats::default();
@@ -1421,6 +1422,7 @@ fn gridded_products_match_the_wrapping_last_global_column() {
         .unwrap()
         .put_values(&[10.0, 20.0, 30.0, 40.0], ..)
         .unwrap();
+    file.close().unwrap();
     let observation = root.join("obs.nc");
     {
         let mut file = netcdf::create(&observation).unwrap();
@@ -1487,6 +1489,7 @@ fn point_lookup_matches_the_wrapping_last_global_column() {
         crate::history_cell(&file, &path, "lat", "lon", (179.75, 10.5)).unwrap(),
         (0, 1)
     );
+    file.close().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -3283,7 +3283,10 @@ pub(crate) fn transplant_state(
         for task in tasks.values_mut() {
             if let Some(dir) = task["case_dir"].as_str() {
                 if let Ok(rest) = Path::new(dir).strip_prefix(remote_root) {
-                    task["case_dir"] = json!(local_root.join(rest));
+                    // Push each component so Windows stores native separators throughout.
+                    let mut local_dir = local_root.to_path_buf();
+                    local_dir.extend(rest.components());
+                    task["case_dir"] = json!(local_dir);
                 }
             }
             if let Some(task) = task.as_object_mut() {
