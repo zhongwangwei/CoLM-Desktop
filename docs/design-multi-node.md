@@ -240,11 +240,16 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
   （`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`）。每个 rank 只物化
   自己块区间换算出的 1–3 个矩形窗口里的元素，但 pixel 格点与元素编号仍按完整算例域，
   因此每个块文件与 N=1 逐字节相同，**直接写进最终 landdata 树，不需要合并/重映射**。
-- 全局文件（`block.nc`、`pixel.nc`、`mesh/<year>/mesh.nc`）由 rank 0 单独写；它需要
-  一份完整域、无窗口的元数据拓扑。注意这份重建必须走与正式物化相同的
-  `build_lct/build_pft_land_patches_from_raster` 过滤步骤，否则 `nelm_blk` 会把
-  landmask 正格全部算进去（bd 上实际差 50400 vs 39973，8088 个文件里只差这一个 —— 见
-  `implementation-verification.md` 该轮记录）。
+- 全局文件（`block.nc`、`pixel.nc`、`mesh/<year>/mesh.nc`）由 rank 0 单独写。`nelm_blk`
+  需要所有块的“过滤后 land element 数”，但 rank 0 不能为统计重跑完整域拓扑（0.1° 全球是
+  3.7e9 像元扫描，还会读整张 500 m landtype 栅格）。做法：每个 rank 把自己 tile（即窗口内
+  元素）的每块计数写到 `<case>/out/.colm-shard/rank-XXXX.txt`；rank 0 等齐全部 rank 后汇总，
+  再用一个“空元素窗口”的元数据拓扑（完整 pixel lattice、不物化元素）写全局文件。协调只用
+  共享文件系统，不引入通信库，也不改变 N=1 的写盘路径。
+  注意：任何在正式物化路径上做的拓扑过滤（land-only、mesh filter）都必须已在各 rank 的
+  tile 上完成；root 汇总的是过滤后的计数，而不是重算。（首版曾让 root 重跑完整域且漏掉
+  land-only 过滤，`nelm_blk` 差 50400 vs 39973 —— 8088 个文件里只差这一个，见
+  `implementation-verification.md`。）
 - `colm-cli run`：Rust 预处理在 `ranks>1` 时走 external launcher（`COLM_MPIEXEC`），
   本地/桌面仍拒绝多进程；远程作业体在任意一段用 Rust 代码时都导出启动器变量。
 - 多进程首版的显式边界：`DEF_USE_SrfdataDiag`（全局诊断文件需要跨 rank gather）、
@@ -256,9 +261,11 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
   2 ranks/2 节点全部逐字节相同**（sha256 清单零差异）。区域 `mksrfdata` 单进程 8 线程约
   29 分钟；2 rank 多节点约 26 分钟（该算例瓶颈在 rawdata/文件系统，加速有限）。
 
-真实 0.1° 全球的端到端（1446 活跃 5° 块、5.7M patch）在这一轮之后单独跑，验收矩阵见
+真实 0.1° 全球的端到端（1446 活跃 5° 块、5.7M patch）在 bd 上单独跑，验收矩阵见
 `implementation-verification.md`；预处理扇出的索引空间与块划分不依赖分辨率，区域验证
-覆盖了同一套代码路径。
+覆盖了同一套代码路径。全球算例的约束是**单节点内存**：总内存需求约数百 GB，必须按节点数
+摊薄（bd 155 GB/节点上，24 rank/2 节点与 4 节点都 OOM；应给到 6 节点以上，或把 root 也
+改成纯文件汇总、不再持有任何完整域对象）。
 
 
 - `mksrfdata` 仍是单进程。按 zh（20°×16°，0.25°）约 345 s / 5,120 元素的外推，0.1° 全球面积约 200 倍，单进程预计 **数十小时**；首版可接受一次性等待，但 Phase 4 要加“按块扇出”（`mksrfdata-rs --block`，目前没有；`mkinidata-rs --block` 已有）。
