@@ -3049,6 +3049,36 @@ fn split_topology_writers_match_the_combined_writer_byte_for_byte() {
 }
 
 #[test]
+fn counts_based_global_writer_matches_the_combined_writer() {
+    let directory = temporary("counts-topology");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+    )
+    .unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 2],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![4, 4],
+        set_type: vec![10, 12],
+        element_index: vec![1, 2],
+    };
+    let blocks = BlockLayout::regular(2, 1).unwrap();
+    let combined = directory.join("combined");
+    write_spatial_topology(&combined, 2005, &topology, &patches, &blocks, 1).unwrap();
+    let counts = element_block_counts(&topology, &blocks).unwrap();
+    assert_eq!(counts.values().sum::<usize>(), topology.mesh.len());
+    let split = directory.join("split");
+    write_spatial_global_topology_with_counts(&split, 2005, &topology, &blocks, &counts).unwrap();
+    write_spatial_block_topology(&split, 2005, &topology, &patches, None, &blocks, 1, true)
+        .unwrap();
+    assert_same_tree(&combined, &split);
+}
+
+#[test]
 fn windowed_topology_only_materializes_the_requested_elements() {
     let directory = temporary("windowed-topology");
     let mesh_file = directory.join("mesh.nc");
@@ -3082,6 +3112,7 @@ fn windowed_topology_only_materializes_the_requested_elements() {
             &[],
             Some(&blocks),
             Some(&windows),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -3120,6 +3151,7 @@ fn empty_element_window_is_allowed_for_an_ocean_only_shard() {
         &[],
         Some(&BlockLayout::regular(2, 1).unwrap()),
         Some(&[]),
+        false,
     )
     .unwrap();
     assert_eq!(topology.mesh.len(), 0);

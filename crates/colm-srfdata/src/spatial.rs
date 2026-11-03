@@ -422,6 +422,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         coordinate_grids,
         block_order,
         None,
+        false,
     )
 }
 
@@ -445,6 +446,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
     coordinate_grids: &[SpatialGrid],
     block_order: Option<&BlockLayout>,
     element_windows: Option<&[crate::SpatialBounds]>,
+    distributed: bool,
 ) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
@@ -474,7 +476,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
         filter_grid,
         extra_raw_grids,
         &with_block_edges(coordinate_grids, block_order),
-        element_windows.is_some(),
+        distributed,
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -4323,6 +4325,35 @@ pub fn write_spatial_global_topology(
     write_spatial_global_files(landdata, land_cover_year, topology, blocks)
 }
 
+/// 每个块里有多少 mesh element（land-only 过滤之后）。多进程扇出时各 rank 把自己 tile 的
+/// 计数写出来，rank 0 汇总后写全局 `mesh/<year>/mesh.nc` 的 `nelm_blk`，避免 root 为了
+/// 统计而重跑一遍完整域拓扑（0.1° 全球那是 3.7e9 像元的扫描）。
+pub fn element_block_counts(
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<std::collections::BTreeMap<(usize, usize), usize>> {
+    let assignments = element_blocks(topology, blocks)?;
+    let mut counts = std::collections::BTreeMap::new();
+    for block in assignments.values() {
+        *counts.entry(*block).or_insert(0) += 1;
+    }
+    Ok(counts)
+}
+
+/// 与 [`write_spatial_global_topology`] 相同，但 `nelm_blk` 用调用方给的每块 element 计数。
+/// `topology` 只需要提供 pixel 格点与 mesh 边缘坐标（可以用“空元素窗口”的元数据拓扑）。
+pub fn write_spatial_global_topology_with_counts(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+    counts: &std::collections::BTreeMap<(usize, usize), usize>,
+) -> Result<()> {
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    write_spatial_global_files_with_counts(landdata, land_cover_year, topology, blocks, counts)
+}
+
 /// 只写**按块**的拓扑文件：`mesh/<year>/mesh_<block>.nc`、`landelm`/`landpatch`
 /// 的块文件与可选的 `patchfrac_elm`。
 ///
@@ -4362,23 +4393,26 @@ fn write_spatial_global_files(
     topology: &SpatialTopology,
     blocks: &BlockLayout,
 ) -> Result<()> {
+    let counts = element_block_counts(topology, blocks)?;
+    write_spatial_global_files_with_counts(landdata, land_cover_year, topology, blocks, &counts)
+}
+
+fn write_spatial_global_files_with_counts(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+    counts: &std::collections::BTreeMap<(usize, usize), usize>,
+) -> Result<()> {
     let (nx, ny) = blocks.dimensions()?;
     std::fs::create_dir_all(landdata)
         .with_context(|| format!("cannot create {}", landdata.display()))?;
     write_block_file(landdata, blocks)?;
     write_pixel_file(landdata, &topology.pixel)?;
-    let assignments = element_blocks(topology, blocks)?;
     let year = format!("{land_cover_year:04}");
     let mesh_dir = landdata.join("mesh").join(&year);
     std::fs::create_dir_all(&mesh_dir)?;
-    write_mesh_index(
-        &mesh_dir.join("mesh.nc"),
-        topology,
-        blocks,
-        &assignments,
-        nx,
-        ny,
-    )
+    write_mesh_index(&mesh_dir.join("mesh.nc"), topology, blocks, counts, nx, ny)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6069,7 +6103,7 @@ fn write_mesh_index(
     path: &Path,
     topology: &SpatialTopology,
     blocks: &BlockLayout,
-    assignments: &BTreeMap<i64, (usize, usize)>,
+    element_counts: &std::collections::BTreeMap<(usize, usize), usize>,
     nx: usize,
     ny: usize,
 ) -> Result<()> {
@@ -6096,8 +6130,8 @@ fn write_mesh_index(
     file.add_dimension("longitude", lon_w.len())?;
     file.add_dimension("latitude", lat_s.len())?;
     let mut counts = vec![0_i32; nx * ny];
-    for block in assignments.values() {
-        counts[block.1 * nx + block.0] += 1;
+    for (&(x, y), &count) in element_counts {
+        counts[y * nx + x] = i32::try_from(count)?;
     }
     // NetCDF-Fortran reverses rank-two dimension order.  Preserve the external
     // `ncdump` contract of `ncio_write_serial(..., 'xblk', 'yblk')`.
