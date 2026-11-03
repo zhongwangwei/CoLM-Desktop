@@ -183,7 +183,8 @@ fn existing_surface_clip_reports_a_missing_mesh_index() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("mesh index"), "{error}");
-    assert!(error.contains("mesh/2005/mesh.nc"), "{error}");
+    let expected = Path::new("mesh").join("2005").join("mesh.nc");
+    assert!(error.contains(expected.to_str().unwrap()), "{error}");
     crate::remove_test_tree(source);
 }
 
@@ -209,10 +210,10 @@ fn region_requirements_report_missing_lake_carbon_by_block() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("Missing required lake carbon"), "{error}");
-    assert!(
-        error.contains("soil/2005/lake_soilc_patches_e000_n00.nc"),
-        "{error}"
-    );
+    let expected = Path::new("soil")
+        .join("2005")
+        .join("lake_soilc_patches_e000_n00.nc");
+    assert!(error.contains(expected.to_str().unwrap()), "{error}");
     crate::remove_test_tree(source);
 }
 
@@ -242,10 +243,10 @@ fn region_requirements_report_missing_methane_ph_by_block() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("Missing required methane pH"), "{error}");
-    assert!(
-        error.contains("soil/2005/methane_ph_patches_e000_n00.nc"),
-        "{error}"
-    );
+    let expected = Path::new("soil")
+        .join("2005")
+        .join("methane_ph_patches_e000_n00.nc");
+    assert!(error.contains(expected.to_str().unwrap()), "{error}");
     crate::remove_test_tree(source);
 }
 
