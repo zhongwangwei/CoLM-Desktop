@@ -868,7 +868,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
 
       allocate (ipt (totalreq))
       allocate (msk (totalreq))
@@ -976,8 +976,6 @@ CONTAINS
          ENDIF
       ENDDO
 
-      deallocate (xlist)
-      deallocate (ylist)
       deallocate (ipt  )
       deallocate (msk  )
 
@@ -1033,6 +1031,9 @@ CONTAINS
       ENDDO
 
 #endif
+
+      deallocate (xlist)
+      deallocate (ylist)
 
    END SUBROUTINE aggregation_request_data
 

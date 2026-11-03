@@ -30,7 +30,7 @@ def preprocess(path: Path, grid: str) -> str:
 def test_flat_methane_ph_uses_all_to_all_sparse_exchange() -> None:
     for grid in ("CATCHMENT", "UNSTRUCTURED"):
         mapping = preprocess(
-            ROOT / "main/TRACER/MOD_Tracer_Reactive_Methane_PHMapping.F90", grid
+            ROOT / "main/MATERIAL/FAMILY_GAS/MOD_MT_Methane_PHMapping.F90", grid
         )
         aggregate = preprocess(ROOT / "mksrfdata/Aggregation_MethanePH.F90", grid)
 

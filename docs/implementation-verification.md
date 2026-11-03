@@ -43864,3 +43864,10 @@ AU-Preston 三个输入已以 SHA256 核对本机/服务器一致，无上传。
   原工作分支与暂存树保持不变；五个无关数据报告未提交。Windows 测试已检出未关闭的测试文件句柄、
   GUI 单元测试缺少 Common Controls v6 清单，以及 Linux MPI 启动器版本探测与旧静态测试问题，
   分别修复并继续验证。公开草稿不代表 Windows 全部通过或允许合并。
+
+真实 CI 随后检出的 FLAT 路径死锁已修复：聚合请求复用本地读取路径，两个材料历史
+写入过程复用既有 collective gather，所有 rank（含空 rank）参与，质量/水量保持配对，
+仅 master 计算比值并写文件。Open MPI 5 的相关 6 项测试及 Linux MPICH 4.3.2 的
+2 项历史测试通过，独立只读审查未发现阻塞问题。日志
+`/tmp/colm-round4-flat-local-tests.log`、`/tmp/colm-round4-flat-history-mpich.log`。
+Fortran 指纹因此改变；上面的城市复跑仍只证明其记录的旧指纹结果，不能转称为新源码逐位通过。

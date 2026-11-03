@@ -1142,7 +1142,9 @@ CONTAINS
       real(r8), allocatable :: mt_global(:), water_global(:)
       real(r8), allocatable :: send_pair(:,:), recv_pair(:,:)
       real(r8) :: delta_loc
+      real(r8), allocatable :: global_fields(:,:)
 
+      numset = 0
       IF (p_is_worker) THEN
          numset = numelm
          IF (numset > 0) THEN
@@ -1172,7 +1174,7 @@ CONTAINS
             ENDDO
          ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -1186,6 +1188,18 @@ CONTAINS
 #endif
       ENDIF
 
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate(send_pair(2, max(1,numset)))
+      send_pair = 0._r8
+      IF (numset > 0) THEN
+         send_pair(1, 1:numset) = mt_local
+         send_pair(2, 1:numset) = water_local
+      ENDIF
+      CALL gather_history_fields (reshape(send_pair, (/size(send_pair)/)), 2, &
+         numset, totalnumelm, elm_data_address, global_fields)
+      deallocate(send_pair)
+#endif
+
       IF (p_is_master) THEN
          totalnumset = totalnumelm
          allocate(out_vec(totalnumset), mt_global(totalnumset), water_global(totalnumset))
@@ -1193,7 +1207,11 @@ CONTAINS
          mt_global = 0._r8
          water_global = 0._r8
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+         mt_global = global_fields(1, :)
+         water_global = global_fields(2, :)
+         deallocate(global_fields)
+#elif defined(USEMPI)
          DO iwork = 0, p_np_worker-1
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
@@ -1284,8 +1302,10 @@ CONTAINS
       real(r8), allocatable :: mt_local(:,:), water_local(:,:), out_vec(:,:)
       real(r8), allocatable :: mt_global(:,:), water_global(:,:)
       real(r8), allocatable :: send_pair(:,:,:), recv_pair(:,:,:)
+      real(r8), allocatable :: global_fields(:,:)
 
       ub1 = lb1 + ndim1 - 1
+      numset = 0
       IF (p_is_worker) THEN
          numset = numelm
          IF (numset > 0) THEN
@@ -1312,7 +1332,7 @@ CONTAINS
             ENDDO
          ENDIF
 
-#ifdef USEMPI
+#if defined(USEMPI) && !defined(FLAT_SPMD)
          mesg = (/p_iam_glb, numset/)
          CALL mpi_send (mesg, 2, MPI_INTEGER, p_address_master, mpi_tag_mesg, p_comm_glb, p_err)
          IF (numset > 0) THEN
@@ -1326,6 +1346,18 @@ CONTAINS
 #endif
       ENDIF
 
+#if defined(USEMPI) && defined(FLAT_SPMD)
+      allocate(send_pair(2, ndim1, max(1,numset)))
+      send_pair = 0._r8
+      IF (numset > 0) THEN
+         send_pair(1, :, 1:numset) = mt_local
+         send_pair(2, :, 1:numset) = water_local
+      ENDIF
+      CALL gather_history_fields (reshape(send_pair, (/size(send_pair)/)), 2*ndim1, &
+         numset, totalnumelm, elm_data_address, global_fields)
+      deallocate(send_pair)
+#endif
+
       IF (p_is_master) THEN
          totalnumset = totalnumelm
          allocate(out_vec(ndim1, totalnumset), mt_global(ndim1, totalnumset), &
@@ -1334,7 +1366,13 @@ CONTAINS
          mt_global = 0._r8
          water_global = 0._r8
 
-#ifdef USEMPI
+#if defined(USEMPI) && defined(FLAT_SPMD)
+         allocate(recv_pair(2, ndim1, totalnumset))
+         recv_pair = reshape(global_fields, shape(recv_pair))
+         mt_global = recv_pair(1, :, :)
+         water_global = recv_pair(2, :, :)
+         deallocate(recv_pair, global_fields)
+#elif defined(USEMPI)
          DO iwork = 0, p_np_worker-1
             CALL mpi_recv (mesg, 2, MPI_INTEGER, MPI_ANY_SOURCE, &
                mpi_tag_mesg, p_comm_glb, p_stat, p_err)
