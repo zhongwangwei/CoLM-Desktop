@@ -414,6 +414,17 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 }
                 filter.apply(&mut topology)?;
             }
+            // 与下面正式物化路径相同：PFT 拓扑在 `build_pft_land_patches_from_raster`
+            // 之后才写盘，全局 mesh 的 nelm_blk 必须按过滤后的元素统计。
+            let (topology, _) = build_pft_land_patches_from_raster(
+                topology,
+                &args.landtype,
+                "landtype",
+                COLM_500M,
+                args.dominant,
+                args.land_only && mesh_filter.is_none(),
+                args.patch_mode,
+            )?;
             Some(topology)
         }
         _ => None,
@@ -1240,6 +1251,17 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 }
                 filter.apply(&mut topology)?;
             }
+            // N=1 的写盘拓扑是 `build_lct_land_patches_from_raster` 过滤后的结果（land_only
+            // 会剔除非陆表元素）。全局 mesh 文件的 nelm_blk 必须与它一致，所以这里也走同一步，
+            // 只是丢掉 patches：它需要 landtype 栅格，但不读 rawdata 的其它大表。
+            let (topology, _) = build_lct_land_patches_from_raster(
+                topology,
+                &args.landtype,
+                "landtype",
+                lct_grid,
+                args.dominant,
+                args.land_only && mesh_filter.is_none(),
+            )?;
             Some(topology)
         }
         _ => None,
