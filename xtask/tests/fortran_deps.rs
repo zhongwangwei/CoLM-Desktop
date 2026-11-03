@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn root() -> PathBuf {
+    // Keep foreign POSIX tools on regular paths, without canonicalize()'s \\?\ prefix.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .canonicalize()
+        .parent()
         .expect("repo root")
+        .to_path_buf()
 }
 
 #[test]
@@ -55,6 +56,43 @@ fn configured_fortran_dependency_tools_must_be_complete() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
         error.contains("COLM_FORTRAN_DEPS_BIN is missing required tools"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stale_fortran_dependencies_report_the_changed_prerequisites() {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util, pathlib, sys, tempfile
+spec = importlib.util.spec_from_file_location("deps", sys.argv[1])
+deps = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(deps)
+text = pathlib.Path(deps.MAKEFILE).read_text(encoding="utf-8")
+line = next(line for line in text.split(deps.BEGIN, 1)[1].splitlines() if ".o: " in line)
+with tempfile.TemporaryDirectory(prefix="colm-stale-deps-") as directory:
+    makefile = pathlib.Path(directory, "Makefile")
+    makefile.write_text(text.replace(line, line + " stale_test.o", 1), encoding="utf-8")
+    deps.MAKEFILE = str(makefile)
+    sys.argv = [sys.argv[1], "--check"]
+    sys.exit(deps.main())
+"#,
+        )
+        .arg(root().join("oracle/scripts/gen_fortran_deps.py"))
+        .current_dir(root())
+        .output()
+        .expect("check a private stale Makefile");
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("--- committed Makefile"), "{error}");
+    assert!(error.contains("+++ generated Makefile"), "{error}");
+    assert!(
+        error
+            .lines()
+            .any(|line| line.starts_with('-') && line.contains("stale_test.o")),
         "{error}"
     );
 }

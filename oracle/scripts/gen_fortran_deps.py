@@ -15,6 +15,7 @@
 """
 
 import argparse
+import difflib
 import os
 import re
 import shutil
@@ -75,6 +76,8 @@ def expand(variable):
             cwd=VENDOR, env=env, check=True, capture_output=True, text=True)
     finally:
         os.unlink(path)
+    if result.stderr:
+        print(f"make {variable}: {result.stderr.rstrip()}", file=sys.stderr)
     return [word for word in result.stdout.split() if word.endswith(".o")]
 
 
@@ -159,6 +162,9 @@ def main():
         if updated != text:
             print("vendor/CoLM202X/Makefile: generated Fortran module prerequisites are stale; "
                   "run oracle/scripts/gen_fortran_deps.py", file=sys.stderr)
+            sys.stderr.writelines(difflib.unified_diff(
+                text.splitlines(keepends=True), updated.splitlines(keepends=True),
+                fromfile="committed Makefile", tofile="generated Makefile"))
             return 1
         print("generated Fortran module prerequisites are current")
         return 0
