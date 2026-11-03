@@ -43871,3 +43871,15 @@ AU-Preston 三个输入已以 SHA256 核对本机/服务器一致，无上传。
 2 项历史测试通过，独立只读审查未发现阻塞问题。日志
 `/tmp/colm-round4-flat-local-tests.log`、`/tmp/colm-round4-flat-history-mpich.log`。
 Fortran 指纹因此改变；上面的城市复跑仍只证明其记录的旧指纹结果，不能转称为新源码逐位通过。
+
+真实 Linux CI 的锁竞争测试随后发现 uutils 0.8.0 的并发 mkdir 调用可同时返回成功，
+已改用 Bash noclobber 的排他文件创建保护目录创建、owner 写入、回收与释放；
+复用原有 `.reclaim` 路径，不增加远程依赖。实际 Linux 30 次重复竞争通过，旧实现的
+确定性回归能打印 BROKEN；独立审查通过。日志 `/tmp/colm-lock-linux-fixed.log`、
+`/tmp/colm-lock-old-shim-proof.log`。遗留 admission 文件仍按原边界保守阻止提交，须核实后清理。
+
+首个真实 Windows 内核作业
+[41629858753](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41629858753) 已成功，
+覆盖三种内核构建、脱离 MSYS2 启动、真实算例及 Rust 启动器。它是较早快照的证据，
+不能代替后续源码的最终 CI。Windows GUI 已实际执行 578 项通过测试，剩余夹具路径
+分隔符断言已修正，定向 1/1 通过；应用与测试 manifest 的最终检查继续运行。

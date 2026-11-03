@@ -1162,27 +1162,57 @@ fn the_active_job_lock_serialises_two_writers() {
     let project = base.join("projects/x");
     std::fs::create_dir_all(&project).unwrap();
     let project_text = project.to_string_lossy().into_owned();
-    // 放大 mkdir 到写 owner 的窗口，让另一进程一定有机会检查尚未写完的锁。
-    let script = format!(
-        r#"{helpers}
+    // Both the actual utility and a deterministic reproduction of uutils 0.8.0's
+    // concurrent mkdir success must preserve mutual exclusion.
+    for simulate_mkdir_race in [false, true] {
+        let mkdir_shim = if simulate_mkdir_race {
+            format!(
+                r#"_colm_mkdir_binary=$(type -P mkdir)
+mkdir() {{
+  if [ "$1" = '{project}/.active-job.lock' ] && [ ! -e "$1" ]; then
+    sleep 0.15
+    "$_colm_mkdir_binary" -p "$1"
+  else
+    "$_colm_mkdir_binary" "$@"
+  fi
+  return $?
+}}
+"#,
+                project = project_text,
+            )
+        } else {
+            String::new()
+        };
+        // 放大 mkdir 到写 owner 的窗口，让另一进程有机会检查尚未写完的锁。
+        let script = format!(
+            r#"{helpers}
+{mkdir_shim}
 date() {{ sleep 0.15; command date "$@"; }}
 hold() {{
   if ! _colm_lock_acquire; then echo timeout; exit 1; fi
-  if ! mkdir '{project}/guard' 2>/dev/null; then echo BROKEN; fi
+  if ! mkdir '{project}/guard'; then echo BROKEN; fi
   sleep 0.15
-  rmdir '{project}/guard' 2>/dev/null
+  rmdir '{project}/guard'
   _colm_lock_release
 }}
 hold & hold &
 wait
 "#,
-        helpers = lock_helpers(&project_text, "one"),
-        project = project_text,
-    );
-    let (success, out, err) = bash_script(&script);
-    assert!(success, "{err}");
-    assert!(!out.contains("BROKEN"), "两个进程同时进了临界区：{out}");
-    assert!(!project.join(".active-job.lock").exists(), "锁要释放");
+            helpers = lock_helpers(&project_text, "one"),
+            project = project_text,
+        );
+        let (success, out, err) = bash_script(&script);
+        assert!(success, "{err}");
+        assert!(
+            !out.contains("BROKEN") && !out.contains("timeout"),
+            "两个进程同时进了临界区或超时（mkdir shim={simulate_mkdir_race}）：{out}\n{err}"
+        );
+        assert!(!project.join(".active-job.lock").exists(), "锁要释放");
+        assert!(
+            !project.join(".active-job.lock.reclaim").exists(),
+            "admission guard must only cover directory bookkeeping"
+        );
+    }
     let _ = std::fs::remove_dir_all(&base);
 }
 

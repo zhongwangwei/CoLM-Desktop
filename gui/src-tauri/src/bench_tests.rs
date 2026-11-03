@@ -536,7 +536,7 @@ fn process_exists(pid: &str) -> bool {
 #[test]
 fn projects_expose_the_recent_runs_history_list() {
     let root = temp("status-runs-history");
-    let project = root.join("projects/fresh");
+    let project = root.join("projects").join("fresh");
     let mut first =
         crate::bench_runs::RunSnapshot::create(&project, "fresh", "cfg: first\n", &[], None)
             .unwrap();

@@ -740,7 +740,7 @@ fn yaml_scalar(value: &str) -> Result<Option<String>> {
 /// 自己令牌的锁。抽成函数是为了让"占位/清理/释放"三段脚本共用同一份实现。
 ///
 /// 为什么是 `mkdir` 自旋锁：macOS 自带 bash 没有 `flock`，测试机与真实服务器也可能一个 macOS 一个
-/// Linux；`mkdir` 是所有 POSIX shell 都有的原子操作，同一个路径只有一个进程能建成。
+/// Linux。部分 mkdir 实现会在并发创建时都报告成功，因此用 bash noclobber 的排他创建串行化目录改动。
 ///
 /// owner records token, timestamp, PID, host and PID namespace. Only an expired same-host owner whose PID is
 /// confirmed gone may be reclaimed; a paused live submitter must never lose its critical section.
@@ -754,14 +754,20 @@ fn lock_helpers(project: &str, token: &str) -> String {
         r#"_colm_lock_namespace() {{
   if [ "$(uname -s)" = Darwin ]; then echo Darwin; else readlink /proc/self/ns/pid 2>/dev/null; fi
 }}
+_colm_lock_admit() {{
+  (set -C; : > {reclaim}) 2>/dev/null
+}}
 _colm_lock_acquire() {{
   _colm_try=0
   while [ "$_colm_try" -lt {tries} ]; do
-    if mkdir {lock} 2>/dev/null; then
-      printf '%s\n%s\n%s\n%s\n%s\n' {token} "$(date +%s)" "${{BASHPID:-$$}}" "$(uname -n)" "$(_colm_lock_namespace)" > {owner} 2>/dev/null
-      if [ "$(sed -n 1p {owner} 2>/dev/null)" = {token} ]; then return 0; fi
-    fi
-    if mkdir {reclaim} 2>/dev/null; then
+    if _colm_lock_admit; then
+      if mkdir {lock} 2>/dev/null; then
+        printf '%s\n%s\n%s\n%s\n%s\n' {token} "$(date +%s)" "${{BASHPID:-$$}}" "$(uname -n)" "$(_colm_lock_namespace)" > {owner} 2>/dev/null
+        if [ "$(sed -n 1p {owner} 2>/dev/null)" = {token} ]; then
+          rm -f {reclaim}
+          return 0
+        fi
+      fi
       _colm_record=$(cat {owner} 2>/dev/null)
       _colm_owner=$(printf '%s\n' "$_colm_record" | sed -n 1p)
       _colm_stamp=$(printf '%s\n' "$_colm_record" | sed -n 2p)
@@ -777,7 +783,7 @@ _colm_lock_acquire() {{
         if _colm_live=$(ps -p "$_colm_pid" -o pid= 2>/dev/null); then _colm_ps_status=0; else _colm_ps_status=$?; fi
         if [ "$_colm_ps_status" = 1 ] && [ -z "$_colm_live" ]; then rm -rf {lock}; fi
       fi
-      rm -rf {reclaim}
+      rm -f {reclaim}
     fi
     _colm_try=$((_colm_try + 1))
     sleep 0.05
@@ -785,7 +791,17 @@ _colm_lock_acquire() {{
   return 1
 }}
 _colm_lock_release() {{
-  if [ "$(sed -n 1p {owner} 2>/dev/null)" = {token} ]; then rm -rf {lock}; fi
+  _colm_release_try=0
+  while [ "$_colm_release_try" -lt {tries} ]; do
+    if _colm_lock_admit; then
+      if [ "$(sed -n 1p {owner} 2>/dev/null)" = {token} ]; then rm -rf {lock}; fi
+      rm -f {reclaim}
+      return 0
+    fi
+    _colm_release_try=$((_colm_release_try + 1))
+    sleep 0.05
+  done
+  return 1
 }}
 "#,
         tries = LOCK_TRIES,
