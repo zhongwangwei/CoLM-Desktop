@@ -152,6 +152,11 @@ jobs:
           $env:COLM_FORTRAN_DEPS_BIN = $tools
           python oracle/scripts/gen_fortran_deps.py --check
 
+      - name: Check Windows dependency tests before the workspace build
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test --locked -p xtask --test fortran_deps -- --test-threads=1
+
       # netcdf 是本方案最大的依赖风险点，所以三平台都编一次 —— 为的是让
       # Windows 上的失败在第一天暴露，而不是等到里程碑 9。
       #
