@@ -474,6 +474,7 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
         filter_grid,
         extra_raw_grids,
         &with_block_edges(coordinate_grids, block_order),
+        element_windows.is_some(),
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -649,6 +650,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         filter.map(|filter| &filter.grid),
         extra_raw_grids,
         &with_block_edges(coordinate_grids, block_layout),
+        false,
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -5159,6 +5161,7 @@ fn assimilated_pixels(
     filter_grid: Option<&SpatialGrid>,
     extra_raw_grids: &[Grid],
     coordinate_grids: &[SpatialGrid],
+    distributed: bool,
 ) -> Result<PixelMapping> {
     ensure!(raw.nlon > 0 && raw.nlat > 0, "raw grid must be nonempty");
     ensure!(
@@ -5300,13 +5303,24 @@ fn assimilated_pixels(
     }
     ys.sort_by(f64::total_cmp);
     ys.dedup();
-    let limit = serial_raw_pixel_limit();
-    ensure!(
-        (xs.len() - 1)
-            .checked_mul(ys.len() - 1)
-            .is_some_and(|n| n <= limit),
-        "assimilated pixel window exceeds the {limit}-pixel serial limit; use block-distributed preprocessing or raise COLM_SRFDATA_MAX_RAW_PIXELS"
-    );
+    let pixel_cells = (xs.len() - 1)
+        .checked_mul(ys.len() - 1)
+        .context("assimilated pixel count overflows usize")?;
+    if distributed {
+        // 扇出时每个 rank 只遍历自己窗口的行/列区间，不再走 `serial_raw_pixel_limit`
+        // 对整张 lattice 的串行上限；真正会落盘成 i32 的是 land pixel 的累计下标，
+        // 超界时写 pixelset 的 `i32::try_from` 会带元素名报错。
+        ensure!(
+            pixel_cells <= 4_000_000_000,
+            "assimilated pixel lattice has {pixel_cells} cells; even block-distributed preprocessing cannot address that many pixels"
+        );
+    } else {
+        let limit = serial_raw_pixel_limit();
+        ensure!(
+            pixel_cells <= limit,
+            "assimilated pixel window exceeds the {limit}-pixel serial limit; use block-distributed preprocessing or raise COLM_SRFDATA_MAX_RAW_PIXELS"
+        );
+    }
     let columns = xs
         .windows(2)
         .map(|cell| {
