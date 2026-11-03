@@ -85,7 +85,7 @@ pub use spatial::{
     build_spatial_topology, build_spatial_topology_in_domain,
     build_spatial_topology_with_filter_grid, build_spatial_topology_with_filter_grid_and_raw_grids,
     build_spatial_topology_with_filter_grid_and_raw_grids_in_window, coordinate_grid_from_file,
-    gather_patch_raster, mesh_cell_area_weights, read_coordinate_patch_selection_f64,
+    gather_patch_raster, mesh_cell_area_weights, mesh_domain, read_coordinate_patch_selection_f64,
     read_coordinate_patch_selection_layers_f64, read_coordinate_raster_pft_point_f64,
     read_mesh_coordinate_raster_f64, read_mesh_coordinate_raster_layers_f64,
     read_mesh_coordinate_raster_pft_f64, read_mesh_open_raster_f64, read_mesh_raster_f64,

@@ -73,6 +73,7 @@ fn resolve_shard(
     kind: SpatialInputKind,
     blocks: &colm_srfdata::BlockLayout,
     domain: Option<colm_srfdata::SpatialBounds>,
+    mesh: &std::path::Path,
     rank: Option<usize>,
     ranks: Option<usize>,
 ) -> Result<Option<Shard>> {
@@ -87,9 +88,12 @@ fn resolve_shard(
         "multi-process mksrfdata does not support CATCHMENT meshes yet; \
          run this case with --engine fortran or one process"
     );
-    let domain = domain.context(
-        "multi-process mksrfdata needs the case domain (DEF_domain) to assign block-aligned windows",
-    )?;
+    // 全球算例通常不写 DEF_domain（整颗球就是域）；这时用网格文件自身的覆盖范围，
+    // 与单进程 `bounds=None` 的默认域完全一致。
+    let domain = match domain {
+        Some(domain) => domain,
+        None => colm_srfdata::mesh_domain(mesh)?,
+    };
     let windows = colm_srfdata::shard_element_windows(blocks, domain, info.rank(), info.size())?
         .with_context(|| {
             format!(
@@ -4322,7 +4326,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         canopy_tiles.is_none() || land_cover == SiteMode::Igbp,
         "--canopy-structure-dir supports IGBP land cover only"
     );
-    let shard = resolve_shard(kind, &blocks, bounds, rank, ranks)?;
+    let shard = resolve_shard(kind, &blocks, bounds, &PathBuf::from(&args[1]), rank, ranks)?;
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -4698,7 +4702,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         simple_topography_factors.is_none() || regular_topography_factors.is_none(),
         "--simple-topography-factors and --regular-topography-factors are mutually exclusive"
     );
-    let shard = resolve_shard(kind, &blocks, bounds, rank, ranks)?;
+    let shard = resolve_shard(kind, &blocks, bounds, &PathBuf::from(&args[1]), rank, ranks)?;
     Ok(SpatialPftArgs {
         kind,
         mesh: PathBuf::from(&args[1]),

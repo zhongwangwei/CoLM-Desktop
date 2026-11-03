@@ -3123,3 +3123,15 @@ fn empty_element_window_is_allowed_for_an_ocean_only_shard() {
     .unwrap();
     assert_eq!(topology.mesh.len(), 0);
 }
+
+#[test]
+fn mesh_domain_uses_the_grid_frame_for_global_cases() {
+    let directory = temporary("mesh-domain");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let domain = mesh_domain(&mesh_file).unwrap();
+    assert_eq!(domain.west, -180.0);
+    assert_eq!(domain.east, -180.0); // 跨日界线的网格，east 回到起点，span 按 360 处理
+    assert_eq!(domain.south, -90.0);
+    assert_eq!(domain.north, 90.0);
+}

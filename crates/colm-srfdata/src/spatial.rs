@@ -5434,6 +5434,42 @@ fn pixel_window(
     Ok((columns, rows))
 }
 
+/// 读空间网格文件的经纬度外框；多进程预处理在算例没写 `DEF_domain`（全球算例的常见情况）
+/// 时用它作为分片用的算例域。与 [`build_spatial_topology_with_filter_grid_and_raw_grids`]
+/// 里 `bounds=None` 时采用的默认域一致（网格文件自身的覆盖范围）。
+pub fn mesh_domain(path: impl AsRef<Path>) -> Result<crate::SpatialBounds> {
+    let path = path.as_ref();
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let values = |name: &str| -> Result<Vec<f64>> {
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{name} is absent from {}", path.display()))?;
+        Ok(variable.get_values::<f64, _>(..)?)
+    };
+    let lon_w = values("lon_w")?;
+    let lon_e = values("lon_e")?;
+    let lat_s = values("lat_s")?;
+    let lat_n = values("lat_n")?;
+    let (first_lon, last_lon) = (lon_w.first(), lon_e.last());
+    let (first_lat, last_lat) = (lat_s.first(), lat_n.last());
+    let (Some(&west), Some(&east), Some(&south), Some(&north)) =
+        (first_lon, last_lon, first_lat, last_lat)
+    else {
+        bail!("mesh file {} has empty coordinate edges", path.display());
+    };
+    ensure!(
+        south < north,
+        "mesh latitude edges in {} are not south-to-north",
+        path.display()
+    );
+    Ok(crate::SpatialBounds {
+        south,
+        north,
+        west,
+        east,
+    })
+}
+
 /// 多进程预处理的“按块扇出”：把算例域覆盖到的活跃块按 row-major 顺序连续分给
 /// `rank`，返回该 rank 的元素窗口（1–3 个块边界对齐的矩形）。
 ///
