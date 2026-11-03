@@ -43791,3 +43791,40 @@ N=1 输出必须逐字节不变，N>1 与 N=1 逐文件相同。预处理扇出�
   全球 24 rank 时每个 rank 拿到的是 108 个块组成的**整条纬度带**（360°×5–7.5°），
   窗口面积 ≈ 全球/24，rawdata 峰值也按这个面积走。区域算例不受影响；全球若要低内存，
   需要 2D 块分区（行×列）或 rank 内按块流式。
+
+## 收尾轮：PixelWindow 修掉全球 reader 内存放大；区域 1vN 在最终代码上复验（2026-11-03）
+
+**全球 0.1° 的结论（按用户要求不跑模拟）**：0.1° 全球 colm 状态约
+`5M+ patch × ~120 KB ≈ 0.36–0.48 TB`，bd 节点 155 GB、当时只有 2 台计算节点
+（node006/node016，其余 113 台 closed），连单份状态都放不下，因此 0.1° 全球模拟取消；
+全球只保留代码路径与容量分析。粗分辨率全球（1°）理论上 2 节点可跑，但 mksrfdata 仍要
+读全球 500 m rawdata（小时级），本轮同样不跑。
+
+**预处理侧真实缺陷（已修）**：reader 之前按**完整 pixel lattice** 分配稠密缓冲。
+0.1° 全球 lattice 是 `86400 × 43200 = 3.73e9` 格，`read_mesh_open_raster` /
+`RasterWindow` / tiled PFT 等一次分配 15–30 GB/rank，24 rank/2 节点必然 OOM（实测
+节点峰值 158 GB，exit 9）。修法：
+- 新增 `PixelWindow`：按 mesh 实际覆盖的连续子矩形裁剪 densе 缓冲，`mesh_order_window`
+  映射回全局元素/pixel 索引；值不变；
+- 层维最内层的 25 层 fast path 在 `窗口行 × 窗口列 × 层 > 64M` 时退回逐层读；
+- 5° tile 文件缓存从无上限改为 16（`COLM_SRFDATA_TILE_CACHE` 可调）；
+- 保留 `COLM_SRFDATA_MEMORY_TRACE=1` 的 phase RSS 日志，供后续 OOM 定位。
+
+**最终代码的区域复验（bd 0.1° Mekong，2000-07-01–07-02，LSF）**
+
+| 对比 | 结果 |
+|---|---|
+| 新 1 rank/1 节点 landdata vs **PixelWindow 之前**的参考清单 | **8088/8088 文件 sha256 相同（0 差异）** |
+| 新 1 rank/1 节点 vs 新 2 ranks/2 节点 landdata | **8088/8088 文件相同（0 差异）** |
+
+参考清单来自旧 reader 的单进程产物 `/tmp/Mekong_rs_a.landdata3.sha`；新产物
+`landdata4.sha` 与它逐文件一致，说明 N=1 行为没有被读取裁剪改变。作业：
+rank1 = job 237152（`run-rs-a-srf4`），rank2 = job 237158（`run-rs-b-srf4`）。
+mkinidata（68/68）与 colm（history 2/2 + restart 135/135）在此前的同一 landdata 上
+已验证 1vN 逐字节一致，且这两个 crate 此后未改动，结论继续有效。
+
+**本地验证**：`cargo fmt --all --check`、`cargo clippy -p colm-srfdata -p colm-init
+-p colm-spmd -p colm-cli --all-targets -- -D warnings`、`cargo test -p colm-spmd --lib`、
+`cargo test -p colm-srfdata --lib --bins -- --test-threads=1`（289 lib tests）全绿。
+本机既有失败（与本次无关）：`colm-init` 的 snicar ULP 1 例；`colm-cli` 的
+`study::runner` 10 例（macOS 进程检查 `Operation not permitted`）。
