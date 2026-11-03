@@ -1810,20 +1810,54 @@ pub fn read_mesh_tiled_raster_f64(
 }
 
 /// Reusable 5°×5° NetCDF files for a serial rawdata read sequence.
-#[derive(Default)]
 pub struct TiledRasterFiles {
     files: BTreeMap<PathBuf, netcdf::File>,
+    opened: std::collections::VecDeque<PathBuf>,
+    limit: usize,
+}
+
+/// 同时保持打开的 5° tile 文件数上限。全球算例一个 rank 的窗口能横跨几百个 tile，
+/// 若不设上限，逐月 LAI/土壤读取会累积打开上千个 HDF5 文件，内存按文件缓存线性上涨
+/// （bd 上 0.1° 全球 24 rank 峰值 158 GB，主要就是这里）。默认 16 足够覆盖按 mesh
+/// 顺序遍历时的局部性；`COLM_SRFDATA_TILE_CACHE` 可覆盖。
+const TILED_RASTER_CACHE_LIMIT: usize = 16;
+
+fn tiled_raster_cache_limit() -> usize {
+    std::env::var("COLM_SRFDATA_TILE_CACHE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|limit: &usize| *limit > 0)
+        .unwrap_or(TILED_RASTER_CACHE_LIMIT)
+}
+
+impl Default for TiledRasterFiles {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            opened: std::collections::VecDeque::new(),
+            limit: tiled_raster_cache_limit(),
+        }
+    }
 }
 
 impl TiledRasterFiles {
     fn open(&mut self, path: &Path) -> Result<&netcdf::File> {
         if !self.files.contains_key(path) {
+            while self.files.len() >= self.limit {
+                let Some(oldest) = self.opened.pop_front() else {
+                    break;
+                };
+                self.files.remove(&oldest);
+            }
             self.files.insert(
                 path.to_path_buf(),
                 netcdf::open(path)
                     .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?,
             );
+        } else if let Some(position) = self.opened.iter().position(|opened| opened == path) {
+            self.opened.remove(position);
         }
+        self.opened.push_back(path.to_path_buf());
         Ok(self.files.get(path).expect("5 degree tile was inserted"))
     }
 }
