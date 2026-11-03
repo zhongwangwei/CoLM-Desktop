@@ -3,6 +3,7 @@
 # incompatible-rust-versions = "fallback" 回退并标注。启用它当场就暴露出
 # hdf5-metno-src 0.10.4 requires Rust 1.85.1，故下面的 MSRV 是 1.85.1 而非 1.85。
 resolver = "3"
+exclude = ["vendor/lopdf"]
 members = ["crates/colm-agent", "crates/colm-bench", "crates/colm-case", "crates/colm-model", "crates/colm-history",
     "crates/colm-cli", "crates/colm-core", "crates/colm-forcing", "crates/colm-h5chunk", "crates/colm-hist", "crates/colm-hybrid", "crates/colm-init", "crates/colm-kernel", "crates/colm-lapack", "crates/colm-numeric", "crates/colm-namelist", "crates/colm-ncchar", "crates/colm-remote", "crates/colm-runtime", "crates/colm-schema", "crates/colm-spmd", "crates/colm-srfdata", "crates/colm-workspace", "oracle", "xtask"]
 
@@ -58,3 +59,7 @@ rayon = "1"
 lto = "thin"
 codegen-units = 1
 debug = 1
+
+# Preserve lopdf's nesting-depth security fix while supporting engine Rust 1.85.1.
+[patch.crates-io]
+lopdf = { path = "vendor/lopdf" }

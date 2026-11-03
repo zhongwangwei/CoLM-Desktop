@@ -1388,7 +1388,7 @@ pub(crate) fn register_child(pid: u32, owner: ChildOwner) -> DetachedChildGuard 
     DetachedChildGuard { pid }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> DetachedChildGuard {
     register_child(pid, ChildOwner::Remote(case))
 }

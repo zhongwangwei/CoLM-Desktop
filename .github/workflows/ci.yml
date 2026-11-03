@@ -344,6 +344,15 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo fmt --all --check
 
+      - name: Diagnose Windows GUI loader failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tests = Get-ChildItem gui/src-tauri/target/debug/deps/colm_desktop_gui_lib-*.exe
+          foreach ($test in $tests) {
+            ./scripts/diagnose-windows-loader.ps1 -Executable $test.FullName
+          }
+
       # 打包只在 macOS 上做。三个平台各打一次要三份 runner 时间，而这一步
       # 要防的两个缺陷都在**与平台无关**的那一段：beforeBuildCommand 的
       # 相对路径，以及 sidecar 落在主二进制旁边这件事（三个平台一致）。
