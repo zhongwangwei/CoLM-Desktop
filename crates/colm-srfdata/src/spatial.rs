@@ -89,7 +89,125 @@ pub struct PixelAxes {
     pub lat_n: Vec<f64>,
 }
 
-/// Source-grid cell ownership for each emitted spatial pixel axis.
+/// Mesh 实际覆盖的 pixel 子网格（连续矩形 + 它在完整 lattice 里的偏移）。
+///
+/// 全球 0.1° 算例的完整 pixel lattice 是 86400×43200 个格点；reader 若按完整 lattice
+/// 分配稠密数组，单个 rank 就要几十 GB（bd 上 0.1° 全球 mksrfdata 被 OOM 杀死的根因）。
+/// 元素编号 / pixel 坐标仍是全局索引空间，只是把这些读取函数内部用到的稠密缓冲裁成
+/// mesh 真正覆盖的矩形；同一次读取的值与用完整 lattice 时逐位相同。
+#[derive(Debug, Clone)]
+pub struct PixelWindow {
+    pub pixel: PixelAxes,
+    /// 完整 lattice 里第一个 cell 的 0 起偏移。
+    pub x_offset: usize,
+    pub y_offset: usize,
+}
+
+impl PixelWindow {
+    pub fn is_empty(&self) -> bool {
+        self.pixel.lon_w.is_empty() || self.pixel.lat_s.is_empty()
+    }
+
+    pub fn width(&self) -> usize {
+        self.pixel.lon_w.len()
+    }
+
+    pub fn height(&self) -> usize {
+        self.pixel.lat_s.len()
+    }
+}
+
+impl PixelAxes {
+    pub fn window_for_mesh(&self, mesh: &FlatMesh) -> Result<PixelWindow> {
+        let mut min_x = usize::MAX;
+        let mut max_x = 0_usize;
+        let mut min_y = usize::MAX;
+        let mut max_y = 0_usize;
+        for element in 0..mesh.len() {
+            let (xs, ys) = mesh.pixels(element)?;
+            for (&x, &y) in xs.iter().zip(ys) {
+                let x = usize::try_from(x)?
+                    .checked_sub(1)
+                    .context("mesh longitude is zero")?;
+                let y = usize::try_from(y)?
+                    .checked_sub(1)
+                    .context("mesh latitude is zero")?;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+        if min_x == usize::MAX || min_y == usize::MAX {
+            return Ok(PixelWindow {
+                pixel: PixelAxes {
+                    edge_south: 0.0,
+                    edge_north: 0.0,
+                    edge_west: 0.0,
+                    edge_east: 0.0,
+                    lon_w: Vec::new(),
+                    lon_e: Vec::new(),
+                    lat_s: Vec::new(),
+                    lat_n: Vec::new(),
+                },
+                x_offset: 0,
+                y_offset: 0,
+            });
+        }
+        ensure!(
+            max_x < self.lon_w.len() && max_y < self.lat_s.len(),
+            "mesh pixels lie outside the spatial pixel lattice"
+        );
+        Ok(PixelWindow {
+            pixel: PixelAxes {
+                edge_south: self.lat_s[min_y],
+                edge_north: self.lat_n[max_y],
+                edge_west: self.lon_w[min_x],
+                edge_east: self.lon_e[max_x],
+                lon_w: self.lon_w[min_x..=max_x].to_vec(),
+                lon_e: self.lon_e[min_x..=max_x].to_vec(),
+                lat_s: self.lat_s[min_y..=max_y].to_vec(),
+                lat_n: self.lat_n[min_y..=max_y].to_vec(),
+            },
+            x_offset: min_x,
+            y_offset: min_y,
+        })
+    }
+}
+
+fn mesh_order_window<T: Copy>(
+    mesh: &FlatMesh,
+    window: &PixelWindow,
+    values: &[T],
+) -> Result<Vec<T>> {
+    let width = window.width();
+    let mut output = Vec::new();
+    for element in 0..mesh.len() {
+        let (xs, ys) = mesh.pixels(element)?;
+        for (&x, &y) in xs.iter().zip(ys) {
+            let x = usize::try_from(x)?
+                .checked_sub(1)
+                .context("mesh longitude is zero")?;
+            let y = usize::try_from(y)?
+                .checked_sub(1)
+                .context("mesh latitude is zero")?;
+            let x = x
+                .checked_sub(window.x_offset)
+                .context("mesh longitude is before the pixel window")?;
+            let y = y
+                .checked_sub(window.y_offset)
+                .context("mesh latitude is before the pixel window")?;
+            output.push(
+                *values
+                    .get(y * width + x)
+                    .context("mesh pixel lies outside the spatial pixel window")?,
+            );
+        }
+    }
+    Ok(output)
+}
+
+/// Source-grid cell ownership for each emitted spatial pixel axis./// Source-grid cell ownership for each emitted spatial pixel axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PixelSourceMapping {
     pub columns: Vec<Option<usize>>,
@@ -412,6 +530,42 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     coordinate_grids: &[SpatialGrid],
     block_order: Option<&BlockLayout>,
 ) -> Result<SpatialTopology> {
+    build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+        path,
+        kind,
+        raw_grid,
+        bounds,
+        filter_grid,
+        extra_raw_grids,
+        coordinate_grids,
+        block_order,
+        None,
+        false,
+    )
+}
+
+/// 与 [`build_spatial_topology_with_filter_grid_and_raw_grids`] 相同，但只物化
+/// `element_windows` 内的网格元素（多进程预处理的按块扇出用）。
+///
+/// **pixel 像元格点仍按 `bounds` 覆盖整个算例域**：每个 rank 只缩小“算哪些元素”，
+/// 不缩小 `pixel.nc`/元素编号的索引空间。这样每个块文件里的 `elmindex`/`elmpixels`
+/// 与单进程逐字节相同，扇出的产物直接就是最终 landdata 树，不需要再合并/重映射。
+///
+/// `element_windows` 为空/全在域外是合法的（该 rank 内没有陆地元素）：返回空 mesh，
+/// 调用方跳过物化；单进程（`None`）仍然要求至少有一个正元素。
+#[allow(clippy::too_many_arguments)]
+pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+    path: impl AsRef<Path>,
+    kind: SpatialInputKind,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter_grid: Option<&SpatialGrid>,
+    extra_raw_grids: &[Grid],
+    coordinate_grids: &[SpatialGrid],
+    block_order: Option<&BlockLayout>,
+    element_windows: Option<&[crate::SpatialBounds]>,
+    distributed: bool,
+) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
         kind != SpatialInputKind::Catchment,
@@ -440,37 +594,66 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
         filter_grid,
         extra_raw_grids,
         &with_block_edges(coordinate_grids, block_order),
+        distributed,
     )?;
     let source = PixelSourceMapping { columns, rows };
 
+    // 多个矩形窗口（按块区间的连续范围换算）可以精确覆盖任意块子集；每个 pixel 行只
+    // 属于一个窗口的行区间，所以按行收集列区间即可，不需要逐窗口重复扫描整张网格。
+    let row_column_ranges: Option<Vec<Vec<(usize, usize)>>> = match element_windows {
+        Some(windows) => {
+            let mut per_row = vec![Vec::new(); pixel.lat_s.len()];
+            for window in windows {
+                let (columns, rows) = pixel_window(&pixel, *window)?;
+                if columns.is_empty() || rows.is_empty() {
+                    continue;
+                }
+                for row in rows {
+                    per_row[row].push((columns.start, columns.end));
+                }
+            }
+            Some(per_row)
+        }
+        None => None,
+    };
+    let whole_row = [(0usize, pixel.lon_w.len())];
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
     for (y, source_row) in source.rows.iter().enumerate() {
         let Some(row) = *source_row else { continue };
-        for (x, source_column) in source.columns.iter().enumerate() {
-            let Some(column) = *source_column else {
-                continue;
-            };
-            let offset = row * summary.nlon + column;
-            let value = values[offset];
-            if value <= 0 {
-                continue;
+        let ranges: &[(usize, usize)] = match &row_column_ranges {
+            Some(per_row) => &per_row[y],
+            None => &whole_row,
+        };
+        for &(start, end) in ranges {
+            for (x, source_column) in source.columns.iter().enumerate().take(end).skip(start) {
+                let Some(column) = *source_column else {
+                    continue;
+                };
+                let offset = row * summary.nlon + column;
+                let value = values[offset];
+                if value <= 0 {
+                    continue;
+                }
+                let element_id = match kind {
+                    SpatialInputKind::GridBased => i64::try_from(offset)?
+                        .checked_add(1)
+                        .context("GRIDBASED element ID overflows int64")?,
+                    SpatialInputKind::Unstructured => value,
+                    SpatialInputKind::Catchment => unreachable!("dedicated catchment builder"),
+                };
+                raw_count += 1;
+                members
+                    .entry(element_id)
+                    .or_default()
+                    .push((i32::try_from(x + 1)?, i32::try_from(y + 1)?));
             }
-            let element_id = match kind {
-                SpatialInputKind::GridBased => i64::try_from(offset)?
-                    .checked_add(1)
-                    .context("GRIDBASED element ID overflows int64")?,
-                SpatialInputKind::Unstructured => value,
-                SpatialInputKind::Catchment => unreachable!("dedicated catchment builder"),
-            };
-            raw_count += 1;
-            members
-                .entry(element_id)
-                .or_default()
-                .push((i32::try_from(x + 1)?, i32::try_from(y + 1)?));
         }
     }
-    ensure!(!members.is_empty(), "spatial mesh has no positive elements");
+    ensure!(
+        !members.is_empty() || element_windows.is_some(),
+        "spatial mesh has no positive elements"
+    );
     if let Some(blocks) = block_order {
         let axes = source_block_axes(&grid, &pixel, &source, blocks)?;
         for pixels in members.values_mut() {
@@ -587,6 +770,7 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         filter.map(|filter| &filter.grid),
         extra_raw_grids,
         &with_block_edges(coordinate_grids, block_layout),
+        false,
     )?;
     let source = PixelSourceMapping { columns, rows };
 
@@ -944,6 +1128,11 @@ pub fn read_mesh_raster_time_f64(
         "{variable} in {} has fewer than {time} time slices",
         raster.display()
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let nlon = source.dimensions()[axes.longitude].len();
@@ -962,7 +1151,7 @@ pub fn read_mesh_raster_time_f64(
     for global_y in latitude {
         pixel_values.extend(window.row(global_y, &longitude, nlon)?);
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+    mesh_order_window(mesh, &pixel_window, &pixel_values)
 }
 
 /// Read leading layers of a named `(soil, lat, lon)` raster in mesh-pixel order.
@@ -989,6 +1178,11 @@ pub fn read_mesh_raster_layers_f64(
         "{variable} in {} has fewer than {layers} layers",
         raster.display()
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let mesh_pixels = (0..mesh.len())
@@ -996,12 +1190,18 @@ pub fn read_mesh_raster_layers_f64(
         .sum::<Result<usize>>()?;
     let mut output = Vec::with_capacity(layers * mesh_pixels);
     // 层维在最内（`TWI.nc` 的 `twi(lat, lon, pixel)`，块 1200×1200×25）时，逐层逐行读会把
-    // 同一个大块反复解压上万次；改为按块对齐的瓦片一次读出所有层。
-    if axes.latitude == 0 && axes.longitude == 1 && axes.layer == 2 {
+    // 同一个大块反复解压上万次；改为按块对齐的瓦片一次读出所有层。但 dense 区域缓冲是
+    // `窗口行 × 列 × 层`，全球 0.1° 窗口会到几十 GB，超过阈值就退回逐层读。
+    let dense_region_values = latitude.len() * longitude.len() * layers;
+    if axes.latitude == 0
+        && axes.longitude == 1
+        && axes.layer == 2
+        && dense_region_values <= 64_000_000
+    {
         let region =
             read_region_layers_innermost(&source, layers, &latitude, &longitude, raw_grid.nlon)?;
         for layer_pixels in &region {
-            output.extend(mesh_order(mesh, pixel.lon_w.len(), layer_pixels)?);
+            output.extend(mesh_order_window(mesh, &pixel_window, layer_pixels)?);
         }
         return Ok(output);
     }
@@ -1021,7 +1221,7 @@ pub fn read_mesh_raster_layers_f64(
         for global_y in &latitude {
             pixels.extend(window.row(*global_y, &longitude, raw_grid.nlon)?);
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -1052,6 +1252,11 @@ pub fn read_mesh_coordinate_raster_pft_f64(
     let dimensions = source.dimensions();
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let source_x = pixel
         .lon_w
         .iter()
@@ -1090,7 +1295,7 @@ pub fn read_mesh_coordinate_raster_pft_f64(
                 );
             }
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -1150,6 +1355,11 @@ pub fn read_mesh_coordinate_raster_f64(
     let dimensions = source.dimensions();
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
     let mut rows = BTreeMap::new();
     let mut pixels = Vec::with_capacity(pixel.lon_w.len() * pixel.lat_s.len());
@@ -1167,7 +1377,7 @@ pub fn read_mesh_coordinate_raster_f64(
             );
         }
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+    mesh_order_window(mesh, &pixel_window, &pixels)
 }
 
 /// Read leading layers of a coordinate-addressed raster in mesh-pixel order.
@@ -1198,6 +1408,11 @@ pub fn read_mesh_coordinate_raster_layers_f64(
     );
     let latitude = read_coordinate(&file, &dimensions[axes.latitude], "latitude", raster)?;
     let longitude = read_coordinate(&file, &dimensions[axes.longitude], "longitude", raster)?;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let (source_y, source_x) = coordinate_source_indices(pixel, &latitude, &longitude)?;
     let mut output = Vec::with_capacity(
         layers
@@ -1224,7 +1439,7 @@ pub fn read_mesh_coordinate_raster_layers_f64(
                     )?);
             }
         }
-        output.extend(mesh_order(mesh, pixel.lon_w.len(), &pixels)?);
+        output.extend(mesh_order_window(mesh, &pixel_window, &pixels)?);
     }
     Ok(output)
 }
@@ -1744,20 +1959,54 @@ pub fn read_mesh_tiled_raster_f64(
 }
 
 /// Reusable 5°×5° NetCDF files for a serial rawdata read sequence.
-#[derive(Default)]
 pub struct TiledRasterFiles {
     files: BTreeMap<PathBuf, netcdf::File>,
+    opened: std::collections::VecDeque<PathBuf>,
+    limit: usize,
+}
+
+/// 同时保持打开的 5° tile 文件数上限。全球算例一个 rank 的窗口能横跨几百个 tile，
+/// 若不设上限，逐月 LAI/土壤读取会累积打开上千个 HDF5 文件，内存按文件缓存线性上涨
+/// （bd 上 0.1° 全球 24 rank 峰值 158 GB，主要就是这里）。默认 16 足够覆盖按 mesh
+/// 顺序遍历时的局部性；`COLM_SRFDATA_TILE_CACHE` 可覆盖。
+const TILED_RASTER_CACHE_LIMIT: usize = 16;
+
+fn tiled_raster_cache_limit() -> usize {
+    std::env::var("COLM_SRFDATA_TILE_CACHE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|limit: &usize| *limit > 0)
+        .unwrap_or(TILED_RASTER_CACHE_LIMIT)
+}
+
+impl Default for TiledRasterFiles {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            opened: std::collections::VecDeque::new(),
+            limit: tiled_raster_cache_limit(),
+        }
+    }
 }
 
 impl TiledRasterFiles {
     fn open(&mut self, path: &Path) -> Result<&netcdf::File> {
         if !self.files.contains_key(path) {
+            while self.files.len() >= self.limit {
+                let Some(oldest) = self.opened.pop_front() else {
+                    break;
+                };
+                self.files.remove(&oldest);
+            }
             self.files.insert(
                 path.to_path_buf(),
                 netcdf::open(path)
                     .with_context(|| format!("cannot open 5 degree tile {}", path.display()))?,
             );
+        } else if let Some(position) = self.opened.iter().position(|opened| opened == path) {
+            self.opened.remove(position);
         }
+        self.opened.push_back(path.to_path_buf());
         Ok(self.files.get(path).expect("5 degree tile was inserted"))
     }
 }
@@ -1923,6 +2172,11 @@ fn read_mesh_tiled_raster_pft_at_times(
     ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
     let tile_nlon = raw_grid.nlon / 72;
     let tile_nlat = raw_grid.nlat / 36;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let x_tiles = tile_axis(&longitude, tile_nlon);
@@ -2031,7 +2285,7 @@ fn read_mesh_tiled_raster_pft_at_times(
                 filled == pixel_count,
                 "5 degree PFT tiles did not cover the spatial pixel window"
             );
-            mesh_order(mesh, width, &grid)
+            mesh_order_window(mesh, &pixel_window, &grid)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(planes
@@ -2205,6 +2459,11 @@ fn read_mesh_open_raster<T: colm_h5chunk::Element>(
         raw_grid.nlat,
         raw_grid.nlon
     );
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let window = RasterWindow::<T>::read(
@@ -2227,7 +2486,7 @@ fn read_mesh_open_raster<T: colm_h5chunk::Element>(
         );
         pixel_values.extend_from_slice(&row);
     }
-    mesh_order(mesh, pixel.lon_w.len(), &pixel_values)
+    mesh_order_window(mesh, &pixel_window, &pixel_values)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3346,6 +3605,11 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
     ensure!(!suffix.is_empty(), "5 degree tile suffix must not be empty");
     let tile_nlon = raw_grid.nlon / 72;
     let tile_nlat = raw_grid.nlat / 36;
+    let pixel_window = pixel.window_for_mesh(mesh)?;
+    if pixel_window.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pixel = &pixel_window.pixel;
     let longitude = raw_longitudes(pixel, raw_grid);
     let latitude = raw_latitudes(pixel, raw_grid);
     let x_tiles = tile_axis(&longitude, tile_nlon);
@@ -3386,7 +3650,7 @@ fn read_mesh_tiled_raster_at_time<T: NcTypeDescriptor + Copy>(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .context("5 degree tiles did not cover the spatial pixel window")?;
-    mesh_order(mesh, pixel.lon_w.len(), &pixels)
+    mesh_order_window(mesh, &pixel_window, &pixels)
 }
 
 fn tile_values<T: NcTypeDescriptor + Copy>(
@@ -3651,27 +3915,6 @@ fn tile_axes(
             tile_nlon
         ),
     }
-}
-
-fn mesh_order<T: Copy>(mesh: &FlatMesh, width: usize, pixel_values: &[T]) -> Result<Vec<T>> {
-    let mut values = Vec::new();
-    for element in 0..mesh.len() {
-        let (xs, ys) = mesh.pixels(element)?;
-        for (&x, &y) in xs.iter().zip(ys) {
-            let x = usize::try_from(x)?
-                .checked_sub(1)
-                .context("mesh longitude is zero")?;
-            let y = usize::try_from(y)?
-                .checked_sub(1)
-                .context("mesh latitude is zero")?;
-            values.push(
-                *pixel_values
-                    .get(y * width + x)
-                    .context("mesh pixel lies outside the spatial pixel grid")?,
-            );
-        }
-    }
-    Ok(values)
 }
 
 fn raw_longitudes(pixel: &PixelAxes, raw_grid: Grid) -> Vec<usize> {
@@ -4226,26 +4469,147 @@ pub fn write_spatial_topology_selecting_fractions(
     validate_compression_level(compression_level)?;
     let landdata = landdata.as_ref();
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
-    let (nx, ny) = blocks.dimensions()?;
     validate_patches(&topology.mesh, land_patches)?;
+    // 先算一次分数，保持“参数不合法时不写任何文件”的既有语义；下面写块文件时复用。
     let fractions = patch_element_fractions(topology, land_patches, pctshared)?;
+    write_spatial_global_files(landdata, land_cover_year, topology, blocks)?;
+    write_spatial_block_files(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        pctshared,
+        blocks,
+        compression_level,
+        patch_fractions,
+        Some(&fractions),
+    )
+}
+
+/// 只写空间 landdata 的**全局**文件：`block.nc`、`pixel.nc` 与
+/// `mesh/<year>/mesh.nc`（`nelm_blk` 全局计数）。
+///
+/// 多进程扇出时只有 rank 0 调它；pixel 格点与元素编号都按完整算例域，所以与单进程
+/// 写出的字节相同。这里不需要 `landpatch`，rank 0 可能只构建了元数据拓扑。
+pub fn write_spatial_global_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    write_spatial_global_files(landdata, land_cover_year, topology, blocks)
+}
+
+/// 每个块里有多少 mesh element（land-only 过滤之后）。多进程扇出时各 rank 把自己 tile 的
+/// 计数写出来，rank 0 汇总后写全局 `mesh/<year>/mesh.nc` 的 `nelm_blk`，避免 root 为了
+/// 统计而重跑一遍完整域拓扑（0.1° 全球那是 3.7e9 像元的扫描）。
+pub fn element_block_counts(
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<std::collections::BTreeMap<(usize, usize), usize>> {
+    let assignments = element_blocks(topology, blocks)?;
+    let mut counts = std::collections::BTreeMap::new();
+    for block in assignments.values() {
+        *counts.entry(*block).or_insert(0) += 1;
+    }
+    Ok(counts)
+}
+
+/// 与 [`write_spatial_global_topology`] 相同，但 `nelm_blk` 用调用方给的每块 element 计数。
+/// `topology` 只需要提供 pixel 格点与 mesh 边缘坐标（可以用“空元素窗口”的元数据拓扑）。
+pub fn write_spatial_global_topology_with_counts(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+    counts: &std::collections::BTreeMap<(usize, usize), usize>,
+) -> Result<()> {
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    write_spatial_global_files_with_counts(landdata, land_cover_year, topology, blocks, counts)
+}
+
+/// 只写**按块**的拓扑文件：`mesh/<year>/mesh_<block>.nc`、`landelm`/`landpatch`
+/// 的块文件与可选的 `patchfrac_elm`。
+///
+/// 多进程扇出时每个 rank 只拿自己 tile 的元素/patches 调它，写出的块文件与单进程
+/// 逐字节相同（元素编号与 pixel 索引都是全局的）。
+#[allow(clippy::too_many_arguments)]
+pub fn write_spatial_block_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+    compression_level: u8,
+    patch_fractions: bool,
+) -> Result<()> {
+    validate_compression_level(compression_level)?;
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_patches)?;
+    write_spatial_block_files(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        pctshared,
+        blocks,
+        compression_level,
+        patch_fractions,
+        None,
+    )
+}
+
+fn write_spatial_global_files(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    let counts = element_block_counts(topology, blocks)?;
+    write_spatial_global_files_with_counts(landdata, land_cover_year, topology, blocks, &counts)
+}
+
+fn write_spatial_global_files_with_counts(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+    counts: &std::collections::BTreeMap<(usize, usize), usize>,
+) -> Result<()> {
+    let (nx, ny) = blocks.dimensions()?;
     std::fs::create_dir_all(landdata)
         .with_context(|| format!("cannot create {}", landdata.display()))?;
     write_block_file(landdata, blocks)?;
     write_pixel_file(landdata, &topology.pixel)?;
+    let year = format!("{land_cover_year:04}");
+    let mesh_dir = landdata.join("mesh").join(&year);
+    std::fs::create_dir_all(&mesh_dir)?;
+    write_mesh_index(&mesh_dir.join("mesh.nc"), topology, blocks, counts, nx, ny)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn write_spatial_block_files(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+    compression_level: u8,
+    patch_fractions: bool,
+    fractions: Option<&[f64]>,
+) -> Result<()> {
+    std::fs::create_dir_all(landdata)
+        .with_context(|| format!("cannot create {}", landdata.display()))?;
     let assignments = element_blocks(topology, blocks)?;
     let year = format!("{land_cover_year:04}");
     let mesh_dir = landdata.join("mesh").join(&year);
     std::fs::create_dir_all(&mesh_dir)?;
-    write_mesh_index(
-        &mesh_dir.join("mesh.nc"),
-        topology,
-        blocks,
-        &assignments,
-        nx,
-        ny,
-    )?;
     write_mesh_blocks(&mesh_dir, &topology.mesh, blocks, &assignments)?;
     write_pixelset(
         landdata,
@@ -4274,6 +4638,14 @@ pub fn write_spatial_topology_selecting_fractions(
         compression_level,
     )?;
     if patch_fractions {
+        let computed;
+        let fractions = match fractions {
+            Some(fractions) => fractions,
+            None => {
+                computed = patch_element_fractions(topology, land_patches, pctshared)?;
+                &computed
+            }
+        };
         write_landpatch_scalar(
             landdata,
             land_cover_year,
@@ -4283,7 +4655,7 @@ pub fn write_spatial_topology_selecting_fractions(
             compression_level,
             "landpatch",
             "patchfrac_elm",
-            &fractions,
+            fractions,
         )?;
     }
     Ok(())
@@ -5000,6 +5372,7 @@ fn assimilated_pixels(
     filter_grid: Option<&SpatialGrid>,
     extra_raw_grids: &[Grid],
     coordinate_grids: &[SpatialGrid],
+    distributed: bool,
 ) -> Result<PixelMapping> {
     ensure!(raw.nlon > 0 && raw.nlat > 0, "raw grid must be nonempty");
     ensure!(
@@ -5141,13 +5514,24 @@ fn assimilated_pixels(
     }
     ys.sort_by(f64::total_cmp);
     ys.dedup();
-    let limit = serial_raw_pixel_limit();
-    ensure!(
-        (xs.len() - 1)
-            .checked_mul(ys.len() - 1)
-            .is_some_and(|n| n <= limit),
-        "assimilated pixel window exceeds the {limit}-pixel serial limit; use block-distributed preprocessing or raise COLM_SRFDATA_MAX_RAW_PIXELS"
-    );
+    let pixel_cells = (xs.len() - 1)
+        .checked_mul(ys.len() - 1)
+        .context("assimilated pixel count overflows usize")?;
+    if distributed {
+        // 扇出时每个 rank 只遍历自己窗口的行/列区间，不再走 `serial_raw_pixel_limit`
+        // 对整张 lattice 的串行上限；真正会落盘成 i32 的是 land pixel 的累计下标，
+        // 超界时写 pixelset 的 `i32::try_from` 会带元素名报错。
+        ensure!(
+            pixel_cells <= 4_000_000_000,
+            "assimilated pixel lattice has {pixel_cells} cells; even block-distributed preprocessing cannot address that many pixels"
+        );
+    } else {
+        let limit = serial_raw_pixel_limit();
+        ensure!(
+            pixel_cells <= limit,
+            "assimilated pixel window exceeds the {limit}-pixel serial limit; use block-distributed preprocessing or raise COLM_SRFDATA_MAX_RAW_PIXELS"
+        );
+    }
     let columns = xs
         .windows(2)
         .map(|cell| {
@@ -5200,6 +5584,304 @@ fn assimilated_pixels(
         columns,
         rows,
     })
+}
+
+/// 把网格元素窗口换算成 pixel 格点阵列的下标区间（闭开区间）。
+///
+/// `pixel.lon_w/lon_e` 是归一化后的经度（可能跨 ±180 跳变），这里与
+/// [`assimilated_pixels`] 一样按网格顺序展开再比较。窗口完全落在域外时返回空区间；
+/// 调用方把“空窗口”解释成该 tile 没有陆地元素（合法的扇出结果）。
+fn pixel_window(
+    pixel: &PixelAxes,
+    window: crate::SpatialBounds,
+) -> Result<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    ensure!(
+        window.south.is_finite()
+            && window.north.is_finite()
+            && window.west.is_finite()
+            && window.east.is_finite()
+            && window.south < window.north,
+        "element window must be a finite, non-empty rectangle"
+    );
+    if pixel.lon_w.is_empty() || pixel.lat_s.is_empty() {
+        return Ok((0..0, 0..0));
+    }
+    let mut longitude = Vec::with_capacity(pixel.lon_w.len());
+    let mut previous = None;
+    for (&west, &east) in pixel.lon_w.iter().zip(&pixel.lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "pixel longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(east > west, "pixel longitude cells must be positive width");
+        longitude.push((west, east));
+        previous = Some(east);
+    }
+    let origin = longitude[0].0;
+    let west = unwrap_longitude(window.west, Some(origin))?;
+    let span = (window.east - window.west).rem_euclid(360.0);
+    let east = west + if span == 0.0 { 360.0 } else { span };
+    let first = longitude.iter().position(|&(cell_west, cell_east)| {
+        let mid = (cell_west + cell_east) * 0.5;
+        mid >= west && mid < east
+    });
+    let last = longitude.iter().rposition(|&(cell_west, cell_east)| {
+        let mid = (cell_west + cell_east) * 0.5;
+        mid >= west && mid < east
+    });
+    let columns = match (first, last) {
+        (Some(first), Some(last)) => first..last + 1,
+        _ => 0..0,
+    };
+    let mut rows = Vec::with_capacity(pixel.lat_s.len());
+    for (&south, &north) in pixel.lat_s.iter().zip(&pixel.lat_n) {
+        ensure!(
+            south < north,
+            "pixel latitude cells must be positive height"
+        );
+        let mid = (south + north) * 0.5;
+        rows.push(mid >= window.south && mid < window.north);
+    }
+    let first = rows.iter().position(|&inside| inside);
+    let last = rows.iter().rposition(|&inside| inside);
+    let rows = match (first, last) {
+        (Some(first), Some(last)) => first..last + 1,
+        _ => 0..0,
+    };
+    Ok((columns, rows))
+}
+
+/// 读空间网格文件的经纬度外框；多进程预处理在算例没写 `DEF_domain`（全球算例的常见情况）
+/// 时用它作为分片用的算例域。与 [`build_spatial_topology_with_filter_grid_and_raw_grids`]
+/// 里 `bounds=None` 时采用的默认域一致（网格文件自身的覆盖范围）。
+pub fn mesh_domain(path: impl AsRef<Path>) -> Result<crate::SpatialBounds> {
+    let path = path.as_ref();
+    let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let values = |name: &str| -> Result<Vec<f64>> {
+        let variable = file
+            .variable(name)
+            .with_context(|| format!("{name} is absent from {}", path.display()))?;
+        Ok(variable.get_values::<f64, _>(..)?)
+    };
+    let lon_w = values("lon_w")?;
+    let lon_e = values("lon_e")?;
+    let lat_s = values("lat_s")?;
+    let lat_n = values("lat_n")?;
+    ensure!(
+        !lon_w.is_empty()
+            && lon_w.len() == lon_e.len()
+            && !lat_s.is_empty()
+            && lat_s.len() == lat_n.len(),
+        "mesh file {} has inconsistent or empty coordinate edges",
+        path.display()
+    );
+    // 经度按网格顺序展开（全球网格最后一格的 east 会回到 west-360），取整段跨度。
+    let mut previous: Option<f64> = None;
+    for (&west, &east) in lon_w.iter().zip(&lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "mesh longitude edges in {} are not contiguous",
+                path.display()
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east <= west {
+            east += 360.0;
+        }
+        previous = Some(east);
+    }
+    let west = unwrap_longitude(lon_w[0], None)?;
+    let east = previous.context("mesh has no longitude cells")?;
+    ensure!(
+        east > west && east - west <= 360.0 + ALIGNMENT_EPSILON,
+        "mesh longitude span in {} is invalid",
+        path.display()
+    );
+    // 空间网格的纬度可能按北→南存储（全球 0.1° 网格就是），这里按实际覆盖范围取边界。
+    let mut south = lat_s[0];
+    let mut north = lat_n[0];
+    for (&s, &n) in lat_s.iter().zip(&lat_n) {
+        ensure!(
+            s.is_finite() && n.is_finite() && (s - n).abs() > ALIGNMENT_EPSILON,
+            "mesh latitude edges in {} are invalid",
+            path.display()
+        );
+        south = south.min(s.min(n));
+        north = north.max(s.max(n));
+    }
+    ensure!(
+        (-90.0..=90.0).contains(&south) && (-90.0..=90.0).contains(&north) && south < north,
+        "mesh latitude edges in {} are outside [-90, 90]",
+        path.display()
+    );
+    Ok(crate::SpatialBounds {
+        south,
+        north,
+        west,
+        east,
+    })
+}
+
+/// 多进程预处理的“按块扇出”：把算例域覆盖到的活跃块按 row-major 顺序连续分给
+/// `rank`，返回该 rank 的元素窗口（1–3 个块边界对齐的矩形）。
+///
+/// 连续块区间保证不同 rank 的窗口互不重叠、并集覆盖全部活跃块；换成矩形之后
+/// [`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`] 只物化这些
+/// 元素，而 pixel 格点仍是完整算例域，所以产物索引空间与单进程一致。
+///
+/// `size > 活跃块数` 是调用方错误（多出来的 rank 无块可写）；空窗口返回 `Ok(Some(vec![]))`。
+pub fn shard_element_windows(
+    blocks: &BlockLayout,
+    domain: crate::SpatialBounds,
+    rank: usize,
+    size: usize,
+) -> Result<Option<Vec<crate::SpatialBounds>>> {
+    ensure!(
+        size >= 1,
+        "multi-process preprocessing needs at least one rank"
+    );
+    ensure!(rank < size, "rank {rank} is outside 0..{size}");
+    let nx = blocks.lon_w.len();
+    let ny = blocks.lat_s.len();
+    ensure!(nx > 0 && ny > 0, "block layout must be non-empty");
+    ensure!(
+        blocks.lon_e.len() == nx
+            && blocks.lat_n.len() == ny
+            && domain.south.is_finite()
+            && domain.north.is_finite()
+            && domain.west.is_finite()
+            && domain.east.is_finite()
+            && domain.south < domain.north,
+        "block layout and domain bounds are inconsistent"
+    );
+    let mut longitude = Vec::with_capacity(nx);
+    let mut previous = None;
+    for (&west, &east) in blocks.lon_w.iter().zip(&blocks.lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "block longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(east > west, "block longitude cells must be positive width");
+        longitude.push((west, east));
+        previous = Some(east);
+    }
+    for pair in blocks.lat_s.windows(2) {
+        ensure!(
+            pair[0] < pair[1],
+            "block latitude cells must be ordered south-to-north"
+        );
+    }
+    for index in 0..ny - 1 {
+        ensure!(
+            nearly_equal(blocks.lat_n[index], blocks.lat_s[index + 1]),
+            "block latitude cells must be contiguous south-to-north"
+        );
+    }
+    ensure!(
+        blocks
+            .lat_s
+            .iter()
+            .zip(&blocks.lat_n)
+            .all(|(&south, &north)| south < north),
+        "block latitude cells must be positive height"
+    );
+    let origin = longitude[0].0;
+    let west = unwrap_longitude(domain.west, Some(origin))?;
+    let span = (domain.east - domain.west).rem_euclid(360.0);
+    let east = west + if span == 0.0 { 360.0 } else { span };
+    let columns: Vec<usize> = longitude
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(cell_west, cell_east))| {
+            (cell_east > west && cell_west < east).then_some(index)
+        })
+        .collect();
+    ensure!(
+        !columns.is_empty(),
+        "case domain does not intersect the block layout"
+    );
+    let rows: Vec<usize> = blocks
+        .lat_s
+        .iter()
+        .zip(&blocks.lat_n)
+        .enumerate()
+        .filter_map(|(index, (&south, &north))| {
+            (north > domain.south && south < domain.north).then_some(index)
+        })
+        .collect();
+    ensure!(
+        !rows.is_empty(),
+        "case domain does not intersect the block layout"
+    );
+    let column_start = columns[0];
+    let column_count = columns.len();
+    let row_start = rows[0];
+    let row_count = rows.len();
+    let total = column_count
+        .checked_mul(row_count)
+        .context("active block count overflows usize")?;
+    ensure!(
+        size <= total,
+        "multi-process preprocessing with {size} ranks needs at least as many blocks, \
+         but this case domain intersects only {total} block(s)"
+    );
+    let first = total * rank / size;
+    let last = total * (rank + 1) / size;
+    if first == last {
+        return Ok(Some(Vec::new()));
+    }
+    let first_row = first / column_count;
+    let last_row = (last - 1) / column_count;
+    let mut rectangles = Vec::new();
+    if first_row == last_row {
+        rectangles.push((
+            (first_row, first_row),
+            (first % column_count, (last - 1) % column_count),
+        ));
+    } else {
+        let first_column = first % column_count;
+        rectangles.push(((first_row, first_row), (first_column, column_count - 1)));
+        if first_row + 1 < last_row {
+            rectangles.push(((first_row + 1, last_row - 1), (0, column_count - 1)));
+        }
+        let last_column = (last - 1) % column_count;
+        rectangles.push(((last_row, last_row), (0, last_column)));
+    }
+    let mut windows = Vec::with_capacity(rectangles.len());
+    for ((row_from, row_to), (column_from, column_to)) in rectangles {
+        let west = longitude[column_start + column_from].0.max(west);
+        let east = longitude[column_start + column_to].1.min(east);
+        let south = blocks.lat_s[row_start + row_from].max(domain.south);
+        let north = blocks.lat_n[row_start + row_to].min(domain.north);
+        if west < east && south < north {
+            windows.push(crate::SpatialBounds {
+                south,
+                north,
+                west: normalize_longitude_value(west),
+                east: normalize_longitude_value(east),
+            });
+        }
+    }
+    Ok(Some(windows))
 }
 
 fn unwrap_longitude(value: f64, previous: Option<f64>) -> Result<f64> {
@@ -5598,7 +6280,7 @@ fn write_mesh_index(
     path: &Path,
     topology: &SpatialTopology,
     blocks: &BlockLayout,
-    assignments: &BTreeMap<i64, (usize, usize)>,
+    element_counts: &std::collections::BTreeMap<(usize, usize), usize>,
     nx: usize,
     ny: usize,
 ) -> Result<()> {
@@ -5625,8 +6307,8 @@ fn write_mesh_index(
     file.add_dimension("longitude", lon_w.len())?;
     file.add_dimension("latitude", lat_s.len())?;
     let mut counts = vec![0_i32; nx * ny];
-    for block in assignments.values() {
-        counts[block.1 * nx + block.0] += 1;
+    for (&(x, y), &count) in element_counts {
+        counts[y * nx + x] = i32::try_from(count)?;
     }
     // NetCDF-Fortran reverses rank-two dimension order.  Preserve the external
     // `ncdump` contract of `ncio_write_serial(..., 'xblk', 'yblk')`.

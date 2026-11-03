@@ -230,6 +230,52 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
 
 ## 11. 预处理与数据准备
 
+### 11.1 Rust 预处理多进程（2026-11-03 实现 + bd 验证）
+
+首版目标里“预处理多进程”已落地，形状和主循环不同：**没有逐步通信**，纯按块扇出。
+
+- `mkinidata-rs`：按块的全局 row-major 顺序做连续区间分片；root 额外写
+  `grid_river`/`catch_lateral` 全局 restart，worker 只写自己块的 restart 文件。
+- `mksrfdata-rs`：新增“元素窗口 + 完整 pixel lattice”模式
+  （`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`）。每个 rank 只物化
+  自己块区间换算出的 1–3 个矩形窗口里的元素，但 pixel 格点与元素编号仍按完整算例域，
+  因此每个块文件与 N=1 逐字节相同，**直接写进最终 landdata 树，不需要合并/重映射**。
+- 全局文件（`block.nc`、`pixel.nc`、`mesh/<year>/mesh.nc`）由 rank 0 单独写。`nelm_blk`
+  需要所有块的“过滤后 land element 数”，但 rank 0 不能为统计重跑完整域拓扑（0.1° 全球是
+  3.7e9 像元扫描，还会读整张 500 m landtype 栅格）。做法：每个 rank 把自己 tile（即窗口内
+  元素）的每块计数写到 `<case>/out/.colm-shard/rank-XXXX.txt`；rank 0 等齐全部 rank 后汇总，
+  再用一个“空元素窗口”的元数据拓扑（完整 pixel lattice、不物化元素）写全局文件。协调只用
+  共享文件系统，不引入通信库，也不改变 N=1 的写盘路径。
+  注意：任何在正式物化路径上做的拓扑过滤（land-only、mesh filter）都必须已在各 rank 的
+  tile 上完成；root 汇总的是过滤后的计数，而不是重算。（首版曾让 root 重跑完整域且漏掉
+  land-only 过滤，`nelm_blk` 差 50400 vs 39973 —— 8088 个文件里只差这一个，见
+  `implementation-verification.md`。）
+- `colm-cli run`：Rust 预处理在 `ranks>1` 时走 external launcher（`COLM_MPIEXEC`），
+  本地/桌面仍拒绝多进程；远程作业体在任意一段用 Rust 代码时都导出启动器变量。
+- 多进程首版的显式边界：`DEF_USE_SrfdataDiag`（全局诊断文件需要跨 rank gather）、
+  Urban 地表、CATCHMENT 网格都直接报错，要求单进程或 Fortran 路径；N=1 完全走原路线。
+- `colm-spmd::RankInfo::resolve_optional` 统一了“只有启动器真的给了 size>1 才走多进程”的
+  判定，单进程/`mpiexec -n 1` 不会误入。
+- bd 验证（0.1° Mekong 区域、窗口 2000-07-01–07-02）：`mksrfdata` 8088 个文件、
+  `mkinidata` 68 个文件、`colm` history 2 个 + restart 135 个文件，**1 rank/1 节点 vs
+  2 ranks/2 节点全部逐字节相同**（sha256 清单零差异）。区域 `mksrfdata` 单进程 8 线程约
+  29 分钟；2 rank 多节点约 26 分钟（该算例瓶颈在 rawdata/文件系统，加速有限）。
+
+### 11.2 全球算例：代码路径保留，0.1° 端到端不在本轮跑（2026-11-03 决定）
+
+全球算例的预处理扇出代码与区域共用同一套索引空间/块划分；真正卡住的是 **colm 运行期的
+状态内存**：0.1° 全球 5M+ patch × 约 120 KB/patch ≈ **0.36–0.48 TB**，bd 的节点是 155 GB、
+当时只有 2 台计算节点可用（总量 310 GB），连单份状态都放不下。mksrfdata 侧另有一个
+“按完整 pixel lattice 建稠密数组”的内存放大问题（`86400×43200=3.73e9` 格，reader 一次
+分配 15–30 GB/rank），本轮已用 `PixelWindow`（只按 mesh 实际覆盖的连续子矩形分配、
+元素/pixel 索引仍是全局）修掉，区域 N=1 输出逐字节不变；但这不会改变 colm 运行期的账。
+
+因此按用户要求**不跑 0.1° 全球模拟**：全球只保留代码路径、单元测试与容量分析，等有
+≥4 节点（最好 8 节点、512 GB/节点级）或做了分布式汇流/状态优化后再做端到端。
+粗分辨率全球（1° 约 20 万 patch、25 GB 状态）理论上 2 节点可跑，但 mksrfdata 仍要读全球
+500 m rawdata（小时级），本轮同样按“不跑全球模拟”处理，写进验收记录备查。
+
+
 - `mksrfdata` 仍是单进程。按 zh（20°×16°，0.25°）约 345 s / 5,120 元素的外推，0.1° 全球面积约 200 倍，单进程预计 **数十小时**；首版可接受一次性等待，但 Phase 4 要加“按块扇出”（`mksrfdata-rs --block`，目前没有；`mkinidata-rs --block` 已有）。
 - `mkinidata`：2,592 个块，按 `--block` 并行提交作业数组，或内部并行；每块约 2 千 patch，写重启 110 GB 总量。
 - 强迫场（用户 2026-10-24 定）：**JRA3Q**。tianhe `~/HDD_POOL/Forcing/JRA3Q/`（3.8 TB，1947-09 起逐月）的目录与文件名和 `vendor/CoLM202X/run/forcing/JRA3Q.nml` 完全一致：8 个变量、`<变量目录>/<变量>_<YYYY>_<MM>.nc`、`DEF_forcing%dataset='JRA3Q'`。tianhe 上的算例把 `DEF_dir_forcing` 指到该目录；模板默认 `startyr=2003`、`endyr=2024`、`dtime=3600`。

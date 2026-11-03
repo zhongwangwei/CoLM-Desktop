@@ -43883,3 +43883,120 @@ Fortran 指纹因此改变；上面的城市复跑仍只证明其记录的旧指
 覆盖三种内核构建、脱离 MSYS2 启动、真实算例及 Rust 启动器。它是较早快照的证据，
 不能代替后续源码的最终 CI。Windows GUI 已实际执行 578 项通过测试，剩余夹具路径
 分隔符断言已修正，定向 1/1 通过；应用与测试 manifest 的最终检查继续运行。
+## Rust 预处理多进程扇出：0.1° 区域 1vN 逐位通过，0.1° 全球推进到调度阶段（2026-11-03）
+
+**目标**：Rust 全链条（`mksrfdata-rs` / `mkinidata-rs` / `colm-rs`）支持多进程/多节点区域与全球算例；
+N=1 输出必须逐字节不变，N>1 与 N=1 逐文件相同。预处理扇出不需要逐步通信 —— 块之间独立，
+只有启动器协议（`COLM_MPIEXEC`、PMI/SLURM 环境、`colm-spmd::RankInfo`）与 colm 共用。
+
+**实现形状**
+- `mkinidata-rs`：按块 row-major 连续区间分片；root 额外写 `grid_river`/`catch_lateral` 全局 restart，
+  其余 rank 只写自己块的 restart。
+- `mksrfdata-rs`：新增“元素窗口 + 完整算例域 pixel lattice”模式
+  （`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`）。每个 rank 物化自己块区间
+  换算出的 1–3 个矩形窗口里的元素，但元素编号与 pixel 索引空间仍按完整算例域；块文件直接写进最终
+  landdata 树，**没有 merge/remap 步骤**。
+- 全局 `block.nc`/`pixel.nc`/`mesh/<year>/mesh.nc` 由 rank 0 写。`nelm_blk` 不能由 root 重跑完整域
+  拓扑得到（0.1° 全球要扫 3.7e9 像元），所以各 rank 把自己 tile 的每块 land element 计数写进
+  `<case>/out/.colm-shard/rank-XXXX.txt`；root 等齐后汇总，用一个“空元素窗口”的元数据拓扑
+  （完整 pixel lattice、不物化元素）写全局文件。协调只用共享文件系统，不引入通信库。
+- `colm-cli`：Rust 预处理在 `ranks>1` 时走 external launcher（`COLM_MPIEXEC`）；`engine rust ||
+  preprocessors rust` 的远程作业体都导出启动器变量；本地/桌面仍拒绝多进程。N=1 完全走原路线。
+- 首版显式边界：`DEF_USE_SrfdataDiag` 全局诊断文件、Urban 地表、CATCHMENT 网格在多进程下直接报错。
+
+**bd 验证（LSF，算例窗口 2000-07-01–07-02，0.1° Mekong，35 个活跃 5° 块）**
+
+| 阶段 | 1 rank / 1 node | 2 ranks / 2 nodes | 对比 |
+|---|---|---|---|
+| mksrfdata | job 237055/237097 | job 237056/237098 | **8088/8088 文件 sha256 相同** |
+| mkinidata | job 237068 | job 237070 | **68/68 文件相同**（const + 起报 restart） |
+| colm（Rust 引擎，48 步 2 天） | job 237072 | job 237083 | **history 2/2 + restart 135/135 文件相同** |
+
+同样算例的 landdata 在 `mksrfdata` 单进程 8 线程约 **29 min**（CPU 5498 s）、2 rank 多节点约 **26 min**
+（CPU 6087 s）；该算例瓶颈在 500 m rawdata 读取与 8088 个文件的文件系统写入，2 rank 加速有限。
+`mkinidata` 两次都约 5–6 min；`colm` 2 rank 与 1 rank 都是约 16–20 min（48 步，restart/history 写盘占大头）。
+
+**过程中抓到的缺陷（都由 bd 的逐文件比对暴露）**
+1. `mesh/2005/mesh.nc` 的 `nelm_blk`：root 重跑完整域时漏了 `build_lct_land_patches_from_raster`
+   的 land-only 过滤，全球 mask 正格全被算进去（50400），而 N=1 是过滤后的 39973 —— 8088 个文件里
+   就差这一个。修复：root 重建也必须走同一过滤（随后改成 rank 计数汇总，不再重跑）。
+2. 全球算例的 namelist 通常不写 `DEF_domain`（整颗球就是域），分片需要域：回退到 mesh 文件自身外框。
+3. 全球 0.1° mesh 的 `lat_s/lat_n` 是自北向南存的，首版 `mesh_domain` 按升序校验直接拒绝；
+   同时经度要按网格顺序展开，`lon_e` 最后一格回到 `-180` 时仍应是 360° 跨度。
+4. 0.1° IGBP 的 500 m pixel lattice 是 `86400×43200=3.7e9` 格，超过串行 400M 保护；但扇出时
+   rank 只扫自己窗口，写入块文件的又是 land pixel 列表（约 1.1e9，仍在 i32 内），所以分布式路径
+   跳过串行上限、保留 4e9 的健全性上限。
+
+**0.1° 全球端到端进展**：全球 0.1° 网格/mesh 与算例已在 bd 建好（3600×1800，25 MB mesh，
+72×36 个 5° 块，1446 个活跃块量级）。`mksrfdata` 24 rank 在 2 节点被 OOM（exit 9，MAX MEM 158 GB；
+4 节点也是 140 GB），说明总内存需求约数百 GB、必须按节点数摊；96 rank / 6 节点的作业
+（job 237105）已提交，等 `normal` 队列调度。本轮结论以区域 1vN 逐位通过为准，全球作业的
+调度与结果下一条追记（当前 `normal` 队列 PEND 约 7 万，调度不可控）。
+
+**同日追加：全球 0.1° 的 bd 容量阻碍（未完成端到端）**
+- 0.1° IGBP 全球：`mksrfdata` 24 rank / 2 节点被 OOM 杀死（exit 9，节点峰值 158.4 GB），
+  24 rank / 4 节点也在 140.1 GB 被杀；`0.5°` 全球（mesh 元素少 25 倍）与 USGS 全球
+  （1 km raw grid，pixel lattice 小 9 倍）仍然在 ~146–156 GB 被杀 —— 说明峰值内存由
+  **每个 rank 窗口内的 rawdata 读取/聚合**决定，而不是网格分辨率或 raw grid 大小。
+- 提交 72/96 rank、6–12 节点的全球作业时发现 bd 当时只有 **2 台计算节点 ok**
+  （`bhosts`：ok 6 台里含 gpu01-03、mgt01，normal 队列可用计算节点只有 node006/node016，
+  其余 113 台 closed），LSF 以 `Not enough hosts to meet the job's spanning requirement`
+  一直 PEND；用 2 节点跑全球净需把峰值压到 ~140 GB/节点以下才可能。
+- 结论：全球扇出的**索引空间/块划分/root 汇总代码路径**已经在区域 1vN 上逐位验证，
+  但真实 0.1° 全球端到端本轮被 bd 的节点数与内存卡住，未完成。下一步有两条路：
+  1) 等 bd 节点池重开，用 6 节点以上跑（内存按节点摊薄）；
+  2) 先把 `mksrfdata` 的逐月 LAI/SAI 与分层土壤读取改成按 5° tile/块流式（当前每个
+     rank 窗口是整条纬度带，rawdata 缓存与中间 Vec 峰值 ~13–23 GB/rank），把全球压到
+     2 节点可跑，再做逐位验收。
+- 这也暴露了扇出粒度的一个真实限制：`shard_element_windows` 按 row-major 连续块区间取窗口，
+  全球 24 rank 时每个 rank 拿到的是 108 个块组成的**整条纬度带**（360°×5–7.5°），
+  窗口面积 ≈ 全球/24，rawdata 峰值也按这个面积走。区域算例不受影响；全球若要低内存，
+  需要 2D 块分区（行×列）或 rank 内按块流式。
+
+## 收尾轮：PixelWindow 修掉全球 reader 内存放大；区域 1vN 在最终代码上复验（2026-11-03）
+
+**全球 0.1° 的结论（按用户要求不跑模拟）**：0.1° 全球 colm 状态约
+`5M+ patch × ~120 KB ≈ 0.36–0.48 TB`，bd 节点 155 GB、当时只有 2 台计算节点
+（node006/node016，其余 113 台 closed），连单份状态都放不下，因此 0.1° 全球模拟取消；
+全球只保留代码路径与容量分析。粗分辨率全球（1°）理论上 2 节点可跑，但 mksrfdata 仍要
+读全球 500 m rawdata（小时级），本轮同样不跑。
+
+**预处理侧真实缺陷（已修）**：reader 之前按**完整 pixel lattice** 分配稠密缓冲。
+0.1° 全球 lattice 是 `86400 × 43200 = 3.73e9` 格，`read_mesh_open_raster` /
+`RasterWindow` / tiled PFT 等一次分配 15–30 GB/rank，24 rank/2 节点必然 OOM（实测
+节点峰值 158 GB，exit 9）。修法：
+- 新增 `PixelWindow`：按 mesh 实际覆盖的连续子矩形裁剪 densе 缓冲，`mesh_order_window`
+  映射回全局元素/pixel 索引；值不变；
+- 层维最内层的 25 层 fast path 在 `窗口行 × 窗口列 × 层 > 64M` 时退回逐层读；
+- 5° tile 文件缓存从无上限改为 16（`COLM_SRFDATA_TILE_CACHE` 可调）；
+- 保留 `COLM_SRFDATA_MEMORY_TRACE=1` 的 phase RSS 日志，供后续 OOM 定位。
+
+**最终代码的区域复验（bd 0.1° Mekong，2000-07-01–07-02，LSF）**
+
+| 对比 | 结果 |
+|---|---|
+| 新 1 rank/1 节点 landdata vs **PixelWindow 之前**的参考清单 | **8088/8088 文件 sha256 相同（0 差异）** |
+| 新 1 rank/1 节点 vs 新 2 ranks/2 节点 landdata | **8088/8088 文件相同（0 差异）** |
+
+参考清单来自旧 reader 的单进程产物 `/tmp/Mekong_rs_a.landdata3.sha`；新产物
+`landdata4.sha` 与它逐文件一致，说明 N=1 行为没有被读取裁剪改变。作业：
+rank1 = job 237152（`run-rs-a-srf4`），rank2 = job 237158（`run-rs-b-srf4`）。
+mkinidata（68/68）与 colm（history 2/2 + restart 135/135）在此前的同一 landdata 上
+已验证 1vN 逐字节一致，且这两个 crate 此后未改动，结论继续有效。
+
+**本地验证**：`cargo fmt --all --check`、`cargo clippy -p colm-srfdata -p colm-init
+-p colm-spmd -p colm-cli --all-targets -- -D warnings`、`cargo test -p colm-spmd --lib`、
+`cargo test -p colm-srfdata --lib --bins -- --test-threads=1`（289 lib tests）全绿。
+本机既有失败（与本次无关）：`colm-init` 的 snicar ULP 1 例；`colm-cli` 的
+`study::runner` 10 例（macOS 进程检查 `Operation not permitted`）。
+
+
+### 2026-11-03 分支整合
+
+合入 rust-preprocess-multirank 的 MPI 启动身份、分片地形/初始化、全局索引及受限栅格缓存；
+保留审计与多进程分支的两份实测记录。合并审查发现无效启动器身份会被吞掉并退回单进程，
+现改为报错，公共接口不变。定向 colm-spmd 12 项测试、Clippy 与格式检查通过，
+日志 `/tmp/colm-merge-spmd-tests.log`、`/tmp/colm-merge-spmd-clippy.log`。
+
+仍需后续处理：`.colm-shard` 计数文件缺少运行/年份隔离，异常中断后的旧文件可能影响重跑；
+本次按“先合并”要求保留该功能并记录风险，没有扩大为新分布式协调协议。

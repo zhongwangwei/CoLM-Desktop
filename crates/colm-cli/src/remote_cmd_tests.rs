@@ -221,11 +221,27 @@ fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
         slurm.contains("--engine fortran --preprocessors rust --ranks 8"),
         "{slurm}"
     );
-    // 没有调度系统或别的调度系统：用 PATH 里的 mpiexec，不设变量。
+    // 没有调度系统或别的调度系统：Rust 预处理也要 Launcher 环境，所以导出 mpiexec；
+    // 纯 Fortran 引擎（预处理也用 Fortran）不需要 COLM_MPIEXEC。
     let bare = body(&["--engine", "fortran", "--ranks", "8"], Scheduler::Bare);
     assert!(
-        !bare.contains("COLM_MPIEXEC") && bare.contains("--ranks 8"),
+        bare.contains("COLM_MPIEXEC=mpiexec") && bare.contains("--ranks 8"),
         "{bare}"
+    );
+    let bare_fortran = body(
+        &[
+            "--engine",
+            "fortran",
+            "--preprocessors",
+            "fortran",
+            "--ranks",
+            "8",
+        ],
+        Scheduler::Bare,
+    );
+    assert!(
+        !bare_fortran.contains("COLM_MPIEXEC") && bare_fortran.contains("--ranks 8"),
+        "{bare_fortran}"
     );
     // 显式选择优先于调度系统。
     let forced = body(
@@ -239,7 +255,8 @@ fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
         ],
         Scheduler::Slurm,
     );
-    assert!(!forced.contains("COLM_MPIEXEC"));
+    // 显式 mpiexec 也仍是 Rust 预处理需要的启动器。
+    assert!(forced.contains("COLM_MPIEXEC=mpiexec"), "{forced}");
     let srun_bare = body(
         &["--engine", "fortran", "--ranks", "8", "--launcher", "srun"],
         Scheduler::Bare,

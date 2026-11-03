@@ -69,6 +69,7 @@ pub mod runtime;
 pub mod single_point;
 mod snicar;
 pub use snicar::SnicarInitialization;
+pub mod shard;
 pub mod spatial_grid;
 pub mod spatial_mapping;
 pub mod spatial_pft;

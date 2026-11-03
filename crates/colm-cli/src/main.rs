@@ -2651,6 +2651,18 @@ fn preflight_spinup_replay(case: &Path, engine: ModelEngine, cli: &Path) -> Resu
     Ok(())
 }
 
+/// Rust 预处理多进程与模型段共用 `COLM_MPIEXEC`：本地没有启动器时提前报错。
+///
+/// 与 [`preflight_rust_model`] 的理由一致：不能退化成“在 PATH 里找 mpiexec”，那会在
+/// 本机（macOS/Windows 没有 MPI）报一个与真实原因无关的 spawn 错误。
+fn ensure_rust_preprocessor_launcher(ranks: usize) -> Result<()> {
+    ensure!(
+        std::env::var_os("COLM_MPIEXEC").is_some(),
+        "Rust preprocessing runs one process locally; --ranks {ranks} needs a remote launcher (COLM_MPIEXEC, e.g. srun/mpiexec)"
+    );
+    Ok(())
+}
+
 /// 在跑前两段**之前**确认 `colm-rs` 接得住这个算例。
 ///
 /// 不做的话，一个 Rust 跑不了的算例（打开了 SNICAR、PFT 内核、湖泊站点……）要等
@@ -3915,16 +3927,35 @@ fn run_case(
             && matches!(stage, Stage::MkSrfData | Stage::MkIniData)
         {
             let executable = rust_preprocessor_executable(*stage)?;
-            colm_kernel::run_stage_streaming_with_executable(
-                &kernel,
-                *stage,
-                &executable,
-                &layout.case_nml(),
-                case,
-                artifacts,
-                rust_arguments.expect("Rust preprocessing stage has prepared arguments"),
-                &mut forward,
-            )?
+            let arguments =
+                rust_arguments.expect("Rust preprocessing stage has prepared arguments");
+            if ranks > 1 {
+                // 空间预处理按块扇出，rank/size 由启动器环境提供；N=1 走下面的老路径，
+                // 保证单进程行为逐字节不变（docs/design-multi-node.md §11）。
+                ensure_rust_preprocessor_launcher(ranks)?;
+                colm_kernel::run_stage_streaming_external_ranks(
+                    &kernel,
+                    *stage,
+                    &executable,
+                    &layout.case_nml(),
+                    case,
+                    artifacts,
+                    arguments,
+                    ranks,
+                    &mut forward,
+                )?
+            } else {
+                colm_kernel::run_stage_streaming_with_executable(
+                    &kernel,
+                    *stage,
+                    &executable,
+                    &layout.case_nml(),
+                    case,
+                    artifacts,
+                    arguments,
+                    &mut forward,
+                )?
+            }
         } else {
             colm_kernel::run_stage_streaming_ranks(
                 &kernel,

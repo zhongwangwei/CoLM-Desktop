@@ -25,6 +25,11 @@ const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_RETRY: Duration = Duration::from_millis(50);
 const ACK: u8 = 0xA5;
+const LAUNCHER_ENV: [(&str, &str); 3] = [
+    ("SLURM_PROCID", "SLURM_NTASKS"),
+    ("OMPI_COMM_WORLD_RANK", "OMPI_COMM_WORLD_SIZE"),
+    ("PMI_RANK", "PMI_SIZE"),
+];
 
 /// 本进程的 rank 与进程总数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,11 +66,7 @@ impl RankInfo {
             rank.is_none() && size.is_none(),
             "--rank and --ranks must be given together, or both omitted so the launcher environment decides"
         );
-        let found = [
-            ("SLURM_PROCID", "SLURM_NTASKS"),
-            ("OMPI_COMM_WORLD_RANK", "OMPI_COMM_WORLD_SIZE"),
-            ("PMI_RANK", "PMI_SIZE"),
-        ]
+        let found = LAUNCHER_ENV
         .iter()
         .find_map(|(rank_name, size_name)| {
             let rank = env(rank_name)?.parse::<usize>().ok()?;
@@ -77,6 +78,35 @@ impl RankInfo {
              tried SLURM_PROCID/SLURM_NTASKS, OMPI_COMM_WORLD_RANK/OMPI_COMM_WORLD_SIZE, PMI_RANK/PMI_SIZE",
         )?;
         Self::new(found.0, found.1)
+    }
+
+    /// 只有真的多进程时才返回 `Some`：显式参数或启动器环境给出 size>1 时解析；
+    /// 单进程（没有启动器变量、size=1）时返回 `None`；已声明但无效的启动器身份报错，
+    /// 调用方可以完全走原来的单进程代码路径。
+    ///
+    /// 显式参数只给一个会报错（与 [`RankInfo::resolve`] 一致），不静默猜另一个。
+    pub fn resolve_optional(rank: Option<usize>, size: Option<usize>) -> Result<Option<Self>> {
+        Self::resolve_optional_with(rank, size, |name| {
+            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+        })
+    }
+
+    fn resolve_optional_with(
+        rank: Option<usize>,
+        size: Option<usize>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>> {
+        if rank.is_some() || size.is_some() {
+            return Ok(Some(Self::resolve_with(rank, size, env)?));
+        }
+        if !LAUNCHER_ENV
+            .iter()
+            .any(|(rank, size)| env(rank).is_some() || env(size).is_some())
+        {
+            return Ok(None);
+        }
+        let info = Self::resolve_with(None, None, env)?;
+        Ok((info.size() > 1).then_some(info))
     }
 
     pub fn rank(&self) -> usize {

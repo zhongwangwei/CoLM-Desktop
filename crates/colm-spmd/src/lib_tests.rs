@@ -62,6 +62,62 @@ fn rank_info_reads_the_launcher_environment_in_priority_order() {
 }
 
 #[test]
+fn optional_rank_info_rejects_invalid_or_incomplete_launcher_identity() {
+    for (rank_name, size_name) in LAUNCHER_ENV {
+        for (rank, size) in [
+            (Some("2"), Some("2")),
+            (Some("bad"), Some("2")),
+            (None, Some("2")),
+            (Some("0"), None),
+            (Some("0"), Some("0")),
+        ] {
+            let env = |name: &str| {
+                if name == rank_name {
+                    rank.map(str::to_owned)
+                } else if name == size_name {
+                    size.map(str::to_owned)
+                } else {
+                    None
+                }
+            };
+            assert!(
+                RankInfo::resolve_optional_with(None, None, env).is_err(),
+                "{rank_name}={rank:?}, {size_name}={size:?} must not become a single-process writer"
+            );
+            assert_eq!(
+                RankInfo::resolve_optional_with(Some(0), Some(2), env).unwrap(),
+                Some(RankInfo::new(0, 2).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_rank_info_distinguishes_absent_single_and_multiple_processes() {
+    assert_eq!(
+        RankInfo::resolve_optional_with(None, None, |_| None).unwrap(),
+        None
+    );
+    for (rank_name, size_name) in LAUNCHER_ENV {
+        for size in [1, 4] {
+            let env = |name: &str| {
+                if name == rank_name {
+                    Some("0".to_owned())
+                } else if name == size_name {
+                    Some(size.to_string())
+                } else {
+                    None
+                }
+            };
+            assert_eq!(
+                RankInfo::resolve_optional_with(None, None, env).unwrap(),
+                (size > 1).then(|| RankInfo::new(0, size).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
 fn f64_and_bool_payloads_round_trip_in_order() {
     let values = [0.0, -1.5, f64::NAN, 1.0e300];
     let bytes = encode_f64s(&values);
@@ -209,4 +265,14 @@ fn a_worker_follows_a_rendezvous_that_root_rewrites() {
         .unwrap()
         .expect("worker must follow the rewritten endpoint");
     let _ = std::fs::remove_dir_all(rendezvous.parent().unwrap());
+}
+
+#[test]
+fn optional_resolution_only_returns_multi_process_ranks() {
+    let explicit = RankInfo::resolve_optional(Some(1), Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!((explicit.rank(), explicit.size()), (1, 2));
+    assert!(RankInfo::resolve_optional(None, None).unwrap().is_none());
+    assert!(RankInfo::resolve_optional(Some(0), None).is_err());
 }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_case::{is_default, is_spatial_case};
+use colm_init::shard::{block_shards, resolve_rank};
 use colm_init::spatial_static::{resolve_vic_parameter_file, VicParameterSource};
 use colm_init::{
     single_point_cold_start_run_from_namelist_with_subgrid, write_data_assimilation_restart,
@@ -24,26 +25,44 @@ use colm_init::{
     UrbanConfig,
 };
 use colm_namelist::{parse, Value};
+use colm_spmd::RankInfo;
 use colm_srfdata::site::SurfaceSubgrid;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let first = required(&mut args, "case namelist, surface, or spatial-lct")?;
+    // 启动器环境里的 rank 信息只对算例 namelist 形式生效：显式 `spatial-lct`/`spatial-pft`
+    // 子命令每块都要传 `--block`，多进程下会重复写同一批文件，直接拒绝。
+    let launcher = resolve_rank(None, None)?;
     if first.as_os_str() == "spatial-lct" {
+        ensure_single_process_subcommand(launcher, "spatial-lct")?;
         run_spatial_lct(args)?;
     } else if first.as_os_str() == "spatial-pft" {
+        ensure_single_process_subcommand(launcher, "spatial-pft")?;
         run_spatial_pft(args)?;
     } else if first
         .extension()
         .is_some_and(|extension| extension == "nml")
     {
-        run_namelist(first, args)?;
+        run_namelist(first, args, launcher)?;
     } else {
+        ensure_single_process_subcommand(launcher, "the explicit single-point form")?;
         run_explicit(first, args)?;
     }
     report_written();
     // Match the marker expected from upstream MKINIDATA.F90 by the stage runner.
     println!("CoLM Initialization Execution Completed");
+    Ok(())
+}
+
+/// 显式子命令没有按块分片逻辑，多进程只支持算例 namelist 形式。
+fn ensure_single_process_subcommand(rank: Option<RankInfo>, what: &str) -> Result<()> {
+    if let Some(rank) = rank {
+        ensure!(
+            rank.size() == 1,
+            "{what} does not support multi-process; run `mkinidata-rs <case.nml>` so blocks can be sharded"
+        );
+    }
     Ok(())
 }
 
@@ -102,8 +121,14 @@ fn report_written() {
     );
 }
 
-fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Result<()> {
+fn run_namelist(
+    namelist: PathBuf,
+    mut args: impl Iterator<Item = String>,
+    launcher: Option<RankInfo>,
+) -> Result<()> {
     let mut land_cover = None;
+    let mut rank = None;
+    let mut ranks = None;
     let mut block = None;
     let mut grid_river = false;
     let mut catch_lateral = false;
@@ -114,6 +139,22 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
     let mut high_resolution = HighResolutionOptions::default();
     while let Some(argument) = args.next() {
         match argument.as_str() {
+            "--rank" => {
+                rank = Some(
+                    args.next()
+                        .context("--rank needs a zero-based process index")?
+                        .parse()
+                        .context("--rank must be a non-negative integer")?,
+                );
+            }
+            "--ranks" => {
+                ranks = Some(
+                    args.next()
+                        .context("--ranks needs the process count")?
+                        .parse()
+                        .context("--ranks must be a positive integer")?,
+                );
+            }
             "--land-cover" => {
                 land_cover = Some(parse_land_cover(
                     &args.next().context("--land-cover needs igbp or usgs")?,
@@ -164,6 +205,12 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
                 && high_resolution.urban_albedo.is_none()),
         "--highres-leaf-optics, --highres-water-optics, --highres-radiation, and --highres-urban-albedo require --hyperspectral"
     );
+    // 显式参数优先；都没给时用启动器环境（srun/mpiexec 提供），与 Rust 运行时同一套解析。
+    let rank = if rank.is_none() && ranks.is_none() {
+        launcher
+    } else {
+        resolve_rank(rank, ranks)?
+    };
     let data_assimilation_ensembles = data_assimilation
         .then(|| namelist_data_assimilation_ensembles(&namelist))
         .transpose()?;
@@ -179,11 +226,16 @@ fn run_namelist(namelist: PathBuf, mut args: impl Iterator<Item = String>) -> Re
             subgrid_fallback: subgrid,
             crop,
             restart_dir,
+            rank,
         });
     }
     ensure!(
         restart_dir.is_none(),
         "--restart-dir applies to spatial cases only"
+    );
+    ensure!(
+        rank.is_none_or(|rank| rank.size() == 1),
+        "multi-process mkinidata is for spatial cases only"
     );
     ensure!(
         !grid_river && !catch_lateral,
@@ -340,6 +392,8 @@ struct SpatialNamelistInvocation<'a> {
     crop: bool,
     /// `--restart-dir`：替换 `<DEF_dir_output>/<case>/restart`。
     restart_dir: Option<PathBuf>,
+    /// 多进程启动器给的 rank/size；`None`/size=1 时完全走原来的单进程路径。
+    rank: Option<RankInfo>,
 }
 
 fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()> {
@@ -354,6 +408,7 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
         subgrid_fallback,
         crop,
         restart_dir,
+        rank,
     } = invocation;
     let mut run = spatial_namelist_run_with_subgrid(namelist, subgrid_fallback)?;
     if let Some(restart_dir) = restart_dir {
@@ -366,27 +421,49 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
     if catch_lateral {
         run.use_soil_texture = true;
     }
+    // 块清单与分片只算一次：三种 subgrid 都按同一套“连续块区间”分工，保证 1 vs N
+    // rank 写出的块文件逐字节相同（块内内容与谁写无关）。
+    let blocks = spatial_blocks(&run, block_override)?;
+    let blocks = match rank {
+        Some(rank) => {
+            ensure!(
+                block_override.is_none(),
+                "--block selects one block for a manual invocation and cannot be combined with multi-process sharding"
+            );
+            let shard = block_shards(&blocks, rank)?;
+            println!(
+                "mkinidata rank {}/{}: {} of {} block(s)",
+                rank.rank(),
+                rank.size(),
+                shard.len(),
+                blocks.len()
+            );
+            shard
+        }
+        None => blocks,
+    };
+    let is_root = rank.is_none_or(|rank| rank.is_root());
     match run.subgrid {
         SpatialSubgrid::Lct => {
             let land_cover = land_cover.context(
                 "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
             )?;
             ensure_land_classes_fit(&run, land_cover)?;
-            for block in spatial_blocks(&run, block_override)? {
+            for block in &blocks {
                 write_spatial_lct_namelist_block(
                     &run,
                     land_cover,
-                    &block,
+                    block,
                     data_assimilation_ensembles,
                 )?;
             }
         }
         SpatialSubgrid::Pft | SpatialSubgrid::Pc => {
-            for block in spatial_blocks(&run, block_override)? {
+            for block in &blocks {
                 write_spatial_pft_namelist_block(
                     namelist,
                     &run,
-                    &block,
+                    block,
                     high_resolution,
                     data_assimilation_ensembles,
                     crop,
@@ -400,21 +477,21 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
                 "spatial urban cold starts always use the IGBP parent land-cover table"
             );
             ensure_land_classes_fit(&run, land_cover)?;
-            for block in spatial_blocks(&run, block_override)? {
+            for block in &blocks {
                 write_spatial_urban_namelist_block(
                     &run,
                     run.urban.as_ref().expect("urban subgrid has controls"),
-                    &block,
+                    block,
                     data_assimilation_ensembles,
                 )?;
             }
         }
     }
-    if grid_river {
+    if grid_river && is_root {
         let path = write_gridriver_namelist_restart(namelist, &run)?;
         wrote(&path);
     }
-    if catch_lateral {
+    if catch_lateral && is_root {
         let path = write_catch_lateral_namelist_restart(namelist, &run)?;
         wrote(&path);
     }
@@ -2306,6 +2383,7 @@ mod tests {
                 "radiation.nc".to_owned(),
             ]
             .into_iter(),
+            None,
         )
         .unwrap_err();
 
@@ -2351,6 +2429,7 @@ mod tests {
             subgrid_fallback: None,
             crop: false,
             restart_dir: None,
+            rank: None,
         })
         .unwrap_err();
 
@@ -2395,6 +2474,7 @@ mod tests {
             subgrid_fallback: None,
             crop: false,
             restart_dir: None,
+            rank: None,
         })
         .unwrap_err();
 

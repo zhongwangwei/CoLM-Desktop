@@ -341,6 +341,7 @@ dependencies = [
  "colm-namelist",
  "colm-ncchar",
  "colm-numeric",
+ "colm-spmd",
  "colm-srfdata",
  "netcdf",
  "rayon",
@@ -451,6 +452,7 @@ dependencies = [
  "colm-h5chunk",
  "colm-namelist",
  "colm-numeric",
+ "colm-spmd",
  "netcdf",
  "rayon",
 ]
