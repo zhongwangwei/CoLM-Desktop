@@ -5450,16 +5450,54 @@ pub fn mesh_domain(path: impl AsRef<Path>) -> Result<crate::SpatialBounds> {
     let lon_e = values("lon_e")?;
     let lat_s = values("lat_s")?;
     let lat_n = values("lat_n")?;
-    let (first_lon, last_lon) = (lon_w.first(), lon_e.last());
-    let (first_lat, last_lat) = (lat_s.first(), lat_n.last());
-    let (Some(&west), Some(&east), Some(&south), Some(&north)) =
-        (first_lon, last_lon, first_lat, last_lat)
-    else {
-        bail!("mesh file {} has empty coordinate edges", path.display());
-    };
     ensure!(
-        south < north,
-        "mesh latitude edges in {} are not south-to-north",
+        !lon_w.is_empty()
+            && lon_w.len() == lon_e.len()
+            && !lat_s.is_empty()
+            && lat_s.len() == lat_n.len(),
+        "mesh file {} has inconsistent or empty coordinate edges",
+        path.display()
+    );
+    // 经度按网格顺序展开（全球网格最后一格的 east 会回到 west-360），取整段跨度。
+    let mut previous: Option<f64> = None;
+    for (&west, &east) in lon_w.iter().zip(&lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "mesh longitude edges in {} are not contiguous",
+                path.display()
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east <= west {
+            east += 360.0;
+        }
+        previous = Some(east);
+    }
+    let west = unwrap_longitude(lon_w[0], None)?;
+    let east = previous.context("mesh has no longitude cells")?;
+    ensure!(
+        east > west && east - west <= 360.0 + ALIGNMENT_EPSILON,
+        "mesh longitude span in {} is invalid",
+        path.display()
+    );
+    // 空间网格的纬度可能按北→南存储（全球 0.1° 网格就是），这里按实际覆盖范围取边界。
+    let mut south = lat_s[0];
+    let mut north = lat_n[0];
+    for (&s, &n) in lat_s.iter().zip(&lat_n) {
+        ensure!(
+            s.is_finite() && n.is_finite() && (s - n).abs() > ALIGNMENT_EPSILON,
+            "mesh latitude edges in {} are invalid",
+            path.display()
+        );
+        south = south.min(s.min(n));
+        north = north.max(s.max(n));
+    }
+    ensure!(
+        (-90.0..=90.0).contains(&south) && (-90.0..=90.0).contains(&north) && south < north,
+        "mesh latitude edges in {} are outside [-90, 90]",
         path.display()
     );
     Ok(crate::SpatialBounds {

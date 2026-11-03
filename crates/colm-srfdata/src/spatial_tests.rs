@@ -3131,7 +3131,35 @@ fn mesh_domain_uses_the_grid_frame_for_global_cases() {
     write_mesh(&mesh_file, "landmask", &[1, 1]);
     let domain = mesh_domain(&mesh_file).unwrap();
     assert_eq!(domain.west, -180.0);
-    assert_eq!(domain.east, -180.0); // 跨日界线的网格，east 回到起点，span 按 360 处理
+    assert_eq!(domain.east, 180.0); // 跨日界线的网格展开后仍是 360° 跨度
     assert_eq!(domain.south, -90.0);
     assert_eq!(domain.north, 90.0);
+
+    // 全球 0.1° mesh 的纬度是自北向南存的：外框仍要取到 [-90, 90]。
+    let descending = directory.join("mesh_descending.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&descending).unwrap();
+        file.add_dimension("nlat", 2).unwrap();
+        file.add_dimension("nlon", 2).unwrap();
+        for (name, values) in [
+            ("lon_w", vec![-180.0, 0.0]),
+            ("lon_e", vec![0.0, -180.0]),
+            ("lat_s", vec![89.0, 0.0]),
+            ("lat_n", vec![90.0, 1.0]),
+        ] {
+            let mut variable = if name.starts_with("lon") {
+                file.add_variable::<f64>(name, &["nlon"]).unwrap()
+            } else {
+                file.add_variable::<f64>(name, &["nlat"]).unwrap()
+            };
+            variable.put_values(&values, ..).unwrap();
+        }
+        file.close().unwrap();
+    }
+    let domain = mesh_domain(&descending).unwrap();
+    assert_eq!(domain.south, 0.0);
+    assert_eq!(domain.north, 90.0);
+    assert_eq!(domain.west, -180.0);
+    assert_eq!(domain.east, 180.0);
 }
