@@ -17,6 +17,8 @@ colm-forcing = { path = "../colm-forcing" }
 colm-namelist = { path = "../colm-namelist" }
 colm-ncchar = { path = "../colm-ncchar" }
 colm-srfdata = { path = "../colm-srfdata" }
+# 多进程预处理的 rank/size：与 Rust 运行时共用同一套启动器环境变量解析。
+colm-spmd = { path = "../colm-spmd" }
 netcdf = { workspace = true, features = ["static"] }
 
 [features]

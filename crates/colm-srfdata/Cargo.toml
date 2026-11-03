@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 colm-numeric = { path = "../colm-numeric" }
+# 多进程预处理的 rank/size 解析（与 Rust 运行时共用启动器约定）。
+colm-spmd = { path = "../colm-spmd" }
 anyhow.workspace = true
 colm-namelist = { path = "../colm-namelist" }
 # 静态 netcdf/HDF5（`netcdf-sys/static` → 从源码编 netcdf-c 与 HDF5）。

@@ -1519,8 +1519,12 @@ fn job_body(
         "mpiexec" => false,
         _ => scheduler == Scheduler::Slurm,
     };
+    // Rust 引擎与 Rust 预处理都不链接 MPI，多进程统一由启动器变量驱动；任意一段用
+    // Rust 实现都要在作业里导出 `COLM_MPIEXEC`，否则作业里的 `colm-cli run --ranks>1`
+    // 会退化成找不到 mpiexec。
+    let rust_multi_process = plan.engine == "rust" || plan.preprocessors == "rust";
     let launcher = if plan.ranks > 1 && srun {
-        if plan.engine == "rust" {
+        if rust_multi_process {
             // Rust 引擎不链接 MPI：远程多进程由 srun 启动，rank 数从 SLURM_* 读。
             let nodes = if plan.nodes > 0 {
                 plan.nodes
@@ -1536,7 +1540,7 @@ fn job_body(
         } else {
             "export COLM_MPIEXEC=srun\n".to_owned()
         }
-    } else if plan.ranks > 1 && plan.engine == "rust" {
+    } else if plan.ranks > 1 && rust_multi_process {
         "export COLM_MPIEXEC=mpiexec\n".to_owned()
     } else {
         String::new()

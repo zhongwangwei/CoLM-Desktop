@@ -210,3 +210,13 @@ fn a_worker_follows_a_rendezvous_that_root_rewrites() {
         .expect("worker must follow the rewritten endpoint");
     let _ = std::fs::remove_dir_all(rendezvous.parent().unwrap());
 }
+
+#[test]
+fn optional_resolution_only_returns_multi_process_ranks() {
+    let explicit = RankInfo::resolve_optional(Some(1), Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!((explicit.rank(), explicit.size()), (1, 2));
+    assert!(RankInfo::resolve_optional(None, None).unwrap().is_none());
+    assert!(RankInfo::resolve_optional(Some(0), None).is_err());
+}

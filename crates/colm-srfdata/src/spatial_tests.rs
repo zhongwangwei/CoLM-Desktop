@@ -2850,3 +2850,276 @@ fn source_block_axes_rejects_malformed_block_layout_without_panic() {
     };
     assert!(source_block_axes(&grid, &pixel, &source, &mismatched).is_err());
 }
+
+fn block_center(blocks: &BlockLayout, column: usize, row: usize) -> (f64, f64) {
+    let west = blocks.lon_w[column];
+    let east = blocks.lon_e[column];
+    let span = (east - west).rem_euclid(360.0);
+    let span = if span == 0.0 { 360.0 } else { span };
+    let lon = west + span * 0.5;
+    let lon = if lon >= 180.0 { lon - 360.0 } else { lon };
+    (lon, (blocks.lat_s[row] + blocks.lat_n[row]) * 0.5)
+}
+
+fn window_contains(window: crate::SpatialBounds, lon: f64, lat: f64) -> bool {
+    if !(lat >= window.south && lat < window.north) {
+        return false;
+    }
+    let span = (window.east - window.west).rem_euclid(360.0);
+    let span = if span == 0.0 { 360.0 } else { span };
+    let offset = (lon - window.west).rem_euclid(360.0);
+    offset < span
+}
+
+#[test]
+fn shard_windows_cover_each_active_block_exactly_once() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let domain = crate::SpatialBounds {
+        south: 8.0,
+        north: 36.0,
+        west: 93.0,
+        east: 111.0,
+    };
+    let size = 4usize;
+    let mut covers = vec![0usize; 72 * 36];
+    for rank in 0..size {
+        let windows = shard_element_windows(&blocks, domain, rank, size)
+            .unwrap()
+            .expect("active domain has a shard for every rank");
+        assert!(!windows.is_empty());
+        for column in 0..72 {
+            for row in 0..36 {
+                let block_west = blocks.lon_w[column].max(domain.west);
+                let block_east = blocks.lon_e[column].min(domain.east);
+                let block_south = blocks.lat_s[row].max(domain.south);
+                let block_north = blocks.lat_n[row].min(domain.north);
+                if !(block_east > block_west && block_north > block_south) {
+                    continue;
+                }
+                let covered = windows.iter().any(|&window| {
+                    let span = (window.east - window.west).rem_euclid(360.0);
+                    let span = if span == 0.0 { 360.0 } else { span };
+                    let west = window.west;
+                    let east = west + span;
+                    east >= block_east - 1e-9
+                        && west <= block_west + 1e-9
+                        && window.south <= block_south + 1e-9
+                        && window.north >= block_north - 1e-9
+                });
+                if covered {
+                    covers[row * 72 + column] += 1;
+                }
+            }
+        }
+    }
+    let mut active = 0usize;
+    for column in 0..72 {
+        for row in 0..36 {
+            let block_west = blocks.lon_w[column].max(domain.west);
+            let block_east = blocks.lon_e[column].min(domain.east);
+            let block_south = blocks.lat_s[row].max(domain.south);
+            let block_north = blocks.lat_n[row].min(domain.north);
+            if block_east > block_west && block_north > block_south {
+                active += 1;
+                assert_eq!(
+                    covers[row * 72 + column],
+                    1,
+                    "active block ({column},{row}) must belong to exactly one rank shard"
+                );
+            }
+        }
+    }
+    assert!(active > 0);
+}
+
+#[test]
+fn shard_windows_reject_more_ranks_than_active_blocks() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let domain = crate::SpatialBounds {
+        south: 8.0,
+        north: 36.0,
+        west: 93.0,
+        east: 111.0,
+    };
+    let error = shard_element_windows(&blocks, domain, 0, 10_000).unwrap_err();
+    assert!(error.to_string().contains("at least as many blocks"));
+}
+
+#[test]
+fn shard_window_partition_covers_the_whole_globe_evenly() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    let domain = crate::SpatialBounds {
+        south: -90.0,
+        north: 90.0,
+        west: -180.0,
+        east: 180.0,
+    };
+    let total = 72 * 36;
+    let size = 8usize;
+    let mut counts = Vec::new();
+    for rank in 0..size {
+        let windows = shard_element_windows(&blocks, domain, rank, size)
+            .unwrap()
+            .unwrap();
+        let mut count = 0usize;
+        for column in 0..72 {
+            for row in 0..36 {
+                let (lon, lat) = block_center(&blocks, column, row);
+                if windows
+                    .iter()
+                    .any(|&window| window_contains(window, lon, lat))
+                {
+                    count += 1;
+                }
+            }
+        }
+        counts.push(count);
+    }
+    assert_eq!(counts.iter().sum::<usize>(), total);
+    assert!(counts.iter().all(|&count| count == total / size));
+}
+
+fn assert_same_tree(expected: &std::path::Path, actual: &std::path::Path) {
+    let mut expected_files = Vec::new();
+    for entry in walkdir(expected) {
+        expected_files.push(entry);
+    }
+    let mut actual_files = Vec::new();
+    for entry in walkdir(actual) {
+        actual_files.push(entry);
+    }
+    assert_eq!(
+        expected_files, actual_files,
+        "split writer produced a different file set"
+    );
+    for relative in expected_files {
+        let a = std::fs::read(expected.join(&relative)).unwrap();
+        let b = std::fs::read(actual.join(&relative)).unwrap();
+        assert_eq!(
+            a, b,
+            "file {relative:?} differs between combined and split writers"
+        );
+    }
+}
+
+fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn split_topology_writers_match_the_combined_writer_byte_for_byte() {
+    let directory = temporary("split-topology");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+    )
+    .unwrap();
+    let patches = FlatLandPatches {
+        element_ids: vec![1, 2],
+        pixel_start: vec![1, 1],
+        pixel_end: vec![4, 4],
+        set_type: vec![10, 12],
+        element_index: vec![1, 2],
+    };
+    let blocks = BlockLayout::regular(2, 1).unwrap();
+    let combined = directory.join("combined");
+    write_spatial_topology(&combined, 2005, &topology, &patches, &blocks, 1).unwrap();
+    let split = directory.join("split");
+    write_spatial_global_topology(&split, 2005, &topology, &blocks).unwrap();
+    write_spatial_block_topology(&split, 2005, &topology, &patches, None, &blocks, 1, true)
+        .unwrap();
+    assert_same_tree(&combined, &split);
+}
+
+#[test]
+fn windowed_topology_only_materializes_the_requested_elements() {
+    let directory = temporary("windowed-topology");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let full = build_spatial_topology(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+    )
+    .unwrap();
+    let blocks = BlockLayout::regular(2, 1).unwrap();
+    let domain = crate::SpatialBounds {
+        south: -90.0,
+        north: 90.0,
+        west: -180.0,
+        east: 180.0,
+    };
+    let mut ids = Vec::new();
+    for rank in 0..2 {
+        let windows = shard_element_windows(&blocks, domain, rank, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(windows.len(), 1);
+        let shard = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+            &mesh_file,
+            SpatialInputKind::GridBased,
+            Grid::by_ndims(4, 2),
+            None,
+            None,
+            &[],
+            &[],
+            Some(&blocks),
+            Some(&windows),
+        )
+        .unwrap();
+        assert_eq!(
+            shard.mesh.len(),
+            1,
+            "each rank owns one of the two elements"
+        );
+        ids.push(shard.mesh.element_id(0).unwrap());
+        let full_index = (0..full.mesh.len())
+            .find(|index| {
+                full.mesh.element_id(*index).unwrap() == shard.mesh.element_id(0).unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            shard.mesh.pixels(0).unwrap(),
+            full.mesh.pixels(full_index).unwrap(),
+            "pixel lattice must stay in the full domain's index space"
+        );
+    }
+    ids.sort();
+    assert_eq!(ids, vec![1, 2]);
+}
+
+#[test]
+fn empty_element_window_is_allowed_for_an_ocean_only_shard() {
+    let directory = temporary("empty-window");
+    let mesh_file = directory.join("mesh.nc");
+    write_mesh(&mesh_file, "landmask", &[1, 1]);
+    let topology = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+        &mesh_file,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+        None,
+        None,
+        &[],
+        &[],
+        Some(&BlockLayout::regular(2, 1).unwrap()),
+        Some(&[]),
+    )
+    .unwrap();
+    assert_eq!(topology.mesh.len(), 0);
+}

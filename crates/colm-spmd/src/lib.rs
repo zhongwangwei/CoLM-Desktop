@@ -79,6 +79,21 @@ impl RankInfo {
         Self::new(found.0, found.1)
     }
 
+    /// 只有真的多进程时才返回 `Some`：显式参数或启动器环境给出 size>1 时解析；
+    /// 单进程（没有启动器变量、size=1）或环境变量不是本模块认识的形式时返回 `None`，
+    /// 调用方可以完全走原来的单进程代码路径。
+    ///
+    /// 显式参数只给一个会报错（与 [`RankInfo::resolve`] 一致），不静默猜另一个。
+    pub fn resolve_optional(rank: Option<usize>, size: Option<usize>) -> Result<Option<Self>> {
+        if rank.is_some() || size.is_some() {
+            return Ok(Some(Self::resolve(rank, size)?));
+        }
+        match Self::resolve(None, None) {
+            Ok(info) if info.size() > 1 => Ok(Some(info)),
+            Ok(_) | Err(_) => Ok(None),
+        }
+    }
+
     pub fn rank(&self) -> usize {
         self.rank
     }

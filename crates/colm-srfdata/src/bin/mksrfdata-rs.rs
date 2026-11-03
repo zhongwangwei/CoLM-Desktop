@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_namelist::{parse, Value};
+use colm_spmd::RankInfo;
 use colm_srfdata::albedo::IGBP_URBAN;
 use colm_srfdata::soil::{
     aggregate_balland_arp, aggregate_campbell, aggregate_soil_field, aggregate_vgm, CampbellFills,
@@ -22,7 +23,7 @@ use colm_srfdata::{
     build_catchment_spatial_topology_with_filter_and_raw_grids, build_crop_land_patches,
     build_crop_pft_topology, build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
     build_pft_land_patches_from_raster, build_pft_topology,
-    build_spatial_topology_with_filter_grid_and_raw_grids, clip_existing_surface,
+    build_spatial_topology_with_filter_grid_and_raw_grids_in_window, clip_existing_surface,
     crop_pft_pctshared, gather_patch_raster, map_patch_diagnostic,
     materialize_single_point_surface, materialize_single_point_surface_from_namelist_with_subgrid,
     mesh_cell_area_weights, read_coordinate_patch_selection_f64,
@@ -52,6 +53,105 @@ const CFT_CLASSES: usize = 64;
 const IGBP_LULCC_CLASSES: usize = 17;
 const TWI_LAYERS: usize = 25;
 const CANOPY_STRUCTURE_SUFFIX: &str = "CanopyStructure_500m_CH90_aggregated";
+
+/// 预处理多进程的 rank 分片：每个 rank 拿一段连续块区间换算出的 1–3 个矩形窗口。
+#[derive(Debug, Clone)]
+struct Shard {
+    rank: usize,
+    /// 块边界对齐的元素窗口；pixel 格点仍按完整算例域，产物索引空间与单进程一致。
+    windows: Vec<colm_srfdata::SpatialBounds>,
+}
+
+impl Shard {
+    fn is_root(&self) -> bool {
+        self.rank == 0
+    }
+}
+
+/// 从显式参数/启动器环境解析多进程 shard；单进程返回 `None`（完全走原代码路径）。
+fn resolve_shard(
+    kind: SpatialInputKind,
+    blocks: &colm_srfdata::BlockLayout,
+    domain: Option<colm_srfdata::SpatialBounds>,
+    rank: Option<usize>,
+    ranks: Option<usize>,
+) -> Result<Option<Shard>> {
+    let Some(info) = RankInfo::resolve_optional(rank, ranks)? else {
+        return Ok(None);
+    };
+    if info.size() == 1 {
+        return Ok(None);
+    }
+    ensure!(
+        kind != SpatialInputKind::Catchment,
+        "multi-process mksrfdata does not support CATCHMENT meshes yet; \
+         run this case with --engine fortran or one process"
+    );
+    let domain = domain.context(
+        "multi-process mksrfdata needs the case domain (DEF_domain) to assign block-aligned windows",
+    )?;
+    let windows = colm_srfdata::shard_element_windows(blocks, domain, info.rank(), info.size())?
+        .with_context(|| {
+            format!(
+                "rank {} of {} has no block-aligned window; reduce --ranks",
+                info.rank(),
+                info.size()
+            )
+        })?;
+    println!(
+        "mksrfdata rank {}/{}: {} element window(s) over {} block(s)",
+        info.rank(),
+        info.size(),
+        windows.len(),
+        blocks.lon_w.len() * blocks.lat_s.len()
+    );
+    Ok(Some(Shard {
+        rank: info.rank(),
+        windows,
+    }))
+}
+
+fn shard_windows(shard: &Option<Shard>) -> Option<&[colm_srfdata::SpatialBounds]> {
+    shard.as_ref().map(|shard| shard.windows.as_slice())
+}
+
+/// 只写全局拓扑文件（rank 0），或者走原来的“一次写全局+按块”路径（单进程）。
+#[allow(clippy::too_many_arguments)]
+fn write_landpatch_topology(
+    shard: Option<&Shard>,
+    landdata: &std::path::Path,
+    year: i32,
+    topology: &colm_srfdata::SpatialTopology,
+    patches: &colm_srfdata::FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &colm_srfdata::BlockLayout,
+    compression: u8,
+    patch_fractions: bool,
+) -> Result<()> {
+    if shard.is_some() {
+        colm_srfdata::write_spatial_block_topology(
+            landdata,
+            year,
+            topology,
+            patches,
+            pctshared,
+            blocks,
+            compression,
+            patch_fractions,
+        )
+    } else {
+        write_spatial_topology_selecting_fractions(
+            landdata,
+            year,
+            topology,
+            patches,
+            pctshared,
+            blocks,
+            compression,
+            patch_fractions,
+        )
+    }
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -111,6 +211,8 @@ struct SpatialLctArgs {
     diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
     urban: Option<SpatialUrbanInputs>,
+    /// 多进程扇出的元素窗口；`None`/size=1 时完全走单进程路径。
+    shard: Option<Shard>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +313,8 @@ struct SpatialPftArgs {
     bedrock: Option<PathBuf>,
     diagnostics: bool,
     soil_hyper_albedo_dir: Option<PathBuf>,
+    /// 多进程扇出的元素窗口；`None`/size=1 时完全走单进程路径。
+    shard: Option<Shard>,
 }
 
 // Upstream ignores an absent filter, but an existing unreadable or malformed file
@@ -258,6 +362,12 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             args.lulcc_lai_only = true;
         }
     }
+    if args.diagnostics && args.shard.is_some() {
+        bail!(
+            "DEF_USE_SrfdataDiag writes global per-class files that would need a cross-rank gather; \
+             run with one process or disable diagnostics"
+        );
+    }
     if args.output_2m_wmo && args.kind != SpatialInputKind::GridBased {
         println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
         args.output_2m_wmo = false;
@@ -273,6 +383,41 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         .transpose()?;
     let coordinate_grids = topography_grid.as_slice();
     let mesh_filter = optional_mesh_filter(args.mesh_filter.as_deref())?;
+    // 多进程扇出：rank 0 用完整域、无窗口的元数据拓扑写 block.nc/pixel.nc/mesh.nc；
+    // 这里不建 patches（全局文件只需要 mesh/pixel/块归属），所以比正式物化便宜。
+    let global_topology = match &args.shard {
+        Some(shard) if shard.is_root() => {
+            ensure!(
+                args.kind != SpatialInputKind::Catchment,
+                "multi-process mksrfdata does not support CATCHMENT meshes yet"
+            );
+            let mut topology =
+                colm_srfdata::build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+                    &args.mesh,
+                    args.kind,
+                    COLM_500M,
+                    args.bounds,
+                    mesh_filter.as_ref().map(|filter| &filter.grid),
+                    &[],
+                    coordinate_grids,
+                    Some(&args.blocks),
+                    None,
+                )?;
+            topology.preserve_element_blocks(&args.blocks)?;
+            if let Some(filter) = &mesh_filter {
+                if args.land_only {
+                    topology.retain_land_pixels_from_raster(
+                        &args.landtype,
+                        "landtype",
+                        COLM_500M,
+                    )?;
+                }
+                filter.apply(&mut topology)?;
+            }
+            Some(topology)
+        }
+        _ => None,
+    };
     let (mut topology, mut base_patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             // PFT and PC CATCHMENT modes still aggregate PFT/LAI and the shared
@@ -298,7 +443,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids(
+            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
                 &args.mesh,
                 args.kind,
                 COLM_500M,
@@ -307,6 +452,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 &[],
                 coordinate_grids,
                 Some(&args.blocks),
+                shard_windows(&args.shard),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
             if let Some(filter) = &mesh_filter {
@@ -331,6 +477,18 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
+    if args.shard.is_some() && topology.mesh.is_empty() {
+        if let Some(global) = &global_topology {
+            colm_srfdata::write_spatial_global_topology(
+                &args.landdata,
+                args.year,
+                global,
+                &args.blocks,
+            )?;
+        }
+        println!("mksrfdata: no land elements in this shard; skipped");
+        return Ok(());
+    }
     let mut base_layout =
         base_patches.aggregation_layout(&topology.mesh, vec![None; base_patches.len()])?;
     let area = mesh_cell_area_weights(&topology.mesh, &topology.pixel)?;
@@ -433,29 +591,17 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         raw_percent
     };
     if args.lulcc_lai_only {
-        if let Some(pctshared) = crop.as_ref().map(|crop| crop.pctshared.as_slice()) {
-            write_spatial_topology_selecting_fractions(
-                &args.landdata,
-                args.year,
-                &topology,
-                patches,
-                Some(pctshared),
-                &args.blocks,
-                args.srfdata_compression,
-                args.patch_fractions,
-            )?;
-        } else {
-            write_spatial_topology_selecting_fractions(
-                &args.landdata,
-                args.year,
-                &topology,
-                patches,
-                None,
-                &args.blocks,
-                args.srfdata_compression,
-                args.patch_fractions,
-            )?;
-        }
+        write_landpatch_topology(
+            args.shard.as_ref(),
+            &args.landdata,
+            args.year,
+            &topology,
+            patches,
+            crop.as_ref().map(|crop| crop.pctshared.as_slice()),
+            &args.blocks,
+            args.srfdata_compression,
+            args.patch_fractions,
+        )?;
         if let Some(land_hrus) = land_hrus {
             write_spatial_hru_topology(
                 &args.landdata,
@@ -596,6 +742,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         diagnostics: args.diagnostics,
         soil_hyper_albedo_dir: args.soil_hyper_albedo_dir.clone(),
         urban: None,
+        shard: args.shard.clone(),
     };
     materialize_spatial_common_fields(
         &common,
@@ -789,6 +936,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         pfts.land_pfts.len(),
         args.landdata.display()
     );
+    if let Some(global) = &global_topology {
+        colm_srfdata::write_spatial_global_topology(
+            &args.landdata,
+            args.year,
+            global,
+            &args.blocks,
+        )?;
+    }
     Ok(())
 }
 
@@ -1046,6 +1201,49 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         })
         .transpose()?;
     let coordinate_grids = topography_grid.as_slice();
+    if args.diagnostics && args.shard.is_some() {
+        bail!(
+            "DEF_USE_SrfdataDiag writes global per-class files that would need a cross-rank gather; \
+             run with one process or disable diagnostics"
+        );
+    }
+    if args.urban.is_some() && args.shard.is_some() {
+        bail!("multi-process mksrfdata does not support urban surface data yet");
+    }
+    // 多进程扇出：rank 0 用完整域、无窗口的元数据拓扑写 block.nc/pixel.nc/mesh.nc；
+    // 不建 land patches（全局文件只需要 mesh/pixel/块归属），所以比正式物化便宜。
+    let global_topology = match &args.shard {
+        Some(shard) if shard.is_root() => {
+            ensure!(
+                args.kind != SpatialInputKind::Catchment,
+                "multi-process mksrfdata does not support CATCHMENT meshes yet"
+            );
+            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+                &args.mesh,
+                args.kind,
+                COLM_500M,
+                args.bounds,
+                mesh_filter.as_ref().map(|filter| &filter.grid),
+                urban_extra_grids,
+                coordinate_grids,
+                Some(&args.blocks),
+                None,
+            )?;
+            topology.preserve_element_blocks(&args.blocks)?;
+            if let Some(filter) = &mesh_filter {
+                if args.land_only {
+                    topology.retain_land_pixels_from_raster(
+                        &args.landtype,
+                        "landtype",
+                        lct_grid,
+                    )?;
+                }
+                filter.apply(&mut topology)?;
+            }
+            Some(topology)
+        }
+        _ => None,
+    };
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
@@ -1068,7 +1266,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (catchment.topology, patches, Some(catchment.land_hrus))
         }
         SpatialInputKind::GridBased | SpatialInputKind::Unstructured => {
-            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids(
+            let mut topology = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
                 &args.mesh,
                 args.kind,
                 COLM_500M,
@@ -1077,6 +1275,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 urban_extra_grids,
                 coordinate_grids,
                 Some(&args.blocks),
+                shard_windows(&args.shard),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
             if let Some(filter) = &mesh_filter {
@@ -1100,6 +1299,18 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
             (topology, patches, None)
         }
     };
+    if args.shard.is_some() && topology.mesh.is_empty() {
+        if let Some(global) = &global_topology {
+            colm_srfdata::write_spatial_global_topology(
+                &args.landdata,
+                args.year,
+                global,
+                &args.blocks,
+            )?;
+        }
+        println!("mksrfdata: no land elements in this shard; skipped");
+        return Ok(());
+    }
     let land_urban = if let Some(urban) = &args.urban {
         ensure!(
             args.land_cover == SiteMode::Igbp,
@@ -1197,6 +1408,14 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         patches.set_type.len(),
         args.landdata.display()
     );
+    if let Some(global) = &global_topology {
+        colm_srfdata::write_spatial_global_topology(
+            &args.landdata,
+            args.year,
+            global,
+            &args.blocks,
+        )?;
+    }
     Ok(())
 }
 
@@ -2574,29 +2793,17 @@ fn materialize_spatial_common_fields(
     )?;
     let patch_type_indices = (0..=land_classification_count(args.land_cover)).collect::<Vec<_>>();
     if args.lulcc_lai_only {
-        if let Some(pctshared) = patch_pctshared {
-            write_spatial_topology_selecting_fractions(
-                &args.landdata,
-                args.year,
-                topology,
-                patches,
-                Some(pctshared),
-                &args.blocks,
-                args.srfdata_compression,
-                args.patch_fractions,
-            )?;
-        } else {
-            write_spatial_topology_selecting_fractions(
-                &args.landdata,
-                args.year,
-                topology,
-                patches,
-                None,
-                &args.blocks,
-                args.srfdata_compression,
-                args.patch_fractions,
-            )?;
-        }
+        write_landpatch_topology(
+            args.shard.as_ref(),
+            &args.landdata,
+            args.year,
+            topology,
+            patches,
+            patch_pctshared,
+            &args.blocks,
+            args.srfdata_compression,
+            args.patch_fractions,
+        )?;
         materialize_lct_monthly_vegetation(
             args,
             topology,
@@ -2767,7 +2974,8 @@ fn materialize_spatial_common_fields(
         None
     };
     if let Some(pctshared) = patch_pctshared {
-        write_spatial_topology_selecting_fractions(
+        write_landpatch_topology(
+            args.shard.as_ref(),
             &args.landdata,
             args.year,
             topology,
@@ -2778,7 +2986,8 @@ fn materialize_spatial_common_fields(
             args.patch_fractions,
         )?;
     } else {
-        write_spatial_topology_selecting_fractions(
+        write_landpatch_topology(
+            args.shard.as_ref(),
             &args.landdata,
             args.year,
             topology,
@@ -3718,6 +3927,8 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
+    let mut rank = None;
+    let mut ranks = None;
     let mut land_only = true;
     let mut patch_fractions = true;
     let mut mesh_filter = None;
@@ -3773,6 +3984,24 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
                     args.get(index + 1)
                         .context("--block-file needs a block information NetCDF path")?,
                 )?;
+                index += 2;
+            }
+            "--rank" => {
+                rank = Some(
+                    args.get(index + 1)
+                        .context("--rank needs a zero-based process index")?
+                        .parse()
+                        .context("--rank must be a non-negative integer")?,
+                );
+                index += 2;
+            }
+            "--ranks" => {
+                ranks = Some(
+                    args.get(index + 1)
+                        .context("--ranks needs the process count")?
+                        .parse()
+                        .context("--ranks must be a positive integer")?,
+                );
                 index += 2;
             }
             "--aggregation-zip" => {
@@ -4071,6 +4300,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         canopy_tiles.is_none() || land_cover == SiteMode::Igbp,
         "--canopy-structure-dir supports IGBP land cover only"
     );
+    let shard = resolve_shard(kind, &blocks, bounds, rank, ranks)?;
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -4115,6 +4345,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
             geometry: urban_geometry,
             use_canyon_hwr: urban_canyon_hwr,
         }),
+        shard,
     })
 }
 
@@ -4135,6 +4366,8 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         .with_context(|| format!("invalid land-cover year {:?}", args[4]))?;
     let mut blocks = BlockLayout::regular(1, 1)?;
     let mut bounds = None;
+    let mut rank = None;
+    let mut ranks = None;
     let mut land_only = true;
     let mut patch_fractions = true;
     let mut mesh_filter = None;
@@ -4195,6 +4428,24 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
                     args.get(index + 1)
                         .context("--block-file needs a block information NetCDF path")?,
                 )?;
+                index += 2;
+            }
+            "--rank" => {
+                rank = Some(
+                    args.get(index + 1)
+                        .context("--rank needs a zero-based process index")?
+                        .parse()
+                        .context("--rank must be a non-negative integer")?,
+                );
+                index += 2;
+            }
+            "--ranks" => {
+                ranks = Some(
+                    args.get(index + 1)
+                        .context("--ranks needs the process count")?
+                        .parse()
+                        .context("--ranks must be a positive integer")?,
+                );
                 index += 2;
             }
             "--aggregation-zip" => {
@@ -4425,6 +4676,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         simple_topography_factors.is_none() || regular_topography_factors.is_none(),
         "--simple-topography-factors and --regular-topography-factors are mutually exclusive"
     );
+    let shard = resolve_shard(kind, &blocks, bounds, rank, ranks)?;
     Ok(SpatialPftArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -4463,6 +4715,7 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         bedrock,
         diagnostics,
         soil_hyper_albedo_dir,
+        shard,
     })
 }
 
@@ -4568,6 +4821,17 @@ fn materialize_case(args: &[String]) -> Result<()> {
         subgrid,
         grid_kind,
     )? {
+        // 启动器环境里的 rank/size 转成显式参数传给子命令；单进程不追加，行为不变。
+        if let Some(rank) = RankInfo::resolve_optional(None, None)? {
+            if rank.size() > 1 {
+                command.args.extend([
+                    "--rank".to_owned(),
+                    rank.rank().to_string(),
+                    "--ranks".to_owned(),
+                    rank.size().to_string(),
+                ]);
+            }
+        }
         if let Some(directory) = soil_hyper_albedo_dir {
             command.required_directories.push(directory.clone());
             command.args.extend([
@@ -5683,6 +5947,7 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use colm_srfdata::build_spatial_topology_with_filter_grid_and_raw_grids;
 
     /// 湖泊沉积碳的有机质代理（raw `lake_soilc.nc` 缺失时）：模式第 1、2 层都取原始第 1 层，
     /// 第 9、10 层都取原始第 8 层；非湖泊 patch 为 0；输出按层平铺。

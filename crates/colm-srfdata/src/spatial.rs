@@ -412,6 +412,40 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     coordinate_grids: &[SpatialGrid],
     block_order: Option<&BlockLayout>,
 ) -> Result<SpatialTopology> {
+    build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+        path,
+        kind,
+        raw_grid,
+        bounds,
+        filter_grid,
+        extra_raw_grids,
+        coordinate_grids,
+        block_order,
+        None,
+    )
+}
+
+/// 与 [`build_spatial_topology_with_filter_grid_and_raw_grids`] 相同，但只物化
+/// `element_windows` 内的网格元素（多进程预处理的按块扇出用）。
+///
+/// **pixel 像元格点仍按 `bounds` 覆盖整个算例域**：每个 rank 只缩小“算哪些元素”，
+/// 不缩小 `pixel.nc`/元素编号的索引空间。这样每个块文件里的 `elmindex`/`elmpixels`
+/// 与单进程逐字节相同，扇出的产物直接就是最终 landdata 树，不需要再合并/重映射。
+///
+/// `element_windows` 为空/全在域外是合法的（该 rank 内没有陆地元素）：返回空 mesh，
+/// 调用方跳过物化；单进程（`None`）仍然要求至少有一个正元素。
+#[allow(clippy::too_many_arguments)]
+pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+    path: impl AsRef<Path>,
+    kind: SpatialInputKind,
+    raw_grid: Grid,
+    bounds: Option<crate::SpatialBounds>,
+    filter_grid: Option<&SpatialGrid>,
+    extra_raw_grids: &[Grid],
+    coordinate_grids: &[SpatialGrid],
+    block_order: Option<&BlockLayout>,
+    element_windows: Option<&[crate::SpatialBounds]>,
+) -> Result<SpatialTopology> {
     let path = path.as_ref();
     ensure!(
         kind != SpatialInputKind::Catchment,
@@ -443,34 +477,62 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids(
     )?;
     let source = PixelSourceMapping { columns, rows };
 
+    // 多个矩形窗口（按块区间的连续范围换算）可以精确覆盖任意块子集；每个 pixel 行只
+    // 属于一个窗口的行区间，所以按行收集列区间即可，不需要逐窗口重复扫描整张网格。
+    let row_column_ranges: Option<Vec<Vec<(usize, usize)>>> = match element_windows {
+        Some(windows) => {
+            let mut per_row = vec![Vec::new(); pixel.lat_s.len()];
+            for window in windows {
+                let (columns, rows) = pixel_window(&pixel, *window)?;
+                if columns.is_empty() || rows.is_empty() {
+                    continue;
+                }
+                for row in rows {
+                    per_row[row].push((columns.start, columns.end));
+                }
+            }
+            Some(per_row)
+        }
+        None => None,
+    };
+    let whole_row = [(0usize, pixel.lon_w.len())];
     let mut members = BTreeMap::<i64, Vec<(i32, i32)>>::new();
     let mut raw_count = 0_usize;
     for (y, source_row) in source.rows.iter().enumerate() {
         let Some(row) = *source_row else { continue };
-        for (x, source_column) in source.columns.iter().enumerate() {
-            let Some(column) = *source_column else {
-                continue;
-            };
-            let offset = row * summary.nlon + column;
-            let value = values[offset];
-            if value <= 0 {
-                continue;
+        let ranges: &[(usize, usize)] = match &row_column_ranges {
+            Some(per_row) => &per_row[y],
+            None => &whole_row,
+        };
+        for &(start, end) in ranges {
+            for (x, source_column) in source.columns.iter().enumerate().take(end).skip(start) {
+                let Some(column) = *source_column else {
+                    continue;
+                };
+                let offset = row * summary.nlon + column;
+                let value = values[offset];
+                if value <= 0 {
+                    continue;
+                }
+                let element_id = match kind {
+                    SpatialInputKind::GridBased => i64::try_from(offset)?
+                        .checked_add(1)
+                        .context("GRIDBASED element ID overflows int64")?,
+                    SpatialInputKind::Unstructured => value,
+                    SpatialInputKind::Catchment => unreachable!("dedicated catchment builder"),
+                };
+                raw_count += 1;
+                members
+                    .entry(element_id)
+                    .or_default()
+                    .push((i32::try_from(x + 1)?, i32::try_from(y + 1)?));
             }
-            let element_id = match kind {
-                SpatialInputKind::GridBased => i64::try_from(offset)?
-                    .checked_add(1)
-                    .context("GRIDBASED element ID overflows int64")?,
-                SpatialInputKind::Unstructured => value,
-                SpatialInputKind::Catchment => unreachable!("dedicated catchment builder"),
-            };
-            raw_count += 1;
-            members
-                .entry(element_id)
-                .or_default()
-                .push((i32::try_from(x + 1)?, i32::try_from(y + 1)?));
         }
     }
-    ensure!(!members.is_empty(), "spatial mesh has no positive elements");
+    ensure!(
+        !members.is_empty() || element_windows.is_some(),
+        "spatial mesh has no positive elements"
+    );
     if let Some(blocks) = block_order {
         let axes = source_block_axes(&grid, &pixel, &source, blocks)?;
         for pixels in members.values_mut() {
@@ -4226,14 +4288,83 @@ pub fn write_spatial_topology_selecting_fractions(
     validate_compression_level(compression_level)?;
     let landdata = landdata.as_ref();
     ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
-    let (nx, ny) = blocks.dimensions()?;
     validate_patches(&topology.mesh, land_patches)?;
+    // 先算一次分数，保持“参数不合法时不写任何文件”的既有语义；下面写块文件时复用。
     let fractions = patch_element_fractions(topology, land_patches, pctshared)?;
+    write_spatial_global_files(landdata, land_cover_year, topology, blocks)?;
+    write_spatial_block_files(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        pctshared,
+        blocks,
+        compression_level,
+        patch_fractions,
+        Some(&fractions),
+    )
+}
+
+/// 只写空间 landdata 的**全局**文件：`block.nc`、`pixel.nc` 与
+/// `mesh/<year>/mesh.nc`（`nelm_blk` 全局计数）。
+///
+/// 多进程扇出时只有 rank 0 调它；pixel 格点与元素编号都按完整算例域，所以与单进程
+/// 写出的字节相同。这里不需要 `landpatch`，rank 0 可能只构建了元数据拓扑。
+pub fn write_spatial_global_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    write_spatial_global_files(landdata, land_cover_year, topology, blocks)
+}
+
+/// 只写**按块**的拓扑文件：`mesh/<year>/mesh_<block>.nc`、`landelm`/`landpatch`
+/// 的块文件与可选的 `patchfrac_elm`。
+///
+/// 多进程扇出时每个 rank 只拿自己 tile 的元素/patches 调它，写出的块文件与单进程
+/// 逐字节相同（元素编号与 pixel 索引都是全局的）。
+#[allow(clippy::too_many_arguments)]
+pub fn write_spatial_block_topology(
+    landdata: impl AsRef<Path>,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+    compression_level: u8,
+    patch_fractions: bool,
+) -> Result<()> {
+    validate_compression_level(compression_level)?;
+    let landdata = landdata.as_ref();
+    ensure!(land_cover_year >= 0, "land-cover year must be non-negative");
+    validate_patches(&topology.mesh, land_patches)?;
+    write_spatial_block_files(
+        landdata,
+        land_cover_year,
+        topology,
+        land_patches,
+        pctshared,
+        blocks,
+        compression_level,
+        patch_fractions,
+        None,
+    )
+}
+
+fn write_spatial_global_files(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    let (nx, ny) = blocks.dimensions()?;
     std::fs::create_dir_all(landdata)
         .with_context(|| format!("cannot create {}", landdata.display()))?;
     write_block_file(landdata, blocks)?;
     write_pixel_file(landdata, &topology.pixel)?;
-
     let assignments = element_blocks(topology, blocks)?;
     let year = format!("{land_cover_year:04}");
     let mesh_dir = landdata.join("mesh").join(&year);
@@ -4245,7 +4376,27 @@ pub fn write_spatial_topology_selecting_fractions(
         &assignments,
         nx,
         ny,
-    )?;
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_spatial_block_files(
+    landdata: &Path,
+    land_cover_year: i32,
+    topology: &SpatialTopology,
+    land_patches: &FlatLandPatches,
+    pctshared: Option<&[f64]>,
+    blocks: &BlockLayout,
+    compression_level: u8,
+    patch_fractions: bool,
+    fractions: Option<&[f64]>,
+) -> Result<()> {
+    std::fs::create_dir_all(landdata)
+        .with_context(|| format!("cannot create {}", landdata.display()))?;
+    let assignments = element_blocks(topology, blocks)?;
+    let year = format!("{land_cover_year:04}");
+    let mesh_dir = landdata.join("mesh").join(&year);
+    std::fs::create_dir_all(&mesh_dir)?;
     write_mesh_blocks(&mesh_dir, &topology.mesh, blocks, &assignments)?;
     write_pixelset(
         landdata,
@@ -4274,6 +4425,14 @@ pub fn write_spatial_topology_selecting_fractions(
         compression_level,
     )?;
     if patch_fractions {
+        let computed;
+        let fractions = match fractions {
+            Some(fractions) => fractions,
+            None => {
+                computed = patch_element_fractions(topology, land_patches, pctshared)?;
+                &computed
+            }
+        };
         write_landpatch_scalar(
             landdata,
             land_cover_year,
@@ -4283,7 +4442,7 @@ pub fn write_spatial_topology_selecting_fractions(
             compression_level,
             "landpatch",
             "patchfrac_elm",
-            &fractions,
+            fractions,
         )?;
     }
     Ok(())
@@ -5200,6 +5359,230 @@ fn assimilated_pixels(
         columns,
         rows,
     })
+}
+
+/// 把网格元素窗口换算成 pixel 格点阵列的下标区间（闭开区间）。
+///
+/// `pixel.lon_w/lon_e` 是归一化后的经度（可能跨 ±180 跳变），这里与
+/// [`assimilated_pixels`] 一样按网格顺序展开再比较。窗口完全落在域外时返回空区间；
+/// 调用方把“空窗口”解释成该 tile 没有陆地元素（合法的扇出结果）。
+fn pixel_window(
+    pixel: &PixelAxes,
+    window: crate::SpatialBounds,
+) -> Result<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    ensure!(
+        window.south.is_finite()
+            && window.north.is_finite()
+            && window.west.is_finite()
+            && window.east.is_finite()
+            && window.south < window.north,
+        "element window must be a finite, non-empty rectangle"
+    );
+    if pixel.lon_w.is_empty() || pixel.lat_s.is_empty() {
+        return Ok((0..0, 0..0));
+    }
+    let mut longitude = Vec::with_capacity(pixel.lon_w.len());
+    let mut previous = None;
+    for (&west, &east) in pixel.lon_w.iter().zip(&pixel.lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "pixel longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(east > west, "pixel longitude cells must be positive width");
+        longitude.push((west, east));
+        previous = Some(east);
+    }
+    let origin = longitude[0].0;
+    let west = unwrap_longitude(window.west, Some(origin))?;
+    let span = (window.east - window.west).rem_euclid(360.0);
+    let east = west + if span == 0.0 { 360.0 } else { span };
+    let first = longitude.iter().position(|&(cell_west, cell_east)| {
+        let mid = (cell_west + cell_east) * 0.5;
+        mid >= west && mid < east
+    });
+    let last = longitude.iter().rposition(|&(cell_west, cell_east)| {
+        let mid = (cell_west + cell_east) * 0.5;
+        mid >= west && mid < east
+    });
+    let columns = match (first, last) {
+        (Some(first), Some(last)) => first..last + 1,
+        _ => 0..0,
+    };
+    let mut rows = Vec::with_capacity(pixel.lat_s.len());
+    for (&south, &north) in pixel.lat_s.iter().zip(&pixel.lat_n) {
+        ensure!(
+            south < north,
+            "pixel latitude cells must be positive height"
+        );
+        let mid = (south + north) * 0.5;
+        rows.push(mid >= window.south && mid < window.north);
+    }
+    let first = rows.iter().position(|&inside| inside);
+    let last = rows.iter().rposition(|&inside| inside);
+    let rows = match (first, last) {
+        (Some(first), Some(last)) => first..last + 1,
+        _ => 0..0,
+    };
+    Ok((columns, rows))
+}
+
+/// 多进程预处理的“按块扇出”：把算例域覆盖到的活跃块按 row-major 顺序连续分给
+/// `rank`，返回该 rank 的元素窗口（1–3 个块边界对齐的矩形）。
+///
+/// 连续块区间保证不同 rank 的窗口互不重叠、并集覆盖全部活跃块；换成矩形之后
+/// [`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`] 只物化这些
+/// 元素，而 pixel 格点仍是完整算例域，所以产物索引空间与单进程一致。
+///
+/// `size > 活跃块数` 是调用方错误（多出来的 rank 无块可写）；空窗口返回 `Ok(Some(vec![]))`。
+pub fn shard_element_windows(
+    blocks: &BlockLayout,
+    domain: crate::SpatialBounds,
+    rank: usize,
+    size: usize,
+) -> Result<Option<Vec<crate::SpatialBounds>>> {
+    ensure!(
+        size >= 1,
+        "multi-process preprocessing needs at least one rank"
+    );
+    ensure!(rank < size, "rank {rank} is outside 0..{size}");
+    let nx = blocks.lon_w.len();
+    let ny = blocks.lat_s.len();
+    ensure!(nx > 0 && ny > 0, "block layout must be non-empty");
+    ensure!(
+        blocks.lon_e.len() == nx
+            && blocks.lat_n.len() == ny
+            && domain.south.is_finite()
+            && domain.north.is_finite()
+            && domain.west.is_finite()
+            && domain.east.is_finite()
+            && domain.south < domain.north,
+        "block layout and domain bounds are inconsistent"
+    );
+    let mut longitude = Vec::with_capacity(nx);
+    let mut previous = None;
+    for (&west, &east) in blocks.lon_w.iter().zip(&blocks.lon_e) {
+        let mut west = unwrap_longitude(west, previous)?;
+        if let Some(end) = previous {
+            ensure!(
+                nearly_equal(west, end),
+                "block longitude cells must be contiguous west-to-east"
+            );
+            west = end;
+        }
+        let mut east = unwrap_longitude(east, Some(west))?;
+        if east == west {
+            east += 360.0;
+        }
+        ensure!(east > west, "block longitude cells must be positive width");
+        longitude.push((west, east));
+        previous = Some(east);
+    }
+    for pair in blocks.lat_s.windows(2) {
+        ensure!(
+            pair[0] < pair[1],
+            "block latitude cells must be ordered south-to-north"
+        );
+    }
+    for index in 0..ny - 1 {
+        ensure!(
+            nearly_equal(blocks.lat_n[index], blocks.lat_s[index + 1]),
+            "block latitude cells must be contiguous south-to-north"
+        );
+    }
+    ensure!(
+        blocks
+            .lat_s
+            .iter()
+            .zip(&blocks.lat_n)
+            .all(|(&south, &north)| south < north),
+        "block latitude cells must be positive height"
+    );
+    let origin = longitude[0].0;
+    let west = unwrap_longitude(domain.west, Some(origin))?;
+    let span = (domain.east - domain.west).rem_euclid(360.0);
+    let east = west + if span == 0.0 { 360.0 } else { span };
+    let columns: Vec<usize> = longitude
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(cell_west, cell_east))| {
+            (cell_east > west && cell_west < east).then_some(index)
+        })
+        .collect();
+    ensure!(
+        !columns.is_empty(),
+        "case domain does not intersect the block layout"
+    );
+    let rows: Vec<usize> = blocks
+        .lat_s
+        .iter()
+        .zip(&blocks.lat_n)
+        .enumerate()
+        .filter_map(|(index, (&south, &north))| {
+            (north > domain.south && south < domain.north).then_some(index)
+        })
+        .collect();
+    ensure!(
+        !rows.is_empty(),
+        "case domain does not intersect the block layout"
+    );
+    let column_start = columns[0];
+    let column_count = columns.len();
+    let row_start = rows[0];
+    let row_count = rows.len();
+    let total = column_count
+        .checked_mul(row_count)
+        .context("active block count overflows usize")?;
+    ensure!(
+        size <= total,
+        "multi-process preprocessing with {size} ranks needs at least as many blocks, \
+         but this case domain intersects only {total} block(s)"
+    );
+    let first = total * rank / size;
+    let last = total * (rank + 1) / size;
+    if first == last {
+        return Ok(Some(Vec::new()));
+    }
+    let first_row = first / column_count;
+    let last_row = (last - 1) / column_count;
+    let mut rectangles = Vec::new();
+    if first_row == last_row {
+        rectangles.push((
+            (first_row, first_row),
+            (first % column_count, (last - 1) % column_count),
+        ));
+    } else {
+        let first_column = first % column_count;
+        rectangles.push(((first_row, first_row), (first_column, column_count - 1)));
+        if first_row + 1 < last_row {
+            rectangles.push(((first_row + 1, last_row - 1), (0, column_count - 1)));
+        }
+        let last_column = (last - 1) % column_count;
+        rectangles.push(((last_row, last_row), (0, last_column)));
+    }
+    let mut windows = Vec::with_capacity(rectangles.len());
+    for ((row_from, row_to), (column_from, column_to)) in rectangles {
+        let west = longitude[column_start + column_from].0.max(west);
+        let east = longitude[column_start + column_to].1.min(east);
+        let south = blocks.lat_s[row_start + row_from].max(domain.south);
+        let north = blocks.lat_n[row_start + row_to].min(domain.north);
+        if west < east && south < north {
+            windows.push(crate::SpatialBounds {
+                south,
+                north,
+                west: normalize_longitude_value(west),
+                east: normalize_longitude_value(east),
+            });
+        }
+    }
+    Ok(Some(windows))
 }
 
 fn unwrap_longitude(value: f64, previous: Option<f64>) -> Result<f64> {
