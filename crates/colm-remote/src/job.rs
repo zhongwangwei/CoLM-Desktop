@@ -86,7 +86,27 @@ pub fn job_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<Strin
 /// 提交作业的远程脚本：写下作业脚本，交给调度系统（或脱离 ssh 会话在后台跑），最后一行回报作业号。
 /// 作业脚本里可以 `echo 阶段 > phase` 报告进度；结束时写下退出码。
 pub fn submit_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<String> {
-    submit_script_with(root, id, body, spec, sched::launch(spec.scheduler))
+    submit_script_with(root, id, body, spec, sched::launch(spec.scheduler), "", "")
+}
+
+/// Fence ownership and job-directory creation together, then unlock before a slow scheduler call.
+pub fn fenced_submit_script(
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    before_create: &str,
+    after_create: &str,
+) -> Result<String> {
+    submit_script_with(
+        root,
+        id,
+        body,
+        spec,
+        sched::launch(spec.scheduler),
+        before_create,
+        after_create,
+    )
 }
 
 /// 和 [`submit_script`] 一样，但放进这一批的节点队列（[`crate::pack`]），由载体按节点打包运行。
@@ -98,7 +118,7 @@ pub fn packed_submit_script(
     pack: &crate::pack::Pack,
 ) -> Result<String> {
     let launch = crate::pack::launch(root, id, pack, spec.scheduler, &spec.resources)?;
-    submit_script_with(root, id, body, spec, &launch)
+    submit_script_with(root, id, body, spec, &launch, "", "")
 }
 
 fn submit_script_with(
@@ -107,6 +127,8 @@ fn submit_script_with(
     body: &str,
     spec: &Spec,
     launch: &str,
+    before_create: &str,
+    after_create: &str,
 ) -> Result<String> {
     let dir = quote(&job_dir(root, id));
     let script = job_script(root, id, body, spec)?;
@@ -116,7 +138,7 @@ fn submit_script_with(
         sched::PATH_PRELUDE
     };
     Ok(format!(
-        "set -e\n{prelude}mkdir -p {jobs}\nmkdir {dir} || {{ echo 'job identity already exists; inspect its status instead of resubmitting' >&2; exit 1; }}\ncd {dir}\ncat > script.sh <<'COLM_JOB_EOF'\n{script}COLM_JOB_EOF\nchmod +x script.sh\n{launch}",
+        "set -e\n{prelude}mkdir -p {jobs}\n{before_create}mkdir {dir} || {{ echo 'job identity already exists; inspect its status instead of resubmitting' >&2; exit 1; }}\n{after_create}cd {dir}\ncat > script.sh <<'COLM_JOB_EOF'\n{script}COLM_JOB_EOF\nchmod +x script.sh\n{launch}",
         jobs = quote(&format!("{}/jobs",root.trim_end_matches('/'))),
     ))
 }
@@ -396,8 +418,28 @@ pub fn submit_with(
 /// 不带引擎快照的作业（比较页在服务器上装 OpenBench、跑评估）：作业目录、日志、阶段、退出码与取消都和
 /// 模拟作业一样，只是作业体不用服务器上的 CoLM 引擎，所以不写快照标记。不支持打包。
 pub fn submit_plain(ssh: &Ssh, root: &str, id: &str, body: &str, spec: &Spec) -> Result<Submitted> {
+    submit_plain_fenced(ssh, root, id, body, spec, "", "")
+}
+
+/// Plain submission with a server-side ownership fence around directory creation.
+pub fn submit_plain_fenced(
+    ssh: &Ssh,
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    before_create: &str,
+    after_create: &str,
+) -> Result<Submitted> {
     check_id(id)?;
-    let out = ssh.run_ok(&submit_script(root, id, body, spec)?)?;
+    let out = ssh.run_ok(&fenced_submit_script(
+        root,
+        id,
+        body,
+        spec,
+        before_create,
+        after_create,
+    )?)?;
     let last = out
         .trim()
         .lines()

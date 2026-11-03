@@ -53,6 +53,7 @@ import {
   parseReferences,
   parseRemoteJob,
   remoteJobTerminal,
+  remoteJobFailureText,
   simulationFormForPick,
   simulationInfoForSave,
   validateSimulation,
@@ -613,18 +614,7 @@ export default function ComparePage() {
     if (hostRef.current === machine) setUnsettled({ job: kept, reason });
     return kept;
   };
-  const jobFailureText = (reply: RemoteJob) => {
-    const exit = reply.status.exit_code;
-    if (exit != null)
-      return t(
-        `服务器上的作业失败（退出码 ${exit}），原因见下面的日志。`,
-        `The server job failed (exit code ${exit}); see the log below.`,
-      );
-    return t(
-      `服务器上的作业失败了（${reply.status.detail ?? '调度系统记录为失败'}）。`,
-      `The server job failed (${reply.status.detail ?? 'recorded as failed by the scheduler'}).`,
-    );
-  };
+  const jobFailureText = (reply: RemoteJob) => remoteJobFailureText(reply.status);
   const uncertainText = (machine: string, identity: ActiveJob) =>
     t(
       `服务器 ${machine} 暂时联系不上：作业 ${identity.job}（${identity.name ?? '安装环境'}）的身份已经保留，远端可能仍在运行。可以重连继续等、核对终态，或停止它。`,
@@ -688,6 +678,10 @@ export default function ComparePage() {
           });
         } catch (error) {
           if (!ownsWatch()) return { state: 'detached' };
+          if (stopping.current && benchErrorText(String(error))[0] === '已停止') {
+            await sleep(1000);
+            continue;
+          }
           // SSH/网络暂时不通：不能当成作业失败，更不能删掉它的身份 —— 远端可能还在跑（旧行为就是这样丢的）。
           const kept = markUncertain(machine, identity, String(error));
           if (!stillCurrent(machine, epoch)) return { state: 'detached' };
@@ -854,18 +848,30 @@ export default function ComparePage() {
     });
   const stop = () => {
     if (remote) {
-      // 服务器上没有正在等的作业时（例如正在取回报告）没有可取消的对象：不能误调本机 bench_cancel。
-      if (!job.current) return;
+      // 没拿到远端作业号时也停止这台机器上本页发起的提交/取回请求。
       const machine = host;
+      const epoch = hostEpoch.current;
       stopping.current = true;
       // 取消失败（比如同样断网）要说出来并让停止按钮恢复可用，不能悄悄停在一个永远等下去的状态。
-      void invoke<{ job: string; request_accepted?: boolean }>('bench_remote_cancel', {
-        host: machine,
-        job: job.current.job,
-      })
+      void invoke<{ job?: string; request_accepted?: boolean; cancelled_children?: number }>(
+        'bench_remote_cancel',
+        {
+          host: machine,
+          job: job.current?.job ?? null,
+        },
+      )
         .then((reply) => {
-          if (!stillCurrent(machine, hostEpoch.current)) return;
+          if (!stillCurrent(machine, epoch)) return;
           // request_accepted 只说明调度器收下取消请求，不是终态：继续等它确认（审查报告第 6 条）。
+          if (!reply.request_accepted) {
+            stopping.current = false;
+            setNotice(
+              t(
+                '已停止当前服务器请求；已提交作业请核对服务器记录。',
+                'Stopped the current server request; check server records for any submitted job.',
+              ),
+            );
+          }
           if (reply.request_accepted)
             setNotice(
               t(
@@ -876,7 +882,7 @@ export default function ComparePage() {
         })
         .catch((e) => {
           stopping.current = false;
-          if (stillCurrent(machine, hostEpoch.current)) setError(shown(e));
+          if (stillCurrent(machine, epoch)) setError(shown(e));
         });
     } else void invoke('bench_cancel');
   };
@@ -990,27 +996,12 @@ export default function ComparePage() {
       );
       // 探测期间换了机器：结果属于旧机器，不能写进当前页面的模拟表（GUI-05）。
       if (!stillCurrent(machine, epoch)) return;
-      const blocked = info.comparable === false ? inspectBlockerText(info) : null;
-      const warning = inspectWarningText(info);
-      const family = inspectFamilyNote(info);
-      const note = [warning ? t(warning[0], warning[1]) : '', family ? t(family[0], family[1]) : '']
-        .filter(Boolean)
-        .join(' ');
       setPicks((old) =>
-        old.map((p) =>
-          p.dir === dir
-            ? {
-                ...p,
-                info,
-                error: blocked ? t(blocked[0], blocked[1]) : undefined,
-                note: note || undefined,
-              }
-            : p,
-        ),
+        old.map((p) => (p.dir === dir ? { ...p, info, error: undefined, note: undefined } : p)),
       );
     } catch (e) {
       if (!stillCurrent(machine, epoch)) return;
-      setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: shown(e) } : p)));
+      setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: String(e) } : p)));
     }
   };
   const registerModelVariable = () =>
@@ -1306,7 +1297,7 @@ export default function ComparePage() {
       stationId: p.stationId,
     })),
     projectDir: comparisonDir(status?.root ?? '', name),
-    gridRes: Number(gridRes) || null,
+    gridRes: gridRes.trim() === '' ? null : Number(gridRes),
     weight: weight || null,
     minYear: minYear.trim() === '' ? null : Number(minYear),
     timeAlignment: timeAlignment || null,
@@ -1413,6 +1404,7 @@ export default function ComparePage() {
     setRunNotice('');
   };
   const invalidateGeneratedConfig = () => {
+    if (!status) return;
     if (
       configInvalidation({
         currentFingerprint: design,
@@ -1434,7 +1426,7 @@ export default function ComparePage() {
     invalidateGeneratedConfig();
     clearStaleEvaluationNotice();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [design, effectiveFingerprint]);
+  }, [design, effectiveFingerprint, status]);
   const allVariables = comparableVariables(
     references,
     ok.map((p) => p.info),
@@ -1450,6 +1442,15 @@ export default function ComparePage() {
   const restoreDraft = async () => {
     const draft = draftOffer;
     if (!draft || draft.host !== host) return;
+    if (!status) {
+      setNotice(
+        t(
+          '正在读取评估环境，请稍后恢复草稿。',
+          'Reading the evaluation environment; restore the draft once it is ready.',
+        ),
+      );
+      return;
+    }
     const epoch = hostEpoch.current;
     if (compareDraftHasContent(currentDraft())) {
       const proceed = await askConfirm(
@@ -1752,6 +1753,11 @@ export default function ComparePage() {
         }
       } catch (error) {
         if (!currentSelection()) return;
+        if (benchErrorText(String(error))[0] === '已停止') {
+          setReportError('');
+          setNotice(t('已停止', 'Stopped'));
+          return;
+        }
         const failure = Object.assign(new Error(shown(error)), { reportFailure: true });
         setReportError(failure.message);
         throw failure;
@@ -2290,14 +2296,23 @@ export default function ComparePage() {
                             />
                           </td>
                           <td>
-                            {p.error
+                            {p.error || (p.info && inspectBlockerText(p.info))
                               ? p.error
+                                ? shown(p.error)
+                                : t(...inspectBlockerText(p.info!)!)
                               : !p.info
                                 ? t('读取中…', 'Reading…')
                                 : p.info.spatial
                                   ? t('格点', 'Gridded')
                                   : t('单点（站点）', 'Single point (station)')}
-                            {p.note && <p className="muted study-hint">{p.note}</p>}
+                            {p.info &&
+                              [inspectWarningText(p.info), inspectFamilyNote(p.info)]
+                                .filter((note): note is [string, string] => !!note)
+                                .map((note, index) => (
+                                  <p key={index} className="muted study-hint">
+                                    {t(...note)}
+                                  </p>
+                                ))}
                           </td>
                           <td>{p.info ? `${p.info.syear}–${p.info.eyear}` : '—'}</td>
                           <td>{p.info?.tim_res ?? '—'}</td>
@@ -3219,10 +3234,15 @@ export default function ComparePage() {
                 run={() =>
                   task(async () => {
                     // 选文件和读文件都在后端：前端不能拿一个任意路径去读（复验 D2-05）。
+                    const owner = {};
+                    reportSelection.current = owner;
                     const picked = await invokeJson<{ path: string; html: string } | null>(
                       'bench_pick_report',
                     );
-                    if (picked) setReport(picked);
+                    if (picked && reportSelection.current === owner) {
+                      setReport(picked);
+                      setReportError('');
+                    }
                   })
                 }
               />

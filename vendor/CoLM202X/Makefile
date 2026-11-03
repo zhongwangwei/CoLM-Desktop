@@ -755,7 +755,7 @@ MOD_MT_SnowHost.o: MOD_SnowLayersCombineDivide.o
 MOD_MT_SoilInit.o: MOD_MT_Isotope_Registry.o MOD_MT_Providers.o MOD_MT_Vars.o
 MOD_MT_SoilWater.o: MOD_MT_EvapLimit.o MOD_MT_Forcing.o MOD_MT_Frac.o MOD_MT_Isotope_SoilFlow.o MOD_MT_Solute.o MOD_MT_Vars.o
 MOD_MT_SpecialPatches.o: MOD_MT_Hist.o
-MOD_MT_SurfaceData.o: MOD_Block.o
+MOD_MT_SurfaceData.o: MOD_Block.o MOD_Filesystem.o
 MOD_MT_Vars.o: MOD_MT_Isotope_Lulcc.o MOD_MT_Solute.o
 MOD_Mesh.o: MOD_Block.o MOD_CatchmentDataReadin.o MOD_DataType.o MOD_Grid.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Pixel.o MOD_Precision.o MOD_SPMD_Task.o MOD_Utils.o
 MOD_MeshFilter.o: MOD_5x5DataReadin.o MOD_AggregationRequestData.o MOD_Block.o MOD_DataType.o MOD_Grid.o MOD_LandElm.o MOD_Mesh.o MOD_Namelist.o MOD_NetCDFBlock.o MOD_Precision.o MOD_SPMD_Task.o

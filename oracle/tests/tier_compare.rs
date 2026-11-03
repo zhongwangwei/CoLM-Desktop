@@ -261,3 +261,65 @@ fn the_repository_table_assigns_rules_that_the_comparator_can_evaluate() {
         );
     }
 }
+
+#[test]
+fn urban_outputs_follow_their_prescribed_or_solved_dependencies() {
+    let tolerances =
+        Tolerances::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("tolerances.toml")).unwrap();
+    // LUCY calendar/population algebra has the same dependency category as
+    // prescribed shortwave; thermal/BEM outputs inherit the solved surface state.
+    for (variables, dependency, expected_tier) in [
+        (&["f_fmeta", "f_fvehc"][..], "f_solvd", "tier1"),
+        (
+            &[
+                "f_fsengimp",
+                "f_fsengper",
+                "f_fsenroof",
+                "f_fsenurbl",
+                "f_fsenwsha",
+                "f_fsenwsun",
+                "f_lfevpgimp",
+                "f_lfevpgper",
+                "f_lfevproof",
+                "f_lfevpurbl",
+                "f_fach",
+                "f_fhac",
+                "f_fhah",
+                "f_fwst",
+                "f_t_roof",
+                "f_t_room",
+                "f_t_wall",
+                "f_tafu",
+            ][..],
+            "f_t_grnd",
+            "tier2",
+        ),
+    ] {
+        let expected = tolerances.rule_for(dependency).unwrap();
+        assert_eq!(expected.0, expected_tier);
+        for variable in variables {
+            assert_eq!(
+                tolerances.rule_for(variable).unwrap(),
+                expected,
+                "{variable} must inherit {dependency}'s existing rule"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_repository_rule_still_rejects_urban_rss_fill_becoming_a_local_value() {
+    let directory = workdir("urban-rss-fill");
+    let a = directory.join("fortran.nc");
+    let b = directory.join("rust.nc");
+    write_file(&a, &[("f_rss", Values::Float([-1e36; 3]))]);
+    write_file(&b, &[("f_rss", Values::Float([516.0; 3]))]);
+    let tolerances =
+        Tolerances::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("tolerances.toml")).unwrap();
+    let report = compare_within(&a, &b, &tolerances).unwrap();
+    assert!(!report.passed());
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure.variable == "f_rss"));
+}

@@ -94,3 +94,47 @@ export function insertGapMarkers(
   }
   return { time: mergedTime, columns: merged };
 }
+
+/** Single timestamps need a bounded clock window instead of uPlot's unit-dependent fallback. */
+export function chartTimeRange(
+  time: ArrayLike<number>,
+  min: number,
+  max: number,
+): [number, number] {
+  return time.length === 1 && Number.isFinite(time[0])
+    ? [time[0] - 43200, time[0] + 43200]
+    : [min, max];
+}
+
+export function pairedChartData(metric: {
+  time?: number[];
+  model?: (number | null)[];
+  obs?: (number | null)[];
+  pair_gaps?: [number, number][];
+  pair_gaps_truncated?: boolean;
+}): [number[], ...(number | null)[][]] {
+  const time = metric.time ?? [];
+  const aligned = insertGapMarkers(
+    time,
+    {
+      model: time.map((_, i) => metric.model?.[i] ?? null),
+      obs: time.map((_, i) => metric.obs?.[i] ?? null),
+    },
+    { model: metric.pair_gaps ?? [], obs: metric.pair_gaps ?? [] },
+  );
+  // A truncated gap list cannot establish continuity; keep the samples without connecting them.
+  if (metric.pair_gaps_truncated) {
+    const markedTime: number[] = [],
+      columns: (number | null)[][] = [[], []];
+    aligned.time.forEach((t, i) => {
+      if (i) {
+        markedTime.push((aligned.time[i - 1] + t) / 2);
+        columns.forEach((column) => column.push(null));
+      }
+      markedTime.push(t);
+      columns.forEach((column, j) => column.push(aligned.columns[j][i]));
+    });
+    return [markedTime, ...columns];
+  }
+  return [aligned.time, ...aligned.columns];
+}

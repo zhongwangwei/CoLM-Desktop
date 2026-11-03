@@ -293,7 +293,7 @@ export default function App() {
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
   }, []);
-  const { state, update, navigate } = useApp();
+  const { state, update, navigate, notify } = useApp();
   // 比较任务跨路由可见（UX ③）：页面只镜像进度，真正提交/等待仍由比较页负责。
   const benchTasks = useBenchTasks();
   useCloseGuard(() =>
@@ -339,15 +339,14 @@ export default function App() {
     // 页面还在时优先用页面自己的停止路径（取消确认/不确定态/提示都由页面处理）；页面卸载后
     // 才退回下面的最小后端请求。
     if (benchTasks.stopTask(task.id)) return;
-    // 页面自己的"停止"按钮仍是最完整的取消路径；这里只在壳上点了停止时做一次最小请求，
-    // 没拿到远程作业号就不猜，交给页面里的活动作业保护处理。
-    const request =
-      task.host && task.job
-        ? invoke('bench_remote_cancel', { host: task.host, job: task.job })
-        : task.host
-          ? Promise.resolve()
-          : invoke('bench_cancel');
-    void request.catch(() => {}).finally(() => benchTasks.clear(task.id));
+    const request = task.host
+      ? invoke('bench_remote_cancel', { host: task.host, job: task.job ?? null })
+      : invoke('bench_cancel');
+    void request
+      .then(() => benchTasks.clear(task.id))
+      .catch((error) => {
+        notify(String(error), true);
+      });
   };
   // 助手面板收起时保持挂载：否则正在跑的回答会被卸载 cleanup 取消，对话也随组件状态丢掉。
   // 第一次打开才加载，之后用 hidden 收起，和 researchKept 同一做法。

@@ -7,7 +7,7 @@
 MODULE MOD_MT_Defs
 
    USE MOD_Precision
-   USE MOD_Namelist, only: DEF_USE_VariablySaturatedFlow
+   USE MOD_Namelist, only: DEF_USE_VariablySaturatedFlow, DEF_USE_BGC, DEF_USE_CoLMDEBUG
    USE MOD_MT_Namelist, only: mt_read_namelist, &
       DEF_USE_ISOTOPE, DEF_ISOTOPE_SPECIES, DEF_ISOTOPE_PARAM_FILE, &
       DEF_SOLUTE_NAMES, DEF_SOLUTE_PARAM_FILES, DEF_SEDIMENT_PARAM_FILE, &
@@ -315,11 +315,11 @@ CONTAINS
 
       ngas = 0
       IF (DEF_USE_METHANE) THEN
-#ifdef BGC
+         IF (DEF_USE_BGC) THEN
          ngas = 1
-#else
+         ELSE
          CALL CoLM_stop ('DEF_USE_METHANE needs a BGC build.')
-#endif
+         ENDIF
       ENDIF
 
       nmts = niso + nsol + nsed + ngas
@@ -889,7 +889,7 @@ CONTAINS
             'species-owned state requires unit_kind=species_owned')
       ENDIF
 
-#ifndef BGC
+      IF (.not. DEF_USE_BGC) THEN
       IF ((trim(material_upper(materials(imt)%name)) == 'CH4' .or. &
            trim(material_upper(materials(imt)%name)) == 'METHANE') .and. &
           materials(imt)%state_owner == STATE_OWNER_PROVIDER) THEN
@@ -897,7 +897,7 @@ CONTAINS
             'species-owned CH4 requires compiling with BGC; full soil/wetland/rice CH4 requires '// &
             'LULC_IGBP_PFT or LULC_IGBP_PC with real carbon, NPP, and root-respiration states')
       ENDIF
-#endif
+      ENDIF
 
    CONTAINS
 
@@ -1112,10 +1112,10 @@ CONTAINS
             ! signs). Returning spval rather than silently clamping so
             ! history readers and assert tools can flag the cell instead
             ! of treating a bogus delta as physical.
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             write(*,'(A,E12.5,A,E12.5)') &
                ' WARNING mass_to_delta: R_sample<0 mt=', mt_mass, ' water=', water_mass
-#endif
+            ENDIF
             mass_to_delta = spval
          ELSE
             mass_to_delta = (R_sample / ref_ratio - 1.0_r8) * 1000.0_r8

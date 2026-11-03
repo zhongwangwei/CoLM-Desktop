@@ -115,6 +115,7 @@ fn thermal_adapter_uses_one_resistance_and_one_flux_state() {
         porosity: 0.46,
         saturated_soil_suction_mm: -100.0,
         residual_water: 0.05,
+        sand_volume_fraction_of_solids: 0.3,
         hydraulic_model: SoilHydraulicModel::Campbell { bsw: 4.0 },
         layer_thickness_m: 0.1,
         temperature_k: FREEZING_K,

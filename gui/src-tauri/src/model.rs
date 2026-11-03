@@ -927,8 +927,107 @@ pub async fn case_runs(case: String) -> Result<Value, String> {
     Ok(metadata)
 }
 
+#[derive(Default)]
+struct PreviewLeases {
+    entries: std::collections::HashMap<String, (PathBuf, PathBuf)>,
+}
+
+impl PreviewLeases {
+    fn register(&mut self, parent: &Path, path: &Path) -> Result<String, String> {
+        let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        let path = path.canonicalize().map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_dir() || path.parent() != Some(parent.as_path()) {
+            return Err("preview lease must name an owned preview directory".into());
+        }
+        let token = preview_id(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos(),
+        );
+        self.entries.insert(token.clone(), (parent, path));
+        Ok(token)
+    }
+
+    fn release(&mut self, token: &str) -> Result<bool, String> {
+        let Some((parent, path)) = self.entries.get(token) else {
+            return Ok(false);
+        };
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.entries.remove(token);
+                return Ok(true);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if !metadata.file_type().is_dir()
+            || path.canonicalize().map_err(|error| error.to_string())? != *path
+            || path.parent() != Some(parent.as_path())
+        {
+            return Err("preview lease directory was replaced; refusing cleanup".into());
+        }
+        std::fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+        self.entries.remove(token);
+        Ok(true)
+    }
+}
+
+fn preview_leases() -> &'static std::sync::Mutex<PreviewLeases> {
+    static LEASES: std::sync::OnceLock<std::sync::Mutex<PreviewLeases>> =
+        std::sync::OnceLock::new();
+    LEASES.get_or_init(|| std::sync::Mutex::new(PreviewLeases::default()))
+}
+
+#[derive(serde::Serialize)]
+pub struct LeasedCaseContext {
+    #[serde(flatten)]
+    context: crate::project::OpenedCase,
+    preview_token: String,
+}
+
+/// UI previews live until the caller finishes its follow-up reads.
 #[tauri::command]
 pub async fn model_case_context(
+    dir: String,
+    model_revision: Option<VersionRef>,
+) -> Result<LeasedCaseContext, String> {
+    let context = model_case_context_unleased(dir, model_revision).await?;
+    let preview_token = preview_leases()
+        .lock()
+        .map_err(|_| "preview lease registry poisoned")?
+        .register(&root()?.join("previews"), Path::new(&context.entry.dir))?;
+    Ok(LeasedCaseContext {
+        context,
+        preview_token,
+    })
+}
+
+#[tauri::command]
+pub async fn model_case_context_release(token: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        preview_leases()
+            .lock()
+            .map_err(|_| "preview lease registry poisoned")?
+            .release(&token)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Retry failed UI cleanup on shutdown; native previews have their own scoped cleanup.
+pub(crate) fn release_case_contexts() {
+    if let Ok(mut leases) = preview_leases().lock() {
+        for token in leases.entries.keys().cloned().collect::<Vec<_>>() {
+            if let Err(error) = leases.release(&token) {
+                eprintln!("cannot release case preview: {error}");
+            }
+        }
+    }
+}
+
+pub(crate) async fn model_case_context_unleased(
     dir: String,
     model_revision: Option<VersionRef>,
 ) -> Result<crate::project::OpenedCase, String> {
@@ -965,7 +1064,116 @@ pub(crate) async fn model_case_context_with_fields(
             remove_fields,
         )
         .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))?;
-    open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
+    let prepared = async {
+        let frozen = registry.get(&version).map_err(|error| error.to_string())?;
+        let effective = colm_namelist::parse(
+            &std::fs::read_to_string(run.run_case.join("case.nml"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let names = requested_material_templates(case_fields, &effective)?;
+        let missing =
+            prepare_preview_material_templates(&run.run_case, &frozen.overlay, &names, None)?;
+        if !missing.is_empty() {
+            // This existing CLI boundary verifies the snapshot hash and workspace commit before
+            // exposing its source directory; never guess a cache path or use this app's templates.
+            let context = assistant_context(version.clone(), None).await?;
+            let verified = Path::new(
+                context["source_dir"]
+                    .as_str()
+                    .ok_or("verified source missing")?,
+            );
+            prepare_preview_material_templates(
+                &run.run_case,
+                &frozen.overlay,
+                &missing,
+                Some(verified),
+            )?;
+        }
+        open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
+    }
+    .await;
+    if prepared.is_err() {
+        let _ = std::fs::remove_dir_all(&run.run_case);
+    }
+    prepared
+}
+
+fn requested_material_templates(
+    fields: &[(String, colm_namelist::Value)],
+    effective: &colm_namelist::Document,
+) -> Result<Vec<(String, String)>, String> {
+    let mut names = Vec::new();
+    for (key, value) in fields {
+        if !colm_namelist::material::PARAM_FILE_FIELDS
+            .iter()
+            .any(|field| key.eq_ignore_ascii_case(field))
+        {
+            continue;
+        }
+        let colm_namelist::Value::Str(value) = value else {
+            continue;
+        };
+        let paths = if key.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") {
+            colm_namelist::material_files::param_file_paths(value)
+                .map_err(|error| error.to_string())?
+        } else {
+            vec![value.trim().to_owned()]
+        };
+        let resolved = match effective.get(key) {
+            Some(colm_namelist::Value::Str(raw))
+                if key.eq_ignore_ascii_case("DEF_SOLUTE_PARAM_FILES") =>
+            {
+                colm_namelist::material_files::param_file_paths(raw)
+                    .map_err(|error| error.to_string())?
+            }
+            Some(colm_namelist::Value::Str(raw)) => vec![raw.clone()],
+            _ => Vec::new(),
+        };
+        for (index, path) in paths.into_iter().enumerate() {
+            if crate::config::material_parameter_template(&path).is_some() {
+                let actual = resolved.get(index).cloned().unwrap_or_else(|| path.clone());
+                names.push((path, actual));
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn prepare_preview_material_templates(
+    preview: &Path,
+    overlay: &colm_model::Overlay,
+    names: &[(String, String)],
+    verified_source: Option<&Path>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut missing = Vec::new();
+    for (name, resolved) in names {
+        let target = preview.join(name);
+        if target.is_file() {
+            continue;
+        }
+        let assets: Vec<_> = overlay
+            .process_files
+            .iter()
+            .filter(|asset| asset.relative_path == *resolved)
+            .collect();
+        if assets.len() > 1 {
+            return Err(format!("Selected model has ambiguous templates for {name}"));
+        }
+        let source = if let Some(asset) = assets.first() {
+            preview.join(&asset.relative_path)
+        } else if let Some(source) = verified_source {
+            source.join("vendor/CoLM202X/run").join(name)
+        } else {
+            missing.push((name.clone(), resolved.clone()));
+            continue;
+        };
+        let text = std::fs::read_to_string(&source).map_err(|error| {
+            format!("Selected model has no trusted template for {name}: {error}")
+        })?;
+        std::fs::write(&target, text).map_err(|error| error.to_string())?;
+    }
+    Ok(missing)
 }
 
 /// One case's effective profile under `version`, from a preview that is removed right after.
@@ -1057,6 +1265,8 @@ fn carry_case_identity(
     }
     profile.domain_kind = source.domain_kind.clone();
     profile.shapefile = source.shapefile.clone();
+    profile.engine = source.engine.clone();
+    profile.obs_file = source.obs_file.clone();
     profile.run_host = source.run_host.clone();
     profile.remote_directory = source.remote_directory.clone();
 }
@@ -1161,6 +1371,140 @@ pub async fn model_attach_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_lease_releases_only_registered_owned_directories() {
+        let root = std::env::temp_dir().join(preview_id(114433));
+        let parent = root.join("previews");
+        let preview = parent.join("generated");
+        let source = root.join("source");
+        std::fs::create_dir_all(&preview).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("keep"), "source").unwrap();
+        let mut leases = PreviewLeases::default();
+        assert!(leases.register(&parent, &source).is_err());
+        assert!(!leases.release(source.to_str().unwrap()).unwrap());
+        let token = leases.register(&parent, &preview).unwrap();
+        assert!(leases.release(&token).unwrap());
+        assert!(!preview.exists());
+        assert!(!leases.release(&token).unwrap());
+        assert!(source.join("keep").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_lease_rejects_replaced_symlinks_without_touching_source() {
+        let root = std::env::temp_dir().join(preview_id(114434));
+        let parent = root.join("previews");
+        let preview = parent.join("generated");
+        let source = root.join("source");
+        std::fs::create_dir_all(&preview).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("keep"), "source").unwrap();
+        let mut leases = PreviewLeases::default();
+        let token = leases.register(&parent, &preview).unwrap();
+        std::fs::remove_dir(&preview).unwrap();
+        std::os::unix::fs::symlink(&source, &preview).unwrap();
+        assert!(leases.register(&parent, &preview).is_err());
+        assert!(leases.release(&token).is_err());
+        assert!(source.join("keep").exists());
+        std::fs::remove_file(&preview).unwrap();
+        assert!(leases.release(&token).unwrap());
+        assert!(leases.entries.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn material_templates_follow_selected_source_and_preserve_case_and_frozen_assets() {
+        let root = std::env::temp_dir().join(preview_id(918273));
+        std::fs::create_dir_all(&root).unwrap();
+        let name = "standard_methane_parameter.nml";
+        let names = vec![(name.to_owned(), name.to_owned())];
+        let overlay = colm_model::Overlay::default();
+        let official = include_str!("../../../vendor/CoLM202X/run/standard_methane_parameter.nml");
+        for (version, contents) in [
+            ("official", official),
+            (
+                "custom",
+                "&nl_colm_methane_parameter\n custom_rate = 42\n/\n",
+            ),
+        ] {
+            let source = root.join(version);
+            let templates = source.join("vendor/CoLM202X/run");
+            std::fs::create_dir_all(&templates).unwrap();
+            std::fs::write(templates.join(name), contents).unwrap();
+            let preview = root.join(format!("preview-{version}"));
+            std::fs::create_dir(&preview).unwrap();
+            assert_eq!(
+                prepare_preview_material_templates(&preview, &overlay, &names, None).unwrap(),
+                names
+            );
+            prepare_preview_material_templates(&preview, &overlay, &names, Some(&source)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(preview.join(name)).unwrap(),
+                contents
+            );
+            std::fs::write(preview.join(name), "case custom bytes").unwrap();
+            prepare_preview_material_templates(&preview, &overlay, &names, Some(&source)).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(preview.join(name)).unwrap(),
+                "case custom bytes"
+            );
+        }
+        let preview = root.join("asset-preview");
+        std::fs::create_dir_all(preview.join("process")).unwrap();
+        std::fs::write(preview.join("process/hash.nml"), "frozen asset bytes").unwrap();
+        let mut overlay = overlay;
+        overlay.process_files.push(colm_model::Asset {
+            relative_path: "process/hash.nml".into(),
+            sha256: "a".repeat(64),
+        });
+        let doc = colm_namelist::parse(
+            "&nl_colm_material\nDEF_METHANE_PARAM_FILE = 'process/hash.nml'\n/\n",
+        )
+        .unwrap();
+        let selected = requested_material_templates(
+            &[(
+                "DEF_METHANE_PARAM_FILE".into(),
+                colm_namelist::Value::Str(name.into()),
+            )],
+            &doc,
+        )
+        .unwrap();
+        prepare_preview_material_templates(
+            &preview,
+            &overlay,
+            &selected,
+            Some(&root.join("custom")),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(preview.join(name)).unwrap(),
+            "frozen asset bytes"
+        );
+        std::fs::remove_file(preview.join(name)).unwrap();
+        assert!(prepare_preview_material_templates(
+            &preview,
+            &colm_model::Overlay::default(),
+            &names,
+            Some(&root.join("missing"))
+        )
+        .unwrap_err()
+        .contains("no trusted template"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_preserves_case_engine_and_observation_identity() {
+        let mut source = crate::project::case_profile("&nl_colm\n/\n", false, None, None).unwrap();
+        source.engine = Some("fortran".into());
+        source.obs_file = Some("/observations/site.nc".into());
+        let mut preview = crate::project::case_profile("&nl_colm\n/\n", false, None, None).unwrap();
+        carry_case_identity(&mut preview, &source);
+        assert_eq!(preview.engine, source.engine);
+        assert_eq!(preview.obs_file, source.obs_file);
+    }
 
     #[test]
     fn a_server_run_has_local_results_only_once_its_history_was_fetched() {

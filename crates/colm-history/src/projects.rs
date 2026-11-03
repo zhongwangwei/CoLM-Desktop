@@ -114,7 +114,12 @@ fn aggregate_status(statuses: &[&str]) -> String {
     } else if statuses.iter().any(|s| {
         !matches!(
             *s,
-            "succeeded" | "completed" | "cancelled" | "failed" | "completed_with_failures"
+            "succeeded"
+                | "completed"
+                | "cancelled"
+                | "interrupted"
+                | "failed"
+                | "completed_with_failures"
         )
     }) {
         "unknown"
@@ -124,6 +129,8 @@ fn aggregate_status(statuses: &[&str]) -> String {
         "failed"
     } else if any("failed") {
         "completed_with_failures"
+    } else if any("interrupted") {
+        "interrupted"
     } else if any("cancelled") {
         "cancelled"
     } else {
@@ -168,7 +175,12 @@ fn fold(members: &mut [Operation]) -> Operation {
         || operation.finished_ms.is_none()
         || !matches!(
             operation.latest.status.as_str(),
-            "succeeded" | "completed" | "failed" | "completed_with_failures" | "cancelled"
+            "succeeded"
+                | "completed"
+                | "failed"
+                | "completed_with_failures"
+                | "cancelled"
+                | "interrupted"
         ) {
         EventPhase::Status
     } else {

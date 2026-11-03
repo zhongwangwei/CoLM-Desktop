@@ -1081,6 +1081,7 @@ test('overview contract exposes optional evaluation conditions only while advanc
     reportFormat: 'json',
     overviewRunLabel: () => '',
     chartVariables,
+    overviewChoices: [],
     variableOption,
     setSource: noop,
     chooseRecordedRun: noop,
@@ -1171,6 +1172,7 @@ test('automatic result preview requires the current catalog and rejects late rep
     caseDir: '/case',
     source: '/current',
     variable: 'f_lfevpa',
+    nativeVariable: true,
     catalogKey: '/current',
     selectedSeriesKey: 'current-series',
     en: false,
@@ -1711,4 +1713,57 @@ test('table finalization asks about the actual destination before retrying an ov
   assert.equal(result, 'written');
   assert.deepEqual(requests, [false, true]);
   assert.match(question, /station\.nc/);
+});
+
+test('case option previews release after reads, failures, and stale responses', async () => {
+  for (const outcome of ['success', 'failure', 'stale']) {
+    const request = { active: true },
+      epoch = { current: request },
+      events: string[] = [];
+    const context = { entry: { dir: '/preview' }, profile: {}, preview_token: 'owned' };
+    const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      dir: '/case',
+      editingDisabled: false,
+      dirty: false,
+      lock: { current: false },
+      t: (_zh: string, en: string) => en,
+      physics: {},
+      values: {},
+      effectiveProfile: {},
+      configurationKernel: undefined,
+      exclusionPatch: () => ({ patch: {}, closed: [] }),
+      caseSimulationDomain,
+      work: (fn: () => Promise<unknown>) => fn(),
+      epoch,
+      state: { versionRef: {}, selectedCase: undefined },
+      versionId: 'official',
+      revision: 1,
+      invoke: async (name: string, args: unknown) => {
+        if (name === 'model_case_context') {
+          if (outcome === 'stale') request.active = false;
+          return context;
+        }
+        if (name === 'model_case_context_release') {
+          assert.deepEqual(args, { token: 'owned' });
+          events.push('release');
+        }
+      },
+      setModelContext: () => {},
+      setContextStale: () => {},
+      contextStaleRef: { current: false },
+      setValues: () => {},
+      setSaved: () => {},
+      setExplicitValues: () => {},
+      setError: () => {},
+      notify: () => {},
+      autoClosedText: () => '',
+      errorText: String,
+      refreshHistory: async () => {
+        events.push('read');
+        if (outcome === 'failure') throw new Error('read failed');
+      },
+    });
+    await change({ DEF_USE_BGC: 'true' });
+    assert.deepEqual(events, outcome === 'stale' ? ['release'] : ['read', 'release']);
+  }
 });

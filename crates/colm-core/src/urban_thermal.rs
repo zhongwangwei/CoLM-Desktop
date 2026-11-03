@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use colm_numeric::Contract;
 
+use crate::urban_flux::{FLH, FSH};
 use crate::{
     lake_temperature, root_uptake, saturation_specific_humidity, soil_psi_from_vliq,
     urban_bare_flux, urban_bem, urban_ground_flux, urban_impervious_temperature,
@@ -36,8 +37,6 @@ const DENH2O: f64 = 1000.0;
 const DENICE: f64 = 917.0;
 /// `roverg = rwat/grav*1000`（`MOD_Const_Physical`）。
 const ROVERG: f64 = 4.71047e4;
-const FSH: f64 = 0.92;
-const FLH: f64 = 0.08;
 
 /// 本步不变的输入：强迫、几何、材料与参数（上游同名变量）。
 #[derive(Debug, Clone, Copy)]
@@ -45,7 +44,7 @@ pub struct UrbanThermalContext<'a> {
     pub time_step_seconds: f64,
     pub latitude_radians: f64,
     pub longitude_radians: f64,
-    /// LUCY 用的步末时刻与 `greenwich`。
+    /// BEM/LUCY 的步末时刻；人为热日变化在本步起点取值。
     pub time: CalendarTime,
     pub greenwich: bool,
     pub wind_height_m: f64,
@@ -258,6 +257,22 @@ pub struct UrbanThermalOutput {
     /// `laketem` 解出的水面温度（`tlake`，`t_grnd` 实参）。
     pub tlake: f64,
     pub lake: LakeThermalFluxes,
+}
+
+impl UrbanThermalOutput {
+    // Totals and ground energy use land-only components before this reporting-area conversion.
+    fn scale_component_diagnostics(&mut self, land: f64) {
+        self.fsen_roof *= land;
+        self.fsen_wsun *= land;
+        self.fsen_wsha *= land;
+        self.fsen_gimp *= land;
+        self.fsen_gper *= land;
+        self.lfevp_roof *= land;
+        self.lfevp_gimp *= land;
+        self.lfevp_gper *= land;
+        self.fsen_urbl = self.fsen_urbl.map(|value| value * land);
+        self.lfevp_urbl = self.lfevp_urbl.map(|value| value * land);
+    }
 }
 
 /// Port of `MOD_Urban_Thermal:UrbanTHERMAL`（非 SNICAR）。
@@ -1098,6 +1113,8 @@ pub fn urban_thermal(
     out.fseng = fseng;
     out.fevpg = fevpg;
 
+    out.scale_component_diagnostics(land);
+
     // 下一步用的长波修正（`:1331-1335`）
     *st.lwsun = dlw[0];
     *st.lwsha = dlw[1];
@@ -1106,8 +1123,18 @@ pub fn urban_thermal(
     *st.lveg = dlveg_new;
 
     // 建筑能量模型与人为热（`:1357-1378`）
+    let local_step_start = crate::urban_lucy::urban_local_step_start(
+        ctx.time,
+        dt,
+        ctx.greenwich,
+        ctx.longitude_radians,
+    )?;
     let bem = urban_bem(UrbanBemInput {
         time_step_seconds: dt,
+        ac_usage_fraction: crate::urban_bem::ac_usage_fraction(
+            local_step_start.seconds,
+            ctx.weh_prof,
+        )?,
         air_density_kg_m3: ctx.air_density_kg_m3,
         cover_fraction: [fcover[0], fcover[1], fcover[2]],
         building_height_m: ctx.hroof,
@@ -1133,8 +1160,8 @@ pub fn urban_thermal(
     *st.twsun_inner = bem.sunlit_wall_inner_temperature_k;
     *st.twsha_inner = bem.shaded_wall_inner_temperature_k;
     let lucy = urban_lucy_flux(UrbanLucyFluxInput {
-        time: ctx.time,
-        greenwich: ctx.greenwich,
+        time: local_step_start,
+        greenwich: false,
         longitude_radians: ctx.longitude_radians,
         fixed_holiday: ctx.fix_holiday,
         week_holiday: ctx.week_holiday,
@@ -1174,3 +1201,7 @@ fn gimp_liq_layer1(surface: &UrbanSurfaceRef<'_>) -> f64 {
 fn gimp_ice_layer1(surface: &UrbanSurfaceRef<'_>) -> f64 {
     layer1(surface).1
 }
+
+#[cfg(test)]
+#[path = "urban_thermal_tests.rs"]
+mod urban_thermal_tests;

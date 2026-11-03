@@ -337,3 +337,38 @@ test('a late initial run list cannot replace completed results or a manually cho
     assert.equal(selected, manual || '/case/new');
   }
 });
+
+test('source-version comparison never sends a raw history variable as an observation name', async () => {
+  const body = effects.find((effect) => effect.includes("'history_compare'"));
+  assert.ok(body);
+  const calls: Record<string, unknown>[] = [];
+  const cleanup = execute(body, {
+    runs: [{ run_case: '/current', operation_id: 'a', version: { id: 'modified', revision: 1 } }],
+    source: '/current',
+    variable: 'f_lfevpa',
+    obs: '/obs.nc',
+    spinup: '0',
+    from: '',
+    to: '',
+    corrected: false,
+    caseDir: '/case',
+    stationTarget: { current: '/case' },
+    setBaseline: () => {},
+    setBaselineNote: () => {},
+    parentRuns: () => [{ operation_id: 'b' }],
+    setTimeout: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    clearTimeout: () => {},
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      if (command === 'model_get') return { parent: { id: 'official', revision: 1 } };
+      calls.push(args);
+      return { same_design: true };
+    },
+  })();
+  await tick();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].variable, null);
+  cleanup();
+});

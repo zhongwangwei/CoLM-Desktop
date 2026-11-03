@@ -733,13 +733,13 @@ pub(super) fn validate_case_parameters(
                     colm_case::land_cover::parameter(&parameter.name).map(|meta| meta.condition);
                 let medlyn = logical(&doc, "DEF_USE_MEDLYNST");
                 let wue = logical(&doc, "DEF_USE_WUEST");
-                if condition == Some(Condition::Medlyn) && !(medlyn && !wue) {
+                if (wue || !medlyn) && condition == Some(Condition::Medlyn) {
                     bail!(
                         "{} is inactive without the Medlyn stomatal scheme",
                         descriptor.id
                     );
                 }
-                if condition == Some(Condition::Wue) && !(wue && !medlyn) {
+                if (medlyn || !wue) && condition == Some(Condition::Wue) {
                     bail!(
                         "{} is inactive without the WUE stomatal scheme",
                         descriptor.id

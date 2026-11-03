@@ -30,6 +30,9 @@ pub(crate) fn query(
         .map_err(|e| e.to_string())?,
         None => colm_namelist::parse("").map_err(|e| e.to_string())?,
     };
+    if let Some(dir) = case.as_ref() {
+        super::load_isotope_fields(&mut doc, dir)?;
+    }
     // 旧算例打开配置面板前先迁移材料字段，界面直接显示新 family 字段。
     crate::config::migrate_legacy_material(&mut doc);
     for (key, raw) in case_values.unwrap_or_default() {
@@ -134,13 +137,31 @@ pub(crate) fn query(
         }
         fields.push(state);
     }
+    let history_switches: BTreeMap<_, _> =
+        colm_hist::selection::switch_states(&colm_hist::selection::SelectionInput {
+            out_default: super::logical(&doc, "DEF_HIST_vars_out_default"),
+            overrides: &[],
+            runtime: &|condition| Ok(super::logical(&doc, condition)),
+            defined: &|name| have.contains(name),
+            diag_matrix: super::logical(&doc, "DEF_USE_BGC")
+                && super::logical(&doc, "DEF_USE_DiagMatrix"),
+        })
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(name, on)| {
+            (
+                format!("DEF_hist_vars%{name}"),
+                if on { ".true." } else { ".false." },
+            )
+        })
+        .collect();
     let pft = pft_parameters(&overlay, selection, &doc, kernel.as_ref().map(|_| &have))?;
     let crop_defaults: BTreeMap<_, _> = colm_case::crop_defaults()
         .into_iter()
         .map(|(name, value)| (name, value.to_string()))
         .collect();
     Ok(
-        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,
+        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,"history_switches":history_switches,
         "context_complete":false,"warnings":["当前目录用于发现配置；未读取所选冻结源码的默认值，最终适用性仍需运行前检查。"]}),
     )
 }
@@ -849,6 +870,17 @@ mod tests {
             .map(|(name, value)| (name, value.to_string()))
             .collect();
         assert_eq!(result["crop_defaults"], json!(expected));
+        let switches = result["history_switches"].as_object().unwrap();
+        assert!(!switches.is_empty());
+        let never = colm_hist::generated::SWITCHES
+            .iter()
+            .find(|switch| matches!(switch.sync, colm_hist::Sync::Never) && !switch.declared)
+            .unwrap();
+        assert_eq!(
+            switches[&format!("DEF_hist_vars%{}", never.name)],
+            ".false."
+        );
+
         assert_eq!(
             result["crop_defaults"]["DEF_TUNING_CROP_PLANTING_DAY"],
             "120"

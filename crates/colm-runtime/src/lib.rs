@@ -1066,7 +1066,7 @@ impl PatchOutputCarry {
             }
             PatchStepOutput::Urban(output) => Self {
                 stomatal_resistance: Some(output.thermal.rst),
-                soil_surface_resistance: Some(output.thermal.rss),
+                soil_surface_resistance: None,
                 gs0sun: None,
                 gs0sha: None,
                 masked: false,
@@ -2026,6 +2026,75 @@ pub(crate) fn remove_test_tree(root: impl AsRef<std::path::Path>) {
         eprintln!("Windows: 临时目录没清掉 {}: {error}", root.display());
     } else {
         panic!("cannot remove {}: {error}", root.display());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn urban_diagnostic_output() -> colm_core::UrbanStepOutput {
+    colm_core::UrbanStepOutput {
+        precipitation: colm_core::PrecipitationState {
+            convective_rain_kg_m2_s: 0.0,
+            convective_snow_kg_m2_s: 0.0,
+            large_scale_rain_kg_m2_s: 0.0,
+            large_scale_snow_kg_m2_s: 0.0,
+            precipitation_temperature_k: 290.0,
+            new_snow_bulk_density_kg_m3: 100.0,
+            liquid_fraction: 1.0,
+        },
+        shortwave: colm_core::UrbanNetSolarFluxes {
+            reflected_w_m2: 0.0,
+            vegetation_absorbed_w_m2: 0.0,
+            vegetation_par_w_m2: 0.0,
+            roof_absorbed_w_m2: 0.0,
+            sunlit_wall_absorbed_w_m2: 0.0,
+            shaded_wall_absorbed_w_m2: 0.0,
+            impervious_absorbed_w_m2: 0.0,
+            pervious_absorbed_w_m2: 0.0,
+            lake_absorbed_w_m2: 0.0,
+            reflected_direct_visible_w_m2: 0.0,
+            reflected_diffuse_visible_w_m2: 0.0,
+            reflected_direct_near_infrared_w_m2: 0.0,
+            reflected_diffuse_near_infrared_w_m2: 0.0,
+            local_noon: colm_core::LocalNoonShortwave {
+                direct_visible_w_m2: 0.0,
+                diffuse_visible_w_m2: 0.0,
+                direct_near_infrared_w_m2: 0.0,
+                diffuse_near_infrared_w_m2: 0.0,
+                reflected_direct_visible_w_m2: 0.0,
+                reflected_diffuse_visible_w_m2: 0.0,
+                reflected_direct_near_infrared_w_m2: 0.0,
+                reflected_diffuse_near_infrared_w_m2: 0.0,
+            },
+        },
+        thermal: colm_core::UrbanThermalOutput {
+            rss: 516.0,
+            rst: 80.0,
+            tref: 290.0,
+            qref: 0.008,
+            trad: 290.0,
+            z0m: 0.1,
+            ustar: 0.3,
+            fm: 1.0,
+            fh: 1.0,
+            fq: 1.0,
+            t_grnd: 290.0,
+            ..Default::default()
+        },
+        sabvsun: 0.0,
+        qintr: 0.0,
+        qdrip: 0.0,
+        rsur: 0.0,
+        rnof: 0.0,
+        qinfl: 0.0,
+        qcharge: 0.0,
+        xerr: 0.0,
+        zerr: 0.0,
+        urb_irrig: 0.0,
+        qref: 0.5,
+        h2osoi: vec![0.0; 10],
+        wat: 0.0,
+        initial_total_water_mm: 0.0,
+        fwet_snow: 0.0,
     }
 }
 

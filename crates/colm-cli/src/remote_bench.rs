@@ -430,9 +430,9 @@ fn read_json<T: serde::de::DeserializeOwned>(opts: &Opts) -> Result<T> {
 // `.active-job` 的路径 —— 占位、陈旧清理、提交失败释放、作业体 EXIT trap —— 都在锁内"核对所有权
 // 再删"。锁只保护毫秒级的 cat/rm/写 intent；查作业状态要 SSH 往返，一律在锁外做。
 //
-// C09：提交前先把"提交意图"（预生成作业号、时间、配置哈希）写进占位，再发提交命令。SSH 在服务器
-// 收下提交之后断线时，回执会丢；这时按作业号有界重查，确认作业真的存在就保留占位、按作业号继续
-// 跟踪，只有连续多次明确查无记录才判未接受并释放占位。
+// C09：提交前写下意图；服务器在同一锁内核对拥有者并创建持久作业目录，之后才释放锁并调度。
+// 超时不是未提交的证据：有作业目录就保留身份；只有锁内确认尚无目录的 fenced 意图才可回收。
+// 被回收的旧提交恢复执行时，必须重新通过拥有者核验，不能再创建目录或调度。
 
 /// 比较目录里的活动作业占位目录。
 const ACTIVE_JOB: &str = ".active-job";
@@ -440,7 +440,7 @@ const ACTIVE_JOB: &str = ".active-job";
 const ACTIVE_JOB_LOCK: &str = ".active-job.lock";
 /// 锁等待轮数（每轮 50 ms，约 5 秒）。锁内只有几个毫秒级命令，等这么久说明持有者卡死或留了死锁。
 const LOCK_TRIES: u32 = 100;
-/// `owner` 里的接管时间超过这么多秒就当死锁回收。正常持锁远小于一秒，30 秒已经非常宽容。
+/// 仅超过此时间且同一主机上的 owner PID 已确认退出的锁可以回收。
 const LOCK_STALE_SECONDS: u64 = 30;
 /// 一次远程运行的身份目录与文件（与窗口进程 `bench_runs.rs` 的布局一致，取回时按同一套名字找）。
 const RUNS_DIR: &str = "runs";
@@ -465,7 +465,7 @@ fn active_job_error(id: &str) -> String {
 
 /// 活动作业锁一直拿不到时的固定错误原文：前端按"这个比较的活动作业锁一直被占用"映射成双语提示。
 fn lock_timeout_error() -> String {
-    "这个比较的活动作业锁一直被占用，请稍后再提交。".to_string()
+    "这个比较的活动作业锁一直被占用，请稍后再提交；若是旧版本或崩溃遗留，请先确认原提交已退出，再清理活动锁。".to_string()
 }
 
 /// 服务器上一个比较的目录：`<openbench>/projects/<名字>`。
@@ -742,33 +742,41 @@ fn yaml_scalar(value: &str) -> Result<Option<String>> {
 /// 为什么是 `mkdir` 自旋锁：macOS 自带 bash 没有 `flock`，测试机与真实服务器也可能一个 macOS 一个
 /// Linux；`mkdir` 是所有 POSIX shell 都有的原子操作，同一个路径只有一个进程能建成。
 ///
-/// 死锁回收：`owner` 第一行是令牌、第二行是接管时的 unix 秒。超过 [`LOCK_STALE_SECONDS`] 的锁由
-/// "回收标记目录"（`mkdir`，同样原子）串行化：只有持有回收标记的进程能删锁，删前再读一次令牌与
-/// 时间 —— 否则两个进程同时判陈旧，会把对方刚建的新锁也删掉。owner 里还没有令牌（刚 mkdir、还没
-/// 写 owner 的窗口）时按目录 mtime 判断，只回收超过一分钟的，避免误删并发进程刚建的空锁。
+/// owner records token, timestamp, PID, host and PID namespace. Only an expired same-host owner whose PID is
+/// confirmed gone may be reclaimed; a paused live submitter must never lose its critical section.
+/// shortcut: incomplete/legacy/cross-host locks and abandoned reclaim guards require manual review;
+/// automatic recovery needs a durable remote owner protocol before those cases can be safe.
 fn lock_helpers(project: &str, token: &str) -> String {
     let lock = quote(&format!("{project}/{ACTIVE_JOB_LOCK}"));
     let reclaim = quote(&format!("{project}/{ACTIVE_JOB_LOCK}.reclaim"));
     let owner = quote(&format!("{project}/{ACTIVE_JOB_LOCK}/owner"));
     format!(
-        r#"_colm_lock_acquire() {{
+        r#"_colm_lock_namespace() {{
+  if [ "$(uname -s)" = Darwin ]; then echo Darwin; else readlink /proc/self/ns/pid 2>/dev/null; fi
+}}
+_colm_lock_acquire() {{
   _colm_try=0
   while [ "$_colm_try" -lt {tries} ]; do
     if mkdir {lock} 2>/dev/null; then
-      printf '%s\n%s\n' {token} "$(date +%s)" > {owner} 2>/dev/null
+      printf '%s\n%s\n%s\n%s\n%s\n' {token} "$(date +%s)" "${{BASHPID:-$$}}" "$(uname -n)" "$(_colm_lock_namespace)" > {owner} 2>/dev/null
       if [ "$(sed -n 1p {owner} 2>/dev/null)" = {token} ]; then return 0; fi
     fi
     if mkdir {reclaim} 2>/dev/null; then
-      _colm_owner=$(sed -n 1p {owner} 2>/dev/null)
-      _colm_stamp=$(sed -n 2p {owner} 2>/dev/null)
+      _colm_record=$(cat {owner} 2>/dev/null)
+      _colm_owner=$(printf '%s\n' "$_colm_record" | sed -n 1p)
+      _colm_stamp=$(printf '%s\n' "$_colm_record" | sed -n 2p)
       case "$_colm_stamp" in ''|*[!0-9]*) _colm_stamp=0;; esac
-      if [ -z "$_colm_owner" ]; then
-        if find {lock} -maxdepth 0 -mmin +0 2>/dev/null | grep -q .; then rm -rf {lock}; fi
-      elif [ "$(( $(date +%s) - _colm_stamp ))" -gt {stale} ]; then
-        rm -rf {lock}
+      _colm_pid=$(printf '%s\n' "$_colm_record" | sed -n 3p)
+      _colm_host=$(printf '%s\n' "$_colm_record" | sed -n 4p)
+      _colm_namespace=$(printf '%s\n' "$_colm_record" | sed -n 5p)
+      case "$_colm_pid" in ''|*[!0-9]*) _colm_pid=0;; esac
+      if [ -n "$_colm_owner" ] && [ "$_colm_stamp" -gt 0 ] && [ "$_colm_pid" -gt 0 ] && \
+         [ "$_colm_host" = "$(uname -n)" ] && [ -n "$_colm_namespace" ] && \
+         [ "$_colm_namespace" = "$(_colm_lock_namespace)" ] && [ "$(( $(date +%s) - _colm_stamp ))" -gt {stale} ]; then
+        # A timer cannot prove a paused submitter dead. Unknown/legacy owners stay locked.
+        if _colm_live=$(ps -p "$_colm_pid" -o pid= 2>/dev/null); then _colm_ps_status=0; else _colm_ps_status=$?; fi
+        if [ "$_colm_ps_status" = 1 ] && [ -z "$_colm_live" ]; then rm -rf {lock}; fi
       fi
-      rm -rf {reclaim}
-    elif find {reclaim} -maxdepth 0 -mmin +0 2>/dev/null | grep -q .; then
       rm -rf {reclaim}
     fi
     _colm_try=$((_colm_try + 1))
@@ -793,6 +801,7 @@ fn submit_intent(id: &str, created_unix: u64, config_sha: &str) -> String {
         "id": id,
         "created_unix": created_unix,
         "config_sha": config_sha,
+        "fenced_submission": true,
     });
     serde_json::to_string_pretty(&value).expect("a JSON value always serialises")
 }
@@ -875,6 +884,51 @@ else
   {on_timeout}
 fi
 "#,
+        id = quote(id),
+    )
+}
+
+/// A delayed submission must still own its claim when its durable job directory is created.
+fn submission_fence(project: &str, id: &str) -> (String, String) {
+    let placeholder = quote(&placeholder_path(project));
+    let before = format!(
+        r#"{helpers}if ! _colm_lock_acquire; then echo 'comparison submission lock timed out' >&2; exit 1; fi
+trap '_colm_lock_release' EXIT
+if [ "$(cat {placeholder}/id 2>/dev/null)" != {id} ]; then
+  echo 'comparison submission claim changed; refusing delayed submission' >&2
+  exit 1
+fi
+"#,
+        helpers = lock_helpers(project, id),
+        id = quote(id),
+    );
+    (before, "_colm_lock_release\ntrap - EXIT\n".into())
+}
+
+/// Only a fenced submission without a durable job directory can be proved not dispatched.
+fn release_unsubmitted_script(project: &str, base: &str, id: &str, stale: bool) -> String {
+    let placeholder = quote(&placeholder_path(project));
+    let age = if stale {
+        format!("find {placeholder} -maxdepth 0 -mmin +1 -print -quit 2>/dev/null | grep -q .")
+    } else {
+        ":".into()
+    };
+    format!(
+        r#"{helpers}if ! _colm_lock_acquire; then echo lock_timeout; exit 0; fi
+if [ -d {job_dir} ]; then
+  echo kept
+elif [ "$(cat {placeholder}/id 2>/dev/null)" != {id} ]; then
+  echo superseded
+elif grep -q '"fenced_submission": true' {placeholder}/intent 2>/dev/null && {{ {age}; }}; then
+  rm -rf {placeholder}
+  echo released
+else
+  echo kept
+fi
+_colm_lock_release
+"#,
+        helpers = lock_helpers(project, id),
+        job_dir = quote(&job::job_dir(base, id)),
         id = quote(id),
     )
 }
@@ -1050,15 +1104,14 @@ impl JobEnd {
 /// 作业目录还在时可能只是这次查不到。Lost 但调度器只是回答"查不到记录"（terminal=false）同样不能
 /// 当结束：宁可拒绝重复提交，也不能赌它已经跑完。查询失败更不会走到这里 —— [`job::report`] 直接返回
 /// 错误，提交中止且不释放占位（审查报告第 6 条）。
-fn placeholder_unfinished(report: &job::Report, job_dir_exists: bool) -> bool {
+fn placeholder_unfinished(report: &job::Report, _job_dir_exists: bool) -> bool {
     // terminal 覆盖 COMPLETED 等"确认不会再写、但退出码可能还在路上"的终态：占位可以放，
     // 页面仍按 terminal 继续等退出码（两件事不能混）。
     if report.terminal || JobEnd::from_report(report).is_some() {
         return false;
     }
     match report.status.state {
-        job::State::Unknown => job_dir_exists,
-        job::State::Queued | job::State::Running | job::State::Lost => true,
+        job::State::Unknown | job::State::Queued | job::State::Running | job::State::Lost => true,
         // Finished 一定 terminal，前面已经返回；保留显式分支，避免用 `_` 把拼错的状态吞掉。
         job::State::Finished { .. } => false,
     }
@@ -1073,18 +1126,13 @@ fn active_job_refusal(id: &str, report: &job::Report, job_dir_exists: bool) -> O
     }
 }
 
-/// 占位可以按"陈旧"回收吗：只有"作业确实不存在"的两种证据 —— Unknown 且作业目录都没有（提交在
-/// mkdir 与 launch 之间崩了），或 Lost 且调度系统没确认终态（两边都回答查无记录）。Queued/Running/
-/// Finished 都不回收；Lost+terminal 是确认终态，走正常的"作业已结束"清理。
-///
-/// Lost+terminal=false 以前一律拒绝（审查报告第 6 条怕把暂时查不到当结束）；C09 的"回执丢了但作业
-/// 从未出现在调度器"会留下这种占位，所以这里保留宽限（占位超过一分钟）+ 清理前再查一次：宽限内
-/// 作业真的被收下就会变成 queued/running，不会误删。作业目录还在时 Lost 也照此处理 —— sacct 回看
-/// 七天，一分钟后再查不到就确实没被调度过。
+/// A missing job directory is recoverable only through the server-side fence and age check.
+/// A scheduler that has not recorded a durable job yet may still accept it later: Lost alone is
+/// never proof that dispatch cannot happen. Existing job directories stay pending until reconciled.
 fn abandoned_placeholder(report: &job::Report, job_dir_exists: bool) -> bool {
     match report.status.state {
         job::State::Unknown => !job_dir_exists,
-        job::State::Lost => !report.terminal,
+        job::State::Lost => false,
         job::State::Queued | job::State::Running | job::State::Finished { .. } => false,
     }
 }
@@ -1131,8 +1179,8 @@ fn claim_active_job(ssh: &Ssh, base: &str, project: &str, id: &str, intent: &str
                     false
                 };
                 if let Some(error) = active_job_refusal(&existing, &report, dir_exists) {
-                    // 宽限回收：作业确实不存在且占位超过一分钟，再核对一次状态仍不存在才清（C09：
-                    // 提交回执丢失后，调度器最终会回答"从没收到过"，那种占位不能永远挡住重试）。
+                    // The final locked cleanup also checks the fencing protocol and directory;
+                    // this observation alone cannot authorize deletion.
                     if abandoned_placeholder(&report, dir_exists)
                         && ssh.run_ok(&placeholder_expired_script(project))?.trim() == "stale"
                     {
@@ -1143,8 +1191,12 @@ fn claim_active_job(ssh: &Ssh, base: &str, project: &str, id: &str, intent: &str
                             false
                         };
                         if abandoned_placeholder(&again, again_dir) {
-                            ssh.run_ok(&release_script(project, &existing))?;
-                            continue;
+                            let released = ssh.run_ok(&release_unsubmitted_script(
+                                project, base, &existing, true,
+                            ))?;
+                            if released.trim() == "released" {
+                                continue;
+                            }
                         }
                     }
                     bail!("{error}");
@@ -1633,40 +1685,38 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
         name: sched::job_name(&format!("bench-{}", request.name)),
     };
     claim_active_job(&ssh, &base, &project, &id, &intent)?;
-    let submitted = match job::submit_plain(&ssh, &base, &id, &body, &spec) {
+    let (before_create, after_create) = submission_fence(&project, &id);
+    let submitted = match job::submit_plain_fenced(
+        &ssh,
+        &base,
+        &id,
+        &body,
+        &spec,
+        &before_create,
+        &after_create,
+    ) {
         Ok(submitted) => submitted,
         Err(error) => {
             // C09：提交命令报错时不能直接当"没提交" —— SSH 可能是在服务器收下提交之后断的线。
-            // 按作业号有界重查：确认存在就保留占位/意图、按作业号继续跟踪；明确查无记录才释放并
-            // 返回原错误；查询失败当成不确定（同样保留），让前端继续核对。
-            match recheck_receipt(|| submission_probe(&ssh, &base, &id)) {
-                ReceiptClass::Absent => {
-                    match ssh.run_ok(&release_script(&project, &id)) {
-                        Ok(output) if output.trim() == "released" => {}
-                        Ok(_) => eprintln!(
-                            "warning: the comparison's active-job placeholder is held by another process; left it in place"
-                        ),
-                        Err(_) => eprintln!(
-                            "warning: cannot release the comparison's active-job placeholder"
-                        ),
-                    }
-                    return Err(error);
-                }
-                ReceiptClass::Accepted | ReceiptClass::Uncertain => {
-                    // 保留占位与意图：前端拿到 job 后按作业号轮询，作业体收尾时 EXIT trap 会释放占位。
-                    println!(
-                        "{}",
-                        json!({
-                            "job": id,
-                            "submitted": "unconfirmed",
-                            "dir": project,
-                            "run_id": id,
-                            "config_sha": config_sha,
-                        })
-                    );
-                    return Ok(());
+            // 按作业号重查后仍须在锁内证明没有持久作业目录；否则保留身份为 unconfirmed。
+            // 已被回收的旧提交不能绕过服务器端 fence 继续调度。
+            if recheck_receipt(|| submission_probe(&ssh, &base, &id)) == ReceiptClass::Absent {
+                match ssh.run_ok(&release_unsubmitted_script(&project, &base, &id, false)) {
+                    Ok(output) if matches!(output.trim(), "released" | "superseded") => return Err(error),
+                    _ => eprintln!("warning: submission may still be in progress; retained its identity for reconciliation"),
                 }
             }
+            println!(
+                "{}",
+                json!({
+                    "job": id,
+                    "submitted": "unconfirmed",
+                    "dir": project,
+                    "run_id": id,
+                    "config_sha": config_sha,
+                })
+            );
+            return Ok(());
         }
     };
     println!(

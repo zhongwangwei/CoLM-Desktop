@@ -1328,3 +1328,37 @@ fn an_evolved_snow_state_writes_back_a_readable_continuation_restart() {
     assert_eq!(reassembled.snow.depth_m, state.snow.depth_m);
     assert_eq!(reassembled.temperature_k, state.soil_temperature_k);
 }
+
+#[test]
+fn rss_six_receives_the_topsoil_sand_fraction_from_the_restart() {
+    let (fixture, mut template) = assemble("rss-six-sand", 1);
+    template.physics.surface_resistance_scheme = 6;
+    let input = template.input(&binding());
+    assert_eq!(input.energy.soil_surface_resistance.scheme, 6);
+    assert_eq!(
+        input
+            .energy
+            .soil_surface_resistance
+            .sand_volume_fraction_of_solids,
+        fixture.soil.get(SoilField::VfSand, 0, 1)
+    );
+}
+
+#[test]
+fn urban_local_soil_resistance_does_not_overwrite_the_host_restart_diagnostic() {
+    let output = crate::urban_diagnostic_output();
+    assert_eq!(output.thermal.rss, 516.0);
+    let mut diagnostics = SurfaceDiagnosticsRow::from_urban(&output, 0.5);
+    assert_eq!(diagnostics.soil_surface_resistance, None);
+    assert_eq!(diagnostics.stomatal_resistance, Some(80.0));
+    let carry = crate::PatchOutputCarry::from_output(Some(crate::PatchStepOutput::Urban(&output)));
+    assert_eq!(carry.soil_surface_resistance, None);
+    assert_eq!(carry.stomatal_resistance, Some(80.0));
+    let mut previous = diagnostics;
+    previous.soil_surface_resistance = Some(colm_core::MISSING);
+    diagnostics.carry_forward(&previous);
+    assert_eq!(
+        diagnostics.soil_surface_resistance,
+        Some(colm_core::MISSING)
+    );
+}

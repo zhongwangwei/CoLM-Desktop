@@ -3230,9 +3230,9 @@ fn registered_report(
     };
     let mut report = query_target(&target, symbol, path_filter, limit, offset, limits);
     report.json["dirty"] = json!(repo.is_dirty());
-    if !report.json["identity"]["state"]
+    if report.json["identity"]["state"]
         .as_str()
-        .is_some_and(|state| state == "verified")
+        .is_none_or(|state| state != "verified")
     {
         if let Some(notes) = report.json["notes"].as_array_mut() {
             notes.push(json!(

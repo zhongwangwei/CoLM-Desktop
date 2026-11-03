@@ -48,8 +48,8 @@ export default function NamelistPreview({
         <>
           <p className="muted">
             {en
-              ? 'Read-only preview of the saved case and its referenced forcing configuration.'
-              : '只读预览已保存的算例配置及其引用的强迫场配置。'}
+              ? 'Read-only preview of the saved case and its referenced forcing configuration. Remote runs map these paths, including the output directory, to server locations during staging.'
+              : '只读预览已保存的算例配置及其引用的强迫场配置。远程运行会在准备阶段将这些路径（含输出目录）映射为服务器路径。'}
           </p>
           {casePaths.length > 1 && (
             <Field label={en ? 'Station' : '站点'}>

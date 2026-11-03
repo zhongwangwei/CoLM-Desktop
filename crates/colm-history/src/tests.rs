@@ -1152,3 +1152,66 @@ fn tracked_study_lookup_reads_only_the_study_index() {
         "{plan:?}"
     );
 }
+
+#[test]
+fn verified_interruption_is_terminal_but_unconfirmed_interruption_is_not() {
+    let history = ledger();
+    let event = Event::start("run");
+    history.append(&event).unwrap();
+    history
+        .append(&event.next(EventPhase::Status, "interrupted"))
+        .unwrap();
+    assert!(history.remove_operation(&event.operation_id).is_err());
+    history
+        .append(&event.next(EventPhase::Finished, "interrupted"))
+        .unwrap();
+    assert!(confirmed_status("interrupted"));
+    assert!(history.remove_operation(&event.operation_id).unwrap());
+}
+
+#[test]
+fn imported_interruption_is_terminal_after_reopening_existing_ledger() {
+    let temp = Temp::new();
+    let path = temp.0.join("history.sqlite");
+    let history = History::open(&path).unwrap();
+    let mut event = Event::start("run");
+    event.phase = EventPhase::Imported;
+    event.status = "interrupted".into();
+    history.append(&event).unwrap();
+    history.connection.execute_batch(
+        "DROP VIEW history_visible_operations;
+         DROP VIEW history_operations;
+         CREATE VIEW history_operations AS SELECT payload, operation_id, 1 AS needs_reconciliation FROM history_events;
+         PRAGMA user_version=0;",
+    ).unwrap();
+    drop(history);
+    let history = History::open(&path).unwrap();
+    let reconciliation: i64 = history
+        .connection
+        .query_row(
+            "SELECT needs_reconciliation FROM history_operations WHERE operation_id=?1",
+            [&event.operation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reconciliation, 0);
+    assert!(history.remove_operation(&event.operation_id).unwrap());
+}
+
+#[test]
+fn reopening_current_ledger_does_not_rewrite_its_schema() {
+    let temp = Temp::new();
+    let path = temp.0.join("history.sqlite");
+    let history = History::open(&path).unwrap();
+    let before: i64 = history
+        .connection
+        .pragma_query_value(None, "schema_version", |row| row.get(0))
+        .unwrap();
+    drop(history);
+    let history = History::open(&path).unwrap();
+    let after: i64 = history
+        .connection
+        .pragma_query_value(None, "schema_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(before, after);
+}

@@ -372,8 +372,9 @@ fn projects_list_new_style_runs_by_their_creation_time() {
 /// 取消代次是进程级全局状态，这几个测试会推进它，必须串行跑：cargo test 默认并行，
 /// 不锁的话一个测试的 cancel 会让另一个测试的 check 失败。
 fn epoch_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::sidecar::CHILD_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]

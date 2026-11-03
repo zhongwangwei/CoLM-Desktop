@@ -365,6 +365,34 @@ impl ToolContext {
 
     /// 长时间运行的 `colm-cli` 子命令：可被这一轮的取消标志中止（连同它启动的内核子进程）。
     pub fn cli_long(&self, args: &[&str]) -> Result<Finished> {
+        let (success, stdout, stderr) = self.cli_output_cancellable(args)?;
+        Ok(Finished {
+            success,
+            stdout_tail: tail_lines(&stdout, 60),
+            stderr_tail: tail_lines(&stderr, 40),
+        })
+    }
+
+    pub fn cli_cancellable(&self, args: &[&str]) -> Result<String> {
+        let (success, stdout, stderr) = self.cli_output_cancellable(args)?;
+        if !success {
+            bail!(
+                "colm-cli {} failed: {}",
+                args.first().copied().unwrap_or_default(),
+                stderr.trim()
+            );
+        }
+        Ok(stdout)
+    }
+
+    fn cli_output_cancellable(&self, args: &[&str]) -> Result<(bool, String, String)> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            bail!("cancelled by the user; the process was not started");
+        }
         let mut command = Command::new(&self.cli);
         command
             .env("COLM_OPERATION_INITIATOR", "assistant")
@@ -394,9 +422,6 @@ impl ToolContext {
             text
         });
         let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
             if self
                 .cancel
                 .as_ref()
@@ -404,15 +429,21 @@ impl ToolContext {
             {
                 terminate(&mut child);
                 let _ = child.wait();
-                bail!("cancelled by the user; the process was stopped");
+                bail!("cancelled by the user");
+            }
+            // Inherited pipes can outlive the leader; keep its PID unreaped until both drain.
+            if out.is_finished() && err.is_finished() {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
             }
             std::thread::sleep(Duration::from_millis(200));
         };
-        Ok(Finished {
-            success: status.success(),
-            stdout_tail: tail_lines(&out.join().unwrap_or_default(), 60),
-            stderr_tail: tail_lines(&err.join().unwrap_or_default(), 40),
-        })
+        Ok((
+            status.success(),
+            out.join().unwrap_or_default(),
+            err.join().unwrap_or_default(),
+        ))
     }
 
     /// 同上，并把输出解析成 JSON。
@@ -428,12 +459,30 @@ impl ToolContext {
 }
 
 /// 结束子进程（Unix 下连同整个进程组）。
-fn terminate(child: &mut std::process::Child) {
+pub(crate) fn terminate(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let group = format!("-{}", child.id());
-        let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+        let _ = Command::new("kill")
+            .args(["-TERM", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         std::thread::sleep(Duration::from_millis(500));
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        // shortcut: cleanup after an exited leader is best effort; use Job Objects for detached CLI trees.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     let _ = child.kill();
 }

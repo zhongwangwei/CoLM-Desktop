@@ -63,6 +63,7 @@ export type CaseEntry = {
   dir: string;
   name: string;
   has_history: boolean;
+  history_warning?: string | null;
   spatial: boolean;
   run_host?: string | null;
   remote_directory?: string | null;
@@ -211,6 +212,7 @@ export type AppState = {
     form: Record<string, string>;
     sites: Site[];
     caseValues?: Record<string, string>;
+    siteDefaults?: import('../features/cases/case-model').SiteDefaults;
     step?: 1 | 2 | 3 | 4 | 5;
     ownData?: boolean;
     exampleValues?: Record<string, string>;

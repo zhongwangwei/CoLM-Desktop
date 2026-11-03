@@ -985,6 +985,7 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
     3: pair('TR13：Tang–Riley（2013）', 'TR13: Tang–Riley (2013)'),
     4: pair('LP92：Lee–Pielke（1992）', 'LP92: Lee–Pielke (1992)'),
     5: pair('S92：Sellers 等（1992）', 'S92: Sellers et al. (1992)'),
+    6: pair('Liu 等（2026）', 'Liu et al. (2026)'),
   },
   DEF_Runoff_SCHEME: {
     0: pair('TOPMODEL（CoLM 2014）', 'TOPMODEL (CoLM 2014)'),

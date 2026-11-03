@@ -31,3 +31,30 @@ fn generated_fortran_module_prerequisites_are_current() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn configured_fortran_dependency_tools_must_be_complete() {
+    let temp = std::env::temp_dir().join(format!(
+        "colm-fortran-deps-tools-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&temp).unwrap();
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let output = Command::new(python)
+        .arg(root().join("oracle/scripts/gen_fortran_deps.py"))
+        .arg("--check")
+        .env("COLM_FORTRAN_DEPS_BIN", &temp)
+        .output()
+        .expect("run dependency generator with incomplete tools");
+    std::fs::remove_dir(&temp).unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("COLM_FORTRAN_DEPS_BIN is missing required tools"),
+        "{error}"
+    );
+}

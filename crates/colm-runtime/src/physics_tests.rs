@@ -620,3 +620,22 @@ fn land_class_overrides_are_read_per_class() {
     )
     .is_ok());
 }
+
+#[test]
+fn soil_resistance_six_is_available_and_unknown_schemes_are_rejected() {
+    let physics = land_physics_parameters(
+        &case_with("DEF_RSS_SCHEME = 6"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    assert_eq!(physics.surface_resistance_scheme, 6);
+    assert!(land_physics_parameters(
+        &case_with("DEF_RSS_SCHEME = 7"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("DEF_RSS_SCHEME"));
+}

@@ -938,3 +938,39 @@ fn programmatic_also_add_duplicates_are_refused_before_summing() {
     let e = super::convert(&p, &dir.join("out.nc"), &plan).unwrap_err();
     assert!(format!("{e:#}").contains("more than once"), "{e:#}");
 }
+
+#[test]
+fn identity_failure_preserves_destination_and_hardlinks_preserve_source() {
+    let dir = std::env::temp_dir().join(format!("colm-identity-safety-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("source");
+    let dest = dir.join("dest");
+    std::fs::write(&source, b"original").unwrap();
+    std::fs::hard_link(&source, &dest).unwrap();
+    let _ = super::identity(&source, &dest);
+    assert_eq!(std::fs::read(&source).unwrap(), b"original");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+    assert!(super::identity(&dir.join("missing"), &dest).is_err());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn identity_copy_preserves_private_source_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("colm-identity-private-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("source");
+    let output = dir.join("output");
+    std::fs::write(&source, b"private forcing").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+    super::identity(&source, &output).unwrap();
+    assert_eq!(
+        std::fs::metadata(output).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

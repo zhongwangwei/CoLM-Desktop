@@ -346,6 +346,7 @@ export default function VersionsPage() {
   }
   const run = (fn: () => Promise<unknown>) => void execute(fn).catch(() => {});
   function edit(next: ModelDraft) {
+    draftNow.current = next;
     dirtyNow.current = true;
     setDraft(next);
     setDirty(true);
@@ -397,7 +398,16 @@ export default function VersionsPage() {
    * 那时对话框里的"保存并继续"会被 CodeFiles 的 disabled 检查拒掉，用户永远选不了保存。
    * 用户取消返回 false，调用方保持原页面与原缓冲区。
    */
-  const sourceReady = () => sourceChoice.ask(sourceState.current);
+  const sourceReady = async () => {
+    if (sourceState.current?.dirty && dirtyNow.current) {
+      try {
+        if (!(await execute(() => save(draftNow.current)))) return false;
+      } catch {
+        return false;
+      }
+    }
+    return sourceChoice.ask(sourceState.current);
+  };
   // finish：普通冻结 true → 冻结后草稿删掉；为做研究而冻结时草稿留着，研究结果还要写回它。
   // useForRuns：普通冻结沿用既有语义——新修订就是模拟接下来用的版本（保留模型修订/运行出处机制）；
   // 研究来源的修订必须传 false：研究基线/研究结果不得悄悄换掉模拟正在用的版本（U-01），
@@ -552,13 +562,20 @@ export default function VersionsPage() {
   async function branchCode() {
     if (!draft) return;
     const current = dirtyNow.current ? await save() : draft;
+    const token = epoch.current;
     const next = await invokeJson<ModelDraft>('model_branch_code', {
       id: current.id,
       expectedGeneration: current.generation,
     });
-    setDraft(next);
-    dirtyNow.current = false;
-    setDirty(false);
+    if (!token.active || token !== epoch.current || draftNow.current?.id !== current.id) return;
+    const changed = dirtyNow.current;
+    const merged = changed
+      ? { ...draftNow.current, code: next.code, generation: next.generation }
+      : next;
+    draftNow.current = merged;
+    setDraft(merged);
+    dirtyNow.current = changed;
+    setDirty(changed);
     setDrafts(await invokeJson('model_drafts'));
   }
   // 冻结前检查里能直接处理的项：编引擎、编内核（用当前算例对应的内核预设，没有就 default）、跑 drift。
@@ -1312,6 +1329,7 @@ export default function VersionsPage() {
                   label={label}
                   role="tab"
                   aria-selected={tab === id}
+                  disabled={busy || codeBusy}
                   className={`versions-tab${tab === id ? ' is-active' : ''}`}
                   run={() => setTab(id)}
                 >
@@ -1358,6 +1376,7 @@ export default function VersionsPage() {
                       : t('查看全部参数…', 'All parameters…')
                   }
                   variant={editable ? 'primary' : undefined}
+                  disabled={busy || codeBusy}
                   run={() => openParameters()}
                 >
                   {editable
@@ -1608,6 +1627,7 @@ export default function VersionsPage() {
                 disabled={busy || codeBusy || dirty}
                 key={shown.code.workspace}
                 name={shown.code.workspace}
+                draftName={draft.name}
                 onChanged={refreshCode}
                 onPendingChange={codePending}
                 onSourceState={codeSourceState}
@@ -2049,7 +2069,7 @@ export default function VersionsPage() {
             }}
             catalog={allowed}
             overlay={shown.overlay}
-            editable={editable}
+            editable={editable && !busy && !codeBusy}
             en={state.language === 'en'}
             onChange={(next) => draft && edit({ ...draft, overlay: next })}
             initialType={paramsType}

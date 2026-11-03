@@ -508,7 +508,7 @@ pub fn write_single_point_constant_restart(
     restart_dir: impl AsRef<Path>,
     config: SinglePointStaticConfig<'_>,
 ) -> Result<ConstantRestartFiles> {
-    write_single_point_constant_restart_with_canopy(surface, restart_dir, config, None, None)
+    write_single_point_constant_restart_with_canopy(surface, restart_dir, config, None, None, None)
 }
 
 /// Writes CoLM's urban time-invariant restart from a completed single-point
@@ -709,6 +709,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                 initialized.state.tree_bottom_m.as_slice(),
             )),
             None,
+            (run.subgrid == SinglePointSubgrid::Pc).then_some(&[1.0][..]),
         )?;
         let urban = write_urban_constant_restart_from_initialized(
             &run.static_run.restart_dir,
@@ -757,6 +758,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                 static_config,
                 None,
                 hyperspectral_albedo,
+                (run.subgrid == SinglePointSubgrid::Pc).then_some(&[1.0][..]),
             )?,
             pft: Some(write_pft_constant_restart(
                 &run.static_run.restart_dir,
@@ -764,6 +766,7 @@ fn write_single_point_constant_restarts_with_hyperspectral(
                 run.static_run.land_cover_year,
                 &run.static_run.block_label,
                 PftConstantRestartInput {
+                    crown_aspect_ratio: (run.subgrid == SinglePointSubgrid::Pc).then_some(&[]),
                     compression_level: run.static_run.compression_level,
                     class: &[],
                     fraction: &[],
@@ -797,7 +800,14 @@ fn write_single_point_constant_restarts_with_hyperspectral(
     }
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
     let crop = single_point_crop_state(run, &document, &surface, &pft)?;
-    let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
+    let canopy = pft_canopy(
+        &document,
+        &pft.class,
+        &pft.canopy_height_m,
+        pft.canopy_bottom_height_m.as_deref(),
+        pft.crown_aspect_ratio.as_deref(),
+        run.subgrid == SinglePointSubgrid::Pc,
+    )?;
     let aggregate_canopy_top = [weighted_sum(&canopy.top_m, &pft.fraction)?];
     let aggregate_canopy_bottom = [weighted_sum(&canopy.bottom_m, &pft.fraction)?];
     let canopy_override = if crop.is_some() {
@@ -808,12 +818,23 @@ fn write_single_point_constant_restarts_with_hyperspectral(
             aggregate_canopy_bottom.as_slice(),
         )
     };
+    let aggregate_crown_ratio = [weighted_sum(&canopy.crown_aspect_ratio, &pft.fraction)?];
+    let pc_crown_ratio = if run.subgrid == SinglePointSubgrid::Pc {
+        Some(if crop.is_some() {
+            canopy.crown_aspect_ratio.as_slice()
+        } else {
+            aggregate_crown_ratio.as_slice()
+        })
+    } else {
+        None
+    };
     let common = write_single_point_constant_restart_with_canopy(
         &run.static_run.surface,
         &run.static_run.restart_dir,
         static_config,
         Some(canopy_override),
         hyperspectral_albedo,
+        pc_crown_ratio,
     )?;
     let pft_file = write_pft_constant_restart(
         &run.static_run.restart_dir,
@@ -821,6 +842,8 @@ fn write_single_point_constant_restarts_with_hyperspectral(
         run.static_run.land_cover_year,
         &run.static_run.block_label,
         PftConstantRestartInput {
+            crown_aspect_ratio: (run.subgrid == SinglePointSubgrid::Pc)
+                .then_some(canopy.crown_aspect_ratio.as_slice()),
             compression_level: run.static_run.compression_level,
             class: &pft.class,
             fraction: &pft.fraction,
@@ -871,6 +894,7 @@ fn write_single_point_constant_restart_with_canopy(
     config: SinglePointStaticConfig<'_>,
     canopy_override: Option<(&[f64], &[f64])>,
     hyperspectral_albedo: Option<&[f64]>,
+    pc_crown_aspect_ratio: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
     let surface = config.read_surface(surface)?;
     write_single_point_constant_restart_from_surface(
@@ -879,6 +903,7 @@ fn write_single_point_constant_restart_with_canopy(
         config,
         canopy_override,
         hyperspectral_albedo,
+        pc_crown_aspect_ratio,
     )
 }
 
@@ -888,6 +913,7 @@ fn write_single_point_constant_restart_from_surface(
     config: SinglePointStaticConfig<'_>,
     canopy_override: Option<(&[f64], &[f64])>,
     hyperspectral_albedo: Option<&[f64]>,
+    pc_crown_aspect_ratio: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
     ensure!(
         !config.use_topmodel || matches!(config.vic_parameters, VicParameterSource::None),
@@ -1071,6 +1097,7 @@ fn write_single_point_constant_restart_from_surface(
         config.land_cover_year,
         config.block_label,
         ConstantRestartInput {
+            pc_crown_aspect_ratio,
             compression_level: config.compression_level,
             dimensions: RestartDimensions::default(),
             patch: RestartPatchFields {
@@ -1954,7 +1981,14 @@ fn write_single_point_pft_cold_time_restarts(
         .transpose()?;
     let pft = read_single_point_pft_data(&run.static_run.surface)?;
     let crop = single_point_crop_state(run, &document, &surface, &pft)?;
-    let canopy = pft_canopy(&document, &pft.class, &pft.canopy_height_m)?;
+    let canopy = pft_canopy(
+        &document,
+        &pft.class,
+        &pft.canopy_height_m,
+        pft.canopy_bottom_height_m.as_deref(),
+        pft.crown_aspect_ratio.as_deref(),
+        run.subgrid == SinglePointSubgrid::Pc,
+    )?;
     let dimensions = TimeRestartDimensions::default();
     let soil = derive_soil_parameters(
         &surface.soil_layers,
@@ -2285,6 +2319,7 @@ fn write_single_point_pft_cold_time_restarts(
                         fraction: pft.fraction[index],
                         canopy_top_m: canopy.top_m[index],
                         canopy_bottom_m: canopy.bottom_m[index],
+                        crown_aspect_ratio: canopy.crown_aspect_ratio[index],
                         optics: pft_leaf_optics(
                             &document,
                             class,
@@ -2765,6 +2800,7 @@ struct ColdPatchFields<'a> {
 pub(crate) struct PftCanopy {
     pub(crate) top_m: Vec<f64>,
     pub(crate) bottom_m: Vec<f64>,
+    pub(crate) crown_aspect_ratio: Vec<f64>,
 }
 
 fn single_point_crop_state(
@@ -2849,15 +2885,29 @@ pub(crate) fn pft_canopy(
     document: &colm_namelist::Document,
     class: &[i32],
     canopy_height_m: &[f64],
+    observed_bottom_m: Option<&[f64]>,
+    observed_crown_ratio: Option<&[f64]>,
+    pc: bool,
 ) -> Result<PftCanopy> {
     ensure!(
         class.len() == canopy_height_m.len(),
         "PFT class and canopy-height vectors must have matching lengths"
     );
+    let rs_crown = optional_bool_or(document, "DEF_RS_CROWN_STRUCTURE", false)?;
+    if rs_crown {
+        ensure!(
+            observed_bottom_m.is_some_and(|values| values.len() == class.len()),
+            "DEF_RS_CROWN_STRUCTURE requires canopy_bottom_height_pfts / hbot_pfts"
+        );
+        if pc {
+            ensure!(observed_crown_ratio.is_some_and(|values| values.len() == class.len()), "DEF_USE_PC with DEF_RS_CROWN_STRUCTURE requires crown_aspect_ratio_pfts / cratio_pfts");
+        }
+    }
+    let mut crown_aspect_ratio = vec![1.0; class.len()];
     let campbell = optional_bool_or(document, "DEF_USE_Campbell_SOIL_MODEL", false)?;
     let mut top_m = Vec::with_capacity(class.len());
     let mut bottom_m = Vec::with_capacity(class.len());
-    for (&class, &observed_top_m) in class.iter().zip(canopy_height_m) {
+    for (index, (&class, &observed_top_m)) in class.iter().zip(canopy_height_m).enumerate() {
         let default_top_m = pft_parameter(document, "DEF_PFT_HTOP0", class, campbell, false)?;
         let default_bottom_m = pft_parameter(document, "DEF_PFT_HBOT0", class, campbell, false)?;
         let (top, bottom) = if (1..=8).contains(&class) {
@@ -2868,10 +2918,32 @@ pub(crate) fn pft_canopy(
         } else {
             (default_top_m, default_bottom_m)
         };
+        let bottom = if rs_crown && (1..=8).contains(&class) {
+            let value = observed_bottom_m.unwrap()[index];
+            ensure!(
+                value.is_finite() && value >= 0.0 && value <= top,
+                "PFT {class} observed canopy bottom is invalid"
+            );
+            if pc {
+                let ratio = observed_crown_ratio.unwrap()[index];
+                ensure!(
+                    ratio.is_finite() && ratio > 0.0,
+                    "PFT {class} crown aspect ratio must be positive and finite"
+                );
+                crown_aspect_ratio[index] = ratio;
+            }
+            value
+        } else {
+            bottom
+        };
         top_m.push(top);
         bottom_m.push(bottom);
     }
-    Ok(PftCanopy { top_m, bottom_m })
+    Ok(PftCanopy {
+        top_m,
+        bottom_m,
+        crown_aspect_ratio,
+    })
 }
 
 pub(crate) fn pft_leaf_optics(

@@ -11,3 +11,24 @@ fn an_unanswered_request_lets_the_next_close_through() {
     gate.confirmed.store(true, Ordering::SeqCst);
     assert!(gate.confirmed.load(Ordering::SeqCst));
 }
+
+#[test]
+fn acknowledged_saving_cannot_be_bypassed_by_the_unanswered_timeout() {
+    let gate = CloseGate::default();
+    let old = Some(Instant::now() - UNANSWERED - Duration::from_secs(1));
+    assert!(gate.unanswered_expired(old));
+    gate.preparing.store(true, Ordering::SeqCst);
+    assert!(!gate.unanswered_expired(old));
+    assert!(
+        gate.saving_expired(old),
+        "a repeat close must offer explicit discard"
+    );
+    assert!(!gate.saving_expired(Some(Instant::now())));
+    assert!(
+        !gate.confirmed.load(Ordering::SeqCst),
+        "elapsed time never confirms discard"
+    );
+    gate.answered();
+    assert!(!gate.preparing.load(Ordering::SeqCst));
+    assert!(!gate.unanswered_expired(None));
+}

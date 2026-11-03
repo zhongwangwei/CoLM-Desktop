@@ -172,7 +172,7 @@ pub fn schedule_records(
             // 因此把 5 月 1 日 00:00 那条算进 **4 月**。实测 Fortran 的 4 月文件最后一条
             // 正是 `56976450`（5 月 1 日 00:00），5 月文件从 `56976510`（01:00）开始。
             //
-            // 而 `time` 标签用的是写入时刻本身（`next / 60`），两者**不同** ——
+            // 而 `time` 标签用的是写入时刻本身的分钟数，两者**不同** ——
             // 把标签也退一秒会让时间轴整体错位。
             //
             // 同一条也是重启目录名的依据，但那边走的是 `jdate`（`adj2begin` 之后），
@@ -181,8 +181,8 @@ pub fn schedule_records(
             let (year, julian_day, _) = civil_from_seconds(suffix_tick)
                 .expect("the window lies inside the supported calendar");
             let suffix = grouping.file_suffix(year, julian_day);
-            // 标签是写入时刻的分钟数（截断）再减去固定位移。
-            let label = next / 60 - shift;
+            // 向下取整与「年初分钟 + 年内分钟」一致，包括 1900 年前的负 tick。
+            let label = next.div_euclid(60) - shift;
             let record = match records.last() {
                 Some(previous) if previous.suffix == suffix => previous.record + 1,
                 _ => 0,
@@ -228,7 +228,9 @@ pub fn schedule(
 /// `timeline` 用同一判据从标签反推输出频率/重建区间边界 —— 复制一份判据
 /// 迟早在月末 24:00 这类边界上分叉，所以这里放开可见性而不是另写一份。
 pub(crate) fn period_ends(next: i64, frequency: HistoryFrequency) -> bool {
-    let (year, julian_day, seconds) = civil_from_seconds(next).expect("supported calendar range");
+    let Some((year, julian_day, seconds)) = civil_from_seconds(next) else {
+        return false;
+    };
     match frequency {
         HistoryFrequency::Hourly => seconds % 3_600 == 0,
         HistoryFrequency::Daily => seconds == 0,
@@ -243,6 +245,10 @@ pub(crate) fn period_ends(next: i64, frequency: HistoryFrequency) -> bool {
 /// 运行时要按它对齐"哪一步该写记录" —— 把写入判据抄一遍就等于埋一个会漂的副本，
 /// 所以这个基准是公开的。
 pub fn tick_seconds(year: i32, julian_day: i32, seconds: i32) -> Result<i64> {
+    ensure!(
+        (1..=9999).contains(&year),
+        "calendar year {year} is outside the supported 1..=9999 range"
+    );
     ensure!(
         (1..=366).contains(&julian_day) && (0..=86_400).contains(&seconds),
         "calendar time {year}-{julian_day} {seconds}s is out of range"
@@ -262,7 +268,18 @@ pub fn tick_seconds(year: i32, julian_day: i32, seconds: i32) -> Result<i64> {
 pub(crate) fn civil_from_seconds(total: i64) -> Option<(i32, i32, i32)> {
     let mut year = 1900;
     let mut remaining = total;
+    while remaining < 0 {
+        year -= 1;
+        if year < 1 {
+            return None;
+        }
+        remaining += i64::from(if is_leap(year) { 366 } else { 365 }) * 86_400;
+    }
     loop {
+        // 9999-12-31 24:00 is a valid end-style boundary, but not a year-10000 window.
+        if year == 10000 && remaining != 0 {
+            return None;
+        }
         let days = if is_leap(year) { 366 } else { 365 };
         let seconds_in_year = i64::from(days) * 86_400;
         if remaining < seconds_in_year {

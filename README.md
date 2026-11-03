@@ -148,7 +148,7 @@ data-root/
 
 ### 环境要求
 
-- Rust **1.85.1** 或更新版本
+- 桌面 GUI：Rust **1.88** 或更新版本；仅构建引擎/CLI：Rust **1.85.1** 或更新版本
 - Git
 - Node.js **24**（与 CI 一致）及 npm
 - Tauri 2 CLI（`cargo tauri`）

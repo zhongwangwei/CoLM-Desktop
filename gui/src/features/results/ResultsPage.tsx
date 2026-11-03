@@ -1,6 +1,6 @@
 import { bilingual } from '../../lib/bilingual';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { insertGapMarkers, sameSeries } from './chart-data';
+import { chartTimeRange, insertGapMarkers, pairedChartData, sameSeries } from './chart-data';
 import uPlot from 'uplot';
 import { modelClockIso, timeTicks } from './time-ticks';
 import { utcSeconds } from '../../lib/dates';
@@ -28,6 +28,8 @@ import {
 } from './series';
 import {
   overviewMetric,
+  overviewVariables,
+  metricWarningText,
   overviewRunStatus,
   overviewVariable,
   overviewRunLabel,
@@ -307,6 +309,8 @@ type Metric = ResultMetric & {
   /** Multi-station comparison: the observation file that produced this row. */
   comparison_obs?: string;
   time?: number[];
+  pair_gaps?: [number, number][];
+  pair_gaps_truncated?: boolean;
   model?: (number | null)[];
   obs?: (number | null)[];
   units?: string;
@@ -369,6 +373,7 @@ export function ScienceChart({
   theme,
   paired = false,
   compact = false,
+  showPoints = false,
   styles,
 }: {
   data: uPlot.AlignedData;
@@ -376,6 +381,7 @@ export function ScienceChart({
   theme: string;
   paired?: boolean;
   compact?: boolean;
+  showPoints?: boolean;
   /** 逐系列的线色、虚线、线宽；不给就用默认的三色循环（研究的分位带要两色加虚线，见 StudyResult）。 */
   styles?: { stroke: string; dash?: number[]; width?: number }[];
 }) {
@@ -400,7 +406,12 @@ export function ScienceChart({
         width: Math.max(160, host.clientWidth),
         height: compact ? 220 : 300,
         legend: { show: !compact },
-        scales: { x: { time: true } },
+        scales: {
+          x: {
+            time: true,
+            range: (_plot, min, max) => chartTimeRange(stableData.current[0], min, max),
+          },
+        },
         tzDate: (ts) => uPlot.tzDate(new Date(ts * 1000), 'Etc/UTC'),
         series: [
           {},
@@ -411,7 +422,7 @@ export function ScienceChart({
               (paired ? ['#0d9488', '#858b94'] : ['#0d9488', '#e87945', '#6366f1'])[i % 3],
             dash: seriesStyles?.[i]?.dash ?? (paired && i === 1 ? [6, 3] : []),
             width: seriesStyles?.[i]?.width ?? 1.5,
-            points: compact ? { show: false } : undefined,
+            points: showPoints ? { show: true } : compact ? { show: false } : undefined,
           })),
         ],
         axes: [
@@ -432,7 +443,7 @@ export function ScienceChart({
       plot.destroy();
       plotRef.current = null;
     };
-  }, [hasData, labelKey, theme, paired, compact, styleKey]);
+  }, [hasData, labelKey, theme, paired, compact, showPoints, styleKey]);
   useEffect(() => {
     plotRef.current?.setData(shownData);
   }, [shownData]);
@@ -655,6 +666,12 @@ export default function ResultsPage({
   const timeBasisText = timeBasisLabel(timeBasisOf(catalog ?? series), en);
   const selectedSeriesKey = JSON.stringify({ source, variable, from, to });
   const selectedMetric = singleFresh ? overviewMetric(singleRows, variable) : undefined;
+  const overviewChoices = overviewVariables(catalog?.variables ?? [], singleRows, en);
+  const nativeVariable = !!catalog?.variables.some((item) => item.name === variable);
+  useEffect(() => {
+    if (tab !== 'overview' && variable && catalog && !nativeVariable)
+      setVariable(overviewVariable(catalog.variables));
+  }, [tab, variable, catalog, nativeVariable]);
   const selectedRun = runs.find((r) => r.run_case === source);
   useEffect(() => {
     const requestEpoch = epoch;
@@ -865,7 +882,8 @@ export default function ResultsPage({
             from: start,
             to: end,
             corrected,
-            variable: variable || null,
+            // The comparison evaluates shared observation quantities, not the raw chart variable.
+            variable: null,
           });
           if (cancelled) return;
           setBaseline(result);
@@ -998,7 +1016,7 @@ export default function ResultsPage({
   );
   useEffect(() => {
     let cancelled = false;
-    if (tab !== 'overview' || !source || !variable || catalogKey !== source) {
+    if (tab !== 'overview' || !source || !variable || !nativeVariable || catalogKey !== source) {
       // 不在本页签/本条件下自动读曲线时，不能把上一次的「读取中」留在页面上。
       setSeriesLoading(false);
       return;
@@ -1023,7 +1041,17 @@ export default function ResultsPage({
     return () => {
       cancelled = true;
     };
-  }, [readSeries, source, variable, selectedSeriesKey, tab, catalogKey, caseDir, en]);
+  }, [
+    readSeries,
+    source,
+    variable,
+    nativeVariable,
+    selectedSeriesKey,
+    tab,
+    catalogKey,
+    caseDir,
+    en,
+  ]);
   const plot = () =>
     task(async (current) => {
       setSeriesError('');
@@ -1666,7 +1694,10 @@ export default function ResultsPage({
       label: tr('图表变量', 'Chart variable'),
       value: variable,
       type: 'choice',
-      options: chartVariables(catalog?.variables ?? []).map((v) => ({
+      options: (tab === 'overview'
+        ? overviewChoices
+        : chartVariables(catalog?.variables ?? [])
+      ).map((v) => ({
         value: v.name,
         label: variableOption(v, en),
       })),
@@ -2201,7 +2232,7 @@ export default function ResultsPage({
                   disabled={busy || !catalog}
                   onChange={(event) => setVariable(event.target.value)}
                 >
-                  {chartVariables(catalog?.variables ?? []).map((item) => (
+                  {overviewChoices.map((item) => (
                     <option key={item.name} value={item.name}>
                       {variableOption(item, en)}
                     </option>
@@ -2241,13 +2272,8 @@ export default function ResultsPage({
               <ScienceChart
                 compact
                 paired
-                data={
-                  [
-                    selectedMetric.time,
-                    selectedMetric.model,
-                    selectedMetric.obs,
-                  ] as uPlot.AlignedData
-                }
+                showPoints={!!selectedMetric.pair_gaps_truncated || selectedMetric.n === 1}
+                data={pairedChartData(selectedMetric) as uPlot.AlignedData}
                 labels={[tr('模拟', 'Simulation'), tr('观测', 'Observation')]}
                 theme={state.theme}
               />
@@ -2300,7 +2326,7 @@ export default function ResultsPage({
               ))}
             </div>
             {!!selectedMetric?.beta_warning && (
-              <Notice tone="warning">{String(selectedMetric.beta_warning)}</Notice>
+              <Notice tone="warning">{metricWarningText(selectedMetric.beta_warning, en)}</Notice>
             )}
           </Card>
           {variableInfo?.kind === 'grid' && source && catalog && (
@@ -3132,13 +3158,13 @@ export default function ResultsPage({
             .filter((m) => m.beta_warning)
             .map((m, i) => (
               <Notice key={`beta-${i}`} tone="warning">
-                {m.name}: {String(m.beta_warning)}
+                {m.name}: {metricWarningText(m.beta_warning, en)}
               </Notice>
             ))}
           {metrics.flatMap((m, i) =>
             (m.warnings ?? []).map((warning, j) => (
               <Notice key={`warning-${i}-${j}`} tone="warning">
-                {m.name}: {String(warning)}
+                {m.name}: {metricWarningText(warning, en)}
               </Notice>
             )),
           )}
@@ -3206,7 +3232,8 @@ export default function ResultsPage({
               .map((m) => (
                 <ScienceChart
                   key={m.name}
-                  data={[m.time!, m.model!, m.obs!] as uPlot.AlignedData}
+                  showPoints={!!m.pair_gaps_truncated}
+                  data={pairedChartData(m) as uPlot.AlignedData}
                   labels={[`${m.name} ${tr('模拟', 'model')}`, `${m.name} ${tr('观测', 'obs')}`]}
                   theme={state.theme}
                 />

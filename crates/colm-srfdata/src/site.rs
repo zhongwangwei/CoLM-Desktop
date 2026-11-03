@@ -1525,6 +1525,7 @@ pub fn skeleton_with_mode(
         lt_var.put_values(&[lt], netcdf::Extents::All)?;
     }
 
+    f.close().context("cannot close site data file")?;
     Ok(())
 }
 
@@ -1812,6 +1813,8 @@ pub fn fill(
         report.record("soil_texture", texture_src);
     }
 
+    f.close()
+        .with_context(|| format!("cannot close {}", dst.display()))?;
     Ok(report)
 }
 
@@ -2557,6 +2560,9 @@ fn add_colm2024_canopy_structure(
             put_or_replace_values(&mut output, name, &["pft"], &values, "SITE")?;
         }
     }
+    output
+        .close()
+        .with_context(|| format!("cannot close {}", target.display()))?;
     Ok(())
 }
 
@@ -2585,7 +2591,9 @@ fn materialize_single_point_bedrock(surface: &Path, rawdata: &Path) -> Result<()
         &[],
         &[depth_cm],
         "rawdata bedrock.nc/dbedrock",
-    )
+    )?;
+    file.close()
+        .with_context(|| format!("cannot close {}", surface.display()))
 }
 
 fn materialize_single_point_landtype(
@@ -2639,7 +2647,9 @@ fn materialize_single_point_landtype(
     let _netcdf_guard = netcdf_write_lock().lock().unwrap();
     let mut file =
         netcdf::append(surface).with_context(|| format!("cannot append {}", surface.display()))?;
-    put_or_replace_values(&mut file, name, &[], &[landtype as f64], source)
+    put_or_replace_values(&mut file, name, &[], &[landtype as f64], source)?;
+    file.close()
+        .with_context(|| format!("cannot close {}", surface.display()))
 }
 
 fn materialize_single_point_soil_fields(
@@ -2707,6 +2717,8 @@ fn materialize_single_point_soil_fields(
             "rawdata soil/soiltexture_0cm-60cm_mean.nc",
         )?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", surface.display()))?;
     Ok(())
 }
 
@@ -2805,6 +2817,8 @@ fn materialize_single_point_static_fields(
             put_or_replace_values(&mut file, name, &[], &[value], "rawdata soil_brightness.nc")?;
         }
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", surface.display()))?;
     Ok(())
 }
 
@@ -3688,6 +3702,9 @@ fn write_single_point_surface_with_lai_frequency(
             scalar_f64(&input, "depth_to_bedrock")?,
         )?;
     }
+    output
+        .close()
+        .with_context(|| format!("cannot close {}", target.display()))?;
     Ok(())
 }
 
@@ -4138,6 +4155,9 @@ fn write_urban_single_point_surface(
     for name in ["elevation", "elvstd", "sloperatio"] {
         emit_scalar(&mut output, name, scalar_f64(&input, name)?)?;
     }
+    output
+        .close()
+        .with_context(|| format!("cannot close {}", target.display()))?;
     Ok(())
 }
 
@@ -5070,6 +5090,8 @@ pub fn prepare_urban(src: &Path, dst: &Path) -> Result<UrbanReport> {
     if let Some(s) = extra {
         report.extra_vars = put_urban_extra(&mut f, s)?;
     }
+    f.close()
+        .with_context(|| format!("cannot close {}", dst.display()))?;
     Ok(report)
 }
 

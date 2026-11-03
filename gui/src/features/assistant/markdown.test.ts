@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElement } from 'react';
+import { createElement, isValidElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { copyText, parseMarkdown, safeHttpUrl } from './markdown';
 
@@ -163,4 +163,41 @@ test('adjacent ordered and unordered lists keep their own structure', () => {
       [false, 1],
     ],
   );
+});
+
+test('native source links invoke the shared opener instead of creating a WebView window', () => {
+  const opened: string[] = [];
+  let prevented = false;
+  function walk(node: ReactNode) {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (
+      !isValidElement<{
+        children?: ReactNode;
+        href?: string;
+        onClick?: (event: { preventDefault: () => void }) => void;
+      }>(node)
+    )
+      return;
+    if (typeof node.type === 'function') {
+      walk((node.type as (props: unknown) => ReactNode)(node.props));
+    } else if (node.type === 'a') {
+      node.props.onClick?.({
+        preventDefault: () => {
+          prevented = true;
+        },
+      });
+    } else walk(node.props.children);
+  }
+  walk(
+    createElement(Markdown, {
+      text: '## **[Source](https://example.com/?a=1&b=2)**',
+      t,
+      onOpenUrl: (url) => opened.push(url),
+    }),
+  );
+  assert.equal(prevented, true);
+  assert.deepEqual(opened, ['https://example.com/?a=1&b=2']);
 });

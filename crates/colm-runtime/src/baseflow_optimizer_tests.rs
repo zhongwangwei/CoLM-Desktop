@@ -103,6 +103,33 @@ fn a_year_writes_the_cycle_record_then_the_updated_scale() {
     std::fs::remove_dir_all(&directory).unwrap();
 }
 
+#[test]
+fn failed_year_write_preserves_the_budget_and_scale_for_retry() {
+    let directory = scratch_directory("retry");
+    let mut optimizer =
+        BaseflowOptimizer::new(&[init(1.0, 3.0, 0)], &directory, "site", "w180_s90");
+    optimizer.accumulate(0, step(2.0e-5, 4.0e-5));
+    let before = optimizer.clone();
+    let main = directory.join("site_baseflow_w180_s90.nc");
+    std::fs::create_dir(&main).unwrap();
+    assert!(optimizer.close_year(&[3.5]).is_err());
+    assert_eq!(optimizer, before);
+
+    std::fs::remove_dir(&main).unwrap();
+    optimizer.close_year(&[3.5]).unwrap();
+    assert_eq!(optimizer.iteration(), 1);
+    assert_eq!(optimizer.scale(0), 0.5);
+    assert_eq!(read_scalar(&main, "scale_baseflow"), 0.5);
+    assert_eq!(
+        read_scalar(
+            &directory.join("c0001/site_baseflow_w180_s90.nc"),
+            "scale_baseflow"
+        ),
+        1.0
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 /// 多 patch（多作物站点）：各 patch 独立累加、独立更新，文件是整向量；
 /// `patchtype > 1` 的 patch 照样累加、写记录，但比例不动；`recharge` 任一输入是 `spval` 时不累加。
 #[test]

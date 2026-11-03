@@ -50,7 +50,8 @@ fn civil_ticks_match_the_history_epoch() {
 
 #[test]
 fn civil_ticks_reject_invalid_dates() {
-    assert!(civil_tick_seconds(1899, 1, 1, 0).is_err());
+    assert!(civil_tick_seconds(0, 1, 1, 0).is_err());
+    assert!(civil_tick_seconds(10000, 1, 1, 0).is_err());
     assert!(civil_tick_seconds(2008, 13, 1, 0).is_err());
     assert!(civil_tick_seconds(2008, 1, 32, 0).is_err());
     assert!(
@@ -58,6 +59,109 @@ fn civil_ticks_reject_invalid_dates() {
         "2008-02-30 不存在"
     );
     assert!(civil_tick_seconds(2008, 1, 1, 86_401).is_err());
+}
+
+#[test]
+fn pre_1900_monthly_and_daily_outputs_keep_filenames_and_reader_intervals() {
+    for (frequency, grouping, end_day, suffixes) in [
+        (
+            HistoryFrequency::Monthly,
+            HistoryGrouping::Month,
+            91,
+            vec!["1850-01", "1850-02", "1850-03"],
+        ),
+        (
+            HistoryFrequency::Daily,
+            HistoryGrouping::Day,
+            4,
+            vec!["1850-01-01", "1850-01-02", "1850-01-03"],
+        ),
+    ] {
+        let window = SimulationWindow {
+            start_year: 1850,
+            start_julian_day: 1,
+            start_seconds: 0,
+            end_year: 1850,
+            end_julian_day: end_day,
+            end_seconds: 0,
+            timestep_seconds: 3_600,
+        };
+        let records = schedule_records(window, frequency, grouping).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.suffix.as_str())
+                .collect::<Vec<_>>(),
+            suffixes
+        );
+        let labels = records
+            .iter()
+            .map(|record| record.label_minutes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classify_frequency(&labels, Some(frequency), None)
+                .unwrap()
+                .frequency,
+            frequency
+        );
+        let start = civil_tick_seconds(1850, 1, 1, 0).unwrap();
+        let intervals = record_intervals(&labels, frequency, None, Some(start)).unwrap();
+        let mut begin = start;
+        for (record, interval) in records.iter().zip(intervals) {
+            assert_eq!(interval.begin_tick_seconds, begin);
+            assert_eq!(interval.end_tick_seconds, record.write_at_tick);
+            begin = record.write_at_tick;
+        }
+    }
+}
+
+#[test]
+fn pre_epoch_partial_hour_starts_at_the_previous_hour() {
+    let end = civil_tick_seconds(1899, 12, 31, 23 * 3600 + 1200).unwrap();
+    let label = end / 60 - HistoryFrequency::Hourly.label_shift_minutes();
+    let intervals = record_intervals(&[label], HistoryFrequency::Hourly, None, None).unwrap();
+    assert_eq!(
+        intervals[0].begin_tick_seconds,
+        civil_tick_seconds(1899, 12, 31, 23 * 3600).unwrap()
+    );
+    assert_eq!(intervals[0].end_tick_seconds, end);
+}
+
+#[test]
+fn reader_rejects_out_of_range_ticks_without_panicking() {
+    for label in [i64::MIN, i64::MAX, minutes_from_1900(1)] {
+        assert!(record_intervals(&[label], HistoryFrequency::Timestep, Some(60), None).is_err());
+    }
+}
+
+#[test]
+fn calendar_edge_windows_roundtrip_through_hourly_output() {
+    for (year, day, start_seconds) in [(1, 1, 0), (9999, 365, 79_200)] {
+        let window = SimulationWindow {
+            start_year: year,
+            start_julian_day: day,
+            start_seconds,
+            end_year: year,
+            end_julian_day: day,
+            end_seconds: start_seconds + 7_200,
+            timestep_seconds: 3_600,
+        };
+        let records =
+            schedule_records(window, HistoryFrequency::Hourly, HistoryGrouping::Day).unwrap();
+        let labels = records
+            .iter()
+            .map(|record| record.label_minutes)
+            .collect::<Vec<_>>();
+        let start = crate::schedule::tick_seconds(year, day, start_seconds).unwrap();
+        let intervals =
+            record_intervals(&labels, HistoryFrequency::Hourly, None, Some(start)).unwrap();
+        assert_eq!(intervals[0].begin_tick_seconds, start);
+        assert_eq!(intervals[1].end_tick_seconds, start + 7_200);
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.suffix.starts_with(&format!("{year:04}-"))));
+    }
 }
 
 #[test]

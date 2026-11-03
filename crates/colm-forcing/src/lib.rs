@@ -59,6 +59,15 @@ pub use tabular::{
 };
 
 fn same_existing_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+                return true;
+            }
+        }
+    }
     left == right
         || std::fs::canonicalize(left)
             .ok()

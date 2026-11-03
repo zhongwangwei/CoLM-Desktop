@@ -372,3 +372,106 @@ test('page fields keep controls visible and stay under the assistant result budg
   assert.ok(fitted.omitted > 0);
   assert.ok(JSON.stringify(fitted.fields).length <= 1200);
 });
+
+test('unregistered visible dialogs block assistant fill and set before changing background fields', async () => {
+  const source = readFileSync(new URL('./guide.ts', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;$/gm, '')
+    .replace(/^export /gm, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const guide = new Function(
+    'bilingual',
+    `${js}; return { pages, drive, bind: value => { app = value; } };`,
+  )((_zh: string, en: string) => en);
+  let changed = 0;
+  guide.bind({ state: { route: 'case' } });
+  guide.pages.set(Symbol(), {
+    fields: [
+      {
+        id: 'background',
+        set: () => {
+          changed++;
+        },
+      },
+    ],
+    actions: [],
+  });
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: {
+      querySelectorAll: () => [
+        { isConnected: true, getClientRects: () => [1], closest: () => null },
+      ],
+    },
+  });
+  try {
+    for (const action of ['fill', 'set'])
+      await assert.rejects(
+        guide.drive(action, { fields: [{ field: 'background', value: 'x' }] }),
+        /Close the current dialog/,
+      );
+    assert.equal(changed, 0);
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'document', prior);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('a field opening a dialog stops the remaining assistant writes', async () => {
+  const source = readFileSync(new URL('./guide.ts', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;$/gm, '')
+    .replace(/^export /gm, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const guide = new Function(
+    'bilingual',
+    js + '; return { pages, drive, bind: value => { app = value; } };',
+  )((_zh: string, en: string) => en);
+  let opened = false,
+    writes = 0;
+  guide.bind({ state: { route: 'case' } });
+  guide.pages.set(Symbol(), {
+    fields: [
+      {
+        id: 'first',
+        set: () => {
+          opened = true;
+          writes++;
+        },
+      },
+      {
+        id: 'second',
+        set: () => {
+          writes++;
+        },
+      },
+    ],
+    actions: [],
+  });
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: {
+      querySelectorAll: () =>
+        opened ? [{ isConnected: true, getClientRects: () => [1], closest: () => null }] : [],
+    },
+  });
+  try {
+    await assert.rejects(
+      guide.drive('fill', {
+        fields: [
+          { field: 'first', value: 'x' },
+          { field: 'second', value: 'y' },
+        ],
+      }),
+      /Close the current dialog/,
+    );
+    assert.equal(writes, 1);
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'document', prior);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+});

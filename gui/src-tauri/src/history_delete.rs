@@ -14,6 +14,60 @@ pub struct DeletePlan {
     case_path: Option<String>,
     case_host: Option<String>,
     case_reason: Option<String>,
+    case_token: Option<String>,
+    case_warning: Option<String>,
+}
+
+struct CaseReview {
+    token: String,
+    identity: serde_json::Value,
+    at: std::time::Instant,
+}
+
+fn case_reviews() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, CaseReview>> {
+    static REVIEWS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, CaseReview>>,
+    > = std::sync::OnceLock::new();
+    REVIEWS.get_or_init(Default::default)
+}
+
+fn review_case(id: &str, target: &Path) -> Result<String, String> {
+    let identity =
+        crate::history::case_identity(target).ok_or("Cannot verify case directory identity")?;
+    let token = colm_history::Event::start("delete-review").operation_id;
+    let mut reviews = case_reviews().lock().map_err(|e| e.to_string())?;
+    reviews.retain(|_, review| review.at.elapsed() < std::time::Duration::from_secs(600));
+    if reviews.len() >= 128 {
+        reviews.clear();
+    }
+    reviews.insert(
+        id.into(),
+        CaseReview {
+            token: token.clone(),
+            identity,
+            at: std::time::Instant::now(),
+        },
+    );
+    Ok(token)
+}
+
+fn consume_case_review(id: &str, token: &str, target: &Path) -> Result<serde_json::Value, String> {
+    let mut reviews = case_reviews().lock().map_err(|e| e.to_string())?;
+    let review = reviews
+        .get(id)
+        .ok_or("删除确认已失效，请重新打开 / Reopen deletion confirmation")?;
+    if review.token != token
+        || review.at.elapsed() >= std::time::Duration::from_secs(600)
+        || crate::history::case_identity(target).as_ref() != Some(&review.identity)
+    {
+        return Err(
+            "确认后的目录身份已变化，请重新打开删除确认 / Directory changed since confirmation"
+                .into(),
+        );
+    }
+    let identity = review.identity.clone();
+    reviews.remove(id);
+    Ok(identity)
 }
 
 #[derive(Serialize)]
@@ -120,6 +174,23 @@ fn has_case_depth(path: &Path) -> bool {
 }
 
 fn case_directory(
+    detail: &OperationDetail,
+) -> Result<(PathBuf, crate::project::CaseRecord), String> {
+    let (target, record) = case_candidate(detail)?;
+    let actual = crate::history::case_identity(&target)
+        .ok_or("无法核对算例目录身份 / Cannot verify case directory identity")?;
+    let identities = detail
+        .events
+        .iter()
+        .filter_map(|event| event.detail.get("case_identity"))
+        .collect::<Vec<_>>();
+    if identities.is_empty() || identities.iter().any(|identity| **identity != actual) {
+        return Err("算例身份与历史记录不匹配，或旧记录没有可信目录身份；请保留文件，只删除记录 / Case identity changed or was not recorded; keep the files".into());
+    }
+    Ok((target, record))
+}
+
+fn case_candidate(
     detail: &OperationDetail,
 ) -> Result<(PathBuf, crate::project::CaseRecord), String> {
     if !terminal(detail) {
@@ -270,6 +341,15 @@ fn unresolved_paths(ledger: &History) -> Result<Vec<PathBuf>, String> {
 
 fn local_case(ledger: &History, detail: &OperationDetail) -> Result<PathBuf, String> {
     let (target, record) = case_directory(detail)?;
+    local_case_candidate(ledger, detail, target, record)
+}
+
+fn local_case_candidate(
+    ledger: &History,
+    detail: &OperationDetail,
+    target: PathBuf,
+    record: crate::project::CaseRecord,
+) -> Result<PathBuf, String> {
     if record.remote_directory.is_some() || is_remote(detail) {
         return Err("服务器算例必须在服务器验证后删除".into());
     }
@@ -310,6 +390,8 @@ fn plan(detail: &OperationDetail) -> DeletePlan {
         case_path: None,
         case_host: None,
         case_reason: None,
+        case_token: None,
+        case_warning: None,
     }
 }
 
@@ -561,7 +643,7 @@ fn remote_case_args(
 
 #[tauri::command]
 pub async fn history_delete_plan(app: tauri::AppHandle, id: String) -> Result<DeletePlan, String> {
-    let detail = crate::history::history_detail(id)?;
+    let detail = crate::history::history_detail(id.clone())?;
     let mut result = plan(&detail);
     if is_remote(&detail) {
         match remote_cleanup(&app, &detail, false, None, false).await {
@@ -585,8 +667,16 @@ pub async fn history_delete_plan(app: tauri::AppHandle, id: String) -> Result<De
         }
     } else {
         let ledger = History::open_default().map_err(|e| e.to_string())?;
-        match local_case(&ledger, &detail) {
-            Ok(path) => result.case_path = Some(path.display().to_string()),
+        match case_candidate(&detail)
+            .and_then(|(target, record)| local_case_candidate(&ledger, &detail, target, record))
+        {
+            Ok(path) => {
+                result.case_path = Some(path.display().to_string());
+                result.case_token = Some(review_case(&id, &path)?);
+                if case_directory(&detail).is_err() {
+                    result.case_warning = Some("目录身份与旧记录不同或未记录；请核对下面当前目录的内容，输入名称后才会删除当前目录。 / This folder differs from the old record or has no recorded identity. Review the current folder and type its name to delete it.".into());
+                }
+            }
             Err(reason) => result.case_reason = Some(reason),
         }
     }
@@ -1263,13 +1353,32 @@ fn delete(
     expected_path: Option<&str>,
     whole_case: bool,
 ) -> Result<DeleteResult, String> {
+    delete_with_review(ledger, id, files, expected_path, whole_case, None)
+}
+
+fn delete_with_review(
+    ledger: &History,
+    id: &str,
+    files: bool,
+    expected_path: Option<&str>,
+    whole_case: bool,
+    case_token: Option<&str>,
+) -> Result<DeleteResult, String> {
     let detail = ledger
         .detail(id)
         .map_err(|e| e.to_string())?
         .ok_or("历史记录不存在")?;
+    let mut reviewed_identity = None;
     let path = if files {
         let target = if whole_case {
-            local_case(ledger, &detail)?
+            if let Some(token) = case_token {
+                let (target, record) = case_candidate(&detail)?;
+                let target = local_case_candidate(ledger, &detail, target, record)?;
+                reviewed_identity = Some(consume_case_review(id, token, &target)?);
+                target
+            } else {
+                local_case(ledger, &detail)?
+            }
         } else {
             owned_directory(&detail)?
         };
@@ -1277,8 +1386,20 @@ fn delete(
             return Err("确认的目录已变化，请重新打开删除确认".into());
         }
         let identity = std::fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
+        if reviewed_identity.is_some()
+            && crate::history::case_identity(&target) != reviewed_identity
+        {
+            return Err(
+                "确认后的目录身份已变化，请重新确认 / Directory changed since confirmation".into(),
+            );
+        }
         if (if whole_case {
-            local_case(ledger, &detail)?
+            if case_token.is_some() {
+                let (target, record) = case_candidate(&detail)?;
+                local_case_candidate(ledger, &detail, target, record)?
+            } else {
+                local_case(ledger, &detail)?
+            }
         } else {
             owned_directory(&detail)?
         }) != target
@@ -1298,6 +1419,7 @@ fn delete(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Tauri injects app/processes; the review token preserves existing IPC arguments.
 #[tauri::command]
 pub async fn history_delete(
     app: tauri::AppHandle,
@@ -1307,6 +1429,7 @@ pub async fn history_delete(
     expected_path: Option<String>,
     whole_case: Option<bool>,
     group: Option<bool>,
+    case_token: Option<String>,
 ) -> Result<DeleteResult, String> {
     if group.unwrap_or(false) {
         return tauri::async_runtime::spawn_blocking(move || {
@@ -1337,7 +1460,16 @@ pub async fn history_delete(
     tauri::async_runtime::spawn_blocking(move || {
         let ledger = History::open_default().map_err(|e| e.to_string())?;
         if files {
-            processes.with_idle(|| delete(&ledger, &id, true, expected_path.as_deref(), whole_case))
+            processes.with_idle(|| {
+                delete_with_review(
+                    &ledger,
+                    &id,
+                    true,
+                    expected_path.as_deref(),
+                    whole_case,
+                    case_token.as_deref(),
+                )
+            })
         } else {
             delete(&ledger, &id, false, None, false)
         }
@@ -1434,6 +1566,12 @@ mod tests {
         std::fs::write(target.join("output"), "result").unwrap();
         std::fs::write(source.join("input"), "keep").unwrap();
         event.detail["model_run"] = run;
+        std::fs::write(
+            source.join("case.nml"),
+            "&nl_colm\nDEF_CASE_NAME='site'\n/\n",
+        )
+        .unwrap();
+        event.detail["case_identity"] = crate::history::case_identity(&source).unwrap();
         let ledger = History::open(root.join("history.sqlite3")).unwrap();
         ledger.append(&event).unwrap();
         let end = event.next(EventPhase::Finished, "succeeded");
@@ -1510,6 +1648,7 @@ mod tests {
         // An unfinished operation on the same case keeps the folder and its own record.
         let mut active = Event::start("run");
         active.case_path = Some(shown.clone());
+        active.detail["case_identity"] = crate::history::case_identity(&source).unwrap();
         ledger.append(&active).unwrap();
         let plan = clear_plan(&ledger, None, None).unwrap();
         assert!(plan.cases.is_empty());
@@ -1555,6 +1694,13 @@ mod tests {
             for path in [case.clone(), case.join("runs").join("r1")] {
                 let mut event = Event::start("run");
                 event.case_path = Some(path.display().to_string());
+                if let Some(identity) = event
+                    .case_path
+                    .as_deref()
+                    .and_then(|path| crate::history::case_identity(Path::new(path)))
+                {
+                    event.detail["case_identity"] = identity;
+                }
                 ledger.append(&event).unwrap();
                 ledger
                     .append(&event.next(EventPhase::Finished, "succeeded"))
@@ -1583,6 +1729,13 @@ mod tests {
             mark_case(&case);
             let mut event = Event::start("run");
             event.case_path = Some(case.display().to_string());
+            if let Some(identity) = event
+                .case_path
+                .as_deref()
+                .and_then(|path| crate::history::case_identity(Path::new(path)))
+            {
+                event.detail["case_identity"] = identity;
+            }
             ledger.append(&event).unwrap();
             ledger
                 .append(&event.next(EventPhase::Finished, "succeeded"))
@@ -1615,6 +1768,13 @@ mod tests {
         std::fs::write(dir.join(".colm-desktop.json"), record.to_string()).unwrap();
         let mut event = Event::start("run");
         event.case_path = Some(dir.display().to_string());
+        if let Some(identity) = event
+            .case_path
+            .as_deref()
+            .and_then(|path| crate::history::case_identity(Path::new(path)))
+        {
+            event.detail["case_identity"] = identity;
+        }
         ledger.append(&event).unwrap();
         ledger
             .append(&event.next(EventPhase::Finished, "succeeded"))
@@ -1852,6 +2012,23 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_case_at_the_recorded_path_never_authorizes_its_deletion() {
+        let (root, ledger, event) = fixture();
+        let source = root.join("source");
+        mark_case(&source);
+        let detail = ledger.detail(&event.operation_id).unwrap().unwrap();
+        assert!(local_case(&ledger, &detail).is_ok());
+        std::fs::rename(&source, root.join("original")).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        mark_case(&source); // Same name and marker contents, different directory identity.
+        assert!(local_case(&ledger, &detail).is_err());
+        assert!(delete(&ledger, &event.operation_id, true, source.to_str(), true).is_err());
+        assert!(source.join("case.nml").exists());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn whole_case_requires_marker_and_no_unfinished_related_history() {
         let (root, ledger, event) = fixture();
         let source = root.join("source");
@@ -1988,6 +2165,70 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &target).unwrap();
         assert!(owned_directory(&detail).is_err());
         assert!(outside.join("output").exists());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_case_deletion_requires_a_fresh_single_use_directory_review() {
+        let (root, ledger, _) = fixture();
+        let source = root.join("source");
+        mark_case(&source);
+        let mut legacy = Event::start("run");
+        legacy.case_path = Some(source.display().to_string());
+        ledger.append(&legacy).unwrap();
+        ledger
+            .append(&legacy.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+        assert!(delete(&ledger, &legacy.operation_id, true, source.to_str(), true).is_err());
+        let token = review_case(&legacy.operation_id, &source).unwrap();
+        assert!(consume_case_review("another-operation", &token, &source).is_err());
+        delete_with_review(
+            &ledger,
+            &legacy.operation_id,
+            true,
+            source.to_str(),
+            true,
+            Some(&token),
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert!(consume_case_review(&legacy.operation_id, &token, &source).is_err());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reviewed_directory_replacement_is_rejected_until_explicitly_reviewed_again() {
+        let (root, ledger, event) = fixture();
+        let source = root.join("source");
+        mark_case(&source);
+        let token = review_case(&event.operation_id, &source).unwrap();
+        std::fs::rename(&source, root.join("original")).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        mark_case(&source);
+        assert!(delete_with_review(
+            &ledger,
+            &event.operation_id,
+            true,
+            source.to_str(),
+            true,
+            Some(&token)
+        )
+        .is_err());
+        assert!(source.join("case.nml").is_file());
+        let token = review_case(&event.operation_id, &source).unwrap();
+        delete_with_review(
+            &ledger,
+            &event.operation_id,
+            true,
+            source.to_str(),
+            true,
+            Some(&token),
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert!(root.join("original/input").exists());
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }

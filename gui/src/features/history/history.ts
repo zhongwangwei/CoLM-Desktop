@@ -672,7 +672,9 @@ function countStatuses(members: HistoryOperation[]) {
   for (const member of members) {
     if (member.needs_reconciliation) counts.pending++;
     else if (['succeeded', 'completed'].includes(member.status)) counts.succeeded++;
-    else if (['failed', 'completed_with_failures', 'cancelled'].includes(member.status))
+    else if (
+      ['failed', 'completed_with_failures', 'cancelled', 'interrupted'].includes(member.status)
+    )
       counts.failed++;
     else counts.running++;
   }
@@ -790,6 +792,8 @@ export type HistoryDeletePlan = {
   casePath: string | null;
   caseHost: string | null;
   caseReason: string | null;
+  caseToken?: string | null;
+  caseWarning?: string | null;
   id: string;
   path: string | null;
   host: string | null;
@@ -800,9 +804,14 @@ export function canDeleteHistory(operation: HistoryOperation): boolean {
   return (
     !operation.needs_reconciliation &&
     (!operation.run_group || operation.run_group.members.every(canDeleteHistory)) &&
-    ['succeeded', 'failed', 'completed', 'completed_with_failures', 'cancelled'].includes(
-      operation.status,
-    )
+    [
+      'succeeded',
+      'failed',
+      'completed',
+      'completed_with_failures',
+      'cancelled',
+      'interrupted',
+    ].includes(operation.status)
   );
 }
 

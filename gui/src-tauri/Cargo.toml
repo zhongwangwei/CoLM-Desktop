@@ -2,7 +2,8 @@
 name = "colm-desktop-gui"
 version = "0.3.0-beta.5"
 edition = "2021"
-rust-version = "1.85.1"
+# Locked time/plist dependencies require Rust 1.88.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["魏忠旺 <weizhw6@mail.sysu.edu.cn>"]
 description = "CoLM site, watershed, regional, and global simulation desktop application"

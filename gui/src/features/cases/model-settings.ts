@@ -603,8 +603,185 @@ export function parameterLocation(
   return labels[step - 1] + (owners[process ?? ''] ? ' → ' + owners[process!] : '');
 }
 
-export function configurationReason(reason?: string | null): string | undefined {
-  return reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考'
-    ? undefined
-    : (reason ?? undefined);
+const CONFIGURATION_REASONS: Record<string, string> = {
+  '当前候选内核未编入 CROP，只支持 PFT 0..15':
+    'CROP is not compiled into this kernel; only PFT 0..15 are supported',
+  '已显式设置算例级系数，覆盖此 PFT 系数':
+    'An explicit case-level coefficient overrides this PFT coefficient',
+  '当前配置未启用所需次网格或过程，或所选类型不适用':
+    'The required subgrid or process is disabled, or the selected type does not apply',
+  适用过程与类型表默认值须按所选源码核对:
+    'Verify applicable processes and type-table defaults against the selected source',
+
+  '仅单点 LCT 植被地表使用；PFT/PC 参数来自 MOD_Const_PFT':
+    'Only used by vegetated single-point LCT cases; PFT/PC parameters come from MOD_Const_PFT',
+  需要先启用植物水力过程: 'Enable plant hydraulics first',
+  '仅 Ball–Berry 气孔导度方案使用': 'Only used by the Ball-Berry stomatal conductance scheme',
+  '仅 Medlyn 气孔导度方案使用': 'Only used by the Medlyn stomatal conductance scheme',
+  '仅水分利用效率（WUE）气孔导度方案使用':
+    'Only used by the water-use efficiency (WUE) stomatal conductance scheme',
+  仅植被或城市地表使用: 'Only used on vegetated or urban surfaces',
+  '开启植物水力过程时不使用（蒸腾上限只在关闭植物水力时起作用）':
+    'Not used with plant hydraulics enabled; the transpiration limit applies only when it is disabled',
+  仅湿地或动态湿地过程使用: 'Only used by wetland or dynamic wetland processes',
+  当前内核没有活动计算路径使用此字段: 'No active computation in this kernel uses this field',
+  当前单点地表不运行土壤水分过程: 'This single-point surface does not run soil hydrology',
+  '仅 TOPMODEL 产流方案使用': 'Only used by the TOPMODEL runoff scheme',
+  '需要 CROP 农田并启用灌溉': 'Requires CROP cropland with irrigation enabled',
+  '仅单点 CROP 农田使用': 'Only used by single-point CROP cropland',
+  '需要 BGC': 'Requires BGC',
+  需要植被地表并启用植物水力过程: 'Requires a vegetated surface with plant hydraulics enabled',
+  需要植被地表并启用臭氧胁迫: 'Requires a vegetated surface with ozone stress enabled',
+  需要先选择一种强迫场降尺度模式: 'Select a forcing downscaling mode first',
+  '仅长波降尺度方案 II 使用': 'Only used by longwave downscaling scheme II',
+  '方案 II 仅在冰川地表使用此长波递减率':
+    'Scheme II uses this longwave lapse rate only over glaciers',
+  仅完整地形强迫降尺度使用: 'Only used by full terrain forcing downscaling',
+  仅简化地形强迫降尺度使用: 'Only used by simplified terrain forcing downscaling',
+  '流域侧向流自行计算产流，并自动开启变饱和流':
+    'Catchment lateral flow computes runoff and automatically enables variably saturated flow',
+  当前内核未编入这个功能: 'This feature is not compiled into the selected kernel',
+  当前内核未编入河湖汇流: 'River and lake routing is not compiled into this kernel',
+  河湖流已关闭: 'River and lake routing is disabled',
+  '仅水库调度方案为 1 时使用': 'Only used with reservoir operation scheme 1',
+  '由软件按模拟范围与 LULCC 自动决定':
+    'Determined automatically from the simulation domain and LULCC',
+  'CoLM 当前只读取并广播此字段，没有任何计算路径使用它':
+    'CoLM reads and broadcasts this field, but no computation uses it',
+  '空间算例没有站点，站点字段不适用': 'Site fields do not apply to spatial cases',
+  '由向导选择的流域网格文件决定；要换网格请重新建算例':
+    'Determined by the selected catchment mesh; create a new case to change the mesh',
+  只有流域网格使用: 'Only used by catchment meshes',
+  '流域网格使用 DEF_CatchmentMesh_data，不读这个字段':
+    'Catchment meshes use DEF_CatchmentMesh_data instead of this field',
+  '由向导生成或选择的网格文件决定；要换网格请重新建算例':
+    'Determined by the generated or selected mesh; create a new case to change it',
+  '网格已按建例时的分辨率生成；要换分辨率请重新建算例':
+    'The mesh uses the creation-time resolution; create a new case to change resolution',
+  只有经纬度网格使用: 'Only used by latitude-longitude grids',
+  '模拟范围取自建例时的网格；要换范围请重新建算例':
+    'The domain comes from the creation-time mesh; create a new case to change it',
+  '分块与 MPI IO 分组用缺省值即可，Rust 引擎在进程内多线程运行':
+    'Use default block and MPI I/O groups; the Rust engine uses threads within one process',
+  流域网格的侧向流不读这个字段: 'Catchment lateral flow does not read this field',
+  '当前内核未编入 CaMa-Flood': 'CaMa-Flood is not compiled into this kernel',
+  当前内核未编入网格河湖汇流: 'Grid river and lake routing is not compiled into this kernel',
+  '需要：TOPMODEL 产流（0）、LCT 次网格、变饱和流，且不开 LULCC 与城市':
+    'Requires TOPMODEL runoff (0), LCT and variably saturated flow, with LULCC and urban mode disabled',
+  只有水同位素使用: 'Only used by water isotopes',
+  '单点没有材料强迫，不能分馏':
+    'Single-point cases have no material forcing and cannot use fractionation',
+  仅漫滩回馈陆面时使用: 'Only used when floodplain water feeds back to the land surface',
+  只有非结构网格内核写向量历史: 'Only unstructured-grid kernels write vector history',
+  '仅 Fortran 引擎生效；Rust 引擎不做平衡检查':
+    'Only applies to Fortran; the Rust engine does not check equilibrium',
+  '只有甲烷的卫星（GIEMS）淹没方案读取':
+    'Only read by the satellite (GIEMS) methane inundation scheme',
+  '模拟范围跨了多个分块，Rust 引擎的基流优化只支持单块区域，仅 Fortran 引擎生效':
+    'The domain spans multiple blocks; Rust baseflow optimization supports one block only. Use Fortran for multiple blocks',
+  'CoLM 读入后不使用此字段；次网格由 LCT/PFT/PC 开关决定':
+    'CoLM does not use this field after reading it; LCT/PFT/PC switches select the subgrid',
+  '只有经纬度网格输出 2m WMO 气温': 'Only latitude-longitude grids output 2 m WMO air temperature',
+  '网格由向导生成并已锁定；要改范围或掩膜请重新建算例':
+    'The generated mesh is locked; create a new case to change the domain or mask',
+  '仅 PC 次网格使用': 'Only used by the PC subgrid',
+  '仅 PFT 次网格使用': 'Only used by the PFT subgrid',
+  '由「输出变量」页管理，勾选写在算例目录的 history.nml':
+    'Managed in Output variables; selections are written to history.nml in the case directory',
+  '只影响 Fortran 引擎的读写方式，不改变结果': 'Only affects Fortran I/O, without changing results',
+  'Rust 引擎总是用站点文件里的城市参数，改读 rawdata 仅 Fortran 引擎生效':
+    'Rust always uses urban parameters from the site file; rawdata is supported only by Fortran',
+  '城市单点不按这个开关读 LAI': 'Urban single-point cases do not use this switch to read LAI',
+  'Rust 引擎尚未移植（网格历史假定 patch 不被屏蔽），仅 Fortran 引擎生效':
+    'Not implemented in Rust, where grid history assumes unmasked patches; applies only to Fortran',
+  "Rust 引擎只写单文件（'one'）历史，'block' 仅 Fortran 引擎生效":
+    "Rust writes single-file ('one') history only; 'block' is supported only by Fortran",
+  'Rust 引擎尚未移植，仅 Fortran 引擎生效': 'Not implemented in Rust; applies only to Fortran',
+  '流域侧向流的基流优化 Rust 引擎尚未移植，仅 Fortran 引擎生效':
+    'Catchment lateral-flow baseflow optimization is not implemented in Rust; applies only to Fortran',
+  'SinglePoint 执行路径不会使用这个字段': 'The SinglePoint execution path does not use this field',
+  'SinglePoint 普通历史文件不使用此压缩设置':
+    'Regular SinglePoint history does not use this compression setting',
+  '当前内核未启用 HYPERSPECTRAL': 'HYPERSPECTRAL is not enabled in this kernel',
+  由选择站点并建算例按站点自动确定: 'Determined from the selected site when creating the case',
+  '仅自然地表的 PFT/PC 次网格使用': 'Only used by natural-surface PFT/PC subgrids',
+  '仅 CROP 内核的作物地表使用': 'Only used by crop surfaces with a CROP kernel',
+  仅水体站点使用: 'Only used by water-body sites',
+  需要先启用基岩过程: 'Enable bedrock processes first',
+  'Rust 引擎只读月尺度 LAI，8 天 LAI 尚未移植':
+    'Rust reads monthly LAI only; 8-day LAI is not implemented',
+  'Rust 引擎只读站点文件里的 LAI，从 landdata 读取尚未移植，仅 Fortran 引擎生效':
+    'Rust reads LAI from the site file; reading landdata LAI is supported only by Fortran',
+  'LAI 由 BGC 叶碳反馈计算': 'LAI is computed from BGC leaf-carbon feedback',
+  '当前按站点文件读取 LAI': 'LAI is currently read from the site file',
+  需要先启用叶面积指数逐年变化: 'Enable yearly LAI changes first',
+  '逐年 LAI 使用模拟年份，不使用单一地表数据年份':
+    'Yearly LAI uses simulation years rather than a single land-data year',
+  'LULCC 要求月尺度、逐年变化的 LAI': 'LULCC requires monthly LAI with yearly changes',
+  '当前次网格会自动使用月尺度 LAI': 'This subgrid automatically uses monthly LAI',
+  '需要先启用 LULCC': 'Enable LULCC first',
+  当前方案按地表覆盖类型估算土壤反照率: 'This scheme estimates soil albedo from land-cover type',
+  需要先启用土壤初始场: 'Enable soil initialization data first',
+  需要先启用积雪初始场: 'Enable snow initialization data first',
+  '需要先启用 CN 初始场': 'Enable CN initialization data first',
+  仅独立地下水位初始化使用: 'Only used for separate water-table initialization',
+  土壤初始场已经包含地下水位初值: 'Soil initialization already includes the initial water table',
+  仅完整地形强迫降尺度需要外部高分辨率地形目录:
+    'Only full terrain downscaling requires an external high-resolution terrain directory',
+  '简单降尺度已开启；先关闭它才能开启完整降尺度':
+    'Simplified downscaling is enabled; disable it before enabling full downscaling',
+  '完整降尺度已开启；先关闭它才能开启简单降尺度':
+    'Full downscaling is enabled; disable it before enabling simplified downscaling',
+  '站点 POINT 强迫场始终循环同一文件，此开关不会改变读入':
+    'Site POINT forcing always cycles the same file; this switch does not change reading',
+  '当前内核已编入扩展截留模块，8 种方案在 Fortran 引擎里都有计算路径；Rust 引擎只支持 1 与 8':
+    'The kernel includes extended interception: Fortran supports all eight schemes, while Rust supports 1 and 8',
+  '当前内核未编入 extend_interception，可用 CoLM2014（1）与 CoLM2024（8）两种方案':
+    'This kernel lacks extend_interception; CoLM2014 (1) and CoLM2024 (8) are available',
+  '仅 MATSIRO 截留方案使用': 'Only used by the MATSIRO interception scheme',
+  'LCT + van Genuchten 下 CoLM 会自动关闭土壤表面阻抗':
+    'CoLM automatically disables soil surface resistance for LCT with van Genuchten',
+  'van Genuchten 下 CoLM 会自动启用 VSF': 'CoLM automatically enables VSF with van Genuchten',
+  '仅 VIC runoff 使用': 'Only used by VIC runoff',
+  '网格 VIC 模式使用网格参数文件': 'Grid VIC mode uses a grid parameter file',
+  '标量 VIC 模式使用文本参数文件': 'Scalar VIC mode uses a text parameter file',
+  流域侧向流自动打开动态湖泊: 'Catchment lateral flow automatically enables dynamic lakes',
+  '没开变饱和流（VSF）时 CoLM 会自动关闭动态湖泊':
+    'CoLM automatically disables dynamic lakes when variably saturated flow (VSF) is disabled',
+  'Rust 引擎尚未验证动态湖泊与城市模型同开，仅 Fortran 引擎生效':
+    'Dynamic lakes with urban mode have not been validated in Rust; applies only to Fortran',
+  仅湿地站点使用: 'Only used by wetland sites',
+  '由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭':
+    'Determined by methane inundation: enabled for dynamic_wtd or hybrid, otherwise disabled',
+  只有甲烷材料使用: 'Only used by methane material',
+  '当前内核未启用 CROP': 'CROP is not enabled in this kernel',
+  '当前站点不是植被地表，不会使用叶片或冠层过程':
+    'This site is not vegetated and does not use leaf or canopy processes',
+  需要先启用臭氧胁迫: 'Enable ozone stress first',
+  仅从文件读取臭氧数据时使用: 'Only used when reading ozone data from a file',
+  '请先解决 Medlyn 与 WUE 同时开启的方案冲突': 'Resolve the conflict between Medlyn and WUE first',
+  'CoLM 会从运行时目录派生 SNICAR 数据文件':
+    'CoLM derives the SNICAR data file from the runtime directory',
+  '需要先启用 SNICAR': 'Enable SNICAR first',
+  需要先读取气溶胶数据: 'Enable aerosol-data reading first',
+  'WUEST 已开启；两种气孔方案不能同时开启':
+    'WUEST is enabled; the two stomatal schemes cannot be enabled together',
+  'Medlyn 已开启；两种气孔方案不能同时开启':
+    'Medlyn is enabled; the two stomatal schemes cannot be enabled together',
+  需要先启用城市模型: 'Enable the urban model first',
+  '当前 rawdata 未提供 NCAR 城市属性，只能使用 LCZ':
+    'The current rawdata lacks NCAR urban properties; only LCZ is available',
+  城市模式会自动关闭这个过程: 'Urban mode automatically disables this process',
+  需要先启用任一种材料: 'Enable at least one material first',
+  '当前没有启用同位素，不使用水同位素参数':
+    'Isotopes are disabled; water-isotope parameters are not used',
+  '由内核或其他路径自动派生，只读显示': 'Derived by the kernel or another path; read-only',
+  '由 CH4 参数文件的淹没方案派生，case.nml 里的值不生效':
+    'Derived from the CH4 parameter file inundation scheme; the case.nml value has no effect',
+};
+
+export function configurationReason(reason?: string | null, en = false): string | undefined {
+  if (!reason || reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考')
+    return undefined;
+  return en ? (CONFIGURATION_REASONS[reason] ?? reason) : reason;
 }

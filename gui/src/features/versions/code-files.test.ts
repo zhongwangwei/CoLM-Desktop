@@ -559,7 +559,7 @@ test('source save state reports live conflict and read failures before a missing
   assert.ok(initializer);
   const openRef = { current: { path: 'a.F90', text: 'code' as string | null } };
   const conflictRef = { current: null as unknown };
-  const latest = { current: { message: 'explain edit' } };
+  const latest = { current: { message: 'explain edit', disabled: false } };
   const context = {
     openRef,
     conflictRef,
@@ -586,5 +586,10 @@ test('source save state reports live conflict and read failures before a missing
   assert.equal(state.saveBlockedReason, 'message');
   latest.current.message = 'resolved';
   assert.equal(state.saveBlockedReason, null);
+  assert.equal(state.canSave, true);
+  latest.current.disabled = true;
+  assert.equal(state.saveBlockedReason, 'busy');
+  assert.equal(state.canSave, false);
+  latest.current.disabled = false;
   assert.equal(state.canSave, true);
 });

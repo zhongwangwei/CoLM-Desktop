@@ -14,6 +14,16 @@ async fn command(
     request: &Value,
     revision: Option<&colm_model::VersionRef>,
 ) -> Result<Value, String> {
+    command_owned(app, server, action, request, revision, None).await
+}
+async fn command_owned(
+    app: &tauri::AppHandle,
+    server: &crate::remote::Server,
+    action: &str,
+    request: &Value,
+    revision: Option<&colm_model::VersionRef>,
+    owner: Option<crate::sidecar::ChildOwner>,
+) -> Result<Value, String> {
     let cache = app
         .path()
         .app_cache_dir()
@@ -42,7 +52,21 @@ async fn command(
     ];
     let result = async {
         crate::model::options(&mut args, revision)?;
-        crate::remote::ssh_cli_json(args, crate::remote::resource_dir(app), Some(server)).await
+        match owner {
+            Some(owner) => {
+                crate::remote::ssh_cli_json_owned(
+                    args,
+                    crate::remote::resource_dir(app),
+                    Some(server),
+                    owner,
+                )
+                .await
+            }
+            None => {
+                crate::remote::ssh_cli_json(args, crate::remote::resource_dir(app), Some(server))
+                    .await
+            }
+        }
     }
     .await;
     let _ = std::fs::remove_file(path);
@@ -376,7 +400,8 @@ async fn finish_locally(
     }
 
     crate::model::bind_new_case(local, model_revision.cloned(), creation).await?;
-    let preview = crate::model::model_case_context(local.clone(), model_revision.cloned()).await?;
+    let preview =
+        crate::model::model_case_context_unleased(local.clone(), model_revision.cloned()).await?;
     let preview_dir = PathBuf::from(&preview.entry.dir);
     let _preview_cleanup = PreviewCleanup(preview_dir.clone());
     let doc = colm_namelist::parse(
@@ -475,12 +500,16 @@ pub async fn remote_create_case(
         model_revision.as_ref(),
     )
     .await?;
-    let generated = match command(
+    prepared.creation.check()?;
+    let owner =
+        crate::sidecar::ChildOwner::RemoteCreation(crate::sidecar::creation_key(&prepared.local)?);
+    let generated = match command_owned(
         &app,
         &server,
         "remote-case-create",
         &prepared.request,
         model_revision.as_ref(),
+        Some(owner.clone()),
     )
     .await
     {
@@ -495,7 +524,15 @@ pub async fn remote_create_case(
     }
     let result = async {
         let publish = finish_locally(&host, &prepared, &generated, model_revision.as_ref()).await?;
-        command(&app, &server, "remote-case-publish", &publish, None).await?;
+        command_owned(
+            &app,
+            &server,
+            "remote-case-publish",
+            &publish,
+            None,
+            Some(owner),
+        )
+        .await?;
         Ok(())
     }
     .await;
@@ -560,11 +597,14 @@ pub async fn remote_create_cases(
             json!({"batch":batch,"stage":stage,"done":done,"total":total}),
         );
     };
-    batches
-        .0
-        .lock()
-        .map_err(|_| "batch registry poisoned")?
-        .insert(batch.clone(), (false, Vec::new()));
+    {
+        let mut registry = batches.0.lock().map_err(|_| "batch registry poisoned")?;
+        if registry.contains_key(&batch) {
+            return Err("case creation batch is already running".into());
+        }
+        crate::sidecar::allow_remote_creation(&format!("batch:{batch}"));
+        registry.insert(batch.clone(), (false, Vec::new()));
+    }
     let cancelled = || {
         batches
             .0
@@ -611,17 +651,25 @@ pub async fn remote_create_cases(
     progress("server", 0);
     let generated = if prepared.is_empty() {
         Vec::new()
+    } else if cancelled() {
+        prepared
+            .iter()
+            .map(|_| Err("case creation cancelled".into()))
+            .collect()
     } else {
         let items = prepared
             .iter()
             .map(|(_, item)| item.request.clone())
             .collect::<Vec<_>>();
-        match command(
+        match command_owned(
             &app,
             &server,
             "remote-case-create-batch",
             &json!({ "items": items }),
             model_revision.as_ref(),
+            Some(crate::sidecar::ChildOwner::RemoteCreation(format!(
+                "batch:{batch}"
+            ))),
         )
         .await
         .and_then(|output| batch_results(&output, prepared.len()))
@@ -675,13 +723,21 @@ pub async fn remote_create_cases(
         .collect::<Vec<_>>();
     let mut published = if ready.is_empty() {
         Vec::new()
+    } else if cancelled() {
+        ready
+            .iter()
+            .map(|_| Err("case creation cancelled".into()))
+            .collect()
     } else {
-        match command(
+        match command_owned(
             &app,
             &server,
             "remote-case-publish-batch",
             &json!({ "items": ready }),
             None,
+            Some(crate::sidecar::ChildOwner::RemoteCreation(format!(
+                "batch:{batch}"
+            ))),
         )
         .await
         .and_then(|output| batch_results(&output, ready.len()))
@@ -738,6 +794,7 @@ pub async fn remote_create_cases(
     progress("done", total);
     if let Ok(mut registry) = batches.0.lock() {
         registry.remove(&batch);
+        crate::sidecar::allow_remote_creation(&format!("batch:{batch}"));
     }
     Ok(outcomes
         .into_iter()
@@ -765,7 +822,8 @@ pub async fn remote_create_cases_cancel(
     };
     let creations = creations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::sidecar::cancel_creations(&creations, &dirs)
+        let stopped = crate::sidecar::cancel_remote_creation_children(&format!("batch:{batch}"))?;
+        crate::sidecar::cancel_creations(&creations, &dirs).map(|local| local + stopped)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -783,7 +841,7 @@ pub(crate) async fn sync_case(app: &tauri::AppHandle, dir: &str) -> Result<(), S
         return Ok(());
     };
     let server = crate::remote::server_for(app.clone(), &host)?;
-    let preview = crate::model::model_case_context(dir.to_owned(), None).await?;
+    let preview = crate::model::model_case_context_unleased(dir.to_owned(), None).await?;
     let preview_dir = PathBuf::from(&preview.entry.dir);
     let _preview_cleanup = PreviewCleanup(preview_dir.clone());
     let source_dir = PathBuf::from(dir);

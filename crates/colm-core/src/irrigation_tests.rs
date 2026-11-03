@@ -168,3 +168,12 @@ fn campbell_groundwater_withdrawal_keeps_the_column_water_balance() {
     assert!((before - after - state.groundwater_supply_mm).abs() < 1.0e-9);
     assert!(zwt > 0.4);
 }
+
+#[test]
+fn local_clock_matches_fortran_rounded_time_zones() {
+    assert_eq!(local_seconds(0, 113.5), 28_800.0);
+    assert_eq!(local_seconds(0, -113.5), 57_600.0);
+    assert_eq!(local_seconds(0, 7.5), 3600.0);
+    assert_eq!(local_seconds(0, -7.5), 82_800.0);
+    assert_eq!(local_seconds(57_600, 113.5), 0.0);
+}

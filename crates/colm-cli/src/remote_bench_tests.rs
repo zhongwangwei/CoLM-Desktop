@@ -836,8 +836,8 @@ fn only_a_confirmed_terminal_job_frees_the_stale_placeholder() {
     // Unknown 不能一律当终态：作业目录还在，可能只是这次查不到，宁可拒绝。
     let unknown = job_report("unknown", None, false, false);
     assert!(active_job_refusal("bench-run-1", &unknown, true).is_some());
-    // 作业目录都没有：占位是提交在 mkdir 与 submit 之间崩掉的残留，可以清掉。
-    assert_eq!(active_job_refusal("bench-run-1", &unknown, false), None);
+    // A fresh claim also has no job directory: only fenced stale recovery may free it.
+    assert!(active_job_refusal("bench-run-1", &unknown, false).is_some());
 }
 
 #[test]
@@ -851,7 +851,7 @@ fn only_a_provably_absent_job_may_be_reclaimed_by_the_grace_rule() {
         &job_report("unknown", None, false, false),
         true
     ));
-    assert!(abandoned_placeholder(
+    assert!(!abandoned_placeholder(
         &job_report("lost", None, false, false),
         true
     ));
@@ -1162,8 +1162,10 @@ fn the_active_job_lock_serialises_two_writers() {
     let project = base.join("projects/x");
     std::fs::create_dir_all(&project).unwrap();
     let project_text = project.to_string_lossy().into_owned();
+    // 放大 mkdir 到写 owner 的窗口，让另一进程一定有机会检查尚未写完的锁。
     let script = format!(
         r#"{helpers}
+date() {{ sleep 0.15; command date "$@"; }}
 hold() {{
   if ! _colm_lock_acquire; then echo timeout; exit 1; fi
   if ! mkdir '{project}/guard' 2>/dev/null; then echo BROKEN; fi
@@ -1184,6 +1186,26 @@ wait
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// 写 owner 时可能只来得及写令牌；缺时间不代表从 Unix epoch 起就持有锁。
+#[cfg(unix)]
+#[test]
+fn a_fresh_incomplete_owner_is_not_reclaimed() {
+    let base = temp_dir("lock-incomplete");
+    let project = base.join("projects/x");
+    let lock = project.join(".active-job.lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("owner"), "writing-token\n").unwrap();
+    let script = format!(
+        "{}\nif _colm_lock_acquire; then echo STOLEN; _colm_lock_release; else echo timeout; fi\n",
+        lock_helpers(&project.to_string_lossy(), "contender")
+    );
+    let (success, out, err) = bash_script(&script);
+    assert!(success, "{err}");
+    assert_eq!(out.trim(), "timeout");
+    assert_eq!(read(&lock.join("owner")), "writing-token\n");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// 进程被 SIGKILL 留下的锁（owner 时间很旧）要能被下一次提交回收；刚写的锁不能抢。
 #[cfg(unix)]
 #[test]
@@ -1195,7 +1217,21 @@ fn a_dead_holder_does_not_wedge_the_active_job_lock() {
     let lock = project.join(".active-job.lock");
     std::fs::create_dir_all(&lock).unwrap();
     let now = unix_now();
-    std::fs::write(lock.join("owner"), format!("dead-token\n{}\n", now - 120)).unwrap();
+    let mut exited = Command::new("true").spawn().unwrap();
+    let dead_pid = exited.id();
+    exited.wait().unwrap();
+    let host = bash_script("uname -n").1;
+    let namespace = bash_script("readlink /proc/self/ns/pid 2>/dev/null || uname -s").1;
+    std::fs::write(
+        lock.join("owner"),
+        format!(
+            "dead-token\n{}\n{dead_pid}\n{}\n{}\n",
+            now - 120,
+            host.trim(),
+            namespace.trim()
+        ),
+    )
+    .unwrap();
     let intent = submit_intent("bench-run-9", now, "cfg");
     let claim = bash_script(&acquire_script(&project_text, "bench-run-9", &intent));
     assert_eq!(claim.1.trim(), "acquired", "{}", claim.2);
@@ -2266,4 +2302,221 @@ fn a_failed_status_query_never_releases_the_placeholder() {
         "{error}"
     );
     assert!(project.join(".active-job").exists(), "查询失败不释放占位");
+}
+
+#[cfg(unix)]
+#[test]
+fn delayed_submission_cannot_dispatch_after_its_claim_was_recovered() {
+    let sb = StatusSandbox::new("delayed-submit-fence");
+    sb.stub(
+        "sbatch",
+        "printf '%s\\n' \"$PWD\" >> \"$STUBS/dispatches\"; echo 4242",
+    );
+    let base = sb.work();
+    let project = format!("{base}/openbench/projects/x");
+    let first = "bench-run-first";
+    let second = "bench-run-second";
+    let claim = |id: &str| acquire_script(&project, id, &submit_intent(id, unix_now(), "cfg"));
+    assert_eq!(sb.run(&claim(first)).0.trim(), "acquired");
+    let spec = Spec {
+        scheduler: Scheduler::Slurm,
+        resources: Resources {
+            cpus: 1,
+            ..Resources::default()
+        },
+        name: "bench-fence".into(),
+    };
+    let script = |id: &str| {
+        let (before, after) = submission_fence(&project, id);
+        job::fenced_submit_script(&base, id, "true", &spec, &before, &after).unwrap()
+    };
+    let delayed_first = script(first);
+    assert_eq!(
+        sb.run(&release_unsubmitted_script(&project, &base, first, true))
+            .0
+            .trim(),
+        "kept"
+    );
+    assert!(
+        sb.run(&format!(
+            "touch -t 200001010000 {}",
+            quote(&placeholder_path(&project))
+        ))
+        .2
+    );
+    assert_eq!(
+        sb.run(&release_unsubmitted_script(&project, &base, first, true))
+            .0
+            .trim(),
+        "released"
+    );
+    assert_eq!(sb.run(&claim(second)).0.trim(), "acquired");
+    let second_result = sb.run(&script(second));
+    assert!(second_result.2, "{}", second_result.1);
+    let first_result = sb.run(&delayed_first);
+    assert!(
+        !first_result.2,
+        "a recovered claimant dispatched: {}",
+        first_result.0
+    );
+    assert!(
+        first_result.1.contains("claim changed"),
+        "{}",
+        first_result.1
+    );
+    assert!(!Path::new(&job::job_dir(&base, first)).exists());
+    assert_eq!(read(&sb.bin.join("dispatches")).lines().count(), 1);
+    assert_eq!(
+        read(&Path::new(&placeholder_path(&project)).join("id")).trim(),
+        second
+    );
+    // Delayed receipt cleanup cannot remove B, and B's durable directory cannot be reclaimed.
+    assert_eq!(
+        sb.run(&release_unsubmitted_script(&project, &base, first, false))
+            .0
+            .trim(),
+        "superseded"
+    );
+    assert_eq!(
+        sb.run(&release_unsubmitted_script(&project, &base, second, false))
+            .0
+            .trim(),
+        "kept"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn job_directory_creation_prevents_reclaim_before_scheduler_acknowledges() {
+    let sb = StatusSandbox::new("created-not-acknowledged");
+    let base = sb.work();
+    let project = format!("{base}/openbench/projects/x");
+    let id = "bench-run-creating";
+    assert_eq!(
+        sb.run(&acquire_script(
+            &project,
+            id,
+            &submit_intent(id, unix_now(), "cfg")
+        ))
+        .0
+        .trim(),
+        "acquired"
+    );
+    let (before, after) = submission_fence(&project, id);
+    let script = format!(
+        "set -e\n{before}mkdir -p {}\n{after}",
+        quote(&job::job_dir(&base, id))
+    );
+    assert!(sb.run(&script).2);
+    assert!(
+        !Path::new(&format!("{project}/{ACTIVE_JOB_LOCK}")).exists(),
+        "scheduler call must not hold project lock"
+    );
+    assert!(
+        sb.run(&format!(
+            "touch -t 200001010000 {}",
+            quote(&placeholder_path(&project))
+        ))
+        .2
+    );
+    assert_eq!(
+        sb.run(&release_unsubmitted_script(&project, &base, id, true))
+            .0
+            .trim(),
+        "kept"
+    );
+    let lost = job_report("lost", None, false, false);
+    assert!(active_job_refusal(id, &lost, true).is_some());
+    assert!(!abandoned_placeholder(&lost, true));
+}
+
+#[cfg(unix)]
+#[test]
+fn old_placeholder_without_a_fence_is_not_assumed_safe_to_reclaim() {
+    let base = temp_dir("legacy-claim");
+    let project = base
+        .join("openbench/projects/x")
+        .to_string_lossy()
+        .into_owned();
+    let id = "bench-run-old";
+    let legacy_intent = format!("{{\n  \"id\": \"{id}\"\n}}\n");
+    assert_eq!(
+        bash_script(&acquire_script(&project, id, &legacy_intent))
+            .1
+            .trim(),
+        "acquired"
+    );
+    assert!(
+        bash_script(&format!(
+            "touch -t 200001010000 {}",
+            quote(&placeholder_path(&project))
+        ))
+        .0
+    );
+    assert_eq!(
+        bash_script(&release_unsubmitted_script(
+            &project,
+            &base.to_string_lossy(),
+            id,
+            true
+        ))
+        .1
+        .trim(),
+        "kept"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_live_but_slow_lock_holder_is_never_stolen_by_its_timestamp() {
+    let base = temp_dir("live-stale-lock");
+    let project = base.join("projects/x");
+    let lock = project.join(ACTIVE_JOB_LOCK);
+    std::fs::create_dir_all(&lock).unwrap();
+    let host = bash_script("uname -n").1;
+    let owner = format!(
+        "live-holder\n{}\n{}\n{}\n{}\n",
+        unix_now() - 120,
+        std::process::id(),
+        host.trim(),
+        bash_script("readlink /proc/self/ns/pid 2>/dev/null || uname -s")
+            .1
+            .trim()
+    );
+    std::fs::write(lock.join("owner"), &owner).unwrap();
+    let (ok, out, error) = bash_script(&format!(
+        "{}\nif _colm_lock_acquire; then echo STOLEN; _colm_lock_release; else echo blocked; fi",
+        lock_helpers(&project.to_string_lossy(), "contender")
+    ));
+    assert!(ok, "{error}");
+    assert_eq!(out.trim(), "blocked");
+    assert_eq!(read(&lock.join("owner")), owner);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_different_pid_namespace_cannot_prove_the_lock_owner_dead() {
+    let base = temp_dir("foreign-namespace-lock");
+    let project = base.join("projects/x");
+    let lock = project.join(ACTIVE_JOB_LOCK);
+    std::fs::create_dir_all(&lock).unwrap();
+    let mut exited = Command::new("true").spawn().unwrap();
+    let dead_pid = exited.id();
+    exited.wait().unwrap();
+    let owner = format!(
+        "foreign-holder\n{}\n{dead_pid}\n{}\nforeign-pid-namespace\n",
+        unix_now() - 120,
+        bash_script("uname -n").1.trim()
+    );
+    std::fs::write(lock.join("owner"), &owner).unwrap();
+    let (ok, out, error) = bash_script(&format!(
+        "{}\nif _colm_lock_acquire; then echo STOLEN; _colm_lock_release; else echo blocked; fi",
+        lock_helpers(&project.to_string_lossy(), "contender")
+    ));
+    assert!(ok, "{error}");
+    assert_eq!(out.trim(), "blocked");
+    assert_eq!(read(&lock.join("owner")), owner);
+    std::fs::remove_dir_all(base).unwrap();
 }

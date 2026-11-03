@@ -7,6 +7,8 @@ use colm_numeric::Contract;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UrbanBemInput {
     pub time_step_seconds: f64,
+    /// Local step-start weekend-profile value divided by its daily maximum.
+    pub ac_usage_fraction: f64,
     pub air_density_kg_m3: f64,
     /// `[roof, sunlit wall, shaded wall]` fractional cover.
     pub cover_fraction: [f64; 3],
@@ -42,16 +44,14 @@ pub struct UrbanBemState {
     pub heating_energy_w_m2: f64,
 }
 
-/// Ports `MOD_Urban_BEM:SimpleBEM`. The upstream `Constant_AC` setting is a
-/// compile-time true constant and is retained here rather than surfaced as a
-/// speculative runtime switch.
+/// Ports `MOD_Urban_BEM:SimpleBEM` with its enabled Constant_AC and Effective_AC paths.
 pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
     validate(input)?;
     const AIR_HEAT_CAPACITY_J_KG_K: f64 = 1004.64;
     const AIR_CHANGE_PER_HOUR: f64 = 0.3;
     const ROOF_CONVECTION_W_M2_K: f64 = 4.040;
     const WALL_CONVECTION_W_M2_K: f64 = 3.076;
-    const COOLING_WASTE_FRACTION: f64 = 0.6;
+    const COOLING_WASTE_FRACTION: f64 = 0.3;
     const HEATING_WASTE_FRACTION: f64 = 0.2;
 
     let sunlit_wall_weight = input.cover_fraction[1] / input.cover_fraction[0];
@@ -138,17 +138,6 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
     let mut waste_heat_w_m2 = 0.0;
     let mut heating_energy_w_m2 = 0.0;
     let mut air_exchange_w_m2 = ventilation * (room_temperature_k - input.urban_air_temperature_k);
-    if room_temperature_k > input.room_max_temperature_k {
-        cooling_energy_w_m2 = (heat * (room_temperature_k - input.room_max_temperature_k)) / dt;
-        room_temperature_k = input.room_max_temperature_k;
-        waste_heat_w_m2 = cooling_energy_w_m2 * COOLING_WASTE_FRACTION;
-    }
-    if room_temperature_k < input.room_min_temperature_k {
-        cooling_energy_w_m2 = (heat * (room_temperature_k - input.room_min_temperature_k)) / dt;
-        room_temperature_k = input.room_min_temperature_k;
-        waste_heat_w_m2 = cooling_energy_w_m2.abs() * HEATING_WASTE_FRACTION;
-        cooling_energy_w_m2 = 0.0;
-    }
     // `Constant_AC = .true.`（`:214-244`）
     if projected_room_temperature_k > input.room_max_temperature_k
         || projected_room_temperature_k < input.room_min_temperature_k
@@ -161,7 +150,6 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
                 room_temperature_k = input.room_min_temperature_k;
                 (HEATING_WASTE_FRACTION, true)
             };
-        air_exchange_w_m2 = ventilation * (room_temperature_k - input.urban_air_temperature_k);
         // `:230` `(B(1) - A(1,4)*troom)/A(1,1)` → `.FNMA (troom, A(1,4), B(1)) / A(1,1)`
         roof_inner_temperature_k =
             (-room_temperature_k).contract(matrix[0][3], rhs[0]) / matrix[0][0];
@@ -184,11 +172,40 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
             ((shaded_wall_inner_temperature_k - room_temperature_k) * half_wall)
                 * shaded_wall_weight,
         );
-        cooling_energy_w_m2 = (roof_term + sun_term) + sha_term;
+        cooling_energy_w_m2 = ((roof_term + sun_term) + sha_term) * input.ac_usage_fraction;
+        let adjustment = ((cooling_energy_w_m2 - half_roof * (roof_inner_before - room_before))
+            - (half_wall * (sunlit_inner_before - room_before)) * sunlit_wall_weight)
+            - (half_wall * (shaded_inner_before - room_before)) * shaded_wall_weight;
+        // Effective_AC contractions follow arm64 gfortran -O2 after the three divisions.
+        let adjustment = ((half_wall * rhs[2]) / matrix[2][2]).contract(
+            shaded_wall_weight,
+            ((half_wall * rhs[1]) / matrix[1][1])
+                .contract(sunlit_wall_weight, (half_roof * rhs[0]) / matrix[0][0]),
+        ) - adjustment;
+        let denominator = (half_wall * (matrix[2][3] / matrix[2][2] + 1.0)).contract(
+            shaded_wall_weight,
+            (matrix[0][3] / matrix[0][0] + 1.0).contract(
+                half_roof,
+                (half_wall * (matrix[1][3] / matrix[1][1] + 1.0)) * sunlit_wall_weight,
+            ),
+        );
+        room_temperature_k = adjustment / denominator;
+        roof_inner_temperature_k =
+            (-room_temperature_k).contract(matrix[0][3], rhs[0]) / matrix[0][0];
+        sunlit_wall_inner_temperature_k =
+            (-room_temperature_k).contract(matrix[1][3], rhs[1]) / matrix[1][1];
+        shaded_wall_inner_temperature_k =
+            (-room_temperature_k).contract(matrix[2][3], rhs[2]) / matrix[2][2];
+        air_exchange_w_m2 = ventilation * (room_temperature_k - input.urban_air_temperature_k);
+        cooling_energy_w_m2 = cooling_energy_w_m2.abs()
+            + if heating {
+                air_exchange_w_m2.max(0.0)
+            } else {
+                (-air_exchange_w_m2).max(0.0)
+            };
         if heating {
-            heating_energy_w_m2 = cooling_energy_w_m2.abs();
+            heating_energy_w_m2 = cooling_energy_w_m2;
         }
-        cooling_energy_w_m2 = cooling_energy_w_m2.abs() + air_exchange_w_m2.abs();
         waste_heat_w_m2 = waste_fraction * cooling_energy_w_m2;
         if heating {
             cooling_energy_w_m2 = 0.0;
@@ -207,9 +224,28 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
     })
 }
 
+/// Effective_AC uses the beginning of the local timestep, like upstream's `tloc`.
+pub(crate) fn ac_usage_fraction(seconds: u32, weekend: &[f64]) -> Result<f64> {
+    ensure!(seconds <= 86_400, "urban BEM clock input is invalid");
+    ensure!(
+        weekend.len() == 24
+            && weekend
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0),
+        "urban BEM needs 24 finite nonnegative AC profile values"
+    );
+    let maximum = weekend.iter().copied().fold(0.0_f64, f64::max);
+    // Disabled LUCY writes an all-zero table; retain constant AC rather than evaluate 0/0.
+    if maximum == 0.0 {
+        return Ok(1.0);
+    }
+    Ok(weekend[(seconds % 86_400 / 3600) as usize] / maximum)
+}
+
 fn validate(input: UrbanBemInput) -> Result<()> {
     for value in [
         input.time_step_seconds,
+        input.ac_usage_fraction,
         input.air_density_kg_m3,
         input.building_height_m,
         input.room_max_temperature_k,
@@ -233,6 +269,7 @@ fn validate(input: UrbanBemInput) -> Result<()> {
     }
     ensure!(
         input.time_step_seconds > 0.0
+            && (0.0..=1.0).contains(&input.ac_usage_fraction)
             && input.air_density_kg_m3 > 0.0
             && input.building_height_m > 0.0
             && input.room_max_temperature_k >= input.room_min_temperature_k

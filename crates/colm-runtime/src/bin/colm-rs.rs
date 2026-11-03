@@ -5621,6 +5621,9 @@ fn mark_history_restart_with_river(
                 .map_or(1, |dimension| dimension.len());
             marker.put_values(&vec![0.0; patches], ..)?;
         }
+        primary
+            .close()
+            .with_context(|| format!("cannot close {}", restart.display()))?;
         return Ok(());
     }
     let mut windows = history
@@ -5705,6 +5708,9 @@ fn mark_history_restart_with_river(
             .add_variable::<f64>("history_sidecar_required", &["patch"])?
             .put_values(&vec![1.0; patches], ..)?,
     }
+    primary
+        .close()
+        .with_context(|| format!("cannot close {}", restart.display()))?;
     Ok(())
 }
 

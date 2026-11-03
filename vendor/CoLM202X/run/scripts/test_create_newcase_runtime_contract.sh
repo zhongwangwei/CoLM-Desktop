@@ -127,7 +127,9 @@ if grep -Eq '^\$IsDef(PFT|PC|BGC|LuLCC|Urban|CB|VG)[[:space:]]+' "${SCRIPT_DIR}/
   exit 1
 fi
 
-grep -q "CASE ('off', '126', '245', '370', '585')" "${ROOT}/share/MOD_Namelist.F90"
+for ssp in off 126 245 370 585; do
+  grep -Fq "CASE ('${ssp}')" "${ROOT}/main/MOD_MonthlyinSituCO2MaunaLoa.F90"
+done
 grep -q "Fatal ERROR: unknown DEF_SSP=" "${ROOT}/main/MOD_MonthlyinSituCO2MaunaLoa.F90"
 if grep -q 'unknown DEF_SSP; future CO2 held' "${ROOT}/main/MOD_MonthlyinSituCO2MaunaLoa.F90"; then
   echo "unknown DEF_SSP still silently falls back to fixed CO2" >&2

@@ -80,6 +80,8 @@ pub struct SinglePointPftData {
     pub class: Vec<i32>,
     pub fraction: Vec<f64>,
     pub canopy_height_m: Vec<f64>,
+    pub canopy_bottom_height_m: Option<Vec<f64>>,
+    pub crown_aspect_ratio: Option<Vec<f64>>,
     /// `CROP` only: one unnormalized crop fraction per packed CFT patch.
     pub crop_fraction: Option<Vec<f64>>,
     /// `ncd_pfts`/`ncw_pfts`/`bcw_pfts`（截留方案 8 时 `MOD_SingleSrfdata` 写进 srfdata），按同样的
@@ -365,7 +367,20 @@ pub fn read_single_point_pft_data(path: impl AsRef<Path>) -> Result<SinglePointP
     let raw_pfts = class.len();
     let lai = pft_monthly_vector(&file, "LAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
     let sai = pft_monthly_vector(&file, "SAI_pfts_monthly", years.len(), raw_pfts, &indices)?;
+    let optional_crown = |name: &str| -> Result<Option<Vec<f64>>> {
+        if file.variable(name).is_none() {
+            return Ok(None);
+        }
+        let values = vector(&file, name)?;
+        ensure!(
+            values.len() == raw_pfts,
+            "{name} length must match {raw_pfts} PFTs"
+        );
+        Ok(Some(indices.iter().map(|&index| values[index]).collect()))
+    };
     Ok(SinglePointPftData {
+        canopy_bottom_height_m: optional_crown("canopy_bottom_height_pfts")?,
+        crown_aspect_ratio: optional_crown("crown_aspect_ratio_pfts")?,
         class: indices.iter().map(|&index| class[index]).collect(),
         fraction,
         canopy_height_m: indices

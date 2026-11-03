@@ -26,7 +26,7 @@ import {
 } from './project-model';
 
 export default function ProjectPage() {
-  const { state, update, navigate, openCase, refreshVersions, notify } = useApp();
+  const { state, update, navigate, openCase, refreshVersions, retryStartup, notify } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [roots, setRoots] = useState<string[]>([]),
@@ -221,6 +221,7 @@ export default function ProjectPage() {
   }
   async function loadProject(root: string) {
     const cases = await invoke<CaseEntry[]>('list_cases', { root });
+    for (const entry of cases) if (entry.history_warning) notify(entry.history_warning, true);
     const next = rememberProject(shownRoots, root);
     // 记"最近的项目"只是方便：recent.json 坏了也照样打开项目，只提示一句（和 openCase 同一条规矩）。
     // 原来写不进就中止打开，openRecent 再把好好的项目当成"目录已删"从列表里拿掉（GUI 审查 2026-10-22，P1-4）。
@@ -284,6 +285,9 @@ export default function ProjectPage() {
     if (!navigate('new-case')) return false;
     update({
       newCaseSeed: null,
+      version: state.version,
+      versionRef: state.versionRef,
+      chosenVersion: state.chosenVersion,
       root: '',
       cases: [],
       selectedCase: null,
@@ -684,6 +688,14 @@ export default function ProjectPage() {
               : t('正在读取模型版本…', 'Loading the model version…')}
           </p>
         </div>
+        {!modelChosen && (
+          <ActionButton
+            action="project-retry-startup"
+            label={t('重试读取模型版本', 'Retry loading model versions')}
+            disabled={busy || state.starting}
+            run={retryStartup}
+          />
+        )}
         <div className="project-actions">
           <ActionButton
             action="project-new-simulation"

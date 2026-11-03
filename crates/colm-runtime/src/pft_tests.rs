@@ -78,3 +78,87 @@ fn a_hybrid_vmax25_override_reaches_the_pft_parameters() {
     let plain = pft_parameters_uncached(&document, 2, false, true, &interfaces).unwrap();
     assert_ne!(format!("{changed:?}"), format!("{plain:?}"));
 }
+
+#[test]
+fn pc_restart_crown_ratio_reaches_runtime_parameters_and_rs_never_silently_defaults() {
+    let root = std::env::temp_dir().join(format!("colm-pc-runtime-crown-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let time = root.join("time.nc");
+    let mut file = netcdf::create(&time).unwrap();
+    for (name, count) in [("pft", 1), ("band", 2), ("rtyp", 2)] {
+        file.add_dimension(name, count).unwrap();
+    }
+    for name in PFT_VECTORS {
+        file.add_variable::<f64>(name, &["pft"])
+            .unwrap()
+            .put_values(&[1.0], ..)
+            .unwrap();
+    }
+    for name in ["ssun_p", "ssha_p"] {
+        file.add_variable::<f64>(name, &["pft", "band", "rtyp"])
+            .unwrap()
+            .put_values(&[0.1; 4], (.., .., ..))
+            .unwrap();
+    }
+    file.close().unwrap();
+    let constant = root.join("constant.nc");
+    let missing = root.join("missing.nc");
+    for (path, ratio) in [(&constant, Some(0.5)), (&missing, None)] {
+        let mut file = netcdf::create(path).unwrap();
+        file.add_dimension("pft", 1).unwrap();
+        file.add_variable::<i32>("pftclass", &["pft"])
+            .unwrap()
+            .put_values(&[1], ..)
+            .unwrap();
+        for (name, value) in [("pftfrac", 1.0), ("htop_p", 20.0), ("hbot_p", 6.0)] {
+            file.add_variable::<f64>(name, &["pft"])
+                .unwrap()
+                .put_values(&[value], ..)
+                .unwrap();
+        }
+        if let Some(ratio) = ratio {
+            file.add_variable::<f64>("cratio_p", &["pft"])
+                .unwrap()
+                .put_values(&[ratio], ..)
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    let source = "&nl_colm\n DEF_USE_PC=.true.\n DEF_USE_PFT=.false.\n DEF_USE_LCT=.false.\n DEF_USE_Campbell_SOIL_MODEL=.true.\n DEF_USE_PLANTHYDRAULICS=.false.\n DEF_Interception_scheme=1\n/\n";
+    let document = colm_namelist::parse(source).unwrap();
+    let physics = crate::physics::land_physics_parameters(
+        &document,
+        colm_core::LandCoverScheme::Igbp,
+        crate::physics::ObservationHeights {
+            wind_m: 10.0,
+            temperature_m: 2.0,
+            humidity_m: 2.0,
+            mode: colm_core::ObservationHeightMode::Absolute,
+        },
+    )
+    .unwrap();
+    let interfaces = colm_core::colm_soil_grid(10).unwrap().interface_depth_m;
+    let read = |path: &Path, doc: &Document| {
+        PftTemplate::read(path, &time, doc, &physics, &interfaces, 0, None)
+    };
+    assert_eq!(
+        read(&constant, &document).unwrap().initial.parameters[0].crown_aspect_ratio,
+        0.5
+    );
+    assert_eq!(
+        read(&missing, &document).unwrap().initial.parameters[0].crown_aspect_ratio,
+        1.0
+    );
+    let observed =
+        colm_namelist::parse(&source.replace("/\n", " DEF_RS_CROWN_STRUCTURE=.true.\n/\n"))
+            .unwrap();
+    assert!(read(&missing, &observed)
+        .unwrap_err()
+        .to_string()
+        .contains("cratio_p"));
+    assert_eq!(
+        read(&constant, &observed).unwrap().initial.parameters[0].crown_aspect_ratio,
+        0.5
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

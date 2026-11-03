@@ -837,5 +837,10 @@ fn ground_albedo_mixing_fuses_the_soil_product() {
         f64::from_bits(0x3FE25E5387F4A59A),
         (1.0 - f64::from_bits(0x3FE25E5387F4A59A)) * soil[1][0],
     );
-    assert_ne!(mixed[1][0].to_bits(), old_formula.to_bits());
+    if colm_numeric::FUSED {
+        assert_ne!(mixed[1][0].to_bits(), old_formula.to_bits());
+    } else {
+        // x86 默认不融合，交换乘积不会改变这组输入的舍入结果。
+        assert_eq!(mixed[1][0].to_bits(), old_formula.to_bits());
+    }
 }

@@ -352,7 +352,7 @@ fn model_schemes_expose_complete_discrete_choices_to_the_gui() {
             "DEF_THERMAL_CONDUCTIVITY_SCHEME",
             &["1", "2", "3", "4", "5", "6", "7", "8"],
         ),
-        ("DEF_RSS_SCHEME", &["0", "1", "2", "3", "4", "5"]),
+        ("DEF_RSS_SCHEME", &["0", "1", "2", "3", "4", "5", "6"]),
         ("DEF_Runoff_SCHEME", &["0", "1", "2", "3"]),
         ("DEF_TOPMOD_method", &["0", "1", "2"]),
         ("DEF_NDEP_FREQUENCY", &["1", "2"]),

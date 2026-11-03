@@ -65,7 +65,20 @@ if ! command -v cargo-zigbuild >/dev/null 2>&1; then
   cargo install cargo-zigbuild --locked
 fi
 
-SOURCE_ID=$(cd "$SRC" && cat .colm-snapshot-id 2>/dev/null || echo unknown)
+source_id() {
+  cargo run --quiet --locked --manifest-path "$SRC/xtask/Cargo.toml" -- engine-source-id "$SRC"
+}
+SOURCE_ID=$(source_id)
+echo "== source snapshot $SOURCE_ID"
+if [[ ! "$SOURCE_ID" =~ ^[0-9a-f]{16}$ ]]; then
+  echo "invalid engine source identity: $SOURCE_ID" >&2; exit 2
+fi
+if [ -f "$SRC/.colm-snapshot-id" ]; then
+  expected=$(cat "$SRC/.colm-snapshot-id")
+  if [ "$expected" != "$SOURCE_ID" ]; then
+    echo "engine source differs from its uploaded snapshot ($expected != $SOURCE_ID)" >&2; exit 2
+  fi
+fi
 for arch in "$@"; do
   case "$arch" in
     x86_64|aarch64) ;;
@@ -80,6 +93,9 @@ for arch in "$@"; do
       --target "$triple.$GLIBC" \
       -p colm-cli --bin colm-cli -p colm-srfdata --bin mksrfdata-rs \
       -p colm-init --bin mkinidata-rs -p colm-runtime --bin colm-rs
+  if [ "$(source_id)" != "$SOURCE_ID" ]; then
+    echo "engine source changed during compilation; refusing to publish" >&2; exit 2
+  fi
   stage="$OUT/stage-$arch"
   rm -rf "$stage"; mkdir -p "$stage/bin"
   for b in colm-cli mksrfdata-rs mkinidata-rs colm-rs; do

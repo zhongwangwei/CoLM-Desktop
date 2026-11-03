@@ -210,6 +210,7 @@ pub fn confirmed_status(status: &str) -> bool {
             | "completed"
             | "completed_with_failures"
             | "cancelled"
+            | "interrupted"
             | "ui_succeeded"
             | "ui_failed"
             | "paused"
@@ -280,6 +281,8 @@ impl OperationView {
 pub struct History {
     connection: Connection,
 }
+const SCHEMA_VERSION: i64 = 1;
+
 impl History {
     pub fn open_default() -> Result<Self> {
         Self::open(default_db_path()?)
@@ -314,7 +317,10 @@ impl History {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .context("lock operation ledger schema")?;
-        transaction.execute_batch("CREATE TABLE IF NOT EXISTS history_events (
+        let schema_version: i64 =
+            transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version < SCHEMA_VERSION {
+            transaction.execute_batch("CREATE TABLE IF NOT EXISTS history_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
                 operation_id TEXT NOT NULL, payload TEXT NOT NULL CHECK(json_valid(payload)));
             CREATE INDEX IF NOT EXISTS history_operation ON history_events(operation_id,seq);
@@ -337,7 +343,9 @@ impl History {
                 BEGIN SELECT RAISE(ABORT,'history is append-only'); END;
             CREATE TRIGGER IF NOT EXISTS history_no_delete BEFORE DELETE ON history_events
                 BEGIN SELECT RAISE(ABORT,'history is append-only'); END;
-            CREATE VIEW IF NOT EXISTS history_operations AS
+            DROP VIEW IF EXISTS history_visible_operations;
+            DROP VIEW IF EXISTS history_operations;
+            CREATE VIEW history_operations AS
                 SELECT e.payload, e.operation_id,
                 COALESCE((SELECT min(json_extract(s.payload,'$.time_ms')) FROM history_events s
                     WHERE s.operation_id=e.operation_id AND json_extract(s.payload,'$.phase')='started'),
@@ -349,7 +357,7 @@ impl History {
                 (SELECT count(*) FROM history_events s WHERE s.operation_id=e.operation_id) event_count,
                 CASE WHEN json_extract(e.payload,'$.phase')='finished' THEN 0
                     WHEN json_extract(e.payload,'$.phase')='imported' AND json_extract(e.payload,'$.status')
-                        IN ('succeeded','failed','completed','completed_with_failures','cancelled') THEN 0 ELSE 1 END needs_reconciliation
+                        IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted') THEN 0 ELSE 1 END needs_reconciliation
                 FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);
             CREATE TABLE IF NOT EXISTS history_removed_operations (
                 operation_id TEXT PRIMARY KEY NOT NULL, removed_ms INTEGER NOT NULL);
@@ -357,6 +365,8 @@ impl History {
                 SELECT * FROM history_operations
                 WHERE operation_id NOT IN (SELECT operation_id FROM history_removed_operations);")
             .context("initialize operation ledger schema")?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         transaction
             .commit()
             .context("commit operation ledger schema")?;
@@ -457,7 +467,7 @@ impl History {
             "INSERT INTO history_removed_operations(operation_id,removed_ms)
              SELECT operation_id,?2 FROM history_operations WHERE operation_id=?1
              AND needs_reconciliation=0 AND json_extract(payload,'$.status')
-                 IN ('succeeded','failed','completed','completed_with_failures','cancelled','ui_succeeded','ui_failed','paused','needs_review')
+                 IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted','ui_succeeded','ui_failed','paused','needs_review')
              ON CONFLICT(operation_id) DO NOTHING",
             params![operation_id, now_ms()],
         )?;

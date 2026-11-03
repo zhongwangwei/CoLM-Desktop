@@ -57,8 +57,9 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           gui_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' gui/src-tauri/Cargo.toml | head -1)
           tauri_version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)
-          if [[ -z "$version" || "$version" != "$gui_version" || "$version" != "$tauri_version" ]]; then
-            echo "::error::Release versions disagree: workspace=$version gui=$gui_version tauri=$tauri_version"
+          ui_version=$(node -p "require('./gui/package.json').version")
+          if [[ -z "$version" || "$version" != "$gui_version" || "$version" != "$tauri_version" || "$version" != "$ui_version" ]]; then
+            echo "::error::Release versions disagree: workspace=$version gui=$gui_version tauri=$tauri_version package.json=$ui_version"
             exit 1
           fi
 
@@ -112,6 +113,9 @@ jobs:
         run: |
           set -euo pipefail
           scripts/build-engine-linux.sh "$PWD" "$RUNNER_TEMP/engine-out" "$RUNNER_TEMP/engine-tools" x86_64 aarch64
+          for archive in "$RUNNER_TEMP/engine-out"/*.tar.gz; do
+            tar -xOf "$archive" ./ENGINE | grep -Eq '^source=[0-9a-f]{16}$'
+          done
           ls -la "$RUNNER_TEMP/engine-out"/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:

@@ -2079,13 +2079,13 @@ CONTAINS
                      CALL decay_river_pool(mt_levsto(imt, i), decay_fraction, decay_src)
                   ENDIF
                ENDIF
-#ifdef CoLMDEBUG
+               IF (DEF_USE_CoLMDEBUG) THEN
                ! Only the CoLMDEBUG mass-balance check in MOD_Grid_RiverLakeFlow
                ! resets and reads this accumulator.
                IF (allocated(mt_decay_source)) THEN
                   mt_decay_source(imt, i) = mt_decay_source(imt, i) + decay_src
                ENDIF
-#endif
+               ENDIF
             ENDIF
          ENDDO
 
@@ -3416,7 +3416,6 @@ CONTAINS
    !-------------------------------------------------------------------------------------
    ! Diagnostic check: print min/max of material state variables
    !-------------------------------------------------------------------------------------
-#ifdef RangeCheck
    SUBROUTINE check_mt_state ()
 
    USE MOD_SPMD_Task
@@ -3444,6 +3443,8 @@ CONTAINS
    ! so the two can be tuned independently if the residue ever differs.
    real(r8), parameter :: mt_flux_fp_dust  = 1.0e-12_r8   ! [R*m3/s]
    real(r8), parameter :: mt_mass_neg_warn = -1.0e-6_r8
+
+      IF (.not. DEF_USE_RangeCheck) RETURN
 
       ! Workers that never ran mt_riverlake_init have no data to check.
       ! Master and IO ranks don't allocate mt_mass but MUST still enter
@@ -3612,11 +3613,7 @@ CONTAINS
       deallocate (tmp)
 
    END SUBROUTINE check_mt_state
-#else
-   SUBROUTINE check_mt_state ()
-   IMPLICIT NONE
-   END SUBROUTINE check_mt_state
-#endif
+
 
 
    !-------------------------------------------------------------------------------------

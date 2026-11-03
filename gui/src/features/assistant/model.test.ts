@@ -1426,3 +1426,21 @@ it('English history status and sync summaries use English punctuation', () => {
   assert.match(summary!.text, /; /);
   assert.doesNotMatch(JSON.stringify([lines, summary]), /[：；]/);
 });
+
+it('provider labels follow the requested language independently of their stored name', () => {
+  for (const [id, chinese, english] of [
+    ['glm', '智谱', 'Zhipu / GLM'],
+    ['qwen', '阿里云', 'Alibaba Cloud / Qwen'],
+  ]) {
+    const provider = {
+      id,
+      name: 'English startup name',
+      base_url: '',
+      model: '',
+      api_format: 'chat_completions',
+    };
+    assert.equal(providerLabel(provider, 'zh'), chinese);
+    assert.equal(providerLabel(provider, 'en'), english);
+    assert.equal(providerLabel(provider, 'zh'), chinese);
+  }
+});

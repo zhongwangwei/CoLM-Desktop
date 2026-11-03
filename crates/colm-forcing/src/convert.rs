@@ -22,9 +22,38 @@ pub fn identity(src: &Path, dst: &Path) -> Result<()> {
         bail!("forcing identity destination must differ from its source");
     }
     ensure_parent(dst)?;
-    std::fs::copy(src, dst)
-        .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
-    Ok(())
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COPY_ID: AtomicU64 = AtomicU64::new(0);
+    let name = dst
+        .file_name()
+        .context("forcing destination has no filename")?
+        .to_string_lossy();
+    let temporary = dst.with_file_name(format!(
+        ".{name}.copy-{}-{}.tmp",
+        std::process::id(),
+        COPY_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(&temporary)?;
+    let result = (|| -> Result<()> {
+        let mut input = std::fs::File::open(src)?;
+        std::io::copy(&mut input, &mut output)
+            .with_context(|| format!("cannot copy {} to {}", src.display(), dst.display()))?;
+        output.set_permissions(input.metadata()?.permissions())?;
+        output.sync_all()?;
+        drop(output);
+        crate::gapfill::install_repaired_file(&temporary, dst)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// 一个槽位怎么从源文件取。
@@ -340,6 +369,8 @@ fn convert_into(src: &Path, dst: &Path, plan: &Plan) -> Result<()> {
             out.put_values(&[val], netcdf::Extents::All)?;
         }
     }
+    fout.close()
+        .with_context(|| format!("cannot close {}", dst.display()))?;
     Ok(())
 }
 

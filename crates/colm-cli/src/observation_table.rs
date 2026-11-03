@@ -382,11 +382,10 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
                     q.put_values(&qc, ..)?;
                 }
             }
+            file.close()
+                .with_context(|| format!("cannot close {}", tmp.display()))?;
         }
-        fs::rename(&tmp, &path).or_else(|_| {
-            let _ = fs::remove_file(&path);
-            fs::rename(&tmp, &path)
-        })?;
+        install_converted_file(&tmp, &path)?;
         out.push(ConvertedSite {
             site,
             path,
@@ -401,6 +400,16 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
         });
     }
     Ok(out)
+}
+
+fn install_converted_file(temp: &Path, destination: &Path) -> Result<()> {
+    fs::rename(temp, destination).with_context(|| {
+        format!(
+            "cannot install {} as {}; previous output was left unchanged",
+            temp.display(),
+            destination.display()
+        )
+    })
 }
 
 fn inferred_choices(table: &Table) -> Vec<VariableChoice> {
@@ -643,6 +652,24 @@ impl IfEmpty for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installing_conversion_preserves_old_output_on_failure_and_replaces_on_success() {
+        let dir = std::env::temp_dir().join(format!("colm_obs_install_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("A_Flux.nc");
+        let temp = dir.join("A_Flux.nc.tmp");
+        fs::write(&destination, b"previous output").unwrap();
+
+        assert!(install_converted_file(&temp, &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"previous output");
+        fs::write(&temp, b"new output").unwrap();
+        install_converted_file(&temp, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new output");
+        assert!(!temp.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn probes_and_converts_multisite_observation_csv() {

@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::bench_runs::{LatestSuccess, RunMeta, META_FILE};
-use crate::remote::{resource_dir, scheduler_args, server_for, ssh_cli_json, Server};
+use crate::remote::{resource_dir, scheduler_args, server_for, ssh_cli_json_owned, Server};
 
 /// 拼一条 `remote-bench-*` 命令：带上这台服务器和它的工作目录。
 fn args(server: &Server, command: &str, extra: &[(&str, String)]) -> Vec<String> {
@@ -37,10 +37,11 @@ async fn call(
     extra: &[(&str, String)],
 ) -> Result<Value, String> {
     let server = server_for(app.clone(), host)?;
-    ssh_cli_json(
+    ssh_cli_json_owned(
         args(&server, command, extra),
         resource_dir(&app),
         Some(&server),
+        crate::sidecar::remote_bench_owner(host),
     )
     .await
 }
@@ -177,10 +178,21 @@ pub async fn bench_remote_job(
 pub async fn bench_remote_cancel(
     app: tauri::AppHandle,
     host: String,
-    job: String,
+    job: Option<String>,
 ) -> Result<Value, String> {
-    check_job(&job)?;
-    call(app, &host, "cancel", &[("--job", job)]).await
+    if let Some(job) = &job {
+        check_job(job)?;
+    }
+    let stop_host = host.clone();
+    let stopped = tauri::async_runtime::spawn_blocking(move || {
+        crate::sidecar::cancel_remote_bench_children(&stop_host)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    match job {
+        Some(job) => call(app, &host, "cancel", &[("--job", job)]).await,
+        None => Ok(json!({"cancelled_children": stopped})),
+    }
 }
 
 fn server_dir(dir: &str) -> Result<(), String> {
@@ -316,7 +328,13 @@ pub async fn bench_remote_run(
     });
     let mut command = args(&server, "run", &[("--json", request.to_string())]);
     command.extend(scheduler_args(&server));
-    ssh_cli_json(command, resource_dir(&app), Some(&server)).await
+    ssh_cli_json_owned(
+        command,
+        resource_dir(&app),
+        Some(&server),
+        crate::sidecar::remote_bench_owner(&host),
+    )
+    .await
 }
 
 /// 取回用的临时目录放在本机镜像的祖父目录（`openbench/`）下：与 `projects/` 同一文件系统，

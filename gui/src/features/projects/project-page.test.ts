@@ -246,6 +246,7 @@ function home() {
       openCase: () => {
         throw new Error('not requested');
       },
+      retryStartup: () => routes.push('retry-startup'),
     }),
     hasBackend: () => false,
     useEffect: (effect: () => unknown) => effects.push(effect),
@@ -468,6 +469,20 @@ test('the loaded official model is usable at once; choosing another version is o
       'tasks wait while the selected revision is still being read',
     );
 });
+test('new simulation preserves the model revision selected in the old project', async () => {
+  const page = home();
+  const selected = { id: 'soil', revision: 2 };
+  page.state.root = '/previous-project';
+  page.state.versionRef = selected;
+  page.state.chosenVersion = selected;
+  page.state.version = { version: selected, name: 'Soil model' };
+  page.render();
+  await page.click('project-new-simulation');
+  assert.equal(page.state.root, '');
+  assert.deepEqual(page.state.versionRef, selected);
+  assert.deepEqual(page.state.chosenVersion, selected);
+});
+
 test('opening a project goes to the history, where it is chosen', async () => {
   const page = home();
   page.render();
@@ -762,4 +777,13 @@ test('version dialog hides the page behind it and never offers deletions to the 
   assert.ok(!ids.includes('project-new-simulation'), 'the page behind the dialog is hidden');
   // 删除版本、清理旧官方版属于 D 级，只在界面上做（docs/design-ai-assistant.md）。
   assert.ok(!ids.some((id) => id.includes('delete') || id.includes('cleanup')));
+});
+
+test('the degraded project home offers a model loading retry', async () => {
+  const page = home();
+  page.state.versionRef = { id: 'missing', revision: 1 };
+  const contract = page.render();
+  assert.ok(contract.actions.some((action) => action.id === 'project-retry-startup'));
+  await page.click('project-retry-startup');
+  assert.deepEqual(page.routes, ['retry-startup']);
 });

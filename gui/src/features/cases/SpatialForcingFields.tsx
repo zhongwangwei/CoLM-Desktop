@@ -76,7 +76,7 @@ export default function SpatialForcingFields({
             >
               <option value="">
                 {currentDataset
-                  ? `${t('保留当前配置', 'Keep current configuration')}（${currentDataset}）`
+                  ? `${t('保留当前配置', 'Keep current configuration')}${t('（', ' (')}${currentDataset}${t('）', ')')}`
                   : t('等待识别或手动选择', 'Identify or select manually')}
               </option>
               {datasets.map((name) => (
@@ -119,9 +119,9 @@ export default function SpatialForcingFields({
                   'The directory listing is incomplete. Confirm the dataset manually.',
                 )
               : probe.candidates.length === 1
-                ? `${t('已识别文件布局', 'Identified file layout')}：${probe.candidates[0]}`
+                ? `${t('已识别文件布局', 'Identified file layout')}${t('：', ': ')}${probe.candidates[0]}`
                 : probe.candidates.length > 1
-                  ? `${t('匹配多个模板，请确认数据集', 'Multiple templates match; confirm the dataset')}：${probe.candidates.join('、')}`
+                  ? `${t('匹配多个模板，请确认数据集', 'Multiple templates match; confirm the dataset')}${t('：', ': ')}${probe.candidates.join(t('、', ', '))}`
                   : t(
                       '未匹配内置模板，请确认配置或选择其他数据集。',
                       'No built-in layout matched. Check the configuration or select another dataset.',
@@ -131,8 +131,8 @@ export default function SpatialForcingFields({
         {currentDataset === undefined && probe?.status === 'done' && (
           <p className="field-hint">
             {probe.coverage
-              ? `${t('已读取强迫场时间覆盖', 'Read forcing time coverage')}：${probe.coverage.start} — ${probe.coverage.end}`
-              : `${t('未读取到时间覆盖，请手动设置模拟日期', 'Time coverage unavailable; enter simulation dates manually')}${probe.coverage_error ? `：${probe.coverage_error}` : ''}`}
+              ? `${t('已读取强迫场时间覆盖', 'Read forcing time coverage')}${t('：', ': ')}${probe.coverage.start} — ${probe.coverage.end}`
+              : `${t('未读取到时间覆盖，请手动设置模拟日期', 'Time coverage unavailable; enter simulation dates manually')}${probe.coverage_error ? `${t('：', ': ')}${probe.coverage_error}` : ''}`}
           </p>
         )}
         <p className="field-hint">

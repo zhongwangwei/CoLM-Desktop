@@ -362,6 +362,7 @@ impl SyntheticRestart {
             2005,
             "w180_s90",
             crate::ConstantRestartInput {
+                pc_crown_aspect_ratio: None,
                 dimensions,
                 compression_level: 1,
                 patch: RestartPatchFields {

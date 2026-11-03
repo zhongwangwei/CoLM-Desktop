@@ -139,9 +139,11 @@ fn surface_water_fraction_grows_with_ponding() {
 #[test]
 fn lake_decomposition_never_exceeds_the_sediment_stock() {
     use crate::methane::config::CATOMW;
-    let mut m = MethaneConfig::default();
-    m.allowlakeprod = true;
-    m.lake_decomp_fact = 1.0;
+    let m = MethaneConfig {
+        allowlakeprod: true,
+        lake_decomp_fact: 1.0,
+        ..MethaneConfig::default()
+    };
 
     let mut dz = [0.0; SOISNO];
     let mut t = [0.0; SOISNO];
@@ -195,8 +197,10 @@ fn lake_decomposition_never_exceeds_the_sediment_stock() {
         "decomposed {decomposed_mol} exceeds stock {stock_mol}"
     );
     // 缺省参数下应退化成线性产量（二阶项 ~1e-14）。
-    let mut m = MethaneConfig::default();
-    m.allowlakeprod = true;
+    let m = MethaneConfig {
+        allowlakeprod: true,
+        ..MethaneConfig::default()
+    };
     let out = prod(
         &m,
         &ProdInput {

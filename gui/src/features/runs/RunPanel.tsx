@@ -268,8 +268,10 @@ export default function RunPanel({
     ? 'unknown'
     : ['running', 'starting', 'submitted'].includes(view.status)
       ? 'running'
-      : ['succeeded', 'failed', 'cancelled'].includes(view.status)
-        ? view.status
+      : ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(view.status)
+        ? view.status === 'interrupted'
+          ? 'cancelled'
+          : view.status
         : ['queued', 'preparing', 'submitting'].includes(view.status)
           ? 'waiting'
           : 'unknown';
@@ -607,7 +609,7 @@ export default function RunPanel({
         throw new Error(
           t('申请 CPU 数须为 1–1024 的整数', 'Requested CPUs must be an integer from 1 to 1024'),
         );
-      if (!host) setRemote(null);
+      setRemote(null);
       const runId = crypto.randomUUID();
       cancelledRun.current = null;
       const initial = Object.fromEntries(
@@ -720,7 +722,7 @@ export default function RunPanel({
                     status,
                     running: !['succeeded', 'failed', 'cancelled'].includes(status),
                     ...(record ? { progress: { host, remote: record } } : {}),
-                    ...(error ? { error } : {}),
+                    error: error || undefined,
                   });
                   if (dir === casePath && record && alive.current) setRemote(record);
                 },
@@ -848,8 +850,9 @@ export default function RunPanel({
       const merged = reconcileRemoteRun(targetRemote, result);
       const accepts = (previous: RunState | undefined) => {
         const known = previous?.progress?.remote as Record<string, unknown> | undefined;
-        const knownRecord = (known?.record ?? known) as Record<string, unknown> | undefined;
-        const observed = result.record as Record<string, unknown> | undefined;
+        const knownRecord = (known?.record ?? known?.pending ?? known) as
+          Record<string, unknown> | undefined;
+        const observed = (result.record ?? result.pending) as Record<string, unknown> | undefined;
         const knownOperation =
           previous?.operation_id ??
           knownRecord?.operation_id ??
@@ -863,9 +866,7 @@ export default function RunPanel({
           typeof knownOperation !== 'string' &&
           typeof observed?.job === 'string' &&
           typeof observed.host === 'string' &&
-          observed.host === previous.progress?.host &&
-          !result.pending &&
-          !result.needs_reconciliation;
+          observed.host === previous.progress?.host;
         if (
           previous?.run_id !== expectedRunId ||
           (!matchesRemoteRun(previous, result) && !discovered)
@@ -895,6 +896,7 @@ export default function RunPanel({
             stages: {},
           }),
           location: 'remote',
+          error: undefined,
           ...(fetchedCase ? { run_case: fetchedCase } : {}),
           ...(provenance && 'stage' in provenance ? { requested_stage: provenance.stage } : {}),
           progress: { ...previous?.progress, remote: merged },
@@ -1149,7 +1151,7 @@ export default function RunPanel({
       notify(
         t(
           `已向 ${count} 个进程发送停止请求；等待真实退出`,
-          `Stop requested for ${count} processes; waiting for exit`,
+          `Stop requested for ${count} ${count === 1 ? 'process' : 'processes'}; waiting for exit`,
         ),
       );
       return { stop_requested: count, terminal: false };
@@ -1188,6 +1190,16 @@ export default function RunPanel({
       return;
     }
     if (resultRun?.location === 'remote' && !resultRun.run_case) {
+      const resultHost = resultRun.progress?.host;
+      if (!host || (typeof resultHost === 'string' && host !== resultHost)) {
+        notify(
+          t(
+            `结果仍在服务器${resultHost ? ` ${resultHost}` : ''}上，请将运行位置切回该服务器后查看。`,
+            `The results are still on the server${resultHost ? ` ${resultHost}` : ''}. Select that server as the run location to view them.`,
+          ),
+        );
+        return;
+      }
       // 结果数据留在服务器上：结果页通过 `remote-read` 在服务器上读变量、曲线和评估指标，只把要
       // 显示的数值传回来。这里不再整份取回 history（一个站点约 0.5 GB），只做一次轻量的作业状态
       // 核对，确认不是"只跑到预处理"。要 NetCDF 文件时，用结果页里的「取回结果」按需取回。
@@ -1603,6 +1615,7 @@ export default function RunPanel({
     succeeded: t('运行完成', 'Completed'),
     failed: t('运行失败', 'Failed'),
     cancelled: t('已停止', 'Stopped'),
+    interrupted: t('已中断', 'Interrupted'),
     unknown: t('等待核对', 'Needs verification'),
     submitted: t('已提交', 'Submitted'),
     submitting: t('正在提交', 'Submitting'),
@@ -1920,9 +1933,12 @@ export default function RunPanel({
             </dl>
           )}
           <p className="path">
-            {t('运行编号', 'Run ID')}：{view.runId || t('等待核对', 'Needs verification')}
+            {t('运行编号：', 'Run ID: ')}
+            {view.runId || t('等待核对', 'Needs verification')}
           </p>
-          {persisted?.error && <Notice tone="error">{persisted.error}</Notice>}
+          {persisted?.error && persisted.status !== 'cancelled' && (
+            <Notice tone="error">{persisted.error}</Notice>
+          )}
           <div className="run-progress-log">
             <strong>{t('最新日志', 'Latest log')}</strong>
             <pre className="run-log">

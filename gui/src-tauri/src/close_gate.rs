@@ -17,6 +17,8 @@ const UNANSWERED: Duration = Duration::from_secs(8);
 pub struct CloseGate {
     /// 用户已经确认（或前端说没什么要保存的）：之后的关窗、退出一律放行。
     confirmed: AtomicBool,
+    /// 前端已接管确认或保存；不再按无人响应超时放行。
+    preparing: AtomicBool,
     /// 上一次把关窗请求交给前端的时刻；前端答复（不论关不关）后清掉。
     asked: Mutex<Option<Instant>>,
 }
@@ -28,7 +30,23 @@ impl CloseGate {
             return false;
         }
         let mut asked = self.asked.lock().unwrap_or_else(|e| e.into_inner());
-        if asked.is_some_and(|at| at.elapsed() > UNANSWERED) {
+        if self.saving_expired(*asked) {
+            drop(asked);
+            // A stuck save must never imply consent to discard it.
+            let discard = rfd::MessageDialog::new()
+                .set_title("保存尚未完成 / Save still pending")
+                .set_description("保存尚未完成。放弃未保存的修改并退出？\nSaving has not finished. Discard unsaved changes and quit?")
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show() == rfd::MessageDialogResult::Yes;
+            if discard {
+                self.confirmed.store(true, Ordering::SeqCst);
+                return false;
+            }
+            *self.asked.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            return true;
+        }
+        if self.unanswered_expired(*asked) {
             // 前端没有在限期内答复：不能让窗口永远关不掉。
             self.confirmed.store(true, Ordering::SeqCst);
             return false;
@@ -40,15 +58,32 @@ impl CloseGate {
         true
     }
 
+    fn unanswered_expired(&self, asked: Option<Instant>) -> bool {
+        !self.preparing.load(Ordering::SeqCst) && asked.is_some_and(|at| at.elapsed() > UNANSWERED)
+    }
+
+    fn saving_expired(&self, asked: Option<Instant>) -> bool {
+        self.preparing.load(Ordering::SeqCst) && asked.is_some_and(|at| at.elapsed() > UNANSWERED)
+    }
+
     fn answered(&self) {
+        self.preparing.store(false, Ordering::SeqCst);
         *self.asked.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
 /// 前端对关窗请求的答复：`close` 为真时停掉一切再关窗，为假时留着窗口（用户点了"取消"）。
 #[tauri::command]
-pub fn app_close(app: tauri::AppHandle, close: bool) -> Result<(), String> {
+pub fn app_close(
+    app: tauri::AppHandle,
+    close: bool,
+    preparing: Option<bool>,
+) -> Result<(), String> {
     let gate = app.state::<CloseGate>();
+    if preparing.unwrap_or(false) {
+        gate.preparing.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
     gate.answered();
     if !close {
         return Ok(());

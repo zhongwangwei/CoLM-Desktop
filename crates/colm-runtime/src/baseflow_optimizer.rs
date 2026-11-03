@@ -199,8 +199,8 @@ impl BaseflowOptimizer {
             self.patches.len(),
             water_table_depth_m.len()
         );
-        self.iteration += 1;
-        let cycle_directory = self.directory.join(format!("c{:04}", self.iteration));
+        let iteration = self.iteration + 1;
+        let cycle_directory = self.directory.join(format!("c{iteration:04}"));
         std::fs::create_dir_all(&cycle_directory)
             .with_context(|| format!("cannot create {}", cycle_directory.display()))?;
         let column = |patches: &[PatchBaseflow], value: fn(&PatchBaseflow) -> f64| -> Vec<f64> {
@@ -227,22 +227,29 @@ impl BaseflowOptimizer {
             ],
         )?;
 
-        for (state, &zwt) in self.patches.iter_mut().zip(water_table_depth_m) {
-            state.scale = adjusted_scale(
-                state.scale,
-                state.adjustable,
-                zwt,
-                state.initial_water_table_depth_m,
-                state.recharge_mm.unwrap_or(SPVAL),
-                state.subsurface_runoff_mm.unwrap_or(SPVAL),
-            );
-        }
+        let scales = self
+            .patches
+            .iter()
+            .zip(water_table_depth_m)
+            .map(|(state, &zwt)| {
+                adjusted_scale(
+                    state.scale,
+                    state.adjustable,
+                    zwt,
+                    state.initial_water_table_depth_m,
+                    state.recharge_mm.unwrap_or(SPVAL),
+                    state.subsurface_runoff_mm.unwrap_or(SPVAL),
+                )
+            })
+            .collect::<Vec<_>>();
 
         write_vector_file(
             &self.directory.join(&self.file_name),
-            &[("scale_baseflow", column(&self.patches, |p| p.scale))],
+            &[("scale_baseflow", scales.clone())],
         )?;
-        for state in &mut self.patches {
+        self.iteration = iteration;
+        for (state, scale) in self.patches.iter_mut().zip(scales) {
+            state.scale = scale;
             state.recharge_mm = None;
             state.subsurface_runoff_mm = None;
         }
@@ -302,6 +309,8 @@ fn write_vector_file(path: &Path, variables: &[(&str, Vec<f64>)]) -> Result<()> 
             .put_values(values, netcdf::Extents::All)
             .with_context(|| format!("cannot write {name} to {}", path.display()))?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 

@@ -25,6 +25,8 @@ pub struct PftConstantRestartInput<'a> {
     pub fraction: &'a [f64],
     pub canopy_top_m: &'a [f64],
     pub canopy_bottom_m: &'a [f64],
+    /// PC `cratio_p`; absent for ordinary PFT restarts.
+    pub crown_aspect_ratio: Option<&'a [f64]>,
     pub canopy_structure: Option<PftCanopyStructure<'a>>,
     /// `CROP` only; one value per land patch.
     pub crop_fraction: Option<&'a [f64]>,
@@ -416,6 +418,15 @@ pub fn write_pft_constant_restart_block(
     ] {
         put_f64_1d(&mut file, name, "pft", values, input.compression_level)?;
     }
+    if let Some(ratios) = input.crown_aspect_ratio {
+        put_f64_1d(
+            &mut file,
+            "cratio_p",
+            "pft",
+            ratios,
+            input.compression_level,
+        )?;
+    }
     // `MOD_Vars_TimeInvariants.F90:128`（`WRITE_PFTimeInvariants`）：只有 `DEF_Interception_scheme == 8` 才写 PFT 树冠结构。
     if let Some(structure) = input.canopy_structure {
         for (name, values) in [
@@ -435,6 +446,7 @@ pub fn write_pft_constant_restart_block(
             input.compression_level,
         )?;
     }
+    file.close().context("cannot close PFT restart file")?;
     Ok(())
 }
 
@@ -614,6 +626,7 @@ pub fn write_pft_time_restart_block(
             put_f64_1d(&mut file, name, "pft", values, compression)?;
         }
     }
+    file.close().context("cannot close PFT restart file")?;
     Ok(())
 }
 
@@ -698,6 +711,12 @@ fn validate_constant_input(input: PftConstantRestartInput<'_>) -> Result<usize> 
             ("hbot_p", input.canopy_bottom_m),
         ],
     )?;
+    if let Some(ratios) = input.crown_aspect_ratio {
+        ensure!(
+            ratios.len() == pfts && ratios.iter().all(|ratio| ratio.is_finite() && *ratio > 0.0),
+            "cratio_p must contain a positive finite ratio for every PFT"
+        );
+    }
     if let Some(structure) = input.canopy_structure {
         validate_pft_values(
             "PFT canopy structure",

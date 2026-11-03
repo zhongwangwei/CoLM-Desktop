@@ -1448,7 +1448,8 @@ fn write_site_file(
             variable.put_attribute("source", source_note.as_str())?;
             variable.put_values(&values, ..)?;
         }
-        drop(file);
+        file.close()
+            .with_context(|| format!("cannot close {}", tmp.display()))?;
         Ok(())
     })();
     if let Err(error) = result {

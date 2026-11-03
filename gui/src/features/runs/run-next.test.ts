@@ -921,3 +921,27 @@ test('provenance enriches the matching restored ledger run without replacing a n
     }
   }
 });
+
+test('a completed server result explains how to view it after switching the run location to local', async () => {
+  const page = render(
+    {
+      ...success,
+      location: 'remote',
+      run_case: undefined,
+      progress: { host: 'server' },
+    },
+    [],
+    undefined,
+    {},
+    undefined,
+    '',
+  );
+  assert.ok(page.next);
+  await (page.next.props.onClick as () => Promise<void>)();
+  assert.deepEqual(page.routes, []);
+  assert.match(page.errors.join('\n'), /结果仍在服务器.*server.*运行位置/);
+  assert.equal(
+    page.invocations.some((row) => row.command === 'remote_status'),
+    false,
+  );
+});

@@ -87,8 +87,8 @@ export default function CodeFiles({
   const contextRef = useRef('');
   contextRef.current = `${name}\u0000${source?.id ?? ''}\u0000${source?.revision ?? ''}`;
   // 异步返回后要用"现在"的说明、回调，而不是发起时那一帧闭包里的。
-  const latest = useRef({ message, onChanged });
-  latest.current = { message, onChanged };
+  const latest = useRef({ message, onChanged, disabled });
+  latest.current = { message, onChanged, disabled };
   const openRef = useRef(open);
   openRef.current = open;
   const draftRef = useRef(draft);
@@ -395,6 +395,7 @@ export default function CodeFiles({
         return openRef.current?.path ?? null;
       },
       get saveBlockedReason() {
+        if (busyRef.current || latest.current.disabled) return 'busy' as const;
         if (conflictRef.current) return 'conflict' as const;
         const file = openRef.current;
         if (!file || file.text == null) return 'unreadable' as const;

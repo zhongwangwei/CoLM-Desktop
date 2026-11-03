@@ -64,6 +64,11 @@ export function workspaceErrorText(error: string): [string, string] {
       ],
     ],
   ];
+  if (text.startsWith('workspace_in_use:'))
+    return [
+      '这个工作区仍被草稿引用，请先删除或迁移草稿，再删除工作区。',
+      'This workspace is still referenced by drafts. Delete or migrate them before removing it.',
+    ];
   for (const [pattern, both] of patterns) {
     const m = pattern.exec(text);
     if (m) return both(m);

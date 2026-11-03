@@ -222,6 +222,48 @@ pub async fn history_compare(
     crate::model::cli(args).await
 }
 
+/// Bind destructive history actions to this directory instance, not just its reusable path.
+pub(crate) fn case_identity(path: &std::path::Path) -> Option<serde_json::Value> {
+    let path = path.canonicalize().ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    let name = colm_case::case_name(&path.join("case.nml")).ok()?;
+    let mut identity = serde_json::json!({"path":path,"name":name});
+    // Birth time is not available on every filesystem (e.g. some Linux mounts).
+    // Unix still has the device/inode pair below, which identifies the directory
+    // instance even when created() is unsupported.
+    if let Some(created) = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        identity["created_ns"] = serde_json::json!(created.as_nanos().to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        identity["device"] = serde_json::json!(metadata.dev());
+        identity["inode"] = serde_json::json!(metadata.ino());
+    }
+    #[cfg(not(unix))]
+    if identity.get("created_ns").is_none() {
+        // A reusable path/name alone must never authorize deleting a directory.
+        return None;
+    }
+    Some(identity)
+}
+fn bind_case_identity(event: &mut Event) {
+    if event.detail.get("case_identity").is_some() {
+        return;
+    }
+    if let Some(identity) = event
+        .case_path
+        .as_deref()
+        .and_then(|path| case_identity(std::path::Path::new(path)))
+    {
+        event.detail["case_identity"] = identity;
+    }
+}
+
 pub(crate) fn start(
     kind: &str,
     case: Option<&str>,
@@ -231,6 +273,7 @@ pub(crate) fn start(
     event.case_path = case.map(str::to_owned);
     event.initiator = Some("gui".into());
     event.detail = detail;
+    bind_case_identity(&mut event);
     History::open_default()
         .and_then(|h| h.append(&event))
         .map_err(|e| {
@@ -679,7 +722,7 @@ pub(crate) fn finish<T>(
         } else {
             EventPhase::Finished
         },
-        if result.is_ok() || uncertain {
+        if result.is_ok() || uncertain || status == "cancelled" {
             status
         } else {
             "failed"
@@ -722,6 +765,9 @@ pub(crate) fn finish<T>(
                 }
             }
         }
+    }
+    if result.is_ok() {
+        bind_case_identity(&mut end);
     }
     capture_remote_record(&mut end);
     if let Err(error) = History::open_default().and_then(|h| {
@@ -1439,6 +1485,7 @@ fn command_event(args: &[String], run_id: Option<&str>) -> Result<Option<Event>,
     if let Some(run_id) = run_id {
         event.detail["run_id"] = serde_json::json!(run_id);
     }
+    bind_case_identity(&mut event);
     Ok(Some(event))
 }
 pub(crate) fn command_finish<T>(
@@ -1469,8 +1516,11 @@ pub(crate) fn import_project_metadata(root: &std::path::Path) -> Result<(), Stri
     import_project_into(&ledger, root)
 }
 fn import_project_into(ledger: &History, root: &std::path::Path) -> Result<(), String> {
+    let mut errors = Vec::new();
     if root.join("case.nml").is_file() {
-        ledger.import_case(root).map_err(|e| e.to_string())?;
+        if let Err(error) = ledger.import_case(root) {
+            errors.push(format!("{}: {error}", root.display()));
+        }
     }
     for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -1478,9 +1528,9 @@ fn import_project_into(ledger: &History, root: &std::path::Path) -> Result<(), S
             continue;
         }
         if entry.path().join("case.nml").is_file() {
-            ledger
-                .import_case(entry.path())
-                .map_err(|e| e.to_string())?;
+            if let Err(error) = ledger.import_case(entry.path()) {
+                errors.push(format!("{}: {error}", entry.path().display()));
+            }
         }
     }
     let studies = root.join(".colm/studies");
@@ -1488,11 +1538,17 @@ fn import_project_into(ledger: &History, root: &std::path::Path) -> Result<(), S
         for entry in std::fs::read_dir(studies).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                import_study_verified(&entry.path())?;
+                if let Err(error) = import_study_verified(&entry.path()) {
+                    errors.push(format!("{}: {error}", entry.path().display()));
+                }
             }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 pub(crate) fn bootstrap(app: &tauri::AppHandle) -> Result<(), String> {
     let recent = crate::recent::load_recent(app.clone());
@@ -1500,7 +1556,11 @@ pub(crate) fn bootstrap(app: &tauri::AppHandle) -> Result<(), String> {
         .get("root")
         .filter(|root| std::path::Path::new(root).is_dir())
     {
-        import_project_metadata(std::path::Path::new(root))?;
+        // A damaged history file must not fail the whole startup: list_cases now
+        // reports it as a per-project warning and the project stays openable.
+        if let Err(error) = import_project_metadata(std::path::Path::new(root)) {
+            eprintln!("history import failed for {root}: {error}");
+        }
     }
     let workspaces = workspace_root();
     if let Some(root) = workspaces.filter(|root| root.is_dir()) {
@@ -2013,6 +2073,17 @@ mod import_tests {
         let ledger = History::open(root.join("history.sqlite3")).unwrap();
         import_project_into(&ledger, &root).unwrap();
         import_project_into(&ledger, &root).unwrap();
+        let broken = root.join("broken");
+        std::fs::create_dir_all(broken.join(".colm")).unwrap();
+        std::fs::write(
+            broken.join("case.nml"),
+            "&nl_colm\nDEF_CASE_NAME='broken'\n/\n",
+        )
+        .unwrap();
+        std::fs::write(broken.join(".colm/runs.jsonl"), "{incomplete").unwrap();
+        assert!(import_project_into(&ledger, &root)
+            .unwrap_err()
+            .contains("broken"));
         let page = ledger.query(&Query::default()).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(

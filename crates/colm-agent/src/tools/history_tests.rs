@@ -1034,6 +1034,10 @@ impl MockGithub {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                         continue;
                     };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
                     let Ok(clone) = stream.try_clone() else {
                         continue;
                     };

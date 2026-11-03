@@ -816,12 +816,12 @@ fn local_fetch(web: &WebAccess, requested: &str, offset: usize, max_chars: usize
     let is_pdf = content_type.contains("pdf")
         || (path.to_ascii_lowercase().ends_with(".pdf")
             && (content_type.is_empty() || content_type.contains("octet-stream")));
-    if !is_pdf
-        && !(content_type.is_empty()
-            || content_type.contains("html")
-            || content_type.starts_with("text/")
-            || content_type.contains("json")
-            || content_type.contains("xml"))
+    if !(is_pdf
+        || content_type.is_empty()
+        || content_type.contains("html")
+        || content_type.starts_with("text/")
+        || content_type.contains("json")
+        || content_type.contains("xml"))
     {
         bail!("{url} is {content_type}, not a text page");
     }

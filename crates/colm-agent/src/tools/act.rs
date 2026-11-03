@@ -457,11 +457,11 @@ impl Tool for CreateStudy {
         std::fs::write(&file, serde_json::to_string_pretty(&spec)?)?;
         let file_s = file.display().to_string();
         let result = ctx
-            .cli(&["study-preflight", &root, "--spec", &file_s])
+            .cli_cancellable(&["study-preflight", &root, "--spec", &file_s])
             .and_then(|preflight| {
                 Ok((
                     preflight,
-                    ctx.cli(&["study-create", &root, "--spec", &file_s])?,
+                    ctx.cli_cancellable(&["study-create", &root, "--spec", &file_s])?,
                 ))
             });
         let _ = std::fs::remove_file(&file);
@@ -534,7 +534,7 @@ impl Tool for StudyControl {
         if !["pause", "resume", "cancel"].contains(&action) {
             bail!("action must be pause, resume or cancel");
         }
-        let output = ctx.cli(&[&format!("study-{action}"), &study])?;
+        let output = ctx.cli_cancellable(&[&format!("study-{action}"), &study])?;
         Ok(json!({ "study": study, "action": action, "output": output.trim() }))
     }
 }

@@ -7,6 +7,7 @@ fn input(scheme: i32) -> SoilSurfaceResistanceInput {
         porosity: 0.45,
         saturated_soil_suction_mm: -100.0,
         residual_water: 0.05,
+        sand_volume_fraction_of_solids: 0.3,
         hydraulic_model: SoilHydraulicModel::Campbell { bsw: 4.0 },
         layer_thickness_m: 0.1,
         temperature_k: 280.0,
@@ -77,5 +78,40 @@ fn van_genuchten_routes_through_the_shared_hydraulic_functions() {
             (actual - expected).abs() < 2.0e-11,
             "scheme {scheme}: got {actual:.17e}, expected {expected:.17e}"
         );
+    }
+}
+
+#[test]
+fn liu2026_matches_extracted_fortran_for_sand_saturation_ice_and_snow() {
+    let fixture = include_str!("../../../oracle/fixtures/rss6_reference.csv");
+    for row in fixture.lines().skip(1) {
+        let values: Vec<f64> = row.split(',').map(|value| value.parse().unwrap()).collect();
+        let actual = soil_surface_resistance(SoilSurfaceResistanceInput {
+            liquid_water_kg_m2: values[0],
+            ice_water_kg_m2: values[1],
+            porosity: values[2],
+            layer_thickness_m: values[3],
+            sand_volume_fraction_of_solids: values[4],
+            snow_cover_fraction: values[5],
+            ..input(6)
+        })
+        .unwrap();
+        let expected = values[if colm_numeric::FUSED { 6 } else { 7 }];
+        // The fixture covers both contraction modes; exp/log can differ by platform libm.
+        assert!(
+            crate::reference_bits_match(actual, expected, 0.0),
+            "{row}: got {actual:.17e}, expected {expected:.17e}"
+        );
+    }
+}
+
+#[test]
+fn liu2026_requires_a_finite_sand_fraction_only_when_selected() {
+    for sand in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+        let mut parameters = input(6);
+        parameters.sand_volume_fraction_of_solids = sand;
+        assert!(soil_surface_resistance(parameters).is_err());
+        parameters.scheme = 5;
+        assert!(soil_surface_resistance(parameters).is_ok());
     }
 }

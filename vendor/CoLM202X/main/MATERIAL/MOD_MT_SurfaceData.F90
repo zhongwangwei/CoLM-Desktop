@@ -2,6 +2,7 @@
 
 MODULE MOD_MT_SurfaceData
    USE MOD_Block, only: get_filename_block
+   USE MOD_Filesystem, only: make_directory
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: mt_clip_methane_surface_data
@@ -32,7 +33,7 @@ CONTAINS
                inquire (file=trim(fileblock), exist=fexists)
                IF (.not. fexists .and. requires_lake_soilc) CALL clip_error('Missing required lake carbon: '//trim(fileblock))
                IF (fexists) THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil/' // lc_cyear)
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // lc_cyear)
                   file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/lake_soilc_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'lake_soilc_patches', patchmask)
                ENDIF
@@ -42,7 +43,7 @@ CONTAINS
                inquire (file=trim(fileblock), exist=fexists)
                IF (.not. fexists .and. requires_spatial_ph) CALL clip_error('Missing required methane pH: '//trim(fileblock))
                IF (fexists) THEN
-                  CALL system('mkdir -p ' // trim(dir_landdata_out) // '/soil/' // lc_cyear)
+                  CALL make_directory(trim(dir_landdata_out) // '/soil/' // lc_cyear)
                   file_out = trim(dir_landdata_out) // '/soil/' // lc_cyear // '/methane_ph_patches.nc'
                   CALL clip_vector (file_in, file_out, iblk, jblk, 'methane_ph_patches', patchmask)
                ENDIF

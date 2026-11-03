@@ -143,6 +143,16 @@ pub struct ManagedXerj {
     detail: Arc<Mutex<Option<String>>>,
 }
 
+pub(crate) fn reuse_managed_endpoint(
+    node: &mut Option<crate::xerj_manager::ManagedNode>,
+) -> Option<String> {
+    if let Some(live) = node.as_ref().filter(|node| node.status().running) {
+        return Some(live.endpoint());
+    }
+    *node = None;
+    None
+}
+
 impl ManagedXerj {
     /// 当前设置对应的节点状态（设置面板轮询/按钮显示）。external 模式不发起网络探测。
     pub fn status_value(&self, settings: &AssistantSettings) -> Value {
@@ -210,12 +220,12 @@ impl ManagedXerj {
             .lock()
             .map_err(|_| "Xerj 节点启动锁失效".to_string())?;
         {
-            let guard = self
+            let mut guard = self
                 .inner
                 .lock()
                 .map_err(|_| "Xerj 节点状态锁失效".to_string())?;
-            if let Some(node) = guard.as_ref() {
-                return Ok(node.endpoint());
+            if let Some(endpoint) = reuse_managed_endpoint(&mut guard) {
+                return Ok(endpoint);
             }
         }
         let starts: Vec<PathBuf> = [
@@ -1209,6 +1219,42 @@ pub fn assistant_settings(app: tauri::AppHandle) -> Result<AssistantSettings, St
     load_assistant_settings(&app)
 }
 
+fn reset_broken_settings(path: &Path) -> Result<PathBuf, String> {
+    let original = std::fs::read(path).map_err(|e| e.to_string())?;
+    if serde_json::from_slice::<AssistantSettings>(&original).is_ok() {
+        return Err("设置可以正常读取，未执行重置 / Settings are readable; reset refused".into());
+    }
+    let backup = path.with_file_name(format!(
+        "assistant.corrupt-{}.json.bak",
+        colm_history::Event::start("settings-backup").operation_id
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&backup).map_err(|e| e.to_string())?;
+    file.write_all(&original).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    if std::fs::read(path).map_err(|e| e.to_string())? != original {
+        return Err(
+            "设置文件已变化，请重新读取 / Settings changed; reload before resetting".into(),
+        );
+    }
+    crate::config::write_export_text_atomic(
+        path,
+        serde_json::to_string_pretty(&AssistantSettings::default()).map_err(|e| e.to_string())?,
+    )?;
+    Ok(backup)
+}
+
+#[tauri::command]
+pub fn assistant_reset_settings(app: tauri::AppHandle) -> Result<String, String> {
+    reset_broken_settings(&settings_path(&app)?).map(|path| path.display().to_string())
+}
+
 #[tauri::command]
 pub fn assistant_save_settings(
     app: tauri::AppHandle,
@@ -1588,6 +1634,7 @@ pub async fn assistant_set_key(
     .and_then(|result| result);
     if result.is_ok() {
         process.stop();
+        let _ = app.emit("assistant://event", json!({ "type": "exited" }).to_string());
     }
     finish_assistant_action(&event, result)
 }
@@ -1631,6 +1678,7 @@ pub async fn assistant_delete_key(
     .and_then(|result| result);
     if result.is_ok() {
         process.stop();
+        let _ = app.emit("assistant://event", json!({ "type": "exited" }).to_string());
     }
     finish_assistant_action(&event, result)
 }
@@ -2023,6 +2071,8 @@ pub fn assistant_history_cancel() -> Result<usize, String> {
 }
 
 /// 启动（或重新配置）助手。进程不在就起一个，并把它的每行输出作为 `assistant://event` 发给前端。
+// Tauri injects app/state separately from the stable IPC arguments.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn assistant_start(
     app: tauri::AppHandle,
@@ -2416,17 +2466,43 @@ fn open_external_url(url: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_url_target(url: &str) -> Vec<u16> {
+    url.encode_utf16().chain(Some(0)).collect()
+}
+
 #[cfg(target_os = "windows")]
 fn open_external_url(url: &str) -> Result<(), String> {
-    // `cmd /C start "" <url>` 交给系统按默认浏览器打开；URL 作为独立 argv，不拼 shell 字符串。
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .status()
-        .map_err(|e| format!("cannot open link: {e}"))?;
-    if status.success() {
+    use std::ffi::c_void;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> *mut c_void;
+    }
+    let url = windows_url_target(url);
+    let operation: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+    // Validated HTTP(S) URL goes directly to the association API, never through cmd.exe.
+    // SAFETY: the terminated UTF-16 buffers remain alive for this synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    } as isize;
+    if result > 32 {
         Ok(())
     } else {
-        Err(format!("could not open link: {status}"))
+        Err(format!("could not open link: Windows error {result}"))
     }
 }
 

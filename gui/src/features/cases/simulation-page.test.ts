@@ -59,13 +59,18 @@ function page(
   options: {
     profile?: { grid?: string; domain_kind?: string; run_host?: string; remote_directory?: string };
     servers?: (Pick<Server, 'host' | 'root' | 'maps'> & Partial<Server>)[];
-    histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
+    histories?: { name: string; on: boolean; writable: boolean | null; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
     kernels?: KernelChoice[];
     schema?: caseModel.SchemaField[];
     configuration?: (args: Record<string, unknown>) => Promise<unknown>;
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
+    saveDraft?: (args: Record<string, unknown>) => Promise<string>;
+    draftTimers?: {
+      setTimeout: (fn: () => void, delay: number) => number;
+      clearTimeout: (id: number) => void;
+    };
     scan?: () => Promise<unknown>;
     prepare?: (args: Record<string, unknown>) => Promise<unknown>;
     progress?: () => unknown;
@@ -73,6 +78,8 @@ function page(
     listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
     context?: () => Promise<unknown>;
+    describeFields?: () => Promise<unknown>;
+    readNml?: (args: Record<string, unknown>) => Promise<unknown>;
     forcingProbe?: (args: Record<string, unknown>) => Promise<unknown>;
     pickFolder?: string;
     forcingInput?: () => Promise<{ directory: string; dataset: string }>;
@@ -112,6 +119,7 @@ function page(
     effectCursor = 0,
     contract: Contract,
     guard: () => unknown = () => null,
+    beforeClose: () => Promise<unknown> = async () => {},
     failCreate = false;
   let effects: (() => unknown)[] = [],
     registered = new Map<number, { dependencies: unknown[] | undefined; cleanup?: () => void }>();
@@ -123,7 +131,15 @@ function page(
     routes.push(route);
     return true;
   };
+  const pendingSaves: Promise<unknown>[] = [];
   const context = {
+    window: options.draftTimers ?? {
+      setTimeout: (fn: () => void) => {
+        fn();
+        return 0;
+      },
+      clearTimeout: () => {},
+    },
     document: {
       querySelector: () => ({ scrollTo: (value: unknown) => scrolls.push(value) }),
     },
@@ -186,11 +202,15 @@ function page(
       state,
       update,
       notify,
+      trackPendingSave: (pending: Promise<unknown>) => pendingSaves.push(pending),
       navigate,
       openCase: async (path: string) => {
         opened.push(path);
       },
     }),
+    useBeforeClose: (value: () => Promise<unknown>) => {
+      beforeClose = value;
+    },
     useNavigationGuard: (value: () => unknown) => {
       guard = value;
     },
@@ -267,7 +287,7 @@ function page(
         case 'set_case_run_host':
           return {};
         case 'describe_fields':
-          return options.schema ?? schema;
+          return options.describeFields ? options.describeFields() : (options.schema ?? schema);
         case 'model_configuration':
           return options.configuration
             ? options.configuration(args)
@@ -301,8 +321,10 @@ function page(
           return { entry: { dir: '/preview/site' }, profile: options.profile ?? {} };
         case 'hist_vars':
           return options.histories ?? [];
+        case 'model_case_context_release':
+          return true;
         case 'read_case_nml':
-          return '';
+          return options.readNml ? options.readNml(args) : '';
         case 'read_case':
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));
         case 'remote_create_cases': {
@@ -350,7 +372,9 @@ function page(
           if (failCreate) throw new Error('save failed');
           return {};
         case 'new_simulation_draft_save':
-          return (args.id as string | null) ?? 'draft-1';
+          return options.saveDraft
+            ? options.saveDraft(args)
+            : ((args.id as string | null) ?? 'draft-1');
         case 'new_simulation_draft_close':
           return null;
         default:
@@ -529,6 +553,11 @@ function page(
     element,
     remount,
     guard: () => guard(),
+    beforeClose: () => beforeClose(),
+    pendingSaves,
+    unmount: () => {
+      for (const entry of registered.values()) entry.cleanup?.();
+    },
     fail: () => {
       failCreate = true;
     },
@@ -734,12 +763,11 @@ test('an unfinished simulation is recorded from step 2 and saved again when the 
   p.set('new-name', 'CN-Cng');
   p.set('new-root', '/project');
   await p.settle();
-  assert.equal(drafts().length, 0, 'step 1 alone is not worth a record');
+  assert.ok(drafts().length > 0, 'filled first-step edits are persisted without leaving');
   await p.click('new-next');
   await p.settle();
-  assert.equal(drafts().length, 1);
-  const first = drafts()[0].args as { id: unknown; name: string; step: number; seed: unknown };
-  assert.equal(first.id, null);
+  const first = drafts().at(-1)!.args as { id: unknown; name: string; step: number; seed: unknown };
+  assert.equal(first.id, 'draft-1');
   assert.equal(first.name, 'CN-Cng');
   assert.equal(first.step, 2);
   const seed = first.seed as { form: Record<string, string>; step: number };
@@ -760,10 +788,10 @@ test('leaving step 1 after filling it in keeps an unfinished simulation record',
   const drafts = () => p.calls.filter((call) => call.command === 'new_simulation_draft_save');
   p.set('new-name', 'CN-Cng');
   await p.settle();
-  assert.equal(drafts().length, 0);
+  assert.ok(drafts().length > 0, 'typing persists the unfinished first step');
   await p.remount();
   await p.settle();
-  assert.equal(drafts().length, 1);
+  assert.ok(drafts().length > 0);
   const left = drafts()[0].args as { step: number; seed: { form: Record<string, string> } };
   assert.equal(left.step, 1);
   assert.equal(left.seed.form.name, 'CN-Cng');
@@ -2035,6 +2063,7 @@ test('new case cancellation waits for backend creation cleanup and retains the f
   const cancel = p.click('new-cancel-creation');
   assert.deepEqual(p.calls.find((call) => call.command === 'case_creation_cancel')?.args, {
     dir: '/project/CN-Cng/CN-Cng',
+    host: null,
   });
   c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-cancel-creation')?.enabled, false);
@@ -2186,6 +2215,7 @@ test('spatial creation cancellation targets its own output directory', async () 
   await p.click('new-cancel-creation');
   assert.deepEqual(p.calls.find((call) => call.command === 'case_creation_cancel')?.args, {
     dir: '/project/spatial',
+    host: null,
   });
   assert.ok(p.calls.some((call) => call.command === 'new_spatial_case'));
   assert.equal(p.render().status, 'busy');
@@ -2230,7 +2260,7 @@ test('crop and nitrogen history fields stay in Step 4 output selection with thei
   const histories = names.map((name) => ({
     name,
     on: true,
-    writable: name !== 'fertnitro_corn',
+    writable: name === 'ndep_to_sminn' ? null : name !== 'fertnitro_corn',
     settable: name !== 'fertnitro_corn',
   }));
   const p = page('CasesPage', undefined, [site], initialValues, {
@@ -2253,7 +2283,7 @@ test('crop and nitrogen history fields stay in Step 4 output selection with thei
     const output = c.fields.find((f) => f.id === `case-DEF_hist_vars%${name}`);
     assert.ok(output, name);
     assert.equal(output.value, '.true.');
-    assert.equal(output.disabled, name === 'fertnitro_corn');
+    assert.equal(output.disabled, name !== 'cropprod1c');
   }
   assert.ok(p.calls.some((call) => call.command === 'hist_vars'));
 });
@@ -3947,7 +3977,7 @@ test('methane selection with missing material schema leaves the original site an
   assert.deepEqual(p.state.version.overlay.physics, {});
 });
 
-test('selecting urban after methane disables BGC and materials while retaining definitions', async () => {
+test('selecting urban after methane removes the prior automatic material definitions', async () => {
   const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
   const urban = { ...site, name: 'AU-Preston', site_file: '/urban/site.nc', urban: true };
   const p = page(
@@ -3967,7 +3997,7 @@ test('selecting urban after methane disables BGC and materials while retaining d
   assert.equal(values.DEF_USE_BGC, '.false.');
   assert.equal(values.DEF_USE_METHANE, '.false.');
   assert.equal(values.DEF_URBAN_RUN, '.true.');
-  assert.equal(values.DEF_METHANE_PARAM_FILE, "'standard_methane_parameter.nml'");
+  assert.equal(values.DEF_METHANE_PARAM_FILE, undefined);
 });
 
 test('methane example retains inherited custom material scalar metadata without copying unrelated version flags', async () => {
@@ -4729,6 +4759,12 @@ test('after a partly failed server batch, Back edits only the sites not yet crea
         String((e.children as unknown[]).flat(Infinity).join('')).includes('设置已锁定'),
     ),
   );
+  await p.beforeClose();
+  const partial = p.calls.filter((call) => call.command === 'new_simulation_draft_save').at(-1)!;
+  assert.deepEqual(
+    (partial.args.seed as { siteDrafts: { site: string }[] }).siteDrafts.map((item) => item.site),
+    multiSites.filter((site) => site.name === 'CN-Cng').map((site) => site.site_file),
+  );
   await p.click('new-previous');
   c = p.render();
   assert.equal((c.details as { step?: number }).step, 3);
@@ -4736,6 +4772,16 @@ test('after a partly failed server batch, Back edits only the sites not yet crea
   assert.deepEqual(
     drafts.map((draft) => draft.site),
     multiSites.filter((site) => site.name === 'CN-Cng').map((site) => site.site_file),
+  );
+  await p.beforeClose();
+  assert.ok(
+    !p.calls.some((call) => call.command === 'new_simulation_draft_close'),
+    'partial success keeps the remaining draft recoverable',
+  );
+  const saved = p.calls.filter((call) => call.command === 'new_simulation_draft_save').at(-1)!;
+  assert.deepEqual(
+    (saved.args.seed as { siteDrafts: { site: string }[] }).siteDrafts.map((item) => item.site),
+    drafts.map((item) => item.site),
   );
 });
 
@@ -5049,4 +5095,210 @@ test('saving case A cannot advance case B after the awaited save returns', async
     await saving;
     assert.deepEqual(steps, changed ? [] : [4]);
   }
+});
+
+test('closing awaits the latest current-step draft and reports a failed save', async () => {
+  let fail = false;
+  const p = page('NewCasePage', { form, sites: [site], step: 3 }, [site], initialValues, {
+    saveDraft: async () => {
+      if (fail) throw new Error('draft storage unavailable');
+      return 'draft-final';
+    },
+  });
+  await p.mount();
+  p.set('new-start', '2001-03-01');
+  await p.beforeClose();
+  const saved = p.calls.filter((call) => call.command === 'new_simulation_draft_save').at(-1)!;
+  assert.equal((saved.args.seed as { form: Record<string, string> }).form.start, '2001-03-01');
+  fail = true;
+  p.set('new-end', '2001-12-31');
+  await assert.rejects(p.beforeClose(), /draft storage unavailable/);
+});
+
+test('moving from a methane site to a natural site removes only automatic site options', async () => {
+  const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [methane, site], step: 3, caseValues: { DEF_HIST_FREQ: "'DAILY'" } },
+    [methane, site],
+    initialValues,
+    { schema: methaneSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click(`new-select-${site.name}`);
+  await p.click('new-next');
+  const values = (
+    p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
+  ).caseValues;
+  assert.equal(values.DEF_USE_METHANE, undefined);
+  assert.equal(values.DEF_USE_BGC, undefined);
+  assert.equal(values.DEF_METHANE_PARAM_FILE, undefined);
+  assert.equal(values.DEF_HIST_FREQ, "'DAILY'");
+});
+
+test('new case output toggles use engine-resolved defaults instead of assuming every variable is enabled', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 5 }, [site], initialValues, {
+    configuration: async () => ({
+      fields: [],
+      history_switches: {
+        'DEF_hist_vars%fsena': '.true.',
+        'DEF_hist_vars%leafc': '.false.',
+      },
+    }),
+  });
+  await p.mount();
+  assert.deepEqual(p.element('HistoryVariablesCard').props.values, {
+    'DEF_hist_vars%fsena': '.true.',
+    'DEF_hist_vars%leafc': '.false.',
+  });
+  assert.equal(p.element('HistoryVariablesCard').props.defaultOn, undefined);
+});
+
+for (const key of ['sitedir', 'forcingdir']) {
+  test(`changing ${key} invalidates an in-flight site scan and clears its selection`, async () => {
+    let resolve!: (value: unknown) => void;
+    const p = page(
+      'NewCasePage',
+      {
+        form: { ...form, sitedir: '/old/sites', forcingdir: '/old/forcing' },
+        ownData: true,
+        sites: [],
+        step: 3,
+      },
+      [site],
+      initialValues,
+      {
+        scan: () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      },
+    );
+    await p.mount();
+    const scan = p.click('new-scan');
+    p.set(`new-${key}`, '/new/path');
+    resolve({ sites: [site] });
+    await scan;
+    await p.settle();
+    assert.equal(p.render().fields.find((field) => field.id === `new-${key}`)?.value, '/new/path');
+    assert.ok(!p.render().actions.some((action) => action.id === `new-select-${site.name}`));
+  });
+}
+
+test('closing keeps waiting for edits queued while the first draft save is pending', async () => {
+  const finish: (() => void)[] = [];
+  let defer = false;
+  const p = page('NewCasePage', { form, sites: [site], step: 3 }, [site], initialValues, {
+    saveDraft: async () => {
+      if (defer) await new Promise<void>((resolve) => finish.push(resolve));
+      return 'draft-final';
+    },
+  });
+  await p.mount();
+  defer = true;
+  let closed = false;
+  const closing = p.beforeClose().then(() => {
+    closed = true;
+  });
+  await p.settle();
+  p.set('new-start', '2001-03-01');
+  await p.settle();
+  finish.shift()!();
+  await p.settle();
+  assert.equal(closed, false);
+  assert.ok(finish.length > 0);
+  while (finish.length) {
+    finish.shift()!();
+    await p.settle();
+  }
+  await closing;
+  const saved = p.calls.filter((call) => call.command === 'new_simulation_draft_save').at(-1)!;
+  assert.equal((saved.args.seed as { form: Record<string, string> }).form.start, '2001-03-01');
+});
+
+test('leaving the wizard registers its final save with the application until it settles', async () => {
+  let finish!: () => void;
+  let defer = false;
+  const p = page('NewCasePage', { form, sites: [site], step: 3 }, [site], initialValues, {
+    saveDraft: async () => {
+      if (defer)
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      return 'draft-final';
+    },
+  });
+  await p.mount();
+  defer = true;
+  const count = p.pendingSaves.length;
+  p.unmount();
+  assert.equal(p.pendingSaves.length, count + 1);
+  let saved = false;
+  const pending = p.pendingSaves.at(-1)!.then(() => {
+    saved = true;
+  });
+  await p.settle();
+  assert.equal(saved, false);
+  finish();
+  await pending;
+  assert.equal(saved, true);
+});
+
+test('typing debounces draft writes, but closing flushes the latest text immediately', async () => {
+  let next = 0;
+  const timers = new Map<number, () => void>();
+  const p = page('NewCasePage', undefined, [site], initialValues, {
+    draftTimers: {
+      setTimeout: (fn, delay) => {
+        assert.equal(delay, 300);
+        timers.set(++next, fn);
+        return next;
+      },
+      clearTimeout: (id) => {
+        timers.delete(id);
+      },
+    },
+  });
+  await p.mount();
+  for (const name of ['s', 'si', 'site']) {
+    p.set('new-name', name);
+    await p.settle();
+  }
+  const saves = () => p.calls.filter((call) => call.command === 'new_simulation_draft_save');
+  assert.equal(saves().length, 0);
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  timers.clear();
+  await p.settle();
+  assert.equal(saves().length, 1);
+  assert.equal(saves()[0].args.name, 'site');
+  p.set('new-name', 'site-final');
+  await p.settle();
+  await p.beforeClose();
+  assert.equal(saves().at(-1)!.args.name, 'site-final');
+  assert.equal(saves().length, 2);
+  p.unmount();
+});
+
+test('failed parallel case reads finish before their preview is released', async () => {
+  let finish!: (value: unknown) => void;
+  const slowRead = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    context: async () => ({ entry: { dir: '/preview/site' }, profile: {}, preview_token: 'owned' }),
+    describeFields: () => slowRead,
+    readNml: async () => {
+      throw new Error('read failed');
+    },
+  });
+  p.mount();
+  await p.settle();
+  assert.ok(p.calls.some((call) => call.command === 'read_case_nml'));
+  assert.ok(!p.calls.some((call) => call.command === 'model_case_context_release'));
+  finish(schema);
+  await p.settle();
+  assert.equal(p.calls.filter((call) => call.command === 'model_case_context_release').length, 1);
+  p.unmount();
 });

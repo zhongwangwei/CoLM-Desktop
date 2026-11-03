@@ -329,8 +329,8 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
 /// 86400（`MOD_TimeManager.F90` 的 `adj2end`），所以 `(day, 86400)` 等于次日
 /// 00:00；这与 `schedule::tick_seconds` 的约定一致。
 pub fn civil_tick_seconds(year: i32, month: usize, day: usize, seconds: i32) -> Result<i64> {
-    if !(1900..=9999).contains(&year) {
-        bail!("calendar year {year} is outside the supported 1900..=9999 range");
+    if !(1..=9999).contains(&year) {
+        bail!("calendar year {year} is outside the supported 1..=9999 range");
     }
     if !(1..=12).contains(&month) {
         bail!("calendar month {month} is out of range");
@@ -391,10 +391,20 @@ pub fn record_intervals(
     } else {
         None
     };
+    let first_tick = minutes_from_1900(1) * 60;
     let ends = labels_minutes
         .iter()
-        .map(|label| label * 60 + shift_seconds)
-        .collect::<Vec<_>>();
+        .map(|label| {
+            let end = label
+                .checked_mul(60)
+                .and_then(|seconds| seconds.checked_add(shift_seconds))
+                .filter(|end| civil_from_seconds(*end).is_some() && *end > first_tick)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("history label {label} is outside the supported calendar")
+                })?;
+            Ok(end)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut intervals = Vec::with_capacity(labels_minutes.len());
     let mut previous_end: Option<i64> = None;
@@ -456,7 +466,7 @@ fn previous_period_start(end: i64, period_seconds: i64) -> i64 {
     if end % period_seconds == 0 {
         end - period_seconds
     } else {
-        end - end % period_seconds
+        end - end.rem_euclid(period_seconds)
     }
 }
 

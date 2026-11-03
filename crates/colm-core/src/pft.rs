@@ -34,6 +34,8 @@ pub struct PftParameters {
     /// `htop_p`/`hbot_p`：常数重启里的值（单点时树木按观测高度折算过）。
     pub canopy_top_m: f64,
     pub canopy_bottom_m: f64,
+    /// PC `cratio_p`; separate from interception-specific `crown_m` dimensions.
+    pub crown_aspect_ratio: f64,
     /// `chil_p`/`rho_p`/`tau_p`
     pub optics: LeafOptics,
     pub biochemistry: LeafBiochemistry,
@@ -597,6 +599,7 @@ fn pc_canopy_radiation(
             fraction: parameters.fraction,
             canopy_top_m: parameters.canopy_top_m,
             canopy_bottom_m: parameters.canopy_bottom_m,
+            crown_aspect_ratio: parameters.crown_aspect_ratio,
             optics: parameters.optics,
             lai: column.leaf_area_index,
             sai: column.stem_area_index,

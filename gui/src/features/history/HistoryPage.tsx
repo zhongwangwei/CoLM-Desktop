@@ -536,6 +536,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         ...(target.item.run_group ? { group: true } : {}),
         ...(target.files ? { expectedPath: deletionPath } : {}),
         ...(target.wholeCase ? { wholeCase: true } : {}),
+        ...(target.wholeCase && target.plan?.caseToken ? { caseToken: target.plan.caseToken } : {}),
       },
     );
     if (!response.removed)
@@ -865,6 +866,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       'Permanently delete this run directory and all its files, along with this record. Referenced input data outside this directory will be preserved.',
                     )}
               </Notice>
+              {deletion.wholeCase && deletion.plan?.caseWarning && (
+                <Notice tone="warning">
+                  {t(
+                    '当前目录身份与旧记录不同或未记录。请核对当前目录内容；输入名称后删除的是当前目录。',
+                    'This folder differs from the old record or has no recorded identity. Review its current contents; confirming deletes the current folder.',
+                  )}
+                </Notice>
+              )}
               <p>
                 {(deletion.wholeCase ? deletion.plan?.caseHost : deletion.plan?.host) ??
                   t('本机', 'Local')}
@@ -1095,7 +1104,8 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             {projectDeletion.plan.host && projectDeletion.plan.remotePath && (
               <li>
                 <span>
-                  {t('服务器', 'Server')} {projectDeletion.plan.host}：
+                  {t('服务器', 'Server')} {projectDeletion.plan.host}
+                  {t('：', ': ')}
                   {projectDeletion.plan.remotePath}
                 </span>
               </li>
@@ -1282,7 +1292,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             {busy
               ? t('正在读取…', 'Loading…')
               : // 列表按项目合并，数的是项，不是记录条数（清空对话框里数的是记录）。
-                `${page.total} ${t('项', 'items')}`}
+                `${page.total} ${t('项', page.total === 1 ? 'item' : 'items')}`}
           </span>
           <div className="button-row">
             <Button variant="danger" disabled={busy} onClick={() => run(() => openClear())}>
@@ -1366,16 +1376,16 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     <span className="history-card-sub">
                       {item.project_group
                         ? [
-                            `${projectSummary(item.project_group).cases} ${t('个算例', 'cases')}`,
+                            `${projectSummary(item.project_group).cases} ${t('个算例', projectSummary(item.project_group).cases === 1 ? 'case' : 'cases')}`,
                             projectSummary(item.project_group).studies
-                              ? `${projectSummary(item.project_group).studies} ${t('个研究', 'studies')}`
+                              ? `${projectSummary(item.project_group).studies} ${t('个研究', projectSummary(item.project_group).studies === 1 ? 'study' : 'studies')}`
                               : '',
-                            `${item.project_group.members.length} ${t('条操作', 'operations')}`,
+                            `${item.project_group.members.length} ${t('条操作', item.project_group.members.length === 1 ? 'operation' : 'operations')}`,
                           ]
                             .filter(Boolean)
                             .join(' · ')
                         : item.run_group
-                          ? `${item.run_group.members.length} ${t('个站点', 'stations')}`
+                          ? `${item.run_group.members.length} ${t('个站点', item.run_group.members.length === 1 ? 'station' : 'stations')}`
                           : `${t('项目', 'Project')} ${subject.project}`}
                     </span>
                   )}
@@ -1461,6 +1471,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           }}
           closeAction="history-close"
         >
+          {error && <Notice tone="error">{error}</Notice>}
           <div className="history-inspector" aria-label={t('记录详情', 'Record details')}>
             {group?.project_group && detail && (
               <div className="history-timeline-back">
@@ -1518,7 +1529,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                           <strong>{historyActionLabel(row.members[0], en)}</strong>
                           <span>
                             {row.members.length > 1
-                              ? `${row.members.length} ${t('个算例', 'cases')}`
+                              ? `${row.members.length} ${t('个算例', row.members.length === 1 ? 'case' : 'cases')}`
                               : historyObject(row.members[0], en)}
                           </span>
                           <span className="muted">{statusCountsLabel(row.counts, en)}</span>

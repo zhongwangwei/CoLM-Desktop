@@ -43721,3 +43721,119 @@ cargo run -p xtask -- audit-vendor --base <基准导入 rev> --fork <同步前�
 材料族（同位素/溶质）的 host 同样逐位一致；material 专用变量仍有舍入级差异
 （同位素 `f_mt_delta_*` ≤2.8e-12/10‰、`f_mt_evap_mass` ≤4.5e-16，溶质 0 差异），
 属于材料模块算术略约 1e-13 相对量级的实现差，不是物种/记账 bug。
+
+
+## 2026-11-03：审计残留的第二轮修复
+
+本节记录本轮修复范围与定向证据，不把编译成功等同于多 rank 路由或真实城市站点验收。
+
+- CLI 保留 `--directive` 值的前导双横线，缺少普通参数值仍报错；新增重复调度指令回归。
+- 两个调试/范围检查开关补 MPI 广播；实际三 rank 回归覆盖四种组合与受控集合通信。
+- 参数审计只扫描模块级常量，忽略 `CONTAINS` 后的局部声明；重生成 1369 项目录，RSS 为 0–6，
+  连续生成逐字节一致。CI 声明 LAPACK/BLAS、OpenMPI、Windows GNU Make 和 golden 数据路径。
+- 城市两层通量及输出分量对齐现有 vendor；独立 Fortran 夹具覆盖 128 个裸地输出和 30 个热分量。
+- 补齐 1900 年前的日期读写、文件分组及负分钟边界；44 项定向日历测试通过。
+- 已有算例首次启用同位素时按实际分馏设置裁剪新模板；10 项实际保存链路回归通过，保留用户
+  已有文件与共享文件只读边界。
+- 另有 12 处 NetCDF 写入补 checked close；基流优化器失败重试不再重复缩放，观测发布失败保留
+  旧输出。基流四项回归通过，最终关闭错误不再被 Drop 吞掉后报告成功。
+- 任务 worker 延续调度器的进程出生标识校验，旧记录保守兼容；取消收尾在发布状态和删除锁前
+  再核对拥有者。旧冻结 CLI 不遵守新 mutation 协议，仍不支持混用版本并发写同一研究。
+- `interrupted` 纳入恢复及历史汇总终态；历史视图采用一次性事务迁移，49 项台账测试通过，
+  包含旧视图升级与重复打开不改 schema。
+
+最终统一套件与本机构建的结果另存当次验证记录；未做 Windows 实机、磁盘故障注入或真实
+城市站点长期验证，也未重生成黄金输出以掩盖差异。
+
+
+### 第二轮统一验证的命令与证据位置
+
+- T7920 执行 `bash .final-tests.sh`：作业 `codex-2591d22c976a43c7a1ad877f00ef0635`
+  终态 `succeeded`、exit 0；37 组检查全部为 0，Rust 测试合计 3530 项通过。
+  完整逐组状态与命令见 `/tmp/colm-round2-remote-evidence/results/status.txt`、
+  `/tmp/colm-final-remote-tests.sh`；汇总为 `/tmp/colm-round2-verification.json`。
+- 空间内核命令 `COLM_SPMD_MODE=grouped bash oracle/scripts/build_kernel.sh latlon "$OBREF_JOB_RESULTS/kernels"`：
+  作业 `codex-da9fd1c3f1224b54b0a89371ce98aaac`，终态 `succeeded`、exit 0；三个程序及其 SHA256
+  位于 `/tmp/colm-round2-kernel-evidence/results/kernels/latlon/manifest.json`，编译日志为
+  `/tmp/colm-round2-kernel-evidence/results/build.log`。临时日志可能被系统清理，作业 ID 用于远端追溯。
+
+## 2026-11-03：第三轮 CI、界面及交付收口
+
+- golden job 同时传入 PLUMBER2 与 rawdata，并在构建前检查数据根；NetCDF 测试仍串行。
+- Windows 依赖生成采用独立 MSYS2 工具目录，验证 make/bash/sh/cpp/awk/printf/cygpath，
+  仅为 make 子进程设置 PATH，不覆盖 MSVC；新增缺工具失败与完整工具链 smoke 检查。
+- 另外六套 Python 入口加入对应 Linux CI：离线工具、bench 科学夹具与终端 SSE 夹具分开，
+  无真实模型付费请求。终端夹具显式配置未知模型的 context window，预算断言与当前默认 40 一致。
+- 任务中断恢复保留 interrupted 状态；停止失败经过错误通知；compact 单有效配对显示点；
+  已结束服务器任务的失败信息保留可翻译原文；WUE 空翻译不插入 undefined。
+- 预编引擎来源复用 `engine::snapshot/content_id`，核对现有标记和编译后的源码；拒绝 stale
+  标记或构建期间变化，不再默认为 unknown。自身进程出生标识只采集一次；历史迁移用显式版本常量。
+
+本轮已执行的定向证据：
+
+- `cd gui && npm test`：1644 passed，0 failed；日志 `/tmp/colm-round3-frontend.log`。
+  `npm run typecheck`、`npm run lint`、`npm run format:check`：exit 0，日志 `/tmp/colm-round3-ui-checks.log`。
+- `cargo test --offline --locked -p colm-cli --bin colm-cli study::runner::tests -- --test-threads=1`：
+  92 passed；日志 `/tmp/colm-round3-runner-tests.log`。
+- `cargo test --offline --locked -p colm-core --lib urban_ -- --test-threads=1`：45 passed；
+  日志 `/tmp/colm-round3-urban-tests.log`。
+- `cargo test --offline --locked -p xtask --bin xtask engine_source_id_tests -- --test-threads=1`
+  及 `cargo test --offline --locked -p xtask --test kernel_profile prebuilt_engine_metadata -- --test-threads=1`：
+  各 1 passed，涵盖 Git/无 Git 输入等价、修改检测、stale marker 与构建期间改动；日志
+  `/tmp/colm-r3-engine-id-tests.log`、`/tmp/colm-r3-engine-metadata-tests.log`。
+
+最终本机构建和远程补充检查的逐组命令与结果写入 `/tmp/colm-round3-verification.json`；
+不把未执行的 hosted Windows 或真实数据验证计为通过。年份 1–9999 是日历换算范围，现有
+int32 分钟 history 输出上限为 5983-01-24 02:07，越界明确报错。RSS 6 的体积分数范围校验保留。
+旧冻结 CLI 不自动更新；预览崩溃遗留目录、旧版本并发写协议和 remote study fetch 取消仍是已知边界，
+不为清理缓存而无差别删除旧目录。本轮不改写黄金文件，也不纳入五个未跟踪的 remote-bd 报告文件。
+
+
+## 2026-11-03：第四轮远程提交 fencing 与待验收项
+
+- remote-bench 占位已有 id/intent，但旧路径把 Unknown 且无作业目录直接视为可释放，绕过宽限。
+  现在所有权核对和作业目录创建位于同一项目锁内；失去占位的迟到提交无法创建作业，调度器调用
+  在锁外执行。作业目录存在后，不再凭时间或未确认的 Unknown/Lost 重试。
+- 项目锁自动回收须确认同主机、同 PID namespace 的 owner 已退出；旧协议、不完整记录、
+  不同主机/namespace 及未确认的持久提交保守保留。混用不遵守 fencing 的冻结旧 CLI 仍是边界。
+- 实际 shell 交错回归覆盖 A 暂停、B 回收并启动、A 恢复被拒绝，确认仅一次 dispatch。
+  `cargo test -p colm-cli --bin colm-cli remote_bench -- --test-threads=1`：53 passed；
+  `cargo test -p colm-remote job -- --test-threads=1`：37 passed。日志
+  `/tmp/colm-round4-remote-bench-tests.log`、`/tmp/colm-round4-remote-job-tests.log`；相关 Clippy 通过。
+- WUE 关闭但原因尚未核实时仍显示双语兜底，不回退为未翻译的中文，也不插值 undefined。
+  前端全部 1645 项通过，记录 `/tmp/colm-round4-frontend.log`。
+- 新 CI 门禁实际使用 Rust 1.85.1 检查 engine、1.88.0 检查 GUI，均 locked/all-targets；
+  `xtask/tests/msrv.rs` 验证其与 manifest 声明一致，定向 1/1 通过。该静态回归不等同于旧编译器验收。
+- Linux 原始 libc close 故障注入触发了 HDF5 的内部断言，该诊断保留于
+  `scripts/test-netcdf-libc-close-faults.py`，未将进程崩溃算作 graceful close 错误传播通过。
+  另提供最终目标链接的 nc_close 包装：实际文件写入和关闭成功后，仅对指定私有文件返回
+  ENOSPC/EIO，验证 C API 错误传播、旧观测内容保留、河道写入失败、Drop 负对照和健康重试。
+  实际 Linux 8 项通过：作业 `codex-84264cbbef9042e588553620a5d3f1ce`；这不是实际磁盘容量耗尽。
+- 新增完整 UrbanVegFlux 参考，实际气孔、湿润比例和湍流模块按生产方式分别编译，无 LTO，
+  固定相同长波边界。四场景、两种收缩模式共 400 个输出通过既有 5e-12 门槛；融合与非融合
+  最大差分别为 4.157e-12 与 2.525e-12，各 35/200 输出逐位相同，因此**不是全部逐位一致**。
+  初始大差异来自夹具 C3/C4 路径输入不一致，修正边界语义后无生产数学改动，未改黄金文件。
+
+本轮原生测试 `cargo test --lib -- --test-threads=1`：625 passed、1 ignored；Clippy 通过，
+日志 `/tmp/colm-round4-native-tests.log`、`/tmp/colm-round4-native-clippy.log`。最终记录为
+`/tmp/colm-round4-verification.json`，分别记录真实旧编译器检查、Linux 故障注入和 AU-Preston
+长期配对结果；代码门禁、片段参考、逐位检查、真实站点验证各自报告，不用一个通过替代另一个。
+
+
+### 第四轮实际城市验证及诊断修复
+
+AU-Preston 三个输入已以 SHA256 核对本机/服务器一致，无上传。原始长期配对作业
+`codex-25e94964c26b4ba58c8a8b95bd5a9ad1` 使用相同 Rust 前处理、同名算例和私有参考 BLAS/LAPACK，
+运行完整 1992-12-31 23:30 至 2004-11-28 12:30；默认一年 spinup 保留，输出 132 个历史月份。
+两套模拟及观测指标计算完成，537 对 NetCDF 文件无缺失，但其中 398 对严格比较失败，不能称逐位通过。
+
+实际发现的 RSS 契约错误已修复：UrbanTHERMAL 的 rss 在 Fortran 是局部变量，Rust 不再将该值
+回写宿主诊断、标准重启或历史；保留原宿主 RSS（冷启动为缺失值）。内部土壤阻力和蒸发计算不变。
+城市写回测试 1/1、实际 NetCDF 历史及非城市 RSS 测试 27/27、runtime Clippy 通过；
+初始配对快照未包含这项修复，最终 Rust 将在同一输入上重新运行，对照只读原始 Fortran 产物。
+
+另补齐 20 个城市输出的既有 tier 分类：LUCY 规定通量 2 项为 tier1，求解状态相关热通量和温度
+18 项为 tier2。没有修改原有分类、atol/rtol、求解器下限或黄金文件；比较器 10/10 测试及 Clippy
+通过，RSS 填充值/实际数值错配仍被拒绝。这项分类只补完变量覆盖，不代表长期误差已获验收。
+
+最终报告分别列出严格逐位、既有 tier、守恒残差及观测技能；不为让任务变绿而修改阈值或生成物。

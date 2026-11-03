@@ -36,15 +36,30 @@ const trim = (value: number) => String(Number(value.toPrecision(6)));
 export function defaultRange(d: Descriptor, base: number | null): [string, string] {
   const min = d.validation.min == null ? null : literalNumber(d.validation.min);
   const max = d.validation.max == null ? null : literalNumber(d.validation.max);
-  if (base != null && base !== 0) {
-    const low = base * 0.5,
-      high = base * 1.5;
+  const step =
+    d.value_kind === 'integer'
+      ? 1
+      : min != null && max != null
+        ? (max - min) * 1e-6
+        : Math.max(Math.abs(min ?? max ?? 0) * 1e-6, 1e-6);
+  const lower = min == null ? null : min + (d.validation.min_exclusive ? step : 0);
+  const upper = max == null ? null : max - (d.validation.max_exclusive ? step : 0);
+  const validBase =
+    base != null &&
+    Number.isFinite(base) &&
+    (lower == null || base >= lower) &&
+    (upper == null || base <= upper);
+  if (validBase && base !== 0) {
+    const low = Math.min(base * 0.5, base * 1.5);
+    const high = Math.max(base * 0.5, base * 1.5);
+    const boundedLow = lower == null ? low : Math.max(lower, low);
+    const boundedHigh = upper == null ? high : Math.min(upper, high);
     return [
-      trim(min != null ? Math.max(min, Math.min(low, high)) : Math.min(low, high)),
-      trim(max != null ? Math.min(max, Math.max(low, high)) : Math.max(low, high)),
+      boundedLow === lower ? String(lower) : trim(boundedLow),
+      boundedHigh === upper ? String(upper) : trim(boundedHigh),
     ];
   }
-  return [min != null ? trim(min) : '', max != null ? trim(max) : ''];
+  return [lower == null ? '' : String(lower), upper == null ? '' : String(upper)];
 }
 
 /**

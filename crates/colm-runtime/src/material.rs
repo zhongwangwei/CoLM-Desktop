@@ -1145,6 +1145,8 @@ pub fn write_land_material_restart(
             )?;
         }
         put_scalar_i32(&mut file, "mt_land_restart_complete", 1)?;
+        file.close()
+            .with_context(|| format!("cannot close {}", path.display()))?;
     }
     Ok(())
 }

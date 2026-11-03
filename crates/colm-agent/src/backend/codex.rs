@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -325,26 +325,49 @@ pub fn list_models() -> Result<Value> {
     let exe = find_cli("codex").context("Codex is not installed")?;
     let mut command = Command::new(exe);
     command.env("PATH", child_path()).arg("app-server");
-    let mut server = Server::connect(command)?;
+    let mut server = Server::connect(command, &AtomicBool::new(false))?;
     let id = server.request("model/list", json!({}))?;
-    let result = server.wait_for(id, Duration::from_secs(60));
-    let _ = server.child.kill();
-    let _ = server.child.wait();
+    let result = server.wait_for(id, Duration::from_secs(60), &AtomicBool::new(false));
+    drop(server);
     let models = result?["data"].as_array().cloned().unwrap_or_default();
     Ok(model_summary(&models))
 }
 
 /// 常驻的 app-server。
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+// The server can stop reading its pipe; queue writes so cancellation remains responsive.
+fn input_channel(mut stdin: ChildStdin) -> Sender<String> {
+    let (sender, receiver) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for message in receiver {
+            if writeln!(stdin, "{message}")
+                .and_then(|()| stdin.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    sender
+}
+
 struct Server {
     child: Child,
-    stdin: ChildStdin,
+    input: Sender<String>,
     lines: Receiver<String>,
     next_id: u64,
 }
 
 impl Server {
     /// 启动 app-server 并完成握手。
-    fn connect(mut command: Command) -> Result<Self> {
+    fn connect(mut command: Command, cancel: &AtomicBool) -> Result<Self> {
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -363,7 +386,7 @@ impl Server {
         });
         let mut server = Server {
             child,
-            stdin,
+            input: input_channel(stdin),
             lines,
             next_id: 0,
         };
@@ -371,15 +394,15 @@ impl Server {
             "initialize",
             json!({ "clientInfo": { "name": "colm_desktop", "title": "CoLM-Desktop", "version": env!("CARGO_PKG_VERSION") } }),
         )?;
-        server.wait_for(id, Duration::from_secs(60))?;
+        server.wait_for(id, Duration::from_secs(60), cancel)?;
         server.send(&json!({ "method": "initialized" }))?;
         Ok(server)
     }
 
     fn send(&mut self, message: &Value) -> Result<()> {
-        writeln!(self.stdin, "{message}")?;
-        self.stdin.flush()?;
-        Ok(())
+        self.input
+            .send(message.to_string())
+            .context("Codex closed its input")
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<u64> {
@@ -390,14 +413,23 @@ impl Server {
     }
 
     /// 等某个请求的回答（期间到达的通知丢掉：这只在建线程时用）。
-    fn wait_for(&mut self, id: u64, timeout: Duration) -> Result<Value> {
+    fn wait_for(&mut self, id: u64, timeout: Duration, cancel: &AtomicBool) -> Result<Value> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let Ok(line) = self.lines.recv_timeout(Duration::from_millis(200)) else {
-                if let Some(status) = self.child.try_wait()? {
-                    bail!("Codex stopped ({status})");
+            anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+            let line = match self.lines.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+                    bail!("Codex closed its output");
                 }
-                continue;
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(status) = self.child.try_wait()? {
+                        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+                        bail!("Codex stopped ({status})");
+                    }
+                    continue;
+                }
             };
             let message: Value = serde_json::from_str(&line).unwrap_or_default();
             if message["id"] == id && message.get("method").is_none() {
@@ -416,6 +448,13 @@ impl Server {
             }
         }
         bail!("Codex did not answer in time")
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        crate::tools::terminate(&mut self.child);
+        let _ = self.child.wait();
     }
 }
 
@@ -442,7 +481,8 @@ impl CodexSession {
         }
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&mut self, cancel: &AtomicBool) -> Result<()> {
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
         if self
             .server
             .as_mut()
@@ -480,13 +520,14 @@ impl CodexSession {
                 crate::bridge::ENV_ADDR,
                 crate::bridge::ENV_TOKEN
             ));
-        let mut server = Server::connect(command)?;
+        let mut server = Server::connect(command, cancel)?;
         // 模型清单（各自支持的思考强度与默认值），用来把“默认”落到具体的模型与强度上。
         let id = server.request("model/list", json!({}))?;
         self.models = server
-            .wait_for(id, Duration::from_secs(60))
+            .wait_for(id, Duration::from_secs(60), cancel)
             .map(|r| r["data"].as_array().cloned().unwrap_or_default())
             .unwrap_or_default();
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
         let settings = json!({
             "cwd": self.launch.cwd,
             "approvalPolicy": "on-request",
@@ -499,15 +540,16 @@ impl CodexSession {
                 params["threadId"] = json!(thread_id);
                 let id = server.request("thread/resume", params)?;
                 // 续接失败（例如线程已被 Codex 清理）就开新线程。
-                server.wait_for(id, Duration::from_secs(60)).ok()
+                server.wait_for(id, Duration::from_secs(60), cancel).ok()
             }
             None => None,
         };
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
         let thread = match thread {
             Some(thread) => thread,
             None => {
                 let id = server.request("thread/start", settings)?;
-                server.wait_for(id, Duration::from_secs(60))?
+                server.wait_for(id, Duration::from_secs(60), cancel)?
             }
         };
         self.thread_id = thread["thread"]["id"].as_str().map(str::to_owned);
@@ -523,7 +565,8 @@ impl ExternalSession for CodexSession {
         sink: &mut dyn TurnSink,
         cancel: &AtomicBool,
     ) -> Result<ExternalOutcome> {
-        self.start()?;
+        self.start(cancel)?;
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
         let thread_id = self
             .thread_id
             .clone()
@@ -539,31 +582,56 @@ impl ExternalSession for CodexSession {
         if let Some(effort) = effort {
             params["effort"] = json!(effort);
         }
-        let start = server.request("turn/start", params)?;
+        let start = match server.request("turn/start", params) {
+            Ok(id) => id,
+            Err(error) => {
+                if cancel.load(Ordering::SeqCst) {
+                    self.server = None;
+                    bail!("cancelled");
+                }
+                return Err(error);
+            }
+        };
         let mut turn_id: Option<String> = None;
         let mut interrupted = false;
+        let mut cancelled_at: Option<Instant> = None;
         let mut state = CodexState::default();
         loop {
+            if cancel.load(Ordering::SeqCst) {
+                let began = cancelled_at.get_or_insert_with(Instant::now);
+                if began.elapsed() >= CANCEL_GRACE {
+                    self.server = None;
+                    bail!("cancelled");
+                }
+            }
             if cancel.load(Ordering::SeqCst) && !interrupted {
                 if let Some(turn) = &turn_id {
-                    server.request(
-                        "turn/interrupt",
-                        json!({ "threadId": thread_id, "turnId": turn }),
-                    )?;
+                    if server
+                        .request(
+                            "turn/interrupt",
+                            json!({ "threadId": thread_id, "turnId": turn }),
+                        )
+                        .is_err()
+                    {
+                        self.server = None;
+                        bail!("cancelled");
+                    }
+                    interrupted = true;
                 }
-                interrupted = true;
             }
             let line = match server.lines.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if let Some(status) = server.child.try_wait()? {
                         self.server = None;
+                        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
                         bail!("Codex stopped ({status})");
                     }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.server = None;
+                    anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
                     bail!("Codex closed its output");
                 }
             };
@@ -604,6 +672,9 @@ impl ExternalSession for CodexSession {
                         if state.usage.prompt_tokens > 0 {
                             self.used = state.usage;
                         }
+                        if cancel.load(Ordering::SeqCst) {
+                            bail!("cancelled");
+                        }
                         return match finished {
                             Ok(()) => Ok(ExternalOutcome {
                                 content: state.content,
@@ -625,15 +696,6 @@ impl ExternalSession for CodexSession {
 
     fn resume_id(&self) -> Option<String> {
         self.thread_id.clone()
-    }
-}
-
-impl Drop for CodexSession {
-    fn drop(&mut self) {
-        if let Some(server) = self.server.as_mut() {
-            let _ = server.child.kill();
-            let _ = server.child.wait();
-        }
     }
 }
 

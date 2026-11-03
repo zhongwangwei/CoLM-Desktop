@@ -214,3 +214,22 @@ fn the_legacy_wrapper_keeps_the_old_conversion_and_rejects_offsets() {
         model_seconds_from_units(&[base], "seconds since 2008-01-01 00:00:00 +08:00").is_none()
     );
 }
+
+#[test]
+fn time_origin_supports_years_before_1900() {
+    assert_eq!(minutes_from_1900(1900), 0);
+    assert_eq!(minutes_from_1900(1899), -365 * 1440);
+    assert_eq!(minutes_from_1900(1), -998_776_800);
+    for year in [1, 1600, 1800, 1899, 1900, 2000] {
+        assert_eq!(
+            parse_time_units(&format!("seconds since {year:04}-01-01"))
+                .unwrap()
+                .civil_minutes,
+            minutes_from_1900(year) as f64
+        );
+        assert_eq!(
+            minutes_from_1900(year + 1) - minutes_from_1900(year),
+            if is_leap(year) { 366 } else { 365 } * 1440
+        );
+    }
+}

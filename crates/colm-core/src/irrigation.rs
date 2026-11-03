@@ -254,12 +254,12 @@ fn needs_check(
     check
 }
 
-/// `gmt2local` 的 `ldate(3)`：`idate(3) + dlon/15*3600`，再卷回 `[0, 86400]`。
+/// `gmt2local` 的 `ldate(3)`：`idate(3) + nint(dlon/15)*3600`，再卷回 `[0, 86400)`。
 fn local_seconds(seconds: i32, longitude_deg: f64) -> f64 {
-    let local = f64::from(seconds) + longitude_deg / 15.0 * 3600.0;
+    let local = f64::from(seconds) + (longitude_deg / 15.0).round() * 3600.0;
     if local < 0.0 {
         86_400.0 + local
-    } else if local > 86_400.0 {
+    } else if local >= 86_400.0 {
         local - 86_400.0
     } else {
         local

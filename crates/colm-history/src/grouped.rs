@@ -21,10 +21,11 @@ fn cte(view: OperationView) -> String {
             CASE
                 WHEN count(DISTINCT json_extract(payload,'$.status'))=1 THEN min(json_extract(payload,'$.status'))
                 WHEN sum(json_extract(payload,'$.status')='running')>0 THEN 'running'
-                WHEN sum(json_extract(payload,'$.status') NOT IN ('succeeded','completed','cancelled','failed','completed_with_failures'))>0 THEN 'unknown'
+                WHEN sum(json_extract(payload,'$.status') NOT IN ('succeeded','completed','cancelled','interrupted','failed','completed_with_failures'))>0 THEN 'unknown'
                 WHEN sum(json_extract(payload,'$.status')='completed_with_failures')>0 THEN 'completed_with_failures'
                 WHEN sum(json_extract(payload,'$.status')='failed')=count(*) THEN 'failed'
                 WHEN sum(json_extract(payload,'$.status')='failed')>0 THEN 'completed_with_failures'
+                WHEN sum(json_extract(payload,'$.status')='interrupted')>0 THEN 'interrupted'
                 WHEN sum(json_extract(payload,'$.status')='cancelled')>0 THEN 'cancelled'
                 ELSE 'succeeded' END status
             FROM keyed GROUP BY group_key),
@@ -109,7 +110,12 @@ pub(super) fn query_page(
                 || finished_ms.is_none()
                 || !matches!(
                     operation.latest.status.as_str(),
-                    "succeeded" | "completed" | "failed" | "completed_with_failures" | "cancelled"
+                    "succeeded"
+                        | "completed"
+                        | "failed"
+                        | "completed_with_failures"
+                        | "cancelled"
+                        | "interrupted"
                 ) {
                 EventPhase::Status
             } else {
@@ -175,7 +181,7 @@ impl History {
             return self.remove_operation(operation_id);
         };
         let predicate = format!("({RUN_ID})=?1");
-        let uncertain: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM history_visible_operations WHERE {predicate} AND (needs_reconciliation!=0 OR json_extract(payload,'$.status') NOT IN ('succeeded','failed','completed','completed_with_failures','cancelled')))"),[run_id],|row| row.get(0))?;
+        let uncertain: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM history_visible_operations WHERE {predicate} AND (needs_reconciliation!=0 OR json_extract(payload,'$.status') NOT IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted')))"),[run_id],|row| row.get(0))?;
         ensure!(
             !uncertain,
             "cannot remove run whose completion is unconfirmed; reconcile it first"

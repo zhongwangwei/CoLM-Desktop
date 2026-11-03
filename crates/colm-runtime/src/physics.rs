@@ -329,7 +329,7 @@ pub fn land_physics_parameters(
             document,
             "DEF_precip_phase_discrimination_scheme",
         )?)?,
-        surface_resistance_scheme: scheme_index(document, "DEF_RSS_SCHEME", 0, 5)?,
+        surface_resistance_scheme: scheme_index(document, "DEF_RSS_SCHEME", 0, 6)?,
         stress_scheme: scheme_index(document, "DEF_RSTFAC", 1, 2)?,
         surface_layer_scheme: if logical(document, "DEF_USE_CBL_HEIGHT")? {
             SurfaceLayerScheme::LargeEddy

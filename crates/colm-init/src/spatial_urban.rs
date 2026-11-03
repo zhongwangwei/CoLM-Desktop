@@ -104,7 +104,7 @@ pub fn write_spatial_urban_constant_restarts(
         canopy.patch_top_m[patch] = data.state.tree_top_m[urban];
         canopy.patch_bottom_m[patch] = data.state.tree_bottom_m[urban];
     }
-    let common = write_spatial_lct_constant_restart_with_canopy(config.common, Some(canopy))?;
+    let common = write_spatial_lct_constant_restart_with_canopy(config.common, Some(canopy), None)?;
     let urban = if data.urban_to_patch.is_empty() {
         None
     } else {

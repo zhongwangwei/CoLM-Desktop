@@ -329,9 +329,20 @@ export async function drive(action: string, args: Record<string, unknown> = {}) 
       return finishedState();
     }
     if (action === 'fill' || action === 'set') {
+      const checkDialog = () => {
+        if (topDialog() && !pageContracts().some((page) => page.modal))
+          throw new Error(
+            bilingual(
+              '请先关闭当前对话框，再修改页面字段',
+              'Close the current dialog before editing page fields.',
+            ),
+          );
+      };
+      checkDialog();
       const requested = args.fields;
       if (!Array.isArray(requested)) throw new Error('fields must be an array');
       for (const raw of requested) {
+        checkDialog();
         if (!raw || typeof raw !== 'object') throw new Error('invalid field');
         const field = raw as { field?: unknown; value?: unknown };
         const control = one(fields(), String(field.field ?? ''));
@@ -347,7 +358,9 @@ export async function drive(action: string, args: Record<string, unknown> = {}) 
         if (control.type === 'switch' && !['true', 'false'].includes(value))
           throw new Error(`${control.id}: boolean value required`);
         await control.set(value);
+        checkDialog();
         await rendered();
+        checkDialog();
       }
       return finishedState();
     }

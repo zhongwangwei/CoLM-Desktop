@@ -11,7 +11,7 @@ import type { UiAction, UiField } from '../../lib/guide';
 import type { ModelField, Descriptor } from './model';
 import { ActionButtonStub } from '../../lib/rendered-tree';
 type Contract = { modal?: boolean; fields: UiField[]; actions: UiAction[]; status: string };
-function harness() {
+function harness(language = 'zh') {
   const overlay: Overlay = {
     physics: {
       DEF_USE_BGC: '.true.',
@@ -105,7 +105,7 @@ function harness() {
     ...Object.fromEntries(
       ['Advanced', 'Button', 'Card', 'Field', 'Input', 'Notice', 'Select'].map((k) => [k, k]),
     ),
-    useApp: () => ({ state: { language: 'zh' } }),
+    useApp: () => ({ state: { language } }),
     // 动作由按钮自己登记（第 737 轮）：从渲染出的元素树里收；折叠着的内容不显示，不登记。
     usePageContract: (value: Contract) => {
       contract = {
@@ -2046,3 +2046,47 @@ test('the guide lists exactly the rendered buttons: collapsed areas and a locked
   assert.ok(!c.actions.some((a) => a.id === 'configuration-group-ecology'));
   assert.ok(!c.actions.some((a) => a.id === 'configuration-pft-toggle'));
 });
+
+test('English configuration renders a translated WUE disabled reason', async () => {
+  const h = harness('en');
+  h.render();
+  const response = h.response();
+  const wue = response.fields.find((field) => field.name === 'DEF_USE_WUEST')!;
+  wue.mode = 'disabled';
+  wue.reason = '城市模式会自动关闭这个过程';
+  h.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  h.render();
+  const paragraphs = h.nodes
+    .filter((node) => node.type === 'p')
+    .map((node) => JSON.stringify(node.children))
+    .join(' ');
+  assert.ok(paragraphs.includes(`WUE: ${settings.configurationReason(wue.reason, true)}`));
+  assert.ok(!paragraphs.includes(wue.reason));
+});
+
+for (const language of ['zh', 'en'] as const)
+  test(`an unverified WUE disabled reason remains visible in ${language}`, async () => {
+    const h = harness(language);
+    h.render();
+    const response = h.response();
+    const wue = response.fields.find((field) => field.name === 'DEF_USE_WUEST')!;
+    wue.mode = 'disabled';
+    wue.reason = '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考';
+    h.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    h.render();
+    const paragraphs = h.nodes
+      .filter((node) => node.type === 'p')
+      .map((node) => JSON.stringify(node.children))
+      .join(' ');
+    assert.ok(!paragraphs.includes('undefined'));
+    assert.ok(
+      paragraphs.includes(
+        language === 'en'
+          ? 'WUE: The reason for disabling WUE has not been verified'
+          : 'WUE：关闭原因尚未核实',
+      ),
+    );
+    assert.ok(!paragraphs.includes(wue.reason));
+  });

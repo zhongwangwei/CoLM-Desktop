@@ -22,7 +22,7 @@ mod xerj;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -37,12 +37,68 @@ fn main() -> Result<()> {
         "check-gui" => gui::check(&gui::source_root(&std::env::current_dir()?)?),
         "audit-vendor" => vendor_audit::command(&repo_root()?),
         "parameter-audit" => parameter_audit(),
+        "engine-source-id" => {
+            let root = match std::env::args().nth(2) {
+                Some(path) => PathBuf::from(path),
+                None => repo_root()?,
+            };
+            println!("{}", engine_source_id(&root)?);
+            Ok(())
+        },
         "stage-sidecar" => sidecar::stage(&repo_root()?),
         "stage-xerj" => xerj::command(&repo_root()?),
         _ => bail!(
-            "usage: cargo run -p xtask -- <gen-schema|gen-histmap|gen-landcover|gen-co2mlo|check-gui|audit-vendor|parameter-audit|stage-sidecar|stage-xerj>"
+            "usage: cargo run -p xtask -- <gen-schema|gen-histmap|gen-landcover|gen-co2mlo|check-gui|audit-vendor|parameter-audit|engine-source-id [SRC]|stage-sidecar|stage-xerj>"
         ),
     }
+}
+
+/// Uploaded sources have the checkout's exact snapshot files, without Git metadata.
+fn engine_source_id(root: &Path) -> Result<String> {
+    use colm_remote::engine;
+    let root = root.canonicalize()?;
+    if root.join(".git").exists() {
+        return Ok(engine::snapshot(&engine::Source::Checkout(root))?.id);
+    }
+    fn collect(root: &Path, relative: &Path, files: &mut Vec<String>) -> Result<()> {
+        let path = root.join(relative);
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                if matches!(
+                    entry.file_name().to_str(),
+                    Some("target" | ".git" | "node_modules" | "__pycache__" | ".bld")
+                ) {
+                    continue;
+                }
+                collect(root, &relative.join(entry.file_name()), files)?;
+            }
+        } else if metadata.is_file() || metadata.file_type().is_symlink() {
+            files.push(
+                relative
+                    .to_str()
+                    .context("source path is not UTF-8")?
+                    .replace('\\', "/"),
+            );
+        } else {
+            bail!("unsupported engine source entry {}", path.display());
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    for path in engine::SNAPSHOT_PATHS {
+        collect(&root, Path::new(path), &mut files)?;
+    }
+    if files.is_empty() {
+        bail!("{} has no engine sources", root.display());
+    }
+    files.sort();
+    engine::content_id(&root, &files)
 }
 
 fn parameter_audit() -> Result<()> {
@@ -384,7 +440,15 @@ fn fortran_parameter_declarations(path: &std::path::Path) -> Result<Vec<(String,
     Ok(text
         .lines()
         .enumerate()
+        .take_while(|(_, raw)| {
+            !raw.split('!')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case("contains")
+        })
         .filter_map(|(line, raw)| {
+            let raw = raw.split('!').next().unwrap_or_default();
             let lower = raw.to_ascii_lowercase();
             let marker = lower.find("::")?;
             lower[..marker].contains("parameter").then_some(())?;
@@ -856,4 +920,79 @@ fn repo_root() -> Result<PathBuf> {
         }
     }
     Ok(d)
+}
+
+#[cfg(test)]
+mod parameter_audit_tests {
+    use super::*;
+
+    #[test]
+    fn parameter_scan_excludes_comments_and_procedure_local_constants() {
+        let path =
+            std::env::temp_dir().join(format!("colm-parameter-scan-{}.F90", std::process::id()));
+        std::fs::write(
+            &path,
+            "module constants\n\
+             ! integer, parameter :: commented = 0\n\
+             ! contains\n\
+             integer, parameter :: module_value = 1 ! retained\n\
+             CoNtAiNs ! module procedures follow\n\
+             function representative_pft_of_lct(lc)\n\
+             integer, parameter :: map(2) = (/1, 2/)\n\
+             end function\n\
+             end module\n",
+        )
+        .unwrap();
+        let declarations = fortran_parameter_declarations(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(declarations, [("module_value".into(), 4)]);
+    }
+}
+
+#[cfg(test)]
+mod engine_source_id_tests {
+    use super::*;
+
+    #[test]
+    fn uploaded_source_matches_checkout_and_detects_edits() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-engine-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("crates/example/src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(
+            root.join("crates/example/src/lib.rs"),
+            "pub const VALUE: u8 = 1;\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success());
+        let checkout = engine_source_id(&root).unwrap();
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        assert_eq!(engine_source_id(&root).unwrap(), checkout);
+        std::fs::write(root.join(".colm-snapshot-id"), &checkout).unwrap();
+        std::fs::create_dir_all(root.join("crates/example/target")).unwrap();
+        std::fs::write(
+            root.join("crates/example/target/generated"),
+            "ignored build output",
+        )
+        .unwrap();
+        assert_eq!(engine_source_id(&root).unwrap(), checkout);
+        std::fs::write(
+            root.join("crates/example/src/lib.rs"),
+            "pub const VALUE: u8 = 2;\n",
+        )
+        .unwrap();
+        assert_ne!(engine_source_id(&root).unwrap(), checkout);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

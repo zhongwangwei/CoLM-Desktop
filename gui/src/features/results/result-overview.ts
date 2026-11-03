@@ -1,4 +1,4 @@
-import { variableTitle } from './variable-labels';
+import { chartVariables, variableTitle, type CatalogVariable } from './variable-labels';
 import type { ResultMetric } from './series';
 export function overviewMetric<T extends ResultMetric>(rows: T[], variable: string): T | undefined {
   return rows.find((row) => !row.site && (row.model_var === variable || row.name === variable));
@@ -85,4 +85,80 @@ export function overviewRunLocation(
             : '服务器'
         : '';
   return [location, engine].filter(Boolean).join(' · ');
+}
+
+/** Composite evaluations are selectable as whole quantities, never as one of their components. */
+export function overviewVariables(
+  catalog: CatalogVariable[],
+  rows: ResultMetric[],
+  en: boolean,
+): CatalogVariable[] {
+  const choices = chartVariables(catalog);
+  for (const row of rows) {
+    if (
+      row.site ||
+      typeof row.model_var !== 'string' ||
+      !/[+-]/.test(row.model_var) ||
+      choices.some((choice) => choice.name === row.name)
+    )
+      continue;
+    choices.push({
+      name: row.name,
+      kind: 'paired',
+      dimensions: [],
+      units: typeof row.units === 'string' ? row.units : null,
+      long_name: String(row[en ? 'label_en' : 'label_zh'] || row.name),
+    });
+  }
+  return choices;
+}
+
+export function metricWarningText(value: unknown, en: boolean): string {
+  const text = String(value);
+  if (!en) return text;
+  return text
+    .replace(
+      /^读不到 (.+)（(.+)）；history 区间起点按名义边界推断$/,
+      'Cannot read $1 ($2); history interval starts use nominal boundaries',
+    )
+    .replace(
+      /^DEF_HIST_FREQ 无法识别（(.+)）；输出频率改由 history 标签判断$/,
+      'Unrecognized DEF_HIST_FREQ ($1); output frequency is inferred from history labels',
+    )
+    .replace(
+      /^DEF_simulation_time%timestep = (.+) 不能当作 history 输出步长；TIMESTEP 频率将用标签间隔推断$/,
+      'DEF_simulation_time%timestep = $1 is not a valid history step; TIMESTEP frequency is inferred from label spacing',
+    )
+    .replace(
+      /^case.nml 的模拟起点不可用（(.+)）；history 区间起点按名义边界推断$/,
+      'The simulation start in case.nml is unavailable ($1); history interval starts use nominal boundaries',
+    )
+    .replace(
+      /^case.nml 的预热截止时刻不可用（(.+)）；history 区间起点按模拟起点处理$/,
+      'The spin-up end in case.nml is unavailable ($1); history interval starts use the simulation start',
+    )
+    .replace(
+      /^case.nml 声明 DEF_HIST_FREQ = (.+)，history 标签显示是 (.+)；按 history 为准$/,
+      'case.nml declares DEF_HIST_FREQ = $1, but history labels indicate $2; history takes precedence',
+    )
+    .replace(
+      /^case.nml 的模拟起点晚于首条 history 记录（配置被改过？）；区间起点改按名义边界推断$/,
+      'The simulation start in case.nml is later than the first history record (configuration changed?); interval starts use nominal boundaries',
+    )
+    .replace(
+      /^KGE 不可信：观测均值 (.+) 接近零$/,
+      'KGE is unreliable: observed mean $1 is near zero',
+    )
+    .replace(
+      /^KGE 不可信：模型与观测的均值反号$/,
+      'KGE is unreliable: model and observed means have opposite signs',
+    )
+    .replace(
+      /^(.+) 个输出区间因观测覆盖不足未参与配对（阈值 (.+)%）$/,
+      '$1 output intervals were excluded for insufficient observation coverage (threshold $2%)',
+    )
+    .replace(
+      /^观测覆盖率均值 (.+)% 偏低（<(.+)%），整段均值代表的是部分时段$/,
+      'Mean observation coverage is low ($1%, below $2%); interval means represent only part of each period',
+    );
 }

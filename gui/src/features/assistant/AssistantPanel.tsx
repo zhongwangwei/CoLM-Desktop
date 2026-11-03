@@ -183,6 +183,7 @@ export default function AssistantPanel() {
   // 初始化状态分开存：核心设置失败要显式重试；输入历史只是辅助记忆，失败不挡发送（GUI-16）。
   const [initPhase, setInitPhase] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const [initError, setInitError] = useState('');
+  const [resettingSettings, setResettingSettings] = useState(false);
   const [initAttempt, setInitAttempt] = useState(0);
   const [historyError, setHistoryError] = useState('');
   const [historyAttempt, setHistoryAttempt] = useState(0);
@@ -725,6 +726,13 @@ export default function AssistantPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyAttempt]);
   async function save(next: Settings) {
+    if (!ready)
+      throw new Error(
+        t(
+          '请先成功读取助手设置再保存。',
+          'Load the assistant settings successfully before saving.',
+        ),
+      );
     if (runningRef.current)
       throw new Error(
         t('请先停止当前回答再修改设置。', 'Stop the current response before changing settings.'),
@@ -1136,6 +1144,34 @@ export default function AssistantPanel() {
    * 关闭设置对话框（也用于"新对话/会话历史"先收起设置）：有未保存草稿时先确认放弃（U-07）。
    * 返回是否真的关闭了 —— 用户选择继续编辑时，调用方应中止后续切换。
    */
+  async function recoverSettings() {
+    if (running || resettingSettings || initPhase !== 'failed') return;
+    const reset = await askConfirm(
+      t(
+        '备份损坏的助手设置文件，再恢复默认设置？API Key 会保留。',
+        'Back up the damaged assistant settings and restore defaults? API keys will be kept.',
+      ),
+      { confirmLabel: t('备份并重置', 'Back up and reset'), danger: true },
+    );
+    if (!reset) return;
+    setResettingSettings(true);
+    try {
+      const backup = await withTimeout(
+        invoke<string>('assistant_reset_settings', {}),
+        SETTINGS_TIMEOUT_MS,
+        t('恢复助手设置', 'recovering assistant settings'),
+      );
+      setAttachNotice(t(`原设置已备份：${backup}`, `Original settings backed up: ${backup}`));
+      setSettingsDirty(false);
+      update({ assistantSettingsOpen: true });
+      setInitAttempt((value) => value + 1);
+    } catch (error) {
+      setInitError(errorText(String(error)));
+    } finally {
+      setResettingSettings(false);
+    }
+  }
+
   async function closeSettings() {
     if (!state.assistantSettingsOpen) return true;
     if (settingsDirty) {
@@ -1215,6 +1251,9 @@ export default function AssistantPanel() {
         setMessages([]);
         setAttachNotice('');
         setUsage('');
+        setContextUsage(null);
+        setLimitReached(false);
+        setStepLimit(0);
         setSessionUsage({ turns: 0, tokens: 0 });
         setUsagePending(false);
         resetFollow();
@@ -1351,7 +1390,9 @@ export default function AssistantPanel() {
         <strong>{t('AI 助手', 'AI assistant')}</strong>
         <Button
           variant="ghost"
+          disabled={!ready}
           onClick={() => {
+            if (!ready) return;
             if (state.assistantSettingsOpen) void closeSettings();
             else {
               setSettingsDirty(false);
@@ -1437,6 +1478,9 @@ export default function AssistantPanel() {
           <Button disabled={running} onClick={() => setInitAttempt((value) => value + 1)}>
             {t('重试读取设置', 'Retry loading settings')}
           </Button>
+          <Button disabled={running || resettingSettings} onClick={() => void recoverSettings()}>
+            {t('备份损坏文件并重置设置', 'Back up damaged file and reset settings')}
+          </Button>
         </Notice>
       )}
       {/* 输入历史只是 ↑/↓ 记忆：读不到也照样能发送，只给一个可重试的警告（GUI-16）。 */}
@@ -1479,7 +1523,7 @@ export default function AssistantPanel() {
           ))}
         </section>
       )}
-      {state.assistantSettingsOpen && (
+      {state.assistantSettingsOpen && ready && (
         <div className="max-h-[55vh] overflow-auto">
           <AssistantSettings
             settings={settings}
@@ -1604,7 +1648,11 @@ export default function AssistantPanel() {
                 {/* 用户消息里可能有附件的 <document> 原文，永远按纯文本显示；Markdown 只用于助手回复。 */}
                 <div>
                   {item.kind === 'assistant' ? (
-                    <Markdown text={item.text || ''} t={t} />
+                    <Markdown
+                      text={item.text || ''}
+                      t={t}
+                      onOpenUrl={(url) => void openEvidenceUrl(url)}
+                    />
                   ) : (
                     item.text
                   )}

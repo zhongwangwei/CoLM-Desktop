@@ -1193,7 +1193,9 @@ impl Opts {
                     flags.push((format!("--{name}"), "1".to_owned()));
                     i += 1;
                 } else {
-                    let v = next.with_context(|| format!("--{name} needs a value"))?;
+                    let v = next
+                        .filter(|value| name == "directive" || !value.starts_with("--"))
+                        .with_context(|| format!("--{name} needs a value"))?;
                     flags.push((format!("--{name}"), v.clone()));
                     i += 2;
                 }
@@ -1208,6 +1210,7 @@ impl Opts {
     fn get(&self, name: &str) -> Option<String> {
         self.flags
             .iter()
+            .rev()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
     }
@@ -4428,6 +4431,10 @@ struct VarMetrics {
     pair_n: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pair_downsampled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_gaps: Option<Vec<[i64; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_gaps_truncated: Option<bool>,
     /// history 实际输出频率（由标签反推，不是 nml 声明值）。
     output_frequency: String,
     /// 每条 history 记录代表的秒数（TIMESTEP 用算例步长，日/月/年用名义长度）。
@@ -5528,6 +5535,9 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         };
         if json {
             let pair_source_n = with_time.len();
+            let pair_gaps = by_sec
+                .as_ref()
+                .map(|axis| metric_pair_gaps(&with_time, axis));
             let pair_time = by_sec.as_ref().map(|by_sec| {
                 with_time
                     .iter()
@@ -5633,6 +5643,8 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
                 pair_downsampled: pair_indexes
                     .as_ref()
                     .map(|indexes| indexes.len() < pair_source_n),
+                pair_gaps: pair_gaps.as_ref().map(|(ranges, _)| ranges.clone()),
+                pair_gaps_truncated: pair_gaps.as_ref().map(|(_, truncated)| *truncated),
                 output_frequency: history_frequency_name(resolution.frequency).to_string(),
                 model_step_seconds: history_step_seconds(
                     resolution.frequency,
@@ -5670,6 +5682,28 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         }
     }
     Ok(rows)
+}
+
+// Derive missing pairs before display sampling, so downsampling cannot erase a coverage gap.
+fn metric_pair_gaps(
+    pairs: &[(f64, f64, f64)],
+    axis: &std::collections::BTreeMap<i64, i64>,
+) -> (Vec<[i64; 2]>, bool) {
+    let Some((first, _, _)) = pairs.first() else {
+        return (Vec::new(), false);
+    };
+    let Some((last, _, _)) = pairs.last() else {
+        return (Vec::new(), false);
+    };
+    let valid = pairs
+        .iter()
+        .map(|(time, _, _)| *time as i64)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (time, values): (Vec<_>, Vec<_>) = axis
+        .range((*first as i64)..=(*last as i64))
+        .map(|(label, unix)| (*unix, if valid.contains(label) { 1.0 } else { f64::NAN }))
+        .unzip();
+    missing_ranges_in_window(&time, &values)
 }
 
 fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
@@ -8548,5 +8582,45 @@ mod stdin_auth_tests {
         );
         assert_eq!(std::fs::read_to_string(&received).unwrap(), line);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod option_boundary_tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+    #[test]
+    fn missing_values_do_not_consume_flags_and_repeated_values_are_predictable() {
+        assert!(Opts::parse(&args(&["--root", "--offline"])).is_err());
+        let opts = Opts::parse(&args(&[
+            "--value", "-1", "--root", "first", "--root", "last", "--slot", "1=a", "--slot", "2=b",
+        ]))
+        .unwrap();
+        assert_eq!(opts.get("--value").as_deref(), Some("-1"));
+        assert_eq!(opts.get("--root").as_deref(), Some("last"));
+        assert_eq!(opts.get_all("--slot"), ["1=a", "2=b"]);
+    }
+
+    #[test]
+    fn scheduler_directives_keep_their_leading_dashes() {
+        let opts = Opts::parse(&args(&[
+            "--host",
+            "server",
+            "--directive",
+            "--mem=64G",
+            "--directive",
+            "--qos=normal",
+            "--directive",
+            "-p gpu",
+        ]))
+        .unwrap();
+        assert_eq!(
+            opts.get_all("--directive"),
+            ["--mem=64G", "--qos=normal", "-p gpu"]
+        );
+        assert!(Opts::parse(&args(&["--directive"])).is_err());
+        assert!(Opts::parse(&args(&["--root", "--host", "server"])).is_err());
     }
 }

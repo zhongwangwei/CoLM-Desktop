@@ -150,3 +150,45 @@ fn the_label_shift_matches_the_upstream_constants() {
     assert_eq!(HistoryFrequency::Yearly.label_shift_minutes(), 262_800);
     assert_eq!(HistoryFrequency::Timestep.label_shift_minutes(), 0);
 }
+
+#[test]
+fn civil_seconds_roundtrip_before_and_after_the_history_epoch() {
+    for year in [1, 1600, 1800, 1850, 1899, 1900, 2000, 9999] {
+        let days = if is_leap(year) { 366 } else { 365 };
+        for day in [1, 59, 60, days] {
+            for second in [0, 1, 86_399] {
+                let tick = tick_seconds(year, day, second).unwrap();
+                assert_eq!(civil_from_seconds(tick), Some((year, day, second)));
+            }
+        }
+    }
+    assert_eq!(civil_from_seconds(-1), Some((1899, 365, 86_399)));
+    let first = tick_seconds(1, 1, 0).unwrap();
+    let last_end = tick_seconds(9999, 365, 86_400).unwrap();
+    assert_eq!(civil_from_seconds(first - 1), None);
+    assert_eq!(civil_from_seconds(last_end), Some((10000, 1, 0)));
+    assert_eq!(civil_from_seconds(last_end + 1), None);
+    assert_eq!(civil_from_seconds(i64::MIN), None);
+    assert_eq!(civil_from_seconds(i64::MAX), None);
+    assert!(tick_seconds(0, 1, 0).is_err());
+    assert!(tick_seconds(10000, 1, 0).is_err());
+    assert!(tick_seconds(1900, 366, 0).is_err());
+    assert!(tick_seconds(2000, 366, 0).is_ok());
+}
+
+#[test]
+fn negative_subminute_write_points_keep_the_correct_minute() {
+    let window = SimulationWindow {
+        start_year: 1899,
+        start_julian_day: 365,
+        start_seconds: 86_340,
+        end_year: 1899,
+        end_julian_day: 365,
+        end_seconds: 86_370,
+        timestep_seconds: 30,
+    };
+    let records =
+        schedule_records(window, HistoryFrequency::Timestep, HistoryGrouping::Day).unwrap();
+    assert_eq!(records[0].suffix, "1899-12-31");
+    assert_eq!(records[0].label_minutes, -1);
+}

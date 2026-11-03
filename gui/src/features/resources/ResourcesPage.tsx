@@ -742,10 +742,12 @@ export default function ResourcesPage() {
           label: t('检查任务', 'Check action'),
           value: action,
           type: 'choice',
-          options: ['test', 'build-engine', 'build-kernel', 'verify'].map((value) => ({
-            value,
-            label: value,
-          })),
+          options: [
+            { value: 'test', label: t('运行测试', 'Run tests') },
+            { value: 'build-engine', label: t('编译模型引擎', 'Build model engine') },
+            { value: 'build-kernel', label: t('编译模型内核', 'Build model kernel') },
+            { value: 'verify', label: t('验证改动', 'Verify changes') },
+          ],
           set: setAction,
         },
         {
@@ -767,7 +769,10 @@ export default function ResourcesPage() {
           label: t('改动类型', 'Change kind'),
           value: changeKind,
           type: 'choice',
-          options: ['refactor', 'physics'].map((value) => ({ value, label: value })),
+          options: [
+            { value: 'refactor', label: t('代码整理', 'Code refactoring') },
+            { value: 'physics', label: t('物理过程修改', 'Physics changes') },
+          ],
           set: setChangeKind,
         },
         {
@@ -808,6 +813,7 @@ export default function ResourcesPage() {
   );
   /** 清除某类型记住的路径：只动本机保存的"上次用过的路径"，不删文件。 */
   async function forgetKindPath(kind: string, key: string) {
+    const savedServer = servers.find((server) => server.host === kindPathHost);
     await invoke('remote_forget_kind_path', { host: kindPathHost, kind, key });
     const forget = <T extends { kind_paths?: Record<string, Record<string, string>> }>(
       old: T,
@@ -818,11 +824,20 @@ export default function ResourcesPage() {
       if (!Object.keys(fields).length) delete paths[kind];
       return { ...old, kind_paths: paths };
     };
-    if (kindPathHost)
+    if (kindPathHost) {
       setServers((old) =>
         old.map((server) => (server.host === kindPathHost ? forget(server) : server)),
       );
-    else setLocalData((old) => forget(old));
+      const current = editorRef.current;
+      if (
+        savedServer &&
+        current.original === kindPathHost &&
+        current.baseline === JSON.stringify(savedServer)
+      ) {
+        setBaseline(JSON.stringify(forget(savedServer)));
+        setEditor((old) => (old ? forget(old) : old));
+      }
+    } else setLocalData((old) => forget(old));
     return t(
       `已清除 ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
       `Forgot ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
@@ -1591,7 +1606,7 @@ export default function ResourcesPage() {
                 />
                 <ActionButton
                   action="resource-workspace-list"
-                  label="list"
+                  label={t('列出任务', 'List jobs')}
                   disabled={busy || dirty || !workspace}
                   run={() =>
                     execute(`maintenance:${selected}`, () =>
@@ -1605,7 +1620,7 @@ export default function ResourcesPage() {
                 />
                 <ActionButton
                   action="resource-workspace-status"
-                  label="status"
+                  label={t('查看任务状态', 'View job status')}
                   disabled={busy || dirty || !workspace}
                   run={() =>
                     execute(`maintenance:${selected}`, () =>
@@ -1619,7 +1634,7 @@ export default function ResourcesPage() {
                 />
                 <ActionButton
                   action="resource-workspace-fetch"
-                  label="fetch"
+                  label={t('取回任务结果', 'Fetch job results')}
                   kind="commit"
                   disabled={busy || dirty || !workspace || !job}
                   run={() =>
@@ -1634,7 +1649,7 @@ export default function ResourcesPage() {
                 />
                 <ActionButton
                   action="resource-workspace-cancel"
-                  label="cancel"
+                  label={t('停止任务', 'Stop job')}
                   kind="commit"
                   disabled={busy || dirty || !workspace || !job}
                   run={() =>

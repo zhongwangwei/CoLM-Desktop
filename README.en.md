@@ -148,7 +148,7 @@ Enter the `Sitedata` and `Forcing` folders on New case and scan the sites. Selec
 
 ### Requirements
 
-- Rust **1.85.1** or newer
+- Desktop GUI: Rust **1.88** or newer; engine/CLI only: Rust **1.85.1** or newer
 - Git
 - Node.js **24** (matching CI) and npm
 - Tauri 2 CLI (`cargo tauri`)

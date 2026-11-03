@@ -824,6 +824,7 @@ test('a changed setting clears an untouched configuration but keeps a hand-edite
   const invalidate = (generatedValue: CompareSnapshot | null, yaml: string, design: string) => {
     const cleared: string[] = [];
     const clear = execute<() => void>('invalidateGeneratedConfig', {
+      status: { root: '/openbench' },
       configInvalidation,
       design,
       generated: { current: generatedValue },
@@ -922,6 +923,7 @@ test('the simulation form rejects an empty profile or an unsafe station ID', () 
       dataType: 'stn',
       from: '2003',
       to: '2006',
+      prefix: 'AT-Neu_hist_',
       stationId: 'AT,Neu',
     }),
   );

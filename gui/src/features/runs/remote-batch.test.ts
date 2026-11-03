@@ -45,11 +45,10 @@ test('remote concurrency counts active scheduler jobs, not successful submission
   assert.equal(q.changes.filter((entry) => entry.state === 'succeeded').length, 3);
 });
 
-test('unknown, missing exit code and poll failure stop submission without freeing their slots', async () => {
-  for (const failure of ['unknown', 'finished', 'network']) {
+test('unknown states and missing exit codes stop submission without freeing their slots', async () => {
+  for (const failure of ['unknown', 'finished']) {
     const q = queue({
       status: async (dir) => {
-        if (failure === 'network') throw new Error('Connection lost');
         return { record: record(dir), status: { state: failure } };
       },
     });
@@ -472,4 +471,47 @@ test('remote batch errors follow both Chinese and English UI languages', async (
     if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
     else Reflect.deleteProperty(globalThis, 'document');
   }
+});
+
+test('a transient status failure retains the job and retries without duplicate submission', async () => {
+  const polls = new Map<string, number>();
+  const q = queue({
+    workers: 1,
+    status: async (dir) => {
+      const count = (polls.get(dir) ?? 0) + 1;
+      polls.set(dir, count);
+      if (dir === 'a' && count === 1) throw new Error('Connection lost');
+      return finished(dir);
+    },
+    wait: async () => {
+      if (polls.get('a') === 1) assert.deepEqual(q.submitted, ['a']);
+    },
+  });
+  await q.run();
+  assert.equal(polls.get('a'), 2);
+  assert.deepEqual(q.submitted, ['a', 'b', 'c']);
+  assert.deepEqual(
+    q.changes.filter((row) => row.dir === 'a').map((row) => row.state),
+    ['submitting', 'submitted', 'unknown', 'succeeded'],
+  );
+});
+
+test('repeated unavailable status remains cancellable without freeing the job slot', async () => {
+  let stopped = false;
+  let polls = 0;
+  const q = queue({
+    workers: 1,
+    stopped: () => stopped,
+    status: async () => {
+      polls++;
+      throw new Error('offline');
+    },
+    wait: async () => {
+      if (polls === 3) stopped = true;
+    },
+  });
+  await q.run();
+  assert.equal(polls, 3);
+  assert.deepEqual(q.submitted, ['a']);
+  assert.equal(q.changes.filter((row) => row.dir === 'a').at(-1)?.state, 'unknown');
 });

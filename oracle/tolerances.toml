@@ -38,6 +38,10 @@ rtol = 1e-12
 variables = [
   # **只有下行辐射留在 tier1。** 它们由 `f_xy_solarin`（tier0）经解析分带得来，
   # 实测 264/264 逐位相等。
+  # Prescribed urban anthropogenic fluxes [W/m2]: MOD_Urban_LUCY.F90:125-178
+  # uses calendar profiles and population/traffic constants; Thermal:665-666
+  # only rescales by fixed lake fraction, with no solved-temperature dependency.
+  "f_fmeta", "f_fvehc",
   "f_solvd", "f_solvi", "f_solnd", "f_solni",
   "f_solvdln", "f_solviln", "f_solndln", "f_solniln",
   # `f_sr*`/`f_sab*`/`f_alb`/`f_rnet`/`f_emis`/`f_fm`/`f_fh`/`f_fq`/`f_fm10m`
@@ -66,6 +70,18 @@ atol = 1e-7
 rtol = 1e-7
 solver_tolerance_floor = 8e-8   # MOD_Hydro_SoilWater 的 Newton 容差
 variables = [
+  # Urban surface/tree fluxes [W/m2] inherit the thermal/canopy solve, like
+  # f_fseng/f_fsenl/f_lfevpa (MOD_Urban_Thermal; MOD_Hist.F90:976-1024).
+  "f_fsengimp", "f_fsengper", "f_fsenroof", "f_fsenurbl",
+  "f_fsenwsha", "f_fsenwsun", "f_lfevpgimp", "f_lfevpgper",
+  "f_lfevproof", "f_lfevpurbl",
+  # BEM exchange/HVAC fluxes [W/m2] use evolved building/ambient temperatures
+  # and HVAC thresholds (MOD_Urban_BEM.F90:233-332), hence inherit tier2 inputs.
+  "f_fach", "f_fhac", "f_fhah", "f_fwst",
+  # Evolved building temperatures [K], same dependency category as f_t_grnd.
+  "f_t_roof", "f_t_room", "f_t_wall", "f_tafu",
+  # AU-Preston January 1994 (744 hours) informed this classification; it does
+  # not establish full-period acceptance. Existing numerical rules are unchanged.
   "f_fsena", "f_fseng", "f_fsenl",
   "f_lfevpa", "f_fevpa", "f_fevpg", "f_fevpl",
   "f_etr", "f_etrsun", "f_etrsha",

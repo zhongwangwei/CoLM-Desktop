@@ -20,6 +20,8 @@ pub struct PcPftInput {
     pub fraction: f64,
     pub canopy_top_m: f64,
     pub canopy_bottom_m: f64,
+    /// `cratio_p`: canopy depth divided by crown width.
+    pub crown_aspect_ratio: f64,
     pub optics: LeafOptics,
     pub lai: f64,
     pub sai: f64,
@@ -124,6 +126,8 @@ pub fn cold_start_pc_broadband_radiation_from_ground(
                 && pft.canopy_top_m.is_finite()
                 && pft.canopy_bottom_m.is_finite()
                 && pft.canopy_top_m >= pft.canopy_bottom_m
+                && pft.crown_aspect_ratio.is_finite()
+                && pft.crown_aspect_ratio > 0.0
                 && pft.lai.is_finite()
                 && pft.lai >= 0.0
                 && pft.sai.is_finite()
@@ -217,6 +221,7 @@ pub fn three_d_canopy_wrap(
     let mut canopy = vec![0usize; count];
     let mut size = vec![0.0; count];
     let mut height = vec![0.0; count];
+    let mut crown_aspect_ratio = vec![1.0; count];
     let mut chil = vec![0.0; count];
     let mut lsai = vec![0.0; count];
     let mut rho = vec![[0.0; BANDS]; count];
@@ -225,6 +230,7 @@ pub fn three_d_canopy_wrap(
         // `:156-157`：`(htop-hbot)/2` 与 `(htop+hbot)/2` 都是乘 0.5。
         size[index] = (pft.canopy_top_m - pft.canopy_bottom_m) * 0.5;
         height[index] = (pft.canopy_top_m + pft.canopy_bottom_m) * 0.5;
+        crown_aspect_ratio[index] = pft.crown_aspect_ratio;
         lsai[index] = pft.lai + pft.sai;
         canopy[index] = pft.canopy_layer;
         chil[index] = pft.optics.chil;
@@ -251,6 +257,7 @@ pub fn three_d_canopy_wrap(
         fractions,
         &size,
         &height,
+        &crown_aspect_ratio,
         &chil,
         cosine_zenith,
         &lsai,
@@ -355,6 +362,7 @@ fn three_d_canopy(
     fcover: &[f64],
     size: &[f64],
     height: &[f64],
+    crown_aspect_ratio: &[f64],
     chil: &[f64],
     coszen: f64,
     lsai: &[f64],
@@ -363,25 +371,34 @@ fn three_d_canopy(
     ground: [[f64; RTYPES]; BANDS],
 ) -> ThreeDCore {
     let count = canopy_layer.len();
-    // `:486-491`：`cosz = coszen*sqrt(1/(cdcw²·sin²(zenith) + cos²(zenith)))`，`cdcw = 1`；
-    // `cosd` 的两个三角函数值在编译期折成常数，`FMA(1, 0.75-ε, 0.25+ε)` 恰为 1。
     let zenith = coszen.acos();
-    // gfortran 把这对 `sin`/`cos` 合成 libm `sincos`，结果与分开调用逐位相同；Rust 的
-    // `sin_cos()` 在 release 下被 LLVM 并成 `__sincos_stret`，**不**同 —— AT-Neu PC 全年
-    // 1213 次日间调用里有 2 次 `sin` 差 1 ULP，`cosz` 随之差，`tt(1,0)` 与 history 的
-    // `sabvsun`/`alb` 差一位。用不内联的分开调用挡住合并。
+    // Keep separate libm calls, matching gfortran rather than LLVM's combined sincos.
     let (sine, cosine) = (
         crate::atmosphere::fortran_sin(zenith),
         crate::atmosphere::fortran_cos(zenith),
     );
-    let cosz = coszen * (1.0 / (sine * sine).contract(1.0, cosine * cosine)).sqrt();
-    let cosd = f64::from_bits(0x3fe0_0000_0000_0001);
+    let diffuse_cosine = f64::from_bits(0x3fe0_0000_0000_0001);
+    let diffuse_sine = crate::atmosphere::fortran_sin(60.0 / 180.0 * std::f64::consts::PI);
+    let cosz: Vec<_> = crown_aspect_ratio
+        .iter()
+        .map(|ratio| coszen * (1.0 / (sine * sine).contract(ratio * ratio, cosine * cosine)).sqrt())
+        .collect();
+    let cosd: Vec<_> = crown_aspect_ratio
+        .iter()
+        .map(|ratio| {
+            diffuse_cosine
+                * (1.0
+                    / (diffuse_sine * diffuse_sine)
+                        .contract(ratio * ratio, diffuse_cosine * diffuse_cosine))
+                .sqrt()
+        })
+        .collect();
     let mut gdir = vec![0.0; count];
     let mut gdif = vec![0.0; count];
     for index in 0..count {
         let (phi1, phi2) = leaf_projection(chil[index]);
-        gdir[index] = phi2.contract(cosz, phi1);
-        gdif[index] = phi2.contract(cosd, phi1);
+        gdir[index] = phi2.contract(cosz[index], phi1);
+        gdif[index] = phi2.contract(cosd[index], phi1);
     }
 
     // `:506-535`：层聚合。`fc0` 是普通加法，其余都是 `FMA(fcover, x, acc)`。
@@ -409,8 +426,8 @@ fn three_d_canopy(
         csiz_lay[lev] = f.contract(size[index], csiz_lay[lev]);
         chgt_lay[lev] = f.contract(height[index], chgt_lay[lev]);
         lsai_lay[lev] = lsai[index].contract(f, lsai_lay[lev]);
-        cosz_lay[lev] = f.contract(cosz, cosz_lay[lev]);
-        cosd_lay[lev] = f.contract(cosd, cosd_lay[lev]);
+        cosz_lay[lev] = f.contract(cosz[index], cosz_lay[lev]);
+        cosd_lay[lev] = f.contract(cosd[index], cosd_lay[lev]);
         gdir_lay[lev] = f.contract(gdir[index], gdir_lay[lev]);
         gdif_lay[lev] = f.contract(gdif[index], gdif_lay[lev]);
         for band in 0..BANDS {
@@ -568,8 +585,8 @@ fn three_d_canopy(
             shadow_pd[index] = shadow_d[lev] * pfc;
             shadow_pi[index] = shadow_i[lev] * pfc;
             let numerator = fcover[index] * 0.375 * lsai[index];
-            taud[index] = numerator / (shadow_pd[index] * cosz);
-            taui[index] = numerator / (shadow_pi[index] * cosd);
+            taud[index] = numerator / (shadow_pd[index] * cosz[index]);
+            taui[index] = numerator / (shadow_pi[index] * cosd[index]);
             ftdd_orig[index] = quad_tee(taud[index]);
             ftdi_orig[index] = quad_tee(taui[index]);
             ftdd[index] = quad_tee_projected(taud[index], gdir[index]);
@@ -701,8 +718,8 @@ fn three_d_canopy(
                 taui[index],
                 ftdd_orig[index],
                 ftdi_orig[index],
-                cosz,
-                cosd,
+                cosz[index],
+                cosd[index],
                 pd,
                 sky,
                 fcover[index],
@@ -932,6 +949,7 @@ mod tests {
             fraction: 1.0,
             canopy_top_m: 0.0,
             canopy_bottom_m: 0.0,
+            crown_aspect_ratio: 1.0,
             optics: LeafOptics {
                 chil: -0.3,
                 reflectance: [[0.11, 0.31], [0.35, 0.53]],
@@ -986,6 +1004,7 @@ mod tests {
                 fraction: 1.0,
                 canopy_top_m: 0.5,
                 canopy_bottom_m: 0.05,
+                crown_aspect_ratio: 1.0,
                 optics: LeafOptics {
                     chil: -0.3,
                     reflectance: [[0.105, 0.36], [0.58, 0.58]],
@@ -1080,6 +1099,7 @@ mod tests {
             fraction,
             canopy_top_m: if canopy_layer == 0 { 0.5 } else { 4.0 },
             canopy_bottom_m: if canopy_layer == 0 { 0.0 } else { 1.0 },
+            crown_aspect_ratio: 1.0,
             optics: LeafOptics {
                 chil,
                 reflectance: [[0.1, 0.2], [0.3, 0.4]],
@@ -1141,6 +1161,7 @@ mod tests {
             fraction: 1.0,
             canopy_top_m: 0.5,
             canopy_bottom_m: 0.05,
+            crown_aspect_ratio: 1.0,
             optics: LeafOptics {
                 chil: -0.3,
                 reflectance: [[0.105, 0.36], [0.58, 0.58]],
@@ -1201,6 +1222,7 @@ mod tests {
                     fraction: 0.540_000_005_364_418,
                     canopy_top_m: 0.5,
                     canopy_bottom_m: 0.0,
+                    crown_aspect_ratio: 1.0,
                     optics,
                     lai: 0.200_000_002_980_232,
                     sai: 0.449_999_988_079_071,
@@ -1211,6 +1233,7 @@ mod tests {
                     fraction: 0.459_999_994_635_582,
                     canopy_top_m: 0.5,
                     canopy_bottom_m: 0.0,
+                    crown_aspect_ratio: 1.0,
                     optics,
                     lai: 0.200_000_002_980_232,
                     sai: 0.449_999_988_079_071,
@@ -1247,6 +1270,64 @@ mod tests {
         assert_close(state.pft[0].thermal_gap_fraction, 0.524_190_845_267_958);
         assert_close(state.pft[0].shade_fraction, 0.540_000_005_364_418);
         assert_close(state.pft[0].direct_extinction, 659.919_009_2);
+    }
+
+    #[test]
+    fn nonunit_crowns_match_the_independent_fortran_three_layer_reference() {
+        // oracle/scripts/test_pc_crown_ratio.py runs the checked-in ThreeDCanopy itself.
+        let state = three_d_canopy(
+            &[1, 2, 3],
+            &[0.3, 0.4, 0.3],
+            &[1.0, 3.0, 5.0],
+            &[1.2, 5.0, 12.0],
+            &[0.5, 1.0, 2.0],
+            &[0.1, 0.2, 0.3],
+            0.6,
+            &[2.0, 3.0, 4.0],
+            &[[0.1, 0.3], [0.12, 0.32], [0.14, 0.34]],
+            &[[0.05, 0.2], [0.06, 0.21], [0.07, 0.22]],
+            [[0.1, 0.15], [0.2, 0.25]],
+        );
+        let actual = [
+            state.albd[0],
+            state.albd[1],
+            state.albi[0],
+            state.albi[1],
+            state.ftdd,
+            state.ftdd,
+            state.ftid[0],
+            state.ftid[1],
+            state.ftii[0],
+            state.ftii[1],
+            state.fabd[0][0],
+            state.fabd[1][0],
+            state.fabd[2][0],
+            state.fabd[0][1],
+            state.fabd[1][1],
+            state.fabd[2][1],
+            state.fabi[0][0],
+            state.fabi[1][0],
+            state.fabi[2][0],
+            state.fabi[0][1],
+            state.fabi[1][1],
+            state.fabi[2][1],
+        ];
+        let expected: Vec<_> = include_str!("../../../oracle/fixtures/pc_crown_reference.csv")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| line.split(',').collect::<Vec<_>>())
+            .collect();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, row) in actual.into_iter().zip(expected) {
+            let expected: f64 = row[if colm_numeric::FUSED { 1 } else { 2 }]
+                .parse()
+                .unwrap();
+            assert!(
+                crate::reference_bits_match(actual, expected, 0.0),
+                "{}: {actual:.17e} != {expected:.17e}",
+                row[0]
+            );
+        }
     }
 
     fn assert_matrix_close(actual: [[f64; RTYPES]; BANDS], expected: [[f64; RTYPES]; BANDS]) {

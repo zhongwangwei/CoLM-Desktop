@@ -1615,6 +1615,8 @@ pub fn write_catch_cold_restart(config: CatchColdStartConfig<'_>) -> Result<Path
         file.variable_mut("dz_lake")
             .expect("checked above")
             .put_values(&dz_lake, ..)?;
+        file.close()
+            .with_context(|| format!("cannot close {}", path.display()))?;
     }
     write_basin_restart(
         &date_dir.join(format!(

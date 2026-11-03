@@ -443,7 +443,17 @@ export function examplePrompt(id: string, language: string) {
     : `我想试试自带的${example.zh}示例。请通过界面引导我选择模型设置、加载数据、创建算例并检查运行条件；实际开始计算前让我核对设置。`;
 }
 export function providerLabel(provider: (typeof API_PROVIDERS)[number], language: string) {
-  if (language !== 'en') return provider.name;
+  if (language !== 'en')
+    return (
+      (
+        {
+          custom: '自定义服务',
+          glm: '智谱',
+          qwen: '阿里云',
+          deepseek: 'DeepSeek（Pro / Flash）',
+        } as Record<string, string>
+      )[provider.id] ?? provider.name
+    );
   return (
     (
       {

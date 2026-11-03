@@ -15,6 +15,7 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            crown_aspect_ratio: None,
             compression_level: 1,
             class: &[1, 3],
             fraction: &[0.25, 0.75],
@@ -72,6 +73,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            crown_aspect_ratio: None,
             compression_level: 1,
             class: &[],
             fraction: &[],
@@ -102,6 +104,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
     assert!(write_pft_constant_restart_block(
         &invalid,
         PftConstantRestartInput {
+            crown_aspect_ratio: None,
             compression_level: 1,
             class: &[],
             fraction: &[1.0],
@@ -335,6 +338,7 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            crown_aspect_ratio: None,
             compression_level: 1,
             class: &[1, 3],
             fraction: &[0.25, 0.75],
@@ -381,6 +385,7 @@ fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
         write_pft_constant_restart_block(
             root.join(label),
             PftConstantRestartInput {
+                crown_aspect_ratio: None,
                 compression_level: level,
                 class: &[1, 3],
                 fraction: &[0.25, 0.75],
@@ -581,6 +586,7 @@ fn pft_restart_rejects_invalid_feature_shapes_before_creating_a_file() {
         2005,
         "w180_s90",
         PftConstantRestartInput {
+            crown_aspect_ratio: None,
             compression_level: 1,
             class: &[1],
             fraction: &[1.0, 0.0],
@@ -818,4 +824,28 @@ fn temp_dir(label: &str) -> PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&path);
     path
+}
+
+#[test]
+fn pc_constant_restart_preserves_nonunit_crown_ratios_and_rejects_invalid_values() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let root = temp_dir("pc-crown-ratio");
+    let path = root.join("pc.nc");
+    let mut input = PftConstantRestartInput {
+        compression_level: 1,
+        class: &[1, 9],
+        fraction: &[0.25, 0.75],
+        canopy_top_m: &[20.0, 0.5],
+        canopy_bottom_m: &[6.0, 0.0],
+        crown_aspect_ratio: Some(&[0.5, 1.0]),
+        canopy_structure: None,
+        crop_fraction: None,
+    };
+    write_pft_constant_restart_block(&path, input).unwrap();
+    let file = crate::RestartFile::open(&path).unwrap();
+    assert_eq!(file.floats("cratio_p").unwrap(), &[0.5, 1.0]);
+    input.crown_aspect_ratio = Some(&[0.0, 1.0]);
+    assert!(write_pft_constant_restart_block(root.join("invalid.nc"), input).is_err());
+    assert!(!root.join("invalid.nc").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }

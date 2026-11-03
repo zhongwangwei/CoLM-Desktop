@@ -75,7 +75,8 @@ def main() -> None:
     assert "CALL CoLM_stop()\n#endif" not in mksrfdata
     # 2026-10-21 同步 zhongwangwei/CoLM202X#28：开分汊时近干单元流域不参与蓄量限制，子步数过多时
     # 告警、停机。这道守卫在并入 CoLM-SYSU-integration（df09a27b）时丢过一次，Rust 汇流同样实现。
-    assert "IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &" in flow
+    assert "IF ((.not. DEF_USE_BIFURCATION) .or. &" in flow
+    assert "(DEF_GRIDBASED_ROUTING_STORAGE_DT_LIMIT .and. volwater > ROUTING_STORAGE_DT_EPS)) &" in flow
     assert "CALL CoLM_stop('grid_riverlake_flow: adaptive routing dt collapsed')" in flow
     # PR 512 replaced the global dt with per-cluster dt groups.
     assert "routing_last_global_dt = dt_reduce(1)" in flow

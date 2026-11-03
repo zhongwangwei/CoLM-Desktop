@@ -111,14 +111,12 @@ CONTAINS
       EM = 3975
       EF = 3975
 
-      IF (DEF_simulation_time%greenwich) THEN
-         sdate    = idate
-         sdate(3) = idate(3) - deltim
-         londeg   = patchlonr*180/PI
-
-         ! convert GMT time to local time
-         CALL gmt2local(sdate, londeg, ldate)
-      ENDIF
+      ! Both clock modes sample the beginning of this step; normalize midnight via gmt2local.
+      sdate    = idate
+      sdate(3) = idate(3) - deltim
+      londeg   = 0._r8
+      IF (DEF_simulation_time%greenwich) londeg = patchlonr*180/PI
+      CALL gmt2local(sdate, londeg, ldate)
 
       vehc_prof(:,1) = wdh_prof
       vehc_prof(:,2) = weh_prof

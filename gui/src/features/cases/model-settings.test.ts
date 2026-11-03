@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   filterModelParameters,
   modelParameterEditable,
@@ -668,5 +669,42 @@ test('material and urban exclusions preserve the side just enabled and ignore qu
     const unchanged = exclusionPatch({ DEF_URBAN_RUN: on, DEF_SOLUTE_NAMES: empty }, {}, context);
     assert.deepEqual(unchanged.closed, []);
     assert.equal(unchanged.patch.DEF_SOLUTE_NAMES, undefined);
+  }
+});
+
+test('configuration disabled reasons retain their meaning in English', async () => {
+  const { configurationReason } = await import('./model-settings');
+  assert.equal(
+    configurationReason('当前内核未编入这个功能', true),
+    'This feature is not compiled into the selected kernel',
+  );
+  assert.equal(
+    configurationReason('需要先启用植物水力过程', true),
+    'Enable plant hydraulics first',
+  );
+  assert.equal(configurationReason('需要先启用植物水力过程', false), '需要先启用植物水力过程');
+  const source = readFileSync(new URL('../../../src-tauri/src/config.rs', import.meta.url), 'utf8');
+  const reasons = source.slice(
+    source.indexOf('fn expert_tuning_runtime_state'),
+    source.indexOf('fn merge_field_states'),
+  );
+  for (const match of reasons.matchAll(/"([^"\n]+)"/g)) {
+    const reason = match[1];
+    if (!/[\u4e00-\u9fff]/.test(reason) || ['河道与水库', '城市', '材料'].includes(reason))
+      continue;
+    assert.doesNotMatch(configurationReason(reason, true) ?? '', /[\u4e00-\u9fff]/, reason);
+  }
+});
+
+test('PFT and PC backend applicability reasons have English translations', async () => {
+  const { configurationReason } = await import('./model-settings');
+  for (const reason of [
+    '当前候选内核未编入 CROP，只支持 PFT 0..15',
+    '已显式设置算例级系数，覆盖此 PFT 系数',
+    '当前配置未启用所需次网格或过程，或所选类型不适用',
+    '适用过程与类型表默认值须按所选源码核对',
+  ]) {
+    assert.doesNotMatch(configurationReason(reason, true) ?? '', /[\u4e00-\u9fff]/, reason);
+    assert.equal(configurationReason(reason, false), reason);
   }
 });

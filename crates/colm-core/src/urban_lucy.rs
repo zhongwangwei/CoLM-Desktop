@@ -7,12 +7,13 @@ use crate::{is_leap_year, month_lengths, CalendarTime};
 /// One urban patch's LUCY forcing, in the layout written by the urban restart.
 #[derive(Debug, Clone, Copy)]
 pub struct UrbanLucyFluxInput<'a> {
+    /// Sampling instant at the beginning of the timestep (UTC when `greenwich`).
     pub time: CalendarTime,
     pub greenwich: bool,
     pub longitude_radians: f64,
     /// `0` marks a public holiday; the array is one value per calendar day.
     pub fixed_holiday: &'a [f64],
-    /// `0` marks a weekday; Sunday is element zero in CoLM's `timeweek` order.
+    /// `0` marks a weekday; Monday is element zero in CoLM's `timeweek` order.
     pub week_holiday: &'a [f64],
     pub human_metabolic_profile: &'a [f64],
     pub weekday_traffic_profile: &'a [f64],
@@ -113,10 +114,11 @@ fn validate(input: UrbanLucyFluxInput<'_>) -> Result<()> {
 }
 
 fn local_time(time: CalendarTime, greenwich: bool, longitude_radians: f64) -> Result<CalendarTime> {
-    if !greenwich {
-        return Ok(time);
-    }
-    let offset_seconds = (longitude_radians.to_degrees() / 15.0 * 3600.0) as i64;
+    let offset_seconds = if greenwich {
+        (longitude_radians * 180.0 / std::f64::consts::PI / 15.0).round() as i64 * 3600
+    } else {
+        0
+    };
     let mut year = time.year;
     let mut day = i64::from(time.julian_day);
     let mut seconds = i64::from(time.seconds) + offset_seconds;
@@ -127,7 +129,7 @@ fn local_time(time: CalendarTime, greenwich: bool, longitude_radians: f64) -> Re
             year -= 1;
             day = if is_leap_year(year) { 366 } else { 365 };
         }
-    } else if seconds > 86_400 {
+    } else if seconds >= 86_400 {
         seconds -= 86_400;
         day += 1;
         if day > if is_leap_year(year) { 366 } else { 365 } {
@@ -153,7 +155,7 @@ fn julian_to_month_day(year: i32, julian_day: u16) -> (usize, u16) {
     unreachable!("validated Julian day fits its year")
 }
 
-/// Returns CoLM's Sunday-first weekday index and its one-based day of year.
+/// Returns CoLM's Monday-first weekday index and its one-based day of year.
 fn fortran_timeweek(year: i32, month: usize, day_of_month: u16) -> (usize, u16) {
     let (calendar_year, calendar_month) = if month <= 2 {
         (year - 1, month as i32 + 12)
@@ -176,10 +178,42 @@ fn fortran_timeweek(year: i32, month: usize, day_of_month: u16) -> (usize, u16) 
 }
 
 fn hour_index(seconds: u32) -> usize {
-    // CoLM's CEILING(seconds / 3600) uses hourly values for (0, 3600].
-    // At an exact day boundary the source's one-based index would be zero;
-    // use the first profile value rather than perform an invalid access.
-    usize::try_from(seconds.saturating_sub(1) / 3600).unwrap()
+    // `INT(ldate(3)/3600)+1`: zero-based profile of the local step-start hour.
+    (seconds % 86_400 / 3600) as usize
+}
+
+/// Both anthropogenic-heat schemes sample `idate - deltim`, then convert UTC to local time.
+pub(crate) fn urban_local_step_start(
+    time: CalendarTime,
+    time_step_seconds: f64,
+    greenwich: bool,
+    longitude_radians: f64,
+) -> Result<CalendarTime> {
+    crate::month_day(time)?;
+    ensure!(
+        time.seconds <= 86_400
+            && longitude_radians.is_finite()
+            && time_step_seconds.is_finite()
+            && time_step_seconds > 0.0
+            && time_step_seconds <= 86_400.0,
+        "urban anthropogenic heat clock inputs are invalid"
+    );
+    let mut start = time;
+    let mut seconds = (f64::from(time.seconds) - time_step_seconds).trunc() as i64;
+    if seconds < 0 {
+        seconds += 86_400;
+        if start.julian_day == 1 {
+            start.year = start
+                .year
+                .checked_sub(1)
+                .ok_or_else(|| anyhow::anyhow!("urban clock year underflow"))?;
+            start.julian_day = if is_leap_year(start.year) { 366 } else { 365 };
+        } else {
+            start.julian_day -= 1;
+        }
+    }
+    start.seconds = seconds as u32;
+    local_time(start, greenwich, longitude_radians)
 }
 
 #[cfg(test)]

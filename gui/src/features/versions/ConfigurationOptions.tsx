@@ -540,7 +540,7 @@ export default function ConfigurationOptions({
         return next;
       });
     }
-    const reason = configurationReason(context?.reason);
+    const reason = configurationReason(context?.reason, en);
     const resistanceReason = forcedResistance
       ? t(
           'LCT + van Genuchten 时模型固定关闭；切换后恢复自定义值或默认 SL14（1）',
@@ -627,7 +627,9 @@ export default function ConfigurationOptions({
     // 城市算例里 WUE 在运行期被两个引擎关掉：只灰掉 WUE 这一项，按实际运行的方案显示，
     // 其余两种照常可选（原来 WUE 照常可选可存，界面一直显示 WUE，GUI 审查 2026-10-22）。
     const wueClosed = closed('DEF_USE_WUEST');
-    const wueReason = values.fields.find((f) => f.name === 'DEF_USE_WUEST')?.reason;
+    const wueReason =
+      configurationReason(values.fields.find((f) => f.name === 'DEF_USE_WUEST')?.reason, en) ??
+      t('关闭原因尚未核实', 'The reason for disabling WUE has not been verified');
     const flags = stomatalFields.map((name) => {
       if (name === 'DEF_USE_WUEST' && wueClosed) return '.false.';
       const context = values.fields.find((field) => field.name === name);
@@ -1220,8 +1222,9 @@ export default function ConfigurationOptions({
         )}
         <small>
           {entry.scope_label} · {entry.unit ?? '—'} ·{' '}
-          {entry.reason || t('待按冻结源码核对', 'Pending frozen-source verification')} ·{' '}
-          {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
+          {configurationReason(entry.reason, en) ||
+            t('待按冻结源码核对', 'Pending frozen-source verification')}{' '}
+          · {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
         </small>
         {overridden && (
           <ActionButton

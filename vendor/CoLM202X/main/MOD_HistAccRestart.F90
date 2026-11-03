@@ -306,6 +306,7 @@ CONTAINS
    USE MOD_LandPatch, only: landpatch
    USE MOD_LandUrban, only: landurban
    USE MOD_NetCDFVector, only: ncio_create_file_vector, ncio_define_dimension_vector
+   USE MOD_Filesystem, only: make_directory
 #ifdef GridRiverLakeFlow
    USE MOD_Grid_RiverLakeHistState, only: acctime_ucat
 #endif
@@ -320,7 +321,7 @@ CONTAINS
       CALL sidecar_filename (jdate, file)
 
       write(cdate,'(i4.4,"-",i3.3,"-",i5.5)') jdate
-      IF (p_is_master) CALL system ('mkdir -p '//trim(DEF_dir_restart)//'/'//trim(cdate))
+      IF (p_is_master) CALL make_directory (trim(DEF_dir_restart)//'/'//trim(cdate))
 #ifdef USEMPI
       CALL mpi_barrier (p_comm_glb, p_err)
 #endif

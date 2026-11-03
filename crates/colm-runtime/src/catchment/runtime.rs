@@ -579,6 +579,8 @@ impl CatchmentRuntime {
                 .with_context(|| format!("{name} disappeared"))?
                 .put_values(values, (t..t + 1, ..))?;
         }
+        file.close()
+            .with_context(|| format!("cannot close {}", path.display()))?;
         self.model.acc.ntacc_bsn.fill(0.0);
         self.history.flush();
         Ok(path)
@@ -628,6 +630,8 @@ impl CatchmentRuntime {
                     .expect("checked above")
                     .put_values(&values, ..)?;
             }
+            file.close()
+                .with_context(|| format!("cannot close {}", path.display()))?;
         }
         Ok(())
     }

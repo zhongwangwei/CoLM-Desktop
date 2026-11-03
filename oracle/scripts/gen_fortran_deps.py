@@ -17,6 +17,7 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,13 +47,32 @@ def stage_variables(makefile_text):
 
 def expand(variable):
     """让 make 展开一个变量（在 vendor 目录下，读真实的 include/Makeoptions）。"""
+    env = os.environ.copy()
+    command = ["make"]
+    if tools := env.get("COLM_FORTRAN_DEPS_BIN"):
+        names = ("make", "bash", "sh", "cpp", "awk", "printf")
+        if os.name == "nt":
+            names += ("cygpath",)
+        binaries = {name: shutil.which(name, path=tools) for name in names}
+        missing = [name for name, path in binaries.items() if path is None]
+        if missing:
+            raise RuntimeError(f"COLM_FORTRAN_DEPS_BIN is missing required tools: {', '.join(missing)}")
+        # Only make's child processes need the POSIX tools; do not shadow MSVC's link.exe.
+        env["PATH"] = tools + os.pathsep + env.get("PATH", "")
+        shell = binaries["bash"]
+        if os.name == "nt":
+            shell = subprocess.check_output([binaries["cygpath"], "-u", shell], env=env, text=True).strip()
+        command = [binaries["make"], "SHELL=" + shell]
     with tempfile.NamedTemporaryFile("w", suffix=".mk", delete=False) as helper:
         helper.write("print-%:\n\t@echo $($*)\n")
         path = helper.name
     try:
+        make_path = path
+        if tools and os.name == "nt":
+            make_path = subprocess.check_output([binaries["cygpath"], "-u", path], env=env, text=True).strip()
         result = subprocess.run(
-            ["make", "-s", "-f", "Makefile", "-f", path, f"print-{variable}"],
-            cwd=VENDOR, check=True, capture_output=True, text=True)
+            command + ["-s", "-f", "Makefile", "-f", make_path, f"print-{variable}"],
+            cwd=VENDOR, env=env, check=True, capture_output=True, text=True)
     finally:
         os.unlink(path)
     return [word for word in result.stdout.split() if word.endswith(".o")]

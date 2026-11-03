@@ -252,6 +252,8 @@ pub fn write(path: &Path, materials: &SidecarMaterials<'_>) -> Result<()> {
         let accumulators: Vec<&CoreAccumulator> = accumulators.iter().collect();
         crate::methane::write_accflux(&mut file, setup, &accumulators)?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 

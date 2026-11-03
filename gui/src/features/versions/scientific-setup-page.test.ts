@@ -4,14 +4,14 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { bilingual } from '../../lib/bilingual';
 import * as setup from './scientific-setup';
-import { modelSettingValue } from '../cases/model-settings';
+import { configurationReason, modelSettingValue } from '../cases/model-settings';
 import type { ConfigurationSource, ConfigurationResult } from './configuration-options';
 import { caseOptionOverlay, caseOptionPatch, type CaseOptionPatch } from './configuration-options';
 import type { Overlay, KernelEntry } from '../../lib/types';
 import type { ModelField } from './model';
 import type { UiAction, UiField } from '../../lib/guide';
 type Contract = { fields: UiField[]; actions: UiAction[]; status: string };
-function harness() {
+function harness(language: 'zh' | 'en' = 'zh') {
   const overlay: Overlay = {
     physics: {
       DEF_USE_LCT: '.false.',
@@ -61,6 +61,7 @@ function harness() {
     ...setup,
     caseOptionOverlay,
     caseOptionPatch,
+    configurationReason,
     modelSettingValue,
     bilingual,
     React: {
@@ -73,7 +74,7 @@ function harness() {
     ...Object.fromEntries(
       ['Button', 'ActionButton', 'Card', 'Field', 'Input', 'Notice'].map((k) => [k, k]),
     ),
-    useApp: () => ({ state: { language: 'zh' } }),
+    useApp: () => ({ state: { language } }),
     // 动作由 ActionButton 登记（第 737 轮）：取最近一次渲染出的按钮。
     usePageContract: (c: Contract) => {
       contract = {
@@ -509,4 +510,21 @@ test('an unavailable inherited process does not expose an empty settings entry',
   h.render();
   const c = await h.resolve();
   assert.ok(!c.actions.some((a) => a.id === 'setup-DEF_USE_GridRiverLakeFlow-settings'));
+});
+
+test('English cards translate a disabled backend configuration reason', async () => {
+  const h = harness('en');
+  h.response.fields.push({
+    name: 'DEF_USE_BGC',
+    mode: 'disabled',
+    reason: '当前内核未编入这个功能',
+    configured_value: '.false.',
+    allowed_values: [],
+    pending: false,
+  });
+  h.render();
+  await h.resolve();
+  const text = JSON.stringify(h.nodes);
+  assert.ok(!text.includes('当前内核未编入这个功能'));
+  assert.ok(text.includes(configurationReason('当前内核未编入这个功能', true)!));
 });

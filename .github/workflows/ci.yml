@@ -11,10 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the kernel compiler
-        run: sudo apt-get update && sudo apt-get install -y gfortran libnetcdff-dev libnetcdf-dev python3-pytest
+        run: sudo apt-get update && sudo apt-get install -y gfortran libnetcdff-dev libnetcdf-dev liblapack-dev libblas-dev openmpi-bin libopenmpi-dev python3-pytest
       - name: Check literal filesystem paths
         run: |
           python3 oracle/scripts/test_kernel_filesystem.py
+          python3 oracle/scripts/test_material_runtime_switches.py
+          python3 oracle/scripts/test_namelist_mpi_flags.py
+          python3 oracle/scripts/test_urban_bem.py
+          python3 oracle/scripts/test_urban_flux_reference.py
+          python3 oracle/scripts/test_urban_vegetated_flux_reference.py
+          python3 oracle/scripts/test_rss6_reference.py
+          python3 oracle/scripts/test_pc_crown_ratio.py
           python3 oracle/scripts/test_kernel_source_copy.py
           python3 oracle/scripts/test_ensure_native_kernels.py
           python3 oracle/scripts/test_netcdf_initialization.py
@@ -35,6 +42,52 @@ jobs:
       # 实现后其中一条一直过时到第 705 轮才发现。
       - name: Check the vendored FLAT_SPMD static assertions
         run: python3 -m pytest -q vendor/CoLM202X/tests
+
+  python-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check offline tooling and packaging
+        run: |
+          python scripts/test-bind-knowledge.py
+          python scripts/test_gui_linux_private_deps.py
+          python scripts/test_prepare_private_cargo_vendor.py
+          python -m unittest discover -s packaging/python/tests -p 'test_*.py'
+      - name: Install synthetic NetCDF fixture dependencies
+        run: python -m pip install numpy xarray scipy cftime
+      - name: Check OpenBench preparation scripts
+        run: python scripts/test-bench-scripts.py
+
+  msrv-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.85.1'
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the locked engine workspace on its minimum Rust version
+        run: cargo check --locked --workspace --all-targets
+
+  msrv-gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.88.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+      - name: Install Linux webview dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Check the locked GUI workspace on its minimum Rust version
+        run: cargo check --locked --manifest-path gui/src-tauri/Cargo.toml --all-targets
 
   # 每个 PR 都跑：纯 Rust 侧
   rust:
@@ -83,6 +136,22 @@ jobs:
       # 缓存尤其重要：没有它每个作业都要重新从源码编译 HDF5 与 netcdf-c。
       - uses: Swatinem/rust-cache@v2
 
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        id: fortran-tools
+        with:
+          msystem: MSYS
+          install: make gcc gawk
+      - name: Check the complete Windows dependency-generation toolchain
+        if: runner.os == 'Windows'
+        env:
+          MSYS2_LOCATION: ${{ steps.fortran-tools.outputs.msys2-location }}
+        run: |
+          $tools = Join-Path $env:MSYS2_LOCATION 'usr\bin'
+          "COLM_FORTRAN_DEPS_BIN=$tools" >> $env:GITHUB_ENV
+          $env:COLM_FORTRAN_DEPS_BIN = $tools
+          python oracle/scripts/gen_fortran_deps.py --check
+
       # netcdf 是本方案最大的依赖风险点，所以三平台都编一次 —— 为的是让
       # Windows 上的失败在第一天暴露，而不是等到里程碑 9。
       #
@@ -92,6 +161,10 @@ jobs:
       # 首次构建约多花 45 秒编译 HDF5 与 netcdf-c 源码；cargo 会缓存。
       - name: Build
         run: cargo build --workspace --all-targets
+
+      - name: Check terminal assistant against local fixtures
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-terminal-assistant.py --agent target/debug/colm-agent --cli target/debug/colm-cli
 
       # 除了需要 PLUMBER2 与 rawdata 的那几个之外，全部在这里跑。
       #
@@ -133,10 +206,14 @@ jobs:
           # The fake-kernel shell harness runs on Unix; Windows uses unit/native jobs.
           cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1
           cargo test -p colm-cli --test engine_pack
+          cargo test -p colm-cli --test ssh_auth
+          cargo test -p colm-agent --test startup_handshake
           cargo test -p oracle --test judge
+          cargo test -p oracle --test tier_compare
           cargo test -p oracle --test golden_run
           cargo test -p colm-namelist --test roundtrip
           cargo test -p colm-schema --test drift
+          cargo test -p colm-schema --test curated
           cargo test -p oracle --test histmap
           cargo test -p colm-hist --test drift
           cargo test -p colm-core --test drift_landcover
@@ -144,9 +221,17 @@ jobs:
           cargo test -p xtask --test kernel_profile
           cargo test -p xtask --test windows_console
           cargo test -p xtask --test ci_golden_status
+          cargo test -p xtask --test basic_settings --test batch_edit --test bgc_history_metadata --test bgc_runtime_guards --test fortran_deps --test urban_history_average -- --test-threads=1
           bash vendor/CoLM202X/run/scripts/test_create_newcase_runtime_contract.sh
       # 前端调用的命令名、参数名要和后端注册的对上；tsc 看不到 Rust 那边，拼错的命令
       # 要等点下去才会以「command not found」暴露。check-gui 把它提前到 CI。
+      - name: Check delayed NetCDF close failures
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash scripts/build-netcdf-fault-probes.sh "$RUNNER_TEMP/netcdf-close-probes"
+          python3 scripts/test-netcdf-close-faults.py --cli "$RUNNER_TEMP/netcdf-close-probes/colm-cli" --runtime-probe "$RUNNER_TEMP/netcdf-close-probes/netcdf-close-probe"
+
       - name: GUI interface
         shell: bash
         run: |
@@ -301,6 +386,9 @@ jobs:
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, plumber2]
+    env:
+      PLUMBER2_ROOT: ${{ vars.PLUMBER2_ROOT }}
+      COLM_RAWDATA: ${{ vars.COLM_RAWDATA }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -308,13 +396,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Check required golden data
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PLUMBER2_ROOT:?Set the PLUMBER2_ROOT repository variable}"
+          : "${COLM_RAWDATA:?Set the COLM_RAWDATA repository variable}"
+          test -d "$PLUMBER2_ROOT/Sitedata"
+          test -d "$PLUMBER2_ROOT/Forcing"
+          test -f "$COLM_RAWDATA/soil_brightness.nc"
+          test -f "$COLM_RAWDATA/topography.nc"
+
       - name: Build default and crop kernels
         run: |
           for p in default crop; do ./oracle/scripts/build_kernel.sh "$p"; done
 
       - name: Golden regression (both windows)
-        env:
-          PLUMBER2_ROOT: ${{ vars.PLUMBER2_ROOT }}
         run: |
           set -euo pipefail
           for case in CN-Cng CN-Cng-wet; do
@@ -329,7 +426,7 @@ jobs:
           cargo run -p oracle --bin tier-check -- oracle/golden/*.nc
 
       - name: Tests that need the CoLM source
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
 
       # 站点文件也进回归：它是黄金输出的输入，改了它而不改黄金文件，
       # 回归就在比两个不同前提下的结果。判官在这里预期退出 0。

@@ -453,6 +453,13 @@ test('remembered paths by simulation type are listed per server, survive saving 
     key: 'sitedir',
   });
   assert.equal(forget().length, 2);
+  page.fill('resource-username', 'kept-after-forget');
+  await page.press('清除');
+  await page.action('resource-save');
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-username')!.value,
+    'kept-after-forget',
+  );
   await page.action('resource-select-server-7920mp');
   assert.equal(forget().length, 0);
 });

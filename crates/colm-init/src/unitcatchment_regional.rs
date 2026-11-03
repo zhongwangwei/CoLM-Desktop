@@ -455,6 +455,8 @@ pub fn subset_write(
         "index of this unit catchment in the source network",
     )?;
     variable.put_values(&src_index, netcdf::Extents::All)?;
+    out.close()
+        .with_context(|| format!("cannot close {}", file_out.display()))?;
     Ok((selection.seq.len(), selection.systems))
 }
 

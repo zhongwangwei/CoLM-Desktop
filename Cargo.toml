@@ -27,7 +27,7 @@ publish = false
 
 # 本项目几乎没有需要 unsafe 的地方（netcdf crate 已封装 FFI）。例外各自是一个小 crate、降为 deny、
 # 只在具体那几行放行：colm-lapack（macOS Accelerate 与 libm 的 FFI）、colm-ncchar（NC_CHAR 的类型描述）、
-# colm-h5chunk（HDF5 直写块）。
+# colm-h5chunk（HDF5 直写块）、colm-case::file_lock（跨进程文件锁）。
 # 注意 forbid 比 deny 强：局部 #[allow(unsafe_code)] 会被 E0453 拒绝。
 # 将来若某成员确实需要 FFI，出口在 workspace 层面（改 deny，或该成员不 opt-in），
 # 不是局部 allow。

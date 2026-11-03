@@ -31,6 +31,17 @@ test('a study range starts at half to one and a half times the default, inside t
   assert.deepEqual(defaultRange(descriptor(null, null), null), ['', '']);
 });
 
+test('sentinel defaults fall back to ordered bounds and exclusive endpoints stay inside', () => {
+  const bounded = descriptor('0', '1');
+  assert.deepEqual(defaultRange(bounded, -999.9), ['0', '1']);
+  bounded.validation.min_exclusive = true;
+  bounded.validation.max_exclusive = true;
+  for (const base of [-999.9, null, 0, 1]) {
+    const [low, high] = defaultRange(bounded, base).map(Number);
+    assert.ok(low > 0 && low < high && high < 1);
+  }
+});
+
 test('picks remembered per version survive, and unreadable storage just means none', () => {
   store.set('colm.versions.studyPicks.model-1', JSON.stringify([{ parameter_id: 'x' }]));
   assert.equal(loadPicks('model-1').length, 1);

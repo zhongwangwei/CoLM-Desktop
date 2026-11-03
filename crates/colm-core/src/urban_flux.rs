@@ -30,8 +30,8 @@ const TFRZ: f64 = 273.16;
 const VONKAR: f64 = 0.4;
 const GRAV: f64 = 9.80616;
 /// 人为热里感热、潜热的份额（`fsh`/`flh`）。
-const FSH: f64 = 0.92;
-const FLH: f64 = 0.08;
+pub(crate) const FSH: f64 = 0.85;
+pub(crate) const FLH: f64 = 0.15;
 /// `rsoil = 0.22*1e-6`：土壤呼吸（mol m⁻² s⁻¹）。
 const RSOIL: f64 = 0.22 * 1.0e-6;
 /// `0.5*1.2/vonkar/vonkar`：gfortran 左结合折成一个常量。
@@ -562,33 +562,29 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         )?;
         let (rd3, rd2, rb0, rb1, rb2) = (t.rd3, t.rd2, t.rb0, t.rb12, t.rb12);
         // 温度（`:691-700`）
-        bt = 1.0 / (rd3 * ((1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0));
-        ct = ((1.0 / rd3 + fg / rd2) + fc[1] / rb1) + fc[2] / rb2;
-        let top_heat = ((input.troof * fc[0]) / rb0 + anthro.hahe3 / rhocp) + input.thm / t.rah;
-        let denominator_t = (1.0 - bt / (rd3 * ct)) * ct;
-        // `:697` 分子里的 `aT` 收成 `.FMA (…, bT, …)`（与 VegFlux 不同）
-        taf2 = top_heat.contract(
-            bt,
-            (((fg * s.tg) / rd2 + anthro.hahe2 / rhocp) + (input.twsun * fc[1]) / rb1)
-                + (input.twsha * fc[2]) / rb2,
-        ) / denominator_t;
-        taf3 = ((((taf2 / rd3) + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp)
-            + input.thm / t.rah)
-            / ((1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0);
+        bt = fg / (rd3 * ((1.0 / t.rah + fg / rd3) + fc[0] / rb0));
+        ct = ((fg / rd3 + fg / rd2) + fc[1] / rb1) + fc[2] / rb2;
+        let top_heat = (input.thm / t.rah + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp;
+        let denominator_t = ct - (bt * fg) / rd3;
+        taf2 = ((top_heat.contract(bt, (s.tg * fg) / rd2) + (input.twsun * fc[1]) / rb1)
+            + (input.twsha * fc[2]) / rb2
+            + anthro.hahe2 / rhocp)
+            / denominator_t;
+        taf3 = (((input.thm / t.rah + (taf2 * fg) / rd3) + (input.troof * fc[0]) / rb0)
+            + anthro.hahe3 / rhocp)
+            / ((1.0 / t.rah + fg / rd3) + fc[0] / rb0);
         // 湿度（`:702-718`）
         rss_ = if input.qgper < qaf2 { 0.0 } else { input.rss };
-        let cq = (1.0 / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2;
-        let bq_inner = (1.0 / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
-        let bq = 1.0 / (rd3 * bq_inner);
+        let cq = (fg / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2;
+        let bq_inner = (fg / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
+        let bq = fg / (rd3 * bq_inner);
         let roof_moisture = (fc[0] * (input.qroof * fwet_roof)) / rb0;
         let top_moisture = roof_moisture + input.qm / t.raw;
-        qaf2 = (top_moisture.contract(
-            bq,
-            ((input.qgper * s.fgper) * fg) / (rd2 + rss_)
-                + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2,
-        ) + (anthro.lahe / input.rhoair) / HVAP)
-            / ((1.0 - bq / (rd3 * cq)) * cq);
-        qaf3 = ((roof_moisture + qaf2 / rd3) + input.qm / t.raw) / bq_inner;
+        qaf2 = ((top_moisture.contract(bq, ((input.qgper * fg) * s.fgper) / (rd2 + rss_))
+            + (((input.qgimp * fwet_gimp) * fg) * s.fgimp) / rd2)
+            + (anthro.lahe / input.rhoair) / HVAP)
+            / (cq - (bq * fg) / rd3);
+        qaf3 = ((input.qm / t.raw + (qaf2 * fg) / rd3) + roof_moisture) / bq_inner;
         fwet_roof = if qaf3 > input.qroof {
             1.0
         } else {
@@ -625,20 +621,20 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
     let fsenwsha = (rhocp / rb2) * (input.twsha - taf2);
     let fevproof = ((input.rhoair / rb0) * (input.qroof - qaf3)) * fwet_roof;
     // `:799-800`：用终值 `fwet_*` 重算 `cQ`/`bQ`（`bT`/`cT` 与循环里的相同）。
-    let cq = (1.0 / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fwet_gimp * fg) * s.fgimp) / rd2;
-    let bq_inner = (1.0 / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
-    let bq = 1.0 / (rd3 * bq_inner);
-    let one_minus_bt = 1.0 - bt / (rd3 * ct);
-    let one_minus_bq = 1.0 - bq / (rd3 * cq);
-    let cwsuns = (rhocp / rb1) * (1.0 - fc[1] / (one_minus_bt * (rb1 * ct)));
-    let cwshas = (rhocp / rb2) * (1.0 - fc[2] / (one_minus_bt * (rb2 * ct)));
-    let bt_inner = (1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0;
+    let cq = (fg / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fwet_gimp * fg) * s.fgimp) / rd2;
+    let bq_inner = (fg / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
+    let bq = fg / (rd3 * bq_inner);
+    let denominator_t = ct - (bt * fg) / rd3;
+    let denominator_q = cq - (bq * fg) / rd3;
+    let cwsuns = (rhocp / rb1) * (1.0 - fc[1] / (rb1 * denominator_t));
+    let cwshas = (rhocp / rb2) * (1.0 - fc[2] / (rb2 * denominator_t));
+    let bt_inner = (1.0 / t.rah + fg / rd3) + fc[0] / rb0;
     let croofs = (rhocp / rb0)
-        * ((1.0 - ((fc[0] * bt) * bt) / (one_minus_bt * (rb0 * ct))) - fc[0] / (rb0 * bt_inner));
+        * ((1.0 - ((fc[0] * bt) * bt) / (rb0 * denominator_t)) - fc[0] / (rb0 * bt_inner));
     let wet_roof_cover = fc[0] * fwet_roof;
     // `:812`
     let croofl = (((fwet_roof * input.rhoair) / rb0) * input.dqroofdt)
-        * ((1.0 - ((wet_roof_cover * bq) * bq) / ((rb0 * cq) * one_minus_bq))
+        * ((1.0 - ((wet_roof_cover * bq) * bq) / (rb0 * denominator_q))
             - wet_roof_cover / (rb0 * bq_inner));
     let croof = croofl.contract(input.htvp_roof, croofs);
     let taux = -((input.eastward_wind_m_s * input.rhoair) / t.ram);
@@ -647,11 +643,11 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
     let fsengimp = (rhocp / rd2) * (input.tgimp - taf2);
     let fevpgper = (input.rhoair / (rd2 + rss_)) * (input.qgper - qaf2);
     let fevpgimp = fwet_gimp * ((input.rhoair / rd2) * (input.qgimp - qaf2));
-    let cgrnds = (rhocp / rd2) * (1.0 - fg / (one_minus_bt * (rd2 * ct)));
+    let cgrnds = (rhocp / rd2) * (1.0 - fg / (rd2 * denominator_t));
     let cgperl = ((input.rhoair / (rd2 + rss_)) * input.dqgperdt)
-        * (1.0 - (fg * s.fgper) / (one_minus_bq * ((rd2 + rss_) * cq)));
+        * (1.0 - (fg * s.fgper) / ((rd2 + rss_) * denominator_q));
     let cgimpl = (((fwet_gimp * input.rhoair) / rd2) * input.dqgimpdt)
-        * (1.0 - ((fwet_gimp * fg) * s.fgimp) / (one_minus_bq * (rd2 * cq)));
+        * (1.0 - ((fwet_gimp * fg) * s.fgimp) / (rd2 * denominator_q));
     let cgimp = cgimpl.contract(input.htvp_gimp, cgrnds);
     let cgper = cgperl.contract(input.htvp_gper, cgrnds);
     // `:860` `.FMA (d-2, tg, taf2*2)/d`，`d = displau + z0mu`
@@ -920,26 +916,26 @@ pub fn urban_vegetated_flux(
         rv = 1.0 / wet_delta.contract(lai / (rs + rb3), (lsai * (1.0 - wet_delta)) / rb3);
 
         // 两层温度（`:1806-1817`）
-        bt = 1.0 / (rd3 * ((1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0));
-        ct = (((1.0 / rd3 + fg / rd2) + fc[1] / rb1) + fc[2] / rb2) + (lsai * fc3) / rb3;
+        bt = fg / (rd3 * ((1.0 / t.rah + fg / rd3) + fc[0] / rb0));
+        ct = (((fg / rd3 + fg / rd2) + fc[1] / rb1) + fc[2] / rb2) + (lsai * fc3) / rb3;
         let at = (((input.troof * fc[0]) / rb0 + anthro.hahe3 / rhocp) + input.thm / t.rah) * bt;
         let wall_sum = (((fg * s.tg) / rd2 + anthro.hahe2 / rhocp) + (input.twsun * fc[1]) / rb1)
             + (input.twsha * fc[2]) / rb2;
-        let denominator_t = (1.0 - bt / (rd3 * ct)) * ct;
-        let one_minus_bt = 1.0 - bt / (rd3 * ct);
+        let denominator_t = (1.0 - (bt * fg) / (rd3 * ct)) * ct;
+        let one_minus_bt = 1.0 - (bt * fg) / (rd3 * ct);
         taf2 = ((wall_sum + (lsai * (fc3 * state.tl)) / rb3) + at) / denominator_t;
         // 两层湿度（`:1819-1836`）
         rss_ = if input.qgper < qaf2 { 0.0 } else { input.rss };
-        let cq = ((1.0 / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2)
+        let cq = ((fg / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2)
             + fc3 / rv;
-        let bq_inner = (1.0 / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
-        let bq = 1.0 / (rd3 * bq_inner);
+        let bq_inner = (fg / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
+        let bq = fg / (rd3 * bq_inner);
         let roof_moisture = (fc[0] * (qsatl0 * fwet_roof)) / rb0;
         let top_moisture = roof_moisture + input.qm / t.raw;
         let ground_moisture = ((input.qgper * s.fgper) * fg) / (rd2 + rss_)
             + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2;
         let anthropogenic_moisture = (anthro.lahe / input.rhoair) / HVAP;
-        let one_minus_bq = 1.0 - bq / (rd3 * cq);
+        let one_minus_bq = 1.0 - (bq * fg) / (rd3 * cq);
         qaf2 = (top_moisture.contract(bq, ground_moisture + (fc3 * qsatl3) / rv)
             + anthropogenic_moisture)
             / (one_minus_bq * cq);
@@ -1037,18 +1033,18 @@ pub fn urban_vegetated_flux(
 
         // 用新叶温重算两层（`:2051-2116`）
         taf2 = ((wall_sum + (lsai * (fc3 * state.tl)) / rb3) + at) / denominator_t;
-        taf3 = ((((taf2 / rd3) + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp)
+        taf3 = (((((taf2 * fg) / rd3) + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp)
             + input.thm / t.rah)
-            / ((1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0);
+            / ((1.0 / t.rah + fg / rd3) + fc[0] / rb0);
         rss_ = if input.qgper < qaf2 { 0.0 } else { input.rss };
-        let cq = ((1.0 / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2)
+        let cq = ((fg / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fg * fwet_gimp) * s.fgimp) / rd2)
             + fc3 / rv;
         let ground_moisture = ((input.qgper * s.fgper) * fg) / (rd2 + rss_)
             + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2;
         qaf2 = (anthropogenic_moisture
             + top_moisture.contract(bq, ground_moisture + (fc3 * qsatl3) / rv))
-            / ((1.0 - bq / (rd3 * cq)) * cq);
-        qaf3 = ((roof_moisture + qaf2 / rd3) + input.qm / t.raw) / bq_inner;
+            / ((1.0 - (bq * fg) / (rd3 * cq)) * cq);
+        qaf3 = ((roof_moisture + (qaf2 * fg) / rd3) + input.qm / t.raw) / bq_inner;
         fwet_roof = if qaf3 > input.qroof {
             1.0
         } else {
@@ -1230,15 +1226,15 @@ pub fn urban_vegetated_flux(
     let fsenwsun = (rhocp / rb1) * (input.twsun - taf2);
     let fsenwsha = (rhocp / rb2) * (input.twsha - taf2);
     let fevproof = ((input.rhoair / rb0) * (qsatl0 - qaf3)) * fwet_roof;
-    let one_minus_bt = 1.0 - bt / (rd3 * ct);
-    let cq = ((1.0 / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fwet_gimp * fg) * s.fgimp) / rd2)
+    let one_minus_bt = 1.0 - (bt * fg) / (rd3 * ct);
+    let cq = ((fg / rd3 + (fg * s.fgper) / (rd2 + rss_)) + ((fwet_gimp * fg) * s.fgimp) / rd2)
         + fc3 / rv;
-    let bq_inner = (1.0 / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
-    let bq = 1.0 / (rd3 * bq_inner);
-    let one_minus_bq = 1.0 - bq / (rd3 * cq);
+    let bq_inner = (fg / rd3 + 1.0 / t.raw) + (fc[0] * fwet_roof) / rb0;
+    let bq = fg / (rd3 * bq_inner);
+    let one_minus_bq = 1.0 - (bq * fg) / (rd3 * cq);
     let cwsuns = (rhocp / rb1) * (1.0 - fc[1] / (one_minus_bt * (rb1 * ct)));
     let cwshas = (rhocp / rb2) * (1.0 - fc[2] / (one_minus_bt * (rb2 * ct)));
-    let bt_inner = (1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0;
+    let bt_inner = (1.0 / t.rah + fg / rd3) + fc[0] / rb0;
     let croofs = (rhocp / rb0)
         * ((1.0 - ((fc[0] * bt) * bt) / (one_minus_bt * (rb0 * ct))) - fc[0] / (rb0 * bt_inner));
     let wet_roof_cover = fc[0] * fwet_roof;

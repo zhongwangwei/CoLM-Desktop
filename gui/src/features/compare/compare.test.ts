@@ -1103,6 +1103,10 @@ it('blocks a selected variable that the station preparation would drop', () => {
 it('maps the remote run-identity errors into English', () => {
   for (const [chinese, expected] of [
     ['这个比较的活动作业锁一直被占用', /active-job lock/],
+    [
+      '这个比较的活动作业锁一直被占用，请稍后再提交；若是旧版本或崩溃遗留，请先确认原提交已退出，再清理活动锁。',
+      /confirm that the original submission has exited before clearing it/,
+    ],
     ['这个比较还没有成功过的运行', /no successful run yet/],
     ['服务器上还没有可显示的评估报告', /no report to show yet/],
     [
@@ -1346,4 +1350,33 @@ it('warns about unusable statistics methods and station-only references', () => 
   };
   assert.equal(statisticsReferenceWarning(mixedDesign, [...stationRef, ...gridRef]), null);
   assert.equal(statisticsReferenceWarning({ ...design, statisticsItems: [] }, stationRef), null);
+});
+
+it('rejects unusable prefixes before simulation save and config generation', () => {
+  const form = simulationFormForPick({ dir: '/history', label: 'site', info: site.info });
+  for (const prefix of ['', '../outside', 'bad\nname', 'bad prefix', '_']) {
+    const probe = { ...site.info, prefix };
+    assert.equal(validateSimulation(probe, { ...form, prefix })?.field, 'prefix');
+    assert.throws(
+      () => buildOpenbenchConfig({ ...base, simulations: [{ ...site, info: probe }] }),
+      /prefix|前缀/,
+    );
+  }
+});
+it('rejects invalid numeric settings instead of silently using OpenBench defaults', () => {
+  for (const settings of [
+    { gridRes: -5 },
+    { gridRes: 0 },
+    { gridRes: NaN },
+    { minYear: -5 },
+    { minYear: 1.5 },
+    { numCores: -5 },
+    { numCores: Infinity },
+  ])
+    assert.throws(() => buildOpenbenchConfig({ ...base, ...settings }));
+  assert.match(buildOpenbenchConfig({ ...base, minYear: 0, numCores: 0 }).config, /num_cores: 0/);
+});
+
+it('maps host-scoped remote cancellation to a normal stopped outcome', () => {
+  assert.deepEqual(benchErrorText('Error: operation cancelled'), ['已停止', 'Stopped']);
 });

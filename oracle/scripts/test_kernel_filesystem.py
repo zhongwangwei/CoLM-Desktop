@@ -13,13 +13,25 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "vendor/CoLM202X"
 
 
+def shell_file_operation(text):
+    return re.search(r"(?im)^\s*(?:IF\s*\([^\n]*\)\s*)?CALL\s+(?:system|execute_command_line)\s*\([^\n]*(mkdir|cp|mv|ls|rm)\b", text)
+
+
 def main():
+    assert shell_file_operation("CALL system ('mkdir -p '//path)")
+    assert shell_file_operation("IF (p_is_master) CALL system ('mkdir -p '//path)")
+    assert shell_file_operation("IF (ready .and. nested(ok)) CALL execute_command_line ('cp a b')")
+    assert not shell_file_operation("! IF (p_is_master) CALL system ('mkdir -p '//path)")
+    assert not shell_file_operation("IF (p_is_master) CALL make_directory (path)")
     compiler = shutil.which("gfortran")
     if not compiler:
         raise SystemExit("gfortran is required for the kernel filesystem regression")
-    namelist = (SOURCE / "share/MOD_Namelist.F90").read_text()
+    namelist = (SOURCE / "share/MOD_Namelist.F90").read_text(encoding="utf-8")
     call = re.search(r"(?im)^\s*CALL (?:system|make_directory)\([^\n]*DEF_dir_output[^\n]*", namelist)
     assert call, "production directory creation call not found"
+    restart = (SOURCE / "main/MOD_HistAccRestart.F90").read_text(encoding="utf-8")
+    restart_call = re.search(r"(?im)^\s*IF\s*\(p_is_master\)\s*CALL make_directory[^\n]*", restart)
+    assert restart_call, "history restart must create its directory without a shell"
     with tempfile.TemporaryDirectory(prefix="colm-filesystem-") as directory:
         work = Path(directory)
         module = SOURCE / "share/MOD_Filesystem.F90"
@@ -28,7 +40,7 @@ def main():
         (work / "spmd.f90").write_text(
             "module MOD_SPMD_Task\ncontains\nsubroutine CoLM_stop(message)\n"
             "character(*), intent(in), optional :: message\nif (present(message)) print *, message\n"
-            "error stop 1\nend subroutine\nend module\n"
+            "error stop 1\nend subroutine\nend module\n", encoding="utf-8"
         )
         subprocess.run(
             [os.environ.get("CC", "cc"), "-c", str(SOURCE / "share/CoLM_Mkdir.c"), "-o", "filesystem.o"],
@@ -37,18 +49,21 @@ def main():
         (work / "probe.f90").write_text(
             "program probe\n"
             "use MOD_Filesystem, only: make_directory, copy_file, list_matching_paths, move_file\n"
-            "implicit none\ncharacter(1024) :: mode, a, b, c, DEF_dir_output\n"
+            "implicit none\ncharacter(1024) :: mode, a, b, c, DEF_dir_output, DEF_dir_restart\n"
+            "logical :: p_is_master=.true.\ncharacter(14) :: cdate='2000-001-00000'\n"
             "call get_command_argument(1, mode)\n"
             "select case (trim(mode))\n"
             "case ('mkdir')\ncall get_command_argument(2, DEF_dir_output)\n"
             + call.group(0) + "\n"
+            "case ('restart')\ncall get_command_argument(2, DEF_dir_restart)\n"
+            + restart_call.group(0) + "\n"
             "case ('copy')\ncall get_command_argument(2, a)\ncall get_command_argument(3, b)\n"
             "call copy_file(trim(a), trim(b))\n"
             "case ('list')\ncall get_command_argument(2, a)\ncall get_command_argument(3, b)\n"
             "call get_command_argument(4, c)\ncall list_matching_paths(trim(a), trim(b), trim(c))\n"
             "case ('move')\ncall get_command_argument(2, a)\ncall get_command_argument(3, b)\n"
             "call move_file(trim(a), trim(b))\n"
-            "case default\nerror stop 2\nend select\nend program\n"
+            "case default\nerror stop 2\nend select\nend program\n", encoding="utf-8"
         )
         executable = work / ("probe.exe" if os.name == "nt" else "probe")
         subprocess.run(
@@ -68,11 +83,16 @@ def main():
                 assert result.returncode == 0, (path, result.stdout, result.stderr)
                 assert (work / path).is_dir(), f"directory was not created literally: {path!r}"
                 assert not (work / "INJECTED").exists(), "path executed as a shell command"
-        (work / "file").write_text("do not replace")
+        restart_path = "restart O'Brien; touch INJECTED; #"
+        result = subprocess.run([str(executable), "restart", restart_path], cwd=work, capture_output=True, timeout=300)
+        assert result.returncode == 0, result.stderr
+        assert (work / restart_path / "2000-001-00000").is_dir()
+        assert not (work / "INJECTED").exists(), "history restart path executed as a shell command"
+        (work / "file").write_text("do not replace", encoding="utf-8")
         for path in ["file", "file/child"]:
             result = subprocess.run([str(executable), "mkdir", path], cwd=work, capture_output=True, timeout=300)
             assert result.returncode != 0, f"file conflict was silently accepted: {path}"
-            assert (work / "file").read_text() == "do not replace"
+            assert (work / "file").read_text(encoding="utf-8") == "do not replace"
 
         src_dir = work / "copy O'Brien; touch INJECTED; #"
         dst_dir = work / "dest space"
@@ -106,14 +126,14 @@ def main():
         list_dir = work / "list O'Brien & data"
         list_dir.mkdir()
         for name in ["LAI_0002.nc", "skip.txt", "LAI_0001.nc", "LAI_0003.tmp"]:
-            (list_dir / name).write_text(name)
+            (list_dir / name).write_text(name, encoding="utf-8")
         list_file = work / "matches.txt"
         result = subprocess.run(
             [str(executable), "list", str(list_dir / "LAI_"), ".nc", str(list_file)],
             cwd=work, capture_output=True, timeout=300,
         )
         assert result.returncode == 0, result.stderr
-        listed = list_file.read_text().splitlines()
+        listed = list_file.read_text(encoding="utf-8").splitlines()
         expected = [str(list_dir / "LAI_0001.nc"), str(list_dir / "LAI_0002.nc")]
         if os.name == "nt":
             # MSYS2 Python and native C may spell the same Windows path differently.
@@ -129,13 +149,13 @@ def main():
         if os.name != "nt":
             backslash_dir = work / "list\\backslash"
             backslash_dir.mkdir()
-            (backslash_dir / "LAI_0004.nc").write_text("backslash")
+            (backslash_dir / "LAI_0004.nc").write_text("backslash", encoding="utf-8")
             result = subprocess.run(
                 [str(executable), "list", str(backslash_dir / "LAI_"), ".nc", str(list_file)],
                 cwd=work, capture_output=True, timeout=300,
             )
             assert result.returncode == 0, result.stderr
-            assert list_file.read_text().splitlines() == [str(backslash_dir / "LAI_0004.nc")]
+            assert list_file.read_text(encoding="utf-8").splitlines() == [str(backslash_dir / "LAI_0004.nc")]
 
         moved = work / "moved O'Brien.nc"
         result = subprocess.run([str(executable), "move", str(dst), str(moved)], cwd=work, capture_output=True, timeout=300)
@@ -157,11 +177,11 @@ def main():
         assert moved.read_bytes() == b"replacement", "invalid copy source destroyed the destination"
 
     source_text = "\n".join(
-        source.read_text(errors="ignore")
+        source.read_text(encoding="utf-8", errors="ignore")
         for source in SOURCE.rglob("*.F90")
         if ".bld" not in source.parts
     )
-    assert not re.search(r"(?im)^\s*CALL\s+(?:system|execute_command_line)\s*\([^\n]*(mkdir|cp|mv|ls|rm)\b", source_text)
+    assert not shell_file_operation(source_text)
     print("kernel filesystem: mkdir, copy, list, rename literal paths PASS")
 
 

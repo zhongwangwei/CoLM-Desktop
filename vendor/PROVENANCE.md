@@ -229,3 +229,55 @@ BGC 保持运行期开关而不是编译期守卫），`CoLMDRIVER` 的逐步材
 同位素算例在第 55 步签名检查失败。修法：`CoLMMAIN` 在 `DEF_USE_VariablySaturatedFlow`
 打开时直接用桌面语义的 `qinfl`，非 VSF 保持原式。同位素 11 天两引擎通过，
 material 量差 ≤2.8e-12，三站点黄金数值不变。
+
+## 2026-11-03：审计后恢复退出码、目录创建和土壤模型运行期开关
+
+- `share/MOD_SPMD_Task.F90`：非 MPI 的错误停机恢复为 `STOP 1`；单点
+  mksrfdata 的正常结束仍保持成功退出，不借错误停机路径结束。
+- `main/MATERIAL/MOD_MT_SurfaceData.F90` 与
+  `mkinidata/MOD_UnitCatchmentRegional.F90`：三处 shell `mkdir -p` 改用既有
+  `MOD_Filesystem::make_directory`，支持含空格或 shell 特殊字符的原样路径，并传播失败。
+- `main/BGC/MOD_BGC_Veg_CNFireLi2016.F90`：Campbell / van Genuchten 两条原公式
+  改由 `DEF_USE_Campbell_SOIL_MODEL` 选择，消除同步源码重新带入的编译期土壤模型宏。
+- Rust 灌溉与 LUCY 的 GMT 转换与 `MOD_TimeManager::gmt2local` 对齐：经度除以 15
+  后按整小时时区取最近整数，并在 86400 秒进入下一天。113.5°E 的偏移现在为
+  8 小时；原先连续经度换算为 7 小时 34 分。此改动可影响边界时刻的灌溉触发与人为热日变化。
+
+同批继续收口了以下一致性缺口：
+
+- MaterialTransport 与 CoLMINI 中 37 处 Debug、RangeCheck、BGC、LULCC 遗留宏改为运行期开关；
+  声明与诊断过程保留，执行仍按相应开关控制。重新生成 Makefile 模块依赖。
+- 城市 BEM 对齐当前 Fortran 的 `Effective_AC`、0.3 制冷废热系数和按通风方向区分的能耗；
+  BEM/LUCY 共用当地步起点。Fortran 两个过程补齐非 GMT 时钟初始化，零 LUCY 时序按原有
+  恒定空调回退到利用率 1，避免 0/0。上游半负荷空调的温度响应仍可能反直觉，本轮没有按直觉
+  另改源公式。
+- RSS 6 对齐当前 Fortran 的 Liu（2026）公式，接入实际顶层 `vf_sand`，枚举和界面取值扩展为 0–6；
+  既有 0–5 计算路径保留。
+- PC 读取并使用真实冠深比，写入 `cratio_p` 与按份额聚合的 `cratio`，直射与散射投影均使用各 PFT
+  的比例。RS 冠结构关闭时保留源码规定的单位比例；开启但缺少 `hbot/cratio` 输入时明确拒绝，
+  不伪造观测值。Rust 地表数据生产器尚不生成这套 RS 产品，须提供兼容输入。
+
+验证：原样路径运行测试、完整 `test_upstream_f48_sync.py`、材料运行期开关片段测试与依赖生成
+检查均通过。独立编译的 Fortran 夹具覆盖 BEM 8 个、LUCY 6 个、RSS 10 个和 PC 22 个输出场景；
+RSS/PC 分别核对融合与非融合模式，PC 在 macOS 的两种模式均为 0 ULP 差异。
+T7920 作业 `codex-96964c60c86e4ee0ad352de22f2768a7` 成功编译三个空间 Fortran 内核，验证材料
+模块转换；最终生成的 Makefile 另补了 Filesystem 前置依赖。未据此宣称完成真实站点的长期物理验证。
+
+### 同日补充：MPI 标志与城市通量的剩余差异
+
+- `DEF_USE_CoLMDEBUG`、`DEF_USE_RangeCheck` 从 master 读入后广播，避免守卫内全局集合通信
+  的 rank 分歧；`test_namelist_mpi_flags.py` 用实际广播语句做三 rank、四种开关组合回归。
+- `MOD_HistAccRestart` 改用共享目录创建函数；文件系统守卫同时检查行内 `IF (...) CALL`。
+- Rust 城市裸地/植被两层通量补齐 `fg` 权重及其导数，按当前 vendor 使用 0.85/0.15 的
+  人为热分配。热量分量在输出边界乘陆地占比，内部总量仍使用未缩放值，避免重复混合。
+- `test_urban_flux_reference.py` 独立编译实际 Fortran 过程，覆盖非零屋顶、露水、人为热及湖泊
+  占比；128 个裸地输出与 30 个热分量和 Rust 参考一致，未放宽已有断言。
+- `test_create_newcase_runtime_contract.sh` 检查运行期开关生成约定；本轮 CI 保留该脚本并纳入
+  新增 MPI、城市通量参考。真实城市站点长期过程与多 rank 完整路由仍需单独验收。
+
+### 同日验证补充：完整有树城市过程
+
+`test_urban_vegetated_flux_reference.py` 按生产式分模块编译实际 UrbanVegFlux、气孔、湿润与
+湍流依赖，四场景、融合/非融合各 200 项参考值；固定长波输入保留两套引擎的边界一致性。
+当前容差检查通过但各仅 35/200 项逐位相同，未据此宣称零 ULP 或真实城市长期过程已通过。
+本批只补参考与验证工具，没有为匹配夹具而修改生产物理或已有黄金输出。

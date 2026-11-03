@@ -329,6 +329,8 @@ test('whole-case deletion is a separate third option and requires the directory 
     casePath: '/cases/Case A',
     caseHost: null,
     caseReason: null,
+    caseToken: 'case-review',
+    caseWarning: 'case identity not recorded',
   });
   await h.settle();
   assert.equal(h.menu().props.items[1].disabled, false);
@@ -356,6 +358,7 @@ test('whole-case deletion is a separate third option and requires the directory 
     files: true,
     wholeCase: true,
     expectedPath: '/cases/Case A',
+    caseToken: 'case-review',
   });
   h.requests[2].resolve({ removed: true, path: '/cases/Case A', host: null });
   await h.settle();
@@ -975,4 +978,26 @@ test('opening a single-case project delegates a pruned binding to openCase repai
   );
   await open('/new');
   assert.deepEqual(opened, ['/new/pruned']);
+});
+
+test('an operation failure is visible inside the history detail dialog', async () => {
+  const h = harness();
+  const operation = { ...row('original'), version_id: 'soil', revision: '7', detail: {} };
+  h.requests[0].resolve({ items: [operation], total: 1 });
+  await h.settle();
+  h.openCard();
+  h.requests[1].resolve({ operation, events: [], related: [] });
+  await h.settle();
+  const pending = Promise.resolve(
+    h
+      .guide()
+      .actions.find((a) => a.id === 'history-replay')!
+      .run(),
+  ).catch(() => {});
+  await h.settle();
+  h.requests.find((r) => r.command === 'history_replay')!.reject(Error('replay fixture failed'));
+  await pending;
+  await h.settle();
+  const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
+  assert.ok(JSON.stringify(dialog.children).includes('replay fixture failed'));
 });

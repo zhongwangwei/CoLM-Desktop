@@ -621,6 +621,7 @@ fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
         fraction,
         canopy_top_m: top,
         canopy_bottom_m: bottom,
+        crown_aspect_ratio: 1.0,
         optics: pft_leaf_optics(&document, class, HydraulicModel::VanGenuchten, true).unwrap(),
         lai,
         sai,
@@ -1082,6 +1083,7 @@ fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
                     run.static_config(),
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
                 let file = netcdf::open(files.block).unwrap();
@@ -1143,6 +1145,7 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
         config,
         None,
         None,
+        None,
     )
     .unwrap();
     let block = netcdf::open(files.block).unwrap();
@@ -1161,6 +1164,7 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
         &surface,
         root.join("restart-grid"),
         grid_config,
+        None,
         None,
         None,
     )
@@ -1182,6 +1186,7 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
         grid_config,
         None,
         None,
+        None
     )
     .is_err());
     crate::remove_test_tree(root);
@@ -1243,6 +1248,7 @@ fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mas
                 config,
                 None,
                 None,
+                None,
             )
             .unwrap();
             config.urban_only = true;
@@ -1250,6 +1256,7 @@ fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mas
                 &surface,
                 root.join("urban"),
                 config,
+                None,
                 None,
                 None,
             )
@@ -1309,6 +1316,7 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
             config,
             None,
             None,
+            None,
         )
         .unwrap()
         .block;
@@ -1339,6 +1347,7 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
             &surface,
             root.join(format!("texture{texture}")),
             config,
+            None,
             None,
             None,
         )
@@ -1582,6 +1591,20 @@ fn urban_subgrids_write_urban_restarts_without_pft_inputs() {
         assert!(file.variable("URBAN_TYPE").is_some());
         drop(file);
         let constants = write_single_point_constant_restarts(&run).unwrap();
+        let common = netcdf::open(&constants.common.block).unwrap();
+        if expected == SinglePointSubgrid::Pc {
+            assert_eq!(
+                common
+                    .variable("cratio")
+                    .unwrap()
+                    .get_values::<f64, _>(..)
+                    .unwrap(),
+                [1.0]
+            );
+        } else {
+            assert!(common.variable("cratio").is_none());
+        }
+        drop(common);
         let time = write_single_point_cold_time_restarts(&run).unwrap();
         assert!(constants.pft.is_none());
         assert!(time.pft.is_none());
@@ -1596,6 +1619,7 @@ fn urban_subgrids_write_urban_restarts_without_pft_inputs() {
         .map(|path| {
             let file = netcdf::open(path).unwrap();
             file.variables()
+                .filter(|variable| variable.name() != "cratio")
                 .map(|variable| {
                     (
                         variable.name(),
@@ -2526,4 +2550,28 @@ fn soil_reflectance_scheme_defaults_to_site_values_and_accepts_urban_colour_tabl
         }
     }
     crate::remove_test_tree(root);
+}
+
+#[test]
+fn remote_sensing_crowns_use_observed_tree_bottom_and_ratio_without_changing_grass_defaults() {
+    let doc =
+        colm_namelist::parse("&nl_colm\n DEF_USE_PC=.true.\n DEF_RS_CROWN_STRUCTURE=.true.\n/\n")
+            .unwrap();
+    let canopy = pft_canopy(
+        &doc,
+        &[1, 9],
+        &[20.0, 99.0],
+        Some(&[6.0, 99.0]),
+        Some(&[0.5, 7.0]),
+        true,
+    )
+    .unwrap();
+    assert_eq!(canopy.top_m, [20.0, 0.5]);
+    assert_eq!(canopy.bottom_m, [6.0, 0.0]);
+    assert_eq!(canopy.crown_aspect_ratio, [0.5, 1.0]);
+    assert!(pft_canopy(&doc, &[1], &[20.0], Some(&[6.0]), None, true).is_err());
+    assert!(pft_canopy(&doc, &[1], &[20.0], Some(&[21.0]), Some(&[0.5]), true).is_err());
+    let defaults = colm_namelist::parse("&nl_colm\n DEF_USE_PC=.true.\n/\n").unwrap();
+    let canopy = pft_canopy(&defaults, &[1], &[20.0], Some(&[6.0]), Some(&[0.5]), true).unwrap();
+    assert_eq!(canopy.crown_aspect_ratio, [1.0]);
 }

@@ -43,9 +43,16 @@ export function usageLabel(
     return usage.version.id === 'official' && /latest official/.test(usage.blocker)
       ? t('当前官方版本', 'Current official')
       : t('有派生版本或草稿', 'Has derived versions or drafts');
-  if (usage.cases > 0) return t(`${usage.cases} 个算例在用`, `Used by ${usage.cases} cases`);
+  if (usage.cases > 0)
+    return t(
+      `${usage.cases} 个算例在用`,
+      `Used by ${usage.cases} ${usage.cases === 1 ? 'case' : 'cases'}`,
+    );
   if (usage.history > 0)
-    return t(`只有 ${usage.history} 条历史记录`, `Only ${usage.history} history records`);
+    return t(
+      `只有 ${usage.history} 条历史记录`,
+      `Only ${usage.history} history ${usage.history === 1 ? 'record' : 'records'}`,
+    );
   return t('没有用到', 'Unused');
 }
 

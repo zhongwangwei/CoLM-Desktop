@@ -2237,41 +2237,20 @@ fn update_repaired_file(
             _ => variable.put_values(values, netcdf::Extents::All)?,
         }
     }
+    output
+        .close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 
 pub(crate) fn install_repaired_file(temp: &Path, dst: &Path) -> Result<()> {
-    if !dst.exists() {
-        return std::fs::rename(temp, dst)
-            .with_context(|| format!("cannot install repaired file {}", dst.display()));
-    }
-    let file_name = dst
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("gap repair destination has no filename")?;
-    let backup = dst.with_file_name(format!(
-        ".{file_name}.gapfill-{}.backup",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&backup);
-    std::fs::rename(dst, &backup)
-        .with_context(|| format!("cannot preserve previous repaired file {}", dst.display()))?;
-    if let Err(error) = std::fs::rename(temp, dst) {
-        let restore = std::fs::rename(&backup, dst);
-        return match restore {
-            Ok(()) => Err(error).with_context(|| {
-                format!("cannot install repaired file {}; previous file restored", dst.display())
-            }),
-            Err(restore_error) => bail!(
-                "cannot install repaired file {} ({error}); previous file is preserved at {} but could not be restored ({restore_error})",
-                dst.display(),
-                backup.display()
-            ),
-        };
-    }
-    std::fs::remove_file(&backup)
-        .with_context(|| format!("cannot remove repair backup {}", backup.display()))?;
-    Ok(())
+    // Atomic replacement preserves the old output if installation fails, including on Windows.
+    std::fs::rename(temp, dst).with_context(|| {
+        format!(
+            "cannot install repaired file {}; previous file left unchanged",
+            dst.display()
+        )
+    })
 }
 
 #[cfg(test)]

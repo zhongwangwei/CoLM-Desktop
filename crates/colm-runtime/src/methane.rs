@@ -549,6 +549,8 @@ pub fn write_restart(
     let accumulators: Vec<_> = patches.iter().map(|(_, a)| *a).collect();
     write_accflux(&mut file, setup, &accumulators)?;
     scalar(&mut file, "ch4_restart_complete", &|_| 1.0)?;
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 

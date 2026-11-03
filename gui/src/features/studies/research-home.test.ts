@@ -80,6 +80,11 @@ function pageCallback(name: string, context: Record<string, unknown>) {
   );
   context = {
     statusPending: '',
+    tr: (zh: string) => zh,
+    studyErrorText,
+    studyIdentity: { current: context.studyDir ?? '' },
+    createdHere: { current: '' },
+    setError: () => {},
     setStatusPending: () => {},
     statusRequest: { current: 0 },
     ...context,
@@ -91,6 +96,20 @@ function pageCallback(name: string, context: Record<string, unknown>) {
       ts.isCallExpression(node) &&
       node.expression.getText(source) === 'useEffect' &&
       node.getText(source).includes('3000')
+    )
+      body = node.arguments[0].getText(source);
+    if (
+      name === 'confirmationReset' &&
+      ts.isCallExpression(node) &&
+      node.expression.getText(source) === 'useEffect' &&
+      node.getText(source).includes('if (!studyDir || step <= 3)')
+    )
+      body = node.arguments[0].getText(source);
+    if (
+      name === 'studyPrefill' &&
+      ts.isCallExpression(node) &&
+      node.expression.getText(source) === 'useEffect' &&
+      node.getText(source).includes('prefilledFor.current === key')
     )
       body = node.arguments[0].getText(source);
     if (ts.isFunctionDeclaration(node) && node.name?.text === name) body = node.getText(source);
@@ -1994,7 +2013,9 @@ it('carrying sensitivity into calibration pins the source study identity and inh
 });
 it('carrying refuses a source study whose model revision or design hash was never recorded', () => {
   const failedFor = { current: '' };
+  const errors: string[] = [];
   const carry = pageCallback('carryToCalibration', {
+    setError: (value: string) => errors.push(value),
     frozenSpec: {
       kind: 'uncertainty',
       base_cases: ['AT-Neu'],
@@ -2035,6 +2056,11 @@ it('carrying refuses a source study whose model revision or design hash was neve
     setStep: () => {},
   }) as unknown as () => void;
   assert.throws(carry, /模型修订|model revision/);
+  assert.match(
+    errors.at(-1)!,
+    /冻结设计或模型修订/,
+    'the refusal is visible even when ActionButton catches the throw',
+  );
 });
 // P1 回归：带入率定会在同一个页面里把研究基线钉到来源研究自己的修订上。研究基线一变，模型身份
 // effect 原来会执行"换版本就回落到当前算例、清空观测"的旧规则，把 deriveStudyDesign 刚写进来的
@@ -3046,6 +3072,16 @@ it('the sidebar research entry keeps an open study and its remote tracking', asy
   page.press('research-current');
   await page.settle();
   assert.match(pageText(page), new RegExp(remoteReply), 'remote tracking is still available');
+  page.state.selectedCase = { dir: '/p/site2', name: 'site2' };
+  page.state.researchBaseline = { id: 'soil', revision: 4 };
+  page.render();
+  await page.settle();
+  assert.match(
+    pageText(page),
+    new RegExp(remoteReply),
+    'switching case and revision retains the running server study',
+  );
+  assert.match(pageText(page), /cluster-a/);
 });
 it('the parameter read identity follows the study baseline, not the run revision', async () => {
   const page = researchPage({
@@ -3385,5 +3421,166 @@ it('a late Ready poll cannot replace the final completed status or clear pending
     assert.equal(shown.length, 1);
     assert.equal((shown[0] as { state: { status: string } }).state.status, 'Completed');
     assert.equal(cleared, 1);
+  }
+});
+
+it('remote fetch keeps completion and failure feedback across editable design epochs', async () => {
+  for (const failure of ['none', 'transfer', 'refresh']) {
+    const epoch = { current: 1 };
+    const errors: string[] = [],
+      notices: string[] = [],
+      reads: unknown[] = [];
+    const identity = { current: '/study' };
+    const task = pageCallback('task', {
+      epoch,
+      studyIdentity: identity,
+      lock: { current: false },
+      setBusy: () => {},
+      setError: (value: string) => errors.push(value),
+      notify: (value: string) => notices.push(value),
+    });
+    const fetch = pageCallback('fetchRemote', {
+      task,
+      studyDir: '/study',
+      remotePermissions: { fetch: true },
+      remoteRequest: { current: 0 },
+      invokeJson: async () => {
+        epoch.current++;
+        if (failure === 'transfer') throw new Error('transfer failed');
+        return { fetched: true, scientific_verified: false };
+      },
+      setRemoteReply: () => {},
+      readStatus: async (...args: unknown[]) => {
+        reads.push(args);
+        if (failure === 'refresh') throw new Error('refresh failed');
+      },
+      readRemoteStatus: async () => {},
+      notify: (value: string) => notices.push(value),
+    });
+    if (failure === 'transfer') {
+      await assert.rejects(fetch(), /transfer failed/);
+      assert.match(errors.at(-1)!, /transfer failed/);
+    } else {
+      await fetch();
+      assert.deepEqual(reads, [['/study', false, true]]);
+      assert.match(notices.at(-1)!, /已取回/);
+      if (failure === 'refresh')
+        assert.ok(notices.some((message) => message.includes('refresh failed')));
+    }
+  }
+});
+
+it('leaving the observation step during prefill does not consume its retry key', async () => {
+  const prefilledFor = { current: '' };
+  const replies: ((value: unknown) => void)[] = [];
+  const updates: unknown[] = [];
+  const prefill = pageCallback('studyPrefill', {
+    tuning: true,
+    sites: ['/case'],
+    studyModel: { id: 'official', revision: 1 },
+    workbench: true,
+    step: 3,
+    ai: false,
+    derivedDesign: null,
+    prefilledFor,
+    invoke: () => new Promise((resolve) => replies.push(resolve)),
+    prefillWindows: async () => {},
+    setObservations: (value: unknown) => updates.push(value),
+  }) as unknown as () => () => void;
+  const leave = prefill();
+  leave();
+  replies[0]({ '/case': { inputs: { start: '2000', end: '2010' } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prefilledFor.current, '');
+  assert.equal(updates.length, 0);
+  prefill();
+  replies[1]({ '/case': { inputs: { start: '2000', end: '2010' } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.notEqual(prefilledFor.current, '');
+  assert.equal(updates.length, 1);
+});
+it('a successful status poll clears only its own previous error', async () => {
+  for (const shown of ['network failed', 'unrelated validation']) {
+    let error = shown;
+    const pollingError = { current: 'network failed' };
+    const clear = pageCallback('clearPollingError', {
+      pollingError,
+      setError: (update: (old: string) => string) => {
+        error = update(error);
+      },
+    });
+    await clear();
+    assert.equal(error, shown === 'network failed' ? '' : shown);
+    assert.equal(pollingError.current, '');
+  }
+});
+
+it('creation review resets even when a frozen study is open, while its run review is retained', () => {
+  for (const [studyDir, step, resets] of [
+    ['', 3, true],
+    ['/new', 3, true],
+    ['/existing', 3, true],
+    ['/existing', 4, false],
+  ] as const) {
+    let confirmed = true;
+    const effect = pageCallback('confirmationReset', {
+      studyDir,
+      step,
+      setConfirmed: (value: boolean) => {
+        confirmed = value;
+      },
+    });
+    effect();
+    assert.equal(confirmed, !resets);
+  }
+  const text = readFileSync(new URL('./ResearchPage.tsx', import.meta.url), 'utf8');
+  const fragment = text.slice(text.indexOf('if (!studyDir || step <= 3)'));
+  const deps = fragment.slice(0, fragment.indexOf(']);'));
+  for (const field of ['population', 'generations', 'parameters'])
+    assert.match(deps, new RegExp(`\\b${field}\\b`));
+});
+
+it('parameter previews release after success, failed reads, and stale responses', async () => {
+  for (const outcome of ['success', 'failure', 'stale']) {
+    const identity = {
+      version: { id: 'official', revision: 1 },
+      kernel: '/kernel',
+      sites: ['/case'],
+      spatial: false,
+      types: [],
+    };
+    const events: string[] = [];
+    const current = { current: identity };
+    const load = pageCallback('loadContexts', {
+      task: async (fn: () => Promise<unknown>) => await fn(),
+      parameterContextKey,
+      sameParameterContextIdentity,
+      clearParameterContextMarker,
+      contextIdentityRef: current,
+      loadedFor: { current: '' },
+      failedFor: { current: '' },
+      effectiveCase: async (_path: string, _version: unknown, tokens: string[]) => {
+        tokens.push('owned-preview');
+        if (outcome === 'stale') current.current = { ...identity, sites: ['/other'] };
+        return '/preview';
+      },
+      invokeJson: async () => {
+        events.push('read');
+        if (outcome === 'failure') throw new Error('read failed');
+        return [];
+      },
+      invoke: async (command: string, args: unknown) => {
+        assert.equal(command, 'model_case_context_release');
+        assert.deepEqual(args, { token: 'owned-preview' });
+        events.push('release');
+      },
+      contextsRef: { current: [] },
+      setParameters: () => {},
+      setContexts: () => {},
+      withCatalogLabels: (rows: unknown) => rows,
+    }) as (value: unknown) => Promise<unknown>;
+    if (outcome === 'failure') await assert.rejects(load(identity), /read failed/);
+    else await load(identity);
+    assert.deepEqual(events, outcome === 'stale' ? ['release'] : ['read', 'release']);
   }
 });

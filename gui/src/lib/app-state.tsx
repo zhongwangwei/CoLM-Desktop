@@ -81,6 +81,8 @@ type AppContextValue = {
   navigate: (route: Route, tab?: AppState['caseTab']) => boolean;
   registerNavigationGuard: (guard: NavigationGuard) => () => void;
   registerCloseGuard: (guard: NavigationGuard) => () => void;
+  trackPendingSave: (save: Promise<unknown>) => void;
+  registerBeforeClose: (save: () => Promise<unknown>) => () => void;
   notify: (message: string, error?: boolean) => void;
   /** 重新尝试启动期失败的阶段；封面上的"重试启动"用它。 */
   retryStartup: () => void;
@@ -107,6 +109,13 @@ export function useCloseGuard(guard: NavigationGuard) {
   const latest = useRef(guard);
   latest.current = guard;
   useLayoutEffect(() => registerCloseGuard(() => latest.current()), [registerCloseGuard]);
+}
+/** Persist the current edit before the native process exits. A failed save keeps the window open. */
+export function useBeforeClose(save: () => Promise<unknown>) {
+  const { registerBeforeClose } = useApp();
+  const latest = useRef(save);
+  latest.current = save;
+  useLayoutEffect(() => registerBeforeClose(() => latest.current()), [registerBeforeClose]);
 }
 /** Resolve a project's default before its batch settings can use the previous project's model. */
 export async function projectVersion(versions: FrozenRevision[], dir?: string) {
@@ -150,6 +159,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   } | null>(null);
   const guards = useRef(new Set<NavigationGuard>());
   const closeGuards = useRef(new Set<NavigationGuard>());
+  const closingSaveError = useRef<{ error: unknown } | null>(null);
+  const pendingSaves = useRef(new Set<Promise<unknown>>());
+  const beforeClose = useRef(new Set<() => Promise<unknown>>());
   // 最近项目的读改写排成一队（A-03）。
   const recentQueue = useRef<Promise<void>>(Promise.resolve());
   // 启动流程放在 effect 里（事件监听也一起），重试按钮通过这个 ref 重新调用同一次 boot。
@@ -162,6 +174,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (patch: AppPatch) =>
       setState((old) => {
         const changes = typeof patch === 'function' ? patch(old) : patch;
+        if (changes.language !== undefined)
+          document.documentElement.lang = changes.language === 'en' ? 'en' : 'zh-CN';
         const switching = changes.root !== undefined && changes.root !== old.root;
         const official = switching
           ? old.versions
@@ -218,6 +232,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       closeGuards.current.delete(guard);
     };
   }, []);
+  const trackPendingSave = useCallback((save: Promise<unknown>) => {
+    pendingSaves.current.add(save);
+    void save.then(
+      () => pendingSaves.current.delete(save),
+      (error: unknown) => {
+        if (askingClose.current) closingSaveError.current = { error };
+        pendingSaves.current.delete(save);
+      },
+    );
+  }, []);
+  const registerBeforeClose = useCallback((save: () => Promise<unknown>) => {
+    beforeClose.current.add(save);
+    return () => {
+      beforeClose.current.delete(save);
+    };
+  }, []);
   const retryStartup = useCallback(() => {
     // 已经在启动中就不要叠第二次。
     if (current.current.startup?.phase === 'booting') return;
@@ -234,6 +264,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
   const navigate = useCallback(
     (route: Route, tab?: AppState['caseTab']) => {
+      if (route === current.current.route && (!tab || tab === current.current.caseTab)) return true;
       const reason = blocked({ route });
       if (reason) {
         notify(reason);
@@ -254,8 +285,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return;
     }
     const cases = await invoke<CaseEntry[]>('list_cases', { root });
-    if (current.current.root === root) update({ cases });
-  }, [update]);
+    if (current.current.root === root) {
+      update({ cases });
+      for (const entry of cases) if (entry.history_warning) notify(entry.history_warning, true);
+    }
+  }, [notify, update]);
   const refreshVersions = useCallback(async () => {
     const versions = await invokeJson<FrozenRevision[]>('model_list');
     const ref = current.current.versionRef;
@@ -335,6 +369,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           // 打开期间页面切走了、或者又开始打开别的算例：这次作废，以后来的为准。不报错——后来的那次
           // 已经正常打开，或者用户本来就离开了，弹一个 Error 只会让人以为出了问题。
           if (epoch !== openEpoch.current) return null;
+          for (const entry of cases) if (entry.history_warning) notify(entry.history_warning, true);
           const normalized = { ...opened, dir: opened.entry.dir, name: opened.entry.name, binding };
           update({
             selectedCase: normalized,
@@ -655,6 +690,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void listen('app://close-requested', () => {
       if (askingClose.current) return;
       askingClose.current = true;
+      closingSaveError.current = null;
       const reasons = closeReasons(
         [...guards.current, ...closeGuards.current],
         current.current.running,
@@ -663,6 +699,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
             `有 ${count} 个本机模拟正在运行，关闭会停止它们。`,
             `${count} local simulation${count > 1 ? 's are' : ' is'} running; closing stops ${count > 1 ? 'them' : 'it'}.`,
           ),
+      );
+      const preparing = invoke('app_close', { close: false, preparing: true }).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
       );
       const answer = reasons.length
         ? askConfirm(
@@ -674,9 +714,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
             },
           )
         : Promise.resolve(true);
-      void answer.then((close) => {
-        askingClose.current = false;
-        return invoke('app_close', { close });
+      void answer.then(async (close) => {
+        try {
+          const prepared = await preparing;
+          if (!prepared.ok) throw prepared.error;
+          if (close) {
+            for (const save of beforeClose.current) await save();
+            while (pendingSaves.current.size) await Promise.all([...pendingSaves.current]);
+            if (closingSaveError.current) throw closingSaveError.current.error;
+          }
+          await invoke('app_close', { close });
+        } catch (error) {
+          notify(errorText(error), true);
+          await invoke('app_close', { close: false });
+        } finally {
+          askingClose.current = false;
+        }
       });
     }).then((unlisten) => {
       if (alive) stop = unlisten;
@@ -686,7 +739,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       alive = false;
       stop?.();
     };
-  }, []);
+  }, [notify]);
   return (
     <Context.Provider
       value={{
@@ -695,6 +748,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         navigate,
         registerNavigationGuard,
         registerCloseGuard,
+        registerBeforeClose,
+        trackPendingSave,
         notify,
         retryStartup,
         refreshCases,

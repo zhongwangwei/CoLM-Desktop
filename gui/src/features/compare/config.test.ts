@@ -645,3 +645,15 @@ it('requires every station CSV to have exactly one frozen site input', () => {
       ),
     );
 });
+
+it('accepts own simulation names that also exist on Object.prototype', () => {
+  const text = generated({ simulations: [{ ...site, label: 'constructor' }] });
+  const parsed = parseOpenbenchConfig(text);
+  assert.deepEqual(parsed.problems, []);
+  assert.ok(parsed.config);
+});
+it('reports an empty grid prefix instead of silently omitting the simulation', () => {
+  const parsed = parseOpenbenchConfig(generated().replace('prefix: "hb_hist_"', 'prefix: ""'));
+  assert.equal(parsed.config, null);
+  assert.ok(parsed.problems.some((problem) => problem[1].includes('prefix must not be empty')));
+});

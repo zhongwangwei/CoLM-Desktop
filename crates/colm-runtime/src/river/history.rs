@@ -763,6 +763,7 @@ impl RiverHistoryWriter {
                 .with_context(|| format!("{name} disappeared"))?
                 .put_values(values, (t..t + 1, ..))?;
         }
+        file.close().context("cannot close river history file")?;
         Ok(())
     }
 }

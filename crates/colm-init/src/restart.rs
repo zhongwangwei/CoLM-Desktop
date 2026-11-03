@@ -184,12 +184,20 @@ impl RestartTuning {
                 document,
                 crate::land_class::LC_OVERRIDE_SLOTS,
             )?;
-            if let Some(site) = document
-                .get("SITE_landtype")
-                .and_then(colm_namelist::Value::as_f64)
-                .filter(|class| *class >= 1.0)
-            {
-                tuning.land_class = table.for_class(site as usize);
+            if let Some(value) = document.get("SITE_landtype") {
+                let site = value.as_f64().context(
+                    "SITE_landtype must be -1 (use site data) or an integer within 1..=24",
+                )?;
+                ensure!(
+                    site == -1.0
+                        || (site.is_finite()
+                            && site.fract() == 0.0
+                            && (1.0..=24.0).contains(&site)),
+                    "SITE_landtype must be -1 (use site data) or an integer within 1..=24"
+                );
+                if site >= 1.0 {
+                    tuning.land_class = table.for_class(site as usize);
+                }
             }
         }
         Ok(tuning)
@@ -241,6 +249,8 @@ pub struct SimpleTerrainFields<'a> {
 /// Everything needed to serialize one constant-restart vector block.
 #[derive(Debug, Clone, Copy)]
 pub struct ConstantRestartInput<'a> {
+    /// PC `cratio`: fraction-weighted PFT ratios, or one for nonvegetated patches.
+    pub pc_crown_aspect_ratio: Option<&'a [f64]>,
     pub dimensions: RestartDimensions,
     pub compression_level: u8,
     pub patch: RestartPatchFields<'a>,
@@ -336,6 +346,9 @@ pub fn write_constant_restart_block(
     define_dimensions(&mut file, patches, input.dimensions)?;
     let compression = Some(input.compression_level);
 
+    if let Some(ratios) = input.pc_crown_aspect_ratio {
+        put_f64_1d(&mut file, "cratio", ratios, compression)?;
+    }
     put_i32_1d(&mut file, "patchclass", input.patch.class)?;
     put_i32_1d(&mut file, "patchtype", input.patch.kind)?;
     let mask = input
@@ -668,6 +681,12 @@ fn validate_input(input: ConstantRestartInput<'_>) -> Result<usize> {
     }
     let patches = input.patch.class.len();
     ensure!(patches > 0, "a restart block needs at least one patch");
+    if let Some(ratios) = input.pc_crown_aspect_ratio {
+        ensure!(
+            ratios.len() == patches && ratios.iter().all(|ratio| ratio.is_finite() && *ratio > 0.0),
+            "cratio must contain a positive finite ratio for every patch"
+        );
+    }
     if let Some(values) = input.lake_soil_carbon {
         ensure!(
             values.len() == dimensions.soil_layers * patches

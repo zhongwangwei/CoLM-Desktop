@@ -273,7 +273,13 @@ impl ClaudeSession {
         sink: &mut dyn TurnSink,
         cancel: &AtomicBool,
     ) -> Result<ExternalOutcome> {
+        anyhow::ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
         let mut command = Command::new(exe);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         command
             .current_dir(&self.launch.cwd)
             .env("PATH", child_path())
@@ -322,10 +328,10 @@ impl ClaudeSession {
             command.env_remove(var);
         }
         let mut child = command.spawn().context("cannot start Claude Code")?;
-        // 消息经 stdin 交过去，避免以 `-` 开头的文字被当成参数。
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
+        // A CLI stalled before reading stdin must not block the cancellation loop.
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        let text = text.to_owned();
+        let input = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
         let stdout = child.stdout.take().context("no stdout")?;
         let mut stderr = child.stderr.take().context("no stderr")?;
         let errors = std::thread::spawn(move || {
@@ -342,11 +348,21 @@ impl ClaudeSession {
             }
         });
         let mut state = ClaudeState::default();
-        loop {
+        let mut output_closed = false;
+        let status = loop {
             if cancel.load(Ordering::SeqCst) {
-                let _ = child.kill();
+                crate::tools::terminate(&mut child);
                 let _ = child.wait();
                 bail!("cancelled");
+            }
+            if output_closed && input.is_finished() && errors.is_finished() {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+            }
+            if output_closed {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
             }
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) => {
@@ -358,10 +374,13 @@ impl ClaudeSession {
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => output_closed = true,
             }
-        }
-        let status = child.wait()?;
+        };
+        input
+            .join()
+            .map_err(|_| anyhow::anyhow!("Claude Code input writer stopped"))?
+            .context("cannot write Claude Code input")?;
         self.started = true;
         match state.result {
             Some((true, content)) => Ok(ExternalOutcome {

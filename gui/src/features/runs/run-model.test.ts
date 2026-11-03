@@ -16,6 +16,9 @@ import {
   siteBatchConcurrency,
   spatialThreads,
   defaultLocalThreads,
+  endedRun,
+  restoredRuns,
+  runCountsText,
 } from './run-model';
 const run: RunState = {
   run_id: 'new',
@@ -26,6 +29,24 @@ const run: RunState = {
   stages: { colm: 'begin' },
   progress: { stage: 'colm', step: 1, total_steps: 10 },
 };
+
+test('settled interruptions restore as ended runs without running again', () => {
+  const last: import('../../lib/types').LastRun = {
+    operation_id: 'interrupted',
+    status: 'interrupted',
+    finished_ms: 1,
+    needs_reconciliation: false,
+    location: 'local',
+    host: null,
+  };
+  assert.equal(endedRun(last), true);
+  assert.equal(endedRun({ ...last, needs_reconciliation: true }), false);
+  const restored = restoredRuns({ '/case/a': last }, {})['/case/a'];
+  assert.equal(restored.running, false);
+  assert.equal(restored.status, 'interrupted');
+  assert.equal(runCountsText([restored]), '已中断 1');
+  assert.equal(runCountsText([restored], true), '1 interrupted');
+});
 describe('persistent run state', () => {
   it('restores logs, identity and progress after page remount', () => {
     assert.deepEqual(restoreRunView(run, '/case/a'), {

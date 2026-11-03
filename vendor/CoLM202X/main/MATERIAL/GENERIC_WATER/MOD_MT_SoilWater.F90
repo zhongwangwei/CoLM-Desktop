@@ -4,6 +4,7 @@ MODULE MOD_MT_SoilWater
 
    USE, INTRINSIC :: IEEE_ARITHMETIC, only: ieee_is_finite
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_CoLMDEBUG
    USE MOD_SPMD_Task, only: CoLM_stop
    USE MOD_Vars_Global, only: spval
    USE MOD_MT_Defs, only: nmts, materials, mt_tiny, mt_water_min_for_ratio, &
@@ -2119,14 +2120,14 @@ CONTAINS
                ! 6. Wetland water: standard soil path should not mutate it.
             ! ============================================================
             d_wetwat = wetwat - wetwat_bef
-#if (defined CoLMDEBUG)
+            IF (DEF_USE_CoLMDEBUG) THEN
             IF (abs(d_wetwat) > mt_tiny) THEN
                write(*,'(A,I8,A,I3,A,E12.5,A,E12.5,A,E12.5)') &
                   ' WARNING mt_soil_water: wetwat changed in standard soil path ipatch=', &
                   ipatch, ' imt=', imt, ' d_wetwat=', d_wetwat, &
                   ' wetwat_bef=', wetwat_bef, ' wetwat=', wetwat
             ENDIF
-#endif
+            ENDIF
 
             ! N04: a nonvolatile solute is retained in mt_wice while ice
             ! sublimates (it must not escape with water vapour).  Once the ice

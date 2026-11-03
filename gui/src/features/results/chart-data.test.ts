@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { insertGapMarkers, sameSeries } from './chart-data';
+import { chartTimeRange, insertGapMarkers, pairedChartData, sameSeries } from './chart-data';
 
 test('chart data rebuilt with the same values counts as unchanged', () => {
   const time = [1, 2, 3];
@@ -144,4 +144,42 @@ test('rejects series whose columns do not align with the time axis', () => {
     () => insertGapMarkers([0], { GPP: [1], LE: [] }),
     /series columns must align with time/,
   );
+});
+
+test('a single timestamp spans one day rather than a thousand days', () => {
+  assert.deepEqual(chartTimeRange([1704067200], 1704067200, 1790467200), [1704024000, 1704110400]);
+  assert.deepEqual(chartTimeRange([1, 2], 1, 2), [1, 2]);
+});
+test('paired curves keep missing intervals and safely stop connecting when gaps are truncated', () => {
+  const metric = {
+    time: [0, 10],
+    model: [1, 2],
+    obs: [3, 4],
+    pair_gaps: [[4, 6]] as [number, number][],
+  };
+  assert.deepEqual(pairedChartData(metric), [
+    [0, 4, 6, 10],
+    [1, null, null, 2],
+    [3, null, null, 4],
+  ]);
+  const data = pairedChartData({ ...metric, pair_gaps: [], pair_gaps_truncated: true });
+  assert.deepEqual(data, [
+    [0, 5, 10],
+    [1, null, 2],
+    [3, null, 4],
+  ]);
+});
+
+test('paired chart columns pad missing values and ignore values without timestamps', () => {
+  assert.deepEqual(pairedChartData({ time: [1, 2, 3], model: [4], obs: [5, 6, 7, 8] }), [
+    [1, 2, 3],
+    [4, null, null],
+    [5, 6, 7],
+  ]);
+  assert.deepEqual(pairedChartData({ time: [1, 2] }), [
+    [1, 2],
+    [null, null],
+    [null, null],
+  ]);
+  assert.deepEqual(pairedChartData({ model: [4], obs: [5] }), [[], [], []]);
 });

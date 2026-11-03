@@ -4194,7 +4194,8 @@ impl HistorySession {
                 ("zerr", output.zerr),
                 ("assim", thermal.assim),
                 ("respc", thermal.respc),
-                ("rss", thermal.rss),
+                // UrbanTHERMAL's rss is local; the host diagnostic retains its previous value.
+                ("rss", state.energy.soil_surface_resistance_s_m),
                 // `CoLMDRIVER.F90:354` 把城市的 `rstfac` 接到 `rstfacsun_out`；
                 // `rstfacsha_out` 城市分支不碰，保持 `spval`。
                 ("rstfacsun", thermal.rstfac),

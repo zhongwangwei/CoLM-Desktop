@@ -273,6 +273,11 @@ fn reject_same_dir_rejects_same_directory_and_the_tmp_private_tmp_alias() {
         "不同目录不该被拒绝"
     );
 
+    let fresh = scratch.join("fresh/nested/output.nc");
+    assert!(reject_same_dir(&src, &fresh).is_ok());
+    assert!(fresh.parent().unwrap().is_dir());
+    assert!(!fresh.exists());
+
     // macOS：`/tmp` 是指向 `/private/tmp` 的符号链接，两条路径字面上不同、
     // 磁盘上是同一处。不 canonicalize 就识破不了这层别名。
     if std::path::Path::new("/private/tmp").is_dir() {

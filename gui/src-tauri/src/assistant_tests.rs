@@ -1426,11 +1426,6 @@ fn history_sync_guard_allows_only_one_sync_at_a_time() {
     drop(second);
 }
 
-/// U01 的子进程登记表是进程级静态表：并行跑这些用例时，取消用例会误杀别的用例的假 CLI。
-/// 需要起 history 子进程的用例串行执行（仅测试用）。
-#[cfg(unix)]
-static HISTORY_CHILD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(unix)]
 fn history_fake_cli(dir: &std::path::Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -1457,7 +1452,7 @@ fn history_temp_dir(label: &str) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn history_status_reads_cli_json_and_attaches_the_resolved_history_root() {
-    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let _serial = crate::sidecar::CHILD_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = history_temp_dir("status");
     let args_file = dir.join("args");
     let cli = history_fake_cli(
@@ -1497,7 +1492,7 @@ fn history_status_reads_cli_json_and_attaches_the_resolved_history_root() {
 #[cfg(unix)]
 #[test]
 fn history_sync_passes_repository_and_the_offline_switch_through() {
-    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let _serial = crate::sidecar::CHILD_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = history_temp_dir("sync");
     let args_file = dir.join("args");
     let cli = history_fake_cli(
@@ -1533,7 +1528,7 @@ fn history_sync_passes_repository_and_the_offline_switch_through() {
 #[cfg(unix)]
 #[test]
 fn history_cli_errors_carry_a_truncated_stderr_summary_not_just_an_exit_code() {
-    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let _serial = crate::sidecar::CHILD_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = history_temp_dir("errors");
     let identity = history_fake_cli(
         &dir,
@@ -1563,7 +1558,7 @@ fn history_cli_errors_carry_a_truncated_stderr_summary_not_just_an_exit_code() {
 #[cfg(unix)]
 #[test]
 fn history_cli_timeout_kills_the_process_group_and_reports_it() {
-    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let _serial = crate::sidecar::CHILD_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = history_temp_dir("timeout");
     let cli = history_fake_cli(&dir, "sleep 30");
     let command = history_cli_command(
@@ -1588,7 +1583,7 @@ fn history_cli_timeout_kills_the_process_group_and_reports_it() {
 #[cfg(unix)]
 #[test]
 fn history_cancel_terminates_a_registered_sync_and_reports_stopped() {
-    let _serial = HISTORY_CHILD_TEST_LOCK.lock().unwrap();
+    let _serial = crate::sidecar::CHILD_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = history_temp_dir("cancel");
     let cli = history_fake_cli(&dir, "sleep 30");
     let worker = {
@@ -1706,6 +1701,7 @@ fn reconcile_effects_ids_are_validated_and_the_message_matches_the_agent_protoco
 fn open_url_only_accepts_http_and_https() {
     for good in [
         "https://example.com/a?b=1#c",
+        "https://example.com/?a=1&b=2%20x|value",
         "http://127.0.0.1:8080/x",
         "  https://api.deepseek.com  ",
     ] {
@@ -1996,4 +1992,43 @@ fn an_old_startup_cancel_cannot_clear_a_new_startup_owner() {
     );
     assert_eq!(*process.startup.lock().unwrap(), None);
     assert!(cancel_startup(&process, Some("new".into())).is_ok());
+}
+
+#[test]
+fn windows_link_target_preserves_unicode_and_query_metacharacters_as_one_url() {
+    let input = "https://example.com/中文/🌱?a=1&b=2%20x|value#结果";
+    let validated = validate_http_url(input).unwrap();
+    let target = windows_url_target(&validated);
+    assert_eq!(target.last(), Some(&0));
+    assert!(!target[..target.len() - 1].contains(&0));
+    assert_eq!(
+        String::from_utf16(&target[..target.len() - 1]).unwrap(),
+        input
+    );
+}
+
+#[test]
+fn broken_settings_reset_preserves_raw_backup_and_keys_and_refuses_valid_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-settings-reset-{}",
+        colm_history::Event::start("test").operation_id
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("assistant.json");
+    let keys = dir.join("assistant-keys.json");
+    std::fs::write(&keys, b"secret key bytes").unwrap();
+    let broken = b"{invalid json\xff";
+    std::fs::write(&path, broken).unwrap();
+    let backup = reset_broken_settings(&path).unwrap();
+    assert_eq!(std::fs::read(backup).unwrap(), broken);
+    assert_eq!(std::fs::read(&keys).unwrap(), b"secret key bytes");
+    assert_eq!(
+        load_settings_file(&path).unwrap(),
+        AssistantSettings::default()
+    );
+    let restored = std::fs::read(&path).unwrap();
+    assert!(reset_broken_settings(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), restored);
+    assert!(reset_broken_settings(&dir.join("missing.json")).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
 }

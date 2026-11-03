@@ -1478,6 +1478,7 @@ fn a_successful_run_must_be_fetched_before_its_record_can_be_archived() {
     );
     let recovery = remote_study_recovery(&reply);
     assert_eq!(recovery.outcome, RemoteStudyOutcome::Succeeded);
+    assert!(fetch_blocked_message(&recovery).is_none());
     assert!(recovery.terminal && recovery.study_created);
     assert!(recovery.permissions.fetch);
     assert!(

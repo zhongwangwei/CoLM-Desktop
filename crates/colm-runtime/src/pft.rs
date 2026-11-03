@@ -279,6 +279,23 @@ impl PftTemplate {
         );
         let campbell = physics.hydraulic_model == HydraulicModel::Campbell;
         let pc = physics.use_pc;
+        let crown_ratio = if pc && constant.contains("cratio_p") {
+            let ratios = constant.floats("cratio_p")?.to_vec();
+            ensure!(
+                ratios.len() == pfts
+                    && ratios.iter().all(|ratio| ratio.is_finite() && *ratio > 0.0),
+                "cratio_p must contain a positive finite ratio for every PFT"
+            );
+            ratios
+        } else {
+            let rs = match document.get("DEF_RS_CROWN_STRUCTURE") {
+                None => false,
+                Some(colm_namelist::Value::Bool(value)) => *value,
+                Some(_) => anyhow::bail!("DEF_RS_CROWN_STRUCTURE must be logical"),
+            };
+            ensure!(!pc || !rs, "PC remote-sensing crown structure requires cratio_p in the PFT constant restart; regenerate the restart");
+            vec![1.0; pfts]
+        };
         // 混合模型 `pft` 插槽：按本 patch 的 PFT 次序给出的 `DEF_PFT_*` 覆盖（见 `crate::hybrid`）。
         ensure!(
             physics.pft_overrides.is_empty() || physics.pft_overrides.len() == pfts,
@@ -322,6 +339,7 @@ impl PftTemplate {
                     physics.pft_overrides.get(index),
                 )
                 .map(|parameters| PftParameters {
+                    crown_aspect_ratio: crown_ratio[index],
                     crown_m: crown
                         .as_ref()
                         .map(|[ncd, ncw, bcw]| [ncd[index], ncw[index], bcw[index]]),
@@ -884,6 +902,7 @@ fn pft_parameters_with(
         fraction,
         canopy_top_m,
         canopy_bottom_m,
+        crown_aspect_ratio: 1.0,
         optics: LeafOptics {
             chil: value("DEF_PFT_CHIL")?,
             reflectance: [

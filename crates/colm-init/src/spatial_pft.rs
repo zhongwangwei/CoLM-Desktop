@@ -214,7 +214,17 @@ pub fn write_spatial_pft_constant_restart(
             "spatial pct_crops must be a finite [0, 1] value for every land patch"
         );
     }
-    let canopy = pft_canopy(&document, &class, &observed_height_m)?;
+    let pc = spatial_pft_subgrid(&document, config.subgrid_fallback)? == SpatialPftSubgrid::Pc;
+    let [observed_bottom_m, crown_aspect_ratio] =
+        read_pft_crown_structure(config, &document, class.len())?;
+    let canopy = pft_canopy(
+        &document,
+        &class,
+        &observed_height_m,
+        observed_bottom_m.as_deref(),
+        crown_aspect_ratio.as_deref(),
+        pc,
+    )?;
     // PFT 树冠结构只在截获方案 8 时读、写（`WRITE_PFTimeInvariants`）。
     let canopy_structure = if interception_scheme_8(&document)? {
         Some([
@@ -234,6 +244,7 @@ pub fn write_spatial_pft_constant_restart(
         config.land_cover_year,
         config.block_label,
         PftConstantRestartInput {
+            crown_aspect_ratio: pc.then_some(canopy.crown_aspect_ratio.as_slice()),
             compression_level,
             class: &class,
             fraction: &fraction,
@@ -311,7 +322,14 @@ pub fn write_spatial_pft_constant_restarts(
     let pfts = read_pft_vectors(config)?;
     let use_crop = config.crop || optional_bool_or(&document, "DEF_USE_CROP", false)?;
     let pft_indices = match_pfts_to_patches(&patches, &patch_kind, &pfts, use_crop)?;
-    let pft_heights = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
+    let pft_heights = pft_canopy(
+        &document,
+        &pfts.class,
+        &pfts.observed_height_m,
+        pfts.observed_bottom_m.as_deref(),
+        pfts.crown_aspect_ratio.as_deref(),
+        spatial_pft_subgrid(&document, config.subgrid_fallback)? == SpatialPftSubgrid::Pc,
+    )?;
     let mut canopy = colm_core::CanopyState {
         patch_top_m: patches
             .class
@@ -326,6 +344,7 @@ pub fn write_spatial_pft_constant_restarts(
         pft_top_m: Vec::new(),
         pft_bottom_m: Vec::new(),
     };
+    let mut patch_crown_ratio = vec![1.0; patches.class.len()];
     // MOD_HtopReadin weights the class-adjusted PFT heights, including WMO
     // grass/bare defaults. Non-soil patches retain the IGBP table heights.
     for (patch, indices) in pft_indices.iter().enumerate() {
@@ -334,6 +353,9 @@ pub fn write_spatial_pft_constant_restarts(
                 !indices.is_empty(),
                 "natural patch {patch} has no PFT canopy"
             );
+            patch_crown_ratio[patch] = indices.iter().fold(0.0, |sum, &pft| {
+                pft_heights.crown_aspect_ratio[pft].contract(pfts.fraction[pft], sum)
+            });
             canopy.patch_top_m[patch] = indices.iter().fold(0.0, |sum, &pft| {
                 pft_heights.top_m[pft].contract(pfts.fraction[pft], sum)
             });
@@ -342,7 +364,12 @@ pub fn write_spatial_pft_constant_restarts(
             });
         }
     }
-    let common = write_spatial_lct_constant_restart_with_canopy(common, Some(canopy))?;
+    let common = write_spatial_lct_constant_restart_with_canopy(
+        common,
+        Some(canopy),
+        (spatial_pft_subgrid(&document, config.subgrid_fallback)? == SpatialPftSubgrid::Pc)
+            .then_some(patch_crown_ratio.as_slice()),
+    )?;
     let pft = write_spatial_pft_constant_restart(config)?;
     let bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?
         .then(|| {
@@ -591,7 +618,14 @@ pub fn write_spatial_pft_cold_time_restarts(
             *lai = (slatop * leafc).max(0.0);
         }
     }
-    let canopy = pft_canopy(&document, &pfts.class, &pfts.observed_height_m)?;
+    let canopy = pft_canopy(
+        &document,
+        &pfts.class,
+        &pfts.observed_height_m,
+        pfts.observed_bottom_m.as_deref(),
+        pfts.crown_aspect_ratio.as_deref(),
+        subgrid == SpatialPftSubgrid::Pc,
+    )?;
     let common_state = read_common_state(&common.block, patches.class.len())?;
     ensure!(
         !config.use_hyperspectral || common_state.snow_depth_m.iter().all(|&depth| depth == 0.0),
@@ -972,6 +1006,7 @@ pub fn write_spatial_pft_cold_time_restarts(
                         fraction: pfts.fraction[pft],
                         canopy_top_m: canopy.top_m[pft],
                         canopy_bottom_m: canopy.bottom_m[pft],
+                        crown_aspect_ratio: canopy.crown_aspect_ratio[pft],
                         optics: pft_leaf_optics(
                             &document,
                             pfts.class[pft],
@@ -1271,6 +1306,8 @@ struct SpatialPftVectors {
     class: Vec<i32>,
     fraction: Vec<f64>,
     observed_height_m: Vec<f64>,
+    observed_bottom_m: Option<Vec<f64>>,
+    crown_aspect_ratio: Option<Vec<f64>>,
     element: Vec<i64>,
     start: Vec<i32>,
     end: Vec<i32>,
@@ -1859,6 +1896,38 @@ fn read_optional_pft_f64(
     Ok(values)
 }
 
+fn read_pft_crown_structure(
+    config: SpatialPftStaticConfig<'_>,
+    document: &colm_namelist::Document,
+    count: usize,
+) -> Result<[Option<Vec<f64>>; 2]> {
+    if !optional_bool_or(document, "DEF_RS_CROWN_STRUCTURE", false)? {
+        return Ok([None, None]);
+    }
+    let bottom = read_pft_f64(
+        config,
+        "htop",
+        "hbot_pfts",
+        "hbot_pfts",
+        config.land_cover_year,
+        count,
+    )?;
+    let ratios = if spatial_pft_subgrid(document, config.subgrid_fallback)? == SpatialPftSubgrid::Pc
+    {
+        Some(read_pft_f64(
+            config,
+            "htop",
+            "cratio_pfts",
+            "cratio_pfts",
+            config.land_cover_year,
+            count,
+        )?)
+    } else {
+        None
+    };
+    Ok([Some(bottom), ratios])
+}
+
 fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVectors> {
     let class = read_pft_classes(config)?;
     let path = block_path(
@@ -1919,7 +1988,12 @@ fn read_pft_vectors(config: SpatialPftStaticConfig<'_>) -> Result<SpatialPftVect
                 .all(|value| value.is_finite() && *value >= 0.0),
         "spatial PFT topology, fraction, and height vectors must be finite and have equal lengths"
     );
+    let document = read_pft_document(config.namelist)?;
+    let [observed_bottom_m, crown_aspect_ratio] =
+        read_pft_crown_structure(config, &document, class.len())?;
     Ok(SpatialPftVectors {
+        observed_bottom_m,
+        crown_aspect_ratio,
         class,
         fraction,
         observed_height_m,

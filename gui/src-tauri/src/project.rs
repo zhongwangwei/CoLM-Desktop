@@ -21,6 +21,7 @@ pub struct CaseEntry {
     pub has_history: bool,
     /// Read from the namelist, not inferred from the selected wizard or comments.
     pub spatial: bool,
+    pub history_warning: Option<String>,
 }
 
 /// 扫一个目录下的算例（只看一层，不递归）。
@@ -53,9 +54,14 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
             has_history: history_of(&d, &name).is_some() && !colm_case::results_are_stale(&d),
             dir: d.to_string_lossy().into_owned(),
             name,
+            history_warning: None,
         });
     }
-    crate::history::import_project_metadata(&root)?;
+    if let Err(error) = crate::history::import_project_metadata(&root) {
+        for entry in &mut out {
+            entry.history_warning = Some(error.clone());
+        }
+    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -689,6 +695,9 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
         return Err(format!("{} 不是算例目录（没有 case.nml）", dir.display()));
     }
     let text = std::fs::read_to_string(&nml).map_err(|e| format!("{}: {e}", nml.display()))?;
+    let mut effective = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+    crate::config::load_isotope_fields(&mut effective, dir)?;
+    let text = effective.to_string();
     let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let record = recorded_case(dir);
     let mut profile = case_profile(&text, spatial, stages.as_deref(), record.mode.as_deref())?;

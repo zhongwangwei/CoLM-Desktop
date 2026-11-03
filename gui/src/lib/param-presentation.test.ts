@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fieldLabel, withCatalogLabels } from './param-presentation';
+import { fieldLabel, optionLabel, withCatalogLabels } from './param-presentation';
 
 interface CatalogItem {
   raw_key: string;
@@ -69,4 +69,9 @@ test('every catalog field shown on the settings or expert pages has Chinese and 
     return zh === key || en === key || /[一-鿿]/.test(en) || zh.includes(' · ');
   });
   assert.deepEqual(missing, [], `fields without real labels:\n${missing.join('\n')}`);
+});
+
+test('RSS 6 has a named option in both interface languages', () => {
+  assert.equal(optionLabel('DEF_RSS_SCHEME', '6', 'en'), 'Liu et al. (2026) (6)');
+  assert.equal(optionLabel('DEF_RSS_SCHEME', '6', 'zh'), 'Liu 等（2026）（6）');
 });

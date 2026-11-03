@@ -325,3 +325,100 @@ fn release_builds_native_macos_installers_for_both_architectures() {
     let makeoptions = read("vendor/CoLM202X/include/Makeoptions.Mac-arm");
     assert!(makeoptions.contains("NETCDF_PREFIX ?= $(shell brew --prefix)"));
 }
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_engine_metadata_rejects_stale_or_changing_source() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    fn executable(path: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let temp = std::env::temp_dir().join(format!(
+        "colm-prebuilt-identity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let source = temp.join("source");
+    let tools = temp.join("tools");
+    std::fs::create_dir_all(source.join("xtask")).unwrap();
+    std::fs::create_dir_all(tools.join("bin")).unwrap();
+    let identity = temp.join("source-id");
+    let original = "0123456789abcdef";
+    std::fs::write(&identity, original).unwrap();
+    executable(&tools.join("cargo/bin/rustup"), "#!/bin/sh\nexit 0\n");
+    executable(
+        &tools.join("cargo/bin/cargo-zigbuild"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    executable(
+        &tools.join("zig/ziglang/zig"),
+        "#!/bin/sh\necho fixture-zig\n",
+    );
+    executable(
+        &tools.join("cargo/bin/rustc"),
+        "#!/bin/sh\necho fixture-rustc\n",
+    );
+    executable(
+        &tools.join("cargo/bin/cargo"),
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = run ]; then cat "$FIXTURE_ID"; exit 0; fi
+[ "$1" = zigbuild ]
+while [ "$1" != --target ]; do shift; done
+shift
+triple=${1%%.*}
+mkdir -p "$CARGO_TARGET_DIR/$triple/release"
+for binary in colm-cli mksrfdata-rs mkinidata-rs colm-rs; do
+  echo fixture > "$CARGO_TARGET_DIR/$triple/release/$binary"
+done
+if [ "${FIXTURE_MUTATE:-0}" = 1 ]; then echo fedcba9876543210 > "$FIXTURE_ID"; fi
+"#,
+    );
+    let run = |name: &str, mutate: bool| {
+        Command::new("bash")
+            .arg(root().join("scripts/build-engine-linux.sh"))
+            .arg(&source)
+            .arg(temp.join(name))
+            .arg(&tools)
+            .arg("x86_64")
+            .env("FIXTURE_ID", &identity)
+            .env("FIXTURE_MUTATE", if mutate { "1" } else { "0" })
+            .output()
+            .unwrap()
+    };
+    let success = run("valid", false);
+    assert!(
+        success.status.success(),
+        "{}",
+        String::from_utf8_lossy(&success.stderr)
+    );
+    let metadata = Command::new("tar")
+        .args(["-xOf"])
+        .arg(temp.join("valid/colm-engine-linux-x86_64.tar.gz"))
+        .arg("./ENGINE")
+        .output()
+        .unwrap();
+    assert!(metadata.status.success());
+    assert!(String::from_utf8_lossy(&metadata.stdout)
+        .lines()
+        .any(|line| line == format!("source={original}")));
+    std::fs::write(source.join(".colm-snapshot-id"), "fedcba9876543210").unwrap();
+    let stale = run("stale", false);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("differs from its uploaded snapshot"));
+    assert!(!temp.join("stale/colm-engine-linux-x86_64.tar.gz").exists());
+    std::fs::remove_file(source.join(".colm-snapshot-id")).unwrap();
+    let changed = run("changed", true);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed during compilation"));
+    assert!(!temp
+        .join("changed/colm-engine-linux-x86_64.tar.gz")
+        .exists());
+    std::fs::remove_dir_all(temp).unwrap();
+}

@@ -248,6 +248,24 @@ export function validateSimulation(
         'The model profile may only use letters, digits, _, . and -.',
       ],
     };
+  const spatial = auto ? (probe?.spatial ?? false) : values.dataType === 'grid';
+  const prefix = values.prefix.trim() || probe?.prefix?.trim() || '';
+  if (!prefix || /[/\\\r\n]/.test(prefix) || prefix === '.' || prefix === '..')
+    return {
+      field: 'prefix',
+      message: [
+        '请填写有效的 history 文件前缀，不能含路径分隔符或换行。',
+        'Enter a valid history file prefix without path separators or line breaks.',
+      ],
+    };
+  if (!spatial && !/^[A-Za-z0-9_-]{1,60}$/.test(prefix.replace(/_+$/, '')))
+    return {
+      field: 'prefix',
+      message: [
+        '站点文件前缀去掉末尾下划线后需为 1–60 个字母、数字、下划线或连字符。',
+        'A station file prefix, without trailing underscores, must contain 1–60 letters, digits, underscores or hyphens.',
+      ],
+    };
   const gridRes = numberInput(values.gridRes);
   if (gridRes === 'invalid' || (typeof gridRes === 'number' && gridRes <= 0))
     return {
@@ -265,7 +283,6 @@ export function validateSimulation(
         'File grouping must be Year, Month, Day or single.',
       ],
     };
-  const spatial = auto ? (probe?.spatial ?? false) : values.dataType === 'grid';
   // 站点 ID：后端 valid_station 的约束（≤80 字符，不能有逗号/引号/换行）；空 = 从前缀推导。
   if (!spatial && values.stationId.trim()) {
     const station = values.stationId.trim();
@@ -913,6 +930,44 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
         'The evaluation years must be positive integers and run forward',
       ),
     );
+  for (const [value, positive, label] of [
+    [design.gridRes, true, ['比较网格分辨率', 'Comparison grid resolution']],
+    [design.minYear, false, ['最少年数', 'Minimum years']],
+    [design.numCores, false, ['进程数', 'Process count']],
+  ] as const) {
+    if (
+      value != null &&
+      (!Number.isFinite(value) ||
+        (positive ? value <= 0 : value < 0) ||
+        (!positive && !Number.isInteger(value)))
+    )
+      throw new Error(
+        bilingual(
+          `${label[0]}必须是${positive ? '正数' : '非负整数'}。`,
+          `${label[1]} must be ${positive ? 'a positive number' : 'a non-negative integer'}.`,
+        ),
+      );
+  }
+  for (const simulation of design.simulations) {
+    const prefix = simulation.info.prefix?.trim();
+    if (
+      !simulation.info.spatial &&
+      !/^[A-Za-z0-9_-]{1,60}$/.test((prefix ?? '').replace(/_+$/, ''))
+    )
+      throw new Error(
+        bilingual(
+          '站点文件前缀无效：只允许字母、数字、下划线或连字符，主体最多 60 字符。',
+          'Invalid station history prefix: use letters, digits, underscores or hyphens, with at most 60 characters before trailing underscores.',
+        ),
+      );
+    if (!prefix || /[/\\\r\n]/.test(prefix) || prefix === '.' || prefix === '..')
+      throw new Error(
+        bilingual(
+          '模拟的 history 文件前缀不能为空或包含路径分隔符。',
+          'Simulation history prefixes must be non-empty and cannot contain path separators.',
+        ),
+      );
+  }
   // 变量与每模拟覆盖都按名字排序：输出顺序不随勾选先后变化，指纹（不区分对象键顺序）才和配置文本一一对应。
   const variables = Object.entries(design.variables)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -1577,12 +1632,43 @@ export function jobEnded(
   };
 }
 
+/** Keep stored task failures independent of the language selected when a job ends. */
+export function remoteJobFailureText(status: {
+  exit_code?: number | null;
+  detail?: string | null;
+}): string {
+  return status.exit_code != null
+    ? `The server job failed (exit code ${status.exit_code}); see the log below.`
+    : `The server job failed (${status.detail ?? 'recorded as failed by the scheduler'}).`;
+}
+
 /**
  * 后端（`bench.rs`）报的是固定的中文句子；按固定文字识别后给出中英两种说法，英文界面不再中英混排
  * （复验 C2-06/A2-05）。不认得的（OpenBench 自己的输出）原样返回。
  */
 export function benchErrorText(error: string): [string, string] {
   const text = error.replace(/^(?:Error: )+/, '');
+  if (text === 'operation cancelled') return ['已停止', 'Stopped'];
+  const exit =
+    text.match(/^The server job failed \(exit code (-?\d+)\); see the log below\.$/) ??
+    text.match(/^服务器上的作业失败（退出码 (-?\d+)），原因见下面的日志。$/);
+  if (exit)
+    return [
+      `服务器上的作业失败（退出码 ${exit[1]}），原因见下面的日志。`,
+      `The server job failed (exit code ${exit[1]}); see the log below.`,
+    ];
+  const detail =
+    text.match(/^The server job failed \(([\s\S]*)\)\.$/) ??
+    text.match(/^服务器上的作业失败了（([\s\S]*)）。$/);
+  if (detail) {
+    const fallback = ['调度系统记录为失败', 'recorded as failed by the scheduler'].includes(
+      detail[1],
+    );
+    return [
+      `服务器上的作业失败了（${fallback ? '调度系统记录为失败' : detail[1]}）。`,
+      `The server job failed (${fallback ? 'recorded as failed by the scheduler' : detail[1]}).`,
+    ];
+  }
   const fixed: Record<string, string> = {
     已停止: 'Stopped',
     '先装 uv': 'Install uv first',
@@ -1603,6 +1689,8 @@ export function benchErrorText(error: string): [string, string] {
     // 复查 C07/C09：远程 run 级快照、提交意图与取回目标的固定句（Tauri/CLI 侧原文）。
     这个比较的活动作业锁一直被占用:
       "The comparison's active-job lock is still held; try again shortly.",
+    '这个比较的活动作业锁一直被占用，请稍后再提交；若是旧版本或崩溃遗留，请先确认原提交已退出，再清理活动锁。':
+      "The comparison's active-job lock is still held; try again shortly. For a lock left by an old version or a crash, confirm that the original submission has exited before clearing it.",
     这个比较还没有成功过的运行: 'This comparison has no successful run yet.',
     服务器上还没有可显示的评估报告: 'The server has no report to show yet.',
     服务器上的运行记录读不懂: 'The run record on the server cannot be read.',

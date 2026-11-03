@@ -2799,6 +2799,9 @@ fn field_states_for_at(
     case_dir: Option<&std::path::Path>,
 ) -> Result<Vec<FieldState>, String> {
     let mut doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
+    if let Some(dir) = case_dir {
+        load_isotope_fields(&mut doc, dir)?;
+    }
     migrate_legacy_material(&mut doc);
     let context = VisibilityContext::new_at(&doc, have, case_dir);
     // `DEF_wetland_finundation_scheme` 在甲烷算例里按 CH4 参数文件的淹没方案派生，namelist 值不生效。
@@ -3726,9 +3729,7 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
         _ => None,
     };
     let mut changed = false;
-    // 一对一改名：只有新字段属于主 namelist（&nl_colm_material / &nl_colm）时才在 case.nml 里换名。
-    // 分馏等 DEF_ISO_* 现在住在同位素参数文件（&nl_colm_isotope_parameter），不能塞进 case.nml；
-    // 那部分由「材料与泥沙」页的过程文件读取，旧文件的 DEF_MATERIAL% 组名仍能显示。
+    // Isotope fields are migrated in memory, then stage_isotope_fields moves them to their file on save.
     for (old, new) in [
         (
             "@@DEF_MATERIAL_@@USE_FRACTIONATION",
@@ -3791,10 +3792,14 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
         let Some(value) = doc.get(old).cloned() else {
             continue;
         };
-        // 目标字段在主 namelist 里才迁移；同位素文件里的参数留给过程文件页。
         let movable = colm_schema::find(new)
             .and_then(|field| field.group)
-            .is_some_and(|group| group == "nl_colm_material" || group == "nl_colm");
+            .is_some_and(|group| {
+                matches!(
+                    group,
+                    "nl_colm_material" | "nl_colm" | "nl_colm_isotope_parameter"
+                )
+            });
         if movable && doc.get(new).is_none() {
             let group = colm_schema::find(new).and_then(|field| field.group);
             if let Some(group) = group {
@@ -4961,6 +4966,7 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     let path = std::path::Path::new(dir).join("case.nml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
+    load_isotope_fields(&mut doc, std::path::Path::new(dir))?;
     // 保存时顺手把旧材料字段迁移成 MaterialTransport 的新名字，避免新旧两套并存。
     migrate_legacy_material(&mut doc);
     // 甲烷淹没方案与溶质浓度写进各自的参数文件，不进 case.nml。
@@ -4995,6 +5001,8 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     validate_runtime_contract(&doc, std::path::Path::new(dir), None)
         .map_err(|e| format!("{dir}: {e}"))?;
     validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
+    let mut writes = staged_history.into_iter().collect::<Vec<_>>();
+    stage_isotope_fields(&mut doc, std::path::Path::new(dir), &mut writes)?;
     stage_material_parameters(
         dir,
         &fields,
@@ -5003,7 +5011,6 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     )?;
     // case.nml is the only copy of the configuration: replace it (and its history file)
     // through staged files with backups instead of truncating in place.
-    let mut writes = staged_history.into_iter().collect::<Vec<_>>();
     writes.push((path, doc.to_string()));
     write_files_atomic_untracked(&writes).map(|_| ())
 }
@@ -5122,11 +5129,174 @@ fn stage_case_material_parameters(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("{}: {error}", path.display())),
         }
-        let text = std::fs::read_to_string(std::path::Path::new(context).join(&file))
-            .map_err(|e| e.to_string())?;
+        let mut text = std::fs::read_to_string(std::path::Path::new(context).join(&file)).map_err(
+            |error| format!("Selected model has no trusted template for {file}: {error}"),
+        )?;
+        if file == "standard_isotope_parameter.nml" {
+            let fractionation = if let Some(field) = fields
+                .iter()
+                .find(|field| field.path.eq_ignore_ascii_case("DEF_ISO_USE_FRACTIONATION"))
+            {
+                matches!(
+                    typed(&field.path, &field.value)?,
+                    colm_namelist::Value::Bool(true)
+                )
+            } else {
+                let parameters = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+                logical(&parameters, "DEF_ISO_USE_FRACTIONATION")
+            };
+            text = isotope_parameter_text(&text, fractionation)?;
+        }
         pending.push((path, text));
     }
     Ok(pending)
+}
+
+pub(crate) fn material_parameter_template(file: &str) -> Option<&'static str> {
+    match file {
+        "standard_methane_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_methane_parameter.nml"
+        )),
+        "standard_sediment_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"
+        )),
+        "standard_isotope_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_isotope_parameter.nml"
+        )),
+        "standard_chloride_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_chloride_parameter.nml"
+        )),
+        "standard_nh4_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_nh4_parameter.nml"
+        )),
+        "standard_no3_parameter.nml" => Some(include_str!(
+            "../../../vendor/CoLM202X/run/standard_no3_parameter.nml"
+        )),
+        _ => None,
+    }
+}
+
+pub(crate) fn load_isotope_fields(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let file = character(doc, "DEF_ISOTOPE_PARAM_FILE");
+    if is_null_file(&file) {
+        return Ok(());
+    }
+    let path = dir.join(file.trim());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let parameters = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+    for key in parameters.paths() {
+        if colm_schema::find(&key).and_then(|field| field.group)
+            == Some("nl_colm_isotope_parameter")
+        {
+            put(doc, &key, parameters.get(&key).unwrap().clone())?;
+        }
+    }
+    Ok(())
+}
+
+/// Both engines read these fields from the isotope parameter file. Commit it with case.nml.
+fn stage_isotope_fields(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+    pending: &mut Vec<(std::path::PathBuf, String)>,
+) -> Result<(), String> {
+    let fields: Vec<_> = doc
+        .paths()
+        .into_iter()
+        .filter(|key| {
+            colm_schema::find(key).and_then(|field| field.group)
+                == Some("nl_colm_isotope_parameter")
+        })
+        .collect();
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let file = character(doc, "DEF_ISOTOPE_PARAM_FILE");
+    if is_null_file(&file) {
+        // Turning off the family removes its case-only projection without touching the old file.
+        for key in fields {
+            doc.remove(&key).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    let path = dir.join(file.trim());
+    // Shared parameter sources may be read, but editing requires a case-owned file.
+    let resolved = if path.exists() {
+        path.canonicalize()
+    } else {
+        path.parent()
+            .ok_or_else(|| "isotope parameter path has no parent".to_string())?
+            .canonicalize()
+            .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+    }
+    .map_err(|error| format!("{}: {error}", path.display()))?;
+    let case = dir.canonicalize().map_err(|error| error.to_string())?;
+    if !resolved.starts_with(&case) {
+        let text = std::fs::read_to_string(&resolved)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let parameters = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+        if fields.iter().any(|key| doc.get(key) != parameters.get(key)) {
+            return Err(format!(
+                "Isotope parameter file is outside the case directory (read-only): {}. Copy it into the case and update DEF_ISOTOPE_PARAM_FILE before editing.",
+                path.display()
+            ));
+        }
+        // Unchanged projections do not turn an unrelated case edit into a shared-file write.
+        for key in fields {
+            doc.remove(&key).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    let existing = pending.iter().position(|(candidate, _)| candidate == &path);
+    let text = if let Some(index) = existing {
+        pending[index].1.clone()
+    } else {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(format!(
+                    "{}: isotope parameters must be a regular file",
+                    path.display()
+                ));
+            }
+            Ok(_) => std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let template = material_parameter_template(file.trim()).ok_or_else(|| {
+                    format!("{}: isotope parameter file is missing", path.display())
+                })?;
+                isotope_parameter_text(
+                    template,
+                    matches!(
+                        doc.get("DEF_ISO_USE_FRACTIONATION"),
+                        Some(colm_namelist::Value::Bool(true))
+                    ),
+                )?
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    let mut parameters = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+    for key in fields {
+        let value = doc
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("missing isotope field {key}"))?;
+        put(&mut parameters, &key, value)?;
+        doc.remove(&key).map_err(|error| error.to_string())?;
+    }
+    let staged = (path, parameters.to_string());
+    if let Some(index) = existing {
+        pending[index] = staged;
+    } else {
+        pending.push(staged);
+    }
+    Ok(())
 }
 
 fn stage_material_parameter_file(
@@ -5185,9 +5355,9 @@ fn isotope_parameter_text(template: &str, fractionation: bool) -> Result<String,
         return Ok(template.to_string());
     }
     // 强迫组总在文件尾部，且一个物种一组；从第一组起整段删掉即可。
-    let start = template
-        .find(GROUP)
-        .ok_or("内置同位素参数模板缺少同位素强迫组")?;
+    let Some(start) = template.to_ascii_lowercase().find(GROUP) else {
+        return Ok(template.to_string());
+    };
     let kept = template[..start].trim_end();
     Ok(format!(
         "{kept}\n! 不分馏：已去掉同位素强迫组（IsoGSM 同位素降水与水汽），降水与水汽取缺省比值。\n"
@@ -5366,6 +5536,8 @@ fn set_fields_with_forcing(
     }
     for (index, (d, text)) in all.into_iter().enumerate() {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
+        load_isotope_fields(&mut doc, std::path::Path::new(&d))?;
+        migrate_legacy_material(&mut doc);
         let fields = site_class_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
@@ -5415,6 +5587,7 @@ fn set_fields_with_forcing(
             let text = std::fs::read_to_string(std::path::Path::new(context).join("case.nml"))
                 .map_err(|e| e.to_string())?;
             let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+            load_isotope_fields(&mut overlay, std::path::Path::new(context))?;
             for field in &fields {
                 // The candidate preview already resolves aliases to the selected frozen assets.
                 if is_removable_placeholder(&field.path) {
@@ -5445,6 +5618,7 @@ fn set_fields_with_forcing(
         )
         .map_err(|e| format!("{d}: {e}"))?;
         validate_changed_fields(validation, &fields).map_err(|e| format!("{d}: {e}"))?;
+        stage_isotope_fields(&mut doc, std::path::Path::new(&d), &mut extra)?;
         done.push((d, doc.to_string()));
     }
     if extra.is_empty() {
@@ -5845,6 +6019,24 @@ pub fn set_spinup(
     })
 }
 
+fn validate_case_removals(fields: &[FieldChange], remove_fields: &[String]) -> Result<(), String> {
+    for key in remove_fields {
+        let field = colm_schema::find(key).ok_or_else(|| format!("unknown case field: {key}"))?;
+        if !matches!(field.group, Some("nl_colm" | "nl_colm_material"))
+            || colm_model::is_model_field(key)
+        {
+            return Err(format!("{key} is not a removable case field"));
+        }
+        if fields
+            .iter()
+            .any(|field| field.path.eq_ignore_ascii_case(key))
+        {
+            return Err(format!("{key} cannot be set and removed together"));
+        }
+    }
+    Ok(())
+}
+
 /// Save only case-owned fields, validating against the selected immutable model.
 #[tauri::command]
 pub async fn case_data_save(
@@ -5863,18 +6055,7 @@ pub async fn case_data_save(
         ));
     }
     let remove_fields = remove_fields.unwrap_or_default();
-    for key in &remove_fields {
-        let field = colm_schema::find(key).ok_or_else(|| format!("unknown case field: {key}"))?;
-        if field.group != Some("nl_colm") || colm_model::is_model_field(key) {
-            return Err(format!("{key} is not a removable case field"));
-        }
-        if fields
-            .iter()
-            .any(|field| field.path.eq_ignore_ascii_case(key))
-        {
-            return Err(format!("{key} cannot be set and removed together"));
-        }
-    }
+    validate_case_removals(&fields, &remove_fields)?;
     if forcing.is_some()
         && (fields
             .iter()

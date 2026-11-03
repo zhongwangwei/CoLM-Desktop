@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import type { VersionRef } from './types';
-import { plainError } from './bilingual';
+import { bilingual, plainError } from './bilingual';
 import { closeReasons } from './navigation-guard';
 import {
   missingRevision,
@@ -849,5 +849,208 @@ test('batch opening repairs a pruned first binding only after the existing rebin
     else await assert.rejects(result, /not rebound/);
     assert.equal(questions.length, 1);
     assert.equal(writes.length, accepted ? 1 : 0);
+  }
+});
+
+function appCallback(name: string, context: Record<string, unknown>) {
+  const path = new URL('./app-state.tsx', import.meta.url);
+  const source = ts.createSourceFile(
+    path.pathname,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === name)
+      body = node.initializer!.getText(source);
+    if (
+      name === 'closeEffect' &&
+      ts.isCallExpression(node) &&
+      node.expression.getText(source) === 'useEffect' &&
+      node.arguments[0].getText(source).includes('app://close-requested')
+    )
+      body = node.arguments[0].getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(body);
+  const code = ts.transpileModule(`const value = (${body});`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return new Function(...Object.keys(context), `${code}; return value;`)(...Object.values(context));
+}
+
+test('clicking the current route keeps the in-flight case opening alive', () => {
+  const openEpoch = { current: 5 },
+    pendingOpen = { current: 5 };
+  const navigate = appCallback('navigate', {
+    useCallback: (fn: unknown) => fn,
+    current: { current: { route: 'project', caseTab: 'settings' } },
+    openEpoch,
+    pendingOpen,
+    blocked: () => null,
+    notify: () => {},
+    update: () => {},
+  });
+  assert.equal(navigate('project'), true);
+  assert.equal(openEpoch.current, 5);
+  assert.equal(pendingOpen.current, 5);
+  assert.equal(navigate('resources'), true);
+  assert.equal(openEpoch.current, 6);
+  assert.equal(pendingOpen.current, null);
+});
+
+test('native closing waits for draft persistence and a failed save leaves the window open', async () => {
+  for (const failed of [false, true]) {
+    let listener!: () => void, finish!: () => void;
+    const saving = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const commands: unknown[] = [],
+      notices: unknown[] = [];
+    const askingClose = { current: false };
+    const effect = appCallback('closeEffect', {
+      closingSaveError: { current: null },
+      listen: async (_name: string, fn: () => void) => {
+        listener = fn;
+        return () => {};
+      },
+      askingClose,
+      guards: { current: new Set() },
+      closeGuards: { current: new Set() },
+      pendingSaves: { current: new Set() },
+      beforeClose: {
+        current: new Set([
+          async () => {
+            await saving;
+            if (failed) throw Error('draft write failed');
+          },
+        ]),
+      },
+      current: { current: { running: {} } },
+      closeReasons,
+      bilingual: (_zh: string, en: string) => en,
+      askConfirm: async () => true,
+      invoke: async (_command: string, args: unknown) => {
+        commands.push(args);
+      },
+      notify: (error: unknown) => notices.push(error),
+      errorText: String,
+    });
+    effect();
+    listener();
+    await settle();
+    assert.deepEqual(commands, [{ close: false, preparing: true }]);
+    assert.equal(askingClose.current, true);
+    finish();
+    await settle();
+    assert.deepEqual(commands, [{ close: false, preparing: true }, { close: !failed }]);
+    assert.equal(askingClose.current, false);
+    assert.equal(notices.length, Number(failed));
+  }
+});
+
+test('App tracks detached saves until settled, including saves queued while closing', async () => {
+  const pendingSaves = { current: new Set<Promise<unknown>>() };
+  const track = appCallback('trackPendingSave', {
+    askingClose: { current: false },
+    closingSaveError: { current: null },
+    useCallback: (fn: unknown) => fn,
+    pendingSaves,
+  });
+  let finish!: () => void, finishNext!: () => void;
+  const first = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const next = new Promise<void>((resolve) => {
+    finishNext = resolve;
+  });
+  track(first);
+  let closed = false;
+  const flush = (async () => {
+    while (pendingSaves.current.size) await Promise.all([...pendingSaves.current]);
+    closed = true;
+  })();
+  track(next);
+  finish();
+  await settle();
+  assert.equal(closed, false);
+  finishNext();
+  await flush;
+  assert.equal(closed, true);
+  assert.equal(pendingSaves.current.size, 0);
+});
+
+test('closing after a page unmount waits for its tracked save and later queued work', async () => {
+  const pendingSaves = { current: new Set<Promise<unknown>>() };
+  const track = appCallback('trackPendingSave', {
+    askingClose: { current: false },
+    closingSaveError: { current: null },
+    useCallback: (fn: unknown) => fn,
+    pendingSaves,
+  });
+  let listener!: () => void, finish!: () => void, finishNext!: () => void;
+  const first = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const next = new Promise<void>((resolve) => {
+    finishNext = resolve;
+  });
+  const commands: unknown[] = [];
+  track(first);
+  const effect = appCallback('closeEffect', {
+    closingSaveError: { current: null },
+    listen: async (_name: string, fn: () => void) => {
+      listener = fn;
+      return () => {};
+    },
+    askingClose: { current: false },
+    guards: { current: new Set() },
+    closeGuards: { current: new Set() },
+    beforeClose: { current: new Set() },
+    pendingSaves,
+    current: { current: { running: {} } },
+    closeReasons,
+    bilingual: (_zh: string, en: string) => en,
+    askConfirm: async () => true,
+    invoke: async (_command: string, args: unknown) => {
+      commands.push(args);
+    },
+    notify: () => {},
+    errorText: String,
+  });
+  effect();
+  listener();
+  await settle();
+  track(next);
+  finish();
+  await settle();
+  assert.deepEqual(commands, [{ close: false, preparing: true }]);
+  finishNext();
+  await settle();
+  assert.deepEqual(commands, [{ close: false, preparing: true }, { close: true }]);
+});
+
+test('language updates reach bilingual text in the first render, before effects', () => {
+  const previous = document.documentElement.lang;
+  let state = { language: 'zh', versions: [], root: '' };
+  const frames: string[] = [];
+  const update = appCallback('update', {
+    document,
+    current: { current: state },
+    useCallback: (fn: unknown) => fn,
+    setState: (fn: (old: typeof state) => typeof state) => {
+      state = fn(state);
+      frames.push(bilingual('全部', 'All'));
+    },
+  });
+  try {
+    update({ language: 'en' });
+    update(() => ({ language: 'zh' }));
+    assert.deepEqual(frames, ['All', '全部']);
+  } finally {
+    document.documentElement.lang = previous;
   }
 });

@@ -128,6 +128,7 @@ export default function CodeWorkspace({
   onPendingChange,
   onSourceState,
   disabled = false,
+  draftName,
 }: {
   name: string | null;
   onChanged: () => Promise<void>;
@@ -135,6 +136,7 @@ export default function CodeWorkspace({
   /** 源码缓冲区的未保存/保存中状态上抛给版本页：离开、冻结时统一处理（GUI-02）。 */
   onSourceState?: (state: SourceEditState | null) => void;
   disabled?: boolean;
+  draftName?: string;
 }) {
   const { state } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
@@ -271,6 +273,7 @@ export default function CodeWorkspace({
     });
     if (!file) return;
     const value = await invokeJson('workspace_import_patch', { name, file, message });
+    setExternalChangeToken((token) => token + 1);
     await onChanged();
     return value;
   }
@@ -319,6 +322,7 @@ export default function CodeWorkspace({
       return;
     run(async () => {
       const value = await invokeJson('workspace_revert_file', { name, path, message });
+      setExternalChangeToken((token) => token + 1);
       await onChanged();
       return value;
     });
@@ -338,12 +342,22 @@ export default function CodeWorkspace({
       return;
     run(async () => {
       const value = await invokeJson('workspace_revert', { name, commit: id });
+      setExternalChangeToken((token) => token + 1);
       await onChanged();
       return value;
     });
   };
   const deleteWorkspace = async () => {
     if (!name) return;
+    if (draftName) {
+      setError(
+        t(
+          '这个代码工作区仍被草稿引用。请先删除或迁移草稿，再删除工作区。',
+          'This code workspace is still referenced by a draft. Delete or migrate the draft before removing the workspace.',
+        ),
+      );
+      return;
+    }
     if (
       !(await askConfirm(
         t(
@@ -904,11 +918,19 @@ export default function CodeWorkspace({
           </p>
           <Button
             variant="danger"
-            disabled={disabled || busy}
+            disabled={disabled || busy || !!draftName}
             onClick={() => void deleteWorkspace()}
           >
             {t('删除这个代码工作区', 'Delete this code workspace')}
           </Button>
+          {draftName && (
+            <p className="muted">
+              {t(
+                `草稿「${draftName}」仍在使用这个工作区。请先删除或迁移草稿，再删除工作区。`,
+                `Draft “${draftName}” still uses this workspace. Delete or migrate the draft before removing the workspace.`,
+              )}
+            </p>
+          )}
         </details>
       </div>
       {/* 编译/测试前统一处理未保存源码：保存并继续 / 放弃并继续 / 取消。 */}

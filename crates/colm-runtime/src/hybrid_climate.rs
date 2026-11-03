@@ -139,6 +139,8 @@ pub fn write_climate_file(path: &Path, values: &[[f64; 5]], period: &str) -> Res
             .put_values(&column, netcdf::Extents::All)
             .with_context(|| format!("cannot write {name} to {}", path.display()))?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 

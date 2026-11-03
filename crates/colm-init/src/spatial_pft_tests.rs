@@ -389,6 +389,8 @@ fn shared_crop_ranges_keep_ordered_natural_and_cft_owners() {
         shared_fraction: vec![0.5, 0.2, 0.3],
     };
     let mut pfts = SpatialPftVectors {
+        observed_bottom_m: None,
+        crown_aspect_ratio: None,
         class: vec![1, 13, 15, 19],
         element: vec![7; 4],
         start: vec![1; 4],
@@ -442,6 +444,8 @@ fn spatial_pft_time_config_defaults_to_loading_snicar_from_document() {
 fn spatial_pft_snow_cover_uses_pft_geometry_and_snow_adjusts_sai_inputs() {
     let _netcdf_guard = crate::netcdf_test_guard();
     let pfts = SpatialPftVectors {
+        observed_bottom_m: None,
+        crown_aspect_ratio: None,
         class: vec![1, 13],
         element: vec![7, 7],
         start: vec![1, 1],
@@ -451,6 +455,7 @@ fn spatial_pft_snow_cover_uses_pft_geometry_and_snow_adjusts_sai_inputs() {
         observed_height_m: vec![20.0, 4.0],
     };
     let canopy = crate::single_point::PftCanopy {
+        crown_aspect_ratio: vec![1.0; 2],
         top_m: vec![20.0, 4.0],
         bottom_m: vec![1.0, 0.0],
     };
@@ -698,4 +703,48 @@ fn spatial_pft_subgrid_uses_the_kernel_only_when_the_namelist_is_silent() {
     )
     .unwrap();
     assert!(spatial_pft_subgrid(&not_a_subgrid, Some(SpatialPftSubgrid::Pc)).is_err());
+}
+
+#[test]
+fn spatial_pc_crown_observations_reach_both_constant_restart_families() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let root = temp_dir();
+    let landdata = root.join("landdata");
+    write_common_landdata(&landdata);
+    write_i32(&landdata, "landpft", "landpft", "settyp", &[1]);
+    write_landpft_topology(&landdata);
+    write_f64(&landdata, "pctpft", "pct_pfts", "pct_pfts", &[1.0]);
+    for (name, value) in [
+        ("htop_pfts", 20.0),
+        ("hbot_pfts", 6.0),
+        ("cratio_pfts", 2.0),
+    ] {
+        write_f64(&landdata, "htop", name, name, &[value]);
+    }
+    let namelist = root.join("pc.nml");
+    std::fs::write(&namelist,"&nl_colm\n DEF_USE_PC=.true.\n DEF_USE_PFT=.false.\n DEF_RS_CROWN_STRUCTURE=.true.\n DEF_Runoff_SCHEME=0\n DEF_TOPMOD_method=0\n/\n").unwrap();
+    let restart = root.join("restart");
+    let config =
+        SpatialPftStaticConfig::new(&namelist, &landdata, &restart, "test", 2005, "w180_s90");
+    let files = write_spatial_pft_constant_restarts(config, false, false).unwrap();
+    let common = netcdf::open(&files.common.block).unwrap();
+    let pft = netcdf::open(files.pft.unwrap()).unwrap();
+    assert_eq!(values_f64(&common, "cratio").unwrap(), [2.0]);
+    assert_eq!(values_f64(&pft, "cratio_p").unwrap(), [2.0]);
+    assert_eq!(values_f64(&pft, "hbot_p").unwrap(), [6.0]);
+    drop(common);
+    drop(pft);
+    std::fs::remove_file(block_path(
+        &landdata,
+        "htop",
+        "cratio_pfts",
+        2005,
+        "w180_s90",
+    ))
+    .unwrap();
+    assert!(write_spatial_pft_constant_restart(config)
+        .unwrap_err()
+        .to_string()
+        .contains("cratio_pfts"));
+    crate::remove_test_tree(root);
 }

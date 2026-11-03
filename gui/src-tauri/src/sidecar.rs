@@ -60,7 +60,7 @@ pub struct CaseCreations(RunProcesses);
 
 const CASE_CREATION_TIMEOUT: Duration = Duration::from_secs(120);
 
-fn creation_key(dir: &str) -> Result<String, String> {
+pub(crate) fn creation_key(dir: &str) -> Result<String, String> {
     let mut ancestor = std::path::absolute(dir).map_err(|e| e.to_string())?;
     let mut missing = Vec::new();
     loop {
@@ -89,14 +89,32 @@ fn creation_key(dir: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn case_creation_cancel(
+    app: tauri::AppHandle,
     creations: tauri::State<'_, CaseCreations>,
     dir: String,
+    host: Option<String>,
 ) -> Result<usize, String> {
     let processes = creations.0.clone();
-    let key = creation_key(&dir)?;
-    tauri::async_runtime::spawn_blocking(move || processes.cancel(Some(vec![key])))
-        .await
-        .map_err(|e| e.to_string())?
+    let local = if let Some(host) = host.filter(|host| !host.is_empty()) {
+        crate::remote::server_for(app.clone(), &host)?;
+        let (_, cache) = crate::remote_cases::cache_paths(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &host,
+            &dir,
+        )?;
+        cache.to_string_lossy().into_owned()
+    } else {
+        dir
+    };
+    let key = creation_key(&local)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let stopped = cancel_remote_creation_children(&key)?;
+        processes
+            .cancel(Some(vec![key]))
+            .map(|local| local + stopped)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Cancels the creations writing these local directories (blocking).
@@ -146,6 +164,7 @@ impl Drop for CreationState {
             let _ = std::fs::remove_dir_all(&self.key);
         }
         if self.writers_reaped.load(Ordering::SeqCst) {
+            allow_remote_creation(&self.key);
             let _ = self.processes.forget(&self.key);
         }
     }
@@ -159,6 +178,7 @@ impl CaseCreation {
     ) -> Result<Self, String> {
         let key = creation_key(dir)?;
         creations.0.prepare(std::slice::from_ref(&key))?;
+        allow_remote_creation(&key);
         // The reserved key prevents another creator from claiming this output while
         // its existence is checked and until cleanup has finished.
         let fresh = !std::path::Path::new(&key).exists();
@@ -1263,6 +1283,32 @@ pub async fn cancel_runs(
 /// 用进程级静态表而不是给每个命令加 State：这些子进程在 `spawn_blocking` 里跑，签名里没有
 /// AppHandle；而这只有一个窗口进程会写。登记的是 PID，也就是 `top_level_sidecar` 建的进程组 ID，
 /// 按组终止。值里记归属（停止按钮按它挑）和是否已被要求停止（用来给出"已停止"而不是空报错）。
+#[cfg(test)]
+pub(crate) static CHILD_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+static REMOTE_BENCH_EPOCHS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+fn remote_bench_epochs() -> &'static Mutex<HashMap<String, u64>> {
+    REMOTE_BENCH_EPOCHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub(crate) fn remote_bench_owner(host: &str) -> ChildOwner {
+    let epoch = remote_bench_epochs()
+        .lock()
+        .ok()
+        .and_then(|epochs| epochs.get(host).copied())
+        .unwrap_or(0);
+    ChildOwner::RemoteBench(host.to_owned(), epoch)
+}
+
+static CANCELLED_CREATIONS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+fn cancelled_creations() -> &'static Mutex<std::collections::HashSet<String>> {
+    CANCELLED_CREATIONS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+pub(crate) fn allow_remote_creation(key: &str) {
+    if let Ok(mut cancelled) = cancelled_creations().lock() {
+        cancelled.remove(key);
+    }
+}
+
 static DETACHED_CHILDREN: OnceLock<Mutex<HashMap<u32, (ChildOwner, bool)>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1271,6 +1317,12 @@ pub(crate) enum ChildOwner {
     Remote(Option<String>),
     /// 准备页的数据准备。页面同一时间只跑一件，停止就停全部。
     Preparation,
+    /// Remote OpenBench requests belonging to one selected server.
+    RemoteBench(String, u64),
+    /// Remote creation writers, keyed by local cache directory or batch ID.
+    RemoteCreation(String),
+    /// Other sidecars must also be reaped when the app closes.
+    Background,
     /// "比较"页的 OpenBench：装环境、检查配置、运行评估。同一时间只跑一件。
     Bench,
     /// 历史记录里"按记录设置重跑"：真的把整段模型跑一遍。同一时间只跑一件。
@@ -1307,12 +1359,36 @@ impl Drop for DetachedChildGuard {
 }
 
 pub(crate) fn register_child(pid: u32, owner: ChildOwner) -> DetachedChildGuard {
+    // Keep the cancellation marker locked through registration, closing cancel-before-spawn.
+    let cancelled = if matches!(owner, ChildOwner::RemoteCreation(_)) {
+        cancelled_creations().lock().ok()
+    } else {
+        None
+    };
+    let bench_epochs = if matches!(owner, ChildOwner::RemoteBench(..)) {
+        remote_bench_epochs().lock().ok()
+    } else {
+        None
+    };
+    let stopped = match &owner {
+        ChildOwner::RemoteBench(host, epoch) => bench_epochs
+            .as_ref()
+            .is_some_and(|epochs| epochs.get(host).copied().unwrap_or(0) != *epoch),
+        ChildOwner::RemoteCreation(key) => {
+            cancelled.as_ref().is_some_and(|items| items.contains(key))
+        }
+        _ => false,
+    };
     if let Ok(mut children) = detached_children().lock() {
-        children.insert(pid, (owner, false));
+        children.insert(pid, (owner, stopped));
+    }
+    if stopped {
+        let _ = terminate_process_tree(pid);
     }
     DetachedChildGuard { pid }
 }
 
+#[cfg(test)]
 pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> DetachedChildGuard {
     register_child(pid, ChildOwner::Remote(case))
 }
@@ -1369,6 +1445,24 @@ pub fn cancel_remote_submission(case: String) -> Result<usize, String> {
 /// 停掉"比较"页正在跑的 OpenBench 任务（安装或评估）。
 pub(crate) fn cancel_bench_children() -> Result<usize, String> {
     cancel_children_where(|owner| *owner == ChildOwner::Bench)
+}
+
+pub(crate) fn cancel_remote_bench_children(host: &str) -> Result<usize, String> {
+    let mut epochs = remote_bench_epochs()
+        .lock()
+        .map_err(|_| "remote bench cancellation registry poisoned")?;
+    let epoch = epochs.entry(host.to_owned()).or_default();
+    *epoch = epoch.wrapping_add(1);
+    cancel_children_where(
+        |owner| matches!(owner, ChildOwner::RemoteBench(owned, _) if owned == host),
+    )
+}
+pub(crate) fn cancel_remote_creation_children(key: &str) -> Result<usize, String> {
+    let mut cancelled = cancelled_creations()
+        .lock()
+        .map_err(|_| "creation cancellation registry poisoned")?;
+    cancelled.insert(key.to_owned());
+    cancel_children_where(|owner| *owner == ChildOwner::RemoteCreation(key.to_owned()))
 }
 
 /// 停掉准备页正在跑的数据准备。返回终止的进程数；0 表示没有在跑的（例如已经结束）。
@@ -2484,6 +2578,9 @@ fn run_one(
                 format!("cannot start {}: {e}", cli.display())
             })?;
         remember_process(processes, case, &mut child)?;
+        if let Some(event) = &event {
+            crate::live_runs::bind_operation(child.id(), &event.operation_id);
+        }
         let (out, err_pipe) = take_process_pipes(&mut child, processes, case)?;
         let _ = app.emit(
             "run://started",
@@ -4287,11 +4384,24 @@ fn study_run_blocking(
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
     let result = study_run_untracked(app, processes, args, &run_id);
-    let status = result
+    let status = study_result_status(&result);
+    crate::history::command_finish(event.as_ref(), result, status)
+}
+
+fn study_result_status(result: &Result<String, String>) -> &'static str {
+    result
         .as_deref()
         .map(study_run_status)
-        .unwrap_or("succeeded");
-    crate::history::command_finish(event.as_ref(), result, status)
+        .unwrap_or_else(|error| {
+            if serde_json::from_str::<serde_json::Value>(error)
+                .ok()
+                .is_some_and(|value| value["kind"] == "study_cancelled")
+            {
+                "cancelled"
+            } else {
+                "failed"
+            }
+        })
 }
 
 /// History status for a study-run that exited normally: the CLI also exits 0 when the Study
@@ -4857,10 +4967,19 @@ fn capture_untracked_with_env(args: &[String], env: &[(String, String)]) -> Resu
     if !env.is_empty() {
         cmd.envs(env.iter().map(|(key, value)| (key, value)));
     }
-    let out = cmd
+    colm_kernel::run::top_level_sidecar(&mut cmd);
+    let child = cmd
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
+    let guard = register_child(child.id(), ChildOwner::Background);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if guard.stopped() {
+        return Err("operation cancelled".into());
+    }
     if !out.status.success() {
         // sidecar 的错误信息在 stderr，原样交给用户 —— 它比我们能编的更具体
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());

@@ -22,6 +22,10 @@ struct Entry {
     pid: u32,
     /// 写登记时 colm-cli 的文件名，用来核对 PID 没被别的程序复用。
     program: String,
+    #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
+    recorded_ms: Option<i64>,
 }
 
 /// 登记目录放在历史库旁边：跟着 `COLM_HISTORY_DB`/隔离 HOME 走，e2e 不会碰到真实用户的登记。
@@ -37,7 +41,8 @@ pub(crate) fn enable() {
     let Some(dir) = default_dir() else {
         return;
     };
-    let stopped = sweep(&dir, &program_name(), alive_colm_cli);
+    let ledger = colm_history::History::open_default().ok();
+    let stopped = sweep(&dir, &program_name(), alive_colm_cli, ledger.as_ref());
     if let Ok(mut swept) = SWEPT.lock() {
         *swept = stopped;
     }
@@ -59,14 +64,88 @@ pub(crate) fn record(key: &str, pid: u32) {
         key: key.to_owned(),
         pid,
         program: program_name(),
+        operation_id: None,
+        recorded_ms: Some(colm_history::now_ms()),
     };
     // 写不下只是少了崩溃后的清理，不能因此拒绝运行。
     let _ = std::fs::create_dir_all(dir).and_then(|()| {
-        std::fs::write(
-            dir.join(format!("{pid}.json")),
-            serde_json::to_vec(&entry).unwrap_or_default(),
+        crate::config::write_export_text_atomic(
+            &dir.join(format!("{pid}.json")),
+            serde_json::to_string(&entry).unwrap_or_default(),
         )
+        .map_err(std::io::Error::other)
     });
+}
+
+pub(crate) fn bind_operation(pid: u32, operation_id: &str) {
+    let Some(dir) = DIR.get() else {
+        return;
+    };
+    let path = dir.join(format!("{pid}.json"));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(mut entry) = serde_json::from_slice::<Entry>(&bytes) else {
+        return;
+    };
+    entry.operation_id = Some(operation_id.to_owned());
+    if let Ok(text) = serde_json::to_string(&entry) {
+        let _ = crate::config::write_export_text_atomic(&path, text);
+    }
+}
+fn settle_interrupted(ledger: &colm_history::History, entry: &Entry) -> Result<(), String> {
+    if entry.key.starts_with("study:") {
+        return Ok(());
+    }
+    let mut offset = 0;
+    let mut candidates = Vec::new();
+    loop {
+        let page = ledger
+            .query_audit(&colm_history::Query {
+                case_path: Some(entry.key.clone()),
+                limit: 200,
+                offset,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        for operation in &page.items {
+            let event = &operation.latest;
+            if event.kind != "run"
+                || event.host.is_some()
+                || event.location.as_deref() == Some("remote")
+                || colm_history::confirmed_status(&event.status)
+            {
+                continue;
+            }
+            let matches = if let Some(id) = &entry.operation_id {
+                event.operation_id == *id
+            } else {
+                entry
+                    .recorded_ms
+                    .zip(operation.started_ms)
+                    .is_some_and(|(recorded, started)| started <= recorded)
+            };
+            if !matches {
+                continue;
+            }
+            candidates.push(event.clone());
+        }
+        offset += page.items.len() as u64;
+        if offset >= page.total || page.items.is_empty() {
+            break;
+        }
+    }
+    if entry.operation_id.is_none() && candidates.len() > 1 {
+        return Err("legacy live-run registration has ambiguous operation identity".into());
+    }
+    for event in candidates {
+        let mut end = event.next(colm_history::EventPhase::Finished, "interrupted");
+        end.detail["interruption_reason"] = serde_json::json!("application_exited");
+        ledger
+            .append_if_latest(&event.event_id, &end)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub(crate) fn clear(pid: u32) {
@@ -76,7 +155,12 @@ pub(crate) fn clear(pid: u32) {
 }
 
 /// 读出每条登记；还活着的就停掉（研究再补一次取消收尾），登记一律删。返回被停掉的运行键。
-fn sweep(dir: &Path, program: &str, alive: impl Fn(u32) -> Option<String>) -> Vec<String> {
+fn sweep(
+    dir: &Path,
+    program: &str,
+    alive: impl Fn(u32) -> Option<String>,
+    ledger: Option<&colm_history::History>,
+) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -88,11 +172,30 @@ fn sweep(dir: &Path, program: &str, alive: impl Fn(u32) -> Option<String>) -> Ve
         let entry = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Entry>(&bytes).ok());
-        if let Some(entry) = entry {
+        if let Some(mut entry) = entry {
+            if entry.recorded_ms.is_none() {
+                entry.recorded_ms = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|time| time.as_millis().min(i64::MAX as u128) as i64);
+            }
             let ours = alive(entry.pid).is_some_and(|command| {
                 command.contains(&entry.program) || command.contains(program)
             });
-            if ours && crate::sidecar::terminate_process_tree(entry.pid).is_ok() {
+            let terminated = !ours || crate::sidecar::terminate_process_tree(entry.pid).is_ok();
+            if !terminated {
+                continue;
+            }
+            if ours {
+                stopped.push(entry.key.clone());
+            }
+            if let Some(ledger) = ledger {
+                if settle_interrupted(ledger, &entry).is_err() {
+                    continue;
+                }
+            }
+            if ours {
                 if let Some(study) = entry.key.strip_prefix("study:") {
                     let _ = crate::sidecar::capture(&[
                         "study-finalize-cancel".into(),
@@ -101,7 +204,6 @@ fn sweep(dir: &Path, program: &str, alive: impl Fn(u32) -> Option<String>) -> Ve
                         entry.pid.to_string(),
                     ]);
                 }
-                stopped.push(entry.key);
             }
         }
         let _ = std::fs::remove_file(&path);

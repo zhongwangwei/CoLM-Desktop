@@ -29,7 +29,7 @@ MODULE MOD_MT_Sediment
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist, only: get_unitcatchment_file, DEF_USE_BIFURCATION, DEF_USE_LEVEE, &
-      DEF_hist_vars, DEF_REST_CompressLevel
+      DEF_hist_vars, DEF_REST_CompressLevel, DEF_USE_CoLMDEBUG
    USE MOD_Vars_Global, only: spval
    USE, INTRINSIC :: IEEE_ARITHMETIC, only: ieee_is_finite
    IMPLICIT NONE
@@ -807,9 +807,9 @@ CONTAINS
       d_raw_seen = .false.
       es_eff_seen = .false.
       d_eff_seen = .false.
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL system_clock(clk_total_start, clk_rate)
-#endif
+      ENDIF
 
       ! diag_max_global / diag_count_global are packed from these unconditionally
       ! below, so they must be defined whether or not CoLMDEBUG is on.
@@ -825,7 +825,7 @@ CONTAINS
       max_d_eff_local = 0._r8
       n_flow_cancel_local = 0
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       ! Maximum valid exposure is diagnostic only; yield uses each cell's own weight.
       precip_time_local = 0._r8
       IF (numucat > 0) precip_time_local = maxval(sed_precip_time)
@@ -851,7 +851,7 @@ CONTAINS
             ', max_precip_rate[mm/s]=', precip_diag_global(2), &
             ', max_slope=', precip_diag_global(3)
       ENDIF
-#endif
+      ENDIF
 
       sed_time_remaining = deltime
       morph_elapsed = 0._r8
@@ -1001,9 +1001,9 @@ CONTAINS
          IF (DEF_USE_LEVEE) CALL transfer_levee_sediment(dt_morph, deltime, &
             rivsto_donor, protected_start, protected_end, protected_initial, .true., &
             donor_visible, donor_protected, sed_visible_scale, sed_protected_scale)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_start)
-#endif
+         ENDIF
          IF (DEF_USE_BIFURCATION .or. DEF_USE_LEVEE) THEN
             CALL calc_sediment_advection(dt_morph, rivout, rivout_abs, rivsto_donor, rivsto, &
                donor_conc, donor_bed, sed_visible_scale, bed_visible_scale)
@@ -1016,48 +1016,48 @@ CONTAINS
          IF (DEF_USE_LEVEE) CALL transfer_levee_sediment(dt_morph, deltime, &
             rivsto, protected_start, protected_end, protected_initial, .false., &
             donor_visible, donor_protected, sed_visible_scale, sed_protected_scale)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_end)
          IF (clk_rate > 0) t_adv = t_adv + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+         ENDIF
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_start)
-#endif
+         ENDIF
          CALL calc_sediment_yield(fldfrc, topo_area, sed_precip_time)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_end)
          IF (clk_rate > 0) t_yield = t_yield + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+         ENDIF
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_start)
-#endif
+         ENDIF
          CALL calc_sediment_exchange(dt_morph, rivsto, bed_area)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_end)
          IF (clk_rate > 0) t_exchange = t_exchange + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+         ENDIF
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_start)
-#endif
+         ENDIF
          CALL apply_sediment_input(dt_morph, rivsto, bed_area)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_end)
          IF (clk_rate > 0) t_input = t_input + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+         ENDIF
 
-#ifdef CoLMDEBUG
+            IF (DEF_USE_CoLMDEBUG) THEN
             CALL system_clock(clk_phase_start)
-#endif
+            ENDIF
             CALL accumulate_sediment_output(dt_morph)
-#ifdef CoLMDEBUG
+            IF (DEF_USE_CoLMDEBUG) THEN
             CALL system_clock(clk_phase_end)
             IF (clk_rate > 0) t_diag = t_diag + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+            ENDIF
 
-#ifdef CoLMDEBUG
+            IF (DEF_USE_CoLMDEBUG) THEN
             ! Per-interval extrema, integrals and coverage flags feed only the
             ! CoLMDEBUG diagnostic report below; skip the full-array scans
             ! otherwise.
@@ -1103,16 +1103,16 @@ CONTAINS
                d_eff_seen = d_eff_seen .or. &
                   (sum(exch_d_eff + exch_d_adv_step, dim=1) > 0._r8)
             ENDIF
-#endif
+            ENDIF
 
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_start)
-#endif
+         ENDIF
          CALL calc_layer_redistribution(bed_area)
-#ifdef CoLMDEBUG
+         IF (DEF_USE_CoLMDEBUG) THEN
          CALL system_clock(clk_phase_end)
          IF (clk_rate > 0) t_layer = t_layer + real(clk_phase_end - clk_phase_start, r8) / real(clk_rate, r8)
-#endif
+         ENDIF
 
          sed_time_remaining = sed_time_remaining - dt_morph
          morph_elapsed = morph_elapsed + dt_morph
@@ -1151,7 +1151,7 @@ CONTAINS
       sed_precip_yield(:)  = 0._r8
       sed_precip_time      = 0._r8
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL system_clock(clk_total_end, clk_rate)
       IF (p_iam_worker == 0) THEN
          IF (clk_rate > 0) THEN
@@ -1165,7 +1165,7 @@ CONTAINS
             ', adv=', t_adv, ', input=', t_input, ', exch=', t_exchange, &
             ', layer=', t_layer, ', diag=', t_diag
       ENDIF
-#endif
+      ENDIF
 
       sum_layer_local = 0._r8
       sum_seddep_local = 0._r8
@@ -1226,7 +1226,7 @@ CONTAINS
          n_susp_local, n_bed_local, n_exchange_pos_local, n_exchange_neg_local, &
          n_es_raw_local, n_d_raw_local, n_es_eff_local, n_d_eff_local, &
          n_flow_cancel_local /)
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
 #ifdef USEMPI
       CALL mpi_allreduce(MPI_IN_PLACE, diag_max_global, size(diag_max_global), &
          MPI_REAL8, MPI_MAX, p_comm_worker, p_err)
@@ -1272,7 +1272,7 @@ CONTAINS
          WRITE(*,'(A,I9,A,I9,A,I9,A,I9)') 'Sediment exchange counts raw: Es=', diag_count_global(8), &
             ', D=', diag_count_global(9), ', eff_Es=', diag_count_global(10), ', eff_D=', diag_count_global(11)
       ENDIF
-#endif
+      ENDIF
 
       deallocate(rivsto, rivsto_donor, rivout, rivout_abs, bed_area, fldfrc, wet_seen, shallow_seen, source_seen, &
          susp_seen, bed_seen, exch_pos_seen, exch_neg_seen, es_raw_seen, &

@@ -471,8 +471,7 @@ fn fake_study_cli(root: &Path, status: &Value) -> PathBuf {
     script
 }
 
-// 只被 cfg(unix) 的假 CLI 测试使用；Windows 上不编译那些测试。
-#[cfg(unix)]
+// JSON evidence is also exercised by platform-independent tests.
 fn study_evidence(study_record: Value, dims: Value, best_values: Value, warnings: Value) -> Value {
     json!({
         "schema": 1,
@@ -1403,7 +1402,6 @@ fn missing_workspace_docs_do_not_fall_back_to_app_documents_even_with_retrieval_
 
 // ---- S01：checkpoint 聚合分与明细缺失一起透出 ----
 
-#[cfg(unix)]
 fn with_checkpoint_details(mut evidence: Value) -> Value {
     for (side, member) in [("baseline", "m000000"), ("best", "m000005")] {
         for period in ["calibration", "validation"] {
@@ -1420,7 +1418,6 @@ fn with_checkpoint_details(mut evidence: Value) -> Value {
     evidence
 }
 
-#[cfg(unix)]
 fn s01_evidence() -> Value {
     with_checkpoint_details(study_evidence(
         json!({

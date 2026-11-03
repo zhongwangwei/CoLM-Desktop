@@ -174,7 +174,7 @@ function panel(
   }).outputText;
   const methods = new Function(
     ...Object.keys(context),
-    `let remote = null; const setRemote = value => {remote = value}; ${code};return {run,cancel,remoteAction,openBatchRuns};`,
+    `let remote = null; const setRemote = value => {remote = value}; ${code};return {run,cancel,remoteAction,openBatchRuns,getRemote: () => remote};`,
   )(...Object.values(context)) as {
     run: () => Promise<unknown>;
     cancel: () => Promise<unknown>;
@@ -185,6 +185,7 @@ function panel(
       held?: boolean,
     ) => Promise<unknown>;
     openBatchRuns: () => string[];
+    getRemote: () => unknown;
   };
   return {
     ...methods,
@@ -496,6 +497,89 @@ test('explicit reconciliation adopts a confirmed job for an unknown submission w
   assert.equal(p.state.running['/good'].status, 'succeeded');
 });
 
+test('pending status without a captured operation is retained and can later settle', async () => {
+  let confirmed = false;
+  const pending = { host: 'server', job: 'pending-job', needs_reconciliation: true };
+  const p = panel({
+    remote: true,
+    ipc: async (command) => {
+      assert.equal(command, 'remote_status');
+      return confirmed
+        ? {
+            record: { host: 'server', job: 'pending-job' },
+            status: { state: 'finished', exit_code: 0 },
+          }
+        : { record: null, pending, needs_reconciliation: true, status: { state: 'unknown' } };
+    },
+  });
+  p.state.running['/good'] = {
+    case: '/good',
+    run_id: 'local-attempt',
+    location: 'remote',
+    status: 'unknown',
+    running: true,
+    logs: [],
+    stages: {},
+    error: 'Connection lost',
+    progress: { host: 'server' },
+  };
+  const result = await p.remoteAction('remote_status');
+  assert.ok(result, 'a pending status is counted as a completed check');
+  assert.equal(p.state.running['/good'].running, true);
+  assert.equal(p.state.running['/good'].error, undefined);
+  assert.equal(remoteRunPermissions(result).fetch, false);
+  assert.equal(remoteRunPermissions(result).cancel, false);
+  confirmed = true;
+  await p.remoteAction('remote_status');
+  assert.equal(p.state.running['/good'].status, 'succeeded');
+  assert.equal(p.state.running['/good'].running, false);
+  assert.equal(p.state.running['/good'].error, undefined);
+});
+
+test('a pending status with a captured operation still binds to this case', async () => {
+  let confirmed = false;
+  const pending = {
+    host: 'server',
+    job: 'pending-job',
+    source_case: '/good',
+    needs_reconciliation: true,
+  };
+  const p = panel({
+    remote: true,
+    single: true,
+    ipc: async (command) => {
+      assert.equal(command, 'remote_status');
+      return confirmed
+        ? {
+            record: { host: 'server', job: 'pending-job', source_case: '/good' },
+            status: { state: 'finished', exit_code: 0 },
+          }
+        : { record: null, pending, needs_reconciliation: true, status: { state: 'unknown' } };
+    },
+  });
+  // Normal remote submissions get an operation id before the job identity is known.
+  p.state.running['/good'] = {
+    case: '/good',
+    run_id: 'remote-attempt',
+    operation_id: 'submitted-operation',
+    location: 'remote',
+    status: 'unknown',
+    running: true,
+    logs: [],
+    stages: {},
+    error: 'Connection lost',
+    progress: { host: 'server' },
+  };
+  const result = await p.remoteAction('remote_status');
+  assert.ok(result, 'the pending status is accepted even with a captured operation id');
+  assert.equal(p.state.running['/good'].running, true);
+  assert.equal(p.state.running['/good'].error, undefined);
+  confirmed = true;
+  await p.remoteAction('remote_status');
+  assert.equal(p.state.running['/good'].status, 'succeeded');
+  assert.equal(p.state.running['/good'].running, false);
+});
+
 test('batch members wait in queue until their own worker starts', async () => {
   const p = panel({
     submit: async () => {
@@ -788,6 +872,27 @@ test('the standing of a batch is said in numbers, so a skipped check still answe
   assert.equal(runCountsText([]), '');
 });
 
+test('the actual run panel labels interruptions separately from failures', () => {
+  const source = ts.createSourceFile(
+    'RunPanel.tsx',
+    readFileSync(new URL('./RunPanel.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let expression = '';
+  function visit(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'statusLabels')
+      expression = node.initializer!.getText(source);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(expression);
+  const labels = new Function('t', `return (${expression});`);
+  assert.equal(labels((zh: string) => zh).interrupted, '已中断');
+  assert.equal(labels((_zh: string, en: string) => en).interrupted, 'Interrupted');
+});
+
 test('every station of a reopened batch claims its server job on the first status check', async () => {
   const p = panel({ remote: true, remoteBatch: true });
   // What reopening a project restores: no job record, no operation id, only the host.
@@ -1048,4 +1153,54 @@ test('an old remote action does not invoke IPC after switching to local', async 
   p.currentHost.current = '';
   await p.remoteAction('remote_fetch');
   assert.deepEqual(p.calls, []);
+});
+
+test('starting another run on the same server clears the previous job before preparation', async () => {
+  let release!: () => void;
+  const migration = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const p = panel({ remote: true, migrate: () => migration });
+  p.state.running['/good'] = {
+    case: '/good',
+    run_id: 'old-run',
+    operation_id: 'submitted-operation',
+    location: 'remote',
+    status: 'unknown',
+    running: true,
+    logs: [],
+    stages: {},
+    progress: { host: 'server' },
+  };
+  await p.remoteAction('remote_status');
+  assert.ok(p.getRemote());
+  const running = p.run();
+  assert.equal(p.getRemote(), null);
+  assert.deepEqual(p.state.running['/good'].progress, { host: 'server' });
+  release();
+  await assert.rejects(running, /connection lost/);
+});
+
+test('a batch status retry clears the temporary error when the same job succeeds', async () => {
+  const polls = new Map<string, number>();
+  const p = panel({
+    remote: true,
+    remoteBatch: true,
+    ipc: async (command, args) => {
+      if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+      if (command === 'remote_job_record') return null;
+      const job = `job-${String(args.case)}`;
+      if (command === 'remote_run') return { host: 'server', job };
+      assert.equal(command, 'remote_status');
+      const count = (polls.get(job) ?? 0) + 1;
+      polls.set(job, count);
+      if (count === 1) throw new Error('temporary network failure');
+      return { record: { host: 'server', job }, status: { state: 'finished', exit_code: 0 } };
+    },
+  });
+  await p.run();
+  for (const run of Object.values(p.state.running)) {
+    assert.equal(run.status, 'succeeded');
+    assert.equal(run.error, undefined);
+  }
 });

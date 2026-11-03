@@ -168,7 +168,7 @@ pub struct LandPhysicsParameters {
     pub root_fraction_scheme: RootFractionScheme,
     pub timestep_seconds: f64,
     pub precipitation_scheme: PrecipitationPhaseScheme,
-    /// `DEF_RSS_SCHEME`，1..=5。
+    /// `DEF_RSS_SCHEME`，0（关闭）或 1..=6。
     pub surface_resistance_scheme: i32,
     /// `DEF_RSTFAC`，1 或 2。
     pub stress_scheme: i32,
@@ -496,7 +496,7 @@ impl SurfaceDiagnosticsRow {
         }
     }
 
-    /// 城市分支：`UrbanTHERMAL` 的相似函数与 2 m 诊断；`rst`/`rss` 由城市分支写下，
+    /// 城市分支：`UrbanTHERMAL` 的相似函数与 2 m 诊断；`rst` 写回，局部 `rss` 不覆盖主重启，
     /// `emis` 上游恒为 0。
     pub fn from_urban(output: &colm_core::UrbanStepOutput, cosine_zenith: f64) -> Self {
         let thermal = &output.thermal;
@@ -506,7 +506,7 @@ impl SurfaceDiagnosticsRow {
             tref: thermal.tref,
             qref: output.qref,
             stomatal_resistance: Some(thermal.rst),
-            soil_surface_resistance: Some(thermal.rss),
+            soil_surface_resistance: None,
             trad: thermal.trad,
             emis: thermal.emis,
             z0m: thermal.z0m,
@@ -2135,6 +2135,8 @@ impl StandardLctRestartTemplate {
                     porosity: self.porosity[0],
                     saturated_soil_suction_mm: self.suction_mm[0],
                     residual_water: self.residual_water[0],
+                    sand_volume_fraction_of_solids: self.soil_thermal_inputs[0]
+                        .sand_volume_fraction_of_solids,
                     hydraulic_model: hydraulic[0],
                     layer_thickness_m: self.layer_thickness_m[0],
                     temperature_k: self.temperature_k[0],

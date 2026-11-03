@@ -5,7 +5,7 @@
  * 用 getter 而不是每次状态变化都往上抛一份快照：父组件在用户点按钮/导航的那一刻读到的必须是最新
  * 值；如果靠 React 状态同步，保存刚失败、文本框刚改一个字符这类瞬间会拿到上一帧的脏标记。
  */
-export type SourceSaveBlockedReason = 'unreadable' | 'conflict' | 'message';
+export type SourceSaveBlockedReason = 'unreadable' | 'conflict' | 'message' | 'busy';
 
 export type SourceEditState = {
   /** 有文本被改过但还没保存。 */
@@ -60,6 +60,11 @@ export function sourceSaveBlockedText(
   en: boolean,
 ): string {
   const t = (zh: string, english: string) => (en ? english : zh);
+  if (reason === 'busy')
+    return t(
+      '请先保存草稿修改，并等待当前操作完成，再保存源码。',
+      'Save the draft changes and wait for the current operation before saving the source.',
+    );
   if (reason === 'conflict')
     return t(
       '当前源码与磁盘内容冲突，请先在「代码」页处理冲突。',

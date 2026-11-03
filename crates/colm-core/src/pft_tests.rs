@@ -49,6 +49,7 @@ fn parameters(class: i32, fraction: f64) -> PftParameters {
         class,
         fraction,
         canopy_top_m: 10.0,
+        crown_aspect_ratio: 1.0,
         canopy_bottom_m: 1.0,
         optics: LeafOptics {
             chil: 0.01,

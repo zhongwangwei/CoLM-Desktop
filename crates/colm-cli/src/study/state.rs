@@ -40,6 +40,8 @@ pub struct ProcessIdentity {
     pub argv_sha256: String,
     pub started_unix: i64,
     pub heartbeat_unix: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_birth: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

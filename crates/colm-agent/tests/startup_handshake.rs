@@ -70,3 +70,57 @@ fn stdio_echoes_each_startup_id_and_keeps_legacy_clients_compatible() {
     assert_eq!(events[3]["session"], events[4]["session"]);
     assert!(!events[5].as_object().unwrap().contains_key("startup_id"));
 }
+
+#[test]
+fn missing_key_is_rejected_before_turn_acceptance() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-no-key-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_colm-agent"))
+        .args(["--data-dir", root.to_str().unwrap(), "--cli"])
+        .arg(env!("CARGO_BIN_EXE_colm-agent"))
+        .arg("--key-file")
+        .arg(root.join("keys.json"))
+        .env_remove("COLM_AGENT_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for command in [
+        json!({"type":"configure", "provider":{"base_url":"https://example.invalid", "model":"offline"}, "project_root":root}),
+        json!({"type":"user_message", "text":"never sent", "request_id":"missing-key"}),
+    ] {
+        writeln!(input, "{command}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|e| e["type"] == "error"
+            && e["message"]
+                .as_str()
+                .is_some_and(|v| v.contains("no API key"))),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|e| e["type"] == "turn_started" || e["type"] == "tool_call"));
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -987,7 +987,10 @@ test('U-07: a late transcript for a conversation the user already left is ignore
 test('U-07: the panel renders the pending-usage state and keeps markdown for assistant replies only', () => {
   assert.match(panelSource, /用量待加载/);
   assert.match(panelSource, /item\.kind === 'assistant' \? \(\s*<Markdown/);
-  assert.match(panelSource, /<Markdown text=\{item\.text \|\| ''\} t=\{t\} \/>/);
+  assert.match(
+    panelSource,
+    /<Markdown[\s\S]*?onOpenUrl=\{\(url\) => void openEvidenceUrl\(url\)\}/,
+  );
 });
 
 test('the panel really sends through the extracted turn functions', () => {
@@ -2116,6 +2119,9 @@ function deletionHarness(answers = [true, true], remove: () => Promise<void> = a
     notice: 'notice',
     usage: 'usage',
     usagePending: true,
+    contextUsage: { tokens: 90 } as { tokens: number } | null,
+    limitReached: true,
+    stepLimit: 40,
     sessionUsage: { turns: 1, tokens: 2 },
     followed: 0,
   };
@@ -2179,6 +2185,15 @@ function deletionHarness(answers = [true, true], remove: () => Promise<void> = a
     setUsage: (value: string) => {
       state.usage = value;
     },
+    setContextUsage: (value: typeof state.contextUsage) => {
+      state.contextUsage = value;
+    },
+    setLimitReached: (value: boolean) => {
+      state.limitReached = value;
+    },
+    setStepLimit: (value: number) => {
+      state.stepLimit = value;
+    },
     setSessionUsage: (value: typeof state.sessionUsage) => {
       state.sessionUsage = value;
     },
@@ -2229,6 +2244,9 @@ test('current session deletion waits for both confirmations and successful IPC b
   assert.deepEqual(h.state.attachments, []);
   assert.deepEqual(h.state.messages, []);
   assert.equal(h.state.review, false);
+  assert.equal(h.state.contextUsage, null);
+  assert.equal(h.state.limitReached, false);
+  assert.equal(h.state.stepLimit, 0);
 });
 
 test('delete IPC failure preserves session, draft, messages and review', async () => {
@@ -2386,4 +2404,56 @@ test('opening history during deletion is blocked and becomes available after can
   await opening.open({ id: 'B' });
   assert.equal(loads, 1);
   assert.equal(opening.refs.session.current, 'B');
+});
+
+test('settings cannot be saved before the original configuration has loaded', async () => {
+  const calls: string[] = [];
+  const save = compileFunction<(next: Settings) => Promise<void>>('save', {
+    ready: false,
+    t: (_zh: string, en: string) => en,
+    invoke: async (command: string) => {
+      calls.push(command);
+    },
+  });
+  await assert.rejects(save(defaultSettings), /Load the assistant settings/);
+  assert.deepEqual(calls, []);
+  assert.match(panelSource, /state.assistantSettingsOpen && ready/);
+});
+
+test('failed settings offer confirmed backup/reset and reopen only after successful recovery', async () => {
+  for (const consent of [false, true]) {
+    const calls: string[] = [],
+      notices: string[] = [];
+    let attempt = 0;
+    const updates: unknown[] = [];
+    const recover = compileFunction<() => Promise<void>>('recoverSettings', {
+      running: false,
+      resettingSettings: false,
+      initPhase: 'failed',
+      t: (_zh: string, en: string) => en,
+      askConfirm: async () => consent,
+      withTimeout: (work: Promise<unknown>) => work,
+      SETTINGS_TIMEOUT_MS: 1000,
+      invoke: async (command: string) => {
+        calls.push(command);
+        return '/backup.json';
+      },
+      setResettingSettings: () => {},
+      setAttachNotice: (text: string) => notices.push(text),
+      setSettingsDirty: () => {},
+      update: (value: unknown) => updates.push(value),
+      setInitAttempt: (fn: (n: number) => number) => {
+        attempt = fn(attempt);
+      },
+      setInitError: (error: string) => {
+        throw Error(error);
+      },
+      errorText: String,
+    });
+    await recover();
+    assert.deepEqual(calls, consent ? ['assistant_reset_settings'] : []);
+    assert.equal(attempt, consent ? 1 : 0);
+    assert.deepEqual(updates, consent ? [{ assistantSettingsOpen: true }] : []);
+    if (consent) assert.match(notices[0], /backup.json/);
+  }
 });

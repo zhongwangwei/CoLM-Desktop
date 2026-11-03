@@ -232,3 +232,209 @@ fn choices_resolve_to_a_concrete_model_and_a_supported_effort() {
     assert_eq!(summary[0]["default"], true);
     assert_eq!(summary[1]["default_effort"], "medium");
 }
+
+#[test]
+fn cancelled_handshake_does_not_start_a_process() {
+    let command = Command::new("nonexistent-codex-test-process");
+    let error = Server::connect(command, &AtomicBool::new(true))
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "cancelled");
+}
+
+#[cfg(unix)]
+#[test]
+fn handshake_wait_can_be_cancelled() {
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        signal.store(true, Ordering::SeqCst);
+    });
+    let mut command = Command::new("sh");
+    command.args(["-c", "read line; exec sleep 10"]);
+    let began = Instant::now();
+    let error = Server::connect(command, &cancel).err().unwrap();
+    worker.join().unwrap();
+    assert_eq!(error.to_string(), "cancelled");
+    assert!(began.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_waits_for_late_turn_id_and_never_reports_success() {
+    struct Sink;
+    impl TurnSink for Sink {
+        fn emit(&mut self, _: Outbound) {}
+        fn approve(&mut self, _: Outbound) -> Decision {
+            Decision::Deny(None)
+        }
+    }
+    let mut child = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "turn/start");
+        signal.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(250));
+        tx.send(json!({"id":request["id"],"result":{"turn":{"id":"late-turn"}}}).to_string())
+            .unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let interrupt: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(interrupt["params"]["turnId"], "late-turn");
+        tx.send(
+            json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}}).to_string(),
+        )
+        .unwrap();
+    });
+    let launch = Launch {
+        cwd: std::env::temp_dir(),
+        mcp_exe: "unused".into(),
+        bridge_addr: String::new(),
+        bridge_token: String::new(),
+        instructions: String::new(),
+        web: false,
+    };
+    let mut session = CodexSession::new(launch, Some("thread".into()));
+    session.server = Some(Server {
+        child,
+        input: input_channel(stdin),
+        lines,
+        next_id: 0,
+    });
+    let error = session.turn("test", &mut Sink, &cancel).unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    worker.join().unwrap();
+}
+
+#[cfg(unix)]
+struct CancelTestSink;
+#[cfg(unix)]
+impl TurnSink for CancelTestSink {
+    fn emit(&mut self, _: Outbound) {}
+    fn approve(&mut self, _: Outbound) -> Decision {
+        Decision::Deny(None)
+    }
+}
+
+#[cfg(unix)]
+fn process_session(
+    mut command: Command,
+) -> (CodexSession, Sender<String>, std::process::ChildStdout) {
+    use std::os::unix::process::CommandExt;
+    let mut child = command
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel();
+    let launch = Launch {
+        cwd: std::env::temp_dir(),
+        mcp_exe: "unused".into(),
+        bridge_addr: String::new(),
+        bridge_token: String::new(),
+        instructions: String::new(),
+        web: false,
+    };
+    let mut session = CodexSession::new(launch, Some("thread".into()));
+    session.server = Some(Server {
+        child,
+        input: input_channel(stdin),
+        lines,
+        next_id: 0,
+    });
+    (session, tx, stdout)
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_is_bounded_when_server_never_reads_input_or_returns_turn_id() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 7"]);
+    let (mut session, _responses, _stdout) = process_session(command);
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        signal.store(true, Ordering::SeqCst);
+    });
+    let began = Instant::now();
+    let error = session
+        .turn(&"x".repeat(500_000), &mut CancelTestSink, &cancel)
+        .unwrap_err();
+    worker.join().unwrap();
+    assert_eq!(error.to_string(), "cancelled");
+    assert!(session.server.is_none());
+    assert!(began.elapsed() < Duration::from_secs(4));
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_is_bounded_when_interrupt_never_finishes() {
+    let (mut session, responses, stdout) = process_session(Command::new("cat"));
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    let (release, wait) = mpsc::channel::<()>();
+    let worker = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let start: Value = serde_json::from_str(&line).unwrap();
+        responses
+            .send(json!({"id":start["id"],"result":{"turn":{"id":"unresponsive"}}}).to_string())
+            .unwrap();
+        signal.store(true, Ordering::SeqCst);
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["method"],
+            "turn/interrupt"
+        );
+        let _ = wait.recv_timeout(Duration::from_secs(6));
+    });
+    let began = Instant::now();
+    let error = session
+        .turn("test", &mut CancelTestSink, &cancel)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    assert!(session.server.is_none());
+    assert!(began.elapsed() < Duration::from_secs(4));
+    let _ = release.send(());
+    worker.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_output_during_cancel_reports_cancellation() {
+    let (mut session, responses, stdout) = process_session(Command::new("cat"));
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        signal.store(true, Ordering::SeqCst);
+        drop(responses);
+    });
+    let error = session
+        .turn("test", &mut CancelTestSink, &cancel)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    worker.join().unwrap();
+}

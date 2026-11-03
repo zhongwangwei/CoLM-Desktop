@@ -64,7 +64,7 @@ def main():
             env = dict(os.environ, COLM_AGENT_API_KEY="local-fixture-key")
             base = [agent, "chat", "--data-dir", str(data), "--cli", cli,
                     "--project-root", temp, "--base-url", f"http://127.0.0.1:{server.server_port}/v1",
-                    "--provider-id", "custom", "--model", "fixture"]
+                    "--provider-id", "custom", "--model", "fixture", "--context-window", "200000"]
 
             def run(args, success):
                 result = subprocess.run(args, env=env, cwd=temp, capture_output=True, text=True, timeout=20)
@@ -101,7 +101,7 @@ def main():
             assert "remote_workspace_submit" in names and not any(n.startswith("ui_") for n in names)
             checks.append("headless remote resources and credential filtering")
 
-            for mode, generations in [("poll", 4), ("budget", 24)]:
+            for mode, generations in [("poll", 4), ("budget", 40)]:
                 Fixture.mode = mode
                 before = len(Fixture.requests)
                 result = run(base + ["--message", f"{mode} fixture turn"], True)

@@ -1,4 +1,4 @@
-import { caseDirectory, versionMode, type Site } from './case-model';
+import { caseDirectory, isMethaneSite, versionMode, type Site } from './case-model';
 import { caseSchemeFields, simulationMode } from './model-settings';
 import { caseDatePatch, newCaseProblem, spinupProblem, validDate } from './simulation-model';
 
@@ -122,6 +122,7 @@ export function planMultiSites({
       mode === 'first-year',
     );
     if (spinupIssue) fail(spinupIssue, spinupIssue, draft.name);
+    const methane = isMethaneSite(scanned);
     const classification =
       scanned.urban || scanned.crop ? 'IGBP' : form.landcover || (step === 3 ? 'IGBP' : '');
     const sharedMode = simulationMode(
@@ -131,7 +132,7 @@ export function planMultiSites({
     );
     const structure = scanned.urban
       ? 'IGBP'
-      : scanned.crop
+      : scanned.crop || methane
         ? sharedMode === 'PC'
           ? 'PC'
           : 'PFT'
@@ -147,6 +148,17 @@ export function planMultiSites({
       ...caseSchemeFields(structure),
       DEF_URBAN_RUN: scanned.urban ? '.true.' : '.false.',
     };
+    if (methane)
+      Object.assign(fields, {
+        DEF_USE_METHANE: '.true.',
+        DEF_METHANE_PARAM_FILE:
+          physics.DEF_METHANE_PARAM_FILE || "'standard_methane_parameter.nml'",
+        DEF_USE_BGC: '.true.',
+        DEF_USE_Campbell_SOIL_MODEL: '.false.',
+        DEF_USE_VariablySaturatedFlow: '.true.',
+        DEF_USE_Dynamic_Wetland: '.false.',
+        DEF_USE_LULCC: '.false.',
+      });
     if (scanned.crop) {
       if (!cropDefaults.DEF_TUNING_CROP_PLANTING_DAY)
         fail('作物默认配置尚未加载。', 'Crop defaults have not loaded.', draft.name);

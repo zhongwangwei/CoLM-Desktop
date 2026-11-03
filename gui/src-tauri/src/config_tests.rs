@@ -3971,6 +3971,10 @@ fn isotope_fractionation_keeps_the_isogsm_forcing_group() {
     );
     assert!(colm_namelist::parse(&stripped).is_ok(), "{stripped}");
     assert_eq!(
+        super::isotope_parameter_text(&stripped, false).unwrap(),
+        stripped
+    );
+    assert_eq!(
         text.matches("&nl_colm_mt_forcing").count()
             - stripped.matches("&nl_colm_mt_forcing").count(),
         2
@@ -5021,9 +5025,348 @@ fn legacy_material_fields_migrate_to_material_families() {
         doc.get("DEF_USE_SEDIMENT"),
         Some(&colm_namelist::Value::Bool(true))
     );
-    // 分馏等 DEF_ISO_* 现在住在同位素参数文件，不迁进 case.nml。
-    assert!(doc.get("DEF_ISO_USE_FRACTIONATION").is_none());
+    // Migrated in memory; saving routes this value into the isotope parameter file.
+    assert_eq!(
+        doc.get("DEF_ISO_USE_FRACTIONATION"),
+        Some(&colm_namelist::Value::Bool(true))
+    );
+    assert!(doc.get("@@DEF_MATERIAL_@@USE_FRACTIONATION").is_none());
     assert!(doc.get("@@DEF_USE_MATERIAL@@").is_none());
     assert!(doc.get("@@DEF_MATERIAL_@@NAMES").is_none());
     assert!(doc.get("@@DEF_MATERIAL_@@PARAM_FILES").is_none());
+}
+
+#[test]
+fn case_material_removal_accepts_family_fields_but_rejects_derived_fields() {
+    validate_case_removals(
+        &[],
+        &["DEF_SOLUTE_NAMES".into(), "DEF_SOLUTE_PARAM_FILES".into()],
+    )
+    .unwrap();
+    assert!(validate_case_removals(&[], &["DEF_hist_vars%fsena".into()]).is_err());
+    assert!(validate_case_removals(
+        &[FieldChange {
+            path: "DEF_SOLUTE_NAMES".into(),
+            value: "'Cl'".into()
+        }],
+        &["DEF_SOLUTE_NAMES".into()]
+    )
+    .is_err());
+}
+
+#[test]
+fn first_material_enable_stages_missing_standard_file_without_touching_existing_files() {
+    let dir = batch("first-material", &[SAMPLE]).remove(0);
+    let preview = std::path::Path::new(&dir).join("preview");
+    std::fs::create_dir(&preview).unwrap();
+    let fields = material_fields(&[("DEF_METHANE_PARAM_FILE", "standard_methane_parameter.nml")]);
+    assert!(stage_case_material_parameters(&dir, preview.to_str().unwrap(), &fields).is_err());
+    std::fs::write(
+        preview.join("standard_methane_parameter.nml"),
+        include_str!("../../../vendor/CoLM202X/run/standard_methane_parameter.nml"),
+    )
+    .unwrap();
+    let staged = stage_case_material_parameters(&dir, preview.to_str().unwrap(), &fields).unwrap();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(
+        staged[0].1,
+        include_str!("../../../vendor/CoLM202X/run/standard_methane_parameter.nml")
+    );
+    assert!(
+        !staged[0].0.exists(),
+        "staging must not write before the atomic commit"
+    );
+    std::fs::write(&staged[0].0, "user custom parameters").unwrap();
+    assert!(
+        stage_case_material_parameters(&dir, preview.to_str().unwrap(), &fields)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&staged[0].0).unwrap(),
+        "user custom parameters"
+    );
+}
+
+#[test]
+fn isotope_first_enable_context_save_uses_effective_fractionation() {
+    for (mode, explicit, template_default, expected_forcing) in [
+        ("default", None, false, false),
+        ("disabled", Some(false), true, false),
+        ("enabled", Some(true), false, true),
+    ] {
+        let source = batch(&format!("isotope-context-{mode}"), &[SAMPLE]).remove(0);
+        let context = batch(&format!("isotope-preview-{mode}"), &[SAMPLE]).remove(0);
+        let template = material_parameter_template("standard_isotope_parameter.nml")
+            .unwrap()
+            .replace(
+                "DEF_ISO_USE_FRACTIONATION      = .false.",
+                &format!("DEF_ISO_USE_FRACTIONATION      = .{template_default}."),
+            );
+        std::fs::write(
+            std::path::Path::new(&context).join("standard_isotope_parameter.nml"),
+            template,
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(&source).join("forcing.nml"),
+            "&nl_colm_forcing\n DEF_forcing%dataset = 'IsoGSM'\n/\n",
+        )
+        .unwrap();
+        let mut fields = isotope_fields(explicit.unwrap_or(false), "1000.0");
+        if explicit.is_none() {
+            fields.retain(|field| field.path != "DEF_ISO_USE_FRACTIONATION");
+        }
+        fields.push(FieldChange {
+            path: "DEF_forcing_namelist".into(),
+            value: "'forcing.nml'".into(),
+        });
+        super::set_fields_with_context(vec![source.clone()], fields, None, Some(&[context]))
+            .unwrap();
+        let text = std::fs::read_to_string(
+            std::path::Path::new(&source).join("standard_isotope_parameter.nml"),
+        )
+        .unwrap();
+        assert_eq!(
+            text.contains("&nl_colm_mt_forcing"),
+            expected_forcing,
+            "{mode}"
+        );
+        let parameters = colm_namelist::parse(&text).unwrap();
+        assert_eq!(
+            parameters.get("DEF_ISO_USE_FRACTIONATION"),
+            Some(&colm_namelist::Value::Bool(expected_forcing)),
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn isotope_context_save_keeps_existing_user_forcing_and_rejects_batches_atomically() {
+    let sources = batch("isotope-context-batch", &[SAMPLE, SAMPLE]);
+    let invalid = SAMPLE.replace(
+        "DEF_USE_OZONEDATA = .FALSE.",
+        "DEF_USE_OZONEDATA = .FALSE.\n DEF_USE_LULCC = .true.",
+    );
+    let contexts = batch("isotope-preview-batch", &[SAMPLE, &invalid]);
+    let template = material_parameter_template("standard_isotope_parameter.nml").unwrap();
+    for context in &contexts {
+        std::fs::write(
+            std::path::Path::new(context).join("standard_isotope_parameter.nml"),
+            template,
+        )
+        .unwrap();
+    }
+    let fields = isotope_fields(false, "1000.0");
+    let error =
+        super::set_fields_with_context(sources.clone(), fields.clone(), None, Some(&contexts))
+            .unwrap_err();
+    assert!(error.contains("LULCC"), "{error}");
+    for source in &sources {
+        let source = std::path::Path::new(source);
+        assert_eq!(
+            std::fs::read_to_string(source.join("case.nml")).unwrap(),
+            SAMPLE
+        );
+        assert!(!source.join("standard_isotope_parameter.nml").exists());
+    }
+    let parameter = std::path::Path::new(&sources[0]).join("standard_isotope_parameter.nml");
+    let custom = format!("! user's existing forcing settings\n{template}");
+    std::fs::write(&parameter, &custom).unwrap();
+    super::set_fields_with_context(vec![sources[0].clone()], fields, None, Some(&contexts[..1]))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(parameter).unwrap(), custom);
+}
+
+#[test]
+fn isotope_edits_reach_the_parameter_file_and_are_read_back_without_case_duplicates() {
+    let dir = batch("isotope-file-route", &[SAMPLE]).remove(0);
+    apply_fields(&dir, &isotope_fields(false, "1000.0")).unwrap();
+    let parameter = std::path::Path::new(&dir).join("standard_isotope_parameter.nml");
+    let case = std::path::Path::new(&dir).join("case.nml");
+    assert!(
+        colm_namelist::parse(&std::fs::read_to_string(&case).unwrap())
+            .unwrap()
+            .get("DEF_ISO_USE_FRACTIONATION")
+            .is_none()
+    );
+    set_batches(
+        vec![dir.clone()],
+        material_fields(&[("DEF_ISO_ICE_SUPERSAT_SLOPE", "0.01")]),
+    )
+    .unwrap();
+    let params = colm_namelist::parse(&std::fs::read_to_string(&parameter).unwrap()).unwrap();
+    assert_eq!(
+        params
+            .get("DEF_ISO_ICE_SUPERSAT_SLOPE")
+            .unwrap()
+            .to_string(),
+        "0.01"
+    );
+    let mut saved = colm_namelist::parse(&std::fs::read_to_string(&case).unwrap()).unwrap();
+    assert!(saved.get("DEF_ISO_ICE_SUPERSAT_SLOPE").is_none());
+    load_isotope_fields(&mut saved, std::path::Path::new(&dir)).unwrap();
+    assert_eq!(
+        saved.get("DEF_ISO_ICE_SUPERSAT_SLOPE").unwrap().to_string(),
+        "0.01"
+    );
+    assert_eq!(
+        saved.get("DEF_ISO_USE_FRACTIONATION"),
+        Some(&colm_namelist::Value::Bool(false))
+    );
+    let before_disable = std::fs::read_to_string(&parameter).unwrap();
+    set_batches(
+        vec![dir.clone()],
+        material_fields(&[
+            ("DEF_USE_ISOTOPE", ".false."),
+            ("DEF_ISOTOPE_PARAM_FILE", "'null'"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&parameter).unwrap(), before_disable);
+}
+
+#[test]
+fn saving_case_fields_persists_legacy_material_migration() {
+    let text = SAMPLE.replace("DEF_USE_OZONEDATA = .FALSE.", "DEF_USE_OZONEDATA = .FALSE.\n @@DEF_USE_MATERIAL@@ = .false.\n @@DEF_MATERIAL_@@NAMES = ''");
+    let dir = batch("save-legacy-material", &[&text]).remove(0);
+    set_batches(
+        vec![dir.clone()],
+        material_fields(&[("DEF_HIST_FREQ", "'DAILY'")]),
+    )
+    .unwrap();
+    let saved = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+    assert!(!saved.contains("@@DEF_"), "{saved}");
+}
+
+#[test]
+fn isotope_edits_reject_external_files_without_staging_writes() {
+    let dir = batch("isotope-boundary", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let outside = case
+        .parent()
+        .unwrap()
+        .join(format!("outside-isotope-{}.nml", std::process::id()));
+    let text = "&nl_colm_isotope_parameter\n DEF_ISO_ICE_SUPERSAT_SLOPE = 0.01\n/\n";
+    std::fs::write(&outside, text).unwrap();
+    let files = vec![
+        outside.to_string_lossy().into_owned(),
+        format!("../{}", outside.file_name().unwrap().to_string_lossy()),
+    ];
+    #[cfg(unix)]
+    let files = {
+        let mut files = files;
+        std::os::unix::fs::symlink(&outside, case.join("linked-isotope.nml")).unwrap();
+        files.push("linked-isotope.nml".into());
+        std::os::unix::fs::symlink(outside.parent().unwrap(), case.join("linked-dir")).unwrap();
+        files.push(format!(
+            "linked-dir/{}",
+            outside.file_name().unwrap().to_string_lossy()
+        ));
+        files
+    };
+    for file in files {
+        let mut doc = colm_namelist::parse(&format!("&nl_colm\n DEF_ISOTOPE_PARAM_FILE = '{file}'\n/\n&nl_colm_isotope_parameter\n DEF_ISO_ICE_SUPERSAT_SLOPE = 0.02\n/\n")).unwrap();
+        let mut pending = Vec::new();
+        let error = stage_isotope_fields(&mut doc, case, &mut pending).unwrap_err();
+        assert!(error.contains("read-only"), "{error}");
+        assert!(pending.is_empty());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), text);
+    }
+    std::fs::remove_file(outside).unwrap();
+}
+
+#[test]
+fn shared_isotope_files_allow_unrelated_case_saves_but_reject_parameter_changes() {
+    let dirs = batch(
+        "shared-isotope-read-only",
+        &[SAMPLE, SAMPLE, SAMPLE, SAMPLE],
+    );
+    let first = std::path::Path::new(&dirs[0]);
+    let outside = first.parent().unwrap().join("shared-isotope.nml");
+    let mut parameters = colm_namelist::parse(
+        &isotope_parameter_text(
+            material_parameter_template("standard_isotope_parameter.nml").unwrap(),
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    put(
+        &mut parameters,
+        "DEF_ISO_ICE_SUPERSAT_SLOPE",
+        colm_namelist::Value::Real {
+            text: "0.01".into(),
+        },
+    )
+    .unwrap();
+    let original = parameters.to_string();
+    std::fs::write(&outside, &original).unwrap();
+    let files = vec![
+        outside.to_string_lossy().into_owned(),
+        "../shared-isotope.nml".into(),
+    ];
+    #[cfg(unix)]
+    let files = {
+        let mut files = files;
+        std::os::unix::fs::symlink(
+            &outside,
+            std::path::Path::new(&dirs[2]).join("linked-isotope.nml"),
+        )
+        .unwrap();
+        files.push("linked-isotope.nml".into());
+        std::os::unix::fs::symlink(
+            first.parent().unwrap(),
+            std::path::Path::new(&dirs[3]).join("linked-dir"),
+        )
+        .unwrap();
+        files.push("linked-dir/shared-isotope.nml".into());
+        files
+    };
+    for (dir, file) in dirs.iter().zip(files) {
+        apply_fields(dir, &isotope_fields(false, "1000.0")).unwrap();
+        let case_file = std::path::Path::new(dir).join("case.nml");
+        let mut doc = colm_namelist::parse(&std::fs::read_to_string(&case_file).unwrap()).unwrap();
+        put(
+            &mut doc,
+            "DEF_ISOTOPE_PARAM_FILE",
+            colm_namelist::Value::Str(file.clone()),
+        )
+        .unwrap();
+        std::fs::write(&case_file, doc.to_string()).unwrap();
+
+        apply_fields(dir, &material_fields(&[("DEF_HIST_FREQ", "'DAILY'")])).unwrap();
+        set_batches(
+            vec![dir.clone()],
+            material_fields(&[("DEF_HIST_FREQ", "'MONTHLY'")]),
+        )
+        .unwrap();
+        let saved = colm_namelist::parse(&std::fs::read_to_string(&case_file).unwrap()).unwrap();
+        assert_eq!(
+            saved.get("DEF_HIST_FREQ"),
+            Some(&colm_namelist::Value::Str("MONTHLY".into()))
+        );
+        assert_eq!(
+            saved.get("DEF_ISOTOPE_PARAM_FILE"),
+            Some(&colm_namelist::Value::Str(file))
+        );
+        assert!(saved.get("DEF_ISO_ICE_SUPERSAT_SLOPE").is_none());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
+
+        let before = std::fs::read_to_string(&case_file).unwrap();
+        let changes = material_fields(&[
+            ("DEF_HIST_FREQ", "'HOURLY'"),
+            ("DEF_ISO_ICE_SUPERSAT_SLOPE", "0.02"),
+        ]);
+        assert!(apply_fields(dir, &changes)
+            .unwrap_err()
+            .contains("read-only"));
+        assert_eq!(std::fs::read_to_string(&case_file).unwrap(), before);
+        assert!(set_batches(vec![dir.clone()], changes)
+            .unwrap_err()
+            .contains("read-only"));
+        assert_eq!(std::fs::read_to_string(&case_file).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
+    }
+    std::fs::remove_dir_all(first.parent().unwrap()).unwrap();
 }

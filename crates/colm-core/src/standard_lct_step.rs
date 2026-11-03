@@ -1768,7 +1768,7 @@ fn soil_surface_resistance_input(
     // `MOD_Thermal.F90:613-621`：`DEF_RSS_SCHEME = 0` 的意思是**不启用**土壤表面
     // 阻力（`DEF_Namelist` 在关掉 Campbell 土壤模型时把它置 0），上游这时把
     // `rss` 直接置 0、连 `SoilSurfaceResistance` 都不调。原先这里无条件调内核，
-    // 而内核只认 1..=5，于是 van Genuchten 算例（默认走 VSF、scheme 恒为 0）
+    // 而内核只认 1..=6，于是 van Genuchten 算例（默认走 VSF、scheme 恒为 0）
     // 在能量步就报 "soil surface resistance inputs are invalid"。
     if input.soil_surface_resistance.scheme == 0 {
         return Ok(0.0);
@@ -1801,6 +1801,8 @@ fn soil_surface_resistance_input(
         porosity: ground.soil_porosity[0],
         saturated_soil_suction_mm: ground.soil_suction_mm[0],
         residual_water: ground.soil_residual_water[0],
+        sand_volume_fraction_of_solids: ground.soil_thermal_inputs[0]
+            .sand_volume_fraction_of_solids,
         hydraulic_model: ground.soil_hydraulic_model[0],
         layer_thickness_m: ground.layer_thickness_m[top_soil],
         temperature_k: ground.temperature_k[top_soil],

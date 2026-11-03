@@ -139,6 +139,7 @@ test('freezing first resolves unsaved source edits before taking the page lock',
       },
     },
     sourceState: { current: { dirty: true } },
+    dirtyNow: { current: false },
   };
   const ready = evaluate<() => Promise<boolean>>(
     './VersionsPage.tsx',
@@ -219,4 +220,122 @@ test('discarding invalid parameter text does not delete a draft with valid edits
       assert.fail('valid edits must keep their draft after invalid input is discarded'),
   });
   drop();
+});
+
+test('freezing saves parameter edits before offering to save a dirty source buffer', async () => {
+  const calls: string[] = [];
+  const context = {
+    sourceState: { current: { dirty: true } },
+    dirtyNow: { current: true },
+    draftNow: { current: { id: 'draft-1' } },
+    execute: async (run: () => Promise<unknown>) => run(),
+    save: async () => {
+      calls.push('save-draft');
+      return { id: 'draft-1' };
+    },
+    sourceChoice: {
+      ask: async () => {
+        calls.push('source-choice');
+        return true;
+      },
+    },
+  };
+  const ready = () =>
+    evaluate<() => Promise<boolean>>('./VersionsPage.tsx', 'sourceReady', 'const', context)();
+  assert.equal(await ready(), true);
+  assert.deepEqual(calls, ['save-draft', 'source-choice']);
+  calls.length = 0;
+  context.save = async () => {
+    throw Error('write failed');
+  };
+  assert.equal(await ready(), false);
+  assert.deepEqual(calls, [], 'do not continue after a failed draft save');
+});
+
+test('a delayed code branch preserves parameter edits made while the request was pending', async () => {
+  const original = { id: 'd', generation: 1, code: { workspace: null }, overlay: { value: 1 } };
+  let release!: (value: unknown) => void;
+  const response = new Promise((resolve) => {
+    release = resolve;
+  });
+  const draftNow = { current: original };
+  const dirtyNow = { current: false };
+  const written: unknown[] = [];
+  const dirty: boolean[] = [];
+  const branch = evaluate<() => Promise<void>>('./VersionsPage.tsx', 'branchCode', 'function', {
+    draft: original,
+    draftNow,
+    dirtyNow,
+    epoch: { current: { active: true } },
+    save: async () => original,
+    invokeJson: (command: string) =>
+      command === 'model_branch_code' ? response : Promise.resolve([]),
+    setDraft: (value: unknown) => written.push(value),
+    setDirty: (value: boolean) => dirty.push(value),
+    setDrafts: () => {},
+  });
+  const pending = branch();
+  draftNow.current = { ...original, overlay: { value: 7 } };
+  dirtyNow.current = true;
+  release({ ...original, generation: 2, code: { workspace: 'copy' } });
+  await pending;
+  assert.deepEqual(written, [
+    { ...original, generation: 2, code: { workspace: 'copy' }, overlay: { value: 7 } },
+  ]);
+  assert.deepEqual(dirty, [true]);
+});
+
+test('a workspace referenced by the open draft cannot be deleted', async () => {
+  const errors: string[] = [];
+  const remove = evaluate<() => Promise<void>>('./CodeWorkspace.tsx', 'deleteWorkspace', 'const', {
+    name: 'copy',
+    draftName: 'Modified model',
+    setError: (value: string) => errors.push(value),
+    t: (_zh: string, en: string) => en,
+    askConfirm: () => {
+      throw Error('must not ask to delete a referenced workspace');
+    },
+  });
+  await remove();
+  assert.match(errors[0], /still referenced by a draft/);
+});
+
+test('patch import and both revert actions notify the open source buffer of disk changes', async () => {
+  for (const [name, declaration, argument] of [
+    ['patch', 'function', undefined],
+    ['revertFile', 'const', 'a.F90'],
+    ['revertToCommit', 'const', { id: 'abc', subject: 'old source' }],
+  ] as const) {
+    let token = 0,
+      refreshed = 0;
+    const pending: Promise<unknown>[] = [];
+    const action = evaluate<(value?: unknown) => Promise<unknown>>(
+      './CodeWorkspace.tsx',
+      name,
+      declaration,
+      {
+        name: 'copy',
+        message: 'change',
+        invoke: async () => '/tmp/change.patch',
+        invokeJson: async () => ({}),
+        askConfirm: async () => true,
+        t: (_zh: string, en: string) => en,
+        commitId: () => 'abc',
+        shortHash: () => 'abc',
+        setExternalChangeToken: (update: (old: number) => number) => {
+          token = update(token);
+        },
+        onChanged: async () => {
+          refreshed++;
+        },
+        run: (work: () => Promise<unknown>) => {
+          pending.push(work());
+        },
+      },
+    );
+    await action(argument);
+    await Promise.all(pending);
+    assert.equal(token, 1, name);
+    assert.equal(refreshed, 1, name);
+  }
 });

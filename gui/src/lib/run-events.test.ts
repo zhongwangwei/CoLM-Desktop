@@ -186,3 +186,37 @@ test('a successful local completion fills the progress bar to the planned step t
   })!;
   assert.equal(remoteDone.progress?.step, 3);
 });
+
+test('cancelled and successful runs clear stale errors while real failures retain their reason', () => {
+  const previous: RunState = {
+    case: '/case',
+    run_id: 'run',
+    status: 'running',
+    running: true,
+    logs: [],
+    stages: {},
+    error: 'old failure',
+  };
+  for (const payload of [{ cancelled: true, reason: '运行已取消', code: 1 }, { code: 0 }]) {
+    const result = applyRunEvent(previous, 'run://done', {
+      case: '/case',
+      run_id: 'run',
+      ...payload,
+    })!;
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 'cancelled' in payload ? 'cancelled' : 'succeeded');
+  }
+  assert.equal(
+    applyRunEvent(previous, 'run://done', { case: '/case', run_id: 'run', code: 1 })!.error,
+    'old failure',
+  );
+  assert.equal(
+    applyRunEvent(previous, 'run://done', {
+      case: '/case',
+      run_id: 'run',
+      code: 1,
+      reason: 'actual failure',
+    })!.error,
+    'actual failure',
+  );
+});

@@ -127,3 +127,26 @@ export function casePreparationOptions(
     classification,
   };
 }
+
+export type SiteDefaults = {
+  previous: Record<string, string>;
+  values: Record<string, string>;
+};
+
+export function withoutSiteDefaults(values: Record<string, string>, defaults: SiteDefaults) {
+  const next = { ...values };
+  for (const [key, value] of Object.entries(defaults.values)) {
+    if (next[key] !== value) continue;
+    if (key in defaults.previous) next[key] = defaults.previous[key];
+    else delete next[key];
+  }
+  return next;
+}
+
+export function isMethaneSite(site: Site) {
+  return (
+    !site.urban &&
+    !site.crop &&
+    (site.name === 'AT-Neu' || /ch4/i.test(site.obs_file ?? '') || /ch4/i.test(site.site_file))
+  );
+}

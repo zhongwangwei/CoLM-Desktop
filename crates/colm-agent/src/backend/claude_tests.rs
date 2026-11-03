@@ -110,3 +110,133 @@ fn model_and_effort_become_command_line_flags_only_when_chosen() {
     };
     assert!(choice_args(&odd).is_empty());
 }
+
+struct Sink;
+impl TurnSink for Sink {
+    fn emit(&mut self, _: Outbound) {}
+    fn approve(&mut self, _: Outbound) -> crate::agent::Decision {
+        crate::agent::Decision::Deny(None)
+    }
+}
+
+fn launch_at(root: std::path::PathBuf) -> Launch {
+    Launch {
+        cwd: root,
+        mcp_exe: "unused-mcp".into(),
+        bridge_addr: String::new(),
+        bridge_token: String::new(),
+        instructions: String::new(),
+        web: false,
+    }
+}
+
+#[test]
+fn a_cancelled_claude_request_does_not_spawn_the_command() {
+    let root = std::env::temp_dir();
+    let mut session = ClaudeSession::new(launch_at(root.clone()), None);
+    let error = session
+        .run(
+            "nonexistent-cancelled-claude".into(),
+            &root.join("unused"),
+            "message",
+            &mut Sink,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+}
+
+#[cfg(unix)]
+fn fake_claude(label: &str, script: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "colm-claude-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let exe = root.join("fake-cli");
+    std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (root, exe)
+}
+
+#[cfg(unix)]
+fn cancel_fake_claude(label: &str, script: &str, text: String) {
+    let (root, exe) = fake_claude(label, script);
+    let signal = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = signal.clone();
+    let target = root.clone();
+    let worker = std::thread::spawn(move || {
+        let mut session = ClaudeSession::new(launch_at(target.clone()), None);
+        session.run(exe, &target.join("unused"), &text, &mut Sink, &flag)
+    });
+    let began = std::time::Instant::now();
+    while !root.join("ready").exists() && began.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(root.join("ready").exists());
+    std::thread::sleep(Duration::from_millis(250));
+    let cancelled = std::time::Instant::now();
+    signal.store(true, Ordering::SeqCst);
+    assert_eq!(worker.join().unwrap().unwrap_err().to_string(), "cancelled");
+    assert!(cancelled.elapsed() < Duration::from_millis(1500));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_cancel_waits_for_a_child_that_closed_stdout() {
+    cancel_fake_claude(
+        "closed-stdout",
+        "cat >/dev/null\necho ready > ready\nexec 1>&-\nsleep 2",
+        "message".into(),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_cancel_reaches_stderr_inherited_by_a_descendant_after_parent_exit() {
+    cancel_fake_claude(
+        "inherited-stderr",
+        "cat >/dev/null\nexec 1>&-\n(trap '' TERM; sleep 2) &\necho ready > ready\nexit 0",
+        "message".into(),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_cancel_interrupts_a_blocked_large_stdin_write() {
+    cancel_fake_claude(
+        "blocked-stdin",
+        "echo ready > ready\nexec sleep 2",
+        "x".repeat(1024 * 1024),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_completed_output_keeps_the_full_input_and_final_answer() {
+    let (root, exe) = fake_claude("completed", "cat >received\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'");
+    let mut session = ClaudeSession::new(launch_at(root.clone()), None);
+    let text = "x".repeat(1024 * 1024);
+    let result = session
+        .run(
+            exe,
+            &root.join("unused"),
+            &text,
+            &mut Sink,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(result.content, "done");
+    assert_eq!(
+        std::fs::read(root.join("received")).unwrap(),
+        text.as_bytes()
+    );
+    assert!(session.started);
+    std::fs::remove_dir_all(root).unwrap();
+}

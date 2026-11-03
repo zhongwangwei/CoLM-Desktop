@@ -3,6 +3,7 @@
 MODULE MOD_MT_Vars
 
    USE MOD_Precision
+   USE MOD_Namelist, only: DEF_USE_LULCC
    USE MOD_MT_Namelist, only: DEF_MT_LULCC_ABORT_NBAD
    USE MOD_SPMD_Task, only: p_is_io, CoLM_stop
    USE MOD_MT_Defs, only: nmts, materials, material_build_descriptor_identity, &
@@ -493,9 +494,7 @@ CONTAINS
    SUBROUTINE remap_land_mt_lulcc_state (patchclass_new, eindex_new, patchclass_old, eindex_old, &
                                              wa_new, host_water_old_2d, host_water_old_3d, &
                                              host_sync, lccpct_patches, new_patch_area, old_patch_area)
-#ifdef LULCC
       USE MOD_MT_Isotope_Lulcc, only: mt_isotope_lulcc_aquifer_reference
-#endif
       IMPLICIT NONE
       integer,   intent(in) :: patchclass_new(:), patchclass_old(:)
       integer*8, intent(in) :: eindex_new(:), eindex_old(:)
@@ -626,7 +625,7 @@ CONTAINS
       ! cold-started patch already has its reference.
       allocate(carrier_change(nmts))
       carrier_change = 0._r8
-#ifdef LULCC
+      IF (DEF_USE_LULCC) THEN
       IF (check_lulcc_mass) THEN
          CALL mt_isotope_lulcc_aquifer_reference (patchclass_new, wa_new, &
             mt_aquifer_ref_water, mt_aquifer_ref_mass, mt_wa, new_patch_area, carrier_change)
@@ -634,7 +633,7 @@ CONTAINS
          CALL mt_isotope_lulcc_aquifer_reference (patchclass_new, wa_new, &
             mt_aquifer_ref_water, mt_aquifer_ref_mass, mt_wa)
       ENDIF
-#endif
+      ENDIF
       IF (check_lulcc_mass) THEN
          CALL compute_current_lulcc_land_water_mass(new_patch_area, mass_after)
          CALL assert_lulcc_land_water_mass_conserved(mass_before + host_change + carrier_change, mass_after)

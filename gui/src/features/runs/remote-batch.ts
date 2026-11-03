@@ -110,9 +110,16 @@ export async function runRemoteBatch(options: {
   }
   async function pollOne(dir: string, previous: Remote) {
     if (options.stopped()) return;
+    let result: Remote;
     try {
-      const result = await options.status(dir);
-      if (options.stopped()) return;
+      result = await options.status(dir);
+    } catch (error) {
+      if (!options.stopped()) options.change(dir, 'unknown', previous, String(error));
+      // Keep its occupied slot and retry: a failed query does not change the submitted job.
+      return;
+    }
+    if (options.stopped()) return;
+    try {
       checkIdentity(dir, previous, result);
       const merged = reconcileRemoteRun(previous, result);
       active.set(dir, merged);

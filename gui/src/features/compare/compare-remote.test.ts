@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as compareConfig from './config';
 import {
+  remoteJobFailureText,
   benchErrorText,
   claimRemoteWatch,
   parseCompareDraft,
@@ -468,7 +469,9 @@ function watchHarness(
     'markUncertain',
     { rememberJob, hostRef, setUnsettled, jobUncertain },
   );
-  const jobFailureText = execute<(reply: unknown) => string>('jobFailureText', { t });
+  const jobFailureText = execute<(reply: unknown) => string>('jobFailureText', {
+    remoteJobFailureText,
+  });
   const watch = execute<
     (
       machine: string,
@@ -857,7 +860,9 @@ test('GUI-07: checking an unreachable job confirms the terminal state, keeps ide
       jobUncertain,
     },
   );
-  const jobFailureText = execute<(reply: unknown) => string>('jobFailureText', { t });
+  const jobFailureText = execute<(reply: unknown) => string>('jobFailureText', {
+    remoteJobFailureText,
+  });
   const current = parseRemoteJob(storage.values['colm.benchJob@serverA'])!;
   const check = execute<() => Promise<void>>('checkUnsettled', {
     unsettled: { job: current, reason: 'ssh: timeout' },

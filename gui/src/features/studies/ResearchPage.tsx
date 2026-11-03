@@ -356,6 +356,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [studyDir, setStudyDir] = useState('');
   const studyIdentity = useRef(studyDir);
   studyIdentity.current = studyDir;
+  // A study created from this page is still a draft design while its fields stay
+  // editable. An opened study is frozen, so design fields do not invalidate it.
+  const createdHere = useRef('');
   const [createdStudy, setCreatedStudy] = useState('');
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
   // 派生设计（审计 P1-4）：来源研究与继承了什么。创建研究时写进 spec.parent_study；
@@ -510,7 +513,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     return () => {
       current = false;
     };
-  }, [notify]);
+  }, [notify, active]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
@@ -527,8 +530,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     }
     setSites(dir ? [dir] : []);
     // 本机研究正在跑时离开研究页去开了别的算例：设计部分照常重置，正在跑的研究留着，回来还看得到进度。
-    if (!runLock.current) {
+    if (!runLock.current && !remotePermissions.exists) {
       setStudyDir('');
+      createdHere.current = '';
       setEnvelope(null);
       setRemoteReply(null);
     }
@@ -550,6 +554,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     return () => {
       requestEpoch.current++;
     };
+    // 仅身份变化才重置设计；服务器状态变化不能触发这次清理。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dir, versionId, revision]);
   // 用站点内容键而不是数组引用：换版本时上面那个 effect 会 setSites 成同内容的新数组，
   // 用数组引用会把这里再触发一次，把刚发起的参数读取清掉、同一身份读两遍。
@@ -576,10 +582,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setTypeChoices(null);
     setTypes([]);
     setPreflight('');
-    if (!runLock.current) {
+    if (!runLock.current && !remotePermissions.exists) {
       setEnvelope(null);
       setRemoteReply(null);
       setStudyDir('');
+      createdHere.current = '';
       // 换了算例或编译配置就是另一个研究，上一个研究勾的"已核对预算"不能带过来。
       setConfirmed(false);
     }
@@ -643,17 +650,23 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     out,
     name,
   ]);
-  async function task<T>(fn: (current: () => boolean) => Promise<T>): Promise<T> {
+  async function task<T>(
+    fn: (current: () => boolean) => Promise<T>,
+    studyPath?: string,
+  ): Promise<T> {
     if (lock.current)
       throw new Error(tr('上一个研究操作还没结束', 'Another study operation is in progress'));
     lock.current = true;
     setBusy(true);
     setError('');
     const token = epoch.current;
+    const current = () =>
+      studyPath == null ? token === epoch.current : studyIdentity.current === studyPath;
     try {
-      return await fn(() => token === epoch.current);
+      return await fn(current);
     } catch (e) {
-      if (token === epoch.current) setError(tr(...studyErrorText(String(e))));
+      if (current()) setError(tr(...studyErrorText(String(e))));
+      else if (studyPath != null) notify(`${studyPath}: ${tr(...studyErrorText(String(e)))}`, true);
       throw e;
     } finally {
       lock.current = false;
@@ -664,6 +677,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     void Promise.resolve()
       .then(fn)
       .catch(() => {});
+  };
+  const pollingError = useRef('');
+  const clearPollingError = () => {
+    const previous = pollingError.current;
+    if (previous) setError((value) => (value === previous ? '' : value));
+    pollingError.current = '';
   };
   const readStatus = useCallback(
     async (path = studyDir, adopt = false, completedRun = false) => {
@@ -697,10 +716,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     [studyDir],
   );
   const readRemoteStatus = useCallback(async () => {
-    const token = epoch.current;
     const sequence = ++remoteRequest.current;
     const data = remoteStudyReply(await invokeJson('remote_study_status', { studyDir }));
-    if (token === epoch.current && sequence === remoteRequest.current) setRemoteReply(data);
+    if (studyIdentity.current === studyDir && sequence === remoteRequest.current)
+      setRemoteReply(data);
     return data;
   }, [studyDir]);
   useEffect(() => {
@@ -720,8 +739,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       if (stopped || lock.current) return;
       try {
         await readStatus();
+        if (!stopped) clearPollingError();
       } catch (e) {
-        if (!stopped) setError(String(e));
+        if (!stopped) {
+          pollingError.current = String(e);
+          setError(pollingError.current);
+        }
       }
       if (!stopped) timer = setTimeout(poll, 3000);
     };
@@ -747,8 +770,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     const poll = async () => {
       try {
         await readRemoteStatus();
+        if (!stopped) clearPollingError();
       } catch (e) {
-        if (!stopped) setError(String(e));
+        if (!stopped) {
+          pollingError.current = String(e);
+          setError(pollingError.current);
+        }
       }
       if (!stopped) timer = setTimeout(poll, REMOTE_CHECK_MS);
     };
@@ -758,11 +785,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       clearTimeout(timer);
     };
   }, [active, studyDir, busy, launching, remotePermissions.poll, readRemoteStatus]);
-  async function effectiveCase(path: string, modelRevision: VersionRef) {
-    const context = await invokeJson<{ entry: { dir: string } }>('model_case_context', {
-      dir: path,
-      modelRevision,
-    });
+  async function effectiveCase(path: string, modelRevision: VersionRef, previews: string[]) {
+    const context = await invokeJson<{ entry: { dir: string }; preview_token?: string }>(
+      'model_case_context',
+      {
+        dir: path,
+        modelRevision,
+      },
+    );
+    if (context.preview_token) previews.push(context.preview_token);
     return context.entry.dir;
   }
   // 读取一组算例的参数上下文。请求带着身份（模型修订、站点、编译配置、格点类型）出去，返回时再和
@@ -770,46 +801,53 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 身份，换身份或点“重新读取”可以再试，不会一次失败就永久跳过。
   const loadContexts = (identity: ParameterContextIdentity) =>
     task(async () => {
-      const key = parameterContextKey(identity);
-      // 数据能不能写回只看身份，不看 epoch：换版本时“清空参数”会连带触发别的 effect 自增 epoch，
-      // 若按 epoch 作废，刚按新版本发起的读取会被判成过期、白读一遍再重来。参数表只由这些身份
-      // 维度决定，改了别的设计（观测、方法……）同一身份读出的参数仍然有效。
-      const isCurrent = () => sameParameterContextIdentity(identity, contextIdentityRef.current);
-      // 身份已变：清掉"已读过"的标记，这次任务结束时 busy 翻回 false，自动读取的 effect 会按
-      // 当前身份重读。只清自己写下的标记，不能清新身份请求的标记。
-      const superseded = () => {
-        clearParameterContextMarker(loadedFor, key);
-      };
-      if (!identity.sites.length || !identity.kernel)
-        throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
-      const effective = [];
-      for (const path of identity.sites) {
-        effective.push(await effectiveCase(path, identity.version));
-        if (!isCurrent()) return superseded();
-      }
-      const rows = await invokeJson<ParameterContext[]>('study_parameter_contexts', {
-        dirs: effective,
-        kernelDir: identity.kernel,
-        types: identity.spatial ? identity.types : null,
-      });
-      if (isCurrent()) {
-        // 勾选按行号记；格点研究改勾地类后重新读出的行序会变（新类型的行插在中间），原来已勾的参数
-        // 会悄悄落到别的参数上。按参数与作用域把已勾的搬到新行号上，读不到的丢掉。
-        const keyOf = (row: ParameterContext) => `${row.id}|${JSON.stringify(row.scope_instance)}`;
-        const previous = contextsRef.current;
-        setParameters((old) => {
-          const byKey = new Map(previous.map((row, i) => [keyOf(row), old[String(i)]]));
-          return Object.fromEntries(
-            rows.flatMap((row, i) => {
-              const kept = byKey.get(keyOf(row));
-              return kept ? [[String(i), kept]] : [];
-            }),
-          );
+      const previews: string[] = [];
+      try {
+        const key = parameterContextKey(identity);
+        // 数据能不能写回只看身份，不看 epoch：换版本时“清空参数”会连带触发别的 effect 自增 epoch，
+        // 若按 epoch 作废，刚按新版本发起的读取会被判成过期、白读一遍再重来。参数表只由这些身份
+        // 维度决定，改了别的设计（观测、方法……）同一身份读出的参数仍然有效。
+        const isCurrent = () => sameParameterContextIdentity(identity, contextIdentityRef.current);
+        // 身份已变：清掉"已读过"的标记，这次任务结束时 busy 翻回 false，自动读取的 effect 会按
+        // 当前身份重读。只清自己写下的标记，不能清新身份请求的标记。
+        const superseded = () => {
+          clearParameterContextMarker(loadedFor, key);
+        };
+        if (!identity.sites.length || !identity.kernel)
+          throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
+        const effective = [];
+        for (const path of identity.sites) {
+          effective.push(await effectiveCase(path, identity.version, previews));
+          if (!isCurrent()) return superseded();
+        }
+        const rows = await invokeJson<ParameterContext[]>('study_parameter_contexts', {
+          dirs: effective,
+          kernelDir: identity.kernel,
+          types: identity.spatial ? identity.types : null,
         });
-        setContexts(withCatalogLabels(rows));
-        failedFor.current = '';
-      } else superseded();
-      return rows;
+        if (isCurrent()) {
+          // 勾选按行号记；格点研究改勾地类后重新读出的行序会变（新类型的行插在中间），原来已勾的参数
+          // 会悄悄落到别的参数上。按参数与作用域把已勾的搬到新行号上，读不到的丢掉。
+          const keyOf = (row: ParameterContext) =>
+            `${row.id}|${JSON.stringify(row.scope_instance)}`;
+          const previous = contextsRef.current;
+          setParameters((old) => {
+            const byKey = new Map(previous.map((row, i) => [keyOf(row), old[String(i)]]));
+            return Object.fromEntries(
+              rows.flatMap((row, i) => {
+                const kept = byKey.get(keyOf(row));
+                return kept ? [[String(i), kept]] : [];
+              }),
+            );
+          });
+          setContexts(withCatalogLabels(rows));
+          failedFor.current = '';
+        } else superseded();
+        return rows;
+      } finally {
+        for (const token of previews)
+          await invoke('model_case_context_release', { token }).catch(() => {});
+      }
     }).catch((error) => {
       // 数据没读到，加载标记也不能留：否则同一身份一次失败就永久跳过。失败身份另记一份，免得
       // busy 翻回 false 时自动读取把失败重试成死循环。
@@ -1115,6 +1153,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         setCreatedStudy('');
         setRemoteReply(null);
         setStudyDir(path.trim());
+        createdHere.current = path.trim();
         await readStatus(path.trim());
         notify(tr('研究任务已创建', 'Study created'));
       } else {
@@ -1180,16 +1219,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             modelRevision,
           }),
         );
-        if (token === epoch.current) {
+        if (studyIdentity.current === studyDir) {
           setRemoteReply(submitted);
-          await readStatus();
-          notify(
-            tr(
-              '研究已提交服务器，正在核对真实进度',
-              'Study submitted to the server; checking actual progress',
+          await readStatus(studyDir, false, true).catch((error) =>
+            notify(
+              tr(
+                `研究已提交，但刷新记录失败：${String(error)}`,
+                `Study submitted, but refreshing its record failed: ${String(error)}`,
+              ),
+              true,
             ),
           );
         }
+        notify(tr(`研究已提交服务器：${studyDir}`, `Study submitted to the server: ${studyDir}`));
         return submitted;
       }
       await invoke('study_run', {
@@ -1218,7 +1260,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         setStatusPending(studyDir);
         await readStatus(studyDir, false, true).catch(() => {});
       }
-      if (token === epoch.current) {
+      if (studyIdentity.current === studyDir) {
         // 后端把取消、失败都当错误返回一段 JSON（`study_cancelled`/`study_failed`），原来整段当红字显示
         //（GUI 审查 B-04）。取消是正常操作，只提示一句；失败只显示原因。
         const outcome = studyRunOutcome(e);
@@ -1228,11 +1270,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           // 提交失败时，研究自己的记录里既没有服务器作业、也没有"已发出提交"的意图，说明什么都没交上去：
           // 收回本地的"提交中"占位，可以改了再交。原来一律记成"状态未确认"，"开始运行"从此一直灰着，
           // 核对服务器也清不掉（GUI 审查 R2）。有记录时照旧按"未确认"处理，不能重复提交。
-          const recorded = await readStatus()
+          const recorded = await readStatus(studyDir, false, true)
             .then((fresh) => !!(fresh.remote || fresh.remote_pending))
             .catch(() => true);
-          if (!recorded && token === epoch.current) setRemoteReply(null);
-          else if (token === epoch.current)
+          if (!recorded && studyIdentity.current === studyDir) setRemoteReply(null);
+          else if (studyIdentity.current === studyDir)
             setRemoteReply((previous) => ({
               ...previous,
               host,
@@ -1241,6 +1283,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             }));
         }
       }
+      if (studyIdentity.current !== studyDir)
+        notify(`${studyDir}: ${tr(...studyErrorText(String(e)))}`, true);
       throw e;
     } finally {
       runLock.current = false;
@@ -1416,18 +1460,28 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             ...(answer.verification_error ? [answer.verification_error] : []),
           ],
         }));
-        await readStatus();
-        // 取回后分类里的 fetched 会变，按钮（再取回/归档）必须按新状态重算。
-        await readRemoteStatus();
-        notify(
-          tr(
-            '服务器研究结果已取回；科学证据另行核对',
-            'Server results fetched; scientific evidence is verified separately',
-          ),
-        );
+        try {
+          await readStatus(studyDir, false, true);
+          // 取回后分类里的 fetched 会变，按钮（再取回/归档）必须按新状态重算。
+          await readRemoteStatus();
+        } catch (error) {
+          notify(
+            tr(
+              `结果已取回，但刷新记录失败：${String(error)}`,
+              `Results fetched, but refreshing the record failed: ${String(error)}`,
+            ),
+            true,
+          );
+        }
       }
+      notify(
+        tr(
+          '服务器研究结果已取回；科学证据另行核对',
+          'Server results fetched; scientific evidence is verified separately',
+        ),
+      );
       return answer;
-    });
+    }, studyDir);
   const inspectRemote = () =>
     task(async () => {
       await readStatus();
@@ -1445,6 +1499,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         if (token === epoch.current && sequence === statusRequest.current) {
           setRemoteReply(null);
           setResult('');
+          // Opening a saved study: its frozen design is not the editable draft.
+          createdHere.current = '';
           setConfirmed(false);
           const loadedMethod = methodFromStudy(loaded.manifest?.spec);
           setTab(loadedMethod);
@@ -1587,11 +1643,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const aiCase = sites[0] ?? dir;
   const inspectHybrid = () =>
     task(async (current) => {
-      const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
-        case: await effectiveCase(aiCase, studyModel),
-      });
-      if (current()) setHybridInfo(data);
-      return data;
+      const previews: string[] = [];
+      try {
+        const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
+          case: await effectiveCase(aiCase, studyModel, previews),
+        });
+        if (current()) setHybridInfo(data);
+        return data;
+      } finally {
+        for (const token of previews)
+          await invoke('model_case_context_release', { token }).catch(() => {});
+      }
     });
   const climate = () =>
     task(async (current) => {
@@ -1741,6 +1803,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       cancelled: ['已取消', 'Cancelled'],
       canceled: ['已取消', 'Cancelled'],
       submitted: ['已提交服务器', 'Submitted'],
+      submitting: ['正在提交', 'Submitting'],
+      queued: ['排队中', 'Queued'],
+      finished: ['已结束', 'Finished'],
+      lost: ['服务器记录丢失', 'Server record lost'],
+      unknown: ['状态待核对', 'Status needs checking'],
     };
     const hit = names[key];
     return hit ? tr(hit[0], hit[1]) : value;
@@ -1823,6 +1890,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setFit(null);
       setDerivedDesign(null);
       setStudyDir('');
+      createdHere.current = '';
       setEnvelope(null);
       setRemoteReply(null);
       setMember('');
@@ -1973,20 +2041,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       prefilledFor.current === key
     )
       return;
-    prefilledFor.current = key;
     let live = true;
     void invoke<Record<string, CaseProfile>>('model_case_profiles', {
       dirs: sites,
       modelRevision: studyModel,
     })
-      .then((profiles) => {
+      .then(async (profiles) => {
         if (!live) return;
         const all = sites.map((d) => profiles[d]).filter((p): p is CaseProfile => !!p);
         const starts = all.map((p) => p.inputs.start).filter(Boolean);
         const ends = all.map((p) => p.inputs.end).filter(Boolean);
         const latestStart = [...starts].sort().at(-1),
           earliestEnd = [...ends].sort()[0];
-        void prefillWindows(
+        await prefillWindows(
           starts.length === sites.length &&
             ends.length === sites.length &&
             latestStart &&
@@ -1996,6 +2063,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             : null,
           () => live,
         );
+        if (!live) return;
+        prefilledFor.current = key;
         const base = (path: string) =>
           path
             .replace(/[/\\]+$/, '')
@@ -2303,6 +2372,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     field('study-directory', 'Study directory', studyDir, (v) => {
       epoch.current++;
       setStudyDir(v);
+      // A manually chosen directory is an existing study, not this page's draft.
+      createdHere.current = '';
       setEnvelope(null);
       setRemoteReply(null);
       setResult('');
@@ -2405,65 +2476,70 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // deriveStudyDesign 明确拒绝。原来只抄了算例/变量/观测，模型版本会回落到全局当前版本，
   // 空间目标的 aggregate 也会丢——那是两次静默改变目标函数。
   function carryToCalibration() {
-    const parentSpec = frozenSpec;
-    const picks = calibrationSeed(parentSpec, carryKeys);
-    if (!parentSpec || !picks.length)
-      throw new Error(
-        tr('请先勾选要带去率定的参数', 'Tick the parameters to carry into calibration'),
-      );
-    const specSha256 = envelope?.manifest?.provenance?.spec_sha256 ?? '';
-    const revision = modelUsed ?? null;
-    if (!specSha256 || !revision)
-      throw new Error(
-        tr(
-          '这个研究没有记下冻结设计或模型修订，派生会悄悄换模型；请从有记录的研究派生，或取消后手工新建。',
-          'This study did not record its frozen design or model revision; deriving would silently switch models. Derive from a study that recorded them, or start fresh.',
-        ),
-      );
-    const root = studyDir.replace(/[/\\]\.colm[/\\]studies[/\\][^/\\]+[/\\]?$/, '');
-    const derived = deriveStudyDesign(parentSpec, {
-      study: studyDir,
-      specSha256,
-      modelRevision: revision,
-      projectRoot: root,
-    });
-    chooseMethod('tuning');
-    setSites(derived.ui.sites);
-    if (derived.ui.variables) setVariables(derived.ui.variables);
-    setMetric(derived.ui.metric);
-    setMinPairs(derived.ui.minPairs);
-    setCorrected(derived.ui.corrected);
-    setAggregate(derived.ui.aggregate);
-    setWeights(derived.ui.weights);
-    setObservations(derived.ui.observations);
-    setFrom(derived.ui.from);
-    setTo(derived.ui.to);
-    setValFrom(derived.ui.valFrom);
-    setValTo(derived.ui.valTo);
-    if (derived.ui.gridTargets) setGridTargets(derived.ui.gridTargets);
-    setSeed(derived.ui.seed);
-    if (derived.ui.kernelDir && state.kernels.some((k) => k.dir === derived.ui.kernelDir))
-      setKernel(derived.ui.kernelDir);
-    loadedFor.current = '';
-    failedFor.current = '';
-    // 派生窗口已经写进 from/to/valFrom/valTo，不再属于"上次自动填的值"：把预填去重键和自动值
-    // 一起清掉，避免下次进第 3 步时 pick 把来源窗口当成可覆盖的旧推荐。
-    prefilledFor.current = '';
-    autoWindows.current = { from: '', to: '', valFrom: '', valTo: '' };
-    // 研究基线必须钉在来源研究实际用的修订上：新研究要跑在同一个冻结模型上，不能回落到当前运行版本。
-    // 只有身份真的变了才标记：标记没人消费会一直留着，下一次真的换算例/换版本时就把重置吞掉了。
-    const carriedBaseline = derived.parent.model_revision;
-    if (
-      carriedBaseline &&
-      (versionId !== carriedBaseline.id || studyBaseline.revision !== carriedBaseline.revision)
-    )
-      applyingDerivation.current = true;
-    update({
-      researchSeed: { parameters: picks },
-      researchBaseline: derived.parent.model_revision,
-    });
-    setDerivedDesign({ parent: derived.parent, notes: derived.notes });
-    setStep(2);
+    try {
+      const parentSpec = frozenSpec;
+      const picks = calibrationSeed(parentSpec, carryKeys);
+      if (!parentSpec || !picks.length)
+        throw new Error(
+          tr('请先勾选要带去率定的参数', 'Tick the parameters to carry into calibration'),
+        );
+      const specSha256 = envelope?.manifest?.provenance?.spec_sha256 ?? '';
+      const revision = modelUsed ?? null;
+      if (!specSha256 || !revision)
+        throw new Error(
+          tr(
+            '这个研究没有记下冻结设计或模型修订，派生会悄悄换模型；请从有记录的研究派生，或取消后手工新建。',
+            'This study did not record its frozen design or model revision; deriving would silently switch models. Derive from a study that recorded them, or start fresh.',
+          ),
+        );
+      const root = studyDir.replace(/[/\\]\.colm[/\\]studies[/\\][^/\\]+[/\\]?$/, '');
+      const derived = deriveStudyDesign(parentSpec, {
+        study: studyDir,
+        specSha256,
+        modelRevision: revision,
+        projectRoot: root,
+      });
+      chooseMethod('tuning');
+      setSites(derived.ui.sites);
+      if (derived.ui.variables) setVariables(derived.ui.variables);
+      setMetric(derived.ui.metric);
+      setMinPairs(derived.ui.minPairs);
+      setCorrected(derived.ui.corrected);
+      setAggregate(derived.ui.aggregate);
+      setWeights(derived.ui.weights);
+      setObservations(derived.ui.observations);
+      setFrom(derived.ui.from);
+      setTo(derived.ui.to);
+      setValFrom(derived.ui.valFrom);
+      setValTo(derived.ui.valTo);
+      if (derived.ui.gridTargets) setGridTargets(derived.ui.gridTargets);
+      setSeed(derived.ui.seed);
+      if (derived.ui.kernelDir && state.kernels.some((k) => k.dir === derived.ui.kernelDir))
+        setKernel(derived.ui.kernelDir);
+      loadedFor.current = '';
+      failedFor.current = '';
+      // 派生窗口已经写进 from/to/valFrom/valTo，不再属于"上次自动填的值"：把预填去重键和自动值
+      // 一起清掉，避免下次进第 3 步时 pick 把来源窗口当成可覆盖的旧推荐。
+      prefilledFor.current = '';
+      autoWindows.current = { from: '', to: '', valFrom: '', valTo: '' };
+      // 研究基线必须钉在来源研究实际用的修订上：新研究要跑在同一个冻结模型上，不能回落到当前运行版本。
+      // 只有身份真的变了才标记：标记没人消费会一直留着，下一次真的换算例/换版本时就把重置吞掉了。
+      const carriedBaseline = derived.parent.model_revision;
+      if (
+        carriedBaseline &&
+        (versionId !== carriedBaseline.id || studyBaseline.revision !== carriedBaseline.revision)
+      )
+        applyingDerivation.current = true;
+      update({
+        researchSeed: { parameters: picks },
+        researchBaseline: derived.parent.model_revision,
+      });
+      setDerivedDesign({ parent: derived.parent, notes: derived.notes });
+      setStep(2);
+    } catch (error) {
+      setError(tr(...studyErrorText(String(error))));
+      throw error;
+    }
   }
   const writeMember = member || defaultMember();
   const writeVerdict = tuning ? memberVerdict(envelope?.state?.candidates, writeMember) : null;
@@ -2733,13 +2809,23 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       return;
     }
     let current = true;
-    invoke<{ profile: Parameters<typeof compatibleKernel>[1] }>('model_case_context', {
-      dir: sites[0],
-      modelRevision: studyModel,
-    })
-      .then((context) => {
-        if (current)
-          setKernel((compatibleKernel(studyKernels, context.profile) ?? studyKernels[0]!).dir);
+    invoke<{ profile: Parameters<typeof compatibleKernel>[1]; preview_token?: string }>(
+      'model_case_context',
+      {
+        dir: sites[0],
+        modelRevision: studyModel,
+      },
+    )
+      .then(async (context) => {
+        try {
+          if (current)
+            setKernel((compatibleKernel(studyKernels, context.profile) ?? studyKernels[0]!).dir);
+        } finally {
+          if (context.preview_token)
+            await invoke('model_case_context_release', { token: context.preview_token }).catch(
+              () => {},
+            );
+        }
       })
       .catch(() => {
         if (current) setKernel(studyKernels[0]!.dir);
@@ -2917,11 +3003,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       setPopulation(String(Math.min(100, Math.max(8, 5 * dimensionCount))));
   }, [host, dimensionCount]);
   // 勾过"我已核对参数范围、预算和适用范围"之后又改了设计，勾选还留着，核对的已不是要建的那个研究
-  //（GUI 审查 B-06）。已打开的研究核对的是冻结的规格，与这些框无关，不动它。
+  //（GUI 审查 B-06）。创建页核对可编辑设计，运行页核对已冻结的规格。
   useEffect(() => {
-    if (!studyDir) setConfirmed(false);
+    // Opening the creation screen reviews editable fields even with a frozen study open.
+    if (!studyDir || step <= 3) setConfirmed(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    step,
     tab,
     observations,
     variables,

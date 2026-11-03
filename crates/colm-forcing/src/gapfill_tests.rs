@@ -965,3 +965,91 @@ fn a_long_gap_uses_the_nearest_era5_grid_and_overlap_bias() {
         .unwrap();
     assert_eq!(repaired, vec![281.0, 282.0, 283.0, 284.0, 285.0, 286.0]);
 }
+
+#[test]
+fn installing_repaired_file_keeps_a_retained_recovery_backup() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-install-backup-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let destination = dir.join("forcing.nc");
+    let temporary = dir.join("prepared.nc");
+    let retained = dir.join(format!(".forcing.nc.gapfill-{}.backup", std::process::id()));
+    std::fs::write(&destination, b"previous output").unwrap();
+    std::fs::write(&temporary, b"new output").unwrap();
+    std::fs::write(&retained, b"retained recovery data").unwrap();
+    super::install_repaired_file(&temporary, &destination).unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"new output");
+    assert_eq!(std::fs::read(&retained).unwrap(), b"retained recovery data");
+    assert!(!temporary.exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_repaired_file_install_preserves_previous_output_and_recovery_data() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-install-rollback-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let destination = dir.join("forcing.nc");
+    let retained = dir.join(format!(".forcing.nc.gapfill-{}.backup", std::process::id()));
+    std::fs::write(&destination, b"previous output").unwrap();
+    std::fs::write(&retained, b"retained recovery data").unwrap();
+    let error = super::install_repaired_file(&dir.join("missing.nc"), &destination).unwrap_err();
+    assert!(
+        error.to_string().contains("previous file left unchanged"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous output");
+    assert_eq!(std::fs::read(&retained).unwrap(), b"retained recovery data");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn independent_repaired_file_installs_replace_atomically() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-install-concurrent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let destination = dir.join("forcing.nc");
+    std::fs::write(&destination, b"previous").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let workers: Vec<_> = [b"first".as_slice(), b"second".as_slice()]
+        .into_iter()
+        .enumerate()
+        .map(|(i, bytes)| {
+            let temp = dir.join(format!("temp-{i}"));
+            std::fs::write(&temp, bytes).unwrap();
+            let target = destination.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::install_repaired_file(&temp, &target)
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap().unwrap();
+    }
+    let value = std::fs::read(&destination).unwrap();
+    assert!(value == b"first" || value == b"second");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}

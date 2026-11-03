@@ -80,7 +80,8 @@ function execute<T>(name: string, context: Record<string, unknown>): T {
     compareDraftKey: (host: string) => `colm.compareDraft@${host}`,
     showRunNotice: () => {},
   };
-  const withDefaults = { ...defaults, ...context };
+  const withDefaults: Record<string, unknown> = { ...defaults, ...context };
+  delete withDefaults[name];
   const code = ts.transpileModule(`${declaration(name)}; return ${name};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -1875,4 +1876,68 @@ test('switching focus never overwrites an offered draft with different current i
   assert.equal(page.localValue('colm.compareDraft@'), raw);
   assert.equal(String(page.configTextarea()!.props.value), yaml);
   assert.match(text(page.nodes()), /Resolve the draft before switching/);
+});
+
+test('draft restoration waits for the machine environment before adopting YAML', async () => {
+  let restored = false;
+  const notices: string[] = [];
+  const restore = execute<() => Promise<void>>('restoreDraft', {
+    draftOffer: { host: '', yaml: 'kept text' },
+    host: '',
+    status: null,
+    setNotice: (message: string) => notices.push(message),
+    t: (_zh: string, en: string) => en,
+    setYaml: () => {
+      restored = true;
+    },
+  });
+  await restore();
+  assert.equal(restored, false);
+  assert.match(notices[0], /environment/);
+  const invalidate = execute<() => void>('invalidateGeneratedConfig', {
+    status: null,
+    setYaml: () => {
+      restored = true;
+    },
+  });
+  invalidate();
+  assert.equal(restored, false, 'loading an environment cannot clear a restored snapshot');
+});
+test('remote stop cancels an owned request even before a scheduler job exists', async () => {
+  const calls: unknown[] = [];
+  const stop = execute<() => void>('stop', {
+    remote: true,
+    host: 'cluster',
+    job: { current: null },
+    stopping: { current: false },
+    invoke: async (command: string, args: unknown) => {
+      calls.push([command, args]);
+      return { cancelled_children: 1 };
+    },
+    t: (_zh: string, en: string) => en,
+  });
+  stop();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [['bench_remote_cancel', { host: 'cluster', job: null }]]);
+});
+
+test('stopping a remote report transfer keeps the previous report without a failure banner', async () => {
+  const errors: string[] = [],
+    notices: string[] = [];
+  const fetch = execute<(host: string, project: string) => Promise<void>>('fetchReport', {
+    reportSelection: { current: null },
+    fetching: { current: new Map() },
+    setReportError: (value: string) => errors.push(value),
+    setNotice: (value: string) => notices.push(value),
+    t: (_zh: string, en: string) => en,
+    invokeJson: async () => {
+      throw new Error('operation cancelled');
+    },
+    view: async () => {
+      throw new Error('must not replace the old report');
+    },
+  });
+  await fetch('server', 'project');
+  assert.deepEqual(errors, ['']);
+  assert.deepEqual(notices, ['Stopped']);
 });

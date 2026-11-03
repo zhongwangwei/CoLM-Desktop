@@ -427,6 +427,8 @@ fn summary_metrics_omit_the_large_chart_pair_arrays() {
         pair_source_n: None,
         pair_n: None,
         pair_downsampled: None,
+        pair_gaps: None,
+        pair_gaps_truncated: None,
         output_frequency: "hourly".into(),
         model_step_seconds: 3_600,
         obs_step_seconds: 3_600,
@@ -1555,4 +1557,22 @@ fn series_window_rejects_profile_variables_with_the_old_message() {
         "{message}"
     );
     assert!(message.contains("12 values for 4 time steps"), "{message}");
+}
+
+#[test]
+fn paired_display_retains_missing_observation_intervals_before_sampling() {
+    let axis = (0..100)
+        .map(|n| (n * 3600, 1_700_000_000 + n * 3600))
+        .collect();
+    let pairs = (0..100)
+        .filter(|n| !(40..60).contains(n))
+        .map(|n| ((n * 3600) as f64, 1.0, 2.0))
+        .collect::<Vec<_>>();
+    let (gaps, truncated) = super::metric_pair_gaps(&pairs, &axis);
+    assert_eq!(gaps, vec![[1_700_144_000, 1_700_216_000]]);
+    assert!(!truncated);
+    let complete = (0..100)
+        .map(|n| ((n * 3600) as f64, 1.0, 2.0))
+        .collect::<Vec<_>>();
+    assert!(super::metric_pair_gaps(&complete, &axis).0.is_empty());
 }

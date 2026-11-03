@@ -632,6 +632,12 @@ pub async fn workspace_revert(name: String, commit: String) -> Result<Value, Str
 #[tauri::command]
 pub async fn workspace_delete(name: String) -> Result<Value, String> {
     valid_name(&name)?;
+    if crate::model::model_drafts()?
+        .iter()
+        .any(|draft| draft.code.workspace.as_deref() == Some(name.as_str()))
+    {
+        return Err("workspace_in_use: delete or migrate the referencing drafts before removing this workspace".into());
+    }
     cli_json(args("ws-delete", &["--name", &name]), None).await
 }
 

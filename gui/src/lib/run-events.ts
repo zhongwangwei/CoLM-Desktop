@@ -62,7 +62,8 @@ export function applyRunEvent(
       : Number(payload.code) === 0
         ? 'succeeded'
         : 'failed';
-    if (payload.reason) next.error = String(payload.reason);
+    next.error =
+      next.status === 'failed' ? (payload.reason ? String(payload.reason) : next.error) : undefined;
     // 本机运行结束时后端不再发进度事件：最后一个 `run://progress` 往往落在总数之前
     // （2026-10-31 实测 1536 步的短算例停在 1304/1536 = 84%），界面上的进度条就一直是
     // 未满格。成功结束把进度补到计划总数；失败/取消保留停下的位置，那是判断"在哪一步断掉"

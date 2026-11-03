@@ -21,6 +21,8 @@ pub struct SoilSurfaceResistanceInput {
     pub porosity: f64,
     pub saturated_soil_suction_mm: f64,
     pub residual_water: f64,
+    /// Top-layer `vf_sand`: sand volume fraction of soil solids, within 0..=1.
+    pub sand_volume_fraction_of_solids: f64,
     pub hydraulic_model: SoilHydraulicModel,
     pub layer_thickness_m: f64,
     pub temperature_k: f64,
@@ -28,7 +30,7 @@ pub struct SoilSurfaceResistanceInput {
     pub ice_water_kg_m2: f64,
     pub snow_cover_fraction: f64,
     pub ground_specific_humidity: f64,
-    /// `DEF_RSS_SCHEME`: 1=SL14, 2=SZ09, 3=TR13, 4=LP92, 5=S92.
+    /// `DEF_RSS_SCHEME`: 1=SL14, 2=SZ09, 3=TR13, 4=LP92, 5=S92, 6=Liu2026.
     pub scheme: i32,
 }
 
@@ -155,6 +157,25 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
             let fraction = (water_ice_volume / input.porosity).clamp(0.001, 1.0);
             (f77(8.206) - 6.0 * fraction).exp()
         }
+        6 => {
+            let water_ice_volume = (input.liquid_water_kg_m2.max(f77(1.0e-6))
+                / WATER_DENSITY_KG_M3
+                + input.ice_water_kg_m2 / ICE_DENSITY_KG_M3)
+                / input.layer_thickness_m;
+            let fraction = (water_ice_volume / input.porosity).clamp(0.001, 1.0);
+            let transition = 1.0 / (1.0 + (-50.0 * (fraction - f77(0.35))).exp());
+            let sigmoid = 1.0 / (1.0 + (25.0 * (fraction - f77(0.70))).exp());
+            // gfortran -O2 contracts these source multiply-add expressions.
+            let basic = (-fraction).contract(6.0, f77(8.206)).exp();
+            let sand_factor = input
+                .sand_volume_fraction_of_solids
+                .contract(f77(20.45), -f77(4.12))
+                .exp();
+            let adjusted = (-(1.0 + sand_factor).ln())
+                .contract(fraction, f77(8.206))
+                .exp();
+            (1.0 - transition).contract(basic, transition * adjusted * sigmoid)
+        }
         _ => unreachable!("validated scheme"),
     };
     if input.scheme == 4 {
@@ -251,7 +272,10 @@ fn validate(input: SoilSurfaceResistanceInput) -> Result<()> {
             && input.ice_water_kg_m2 >= 0.0
             && input.ground_specific_humidity > 0.0
             && (0.0..=1.0).contains(&input.snow_cover_fraction)
-            && (1..=5).contains(&input.scheme),
+            && (1..=6).contains(&input.scheme)
+            && (input.scheme != 6
+                || (input.sand_volume_fraction_of_solids.is_finite()
+                    && (0.0..=1.0).contains(&input.sand_volume_fraction_of_solids))),
         "soil surface resistance inputs are invalid"
     );
     Ok(())

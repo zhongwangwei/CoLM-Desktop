@@ -234,21 +234,29 @@ export default function CasesPage() {
       try {
         const context = await invoke<{
           entry: { dir: string };
+          preview_token?: string;
           profile: NonNullable<typeof modelContext>['profile'];
         }>('model_case_context', { dir: target, modelRevision: state.versionRef });
-        if (!request.active || epoch.current !== request) return;
-        setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
-        if (state.selectedCase?.entry.dir === target)
-          update({
-            selectedCase: {
-              ...state.selectedCase,
-              profile: { ...state.selectedCase.profile, ...context.profile },
-            },
-          });
-        await refreshHistory(context, request);
-        if (request.active && epoch.current === request) {
-          setContextStale(false);
-          contextStaleRef.current = false;
+        try {
+          if (!request.active || epoch.current !== request) return;
+          setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
+          if (state.selectedCase?.entry.dir === target)
+            update({
+              selectedCase: {
+                ...state.selectedCase,
+                profile: { ...state.selectedCase.profile, ...context.profile },
+              },
+            });
+          await refreshHistory(context, request);
+          if (request.active && epoch.current === request) {
+            setContextStale(false);
+            contextStaleRef.current = false;
+          }
+        } finally {
+          if (context.preview_token)
+            await invoke('model_case_context_release', { token: context.preview_token }).catch(
+              () => {},
+            );
         }
       } catch (error) {
         if (!request.active || epoch.current !== request) return;
@@ -284,7 +292,7 @@ export default function CasesPage() {
     setHistoryVars(
       histories.map((h) => ({
         name: h.name,
-        settable: h.settable && h.writable !== false,
+        settable: h.settable && h.writable === true,
         longName: h.long_name,
         reason: h.blocked_by,
       })),
@@ -298,7 +306,7 @@ export default function CasesPage() {
     );
     setDisabledFields(
       histories
-        .filter((h) => !h.settable || h.writable === false)
+        .filter((h) => !h.settable || h.writable !== true)
         .map((h) => `DEF_hist_vars%${h.name}`),
     );
   }
@@ -348,6 +356,7 @@ export default function CasesPage() {
     async function load() {
       const context = await invoke<{
         entry: { dir: string };
+        preview_token?: string;
         profile: {
           grid?: string;
           classification?: 'IGBP' | 'USGS';
@@ -358,92 +367,105 @@ export default function CasesPage() {
           crop?: boolean;
         };
       }>('model_case_context', { dir, modelRevision: versionRef });
-      if (!request.active) return;
-      setModelContext({ dir: dir!, id: versionId, revision, profile: context.profile });
-      if (context.profile.grid) {
-        const [input, datasets] = await Promise.all([
-          invoke<ForcingInput>('case_forcing_input', { dir }).catch((error) => {
-            if (request.active) setForcingInputError(String(error));
-            return null;
-          }),
-          invoke<string[]>('forcing_datasets').catch((error) => {
-            if (request.active) setForcingInputError(String(error));
-            return [];
-          }),
-        ]);
+      try {
         if (!request.active) return;
-        setForcingInput(input);
-        setSavedForcing(input);
-        setForcingDatasets(datasets);
-      }
-      const preview = context.entry.dir,
-        kernel = compatibleKernel(state.kernels, context.profile);
-      const [all, text, sourceText, modelFields] = await Promise.all([
-        invoke<SchemaField[]>('describe_fields', {}),
-        invoke<string>('read_case_nml', { caseDir: preview }),
-        invoke<string>('read_case_nml', { caseDir: dir }),
-        invoke<SchemaField[]>('model_fields', {}),
-      ]);
-      // Display source paths; the preview is the authority for model-dependent gates.
-      const entries = await invoke<{ path: string; value: string }[]>('read_case', {
-          text: sourceText,
-        }),
-        actual = Object.fromEntries(entries.map((e) => [e.path, displayLiteral(e.value)]));
-      const modes: { name: string; mode: string; reason?: string }[] = [];
-      const histories = kernel
-        ? await invoke<
-            {
-              name: string;
-              on: boolean;
-              writable: boolean | null;
-              blocked_by?: string;
-              settable: boolean;
-              long_name?: string | null;
-            }[]
-          >('hist_vars', { text, kernelDir: kernel.dir, dir: preview })
-        : [];
-      for (const h of histories) actual[`DEF_hist_vars%${h.name}`] = h.on ? '.true.' : '.false.';
-      const fields = all
-        .filter(isCaseField)
-        .filter((f) => !modelFields.some((m) => m.name.toLowerCase() === f.name.toLowerCase()))
-        .filter((f) => !f.name.startsWith('DEF_hist_vars%') || histories.length > 0);
-      const v = Object.fromEntries(
-        fields.map((f) => [f.name, actual[f.name] ?? displayLiteral(f.default)]),
-      );
-      if (!request.active) return;
-      setModelKeys(modelFields);
-      setSchema(fields);
-      setValues(v);
-      setSaved(v);
-      setExplicitValues(
-        Object.fromEntries(
-          Object.entries(actual).filter(([key]) => fields.some((f) => f.name === key)),
-        ),
-      );
-      setContextReason(
-        Object.fromEntries([
-          ...modes.filter((m) => m.reason).map((m) => [m.name, m.reason!]),
+        setModelContext({ dir: dir!, id: versionId, revision, profile: context.profile });
+        if (context.profile.grid) {
+          const [input, datasets] = await Promise.all([
+            invoke<ForcingInput>('case_forcing_input', { dir }).catch((error) => {
+              if (request.active) setForcingInputError(String(error));
+              return null;
+            }),
+            invoke<string[]>('forcing_datasets').catch((error) => {
+              if (request.active) setForcingInputError(String(error));
+              return [];
+            }),
+          ]);
+          if (!request.active) return;
+          setForcingInput(input);
+          setSavedForcing(input);
+          setForcingDatasets(datasets);
+        }
+        const preview = context.entry.dir,
+          kernel = compatibleKernel(state.kernels, context.profile);
+        const reads = [
+          invoke<SchemaField[]>('describe_fields', {}),
+          invoke<string>('read_case_nml', { caseDir: preview }),
+          invoke<string>('read_case_nml', { caseDir: dir }),
+          invoke<SchemaField[]>('model_fields', {}),
+        ] as const;
+        const [all, text, sourceText, modelFields] = await Promise.all(reads).catch(
+          async (error) => {
+            await Promise.allSettled(reads);
+            throw error;
+          },
+        );
+        // Display source paths; the preview is the authority for model-dependent gates.
+        const entries = await invoke<{ path: string; value: string }[]>('read_case', {
+            text: sourceText,
+          }),
+          actual = Object.fromEntries(entries.map((e) => [e.path, displayLiteral(e.value)]));
+        const modes: { name: string; mode: string; reason?: string }[] = [];
+        const histories = kernel
+          ? await invoke<
+              {
+                name: string;
+                on: boolean;
+                writable: boolean | null;
+                blocked_by?: string;
+                settable: boolean;
+                long_name?: string | null;
+              }[]
+            >('hist_vars', { text, kernelDir: kernel.dir, dir: preview })
+          : [];
+        for (const h of histories) actual[`DEF_hist_vars%${h.name}`] = h.on ? '.true.' : '.false.';
+        const fields = all
+          .filter(isCaseField)
+          .filter((f) => !modelFields.some((m) => m.name.toLowerCase() === f.name.toLowerCase()))
+          .filter((f) => !f.name.startsWith('DEF_hist_vars%') || histories.length > 0);
+        const v = Object.fromEntries(
+          fields.map((f) => [f.name, actual[f.name] ?? displayLiteral(f.default)]),
+        );
+        if (!request.active) return;
+        setModelKeys(modelFields);
+        setSchema(fields);
+        setValues(v);
+        setSaved(v);
+        setExplicitValues(
+          Object.fromEntries(
+            Object.entries(actual).filter(([key]) => fields.some((f) => f.name === key)),
+          ),
+        );
+        setContextReason(
+          Object.fromEntries([
+            ...modes.filter((m) => m.reason).map((m) => [m.name, m.reason!]),
+            ...histories
+              .filter((h) => h.blocked_by)
+              .map((h) => [`DEF_hist_vars%${h.name}`, h.blocked_by!]),
+          ]),
+        );
+        setHistoryVars(
+          histories.map((h) => ({
+            name: h.name,
+            settable: h.settable && h.writable === true,
+            longName: h.long_name,
+            reason: h.blocked_by,
+          })),
+        );
+        setDisabledFields([
+          ...modes
+            .filter((m) => ['disabled', 'readonly'].includes(m.mode.toLowerCase()))
+            .map((m) => m.name),
           ...histories
-            .filter((h) => h.blocked_by)
-            .map((h) => [`DEF_hist_vars%${h.name}`, h.blocked_by!]),
-        ]),
-      );
-      setHistoryVars(
-        histories.map((h) => ({
-          name: h.name,
-          settable: h.settable && h.writable !== false,
-          longName: h.long_name,
-          reason: h.blocked_by,
-        })),
-      );
-      setDisabledFields([
-        ...modes
-          .filter((m) => ['disabled', 'readonly'].includes(m.mode.toLowerCase()))
-          .map((m) => m.name),
-        ...histories
-          .filter((h) => !h.settable || h.writable === false)
-          .map((h) => `DEF_hist_vars%${h.name}`),
-      ]);
+            .filter((h) => !h.settable || h.writable !== true)
+            .map((h) => `DEF_hist_vars%${h.name}`),
+        ]);
+      } finally {
+        if (context.preview_token)
+          await invoke('model_case_context_release', { token: context.preview_token }).catch(
+            () => {},
+          );
+      }
     }
     void load()
       .catch((e) => {
@@ -617,21 +639,29 @@ export default function CasesPage() {
       try {
         const context = await invoke<{
           entry: { dir: string };
+          preview_token?: string;
           profile: NonNullable<typeof modelContext>['profile'];
         }>('model_case_context', { dir: target, modelRevision: state.versionRef });
-        if (!id.active || epoch.current !== id) return;
-        setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
-        if (state.selectedCase?.entry.dir === target)
-          update({
-            selectedCase: {
-              ...state.selectedCase,
-              profile: { ...state.selectedCase.profile, ...context.profile },
-            },
-          });
-        await refreshHistory(context, id);
-        if (id.active && epoch.current === id) {
-          setContextStale(false);
-          contextStaleRef.current = false;
+        try {
+          if (!id.active || epoch.current !== id) return;
+          setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
+          if (state.selectedCase?.entry.dir === target)
+            update({
+              selectedCase: {
+                ...state.selectedCase,
+                profile: { ...state.selectedCase.profile, ...context.profile },
+              },
+            });
+          await refreshHistory(context, id);
+          if (id.active && epoch.current === id) {
+            setContextStale(false);
+            contextStaleRef.current = false;
+          }
+        } finally {
+          if (context.preview_token)
+            await invoke('model_case_context_release', { token: context.preview_token }).catch(
+              () => {},
+            );
         }
       } catch (error) {
         if (!id.active || epoch.current !== id) return;
@@ -809,7 +839,7 @@ export default function CasesPage() {
         options: [
           {
             value: '',
-            label: `${t('保留当前配置', 'Keep current configuration')}（${forcingInput.dataset}）`,
+            label: `${t('保留当前配置', 'Keep current configuration')}${t('（', ' (')}${forcingInput.dataset}${t('）', ')')}`,
           },
           ...forcingDatasets.map((value) => ({ value, label: value })),
         ],
@@ -956,8 +986,8 @@ export default function CasesPage() {
       key={f.name}
       label={labels[f.name] || fieldLabel(f.name, state.language)}
       hint={
-        configurationReason(optionState(f.name)?.reason) ??
-        configurationReason(contextReason[f.name]) ??
+        configurationReason(optionState(f.name)?.reason, en) ??
+        configurationReason(contextReason[f.name], en) ??
         (advanced ? f.name : undefined)
       }
     >

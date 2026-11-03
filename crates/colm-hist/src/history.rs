@@ -589,6 +589,8 @@ impl HistoryBuffers {
                 .with_context(|| format!("{} disappeared after definition", variable.name))?
                 .put_values(&variable.values, netcdf::Extents::All)?;
         }
+        file.close()
+            .with_context(|| format!("cannot close {}", path.display()))?;
         Ok(())
     }
 
@@ -641,6 +643,8 @@ impl HistoryBuffers {
                 .with_context(|| format!("{} disappeared after definition", variable.name))?
                 .put_values(&variable.values, netcdf::Extents::All)?;
         }
+        file.close()
+            .with_context(|| format!("cannot close {}", path.display()))?;
         Ok(())
     }
 

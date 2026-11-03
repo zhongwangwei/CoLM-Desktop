@@ -20,7 +20,7 @@ MODULE MOD_BGC_Veg_CNFireLi2016
 
    USE MOD_Precision
    USE MOD_TimeManager
-   USE MOD_Namelist, only: DEF_Runoff_SCHEME, DEF_TOPMOD_method
+   USE MOD_Namelist, only: DEF_Runoff_SCHEME, DEF_TOPMOD_method, DEF_USE_Campbell_SOIL_MODEL
    USE MOD_IncompleteGamma, only: GRATIO
    USE MOD_Const_Physical, only: tfrz
    USE MOD_Vars_Global, only: spval
@@ -203,15 +203,14 @@ CONTAINS
             do j = 1, nl_soil
                s_node = max(wliq_soisno(j,i)/(1000.*dz_soi(j)*porsl(j,i)),0.001)
                s_node = min(1., s_node)
-#ifdef Campbell_SOIL_MODEL
+               IF (DEF_USE_Campbell_SOIL_MODEL) THEN
                smp_node = max(smpswc, psi0(j,i)*s_node**(-bsw(j,i)))
-#endif
-#ifdef vanGenuchten_Mualem_SOIL_MODEL
+               ELSE
                smp_node = soil_psi_from_vliq ( s_node*(porsl(j,i)-theta_r(j,i)) + theta_r(j,i), &
                   porsl(j,i), theta_r(j,i), psi0(j,i), &
                   5, (/alpha_vgm(j,i), n_vgm(j,i), L_vgm(j,i), sc_vgm(j,i), fc_vgm(j,i)/))
                smp_node = max(smpswc, smp_node)
-#endif
+               ENDIF
             
 !               btran2_p(m) = btran2_p(m) + rootfr_p(j,ivt) * max(0._r8, min((smp_node - smpswc) / &
 !                    (smpsfc - smpswc),1._r8))

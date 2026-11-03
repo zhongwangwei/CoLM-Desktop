@@ -484,6 +484,7 @@ fn input<'a>(
     canopy: &'a CanopyState,
 ) -> ConstantRestartInput<'a> {
     ConstantRestartInput {
+        pc_crown_aspect_ratio: None,
         compression_level: 1,
         dimensions: RestartDimensions {
             wavelengths: 3,
@@ -777,4 +778,45 @@ fn constant_restart_round_trips_through_the_reader() {
         on_disk[10..20].to_vec()
     );
     crate::remove_test_tree(root);
+}
+
+#[test]
+fn restart_tuning_rejects_fractional_or_out_of_range_land_classes() {
+    for class in ["1.5", "0", "25", "-2", "'bad'"] {
+        let doc =
+            colm_namelist::parse(&format!("&nl_colm\n SITE_landtype = {class}\n/\n")).unwrap();
+        assert!(
+            super::RestartTuning::from_document(&doc).is_err(),
+            "{class}"
+        );
+    }
+}
+
+#[test]
+fn pc_patch_constant_restart_preserves_fraction_weighted_crown_ratios() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let root = temp_dir("pc-patch-crown");
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    let mut fields = input(&soil, &lake, &canopy);
+    fields.pc_crown_aspect_ratio = Some(&[0.875, 1.5]);
+    let path = root.join("pc.nc");
+    write_constant_restart_block(&path, fields).unwrap();
+    let file = crate::RestartFile::open(&path).unwrap();
+    assert_eq!(file.floats("cratio").unwrap(), &[0.875, 1.5]);
+    fields.pc_crown_aspect_ratio = Some(&[f64::NAN, 1.0]);
+    assert!(write_constant_restart_block(root.join("invalid.nc"), fields).is_err());
+    assert!(!root.join("invalid.nc").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn site_landtype_minus_one_preserves_the_fortran_unset_marker() {
+    let unset = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+    let explicit = colm_namelist::parse("&nl_colm\n SITE_landtype = -1\n/\n").unwrap();
+    assert_eq!(
+        super::RestartTuning::from_document(&unset).unwrap(),
+        super::RestartTuning::from_document(&explicit).unwrap()
+    );
 }

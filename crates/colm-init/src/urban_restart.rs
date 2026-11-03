@@ -222,6 +222,8 @@ pub fn write_urban_constant_restart_block(
             input.compression_level,
         )?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 
@@ -742,6 +744,8 @@ pub fn write_urban_time_restart_block(
             input.compression_level,
         )?;
     }
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useApp, useNavigationGuard } from '../../lib/app-state';
+import { useApp, useBeforeClose, useNavigationGuard } from '../../lib/app-state';
 import { invoke, listen } from '../../lib/ipc';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
@@ -15,6 +15,9 @@ import {
 } from '../../components/ui';
 import {
   caseDirectory,
+  isMethaneSite,
+  withoutSiteDefaults,
+  type SiteDefaults,
   displayLiteral,
   cropEnabled,
   requiredNumber,
@@ -91,14 +94,6 @@ import EngineProgress from './EngineProgress';
 import TaskCard from '../../components/TaskCard';
 import type { BuildProgress } from './engine-progress';
 
-function isMethaneSite(site: Site) {
-  return (
-    !site.urban &&
-    !site.crop &&
-    (site.name === 'AT-Neu' || /ch4/i.test(site.obs_file ?? '') || /ch4/i.test(site.site_file))
-  );
-}
-
 function siteInfo(s: Site, t: (zh: string, en: string) => string) {
   if (s.urban)
     return {
@@ -163,7 +158,7 @@ type EngineState = {
 };
 
 export default function NewCasePage() {
-  const { state, update, openCase, navigate, notify } = useApp(),
+  const { state, update, openCase, navigate, notify, trackPendingSave } = useApp(),
     en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const seed = state.newCaseSeed;
@@ -313,6 +308,8 @@ export default function NewCasePage() {
     [schema, setSchema] = useState<SchemaField[]>([]),
     [schemaReady, setSchemaReady] = useState(false),
     [modelFields, setModelFields] = useState<SchemaField[]>([]);
+  const siteDefaults = useRef<SiteDefaults>(seed?.siteDefaults ?? { previous: {}, values: {} });
+  const [historySwitches, setHistorySwitches] = useState<Record<string, string>>({});
   const [historyVariables, setHistoryVariables] = useState<
     Array<{ name: string; long_name?: string }>
   >([]);
@@ -520,7 +517,12 @@ export default function NewCasePage() {
             ),
           )),
   );
-  const creation = useRef<{ dir: string; cancelRequested: boolean; batch?: string } | null>(null),
+  const creation = useRef<{
+      dir: string;
+      host?: string;
+      cancelRequested: boolean;
+      batch?: string;
+    } | null>(null),
     lock = useRef(false),
     sequence = useRef(0),
     alive = useRef(true),
@@ -609,7 +611,10 @@ export default function NewCasePage() {
       multiSiteEnabled,
       multiSiteMode,
       multiSiteRepeat,
-      siteDrafts,
+      siteDrafts: siteDrafts.filter(
+        (site) => !multiResults.some((result) => result.site === site.site && result.created),
+      ),
+      siteDefaults: siteDefaults.current,
     };
   }
   // 记录失败不挡向导：这只是方便找回，写不进去时照样能建模拟。保存排成一队，免得第一次保存还没
@@ -624,6 +629,7 @@ export default function NewCasePage() {
     const snapshot = wizardSeed(at),
       name = (form.name ?? '').trim() || t('未命名模拟', 'Untitled simulation');
     record.queue = record.queue
+      .catch(() => {})
       .then(() =>
         invoke<string>('new_simulation_draft_save', {
           id: record.id,
@@ -634,8 +640,10 @@ export default function NewCasePage() {
       )
       .then((id) => {
         if (typeof id === 'string') record.id = id;
-      })
-      .catch(() => {});
+      });
+    trackPendingSave(record.queue);
+    void record.queue.catch(() => {});
+    return record.queue;
   }
   // 建好以后由项目自己的记录接替；排在未完成的保存之后，拿到的是最终的记录号。
   function closeDraft() {
@@ -652,14 +660,30 @@ export default function NewCasePage() {
   const saveOnLeave = useRef(() => {});
   saveOnLeave.current = () => saveDraft(step);
   useEffect(() => () => saveOnLeave.current(), []);
+  const draftContent = JSON.stringify(wizardSeed(step));
   useEffect(() => {
-    saveDraft(step);
-    // Saved per step; leaving the page saves whatever was filled in since.
+    // Leaving or closing still flushes immediately; typing saves only after a pause.
+    const timer = window.setTimeout(() => saveDraft(step), 300);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [draftContent]);
+  useBeforeClose(async () => {
+    saveDraft(step);
+    let pending: Promise<unknown>;
+    do {
+      pending = draft.current.queue;
+      await pending;
+    } while (pending !== draft.current.queue);
+  });
   useEffect(() => {
-    if (multiResults.some((result) => result.created)) closeDraft();
-  }, [multiResults]);
+    if (
+      siteDrafts.length > 0 &&
+      siteDrafts.every((site) =>
+        multiResults.some((result) => result.site === site.site && result.created),
+      )
+    )
+      closeDraft();
+  }, [multiResults, siteDrafts]);
   // Prepare the server engine as soon as a server is chosen. After an app update the server
   // compiles a matching engine for a few minutes; doing it here keeps that wait off
   // "Read sites" and case creation, which share the same server-side build lock.
@@ -840,14 +864,16 @@ export default function NewCasePage() {
     let current = true;
     if (!schemaReady || !state.version) return;
     setOptionError('');
-    void invoke<{ fields: ConfigurationField[]; crop_defaults?: Record<string, string> }>(
-      'model_configuration',
-      JSON.parse(dataRequest),
-    )
+    void invoke<{
+      fields: ConfigurationField[];
+      crop_defaults?: Record<string, string>;
+      history_switches?: Record<string, string>;
+    }>('model_configuration', JSON.parse(dataRequest))
       .then((result) => {
         if (current) {
           setOptionStates(result.fields);
           setCropDefaults(result.crop_defaults ?? {});
+          setHistorySwitches(result.history_switches ?? {});
         }
       })
       .catch((e) => {
@@ -897,6 +923,16 @@ export default function NewCasePage() {
     ) {
       ++forcingSequence.current;
       setForcingProbe(null);
+    }
+    if (['sitedir', 'forcingdir'].includes(k) && v !== form[k]) {
+      ++sequence.current;
+      ++scanToken.current;
+      setScanning(false);
+      setSites([]);
+      setSiteDrafts([]);
+      setMultiResults([]);
+      setHint('');
+      setForm((old) => ({ ...old, site: '', met: '' }));
     }
     if (k === 'host' && v !== form.host) {
       ++sequence.current;
@@ -1234,6 +1270,7 @@ export default function NewCasePage() {
       return;
     }
     const methane = isMethaneSite(site);
+    const previous = withoutSiteDefaults(caseValues, siteDefaults.current);
     let methaneValues: Record<string, string> | undefined;
     if (methane) {
       if (!schemaReady) {
@@ -1252,7 +1289,7 @@ export default function NewCasePage() {
             )
           : {};
         const existing = {
-          physics: { ...inheritedMaterials, ...caseValues },
+          physics: { ...inheritedMaterials, ...previous },
           parameters: [],
           process_files: [],
         };
@@ -1325,7 +1362,7 @@ export default function NewCasePage() {
       start: site.start ?? '',
       end: site.end ?? '',
     }));
-    setCaseValues((previous) => {
+    {
       const next: Record<string, string> = {
         ...previous,
         ...methaneValues,
@@ -1349,8 +1386,14 @@ export default function NewCasePage() {
             DEF_SOLUTE_NAMES: "''",
           });
       }
-      return next;
-    });
+      siteDefaults.current = {
+        previous,
+        values: Object.fromEntries(
+          Object.entries(next).filter(([key, value]) => previous[key] !== value),
+        ),
+      };
+      setCaseValues(next);
+    }
     if (site.crop || site.urban || methane)
       setForm((previous) => ({
         ...previous,
@@ -1536,7 +1579,7 @@ export default function NewCasePage() {
     const shared = {
       ...effectiveModelFields(state.version?.overlay, modelFields),
       ...schemeFields,
-      ...Object.fromEntries(editedOptions),
+      ...withoutSiteDefaults(Object.fromEntries(editedOptions), siteDefaults.current),
     };
     for (const key of Object.keys(shared)) {
       if (
@@ -1601,7 +1644,7 @@ export default function NewCasePage() {
     const plans = multiPlans(5);
     const revision = state.versionRef;
     const results = [...multiResults];
-    const job: { dir: string; cancelRequested: boolean; batch?: string } = {
+    const job: { dir: string; host?: string; cancelRequested: boolean; batch?: string } = {
       dir: '',
       cancelRequested: false,
     };
@@ -1872,7 +1915,7 @@ export default function NewCasePage() {
           (field) => !templateForcing || field.path.toLowerCase() !== 'def_forcing_namelist',
         ),
         mode = versionMode(physics, classification);
-      const job = { dir: out, cancelRequested: false };
+      const job = { dir: out, host: form.host, cancelRequested: false };
       creation.current = job;
       setCreationDir(out);
       setCancellingCreation(false);
@@ -1987,7 +2030,7 @@ export default function NewCasePage() {
     try {
       const cancelled = job.batch
         ? await invoke<number>('remote_create_cases_cancel', { batch: job.batch })
-        : await invoke<number>('case_creation_cancel', { dir: job.dir });
+        : await invoke<number>('case_creation_cancel', { dir: job.dir, host: job.host || null });
       if (!multiSite && !cancelled && creation.current === job)
         throw new Error(
           t(
@@ -2469,7 +2512,7 @@ export default function NewCasePage() {
     <Field
       key={f.name}
       label={optionLabels[f.name] || fieldLabel(f.name, state.language)}
-      hint={configurationReason(optionState(f.name)?.reason) ?? (advanced ? f.name : undefined)}
+      hint={configurationReason(optionState(f.name)?.reason, en) ?? (advanced ? f.name : undefined)}
     >
       {f.kind === 'Logical' ? (
         <Select
@@ -3061,8 +3104,9 @@ export default function NewCasePage() {
               )}
               {!multiSite && scannedForcing(selected, form.met) && selected && (
                 <p className="muted">
-                  {t('已读取强迫场覆盖', 'Scanned forcing coverage')}：{selected.start} —{' '}
-                  {selected.end}
+                  {t('已读取强迫场覆盖', 'Scanned forcing coverage')}
+                  {t('：', ': ')}
+                  {selected.start} — {selected.end}
                 </p>
               )}
             </>
@@ -3482,8 +3526,7 @@ export default function NewCasePage() {
               settable: true,
               longName: v.long_name,
             }))}
-            values={caseValues}
-            defaultOn
+            values={{ ...historySwitches, ...caseValues }}
             disabled={!enabled}
             en={en}
             onChange={(patch) => setCaseValues((old) => ({ ...old, ...patch }))}

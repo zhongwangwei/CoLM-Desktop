@@ -7,7 +7,7 @@ import { usePageContract, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
 import type { Overlay } from '../../lib/types';
 import type { ModelField } from './model';
-import { modelSettingValue } from '../cases/model-settings';
+import { configurationReason, modelSettingValue } from '../cases/model-settings';
 import {
   caseOptionOverlay,
   caseOptionPatch,
@@ -137,7 +137,7 @@ export default function ScientificSetupCards({
           : request.value;
       const choice = choices.find((c) => c.id === request.id);
       const reason = choice?.choices.find((c) => c.value === requestedValue)?.reason;
-      if (reason) throw new Error(reason);
+      if (reason) throw new Error(configurationReason(reason, state.language === 'en'));
       const previous = choice?.value;
       if (
         onCaseChange &&
@@ -251,7 +251,9 @@ export default function ScientificSetupCards({
                   ? t('选择材料', 'Choose materials')
                   : t(choice.zh, choice.en)}
               </strong>
-              {choice.reason && <small>{choice.reason}</small>}
+              {choice.reason && (
+                <small>{configurationReason(choice.reason, state.language === 'en')}</small>
+              )}
             </Button>
           ))}
         </div>

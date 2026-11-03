@@ -83,6 +83,7 @@ fn should_emit_task_log(last: &mut Option<Instant>, now: Instant) -> bool {
 
 impl StudyRunLock {
     pub(crate) fn acquire(study_dir: &Path) -> Result<Self> {
+        let _mutation = run_lock_mutation(study_dir)?;
         let path = study_dir.join("run.lock");
         let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => file,
@@ -105,8 +106,7 @@ impl StudyRunLock {
         let heartbeat_path = path.clone();
         let heartbeat_record = record.clone();
         let (stop, stopped) = mpsc::channel();
-        // ponytail: MSRV 1.85 has no portable std file lock; this short lease
-        // prevents confirmed crash recovery from deleting a live scheduler lock.
+        // Heartbeats also let legacy recovery detect a live scheduler.
         let heartbeat = std::thread::spawn(move || {
             let mut record = heartbeat_record;
             while matches!(
@@ -139,11 +139,20 @@ impl Drop for StudyRunLock {
         if let Some(heartbeat) = self.heartbeat.take() {
             let _ = heartbeat.join();
         }
-        // Remove only our own lock, never one a replacement scheduler created after ours.
+        // Serialize ownership verification and unlink with recovery and replacement.
+        let Ok(_mutation) = run_lock_mutation(self.path.parent().unwrap()) else {
+            return;
+        };
         if owns_run_lock(&self.path, &self.record) {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+fn run_lock_mutation(study_dir: &Path) -> Result<std::fs::File> {
+    // shortcut: older pinned CLIs ignore this lock; mixed-version writers need protocol negotiation.
+    colm_case::file_lock::exclusive(&study_dir.join(".run-lock-mutation"))
+        .context("cannot serialize Study scheduler state")
 }
 
 fn owns_run_lock(path: &Path, record: &RunLockRecord) -> bool {
@@ -151,11 +160,18 @@ fn owns_run_lock(path: &Path, record: &RunLockRecord) -> bool {
         owner.owner.pid == record.owner.pid
             && owner.owner.started_unix == record.owner.started_unix
             && owner.owner.argv_sha256 == record.owner.argv_sha256
+            && owner.run_id == record.run_id
+            && owner.owner.process_birth == record.owner.process_birth
     })
 }
 
 /// Rewrite the lease through a sibling file and a rename, so readers never see half a record.
 fn replace_run_lock(path: &Path, record: &RunLockRecord) -> Result<()> {
+    let _mutation = run_lock_mutation(path.parent().context("run lock has no parent")?)?;
+    anyhow::ensure!(
+        owns_run_lock(path, record),
+        "Study scheduler changed before heartbeat"
+    );
     let staged = path.with_extension(format!("lock.{}", std::process::id()));
     let mut file = fs::File::create(&staged)?;
     write_run_lock_record(&staged, &mut file, record)?;
@@ -173,14 +189,15 @@ fn write_run_lock_record(path: &Path, file: &mut fs::File, record: &RunLockRecor
 }
 
 fn clear_stale_run_lock(study_dir: &Path) -> Result<()> {
+    let _mutation = run_lock_mutation(study_dir)?;
     let path = study_dir.join("run.lock");
-    let Some(owner) = run_lock_record(&path)?.map(|record| record.owner) else {
+    let Some(record) = run_lock_record(&path)? else {
         return Ok(());
     };
-    if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
-        || scheduler_process_alive(owner.pid)?
+    if unix_now().saturating_sub(record.owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS
+        || record_process_live(&record)?
     {
-        bail!("Study scheduler PID {} is still running", owner.pid);
+        bail!("Study scheduler PID {} is still running", record.owner.pid);
     }
     fs::remove_file(&path).with_context(|| format!("cannot remove stale {}", path.display()))
 }
@@ -2178,6 +2195,7 @@ pub(super) fn ensure_scheduler_idle(study_dir: &Path) -> Result<()> {
 
 pub fn status_state(study_dir: &Path) -> Result<Option<StudyState>> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    let _mutation = run_lock_mutation(&study_dir)?;
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let Some(mut state) =
         super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?.map(|loaded| loaded.payload)
@@ -2205,26 +2223,87 @@ fn scheduler_is_live(study_dir: &Path) -> Result<bool> {
     let Some(record) = run_lock_record(&study_dir.join("run.lock"))? else {
         return Ok(false);
     };
-    scheduler_owner_live(&record.owner)
+    scheduler_owner_live(&record)
 }
 
 /// The lock owner may still write checkpoints: its heartbeat is fresh, or its PID is alive and
 /// still runs the recorded scheduler executable. A stale heartbeat alone (sleep, clock jump,
 /// one failed heartbeat write) must not let `study-status` become a second checkpoint writer
 /// next to a running scheduler; a PID reused by another program is not that scheduler.
-fn scheduler_owner_live(owner: &ProcessIdentity) -> Result<bool> {
-    if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS {
+fn scheduler_owner_live(record: &RunLockRecord) -> Result<bool> {
+    if unix_now().saturating_sub(record.owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS {
         return Ok(true);
+    }
+    record_process_live(record)
+}
+
+fn record_process_live(record: &RunLockRecord) -> Result<bool> {
+    let owner = &record.owner;
+    if owner.process_birth.is_some() {
+        return worker_process_live(owner);
     }
     if !scheduler_process_alive(owner.pid)? {
         return Ok(false);
     }
-    let recorded = Path::new(&owner.executable).file_name();
     Ok(match process_image_name(owner.pid) {
-        // When the platform cannot say what the PID runs, stay on the safe side: no second writer.
         None => true,
-        Some(name) => recorded.is_some_and(|recorded| recorded == name.as_os_str()),
+        Some(name) => Path::new(&owner.executable)
+            .file_name()
+            .is_some_and(|recorded| recorded == name.as_os_str()),
     })
+}
+
+fn worker_process_live(owner: &ProcessIdentity) -> Result<bool> {
+    if !scheduler_process_alive(owner.pid)? {
+        return Ok(false);
+    }
+    if let (Some(recorded), Some(current)) =
+        (owner.process_birth.as_deref(), process_birth_id(owner.pid))
+    {
+        return Ok(recorded == current);
+    }
+    // A legacy worker may be launched through a shell/MPI wrapper with a different image name.
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn process_birth_id(pid: u32) -> Option<String> {
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    Some(format!("{}:{start}", boot.trim()))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_birth_id(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !value.is_empty()).then_some(value)
+}
+
+#[cfg(windows)]
+fn process_birth_id(pid: u32) -> Option<String> {
+    let script = format!(
+        "$ErrorActionPreference='Stop'; (Get-Process -Id {pid}).StartTime.ToUniversalTime().Ticks"
+    );
+    let mut command = std::process::Command::new("powershell.exe");
+    colm_kernel::run::no_console(&mut command);
+    let output = command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()?;
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !value.is_empty()).then_some(value)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_birth_id(_pid: u32) -> Option<String> {
+    None
 }
 
 /// File name of the executable a live PID runs, when the platform can tell.
@@ -2278,7 +2357,7 @@ fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
     for task in state.tasks.values_mut() {
         if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
             let process_alive = match &task.process {
-                Some(process) => scheduler_process_alive(process.pid)?,
+                Some(process) => worker_process_live(process)?,
                 None => false,
             };
             task.status = TaskStatus::NeedsReview;
@@ -2330,58 +2409,56 @@ fn finalize_cancel_impl(
     expected_run_id: Option<&str>,
 ) -> Result<StudyState> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    let _mutation = run_lock_mutation(&study_dir)?;
     let lock_path = study_dir.join("run.lock");
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
         .map(|loaded| loaded.payload)
         .with_context(|| format!("{} has no Study state checkpoint", study_dir.display()))?;
-    let had_lock = match run_lock_record(&lock_path)? {
-        Some(record) => {
-            // 带运行 ID 时优先按运行 ID 认锁。只有锁里没有运行 ID（升级前冻结的 CLI）
-            // 才回落到 PID：冻结修订的运行里内层 PID 不可能等于外层 PID，若两个都带上却
-            // 只比 PID，PID 复用后另一个运行的调度器可能恰好拿到同一个号，迟到的取消就会
-            // 把它误杀；反过来，有 ID 却因为锁里缺 ID 直接拒绝，旧锁就永远清不掉了。
-            let claimed = match (expected_pid, expected_run_id) {
-                // 空闲收尾（GUI 没有登记到进程）只用于“调度器已确认停止”的收尾，
-                // 它本来就不带启动身份，不能因此把任何在跑的锁都当自己的。
-                (None, None) => true,
-                (Some(pid), Some(expected)) => match record.run_id.as_deref() {
-                    Some(lock_run_id) => lock_run_id == expected,
-                    None => record.owner.pid == pid,
-                },
-                (None, Some(expected)) => record.run_id.as_deref() == Some(expected),
-                (Some(pid), None) => record.owner.pid == pid,
-            };
-            if !claimed {
-                bail!(
-                    "Study scheduler changed while cancelling: expected PID {}, found {}",
-                    expected_pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "none".into()),
-                    record.owner.pid
-                );
-            }
-            if scheduler_process_alive(record.owner.pid)? {
-                bail!("Study scheduler PID {} is still running", record.owner.pid);
-            }
-            true
+    let lock_record = run_lock_record(&lock_path)?;
+    if let Some(record) = &lock_record {
+        // 带运行 ID 时优先按运行 ID 认锁。只有锁里没有运行 ID（升级前冻结的 CLI）
+        // 才回落到 PID：冻结修订的运行里内层 PID 不可能等于外层 PID，若两个都带上却
+        // 只比 PID，PID 复用后另一个运行的调度器可能恰好拿到同一个号，迟到的取消就会
+        // 把它误杀；反过来，有 ID 却因为锁里缺 ID 直接拒绝，旧锁就永远清不掉了。
+        let claimed = match (expected_pid, expected_run_id) {
+            // 空闲收尾（GUI 没有登记到进程）只用于“调度器已确认停止”的收尾，
+            // 它本来就不带启动身份，不能因此把任何在跑的锁都当自己的。
+            (None, None) => true,
+            (Some(pid), Some(expected)) => match record.run_id.as_deref() {
+                Some(lock_run_id) => lock_run_id == expected,
+                None => record.owner.pid == pid,
+            },
+            (None, Some(expected)) => record.run_id.as_deref() == Some(expected),
+            (Some(pid), None) => record.owner.pid == pid,
+        };
+        if !claimed {
+            bail!(
+                "Study scheduler changed while cancelling: expected PID {}, found {}",
+                expected_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                record.owner.pid
+            );
         }
-        None => false,
-    };
+        if record_process_live(record)? {
+            bail!("Study scheduler PID {} is still running", record.owner.pid);
+        }
+    }
     let mut changed = false;
     for task in state.tasks.values_mut() {
         if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
             let Some(process) = &task.process else {
                 bail!("Study has active tasks without a verified process identity");
             };
-            if scheduler_process_alive(process.pid)? {
+            if worker_process_live(process)? {
                 bail!("Study worker PID {} is still running", process.pid);
             }
         } else if task.status == TaskStatus::NeedsReview
             && task
                 .process
                 .as_ref()
-                .is_some_and(|process| scheduler_process_alive(process.pid).unwrap_or(true))
+                .is_some_and(|process| worker_process_live(process).unwrap_or(true))
         {
             bail!("Study has a review task with a live unverified process");
         }
@@ -2402,6 +2479,11 @@ fn finalize_cancel_impl(
         }
     }
     state.finish_status();
+    let still_owned = match &lock_record {
+        Some(record) => owns_run_lock(&lock_path, record),
+        None => !lock_path.try_exists()?,
+    };
+    anyhow::ensure!(still_owned, "Study scheduler changed while cancelling");
     if changed {
         state.status = StudyStatus::Cancelled;
         super::checkpoint::write_next(&checkpoint_dir, &state)?;
@@ -2411,7 +2493,12 @@ fn finalize_cancel_impl(
             serde_json::json!({"type":"study_cancelled","kind":"study_cancelled","study":state.study_id,"status":state.status}),
         )?;
     }
-    if had_lock {
+    if let Some(record) = &lock_record {
+        // Legacy writers do not take the mutation lock; refuse a changed owner before unlink.
+        anyhow::ensure!(
+            owns_run_lock(&lock_path, record),
+            "Study scheduler changed while cancelling"
+        );
         fs::remove_file(&lock_path).with_context(|| {
             format!("cannot remove cancelled Study lock {}", lock_path.display())
         })?;
@@ -3047,6 +3134,7 @@ fn run_members(
                                 argv_sha256: String::new(),
                                 started_unix: now,
                                 heartbeat_unix: now,
+                                process_birth: process_birth_id(pid),
                             });
                             super::checkpoint::write_next(checkpoint_dir, state)?;
                         }
@@ -6072,6 +6160,7 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn supervisor_identity() -> ProcessIdentity {
+    static BIRTH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let now = unix_now();
     let executable = std::env::current_exe()
         .map(|path| path.to_string_lossy().into_owned())
@@ -6083,6 +6172,9 @@ fn supervisor_identity() -> ProcessIdentity {
         argv_sha256: sha256(argv.as_bytes()),
         started_unix: now,
         heartbeat_unix: now,
+        process_birth: BIRTH
+            .get_or_init(|| process_birth_id(std::process::id()))
+            .clone(),
     }
 }
 
@@ -6248,6 +6340,132 @@ pub(crate) fn save_version(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancel_rechecks_the_scheduler_after_waiting_for_the_mutation_lock() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!(
+            "colm-cancel-race-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        fs::create_dir_all(dir.join("checkpoints/state")).unwrap();
+        let state = StudyState::new(
+            "race".into(),
+            [crate::study::state::TaskState {
+                member: "m1".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Queued,
+                stage: None,
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: None,
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&dir.join("checkpoints/state"), &state).unwrap();
+        let owner = RunLockRecord {
+            owner: ProcessIdentity {
+                pid: exited_child_pid(),
+                ..supervisor_identity()
+            },
+            run_id: Some("old".into()),
+        };
+        fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
+        let mutation = run_lock_mutation(&dir).unwrap();
+        let target = dir.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            finalize_cancel_impl(&target, None, Some("old"))
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !worker.is_finished(),
+            "cancellation must wait for the mutation lock"
+        );
+        let successor = RunLockRecord {
+            run_id: Some("new".into()),
+            ..owner
+        };
+        fs::write(
+            dir.join("run.lock"),
+            serde_json::to_vec(&successor).unwrap(),
+        )
+        .unwrap();
+        drop(mutation);
+        assert!(worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("scheduler changed"));
+        assert_eq!(
+            run_lock_record(&dir.join("run.lock"))
+                .unwrap()
+                .unwrap()
+                .run_id
+                .as_deref(),
+            Some("new")
+        );
+        let saved =
+            super::super::checkpoint::load_latest::<StudyState>(&dir.join("checkpoints/state"))
+                .unwrap()
+                .unwrap()
+                .payload;
+        assert!(saved
+            .tasks
+            .values()
+            .all(|task| task.status == TaskStatus::Queued));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn worker_identity_detects_pid_reuse_and_accepts_legacy_checkpoints() {
+        let mut process = supervisor_identity();
+        let Some(birth) = process.process_birth.clone() else {
+            return;
+        };
+        assert!(worker_process_live(&process).unwrap());
+        process.process_birth = Some(format!("different:{birth}"));
+        assert!(!worker_process_live(&process).unwrap());
+        let mut legacy = serde_json::to_value(&process).unwrap();
+        legacy.as_object_mut().unwrap().remove("process_birth");
+        let mut legacy: ProcessIdentity = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.process_birth.is_none());
+        legacy.executable = "/configured/wrapper".into();
+        assert!(worker_process_live(&legacy).unwrap());
+    }
+
+    #[test]
+    fn a_reused_pid_with_a_different_birth_does_not_keep_a_stale_lock_alive() {
+        use super::*;
+        let Some(birth) = process_birth_id(std::process::id()) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "colm-reused-pid-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut owner = supervisor_identity();
+        owner.heartbeat_unix = unix_now() - RUN_LOCK_STALE_SECONDS - 1;
+        owner.process_birth = Some(format!("different:{birth}"));
+        let record = RunLockRecord {
+            owner,
+            run_id: None,
+        };
+        fs::write(dir.join("run.lock"), serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(!record_process_live(&record).unwrap());
+        assert!(!scheduler_is_live(&dir).unwrap());
+        clear_stale_run_lock(&dir).unwrap();
+        assert!(!dir.join("run.lock").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
 
     #[test]
@@ -8182,6 +8400,7 @@ mod tests {
         let mut process = supervisor_identity();
         process.executable = "not-the-recorded-scheduler".into();
         process.argv_sha256 = "wrong".into();
+        process.process_birth = None;
         let state = StudyState::new(
             id,
             [crate::study::state::TaskState {
@@ -8201,6 +8420,7 @@ mod tests {
         let mut owner = supervisor_identity();
         owner.executable = "not-the-recorded-scheduler".into();
         owner.argv_sha256 = "wrong".into();
+        owner.process_birth = None;
         owner.heartbeat_unix = 0;
         std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
 
@@ -8216,7 +8436,15 @@ mod tests {
             .contains("ownership could not be verified"));
         assert!(retry(&dir, true).is_err());
         let error = finalize_idle_cancel(&dir).unwrap_err().to_string();
-        assert!(error.contains("still running"), "{error}");
+        assert!(
+            error.contains("review task with a live unverified process"),
+            "{error}"
+        );
+        let unchanged = status_state(&dir).unwrap().unwrap();
+        assert_eq!(
+            unchanged.tasks["m000001/site"].status,
+            TaskStatus::NeedsReview
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

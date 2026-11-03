@@ -1651,7 +1651,10 @@ fn model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works() {
 // 表是进程级静态的：两种归属放在同一条测试里，免得并行测试互相终止对方登记的子进程。
 #[cfg(unix)]
 #[test]
-fn detached_children_stop_by_owner_and_all_stop_when_the_app_exits() {
+fn detached_children_stop_by_owner_without_cancelling_other_operations() {
+    let _serial = CHILD_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let sleeper = || {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "sleep 30"]);
@@ -1676,9 +1679,9 @@ fn detached_children_stop_by_owner_and_all_stop_when_the_app_exits() {
     assert!(!remote_guard.stopped());
     drop(preparation_guard);
     assert_eq!(
-        cancel_detached_children().unwrap(),
+        cancel_remote_submission("/case/a".into()).unwrap(),
         1,
-        "exit cancels the remaining remote child"
+        "the owner cancels the remaining remote child"
     );
     assert!(
         !remote.wait().unwrap().success(),
@@ -1686,7 +1689,7 @@ fn detached_children_stop_by_owner_and_all_stop_when_the_app_exits() {
     );
     drop(remote_guard);
     assert_eq!(
-        cancel_detached_children().unwrap(),
+        cancel_remote_submission("/case/a".into()).unwrap(),
         0,
         "the guard removes a finished child from the registry"
     );
@@ -2552,4 +2555,66 @@ fn the_background_watcher_registers_a_lock_that_appears_after_spawn() {
     let _ = child.wait();
     processes.forget(&key).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancelled_study_errors_keep_cancelled_history_status() {
+    assert_eq!(
+        study_result_status(&Err(r#"{"kind":"study_cancelled"}"#.into())),
+        "cancelled"
+    );
+    assert_eq!(study_result_status(&Err("engine failed".into())), "failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_bench_and_creation_cancel_only_their_owner() {
+    let _serial = CHILD_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let spawn = |owner| {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        let child = colm_kernel::run::top_level_sidecar(&mut command)
+            .spawn()
+            .unwrap();
+        let guard = register_child(child.id(), owner);
+        (child, guard)
+    };
+    let (mut a, ag) = spawn(remote_bench_owner("audit-a"));
+    let (mut b, bg) = spawn(remote_bench_owner("audit-b"));
+    let (mut c, cg) = spawn(ChildOwner::RemoteCreation("batch:audit".into()));
+    let queued = remote_bench_owner("audit-a");
+    assert_eq!(cancel_remote_bench_children("audit-a").unwrap(), 1);
+    assert!(!a.wait().unwrap().success());
+    assert!(ag.stopped());
+    let (mut delayed, delayed_guard) = spawn(queued);
+    assert!(
+        delayed_guard.stopped(),
+        "queued remote work keeps its original cancellation epoch"
+    );
+    assert!(!delayed.wait().unwrap().success());
+    assert!(!bg.stopped() && !cg.stopped());
+    assert_eq!(cancel_remote_creation_children("batch:audit").unwrap(), 1);
+    assert!(!c.wait().unwrap().success());
+    assert!(!bg.stopped());
+    assert_eq!(cancel_remote_bench_children("audit-b").unwrap(), 1);
+    assert!(!b.wait().unwrap().success());
+    let (mut late, late_guard) = spawn(ChildOwner::RemoteCreation("batch:audit".into()));
+    assert!(
+        late_guard.stopped(),
+        "cancellation survives a child registering late"
+    );
+    assert!(!late.wait().unwrap().success());
+    drop(cg);
+    drop(late_guard);
+    allow_remote_creation("batch:audit");
+    let (mut retry, retry_guard) = spawn(ChildOwner::RemoteCreation("batch:audit".into()));
+    assert!(
+        !retry_guard.stopped(),
+        "a new operation can reuse its directory"
+    );
+    assert_eq!(cancel_remote_creation_children("batch:audit").unwrap(), 1);
+    assert!(!retry.wait().unwrap().success());
+    allow_remote_creation("batch:audit");
 }

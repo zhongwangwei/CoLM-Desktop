@@ -702,3 +702,47 @@ fn assert_close(name: &str, actual: &[f64], expected: &[f64]) {
         );
     }
 }
+
+#[test]
+fn pft_crown_observations_follow_the_same_positive_fraction_packing() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let path = temp_file("pc-crown-packing");
+    let mut file = netcdf::create(&path).unwrap();
+    for (name, count) in [("LAI_year", 1), ("month", 12), ("pft", 3)] {
+        file.add_dimension(name, count).unwrap();
+    }
+    file.add_variable::<i32>("LAI_year", &["LAI_year"])
+        .unwrap()
+        .put_values(&[2005], ..)
+        .unwrap();
+    file.add_variable::<i32>("pfttyp", &["pft"])
+        .unwrap()
+        .put_values(&[1, 2, 9], ..)
+        .unwrap();
+    for (name, values) in [
+        ("pctpfts", [0.25, 0.0, 0.75]),
+        ("canopy_height_pfts", [20.0, 25.0, 0.5]),
+        ("canopy_bottom_height_pfts", [6.0, 7.0, 0.0]),
+        ("crown_aspect_ratio_pfts", [0.5, 3.0, 7.0]),
+    ] {
+        file.add_variable::<f64>(name, &["pft"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    for name in ["LAI_pfts_monthly", "SAI_pfts_monthly"] {
+        file.add_variable::<f64>(name, &["LAI_year", "month", "pft"])
+            .unwrap()
+            .put_values(&[1.0; 36], (.., .., ..))
+            .unwrap();
+    }
+    file.close().unwrap();
+    let data = read_single_point_pft_data(&path).unwrap();
+    assert_eq!(data.class, [1, 9]);
+    assert_eq!(
+        data.canopy_bottom_height_m.as_deref(),
+        Some(&[6.0, 0.0][..])
+    );
+    assert_eq!(data.crown_aspect_ratio.as_deref(), Some(&[0.5, 7.0][..]));
+    std::fs::remove_file(path).unwrap();
+}

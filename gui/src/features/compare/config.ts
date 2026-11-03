@@ -477,7 +477,7 @@ function parseMapping(
   indent: number,
   problems: Problem[],
 ): { value: { [key: string]: Yaml }; next: number } {
-  const out: { [key: string]: Yaml } = {};
+  const out: { [key: string]: Yaml } = Object.create(null);
   let index = start;
   while (index < lines.length) {
     const line = lines[index]!;
@@ -494,7 +494,7 @@ function parseMapping(
     const keyed = splitKey(line.text, problems, line);
     index++;
     if (!keyed) continue;
-    if (keyed.key in out) {
+    if (Object.hasOwn(out, keyed.key)) {
       problems.push([
         `第 ${line.number} 行的配置项重复了：${keyed.key}`,
         `Line ${line.number} repeats the key ${keyed.key}.`,
@@ -729,6 +729,8 @@ function validateSimulation(
         if (varname && varunit) variables[variable] = { varname, varunit };
       }
   }
+  if (dataType === 'grid' && !prefix)
+    problems.push([`${path}.prefix 不能为空。`, `${path}.prefix must not be empty.`]);
   if (!model || !rootDir || (dataType === 'grid' && !prefix) || (dataType === 'stn' && !fulllist))
     return null;
   return {

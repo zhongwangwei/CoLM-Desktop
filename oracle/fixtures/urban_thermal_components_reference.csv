@@ -1,0 +1,5 @@
+# Actual MOD_Urban_Thermal diagnostic assignments with flake=0/.3/1.
+fsen_roof,fsen_wsun,fsen_wsha,fsen_gimp,fsen_gper,lfevp_roof,lfevp_gimp,lfevp_gper,fsen_urbl,lfevp_urbl
+20.0,9.6,4.8,16.8,7.6,100.0,105.0,-28.5,10.0,10.041599999999999
+14.0,6.72,3.36,11.76,5.319999999999999,70.0,73.5,-19.95,7.0,7.029119999999999
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,-0.0,0.0,0.0

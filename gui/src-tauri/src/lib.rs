@@ -83,6 +83,7 @@ pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
     app.state::<AssistantProcess>().stop();
     // 应用托管的 Xerj 节点：只停自己启动的进程组；用户已有节点走 external 模式，不在这里。
     app.state::<ManagedXerj>().stop();
+    crate::model::release_case_contexts();
 }
 
 pub fn run() {
@@ -231,6 +232,7 @@ pub fn run() {
             model_case_runs,
             model_project_runs,
             model_case_context,
+            model_case_context_release,
             model_case_profiles,
             model_configuration,
             model_attach_network,
@@ -272,6 +274,7 @@ pub fn run() {
             study_result,
             hybrid_info,
             assistant_settings,
+            assistant_reset_settings,
             assistant_save_settings,
             assistant_set_key,
             assistant_has_key,

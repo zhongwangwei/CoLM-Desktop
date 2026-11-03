@@ -193,3 +193,20 @@ test('invalid anniversary messages follow the selected language', () => {
     (error: Error) => /周年/.test(error.message) && !/First-year/.test(error.message),
   );
 });
+
+test('methane presets apply to their own station without enabling methane for other stations', () => {
+  const methane = { ...natural, name: 'AT-Neu', site_file: '/AT-Neu.nc' };
+  const sites = [methane, natural, crop];
+  const [wetland, forest, farm] = planMultiSites({
+    ...base,
+    sites,
+    drafts: sites.map(siteDraft),
+    form: { ...base.form, subgrid: 'IGBP' },
+    physics: {},
+  });
+  assert.equal(wetland.mode, 'pft');
+  assert.equal(wetland.fields.DEF_USE_METHANE, '.true.');
+  assert.equal(wetland.fields.DEF_USE_Campbell_SOIL_MODEL, '.false.');
+  assert.notEqual(forest.fields.DEF_USE_METHANE, '.true.');
+  assert.notEqual(farm.fields.DEF_USE_METHANE, '.true.');
+});

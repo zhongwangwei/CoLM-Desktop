@@ -6,7 +6,9 @@ import { copyText, parseMarkdown, type MarkdownBlock, type MarkdownInline } from
  * 这里没有任何 HTML 注入入口 —— 文本一律作为 React 子节点，源码里的标签只会显示成字面文字。
  */
 
-function Inline({ nodes }: { nodes: MarkdownInline[] }) {
+type OpenLink = { onOpenUrl?: (url: string) => void };
+
+function Inline({ nodes, onOpenUrl }: { nodes: MarkdownInline[] } & OpenLink) {
   return (
     <>
       {nodes.map((node, index) => {
@@ -23,26 +25,34 @@ function Inline({ nodes }: { nodes: MarkdownInline[] }) {
           case 'strong':
             return (
               <strong key={index}>
-                <Inline nodes={node.children} />
+                <Inline nodes={node.children} onOpenUrl={onOpenUrl} />
               </strong>
             );
           case 'em':
             return (
               <em key={index}>
-                <Inline nodes={node.children} />
+                <Inline nodes={node.children} onOpenUrl={onOpenUrl} />
               </em>
             );
           case 'link':
             return (
-              // 来源链接只按 http/https 出现（解析层已过滤），新窗口打开且断开 opener。
+              // 原生应用由统一的来源链接入口打开；普通网页预览保留浏览器行为。
               <a
                 key={index}
                 href={node.url}
+                onClick={
+                  onOpenUrl
+                    ? (event) => {
+                        event.preventDefault();
+                        onOpenUrl(node.url);
+                      }
+                    : undefined
+                }
                 target="_blank"
                 rel="noopener noreferrer"
                 className="underline"
               >
-                <Inline nodes={node.children} />
+                <Inline nodes={node.children} onOpenUrl={onOpenUrl} />
               </a>
             );
         }
@@ -84,8 +94,11 @@ function CodeBlock({ block, t }: { block: Extract<MarkdownBlock, { kind: 'code' 
 
 type Copy = (zh: string, en: string) => string;
 
-function Heading({ block }: { block: Extract<MarkdownBlock, { kind: 'heading' }> }) {
-  const content = <Inline nodes={block.children} />;
+function Heading({
+  block,
+  onOpenUrl,
+}: { block: Extract<MarkdownBlock, { kind: 'heading' }> } & OpenLink) {
+  const content = <Inline nodes={block.children} onOpenUrl={onOpenUrl} />;
   const className = block.level <= 2 ? 'text-base font-bold' : 'text-sm font-semibold';
   switch (block.level) {
     case 1:
@@ -103,14 +116,14 @@ function Heading({ block }: { block: Extract<MarkdownBlock, { kind: 'heading' }>
   }
 }
 
-function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
+function Block({ block, t, onOpenUrl }: { block: MarkdownBlock; t: Copy } & OpenLink): ReactNode {
   switch (block.kind) {
     case 'heading':
-      return <Heading block={block} />;
+      return <Heading block={block} onOpenUrl={onOpenUrl} />;
     case 'paragraph':
       return (
         <p className="whitespace-pre-wrap break-words">
-          <Inline nodes={block.children} />
+          <Inline nodes={block.children} onOpenUrl={onOpenUrl} />
         </p>
       );
     case 'code':
@@ -123,7 +136,7 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
         >
           {block.items.map((item, index) => (
             <li key={index}>
-              <Inline nodes={item} />
+              <Inline nodes={item} onOpenUrl={onOpenUrl} />
             </li>
           ))}
         </ol>
@@ -131,7 +144,7 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
         <ul className="list-disc space-y-1 pl-5">
           {block.items.map((item, index) => (
             <li key={index}>
-              <Inline nodes={item} />
+              <Inline nodes={item} onOpenUrl={onOpenUrl} />
             </li>
           ))}
         </ul>
@@ -141,7 +154,7 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
         <blockquote className="space-y-1 border-l-2 pl-3 text-muted-foreground">
           {block.lines.map((line, index) => (
             <p key={index} className="whitespace-pre-wrap break-words">
-              <Inline nodes={line} />
+              <Inline nodes={line} onOpenUrl={onOpenUrl} />
             </p>
           ))}
         </blockquote>
@@ -154,7 +167,7 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
               <tr>
                 {block.header.map((cell, index) => (
                   <th key={index} className="border px-2 py-1 text-left font-semibold">
-                    <Inline nodes={cell} />
+                    <Inline nodes={cell} onOpenUrl={onOpenUrl} />
                   </th>
                 ))}
               </tr>
@@ -164,7 +177,7 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
                 <tr key={rowIndex}>
                   {row.map((cell, index) => (
                     <td key={index} className="border px-2 py-1 align-top">
-                      <Inline nodes={cell} />
+                      <Inline nodes={cell} onOpenUrl={onOpenUrl} />
                     </td>
                   ))}
                 </tr>
@@ -176,12 +189,12 @@ function Block({ block, t }: { block: MarkdownBlock; t: Copy }): ReactNode {
   }
 }
 
-export function Markdown({ text, t }: { text: string; t: Copy }) {
+export function Markdown({ text, t, onOpenUrl }: { text: string; t: Copy } & OpenLink) {
   const blocks = parseMarkdown(text);
   return (
     <div className="space-y-2">
       {blocks.map((block, index) => (
-        <Block key={index} block={block} t={t} />
+        <Block key={index} block={block} t={t} onOpenUrl={onOpenUrl} />
       ))}
     </div>
   );

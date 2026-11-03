@@ -190,7 +190,7 @@ struct RegularTerrainSurfaceFields {
 pub fn write_spatial_lct_constant_restart(
     config: SpatialLctStaticConfig<'_>,
 ) -> Result<ConstantRestartFiles> {
-    write_spatial_lct_constant_restart_with_canopy(config, None)
+    write_spatial_lct_constant_restart_with_canopy(config, None, None)
 }
 
 /// Common spatial writer with canopy supplied by PFT/PC `HTOP_readin` or
@@ -198,6 +198,7 @@ pub fn write_spatial_lct_constant_restart(
 pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
     config: SpatialLctStaticConfig<'_>,
     canopy_override: Option<CanopyState>,
+    pc_crown_aspect_ratio: Option<&[f64]>,
 ) -> Result<ConstantRestartFiles> {
     let dimensions = RestartDimensions::default();
     ensure!(
@@ -460,6 +461,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         config.land_cover_year,
         config.block_label,
         ConstantRestartInput {
+            pc_crown_aspect_ratio,
             compression_level: config.compression_level,
             dimensions,
             patch: RestartPatchFields {

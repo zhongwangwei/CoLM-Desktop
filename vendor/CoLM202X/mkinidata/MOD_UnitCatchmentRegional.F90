@@ -50,6 +50,7 @@ CONTAINS
    USE MOD_SrfdataRestart, only: mesh_load_from_file, pixelset_load_from_file
    USE MOD_WorkerPushData
    USE MOD_UnitCatchmentSubset
+   USE MOD_Filesystem, only: make_directory
    IMPLICIT NONE
 
    character(len=*), intent(in) :: dir_landdata
@@ -154,7 +155,7 @@ CONTAINS
       ENDDO
 
       IF (p_is_master) THEN
-         CALL execute_command_line ('mkdir -p ' // trim(file_regional(1:index(file_regional, '/', back=.true.))))
+         CALL make_directory (trim(file_regional(1:index(file_regional, '/', back=.true.))))
          CALL unitcatchment_subset_write (trim(DEF_UnitCatchment_file), trim(file_regional), nlon, nlat, &
             touched, .true., nkeep, nsystem)
          write(*,'(/,A,I0,A,I0,A,I0,A)') ' Regional unit-catchment network: ', nkeep, ' unit catchments in ', &

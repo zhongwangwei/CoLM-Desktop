@@ -240,6 +240,12 @@ fn cached_key(
     Ok(key)
 }
 
+fn clear_previous_decisions(decisions: &Mutex<Receiver<(String, Decision)>>) {
+    if let Ok(decisions) = decisions.lock() {
+        while decisions.try_recv().is_ok() {}
+    }
+}
+
 /// 等 GUI 回复审批（取消时也会收到拒绝）。
 struct ChannelApprover {
     decisions: Arc<Mutex<Receiver<(String, Decision)>>>,
@@ -1394,6 +1400,20 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     emitter.emit(Outbound::Error { message });
                     continue;
                 }
+                if backend == BackendKind::Builtin {
+                    match cached_key(&keys, &key_file, &provider.base_url) {
+                        Ok(key) => provider.api_key = key,
+                        Err(error) => {
+                            busy.store(false, Ordering::SeqCst);
+                            emitter.emit(Outbound::Error {
+                                message: format!("{error:#}"),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                // An idle cancellation must not become the next turn's approval decision.
+                clear_previous_decisions(&decision_rx);
                 // A3：所有拒绝分支（未配置、会话上限）都已过去，这一轮现在真正开始；
                 // 在任何模型请求/工具执行之前只发一次 turn_started，request_id 原样回显。
                 emitter.emit(Outbound::TurnStarted {
@@ -1475,7 +1495,6 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 worker = Some(std::thread::spawn(move || {
                     let _busy = BusyReset(Arc::clone(&busy));
                     let result = (|| -> Result<()> {
-                        provider.api_key = cached_key(&keys, &key_file, &provider.base_url)?;
                         if web_search {
                             // 搜索总用 DeepSeek 的 Key（会话模型可以是别家）；没存时搜索工具自己报错。
                             let search_key =
@@ -2731,6 +2750,34 @@ mod tests {
             ),
             Decision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn a_previous_turns_idle_cancel_does_not_deny_the_next_approval() {
+        let (sender, receiver) = mpsc::channel();
+        let decisions = Arc::new(Mutex::new(receiver));
+        sender
+            .send(("*".into(), Decision::Deny(Some("cancelled".into()))))
+            .unwrap();
+        clear_previous_decisions(&decisions);
+        sender.send(("next".into(), Decision::Approve)).unwrap();
+        let mut approver = ChannelApprover {
+            decisions,
+            policy: ApprovalPolicy::Ask,
+            allowed: Arc::default(),
+            reconciliation: false,
+        };
+        assert_eq!(
+            approver.decide(&Outbound::ApprovalRequest {
+                id: "next".into(),
+                name: "shell".into(),
+                tier: Tier::Code,
+                summary: "run shell".into(),
+                arguments: "{}".into(),
+                explicit_only: false,
+            }),
+            Decision::Approve
+        );
     }
 
     #[test]

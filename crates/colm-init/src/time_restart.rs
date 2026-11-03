@@ -1077,5 +1077,7 @@ pub fn write_empty_land_material_transaction(
         None => file.add_variable::<f64>("mt_aquifer_mixing_water_mm", &[])?,
     };
     variable.put_value(aquifer_mixing_water_mm, ())?;
+    file.close()
+        .with_context(|| format!("cannot close {}", path.display()))?;
     Ok(())
 }

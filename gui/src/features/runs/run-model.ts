@@ -136,12 +136,13 @@ export function matchesRemoteRun(run: RunState | undefined, result: unknown): bo
   const record = (value: unknown): Record<string, unknown> => {
     if (!value || typeof value !== 'object') return {};
     const data = value as Record<string, unknown>;
-    return data.record && typeof data.record === 'object'
-      ? (data.record as Record<string, unknown>)
-      : data;
+    const identity = data.record ?? data.pending;
+    return identity && typeof identity === 'object' ? (identity as Record<string, unknown>) : data;
   };
   const previous = record(run.progress?.remote);
   const next = record(result);
+  const pending =
+    !!result && typeof result === 'object' && !!(result as Record<string, unknown>).pending;
   const operation =
     next.operation_id ?? (next.provenance as { operation_id?: string } | undefined)?.operation_id;
   const expectedOperation =
@@ -150,6 +151,20 @@ export function matchesRemoteRun(run: RunState | undefined, result: unknown): bo
     (previous.provenance as { operation_id?: string } | undefined)?.operation_id;
   if (operation && expectedOperation && operation !== expectedOperation) return false;
   if (typeof previous.job !== 'string') {
+    // A submission interrupted before its job identity was captured still belongs to
+    // this case. Bind it by host and source case instead of requiring an operation id
+    // that the pending record does not carry. A confirmed record still needs the exact
+    // started operation: only the unresolved pending identity is allowed to skip it.
+    if (pending && run.status === 'unknown') {
+      if (
+        typeof next.job !== 'string' ||
+        typeof next.host !== 'string' ||
+        next.host !== run.progress?.host ||
+        (typeof next.source_case === 'string' && next.source_case !== run.case)
+      )
+        return false;
+      return true;
+    }
     return (
       typeof run.operation_id === 'string' &&
       operation === run.operation_id &&
@@ -246,7 +261,14 @@ export function settleRuns(
   };
 }
 
-const ENDED = ['succeeded', 'completed', 'failed', 'cancelled', 'completed_with_failures'];
+const ENDED = [
+  'succeeded',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'completed_with_failures',
+];
 /** A last run the ledger has settled: finished, and nothing left to re-check on a server. */
 export function endedRun(run: LastRun | undefined): run is LastRun {
   return (
@@ -279,8 +301,8 @@ export function restoredRuns(
       // 停止的就是停止，不算失败（以前重开项目后，取消的站点都显示成"运行失败"）。
       status: ['succeeded', 'completed'].includes(run.status)
         ? 'succeeded'
-        : run.status === 'cancelled'
-          ? 'cancelled'
+        : ['cancelled', 'interrupted'].includes(run.status)
+          ? run.status
           : 'failed',
       running: false,
       logs: [],
@@ -551,12 +573,21 @@ export function remoteJobFacts(
 
 /** How the stations of a batch stand right now, from the run states the page already holds. */
 export function runCountsText(runs: (RunState | undefined)[], en = false): string {
-  const counts = { running: 0, waiting: 0, succeeded: 0, failed: 0, stopped: 0, unconfirmed: 0 };
+  const counts = {
+    running: 0,
+    waiting: 0,
+    succeeded: 0,
+    failed: 0,
+    stopped: 0,
+    interrupted: 0,
+    unconfirmed: 0,
+  };
   for (const run of runs) {
     if (!run) continue;
     if (run.status === 'succeeded') counts.succeeded++;
     else if (run.status === 'failed') counts.failed++;
     else if (run.status === 'cancelled') counts.stopped++;
+    else if (run.status === 'interrupted') counts.interrupted++;
     else if (run.status === 'unknown') counts.unconfirmed++;
     else if (['submitted', 'running', 'queued'].includes(run.status)) counts.running++;
     else counts.waiting++;
@@ -567,6 +598,8 @@ export function runCountsText(runs: (RunState | undefined)[], en = false): strin
     counts.succeeded && (en ? `${counts.succeeded} finished` : `完成 ${counts.succeeded}`),
     counts.failed && (en ? `${counts.failed} failed` : `失败 ${counts.failed}`),
     counts.stopped && (en ? `${counts.stopped} stopped` : `已停止 ${counts.stopped}`),
+    counts.interrupted &&
+      (en ? `${counts.interrupted} interrupted` : `已中断 ${counts.interrupted}`),
     counts.unconfirmed &&
       (en ? `${counts.unconfirmed} unconfirmed` : `待核对 ${counts.unconfirmed}`),
   ].filter(Boolean);

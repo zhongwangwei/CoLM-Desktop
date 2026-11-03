@@ -129,11 +129,11 @@ ENDIF
       ! the initial year are loaded (it loads and frees them itself). With LULCC the
       ! network serves every land-cover year of the run.
       IF (DEF_UnitCatchment_regional) THEN
-#ifdef LULCC
+         IF (DEF_USE_LULCC) THEN
          CALL unitcatchment_regional_build (dir_landdata, lc_year, DEF_simulation_time%end_year)
-#else
+         ELSE
          CALL unitcatchment_regional_build (dir_landdata, lc_year, lc_year)
-#endif
+         ENDIF
       ENDIF
 
       CALL mesh_load_from_file   (dir_landdata, lc_year)

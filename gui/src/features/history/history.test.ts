@@ -242,9 +242,16 @@ test('deletion accepts terminal records only and rejects reconciliation regardle
     status: 'succeeded',
     needs_reconciliation: false,
   } as import('../../lib/types').HistoryOperation;
-  for (const status of ['succeeded', 'failed', 'completed', 'completed_with_failures', 'cancelled'])
+  for (const status of [
+    'succeeded',
+    'failed',
+    'completed',
+    'completed_with_failures',
+    'cancelled',
+    'interrupted',
+  ])
     assert.equal(canDeleteHistory({ ...operation, status }), true);
-  for (const status of ['running', 'pending', 'unknown', 'interrupted', ''])
+  for (const status of ['running', 'pending', 'unknown', ''])
     assert.equal(canDeleteHistory({ ...operation, status }), false);
   assert.equal(canDeleteHistory({ ...operation, needs_reconciliation: true }), false);
 });
@@ -450,6 +457,24 @@ test('history cards name what was done, to what, with which model, where and for
     true,
   );
   assert.equal(historyInternal({ ...base, kind: 'run', detail: { action: 'run' } }), false);
+});
+
+test('project timeline interruptions count as terminal failures', async () => {
+  const { projectTimeline } = await import('./history');
+  const member = {
+    operation_id: 'interrupted',
+    kind: 'run',
+    phase: 'finished',
+    status: 'interrupted',
+    needs_reconciliation: false,
+    time_ms: 1,
+  } as import('../../lib/types').HistoryOperation;
+  assert.deepEqual(projectTimeline([member])[0].counts, {
+    succeeded: 0,
+    failed: 1,
+    running: 0,
+    pending: 0,
+  });
 });
 
 test('project timelines batch consecutive actions and summarize the latest result per case', async () => {

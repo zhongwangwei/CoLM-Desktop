@@ -365,6 +365,13 @@ fn the_bridge_writes_the_state_variables_it_declares() {
             .get_values::<f64, _>(..)
             .unwrap()[0]
     };
+    assert_eq!(value("rss"), output.energy.soil_surface_resistance_s_m);
+    let diagnostics =
+        crate::assembly::SurfaceDiagnosticsRow::from_lct(&output.energy, 0.5).unwrap();
+    assert_eq!(
+        diagnostics.soil_surface_resistance,
+        Some(output.energy.soil_surface_resistance_s_m)
+    );
     // `lfevpa` 必须用**内核那一份** `htvp` 拼出来，与 `fevpl`/`fevpg` 自洽。
     // 上游写的是 `lfevpa = hvap*fevpl + htvp*fevpg`（`MOD_Thermal.F90:1333`），
     // 而 `htvp` 由表层是否纯冰定（`:539-540`）。自己写死 `hvap + hfus` 会让
@@ -1435,4 +1442,130 @@ fn the_external_writer_exports_ready_accumulators_without_writing() {
     assert!(!root.join("out").exists());
     assert!(session.take_export().is_none());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn urban_history_keeps_the_host_soil_resistance_fill_or_previous_value() {
+    let root = temp_dir("urban-rss");
+    let fixture = SyntheticRestart::write_with_snow(
+        root.join("restart"),
+        SyntheticSnow {
+            depth_m: 0.15,
+            water_equivalent_kg_m2: 45.0,
+            ground_snow_fraction: 1.0,
+            temperature_k: 268.0,
+        },
+    )
+    .unwrap();
+    let template = assemble_standard_lct_snow_template(
+        &RestartStateFiles {
+            constant: fixture.constant.block.clone(),
+            time: fixture.time.block.clone(),
+        },
+        1,
+        physics(),
+    )
+    .unwrap();
+    let output = crate::urban_diagnostic_output();
+    for (label, host_rss) in [("fill", colm_core::MISSING), ("previous", 42.0)] {
+        let mut state = template.snow_state();
+        state.energy.soil_surface_resistance_s_m = host_rss;
+        let surface = colm_core::UrbanSurface {
+            snow: state.snow.clone(),
+            temperature_k: vec![290.0; 10],
+            liquid_water_kg_m2: vec![0.0; 10],
+            ice_water_kg_m2: vec![0.0; 10],
+        };
+        let radiation = colm_core::UrbanRadiationState {
+            sunlit_wall_fraction: 0.5,
+            change_in_sunlit_wall_fraction: 0.0,
+            diffuse_extinction: 0.7,
+            albedo: [[0.2; 2]; 2],
+            sunlit_tree_absorption: [[0.0; 2]; 2],
+            shaded_tree_absorption: [[0.0; 2]; 2],
+            roof_absorption: [[0.0; 2]; 2],
+            sunlit_wall_absorption: [[0.0; 2]; 2],
+            shaded_wall_absorption: [[0.0; 2]; 2],
+            impervious_absorption: [[0.0; 2]; 2],
+            pervious_absorption: [[0.0; 2]; 2],
+            lake_absorption: [[0.0; 2]; 2],
+        };
+        state.urban = Some(Box::new(colm_core::UrbanPatchState {
+            roof: surface.clone(),
+            impervious: surface.clone(),
+            pervious: surface.clone(),
+            lake_bed: surface,
+            t_wallsun: vec![290.0; 10],
+            t_wallsha: vec![290.0; 10],
+            radiation,
+            lwsun: 0.0,
+            lwsha: 0.0,
+            lgimp: 0.0,
+            lgper: 0.0,
+            lveg: 0.0,
+            troof_inner: 290.0,
+            twsun_inner: 290.0,
+            twsha_inner: 290.0,
+            t_room: 290.0,
+            t_roof: 290.0,
+            t_wall: 290.0,
+            tafu: 290.0,
+            fhac: 0.0,
+            fwst: 0.0,
+            fach: 0.0,
+            fahe: 0.0,
+            fhah: 0.0,
+            vehc: 0.0,
+            meta: 0.0,
+            fsen_urbl: None,
+            lfevp_urbl: None,
+            cosine_zenith: Some(0.5),
+        }));
+        let window = SimulationWindow {
+            start_year: 2008,
+            start_julian_day: 1,
+            start_seconds: 0,
+            end_year: 2008,
+            end_julian_day: 1,
+            end_seconds: 1800,
+            timestep_seconds: 1800,
+        };
+        let mut session = HistorySession::new(
+            dimensions(),
+            site(),
+            window,
+            HistoryFrequency::Hourly,
+            HistoryGrouping::Month,
+            root.join(label),
+            "urban",
+        )
+        .unwrap();
+        let path = session
+            .push_urban(
+                colm_core::CalendarTime {
+                    year: 2008,
+                    julian_day: 1,
+                    seconds: 1800,
+                },
+                &template,
+                &state,
+                &output,
+                reference(),
+            )
+            .unwrap()
+            .unwrap();
+        let file = netcdf::open(path).unwrap();
+        let rss = file
+            .variable("f_rss")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        assert_eq!(
+            rss,
+            [host_rss],
+            "{label}: local urban rss must not be published"
+        );
+        assert_eq!(output.thermal.rss, 516.0);
+    }
+    crate::remove_test_tree(root);
 }

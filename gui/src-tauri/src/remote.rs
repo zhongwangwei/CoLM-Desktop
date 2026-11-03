@@ -990,7 +990,16 @@ pub(crate) async fn ssh_cli_json(
     resources: Option<PathBuf>,
     server: Option<&Server>,
 ) -> Result<Value, String> {
-    ssh_cli_json_for_run(args, resources, server, None).await
+    ssh_cli_json_for_run(args, resources, server, None, None).await
+}
+
+pub(crate) async fn ssh_cli_json_owned(
+    args: Vec<String>,
+    resources: Option<PathBuf>,
+    server: Option<&Server>,
+    owner: crate::sidecar::ChildOwner,
+) -> Result<Value, String> {
+    ssh_cli_json_for_run(args, resources, server, None, Some(owner)).await
 }
 
 async fn ssh_cli_json_for_run(
@@ -998,6 +1007,7 @@ async fn ssh_cli_json_for_run(
     resources: Option<PathBuf>,
     server: Option<&Server>,
     run: Option<(&tauri::AppHandle, &str, &str)>,
+    owner: Option<crate::sidecar::ChildOwner>,
 ) -> Result<Value, String> {
     if !args.iter().any(|a| a == "--history-db") {
         crate::model::options(&mut args, None)?;
@@ -1030,7 +1040,9 @@ async fn ssh_cli_json_for_run(
             args,
             resources,
             server,
-            run.map(|(_, _, case)| case.to_owned()),
+            owner.unwrap_or_else(|| {
+                crate::sidecar::ChildOwner::Remote(run.map(|(_, _, case)| case.to_owned()))
+            }),
         )
         .await
     }
@@ -1067,7 +1079,7 @@ async fn ssh_cli_json_untracked(
     args: Vec<String>,
     resources: Option<PathBuf>,
     server: Option<&Server>,
-    case: Option<String>,
+    owner: crate::sidecar::ChildOwner,
 ) -> Result<Value, String> {
     let payload = server.map(auth_payload).transpose()?;
     let password = payload
@@ -1097,7 +1109,7 @@ async fn ssh_cli_json_untracked(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动 colm-cli：{e}"))?;
-        let _remote_child = crate::sidecar::register_remote_child(child.id(), case);
+        let remote_child = crate::sidecar::register_child(child.id(), owner);
         if let Some(payload) = payload {
             let result = child.stdin.take().ok_or("no stdin").and_then(|mut stdin| {
                 writeln!(stdin, "{payload}").map_err(|_| "无法传递 SSH 登录信息")
@@ -1111,6 +1123,9 @@ async fn ssh_cli_json_untracked(
         let output = child
             .wait_with_output()
             .map_err(|e| format!("colm-cli：{e}"))?;
+        if remote_child.stopped() {
+            return Err("operation cancelled".into());
+        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
@@ -1558,7 +1573,7 @@ async fn validate_server_case_inputs(
         None
     } else {
         Some(
-            crate::model::model_case_context(case.to_owned(), revision)
+            crate::model::model_case_context_unleased(case.to_owned(), revision)
                 .await?
                 .entry
                 .dir,
@@ -1765,6 +1780,7 @@ async fn submit_run(
         resources,
         Some(&server),
         run_id.as_deref().map(|id| (&app, id, case.as_str())),
+        None,
     )
     .await
 }
@@ -2372,7 +2388,7 @@ fn study_fetch_error(
             "服务器作业没有正常退出（已取消或已丢失），没有可核验的退出码与结果。需要重新运行请先归档关闭这条记录。".into(),
             "The server job did not exit normally (cancelled or lost), so there is no verified exit code or result to fetch. Close this record before running it again.".into(),
         )),
-        RemoteStudyOutcome::Succeeded | RemoteStudyOutcome::NotSubmitted => Some((
+        RemoteStudyOutcome::NotSubmitted => Some((
             "这次取回不需要或已经完成：提交从未到达服务器时没有结果可取回；已取回过的结果不用重复取回。".into(),
             "There is nothing to fetch here: a submission that never reached the server has no results, and results already fetched need not be fetched again.".into(),
         )),
@@ -2380,7 +2396,7 @@ fn study_fetch_error(
             "服务器状态还无法核对，不能确认作业已经结束。先重新核对状态，确认后再取回。".into(),
             "The server state is unconfirmed, so the job's completion cannot be trusted. Check the status again before fetching.".into(),
         )),
-        RemoteStudyOutcome::MemberRunFailed => None,
+        RemoteStudyOutcome::Succeeded | RemoteStudyOutcome::MemberRunFailed => None,
     }
 }
 

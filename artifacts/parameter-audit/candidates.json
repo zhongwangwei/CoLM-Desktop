@@ -8274,189 +8274,189 @@
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%unit_kind",
+    "id": "process:material:DEF_SOLUTE%unit_kind",
     "raw_key": "DEF_SOLUTE%unit_kind",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:24",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%mol_weight",
+    "id": "process:material:DEF_SOLUTE%mol_weight",
     "raw_key": "DEF_SOLUTE%mol_weight",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:25",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%init_conc",
+    "id": "process:material:DEF_SOLUTE%init_conc",
     "raw_key": "DEF_SOLUTE%init_conc",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:26",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%precip_default_conc",
+    "id": "process:material:DEF_SOLUTE%precip_default_conc",
     "raw_key": "DEF_SOLUTE%precip_default_conc",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:27",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%vapor_default_conc",
+    "id": "process:material:DEF_SOLUTE%vapor_default_conc",
     "raw_key": "DEF_SOLUTE%vapor_default_conc",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:28",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%max_dissolved_conc",
+    "id": "process:material:DEF_SOLUTE%max_dissolved_conc",
     "raw_key": "DEF_SOLUTE%max_dissolved_conc",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:29",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%decay_rate",
+    "id": "process:material:DEF_SOLUTE%decay_rate",
     "raw_key": "DEF_SOLUTE%decay_rate",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:30",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%n2o_ef5",
+    "id": "process:material:DEF_SOLUTE%n2o_ef5",
     "raw_key": "DEF_SOLUTE%n2o_ef5",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:33",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_SOLUTE%charge",
+    "id": "process:material:DEF_SOLUTE%charge",
     "raw_key": "DEF_SOLUTE%charge",
     "scope": "process-file",
     "source_location": "MOD_MT_Solute.F90:34",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_USE_FRACTIONATION",
+    "id": "process:material:DEF_ISO_USE_FRACTIONATION",
     "raw_key": "DEF_ISO_USE_FRACTIONATION",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:124",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_KINETIC_SCHEME",
+    "id": "process:material:DEF_ISO_KINETIC_SCHEME",
     "raw_key": "DEF_ISO_KINETIC_SCHEME",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:125",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_ICE_SUPERSAT_SLOPE",
+    "id": "process:material:DEF_ISO_ICE_SUPERSAT_SLOPE",
     "raw_key": "DEF_ISO_ICE_SUPERSAT_SLOPE",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:126",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_CG_RELHUM_MAX",
+    "id": "process:material:DEF_ISO_CG_RELHUM_MAX",
     "raw_key": "DEF_ISO_CG_RELHUM_MAX",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:127",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_OPEN_WATER_KINETIC",
+    "id": "process:material:DEF_ISO_OPEN_WATER_KINETIC",
     "raw_key": "DEF_ISO_OPEN_WATER_KINETIC",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:128",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_SUBL_SKIN_MM",
+    "id": "process:material:DEF_ISO_SUBL_SKIN_MM",
     "raw_key": "DEF_ISO_SUBL_SKIN_MM",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:129",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_SOIL_KINETIC",
+    "id": "process:material:DEF_ISO_SOIL_KINETIC",
     "raw_key": "DEF_ISO_SOIL_KINETIC",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:130",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_SOIL_DIFFUSION",
+    "id": "process:material:DEF_ISO_SOIL_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_DIFFUSION",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:131",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_SOIL_VAPOR_DIFFUSION",
+    "id": "process:material:DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "raw_key": "DEF_ISO_SOIL_VAPOR_DIFFUSION",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:132",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_CANOPY_EQUILIBRATION",
+    "id": "process:material:DEF_ISO_CANOPY_EQUILIBRATION",
     "raw_key": "DEF_ISO_CANOPY_EQUILIBRATION",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:133",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_SNOWMELT_EQUILIBRATION",
+    "id": "process:material:DEF_ISO_SNOWMELT_EQUILIBRATION",
     "raw_key": "DEF_ISO_SNOWMELT_EQUILIBRATION",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:134",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_NSS_LEAF_WATER_PER_LAI",
+    "id": "process:material:DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "raw_key": "DEF_ISO_NSS_LEAF_WATER_PER_LAI",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:135",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_NSS_LEAF_PATH_LENGTH",
+    "id": "process:material:DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "raw_key": "DEF_ISO_NSS_LEAF_PATH_LENGTH",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:136",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_NSS_LEAF_RB",
+    "id": "process:material:DEF_ISO_NSS_LEAF_RB",
     "raw_key": "DEF_ISO_NSS_LEAF_RB",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:137",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_REF_RATIO_H2_18O",
+    "id": "process:material:DEF_ISO_REF_RATIO_H2_18O",
     "raw_key": "DEF_ISO_REF_RATIO_H2_18O",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:140",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_INIT_DELTA_H2_18O",
+    "id": "process:material:DEF_ISO_INIT_DELTA_H2_18O",
     "raw_key": "DEF_ISO_INIT_DELTA_H2_18O",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:141",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_REF_RATIO_HDO",
+    "id": "process:material:DEF_ISO_REF_RATIO_HDO",
     "raw_key": "DEF_ISO_REF_RATIO_HDO",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:142",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:DEF_ISO_INIT_DELTA_HDO",
+    "id": "process:material:DEF_ISO_INIT_DELTA_HDO",
     "raw_key": "DEF_ISO_INIT_DELTA_HDO",
     "scope": "process-file",
     "source_location": "MOD_MT_Namelist.F90:143",
@@ -9527,56 +9527,56 @@
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_num",
+    "id": "process:material:forcing_num",
     "raw_key": "forcing_num",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_role",
+    "id": "process:material:forcing_role",
     "raw_key": "forcing_role",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_fprefix",
+    "id": "process:material:forcing_fprefix",
     "raw_key": "forcing_fprefix",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_vname",
+    "id": "process:material:forcing_vname",
     "raw_key": "forcing_vname",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_tintalgo",
+    "id": "process:material:forcing_tintalgo",
     "raw_key": "forcing_tintalgo",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_dtime",
+    "id": "process:material:forcing_dtime",
     "raw_key": "forcing_dtime",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_offset",
+    "id": "process:material:forcing_offset",
     "raw_key": "forcing_offset",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",
     "status": "editable-expert"
   },
   {
-    "id": "process:tracer:forcing_input_mode",
+    "id": "process:material:forcing_input_mode",
     "raw_key": "forcing_input_mode",
     "scope": "process-file",
     "source_location": "MOD_MT_ForcingInput.F90:nl_colm_mt_forcing",

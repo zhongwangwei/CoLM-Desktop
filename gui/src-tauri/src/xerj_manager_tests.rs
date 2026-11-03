@@ -134,6 +134,7 @@ fn fake_server(responder: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> F
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let request = read_http_request(&mut stream);
                     // 端口可能被并行测试短暂复用，出现“连上就断、一个字节都没发”的
                     // 杂散连接；它不是健康检查请求，不能进请求列表、也不能影响顺序断言。
@@ -991,4 +992,44 @@ fn real_xerj_rc100_node_starts_serves_health_and_stops() {
         "启动日志应写在数据目录"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exited_managed_node_is_not_reused_when_the_assistant_prepares_search() {
+    use std::os::unix::process::CommandExt;
+    let child = Command::new("sh")
+        .args(["-c", "read ignored"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut cached = Some(ManagedNode {
+        process: Mutex::new(ProcessState { child: Some(child) }),
+        endpoint: "http://127.0.0.1:9200".into(),
+        port: 9200,
+        binary: "unused-test-binary".into(),
+        version: None,
+        pinned_match: None,
+        data_dir: PathBuf::new(),
+        detail: None,
+        key: "test-only".into(),
+    });
+    assert_eq!(
+        crate::assistant::reuse_managed_endpoint(&mut cached).as_deref(),
+        Some("http://127.0.0.1:9200")
+    );
+    {
+        let mut process = cached.as_ref().unwrap().process.lock().unwrap();
+        let child = process.child.as_mut().unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+    }
+    assert_eq!(crate::assistant::reuse_managed_endpoint(&mut cached), None);
+    assert!(
+        cached.is_none(),
+        "preparing search can now start a replacement node"
+    );
 }

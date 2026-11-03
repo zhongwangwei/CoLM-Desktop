@@ -73,10 +73,8 @@ MODULE MOD_MT_RiverLakeCoupling
    real(r8), allocatable :: pub_flooddepth (:)
    real(r8), allocatable :: pub_leveearea  (:)
 
-#ifdef CoLMDEBUG
    ! material balance of one routing call (cf. the water balance printed there)
    real(r8), allocatable :: mt_mass_bef(:), mt_mass_inp(:), mt_mass_dis(:)
-#endif
 
    PUBLIC :: flood_mt_credit_patch, flood_mt_evap_patch, flood_mt_land_patch
 
@@ -319,7 +317,7 @@ CONTAINS
 
       IF (allocated(mt_decay_source)) mt_decay_source = 0._r8
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL ensure_debug_arrays ()
       IF (numucat > 0) THEN
          DO imt = 1, nmts
@@ -328,7 +326,7 @@ CONTAINS
             mt_mass_inp(imt) = sum(acc_mt_inp(imt,:))
          ENDDO
       ENDIF
-#endif
+      ENDIF
 
       IF (numucat > 0) THEN
          DO imt = 1, nmts
@@ -587,16 +585,16 @@ CONTAINS
    IMPLICIT NONE
    integer,  intent(in) :: i
    real(r8), intent(in) :: dt
-#ifdef CoLMDEBUG
    integer :: imt
 
+      IF (DEF_USE_CoLMDEBUG) THEN
       IF (nmts <= 0) RETURN
       CALL ensure_debug_arrays ()
       DO imt = 1, nmts
          IF (.not. mt_uses_generic_water(imt)) CYCLE
          mt_mass_dis(imt) = mt_mass_dis(imt) + mt_flux_out(imt,i) * dt
       ENDDO
-#endif
+      ENDIF
 
    END SUBROUTINE mt_rlc_debug_discharge
 
@@ -612,15 +610,13 @@ CONTAINS
    IMPLICIT NONE
 
    integer :: lim_calls, lim_iter_sum, lim_iter_peak, lim_over_soft
-#ifdef CoLMDEBUG
    integer :: imt
    real(r8), allocatable :: mt_mass_aft(:), mt_mass_decay(:)
-#endif
 
       CALL mt_riverlake_release_pending_drain ()
       IF (nmts <= 0) RETURN
 
-#ifdef CoLMDEBUG
+      IF (DEF_USE_CoLMDEBUG) THEN
       CALL ensure_debug_arrays ()
       allocate (mt_mass_aft(nmts), mt_mass_decay(nmts))
       mt_mass_aft = 0._r8
@@ -661,7 +657,7 @@ CONTAINS
       mt_mass_inp = 0._r8
       mt_mass_dis = 0._r8
       deallocate (mt_mass_aft, mt_mass_decay)
-#endif
+      ENDIF
 
       IF (p_is_worker) THEN
          CALL mt_riverlake_limiter_stats (lim_calls, lim_iter_sum, lim_iter_peak, lim_over_soft, &
@@ -1104,9 +1100,7 @@ CONTAINS
       IF (allocated(prov_storage_start)) deallocate (prov_storage_start, prov_protected_start, &
          prov_storage_end, prov_protected_end, prov_floodarea, prov_protected_area)
       IF (allocated(pub_floodarea)) deallocate (pub_floodarea, pub_flooddepth, pub_leveearea)
-#ifdef CoLMDEBUG
       IF (allocated(mt_mass_bef)) deallocate (mt_mass_bef, mt_mass_inp, mt_mass_dis)
-#endif
 
    END SUBROUTINE mt_rlc_final
 
@@ -1131,7 +1125,6 @@ CONTAINS
 
    END SUBROUTINE ensure_provider_arrays
 
-#ifdef CoLMDEBUG
    ! ---------
    SUBROUTINE ensure_debug_arrays ()
 
@@ -1156,7 +1149,6 @@ CONTAINS
          + sum(mt_levsto_solid(imt,:))
 
    END FUNCTION pool_total
-#endif
 
 END MODULE MOD_MT_RiverLakeCoupling
 #endif

@@ -22,9 +22,15 @@ use anyhow::{bail, ensure, Result};
 /// 只处理公历闰年规则；CoLM 的 history 时间单位固定是
 /// `minutes since 1900-1-1 0:0:0`，`calendar` 属性实测是 standard。
 pub fn minutes_from_1900(year: i32) -> i64 {
-    let days: i64 = (1900..year)
+    let (start, end, sign) = if year < 1900 {
+        (year, 1900, -1)
+    } else {
+        (1900, year, 1)
+    };
+    let days: i64 = (start..end)
         .map(|y| if is_leap(y) { 366 } else { 365 })
-        .sum();
+        .sum::<i64>()
+        * sign;
     days * 24 * 60
 }
 
@@ -225,8 +231,7 @@ fn parse_date(text: &str) -> Option<(i32, u32, u32)> {
     let year: i32 = parts.next()?.parse().ok()?;
     let month: u32 = parts.next()?.parse().ok()?;
     let day: u32 = parts.next()?.parse().ok()?;
-    // `minutes_from_1900` 只累加 1900 年之后；再早的年份会静默算成 0，必须挡住。
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1900..=9999).contains(&year) {
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=9999).contains(&year) {
         return None;
     }
     let month_days = month_lengths(year);

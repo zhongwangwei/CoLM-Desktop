@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { visibleBenchTasks, type BenchTask } from '../lib/bench-task';
 import { Button } from './ui';
+import { benchErrorText } from '../features/compare/compare';
 
 const formatWaited = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -25,15 +26,15 @@ export default function BenchTaskBar({
   onDismiss: (task: BenchTask) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  const running = tasks.some((task) => task.state === 'running');
+  const shown = visibleBenchTasks(tasks, now);
+  const ticking = shown.some((task) => task.state === 'running' || task.finishedAt != null);
   useEffect(() => {
-    // 任务列表没变但时间在走（running）；全部结束后也要刷一次，完成项的"保留 5 分钟"才会按期收起。
+    // 完成项还在保留期内时继续计时，全部过期后停止。
     setNow(Date.now());
-    if (!running) return;
+    if (!ticking) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [running, tasks]);
-  const shown = visibleBenchTasks(tasks, now);
+  }, [ticking, tasks]);
   if (!shown.length) return null;
   return (
     <section
@@ -62,7 +63,7 @@ export default function BenchTaskBar({
             </span>
           )}
           {task.state === 'failed' && task.error && (
-            <span className="bench-task-error">{task.error}</span>
+            <span className="bench-task-error">{t(...benchErrorText(task.error))}</span>
           )}
           <span className="bench-task-actions">
             {task.state === 'running' && (

@@ -16,5 +16,6 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
-[lints]
-workspace = true
+# Only file_lock permits native lock FFI; other unsafe code remains denied.
+[lints.rust]
+unsafe_code = "deny"

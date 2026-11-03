@@ -139,3 +139,97 @@ fn bound_models_cannot_use_legacy_original_case_writes_or_runs() {
     assert!(error.to_string().contains("complete revision"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn cancellable_cli_keeps_full_output_and_stops_term_resistant_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_case("cancellable-cli", "");
+    let cli = dir.join("fake-cli");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\ni=0; while [ $i -lt 90 ]; do echo line-$i; i=$((i+1)); done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ctx = ToolContext {
+        cli: cli.clone(),
+        cancel: Some(signal.clone()),
+        ..ToolContext::default()
+    };
+    assert_eq!(ctx.cli_cancellable(&[]).unwrap().lines().count(), 90);
+    std::fs::write(&cli, format!("#!/bin/sh\ncd '{}' || exit 1\ntrap '' TERM\n(sleep 1; echo escaped > escaped) &\necho ready > ready\nwait\n", dir.display())).unwrap();
+    let worker = std::thread::spawn(move || ctx.cli_cancellable(&[]));
+    let began = std::time::Instant::now();
+    while !dir.join("ready").exists() && began.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(dir.join("ready").exists());
+    signal.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(worker
+        .join()
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("cancelled"));
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(!dir.join("escaped").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_cancelled_cli_request_does_not_spawn_the_command() {
+    let ctx = ToolContext {
+        cli: std::path::PathBuf::from("nonexistent-cancelled-cli"),
+        cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..ToolContext::default()
+    };
+    assert!(ctx
+        .cli_cancellable(&[])
+        .unwrap_err()
+        .to_string()
+        .contains("not started"));
+    assert!(ctx
+        .cli_long(&[])
+        .unwrap_err()
+        .to_string()
+        .contains("not started"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_remains_live_after_a_cli_leader_exits_with_inherited_pipes() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_case("exited-cli-leader", "");
+    let cli = dir.join("fake-cli");
+    std::fs::write(&cli, format!("#!/bin/sh\ncd '{}' || exit 1\ntrap '' TERM\n(sleep 2; echo escaped > escaped) &\necho ready > ready\nexit 0\n", dir.display())).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ctx = ToolContext {
+        cli,
+        cancel: Some(signal.clone()),
+        ..ToolContext::default()
+    };
+    let worker = std::thread::spawn(move || ctx.cli_cancellable(&[]));
+    let started = std::time::Instant::now();
+    while !dir.join("ready").exists() && started.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(dir.join("ready").exists());
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let cancelled = std::time::Instant::now();
+    signal.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(worker
+        .join()
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("cancelled"));
+    assert!(cancelled.elapsed() < std::time::Duration::from_millis(1500));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(!dir.join("escaped").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

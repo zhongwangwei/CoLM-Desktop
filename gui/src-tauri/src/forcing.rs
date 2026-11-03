@@ -392,6 +392,12 @@ fn reject_same_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), S
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => std::path::Path::new("."),
     };
+    std::fs::create_dir_all(dst_parent).map_err(|e| {
+        format!(
+            "cannot create output directory {}: {e}",
+            dst_parent.display()
+        )
+    })?;
     let dst_dir = dst_parent
         .canonicalize()
         .map_err(|e| format!("产物目录 {} 打不开：{e}", dst_parent.display()))?;

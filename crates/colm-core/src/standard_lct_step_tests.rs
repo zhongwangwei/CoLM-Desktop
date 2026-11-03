@@ -34,6 +34,15 @@ static HYDRAULICS: [SoilHydraulicModel; 2] = [
 
 #[test]
 fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
+    shared_energy_handoff(1);
+}
+
+#[test]
+fn rss_six_uses_the_shared_ground_humidity_and_topsoil_sand_handoff() {
+    shared_energy_handoff(6);
+}
+
+fn shared_energy_handoff(scheme: i32) {
     let forcing = prepare_runtime_forcing(RuntimeForcingInput {
         air_temperature_k: 290.0,
         specific_humidity: 0.008,
@@ -54,6 +63,8 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
     .unwrap();
     let mut state = energy_state(forcing);
     let mut input = input(forcing);
+    input.soil_surface_resistance.scheme = scheme;
+    input.ground_flux.surface_resistance_scheme = scheme;
     input.ground_flux.ground_specific_humidity = 0.03;
     input.ground_flux.ground_temperature_k = 100.0;
     input.soil_surface_resistance.ground_specific_humidity = 0.02;
@@ -77,6 +88,8 @@ fn standard_lct_energy_step_uses_one_shared_physical_handoff() {
         porosity: input.ground_temperature.soil_porosity[0],
         saturated_soil_suction_mm: input.ground_temperature.soil_suction_mm[0],
         residual_water: input.ground_temperature.soil_residual_water[0],
+        sand_volume_fraction_of_solids: input.ground_temperature.soil_thermal_inputs[0]
+            .sand_volume_fraction_of_solids,
         hydraulic_model: input.ground_temperature.soil_hydraulic_model[0],
         layer_thickness_m: input.ground_temperature.layer_thickness_m[0],
         temperature_k: input.ground_temperature.temperature_k[0],
@@ -819,6 +832,7 @@ fn input(forcing: crate::RuntimeForcing) -> StandardLctEnergyInput<'static> {
             porosity: 0.46,
             saturated_soil_suction_mm: -100.0,
             residual_water: 0.05,
+            sand_volume_fraction_of_solids: 0.3,
             hydraulic_model: SoilHydraulicModel::Campbell { bsw: 4.0 },
             layer_thickness_m: 0.1,
             temperature_k: 289.0,
