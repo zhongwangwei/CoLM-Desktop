@@ -43721,3 +43721,53 @@ cargo run -p xtask -- audit-vendor --base <基准导入 rev> --fork <同步前�
 材料族（同位素/溶质）的 host 同样逐位一致；material 专用变量仍有舍入级差异
 （同位素 `f_mt_delta_*` ≤2.8e-12/10‰、`f_mt_evap_mass` ≤4.5e-16，溶质 0 差异），
 属于材料模块算术略约 1e-13 相对量级的实现差，不是物种/记账 bug。
+
+## Rust 预处理多进程扇出：0.1° 区域 1vN 逐位通过，0.1° 全球推进到调度阶段（2026-11-03）
+
+**目标**：Rust 全链条（`mksrfdata-rs` / `mkinidata-rs` / `colm-rs`）支持多进程/多节点区域与全球算例；
+N=1 输出必须逐字节不变，N>1 与 N=1 逐文件相同。预处理扇出不需要逐步通信 —— 块之间独立，
+只有启动器协议（`COLM_MPIEXEC`、PMI/SLURM 环境、`colm-spmd::RankInfo`）与 colm 共用。
+
+**实现形状**
+- `mkinidata-rs`：按块 row-major 连续区间分片；root 额外写 `grid_river`/`catch_lateral` 全局 restart，
+  其余 rank 只写自己块的 restart。
+- `mksrfdata-rs`：新增“元素窗口 + 完整算例域 pixel lattice”模式
+  （`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`）。每个 rank 物化自己块区间
+  换算出的 1–3 个矩形窗口里的元素，但元素编号与 pixel 索引空间仍按完整算例域；块文件直接写进最终
+  landdata 树，**没有 merge/remap 步骤**。
+- 全局 `block.nc`/`pixel.nc`/`mesh/<year>/mesh.nc` 由 rank 0 写。`nelm_blk` 不能由 root 重跑完整域
+  拓扑得到（0.1° 全球要扫 3.7e9 像元），所以各 rank 把自己 tile 的每块 land element 计数写进
+  `<case>/out/.colm-shard/rank-XXXX.txt`；root 等齐后汇总，用一个“空元素窗口”的元数据拓扑
+  （完整 pixel lattice、不物化元素）写全局文件。协调只用共享文件系统，不引入通信库。
+- `colm-cli`：Rust 预处理在 `ranks>1` 时走 external launcher（`COLM_MPIEXEC`）；`engine rust ||
+  preprocessors rust` 的远程作业体都导出启动器变量；本地/桌面仍拒绝多进程。N=1 完全走原路线。
+- 首版显式边界：`DEF_USE_SrfdataDiag` 全局诊断文件、Urban 地表、CATCHMENT 网格在多进程下直接报错。
+
+**bd 验证（LSF，算例窗口 2000-07-01–07-02，0.1° Mekong，35 个活跃 5° 块）**
+
+| 阶段 | 1 rank / 1 node | 2 ranks / 2 nodes | 对比 |
+|---|---|---|---|
+| mksrfdata | job 237055/237097 | job 237056/237098 | **8088/8088 文件 sha256 相同** |
+| mkinidata | job 237068 | job 237070 | **68/68 文件相同**（const + 起报 restart） |
+| colm（Rust 引擎，48 步 2 天） | job 237072 | job 237083 | **history 2/2 + restart 135/135 文件相同** |
+
+同样算例的 landdata 在 `mksrfdata` 单进程 8 线程约 **29 min**（CPU 5498 s）、2 rank 多节点约 **26 min**
+（CPU 6087 s）；该算例瓶颈在 500 m rawdata 读取与 8088 个文件的文件系统写入，2 rank 加速有限。
+`mkinidata` 两次都约 5–6 min；`colm` 2 rank 与 1 rank 都是约 16–20 min（48 步，restart/history 写盘占大头）。
+
+**过程中抓到的缺陷（都由 bd 的逐文件比对暴露）**
+1. `mesh/2005/mesh.nc` 的 `nelm_blk`：root 重跑完整域时漏了 `build_lct_land_patches_from_raster`
+   的 land-only 过滤，全球 mask 正格全被算进去（50400），而 N=1 是过滤后的 39973 —— 8088 个文件里
+   就差这一个。修复：root 重建也必须走同一过滤（随后改成 rank 计数汇总，不再重跑）。
+2. 全球算例的 namelist 通常不写 `DEF_domain`（整颗球就是域），分片需要域：回退到 mesh 文件自身外框。
+3. 全球 0.1° mesh 的 `lat_s/lat_n` 是自北向南存的，首版 `mesh_domain` 按升序校验直接拒绝；
+   同时经度要按网格顺序展开，`lon_e` 最后一格回到 `-180` 时仍应是 360° 跨度。
+4. 0.1° IGBP 的 500 m pixel lattice 是 `86400×43200=3.7e9` 格，超过串行 400M 保护；但扇出时
+   rank 只扫自己窗口，写入块文件的又是 land pixel 列表（约 1.1e9，仍在 i32 内），所以分布式路径
+   跳过串行上限、保留 4e9 的健全性上限。
+
+**0.1° 全球端到端进展**：全球 0.1° 网格/mesh 与算例已在 bd 建好（3600×1800，25 MB mesh，
+72×36 个 5° 块，1446 个活跃块量级）。`mksrfdata` 24 rank 在 2 节点被 OOM（exit 9，MAX MEM 158 GB；
+4 节点也是 140 GB），说明总内存需求约数百 GB、必须按节点数摊；96 rank / 6 节点的作业
+（job 237105）已提交，等 `normal` 队列调度。本轮结论以区域 1vN 逐位通过为准，全球作业的
+调度与结果下一条追记（当前 `normal` 队列 PEND 约 7 万，调度不可控）。
