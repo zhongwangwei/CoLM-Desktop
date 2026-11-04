@@ -277,3 +277,66 @@ fn lsf_spreads_a_big_mpi_job_over_the_planned_nodes() {
         "{slurm:?}"
     );
 }
+
+#[test]
+fn automatic_cpu_budgets_use_every_core_without_oversubscribing() {
+    for (engine, nodes, cores, ranks, threads) in [
+        ("rust", 2, 48, 2, 48),
+        ("fortran", 2, 48, 96, 1),
+        ("rust", 2, 384, 4, 192),
+        ("rust", 1, 257, 257, 1),
+    ] {
+        let plan = Parallelism::from_budget(engine, nodes, cores).unwrap();
+        assert_eq!((plan.ranks, plan.threads), (ranks, threads));
+        assert_eq!(plan.ranks * plan.threads, nodes * cores);
+        let resources = Resources {
+            cpus: plan.threads,
+            ranks: plan.ranks,
+            nodes,
+            cores_per_node: cores,
+            memory_gb: Some(64),
+            ..Resources::default()
+        };
+        resources.validate().unwrap();
+        for scheduler in [Scheduler::Slurm, Scheduler::Pbs, Scheduler::Lsf] {
+            directives(scheduler, "budget", "/log", &resources).unwrap();
+        }
+    }
+    for (engine, nodes, cores) in [
+        ("rust", 0, 48),
+        ("rust", 2, 0),
+        ("rust", 4097, 48),
+        ("fortran", 2, 4097),
+        ("invalid", 2, 48),
+    ] {
+        assert!(Parallelism::from_budget(engine, nodes, cores).is_err());
+    }
+}
+
+#[test]
+fn explicit_nodes_cannot_hide_overflow_or_exceed_per_node_capacity() {
+    for resources in [
+        Resources {
+            cpus: u32::MAX,
+            ranks: 2,
+            nodes: 2,
+            ..Resources::default()
+        },
+        Resources {
+            cpus: 16,
+            ranks: 8,
+            nodes: 2,
+            cores_per_node: 48,
+            ..Resources::default()
+        },
+        Resources {
+            cpus: 64,
+            ranks: 1,
+            nodes: 1,
+            cores_per_node: 48,
+            ..Resources::default()
+        },
+    ] {
+        assert!(resources.validate().is_err());
+    }
+}

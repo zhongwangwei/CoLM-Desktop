@@ -18,6 +18,7 @@ import {
   matchesRemoteRun,
   remoteEndStatus,
   restoreRunView,
+  parallelBudgetPlan,
 } from './run-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
 import { compatibleKernel } from './run-model';
@@ -41,6 +42,11 @@ function panel(
     engine?: string;
     threads?: string;
     cpus?: string;
+    autoParallel?: boolean;
+    parallelNodes?: string;
+    parallelCoresPerNode?: string;
+    parallelProblem?: string | null;
+    siteCasesOnly?: boolean;
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -126,6 +132,12 @@ function panel(
     siteBatch: !!options.remote && !!options.remoteBatch && !options.single,
     stationConcurrency: options.stationConcurrency ?? 1,
     localSiteNow: false,
+    siteCasesOnly: options.siteCasesOnly ?? false,
+    autoParallel: options.autoParallel ?? false,
+    parallelNodes: options.parallelNodes ?? '2',
+    parallelCoresPerNode: options.parallelCoresPerNode ?? '48',
+    parallelProblem: options.parallelProblem ?? null,
+    parallelBudgetPlan,
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
     setMonitor: options.setMonitor ?? (() => {}),
@@ -1203,4 +1215,73 @@ test('a batch status retry clears the temporary error when the same job succeeds
     assert.equal(run.status, 'succeeded');
     assert.equal(run.error, undefined);
   }
+});
+
+test('automatic remote runs submit only the node budget, without stale manual resources', async () => {
+  for (const engine of ['rust', 'fortran']) {
+    const p = panel({
+      remote: true,
+      single: true,
+      engine,
+      autoParallel: true,
+      ranks: 'bad old rank',
+      threads: 'bad old threads',
+      cpus: 'bad old cpus',
+    });
+    await p.run().catch(() => {});
+    const submitted = p.calls.find((call) => call.command === 'remote_run');
+    assert.ok(submitted, engine);
+    assert.deepEqual(
+      {
+        parallel: submitted.args.parallel,
+        nodes: submitted.args.nodes,
+        cores: submitted.args.coresPerNode,
+        ranks: submitted.args.ranks,
+        threads: submitted.args.threads,
+        cpus: submitted.args.cpus,
+      },
+      { parallel: 'auto', nodes: 2, cores: 48, ranks: null, threads: null, cpus: null },
+    );
+  }
+});
+
+test('invalid automatic budgets and unsupported placement stop before migration or submission', async () => {
+  for (const options of [
+    { parallelNodes: '0' },
+    { parallelCoresPerNode: '' },
+    { parallelNodes: '2.5' },
+    { parallelCoresPerNode: '4097' },
+    { parallelProblem: 'Automatic multi-node plans require Slurm' },
+  ]) {
+    const p = panel({ remote: true, single: true, autoParallel: true, ...options });
+    await assert.rejects(p.run());
+    assert.equal(p.calls.length, 0);
+  }
+});
+
+test('manual remote settings keep explicit values and do not attach an automatic budget', async () => {
+  const p = panel({
+    remote: true,
+    single: true,
+    engine: 'fortran',
+    ranks: '8',
+    threads: '4',
+    cpus: '4',
+  });
+  await p.run().catch(() => {});
+  const submitted = p.calls.find((call) => call.command === 'remote_run')!;
+  assert.equal(submitted.args.ranks, 8);
+  assert.equal(submitted.args.threads, 4);
+  assert.equal(submitted.args.cpus, 4);
+  assert.equal(submitted.args.parallel, undefined);
+  assert.equal(submitted.args.nodes, undefined);
+});
+
+test('one Rust site stays single-process and single-threaded on a server', async () => {
+  const p = panel({ remote: true, single: true, siteCasesOnly: true, ranks: '8', threads: '16' });
+  await p.run().catch(() => {});
+  const submitted = p.calls.find((call) => call.command === 'remote_run')!;
+  assert.equal(submitted.args.ranks, 1);
+  assert.equal(submitted.args.threads, 1);
+  assert.equal(submitted.args.cpus, 1);
 });

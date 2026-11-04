@@ -59,6 +59,39 @@ pub struct Resources {
     pub directives: Vec<String>,
 }
 
+/// Deterministic CPU layout; performance still depends on the case and filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Parallelism {
+    pub ranks: u32,
+    pub threads: u32,
+}
+
+impl Parallelism {
+    pub fn from_budget(engine: &str, nodes: u32, cores_per_node: u32) -> Result<Self> {
+        ensure!(
+            (1..=4096).contains(&nodes),
+            "nodes must be between 1 and 4096"
+        );
+        ensure!(
+            (1..=4096).contains(&cores_per_node),
+            "cores per node must be between 1 and 4096"
+        );
+        let per_node = match engine {
+            "rust" => (1..=cores_per_node)
+                .find(|ranks| cores_per_node % ranks == 0 && cores_per_node / ranks <= 256)
+                .expect("one thread per core always fits"),
+            "fortran" => cores_per_node,
+            _ => bail!("engine must be rust or fortran"),
+        };
+        Ok(Self {
+            ranks: nodes
+                .checked_mul(per_node)
+                .ok_or_else(|| anyhow::anyhow!("parallel rank count overflows"))?,
+            threads: cores_per_node / per_node,
+        })
+    }
+}
+
 /// 把时限解析成秒。
 pub fn parse_walltime(text: &str) -> Result<u64> {
     let text = text.trim();
@@ -106,11 +139,15 @@ impl Resources {
     /// 作业实际占几个节点；0 表示不指定。指定了节点数就用它；没指定时，总核数（每进程核数 × 进程数）
     /// 不超过一个节点的核数就是 0，超过了就取能让进程数整除、且每节点不超过 `cores_per_node` 的最少节点数。
     pub fn planned_nodes(&self) -> Result<u32> {
+        let ranks = self.ranks.max(1);
+        let total = self
+            .cpus
+            .max(1)
+            .checked_mul(ranks)
+            .ok_or_else(|| anyhow::anyhow!("total CPU request overflows"))?;
         if self.nodes > 0 {
             return Ok(self.nodes);
         }
-        let ranks = self.ranks.max(1);
-        let total = self.cpus.max(1) * ranks;
         let per_node = self.cores_per_node;
         if per_node == 0 || total <= per_node {
             return Ok(0);
@@ -126,7 +163,7 @@ impl Resources {
         );
         // Never more than twice the minimum: a prime rank count would otherwise end up one per node.
         let first = total.div_ceil(per_node);
-        (first..=ranks.min(first * 2))
+        (first..=ranks.min(first.saturating_mul(2)))
             .find(|nodes| ranks % nodes == 0)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -144,6 +181,15 @@ impl Resources {
             self.ranks.max(1),
             self.nodes
         );
+        if self.nodes > 0 && self.cores_per_node > 0 {
+            let per_node = self.ranks.max(1) / self.nodes;
+            ensure!(
+                self.cpus * per_node <= self.cores_per_node,
+                "each node needs {} cores but only {} are available",
+                self.cpus * per_node,
+                self.cores_per_node
+            );
+        }
         if let Some(seconds) = &self.walltime {
             parse_walltime(seconds)?;
         }

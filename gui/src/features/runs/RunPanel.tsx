@@ -38,6 +38,7 @@ import {
   siteBatchConcurrency,
   spatialThreads,
   SITE_THREADS,
+  parallelBudgetPlan,
 } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
@@ -77,12 +78,16 @@ export default function RunPanel({
   batchCases?: string[];
   onBusyChange?: (busy: boolean) => void;
   initialSettings?: {
+    host?: string;
     threads: string;
     ranks: string;
     workers: string;
     autoWorkers?: boolean;
     scheduler: string;
     cpus: string;
+    parallel?: 'auto' | 'manual';
+    nodes?: string;
+    coresPerNode?: string;
   };
   initialHost?: string;
   batchProfiles?: Record<string, CaseProfile>;
@@ -110,15 +115,17 @@ export default function RunPanel({
   // 本机单点：主模型是单个垂直柱、时间步串行，多线程没有可拆的活；并行只能靠同时跑多个站点。
   // 所以本机单点固定 1 线程，界面不再给线程数，批量只给"同时运行的站点数"（GUI 审查 2026-10-22）。
   const localCores = localCoreCount();
-  const singleSpatialCase =
-    !batchCases && !initialHostValue && state.selectedCase?.profile?.spatial === true;
+  const spatialCase =
+    !batchCases &&
+    ((state.selectedCase?.dir === casePath && state.selectedCase.profile?.spatial === true) ||
+      ['latlon', 'unstructured', 'catchment'].includes(effectiveProfile?.grid ?? ''));
+  const singleSpatialCase = spatialCase && !initialHostValue;
   const batchSiteCases =
     !!batchCases &&
-    !initialHostValue &&
     !!batchProfiles &&
     Object.keys(batchProfiles).length > 0 &&
     Object.values(batchProfiles).every((profile) => !profile.spatial);
-  const siteCasesOnly = !singleSpatialCase && (!batchCases || batchSiteCases);
+  const siteCasesOnly = !spatialCase && (!batchCases || batchSiteCases);
   // 只用来定初值；页面上改了运行位置以后看 `localSiteNow`。
   const localSiteOnly = siteCasesOnly && !initialHostValue;
   const [host, setHost] = useState(initialHostValue),
@@ -141,6 +148,21 @@ export default function RunPanel({
     ),
     [scheduler, setScheduler] = useState(settings?.scheduler || 'auto'),
     [cpus, setCpus] = useState(settings?.cpus || ''),
+    [parallelMode, setParallelMode] = useState<'auto' | 'manual'>(
+      settings?.parallel ?? (settings ? 'manual' : 'auto'),
+    ),
+    [parallelBudgets, setParallelBudgets] = useState<
+      Record<string, { nodes?: string; coresPerNode?: string }>
+    >(
+      settings && (settings.host ?? initialHostValue)
+        ? {
+            [settings.host ?? initialHostValue]: {
+              nodes: settings.nodes,
+              coresPerNode: settings.coresPerNode,
+            },
+          }
+        : {},
+    ),
     [force, setForce] = useState(false),
     [recordInputFingerprints, setRecordInputFingerprints] = useState(false),
     [remote, setRemote] = useState<unknown>(
@@ -586,12 +608,31 @@ export default function RunPanel({
         throw new Error(
           bilingual('请选择与当前模型匹配的编译配置', 'Select a compatible build configuration'),
         );
+      const plan = autoParallel
+        ? parallelBudgetPlan(engine, Number(parallelNodes), Number(parallelCoresPerNode))
+        : null;
+      if (autoParallel && !plan)
+        throw new Error(
+          t(
+            '节点数和每节点核数须为 1–4096 的整数',
+            'Nodes and cores per node must be integers from 1 to 4096',
+          ),
+        );
+      if (autoParallel && parallelProblem) throw new Error(parallelProblem);
       const nums = [
         // 本机 Rust 只能单进程；远程 Rust 由 srun/mpiexec 启动，rank 数交给启动器。
         // 站点批量按节点打包（一个站点一个 CPU），每个算例仍是单进程。
-        engine === 'rust' && (!host || siteBatch) ? '1' : ranks,
+        plan
+          ? String(plan.ranks)
+          : engine === 'rust' && (!host || siteCasesOnly || siteBatch)
+            ? '1'
+            : ranks,
         // 本机单点固定 1 线程；从服务器切回本机时，线程框藏起来了，但里面可能还是服务器的值。
-        siteBatch || localSiteNow ? '1' : threads,
+        plan
+          ? String(plan.threads)
+          : siteBatch || localSiteNow || (siteCasesOnly && engine === 'rust')
+            ? '1'
+            : threads,
         siteBatch ? String(stationConcurrency) : workers,
       ].map(Number);
       if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
@@ -603,6 +644,7 @@ export default function RunPanel({
         );
       if (
         host &&
+        !autoParallel &&
         cpus &&
         (!Number.isInteger(Number(cpus)) || Number(cpus) < 1 || Number(cpus) > 1024)
       )
@@ -678,12 +720,22 @@ export default function RunPanel({
             recordInputFingerprints,
             engine,
             preprocessors,
-            ranks: nums[0],
-            threads: nums[1],
+            ranks: plan ? null : nums[0],
+            threads: plan ? null : nums[1],
+            ...(plan
+              ? { parallel: 'auto' as const, nodes: plan.nodes, coresPerNode: plan.coresPerNode }
+              : {}),
             // Server site batches: the requested CPUs are the stations running at once, one each.
-            // Rust 引擎只有一个进程，核数就按线程数申请：不让服务器设置里的 CPU 数盖掉它，
-            // 免得多开的线程挤在少数几个核上、或多占的核空着。
-            cpus: siteBatch ? 1 : engine === 'rust' ? nums[1] : cpus ? Number(cpus) : null,
+            // Auto mode sends only the budget; the CLI resolves rank and thread requests together.
+            cpus: plan
+              ? null
+              : siteBatch
+                ? 1
+                : engine === 'rust'
+                  ? nums[1]
+                  : cpus
+                    ? Number(cpus)
+                    : null,
             scheduler,
             modelVersion: null,
             modelRevision: revision,
@@ -1312,6 +1364,36 @@ export default function RunPanel({
     !!host &&
     batchCases.every((dir) => state.cases?.some((entry) => entry.dir === dir && !entry.spatial));
   const runServer = servers.find((server) => server.host === host);
+  const canAutoParallel = !!host && spatialCase;
+  const autoParallel = canAutoParallel && parallelMode === 'auto';
+  const parallelNodes = parallelBudgets[host]?.nodes ?? String(runServer?.nodes || 1);
+  const parallelCoresPerNode =
+    parallelBudgets[host]?.coresPerNode ??
+    (runServer?.cores_per_node ? String(runServer.cores_per_node) : '');
+  const parallelPlan = autoParallel
+    ? parallelBudgetPlan(engine, Number(parallelNodes), Number(parallelCoresPerNode))
+    : null;
+  const parallelProblem =
+    autoParallel && !parallelPlan
+      ? t(
+          '节点数和每节点核数须为 1–4096 的整数',
+          'Nodes and cores per node must be integers from 1 to 4096',
+        )
+      : autoParallel &&
+          parallelPlan &&
+          parallelPlan.nodes > 1 &&
+          ['bare', 'pbs', 'lsf'].includes(
+            scheduler === 'auto' ? (runServer?.scheduler ?? '') : scheduler,
+          )
+        ? t(
+            '自动多节点配置目前需要 Slurm；请选择 Slurm、改为一个节点或使用手动配置。',
+            'Automatic multi-node plans currently require Slurm. Select Slurm, use one node, or choose manual configuration.',
+          )
+        : null;
+  function setParallelBudget(key: 'nodes' | 'coresPerNode', value: string) {
+    if (pending) return;
+    setParallelBudgets((old) => ({ ...old, [host]: { ...old[host], [key]: value } }));
+  }
   const stationConcurrency =
     Number(cpus) > 0 ? Number(cpus) : runServer?.cpus || runServer?.threads || 1;
   function back() {
@@ -1364,11 +1446,11 @@ export default function RunPanel({
   }
 
   useEffect(() => {
-    if (!batchCases) return;
+    if (!batchCases && !canAutoParallel) return;
     const preferences = {
       root: state.root,
-      cases: batchCases,
-      batch: true,
+      cases: batchCases ?? [casePath],
+      batch: !!batchCases,
       host,
       ranks,
       threads,
@@ -1376,6 +1458,7 @@ export default function RunPanel({
       autoWorkers: autoWorkers.current !== null && workers === autoWorkers.current,
       scheduler,
       cpus,
+      ...(canAutoParallel ? { parallel: parallelMode, ...parallelBudgets[host] } : {}),
     };
     if (JSON.stringify(state.projectRunSettings) === JSON.stringify(preferences)) return;
     update((old) =>
@@ -1386,6 +1469,10 @@ export default function RunPanel({
     );
   }, [
     batchCases,
+    casePath,
+    canAutoParallel,
+    parallelMode,
+    parallelBudgets,
     state.root,
     state.projectRunSettings,
     host,
@@ -1409,7 +1496,9 @@ export default function RunPanel({
     autoWorkers.current = next;
     if (next !== workers) setWorkers(next);
   }, [localSiteNow, batchCount, localCores, workers]);
-  const showRanks = engine === 'fortran' || (engine === 'rust' && !!host && !siteBatch);
+  const showRanks =
+    !autoParallel &&
+    (engine === 'fortran' || (engine === 'rust' && !!host && !siteCasesOnly && !siteBatch));
   const fields: UiField[] = [
     {
       id: 'run-host',
@@ -1426,6 +1515,41 @@ export default function RunPanel({
       ],
       set: changeHost,
     },
+    ...(canAutoParallel
+      ? [
+          {
+            id: 'run-parallel',
+            label: t('并行配置', 'Parallel configuration'),
+            type: 'choice' as const,
+            value: parallelMode,
+            options: [
+              { value: 'auto', label: t('按节点与核数自动配置', 'Automatic from nodes and cores') },
+              { value: 'manual', label: t('手动配置', 'Manual') },
+            ],
+            set: (value: string) => {
+              if (!pending && (value === 'auto' || value === 'manual')) setParallelMode(value);
+            },
+          },
+          ...(autoParallel
+            ? [
+                {
+                  id: 'run-nodes',
+                  label: t('节点数', 'Nodes'),
+                  type: 'number' as const,
+                  value: parallelNodes,
+                  set: (value: string) => setParallelBudget('nodes', value),
+                },
+                {
+                  id: 'run-cores-per-node',
+                  label: t('每节点可用核数', 'Available cores per node'),
+                  type: 'number' as const,
+                  value: parallelCoresPerNode,
+                  set: (value: string) => setParallelBudget('coresPerNode', value),
+                },
+              ]
+            : []),
+        ]
+      : []),
     ...[
       ...(showRanks
         ? [
@@ -1439,14 +1563,18 @@ export default function RunPanel({
             ] as const,
           ]
         : []),
-      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch && !localSiteNow
+      ...(!autoParallel &&
+      (engine === 'rust' || preprocessors === 'rust') &&
+      !siteBatch &&
+      !localSiteNow &&
+      !(siteCasesOnly && engine === 'rust')
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
         : []),
       ...(batchCases && !siteBatch
         ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
         : []),
       // 只有 Fortran 引擎（MPI）才要另填每个进程的 CPU 数；Rust 引擎按线程数申请。
-      ...(host && !siteBatch && engine === 'fortran'
+      ...(host && !autoParallel && !siteBatch && engine === 'fortran'
         ? [
             [
               'cpus',
@@ -1702,11 +1830,54 @@ export default function RunPanel({
             ...servers.map((s) => ({ value: s.host, label: s.host })),
           ],
         })}
-        {['run-scheduler', 'run-ranks', 'run-threads', 'run-workers', 'run-cpus'].flatMap((id) => {
+        {[
+          'run-scheduler',
+          'run-parallel',
+          'run-nodes',
+          'run-cores-per-node',
+          'run-ranks',
+          'run-threads',
+          'run-workers',
+          'run-cpus',
+        ].flatMap((id) => {
           const field = fields.find((entry) => entry.id === id);
           return field ? [render(field)] : [];
         })}
       </div>
+      {parallelProblem && <Notice tone="warning">{parallelProblem}</Notice>}
+      {parallelPlan && (
+        <div role="status" aria-live="polite">
+          <p>
+            {t(
+              `${parallelPlan.nodes} 节点 × 每节点 ${parallelPlan.coresPerNode} 核；${parallelPlan.ranks} 个进程，每进程 ${parallelPlan.threads} 线程；总预算 ${parallelPlan.totalCpus} 核。`,
+              `${parallelPlan.nodes} ${parallelPlan.nodes === 1 ? 'node' : 'nodes'} × ${parallelPlan.coresPerNode} cores per node; ${parallelPlan.ranks} ${parallelPlan.ranks === 1 ? 'process' : 'processes'} with ${parallelPlan.threads} ${parallelPlan.threads === 1 ? 'thread' : 'threads'} each; total CPU budget: ${parallelPlan.totalCpus}.`,
+            )}
+          </p>
+          <p className="muted">
+            {runServer?.memory_gb
+              ? t(
+                  `每节点配置的内存预算为 ${runServer.memory_gb} GB。`,
+                  `Configured memory budget: ${runServer.memory_gb} GB per node.`,
+                )
+              : t(
+                  '每节点内存预算未指定；提交到队列时使用队列默认值。',
+                  'Memory per node is unspecified; queued jobs use the queue default.',
+                )}{' '}
+            {t(
+              '此方案按资源预算生成；运行时还会检查模型与分块限制，尚未进行性能调优或内存用量预测。',
+              'This plan follows the resource budget. Model and block limits are also checked at run time; performance and memory use have not been estimated.',
+            )}
+          </p>
+        </div>
+      )}
+      {host && batchCases && !siteBatch && (
+        <p className="muted">
+          {t(
+            '空间算例批量沿用每个算例的手动并行设置。',
+            'Spatial batches use the manual parallel settings for each case.',
+          )}
+        </p>
+      )}
       {localSiteNow && (
         <p className="muted">
           {batchCases
@@ -1870,7 +2041,11 @@ export default function RunPanel({
             label={t('开始运行', 'Start run')}
             variant={completed ? 'secondary' : 'primary'}
             disabled={
-              disabled || pending || !kernelMatches || (!!host && remoteSubmissionBlocked(remote))
+              disabled ||
+              pending ||
+              !kernelMatches ||
+              !!parallelProblem ||
+              (!!host && remoteSubmissionBlocked(remote))
             }
             run={run}
           >

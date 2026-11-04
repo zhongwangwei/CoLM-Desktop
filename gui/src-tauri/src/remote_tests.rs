@@ -234,7 +234,7 @@ fn remote_logs_are_parsed_like_local_runs() {
 }
 
 #[test]
-fn the_fortran_engine_passes_ranks_and_nodes_only_when_it_uses_mpi() {
+fn both_engines_pass_remote_ranks_and_nodes_to_the_launcher() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     server.nodes = 2;
     let go = |engine: Option<&str>, ranks: Option<u32>| {
@@ -264,10 +264,90 @@ fn the_fortran_engine_passes_ranks_and_nodes_only_when_it_uses_mpi() {
     // 一个进程不用 MPI，也就不申请节点。
     let one = go(Some("fortran"), Some(1));
     assert!(value(&one, "--ranks").is_none() && value(&one, "--nodes").is_none());
-    // Rust 引擎：什么都不加，沿用 colm-cli 的默认。
     let rust = go(Some("rust"), Some(8));
-    assert!(value(&rust, "--engine").is_none() && value(&rust, "--ranks").is_none());
+    assert!(value(&rust, "--engine").is_none());
+    assert_eq!(value(&rust, "--ranks").as_deref(), Some("8"));
+    assert_eq!(value(&rust, "--nodes").as_deref(), Some("2"));
     assert!(value(&go(None, None), "--engine").is_none());
+}
+
+#[test]
+fn automatic_parallel_budget_replaces_manual_values_in_runs_and_previews() {
+    let server: Server = serde_json::from_value(json!({
+        "host":"server", "root":"/data/colm", "threads":8, "cpus":4,
+        "nodes":3, "cores_per_node":64, "memory_gb":128, "env_script":"--ranks"
+    }))
+    .unwrap();
+    for dry_run in [false, true] {
+        for engine in ["rust", "fortran"] {
+            let mut args = run_args(
+                &server,
+                "/case".into(),
+                "/kernel".into(),
+                None,
+                false,
+                dry_run,
+                &Engine {
+                    engine: Some(engine.into()),
+                    ranks: Some(6),
+                    model_version: None,
+                },
+            );
+            apply_parallel_budget(&mut args, Some("auto"), Some(2), Some(48)).unwrap();
+            let pairs: Vec<_> = args[2..].chunks_exact(2).collect();
+            for expected in [
+                ["--parallel", "auto"],
+                ["--nodes", "2"],
+                ["--cores-per-node", "48"],
+                ["--mem-gb", "128"],
+                ["--env-script", "--ranks"],
+            ] {
+                assert_eq!(
+                    pairs.iter().filter(|pair| **pair == expected).count(),
+                    1,
+                    "{args:?}"
+                );
+            }
+            for old in ["--ranks", "--threads", "--cpus"] {
+                assert!(!pairs.iter().any(|pair| pair[0] == old), "{args:?}");
+            }
+            assert_eq!(args.iter().any(|arg| arg == "--dry-run"), dry_run);
+        }
+    }
+}
+
+#[test]
+fn parallel_budget_validation_preserves_manual_arguments_and_refuses_incomplete_budgets() {
+    let server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    let original = run_args(
+        &server,
+        "/case".into(),
+        "/kernel".into(),
+        None,
+        false,
+        false,
+        &Engine::default(),
+    );
+    for mode in [None, Some("manual")] {
+        let mut args = original.clone();
+        apply_parallel_budget(&mut args, mode, None, None).unwrap();
+        assert_eq!(args, original);
+    }
+    for (mode, nodes, cores) in [
+        (Some("unknown"), None, None),
+        (None, Some(2), Some(48)),
+        (Some("manual"), Some(2), Some(48)),
+        (Some("auto"), None, Some(48)),
+        (Some("auto"), Some(2), None),
+        (Some("auto"), Some(0), Some(48)),
+        (Some("auto"), Some(4097), Some(48)),
+        (Some("auto"), Some(2), Some(0)),
+        (Some("auto"), Some(2), Some(4097)),
+    ] {
+        let mut args = original.clone();
+        assert!(apply_parallel_budget(&mut args, mode, nodes, cores).is_err());
+        assert_eq!(args, original);
+    }
 }
 
 #[test]

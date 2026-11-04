@@ -16,6 +16,7 @@ import {
   siteBatchConcurrency,
   spatialThreads,
   defaultLocalThreads,
+  parallelBudgetPlan,
   endedRun,
   restoredRuns,
   runCountsText,
@@ -366,4 +367,51 @@ test('a status reply saying the case was never run remotely releases a stuck sub
     true,
   );
   assert.equal(neverSubmitted('remote submission is pending; inspect remote-status'), false);
+});
+
+test('remote budgets fill nodes with Rust threads or Fortran MPI ranks', () => {
+  assert.deepEqual(parallelBudgetPlan('rust', 2, 48), {
+    nodes: 2,
+    coresPerNode: 48,
+    ranksPerNode: 1,
+    ranks: 2,
+    threads: 48,
+    cpus: 48,
+    totalCpus: 96,
+  });
+  assert.deepEqual(parallelBudgetPlan('fortran', 2, 48), {
+    nodes: 2,
+    coresPerNode: 48,
+    ranksPerNode: 48,
+    ranks: 96,
+    threads: 1,
+    cpus: 1,
+    totalCpus: 96,
+  });
+  const large = parallelBudgetPlan('rust', 3, 384)!;
+  assert.equal(large.ranks, 6);
+  assert.equal(large.threads, 192);
+  assert.equal(large.ranks * large.cpus, 3 * 384);
+  const prime = parallelBudgetPlan('rust', 2, 257)!;
+  assert.equal(prime.ranksPerNode, 257);
+  assert.equal(prime.threads, 1);
+});
+
+test('remote budgets reject missing, fractional, unsafe and out-of-range capacities', () => {
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    4097,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER,
+  ]) {
+    assert.equal(parallelBudgetPlan('rust', value, 48), null);
+    assert.equal(parallelBudgetPlan('rust', 2, value), null);
+  }
+  assert.equal(parallelBudgetPlan('unknown', 2, 48), null);
+  const maximum = parallelBudgetPlan('rust', 4096, 4096)!;
+  assert.equal(maximum.ranks * maximum.cpus, 4096 * 4096);
+  assert.ok(maximum.threads <= 256);
 });

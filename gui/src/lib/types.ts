@@ -207,6 +207,9 @@ export type AppState = {
     autoWorkers?: boolean;
     scheduler: string;
     cpus: string;
+    parallel?: 'auto' | 'manual';
+    nodes?: string;
+    coresPerNode?: string;
   };
   newCaseSeed: {
     form: Record<string, string>;

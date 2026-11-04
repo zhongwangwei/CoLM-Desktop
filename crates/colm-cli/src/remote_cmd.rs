@@ -7,7 +7,8 @@
 //!                        [--scheduler auto|bare|slurm|pbs|lsf] [--partition P] [--account A] [--walltime T]
 //!                        [--cpus N] [--mem-gb N] [--env-script TEXT] [--directive '-x…']… [--dry-run 1]
 //!                        [--engine rust|fortran] [--remote-kernel auto|名字|路径] [--preprocessors rust|fortran]
-//!                        [--ranks N] [--nodes N] [--cores-per-node N] [--launcher auto|srun|mpiexec]
+//!                        [--parallel manual|auto] [--ranks N] [--nodes N] [--cores-per-node N] [--launcher auto|srun|mpiexec]
+//!                        # auto: provide nodes and cores-per-node; omit ranks, threads and cpus
 //!                        [--model-version official|<修改版>] [--workspace-root DIR]
 //! colm-cli remote-kernel --host H --root R --preset P [--env-script TEXT] [--profile production|debug] [--force 1]
 //!                        [--model-version <修改版>]   # 用修改版的源码编，内核身份记为 ws-<名>-<提交>
@@ -1045,15 +1046,13 @@ fn engine_for_probe(
     }
 }
 
-/// 这次运行的引擎与 MPI 设置。
+/// This run's resolved resource request is also the launcher's resource contract.
 struct RunPlan {
-    /// rust 或 fortran。
     engine: String,
-    /// 前处理用谁：rust 或 fortran（真正的 Fortran 对照要选 fortran）。
     preprocessors: String,
-    ranks: u32,
-    nodes: u32,
-    /// auto、srun 或 mpiexec。
+    parallel: String,
+    threads: u32,
+    resources: Resources,
     launcher: String,
 }
 
@@ -1069,19 +1068,49 @@ impl RunPlan {
             ["rust", "fortran"].contains(&preprocessors.as_str()),
             "--preprocessors must be rust or fortran"
         );
-        let ranks: u32 = opts
-            .get("--ranks")
-            .map(|v| v.parse())
-            .transpose()
-            .context("--ranks must be a whole number")?
-            .unwrap_or(1);
-        ensure!(ranks >= 1, "--ranks must be at least 1");
+        let parallel = opts.get("--parallel").unwrap_or_else(|| "manual".into());
+        ensure!(
+            ["manual", "auto"].contains(&parallel.as_str()),
+            "--parallel must be manual or auto"
+        );
         let nodes: u32 = opts
             .get("--nodes")
             .map(|v| v.parse())
             .transpose()
             .context("--nodes must be a whole number")?
             .unwrap_or(0);
+        let (ranks, threads) = if parallel == "auto" {
+            for flag in ["--ranks", "--threads", "--cpus"] {
+                ensure!(
+                    opts.get(flag).is_none(),
+                    "--parallel auto chooses {flag}; remove it or select --parallel manual"
+                );
+            }
+            let cores = opts
+                .need_str("--cores-per-node")?
+                .parse::<u32>()
+                .context("--cores-per-node must be a whole number")?;
+            let budget = sched::Parallelism::from_budget(&engine, nodes, cores)?;
+            (budget.ranks, budget.threads)
+        } else {
+            let ranks = opts
+                .get("--ranks")
+                .map(|v| v.parse::<u32>())
+                .transpose()
+                .context("--ranks must be a whole number")?
+                .unwrap_or(1);
+            let threads = opts
+                .get("--threads")
+                .map(|v| v.parse::<u32>())
+                .transpose()
+                .context("--threads must be a whole number")?
+                .unwrap_or(8);
+            (ranks, threads)
+        };
+        ensure!(ranks >= 1, "--ranks must be at least 1");
+        ensure!(threads >= 1, "--threads must be at least 1");
+        let mut resources = resources_from(opts, threads, ranks, nodes)?;
+        resources.nodes = resources.planned_nodes()?;
         let launcher = opts.get("--launcher").unwrap_or_else(|| "auto".into());
         ensure!(
             ["auto", "srun", "mpiexec"].contains(&launcher.as_str()),
@@ -1090,9 +1119,89 @@ impl RunPlan {
         Ok(Self {
             engine,
             preprocessors,
-            ranks,
-            nodes,
+            parallel,
+            threads,
+            resources,
             launcher,
+        })
+    }
+
+    fn validate_case(&self, case: &Path, kernel: Option<&colm_kernel::Kernel>) -> Result<()> {
+        if self.parallel == "auto" {
+            ensure!(
+                colm_case::is_spatial_case(&case.join("case.nml"))?,
+                "automatic node budgets require a spatial case; single-point cases use one process and gain parallelism from station batches"
+            );
+            if let Some(kernel) = kernel {
+                ensure!(
+                    crate::kernel_grid_kind(kernel).is_some(),
+                    "automatic node budgets require a spatial kernel"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scheduler(&self, scheduler: Scheduler) -> Result<()> {
+        // mpiexec placement flags differ between MPI implementations; only srun is specified here.
+        ensure!(
+            self.parallel != "auto"
+                || self.resources.nodes <= 1
+                || (scheduler == Scheduler::Slurm && self.launcher != "mpiexec"),
+            "automatic multi-node runs require Slurm with srun; select manual parallel settings for other launchers"
+        );
+        if self.parallel == "auto" {
+            for directive in &self.resources.directives {
+                // Inspect directive option tokens, not env_script or arbitrary substrings
+                // (e.g. --hint=nomultithread is not --ntasks). Additional options on
+                // the same directive line must not override the resolved CPU budget.
+                for token in directive.split_whitespace() {
+                    let option = token.split('=').next().unwrap_or(token);
+                    let topology = match scheduler {
+                        Scheduler::Slurm => {
+                            matches!(
+                                option,
+                                "--nodes"
+                                    | "--ntasks"
+                                    | "--cpus-per-task"
+                                    | "--ntasks-per-node"
+                                    | "--ntasks-per-core"
+                                    | "--ntasks-per-socket"
+                                    | "--sockets-per-node"
+                                    | "--cores-per-socket"
+                                    | "--threads-per-core"
+                                    | "--extra-node-info"
+                                    | "--cpus-per-gpu"
+                                    | "--overcommit"
+                            ) || ["-N", "-n", "-c", "-B"]
+                                .iter()
+                                .any(|short| token.starts_with(short))
+                        }
+                        // PBS resource lists and LSF placement expressions can override
+                        // more than a single scalar, so keep these in manual mode.
+                        Scheduler::Pbs => token.starts_with("-l"),
+                        Scheduler::Lsf => token.starts_with("-n") || token.starts_with("-R"),
+                        Scheduler::Bare => false,
+                    };
+                    ensure!(!topology,
+                        "--parallel auto cannot use resource topology directive {directive:?}; remove it or select --parallel manual");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parallel_json(&self) -> serde_json::Value {
+        json!({
+            "mode": self.parallel,
+            "nodes": self.resources.nodes,
+            "ranks": self.resources.ranks,
+            "threads": self.threads,
+            "cpus": self.resources.cpus,
+            "cores_per_node": self.resources.cores_per_node,
+            "total_cpus": u64::from(self.resources.cpus) * u64::from(self.resources.ranks),
+            "memory_gb_per_node": self.resources.memory_gb,
+            "runtime_checks": ["landpatch_block_count", "model_parallel_capabilities"],
         })
     }
 }
@@ -1494,11 +1603,12 @@ fn job_body(
     engine_id: &str,
     remote_case: &str,
     remote_kernel: &str,
-    threads: u32,
     plan: &RunPlan,
     scheduler: Scheduler,
     opts: &Opts,
 ) -> Result<String> {
+    plan.validate_scheduler(scheduler)?;
+    let threads = plan.threads;
     let mut run = format!(
         "COLM_AUDIT_BY_PARENT=1 COLM_EXECUTION_SNAPSHOT={snapshot} RAYON_NUM_THREADS={threads} {bin}/colm-cli run {case} --kernel {kernel} --stream 1 --engine {engine} --preprocessors {pre}",
         snapshot = quote(engine_id),
@@ -1508,8 +1618,8 @@ fn job_body(
         engine = plan.engine,
         pre = plan.preprocessors,
     );
-    if plan.ranks > 1 {
-        run.push_str(&format!(" --ranks {}", plan.ranks));
+    if plan.resources.ranks > 1 {
+        run.push_str(&format!(" --ranks {}", plan.resources.ranks));
     }
     // 取回本机的 `produced-by.json` 要说清结果是在服务器上算的（旧引擎不认这一项，照样忽略）。
     run.push_str(" --location server");
@@ -1523,24 +1633,23 @@ fn job_body(
     // Rust 实现都要在作业里导出 `COLM_MPIEXEC`，否则作业里的 `colm-cli run --ranks>1`
     // 会退化成找不到 mpiexec。
     let rust_multi_process = plan.engine == "rust" || plan.preprocessors == "rust";
-    let launcher = if plan.ranks > 1 && srun {
-        if rust_multi_process {
-            // Rust 引擎不链接 MPI：远程多进程由 srun 启动，rank 数从 SLURM_* 读。
-            let nodes = if plan.nodes > 0 {
-                plan.nodes
-            } else {
-                plan.ranks
-            };
-            let per_node = plan.ranks.div_ceil(nodes.max(1)).max(1);
+    let launcher = if plan.resources.ranks > 1 && srun {
+        let placement = if plan.resources.nodes > 0 {
             format!(
-                "export COLM_MPIEXEC=srun\nexport COLM_MPIEXEC_ARGS=\"--nodes={} --ntasks-per-node={} --distribution=block:block\"\n",
-                nodes.max(1),
-                per_node
+                "--nodes={} --ntasks-per-node={} ",
+                plan.resources.nodes,
+                plan.resources.ranks / plan.resources.nodes
             )
         } else {
-            "export COLM_MPIEXEC=srun\n".to_owned()
-        }
-    } else if plan.ranks > 1 && rust_multi_process {
+            String::new()
+        };
+        // srun steps do not consistently inherit sbatch --cpus-per-task across
+        // Slurm versions. Pass the resolved allocation explicitly for both engines.
+        format!(
+            "export COLM_MPIEXEC=srun\nexport COLM_MPIEXEC_ARGS=\"{placement}--cpus-per-task={} --distribution=block:block\"\n",
+            plan.resources.cpus
+        )
+    } else if plan.resources.ranks > 1 && rust_multi_process {
         "export COLM_MPIEXEC=mpiexec\n".to_owned()
     } else {
         String::new()
@@ -1935,15 +2044,11 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         .iter()
         .map(|m| parse_mapping(m))
         .collect::<Result<Vec<_>>>()?;
-    let threads: u32 = opts
-        .get("--threads")
-        .map(|t| t.parse())
-        .transpose()?
-        .unwrap_or(8);
+    plan.validate_case(&case, local_kernel.as_ref().map(|(_, kernel)| kernel))?;
     let upload_unmapped = opts.get("--upload-unmapped").is_some_and(|v| v == "1");
     let dry_run = opts.get("--dry-run").is_some_and(|v| v == "1");
     let scheduler = parse_scheduler(opts, &ssh, &root)?;
-    let resources = resources_from(opts, threads, plan.ranks, plan.nodes)?;
+    plan.validate_scheduler(scheduler)?;
 
     let case_name = colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml"))?)?
         .get("DEF_CASE_NAME")
@@ -2080,14 +2185,13 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             engine.id(),
             &remote_case,
             &remote_kernel,
-            threads,
             &plan,
             scheduler,
             opts,
         )?;
         let spec = Spec {
             scheduler,
-            resources,
+            resources: plan.resources.clone(),
             name: sched::job_name(&case_name),
         };
         let script = job::job_script(&root, "JOBID", &body, &spec)?;
@@ -2095,6 +2199,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             "{}",
             json!({
                 "dry_run": true,
+                "parallel_plan": plan.parallel_json(),
                 "scheduler": scheduler.name(),
                 "job_script": script,
                 "remote_case": remote_case,
@@ -2122,14 +2227,13 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         engine.id(),
         &remote_case,
         &remote_kernel,
-        threads,
         &plan,
         scheduler,
         opts,
     )?;
     let spec = Spec {
         scheduler,
-        resources,
+        resources: plan.resources.clone(),
         name: sched::job_name(&case_name),
     };
     let body = format!(
@@ -2147,7 +2251,8 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         },
         "engine": plan.engine,
         "preprocessors": plan.preprocessors,
-        "ranks": plan.ranks,
+        "ranks": plan.resources.ranks,
+        "parallel_plan": plan.parallel_json(),
         "stage": opts.get("--stage"),
         "force": opts.get("--force").is_some_and(|v| v == "1"),
         "record_input_fingerprints": opts.get("--record-input-fingerprints").is_some_and(|v| v == "1"),
@@ -3249,6 +3354,7 @@ fn replay_remote_flag(flag: &str) -> bool {
             | "--server"
             | "--map"
             | "--scheduler"
+            | "--parallel"
             | "--threads"
             | "--cpus"
             | "--mem-gb"
@@ -3324,6 +3430,27 @@ pub(crate) fn publish_partial_history(
     Ok(())
 }
 
+// Auto replay must resolve its captured budget again: the generic model replay
+// materializer also supplies the old resolved rank count, which is not an override.
+fn replay_remote_options(prepared: &Opts, supplied: Vec<(String, String)>) -> Result<Opts> {
+    ensure!(
+        supplied.iter().all(|(key, _)| replay_remote_flag(key)),
+        "invalid captured remote options"
+    );
+    let mut opts = Opts {
+        positional: prepared.positional.clone(),
+        flags: prepared.flags.clone(),
+    };
+    if supplied
+        .iter()
+        .any(|(key, value)| key == "--parallel" && value == "auto")
+    {
+        opts.flags.retain(|(key, _)| key != "--ranks");
+    }
+    opts.flags.extend(supplied);
+    Ok(opts)
+}
+
 pub(crate) fn replay_remote(
     old_case: &Path,
     prepared: &Opts,
@@ -3341,15 +3468,7 @@ pub(crate) fn replay_remote(
     let supplied: Vec<(String, String)> =
         serde_json::from_value(provenance["remote_options"].clone())
             .context("remote replay options were not captured")?;
-    ensure!(
-        supplied.iter().all(|(key, _)| replay_remote_flag(key)),
-        "invalid captured remote options"
-    );
-    let mut opts = Opts {
-        positional: prepared.positional.clone(),
-        flags: prepared.flags.clone(),
-    };
-    opts.flags.extend(supplied);
+    let mut opts = replay_remote_options(prepared, supplied)?;
     opts.flags
         .push(("--expected-engine".into(), previous.engine.clone()));
     opts.flags.push(("--quiet-submit-json".into(), "1".into()));

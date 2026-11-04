@@ -3,6 +3,46 @@
 This repository uses **Rayon for production data parallelism** and keeps model
 values as IEEE-754 `f64`.
 
+## Remote resource budgets
+
+For a single spatial case, the run page supports automatic parallel allocation
+from a node count and the usable CPU cores per node. Existing saved manual
+settings remain manual. Independent station batches keep their node-packing
+path; a single station has no spatial work to divide between ranks.
+
+The equivalent CLI request is:
+
+```sh
+colm-cli remote-run /path/to/case --host cluster --root /data/colm \
+  --kernel /path/to/kernel --scheduler slurm \
+  --parallel auto --nodes 2 --cores-per-node 48 --dry-run 1
+```
+
+Automatic mode resolves both the scheduler request and process launcher from
+one plan. Do not combine it with manual `--ranks`, `--threads` or `--cpus`.
+
+| Engine | Two nodes, 48 cores per node |
+| --- | --- |
+| Rust | 2 ranks, 48 threads/CPUs per rank |
+| Fortran | 96 MPI ranks, 1 thread/CPU per rank |
+
+Rust prefers one rank per node; when a node has more than 256 usable cores,
+the planner chooses the smallest evenly dividing rank count that keeps each
+rank at 256 threads or fewer. This is a deterministic feasible layout, not a
+measured performance optimum. With `--parallel manual` (or no mode flag),
+explicit process/thread settings retain their meaning, and omitted node counts
+are planned from `--cores-per-node` when known.
+
+Automatic multi-node allocation currently requires Slurm and `srun`. Other
+schedulers support single-node automatic allocation; multi-node jobs need
+manual configuration until their MPI placement is verified. Bare execution
+cannot allocate additional hosts merely from a node count.
+
+The requested `--mem-gb` remains a per-node memory request. The planner does not
+invent a model memory estimate. Actual remote landdata block counts and
+unsupported multi-process model configurations remain subject to the engine's
+startup checks; a resource plan does not certify those scientific inputs.
+
 ## Required shape
 
 - Parallelize independent work units (patches, mesh elements, raster blocks)

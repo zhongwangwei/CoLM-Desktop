@@ -1424,13 +1424,13 @@ pub(crate) fn run_args(
     if engine.engine.as_deref() == Some("fortran") {
         args.push("--engine".into());
         args.push("fortran".into());
-        if let Some(ranks) = engine.ranks.filter(|r| *r > 1) {
-            args.push("--ranks".into());
-            args.push(ranks.to_string());
-            if server.nodes > 0 {
-                args.push("--nodes".into());
-                args.push(server.nodes.to_string());
-            }
+    }
+    if let Some(ranks) = engine.ranks.filter(|r| *r > 1) {
+        args.push("--ranks".into());
+        args.push(ranks.to_string());
+        if server.nodes > 0 {
+            args.push("--nodes".into());
+            args.push(server.nodes.to_string());
         }
     }
     // 名字在命令入口已经校验过（`model_version_args`）；这里只是拼上。
@@ -1444,6 +1444,54 @@ pub(crate) fn run_args(
         args.push(name.to_owned());
     }
     args
+}
+
+/// Send the budget to the CLI planner instead of mixing it with saved manual settings.
+fn apply_parallel_budget(
+    args: &mut Vec<String>,
+    parallel: Option<&str>,
+    nodes: Option<u32>,
+    cores_per_node: Option<u32>,
+) -> Result<(), String> {
+    match parallel {
+        None | Some("manual") => {
+            if nodes.is_some() || cores_per_node.is_some() {
+                return Err(
+                    "节点预算只适用于自动并行模式 / Node budgets require automatic parallel mode"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
+        Some("auto") => {}
+        _ => {
+            return Err("并行模式须为 auto 或 manual / Parallel mode must be auto or manual".into())
+        }
+    }
+    let (nodes, cores_per_node) = match (nodes, cores_per_node) {
+        (Some(nodes @ 1..=4096), Some(cores @ 1..=4096)) => (nodes, cores),
+        _ => return Err("节点数和每节点核数须为 1–4096 的整数 / Nodes and cores per node must be integers between 1 and 4096".into()),
+    };
+    // Preserve flag-like directive/script values while replacing resource flags.
+    let mut tail = args.split_off(2).into_iter();
+    while let Some(flag) = tail.next() {
+        let value = tail.next().ok_or("Incomplete remote run arguments")?;
+        if !matches!(
+            flag.as_str(),
+            "--ranks" | "--threads" | "--cpus" | "--nodes" | "--cores-per-node"
+        ) {
+            args.extend([flag, value]);
+        }
+    }
+    args.extend([
+        "--parallel".into(),
+        "auto".into(),
+        "--nodes".into(),
+        nodes.to_string(),
+        "--cores-per-node".into(),
+        cores_per_node.to_string(),
+    ]);
+    Ok(())
 }
 
 /// Recover server ownership from a frozen run's source configuration mirror.
@@ -1670,6 +1718,9 @@ pub async fn remote_run(
     threads: Option<u32>,
     cpus: Option<u32>,
     scheduler: Option<String>,
+    parallel: Option<String>,
+    nodes: Option<u32>,
+    cores_per_node: Option<u32>,
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
@@ -1690,6 +1741,9 @@ pub async fn remote_run(
             threads,
             cpus,
             scheduler,
+            parallel,
+            nodes,
+            cores_per_node,
             model_version,
             model_revision,
             preprocessors,
@@ -1721,6 +1775,9 @@ pub async fn remote_run(
         threads,
         cpus,
         scheduler,
+        parallel,
+        nodes,
+        cores_per_node,
         model_version,
         model_revision,
         preprocessors,
@@ -1747,6 +1804,9 @@ async fn submit_run(
     threads: Option<u32>,
     cpus: Option<u32>,
     scheduler: Option<String>,
+    parallel: Option<String>,
+    nodes: Option<u32>,
+    cores_per_node: Option<u32>,
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
@@ -1765,8 +1825,20 @@ async fn submit_run(
         model_version,
     };
     let server_args = server_case_args(&case, &host)?;
+    let mut args = run_args(
+        &server,
+        case.clone(),
+        kernel.clone(),
+        stage,
+        force,
+        false,
+        &engine,
+    );
+    apply_parallel_budget(&mut args, parallel.as_deref(), nodes, cores_per_node)?;
+    if parallel.as_deref() == Some("auto") && pack == Some(true) {
+        return Err("站点批量使用节点打包，不使用空间并行预算 / Station batches use node packing instead of a spatial parallel budget".into());
+    }
     validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
-    let mut args = run_args(&server, case.clone(), kernel, stage, force, false, &engine);
     crate::sidecar::add_input_fingerprints(&mut args, record_input_fingerprints);
     args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
@@ -1844,6 +1916,9 @@ pub async fn remote_preview(
     threads: Option<u32>,
     cpus: Option<u32>,
     scheduler: Option<String>,
+    parallel: Option<String>,
+    nodes: Option<u32>,
+    cores_per_node: Option<u32>,
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
@@ -1858,8 +1933,17 @@ pub async fn remote_preview(
         model_version,
     };
     let server_args = server_case_args(&case, &host)?;
+    let mut args = run_args(
+        &server,
+        case.clone(),
+        kernel.clone(),
+        stage,
+        force,
+        true,
+        &engine,
+    );
+    apply_parallel_budget(&mut args, parallel.as_deref(), nodes, cores_per_node)?;
     validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
-    let mut args = run_args(&server, case, kernel, stage, force, true, &engine);
     crate::sidecar::add_input_fingerprints(&mut args, record_input_fingerprints);
     args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;

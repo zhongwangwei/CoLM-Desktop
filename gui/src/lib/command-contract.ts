@@ -1766,6 +1766,18 @@ export const commandContract = {
       "required": false,
       "rust_type": "Option<String>"
     },
+    "parallel": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "nodes": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "coresPerNode": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
     "modelVersion": {
       "required": false,
       "rust_type": "Option<String>"
@@ -1847,6 +1859,18 @@ export const commandContract = {
     "scheduler": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "parallel": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "nodes": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "coresPerNode": {
+      "required": false,
+      "rust_type": "Option<u32>"
     },
     "modelVersion": {
       "required": false,

@@ -1050,8 +1050,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     let root = root_of(opts)?;
     let plan = RunPlan::from_opts(opts)?;
     ensure!(
-        plan.ranks == 1,
-        "Study members run one process each; --ranks does not apply"
+        plan.parallel == "manual" && plan.resources.ranks == 1,
+        "Study members run one process each; --ranks and --parallel auto do not apply; use --jobs and --threads"
     );
     let version = remote_version(opts)?;
     let kernel_dir = opts

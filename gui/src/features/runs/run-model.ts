@@ -27,6 +27,42 @@ export function spatialThreads(cores = localCoreCount()): number {
   return Math.max(1, Math.min(256, Math.floor(cores)));
 }
 
+export interface ParallelBudgetPlan {
+  nodes: number;
+  coresPerNode: number;
+  ranksPerNode: number;
+  ranks: number;
+  threads: number;
+  cpus: number;
+  totalCpus: number;
+}
+
+/** Display the deterministic budget plan; the CLI validates the same budget before submission. */
+export function parallelBudgetPlan(
+  engine: string,
+  nodes: number,
+  coresPerNode: number,
+): ParallelBudgetPlan | null {
+  if (
+    !['rust', 'fortran'].includes(engine) ||
+    ![nodes, coresPerNode].every((n) => Number.isSafeInteger(n) && n >= 1 && n <= 4096) ||
+    !Number.isSafeInteger(nodes * coresPerNode)
+  )
+    return null;
+  let ranksPerNode = engine === 'fortran' ? coresPerNode : 1;
+  while (coresPerNode % ranksPerNode !== 0 || coresPerNode / ranksPerNode > 256) ranksPerNode++;
+  const threads = coresPerNode / ranksPerNode;
+  return {
+    nodes,
+    coresPerNode,
+    ranksPerNode,
+    ranks: nodes * ranksPerNode,
+    threads,
+    cpus: threads,
+    totalCpus: nodes * coresPerNode,
+  };
+}
+
 /** 本机运行的默认线程数：单点固定 1；空间单算例用满核；空间批量保持 1（由用户显式调）。 */
 export function defaultLocalThreads(
   spatial: boolean,

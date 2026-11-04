@@ -183,7 +183,11 @@ fn opts(args: &[&str]) -> Opts {
 fn the_run_plan_defaults_to_rust_and_supports_remote_ranks_for_both_engines() {
     let plan = RunPlan::from_opts(&opts(&[])).unwrap();
     assert_eq!(
-        (plan.engine.as_str(), plan.ranks, plan.nodes),
+        (
+            plan.engine.as_str(),
+            plan.resources.ranks,
+            plan.resources.nodes
+        ),
         ("rust", 1, 0)
     );
     assert_eq!(plan.preprocessors, "rust");
@@ -191,9 +195,9 @@ fn the_run_plan_defaults_to_rust_and_supports_remote_ranks_for_both_engines() {
         "--engine", "fortran", "--ranks", "8", "--nodes", "2",
     ]))
     .unwrap();
-    assert_eq!((plan.ranks, plan.nodes), (8, 2));
+    assert_eq!((plan.resources.ranks, plan.resources.nodes), (8, 2));
     let rust = RunPlan::from_opts(&opts(&["--ranks", "4"])).unwrap();
-    assert_eq!((rust.engine.as_str(), rust.ranks), ("rust", 4));
+    assert_eq!((rust.engine.as_str(), rust.resources.ranks), ("rust", 4));
     assert!(RunPlan::from_opts(&opts(&["--engine", "fortran", "--ranks", "0"])).is_err());
     assert!(RunPlan::from_opts(&opts(&["--engine", "cobol"])).is_err());
     assert!(RunPlan::from_opts(&opts(&["--launcher", "ssh"])).is_err());
@@ -208,7 +212,6 @@ fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
             "eng",
             "/r/cases/c",
             "/r/kernels/k",
-            4,
             &plan,
             scheduler,
             &opts(args),
@@ -1622,7 +1625,6 @@ fn job_input_fingerprints_default_off_and_forward_only_explicit_opt_in() {
                 "eng",
                 "/r/cases/c",
                 "/r/kernels/k",
-                4,
                 &plan,
                 scheduler,
                 &opts,
@@ -2036,7 +2038,6 @@ fn rust_multi_process_gets_a_launcher_and_node_args() {
             "eng",
             "/r/cases/c",
             "/r/kernels/k",
-            4,
             &plan,
             scheduler,
             &opts(args),
@@ -2051,7 +2052,7 @@ fn rust_multi_process_gets_a_launcher_and_node_args() {
     assert!(slurm.contains("export COLM_MPIEXEC=srun\n"), "{slurm}");
     assert!(
         slurm.contains(
-            "COLM_MPIEXEC_ARGS=\"--nodes=2 --ntasks-per-node=2 --distribution=block:block\""
+            "COLM_MPIEXEC_ARGS=\"--nodes=2 --ntasks-per-node=2 --cpus-per-task=8 --distribution=block:block\""
         ),
         "{slurm}"
     );
@@ -2060,4 +2061,316 @@ fn rust_multi_process_gets_a_launcher_and_node_args() {
     // 一个进程仍走原来的直接执行，不产生启动器变量。
     let single = body(&["--engine", "rust"], Scheduler::Slurm);
     assert!(!single.contains("COLM_MPIEXEC"), "{single}");
+}
+
+#[test]
+fn automatic_parallel_budget_resolves_threads_and_scheduler_resources_once() {
+    for (engine, ranks, threads) in [("rust", 2, 48), ("fortran", 96, 1)] {
+        let args = opts(&[
+            "--parallel",
+            "auto",
+            "--engine",
+            engine,
+            "--nodes",
+            "2",
+            "--cores-per-node",
+            "48",
+            "--mem-gb",
+            "64",
+        ]);
+        let plan = RunPlan::from_opts(&args).unwrap();
+        assert_eq!(
+            (plan.resources.nodes, plan.resources.ranks, plan.threads),
+            (2, ranks, threads)
+        );
+        assert_eq!(plan.resources.cpus, threads);
+        assert_eq!(plan.resources.memory_gb, Some(64));
+        let body = job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Slurm, &args).unwrap();
+        let script = job::job_script(
+            "/r",
+            "j",
+            &body,
+            &Spec {
+                scheduler: Scheduler::Slurm,
+                resources: plan.resources.clone(),
+                name: "budget".into(),
+            },
+        )
+        .unwrap();
+        assert!(script.contains("#SBATCH --nodes=2"), "{script}");
+        assert!(
+            script.contains(&format!("#SBATCH --ntasks={ranks}")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("#SBATCH --cpus-per-task={threads}")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("--nodes=2 --ntasks-per-node={}", ranks / 2)),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("RAYON_NUM_THREADS={threads}")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!(
+                "--cpus-per-task={threads} --distribution=block:block"
+            )),
+            "{script}"
+        );
+        assert_eq!(plan.parallel_json()["total_cpus"], 96);
+        assert_eq!(plan.parallel_json()["memory_gb_per_node"], 64);
+    }
+}
+
+#[test]
+fn automatic_parallel_budget_rejects_conflicting_or_incomplete_inputs() {
+    for bad in ["--ranks", "--threads", "--cpus"] {
+        let error = RunPlan::from_opts(&opts(&[
+            "--parallel",
+            "auto",
+            "--nodes",
+            "2",
+            "--cores-per-node",
+            "48",
+            bad,
+            "1",
+        ]))
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains(bad), "{error}");
+    }
+    for args in [
+        vec!["--parallel", "wrong"],
+        vec!["--parallel", "auto", "--nodes", "2"],
+        vec!["--parallel", "auto", "--cores-per-node", "48"],
+        vec![
+            "--parallel",
+            "auto",
+            "--nodes",
+            "0",
+            "--cores-per-node",
+            "48",
+        ],
+    ] {
+        assert!(RunPlan::from_opts(&opts(&args)).is_err());
+    }
+}
+
+#[test]
+fn planned_nodes_and_slurm_launch_nodes_cannot_diverge() {
+    for engine in ["rust", "fortran"] {
+        let args = opts(&[
+            "--engine",
+            engine,
+            "--ranks",
+            "96",
+            "--threads",
+            "1",
+            "--cores-per-node",
+            "48",
+        ]);
+        let plan = RunPlan::from_opts(&args).unwrap();
+        assert_eq!(plan.resources.nodes, 2);
+        let body = job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Slurm, &args).unwrap();
+        assert!(body.contains("--nodes=2 --ntasks-per-node=48"), "{body}");
+        assert!(!body.contains("--nodes=96"));
+    }
+    let args = opts(&["--ranks", "96", "--threads", "1"]);
+    let plan = RunPlan::from_opts(&args).unwrap();
+    let body = job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Slurm, &args).unwrap();
+    assert_eq!(plan.resources.nodes, 0);
+    assert!(!body.contains("--nodes="), "{body}");
+    assert!(!body.contains("--ntasks-per-node="), "{body}");
+}
+
+#[test]
+fn automatic_multi_node_requires_a_defined_srun_placement() {
+    let args = opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "48",
+    ]);
+    let plan = RunPlan::from_opts(&args).unwrap();
+    for scheduler in [Scheduler::Bare, Scheduler::Pbs, Scheduler::Lsf] {
+        assert!(job_body("/r", "eng", "/c", "/k", &plan, scheduler, &args).is_err());
+    }
+    let explicit_mpiexec = RunPlan::from_opts(&opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "48",
+        "--launcher",
+        "mpiexec",
+    ]))
+    .unwrap();
+    assert!(explicit_mpiexec
+        .validate_scheduler(Scheduler::Slurm)
+        .is_err());
+    let single = RunPlan::from_opts(&opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "1",
+        "--cores-per-node",
+        "48",
+    ]))
+    .unwrap();
+    for scheduler in [
+        Scheduler::Bare,
+        Scheduler::Slurm,
+        Scheduler::Pbs,
+        Scheduler::Lsf,
+    ] {
+        single.validate_scheduler(scheduler).unwrap();
+    }
+}
+
+#[test]
+fn automatic_parallel_budget_rejects_single_point_cases() {
+    let dir = std::env::temp_dir().join(format!("colm-budget-case-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("case.nml"), "&nl_colm\nDEF_CASE_NAME='site'\n/\n").unwrap();
+    let plan = RunPlan::from_opts(&opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "48",
+    ]))
+    .unwrap();
+    assert!(plan
+        .validate_case(&dir, None)
+        .unwrap_err()
+        .to_string()
+        .contains("station batches"));
+    std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\nDEF_CASE_NAME='region'\nDEF_file_mesh='/mesh.nc'\n/\n",
+    )
+    .unwrap();
+    plan.validate_case(&dir, None).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(replay_remote_flag("--parallel"));
+}
+
+#[test]
+fn auto_replay_reuses_the_budget_instead_of_a_conflicting_materialized_rank_count() {
+    let prepared = opts(&["--engine", "rust", "--ranks", "2"]);
+    let supplied = opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "48",
+    ]);
+    let replay = replay_remote_options(&prepared, supplied.flags).unwrap();
+    assert!(replay.get("--ranks").is_none());
+    let plan = RunPlan::from_opts(&replay).unwrap();
+    assert_eq!(
+        (plan.resources.nodes, plan.resources.ranks, plan.threads),
+        (2, 2, 48)
+    );
+    let manual = replay_remote_options(&prepared, vec![]).unwrap();
+    assert_eq!(manual.get("--ranks").as_deref(), Some("2"));
+    assert!(replay_remote_options(&prepared, vec![("--untrusted".into(), "1".into())]).is_err());
+}
+
+#[test]
+fn auto_budget_rejects_scheduler_topology_directive_overrides() {
+    let plan = |directive: &str| {
+        RunPlan::from_opts(&opts(&[
+            "--parallel",
+            "auto",
+            "--nodes",
+            "1",
+            "--cores-per-node",
+            "48",
+            "--directive",
+            directive,
+        ]))
+        .unwrap()
+    };
+    for directive in [
+        "--nodes=4",
+        "--ntasks 9",
+        "--cpus-per-task=2",
+        "--ntasks-per-node=3",
+        "-N2",
+        "-n 8",
+        "-c4",
+        "--constraint=cpu --nodes=3",
+    ] {
+        assert!(
+            plan(directive)
+                .validate_scheduler(Scheduler::Slurm)
+                .is_err(),
+            "{directive}"
+        );
+    }
+    for directive in [
+        "--constraint=cpu",
+        "--hint=nomultithread",
+        "--account=project",
+    ] {
+        plan(directive)
+            .validate_scheduler(Scheduler::Slurm)
+            .unwrap();
+    }
+    assert!(plan("-l select=4:ncpus=48")
+        .validate_scheduler(Scheduler::Pbs)
+        .is_err());
+    assert!(plan("-n 200").validate_scheduler(Scheduler::Lsf).is_err());
+    let manual = RunPlan::from_opts(&opts(&["--directive", "--nodes=4"])).unwrap();
+    manual.validate_scheduler(Scheduler::Slurm).unwrap();
+}
+
+#[test]
+fn every_srun_step_gets_the_allocated_cpu_count_including_pure_fortran() {
+    for (engine, preprocessors) in [
+        ("rust", "rust"),
+        ("fortran", "rust"),
+        ("fortran", "fortran"),
+    ] {
+        let args = opts(&[
+            "--engine",
+            engine,
+            "--preprocessors",
+            preprocessors,
+            "--ranks",
+            "4",
+            "--nodes",
+            "2",
+            "--threads",
+            "6",
+            "--cpus",
+            "8",
+        ]);
+        let plan = RunPlan::from_opts(&args).unwrap();
+        let body = job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Slurm, &args).unwrap();
+        let script = job::job_script(
+            "/r",
+            "j",
+            &body,
+            &Spec {
+                scheduler: Scheduler::Slurm,
+                resources: plan.resources.clone(),
+                name: "step-cpus".into(),
+            },
+        )
+        .unwrap();
+        assert!(script.contains("#SBATCH --cpus-per-task=8"), "{script}");
+        assert!(script.contains("COLM_MPIEXEC_ARGS=\"--nodes=2 --ntasks-per-node=2 --cpus-per-task=8 --distribution=block:block\""), "{script}");
+        assert!(script.contains("RAYON_NUM_THREADS=6"), "{script}");
+    }
 }
