@@ -294,7 +294,8 @@ fn automatic_parallel_budget_replaces_manual_values_in_runs_and_previews() {
                 },
             );
             apply_parallel_budget(&mut args, Some("auto"), Some(2), Some(48)).unwrap();
-            let pairs: Vec<_> = args[2..].chunks_exact(2).collect();
+            let (pairs, remainder) = args[2..].as_chunks::<2>();
+            assert!(remainder.is_empty());
             for expected in [
                 ["--parallel", "auto"],
                 ["--nodes", "2"],

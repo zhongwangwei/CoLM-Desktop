@@ -44387,3 +44387,22 @@ ID 均为 `3c51fbb330b8554f`，`/tmp/colm-urban-ci-current-source.log`。
 最新完整路径 `gui/src-tauri/target/preview-urban-ci-fixed-20261104/CoLM Desktop.app`
 已启动，PID 47142、ready=complete、home=true，
 `/tmp/colm-urban-ci-native-restart.log`。前一个预算版本已正常关闭，未强制终止或覆盖配置。
+
+短目录研究回归作业 `codex-f0a9b1956cb84516aefd8326f06129f2` 已 succeeded/exit0，
+同一二进制 74/74 通过、0 失败/忽略，运行前后 SHA256 均为
+`2bd4a31c86d014aecdbb99edc775ece4917898a65168fe1124e02442e88bb322`。
+专属临时目录真实前缀61字节，仍位于 data01 的编译缓存；通过后只清理了该新建目录。
+原始14项失败记录未改，产品256字节限制未动。完整证据
+`/tmp/colm-parallel-study-short-evidence/results/{verification,scratch}.json` 和
+`study-recheck.log`。并行配置的本轮定向验证至此收口。
+
+实际 CI 首轮修复提交 `84535411` 的三个 GUI job 另报 Rust1.99 新增
+`chunks_exact_to_as_chunks` lint，位置 `remote_tests.rs` 新预算测试，属于测试写法而非
+数值修复回退。本机 Rust1.97 和服务器旧工具链此前不会报此 lint。
+按建议改用安全的 `as_chunks::<2>()`，并检查 remainder 为空，保留所有断言。
+该 API 从 [Rust1.88 起稳定](https://doc.rust-lang.org/std/primitive.slice.html#method.as_chunks)，
+与 GUI 的1.88最低版本一致，没有提高 MSRV、加 allow 或固定旧版 CI 工具链。
+本机 remote 模块52/52和GUI lib/tests Clippy再次通过：
+`/tmp/colm-ci-as-chunks-{tests,clippy}.log`；diff和格式检查通过。
+此次额外改动仅 test 模块，不改变已构建/启动应用的运行代码或引擎内容ID。
+原失败日志 `/tmp/colm-ci-84535411-job-{126398545169,126398545203,126398545020}.log`。
