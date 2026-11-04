@@ -312,6 +312,12 @@ impl History {
         connection
             .execute_batch("PRAGMA synchronous=FULL;")
             .context("configure operation ledger durability")?;
+        // A current schema needs no writer lock; WAL readers may open during a write.
+        let schema_version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version >= SCHEMA_VERSION {
+            return Ok(Self { connection });
+        }
         // Acquire the writer lock before schema reads to avoid read-to-write
         // upgrades racing other first opens; publish the complete schema at once.
         let transaction = connection

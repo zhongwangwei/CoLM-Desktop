@@ -811,6 +811,22 @@ fn corrupt_jsonl_import_keeps_all_prior_rows_out_of_the_ledger() {
 }
 
 #[test]
+fn opening_an_initialized_ledger_does_not_wait_for_an_active_writer() {
+    let temp = Temp::new();
+    let path = temp.0.join("history.sqlite3");
+    let mut history = History::open(&path).unwrap();
+    history.append(&Event::start("committed-audit")).unwrap();
+    let transaction = history
+        .connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+
+    let reader = History::open(&path).expect("opening a current schema needs no writer lock");
+    assert_eq!(reader.query(&Query::default()).unwrap().total, 1);
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn concurrent_first_open_preserves_every_audit_event() {
     let temp = Temp::new();
     for round in 0..8 {
