@@ -179,10 +179,10 @@ pub use pipeline::{
 };
 pub use restart::{
     write_constant_restart, write_constant_restart_block, write_restart_tuning,
-    CanopyStructureFields, ConstantRestartFiles, ConstantRestartInput, RestartDimensions,
-    RestartPatchFields, RestartTuning, SimpleTerrainFields, SoilAlbedo, TerrainFields,
-    TerrainRadiation, TopmodelFields, SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL,
-    SOIL_FIELDS_VAN_GENUCHTEN,
+    write_shared_constant_restart, CanopyStructureFields, ConstantRestartFiles,
+    ConstantRestartInput, RestartDimensions, RestartPatchFields, RestartTuning,
+    SimpleTerrainFields, SoilAlbedo, TerrainFields, TerrainRadiation, TopmodelFields,
+    SOIL_FIELDS_COMMON, SOIL_FIELDS_THERMAL, SOIL_FIELDS_VAN_GENUCHTEN,
 };
 pub use restart_read::{RestartFile, RestartOverride, RestartValueType};
 pub use runtime::{

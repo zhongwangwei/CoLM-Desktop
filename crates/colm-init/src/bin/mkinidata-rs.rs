@@ -487,6 +487,15 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
             }
         }
     }
+    if is_root {
+        let path = colm_init::write_shared_constant_restart(
+            &run.restart,
+            &run.case_name,
+            run.land_cover_year,
+            run.tuning,
+        )?;
+        wrote(&path);
+    }
     if grid_river && is_root {
         let path = write_gridriver_namelist_restart(namelist, &run)?;
         wrote(&path);
@@ -618,6 +627,7 @@ fn write_spatial_urban_namelist_block(
         LandCoverScheme::Igbp,
         run.hydraulic_model,
     );
+    static_config.write_shared_constants = false;
     static_config.compression_level = run.compression_level;
     static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
@@ -671,7 +681,6 @@ fn write_spatial_urban_namelist_block(
             write_data_assimilation_restart(&time.common.block, members, run.compression_level)
         })
         .transpose()?;
-    wrote(&files.common.constants);
     wrote(&files.common.block);
     if let Some(path) = files.urban {
         wrote(&path);
@@ -714,6 +723,7 @@ fn write_spatial_lct_namelist_block(
         land_cover,
         run.hydraulic_model,
     );
+    static_config.write_shared_constants = false;
     static_config.compression_level = run.compression_level;
     static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
@@ -755,7 +765,6 @@ fn write_spatial_lct_namelist_block(
     let da = data_assimilation_ensembles
         .map(|members| write_data_assimilation_restart(&time.block, members, run.compression_level))
         .transpose()?;
-    wrote(&files.constants);
     wrote(&files.block);
     if let Some(mixing) = run.material_mixing_water_mm {
         colm_init::write_empty_land_material_transaction(&time.block, mixing)?;
@@ -783,6 +792,7 @@ fn write_spatial_pft_namelist_block(
         run.land_cover_year,
         block,
     );
+    static_config.write_shared_constants = false;
     static_config.crop = crop;
     static_config.subgrid_fallback = Some(match run.subgrid {
         SpatialSubgrid::Pft => SpatialPftSubgrid::Pft,
@@ -817,7 +827,6 @@ fn write_spatial_pft_namelist_block(
             write_data_assimilation_restart(&time.common.block, members, run.compression_level)
         })
         .transpose()?;
-    wrote(&files.common.constants);
     wrote(&files.common.block);
     if let Some(path) = files.pft {
         wrote(&path);

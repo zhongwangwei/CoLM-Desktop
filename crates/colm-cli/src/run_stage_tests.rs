@@ -588,3 +588,20 @@ fn isolated_single_stage_runs_check_their_required_upstream_stages() {
         [Stage::MkSrfData, Stage::MkIniData]
     );
 }
+
+#[test]
+fn single_point_multiple_rank_preprocessing_is_rejected_before_launcher_or_outputs() {
+    let root = test_directory("singlepoint-multiple-ranks");
+    let namelist = root.join("case.nml");
+    std::fs::write(&namelist, "&nl_colm\nDEF_CASE_NAME='single'\n/\n").unwrap();
+    let error = preflight_rust_preprocessor_ranks(&namelist, 2).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("single-point cases must use --ranks 1"),
+        "{error}"
+    );
+    preflight_rust_preprocessor_ranks(&namelist, 1).unwrap();
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}

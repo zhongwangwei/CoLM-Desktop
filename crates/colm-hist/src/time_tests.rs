@@ -115,6 +115,16 @@ fn time_units_parse_spaced_and_attached_zone_offsets() {
 }
 
 #[test]
+fn malformed_unicode_offsets_return_errors_instead_of_panicking() {
+    for zone in ["+0é0", "-0é0", "+é00", "UTC+0é0", "+０0"] {
+        for separator in ["", " "] {
+            let units = format!("seconds since 2003-01-01 00:00:00{separator}{zone}");
+            assert!(parse_time_units(&units).is_err(), "{units}");
+        }
+    }
+}
+
+#[test]
 fn named_zones_and_calendar_dependent_units_are_refused() {
     // 命名时区没有时区数据库可查，猜一个偏移比拒绝更危险。
     let error = parse_time_units("seconds since 2003-01-01 00:00:00 EST").unwrap_err();

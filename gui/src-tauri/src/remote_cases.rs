@@ -555,6 +555,20 @@ pub async fn remote_create_case(
 #[derive(Default)]
 pub struct RemoteCreationBatches(std::sync::Mutex<BTreeMap<String, (bool, Vec<String>)>>);
 
+// A join failure can leave before the normal end of a batch.
+struct BatchCleanup<'a> {
+    batches: &'a RemoteCreationBatches,
+    batch: &'a str,
+}
+impl Drop for BatchCleanup<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.batches.0.lock() {
+            registry.remove(self.batch);
+        }
+        crate::sidecar::allow_remote_creation(&format!("batch:{}", self.batch));
+    }
+}
+
 /// Local finishing (model binding, preview) runs this many cases at a time.
 const LOCAL_PARALLEL: usize = 8;
 
@@ -605,6 +619,10 @@ pub async fn remote_create_cases(
         crate::sidecar::allow_remote_creation(&format!("batch:{batch}"));
         registry.insert(batch.clone(), (false, Vec::new()));
     }
+    let _batch_cleanup = BatchCleanup {
+        batches: &batches,
+        batch: &batch,
+    };
     let cancelled = || {
         batches
             .0
@@ -792,10 +810,6 @@ pub async fn remote_create_cases(
         outcomes[index] = Some(conclude(&host, item, result, cleanup));
     }
     progress("done", total);
-    if let Ok(mut registry) = batches.0.lock() {
-        registry.remove(&batch);
-        crate::sidecar::allow_remote_creation(&format!("batch:{batch}"));
-    }
     Ok(outcomes
         .into_iter()
         .map(|outcome| match outcome.unwrap_or(Err("未处理".into())) {
@@ -871,6 +885,30 @@ pub(crate) async fn sync_case(app: &tauri::AppHandle, dir: &str) -> Result<(), S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_registration_is_removed_on_normal_and_failed_local_completion() {
+        for panic in [false, true] {
+            let batches = super::RemoteCreationBatches::default();
+            let batch = "local-completion-test";
+            batches
+                .0
+                .lock()
+                .unwrap()
+                .insert(batch.into(), (false, Vec::new()));
+            let outcome = std::panic::catch_unwind(|| {
+                let _cleanup = super::BatchCleanup {
+                    batches: &batches,
+                    batch,
+                };
+                if panic {
+                    panic!("local task panicked");
+                }
+            });
+            assert_eq!(outcome.is_err(), panic);
+            assert!(!batches.0.lock().unwrap().contains_key(batch));
+        }
+    }
+
     #[test]
     fn a_case_created_on_a_server_is_recorded_under_its_project() {
         let ledger = colm_history::History::open(":memory:").unwrap();

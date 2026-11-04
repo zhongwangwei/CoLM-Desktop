@@ -267,3 +267,268 @@ fn vegetated_flux_matches_full_vendor_procedure_with_fixed_radiation_boundary() 
     assert_eq!(covered, 4);
     eprintln!("UrbanVegFlux {mode}: {exact}/200 bitwise equal, max absolute {max_absolute:.17e}");
 }
+
+// This exact captured reference is GNU/Linux x86_64 without contraction. Other
+// targets/contraction modes retain the full-procedure bounds exercised above.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn captured_urban_dew_case_matches_fortran_humidity_and_stomatal_diagnostics() {
+    if colm_numeric::FUSED {
+        return;
+    }
+    let fixture = include_str!("../../../oracle/fixtures/urban_au_preston_first_step.csv");
+    let (values, input, flux, leaf, _) = replay_captured_urban_case(fixture);
+    let v = |name: &str| values[name];
+    let normalized_qref = flux.qref
+        / crate::saturation_specific_humidity(flux.tref, input.psrf)
+            .unwrap()
+            .specific_humidity;
+    for (name, actual) in [
+        ("qstar", flux.qstar),
+        ("rst", leaf.rst),
+        ("qref", normalized_qref),
+    ] {
+        assert_eq!(
+            actual.to_bits(),
+            v(&format!("expected_{name}")).to_bits(),
+            "{name}"
+        );
+    }
+}
+
+// Both captured cases use the same immutable input schema and public solver.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn replay_captured_urban_case(
+    fixture: &str,
+) -> (
+    std::collections::BTreeMap<&str, f64>,
+    UrbanFluxInput,
+    UrbanFluxOutput,
+    UrbanTreeOutput,
+    UrbanTreeState,
+) {
+    let values: std::collections::BTreeMap<_, _> = fixture
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .skip(1)
+        .map(|line| {
+            let (name, bits) = line.split_once(',').unwrap();
+            (name, f64::from_bits(u64::from_str_radix(bits, 16).unwrap()))
+        })
+        .collect();
+    let v = |name: &str| values[name];
+    assert_eq!(v("use_wue"), 0.0);
+    assert_eq!(v("use_medlyn"), 0.0);
+    assert_eq!(v("respcp_present"), 0.0);
+    assert_eq!(v("surface_standard"), 1.0);
+    let input = UrbanFluxInput {
+        time_step_seconds: v("deltim"),
+        roof_has_snow_layers: v("roof_snow") != 0.0,
+        impervious_has_snow_layers: v("impervious_snow") != 0.0,
+        wind_height_m: v("hu"),
+        temperature_height_m: v("ht"),
+        humidity_height_m: v("hq"),
+        absolute_heights: v("absolute_heights") != 0.0,
+        eastward_wind_m_s: v("us"),
+        northward_wind_m_s: v("vs"),
+        thm: v("thm"),
+        th: v("th"),
+        thv: v("thv"),
+        qm: v("qm"),
+        psrf: v("psrf"),
+        rhoair: v("rhoair"),
+        fhac: v("fhac"),
+        fwst: v("fwst"),
+        fach: v("fach"),
+        vehc: v("vehc"),
+        meta: v("meta"),
+        hroof: v("hroof"),
+        hlr: v("hlr"),
+        fcover: std::array::from_fn(|i| v(&format!("fcover_{i}"))),
+        z0h_g: v("z0h_g"),
+        obug: v("obug"),
+        ustarg: v("ustarg"),
+        zlnd: v("zlnd"),
+        zsno: v("zsno"),
+        fsno_roof: v("fsno_roof"),
+        fsno_gimp: v("fsno_gimp"),
+        fsno_gper: v("fsno_gper"),
+        wliq_roof: v("wliq_roofsno"),
+        wliq_gimp: v("wliq_gimpsno"),
+        wice_roof: v("wice_roofsno"),
+        wice_gimp: v("wice_gimpsno"),
+        htvp_roof: v("htvp_roof"),
+        htvp_gimp: v("htvp_gimp"),
+        htvp_gper: v("htvp_gper"),
+        troof: v("troof"),
+        twsun: v("twsun"),
+        twsha: v("twsha"),
+        tgimp: v("tgimp"),
+        tgper: v("tgper"),
+        qroof: v("qroof"),
+        qgimp: v("qgimp"),
+        qgper: v("qgper"),
+        dqroofdt: v("dqroofdt"),
+        dqgimpdt: v("dqgimpdt"),
+        dqgperdt: v("dqgperdt"),
+        rss: v("rss"),
+        surface_layer_scheme: crate::SurfaceLayerScheme::Standard,
+    };
+    let tree = UrbanTreeInput {
+        frl: v("frl"),
+        po2m: v("po2m"),
+        pco2m: v("pco2m"),
+        par: v("par"),
+        sabv: v("sabv"),
+        rstfac: v("rstfac"),
+        ewall: v("ewall"),
+        egimp: v("egimp"),
+        egper: v("egper"),
+        ev: v("ev"),
+        htop: v("htop"),
+        hbot: v("hbot"),
+        lai: v("lai"),
+        sai: v("sai"),
+        sqrtdi: v("sqrtdi"),
+        extkd: v("extkd"),
+        dewmx: v("dewmx"),
+        etrc: v("etrc"),
+        trsmx0: v("trsmx0"),
+        biochemistry: crate::LeafBiochemistry {
+            quantum_efficiency: v("effcon"),
+            maximum_carboxylation_25c_mol_m2_s: v("vmax25"),
+            low_temperature_slope: v("slti"),
+            low_temperature_half_k: v("hlti"),
+            high_temperature_slope: v("shti"),
+            high_temperature_half_k: v("hhti"),
+            respiration_temperature_slope: v("trda"),
+            respiration_temperature_half_k: v("trdm"),
+            optimum_temperature_k: v("trop"),
+            medlyn_g1: v("g1"),
+            medlyn_g0: v("g0"),
+            ball_berry_slope: v("gradm"),
+            ball_berry_intercept: v("binter"),
+            c3c4: v("c3c4") as i32,
+            respiration_fraction_override: None,
+        },
+        stomata_options: crate::StomataOptions::default(),
+        wue_lambda: v("lambda_wue"),
+        vegetation_snow: v("vegetation_snow") != 0.0,
+        ainv: std::array::from_fn(|i| std::array::from_fn(|j| v(&format!("ainv_{i}_{j}")))),
+        b: std::array::from_fn(|i| v(&format!("b_{i}"))),
+        b1: std::array::from_fn(|i| v(&format!("b1_{i}"))),
+        dbdt: std::array::from_fn(|i| v(&format!("dbdt_{i}"))),
+        sky_vf: std::array::from_fn(|i| v(&format!("sky_vf_{i}"))),
+        veg_vf: std::array::from_fn(|i| v(&format!("veg_vf_{i}"))),
+        lwsun: v("lwsun"),
+        lwsha: v("lwsha"),
+        lgimp: v("lgimp"),
+        lgper: v("lgper"),
+        lveg: v("lveg"),
+    };
+    let mut state = UrbanTreeState {
+        tl: v("tl"),
+        ldew: v("ldew"),
+        ldew_rain: v("ldew_rain"),
+        ldew_snow: v("ldew_snow"),
+        fwet_snow: 0.0,
+    };
+    let (flux, leaf) = urban_vegetated_flux(input, tree, &mut state).unwrap();
+    (values, input, flux, leaf, state)
+}
+
+// Source-ordered temperature sums must preserve the next real canopy step.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn captured_urban_second_step_matches_all_fortran_flux_and_state_outputs() {
+    assert_captured_urban_outputs(include_str!(
+        "../../../oracle/fixtures/urban_au_preston_second_step.csv"
+    ));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn captured_urban_third_step_matches_all_fortran_flux_and_state_outputs() {
+    assert_captured_urban_outputs(include_str!(
+        "../../../oracle/fixtures/urban_au_preston_third_step.csv"
+    ));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn assert_captured_urban_outputs(fixture: &str) {
+    if colm_numeric::FUSED {
+        return;
+    }
+    let (values, _, flux, leaf, state) = replay_captured_urban_case(fixture);
+    for (name, actual) in [
+        ("taux", flux.taux),
+        ("tauy", flux.tauy),
+        ("fsenroof", flux.fsenroof),
+        ("fsenwsun", flux.fsenwsun),
+        ("fsenwsha", flux.fsenwsha),
+        ("fsengimp", flux.fsengimp),
+        ("fsengper", flux.fsengper),
+        ("fevproof", flux.fevproof),
+        ("fevpgimp", flux.fevpgimp),
+        ("fevpgper", flux.fevpgper),
+        ("croofs", flux.croofs),
+        ("cwsuns", flux.cwsuns),
+        ("cwshas", flux.cwshas),
+        ("cgrnds", flux.cgrnds),
+        ("croofl", flux.croofl),
+        ("cgimpl", flux.cgimpl),
+        ("cgperl", flux.cgperl),
+        ("croof", flux.croof),
+        ("cgimp", flux.cgimp),
+        ("cgper", flux.cgper),
+        ("tref", flux.tref),
+        ("qref", flux.qref),
+        ("z0m", flux.z0m),
+        ("zol", flux.zol),
+        ("rib", flux.rib),
+        ("ustar", flux.ustar),
+        ("qstar", flux.qstar),
+        ("tstar", flux.tstar),
+        ("fm", flux.fm),
+        ("fh", flux.fh),
+        ("fq", flux.fq),
+        ("tafu", flux.tafu),
+        ("fsenl", leaf.fsenl),
+        ("fevpl", leaf.fevpl),
+        ("etr", leaf.etr),
+        ("rst", leaf.rst),
+        ("assim", leaf.assim),
+        ("respc", leaf.respc),
+        ("lwsun", leaf.lwsun),
+        ("lwsha", leaf.lwsha),
+        ("lgimp", leaf.lgimp),
+        ("lgper", leaf.lgper),
+        ("lveg", leaf.lveg),
+        ("lout", leaf.lout),
+        ("etr_deficit", leaf.etr_deficit),
+        ("dheatl", leaf.dheatl),
+        ("state_tl", state.tl),
+        ("state_ldew", state.ldew),
+        ("state_ldew_rain", state.ldew_rain),
+        ("state_ldew_snow", state.ldew_snow),
+        ("state_fwet_snow", state.fwet_snow),
+    ] {
+        assert_eq!(
+            actual.to_bits(),
+            values[&format!("expected_{name}")[..]].to_bits(),
+            "{name}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn captured_urban_slope_steps_match_all_fortran_flux_and_state_outputs() {
+    let fixtures = include_str!("../../../oracle/fixtures/urban_au_preston_slope_steps.csv");
+    let mut covered = 0;
+    for fixture in fixtures.split("\n\n").filter(|s| !s.trim().is_empty()) {
+        assert_captured_urban_outputs(fixture);
+        covered += 1;
+    }
+    assert_eq!(covered, 8);
+}

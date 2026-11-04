@@ -17,12 +17,16 @@ int close(int fd) {
     const char *target = getenv("COLM_TEST_IO_TARGET");
     const char *trace = getenv("COLM_TEST_IO_TRACE");
     const char *error = getenv("COLM_TEST_IO_ERRNO");
+    const char *phase = getenv("COLM_TEST_IO_CLOSE_PHASE");
+    const char *only_final = getenv("COLM_TEST_IO_ONLY_FINAL_CLOSE");
+    int in_final_close = phase && access(phase, F_OK) == 0;
     char link[64], path[PATH_MAX + 1];
     struct stat status;
     snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
     ssize_t length = readlink(link, path, sizeof(path) - 1);
     if (length >= 0) path[length] = '\0';
-    int inject = target && trace && error && length >= 0 && !strcmp(path, target)
+    int inject = (!only_final || in_final_close) && target && trace && error
+        && length >= 0 && !strcmp(path, target)
         && fstat(fd, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 4096;
     int result = (int)syscall(SYS_close, fd);
     int saved_errno = errno;
@@ -30,7 +34,8 @@ int close(int fd) {
         int number = !strcmp(error, "ENOSPC") ? ENOSPC : !strcmp(error, "EIO") ? EIO : 0;
         if (number) {
             char line[192];
-            int size = snprintf(line, sizeof(line), "close errno=%d bytes=%lld\n", number, (long long)status.st_size);
+            int size = snprintf(line, sizeof(line), "close errno=%d bytes=%lld phase=%s\n", number, (long long)status.st_size,
+                                in_final_close ? "final" : "outside");
             int log = (int)syscall(SYS_openat, AT_FDCWD, trace, O_WRONLY | O_CREAT | O_APPEND, 0600);
             if (log >= 0) {
                 (void)syscall(SYS_write, log, line, size);

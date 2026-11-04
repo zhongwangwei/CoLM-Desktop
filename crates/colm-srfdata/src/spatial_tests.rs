@@ -3256,3 +3256,359 @@ fn pixel_window_skips_the_ocean_margin_outside_the_mesh() {
         window.width() * window.height() <= topology.pixel.lon_w.len() * topology.pixel.lat_s.len()
     );
 }
+
+#[test]
+fn shard_windows_cover_cyclic_domains_without_duplicate_blocks() {
+    let blocks = BlockLayout::regular(72, 36).unwrap();
+    for (west, east, expected) in [
+        (0.0, 360.0, 2592),
+        (170.0, -170.0, 144),
+        (93.0, 453.0, 2592),
+    ] {
+        let domain = crate::SpatialBounds {
+            south: -90.0,
+            north: 90.0,
+            west,
+            east,
+        };
+        let mut covers = vec![0; 72 * 36];
+        for rank in 0..4 {
+            let windows = shard_element_windows(&blocks, domain, rank, 4)
+                .unwrap()
+                .unwrap();
+            for row in 0..36 {
+                for column in 0..72 {
+                    let (lon, lat) = block_center(&blocks, column, row);
+                    covers[row * 72 + column] += windows
+                        .iter()
+                        .filter(|&&window| window_contains(window, lon, lat))
+                        .count();
+                }
+            }
+        }
+        assert!(
+            covers.iter().all(|&count| count <= 1),
+            "duplicate block in {west}..{east}"
+        );
+        assert_eq!(covers.iter().sum::<usize>(), expected, "{west}..{east}");
+    }
+}
+
+#[test]
+fn pixel_window_keeps_both_sides_of_a_cyclic_longitude_cut() {
+    let pixel = PixelAxes {
+        edge_south: -90.0,
+        edge_north: 90.0,
+        edge_west: 0.0,
+        edge_east: 360.0,
+        lon_w: vec![0.0, 90.0, 180.0, 270.0],
+        lon_e: vec![90.0, 180.0, 270.0, 360.0],
+        lat_s: vec![-90.0],
+        lat_n: vec![90.0],
+    };
+    let (columns, rows) = pixel_window(
+        &pixel,
+        crate::SpatialBounds {
+            south: -90.0,
+            north: 90.0,
+            west: 270.0,
+            east: 90.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(columns, vec![0..1, 3..4]);
+    assert_eq!(rows, 0..1);
+}
+
+#[test]
+fn shard_topology_rejects_split_cells_and_unstructured_ids_before_writing() {
+    let directory = temporary("reject-split-elements");
+    for (kind, variable, values, nx) in [
+        (SpatialInputKind::GridBased, "landmask", [1, 1], 4),
+        (SpatialInputKind::Unstructured, "elmindex", [7, 7], 2),
+    ] {
+        let mesh_file = directory.join(format!("{variable}.nc"));
+        write_mesh(&mesh_file, variable, &values);
+        let blocks = BlockLayout::regular(nx, 1).unwrap();
+        let domain = crate::SpatialBounds {
+            south: -90.0,
+            north: 90.0,
+            west: -180.0,
+            east: 180.0,
+        };
+        // These inputs retain their existing single-process support.
+        let full = build_spatial_topology(&mesh_file, kind, Grid::by_ndims(4, 2)).unwrap();
+        assert!(!full.mesh.is_empty());
+        for rank in 0..2 {
+            let windows = shard_element_windows(&blocks, domain, rank, 2)
+                .unwrap()
+                .unwrap();
+            let error = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+                &mesh_file,
+                kind,
+                Grid::by_ndims(4, 2),
+                None,
+                None,
+                &[],
+                &[],
+                Some(&blocks),
+                Some(&windows),
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("run with one process"),
+                "{error}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(&directory).unwrap().count(),
+        2,
+        "preflight created output files"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn write_longitude_strip_mesh(path: &std::path::Path, west: &[f64], east: &[f64]) {
+    let _guard = netcdf_lock().lock().unwrap();
+    let mut file = netcdf::create(path).unwrap();
+    file.add_dimension("nlon", west.len()).unwrap();
+    file.add_dimension("nlat", 1).unwrap();
+    for (name, values) in [("lon_w", west), ("lon_e", east)] {
+        file.add_variable::<f64>(name, &["nlon"])
+            .unwrap()
+            .put_values(values, ..)
+            .unwrap();
+    }
+    for (name, value) in [("lat_s", -90.0), ("lat_n", 90.0)] {
+        file.add_variable::<f64>(name, &["nlat"])
+            .unwrap()
+            .put_values(&[value], ..)
+            .unwrap();
+    }
+    file.add_variable::<i64>("landmask", &["nlat", "nlon"])
+        .unwrap()
+        .put_values(&vec![1; west.len()], (.., ..))
+        .unwrap();
+    file.close().unwrap();
+}
+
+fn element_patches(topology: &SpatialTopology) -> FlatLandPatches {
+    let lengths: Vec<usize> = (0..topology.mesh.len())
+        .map(|i| topology.mesh.pixels(i).unwrap().0.len())
+        .collect();
+    FlatLandPatches {
+        element_ids: (0..topology.mesh.len())
+            .map(|i| topology.mesh.element_id(i).unwrap())
+            .collect(),
+        pixel_start: vec![1; lengths.len()],
+        pixel_end: lengths,
+        set_type: vec![10; topology.mesh.len()],
+        element_index: (1..=topology.mesh.len()).collect(),
+    }
+}
+
+#[test]
+fn shard_cyclic_netcdf_outputs_match_single_process_byte_for_byte() {
+    let root = temporary("cyclic-output-equivalence");
+    let mesh_file = root.join("mesh.nc");
+    let west: Vec<_> = (0..72).map(|i| i as f64 * 5.0).collect();
+    let east: Vec<_> = west.iter().map(|w| w + 5.0).collect();
+    write_longitude_strip_mesh(&mesh_file, &west, &east);
+    let blocks = BlockLayout::regular(72, 1).unwrap();
+    let filter_path = root.join("filter.nc");
+    let mask: Vec<_> = (0..72).map(|i| if i < 18 { 0 } else { 1 }).collect();
+    write_mesh_filter(&filter_path, &west, &east, &[-90.0], &[90.0], &mask);
+    let filter = MeshFilter::open(&filter_path).unwrap();
+    for (label, west, east) in [
+        ("global", 0.0, 360.0),
+        ("dateline", 170.0, -170.0),
+        ("masked-global", 0.0, 360.0),
+    ] {
+        let masked = label == "masked-global";
+        let domain = crate::SpatialBounds {
+            south: -90.0,
+            north: 90.0,
+            west,
+            east,
+        };
+        let mut full = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+            &mesh_file,
+            SpatialInputKind::GridBased,
+            Grid::by_ndims(72, 1),
+            Some(domain),
+            None,
+            &[],
+            &[],
+            Some(&blocks),
+            None,
+            false,
+        )
+        .unwrap();
+        full.preserve_element_blocks(&blocks).unwrap();
+        if masked {
+            filter.apply(&mut full).unwrap();
+        }
+        let single = root.join(format!("{label}-single"));
+        write_spatial_topology(&single, 2005, &full, &element_patches(&full), &blocks, 1).unwrap();
+        let split = root.join(format!("{label}-split"));
+        let mut counts = BTreeMap::new();
+        let mut ids = std::collections::BTreeSet::new();
+        let mut empty_ranks = 0;
+        for rank in 0..4 {
+            let windows = shard_element_windows(&blocks, domain, rank, 4)
+                .unwrap()
+                .unwrap();
+            let mut shard = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+                &mesh_file,
+                SpatialInputKind::GridBased,
+                Grid::by_ndims(72, 1),
+                Some(domain),
+                None,
+                &[],
+                &[],
+                Some(&blocks),
+                Some(&windows),
+                false,
+            )
+            .unwrap();
+            shard.preserve_element_blocks(&blocks).unwrap();
+            if masked {
+                let mut ordinary = shard.clone();
+                let ordinary_result = filter.apply(&mut ordinary);
+                filter.apply_with_empty(&mut shard, true).unwrap();
+                assert_eq!(ordinary_result.is_err(), shard.mesh.is_empty());
+            }
+            if shard.mesh.is_empty() {
+                empty_ranks += 1;
+                continue;
+            }
+            for element in 0..shard.mesh.len() {
+                assert!(
+                    ids.insert(shard.mesh.element_id(element).unwrap()),
+                    "element owned by two ranks"
+                );
+            }
+            for (block, count) in element_block_counts(&shard, &blocks).unwrap() {
+                assert!(
+                    counts.insert(block, count).is_none(),
+                    "block owned by two ranks"
+                );
+            }
+            write_spatial_block_topology(
+                &split,
+                2005,
+                &shard,
+                &element_patches(&shard),
+                None,
+                &blocks,
+                1,
+                true,
+            )
+            .unwrap();
+        }
+        assert_eq!(empty_ranks, usize::from(masked));
+        assert_eq!(ids.len(), full.mesh.len());
+        write_spatial_global_topology_with_counts(&split, 2005, &full, &blocks, &counts).unwrap();
+        assert_same_tree(&single, &split);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shard_six_degree_cell_crossing_five_degree_blocks_is_rejected_by_every_rank() {
+    let root = temporary("six-degree-crossing");
+    let mesh = root.join("mesh.nc");
+    write_longitude_strip_mesh(&mesh, &[0.0], &[6.0]);
+    let domain = crate::SpatialBounds {
+        south: -90.0,
+        north: 90.0,
+        west: 0.0,
+        east: 6.0,
+    };
+    let blocks = BlockLayout::regular(72, 1).unwrap();
+    for rank in 0..2 {
+        let windows = shard_element_windows(&blocks, domain, rank, 2)
+            .unwrap()
+            .unwrap();
+        let error = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+            &mesh,
+            SpatialInputKind::GridBased,
+            Grid::by_ndims(360, 1),
+            Some(domain),
+            None,
+            &[],
+            &[],
+            Some(&blocks),
+            Some(&windows),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("align the mesh elements and block boundaries"),
+            "{error}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shard_land_only_can_be_empty_while_whole_domain_keeps_land() {
+    let root = temporary("landonly-empty-shard");
+    let mesh = root.join("mesh.nc");
+    write_mesh(&mesh, "landmask", &[1, 1]);
+    let raster = root.join("landtype.nc");
+    {
+        let _guard = netcdf_lock().lock().unwrap();
+        let mut file = netcdf::create(&raster).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 4).unwrap();
+        file.add_variable::<i32>("landtype", &["lat", "lon"])
+            .unwrap()
+            .put_values(&[0, 0, 10, 10, 0, 0, 10, 10], (.., ..))
+            .unwrap();
+        file.close().unwrap();
+    }
+    let blocks = BlockLayout::regular(2, 1).unwrap();
+    let domain = crate::SpatialBounds {
+        south: -90.0,
+        north: 90.0,
+        west: -180.0,
+        east: 180.0,
+    };
+    let mut full =
+        build_spatial_topology(&mesh, SpatialInputKind::GridBased, Grid::by_ndims(4, 2)).unwrap();
+    full.retain_land_pixels_from_raster(&raster, "landtype", Grid::by_ndims(4, 2))
+        .unwrap();
+    let windows = shard_element_windows(&blocks, domain, 0, 2)
+        .unwrap()
+        .unwrap();
+    let mut shard = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
+        &mesh,
+        SpatialInputKind::GridBased,
+        Grid::by_ndims(4, 2),
+        None,
+        None,
+        &[],
+        &[],
+        Some(&blocks),
+        Some(&windows),
+        false,
+    )
+    .unwrap();
+    assert!(shard
+        .clone()
+        .retain_land_pixels_from_raster(&raster, "landtype", Grid::by_ndims(4, 2))
+        .is_err());
+    shard
+        .retain_land_pixels_from_raster_with_empty(&raster, "landtype", Grid::by_ndims(4, 2), true)
+        .unwrap();
+    assert!(shard.mesh.is_empty());
+    assert_eq!(full.mesh.len(), 1);
+    assert_eq!(full.mesh.element_id(0).unwrap(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}

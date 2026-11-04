@@ -173,7 +173,8 @@ function localResultsLabel(run: Run, en: boolean): string {
   return en ? 'No local results' : '本机无结果';
 }
 /** 曲线区的显示状态；`none`=还没选运行/变量，`idle`=手动读取的页签还没点读。 */
-type CurveState = 'none' | 'idle' | 'loading' | 'error' | 'stale' | 'empty' | 'ready';
+type CurveState =
+  'none' | 'idle' | 'loading' | 'error' | 'stale' | 'evaluation' | 'empty' | 'ready';
 /**
  * 曲线区该显示哪种状态（审计 §五.2）。旧实现把「还没开始读」「正在读」「读失败」
  * 「窗口里没有数据」「条件改了还没重读」都写成同一句「正在读取真实模拟结果…」，
@@ -1849,15 +1850,21 @@ export default function ResultsPage({
         ? 'not scientifically verified'
         : 'scientific verification unknown';
   // 曲线区状态：overview 自动读，时序页手动读（未点之前是 idle，不是 loading）。
-  const curveStatus = curveStateOf({
-    hasRequest: !!source && !!variable,
-    hasSeries: !!series,
-    fresh: seriesKey === selectedSeriesKey,
-    hasData: !!series && series.time.length > 0,
-    loading: seriesLoading,
-    error: seriesError,
-    manual: tab === 'series',
-  });
+  const compositeSelection = !nativeVariable && !!overviewMetric(singleRows, variable);
+  const curveStatus: CurveState =
+    tab === 'overview' && compositeSelection
+      ? singleFresh
+        ? 'empty'
+        : 'evaluation'
+      : curveStateOf({
+          hasRequest: !!source && !!variable,
+          hasSeries: !!series,
+          fresh: seriesKey === selectedSeriesKey,
+          hasData: !!series && series.time.length > 0,
+          loading: seriesLoading,
+          error: seriesError,
+          manual: tab === 'series',
+        });
   // 已算完但条件又改了：旧表保留给「待更新」提示，而不是变成“没有结果”的空态。
   const resultsPendingUpdate =
     (tab === 'evaluation' && singleResult !== null && !singleFresh) ||
@@ -1878,6 +1885,24 @@ export default function ResultsPage({
           >
             {tr('重试', 'Retry')}
           </ActionButton>
+        </div>
+      );
+    if (state === 'evaluation')
+      return (
+        <div className="results-chart-empty">
+          <p>
+            {tr(
+              '评估条件已更改，请重新评估以更新组合指标曲线。',
+              'Evaluation conditions changed. Reevaluate to update the composite curve.',
+            )}
+          </p>
+          <ActionButton
+            action="result-composite-reevaluate"
+            label={tr('重新评估', 'Reevaluate')}
+            kind="click"
+            disabled={busy || !obs.trim()}
+            run={evaluate}
+          />
         </div>
       );
     if (state === 'stale')

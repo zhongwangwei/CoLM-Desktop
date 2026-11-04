@@ -85,10 +85,10 @@ pub fn hist_vars(
         .map(|states| {
             states
                 .into_iter()
-                .map(|(name, on)| (format!("DEF_hist_vars%{}", name.to_ascii_lowercase()), on))
+                .map(|(name, on)| (format!("def_hist_vars%{}", name.to_ascii_lowercase()), on))
                 .collect()
         })
-        .unwrap_or_default();
+        .map_err(|error| format!("{error:#}"))?;
     // 这份配置里某个 logical 的实际取值：输出变量开关按上面的判定，其余文件里设了就用文件的，否则用默认值。
     let truth = |path: &str| -> bool {
         switches

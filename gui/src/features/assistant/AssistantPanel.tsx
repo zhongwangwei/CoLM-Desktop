@@ -475,7 +475,22 @@ export default function AssistantPanel() {
               if (!active) throw new Error(t('助手面板已卸载', 'The assistant panel was closed.'));
               return await drive(action, args);
             },
-            (id, ok, result) => invoke('assistant_ui_result', { id, ok, result }),
+            async (id, ok, result) => {
+              const delivery = await invoke<{ warning?: string | null }>('assistant_ui_result', {
+                id,
+                ok,
+                result,
+              });
+              if (active)
+                setAttachNotice(
+                  delivery?.warning
+                    ? t(
+                        `助手已收到界面操作结果，但审计记录未完成：${delivery.warning}`,
+                        `The assistant received the UI result, but its audit record could not be completed: ${delivery.warning}`,
+                      )
+                    : '',
+                );
+            },
           ).catch((e) => {
             if (active) setError(String(e));
           });

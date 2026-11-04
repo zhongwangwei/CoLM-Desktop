@@ -55,6 +55,7 @@ pub struct SpatialPftStaticConfig<'a> {
     pub subgrid_fallback: Option<SpatialPftSubgrid>,
     /// Force soil texture/BVIC initialization for CatchLateral even when runoff scheme is not Simple VIC.
     pub force_soil_texture: bool,
+    pub write_shared_constants: bool,
     /// `CROP` 内核宏。上游的 `DEF_USE_CROP` 是它的只读映射、不在 namelist 里，所以由调用方传进来；
     /// namelist 里写了 `DEF_USE_CROP = .true.` 也算（旧测试与研究算例）。
     pub crop: bool,
@@ -128,6 +129,7 @@ impl<'a> SpatialPftStaticConfig<'a> {
             namelist,
             subgrid_fallback: None,
             force_soil_texture: false,
+            write_shared_constants: true,
             crop: false,
             landdata,
             restart_dir,
@@ -286,6 +288,7 @@ pub fn write_spatial_pft_constant_restarts(
         LandCoverScheme::Igbp,
         hydraulic_model,
     );
+    common.write_shared_constants = config.write_shared_constants;
     common.use_bedrock = use_bedrock;
     common.use_bgc = optional_bool_or(&document, "DEF_USE_BGC", false)?;
     common.compression_level = compression_level;

@@ -17,9 +17,11 @@ field is compiled exactly when it is allocated.
 """
 import re
 import sys
+from pathlib import Path
 
-ACC = 'main/MOD_Vars_1DAccFluxes.F90'
-MOD = 'main/MOD_HistAccRestart.F90'
+ROOT = Path(__file__).resolve().parents[2]
+ACC = ROOT / 'main/MOD_Vars_1DAccFluxes.F90'
+MOD = ROOT / 'main/MOD_HistAccRestart.F90'
 BEGIN = '      ! >>> fields from allocate_acc_fluxes'
 END = '      ! <<< fields from allocate_acc_fluxes'
 
@@ -31,13 +33,42 @@ PP = re.compile(r'^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b', re.I)
 
 
 def fields():
-    src = open(ACC).read().splitlines()
+    src = Path(ACC).read_text(encoding='utf-8').splitlines()
     i0 = next(i for i, l in enumerate(src) if re.match(r'\s*SUBROUTINE allocate_acc_fluxes', l, re.I))
     i1 = next(i for i, l in enumerate(src) if re.match(r'\s*END SUBROUTINE allocate_acc_fluxes', l, re.I))
     out = []
+    guards = []
     for ln in src[i0 + 1:i1]:
         if PP.match(ln):
             out.append(('pp', ln.strip()))
+            continue
+        guard = re.match(r'\s*IF\s*\((.*)\)\s*THEN\s*$', ln, re.I)
+        if guard:
+            condition = guard.group(1).strip()
+            key = re.sub(r'\s+', '', condition).lower()
+            # Per-rank allocation guards cannot surround collective history I/O.
+            if key in {'p_is_worker', 'numpatch>0', 'mt_any_enabled()'}:
+                condition = None
+            elif key == 'numurban>0':
+                condition = 'DEF_URBAN_RUN'
+            elif key == 'def_use_pft.or.def_use_pc':
+                condition = '(DEF_USE_PFT .or. DEF_USE_PC)'
+            elif 'def_' not in key:
+                sys.exit(f'{ACC}: unsupported allocation guard {condition}')
+            guards.append(condition)
+            if condition is not None:
+                out.append(('if', condition))
+            continue
+        if re.match(r'\s*END\s*IF\b', ln, re.I):
+            if not guards:
+                sys.exit(f'{ACC}: unmatched ENDIF')
+            if guards.pop() is not None:
+                out.append(('endif', ''))
+            continue
+        if re.match(r'\s*ELSE\b|\s*ELSEIF\b', ln, re.I):
+            sys.exit(f'{ACC}: unsupported allocation branch {ln.strip()}')
+        if re.match(r'\s*CALL\s+mt_allocate_frcsat_count\s*\(', ln, re.I):
+            sys.exit(f'{ACC}: frcsat allocation moved; update its explicit counter mapping')
             continue
         m = ALLOC.match(ln)
         if not m or m.group(1) in SKIP:
@@ -53,6 +84,8 @@ def fields():
         if len(dims) > 3:
             sys.exit(f'{ACC}: {m.group(1)} has rank {len(dims)}; only ranks 1-3 are supported')
         out.append(('f', m.group(1), len(dims), pset, dname))
+    if guards:
+        sys.exit(f'{ACC}: unclosed allocation guard')
     return prune(out)
 
 
@@ -62,14 +95,15 @@ def prune(items):
     while changed:
         changed = False
         for i in range(len(items)):
-            if items[i][0] != 'pp' or not re.match(r'#\s*if', items[i][1]):
+            if not (items[i][0] == 'if' or
+                    (items[i][0] == 'pp' and re.match(r'#\s*if', items[i][1]))):
                 continue
             depth, j = 0, i
             while j < len(items):
-                if items[j][0] == 'pp':
-                    if re.match(r'#\s*if', items[j][1]):
+                if items[j][0] in {'pp', 'if', 'endif'}:
+                    if items[j][0] == 'if' or re.match(r'#\s*if', items[j][1]):
                         depth += 1
-                    elif re.match(r'#\s*endif', items[j][1]):
+                    elif items[j][0] == 'endif' or re.match(r'#\s*endif', items[j][1]):
                         depth -= 1
                         if depth == 0:
                             break
@@ -83,22 +117,31 @@ def prune(items):
 
 def render(items):
     lines = []
+    depth = 0
     for t in items:
         if t[0] == 'pp':
             lines.append(t[1])
+        elif t[0] == 'if':
+            lines.append(' ' * (6 + depth * 3) + f'IF ({t[1]}) THEN')
+            depth += 1
+        elif t[0] == 'endif':
+            depth -= 1
+            lines.append(' ' * (6 + depth * 3) + 'ENDIF')
         else:
             _, name, rank, pset, dname = t
+            indent = ' ' * (6 + depth * 3)
             if name == 'nac_frcsat':
                 # Older partial windows have no trustworthy valid-sample count.
-                lines.append('      CALL hacc_frcsat_count (file, mode)')
+                lines.append(indent + 'CALL mt_history_frcsat_count(file, mode, HACC_WRITE, nac, a_frcsat, nac_frcsat, &')
+                lines.append(indent + '   hacc_field1d, write_marker, read_marker, require_var, global_max)')
             else:
-                lines.append(f"      CALL hacc_field{rank}d (file, mode, '{name}', {name}, {pset}, '{dname}')")
+                lines.append(indent + f"CALL hacc_field{rank}d (file, mode, '{name}', {name}, {pset}, '{dname}')")
     return lines
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else '--check'
-    text = open(MOD).read().splitlines()
+    text = Path(MOD).read_text(encoding='utf-8').splitlines()
     try:
         b = text.index(BEGIN)
         e = text.index(END)
@@ -106,7 +149,7 @@ def main():
         sys.exit(f'{MOD}: marker lines not found')
     new = render(fields())
     if mode == '--write':
-        open(MOD, 'w').write('\n'.join(text[:b + 1] + new + text[e:]) + '\n')
+        Path(MOD).write_text('\n'.join(text[:b + 1] + new + text[e:]) + '\n', encoding='utf-8')
         print(f'{MOD}: {sum(1 for l in new if "CALL" in l)} fields written')
     elif text[b + 1:e] != new:
         old = set(l for l in text[b + 1:e] if 'CALL' in l)

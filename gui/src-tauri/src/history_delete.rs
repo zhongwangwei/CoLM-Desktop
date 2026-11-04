@@ -671,9 +671,8 @@ pub async fn history_delete_plan(app: tauri::AppHandle, id: String) -> Result<De
             .and_then(|(target, record)| local_case_candidate(&ledger, &detail, target, record))
         {
             Ok(path) => {
-                result.case_path = Some(path.display().to_string());
-                result.case_token = Some(review_case(&id, &path)?);
-                if case_directory(&detail).is_err() {
+                review_case_plan(&mut result, &id, &path);
+                if result.case_token.is_some() && case_directory(&detail).is_err() {
                     result.case_warning = Some("目录身份与旧记录不同或未记录；请核对下面当前目录的内容，输入名称后才会删除当前目录。 / This folder differs from the old record or has no recorded identity. Review the current folder and type its name to delete it.".into());
                 }
             }
@@ -681,6 +680,20 @@ pub async fn history_delete_plan(app: tauri::AppHandle, id: String) -> Result<De
         }
     }
     Ok(result)
+}
+
+fn review_case_plan(result: &mut DeletePlan, id: &str, path: &Path) {
+    match review_case(id, path) {
+        Ok(token) => {
+            result.case_path = Some(path.display().to_string());
+            result.case_token = Some(token);
+        }
+        Err(reason) => {
+            result.case_path = None;
+            result.case_token = None;
+            result.case_reason = Some(reason);
+        }
+    }
 }
 
 /// Rename into an exclusively created sibling before recursive removal, so a directory
@@ -1504,6 +1517,31 @@ fn hide_after_files(ledger: &History, id: &str, deleted: Option<&str>) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_case_identity_preserves_the_independent_run_plan() {
+        let mut result = super::DeletePlan {
+            id: "record".into(),
+            path: Some("/verified/run".into()),
+            host: None,
+            reason: None,
+            case_path: None,
+            case_host: None,
+            case_reason: None,
+            case_token: None,
+            case_warning: None,
+        };
+        let absent =
+            std::env::temp_dir().join(colm_history::Event::start("missing-review").operation_id);
+        super::review_case_plan(&mut result, "record", &absent);
+        assert_eq!(result.path.as_deref(), Some("/verified/run"));
+        assert!(result.reason.is_none());
+        assert!(result
+            .case_reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("identity")));
+        assert!(result.case_path.is_none() && result.case_token.is_none());
+    }
+
     #[test]
     fn a_server_project_in_the_work_root_has_no_folder_of_its_own() {
         let error = super::own_server_project_folder(

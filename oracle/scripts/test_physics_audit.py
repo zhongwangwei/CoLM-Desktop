@@ -402,6 +402,96 @@ def assert_lake_adjust_uses_actual_routine_for_zero_and_tiny_depths() -> None:
     assert finite.returncode != 0, "NaN lake thickness should call CoLM_stop"
     assert "CoLM_stop called" in finite.stderr
 
+def assert_vic_ice_groups_do_not_reuse_previous_output() -> None:
+    source = read("HYDRO/MOD_Hydro_VIC_Variables.F90")
+    routine = re.search(
+        r"(?is)\bSUBROUTINE VIC_IceLay\(.*?END SUBROUTINE VIC_Icelay", source
+    )
+    assert routine, "production VIC_IceLay procedure not found"
+    out = compile_and_run_fortran(
+        "module reference\ncontains\n" + routine.group(0) + "\nend module\n"
+        "program probe\n"
+        "use reference\nimplicit none\n"
+        "real(kind=8) :: ice(3)\n"
+        "ice = 77.d0\n"
+        "call VIC_IceLay(7,10,[1.d0,2.d0,3.d0,4.d0],ice)\n"
+        "if (any(ice /= [1.d0,5.d0,4.d0])) error stop 'previous output contaminated group'\n"
+        "call VIC_IceLay(4,6,[11.d0,22.d0,33.d0],ice)\n"
+        "call VIC_IceLay(7,10,[1.d0,2.d0,3.d0,4.d0],ice)\n"
+        "if (any(ice /= [1.d0,5.d0,4.d0])) error stop 'preceding soil group contaminated ice'\n"
+        "print *, 'VIC ice groups start from zero'\nend program\n",
+        extra_flags=["-fcheck=all", "-fdefault-real-8", "-fdefault-double-8"],
+    )
+    assert out.returncode == 0, out.stderr + out.stdout
+    assert "VIC ice groups start from zero" in out.stdout
+
+
+def assert_region_clip_uses_the_selected_land_cover_table() -> None:
+    source = (ROOT / "vendor/CoLM202X/mksrfdata/MOD_RegionClip.F90").read_text()
+    start = source.index("   SUBROUTINE clip_pixelset (")
+    end = source.index("      IF (.not. fexists) CALL clip_error('Missing pixelset:", start)
+    # Exercise the real absent-PFT branch, before unrelated vector reads.
+    branch = source[start:end] + "   END SUBROUTINE clip_pixelset\n"
+    tables = read("MOD_Const_LC.F90")
+    for scheme, urban, soil in [("igbp", 13, 1), ("usgs", 1, 2)]:
+        table = re.search(rf"(?is):: patchtypes_{scheme}\s*&\s*=\s*(\(/.*?/\))", tables)
+        assert table, scheme
+        contents = table.group(1)
+        count = len(re.findall(r"\d+", contents))
+        for patch, expected_error in [(urban, None), (soil, "PFT-bearing"), (count + 1, "Invalid source")]:
+            probe = f"""
+module MOD_Const_LC
+ integer, parameter :: patchtypes_{scheme}({count}) = {contents}
+end module
+module MOD_Namelist
+ logical :: DEF_USE_PFT=.true., DEF_USE_PC=.false.
+end module
+module MOD_Block
+contains
+ subroutine get_filename_block(filename, iblk, jblk, fileblock)
+  character(*) :: filename, fileblock
+  integer :: iblk, jblk
+  fileblock=filename
+ end subroutine
+end module
+module MOD_NetCDFSerial
+contains
+ subroutine ncio_read_serial(filename, name, values)
+  character(*) :: filename, name
+  integer, allocatable :: values(:)
+  values=[{patch}]
+ end subroutine
+end module
+module production
+contains
+ subroutine clip_error(message)
+  character(*) :: message
+  print *, message
+  stop 1
+ end subroutine
+{branch}
+end module
+program probe
+ use production
+ logical, allocatable :: mask(:)
+ call clip_pixelset('missing-source', '2000', 'landpft', 1, 1, [.true.], [1_8], mask)
+ if (.not. allocated(mask)) error stop 'missing zero-PFT mask'
+ if (size(mask) /= 0) error stop 'nonempty zero-PFT mask'
+ print *, 'urban source needs no PFT block'
+end program
+"""
+            flags = ["-cpp", "-fcheck=all", "-ffree-line-length-0"]
+            if scheme == "usgs":
+                flags.append("-DLULC_USGS")
+            out = compile_and_run_fortran(probe, extra_flags=flags)
+            if expected_error is None:
+                assert out.returncode == 0, out.stderr + out.stdout
+                assert "urban source needs no PFT block" in out.stdout
+            else:
+                assert out.returncode != 0, (scheme, patch, out.stdout)
+                assert expected_error in out.stdout, out.stderr + out.stdout
+
+
 def main() -> None:
     assert_da_nextmonth_formula()
     assert_bgc_sasu_uses_actual_endofyear_gate()
@@ -411,6 +501,8 @@ def main() -> None:
     assert_grace_first_observation_avoids_zero_divide()
     assert_lulcc_missing_source_stops_before_frnp_use()
     assert_lake_adjust_uses_actual_routine_for_zero_and_tiny_depths()
+    assert_vic_ice_groups_do_not_reuse_previous_output()
+    assert_region_clip_uses_the_selected_land_cover_table()
     print("physics audit regressions PASS")
 
 

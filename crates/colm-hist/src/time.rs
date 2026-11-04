@@ -318,8 +318,8 @@ fn parse_zone(text: &str) -> Option<i32> {
     } else if body.len() == 4 {
         // `+0800` 这种无冒号写法：前两位小时、后两位分钟。
         (
-            body[..2].parse::<u32>().ok()?,
-            body[2..].parse::<u32>().ok()?,
+            body.get(..2)?.parse::<u32>().ok()?,
+            body.get(2..)?.parse::<u32>().ok()?,
         )
     } else {
         (body.parse::<u32>().ok()?, 0)

@@ -234,16 +234,25 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
 
 首版目标里“预处理多进程”已落地，形状和主循环不同：**没有逐步通信**，纯按块扇出。
 
-- `mkinidata-rs`：按块的全局 row-major 顺序做连续区间分片；root 额外写
-  `grid_river`/`catch_lateral` 全局 restart，worker 只写自己块的 restart 文件。
+- `mkinidata-rs`：按块的全局 row-major 顺序做连续区间分片；root 独立写一次共享
+  constants（即使 root 没有有效块），并额外写 `grid_river`/`catch_lateral` 全局 restart；
+  worker 只写自己块的 restart 文件。
 - `mksrfdata-rs`：新增“元素窗口 + 完整 pixel lattice”模式
   （`build_spatial_topology_with_filter_grid_and_raw_grids_in_window`）。每个 rank 只物化
   自己块区间换算出的 1–3 个矩形窗口里的元素，但 pixel 格点与元素编号仍按完整算例域，
   因此每个块文件与 N=1 逐字节相同，**直接写进最终 landdata 树，不需要合并/重映射**。
+  块经度按算例域循环展开，支持 0–360 和跨日期线；一个块跨域切口时可对应两个像素区间。
+  当前多进程实现要求整个 mesh element 归于同一物理块；所有 rank 在科学文件写出前预检，
+  跨块元素会明确拒绝，可改用单进程或对齐 mesh/block 边界。单点和已有表面数据裁剪也只允许单进程。
+  过滤后局部为空的 rank 仍发布空计数；全体为空则失败，不生成空的全局科学文件。
 - 全局文件（`block.nc`、`pixel.nc`、`mesh/<year>/mesh.nc`）由 rank 0 单独写。`nelm_blk`
   需要所有块的“过滤后 land element 数”，但 rank 0 不能为统计重跑完整域拓扑（0.1° 全球是
   3.7e9 像元扫描，还会读整张 500 m landtype 栅格）。做法：每个 rank 把自己 tile（即窗口内
-  元素）的每块计数写到 `<case>/out/.colm-shard/rank-XXXX.txt`；rank 0 等齐全部 rank 后汇总，
+  元素）的每块计数写到 `<case>/out/.colm-shard/<run-id>/<requested-year>/rank-XXXX.txt`；
+  rank 0 为本次运行的请求年份独占建立目录，发布 ready 标记后，各 rank 才开始物化。
+  ready 只等待启动发布，超时 60 秒会提示检查 root；后续计数等待保留六小时计算预算。
+  计数文件完整写入后原子发布且禁止覆盖，文件头核对运行、请求年份、rank 和进程数；
+  rank 0 等齐全部 rank 后汇总，
   再用一个“空元素窗口”的元数据拓扑（完整 pixel lattice、不物化元素）写全局文件。协调只用
   共享文件系统，不引入通信库，也不改变 N=1 的写盘路径。
   注意：任何在正式物化路径上做的拓扑过滤（land-only、mesh filter）都必须已在各 rank 的
@@ -251,7 +260,19 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
   land-only 过滤，`nelm_blk` 差 50400 vs 39973 —— 8088 个文件里只差这一个，见
   `implementation-verification.md`。）
 - `colm-cli run`：Rust 预处理在 `ranks>1` 时走 external launcher（`COLM_MPIEXEC`），
+  每次 mksrfdata 启动自动生成并向所有 rank 传入新的 `COLM_PREPROCESS_RUN_ID`，无需用户设置。
   本地/桌面仍拒绝多进程；远程作业体在任意一段用 Rust 代码时都导出启动器变量。
+  直接使用 `mpiexec`／`srun` 启动 mksrfdata 时，必须在启动器外生成并导出一个新的共享 token：
+
+  ```sh
+  export COLM_PREPROCESS_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  mpiexec -n 2 /path/to/mksrfdata-rs /path/to/case.nml
+  ```
+
+  token 只能包含 1–128 个字母、数字、`-` 或 `_`，不能每个 rank 各生成一个，也不能重试时复用。
+  成功后只删除该请求年份的计数文件，保留一次性 ready 标记；中断运行留下的记录不会被新运行采纳，
+  也不会清除已开始的下一年份记录。历史 LAI-only 年份的所有 rank 都跳过全局计数屏障。
+  共享输出文件系统须支持同目录内的 hard link；不支持时明确失败，不以覆盖式发布降级。
 - 多进程首版的显式边界：`DEF_USE_SrfdataDiag`（全局诊断文件需要跨 rank gather）、
   Urban 地表、CATCHMENT 网格都直接报错，要求单进程或 Fortran 路径；N=1 完全走原路线。
 - `colm-spmd::RankInfo::resolve_optional` 统一了“只有启动器真的给了 size>1 才走多进程”的

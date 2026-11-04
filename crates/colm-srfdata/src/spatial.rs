@@ -248,11 +248,22 @@ impl SpatialTopology {
         variable: &str,
         raw_grid: Grid,
     ) -> Result<()> {
+        self.retain_land_pixels_from_raster_with_empty(raster, variable, raw_grid, false)
+    }
+
+    /// A shard may contain only ocean; ordinary whole-domain calls still reject it.
+    pub fn retain_land_pixels_from_raster_with_empty(
+        &mut self,
+        raster: impl AsRef<Path>,
+        variable: &str,
+        raw_grid: Grid,
+        allow_empty: bool,
+    ) -> Result<()> {
         let mut types =
             read_mesh_raster_i32(raster.as_ref(), variable, &self.mesh, &self.pixel, raw_grid)?;
         self.mesh.retain_land_pixels(&mut types)?;
         ensure!(
-            !self.mesh.is_empty(),
+            allow_empty || !self.mesh.is_empty(),
             "land raster removed every mesh element"
         );
         self.land_elements = self.mesh.land_elements();
@@ -306,10 +317,19 @@ impl MeshFilter {
     }
 
     pub fn apply(&self, topology: &mut SpatialTopology) -> Result<()> {
+        self.apply_with_empty(topology, false)
+    }
+
+    /// Permit an empty rank while preserving the whole-domain filter contract.
+    pub fn apply_with_empty(
+        &self,
+        topology: &mut SpatialTopology,
+        allow_empty: bool,
+    ) -> Result<()> {
         let mut filter = self.read_for_topology(topology)?;
         topology.mesh.retain_land_pixels(&mut filter)?;
         ensure!(
-            !topology.mesh.is_empty(),
+            allow_empty || !topology.mesh.is_empty(),
             "mesh filter removed every mesh element"
         );
         topology.land_elements = topology.mesh.land_elements();
@@ -597,6 +617,19 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
         distributed,
     )?;
     let source = PixelSourceMapping { columns, rows };
+    if element_windows.is_some() {
+        if let Some(blocks) = block_order {
+            validate_shard_element_blocks(
+                kind,
+                &values,
+                summary.nlon,
+                &grid,
+                &pixel,
+                &source,
+                blocks,
+            )?;
+        }
+    }
 
     // 多个矩形窗口（按块区间的连续范围换算）可以精确覆盖任意块子集；每个 pixel 行只
     // 属于一个窗口的行区间，所以按行收集列区间即可，不需要逐窗口重复扫描整张网格。
@@ -605,11 +638,8 @@ pub fn build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
             let mut per_row = vec![Vec::new(); pixel.lat_s.len()];
             for window in windows {
                 let (columns, rows) = pixel_window(&pixel, *window)?;
-                if columns.is_empty() || rows.is_empty() {
-                    continue;
-                }
                 for row in rows {
-                    per_row[row].push((columns.start, columns.end));
+                    per_row[row].extend(columns.iter().map(|range| (range.start, range.end)));
                 }
             }
             Some(per_row)
@@ -5594,7 +5624,7 @@ fn assimilated_pixels(
 fn pixel_window(
     pixel: &PixelAxes,
     window: crate::SpatialBounds,
-) -> Result<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+) -> Result<(Vec<std::ops::Range<usize>>, std::ops::Range<usize>)> {
     ensure!(
         window.south.is_finite()
             && window.north.is_finite()
@@ -5604,7 +5634,7 @@ fn pixel_window(
         "element window must be a finite, non-empty rectangle"
     );
     if pixel.lon_w.is_empty() || pixel.lat_s.is_empty() {
-        return Ok((0..0, 0..0));
+        return Ok((Vec::new(), 0..0));
     }
     let mut longitude = Vec::with_capacity(pixel.lon_w.len());
     let mut previous = None;
@@ -5625,22 +5655,18 @@ fn pixel_window(
         longitude.push((west, east));
         previous = Some(east);
     }
-    let origin = longitude[0].0;
-    let west = unwrap_longitude(window.west, Some(origin))?;
     let span = (window.east - window.west).rem_euclid(360.0);
-    let east = west + if span == 0.0 { 360.0 } else { span };
-    let first = longitude.iter().position(|&(cell_west, cell_east)| {
-        let mid = (cell_west + cell_east) * 0.5;
-        mid >= west && mid < east
-    });
-    let last = longitude.iter().rposition(|&(cell_west, cell_east)| {
-        let mid = (cell_west + cell_east) * 0.5;
-        mid >= west && mid < east
-    });
-    let columns = match (first, last) {
-        (Some(first), Some(last)) => first..last + 1,
-        _ => 0..0,
-    };
+    let span = if span == 0.0 { 360.0 } else { span };
+    let mut columns: Vec<std::ops::Range<usize>> = Vec::new();
+    for (index, &(west, east)) in longitude.iter().enumerate() {
+        let inside = (((west + east) * 0.5 - window.west).rem_euclid(360.0)) < span;
+        if inside {
+            match columns.last_mut() {
+                Some(range) if range.end == index => range.end += 1,
+                _ => columns.push(index..index + 1),
+            }
+        }
+    }
     let mut rows = Vec::with_capacity(pixel.lat_s.len());
     for (&south, &north) in pixel.lat_s.iter().zip(&pixel.lat_n) {
         ensure!(
@@ -5808,13 +5834,23 @@ pub fn shard_element_windows(
     let west = unwrap_longitude(domain.west, Some(origin))?;
     let span = (domain.east - domain.west).rem_euclid(360.0);
     let east = west + if span == 0.0 { 360.0 } else { span };
-    let columns: Vec<usize> = longitude
+    ensure!(
+        longitude.last().unwrap().1 - origin <= 360.0 + ALIGNMENT_EPSILON,
+        "block longitude layout must not cover more than one revolution"
+    );
+    // Rotate every block into the domain's longitude cycle, retaining each block
+    // once even when a global domain cuts through the middle of that block.
+    let mut columns: Vec<(f64, f64)> = longitude
         .iter()
-        .enumerate()
-        .filter_map(|(index, &(cell_west, cell_east))| {
-            (cell_east > west && cell_west < east).then_some(index)
+        .filter_map(|&(cell_west, cell_east)| {
+            let mut shift = ((west - cell_west) / 360.0).floor() * 360.0;
+            if cell_east + shift <= west {
+                shift += 360.0;
+            }
+            (cell_west + shift < east).then_some((cell_west + shift, cell_east + shift))
         })
         .collect();
+    columns.sort_by(|left, right| left.0.total_cmp(&right.0));
     ensure!(
         !columns.is_empty(),
         "case domain does not intersect the block layout"
@@ -5832,7 +5868,6 @@ pub fn shard_element_windows(
         !rows.is_empty(),
         "case domain does not intersect the block layout"
     );
-    let column_start = columns[0];
     let column_count = columns.len();
     let row_start = rows[0];
     let row_count = rows.len();
@@ -5868,8 +5903,8 @@ pub fn shard_element_windows(
     }
     let mut windows = Vec::with_capacity(rectangles.len());
     for ((row_from, row_to), (column_from, column_to)) in rectangles {
-        let west = longitude[column_start + column_from].0.max(west);
-        let east = longitude[column_start + column_to].1.min(east);
+        let west = columns[column_from].0;
+        let east = columns[column_to].1;
         let south = blocks.lat_s[row_start + row_from].max(domain.south);
         let north = blocks.lat_n[row_start + row_to].min(domain.north);
         if west < east && south < north {
@@ -6106,6 +6141,71 @@ fn compute_element_blocks(
         );
     }
     Ok(out)
+}
+
+/// Every rank checks the complete source mesh before selecting its windows.
+/// Splitting an element would change its contents and let two writers own one file.
+#[allow(clippy::too_many_arguments)]
+fn validate_shard_element_blocks(
+    kind: SpatialInputKind,
+    values: &[i64],
+    nlon: usize,
+    grid: &SpatialGrid,
+    pixel: &PixelAxes,
+    source: &PixelSourceMapping,
+    blocks: &BlockLayout,
+) -> Result<()> {
+    let (longitude, latitude) = midpoint_block_axes(pixel, blocks)?;
+    let (source_longitude, source_latitude) = source_block_axes(grid, pixel, source, blocks)?;
+    let columns = shard_source_axis_blocks(&source.columns, &longitude, &source_longitude);
+    let rows = shard_source_axis_blocks(&source.rows, &latitude, &source_latitude);
+    let mut owners = BTreeMap::new();
+    for (&row, &block_y) in &rows {
+        for (&column, &block_x) in &columns {
+            let value = values[row * nlon + column];
+            if value <= 0 {
+                continue;
+            }
+            let unsupported = || {
+                anyhow::anyhow!(
+                    "multi-process preprocessing cannot split mesh element {value} across blocks; \
+                 run with one process or align the mesh elements and block boundaries"
+                )
+            };
+            let owner = (
+                block_x.ok_or_else(unsupported)?,
+                block_y.ok_or_else(unsupported)?,
+            );
+            if kind == SpatialInputKind::Unstructured {
+                if let Some(previous) = owners.insert(value, owner) {
+                    ensure!(previous == owner, "{}", unsupported());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn shard_source_axis_blocks(
+    source: &[Option<usize>],
+    physical: &[Option<usize>],
+    stored: &[Option<usize>],
+) -> BTreeMap<usize, Option<usize>> {
+    let mut owners = BTreeMap::new();
+    for ((source, physical), stored) in source.iter().zip(physical).zip(stored) {
+        if let Some(source) = *source {
+            let owner = if physical == stored { *physical } else { None };
+            owners
+                .entry(source)
+                .and_modify(|previous| {
+                    if *previous != owner {
+                        *previous = None;
+                    }
+                })
+                .or_insert(owner);
+        }
+    }
+    owners
 }
 
 type BlockAxes = (Vec<Option<usize>>, Vec<Option<usize>>);

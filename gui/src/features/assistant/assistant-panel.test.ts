@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { withTimeout } from '../../lib/ipc';
+import { respondToUiRequest } from './ui-request';
 import {
   appendDelta,
   defaultSettings,
@@ -2456,4 +2457,47 @@ test('failed settings offer confirmed backup/reset and reopen only after success
     assert.deepEqual(updates, consent ? [{ assistantSettingsOpen: true }] : []);
     if (consent) assert.match(notices[0], /backup.json/);
   }
+});
+
+test('a delivered UI result with an audit warning is acknowledged once and shown as a warning', async () => {
+  let callback: ts.Expression | undefined;
+  function find(node: ts.Node) {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'respondToUiRequest')
+      callback = node.arguments[2];
+    ts.forEachChild(node, find);
+  }
+  find(source);
+  assert.ok(callback);
+  const notices: string[] = [];
+  const calls: unknown[] = [];
+  let drives = 0;
+  let warning: string | null = 'audit disk full';
+  const respond = compileExpression<(id: string, ok: boolean, result: unknown) => Promise<void>>(
+    callback.getText(source),
+    {
+      active: true,
+      invoke: async (command: string, args: unknown) => {
+        calls.push([command, args]);
+        return { warning };
+      },
+      t: (_zh: string, en: string) => en,
+      setAttachNotice: (notice: string) => notices.push(notice),
+    },
+  );
+  await respondToUiRequest(
+    { type: 'ui_request', id: 'request', action: 'commit' },
+    () => {
+      drives++;
+      return { saved: true };
+    },
+    respond,
+  );
+  assert.equal(drives, 1);
+  assert.deepEqual(calls, [
+    ['assistant_ui_result', { id: 'request', ok: true, result: { saved: true } }],
+  ]);
+  assert.match(notices[0], /received the UI result.*audit disk full/);
+  warning = null;
+  await respond('next', true, {});
+  assert.equal(notices.at(-1), '');
 });

@@ -14,11 +14,10 @@ use crate::crop::{map_field_2d, AreaMapping, MapGrid};
 use crate::single_point::{canopy_tables, patch_type, urban_class, BVIC_USDA};
 use crate::{
     colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
-    derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
-    write_constant_restart, CanopyState, CanopyStructureFields, ConstantRestartFiles,
-    ConstantRestartInput, HydraulicModel, LandCoverScheme, RestartDimensions, RestartPatchFields,
-    RestartTuning, SimpleTerrainFields, SoilAlbedo, SoilLayerInput, TerrainFields,
-    TerrainRadiation, TopmodelFields,
+    derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture, CanopyState,
+    CanopyStructureFields, ConstantRestartFiles, ConstantRestartInput, HydraulicModel,
+    LandCoverScheme, RestartDimensions, RestartPatchFields, RestartTuning, SimpleTerrainFields,
+    SoilAlbedo, SoilLayerInput, TerrainFields, TerrainRadiation, TopmodelFields,
 };
 
 /// Arguments for one already-addressed LCT landpatch block.
@@ -26,6 +25,8 @@ use crate::{
 pub struct SpatialLctStaticConfig<'a> {
     /// DEF_REST_CompressLevel; validated before output creation.
     pub compression_level: u8,
+    /// The root rank writes the shared tuning file once; other blocks only write vectors.
+    pub write_shared_constants: bool,
     pub landdata: &'a Path,
     pub restart_dir: &'a Path,
     pub case_name: &'a str,
@@ -71,6 +72,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
     ) -> Self {
         Self {
             compression_level: 1,
+            write_shared_constants: true,
             landdata,
             restart_dir,
             case_name,
@@ -455,7 +457,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
         None
     };
 
-    write_constant_restart(
+    crate::restart::write_constant_restart_with_tuning(
         config.restart_dir,
         config.case_name,
         config.land_cover_year,
@@ -525,6 +527,7 @@ pub(crate) fn write_spatial_lct_constant_restart_with_canopy(
             }),
             hyperspectral_albedo: hyperspectral_albedo.as_deref(),
         },
+        config.write_shared_constants,
     )
 }
 

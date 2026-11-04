@@ -33,22 +33,25 @@ USE_STMT = re.compile(r"^\s*use\s*(?:,\s*(intrinsic|non_intrinsic)\s*::|::)?\s*(
 
 
 def stage_variables(makefile_text):
-    """每条 `$(VAR) : %.o : %.F90` 规则左侧的变量名（`$(filter-out X,$(VAR))` 取其中的 VAR）。"""
+    """Keep each complete target expression: a phase may combine/filter variables."""
     names = []
-    for line in makefile_text.splitlines():
+    for line in makefile_text.replace("\\\n", " ").splitlines():
         normalized = line.replace("${", "$(").replace("}", ")")
-        match = re.match(r"^(\$\(.*?)\s*:\s*%\.o\s*:\s*%\.F90", normalized)
+        match = re.match(r"^([^:\n]+?)\s*:\s*%\.o\s*:\s*%\.F90", normalized)
         if not match:
             continue
-        variables = re.findall(r"\$\(([A-Za-z0-9_]+)\)", match.group(1))
-        if variables:
-            names.append(variables[-1])
+        names.append(match.group(1).strip())
     return names
 
 
 def expand(variable):
-    """让 make 展开一个变量（在 vendor 目录下，读真实的 include/Makeoptions）。"""
+    """Let make expand a phase, retaining legal defined-but-empty phases."""
+    expression = f"$({variable})" if re.fullmatch(r"[A-Za-z0-9_]+", variable) else variable
+    references = sorted(set(re.findall(r"\$\(([A-Za-z0-9_]+)\)", expression)))
+    with open(os.path.join(VENDOR, "Makefile"), encoding="utf-8") as source:
+        declared = set(re.findall(r"^\s*([A-Za-z0-9_]+)\s*[:+?]?=", source.read(), re.MULTILINE))
     env = os.environ.copy()
+    env["LC_ALL"] = "C"
     command = ["make"]
     if tools := env.get("COLM_FORTRAN_DEPS_BIN"):
         names = ("make", "bash", "sh", "cpp", "awk", "printf")
@@ -65,20 +68,42 @@ def expand(variable):
             shell = subprocess.check_output([binaries["cygpath"], "-u", shell], env=env, text=True).strip()
         command = [binaries["make"], "SHELL=" + shell]
     with tempfile.NamedTemporaryFile("w", suffix=".mk", delete=False) as helper:
-        helper.write("print-%:\n\t@echo $($*)\n")
+        for name in references:
+            # An optional phase (e.g. CaMa) can be declared inside an inactive conditional.
+            if name in declared:
+                continue
+            helper.write(f"ifeq ($(origin {name}),undefined)\n$(error undefined phase variable {name} in {expression})\nendif\n")
+        helper.write(".PHONY: __colm_deps_print\n__colm_deps_print:\n")
+        helper.write(f"\t@echo __COLM_DEPS_BEGIN__\n\t@echo {expression}\n\t@echo __COLM_DEPS_END__\n")
         path = helper.name
     try:
         make_path = path
         if tools and os.name == "nt":
             make_path = subprocess.check_output([binaries["cygpath"], "-u", path], env=env, text=True).strip()
         result = subprocess.run(
-            command + ["-s", "-f", "Makefile", "-f", make_path, f"print-{variable}"],
+            command + ["-s", "--warn-undefined-variables", "-f", "Makefile", "-f", make_path, "__colm_deps_print"],
             cwd=VENDOR, env=env, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"cannot expand phase {expression} in {MAKEFILE}: {error.stderr.strip()}") from error
     finally:
         os.unlink(path)
     if result.stderr:
         print(f"make {variable}: {result.stderr.rstrip()}", file=sys.stderr)
-    return [word for word in result.stdout.split() if word.endswith(".o")]
+        warnings = re.findall(re.escape(make_path) + r":\d+: warning: undefined variable ['`]([^'`]+)['`]",
+                              result.stderr)
+        unknown = sorted(set(warnings) - declared)
+        if unknown:
+            raise RuntimeError(f"undefined variables {', '.join(unknown)} in phase {expression} in {MAKEFILE}")
+    lines = result.stdout.splitlines()
+    if lines.count("__COLM_DEPS_BEGIN__") != 1 or lines.count("__COLM_DEPS_END__") != 1:
+        raise RuntimeError(f"missing expansion output for phase {expression} in {MAKEFILE}")
+    begin, end = lines.index("__COLM_DEPS_BEGIN__"), lines.index("__COLM_DEPS_END__")
+    if end <= begin:
+        raise RuntimeError(f"invalid expansion output for phase {expression} in {MAKEFILE}")
+    objects = " ".join(lines[begin + 1:end]).split()
+    if any(not obj.endswith(".o") for obj in objects):
+        raise RuntimeError(f"non-object expansion for phase {expression} in {MAKEFILE}: {objects}")
+    return objects
 
 
 def vpath_directories(makefile_text):
@@ -134,7 +159,7 @@ def generate():
             if deps:
                 lines.append(f"{obj}: {' '.join(deps)}")
     # 对象都写进 `.bld/`：并行时要先建好目录（order-only，不触发重编）。
-    order_only = [f"$({variable}): | mkdir_build" for variable in variables]
+    order_only = [f"{variable}: | mkdir_build" for variable in variables]
     block = [BEGIN,
              "# Same-stage MODULE/USE prerequisites (cross-stage ordering comes from the pattern",
              "# rules above).  Regenerate after every upstream sync.",

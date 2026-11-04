@@ -2663,6 +2663,17 @@ fn ensure_rust_preprocessor_launcher(ranks: usize) -> Result<()> {
     Ok(())
 }
 
+fn preflight_rust_preprocessor_ranks(case_nml: &Path, ranks: usize) -> Result<()> {
+    ensure!(
+        ranks == 1 || colm_case::is_spatial_case(case_nml)?,
+        "multi-process Rust preprocessing requires a spatial case; single-point cases must use --ranks 1"
+    );
+    if ranks > 1 {
+        ensure_rust_preprocessor_launcher(ranks)?;
+    }
+    Ok(())
+}
+
 /// 在跑前两段**之前**确认 `colm-rs` 接得住这个算例。
 ///
 /// 不做的话，一个 Rust 跑不了的算例（打开了 SNICAR、PFT 内核、湖泊站点……）要等
@@ -3690,6 +3701,11 @@ fn run_case(
     }
     let layout = Layout::new(case);
     let runs_model = only_stage.is_none_or(|stage| stage == Stage::Colm);
+    if preprocessors == PreprocessorMode::Rust
+        && only_stage.is_none_or(|stage| matches!(stage, Stage::MkSrfData | Stage::MkIniData))
+    {
+        preflight_rust_preprocessor_ranks(&layout.case_nml(), ranks)?;
+    }
     // 混合模型只有 Rust 引擎支持；Fortran 引擎静默忽略它会给出纯物理的结果。
     if let (true, ModelEngine::Fortran, Some(path)) =
         (runs_model, engine, hybrid_config(&layout.case_nml()))

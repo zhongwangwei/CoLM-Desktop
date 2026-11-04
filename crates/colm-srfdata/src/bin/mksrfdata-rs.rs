@@ -1,4 +1,7 @@
 //! Native single-point surface-data materializer.
+//!
+//! Direct multi-process launches must export one fresh COLM_PREPROCESS_RUN_ID shared by
+//! all ranks. colm-cli supplies it automatically; a run/year identity cannot be reused.
 
 use std::{
     collections::BTreeMap,
@@ -59,6 +62,8 @@ const CANOPY_STRUCTURE_SUFFIX: &str = "CanopyStructure_500m_CH90_aggregated";
 struct Shard {
     rank: usize,
     size: usize,
+    run_id: String,
+    year: i32,
     /// 块边界对齐的元素窗口；pixel 格点仍按完整算例域，产物索引空间与单进程一致。
     windows: Vec<colm_srfdata::SpatialBounds>,
 }
@@ -77,6 +82,7 @@ fn resolve_shard(
     mesh: &std::path::Path,
     rank: Option<usize>,
     ranks: Option<usize>,
+    year: i32,
 ) -> Result<Option<Shard>> {
     let Some(info) = RankInfo::resolve_optional(rank, ranks)? else {
         return Ok(None);
@@ -84,6 +90,11 @@ fn resolve_shard(
     if info.size() == 1 {
         return Ok(None);
     }
+    let run_id = std::env::var("COLM_PREPROCESS_RUN_ID").context(
+        "multi-process mksrfdata needs a fresh shared COLM_PREPROCESS_RUN_ID; \
+         colm-cli sets it automatically, or export a new token before direct mpiexec",
+    )?;
+    validate_shard_run_id(&run_id)?;
     ensure!(
         kind != SpatialInputKind::Catchment,
         "multi-process mksrfdata does not support CATCHMENT meshes yet; \
@@ -113,6 +124,8 @@ fn resolve_shard(
     Ok(Some(Shard {
         rank: info.rank(),
         size: info.size(),
+        run_id,
+        year,
         windows,
     }))
 }
@@ -127,11 +140,88 @@ fn shard_windows(shard: &Option<Shard>) -> Option<&[colm_srfdata::SpatialBounds]
 // 不能为了统计重跑一遍完整域拓扑（0.1° 全球是 3.7e9 像元扫描）。各 rank 把自己 tile 的
 // 每块计数写成文件，root 等齐后汇总写全局文件；协调只用共享文件系统，不需要通信库。
 
-fn shard_sync_dir(landdata: &std::path::Path) -> Result<std::path::PathBuf> {
+fn validate_shard_run_id(run_id: &str) -> Result<()> {
+    ensure!(
+        !run_id.is_empty()
+            && run_id.len() <= 128
+            && run_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
+        "COLM_PREPROCESS_RUN_ID must be a fresh 1–128 character alphanumeric, '-' or '_' token"
+    );
+    Ok(())
+}
+
+fn shard_sync_dir(shard: &Shard, landdata: &std::path::Path) -> Result<std::path::PathBuf> {
+    validate_shard_run_id(&shard.run_id)?;
     landdata
         .parent()
-        .map(|directory| directory.join(".colm-shard"))
+        .map(|directory| {
+            directory
+                .join(".colm-shard")
+                .join(&shard.run_id)
+                .join(shard.year.to_string())
+        })
         .context("landdata has no case output directory")
+}
+
+fn shard_ready_record(shard: &Shard) -> String {
+    format!(
+        "COLM-SHARD-1 {} {} {}\n",
+        shard.run_id, shard.year, shard.size
+    )
+}
+
+fn begin_shard_year(shard: &Shard, landdata: &Path) -> Result<()> {
+    let directory = shard_sync_dir(shard, landdata)?;
+    if shard.is_root() {
+        std::fs::create_dir_all(
+            directory
+                .parent()
+                .context("shard year has no run directory")?,
+        )?;
+        std::fs::create_dir(&directory).with_context(|| {
+            format!(
+                "cannot reserve fresh shard year {}; use a new COLM_PREPROCESS_RUN_ID",
+                directory.display()
+            )
+        })?;
+        std::fs::write(directory.join("ready.tmp"), shard_ready_record(shard))?;
+        std::fs::rename(directory.join("ready.tmp"), directory.join("ready"))?;
+    } else {
+        wait_for_shard_ready(shard, landdata, std::time::Duration::from_secs(60))?;
+    }
+    Ok(())
+}
+
+fn wait_for_shard_ready(
+    shard: &Shard,
+    landdata: &Path,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let directory = shard_sync_dir(shard, landdata)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match std::fs::read_to_string(directory.join("ready")) {
+            Ok(record) => {
+                ensure!(
+                    record == shard_ready_record(shard),
+                    "shard session/year/process count changed"
+                );
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure!(
+                        std::time::Instant::now() < deadline,
+                        "root did not publish the fresh shard year {} before the startup deadline; check whether rank 0 failed",
+                        directory.display()
+                    );
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn shard_counts_path(sync_dir: &std::path::Path, rank: usize) -> std::path::PathBuf {
@@ -143,18 +233,45 @@ fn write_shard_counts(
     landdata: &std::path::Path,
     topology: &SpatialTopology,
     blocks: &BlockLayout,
-) -> Result<()> {
-    let sync_dir = shard_sync_dir(landdata)?;
-    std::fs::create_dir_all(&sync_dir)?;
+    lai_only: bool,
+) -> Result<bool> {
+    if lai_only {
+        return Ok(false);
+    }
     let counts = colm_srfdata::element_block_counts(topology, blocks)?;
-    let mut text = String::new();
+    publish_shard_counts(shard, landdata, &counts)?;
+    Ok(true)
+}
+
+fn publish_shard_counts(
+    shard: &Shard,
+    landdata: &Path,
+    counts: &BTreeMap<(usize, usize), usize>,
+) -> Result<()> {
+    use std::io::Write;
+    let sync_dir = shard_sync_dir(shard, landdata)?;
+    let mut text = format!("{}{}\n", shard_ready_record(shard), shard.rank);
     for ((x, y), count) in counts {
         text.push_str(&format!("{x} {y} {count}\n"));
     }
     let path = shard_counts_path(&sync_dir, shard.rank);
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, text)?;
-    std::fs::rename(&temporary, &path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    // Publish complete bytes without replacing a duplicate rank's record.
+    std::fs::hard_link(&temporary, &path).with_context(|| {
+        format!(
+            "cannot exclusively publish rank {} counts at {}",
+            shard.rank,
+            path.display()
+        )
+    })?;
+    std::fs::remove_file(&temporary)?;
     Ok(())
 }
 
@@ -162,7 +279,7 @@ fn gather_shard_counts(
     shard: &Shard,
     landdata: &std::path::Path,
 ) -> Result<std::collections::BTreeMap<(usize, usize), usize>> {
-    let sync_dir = shard_sync_dir(landdata)?;
+    let sync_dir = shard_sync_dir(shard, landdata)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6 * 3600);
     loop {
         let ready = (0..shard.size)
@@ -179,10 +296,26 @@ fn gather_shard_counts(
         );
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+    read_shard_counts(shard, landdata)
+}
+
+fn read_shard_counts(shard: &Shard, landdata: &Path) -> Result<BTreeMap<(usize, usize), usize>> {
+    let sync_dir = shard_sync_dir(shard, landdata)?;
     let mut counts = std::collections::BTreeMap::new();
+    let expected_header = shard_ready_record(shard);
     for rank in 0..shard.size {
         let text = std::fs::read_to_string(shard_counts_path(&sync_dir, rank))?;
-        for line in text.lines() {
+        let mut lines = text.lines();
+        ensure!(
+            lines.next() == Some(expected_header.trim_end()),
+            "shard count session/year/process count changed"
+        );
+        let rank_label = rank.to_string();
+        ensure!(
+            lines.next() == Some(rank_label.as_str()),
+            "shard count rank changed"
+        );
+        for line in lines {
             let mut fields = line.split_whitespace();
             let x: usize = fields
                 .next()
@@ -196,10 +329,23 @@ fn gather_shard_counts(
                 .next()
                 .context("shard count line is missing count")?
                 .parse()?;
-            *counts.entry((x, y)).or_insert(0) += count;
+            ensure!(fields.next().is_none(), "shard count line has extra fields");
+            let total = counts.entry((x, y)).or_insert(0_usize);
+            *total = total
+                .checked_add(count)
+                .context("shard element count overflow")?;
         }
     }
     Ok(counts)
+}
+
+fn cleanup_shard_counts(shard: &Shard, landdata: &Path) -> Result<()> {
+    let directory = shard_sync_dir(shard, landdata)?;
+    for rank in 0..shard.size {
+        std::fs::remove_file(shard_counts_path(&directory, rank))?;
+    }
+    // Retain the ready marker: a run/year identity is single-use, even after success.
+    Ok(())
 }
 
 /// root：等齐各 rank 的每块 element 计数，再用“空元素窗口”的元数据拓扑写全局文件。
@@ -221,6 +367,10 @@ fn write_global_topology_from_shards(
         "multi-process mksrfdata does not support CATCHMENT meshes yet"
     );
     let counts = gather_shard_counts(shard, landdata)?;
+    ensure!(
+        counts.values().any(|&count| count > 0),
+        "mesh/land filtering removed every element across all ranks"
+    );
     let lattice = build_spatial_topology_with_filter_grid_and_raw_grids_in_window(
         mesh,
         kind,
@@ -236,7 +386,7 @@ fn write_global_topology_from_shards(
     colm_srfdata::write_spatial_global_topology_with_counts(
         landdata, year, &lattice, blocks, &counts,
     )?;
-    let _ = std::fs::remove_dir_all(shard_sync_dir(landdata)?);
+    cleanup_shard_counts(shard, landdata)?;
     Ok(())
 }
 
@@ -518,6 +668,9 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         println!("DEF_Output_2mWMO is disabled outside GRIDBASED, matching upstream");
         args.output_2m_wmo = false;
     }
+    if let Some(shard) = &args.shard {
+        begin_shard_year(shard, &args.landdata)?;
+    }
     // `DEF_USE_Forcing_Downscaling`：`grid_topo_factor%define_from_file(slope.nc)` 并入像元
     // （`MKSRFDATA.F90:267-309`），之后所有聚合都在这套更细的像元上做。
     let topography_grid = args
@@ -567,15 +720,16 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 args.shard.is_some(),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
+            if args.land_only && (mesh_filter.is_some() || args.shard.is_some()) {
+                topology.retain_land_pixels_from_raster_with_empty(
+                    &args.landtype,
+                    "landtype",
+                    COLM_500M,
+                    args.shard.is_some(),
+                )?;
+            }
             if let Some(filter) = &mesh_filter {
-                if args.land_only {
-                    topology.retain_land_pixels_from_raster(
-                        &args.landtype,
-                        "landtype",
-                        COLM_500M,
-                    )?;
-                }
-                filter.apply(&mut topology)?;
+                filter.apply_with_empty(&mut topology, args.shard.is_some())?;
             }
             let (topology, patches) = build_pft_land_patches_from_raster(
                 topology,
@@ -583,7 +737,7 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
                 "landtype",
                 COLM_500M,
                 args.dominant,
-                args.land_only && mesh_filter.is_none(),
+                args.land_only && mesh_filter.is_none() && args.shard.is_none(),
                 args.patch_mode,
             )?;
             (topology, patches, None)
@@ -592,8 +746,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
     trace_memory("pft: topology+patches built");
     if topology.mesh.is_empty() {
         if let Some(shard) = &args.shard {
-            write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;
-            if shard.is_root() {
+            if write_shard_counts(
+                shard,
+                &args.landdata,
+                &topology,
+                &args.blocks,
+                args.lulcc_lai_only,
+            )? && shard.is_root()
+            {
                 write_global_topology_from_shards(
                     shard,
                     &args.landdata,
@@ -1059,8 +1219,14 @@ fn materialize_spatial_pft(args: &[String]) -> Result<()> {
         args.landdata.display()
     );
     if let Some(shard) = &args.shard {
-        write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;
-        if shard.is_root() {
+        if write_shard_counts(
+            shard,
+            &args.landdata,
+            &topology,
+            &args.blocks,
+            args.lulcc_lai_only,
+        )? && shard.is_root()
+        {
             write_global_topology_from_shards(
                 shard,
                 &args.landdata,
@@ -1342,6 +1508,9 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     if args.urban.is_some() && args.shard.is_some() {
         bail!("multi-process mksrfdata does not support urban surface data yet");
     }
+    if let Some(shard) = &args.shard {
+        begin_shard_year(shard, &args.landdata)?;
+    }
     let (mut topology, mut patches, land_hrus) = match args.kind {
         SpatialInputKind::Catchment => {
             let catchment = build_catchment_spatial_topology_with_filter_and_raw_grids(
@@ -1377,15 +1546,16 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 args.shard.is_some(),
             )?;
             topology.preserve_element_blocks(&args.blocks)?;
+            if args.land_only && (mesh_filter.is_some() || args.shard.is_some()) {
+                topology.retain_land_pixels_from_raster_with_empty(
+                    &args.landtype,
+                    "landtype",
+                    lct_grid,
+                    args.shard.is_some(),
+                )?;
+            }
             if let Some(filter) = &mesh_filter {
-                if args.land_only {
-                    topology.retain_land_pixels_from_raster(
-                        &args.landtype,
-                        "landtype",
-                        lct_grid,
-                    )?;
-                }
-                filter.apply(&mut topology)?;
+                filter.apply_with_empty(&mut topology, args.shard.is_some())?;
             }
             let (topology, patches) = build_lct_land_patches_from_raster(
                 topology,
@@ -1393,7 +1563,7 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
                 "landtype",
                 lct_grid,
                 args.dominant,
-                args.land_only && mesh_filter.is_none(),
+                args.land_only && mesh_filter.is_none() && args.shard.is_none(),
             )?;
             (topology, patches, None)
         }
@@ -1401,8 +1571,14 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
     trace_memory("lct: topology+patches built");
     if topology.mesh.is_empty() {
         if let Some(shard) = &args.shard {
-            write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;
-            if shard.is_root() {
+            if write_shard_counts(
+                shard,
+                &args.landdata,
+                &topology,
+                &args.blocks,
+                args.lulcc_lai_only,
+            )? && shard.is_root()
+            {
                 write_global_topology_from_shards(
                     shard,
                     &args.landdata,
@@ -1518,8 +1694,14 @@ fn materialize_spatial_lct(args: &[String]) -> Result<()> {
         args.landdata.display()
     );
     if let Some(shard) = &args.shard {
-        write_shard_counts(shard, &args.landdata, &topology, &args.blocks)?;
-        if shard.is_root() {
+        if write_shard_counts(
+            shard,
+            &args.landdata,
+            &topology,
+            &args.blocks,
+            args.lulcc_lai_only,
+        )? && shard.is_root()
+        {
             write_global_topology_from_shards(
                 shard,
                 &args.landdata,
@@ -4418,7 +4600,15 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         canopy_tiles.is_none() || land_cover == SiteMode::Igbp,
         "--canopy-structure-dir supports IGBP land cover only"
     );
-    let shard = resolve_shard(kind, &blocks, bounds, &PathBuf::from(&args[1]), rank, ranks)?;
+    let shard = resolve_shard(
+        kind,
+        &blocks,
+        bounds,
+        &PathBuf::from(&args[1]),
+        rank,
+        ranks,
+        year,
+    )?;
     Ok(SpatialLctArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -4794,7 +4984,15 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         simple_topography_factors.is_none() || regular_topography_factors.is_none(),
         "--simple-topography-factors and --regular-topography-factors are mutually exclusive"
     );
-    let shard = resolve_shard(kind, &blocks, bounds, &PathBuf::from(&args[1]), rank, ranks)?;
+    let shard = resolve_shard(
+        kind,
+        &blocks,
+        bounds,
+        &PathBuf::from(&args[1]),
+        rank,
+        ranks,
+        year,
+    )?;
     Ok(SpatialPftArgs {
         kind,
         mesh: PathBuf::from(&args[1]),
@@ -4835,6 +5033,14 @@ fn parse_spatial_pft(args: &[String]) -> Result<SpatialPftArgs> {
         soil_hyper_albedo_dir,
         shard,
     })
+}
+
+fn ensure_single_process_materialization(rank: Option<RankInfo>, mode: &str) -> Result<()> {
+    ensure!(
+        rank.is_none_or(|rank| rank.size() == 1),
+        "multi-process mksrfdata does not support {mode}; run with one process"
+    );
+    Ok(())
 }
 
 fn materialize_case(args: &[String]) -> Result<()> {
@@ -4910,6 +5116,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
             ),
         }
     }
+    let rank = RankInfo::resolve_optional(None, None)?;
     if let Some(command) = spatial_existing_surface_command(
         &namelist,
         lct_mode,
@@ -4922,6 +5129,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
             soil_hyper_albedo_dir.is_none(),
             "--soil-hyper-albedo-dir is unavailable with USE_srfdata_from_larger_region because the copied landdata already owns its spectral fields"
         );
+        ensure_single_process_materialization(rank, "existing surface clipping")?;
         let destination = command.destination.clone();
         // 上游把甲烷的必需输入检查放在裁剪循环里（`MOD_RegionClip.F90:459-478`），
         // 这里放在写输出之前，缺文件时不会留下半棵 landdata。
@@ -4940,7 +5148,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
         grid_kind,
     )? {
         // 启动器环境里的 rank/size 转成显式参数传给子命令；单进程不追加，行为不变。
-        if let Some(rank) = RankInfo::resolve_optional(None, None)? {
+        if let Some(rank) = rank {
             if rank.size() > 1 {
                 command.args.extend([
                     "--rank".to_owned(),
@@ -4973,6 +5181,7 @@ fn materialize_case(args: &[String]) -> Result<()> {
         spatial_blocks.is_none(),
         "--blocks is available only for a spatial case namelist"
     );
+    ensure_single_process_materialization(rank, "single-point surface data")?;
     if let Some(directory) = &soil_hyper_albedo_dir {
         colm_srfdata::validate_single_point_hyperspectral_albedo_directory(directory)?;
     }
@@ -5981,6 +6190,10 @@ fn case_eight_day_lai_years(document: &colm_namelist::Document) -> Result<Vec<i3
 }
 
 fn materialize_legacy(args: &[String]) -> Result<()> {
+    ensure_single_process_materialization(
+        RankInfo::resolve_optional(None, None)?,
+        "single-point surface data",
+    )?;
     if !(2..=4).contains(&args.len()) {
         bail!("{}", usage());
     }
@@ -6059,13 +6272,272 @@ fn usage() -> &'static str {
   mksrfdata-rs <case.nml> [--grid-kind latlon|unstructured|catchment] [--subgrid lct|pft|pc] [--land-cover igbp|usgs] [--crop] [--blocks nx ny] [--observation observation.nc] [--soil-hyper-albedo-dir colm_input_ghsad]
   mksrfdata-rs <site.nc> <landdata-dir> [rawdata] [observation.nc]
   mksrfdata-rs spatial-lct <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --land-cover <igbp|usgs> [--srfdata-compress-level 0..9] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--plant-tiles plant_15s] [--canopy-structure-dir canopy_data] [--usgs-forest-height Forest_Height.nc] [--lulcc] [--monthly-vegetation-year year]... [--lai-8day-dir lai_15s_8day --lai-8day-year year]... [--urban-rawdata rawdata --urban-scheme ncar|lcz --urban-geometry ghsl|li --urban-canyon-hwr true|false]
-  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--canopy-structure-dir canopy_data] [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]..."
+  mksrfdata-rs spatial-pft <latlon|unstructured|catchment> <mesh.nc> <landtype.nc> <landdata-dir> <lc-year> --plant-tiles plant_15s [--canopy-structure-dir canopy_data] [--srfdata-compress-level 0..9] [--lulcc] [--patch-mode merged|separate|fast-pc] [--output-2m-wmo true|false] [--crop-surface global_CFT_surface_data.nc] [--blocks nx ny] [--land-only true|false] [--mesh-filter filter.nc] [--dominant] [--diagnostics] [--lake-depth lake_depth.nc] [--lake-soil-carbon lake_soilc.nc] [--methane-ph PHH2O1.nc] [--soil-texture soiltexture_0cm-60cm_mean.nc] [--soil-dir soil] [--soil-model vgm|campbell] [--soil-fit true|false] [--soil-brightness soil_brightness.nc] [--soil-hyper-albedo-dir colm_input_ghsad] [--topography topography.nc] [--topographic-wetness TWI.nc] [--simple-topography-factors directory] [--regular-topography-factors directory] [--bedrock bedrock.nc] [--monthly-vegetation-year year]...
+Multi-process mksrfdata requires one fresh COLM_PREPROCESS_RUN_ID shared by all ranks.
+colm-cli supplies it automatically; direct mpiexec/srun users must export a new token before each launch."
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use colm_srfdata::build_spatial_topology_with_filter_grid_and_raw_grids;
+
+    fn counts_shard(rank: usize, run_id: &str, year: i32) -> Shard {
+        Shard {
+            rank,
+            size: 2,
+            run_id: run_id.to_owned(),
+            year,
+            windows: Vec::new(),
+        }
+    }
+
+    fn counts_test_root(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "colm-shard-counts-{tag}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn shard_non_spatial_materialization_rejects_each_multi_process_rank() {
+        ensure_single_process_materialization(None, "single-point surface data").unwrap();
+        ensure_single_process_materialization(
+            Some(RankInfo::new(0, 1).unwrap()),
+            "single-point surface data",
+        )
+        .unwrap();
+        for rank in 0..2 {
+            for mode in ["single-point surface data", "existing surface clipping"] {
+                let error = ensure_single_process_materialization(
+                    Some(RankInfo::new(rank, 2).unwrap()),
+                    mode,
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("run with one process"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shard_all_empty_filter_result_fails_before_creating_scientific_outputs() {
+        let root = counts_test_root("all-empty");
+        let landdata = root.join("landdata");
+        let first = counts_shard(0, "all-empty", 2005);
+        let second = counts_shard(1, "all-empty", 2005);
+        begin_shard_year(&first, &landdata).unwrap();
+        for shard in [&first, &second] {
+            publish_shard_counts(shard, &landdata, &BTreeMap::new()).unwrap();
+        }
+        let error = write_global_topology_from_shards(
+            &first,
+            &landdata,
+            2005,
+            &root.join("not-opened.nc"),
+            SpatialInputKind::GridBased,
+            None,
+            None,
+            &[],
+            &[],
+            &BlockLayout::regular(2, 1).unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("removed every element across all ranks"),
+            "{error}"
+        );
+        assert!(!landdata.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shard_ready_missing_root_times_out_without_creating_a_session() {
+        let root = counts_test_root("missing-root");
+        let landdata = root.join("landdata");
+        let shard = counts_shard(1, "missing-root", 2005);
+        let error = wait_for_shard_ready(&shard, &landdata, std::time::Duration::ZERO).unwrap_err();
+        assert!(
+            error.to_string().contains("check whether rank 0 failed"),
+            "{error}"
+        );
+        assert!(!root.join(".colm-shard").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shard_session_tokens_cannot_escape_the_output_namespace() {
+        for invalid in ["", ".", "..", "a/b", "a\\b", "a\nb", "a b"] {
+            assert!(validate_shard_run_id(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(validate_shard_run_id(&"a".repeat(129)).is_err());
+        validate_shard_run_id("session_123-abc").unwrap();
+    }
+
+    #[test]
+    fn shard_counts_publish_complete_same_session_records_and_gather_them() {
+        let root = counts_test_root("same-run");
+        let landdata = root.join("landdata");
+        let first = counts_shard(0, "fresh", 2005);
+        let second = counts_shard(1, "fresh", 2005);
+        begin_shard_year(&first, &landdata).unwrap();
+        begin_shard_year(&second, &landdata).unwrap();
+        let a = BTreeMap::from([((0, 0), 3)]);
+        let b = BTreeMap::from([((1, 0), 5)]);
+        publish_shard_counts(&first, &landdata, &a).unwrap();
+        publish_shard_counts(&second, &landdata, &b).unwrap();
+        assert_eq!(
+            gather_shard_counts(&first, &landdata).unwrap(),
+            BTreeMap::from([((0, 0), 3), ((1, 0), 5)])
+        );
+        assert!(
+            !shard_counts_path(&shard_sync_dir(&first, &landdata).unwrap(), 0)
+                .with_extension("tmp")
+                .exists()
+        );
+        remove_test_tree(root);
+    }
+
+    #[test]
+    fn shard_counts_ignore_old_runs_and_cleanup_cannot_remove_the_next_year() {
+        let root = counts_test_root("old-run-year");
+        let landdata = root.join("landdata");
+        let a = BTreeMap::from([((0, 0), 3)]);
+        let b = BTreeMap::from([((1, 0), 5)]);
+        let old = counts_shard(0, "old", 2005);
+        begin_shard_year(&old, &landdata).unwrap();
+        publish_shard_counts(&old, &landdata, &a).unwrap();
+        publish_shard_counts(&counts_shard(1, "old", 2005), &landdata, &b).unwrap();
+
+        let current = counts_shard(0, "fresh", 2005);
+        begin_shard_year(&current, &landdata).unwrap();
+        assert!(
+            read_shard_counts(&current, &landdata).is_err(),
+            "old ready files must not satisfy the new run"
+        );
+        publish_shard_counts(&current, &landdata, &a).unwrap();
+        publish_shard_counts(&counts_shard(1, "fresh", 2005), &landdata, &b).unwrap();
+
+        let next = counts_shard(0, "fresh", 2006);
+        begin_shard_year(&next, &landdata).unwrap();
+        assert!(
+            read_shard_counts(&next, &landdata).is_err(),
+            "the previous year's counts must not satisfy the next year"
+        );
+        publish_shard_counts(&next, &landdata, &a).unwrap();
+        publish_shard_counts(&counts_shard(1, "fresh", 2006), &landdata, &b).unwrap();
+        cleanup_shard_counts(&current, &landdata).unwrap();
+        assert_eq!(gather_shard_counts(&next, &landdata).unwrap().len(), 2);
+        assert!(shard_sync_dir(&current, &landdata)
+            .unwrap()
+            .join("ready")
+            .is_file());
+        assert!(
+            begin_shard_year(&current, &landdata).is_err(),
+            "completed identities cannot be reused"
+        );
+        remove_test_tree(root);
+    }
+
+    #[test]
+    fn shard_counts_reject_reused_years_and_duplicate_rank_publication() {
+        let root = counts_test_root("duplicates");
+        let landdata = root.join("landdata");
+        let shard = counts_shard(0, "fresh", 2005);
+        begin_shard_year(&shard, &landdata).unwrap();
+        assert!(begin_shard_year(&shard, &landdata).is_err());
+        let original = BTreeMap::from([((0, 0), 3)]);
+        publish_shard_counts(&shard, &landdata, &original).unwrap();
+        let path = shard_counts_path(&shard_sync_dir(&shard, &landdata).unwrap(), 0);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(publish_shard_counts(&shard, &landdata, &BTreeMap::from([((0, 0), 999)])).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        remove_test_tree(root);
+    }
+
+    #[test]
+    fn shard_counts_reject_unpublished_or_mismatched_records() {
+        let root = counts_test_root("invalid-records");
+        let landdata = root.join("landdata");
+        let shard = counts_shard(0, "fresh", 2005);
+        begin_shard_year(&shard, &landdata).unwrap();
+        publish_shard_counts(&shard, &landdata, &BTreeMap::from([((0, 0), 1)])).unwrap();
+        let path = shard_counts_path(&shard_sync_dir(&shard, &landdata).unwrap(), 1);
+        std::fs::write(path.with_extension("tmp"), "partial").unwrap();
+        assert!(read_shard_counts(&shard, &landdata).is_err());
+        for invalid in [
+            "COLM-SHARD-1 old 2005 2\n1\n0 0 9\n".to_owned(),
+            "COLM-SHARD-1 fresh 2004 2\n1\n0 0 9\n".to_owned(),
+            "COLM-SHARD-1 fresh 2005 3\n1\n0 0 9\n".to_owned(),
+            "COLM-SHARD-1 fresh 2005 2\n0\n0 0 9\n".to_owned(),
+            "COLM-SHARD-1 fresh 2005 2\n1\n0 0 9 extra\n".to_owned(),
+            format!("COLM-SHARD-1 fresh 2005 2\n1\n0 0 {}\n", usize::MAX),
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(read_shard_counts(&shard, &landdata).is_err());
+        }
+        remove_test_tree(root);
+    }
+
+    #[test]
+    fn lai_only_shards_skip_the_global_count_barrier_for_empty_and_nonempty_meshes() {
+        let root = counts_test_root("lai-only");
+        let landdata = root.join("landdata");
+        let global_file = root.join("existing-global-mesh.nc");
+        std::fs::write(&global_file, "existing topology").unwrap();
+        let blocks = BlockLayout::regular(1, 1).unwrap();
+        for empty in [true, false] {
+            let mesh = if empty {
+                FlatMesh::new(vec![], vec![0], vec![], vec![]).unwrap()
+            } else {
+                FlatMesh::new(vec![1], vec![0, 1], vec![1], vec![1]).unwrap()
+            };
+            let topology = SpatialTopology {
+                kind: SpatialInputKind::GridBased,
+                mesh_index_grid: None,
+                grid: colm_srfdata::SpatialGrid {
+                    lon_w: vec![-180.0],
+                    lon_e: vec![180.0],
+                    lat_s: vec![-90.0],
+                    lat_n: vec![90.0],
+                },
+                pixel: PixelAxes {
+                    edge_south: -90.0,
+                    edge_north: 90.0,
+                    edge_west: -180.0,
+                    edge_east: 180.0,
+                    lon_w: vec![-180.0],
+                    lon_e: vec![180.0],
+                    lat_s: vec![-90.0],
+                    lat_n: vec![90.0],
+                },
+                source: None,
+                element_block_owners: None,
+                land_elements: mesh.land_elements(),
+                mesh,
+            };
+            for rank in 0..2 {
+                let shard = counts_shard(rank, "fresh", 2005);
+                assert!(!write_shard_counts(&shard, &landdata, &topology, &blocks, true).unwrap());
+                assert!(!shard_sync_dir(&shard, &landdata).unwrap().exists());
+                assert_eq!(
+                    std::fs::read_to_string(&global_file).unwrap(),
+                    "existing topology"
+                );
+            }
+        }
+        remove_test_tree(root);
+    }
 
     /// 湖泊沉积碳的有机质代理（raw `lake_soilc.nc` 缺失时）：模式第 1、2 层都取原始第 1 层，
     /// 第 9、10 层都取原始第 8 层；非湖泊 patch 为 0；输出按层平铺。

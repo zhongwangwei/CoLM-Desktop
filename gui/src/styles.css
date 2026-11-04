@@ -2180,7 +2180,8 @@ table input {
 .batch-page .is-failed {
   --tone: var(--danger);
 }
-.batch-page .is-cancelled {
+.batch-page .is-cancelled,
+.batch-page .is-interrupted {
   --tone: color-mix(in srgb, var(--muted) 45%, var(--foreground));
 }
 .batch-page .is-unknown {
@@ -2404,7 +2405,7 @@ table input {
 }
 .batch-tiles {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 14px;
 }

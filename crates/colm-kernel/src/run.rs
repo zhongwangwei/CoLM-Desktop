@@ -298,6 +298,7 @@ fn run_stage_streaming_with_command(
         external_launcher,
     )?;
     let mut cmd = Command::new(&program);
+    configure_preprocessor_run(&mut cmd, stage, external_launcher)?;
     let hdf5_file_locking = std::env::var_os("HDF5_USE_FILE_LOCKING");
     configure_hdf5_file_locking(&mut cmd, hdf5_file_locking.as_deref());
     if uses_mpi {
@@ -440,6 +441,21 @@ fn configure_hdf5_file_locking(cmd: &mut Command, inherited: Option<&std::ffi::O
     if inherited.is_none() {
         cmd.env("HDF5_USE_FILE_LOCKING", "FALSE");
     }
+}
+
+fn configure_preprocessor_run(cmd: &mut Command, stage: Stage, external: bool) -> Result<()> {
+    if stage == Stage::MkSrfData && external {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cmd.env(
+            "COLM_PREPROCESS_RUN_ID",
+            format!("{}-{time}-{sequence}", std::process::id()),
+        );
+    }
+    Ok(())
 }
 
 fn bundled_mpi_root(exe: &Path) -> Option<PathBuf> {

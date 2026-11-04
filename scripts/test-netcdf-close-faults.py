@@ -8,8 +8,8 @@
 The target-only linker wrapper performs the actual nc_close (including real file
 I/O), then reports the injected close error for one exact private fixture path.
 This tests checked-close propagation, not filesystem capacity exhaustion. The
-separate test-netcdf-libc-close-faults.py retains the raw POSIX close diagnostic:
-current bundled HDF5 aborts on that fault before nc_close can return an error.
+separate test-netcdf-libc-close-faults.py verifies raw POSIX close errors and the
+vendored netCDF fix that avoids inspecting HDF5 state after failed close.
 """
 import argparse
 import errno
@@ -23,6 +23,8 @@ import tempfile
 
 
 def main():
+    if not __debug__:
+        raise SystemExit("NetCDF fault checks require assertions; remove -O or PYTHONOPTIMIZE")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--runtime-probe", type=Path, required=True)
@@ -38,7 +40,8 @@ def main():
             trace = temp / "fault.log"
             trace.unlink(missing_ok=True)
             env = os.environ.copy()
-            for name in ("LD_PRELOAD", "COLM_TEST_IO_TARGET", "COLM_TEST_IO_TRACE", "COLM_TEST_IO_ERRNO"):
+            for name in ("LD_PRELOAD", "COLM_TEST_IO_TARGET", "COLM_TEST_IO_TRACE", "COLM_TEST_IO_ERRNO",
+                         "COLM_TEST_IO_CLOSE_PHASE", "COLM_TEST_IO_ONLY_FINAL_CLOSE"):
                 env.pop(name, None)
             if injected:
                 env.update(COLM_TEST_IO_TARGET=str(target.resolve()),
@@ -92,9 +95,11 @@ def main():
         result, _ = run(command, output / "A_Flux.nc.tmp")
         assert result.returncode == 0, result.stderr
         assert hashlib.sha256(destination.read_bytes()).hexdigest() != previous
-        checks.append("retry without the fault publishes the changed observation data")
+        verified, _ = run([probe, "observation-updated", destination], destination)
+        assert verified.returncode == 0, verified.stderr
+        checks.append("retry without the fault publishes readable changed observation data")
     print(json.dumps({"passed": len(checks), "checks": checks,
-                      "scope": "NetCDF C API close errors after actual close; raw filesystem close abort is a separate unresolved diagnostic"}, indent=2))
+                      "scope": "NetCDF C API close errors after actual close; raw libc close propagation is verified separately"}, indent=2))
 
 
 if __name__ == "__main__":

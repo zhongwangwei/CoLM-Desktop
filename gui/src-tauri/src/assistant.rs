@@ -346,8 +346,8 @@ fn store_retrieval_key(app: &tauri::AppHandle, endpoint: &str, key: &str) -> Res
 pub struct RetrievalSettings {
     #[serde(default)]
     pub enabled: bool,
-    /// "external"（默认，使用用户自己运行的节点）或 "managed"（应用启动并托管自己的 Xerj）。
-    #[serde(default = "default_retrieval_mode")]
+    /// 新配置默认 managed；旧配置已有 retrieval 但缺 mode 时保留 external 节点。
+    #[serde(default = "legacy_retrieval_mode")]
     pub mode: String,
     #[serde(default = "default_retrieval_endpoint")]
     pub endpoint: String,
@@ -377,7 +377,7 @@ impl Default for RetrievalSettings {
     }
 }
 
-fn default_retrieval_mode() -> String {
+fn legacy_retrieval_mode() -> String {
     "external".into()
 }
 
@@ -1559,13 +1559,29 @@ pub async fn assistant_delete_session(app: tauri::AppHandle, id: String) -> Resu
 }
 
 /// 引导模式：把窗口执行界面请求的结果回给助手。
+#[derive(Serialize)]
+pub struct UiResultDelivery {
+    warning: Option<String>,
+}
+
+fn deliver_ui_result(
+    send: impl FnOnce() -> Result<(), String>,
+    audit: impl FnOnce() -> Result<(), String>,
+) -> Result<UiResultDelivery, String> {
+    send()?;
+    // Once delivered, an audit failure must not invite replaying the UI action.
+    Ok(UiResultDelivery {
+        warning: audit().err(),
+    })
+}
+
 #[tauri::command]
 pub fn assistant_ui_result(
     process: tauri::State<'_, AssistantProcess>,
     id: String,
     ok: bool,
     result: Value,
-) -> Result<(), String> {
+) -> Result<UiResultDelivery, String> {
     let (generation, request) = {
         let mut pending = process.ui_requests.lock().map_err(|e| e.to_string())?;
         let request = pending
@@ -1574,15 +1590,19 @@ pub fn assistant_ui_result(
             .ok_or("unregistered or already answered UI request")?;
         (pending.generation, request)
     };
-    send_in_generation(
-        &process,
-        Some(generation),
-        &json!({ "type": "ui_result", "id": request.original_id, "ok": ok, "result": result }),
-    )?;
-    if let Some(event) = request.audit {
-        crate::history::assistant_ui_finish(&event, ok, &result)?;
-    }
-    Ok(())
+    deliver_ui_result(
+        || {
+            send_in_generation(
+                &process,
+                Some(generation),
+                &json!({ "type": "ui_result", "id": request.original_id, "ok": ok, "result": result }),
+            )
+        },
+        || match request.audit {
+            Some(event) => crate::history::assistant_ui_finish(&event, ok, &result),
+            None => Ok(()),
+        },
+    )
 }
 
 /// 让正在运行的助手续接一个历史会话。

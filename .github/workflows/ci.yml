@@ -31,6 +31,8 @@ jobs:
           python3 oracle/scripts/test_postprocess_startup.py
           python3 oracle/scripts/test_gridriver_restart_sentinel.py
           python3 oracle/scripts/test_land_history_restart_shape.py
+          python3 oracle/scripts/test_vendor_generators.py
+          python3 vendor/CoLM202X/.github/workflows/hist_acc_restart_fields.py --check
       # vendor/CoLM202X 是按**语义 hunk** 同步上游 `f48fbf9` 的：上游带进来的
       # 改动与桌面版自己的扩展（`#ifdef FLAT_SPMD` 传输分支、臭氧的空间映射与
       # 两个 namelist 开关）混在同一批文件里，整树覆盖会静默抹掉后者。这套
@@ -226,17 +228,20 @@ jobs:
           cargo test -p xtask --test kernel_profile
           cargo test -p xtask --test windows_console
           cargo test -p xtask --test ci_golden_status
-          cargo test -p xtask --test basic_settings --test batch_edit --test bgc_history_metadata --test bgc_runtime_guards --test fortran_deps --test urban_history_average -- --test-threads=1
+          cargo test -p xtask --test basic_settings --test batch_edit --test bgc_history_metadata --test bgc_runtime_guards --test fortran_deps --test urban_history_average --test msrv --test netcdf_patch -- --test-threads=1
           bash vendor/CoLM202X/run/scripts/test_create_newcase_runtime_contract.sh
-      # 前端调用的命令名、参数名要和后端注册的对上；tsc 看不到 Rust 那边，拼错的命令
-      # 要等点下去才会以「command not found」暴露。check-gui 把它提前到 CI。
       - name: Check delayed NetCDF close failures
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          cargo build --offline --locked -p colm-cli --bin colm-cli
+          cargo build --offline --locked -p colm-runtime --example netcdf-close-probe
           bash scripts/build-netcdf-fault-probes.sh "$RUNNER_TEMP/netcdf-close-probes"
+          python3 scripts/test-netcdf-libc-close-faults.py --cli "$RUNNER_TEMP/netcdf-close-probes/colm-cli" --runtime-probe "$RUNNER_TEMP/netcdf-close-probes/netcdf-close-probe" --plain-cli target/debug/colm-cli
           python3 scripts/test-netcdf-close-faults.py --cli "$RUNNER_TEMP/netcdf-close-probes/colm-cli" --runtime-probe "$RUNNER_TEMP/netcdf-close-probes/netcdf-close-probe"
 
+      # 前端调用的命令名、参数名要和后端注册的对上；tsc 看不到 Rust 那边，拼错的命令
+      # 要等点下去才会以「command not found」暴露。check-gui 把它提前到 CI。
       - name: GUI interface
         shell: bash
         run: |

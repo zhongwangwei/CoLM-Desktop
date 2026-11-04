@@ -66,6 +66,7 @@ function harness(
   initialCase = '/case',
   options: {
     remoteRun?: boolean;
+    metricsRows?: seriesHelpers.ResultMetric[];
     withBack?: boolean;
     /** 远程运行的本机结果状态（部分取回等）。 */
     localResults?: Record<string, unknown>;
@@ -183,6 +184,7 @@ function harness(
         options.seriesData ??
         (options.seriesEmpty ? emptySeries : options.gaps ? gapped : normal)
       );
+    if (command === 'metrics' && options.metricsRows) return options.metricsRows;
     if (command === 'evaluation_catalog') return [{ name: 'Qle', available: true }];
     // 单站评估：只有 /obs/single.nc 这条路径返回一行指标，避免自动评估等用例拿到假数据。
     if (command === 'metrics' && args.obs === '/obs/single.nc')
@@ -1414,4 +1416,57 @@ test('a comparison condition change marks the previous table as pending update',
   const after = JSON.stringify(h.tree());
   assert.ok(after.includes('pending update'));
   assert.ok(after.includes('f_lfevpa'), 'the previous comparison rows stay visible');
+});
+
+test('a selected composite reevaluates after its conditions change instead of loading an unavailable native series', async () => {
+  const h = harness(false, undefined, '', '/case', {
+    metricsRows: [
+      {
+        name: 'Resp',
+        model_var: 'f_ar + f_hr',
+        n: 2,
+        rmse: 1,
+        mae: 1,
+        bias: 1,
+        r2: 1,
+        nse: 1,
+        kge: 1,
+        time: [1, 2],
+        model: [3, 4],
+        obs: [2, 3],
+      },
+    ],
+  });
+  await h.render();
+  await h.action('result-settings');
+  h.field('result-observation')!.set!('/obs/single.nc');
+  await h.render();
+  await h.action('evaluate-observations');
+  h.field('result-variable')!.set!('Resp');
+  await h.render();
+  assert.deepEqual((h.charts()[0] as { labels: string[] }).labels, ['Simulation', 'Observation']);
+  const before = h.requests.filter((request) => request.command === 'series').length;
+  await h.action('result-settings');
+  h.field('result-observation')!.set!('/obs/replaced.nc');
+  await h.render();
+  // Closing settings without evaluating must leave an explicit paired-data action.
+  const nodes = (node: unknown): { type: unknown; props: Record<string, unknown> }[] => {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as { type: unknown; props: Record<string, unknown> };
+    return [element, ...nodes(element.props?.children)];
+  };
+  const dialog = nodes(h.tree()).find((node) => node.type === 'Dialog' && node.props.open);
+  (dialog!.props.onOpenChange as (open: boolean) => void)(false);
+  await h.render();
+  assert.ok(JSON.stringify(h.tree()).includes('Reevaluate to update the composite curve'));
+  assert.ok(!JSON.stringify(h.tree()).includes('Reading simulation results'));
+  assert.equal(h.requests.filter((request) => request.command === 'series').length, before);
+  await h.action('result-composite-reevaluate');
+  assert.deepEqual((h.charts()[0] as { labels: string[] }).labels, ['Simulation', 'Observation']);
+  assert.ok(!actionById(h, 'result-composite-reevaluate'));
+  assert.equal(
+    h.requests.filter((request) => request.command === 'metrics').at(-1)?.args.obs,
+    '/obs/replaced.nc',
+  );
 });

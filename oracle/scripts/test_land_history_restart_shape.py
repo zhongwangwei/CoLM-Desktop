@@ -10,14 +10,99 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def counter_probe():
+    source = (ROOT / 'vendor/CoLM202X/main/MATERIAL/MOD_MT_HistoryRestart.F90').read_text()
+    interfaces = re.search(r'   abstract interface.*?   end interface', source, re.S).group(0)
+    routine = re.search(r'   SUBROUTINE mt_history_frcsat_count\(.*?END SUBROUTINE mt_history_frcsat_count',
+                        source, re.S).group(0)
+    return '''module MOD_Precision
+integer, parameter :: r8=kind(1d0)
+end module
+module MOD_Vars_Global
+use MOD_Precision
+real(r8), parameter :: spval=-1d36
+end module
+module MOD_MT_Namelist
+logical :: enabled=.true.
+contains
+logical function mt_any_enabled()
+mt_any_enabled=enabled
+end function
+end module
+module MOD_LandPatch
+use MOD_Pixelset
+type(pixelset_type) :: landpatch
+end module
+module counter_guard
+use MOD_Precision
+implicit none
+''' + interfaces + '\ncontains\n' + routine + '''
+end module
+program counter_test
+use MOD_Precision
+use MOD_Pixelset
+use MOD_MT_Namelist
+use counter_guard
+implicit none
+real(r8), allocatable :: counter(:), flux(:)
+integer :: calls=0, markers=0
+allocate(counter(3),flux(3))
+counter=[2d0,0d0,1d0]
+flux=1d0
+call mt_history_frcsat_count('unused',1,1,3d0,flux,counter, &
+ field,write_marker,read_marker,require_var,global_max)
+if (calls/=1.or.markers/=1.or.counter(2)/=7d0) stop 4
+enabled=.false.
+call mt_history_frcsat_count('unused',1,1,3d0,flux,counter, &
+ field,write_marker,read_marker,require_var,global_max)
+if (calls/=1.or.markers/=1) stop 5
+print *, 'COUNTER PASSED'
+contains
+subroutine field(file,mode,name,var,pixels,vecname)
+character(len=*), intent(in) :: file,name,vecname
+integer, intent(in) :: mode
+type(pixelset_type), intent(in) :: pixels
+real(r8), allocatable, intent(inout) :: var(:)
+if (.not.allocated(var)) stop 6
+if (size(var)/=3) stop 7
+if (any(var/=[2d0,0d0,1d0])) stop 8
+var(2)=7d0
+calls=calls+1
+end subroutine
+subroutine write_marker(file,name,value)
+character(len=*), intent(in) :: file,name
+real(r8), intent(in) :: value
+if (name/='hacc_frcsat_count_version'.or.value/=1d0) stop 10
+markers=markers+1
+end subroutine
+subroutine read_marker(file,name,vmin,vmax)
+character(len=*), intent(in) :: file,name
+real(r8), intent(out) :: vmin,vmax
+stop 11
+end subroutine
+subroutine require_var(file,name,pixels,vecname,rank,n1,n2)
+character(len=*), intent(in) :: file,name,vecname
+type(pixelset_type), intent(in) :: pixels
+integer, intent(in) :: rank,n1,n2
+stop 12
+end subroutine
+subroutine global_max(n)
+integer, intent(inout) :: n(:)
+stop 13
+end subroutine
+end program
+'''
+
+
 def main():
-    source = (ROOT / 'vendor/CoLM202X/include/land_history_restart.inc').read_text()
-    helper = re.search(r'   SUBROUTINE history_acc_require_shape\(.*?END SUBROUTINE history_acc_require_shape',
+    source = (ROOT / 'vendor/CoLM202X/main/MOD_HistAccRestart.F90').read_text()
+    helper = re.search(r'   SUBROUTINE require_var \(.*?END SUBROUTINE require_var',
                        source, re.S).group(0)
     support = '''module MOD_SPMD_Task
-logical :: p_is_io = .true.
+logical :: p_is_io = .true., p_is_master = .true.
 contains
-subroutine CoLM_stop()
+subroutine CoLM_stop(message)
+character(len=*), optional, intent(in) :: message
 stop 9
 end subroutine
 end module
@@ -40,8 +125,12 @@ type(vector_type) :: vecgs
 end type
 end module
 module shape_guard
+use MOD_SPMD_Task
 contains
 ''' + helper + '''
+subroutine global_max(n)
+integer, intent(inout) :: n(:)
+end subroutine
 end module
 program test
 use netcdf
@@ -87,7 +176,7 @@ do i=1,file_rank
 enddo
 call check(nf90_def_var(ncid, trim(name), dtype, dims(:file_rank), varid))
 call check(nf90_close(ncid))
-call history_acc_require_shape('sidecar.nc', trim(name), pixels, trim(vector_dim), rank, 2, 3)
+call require_var('sidecar.nc', trim(name), pixels, trim(vector_dim), rank, 2, 3)
 print *, 'ACCEPTED'
 contains
 subroutine check(code)
@@ -124,9 +213,18 @@ end program
                 expected = 0 if mode == 'valid' else 9
                 assert result.returncode == expected, (flat, mode, rank, dim, result.stdout, result.stderr)
                 if expected:
-                    assert 'incompatible land-history sidecar shape' in result.stdout
+                    assert 'missing or of wrong shape' in result.stdout
                 count += 1
+        # Reuse the same basic support modules, but link the actual counter routine.
+        counter = root / 'counter.F90'
+        counter.write_text(support.split('module shape_guard')[0] + counter_probe())
+        executable = root / 'counter'
+        subprocess.run(fc + ['-cpp', '-fcheck=all'] + flags + [str(counter)] + libs + ['-o', str(executable)],
+                       cwd=root, check=True, timeout=60)
+        result = subprocess.run([str(executable)], cwd=root, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and 'COUNTER PASSED' in result.stdout, (result.stdout, result.stderr)
     print(f'PASS: {count} flat/grouped sidecar shape cases (valid rank 1–3 patch/urban and invalid layouts)')
+    print('PASS: MT history preserves the host counter and the disabled-material path')
 
 
 if __name__ == '__main__':

@@ -44000,3 +44000,274 @@ mkinidata（68/68）与 colm（history 2/2 + restart 135/135）在此前的同�
 
 仍需后续处理：`.colm-shard` 计数文件缺少运行/年份隔离，异常中断后的旧文件可能影响重跑；
 本次按“先合并”要求保留该功能并记录风险，没有扩大为新分布式协调协议。
+
+
+## 2026-11-04：真实关闭故障与分片重跑修补
+
+实际静态 netCDF-C 4.10.1 / HDF5 2.2.0 的隔离复现确认：H5Fclose 失败后
+netCDF 再调用 dumpopenobjects，读取已释放的 HDF5 文件状态并在 H5G_rootof 中止。
+固定同版本 netcdf-src 0.5.3 的本地源码补丁，仅移除此错误分支的诊断调用，
+保留 NC_EHDFERR；原许可和上游 SHA 校验清单随源码保留。普通写入/读回不变。
+本机实际 C 复现 EIO/ENOSPC 从 SIGABRT 变为 nc_close=-101；
+证据 `/private/var/folders/kx/pr5xmbf502q7sww93rg26l7r0000gn/T/colm-raw-close-isolate-s9fmp14s/vendored-comparison.json`。
+
+首次 Linux 作业 `codex-c483f97f2fb744e2bfc48dda4e25c4e5` 的 C API 八项通过，
+原始 libc 测试却在首项报 EACCES，故该作业仍记失败。进一步通过阶段标记确认
+原始 close 注入发生在最终 nc_close 之前，错误与 H5Fcreate 失败映射为 EACCES 的
+源码路径一致。
+现保留这个提前关闭场景，并单独标记真实 nc_close 的执行区间，要求最终关闭的
+enter → POSIX close 故障 → nc_close=-101 顺序；未放宽 cannot-close 错误断言。
+
+组合复跑 `codex-5de1be88e1614e6e8b722a4d83959735` 终态 succeeded / exit0，
+入口 `bash .hdf-r2-linux-checks.sh`，源码清单 SHA256
+`abdd118dc86d184d8d53d37d4b130cebffd0f62cd168a97726857ff2499f052c`。
+原始 libc 12 项、C API 8 项、源码/MSRV 守卫 3 项、实际 mksrfdata-rs 分片 6 项、
+launcher 1 项均通过，四个受影响 crate 的 all-target Clippy 与 fmt 通过。
+证据 `/tmp/colm-hdf-r2-linux-evidence/verification.json`。这验证的是实际 libc 错误注入，
+不将其称为真正填满磁盘的容量测试。
+
+分片计数以每次 launcher 自动生成的共享新 token 和原始请求年份隔离，
+完整计数原子发布且不可覆盖，严格核对 token/year/rank/size；清理只涉及当前年份，
+保留单次使用标记，防止中断后旧计数或下一年的文件串入。LAI-only 时所有 rank 均
+跳过该屏障，包括空 rank。直接 mpiexec 的一次性 token 用法见 docs/design-multi-node.md。
+
+城市追踪的独立分析已确认：当前 Rust/Fortran 的真实首步分别复现此前长期作业的
+137/140 个数值字段及坐标，插桩前后也逐位不变。160 个入口字段中 159 个实际启用
+字段逐位相同；WUE 关闭时 lambda 未消费的值差异被原样记录，并以分支源码与
+分类回归验证其非活动状态。第一处捕获偏差是 Q0 iteration1 的 qaf2 相差 1 ULP；
+尚未将它认定为全部长期超差根因，正在进行操作数级复算，不调整验收容差。
+
+后续实际操作数复算确认两处湿度方程的乘法/加法顺序，以及把
+`cQ-bQ*fg/rd3` 改写为归一化乘积的分母，造成逐位偏差。生产修补恢复
+原 Fortran/GIMPLE 顺序，保留温度、导数和既有 FMA 策略。
+Linux 受控重放 `codex-5099b027c0ad472685f741e781f47301` 成功；未改代码的
+对照复现全部 160 个入口、61 条阶段记录及 9 个最终输出，修补后的 9 个输出
+全部与原始 Fortran 相同，包含此前不一致的 qstar/rst/qref。
+这是函数级证据，尚不替代完整首步和多年运行验收。
+
+实际输入回归 `codex-36c2216af23e4e948f382a538333e662` 成功：同一个
+public-call 测试在旧代码确实被收集并因 qstar 偏差失败，在修补代码通过。
+逐位断言仅适用于已验证的 GNU/Linux x86_64 非融合模式；既有完整过程参考
+在融合/非融合两种模式均保留原 5e-12 检查并通过。证据目录
+`/tmp/colm-urban-first-step-trace/regression-36c221/results/regression/`。
+原生应用已以引擎快照 `034f04845ed7b8aa` 重建并启动，实际进程路径为
+`gui/src-tauri/target/preview-urban-moisture-fix-20261104/CoLM Desktop.app/Contents/MacOS/colm-desktop-gui`，
+页面 ready/home 检查通过。
+
+完整程序首步 `codex-dac5503298a34371bd16ab804732f824` 的物理检查通过：
+Fortran 对照的 140 个字段逐位复现旧参考；新 Rust 的全部 136 个共享数值字段
+与坐标逐位一致，旧 Rust 的三个字段差异归零。原有字段集合差异
+（Fortran 140 / Rust 137，四个 Fortran 独有、一个 Rust 独有）单独报告。
+此项使用原完整 namelist/spinup，只在首次提交 restart 后停止，并非函数重放。
+
+进一步恢复 taf3 和 qaf3 的源码加法顺序，没有改动其温度分母、导数或夹限。
+受控作业 `codex-0534b4bf55af49fdb199aaaf42694d1c` 与
+`codex-720e1b83dd7a438da950c489a4fecde7` 均成功，原始入口/阶段/输出对照保持
+不变，最终 9 个输出均与原 Fortran 逐位相同，融合/非融合完整参考仍在原
+5e-12 范围内。最终 61 条阶段快照仅余一次 D4 温度增量为 3.0 与
+2.9999999999999996 的差异，两者更新后的叶温均为 295.0；尚无其上游因果
+证据，因此没有为消除该差异而改夹限公式或放宽容差。真实多年对拍仍待复验。
+
+最终修补源码 SHA256（urban_flux.rs）为
+`64cd654cd804b44a8c51a807eb0840719e6e023343b168bfc499c33736ed6e23`。
+原生应用以引擎快照 `57c93640d9434469` 编译并启动，实际路径
+`gui/src-tauri/target/preview-urban-complete-fix-20261104/CoLM Desktop.app`，
+进程路径和 ready/home 检查通过。
+最终完整首步作业 `codex-d9bfe820d8c24b188f6f8f93c0f8ec8d`
+终态 succeeded / exit0，源码清单 SHA256
+`ba81ca67665602bab1a9c7a3be8881f158240b8e93742f583aaff9e80f7debd3`。
+完整首步、实际回归（确认收集到 1 项并通过）、core all-target Clippy
+`-D warnings`、fmt 四门均为 0；原始 Fortran 140 字段对照和共享 136 字段、
+坐标逐位检查均通过，字段集合差异不变。证据
+`/tmp/colm-city-final4-firststep-evidence/`。此算例未启用同位素/溶质/甲烷材料功能，
+不能由此推断启用这些材料后的 restart 等价性。
+
+最终完整长跑 `codex-a26c897512034b7294af48e95f959998` 模型阶段成功，
+但比较门失败，终态 failed / exit1；不可记为长期通过。文件集合 537 对 537
+齐全，132 个月 history 的原逐位比较失败 132 个月，原 tier 比较失败 125 个月。
+最早可观测 history 逐位差异位于 1993-12-31 23:30 的 f_assim；此前 spinup
+未输出 history，不能称它为第一个内部差异。最早 tier 超差仍在
+1994-06-02 03:30 的 f_fach：Fortran -0.46908485399014177，
+Rust -0.4691640377968846，绝对差 7.91838e-5 大于原允许值 1.46916e-7。
+实际长跑自身的首步 restart 另经核查，136 个共享字段及坐标确实逐位一致。
+尚需继续从 spinup 内的早期实际入口/输出追踪，未调整原容差或参考。
+完整证据 `/tmp/colm-city-final4-final-evidence.json` 与
+`/tmp/colm-city-final4-long-evidence/results/city/report.json`。
+
+该长跑之前的预检作业 `codex-0e02af19dc184147a1754623a34ae4a7` 在模型启动前
+因当前/旧 vendor 指纹不同失败，原失败证据保留。修正的是私有验收入口的身份
+分类：重新核对原参考源码指纹及三个原二进制 SHA，单独记录当前源码及仅有的
+MATERIAL/MOD_MT_Hist.F90、mksrfdata/MOD_AggregationRequestData.F90 两个差异文件。
+没有将当前源码冒称原参考，也没有改变任何科学比较门。
+
+### 2026-11-04：从真实连续调用追踪到完整函数修补
+
+97 步调用边界作业 `codex-5145dfcebdb545e6a18f72b70129a89e` 成功：
+同语言开启/关闭记录的首步和第 97 步完整数值字段逐位相同，Fortran 求解器
+对象未变；原始首步亦与不可变参考一致。第二次调用（1993-001-01800）在
+159 个启用入口完全一致时有 42 个出口不同，第三次调用才开始入口分叉。
+定义的出口共 51 个，包含启用植被雪选项时的 fwet_snow；未省略这个条件出口。
+
+实际第二次调用的独立重放和最小温度观测
+`codex-d08d42dbf47640b2a269f131c64a9686` 均复现原来的全部 51 个出口。
+逐操作重构证明第一次差异为温度分子累加次序；仅修分子后，下一次差异来自
+温度直接分母被改写成归一化乘积。进一步用真实第三次 Fortran 调用输入做
+明确标注的独立函数反事实重放，证明另一个温度项 at 的加法次序也会触发偏差。
+逐项证明见 `/tmp/colm-urban-call2/temperature-graph-proof.json`、
+`numerator-temperature-graph-proof.json` 和
+`/tmp/colm-urban-call3/temperature-graph-proof.json`。
+
+在全部温度项恢复原次序后，97 组真实 Fortran 输入的 4,947 个独立函数出口
+仍有 41 个差异。八组最小斜率观测
+`codex-d6e4dc06b51e40fca94a8722e1d3cf1a` 的双语言 baseline/observer 均
+复现每组全部 51 个出口；1,460 项实际表达式重构全部逐位相同。
+证据明确将剩余误差追到叶片斜率及地面导数的归一化分母。
+Newton 自身求和、夹限和 dheatl 表达式均符合原实现，未改动；
+恢复斜率的原直接分母同时消除了最后增量和储热诊断的差异。
+证据 `/tmp/colm-urban-finalops/final-ops-proof.json` 及
+`controlled-source-slope-proof.json`。
+
+斜率候选 `codex-c0813c50ce254a7584c3cfada2ef1435` 与补齐同源屋顶/不透水面
+分母的最终候选 `codex-38f9fea70663487baa8f7cbc5f296162` 均成功：
+97 × 51 = 4,947 个独立函数出口与原 Fortran 全部逐位一致，旧数据/原容差未改。
+三个单步捕获加八个斜率实例的回归、原融合/非融合 5e-12 参考检查及 core
+Clippy 均通过。原首步夹具和三个既有期望值保留；新增参考来自真实 Fortran
+调用，而非候选程序生成。函数反事实检查不等同于新代码连续轨迹或多年验收。
+
+最终修补已一次落地，urban_flux.rs SHA256 为
+`9f14df5ed40bb5c05ffd1732f633271000893ca266fdcb057a0e9d476233a764`。
+真实连续 97 步和完整多年窗口仍需在此代码上重新验证。
+
+最终代码已本地重新编译并启动原生应用，包内引擎快照
+`9d5a3c1fa765fa82`，实际进程路径
+`gui/src-tauri/target/preview-urban-parity-fix-20261104/CoLM Desktop.app/Contents/MacOS/colm-desktop-gui`，
+ready/home 检查通过。真实连续轨迹作业
+`codex-841272282e864beca552798bda2c1e7c` 终态 succeeded / exit0；
+原始 Fortran 140 字段对照、实际新 Rust 首步和第 97 步的全部 136 个共享字段及
+坐标逐位一致，材料/历史侧车和时间门完整。这是未加调用记录的连续冷启动轨迹，
+不是 97 个独立函数反事实。第 97 步 raw 时间 1993-002-86400 对应保存目录
+1993-003-00000，原完整 namelist/spinup 保留。
+证据 `/tmp/colm-urban-final-trajectory-evidence/`。
+同一冻结源码清单 SHA256
+`95a59c49b831fb4b9c8e21367ca56789be25c707d6e5089d19cbb81e94bcc3e5`
+的完整多年作业 `codex-30ab7d7b0117428cb0a540a61ff91068` 已运行，尚待比较终态。
+
+最终完整窗口模型运行完成，537 对 537 文件齐全；132 个月 history 全部严格
+逐位相同，原 tier 亦全部通过。原通用全文件严格任务仍如实保留
+failed / exit1：133 个标准 restart 存在此前已声明的字段集合差异，未改原报告。
+
+独立只读科学/格式审计 `codex-24063b1a46a544d187214ca362fc9dad` 终态
+succeeded / exit0：遍历全部 537 份 NetCDF 的 37,811 个共同数值变量实例及
+所有坐标，全部逐位相同；133 处已知 Fortran 独有字段的值
+`mt_land_restart_complete=1`、`mt_land_restart_schema=5`、
+`mt_land_transport_count=0`、`mt_aquifer_mixing_water_mm=-1` 和 Rust
+`history_sidecar_required=[1]` 均逐一验证，133 对要求的历史侧车完整提交。
+其中 -1 是本算例关闭材料功能时的配置哨兵，并非物理含水量或可任意忽略的元数据。
+额外字段、异常值、任何共同字段差异均会使此审计失败。原报告与原容差的 SHA
+也保持不变，未把通用严格任务的失败状态改成成功。
+
+水、能量余额在 95,630 个样本上的最大值和均值也与原 Fortran 一致，
+两侧观测指标命令均成功；未据此发明新的观测拟合验收阈值。
+最终汇总 `/tmp/colm-urban-final-verification.json`，原完整结果
+`/tmp/colm-urban-final-long-evidence/`，独立严格审计
+`/tmp/colm-urban-final-common-evidence/results/independent-common-fields.json`。
+结论限定于此完整 AU-Preston 默认算例与未启用材料输运的配置，未宣称验证了
+启用同位素/溶质/甲烷时的 restart 互换；本轮亦未重跑 Windows、多节点和实际满盘测试。
+
+### 2026-11-04：bc5b3e58 审计问题修复
+
+保留前述城市/HDF5 修复，本轮处理审计中的 B1–B13、G1–G7 和 W1/W2。
+多进程经度块改为按域循环展开，支持切口两侧像素；跨物理块的完整元素暂不支持
+多进程拆分，所有 rank 在科学写出前明确拒绝，可用单进程或对齐网格。
+过滤后的空 rank 仍参与计数，全部为空则报错；共享 constants 由 root 独立写一次，
+不依赖 root 是否有有效块。单点多进程和表面数据裁剪在写出前拒绝。
+ready 发布移到重计算之前，最多等 60 秒；计算计数仍保留六小时等待。
+
+恢复 VIC 分组冰量的 intent(out) 累加器清零；时区错误通过 UTF-8 安全切片返回错误。
+GUI 补齐 interrupted 标签/筛选/计数，过期组合曲线引导重新评估；批次提前退出也清理
+注册信息。助手结果已送达后，审计失败返回独立 warning，不能报为界面操作失败。
+history 开关的未知字段错误不再吞掉。目录身份检查失败只禁整目录删除计划，保留
+独立的运行目录与记录操作；原报告称“不能只删记录”不符合实际调用链。
+新 retrieval 默认 managed，旧配置缺 mode 保留 external，显式模式不变并用测试锁定，
+避免一次默认值调整接管旧外部节点。
+
+历史字段生成器保留运行期守卫与缩进，frcsat helper 显式接收当前 host 计数数组，
+删除旧重复 helper。形状检查改测活动 require_var，FLAT 长度按 vcnt 总和核对。
+依赖生成器展开整个阶段表达式，未知变量带上下文报错，合法空阶段保留。
+CI 显式执行 msrv/netcdf_patch 与生成器回归，release paths 补齐 vendored 补丁及 xtask；
+两个 NetCDF 故障脚本拒绝 -O/PYTHONOPTIMIZE，避免关闭断言后误报通过。
+
+本地快速验证（实际执行）：
+
+- `cd gui && npm run typecheck && npm run lint && npm run format:check && npm test`：
+  1648 项通过、0 失败/跳过；日志 `/tmp/colm-audit-frontend-tests.log`。
+- `cargo test --offline --locked -p xtask --test kernel_profile --test msrv --test netcdf_patch`：
+  15 项通过，含两脚本 × 两种优化入口的拒绝检查及上游内容完整性。
+- `cargo test --offline --locked -p colm-hist --lib time::time_tests -- --test-threads=1`：16 项通过。
+- `python3 oracle/scripts/test_vendor_generators.py`：7 项通过，含从仓库根及 vendor 目录调用；
+  `hist_acc_restart_fields.py --check`：525 字段一致。
+- `DYLD_LIBRARY_PATH=/opt/homebrew/lib python3 oracle/scripts/test_land_history_restart_shape.py`：
+  22 个 flat/grouped 实际 NetCDF 场景及 host counter/关闭材料模式检查通过。
+- `DYLD_LIBRARY_PATH=/opt/homebrew/lib python3 oracle/scripts/test_physics_audit.py`：通过；
+  `/tmp/colm-audit-physics.log`。VIC 移除清零的负对照失败。
+- `python3 oracle/scripts/gen_fortran_deps.py --check`、两个 workspace 的 fmt 及 diff 检查通过。
+
+原生全预设重编还发现 USGS RegionClip 无条件引用 IGBP 表的既有编译错误；
+现按宏选择对应不可变分类表，IGBP/USGS 的城市、土壤、非法编号六个编译执行回归通过。
+原始失败日志保留 `/tmp/colm-audit-native-kernels-r0/`，没有把失败记录改成通过。
+完整原生构建、重启和远程回归的终态在后续验收记录补充。
+
+Mac 定向回归实际发现并修复了同族遗漏：switch_states 的表键保留大写 `DEF_`，
+truth 查询却使用小写，计算出的默认值/runtime/DiagMatrix 状态因而不会命中。
+统一键名后，本轮 GUI 定向 10/10、历史与开关相关 32/32 通过，日志
+`/tmp/colm-audit-gui-focused-mac-r2.log` 与 `/tmp/colm-audit-gui-history-focused-mac.log`。
+没有把失败断言改成旧行为；最初失败日志保留 `/tmp/colm-audit-gui-focused-mac.log`。
+最新原生应用真实 IPC 调用 hist_vars，在 out_default=false 时 xy_us/xy_vs 均返回 false，
+证据 `/tmp/colm-audit-native-history-switches.json`。
+
+15 个原生预设均已从当前 Fortran 源重编并校验，MPI runtime 启动检查也通过：
+`/tmp/colm-audit-native-kernels/status.json`、`validation.log`。
+全部 sidecar 编译/打包通过，工作树和包内引擎快照均为 `531b6006f35699f6`。
+Clippy 检出的四条既有布尔表达式告警作等价化简，未放宽 lint。
+最新应用已重建并按完整路径重启，PID 62382，路径
+`gui/src-tauri/target/preview-audit-fixes-r3-20261104/CoLM Desktop.app`；
+ready=complete、home=true。日志 `/tmp/colm-audit-native-{stage,app-r3,restart-r3}.log`。
+
+Linux 引擎验收作业 `codex-d6035522e1474ae487a774d79c1d2c69` 的两个重要终态分开记录：
+`workspace_lib_bins=101` 保留原始失败；drift/curated、hist/core drift、oracle histmap、
+xtask integration、workspace clippy（all-targets，-D warnings）及 fmt 均为 0。
+要求的检查完成后取消未完成的重复构建，作业终态为 cancelled/-15，不能称整单成功。
+证据 `/tmp/colm-audit-engine-evidence/`。原始 lib/bin 汇总为 3544 passed、19 failed、
+16 ignored：14 项助手文件操作因测试临时目录位于受保护的 target 下失败，在相同
+二进制、普通临时目录下逐项复核均通过；另 5 项工作区测试因 runner 不允许嵌套
+bwrap namespace 未通过，未放宽产品沙箱。后续整组助手复核另有 mock SQLite 启动
+与计时断言失败，保留 `/tmp/colm-audit-agent-r1-evidence/` 和
+`/tmp/colm-audit-agent-r2-evidence/`，不以分次成功拼成一次全绿。
+
+本轮新增的真实 NetCDF 单进程/四 rank 文件树逐字节对比（全球、跨日界线、掩膜）、
+跨块元素所有 rank 拒绝、局部空 rank/全空域、共享 tuning 独立写入、单点多 rank
+提前拒绝及 ready 超时回归全部通过。参数目录本地重生成无差异，日志
+`/tmp/colm-audit-parameter-catalog.log`。
+
+Linux GUI 作业 `codex-c1b63250563a4d96815013824744f89d` 的 full all-targets Clippy
+（-D warnings）和 fmt 均为 0；backend=101 原样保留：只读开发依赖包中的损坏
+DSO 链接使显式 -L 先选中了静态 gio/glib，产生 mnt 符号链接错误。未改系统库或
+产品代码，后续验收只在任务私有目录把已安装、版本明确的动态库放到搜索路径前，
+并检查实际 Rust 测试程序的 ldd。原证据 `/tmp/colm-audit-gui-r3-evidence/`。
+
+HDF5 生产关闭故障逻辑未因本轮审计再变更，沿用前述真实 Linux 故障矩阵 30 项
+证据；本轮新增的四个 Python 优化入口拒绝检查已实际通过。未重跑 Windows CI、
+物理满盘或多节点；N>1 跨物理块完整元素仍明确拒绝，未宣称已支持此网格拆分。
+本轮未提交或推送，五个已有未跟踪数据报告未改动。
+
+最终 Linux GUI 验证：`codex-2a91cdb2ab3e4277968a4a754806f63f` 使用修正后的私有
+动态库搜索顺序完成最终源码的 lib/bin 编译（14m25s），进入 632 项测试。
+87 项通过后因共享磁盘 I/O 等待持续缓慢，主动取消剩余全量运行；终态
+cancelled/-15，原日志 `/tmp/colm-audit-gui-backend-final-evidence/`，不称全量通过。
+随后 `codex-4d28a4ad9e594c769c0c62a6d3db0026` 使用同一只读测试二进制执行本轮
+10 项定向回归，10/10 通过、0 失败/忽略，作业 succeeded/exit0。
+二进制运行前后 SHA256 均为
+`ab3c84be08bdc958abbeaea414f5f39619c3fcf99d2fdd46b956ae8cd1d3b76c`；
+实际 Rust 程序 ldd 无缺失库，未从旧开发 sysroot 装载运行库。
+证据 `/tmp/colm-audit-gui-targeted-final-evidence/results/verification.json`、
+`gui-targeted.log`、`gui-rust-test-ldd.txt`。未修改断言、跳过定向用例或放宽链接检查。

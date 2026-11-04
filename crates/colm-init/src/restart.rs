@@ -309,6 +309,17 @@ pub fn write_constant_restart(
     block_label: &str,
     input: ConstantRestartInput<'_>,
 ) -> Result<ConstantRestartFiles> {
+    write_constant_restart_with_tuning(restart_dir, case_name, lc_year, block_label, input, true)
+}
+
+pub(crate) fn write_constant_restart_with_tuning(
+    restart_dir: impl AsRef<Path>,
+    case_name: &str,
+    lc_year: i32,
+    block_label: &str,
+    input: ConstantRestartInput<'_>,
+    write_tuning: bool,
+) -> Result<ConstantRestartFiles> {
     ensure!(
         (0..=9999).contains(&lc_year),
         "land-cover year {lc_year} is outside the four-digit restart filename range"
@@ -325,8 +336,30 @@ pub fn write_constant_restart(
     let block = constants_dir.join(format!("{stem}_{block_label}.nc"));
 
     write_constant_restart_block(&block, input)?;
-    write_restart_tuning(&constants, input.tuning)?;
+    if write_tuning {
+        write_shared_constant_restart(restart_dir, case_name, lc_year, input.tuning)?;
+    }
     Ok(ConstantRestartFiles { constants, block })
+}
+
+/// Writes the scalar tuning shared by all blocks, independently of block ownership.
+pub fn write_shared_constant_restart(
+    restart_dir: impl AsRef<Path>,
+    case_name: &str,
+    lc_year: i32,
+    tuning: RestartTuning,
+) -> Result<PathBuf> {
+    ensure!(
+        (0..=9999).contains(&lc_year),
+        "land-cover year {lc_year} is outside the four-digit restart filename range"
+    );
+    validate_filename_component(case_name, "case name")?;
+    let path = restart_dir
+        .as_ref()
+        .join("const")
+        .join(format!("{case_name}_restart_const_lc{lc_year:04}.nc"));
+    write_restart_tuning(&path, tuning)?;
+    Ok(path)
 }
 
 /// Writes one already-addressed CoLM vector restart block.

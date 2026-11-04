@@ -54,6 +54,10 @@ fn lopdf_backport_changes_only_the_incompatible_let_chain() {
     }
     assert_eq!(checked, 89);
     let workspace = include_str!("../../Cargo.toml");
-    assert!(workspace.contains("exclude = [\"vendor/lopdf\"]"));
+    let excluded = workspace
+        .lines()
+        .find(|line| line.starts_with("exclude = "))
+        .unwrap();
+    assert!(excluded.contains("\"vendor/lopdf\""));
     assert!(workspace.contains("lopdf = { path = \"vendor/lopdf\" }"));
 }

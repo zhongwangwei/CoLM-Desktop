@@ -22,6 +22,9 @@ on:
       - oracle/scripts/**
       - scripts/**
       - vendor/CoLM202X/**
+      - vendor/netcdf-src/**
+      - vendor/lopdf/**
+      - xtask/**
       - .github/workflows/release.yml
   workflow_dispatch:
 

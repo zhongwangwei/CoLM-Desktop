@@ -11,6 +11,48 @@ fn have_kernel(preset: &str) -> bool {
 }
 
 #[test]
+fn invalid_history_members_are_reported_instead_of_showing_default_switches() {
+    let dir = std::env::temp_dir().join(format!("colm-histvars-invalid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let kernel_dir = dir.join("kernel");
+    std::fs::create_dir_all(&kernel_dir).unwrap();
+    let mut hashes = serde_json::Map::new();
+    for program in colm_kernel::PROGRAMS {
+        std::fs::write(kernel_dir.join(colm_kernel::program_file(program)), b"").unwrap();
+        hashes.insert(program.into(), colm_kernel::sha256_hex(b"").into());
+    }
+    let manifest = serde_json::json!({
+        "schema": 1, "preset": "test", "platform": "test", "colm_git_sha": "test",
+        "generator_args": "", "macros": ["SinglePoint", "LULC_IGBP"], "built_with": "test",
+        "netcdf_c": "", "netcdf_fortran": "", "hdf5": "", "sha256": hashes,
+    });
+    std::fs::write(kernel_dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let text = "&nl_colm\n DEF_HIST_vars_out_default = .false.\n DEF_HIST_vars_namelist = 'history.nml'\n/\n";
+    let history = "&nl_colm_history\n DEF_hist_vars%xy_us = .true.\n";
+    std::fs::write(
+        dir.join("history.nml"),
+        format!("{history} DEF_hist_vars%not_a_real_member = .true.\n/\n"),
+    )
+    .unwrap();
+    let run = || {
+        hist_vars(
+            text.into(),
+            kernel_dir.to_string_lossy().into_owned(),
+            Some(dir.to_string_lossy().into_owned()),
+        )
+    };
+    let error = run()
+        .err()
+        .expect("unknown history member must be rejected");
+    assert!(error.contains("not_a_real_member"), "{error}");
+    std::fs::write(dir.join("history.nml"), format!("{history}/\n")).unwrap();
+    let vars = run().expect("valid history must retain computed switch states");
+    assert!(vars.iter().find(|var| var.name == "xy_us").unwrap().on);
+    assert!(!vars.iter().find(|var| var.name == "xy_vs").unwrap().on);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_bgc_variable_is_unwritable_under_the_default_kernel() {
     // 勾了却没有输出是这个界面最该防的事。`ar` 的闸门是 `#ifdef BGC`，
     // 而 default 内核没编 BGC —— 界面必须说出来，而不是让人跑完

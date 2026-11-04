@@ -136,7 +136,7 @@ CONTAINS
       ENDIF
    END SUBROUTINE mt_history_restart_fields
 
-   SUBROUTINE mt_history_frcsat_count(file, mode, write_mode, nac, a_frcsat, &
+   SUBROUTINE mt_history_frcsat_count(file, mode, write_mode, nac, a_frcsat, nac_frcsat, &
       hacc_field1d, write_marker, read_marker, require_var, global_max)
 
    USE, intrinsic :: ieee_arithmetic, only: ieee_is_finite
@@ -145,7 +145,6 @@ CONTAINS
    USE MOD_LandPatch, only: landpatch
    USE MOD_MT_Namelist, only: mt_any_enabled
    USE MOD_Vars_Global, only: spval
-   USE MOD_MT_HostHistory, only: nac_frcsat
    USE MOD_SPMD_Task, only: p_is_io, p_is_master, CoLM_stop
    IMPLICIT NONE
 
@@ -153,6 +152,7 @@ CONTAINS
    integer, intent(in) :: mode, write_mode
    real(r8), intent(in) :: nac
    real(r8), allocatable, intent(in) :: a_frcsat(:)
+   real(r8), allocatable, intent(inout) :: nac_frcsat(:)
    procedure(history_field1d) :: hacc_field1d
    procedure(history_write_marker) :: write_marker
    procedure(history_read_marker) :: read_marker

@@ -461,10 +461,10 @@ fn assistant_ui_finish_in(
             .map_err(|e| e.to_string())?
             .ok_or("assistant UI outcome refers to an unrecorded operation")?;
         if child.events.iter().any(|e| e.phase == EventPhase::Imported)
-            || !event
+            || event
                 .time_ms
                 .zip(child.operation.started_ms)
-                .is_some_and(|(start, child_start)| child_start >= start)
+                .is_none_or(|(start, child_start)| child_start < start)
             || child.operation.latest.kind == "assistant_ui"
         {
             return Err(
@@ -570,8 +570,8 @@ pub(crate) fn observe_remote_response(event: &mut Event, value: &serde_json::Val
 
 fn capture_remote_record(event: &mut Event) {
     let action = event_action(event);
-    if !action.starts_with("remote-")
-        && !(action == "history-replay" && event.detail["replay_location"] == "remote")
+    if !(action.starts_with("remote-")
+        || action == "history-replay" && event.detail["replay_location"] == "remote")
     {
         return;
     }

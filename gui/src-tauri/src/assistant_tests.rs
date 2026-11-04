@@ -1122,6 +1122,34 @@ fn session_limits_default_to_a_finite_budget_and_allow_unlimited_zero() {
 }
 
 #[test]
+fn retrieval_defaults_preserve_legacy_external_nodes_and_explicit_modes() {
+    let fresh = RetrievalSettings::default();
+    assert_eq!(fresh.mode, "managed");
+    assert!(!fresh.enabled);
+    for enabled in [false, true] {
+        let legacy: RetrievalSettings = serde_json::from_value(serde_json::json!({
+            "enabled": enabled, "endpoint": "http://127.0.0.1:9400", "index": "my-docs"
+        }))
+        .unwrap();
+        assert_eq!(legacy.mode, "external");
+        assert_eq!(legacy.enabled, enabled);
+        assert_eq!(legacy.endpoint, "http://127.0.0.1:9400");
+        assert_eq!(legacy.index, "my-docs");
+        for mode in ["managed", "external"] {
+            let explicit: RetrievalSettings = serde_json::from_value(serde_json::json!({
+                "enabled": enabled, "mode": mode
+            }))
+            .unwrap();
+            assert_eq!(explicit.mode, mode);
+            assert_eq!(explicit.enabled, enabled);
+        }
+    }
+    let roundtrip: RetrievalSettings =
+        serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+    assert_eq!(roundtrip, fresh);
+}
+
+#[test]
 fn retrieval_managed_settings_load_old_files_and_validate_the_new_fields() {
     // 没有 retrieval 的旧配置仍关闭；首次启用默认由应用托管。
     let old: AssistantSettings =
@@ -2031,4 +2059,31 @@ fn broken_settings_reset_preserves_raw_backup_and_keys_and_refuses_valid_files()
     assert_eq!(std::fs::read(&path).unwrap(), restored);
     assert!(reset_broken_settings(&dir.join("missing.json")).is_err());
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn delivered_result_survives_audit_failure_without_resending() {
+    let order = std::cell::RefCell::new(Vec::new());
+    let outcome = deliver_ui_result(
+        || {
+            order.borrow_mut().push("send");
+            Ok(())
+        },
+        || {
+            order.borrow_mut().push("audit");
+            Err("disk full".into())
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.warning.as_deref(), Some("disk full"));
+    assert_eq!(*order.borrow(), ["send", "audit"]);
+}
+
+#[test]
+fn undelivered_result_does_not_finish_audit() {
+    let result = deliver_ui_result(
+        || Err("agent disconnected".into()),
+        || panic!("cannot audit an undelivered result"),
+    );
+    assert!(matches!(result, Err(error) if error == "agent disconnected"));
 }

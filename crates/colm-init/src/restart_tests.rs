@@ -820,3 +820,32 @@ fn site_landtype_minus_one_preserves_the_fortran_unset_marker() {
         super::RestartTuning::from_document(&explicit).unwrap()
     );
 }
+
+#[test]
+fn block_only_constant_writer_never_creates_or_replaces_shared_tuning() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let root = temp_dir("shared-constant-owner");
+    let soil = soil_state();
+    let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
+    let canopy = canopy();
+    let files = write_constant_restart_with_tuning(
+        &root,
+        "case",
+        2005,
+        "e000_s90",
+        input(&soil, &lake, &canopy),
+        false,
+    )
+    .unwrap();
+    assert!(files.block.is_file());
+    assert!(!files.constants.exists());
+    // Root may have no land block: shared tuning does not require a block input.
+    let shared =
+        write_shared_constant_restart(&root, "case", 2005, RestartTuning::default()).unwrap();
+    let expected = std::fs::read(&shared).unwrap();
+    let mut changed = input(&soil, &lake, &canopy);
+    changed.tuning.zlnd *= 2.0;
+    write_constant_restart_with_tuning(&root, "case", 2005, "e090_s90", changed, false).unwrap();
+    assert_eq!(std::fs::read(shared).unwrap(), expected);
+    crate::remove_test_tree(root);
+}

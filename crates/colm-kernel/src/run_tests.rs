@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn each_multi_process_surface_launch_gets_a_fresh_shared_run_identity() {
+    let mut first = Command::new("launcher");
+    first.env("COLM_PREPROCESS_RUN_ID", "stale-inherited-value");
+    configure_preprocessor_run(&mut first, Stage::MkSrfData, true).unwrap();
+    let first = first
+        .get_envs()
+        .find(|(key, _)| *key == "COLM_PREPROCESS_RUN_ID")
+        .unwrap()
+        .1
+        .unwrap()
+        .to_owned();
+    assert_ne!(first, "stale-inherited-value");
+    let mut second = Command::new("launcher");
+    configure_preprocessor_run(&mut second, Stage::MkSrfData, true).unwrap();
+    assert_ne!(
+        second
+            .get_envs()
+            .find(|(key, _)| *key == "COLM_PREPROCESS_RUN_ID")
+            .unwrap()
+            .1,
+        Some(first.as_os_str())
+    );
+    for (stage, external) in [
+        (Stage::MkSrfData, false),
+        (Stage::MkIniData, true),
+        (Stage::Colm, true),
+    ] {
+        let mut command = Command::new("launcher");
+        configure_preprocessor_run(&mut command, stage, external).unwrap();
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == "COLM_PREPROCESS_RUN_ID"));
+    }
+}
+
+#[test]
 fn mpi_uses_plain_spmd_launch_without_process_roles() {
     let exe = Path::new("/kernel/colm.x");
     let (program, args) =

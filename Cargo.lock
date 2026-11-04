@@ -1291,8 +1291,6 @@ dependencies = [
 [[package]]
 name = "netcdf-src"
 version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f8a4c2a96491452c12be9fe0ad0e6e20fd94cb5996eabd4cfcec51dfd4d898a"
 dependencies = [
  "cmake",
  "hdf5-metno-src",

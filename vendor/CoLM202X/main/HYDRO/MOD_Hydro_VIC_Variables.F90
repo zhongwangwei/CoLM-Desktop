@@ -196,6 +196,8 @@ CONTAINS
       ELSEIF (colm_lay == 3) THEN
          vic_ice    = ice_tmp
       ELSE
+         ! intent(out) is undefined on entry; each layer group starts its own sum.
+         vic_ice = 0.
          DO idx = 1, min(int((colm_lay-1)/vic_lay), vic_lay)
             multiplier = merge(1.0, 0.0, colm_lay > idx*vic_lay)
             vic_ice(1) = vic_ice(1) + ice_tmp(idx) * multiplier

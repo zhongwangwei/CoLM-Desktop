@@ -439,7 +439,7 @@ test('batch monitor shows each active station progress before waiting and comple
   page.render();
   assert.ok(
     page.text.includes(
-      'Running 2 · Waiting 2 · Completed 1 · Failed 0 · Stopped 0 · Unconfirmed 1',
+      'Running 2 · Waiting 2 · Completed 1 · Failed 0 · Stopped 0 · Interrupted 0 · Unconfirmed 1',
     ),
   );
   assert.deepEqual(
@@ -483,7 +483,7 @@ test('remote scheduler queue is not counted as a running station', () => {
   page.render();
   assert.ok(
     page.text.includes(
-      'Running 1 · Waiting 1 · Completed 0 · Failed 0 · Stopped 0 · Unconfirmed 0',
+      'Running 1 · Waiting 1 · Completed 0 · Failed 0 · Stopped 0 · Interrupted 0 · Unconfirmed 0',
     ),
   );
 });
@@ -691,4 +691,34 @@ test('a project with gridded cases selects its single-point cases and explains m
   page.render();
   assert.equal(page.panels.length, 0);
   assert.ok(page.text.some((line) => line.includes('need separate batch runs')));
+});
+
+test('interrupted runs have their own monitor, count as ended, and remain selectable for rerun', () => {
+  const page = screen();
+  page.state.running = {
+    '/a': { running: false, status: 'interrupted', logs: [] },
+    '/b': { running: false, status: 'succeeded', logs: [] },
+  };
+  page.render();
+  assert.ok(page.text.includes('2 of 2 ended'));
+  assert.ok(page.text.includes('Interrupted'));
+  const tile = page.elements.find(
+    (element) => element.props?.className === 'batch-tile is-interrupted',
+  )!;
+  assert.ok(tile && !tile.props.disabled);
+  (tile.props.onClick as () => void)();
+  page.render();
+  const articles = page.elements.filter((element) => element.type === 'article');
+  assert.deepEqual(
+    articles.map((element) => element.props['aria-label']),
+    ['A'],
+  );
+  assert.equal(articles[0].props.className, 'batch-run is-interrupted');
+  const rerun = page.elements.find((element) =>
+    element.children.includes('Select the 1 failed or stopped stations to rerun'),
+  )!;
+  assert.ok(rerun);
+  (rerun.props.onClick as () => void)();
+  page.render();
+  assert.ok(page.text.includes('1 of 1 ended'));
 });

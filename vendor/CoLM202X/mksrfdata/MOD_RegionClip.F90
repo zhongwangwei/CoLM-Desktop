@@ -730,7 +730,11 @@ CONTAINS
 
    USE MOD_NetCDFSerial
    USE MOD_Block
-   USE MOD_Const_LC, only: patchtypes_igbp
+#ifdef LULC_USGS
+   USE MOD_Const_LC, only: patchtypes_table => patchtypes_usgs
+#else
+   USE MOD_Const_LC, only: patchtypes_table => patchtypes_igbp
+#endif
    USE MOD_Namelist, only: DEF_USE_PFT, DEF_USE_PC
 
    IMPLICIT NONE
@@ -763,10 +767,10 @@ CONTAINS
             filename = trim(dir_landdata_in)//'/landpatch/'//lc_cyear//'/landpatch.nc'
             CALL get_filename_block(filename, iblk, jblk, fileblock)
             CALL ncio_read_serial(fileblock, 'settyp', patchtypes_source)
-            IF (any(patchtypes_source < 1) .or. any(patchtypes_source > size(patchtypes_igbp))) &
+            IF (any(patchtypes_source < 1) .or. any(patchtypes_source > size(patchtypes_table))) &
                CALL clip_error('Invalid source patch types while checking absent PFT block: '//trim(fileblock))
             IF (size(patchtypes_source) > 0) THEN
-               IF (all(patchtypes_igbp(patchtypes_source) /= 0)) THEN
+               IF (all(patchtypes_table(patchtypes_source) /= 0)) THEN
                   allocate(psetmask(0))
                   RETURN
                ENDIF

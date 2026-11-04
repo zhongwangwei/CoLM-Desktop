@@ -8,7 +8,8 @@ import RunPanel from '../runs/RunPanel';
 import { remoteActivity, restoreRunView } from '../runs/run-model';
 import { ActionButton } from '../../components/ActionButton';
 
-type Tone = 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+type Tone =
+  'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
 // 选站点时还要区分没有运行记录的站点：本地已有结果的算 previous，其余算 idle。
 type PickTone = Tone | 'previous' | 'idle';
 type PickFilter = 'all' | 'idle' | 'done' | 'problem' | 'active' | 'unknown';
@@ -17,7 +18,7 @@ const pickFilters: Record<PickFilter, PickTone[]> = {
   all: [],
   idle: ['idle'],
   done: ['succeeded', 'previous'],
-  problem: ['failed', 'cancelled'],
+  problem: ['failed', 'cancelled', 'interrupted'],
   active: ['running', 'waiting'],
   unknown: ['unknown'],
 };
@@ -25,7 +26,13 @@ const pickFilters: Record<PickFilter, PickTone[]> = {
 function toneOf(status: string): Tone {
   if (status === 'starting' || status === 'running') return 'running';
   if (['queued', 'preparing', 'submitting', 'submitted'].includes(status)) return 'waiting';
-  if (status === 'succeeded' || status === 'failed' || status === 'cancelled') return status;
+  if (
+    status === 'succeeded' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  )
+    return status;
   return 'unknown';
 }
 
@@ -159,6 +166,7 @@ export default function ProjectBatchRun({
     succeeded: t('运行完成', 'Completed'),
     failed: t('运行失败', 'Failed'),
     cancelled: t('已停止', 'Stopped'),
+    interrupted: t('已中断', 'Interrupted'),
     unknown: t('等待核对', 'Needs verification'),
     submitted: t('已提交，等待服务器状态', 'Submitted; awaiting server status'),
     submitting: t('正在提交', 'Submitting'),
@@ -178,6 +186,7 @@ export default function ProjectBatchRun({
     succeeded: t('完成', 'Completed'),
     failed: t('失败', 'Failed'),
     cancelled: t('已停止', 'Stopped'),
+    interrupted: t('已中断', 'Interrupted'),
     unknown: t('待核对', 'Unconfirmed'),
   };
   // 所有站点（不只是已选的）都算一次状态：选站点时要按状态筛选，监控只看已选的。
@@ -201,7 +210,9 @@ export default function ProjectBatchRun({
   const counts = Object.fromEntries(
     (Object.keys(toneLabels) as Tone[]).map((tone) => [tone, ofTone(tone).length]),
   ) as Record<Tone, number>;
-  const finished = runs.filter(({ tone }) => ['succeeded', 'failed', 'cancelled'].includes(tone));
+  const finished = runs.filter(({ tone }) =>
+    ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(tone),
+  );
   const ended = finished.length;
   const pickTone = (entry: CaseEntry): PickTone =>
     tracked.find((run) => run.entry.dir === entry.dir)?.tone ??
@@ -223,7 +234,9 @@ export default function ProjectBatchRun({
   const unfinished = state.cases
     .filter((entry) => !['succeeded', 'previous'].includes(pickTone(entry)))
     .map((entry) => entry.dir);
-  const problems = [...ofTone('failed'), ...ofTone('cancelled')].map(({ entry }) => entry.dir);
+  const problems = [...ofTone('failed'), ...ofTone('cancelled'), ...ofTone('interrupted')].map(
+    ({ entry }) => entry.dir,
+  );
   // 服务器上的站点再说一句它在做什么：排队的原因、在编译引擎、怎么结束的。阶段已经写明的运行中不重复。
   const remoteNote = (run: (typeof runs)[number]['run']) => {
     if (run.location !== 'remote' || !run.progress?.remote) return '';
@@ -499,7 +512,17 @@ export default function ProjectBatchRun({
             </span>
           </div>
           <div className="batch-overall" aria-hidden="true">
-            {(['succeeded', 'failed', 'cancelled', 'running', 'waiting', 'unknown'] as Tone[])
+            {(
+              [
+                'succeeded',
+                'failed',
+                'cancelled',
+                'interrupted',
+                'running',
+                'waiting',
+                'unknown',
+              ] as Tone[]
+            )
               .filter((tone) => counts[tone])
               .map((tone) => (
                 <span key={tone} className={`is-${tone}`} style={{ flexGrow: counts[tone] }} />
@@ -507,28 +530,36 @@ export default function ProjectBatchRun({
           </div>
           <p role="status" aria-live="polite" className="visually-hidden">
             {t(
-              `运行中 ${counts.running} · 等待 ${counts.waiting} · 完成 ${counts.succeeded} · 失败 ${counts.failed} · 已停止 ${counts.cancelled} · 待核对 ${counts.unknown}`,
-              `Running ${counts.running} · Waiting ${counts.waiting} · Completed ${counts.succeeded} · Failed ${counts.failed} · Stopped ${counts.cancelled} · Unconfirmed ${counts.unknown}`,
+              `运行中 ${counts.running} · 等待 ${counts.waiting} · 完成 ${counts.succeeded} · 失败 ${counts.failed} · 已停止 ${counts.cancelled} · 已中断 ${counts.interrupted} · 待核对 ${counts.unknown}`,
+              `Running ${counts.running} · Waiting ${counts.waiting} · Completed ${counts.succeeded} · Failed ${counts.failed} · Stopped ${counts.cancelled} · Interrupted ${counts.interrupted} · Unconfirmed ${counts.unknown}`,
             )}
           </p>
           <div className="batch-tiles" role="group" aria-label={t('按状态查看', 'Show by status')}>
-            {(['running', 'waiting', 'succeeded', 'failed', 'cancelled', 'unknown'] as Tone[]).map(
-              (tone) => (
-                <ActionButton
-                  bare
-                  key={tone}
-                  action={`project-batch-monitor-${tone}`}
-                  label={t(`只看：${toneLabels[tone]}`, `Show only: ${toneLabels[tone]}`)}
-                  className={`batch-tile is-${tone}`}
-                  aria-pressed={monitorFilter === tone}
-                  disabled={!counts[tone] && monitorFilter !== tone}
-                  run={() => setMonitorFilter((value) => (value === tone ? 'all' : tone))}
-                >
-                  <span className="batch-tile-count">{counts[tone]}</span>
-                  <span className="batch-tile-label">{toneLabels[tone]}</span>
-                </ActionButton>
-              ),
-            )}
+            {(
+              [
+                'running',
+                'waiting',
+                'succeeded',
+                'failed',
+                'cancelled',
+                'interrupted',
+                'unknown',
+              ] as Tone[]
+            ).map((tone) => (
+              <ActionButton
+                bare
+                key={tone}
+                action={`project-batch-monitor-${tone}`}
+                label={t(`只看：${toneLabels[tone]}`, `Show only: ${toneLabels[tone]}`)}
+                className={`batch-tile is-${tone}`}
+                aria-pressed={monitorFilter === tone}
+                disabled={!counts[tone] && monitorFilter !== tone}
+                run={() => setMonitorFilter((value) => (value === tone ? 'all' : tone))}
+              >
+                <span className="batch-tile-count">{counts[tone]}</span>
+                <span className="batch-tile-label">{toneLabels[tone]}</span>
+              </ActionButton>
+            ))}
           </div>
           <div className="batch-toolbar">
             <input
