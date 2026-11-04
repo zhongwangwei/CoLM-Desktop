@@ -1,4 +1,5 @@
 """Small orchestration checks, without model datasets or an SSH server."""
+import fcntl
 import json
 import pathlib
 import subprocess
@@ -49,6 +50,15 @@ elif args[0] == 'new':
 ''')
         with self.cli.open('a') as stream:
             stream.write("\nif args[0] == 'new':\n external=pathlib.Path(get('--site')+'.nml')\n if external.is_file():\n  with (out/'case.nml').open('a') as f: f.write(\"&extra\\n ref = '\"+str(external).replace(\"'\",\"''\")+\"'\\n/\\n\")\n")
+        with self.cli.open('a') as stream:
+            stream.write("""
+if args[0] == 'new' and '--mode' in args and get('--mode') == 'urban':
+ for root, name in (('rawdata', 'NCAR_urban_properties.nc'), ('runtime', 'LUCY_rawdata.nc')):
+  if '--' + root not in args:
+   target = out/root/'urban'/name
+   target.parent.mkdir(parents=True, exist_ok=True)
+   target.write_bytes(b'generated urban data')
+""")
         self.cli.chmod(0o700)
 
     def tearDown(self): self.tmp.cleanup()
@@ -72,15 +82,14 @@ elif args[0] == 'new':
         self.assertIn('/data/site.nc', result['files']['case.nml'])
         recovered = self.run_action('create',req)
         self.assertEqual(recovered, result)
-        # Different settings take over the folder instead of refusing it.
-        other = self.run_action('create',dict(req, token='b'*64))
-        self.assertEqual(other['token'],'b'*64)
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        self.run_action('create',dict(req, token='b'*64),False)
+        self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
         self.assertTrue((out/'case.nml').is_file())
-        self.run_action('publish',{'out':str(out),'token':'wrong','files':other['files']},False)
-        self.run_action('publish',{'out':str(out),'token':result['token'],'files':other['files']},False)
-        self.run_action('publish',{'out':str(out),'token':other['token'],'files':other['files']})
+        self.run_action('publish',{'out':str(out),'token':'wrong','files':result['files']},False)
+        self.run_action('publish',{'out':str(out),'token':result['token'],'files':result['files']})
         self.assertEqual(json.loads((out/'.colm-desktop-server.json').read_text())['remote_directory'],str(out))
-        self.run_action('abort',{'out':str(out),'token':other['token']},False)
+        self.run_action('abort',{'out':str(out),'token':result['token']},False)
         self.assertTrue(out.is_dir())
 
     def test_failure_removes_only_owned_destination(self):
@@ -128,8 +137,52 @@ elif args[0] == 'new':
         other.mkdir()
         (other/'.colm-desktop-creation.json').write_text(json.dumps({'token':'a'*64}))
         (other/'partial.nc').write_text('incomplete')
-        self.assertEqual(self.run_action('create',dict(request, out=str(other), token='b'*64))['token'],'b'*64)
+        before = {p.name: p.read_bytes() for p in other.iterdir()}
+        self.run_action('create',dict(request, out=str(other), token='b'*64),False)
+        self.assertEqual({p.name: p.read_bytes() for p in other.iterdir()}, before)
         self.assertTrue((other/'partial.nc').exists())
+
+    def test_owned_adopted_retry_preserves_unrelated_data(self):
+        out = self.root/'adopted-interrupted'
+        out.mkdir()
+        (out/'data.nc').write_bytes(b'keep input')
+        (out/'case.nml').write_text('partial case')
+        (out/'forcing.nml').write_text('partial forcing')
+        (out/'.colm-desktop-creation.json').write_text(json.dumps({
+            'token':'a'*64, 'adopted':True, 'outputs_owned':True}))
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        result = self.run_action('create',request)
+        self.assertEqual((out/'data.nc').read_bytes(), b'keep input')
+        self.assertEqual(self.run_action('create',request), result)
+        self.assertTrue(json.loads((out/'.colm-desktop-creation.json').read_text())['adopted'])
+
+    def test_locked_claim_cannot_be_taken_over(self):
+        out = self.root/'locked'
+        out.mkdir()
+        marker = out/'.colm-desktop-creation.json'
+        marker.write_text(json.dumps({'token':'a'*64}))
+        (out/'case.nml').write_text('partial case')
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        with marker.open('r+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for token in ('a'*64, 'b'*64):
+                error = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','token':token},False)
+                self.assertIn('another case creation', error)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_generated_symlink_cannot_be_overwritten_on_adopted_retry(self):
+        out = self.root/'adopted-link'
+        out.mkdir()
+        target = self.root/'input'
+        target.write_bytes(b'keep input')
+        (out/'forcing.nml').symlink_to(target)
+        marker = out/'.colm-desktop-creation.json'
+        marker.write_text(json.dumps({'token':'a'*64, 'adopted':True, 'outputs_owned':True}))
+        before = marker.read_bytes()
+        self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'},False)
+        self.assertEqual(target.read_bytes(), b'keep input')
+        self.assertEqual(marker.read_bytes(), before)
+        self.assertTrue((out/'forcing.nml').is_symlink())
 
     def test_second_file_publish_failure_restores_every_old_file(self):
         out = self.root/'case'
@@ -193,25 +246,101 @@ elif args[0] == 'new':
         out = self.root/'existing'
         out.mkdir()
         (out/'data.nc').write_text('keep')
-        (out/'case.nml').write_text('old case')
         self.run_action('create',{'out':str(out),'kind':'site','site':'fail'},False,nfs=True)
         self.assertEqual((out/'data.nc').read_text(),'keep')
-        self.assertEqual((out/'case.nml').read_text(),'old case')
         self.assertFalse((out/'.colm-desktop-creation.json').exists())
         result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'})
         self.assertEqual((out/'case.nml').read_text(),result['files']['case.nml'])
         self.assertEqual((out/'data.nc').read_text(),'keep')
+        self.assertEqual(self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'}),result)
         self.run_action('abort',{'out':str(out),'token':result['token'],'incomplete_only':True},False)
         self.run_action('abort',{'out':str(out),'token':result['token']},nfs=True)
         self.assertEqual((out/'data.nc').read_text(),'keep')
         self.assertFalse((out/'.colm-desktop-creation.json').exists())
 
-    def test_plain_file_at_the_case_path_is_replaced(self):
+    def test_plain_file_at_the_case_path_is_preserved(self):
         out = self.root/'case-file'
         out.write_text('not a folder')
-        result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'})
-        self.assertTrue((out/'case.nml').is_file())
-        self.assertIn('case.nml',result['files'])
+        self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'},False)
+        self.assertEqual(out.read_bytes(), b'not a folder')
+
+    def test_existing_case_and_markers_are_unchanged(self):
+        for claim in (None, {'token':'b'*64}, {'token':'a'*64, 'adopted':True}):
+            with self.subTest(claim=claim):
+                out = self.root / ('existing-' + str(len(list(self.root.iterdir()))))
+                out.mkdir()
+                for name in ('case.nml', 'forcing.nml', 'site.nc', 'data.nc'):
+                    (out/name).write_bytes(('old ' + name).encode())
+                if claim is not None:
+                    (out/'.colm-desktop-creation.json').write_text(json.dumps(claim))
+                before = {p.name: p.read_bytes() for p in out.iterdir()}
+                self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'},False)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_unowned_generated_collisions_are_preserved(self):
+        for name in ('case.nml', 'forcing.nml', 'site.nc', 'mesh.nc', 'spatial-input.manifest.json', 'extra.nml', '.colm-desktop-server.json'):
+            with self.subTest(name=name):
+                out = self.root/name
+                out.mkdir()
+                (out/name).write_bytes(b'original')
+                self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'},False)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, {name: b'original'})
+
+    def test_urban_default_directories_are_not_adopted(self):
+        for root, name in (('rawdata', 'NCAR_urban_properties.nc'), ('runtime', 'LUCY_rawdata.nc')):
+            with self.subTest(root=root):
+                out = self.root/root
+                target = out/root/'urban'/name
+                target.parent.mkdir(parents=True)
+                target.write_bytes(b'original urban data')
+                before = sorted(str(p.relative_to(out)) for p in out.rglob('*'))
+                self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','mode':'urban'},False)
+                self.assertEqual(target.read_bytes(), b'original urban data')
+                self.assertEqual(sorted(str(p.relative_to(out)) for p in out.rglob('*')), before)
+
+    def test_urban_default_symlinks_never_modify_external_data(self):
+        for owned in (False, True):
+            for relative in ('runtime', 'runtime/urban', 'runtime/urban/LUCY_rawdata.nc'):
+                with self.subTest(owned=owned, relative=relative):
+                    out = self.root/('case-' + str(len(list(self.root.iterdir()))))
+                    target = self.root/('external-' + out.name)
+                    target.mkdir()
+                    external_file = target/'LUCY_rawdata.nc'
+                    external_file.write_bytes(b'external data')
+                    link = out/relative
+                    link.parent.mkdir(parents=True)
+                    link.symlink_to(external_file if relative.endswith('.nc') else target)
+                    marker = out/'.colm-desktop-creation.json'
+                    if owned:
+                        marker.write_text(json.dumps({'token':'a'*64,'adopted':True,'outputs_owned':True}))
+                    before = marker.read_bytes() if owned else None
+                    self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','mode':'urban'},False)
+                    self.assertEqual(external_file.read_bytes(), b'external data')
+                    self.assertEqual(list(target.iterdir()), [external_file])
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(marker.read_bytes() if marker.exists() else None, before)
+                    self.assertFalse((out/'case.nml').exists())
+
+    def test_owned_urban_retry_and_explicit_inputs_preserve_unrelated_data(self):
+        out = self.root/'urban-owned'
+        out.mkdir()
+        (out/'data.nc').write_bytes(b'keep')
+        marker = out/'.colm-desktop-creation.json'
+        marker.write_text(json.dumps({'token':'a'*64,'adopted':True,'outputs_owned':True}))
+        target = out/'runtime'/'urban'/'LUCY_rawdata.nc'
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'partial')
+        result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','mode':'urban'})
+        self.assertEqual(target.read_bytes(), b'generated urban data')
+        self.assertEqual((out/'data.nc').read_bytes(), b'keep')
+        self.assertIn('case.nml', result['files'])
+        explicit = self.root/'urban-explicit'
+        (explicit/'runtime').mkdir(parents=True)
+        (explicit/'rawdata').mkdir()
+        self.run_action('create',{'out':str(explicit),'kind':'site','site':'/data/site.nc','mode':'urban',
+                                 'runtime':'/external/runtime','rawdata':'/external/rawdata'})
+        self.assertEqual(list((explicit/'runtime').iterdir()), [])
+        self.assertEqual(list((explicit/'rawdata').iterdir()), [])
 
     def test_symlink_destination_is_refused(self):
         target = self.root/'target'

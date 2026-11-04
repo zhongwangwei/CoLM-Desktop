@@ -163,22 +163,45 @@ out.parent.mkdir(parents=True, exist_ok=True)
 def write_claim(lock, adopted):
     lock.seek(0)
     lock.truncate()
-    lock.write(json.dumps({'token': token, 'adopted': adopted}))
+    lock.write(json.dumps({'token': token, 'adopted': adopted, 'outputs_owned': True}))
     lock.flush()
     os.fsync(lock.fileno())
+
+def check_unowned_outputs(owned=False):
+    # 后续会重写所有平铺 namelist；仅有无关数据的目录才可接管。
+    for child in out.iterdir():
+        if child.name.endswith('.nml') or child.name in (
+                'site.nc', 'mesh.nc', 'spatial-input.manifest.json', '.colm-desktop-server.json'):
+            if not owned or child.is_symlink() or child.name == '.colm-desktop-server.json':
+                raise ValueError('refusing to overwrite existing case output: ' + str(child))
+    # CLI 会自动识别城市站点；默认参数表的目录也必须由本次创建拥有。
+    if r.get('kind') == 'site':
+        for name, filename in (('rawdata', 'NCAR_urban_properties.nc'), ('runtime', 'LUCY_rawdata.nc')):
+            if r.get(name) is not None and str(r[name]).strip():
+                continue
+            root = out / name
+            if not owned and (root.exists() or root.is_symlink()):
+                raise ValueError('refusing to overwrite existing case output: ' + str(root))
+            for target in (root, root / 'urban', root / 'urban' / filename):
+                if target.is_symlink():
+                    raise ValueError('refusing to create case output through a symlink: ' + str(target))
 
 def claim(adopted):
     lock = marker.open('x+')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    write_claim(lock, adopted)
+    try:
+        check_unowned_outputs()
+        write_claim(lock, adopted)
+    except BaseException:
+        lock.close()
+        forget(marker)
+        raise
     return lock
 
-# An existing destination is reused: generated files overwrite same-name files and
-# nothing that was already there is deleted, even when creation fails ("adopted").
 if out.is_symlink() or marker.is_symlink():
     raise ValueError('refusing to create a case through a symlink: ' + str(out))
 if out.exists() and not out.is_dir():
-    out.unlink()
+    raise ValueError('case destination is not a directory: ' + str(out))
 try:
     out.mkdir(parents=False, exist_ok=False)
     lock, adopted = claim(False), False
@@ -193,13 +216,21 @@ except FileExistsError:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('another case creation is still writing ' + str(out))
+        # 完成记录用原子替换发布；旧 inode 的锁不能授权修改新的记录。
+        if out.is_symlink() or marker.is_symlink() or not os.path.samestat(os.fstat(lock.fileno()), marker.stat()):
+            raise ValueError('case creation ownership changed')
         saved = json.load(lock)
-        if saved.get('token') == token and saved.get('files') is not None:
+        if saved.get('token') != token:
+            raise ValueError('case creation ownership changed; refusing to modify it')
+        if saved.get('files') is not None:
             print(json.dumps({'remote_dir': str(out), 'token': token, 'files': saved['files']}))
             sys.exit(0)
-        own = saved.get('token') == token and not saved.get('adopted')
-        adopted = not own
-        if own:
+        adopted = bool(saved.get('adopted'))
+        if (out / '.colm-desktop-server.json').exists() or (out / '.colm-desktop-server.json').is_symlink():
+            raise ValueError('refusing to overwrite an existing server case')
+        if adopted:
+            check_unowned_outputs(owned=saved.get('outputs_owned', False))
+        else:
             # This interrupted creator made the directory; its partial output can go.
             clear_children()
         write_claim(lock, adopted)

@@ -2618,3 +2618,46 @@ fn remote_bench_and_creation_cancel_only_their_owner() {
     assert!(!retry.wait().unwrap().success());
     allow_remote_creation("batch:audit");
 }
+
+#[cfg(unix)]
+#[test]
+fn legacy_study_options_never_select_a_current_revision_or_remote_head() {
+    let dir = creation_test_dir("legacy-study-options");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut args = vec!["study-run".into(), dir.display().to_string()];
+    assert!(study_model_options(&dir, &mut args, None, false).is_err());
+    let cli = dir.join("colm-cli");
+    std::fs::write(&cli, "snapshot").unwrap();
+    std::fs::write(
+        dir.join("model-version.json"),
+        serde_json::json!({
+            "name": "legacy", "head": "old-head", "cli": cli
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let original = args.clone();
+    study_model_options(&dir, &mut args, None, false).unwrap();
+    assert_eq!(args, original);
+    assert!(study_model_options(&dir, &mut args, None, true).is_err());
+    let selected = colm_model::VersionRef {
+        id: "official".into(),
+        revision: 1,
+    };
+    assert!(study_model_options(&dir, &mut args, Some(&selected), false).is_err());
+    std::fs::remove_file(cli).unwrap();
+    assert!(study_model_options(&dir, &mut args, None, false).is_err());
+    std::fs::write(
+        dir.join("model-version.json"),
+        serde_json::json!({"model_revision": {"version": {"id": "older", "revision": 2}}})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(study_model_options(&dir, &mut args, Some(&selected), false).is_err());
+    study_model_options(&dir, &mut args, None, true).unwrap();
+    assert!(args.windows(2).any(|pair| pair == ["--model-id", "older"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--model-revision", "2"]));
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -864,7 +864,8 @@ export default function PreparationPage() {
               ...gapOptions(),
               latitude: item.latitude,
               longitude: item.longitude,
-              utc_offset: item.timezone_offset_hours,
+              // Table import already normalized this staged file to UTC.
+              utc_offset: null,
             },
             overwrite,
           }),

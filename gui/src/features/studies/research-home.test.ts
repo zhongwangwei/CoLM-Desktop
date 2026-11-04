@@ -43,7 +43,12 @@ import {
   targetMatchingOf,
   researchBaselineOf,
 } from './study';
-import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
+import {
+  remoteStudyPermissions,
+  remoteStudyReply,
+  studyModelRevision,
+  studyExecutionIssue,
+} from './remote-study';
 import {
   clearParameterContextMarker,
   parameterContextKey,
@@ -595,6 +600,9 @@ it('retrying a study that needs review reruns those members only after confirmat
   for (const confirmed of [true, false]) {
     const calls: [string, Record<string, unknown>][] = [];
     const control = pageCallback('control', {
+      studyExecutionIssue: () => null,
+      envelope: null,
+      host: '',
       remotePermissions: { exists: false },
       tr: (zh: string) => zh,
       status: 'needs_review',
@@ -638,6 +646,7 @@ it('a server submission that recorded nothing can be submitted again', async () 
       // U-01：运行用的修订由“研究基线 + 研究自己记录的修订”决定，不再直接读全局运行版本。
       studyBaseline: { id: 'official', revision: 1 },
       studyModelRevision: () => ({ id: 'official', revision: 1 }),
+      studyExecutionIssue: () => null,
       state: { versionRef: { id: 'official', revision: 1 } },
       remoteRequest: { current: 0 },
       setLaunching: () => {},
@@ -845,6 +854,7 @@ function researchPage(
     resultFileLabel,
     shownResultFiles,
     studyModelRevision,
+    studyExecutionIssue,
     studyPermissions,
     calibrationSeed,
     deriveStudyDesign,
@@ -3583,4 +3593,79 @@ it('parameter previews release after success, failed reads, and stale responses'
     else await load(identity);
     assert.deepEqual(events, outcome === 'stale' ? ['release'] : ['read', 'release']);
   }
+});
+
+it('legacy snapshot studies run and resume without selecting the current revision', async () => {
+  for (const paused of [false, true]) {
+    const page = researchPage({ researchMethod: 'tuning' });
+    page.render();
+    page.press('study-browse');
+    page.requests.at(-1)!.resolve('/p/.colm/studies/legacy');
+    await page.settle();
+    const envelope = {
+      manifest: {
+        id: 'legacy',
+        spec: {
+          kind: 'tuning',
+          kernel_dir: '/kernels/default',
+          parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+        },
+      },
+      state: { status: paused ? 'Paused' : 'Ready' },
+      model_version: { name: 'old', head: 'abc', cli: '/study/version/bin/colm-cli' },
+    };
+    page.requests.at(-1)!.resolve(envelope);
+    await page.settle();
+    const confirm = page
+      .nodes()
+      .find(
+        (node) =>
+          node.type === 'label' && String(node.props.className ?? '').includes('study-confirm'),
+      )
+      ?.children.flat()
+      .find(
+        (node): node is Tree =>
+          !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+      );
+    assert.ok(confirm);
+    (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+    page.render();
+    page.press(paused ? 'study-resume' : 'study-run');
+    if (paused) {
+      assert.equal(page.requests.at(-1)!.command, 'study_resume');
+      page.requests.at(-1)!.resolve({});
+      await page.settle();
+      assert.equal(page.requests.at(-1)!.command, 'study_status');
+      page.requests.at(-1)!.resolve({ ...envelope, state: { status: 'Ready' } });
+      await page.settle();
+    }
+    assert.equal(page.requests.at(-1)!.command, 'study_run');
+    assert.equal(page.requests.at(-1)!.args.modelRevision, null);
+    assert.equal(page.requests.at(-1)!.args.modelVersion, null);
+  }
+});
+
+it('an unidentified legacy study offers a new study and cannot run', async () => {
+  const page = researchPage({ researchMethod: 'tuning' });
+  page.render();
+  page.press('study-browse');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/unidentified');
+  await page.settle();
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 'unidentified',
+      spec: {
+        kind: 'tuning',
+        kernel_dir: '/kernels/default',
+        parameters: [{ name: 'DEF_TEST', sample_min: 0, sample_max: 10, scale: 'linear' }],
+      },
+    },
+    state: { status: 'Ready' },
+  });
+  await page.settle();
+  assert.equal(page.actions().find((a) => a.id === 'study-run')?.enabled, false);
+  assert.match(pageText(page), /旧研究没有可核对的模型快照/);
+  page.press('study-new-from-legacy');
+  assert.equal(page.requests.filter((r) => r.command === 'study_run').length, 0);
+  assert.ok(page.ids().includes('research-step-2'));
 });

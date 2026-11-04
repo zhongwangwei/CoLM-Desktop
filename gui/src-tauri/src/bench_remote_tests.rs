@@ -2,6 +2,27 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+#[test]
+fn comparison_request_does_not_inherit_mpi_process_cpus() {
+    let server: Server = serde_json::from_value(serde_json::json!({
+        "host": "cluster", "root": "/data/colm", "cpus": 1, "threads": 8,
+        "scheduler": "lsf", "cores_per_node": 48,
+    }))
+    .unwrap();
+    let config = serde_json::json!({"config": "project:\n  num_cores: 8\n"});
+    let args = bench_run_args(&server, &config);
+    let serialized = config.to_string();
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--cpus" | "--threads" | "--ranks")));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--cores-per-node", "48"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--json" && pair[1] == serialized));
+}
+
 fn temp(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("colm-remote-fetch-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

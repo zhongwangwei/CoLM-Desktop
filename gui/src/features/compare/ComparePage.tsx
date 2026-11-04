@@ -2537,8 +2537,12 @@ export default function ComparePage() {
                   <Field
                     label={t('并行核数', 'Parallel cores')}
                     hint={t(
-                      '空=OpenBench 用全部 CPU；共享机器建议填。',
-                      'Empty = all CPUs; set this on shared machines.',
+                      host
+                        ? '空或 0：申请并使用 4 核；填写数字则按该核数申请。'
+                        : '空或 0：OpenBench 使用可用 CPU；共享机器建议填写。',
+                      host
+                        ? 'Empty or 0 requests and uses 4 CPUs; a positive value requests that many.'
+                        : 'Empty or 0 uses available CPUs; set this on shared machines.',
                     )}
                   >
                     <Input

@@ -707,8 +707,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   const comparisonLabels: Record<keyof ComparisonInput, string> = {
     obs: t('共同观测文件', 'Shared observations'),
     variable: t('共同评估变量', 'Common evaluation variable'),
-    from: t('评估开始 (UTC，留空全时段)', 'Evaluation start (UTC, blank for full period)'),
-    to: t('评估结束 (UTC，留空全时段)', 'Evaluation end (UTC, blank for full period)'),
+    from: t(
+      '评估开始（模型时钟，留空全时段）',
+      'Evaluation start (model clock, blank for full period)',
+    ),
+    to: t(
+      '评估结束（模型时钟，留空全时段）',
+      'Evaluation end (model clock, blank for full period)',
+    ),
     spinup: t('跳过模型记录数', 'Model records to skip'),
     corrected: t('能量闭合校正', 'Energy closure correction'),
   };
@@ -1901,6 +1907,12 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                         ))}
                     </Select>
                   </Field>
+                  <Notice>
+                    {t(
+                      '评估窗口分别按每次运行自己的模型时钟解释，不自动转换为 UTC；不同运行的相同时刻不一定对应同一 UTC 时刻。',
+                      'The evaluation window uses each run’s own model clock. No automatic UTC conversion is applied; the same clock time may represent different UTC instants across runs.',
+                    )}
+                  </Notice>
                   <div className="form-grid">
                     {(['obs', 'from', 'to', 'spinup'] as const).map((key) => (
                       <Field key={key} label={comparisonLabels[key]}>

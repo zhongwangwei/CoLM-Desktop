@@ -2644,7 +2644,10 @@ pub(crate) fn study_args(
         ranks: None,
         model_version: engine.model_version.clone(),
     };
-    let mut args = run_args(server, study, kernel, None, false, false, &single);
+    // 研究按“成员线程数 × 并发”申请总核数，不继承 Fortran 每进程核数。
+    let mut allocation = server.clone();
+    allocation.cpus = 0;
+    let mut args = run_args(&allocation, study, kernel, None, false, false, &single);
     args[0] = "remote-study-run".into();
     if let Some(jobs) = jobs.filter(|j| *j > 0) {
         args.push("--jobs".into());
@@ -2713,17 +2716,21 @@ pub async fn remote_study_run(
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
-    // 原记录会让 CLI 拒绝再次提交；已确认失败（有非零退出码）的终态记录先归档再提交，
-    // 这是“修复后重提”的唯一出口。排队/运行中/未确认丢失的记录仍然拒绝，不能重复提交。
-    archive_failed_remote_study_before_submit(&study_dir, &server).await?;
     let engine = Engine {
         engine,
         ranks: None,
         model_version,
     };
-    let mut args = study_args(&server, study_dir, kernel, &engine, jobs);
-    crate::model::options(&mut args, model_revision.as_ref())?;
+    let mut args = study_args(&server, study_dir.clone(), kernel, &engine, jobs);
+    crate::sidecar::study_model_options(
+        std::path::Path::new(&study_dir),
+        &mut args,
+        model_revision.as_ref(),
+        true,
+    )?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
+    // 身份和参数全部校验后才归档已确认失败的旧提交，不影响排队或未核对记录。
+    archive_failed_remote_study_before_submit(&study_dir, &server).await?;
     ssh_cli_json(args, resources, Some(&server)).await
 }
 

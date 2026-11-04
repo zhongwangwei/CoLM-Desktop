@@ -5,6 +5,7 @@ import {
   remoteStudyRecovery,
   remoteStudyReply,
   studyModelRevision,
+  studyExecutionIssue,
 } from './remote-study';
 
 describe('server study lifecycle', () => {
@@ -154,8 +155,16 @@ describe('server study lifecycle', () => {
       }),
       { id: 'modified', revision: 1 },
     );
-    assert.deepEqual(studyModelRevision(selected), selected);
-    assert.throws(() => studyModelRevision({ id: 'modified', revision: 0 }));
+    assert.equal(studyModelRevision(selected), null);
+    assert.equal(
+      studyModelRevision(selected, { name: 'old', head: 'abc', cli: '/old/colm-cli' }),
+      null,
+    );
+    assert.throws(() =>
+      studyModelRevision(selected, {
+        model_revision: { version: { id: 'modified', revision: 0 } },
+      }),
+    );
   });
   it('keeps diagnostic fetch separate from verified scientific evidence, including after restart', () => {
     assert.equal(
@@ -342,4 +351,16 @@ describe('server study failure stages and recovery actions', () => {
     assert.equal(parsed?.permissions.close, true);
     assert.equal(parsed?.permissions.fetch, false);
   });
+});
+
+it('legacy execution requires a recorded snapshot and never drifts remotely', () => {
+  const legacy = { name: 'old', head: 'abc', cli: '/study/version/bin/colm-cli' };
+  assert.equal(studyExecutionIssue(legacy, false), null);
+  assert.match(studyExecutionIssue(legacy, true)![1], /local snapshot/);
+  assert.match(studyExecutionIssue(null, false)![1], /new study/);
+  assert.match(studyExecutionIssue({ name: 'old' }, false)![0], /新建研究/);
+  assert.equal(
+    studyExecutionIssue({ model_revision: { version: { id: 'old', revision: 1 } } }, true),
+    null,
+  );
 });

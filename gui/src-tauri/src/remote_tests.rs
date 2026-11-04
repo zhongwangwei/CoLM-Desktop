@@ -237,6 +237,7 @@ fn remote_logs_are_parsed_like_local_runs() {
 fn both_engines_pass_remote_ranks_and_nodes_to_the_launcher() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     server.nodes = 2;
+    server.cpus = 1;
     let go = |engine: Option<&str>, ranks: Option<u32>| {
         run_args(
             &server,
@@ -261,6 +262,7 @@ fn both_engines_pass_remote_ranks_and_nodes_to_the_launcher() {
     assert_eq!(value(&fortran, "--engine").as_deref(), Some("fortran"));
     assert_eq!(value(&fortran, "--ranks").as_deref(), Some("8"));
     assert_eq!(value(&fortran, "--nodes").as_deref(), Some("2"));
+    assert_eq!(value(&fortran, "--cpus").as_deref(), Some("1"));
     // 一个进程不用 MPI，也就不申请节点。
     let one = go(Some("fortran"), Some(1));
     assert!(value(&one, "--ranks").is_none() && value(&one, "--nodes").is_none());
@@ -268,6 +270,7 @@ fn both_engines_pass_remote_ranks_and_nodes_to_the_launcher() {
     assert!(value(&rust, "--engine").is_none());
     assert_eq!(value(&rust, "--ranks").as_deref(), Some("8"));
     assert_eq!(value(&rust, "--nodes").as_deref(), Some("2"));
+    assert_eq!(value(&rust, "--cpus").as_deref(), Some("1"));
     assert!(value(&go(None, None), "--engine").is_none());
 }
 
@@ -825,6 +828,7 @@ fn a_remote_run_of_a_modified_version_names_it_and_the_official_one_adds_nothing
 fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     server.nodes = 2;
+    server.cpus = 1;
     let args = study_args(
         &server,
         "/p/.colm/studies/s-1".into(),
@@ -848,6 +852,10 @@ fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member()
     assert_eq!(value("--jobs").as_deref(), Some("4"));
     assert_eq!(value("--model-version").as_deref(), Some("snow"));
     assert!(value("--ranks").is_none() && value("--nodes").is_none());
+    assert!(
+        value("--cpus").is_none(),
+        "Study derives total CPUs from threads × jobs"
+    );
     assert!(absolute_study("rel/study").is_err());
 }
 

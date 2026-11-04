@@ -129,9 +129,10 @@ export function comparisonArgs(a: string, b: string, input: ComparisonInput) {
     throw new Error(bilingual('真实观测与变量必填', 'Observations and variable required'));
   const time = (value: string) => {
     if (!value) return null;
+    // Encode civil clock fields without the browser timezone; the backend uses each run’s model clock.
     const seconds = utcSeconds(value);
     if (!Number.isSafeInteger(seconds))
-      throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
+      throw new Error(bilingual('模型时钟日期格式不对', 'Invalid model-clock date'));
     return seconds;
   };
   const from = time(input.from),

@@ -294,11 +294,37 @@ export function remoteStudyPermissions(
   };
 }
 
+export type StudyModelPin = {
+  name?: string;
+  head?: string;
+  cli?: string;
+  model_revision?: { version?: VersionRef } | null;
+};
+
+export function studyExecutionIssue(
+  pinned: StudyModelPin | null | undefined,
+  remote: boolean,
+): [string, string] | null {
+  if (pinned?.model_revision?.version) return null;
+  if (pinned?.name && pinned.head && pinned.cli)
+    return remote
+      ? [
+          '旧研究只能用本机快照运行；远程代码身份无法核对，请新建研究。',
+          'This legacy study can run with its local snapshot only; remote code identity cannot be verified. Create a new study.',
+        ]
+      : null;
+  return [
+    '旧研究没有可核对的模型快照，已停用运行；请新建研究并选择冻结修订，原结果保留。',
+    'This legacy study has no identifiable model snapshot. Running is disabled; create a new study with a frozen revision. Existing results are preserved.',
+  ];
+}
+
 export function studyModelRevision(
-  selected: VersionRef,
-  pinned?: { model_revision?: { version?: VersionRef } | null } | null,
-): VersionRef {
-  const version = pinned?.model_revision?.version ?? selected;
+  _selected: VersionRef,
+  pinned?: StudyModelPin | null,
+): VersionRef | null {
+  const version = pinned?.model_revision?.version;
+  if (!version) return null;
   if (!version.id || !Number.isSafeInteger(version.revision) || version.revision < 1)
     throw new Error('Study requires an immutable model revision');
   return { ...version };

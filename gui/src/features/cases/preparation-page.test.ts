@@ -425,3 +425,54 @@ test('editing a field clears the previous result so no stale success remains', (
   void set('dst', '/b.nc');
   assert.deepEqual(shown, [null], 're-entering the same value does not add another clear');
 });
+
+test('table finalization uses staged UTC metadata despite source and raw repair offsets', async () => {
+  for (const manualOffset of [null, 8, -5]) {
+    const requests: { command: string; args: Record<string, unknown> }[] = [];
+    const options = { utc_offset: manualOffset, latitude: 1, longitude: 2, era5: '/era5.nc' };
+    const finish = pageCallback('finish', {
+      slots: [{ index: 1, name: 'temperature', wants: 'K' }],
+      gapOptions: () => options,
+      work: (fn: () => unknown) => fn(),
+      confirmOverwrite: (fn: (overwrite: boolean) => unknown) => fn(false),
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        requests.push({ command, args });
+        return { unresolved: 0 };
+      },
+      setImported: () => {},
+      setProduced: () => {},
+    });
+    await finish({
+      staged_path: '/stage.nc',
+      final_path: '/final.nc',
+      latitude: 30,
+      longitude: 120,
+      timezone_offset_hours: 8,
+    });
+    assert.equal(requests[0].command, 'repair_forcing');
+    assert.equal(requests[0].args.src, '/stage.nc');
+    assert.deepEqual(requests[0].args.options, {
+      ...options,
+      latitude: 30,
+      longitude: 120,
+      utc_offset: null,
+    });
+    assert.equal(options.utc_offset, manualOffset, 'raw-file repair options remain intact');
+  }
+});
+
+test('raw gap repair keeps its explicit manual timezone override', async () => {
+  const options = pageCallback('gapOptions', {
+    num: () => 1,
+    optional: (key: string) => ({ utc_offset: 8, lat: 30, lon: 120 })[key],
+    form: { era5: '/era5.nc' },
+  });
+  assert.deepEqual(await options(), {
+    short_gap: 1,
+    min_overlap: 1,
+    utc_offset: 8,
+    latitude: 30,
+    longitude: 120,
+    era5: '/era5.nc',
+  });
+});

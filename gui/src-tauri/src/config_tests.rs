@@ -4653,6 +4653,22 @@ fn spatial_forcing_read_resolves_server_cache_and_preserves_server_data_path() {
     assert_eq!(preview.files.len(), 2);
     assert!(preview.files[1].text.contains("/server/data"));
     assert!(preview.warnings.is_empty());
+    let mut doc =
+        colm_namelist::parse(&std::fs::read_to_string(dir.join("case.nml")).unwrap()).unwrap();
+    load_forcing_fields(&mut doc, dir).unwrap();
+    assert_eq!(character(&doc, "DEF_dir_forcing"), "/server/data");
+    set_batches(
+        dirs.clone(),
+        material_fields(&[("DEF_forcing%HEIGHT_V", "30.0")]),
+    )
+    .unwrap();
+    let saved =
+        colm_namelist::parse(&std::fs::read_to_string(dir.join("forcing.nml")).unwrap()).unwrap();
+    assert_eq!(
+        saved.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+        "30.0"
+    );
+    assert_eq!(character(&saved, "DEF_dir_forcing"), "/server/data");
     let prepared = case_forcing::prepare(
         &dirs,
         &ForcingInput {
@@ -5369,4 +5385,133 @@ fn shared_isotope_files_allow_unrelated_case_saves_but_reject_parameter_changes(
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
     }
     std::fs::remove_dir_all(first.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn forcing_fields_save_reload_in_referenced_owned_header() {
+    for legacy in [false, true] {
+        let dir = batch("forcing-fields-route", &[SAMPLE]).remove(0);
+        let root = std::path::Path::new(&dir);
+        let shared = root.parent().unwrap().join(format!(
+            "shared-forcing-{}.nml",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let original = "&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 10.0\n/\n";
+        std::fs::write(&shared, original).unwrap();
+        let mut doc =
+            colm_namelist::parse(&std::fs::read_to_string(root.join("case.nml")).unwrap()).unwrap();
+        put(
+            &mut doc,
+            "DEF_forcing_namelist",
+            colm_namelist::Value::Str(shared.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        if legacy {
+            put(
+                &mut doc,
+                "DEF_forcing%HEIGHT_V",
+                typed("DEF_forcing%HEIGHT_V", "20.0").unwrap(),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("case.nml"), doc.to_string()).unwrap();
+        set_batches(
+            vec![dir.clone()],
+            material_fields(&[("DEF_forcing%HEIGHT_V", "30.0")]),
+        )
+        .unwrap();
+        let mut saved =
+            colm_namelist::parse(&std::fs::read_to_string(root.join("case.nml")).unwrap()).unwrap();
+        assert!(saved.get("DEF_forcing%HEIGHT_V").is_none());
+        let header = root.join(character(&saved, "DEF_forcing_namelist"));
+        assert!(header
+            .canonicalize()
+            .unwrap()
+            .starts_with(root.canonicalize().unwrap()));
+        let forcing = colm_namelist::parse(&std::fs::read_to_string(header).unwrap()).unwrap();
+        assert_eq!(
+            forcing.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+            "30.0"
+        );
+        load_forcing_fields(&mut saved, root).unwrap();
+        assert_eq!(
+            saved.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+            "30.0"
+        );
+        assert_eq!(std::fs::read_to_string(&shared).unwrap(), original);
+        std::fs::remove_file(shared).unwrap();
+    }
+}
+
+#[test]
+fn forcing_reference_and_values_change_together_without_copying_stale_values() {
+    let dir = batch("forcing-selected-header", &[SAMPLE]).remove(0);
+    let root = std::path::Path::new(&dir);
+    for (file, v, t) in [("first.nml", 10, 11), ("second.nml", 20, 21)] {
+        std::fs::write(root.join(file),format!("&nl_colm_forcing\n DEF_forcing%HEIGHT_V = {v}.0\n DEF_forcing%HEIGHT_T = {t}.0\n/\n")).unwrap();
+    }
+    apply_fields(
+        &dir,
+        &material_fields(&[("DEF_forcing_namelist", "'first.nml'")]),
+    )
+    .unwrap();
+    let before = forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
+    apply_fields(
+        &dir,
+        &material_fields(&[
+            ("DEF_forcing_namelist", "'second.nml'"),
+            ("DEF_forcing%HEIGHT_V", "30.0"),
+        ]),
+    )
+    .unwrap();
+    let second =
+        colm_namelist::parse(&std::fs::read_to_string(root.join("second.nml")).unwrap()).unwrap();
+    assert_eq!(
+        second.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+        "30.0"
+    );
+    assert_eq!(
+        second.get("DEF_forcing%HEIGHT_T").unwrap().to_string(),
+        "21.0"
+    );
+    assert_ne!(
+        forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap(),
+        before
+    );
+    let before = forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
+    std::fs::write(root.join("second.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    assert_ne!(forcing_input_snapshot(&[dir], &[]).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn forcing_save_rejects_symlink_target_without_touching_shared_header() {
+    let dir = batch("forcing-symlink-target", &[SAMPLE]).remove(0);
+    let root = std::path::Path::new(&dir);
+    let shared = root.parent().unwrap().join(format!(
+        "shared-{}.nml",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let original = "&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 10.0\n/\n";
+    std::fs::write(&shared, original).unwrap();
+    std::os::unix::fs::symlink(&shared, root.join("forcing.nml")).unwrap();
+    let mut doc =
+        colm_namelist::parse(&std::fs::read_to_string(root.join("case.nml")).unwrap()).unwrap();
+    put(
+        &mut doc,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str(shared.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    std::fs::write(root.join("case.nml"), doc.to_string()).unwrap();
+    let before = std::fs::read(root.join("case.nml")).unwrap();
+    assert!(set_batches(
+        vec![dir.clone()],
+        material_fields(&[("DEF_forcing%HEIGHT_V", "30.0")])
+    )
+    .unwrap_err()
+    .contains("regular file"));
+    assert_eq!(std::fs::read(root.join("case.nml")).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), original);
+    std::fs::remove_file(shared).unwrap();
 }

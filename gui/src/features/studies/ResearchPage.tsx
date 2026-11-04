@@ -57,6 +57,8 @@ import {
   remoteStudyPermissions,
   remoteStudyReply,
   studyModelRevision,
+  studyExecutionIssue,
+  type StudyModelPin,
   type RemoteStudyRecord,
   type RemoteStudyReply,
 } from './remote-study';
@@ -110,7 +112,7 @@ type Envelope = {
     provenance?: { spec_sha256?: string } | null;
   };
   results?: (string | { path: string })[];
-  model_version?: { model_revision?: { version?: VersionRef } | null } | null;
+  model_version?: StudyModelPin | null;
   /** 第一次运行时记下的引擎与前处理（`run-options.json`）；之后的运行都用它。 */
   run_options?: { engine: string; preprocessors: string } | null;
   remote?: RemoteStudyRecord | null;
@@ -1170,6 +1172,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     typeof frozenKernel === 'string' && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(frozenKernel)
       ? frozenKernel
       : kernel;
+  const executionIssue = envelope ? studyExecutionIssue(envelope.model_version, !!host) : null;
   const start = async () => {
     if (runLock.current || lock.current || statusPending === studyDir)
       throw new Error(
@@ -1193,10 +1196,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'This study has a server submission; inspect or fetch it instead of starting another run',
         ),
       );
+    const issue = studyExecutionIssue(envelope.model_version, !!host);
+    if (issue) throw new Error(tr(...issue));
     const concurrency = Number(jobs);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
       throw new Error(tr('同时运行的模拟数要在 1–16 之间', 'Jobs must be 1–16'));
-    // 已有研究用它记下的冻结修订跑，新研究用研究基线；两者都不受页面别的选择影响（U-01）。
+    // 旧研究只交给自己的快照程序，不能把当前研究基线补成旧研究的修订。
     const modelRevision = studyModelRevision(studyBaseline, envelope.model_version);
     runLock.current = true;
     remoteRequest.current++;
@@ -1309,6 +1314,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'Use the recorded server controls for this study',
         ),
       );
+    if (command === 'study_resume' || command === 'study_retry') {
+      const issue = studyExecutionIssue(envelope?.model_version, !!host);
+      if (issue) throw new Error(tr(...issue));
+    }
     // "待复核"的任务是进程身份核对不上的（多是软件中途被关）：原来重试固定不带它们，按了等于没按
     //（GUI 审查 R3）。问过用户确认它们确实不在运行，再连同待复核的一起重跑；后端还会核对残留的运行锁。
     const includeReview =
@@ -2544,6 +2553,27 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const writeMember = member || defaultMember();
   const writeVerdict = tuning ? memberVerdict(envelope?.state?.candidates, writeMember) : null;
   const writeAllowed = !writeVerdict?.blocked || overrideFor === `${studyDir}#${writeMember}`;
+  const legacyNotice =
+    envelope && !modelUsed ? (
+      <div className="notice">
+        <p>
+          {executionIssue
+            ? tr(...executionIssue)
+            : tr(
+                '旧研究按记录的本机快照运行，不使用当前选择的模型修订。',
+                'This legacy study runs its recorded local snapshot, independent of the selected model revision.',
+              )}
+        </p>
+        <ActionButton
+          action="study-new-from-legacy"
+          label={tr('新建研究并选择冻结修订', 'Create a study with a frozen revision')}
+          disabled={launching || unresolvedRemote}
+          run={() => startHomeMethod(tab)}
+        >
+          {tr('新建研究并选择冻结修订', 'Create a study with a frozen revision')}
+        </ActionButton>
+      </div>
+    ) : null;
   const lifecycleActions = [
     action(
       'study-browse',
@@ -2568,6 +2598,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           throw e;
         }),
       permissions.run &&
+        !executionIssue &&
         !!runKernel &&
         confirmed &&
         !launching &&
@@ -2589,14 +2620,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             tr('恢复', 'Resume'),
             () => control('study_resume'),
             // 恢复之后接着就是运行，同样要先核对过冻结的预算。
-            permissions.resume && confirmed,
+            permissions.resume && confirmed && !executionIssue,
             true,
           ),
           action(
             'study-retry',
             tr('重试失败任务', 'Retry failed tasks'),
             () => control('study_retry'),
-            permissions.retry,
+            permissions.retry && !executionIssue,
             true,
           ),
           action(
@@ -3355,6 +3386,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             <h2>{tr('当前研究', 'Current study')}</h2>
             {renderActions(homeActions.slice(0, 1))}
           </div>
+          {legacyNotice}
           {hasStudy ? (
             <div className="research-current">
               <div className="research-current-copy">
@@ -3365,7 +3397,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 <p>
                   {envelope?.model_version?.model_revision?.version
                     ? versionLabel(envelope.model_version.model_revision.version)
-                    : tr('模型修订待核对', 'Model revision unverified')}{' '}
+                    : envelope?.model_version?.head
+                      ? tr('旧版固定快照（仅本机）', 'Legacy pinned snapshot (local only)')
+                      : tr(
+                          '旧研究缺少模型身份 · 请新建研究',
+                          'Legacy model unidentified · Create a new study',
+                        )}{' '}
                   ·{' '}
                   {envelope
                     ? remoteIdentity?.host || tr('本机', 'Local')
@@ -3814,17 +3851,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const controls = lifecycleActions.filter(
     (a) => controlIds.includes(a.id) && (a.enabled || shownWhenDisabled[a.id]),
   );
-  const runBlocked = controls.some((a) => shownWhenDisabled[a.id] && !a.enabled)
-    ? !confirmed
-      ? tr('先勾选上面的"我已核对……"才能运行。', 'Tick the review box above to run.')
-      : !runKernel
-        ? tr('没有可用的编译配置。', 'No build configuration is available.')
-        : launching
-          ? tr('研究正在运行。', 'The study is running.')
-          : busy
-            ? tr('上一个操作还没结束。', 'Another operation is still in progress.')
-            : ''
-    : '';
+  const runBlocked = executionIssue
+    ? tr(...executionIssue)
+    : controls.some((a) => shownWhenDisabled[a.id] && !a.enabled)
+      ? !confirmed
+        ? tr('先勾选上面的"我已核对……"才能运行。', 'Tick the review box above to run.')
+        : !runKernel
+          ? tr('没有可用的编译配置。', 'No build configuration is available.')
+          : launching
+            ? tr('研究正在运行。', 'The study is running.')
+            : busy
+              ? tr('上一个操作还没结束。', 'Another operation is still in progress.')
+              : ''
+      : '';
   const frozen = frozenDesign(frozenSpec);
   const byId = (id: string) => lifecycleActions.find((a) => a.id === id);
   const stepNames: [1 | 2 | 3 | 4, string][] = [
@@ -5059,7 +5098,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               {renderActions(controls)}
               {renderActions([byId('study-status')!].filter((a) => a.enabled))}
             </div>
-            {runBlocked && <p className="muted study-hint">{runBlocked}</p>}
+            {legacyNotice}
+            {runBlocked && !legacyNotice && <p className="muted study-hint">{runBlocked}</p>}
             {remotePermissions.exists && (
               <div className="study-remote">
                 <p className="muted">

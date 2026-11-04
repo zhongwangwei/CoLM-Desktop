@@ -33,7 +33,7 @@ use colm_bench::{
     PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 use colm_remote::job::{self, Spec};
-use colm_remote::sched::{self, Resources, Scheduler};
+use colm_remote::sched::{self, Resources};
 use colm_remote::ssh::{quote, Ssh};
 use serde::Deserialize;
 use serde_json::json;
@@ -523,10 +523,43 @@ const DEFAULT_OUTPUT_DIR: &str = "output";
 /// 远程 run 的 `project.output_dir`：只允许本次运行目录内的相对路径（服务器是 POSIX，统一用 `/`）。
 /// 配置由窗口进程生成/校验，这里再挡一次：CLI 也能被直接调用，不能靠调用方保证。
 fn output_dir_from_config(config: &str) -> Result<String> {
+    match project_scalar_from_config(config, "output_dir")? {
+        Some(raw) => normalize_output_dir(&raw).context("project.output_dir 不合格"),
+        None => Ok(DEFAULT_OUTPUT_DIR.to_owned()),
+    }
+}
+
+fn configured_bench_cores(config: &str) -> Result<Option<u32>> {
+    project_scalar_from_config(config, "num_cores")?
+        .map(|raw| {
+            raw.parse::<u32>()
+                .context("project.num_cores 必须是非负整数 / project.num_cores must be a non-negative integer")
+        })
+        .transpose()
+        .map(|cores| cores.filter(|value| *value > 0))
+}
+
+// 评估是单任务额度；auto 按已申请额度运行，不继承模拟的每 MPI 进程设置。
+fn bench_resources(opts: &Opts, config: &str) -> Result<(Resources, u32)> {
+    let configured = configured_bench_cores(config)?;
+    let resources = super::remote_cmd::resources_from(opts, configured.unwrap_or(4), 1, 1)?;
+    ensure!(
+        resources.cpus >= configured.unwrap_or(1),
+        "申请核数不足 / --cpus ({}) must cover project.num_cores ({}); raise --cpus or lower project.num_cores",
+        resources.cpus,
+        configured.unwrap_or(1)
+    );
+    let cores = configured.unwrap_or(resources.cpus);
+    Ok((resources, cores))
+}
+
+fn project_scalar_from_config(config: &str, field: &str) -> Result<Option<String>> {
+    // YAML 的 BOM 不是键名；不支持的键别名/转义必须拒绝，不能误判为未配置额度。
+    let config = config.trim_start_matches('\u{feff}');
     let mut in_project = false;
     let mut seen_project = false;
     let mut project_child_indent: Option<usize> = None;
-    let mut found: Option<String> = None;
+    let mut found: Option<Option<String>> = None;
     for (index, raw) in config.lines().enumerate() {
         let line = strip_yaml_comment(raw.trim_end_matches('\r'));
         if line.trim().is_empty() {
@@ -537,29 +570,37 @@ fn output_dir_from_config(config: &str) -> Result<String> {
         // 多文档 YAML 里 OpenBench 只读第一份，而我们会把每份的 project 都扫进来 —— 不猜。
         if trimmed == "---" || trimmed == "..." {
             bail!(
-                "project.output_dir 不合格（配置第 {} 行）：不支持多文档 YAML",
+                "project.{field} 不合格（配置第 {} 行）：不支持多文档 YAML",
                 index + 1
             );
         }
         let Some((key, value)) = split_mapping(trimmed) else {
-            if trimmed.contains("output_dir") {
+            ensure!(
+                !trimmed.starts_with(['"', '?', '*', '&', '!']),
+                "不支持跨行或特殊 YAML 键 / Unsupported multiline or special YAML mapping key"
+            );
+            if trimmed.contains(field) {
                 bail!(
-                    "project.output_dir 不合格（配置第 {} 行）：无法识别的写法",
+                    "project.{field} 不合格（配置第 {} 行）：无法识别的写法",
                     index + 1
                 );
             }
             continue;
         };
+        ensure!(
+            !key.contains('\\') && !key.starts_with(['?', '*', '&', '!']) && key != "<<",
+            "不支持转义、别名或合并 YAML 键 / Escaped, alias or merge YAML mapping keys are unsupported"
+        );
         if indent == 0 {
             if key == "project" {
                 if seen_project {
-                    bail!("project.output_dir 不合格：project 段只能有一个");
+                    bail!("project.{field} 不合格：project 段只能有一个");
                 }
                 seen_project = true;
                 // 内联 `project: {output_dir: /tmp}` 会绕过逐行检查，而 OpenBench 仍会读它。
                 if !value.trim().is_empty() {
                     bail!(
-                        "project.output_dir 不合格（配置第 {} 行）：project 段必须用块写法",
+                        "project.{field} 不合格（配置第 {} 行）：project 段必须用块写法",
                         index + 1
                     );
                 }
@@ -569,49 +610,39 @@ fn output_dir_from_config(config: &str) -> Result<String> {
             }
             in_project = false;
             project_child_indent = None;
-            if key == "output_dir" {
-                bail!("project.output_dir 必须写在 project 段下面");
+            if key == field {
+                bail!("project.{field} 必须写在 project 段下面");
             }
             continue;
         }
         if !in_project {
-            if key == "output_dir" {
-                bail!("project.output_dir 必须写在 project 段下面");
+            if key == field {
+                bail!("project.{field} 必须写在 project 段下面");
             }
             continue;
         }
-        // `<<` 合并键能把别处的 output_dir 注进 project，逐行检查看不见；OpenBench 却会展开它。
-        if key == "<<" {
-            bail!("project.output_dir 不合格：不支持 YAML 的 `<<` 合并键");
-        }
         let child_indent = *project_child_indent.get_or_insert(indent);
-        if key != "output_dir" {
-            if trimmed.contains("output_dir") {
+        if key != field {
+            if trimmed.contains(field) {
                 bail!(
-                    "project.output_dir 不合格（配置第 {} 行）：无法识别的写法",
+                    "project.{field} 不合格（配置第 {} 行）：无法识别的写法",
                     index + 1
                 );
             }
             continue;
         }
         if indent != child_indent {
-            bail!("project.output_dir 只能是 project 的直属键");
+            bail!("project.{field} 只能是 project 的直属键");
         }
         if found.is_some() {
-            bail!("project.output_dir 只能写一次");
+            bail!("project.{field} 只能写一次");
         }
         found = Some(
-            match yaml_scalar(value)
-                .with_context(|| format!("project.output_dir 不合格（配置第 {} 行）", index + 1))?
-            {
-                None => DEFAULT_OUTPUT_DIR.to_owned(),
-                Some(raw) => normalize_output_dir(&raw).with_context(|| {
-                    format!("project.output_dir 不合格（配置第 {} 行）", index + 1)
-                })?,
-            },
+            yaml_scalar(value)
+                .with_context(|| format!("project.{field} 不合格（配置第 {} 行）", index + 1))?,
         );
     }
-    Ok(found.unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_owned()))
+    Ok(found.flatten())
 }
 
 fn normalize_output_dir(raw: &str) -> Result<String> {
@@ -1516,7 +1547,9 @@ fn run_body(
     request: &RunRequest,
     id: &str,
     created_unix: u64,
+    cores: u32,
 ) -> Result<String> {
+    ensure!(cores > 0, "OpenBench requires at least one CPU");
     ensure!(
         request.config.len() <= 512 * 1024,
         "the configuration exceeds 512 KiB"
@@ -1659,8 +1692,14 @@ _colm_run_ready=1
         body.push_str(&format!("export OPENBENCH_REF_ROOT={}\n", quote(ref_root)));
     }
     for stage in ["check", "run"] {
+        // OpenBench 3.0.8 的 --cores 只覆盖内存配置，冻结 YAML 与哈希保持原样。
+        let core_option = if stage == "run" {
+            format!(" --cores {cores}")
+        } else {
+            String::new()
+        };
         body.push_str(&format!(
-            "echo 'openbench {stage} openbench.yaml'\n{} {stage} {RUN_CONFIG_FILE}\n",
+            "echo 'openbench {stage} openbench.yaml{core_option}'\n{} {stage} {RUN_CONFIG_FILE}{core_option}\n",
             env_program(root, "openbench")
         ));
     }
@@ -1684,17 +1723,9 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
     let created_unix = unix_now();
     let config_sha = sha256_hex(request.config.as_bytes());
     let intent = submit_intent(&id, created_unix, &config_sha);
-    let body = run_body(&base, &root, &request, &id, created_unix)?;
     let scheduler = super::remote_cmd::parse_scheduler(opts, &ssh, &base)?;
-    let resources = if scheduler == Scheduler::Bare {
-        Resources {
-            cpus: 1,
-            env_script: opts.get("--env-script").filter(|t| !t.trim().is_empty()),
-            ..Resources::default()
-        }
-    } else {
-        super::remote_cmd::resources_from(opts, 4, 1, 1)?
-    };
+    let (resources, cores) = bench_resources(opts, &request.config)?;
+    let body = run_body(&base, &root, &request, &id, created_unix, cores)?;
     let spec = Spec {
         scheduler,
         resources,

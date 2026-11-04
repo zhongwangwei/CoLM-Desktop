@@ -73,7 +73,7 @@ test('history paths use recorded copies and never local/remote location labels',
     null,
   );
 });
-test('comparison uses UTC seconds and explicit skipped-record count', () => {
+test('comparison encodes model-clock fields as seconds and keeps the explicit skipped-record count', () => {
   const input = {
     obs: '/obs.nc',
     variable: 'LE',

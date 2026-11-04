@@ -4,8 +4,95 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use colm_remote::sched::Scheduler;
 use colm_remote::ssh::quote;
 use serde_json::json;
+
+#[test]
+fn configured_bench_cores_reach_openbench_without_changing_frozen_yaml() {
+    let config = "project:\n  num_cores: 8\n  output_dir: output\n";
+    let (_, cores) = bench_resources(
+        &crate::Opts {
+            flags: Vec::new(),
+            positional: Vec::new(),
+        },
+        config,
+    )
+    .unwrap();
+    let body = super::run_body(
+        "/srv/colm",
+        "/srv/colm/openbench",
+        &request(config),
+        "run-cores",
+        0,
+        cores,
+    )
+    .unwrap();
+    assert!(body.contains("run openbench.yaml --cores 8"));
+    assert!(body.contains(&format!("printf '%s' {} > openbench.yaml", quote(config))));
+}
+
+fn fixture_body(
+    base: &str,
+    root: &str,
+    request: &RunRequest,
+    id: &str,
+    created: u64,
+) -> anyhow::Result<String> {
+    super::run_body(base, root, request, id, created, 4)
+}
+
+#[test]
+fn comparison_resources_follow_config_and_bound_auto_workers() {
+    let options = |cpus: Option<&str>| crate::Opts {
+        flags: cpus
+            .map(|value| vec![("--cpus".into(), value.into())])
+            .unwrap_or_default(),
+        positional: Vec::new(),
+    };
+    let config = "project:\n  num_cores: 8\n";
+    let (resources, cores) = bench_resources(&options(None), config).unwrap();
+    assert_eq!((resources.cpus, resources.ranks, cores), (8, 1, 8));
+    assert!(bench_resources(&options(Some("1")), config).is_err());
+    assert_eq!(bench_resources(&options(Some("16")), config).unwrap().1, 8);
+    for config in [
+        "project:\n  num_cores: 0\n",
+        "project:\n  num_cores: null\n",
+        "project:\n  name: cmp\n",
+    ] {
+        let (resources, cores) = bench_resources(&options(None), config).unwrap();
+        assert_eq!((resources.cpus, cores), (4, 4));
+        assert_eq!(bench_resources(&options(Some("16")), config).unwrap().1, 16);
+    }
+    for config in [
+        "project: {num_cores: 8}",
+        "project:\n  num_cores: -1\n",
+        "project:\n  num_cores: 1.5\n",
+        "project:\n  num_cores: 8\n  num_cores: 4\n",
+        "project:\n  nested:\n    num_cores: 8\n",
+    ] {
+        assert!(bench_resources(&options(None), config).is_err(), "{config}");
+    }
+}
+
+#[test]
+fn comparison_resource_keys_cannot_hide_worker_counts() {
+    let opts = crate::Opts {
+        flags: Vec::new(),
+        positional: Vec::new(),
+    };
+    for config in [
+        "project:\n  \"num_\\u0063ores\": 64\n",
+        "\"\\u0070roject\":\n  num_cores: 64\n",
+        "key: &name num_cores\nproject:\n  *name: 64\n",
+        "defaults: &defaults {project: {num_cores: 64}}\n<<: *defaults\n",
+        "\"pro\\\nject\":\n  num_cores: 64\n",
+    ] {
+        assert!(bench_resources(&opts, config).is_err(), "{config}");
+    }
+    let (resources, cores) = bench_resources(&opts, "\u{feff}project:\n  num_cores: 8\n").unwrap();
+    assert_eq!((resources.cpus, cores), (8, 8));
+}
 
 fn request(config: &str) -> RunRequest {
     RunRequest {
@@ -185,7 +272,7 @@ fn recorded_run_paths_stay_inside_the_run_directory() {
 
 #[test]
 fn the_run_job_records_and_uses_the_configured_output_dir() {
-    let body = run_body(
+    let body = fixture_body(
         "/srv/colm",
         "/srv/colm/openbench",
         &request("project:\n  name: cmp\n  output_dir: ./results\n"),
@@ -218,7 +305,7 @@ fn the_run_job_records_and_uses_the_configured_output_dir() {
 #[test]
 fn the_run_job_freezes_a_run_snapshot_and_runs_inside_it() {
     let config = "general:\n  name: \"versions_vs_flux\"\n  note: it's $HOME `x`\n";
-    let body = run_body(
+    let body = fixture_body(
         "/srv/colm",
         "/srv/colm/openbench",
         &request(config),
@@ -276,7 +363,7 @@ fn the_run_job_freezes_a_run_snapshot_and_runs_inside_it() {
 
 #[test]
 fn the_run_job_installs_its_finish_trap_before_doing_any_work() {
-    let body = run_body(
+    let body = fixture_body(
         "/srv/colm",
         "/srv/colm/openbench",
         &frozen_request("x"),
@@ -304,23 +391,23 @@ fn the_run_job_refuses_unsafe_names_paths_and_terminators() {
     let root = "/srv/colm/openbench";
     let mut bad = request("x");
     bad.name = "../escape".into();
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
     let mut bad = request("x");
     bad.sites[0].station = "AT,Neu".into();
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
     let mut bad = request("x");
     bad.sites[0].history_dir = "relative/history".into();
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
     let mut bad = request("x");
     bad.sites[0].prefix = "a*b_hist_".into();
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
     let mut bad = request("x");
     bad.ref_root = Some("data/ref".into());
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
     // 配置里有 NUL 字节时 shell 无法原样写下，宁可提前拒绝。
     let mut bad = request("a\0b");
     bad.sites.clear();
-    assert!(run_body(base, root, &bad, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &bad, "bench-run-1", 0).is_err());
 }
 
 #[test]
@@ -328,7 +415,7 @@ fn the_run_job_refuses_an_oversized_configuration() {
     let mut huge = request("x");
     huge.config = "a".repeat(512 * 1024 + 1);
     huge.sites.clear();
-    assert!(run_body("/srv/colm", "/srv/colm/openbench", &huge, "bench-run-1", 0).is_err());
+    assert!(fixture_body("/srv/colm", "/srv/colm/openbench", &huge, "bench-run-1", 0).is_err());
 }
 
 /// PREPARE 的签名是 `folder prefix out_nc out_csv station [lon] [lat]`：经纬度是成对的可选参数。
@@ -337,12 +424,12 @@ fn the_run_job_refuses_an_oversized_configuration() {
 fn station_coordinates_reach_prepare_only_when_both_are_given() {
     let base = "/srv/colm";
     let root = "/srv/colm/openbench";
-    let plain = run_body(base, root, &request("x"), "bench-run-1", 0).unwrap();
+    let plain = fixture_body(base, root, &request("x"), "bench-run-1", 0).unwrap();
     assert!(!plain.contains("'-77.5'"), "{plain}");
     let mut located = request("x");
     located.sites[0].lon = Some(-77.5);
     located.sites[0].lat = Some(40.25);
-    let body = run_body(base, root, &located, "bench-run-1", 0).unwrap();
+    let body = fixture_body(base, root, &located, "bench-run-1", 0).unwrap();
     assert!(
         body.contains("'AT-Neu' '-77.5' '40.25'"),
         "经纬度要成对跟在 station 后面：{body}"
@@ -352,12 +439,12 @@ fn station_coordinates_reach_prepare_only_when_both_are_given() {
     // 只给一半：签名是成对的，宁可拒绝也不写出半份坐标。
     let mut half = request("x");
     half.sites[0].lon = Some(-77.5);
-    assert!(run_body(base, root, &half, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &half, "bench-run-1", 0).is_err());
     // 范围与 Tauri 侧一致：|lat| <= 90、|lon| <= 360。
     let mut out_of_range = request("x");
     out_of_range.sites[0].lon = Some(400.0);
     out_of_range.sites[0].lat = Some(0.0);
-    assert!(run_body(base, root, &out_of_range, "bench-run-1", 0).is_err());
+    assert!(fixture_body(base, root, &out_of_range, "bench-run-1", 0).is_err());
 }
 
 // ---- 远程 run 的端到端沙箱：冻结、成功指针、失败只写自己 meta（C07） ----
@@ -529,7 +616,7 @@ fn a_successful_remote_run_freezes_its_snapshot_and_moves_the_success_pointer() 
     let config = "general:\n  name: \"versions_vs_flux\"\n  note: it's $HOME `x`\n";
     let config_sha = sha256_hex(config.as_bytes());
     let request = frozen_request(config);
-    let body = run_body(
+    let body = fixture_body(
         &sandbox.base_text(),
         &sandbox.root_text(),
         &request,
@@ -614,7 +701,7 @@ fn a_custom_output_dir_run_records_and_finds_its_own_report() {
     let config = "project:\n  name: versions_vs_flux\n  output_dir: ./results/nested\n";
     let config_sha = sha256_hex(config.as_bytes());
     let request = frozen_request(config);
-    let body = run_body(
+    let body = fixture_body(
         &sandbox.base_text(),
         &sandbox.root_text(),
         &request,
@@ -661,7 +748,7 @@ fn a_failed_remote_run_writes_only_its_own_meta_and_keeps_the_success_pointer() 
     let previous = "{\n  \"run_id\": \"bench-run-0\",\n  \"config_sha\": \"old\",\n  \"report\": \"output/old/reports/evaluation_report_standalone.html\",\n  \"finished_at\": \"2026-10-01T00:00:00Z\",\n  \"finished_unix\": 1\n}\n";
     std::fs::write(project.join("latest-success.json"), previous).unwrap();
     let request = frozen_request("x: 1\n");
-    let body = run_body(
+    let body = fixture_body(
         &sandbox.base_text(),
         &sandbox.root_text(),
         &request,
@@ -722,7 +809,7 @@ fn a_run_job_that_cannot_start_still_releases_the_placeholder() {
     std::fs::remove_file(sandbox.root.join("env/bin/openbench")).unwrap();
     let id = "bench-run-3-3";
     let request = frozen_request("x: 1\n");
-    let body = run_body(
+    let body = fixture_body(
         &sandbox.base_text(),
         &sandbox.root_text(),
         &request,

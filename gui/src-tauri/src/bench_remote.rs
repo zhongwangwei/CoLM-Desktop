@@ -305,6 +305,15 @@ pub(crate) fn sites_payload(sites: &[crate::bench::BenchSite]) -> Vec<Value> {
 }
 
 /// 在服务器上评估：按服务器设置的调度系统提交作业，返回作业号。
+fn bench_run_args(server: &Server, request: &Value) -> Vec<String> {
+    let mut command = args(server, "run", &[("--json", request.to_string())]);
+    // CLI 根据冻结配置的并行核数申请额度，不能借用 Fortran 的每进程核数。
+    let mut allocation = server.clone();
+    allocation.cpus = 0;
+    command.extend(scheduler_args(&allocation));
+    command
+}
+
 #[tauri::command]
 pub async fn bench_remote_run(
     app: tauri::AppHandle,
@@ -326,8 +335,7 @@ pub async fn bench_remote_run(
         "name": name, "config": config, "sites": sites,
         "ref_root": ref_root.filter(|r| !r.trim().is_empty()),
     });
-    let mut command = args(&server, "run", &[("--json", request.to_string())]);
-    command.extend(scheduler_args(&server));
+    let command = bench_run_args(&server, &request);
     ssh_cli_json_owned(
         command,
         resource_dir(&app),

@@ -4270,6 +4270,45 @@ pub async fn study_status(study_dir: String) -> Result<String, String> {
     capture_async(vec!["study-status".to_string(), study_dir]).await
 }
 
+// 旧研究只能沿用自己的程序快照，不能由当前默认修订或远程工作区 HEAD 补齐身份。
+pub(crate) fn study_model_options(
+    study_dir: &std::path::Path,
+    args: &mut Vec<String>,
+    revision: Option<&colm_model::VersionRef>,
+    remote: bool,
+) -> Result<(), String> {
+    let missing = "旧研究缺少可核对的模型快照，请新建研究；原结果保留。 / This legacy study has no identifiable model snapshot; create a new study. Existing results are preserved.";
+    let text = std::fs::read_to_string(study_dir.join("model-version.json"))
+        .map_err(|_| missing.to_string())?;
+    let pin: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if let Some(version) = pin.get("model_revision").and_then(|v| v.get("version")) {
+        let pinned: colm_model::VersionRef =
+            serde_json::from_value(version.clone()).map_err(|e| e.to_string())?;
+        if revision.is_some_and(|requested| requested != &pinned) {
+            return Err(
+                "研究不能切换冻结修订。 / Study cannot switch its frozen model revision.".into(),
+            );
+        }
+        return crate::model::options(args, Some(&pinned));
+    }
+    if revision.is_some() || args.iter().any(|arg| arg == "--model-version") {
+        return Err("旧研究不能绑定当前修订，请新建研究。 / A legacy study cannot bind a current revision; create a new study.".into());
+    }
+    if remote {
+        return Err("无法核对旧研究的远程代码身份，请使用本机快照或新建研究。 / Cannot verify legacy remote code identity; use the local snapshot or create a new study.".into());
+    }
+    if !["name", "head"]
+        .iter()
+        .all(|key| pin[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
+        || !pin["cli"]
+            .as_str()
+            .is_some_and(|path| std::path::Path::new(path).is_file())
+    {
+        return Err(missing.into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 // Named IPC arguments, as for `run_batch`: a wrapper struct would only add a
 // second frontend/backend shape for the same fields.
@@ -4294,7 +4333,8 @@ pub async fn study_run(
     if let Some(version) = model_version.filter(|v| v != "official") {
         args.extend(["--model-version".into(), version]);
     }
-    crate::model::options(&mut args, model_revision.as_ref())?;
+    let study_path = std::path::PathBuf::from(&args[1]);
+    study_model_options(&study_path, &mut args, model_revision.as_ref(), false)?;
     // 运行 ID 在启动前就登记：取消可能发生在 spawn 与 PID 登记之间，那时收尾没有 PID 可
     // 依赖，运行 ID 至少能让迟到的收尾认出“这次运行还没有锁”，而不是去动后来者的锁。
     let run_id = new_study_run_id();

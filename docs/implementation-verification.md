@@ -44679,3 +44679,70 @@ PID14056、ready=complete/home=true/lang=zh-CN；
 
 发布前以当前完整工作树重跑两包联合Clippy，exit0（5.64秒），
 `/tmp/colm-final-history-agent-clippy.log`；最终根workspace fmt及diff检查通过。
+
+### 2026-11-04：七条 GUI—CLI—实际输入文件断链修复
+
+对应用户提供的 ead4aa45 对抗性复核，七项均已落实：
+
+- 表格拆分后的修复完成路径不再重复传入原始时区，使用暂存 NetCDF 的 UTC 属性；
+  原始文件人工修复仍保留显式时区选项。UTC+8 CSV 经导入和 gapfill 后时间值不变，
+  `time_shown_in` 仍为 UTC。
+- `nl_colm_forcing` 字段从真实引用头文件投影到 GUI，保存时回写算例自有头文件；
+  共享来源复制后修改。新建、已有算例、同时切换头文件和字段、服务器路径缓存、
+  并发来源快照及符号链接目标均有回归。运行物化同样把字段写入运行自有 forcing.nml。
+- 远程建例在调用 new 前拒绝普通文件目标、已有算例/生成物、默认城市输入目录，
+  校验 claim 身份及目录 inode；同 token 已完成响应恢复和已拥有输出的重试保留。
+  嵌套 urban 表及目录符号链接也在写入前拒绝。既有默认 rawdata/runtime 目录被保守拒绝，
+  需要使用新的算例目录或显式外部输入路径；不会为继续创建而清理既有目录。
+- 手动模拟的 cpus 仍是每进程额度，比较和研究不再继承该值：研究由成员线程数×并发数推导；
+  比较按 project.num_cores 申请并使用 `openbench run --cores N`，auto 使用申请额度
+  （未指定为4），显式额度不足则拒绝。冻结 YAML 内容不变，转义键/别名/merge 不能隐藏额度。
+- 历史比较窗口明确标注模型钟，说明不同算例模型钟未必对应同一 UTC；保留 CLI 已有钟面编码契约。
+- 旧研究沿用记录的本机程序快照，不再注入当前修订；没有可信身份或远程旧代码不可核实者
+  明确禁用执行并提供新建冻结研究入口，原结果保留。现代冻结修订继续严格匹配；CLI 身份守卫未放宽。
+- 所有材料共用的同位素系数写入运行自有参数文件并更新引用，计入产物指纹；
+  激活族缺文件时报错，未激活族不创建虚假文件。远程缓存绝对引用在冻结资产校验前映射，
+  任意未绑定外部绝对引用仍拒绝；源算例/共享文件字节不变。
+
+验证命令及实际日志（均本轮当前源码，未把零测试筛选记为通过）：
+
+- `cd gui && npm test`：1668/1668；`/tmp/colm-seven-gui-final.log`。
+- `npm run typecheck`、`npm run lint`、`npm run format:check` 均 exit0；
+  `/tmp/colm-seven-{typecheck,lint,format}-final.log`。
+- `cargo test --offline --locked -p colm-cli --bin colm-cli remote_bench_tests -- --test-threads=1`：
+  56/56；`/tmp/colm-seven-bench-final.log`。
+- GUI `cargo test --offline --locked --manifest-path gui/src-tauri/Cargo.toml --lib remote_tests -- --test-threads=1`：
+  67/67（含 bench_remote_tests）；config_tests 149/149，旧研究身份1/1，比较 argv1/1；
+  `/tmp/colm-seven-{remote,config,legacy,bench-gui}-final.log`。
+- `cargo test --offline --locked -p colm-model --lib`：42/42；
+  `cargo test --offline --locked -p colm-forcing --lib utc_plus_eight_table_repair_preserves_normalized_times`：1/1；
+  `/tmp/colm-seven-{model,forcing}-final.log`。
+- `python3 crates/colm-cli/src/remote_cmd/remote_cases_test.py`：23/23；
+  `/tmp/colm-seven-python-final.log`。
+- engine（colm-cli/model/forcing）与 GUI 的 `cargo clippy --offline --locked ... --all-targets -- -D warnings`
+  均 exit0；`/tmp/colm-seven-{engine,gui}-clippy.log`。两个 workspace fmt 和 git diff --check 通过。
+  GUI 首轮 Clippy 发现新测试中的无效分配，修正后重跑对应测试及 Clippy；未屏蔽 lint。
+- 文件路由、远程覆盖保护及时间/旧研究三路独立只读复核最终 APPROVE。
+
+OpenBench 额度依据是已安装 colm-openbench 3.0.8 对应官方固定源码
+[f2d841609d3c214a8726e1abde5f4ca177cefc60/run.py](https://github.com/CoLM-SYSU/OpenBench/blob/f2d841609d3c214a8726e1abde5f4ca177cefc60/src/openbench/cli/run.py)：
+run 支持 --cores，check 不支持；check 的 auto 扫描只用一个 worker，显式值最多使用该数量。
+其自动 CPU 检测不读取 Slurm/LSF 额度，故在命令入口绑定运行核数而非依赖宿主核数检测。
+
+本轮未实投集群作业、未跑完整物理仿真或完整工作区测试，远程建例采用实际脚本的沙箱回归。
+此前 T7920 严重 I/O 拥堵和5秒历史冷启动等待预算的验收限制仍有效，未通过放宽超时隐藏。
+
+当前源码本机构建/启动证据：`/tmp/colm-seven-native-build.json`，stage96.26秒、
+15套已有内核校验及MPI暂存14.18秒、完整app构建52.25秒，全部exit0。
+所有修改源码与私有构建目录逐字节一致；仅后补的本验证记录不在编译时源码中。
+引擎快照`9ff5f168f675f750`、源码SHA256
+`194dea8694c79ecafd90b4a4f31b72cd762e1a2cc1e25f66c3dcd9f96bc7ec48`。
+最新应用完整路径
+`/Users/zhongwangwei/Desktop/Github/CoLM-Desktop/gui/src-tauri/target/preview-seven-fixes-20261104/CoLM Desktop.app`，
+PID70612，ready=complete/home=true/lang=zh-CN；`/tmp/colm-seven-native-ready.json`。
+旧应用通过正常关闭握手退出；没有强制结束用户进程。
+包内CLI SHA256 `322cfb6664ed99d9f2d7a430eeb20e7004d589fe4deacdd526449f2d27bc83a8`，
+四个科学/CLI程序摘要均与包内构建标识一致。
+新包CLI再跑36个入口/资源规划回归和15份调度脚本bash语法检查，全部通过，
+`/private/tmp/colm-lsf-mpich-cli-dk84jhk4/{results,summary}.json`；
+`/tmp/colm-seven-packaged-cli-probe.log`。这是替身SSH下的dry-run检查，未提交集群作业。

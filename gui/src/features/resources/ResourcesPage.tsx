@@ -566,15 +566,18 @@ export default function ResourcesPage() {
   ];
   const extraFields: [keyof Server, string][] = [
     ['port', t('端口（0 使用 SSH 默认）', 'Port (0 uses SSH default)')],
-    ['threads', t('线程', 'Threads')],
+    [
+      'threads',
+      t('Rust 每进程线程数 / 研究每成员线程数', 'Threads per Rust process / study member'),
+    ],
     ['partition', t('分区 / 队列', 'Partition / queue')],
     ['account', t('账户', 'Account')],
     ['walltime', t('时限', 'Walltime')],
     [
       'cpus',
       t(
-        '每个 MPI 进程申请的 CPU 数（只用于 Fortran 引擎；Rust 引擎按线程数申请）',
-        'CPUs per MPI rank (Fortran engine only; the Rust engine requests its thread count)',
+        '手动模拟：每进程 CPU 数（0 按线程；比较按项目核数，研究按线程 × 并发申请）',
+        'Manual simulations: CPUs per process (0 uses threads; comparisons use project cores; studies use threads × jobs)',
       ),
     ],
     ['memory_gb', t('内存 GB', 'Memory GB')],

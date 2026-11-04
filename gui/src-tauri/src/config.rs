@@ -2801,6 +2801,7 @@ fn field_states_for_at(
     let mut doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
     if let Some(dir) = case_dir {
         load_isotope_fields(&mut doc, dir)?;
+        load_forcing_fields(&mut doc, dir)?;
     }
     migrate_legacy_material(&mut doc);
     let context = VisibilityContext::new_at(&doc, have, case_dir);
@@ -4843,7 +4844,14 @@ fn put(
 ) -> Result<(), String> {
     // 组名从 schema 来 —— 那是从 CoLM 自己的声明里扫出来的。
     // schema 不认识的字段只能改不能插：不知道往哪个组插，而插错组等于没设。
-    match colm_schema::find(schema_name(path)).and_then(|f| f.group) {
+    match colm_schema::find(schema_name(path))
+        .or_else(|| {
+            is_forcing_field(path)
+                .then(|| colm_schema::find(path.split('(').next().unwrap_or(path)))
+                .flatten()
+        })
+        .and_then(|f| f.group)
+    {
         Some(g) => {
             // 上游把材料拆到 `&nl_colm_material` 等新组后，建例只写 `&nl_colm`，
             // 老算例更没有这些组。缺组时补一个空组再插，否则向导打开第一个 family
@@ -4984,6 +4992,13 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
             .find(|field| field.path.eq_ignore_ascii_case(name))
             .map(|field| field.value.as_str())
     };
+    for field in fields
+        .iter()
+        .filter(|field| field.path.eq_ignore_ascii_case("DEF_forcing_namelist"))
+    {
+        put(&mut doc, &field.path, typed(&field.path, &field.value)?)?;
+    }
+    load_forcing_fields(&mut doc, std::path::Path::new(dir))?;
     for field in &fields {
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
@@ -5002,6 +5017,13 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
         .map_err(|e| format!("{dir}: {e}"))?;
     validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
     let mut writes = staged_history.into_iter().collect::<Vec<_>>();
+    stage_forcing_fields(
+        &mut doc,
+        std::path::Path::new(dir),
+        &fields,
+        &[],
+        &mut writes,
+    )?;
     stage_isotope_fields(&mut doc, std::path::Path::new(dir), &mut writes)?;
     stage_material_parameters(
         dir,
@@ -5174,6 +5196,152 @@ pub(crate) fn material_parameter_template(file: &str) -> Option<&'static str> {
         )),
         _ => None,
     }
+}
+
+fn forcing_input_snapshot(
+    dirs: &[String],
+    fields: &[FieldChange],
+) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, String> {
+    let mut snapshot = Vec::new();
+    for (dir, text) in read_all(dirs)? {
+        let mut doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+        let mut files = vec![character(&doc, "DEF_forcing_namelist")];
+        for field in fields
+            .iter()
+            .filter(|field| field.path.eq_ignore_ascii_case("DEF_forcing_namelist"))
+        {
+            if let colm_namelist::Value::Str(file) = typed(&field.path, &field.value)? {
+                files.push(file);
+            }
+        }
+        for file in files.into_iter().filter(|file| !is_null_file(file)) {
+            put(
+                &mut doc,
+                "DEF_forcing_namelist",
+                colm_namelist::Value::Str(file),
+            )?;
+            let path = case_forcing::forcing_path(std::path::Path::new(&dir), &doc)?;
+            match std::fs::read(&path) {
+                Ok(bytes) => snapshot.push((path, bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+fn is_forcing_field(key: &str) -> bool {
+    colm_schema::find(key.split('(').next().unwrap_or(key)).and_then(|field| field.group)
+        == Some("nl_colm_forcing")
+}
+
+pub(crate) fn load_forcing_fields(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    for key in doc.paths() {
+        if is_forcing_field(&key) {
+            doc.remove(&key).map_err(|e| e.to_string())?;
+        }
+    }
+    let file = character(doc, "DEF_forcing_namelist");
+    if is_null_file(&file) {
+        return Ok(());
+    }
+    let path = case_forcing::forcing_path(dir, doc)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let forcing = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+    for key in forcing.paths() {
+        if is_forcing_field(&key) {
+            put(doc, &key, forcing.get(&key).unwrap().clone())?;
+        }
+    }
+    Ok(())
+}
+
+fn stage_forcing_fields(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+    fields: &[FieldChange],
+    remove: &[String],
+    pending: &mut Vec<(std::path::PathBuf, String)>,
+) -> Result<(), String> {
+    let changed = fields
+        .iter()
+        .filter(|field| is_forcing_field(&field.path))
+        .collect::<Vec<_>>();
+    let removed = remove
+        .iter()
+        .filter(|key| is_forcing_field(key))
+        .collect::<Vec<_>>();
+    for key in doc.paths() {
+        if is_forcing_field(&key) {
+            doc.remove(&key).map_err(|e| e.to_string())?;
+        }
+    }
+    if changed.is_empty() && removed.is_empty() {
+        return Ok(());
+    }
+    let file = character(doc, "DEF_forcing_namelist");
+    if is_null_file(&file) {
+        return Err("请先指定强迫头文件 / Forcing fields require DEF_forcing_namelist".into());
+    }
+    let source = case_forcing::forcing_path(dir, doc)?;
+    let root = dir.canonicalize().map_err(|e| e.to_string())?;
+    let resolved = source
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", source.display()))?;
+    let owned = resolved.starts_with(&root)
+        && std::fs::symlink_metadata(&source)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_file();
+    let target = if owned {
+        source.clone()
+    } else {
+        dir.join("forcing.nml")
+    };
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(
+                "强迫头文件目标必须是普通文件 / Forcing target must be a regular file".into(),
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let existing = pending.iter().position(|(path, _)| path == &target);
+    let text = match existing {
+        Some(i) => pending[i].1.clone(),
+        None => std::fs::read_to_string(&source).map_err(|e| e.to_string())?,
+    };
+    let mut forcing = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+    for field in changed {
+        put(&mut forcing, &field.path, typed(&field.path, &field.value)?)?;
+    }
+    for key in removed {
+        forcing.remove(key).map_err(|e| e.to_string())?;
+    }
+    if !owned {
+        put(
+            doc,
+            "DEF_forcing_namelist",
+            colm_namelist::Value::Str("forcing.nml".into()),
+        )?;
+    }
+    let staged = (target, forcing.to_string());
+    if let Some(i) = existing {
+        pending[i] = staged;
+    } else {
+        pending.push(staged);
+    }
+    Ok(())
 }
 
 pub(crate) fn load_isotope_fields(
@@ -5539,6 +5707,13 @@ fn set_fields_with_forcing(
         load_isotope_fields(&mut doc, std::path::Path::new(&d))?;
         migrate_legacy_material(&mut doc);
         let fields = site_class_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
+        for field in fields
+            .iter()
+            .filter(|field| field.path.eq_ignore_ascii_case("DEF_forcing_namelist"))
+        {
+            put(&mut doc, &field.path, typed(&field.path, &field.value)?)?;
+        }
+        load_forcing_fields(&mut doc, std::path::Path::new(&d))?;
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
@@ -5588,6 +5763,7 @@ fn set_fields_with_forcing(
                 .map_err(|e| e.to_string())?;
             let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
             load_isotope_fields(&mut overlay, std::path::Path::new(context))?;
+            load_forcing_fields(&mut overlay, std::path::Path::new(context))?;
             for field in &fields {
                 // The candidate preview already resolves aliases to the selected frozen assets.
                 if is_removable_placeholder(&field.path) {
@@ -5618,6 +5794,13 @@ fn set_fields_with_forcing(
         )
         .map_err(|e| format!("{d}: {e}"))?;
         validate_changed_fields(validation, &fields).map_err(|e| format!("{d}: {e}"))?;
+        stage_forcing_fields(
+            &mut doc,
+            std::path::Path::new(&d),
+            &fields,
+            remove_fields,
+            &mut extra,
+        )?;
         stage_isotope_fields(&mut doc, std::path::Path::new(&d), &mut extra)?;
         done.push((d, doc.to_string()));
     }
@@ -6057,12 +6240,11 @@ pub async fn case_data_save(
     let remove_fields = remove_fields.unwrap_or_default();
     validate_case_removals(&fields, &remove_fields)?;
     if forcing.is_some()
-        && (fields
+        && (fields.iter().any(|field| {
+            field.path.eq_ignore_ascii_case("DEF_forcing_namelist") || is_forcing_field(&field.path)
+        }) || remove_fields
             .iter()
-            .any(|field| field.path.eq_ignore_ascii_case("DEF_forcing_namelist"))
-            || remove_fields
-                .iter()
-                .any(|key| key.eq_ignore_ascii_case("DEF_forcing_namelist")))
+            .any(|key| key.eq_ignore_ascii_case("DEF_forcing_namelist") || is_forcing_field(key)))
     {
         return Err("不能同时修改强迫场数据目录和原始配置文件路径".into());
     }
@@ -6076,6 +6258,7 @@ pub async fn case_data_save(
         .map(|field| Ok((field.path.clone(), typed(&field.path, &field.value)?)))
         .collect::<Result<Vec<_>, String>>()?;
     let before = read_all(&dirs)?;
+    let forcing_before = forcing_input_snapshot(&dirs, &fields)?;
     let mut contexts = Vec::new();
     let result = async {
         for dir in &dirs {
@@ -6113,7 +6296,7 @@ pub async fn case_data_save(
                 .await?;
             }
         }
-        if read_all(&dirs)? != before {
+        if read_all(&dirs)? != before || forcing_input_snapshot(&dirs, &fields)? != forcing_before {
             return Err("case data changed while validating; reload before saving".into());
         }
         let saved = set_fields_with_forcing(

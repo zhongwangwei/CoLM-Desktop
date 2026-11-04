@@ -594,6 +594,76 @@ fn multisite_import_normalizes_utc_inserts_missing_rows_and_keeps_sites_separate
 }
 
 #[test]
+fn utc_plus_eight_table_repair_preserves_normalized_times() {
+    let root = temp("utc-eight-repair");
+    let src = root.join("site.csv");
+    write(
+        &src,
+        "site,time,lat,lon,landtype,Tair,Qair,Psurf,Precip,Wind,SWdown,LWdown\n\
+         A,2020-01-01 08:00,30,120,10,280,.005,100000,0,2,0,300\n\
+         A,2020-01-01 10:00,30,120,10,282,.007,100020,0,2,30,302\n",
+    );
+    let mut import_plan = plan();
+    import_plan.manual_utc_offset = Some(8.0);
+    let imported = super::import_table(&src, &root.join("Forcing"), &import_plan).unwrap();
+    let item = &imported[0];
+    assert_eq!(item.timezone_offset_hours, Some(8.0));
+    assert_eq!(item.start_utc, 1_577_836_800);
+    let repair_plan = crate::gapfill::RepairPlan {
+        slots: vec![crate::gapfill::RepairSlot {
+            index: 1,
+            source_name: "Tair".into(),
+            source_units: "K".into(),
+            also_add: vec![],
+        }],
+        short_gap_max: 1,
+        manual_utc_offset: None,
+        latitude: Some(30.0),
+        longitude: Some(120.0),
+        era5: None,
+        min_overlap: 1,
+    };
+    let report =
+        crate::gapfill::repair_file(&item.staged_path, &item.final_path, &repair_plan).unwrap();
+    assert_eq!(report.timezone.offset_hours, 0.0);
+    assert_eq!(
+        report.timezone.source,
+        crate::gapfill::TimezoneSource::FileMetadata
+    );
+    assert_eq!(report.start_utc, item.start_utc);
+    assert_eq!(report.end_utc, item.end_utc);
+    assert_eq!(report.unresolved(), 0);
+    let staged = netcdf::open(&item.staged_path).unwrap();
+    let final_file = netcdf::open(&item.final_path).unwrap();
+    assert_eq!(
+        final_file
+            .attribute("time_shown_in")
+            .unwrap()
+            .value()
+            .unwrap(),
+        netcdf::AttributeValue::Str("UTC".into())
+    );
+    let times = |file: &netcdf::File| {
+        file.variable("time")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap()
+    };
+    assert_eq!(times(&final_file), times(&staged));
+    assert_eq!(
+        final_file
+            .variable("Tair")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap(),
+        vec![280.0, 281.0, 282.0]
+    );
+    drop(staged);
+    drop(final_file);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn whitespace_txt_and_compact_timestamps_are_supported() {
     let root = temp("txt");
     let src = root.join("AT-Neu.txt");

@@ -697,6 +697,7 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
     let text = std::fs::read_to_string(&nml).map_err(|e| format!("{}: {e}", nml.display()))?;
     let mut effective = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
     crate::config::load_isotope_fields(&mut effective, dir)?;
+    crate::config::load_forcing_fields(&mut effective, dir)?;
     let text = effective.to_string();
     let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let record = recorded_case(dir);

@@ -20,6 +20,19 @@ import {
   structuralProblems,
 } from './config';
 
+it('accepts automatic zero cores and rejects a negative worker count', () => {
+  for (const cores of [0, 8]) {
+    const text = generated().replace('project:\n', `project:\n  num_cores: ${cores}\n`);
+    const parsed = parseOpenbenchConfig(text);
+    assert.deepEqual(parsed.problems, []);
+    assert.equal(parsed.config?.project.numCores, cores);
+  }
+  const invalid = parseOpenbenchConfig(
+    generated().replace('project:\n', 'project:\n  num_cores: -1\n'),
+  );
+  assert.ok(invalid.problems.some((problem) => problem[1].includes('num_cores')));
+});
+
 const site: BenchSimulation = {
   label: 'AT-Neu (official)',
   info: {

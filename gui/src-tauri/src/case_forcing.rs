@@ -25,7 +25,7 @@ fn read(dir: &Path) -> Result<(PathBuf, String, colm_namelist::Document), String
     Ok((path, text, doc))
 }
 
-fn forcing_path(dir: &Path, doc: &colm_namelist::Document) -> Result<PathBuf, String> {
+pub(super) fn forcing_path(dir: &Path, doc: &colm_namelist::Document) -> Result<PathBuf, String> {
     let name = character(doc, "DEF_forcing_namelist");
     if name.trim().is_empty() || name.eq_ignore_ascii_case("null") {
         return Err("算例没有强迫场配置文件".into());

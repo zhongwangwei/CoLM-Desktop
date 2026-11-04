@@ -9,6 +9,7 @@ type Node = { type: string; props: Record<string, any>; children: unknown[] };
 function harness(
   running: Record<string, { running: boolean; run_id: string }> = {},
   props: { casePath?: string } = {},
+  language = 'en',
 ) {
   const source = readFileSync(new URL('./HistoryPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
@@ -71,7 +72,7 @@ function harness(
       ].map((x) => [x, x]),
     ),
     useApp: () => ({
-      state: { language: 'en', running },
+      state: { language, running },
       registerCloseGuard: () => () => {},
       update: (patch: unknown) => {
         updates.push(patch);
@@ -1000,4 +1001,48 @@ test('an operation failure is visible inside the history detail dialog', async (
   await h.settle();
   const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
   assert.ok(JSON.stringify(dialog.children).includes('replay fixture failed'));
+});
+
+test('comparison labels and requests preserve each run’s model clock in both languages', async () => {
+  for (const language of ['en', 'zh']) {
+    const h = harness({}, {}, language);
+    const a = { ...row('a'), version_id: 'official', revision: '1' };
+    const b = { ...a, operation_id: 'b' };
+    h.requests[0].resolve({ items: [a, b], total: 2 });
+    await h.settle();
+    h.openCard();
+    h.requests.at(-1)!.resolve({ operation: a, events: [], related: [] });
+    await h.settle();
+    const fields = h.nodes().filter((n) => n.type === 'Field');
+    const label =
+      language === 'en' ? /Evaluation (start|end) \(model clock/ : /评估[开始结束]+（模型时钟/;
+    const windows = fields.filter((n) => label.test(n.props.label));
+    assert.equal(windows.length, 2);
+    assert.match(
+      JSON.stringify(h.nodes()),
+      language === 'en' ? /No automatic UTC conversion/ : /不自动转换为 UTC/,
+    );
+    const setField = (pattern: RegExp, value: string) => {
+      const field = fields.find((n) => pattern.test(n.props.label))!;
+      const control = field.children[0] as Node;
+      control.props.onChange({ target: { value } });
+      h.render();
+    };
+    setField(/Compare real history|与实际历史比较/, 'b');
+    setField(/Shared observations|共同观测文件/, '/obs.nc');
+    setField(/Common evaluation variable|共同评估变量/, 'LE');
+    setField(/Evaluation start|评估开始/, '2026-01-01T08:00');
+    setField(/Evaluation end|评估结束/, '2026-01-02T08:00');
+    h.guide()
+      .actions.find((action) => action.id === 'history-compare')!
+      .run();
+    await h.settle();
+    const request = h.requests.at(-1)!;
+    assert.equal(request.command, 'history_compare');
+    assert.equal(request.args.from, 1767254400);
+    assert.equal(request.args.to, 1767340800);
+    request.resolve({});
+    await h.settle();
+    h.unmount();
+  }
 });

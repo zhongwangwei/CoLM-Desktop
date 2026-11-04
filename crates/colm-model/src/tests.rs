@@ -1718,3 +1718,210 @@ fn version_changes_land_on_the_case_parameter_file_and_skip_cases_without_it() {
         .unwrap();
     assert!(!run.run_case.join(file).exists());
 }
+
+#[test]
+fn forcing_edits_target_referenced_clone_without_case_projection() {
+    for legacy in [false, true] {
+        let tmp = Temp::new();
+        let reg = tmp.registry();
+        let case = tmp.case();
+        let source = tmp.0.join("shared.nml");
+        let original = "&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 10.0\n/\n";
+        fs::write(&source, original).unwrap();
+        let mut text = format!(
+            "&nl_colm\n DEF_forcing_namelist = '{}'\n/\n",
+            source.display()
+        );
+        if legacy {
+            text.push_str("&nl_colm_forcing\n DEF_forcing%HEIGHT_V = 20.0\n/\n");
+        }
+        fs::write(case.join("case.nml"), &text).unwrap();
+        let official = reg.install_official(code()).unwrap();
+        let run = reg
+            .materialize_run_with_case_fields(
+                &official.version,
+                &case,
+                &tmp.0.join("run"),
+                "forcing-edit",
+                &[(
+                    "DEF_forcing%HEIGHT_V".into(),
+                    colm_namelist::Value::Real {
+                        text: "30.0".into(),
+                    },
+                )],
+            )
+            .unwrap();
+        let doc = colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap())
+            .unwrap();
+        assert!(doc.get("DEF_forcing%HEIGHT_V").is_none());
+        let Some(colm_namelist::Value::Str(path)) = doc.get("DEF_forcing_namelist") else {
+            panic!()
+        };
+        let forcing = colm_namelist::parse(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            forcing.get("DEF_forcing%HEIGHT_V"),
+            Some(&colm_namelist::Value::Real {
+                text: "30.0".into()
+            })
+        );
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+        assert_eq!(fs::read_to_string(case.join("case.nml")).unwrap(), text);
+    }
+}
+
+#[test]
+fn isotope_scalar_override_targets_owned_parameter_file() {
+    for legacy in [false, true] {
+        let tmp = Temp::new();
+        let reg = tmp.registry();
+        let case = tmp.case();
+        let original = "&nl_colm_isotope_parameter\n DEF_ISO_ICE_SUPERSAT_SLOPE = 0.005\n/\n";
+        fs::write(case.join("isotope.nml"), original).unwrap();
+        let mut text = "&nl_colm\n/\n&nl_colm_material\n DEF_USE_ISOTOPE = .true.\n DEF_ISOTOPE_PARAM_FILE = 'isotope.nml'\n/\n".to_owned();
+        if legacy {
+            text.push_str("&nl_colm_isotope_parameter\n DEF_ISO_ICE_SUPERSAT_SLOPE = 0.006\n/\n");
+        }
+        fs::write(case.join("case.nml"), &text).unwrap();
+        let official = reg.install_official(code()).unwrap();
+        let mut d = draft(official.version);
+        let key = "DEF_ISO_ICE_SUPERSAT_SLOPE";
+        d.overlay.parameters.push(ParameterOverrideRecord {
+            parameter_id: colm_case::parameters::find(key).unwrap().id.clone(),
+            raw_key: key.into(),
+            scope_instance: ParameterScopeInstance {
+                kind: "case-scalar".into(),
+                scheme: None,
+                index: None,
+                type_name: None,
+                process_file: None,
+            },
+            value: "0.01".into(),
+            expected_old_value: None,
+            unit: None,
+        });
+        let d = reg.create_draft(d).unwrap();
+        let frozen = reg.freeze(&d.id, &tmp.0).unwrap();
+        let run = reg
+            .materialize_run(&frozen.version, &case, &tmp.0.join("run"), "isotope-edit")
+            .unwrap();
+        let doc = colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap())
+            .unwrap();
+        assert!(doc.get(key).is_none());
+        let Some(colm_namelist::Value::Str(path)) = doc.get("DEF_ISOTOPE_PARAM_FILE") else {
+            panic!()
+        };
+        let params =
+            colm_namelist::parse(&fs::read_to_string(run.run_case.join(path)).unwrap()).unwrap();
+        assert_eq!(params.get(key).unwrap().to_string(), "0.01");
+        assert_eq!(
+            fs::read_to_string(case.join("isotope.nml")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_to_string(case.join("case.nml")).unwrap(), text);
+        // Remote caches retain server-absolute references without a frozen binding rewrite.
+        fs::write(
+            case.join(".colm-desktop.json"),
+            r#"{"remote_directory":"/server/case"}"#,
+        )
+        .unwrap();
+        let remote_text = text.replace("isotope.nml", "/server/case/isotope.nml");
+        fs::write(case.join("case.nml"), &remote_text).unwrap();
+        let remote = reg
+            .materialize_run(
+                &frozen.version,
+                &case,
+                &tmp.0.join("remote"),
+                "remote-isotope",
+            )
+            .unwrap();
+        let remote_doc =
+            colm_namelist::parse(&fs::read_to_string(remote.run_case.join("case.nml")).unwrap())
+                .unwrap();
+        let Some(colm_namelist::Value::Str(path)) = remote_doc.get("DEF_ISOTOPE_PARAM_FILE") else {
+            panic!()
+        };
+        assert!(Path::new(path).starts_with(&remote.run_case));
+        let remote_params = colm_namelist::parse(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(remote_params.get(key).unwrap().to_string(), "0.01");
+        assert_eq!(
+            fs::read_to_string(case.join("isotope.nml")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(case.join("case.nml")).unwrap(),
+            remote_text
+        );
+        // A shared version may carry isotope coefficients for non-isotope cases.
+        fs::write(
+            case.join("case.nml"),
+            text.replace(".true.", ".false.")
+                .replace("isotope.nml", "missing.nml"),
+        )
+        .unwrap();
+        let inactive = reg
+            .materialize_run(&frozen.version, &case, &tmp.0.join("inactive"), "inactive")
+            .unwrap();
+        assert!(!inactive
+            .run_case
+            .join("model_isotope_parameter.nml")
+            .exists());
+        fs::write(
+            case.join("case.nml"),
+            text.replace("isotope.nml", "missing.nml"),
+        )
+        .unwrap();
+        assert!(reg
+            .materialize_run(&frozen.version, &case, &tmp.0.join("missing"), "missing")
+            .unwrap_err()
+            .to_string()
+            .contains("isotope parameter file is missing"));
+    }
+}
+
+#[test]
+fn forcing_edits_resolve_remote_cache_header_without_rewriting_server_data() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    fs::write(
+        case.join(".colm-desktop.json"),
+        r#"{"remote_directory":"/server/case"}"#,
+    )
+    .unwrap();
+    fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_forcing_namelist = '/server/case/forcing.nml'\n/\n",
+    )
+    .unwrap();
+    fs::write(
+        case.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing = '/server/data'\n/\n",
+    )
+    .unwrap();
+    let official = reg.install_official(code()).unwrap();
+    let run = reg
+        .materialize_run_with_case_fields(
+            &official.version,
+            &case,
+            &tmp.0.join("run"),
+            "remote-forcing",
+            &[(
+                "DEF_forcing%HEIGHT_V".into(),
+                colm_namelist::Value::Real {
+                    text: "30.0".into(),
+                },
+            )],
+        )
+        .unwrap();
+    let forcing =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("forcing.nml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        forcing.get("DEF_dir_forcing"),
+        Some(&colm_namelist::Value::Str("/server/data".into()))
+    );
+    assert_eq!(
+        forcing.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+        "30.0"
+    );
+}

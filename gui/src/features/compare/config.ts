@@ -551,7 +551,7 @@ function numberField(
   value: Yaml | undefined,
   path: string,
   problems: Problem[],
-  options: { integer?: boolean; positive?: boolean } = {},
+  options: { integer?: boolean; positive?: boolean; minimum?: number } = {},
 ): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     if (options.integer && !Number.isInteger(value)) {
@@ -560,6 +560,13 @@ function numberField(
     }
     if (options.positive && value <= 0) {
       problems.push([`${path} 应该是正数。`, `${path} should be positive.`]);
+      return null;
+    }
+    if (options.minimum != null && value < options.minimum) {
+      problems.push([
+        `${path} 不能小于 ${options.minimum}。`,
+        `${path} must be at least ${options.minimum}.`,
+      ]);
       return null;
     }
     return value;
@@ -870,7 +877,7 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
       ? null
       : numberField(project.num_cores, 'project.num_cores', problems, {
           integer: true,
-          positive: true,
+          minimum: 0,
         });
 
   const evaluation = root.evaluation;

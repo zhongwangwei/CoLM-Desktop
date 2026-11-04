@@ -493,13 +493,14 @@ impl Registry {
         let original_overlay = frozen.overlay.clone();
         frozen.overlay = model_overlay(&frozen.overlay);
         let source = source_case.canonicalize()?;
-        let server_inputs = match fs::read(source.join(".colm-desktop.json")) {
-            Ok(bytes) => {
-                serde_json::from_slice::<serde_json::Value>(&bytes)?["remote_directory"].is_string()
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        let server_root = match fs::read(source.join(".colm-desktop.json")) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?["remote_directory"]
+                .as_str()
+                .map(PathBuf::from),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        let server_inputs = server_root.is_some();
         ensure!(!run_case.exists(), "run destination already exists");
         let parent = run_case
             .parent()
@@ -536,10 +537,12 @@ impl Registry {
             let mut doc = colm_namelist::parse(std::str::from_utf8(&original)?)?;
             for key in remove_fields {
                 ensure!(
-                    !is_model_field(key)
-                        && colm_schema::find(key).is_some_and(|field| field.group.is_some()),
+                    !is_model_field(key) && external_group(key).is_some(),
                     "{key} is not a writable case field"
                 );
+                if external_group(key) == Some("nl_colm_forcing") {
+                    continue;
+                }
                 if colm_namelist::material::PARAM_FILE_FIELDS
                     .iter()
                     .any(|field| key.eq_ignore_ascii_case(field))
@@ -555,7 +558,16 @@ impl Registry {
                     !is_model_field(key),
                     "{key} belongs to the model, not case data"
                 );
-                put(&mut doc, key, value.clone())?;
+                if external_group(key) != Some("nl_colm_forcing") {
+                    put(&mut doc, key, value.clone())?;
+                }
+            }
+            // Resolve a cached server header before the frozen-asset relative-path guard.
+            if let Some(Value::Str(raw)) = doc.get("DEF_ISOTOPE_PARAM_FILE").cloned() {
+                let cached = cached_config_path(&raw, server_root.as_deref());
+                if cached != Path::new(&raw) {
+                    doc.set("DEF_ISOTOPE_PARAM_FILE", Value::Str(namelist_path(cached)))?;
+                }
             }
             let removed_param_field = remove_fields.iter().any(|key| {
                 colm_namelist::material::PARAM_FILE_FIELDS
@@ -589,7 +601,12 @@ impl Registry {
             if let Some(h) = &frozen.overlay.hybrid {
                 fs::write(destination.join("hybrid.toml"), &h.config)?;
             }
+            let mut isotope_fields = Vec::new();
             for (key, value) in &frozen.overlay.physics {
+                if external_group(key) == Some("nl_colm_isotope_parameter") {
+                    isotope_fields.push((key.clone(), schema_value(key, value)?));
+                    continue;
+                }
                 put(&mut doc, key, schema_value(key, value)?)?;
             }
             // Apply model scalar parameters before validating case-dependent scopes.
@@ -599,7 +616,11 @@ impl Registry {
                 .iter()
                 .filter(|record| record.scope_instance.kind == "case-scalar")
             {
-                put(&mut doc, &record.raw_key, parameter_value(record)?)?;
+                if external_group(&record.raw_key) == Some("nl_colm_isotope_parameter") {
+                    isotope_fields.push((record.raw_key.clone(), parameter_value(record)?));
+                } else {
+                    put(&mut doc, &record.raw_key, parameter_value(record)?)?;
+                }
             }
             let land_cover_scheme = run_land_cover_scheme(&doc, &source, &frozen.overlay)?;
             for record in &frozen.overlay.parameters {
@@ -700,6 +721,19 @@ impl Registry {
                     _ => anyhow::bail!("unsupported scope"),
                 }
             }
+            let isotope_file = stage_run_isotope(
+                &mut doc,
+                &source,
+                &destination,
+                server_root.as_deref(),
+                &isotope_fields,
+                &mut inputs,
+            )?;
+            for key in doc.paths() {
+                if external_group(&key) == Some("nl_colm_forcing") {
+                    doc.remove(&key)?;
+                }
+            }
             for (field, fallback) in [
                 ("DEF_forcing_namelist", "forcing.nml"),
                 ("DEF_HIST_vars_namelist", "history.nml"),
@@ -708,7 +742,8 @@ impl Registry {
                     if raw.eq_ignore_ascii_case("null") || raw.is_empty() {
                         continue;
                     }
-                    let path = source.join(&raw);
+                    let relative = cached_config_path(&raw, server_root.as_deref());
+                    let path = source.join(relative);
                     ensure!(
                         path.is_file(),
                         "referenced configuration is missing: {}",
@@ -718,6 +753,18 @@ impl Registry {
                         let bytes = fs::read(&path)?;
                         inputs.insert(path.to_string_lossy().into_owned(), digest(&bytes));
                         let mut config = colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
+                        if field == "DEF_forcing_namelist" {
+                            for key in remove_fields {
+                                if external_group(key) == Some("nl_colm_forcing") {
+                                    config.remove(key)?;
+                                }
+                            }
+                            for (key, value) in case_fields {
+                                if external_group(key) == Some("nl_colm_forcing") {
+                                    put(&mut config, key, value.clone())?;
+                                }
+                            }
+                        }
                         // Runtime paths are relative to the case cwd, even for nested namelists.
                         rewrite_case_paths(&mut config, &source, &destination, server_inputs)?;
                         fs::write(destination.join(fallback), config.to_string())?;
@@ -728,6 +775,13 @@ impl Registry {
                     }
                 }
             }
+            ensure!(
+                !case_fields
+                    .iter()
+                    .any(|(key, _)| external_group(key) == Some("nl_colm_forcing"))
+                    || matches!(doc.get("DEF_forcing_namelist"), Some(Value::Str(raw)) if !raw.is_empty() && !raw.eq_ignore_ascii_case("null")),
+                "forcing fields require DEF_forcing_namelist"
+            );
             rewrite_case_paths(&mut doc, &source, &destination, server_inputs)?;
             fs::write(destination.join("case.nml"), doc.to_string())?;
             // Forcing namelist may contain case-local absolute input paths as well.
@@ -742,6 +796,10 @@ impl Registry {
                 .map(|a| destination.join(&a.relative_path))
                 .collect::<Vec<_>>();
             artifact_paths.push(destination.join("case.nml"));
+            artifact_paths.extend(isotope_file);
+            if destination.join("forcing.nml").is_file() {
+                artifact_paths.push(destination.join("forcing.nml"));
+            }
             if frozen.overlay.hybrid.is_some() {
                 artifact_paths.push(destination.join("hybrid.toml"));
             }
@@ -854,10 +912,70 @@ fn land_cover_index(doc: &Document, key: &str) -> Result<Option<u8>> {
         })
 }
 
+fn external_group(key: &str) -> Option<&'static str> {
+    colm_schema::find(key.split('(').next().unwrap_or(key)).and_then(|field| field.group)
+}
+
+fn cached_config_path<'a>(raw: &'a str, server_root: Option<&Path>) -> &'a Path {
+    server_root
+        .and_then(|root| Path::new(raw).strip_prefix(root).ok())
+        .unwrap_or_else(|| Path::new(raw))
+}
+
+fn stage_run_isotope(
+    doc: &mut Document,
+    source: &Path,
+    destination: &Path,
+    server_root: Option<&Path>,
+    fields: &[(String, Value)],
+    inputs: &mut BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    // Inactive families do not need parameter files, even when the model has coefficients.
+    if !matches!(doc.get("DEF_USE_ISOTOPE"), Some(Value::Bool(true))) {
+        return Ok(None);
+    }
+    let Some(Value::Str(raw)) = doc.get("DEF_ISOTOPE_PARAM_FILE").cloned() else {
+        anyhow::bail!("active isotope overrides require DEF_ISOTOPE_PARAM_FILE");
+    };
+    ensure!(
+        !raw.trim().is_empty() && !raw.eq_ignore_ascii_case("null"),
+        "active isotope overrides require DEF_ISOTOPE_PARAM_FILE"
+    );
+    let relative = cached_config_path(&raw, server_root);
+    let owned = destination.join(relative);
+    let text = if owned.starts_with(destination) && owned.is_file() {
+        fs::read_to_string(safe_file(
+            destination,
+            relative.to_str().context("invalid isotope path")?,
+        )?)?
+    } else {
+        let path = source.join(relative);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("isotope parameter file is missing: {}", path.display()))?;
+        inputs.insert(path.to_string_lossy().into_owned(), digest(&bytes));
+        String::from_utf8(bytes)?
+    };
+    let mut parameters = colm_namelist::parse(&text)?;
+    for (key, value) in fields {
+        put(&mut parameters, key, value.clone())?;
+    }
+    let name = "model_isotope_parameter.nml";
+    fs::write(
+        prepare_asset_path(destination, name)?,
+        parameters.to_string(),
+    )?;
+    doc.set(
+        "DEF_ISOTOPE_PARAM_FILE",
+        Value::Str(namelist_path(&destination.join(name))),
+    )?;
+    Ok(Some(destination.join(name)))
+}
+
 fn put(doc: &mut Document, key: &str, value: Value) -> Result<()> {
-    let group = colm_schema::find(key)
-        .and_then(|f| f.group)
-        .context("field has no writable namelist group")?;
+    let group = external_group(key).context("field has no writable namelist group")?;
     doc.insert(key, value, group)
 }
 fn prepare_asset_path(root: &Path, name: &str) -> Result<PathBuf> {
