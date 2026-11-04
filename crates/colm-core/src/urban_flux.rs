@@ -919,9 +919,10 @@ pub fn urban_vegetated_flux(
         bt = fg / (rd3 * ((1.0 / t.rah + fg / rd3) + fc[0] / rb0));
         ct = (((fg / rd3 + fg / rd2) + fc[1] / rb1) + fc[2] / rb2) + (lsai * fc3) / rb3;
         // Preserve source association and direct denominators throughout the feedback calculation.
-        let at = ((input.thm / t.rah + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp) * bt;
+        // Fortran fuses aT*bT with the ground term on fused targets; contract also preserves unfused order.
+        let at_inner = (input.thm / t.rah + (input.troof * fc[0]) / rb0) + anthro.hahe3 / rhocp;
         let denominator_t = ct - (bt * fg) / rd3;
-        taf2 = (((((at + (s.tg * fg) / rd2) + (input.twsun * fc[1]) / rb1)
+        taf2 = (((((at_inner.contract(bt, (s.tg * fg) / rd2)) + (input.twsun * fc[1]) / rb1)
             + (input.twsha * fc[2]) / rb2)
             + (lsai * (fc3 * state.tl)) / rb3)
             + anthro.hahe2 / rhocp)
@@ -1035,7 +1036,7 @@ pub fn urban_vegetated_flux(
         ei3 = leaf.vapor_pressure_pa;
 
         // 用新叶温重算两层（`:2051-2116`）
-        taf2 = (((((at + (s.tg * fg) / rd2) + (input.twsun * fc[1]) / rb1)
+        taf2 = (((((at_inner.contract(bt, (s.tg * fg) / rd2)) + (input.twsun * fc[1]) / rb1)
             + (input.twsha * fc[2]) / rb2)
             + (lsai * (fc3 * state.tl)) / rb3)
             + anthro.hahe2 / rhocp)

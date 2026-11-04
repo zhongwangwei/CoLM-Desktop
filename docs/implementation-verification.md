@@ -44271,3 +44271,119 @@ cancelled/-15，原日志 `/tmp/colm-audit-gui-backend-final-evidence/`，不称
 实际 Rust 程序 ldd 无缺失库，未从旧开发 sysroot 装载运行库。
 证据 `/tmp/colm-audit-gui-targeted-final-evidence/results/verification.json`、
 `gui-targeted.log`、`gui-rust-test-ldd.txt`。未修改断言、跳过定向用例或放宽链接检查。
+
+### 2026-11-04：按节点和核心预算配置远程并行
+
+基于 main `168cce86`，新增单个远程空间算例的自动预算入口，填写节点数和每节点
+可用核数；旧设置未指定模式时仍走 manual。Rust 优先每节点一个 rank，节点内使用
+线程；超过 256 核时选择最少、均分核数的 rank 数以保持每 rank 不超过 256 线程。
+Fortran 使用每核一个 MPI rank。该规则生成可行资源布局，未声称是吞吐最优。
+单点、站点批量仍使用原有单进程/站点打包；空间批量保留手动设置。
+
+GUI 的 Rust ranks/nodes 现会转发。auto 只传原始预算，移除旧 ranks/threads/cpus，
+内存和其他环境选项仍保留。手动值切回后保留，跨服务器预算不串用。CLI 的
+SBATCH 与 srun 现在共用同一 resolved Resources，修复 96 ranks/48 核节点申请
+2 节点却启动 96 节点的断链；dry-run 和 provenance 均保存 parallel_plan，重放保留
+预算而不混入物化阶段的旧 ranks。显式节点容量、整数范围、CPU 乘法溢出和自动模式
+的拓扑覆盖指令会报错。
+
+审查还补齐了 srun 显式 `--cpus-per-task`，包括纯 Fortran/混合预处理/manual，避免
+仅批作业申请了多核、实际 step 却没有同样的每进程配额。依据 [srun 官方手册](https://slurm.schedmd.com/srun.html)
+的 CPU per task、job/step allocations 约定；回归用 threads=6/cpus=8 分别验证 Rayon6、
+SBATCH8 和 srun8，不能把线程数误当成所有手动申请值。
+
+自动多节点目前限定 Slurm+srun；PBS/LSF 不同 MPI 实现的节点放置尚未统一验证，
+多节点自动模式明确拒绝并引导 manual，单节点自动模式仍可用。未用陈旧本机
+landdata 推测服务器块数；实际块数和物理功能限制保留远端启动检查。
+`--mem-gb` 是每节点申请，未新增未经验证的科学模型内存估算。
+
+已实际执行：
+
+- 前端全量 typecheck、lint、format 及 1660 测试通过，0 失败/跳过：
+  `/tmp/colm-parallel-frontend-all.log`；实现者 121 项和独立审查 75 项定向回归亦通过。
+- GUI 后端 remote 模块 52/52 通过：`/tmp/colm-parallel-gui-remote-tests.log`；
+  `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --lib --tests -- -D warnings` 通过：
+  `/tmp/colm-parallel-gui-clippy-tests.log`；265 个 IPC 合同生成/检查通过。
+- 调度层 `cargo test -p colm-remote --lib sched::sched_tests -- --test-threads=1`：12/12。
+- 集成原生编译暴露 remote_study 仍引用旧 RunPlan.ranks，已改用 resources.ranks，
+  同时明确禁止 Study 混入空间 auto 预算，继续用 jobs/threads；原失败日志
+  `/tmp/colm-parallel-native-stage.log` 保留。
+- 更新后 sidecar 和原生 app 均构建成功，15 预设源码校验和 MPI runtime 启动检查通过：
+  `/tmp/colm-parallel-native-stage-r2.log`、`/tmp/colm-parallel-native-app.log`、
+  `/tmp/colm-parallel-native-kernels-check.log`。原生源码包与当前工作树独立打包的
+  引擎内容 ID 都是 `67426ad17f5c98db`，证据 `/tmp/colm-parallel-current-source.log`。
+- 最新应用按完整路径重启，PID 33569：
+  `gui/src-tauri/target/preview-parallel-budget-20261104/CoLM Desktop.app`，
+  ready=complete、home=true；`/tmp/colm-parallel-native-restart.log`。
+
+本轮没有改城市通量或容差。用户要求查询的前一提交 CI
+[41764972635](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41764972635)
+唯一失败 job 是 rust/macos 的
+`vegetated_flux_matches_full_vendor_procedure_with_fixed_radiation_boundary`，
+case3/component32 为 `8.44007160073973211e1` 与 `8.44007160074031191e1`，绝对差约
+5.8e-12；原日志 `/tmp/colm-ci-168cce86-failed.log`。Linux/Windows Rust、三平台 GUI、
+MSRV 与 kernel jobs 已通过，golden skipped。该失败作为独立待处理项，未在并行功能
+任务中放宽断言或掩盖。
+
+本机 CLI 定向检查使用已有缓存并限定最多 90 秒，实际 32.32 秒完成：
+`cargo test -p colm-cli --bin colm-cli -- --test-threads=1 remote_cmd::remote_cmd_tests remote_cmd::remote_study`，
+131/131 通过，0 失败/忽略，测试本身耗时 9.33 秒；
+`/tmp/colm-parallel-cli-mac-bounded.{json,log}`。调度包 all-targets Clippy 通过：
+`/tmp/colm-parallel-scheduler-mac-clippy.log`。本机包含 CLI 的 Clippy 在依赖/check 阶段
+中止，不能列为成功；后续以远程验收为准。
+
+Linux 作业 `codex-f8cc382246e74b9fb3194680e0256524` 的调度层 12/12、
+remote_cmd 57/57 已通过；附加 remote_study 为 60 通过/14 失败，14 项错误完全相同：
+runner 的长 TMPDIR 使 fixture 重启路径长 273 字节，触发既有的 256 字节限制，
+均在 `remote_study_tests.rs:328` 的 fixture 创建阶段、实际断言之前失败。
+对应产品限制和 fixture 未改；完整原日志 `/tmp/colm-parallel-study-fail.log` 保留。
+短 symlink 会被 canonicalize 展开，不能解决；重跑使用同一已编译二进制，在
+runner 可写的真实编译缓存下创建唯一私有短临时目录，所有文件仍在 data01，
+不改原始测试或产品限制。重跑与静态检查终态后续补充。
+
+### 2026-11-04：macOS 城市叶片感热通量 CI 舍入修复
+
+用户另行要求修复上面的 macOS CI。已在本机 ARM64 稳定复现完全相同的 case3/
+component32 差异，分量为 `leaf.fsenl`（树冠叶片感热通量）。case3 使用高湿 qm=.02、
+thm=298、叶面积3、湿叶水.05、C3、stress=.8。原始回归统一阈值 5e-12 保持不变，
+没有调整任何 golden、迭代、Newton、夹限或物理参数。
+
+根因是恢复分母和关联顺序时，将 `aT_inner*bT` 提前存成已舍入的 `aT`，漏掉了
+原 Fortran 编译器把它与首个 ground 项融合的行为。gfortran16.1 在本机 ARM64 的
+完整 vendor 过程 GIMPLE 明确生成 `_333 = .FMA (_318, bt_1524, _332)`；第二处温度
+反馈复用同一融合结果。让 Fortran 的 aT 在诊断副本中变得可观测、阻止此融合后，
+30 次迭代×9 个量均与旧 Rust 逐位相同，最终也精确退化成原失败值
+84.4007160073973211，构成实际反向因果验证。
+
+修复仅在 urban_vegetated_flux 两次 taf2 反馈中使用已有 `contract`，让乘法留在
+融合边界内。unfused 的 contract 仍是 `self*mul+add`，原 aT 也只有这两处用途，
+中间乘数和 ground 项未改变，非融合逐运算顺序保持。独立只读审查确认与 Fortran
+两处反馈及 GIMPLE 一致；bare 函数未修改。没有声称已经重跑 97 步或 12 年对拍。
+
+实际快速证据与命令集中在 `/tmp/colm-urban-ci-diagnosis.json`：
+
+- 原失败负对照 exit101：`/tmp/colm-urban-ci-scratch-baseline.log`。
+- 当前工作树原失败单测 200/200 逐位相同、maxabs=0：
+  `/tmp/colm-urban-ci-fixed-worktree.log`。
+- 独占诊断副本强制 unfused 也为 200/200 逐位相同：
+  `/tmp/colm-urban-ci-candidate-unfused.log`；bare/vegetated 两项回归通过：
+  `/tmp/colm-urban-ci-candidate-urban.log`。
+- 同机完整 vendor Fortran、两种 contraction 模式共400输出通过：
+  `/tmp/colm-urban-ci-oracle.log`，命令 `python3 oracle/scripts/test_urban_vegetated_flux_reference.py`。
+- core lib/tests Clippy -D warnings 通过：`/tmp/colm-urban-ci-clippy.log`。
+- GIMPLE 原件 `/tmp/colm-urban-ci-diag-cjlx6ynx/fused/flux.F90.273t.optimized:2174`，
+  trace `/tmp/colm-urban-ci-{fortran,rust}-trace.log`；诊断拷贝没有覆盖工作树参考。
+
+最终原生应用和实际 GitHub CI 终态在后续验收补充。
+
+并行配置原始 Linux 作业终态 failed/exit1 保留，原因仅为上述 fixture 路径14项：
+同单的 scheduler、remote CLI、CLI/remote 包 all-targets Clippy（-D warnings）、
+两个 workspace fmt 步骤均 exit0。取回完整证据
+`/tmp/colm-parallel-linux-evidence/results/status.json`，未改原任务的失败标签。
+
+城市修复后的 sidecar 与原生 app 也已重新构建通过，日志
+`/tmp/colm-urban-ci-native-{stage,app}.log`；当前工作树独立打包与原生包内引擎内容
+ID 均为 `3c51fbb330b8554f`，`/tmp/colm-urban-ci-current-source.log`。
+最新完整路径 `gui/src-tauri/target/preview-urban-ci-fixed-20261104/CoLM Desktop.app`
+已启动，PID 47142、ready=complete、home=true，
+`/tmp/colm-urban-ci-native-restart.log`。前一个预算版本已正常关闭，未强制终止或覆盖配置。
