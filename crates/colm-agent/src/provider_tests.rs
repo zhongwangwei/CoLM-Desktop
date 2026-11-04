@@ -804,6 +804,42 @@ fn response_refusal_is_visible_and_malformed_tool_rejects_entire_turn() {
 }
 
 #[test]
+fn invalid_tool_call_diagnostics_identify_the_protocol_field_without_arguments() {
+    let c = native_config(ApiFormat::ChatCompletions);
+    for (calls, reason) in [
+        (
+            json!([{"index":0,"function":{"name":"inspect","arguments":"{}"}}]),
+            "missing call id",
+        ),
+        (
+            json!([{"index":0,"id":"a","function":{"arguments":"{}"}}]),
+            "missing function name",
+        ),
+        (
+            json!([{"index":0,"id":"a","function":{"name":"inspect","arguments":"{}"}},{"index":1,"id":"a","function":{"name":"inspect","arguments":"{}"}}]),
+            "duplicate call id",
+        ),
+        (
+            json!([{"index":0,"id":"a","function":{"name":"inspect","arguments":"{private-secret"}}]),
+            "arguments are not valid JSON",
+        ),
+        (
+            json!([{"index":0,"id":"a","function":{"name":"inspect","arguments":"[\"private-secret\"]"}}]),
+            "arguments are not a JSON object",
+        ),
+    ] {
+        let wire = stream(&[
+            json!({"choices":[{"delta":{"tool_calls":calls},"finish_reason":"tool_calls"}]}),
+        ]) + "data: [DONE]\n\n";
+        let error = adapters::parse_stream(&c, wire.as_bytes(), &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(reason), "{error}");
+        assert!(!error.contains("private-secret"), "{error}");
+    }
+}
+
+#[test]
 fn stream_errors_preserve_bounded_redacted_service_reasons() {
     for format in [
         ApiFormat::ChatCompletions,

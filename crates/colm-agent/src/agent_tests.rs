@@ -9,14 +9,18 @@ use crate::tools::{object, Tier, Tool};
 
 /// 按脚本依次给出的模型回复；记下每次收到的对话，供断言。
 struct Scripted {
-    turns: Mutex<Vec<Turn>>,
+    turns: Mutex<Vec<Result<Turn>>>,
     seen: Mutex<Vec<Vec<Message>>>,
     seen_tools: Mutex<Vec<Vec<Value>>>,
     stream_content: bool,
 }
 
 impl Scripted {
-    fn new(mut turns: Vec<Turn>) -> Self {
+    fn new(turns: Vec<Turn>) -> Self {
+        Self::with_results(turns.into_iter().map(Ok).collect())
+    }
+
+    fn with_results(mut turns: Vec<Result<Turn>>) -> Self {
         turns.reverse();
         Self {
             turns: Mutex::new(turns),
@@ -36,7 +40,7 @@ impl Provider for Scripted {
     ) -> Result<Turn> {
         self.seen.lock().unwrap().push(messages.to_vec());
         self.seen_tools.lock().unwrap().push(tools.to_vec());
-        let turn = self.turns.lock().unwrap().pop().expect("script ran out");
+        let turn = self.turns.lock().unwrap().pop().expect("script ran out")?;
         if self.stream_content && !turn.content.is_empty() {
             on_event(StreamEvent::Content(turn.content.clone()));
         }
@@ -1814,4 +1818,206 @@ fn knowledge_validation_failure_emits_no_effect_without_parsing_error_text() {
         |event| matches!(event, Outbound::ToolResult {result,ok:false,..}
         if result.contains("draft must cite source crates/flux.rs"))
     ));
+}
+
+fn malformed_batch() -> anyhow::Error {
+    crate::provider::InvalidToolCall {
+        index: 0,
+        reason: "arguments are not valid JSON",
+        usage: crate::message::Usage {
+            prompt_tokens: 11,
+            completion_tokens: 7,
+        },
+    }
+    .into()
+}
+
+#[test]
+fn malformed_batch_recovery_preserves_completed_tools_and_request_only_instruction() {
+    let provider = Scripted::with_results(vec![
+        Ok(tool_turn(vec![call("done", "echo", r#"{"x":2}"#)])),
+        Err(malformed_batch()),
+        Ok(tool_turn(vec![call("corrected", "echo", r#"{"x":3}"#)])),
+        Ok(answer("confirmed")),
+    ]);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
+    let mut history = vec![Message::User {
+        content: "inspect".into(),
+    }];
+    let mut events = Vec::new();
+    let result = agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut Answers(vec![], 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(result.steps, 4);
+    assert_eq!(result.usage.prompt_tokens, 11);
+    assert_eq!(result.usage.completion_tokens, 7);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Outbound::ToolResult { .. }))
+            .count(),
+        2
+    );
+    let seen = provider.seen.lock().unwrap();
+    assert_eq!(&seen[2][..seen[1].len()], seen[1].as_slice());
+    assert!(
+        matches!(seen[2].last(), Some(Message::System { content }) if content.contains("No calls from that response were executed"))
+    );
+    assert!(!history.iter().any(|m| matches!(m, Message::System { .. })));
+}
+
+#[test]
+fn malformed_batch_recovery_is_bounded_and_does_not_dispatch() {
+    let provider = Scripted::with_results(vec![Err(malformed_batch()), Err(malformed_batch())]);
+    let registry = Registry::with(vec![]);
+    let mut history = vec![Message::User {
+        content: "inspect".into(),
+    }];
+    let original = history.clone();
+    let mut events = Vec::new();
+    let error = agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut Answers(vec![], 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("arguments are not valid JSON"));
+    assert_eq!(provider.seen.lock().unwrap().len(), 2);
+    assert_eq!(history, original);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Outbound::ToolResult { .. } | Outbound::ToolCall { .. })));
+}
+
+#[test]
+fn malformed_batch_recovery_respects_reserved_final_generation() {
+    let provider = Scripted::with_results(vec![Err(malformed_batch()), Ok(answer("incomplete"))]);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
+    let mut runner = agent(&provider, &registry);
+    runner.limits.max_steps = 2;
+    let result = runner
+        .run_turn(
+            &mut vec![],
+            &mut |_| {},
+            &mut Answers(vec![], 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(result.steps, 2);
+    assert!(result.limit_reached);
+    assert!(provider.seen_tools.lock().unwrap()[1].is_empty());
+}
+
+#[test]
+fn malformed_batch_recovery_does_not_retry_untyped_errors() {
+    let provider = Scripted::with_results(vec![Err(anyhow::anyhow!(
+        "model returned an invalid or incomplete tool call"
+    ))]);
+    let registry = Registry::with(vec![]);
+    assert!(agent(&provider, &registry)
+        .run_turn(
+            &mut vec![],
+            &mut |_| {},
+            &mut Answers(vec![], 0),
+            &AtomicBool::new(false)
+        )
+        .is_err());
+    assert_eq!(provider.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn malformed_batch_recovery_stops_after_body_or_cancellation() {
+    struct InvalidStream {
+        content: bool,
+        calls: AtomicUsize,
+    }
+    impl Provider for InvalidStream {
+        fn complete(
+            &self,
+            _: &[Message],
+            _: &[Value],
+            emit: &mut dyn FnMut(StreamEvent),
+        ) -> Result<Turn> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            emit(if self.content {
+                StreamEvent::Content("already visible".into())
+            } else {
+                StreamEvent::Reasoning("thinking".into())
+            });
+            Err(malformed_batch())
+        }
+    }
+    for content in [true, false] {
+        let provider = InvalidStream {
+            content,
+            calls: AtomicUsize::new(0),
+        };
+        let registry = Registry::with(vec![]);
+        let runner = Agent {
+            provider: &provider,
+            registry: &registry,
+            context: ToolContext::default(),
+            limits: Limits { max_steps: 5 },
+            strict: false,
+        };
+        let cancel = AtomicBool::new(false);
+        let error = runner
+            .run_turn(
+                &mut vec![],
+                &mut |_| {
+                    if !content {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                },
+                &mut Answers(vec![], 0),
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(error.to_string().contains(if content {
+            "invalid or incomplete"
+        } else {
+            "cancelled"
+        }));
+    }
+}
+
+#[test]
+fn malformed_batch_recovery_preserves_unknown_effect_without_reexecuting_action() {
+    let provider = Scripted::with_results(vec![
+        Ok(tool_turn(vec![call("uncertain", "act", r#"{"x":-1}"#)])),
+        Err(malformed_batch()),
+        Ok(answer("still needs reconciliation")),
+    ]);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let mut events = Vec::new();
+    let mut approvals = Answers(vec![Decision::Approve], 0);
+    let mut history = vec![];
+    agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut approvals,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(approvals.1, 1);
+    assert_eq!(outcome_for(&events, "uncertain"), ToolEffect::EffectUnknown);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Outbound::ToolCall { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        matches!(&provider.seen.lock().unwrap()[2][1], Message::Tool { content, .. } if content.contains("x must not be -1"))
+    );
 }

@@ -437,13 +437,27 @@ fn validate_turn(turn: &Turn) -> Result<()> {
         bail!("model returned too many tool calls");
     }
     let mut ids = std::collections::HashSet::new();
-    for call in &turn.tool_calls {
-        if call.id.is_empty()
-            || call.name.is_empty()
-            || !ids.insert(&call.id)
-            || !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|v| v.is_object())
-        {
-            bail!("model returned an invalid or incomplete tool call");
+    for (index, call) in turn.tool_calls.iter().enumerate() {
+        let reason = if call.id.is_empty() {
+            Some("missing call id")
+        } else if call.name.is_empty() {
+            Some("missing function name")
+        } else if !ids.insert(&call.id) {
+            Some("duplicate call id")
+        } else {
+            match serde_json::from_str::<Value>(&call.arguments) {
+                Err(_) => Some("arguments are not valid JSON"),
+                Ok(value) if !value.is_object() => Some("arguments are not a JSON object"),
+                Ok(_) => None,
+            }
+        };
+        if let Some(reason) = reason {
+            return Err(InvalidToolCall {
+                index,
+                reason,
+                usage: turn.usage,
+            }
+            .into());
         }
     }
     Ok(())

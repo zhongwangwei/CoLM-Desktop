@@ -169,6 +169,22 @@ impl Turn {
     }
 }
 
+/// A rejected whole tool-call batch; details are field categories, never model arguments.
+#[derive(Debug)]
+pub(crate) struct InvalidToolCall {
+    pub(crate) index: usize,
+    pub(crate) reason: &'static str,
+    pub(crate) usage: Usage,
+}
+
+impl std::fmt::Display for InvalidToolCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "model returned an invalid or incomplete tool call (call {}: {}); no tools from this response were executed", self.index + 1, self.reason)
+    }
+}
+
+impl std::error::Error for InvalidToolCall {}
+
 /// 模型服务。测试用脚本化的实现代替真实网络。
 pub trait Provider: Send + Sync {
     fn complete(

@@ -44406,3 +44406,276 @@ ID 均为 `3c51fbb330b8554f`，`/tmp/colm-urban-ci-current-source.log`。
 `/tmp/colm-ci-as-chunks-{tests,clippy}.log`；diff和格式检查通过。
 此次额外改动仅 test 模块，不改变已构建/启动应用的运行代码或引擎内容ID。
 原失败日志 `/tmp/colm-ci-84535411-job-{126398545169,126398545203,126398545020}.log`。
+
+
+### 2026-11-04：自动并行配置与城市通量的交付后复测
+
+用户要求实际测试。当前本地与 GitHub main 均为 `ead4aa45`；本轮未修改产品代码。
+在当前工作树新跑前端 run-parallel/run-model/run-panel 三个测试文件，75/75 通过，
+并运行 `npm run typecheck` exit0，日志 `/tmp/colm-budget-user-test-{frontend,typecheck}.log`。
+
+后端使用已有缓存、每条90秒硬上限重新执行：`colm-remote --lib sched::` 12/12、
+`colm-cli --bin colm-cli remote_cmd::remote_cmd_tests` 57/57、GUI workspace
+`--lib remote::remote_tests` 52/52、`colm-core --lib urban_flux::urban_flux_tests::` 2/2。
+共123项，全部通过，最长20.08秒；城市植被通量200/200输出逐位一致、maxabs=0。
+完整命令、退出码、日志路径 `/tmp/colm-followup-backend-tests.json`。
+初次GUI筛选误写 remote::tests 得到0项，不计通过，随后纠正筛选并实际运行52项。
+
+真实原生验收直接使用已构建包
+`gui/src-tauri/target/preview-urban-ci-fixed-20261104/CoLM Desktop.app`，
+创建隔离 HOME `/private/tmp/cqa-6aj_knk8`、测试项目和两台虚构服务器配置，
+端口18903，独立进程64063。所有操作通过真实WKWebView控件和真实Tauri IPC。
+没有替换IPC结果；观察器逐次转发原调用。驱动等待切换主机后的异步恢复完成、
+字段重新启用后才输入，没有绕过disabled闸门。
+
+原生10项通过：Rust 2×48生成2进程×48线程；Fortran同预算96进程×1线程；
+B服务器使用3×64默认值；切回A保留编辑后的4×32；0节点禁用提交且显示校验；
+PBS多节点自动方案被拦截；PBS单节点允许；2×512预算拆为4进程×256线程；
+切英文后显示一致预算；没有模拟提交或未处理的Promise异常。
+明细 `/tmp/colm-budget-native-check-results.json`，驱动 `/tmp/colm-budget-native-check.py`，
+最终DOM与IPC记录 `/tmp/colm-budget-native-final-snapshot.json`。
+虚构 `.invalid` 主机的负载探测连接失败属于该隔离fixture预期，不计为真实集群验证。
+测试结束通过正常关窗路径关闭64063，原预览进程47142保持运行，未改用户页面或字段。
+本轮没有运行真实多节点任务、全量Cargo、97步或12年长期对拍。
+
+用户随后询问CI失败，重新查询GitHub确认 main 最新 `ead4aa45` 的
+[ci 41777918213](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41777918213)、
+[windows-kernel 41777918178](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41777918178)、
+[release 41777918136](https://github.com/zhongwangwei/CoLM-Desktop/actions/runs/41777918136)
+均为 completed/success；主CI golden为正常skipped，不声称其执行。
+上一提交84535411的ci41776678816保留failure，原因是已修复的新Clippy lint。
+终态证据 `/tmp/colm-parallel-urban-final-{ci,windows-kernel,release}.json`。
+
+
+### 2026-11-04：LSF 自动多节点配置与双集群实测
+
+用户要求继续测试天河和bd，并补全LSF自动多节点。产品改动仅为CLI启动脚本、GUI闸门、
+MPI打包及对应回归；科学方程、参考值、容差和初始状态未变。
+本节最终产品源码ID为`68e99361b42419d0`，不以开发中旧版本的通过替代最终版本验收。
+
+真实负对照：bd作业237661分配node091×2槽、node106×2槽，但Intel MPI默认
+`mpiexec -bootstrap lsf -n 2 hostname`两rank均在node091；增加`-ppn 1`才分散。
+日志`/tmp/bd-parallel-1494d2c1/placement.log`。问题是应用缺少LSF放置策略，
+不是LSF不支持多节点。[IBM span](https://www.ibm.com/docs/SSWRJV_10.1.0/lsf_admin/span_string.html)
+的ptile表示每host的CPU槽数；申请保持`-n ranks*cpus`、`span[ptile=ranks_per_node*cpus]`。
+
+自动启动前检查`LSB_MCPU_HOSTS`的节点数、每host槽数与预算一致，再识别实际MPI安装：
+
+- Intel MPI：`I_MPI_JOB_RESPECT_PROCESS_PLACEMENT=off`及`-bootstrap lsf -ppn RPN`。
+  [Intel placement](https://www.intel.com/content/www/us/en/docs/mpi-library/developer-guide-linux/2021-6/controlling-process-placement.html)
+  说明调度器放置可能覆盖ppn。
+- Open MPI4/5：查询同安装的`ompi_info`或`prte-info`（兼容旧`prte_info`），确认
+  `ras:lsf`及`plm:lsf`，使用`--map-by ppr:RPN:node:PE=CPUS --bind-to core`。
+  [Open MPI LSF](https://docs.open-mpi.org/en/v5.0.8/launching-apps/lsf.html)。
+- MPICH Hydra：要求实际版本输出含Hydra标识，且`Launchers available`和
+  `Resource management kernels available`两项都显式含lsf；使用
+  `-rmk lsf -bootstrap lsf -ppn RPN`，拒绝`HYDRA_HOST_FILE`冲突。
+  依据MPICH4.2.3的[选项解析](https://github.com/pmodels/mpich/blob/v4.2.3/src/pm/hydra/mpiexec/options.c)、
+  [能力输出](https://github.com/pmodels/mpich/blob/v4.2.3/src/pm/hydra/mpiexec/mpiexec.c)与
+  [默认资源管理选择](https://github.com/pmodels/mpich/blob/v4.2.3/src/pm/hydra/mpiexec/get_parameters.c)。
+
+未知MPI、缺LSF组件、查询失败、参数冲突均明确报错，不退到SSH启动。自动模式拒绝
+`COLM_MPIEXEC_ARGS`，手动模式保持；LSF自动不接受srun，Slurm/PBS/Bare边界保持。
+Fortran共享运行库在`kernels/_runtime`，有bundle时拒绝不同的显式MPI launcher，
+以免混用MPI ABI。stage脚本补入同安装查询工具及依赖闭包，并清除旧缓存查询工具。
+实际PRRTE4.1.0需`--parsable --all`，未沿用不支持的旧查询参数。
+Linux合成安装/污染PATH/旧缓存回归2/2：`/private/tmp/colm-mpi-stage-query-scbfmbew/results.json`。
+Mac bundle的`ompi_info --version`、`prte-info --parsable --all`和`mpiexec -n 1 hostname`
+均exit0：`/tmp/colm-lsf-bundled-mpi-check.json`及对应三份log。
+本机没有LSF组件，未声称Open MPI+LSF已完成集群实测。
+
+快速门禁：`npm test`1661/1661；typecheck、lint、format:check均exit0，
+`/tmp/colm-lsf-frontend-full.log`、`/tmp/colm-lsf-final-{typecheck,eslint,prettier}.log`。
+`cargo test --offline --locked -p colm-cli --bin colm-cli remote_cmd::remote_cmd_tests -- --test-threads=1`
+59/59，`cargo clippy --offline --locked -p colm-cli --bin colm-cli --tests -- -D warnings` exit0；
+命令/退出码在`/tmp/colm-lsf-backend-verification-v3.json`，日志为`/tmp/colm-lsf-cli-tests-v3.log`
+及`/tmp/colm-lsf-clippy-v3.log`。两个workspace fmt、bash语法和diff检查通过。
+独立复审APPROVE，另跑LSF两项回归通过；shell回归覆盖三类MPI、PRTE两名称、
+缺组件/查询失败/错误分配/参数冲突与Fortran ABI冲突，fixture不充作真实集群。
+
+本次完整原生构建、sidecar及15个kernel校验均exit0：`/tmp/colm-lsf-mpich-native-build.json`
+和`/tmp/colm-lsf-mpich-native-{stage,kernels,app}.log`。
+build source SHA256 `65ae1d122af15e0a8ab6c99f715f50cb020aca2c52afd95517c7cdb98e7db9c9`，
+包内CLI SHA256 `01374ea48e4c386a08409fdd79b2e7d2bfa5613f16a01e84aa8e244f64e779f7`。
+已正常重启完整路径`gui/src-tauri/target/preview-lsf-auto-mpich-20261104/CoLM Desktop.app`，
+PID33559、ready=complete/home=true/lang=zh-CN，证据`/tmp/colm-lsf-mpich-native-ready.json`。
+早期QA改变共享WebKit语言偏好，曾使只认中文的检查脚本误报未就绪；已恢复中文并修正检查。
+HOME隔离配置不代表WebKit偏好隔离，之后不再依赖这一假设切语言。
+打包CLI真实argv回归36/36（15有效、21拒绝），15脚本bash-n通过，全部为最终源码ID：
+`/private/tmp/colm-lsf-mpich-cli-kfeg7wsc/{results,summary}.json`、
+`/tmp/colm-lsf-mpich-cli-probe.py`及log。Fortran只读清单采用严格SSH fixture，非集群实跑。
+
+bd实际环境选择站点MPICH Hydra4.2.3，能力检查确认同时支持LSF资源管理和启动。
+只修改该服务器`env_script`：初始化`/etc/profile`，PATH加入专用cmake-only目录、
+站点MPICH bin与Cargo；不加入Conda MPI或全局Intel MPI库路径，不写placement/debug环境。
+专用目录只链接已有CMake3.31.5，版本与最小CMake项目检查通过。
+修改走真实`remote_save_config`，重读后确认其他字段未变，先保留0600备份；
+`/tmp/colm-bd-lsf-settings-change.json`记录变更/备份。
+`/tmp/bd-parallel-1494d2c1/{cmake-only-smoke,mpich-launcher-capabilities,cmake-only-fortran-ldd-comparison}.json`
+证明CMake/MPICH能力与旧Fortran依赖未变。旧Fortran kernel原有NetCDF/Intel编译库缺失仍在，
+不声称其完成科学运行；没有为了Rust启动改变其MPI ABI。
+
+最终版本天河实跑通过：Slurm8899021为1node×64核（cnode4860），8899023为2nodes×64核
+（cnode5397/cnode5428），均COMPLETED/0；模型step8899023.1实际为2nodes/2tasks/128CPUs。
+双节点每rank32块/704patch、64threads，2步后128个restart及1个history的SHA256全部一致。
+完整命令、退出码、拓扑、校验记录`/tmp/colm-tianhe-hydra-final-live-state.json`，
+`/private/tmp/colm-tianhe-final-68e99361b42419d0-a989fb54/{output-comparison.json,baseline-terminal.log,two-node-terminal.log}`。
+这是短程并行不变性验证，不代表长期数值验收或性能最优。
+
+68e99版本bd单节点237726（1×48）已DONE且应用exit0：node091，2步、42208patch/9blocks，
+30个输出完整，与此前2fd7单节点物理基线SHA256全部一致；
+`/tmp/bd-parallel-1494d2c1/output-hashes-final1.json`。双节点237727（2×48）截至17:53仍PEND，
+未记为通过；队列105台CPU host满槽，非用户960slots额度不足。
+`/tmp/colm-bd-hydra-final-live-state.json`、
+`/tmp/bd-parallel-1494d2c1/{validation-hydra-final-pending.md,final-pending-diagnosis-1634.log}`。
+终态后仍须检查应用退出码及30个科学输出，不能只看LSF DONE。未重复提交、降预算或改队列绕过验收。
+
+开发阶段记录保留以免混淆：3c51版本天河8898103/8898113单/双节点129文件一致，
+bd237663自动单节点/237664手动双节点30文件一致；2fd7版本天河8898402/8898407
+64/128核129文件一致，bd237699/237723使用Intel MPI的48/96核30文件一致。
+bd237700虽LSF DONE但应用exit1，原因是当时PATH选中尚未受支持的MPICH，仍记失败。
+最终补全Hydra且改用不影响Fortran的站点MPICH环境后重新提交，旧通过不替代最终待验结果。
+
+### 2026-11-04：当前 Rust 核心全量单测与四倍精度参考向量复核
+
+用户询问Rust核心是否均测试过。当前源码ID仍为`68e99361b42419d0`，重计算经T7920 runner，
+没有在Mac跑全量Cargo。权威来源为当前本地已跟踪文件含未提交修改的私有快照，
+2740文件、111349657字节；不包含五个未跟踪数据报告及外部数据集。
+源清单`/tmp/colm-full-rust-source.json`，目录`/private/tmp/colm-full-rust-20261104-le8o50p_`。
+
+`colm-core`全量单测559通过/0失败/1默认忽略：
+作业`codex-fdf1740391fe41ad98865291b8712ea6`为succeeded/exit0。
+运行全部测试`colm_core-12043c0e2bc3437b --test-threads=1`前后确认二进制SHA256
+`3b42fb5c5b5db1b65cf830a5a4ca8a1af5e69c50ea6f8bbfabf51c7046783ea8`不变，
+并逐一核对编译源与当前243个core文件SHA256一致。
+结果`/tmp/colm-core-priority-evidence/results/{verification.json,core-all-tests.log}`。
+该二进制由当前全workspace编译作业df94构建，未拿旧缓存结果充作本次测试。
+
+默认忽略的`matches_gfortran_real16_on_a_large_vector_file`另行实际执行通过：
+作业`codex-c640fcdf287c4367b2b03b2e5041f580`为succeeded/exit0。
+用GNU Fortran15.2.0和仓库`oracle/scripts/binary128/gen.f90`（SHA256
+`0b151ec88c843a491e4c785b4e65439c95d3a770dd59489b26473125fc4bd13a`）
+`gfortran -O2`编译，生成1000000组REAL(16)参考向量、seed20261104。
+向量224000000字节、SHA256 `2a4a3c92453b7866e982d8dca83dc32eeded386a6753c989576bc9c3522fef41`，
+执行同一core二进制`--ignored --exact binary128::binary128_tests::matches_gfortran_real16_on_a_large_vector_file --test-threads=1`，
+1通过/0失败，比较四则运算、f64转换与比较操作的逐位结果。
+日志与完整命令`/tmp/colm-core-quad-evidence/results/{verification.json,quad-reference-test.log}`，
+runner终态`/tmp/colm-core-quad-status.json`。
+大向量只留远程私有tmp，未取回Mac。
+
+全workspace首轮未通过，原始失败保留：959e作业在编译前因只读Cargo registry不能解包
+adobe-cmap-parser失败；后以私有可写Cargo home复用只读缓存，未修改共享registry。
+df94作业完整编译成功后，助手测试399通过/24失败/1忽略；其中临时目录位于target祖先
+触发正确的文件安全拒绝，另有PATH缺真实sqlite3导致OpenCode启动前校验失败。
+该轮主测试进程399通过/24失败/1忽略，不能记全绿；子进程自身的1项汇总不重复计数。原日志在远程df94作业results下
+`cargo-workspace-lib-bins.log`及`verification.json`。
+后续重跑使用正常job临时目录，仅CLI原有256字节路径fixture单独使用61字节短目录，
+并只把已有真实SQLite CLI加入专用测试PATH；不关闭安全检查、不stub SQLite、不跳过失败测试。
+后续旧68e99完整工作区作业`codex-3c0c6437eaec4ae79d37261aae098cbd`已完成18/37个程序，
+1484通过/16失败/2忽略；15项remote环境失败在下面单独复核通过，1项history为磁盘压力下的冷启动超时。
+随后产品代码已变且磁盘I/O压力严重，只取消了该旧快照作业，终态cancelled/exit-15，
+没有将未执行的19个程序计为通过。`/tmp/colm-full-workspace-cancelled-evidence`保留原日志，
+`results/corrected-test-results.json`按每个主进程最后一条汇总计数，避免将嵌套子进程汇总误当主结果；
+其中助手lib实际423通过/0失败/1忽略。当前不声称整个工作区全绿、全部物理开关或长期模拟已验收。
+
+### 2026-11-04：历史库普通打开不再抢占写事务
+
+全工作区验证在T7920发现`concurrent_first_open_preserves_every_audit_event`失败：
+`enable operation ledger WAL → database is locked`。清理测试环境后，同一二进制的原场景
+再次失败（28.19秒），不是一次性噪声；原证据保留在作业
+`codex-4e0c80ea91a94b429302a7ad2e152720/results/03-colm_history.log`。
+
+确认了另一项确定缺陷：`History::open`即使遇到当前schema，仍无条件`BEGIN IMMEDIATE`。
+新增回归先初始化数据库、写入已提交审计事件，再由另一连接持有写事务，此时普通打开应能
+读取已提交记录。旧代码5.21秒后报`lock operation ledger schema → SQLITE_BUSY`；
+`/tmp/colm-history-writer-regression-before.log`。这与
+[SQLite事务约定](https://sqlite.org/lang_transaction.html#deferred_immediate_and_exclusive_transactions)
+一致：IMMEDIATE立即争夺唯一写事务；WAL允许读者与已有writer共存。
+
+修复仅在WAL/FULL配置后先独立读取`user_version`，当前或更高版本直接返回；
+只有需要迁移时才申请IMMEDIATE写锁，并在锁内重新读取版本。跨进程首次建表/迁移仍原子提交，
+不增加依赖、不增加无限等待或额外文件锁，保留5秒等待和`synchronous=FULL`。
+不能只凭暖启动回归就断言原WAL报错已消失，原12线程×8轮冷启动场景仍作为服务器验收。
+独立代码审查通过，未发现数据正确性或错误语义阻塞项。
+
+本地`cargo test --offline --locked -p colm-history --lib -- --test-threads=1`
+50通过/0失败/0忽略（27.76秒），含新回归和原始冷启动测试；
+`/tmp/colm-history-fastpath-local-tests.log`。`cargo fmt --all -- --check`与
+`cargo clippy --offline --locked -p colm-history --all-targets -- -D warnings`均exit0。
+
+本次完整应用源码ID`5cb51c2b94b15546`；这是前述LSF验收版本68e99之后的历史库修改，
+不把此前集群运行冒记为新ID验收。sidecar与15个kernel/MPI校验通过：
+`/tmp/colm-history-native-build.json`、`/tmp/colm-history-native-{stage,kernels}.log`。
+初次预览漏带bundle资源配置与e2e-driver，因此验收接口未启动，明确没有记为页面通过。
+已补齐两份bundle配置和e2e-driver重建，`/tmp/colm-history-native-app-driver.log` exit0，
+正常退出旧预览并启动完整路径
+`gui/src-tauri/target/preview-history-open-driver-20261104/CoLM Desktop.app`，
+PID72362、ready=complete/home=true/lang=zh-CN；`/tmp/colm-history-native-ready.json`。
+新包CLI SHA256 `78be1949933e2506fba7492d11534d3fb3e276ee917552ce8a4b56acfa3def55`；
+colm-rs、mkinidata-rs、mksrfdata-rs的程序SHA256与前一预览完全相同，科学引擎未改动。
+
+随后才提交T7920复核`codex-b71a233fe186455194a6b1e75d599fe1`，执行全history单测、
+额外一轮原始冷启动压力测试和Clippy；提交命令`/tmp/colm-history-remote-verify.py`，
+源快照同步记录`/tmp/colm-history-remote-snapshot.json`。终态failed：全模块49通过/1失败，
+额外冷启动0通过/1失败，Clippy通过；
+`/tmp/colm-history-fastpath-t7920-attempt1/results/{verification.json,history-all.log,cold-open-repeat.log,clippy.log}`。
+仍失败的是原WAL冷启动场景，新的持写锁普通打开回归通过，不能混为同一结论。
+
+工作区另外15项remote测试失败已证实为测试环境问题：OBRef runner默认Conda库路径令系统
+bash输出libtinfo兼容警告，污染了模拟调度器的严格输出；源码快照不带.git，另有两项需要真实
+Git index。清理测试子进程LD_LIBRARY_PATH，以私有Git index绑定实际只读源码，仅两项
+checkout测试设置Git环境，其他测试不继承；同一二进制128/128通过，无产品修改或测试跳过。
+`codex-4e0c80ea91a94b429302a7ad2e152720/results/{verification.json,00-checkout-index.log,01-checkout-index.log,02-colm_remote.log}`。
+两项checkout单独执行，其余126项另跑，合计覆盖全部128项，未拿空筛选充数。
+
+合并前分支只读核查：本地只有main，GitHub heads也只有main，无可删除的开发分支。
+`/private/tmp/CoLM-Desktop-rustmp`是detached工作树，不是分支，未按分支清理误删。
+
+
+冷启动后续取证：独立私有runner作业`codex-2f02cb3d097e4c3e8e7d9d712ebca0b4`确认
+T7920 data01是普通ext4（非sync挂载），系统I/O full pressure为85–88%。
+三个1KB写入并fsync耗时0.603/8.802/4.651秒；12连接场景中健康持有者启用WAL
+耗时10.040或7.602秒，其他11个连接在约5.008秒耗尽现有锁等待预算。
+将WAL内部busy timeout设0、仍保留外部5秒重试的对照同样只有1/12成功，另一轮
+schema commit本身耗时8.392秒，因此这项算法替代已被实验证伪，未加入产品。
+完整逐连接时间线`/tmp/colm-history-lock-probe-evidence/results/probe.json`，脚本
+`/tmp/colm-history-lock-probe-source/probe.py`。诊断任务succeeded仅表示取证完成，不代表压力测试通过。
+原始冷启动在严重磁盘拥堵时仍可能超过5秒并明确报错；没有延长超时或降低FULL同步来伪装修复。
+只停止了自己的过时验证任务，未停止其他用户/会话任务。正常本机环境的原冷启动场景额外复核通过：
+`/tmp/colm-history-cold-final-local.log`。
+
+### 2026-11-04：助手无效工具调用的有界协议恢复
+
+用户实际会话使用official@168/deepseek-flash。已成功执行Xerj文档检索20条、
+source_history/search_code及后续search_code/fetch_url；第三次模型生成在整批工具调用
+校验时失败。会话未保存该坏响应原始SSE，无法断言具体缺字段或截断原因，未据此猜测性修补JSON。
+
+`validate_turn`现在区分缺ID、缺工具名、重复ID、非法JSON、参数非对象，错误只包含
+调用序号和静态字段类别，不带参数。整批通过校验后才允许执行，坏批次中任何工具都不执行。
+Agent对这种类型化错误每轮最多重新生成一次：只在尚未输出正文且未进入最终总结时恢复，
+消耗现有生成步数并重做实际请求的上下文预算。修复指令只加到发送副本的System消息，
+不伪造用户输入、不写入历史；只使用类型化静态诊断，不把外层错误上下文送回模型。
+已完成工具结果、未知效果、取消及审批状态保持原控制逻辑；第二次无效或其他错误直接停止。
+
+先红后绿证据`/tmp/colm-assistant-invalid-call-provider-before.log`；Agent45/45、Provider31/31，
+`/tmp/colm-assistant-{agent-tests,provider-tests}.log`；Clippy exit0，
+`/tmp/colm-assistant-clippy.log`。最终静态诊断收口后6条恢复回归再次通过，
+`/tmp/colm-assistant-final-protocol-tests.log`。独立复审APPROVE，fmt及diff检查通过。
+没有调用付费DeepSeek接口回放真实请求；这些是确定性协议/状态回归。
+
+包含本轮全部修改的应用源码ID`b05cdf7df028d16a`，完整sidecar/app构建均exit0：
+`/tmp/colm-final-agent-history-native-build.json`及stage/app日志。
+启动完整路径`gui/src-tauri/target/preview-agent-history-final-20261104/CoLM Desktop.app`，
+PID14056、ready=complete/home=true/lang=zh-CN；
+`/tmp/colm-final-agent-history-native-ready.json`。
+旧预览已不在运行，首次重启辅助脚本因连接不到旧验收端口而停止；确认无旧进程后正常启动新版，
+没有把这次助手脚本失败冒记为应用故障。
+新包agent SHA256 `fd01ce1f7907f1362beda4504e9c29b3e850db0ef89e82a5e0f7ee23d1758fa8`，
+与旧包不同；CLI及三个科学程序SHA256保持前述历史库版本值，源包SHA256
+`97d4eb4bb2108bf4e06d9b5b310129702b4c8a64a1d2a00faa3cdf5f4d99c4ef`。
+最终打包CLI36/36入口回归及15份bash语法校验通过，source全部为b05cdf7df028d16a；
+`/private/tmp/colm-lsf-mpich-cli-05d6ibhf/{results,summary}.json`、
+`/tmp/colm-final-packaged-cli-probe.py`及log。没有据此把仍排队的bd双节点作业算作实跑通过。
+
+发布前以当前完整工作树重跑两包联合Clippy，exit0（5.64秒），
+`/tmp/colm-final-history-agent-clippy.log`；最终根workspace fmt及diff检查通过。

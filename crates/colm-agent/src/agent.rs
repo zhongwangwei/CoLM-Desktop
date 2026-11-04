@@ -86,6 +86,8 @@ impl Agent<'_> {
         let mut previous_reads = Vec::new();
         let mut repeated_reads = 0;
         let mut limit_reached = false;
+        let mut protocol_repaired = false;
+        let mut protocol_notice = None;
         for step in 1..=self.limits.max_steps {
             if cancel.load(Ordering::SeqCst) {
                 bail!("cancelled");
@@ -105,12 +107,21 @@ impl Agent<'_> {
                     "execution_limit",
                 );
             }
+            // Recovery instructions belong only to this request, never persisted conversation.
+            let mut recovery_history;
+            let history_for_request = if let Some(content) = protocol_notice.take() {
+                recovery_history = history.clone();
+                recovery_history.push(Message::System { content });
+                &recovery_history
+            } else {
+                &*history
+            };
             let mut summary_history;
             // 总结请求发空工具集；这里固定一个空切片，避免 `&[]` 临时值跨语句借用的麻烦。
             let empty_tools: [Value; 0] = [];
             let (messages, send_tools): (&[Message], &[Value]) = if finalizing {
                 // 运行控制提示只用于本次请求，不伪装成用户保存的消息。
-                summary_history = history.clone();
+                summary_history = history_for_request.clone();
                 let reason = if repeated_reads >= 3 {
                     "The same read-only queries have been repeated three times with unchanged results."
                 } else {
@@ -121,7 +132,7 @@ impl Agent<'_> {
                 });
                 (&summary_history, &empty_tools)
             } else {
-                (&*history, &tools)
+                (history_for_request, &tools)
             };
             // 每步发送前解析窗口预算。解析失败（未知窗口、api_options 输出键冲突）必须在这里
             // 结束本轮：不在解析失败后调用模型，也不继续派生新的工具调用。
@@ -186,10 +197,14 @@ impl Agent<'_> {
                 }
             };
             let mut final_events = Vec::new();
-            let mut turn = self.provider.complete_cancellable(
+            let mut emitted_content = false;
+            let response = self.provider.complete_cancellable(
                 &request_messages,
                 send_tools,
                 &mut |event| {
+                    if matches!(&event, StreamEvent::Content(text) if !text.is_empty()) {
+                        emitted_content = true;
+                    }
                     if finalizing {
                         final_events.push(event);
                         return;
@@ -200,11 +215,29 @@ impl Agent<'_> {
                     })
                 },
                 cancel,
-            )?;
+            );
             // 停止之后才返回的这次生成不算数：不记进历史，也不当成正常结束发 usage 与 turn_done（G-02）。
             if cancel.load(Ordering::SeqCst) {
                 bail!("cancelled");
             }
+            let mut turn = match response {
+                Ok(turn) => turn,
+                Err(error) => {
+                    if let Some(invalid) = error.downcast_ref::<crate::provider::InvalidToolCall>()
+                    {
+                        // Validation rejects the entire batch before dispatch. One fresh generation
+                        // may repair the protocol, but it still consumes the normal step/context budget.
+                        if !protocol_repaired && !emitted_content && !finalizing {
+                            protocol_repaired = true;
+                            outcome.usage.prompt_tokens += invalid.usage.prompt_tokens;
+                            outcome.usage.completion_tokens += invalid.usage.completion_tokens;
+                            protocol_notice = Some(format!("[Tool-call protocol correction] {invalid}. No calls from that response were executed. Continue using the confirmed results already in the conversation; do not repeat completed actions. If tools are available, return complete calls with nonempty unique IDs, function names, and JSON-object arguments. Otherwise answer from the existing evidence."));
+                            continue;
+                        }
+                    }
+                    return Err(error);
+                }
+            };
             outcome.steps = step;
             outcome.usage.prompt_tokens += turn.usage.prompt_tokens;
             outcome.usage.completion_tokens += turn.usage.completion_tokens;
