@@ -233,7 +233,32 @@ test('automatic plans show the resolved resources and submit the raw budget', as
   assert.equal(call.args.cpus, null);
 });
 
-test('invalid budgets and non-Slurm multi-node plans are visible and cannot start', async () => {
+test('LSF automatic multi-node plans submit the original budget for both engines', async () => {
+  for (const engine of ['rust', 'fortran']) {
+    const p = await page({ language: 'en' });
+    await p.set('run-scheduler', 'lsf');
+    await p.set('run-engine', engine);
+    assert.equal(p.submit().props.disabled, false);
+    assert.match(
+      p.text(),
+      engine === 'rust'
+        ? /2 nodes × 48 cores per node; 2 processes with 48 threads each; total CPU budget: 96/
+        : /2 nodes × 48 cores per node; 96 processes with 1 thread each; total CPU budget: 96/,
+    );
+    await (p.submit().props.run as () => Promise<unknown>)();
+    const call = p.calls.find((entry) => entry.command === 'remote_run')!;
+    assert.equal(call.args.scheduler, 'lsf');
+    assert.equal(call.args.engine, engine);
+    assert.equal(call.args.parallel, 'auto');
+    assert.equal(call.args.nodes, 2);
+    assert.equal(call.args.coresPerNode, 48);
+    assert.equal(call.args.ranks, null);
+    assert.equal(call.args.threads, null);
+    assert.equal(call.args.cpus, null);
+  }
+});
+
+test('invalid budgets and unsupported multi-node plans are visible and cannot start', async () => {
   const p = await page({ language: 'en' });
   await p.set('run-nodes', '0');
   assert.equal(p.submit().props.disabled, true);
@@ -241,10 +266,10 @@ test('invalid budgets and non-Slurm multi-node plans are visible and cannot star
   await assert.rejects((p.submit().props.run as () => Promise<unknown>)());
   assert.ok(!p.calls.some((call) => call.command === 'model_migrate_case'));
   await p.set('run-nodes', '2');
-  for (const scheduler of ['bare', 'pbs', 'lsf']) {
+  for (const scheduler of ['bare', 'pbs']) {
     await p.set('run-scheduler', scheduler);
     assert.equal(p.submit().props.disabled, true);
-    assert.match(p.text(), /Automatic multi-node plans currently require Slurm/);
+    assert.match(p.text(), /Automatic multi-node plans currently require Slurm or LSF/);
   }
   await p.set('run-nodes', '1');
   assert.equal(p.submit().props.disabled, false);

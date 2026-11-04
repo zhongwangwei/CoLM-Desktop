@@ -1143,12 +1143,21 @@ impl RunPlan {
     }
 
     fn validate_scheduler(&self, scheduler: Scheduler) -> Result<()> {
-        // mpiexec placement flags differ between MPI implementations; only srun is specified here.
+        ensure!(
+            self.parallel != "auto"
+                || scheduler != Scheduler::Lsf
+                || self.launcher != "srun",
+            "LSF automatic placement uses mpiexec; remove --launcher srun or select manual parallel settings"
+        );
         ensure!(
             self.parallel != "auto"
                 || self.resources.nodes <= 1
-                || (scheduler == Scheduler::Slurm && self.launcher != "mpiexec"),
-            "automatic multi-node runs require Slurm with srun; select manual parallel settings for other launchers"
+                || matches!(
+                    (scheduler, self.launcher.as_str()),
+                    (Scheduler::Slurm, "auto" | "srun")
+                        | (Scheduler::Lsf, "auto" | "mpiexec")
+                ),
+            "automatic multi-node runs require Slurm with srun or LSF with a supported mpiexec; select manual parallel settings for other launchers"
         );
         if self.parallel == "auto" {
             for directive in &self.resources.directives {
@@ -1596,6 +1605,118 @@ fn forcing_policy_guard(cli: &str) -> String {
     format!("colm_forcing_policy=$({cli} fingerprint-policy) || {{ echo 'Update model code: fingerprint-policy is unavailable' >&2; exit 1; }}\n[ \"$colm_forcing_policy\" = '{policy}' ] || {{ echo 'Update model code: forcing content fingerprints must be excluded' >&2; exit 1; }}\n", cli=quote(cli), policy=r#"{"forcing_content_policy":"excluded-v1"}"#)
 }
 
+fn lsf_auto_launcher(plan: &RunPlan, remote_kernel: &str) -> String {
+    let nodes = plan.resources.nodes.max(1);
+    let ranks_per_node = plan.resources.ranks / nodes;
+    let cpus = plan.resources.cpus;
+    // Remote paths are POSIX; MPI is shared beside the preset directories, as in colm-kernel.
+    let parent = remote_kernel
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(".", |(parent, _)| parent);
+    let runtime_path = format!("{parent}/_runtime");
+    let bundled = quote(&format!("{runtime_path}/bin/mpiexec"));
+    let runtime = quote(&runtime_path);
+    let fortran = u8::from(plan.engine == "fortran" || plan.preprocessors == "fortran");
+    format!(
+        r#"if [ -n "${{COLM_MPIEXEC_ARGS:-}}" ]; then
+  echo 'LSF automatic placement configures COLM_MPIEXEC_ARGS; remove it or select manual parallel settings.' >&2
+  exit 1
+fi
+# The Fortran child also loads this runtime; a different launcher could mix MPI ABIs.
+if [ {fortran} = 1 ] && [ -x {bundled} ]; then
+  if [ -n "${{COLM_MPIEXEC:-}}" ] && [ ! "$(command -v "$COLM_MPIEXEC")" -ef {bundled} ]; then
+    echo 'LSF automatic placement must use the MPI bundled with this Fortran kernel; select a matching kernel or manual parallel settings.' >&2
+    exit 1
+  fi
+  COLM_MPIEXEC={bundled}
+  colm_mpi_runtime={runtime}
+  export PATH="$colm_mpi_runtime/bin:$PATH"
+  export LD_LIBRARY_PATH="$colm_mpi_runtime/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+  export OPAL_PREFIX="$colm_mpi_runtime" PRTE_PREFIX="$colm_mpi_runtime" PMIX_PREFIX="$colm_mpi_runtime"
+  export OMPI_MCA_component_path="$colm_mpi_runtime/lib/openmpi"
+else
+  COLM_MPIEXEC=${{COLM_MPIEXEC:-mpiexec}}
+fi
+COLM_MPIEXEC=$(command -v "$COLM_MPIEXEC") || {{ echo 'LSF automatic placement needs mpiexec in the configured server environment.' >&2; exit 1; }}
+# LSF counts CPU slots, while MPI counts processes; validate the resolved allocation before launch.
+read -r -a colm_lsf_slots <<< "${{LSB_MCPU_HOSTS:-}}" || {{ echo 'Cannot read the LSF node allocation (LSB_MCPU_HOSTS).' >&2; exit 1; }}
+if [ "${{#colm_lsf_slots[@]}}" -ne {host_fields} ]; then
+  echo 'LSF allocated a different node count from the automatic budget; refusing to change the plan.' >&2
+  exit 1
+fi
+for ((colm_i=1; colm_i<${{#colm_lsf_slots[@]}}; colm_i+=2)); do
+  if [ "${{colm_lsf_slots[colm_i]}}" != {slots_per_node} ]; then
+    echo 'LSF allocated a different CPU count per node from the automatic budget.' >&2
+    exit 1
+  fi
+done
+# Intel Hydra accepts -version; Open MPI documents --version.
+colm_mpi_version=$("$COLM_MPIEXEC" --version 2>&1) || colm_mpi_version=$("$COLM_MPIEXEC" -version 2>&1) || {{ echo 'Cannot identify the configured LSF MPI launcher.' >&2; exit 1; }}
+case "$colm_mpi_version" in
+  *Intel*MPI*)
+    # Intel otherwise interprets LSF CPU slots as process placement and may ignore -ppn.
+    export I_MPI_JOB_RESPECT_PROCESS_PLACEMENT=off
+    COLM_MPIEXEC_ARGS='-bootstrap lsf -ppn {ranks_per_node}'
+    ;;
+  *'Open MPI'*|*OpenRTE*)
+    colm_mpi_bin=$(dirname "$COLM_MPIEXEC")
+    if [[ "$colm_mpi_version" =~ \((Open[[:space:]]MPI|OpenRTE)\)[[:space:]]+([0-9]+)\. ]]; then
+      colm_mpi_major=${{BASH_REMATCH[2]}}
+    else
+      echo 'Cannot identify the Open MPI runtime version for LSF placement.' >&2
+      exit 1
+    fi
+    if [ "$colm_mpi_major" -ge 5 ]; then
+      # PRRTE uses prte-info in newer releases and prte_info in older releases.
+      if [ -x "$colm_mpi_bin/prte-info" ]; then
+        colm_mpi_info="$colm_mpi_bin/prte-info"
+      else
+        colm_mpi_info="$colm_mpi_bin/prte_info"
+      fi
+    else
+      colm_mpi_info="$colm_mpi_bin/ompi_info"
+    fi
+    if [ ! -x "$colm_mpi_info" ]; then
+      echo 'Open MPI automatic placement needs its matching prte-info/prte_info or ompi_info.' >&2
+      exit 1
+    fi
+    colm_component_info=$("$colm_mpi_info" --parsable --all) || {{ echo 'Cannot inspect the matching Open MPI LSF components.' >&2; exit 1; }}
+    for colm_component in ras plm; do
+      case "$colm_component_info" in
+        *":$colm_component:lsf:"*) ;;
+        *) echo 'Open MPI automatic placement needs native LSF allocation and launch components; use an LSF-enabled MPI or manual settings.' >&2; exit 1 ;;
+      esac
+    done
+    COLM_MPIEXEC_ARGS='--map-by ppr:{ranks_per_node}:node:PE={cpus} --bind-to core'
+    ;;
+  *'HYDRA build details:'*)
+    if [ -n "${{HYDRA_HOST_FILE:-}}" ]; then
+      echo 'MPICH Hydra automatic placement uses the LSF allocation; remove HYDRA_HOST_FILE or select manual settings.' >&2
+      exit 1
+    fi
+    # Hydra must provide both the LSF launcher and resource manager; ppn converts slots to ranks.
+    if ! printf '%s\n' "$colm_mpi_version" | awk '
+      /^[[:space:]]*Launchers available:/ {{ for (i=1; i<=NF; i++) if ($i=="lsf") launch=1 }}
+      /^[[:space:]]*Resource management kernels available:/ {{ for (i=1; i<=NF; i++) if ($i=="lsf") rmk=1 }}
+      END {{ exit !(launch && rmk) }}'; then
+      echo 'MPICH Hydra automatic placement needs native LSF launcher and resource-manager support.' >&2
+      exit 1
+    fi
+    COLM_MPIEXEC_ARGS='-rmk lsf -bootstrap lsf -ppn {ranks_per_node}'
+    ;;
+  *)
+    echo 'LSF automatic placement supports Intel MPI, LSF-enabled Open MPI or MPICH Hydra; select a supported MPI or manual parallel settings.' >&2
+    exit 1
+    ;;
+esac
+export COLM_MPIEXEC COLM_MPIEXEC_ARGS
+"#,
+        host_fields = nodes * 2,
+        slots_per_node = ranks_per_node * cpus,
+    )
+}
+
 /// 作业体：先确保引擎编好，再跑三段。
 #[allow(clippy::too_many_arguments)]
 fn job_body(
@@ -1633,7 +1754,12 @@ fn job_body(
     // Rust 实现都要在作业里导出 `COLM_MPIEXEC`，否则作业里的 `colm-cli run --ranks>1`
     // 会退化成找不到 mpiexec。
     let rust_multi_process = plan.engine == "rust" || plan.preprocessors == "rust";
-    let launcher = if plan.resources.ranks > 1 && srun {
+    let launcher = if plan.resources.ranks > 1
+        && scheduler == Scheduler::Lsf
+        && plan.parallel == "auto"
+    {
+        lsf_auto_launcher(plan, remote_kernel)
+    } else if plan.resources.ranks > 1 && srun {
         let placement = if plan.resources.nodes > 0 {
             format!(
                 "--nodes={} --ntasks-per-node={} ",

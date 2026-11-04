@@ -5,6 +5,8 @@ set -euo pipefail
 KERNELS="${1:-kernels}"
 RUNTIME="$KERNELS/_runtime"
 mkdir -p "$RUNTIME/bin" "$RUNTIME/lib" "$RUNTIME/share" "$RUNTIME/etc"
+# Cached query tools from another MPI release would report the wrong capabilities.
+rm -f "$RUNTIME/bin/ompi_info" "$RUNTIME/bin/prte_info" "$RUNTIME/bin/prte-info"
 
 copy_file() {
   local src=$1 dst=$2
@@ -38,10 +40,11 @@ case "$(uname -s)" in
   Darwin)
     ompi=$(brew --prefix open-mpi)
     prrte=$(brew --prefix prrte)
-    copy_file "$ompi/bin/mpiexec" "$RUNTIME/bin/mpiexec"
-    for name in prte prted prterun; do
-      path=$(command -v "$name" || true)
-      test -n "$path" && copy_file "$path" "$RUNTIME/bin/$name"
+    for name in mpiexec ompi_info; do
+      copy_file "$ompi/bin/$name" "$RUNTIME/bin/$name"
+    done
+    for name in prte prted prterun prte_info prte-info; do
+      copy_file "$prrte/bin/$name" "$RUNTIME/bin/$name"
     done
     for prefix in "$ompi" "$prrte"; do
       for lib in "$prefix"/lib/*.dylib; do copy_file "$lib" "$RUNTIME/lib/$(basename "$lib")"; done
@@ -114,12 +117,22 @@ case "$(uname -s)" in
 
   Linux)
     launcher=$(command -v mpiexec.openmpi || command -v mpiexec)
+    mpi_bin=$(dirname "$(readlink -f "$launcher")")
+    info="$mpi_bin/ompi_info"
+    test -x "$info" || { echo "Open MPI query tool missing beside $launcher" >&2; exit 2; }
     copy_file "$launcher" "$RUNTIME/bin/mpiexec"
-    daemon=$(command -v orted || true)
-    test -z "$daemon" || copy_file "$daemon" "$RUNTIME/bin/orted"
-    libdir=$(ompi_info --path libdir --parsable | cut -d: -f3-)
-    pkglibdir=$(ompi_info --path pkglibdir --parsable | cut -d: -f3-)
-    datadir=$(ompi_info --path datadir --parsable | cut -d: -f3-)
+    copy_file "$info" "$RUNTIME/bin/ompi_info"
+    copy_file "$mpi_bin/orted" "$RUNTIME/bin/orted"
+    version=$("$info" --parsable | awk -F: '/^ompi:version:full:/ {print $4}')
+    # Open MPI 4 uses ORTE; a PRTE tool elsewhere on PATH belongs to another runtime.
+    if test "${version%%.*}" -ge 5; then
+      for name in prte prted prterun prte_info prte-info; do
+        copy_file "$mpi_bin/$name" "$RUNTIME/bin/$name"
+      done
+    fi
+    libdir=$("$info" --path libdir --parsable | cut -d: -f3-)
+    pkglibdir=$("$info" --path pkglibdir --parsable | cut -d: -f3-)
+    datadir=$("$info" --path datadir --parsable | cut -d: -f3-)
     for lib in "$libdir"/*.so*; do copy_file "$lib" "$RUNTIME/lib/$(basename "$lib")"; done
     if test -d "$pkglibdir"; then
       mkdir -p "$RUNTIME/lib/openmpi"
@@ -139,8 +152,8 @@ case "$(uname -s)" in
     # (the 0.3.0-beta.4 Linux bundle failed its `mpiexec -n 1 hostname` check this way).
     # Ask Open MPI where that is and put a copy there too.
     runtime_abs=$(cd "$RUNTIME" && pwd)
-    relocated_pkglib=$(OPAL_PREFIX="$runtime_abs" ompi_info --path pkglibdir --parsable | cut -d: -f3-)
-    relocated_data=$(OPAL_PREFIX="$runtime_abs" ompi_info --path datadir --parsable | cut -d: -f3-)
+    relocated_pkglib=$(OPAL_PREFIX="$runtime_abs" "$info" --path pkglibdir --parsable | cut -d: -f3-)
+    relocated_data=$(OPAL_PREFIX="$runtime_abs" "$info" --path datadir --parsable | cut -d: -f3-)
     echo "relocated Open MPI component directory: $relocated_pkglib"
     case "$relocated_pkglib" in
       "$runtime_abs"/*)

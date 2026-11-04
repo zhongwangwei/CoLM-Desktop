@@ -2188,7 +2188,7 @@ fn planned_nodes_and_slurm_launch_nodes_cannot_diverge() {
 }
 
 #[test]
-fn automatic_multi_node_requires_a_defined_srun_placement() {
+fn automatic_multi_node_requires_a_defined_scheduler_placement() {
     let args = opts(&[
         "--parallel",
         "auto",
@@ -2198,9 +2198,10 @@ fn automatic_multi_node_requires_a_defined_srun_placement() {
         "48",
     ]);
     let plan = RunPlan::from_opts(&args).unwrap();
-    for scheduler in [Scheduler::Bare, Scheduler::Pbs, Scheduler::Lsf] {
+    for scheduler in [Scheduler::Bare, Scheduler::Pbs] {
         assert!(job_body("/r", "eng", "/c", "/k", &plan, scheduler, &args).is_err());
     }
+    assert!(job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Lsf, &args).is_ok());
     let explicit_mpiexec = RunPlan::from_opts(&opts(&[
         "--parallel",
         "auto",
@@ -2215,6 +2216,19 @@ fn automatic_multi_node_requires_a_defined_srun_placement() {
     assert!(explicit_mpiexec
         .validate_scheduler(Scheduler::Slurm)
         .is_err());
+    explicit_mpiexec.validate_scheduler(Scheduler::Lsf).unwrap();
+    let explicit_srun = RunPlan::from_opts(&opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "48",
+        "--launcher",
+        "srun",
+    ]))
+    .unwrap();
+    assert!(explicit_srun.validate_scheduler(Scheduler::Lsf).is_err());
     let single = RunPlan::from_opts(&opts(&[
         "--parallel",
         "auto",
@@ -2232,6 +2246,328 @@ fn automatic_multi_node_requires_a_defined_srun_placement() {
     ] {
         single.validate_scheduler(scheduler).unwrap();
     }
+}
+
+#[test]
+fn lsf_automatic_scripts_keep_cpu_slots_separate_from_mpi_processes() {
+    for (engine, preprocessors, ranks) in [
+        ("rust", "rust", 2),
+        ("fortran", "rust", 96),
+        ("fortran", "fortran", 96),
+    ] {
+        let args = opts(&[
+            "--parallel",
+            "auto",
+            "--nodes",
+            "2",
+            "--cores-per-node",
+            "48",
+            "--engine",
+            engine,
+            "--preprocessors",
+            preprocessors,
+        ]);
+        let plan = RunPlan::from_opts(&args).unwrap();
+        let body = job_body("/r", "eng", "/c", "/k", &plan, Scheduler::Lsf, &args).unwrap();
+        let script = job::job_script(
+            "/r",
+            "lsf-auto",
+            &body,
+            &Spec {
+                scheduler: Scheduler::Lsf,
+                resources: plan.resources.clone(),
+                name: "lsf-auto".into(),
+            },
+        )
+        .unwrap();
+        assert!(script.contains("#BSUB -n 96"), "{script}");
+        assert!(script.contains("span[ptile=48]"), "{script}");
+        assert!(script.contains(&format!("--ranks {ranks}")), "{script}");
+        assert!(script.contains(&format!("-ppn {}", ranks / 2)), "{script}");
+        assert!(
+            script.contains("I_MPI_JOB_RESPECT_PROCESS_PLACEMENT=off"),
+            "{script}"
+        );
+        assert!(script.contains("LSB_MCPU_HOSTS"), "{script}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn lsf_auto_launcher_checks_real_mpi_family_allocation_and_kernel_runtime() {
+    use std::os::unix::fs::PermissionsExt;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("colm-lsf-launcher-{}-{unique}", std::process::id()));
+    let kernels = dir.join("kernels with spaces");
+    let kernel = kernels.join("preset");
+    let runtime = kernels.join("_runtime");
+    let bin = runtime.join("bin");
+    std::fs::create_dir_all(&kernel).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join("mpiexec");
+    std::fs::write(&launcher, "#!/bin/sh\nif [ \"${QA_REQUIRE_RUNTIME:-}\" = 1 ]; then [ \"${OPAL_PREFIX:-}\" = \"$QA_RUNTIME\" ] && [ \"${PRTE_PREFIX:-}\" = \"$QA_RUNTIME\" ] && [ \"${OMPI_MCA_component_path:-}\" = \"$QA_RUNTIME/lib/openmpi\" ] || exit 2; fi\nif [ \"$1\" = --version ] && [ \"${QA_VERSION_STYLE:-}\" = intel ]; then exit 1; fi\nprintf '%s\\n' \"$QA_MPI_VERSION\"\n").unwrap();
+    let info = bin.join("ompi_info");
+    std::fs::write(&info, "#!/bin/sh\n[ \"${QA_LSF_COMPONENTS:-}\" = error ] && exit 2\nfor component in ras plm; do if [ \"${QA_LSF_COMPONENTS:-}\" = both ] || [ \"${QA_LSF_COMPONENTS:-}\" = \"$component\" ]; then printf 'mca:%s:lsf:version:1\\n' \"$component\"; fi; done\nexit 0\n").unwrap();
+    for file in [&launcher, &info] {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let args = opts(&[
+        "--parallel",
+        "auto",
+        "--nodes",
+        "2",
+        "--cores-per-node",
+        "4",
+    ]);
+    let plan = RunPlan::from_opts(&args).unwrap();
+    let external_launcher = dir.join("external-mpiexec");
+    std::fs::copy(&launcher, &external_launcher).unwrap();
+    let run = |version: &str,
+               components: &str,
+               hosts: &str,
+               extra: Option<(&str, &str)>,
+               fortran: bool,
+               explicit: Option<&Path>| {
+        let fortran_plan = RunPlan::from_opts(&opts(&[
+            "--parallel",
+            "auto",
+            "--nodes",
+            "2",
+            "--cores-per-node",
+            "4",
+            "--engine",
+            "fortran",
+            "--preprocessors",
+            "fortran",
+        ]))
+        .unwrap();
+        let script = lsf_auto_launcher(
+            if fortran { &fortran_plan } else { &plan },
+            kernel.to_str().unwrap(),
+        );
+        let mut command = Command::new("bash");
+        command.args(["-c", &format!("set -e\n{script}\nprintf '%s\\n' \"$COLM_MPIEXEC\" \"$COLM_MPIEXEC_ARGS\" \"${{I_MPI_JOB_RESPECT_PROCESS_PLACEMENT:-}}\"\n")]);
+        command
+            .env("QA_MPI_VERSION", version)
+            .env("QA_LSF_COMPONENTS", components)
+            .env(
+                "QA_VERSION_STYLE",
+                if version.starts_with("Intel") {
+                    "intel"
+                } else {
+                    "openmpi"
+                },
+            )
+            .env("QA_REQUIRE_RUNTIME", if fortran { "1" } else { "0" })
+            .env("QA_RUNTIME", &runtime)
+            .env("LSB_MCPU_HOSTS", hosts)
+            .env_remove("COLM_MPIEXEC_ARGS")
+            .env_remove("HYDRA_HOST_FILE")
+            .env_remove("I_MPI_JOB_RESPECT_PROCESS_PLACEMENT");
+        if fortran {
+            command.env_remove("COLM_MPIEXEC");
+        } else {
+            command.env("COLM_MPIEXEC", &launcher);
+        }
+        if let Some(extra) = extra {
+            command.env(extra.0, extra.1);
+        }
+        if let Some(explicit) = explicit {
+            command.env("COLM_MPIEXEC", explicit);
+        }
+        command.output().unwrap()
+    };
+    let intel = run(
+        "Intel(R) MPI Library 2021.3",
+        "",
+        "hostA 4 hostB 4",
+        None,
+        false,
+        None,
+    );
+    assert!(
+        intel.status.success(),
+        "{}",
+        String::from_utf8_lossy(&intel.stderr)
+    );
+    assert!(String::from_utf8_lossy(&intel.stdout).contains("-bootstrap lsf -ppn 1\noff\n"));
+    let openmpi = run(
+        "mpiexec (Open MPI) 4.1.6",
+        "both",
+        "hostA 4 hostB 4",
+        None,
+        false,
+        None,
+    );
+    assert!(
+        openmpi.status.success(),
+        "{}",
+        String::from_utf8_lossy(&openmpi.stderr)
+    );
+    assert!(String::from_utf8_lossy(&openmpi.stdout)
+        .contains("--map-by ppr:1:node:PE=4 --bind-to core"));
+    let hydra_version = "HYDRA build details:\nVersion: 4.2.3\nLaunchers available: ssh rsh fork slurm ll lsf sge manual persist\nResource management kernels available: user slurm ll lsf sge pbs cobalt";
+    let hydra = run(hydra_version, "", "hostA 4 hostB 4", None, false, None);
+    assert!(
+        hydra.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hydra.stderr)
+    );
+    assert!(String::from_utf8_lossy(&hydra.stdout).contains("-rmk lsf -bootstrap lsf -ppn 1"));
+    let hostfile = run(
+        hydra_version,
+        "",
+        "hostA 4 hostB 4",
+        Some(("HYDRA_HOST_FILE", "/different/hosts")),
+        false,
+        None,
+    );
+    assert!(!hostfile.status.success());
+    assert!(String::from_utf8_lossy(&hostfile.stderr).contains("remove HYDRA_HOST_FILE"));
+    for version in [
+        hydra_version.replace("ll lsf sge manual", "ll lsf-other sge manual"),
+        hydra_version.replace("ll lsf sge pbs", "ll other-lsf sge pbs"),
+        "HYDRA build details:\nVersion: 4.2.3\nlsf exists only in descriptive text".to_owned(),
+    ] {
+        let output = run(&version, "", "hostA 4 hostB 4", None, false, None);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("native LSF launcher and resource-manager"));
+    }
+    for name in ["prte_info", "prte-info"] {
+        let prte_info = bin.join(name);
+        std::fs::copy(&info, &prte_info).unwrap();
+        let prte = run(
+            "mpiexec (Open MPI) 5.0.8",
+            "both",
+            "hostA 4 hostB 4",
+            None,
+            false,
+            None,
+        );
+        assert!(
+            prte.status.success(),
+            "{}",
+            String::from_utf8_lossy(&prte.stderr)
+        );
+        std::fs::remove_file(prte_info).unwrap();
+    }
+    // Open MPI 4 must query its own components even if unrelated PRTE tools are installed.
+    let unrelated_prte = bin.join("prte-info");
+    std::fs::write(&unrelated_prte, "#!/bin/sh\nexit 2\n").unwrap();
+    std::fs::set_permissions(&unrelated_prte, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bundled = run(
+        "mpiexec (Open MPI) 4.1.6",
+        "both",
+        "hostA 4 hostB 4",
+        None,
+        true,
+        None,
+    );
+    assert!(
+        bundled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bundled.stderr)
+    );
+    let text = String::from_utf8(bundled.stdout).unwrap();
+    assert!(text.starts_with(launcher.to_str().unwrap()));
+    assert!(text.contains("--map-by ppr:4:node:PE=1 --bind-to core"));
+    let explicit_bundled = run(
+        "mpiexec (Open MPI) 4.1.6",
+        "both",
+        "hostA 4 hostB 4",
+        None,
+        true,
+        Some(&launcher),
+    );
+    assert!(
+        explicit_bundled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_bundled.stderr)
+    );
+    let conflicting = run(
+        "Intel(R) MPI Library",
+        "",
+        "hostA 4 hostB 4",
+        None,
+        true,
+        Some(&external_launcher),
+    );
+    assert!(!conflicting.status.success());
+    assert!(String::from_utf8_lossy(&conflicting.stderr)
+        .contains("MPI bundled with this Fortran kernel"));
+    let rust_override = run(
+        "Intel(R) MPI Library",
+        "",
+        "hostA 4 hostB 4",
+        None,
+        false,
+        Some(&external_launcher),
+    );
+    assert!(rust_override.status.success());
+    assert!(String::from_utf8_lossy(&rust_override.stdout)
+        .starts_with(external_launcher.to_str().unwrap()));
+    for (version, components, hosts, extra, message) in [
+        (
+            "MPICH unrelated launcher",
+            "both",
+            "hostA 4 hostB 4",
+            None,
+            "supports Intel MPI",
+        ),
+        (
+            "mpiexec (Open MPI) 4.1.6",
+            "ras",
+            "hostA 4 hostB 4",
+            None,
+            "native LSF allocation and launch",
+        ),
+        (
+            "mpiexec (Open MPI) 4.1.6",
+            "error",
+            "hostA 4 hostB 4",
+            None,
+            "Cannot inspect",
+        ),
+        (
+            "Intel(R) MPI Library",
+            "",
+            "hostA 8",
+            None,
+            "different node count",
+        ),
+        (
+            "Intel(R) MPI Library",
+            "",
+            "hostA 3 hostB 5",
+            None,
+            "different CPU count",
+        ),
+        ("Intel(R) MPI Library", "", "", None, "different node count"),
+        (
+            "Intel(R) MPI Library",
+            "",
+            "hostA 4 hostB 4",
+            Some(("COLM_MPIEXEC_ARGS", "-ppn 2")),
+            "remove it or select manual",
+        ),
+    ] {
+        let output = run(version, components, hosts, extra, false, None);
+        assert!(
+            !output.status.success(),
+            "unexpected success for {version}/{components}/{hosts}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

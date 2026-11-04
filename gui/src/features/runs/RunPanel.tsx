@@ -1382,12 +1382,10 @@ export default function RunPanel({
       : autoParallel &&
           parallelPlan &&
           parallelPlan.nodes > 1 &&
-          ['bare', 'pbs', 'lsf'].includes(
-            scheduler === 'auto' ? (runServer?.scheduler ?? '') : scheduler,
-          )
+          ['bare', 'pbs'].includes(scheduler === 'auto' ? (runServer?.scheduler ?? '') : scheduler)
         ? t(
-            '自动多节点配置目前需要 Slurm；请选择 Slurm、改为一个节点或使用手动配置。',
-            'Automatic multi-node plans currently require Slurm. Select Slurm, use one node, or choose manual configuration.',
+            '自动多节点配置目前需要 Slurm 或 LSF；请选择其中之一、改为一个节点或使用手动配置。',
+            'Automatic multi-node plans currently require Slurm or LSF. Select either scheduler, use one node, or choose manual configuration.',
           )
         : null;
   function setParallelBudget(key: 'nodes' | 'coresPerNode', value: string) {

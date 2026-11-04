@@ -33,10 +33,30 @@ measured performance optimum. With `--parallel manual` (or no mode flag),
 explicit process/thread settings retain their meaning, and omitted node counts
 are planned from `--cores-per-node` when known.
 
-Automatic multi-node allocation currently requires Slurm and `srun`. Other
-schedulers support single-node automatic allocation; multi-node jobs need
-manual configuration until their MPI placement is verified. Bare execution
-cannot allocate additional hosts merely from a node count.
+Automatic multi-node allocation supports Slurm with `srun`, and LSF with Intel
+MPI, an Open MPI installation built with native LSF allocation and launch
+components, or MPICH Hydra with native LSF launcher and resource-manager support.
+LSF CPU slots and MPI ranks are planned separately: two nodes with
+48 cores each request 96 CPU slots and 48 slots per host; the Rust engine then
+launches one 48-thread process per host. Intel MPI uses an explicit process count
+per host, with scheduler process placement disabled so it cannot override that
+count. Open MPI uses an explicit processes-per-node and CPUs-per-process mapping.
+MPICH Hydra explicitly selects the LSF resource manager and launcher, then sets
+the process count per host; its capability report is checked before launch.
+
+The LSF server environment must expose the selected MPI launcher. Rust respects
+an explicit `COLM_MPIEXEC`. Fortran retains its kernel's bundled MPI when
+available; a conflicting launcher is rejected in automatic mode to avoid mixing
+MPI libraries. Use a matching kernel or manual mode for that configuration.
+The job verifies the allocated hosts and slots before running.
+Unknown MPI implementations or Open MPI installations without native LSF support
+fail with an actionable error. Automatic placement owns `COLM_MPIEXEC_ARGS`;
+remove a custom value or choose manual mode. MPICH Hydra automatic mode also rejects a
+custom `HYDRA_HOST_FILE`, which would replace the scheduler's allocated hosts.
+PBS and bare execution support
+single-node automatic allocation; their multi-node jobs still require manual
+configuration. Bare execution cannot allocate additional hosts merely from a
+node count.
 
 The requested `--mem-gb` remains a per-node memory request. The planner does not
 invent a model memory estimate. Actual remote landdata block counts and
