@@ -45787,3 +45787,14 @@ T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码�
 本地三项定向测试通过：代次分配、panic 后恢复、正常换代清理；rustfmt/diff 检查通过。独立只读复审 APPROVE，确认状态唯一构造使用 Default，旧成功 manifest 与新分配器兼容。已知错误的旧 release 作业 `42271398281` 在 engine-linux 阶段主动取消，终态 cancelled，未发布安装包；修复后重编原生预览并由新提交重新触发完整 CI/发布。
 
 补充实测：原生 beta.6 再次构建成功，以完整路径启动后官方模型与首页按钮就绪。T7920 私有源码任务 `codex-392563e92beb4afbb50734c17c384d19` 终态 succeeded，`cargo test --locked -p colm-agent --lib` 完整 **431 通过 / 0 失败 / 1 ignored**，测试运行 5.99 秒；声明只读 SQLite 输入，未接入真实 LLM 服务。
+
+
+#### beta.6 观测表备用发布路径补齐
+
+发布等待期间复核发现此前遗漏：`observation_table.rs` 虽已用唯一暂存名和原子硬链接，但在硬链接失败时仍退回应用发布锁、存在性检查和 rename。锁只约束配合的转换进程，不能阻止外部写入者在检查后创建目标，因而仍可能覆盖竞争产物；上方注释还残留已删除的10分钟清锁说法。此前 sitedata 同类路径已修，这条也必须封住，不能将旧成功 CI 当作覆盖证明。
+
+现在无覆盖模式仅通过硬链接发布：Unsupported、PermissionDenied 等错误保留原始 IO 因果并明确失败；删除发布锁、rename 回退和两条仅验证该回退实现的测试。显式 `overwrite=true` 仍按原授权替换路径执行。新增注入 link 错误的四种组合（两类错误 × 无目标/竞争目标），检查目标不变、原始错误类型、暂存由 PendingOutput 的 RAII 清理；保留原8写入者单赢家与授权替换测试。旧实现抽取实测 RED：应报错时返回成功；修后 GREEN。实际 `cargo test --offline --locked -p colm-cli --bins observation_table` **10/10** 通过，fmt/diff 检查通过；独立架构复核 CLEAR，并核对 GUI 新错误不会自动触发覆盖重试。
+
+兼容性取舍与 sitedata 一致：不支持硬链接的卷默认拒绝无覆盖发布；不以无法约束外部写入者的锁冒充原子保护。旧发布 `42273200181` 已主动取消，未发布；其 arm64 macOS/Linux 安装包成功，Windows/Intel 打包取消，四平台生产内核缓存已保存。补丁后重新构建本地预览，再跑完整 CLI/关闭故障验证与新提交 CI/发布。
+
+补充实测：带新保护的原生 beta.6 再次构建成功并通过完整路径重启，官方模型与首页按钮就绪；实际应用携带的 CLI 在大小写不敏感文件系统上拒绝 A/a 两站点别名冲突，未生成输出。首次远程任务 `codex-499788aa957240a1934b66167fdf0dc9` 的新验证脚本漏了仓库明确要求的 `--test-threads=1`，默认并发产生 831通过/38失败（37项NetCDF类、1项ETXTBSY）；不能据此认定本补丁回归，也没有修改测试断言。对照 `ci.yml:198-211` 与先前成功脚本后，在任务 `codex-32d8e1041bea42eea67319cb825dadd6` 对同一只读输入测试二进制串行重跑：**869/869** 全通过，86.47秒。该任务还从同源构建正常CLI与探针，实际 libc close故障 **11/11**、NetCDF API close故障 **8/8**，终态 succeeded；证据在 `/tmp/colm-beta6-publication-serial-verification/results/`。

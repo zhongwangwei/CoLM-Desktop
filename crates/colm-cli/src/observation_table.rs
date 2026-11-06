@@ -496,12 +496,19 @@ impl Drop for PendingOutput {
 /// 原子“禁止覆盖”发布：`hard_link` 在目标已存在时返回 `AlreadyExists`，成功才把暂存删掉。
 /// 不用“先看存在再 rename”，那之间有窗口，并发时两个都会以为自己没覆盖。
 ///
-/// 不支持硬链接的文件系统（exFAT/FAT、部分 SMB/NFS）回退到“独占发布锁 + rename”：
-/// 锁文件用 `create_new` 原子创建，同一目标同一时刻只有一个写入者；拿到锁后确认目标不存在，
-/// 再 rename（同目录，原子替换）。这不是跨进程通用协议，但比旧行为（无锁 rename）安全，
-/// 且不会在崩溃时留下半截产物（只可能留下锁文件，过期 10 分钟后自动清理）。
+/// 不支持硬链接时拒绝发布：外部写入者不受应用锁约束，exists + rename 仍会覆盖竞争产物。
 fn install_converted_file_no_clobber(temp: &Path, destination: &Path) -> Result<()> {
-    match fs::hard_link(temp, destination) {
+    install_converted_file_with_link(temp, destination, |source, destination| {
+        fs::hard_link(source, destination)
+    })
+}
+
+fn install_converted_file_with_link(
+    temp: &Path,
+    destination: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    match link(temp, destination) {
         Ok(()) => {
             // 目标已经指向暂存文件的 inode；暂存只是多出来的名字，删掉它不影响产物。
             let _ = fs::remove_file(temp);
@@ -512,70 +519,13 @@ fn install_converted_file_no_clobber(temp: &Path, destination: &Path) -> Result<
             destination.display(),
             destination.display()
         ),
-        Err(_) => install_with_publish_lock(temp, destination),
-    }
-}
-
-fn publish_lock_path(destination: &Path) -> std::path::PathBuf {
-    let name = destination
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output.nc".into());
-    destination.with_file_name(format!(".{name}.publish.lock"))
-}
-
-/// 硬链接不可用时的回退发布。
-///
-/// **锁只由创建者/持有者删除，绝不按年龄自动删除**：两个进程同时判断“旧锁过期”时，A 删旧锁
-/// 并建新锁后，B 仍会按先前判断删掉 A 的新锁，于是两个发布都能成功、后者覆盖前者（复核发现）。
-/// 崩溃留下的锁因此会一直挡路；错误里给出锁路径和人工删除提示，宁可让用户确认一次，
-/// 也不引入会覆盖产物的竞态。
-fn install_with_publish_lock(temp: &Path, destination: &Path) -> Result<()> {
-    use std::io::ErrorKind;
-    let lock_path = publish_lock_path(destination);
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-    {
-        Ok(_lock) => {}
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => bail!(
-            "目标文件正在被另一个转换写入：{}。若确认上次转换已异常退出，请删除锁文件 {} 后重试 / another conversion is publishing {}; if the previous conversion crashed, remove {} and retry",
-            destination.display(),
-            lock_path.display(),
-            destination.display(),
-            lock_path.display()
-        ),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "无法创建发布锁 {}（目标文件系统可能不允许写隐藏文件）/ cannot create publish lock {}",
-                    lock_path.display(),
-                    lock_path.display()
-                )
-            })
-        }
-    }
-    let result = (|| {
-        if destination.exists() {
-            bail!(
-                "输出文件已存在：{}；确认覆盖后重试（命令行加 --overwrite 1）/ Output already exists: {}; confirm overwrite and retry (pass --overwrite 1 on the command line)",
-                destination.display(),
-                destination.display()
-            );
-        }
-        std::fs::rename(temp, destination).with_context(|| {
+        Err(error) => Err(error).with_context(|| {
             format!(
-                "无法发布 {} 到 {}；原产物未改动 / cannot publish {} as {}; previous output was left unchanged",
-                temp.display(),
-                destination.display(),
-                temp.display(),
-                destination.display()
+                "无法安全安装到 {}，未覆盖目标文件 / Cannot install without risking an overwrite at {}; choose a filesystem supporting hard links",
+                destination.display(), destination.display()
             )
-        })
-    })();
-    let _ = std::fs::remove_file(&lock_path);
-    result
+        }),
+    }
 }
 
 fn inferred_choices(table: &Table) -> Vec<VariableChoice> {
@@ -1175,65 +1125,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 无硬链接文件系统（exFAT/SMB）走发布锁回退：正确发布、清理锁、绝不覆盖已有目标。
     #[test]
-    fn publish_lock_fallback_installs_without_clobbering() {
-        let dir =
-            std::env::temp_dir().join(format!("colm_obs_publish_lock_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+    fn hard_link_errors_preserve_competing_output_and_cleanup_staging() {
+        use std::io::ErrorKind;
+        let dir = std::env::temp_dir().join(format!(
+            "colm_obs_link_error_{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let destination = dir.join("A_Flux.nc");
-        let temp = dir.join("A_Flux.nc.tmp");
-        fs::write(&temp, b"new output").unwrap();
-        install_with_publish_lock(&temp, &destination).unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"new output");
-        assert!(!temp.exists(), "rename 后暂存不应残留");
-        assert!(!publish_lock_path(&destination).exists(), "发布锁要清理");
-        // 目标已存在：再次发布必须拒绝且不改内容。
-        fs::write(&temp, b"second output").unwrap();
-        let error = install_with_publish_lock(&temp, &destination)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Output already exists"), "{error}");
-        assert_eq!(fs::read(&destination).unwrap(), b"new output");
-        let _ = fs::remove_file(&temp);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn publish_lock_fallback_refuses_an_abandoned_lock_instead_of_stealing_it() {
-        let dir =
-            std::env::temp_dir().join(format!("colm_obs_publish_stale_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let destination = dir.join("B_Flux.nc");
-        let temp = dir.join("B_Flux.nc.tmp");
-        fs::write(&temp, b"output").unwrap();
-        let lock = publish_lock_path(&destination);
-        // 崩溃遗留的锁：即使很旧也不自动删除（按年龄删会引入双删竞态，复核发现）。
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-            .unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        file.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
-        drop(file);
-        let error = install_with_publish_lock(&temp, &destination)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("另一个转换"), "{error}");
-        assert!(
-            error.contains(lock.to_str().unwrap()),
-            "错误要给出锁路径：{error}"
-        );
-        assert!(temp.exists(), "失败时暂存要留给调用方清理");
-        // 人工确认后删除锁，才能继续发布。
-        fs::remove_file(&lock).unwrap();
-        install_with_publish_lock(&temp, &destination).unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"output");
-        assert!(!lock.exists());
-        let _ = fs::remove_dir_all(&dir);
+        for kind in [ErrorKind::Unsupported, ErrorKind::PermissionDenied] {
+            for competing in [false, true] {
+                let staging = unique_tmp_path(&destination);
+                fs::write(&staging, b"new output").unwrap();
+                let pending = PendingOutput::new(staging.clone());
+                let error =
+                    install_converted_file_with_link(pending.path(), &destination, |_, target| {
+                        if competing {
+                            fs::write(target, b"competing output")?;
+                        }
+                        Err(std::io::Error::new(kind, "injected link failure"))
+                    })
+                    .unwrap_err();
+                assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Cannot install without risking an overwrite"),
+                    "{error}"
+                );
+                assert!(
+                    staging.exists(),
+                    "failed publication leaves staging to its owner"
+                );
+                drop(pending);
+                assert!(!staging.exists(), "RAII removes staging after failure");
+                if competing {
+                    assert_eq!(fs::read(&destination).unwrap(), b"competing output");
+                    fs::remove_file(&destination).unwrap();
+                } else {
+                    assert!(
+                        !destination.exists(),
+                        "unsupported links must not fall back to publication"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 }
