@@ -460,7 +460,8 @@ fn write_tuning_spec_for_sites(
             "base_cases": sites,
             "observations": observations,
             "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
-            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199577600,"validation_from":1199577600,"validation_to":1200009600,"min_pairs":min_pairs}],
+            // Closed windows must not share the first validation sample.
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199577599,"validation_from":1199577600,"validation_to":1200009600,"min_pairs":min_pairs}],
             "budget": {"population":4,"generations":1,"jobs":2}
         }))
         .unwrap(),
@@ -1368,7 +1369,8 @@ fn tuning_validation_failure_warns_without_breaking_calibration_selection() {
             "base_cases": ["siteA"],
             "observations": {"siteA": root.join("siteA-obs.nc")},
             "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
-            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199232000,"validation_from":1199232000,"validation_to":1199318400,"min_pairs":10}],
+            // Closed windows must not share the first validation sample.
+            "targets": [{"key":"Qle","variable":"Qle","from":1199145600,"to":1199231999,"validation_from":1199232000,"validation_to":1199318400,"min_pairs":10}],
             "budget": {"population":4,"generations":1,"jobs":2}
         }))
         .unwrap(),

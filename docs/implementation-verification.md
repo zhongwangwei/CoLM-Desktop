@@ -45760,3 +45760,8 @@ GitHub Ubuntu 原生 runner 在 `remote_workspace_cmd::tests::sandbox_failure_st
 
 
 已直接核对首次 Ubuntu CI 完整日志：五项 workspace 构建/配对/沙箱测试均在 CLI 旧断言失败前通过（该 job 先跑排除 CLI 的 workspace，再单独跑 CLI）。不能把它们记为“尚未执行”。三平台引擎失败日志只有上述两个旧测试预期，无第三个根因。两项补修后重新打包 beta.6 并再次用完整应用路径重启，首页官方模型加载完成、操作按钮可用。
+
+
+#### beta.6 CLI 集成夹具同步闭区间规则
+
+补查集成调用发现 `study_cli_tuning.rs` 的两个 JSON 夹具仍让率定终点等于验证起点。率定终点各减 1 秒、验证起点不变，使日内采样分区保持原先半开窗口的样本集合，并满足新的严格分离校验；没有放宽生产校验或忽略失败测试。指定验证期测试、公共预检和多站点率定/应用三个定向测试先通过；随后 `cargo test -p colm-cli --test study_cli_tuning --offline --locked -- --test-threads=1` 整份 24/24 通过（140.10 秒）。只改集成测试数据和说明，不改生产逻辑；后续同等规模长测应继续优先远程执行。源码包随之重新打包，保持本地 beta.6 预览与交付测试一致。
