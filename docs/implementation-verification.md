@@ -45775,4 +45775,4 @@ GitHub Ubuntu 原生 runner 在 `remote_workspace_cmd::tests::sandbox_failure_st
 
 T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码快照实际编译 CLI/runtime 探针，终态 succeeded：libc close 故障 11/11、NetCDF API close 故障 8/8。原始 close 最终阶段返回 -101，旧输出不变，去掉故障后重试生成可读的新数据。取回证据在本机 `/tmp/colm-beta6-fault-verification/results/`。
 
-参数目录通过 `cargo run -q -p xtask -- parameter-audit` 生成；第二次生成 8 个产物的 SHA-256 完全相同。逐项比较证明 1369 个描述符中仅 715 个布尔默认值从 true/false 变为 Fortran 文本，其他字段不变；不手改生成表。Python 编译检查与 git diff 检查通过。本地 beta.6 源码包也已重新打包，包含新故障工具与生成目录；原生构建成功后已通过完整应用路径重启，确认 beta.6 首页官方模型加载完成、操作按钮可用。
+参数目录通过 `cargo run -q -p xtask -- parameter-audit` 生成；第二次生成 8 个产物的 SHA-256 完全相同。逐项比较证明 1369 个描述符中仅 715 个布尔默认值从 true/false 变为 Fortran 文本，其他字段不变；不手改生成表。Python 编译检查与 git diff 检查通过。本地 beta.6 源码包也已重新打包，解包核对新故障工具与当前文件字节一致；参数审计目录按打包规则不进入运行源码包，已独立入库。原生构建成功后已通过完整应用路径重启，确认 beta.6 首页官方模型加载完成、操作按钮可用。
