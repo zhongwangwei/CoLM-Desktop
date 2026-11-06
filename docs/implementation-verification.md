@@ -45776,3 +45776,14 @@ GitHub Ubuntu 原生 runner 在 `remote_workspace_cmd::tests::sandbox_failure_st
 T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码快照实际编译 CLI/runtime 探针，终态 succeeded：libc close 故障 11/11、NetCDF API close 故障 8/8。原始 close 最终阶段返回 -101，旧输出不变，去掉故障后重试生成可读的新数据。取回证据在本机 `/tmp/colm-beta6-fault-verification/results/`。
 
 参数目录通过 `cargo run -q -p xtask -- parameter-audit` 生成；第二次生成 8 个产物的 SHA-256 完全相同。逐项比较证明 1369 个描述符中仅 715 个布尔默认值从 true/false 变为 Fortran 文本，其他字段不变；不手改生成表。Python 编译检查与 git diff 检查通过。本地 beta.6 源码包也已重新打包，解包核对新故障工具与当前文件字节一致；参数审计目录按打包规则不进入运行源码包，已独立入库。原生构建成功后已通过完整应用路径重启，确认 beta.6 首页官方模型加载完成、操作按钮可用。
+
+
+#### beta.6 后台检索索引失败恢复的代次预留
+
+后续 GitHub Ubuntu CI 在 `background_build_panic_becomes_an_error_status` 捕获真实恢复缺陷：bulk 已把块写入远端后发生 panic，失败代未发布，旧 `next_generation` 只参考成功 manifest。同一毫秒 refresh 会复用失败代的 generation，新 build_id 虽不同，scope+generation 查询仍命中旧残留块，严格 id 验证因而拒绝发布。没有将此故障归为环境或简单重跑。
+
+`RuntimeState` 现在记录 `last_allocated_generation`，每次在同一状态锁内按当前时刻与上次预留值递增分配并立即记下，失败/panic 不回退；不修改查询、物理 id 校验或清理范围。新增确定性固定 now=1000 的连续未发布分配测试，旧实现第二次仍为1000（RED），修复后1001；同时覆盖时钟回退。增强 panic 恢复测试，明确旧失败代的每条远端文档仍在，恢复代更大、两代并存且能 ready，未清空 fake 或加 sleep。
+
+本地三项定向测试通过：代次分配、panic 后恢复、正常换代清理；rustfmt/diff 检查通过。独立只读复审 APPROVE，确认状态唯一构造使用 Default，旧成功 manifest 与新分配器兼容。已知错误的旧 release 作业 `42271398281` 在 engine-linux 阶段主动取消，终态 cancelled，未发布安装包；修复后重编原生预览并由新提交重新触发完整 CI/发布。
+
+补充实测：原生 beta.6 再次构建成功，以完整路径启动后官方模型与首页按钮就绪。T7920 私有源码任务 `codex-392563e92beb4afbb50734c17c384d19` 终态 succeeded，`cargo test --locked -p colm-agent --lib` 完整 **431 通过 / 0 失败 / 1 ignored**，测试运行 5.99 秒；声明只读 SQLite 输入，未接入真实 LLM 服务。

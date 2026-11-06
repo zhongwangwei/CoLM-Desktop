@@ -1286,6 +1286,17 @@ fn bulk_partial_failure_does_not_publish_and_cleans_up_accepted_chunks() {
 }
 
 #[test]
+fn generation_allocations_survive_same_millisecond_and_clock_rollback() {
+    let fake = FakeTransport::new();
+    let handle = build_handle(&fake, enabled_settings());
+    assert_eq!(handle.inner.next_generation(1000), 1000);
+    assert_eq!(handle.inner.next_generation(1000), 1001);
+    assert_eq!(handle.inner.next_generation(900), 1002);
+    assert_eq!(handle.inner.next_generation(2000), 2000);
+    assert!(handle.inner.lock_state().manifest.is_none());
+}
+
+#[test]
 fn background_build_panic_becomes_an_error_status() {
     let docs = TempDocs::new("build-panic");
     docs.write("a.md", "# A\nbody\n");
@@ -1304,10 +1315,24 @@ fn background_build_panic_becomes_an_error_status() {
         handle.candidates(&snapshot, "a", 5),
         Err(RetrievalError::NotReady(_))
     ));
+    let failed_generations = fake.stored_generations();
+    assert_eq!(failed_generations.len(), 1);
+    let failed_generation = failed_generations[0];
+    let failed_documents = fake.lock().documents.clone();
+    assert!(!failed_documents.is_empty());
     // 后台线程被 catch_unwind 兜住后，handle 仍可继续用（这里用 refresh 再建一次）。
     let _ = handle.refresh(snapshot);
     let status = handle.wait_for_idle(Duration::from_secs(5));
     assert_eq!(status["state"], "ready", "{status}");
+    let recovered_generation = status["generation"].as_u64().unwrap();
+    assert!(recovered_generation > failed_generation);
+    assert_eq!(
+        fake.stored_generations(),
+        vec![failed_generation, recovered_generation]
+    );
+    for (id, document) in failed_documents {
+        assert_eq!(fake.document(&id), Some(document));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

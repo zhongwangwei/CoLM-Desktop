@@ -821,6 +821,8 @@ struct RuntimeState {
     phase: Option<Phase>,
     meta: Option<SnapshotMeta>,
     manifest: Option<Arc<Manifest>>,
+    /// 已分配的代次，包括未发布或失败的构建，避免重用远端残留块的过滤键。
+    last_allocated_generation: u64,
     /// 后台 worker 是否活着（从启动到循环退出）。用它而不是 `phase` 判断，因为清理旧代时
     /// worker 还活着但 phase 已经 ready。
     worker_active: bool,
@@ -1543,7 +1545,7 @@ impl Inner {
         })?;
         self.check_health()?;
         self.ensure_mapping()?;
-        let generation = self.next_generation();
+        let generation = self.next_generation(unix_millis());
         // build_id 每代唯一（跨进程）；物理 id 一含它，这一代的所有写入就与旧代记录物理分离。
         // 旧 manifest 引用的 id 在新代里不存在，失败清理按本次写入 id 删除时不可能碰到它们。
         let build_id = next_build_id();
@@ -1688,16 +1690,11 @@ impl Inner {
 
     /// 严格递增的 generation：正常就是构建时刻的 unix 毫秒；同一毫秒内重建时 +1，
     /// 否则新旧两代的 filter 分不开，旧块会混进新查询。
-    fn next_generation(&self) -> u64 {
-        let previous = {
-            let state = self.lock_state();
-            state
-                .manifest
-                .as_ref()
-                .map(|manifest| manifest.generation)
-                .unwrap_or(0)
-        };
-        unix_millis().max(previous.saturating_add(1))
+    fn next_generation(&self, now: u64) -> u64 {
+        let mut state = self.lock_state();
+        let generation = now.max(state.last_allocated_generation.saturating_add(1));
+        state.last_allocated_generation = generation;
+        generation
     }
 
     /// bulk 一批。HTTP 200 不代表整批成功：逐项检查 `items[i].index.status`。
