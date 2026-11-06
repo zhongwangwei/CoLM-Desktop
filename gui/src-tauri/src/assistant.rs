@@ -145,15 +145,54 @@ pub struct ManagedXerj {
 
 pub(crate) fn reuse_managed_endpoint(
     node: &mut Option<crate::xerj_manager::ManagedNode>,
+    config_key: &str,
 ) -> Option<String> {
-    if let Some(live) = node.as_ref().filter(|node| node.status().running) {
+    // 只有还在运行且启动配置仍匹配当前设置才复用；端口/二进制路径改了必须重启（A-01）。
+    if let Some(live) = node
+        .as_ref()
+        .filter(|node| node.status().running && node.config_key() == config_key)
+    {
         return Some(live.endpoint());
     }
     *node = None;
     None
 }
 
+/// 由当前设置和应用位置拼出托管节点启动配置（ensure_started 与保存设置共用）。
+fn managed_config(
+    app: &tauri::AppHandle,
+    settings: &AssistantSettings,
+) -> Result<crate::xerj_manager::ManagedConfig, String> {
+    let starts: Vec<PathBuf> = [
+        app.path().resource_dir().ok(),
+        agent_path().parent().map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(PathBuf::from)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok(crate::xerj_manager::ManagedConfig {
+        binary_path: settings.retrieval.binary_path.clone(),
+        // 按固定 Xerj 版本隔离数据目录：应用升级换随包版本时，新版本从空索引开始重建，
+        // 绝不复用旧版本写下的索引/数据（Xerj 的存储格式不保证跨版本兼容）。
+        data_dir: data_dir(app)?.join("xerj").join(xerj_data_dir_name()),
+        preferred_port: settings.retrieval.port,
+        extra_binary_dirs: starts,
+        ready_timeout: crate::xerj_manager::DEFAULT_READY_TIMEOUT,
+    })
+}
+
 impl ManagedXerj {
+    /// 运行中节点的启动配置指纹；没节点/锁失效时为 None。
+    pub(crate) fn config_key(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|node| node.config_key().to_string()))
+    }
+
     /// 当前设置对应的节点状态（设置面板轮询/按钮显示）。external 模式不发起网络探测。
     pub fn status_value(&self, settings: &AssistantSettings) -> Value {
         let pinned = crate::xerj_manager::PINNED_XERJ_RELEASE;
@@ -212,6 +251,8 @@ impl ManagedXerj {
         settings: &AssistantSettings,
     ) -> Result<String, String> {
         if settings.retrieval.mode != "managed" {
+            // 切到 external 或关掉检索后，应用自己启动的节点不应继续占用端口/内存（A-01）。
+            self.stop();
             return Ok(settings.retrieval.endpoint.clone());
         }
         // Opening the panel and sending a message may prepare the same node concurrently.
@@ -219,34 +260,17 @@ impl ManagedXerj {
             .lifecycle
             .lock()
             .map_err(|_| "Xerj 节点启动锁失效".to_string())?;
+        let config = managed_config(app, settings)?;
+        let config_key = crate::xerj_manager::managed_config_key(&config);
         {
             let mut guard = self
                 .inner
                 .lock()
                 .map_err(|_| "Xerj 节点状态锁失效".to_string())?;
-            if let Some(endpoint) = reuse_managed_endpoint(&mut guard) {
+            if let Some(endpoint) = reuse_managed_endpoint(&mut guard, &config_key) {
                 return Ok(endpoint);
             }
         }
-        let starts: Vec<PathBuf> = [
-            app.path().resource_dir().ok(),
-            agent_path().parent().map(PathBuf::from),
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.parent().map(PathBuf::from)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let config = crate::xerj_manager::ManagedConfig {
-            binary_path: settings.retrieval.binary_path.clone(),
-            // 按固定 Xerj 版本隔离数据目录：应用升级换随包版本时，新版本从空索引开始重建，
-            // 绝不复用旧版本写下的索引/数据（Xerj 的存储格式不保证跨版本兼容）。
-            data_dir: data_dir(app)?.join("xerj").join(xerj_data_dir_name()),
-            preferred_port: settings.retrieval.port,
-            extra_binary_dirs: starts,
-            ready_timeout: crate::xerj_manager::DEFAULT_READY_TIMEOUT,
-        };
         let node = crate::xerj_manager::ManagedNode::start(config).inspect_err(|error| {
             if let Ok(mut detail) = self.detail.lock() {
                 *detail = Some(error.clone());
@@ -1256,8 +1280,9 @@ pub fn assistant_reset_settings(app: tauri::AppHandle) -> Result<String, String>
 }
 
 #[tauri::command]
-pub fn assistant_save_settings(
+pub async fn assistant_save_settings(
     app: tauri::AppHandle,
+    managed: tauri::State<'_, ManagedXerj>,
     settings: AssistantSettings,
 ) -> Result<(), String> {
     // 先按原文件读一次：解析失败就拒绝保存，绝不把用户手改坏的配置静默覆盖掉。
@@ -1278,7 +1303,33 @@ pub fn assistant_save_settings(
         &path,
         serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
     );
-    finish_assistant_action(&event, result)
+    let outcome = finish_assistant_action(&event, result);
+    if outcome.is_ok() {
+        // 保存后：关检索/切 external 要停掉应用自己启动的节点；managed 配置（端口/二进制路径）
+        // 改了就停掉旧节点，下次启动按新配置起（A-01）。
+        let keep = settings.retrieval.enabled && settings.retrieval.mode == "managed";
+        let stale = if keep {
+            match managed_config(&app, &settings) {
+                Ok(config) => {
+                    managed.config_key().as_deref()
+                        != Some(crate::xerj_manager::managed_config_key(&config).as_str())
+                }
+                Err(_) => true,
+            }
+        } else {
+            true
+        };
+        if stale {
+            // 停止托管节点要等 lifecycle 锁（节点正在启动时最长 ~20s）和 TERM 超时；放到阻塞
+            // 线程池，避免节点启停期间保存设置卡住 IPC/主线程（GUI 审查 F-A-01）。保存结果不等它；
+            // 失败只写进节点 detail，下一次状态轮询会显示。
+            let node = managed.handle();
+            tauri::async_runtime::spawn_blocking(move || node.stop())
+                .await
+                .ok();
+        }
+    }
+    outcome
 }
 
 fn finish_assistant_action(
@@ -2001,7 +2052,8 @@ fn history_status_blocking(
     root: &Path,
     history: &HistorySettings,
 ) -> Result<Value, String> {
-    let command = history_cli_command(cli, "history-repos", root, history, Some("both"), false);
+    // history-repos 只读 --history-root/--desktop-path/--upstream-path；--repository 仅 history-sync 消费。
+    let command = history_cli_command(cli, "history-repos", root, history, None, false);
     let mut value = run_history_cli("history-repos", command, HISTORY_STATUS_TIMEOUT)?;
     // CLI 也会带 history_root；界面显示以窗口进程解析的绝对目录为准。
     let Some(object) = value.as_object_mut() else {

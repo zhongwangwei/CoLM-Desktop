@@ -530,8 +530,8 @@ pub fn verify(regional: &Path, source: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `check_regional_coverage`（`MOD_Grid_RiverLakeNetwork.F90:1355-1385`）：区域网络保留的
-/// 单元流域必须覆盖所有 land patch 触及的汇流输入格；否则运行期会静默丢掉一部分径流。
+/// `check_regional_coverage`（`MOD_Grid_RiverLakeNetwork.F90`）：区域网络必须保留
+/// land patch 触及且源网络负责路由的格子；否则运行期会静默丢掉一部分径流。
 pub fn verify_coverage(landdata: &Path, year: i32, regional: &Path, source: &Path) -> Result<()> {
     let src = netcdf::open(source).with_context(|| format!("cannot open {}", source.display()))?;
     let dim = |name: &str| -> Result<usize> {
@@ -561,6 +561,14 @@ pub fn verify_coverage(landdata: &Path, year: i32, regional: &Path, source: &Pat
         .with_context(|| format!("{} has no seq_src_index", regional.display()))?
         .get_values(netcdf::Extents::All)?;
     let touched = touched_cells(landdata, year, nlon, nlat)?;
+    // Fortran: count(touched .and. routed_full .and. .not. routed_regional).
+    // Coastal land pixels can overlap cells outside the full network's routing mask.
+    let mut routed_full = vec![false; nlon * nlat];
+    for (&x, &y) in inp_x.iter().zip(&inp_y) {
+        if x >= 1 && x as usize <= nlon && y >= 1 && y as usize <= nlat {
+            routed_full[(y as usize - 1) * nlon + (x as usize - 1)] = true;
+        }
+    }
     let mut covered = vec![false; nlon * nlat];
     for &source_index in &src_index {
         ensure!(
@@ -579,8 +587,9 @@ pub fn verify_coverage(landdata: &Path, year: i32, regional: &Path, source: &Pat
     }
     let missing = touched
         .iter()
+        .zip(&routed_full)
         .zip(&covered)
-        .filter(|(touched, covered)| **touched && !**covered)
+        .filter(|((touched, routed), covered)| **touched && **routed && !**covered)
         .count();
     ensure!(
         missing == 0,

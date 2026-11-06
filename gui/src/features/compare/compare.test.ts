@@ -22,6 +22,7 @@ import {
   jobEnded,
   jobUncertain,
   layerVariableProblems,
+  unreferencedVariableProblems,
   statisticsMethodWarnings,
   statisticsReferenceWarning,
   STATISTICS_SCHEMA_ITEMS,
@@ -196,6 +197,15 @@ it('backend messages read in both languages', () => {
     'The report is 52 MB, too large to show here; open it in a browser',
   );
   assert.deepEqual(benchErrorText('Traceback x'), ['Traceback x', 'Traceback x']);
+  // 远程失败运行的固定中文 meta.error 在英文界面翻译，作业日志原文保留（F-C-04）。
+  assert.equal(
+    benchErrorText('这次运行失败（退出码 1）；作业日志里没有输出。')[1],
+    'The run failed (exit code 1); the job log has no output.',
+  );
+  assert.deepEqual(benchErrorText('这次运行失败（退出码 2）；输出末尾：\nboom'), [
+    '这次运行失败（退出码 2）；输出末尾：\nboom',
+    'The run failed (exit code 2). Output tail:\nboom',
+  ]);
   assert.equal(benchLogText('合并 AT_Neu 的 history'), 'Merging the history of AT_Neu');
   assert.equal(benchLogText('Resolved 55 packages'), 'Resolved 55 packages');
 });
@@ -1100,6 +1110,16 @@ it('blocks a selected variable that the station preparation would drop', () => {
   assert.throws(() => buildOpenbenchConfig(layerDesign), /f_wliq_soisno/);
 });
 
+it('warns instead of silently dropping a variable whose last reference was removed', () => {
+  const problems = unreferencedVariableProblems({
+    ...base,
+    variables: { Latent_Heat: 'ERA5', Sensible_Heat: '' },
+  });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0]![0], /Sensible_Heat/);
+  assert.match(problems[0]![1], /no usable reference data/);
+});
+
 it('maps the remote run-identity errors into English', () => {
   for (const [chinese, expected] of [
     ['这个比较的活动作业锁一直被占用', /active-job lock/],
@@ -1379,4 +1399,49 @@ it('rejects invalid numeric settings instead of silently using OpenBench default
 
 it('maps host-scoped remote cancellation to a normal stopped outcome', () => {
   assert.deepEqual(benchErrorText('Error: operation cancelled'), ['已停止', 'Stopped']);
+});
+
+it('resource validation messages have English-only translations without splitting paths', () => {
+  for (const [message, expected] of [
+    [
+      'project.num_cores 必须是非负整数 / project.num_cores must be a non-negative integer',
+      'project.num_cores must be a non-negative integer',
+    ],
+    [
+      '申请核数不足 / --cpus (4) must cover project.num_cores (8); raise --cpus or lower project.num_cores',
+      '--cpus (4) must cover project.num_cores (8); raise --cpus or lower project.num_cores',
+    ],
+    [
+      '不支持跨行或特殊 YAML 键 / Unsupported multiline or special YAML mapping key',
+      'Unsupported multiline or special YAML mapping key',
+    ],
+    [
+      '不支持转义、别名或合并 YAML 键 / Escaped, alias or merge YAML mapping keys are unsupported',
+      'Escaped, alias or merge YAML mapping keys are unsupported',
+    ],
+  ]) {
+    assert.equal(benchErrorText(message!)[1], expected);
+  }
+  assert.equal(
+    benchErrorText(
+      'project.num_cores 必须是非负整数 / project.num_cores must be a non-negative integer: invalid digit found in string',
+    )[1],
+    'project.num_cores must be a non-negative integer: invalid digit found in string',
+  );
+  assert.equal(benchErrorText('Cannot read /tmp/a / b')[1], 'Cannot read /tmp/a / b');
+});
+
+it('translates real anyhow multiline CPU errors and multiline scalar errors', () => {
+  const stderr =
+    'Error: project.num_cores 必须是非负整数 / project.num_cores must be a non-negative integer\n\nCaused by:\n    invalid digit found in string\n';
+  const english = benchErrorText(stderr)[1];
+  assert.doesNotMatch(english, /[\u3400-\u9fff]/);
+  assert.match(english, /Caused by:\n {4}invalid digit found in string/);
+  for (const field of ['num_cores', 'output_dir']) {
+    const error = `project.${field}: multiline YAML values are unsupported; write the value on the same line as its key`;
+    const [zh, en] = benchErrorText(error);
+    assert.match(zh, /不支持跨行/);
+    assert.equal(en, error);
+    assert.match(benchErrorText(`Error: ${error}\n`)[0], /不支持跨行/);
+  }
 });

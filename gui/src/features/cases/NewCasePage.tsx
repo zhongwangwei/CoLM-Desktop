@@ -52,6 +52,7 @@ import {
   type ModelSetup,
   type SetupRecheck,
   type SimulationStep,
+  spatialSurfaceOnlyFields,
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import {
@@ -84,7 +85,12 @@ import {
 import type { CaseOptionPatch } from '../versions/configuration-options';
 import HistoryVariablesCard from './HistoryVariablesCard';
 import MultiSiteSettings from './MultiSiteSettings';
-import { planMultiSites, type MultiSiteDraft, type MultiSiteMode } from './multisite-model';
+import {
+  multiSiteMarkerRoot,
+  planMultiSites,
+  type MultiSiteDraft,
+  type MultiSiteMode,
+} from './multisite-model';
 import type { CaseEntry, DataDefaults } from '../../lib/types';
 import RunLocationSettings from '../runs/RunLocationSettings';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
@@ -842,6 +848,9 @@ export default function NewCasePage() {
       Object.entries(caseValues).filter(
         ([key, value]) =>
           schema.some((f) => f.name === key) &&
+          // 单点算例不消费空间专属的地表裁取选项，残留值不再送给后端。
+          (form.kind !== 'site' ||
+            !(spatialSurfaceOnlyFields as readonly string[]).includes(key)) &&
           (value !== '' || schema.find((f) => f.name === key)?.kind.startsWith('Character')),
       ),
     ),
@@ -891,6 +900,53 @@ export default function NewCasePage() {
         )
       : null,
   );
+  // 从已有项目重开向导时，项目里已经存在的站点不能再作为"待创建"预选：用户点创建后
+  // 每站都会报"目录已存在"（GUI 审查 S-12）。读取项目现有算例后把已建的草稿移除。
+  useEffect(() => {
+    if (!seed || seed.recordDraft !== false) return;
+    const projectRoot = seed.form?.root;
+    const projectName = seed.form?.name;
+    if (!projectRoot || !projectName) return;
+    let live = true;
+    let project = '';
+    try {
+      project = caseDirectory(projectRoot, projectName);
+    } catch {
+      return;
+    }
+    void invoke<{ dir: string }[]>('list_cases', { root: project })
+      .then((cases) => {
+        if (!live || !cases.length) return;
+        const existing = new Set(cases.map((entry) => entry.dir.replace(/[\\/]+$/, '')));
+        setSiteDrafts((current) => {
+          const kept = current.filter((draft) => {
+            let out: string;
+            try {
+              out = caseDirectory(project, draft.name);
+            } catch {
+              return true;
+            }
+            return !existing.has(out.replace(/[\\/]+$/, ''));
+          });
+          if (kept.length === current.length) return current;
+          notify(
+            t(
+              `已跳过 ${current.length - kept.length} 个已存在的站点算例；只会创建新的站点。`,
+              `Skipped ${current.length - kept.length} site cases that already exist; only new sites will be created.`,
+            ),
+          );
+          return kept;
+        });
+      })
+      .catch(() => {
+        // 读不到现有算例时保持原样：创建时后端仍会逐站报明确的错误。
+      });
+    return () => {
+      live = false;
+    };
+    // seed 只在打开向导时变化；notify/t 是稳定回调，不进依赖以免重复请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
   // 上游选择改变后，把失去物理前提或与之互斥的已开启过程一并关闭，并告知用户。
   function reconcile(
     patch: CaseOptionPatch,
@@ -983,6 +1039,15 @@ export default function NewCasePage() {
       }
     }
     delete exampleValues.current[k];
+    // 切回单点：空间专属的地表裁取设置必须从待写字段里删掉，否则创建时仍会写进单点
+    // case.nml（界面已禁用、用户改不回来；GUI 审查 F-S-08）。
+    if (k === 'kind' && v === 'site') {
+      setCaseValues((old) => {
+        const next = { ...old };
+        for (const name of spatialSurfaceOnlyFields) delete next[name];
+        return next;
+      });
+    }
     if (k === 'kind' || k === 'grid')
       reconcile(
         k === 'kind' && v !== 'site' && cropEnabled(physics)
@@ -1785,6 +1850,28 @@ export default function NewCasePage() {
       await rememberDataPaths(false);
       await rememberKindPaths('site', { sitedir: form.sitedir, forcingdir: form.forcingdir });
     }
+    // 记住本次多站点建例方式，下次打开项目向导时不用再启发式猜（S-06）。远程项目写在本机
+    // 镜像根（`result.root`，即打开/重开远程项目用的本地路径），不写服务器；重开项目时
+    // `project_wizard_seed` 先读这个标记，能区分之前只能靠日期猜的 per-site/first-year。
+    // 本地项目根是 caseDirectory(form.root, form.name)，不是保存目录 form.root；
+    // 写到 form.root 会让 project_wizard_seed 读不到，还会在父目录留下标记（F-S-07）。
+    const markerRoot = form.host
+      ? results.find((result) => result.created && !result.error && result.root)?.root
+      : multiSiteMarkerRoot(form.root, form.name);
+    if (markerRoot && results.some((result) => result.created && !result.error)) {
+      await invoke('project_remember_multi_site', {
+        root: markerRoot,
+        mode: multiSiteMode,
+        repeat: Number(multiSiteRepeat),
+      }).catch((error: unknown) =>
+        notify(
+          t(
+            `多站点建例方式未能记入项目目录：${error}。算例已创建，下次打开可能按内容推断模式。`,
+            `The multi-site creation mode could not be recorded in the project folder: ${error}. The cases were created; the next open may infer the mode from their contents.`,
+          ),
+        ),
+      );
+    }
     if (
       !job.cancelRequested &&
       alive.current &&
@@ -1897,7 +1984,14 @@ export default function NewCasePage() {
       if (multiSite) return createMultiSites();
       const out = finalDirectory,
         revision = state.versionRef;
-      const changed = editedOptions.map(([path, value]) => ({ path, value }));
+      // 单点创建时不写入空间专属的地表裁取残留值（F-S-08）：界面已禁用它们，
+      // 但旧草稿/切换范围留下的 caseValues 不能借创建流程落进 case.nml。
+      const changed = editedOptions
+        .filter(
+          ([path]) =>
+            form.kind !== 'site' || !(spatialSurfaceOnlyFields as readonly string[]).includes(path),
+        )
+        .map(([path, value]) => ({ path, value }));
       const spinup = form.spinup_end
         ? {
             ...caseDatePatch(form.spinup_end, 'spinup'),
@@ -2070,7 +2164,7 @@ export default function NewCasePage() {
     dlon: t('经度分辨率（°）', 'Longitude resolution (°)'),
     dlat: t('纬度分辨率（°）', 'Latitude resolution (°)'),
     mesh: t('网格文件', 'Mesh file'),
-    catchment: t('汇水区网格文件', 'Catchment file'),
+    catchment: t('流域单元网格文件', 'Catchment file'),
     shapefile: t('流域边界文件', 'Watershed boundary'),
     forcing: t('强迫场配置文件', 'Forcing configuration'),
     spatial_forcingdir: t('强迫场数据路径', 'Forcing data path'),
@@ -2184,9 +2278,13 @@ export default function NewCasePage() {
     basicOptions = simulationFields(visibleSchema, step, false, form.engine).filter(
       (f) => !groupFields.includes(f),
     );
+  const spatialSurfaceOnly = (name: string) =>
+    form.kind === 'site' && (spatialSurfaceOnlyFields as readonly string[]).includes(name);
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
     optionDisabled = (name: string) =>
-      optionState(name)?.mode === 'disabled' || optionState(name)?.mode === 'readonly';
+      spatialSurfaceOnly(name) ||
+      optionState(name)?.mode === 'disabled' ||
+      optionState(name)?.mode === 'readonly';
   const domains = [
     ['site', t('单点', 'Single site'), t('一个观测站或位置', 'One station or location')],
     ['watershed', t('流域', 'Watershed'), t('按流域边界开展模拟', 'Simulate a watershed')],
@@ -2204,7 +2302,11 @@ export default function NewCasePage() {
       t('非结构网格', 'Unstructured'),
       t('读取已有网格文件', 'Use an existing mesh'),
     ],
-    ['catchment', t('汇水区网格', 'Catchment'), t('读取汇水区网格文件', 'Use a catchment mesh')],
+    [
+      'catchment',
+      t('流域单元网格', 'Catchment'),
+      t('读取流域单元网格文件', 'Use a catchment mesh'),
+    ],
   ];
   const autoLabel = t('沿用算例默认', 'Use case defaults');
   const optionValue = (f: SchemaField) =>
@@ -2213,6 +2315,10 @@ export default function NewCasePage() {
       ? displayLiteral(optionState(f.name)?.built_in_default ?? f.default)
       : '');
   const optionLabels: Record<string, string> = {
+    USE_srfdata_from_larger_region: t(
+      '从已有大区域地表资料裁取',
+      'Crop existing larger-region surface data',
+    ),
     DEF_dir_existing_srfdata: t('已有地表资料目录（可选）', 'Existing surface data (optional)'),
     'DEF_simulation_time%timestep': t('时间步长（秒）', 'Time step (seconds)'),
     'DEF_simulation_time%greenwich': t('使用 UTC 时间', 'Use UTC time'),
@@ -2512,7 +2618,23 @@ export default function NewCasePage() {
     <Field
       key={f.name}
       label={optionLabels[f.name] || fieldLabel(f.name, state.language)}
-      hint={configurationReason(optionState(f.name)?.reason, en) ?? (advanced ? f.name : undefined)}
+      hint={
+        (spatialSurfaceOnly(f.name)
+          ? t(
+              '仅空间算例使用；单点模拟不使用大区域地表裁取及此目录。',
+              'Spatial cases only; single-site simulations do not use regional surface cropping or this directory.',
+            )
+          : undefined) ??
+        configurationReason(optionState(f.name)?.reason, en) ??
+        (f.name === 'USE_srfdata_from_larger_region'
+          ? t(
+              '开启后，地表准备阶段从下方目录裁取本区域资料；关闭则从原始资料生成。',
+              'When enabled, surface preparation crops this region from the directory below; otherwise it generates data from raw inputs.',
+            )
+          : advanced
+            ? f.name
+            : undefined)
+      }
     >
       {f.kind === 'Logical' ? (
         <Select
@@ -3423,6 +3545,7 @@ export default function NewCasePage() {
                 <dd>
                   {mode ?? '—'}
                   {mode === 'PFT' || mode === 'PC' ? ` · ${form.landcover}` : ''}
+                  {cropEnabled(caseValues) ? t(' · CROP 作物内核', ' · CROP kernel') : ''}
                 </dd>
                 <dt>{t('预热', 'Spin-up')}</dt>
                 <dd>
@@ -3519,6 +3642,18 @@ export default function NewCasePage() {
             {moreOptions()}
           </Card>
 
+          {(() => {
+            const histFreq = basicOptions.find((f) => f.name === 'DEF_HIST_FREQ');
+            const value = histFreq ? optionValue(histFreq) : '';
+            return value.trim().toLowerCase() === 'none';
+          })() && (
+            <Notice tone="warning">
+              {t(
+                '输出间隔是「不写历史文件」（none）：下面的输出变量不会写入结果，运行后也不会有曲线或评估数据。',
+                'The output interval is "No history output" (none): the variables below will not be written, so runs produce no curves or evaluation data.',
+              )}
+            </Notice>
+          )}
           <HistoryVariablesCard
             actionPrefix="new"
             variables={historyVariables.map((v) => ({

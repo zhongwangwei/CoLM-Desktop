@@ -295,7 +295,7 @@ pub(super) fn run(case: &Path, r: &Request) -> Result<Value> {
     let all: Vec<_> = aligned.iter().map(|(_, m, o)| (*m, *o)).collect();
     let mut groups: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     // Include requested months with no usable observations instead of silently losing them.
-    for day in r.from.div_euclid(86400)..=(r.to - 1).div_euclid(86400) {
+    for day in r.from.div_euclid(86400)..=r.to.div_euclid(86400) {
         groups
             .entry(format!("month_{:02}", month(day * 86400)))
             .or_default();
@@ -409,7 +409,7 @@ pub(super) fn run(case: &Path, r: &Request) -> Result<Value> {
         }
     }
     let evidence_id = format!("{:x}", hash.finalize());
-    let mut result = json!({"version":1,"status":if all.len()>=3 {"evidence_collected"}else{"insufficient_data"},"evidence_id":evidence_id,"paired_support_id":paired_support_id,"case":case,"observation":obs_path,"variable":r.variable,"observation_variable":r.observation_variable,"window":{"from":r.from,"to":r.to,"end_exclusive":true},"alignment":{"status":if all.len()>=3 {"computed"}else{"missing"},"paired":all.len(),"model_records_excluded":unix.iter().filter(|t|**t>=r.from && **t<r.to).count().saturating_sub(all.len()),"model_records_in_window":unix.iter().filter(|t|**t>=r.from && **t<r.to).count(),"quality_control":if r.observation_qc.is_some(){"qc_zero_only"}else{"finite_only_no_qc_supplied"},"units":r.output_units,"model_scale":r.model_scale,"obs_scale":r.obs_scale,"sign_convention":r.sign_convention,"contract":"explicit fixed-offset UTC conversion; half-hour same label, hourly midpoint covers two observation start labels"},"metrics":summary(&all),"regimes":regimes,"hypotheses":[{"status":"unverified","candidate":"Forcing, water availability or process parameter mismatch","basis":{"evidence_id":evidence_id,"metric":"bias","value":summary(&all)["bias"]},"limitation":"Residual grouping suggests tests; it does not identify a causal mechanism."}],"minimal_experiment":{"status":"proposed_not_executed","baseline_evidence_id":evidence_id,"window":{"from":r.from,"to":r.to},"proposal":"Choose one active process parameter using source/configuration evidence; preserve baseline and change only that parameter over this window.","required_before_execution":["physical hypothesis and active parameter/source reference","explicit perturbation value and bounds","same forcing, observation, initial state, build identity and window","approved isolated case/run"],"required_before_causal_claim":["verified baseline and experiment artifact identity","configuration diff restricted to the proposed parameter","same aligned paired timestamps and QC","held-out/closure checks and competing explanations"],"cause_verified":false}});
+    let mut result = json!({"version":1,"status":if all.len()>=3 {"evidence_collected"}else{"insufficient_data"},"evidence_id":evidence_id,"paired_support_id":paired_support_id,"case":case,"observation":obs_path,"variable":r.variable,"observation_variable":r.observation_variable,"window":{"from":r.from,"to":r.to,"end_inclusive":true},"alignment":{"status":if all.len()>=3 {"computed"}else{"missing"},"paired":all.len(),"model_records_excluded":unix.iter().filter(|t|**t>=r.from && **t<=r.to).count().saturating_sub(all.len()),"model_records_in_window":unix.iter().filter(|t|**t>=r.from && **t<=r.to).count(),"quality_control":if r.observation_qc.is_some(){"qc_zero_only"}else{"finite_only_no_qc_supplied"},"units":r.output_units,"model_scale":r.model_scale,"obs_scale":r.obs_scale,"sign_convention":r.sign_convention,"contract":"explicit fixed-offset UTC conversion; half-hour same label, hourly midpoint covers two observation start labels"},"metrics":summary(&all),"regimes":regimes,"hypotheses":[{"status":"unverified","candidate":"Forcing, water availability or process parameter mismatch","basis":{"evidence_id":evidence_id,"metric":"bias","value":summary(&all)["bias"]},"limitation":"Residual grouping suggests tests; it does not identify a causal mechanism."}],"minimal_experiment":{"status":"proposed_not_executed","baseline_evidence_id":evidence_id,"window":{"from":r.from,"to":r.to},"proposal":"Choose one active process parameter using source/configuration evidence; preserve baseline and change only that parameter over this window.","required_before_execution":["physical hypothesis and active parameter/source reference","explicit perturbation value and bounds","same forcing, observation, initial state, build identity and window","approved isolated case/run"],"required_before_causal_claim":["verified baseline and experiment artifact identity","configuration diff restricted to the proposed parameter","same aligned paired timestamps and QC","held-out/closure checks and competing explanations"],"cause_verified":false}});
     if let Some(experiment) = &r.experiment {
         result["experiment"] = compare_experiment(case, r, experiment, &result).unwrap_or_else(
             |e| json!({"status":"missing","cause_verified":false,"reason":e.to_string()}),
@@ -569,7 +569,9 @@ mod tests {
             run(&root, &r).unwrap()["regimes"]["daylight"]["status"],
             "missing"
         );
-        r.to = 3600;
+        // 闭窗口 [0, 1800] 只有 2 条记录，仍不足以给出指标（原来靠半开窗口的 3600 边界
+        // 才显得"缺"；现在边界记录属于窗口，改用更短的窗口表达同一个不足）。
+        r.to = 1800;
         assert_eq!(run(&root, &r).unwrap()["metrics"]["status"], "missing");
         r.model_utc_offset_seconds = 3600;
         assert!(run(&root, &r).is_err());

@@ -13,6 +13,35 @@ import {
   type SingleResult,
 } from './analysis-state';
 
+test('comparison freshness ignores the time basis label', () => {
+  const request: ComparisonRequest = {
+    entries: [{ runCase: '/case/runs/a', obs: '/obs/a.nc' }],
+    from: '2008-01-01',
+    to: '2008-12-31',
+    spinup: '0',
+    corrected: false,
+    time_basis: {
+      kind: 'utc',
+      utc_offset_seconds: 0,
+      calendar: 'standard',
+      source: 'case.nml',
+    },
+  };
+  const labelled = {
+    ...request,
+    time_basis: {
+      kind: 'local_standard_time' as const,
+      utc_offset_seconds: 28_800,
+      calendar: 'standard',
+      source: 'obs units',
+    },
+  };
+  // catalog/series 异步到达会让 time_basis 变；它不能把已完成的比较判成"条件已更改"（F-H-11）。
+  assert.equal(comparisonKey(request), comparisonKey(labelled));
+  const without = { ...request, time_basis: undefined };
+  assert.equal(comparisonKey(request), comparisonKey(without));
+});
+
 const singleRequest = (): SingleRequest => ({
   caseDir: '/case',
   versionId: 'official',
@@ -141,7 +170,7 @@ test('comparison csv takes its conditions and observation from the result snapsh
   assert.equal(lines[0], comparisonCsvHeader.join(','));
   assert.equal(
     lines[0],
-    'site,run_case,status,version,observation,from,to,spinup,corrected,variable,units,n,rmse,mae,bias,r2,r,nse,kge',
+    'site,run_case,status,version,observation,from,to,spinup,corrected,time_basis,variable,units,n,rmse,mae,bias,r2,r,nse,kge',
   );
   const row = lines[1];
   assert.match(row, /CN-Cng · a/);
@@ -159,7 +188,71 @@ test('comparison csv takes its conditions and observation from the result snapsh
   later.request = { ...later.request, spinup: '8', corrected: true };
   later.id = comparisonKey(later.request);
   const laterCsv = comparisonCsv(later).split('\n')[1];
-  assert.match(laterCsv, /,8,1,/, 'spinup and corrected come from the snapshot');
+  assert.match(laterCsv, /,8,1,model_clock,/, 'spinup/corrected/basis come from the snapshot');
+  later.request = {
+    ...later.request,
+    time_basis: {
+      kind: 'utc',
+      utc_offset_seconds: 0,
+      calendar: 'standard',
+      source: 'case.nml',
+    },
+  };
+  assert.match(comparisonCsv(later).split('\n')[1], /,8,1,utc,/, 'explicit time basis is exported');
+});
+
+test('comparison csv exports each row’s own time basis and falls back deliberately', () => {
+  const basis = (kind: 'utc' | 'local_standard_time' | 'model_clock') =>
+    kind === 'model_clock'
+      ? {
+          kind,
+          utc_offset_seconds: null,
+          calendar: 'standard',
+          source: 'case_namelist_greenwich_false',
+        }
+      : {
+          kind,
+          utc_offset_seconds: kind === 'utc' ? 0 : 28800,
+          calendar: 'standard',
+          source: 'case.nml',
+        };
+  const result = comparisonResult();
+  result.request = { ...result.request, time_basis: basis('local_standard_time') };
+  result.rows[0].time_basis = basis('utc');
+  result.rows.push({
+    site: '/other/runs/b',
+    name: 'Qh',
+    n: 3,
+    rmse: 2,
+    time_basis: basis('model_clock'),
+  });
+  let lines = comparisonCsv(result).split('\n');
+  assert.match(lines[1], /,0,0,utc,/, 'row basis overrides the request basis');
+  assert.match(lines[2], /,0,0,model_clock,/, 'a mixed-clock row keeps its own basis');
+
+  // 其它行已带自己的基准时，缺基准的行不能拿“当前打开算例”的基准冒充：写 unknown。
+  result.rows[1].time_basis = undefined;
+  lines = comparisonCsv(result).split('\n');
+  assert.match(lines[2], /,unknown,/, 'missing row basis cannot borrow another case’s basis');
+  delete result.request.time_basis;
+  lines = comparisonCsv(result).split('\n');
+  assert.match(lines[1], /,0,0,utc,/, 'a row with its own basis still exports it');
+  assert.match(lines[2], /,unknown,/, 'still unknown rather than guessing model_clock');
+  // 后端原文形状不认识时写 unknown，不能静默写空单元格（复核 C F4）。
+  result.rows[1] = {
+    ...result.rows[1],
+    time_basis: 'utc' as unknown as (typeof result.rows)[number]['time_basis'],
+  };
+  assert.match(comparisonCsv(result).split('\n')[2], /,unknown,/);
+  // 所有行都没有基准（旧后端）时，回退到请求快照，再回退 model_clock。
+  result.rows[1].time_basis = undefined;
+  result.rows[0].time_basis = undefined;
+  result.request = { ...result.request, time_basis: basis('local_standard_time') };
+  assert.match(
+    comparisonCsv(result).split('\n')[1],
+    /,local_standard_time:offset=28800s,/,
+    'all rows missing a basis falls back to the request snapshot with its offset',
+  );
 });
 
 test('comparison csv keeps row order and falls back to the entry observation', () => {

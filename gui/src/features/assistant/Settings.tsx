@@ -43,7 +43,13 @@ import {
   type ModelChoice,
   type RetrievalSettings,
   type XerjNodeStatus,
+  retrievalDetailText,
+  ASSISTANT_MODELS_CACHE_KEY,
+  cachedAssistantModels,
+  parseAssistantModelsCache,
+  rememberAssistantModels,
 } from './model';
+import { readStored, writeStored } from '../../lib/storage';
 import {
   draftSaveState,
   equalJson,
@@ -83,6 +89,154 @@ export default function AssistantSettings({
         '助手还没有启动；先发送一条消息启动助手，再更新或查询文档索引。',
         'The assistant is not running yet; send a message first, then update or check the document index.',
       );
+    // 后端保存校验的固定中文原文：英文界面也要给英文，而不是把中文直接弹出来（GUI 审查 A-06）。
+    const backendValidationErrors: [string, string, string][] = [
+      [
+        '会话上限过大',
+        '会话上限超过后端限制：每会话最多 100000 轮、累计 1000000000 token。',
+        'Session limits exceed the backend maximum: at most 100000 turns and 1000000000 tokens per conversation.',
+      ],
+      [
+        '超时须为 1–3600 秒，最大输出须为 1–1000000 token',
+        '超时须为 1–3600 秒，最大输出须为 1–1000000 token。',
+        'Timeout must be 1–3600 seconds and the maximum output must be 1–1000000 tokens.',
+      ],
+      [
+        '上下文窗口须为 1024–10000000 token，留空表示使用内置预设',
+        '上下文窗口须为 1024–10000000 token，留空表示使用内置预设。',
+        'The context window must be 1024–10000000 tokens; leave it blank to use the built-in preset.',
+      ],
+      [
+        '请填写不含空白的模型名',
+        '请填写模型名（最多 256 字节，不能含空白）。',
+        'Enter a model name (up to 256 bytes, no whitespace).',
+      ],
+      ['不支持这个 API 接口格式', '不支持这个 API 接口格式。', 'This API format is not supported.'],
+      [
+        '思考程度须为不超过 32 字节的英文档位名',
+        '思考程度须为不超过 32 字节的英文档位名。',
+        'Reasoning effort must be an ASCII level name of at most 32 bytes.',
+      ],
+      [
+        '额外参数须为 JSON 对象',
+        '额外参数须为 JSON 对象。',
+        'Extra API options must be a JSON object.',
+      ],
+      ['额外参数超过 16 KiB', '额外参数超过 16 KiB。', 'Extra API options exceed 16 KiB.'],
+      [
+        '额外参数不能覆盖模型、对话、工具、流式设置或凭据',
+        '额外参数不能覆盖模型、对话、工具、流式设置或凭据。',
+        'Extra API options must not override the model, messages, tools, streaming or credentials.',
+      ],
+      [
+        'OpenCode 模型须为 provider/model',
+        'OpenCode 模型须为 provider/model 形式。',
+        'The OpenCode model must be in provider/model form.',
+      ],
+      ['请先选择 OpenCode 模型', '请先选择 OpenCode 模型。', 'Choose an OpenCode model first.'],
+      [
+        '审批方式只能是 ask 或 auto',
+        '审批方式只能是 ask 或 auto。',
+        'Approval must be ask or auto.',
+      ],
+      [
+        '没有这个 API 服务预设；其他服务请选择自定义',
+        '没有这个 API 服务预设；其他服务请选择“自定义”。',
+        'Unknown API provider preset; choose “Custom” for other services.',
+      ],
+      [
+        'Claude Code 的思考强度只能是',
+        'Claude Code 的思考强度只支持 low、medium、high、xhigh、max。',
+        'Claude Code reasoning effort only supports low, medium, high, xhigh and max.',
+      ],
+      ['服务地址不是有效的网址', '服务地址不是有效的网址。', 'The service URL is not a valid URL.'],
+      [
+        '服务地址必须是 https://',
+        '服务地址必须是 https://，或本机的 http://127.0.0.1 / localhost。',
+        'The service URL must use https://, or http://127.0.0.1 / localhost for this computer only.',
+      ],
+      [
+        '服务地址不能含用户名、密码、查询参数或片段',
+        '服务地址不能含用户名、密码、查询参数或片段；API Key 单独保存。',
+        'The service URL must not contain a username, password, query or fragment; the API key is stored separately.',
+      ],
+      [
+        '额外参数的思考强度须为字符串',
+        '额外参数里的思考强度须为字符串。',
+        'The reasoning effort in extra API options must be a string.',
+      ],
+    ];
+    for (const [needle, zh, en] of backendValidationErrors)
+      if (text.includes(needle)) return t(zh, en);
+    // 动态内容的前缀错误：保留后端的具体 id/值，但给双语外壳，英文界面不再整句中文。
+    if (text.startsWith('没有这个 API 服务预设：'))
+      return t(
+        `没有这个 API 服务预设：${text.slice('没有这个 API 服务预设：'.length)}。`,
+        `Unknown API provider preset: ${text.slice('没有这个 API 服务预设：'.length)}.`,
+      );
+    if (text.startsWith('没有这个外部后端：'))
+      return t(
+        `没有这个外部后端：${text.slice('没有这个外部后端：'.length)}。`,
+        `Unknown external backend: ${text.slice('没有这个外部后端：'.length)}.`,
+      );
+    if (text.startsWith('模型名或思考强度不合法：'))
+      return t(
+        `模型名或思考强度不合法：${text.slice('模型名或思考强度不合法：'.length)}（不能以 - 开头或含空白）。`,
+        `Invalid model name or reasoning effort: ${text.slice('模型名或思考强度不合法：'.length)} (must not start with - or contain whitespace).`,
+      );
+    // 带模型名/可用档位的后端校验：保留具体值，只翻译固定句式（F-A-05）。
+    const disabledThinking = text.match(/^(.+) 不支持关闭思考，请改用服务默认或支持的思考强度$/);
+    if (disabledThinking)
+      return t(
+        `${disabledThinking[1]} 不支持关闭思考，请改用服务默认或支持的思考强度。`,
+        `${disabledThinking[1]} cannot disable thinking; use the service default or a supported reasoning effort.`,
+      );
+    const effortUnsupported = text.match(/^(.+) 不支持思考强度 (.+)；可用：(.+)$/);
+    if (effortUnsupported)
+      return t(
+        `${effortUnsupported[1]} 不支持思考强度 ${effortUnsupported[2]}；可用：${effortUnsupported[3]}。`,
+        `${effortUnsupported[1]} does not support reasoning effort ${effortUnsupported[2]}; available: ${effortUnsupported[3]}.`,
+      );
+    const responsesOnly = text.match(/^(.+) 的助手工具调用须使用 Responses 接口$/);
+    if (responsesOnly)
+      return t(
+        `${responsesOnly[1]} 的助手工具调用须使用 Responses 接口。`,
+        `${responsesOnly[1]} tool calls require the Responses API.`,
+      );
+    const anthropicOnly = text.match(/^(.+) 须使用 Anthropic Messages 接口$/);
+    if (anthropicOnly)
+      return t(
+        `${anthropicOnly[1]} 须使用 Anthropic Messages 接口。`,
+        `${anthropicOnly[1]} requires the Anthropic Messages API.`,
+      );
+    const samplingUnsupported = text.match(
+      /^(.+) 的思考模式不支持 temperature、top_p 或 logprobs 等采样选项，请移除$/,
+    );
+    if (samplingUnsupported)
+      return t(
+        `${samplingUnsupported[1]} 的思考模式不支持 temperature、top_p 或 logprobs 等采样选项，请移除。`,
+        `${samplingUnsupported[1]} thinking mode does not support temperature, top_p or logprobs; remove them.`,
+      );
+    const historyPathRelative = text.match(
+      /^(.+) 历史仓库路径须为绝对路径、不能含控制字符（留空由 CLI 使用默认缓存）$/,
+    );
+    if (historyPathRelative)
+      return t(
+        `${historyPathRelative[1]} 历史仓库路径须为绝对路径、不能含控制字符（留空由 CLI 使用默认缓存）。`,
+        `${historyPathRelative[1]} history repository path must be absolute and contain no control characters (leave blank to let the CLI use its default cache).`,
+      );
+    const historyPathMissing = text.match(/^(.+) 历史仓库路径不存在或不是目录：(.+)$/);
+    if (historyPathMissing)
+      return t(
+        `${historyPathMissing[1]} 历史仓库路径不存在或不是目录：${historyPathMissing[2]}。`,
+        `${historyPathMissing[1]} history repository path does not exist or is not a directory: ${historyPathMissing[2]}.`,
+      );
+    const tianhe = text.match(/^检测到模型服务端点疑似位于天河（(.+)）。软件底线：/);
+    if (tianhe)
+      return t(
+        `检测到模型服务端点疑似位于天河（${tianhe[1]}）。软件底线：禁止在天河上直接运行 DeepSeek 等 LLM；请改用官方云服务或其他机器。`,
+        `The model service endpoint appears to be on Tianhe (${tianhe[1]}). Hard policy: DeepSeek and other LLMs must not run directly on Tianhe; use an official cloud service or another machine.`,
+      );
     return text;
   }
   const lock = useRef(false);
@@ -121,7 +275,14 @@ export default function AssistantSettings({
   // 天河 LLM 底线：当前端点 guard 结果；blocked 时保存禁用，错误展示在安全区。
   const [endpointGuard, setEndpointGuard] = useState<LlmEndpointGuard | null>(null);
   const [endpointGuardError, setEndpointGuardError] = useState('');
-  const [models, setModels] = useState<ModelChoice[]>([]);
+  // 最近一次成功探测按「后端 + 端点」缓存在 localStorage；重启/关闭设置后思考档位不退回硬编码（A-02）。
+  const [models, setModels] = useState<ModelChoice[]>(
+    cachedAssistantModels(
+      parseAssistantModelsCache(readStored(ASSISTANT_MODELS_CACHE_KEY)),
+      settings.backend,
+      settings.base_url,
+    ),
+  );
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   // 只用于保存请求在飞时显示"正在保存"；发现模型、登记 Key 等操作不算保存设置。
@@ -139,15 +300,28 @@ export default function AssistantSettings({
         : old,
     );
   }, [settings]);
-  // 状态字符串是生成时语言的文本，切换语言后清掉，避免英文界面残留中文。
+  // 状态/错误字符串是生成时语言的文本，切换语言后清掉，避免英文界面残留中文。
+  // historyError / endpointGuardError 是后端原文（中文），只清 status 会留下它们（GUI 审查 A-08）。
   useEffect(() => {
     setStatus('');
+    setHistoryError('');
+    setEndpointGuardError('');
+    // 同步结果与错误是生成时语言的字符串，切语言后清掉而不是留着中英混排（F-A-06）。
+    // 索引状态来自面板 props，不能在这里清空；它的 detail 在渲染时按当前语言翻译。
+    setSyncFailures([]);
+    setSyncOutcome(null);
   }, [state.language]);
   useEffect(() => {
     let active = true;
     const sourceRequest = request;
     setHasKey(null);
-    setModels([]);
+    setModels(
+      cachedAssistantModels(
+        parseAssistantModelsCache(readStored(ASSISTANT_MODELS_CACHE_KEY)),
+        draft.backend,
+        draft.base_url,
+      ),
+    );
     request.current++;
     if (hasBackend() && draft.backend === 'builtin')
       invoke<boolean>('assistant_has_key', { baseUrl: draft.base_url })
@@ -155,12 +329,14 @@ export default function AssistantSettings({
           if (active) setHasKey(value);
         })
         .catch((error) => {
-          if (active) setStatus(String(error));
+          if (active) setStatus(settingsError(String(error)));
         });
     return () => {
       active = false;
       sourceRequest.current++;
     };
+    // settingsError 每次渲染都是新函数，不能进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.backend, draft.base_url]);
   // 必须放在最后：草稿比较依赖 draft/options，改完才报给面板（U-07）。onDirtyChange 是 setState，稳定。
   const dirty = settingsDraftDirty(settings, draft, options);
@@ -303,6 +479,19 @@ export default function AssistantSettings({
     }
     if (sequence === request.current) {
       setModels(found);
+      // 只有成功探测才写缓存；空结果不覆盖旧缓存（可能是端点暂时失败）。
+      if (found.length)
+        writeStored(
+          ASSISTANT_MODELS_CACHE_KEY,
+          JSON.stringify(
+            rememberAssistantModels(
+              parseAssistantModelsCache(readStored(ASSISTANT_MODELS_CACHE_KEY)),
+              draft.backend,
+              draft.base_url,
+              found,
+            ),
+          ),
+        );
       setStatus(
         `${t('可用模型', 'Available models')}: ${found.length} (${t('保留手动输入', 'manual entry retained')})`,
       );
@@ -508,7 +697,8 @@ export default function AssistantSettings({
           (draft.backend === 'opencode'
             ? []
             : draft.backend === 'claude_code'
-              ? ['low', 'medium', 'high']
+              ? // 后端 CLAUDE_EFFORTS 是 5 档（Claude Code 2.1.293），设置框不能只给 3 档（F-A-04）。
+                ['low', 'medium', 'high', 'xhigh', 'max']
               : ['low', 'medium', 'high', 'xhigh', 'max'])),
       ];
   // "实际发送"按已保存设置算，不能用 draft：草稿换服务后、保存前发送仍走旧值（U-07）。
@@ -595,24 +785,22 @@ export default function AssistantSettings({
     // Xerj 的 Key 也是"输入框里有内容"= 还没登记；保存会重启助手，先让用户登记或清空。
     if (retrievalMode === 'external' && retrievalKey)
       throw new Error(t('请先登记或清空 Xerj Key。', 'Register or clear the Xerj key first.'));
+    // 这些值会直接进模型请求：只校验"正整数"会放过 10^15 之类的值，请求还没发就被服务端拒绝，
+    // 或在本地算出巨大的预算。上界必须与后端 validate_settings 一致（每会话轮数 100000、
+    // token 1000000000，见 gui/src-tauri/src/assistant.rs），否则前端"接受"的值保存时才报错（GUI 审查 A-06）。
+    const bounded = (value: number, min: number, max: number) =>
+      Number.isSafeInteger(value) && value >= min && value <= max;
     if (
-      ![draft.max_output_tokens, draft.timeout_seconds].every(
-        (n) => Number.isSafeInteger(n) && n > 0,
-      ) ||
-      !(
-        draft.context_window === null ||
-        (Number.isSafeInteger(draft.context_window) &&
-          draft.context_window >= 1024 &&
-          draft.context_window <= 10_000_000)
-      ) ||
-      ![draft.session_turn_limit, draft.session_token_limit].every(
-        (n) => Number.isSafeInteger(n) && n >= 0,
-      )
+      !bounded(draft.max_output_tokens, 1, 1_000_000) ||
+      !bounded(draft.timeout_seconds, 1, 3_600) ||
+      !(draft.context_window === null || bounded(draft.context_window, 1024, 10_000_000)) ||
+      !bounded(draft.session_turn_limit, 0, 100_000) ||
+      !bounded(draft.session_token_limit, 0, 1_000_000_000)
     )
       throw new Error(
         t(
-          '输出上限和超时必须是正整数；上下文窗口须为 1024–10000000 的整数或留空；会话上限必须是非负整数。',
-          'Output limit and timeout must be positive integers; the context window must be an integer between 1024 and 10000000 or blank; session limits must be non-negative integers.',
+          '输出上限须为 1–1000000 的整数；超时须为 1–3600 秒；上下文窗口须为 1024–10000000 的整数或留空；每会话轮数须为 0–100000 的整数；会话 token 上限须为 0–1000000000 的整数。',
+          'Output limit must be an integer from 1 to 1000000; timeout must be 1–3600 seconds; the context window must be an integer between 1024 and 10000000 or blank; turns per conversation must be 0–100000; session token limit must be 0–1000000000.',
         ),
       );
     // 检索关闭也校验格式：开/关之间切换不应因为存了非法值才发现。
@@ -673,6 +861,12 @@ export default function AssistantSettings({
     setDraft(next);
     setOptions(JSON.stringify(next.api_options, null, 2));
     setStatus(t('设置已保存，下次发送时生效。', 'Settings saved; they apply to the next message.'));
+    // 保存可能停掉/重启托管节点：立即刷新设置页上的节点状态与地址，别显示旧 endpoint（F-A-03）。
+    if (hasBackend() && next.retrieval.enabled && next.retrieval.mode === 'managed') {
+      void invoke<XerjNodeStatus>('assistant_xerj_node', { action: 'status' })
+        .then((value) => setXerjNode(value))
+        .catch(() => {});
+    }
     return next;
   }
   return (
@@ -736,7 +930,9 @@ export default function AssistantSettings({
                   {endpointGuard.host}
                 </p>
               )}
-              {endpointGuard.message && <p className="text-xs">{endpointGuard.message}</p>}
+              {endpointGuard.message && (
+                <p className="text-xs">{settingsError(endpointGuard.message)}</p>
+              )}
             </Notice>
           ) : endpointConfirmRequired ? (
             <Notice tone="warning">
@@ -942,13 +1138,23 @@ export default function AssistantSettings({
                 checked={draft.web_search}
                 onChange={(e) => patch({ web_search: e.target.checked })}
               />{' '}
-              {t('联网搜索与读网页（DeepSeek API）', 'Web search and page fetch (DeepSeek APIs)')}
+              {draft.backend === 'builtin'
+                ? t('联网搜索与读网页（DeepSeek API）', 'Web search and page fetch (DeepSeek APIs)')
+                : t(
+                    '联网搜索与读网页（外部后端自带的联网）',
+                    'Web search and page fetch (the external backend’s own web access)',
+                  )}
             </label>
             <p className="text-xs text-muted-foreground">
-              {t(
-                '每次搜索约 $0.00075；读网页先在本机免费尝试（HTML/文本，以及有文字层的 PDF，≤64 MB、前 300 页），失败时回退 DeepSeek Fetch API（每成功一页约 $0.00075，URL 与页面内容会发给 DeepSeek）。失败/空结果不计费。需要 DeepSeek Key。',
-                'Each search costs about $0.00075. Pages are tried locally for free first (HTML/text and PDFs with an embedded text layer, up to 64 MB and the first 300 pages); if that fails, the DeepSeek Fetch API is used (about $0.00075 per successful page, and the URL and content are sent to DeepSeek). Failed or empty requests are free. Requires a DeepSeek key.',
-              )}
+              {draft.backend === 'builtin'
+                ? t(
+                    '搜索与读网页由 DeepSeek 的 Search / Fetch API 提供，用登记在 https://api.deepseek.com 的 DeepSeek Key（与当前回答服务商无关：用 OpenAI/Anthropic 等回答时也要它；可先切到 DeepSeek 服务商登记 Key 再切回）。每次搜索约 $0.00075；读网页先在本机免费尝试（HTML/文本，以及有文字层的 PDF，≤64 MB、前 300 页），失败时回退 DeepSeek Fetch API（每成功一页约 $0.00075，URL 与页面内容会发给 DeepSeek）。失败/空结果不计费。关闭后助手的只读历史 / GitHub 在线查询也会离线（只读本地缓存）。',
+                    'Search and page fetch are provided by the DeepSeek Search / Fetch APIs and use the DeepSeek key registered for https://api.deepseek.com (independent of the answering provider, so OpenAI/Anthropic answers also need it; register it under the DeepSeek provider and switch back). Each search costs about $0.00075. Pages are tried locally for free first (HTML/text and PDFs with an embedded text layer, up to 64 MB and the first 300 pages); if that fails, the DeepSeek Fetch API is used (about $0.00075 per successful page, and the URL and content are sent to DeepSeek). Failed or empty requests are free. Turning this off also makes the assistant’s read-only history/GitHub lookups offline (local cache only).',
+                  )
+                : t(
+                    '联网搜索与读网页使用外部后端自带的联网能力（本机 Codex 的实时搜索 / Claude Code 的 WebSearch 与 WebFetch），计入该后端自己的订阅，不使用 DeepSeek Key、也不产生 DeepSeek 费用；可用性与费用以该后端为准。关闭后外部后端的联网被禁用，助手的只读历史 / GitHub 在线查询也会离线（只读本地缓存）。',
+                    'Web search and page fetch use the external backend’s own web access (live search in local Codex / WebSearch and WebFetch in Claude Code), billed to that backend’s subscription; no DeepSeek key is used and no DeepSeek charge is incurred. Availability and cost follow that backend. Turning this off disables the backend’s web access and also makes the assistant’s read-only history/GitHub lookups offline (local cache only).',
+                  )}
             </p>
           </>
         )}
@@ -1209,7 +1415,9 @@ export default function AssistantSettings({
                   ` · ${t('分块', 'chunks')} ${docsIndex.chunks}`}
                 {typeof docsIndex.generation === 'number' &&
                   ` · ${t('索引代次', 'generation')} ${docsIndex.generation}`}
-                {docsIndex.detail ? ` · ${docsIndex.detail}` : ''}
+                {docsIndex.detail
+                  ? ` · ${retrievalDetailText(docsIndex.detail, state.language === 'en')}`
+                  : ''}
               </>
             ) : (
               t('尚未收到状态', 'No status received yet')
@@ -1227,7 +1435,9 @@ export default function AssistantSettings({
           <div className="flex flex-wrap gap-2">
             <Button
               disabled={
-                !settings.retrieval.enabled || !equalJson(draft.retrieval, settings.retrieval)
+                saving ||
+                !settings.retrieval.enabled ||
+                !equalJson(draft.retrieval, settings.retrieval)
               }
               onClick={() =>
                 void run(async () => {
@@ -1245,7 +1455,9 @@ export default function AssistantSettings({
             </Button>
             <Button
               disabled={
-                !settings.retrieval.enabled || !equalJson(draft.retrieval, settings.retrieval)
+                saving ||
+                !settings.retrieval.enabled ||
+                !equalJson(draft.retrieval, settings.retrieval)
               }
               onClick={() =>
                 void run(async () => {
@@ -1277,11 +1489,12 @@ export default function AssistantSettings({
               <Field
                 label={t('输出 token 上限', 'Maximum output tokens')}
                 unit={t('tokens', 'tokens')}
-                range={t('≥ 1 的整数', 'integer ≥ 1')}
+                range={t('1–1000000 的整数', 'integer 1–1000000')}
               >
                 <Input
                   type="number"
                   min={1}
+                  max={1_000_000}
                   value={draft.max_output_tokens}
                   onChange={(e) => patch({ max_output_tokens: Number(e.target.value) })}
                 />
@@ -1313,11 +1526,12 @@ export default function AssistantSettings({
               <Field
                 label={t('超时秒数', 'Timeout (seconds)')}
                 unit={t('秒', 'seconds')}
-                range={t('≥ 1 的整数', 'integer ≥ 1')}
+                range={t('1–3600 的整数', 'integer 1–3600')}
               >
                 <Input
                   type="number"
                   min={1}
+                  max={3_600}
                   value={draft.timeout_seconds}
                   onChange={(e) => patch({ timeout_seconds: Number(e.target.value) })}
                 />
@@ -1348,11 +1562,12 @@ export default function AssistantSettings({
               '达到上限后开始新对话可继续。',
               'After the limit, start a new conversation to continue.',
             )}
-            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
+            range={t('0–100000 的整数；0 = 不限', 'integer 0–100000; 0 = unlimited')}
           >
             <Input
               type="number"
               min={0}
+              max={100_000}
               value={draft.session_turn_limit}
               onChange={(e) => patch({ session_turn_limit: Number(e.target.value) })}
             />
@@ -1364,11 +1579,12 @@ export default function AssistantSettings({
               'Cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
             )}
             unit={t('tokens', 'tokens')}
-            range={t('≥ 0；0 = 不限', '≥ 0; 0 = unlimited')}
+            range={t('0–1000000000 的整数；0 = 不限', 'integer 0–1000000000; 0 = unlimited')}
           >
             <Input
               type="number"
               min={0}
+              max={1_000_000_000}
               value={draft.session_token_limit}
               onChange={(e) => patch({ session_token_limit: Number(e.target.value) })}
             />
@@ -1491,7 +1707,7 @@ export default function AssistantSettings({
                   <p key={failure.repository} className="text-xs">
                     {historySyncRepositoryName(failure.repository)}
                     {t('：', ': ')}
-                    {failure.message}
+                    {settingsError(failure.message)}
                   </p>
                 ))}
               </Notice>

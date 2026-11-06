@@ -963,7 +963,7 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         }
         match (target.validation_from, target.validation_to) {
             (None, None) => {}
-            (Some(from), Some(to)) if from < to && (to <= target.from || from >= target.to) => {
+            (Some(from), Some(to)) if from < to && (to < target.from || from > target.to) => {
                 validation_targets += 1;
             }
             (Some(_), Some(_)) => {
@@ -1149,7 +1149,7 @@ mod tests {
             weight: 1.0,
             from: 0,
             to: 10,
-            validation_from: validation.then_some(10),
+            validation_from: validation.then_some(11),
             validation_to: validation.then_some(20),
             min_pairs: 30,
             source: None,
@@ -1385,6 +1385,18 @@ mod tests {
             tuning_target("Qh", false),
         ]))
         .unwrap();
+    }
+
+    #[test]
+    fn validation_windows_must_not_share_a_boundary_sample() {
+        for (from, to) in [(10, 20), (-10, 0)] {
+            let mut target = tuning_target("Qle", true);
+            target.validation_from = Some(from);
+            target.validation_to = Some(to);
+            let error = validate_spec(&tuning_spec(vec![target])).unwrap_err();
+            assert!(error.to_string().contains("overlapping validation window"));
+        }
+        validate_spec(&tuning_spec(vec![tuning_target("Qle", true)])).unwrap();
     }
 
     #[test]

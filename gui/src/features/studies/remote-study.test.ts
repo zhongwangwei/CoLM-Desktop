@@ -6,6 +6,7 @@ import {
   remoteStudyReply,
   studyModelRevision,
   studyExecutionIssue,
+  hybridStudyModelRevision,
 } from './remote-study';
 
 describe('server study lifecycle', () => {
@@ -356,11 +357,28 @@ describe('server study failure stages and recovery actions', () => {
 it('legacy execution requires a recorded snapshot and never drifts remotely', () => {
   const legacy = { name: 'old', head: 'abc', cli: '/study/version/bin/colm-cli' };
   assert.equal(studyExecutionIssue(legacy, false), null);
-  assert.match(studyExecutionIssue(legacy, true)![1], /local snapshot/);
+  assert.match(studyExecutionIssue(legacy, true)![1], /server/);
   assert.match(studyExecutionIssue(null, false)![1], /new study/);
   assert.match(studyExecutionIssue({ name: 'old' }, false)![0], /新建研究/);
+  // 提示按远程记录的真实状态分叉，不再让用户找不存在的归档入口（F-V-09）。
+  assert.match(studyExecutionIssue(legacy, true, { exists: false })![0], /新建研究/);
+  assert.match(studyExecutionIssue(legacy, true, { exists: true, closable: true })![0], /关闭/);
+  assert.match(studyExecutionIssue(legacy, true, { exists: true, fetched: true })![0], /已取回/);
+  assert.match(
+    studyExecutionIssue(legacy, true, { exists: true, fetched: false })![0],
+    /核对\/取回/,
+  );
   assert.equal(
     studyExecutionIssue({ model_revision: { version: { id: 'old', revision: 1 } } }, true),
     null,
+  );
+});
+
+it('legacy studies cannot borrow the baseline identity for hybrid checks', () => {
+  const model = { id: 'official', revision: 4 };
+  assert.deepEqual(hybridStudyModelRevision(null, model), model);
+  assert.throws(
+    () => hybridStudyModelRevision(['旧研究', 'legacy'], model),
+    /没有可核对的模型快照|no verifiable model snapshot/,
   );
 });

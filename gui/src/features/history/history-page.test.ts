@@ -248,7 +248,11 @@ test('remote lifecycle statuses remain filterable when the current page is empty
     await h.settle();
     const request = h.requests.at(-1)!;
     assert.equal(request.command, 'history_list');
-    assert.equal(request.args.filter.status, status);
+    if (status === 'needs_reconciliation') {
+      // 待核对按派生标志过滤（H-05），不再把字面 status 传给后端。
+      assert.equal(request.args.filter.needsReconciliation, true);
+      assert.equal(request.args.filter.status, undefined);
+    } else assert.equal(request.args.filter.status, status);
     request.resolve({ items: [], total: 0 });
     await h.settle();
   }

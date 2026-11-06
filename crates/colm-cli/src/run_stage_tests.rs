@@ -605,3 +605,210 @@ fn single_point_multiple_rank_preprocessing_is_rejected_before_launcher_or_outpu
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn existing_surface_clipping_uses_one_rank_without_reducing_other_stages() {
+    let root = test_directory("clipping-stage-ranks");
+    let namelist = root.join("case.nml");
+    for (setting, surface_ranks) in [(".true.", 1), (".false.", 4)] {
+        std::fs::write(
+            &namelist,
+            format!(
+                "&nl_colm\nDEF_file_mesh='mesh.nc'\nUSE_srfdata_from_larger_region={setting}\n/\n"
+            ),
+        )
+        .unwrap();
+        for (stage, expected) in [
+            (Stage::MkSrfData, surface_ranks),
+            (Stage::MkIniData, 4),
+            (Stage::Colm, 4),
+        ] {
+            assert_eq!(
+                rust_preprocessor_stage_ranks(&namelist, stage, 4).unwrap(),
+                expected
+            );
+            assert_eq!(
+                rust_preprocessor_stage_ranks(&namelist, stage, 1).unwrap(),
+                1
+            );
+        }
+    }
+    std::fs::write(&namelist, "&nl_colm\nDEF_file_mesh='mesh.nc'\n/\n").unwrap();
+    assert_eq!(
+        rust_preprocessor_stage_ranks(&namelist, Stage::MkSrfData, 4).unwrap(),
+        4
+    );
+    std::fs::write(
+        &namelist,
+        "&nl_colm\nDEF_file_mesh='mesh.nc'\nUSE_srfdata_from_larger_region='true'\n/\n",
+    )
+    .unwrap();
+    assert!(
+        rust_preprocessor_stage_ranks(&namelist, Stage::MkSrfData, 4)
+            .unwrap_err()
+            .to_string()
+            .contains("must be logical")
+    );
+    std::fs::write(
+        &namelist,
+        "&nl_colm\nUSE_srfdata_from_larger_region=.true.\n/\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rust_preprocessor_stage_ranks(&namelist, Stage::MkSrfData, 4).unwrap(),
+        4
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_multi_rank_frozen_long_path_keeps_shared_namelist_and_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "COLM_TEST_SHARED_RUST_CASE";
+    const TEST: &str =
+        "run_stage_tests::rust_multi_rank_frozen_long_path_keeps_shared_namelist_and_cwd";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        let case = root
+            .join("shared-case")
+            .join("long-project-segment-".repeat(6))
+            .join("long-operation-segment-".repeat(6));
+        let executable = root.join("colm-rs");
+        let nml = case.join("case.nml");
+        let before = fingerprint::sha256_file(&nml).unwrap();
+        let work = run_case_execution_path(
+            &case,
+            ModelEngine::Rust,
+            PreprocessorMode::Rust,
+            Some(Stage::Colm),
+        )
+        .unwrap();
+        colm_kernel::run_stage_streaming_external_ranks(
+            &hyperspectral_kernel(),
+            Stage::Colm,
+            &executable,
+            &work.join("case.nml"),
+            &work,
+            &[],
+            &["--case-outputs".into()],
+            4,
+            &mut |_| {},
+        )
+        .unwrap();
+        let captured = std::fs::read_to_string(root.join("launch.txt")).unwrap();
+        let lines: Vec<_> = captured.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                case.to_str().unwrap(),
+                "-n",
+                "4",
+                executable.to_str().unwrap(),
+                nml.to_str().unwrap(),
+                "--case-outputs"
+            ]
+        );
+        assert_eq!(fingerprint::sha256_file(&nml).unwrap(), before);
+        return;
+    }
+    let root = test_directory("shared-rust-frozen-launch")
+        .canonicalize()
+        .unwrap();
+    let case = root
+        .join("shared-case")
+        .join("long-project-segment-".repeat(6))
+        .join("long-operation-segment-".repeat(6));
+    std::fs::create_dir_all(&case).unwrap();
+    assert!(case.to_string_lossy().len() > 256);
+    let nml = format!(
+        "&nl_colm\nDEF_CASE_NAME='demo'\nDEF_dir_output='{}'\n/\n",
+        case.join("out").display()
+    );
+    std::fs::write(case.join("case.nml"), &nml).unwrap();
+    let hash = colm_kernel::sha256_hex(nml.as_bytes());
+    let run = colm_model::MaterializedRun {
+        schema: 1,
+        operation_id: "operation".into(),
+        source_case: root.join("source"),
+        run_case: case.clone(),
+        version: colm_model::VersionRef {
+            id: "official".into(),
+            revision: 1,
+        },
+        code: colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        },
+        case_sha256: hash.clone(),
+        effective_nml_sha256: hash,
+        overlay_sha256: "b".repeat(64),
+        revision_fingerprint: "c".repeat(64),
+        artifact_paths: vec![],
+        inputs: Default::default(),
+    };
+    std::fs::write(
+        case.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&run).unwrap(),
+    )
+    .unwrap();
+    let launcher = root.join("capture-launcher");
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > \"$COLM_TEST_SHARED_RUST_CASE/launch.txt\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD, &root)
+        .env("COLM_MPIEXEC", &launcher)
+        .env_remove("COLM_MPIEXEC_ARGS")
+        .output()
+        .unwrap();
+    // Existing native alias support remains available for Fortran under the same long frozen path.
+    let native = run_case_execution_path(
+        &case,
+        ModelEngine::Fortran,
+        PreprocessorMode::Rust,
+        Some(Stage::Colm),
+    )
+    .unwrap();
+    assert_ne!(native, case);
+    assert_eq!(native.canonicalize().unwrap(), case);
+    validate_native_case_paths(&native, "demo").unwrap();
+    assert!(validate_native_case_paths(&case, "demo").is_err());
+    std::fs::remove_file(native).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn native_path_limits_follow_the_stages_that_will_actually_run() {
+    for engine in [ModelEngine::Rust, ModelEngine::Fortran] {
+        for preprocessors in [PreprocessorMode::Rust, PreprocessorMode::Fortran] {
+            for stage in [
+                None,
+                Some(Stage::Colm),
+                Some(Stage::MkSrfData),
+                Some(Stage::MkIniData),
+            ] {
+                let expected = match stage {
+                    Some(Stage::Colm) => engine == ModelEngine::Fortran,
+                    Some(_) => preprocessors == PreprocessorMode::Fortran,
+                    None => {
+                        engine == ModelEngine::Fortran || preprocessors == PreprocessorMode::Fortran
+                    }
+                };
+                assert_eq!(runs_native_stage(engine, preprocessors, stage), expected);
+            }
+        }
+    }
+}

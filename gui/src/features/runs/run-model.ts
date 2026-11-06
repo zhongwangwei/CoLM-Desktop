@@ -72,6 +72,22 @@ export function defaultLocalThreads(
   return spatial && !batch ? spatialThreads(cores) : SITE_THREADS;
 }
 
+/** 提交给运行器的 ranks：自动计划用计划值；站点批量按 pack "1 站点 1 slot" 恒为 1；
+ * Rust 单点/本机/站点批量也只能单进程。界面残留的手动 ranks 只在真正手动的空间算例上生效（F-R-03/F-R-09）。 */
+export function submittedRanks(options: {
+  planRanks?: number | null;
+  siteBatch: boolean;
+  engine: string;
+  host: string;
+  siteCasesOnly: boolean;
+  manualRanks: string;
+}): number {
+  if (options.planRanks != null) return options.planRanks;
+  if (options.siteBatch) return 1;
+  if (options.engine === 'rust' && (!options.host || options.siteCasesOnly)) return 1;
+  return Number(options.manualRanks);
+}
+
 export interface RunView {
   runId: string;
   casePath: string;
@@ -215,6 +231,48 @@ export function matchesRemoteRun(run: RunState | undefined, result: unknown): bo
     previous.host === next.host &&
     previous.job === next.job
   );
+}
+
+/** Frozen submitted resources, never the next submission's editable defaults. */
+export function submittedParallelPlan(
+  run: RunState | undefined,
+  result: unknown,
+  casePath: string,
+  host: string,
+): {
+  nodes: number;
+  coresPerNode: number;
+  ranks: number;
+  threads: number;
+  totalCpus: number;
+} | null {
+  if (!run || run.case !== casePath || !matchesRemoteRun(run, result)) return null;
+  const data = result as {
+    record?: {
+      host?: string;
+      source_case?: string;
+      provenance?: { parallel_plan?: Record<string, unknown> };
+    };
+  };
+  const record = data.record;
+  if (!record || record.host !== host || (record.source_case && record.source_case !== casePath))
+    return null;
+  const plan = record.provenance?.parallel_plan;
+  if (
+    !plan ||
+    !['nodes', 'cores_per_node', 'ranks', 'threads', 'total_cpus'].every(
+      (key) =>
+        typeof plan[key] === 'number' && Number.isSafeInteger(plan[key]) && Number(plan[key]) > 0,
+    )
+  )
+    return null;
+  return {
+    nodes: plan.nodes as number,
+    coresPerNode: plan.cores_per_node as number,
+    ranks: plan.ranks as number,
+    threads: plan.threads as number,
+    totalCpus: plan.total_cpus as number,
+  };
 }
 
 export function restoreRunView(record: RunState | undefined, casePath: string): RunView | null {

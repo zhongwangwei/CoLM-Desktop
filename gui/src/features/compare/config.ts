@@ -16,6 +16,7 @@ import {
   designFingerprint,
   buildOpenbenchConfig,
   layerVariableProblems,
+  unreferencedVariableProblems,
   simulationKey,
   KNOWN_BROKEN_STATISTICS_ITEMS,
   VALID_COMPARISON_ITEMS,
@@ -761,6 +762,15 @@ function validateSimulation(
  * 归一后逃到上级的路径，以及归一后正好是运行目录本身（`.`、`sim/..`：OpenBench 会把结果散进 run 根）。
  */
 function unsafeOutputDir(value: string): Problem | null {
+  const percentVariable = value
+    .split('%')
+    .slice(1, -1)
+    .some((part, index) => index % 2 === 0 && part.length > 0);
+  if (value.includes('$') || percentVariable)
+    return [
+      'project.output_dir 不支持环境变量展开，请写运行目录内的普通相对路径。',
+      'project.output_dir must not contain environment variables; use a plain relative path inside the run directory.',
+    ];
   const normalized = value.replace(/\\/g, '/');
   if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.startsWith('~'))
     return [
@@ -1064,6 +1074,8 @@ export function structuralProblems(
   const problems: Problem[] = [];
   // 页面选的变量若映射到制备会跳过的层/类别维度变量，运行前明确拒绝（C05）。
   for (const [zh, en] of layerVariableProblems(design)) problems.push([zh, en]);
+  // 变量被取消到最后一条参考也没有：生成器会过滤掉它，不能让用户以为它还在评估里（C-05）。
+  for (const [zh, en] of unreferencedVariableProblems(design)) problems.push([zh, en]);
   const expected = design.simulations.map((sim) => simulationKey(sim.label));
   const actual = config.simulations.map((sim) => sim.key);
   const missing = expected.filter((key) => !actual.includes(key));

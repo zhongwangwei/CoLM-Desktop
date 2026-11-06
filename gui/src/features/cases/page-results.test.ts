@@ -77,6 +77,12 @@ test('preparation callbacks retain native evidence and errors through both async
   assert.equal(shown.at(-1), inspection);
   const downloaded = { path: '/era5.nc', days: 7 };
   const execute = callback(prep, 'execute', {
+    preparedSiteNameValid: () => true,
+    preparedSiteDestination: (_directory: string, current: string) => current,
+    rememberForm: () => {},
+    t: (zh: string) => zh,
+    prepDateValid: () => true,
+    prepDateKey: (value: string) => value,
     work,
     mode: 'era5',
     form: { dst: '/era5.nc', lat: '1', lon: '2' },
@@ -84,17 +90,20 @@ test('preparation callbacks retain native evidence and errors through both async
     invoke: async () => downloaded,
     setProduced: () => {},
     setForm: () => {},
+    setInputsConsumed: () => {},
   });
   assert.equal(await execute(), downloaded);
   const report = { unresolved: 0, filled: 12 };
   const finish = callback(prep, 'finish', {
     work,
     slots: [],
+    imported: [],
     gapOptions: () => ({}),
     invoke: async () => report,
     confirmOverwrite: (write: (overwrite: boolean) => Promise<unknown>) => write(false),
     setProduced: () => {},
     setImported: () => {},
+    setInputsConsumed: () => {},
   });
   assert.deepEqual(await finish({ staged_path: '/stage', final_path: '/forcing.nc' }), {
     path: '/forcing.nc',
@@ -147,6 +156,8 @@ test('research inspection and saved-model callbacks return backend evidence even
     epoch: { current: 1 },
     setBusy: () => {},
     setError: () => {},
+    tr: (_zh: string, en: string) => en,
+    studyErrorText: (error: unknown) => String(error),
   });
   const evidence = {
     ok: false,
@@ -156,6 +167,11 @@ test('research inspection and saved-model callbacks return backend evidence even
   const ignored = () => {};
   const common = {
     task,
+    executionIssue: null,
+    hybridStudyModelRevision: (issue: unknown, model: unknown) => {
+      if (issue) throw new Error('legacy study identity');
+      return model;
+    },
     invoke: async () => evidence,
     invokeJson: async () => evidence,
     state: { versionRef: { id: 'soil', revision: 1 }, root: '/project' },
@@ -376,6 +392,10 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
     task,
     source: '/copy',
     variable: 'f_fsena',
+    nativeVariable: true,
+    singleRows: [],
+    overviewMetric: () => undefined,
+    bilingual: (zh: string) => zh,
     readSeries,
     fullSeriesCsv,
     download: (...args: unknown[]) => {
@@ -464,6 +484,13 @@ function comparisonPage(
       return metricRows(args);
     },
     windowArgs: () => ({ from: null, to: null }),
+    // 比较请求快照现在带时间基准（H-09）；测试上下文按模型钟提供规范化结果。
+    timeBasisOf: () => ({
+      kind: 'model_clock',
+      utc_offset_seconds: null,
+      calendar: 'standard',
+      source: 'test',
+    }),
   });
   const comparisonFailureReason = callback(page, 'comparisonFailureReason', {
     bilingual: (zh: string) => zh,
@@ -473,12 +500,20 @@ function comparisonPage(
   });
   const common = {
     task,
+    executionIssue: null,
+    hybridStudyModelRevision: (issue: unknown, model: unknown) => {
+      if (issue) throw new Error('legacy study identity');
+      return model;
+    },
     comparisonEntries,
     projectRuns: runs,
     from: '',
     to: '',
     spinup: '0',
     corrected: false,
+    catalog: null,
+    series: null,
+    MAX_COMPARISON_RUNS: 20,
     requestSeq,
     comparisonTaskId: { current: 0 },
     comparisonKey,
@@ -488,6 +523,12 @@ function comparisonPage(
     comparisonFailureReason,
     splitSettledComparison,
     windowArgs: () => ({ from: null, to: null }),
+    timeBasisOf: () => ({
+      kind: 'model_clock',
+      utc_offset_seconds: null,
+      calendar: 'standard',
+      source: 'test',
+    }),
     setComparisonProgress: (value: unknown) => {
       progressState =
         typeof value === 'function'
@@ -764,8 +805,8 @@ test('comparison export refuses a stale snapshot and writes the snapshot conditi
   assert.match(text, /2008-01-02T00:00/);
   assert.match(
     text,
-    /,8,1,Qle/,
-    'spinup and corrected columns come from the compare-time snapshot',
+    /,8,1,model_clock,Qle/,
+    'spinup/corrected/basis columns come from the compare-time snapshot',
   );
   assert.equal(notices.at(-1), 'saved');
 });
@@ -1329,6 +1370,12 @@ test('preparation sends only active case or pending case settings to native data
   const produced: Record<string, string>[] = [];
   const run = async (preparation: ReturnType<typeof casePreparationOptions>, mode: string) => {
     const execute = callback(prep, 'execute', {
+      preparedSiteNameValid: () => true,
+      preparedSiteDestination: (_directory: string, current: string) => current,
+      rememberForm: () => {},
+      t: (zh: string) => zh,
+      prepDateValid: () => true,
+      prepDateKey: (value: string) => value,
       // 做好的站点文件记下来，"用于新算例"带着它去新建模拟。
       setProduced: (
         next: Record<string, string> | ((old: Record<string, string>) => Record<string, string>),
@@ -1337,6 +1384,7 @@ test('preparation sends only active case or pending case settings to native data
       state,
       preparation,
       mode,
+      confirmOverwrite: (write: (overwrite: boolean) => Promise<unknown>) => write(false),
       form: { dst: '/new-data.nc', rawdata: '/raw' },
       num: () => 1,
       optional: () => null,
@@ -1348,6 +1396,7 @@ test('preparation sends only active case or pending case settings to native data
       choices: () => [],
       heights: () => null,
       setImported: () => {},
+      setInputsConsumed: () => {},
     });
     await execute();
     return calls.at(-1)!;
@@ -1429,6 +1478,7 @@ test('process saves refresh history availability in both directions without rese
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
       dir: '/case',
       editingDisabled: false,
+      loadFailed: false,
       dirty: false,
       lock: { current: false },
       t: (_zh: string, en: string) => en,
@@ -1522,6 +1572,8 @@ test('case save stays successful when either context or history refresh fails af
       setError: () => {},
       setModelContext: () => {},
       setContextStale: () => {},
+      setReloadCount: () => {},
+      forcingSaveConflict: () => false,
       contextStaleRef: { current: false },
       versionId: 'official',
       revision: 1,
@@ -1549,6 +1601,7 @@ for (const failure of ['write', 'context', 'history']) {
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
       dir: '/case',
       editingDisabled: false,
+      loadFailed: false,
       dirty: false,
       lock: { current: false },
       t: (_zh: string, en: string) => en,
@@ -1613,6 +1666,11 @@ test('ERA5 is auxiliary data and only finished table outputs seed new-case forci
     produced = typeof next === 'function' ? next(produced) : next;
   };
   const execute = callback(prep, 'execute', {
+    preparedSiteNameValid: () => true,
+    preparedSiteDestination: (_directory: string, current: string) => current,
+    rememberForm: () => {},
+    prepDateValid: () => true,
+    prepDateKey: (value: string) => value,
     mode: 'era5',
     form: { dst: '/era5.nc', start: '2001-01-01', end: '2002-01-01' },
     work: async (fn: () => Promise<unknown>) => fn(),
@@ -1622,6 +1680,7 @@ test('ERA5 is auxiliary data and only finished table outputs seed new-case forci
     setForm: (apply: (old: Record<string, string>) => Record<string, string>) => {
       auxiliary = apply({}).era5;
     },
+    setInputsConsumed: () => {},
     t: (_zh: string, en: string) => en,
   });
   await execute();
@@ -1632,6 +1691,7 @@ test('ERA5 is auxiliary data and only finished table outputs seed new-case forci
   const finish = callback(prep, 'finish', {
     work: async (fn: () => Promise<unknown>) => fn(),
     slots: [],
+    imported: [],
     gapOptions: () => ({}),
     confirmOverwrite: async (write: (overwrite: boolean) => Promise<unknown>, output: string) => {
       confirmedPath = output;
@@ -1643,6 +1703,7 @@ test('ERA5 is auxiliary data and only finished table outputs seed new-case forci
     },
     setImported: () => {},
     setProduced,
+    setInputsConsumed: () => {},
     t: (_zh: string, en: string) => en,
   });
   await finish({
@@ -1724,6 +1785,7 @@ test('case option previews release after reads, failures, and stale responses', 
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
       dir: '/case',
       editingDisabled: false,
+      loadFailed: false,
       dirty: false,
       lock: { current: false },
       t: (_zh: string, en: string) => en,

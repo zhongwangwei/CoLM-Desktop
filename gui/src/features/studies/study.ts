@@ -152,11 +152,12 @@ export function calibrationWindows(
         'Leave the validation window empty, or give a start before its end',
       ),
     );
-  if (!(end <= validStart || validEnd <= start))
+  // 日内配对包含两端，接壤时间戳也不能同时进入率定与验证。
+  if (!(end < validStart || validEnd < start))
     throw new Error(
       bilingual(
-        '验证期不能和率定期重叠',
-        'The validation window must not overlap the calibration window',
+        '验证期不能和率定期重叠，开始和结束边界也不能相同',
+        'The validation window must not overlap or share an endpoint with the calibration window',
       ),
     );
   return { from: start, to: end, validation_from: validStart, validation_to: validEnd };
@@ -686,7 +687,8 @@ export function suggestedWindows(sites: SiteTiming[]) {
   const valid = validationYears > 0 && split < end;
   return {
     from: isoDay(start),
-    to: isoDay(valid ? split : end),
+    // 日期控件按午夜填写；率定结束退到前一天，避免与验证首日共享样本。
+    to: isoDay(valid ? split - 86_400_000 : end),
     validationFrom: valid ? isoDay(split) : '',
     validationTo: valid ? isoDay(end) : '',
     warmup,

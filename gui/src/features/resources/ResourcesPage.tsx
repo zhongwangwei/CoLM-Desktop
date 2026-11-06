@@ -572,7 +572,13 @@ export default function ResourcesPage() {
     ],
     ['partition', t('分区 / 队列', 'Partition / queue')],
     ['account', t('账户', 'Account')],
-    ['walltime', t('时限', 'Walltime')],
+    [
+      'walltime',
+      t(
+        '时限（HH:MM、HH:MM:SS、D-HH:MM 或 D-HH:MM:SS）',
+        'Walltime (HH:MM, HH:MM:SS, D-HH:MM or D-HH:MM:SS)',
+      ),
+    ],
     [
       'cpus',
       t(

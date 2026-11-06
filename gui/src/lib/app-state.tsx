@@ -48,6 +48,16 @@ import type {
   VersionRef,
 } from './types';
 import { readStored, writeStored } from './storage';
+import {
+  CASE_RUN_SETTINGS_KEY,
+  parseCaseRunSettings,
+  serializeCaseRunSettings,
+} from './case-run-settings';
+import {
+  PROJECT_RUN_SETTINGS_KEY,
+  parseProjectRunSettings,
+  serializeProjectRunSettings,
+} from './project-run-settings';
 const initial: AppState = {
   route: 'project',
   caseTab: 'settings',
@@ -65,6 +75,13 @@ const initial: AppState = {
   // 设置页的"默认展开专家设置"：和语言、外观一样记住，原来每次重开都回到不展开。
   expert: readStored('colm-ui-expert') === 'true',
   language: readStored('colm-ui-language') === 'en' ? 'en' : 'zh',
+  // 单算例运行设置跨应用重启恢复；形状/上限由纯函数守住（复核 C F5b）。
+  caseRunSettings: parseCaseRunSettings(
+    readStored(CASE_RUN_SETTINGS_KEY),
+  ) as AppState['caseRunSettings'],
+  projectRunSettings: parseProjectRunSettings(
+    readStored(PROJECT_RUN_SETTINGS_KEY),
+  ) as AppState['projectRunSettings'],
   theme: readStored('colm-ui-theme') === 'dark' ? 'dark' : 'light',
   assistantOpen: readStored('colm-ui-assistant') !== 'false',
   assistantSettingsOpen: false,
@@ -191,6 +208,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : official;
         const next = {
           ...old,
+          // 已显示的 notice 是渲染时定死的单语文案；切语言后无法原地重译，清掉比留着旧语言更诚实（A-08）。
+          ...(changes.language !== undefined && changes.language !== old.language
+            ? { notices: [], errorNotices: [] }
+            : {}),
           ...(switching
             ? {
                 chosenVersion: null,
@@ -413,7 +434,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     writeStored('colm-ui-theme', state.theme);
     writeStored('colm-ui-assistant', String(state.assistantOpen));
     writeStored('colm-ui-expert', String(state.expert));
-  }, [state.language, state.theme, state.assistantOpen, state.expert]);
+    // 单算例运行设置也跨重启保存；批量交接槽位仍只活在本次会话（由项目/建例重建）。
+    writeStored(
+      CASE_RUN_SETTINGS_KEY,
+      serializeCaseRunSettings(
+        state.caseRunSettings as Record<string, Record<string, unknown>> | undefined,
+      ),
+    );
+    // 批量运行交接设置也跨重启保存，否则从项目页进批量页回到默认值（F-R-07）。
+    writeStored(PROJECT_RUN_SETTINGS_KEY, serializeProjectRunSettings(state.projectRunSettings));
+  }, [
+    state.language,
+    state.theme,
+    state.assistantOpen,
+    state.expert,
+    state.caseRunSettings,
+    state.projectRunSettings,
+  ]);
   // 当前项目只在这次打开的应用里有效：启动时不再自动打开上次的项目（2026-10-21 用户：重新打开总显示
   // "当前项目 tianhe:uuu"，不合理）。首页列出最近的项目，点一下再打开；本次会话里各页之间仍能回到它。
   useEffect(() => {

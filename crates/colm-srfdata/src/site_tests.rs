@@ -604,6 +604,36 @@ fn an_unsupported_raw_lcz_is_never_written_into_a_runnable_site() {
 // ---------------------------------------------------------- bare coordinates
 
 #[test]
+fn an_unusable_rawdata_directory_is_reported_instead_of_silently_falling_back() {
+    // 目录存在但内容不是 CoLM rawdata 根：以前 12 个字段全部静默回落标称值，界面只看到
+    // "rawdata 栅格 0 项"。现在必须显式警告（D-07）。
+    let dir = std::env::temp_dir().join(format!("colm-site-empty-rawdata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("bare_site.nc");
+    {
+        let _netcdf_guard = netcdf_write_lock().lock().unwrap();
+        let mut f = netcdf::create(&src).unwrap();
+        let mut lon = f.add_variable::<f64>("longitude", &[]).unwrap();
+        lon.put_values(&[123.5092], netcdf::Extents::All).unwrap();
+        let mut lat = f.add_variable::<f64>("latitude", &[]).unwrap();
+        lat.put_values(&[44.5933], netcdf::Extents::All).unwrap();
+    }
+    let rawdata = dir.join("rawdata");
+    std::fs::create_dir_all(&rawdata).unwrap();
+    let dst = dir.join("filled.nc");
+    let report = super::fill(&src, &dst, Some(&rawdata), None).expect("fallback still fills");
+    assert!(report.from_raster.is_empty(), "{:?}", report.from_raster);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(
+        report.warnings[0].contains("rawdata"),
+        "{:?}",
+        report.warnings
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_site_with_only_coordinates_can_still_be_filled() {
     // **这是阶段 B 的地基。** 用户只给经纬度时，`read_inputs` 会在
     // `soil_vf_sand missing` 上直接失败 —— 那六个 8 层数组是它的硬性

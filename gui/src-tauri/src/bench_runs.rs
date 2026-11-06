@@ -806,11 +806,21 @@ fn output_dir_error(line: usize, detail: &str) -> String {
 /// 绝对路径（含 Windows 盘符）明确拒绝：那种路径会跨 run 共享报告，正是 R03 的根因。
 pub(crate) fn normalize_output_dir(raw: &str) -> Result<String, String> {
     let text = raw.trim();
+    // Windows expands %VAR%; %% is an escaped percent and an unmatched % is literal.
+    let mut percent_parts = text.split('%').skip(1);
+    let mut percent_variable = false;
+    while let (Some(name), Some(_)) = (percent_parts.next(), percent_parts.next()) {
+        percent_variable |= !name.is_empty();
+    }
+
     if text.is_empty() {
         return Err("不能是空路径".into());
     }
     if text.contains('\0') {
         return Err("不能含 NUL 字符".into());
+    }
+    if text.contains('$') || percent_variable {
+        return Err("不支持环境变量展开，请写运行目录内的普通相对路径".into());
     }
     // `~`、环境变量之类的展开由 OpenBench 那侧的路径库决定；这里看到的是字面相对路径，
     // 一旦对面展开就会跑到运行目录外。没有展开语义的普通目录名才在允许范围内。

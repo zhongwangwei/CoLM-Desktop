@@ -212,7 +212,9 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
             "vars":{"residual":plot.iter().map(|index| residual[*index].is_finite().then_some(residual[*index])).collect::<Vec<_>>()},
             "source_n":indexes.len(),"n":plot.len(),"downsampled":plot.len()<indexes.len(),
         },
-        "window":{"from":from,"to":to,"end_inclusive":true,"time_basis":"model_history_clock"},
+        // 窗口时刻的基准由调用方（main.rs 的 energy-summary 分支）按 case.nml 写入，
+        // 这里不再写死 model_history_clock（GUI 审查 H-14）。
+        "window":{"from":from,"to":to,"end_inclusive":true},
         "limitation":"Surface flux residual excludes storage and other energy terms; it does not establish model budget closure.",
     }))
 }

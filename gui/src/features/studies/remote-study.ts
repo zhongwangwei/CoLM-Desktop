@@ -304,19 +304,46 @@ export type StudyModelPin = {
 export function studyExecutionIssue(
   pinned: StudyModelPin | null | undefined,
   remote: boolean,
+  record?: { exists?: boolean; closable?: boolean; fetched?: boolean },
 ): [string, string] | null {
   if (pinned?.model_revision?.version) return null;
-  if (pinned?.name && pinned.head && pinned.cli)
-    return remote
-      ? [
-          '旧研究只能用本机快照运行；远程代码身份无法核对，请新建研究。',
-          'This legacy study can run with its local snapshot only; remote code identity cannot be verified. Create a new study.',
-        ]
-      : null;
+  if (pinned?.name && pinned.head && pinned.cli) {
+    if (!remote) return null;
+    // 提示必须对应当前状态，否则会让人去找不存在的"归档"入口（F-V-09）：
+    // 没有远程记录（只是手选了服务器）/ 记录已完成待取回 / 记录可关闭（丢失或无法核对）。
+    if (!record?.exists)
+      return [
+        '旧研究只能用本机快照运行；要提交到服务器请新建研究并选择冻结修订（原结果保留）。',
+        'This legacy study can run with its local snapshot only; to submit to a server, create a new study with a frozen revision (existing results are preserved).',
+      ];
+    if (record.closable)
+      return [
+        '旧研究只能用本机快照运行；这条远程记录已丢失或无法核对，可在下方关闭它。新建本机研究不需要先关闭。',
+        'This legacy study can run with its local snapshot only; the remote record is lost or unverifiable and can be closed below. Creating a local study does not require closing it first.',
+      ];
+    return [
+      record.fetched
+        ? '旧研究只能用本机快照运行；远程结果已取回，可继续查看。新建本机研究不需要先归档旧记录。'
+        : '旧研究只能用本机快照运行；这条远程记录还需先核对/取回结果。新建本机研究不需要等它完成。',
+      record.fetched
+        ? 'This legacy study can run with its local snapshot only; the remote result was fetched and can still be viewed. A new local study does not require archiving the old record.'
+        : 'This legacy study can run with its local snapshot only; this remote record still needs verification or fetching. A new local study does not need to wait for it.',
+    ];
+  }
   return [
     '旧研究没有可核对的模型快照，已停用运行；请新建研究并选择冻结修订，原结果保留。',
     'This legacy study has no identifiable model snapshot. Running is disabled; create a new study with a frozen revision. Existing results are preserved.',
   ];
+}
+
+/** hybrid 检查/拟合用哪个模型修订：旧研究（没有可核对的模型快照）不能再拿当前
+ *  研究基线冒充它的身份，必须显式失败（V-05 边角 3）。 */
+export function hybridStudyModelRevision<T>(executionIssue: unknown, studyModel: T): T {
+  if (executionIssue)
+    throw new Error(
+      '旧研究没有可核对的模型快照，检查或拟合需要先用冻结修订新建研究 / This legacy study has no verifiable model snapshot; create a new study with a frozen revision before checking or fitting',
+    );
+  return studyModel;
 }
 
 export function studyModelRevision(

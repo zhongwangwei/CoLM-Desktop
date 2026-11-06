@@ -226,3 +226,18 @@ export function planMultiSites({
     };
   });
 }
+
+/**
+ * 多站点建例方式标记应写到哪个目录。
+ *
+ * `form.root` 只是"保存目录"，真正的项目根是 `caseDirectory(form.root, form.name)`
+ * （`planMultiSites` 也用它）。S-06 的修复曾把标记写到 `form.root`，于是项目根上的
+ * `project_wizard_seed` 读不到，还在父目录留下可能被别的项目误读的标记（GUI 审查 F-S-07）。
+ */
+export function multiSiteMarkerRoot(formRoot: string, name: string): string {
+  try {
+    return caseDirectory(formRoot, name);
+  } catch {
+    return '';
+  }
+}

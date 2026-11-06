@@ -511,7 +511,19 @@ it('R01: the snapshot expires when the form changes, and stays valid for text-on
 
 it('R03: refuses output directories that are absolute, escape the run directory or name it itself', () => {
   const pristine = generated();
-  for (const bad of ['/tmp/out', '../shared', '~', '.', 'sim/..', 'C:\\tmp']) {
+  for (const bad of [
+    '/tmp/out',
+    '../shared',
+    '~',
+    '.',
+    'sim/..',
+    'C:\\tmp',
+    '%USERPROFILE%/out',
+    'nested/%COLM_OUTPUT%',
+    '$HOME/out',
+    '${HOME}/out',
+    'nested/$OUTPUT',
+  ]) {
     const parsed = parseOpenbenchConfig(
       pristine.replace('  output_dir: ./output', `  output_dir: "${bad.replace(/\\/g, '\\\\')}"`),
     );
@@ -669,4 +681,11 @@ it('reports an empty grid prefix instead of silently omitting the simulation', (
   const parsed = parseOpenbenchConfig(generated().replace('prefix: "hb_hist_"', 'prefix: ""'));
   assert.equal(parsed.config, null);
   assert.ok(parsed.problems.some((problem) => problem[1].includes('prefix must not be empty')));
+});
+
+it('keeps a literal unpaired percent in output directories', () => {
+  const parsed = parseOpenbenchConfig(
+    generated().replace('  output_dir: ./output', '  output_dir: 100%/out'),
+  );
+  assert.ok(parsed.config);
 });

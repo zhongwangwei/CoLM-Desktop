@@ -1508,8 +1508,6 @@ fn history_status_reads_cli_json_and_attaches_the_resolved_history_root() {
             "history-repos",
             "--history-root",
             dir.to_str().unwrap(),
-            "--repository",
-            "both",
             "--desktop-path",
             desktop.to_str().unwrap(),
         ]

@@ -88,3 +88,92 @@ fn regional_file_lives_under_the_case_directory_not_landdata() {
         std::path::Path::new("/cases/rivgrid/riverlake/unitcatchment_regional.nc")
     );
 }
+
+#[test]
+fn coverage_requires_only_cells_routed_by_the_full_network() {
+    let root = std::env::temp_dir().join(format!("colm-regional-coverage-{}", std::process::id()));
+    let land = root.join("landdata");
+    std::fs::create_dir_all(land.join("landpatch/2005")).unwrap();
+    std::fs::create_dir_all(land.join("mesh/2005")).unwrap();
+    let mut pixel = netcdf::create(land.join("pixel.nc")).unwrap();
+    pixel.add_dimension("pixel", 2).unwrap();
+    for (name, values) in [
+        ("lon_w", [-170.0, 10.0]),
+        ("lon_e", [-160.0, 20.0]),
+        ("lat_s", [0.0, 0.0]),
+        ("lat_n", [10.0, 10.0]),
+    ] {
+        pixel
+            .add_variable::<f64>(name, &["pixel"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    pixel.close().unwrap();
+    let mut mesh = netcdf::create(land.join("mesh/2005/mesh_e000_n00.nc")).unwrap();
+    mesh.add_dimension("element", 2).unwrap();
+    mesh.add_dimension("coord", 4).unwrap();
+    for (name, dimension, values) in [
+        ("elmindex", "element", vec![1_i64, 2]),
+        ("elmnpxl", "element", vec![1, 1]),
+        ("elmpixels", "coord", vec![1, 1, 2, 2]),
+    ] {
+        mesh.add_variable::<i64>(name, &[dimension])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    mesh.close().unwrap();
+    let mut patch = netcdf::create(land.join("landpatch/2005/landpatch_e000_n00.nc")).unwrap();
+    patch.add_dimension("patch", 2).unwrap();
+    for (name, values) in [
+        ("eindex", [1_i64, 2]),
+        ("ipxstt", [1, 1]),
+        ("ipxend", [1, 1]),
+        ("settyp", [1, 1]),
+    ] {
+        patch
+            .add_variable::<i64>(name, &["patch"])
+            .unwrap()
+            .put_values(&values, ..)
+            .unwrap();
+    }
+    patch.close().unwrap();
+    let source = root.join("full.nc");
+    let mut full = netcdf::create(&source).unwrap();
+    for (name, size) in [("nx", 2), ("ny", 1), ("nseqmax", 1), ("inpn", 1)] {
+        full.add_dimension(name, size).unwrap();
+    }
+    for name in ["inpmat_x", "inpmat_y"] {
+        full.add_variable::<i32>(name, &["nseqmax", "inpn"])
+            .unwrap()
+            .put_values(&[1], ..)
+            .unwrap();
+    }
+    full.close().unwrap();
+    let regional = root.join("regional.nc");
+    let mut reg = netcdf::create(&regional).unwrap();
+    reg.add_dimension("nseqmax", 1).unwrap();
+    reg.add_variable::<i32>("seq_src_index", &["nseqmax"])
+        .unwrap()
+        .put_values(&[1], ..)
+        .unwrap();
+    reg.close().unwrap();
+    assert_eq!(touched_cells(&land, 2005, 2, 1).unwrap(), [true, true]);
+    // Cell 2 is land but absent from the full routing input matrix: this is legal.
+    verify_coverage(&land, 2005, &regional, &source).unwrap();
+    // Removing the catchment that routes cell 1 is still an actual coverage error.
+    let mut reg = netcdf::create(&regional).unwrap();
+    reg.add_dimension("nseqmax", 0).unwrap();
+    reg.add_variable::<i32>("seq_src_index", &["nseqmax"])
+        .unwrap();
+    reg.close().unwrap();
+    let error = verify_coverage(&land, 2005, &regional, &source)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("does not cover 1 land patch grid cell"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

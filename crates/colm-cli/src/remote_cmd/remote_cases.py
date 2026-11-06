@@ -1,4 +1,13 @@
-import fcntl, json, os, pathlib, re, shutil, subprocess, sys, uuid
+import fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, uuid
+
+def report_error(kind, error, traceback):
+    # Expected ownership/input refusals are actionable messages, not Python failures.
+    if issubclass(kind, ValueError):
+        print(str(error), file=sys.stderr)
+    else:
+        sys.__excepthook__(kind, error, traceback)
+
+sys.excepthook = report_error
 
 payload = json.loads(sys.argv[1])
 r = payload['request']
@@ -43,6 +52,31 @@ out = path(r['out'])
 if out == pathlib.Path('/'):
     raise ValueError('cannot use the server root as a case directory')
 marker = out / '.colm-desktop-creation.json'
+receipt = out / '.colm-desktop-publication.json'
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+def request_identity():
+    return digest({key: value for key, value in r.items() if key != 'token'})
+
+def published_receipt():
+    # A receipt authorizes acknowledgement only, never rewriting a published case.
+    if out.is_symlink() or receipt.is_symlink():
+        raise ValueError('case already published and its ownership differs; choose a new case directory')
+    saved = json.loads(receipt.read_text())
+    stat = out.stat()
+    if saved.get('token') != r.get('token') or saved.get('directory') != [stat.st_dev, stat.st_ino]:
+        raise ValueError('case already published and its ownership differs; choose a new case directory')
+    owner = out / '.colm-desktop-server.json'
+    if owner.is_symlink() or json.loads(owner.read_text()) != {'schema': 1, 'remote_directory': str(out)}:
+        raise ValueError('server case identity changed')
+    for name, checksum in saved['published'].items():
+        target = out / name
+        if pathlib.PurePosixPath(name).name != name or target.is_symlink() or not target.is_file() or digest(target.read_text()) != checksum:
+            raise ValueError('published configuration changed; refusing to replay creation')
+    return saved
+
 
 def clear_children():
     for child in out.iterdir():
@@ -66,6 +100,19 @@ def empty_leftover():
     return out.is_dir() and not out.is_symlink() and not marker.exists() and not any(out.iterdir())
 
 if action in ('publish', 'abort', 'sync'):
+    if action != 'sync' and (receipt.exists() or receipt.is_symlink()):
+        if action == 'abort' and r.get('incomplete_only'):
+            if out.is_symlink() or receipt.is_symlink():
+                raise ValueError('case publication ownership changed')
+            # Release only the client's obsolete pending request. Never mutate a
+            # published directory, even when its token or current config differs.
+            print(json.dumps({'ok': True, 'directory_retained': True}))
+            sys.exit(0)
+        saved = published_receipt()
+        if action == 'publish' and {name: digest(text) for name, text in r['files'].items()} == saved['published']:
+            print(json.dumps({'ok': True}))
+            sys.exit(0)
+        raise ValueError('case already published; retry the original settings to recover it')
     if action == 'abort' and r.get('incomplete_only'):
         if not out.exists() and not out.is_symlink():
             print(json.dumps({'ok': True}))
@@ -76,8 +123,15 @@ if action in ('publish', 'abort', 'sync'):
             sys.exit(0)
         if out.is_symlink() or marker.is_symlink():
             raise ValueError('case creation ownership changed')
+        if not marker.exists():
+            # No claim means there is nothing owned by this attempt to abort. Leave
+            # every foreign file intact; create will independently check collisions.
+            print(json.dumps({'ok': True}))
+            sys.exit(0)
         lock = marker.open('r+')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not os.path.samestat(os.fstat(lock.fileno()), marker.stat()):
+            raise ValueError('case creation ownership changed')
         saved = json.load(lock)
         if saved.get('token') != r['token'] or saved.get('files') is not None:
             raise ValueError('server creation may have completed; retry the original settings to recover it')
@@ -148,6 +202,16 @@ if action in ('publish', 'abort', 'sync'):
                     forget(backup)
         if action == 'publish':
             (out / '.colm-desktop-server.json').write_text(json.dumps({'schema': 1, 'remote_directory': str(out)}))
+            saved = json.loads(marker.read_text())
+            stat = out.stat()
+            published = dict(saved, directory=[stat.st_dev, stat.st_ino],
+                             published={name: digest(text) for name, text in files.items()})
+            temporary = out / ('.publication-' + uuid.uuid4().hex)
+            with temporary.open('x') as stream:
+                stream.write(json.dumps(published))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, receipt)
             marker.unlink()
     print(json.dumps({'ok': True}))
     sys.exit(0)
@@ -158,22 +222,32 @@ if action != 'create':
 token = r['token']
 if not isinstance(token, str) or not re.fullmatch(r'[a-f0-9]{32,64}', token):
     raise ValueError('invalid creation token')
+if receipt.exists() or receipt.is_symlink():
+    saved = published_receipt()
+    if saved.get('request_identity') != request_identity():
+        raise ValueError('creation settings changed; refusing to replay a published case')
+    print(json.dumps({'remote_dir': str(out), 'token': token, 'files': saved['files']}))
+    sys.exit(0)
 out.parent.mkdir(parents=True, exist_ok=True)
 
 def write_claim(lock, adopted):
     lock.seek(0)
     lock.truncate()
-    lock.write(json.dumps({'token': token, 'adopted': adopted, 'outputs_owned': True}))
+    lock.write(json.dumps({'token': token, 'adopted': adopted, 'outputs_owned': True, 'request_identity': request_identity()}))
     lock.flush()
     os.fsync(lock.fileno())
 
 def check_unowned_outputs(owned=False):
     # 后续会重写所有平铺 namelist；仅有无关数据的目录才可接管。
     for child in out.iterdir():
+        # `new` creates out/ before finishing. Only a claim that already owns
+        # generated outputs may reuse that empty ordinary directory after interruption.
+        if child.name == 'out' and owned and not child.is_symlink() and child.is_dir() and not any(child.iterdir()):
+            continue
         if child.name.endswith('.nml') or child.name in (
-                'site.nc', 'mesh.nc', 'spatial-input.manifest.json', '.colm-desktop-server.json'):
-            if not owned or child.is_symlink() or child.name == '.colm-desktop-server.json':
-                raise ValueError('refusing to overwrite existing case output: ' + str(child))
+                'site.nc', 'mesh.nc', 'out', 'runs', 'spatial-input.manifest.json', '.colm-desktop-server.json', '.colm-desktop-publication.json'):
+            if not owned or child.is_symlink() or child.name in ('out', 'runs', '.colm-desktop-server.json', '.colm-desktop-publication.json'):
+                raise ValueError('拒绝覆盖服务器上已有的算例配置、数据或结果 / refusing to overwrite existing case configuration, data or results: ' + str(child))
     # CLI 会自动识别城市站点；默认参数表的目录也必须由本次创建拥有。
     if r.get('kind') == 'site':
         for name, filename in (('rawdata', 'NCAR_urban_properties.nc'), ('runtime', 'LUCY_rawdata.nc')):
@@ -181,10 +255,10 @@ def check_unowned_outputs(owned=False):
                 continue
             root = out / name
             if not owned and (root.exists() or root.is_symlink()):
-                raise ValueError('refusing to overwrite existing case output: ' + str(root))
+                raise ValueError('拒绝覆盖服务器上已有的算例配置、数据或结果 / refusing to overwrite existing case configuration, data or results: ' + str(root))
             for target in (root, root / 'urban', root / 'urban' / filename):
                 if target.is_symlink():
-                    raise ValueError('refusing to create case output through a symlink: ' + str(target))
+                    raise ValueError('refusing to create case data through a symlink: ' + str(target))
 
 def claim(adopted):
     lock = marker.open('x+')
@@ -222,6 +296,10 @@ except FileExistsError:
         saved = json.load(lock)
         if saved.get('token') != token:
             raise ValueError('case creation ownership changed; refusing to modify it')
+        # Pre-receipt incomplete claims used token ownership only; the next successful
+        # creation upgrades them. New claims also bind the complete request.
+        if 'request_identity' in saved and saved['request_identity'] != request_identity():
+            raise ValueError('creation settings changed; abort the incomplete attempt before retrying')
         if saved.get('files') is not None:
             print(json.dumps({'remote_dir': str(out), 'token': token, 'files': saved['files']}))
             sys.exit(0)
@@ -322,7 +400,7 @@ try:
         raise ValueError('namelist configuration exceeds total size limit')
     completed = out / ('.creation-complete-' + uuid.uuid4().hex)
     with completed.open('x') as saved:
-        saved.write(json.dumps({'token': token, 'adopted': adopted, 'files': files}))
+        saved.write(json.dumps({'token': token, 'adopted': adopted, 'files': files, 'request_identity': request_identity()}))
         saved.flush()
         os.fsync(saved.fileno())
     os.replace(completed, marker)

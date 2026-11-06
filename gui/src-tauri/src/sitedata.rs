@@ -40,6 +40,9 @@ pub struct SiteReport {
     pub from_default: Vec<String>,
     /// CoLM 自带查表得到的字段（目前仅 IGBP 冠层高度）。
     pub from_lookup: Vec<String>,
+    /// `site-new` 的显式警告（例如 rawdata 目录内容不是 rawdata 根）；旧后端没有就是空。
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// 文件本身没有、运行时需要由 rawdata 提供的完整 mksrfdata 契约。
     pub needs_external: Vec<String>,
     pub site_kind: String,
@@ -192,7 +195,21 @@ fn build_site_new_args(
 ///
 /// **地类不给就不传 `--landtype`。** 界面上不该替用户猜——`colm-cli` 那边
 /// 已经把这条规矩定死：不给就整条不写，让 CoLM 走自己的回落路径。
+/// rawdata 写错时 `site-new` 会静默回落到标称默认值；在进入 CLI 前明确拒绝不存在的目录。
+fn validate_rawdata_dir(rawdata: Option<&str>) -> Result<(), String> {
+    if let Some(rawdata) = rawdata.map(str::trim).filter(|path| !path.is_empty()) {
+        let path = std::path::Path::new(rawdata);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(format!(
+                "rawdata 目录不存在或不是目录：{rawdata}；请重新选择，或清空该字段明确使用标称默认值 / rawdata directory is missing or not a directory: {rawdata}; choose it again, or clear the field to explicitly use nominal defaults"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn make_site(
     out: String,
     lon: f64,
@@ -201,8 +218,13 @@ pub async fn make_site(
     rawdata: Option<String>,
     mode: String,
     crop: bool,
+    overwrite: Option<bool>,
 ) -> Result<SiteReport, String> {
-    let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode, crop);
+    validate_rawdata_dir(rawdata.as_deref())?;
+    let mut args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode, crop);
+    if overwrite == Some(true) {
+        args.extend(["--overwrite".into(), "1".into()]);
+    }
     let json = crate::sidecar::capture_preparation_async(args).await?;
     serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是建站点失败 —— 照 `probe_forcing`/`scan_sites`
@@ -341,6 +363,113 @@ pub fn install_prepared_pair(
             std::path::Path::new(&forcing_final),
         ],
     )
+}
+
+/// 单个前处理产物安装到数据集目录（站点模式只产 `Sitedata/<X>_site.nc`，强迫场另一次
+/// 转换只产 `Forcing/<X>_Met.nc`，无法总是凑成一对）。复制到目标目录的隐藏临时文件后
+/// 原子替换；`overwrite=false` 时目标已存在直接拒绝，由前端确认后重试（D-06 残留）。
+#[tauri::command]
+pub fn install_prepared_file(
+    source: String,
+    destination: String,
+    overwrite: Option<bool>,
+) -> Result<(), String> {
+    install_prepared_file_with_link(source, destination, overwrite, |source, destination| {
+        std::fs::hard_link(source, destination)
+    })
+}
+
+fn install_prepared_file_with_link(
+    source: String,
+    destination: String,
+    overwrite: Option<bool>,
+    link: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    use std::io::ErrorKind;
+    let source = std::path::Path::new(&source);
+    let destination = std::path::Path::new(&destination);
+    let metadata = source
+        .symlink_metadata()
+        .map_err(|error| format!("无法检查待安装产物 {}：{error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("待安装产物不能是符号链接：{}", source.display()));
+    }
+    if !source.is_file() {
+        return Err(format!("待安装产物不存在：{}", source.display()));
+    }
+    if destination
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!("产物目标不能是符号链接：{}", destination.display()));
+    }
+    if destination.exists() && !destination.is_file() {
+        return Err(format!("产物目标不是文件：{}", destination.display()));
+    }
+    if destination.exists() && overwrite != Some(true) {
+        return Err(format!(
+            "目标文件已存在，未覆盖：{} / destination already exists; overwrite was not confirmed: {}",
+            destination.display(),
+            destination.display()
+        ));
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| format!("产物目标没有父目录：{}", destination.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "无法创建目标目录 {}：{error} / cannot create destination directory {}: {error}",
+            parent.display(),
+            parent.display()
+        )
+    })?;
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "prepared.nc".into());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let staged = parent.join(format!(
+        ".{name}.colm-install-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::copy(source, &staged).map_err(|error| {
+        format!(
+            "无法复制 {} 到 {}：{error}",
+            source.display(),
+            staged.display()
+        )
+    })?;
+    let result = if overwrite == Some(true) {
+        std::fs::rename(&staged, destination)
+            .map_err(|error| format!("无法替换 {}：{error}", destination.display()))
+    } else {
+        match link(&staged, destination) {
+            Ok(()) => {
+                // 目标已指向临时文件的 inode；临时名删掉不影响产物。
+                let _ = std::fs::remove_file(&staged);
+                Ok(())
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(format!(
+                "目标文件已存在，未覆盖：{} / destination already exists; overwrite was not confirmed: {}",
+                destination.display(),
+                destination.display()
+            )),
+            // rename 会覆盖检查后才出现的文件；无法原子地禁止覆盖时必须拒绝发布。
+            Err(error) => Err(format!(
+                "无法安全安装到 {}，未覆盖目标文件：{error} / Cannot install without risking an overwrite at {}; choose a filesystem supporting hard links",
+                destination.display(), destination.display()
+            )),
+        }
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
 }
 
 #[cfg(test)]

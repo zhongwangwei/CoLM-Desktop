@@ -472,7 +472,9 @@ fn record_creation(
 fn server_failed(prepared: PreparedCreation, error: String) -> Result<Value, String> {
     prepared
         .creation
-        .finish(Err(format!("{error}；创建凭据已保留，可用相同设置重试")))
+        .finish(Err(format!(
+            "{error}；创建凭据已保留；连接中断可用相同设置重试，目录已存在或归属冲突请更换算例目录 / the creation token is kept; retry with the same settings after connection loss, or choose another case directory when it already exists or belongs to another owner"
+        )))
         .map(Value::String)
 }
 

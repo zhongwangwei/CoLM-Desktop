@@ -59,6 +59,10 @@ function page(
     kind?: 'parameters' | 'network' | 'joint';
     network?: Record<string, unknown> | null;
     assetRoot?: string;
+    /** `model_study_members` 的返回；默认单成员，旧测试的一键预览路径不变。 */
+    members?: string[];
+    truncated?: boolean;
+    total?: number;
   } = {},
 ) {
   const version = {
@@ -144,6 +148,14 @@ function page(
         return {};
       case 'pick_folder':
         return folderPick;
+      case 'model_study_members': {
+        const members = studyImport.members ?? ['m000001'];
+        return {
+          members,
+          truncated: studyImport.truncated === true,
+          total: studyImport.total ?? members.length,
+        };
+      }
       case 'model_import_study':
         if (args.preview)
           return {
@@ -872,7 +884,7 @@ test('a draft offers importing a study only on its research tab', async () => {
   await p.mount();
   await p.openDraft('custom');
   const imports = p.elements.filter(
-    (e) => e.type === 'Button' && e.children.flat().includes('从研究导入最优参数…'),
+    (e) => e.type === 'Button' && e.children.flat().includes('从研究导入参数 / AI 网络…'),
   );
   assert.equal(imports.length, 1);
 });
@@ -1002,6 +1014,62 @@ test('importing study parameters first previews them in a dialog the assistant c
     (call) => call.command === 'model_import_study' && call.args.preview === null,
   )!;
   assert.deepEqual(write.args.only, [['case:DEF_X', null, null]]);
+});
+
+test('a single-member study previews that member instead of asking for best', async () => {
+  const p = page(undefined, {}, [], { kind: 'official' }, { members: ['m000007'] });
+  await p.mount();
+  await p.openDraft('custom');
+  p.pickFolder('/study');
+  await p.click('version-tab-research');
+  await p.settle();
+  await p.click('version-import-study');
+  await p.settle();
+  const preview = p.calls.find(
+    (call) => call.command === 'model_import_study' && call.args.preview === true,
+  );
+  assert.ok(preview, '单成员研究仍直接给出预览');
+  assert.equal(preview.args.member, 'm000007', '没有 best 可选时必须传实际唯一成员');
+});
+
+test('a multi-member study asks the user to pick before previewing', async () => {
+  const p = page(undefined, {}, [], { kind: 'official' }, { members: ['m000001', 'm000002'] });
+  await p.mount();
+  await p.openDraft('custom');
+  p.pickFolder('/study');
+  await p.click('version-tab-research');
+  await p.settle();
+  await p.click('version-import-study');
+  await p.settle();
+  assert.equal(
+    p.calls.some((call) => call.command === 'model_import_study'),
+    false,
+    '多成员研究先让用户选成员，不自动挑 best',
+  );
+  assert.ok(
+    p.actions().some((action) => action.id === 'version-preview-study-member'),
+    '成员选择器与预览动作可见',
+  );
+});
+
+test('truncated study member lists say so instead of pretending to be complete', async () => {
+  const p = page(
+    undefined,
+    {},
+    [],
+    { kind: 'official' },
+    { members: ['m000001', 'm000002'], truncated: true, total: 250 },
+  );
+  await p.mount();
+  await p.openDraft('custom');
+  p.pickFolder('/study');
+  await p.click('version-tab-research');
+  await p.settle();
+  await p.click('version-import-study');
+  await p.settle();
+  const text = JSON.stringify(p.elements);
+  assert.match(text, /研究成员共 250 个，这里只列出前 2 个/);
+  assert.match(text, /其余成员需要时请在命令行导入/);
 });
 
 test('the code tab registers its own actions and keeps export and revert out of reach', async () => {
@@ -1282,4 +1350,12 @@ test('draft saving reports dirty, saving and saved, and keeps edits when the sav
   assert.equal(badge()?.props.state, 'dirty', '保存失败保留未保存状态');
   assert.doesNotMatch(texts(), /已保存草稿/);
   assert.match(texts(), /model_save_draft failed/);
+});
+
+test('study import copy covers members, AI networks and the missing-best error', () => {
+  const source = readFileSync(new URL('./VersionsPage.tsx', import.meta.url), 'utf8');
+  assert.match(source, /从研究导入参数 \/ AI 网络/);
+  assert.match(source, /Study has no best member yet/);
+  assert.match(source, /基准成员/);
+  assert.match(source, /其余成员需要时请在命令行导入/);
 });

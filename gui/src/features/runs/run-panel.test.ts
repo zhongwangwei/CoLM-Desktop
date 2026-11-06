@@ -21,7 +21,7 @@ import {
   parallelBudgetPlan,
 } from './run-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
-import { compatibleKernel } from './run-model';
+import { compatibleKernel, submittedRanks } from './run-model';
 import { applyRunEvent } from '../../lib/run-events';
 import type { RunState } from '../../lib/types';
 
@@ -138,6 +138,7 @@ function panel(
     parallelCoresPerNode: options.parallelCoresPerNode ?? '48',
     parallelProblem: options.parallelProblem ?? null,
     parallelBudgetPlan,
+    submittedRanks,
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
     setMonitor: options.setMonitor ?? (() => {}),

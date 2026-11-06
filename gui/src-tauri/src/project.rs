@@ -79,7 +79,28 @@ fn project_wizard_form(root: String) -> Result<std::collections::BTreeMap<String
     let doc = std::fs::read_to_string(dir.join("case.nml"))
         .ok()
         .and_then(|text| colm_namelist::parse(&text).ok());
-    let forcing = std::fs::read_to_string(dir.join("forcing.nml"))
+    // 强迫场可能是算例自带的 forcing.nml，也可能是建例时选的外部配置路径；按
+    // `DEF_forcing_namelist` 解析，而不是永远读 <case>/forcing.nml（F-S-10 回填）。
+    let forcing_path = {
+        let declared = profile.inputs.forcing_namelist.trim();
+        // schema 对 `DEF_forcing_namelist` 的缺省是字符串 "null"；缺省时读算例自带的 forcing.nml。
+        let declared = if declared.eq_ignore_ascii_case("null") {
+            ""
+        } else {
+            declared
+        };
+        if declared.is_empty() {
+            dir.join("forcing.nml")
+        } else {
+            let path = PathBuf::from(declared);
+            if path.is_absolute() {
+                path
+            } else {
+                dir.join(path)
+            }
+        }
+    };
+    let forcing = std::fs::read_to_string(&forcing_path)
         .ok()
         .and_then(|text| colm_namelist::parse(&text).ok());
     let mut form = std::collections::BTreeMap::new();
@@ -148,7 +169,58 @@ fn project_wizard_form(root: String) -> Result<std::collections::BTreeMap<String
                 .map(|parent| parent.to_string_lossy().into_owned())
         }),
     );
+    form.extend(spatial_wizard_choices(&profile, forcing.as_ref()));
     Ok(form)
+}
+
+/// 空间项目重开时向导第 2/3 步要回填的字段：网格文件、四边界、分辨率、强迫场方式与目录。
+///
+/// 这些值在 `case.nml`/`forcing.nml` 和建例记录里都有，不回填会让"五步已填好"的承诺落空，
+/// 还会被本机"上次用过的路径"跨项目顶替（GUI 审查 F-S-10）。只对空间算例生效。
+fn spatial_wizard_choices(
+    profile: &CaseProfile,
+    forcing: Option<&colm_namelist::Document>,
+) -> std::collections::BTreeMap<String, String> {
+    use crate::config::character;
+    let mut form = std::collections::BTreeMap::new();
+    if !profile.spatial {
+        return form;
+    }
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            form.insert(key.to_owned(), value);
+        }
+    };
+    if profile.grid == Some("latlon") {
+        if let Some([west, east, south, north]) = profile.domain {
+            put("west", Some(west.to_string()));
+            put("east", Some(east.to_string()));
+            put("south", Some(south.to_string()));
+            put("north", Some(north.to_string()));
+        }
+        if let Some([dlon, dlat]) = profile.resolution {
+            put("dlon", Some(dlon.to_string()));
+            put("dlat", Some(dlat.to_string()));
+        }
+    }
+    put("mesh", profile.mesh_file.clone());
+    put("catchment", profile.catchment_file.clone());
+    put("shapefile", profile.shapefile.clone());
+    if let Some(forcing) = forcing {
+        let dataset = character(forcing, "DEF_forcing%dataset");
+        let directory = character(forcing, "DEF_dir_forcing");
+        let template = colm_case::forcing_templates::forcing_datasets().any(|name| name == dataset);
+        if template && !directory.trim().is_empty() {
+            // 建例时按数据集模板生成 forcing.nml：向导要回到"目录 + 数据集"模式。
+            put("forcing_mode", Some("directory".into()));
+            put("forcing_dataset", Some(dataset));
+            put("spatial_forcingdir", Some(directory));
+        } else {
+            put("forcing_mode", Some("config".into()));
+            put("forcing", Some(profile.inputs.forcing_namelist.clone()));
+        }
+    }
+    form
 }
 
 /// 向导第 3 步里的一个站点：站点文件、算例名、起止与预热结束日。
@@ -224,7 +296,7 @@ fn wizard_skips(name: &str) -> bool {
 pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
     use crate::config::integer;
     let form = project_wizard_form(root.clone())?;
-    let cases = list_cases(root)?;
+    let cases = list_cases(root.clone())?;
     let mut case_values = std::collections::BTreeMap::new();
     if let Some(doc) = cases
         .first()
@@ -318,14 +390,71 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
             draft.spinup_repeat == repeat
                 && first_year_cutoff(&draft.start).as_deref() == Some(draft.spinup_end.as_str())
         });
+    // 用户上次建例时明确选的模式优先于启发式；没有标记才按内容反推。
+    let remembered = read_multi_site_marker(std::path::Path::new(&root));
+    let (multi_site_mode, multi_site_repeat) = match remembered {
+        Some((mode, repeat)) => (mode, repeat),
+        None => (if first_year { "first-year" } else { "per-site" }, repeat),
+    };
     Ok(WizardSeed {
         form,
         case_values,
         sites,
         drafts,
-        multi_site_mode: if first_year { "first-year" } else { "per-site" },
-        multi_site_repeat: repeat,
+        multi_site_mode,
+        multi_site_repeat,
     })
+}
+
+/// 多站点项目根目录下记录建例方式的标记文件。只在本地项目根写，供下次打开向导时恢复
+/// first-year/per-site 的**用户选择**；没有标记时才退回按算例内容启发式反推（GUI 审查 S-06）。
+const MULTI_SITE_MARKER: &str = ".colm-desktop-multisite.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct MultiSiteMarker {
+    mode: String,
+    repeat: String,
+}
+
+/// 读项目根的多站点标记；文件缺失/读坏/值不合法一律当作没有标记（启发式兜底），不报错。
+fn read_multi_site_marker(root: &std::path::Path) -> Option<(&'static str, String)> {
+    let text = std::fs::read_to_string(root.join(MULTI_SITE_MARKER)).ok()?;
+    let marker: MultiSiteMarker = serde_json::from_str(&text).ok()?;
+    let mode = match marker.mode.as_str() {
+        "first-year" => "first-year",
+        "per-site" => "per-site",
+        _ => return None,
+    };
+    let repeat = marker
+        .repeat
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..=999).contains(n))?;
+    Some((mode, repeat.to_string()))
+}
+
+/// 记住本次多站点建例方式；只在本地项目根写（远程项目由服务器上的文件决定，不写本机）。
+#[tauri::command]
+pub fn project_remember_multi_site(root: String, mode: String, repeat: u32) -> Result<(), String> {
+    let root = std::path::Path::new(&root);
+    if root.as_os_str().is_empty() || !root.is_absolute() || !root.is_dir() {
+        return Err("项目根目录必须是已存在的绝对路径".into());
+    }
+    let mode = match mode.as_str() {
+        "first-year" | "per-site" => mode,
+        _ => return Err("多站点建例方式只能是 first-year 或 per-site".into()),
+    };
+    if !(1..=999).contains(&repeat) {
+        return Err("多站点预热重复次数须在 1–999 之间".into());
+    }
+    let marker = MultiSiteMarker {
+        mode,
+        repeat: repeat.to_string(),
+    };
+    crate::config::write_export_text_atomic(
+        &root.join(MULTI_SITE_MARKER),
+        serde_json::to_string_pretty(&marker).map_err(|error| error.to_string())?,
+    )
 }
 
 /// 打开已有算例时从 `case.nml`（和跑过时的 `stages.json`）反推出的向导选择，前端据此恢复会话。
@@ -697,7 +826,9 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
     let text = std::fs::read_to_string(&nml).map_err(|e| format!("{}: {e}", nml.display()))?;
     let mut effective = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
     crate::config::load_isotope_fields(&mut effective, dir)?;
-    crate::config::load_forcing_fields(&mut effective, dir)?;
+    // Profile classification uses case/material fields, not forcing-header values.
+    // Keep unreadable forcing headers repairable through open_case; the dedicated
+    // forcing read and save paths still report and validate those errors.
     let text = effective.to_string();
     let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let record = recorded_case(dir);

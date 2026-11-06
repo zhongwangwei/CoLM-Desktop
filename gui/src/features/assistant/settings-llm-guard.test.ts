@@ -84,6 +84,9 @@ function saveHarness(options: {
     state: { language: options.language ?? 'en' },
     options: JSON.stringify(options.draft.api_options, null, 2),
     invoke,
+    // 保存后的托管节点状态刷新（F-A-03）；这些用例不涉及 managed 检索，保持 false 不产生额外 IPC。
+    hasBackend: () => false,
+    setXerjNode: () => {},
     setEndpointGuard: (value: LlmEndpointGuard | null) => {
       state.guard = value;
     },
@@ -309,4 +312,82 @@ test('the settings panel renders the endpoint policy area in both languages', ()
   assert.match(settingsSource, /external_llm_ack/, '外部后端确认写进设置');
   assert.match(settingsSource, /model_endpoint_ack: null/, '改地址清空 ack');
   assert.match(settingsSource, /disabled=\{endpointBlocked\}/, 'blocked 保存禁用');
+});
+
+test('refuses budgets above the supported upper bounds before saving', async () => {
+  const harness = saveHarness({
+    draft: draftWith({ max_output_tokens: 2_000_000 }),
+  });
+  await assert.rejects(harness.saveDraft(), /1000000|Output limit/i);
+  assert.equal(harness.state.saved, null);
+});
+
+test('session limits use the same upper bounds as the backend', async () => {
+  // 后端 gui/src-tauri/src/assistant.rs validate_settings：轮数 ≤100000、累计 token ≤1000000000。
+  for (const budget of [{ session_turn_limit: 100_001 }, { session_token_limit: 1_000_000_001 }]) {
+    const harness = saveHarness({ draft: draftWith(budget) });
+    await assert.rejects(harness.saveDraft(), /100000|Session limits|会话/i);
+    assert.equal(harness.state.saved, null, '超界不得写盘');
+  }
+  // 边界值本身要能保存（100000 轮 = 后端允许的最大值）。
+  const accepted = saveHarness({ draft: draftWith({ session_turn_limit: 100_000 }) });
+  await accepted.saveDraft();
+  assert.equal(accepted.state.saved?.session_turn_limit, 100_000);
+});
+
+test('fixed backend validation errors are bilingual in the English UI', () => {
+  const compileError = (language: 'zh' | 'en') =>
+    compile<(error: unknown) => string>('settingsError', {
+      t: (zh: string, en: string) => (language === 'zh' ? zh : en),
+    });
+  const english = compileError('en');
+  assert.match(english(new Error('会话上限过大')), /Session limits exceed/);
+  assert.match(
+    english(new Error('超时须为 1–3600 秒，最大输出须为 1–1000000 token')),
+    /Timeout must be 1–3600/,
+  );
+  const chinese = compileError('zh');
+  assert.match(chinese(new Error('会话上限过大')), /每会话最多 100000 轮/);
+  // A-06/A-05 残余：地址、模型能力、历史路径与天河 guard 的固定中文也要翻译。
+  assert.match(english(new Error('服务地址不是有效的网址')), /not a valid URL/);
+  assert.match(
+    english(new Error('服务地址必须是 https://，或本机的 http://127.0.0.1 / localhost')),
+    /must use https:\/\//,
+  );
+  assert.match(
+    english(new Error('gpt-6.1-sol 的助手工具调用须使用 Responses 接口')),
+    /gpt-6.1-sol tool calls require the Responses API/,
+  );
+  assert.match(
+    english(new Error('claude-sonnet-5-5 须使用 Anthropic Messages 接口')),
+    /claude-sonnet-5-5 requires the Anthropic Messages API/,
+  );
+  assert.match(
+    english(new Error('qwen3.8 不支持思考强度 xhigh；可用：low、medium、high')),
+    /does not support reasoning effort xhigh; available: low、medium、high/,
+  );
+  assert.match(
+    english(new Error('Desktop 历史仓库路径不存在或不是目录：/missing')),
+    /Desktop history repository path does not exist or is not a directory: \/missing/,
+  );
+  assert.match(
+    english(
+      new Error(
+        '检测到模型服务端点疑似位于天河（llm.tianhe.example）。软件底线：禁止在天河上直接运行 DeepSeek 等 LLM；请改用官方云服务或其他机器。',
+      ),
+    ),
+    /appears to be on Tianhe/,
+  );
+});
+
+test('web-search copy matches the DeepSeek tools and the external backends', () => {
+  // 内置后端（任意回答服务商）的搜索/读网页由 DeepSeek 提供、用 DeepSeek Key（GUI 审查 A-05/A-13）。
+  assert.match(settingsSource, /联网搜索与读网页（DeepSeek API）/);
+  assert.match(settingsSource, /与当前回答服务商无关/);
+  // 外部后端用自带联网，不产生 DeepSeek 费用，文案必须说清。
+  assert.match(settingsSource, /外部后端自带的联网/);
+  assert.match(settingsSource, /不使用 DeepSeek Key、也不产生 DeepSeek 费用/);
+  // 旧文案与实际实现不符，不能回退。
+  assert.doesNotMatch(settingsSource, /联网能力由所选服务商/);
+  assert.doesNotMatch(settingsSource, /providerId\(settings\) === 'deepseek'/);
 });

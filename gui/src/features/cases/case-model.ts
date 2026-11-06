@@ -4,6 +4,7 @@ export type { Site } from '../../lib/types';
 export interface SchemaField {
   name: string;
   kind: string;
+  arity?: number | null;
   default: string;
   doc?: string;
   group?: string;
@@ -15,20 +16,54 @@ export interface SchemaField {
 export function isCaseField(field: SchemaField): boolean {
   return !field.derived && !!field.group && !/^DEF_USE_(USGS|IGBP)$/.test(field.name);
 }
-export function requiredNumber(value: string, label: string): number {
-  if (!value.trim() || !Number.isFinite(Number(value)))
-    throw new Error(`${label}: 请输入有效数字 / enter a number`);
+export function requiredNumber(
+  value: string,
+  label: string,
+  t?: (zh: string, en: string) => string,
+): number {
+  if (!value.trim() || !Number.isFinite(Number(value))) {
+    // React 页面传 t 得到当前语言；非 React 调用回退到 bilingual（无 document 时为中文，D-09）。
+    const say = t ?? bilingual;
+    throw new Error(`${label}: ${say('请输入有效数字', 'enter a number')}`);
+  }
   return Number(value);
+}
+
+/** 日期接受 `YYYY-MM-DD` 或 `YYYYMMDD`，且必须是真实存在的日期（D-09）。 */
+export function prepDateValid(text: string): boolean {
+  const compact = text.trim().replace(/-/g, '');
+  if (!/^\d{8}$/.test(compact)) return false;
+  const year = Number(compact.slice(0, 4));
+  const month = Number(compact.slice(4, 6));
+  const day = Number(compact.slice(6, 8));
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/** 把两种日期写法归一成可比较的 `YYYYMMDD`。 */
+export function prepDateKey(text: string): string {
+  return text.trim().replace(/-/g, '');
 }
 export function caseDirectory(root: string, name: string): string {
   if (
     !root.trim() ||
     !name ||
     name !== name.trim() ||
+    /^--/.test(name) ||
     /[\\/:]|^\.{1,2}$|\p{Cc}/u.test(name) ||
     new TextEncoder().encode(name).length > 256
   )
-    throw new Error(bilingual('请填写根目录和有效算例名', 'root and valid case name required'));
+    throw new Error(
+      name.trim().startsWith('--')
+        ? bilingual(
+            '算例名不能以 -- 开头：命令行会把它当成参数。',
+            'A case name must not start with --: the command line would treat it as a flag.',
+          )
+        : bilingual('请填写根目录和有效算例名', 'root and valid case name required'),
+    );
   return `${root.replace(/[\\/]+$/, '')}/${name.trim()}`;
 }
 export function physicsFields(physics: Record<string, string> = {}) {
@@ -71,9 +106,50 @@ export function siteVersionMismatch(
     return bilingual('站点城市类型与当前算例配置不符', 'Urban configuration mismatch');
   return null;
 }
-export function preparedDestination(directory: string, source: string): string {
-  const stem = (source.split(/[\\/]/).pop() ?? 'forcing').replace(/\.[^.]+$/, '');
-  return `${directory.replace(/[\\/]$/, '')}/${stem}_colm.nc`;
+/**
+ * 前处理产物的默认落盘名。必须和 `colm-cli` 扫描器（`main.rs` 的 `LAYOUTS`）使用同一套
+ * 命名约定，否则前处理→扫描→建例配对不上（GUI 审查 D-06 / 复核 P2）：
+ *
+ * | 数据集 | 站点 | 强迫场 | 观测 |
+ * |---|---|---|---|
+ * | PLUMBER2 | `<X>_site.nc` | `<X>_Met.nc` | `<X>_Flux.nc` |
+ * | Urban-PLUMBER | `<X>_site_v1.nc` | `<X>_metforcing_v1.nc` | `<X>_clean_observations_v1.nc` |
+ *
+ * 源文件已带约定后缀时，**只剥一层完整后缀**再换成同布局的目标后缀：
+ * `A_Met_site.nc` 的站名是 `A_Met`，强迫场应为 `A_Met_Met.nc`；
+ * 合法的 `A_Met.nc` 作为源时不能再剥成 `A`。源文件没有约定后缀时按 PLUMBER2 追加。
+ */
+const PREPARED_LAYOUTS: {
+  site: string;
+  met: string;
+  flux: string;
+}[] = [
+  { site: '_site.nc', met: '_Met.nc', flux: '_Flux.nc' },
+  {
+    site: '_site_v1.nc',
+    met: '_metforcing_v1.nc',
+    flux: '_clean_observations_v1.nc',
+  },
+];
+
+export function preparedDestination(
+  directory: string,
+  source: string,
+  kind: 'site' | 'Met' | 'Flux' = 'Met',
+): string {
+  const name = source.split(/[\\/]/).pop() ?? 'forcing';
+  const target = kind === 'site' ? 'site' : kind === 'Met' ? 'met' : 'flux';
+  // 与扫描器同样逐布局、逐源后缀精确匹配（大小写敏感）；只剥一层。
+  for (const layout of PREPARED_LAYOUTS) {
+    for (const sourceKind of ['site', 'met', 'flux'] as const) {
+      const suffix = layout[sourceKind];
+      if (!name.endsWith(suffix)) continue;
+      return `${directory.replace(/[\\/]$/, '')}/${name.slice(0, -suffix.length)}${layout[target]}`;
+    }
+  }
+  const stem = name.replace(/\.[^.]+$/, '') || 'forcing';
+  const suffix = kind === 'site' ? '_site.nc' : kind === 'Met' ? '_Met.nc' : '_Flux.nc';
+  return `${directory.replace(/[\\/]$/, '')}/${stem}${suffix}`;
 }
 
 export function effectiveModelFields(
@@ -149,4 +225,107 @@ export function isMethaneSite(site: Site) {
     !site.crop &&
     (site.name === 'AT-Neu' || /ch4/i.test(site.obs_file ?? '') || /ch4/i.test(site.site_file))
   );
+}
+
+/**
+ * 第 4 步 `model_configuration` 接受的算例覆盖值。
+ *
+ * forcing 组（`nl_colm_forcing`）的字段是从 forcing.nml 读进来的"文件实际值"，不是算例标量
+ * 覆盖；后端 `typed()` 会拿 schema 旧值表校验 `DEF_forcing%dataset`，而 22 个 GUI 空间模板里
+ * 17 个的 dataset 不在那份 8 值白名单里（ERA5/CMFD/CRA40…），整份配置查询会因此失败——
+ * 空间模板算例一打开第 4 步就红字锁死（GUI 审查 F-N-07，已真机复现）。这里按字段组过滤；
+ * forcing 字段仍由第 3 步控件与 forcing.nml 链路负责保存和回读。
+ */
+export function configurationCaseValues(
+  values: Record<string, string>,
+  schema: readonly Pick<SchemaField, 'name' | 'group'>[],
+): Record<string, string> {
+  const byName = new Map(schema.map((field) => [field.name.toLowerCase(), field] as const));
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    const field = byName.get(key.toLowerCase());
+    // 只过滤 forcing 组；schema 里没有的键（界面临时 scheme 字段等）保持原样传下去。
+    if (field?.group === 'nl_colm_forcing') continue;
+    out[field?.name ?? key] = value;
+  }
+  return out;
+}
+
+/** 「制作站点」可选的地表覆盖/植被方案。 */
+export const PREPARATION_SITE_MODES = [
+  'igbp',
+  'usgs',
+  'pft',
+  'pc',
+  'urban-igbp',
+  'urban-usgs',
+  'urban-pft',
+  'urban-pc',
+] as const;
+
+/**
+ * CROP 内核只接受 PFT/PC 结构：用 IGBP/USGS 建站会在站点审计（site.rs `crop_enabled &&
+ * subgrid == Lct`）时才失败，GUI 应提前只给可行选项（GUI 审查 F-D-04）。
+ */
+export function preparationSiteModes(crop: boolean): readonly string[] {
+  return crop ? ['pft', 'pc', 'urban-pft', 'urban-pc'] : PREPARATION_SITE_MODES;
+}
+
+/**
+ * 同一次保存里"强迫场路径/数据集"与「更多配置」里的 forcing 字段都改会被后端拒绝
+ * （两处都写 forcing.nml）；前端先给出可操作的提示（GUI 审查 N-08）。
+ */
+export function forcingSaveConflict(
+  forcingDirty: boolean,
+  fields: readonly { path: string }[],
+): boolean {
+  return (
+    forcingDirty && fields.some((field) => field.path.toLowerCase().startsWith('def_forcing%'))
+  );
+}
+
+/** 站点文件被新算例扫描识别所需的两种布局后缀。 */
+export const PREPARED_SITE_SUFFIXES = ['_site.nc', '_site_v1.nc'] as const;
+
+/** 站点输出文件名须以扫描器认识的 `_site.nc`/`_site_v1.nc` 结尾（D-06 残留）。 */
+export function preparedSiteNameValid(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() ?? '';
+  return PREPARED_SITE_SUFFIXES.some((suffix) => name.toLowerCase().endsWith(suffix));
+}
+
+/** 选目录后给站点文件补一个扫描器认识的名字；沿用当前文件名词干，没有就用 `site`。 */
+export function preparedSiteDestination(directory: string, current = ''): string {
+  const base = directory.replace(/[\\/]+$/, '');
+  const name = current.split(/[\\/]/).pop() ?? '';
+  const stem =
+    name
+      .replace(/_site(_v1)?\.nc$/i, '')
+      .replace(/\.[^.]+$/, '')
+      .trim() || 'site';
+  return `${base}/${stem}_site.nc`;
+}
+
+export interface PreparedDatasetDestinations {
+  site?: string;
+  met?: string;
+  /** 站点与强迫场词干是否一致（扫描按同一词干配对；不一致时安装后扫不到配对的强迫场）。 */
+  stemsMatch: boolean;
+}
+
+/** 把准备页产物映射到数据集根下的 Sitedata/Forcing 正式路径（D-06 残留）。
+ *  PLUMBER2 布局：`Sitedata/<X>_site.nc` + `Forcing/<X>_Met.nc`。 */
+export function preparedDatasetDestinations(
+  produced: { site?: string; met?: string },
+  root: string,
+): PreparedDatasetDestinations {
+  const base = root.replace(/[\\/]+$/, '');
+  const stemOf = (path: string, suffixes: RegExp) =>
+    (path.split(/[\\/]/).pop() ?? '').replace(suffixes, '').trim();
+  const siteStem = produced.site ? stemOf(produced.site, /_site(_v1)?\.nc$/i) : '';
+  const metStem = produced.met ? stemOf(produced.met, /_(Met|metforcing_v1)\.nc$|\.[^.]+$/i) : '';
+  return {
+    ...(produced.site ? { site: `${base}/Sitedata/${siteStem || 'site'}_site.nc` } : {}),
+    ...(produced.met ? { met: `${base}/Forcing/${metStem || 'forcing'}_Met.nc` } : {}),
+    stemsMatch: !produced.site || !produced.met || siteStem === metStem,
+  };
 }

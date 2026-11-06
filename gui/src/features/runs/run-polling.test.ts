@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { endedRun, openRuns, restoredRuns } from './run-model';
-import type { RunState } from '../../lib/types';
+import type { LastRun, RunState } from '../../lib/types';
 
 function execute<T>(
   file: string,
@@ -322,7 +322,8 @@ test('manual check and cancellation keep the parent batch selection locked', () 
   }
 });
 
-function restorePanel(legacy = false) {
+function restorePanel(legacy = false, deferredLast?: LastRun) {
+  const pendingUpdates: (() => void)[] = [];
   let imported = false;
   const currentHost = { current: 'A' },
     restoreRequest = { current: 0 };
@@ -365,16 +366,21 @@ function restorePanel(legacy = false) {
           recovering = value;
         },
         notify: (value: string) => errors.push(value),
-        endedRun: legacy ? endedRun : () => true,
-        restoredRuns: legacy ? restoredRuns : () => ({}),
-        openRuns: legacy ? openRuns : () => ({}),
+        endedRun: legacy || deferredLast ? endedRun : () => true,
+        restoredRuns: legacy || deferredLast ? restoredRuns : () => ({}),
+        openRuns: legacy || deferredLast ? openRuns : () => ({}),
         update: (
           fn: (old: { running: typeof latest.current }) => { running?: typeof latest.current },
         ) => {
-          const patch = fn({ running: latest.current });
-          if (patch.running) latest.current = patch.running;
+          const apply = () => {
+            const patch = fn({ running: latest.current });
+            if (patch.running) latest.current = patch.running;
+          };
+          if (deferredLast) pendingUpdates.push(apply);
+          else apply();
         },
         invokeJson: async (command: string) => {
+          if (command === 'project_last_runs' && deferredLast) return { '/case': deferredLast };
           if (command === 'project_last_runs')
             return legacy
               ? imported
@@ -401,6 +407,9 @@ function restorePanel(legacy = false) {
     requests,
     latest,
     errors,
+    render: () => {
+      for (const apply of pendingUpdates.splice(0)) apply();
+    },
     get remote() {
       return remote;
     },
@@ -511,3 +520,54 @@ test('explicit local selection keeps completed remote records hidden', async () 
   assert.equal(page.latest.current['/case'].running, false);
   assert.equal(page.requests.length, 0);
 });
+
+for (const status of ['unknown', 'succeeded']) {
+  test(`remote receipt survives its own delayed ${status} ledger restoration`, async () => {
+    const page = restorePanel(false, {
+      status,
+      location: 'remote',
+      host: 'A',
+      operation_id: 'restored',
+      needs_reconciliation: status === 'unknown',
+      finished_ms: status === 'succeeded' ? 1 : null,
+    });
+    const cleanup = page.select('A');
+    await flush();
+    assert.equal(page.requests.length, 1, 'receipt read starts before React renders the update');
+    assert.equal(Object.hasOwn(page.latest.current, '/case'), false);
+    page.render();
+    assert.equal(page.latest.current['/case'].run_id, 'restored');
+    const receipt = { host: 'A', job: 'queued-job' };
+    page.requests[0](receipt);
+    await flush();
+    assert.deepEqual(
+      page.remote,
+      status === 'succeeded' ? finishedJob('A', 'queued-job') : receipt,
+    );
+    assert.equal(page.recovering, false);
+    assert.deepEqual(page.errors, []);
+    cleanup();
+  });
+}
+
+for (const identity of [{ run_id: 'new-run' }, { operation_id: 'new-operation' }]) {
+  test(`pending receipt rejects a genuine new ${Object.keys(identity)[0]} after ledger restoration`, async () => {
+    const page = restorePanel(false, {
+      status: 'unknown',
+      location: 'remote',
+      host: 'A',
+      operation_id: 'restored',
+      needs_reconciliation: true,
+      finished_ms: null,
+    });
+    const cleanup = page.select('A');
+    await flush();
+    page.render();
+    page.latest.current['/case'] = { ...page.latest.current['/case'], ...identity };
+    page.requests[0]({ host: 'A', job: 'old-job' });
+    await flush();
+    assert.equal(page.remote, null);
+    assert.deepEqual(page.errors, []);
+    cleanup();
+  });
+}

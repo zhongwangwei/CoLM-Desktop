@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { invoke, invokeJson, listen, hasBackend, withTimeout } from '../../lib/ipc';
-import { useApp } from '../../lib/app-state';
+import { useApp, useCloseGuard } from '../../lib/app-state';
 import { askConfirm } from '../../lib/confirm';
 import { guideState, drive } from '../../lib/guide';
 import { Button, Select, Notice } from '../../components/ui';
@@ -123,6 +123,24 @@ export default function AssistantPanel() {
         '这个端点/模型没有已知的上下文窗口。请在助手设置 → 高级设置里填写“上下文窗口”（tokens）后再发送；应用不会猜一个窗口。',
         'This endpoint/model has no known context window. Open assistant settings → Advanced, set the context window (tokens), then send again; the app does not guess one.',
       );
+    if (
+      text.includes('does not support reasoning effort') ||
+      text.includes('reports no supported reasoning efforts')
+    )
+      return t(
+        '所选模型不支持这个思考强度；请在助手设置里改选该模型支持的档位后再发送。',
+        'The selected model does not support this reasoning effort; choose a supported level in assistant settings and send again.',
+      );
+    if (text.includes('selected OpenCode thinking variant is unavailable'))
+      return t(
+        'OpenCode 所选思考档位在这个模型上不可用；请在助手设置里改选该模型支持的档位（OpenCode 的 variant）后再发送。',
+        'The selected OpenCode thinking variant is unavailable for this model; choose a supported variant in assistant settings and send again.',
+      );
+    if (text.includes('selected OpenCode model is not enabled'))
+      return t(
+        '所选 OpenCode 模型没有在 OpenCode 里启用；请先在 OpenCode 里启用它，或换一个可用模型。',
+        'The selected OpenCode model is not enabled in OpenCode; enable it there or choose another model.',
+      );
     if (text.includes('estimated input tokens') && text.includes('context window'))
       return t(
         '这条请求即使折叠较早的工具结果仍超过当前上下文窗口。被拦住的这次模型请求没有发往模型服务（本轮较早的请求可能已经发送）；请缩短附件或对话、在助手设置里调大上下文窗口，或调低输出 token 上限后再发送。',
@@ -201,6 +219,8 @@ export default function AssistantPanel() {
   const [reconciling, setReconciling] = useState(false);
   const [reconcileNote, setReconcileNote] = useState('');
   const [reconcileNotice, setReconcileNotice] = useState('');
+  // 设置已保存但立即重发 configure 失败：不能静默吞掉，否则索引/模型仍走旧配置（F-A-07）。
+  const [reconfigureNotice, setReconfigureNotice] = useState('');
   const [reconcileError, setReconcileError] = useState('');
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
@@ -663,9 +683,15 @@ export default function AssistantPanel() {
     };
   }, [settings.backend, settings.base_url, state.assistantSettingsOpen]);
   // 已生成的错误/提示是当时语言的字符串，切换语言后清掉，避免中英混排。
+  // initError/historyError/reconcileError 同样是渲染时定死的单语字符串（A-08 同类残留）。
   useEffect(() => {
     setError('');
     setAttachNotice('');
+    setInitError('');
+    setHistoryError('');
+    setReconcileError('');
+    setReconcileNotice('');
+    setReconfigureNotice('');
   }, [state.language]);
   /**
    * 核心设置单独加载/重试（GUI-16）。原来它和输入历史串行 await，历史一失败就整个助手永久不可用；
@@ -753,6 +779,34 @@ export default function AssistantPanel() {
         t('请先停止当前回答再修改设置。', 'Stop the current response before changing settings.'),
       );
     await invoke('assistant_save_settings', { settings: next });
+    // agent 进程还在时立刻重发 configure：检索/模型/预算改动不该等下一次发送才生效，
+    // 否则保存后马上点“更新文档索引”用的还是旧配置（GUI 审查 A-03）。进程没起时下次发送会配置。
+    if (ready) {
+      const page = app.current;
+      // 新 configure 的 ready/docs_index_status 事件带这个 startup_id；保存流程必须自己接管，
+      // 否则会被旧 id 过滤掉，重配期间界面看不到新状态（F-A-07）。
+      const startup = newRequestId();
+      startupId.current = startup;
+      setReconfigureNotice('');
+      try {
+        await invoke('assistant_start', {
+          startupId: startup,
+          projectRoot: page.root,
+          kernelDir: guideState().kernelDir,
+          resume: session.current ?? null,
+          caseDir: page.selectedCase?.entry.dir || null,
+          modelRevision: page.versionRef,
+        });
+      } catch (error) {
+        // 设置已经落盘，不把保存报错；但要明确告诉用户"重配失败、何时生效"（F-A-07）。
+        setReconfigureNotice(
+          t(
+            `设置已保存，但助手重配失败：${String(error)}。下一次发送会自动重试。`,
+            `Settings saved, but reconfiguring the assistant failed: ${String(error)}. The next message will retry.`,
+          ),
+        );
+      }
+    }
     setSettings(next);
     setModel('');
     // 换后端或换端点/模型/协议后，旧的 API 上下文估算不再属于当前发送目标：清掉，别当成新配置的占用。
@@ -1186,6 +1240,16 @@ export default function AssistantPanel() {
       setResettingSettings(false);
     }
   }
+
+  // 关窗（不是关面板）时也要确认：未保存的助手设置草稿只活在面板里，直接关应用会丢（GUI 审查 A-07）。
+  useCloseGuard(() =>
+    settingsDirty
+      ? t(
+          '助手设置还有未保存的修改，关闭应用会丢失。',
+          'The assistant settings have unsaved changes that will be lost if the application closes.',
+        )
+      : null,
+  );
 
   async function closeSettings() {
     if (!state.assistantSettingsOpen) return true;
@@ -1756,6 +1820,7 @@ export default function AssistantPanel() {
         </section>
       )}
       {error && <Notice tone="error">{error}</Notice>}
+      {reconfigureNotice && <Notice tone="warning">{reconfigureNotice}</Notice>}
       {attachNotice && <Notice tone="warning">{attachNotice}</Notice>}
       {attachments.length > 0 && (
         <div className="flex flex-col gap-1" aria-label={t('已附加的文档', 'Attached documents')}>

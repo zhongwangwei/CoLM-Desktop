@@ -1175,6 +1175,8 @@ fn compare(history: &History, flags: &Flags) -> Result<Value> {
         let br = frozen_run(&b, &root)?;
         let ap = verified_outputs(&a, &ar)?;
         let bp = verified_outputs(&b, &br)?;
+        let (basis, basis_source) = crate::time_basis::resolve(&ar.run_case)?;
+        let window_basis = serde_json::to_value(crate::time_basis::json(basis, basis_source))?;
         let ai = scientific_inputs(&ap, &ar.run_case)?;
         let bi = scientific_inputs(&bp, &br.run_case)?;
         ensure!(ai == bi, "scientific input identities differ");
@@ -1278,7 +1280,7 @@ fn compare(history: &History, flags: &Flags) -> Result<Value> {
         };
         Ok(
             json!({"a":a_id,"b":b_id,"same_design":true,"better":better,"variables":scores,
-            "metrics_a":am,"metrics_b":bm,"evaluation":{"obs":observation,"obs_sha256":obs_hash,"spinup":spinup,"from":from,"to":to,"corrected":corrected,"window_time_basis":"model_clock"},
+            "metrics_a":am,"metrics_b":bm,"evaluation":{"obs":observation,"obs_sha256":obs_hash,"spinup":spinup,"from":from,"to":to,"corrected":corrected,"window_time_basis":window_basis},
             "notes":if variable.is_none(){vec!["Select --variable to request a single RMSE ranking; no aggregate objective is assumed."]}else{vec![]}}),
         )
     })();

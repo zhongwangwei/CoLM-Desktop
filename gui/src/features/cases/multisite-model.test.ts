@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { firstYearCutoff, planMultiSites, siteDraft } from './multisite-model';
+import { firstYearCutoff, multiSiteMarkerRoot, planMultiSites, siteDraft } from './multisite-model';
 import type { Site } from './case-model';
 
 const natural: Site = {
@@ -209,4 +209,12 @@ test('methane presets apply to their own station without enabling methane for ot
   assert.equal(wetland.fields.DEF_USE_Campbell_SOIL_MODEL, '.false.');
   assert.notEqual(forest.fields.DEF_USE_METHANE, '.true.');
   assert.notEqual(farm.fields.DEF_USE_METHANE, '.true.');
+});
+
+test('multi-site marker root is the project directory, not the save parent', () => {
+  assert.equal(multiSiteMarkerRoot('/data', 'multi1'), '/data/multi1');
+  assert.equal(multiSiteMarkerRoot('/data/', 'multi1'), '/data/multi1');
+  // 非法名称/空根目录：不返回一个会写错位置的路径。
+  assert.equal(multiSiteMarkerRoot('/data', '--flag'), '');
+  assert.equal(multiSiteMarkerRoot('', 'multi1'), '');
 });

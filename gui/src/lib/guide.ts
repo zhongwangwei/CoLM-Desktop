@@ -12,6 +12,8 @@ export type UiField = {
   options?: { value: string; label: string }[];
   disabled?: boolean;
   readOnly?: boolean;
+  /** 控件下方的说明（页面可自行渲染；当前用于解释"为什么某些选项不可选"）。 */
+  hint?: string;
   /// 会随时间/轮询自己变化的值（例如候选列表里的默认成员）：审批快照不比较它，避免假阳性。
   volatile?: boolean;
   saves?: boolean;

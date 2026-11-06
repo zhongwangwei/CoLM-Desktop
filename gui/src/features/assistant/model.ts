@@ -466,20 +466,40 @@ export function providerLabel(provider: (typeof API_PROVIDERS)[number], language
   );
 }
 
+/** 外部后端的显示名：`display_model` 上报 "Codex" / "Claude Code" / "OpenCode"（选了模型时
+ * 拼成 "Codex · <model>"）。它们是界面标签，不是可保存的模型 id。 */
+const EXTERNAL_DISPLAY_NAMES = new Set(['Codex', 'Claude Code', 'OpenCode']);
+
+/**
+ * 外部后端 ready 事件上报的 activeModel 只有像模型 id 时才允许进可保存候选（GUI 审查 A-04）：
+ * 单词显示名（如 "Codex"）也是合法 id 形态，单靠空白过滤拦不住，必须显式排除后端名。
+ * 已保存的当前模型由 assistantModels 的 chosen 单独保留，不依赖这里。
+ */
+function selectableExternalModel(value: string): string | null {
+  const model = value.trim();
+  if (!model || EXTERNAL_DISPLAY_NAMES.has(model)) return null;
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(model) ? model : null;
+}
+
 export function assistantModels(settings: Settings, activeModel = '') {
   const preset = API_PROVIDERS.find((item) => item.id === providerId(settings));
   const chosen =
     settings.backend === 'builtin'
       ? settings.model
       : settings.external[settings.backend]?.model || '';
+  const reported = settings.backend === 'builtin' ? null : selectableExternalModel(activeModel);
   return [
     ...new Set([
       chosen,
       ...(settings.backend === 'builtin'
         ? (preset?.models ?? (preset?.model ? [preset.model] : []))
-        : ['', activeModel]),
+        : ['', ...(reported ? [reported] : [])]),
     ]),
-  ].filter((value, index) => value || index === 0);
+  ].filter((value, index) => {
+    // 外部后端允许把模型显式设回"默认模型"（空串）；只有内置后端才让空串占位。
+    if (value) return true;
+    return settings.backend !== 'builtin' || index === 0;
+  });
 }
 /**
  * 直接改接口三要素（地址/模型/协议）后，旧窗口不再对应当前配置，必须清空；
@@ -642,6 +662,69 @@ export interface XerjNodeStatus {
  * 托管 Xerj 节点状态的中英文字：运行中/未运行、版本、是否与固定 release 一致、endpoint 与
  * 后端给的 detail。未知 mode 与 detail 原样显示 —— 后端加字段时界面不能把它悄悄吞掉。
  */
+/** 后端 Xerj 状态 detail 是中文原文；英文界面翻译固定句式，未知内容原样保留（F-A-06）。 */
+export function managedNodeDetail(detail: string, en: boolean): string {
+  if (!en) return detail;
+  const versioned = detail.match(
+    /^Xerj 版本 (.+) 与固定版本 (.+) 不一致：需人工替换为固定版本并重跑验收；当前不阻断启动$/,
+  );
+  if (versioned)
+    return `Xerj ${versioned[1]} does not match the pinned release ${versioned[2]}: replace it with the pinned release and rerun acceptance; starting is not blocked`;
+  const stop = detail.match(/^停止 Xerj 进程组失败：(.*)$/);
+  if (stop) return `Failed to stop the Xerj process group: ${stop[1]}`;
+  return detail;
+}
+
+/** 文档索引 detail 来自 agent 的英文原因；中文界面给固定句式的翻译，未知内容原样保留（F-A-06）。 */
+export function retrievalDetailText(detail: string, en: boolean): string {
+  const exact: Record<string, [string, string]> = {
+    'document retrieval is disabled': ['文档检索已关闭', 'document retrieval is disabled'],
+  };
+  if (exact[detail]) return en ? exact[detail][1] : exact[detail][0];
+  const patterns: [RegExp, (match: RegExpMatchArray) => [string, string]][] = [
+    [
+      /^document retrieval settings are invalid: (.*)$/,
+      (m) => [`文档检索设置无效：${m[1]}`, `document retrieval settings are invalid: ${m[1]}`],
+    ],
+    [
+      /^Xerj is not reachable: (.*)$/,
+      (m) => [`无法连接 Xerj：${m[1]}`, `Xerj is not reachable: ${m[1]}`],
+    ],
+    [
+      /^Xerj did not answer within the timeout: (.*)$/,
+      (m) => [`Xerj 在超时内未响应：${m[1]}`, `Xerj did not answer within the timeout: ${m[1]}`],
+    ],
+    [
+      /^Xerj returned an invalid response: (.*)$/,
+      (m) => [`Xerj 返回了无效响应：${m[1]}`, `Xerj returned an invalid response: ${m[1]}`],
+    ],
+    [
+      /^the document index is not ready: (.*)$/,
+      (m) => [`文档索引尚未就绪：${m[1]}`, `the document index is not ready: ${m[1]}`],
+    ],
+    [
+      /^the document index is stale for the current documentation snapshot: (.*)$/,
+      (m) => [
+        `文档索引相对当前文档快照已过期：${m[1]}`,
+        `the document index is stale for the current documentation snapshot: ${m[1]}`,
+      ],
+    ],
+    [
+      /^Xerj rejected the request: (.*)$/,
+      (m) => [`Xerj 拒绝了请求：${m[1]}`, `Xerj rejected the request: ${m[1]}`],
+    ],
+    [
+      /^document retrieval failed: (.*)$/,
+      (m) => [`文档检索失败：${m[1]}`, `document retrieval failed: ${m[1]}`],
+    ],
+  ];
+  for (const [pattern, translate] of patterns) {
+    const match = detail.match(pattern);
+    if (match) return en ? translate(match)[1] : translate(match)[0];
+  }
+  return detail;
+}
+
 export function managedNodeText(status: XerjNodeStatus | null, language: string): string {
   const t = (zh: string, en: string) => (language === 'en' ? en : zh);
   if (!status) return t('节点状态尚未获取', 'Node status has not been loaded');
@@ -664,8 +747,83 @@ export function managedNodeText(status: XerjNodeStatus | null, language: string)
         : t('与固定版本不一致', 'does not match the pinned release'),
     );
   if (status.endpoint) parts.push(status.endpoint);
-  if (status.detail) parts.push(status.detail);
+  if (status.detail) parts.push(managedNodeDetail(status.detail, language === 'en'));
   return parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------------------------
+// 模型/思考档位探测缓存：`assistant_api_models`/`assistant_codex_models`/`assistant_opencode_models`
+// 的结果原来只活在设置页内存里，关闭设置或重启后"思考档位"退回硬编码列表（A-02 残留）。
+// 这里把最近一次成功探测按「后端 + 端点」缓存；端点和后端一变就不复用，避免拿旧档位误导。
+// ---------------------------------------------------------------------------------------------
+export const ASSISTANT_MODELS_CACHE_KEY = 'colm-assistant-models-cache-v1';
+const ASSISTANT_MODELS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ASSISTANT_MODELS_CACHE_LIMIT = 8;
+type AssistantModelsCacheEntry = { at: number; models: ModelChoice[] };
+export type AssistantModelsCache = Record<string, AssistantModelsCacheEntry>;
+
+/** 缓存条目按「后端|端点」区分；端点统一小写去尾斜杠，和保存时的归一化一致。 */
+export function assistantModelsCacheKey(backend: string, baseUrl: string): string {
+  return `${backend}|${baseUrl.trim().toLowerCase().replace(/\/+$/, '')}`;
+}
+
+/** 解析 localStorage 里的缓存；损坏/旧形状一律当空。 */
+export function parseAssistantModelsCache(raw: string | null): AssistantModelsCache {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: AssistantModelsCache = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      if (typeof record.at !== 'number' || !Number.isFinite(record.at)) continue;
+      if (!Array.isArray(record.models)) continue;
+      const models = record.models
+        .filter(
+          (model): model is ModelChoice =>
+            !!model &&
+            typeof model === 'object' &&
+            typeof (model as ModelChoice).id === 'string' &&
+            (model as ModelChoice).id.length > 0,
+        )
+        .slice(0, 200);
+      if (models.length) out[key] = { at: record.at, models };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** 取某个后端/端点的缓存；过期（默认 7 天）当没有。 */
+export function cachedAssistantModels(
+  cache: AssistantModelsCache,
+  backend: string,
+  baseUrl: string,
+  now = Date.now(),
+): ModelChoice[] {
+  const entry = cache[assistantModelsCacheKey(backend, baseUrl)];
+  if (!entry || now - entry.at > ASSISTANT_MODELS_CACHE_TTL_MS) return [];
+  return entry.models;
+}
+
+/** 记录一次成功探测，保留最近 8 个后端/端点组合。 */
+export function rememberAssistantModels(
+  cache: AssistantModelsCache,
+  backend: string,
+  baseUrl: string,
+  models: ModelChoice[],
+  now = Date.now(),
+): AssistantModelsCache {
+  if (!models.length) return cache;
+  const out: AssistantModelsCache = {
+    ...cache,
+    [assistantModelsCacheKey(backend, baseUrl)]: { at: now, models: models.slice(0, 200) },
+  };
+  const keys = Object.keys(out).sort((a, b) => out[b].at - out[a].at);
+  for (const stale of keys.slice(ASSISTANT_MODELS_CACHE_LIMIT)) delete out[stale];
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

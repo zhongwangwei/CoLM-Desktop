@@ -125,6 +125,9 @@ pub struct ManagedNode {
     version: Option<String>,
     pinned_match: Option<bool>,
     data_dir: PathBuf,
+    /// 本次启动依据的配置指纹（请求的二进制路径/偏好端口/数据目录）；用于判断运行中的节点
+    /// 是否仍匹配当前设置（GUI 审查 A-01）。不含 key，也不代表实际端口。
+    config_key: String,
     detail: Option<String>,
     key: String,
 }
@@ -141,9 +144,26 @@ impl std::fmt::Debug for ManagedNode {
             .field("version", &self.version)
             .field("pinned_match", &self.pinned_match)
             .field("data_dir", &self.data_dir)
+            .field("config_key", &self.config_key)
             .field("api_key", &"<redacted>")
             .finish_non_exhaustive()
     }
+}
+
+/// 启动配置指纹：用户请求的二进制路径（空=自动探测）、偏好端口与数据目录。
+/// 只用于“要不要重启”，不参与任何权限/身份判断。
+pub fn managed_config_key(config: &ManagedConfig) -> String {
+    let binary = config
+        .binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("<auto>");
+    format!(
+        "{binary}\u{1f}{:?}\u{1f}{}",
+        config.preferred_port,
+        config.data_dir.display()
+    )
 }
 
 impl ManagedNode {
@@ -154,6 +174,7 @@ impl ManagedNode {
     /// 允许换端口重试一次：`pick_base_port` 的可用性检查与真正 bind 之间有竞态
     /// （另一个进程可能刚好占了端口），一次重试比把竞态直接抛给用户划算。
     pub fn start(config: ManagedConfig) -> Result<ManagedNode, String> {
+        let config_key = managed_config_key(&config);
         if config.data_dir.as_os_str().is_empty() {
             return Err("Xerj 数据目录为空：请先指定应用数据目录下的 Xerj 专用目录".to_owned());
         }
@@ -209,6 +230,7 @@ impl ManagedNode {
                         version,
                         pinned_match,
                         data_dir,
+                        config_key,
                         detail,
                         key,
                     });
@@ -221,6 +243,11 @@ impl ManagedNode {
 
     pub fn endpoint(&self) -> String {
         self.endpoint.clone()
+    }
+
+    /// 启动配置指纹：当前设置与运行节点不一致时应重启，而不是无条件复用（A-01）。
+    pub fn config_key(&self) -> &str {
+        &self.config_key
     }
 
     pub fn port(&self) -> u16 {

@@ -280,3 +280,115 @@ fn it_parses_what_the_real_cli_prints() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rawdata_must_be_an_existing_absolute_directory() {
+    let missing = std::env::temp_dir().join("colm-missing-rawdata-for-site");
+    let text = missing.display().to_string();
+    assert!(super::validate_rawdata_dir(Some(&text)).is_err());
+    assert!(super::validate_rawdata_dir(Some("relative/rawdata")).is_err());
+    assert!(super::validate_rawdata_dir(None).is_ok());
+    assert!(super::validate_rawdata_dir(Some("   ")).is_ok());
+    let dir = std::env::temp_dir().join(format!(
+        "colm-rawdata-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(super::validate_rawdata_dir(Some(&dir.display().to_string())).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn installing_a_prepared_file_copies_into_place_and_refuses_unconfirmed_overwrite() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-install-file-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("staged_site.nc");
+    std::fs::write(&source, b"site-data").unwrap();
+    let destination = dir.join("root").join("Sitedata").join("CN-Cng_site.nc");
+    super::install_prepared_file(
+        source.display().to_string(),
+        destination.display().to_string(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"site-data");
+    assert!(
+        destination.parent().unwrap().is_dir(),
+        "parent folders are created"
+    );
+
+    // 未确认覆盖：拒绝且保留旧文件。
+    std::fs::write(&source, b"new-data").unwrap();
+    let error = super::install_prepared_file(
+        source.display().to_string(),
+        destination.display().to_string(),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("目标文件已存在"), "{error}");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"site-data");
+
+    // 显式确认后替换。
+    super::install_prepared_file(
+        source.display().to_string(),
+        destination.display().to_string(),
+        Some(true),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"new-data");
+    // 目标目录里不留临时文件。
+    assert!(!std::fs::read_dir(destination.parent().unwrap())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("colm-install")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unsupported_hard_links_never_replace_a_competing_prepared_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-install-race-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("source.nc");
+    let destination = dir.join("target.nc");
+    std::fs::write(&source, b"new-data").unwrap();
+    let error = super::install_prepared_file_with_link(
+        source.display().to_string(),
+        destination.display().to_string(),
+        None,
+        |_, destination| {
+            // 模拟复制结束后另一进程创建目标，随后卷拒绝硬链接。
+            std::fs::write(destination, b"competing-data")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "hard links unsupported",
+            ))
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("未覆盖目标文件"), "{error}");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"competing-data");
+    assert_eq!(std::fs::read(&source).unwrap(), b"new-data");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}

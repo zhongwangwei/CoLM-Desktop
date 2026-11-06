@@ -102,6 +102,16 @@ fn project_name(path: &str, members: &[Operation]) -> String {
 
 /// The same precedence the run grouping uses in SQL.
 fn aggregate_status(statuses: &[&str]) -> String {
+    // 助手 UI 操作的终态与运行终态语义相同，先归一，项目聚合才不会落到 unknown。
+    let statuses = statuses
+        .iter()
+        .map(|status| match *status {
+            "ui_succeeded" => "succeeded",
+            "ui_failed" => "failed",
+            other => other,
+        })
+        .collect::<Vec<_>>();
+    let statuses = statuses.as_slice();
     let all = |status: &str| statuses.iter().all(|s| *s == status);
     let any = |status: &str| statuses.contains(&status);
     if let Some(first) = statuses.first() {
@@ -120,9 +130,15 @@ fn aggregate_status(statuses: &[&str]) -> String {
                 | "interrupted"
                 | "failed"
                 | "completed_with_failures"
+                | "paused"
+                | "needs_review"
         )
     }) {
         "unknown"
+    } else if any("needs_review") {
+        "needs_review"
+    } else if any("paused") {
+        "paused"
     } else if any("completed_with_failures") {
         "completed_with_failures"
     } else if all("failed") {
@@ -181,6 +197,10 @@ fn fold(members: &mut [Operation]) -> Operation {
                 | "completed_with_failures"
                 | "cancelled"
                 | "interrupted"
+                | "ui_succeeded"
+                | "ui_failed"
+                | "paused"
+                | "needs_review"
         ) {
         EventPhase::Status
     } else {
@@ -416,6 +436,24 @@ mod tests {
     }
 
     #[test]
+    fn mixed_projects_preserve_attention_states() {
+        for success in ["succeeded", "completed", "ui_succeeded"] {
+            assert_eq!(aggregate_status(&[success, "paused"]), "paused");
+            assert_eq!(aggregate_status(&["needs_review", success]), "needs_review");
+        }
+        assert_eq!(
+            aggregate_status(&["paused", "needs_review"]),
+            "needs_review"
+        );
+        assert_eq!(
+            aggregate_status(&["ui_failed", "needs_review"]),
+            "needs_review"
+        );
+        assert_eq!(aggregate_status(&["paused", "running"]), "running");
+        assert_eq!(aggregate_status(&["needs_review", "queued"]), "unknown");
+    }
+
+    #[test]
     fn statuses_fold_with_the_run_grouping_precedence() {
         assert_eq!(aggregate_status(&["succeeded", "succeeded"]), "succeeded");
         assert_eq!(aggregate_status(&["succeeded", "running"]), "running");
@@ -426,5 +464,17 @@ mod tests {
         assert_eq!(aggregate_status(&["failed", "failed"]), "failed");
         assert_eq!(aggregate_status(&["succeeded", "cancelled"]), "cancelled");
         assert_eq!(aggregate_status(&["succeeded", "queued"]), "unknown");
+        // assistant UI 的终态与运行终态语义相同，不能因为状态名新就落到 unknown。
+        assert_eq!(aggregate_status(&["ui_succeeded"]), "succeeded");
+        assert_eq!(
+            aggregate_status(&["succeeded", "ui_succeeded"]),
+            "succeeded"
+        );
+        assert_eq!(
+            aggregate_status(&["succeeded", "ui_failed"]),
+            "completed_with_failures"
+        );
+        assert_eq!(aggregate_status(&["paused"]), "paused");
+        assert_eq!(aggregate_status(&["needs_review"]), "needs_review");
     }
 }

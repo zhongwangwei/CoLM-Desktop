@@ -463,7 +463,15 @@ fn schema_kind(kind: colm_schema::FieldKind) -> String {
 
 fn default_value(default: colm_schema::Default) -> String {
     match default {
-        colm_schema::Default::Logical(v) => v.to_string(),
+        // 参数对话框展示的是 Fortran 字面量：逻辑默认值写成 `.true.`/`.false.`，
+        // 直接显示 Rust 的 true/false 会让人以为可以按 Java/JSON 语法填写（GUI 审查 N-05）。
+        colm_schema::Default::Logical(v) => {
+            if v {
+                ".true.".to_string()
+            } else {
+                ".false.".to_string()
+            }
+        }
         colm_schema::Default::Integer(v) => v.to_string(),
         colm_schema::Default::Real(v)
         | colm_schema::Default::Str(v)

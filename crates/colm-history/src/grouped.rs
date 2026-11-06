@@ -181,7 +181,7 @@ impl History {
             return self.remove_operation(operation_id);
         };
         let predicate = format!("({RUN_ID})=?1");
-        let uncertain: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM history_visible_operations WHERE {predicate} AND (needs_reconciliation!=0 OR json_extract(payload,'$.status') NOT IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted')))"),[run_id],|row| row.get(0))?;
+        let uncertain: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM history_visible_operations WHERE {predicate} AND (needs_reconciliation!=0 OR json_extract(payload,'$.status') NOT IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted','ui_succeeded','ui_failed','paused','needs_review')))"),[run_id],|row| row.get(0))?;
         ensure!(
             !uncertain,
             "cannot remove run whose completion is unconfirmed; reconcile it first"

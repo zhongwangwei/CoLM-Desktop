@@ -18,6 +18,9 @@ pub struct HistoryFilter {
     include_routine: Option<bool>,
     /// One entry per project folder (the default); false lists operations one by one.
     group_projects: Option<bool>,
+    /// 只看/排除「待核对」记录。列表徽标用的是派生的 `needs_reconciliation`，字面 status 只是
+    /// 历史事件的一种；前端状态筛选选“待核对”时翻译成这个字段（GUI 审查 H-05）。
+    needs_reconciliation: Option<bool>,
 }
 /// Recorded for audit, but not what a user means by "what did I do": shown on request only.
 const ROUTINE_KINDS: &[&str] = &[
@@ -62,6 +65,7 @@ impl From<HistoryFilter> for Query {
             offset: f.offset.unwrap_or(0),
             group_runs: true,
             group_projects,
+            needs_reconciliation: f.needs_reconciliation,
             ..Default::default()
         }
     }
@@ -155,11 +159,10 @@ pub fn history_export(
     out: Option<String>,
 ) -> Result<String, String> {
     let ledger = History::open_default().map_err(|e| e.to_string())?;
-    // Exports are audit records: one row per operation, never folded into projects.
-    let query = Query {
-        group_projects: false,
-        ..filter.unwrap_or_default().into()
-    };
+    // Exports are audit records: one row per operation, never folded into projects or runs.
+    // Global history used to fold multi-site runs into one CSV row and lose station rows (F-H-16).
+    let query = export_query(filter);
+
     let content = match format.as_str() {
         "csv" => ledger.export_csv(&query),
         "json" => ledger.export_json(&query),
@@ -173,6 +176,16 @@ pub fn history_export(
         Ok(content)
     }
 }
+/// 导出用的查询：保留筛选条件，但绝不按项目/运行折叠 —— 审计导出在算例和全局作用域里
+/// 都必须是"一条操作一行"（F-H-16）。
+fn export_query(filter: Option<HistoryFilter>) -> Query {
+    Query {
+        group_projects: false,
+        group_runs: false,
+        ..filter.unwrap_or_default().into()
+    }
+}
+
 fn write_export(path: &std::path::Path, content: &str) -> Result<(), String> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -312,6 +325,9 @@ fn assistant_ui_event(
                     | "new-create"
                     | "new-multi-retry"
                     | "case-save"
+                    | "case-output-dir"
+                    | "case-cbl-file"
+                    | "case-ozone-file"
                     | "project-example"
                     | "run-submit"
                     | "run-cancel"
@@ -320,6 +336,7 @@ fn assistant_ui_event(
                     | "remote-study-cancel"
                     | "remote-study-fetch"
                     | "prep-execute"
+                    | "prep-install-dataset"
                     | "export-full-series-csv"
                     | "export-series-data"
                     | "export-report"
@@ -344,6 +361,7 @@ fn assistant_ui_event(
                     | "code-file-replace"
                     | "version-save"
                     | "version-freeze"
+                    | "case-forcing-repair-save"
                     | "version-branch-code"
                     | "version-adopt-workspace"
                     | "version-import-process"
@@ -1002,6 +1020,60 @@ mod tests {
         assert_eq!(last.host.as_deref(), Some("compute"));
     }
     #[test]
+    fn needs_reconciliation_filter_uses_the_derived_ledger_flag() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let case = format!(
+            "/tmp/colm-needs-filter-case-{}-{unique}",
+            std::process::id()
+        );
+        let dir =
+            std::env::temp_dir().join(format!("colm-needs-filter-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = History::open(dir.join("history.sqlite3")).unwrap();
+        // 已确认结束的运行：派生列 needs_reconciliation=0。
+        let mut finished = Event::start("run");
+        finished.case_path = Some(case.clone());
+        ledger.append(&finished).unwrap();
+        ledger
+            .append(&finished.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+        // 只有 started、没有终态的运行：派生列 needs_reconciliation=1，字面 status 是 running。
+        let mut pending = Event::start("run");
+        pending.case_path = Some(case.clone());
+        ledger.append(&pending).unwrap();
+        assert_eq!(pending.status, "running");
+        let filter = |needs: Option<bool>| HistoryFilter {
+            case_path: Some(case.clone()),
+            group_projects: Some(false),
+            needs_reconciliation: needs,
+            limit: Some(50),
+            ..Default::default()
+        };
+        let page = ledger.query(&filter(Some(true)).into()).unwrap();
+        assert_eq!(page.total, 1, "只有未结束的运行需要核对");
+        assert_eq!(page.items[0].latest.operation_id, pending.operation_id);
+        let page = ledger.query(&filter(Some(false)).into()).unwrap();
+        assert_eq!(page.total, 1, "已结束的运行不该出现在待核对筛选里");
+        assert_eq!(page.items[0].latest.operation_id, finished.operation_id);
+        let all = ledger.query(&filter(None).into()).unwrap();
+        assert_eq!(all.total, 2, "不给该字段时两条都列出（旧行为不变）");
+        // IPC 契约：前端按 camelCase 发 needsReconciliation；反序列化后必须落到 Query 的派生筛选上。
+        let parsed: HistoryFilter = serde_json::from_value(serde_json::json!({
+            "casePath": case.clone(),
+            "groupProjects": false,
+            "needsReconciliation": true,
+        }))
+        .unwrap();
+        let page = ledger.query(&parsed.into()).unwrap();
+        assert_eq!(page.total, 1, "camelCase needsReconciliation 要被转发");
+        assert_eq!(page.items[0].latest.operation_id, pending.operation_id);
+        drop(ledger);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
     fn command_run_identity_survives_started_and_terminal_records() {
         for (action, status) in [("run", "cancelled"), ("remote-run", "succeeded")] {
             let args = vec![action.to_string(), "/case/station".to_string()];
@@ -1236,6 +1308,15 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn audit_exports_are_never_folded_by_project_or_run() {
+        let query = export_query(Some(HistoryFilter::default()));
+        assert!(!query.group_projects);
+        // 全局导出曾经按 run 折叠成一行并丢掉站点行（F-H-16）。
+        assert!(!query.group_runs);
+        assert!(!export_query(None).group_runs);
+    }
+
+    #[test]
     fn assistant_audit_records_only_mutations_and_public_outcomes() {
         assert!(assistant_ui_event("ui-1", "state", None).unwrap().is_none());
         assert!(assistant_ui_event("ui-1", "go", Some("resources"))
@@ -1260,6 +1341,7 @@ mod tests {
             "version-method-manual",
             "version-branch-code",
             "code-file-save",
+            "case-forcing-repair-save",
             "history-export-json",
             "study-write-version",
         ] {

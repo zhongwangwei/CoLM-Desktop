@@ -79,7 +79,10 @@ pub fn job_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<Strin
         script.push('\n');
     }
     // `set -e`：作业体里任何一步失败就停，退出码如实反映（否则最后一条命令的状态会把前面的失败盖住）。
-    script.push_str(&format!("(\nset -e\n{body}\n)\necho $? > exit_code\n"));
+    // The scheduler must see the body's result, not the successful receipt write.
+    script.push_str(&format!(
+        "(\nset -e\n{body}\n)\nCOLM_JOB_EXIT_CODE=$?\necho \"$COLM_JOB_EXIT_CODE\" > exit_code || exit 1\nexit \"$COLM_JOB_EXIT_CODE\"\n"
+    ));
     Ok(script)
 }
 

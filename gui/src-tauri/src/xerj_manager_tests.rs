@@ -1014,11 +1014,19 @@ fn an_exited_managed_node_is_not_reused_when_the_assistant_prepares_search() {
         version: None,
         pinned_match: None,
         data_dir: PathBuf::new(),
+        config_key: crate::xerj_manager::managed_config_key(&crate::xerj_manager::ManagedConfig {
+            binary_path: None,
+            data_dir: PathBuf::new(),
+            preferred_port: None,
+            extra_binary_dirs: Vec::new(),
+            ready_timeout: std::time::Duration::ZERO,
+        }),
         detail: None,
         key: "test-only".into(),
     });
+    let key = cached.as_ref().unwrap().config_key().to_string();
     assert_eq!(
-        crate::assistant::reuse_managed_endpoint(&mut cached).as_deref(),
+        crate::assistant::reuse_managed_endpoint(&mut cached, &key).as_deref(),
         Some("http://127.0.0.1:9200")
     );
     {
@@ -1027,9 +1035,34 @@ fn an_exited_managed_node_is_not_reused_when_the_assistant_prepares_search() {
         drop(child.stdin.take());
         child.wait().unwrap();
     }
-    assert_eq!(crate::assistant::reuse_managed_endpoint(&mut cached), None);
+    assert_eq!(
+        crate::assistant::reuse_managed_endpoint(&mut cached, &key),
+        None
+    );
     assert!(
         cached.is_none(),
         "preparing search can now start a replacement node"
     );
+}
+
+#[test]
+fn managed_config_fingerprint_covers_binary_port_and_data_dir() {
+    let base = super::ManagedConfig {
+        binary_path: None,
+        data_dir: std::path::PathBuf::from("/data/xerj"),
+        preferred_port: Some(9200),
+        extra_binary_dirs: Vec::new(),
+        ready_timeout: std::time::Duration::ZERO,
+    };
+    let key = super::managed_config_key(&base);
+    assert_eq!(key, super::managed_config_key(&base.clone()));
+    let mut changed = base.clone();
+    changed.preferred_port = Some(9300);
+    assert_ne!(key, super::managed_config_key(&changed));
+    let mut binary = base.clone();
+    binary.binary_path = Some("/opt/xerj".into());
+    assert_ne!(key, super::managed_config_key(&binary));
+    let mut dir = base.clone();
+    dir.data_dir = std::path::PathBuf::from("/data/other");
+    assert_ne!(key, super::managed_config_key(&dir));
 }

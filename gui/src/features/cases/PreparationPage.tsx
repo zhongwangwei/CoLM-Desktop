@@ -1,11 +1,29 @@
 import { useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
-import { useApp } from '../../lib/app-state';
+import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
-import { requiredNumber, preparedDestination, casePreparationOptions } from './case-model';
+import {
+  EMPTY_PREP_FORM,
+  type PrepDraft,
+  clearPrepDraft,
+  prepDraftHasInput,
+  readPrepDraft,
+  writePrepDraft,
+} from './preparation-draft';
+import {
+  requiredNumber,
+  preparedDestination,
+  casePreparationOptions,
+  preparationSiteModes,
+  prepDateValid,
+  prepDateKey,
+  preparedSiteDestination,
+  preparedSiteNameValid,
+  preparedDatasetDestinations,
+} from './case-model';
 interface Slot {
   index: number;
   meaning: string;
@@ -42,6 +60,7 @@ interface Probe {
     | {
         name: string;
         label: string;
+        units?: string;
         column?: string;
         qc_column?: string;
         requires_qc: boolean;
@@ -89,6 +108,15 @@ type PreparationResultSummary = {
   warnings: string[];
   /** SiteReport.readiness 的三档。 */
   readiness: 'self-contained' | 'needs-rawdata' | 'blocked' | null;
+  /** 站点字段来源计数（SiteReport.from_site/from_raster/from_default）；旧后端没有就不显示。 */
+  fromSite?: number;
+  fromRaster?: number;
+  fromDefault?: number;
+  /** 走 CoLM 查表的字段数（from_lookup）。 */
+  fromLookup?: number;
+  /** SiteReport.site_kind / mode（站点结果页显示，D-04 残留）。 */
+  siteKind?: string;
+  siteMode?: string;
   /** 输入检查里后端给出的槽位数（Probe.slots）。 */
   slots: number | null;
   /** 输入检查里后端给出的变量/列字段数。 */
@@ -177,6 +205,19 @@ function summarizePreparationResult(
       output: stringField(result, 'path'),
       needsExternal: Array.isArray(result.needs_external) ? result.needs_external.length : null,
       readiness,
+      ...(Array.isArray(result.from_site) ? { fromSite: result.from_site.length } : {}),
+      ...(Array.isArray(result.from_raster) ? { fromRaster: result.from_raster.length } : {}),
+      ...(Array.isArray(result.from_default) ? { fromDefault: result.from_default.length } : {}),
+      ...(Array.isArray(result.from_lookup) ? { fromLookup: result.from_lookup.length } : {}),
+      ...(stringField(result, 'site_kind') ? { siteKind: stringField(result, 'site_kind')! } : {}),
+      ...(stringField(result, 'mode') ? { siteMode: stringField(result, 'mode')! } : {}),
+      ...(Array.isArray(result.warnings)
+        ? {
+            warnings: result.warnings.filter(
+              (warning): warning is string => typeof warning === 'string',
+            ),
+          }
+        : {}),
     };
   }
   // 缺测报告（检查缺测与修复缺测同构）。
@@ -340,6 +381,17 @@ function PreparationResultView({
         ),
       );
   }
+  if (
+    summary.kind === 'site' &&
+    summary.fromSite !== undefined &&
+    summary.fromDefault !== undefined
+  )
+    steps.push(
+      t(
+        `字段来源：站点文件 ${summary.fromSite} 项、rawdata 栅格 ${summary.fromRaster ?? 0} 项、标称默认 ${summary.fromDefault} 项${summary.fromLookup ? `、CoLM 查表 ${summary.fromLookup} 项` : ''}。`,
+        `Field provenance: ${summary.fromSite} from the site file, ${summary.fromRaster ?? 0} from rawdata rasters, ${summary.fromDefault} nominal defaults${summary.fromLookup ? `, ${summary.fromLookup} from CoLM lookup` : ''}.`,
+      ),
+    );
   if (summary.kind === 'site' && summary.state === 'partial')
     steps.push(
       t(
@@ -350,8 +402,8 @@ function PreparationResultView({
   if (summary.kind === 'site' && summary.state === 'complete')
     steps.push(
       t(
-        '站点文件已生成，可点下方「用于新算例」带着它继续。',
-        'The site file is ready; use “Use for new case” below to continue with it.',
+        '站点文件已生成，可点下方「用于新算例」带着它继续。新建模拟扫描项目时按 PLUMBER2 的 `<站名>_site.nc` 或 Urban-PLUMBER 的 `<站名>_site_v1.nc` 识别站点文件；强迫场请用同一词干的 `<站名>_Met.nc` / `<站名>_metforcing_v1.nc` 放进 Forcing/，扫描时才能配对。',
+        'The site file is ready; use “Use for new case” below to continue with it. New-case scanning recognizes site files named `<site>_site.nc` (PLUMBER2) or `<site>_site_v1.nc` (Urban-PLUMBER); put forcing with the same stem (`<site>_Met.nc` / `<site>_metforcing_v1.nc`) under Forcing/ so the scan can pair them.',
       ),
     );
   if (summary.kind === 'forcing')
@@ -432,6 +484,12 @@ function PreparationResultView({
         </p>
       )}
       {readiness && <p>{readiness}</p>}
+      {(summary.siteKind || summary.siteMode) && (
+        <p>
+          {t('站点类型 / 生成模式：', 'Site kind / mode: ')}
+          {summary.siteKind ?? '—'} · {summary.siteMode ?? '—'}
+        </p>
+      )}
       {summary.sites !== null && (
         <p>{t(`拆分站点 ${summary.sites} 个`, `${summary.sites} site(s) split`)}</p>
       )}
@@ -470,32 +528,14 @@ function PreparationResultView({
 export default function PreparationPage() {
   const { state, notify, navigate, update, registerCloseGuard } = useApp();
   currentLang = state.language;
+  const initialDraft = useRef<PrepDraft | null | undefined>(undefined);
+  if (initialDraft.current === undefined) initialDraft.current = readPrepDraft();
+  const restoredDraft = initialDraft.current;
   const [imported, setImported] = useState<Imported[]>([]),
-    [mode, setMode] = useState('netcdf'),
+    [mode, setMode] = useState(initialDraft.current?.mode ?? 'netcdf'),
     [form, setForm] = useState<Record<string, string>>({
-      src: '',
-      dst: '',
-      lon: '',
-      lat: '',
-      landtype: '',
-      rawdata: '',
-      time_column: '',
-      site_column: '',
-      site_name: '',
-      latitude_column: '',
-      longitude_column: '',
-      landtype_column: '',
-      utc_offset_column: '',
-      utc_offset: '',
-      step_seconds: '',
-      era5: '',
-      short_gap: '3',
-      min_overlap: '48',
-      start: '',
-      end: '',
-      height_v: '',
-      height_t: '',
-      height_q: '',
+      ...EMPTY_PREP_FORM,
+      ...(initialDraft.current?.form ?? {}),
     }),
     [probe, setProbe] = useState<Probe | null>(null),
     [slots, setSlots] = useState<Slot[]>([]),
@@ -507,8 +547,33 @@ export default function PreparationPage() {
     [error, setError] = useState(''),
     [declined, setDeclined] = useState(''),
     // 这一页做出来、能直接给新算例用的文件：站点文件、转换或修补好的强迫场。
-    [produced, setProduced] = useState<{ site?: string; met?: string }>({});
+    [produced, setProduced] = useState<{ site?: string; met?: string }>({}),
+    // 安装到哪个数据集根（Sitedata/Forcing 的父目录）；记住上次选择（D-06 残留）。
+    [datasetRoot, setDatasetRoot] = useState(() => {
+      try {
+        return globalThis.localStorage?.getItem('colm-prep-dataset-root') ?? '';
+      } catch {
+        return '';
+      }
+    }),
+    [datasetScan, setDatasetScan] = useState<{
+      root: string;
+      count: number;
+      names: string[];
+    } | null>(null),
+    // 离页保护的两个来源：用户是否改过本页输入，以及这些输入是否已经被一次成功的
+    // "生成数据"消费掉。检查输入只把 result 写回、不算消费——否则改完 src 点一下检查，
+    // 还没生成产物离页保护就解除了（GUI 复核 D-05）。
+    // 恢复出来的输入仍算"未生成"：刷新后不能悄悄绕过离页保护（D-05）。
+    [edited, setEdited] = useState(!!restoredDraft && prepDraftHasInput(restoredDraft)),
+    [inputsConsumed, setInputsConsumed] = useState(false);
   const lock = useRef(false);
+  // 导航守卫的同步镜像：确认"丢弃并继续"后要立刻允许 navigate，不能等 React 重新渲染
+  // （setEdited/setInputsConsumed 是异步的，守卫闭包会读到上一轮的 dirty 状态，本次验收 P2）。
+  const dirtyNow = useRef(false);
+  function rememberForm(next: Record<string, string>) {
+    writePrepDraft({ mode, form: next });
+  }
   // 上次"检查"自动推出的输出路径。换了源文件就作废：原来选 A 检查后再换成 B，输出路径还是
   // A 的推荐名，B 的数据被写进 A 的文件（GUI 审查 2026-10-22，P1-1）。用户自己改过的路径不动。
   const autoDst = useRef('');
@@ -518,20 +583,99 @@ export default function PreparationPage() {
     ...(probe?.columns ?? []).map((v) => v.name),
   ];
   const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
+  // 准备页的源文件/映射/探测结果都只活在组件 state 里；一次成功的生成之前切页会全部丢失
+  // （GUI 审查 D-05）。生成出产物后允许离开：用户的目的已经达到，继续拦反而挡住“用于新算例”。
+  // **不能用 result 是否为空判断完成**：检查输入也会写 result（见 inputsConsumed 注释）。
+  const preparationDirty = edited && !inputsConsumed;
+  dirtyNow.current = preparationDirty;
+  useNavigationGuard(() =>
+    dirtyNow.current
+      ? t(
+          '数据准备页还有未生成的输入或映射。请先点「放弃未生成的输入」或完成一次生成，再切换页面。',
+          'This page still has input or mappings that have not been generated. Click “Discard unfinished inputs” or generate once before leaving.',
+        )
+      : null,
+  );
   const set = (k: string, v: string) => {
-    // 字段一改，上一次的成功结果就过时了：先清掉，别让旧的"成功"挂在页面上（U-05）。
-    if (form[k] !== v) setResult(null);
-    if (k === 'src' && v !== form.src) {
+    const changed = form[k] !== v;
+    if (changed) {
+      // 字段一改，上一次的成功结果就过时了：先清掉，别让旧的"成功"挂在页面上（U-05）。
+      setResult(null);
+      // 普通字段（纬度/输出路径/rawdata…）也会改变产物内容：旧产物不能再拿去建例（GUI 复核 D-12）。
+      setProduced({});
+      // 表格任务暂存列表只由"拆分/转换"输入决定；ERA5 辅助文件和缺测修复参数只影响逐站
+      // "修复并完成"那一步，输它们不能把已拆分列表清掉（否则逐站修复入口直接消失，
+      // GUI 审查 F-D-01 的回归就是这么来的）。
+      if (!['era5', 'short_gap', 'min_overlap'].includes(k)) setImported([]);
+      setDeclined('');
+      setEdited(true);
+      setInputsConsumed(false);
+    }
+    if (k === 'src' && changed) {
       setProbe(null);
       setSlots([]);
     }
-    setForm((f) =>
-      k !== 'src' || v === f.src
-        ? { ...f, [k]: v }
-        : { ...f, src: v, dst: f.dst === autoDst.current ? '' : f.dst },
-    );
+    setForm((f) => {
+      const next =
+        k !== 'src' || v === f.src
+          ? { ...f, [k]: v }
+          : { ...f, src: v, dst: f.dst === autoDst.current ? '' : f.dst };
+      rememberForm(next);
+      return next;
+    });
   };
-  const num = (k: string) => requiredNumber(form[k], k);
+  // 校验错误给用户看的字段名，不把内部 key（src/dst/lon…）泄漏到界面；经纬度和偏移在这里定范围（GUI 审查 D-09）。
+  const numericLabels: Record<string, string> = {
+    lon: t('经度', 'Longitude'),
+    lat: t('纬度', 'Latitude'),
+    landtype: t('地类编号', 'Land class'),
+    utc_offset: t('UTC 偏移（小时）', 'UTC offset (hours)'),
+    step_seconds: t('时间步长（秒）', 'Time step (seconds)'),
+    short_gap: t('短缺测最大步数', 'Max short-gap steps'),
+    min_overlap: t('最少重叠步数', 'Min overlap steps'),
+    height_v: t('风速观测高度（m）', 'Wind measurement height (m)'),
+    height_t: t('温度观测高度（m）', 'Temperature measurement height (m)'),
+    height_q: t('湿度观测高度（m）', 'Humidity measurement height (m)'),
+  };
+  const num = (k: string) => {
+    const label = numericLabels[k] ?? k;
+    const value = requiredNumber(form[k], label, t);
+    const range = (min: number, max: number) => {
+      if (value < min || value > max)
+        throw new Error(
+          t(
+            `${label}须在 ${min} 到 ${max} 之间（当前 ${value}）`,
+            `${label} must be between ${min} and ${max} (currently ${value})`,
+          ),
+        );
+    };
+    if (k === 'lon') range(-180, 180);
+    if (k === 'lat') range(-90, 90);
+    // CLI gapfill.rs 只接受 -12..14；前端不能放行 -14（D-09）。
+    if (k === 'utc_offset') range(-12, 14);
+    if (k === 'landtype' || k === 'step_seconds') {
+      if (!Number.isInteger(value))
+        throw new Error(
+          t(
+            `${label}必须是整数（当前 ${value}）`,
+            `${label} must be a whole number (currently ${value})`,
+          ),
+        );
+    }
+    if (k === 'step_seconds') range(1, 86_400);
+    if (k === 'height_v' || k === 'height_t' || k === 'height_q') range(0.01, 300);
+    if (k === 'short_gap' || k === 'min_overlap') {
+      if (!Number.isInteger(value))
+        throw new Error(
+          t(
+            `${label}必须是整数（当前 ${value}）`,
+            `${label} must be a whole number (currently ${value})`,
+          ),
+        );
+      range(0, 1_000_000);
+    }
+    return value;
+  };
   const optional = (k: string) => (form[k].trim() ? num(k) : null);
   async function work(fn: () => Promise<unknown>) {
     if (lock.current) return;
@@ -559,9 +703,14 @@ export default function PreparationPage() {
       // 自由标识符会让抽取出来的函数在测试上下文里 ReferenceError。
       // 用户按了"停止"也是决定：后端在进程被停止按钮或关窗终止时给出这句固定文字。
       const stopped = String(e).includes('已停止：数据准备被中断');
-      const declined =
-        stopped ||
-        (!!e && typeof e === 'object' && (e as { userDeclined?: boolean }).userDeclined === true);
+      const flagged =
+        !!e &&
+        typeof e === 'object' &&
+        ((e as { userDeclined?: boolean }).userDeclined === true ||
+          // 观测转换的覆盖取消抛的是 CancelledError（按 name 标记，不引入新的自由标识符/类：
+          // 本函数会被测试按源码抽取执行）；取消是决定，不该在其它页面挂红色错误。
+          (e as { name?: string }).name === 'CancelledError');
+      const declined = stopped || flagged;
       if (declined) {
         // 页面内也按提示显示，不是红色的 "Error: …"。
         setError('');
@@ -582,16 +731,33 @@ export default function PreparationPage() {
     }
   }
   function changeMode(v: string) {
+    if (v === mode) return;
     setMode(v);
-    if (v === 'table' || v === 'era5' || v === 'observation') setProduced({});
+    // 每个任务有自己的输入字段/输出语义：切换任务必须回到空表单，不能把上一任务的
+    // src/经纬度/列名等残留值当成"干净的新任务"（D-05 残留）。
+    setForm({ ...EMPTY_PREP_FORM });
+    clearPrepDraft();
+    autoDst.current = '';
+    dirtyNow.current = false;
+    setProduced({});
     setImported([]);
     setProbe(null);
     setSlots([]);
     setResult(null);
+    setEdited(false);
+    setInputsConsumed(true);
     setError('');
+    setDeclined('');
   }
   async function pick(k: string) {
     await work(async () => {
+      if (k === 'dst' && mode === 'site') {
+        // 站点输出是文件，但文件还不存在；让用户选目录，再按扫描器约定的
+        // `_site.nc` 后缀自动补全文件名（D-06 残留）。
+        const directory = await invoke<string | null>('pick_folder', { key: 'prep-dst' });
+        if (directory) set('dst', preparedSiteDestination(directory, form.dst));
+        return null;
+      }
       const path =
         k === 'rawdata' || (k === 'dst' && ['table', 'observation'].includes(mode))
           ? await invoke<string | null>('pick_folder', { key: `prep-${k}` })
@@ -631,7 +797,7 @@ export default function PreparationPage() {
       setForm((f) => {
         const keep = !!f.dst && f.dst !== autoDst.current;
         if (!keep) autoDst.current = suggested;
-        return {
+        const next = {
           ...f,
           dst: keep ? f.dst : suggested,
           ...Object.fromEntries(
@@ -645,6 +811,8 @@ export default function PreparationPage() {
             ].map((k) => [k, (p as unknown as Record<string, string>)[k] ?? f[k]]),
           ),
         };
+        rememberForm(next);
+        return next;
       });
       return p;
     });
@@ -704,8 +872,8 @@ export default function PreparationPage() {
       if (!String(error).includes('产物已存在，未覆盖')) throw error;
       const ok = await askConfirm(
         t(
-          `输出文件已经存在：${output}。覆盖会改掉引用它的算例所用的强迫场。要覆盖吗？`,
-          `The output file already exists: ${output}. Overwriting changes the forcing of any case that uses it. Overwrite?`,
+          `输出文件已经存在：${output}。覆盖会改掉引用它的算例所用的数据。要覆盖吗？`,
+          `The output file already exists: ${output}. Overwriting changes the data of any case that uses it. Overwrite?`,
         ),
         { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
       );
@@ -724,17 +892,69 @@ export default function PreparationPage() {
     const output = form.dst;
     const done = await work(async () => {
       if (!form.dst) throw new Error(t('请选择独立的输出路径', 'Destination path required'));
+      const flagLike = Object.entries({
+        src: form.src,
+        dst: form.dst,
+        rawdata: form.rawdata,
+        time_column: form.time_column,
+        site_column: form.site_column,
+        site_name: form.site_name,
+        latitude_column: form.latitude_column,
+        longitude_column: form.longitude_column,
+        landtype_column: form.landtype_column,
+        utc_offset_column: form.utc_offset_column,
+      }).find(([, value]) =>
+        String(value ?? '')
+          .trim()
+          .startsWith('--'),
+      );
+      if (flagLike) {
+        const name = numericLabels[flagLike[0]] ?? labels[flagLike[0]] ?? flagLike[0];
+        throw new Error(
+          t(
+            `${name}不能以 -- 开头（命令行会把它当成参数）。`,
+            `${name} must not start with -- (the command line would treat it as a flag).`,
+          ),
+        );
+      }
+      if (mode === 'site' && !preparedSiteNameValid(form.dst))
+        throw new Error(
+          t(
+            '站点输出文件名须以 `_site.nc` 或 `_site_v1.nc` 结尾，新建模拟扫描才能识别这个站点；可点「选择…」自动补全。',
+            'The site output file must end with `_site.nc` or `_site_v1.nc` so the new-case scan can find it; use “Choose…” to fill the name automatically.',
+          ),
+        );
       if (mode === 'site')
-        return invoke('make_site', {
-          out: form.dst,
-          lon: num('lon'),
-          lat: num('lat'),
-          landtype: optional('landtype'),
-          rawdata: form.rawdata || null,
-          mode: preparation.mode,
-          crop: preparation.crop,
-        });
-      if (mode === 'era5')
+        return confirmOverwrite((overwrite) =>
+          invoke('make_site', {
+            out: form.dst,
+            lon: num('lon'),
+            lat: num('lat'),
+            landtype: optional('landtype'),
+            rawdata: form.rawdata || null,
+            mode: form.site_mode || preparation.mode,
+            crop: preparation.crop,
+            overwrite,
+          }),
+        );
+      if (mode === 'era5') {
+        for (const [key, label] of [
+          ['start', t('开始日期', 'Start date')],
+          ['end', t('结束日期', 'End date')],
+        ] as const) {
+          const value = (form[key] ?? '').trim();
+          if (!prepDateValid(value))
+            throw new Error(
+              t(
+                `${label}须为有效日期（YYYY-MM-DD 或 YYYYMMDD，当前 ${value || '空'}）`,
+                `${label} must be a valid date (YYYY-MM-DD or YYYYMMDD, currently ${value || 'empty'})`,
+              ),
+            );
+        }
+        if (prepDateKey(form.start) > prepDateKey(form.end))
+          throw new Error(
+            t('开始日期不能晚于结束日期。', 'The start date must not be after the end date.'),
+          );
         return invoke('download_era5land', {
           dst: form.dst,
           latitude: num('lat'),
@@ -742,21 +962,49 @@ export default function PreparationPage() {
           start: form.start,
           end: form.end,
         });
+      }
       if (!probe)
         throw new Error(t('先检查输入并确认字段', 'Inspect input and confirm fields first'));
-      if (mode === 'observation')
-        return invoke('convert_observation_table', {
-          src: form.src,
-          dstDir: form.dst,
-          options: {
-            time_column: form.time_column,
-            site_column: form.site_column || null,
-            site_name: form.site_name || null,
-            variables: observationVariables
-              .filter((v) => v.column)
-              .map((v) => ({ name: v.name, column: v.column, qc_column: v.qc_column || null })),
-          },
-        });
+      if (mode === 'observation') {
+        const convert = (overwrite: boolean) =>
+          invoke('convert_observation_table', {
+            src: form.src,
+            dstDir: form.dst,
+            overwrite,
+            options: {
+              time_column: form.time_column,
+              site_column: form.site_column || null,
+              site_name: form.site_name || null,
+              variables: observationVariables
+                .filter((v) => v.column)
+                .map((v) => ({ name: v.name, column: v.column, qc_column: v.qc_column || null })),
+            },
+          });
+        try {
+          return await convert(false);
+        } catch (error) {
+          // 观测产物被覆盖会悄悄换掉引用它的算例的参考数据；先让用户明确确认再重试（D-03）。
+          if (!/输出文件已存在|Output already exists/.test(String(error))) throw error;
+          const ok = await askConfirm(
+            t(
+              '目标目录已有同名观测文件。覆盖会改掉引用它的算例所用的观测数据。要覆盖吗？',
+              'The destination already contains observation files with the same names. Overwriting changes the observations used by any case that references them. Overwrite?',
+            ),
+            { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
+          );
+          if (!ok)
+            throw Object.assign(
+              new Error(
+                t(
+                  '已取消：保留已有观测文件。',
+                  'Cancelled: the existing observation files were kept.',
+                ),
+              ),
+              { name: 'CancelledError' },
+            );
+          return await convert(true);
+        }
+      }
       const mapped = choices();
       if (mode === 'table') {
         const batch = await invoke<Imported[]>('convert_forcing_table', {
@@ -806,9 +1054,16 @@ export default function PreparationPage() {
       if (mode === 'site') setProduced((p) => ({ ...p, site: output }));
       if (mode === 'era5') {
         setProduced({});
-        setForm((old) => ({ ...old, era5: output }));
+        setForm((old) => {
+          const next = { ...old, era5: output };
+          rememberForm(next);
+          return next;
+        });
       }
       if (mode === 'netcdf' || mode === 'gaps') setProduced((p) => ({ ...p, met: output }));
+      // 输入已被这次成功消费：允许离页。表格拆分只写了暂存文件，还要逐站点「修复并完成」，
+      // 因此不算消费完（否则离页会丢掉待办列表）。
+      setInputsConsumed(mode !== 'table');
     }
     return done;
   }
@@ -827,8 +1082,105 @@ export default function PreparationPage() {
   }
   // 带着这一页做好的文件去新建模拟；原来什么都没做也能点，进去是空白向导（2026-10-22 用户实测）。
   const canUse = !['era5', 'observation'].includes(mode) && (!!produced.site || !!produced.met);
-  function useForNewCase() {
+  // 把产物安装到数据集根下的 Sitedata/Forcing，并立即重新扫描一次（D-06 残留：
+  // 以前产物要用户手工搬进这两个目录，转换完也不会刷新扫描）。
+  async function installToDataset() {
+    if (!produced.site && !produced.met) return;
+    let root = datasetRoot.trim();
+    if (!root) {
+      const picked = await invoke<string | null>('pick_folder', { key: 'prep-dataset' });
+      if (!picked) return;
+      root = picked;
+      setDatasetRoot(root);
+      try {
+        globalThis.localStorage?.setItem('colm-prep-dataset-root', root);
+      } catch {
+        /* 存储不可用：本次会话内继续用这个目录。 */
+      }
+    }
+    const final = preparedDatasetDestinations(produced, root);
+    const install = async (source: string, destination: string) => {
+      try {
+        await invoke('install_prepared_file', { source, destination });
+        return true;
+      } catch (error) {
+        if (!/目标文件已存在|destination already exists/.test(String(error))) throw error;
+        const ok = await askConfirm(
+          t(
+            `数据集目录里已有同名文件：${destination}。覆盖会改掉它；要覆盖吗？`,
+            `The dataset already has ${destination}. Overwriting replaces it; continue?`,
+          ),
+          { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
+        );
+        if (!ok) return false;
+        await invoke('install_prepared_file', { source, destination, overwrite: true });
+        return true;
+      }
+    };
+    let installed = 0;
+    if (produced.site && final.site && (await install(produced.site, final.site))) installed++;
+    if (produced.met && final.met && (await install(produced.met, final.met))) installed++;
+    if (!installed) return;
+    notify(
+      t(
+        `已安装 ${installed} 个前处理产物到 ${root} 的 Sitedata/Forcing。`,
+        `Installed ${installed} prepared file(s) into Sitedata/Forcing under ${root}.`,
+      ),
+    );
+    if (!final.stemsMatch)
+      notify(
+        t(
+          '站点与强迫场文件名词干不同，扫描时无法配对成同一站点；请改成相同的 <X>_site.nc / <X>_Met.nc 词干。',
+          'The site and forcing files use different stems, so the scan cannot pair them; use the same <X>_site.nc / <X>_Met.nc stem.',
+        ),
+        true,
+      );
+    try {
+      const scan = await invoke<{ sites: { name: string }[] }>('scan_sites', {
+        dir: `${root.replace(/[\\/]+$/, '')}/Sitedata`,
+        forcingDir: `${root.replace(/[\\/]+$/, '')}/Forcing`,
+        quick: true,
+      });
+      setDatasetScan({
+        root,
+        count: scan.sites.length,
+        names: scan.sites.map((site) => site.name).slice(0, 8),
+      });
+      notify(
+        t(
+          `已重新扫描：识别到 ${scan.sites.length} 个站点。`,
+          `Rescanned: ${scan.sites.length} site(s) recognized.`,
+        ),
+      );
+    } catch (error) {
+      notify(
+        t(
+          `产物已安装，但重新扫描失败：${String(error)}`,
+          `Files were installed, but the rescan failed: ${String(error)}`,
+        ),
+        true,
+      );
+    }
+  }
+  async function useForNewCase() {
     if (!canUse) return false;
+    // 表格批量还有站点没"修复并完成"：直接走会被导航守卫拦下，且 newCaseSeed 已经写进状态
+    // （GUI 审查 F-D-02）。先明确问，确认后丢弃未完成待办再放行；暂存文件仍留在磁盘上。
+    if (imported.length > 0) {
+      const ok = await askConfirm(
+        t(
+          `还有 ${imported.length} 个站点没有完成修复；现在离开会丢弃这些待办（已经拆分的暂存文件仍保留在磁盘）。要去新建模拟吗？`,
+          `${imported.length} site(s) are not finalized yet; leaving now discards these pending items (the split staging files stay on disk). Continue to the new simulation?`,
+        ),
+        { confirmLabel: t('丢弃并继续', 'Discard and continue') },
+      );
+      if (!ok) return false;
+      setImported([]);
+      setEdited(false);
+      setInputsConsumed(true);
+      // 同步放行：navigate 可能在同一 tick 内被调用，守卫必须看到"已确认丢弃"。
+      dirtyNow.current = false;
+    }
     update({
       newCaseSeed: {
         form: {
@@ -880,6 +1232,8 @@ export default function PreparationPage() {
         );
       setImported((items) => items.filter((x) => x.staged_path !== item.staged_path));
       setProduced({ met: item.final_path });
+      // 最后一站的最终强迫场也写好了，表格任务才算消费完；还有待办站时离页保护继续保留。
+      setInputsConsumed(imported.every((x) => x.staged_path === item.staged_path));
       return { path: item.final_path, ...report };
     });
   }
@@ -958,6 +1312,46 @@ export default function PreparationPage() {
       disabled: busy,
       set: changeMode,
     },
+    ...(mode === 'site'
+      ? [
+          {
+            id: 'prep-site-mode',
+            label: t('地表覆盖 / 植被方案', 'Land cover / vegetation scheme'),
+            value: (() => {
+              const allowed = preparationSiteModes(preparation.crop === true);
+              const current = form.site_mode || preparation.mode;
+              return allowed.includes(current) ? current : allowed[0];
+            })(),
+            type: 'choice' as const,
+            hint:
+              preparation.crop === true
+                ? t(
+                    '当前算例启用了 CROP：站点必须用 PFT/PC 结构生成；IGBP/USGS 会在建站审计时被拒绝。',
+                    'This case enables CROP: sites must use PFT/PC structures; IGBP/USGS are rejected by the site audit.',
+                  )
+                : undefined,
+            options: [
+              ['igbp', t('IGBP 自然植被（17 类）', 'IGBP natural vegetation (17 classes)')],
+              ['usgs', t('USGS 自然植被（24 类）', 'USGS natural vegetation (24 classes)')],
+              ['pft', t('PFT 植被功能型', 'PFT plant functional types')],
+              ['pc', t('PC 植物群落', 'PC plant communities')],
+              ['urban-igbp', t('城市 + IGBP', 'Urban + IGBP')],
+              ['urban-usgs', t('城市 + USGS', 'Urban + USGS')],
+              ['urban-pft', t('城市 + PFT', 'Urban + PFT')],
+              ['urban-pc', t('城市 + PC', 'Urban + PC')],
+            ]
+              .filter(([value]) =>
+                (preparationSiteModes(preparation.crop === true) as readonly string[]).includes(
+                  value!,
+                ),
+              )
+              .map(([value, label]) => ({ value: value!, label: label! })),
+            disabled: busy,
+            // set() 会一并清掉旧的 result/produced、标脏并解除"已消费"状态。
+            set: (value: string) => set('site_mode', value),
+          },
+        ]
+      : []),
     ...[...basic, ...(advanced ? extra : [])].map((k) => ({
       id: `prep-${k}`,
       label: labels[k],
@@ -969,6 +1363,8 @@ export default function PreparationPage() {
         if (k === 'src') {
           setProbe(null);
           setSlots([]);
+          setProduced({});
+          setDeclined('');
         }
       },
     })),
@@ -979,7 +1375,13 @@ export default function PreparationPage() {
         value: key === 'also_add' ? s.also_add.join(',') : String(s[key as 'name' | 'units'] ?? ''),
         type: 'text' as const,
         disabled: busy,
-        set: (v: string) =>
+        set: (v: string) => {
+          // 映射改了，上一次的"成功"与已产物都不再对应当前输入（GUI 审查 D-10/D-12）。
+          setResult(null);
+          setProduced({});
+          setDeclined('');
+          setEdited(true);
+          setInputsConsumed(false);
           setSlots((all) =>
             all.map((x, j) =>
               i !== j
@@ -991,18 +1393,24 @@ export default function PreparationPage() {
                     }
                   : { ...x, [key]: v, ...(key === 'name' ? { also_add: [] } : {}) },
             ),
-          ),
+          );
+        },
       })),
     ),
     ...(mode === 'observation'
       ? observationVariables.flatMap((v, i) =>
           ['column', 'qc_column'].map((key) => ({
             id: `prep-obs-${i}-${key}`,
-            label: `${v.label} ${key === 'column' ? t('数据列', 'Data column') : t('质控列', 'QC column')}`,
+            label: `${v.label}${v.units ? ` (${v.units})` : ''}${v.requires_qc ? t('，需要质控列', ' (QC required)') : ''} ${key === 'column' ? t('数据列', 'Data column') : t('质控列', 'QC column')}`,
             value: v[key as 'column' | 'qc_column'] ?? '',
             type: 'text' as const,
             disabled: busy,
-            set: (value: string) =>
+            set: (value: string) => {
+              setResult(null);
+              setProduced({});
+              setDeclined('');
+              setEdited(true);
+              setInputsConsumed(false);
               setProbe((p) =>
                 p
                   ? {
@@ -1012,7 +1420,8 @@ export default function PreparationPage() {
                       ),
                     }
                   : p,
-              ),
+              );
+            },
           })),
         )
       : []),
@@ -1044,7 +1453,7 @@ export default function PreparationPage() {
     actions: [],
   });
   const render = (f: UiField) => (
-    <Field key={f.id} label={f.label}>
+    <Field key={f.id} label={f.label} hint={f.hint}>
       {f.type === 'choice' ? (
         <Select disabled={busy} value={String(f.value)} onChange={(e) => f.set(e.target.value)}>
           {f.options?.map((o) => (
@@ -1057,7 +1466,7 @@ export default function PreparationPage() {
         <Input value={String(f.value)} disabled={busy} onChange={(e) => f.set(e.target.value)} />
       )}
       {(['prep-src', 'prep-rawdata'].includes(f.id) ||
-        (f.id === 'prep-dst' && ['table', 'observation'].includes(mode))) && (
+        (f.id === 'prep-dst' && ['table', 'observation', 'site'].includes(mode))) && (
         <ActionButton
           action={`prep-pick-${f.id.slice(5)}`}
           label={t(`选择 ${labels[f.id.slice(5)]}`, `Choose ${labels[f.id.slice(5)]}`)}
@@ -1091,10 +1500,48 @@ export default function PreparationPage() {
         </>
       )}
       {declined && <Notice>{declined}</Notice>}
+      {preparationDirty && (
+        <Notice tone="warning">
+          {t(
+            '本页还有未生成/未处理的输入；切页保护会拦住导航。',
+            'This page has inputs or mappings that have not been generated yet; leaving is blocked.',
+          )}{' '}
+          <ActionButton
+            action="prep-discard-unfinished"
+            label={t('放弃未生成的输入', 'Discard unfinished inputs')}
+            disabled={busy}
+            run={() => {
+              // "放弃未生成的输入"必须真的清空输入，不能只解除守卫（D-05 残留）。
+              setForm({ ...EMPTY_PREP_FORM });
+              clearPrepDraft();
+              autoDst.current = '';
+              setProbe(null);
+              setSlots([]);
+              setEdited(false);
+              setInputsConsumed(true);
+              dirtyNow.current = false;
+              setResult(null);
+              setProduced({});
+              setImported([]);
+              setDeclined('');
+              setError('');
+            }}
+          >
+            {t('放弃未生成的输入', 'Discard unfinished inputs')}
+          </ActionButton>
+        </Notice>
+      )}
       <Card>
         <div className="form-grid">
           {fields
-            .filter((f) => f.id === 'prep-mode' || basic.some((k) => f.id === `prep-${k}`))
+            .filter(
+              (f) =>
+                f.id === 'prep-mode' ||
+                // 制作站点的地表覆盖/植被方案选择在基础区直接可见，不能只存在于 page contract
+                // 里（GUI 复核 D-04）。
+                f.id === 'prep-site-mode' ||
+                basic.some((k) => f.id === `prep-${k}`),
+            )
             .map(render)}
         </div>
         {canInspect && (
@@ -1197,7 +1644,34 @@ export default function PreparationPage() {
           >
             {t('用于新算例', 'Use for new case')}
           </ActionButton>
+          <ActionButton
+            action="prep-install-dataset"
+            kind="commit"
+            label={t('安装到数据集目录并扫描…', 'Install into dataset and rescan…')}
+            disabled={busy || (!produced.site && !produced.met)}
+            title={
+              produced.site || produced.met
+                ? undefined
+                : t('先生成站点文件或强迫场', 'Generate a site file or forcing first')
+            }
+            run={() => installToDataset().catch((error) => notify(String(error), true))}
+          >
+            {t('安装到数据集目录并扫描…', 'Install into dataset and rescan…')}
+          </ActionButton>
         </div>
+        {datasetScan && (
+          <Notice tone={datasetScan.count > 0 ? 'success' : 'warning'}>
+            {datasetScan.count > 0
+              ? t(
+                  `已重新扫描 ${datasetScan.root}：识别到 ${datasetScan.count} 个站点（${datasetScan.names.join('、')}${datasetScan.count > datasetScan.names.length ? ' …' : ''}）。`,
+                  `Rescanned ${datasetScan.root}: ${datasetScan.count} site(s) recognized (${datasetScan.names.join(', ')}${datasetScan.count > datasetScan.names.length ? ' …' : ''}).`,
+                )
+              : t(
+                  `已重新扫描 ${datasetScan.root}，但没有识别到站点；请检查 Sitedata/Forcing 的布局与命名（PLUMBER2 或 Urban-PLUMBER）。`,
+                  `Rescanned ${datasetScan.root} but found no sites; check the Sitedata/Forcing layout and names (PLUMBER2 or Urban-PLUMBER).`,
+                )}
+          </Notice>
+        )}
       </Card>
       {imported.length > 0 && (
         <Card

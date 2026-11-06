@@ -268,31 +268,45 @@ pub fn automatic_answer(method: &str, params: &Value) -> Value {
     }
 }
 
-/// 把选择落到具体的模型与思考强度：没选模型用清单里的默认模型；没选强度、或所选强度那个模型不支持，
-/// 用那个模型的默认强度。清单为空（取不到）时原样交给 Codex。
+/// 把选择落到具体的模型与思考强度：没选模型用清单里的默认模型；没选强度用那个模型的默认强度。
+/// 用户明确选了强度、而该模型不支持时**明确拒绝**：静默换成默认值会让界面显示与实际执行的
+/// 思考强度不一致（旧行为把 `max` 悄悄跑成 `medium`）。清单为空（取不到）或模型不在清单里时
+/// 无法核对，原样交给 Codex。
 pub fn resolve_choice(
     models: &[Value],
     choice: &ExternalChoice,
-) -> (Option<String>, Option<String>) {
+) -> Result<(Option<String>, Option<String>)> {
     let choice = choice.cleaned();
     let entry = match &choice.model {
         Some(id) => models.iter().find(|m| m["id"] == id.as_str()),
         None => models.iter().find(|m| m["isDefault"] == true),
     };
     let Some(entry) = entry else {
-        return (choice.model, choice.effort);
+        return Ok((choice.model, choice.effort));
     };
-    let supported: Vec<&str> = entry["supportedReasoningEfforts"]
-        .as_array()
+    let id = entry["id"].as_str().unwrap_or_default();
+    // 区分“没有能力信息”（旧 Codex/未知模型：放行）与“明确支持零档”（空数组：拒绝），
+    // 否则支持零档的模型仍会被 Codex 静默忽略思考强度。
+    let supported_field = entry["supportedReasoningEfforts"].as_array();
+    let supported: Vec<&str> = supported_field
         .into_iter()
         .flatten()
         .filter_map(|e| e["reasoningEffort"].as_str())
         .collect();
-    let effort = choice
-        .effort
-        .filter(|e| supported.contains(&e.as_str()))
-        .or_else(|| entry["defaultReasoningEffort"].as_str().map(str::to_owned));
-    (entry["id"].as_str().map(str::to_owned), effort)
+    let effort = match &choice.effort {
+        None => entry["defaultReasoningEffort"].as_str().map(str::to_owned),
+        Some(requested) if supported.contains(&requested.as_str()) => Some(requested.clone()),
+        // 清单里没有强度信息时无法判断，原样交给 Codex（它自己会拒绝）。
+        Some(requested) if supported_field.is_none() => Some(requested.clone()),
+        Some(requested) if supported.is_empty() => bail!(
+            "Codex model {id:?} reports no supported reasoning efforts; cannot use {requested:?}. Clear the effort instead of falling back silently."
+        ),
+        Some(requested) => bail!(
+            "Codex model {id:?} does not support reasoning effort {requested:?}; supported efforts: {}. Select a supported effort instead of falling back silently.",
+            supported.join(", ")
+        ),
+    };
+    Ok((entry["id"].as_str().map(str::to_owned), effort))
 }
 
 /// 精简的模型清单给设置界面：id、显示名、说明、支持的思考强度、默认强度、是否默认模型。
@@ -571,7 +585,7 @@ impl ExternalSession for CodexSession {
             .thread_id
             .clone()
             .context("Codex did not open a thread")?;
-        let (model, effort) = resolve_choice(&self.models, &self.choice);
+        let (model, effort) = resolve_choice(&self.models, &self.choice)?;
         let server = self.server.as_mut().context("Codex is not running")?;
         let mut params =
             json!({ "threadId": thread_id, "input": [{ "type": "text", "text": text }] });

@@ -323,10 +323,19 @@ export const primaryDataFields = [
   'DEF_forcing_namelist',
   'DEF_dir_rawdata',
   'DEF_dir_runtime',
+  'USE_srfdata_from_larger_region',
   'DEF_dir_existing_srfdata',
   // 预热与模拟时段同属“数据与时段”这一步，不在输出步骤重复出现。
   'DEF_simulation_time%spinup_repeat',
 ];
+/// 只对空间算例生效、单点必须忽略的地表裁取选项。切回单点后旧值不能再写进 case.nml
+/// （GUI 审查 F-S-08：禁用控件但残留值仍会被创建流程带出去）。
+export const spatialSurfaceOnlyFields = [
+  'USE_srfdata_from_larger_region',
+  'DEF_dir_existing_srfdata',
+  'USE_srfdata_from_3D_gridded_data',
+] as const;
+
 export const primaryOutputFields = [
   'DEF_simulation_time%timestep',
   'DEF_simulation_time%greenwich',
@@ -545,10 +554,14 @@ export function newCaseProblem(
       );
     if (
       !form.timestep?.trim() ||
-      !Number.isFinite(Number(form.timestep)) ||
-      Number(form.timestep) <= 0
+      !Number.isInteger(Number(form.timestep)) ||
+      Number(form.timestep) < 1 ||
+      Number(form.timestep) > 3600
     )
-      return t('时间步长须为正数。', 'The time step must be positive.');
+      return t(
+        '时间步长须为 1–3600 的整数秒。',
+        'The time step must be an integer from 1 to 3600 seconds.',
+      );
     if (form.kind === 'site') {
       if (!form.site || !form.met)
         return t('请选择站点文件与强迫场文件。', 'Choose the site and forcing files.');
@@ -676,4 +689,27 @@ export function nodePlanText(plan: NodePlan | null, en = false): string {
   return en
     ? `Takes ${plan.nodes} node(s) with ${plan.perNode} cores each, ${plan.total} cores in all (${mode}).`
     : `将占用 ${plan.nodes} 个节点，每个节点 ${plan.perNode} 核，共 ${plan.total} 核（${mode}）。`;
+}
+
+export function surfacePreparation(values: Record<string, string>, en = false) {
+  const enabled = (key: string) => values[key]?.trim().toLowerCase();
+  if (enabled('USE_srfdata_from_3D_gridded_data') === '.true.')
+    return {
+      mode: en
+        ? '3D gridded surface data (check engine support)'
+        : '三维网格地表资料（请核对引擎支持）',
+    };
+  const crop = enabled('USE_srfdata_from_larger_region');
+  if (crop !== '.true.' && crop !== '.false.') return undefined;
+  return {
+    mode:
+      crop === '.true.'
+        ? en
+          ? 'Crop existing larger-region surface data'
+          : '从已有大区域地表资料裁取'
+        : en
+          ? 'Generate from raw surface data'
+          : '从原始地表资料生成',
+    source: values[crop === '.true.' ? 'DEF_dir_existing_srfdata' : 'DEF_dir_rawdata'],
+  };
 }

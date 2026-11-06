@@ -572,6 +572,11 @@ fn a_run_refuses_an_output_dir_that_can_escape_or_leaves_the_run_root() {
         "sim/..",
         // 对面一旦展开 ~ 就跑到运行目录外。
         "~/shared",
+        "%USERPROFILE%/out",
+        "nested/%COLM_OUTPUT%",
+        "$HOME/out",
+        "${HOME}/out",
+        "nested/$OUTPUT",
     ] {
         let error = RunSnapshot::create(&project, "cmp", &config_with_output_dir(raw), &[], None)
             .err()
@@ -938,4 +943,9 @@ fn list_runs_skips_bad_meta_and_degrades_old_records_without_losing_the_rest() {
     std::fs::create_dir_all(&old).unwrap();
     assert!(list_runs(&old, 20).is_empty());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn output_directory_keeps_literal_unpaired_percent() {
+    assert_eq!(normalize_output_dir("100%/out").unwrap(), "100%/out");
 }

@@ -33,7 +33,7 @@ use colm_bench::{
     PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 use colm_remote::job::{self, Spec};
-use colm_remote::sched::{self, Resources};
+use colm_remote::sched::{self, Resources, Scheduler};
 use colm_remote::ssh::{quote, Ssh};
 use serde::Deserialize;
 use serde_json::json;
@@ -198,6 +198,46 @@ for d in "$OB"/projects/*/; do
     lrep=$(printf '%s' "$lrep" | status_clean)
     lerr=$(printf '%s' "$lerr" | status_clean | cut -c 1-{limit})
     echo "project=$pname|$report|$rid|$csha|$fat|$lrid|$lstate|$lcsha|$lcat|$lfat|$lrep|$lerr"
+    # 历史运行（GUI 比较页的“历史运行”列表）：每条 run= 一行。不能按 glob 顺序先截断：
+    # 运行目录名是 `bench-run-<pid>-<nanos>`，字典序不等于创建时间，先截 200 再排序会漏掉
+    # 最新几次（本次验收 P3 回归）。这里先把候选写入临时文件，按 created_unix/created_at
+    # 降序排序后只取最近 20 条；Rust 端仍会再排序/截断一次，两边同一契约（F-C-02）。
+    # 字段顺序 project|run_id|state|config_sha|created_at|finished_at|report|error。
+    runs_tmp=$(mktemp "${{TMPDIR:-/tmp}}/colm-runs.XXXXXX") || {{
+      echo '无法读取运行历史：不能创建排序临时文件 / Cannot read run history: cannot create a sorting temporary file' >&2
+      exit 1
+    }}
+    for meta in "$pdir"/runs/*/meta.json; do
+      [ -f "$meta" ] || continue
+      run_dir=$(dirname "$meta")
+      hrid=$(sed -n 's/^ *"run_id": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      case "$hrid" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+      hstate=$(sed -n 's/^ *"state": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      case "$hstate" in running|succeeded|failed) ;; *) continue ;; esac
+      hcsha=$(sed -n 's/^ *"config_sha": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      hkey=$(sed -n 's/^ *"created_unix": *\([0-9][0-9]*\).*$/\1/p' "$meta" | head -n 1)
+      case "$hkey" in ''|*[!0-9]*) hkey=0 ;; esac
+      hcat=$(sed -n 's/^ *"created_at": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      hfat=$(sed -n 's/^ *"finished_at": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      hrel=
+      if [ "$hstate" = succeeded ]; then
+        rel=$(sed -n 's/^ *"report": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+        case "$rel" in ''|/*|*..*) rel= ;; esac
+        if [ -n "$rel" ] && [ -f "$run_dir/$rel" ]; then hrel="$run_dir/$rel"; fi
+      fi
+      herr=$(sed -n 's/^ *"error": *"\(.*\)".*$/\1/p' "$meta" | head -n 1)
+      hcsha=$(printf '%s' "$hcsha" | status_clean)
+      hcat=$(printf '%s' "$hcat" | status_clean)
+      hfat=$(printf '%s' "$hfat" | status_clean)
+      hrel=$(printf '%s' "$hrel" | status_clean)
+      herr=$(printf '%s' "$herr" | status_clean | cut -c 1-{limit})
+      printf '%s|%s|run=%s|%s|%s|%s|%s|%s|%s|%s\n' "$hkey" "$hcat" "$pname" "$hrid" "$hstate" "$hcsha" "$hcat" "$hfat" "$hrel" "$herr" >> "$runs_tmp"
+    done
+    if [ -s "$runs_tmp" ]; then
+      # 第 1、2 字段是排序键（created_unix 数字 + created_at ISO），第 3 字段起是原 run= 行。
+      sort -t'|' -k1,1nr -k2,2r "$runs_tmp" | head -n 20 | cut -d'|' -f3-
+    fi
+    rm -f "$runs_tmp"
     continue
   fi
   report=$(ls "$pdir"/output/*/reports/evaluation_report_standalone.html "$pdir"/output/*/reports/evaluation_report.html 2>/dev/null | head -n 1)
@@ -225,6 +265,8 @@ fn parse_status(root: &str, text: &str) -> serde_json::Value {
         "projects": [],
     });
     let mut projects = Vec::new();
+    let mut runs: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -235,6 +277,33 @@ fn parse_status(root: &str, text: &str) -> serde_json::Value {
                 out[field] = value.into();
             }
         };
+        // run= 行是某个项目的一条历史运行；先收集，最后挂到对应 project 上。
+        if key == "run" {
+            let mut fields = value.split('|');
+            let project = fields.next().unwrap_or_default();
+            let run_id = fields.next().unwrap_or_default();
+            let state = fields.next().unwrap_or_default();
+            let config_sha = fields.next().unwrap_or_default();
+            let created_at = fields.next().unwrap_or_default();
+            let finished_at = fields.next().unwrap_or_default();
+            let report = fields.next().unwrap_or_default();
+            let error = fields.next().unwrap_or_default();
+            if !project.is_empty()
+                && !run_id.is_empty()
+                && matches!(state, "running" | "succeeded" | "failed")
+            {
+                runs.entry(project.to_owned()).or_default().push(json!({
+                    "run_id": run_id,
+                    "state": state,
+                    "config_sha": (!config_sha.is_empty()).then_some(config_sha),
+                    "created_at": (!created_at.is_empty()).then_some(created_at),
+                    "finished_at": (!finished_at.is_empty()).then_some(finished_at),
+                    "report": (!report.is_empty()).then_some(report),
+                    "error": (!error.is_empty()).then_some(error),
+                }));
+            }
+            continue;
+        }
         match key {
             "uname" => {
                 out["platform"] = platform_from_uname(value).into();
@@ -296,6 +365,24 @@ fn parse_status(root: &str, text: &str) -> serde_json::Value {
                 projects.push(entry);
             }
             _ => {}
+        }
+    }
+    for project in &mut projects {
+        let Some(name) = project.get("name").and_then(|name| name.as_str()) else {
+            continue;
+        };
+        if let Some(found) = runs.remove(name) {
+            let mut found = found;
+            // 前端契约是"最近若干次运行（新→旧）"，与本地 `bench.rs` 的 20 条一致；
+            // 远程 glob 顺序不可靠，所以在这里排序并截断（F-C-02）。
+            found.sort_by(|a, b| {
+                b["created_at"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(a["created_at"].as_str().unwrap_or(""))
+            });
+            found.truncate(REMOTE_RUNS_LIMIT);
+            project["runs"] = found.into();
         }
     }
     out["projects"] = projects.into();
@@ -452,6 +539,10 @@ const LATEST_SUCCESS_FILE: &str = "latest-success.json";
 /// 失败原因写进 meta 的上限（字符）：作业日志可能很长，meta 只用来诊断。
 const RUN_ERROR_LIMIT: usize = 4_000;
 
+/// 远程历史运行返回给 GUI 的条数上限；与 `gui/src-tauri/src/bench.rs` 的本机
+/// `PROJECT_RUNS_LIMIT=20` 保持一致（F-C-02）。
+const REMOTE_RUNS_LIMIT: usize = 20;
+
 fn placeholder_path(project: &str) -> String {
     format!("{project}/{ACTIVE_JOB}")
 }
@@ -540,8 +631,24 @@ fn configured_bench_cores(config: &str) -> Result<Option<u32>> {
 }
 
 // 评估是单任务额度；auto 按已申请额度运行，不继承模拟的每 MPI 进程设置。
-fn bench_resources(opts: &Opts, config: &str) -> Result<(Resources, u32)> {
+fn bench_resources(opts: &Opts, config: &str, scheduler: Scheduler) -> Result<(Resources, u32)> {
     let configured = configured_bench_cores(config)?;
+    // Bare has no scheduler node placement; retain the actual worker quota and all other validation.
+    let bare_opts;
+    let opts = if scheduler == Scheduler::Bare {
+        bare_opts = Opts {
+            flags: opts
+                .flags
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "--cores-per-node" | "--walltime"))
+                .cloned()
+                .collect(),
+            positional: opts.positional.clone(),
+        };
+        &bare_opts
+    } else {
+        opts
+    };
     let resources = super::remote_cmd::resources_from(opts, configured.unwrap_or(4), 1, 1)?;
     ensure!(
         resources.cpus >= configured.unwrap_or(1),
@@ -560,6 +667,7 @@ fn project_scalar_from_config(config: &str, field: &str) -> Result<Option<String
     let mut seen_project = false;
     let mut project_child_indent: Option<usize> = None;
     let mut found: Option<Option<String>> = None;
+    let mut scalar_indent = None;
     for (index, raw) in config.lines().enumerate() {
         let line = strip_yaml_comment(raw.trim_end_matches('\r'));
         if line.trim().is_empty() {
@@ -567,6 +675,11 @@ fn project_scalar_from_config(config: &str, field: &str) -> Result<Option<String
         }
         let indent = line.len() - line.trim_start().len();
         let trimmed = line.trim();
+        if let Some(previous_indent) = scalar_indent.take() {
+            // Otherwise an indented value can silently become null/default, bypassing path/CPU checks.
+            ensure!(indent <= previous_indent,
+                "project.{field}: multiline YAML values are unsupported; write the value on the same line as its key");
+        }
         // 多文档 YAML 里 OpenBench 只读第一份，而我们会把每份的 project 都扫进来 —— 不猜。
         if trimmed == "---" || trimmed == "..." {
             bail!(
@@ -637,6 +750,7 @@ fn project_scalar_from_config(config: &str, field: &str) -> Result<Option<String
         if found.is_some() {
             bail!("project.{field} 只能写一次");
         }
+        scalar_indent = Some(indent);
         found = Some(
             yaml_scalar(value)
                 .with_context(|| format!("project.{field} 不合格（配置第 {} 行）", index + 1))?,
@@ -647,8 +761,20 @@ fn project_scalar_from_config(config: &str, field: &str) -> Result<Option<String
 
 fn normalize_output_dir(raw: &str) -> Result<String> {
     let text = raw.trim();
+    // Windows expands %VAR%; %% is an escaped percent and an unmatched % is literal.
+    let mut percent_parts = text.split('%').skip(1);
+    let mut percent_variable = false;
+    while let (Some(name), Some(_)) = (percent_parts.next(), percent_parts.next()) {
+        percent_variable |= !name.is_empty();
+    }
+
     ensure!(!text.is_empty(), "output_dir 不能是空路径");
     ensure!(!text.contains('\0'), "output_dir 不能含 NUL 字符");
+    // OpenBench expands environment variables before resolving the output path.
+    ensure!(
+        !text.contains('$') && !percent_variable,
+        "output_dir 不支持环境变量展开，请写运行目录内的普通相对路径"
+    );
     // `~` 一旦被对面的路径库展开就跑到运行目录外；这里只接受字面相对目录名。
     ensure!(
         !text.starts_with('~'),
@@ -1724,7 +1850,7 @@ pub(super) fn run(opts: &Opts) -> Result<()> {
     let config_sha = sha256_hex(request.config.as_bytes());
     let intent = submit_intent(&id, created_unix, &config_sha);
     let scheduler = super::remote_cmd::parse_scheduler(opts, &ssh, &base)?;
-    let (resources, cores) = bench_resources(opts, &request.config)?;
+    let (resources, cores) = bench_resources(opts, &request.config, scheduler)?;
     let body = run_body(&base, &root, &request, &id, created_unix, cores)?;
     let spec = Spec {
         scheduler,

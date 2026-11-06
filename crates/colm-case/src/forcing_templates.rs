@@ -103,6 +103,57 @@ pub fn forcing_datasets() -> impl Iterator<Item = &'static str> {
     FORCING_TEMPLATES.iter().map(|(name, _)| *name)
 }
 
+/// 从一个模板里读 `DEF_forcing%dataset` 的**实际标识**（模板名不一定等于标识：
+/// ERA5_LEddy 写 `ERA5`、MPI-ESM1-2-HR_ssp585 写 `CMIP6`、CRUJRA_local 写 `CRUJRA`）。
+fn template_dataset(template: &'static str) -> Option<&'static str> {
+    for line in template.lines() {
+        let code = line.split('!').next().unwrap_or_default();
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("DEF_forcing%dataset") {
+            continue;
+        }
+        let value = value.trim().trim_end_matches(',');
+        for quote in ['\'', '"'] {
+            if let Some(rest) = value.strip_prefix(quote) {
+                if let Some(end) = rest.find(quote) {
+                    let identifier = rest[..end].trim();
+                    return (!identifier.is_empty()).then_some(identifier);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 全部模板实际写入 `DEF_forcing%dataset` 的标识集合（去重、保持模板顺序）。
+/// 这是**引擎认识的 dataset 标识**，不是模板名；GUI 的允许值/保存校验用它，
+/// 否则会把 ERA5_LEddy 这类模板名当成合法标识，反而拒绝 CMFD/CMIP6（验收复核 P2）。
+pub fn forcing_dataset_identifiers() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (_, template) in FORCING_TEMPLATES {
+        let Some(identifier) = template_dataset(template) else {
+            continue;
+        };
+        if !out
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(identifier))
+        {
+            out.push(identifier);
+        }
+    }
+    out
+}
+
+/// 某个模板实际写入的 dataset 标识；模板名不存在时 `None`。
+pub fn template_dataset_identifier(template: &str) -> Option<&'static str> {
+    FORCING_TEMPLATES
+        .iter()
+        .find(|(name, _)| *name == template)
+        .and_then(|(_, text)| template_dataset(text))
+}
+
 /// 按数据集模板生成 forcing namelist：只替换第一处（非注释的）`DEF_dir_forcing` 赋值，目录补上结尾的 `/`。
 pub fn render_forcing_namelist(dataset: &str, forcing_dir: &str) -> Result<String> {
     let Some((_, template)) = FORCING_TEMPLATES.iter().find(|(name, _)| *name == dataset) else {

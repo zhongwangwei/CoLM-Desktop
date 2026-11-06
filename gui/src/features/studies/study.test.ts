@@ -122,11 +122,17 @@ describe('study contracts', () => {
         '2020-04-01T00:00',
       ),
     );
+    for (const [from, to] of [
+      ['2020-03-01T00:00', '2020-04-01T00:00'],
+      ['2019-12-01T00:00', '2020-01-01T00:00'],
+    ]) {
+      assert.throws(() => calibrationWindows('2020-01-01T00:00', '2020-03-01T00:00', from!, to!));
+    }
     assert.equal(
       calibrationWindows(
         '2020-01-01T00:00',
         '2020-03-01T00:00',
-        '2020-03-01T00:00',
+        '2020-03-01T00:01',
         '2020-04-01T00:00',
       ).to,
       1583020800,
@@ -322,7 +328,7 @@ it('prefilled windows drop a warm-up year without spin-up and hold out the last 
   });
   assert.deepEqual(suggestedWindows([site('2002-01-01', '2012-12-31')]), {
     from: '2003-01-01',
-    to: '2010-01-01',
+    to: '2009-12-31',
     validationFrom: '2010-01-01',
     validationTo: '2012-12-31',
     warmup: true,

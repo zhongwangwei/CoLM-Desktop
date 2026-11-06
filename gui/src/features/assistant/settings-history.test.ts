@@ -483,6 +483,48 @@ test('the settings panel renders both rows, separate times, progress and busy/er
   );
 });
 
+test('switching language clears stale local errors so the old language cannot linger', () => {
+  const languageEffect = effectsContaining('setStatus').find((effect) =>
+    effect.deps.includes('state.language'),
+  );
+  assert.ok(languageEffect, '有一个语言变化时清理本地字符串的 effect');
+  // 后端原文错误（historyError / endpointGuardError）只清 status 会留下旧语言，必须一起清（A-08）。
+  for (const marker of [
+    'setStatus',
+    'setHistoryError',
+    'setEndpointGuardError',
+    'setSyncFailures',
+    'setSyncOutcome',
+  ])
+    assert.ok(languageEffect!.body.includes(marker), `${marker} 也要清`);
+  const cleared: string[] = [];
+  const js = ts.transpileModule(`const run = ${languageEffect!.body};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const run = new Function(
+    'setStatus',
+    'setHistoryError',
+    'setEndpointGuardError',
+    'setSyncFailures',
+    'setSyncOutcome',
+    `${js}; return run;`,
+  )(
+    () => cleared.push('status'),
+    () => cleared.push('historyError'),
+    () => cleared.push('endpointGuardError'),
+    () => cleared.push('syncFailures'),
+    () => cleared.push('syncOutcome'),
+  ) as () => void;
+  run();
+  assert.deepEqual(cleared, [
+    'status',
+    'historyError',
+    'endpointGuardError',
+    'syncFailures',
+    'syncOutcome',
+  ]);
+});
+
 for (const failed of [['desktop'], ['desktop', 'colm_upstream']]) {
   test(`structured history errors report ${failed.length === 1 ? 'partial' : 'total'} failure`, async () => {
     const harness = historyHarness({

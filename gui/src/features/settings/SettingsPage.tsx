@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invokeJson } from '../../lib/ipc';
@@ -13,13 +13,19 @@ import { ActionButton } from '../../components/ActionButton';
 
 /** Check how much the old official revisions take, and tidy them on request. */
 function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
-  const { update } = useApp();
+  const { state, update } = useApp();
   const [report, setReport] = useState<PruneReport | null>(null);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
+  // 结果文案按当前语言在渲染时生成；错误原文切换语言后清掉，避免中英混排（F-A-06）。
+  const [message, setMessage] = useState<
+    { kind: 'tidied'; removed: number; bytes: number } | { kind: 'error'; text: string } | null
+  >(null);
+  useEffect(() => {
+    setMessage((current) => (current?.kind === 'error' ? null : current));
+  }, [state.language]);
   const run = async (dryRun: boolean) => {
     setBusy(true);
-    setMessage('');
+    setMessage(null);
     try {
       const result = await invokeJson<PruneReport>('model_prune', { dryRun });
       setReport(result);
@@ -37,15 +43,10 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
               : null,
           };
         });
-        setMessage(
-          t(
-            `已整理 ${result.removed.length} 个旧官方修订，释放 ${formatBytes(result.bytes)}`,
-            `Tidied ${result.removed.length} old official revisions, freeing ${formatBytes(result.bytes)}`,
-          ),
-        );
+        setMessage({ kind: 'tidied', removed: result.removed.length, bytes: result.bytes });
       }
     } catch (error) {
-      setMessage(String(error));
+      setMessage({ kind: 'error', text: String(error) });
     } finally {
       setBusy(false);
     }
@@ -72,7 +73,16 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
               )}
         </p>
       )}
-      {message && <p className="muted">{message}</p>}
+      {message && (
+        <p className="muted">
+          {message.kind === 'tidied'
+            ? t(
+                `已整理 ${message.removed} 个旧官方修订，释放 ${formatBytes(message.bytes)}`,
+                `Tidied ${message.removed} old official revisions, freeing ${formatBytes(message.bytes)}`,
+              )
+            : message.text}
+        </p>
+      )}
       <div className="actions">
         <ActionButton
           action="settings-cache-check"

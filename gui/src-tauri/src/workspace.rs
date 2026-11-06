@@ -31,6 +31,18 @@ fn args(command: &str, extra: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// 自由文本/相对路径会作为 `--flag <value>` 的值原样交给 `colm-cli`。值以 `--` 开头时
+/// CLI 的参数解析会把它当成下一个选项，报出「--note needs a value」这种看不出原因的错误
+/// （`colm-cli --note --example` 实测如此）。在 GUI 边界挡住并给双语错误；不改全局解析。
+fn reject_option_like(value: &str, field: &str, field_en: &str) -> Result<(), String> {
+    if value.trim_start().starts_with("--") {
+        return Err(format!(
+            "{field}不能以 -- 开头（会被命令行当成选项），请改写开头 / {field_en} must not start with -- (the command line would parse it as an option); rephrase it"
+        ));
+    }
+    Ok(())
+}
+
 fn create_args(name: &str, source: Option<&str>, rev: Option<&str>) -> Result<Vec<String>, String> {
     valid_name(name)?;
     let source = source.map(str::trim).filter(|s| !s.is_empty());
@@ -60,6 +72,7 @@ fn create_args(name: &str, source: Option<&str>, rev: Option<&str>) -> Result<Ve
 /// 一句目的：写进 `workspace.json` 与这个版本跑出的每个结果的出处。
 fn checked_note(note: &str) -> Result<&str, String> {
     let note = note.trim();
+    reject_option_like(note, "目的", "Purpose")?;
     if note.chars().count() > 500 || note.contains('\0') {
         return Err("目的最多 500 个字，不能含空字符".into());
     }
@@ -206,6 +219,7 @@ pub async fn workspace_import_patch(
         return Err("补丁文件要是绝对路径，扩展名 .patch 或 .diff".into());
     }
     let message = message.trim();
+    reject_option_like(message, "改动说明", "Change message")?;
     if message.is_empty() || message.contains('\0') || message.chars().count() > 200 {
         return Err("改动说明不能为空，最多 200 个字".into());
     }
@@ -301,6 +315,7 @@ fn open_with(app: &str, target: &std::path::Path) -> Result<(), String> {
 
 /// 工作区里的相对路径：与 `colm-workspace` 的补丁规则一致（拼进命令行前先在这一层挡住）。
 fn checked_path(path: &str) -> Result<(), String> {
+    reject_option_like(path, "文件路径", "File path")?;
     let lower = path.to_ascii_lowercase();
     if path.is_empty()
         || path.starts_with('/')
@@ -320,6 +335,7 @@ fn checked_path(path: &str) -> Result<(), String> {
 /// 改动说明：一行非空文字。
 fn checked_message(message: &str) -> Result<&str, String> {
     let message = message.trim();
+    reject_option_like(message, "改动说明", "Change message")?;
     if message.is_empty() || message.chars().count() > 200 || message.contains(['\n', '\r', '\0']) {
         return Err("改动说明须为一行非空文字，最多 200 字".into());
     }
@@ -339,6 +355,7 @@ fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String
     );
     if let Some(message) = message {
         let message = message.trim();
+        reject_option_like(message, "撤销说明", "Restore message")?;
         if message.is_empty() || message.len() > 200 || message.contains(['\n', '\r', '\0']) {
             return Err("撤销说明须为一行非空文字，最多 200 字节".into());
         }
@@ -654,10 +671,11 @@ fn remote_args(
     if !["submit", "list", "status", "cancel", "fetch", "knowledge"].contains(&operation) {
         return Err("不支持的远程工作区操作".into());
     }
-    let mut command = args(
-        "remote-workspace",
-        &["--operation", operation, "--name", name],
-    );
+    let mut command = args("remote-workspace", &["--operation", operation]);
+    // knowledge 只读 --request/--host；空 `--name` 属于"传了但没人读"的假参数（L-02 同族，F-L-05）。
+    if operation != "knowledge" {
+        command.extend(["--name".into(), name.into()]);
+    }
     if operation == "knowledge" {
         let request = request
             .filter(|v| v.is_object())
@@ -722,13 +740,13 @@ pub async fn workspace_remote(
             .find(|s| s.host == host)
             .cloned()
             .ok_or("没有配置这台服务器")?;
-        command.extend([
-            "--host".into(),
-            server.host.clone(),
-            "--remote-root".into(),
-            server.root.clone(),
-        ]);
-        command.extend(crate::remote::scheduler_args(&server));
+        command.extend(["--host".into(), server.host.clone()]);
+        // knowledge 分支只读 --request/--host/--name；--remote-root 与调度参数是 submit 才消费的，
+        // 继续传会让“传了但没人读”的假参数掩盖真实契约（GUI 审查 L-02）。
+        if operation != "knowledge" {
+            command.extend(["--remote-root".into(), server.root.clone()]);
+            command.extend(crate::remote::scheduler_args(&server));
+        }
         server
     } else {
         let records = cli_json(remote_args(&name, "list", None, None)?, None).await?;

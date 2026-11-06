@@ -47,6 +47,49 @@ fn switch_long_name(switch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A switch can enable several differently named outputs. One writable output is
+/// sufficient; otherwise an unknown gate must not be mistaken for a blocked one.
+fn switch_writability(
+    switch: &str,
+    vars: &[colm_hist::Var],
+    macros: &std::collections::BTreeSet<&str>,
+    truth: &impl Fn(&str) -> Option<bool>,
+) -> (Option<bool>, Option<String>) {
+    let mut blocked = None;
+    let mut unknown = None;
+    for var in vars.iter().filter(|var| {
+        var.switch
+            .is_some_and(|name| name.eq_ignore_ascii_case(switch))
+    }) {
+        if let Some(cond) = var.macros.iter().find(|cond| !cond.holds(macros)) {
+            blocked.get_or_insert_with(|| format!("本内核未编入：需要 {}", cond_text(cond)));
+            continue;
+        }
+        let Some(expr) = var.runtime else {
+            return (Some(true), None);
+        };
+        match colm_hist::eval_runtime_gate(expr, truth) {
+            Some(true) => return (Some(true), None),
+            Some(false) => {
+                blocked.get_or_insert_with(|| format!("需要 {expr}"));
+            }
+            None => {
+                unknown.get_or_insert_with(|| format!("条件 {expr} 需要人工判断"));
+            }
+        }
+    }
+    if let Some(reason) = unknown {
+        (None, Some(reason))
+    } else if let Some(reason) = blocked {
+        (Some(false), Some(reason))
+    } else {
+        (
+            None,
+            Some("闸门表里没有这一条，写不写得出来未知".to_string()),
+        )
+    }
+}
+
 #[tauri::command]
 pub fn hist_vars(
     text: String,
@@ -106,32 +149,8 @@ pub fn hist_vars(
             continue;
         };
         let on = truth(f.name);
-        let gate = colm_hist::generated::VARS.iter().find(|v| v.name == name);
-        let (writable, blocked_by) = match gate {
-            None => (
-                None,
-                Some("闸门表里没有这一条，写不写得出来未知".to_string()),
-            ),
-            Some(v) => {
-                if let Some(c) = v.macros.iter().find(|c| !c.holds(&macros)) {
-                    (
-                        Some(false),
-                        Some(format!("本内核未编入：需要 {}", cond_text(c))),
-                    )
-                } else {
-                    match v.runtime {
-                        None => (Some(true), None),
-                        Some(expr) => match colm_hist::eval_runtime_gate(expr, &gate_truth) {
-                            Some(true) => (Some(true), None),
-                            Some(false) => (Some(false), Some(format!("需要 {expr}"))),
-                            // 表达式不是我们认得的两种形状。**不猜** ——
-                            // 把原文给人看，比给一个可能反了的结论好。
-                            None => (None, Some(format!("条件 {expr} 需要人工判断"))),
-                        },
-                    }
-                }
-            }
-        };
+        let (writable, blocked_by) =
+            switch_writability(name, colm_hist::generated::VARS, &macros, &gate_truth);
         seen.insert(name.to_string());
         out.push(HistVar {
             name: name.to_string(),

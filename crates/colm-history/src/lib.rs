@@ -281,7 +281,8 @@ impl OperationView {
 pub struct History {
     connection: Connection,
 }
-const SCHEMA_VERSION: i64 = 1;
+// 2: needs_reconciliation 的 imported 终态列表补上 ui_*/paused/needs_review（与 remove_operation 一致）。
+const SCHEMA_VERSION: i64 = 2;
 
 impl History {
     pub fn open_default() -> Result<Self> {
@@ -363,7 +364,7 @@ impl History {
                 (SELECT count(*) FROM history_events s WHERE s.operation_id=e.operation_id) event_count,
                 CASE WHEN json_extract(e.payload,'$.phase')='finished' THEN 0
                     WHEN json_extract(e.payload,'$.phase')='imported' AND json_extract(e.payload,'$.status')
-                        IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted') THEN 0 ELSE 1 END needs_reconciliation
+                        IN ('succeeded','failed','completed','completed_with_failures','cancelled','interrupted','ui_succeeded','ui_failed','paused','needs_review') THEN 0 ELSE 1 END needs_reconciliation
                 FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);
             CREATE TABLE IF NOT EXISTS history_removed_operations (
                 operation_id TEXT PRIMARY KEY NOT NULL, removed_ms INTEGER NOT NULL);

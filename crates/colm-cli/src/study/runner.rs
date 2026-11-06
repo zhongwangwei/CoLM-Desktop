@@ -6840,7 +6840,7 @@ mod tests {
                     weight: 1.0,
                     from: 0,
                     to: 10,
-                    validation_from: Some(10),
+                    validation_from: Some(11),
                     validation_to: Some(20),
                     min_pairs: 2,
                     source: None,
@@ -10322,7 +10322,7 @@ esac
         );
 
         let mut configured = evidence_manifest(&root);
-        configured.spec.targets[0].validation_from = Some(10);
+        configured.spec.targets[0].validation_from = Some(11);
         configured.spec.targets[0].validation_to = Some(20);
         write_evidence_result(&configured, "m000000", &[("Qle", 0.8)], &[], &[]);
         write_evidence_result(

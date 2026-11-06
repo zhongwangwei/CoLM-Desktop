@@ -39,7 +39,9 @@ import {
   spatialThreads,
   SITE_THREADS,
   parallelBudgetPlan,
+  submittedParallelPlan,
 } from './run-model';
+import { submittedRanks } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
 // from whichever panel is showing, so the stop marks live here rather than in a component ref.
@@ -73,7 +75,7 @@ export default function RunPanel({
   } | null;
   disabled?: boolean;
   active?: boolean;
-  summary?: { name: string; period: string };
+  summary?: { name: string; period: string; surface?: { mode: string; source?: string } };
   onBack?: () => void;
   batchCases?: string[];
   onBusyChange?: (busy: boolean) => void;
@@ -88,6 +90,11 @@ export default function RunPanel({
     parallel?: 'auto' | 'manual';
     nodes?: string;
     coresPerNode?: string;
+    parallelBudgets?: Record<string, { nodes?: string; coresPerNode?: string }>;
+    stage?: string;
+    force?: boolean;
+    preprocessors?: string;
+    recordInputFingerprints?: boolean;
   };
   initialHost?: string;
   batchProfiles?: Record<string, CaseProfile>;
@@ -95,8 +102,10 @@ export default function RunPanel({
   const { state, notify, update, navigate, openCase } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
+  const savedCaseSettings = !batchCases ? state.caseRunSettings?.[casePath] : undefined;
   const settings =
     initialSettings ??
+    savedCaseSettings ??
     (state.projectRunSettings?.cases.includes(casePath) ? state.projectRunSettings : undefined);
   const hadSavedSettings = useRef(!!settings);
   const savedHost =
@@ -131,11 +140,11 @@ export default function RunPanel({
   const [host, setHost] = useState(initialHostValue),
     [servers, setServers] = useState<Server[]>([]),
     [kernel, setKernel] = useState(''),
-    [preprocessors, setPreprocessors] = useState('rust'),
+    [preprocessors, setPreprocessors] = useState(settings?.preprocessors || 'rust'),
     [engine, setEngine] = useState<string>(
       (batchCases ? effectiveProfile?.engine : state.selectedCase?.profile?.engine) || 'rust',
     ),
-    [stage, setStage] = useState(''),
+    [stage, setStage] = useState(settings?.stage ?? ''),
     [ranks, setRanks] = useState(settings?.ranks || '1'),
     [threads, setThreads] = useState(
       settings?.threads || String(singleSpatialCase ? spatialThreads(localCores) : SITE_THREADS),
@@ -154,17 +163,23 @@ export default function RunPanel({
     [parallelBudgets, setParallelBudgets] = useState<
       Record<string, { nodes?: string; coresPerNode?: string }>
     >(
-      settings && (settings.host ?? initialHostValue)
-        ? {
-            [settings.host ?? initialHostValue]: {
-              nodes: settings.nodes,
-              coresPerNode: settings.coresPerNode,
-            },
-          }
-        : {},
+      settings?.parallelBudgets
+        ? { ...settings.parallelBudgets }
+        : settings && (settings.host ?? initialHostValue)
+          ? {
+              [settings.host ?? initialHostValue]: {
+                nodes: settings.nodes,
+                coresPerNode: settings.coresPerNode,
+              },
+            }
+          : {},
     ),
-    [force, setForce] = useState(false),
-    [recordInputFingerprints, setRecordInputFingerprints] = useState(false),
+    [force, setForce] = useState(settings?.force === true),
+    [recordInputFingerprints, setRecordInputFingerprints] = useState(
+      settings?.recordInputFingerprints === true,
+    ),
+    // CoLM 会拒绝不认识的 namelist 成员；开跑前点名，而不是让运行在几十秒后才失败（GUI 审查 N-06）。
+    [unknownMembers, setUnknownMembers] = useState<string[]>([]),
     [remote, setRemote] = useState<unknown>(
       recoveringRun?.location === 'remote' && recoveringRun.status === 'unknown'
         ? (recoveringRun.progress?.remote ?? {
@@ -270,6 +285,12 @@ export default function RunPanel({
     (remote as { host?: string } | null)?.host ??
     persisted?.progress?.host;
   const remoteRun = host === remoteHost && persisted?.location === 'remote' && !!remote;
+  const submittedPlan = submittedParallelPlan(
+    persisted,
+    remote ?? persisted?.progress?.remote,
+    casePath,
+    host,
+  );
   const serverActivity = remoteRun ? remoteActivity(remote, en).text : '';
   const progressData = (
     remoteRun ? (remote as { progress?: unknown }).progress : persisted?.progress
@@ -358,12 +379,13 @@ export default function RunPanel({
       currentHost.current === host;
     setRecovering(true);
     setRemote(null);
-    let previousRun = latest.current[casePath];
+    const previousRun = latest.current[casePath];
     const known = previousRun?.progress?.remote;
     if (host && previousRun?.progress?.host === host && known) setRemote(known);
     // What each case's last run ended as is known from the ledger. A batch that finished is shown
     // finished, rather than as stations waiting to be re-checked on their server.
     let endedHere: LastRun | undefined;
+    let restoredHere: RunState | undefined;
     const restoreEnded = async () => {
       const dirs = batchCases ?? [casePath];
       const last = await invokeJson<Record<string, LastRun>>('project_last_runs', { dirs }).catch(
@@ -371,25 +393,32 @@ export default function RunPanel({
       );
       if (!valid()) return;
       endedHere = endedRun(last[casePath]) ? last[casePath] : undefined;
+      restoredHere = {
+        ...restoredRuns(last, latest.current),
+        ...openRuns(last, latest.current),
+      }[casePath];
       update((old) => {
         const added = { ...restoredRuns(last, old.running), ...openRuns(last, old.running) };
         return Object.keys(added).length ? { running: { ...old.running, ...added } } : {};
       });
     };
     restoreEnded()
-      .then(() => {
-        previousRun = latest.current[casePath];
-        return host && valid()
+      .then(() =>
+        host && valid()
           ? invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
-          : null;
-      })
+          : null,
+      )
       .then(async (rawRecord) => {
         if (!valid()) return;
         const previous = latest.current[casePath];
-        // A restored file must not replace a run started while the read was pending.
+        // React may commit this effect's ledger restoration while the receipt read is pending.
+        // Accept that identity or the original one, but never a genuinely new run/operation.
         if (
-          previous?.run_id !== previousRun?.run_id ||
-          previous?.operation_id !== previousRun?.operation_id
+          (previous?.run_id !== previousRun?.run_id ||
+            previous?.operation_id !== previousRun?.operation_id) &&
+          (!restoredHere ||
+            previous?.run_id !== restoredHere.run_id ||
+            previous?.operation_id !== restoredHere.operation_id)
         )
           return;
         if (rawRecord && rawRecord.host !== host) rawRecord = null;
@@ -618,15 +647,21 @@ export default function RunPanel({
             'Nodes and cores per node must be integers from 1 to 4096',
           ),
         );
-      if (autoParallel && parallelProblem) throw new Error(parallelProblem);
+      if (parallelProblem) throw new Error(parallelProblem);
       const nums = [
         // 本机 Rust 只能单进程；远程 Rust 由 srun/mpiexec 启动，rank 数交给启动器。
-        // 站点批量按节点打包（一个站点一个 CPU），每个算例仍是单进程。
-        plan
-          ? String(plan.ranks)
-          : engine === 'rust' && (!host || siteCasesOnly || siteBatch)
-            ? '1'
-            : ranks,
+        // 站点批量按节点打包（一个站点一个 CPU），每个算例仍是单进程——Fortran 也一样，
+        // 否则多 MPI rank 与 pack "1 站点 1 slot" 冲突（F-R-09）。
+        String(
+          submittedRanks({
+            planRanks: plan?.ranks,
+            siteBatch,
+            engine,
+            host,
+            siteCasesOnly,
+            manualRanks: ranks,
+          }),
+        ),
         // 本机单点固定 1 线程；从服务器切回本机时，线程框藏起来了，但里面可能还是服务器的值。
         plan
           ? String(plan.threads)
@@ -635,11 +670,18 @@ export default function RunPanel({
             : threads,
         siteBatch ? String(stationConcurrency) : workers,
       ].map(Number);
-      if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
+      if (
+        nums.some((n) => !Number.isSafeInteger(n) || n < 1) ||
+        // 4096 是手动输入的上界；自动计划的总 ranks 由"节点×每节点核数"算出，CLI 本就可以接受
+        // 更大的值（GUI 审查 F-R-02：96×48=4608 的合法计划不该被手动上界误拒）。
+        (!plan && nums[0] > 4096) ||
+        nums[1] > 256 ||
+        nums[2] > 4096
+      )
         throw new Error(
           t(
-            '进程与并发数须为正整数，线程数须为 1–256 的整数',
-            'Ranks and workers must be positive integers; threads must be between 1 and 256',
+            '进程与并发数须为 1–4096 的整数，线程数须为 1–256 的整数',
+            'Ranks and workers must be integers between 1 and 4096; threads between 1 and 256',
           ),
         );
       if (
@@ -1200,11 +1242,18 @@ export default function RunPanel({
         return { stop_requested: stopped, terminal: false };
       }
       const count = await invoke<number>('cancel_runs', { cases: targets });
+      // 准备阶段可能还没有可终止的进程（cancelledRun 已置位，准备链会在检查点自行停下）：
+      // 说“0 个进程”会让用户以为没停掉，实际已经请求停止（GUI 审查 R-07）。
       notify(
-        t(
-          `已向 ${count} 个进程发送停止请求；等待真实退出`,
-          `Stop requested for ${count} ${count === 1 ? 'process' : 'processes'}; waiting for exit`,
-        ),
+        count > 0
+          ? t(
+              `已向 ${count} 个进程发送停止请求；等待真实退出`,
+              `Stop requested for ${count} ${count === 1 ? 'process' : 'processes'}; waiting for exit`,
+            )
+          : t(
+              '已请求停止；准备/启动阶段尚无已登记的进程，运行会在检查点停下并等待真实退出。',
+              'Stop requested; no registered process exists during preparation/startup yet. The run stops at its next checkpoint and waits for a real exit.',
+            ),
       );
       return { stop_requested: count, terminal: false };
     } catch (e) {
@@ -1373,21 +1422,44 @@ export default function RunPanel({
   const parallelPlan = autoParallel
     ? parallelBudgetPlan(engine, Number(parallelNodes), Number(parallelCoresPerNode))
     : null;
+  const manualNodes = runServer?.nodes ?? 0;
+  // Rust 单点/站点批量实际提交的 ranks 恒为 1（见 `run()`），不能拿界面上残留的隐藏字段来拦。
+  const submittedRankCount = autoParallel
+    ? (parallelPlan?.ranks ?? Number.NaN)
+    : submittedRanks({
+        siteBatch,
+        engine,
+        host,
+        siteCasesOnly,
+        manualRanks: ranks,
+      });
   const parallelProblem =
-    autoParallel && !parallelPlan
+    !autoParallel &&
+    host &&
+    manualNodes > 1 &&
+    Number.isSafeInteger(submittedRankCount) &&
+    submittedRankCount > 1 &&
+    submittedRankCount % manualNodes !== 0
       ? t(
-          '节点数和每节点核数须为 1–4096 的整数',
-          'Nodes and cores per node must be integers from 1 to 4096',
+          `服务器按 ${manualNodes} 个节点提交，进程数须为节点数的整数倍（当前 ${submittedRankCount}）；请调整进程数或换服务器。`,
+          `The server submits ${manualNodes} nodes, so ranks must be a multiple of the node count (currently ${submittedRankCount}). Adjust ranks or choose another server.`,
         )
-      : autoParallel &&
-          parallelPlan &&
-          parallelPlan.nodes > 1 &&
-          ['bare', 'pbs'].includes(scheduler === 'auto' ? (runServer?.scheduler ?? '') : scheduler)
+      : autoParallel && !parallelPlan
         ? t(
-            '自动多节点配置目前需要 Slurm 或 LSF；请选择其中之一、改为一个节点或使用手动配置。',
-            'Automatic multi-node plans currently require Slurm or LSF. Select either scheduler, use one node, or choose manual configuration.',
+            '节点数和每节点核数须为 1–4096 的整数',
+            'Nodes and cores per node must be integers from 1 to 4096',
           )
-        : null;
+        : autoParallel &&
+            parallelPlan &&
+            parallelPlan.nodes > 1 &&
+            ['bare', 'pbs'].includes(
+              scheduler === 'auto' ? (runServer?.scheduler ?? '') : scheduler,
+            )
+          ? t(
+              '自动多节点配置目前需要 Slurm 或 LSF；请选择其中之一、改为一个节点或使用手动配置。',
+              'Automatic multi-node plans currently require Slurm or LSF. Select either scheduler, use one node, or choose manual configuration.',
+            )
+          : null;
   function setParallelBudget(key: 'nodes' | 'coresPerNode', value: string) {
     if (pending) return;
     setParallelBudgets((old) => ({ ...old, [host]: { ...old[host], [key]: value } }));
@@ -1406,8 +1478,16 @@ export default function RunPanel({
           ranks,
           threads,
           workers,
+          autoWorkers: autoWorkers.current !== null && workers === autoWorkers.current,
           scheduler,
           cpus,
+          stage,
+          force,
+          preprocessors,
+          recordInputFingerprints,
+          ...(canAutoParallel
+            ? { parallel: parallelMode, ...parallelBudgets[host], parallelBudgets }
+            : {}),
         },
       });
     onBack();
@@ -1444,11 +1524,7 @@ export default function RunPanel({
   }
 
   useEffect(() => {
-    if (!batchCases && !canAutoParallel) return;
-    const preferences = {
-      root: state.root,
-      cases: batchCases ?? [casePath],
-      batch: !!batchCases,
+    const shared = {
       host,
       ranks,
       threads,
@@ -1456,23 +1532,61 @@ export default function RunPanel({
       autoWorkers: autoWorkers.current !== null && workers === autoWorkers.current,
       scheduler,
       cpus,
-      ...(canAutoParallel ? { parallel: parallelMode, ...parallelBudgets[host] } : {}),
+      // 「下次提交设置/阶段」文案要求这些真的记住（GUI 审查 F-R-08）。
+      stage,
+      force,
+      preprocessors,
+      recordInputFingerprints,
+      ...(canAutoParallel
+        ? {
+            parallel: parallelMode,
+            ...parallelBudgets[host],
+            // 整张表都持久化：换回之前那台服务器时预算还在（GUI 审查 R-05）。
+            parallelBudgets,
+          }
+        : {}),
     };
-    if (JSON.stringify(state.projectRunSettings) === JSON.stringify(preferences)) return;
-    update((old) =>
-      old.root !== preferences.root ||
-      JSON.stringify(old.projectRunSettings) === JSON.stringify(preferences)
-        ? {}
-        : { projectRunSettings: preferences },
-    );
+    if (batchCases) {
+      // 批量页是项目级交接：只写 projectRunSettings（cases 就是选中的站点）。
+      const preferences = { root: state.root, cases: batchCases, batch: true, ...shared };
+      if (JSON.stringify(state.projectRunSettings) === JSON.stringify(preferences)) return;
+      update((old) =>
+        old.root !== preferences.root ||
+        JSON.stringify(old.projectRunSettings) === JSON.stringify(preferences)
+          ? {}
+          : { projectRunSettings: preferences },
+      );
+      return;
+    }
+    // 单算例页按算例目录记：不能占项目级槽位，否则会覆盖批量页/建例交接的资源设置，
+    // 多个本机空间算例也会互相覆盖 threads（复核 A-03）。
+    // 单点也要记住阶段、前处理器和指纹选项；没有并行项不能跳过通用提交设置。
+    // 判等必须用**合并后的最终对象**：已保存远程预算的算例切回本机时，shared 里没有
+    // parallel/parallelBudgets，而保存会保留旧字段；拿 shared 去比永远不相等，effect 每次
+    // 渲染都再写一次（本次验收 P2 回归）。比较合并结果后，第二次渲染就能收敛。
+    const existing = state.caseRunSettings?.[casePath];
+    const merged = { ...(existing ?? {}), ...shared };
+    if (JSON.stringify(existing) === JSON.stringify(merged)) return;
+    update((old) => ({
+      caseRunSettings: {
+        ...(old.caseRunSettings ?? {}),
+        [casePath]: { ...(old.caseRunSettings?.[casePath] ?? {}), ...shared },
+      },
+    }));
   }, [
     batchCases,
     casePath,
     canAutoParallel,
+    spatialCase,
     parallelMode,
     parallelBudgets,
+    stage,
+    force,
+    preprocessors,
+    recordInputFingerprints,
     state.root,
     state.projectRunSettings,
+    state.caseRunSettings,
     host,
     ranks,
     threads,
@@ -1481,6 +1595,24 @@ export default function RunPanel({
     cpus,
     update,
   ]);
+
+  // 开跑前读一次 case.nml，点名 CoLM 会拒绝的未知成员；读不到（服务器/损坏）就静默跳过，
+  // 不把"检查本身失败"误报成算例错误。
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const text = await invoke<string>('read_case_nml', { caseDir: casePath });
+        const members = await invoke<string[]>('unknown_fields', { text });
+        if (alive) setUnknownMembers(Array.isArray(members) ? members : []);
+      } catch {
+        if (alive) setUnknownMembers([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [casePath]);
 
   // 换了服务器就读一次它的负载；放在所有 hook 的最后，测试按顺序取前面的 effect。
   useEffect(() => {
@@ -1645,26 +1777,37 @@ export default function RunPanel({
             options: ['rust', 'fortran'].map((value) => ({ value, label: value })),
             set: setPreprocessors,
           },
-          {
-            id: 'run-stage',
-            label: bilingual('阶段', 'Stage'),
-            type: 'choice' as const,
-            value: stage,
-            options: [
-              { value: '', label: bilingual('全部', 'All') },
-              ...['mksrfdata', 'mkinidata', 'colm'].map((value) => ({ value, label: value })),
-            ],
-            set: setStage,
-          },
-          {
-            id: 'run-force',
-            label: bilingual('重新运行全部阶段', 'Force'),
-            value: String(force),
-            type: 'switch' as const,
-            set: (v: string) => setForce(v === 'true'),
-          },
         ]
       : []),
+    // 阶段与强制重跑对单算例和批量都生效（后端 run_batch 同样接收）：批量页不再只能全阶段。
+    {
+      id: 'run-stage',
+      label: persisted
+        ? t('下次提交阶段', 'Stages for next submission')
+        : t('本次提交阶段', 'Stages for this submission'),
+      type: 'choice' as const,
+      value: stage,
+      options: [
+        {
+          value: '',
+          label: t('全部（地表 → 初始化 → 主模拟）', 'All (surface → initialization → simulation)'),
+        },
+        {
+          value: 'mksrfdata',
+          label: t('地表准备 (mksrfdata)', 'Surface preparation (mksrfdata)'),
+        },
+        { value: 'mkinidata', label: t('初始化 (mkinidata)', 'Initialization (mkinidata)') },
+        { value: 'colm', label: t('主模拟 (colm)', 'Simulation (colm)') },
+      ],
+      set: setStage,
+    },
+    {
+      id: 'run-force',
+      label: bilingual('重新运行全部阶段', 'Force'),
+      value: String(force),
+      type: 'switch' as const,
+      set: (v: string) => setForce(v === 'true'),
+    },
   ].map((f) => ({ ...f, disabled: pending || ('disabled' in f && f.disabled === true) }));
   usePageContract(
     {
@@ -1771,6 +1914,21 @@ export default function RunPanel({
             <dt>{t('时段', 'Period')}</dt>
             <dd>{summary?.period ?? '—'}</dd>
           </div>
+          {summary?.surface && (
+            <div>
+              <dt>
+                {t('地表准备方式（当前算例设置）', 'Surface preparation (current case settings)')}
+              </dt>
+              <dd>
+                {summary.surface.mode}
+                {summary.surface.source && (
+                  <p>
+                    {t('来源目录', 'Source directory')}: {summary.surface.source}
+                  </p>
+                )}
+              </dd>
+            </div>
+          )}
           <div>
             <dt>{t('模型', 'Model')}</dt>
             <dd>
@@ -1815,6 +1973,28 @@ export default function RunPanel({
           )}
         />
       )}
+      {submittedPlan && (
+        <Notice tone="info">
+          <strong>{t('当前作业已提交资源', 'Current job: submitted resources')}</strong>
+          <p>
+            {t(
+              `${submittedPlan.nodes} 节点 × 每节点 ${submittedPlan.coresPerNode} 核；${submittedPlan.ranks} 个进程，每进程 ${submittedPlan.threads} 线程；共 ${submittedPlan.totalCpus} 核。`,
+              `${submittedPlan.nodes} nodes × ${submittedPlan.coresPerNode} cores per node; ${submittedPlan.ranks} processes × ${submittedPlan.threads} threads; ${submittedPlan.totalCpus} cores total.`,
+            )}
+          </p>
+        </Notice>
+      )}
+      <h3>
+        {persisted
+          ? t('下次提交设置', 'Next submission settings')
+          : t('本次提交设置', 'Submission settings')}
+      </h3>
+      <p className="muted">
+        {t(
+          '以下设置用于提交新作业，不会更改已提交作业的资源或阶段。当前实际阶段见运行进度。',
+          'These settings apply to a new submission and do not change an existing job. See run progress for its current stage.',
+        )}
+      </p>
       {/* 运行位置和提交方式放在同一行：两者一起决定作业交到哪、怎么交。 */}
       <div className="run-settings">
         {render({
@@ -1841,8 +2021,23 @@ export default function RunPanel({
           const field = fields.find((entry) => entry.id === id);
           return field ? [render(field)] : [];
         })}
+        {/* 批量页也要有阶段/强制重跑：它们此前只进页面契约，界面靠 `{!batchCases}` 的引擎区
+            渲染，批量时整段消失（GUI 审查 F-R-01）。单算例仍由下面的引擎区渲染，避免重复。 */}
+        {batchCases &&
+          ['run-stage', 'run-force'].flatMap((id) => {
+            const field = fields.find((entry) => entry.id === id);
+            return field ? [render(field)] : [];
+          })}
       </div>
       {parallelProblem && <Notice tone="warning">{parallelProblem}</Notice>}
+      {unknownMembers.length > 0 && (
+        <Notice tone="warning">
+          {t(
+            `case.nml 里这些成员 CoLM 不认识，开跑会失败：${unknownMembers.join('、')}。请在模型参数里删除或改回官方成员名。`,
+            `CoLM would reject these members in case.nml and the run would fail: ${unknownMembers.join(', ')}. Remove them or use official names.`,
+          )}
+        </Notice>
+      )}
       {parallelPlan && (
         <div role="status" aria-live="polite">
           <p>
@@ -1970,6 +2165,9 @@ export default function RunPanel({
               .filter(
                 (f) =>
                   ![
+                    'run-parallel',
+                    'run-nodes',
+                    'run-cores-per-node',
                     'run-ranks',
                     'run-threads',
                     'run-workers',

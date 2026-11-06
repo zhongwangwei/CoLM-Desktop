@@ -307,6 +307,23 @@ pub fn remote_case_delete(app: tauri::AppHandle, id: String) -> Result<(), Strin
     write_server_cases(&path, &file)
 }
 
+/// 与 `colm-remote::sched::parse_walltime` 同口径：`HH:MM`、`HH:MM:SS`、`D-HH:MM`、`D-HH:MM:SS`，
+/// 且总时长大于 0。GUI 保存设置时就必须按 CLI 的语义拒绝，而不是等远程提交才报英文错（F-C-03）。
+fn walltime_seconds(text: &str) -> Option<u64> {
+    let (days, rest) = match text.split_once('-') {
+        Some((days, rest)) => (days.parse::<u64>().ok()?, rest),
+        None => (0, text),
+    };
+    let numbers: Option<Vec<u64>> = rest.split(':').map(|part| part.parse().ok()).collect();
+    let seconds = match numbers?.as_slice() {
+        [hours, minutes] => hours * 3600 + minutes * 60,
+        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+    let total = days * 86_400 + seconds;
+    (total > 0).then_some(total)
+}
+
 pub(crate) fn validate_connection(server: &Server) -> Result<(), String> {
     let host = server.host.trim();
     if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
@@ -369,14 +386,9 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
             }
         }
         let wall = server.walltime.trim();
-        if !wall.is_empty()
-            && (wall.starts_with('-')
-                || !wall
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == ':' || c == '-'))
-        {
+        if !wall.is_empty() && walltime_seconds(wall).is_none() {
             return Err(format!(
-                "{host} 的时限要写成 HH:MM:SS 或 D-HH:MM:SS：{wall:?}"
+                "{host} 的时限要写成 HH:MM、HH:MM:SS、D-HH:MM 或 D-HH:MM:SS 且大于 0 / the walltime must look like HH:MM, HH:MM:SS, D-HH:MM or D-HH:MM:SS and be greater than zero: {wall:?}"
             ));
         }
         let vars = server.fetch_vars.trim();
@@ -2051,6 +2063,8 @@ pub fn remote_job_record(case: String) -> Result<Option<Value>, String> {
     Ok(Some(
         json!({"host":host,"job":job,"pending":pending,"needs_reconciliation":pending,
         "source_case":run_source(&case)?,"run_case":record.get("run_case").cloned().unwrap_or(json!(target)),
+        // 重开运行页时"当前作业已提交资源"要能从记录里读回 parallel_plan（GUI 审查 F-R-05）。
+        "provenance": record.get("provenance").cloned().unwrap_or(Value::Null),
         "operation_id":record["provenance"]["operation_id"]}),
     ))
 }

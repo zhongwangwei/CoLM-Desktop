@@ -17,6 +17,7 @@ fn configured_bench_cores_reach_openbench_without_changing_frozen_yaml() {
             positional: Vec::new(),
         },
         config,
+        Scheduler::Slurm,
     )
     .unwrap();
     let body = super::run_body(
@@ -51,18 +52,28 @@ fn comparison_resources_follow_config_and_bound_auto_workers() {
         positional: Vec::new(),
     };
     let config = "project:\n  num_cores: 8\n";
-    let (resources, cores) = bench_resources(&options(None), config).unwrap();
+    let (resources, cores) = bench_resources(&options(None), config, Scheduler::Slurm).unwrap();
     assert_eq!((resources.cpus, resources.ranks, cores), (8, 1, 8));
-    assert!(bench_resources(&options(Some("1")), config).is_err());
-    assert_eq!(bench_resources(&options(Some("16")), config).unwrap().1, 8);
+    assert!(bench_resources(&options(Some("1")), config, Scheduler::Slurm).is_err());
+    assert_eq!(
+        bench_resources(&options(Some("16")), config, Scheduler::Slurm)
+            .unwrap()
+            .1,
+        8
+    );
     for config in [
         "project:\n  num_cores: 0\n",
         "project:\n  num_cores: null\n",
         "project:\n  name: cmp\n",
     ] {
-        let (resources, cores) = bench_resources(&options(None), config).unwrap();
+        let (resources, cores) = bench_resources(&options(None), config, Scheduler::Slurm).unwrap();
         assert_eq!((resources.cpus, cores), (4, 4));
-        assert_eq!(bench_resources(&options(Some("16")), config).unwrap().1, 16);
+        assert_eq!(
+            bench_resources(&options(Some("16")), config, Scheduler::Slurm)
+                .unwrap()
+                .1,
+            16
+        );
     }
     for config in [
         "project: {num_cores: 8}",
@@ -71,7 +82,10 @@ fn comparison_resources_follow_config_and_bound_auto_workers() {
         "project:\n  num_cores: 8\n  num_cores: 4\n",
         "project:\n  nested:\n    num_cores: 8\n",
     ] {
-        assert!(bench_resources(&options(None), config).is_err(), "{config}");
+        assert!(
+            bench_resources(&options(None), config, Scheduler::Slurm).is_err(),
+            "{config}"
+        );
     }
 }
 
@@ -88,10 +102,68 @@ fn comparison_resource_keys_cannot_hide_worker_counts() {
         "defaults: &defaults {project: {num_cores: 64}}\n<<: *defaults\n",
         "\"pro\\\nject\":\n  num_cores: 64\n",
     ] {
-        assert!(bench_resources(&opts, config).is_err(), "{config}");
+        assert!(
+            bench_resources(&opts, config, Scheduler::Slurm).is_err(),
+            "{config}"
+        );
     }
-    let (resources, cores) = bench_resources(&opts, "\u{feff}project:\n  num_cores: 8\n").unwrap();
+    let (resources, cores) = bench_resources(
+        &opts,
+        "\u{feff}project:\n  num_cores: 8\n",
+        Scheduler::Slurm,
+    )
+    .unwrap();
     assert_eq!((resources.cpus, cores), (8, 8));
+}
+
+#[test]
+fn project_scalars_cannot_hide_values_on_continuation_lines() {
+    for (field, value) in [("num_cores", "8"), ("output_dir", "/tmp/outside")] {
+        for head in ["", "null", "safe"] {
+            let config = format!("project:\n  {field}: {head}\n    # continuation\n    {value}\n");
+            assert!(
+                project_scalar_from_config(&config, field).is_err(),
+                "{config}"
+            );
+        }
+    }
+    assert_eq!(
+        configured_bench_cores("project:\n  num_cores:\n  output_dir: output\n").unwrap(),
+        None
+    );
+    assert_eq!(
+        output_dir_from_config("project:\n  output_dir:\n  num_cores: 8\n").unwrap(),
+        "output"
+    );
+}
+
+#[test]
+fn bare_comparison_keeps_cpu_budget_without_scheduler_node_limits() {
+    let mut opts = crate::Opts {
+        flags: vec![
+            ("--cores-per-node".into(), "8".into()),
+            ("--walltime".into(), "not-a-time".into()),
+        ],
+        positional: Vec::new(),
+    };
+    let config = "project:\n  num_cores: 16\n";
+    let (resources, cores) = bench_resources(&opts, config, Scheduler::Bare).unwrap();
+    assert_eq!(
+        (resources.cpus, resources.cores_per_node, cores),
+        (16, 0, 16)
+    );
+    for scheduler in [Scheduler::Slurm, Scheduler::Pbs, Scheduler::Lsf] {
+        assert!(bench_resources(&opts, config, scheduler).is_err());
+    }
+    opts.flags[0].1 = "32".into();
+    for scheduler in [Scheduler::Slurm, Scheduler::Pbs, Scheduler::Lsf] {
+        let error = bench_resources(&opts, config, scheduler).unwrap_err();
+        assert!(error.to_string().contains("walltime"));
+    }
+    opts.flags.push(("--cpus".into(), "8".into()));
+    assert!(bench_resources(&opts, config, Scheduler::Bare).is_err());
+    opts.flags.last_mut().unwrap().1 = "0".into();
+    assert!(bench_resources(&opts, config, Scheduler::Bare).is_err());
 }
 
 fn request(config: &str) -> RunRequest {
@@ -229,6 +301,11 @@ fn remote_output_dir_is_normalized_inside_the_run_directory() {
         ".",
         "sim/..",
         "~/shared",
+        "%USERPROFILE%/out",
+        "nested/%COLM_OUTPUT%",
+        "$HOME/out",
+        "${HOME}/out",
+        "nested/$OUTPUT",
     ] {
         let error =
             output_dir_from_config(&format!("project:\n  output_dir: {bad}\n")).unwrap_err();
@@ -1782,6 +1859,130 @@ fn write_run_meta(run_dir: &Path, meta: serde_json::Value) {
 
 #[cfg(unix)]
 #[test]
+fn the_status_script_keeps_history_columns_aligned_with_the_parser() {
+    // 脚本输出必须先经过 parse_status 验证列对齐：此前去掉排序键时漏了 created_at，
+    // 报告路径被解析成完成时间，历史里"查看报告"消失、错误原因错位（验收复核 P2）。
+    let base = temp_dir("status-history-columns");
+    let project = base.join("projects/cmp");
+    let report_rel = "output/demo/reports/evaluation_report_standalone.html";
+    let ok_run = project.join("runs/bench-run-ok");
+    std::fs::create_dir_all(ok_run.join("output/demo/reports")).unwrap();
+    std::fs::write(ok_run.join(report_rel), "<p>ok</p>").unwrap();
+    write_run_meta(
+        &ok_run,
+        json!({
+            "run_id": "bench-run-ok",
+            "state": "succeeded",
+            "config_sha": "sha-ok",
+            "created_at": iso8601_utc(1_700_000_100),
+            "created_unix": 1_700_000_100u64,
+            "finished_at": iso8601_utc(1_700_000_200),
+            "report": report_rel,
+        }),
+    );
+    let failed_run = project.join("runs/bench-run-fail");
+    write_run_meta(
+        &failed_run,
+        json!({
+            "run_id": "bench-run-fail",
+            "state": "failed",
+            "config_sha": "sha-fail",
+            "created_at": iso8601_utc(1_700_000_300),
+            "created_unix": 1_700_000_300u64,
+            "finished_at": iso8601_utc(1_700_000_400),
+            "error": "missing forcing file",
+        }),
+    );
+    let (success, text, error) = bash_script(&status_script(&base.to_string_lossy()));
+    assert!(success, "{error}");
+    let value = parse_status(&base.to_string_lossy(), &text);
+    let project_value = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["name"] == "cmp")
+        .unwrap();
+    let runs = project_value["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{project_value}");
+    // 按 created_at 降序：失败的在最前。
+    assert_eq!(runs[0]["run_id"], "bench-run-fail");
+    assert_eq!(runs[0]["created_at"], iso8601_utc(1_700_000_300));
+    assert_eq!(runs[0]["finished_at"], iso8601_utc(1_700_000_400));
+    assert_eq!(runs[0]["error"], "missing forcing file");
+    assert!(runs[0]["report"].is_null());
+    assert_eq!(runs[1]["run_id"], "bench-run-ok");
+    assert_eq!(runs[1]["created_at"], iso8601_utc(1_700_000_100));
+    assert_eq!(runs[1]["finished_at"], iso8601_utc(1_700_000_200));
+    let report = runs[1]["report"].as_str().expect("report path survives");
+    assert!(report.ends_with(report_rel), "{report}");
+    assert!(runs[1]["error"].is_null(), "{}", runs[1]);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_status_script_refuses_incomplete_history_when_mktemp_fails() {
+    let base = temp_dir("status-history-no-temp");
+    std::fs::create_dir_all(base.join("projects/cmp/runs")).unwrap();
+    let script = format!(
+        "mktemp() {{ return 1; }}\n{}",
+        status_script(&base.to_string_lossy())
+    );
+    let (success, text, error) = bash_script(&script);
+    assert!(
+        !success,
+        "cannot present incomplete history as successful: {text}"
+    );
+    assert!(error.contains("Cannot read run history"), "{error}");
+    assert!(!text.lines().any(|line| line.starts_with("run=")));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_status_script_selects_newest_runs_before_limiting() {
+    // 205 次运行：目录名字典序与创建时间同向时旧实现会先截 200 再排序，最新 5 次被漏掉。
+    // 状态脚本必须先按创建时间取最近 20 次再输出（本次验收 P3 回归，F-C-02 残留）。
+    let base = temp_dir("status-runs-order");
+    let project = base.join("projects/cmp");
+    std::fs::create_dir_all(&project).unwrap();
+    for index in 0..205u64 {
+        let run_id = format!("bench-run-{index:03}");
+        write_run_meta(
+            &project.join("runs").join(&run_id),
+            json!({
+                "run_id": run_id,
+                "state": "succeeded",
+                "config_sha": "sha",
+                "created_unix": 1_700_000_000u64 + index,
+                "created_at": iso8601_utc(1_700_000_000u64 + index),
+            }),
+        );
+    }
+    let (success, text, error) = bash_script(&status_script(&base.to_string_lossy()));
+    assert!(success, "{error}");
+    let runs: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("run="))
+        .collect();
+    assert_eq!(runs.len(), 20, "{text}");
+    assert!(
+        runs.iter().any(|line| line.contains("bench-run-204")),
+        "the newest run must survive the limit: {text}"
+    );
+    assert!(
+        runs.iter().any(|line| line.contains("bench-run-185")),
+        "the newest 20 are selected: {text}"
+    );
+    assert!(
+        !runs.iter().any(|line| line.contains("bench-run-000")),
+        "older runs are dropped after sorting: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
 fn the_status_script_reports_the_newest_run_and_its_failure_reason() {
     let base = temp_dir("status-latest-run");
     let projects = base.join("projects");
@@ -2636,4 +2837,54 @@ fn a_different_pid_namespace_cannot_prove_the_lock_owner_dead() {
     assert_eq!(out.trim(), "blocked");
     assert_eq!(read(&lock.join("owner")), owner);
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn output_directory_keeps_literal_unpaired_percent() {
+    assert_eq!(normalize_output_dir("100%/out").unwrap(), "100%/out");
+}
+
+#[test]
+fn status_parses_historical_runs_for_the_compare_page() {
+    let text = "\
+project=demo|/root/projects/demo/runs/r1/report.html
+run=demo|r1|succeeded|sha1|2026-01-01T00:00:00Z|2026-01-02T00:00:00Z|/root/projects/demo/runs/r1/report.html|
+run=demo|r2|failed|sha2|2026-01-03T00:00:00Z|2026-01-03T01:00:00Z||boom
+run=demo|bad|weird|||||
+project=other|/root/projects/other/output/x/reports/evaluation_report.html
+run=other|r9|running|sha9|2026-01-04T00:00:00Z|||
+";
+    let status = super::parse_status("/root", text);
+    let rows = status["projects"].as_array().unwrap();
+    let demo = rows.iter().find(|row| row["name"] == "demo").unwrap();
+    let runs = demo["runs"].as_array().unwrap();
+    // 乱序/坏 meta 行被忽略；历史运行按 created_at 升序。
+    assert_eq!(runs.len(), 2, "{demo}");
+    // 历史运行按 created_at 降序（与本机列表一致，F-C-02）。
+    assert_eq!(runs[0]["run_id"], "r2");
+    assert_eq!(runs[0]["state"], "failed");
+    assert_eq!(runs[0]["error"], "boom");
+    assert!(runs[0]["report"].is_null());
+    assert_eq!(runs[1]["run_id"], "r1");
+    assert_eq!(runs[1]["state"], "succeeded");
+    assert_eq!(runs[1]["config_sha"], "sha1");
+    let other = rows.iter().find(|row| row["name"] == "other").unwrap();
+    assert_eq!(other["runs"].as_array().unwrap()[0]["run_id"], "r9");
+}
+
+#[test]
+fn remote_history_runs_keep_only_the_newest_twenty() {
+    let mut text = String::new();
+    for index in 1..=25 {
+        text.push_str(&format!(
+            "project=demo|/root/projects/demo/output/x/reports/evaluation_report.html\nrun=demo|r{index:02}|succeeded|sha{index}|2026-01-{index:02}T00:00:00Z|||\n"
+        ));
+    }
+    let status = super::parse_status("/root", &text);
+    let runs = status["projects"].as_array().unwrap()[0]["runs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(runs.len(), 20);
+    assert_eq!(runs[0]["run_id"], "r25");
+    assert_eq!(runs[19]["run_id"], "r06");
 }

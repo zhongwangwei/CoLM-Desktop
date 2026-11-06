@@ -33,7 +33,8 @@ pub struct Series<'a> {
     pub qc: &'a [f64],
 }
 
-/// 已归一化秒时间轴上的半开评估窗口：`from <= t < to`。
+/// 已归一化秒时间轴上的闭评估窗口：`from <= t <= to`（结束时刻属于窗口，
+/// 与 Results 曲线/闭合诊断的闭区间口径一致，GUI 审查 H-04）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TimeWindow {
     pub from: f64,
@@ -42,7 +43,7 @@ pub struct TimeWindow {
 
 impl TimeWindow {
     fn contains(self, seconds: f64) -> bool {
-        seconds >= self.from && seconds < self.to
+        seconds >= self.from && seconds <= self.to
     }
 }
 
@@ -207,7 +208,7 @@ pub enum PairMode {
 pub struct PairOptions {
     /// 丢掉的模型记录条数（沿用现有语义：记录条数，不是秒数）。
     pub spinup: usize,
-    /// 归一化秒时间轴上的半开窗口 `[from, to)`。
+    /// 归一化秒时间轴上的闭窗口 `[from, to]`。
     pub window: Option<TimeWindow>,
     /// 日/月/年的最小有效覆盖率（0..=1）；子日尺度不使用。
     pub min_coverage: f64,
@@ -304,7 +305,8 @@ pub fn pair_intervals(
                 record.begin_seconds >= window.from - CONTAINMENT_EPSILON_SECONDS
                     && record.end_seconds <= window.to + CONTAINMENT_EPSILON_SECONDS
             } else {
-                record.label_seconds >= window.from && record.label_seconds < window.to
+                record.label_seconds >= window.from
+                    && record.label_seconds <= window.to + CONTAINMENT_EPSILON_SECONDS
             };
             if !inside {
                 continue;

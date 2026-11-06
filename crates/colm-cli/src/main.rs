@@ -7,7 +7,7 @@
 //! ```text
 //! colm-cli scan      --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
 //!                    [--out sites.json] [--quick 1]
-//! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>] [--crop 1]
+//! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>] [--crop 1] [--overwrite 1]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
 //! colm-cli site-classes <site.nc>                 # 站点文件带了哪几套地类分类（JSON）
@@ -114,7 +114,7 @@ usage:
   colm-cli scan    --dir <Sitedata 目录> [--forcing-dir <Forcing 目录>]
                    [--out sites.json] [--quick 1]
                    # 列出目录下的站点；--quick 跳过强迫场，只读站点文件
-  colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N] [--crop 1]
+  colm-cli site-new --out <site.nc> --lon <度> --lat <度> [--landtype N] [--crop 1] [--overwrite 1]
                    [--rawdata <dir>]
                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc] [--json 1]
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
@@ -272,8 +272,8 @@ usage:
                            # 探测可选验证数据，自动识别站点/时间/评估变量
   colm-cli observation-table-convert <obs.csv|txt|tsv> <Observation-dir>
                            --time-column COLUMN [--site-column COLUMN|--site-name NAME]
-                           [--variable VAR=column[:qc_column] ...] [--json 1]
-                           # 输出 <site>_Flux.nc；缺 QC 时有限值=0/缺失=1
+                           [--variable VAR=column[:qc_column] ...] [--json 1] [--overwrite 1]
+                           # 输出 <site>_Flux.nc；已有同名文件默认拒绝，--overwrite 1 才覆盖；缺 QC 时有限值=0/缺失=1
   colm-cli forcing-probe   <met.nc> [--json 1]
   colm-cli forcing-table-probe <forcing.csv|txt|tsv> [--json 1]
                            # 自动识别分隔符、站点/时间/经纬度列与变量候选
@@ -472,9 +472,17 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 .transpose()
                 .context("invalid energy summary end")?;
             let mut value = energy_summary::run(&case, from, to)?;
-            // 诊断窗口与序列的时刻同样是模型钟；这里补上与其它时间载荷一致的基准。
+            // 诊断窗口与序列的时刻用同一个真实基准；顶层和 window 都写，旧后端只给过顶层的
+            // model_history_clock 兜底（GUI 审查 H-14）。
             let (basis, source) = time_basis::resolve(&case)?;
-            value["time_basis"] = serde_json::to_value(time_basis::json(basis, source))?;
+            let basis_json = serde_json::to_value(time_basis::json(basis, source))?;
+            value["time_basis"] = basis_json.clone();
+            if let Some(window) = value
+                .get_mut("window")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                window.insert("time_basis".into(), basis_json);
+            }
             println!("{}", serde_json::to_string(&value)?);
         }
         "fingerprint-policy" => println!("{{\"forcing_content_policy\":\"excluded-v1\"}}"),
@@ -1053,11 +1061,15 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         }
         "observation-table-convert" => {
             let opts2 = observation_convert_options(opts)?;
-            let result = observation_table::convert(
-                &opts.positional_at(0, "an observation CSV/TXT file")?,
-                &opts.positional_at(1, "an Observation destination directory")?,
-                &opts2,
-            )?;
+            let overwrite = matches!(opts.get("--overwrite").as_deref(), Some("1"));
+            let src = opts.positional_at(0, "an observation CSV/TXT file")?;
+            let dst = opts.positional_at(1, "an Observation destination directory")?;
+            let result = if overwrite {
+                observation_table::convert_checked(&src, &dst, &opts2, true)?
+            } else {
+                // 默认调用保留原有函数，已有产物由 convert 内部的 false 分支拒绝。
+                observation_table::convert(&src, &dst, &opts2)?
+            };
             if opts.get("--json").is_some() {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -1183,6 +1195,16 @@ impl Opts {
         let (mut flags, mut positional) = (Vec::new(), Vec::new());
         let mut i = 0;
         while i < args.len() {
+            // 自由文本还支持 `--note=--example`：文本以 `--` 开头且后面还有参数时，这是无歧义写法。
+            if let Some((name, value)) = args[i]
+                .strip_prefix("--")
+                .and_then(|rest| rest.split_once('='))
+                .filter(|(name, _)| matches!(*name, "note" | "directive"))
+            {
+                flags.push((format!("--{name}"), value.to_owned()));
+                i += 1;
+                continue;
+            }
             if let Some(name) = args[i].strip_prefix("--") {
                 // `--offline` is a boolean history-sync switch. Accept both its bare
                 // form (as documented) and the older `--offline 1`; every other flag
@@ -1193,9 +1215,26 @@ impl Opts {
                     flags.push((format!("--{name}"), "1".to_owned()));
                     i += 1;
                 } else {
-                    let v = next
-                        .filter(|value| name == "directive" || !value.starts_with("--"))
-                        .with_context(|| format!("--{name} needs a value"))?;
+                    // 自由文本（提交说明、工作区目的等）可以合法地以 `--` 开头。directive 保留旧行为
+                    // （调度器指令常连写）；note 只在它是最后一个参数时接受空格形式，否则报错并建议
+                    // `--note=TEXT`——避免 `--note --rev main` 把 --rev 吞成说明（复核 C F1）。
+                    let v = match next {
+                        Some(value) if value.starts_with("--") && name == "note" => {
+                            (i + 2 == args.len()).then_some(value)
+                        }
+                        Some(value) if !value.starts_with("--") || name == "directive" => {
+                            Some(value)
+                        }
+                        _ => None,
+                    }
+                    .with_context(|| {
+                        if name == "note" {
+                            "--note needs a value (use --note=TEXT when the text begins with --)"
+                                .to_string()
+                        } else {
+                            format!("--{name} needs a value")
+                        }
+                    })?;
                     flags.push((format!("--{name}"), v.clone()));
                     i += 2;
                 }
@@ -1385,6 +1424,93 @@ fn ensure_cli_output_dir(case_nml: &Path, expected: &Path) -> Result<()> {
 
 // ------------------------------------------------------------- site-new
 
+// Build beside the destination so publication stays on one filesystem. The default
+// hard-link publication refuses a competing creator without truncating its file.
+fn publish_site_product<T>(
+    out: &Path,
+    overwrite: bool,
+    build: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    if !overwrite && out.symlink_metadata().is_ok() {
+        anyhow::bail!("产物已存在，未覆盖：{}", out.display());
+    }
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let staging = parent.join(format!(".site-new-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&staging)?;
+    let product = staging.join("site.nc");
+    let result = (|| {
+        let value = build(&product)?;
+        if overwrite {
+            std::fs::rename(&product, out)?;
+        } else {
+            install_site_output_no_clobber(&product, out)?;
+        }
+        Ok(value)
+    })();
+    let _ = std::fs::remove_dir_all(staging);
+    result
+}
+
+/// 禁止覆盖发布站点产物。硬链接不可用的文件系统（exFAT/FAT、部分 SMB/NFS）以前会让整个
+/// `site-new` 失败；这里回退到"独占发布锁 + 同目录 rename"，与 observation-table 的发布策略
+/// 同思路（GUI 审查 F-D-05）。锁只由创建者删除，崩溃留下的锁会一直挡路并给出人工删除提示，
+/// 宁可让用户确认一次，也不引入会覆盖产物的竞态。
+fn install_site_output_no_clobber(staged: &Path, out: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    match std::fs::hard_link(staged, out) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            anyhow::bail!("产物已存在，未覆盖：{}", out.display())
+        }
+        Err(_) => {}
+    }
+    install_site_output_with_lock(staged, out)
+}
+
+/// 硬链接不可用时的回退发布；单独成函数便于测试锁与已有文件语义。
+fn install_site_output_with_lock(staged: &Path, out: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    let name = out
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "site.nc".into());
+    let lock = out.with_file_name(format!(".{name}.publish.lock"));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => anyhow::bail!(
+            "目标文件正在被另一个建站任务写入：{}；若确认上次已异常退出，删除锁文件 {} 后重试 / another site creation is publishing {}; if it crashed, remove {} and retry",
+            out.display(),
+            lock.display(),
+            out.display(),
+            lock.display()
+        ),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("无法创建发布锁 {}", lock.display()));
+        }
+    }
+    let result = (|| {
+        if out.symlink_metadata().is_ok() {
+            anyhow::bail!("产物已存在，未覆盖：{}", out.display());
+        }
+        std::fs::rename(staged, out)
+            .with_context(|| format!("无法发布 {} 到 {}", staged.display(), out.display()))
+    })();
+    let _ = std::fs::remove_file(&lock);
+    result
+}
+
 /// `colm-cli site-new`：从站点身份与经纬度建立标准命名的 site.nc。
 ///
 /// 两步拼起来：[`colm_srfdata::site::skeleton_with_mode`] 写出只有经纬度
@@ -1404,37 +1530,42 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
     let mode = parse_site_mode(o.get("--mode").as_deref())?;
     let crop = o.get("--crop").is_some();
 
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
+    let (r, audit) = publish_site_product(
+        &out,
+        o.get("--overwrite").as_deref() == Some("1"),
+        |product| {
+            // skeleton 与 fill 之间的中间文件：用户不该知道它存在过。
+            let skel = product.with_extension(format!("site-new-input-{}.nc", std::process::id()));
+            let kind = if mode == colm_srfdata::site::SiteMode::Urban {
+                colm_srfdata::site::SiteKind::Urban
+            } else {
+                colm_srfdata::site::SiteKind::Natural
+            };
+            colm_srfdata::site::skeleton_with_mode(&skel, lon, lat, landtype, kind, mode, crop)?;
+            let generic = if mode == colm_srfdata::site::SiteMode::Urban {
+                product.with_extension(format!("site-new-{}.nc", std::process::id()))
+            } else {
+                product.to_path_buf()
+            };
+            let filled =
+                colm_srfdata::site::fill(&skel, &generic, rawdata.as_deref().map(Path::new), None);
+            let _ = std::fs::remove_file(&skel);
+            let mut r = filled?;
+            if mode == colm_srfdata::site::SiteMode::Urban {
+                let prepared = colm_srfdata::site::prepare_urban(&generic, product);
+                let _ = std::fs::remove_file(&generic);
+                let prepared = prepared?;
+                r.from_lookup.extend(prepared.soil_vars);
+                r.from_lookup.extend(prepared.extra_vars);
+                r.from_lookup.sort();
+                r.from_lookup.dedup();
+            }
+            let audit =
+                colm_srfdata::site::audit(product, mode, rawdata.as_deref().map(Path::new), crop)?;
 
-    // skeleton 与 fill 之间的中间文件：用户不该知道它存在过。
-    let skel = out.with_extension(format!("site-new-input-{}.nc", std::process::id()));
-    let kind = if mode == colm_srfdata::site::SiteMode::Urban {
-        colm_srfdata::site::SiteKind::Urban
-    } else {
-        colm_srfdata::site::SiteKind::Natural
-    };
-    colm_srfdata::site::skeleton_with_mode(&skel, lon, lat, landtype, kind, mode, crop)?;
-    let generic = if mode == colm_srfdata::site::SiteMode::Urban {
-        out.with_extension(format!("site-new-{}.nc", std::process::id()))
-    } else {
-        out.clone()
-    };
-    let filled = colm_srfdata::site::fill(&skel, &generic, rawdata.as_deref().map(Path::new), None);
-    let _ = std::fs::remove_file(&skel);
-    let mut r = filled?;
-    if mode == colm_srfdata::site::SiteMode::Urban {
-        let prepared = colm_srfdata::site::prepare_urban(&generic, &out);
-        let _ = std::fs::remove_file(&generic);
-        let prepared = prepared?;
-        r.from_lookup.extend(prepared.soil_vars);
-        r.from_lookup.extend(prepared.extra_vars);
-        r.from_lookup.sort();
-        r.from_lookup.dedup();
-    }
-    let audit = colm_srfdata::site::audit(&out, mode, rawdata.as_deref().map(Path::new), crop)?;
+            Ok((r, audit))
+        },
+    )?;
 
     // 人读输出仍单独说明 IGBP 冠层高度是否来自 CoLM 查表；完整运行缺项只由
     // `site::audit` 生成，不能在 CLI 再维护第二张会漂移的变量表。
@@ -1457,6 +1588,7 @@ fn cmd_site_new(o: &Opts) -> Result<PathBuf> {
             "from_raster": r.from_raster,
             "from_default": r.from_default,
             "from_lookup": r.from_lookup,
+            "warnings": r.warnings,
             // 这份 site.nc 还需要哪些外部数据 mksrfdata 才能跑完 ——
             // 见上面 `needs_external` 的注释。界面要把这个显示出来。
             "needs_external": audit.needs_external,
@@ -1612,6 +1744,10 @@ fn parse_new_mode(value: Option<&str>) -> Result<NewMode> {
 /// |---|---|---|---|
 /// | PLUMBER2 | `<X>_site.nc` | `<X>_Met.nc` | `<X>_Flux.nc` |
 /// | Urban-PLUMBER | `<X>_site_v1.nc` | `<X>_metforcing_v1.nc` | `<X>_clean_observations_v1.nc` |
+///
+/// 注意这些是**读取**约定：GUI/命令行的转换器（`observation-table-convert`）只产生
+/// PLUMBER2 布局的 `<X>_Flux.nc`（GUI 审查 F-D-06）；Urban 命名只用于识别已按该布局
+/// 准备好的数据，不会由本仓库的转换命令自动生成。
 const LAYOUTS: [(&str, &str, &str); 2] = [
     ("_site.nc", "_Met.nc", "_Flux.nc"),
     (
@@ -2674,6 +2810,21 @@ fn preflight_rust_preprocessor_ranks(case_nml: &Path, ranks: usize) -> Result<()
     Ok(())
 }
 
+fn rust_preprocessor_stage_ranks(case_nml: &Path, stage: Stage, ranks: usize) -> Result<usize> {
+    if stage != Stage::MkSrfData || ranks <= 1 || !colm_case::is_spatial_case(case_nml)? {
+        return Ok(ranks);
+    }
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let document = colm_namelist::parse(&text)?;
+    match document.get("USE_srfdata_from_larger_region") {
+        // Clipping publishes one shared topology; only raw-data generation supports sharding.
+        Some(colm_namelist::Value::Bool(true)) => Ok(1),
+        Some(colm_namelist::Value::Bool(false)) | None => Ok(ranks),
+        Some(other) => bail!("USE_srfdata_from_larger_region must be logical, got {other}"),
+    }
+}
+
 /// 在跑前两段**之前**确认 `colm-rs` 接得住这个算例。
 ///
 /// 不做的话，一个 Rust 跑不了的算例（打开了 SNICAR、PFT 内核、湖泊站点……）要等
@@ -3243,7 +3394,7 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
     };
     let owns_provenance = std::env::var_os("COLM_PROVENANCE_BY_PARENT").is_none();
     let materialized_run = case.join(colm_model::RUN_MANIFEST).is_file();
-    if materialized_run && owns_provenance {
+    if materialized_run && owns_provenance && runs_native_stage(engine, preprocessors, stage) {
         model_version::execution_path(&case)?;
     }
     let full_before = if owns_provenance && record_inputs {
@@ -3646,6 +3797,33 @@ fn cmd_run(
     )
 }
 
+fn runs_native_stage(
+    engine: ModelEngine,
+    preprocessors: PreprocessorMode,
+    stage: Option<Stage>,
+) -> bool {
+    match stage {
+        Some(Stage::Colm) => engine == ModelEngine::Fortran,
+        Some(Stage::MkSrfData | Stage::MkIniData) => preprocessors == PreprocessorMode::Fortran,
+        None => engine == ModelEngine::Fortran || preprocessors == PreprocessorMode::Fortran,
+    }
+}
+
+fn run_case_execution_path(
+    case: &Path,
+    engine: ModelEngine,
+    preprocessors: PreprocessorMode,
+    stage: Option<Stage>,
+) -> Result<PathBuf> {
+    if runs_native_stage(engine, preprocessors, stage) {
+        model_version::execution_path(case)
+    } else {
+        // Native aliases live in node-local /tmp. Rust MPI ranks must receive the
+        // actual shared case directory, without rewriting frozen namelist bytes.
+        Ok(colm_kernel::manifest::absolute(case)?)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_case(
     case: &Path,
@@ -3670,7 +3848,7 @@ fn run_case(
     // （见那里的注释），这一半当时漏了。
     // `absolute` 而不是 `canonicalize`：Windows 上后者返回 `\\?\C:\...`，
     // 而工作目录与 namelist 路径都要交给子进程 —— 那种形式两边都不认。
-    let case = &model_version::execution_path(case)
+    let case = &run_case_execution_path(case, engine, preprocessors, only_stage)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
     preflight_spinup_replay(case, engine, &std::env::current_exe()?)?;
     // 引擎与前处理都用 Rust 时三个 Fortran 二进制不会被执行，只要清单（宏与身份）：远程服务器上
@@ -3701,10 +3879,24 @@ fn run_case(
     }
     let layout = Layout::new(case);
     let runs_model = only_stage.is_none_or(|stage| stage == Stage::Colm);
+    let rust_surface_ranks = if preprocessors == PreprocessorMode::Rust
+        && only_stage.is_none_or(|stage| stage == Stage::MkSrfData)
+    {
+        rust_preprocessor_stage_ranks(&layout.case_nml(), Stage::MkSrfData, ranks)?
+    } else {
+        ranks
+    };
     if preprocessors == PreprocessorMode::Rust
         && only_stage.is_none_or(|stage| matches!(stage, Stage::MkSrfData | Stage::MkIniData))
     {
-        preflight_rust_preprocessor_ranks(&layout.case_nml(), ranks)?;
+        preflight_rust_preprocessor_ranks(
+            &layout.case_nml(),
+            if only_stage == Some(Stage::MkSrfData) {
+                rust_surface_ranks
+            } else {
+                ranks
+            },
+        )?;
     }
     // 混合模型只有 Rust 引擎支持；Fortran 引擎静默忽略它会给出纯物理的结果。
     if let (true, ModelEngine::Fortran, Some(path)) =
@@ -3726,7 +3918,9 @@ fn run_case(
     preflight_spatial_case(&layout.case_nml(), &kernel, only_stage)?;
     ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
-    validate_native_case_paths(case, &name)?;
+    if runs_native_stage(engine, preprocessors, only_stage) {
+        validate_native_case_paths(case, &name)?;
+    }
     let out = layout.out().join(&name);
     let lc_year = land_cover_year(&layout.case_nml())?;
     let spatial = colm_case::is_spatial_case(&layout.case_nml())?;
@@ -3812,6 +4006,11 @@ fn run_case(
             continue;
         }
         let sname = stage.program();
+        let stage_ranks = if preprocessors == PreprocessorMode::Rust && *stage == Stage::MkSrfData {
+            rust_surface_ranks
+        } else {
+            ranks
+        };
         let rust_arguments = match stage {
             Stage::MkSrfData => rust_mksrfdata_arguments.as_deref(),
             Stage::MkIniData => rust_mkinidata_arguments.as_deref(),
@@ -3945,10 +4144,13 @@ fn run_case(
             let executable = rust_preprocessor_executable(*stage)?;
             let arguments =
                 rust_arguments.expect("Rust preprocessing stage has prepared arguments");
-            if ranks > 1 {
+            if stage_ranks != ranks && !quiet {
+                println!("  {sname}: existing surface clipping uses one process; other stages retain {ranks} MPI processes");
+            }
+            if stage_ranks > 1 {
                 // 空间预处理按块扇出，rank/size 由启动器环境提供；N=1 走下面的老路径，
                 // 保证单进程行为逐字节不变（docs/design-multi-node.md §11）。
-                ensure_rust_preprocessor_launcher(ranks)?;
+                ensure_rust_preprocessor_launcher(stage_ranks)?;
                 colm_kernel::run_stage_streaming_external_ranks(
                     &kernel,
                     *stage,
@@ -3957,7 +4159,7 @@ fn run_case(
                     case,
                     artifacts,
                     arguments,
-                    ranks,
+                    stage_ranks,
                     &mut forward,
                 )?
             } else {
@@ -5777,7 +5979,7 @@ fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// 观测在 `[from, to)` 里能用（实测、非缺测）的时刻，Unix 秒。
+/// 观测在闭窗口 `[from, to]` 里能用（实测、非缺测）的时刻，Unix 秒。
 pub(crate) fn observation_usable_times(
     obs_path: &Path,
     variable_name: &str,
@@ -5836,7 +6038,7 @@ pub(crate) fn observation_usable_times(
         .filter(|(seconds, (value, qc))| {
             let unix = origin_unix + **seconds;
             unix >= from as f64
-                && unix < to as f64
+                && unix <= to as f64
                 && **qc == colm_hist::pair::QC_MEASURED
                 && value.is_finite()
         })
@@ -8361,6 +8563,9 @@ fn netcdf_test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 #[path = "history_tests.rs"]
 mod history_tests;
+#[cfg(test)]
+#[path = "opts_tests.rs"]
+mod opts_tests;
 
 #[cfg(test)]
 #[path = "run_stage_tests.rs"]

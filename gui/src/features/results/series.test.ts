@@ -10,6 +10,7 @@ import {
   reportFile,
   type EnergyDiagnostic,
   type ResultReport,
+  energyDiagnosticSeries,
 } from './series';
 import type { TimeBasis } from './time-basis';
 import { plainError } from '../../lib/bilingual';
@@ -493,4 +494,38 @@ describe('localized scientific validation errors', () => {
       }
     });
   }
+});
+
+it('diagnostic series keeps the top-level time basis from energy_summary', () => {
+  const merged = energyDiagnosticSeries({
+    schema: 1,
+    expression: 'Rnet - Qh - Qle - Qg',
+    closure_assessed: false,
+    full_stats: {
+      basis: 'all_records_in_selected_window',
+      mean_kind: 'arithmetic_mean_of_common_finite_records',
+      status: 'computed',
+      source_n: 1,
+      n: 1,
+      missing: 0,
+      mean: 0,
+      units: 'W/m²',
+    },
+    series: {
+      time: [0],
+      vars: { Rnet: [1] },
+      n: 1,
+      source_n: 1,
+      downsampled: false,
+    },
+    time_basis: {
+      kind: 'utc',
+      utc_offset_seconds: 0,
+      calendar: 'standard',
+      source: 'case.nml',
+    },
+    window: { from: null, to: null, end_inclusive: true, time_basis: 'model_history_clock' },
+    limitation: 'test',
+  });
+  assert.equal(merged?.time_basis?.kind, 'utc');
 });

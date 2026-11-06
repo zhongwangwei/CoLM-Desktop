@@ -164,6 +164,142 @@ fn existing_surface_clip_keeps_only_vectors_owned_by_selected_elements() {
 }
 
 #[test]
+fn existing_surface_clip_uses_static_lc_topology_for_other_lai_years() {
+    let source = root("static-lc-lai");
+    source_tree(&source);
+    for (name, dimension) in [("LAI_patches01", "patch"), ("SAI_pfts01", "pft")] {
+        vector(
+            &source.join(format!("LAI/2000/{name}_e000_n00.nc")),
+            dimension,
+            name,
+            &[3.0, 9.0],
+        );
+    }
+    let output = source.join("clipped");
+    clip_existing_surface(
+        &source,
+        &output,
+        SpatialBounds {
+            south: 0.0,
+            north: 1.0,
+            west: 0.0,
+            east: 1.0,
+        },
+    )
+    .unwrap();
+    for name in ["LAI_patches01", "SAI_pfts01"] {
+        let file = netcdf::open(output.join(format!("LAI/2000/{name}_e000_n00.nc"))).unwrap();
+        assert_eq!(values_f64(&file, name).unwrap(), [3.0]);
+    }
+    assert!(output
+        .join("landpatch/2005/landpatch_e000_n00.nc")
+        .is_file());
+    assert!(!output.join("landpatch/2000").exists());
+    crate::remove_test_tree(source);
+}
+
+#[test]
+fn existing_surface_clip_keeps_lai_epoch_selection_strict() {
+    for (name, second_year, expected) in [
+        ("lai-matching-epoch", "2000", None),
+        (
+            "lai-ambiguous-epoch",
+            "2010",
+            Some("multiple land-cover years"),
+        ),
+    ] {
+        let source = root(name);
+        source_tree(&source);
+        for (directory, files) in [
+            ("mesh", vec!["mesh.nc", "mesh_e000_n00.nc"]),
+            ("landpatch", vec!["landpatch_e000_n00.nc"]),
+        ] {
+            let target = source.join(directory).join(second_year);
+            std::fs::create_dir_all(&target).unwrap();
+            for file in files {
+                std::fs::copy(
+                    source.join(directory).join("2005").join(file),
+                    target.join(file),
+                )
+                .unwrap();
+            }
+        }
+        // The two epochs have equal vector lengths but opposite ownership order.
+        let mut patches =
+            netcdf::append(source.join(format!("landpatch/{second_year}/landpatch_e000_n00.nc")))
+                .unwrap();
+        patches
+            .variable_mut("eindex")
+            .unwrap()
+            .put_values(&[22_i64, 11], ..)
+            .unwrap();
+        patches.close().unwrap();
+        vector(
+            &source.join("LAI/2000/LAI_patches01_e000_n00.nc"),
+            "patch",
+            "LAI_patches01",
+            &[3.0, 9.0],
+        );
+        let output = source.join("clipped");
+        let result = clip_existing_surface(
+            &source,
+            &output,
+            SpatialBounds {
+                south: 0.0,
+                north: 1.0,
+                west: 0.0,
+                east: 1.0,
+            },
+        );
+        if let Some(message) = expected {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        } else {
+            result.unwrap();
+            let file = netcdf::open(output.join("LAI/2000/LAI_patches01_e000_n00.nc")).unwrap();
+            assert_eq!(values_f64(&file, "LAI_patches01").unwrap(), [9.0]);
+        }
+        crate::remove_test_tree(source);
+    }
+}
+
+#[test]
+fn existing_surface_clip_rejects_incompatible_lai_and_missing_non_lai_epochs() {
+    for (name, relative, values, expected) in [
+        (
+            "lai-length",
+            "LAI/2000/LAI_patches01_e000_n00.nc",
+            &[3.0, 9.0, 12.0][..],
+            "vector mask length",
+        ),
+        (
+            "soil-missing-epoch",
+            "soil/2000/soil_e000_n00.nc",
+            &[3.0, 9.0][..],
+            "to select its landpatch records",
+        ),
+    ] {
+        let source = root(name);
+        source_tree(&source);
+        vector(&source.join(relative), "patch", "values", values);
+        let error = clip_existing_surface(
+            &source,
+            source.join("clipped"),
+            SpatialBounds {
+                south: 0.0,
+                north: 1.0,
+                west: 0.0,
+                east: 1.0,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{error}");
+        crate::remove_test_tree(source);
+    }
+}
+
+#[test]
 fn existing_surface_clip_reports_a_missing_mesh_index() {
     // 上游 `MOD_RegionClip.F90:73-83` 对每个 land-cover 年要求 `mesh/<year>/mesh.nc`；
     // 缺索引时报出缺哪个文件（而不是让下游在聚合拓扑时才失败）。

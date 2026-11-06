@@ -461,7 +461,7 @@ export function exclusionPatch(
           site
             ? '土地覆盖变化需要空间模拟'
             : catchment
-              ? '汇水区网格不支持土地覆盖变化'
+              ? '流域单元网格不支持土地覆盖变化'
               : 'USGS 分类不支持土地覆盖变化',
           site
             ? 'Land-cover change requires a spatial simulation'
@@ -472,7 +472,7 @@ export function exclusionPatch(
       (site || catchment) &&
         close(
           'DEF_USE_GridRiverLakeFlow',
-          site ? '河湖汇流需要空间模拟' : '汇水区网格不能启用网格河湖汇流',
+          site ? '河湖汇流需要空间模拟' : '流域单元网格不能启用网格河湖汇流',
           site
             ? 'River-lake routing requires a spatial simulation'
             : 'Grid routing is unavailable for catchments',
@@ -494,7 +494,7 @@ export function exclusionPatch(
       catchment &&
         close(
           'DEF_URBAN_RUN',
-          '汇水区网格不支持城市过程',
+          '流域单元网格不支持城市过程',
           'Catchment grids do not support urban processes',
         ),
       // 材料拆成 family 开关后没有单一字段；“关闭材料”要把三个开关全关并清空溶质名单。
@@ -514,7 +514,7 @@ export function exclusionPatch(
         read('DEF_USE_Campbell_SOIL_MODEL')?.trim().toLowerCase() === '.true.' ||
         read('DEF_USE_VariablySaturatedFlow')?.trim().toLowerCase() === '.false.') &&
         closeMaterials(
-          catchment ? '汇水区网格不支持材料' : '材料过程需要 van Genuchten 土壤方案与变饱和流',
+          catchment ? '流域单元网格不支持材料' : '材料过程需要 van Genuchten 土壤方案与变饱和流',
           catchment
             ? 'Catchment grids do not support materials'
             : 'Materials require the van Genuchten soil scheme with variably saturated flow',

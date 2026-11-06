@@ -45,6 +45,11 @@ function harness(series?: Record<string, unknown>) {
     },
     source: '/case/run',
     variable: 'GPP',
+    // 导出页测试覆盖原生变量路径；组合量守卫由 diagnostic-page.test.ts 覆盖。
+    nativeVariable: true,
+    singleRows: [],
+    overviewMetric: () => undefined,
+    bilingual: (zh: string) => zh,
     fullSeriesCsv,
     readSeries: async () =>
       series ?? {

@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assistantModelsCacheKey,
+  cachedAssistantModels,
+  parseAssistantModelsCache,
+  rememberAssistantModels,
   rejectedBeforeTurn,
   appendDelta,
   apiEfforts,
@@ -301,6 +305,23 @@ it('offers all four real bundled examples in both languages without sending', ()
     ),
     'Custom provider',
   );
+});
+
+it('external display names are never offered as selectable model ids', () => {
+  const external = { ...defaultSettings, backend: 'codex' as const };
+  // display_model 上报的单词后端名也是合法 id 形态，单靠空白过滤拦不住；必须显式排除（A-04）。
+  for (const label of ['Codex', 'Claude Code', 'OpenCode', 'Codex · gpt-5-codex'])
+    assert.deepEqual(assistantModels(external, label), [''], `${label} 是显示名，不能当候选`);
+  // 真模型 id（带连字符/点号/冒号）仍进候选。
+  assert.deepEqual(assistantModels(external, 'gpt-5-codex'), ['', 'gpt-5-codex']);
+  // 已保存的当前模型仍要显示，且不因显示名过滤而丢失。
+  const saved = {
+    ...external,
+    external: { codex: { model: 'gpt-5-codex', effort: null } },
+  };
+  // 已保存模型之外仍保留空串"默认模型"，否则切不回默认（F-A-02）。
+  assert.deepEqual(assistantModels(saved, 'Codex'), ['gpt-5-codex', '']);
+  assert.deepEqual(assistantModels(saved, 'Codex · gpt-5-codex'), ['gpt-5-codex', '']);
 });
 
 it('compact model choice preserves provider and external settings, resetting incompatible effort', () => {
@@ -1443,4 +1464,68 @@ it('provider labels follow the requested language independently of their stored 
     assert.equal(providerLabel(provider, 'en'), english);
     assert.equal(providerLabel(provider, 'zh'), chinese);
   }
+});
+
+it('backend status details are translated instead of left Chinese in the English UI', async () => {
+  const { managedNodeDetail, retrievalDetailText } = await import('./model');
+  assert.match(
+    managedNodeDetail(
+      'Xerj 版本 0.2.0 与固定版本 0.1.0 不一致：需人工替换为固定版本并重跑验收；当前不阻断启动',
+      true,
+    ),
+    /does not match the pinned release 0\.1\.0/,
+  );
+  assert.match(
+    managedNodeDetail('停止 Xerj 进程组失败：timeout', true),
+    /Failed to stop the Xerj process group: timeout/,
+  );
+  assert.equal(managedNodeDetail('other detail', false), 'other detail');
+  assert.match(
+    retrievalDetailText('the document index is not ready: building', false),
+    /文档索引尚未就绪：building/,
+  );
+  assert.match(
+    retrievalDetailText('Xerj is not reachable: connection refused', true),
+    /Xerj is not reachable: connection refused/,
+  );
+  assert.match(retrievalDetailText('document retrieval failed: boom', false), /文档检索失败：boom/);
+  assert.equal(retrievalDetailText('custom detail', true), 'custom detail');
+});
+
+it('discovered model efforts survive settings reopens per backend and endpoint', () => {
+  const key = assistantModelsCacheKey('codex', 'HTTPS://API.Example/v1/');
+  assert.equal(key, 'codex|https://api.example/v1');
+  assert.deepEqual(parseAssistantModelsCache('{'), {});
+  assert.deepEqual(parseAssistantModelsCache('[]'), {});
+  let cache = rememberAssistantModels(
+    {},
+    'codex',
+    'https://api.example/v1/',
+    [{ id: 'gpt-5-codex', efforts: ['low', 'xhigh'] }],
+    1_700_000_000_000,
+  );
+  assert.deepEqual(
+    cachedAssistantModels(cache, 'codex', 'https://api.example/v1', 1_700_000_100_000),
+    [{ id: 'gpt-5-codex', efforts: ['low', 'xhigh'] }],
+  );
+  // 端点/后端任一变化都不复用旧档位。
+  assert.deepEqual(cachedAssistantModels(cache, 'codex', 'https://other.example/v1'), []);
+  assert.deepEqual(cachedAssistantModels(cache, 'opencode', 'https://api.example/v1'), []);
+  // 7 天后过期。
+  assert.deepEqual(
+    cachedAssistantModels(
+      cache,
+      'codex',
+      'https://api.example/v1',
+      1_700_000_000_000 + 8 * 86_400_000,
+    ),
+    [],
+  );
+  // 损坏条目被忽略，最近 8 个组合之外的条目被淘汰。
+  cache = parseAssistantModelsCache(JSON.stringify({ bad: 1, ...cache }));
+  for (let index = 0; index < 12; index++)
+    cache = rememberAssistantModels(cache, `b${index}`, 'https://x', [{ id: 'm' }], index);
+  assert.equal(Object.keys(cache).length, 8);
+  const restored = parseAssistantModelsCache(JSON.stringify(cache));
+  assert.deepEqual(restored['b11|https://x'].models, [{ id: 'm' }]);
 });

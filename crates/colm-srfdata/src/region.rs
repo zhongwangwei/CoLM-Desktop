@@ -88,6 +88,19 @@ pub fn clip_existing_surface(
     let block_layout = read_block_layout(&block)?;
     let files = netcdf_files(source)?;
     ensure_mesh_indexes(source, &files)?;
+    let topology_years: BTreeSet<_> = files
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(source).ok()?;
+            if !mesh_block(relative) {
+                return None;
+            }
+            relative
+                .components()
+                .nth(1)
+                .map(|year| year.as_os_str().to_owned())
+        })
+        .collect();
     let selections = mesh_selections(source, &files, &pixel_axes, bounds)?;
     ensure!(
         !selections.is_empty()
@@ -125,7 +138,14 @@ pub fn clip_existing_surface(
             clip_mesh_block(&source_file, &target, &selection.elements)?;
             continue;
         }
-        let masks = masks_for_vector(&source_file, source, relative, &key, &selection.ids)?;
+        let masks = masks_for_vector(
+            &source_file,
+            source,
+            relative,
+            &key,
+            &selection.ids,
+            &topology_years,
+        )?;
         if masks.is_empty() {
             continue;
         }
@@ -498,6 +518,7 @@ fn masks_for_vector(
     relative: &Path,
     block: &str,
     selected_elements: &HashSet<i64>,
+    topology_years: &BTreeSet<std::ffi::OsString>,
 ) -> Result<BTreeMap<String, Vec<bool>>> {
     let input = netcdf::open(file).with_context(|| format!("cannot open {}", file.display()))?;
     let mut dimensions = HashSet::new();
@@ -520,7 +541,14 @@ fn masks_for_vector(
         if dimensions.contains(dimension) {
             masks.insert(
                 dimension.to_owned(),
-                pixelset_mask(root, relative, pixelset, block, selected_elements)?,
+                pixelset_mask(
+                    root,
+                    relative,
+                    pixelset,
+                    block,
+                    selected_elements,
+                    topology_years,
+                )?,
             );
         }
     }
@@ -533,12 +561,23 @@ fn pixelset_mask(
     pixelset: &str,
     block: &str,
     selected: &HashSet<i64>,
+    topology_years: &BTreeSet<std::ffi::OsString>,
 ) -> Result<Vec<bool>> {
-    let year = relative
+    let mut year = relative
         .components()
         .nth(1)
-        .and_then(|component| component.as_os_str().to_str())
+        .map(|component| component.as_os_str())
         .context("blocked landdata file is missing its land-cover year")?;
+    // RegionClip uses the LC epoch's patch/PFT masks for every static-LC LAI year.
+    // With multiple epochs, only the matching year identifies an unambiguous topology.
+    if relative.starts_with("LAI") && !topology_years.contains(year) {
+        ensure!(
+            topology_years.len() == 1,
+            "{} has no matching land-cover topology; cannot select its {pixelset} records from multiple land-cover years: {:?}",
+            relative.display(), topology_years
+        );
+        year = topology_years.first().expect("one topology year");
+    }
     let path = root
         .join(pixelset)
         .join(year)

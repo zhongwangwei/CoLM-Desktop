@@ -478,11 +478,16 @@ test('spin-up defaults are strictly inside the period or unavailable', () => {
   }
 });
 
-test('single-site creation rejects empty, nonnumeric and nonpositive time steps', () => {
-  for (const timestep of ['', ' ', 'NaN', 'Infinity', '0', '-1'])
+test('creation requires integer time steps from 1 through 3600 seconds', () => {
+  for (const timestep of ['', ' ', 'NaN', 'Infinity', '0', '-1', '3601', '0.5'])
     assert.match(
       newCaseProblem({ ...form, timestep }, 3, undefined, {}, true) ?? '',
-      /time step must be positive/,
+      /time step must be an integer from 1 to 3600 seconds/,
     );
-  assert.equal(newCaseProblem({ ...form, timestep: '1800' }, 3, undefined, {}, true), null);
+  for (const timestep of ['1', '1800', '3600'])
+    assert.equal(newCaseProblem({ ...form, timestep }, 3, undefined, {}, true), null);
+  assert.equal(
+    newCaseProblem({ ...form, timestep: '0.5' }, 3, undefined, {}),
+    '时间步长须为 1–3600 的整数秒。',
+  );
 });

@@ -26,7 +26,7 @@ const SAMPLE: &str = "\
 
 #[test]
 fn reading_a_case_marks_what_the_schema_knows() {
-    let e = read_case(SAMPLE.into()).expect("parses");
+    let e = read_case(SAMPLE.into(), None).expect("parses");
     let by = |n: &str| e.iter().find(|x| x.path == n).expect(n);
     assert!(by("DEF_CASE_NAME").known);
     assert_eq!(by("DEF_CASE_NAME").group, Some("nl_colm"));
@@ -34,6 +34,42 @@ fn reading_a_case_marks_what_the_schema_knows() {
     // 上游删掉的字段。CoLM 读到会 `Cannot match namelist object name` 然后停 ——
     // 界面该在开跑前点名它，而不是让用户对着那句报错发呆。
     assert!(!by("USE_SITE_topostd").known);
+}
+
+#[test]
+fn forcing_dataset_values_come_from_the_template_registry_not_the_old_schema_list() {
+    // 标准模板（CMFD/ERA5/…）必须能保存、能出现在第 3 步下拉里；上游 schema 的旧 8 值
+    // 不能继续当权威（本次验收 P2，F-N-07 残留）。
+    for dataset in [
+        "CMFD", "CMFDv2", "ERA5", "ERA5LAND", "CMIP6", "POINT", "GSWP3", "QIAN", "CLDAS", "JRA55",
+        "CPL7", "GSWP2",
+    ] {
+        assert!(
+            typed_scalar("DEF_forcing%dataset", dataset).is_ok(),
+            "{dataset}"
+        );
+    }
+    for template_name in [
+        "ERA5_LEddy",
+        "MPI-ESM1-2-HR_ssp585",
+        "CRUJRA_local",
+        "NOT_A_DATASET",
+    ] {
+        let error = typed_scalar("DEF_forcing%dataset", template_name)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CMFD"), "{error}");
+        assert!(error.contains(template_name), "{error}");
+    }
+    let field = colm_schema::find("DEF_forcing%dataset").expect("schema has the dataset field");
+    let allowed = super::forcing_dataset_values();
+    assert!(allowed.contains(&"CMFD"));
+    assert!(allowed.contains(&"ERA5"));
+    assert!(allowed.contains(&"CMIP6"));
+    assert!(allowed.contains(&"POINT"));
+    assert!(!allowed.contains(&"ERA5_LEddy"));
+    assert!(!allowed.contains(&"MPI-ESM1-2-HR_ssp585"));
+    assert_ne!(allowed, field.values, "schema 旧白名单不再作为权威");
 }
 
 #[test]
@@ -83,6 +119,16 @@ fn unknown_fields_names_the_ones_colm_would_reject() {
     let pft =
         unknown_fields("&nl_colm\n DEF_PFT_C3C4(15)=0\n DEF_PFT_C3C4(80)=0\n/\n".into()).unwrap();
     assert_eq!(pft, ["DEF_PFT_C3C4(80)"], "only slots 1..=79 are valid");
+
+    // 数组元素形式：schema 只登记基名，不能把合法的 `DEF_LC_BETA(10)` 报成 CoLM 不认识（F-R-04）。
+    let indexed = unknown_fields(
+        "&nl_colm\n DEF_LC_BETA(10)=0.5\n DEF_forcing%fprefix(1)='a.nc'\n/\n".into(),
+    )
+    .unwrap();
+    assert_eq!(indexed, Vec::<String>::new());
+    // 基名也不认识的才该报。
+    let unknown_indexed = unknown_fields("&nl_colm\n DEF_NOT_A_FIELD(1)=0\n/\n".into()).unwrap();
+    assert_eq!(unknown_indexed, ["DEF_NOT_A_FIELD(1)"]);
 }
 
 #[test]
@@ -1517,6 +1563,50 @@ fn either_zero_spinup_input_still_means_disabled() {
     set_test_spinup(dirs.clone(), 30, 0).unwrap();
     let t = super::read_timing(dirs).unwrap();
     assert_eq!((t.spinup_years, t.spinup_repeat), (0, 0));
+}
+
+#[test]
+fn spinup_inside_the_start_year_counts_like_colm() {
+    // CoLM 比较的是截止时间戳是否晚于起始时间戳（CoLM.F90:341），不是年份差：
+    // 1992-01-01 开始、1992-06-01 截止的预热必须被读成开启，否则研究页会把窗口算错。
+    let with_spinup = colm_namelist::parse(
+        "&nl_colm\n\
+         DEF_simulation_time%start_year = 1992\n\
+         DEF_simulation_time%start_month = 1\n\
+         DEF_simulation_time%start_day = 1\n\
+         DEF_simulation_time%end_year = 1993\n\
+         DEF_simulation_time%end_month = 1\n\
+         DEF_simulation_time%end_day = 1\n\
+         DEF_simulation_time%spinup_year = 1992\n\
+         DEF_simulation_time%spinup_month = 6\n\
+         DEF_simulation_time%spinup_day = 1\n\
+         DEF_simulation_time%spinup_repeat = 2\n\
+         DEF_simulation_time%timestep = 1800.\n/\n",
+    )
+    .unwrap();
+    let disabled = colm_namelist::parse(
+        "&nl_colm\n\
+         DEF_simulation_time%start_year = 1992\n\
+         DEF_simulation_time%start_month = 1\n\
+         DEF_simulation_time%start_day = 1\n\
+         DEF_simulation_time%end_year = 1993\n\
+         DEF_simulation_time%end_month = 1\n\
+         DEF_simulation_time%end_day = 1\n\
+         DEF_simulation_time%spinup_year = 0\n\
+         DEF_simulation_time%spinup_repeat = 2\n\
+         DEF_simulation_time%timestep = 1800.\n/\n",
+    )
+    .unwrap();
+    let on = super::one_timing(&with_spinup);
+    let off = super::one_timing(&disabled);
+    assert_eq!(
+        on.4, "1992-06-01",
+        "output starts after the same-year spin-up"
+    );
+    assert!(
+        on.5 > off.5,
+        "same-year spin-up adds steps: {on:?} vs {off:?}"
+    );
 }
 
 #[test]
@@ -5420,7 +5510,7 @@ fn forcing_fields_save_reload_in_referenced_owned_header() {
             material_fields(&[("DEF_forcing%HEIGHT_V", "30.0")]),
         )
         .unwrap();
-        let mut saved =
+        let saved =
             colm_namelist::parse(&std::fs::read_to_string(root.join("case.nml")).unwrap()).unwrap();
         assert!(saved.get("DEF_forcing%HEIGHT_V").is_none());
         let header = root.join(character(&saved, "DEF_forcing_namelist"));
@@ -5433,9 +5523,13 @@ fn forcing_fields_save_reload_in_referenced_owned_header() {
             forcing.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
             "30.0"
         );
-        load_forcing_fields(&mut saved, root).unwrap();
+        let entries = read_case(saved.to_string(), Some(dir.clone())).unwrap();
         assert_eq!(
-            saved.get("DEF_forcing%HEIGHT_V").unwrap().to_string(),
+            entries
+                .iter()
+                .find(|e| e.path == "DEF_forcing%HEIGHT_V")
+                .unwrap()
+                .value,
             "30.0"
         );
         assert_eq!(std::fs::read_to_string(&shared).unwrap(), original);
@@ -5514,4 +5608,292 @@ fn forcing_save_rejects_symlink_target_without_touching_shared_header() {
     assert_eq!(std::fs::read(root.join("case.nml")).unwrap(), before);
     assert_eq!(std::fs::read_to_string(&shared).unwrap(), original);
     std::fs::remove_file(shared).unwrap();
+}
+
+#[test]
+fn forcing_array_writes_require_all_typed_slots() {
+    assert!(typed("DEF_forcing%dtime", "1800").is_err());
+    assert!(typed("DEF_forcing%vname", "'temperature'").is_err());
+    assert!(typed("DEF_forcing%dtime", "1,2,3,4,5,6,7,'bad'").is_err());
+    assert!(typed("DEF_forcing%dtime", "1,2,3,4,5,6,7,8").is_ok());
+    assert!(typed("DEF_forcing%vname", "'a','b','c','d','e','f','g','h'").is_ok());
+}
+
+#[test]
+fn forcing_read_case_projects_header_and_reports_unavailable_files() {
+    let dir = batch("forcing-effective-read", &[SAMPLE]).remove(0);
+    let root = std::path::Path::new(&dir);
+    let mut doc = colm_namelist::parse(SAMPLE).unwrap();
+    put(
+        &mut doc,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str("forcing.nml".into()),
+    )
+    .unwrap();
+    assert!(read_case(doc.to_string(), Some(dir.clone()))
+        .err()
+        .unwrap()
+        .contains("forcing.nml"));
+    std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='/actual/data'\nDEF_forcing%dataset='CUSTOM'\nDEF_forcing%dtime=1,2,3,4,5,6,7,8\n/\n").unwrap();
+    let entries = read_case(doc.to_string(), Some(dir.clone())).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.path == "DEF_dir_forcing")
+            .unwrap()
+            .value,
+        "'/actual/data'"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.path == "DEF_forcing%dataset")
+            .unwrap()
+            .value,
+        "'CUSTOM'"
+    );
+    std::fs::write(root.join("forcing.nml"), "broken").unwrap();
+    assert!(read_case(doc.to_string(), Some(dir.clone()))
+        .err()
+        .unwrap()
+        .contains("forcing.nml"));
+}
+
+#[test]
+fn forcing_full_array_save_preserves_shared_header() {
+    let dir = batch("forcing-array-save", &[SAMPLE]).remove(0);
+    let root = std::path::Path::new(&dir);
+    let shared = root.parent().unwrap().join("forcing-array-shared.nml");
+    let original = "&nl_colm_forcing\nDEF_forcing%dtime=1,2,3,4,5,6,7,8\n/\n";
+    std::fs::write(&shared, original).unwrap();
+    let mut doc = colm_namelist::parse(SAMPLE).unwrap();
+    put(
+        &mut doc,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str(shared.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    std::fs::write(root.join("case.nml"), doc.to_string()).unwrap();
+    assert!(set_batches(
+        vec![dir.clone()],
+        material_fields(&[("DEF_forcing%dtime", "1800")])
+    )
+    .is_err());
+    set_batches(
+        vec![dir.clone()],
+        material_fields(&[("DEF_forcing%dtime", "8,7,6,5,4,3,2,1")]),
+    )
+    .unwrap();
+    let entries = read_case(
+        std::fs::read_to_string(root.join("case.nml")).unwrap(),
+        Some(dir),
+    )
+    .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.path == "DEF_forcing%dtime")
+            .unwrap()
+            .value,
+        "8 7 6 5 4 3 2 1"
+    );
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), original);
+    std::fs::remove_file(shared).unwrap();
+}
+
+#[test]
+fn forcing_remote_shared_header_never_reads_same_named_local_file() {
+    let dir = batch("forcing-remote-external", &[SAMPLE]).remove(0);
+    let root = std::path::Path::new(&dir);
+    std::fs::write(
+        root.join(".colm-desktop.json"),
+        r#"{"run_host":"server","remote_directory":"/server/project/case"}"#,
+    )
+    .unwrap();
+    let shared = root.parent().unwrap().join("remote-shared.nml");
+    std::fs::write(
+        &shared,
+        "&nl_colm_forcing\nDEF_dir_forcing='/wrong/local/data'\n/\n",
+    )
+    .unwrap();
+    let mut doc = colm_namelist::parse(SAMPLE).unwrap();
+    put(
+        &mut doc,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str(shared.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    let error = read_case(doc.to_string(), Some(dir.clone())).err().unwrap();
+    assert!(error.contains("not cached"), "{error}");
+    std::fs::remove_file(shared).unwrap();
+}
+
+#[test]
+fn all_seven_forcing_arrays_enforce_schema_arity_and_element_types() {
+    use colm_namelist::Value;
+    use colm_schema::FieldKind;
+
+    let fields = colm_schema::all()
+        .iter()
+        .filter(|field| field.group == Some("nl_colm_forcing") && field.arity.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 7);
+    for field in fields {
+        let arity = field.arity.unwrap();
+        let (scalar, wrong_type) = match field.kind {
+            FieldKind::Integer => ("1800", "'wrong type'"),
+            FieldKind::Real => ("90.5", "'wrong type'"),
+            FieldKind::Character { .. } => ("'value'", "1800"),
+            FieldKind::Logical => panic!("unexpected logical forcing array: {}", field.name),
+        };
+        assert!(
+            typed(field.name, scalar).is_err(),
+            "{} accepted one slot",
+            field.name
+        );
+        for length in [arity - 1, arity + 1] {
+            assert!(
+                typed(field.name, &vec![scalar; length].join(", ")).is_err(),
+                "{} accepted {length} slots instead of {arity}",
+                field.name
+            );
+        }
+        let mut complete = vec![scalar; arity];
+        if field.name == "DEF_forcing%regbnd" {
+            assert_eq!(arity, 4);
+            complete = vec!["-90", "90.5", "-180.0", "180"];
+        }
+        let result = typed(field.name, &complete.join(", "))
+            .unwrap_or_else(|error| panic!("{} rejected complete array: {error}", field.name));
+        let Value::List(values) = result else {
+            panic!("{} did not produce an array", field.name);
+        };
+        assert_eq!(values.len(), arity, "{} lost slots", field.name);
+        complete[arity - 1] = wrong_type;
+        assert!(
+            typed(field.name, &complete.join(", ")).is_err(),
+            "{} accepted wrong element type",
+            field.name
+        );
+    }
+    for non_finite in ["NaN", "Inf", "-Inf", "1e999"] {
+        assert!(
+            typed(
+                "DEF_forcing%regbnd",
+                &format!("-90, 90.5, -180.0, {non_finite}")
+            )
+            .is_err(),
+            "regbnd accepted non-finite element {non_finite}"
+        );
+    }
+}
+
+#[test]
+fn case_data_save_candidate_rejects_missing_or_bad_forcing_replacements_before_commit() {
+    let dirs = batch("forcing-reference-repair", &[SAMPLE, SAMPLE]);
+    let source = std::path::Path::new(&dirs[0]);
+    let work = std::path::Path::new(&dirs[1]);
+    let mut doc = colm_namelist::parse(SAMPLE).unwrap();
+    put(
+        &mut doc,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str("broken-original.nml".into()),
+    )
+    .unwrap();
+    let original = doc.to_string();
+    std::fs::write(source.join("case.nml"), &original).unwrap();
+    std::fs::write(source.join("broken-original.nml"), "broken original").unwrap();
+    std::fs::write(source.join("bad-replacement.nml"), "bad replacement").unwrap();
+    std::fs::write(
+        source.join("valid-replacement.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='/repaired/data'\n DEF_forcing%dataset='CUSTOM'\n/\n",
+    )
+    .unwrap();
+    let registry = colm_model::Registry::open(work.join("registry")).unwrap();
+    let official = registry
+        .install_official(colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    // case_data_save creates this real model candidate before calling its commit
+    // routine. Exercise both stages without constructing a native AppHandle.
+    for replacement in [
+        "missing.nml",
+        "bad-replacement.nml",
+        "valid-replacement.nml",
+    ] {
+        let fields = material_fields(&[("DEF_forcing_namelist", replacement)]);
+        let candidate_fields = fields
+            .iter()
+            .map(|field| {
+                (
+                    field.path.clone(),
+                    typed(&field.path, &field.value).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let destination = work.join(format!("preview-{replacement}"));
+        let candidate = registry.materialize_run_with_case_changes(
+            &official.version,
+            source,
+            &destination,
+            "forcing-repair",
+            &candidate_fields,
+            &[],
+        );
+        if replacement != "valid-replacement.nml" {
+            let error = candidate
+                .expect_err("invalid replacement must fail before commit")
+                .to_string();
+            if replacement == "missing.nml" {
+                assert!(
+                    error.contains("referenced configuration is missing"),
+                    "{error}"
+                );
+            } else {
+                assert!(error.contains("namelist"), "{error}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(source.join("case.nml")).unwrap(),
+                original
+            );
+            assert!(!destination.exists(), "rejected preview must be cleaned up");
+        } else {
+            let candidate = candidate.unwrap();
+            let contexts = vec![candidate.run_case.to_string_lossy().into_owned()];
+            set_fields_with_forcing(
+                vec![dirs[0].clone()],
+                fields,
+                &[],
+                None,
+                Some(&contexts),
+                None,
+            )
+            .unwrap();
+            let saved = std::fs::read_to_string(source.join("case.nml")).unwrap();
+            assert_eq!(
+                character(
+                    &colm_namelist::parse(&saved).unwrap(),
+                    "DEF_forcing_namelist"
+                ),
+                replacement
+            );
+            let entries = read_case(saved, Some(dirs[0].clone())).unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.path == "DEF_dir_forcing")
+                    .unwrap()
+                    .value,
+                "'/repaired/data'"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(source.join("broken-original.nml")).unwrap(),
+            "broken original"
+        );
+    }
 }

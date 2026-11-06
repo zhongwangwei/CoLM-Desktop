@@ -15,6 +15,7 @@ import {
   boundedMapSettled,
   download,
   fullEnergyStats,
+  energyDiagnosticSeries,
   fullSeriesCsv,
   parentRuns,
   printReport,
@@ -523,6 +524,8 @@ function metricCoverageTitle(metric: Metric, en: boolean): string | undefined {
     );
   return parts.length ? parts.join(' · ') : undefined;
 }
+const MAX_COMPARISON_RUNS = 20;
+
 export default function ResultsPage({
   casePath,
   onBack,
@@ -654,6 +657,7 @@ export default function ResultsPage({
     to,
     spinup,
     corrected,
+    time_basis: timeBasisOf(catalog ?? series),
   };
   const comparisonFreshKey = comparisonKey(comparisonRequest);
   const singleRows = singleResult?.rows ?? [];
@@ -988,7 +992,7 @@ export default function ResultsPage({
       const parse = (value: string) => {
         if (!value) return null;
         const n = utcSeconds(value);
-        if (!Number.isFinite(n)) throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
+        if (!Number.isFinite(n)) throw new Error(bilingual('日期格式不对', 'Invalid date'));
         return n;
       };
       const a = parse(fromValue),
@@ -1056,6 +1060,14 @@ export default function ResultsPage({
   const plot = () =>
     task(async (current) => {
       setSeriesError('');
+      // 组合评估量只存在于指标表里，没有可读取的原生 series；按钮已禁用，这里再挡一次静默失败。
+      if (!nativeVariable && overviewMetric(singleRows, variable))
+        throw new Error(
+          bilingual(
+            '组合评估量没有单一原生序列，不能刷新曲线；请在评估表中查看组合指标。',
+            'Composite evaluation quantities have no single native series; the curve cannot be refreshed. See the evaluation table.',
+          ),
+        );
       setSeriesLoading(true);
       try {
         const data = await readSeries(variable);
@@ -1072,7 +1084,7 @@ export default function ResultsPage({
         if (current()) setSeriesLoading(false);
       }
     });
-  const evaluate = () =>
+  const evaluate = (options?: { keepSettingsOpen?: boolean }) =>
     task(async (current) => {
       // 请求条件在发起时定死；之后界面再改条件，这份结果也不会被当成新条件的结果。
       const request = singleRequest;
@@ -1102,7 +1114,7 @@ export default function ResultsPage({
             evaluation: available,
             completedAt: Date.now(),
           });
-          setSettingsOpen(false);
+          if (!options?.keepSettingsOpen) setSettingsOpen(false);
         }
         return rows;
       }
@@ -1125,11 +1137,13 @@ export default function ResultsPage({
           evaluation: available,
           completedAt: Date.now(),
         });
-        setSettingsOpen(false);
+        // 自动评估（keepSettingsOpen）在“有数据”这条正常分支上也不能关掉用户正在编辑的对话框。
+        if (!options?.keepSettingsOpen) setSettingsOpen(false);
       }
       return rows;
     });
-  automaticEvaluator.current = () => run(evaluate);
+  // 自动评估是"条件一改就重算"的后台动作，不能把用户正在编辑的评估设置对话框关掉（GUI 审查 H-08）。
+  automaticEvaluator.current = () => run(() => evaluate({ keepSettingsOpen: true }));
   useEffect(() => {
     if (
       multiStation ||
@@ -1173,14 +1187,20 @@ export default function ResultsPage({
         to,
         spinup,
         corrected,
+        time_basis: timeBasisOf(catalog ?? series),
       };
       requestSeq.current.multi++;
       const token = requestSeq.current.multi;
       const live = () => current() && requestSeq.current.multi === token;
       if (!Number.isInteger(Number(request.spinup)) || Number(request.spinup) < 0)
         throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
-      if (!entries.length || entries.length > 20)
-        throw new Error(bilingual('要选 1–20 个运行再比较', 'Select 1–20 runs to compare'));
+      if (!entries.length || entries.length > MAX_COMPARISON_RUNS)
+        throw new Error(
+          bilingual(
+            `要选 1–${MAX_COMPARISON_RUNS} 个运行再比较`,
+            `Select 1–${MAX_COMPARISON_RUNS} runs to compare`,
+          ),
+        );
       if (entries.some((entry) => !entry.obs.trim()))
         throw new Error(
           bilingual(
@@ -1321,6 +1341,14 @@ export default function ResultsPage({
       if (!source || !variable)
         throw new Error(
           bilingual('请先选一次运行和一个变量', 'Select a recorded run and variable'),
+        );
+      // 组合评估量没有原生 series：导出完整 CSV 会按变量名去 CLI 查，必然失败且错误会被图表吞掉。
+      if (!nativeVariable && overviewMetric(singleRows, variable))
+        throw new Error(
+          bilingual(
+            '组合评估量没有单一原生序列，不能导出完整 CSV；请在评估表中查看组合指标。',
+            'Composite evaluation quantities have no single native series; export full CSV is unavailable. See the evaluation table.',
+          ),
         );
       const data = await readSeries(variable, null);
       const text = fullSeriesCsv(data, variable);
@@ -1463,6 +1491,14 @@ export default function ResultsPage({
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
+    // 助手的契约路径也必须遵守同一上限，不能绕过勾选处的限制（GUI 审查 H-13）。
+    if (lines.length > MAX_COMPARISON_RUNS)
+      throw new Error(
+        tr(
+          `最多比较 ${MAX_COMPARISON_RUNS} 个运行；请减少这次比较的条目。`,
+          `At most ${MAX_COMPARISON_RUNS} runs can be compared; remove some entries.`,
+        ),
+      );
     setComparisonEntries(
       lines
         .map((line) => {
@@ -1529,7 +1565,7 @@ export default function ResultsPage({
     const path = externalRun.trim();
     if (!path) return;
     setComparisonEntries((current) =>
-      current.some((entry) => entry.run.run_case === path)
+      current.some((entry) => entry.run.run_case === path) || current.length >= MAX_COMPARISON_RUNS
         ? current
         : [
             ...current,
@@ -1547,11 +1583,13 @@ export default function ResultsPage({
     setExternalRun('');
   }
   function toggleComparisonRun(run: ProjectRun) {
-    setComparisonEntries((current) =>
-      current.some((entry) => entry.run.run_case === run.run_case)
-        ? current.filter((entry) => entry.run.run_case !== run.run_case)
-        : [...current, { run, obs: obs.trim() }],
-    );
+    setComparisonEntries((current) => {
+      if (current.some((entry) => entry.run.run_case === run.run_case))
+        return current.filter((entry) => entry.run.run_case !== run.run_case);
+      // 后端/旧手动表单最多比较 20 条：在勾选处就拦住并解释，避免选到 21 条才报错（GUI 审查 H-01）。
+      if (current.length >= MAX_COMPARISON_RUNS) return current;
+      return [...current, { run, obs: obs.trim() }];
+    });
   }
   function removeComparisonEntry(index: number) {
     setComparisonEntries((current) => current.filter((_, item) => item !== index));
@@ -1758,7 +1796,8 @@ export default function ResultsPage({
       disabled: busy,
       set: (value) => setReportFormat(value as ReportFormat),
     });
-  const displayedSeries = tab === 'diagnostics' ? diagnostic?.series : series;
+  // energy_summary 把基准放在顶层；诊断曲线用它，而不是只读 series（旧代码因此把区域 UTC 算例标成模型钟）。
+  const displayedSeries = tab === 'diagnostics' ? energyDiagnosticSeries(diagnostic) : series;
   const truncatedGaps = displayedSeries?.downsampled && displayedSeries.gaps_truncated;
   const gapNotice = tr(
     '缺测区间过多，抽样数据无法完整标出缺口，已暂停绘制曲线。请缩短时段后重新读取。',
@@ -1851,6 +1890,10 @@ export default function ResultsPage({
         : 'scientific verification unknown';
   // 曲线区状态：overview 自动读，时序页手动读（未点之前是 idle，不是 loading）。
   const compositeSelection = !nativeVariable && !!overviewMetric(singleRows, variable);
+  const compositeSeriesReason = tr(
+    '组合评估量没有单一原生序列，不能导出或刷新曲线；请在评估表中查看组合指标。',
+    'Composite evaluation quantities have no single native series; export or refresh is unavailable. See the evaluation table.',
+  );
   const curveStatus: CurveState =
     tab === 'overview' && compositeSelection
       ? singleFresh
@@ -2096,11 +2139,15 @@ export default function ResultsPage({
               label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
               kind="commit"
               variant="ghost"
-              disabled={!source || !variable || busy}
+              disabled={!source || !variable || busy || compositeSelection}
+              title={compositeSelection ? compositeSeriesReason : undefined}
               run={exportFullSeries}
             >
               {tr('导出完整 CSV', 'Export full CSV')}
             </ActionButton>
+          )}
+          {compositeSelection && tab === 'overview' && (
+            <span className="text-xs text-muted-foreground">{compositeSeriesReason}</span>
           )}
           {onBack && (
             <ActionButton
@@ -2447,6 +2494,12 @@ export default function ResultsPage({
         closeAction="result-settings-close"
       >
         {error && <Notice tone="error">{error}</Notice>}
+        <p className="field-hint">
+          {tr(
+            '时间窗口口径：子日尺度的曲线与闭合诊断用闭区间 [开始, 结束]（含结束记录）；日/月/年尺度的配对指标要求整段记录都落在窗口内，结束日期是截止时刻。两种口径在边界记录上可能相差一条。',
+            'Window semantics: sub-daily series and closure diagnostics use the closed interval [start, end] (the end record is included); daily/monthly/yearly paired metrics require the whole period inside the window, and the end date is a cutoff. The two can differ by one boundary record.',
+          )}
+        </p>
         <Field label={tr('观测文件', 'Observation file')}>
           <div className="browse-input">
             <Input
@@ -2489,6 +2542,14 @@ export default function ResultsPage({
             )}
           </div>
         </Field>
+        {selectedRun?.server && (
+          <p className="field-hint">
+            {tr(
+              '这个运行的结果在服务器上，评估也在服务器上执行：观测文件必须是服务器上的路径（用「选择文件」浏览服务器）；本机路径服务器读不到。',
+              'This run evaluates on the server: the observation file must be a path on that server (browse with “Choose a file”); local paths cannot be read there.',
+            )}
+          </p>
+        )}
         <Advanced
           title={tr('高级评估设置', 'Advanced evaluation settings')}
           action="result-advanced-settings"
@@ -2548,7 +2609,8 @@ export default function ResultsPage({
             action="plot-series"
             label={tr('刷新模拟曲线', 'Refresh simulation curve')}
             kind="click"
-            disabled={!source || !variable || busy}
+            disabled={!source || !variable || busy || compositeSelection}
+            title={compositeSelection ? compositeSeriesReason : undefined}
             run={plot}
           >
             {tr('刷新模拟曲线', 'Refresh simulation curve')}
@@ -2727,7 +2789,10 @@ export default function ResultsPage({
                               <input
                                 type="checkbox"
                                 checked={checked}
-                                disabled={busy}
+                                disabled={
+                                  busy ||
+                                  (!checked && comparisonEntries.length >= MAX_COMPARISON_RUNS)
+                                }
                                 onChange={() => toggleComparisonRun(run)}
                               />
                               <span>
@@ -2759,7 +2824,9 @@ export default function ResultsPage({
                 <ActionButton
                   action="comparison-add-external"
                   label={tr('添加', 'Add')}
-                  disabled={!externalRun.trim() || busy}
+                  disabled={
+                    !externalRun.trim() || busy || comparisonEntries.length >= MAX_COMPARISON_RUNS
+                  }
                   run={addExternalComparisonRun}
                 />
               </div>
@@ -2819,6 +2886,14 @@ export default function ResultsPage({
                   ))}
                 </ul>
               </div>
+            )}
+            {comparisonEntries.length >= MAX_COMPARISON_RUNS && (
+              <Notice>
+                {tr(
+                  `最多同时比较 ${MAX_COMPARISON_RUNS} 条运行；取消勾选一条后再添加。`,
+                  `At most ${MAX_COMPARISON_RUNS} runs can be compared at once; uncheck one before adding another.`,
+                )}
+              </Notice>
             )}
             <Notice>
               {tr(

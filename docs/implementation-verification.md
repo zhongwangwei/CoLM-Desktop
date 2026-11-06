@@ -44746,3 +44746,1002 @@ PID70612，ready=complete/home=true/lang=zh-CN；`/tmp/colm-seven-native-ready.j
 新包CLI再跑36个入口/资源规划回归和15份调度脚本bash语法检查，全部通过，
 `/private/tmp/colm-lsf-mpich-cli-dk84jhk4/{results,summary}.json`；
 `/tmp/colm-seven-packaged-cli-probe.log`。这是替身SSH下的dry-run检查，未提交集群作业。
+
+### 2026-11-04 bd 河湖流 GUI 手册实操修复
+
+实操输入来自 bd `CoLM202X_1030/run/aas_namelists` 的 Mekong ctl/DB。
+所有建例、配置及提交走真实原生 GUI；SSH 用于只读核验源文件和本次作业。
+原六年配置改为2000-07-01一天演示，使用匹配的 IGBP LCT 资料、小时输出、无预热，
+不能据此宣称科学复现或率定通过。
+
+本次修复与证据：
+
+- 静态 LC2005 / LAI2000 裁取按唯一已验证网格拓扑年选择，歧义多年代仍拒绝；
+  `cargo test --offline --locked -p colm-srfdata --lib region_tests -- --test-threads=1`，
+  8项通过，`/tmp/colm-bd-manual-region-tests.log`。
+- histvars按实际输出的switch查可写性，一开关多输出采用任一可写即支持、未知不冒充支持；
+  riv_height→wdpth_ucat_regrid、riv_veloct→veloc_riv_regrid恢复可选。
+  GUI histvars_tests 12项通过，`/tmp/colm-bd-manual-histvars-tests.log`。
+- 后台模型清理的历史目录读取不持运行/建例锁，读扫描总预算2秒，超时跳过全部删除；
+  扫描后的任务与绑定代次变化会拒绝删除。合法无registry修订的旧研究pin可跳过，坏引用仍拒绝。
+  GUI model::tests 22通过/1既有忽略、generation 2通过；
+  `/tmp/colm-prune-legacy-{red,green,clippy}.log`、`/tmp/colm-bd-manual-generation-tests.log`。
+- Rust区域河网覆盖检查恢复Fortran的touched AND routed_full AND NOT regional规则。
+  原r171两例报515格；真实源/区域网逐格诊断证明515格全为源网络本不路由，
+  源网本应路由但裁漏的格数为0。未删patch、未缩域、未改科学输入。
+  `cargo test --offline --locked -p colm-init --lib unitcatchment_regional_tests -- --test-threads=1`
+  6项通过，真实NetCDF回归同时验证真正裁漏1格仍拒绝；
+  `/tmp/colm-bd-manual-routing-{tests,clippy}.log`。
+- RunPanel重启后的台账恢复可能在receipt返回前触发React渲染；现在身份守卫认可本次
+  恢复产生的身份，同时继续拒绝新提交的run_id/operation_id。延迟render测试先红后绿；
+  run-model+run-polling 42项通过，typecheck、定向eslint/prettier通过，
+  `/tmp/colm-run-restore-{red,green,typecheck,eslint,format}.log`。
+
+源码8个Rust文件的相关Clippy通过，日志
+`/tmp/colm-bd-manual-final-gui-clippy.log`、`/tmp/colm-bd-manual-srfdata-clippy.log`、
+`/tmp/colm-bd-manual-routing-clippy.log`、`/tmp/colm-prune-legacy-clippy.log`。
+未跑完整workspace物理测试，不把上述定向检查替代全量验收。
+独立只读复核确认科学掩码、静态拓扑、输出别名、legacy pin及恢复竞态修正。
+
+实操证据根目录为 `output/manual/bd-river-20261104`，包含源NML及SHA256、
+原生截图、UTC操作日志、构建标识和远程运行记录。失败的237796、237819、237820
+均保留，新r172作业为DB 237822、ctl 237823，后续状态以记录包的最终验收为准。
+引擎快照 `002e50b922a71610`，源码 SHA256
+`3865382e0ec20ad2b5abd7a853fac7fb73037eb76b6ca87be502058fabb72a1d`。
+
+最终原生应用为
+`gui/src-tauri/target/preview-bd-river-manual-restored-20261104/CoLM Desktop.app`，
+PID1754、window11249、ready complete；正常关闭旧窗口后重启。
+`/tmp/colm-bd-manual-restore-native-build.log`：stage14.24秒、kernels14.39秒、app52.07秒，均exit0。
+重启后第一次打开DB即自动恢复237822运行中37/48，未手动核对；
+`output/manual/bd-river-20261104/evidence/72-db-first-open-restored.json`。
+两例最终均48/48、模型exit0、33个非空块、176457patch；
+完整主网格和unitcat每例各24小时记录，时轴严格递增。
+`evidence/completed-output-inspection.json`及`*-r172-job-exit_code`、73/78号原生截图为证据。
+DB水库830轴、首末643有效/187缺测，实际写出volresv/qresv_in/qresv_out及分汊f_bifout。
+首末选定字段非缺测有限值检查通过；未做全时段物理守恒、长期或对观测验收。
+DB较大负入流及水深、输出时区元数据不足明确列入手册限制，未作科学合理性通过声明。
+
+### 2026-11-05 远程创建与 forcing 复核及两年多节点提交
+
+远程建例发布成功但响应丢失时，现在凭持久化 publication receipt 核对 token、请求、目录身份及文件摘要，
+同一请求恢复原发布结果，不能据已有目录冒领新算例。缺失 marker 的 abort 是不改文件的空操作。
+孤立 out 拒绝采用；仅有本次创建所有权、普通且为空的 out 可在中断后恢复，文件、链接和非空目录仍拒绝。
+`python3 crates/colm-cli/src/remote_cmd/remote_cases_test.py` 最终30/30，
+`/tmp/colm-bd-audit-final-remote-tests.log`；中断后空 out 回归先红后绿，
+`/tmp/remote-creation-owned-output-{red,green}.log`。
+
+`read_case(text, dir)` 投影有效 forcing header，GUI 初次打开和保存后回读均提供算例目录。
+数组 arity 传至界面；整数组输入验证完整长度和元素类型，清除旧下标覆盖；下标形式原文只读，
+不把标量当完整数组，也不补造默认槽。header 不可读时字段留空禁用并保留引用修复入口。
+`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib forcing -- --test-threads=1` 对应31/31，
+`/tmp/forcing-green.log`；实际GUI链4/4，`/tmp/forcing-ui-final3.log`。
+实际原生IPC只读回查 Mekong_DB，确认 JRA3Q 目录、dataset、8槽 dtime/offset 和逐项 fprefix 保留；
+记录于 `output/manual/bd-river-20261104/multinode-20261105/evidence/events.jsonl`。
+边界：远程目录外共享 header 未实现自动下载；缓存缺失明确报错。损坏 header 仍阻止保存，
+更换引用后可修复，不以默认值掩盖损坏。schema共7个forcing数组，regbnd为4槽，其余6项为8槽。
+追加 `all_seven_forcing_arrays_enforce_schema_arity_and_element_types` 定向回归1/1，`/tmp/forcing-all-seven.log`：
+逐项验证完整长度接受、单值/短/长数组及错类型拒绝，regbnd还验证整数与实数混合、非有限拒绝。
+
+OpenBench共享标量读取拒绝换行续值，覆盖 num_cores 和 output_dir，避免核数降为4及路径校验漏过。
+Bare不使用调度器每节点拓扑限制，但保留任务CPU预算校验；新增CLI错误有精确双语映射。
+结果日期非法提示改中性 Invalid date。
+`colm-cli remote_bench_tests --test-threads=1` 58/58，`/tmp/bench-edges-cargo-tests.log`；
+CLI Clippy tests通过，`/tmp/bench-edges-clippy.log`；GUI比较48/48及typecheck/eslint通过。
+GUI最终 `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --lib --tests -- -D warnings`
+exit0，`/tmp/colm-bd-audit-final-gui-clippy.log`；两个workspace fmt及git diff --check通过。
+未给出具体断言的V区三个边角不标记为已修；本轮未跑完整workspace或CI。
+
+两年多节点准备发现纯Rust冻结运行的CLI仍把argv/cwd改到节点本地/tmp别名，其他节点不可见。
+现在纯Rust执行保留共享规范路径；Fortran路径仍保留别名及长度保护。
+定向21/21和原生启动路径11/11，`/tmp/colm-shared-mpi-{green,native}.log`，CLI Clippy通过。
+这是启动路径验证，不能替代真实集群MPI运行验证。
+
+用户要求两年及每节点用满48核后，经实际GUI提交ctl 237829、DB 237830，
+两例各4节点×48核=192核、4MPI×48线程，normal队列、120小时上限。
+时段2000-07-01 00:00至2002-07-01 00:00，共730天/35040步，步长1800秒；
+DAILY输出预期730条，MONTHLY重启、MONTH文件分组，无新增预热。
+25个月×8 forcing文件均存在，含末月插值所需2002-07月；仅核对文件、NetCDF头和时间，
+未对约111.7GB内容做全量哈希。
+冻结official r173，engine 51fa84191506f30f，源码SHA256
+bd424a6029ab0597bfafff8106323d6562ecd6a9fec71485b01390a864b5dc2b。
+实际script.sh已核对BSUB -n192、span[ptile=48]、-W120:00、RAYON_NUM_THREADS=48、
+--ranks4和Hydra LSF -ppn1。两例仍PEND，调度器报空闲作业槽不足，未分配实际计算主机；
+没有降配、重复提交或取消作业，不能宣称两年已完成或多节点已跑通。
+证据：`multinode-20261105/evidence/{ctl,db}-two-year-script.sh`、
+`two-year-lsf-status.txt`、`forcing-two-years-inventory.json`及12/13号GUI恢复截图。
+
+包含本批全部源码修复的原生应用已本机构建并重启：
+`gui/src-tauri/target/preview-bd-river-audit-fixed-20261105/CoLM Desktop.app`，
+PID77929、window11603、ready complete。当前r174可监控冻结r173任务；首次打开即恢复两条PEND。
+stage95.48秒、kernels14.30秒、app53.84秒均exit0；
+`multinode-20261105/evidence/audit-native-build-final.json`和`audit-native-ready.json`。
+包内CLI嵌入的remote_cases.py与工作树逐字节一致，程序摘要匹配build stamp；
+本验证小节是在构建后补写，不改变编译源码。原一日演示成功与长期科学验收仍分开记录。
+
+### 2026-11-05 已有地表裁取的阶段并行与调度退出码
+
+后续查 `bhist -l 237829 237830`：两任务均在01:04获配node082、node051、node028、node010
+各48槽，随后分别4秒和3秒退出。真实 `exit_code=1`，原生日志明确停在
+`multi-process mksrfdata does not support existing surface clipping`；两年主循环未开始。
+原生GUI正确显示失败，LSF却报告DONE：共享作业脚本以最后一次成功echo的0退出，
+并非状态读取遗漏了真实失败码。原记录及一日成功输出全部保留。
+
+`rust_preprocessor_stage_ranks` 仅对空间算例、Rust mksrfdata、
+USE_srfdata_from_larger_region=true使用单进程裁取，其余阶段保留请求进程数。
+原始资料生成仍支持按块并行，mkinidata和colm仍使用本例请求的4MPI×48线程。
+单独裁取的预检使用实际单进程数；完整链仍预检后续MPI条件，非法logical不被猜成true。
+运行日志明确解释阶段差异，未给用户增加手动切换配置。
+`cargo test --offline --locked -p colm-cli --bin colm-cli run_stage_tests -- --test-threads=1`
+22/22，`/tmp/colm-stage-ranks-green.log`；新增裁取回归先红，`/tmp/colm-stage-ranks-red.log`。
+CLI Clippy tests exit0，`/tmp/colm-stage-ranks-clippy.log`。
+
+共享job_script现在保存一次作业体退出码、写exit_code并以相同退出码结束，回执写失败也返回失败。
+Bare/Slurm/PBS/LSF的0/1/37实执行矩阵、LSFDONE不得覆盖exit1、回执写失败均有回归。
+colm-remote job_tests 40/40，`/tmp/lsf-exit-status-green.log`；
+Clippy exit0，`/tmp/lsf-exit-status-clippy.log`；首轮失败重现为`/tmp/lsf-exit-status-red.log`。
+旧调度历史不能追溯改写，真实exit1仍是软件判断终态的依据。
+独立只读复核APPROVE；未跑全workspace或CI。
+
+本机完整构建stage105.58秒、kernels17.09秒、app60.75秒，均exit0。
+最新版已正常关闭旧实例并启动
+`gui/src-tauri/target/preview-bd-stage-ranks-fixed-20261105/CoLM Desktop.app`，
+PID23161/window11977/ready complete，官方r175。
+源码SHA256 eeaeb944055301c49a6bb53536011348f163220e730b30ab3ce3d091627c606f。
+包内CLI摘要匹配build stamp，包含阶段选择提示与退出码修复。
+本次证据在 `output/manual/bd-river-20261104/multinode-20261105/evidence/retry-20261105/`，
+GUI新提交继续使用2000-07-01至2002-07-01、4节点×48核，冻结到新的运行目录，旧失败不覆盖。
+
+实际GUI重投成功：ctl237838、DB237839，均冻结official r175，服务器引擎09ef5916a755a222。
+ctl操作e8ff650c6aa6389a09aad98ec8219aa31f7c6878a17d82617b1d0fb1255743d5，
+DB操作be10b87eec1b31c357c7eec5fdb2f35c52aceb9d6bfa4b605719d50099b9227b。
+LSF实际分配ctl node038/010/091/069、DB node015/026/061/096，各节点48槽；两例均RUN。
+两例日志均确认单进程裁取成功、mkinidata的4个rank分别处理33块中的8/8/8/9块并成功，
+随后启动主模拟且有TIMESTEP持续推进。带采样时间的progress-snapshot.json记录ctl48步、DB5步，
+后续原生截图22显示ctl81步、2000-07-02；计数是采样状态，不是两年完成或物理验收。
+真实上传脚本验证192槽、ptile48、ranks4、RAYON48及新退出码传递均生效。
+前台GUI会自动核对，后台隐藏时按既有节流策略暂停；截图20是前台激活前的回执状态，
+真正运行及时间步截图为21/22。未为截图伪造服务器状态，也未再次提交同一操作。
+
+### 2026-11-05 fix-check2 优先回归与运行页澄清
+
+复核输入为 `tmp/gui-option-audit-2026-11-04/fix-check2/{00-summary,02-e2e-verification}.md`。
+该目录被git忽略；本节只记录已实际处理和验证的范围，不把“原53项未改”当作全部已经核实。
+
+- R5确证：下标数组的只读合成文本进入explicitValues，导致第4步model_configuration解析失败。
+  现在合成base键仅用于显示，不发给配置校验；第4步真实请求回归先红后绿。
+- 运行页并行控件去重；匹配当前case/host/operation的已提交资源只读显示，独立于下次提交预算。
+  “全部”改为明确的提交阶段语义，包含地表准备、初始化、主模拟，不冒充当前执行阶段。
+  第3步增加已有大区域地表裁取开关，第5步显示当前算例地表准备方式和来源目录。
+  单点不使用该空间裁取路径，两页面禁用这两项并解释用途，不改原字段值。
+- N-R3/R4：case_profile_of不消费forcing组，移除分类时多余的header加载，真实open_case测试覆盖
+  缺失、坏header和远程外部未缓存三种。model_case_context仍严格物化；失败时仅在主case可解析
+  且有效header读取失败后，提供独立引用修复入口，配置/运行不冒充就绪。
+  真实Registry候选物化→保存集成验证不存在/坏新引用均拒绝且原case不变，有效新引用可以修复。
+  没有实现远程外部header自动下载，没有改变原未改引用时NotFound的兼容语义。
+- S-N2/N3/N4：已发布目录的incomplete abort不删改服务器文件，仅允许客户端释放旧pending；
+  后续create仍核对归属。孤立runs拒绝接管。预期拒绝不再带Python traceback，GUI按断连与目录
+  冲突分别提示。sync改变配置后旧receipt不得回放覆盖；发布后marker残留可安全恢复。
+- C-03及C-R3：三层output_dir守卫均拒绝$环境展开及Windows成对非空%VAR%，保留字面单个%。
+  Python ntpath探针确认Windows展开行为。补真实anyhow多行stderr翻译与续行错误提示；
+  Bare不校验自己未使用的walltime，调度器仍校验。实际Windows应用未验。
+- D02/D03站点链：切准备任务清输出目标及旧产物；make_site默认不覆盖，明确确认才overwrite。
+  CLI在相邻独立目录先生成并audit，默认hard_link原子发布、确认后rename替换，失败保留旧文件；
+  并发目标创建会拒绝发布。未把其它准备产物、D05草稿或原D区其余问题标为已修。
+- S04：时间步前端与后端统一为1–3600整数秒，边界和非有限数回归通过。
+
+验证证据：完整GUI `npm test` 1691/1691（`/tmp/colm-audit-integrated-gui-tests-fixed.log`）。
+初轮完整测试6个失败均为旧抽取fixture缺少新增guard/helper上下文，补fixture后全绿，未删生产保护。
+CLI window_tests 39/39，包括真实NetCDF站点生成及新增原子发布用例，
+`/tmp/colm-audit-integrated-window-tests.log`。
+GUI project_tests25/25、候选引用修复1/1、最终GUI Clippy通过，
+`/tmp/forcing-open-green.log`、`/tmp/forcing-repair-{candidate,clippy}.log`。
+远程创建Python34/34，`/tmp/remote-creation-tails-final.log`。
+OpenBench CLI59/59、GUI后端19/19、前端78/78及两端Clippy通过，`/tmp/bench-percent-*.log`。
+CLI/GUI集成Clippy通过，`/tmp/colm-audit-integrated-{cli,gui}-clippy.log`；265 IPC契约验证通过。
+未运行完整Rust工作区、真实Windows或CI，未提交GitHub。
+
+性能核查仅只读，未重提/中断237838、237839。ctl实际4节点×48槽，09:30:14的371步至09:32:12的432步，
+约1.93秒/步；LSF 09:29:30至09:31:30 CPU累计80257→89608秒，平均约78核、申请192核。
+按33份landpatch NetCDF头与真实连续整块切分算法重建4rank patch数54508/38068/41594/42287，
+最重为均值1.236倍。ctl的区域河网65855单元、940河系，最大河系18017单元（27.36%）；
+不能把DB带分汊闭包的86564/1178当ctl网络。代码确认每rank重复完整河网，普通河系内部串行、
+河系之间Rayon并行；阻塞交换含等待慢rank。上述机制和负载不均不足以确认实际耗时主因；
+未启用逐阶段计时、未做同配置1对4节点对拍，计算节点SSH关闭连接，未取得实时perf采样。
+原始观察保留 `/tmp/colm-bd-parallel-observations-20261105.json`。
+
+本轮原生完整构建stage95.35秒、kernels13.55秒、app51.26秒全部exit0，已正常重启
+`gui/src-tauri/target/preview-bd-ui-clarity-fix-check2-20261105/CoLM Desktop.app`，
+PID63378/window12419/ready complete，当前GUI官方r176，源码SHA256
+900532541754737ff17e7a2bea0ced28a5a6a388620ff6dd9b49300b7aac6fd3。
+已有任务仍冻结r175/09ef5916a755a222，237838、237839保持RUN，未重提。
+23号实机截图显示当前已提交4×48与下次提交默认1分区，标签统计并行配置只出现一次；
+30号显示下次提交阶段ALL含义；31号保留原作业推进到2000-08-11的采样。
+运行期间步骤切换与字段仍锁定，所以裁取入口截图29来自独立空间配置副本，不冒充在线改运行参数。
+
+额外隔离原生实机验收HOME=/tmp/colm-ui-audit-isolated-home-20261105，端口18911、
+PID63504/window12423；appDataDir由真实IPC确认指向隔离HOME，没有复用用户项目目录。
+本机示例站点经真实CLI new产生标准带下标forcing的测试算例；另复制配置生成坏header场景。
+25号截图确认引用修复入口可达且运行禁用；不存在替换路径由后端拒绝，原case字节未变。
+更换为算例自有repaired.nml后正常重读；28号确认第4步完整参数目录加载、无notice-error及R5错误。
+26/27属于异步重读或旧全局拒绝通知仍显示的中间帧，未作为恢复成功证据。
+空间副本的中英文裁取入口均可见；单点禁用用途有真实render回归。
+真实make_site IPC默认拒绝已存在目标并保留原字节，显式overwrite=true后生成NetCDF；
+测试产物readiness仍blocked，未冒称完整科学输入或运行模拟。
+隔离窗口最后正常关闭，用户最新版窗口保持开启可用。
+详细证据在 `multinode-20261105/evidence/ui-clarity-fix-check2/` 及对应23/25/28/29/30/31截图。
+视觉复核发现25/28/29虽有正确DOM状态但原生截图为空白后台窗口，故它们仅保留作操作记录，
+不作为视觉验收证据。重新以前台可见隔离窗口PID65827/window12475复做配置入口与修复流程，
+32/33/34号补拍均经view_image逐张确认有真实内容，正式手册改用这些图。
+重拍不改变编译代码，也不触碰运行中的服务器配置；补拍窗口最后正常关闭。
+
+原报告其余问题的本轮边界：A03的“下次问答仍旧配置”不成立，每次send会assistant_start重读并configure；
+A01托管节点复用是独立待核实问题。D05已有运行close guard但未保存表单仍可能切页丢失；
+H03合成变量完整导出有明确调用链问题，本轮未修改；H01上限20属于已确认限制，未更改产品契约。
+S02、R01、D06、A02等未完整核实，不据文件未改而宣称确证；原53项没有整体关闭。
+
+### 2026-11-05 GUI 审查批次修复（T-01 / R-01 / H-03 / D-05 / D-03 / N-03 / N-04 / H-07 / H-08 / C-05）
+
+本轮按 `tmp/gui-option-audit-2026-11-04/fix-check3/00-summary.md` 的优先顺序继续修；原 61 条发现
+仍有 48 条未修（产品取舍类见边界），本批只动以下 10 项，不宣称整体关账。
+
+- T-01：`case-forcing-repair-save` 加入 `history.rs` 的 assistant commit 白名单，并写进白名单回归测试；
+  GUI `--lib` 的 `every_fixed_commit_button_is_an_audited_target` 重新变绿。
+- R-01：`RunPanel` 持久化条件从"批量或空间自动并行"放宽为"远程单点也持久化"（本机单点仍不写入默认值），
+  `run-parallel.test.ts` 覆盖远程单点重开恢复与本机单点不污染。
+- H-03：组合评估量没有原生 series；"导出完整 CSV"与"刷新模拟曲线"在组合量下禁用并给双语原因，
+  两个函数入口再兜底拒绝；export-page 测试上下文补 `nativeVariable/singleRows/overviewMetric/bilingual`。
+- D-05：准备页加 `useNavigationGuard`：已有源文件/映射/探测结果且尚未生成时切页提示，生成产物后放行；
+  preparation-mapping 测试覆盖。
+- D-03（观测半条）：`observation-table-convert` 新增 `--overwrite 1`，默认已有 `<site>_Flux.nc` 拒绝；
+  GUI `convert_observation_table` 传可选 `overwrite`，先按默认调用，命中拒绝后弹确认再重试；CLI 加
+  `refuses_existing_observation_outputs_until_overwrite` 回归。站点链上一轮已修。
+- N-03：`read_timing` 预热判据从"年份 py>sy"改为"截止时间戳晚于起始时间戳"（CoLM.F90:341），
+  同年预热不再被读成无预热；`spinup_inside_the_start_year_counts_like_colm` 覆盖。
+- N-04：`DEF_HIST_FREQ=none` 现在有双语标签"不写历史文件"，输出变量卡片上方说明不会写出结果；
+  CasesPage 测试覆盖。
+- H-07：`canDeleteHistory` 与后端 `confirmed_status` 对齐，加入 `ui_succeeded/ui_failed/paused/needs_review`。
+- H-08：自动评估不再关闭用户正在编辑的评估设置对话框（仅显式"更新评估"关闭），自动评估传
+  `keepSettingsOpen: true`。
+- C-05：新增 `unreferencedVariableProblems`，在 `structuralProblems` 中把"变量没有可用参考数据"列为
+  运行前阻断项，不再静默过滤；compare 测试覆盖。
+- 顺带：为 `convert_observation_table` 新参数重新生成 265 条 IPC 契约。
+
+验证：`gui` npm test **1696/1696**，typecheck/lint/format 全过；GUI crate `--lib` 646 通过 / 9 失败
+（7 条为本沙箱 `/bin/ps` 环境用例；2 条 xerj 端口用例在并行跑全量时抢端口，单独 `--test-threads=1`
+跑 `xerj_manager::xerj_manager_tests` 28/28 通过）；GUI `config_tests` 156/156（含 N-03 新用例）、
+`history::tests` 15/15；CLI `observation_table::tests` 7/7、`window_tests` 39/39；`xtask check-gui` 265；
+GUI/CLI Clippy 与两套 fmt 通过。未跑完整 workspace 与 CI。
+
+边界：H-01（比较 20 条上限）、S-02（mesh 重建/拒绝）、D-04（制作站点模式选择）、V-02（研究成员选择）、
+D-06（产物命名配对）、A-01/A-02/A-03、R-02..R-08 等仍未修，其中若干需要产品决策；原 48 条未关闭。
+本批只保证上述 10 项在测试层面闭合，未做真实 Slurm/LSF/OpenBench 端到端复验。
+
+### 2026-11-05 GUI 审查批次修复（第二批：R-07/R-03/L-01/L-02/V-03/V-04/N-05）
+
+继续按 fix-check2 清单修技术口径明确的小项，产品取舍项仍未动。
+
+- R-07：本机停止在准备/启动阶段没有可终止进程时，不再显示"已向 0 个进程发送停止请求"，
+  改为"已请求停止…在检查点停下并等待真实退出"。
+- R-03：前端 ranks/workers 上限 4096、线程 1–256；Tauri `sidecar` 的 `mpiRanks`/`threads`
+  同样限制 1–4096，避免负值/超大值穿透到 CLI。
+- L-01：`assistant_history_status` 调 `history-repos` 不再传只被 `history-sync` 消费的
+  `--repository both`；对应 argv 测试同步改为不带该参数。
+- L-02：`workspace_remote` 的 `knowledge` 操作不再追加只被 `submit` 消费的 `--remote-root`
+  与调度参数，只保留 CLI `knowledge()` 真正读取的 `--host`。
+- V-03：AI 学习"保存为新模型版本"的 `model_freeze` 现在传 `finish: true`，冻结后与文案一致地
+  删除草稿，不再留下空草稿。
+- V-04：研究导出目录在 GUI 先校验绝对路径（`/`、盘符或 UNC），CLI `study/export.rs` 的
+  `prepare_output_dir` 也拒绝相对路径，避免按 sidecar CWD 落盘到意外位置。
+- N-05：版本参数对话框的逻辑默认值改为 Fortran 字面量 `.true.`/`.false.`，不再显示 `true/false`。
+
+验证：前端 `npm test` **1697/1697**、typecheck/lint/format 全过；`assistant::assistant_tests`
+51/51；`workspace_tests` 12/12；`colm-cli study::export::tests` 15/15；`colm-case` 81/81；
+GUI/CLI Clippy、两套 fmt、check-gui 265 契约通过。GUI `--lib` 全量 646 通过 / 9 失败（7 条
+`/bin/ps` 环境用例 + 2 条 xerj 端口并行抢占；xerj 单线程套件单独 28/28）。未跑完整 workspace/CI。
+
+边界：H-01、S-02、D-04、D-06、V-02、A-01、A-02、A-03、D-07、D-08 等 P2 仍需产品决策；
+原 61 条累计已修 28、剩余 33（P2 10 + P3 23），本批未改变这一边界。
+
+### 2026-11-05 GUI 审查批次修复（第三批：R-05/R-06/D-10/D-11/D-12/H-09）
+
+- R-05：`projectRunSettings` 增加 `parallelBudgets` 整表并持久化/恢复；换回之前那台服务器时
+  自动并行预算还在，不再只记住最后选中的服务器；旧字段 `nodes/coresPerNode` 保留兼容。
+- R-06：手动 MPI ranks 不是服务器节点数整数倍时，页面显示双语警告并禁止提交（原来只在
+  提交后由调度器拒绝，界面无提示）；前端把 `parallelProblem` 纳入提交前检查。
+- D-10/D-12：准备页改槽位映射（变量名/单位/附加分量）或观测列映射时，清空上一次结果的摘要/
+  错误/取消提示与 `produced` 产物，避免“用于新算例”仍带旧产物；换源文件同样作废产物。
+- D-11：观测映射字段标签显示目标单位与“需要质控列”，不再只有变量名。
+- H-09：多站比较请求快照记录 `time_basis`，比较 CSV 增加 `time_basis` 列（旧快照缺省为
+  `model_clock`），并纳入比较条件 key；导出条件列不再缺少时间基准。
+
+验证：前端 `npm test` **1699/1699**、typecheck/lint/format 全过（新增 run-parallel 跨服务器
+预算恢复与手动 ranks 约束用例；analysis-state/page-results/diagnostic 断言同步补 time_basis 列）。
+本轮仅前端与测试改动，未跑 GUI/CLI Rust 侧；此前 Rust 门禁结果仍适用。原 61 条累计已修 34、
+剩余 27（P2 10 + P3 17，S-05/R-08 按同一死接口计）。
+
+### 2026-11-05 GUI 审查批次修复（第四批：D-09/L-03/A-06）
+
+- D-09：准备页数值校验不再把内部 key（src/dst/lon…）当字段名显示；经度/纬度/UTC 偏移/
+  时间步长/观测高度加上下界；准备页测试覆盖"经度 999 报经度范围"。
+- L-03：自由文本值以 `--` 开头会被 CLI 当作参数（`Opts::parse` 误报 needs a value）。准备页
+  在提交前对 src/dst/列名/站名等 argv 字段统一拒绝并给双语原因；算例名 `caseDirectory` 也
+  拒绝 `--` 前缀（case-model 测试覆盖）。
+- A-06：助手设置保存前给输出上限/超时/上下文/会话上限加上界（1–1000000、1–3600、
+  1024–10000000、0–1000000、0–100000000），超界在保存前双语报错，不再等后端/模型拒绝；
+  settings-llm-guard 测试覆盖。
+
+验证：前端 `npm test` **1701/1701**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+R-02（自动并行"申请资源"展示 provenance.parallel_plan）经查已在运行页澄清批中实现
+（`submittedParallelPlan` + 当前已提交资源只读区），复核后按已修处理。原 61 条累计已修 37、
+剩余 24（P2 10 + P3 14）。
+
+### 2026-11-05 GUI 审查批次修复（第五批：N-06/R-04/H-05）
+
+- N-06：运行页在打开算例时读一次 `case.nml` 并调用 `unknown_fields`；发现 CoLM 不认识的
+  namelist 成员时在运行面板上方用双语警告点名，不再等运行几十秒后才失败。读取失败时静默跳过，
+  不把检查失败误报成算例错误。
+- R-04：批量运行页暴露“本次/下次提交阶段”和“重新运行全部阶段”两个控件（后端 `run_batch`
+  本来就接收 stage/force）；编译配置/引擎/前处理仍按各算例 profile 决定，不提供批量覆盖。
+  run-next/run-parallel 测试更新：批量可见 stage/force，不可见 kernel/engine/preprocessors。
+- H-05：历史筛选选“待核对”时改发派生字段 `needsReconciliation: true`，不再按字面 status
+  过滤；submitted/cancel_requested 等同样待核对的记录不再漏掉。historyFilter 与页面测试同步。
+
+验证：前端 `npm test` **1702/1702**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+原 61 条累计已修 40、剩余 21（P2 10 + P3 11）。
+
+### 2026-11-05 GUI 审查批次修复（第六批：A-07/H-06）
+
+- A-07：助手面板注册 `useCloseGuard`：设置页有未保存草稿时关应用会提示“关闭应用会丢失”，
+  与关面板的确认共用同一 dirty 状态；不再只在点面板关闭时拦。
+- H-06：`EnergyDiagnostic` 增加顶层 `time_basis` 字段；抽出 `energyDiagnosticSeries(report)`
+  合并顶层基准与 series（旧后端缺字段时按 series/模型钟兜底），诊断曲线与“时间基准”标签
+  用它。series 单测覆盖“energy_summary 顶层 utc 基准不被 series 的模型钟覆盖”。
+
+验证：前端 `npm test` **1703/1703**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+原 61 条累计已修 42、剩余 19（P2 10 + P3 9）。
+
+### 2026-11-05 GUI 审查批次修复（第七批：A-05/A-08/V 区三边角）
+
+- A-05：联网搜索的 DeepSeek 计费/Key 文案只在“内置后端 + DeepSeek 服务商”下显示；外部后端或
+  其它服务商改为说明“联网能力由所选服务商提供、费用/Key 取决于对方”，不再让用户按 DeepSeek
+  文案去找不存在的 Key 入口。
+- A-08：切换界面语言时清空已显示的单语 notice/error notice（它们渲染时定死语言、无法原地重译），
+  避免中英混排残留。
+- V 区边角：
+  1) `study-pause` 与 resume/retry 一样加 `!executionIssue`（旧研究无模型身份时暂停也被禁用）；
+  2) 远程 legacy 研究提示补“先归档/关闭远程记录，再在本机新建研究（原结果保留）”；
+  3) `hybrid-info`/`hybrid-check`/`hybrid-fit`/`hybrid-save-version` 四个动作都按 executionIssue
+     关闭，不再用当前修订冒充旧研究的执行身份。
+
+验证：前端 `npm test` **1703/1703**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+原 61 条累计已修 47（另 V 区三边角）、剩余 17（P2 10 + P3 7）。
+
+### 2026-11-05 GUI 审查批次修复（第八批：S-02/A-04）
+
+- S-02：空间算例第 2 步“范围与网格”改为只读（字段 disabled）+ 双语说明“网格在创建时固定，
+  直接改数字不会重建 mesh，需要换网格请新建模拟”；单点算例的经纬度等仍可编辑。
+- A-04：外部后端上报名可能是显示标签（如“Codex · gpt-5”）；`assistantModels` 只把不含空白/
+  分隔符的值放进可选模型候选，避免下拉把显示标签保存成非法模型 id；新增模型候选测试。
+
+验证：前端 `npm test` **1704/1704**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+原 61 条累计已修 46、剩余 15（P2 9 + P3 6）。
+
+### 2026-11-05 GUI 审查批次修复（第九批：D-04/S-05/R-08）
+
+- D-04：准备页“制作站点”新增“地表覆盖 / 植被方案”选择（IGBP/USGS/PFT/PC/Urban+四方案），
+  默认跟随算例 profile；`make_site` 传用户选择的 `mode`，不再静默按 IGBP 自然站生成。
+- S-05/R-08：`redirect_output_dir` 不再是死接口——算例第 1 步“输出目录”旁提供“更改…”入口，
+  选目录后调用 `redirect_output_dir` 建软链接并刷新上下文；远程算例/有未保存修改时禁用。
+
+验证：前端 `npm test` **1705/1705**、typecheck/lint/format 全过。本轮仅前端/测试改动。
+原 61 条累计已修 48、剩余 13（P2 8 + P3 5）。
+
+### 2026-11-05 术语调整：汇水区网格 → 流域单元网格
+
+按用户要求把中文界面里的网格类型“汇水区网格”改为“流域单元网格”（英文仍用 Catchment）：
+- `NewCasePage.tsx`：网格类型标签、网格文件标签、说明文案；
+- `model-settings.ts`：土地覆盖变化/网格河湖汇流/城市过程/材料四类“汇水区网格不支持…”原因；
+- `docs/simulation-configuration-order.md` 及其打包副本
+  `gui/src-tauri/engine/docs/simulation-configuration-order.md` 同步。
+`docs/implementation-verification.md` 里的历史记录不改写；“汇水区侧向流”是水文过程名，保留。
+验证：前端 `npm test` 1705/1705、typecheck/lint/format 全过。
+注意：已交付的使用手册（Screenshots/PDF）里的旧词与截图待下次构建应用后重新生成。
+
+### 2026-11-05 GUI 审查批次修复（第十批：H-01/D-07）
+
+- H-01：多站比较保留后端 20 条上限（不改产品契约），但在勾选处就拦住：已选满 20 条时未勾选项
+  禁用、外部运行“添加”禁用、列表上方显示双语解释；`compare()` 的报错也用同一常量。
+- D-07：`make_site` 在进入 CLI 前校验用户给的 rawdata：不存在/不是目录/非绝对路径直接双语报错，
+  不再让 `site-new` 静默回落到标称默认值；站点结果摘要新增“字段来源：站点文件 N / rawdata 栅格 N /
+  标称默认 N”，用户能看出哪些字段没来自真实栅格。`sitedata` 新增 15/15 测试（含 rawdata 校验）。
+
+验证：前端 `npm test` **1705/1705**、typecheck/lint/format 全过；GUI Clippy、check-gui 265 契约通过。
+原 61 条累计已修 51、剩余 10（P2 6 + P3 4）。
+
+### 2026-11-05 GUI 审查批次修复（第十一批：A-01/A-03）
+
+- A-01：托管 Xerj 节点增加启动配置指纹（请求二进制路径 + 偏好端口 + 数据目录）：
+  `ensure_started` 只在指纹一致时复用运行中的节点，端口/二进制改了会停旧节点按新配置重启；
+  切 external 或保存设置关闭检索时停掉应用自己启动的节点，不再留旧节点占端口。新增指纹单测，
+  xerj_manager 串行 28/28。
+- A-03：保存助手设置后，若 agent 进程已就绪，立即用当前项目/内核/会话重发一次 `assistant_start`
+  （configure），检索/模型/预算改动不再等下一次发送；重配失败不把落盘成功的保存报成失败。
+  前端 `npm test` 1705/1705、typecheck/lint/format 全过。
+- 生成契约重新生成（`command-contract.ts` 补上此前遗漏的 `overwrite`/`dir` 参数，265 条核对通过）。
+
+GUI `--lib --test-threads=1`：650 passed / 7 failed（全部为 `/bin/ps` 沙箱环境测试），Clippy、
+check-gui 265 契约通过。原 61 条累计已修 53、剩余 8（P2 4 + P3 4）。
+
+### 2026-11-05 GUI 审查批次修复（第十二批：V-02/D-06/D-08，并复核 A-02）
+
+- V-02：新增 `model_study_members` 命令列出 `<study>/members/*` 成员目录（排序、忽略隐藏项、
+  最多 200 个）；版本页“从研究导入”先选研究目录，多于一个成员时显示“研究成员”下拉（含
+  best）和“预览所选成员…”，预览/导入用所选成员。成员完整性仍由 `model_import_study` 核验。
+  新增成员列表单测；契约 266 条。
+- D-06：前处理默认产物名从 `_colm.nc` 改为扫描契约的 `_Met.nc`（导出 `preparedDestination`
+  支持 site/Met/Flux 后缀）；站点结果步骤提示新建模拟按 `<站名>_site.nc` 识别，避免前处理→
+  扫描→建例因命名对不上而断链。case-model 测试更新。
+- D-08：算例“数据与时段”页恢复 CBL/臭氧专用入口（单点本地算例）：选文件后调用
+  `configure_cbl_batch`/`configure_ozone_batch`，刷新算例上下文并提示；远程/空间算例隐藏。
+- A-02 复核：`provider_adapters::validate_reasoning` 已按模型/API 显式校验档位并在不支持时报错
+  （`does not support reasoning effort …; use …`），非静默替换，按已修处理。
+
+验证：前端 `npm test` 1705/1705、typecheck/lint/format 全过；GUI Clippy、check-gui 266 契约通过；
+GUI `--lib --test-threads=1` 651 passed / 7 failed（全为 `/bin/ps` 沙箱环境测试）。
+原 61 条累计已修 57、剩余 4（P3：S-06/H-04/V-05/C-04）。
+
+### 2026-11-05 GUI 审查批次修复（第十三批：S-06）
+
+- S-06：多站点建例完成后把用户选择的建例方式写入本地项目根
+  `.colm-desktop-multisite.json`（`{mode, repeat}`，原子替换）；`project_wizard_seed` 优先读该
+  标记，缺失/损坏/非法值时才退回原有启发式反推，避免特定日期把 per-site 误判成 first-year。
+  远程项目不写本机标记（服务器侧创建由服务器文件决定）。新增 `project_remember_multi_site`
+  命令与标记读写单测；前端创建成功后写入，写失败只提示不把已创建算例报成失败。
+- 契约重新生成：267 条命令。
+
+验证：前端 `npm test` 1705/1705、typecheck/lint/format 全过；GUI Clippy、check-gui 267 契约通过；
+GUI `--lib --test-threads=1` 652 passed / 7 failed（全为 `/bin/ps` 沙箱环境测试）。
+原 61 条累计已修 58、剩余 3（P3：H-04/V-05/C-04）。
+
+### 2026-11-05 GUI 审查批次修复（第十四批：V-05/C-04，并明确 H-04 口径）
+
+- V-05：“新建修改版”保留全部历史冻结修订可选（与项目页只列最新修订的规则不同），但在下拉里把
+  非最新的一条标成“旧修订 / older revision”，避免误当成当前修订。
+- C-04：远程 bench 状态脚本为每个项目追加 `run=` 历史运行行（最多 50 条，字段
+  run_id/state/config_sha/created_at/finished_at/report/error，过滤坏 meta 与 README 行），
+  `parse_status` 归并成 `projects[].runs`（按 created_at 升序）；比较页既有的“历史运行”列表
+  因此真正有数据，`view(run.report)` 可直接取回该次报告。新增 parse_status 单测；CLI
+  remote_bench 59 passed / 1 failed（`a_dead_holder_does_not_wedge_the_active_job_lock` 为
+  `/bin/ps` 沙箱环境限制，非本轮代码回归）。
+- H-04：不擅自改科学口径，在“评估设置”对话框显式写明：配对指标 `[from,to)`、曲线与闭合诊断
+  `[from,to]`；两处契约差异不再只藏在诊断文案里。若要统一为闭区间需产品确认后改
+  `colm-hist::pair::TimeWindow` 与黄金指标。
+
+验证：前端 `npm test` 1705/1705、typecheck/lint/format 全过；`cargo clippy -p colm-cli
+--all-targets` exit 0。原 61 条：60 条已落实（H-04 仅显式标注口径，数值统一待确认）。
+
+### 2026-11-05 GUI 审查收口（第十五批：H-04 统一闭区间）
+
+按用户“继续”的默认口径，把评估窗口统一为**闭区间 `[from, to]`**（结束时刻属于窗口）：
+- `colm-hist::pair::TimeWindow`：`contains` 与子日 label 判定改为 `<= to`，日/月/年
+  interval 包含判定原本就是 `<= to + eps`，现在两类一致；单测 `window_keeps_from_and_excludes_to`
+  改为 `window_keeps_both_endpoints_including_to`，边界 label 现在参与配对。
+- `colm-cli`：`observation_usable_times` 的观测过滤改为 `unix <= to`；`normalized_metric_window`
+  仍拒绝 `from >= to`（零长度窗口不是有效评估窗口）。
+- `flux_diagnostics`：输出窗口标记 `end_inclusive: true`，`model_records_in_window` 统计
+  改为 `<= to`，月覆盖的日期循环包含 `to` 所在日；对应 guard 测试改用更短窗口表达“记录不足”。
+- 结果页“评估设置”文案改为“指标/曲线/诊断统一闭区间 [开始, 结束]”。
+
+验证：`colm-hist --lib` 87/87；前端 `npm test` 1705/1705、typecheck/lint/format 全过；
+`cargo clippy --workspace --all-targets -D warnings` exit 0；`cargo fmt --all --check` 通过。
+`cargo test -p colm-cli --bins` 847 passed / 12 failed，全部为进程存活探测类测试
+（`Operation not permitted` 读不到 `/bin/ps` 等系统进程信息），非本轮代码回归。
+注意：闭区间会让“结束时刻恰好有记录”的指标多一条配对，历史黄金指标若落在边界上需重核。
+
+### 2026-11-05 用户补充 20 条问题复核与修复（并行 4 分区）
+
+对用户列出的 14 条功能问题 + 6 条低优先级残留逐条复核，确认绝大多数真实；按 4 个不重叠区域并行修复，
+Lead 统一复核并跑全量门禁。
+
+功能问题：
+1. 历史「待核对」筛选：`HistoryFilter` 补 `needs_reconciliation` 并映射 `Query.needs_reconciliation`；
+   新增台账测试（true/false/None + camelCase IPC）。—— FIXED
+2. 比较 CSV time_basis：`AnalysisRow.time_basis` 逐行导出，缺省回退请求快照、再回退 model_clock；
+   混合时钟单测。—— FIXED
+3. 准备页 site-mode：JSX 渲染过滤补 `prep-site-mode`，无算例时缺省 igbp 可切换；假 React 树断言。
+   —— FIXED
+4. 检查输入过早解除离页保护：dirty 改为 `edited && !inputsConsumed`，检查不算消费、生成/最后一站才放行。
+   —— FIXED
+5. 改普通字段仍可复用旧产物：`set()` 真变化时清 produced/declined 并置 dirty（同值/仅切任务不清）。
+   —— FIXED
+6. 前处理产物重复后缀：`preparedDestination` 先识别已带 `_Met/_site/_Flux` 后缀再拼接，含大小写。
+   —— FIXED
+7. 观测转换禁止覆盖竞态：唯一暂存名（pid+纳秒+序号）+ RAII 清理 + `hard_link` 原子禁止覆盖，
+   overwrite=true 才 rename；新增 8 线程并发测试（恰一成功、绝不覆盖）。—— FIXED
+8. 版本页单成员研究：成员数==1 直接传实际成员；多成员保留选择；截断返回 `{members,truncated,total}`
+   并显示提示。—— FIXED
+9. AI 版本保存刷新失败误报：`finish:true` 冻结成功后先提交成功状态/提示，刷新失败单独 warning；
+   冻结前失败才提示“保留可恢复草稿”。—— FIXED
+10. 本机空间算例 threads：持久化条件补 `!spatialCase` 例外，重开恢复；本机单点仍不落盘。—— FIXED
+11. Codex 思考档静默回落：`resolve_choice` 返回 Result，不支持时明确报错并列出可选档位。—— FIXED
+12. Codex 显示标签当模型 ID：外部分支过滤后端显示名（Codex/Claude Code/OpenCode 及带 · 标签），
+    已保存 current 保留。—— FIXED
+13. 联网搜索说明：按实现二分文案——内置后端用 DeepSeek Search/Fetch + DeepSeek Key（与回答服务商无关），
+    外部后端用自带联网、不计 DeepSeek 费用；关闭均连带历史/GitHub 离线。—— FIXED（仅文案）
+14. 自由文本 `--` 开头：`workspace.rs` 对目的/说明/导入/撤销说明/相对路径统一双语拒绝；
+    GUI workspace 测试 14/14。直接 CLI 全局解析未改（避免风险）。—— FIXED（GUI 边界）
+
+低优先级残留：
+- 自动评估成功分支关设置框：正常分支也按 `keepSettingsOpen` 决定。—— FIXED
+- 成员列表 200 截断：后端返回 truncated/total，前端显示“共 N 个只列举…”。—— FIXED
+- 会话轮数上限：前端改为后端一致的 100,000，token 上限对齐 1,000,000,000，固定中文错误补双语映射。
+  —— FIXED
+- 切语言 historyError/endpointGuardError：语言变化 effect 清空这两个本地错误。—— FIXED
+- 取消观测覆盖确认红错：识别 CancelledError，按“决定”显示 declined，不推全局红条。—— FIXED
+- 远程多站预热模式：远程项目把标记写到本机镜像根（`result.root`），重开可读；服务器侧发布未做。
+  —— PARTIAL（本机重开生效；换机/清缓存仍回退启发式）
+
+验证（Lead 全量）：前端 `npm test` 1719/1719、typecheck/lint/format 全过；GUI Rust fmt/clippy/check-gui
+267 契约通过，`--lib --test-threads=1` 655 passed / 7 failed（7 条 `/bin/ps` 沙箱环境）；
+根 workspace fmt/clippy 通过；`colm-agent --lib` 429 passed / 1 failed（`out of pty devices` 环境）；
+`observation_table` 9/9、`status_parses_historical_runs` 1/1。
+
+### 2026-11-05 对抗复核后的补修（复核 A/B 发现）
+
+两个只读审查员对本轮 20 条修复做对抗复核；Lead 按发现补修并加防回退测试。
+
+复核 A（准备/运行/版本/助手）发现：
+- A-01（P2）：准备页离页保护是硬阻断且无出口（`edited` 只置 true，guard 只 notify）——修：页面上新增
+  “放弃未生成的输入”动作，显式清 `edited/inputsConsumed/produced/imported/result` 后允许离开；
+  guard 文案指向该按钮；`changeMode` 重置 `edited=false/inputsConsumed=true`，切任务不再误拦。
+- A-02（P2）：表格任务“生成数据”后改 src/dst/映射不清 `imported` 暂存列表，仍可对旧 staged 文件
+  “修复并完成”写出旧数据——修：普通字段变化时同时 `setImported([])`。
+- A-04（P3）：hard_link 在 exFAT/SMB/NFS 上首次发布也会失败——修：错误改为双语可操作提示
+  （换本机磁盘或 `--overwrite 1`），并保留 fail-closed 不覆盖；不引入有竞态的 rename 回退。
+- A-05（P3）：Codex 思考档报错未接 `errorText`——修：面板把两类报错翻译成双语可操作提示。
+- A-06（P3）：`preparedDestination` 只剥一层后缀（`A_Met_site.nc`→`A_Met_Met.nc`）——修：循环剥
+  已知后缀，测试覆盖双重后缀。
+- A-07（P3）：版本页“从研究导入”的候选/截断状态跨草稿残留——修：草稿变化时清空成员候选、
+  截断状态与预览。
+- A-03/P3（RunPanel 项目级槽位被单算例覆盖）与 A-08 部分测试缺口未改，记录为已知设计边界。
+
+复核 B（数据/契约）发现：
+- time_basis CSV 只导 `.kind` 丢偏移——修：CSV 写 `local_standard_time:offset=28800s`；
+  行缺基准且其它行有时写 `unknown`，不再借“当前打开算例”的基准冒充；
+- `supportedReasoningEfforts` 缺失与空数组被合并——修：缺字段视为未知放行，空数组明确拒绝；
+- imported 的 `ui_succeeded/ui_failed/paused/needs_review` 被当成待核对——修：视图终态列表与
+  `remove_operation` 对齐，`SCHEMA_VERSION` 升到 2 触发视图重建；新增 4 状态测试；
+- 旧服务器 metrics 缺 time_basis、CSV 列位置变化、CLI 覆盖错误文案：前两项已按 unknown/逐行处理，
+  observation 错误补 `--overwrite 1` 提示。
+
+验证：前端 `npm test` 1719/1719、typecheck/lint/format 全过；`colm-history --lib` 51/51；
+`colm-agent choices_resolve` 1/1；`observation_table::tests` 9/9；根 workspace
+fmt/clippy（cli/agent/history）通过。
+
+### 2026-11-05 复核后继续补修（持久化隔离 / 自由文本 / 校验）
+
+- RunPanel 持久化拆分：单算例页面不再写 `projectRunSettings`（项目级批量/建例交接槽位），
+  改为按算例目录写 `caseRunSettings`；批量页仍写项目级槽位。修复“单算例页覆盖混合项目
+  workers/scheduler/cpus”与“多个本机空间算例 threads 互相覆盖”（复核 A-03）。页面测试更新为
+  按算例断言并验证不污染项目级槽位。
+- CLI 自由文本：`Opts::parse` 对 `--note`/`--directive` 允许以 `--` 开头的值（其它 flag 仍拒绝，
+  避免漏值吞掉下一个选项）；新增 `opts_tests` 覆盖 `--note --example`。GUI 侧 workspace 校验继续保留。
+- 助手面板错误：`initError/historyError/reconcileError` 随语言切换清空；Codex 思考档报错翻译为
+  双语提示；设置保存新增 8 类后端固定中文校验错误的双语映射（模型名/接口格式/额外参数/
+  OpenCode/Claude Code 档位等）。
+- 准备页：新增“放弃未生成的输入”出口（解除硬阻断），字段变化同时清表格暂存列表；
+  `preparedDestination` 循环剥已知后缀；版本页切草稿清空研究成员候选；历史视图 imported
+  `ui_*/paused/needs_review` 不再算待核对（`SCHEMA_VERSION=2`）。
+
+验证：前端 `npm test` 1719/1719、typecheck/lint/format 全过；`colm-history --lib` 51/51；
+`colm-agent choices_resolve` 1/1；`observation_table::tests` 9/9；CLI `free_text_flags_accept` 1/1；
+根 workspace fmt/clippy（cli/agent/history）通过。
+
+### 2026-11-05 复核 C 补修（P3 收口）
+
+- CLI 自由文本解析精化：`--note` 空格形式只在它是最后一个参数时接受以 `--` 开头的文本，否则报错并
+  建议 `--note=TEXT`；新增 `--note=TEXT` 无歧义写法。`--directive` 保持旧行为（调度器指令可连写）。
+  新增测试覆盖“不吞下一个 flag”与 `=TEXT` 形式；`scheduler_directives_keep_their_leading_dashes`
+  继续通过。
+- history 项目聚合：`aggregate_status` 先把 `ui_succeeded/ui_failed` 归一为 succeeded/failed，
+  并把 `ui_*/paused/needs_review` 视为终态；`grouped.rs` 的 remove-run 谓词同步补齐。新增折叠状态测试。
+  前端补 ui_succeeded/ui_failed 标签。
+- CSV time_basis 归一化：`comparisonTimeBasisText` 接受 unknown 原文，不认识的形状写 `unknown`，
+  不再出现空单元格；新增非法形状测试。
+- RunPanel `back()` 写入项目槽位的字段集与保存 effect 对齐（补 autoWorkers 与自动并行预算字段），
+  避免“返回”丢设置。测试期望同步。
+- 未改：无硬链接文件系统的 GUI 出口（仍 fail-closed + 提示换盘）、`caseRunSettings` 仅内存
+  （页面重开语义）、远程标记服务器侧发布（设计边界）。
+
+验证：前端 `npm test` 1719/1719、typecheck/lint/format 全过；`cargo clippy -p colm-cli -p colm-agent
+-p colm-history --all-targets -D warnings` 通过；`colm-history --lib` 51/51；CLI 全量 850 passed /
+12 failed（均为 `/bin/ps`/进程探测环境限制）；`colm-agent choices_resolve` 1/1。
+
+### 2026-11-05 单算例运行设置跨重启持久化（复核 C F5b）
+
+- 新增 `gui/src/lib/case-run-settings.ts` 纯函数：`parseCaseRunSettings` 只接受对象形状条目、
+  丢弃坏数据；`serializeCaseRunSettings` 最多保留 100 个算例目录（按插入顺序淘汰最旧）。
+- `app-state.tsx`：启动时从 `localStorage['colm-case-run-settings']` 恢复 `caseRunSettings`；
+  状态变化时写回。批量运行的 `projectRunSettings` 仍是本次会话的建例/批量交接槽位，不落盘。
+- 单测：坏 JSON/数组/非对象条目被丢弃；超限淘汰最旧且保留最新。
+- 仍未做：远程项目标记的服务器侧发布（需扩展远程写协议）；无硬链接文件系统仍 fail-closed。
+
+验证：前端 `npm test` 全部通过（新增 case-run-settings 2/2）、typecheck/lint/format 通过。
+
+### 2026-11-05 目标轮收口：发布回退、解析边界与手册重生成
+
+- F2 无硬链接文件系统：`observation_table` 的发布在 hard_link 失败时回退到“独占发布锁 + rename”：
+  锁文件 create_new 原子争用、确认目标不存在后同目录 rename；崩溃只可能残留锁文件（10 分钟后
+  视为过期自动清理），不会留下半截产物。新增 2 条回退测试（正常发布/锁争用/过期恢复），
+  `observation_table::tests` 11/11。旧行为（无锁 rename）不再需要，GUI 在 exFAT/SMB 上也可用。
+- CLI `--note` 边界复核：空格形式只在它是最后一个参数时接受 `--` 开头文本，否则报错并建议
+  `--note=TEXT`；其它 flag 仍拒绝 `--` 值，避免漏值吞掉后续选项。`directive` 保持连写语义。
+- history 项目聚合：`aggregate_status` 归一 `ui_succeeded/ui_failed` 并把 `ui_*/paused/needs_review`
+  当终态；`grouped.rs` 移除运行谓词同步；前端补 ui 状态标签。折叠状态测试通过。
+- CSV time_basis：`comparisonTimeBasisText` 接受后端原文，不认识形状写 `unknown`（不再空单元格）。
+- RunPanel `back()` 与保存 effect 字段集对齐（autoWorkers/自动并行预算）。
+- **使用手册重生成**：用当前工作树构建 `preview-manual-term-20261105`（tauri app build exit0，
+  含 e2e-driver 与 bundle 资源），隔离 HOME 启动；重拍向导第 2 步（区域网格示例，显示
+  “流域单元网格”），更新标注/图例、正文术语与图注；重建 PDF：
+  `output/manual/general-20261105/CoLM-Desktop-使用手册-v0.3.0-beta.5.pdf`，
+  46 页、33 图；`pdftotext` 校验“流域单元网格”5 处、“汇水区网格”0 处。README 已记录
+  本次更新与截图来源。
+- 仍未做（设计边界，非本轮 bug）：远程多站模式标记只在本地镜像根（服务器侧发布需扩展远程写协议）；
+  单算例页首次挂载会写默认 caseRunSettings（默认策略变化不再作用于已打开过的算例）。
+
+验证：前端 `npm test` 1721/1721、typecheck/lint/format 全过；根 fmt/clippy（cli/agent/history）
+通过；`colm-history --lib` 51/51；`observation_table::tests` 11/11；CLI 自由文本解析 1/1；
+`colm-agent choices_resolve` 1/1。
+
+### 2026-11-06 复核后修 2 条 P2（发布锁竞态 / 产物命名与扫描规则）
+
+- 发布锁：取消按年龄自动删除过期锁（两个进程同时判旧时，A 删旧建新后 B 会删掉 A 的新锁，
+  两者都能发布、后者覆盖前者）。现在锁只由持有者删除；遇到遗留锁明确报错并给出锁路径，
+  由用户确认上次转换已退出后删除。回归测试改为“很旧的锁也不自动抢占，人工删除后才发布”。
+- 产物命名：`preparedDestination` 改为复用 `colm-cli` 扫描器的两套布局（PLUMBER2
+  `_site/_Met/_Flux`；Urban-PLUMBER `_site_v1/_metforcing_v1/_clean_observations_v1`），
+  只剥一层完整后缀、保留站名：
+  `A_metforcing_v1.nc → A_metforcing_v1.nc`（不再拼 `_Met`），
+  `A_Met_site.nc → A_Met_Met.nc`（站名 `A_Met` 不再被缩成 `A`）。
+  站点结果提示同步说明两种可识别命名。
+- 验证：前端 `npm test` 1721/1721、typecheck/lint/format 全过；`cargo fmt --all --check` 通过；
+  `clippy -p colm-cli --all-targets -D warnings` 通过；`observation_table::tests` 11/11。
+
+### 2026-11-06 批次 0 修复（F-V-06 / F-N-07 / F-D-01）
+
+按第三轮 GUI 全链条审查（`tmp/gui-option-audit-2026-11-06/`）的批次 0 修复三条：
+
+1. **F-V-06（条件性 P1，版本删除保护）**。故障注入证明项目目录不可读时 `model_usage` 把
+   official#1 的 cases 从 2 静默报成 0，而版本页「清理没用的版本」只看 `cases===0`，且
+   `model_delete(keepHistory:true)` 主动放弃历史阻断。修复（`gui/src-tauri/src/model.rs`）：
+   - `model_usage` 改 `uses_checked(..., true)`：项目目录不可读时版本页显示错误，不再静默 0；
+   - `model_delete` 增加 `BindingDeleteGuard`（清理期间算例迁移/缓存整理按"忙"拒绝，反向亦然）；
+     扫描前 `ensure_project_roots_known()` fail-closed：目录存在但不可读→拒绝；目录和上级都不存在
+     （卷可能未挂载）→拒绝并点名路径；仅"项目已删除、上级仍在"放行；
+   - 清理扫描改严格 + 2s 有界检查（沿用 prune 的 `bounded_scan`），不会挂住运行/创建锁。
+   实机验证（隔离 HOME，证据 `tmp/gui-option-audit-2026-11-06/e2e/evidence/f-v-06-*.json`）：
+   chmod 000 后 `model_usage` 返回 `Permission denied`（修复前同操作报 cases 2→0 不报错）；
+   `model_delete` 同样拒绝；伪造未挂载根时返回"无法确认项目目录…清理已取消"；正常路径仍返回
+   DeleteReport。
+2. **F-N-07（空间模板算例第 4 步锁死）**。`read_case` 回读投影把 forcing.nml 的
+   `DEF_forcing%dataset` 放进 `caseValues`，后端 `typed()` 用 8 值旧白名单拒绝（22 个 GUI 空间
+   模板里 17 个不在表内，去重 16 个 dataset 值：ERA5/ERA5_LEddy 同为 ERA5、MPI-ESM… 写 CMIP6），
+   整份 `model_configuration` 查询失败、第 4 步红字锁死。修复：新增
+   `configurationCaseValues()`（`gui/src/features/cases/case-model.ts`），`CasesPage` 构建
+   `model_configuration` 请求与 `setupEnvironment.caseValues` 时过滤 `nl_colm_forcing` 组；
+   forcing 字段仍由第 3 步控件与 forcing.nml 链路负责保存和回读。实机验证：把算例 dataset 改成
+   CMFD 后打开第 4 步，修复前 2 条 `.notice-error` + 持续"正在查询配置条件"，修复后 1369 参数、
+   无错误（证据 `f-n-07-casevalues-error.json` / `f-n-07-after-fix.json`）。
+3. **F-D-01（表格拆分明细被清空）**。`set()` 对任何字段都 `setImported([])`，往 ERA5 辅助文件 /
+   缺测阈值输入会清掉"表格已拆分"待办列表，逐站"修复并完成"入口消失。修复：`era5`/`short_gap`/
+   `min_overlap` 只影响逐站 finish，不再清空 imported；影响拆分结果的字段仍清空。
+   `preparation-page.test.ts` 覆盖。
+
+验证命令（当前工作树）：
+- `cd gui && npm test`：**1723 通过 / 0 失败**（新增 `configurationCaseValues` 用例与扩展的 `set()` 用例）；
+  typecheck/lint/format:check 全 exit 0。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib -- --test-threads=1`：**658 通过 / 7 失败**
+  （7 条为进程映像/`/bin/ps` 沙箱环境用例，与既有基线同类；新增 3 条 model 用例全过）。
+- `cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnings`、
+  `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --all --check`：exit 0。
+- `cargo run -q -p xtask -- check-gui`：267 条契约不变。
+- 实机 e2e 构建：`cargo tauri build --config tauri.bundle.conf.json --bundles app --features e2e-driver`
+  exit 0；隔离 HOME + 独立 app 标识；证据 `tmp/gui-option-audit-2026-11-06/e2e/`。
+
+边界：F-N-07/F-V-06 的修复前后现象来自同一隔离环境同一算例（形成 A/B），但没有在 HEAD 版本上
+另跑一份完整构建做双版本对照；`model_delete` 未真实删除（隔离环境只有受 removal_blocker 保护的
+latest official），"删掉仍绑定修订"的最后一步按代码链 + 前置条件实机确认；未跑真实服务器/CI。
+
+### 2026-11-06 批次 1–3 修复（剩余 P2 收口）
+
+按第三轮 GUI 审查 `tmp/gui-option-audit-2026-11-06/remaining.md` 的批次顺序，修完剩余 9 条 P2：
+
+1. **F-R-01**：批量运行页「阶段/强制重跑」只进页面契约、界面不渲染。`RunPanel.tsx` 在
+   `run-settings` 区对 `batchCases` 渲染 `run-stage`/`run-force`（单算例仍由引擎区渲染，不重复）；
+   `run-parallel.test.ts` 除契约字段外，增加"批量页真实渲染出阶段/强制控件"的断言（此前测试只断言
+   contract，掩盖了 R-04 修复未到用户）。
+2. **F-S-07**：多站点建例方式标记写到 `form.root` 而非项目根。新增
+   `multisite-model.ts::multiSiteMarkerRoot(root, name)`（复用 `caseDirectory`，非法名返回空），
+   `NewCasePage` 本地多站点改用它；`multisite-model.test.ts` 覆盖。
+3. **F-S-08**：空间专属"大区域地表资料/3D 栅格"设置切回单点后残留值仍被创建流程写出。
+   `simulation-model.ts` 新增 `spatialSurfaceOnlyFields`（含此前漏掉的
+   `USE_srfdata_from_3D_gridded_data`）；`NewCasePage` 在 kind→site 时清掉这些 caseValues、
+   构建 `model_configuration` 的 dataPatch 与创建字段 `changed` 时双重过滤；`CasesPage` 的
+   `spatialSurfaceOnly` 同步改用该常量。测试：单点创建的 `new_case.fields` 不含残留值，
+   两个可见空间控件保持禁用。
+4. **F-A-01**：同步 `assistant_save_settings` 内同步 `managed.stop()` 会卡 IPC/主线程。
+   命令改 `async fn`，停止动作移入 `spawn_blocking`（保存结果不等它，失败写节点 detail）；
+   契约参数不变（267 条 check-gui 通过）。
+5. **F-S-09**：空间算例第 2 步"范围与网格只能查看"只锁 DOM。`CasesPage` 的页面契约
+   `disabled` 增加"step===2 且空间算例且字段属于 `caseRangeKeys`"；测试断言
+   `DEF_GRIDBASED_lon_res/lat_res` 在契约里 disabled=true（助手 `ui_set` 只认契约）。
+6. **F-S-10**：空间项目从历史重开时向导不回填网格/边界/强迫场字段。`project.rs` 新增
+   `spatial_wizard_choices()`：从 `CaseProfile`（`DEF_domain` 四边界、分辨率、mesh/catchment、
+   shapefile）与 forcing.nml（`DEF_forcing%dataset/DEF_dir_forcing`）回填
+   west/east/south/north、dlon/dlat、mesh、catchment、forcing_mode/forcing_dataset/
+   spatial_forcingdir（模板数据集）或 forcing（自定义配置）；forcing 文件按
+   `DEF_forcing_namelist` 解析而非固定 `<case>/forcing.nml`。`project_tests` 新增纬度网格、
+   流域网格、非结构网格、自定义强迫四条断言。
+7. **F-D-02**：表格批量部分完成时"用于新算例"被导航守卫拦下且 newCaseSeed 已写入。
+   `useForNewCase` 改 async：还有未完成站点时先弹确认，确认后清 `imported`、`edited`、
+   `inputsConsumed` 再写种子并导航；取消则不动状态。`preparation-page.test.ts` 覆盖两条路径。
+8. **F-H-10**：评估设置文案把日/月/年指标也说成闭区间。改为按尺度分别说明：子日曲线/闭合诊断闭
+   区间，日/月/年配对指标要求整段落在窗口内、结束日期是截止时刻、两者在边界可能差一条。
+   H-04 的"统一语义"仍需产品决策，本次只修正文案口径。
+9. **F-C-01**：远程「历史运行→查看这次报告」无 remote 分支。远程模式改为
+   `fetchReport(host, project, run_id)` 先按 run_id 取回到本机镜像再 `bench_report`；本机模式保持
+   原路径。未新增单测（ComparePage 的该块是 JSX，现有测试不渲染它），本次只做代码修复 + typecheck。
+
+验证（当前工作树）：`cd gui && npm test` **1728/1728 通过**、lint/format:check/typecheck 全 exit 0；
+GUI Rust `--lib` **659 通过 / 7 失败**（7 条为既有 `/bin/ps` 进程映像沙箱用例）、
+新增 project 用例通过；GUI Clippy `-D warnings`、fmt `--check` exit 0；`check-gui` 267 契约；
+FE 静态检查全过。未跑真实服务器/CI；F-C-01 远程分支只到代码+类型层，未连真实服务器验证。
+
+### 2026-11-06 P3 批次 A/B（17 条）
+
+接第三轮审查剩余 P3，先修边界清晰的一批（每项都带回归测试或清单对齐）：
+
+- **F-R-04**：`unknown_fields` 把已知基名的数组元素（`DEF_LC_BETA(10)`、`DEF_forcing%fprefix(1)`）
+  误报成"CoLM 不认识"；改为按 `(` 前基名再查一次 schema/PFT override，基名未知仍报。
+- **F-H-11**：`comparisonKey` 不再包含 `time_basis`（catalog/series 异步到位只影响标注，不应把已完成
+  比较判成"条件已更改"并禁用导出）。
+- **F-H-12**：`countStatuses` 与 `confirmed_status`/`canDeleteHistory` 对齐：`ui_succeeded/ui_failed`
+  进成功/失败，`paused/needs_review` 进待核对，不再算"进行中"。
+- **F-D-03**：`short_gap`/`min_overlap` 原先的整数守卫表达式恒不触发；改为先判整数再判 0–1000000。
+- **F-N-09**：新建向导在 `DEF_HIST_FREQ=none` 时也显示"不会写出结果"提示（原先只有已有算例页有）。
+- **F-N-10**：已有算例第 2 步文案按单点/空间分开（单点坐标可调，空间只能查看），不再自相矛盾。
+- **F-C-05**：比较页运行前问题提示头/按钮 title 改为通用"配置还有不能运行的问题"。
+- **F-C-03**：服务器「时限」GUI 校验与 CLI `parse_walltime` 同口径（HH:MM、HH:MM:SS、D-HH:MM、
+  D-HH:MM:SS 且 >0），保存即拒绝；提示文案列出全部接受格式；remote_tests 覆盖 `8`/`0:00` 拒绝。
+- **F-L-05**：`remote-workspace knowledge` 不再传只被 submit 读取的 `--name`。
+- **F-A-02**：外部后端模型下拉保留空串"默认模型"（保存具体模型后仍能切回默认）。
+- **F-A-04**：Claude Code 思考档补 xhigh/max（与后端 `CLAUDE_EFFORTS` 5 档一致）。
+- **F-S-11 / F-N-11**：「更改输出目录」「接入 CBL 文件」「接入臭氧文件」三个会写算例文件的按钮
+  改为 `kind="commit"`，并加入 `history.rs` 的 assistant 审计白名单
+  （`every_fixed_commit_button_is_an_audited_target` 自动覆盖）；臭氧提示改为"算例配置（case.nml）"，
+  不再声称写 forcing.nml。
+- **F-V-10**：切草稿/切版本时清空"研究导入成功"横幅。
+- **F-V-07**：导出目录不是绝对路径时，输入框下方显示双语原因（不再只是按钮静默不可用）。
+- **F-C-04**：远程失败运行的固定中文 `meta.error`（`这次运行失败（退出码 N）…`）在英文界面翻译，
+  作业日志原文保留。
+- **F-A-03**：保存设置后若为 managed 检索，立即刷新设置页的托管节点状态/endpoint。
+
+验证：`cd gui && npm test` **1731/1731**、typecheck/lint/format 全过；GUI Rust 定向
+（config/remote/workspace/history 审计）与全量 `--lib` 见本轮门禁日志；Clippy `-D warnings` 与
+两套 fmt、`check-gui` 267 契约保持通过。
+
+### 2026-11-06 P3 批次 C（R 区 6 条 + H 区 4 条，目标第 2 轮）
+
+- **F-R-02**：自动并行计划的总 ranks（如 96×48=4608）不再被"手动 ranks ≤4096"的上界误拒；
+  4096 只限制手动输入。
+- **F-R-03**：手动 ranks 的"节点数整数倍"前置校验改用**实际提交的 ranks**：Rust 单点/站点批量
+  实际恒为 1，不再拿界面上残留的隐藏字段误拦。
+- **F-R-05**：`remote_job_record` 返回 `provenance`，重开运行页时"当前作业已提交资源
+  （parallel_plan）"能读回。
+- **F-R-06**：单算例运行设置保存改为按算例合并，不再整条替换：本地空间算例保存不会抹掉另一台
+  服务器的 `parallel`/`parallelBudgets`。
+- **F-R-07**：新增 `lib/project-run-settings.ts`（`PROJECT_RUN_SETTINGS_KEY`，解析校验 root/cases）
+  并在 app-state 跨重启持久化 `projectRunSettings`；批量页仍只认 `root === state.root` 的交接设置。
+- **F-R-08**：「下次提交阶段/强制重跑/前处理引擎/输入文件指纹」纳入 case/project 运行设置持久化
+  并回读；`back()` 与保存 effect 的字段集同步。
+- **F-H-13**：助手契约路径的"比较多选"也遵守 20 条上限（超出明确报错，不再静默 21 条）。
+- **F-H-14**：`energy_summary` 的 `window.time_basis` 改由 main.rs 用 `time_basis::resolve(case)`
+  写入真实基准（与顶层一致），不再写死 `model_history_clock`；前端类型改为可选真实基准。
+- **F-H-15**：`history-compare` 的 `window_time_basis` 改为按实际算例解析的基准对象，
+  不再恒 `model_clock`。
+- **F-H-17**：服务器结果 + 手填观测路径时，评估设置里显示双语提示"观测必须是服务器路径，
+  本机路径服务器读不到"。
+
+验证：`cd gui && npm test` **1737/1737**、typecheck/lint/format 全过；`cargo test -p colm-cli --bins
+energy_summary` 4/4、`--bins history` 150/150；GUI Rust `--lib` 659 通过 / 7 失败（既有 `/bin/ps`
+环境用例）、Clippy、两套 fmt、check-gui 267 均通过。未跑真实服务器/CI。
+
+### 2026-11-06 P3 批次 D（S 区 3 条 + D 区 3 条 + N 区 1 条，目标第 3 轮）
+
+- **F-S-12**：从已有项目重开向导时读取项目现有算例，把已建站点的草稿从"待创建"列表移除并
+  提示跳过数量；不会再把所有站点预选、点创建后每站报"目录已存在"。
+- **F-S-13**：建例/重定向错误补双语：`validate_destination`、空间建例 `domain/gridKind` 校验、
+  无法创建目录、输出目录软链失败、远程建例失败尾巴（`remote_cases.rs`）、服务器端
+  `remote_cases.py` 的拒绝覆盖错误，都同时给中文与英文。
+- **F-S-14**：`redirect_output_dir` 返回 `{out,target}`，GUI 在输出目录字段下显示当前链接；
+  仅当 `DEF_dir_output` 为空或等于默认 `<case>/out` 时允许重定向，否则禁用并解释原因。
+- **F-D-04**：新增 `preparationSiteModes(crop)`：CROP 算例的「地表覆盖/植被方案」只列
+  PFT/PC（含 urban-pft/urban-pc），并显示"IGBP/USGS 会被建站审计拒绝"的说明；
+  `UiField` 增加可选 `hint` 并由 PreparationPage 渲染。
+- **F-D-05**：`site-new` 产物发布在硬链接不可用的文件系统（exFAT/FAT、部分 SMB/NFS）上回退到
+  "独占发布锁 + 同目录 rename"，不再整链失败；锁文件不自动删除，错误给出人工清理提示。
+- **F-D-06**：明确 `observation-table-convert` 只产生 PLUMBER2 布局 `<X>_Flux.nc`；Urban 命名
+  `_clean_observations_v1.nc` 只是读取约定（扫描器兼容既有数据），不会由本仓库转换命令生成。
+- **F-N-08**：`case_data_save` 前若同时改强迫场路径/数据集与「更多配置」里的 forcing 字段，
+  前端先给出可操作的双语提示（两处都写 forcing.nml）；保存 forcing 后重新从磁盘读取，
+  让更多配置里的 forcing 显示与新文件一致。
+
+验证：`cd gui && npm test` **1740/1740**、typecheck/lint/format 全过；`cargo test -p colm-cli
+--bins window` 64/64（含新的发布锁回退测试）；GUI Rust `--lib` 659 通过 / 7 失败（既有
+`/bin/ps` 环境用例）、Clippy/fmt、根 fmt、`check-gui` 见门禁日志。未跑真实服务器/CI。
+
+### 2026-11-06 P3 批次 E（V/C/A/R/H 区 9 条，目标第 4 轮）
+
+- **F-V-08**：研究导入卡片/按钮改"参数 / AI 网络（可选成员）"；基准成员 `m000000` 标注可能无
+  可导入产物；截断提示去掉"默认成员 best 仍然可用"的不实说法；`Study has no best member yet`
+  等固定后端错误用 `studyImportErrorText` 给双语说明（英文界面不再直接弹英文原句）。
+- **F-V-09**：`studyExecutionIssue` 接收远程记录状态，按"无记录 / 已取回 / 可关闭 / 待核对取回"
+  分叉提示；不再在纯手选服务器或已完成记录上让人去找不可用的归档入口，并明确"新建本机研究
+  不需要先归档"。
+- **F-C-02**：远程历史运行按 `created_at` **降序**并截到 20 条（与本地 `PROJECT_RUNS_LIMIT`
+  一致）；shell 侧上限从 50 提到 200 只为限制 SSH 输出，最终排序/截断在 Rust
+  `parse_status`。
+- **F-A-05**：`settingsError` 补地址/模型能力/思考强度/历史路径/天河 guard 的固定中文映射；
+  输出上限与超时提示改为真实上界（1–1000000、1–3600）并补 `max`。
+- **F-A-06**：`managedNodeText` 的 Xerj detail、文档索引 detail 用 `managedNodeDetail`/
+  `retrievalDetailText` 按语言翻译；切语言时清掉同步失败/结果；模型缓存结果按当前语言渲染、
+  错误切换语言即清；审批原文（后端动态中文摘要）保持"英文界面给英文说明 + 原文"的既有设计。
+- **F-A-07**（SUSPECT，按建议方案落地）：保存后 `assistant_start` 重配失败不再 `catch {}` 吞掉，
+  显示"设置已保存、助手重配失败、下次发送重试"；保存流程接管新的 `startupId`；设置保存期间
+  禁用索引/状态按钮。
+- **F-R-09**（SUSPECT，按 pack 契约落地）：站点批量（不论 Rust/Fortran）一律提交
+  `ranks=1, threads=1`，与 `colm_remote::pack` 的"1 站点 1 slot"一致。
+- **F-H-16**：审计导出 `history_export` 强制 `group_projects=false, group_runs=false`，全局/算例
+  作用域都是"一条操作一行"，不再把批量运行折叠成一行丢站点行；新增导出查询单测。
+- **F-S-09**：补"空间算例第 2 步范围字段在助手契约里 disabled=true"回归测试（DOM 锁与契约锁一致）。
+
+门禁：`cd gui && npm test` **1743/1743**、typecheck/lint/format 全过；`cargo test -p colm-cli
+--bins remote_bench` 60/61（`a_dead_holder_does_not_wedge_the_active_job_lock` 依赖 `ps -p`，
+与既有 `/bin/ps` 沙箱限制同源）；GUI Rust `--lib`/Clippy/fmt 与根 clippy/fmt、`check-gui`
+见本轮门禁日志。未跑真实服务器/集群/CI。
+
+### 2026-11-06 P3 批次 F（第 5 轮）：补可本地执行的验收证据
+
+- **F-V-06 实际删除步骤**：新增 GUI Rust 单测 `delete_revisions_actually_removes_an_unbound_revision`：
+  用临时 `Registry`（两个官方修订）与临时 history 调用真正的 `delete_revisions`，断言被删修订从
+  注册表消失、返回的 `removed` 路径不存在、最新官方基线保留。此前只有 chmod 000 的漏报/拒绝
+  注入，没有真正执行删除。
+- **F-H-16 全局导出**：`crates/colm-history` 新增
+  `global_export_rows_follow_the_group_runs_flag`：同一批量台账在 `group_runs=true` 时 CSV 只有
+  表头+一行（含 `member_count`），`group_runs=false`（GUI 审计导出现在的取值）时一条操作一行，
+  站点路径全在。GUI 侧另有 `export_query` 单测断言两个 flag 都为 false。
+- **F-R-09**：把"实际提交 ranks"抽成纯函数 `run-model.ts::submittedRanks` 并在 `RunPanel`
+  提交与前置校验两处共用；新增 3 条单测覆盖"自动计划优先 / 站点批量 Rust、Fortran 恒 1 /
+  手动 ranks 只对真正 MPI 的空间算例生效、Rust 本机与站点算例恒 1"。
+- **F-S-09 回归测试**已在批次 E 补齐（空间算例第 2 步范围字段契约 disabled=true）。
+
+验证：`cd gui && npm test` **1745/1745**、typecheck/lint/format 全过；GUI Rust `--lib`
+**661 通过 / 7 失败**（既有 `/bin/ps` 环境用例）、Clippy/fmt 全过；`cargo test -p colm-history`
+export 4/4；根 Clippy/fmt、`check-gui` 267 契约全过。
+
+### F-C-01 分支级回归（第 5 轮）
+
+`ComparePage.tsx` 历史运行行的「查看这次报告」在服务器模式调用
+`fetchReport(host, p.name, run.run_id)`、本机模式才 `view(run.report)`；新增测试
+`remote run history fetches the run instead of treating a server path as local` 固定这一分支。
+真实 SSH 服务器上的取回仍属外部环境验收。
+
+### 2026-11-06 验收复核批次 2（用户确认 5 处回归 + 8 项残留）
+
+**5 处已确认回归/残留**
+- **RunPanel 持久化 effect 不收敛**：判等改为比较**合并后的最终对象**（`existing` vs
+  `{...existing, ...shared}`），并新增"连续 5 次 effect 不再重写"回归测试；已保存远程预算的
+  算例切回本机后不会每次渲染都写一次。
+- **「丢弃并继续」导航时序**：新增同步镜像 `dirtyNow`，守卫读 ref；确认丢弃后在同一 tick 内
+  置 false 再 navigate，不再被上一轮 dirty 拦下（新增"navigate 检查 ref"回归测试）。
+- **dataset 旧白名单**：`field_runtime_state_with_datasets` 与 `typed_scalar` 统一用
+  `colm_case::forcing_templates::forcing_datasets()`（第 3 步下拉与保存校验同源）；
+  测试覆盖 CMFD/ERA5/ERA5LAND/GSWP3/QIAN 可保存、未知值被拒。
+- **远程历史先截断后排序**：状态脚本先写临时文件，按 `created_unix`/`created_at` 降序取最近
+  20 条再输出（无 `mktemp` 时才回退旧的 200 条上限）；新增 205 条运行记录的脚本级测试，
+  断言最新 20 条保留、旧记录不再占坑。
+- **中文失败日志丢失**：`benchErrorText` 的远程失败中文分支返回后端完整原文（含"输出末尾"），
+  英文分支保留翻译+日志；测试改为中文也断言原始日志。
+
+**8 项历史残留**
+- **D-05**：新增 `preparation-draft.ts` 本地草稿（模式+表单，损坏/未知模式忽略，纯默认不落盘），
+  刷新/重开恢复并把"有未生成输入"告知守卫；「放弃未生成的输入」清空表单/探测/槽位/产物并
+  清草稿；切换任务重置整张表单，不再把上一任务残留输入判成"干净"；测试覆盖恢复/放弃/损坏。
+- **D-07**：`site::fill` 在"给了 rawdata 但零栅格字段"时返回显式 warning（CLI JSON 带
+  `warnings`），Tauri `SiteReport` 透传；前端摘要增加 `warnings` 与 `from_lookup` 计数并在结果卡
+  展示；srfdata 新增空 rawdata 目录单测。
+- **D-09**：新增 `prepDateValid`/`prepDateKey`（真实日历日、两种格式），ERA5 起止日期在调用前
+  校验且开始≤结束；landtype/step_seconds 整数校验；`utc_offset` 前端范围改 -12..14（与 CLI
+  一致）；`requiredNumber` 接受 `t` 本地化错误文案（非 React 回退 bilingual）。
+- **D-04**：算例第 2 步摘要显示 `CROP 作物内核`/`城市` 标签；新建向导第 5 步下垫面方案行显示
+  CROP；准备结果卡显示 `site_kind`/`mode` 与 `from_lookup` 来源。
+- **D-06**：站点输出文件名必须 `_site.nc`/`_site_v1.nc`（前端校验+双语错误）；站点模式
+  「选择…」改为选目录后自动补 `_site.nc`（`preparedSiteDestination`）；结果卡提示强迫场需用
+  同一词干 `<X>_Met.nc`/`<X>_metforcing_v1.nc` 放 Forcing/。新增
+  `install_prepared_file`（Tauri 命令 + 单测：复制到目标目录隐藏临时文件后原子替换、未确认覆盖
+  拒绝）与准备页「安装到数据集目录并扫描…」动作：把 produced 站点/强迫场装进所选数据集根的
+  `Sitedata/`、`Forcing/`（同名文件先确认覆盖），安装后立即调用 `scan_sites` 重新扫描并在页面
+  显示识别到的站点数/名字；站点与强迫场词干不同时给出配对警告。目标路径映射抽成
+  `preparedDatasetDestinations` 并加单测。`command-contract.ts` 已重新生成（268 条命令）。
+- **R-02**：历史详情「计算资源」新增「自动并行预算（提交时）」行，从
+  `evidence/summary/run/remote/provenance` 任一处 `parallel_plan` 渲染 nodes/cores/ranks/
+  threads/total CPU；新增单测。
+- **V-05 边角 3**：新增 `hybridStudyModelRevision`，旧研究无快照时 hybrid 检查/拟合显式报错，
+  不再用当前研究基线冒充；单元测试覆盖。
+- **A-02**：模型探测结果按「后端+端点」缓存到 localStorage（7 天、最多 8 组，端点半归一化），
+  关闭设置/重启后思考档位不退回硬编码；设置页打开时先恢复缓存。OpenCode "variant unavailable"/
+  "model not enabled" 运行错误补中英映射。新增缓存 helper 单测。
+
+**本轮门禁结果见下方门禁日志文件；未跑真实服务器/集群/GUI 端到端。**
+
+**批次 2 门禁（实际执行）**：`cd gui && npm test` **1757/1757**；typecheck、lint（0 warning）、
+format:check 全过。CLI：`cargo test -p colm-cli --bins the_status_script` 3/3（含 205 条运行记录
+脚本测试）、`remote_bench` 61 通过/1 失败（`a_dead_holder_does_not_wedge_the_active_job_lock`
+依赖 `ps -p`，既有沙箱限制）；`cargo test -p colm-srfdata --lib site` 81/81。根 workspace
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、`check-gui`
+267 契约全过。GUI Rust `--lib` 662 通过/7 失败（既有 `/bin/ps` 环境用例）、Clippy/fmt 全过。
+未跑真实 SSH 服务器、Slurm/LSF 集群、真实 GUI 助手会话与 exFAT/SMB 挂载。
+
+
+**批次 2 补充（D-06 安装/自动扫描落地）门禁**：`npm test` **1758/1758**，typecheck/lint/format
+全过；GUI Rust sitedata 13/13、history 24/24；`cargo test --manifest-path gui/src-tauri` 全量
+`--lib` **663 通过/7 失败**（既有 `/bin/ps` 环境用例）；GUI Clippy/fmt、根 fmt、`check-gui`
+**268** 契约全过（`command-contract.ts` 已重新生成）。
+
+### 2026-11-07 复核必须修复（2 条 P2，均为上一批引入）
+
+- **dataset 允许值混用模板名与引擎标识**：`forcing_dataset_identifiers()` 从每个模板里解析
+  `DEF_forcing%dataset` 实际值（ERA5_LEddy→ERA5、MPI-ESM1-2-HR_ssp585→CMIP6），GUI 的
+  `forcing_dataset_values()` 再并上 schema 登记但模板未覆盖的旧标识（CPL7/GSWP2 等）——
+  **允许值不再包含模板名**。保存校验/第 3 步下拉同一张表；POINT 由 schema 并集提供。
+  测试：模板标识集合含 CMFD/ERA5/CMIP6/CLDAS/JRA55/WFDEI、不含 ERA5_LEddy/
+  MPI-ESM1-2-HR_ssp585；配置校验接受 CMFD/CMFDv2/ERA5/CMIP6/POINT/CPL7/GSWP2 等，
+  拒绝模板名。
+- **远程历史 run= 漏 created_at 列**：排序临时行的 `printf` 补回 `created_at`（此前去掉排序键后
+  只剩 7 列，`parse_status` 按 8 列读 → 报告路径进入 finished_at、错误错位）。新增
+  "脚本输出 → parse_status" 完整链路测试：成功运行报告路径/完成时间、失败运行 error 都在正确
+  字段，历史按创建时间降序。
+
+**复核第 2 轮修复门禁（实际执行）**：`cargo test -p colm-case --lib` **82/82**；
+`cargo test -p colm-cli --bins the_status_script` **4/4**（含脚本输出→parse_status 列对齐链路）；
+GUI `config::config_tests` **157/157**、`history::` 24/24；GUI `--lib` 全量 **663 通过/7 失败**
+（既有 `/bin/ps` 环境用例）。根 `cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all --check`、GUI Clippy/fmt、`check-gui` **268** 契约全过。前端上一轮 1758/1758 未再改动。
+
+
+### 2026-11-07 两日改动发布前复审与 beta.6
+
+范围为 `77f38c48` 之后的未提交工作树，复核已修的 GUI 选项链问题，并检查其调用者、保存/回读、CLI 真消费点和测试。当前只有 main，没有另一个待合并分支；按仓库约定直接整理提交到 main。版本统一升至 `0.3.0-beta.6`（根 workspace、GUI Cargo、Tauri、npm、两份 Cargo.lock 和 npm lock），中英文 README 添加本版说明。
+
+本轮额外修复：
+
+- 禁止覆盖的前处理安装：不支持硬链接时显式失败，不再退回会覆盖竞争目标的 rename；故障注入测试证明复制后出现的目标仍保留。
+- 模型删除、自动 prune 和用途查询共用严格项目根检查：缺失、空或不可读的已知根都拒绝清理，不再根据父目录存在推断项目已删除。完整删除绑定扫描纳入超时，扫描线程只读，超时后释放运行/建例锁。真实删除或清空项目后需移除对应最近记录再清理，这是保守取舍。
+- 本机单点也持久化阶段、force、前处理器和输入指纹设置；空间与远程预算保留，合并判等继续收敛。
+- 安装自定义强迫场名 `CN-Cng.nc` 时正确生成 `Forcing/CN-Cng_Met.nc`，不再生成 `CN-Cng.nc_Met.nc`。
+- 项目历史聚合对混合的成功记录与 paused/needs_review 保留需关注状态，不再误报成功。
+- 日内配对为闭区间后，Study 训练与验证窗口必须严格分离，拒绝共享端点，避免同一配对样本进入两组。GUI 校验、日期预填与 Rust 校验同步；旧接壤窗口需调整后才能运行。不修改物理公式或配对黄金结果。
+- 远程历史无法创建排序临时文件时明确报错，不再静默使用未排序的前 200 条。
+
+本地实测：前端 `npm test` 1759/1759；typecheck、lint（0 warning）、Prettier 全过；两个 workspace 的 fmt、GUI all-targets Clippy、`xtask check-gui`（268 命令）通过。GUI 定向测试 model 29 通过/1 ignored、sitedata 17 通过、dataset 标识保存校验 1 通过；新增前端保存/文件名测试先 RED 后 GREEN。独立代码审查 APPROVE、架构复审 CLEAR。
+
+本地预览先于远程长测完成：`cargo tauri build --config tauri.bundle.conf.json --bundles app` 成功；通过完整路径 `gui/src-tauri/target/release/bundle/macos/CoLM Desktop.app` 启动本次产物，进程路径、Info.plist 和原生窗口均确认 beta.6，首页官方模型加载完毕，操作按钮可用。此构建不带 e2e-driver。旧 Fortran 内核沿本地已有包复用，发布流水线仍按自身规则重建；此次未修改 Fortran 源。
+
+远程验证使用当前源码的 SHA-256 核对快照（2750 文件，约 112 MB），只携带入库小夹具，不上传 PLUMBER2/rawdata 等外部数据。T7920 runner 默认 Cargo registry 只读，因此新依赖需在私有 Cargo home 解包；源码快照还需初始化测试用 Git 元数据。共享 target 缓存可能让 `env!(CARGO_MANIFEST_DIR)` 保留旧快照路径，最终验证改用任务独立 target；OpenCode 测试显式声明并使用服务器已有 SQLite CLI，未改系统安装或共享 registry。前两次环境失败任务为 `codex-d58cc7d0c1a6460d86af3758effe33e5` 与 `codex-fa7617b7c8eb4bb1b69cdc6dfff909b2`；完整复核任务 `codex-48b5b920506945afb33c5de81a502e75` 的结果在后文补记。
+
+边界：不支持硬链接的卷会明确拒绝默认的无覆盖安装；未做真实 SMB/exFAT、集群调度或外部 LLM 全链验收。已有用户生成的手册、图片、运行输出不纳入本次源码提交。
+
+远程完整复核结果：workspace Clippy、fmt、四张生成表 drift、namelist roundtrip、histmap 和 remote Python 全部通过。初次完整测试 3566 通过/56 失败/16 ignored；失败进一步定位为 36 项长 TMPDIR 触发原有 Fortran 256 字节保护、14 项继承的 Conda libtinfo 警告扰动模拟调度器输出、6 项外层沙箱禁止嵌套 bubblewrap。没有据此删除或放宽源码保护。
+
+在任务 `codex-639b7235d3714419ba58f889a2d1cfa5` 重跑三个失败目标：复用同一源码已编译的测试二进制，清除 LD_LIBRARY_PATH/LD_PRELOAD，使用 runner 已隔离的 /tmp tmpfs 放小测试夹具（内存盘，不写服务器根磁盘；源码、编译产物、日志与取回结果仍在 data01）。CLI 869 通过/1 项嵌套沙箱失败；remote 全部通过；workspace 75 通过/5 项嵌套沙箱失败。其余原失败项均消失，6 项嵌套沙箱限制保留为验证缺口，由后续 GitHub 原生 runner 验证。本轮没有修改测试来隐藏它们，也没有降低生产沙箱限制。

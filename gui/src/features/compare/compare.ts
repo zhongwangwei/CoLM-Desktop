@@ -782,6 +782,25 @@ export function layerVariableProblems(design: ComparisonDesign): [string, string
 }
 
 /**
+ * 变量没有参考数据的问题：生成配置会把它静默过滤掉，用户却以为它参与了评估（GUI 审查 C-05）。
+ * 与 `layerVariableProblems` 一样作为运行前阻断项交给 `structuralProblems`，而不是生成后无声消失。
+ */
+export function unreferencedVariableProblems(design: ComparisonDesign): [string, string][] {
+  const problems: [string, string][] = [];
+  for (const [variable, refs] of Object.entries(design.variables ?? {})) {
+    const usable = (Array.isArray(refs) ? refs : [refs]).filter(
+      (reference) => typeof reference === 'string' && reference,
+    );
+    if (usable.length) continue;
+    problems.push([
+      `变量 ${variable} 没有可用的参考数据；请选择参考或取消勾选，否则它不会进入评估。`,
+      `Variable ${variable} has no usable reference data; choose a reference or clear it, otherwise it will not be evaluated.`,
+    ]);
+  }
+  return problems;
+}
+
+/**
  * 层维度变量提示（不是阻断）：用户显式把标准变量映射到带 soilsnow/soil/lake 维的 NetCDF 变量时，
  * 站点合并文件会原样保留这些维度；能不能用取决于 OpenBench 模型 profile 里有没有对应的 compute/层处理
  * （3.0.8 的 CoLM2024 profile 对 Root_Zone_Soil_Moisture 等确实有）。错误的 varname 到运行阶段才会报
@@ -1647,8 +1666,13 @@ export function remoteJobFailureText(status: {
  * （复验 C2-06/A2-05）。不认得的（OpenBench 自己的输出）原样返回。
  */
 export function benchErrorText(error: string): [string, string] {
-  const text = error.replace(/^(?:Error: )+/, '');
+  const text = error.replace(/^(?:Error: )+/, '').replace(/[\r\n]+$/, '');
   if (text === 'operation cancelled') return ['已停止', 'Stopped'];
+  const multilineScalar = text.match(
+    /^project\.(num_cores|output_dir): multiline YAML values are unsupported; write the value on the same line as its key$/,
+  );
+  if (multilineScalar)
+    return [`project.${multilineScalar[1]} 不支持跨行值，请将值写在键名所在的同一行。`, text];
   const exit =
     text.match(/^The server job failed \(exit code (-?\d+)\); see the log below\.$/) ??
     text.match(/^服务器上的作业失败（退出码 (-?\d+)），原因见下面的日志。$/);
@@ -1669,7 +1693,28 @@ export function benchErrorText(error: string): [string, string] {
       `The server job failed (${fallback ? 'recorded as failed by the scheduler' : detail[1]}).`,
     ];
   }
+  // 远程失败运行的 meta.error 是固定中文句式（remote_bench.rs finish_function），英文界面要翻译
+  // 固定部分，输出末尾的作业日志原文保留（F-C-04）。
+  const remoteFailure = text.match(/^这次运行失败（退出码 (-?\d+)）(?:；输出末尾：\n?([\s\S]*))?$/);
+  if (remoteFailure) {
+    const tail = remoteFailure[2] ? ` Output tail:\n${remoteFailure[2]}` : '';
+    // 中文界面保留后端的完整原文（含"输出末尾"的作业日志）；翻译只用于英文界面，
+    // 否则中文用户只剩退出码、缺文件等具体原因被吞（本次验收 P3 回归）。
+    return [text, `The run failed (exit code ${remoteFailure[1]}).${tail}`];
+  }
+  const noOutput = text.match(/^这次运行失败（退出码 (-?\d+)）；作业日志里没有输出。$/);
+  if (noOutput)
+    return [
+      `这次运行失败（退出码 ${noOutput[1]}）；作业日志里没有输出。`,
+      `The run failed (exit code ${noOutput[1]}); the job log has no output.`,
+    ];
   const fixed: Record<string, string> = {
+    'project.num_cores 必须是非负整数 / project.num_cores must be a non-negative integer':
+      'project.num_cores must be a non-negative integer',
+    '不支持跨行或特殊 YAML 键 / Unsupported multiline or special YAML mapping key':
+      'Unsupported multiline or special YAML mapping key',
+    '不支持转义、别名或合并 YAML 键 / Escaped, alias or merge YAML mapping keys are unsupported':
+      'Escaped, alias or merge YAML mapping keys are unsupported',
     已停止: 'Stopped',
     '先装 uv': 'Install uv first',
     '先装专用 Python': 'Install the private Python first',
@@ -1697,6 +1742,14 @@ export function benchErrorText(error: string): [string, string] {
   };
   if (text in fixed) return [text, fixed[text]!];
   const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    [
+      /^project\.num_cores 必须是非负整数 \/ (project\.num_cores must be a non-negative integer(?:: |\n\nCaused by:\n)[\s\S]+)$/,
+      (m) => m[1]!,
+    ],
+    [
+      /^申请核数不足 \/ (--cpus \(\d+\) must cover project\.num_cores \(\d+\); raise --cpus or lower project\.num_cores)$/,
+      (m) => m[1]!,
+    ],
     // 远程 run 级身份：指定了服务器上不存在的 run，或运行记录解析失败。
     [
       /^这次运行没有成功，没有可显示的评估报告（运行 ([^，]+)，状态 ([^）]+)）$/,

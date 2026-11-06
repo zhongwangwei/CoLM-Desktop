@@ -41,14 +41,26 @@ export interface EnergyDiagnostic {
     units: 'W/m²';
   };
   series: SeriesData;
+  /** energy_summary 顶层的真实时间基准；旧后端没给时按 series/模型钟兜底（GUI 审查 H-06）。 */
+  time_basis?: TimeBasis;
   window: {
     from: number | null;
     to: number | null;
     end_inclusive: true;
-    time_basis: 'model_history_clock';
+    /** 与顶层 `time_basis` 相同的真实基准；旧后端这里写死过 model_history_clock（GUI 审查 H-14）。 */
+    time_basis?: TimeBasis | 'model_history_clock';
   };
   limitation: string;
 }
+/** 诊断曲线要用 energy_summary 顶层的真实基准；series 自己的字段可能是旧后端留下的模型钟。 */
+export function energyDiagnosticSeries(report: EnergyDiagnostic | null | undefined) {
+  if (!report?.series) return undefined;
+  return {
+    ...report.series,
+    time_basis: report.time_basis ?? report.series.time_basis,
+  };
+}
+
 export function fullEnergyStats(report: EnergyDiagnostic) {
   const summary = report.full_stats;
   if (

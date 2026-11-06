@@ -62,6 +62,7 @@ pub fn probe_log(msg: String) {
 pub struct Field {
     pub name: &'static str,
     pub kind: String,
+    pub arity: Option<usize>,
     pub default: String,
     pub doc: Option<&'static str>,
     /// 它属于哪个 namelist 组，也就是**该写进哪个文件**。
@@ -98,6 +99,7 @@ pub fn describe_fields() -> Vec<Field> {
         .map(|f| Field {
             name: f.name,
             kind: format!("{:?}", f.kind),
+            arity: f.arity,
             // 前端会把未显式设置的字段默认值直接放进控件。Debug 文本
             // `Integer(3)` / `Logical(true)` 不是 Fortran 值，会生成无法保存的
             // 数字框或非法选项；必须传可直接写回 namelist 的字面量。
@@ -2120,6 +2122,35 @@ fn expert_tuning_runtime_state(
     None
 }
 
+/// 取值集合以运行时的 forcing 模板为准：schema 的 `values` 是上游旧白名单（8 个 dataset），
+/// 标准模板里的 CMFD/ERA5 等会被它误拒；第 3 步下拉与保存校验必须用同一张权威表
+/// （本次验收 P2，F-N-07 残留）。
+fn forcing_dataset_values() -> Vec<&'static str> {
+    // 模板名 != dataset 标识（ERA5_LEddy→ERA5、MPI-ESM1-2-HR_ssp585→CMIP6）。允许值必须是
+    // 模板实际写入的标识集合，再并上引擎 schema 里登记、但模板未覆盖的旧标识（CPL7/GSWP2 等）；
+    // 不能直接用模板名，否则合法 CMFD/CMIP6 被拒、非法模板名反而放行（验收复核 P2）。
+    let mut values = colm_case::forcing_templates::forcing_dataset_identifiers();
+    if let Some(field) = colm_schema::find("DEF_forcing%dataset") {
+        for value in field.values.iter().copied() {
+            if !values.iter().any(|known| known.eq_ignore_ascii_case(value)) {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
+
+fn field_runtime_state_with_datasets(
+    field: &colm_schema::Field,
+    c: &VisibilityContext<'_>,
+) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
+    let (mode, reason, allowed_values) = field_runtime_state(field, c);
+    if field.name.eq_ignore_ascii_case("DEF_forcing%dataset") {
+        return (mode, reason, forcing_dataset_values());
+    }
+    (mode, reason, allowed_values)
+}
+
 fn field_runtime_state(
     field: &colm_schema::Field,
     c: &VisibilityContext<'_>,
@@ -2812,7 +2843,7 @@ fn field_states_for_at(
     colm_schema::all()
         .iter()
         .map(|field| {
-            let (mode, reason, allowed_values) = field_runtime_state(field, &context);
+            let (mode, reason, allowed_values) = field_runtime_state_with_datasets(field, &context);
             if let Some((methane, scheme)) = finundation
                 .as_ref()
                 .filter(|_| field.name == "DEF_wetland_finundation_scheme")
@@ -3151,7 +3182,14 @@ pub fn unknown_fields(text: String) -> Result<Vec<String>, String> {
     Ok(doc
         .paths()
         .into_iter()
-        .filter(|p| colm_schema::find(p).is_none() && !colm_case::pft::is_override_path(p))
+        .filter(|p| {
+            // 数组元素 `DEF_LC_BETA(10)`：schema 只登记基名，不能把它当成"CoLM 不认识"。
+            let base = p.split('(').next().unwrap_or(p);
+            colm_schema::find(p).is_none()
+                && colm_schema::find(base).is_none()
+                && !colm_case::pft::is_override_path(p)
+                && !colm_case::pft::is_override_path(base)
+        })
         .collect())
 }
 
@@ -4691,8 +4729,11 @@ pub struct Entry {
 
 /// 读一份 namelist 文本，列出它设了哪些字段。
 #[tauri::command]
-pub fn read_case(text: String) -> Result<Vec<Entry>, String> {
-    let doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+pub fn read_case(text: String, dir: Option<String>) -> Result<Vec<Entry>, String> {
+    let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
+    if let Some(dir) = dir {
+        load_forcing_fields_checked(&mut doc, std::path::Path::new(&dir), false)?;
+    }
     Ok(doc
         .paths()
         .into_iter()
@@ -4751,6 +4792,49 @@ fn path_placeholder_options(name: &str, values: &[&str]) -> bool {
 /// 静默丢弃会让用户以为自己设了。
 fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
     use colm_namelist::Value;
+    if is_forcing_field(path) && path.contains('(') {
+        return Err(format!(
+            "{path}: edit the complete forcing array instead of an indexed element"
+        ));
+    }
+    if is_forcing_field(path) {
+        if let Some(arity) = colm_schema::find(path).and_then(|field| field.arity) {
+            let literal = colm_namelist::parse(&format!("&literal\nvalue={}\n/\n", raw.trim()))
+                .map_err(|e| format!("{path}: {e}"))?;
+            let Some(Value::List(items)) = literal.get("value") else {
+                return Err(format!("{path}: expected all {arity} array elements"));
+            };
+            if literal.paths().len() != 1 || items.len() != arity {
+                return Err(format!("{path}: expected exactly {arity} array elements"));
+            }
+            return items
+                .iter()
+                .map(|item| {
+                    let kind = colm_schema::find(path).unwrap().kind;
+                    let valid = matches!(
+                        (kind, item),
+                        (colm_schema::FieldKind::Integer, Value::Int(_))
+                            | (
+                                colm_schema::FieldKind::Real,
+                                Value::Int(_) | Value::Real { .. }
+                            )
+                            | (colm_schema::FieldKind::Logical, Value::Bool(_))
+                            | (colm_schema::FieldKind::Character { .. }, Value::Str(_))
+                    );
+                    if !valid {
+                        return Err(format!("{path}: array element {item} has the wrong type"));
+                    }
+                    typed_scalar(path, &item.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List);
+        }
+    }
+    typed_scalar(path, raw)
+}
+
+fn typed_scalar(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
+    use colm_namelist::Value;
     use colm_schema::FieldKind as K;
     let s = raw.trim();
     let Some(f) = colm_schema::find(schema_name(path)) else {
@@ -4779,13 +4863,21 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
     };
     let path_placeholders =
         matches!(f.kind, K::Character { .. }) && path_placeholder_options(f.name, f.values);
+    let dataset_values = f
+        .name
+        .eq_ignore_ascii_case("DEF_forcing%dataset")
+        .then(forcing_dataset_values);
+    let allowed_values: &[&str] = match &dataset_values {
+        Some(values) => values,
+        None => f.values,
+    };
     if !path_placeholders
-        && !f.values.is_empty()
-        && !f.values.iter().any(|v| v.eq_ignore_ascii_case(bare))
+        && !allowed_values.is_empty()
+        && !allowed_values.iter().any(|v| v.eq_ignore_ascii_case(bare))
     {
         return Err(format!(
             "{path} only accepts {}; {raw:?} is invalid",
-            f.values.join(", ")
+            allowed_values.join(", ")
         ));
     }
     match f.kind {
@@ -5240,6 +5332,14 @@ pub(crate) fn load_forcing_fields(
     doc: &mut colm_namelist::Document,
     dir: &std::path::Path,
 ) -> Result<(), String> {
+    load_forcing_fields_checked(doc, dir, true)
+}
+
+fn load_forcing_fields_checked(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+    allow_missing: bool,
+) -> Result<(), String> {
     for key in doc.paths() {
         if is_forcing_field(&key) {
             doc.remove(&key).map_err(|e| e.to_string())?;
@@ -5252,10 +5352,10 @@ pub(crate) fn load_forcing_fields(
     let path = case_forcing::forcing_path(dir, doc)?;
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if allow_missing && e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let forcing = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+    let forcing = colm_namelist::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     for key in forcing.paths() {
         if is_forcing_field(&key) {
             put(doc, &key, forcing.get(&key).unwrap().clone())?;
@@ -5323,7 +5423,21 @@ fn stage_forcing_fields(
     };
     let mut forcing = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
     for field in changed {
-        put(&mut forcing, &field.path, typed(&field.path, &field.value)?)?;
+        let value = typed(&field.path, &field.value)?;
+        if matches!(value, colm_namelist::Value::List(_)) {
+            // A complete replacement also supersedes explicit indexed overrides.
+            for key in forcing.paths() {
+                if key.contains('(')
+                    && key
+                        .split('(')
+                        .next()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&field.path))
+                {
+                    forcing.remove(&key).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        put(&mut forcing, &field.path, value)?;
     }
     for key in removed {
         forcing.remove(key).map_err(|e| e.to_string())?;
@@ -6037,11 +6151,10 @@ fn one_timing_with_replay(
     );
     let repeat = int("DEF_simulation_time%spinup_repeat").max(0) as u32;
     let py = int("DEF_simulation_time%spinup_year");
-    // 预热开着的判据与 CoLM 一样：截止时刻晚于起始时刻（`CoLM.F90:300`）。
+    // 预热开着的判据与 CoLM 一样：**截止时间戳晚于起始时间戳**（CoLM.F90:341 比较时间戳，
+    // 不比较年份）。只比年份会把同年内的 start→spinup 窗口读成“没有预热”。
     // `spinup_repeat = 1` 仍会把 start→spinup 截止这段当预热跑一遍且不写 history；
     // 手写 0 也会被 CoLM 提成 1。界面关闭预热靠写 `spinup_year = 0`。
-    let on = py > sy;
-    let repeat = if on { repeat.max(1) } else { repeat };
     let ymd = |y: i64, m: i64, d: i64| format!("{y:04}-{m:02}-{d:02}");
     let stamp = |y: i64, m: i64, d: i64, sec: i64| {
         // Howard Hinnant 的 days_from_civil。这里不能依赖 colm-forcing：那会把
@@ -6055,6 +6168,14 @@ fn one_timing_with_replay(
     };
     let start = stamp(sy, sm, sd, int("DEF_simulation_time%start_sec"));
     let end = stamp(ey, em, ed, int("DEF_simulation_time%end_sec"));
+    let spinup_end = stamp(
+        py,
+        int("DEF_simulation_time%spinup_month"),
+        int("DEF_simulation_time%spinup_day"),
+        int("DEF_simulation_time%spinup_sec"),
+    );
+    let on = spinup_end > start;
+    let repeat = if on { repeat.max(1) } else { repeat };
     let step = doc
         .get("DEF_simulation_time%timestep")
         .and_then(colm_namelist::Value::as_f64)
@@ -6074,12 +6195,6 @@ fn one_timing_with_replay(
     };
     let normal_steps = steps(start, end);
     let total_steps = if on {
-        let spinup_end = stamp(
-            py,
-            int("DEF_simulation_time%spinup_month"),
-            int("DEF_simulation_time%spinup_day"),
-            int("DEF_simulation_time%spinup_sec"),
-        );
         // 旧模式最后一轮从截止处继续；回卷模式额外运行完整正式窗口。
         if replay && spinup_end <= end {
             steps(start, spinup_end) * repeat as u64 + normal_steps

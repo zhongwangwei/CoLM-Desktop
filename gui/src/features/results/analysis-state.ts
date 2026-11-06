@@ -13,6 +13,8 @@
  * 纯函数、无 React 依赖：页面只负责发布快照与按 gate 渲染，规则集中在这里可单独测试。
  */
 
+import type { TimeBasis } from './time-basis';
+
 /** 单站点评估的一次请求条件（全部是计算时真正用到的字段）。 */
 export interface SingleRequest {
   caseDir: string;
@@ -39,6 +41,8 @@ export interface ComparisonRequest {
   to: string;
   spinup: string;
   corrected: boolean;
+  /** 比较窗口的时间基准；导出 CSV 必须写清楚，否则 from/to 的时钟口径无从判断（GUI 审查 H-09）。 */
+  time_basis?: TimeBasis;
 }
 
 /** 指标行里快照/导出真正要读的字段；后端新增字段允许缺省，旧行为不变。 */
@@ -47,6 +51,11 @@ export interface AnalysisRow {
   comparison_obs?: string;
   /** 后端行里的出处对象形状随运行台账变化；导出只读 name/status/version/case_*，读不到就留空。 */
   provenance?: Record<string, unknown> | null;
+  /**
+   * 这一行指标实际使用的时间基准（`metrics` 每行都回传）。多站比较可能混用不同时钟的算例：
+   * 导出必须逐行写，不能拿页面请求的基准冒充每一行（GUI 审查 H-09）。
+   */
+  time_basis?: TimeBasis;
   name: string;
   units?: string;
   n: number;
@@ -112,7 +121,11 @@ export function singleKey(request: SingleRequest): string {
 
 /** 多站点比较的 key 对条目顺序敏感：重排会改变 CSV 行序，也算条件变化。 */
 export function comparisonKey(request: ComparisonRequest): string {
-  return JSON.stringify(request);
+  // time_basis 只决定结果怎么标注，不改变配对；它来自异步到达的 catalog/series，放进 key 会让
+  // 已完成的比较在 catalog 到位瞬间被标成"条件已更改"并禁用导出（GUI 审查 F-H-11）。
+  const conditions = { ...request };
+  delete conditions.time_basis;
+  return JSON.stringify(conditions);
 }
 
 /** 这份快照是不是当前条件下的结果。 */
@@ -162,6 +175,7 @@ export const comparisonCsvHeader = [
   'to',
   'spinup',
   'corrected',
+  'time_basis',
   'variable',
   'units',
   'n',
@@ -175,11 +189,35 @@ export const comparisonCsvHeader = [
 ] as const;
 
 /**
+ * CSV 里的时间基准文本：kind + 已知偏移；同一个 kind 下不同 offset 必须能区分。
+ * 入参来自后端原文（旧服务器/未来形状可能不是 `TimeBasis`）：不认识的一律写 `unknown`，
+ * 不能静默写空单元格（复核 C F4）。
+ */
+export function comparisonTimeBasisText(basis: unknown): string {
+  if (!basis || typeof basis !== 'object') return 'unknown';
+  const record = basis as Record<string, unknown>;
+  if (record.kind === 'utc') return 'utc';
+  if (record.kind === 'model_clock') return 'model_clock';
+  if (record.kind === 'local_standard_time') {
+    const offset = record.utc_offset_seconds;
+    return typeof offset === 'number' && Number.isFinite(offset)
+      ? `local_standard_time:offset=${offset}s`
+      : 'local_standard_time:offset=unknown';
+  }
+  return 'unknown';
+}
+
+/**
  * 用比较**当时的条件快照**生成 CSV。条件列（from/to/spinup/corrected）只读 `result.request`；
  * 观测列优先取每行实际用的观测，其次按运行路径回查请求条目。
+ * `time_basis` 逐行取该指标实际使用的基准（缺省才回退请求快照，最后回退 model_clock）：
+ * 同一张比较表里可能混着 UTC 格点算例与地方时单点算例，不能用一个基准覆盖整列。
  */
 export function comparisonCsv<R extends AnalysisRow>(result: ComparisonResult<R>): string {
   const { entries, from, to, spinup, corrected } = result.request;
+  // 只要有一行带自己的基准，就不能再拿“当前打开算例”的基准去补缺行：
+  // 多站比较可能混用不同时钟，补错比写 unknown 更糟（GUI 审查 H-09 复核）。
+  const anyRowBasis = result.rows.some((metric) => !!metric.time_basis);
   const lines = [comparisonCsvHeader.join(',')];
   for (const metric of result.rows) {
     const site = metric.site ?? '';
@@ -208,6 +246,13 @@ export function comparisonCsv<R extends AnalysisRow>(result: ComparisonResult<R>
         to,
         spinup,
         corrected ? '1' : '0',
+        metric.time_basis
+          ? comparisonTimeBasisText(metric.time_basis)
+          : anyRowBasis
+            ? 'unknown'
+            : result.request.time_basis
+              ? comparisonTimeBasisText(result.request.time_basis)
+              : 'model_clock',
         metric.name,
         metric.units,
         metric.n,

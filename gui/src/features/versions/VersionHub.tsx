@@ -34,6 +34,14 @@ export default function VersionHub({
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const research = (id: string) => !['manual', 'source'].includes(id);
+  // 这里列全部冻结修订（与项目页“只列每个版本线最新修订”的规则不同）：
+  // 保留历史修订可选，但把非最新的一条明确标成“旧修订”，避免用户以为它是当前修订（GUI 审查 V-05）。
+  const latestRevision = new Map<string, number>();
+  for (const version of versions) {
+    const current = latestRevision.get(version.version.id) ?? 0;
+    if (version.version.revision > current)
+      latestRevision.set(version.version.id, version.version.revision);
+  }
   return (
     <div className="version-hub">
       <div className="page-heading versions-heading">
@@ -66,6 +74,9 @@ export default function VersionHub({
               <option key={keyOf(v.version)} value={keyOf(v.version)}>
                 {v.name} · r{v.version.revision}
                 {v.version.id === 'official' ? ` (${t('官方', 'official')})` : ''}
+                {v.version.revision !== latestRevision.get(v.version.id)
+                  ? ` (${t('旧修订', 'older revision')})`
+                  : ''}
               </option>
             ))}
           </Select>

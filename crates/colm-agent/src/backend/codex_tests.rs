@@ -197,32 +197,69 @@ fn choices_resolve_to_a_concrete_model_and_a_supported_effort() {
     let pair = |a: &str, b: &str| (Some(a.to_owned()), Some(b.to_owned()));
     // “默认”落到默认模型与它的默认强度：turn/start 的覆盖会沿用，必须能换回来。
     assert_eq!(
-        resolve_choice(&m, &choice(None, None)),
+        resolve_choice(&m, &choice(None, None)).unwrap(),
         pair("gpt-6.1-sol", "low")
     );
     assert_eq!(
-        resolve_choice(&m, &choice(None, Some("max"))),
+        resolve_choice(&m, &choice(None, Some("max"))).unwrap(),
         pair("gpt-6.1-sol", "max")
     );
     assert_eq!(
-        resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("xhigh"))),
+        resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("xhigh"))).unwrap(),
         pair("gpt-6-astra", "xhigh")
     );
-    // 那个模型不支持的强度换成它的默认强度。
+    // 用户明确选了该模型不支持的强度：明确拒绝，不能悄悄换成默认的 medium。
+    let error = resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("max")))
+        .expect_err("不支持的思考强度必须报错而不是静默回落")
+        .to_string();
+    assert!(error.contains("gpt-6-astra"), "{error}");
+    assert!(error.contains("max"), "{error}");
+    assert!(error.contains("medium"), "报错要点名支持的强度：{error}");
+    assert!(error.contains("xhigh"), "报错要点名支持的强度：{error}");
+    // 没选模型、默认模型不支持所设强度时同样明确拒绝。
+    let error = resolve_choice(&m, &choice(None, Some("xhigh")))
+        .expect_err("默认模型不支持时也不能静默回落")
+        .to_string();
+    assert!(error.contains("gpt-6.1-sol"), "{error}");
+    assert!(error.contains("xhigh"), "{error}");
+    // 清单里没有的模型、或取不到清单时，无法核对，原样交给 Codex。
     assert_eq!(
-        resolve_choice(&m, &choice(Some("gpt-6-astra"), Some("max"))),
-        pair("gpt-6-astra", "medium")
-    );
-    // 清单里没有的模型、或取不到清单时，原样交给 Codex。
-    assert_eq!(
-        resolve_choice(&m, &choice(Some("o9"), Some("high"))),
+        resolve_choice(&m, &choice(Some("o9"), Some("high"))).unwrap(),
         pair("o9", "high")
     );
-    assert_eq!(resolve_choice(&[], &choice(None, None)), (None, None));
+    assert_eq!(
+        resolve_choice(&[], &choice(None, None)).unwrap(),
+        (None, None)
+    );
     // 像选项的值丢掉。
     assert_eq!(
-        resolve_choice(&[], &choice(Some("--yolo"), Some(" "))),
+        resolve_choice(&[], &choice(Some("--yolo"), Some(" "))).unwrap(),
         (None, None)
+    );
+    // 明确“支持零档”（空数组）与“没有能力信息”（缺字段）语义不同：前者必须拒绝显式档位。
+    let no_efforts = vec![serde_json::json!({
+        "id": "no-effort-model",
+        "displayName": "No effort",
+        "hidden": false,
+        "isDefault": true,
+        "defaultReasoningEffort": null,
+        "supportedReasoningEfforts": [],
+    })];
+    let error = resolve_choice(&no_efforts, &choice(None, Some("max")))
+        .expect_err("明确支持零档时不能把 max 静默交给 Codex")
+        .to_string();
+    assert!(error.contains("no-effort-model"), "{error}");
+    assert!(error.contains("max"), "{error}");
+    let no_info = vec![serde_json::json!({
+        "id": "no-info-model",
+        "displayName": "No info",
+        "hidden": false,
+        "isDefault": true,
+    })];
+    assert_eq!(
+        resolve_choice(&no_info, &choice(None, Some("max"))).unwrap(),
+        pair("no-info-model", "max"),
+        "缺少能力信息时仍原样交给 Codex"
     );
     let summary = model_summary(&m);
     assert_eq!(

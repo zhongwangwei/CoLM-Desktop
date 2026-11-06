@@ -568,3 +568,163 @@ fn server_projects_take_the_observation_beside_their_server_sitedata() {
         None
     );
 }
+
+#[test]
+fn open_case_keeps_unavailable_forcing_repairable_without_validating_it() {
+    let root = tmp("forcing-repairable-open");
+    for (name, header, remote) in [
+        ("missing", "missing.nml", false),
+        ("malformed", "forcing.nml", false),
+        ("remote-shared", "/server/shared/forcing.nml", true),
+    ] {
+        let dir = make_case(&root, name, name);
+        let text = format!(
+            "&nl_colm\n DEF_CASE_NAME='{name}'\n DEF_GRIDBASED_lon_res=1.0\n DEF_GRIDBASED_lat_res=1.0\n DEF_USE_PFT=.true.\n DEF_forcing_namelist='{header}'\n/\n"
+        );
+        std::fs::write(dir.join("case.nml"), &text).unwrap();
+        if name == "malformed" {
+            std::fs::write(dir.join(header), "not a namelist").unwrap();
+        }
+        if remote {
+            std::fs::write(
+                dir.join(".colm-desktop.json"),
+                r#"{"run_host":"server","remote_directory":"/server/project/case"}"#,
+            )
+            .unwrap();
+        }
+        let argument = dir.to_string_lossy().into_owned();
+        let opened = open_case(argument.clone()).unwrap_or_else(|error| {
+            panic!("{name}: cannot reach forcing repair controls: {error}")
+        });
+        assert_eq!(opened.profile.grid, Some("latlon"));
+        assert_eq!(opened.profile.subgrid, "PFT");
+        assert_eq!(opened.profile.inputs.forcing_namelist, header);
+        let error = crate::config::read_case(text.clone(), Some(argument.clone()))
+            .err()
+            .expect("opening must not turn an unavailable header into valid defaults");
+        assert!(
+            error.contains(header),
+            "{name}: missing header diagnostic: {error}"
+        );
+        assert!(crate::config::case_forcing_input(argument.clone()).is_err());
+        if name != "missing" {
+            assert!(
+                crate::config::set_field_batch(
+                    vec![argument],
+                    "DEF_simulation_time%start_year".into(),
+                    "2001".into(),
+                    None,
+                )
+                .is_err(),
+                "{name}: save must still reject the unreadable header"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("case.nml")).unwrap(), text);
+    }
+}
+
+#[test]
+fn multi_site_marker_roundtrips_and_rejects_invalid_values() {
+    let root = tmp("multi-site-marker");
+    let root_text = root.display().to_string();
+    project_remember_multi_site(root_text.clone(), "per-site".into(), 3).unwrap();
+    assert_eq!(
+        read_multi_site_marker(&root),
+        Some(("per-site", "3".to_owned()))
+    );
+    assert!(project_remember_multi_site(root_text, "grid".into(), 3).is_err());
+    assert!(
+        project_remember_multi_site(root.display().to_string(), "first-year".into(), 0).is_err()
+    );
+    std::fs::write(
+        root.join(MULTI_SITE_MARKER),
+        r#"{"mode":"first-year","repeat":"nope"}"#,
+    )
+    .unwrap();
+    assert_eq!(read_multi_site_marker(&root), None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn reopening_a_spatial_project_backfills_grid_bounds_and_forcing() {
+    let profile = case_profile(
+        "&nl_colm
+ DEF_forcing_namelist = 'forcing.nml'
+ DEF_domain%edgew = 100.0
+ DEF_domain%edgee = 110.0
+ DEF_domain%edges = 20.0
+ DEF_domain%edgen = 30.0
+ DEF_GRIDBASED_lon_res = 0.1
+ DEF_GRIDBASED_lat_res = 0.05
+ DEF_file_mesh = '/mesh/a.nc'
+/
+",
+        true,
+        None,
+        None,
+    )
+    .expect("spatial profile");
+    let forcing = colm_namelist::parse(
+        "&nl_colm_forcing
+ DEF_forcing%dataset = 'CMFD'
+ DEF_dir_forcing = '/data/CMFD/'
+/
+",
+    )
+    .expect("forcing doc");
+    let form = spatial_wizard_choices(&profile, Some(&forcing));
+    assert_eq!(form["west"], "100");
+    assert_eq!(form["east"], "110");
+    assert_eq!(form["south"], "20");
+    assert_eq!(form["north"], "30");
+    assert_eq!(form["dlon"], "0.1");
+    assert_eq!(form["dlat"], "0.05");
+    assert!(!form.contains_key("mesh"), "latlon grids have no mesh file");
+    assert_eq!(form["forcing_mode"], "directory");
+    assert_eq!(form["forcing_dataset"], "CMFD");
+    assert_eq!(form["spatial_forcingdir"], "/data/CMFD/");
+
+    // 自定义强迫场配置（非模板数据集）：回填成"使用已有配置文件"。
+    let custom = colm_namelist::parse(
+        "&nl_colm_forcing
+ DEF_forcing%dataset = 'POINT'
+/
+",
+    )
+    .expect("custom forcing doc");
+    let form = spatial_wizard_choices(&profile, Some(&custom));
+    assert_eq!(form["forcing_mode"], "config");
+    assert_eq!(form["forcing"], "forcing.nml");
+    assert!(!form.contains_key("forcing_dataset"));
+
+    // 流域单元网格：只回填网格文件，不写经纬度边界。
+    let catchment = case_profile(
+        "&nl_colm
+ DEF_CatchmentMesh_data = '/mesh/catchment.nc'
+/
+",
+        true,
+        None,
+        None,
+    )
+    .expect("catchment profile");
+    let form = spatial_wizard_choices(&catchment, None);
+    assert_eq!(form["catchment"], "/mesh/catchment.nc");
+    assert!(!form.contains_key("west"));
+    assert!(!form.contains_key("forcing_mode"));
+
+    // 非结构网格：回填 mesh 文件。
+    let unstructured = case_profile(
+        "&nl_colm
+ DEF_file_mesh = '/mesh/ugrid.nc'
+/
+",
+        true,
+        None,
+        None,
+    )
+    .expect("unstructured profile");
+    let form = spatial_wizard_choices(&unstructured, None);
+    assert_eq!(form["mesh"], "/mesh/ugrid.nc");
+    assert!(!form.contains_key("catchment"));
+}

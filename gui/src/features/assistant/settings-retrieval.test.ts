@@ -80,8 +80,10 @@ test('index actions wait until enabled retrieval changes are saved', () => {
   ) as ts.JsxAttribute;
   const expression = (disabled.initializer as ts.JsxExpression).expression!.getText(source);
   const saved = { ...defaultSettings, retrieval: { ...defaultSettings.retrieval, enabled: true } };
-  const isDisabled = (draft: typeof saved, settings = saved) =>
-    evaluate<boolean>(expression, { draft, settings, equalJson });
+  const isDisabled = (draft: typeof saved, settings = saved, saving = false) =>
+    evaluate<boolean>(expression, { draft, settings, equalJson, saving });
+  // 保存请求在飞时也要禁用索引动作，避免抢在 configure 送达前发往旧配置（F-A-07）。
+  assert.equal(isDisabled(saved, saved, true), true);
   assert.equal(isDisabled(saved), false);
   assert.equal(
     isDisabled({ ...saved, retrieval: { ...saved.retrieval, index: 'other-docs' } }),

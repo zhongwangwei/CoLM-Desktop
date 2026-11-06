@@ -10,6 +10,8 @@ import {
   effectiveModelFields,
   selectChoice,
   type SchemaField,
+  configurationCaseValues,
+  forcingSaveConflict,
 } from './case-model';
 import { compatibleKernel } from '../runs/run-model';
 import {
@@ -19,10 +21,12 @@ import {
   caseSpinupValid,
   casePeriodText,
   simulationFields,
+  surfacePreparation,
   isSiteConfiguration,
   caseRangeKeys,
   validDate,
   type SimulationStep,
+  spatialSurfaceOnlyFields,
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
@@ -139,9 +143,15 @@ export default function CasesPage() {
     [saved, setSaved] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState(false),
     [advanced, setAdvanced] = useState(state.expert);
+  const [forcingRepair, setForcingRepair] = useState<{
+    original: string;
+    path: string;
+    error: string;
+  } | null>(null);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [explicitValues, setExplicitValues] = useState<Record<string, string>>({}),
+    [outputRedirect, setOutputRedirect] = useState<{ out: string; target: string } | null>(null),
     [modelKeys, setModelKeys] = useState<SchemaField[]>([]);
   const epoch = useRef({ active: false }),
     lock = useRef(false),
@@ -182,7 +192,7 @@ export default function CasesPage() {
       (prefix) => dateDraft[prefix] !== undefined && dateDraft[prefix] !== caseDate(saved, prefix),
     );
   useNavigationGuard(() =>
-    dirty
+    dirty || (forcingRepair !== null && forcingRepair.path !== forcingRepair.original)
       ? t(
           '请先保存算例设置，或放弃本地修改后再离开。',
           'Save case settings or discard local edits before leaving.',
@@ -193,7 +203,7 @@ export default function CasesPage() {
     update({ simulationReturn: null });
   }, [update]);
   async function changeCaseOptions(requested: CaseOptionPatch) {
-    if (!dir || editingDisabled || dirty || lock.current)
+    if (!dir || editingDisabled || dirty || loadFailed || lock.current)
       throw new Error(t('请先保存或放弃当前修改。', 'Save or discard current edits first.'));
     // 上游选择否定了已开启过程的物理前提时，同一次保存里一并关闭它。
     const { patch, closed } = exclusionPatch({ ...physics, ...values }, requested, {
@@ -346,6 +356,7 @@ export default function CasesPage() {
     setForcingProbe(null);
     setForcingPicker(false);
     setForcingInputError('');
+    setForcingRepair(null);
     if (!dir) {
       setBusy(false);
       return () => {
@@ -366,7 +377,29 @@ export default function CasesPage() {
           urban?: boolean;
           crop?: boolean;
         };
-      }>('model_case_context', { dir, modelRevision: versionRef });
+      }>('model_case_context', { dir, modelRevision: versionRef }).catch(async (contextError) => {
+        // A failed materialization is not a usable model context. Offer only a
+        // reference repair after independently proving that the case itself parses.
+        try {
+          const text = await invoke<string>('read_case_nml', { caseDir: dir });
+          const entries = await invoke<{ path: string; value: string }[]>('read_case', { text });
+          const reference = entries.find(
+            (entry) => entry.path.toLowerCase() === 'def_forcing_namelist',
+          );
+          const original = reference ? displayLiteral(reference.value) : '';
+          if (original.trim()) {
+            try {
+              await invoke('read_case', { text, dir });
+            } catch (headerError) {
+              if (request.active)
+                setForcingRepair({ original, path: original, error: String(headerError) });
+            }
+          }
+        } catch {
+          // No trustworthy case reference: retain the original context error only.
+        }
+        throw contextError;
+      });
       try {
         if (!request.active) return;
         setModelContext({ dir: dir!, id: versionId, revision, profile: context.profile });
@@ -401,10 +434,54 @@ export default function CasesPage() {
           },
         );
         // Display source paths; the preview is the authority for model-dependent gates.
+        let forcingReadError = '';
         const entries = await invoke<{ path: string; value: string }[]>('read_case', {
-            text: sourceText,
-          }),
-          actual = Object.fromEntries(entries.map((e) => [e.path, displayLiteral(e.value)]));
+          text: sourceText,
+          dir,
+        }).catch(async (error) => {
+          forcingReadError = String(error);
+          if (request.active) setForcingInputError(forcingReadError);
+          // Keep the case-file controls available to repair its header reference.
+          // Unreadable header fields stay blank and disabled, never schema defaults.
+          return invoke<{ path: string; value: string }[]>('read_case', { text: sourceText });
+        });
+        const actual = Object.fromEntries(
+          entries
+            .filter(
+              (e) =>
+                !forcingReadError ||
+                !all.some(
+                  (f) =>
+                    f.name.toLowerCase() === e.path.toLowerCase() && f.group === 'nl_colm_forcing',
+                ),
+            )
+            .map((e) => {
+              const field = all.find((f) => f.name.toLowerCase() === e.path.toLowerCase());
+              return [field?.name ?? e.path, field?.arity ? e.value : displayLiteral(e.value)];
+            }),
+        );
+        // Indexed declarations cannot be represented as one complete array without
+        // inventing values for absent slots. Show their exact assignments read-only.
+        const indexedArrays = all
+          .filter(
+            (field) =>
+              field.group === 'nl_colm_forcing' &&
+              field.arity &&
+              entries.some((entry) =>
+                entry.path.toLowerCase().startsWith(`${field.name.toLowerCase()}(`),
+              ),
+          )
+          .map((field) => field.name);
+        for (const name of indexedArrays) {
+          actual[name] = entries
+            .filter(
+              (entry) =>
+                entry.path.toLowerCase() === name.toLowerCase() ||
+                entry.path.toLowerCase().startsWith(`${name.toLowerCase()}(`),
+            )
+            .map((entry) => `${entry.path}=${entry.value}`)
+            .join('; ');
+        }
         const modes: { name: string; mode: string; reason?: string }[] = [];
         const histories = kernel
           ? await invoke<
@@ -424,7 +501,12 @@ export default function CasesPage() {
           .filter((f) => !modelFields.some((m) => m.name.toLowerCase() === f.name.toLowerCase()))
           .filter((f) => !f.name.startsWith('DEF_hist_vars%') || histories.length > 0);
         const v = Object.fromEntries(
-          fields.map((f) => [f.name, actual[f.name] ?? displayLiteral(f.default)]),
+          fields.map((f) => [
+            f.name,
+            forcingReadError && f.group === 'nl_colm_forcing'
+              ? ''
+              : (actual[f.name] ?? displayLiteral(f.default)),
+          ]),
         );
         if (!request.active) return;
         setModelKeys(modelFields);
@@ -433,7 +515,9 @@ export default function CasesPage() {
         setSaved(v);
         setExplicitValues(
           Object.fromEntries(
-            Object.entries(actual).filter(([key]) => fields.some((f) => f.name === key)),
+            Object.entries(actual).filter(
+              ([key]) => !indexedArrays.includes(key) && fields.some((f) => f.name === key),
+            ),
           ),
         );
         setContextReason(
@@ -453,6 +537,10 @@ export default function CasesPage() {
           })),
         );
         setDisabledFields([
+          ...indexedArrays,
+          ...fields
+            .filter((f) => forcingReadError && f.group === 'nl_colm_forcing')
+            .map((f) => f.name),
           ...modes
             .filter((m) => ['disabled', 'readonly'].includes(m.mode.toLowerCase()))
             .map((m) => m.name),
@@ -496,7 +584,7 @@ export default function CasesPage() {
     caseDir: dir ?? null,
     kernelDir: configurationKernel?.dir ?? null,
     pftSelection: null,
-    caseValues: dataPatch,
+    caseValues: configurationCaseValues(dataPatch, schema),
   });
   function changeForcingDirectory(directory: string) {
     ++forcingSequence.current;
@@ -588,6 +676,22 @@ export default function CasesPage() {
       if (request.active && epoch.current === request) setBusy(false);
     }
   }
+  async function repairForcingReference() {
+    if (editingDisabled || !dir || !forcingRepair || !forcingRepair.path.trim()) return;
+    const request = epoch.current;
+    const path = forcingRepair.path.trim();
+    await work(async () => {
+      await invoke('case_data_save', {
+        dirs: [dir],
+        fields: [{ path: 'DEF_forcing_namelist', value: path }],
+        kernelDir: null,
+        modelRevision: state.versionRef,
+      });
+      if (!request.active || epoch.current !== request) return;
+      setForcingRepair(null);
+      setReloadCount((count) => count + 1);
+    });
+  }
   async function save() {
     const target = dir,
       id = epoch.current;
@@ -599,6 +703,14 @@ export default function CasesPage() {
         .map(([path, value]) => ({ path, value }));
       if (forcingDirty && !forcingInput?.directory.trim())
         throw new Error(t('请选择强迫场数据路径。', 'Choose the forcing data path.'));
+      // 两处都写 forcing.nml：同一次保存会互相冲突，后端只能整体拒绝；先给可操作提示（F-N-08）。
+      if (forcingSaveConflict(forcingDirty, fields))
+        throw new Error(
+          t(
+            '强迫场路径/数据集与「更多配置」里的 forcing 字段不能在同一次保存里同时修改：请先保存其中一处，再保存另一处。',
+            'The forcing path/dataset and the forcing fields under “More settings” cannot be changed in the same save: save one group, then the other.',
+          ),
+        );
       if (!target || (!fields.length && !forcingDirty)) return;
       await invoke('case_data_save', {
         dirs: [target],
@@ -628,6 +740,12 @@ export default function CasesPage() {
         setValues((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
         setSaved((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
       }
+      // 写 forcing.nml 后重新从磁盘读取，让「更多配置」里对 forcing 的显示与新文件一致（F-N-08）。
+      if (
+        forcingDirty ||
+        fields.some((field) => field.path.toLowerCase().startsWith('def_forcing%'))
+      )
+        setReloadCount((count) => count + 1);
       setExplicitValues((old) => ({
         ...old,
         ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
@@ -677,6 +795,10 @@ export default function CasesPage() {
     });
   }
   const labels: Record<string, string> = {
+    USE_srfdata_from_larger_region: t(
+      '从已有大区域地表资料裁取',
+      'Crop existing larger-region surface data',
+    ),
     DEF_dir_existing_srfdata: t('已有地表资料目录', 'Existing surface data'),
     SITE_fsitedata: t('站点文件', 'Site file'),
     DEF_forcing_namelist: t('强迫场配置', 'Forcing configuration'),
@@ -695,6 +817,7 @@ export default function CasesPage() {
     DAILY: t('每日', 'Daily'),
     MONTHLY: t('每月', 'Monthly'),
     YEARLY: t('每年', 'Yearly'),
+    none: t('不写历史文件', 'No history output'),
   };
   const engine: string =
     typeof state.selectedCase?.profile?.engine === 'string'
@@ -716,8 +839,11 @@ export default function CasesPage() {
         (f) => !groupFields.includes(f) && !rangeFields.includes(f),
       ),
     ];
+  const spatialSurfaceOnly = (name: string) =>
+    !effectiveProfile?.grid && (spatialSurfaceOnlyFields as readonly string[]).includes(name);
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
     optionDisabled = (name: string) =>
+      spatialSurfaceOnly(name) ||
       disabledFields.includes(name) ||
       optionState(name)?.mode === 'disabled' ||
       optionState(name)?.mode === 'readonly';
@@ -812,7 +938,15 @@ export default function CasesPage() {
                   })),
                 }
               : {}),
-            disabled: editingDisabled || optionDisabled(f.name) || f.name === 'DEF_dir_output',
+            disabled:
+              editingDisabled ||
+              optionDisabled(f.name) ||
+              f.name === 'DEF_dir_output' ||
+              // 空间算例的网格在创建时固定：第 2 步"只能查看"必须同时锁助手契约，
+              // 否则 ui_set+ui_commit 仍可改边界/分辨率并写进 case.nml 却不重建 mesh（F-S-09）。
+              (step === 2 &&
+                state.selectedCase?.profile.spatial === true &&
+                rangeKeys.includes(f.name)),
             set: (v: string) => setValues((x) => ({ ...x, [f.name]: v })),
           })),
         ]
@@ -896,6 +1030,17 @@ export default function CasesPage() {
       type: 'switch',
       disabled: editingDisabled,
       set: (v) => setAdvanced(v === 'true'),
+    });
+  if (forcingRepair && state.caseTab === 'settings')
+    fields.push({
+      id: 'case-forcing-repair',
+      label: t('新的强迫场配置引用', 'Replacement forcing configuration reference'),
+      value: forcingRepair.path,
+      type: 'text',
+      disabled: editingDisabled,
+      set: (path) => {
+        if (!editingDisabled) setForcingRepair((old) => (old ? { ...old, path } : null));
+      },
     });
   usePageContract({
     title:
@@ -981,14 +1126,33 @@ export default function CasesPage() {
       values[f.name] ?? '',
       optionState(f.name)?.allowed_values.length ? optionState(f.name)!.allowed_values : f.values,
     );
-  const render = (f: SchemaField) => (
+  const render = (f: SchemaField, locked = false) => (
     <Field
       key={f.name}
       label={labels[f.name] || fieldLabel(f.name, state.language)}
       hint={
+        (spatialSurfaceOnly(f.name)
+          ? t(
+              '仅空间算例使用；单点模拟不使用大区域地表裁取及此目录。',
+              'Spatial cases only; single-site simulations do not use regional surface cropping or this directory.',
+            )
+          : undefined) ??
         configurationReason(optionState(f.name)?.reason, en) ??
         configurationReason(contextReason[f.name], en) ??
-        (advanced ? f.name : undefined)
+        (f.name === 'USE_srfdata_from_larger_region'
+          ? t(
+              '开启后，地表准备阶段从下方目录裁取本区域资料；关闭则从原始资料生成。',
+              'When enabled, surface preparation crops this region from the directory below; otherwise it generates data from raw inputs.',
+            )
+          : undefined) ??
+        (f.group === 'nl_colm_forcing' && f.arity
+          ? t(
+              `完整填写 ${f.arity} 项，以逗号分隔；字符串须加引号。按下标声明的数组仅显示原文`,
+              `Enter all ${f.arity} comma-separated values; quote strings. Indexed declarations are read-only`,
+            )
+          : advanced
+            ? f.name
+            : undefined)
       }
     >
       {f.name === 'DEF_dir_output' ? (
@@ -996,7 +1160,7 @@ export default function CasesPage() {
       ) : f.kind === 'Logical' ? (
         <Select
           value={values[f.name] ?? ''}
-          disabled={editingDisabled || optionDisabled(f.name)}
+          disabled={editingDisabled || locked || optionDisabled(f.name)}
           onChange={(e) => setValues((x) => ({ ...x, [f.name]: e.target.value }))}
         >
           <option value=".true.">{t('开启', 'On')}</option>
@@ -1005,7 +1169,7 @@ export default function CasesPage() {
       ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
           value={choice(f).value}
-          disabled={editingDisabled || optionDisabled(f.name)}
+          disabled={editingDisabled || locked || optionDisabled(f.name)}
           onChange={(e) => setValues((x) => ({ ...x, [f.name]: e.target.value }))}
         >
           {choice(f).options.map((v) => (
@@ -1019,7 +1183,7 @@ export default function CasesPage() {
       ) : (
         <Input
           value={values[f.name] ?? ''}
-          disabled={editingDisabled || optionDisabled(f.name)}
+          disabled={editingDisabled || locked || optionDisabled(f.name)}
           onChange={(e) => setValues((x) => ({ ...x, [f.name]: e.target.value }))}
         />
       )}
@@ -1056,7 +1220,7 @@ export default function CasesPage() {
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
       {advanced && (
         <>
-          <div className="form-grid">{extras.map(render)}</div>
+          <div className="form-grid">{extras.map((field) => render(field))}</div>
         </>
       )}
     </Advanced>
@@ -1112,6 +1276,41 @@ export default function CasesPage() {
             onChange={setStep}
           />
           {error && <Notice tone="error">{error}</Notice>}
+          {forcingRepair && (
+            <Card title={t('修复强迫场配置引用', 'Repair forcing configuration reference')}>
+              <Notice tone="warning">{forcingRepair.error}</Notice>
+              <Field label={t('原强迫场配置引用', 'Original forcing configuration reference')}>
+                <Input value={forcingRepair.original} readOnly />
+              </Field>
+              <Field
+                label={t('新的强迫场配置引用', 'Replacement forcing configuration reference')}
+                hint={t(
+                  '指向本算例自有的可读配置文件。不会自动下载服务器上未缓存的外部文件；保存时校验，成功后重新读取模型设置。',
+                  'Use a readable configuration file owned by this case. Uncached external server files are not downloaded automatically. Saving validates the reference before reloading model settings.',
+                )}
+              >
+                <Input
+                  value={forcingRepair.path}
+                  disabled={editingDisabled}
+                  onChange={(event) => {
+                    if (!editingDisabled)
+                      setForcingRepair({ ...forcingRepair, path: event.target.value });
+                  }}
+                />
+              </Field>
+              <ActionButton
+                action="case-forcing-repair-save"
+                kind="commit"
+                label={t('保存引用并重新读取', 'Save reference and reload')}
+                disabled={
+                  editingDisabled ||
+                  !forcingRepair.path.trim() ||
+                  forcingRepair.path === forcingRepair.original
+                }
+                run={repairForcingReference}
+              />
+            </Card>
+          )}
           {(loadFailed || contextStale) && !busy && (
             <div className="flex gap-2">
               <ActionButton
@@ -1198,6 +1397,58 @@ export default function CasesPage() {
                   )}
                 >
                   <Input readOnly value={values['DEF_dir_output'] ?? (dir ? `${dir}/out` : '')} />
+                  {!remoteDirectory &&
+                    (() => {
+                      const caseOut = dir ? `${dir.replace(/[\\/]+$/, '')}/out` : '';
+                      const configured = (values['DEF_dir_output'] ?? '').trim();
+                      // 重定向只改算例的 `<case>/out` 软链；case.nml 显式指向别处的算例改了也没用（F-S-14）。
+                      const redirectable =
+                        !!dir &&
+                        (!configured ||
+                          configured.replace(/[\\/]+$/, '').toLowerCase() ===
+                            caseOut.toLowerCase());
+                      return (
+                        <>
+                          <ActionButton
+                            action="case-output-dir"
+                            kind="commit"
+                            label={t('更改输出目录', 'Change output directory')}
+                            disabled={editingDisabled || busy || dirty || !dir || !redirectable}
+                            run={async () => {
+                              const target = await invoke<string | null>('pick_folder', {
+                                key: 'case-output-dir',
+                              });
+                              if (!target || !dir) return;
+                              const redirected = await invoke<{ out: string; target: string }>(
+                                'redirect_output_dir',
+                                { caseDir: dir, targetDir: target },
+                              );
+                              setOutputRedirect(redirected);
+                              notify(t('输出目录已改到：', 'Output directory now: ') + target);
+                              setReloadCount((count) => count + 1);
+                            }}
+                          >
+                            {t('更改…', 'Change…')}
+                          </ActionButton>
+                          {!redirectable && (
+                            <p className="field-hint">
+                              {t(
+                                '这个算例的 DEF_dir_output 指向自定义位置：更改输出目录只对默认的 <算例>/out 生效，请先改回默认或直接修改该字段。',
+                                'This case writes to a custom DEF_dir_output: changing the output folder only applies to the default <case>/out. Restore the default or edit the field directly.',
+                              )}
+                            </p>
+                          )}
+                          {outputRedirect && (
+                            <p className="field-hint">
+                              {t(
+                                `当前链接：${outputRedirect.out} → ${outputRedirect.target}`,
+                                `Current link: ${outputRedirect.out} → ${outputRedirect.target}`,
+                              )}
+                            </p>
+                          )}
+                        </>
+                      );
+                    })()}
                 </Field>
               </div>
               <p className="muted">
@@ -1218,14 +1469,27 @@ export default function CasesPage() {
                     : t('单点', 'Single site')}
                 </span>
                 <span>{state.selectedCase?.profile.grid ?? ''}</span>
+                {state.selectedCase?.profile.crop && (
+                  <span>{t('CROP 作物内核', 'CROP kernel')}</span>
+                )}
+                {state.selectedCase?.profile.urban && <span>{t('城市', 'Urban')}</span>}
               </div>
               <p className="muted">
-                {t(
-                  '可修改当前范围与网格配置。更换站点或网格后，请在下一步匹配对应数据；旧运行结果仍保留。',
-                  'Edit the current range and grid settings, then match the corresponding inputs in the next step. Existing run results are preserved.',
-                )}
+                {state.selectedCase?.profile.spatial
+                  ? t(
+                      '范围与网格在创建算例时固定：这里只能查看。已有算例运行的网格不会随这些字段重建，直接改数字会让边界/分辨率与实际网格不一致；需要换网格请新建模拟。',
+                      'Range and grid are fixed when the case is created and can only be reviewed here. Existing runs do not rebuild the mesh from these fields, so editing the numbers would disagree with the actual mesh. Create a new simulation to change the grid.',
+                    )
+                  : t(
+                      '单点算例的经纬度可以在这里调整；网格在创建时固定，换网格请新建模拟。',
+                      'Single-site coordinates can be adjusted here; the grid is fixed at creation, so create a new simulation to change it.',
+                    )}
               </p>
-              <div className="form-grid">{rangeFields.map(render)}</div>
+              <div className="form-grid">
+                {rangeFields.map((field) =>
+                  render(field, state.selectedCase?.profile.spatial === true),
+                )}
+              </div>
               {more()}
             </Card>
           )}
@@ -1247,6 +1511,64 @@ export default function CasesPage() {
                   'Enter YYYY-MM-DD or YYYYMMDD; complete valid dates gain separators automatically. You can also choose from the calendar. The end is a cutoff; existing time-of-day seconds are preserved.',
                 )}
               </p>
+              {dir && !remoteDirectory && !state.selectedCase?.profile.spatial && (
+                <div className="actions" style={{ marginTop: '0.75rem' }}>
+                  <ActionButton
+                    action="case-cbl-file"
+                    kind="commit"
+                    label={t('接入边界层高度文件', 'Attach boundary-layer height file')}
+                    disabled={editingDisabled || busy || dirty}
+                    run={async () => {
+                      const file = await invoke<string | null>('pick_file', {
+                        key: 'case-cbl-file',
+                      });
+                      if (!file) return;
+                      await invoke('configure_cbl_batch', {
+                        dirs: [dir],
+                        file,
+                        kernelDir:
+                          compatibleKernel(state.kernels, effectiveProfile ?? {})?.dir ?? null,
+                      });
+                      notify(
+                        t(
+                          '已把边界层高度文件接入该站点的强迫配置（forcing.nml）。',
+                          'Boundary-layer height file attached to this site’s forcing configuration.',
+                        ),
+                      );
+                      setReloadCount((count) => count + 1);
+                    }}
+                  >
+                    {t('选择 CBL 文件…', 'Choose CBL file…')}
+                  </ActionButton>
+                  <ActionButton
+                    action="case-ozone-file"
+                    kind="commit"
+                    label={t('接入臭氧文件', 'Attach ozone file')}
+                    disabled={editingDisabled || busy || dirty}
+                    run={async () => {
+                      const file = await invoke<string | null>('pick_file', {
+                        key: 'case-ozone-file',
+                      });
+                      if (!file) return;
+                      await invoke('configure_ozone_batch', {
+                        dirs: [dir],
+                        file,
+                        kernelDir:
+                          compatibleKernel(state.kernels, effectiveProfile ?? {})?.dir ?? null,
+                      });
+                      notify(
+                        t(
+                          '已把臭氧文件接入该站点的算例配置（case.nml）。',
+                          'Ozone file attached to this site’s case settings (case.nml).',
+                        ),
+                      );
+                      setReloadCount((count) => count + 1);
+                    }}
+                  >
+                    {t('选择臭氧文件…', 'Choose ozone file…')}
+                  </ActionButton>
+                </div>
+              )}
               <div
                 className="simulation-spinup-box"
                 style={{
@@ -1279,11 +1601,15 @@ export default function CasesPage() {
                     <Input readOnly value={start} />
                   </Field>
                   {renderDate('spinup')}
-                  {timeBasic.filter((f) => f.name.endsWith('spinup_repeat')).map(render)}
+                  {timeBasic
+                    .filter((f) => f.name.endsWith('spinup_repeat'))
+                    .map((field) => render(field))}
                 </div>
               </div>
               <div className="form-grid" style={{ marginTop: '1rem' }}>
-                {basic.filter((f) => !f.name.startsWith('DEF_simulation_time%')).map(render)}
+                {basic
+                  .filter((f) => !f.name.startsWith('DEF_simulation_time%'))
+                  .map((field) => render(field))}
               </div>
               {forcingInputError && <Notice tone="warning">{forcingInputError}</Notice>}
               {forcingInput && (
@@ -1343,7 +1669,7 @@ export default function CasesPage() {
                 setupEnvironment={{
                   engine,
                   subgrid: effectiveProfile?.subgrid,
-                  caseValues: explicitValues,
+                  caseValues: configurationCaseValues(explicitValues, schema),
                   domain: caseSimulationDomain(effectiveProfile),
                   grid: effectiveProfile?.grid,
                   classification: effectiveProfile?.classification,
@@ -1356,7 +1682,7 @@ export default function CasesPage() {
                 }}
                 onCaseChange={changeCaseOptions}
                 siteClassifications={siteClasses?.dir === dir ? siteClasses.value : null}
-                disabled={editingDisabled || dirty}
+                disabled={editingDisabled || dirty || loadFailed}
                 onEdit={() => openResearch()}
               />
               {dirty && (
@@ -1379,12 +1705,22 @@ export default function CasesPage() {
                 )}
               >
                 <div className="form-grid">
-                  {timeBasic.filter((f) => !f.name.endsWith('spinup_repeat')).map(render)}
+                  {timeBasic
+                    .filter((f) => !f.name.endsWith('spinup_repeat'))
+                    .map((field) => render(field))}
                 </div>
                 <h3 className="simulation-subheading">{t('输出设置', 'Output settings')}</h3>
-                <div className="form-grid">{outputBasic.map(render)}</div>
+                <div className="form-grid">{outputBasic.map((field) => render(field))}</div>
                 {more()}
               </Card>
+              {(values.DEF_HIST_FREQ ?? '').trim().toLowerCase() === 'none' && (
+                <Notice tone="warning">
+                  {t(
+                    '输出间隔是「不写历史文件」（none）：下面的输出变量不会写入结果，运行后也不会有曲线或评估数据。',
+                    'The output interval is "No history output" (none): the variables below will not be written, so runs produce no curves or evaluation data.',
+                  )}
+                </Notice>
+              )}
               {historyVars.length > 0 && (
                 <HistoryVariablesCard
                   actionPrefix="case"
@@ -1437,6 +1773,10 @@ export default function CasesPage() {
               disabled={busy || dirty || contextStale || !!error || !schema.length}
               summary={{
                 name: state.selectedCase?.entry.name ?? '',
+                surface:
+                  !contextStale && !error && state.selectedCase?.entry.spatial
+                    ? surfacePreparation(values, en)
+                    : undefined,
                 period: casePeriodText(values) || t('时段未读取', 'Period unavailable'),
               }}
               onBack={() => setStep(4)}

@@ -24,6 +24,11 @@ test('filters preserve pagination and reject reversed dates', () => {
     casePath: '/a',
   });
   assert.throws(() => historyFilter({ ...emptyFilter, from: '2026-02-01', to: '2026-01-01' }));
+  assert.deepEqual(historyFilter({ ...emptyFilter, status: 'needs_reconciliation' }), {
+    offset: 0,
+    limit: 30,
+    needsReconciliation: true,
+  });
 });
 
 test('the history end minute includes its final millisecond and preserves explicit seconds', () => {
@@ -162,6 +167,39 @@ test('organized history uses recorded identities, preserves zero exits and large
   assert.equal(exported.name, 'colm-history-op-a.json');
   assert.deepEqual(JSON.parse(exported.content), detail);
 });
+test('history detail surfaces the automatically resolved parallel budget', () => {
+  const detail = {
+    operation: {
+      operation_id: 'op',
+      kind: 'remote-run',
+      status: 'succeeded',
+      case_path: '/case',
+      detail: {
+        provenance: {
+          parallel_plan: {
+            mode: 'auto',
+            nodes: 2,
+            cores_per_node: 48,
+            ranks: 2,
+            threads: 48,
+            total_cpus: 96,
+            memory_gb_per_node: 64,
+          },
+        },
+      },
+    },
+    events: [],
+    related: [],
+  } as unknown as Parameters<typeof historySections>[0];
+  const row = historySections(detail)
+    .flatMap((section) => section.rows)
+    .find((entry) => entry.en === 'Automatically resolved budget');
+  assert.ok(row, 'the budget row is rendered');
+  assert.match(String(row.value), /auto/);
+  assert.match(String(row.value), /2 nodes × 48 cores/);
+  assert.match(String(row.value), /96 CPU/);
+});
+
 test('history does not invent missing metadata or render an unbounded manifest', () => {
   const operation = {
     operation_id: '../bad/id',
@@ -591,4 +629,37 @@ test('server lifecycle statuses have localized labels', async () => {
   assert.equal(historyStatusLabel('cancel_requested'), '已请求取消');
   assert.equal(historyStatusLabel('needs_reconciliation'), '待核对');
   assert.equal(historyStatusLabel('cancel_requested', true), 'Cancellation requested');
+});
+
+test('projectSummary counts assistant and study terminal states as finished', async () => {
+  const { projectSummary } = await import('./history');
+  const member = (status: string, path: string, extra: Record<string, unknown> = {}) =>
+    ({
+      operation_id: `op-${status}-${path}`,
+      kind: 'run',
+      action: 'run',
+      status,
+      phase: 'finished',
+      case_path: path,
+      time_ms: 1,
+      ...extra,
+    }) as never;
+  const group = {
+    path: '/project',
+    members: [
+      member('ui_succeeded', '/project/a'),
+      member('ui_failed', '/project/b'),
+      member('paused', '/project/c'),
+      member('needs_review', '/project/d'),
+      member('running', '/project/e'),
+    ],
+  } as never;
+  const summary = projectSummary(group);
+  assert.deepEqual(summary.counts, {
+    succeeded: 1,
+    failed: 1,
+    running: 1,
+    pending: 2,
+  });
+  assert.equal(summary.cases, 5);
 });

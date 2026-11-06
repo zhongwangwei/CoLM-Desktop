@@ -13,7 +13,7 @@ import type {
   StudyPick,
   VersionRef,
 } from '../../lib/types';
-import { Advanced, Button, Card, Field, Input, Notice } from '../../components/ui';
+import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import { download } from '../history/history';
 import {
@@ -47,6 +47,45 @@ import { researchVersion, refreshDraftCode } from './research-version';
 import { sourceGuardReason, type SourceEditState } from './source-edits';
 import { useSourceChoicePrompt } from './source-guard';
 import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
+
+/** `model_study_members` 的返回：旧版是字符串数组，新版带截断信息（成员过多时不静默丢）。 */
+function studyMemberList(payload: unknown): {
+  members: string[];
+  truncated: boolean;
+  total: number;
+} {
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((name): name is string => typeof name === 'string') : [];
+  if (Array.isArray(payload)) {
+    const members = strings(payload);
+    return { members, truncated: false, total: members.length };
+  }
+  const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+  const members = strings(record.members);
+  return {
+    members,
+    truncated: record.truncated === true,
+    total:
+      typeof record.total === 'number' && Number.isFinite(record.total)
+        ? record.total
+        : members.length,
+  };
+}
+
+/** 研究导入的固定后端错误给双语说明；未知错误原样保留（F-V-08）。 */
+export function studyImportErrorText(
+  error: unknown,
+  t: (zh: string, en: string) => string,
+): string {
+  const text = String(error);
+  if (/Study has no best member yet/i.test(text))
+    return t(
+      '这个研究没有最优成员（不确定性/敏感性研究没有 best）；请在「研究成员」里选择具体成员再预览。',
+      'This study has no best member (uncertainty/sensitivity studies have none); choose a specific member under “Study member” and preview again.',
+    );
+  return text;
+}
+
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions, notify } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
@@ -70,6 +109,13 @@ export default function VersionsPage() {
     [fixing, setFixing] = useState(''),
     // 研究结果先列出来勾选（不直接全写进草稿）；以及这个版本要研究的参数。
     [studyPreview, setStudyPreview] = useState<StudyPreview | null>(null),
+    // 「从研究导入」选成员：先列出 members/ 下的成员，再对所选成员做预览（V-02）。
+    [studyMembers, setStudyMembers] = useState<string[]>([]),
+    [studyMemberChoice, setStudyMemberChoice] = useState('best'),
+    [studyCandidate, setStudyCandidate] = useState<string | null>(null),
+    // 成员目录超过后端上限时只返回前 N 个；如实告诉用户，不假装列全了。
+    [studyMembersTruncated, setStudyMembersTruncated] = useState(false),
+    [studyMembersTotal, setStudyMembersTotal] = useState(0),
     [picks, setPicks] = useState<StudyPick[]>([]),
     // 冻结前的检查清单（只有用自己代码的草稿才有）；checkTick 用来手动重查。
     [freezeCheck, setFreezeCheck] = useState<{
@@ -279,6 +325,8 @@ export default function VersionsPage() {
   useEffect(() => {
     let live = true;
     setReferences([]);
+    // 研究导入成功的横幅只属于那一次操作；切草稿/切版本后必须清掉（F-V-10）。
+    setStudyNotice('');
     invokeJson<{ items: HistoryOperation[] }>('history_list', {
       // 一条一条列操作：默认按项目合并，原来这里显示成"project completed"，算例和修订都是空的。
       filter: {
@@ -326,6 +374,16 @@ export default function VersionsPage() {
       live = false;
     };
   }, [draft?.id, draft?.code.workspace, draft?.code.commit, draft?.generation, checkTick]);
+  // 切换草稿时清掉“从研究导入”的候选目录/成员/截断状态：上一个研究的成员下拉与
+  // “共 N 个只列前 200”不能残留到另一个草稿的导入流程里（复核 A-07）。
+  useEffect(() => {
+    setStudyCandidate(null);
+    setStudyMembers([]);
+    setStudyMembersTruncated(false);
+    setStudyMembersTotal(0);
+    setStudyMemberChoice('best');
+    setStudyPreview(null);
+  }, [draft?.id]);
   async function execute<T>(fn: () => Promise<T>) {
     if (codeBusyNow.current)
       throw new Error(t('代码工作区操作进行中', 'A code workspace operation is in progress'));
@@ -337,7 +395,7 @@ export default function VersionsPage() {
     try {
       return await fn();
     } catch (e) {
-      if (token.active && token === epoch.current) setError(String(e));
+      if (token.active && token === epoch.current) setError(studyImportErrorText(e, t));
       throw e;
     } finally {
       lock.current = false;
@@ -649,16 +707,34 @@ export default function VersionsPage() {
       if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
       const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
       if (!studyDir) return;
-      const result = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
-        id: draft.id,
-        studyDir,
-        member: null,
-        expectedGeneration: draft.generation,
-        preview: true,
-        only: null,
-      });
-      setStudyPreview({ ...result, study: studyDir });
+      setStudyCandidate(studyDir);
+      const listing = studyMemberList(
+        await invokeJson<unknown>('model_study_members', { studyDir }).catch(() => null),
+      );
+      setStudyMembers(listing.members);
+      setStudyMembersTruncated(listing.truncated);
+      setStudyMembersTotal(listing.total);
+      // 多成员先让用户选；单成员研究没有 best 可选，直接预览那个实际成员（传 best 会被当成 null）。
+      if (listing.members.length > 1) {
+        setStudyMemberChoice('best');
+        return;
+      }
+      const member = listing.members.length === 1 ? listing.members[0] : 'best';
+      setStudyMemberChoice(member);
+      await previewStudyMember(studyDir, member);
     });
+  }
+  async function previewStudyMember(studyDir: string, member: string) {
+    if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
+    const result = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
+      id: draft.id,
+      studyDir,
+      member: member === 'best' ? null : member,
+      expectedGeneration: draft.generation,
+      preview: true,
+      only: null,
+    });
+    setStudyPreview({ ...result, study: studyDir });
   }
   async function importChosen(chosen: [string, string | null, number | null][]) {
     await execute(async () => {
@@ -1828,22 +1904,70 @@ export default function VersionsPage() {
               <Card
                 title={t('研究结果', 'Study results')}
                 description={t(
-                  '跑完的率定或敏感性研究，可以把最优成员的参数勾选后写进这个草稿。',
-                  'Tick parameters from the best member of a finished calibration or sensitivity study to write them into this draft.',
+                  '跑完的率定、敏感性或联合研究，可以把某个成员的参数或 AI 网络勾选后写进这个草稿。',
+                  'Tick parameters or an AI network from a member of a finished calibration, sensitivity or joint study to write it into this draft.',
                 )}
               >
                 <div className="button-row">
                   {editable && (
                     <ActionButton
                       action="version-import-study"
-                      label={t('从研究导入最优参数…', 'Import the best parameters from a study…')}
+                      label={t(
+                        '从研究导入参数 / AI 网络…',
+                        'Import parameters / AI network from a study…',
+                      )}
                       disabled={busy || codeBusy}
                       run={() => void previewStudy().catch(() => {})}
                     >
-                      {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
+                      {t(
+                        '从研究导入参数 / AI 网络…',
+                        'Import parameters / AI network from a study…',
+                      )}
                     </ActionButton>
                   )}
                 </div>
+                {studyCandidate && studyMembersTruncated && (
+                  <Notice>
+                    {t(
+                      `研究成员共 ${studyMembersTotal} 个，这里只列出前 ${studyMembers.length} 个；其余成员需要时请在命令行导入。`,
+                      `This study has ${studyMembersTotal} members; only the first ${studyMembers.length} are listed. Import the rest from the command line if needed.`,
+                    )}
+                  </Notice>
+                )}
+                {studyCandidate && studyMembers.length > 1 && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <Field label={t('研究成员', 'Study member')}>
+                      <Select
+                        value={studyMemberChoice}
+                        onChange={(e) => setStudyMemberChoice(e.target.value)}
+                      >
+                        <option value="best">{t('最优成员（best）', 'Best member (best)')}</option>
+                        {studyMembers.map((member) => (
+                          <option key={member} value={member}>
+                            {member === 'm000000'
+                              ? t(
+                                  'm000000（基准成员，网络/联合研究可能没有可导入产物）',
+                                  'm000000 (baseline member; network/joint studies may have nothing to import)',
+                                )
+                              : member}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <ActionButton
+                      action="version-preview-study-member"
+                      label={t('预览所选成员…', 'Preview the selected member…')}
+                      disabled={busy || codeBusy}
+                      run={() =>
+                        void execute(() =>
+                          previewStudyMember(studyCandidate, studyMemberChoice),
+                        ).catch(() => {})
+                      }
+                    >
+                      {t('预览所选成员…', 'Preview the selected member…')}
+                    </ActionButton>
+                  </div>
+                )}
                 {draft && (
                   <p className="muted versions-hint">
                     {t(

@@ -39,6 +39,10 @@ export function historyFilter(filter: Filter, offset = 0, limit = 30) {
           : time;
     } else if (key === 'includeRoutine') {
       if (value) result.includeRoutine = true;
+    } else if (key === 'status' && value === 'needs_reconciliation') {
+      // 列表徽标按派生的 needs_reconciliation 显示，字面 status 只是历史事件的一种；
+      // 按字面过滤会漏掉 submitted/cancel_requested 等同样“待核对”的记录（GUI 审查 H-05）。
+      result.needsReconciliation = true;
     } else result[key] = value;
   }
   if (typeof result.from === 'number' && typeof result.to === 'number' && result.from > result.to)
@@ -189,6 +193,24 @@ function text(value: unknown): string | null {
     );
   return null;
 }
+/** 把 `parallel_plan`（remote_cmd.rs 的 parallel_json）渲染成一行可核对的预算。 */
+export function parallelPlanText(plan: Record<string, unknown>): string | null {
+  if (!plan || Object.keys(plan).length === 0) return null;
+  const value = (key: string) => (typeof plan[key] === 'number' ? String(plan[key]) : null);
+  const parts = [
+    typeof plan.mode === 'string' ? plan.mode : null,
+    value('nodes') && value('cores_per_node')
+      ? `${value('nodes')} nodes × ${value('cores_per_node')} cores/node`
+      : null,
+    value('ranks') && value('threads')
+      ? `${value('ranks')} ranks × ${value('threads')} threads`
+      : null,
+    value('total_cpus') ? `total ${value('total_cpus')} CPU` : null,
+    value('memory_gb_per_node') ? `${value('memory_gb_per_node')} GB/node` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
+}
+
 function historyEvidence(detail: HistoryDetail) {
   return Object.assign(
     {},
@@ -204,6 +226,13 @@ export function historySections(detail: HistoryDetail, en = false): HistorySecti
     run = object(evidence.model_run ?? summary.model_run),
     code = object(run.code),
     remote = object(evidence.remote_record),
+    parallel = object(
+      evidence.parallel_plan ??
+        summary.parallel_plan ??
+        run.parallel_plan ??
+        remote.parallel_plan ??
+        provenance.parallel_plan,
+    ),
     status = object(evidence.status),
     identity = object(summary.full_input_identity),
     kernel = object(summary.kernel),
@@ -281,6 +310,8 @@ export function historySections(detail: HistoryDetail, en = false): HistorySecti
         row('核身份', 'Kernel identity', kernel.identity),
         row('并行进程数', 'Parallel ranks', evidence.ranks ?? summary.ranks),
         row('线程数', 'Threads', evidence.threads),
+        // 自动预算的原始快照：重开运行页/查看历史时都要能核对提交时实际申请了什么（R-02）。
+        row('自动并行预算（提交时）', 'Automatically resolved budget', parallelPlanText(parallel)),
       ],
     },
     {
@@ -574,6 +605,8 @@ export function historyStatusLabel(status: string, en = false): string {
     completed: ['已完成', 'Completed'],
     paused: ['已暂停', 'Paused'],
     needs_review: ['待复核', 'Needs review'],
+    ui_succeeded: ['已完成', 'Completed'],
+    ui_failed: ['失败', 'Failed'],
     interrupted: ['已中断', 'Interrupted'],
     unknown: ['未知', 'Unknown'],
   };
@@ -672,11 +705,16 @@ function countStatuses(members: HistoryOperation[]) {
   const counts = { succeeded: 0, failed: 0, running: 0, pending: 0 };
   for (const member of members) {
     if (member.needs_reconciliation) counts.pending++;
-    else if (['succeeded', 'completed'].includes(member.status)) counts.succeeded++;
+    // 与 `confirmed_status` / `canDeleteHistory` 对齐：assistant UI 操作以 ui_* 结束，
+    // 研究运行可能以 paused/needs_review 结束——它们都是终态，不能算"进行中"（F-H-12）。
+    else if (['succeeded', 'completed', 'ui_succeeded'].includes(member.status)) counts.succeeded++;
     else if (
-      ['failed', 'completed_with_failures', 'cancelled', 'interrupted'].includes(member.status)
+      ['failed', 'completed_with_failures', 'cancelled', 'interrupted', 'ui_failed'].includes(
+        member.status,
+      )
     )
       counts.failed++;
+    else if (['paused', 'needs_review'].includes(member.status)) counts.pending++;
     else counts.running++;
   }
   return counts;
@@ -802,6 +840,8 @@ export type HistoryDeletePlan = {
 };
 export function canDeleteHistory(operation: HistoryOperation): boolean {
   if (simulationDraft(operation)) return true;
+  // Keep in step with `colm_history::confirmed_status`: assistant UI operations end as ui_*,
+  // and a study run may end paused / needs_review. Older UI只列 6 个状态，把这些已确认终态误禁用。
   return (
     !operation.needs_reconciliation &&
     (!operation.run_group || operation.run_group.members.every(canDeleteHistory)) &&
@@ -812,6 +852,10 @@ export function canDeleteHistory(operation: HistoryOperation): boolean {
       'completed_with_failures',
       'cancelled',
       'interrupted',
+      'ui_succeeded',
+      'ui_failed',
+      'paused',
+      'needs_review',
     ].includes(operation.status)
   );
 }

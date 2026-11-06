@@ -31,7 +31,7 @@ fn job_scripts_detach_record_and_report() {
     assert!(script.contains("mkdir -p '/data/colm/jobs'"));
     assert!(script.contains("mkdir '/data/colm/jobs/j-1' ||"));
     assert!(script.contains("setsid nohup ./script.sh > log 2>&1 < /dev/null &"));
-    assert!(script.contains("echo hi > out.txt") && script.contains("echo $? > exit_code"));
+    assert!(script.contains("echo hi > out.txt") && script.contains("COLM_JOB_EXIT_CODE=$?"));
     assert!(!script.contains("#SBATCH"));
     assert!(status_script("/data/colm", "j-1", 40).contains("tail -n 40 log"));
     assert!(cancel_script("/data/colm", "j-1").contains("kill -TERM -- -\"$P\""));
@@ -54,7 +54,7 @@ fn scheduler_job_script_has_directives_environment_then_body() {
     assert!(at("#SBATCH --time=02:00:00") < at("cd '/r/jobs/j-1'"));
     assert!(at("cd '/r/jobs/j-1'") < at("module load rust"));
     assert!(at("module load rust") < at("echo body"));
-    assert!(at("echo body") < at("echo $? > exit_code"));
+    assert!(at("echo body") < at("COLM_JOB_EXIT_CODE=$?"));
 }
 
 #[test]
@@ -115,6 +115,76 @@ fn an_lsf_job_log_holds_the_output_before_the_job_ends() {
         "0"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn job_scripts_return_the_recorded_exit_code_to_every_scheduler() {
+    let sb = Sandbox::new("recorded-exit-status");
+    for scheduler in [
+        Scheduler::Bare,
+        Scheduler::Slurm,
+        Scheduler::Pbs,
+        Scheduler::Lsf,
+    ] {
+        for (body, expected) in [
+            ("true", 0),
+            ("false\necho should-not-run > continued", 1),
+            ("exit 37", 37),
+        ] {
+            let id = format!("job-{scheduler:?}-{expected}");
+            let dir = sb.job_dir(&id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let spec = Spec {
+                scheduler,
+                ..Spec::bare()
+            };
+            let script = job_script(&sb.work(), &id, body, &spec).unwrap();
+            std::fs::write(dir.join("script.sh"), script).unwrap();
+            let result = Command::new("bash")
+                .arg(dir.join("script.sh"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.join("exit_code"))
+                    .unwrap()
+                    .trim(),
+                expected.to_string()
+            );
+            assert_eq!(
+                result.status.code(),
+                Some(expected),
+                "{scheduler:?}: scheduler must observe the body's result"
+            );
+            assert!(!dir.join("continued").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recorded_failure_takes_precedence_over_lsf_done() {
+    let sb = Sandbox::new("lsf-done-recorded-failure");
+    let dir = sb.job_dir("failed");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("scheduler"), "lsf\n").unwrap();
+    std::fs::write(dir.join("sched_id"), "555\n").unwrap();
+    std::fs::write(dir.join("exit_code"), "1\n").unwrap();
+    sb.set("lsf_state", "DONE\n");
+    let report = sb.report("failed");
+    assert_eq!(report.status.state, State::Finished { exit_code: 1 });
+    assert!(report.terminal);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_job_that_cannot_write_its_exit_record_does_not_report_success() {
+    let sb = Sandbox::new("exit-record-write-failure");
+    let dir = sb.job_dir("blocked-record");
+    std::fs::create_dir_all(dir.join("exit_code")).unwrap();
+    let script = job_script(&sb.work(), "blocked-record", "true", &Spec::bare()).unwrap();
+    let (_, _, success) = sb.run(&script);
+    assert!(!success);
 }
 
 #[test]

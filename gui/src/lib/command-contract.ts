@@ -703,6 +703,10 @@ export const commandContract = {
     "text": {
       "required": true,
       "rust_type": "String"
+    },
+    "dir": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "varying_fields": {
@@ -1404,6 +1408,12 @@ export const commandContract = {
       "rust_type": "Option<Vec<ChosenParameter>>"
     }
   },
+  "model_study_members": {
+    "studyDir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "model_import_process": {
     "id": {
       "required": true,
@@ -1468,6 +1478,10 @@ export const commandContract = {
     "options": {
       "required": true,
       "rust_type": "ObservationConvertOptions"
+    },
+    "overwrite": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "list_cases": {
@@ -1480,6 +1494,20 @@ export const commandContract = {
     "root": {
       "required": true,
       "rust_type": "String"
+    }
+  },
+  "project_remember_multi_site": {
+    "root": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "mode": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "repeat": {
+      "required": true,
+      "rust_type": "u32"
     }
   },
   "set_case_run_host": {
@@ -2835,6 +2863,10 @@ export const commandContract = {
     "crop": {
       "required": true,
       "rust_type": "bool"
+    },
+    "overwrite": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "install_prepared_pair": {
@@ -2853,6 +2885,20 @@ export const commandContract = {
     "forcingFinal": {
       "required": true,
       "rust_type": "String"
+    }
+  },
+  "install_prepared_file": {
+    "source": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "destination": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "overwrite": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "scan_sites": {

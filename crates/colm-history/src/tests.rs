@@ -206,6 +206,39 @@ fn filters_pagination_relations_and_safe_csv() {
     );
 }
 #[test]
+fn global_export_rows_follow_the_group_runs_flag() {
+    let history = ledger();
+    for (index, case) in ["A", "B", "C"].iter().enumerate() {
+        let mut event = Event::start("run");
+        event.time_ms = Some(index as i64 + 1);
+        event.case_path = Some(format!("/project/{case}"));
+        event.detail = json!({"run_id": "batch-1"});
+        history.append(&event).unwrap();
+    }
+    // 全局历史默认按 run 折叠：一条批量记录只留一行（带 member_count），站点行丢失。
+    let csv = history
+        .export_csv(&Query {
+            group_runs: true,
+            ..Query::default()
+        })
+        .unwrap();
+    assert!(csv.contains("member_count"));
+    assert_eq!(csv.lines().count(), 2, "{csv}");
+    // 审计导出（GUI `history_export` 现在强制 group_runs=false）必须一条操作一行。
+    let audit = history
+        .export_csv(&Query {
+            group_runs: false,
+            ..Query::default()
+        })
+        .unwrap();
+    assert!(!audit.contains("member_count"));
+    assert_eq!(audit.lines().count(), 4, "{audit}");
+    for case in ["A", "B", "C"] {
+        assert!(audit.contains(&format!("/project/{case}")), "{case}");
+    }
+}
+
+#[test]
 fn structured_secrets_removed_without_changing_science_values() {
     let h = ledger();
     let mut e = Event::start("run");
@@ -1230,4 +1263,35 @@ fn reopening_current_ledger_does_not_rewrite_its_schema() {
         .pragma_query_value(None, "schema_version", |row| row.get(0))
         .unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn imported_ui_terminal_states_are_not_pending_reconciliation() {
+    let h = ledger();
+    for (index, status) in ["ui_succeeded", "ui_failed", "paused", "needs_review"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut event = Event::start("assistant_ui");
+        event.case_path = Some(format!("/case/{index}"));
+        h.append(&event).unwrap();
+        h.append(&event.next(EventPhase::Imported, status)).unwrap();
+    }
+    let pending = h
+        .query(&Query {
+            needs_reconciliation: Some(true),
+            ..Query::default()
+        })
+        .unwrap();
+    assert_eq!(
+        pending.total, 0,
+        "imported ui_*/paused/needs_review are confirmed terminal states"
+    );
+    let settled = h
+        .query(&Query {
+            needs_reconciliation: Some(false),
+            ..Query::default()
+        })
+        .unwrap();
+    assert_eq!(settled.total, 4, "{settled:?}");
 }

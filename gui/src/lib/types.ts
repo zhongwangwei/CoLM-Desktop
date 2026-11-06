@@ -167,6 +167,34 @@ export type Route =
   | 'compare'
   | 'settings'
   | 'help';
+/** 运行页记住的项目级选择；批量运行/建例交接用它。 */
+export type ProjectRunSettings = {
+  root: string;
+  cases: string[];
+  batch?: boolean;
+  host: string;
+  threads: string;
+  ranks: string;
+  workers: string;
+  /** 同时运行站点数还是自动值（按所选站点数与本机核数算）；为真时换了选择会跟着重算。 */
+  autoWorkers?: boolean;
+  scheduler: string;
+  cpus: string;
+  parallel?: 'auto' | 'manual';
+  nodes?: string;
+  coresPerNode?: string;
+  /** 每台服务器各自记住的自动并行预算；只存最后一台会让换服务器就丢配置（GUI 审查 R-05）。 */
+  parallelBudgets?: Record<string, { nodes?: string; coresPerNode?: string }>;
+  /** 「下次提交」的阶段/强制重跑/前处理引擎/输入指纹开关（GUI 审查 F-R-08）。 */
+  stage?: string;
+  force?: boolean;
+  preprocessors?: string;
+  recordInputFingerprints?: boolean;
+};
+
+/** 单算例页面按算例目录记住的选择；不覆盖项目级批量交接设置。 */
+export type CaseRunSettings = Omit<ProjectRunSettings, 'root' | 'cases' | 'batch'>;
+
 export type AppState = {
   /** True until the first backend/kernel/version load has finished; the cover shows meanwhile. */
   starting?: boolean;
@@ -195,22 +223,9 @@ export type AppState = {
     home?: boolean;
     fromCreation?: boolean;
   };
-  projectRunSettings?: {
-    root: string;
-    cases: string[];
-    batch?: boolean;
-    host: string;
-    threads: string;
-    ranks: string;
-    workers: string;
-    /** 同时运行站点数还是自动值（按所选站点数与本机核数算）；为真时换了选择会跟着重算。 */
-    autoWorkers?: boolean;
-    scheduler: string;
-    cpus: string;
-    parallel?: 'auto' | 'manual';
-    nodes?: string;
-    coresPerNode?: string;
-  };
+  projectRunSettings?: ProjectRunSettings;
+  /** 单算例页面按算例目录记住的运行选择（不覆盖项目级批量交接设置）。 */
+  caseRunSettings?: Record<string, CaseRunSettings>;
   newCaseSeed: {
     form: Record<string, string>;
     sites: Site[];

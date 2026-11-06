@@ -836,3 +836,77 @@ fn bundled_crop_creation_materializes_its_declared_unused_rawdata_root() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn site_publication_preserves_existing_outputs_until_successful_confirmed_replace() {
+    let root = case_with_nml("site-publication", "&nl_colm\n/\n");
+    let out = root.join("site.nc");
+    std::fs::write(&out, b"original").unwrap();
+    let error = super::publish_site_product(&out, false, |_| -> anyhow::Result<()> {
+        panic!("existing output must be refused before generation")
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("产物已存在，未覆盖"));
+    let failed = super::publish_site_product(&out, true, |temporary| -> anyhow::Result<()> {
+        std::fs::write(temporary, b"partial")?;
+        anyhow::bail!("generation failed")
+    });
+    assert!(failed.is_err());
+    assert_eq!(std::fs::read(&out).unwrap(), b"original");
+    super::publish_site_product(&out, true, |temporary| {
+        std::fs::write(temporary, b"complete")?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"complete");
+    assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".site-new-")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn site_publication_lock_fallback_never_clobbers_and_clears_its_lock() {
+    let root = std::env::temp_dir().join(format!(
+        "site-publish-lock-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let staged = root.join("staged.nc");
+    let out = root.join("site.nc");
+    std::fs::write(&staged, b"fallback").unwrap();
+    super::install_site_output_with_lock(&staged, &out).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"fallback");
+    assert!(!root.join(".site.nc.publish.lock").exists(), "锁必须被清理");
+    let staged2 = root.join("staged2.nc");
+    std::fs::write(&staged2, b"second").unwrap();
+    let error = super::install_site_output_with_lock(&staged2, &out).unwrap_err();
+    assert!(error.to_string().contains("产物已存在，未覆盖"), "{error}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"fallback");
+    // 崩溃留下的锁不会被自动删除，而是给出可操作的错误，避免两个发布者同时 rename。
+    std::fs::write(root.join(".site.nc.publish.lock"), b"stale").unwrap();
+    let error = super::install_site_output_with_lock(&staged2, &out).unwrap_err();
+    assert!(error.to_string().contains("publish.lock"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn site_publication_refuses_a_destination_created_during_generation() {
+    let root = case_with_nml("site-publication-race", "&nl_colm\n/\n");
+    let out = root.join("site.nc");
+    let error = super::publish_site_product(&out, false, |temporary| {
+        std::fs::write(temporary, b"generated")?;
+        std::fs::write(&out, b"other writer")?;
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("产物已存在，未覆盖"));
+    assert_eq!(std::fs::read(&out).unwrap(), b"other writer");
+    std::fs::remove_dir_all(root).unwrap();
+}

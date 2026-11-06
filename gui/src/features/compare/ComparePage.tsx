@@ -2912,8 +2912,8 @@ export default function ComparePage() {
                     <Notice tone="error">
                       <strong>
                         {t(
-                          '配置与页面选中的模拟对不上，不能运行：',
-                          'The configuration does not match the simulations picked on the page and cannot run:',
+                          '配置还有不能运行的问题：',
+                          'The configuration still has problems that prevent it from running:',
                         )}
                       </strong>
                       <ul>
@@ -3025,8 +3025,8 @@ export default function ComparePage() {
                                 )
                               : structureProblems.length > 0
                                 ? t(
-                                    '配置与页面的模拟对不上：先重新生成评估配置',
-                                    'The configuration does not match the page simulations: regenerate it first',
+                                    '配置还有不能运行的问题：先修正上面的问题',
+                                    'The configuration still has problems that prevent it from running: fix them first',
                                   )
                                 : undefined
                       }
@@ -3217,7 +3217,18 @@ export default function ComparePage() {
                             <strong>{run.run_id}</strong> · {run.state}
                             {run.finished_at ? ` · ${run.finished_at}` : ''}
                             {run.report && (
-                              <Button onClick={() => void task(() => view(run.report!))}>
+                              <Button
+                                onClick={() =>
+                                  void task(() =>
+                                    // 远程历史运行：先按 run_id 取回到本机镜像，再走本机
+                                    // bench_report；直接 view 服务器绝对路径必被 projects/
+                                    // 守卫拒绝（GUI 审查 F-C-01 / C-04 剩余缺口）。
+                                    host
+                                      ? fetchReport(host, p.name, run.run_id)
+                                      : view(run.report!),
+                                  )
+                                }
+                              >
                                 {t('查看这次报告', 'View this report')}
                               </Button>
                             )}

@@ -302,3 +302,102 @@ fn methane_history_variables_follow_the_ch4_parameter_file() {
     assert!(!on(&off, "methane_surf_flux_tot"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn river_switches_follow_output_mapping_and_kernel_runtime_gates() {
+    let dir = std::env::temp_dir().join(format!("colm-histvars-river-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut hashes = serde_json::Map::new();
+    for program in colm_kernel::PROGRAMS {
+        std::fs::write(dir.join(colm_kernel::program_file(program)), b"").unwrap();
+        hashes.insert(program.into(), colm_kernel::sha256_hex(b"").into());
+    }
+    for (preset, macros) in [
+        (
+            "latlon",
+            vec!["GRIDBASED", "LULC_IGBP", "GridRiverLakeFlow"],
+        ),
+        ("default", vec!["SinglePoint", "LULC_IGBP"]),
+    ] {
+        let manifest = serde_json::json!({
+            "schema": 1, "preset": preset, "platform": "test", "colm_git_sha": "test",
+            "generator_args": "", "macros": macros, "built_with": "test",
+            "netcdf_c": "", "netcdf_fortran": "", "hdf5": "", "sha256": hashes,
+        });
+        std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+        for enabled in [false, true] {
+            let logical = if enabled { ".true." } else { ".false." };
+            let vars = hist_vars(
+                format!("&nl_colm\n DEF_USE_GridRiverLakeFlow = {logical}\n/\n"),
+                dir.to_string_lossy().into_owned(),
+                None,
+            )
+            .unwrap();
+            for name in ["riv_height", "riv_veloct", "discharge", "floodfrc"] {
+                let var = vars.iter().find(|v| v.name == name).unwrap();
+                let writable = preset == "latlon" && enabled;
+                assert_eq!(
+                    var.writable,
+                    Some(writable),
+                    "{preset} {enabled} {name}: {:?}",
+                    var.blocked_by
+                );
+                assert_eq!(var.blocked_by.is_none(), writable);
+                assert!(var.settable);
+            }
+            for name in ["volresv", "qresv_in", "qresv_out"] {
+                let var = vars.iter().find(|v| v.name == name).unwrap();
+                assert_eq!(var.writable, None, "no writer mapping for {name}");
+                assert!(var.blocked_by.is_some());
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn multi_output_switches_preserve_true_unknown_and_false_gate_precedence() {
+    let output = |name, switch, runtime, macros| colm_hist::Var {
+        name,
+        switch,
+        runtime,
+        macros,
+        long_name: None,
+        units: None,
+        dims: &[],
+        line: 0,
+    };
+    let blocked = output("blocked_output", Some("shared"), Some("DEF_DISABLED"), &[]);
+    let unknown = output("unknown_output", Some("shared"), Some("DEF_UNKNOWN"), &[]);
+    let ready = output("ready_output", Some("shared"), Some("DEF_ENABLED"), &[]);
+    let absent_macro = output(
+        "macro_output",
+        Some("shared"),
+        None,
+        &[colm_hist::Cond::AnyOf(&["MISSING"])],
+    );
+    let unrelated = output("shared", Some("different_switch"), None, &[]);
+    let truth = |name: &str| match name {
+        "DEF_ENABLED" => Some(true),
+        "DEF_DISABLED" => Some(false),
+        _ => None,
+    };
+    let macros = std::collections::BTreeSet::new();
+    let run = |vars: &[colm_hist::Var]| switch_writability("SHARED", vars, &macros, &truth);
+    let all_blocked = run(&[blocked, absent_macro, unrelated]);
+    assert_eq!(all_blocked.0, Some(false));
+    assert!(all_blocked.1.is_some());
+    for vars in [[blocked, unknown, unrelated], [unknown, blocked, unrelated]] {
+        let result = run(&vars);
+        assert_eq!(result.0, None);
+        assert!(result.1.unwrap().contains("DEF_UNKNOWN"));
+    }
+    for vars in [[unknown, blocked, ready], [ready, blocked, unknown]] {
+        assert_eq!(run(&vars), (Some(true), None));
+    }
+    assert_eq!(
+        run(&[unrelated]).0,
+        None,
+        "an output name is not a switch association"
+    );
+}

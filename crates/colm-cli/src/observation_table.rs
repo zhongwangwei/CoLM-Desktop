@@ -171,6 +171,17 @@ pub fn probe(path: &Path) -> Result<Probe> {
 }
 
 pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<Vec<ConvertedSite>> {
+    convert_checked(src, dst_dir, options, false)
+}
+
+/// `overwrite=false` 时已有 `<site>_Flux.nc` 直接拒绝：观测产物一旦被覆盖，引用它的算例
+/// 会在下次评估时悄悄换掉参考数据。GUI 在用户确认后才重试 `overwrite=true`（D-03）。
+pub fn convert_checked(
+    src: &Path,
+    dst_dir: &Path,
+    options: &ConvertOptions,
+    overwrite: bool,
+) -> Result<Vec<ConvertedSite>> {
     let table = read_table(src)?;
     if table.rows.is_empty() {
         bail!("observation table has no data rows");
@@ -251,12 +262,21 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
         }
         let safe = safe_name(&site);
         let path = dst_dir.join(format!("{safe}_Flux.nc"));
-        let tmp = path.with_extension("nc.tmp");
+        if !overwrite && path.exists() {
+            bail!(
+                "输出文件已存在：{}；确认覆盖后重试（命令行加 --overwrite 1）/ Output already exists: {}; confirm overwrite and retry (pass --overwrite 1 on the command line)",
+                path.display(),
+                path.display()
+            );
+        }
+        // 每次转换用唯一暂存名：并发转换（两个 GUI 任务、两个窗口）共用固定 `.nc.tmp` 时
+        // 会互相写坏，而且谁先发布谁就把别人的半成品顶上去。
+        let tmp = PendingOutput::new(unique_tmp_path(&path));
         let times = rows.iter().map(|(t, _)| *t).collect::<Vec<_>>();
         let origin = *times.first().context("no rows")?;
         let mut warnings = Vec::new();
         {
-            let mut file = netcdf::create(&tmp)?;
+            let mut file = netcdf::create(tmp.path())?;
             file.add_attribute("source_format", "tabular observation CSV/TXT")?;
             file.add_attribute("source_path", src.display().to_string().as_str())?;
             file.add_attribute("site_id", site.as_str())?;
@@ -383,9 +403,9 @@ pub fn convert(src: &Path, dst_dir: &Path, options: &ConvertOptions) -> Result<V
                 }
             }
             file.close()
-                .with_context(|| format!("cannot close {}", tmp.display()))?;
+                .with_context(|| format!("cannot close {}", tmp.path().display()))?;
         }
-        install_converted_file(&tmp, &path)?;
+        tmp.install(&path, overwrite)?;
         out.push(ConvertedSite {
             site,
             path,
@@ -410,6 +430,152 @@ fn install_converted_file(temp: &Path, destination: &Path) -> Result<()> {
             destination.display()
         )
     })
+}
+
+/// 每次转换唯一的暂存文件名。以前固定用 `<site>_Flux.nc.tmp`：两个并发转换会同时写同一个
+/// 文件，谁先发布谁就把对方的半成品 rename 成正式产物（overwrite=false 也挡不住）。
+fn unique_tmp_path(destination: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output.nc".into());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    destination.with_file_name(format!(
+        ".{name}.{}-{nanos}-{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// 暂存文件守卫：发布成功之前任何一步失败（NetCDF 写失败、目标已存在）都删掉暂存，
+/// 不给下一次转换留下半截文件。
+struct PendingOutput {
+    path: PathBuf,
+    installed: bool,
+}
+
+impl PendingOutput {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            installed: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 发布到目标。`overwrite=false` 走硬链接：目标已存在时由文件系统原子拒绝
+    /// （`AlreadyExists`），两个并发转换只能有一个成功，绝不会有覆盖；`overwrite=true`
+    /// 才用 rename 替换（用户明确确认过的语义）。
+    fn install(mut self, destination: &Path, overwrite: bool) -> Result<()> {
+        if overwrite {
+            install_converted_file(&self.path, destination)?;
+        } else {
+            install_converted_file_no_clobber(&self.path, destination)?;
+        }
+        self.installed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PendingOutput {
+    fn drop(&mut self) {
+        if !self.installed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// 原子“禁止覆盖”发布：`hard_link` 在目标已存在时返回 `AlreadyExists`，成功才把暂存删掉。
+/// 不用“先看存在再 rename”，那之间有窗口，并发时两个都会以为自己没覆盖。
+///
+/// 不支持硬链接的文件系统（exFAT/FAT、部分 SMB/NFS）回退到“独占发布锁 + rename”：
+/// 锁文件用 `create_new` 原子创建，同一目标同一时刻只有一个写入者；拿到锁后确认目标不存在，
+/// 再 rename（同目录，原子替换）。这不是跨进程通用协议，但比旧行为（无锁 rename）安全，
+/// 且不会在崩溃时留下半截产物（只可能留下锁文件，过期 10 分钟后自动清理）。
+fn install_converted_file_no_clobber(temp: &Path, destination: &Path) -> Result<()> {
+    match fs::hard_link(temp, destination) {
+        Ok(()) => {
+            // 目标已经指向暂存文件的 inode；暂存只是多出来的名字，删掉它不影响产物。
+            let _ = fs::remove_file(temp);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+            "输出文件已存在：{}；确认覆盖后重试（命令行加 --overwrite 1）/ Output already exists: {}; confirm overwrite and retry (pass --overwrite 1 on the command line)",
+            destination.display(),
+            destination.display()
+        ),
+        Err(_) => install_with_publish_lock(temp, destination),
+    }
+}
+
+fn publish_lock_path(destination: &Path) -> std::path::PathBuf {
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output.nc".into());
+    destination.with_file_name(format!(".{name}.publish.lock"))
+}
+
+/// 硬链接不可用时的回退发布。
+///
+/// **锁只由创建者/持有者删除，绝不按年龄自动删除**：两个进程同时判断“旧锁过期”时，A 删旧锁
+/// 并建新锁后，B 仍会按先前判断删掉 A 的新锁，于是两个发布都能成功、后者覆盖前者（复核发现）。
+/// 崩溃留下的锁因此会一直挡路；错误里给出锁路径和人工删除提示，宁可让用户确认一次，
+/// 也不引入会覆盖产物的竞态。
+fn install_with_publish_lock(temp: &Path, destination: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    let lock_path = publish_lock_path(destination);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(_lock) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => bail!(
+            "目标文件正在被另一个转换写入：{}。若确认上次转换已异常退出，请删除锁文件 {} 后重试 / another conversion is publishing {}; if the previous conversion crashed, remove {} and retry",
+            destination.display(),
+            lock_path.display(),
+            destination.display(),
+            lock_path.display()
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "无法创建发布锁 {}（目标文件系统可能不允许写隐藏文件）/ cannot create publish lock {}",
+                    lock_path.display(),
+                    lock_path.display()
+                )
+            })
+        }
+    }
+    let result = (|| {
+        if destination.exists() {
+            bail!(
+                "输出文件已存在：{}；确认覆盖后重试（命令行加 --overwrite 1）/ Output already exists: {}; confirm overwrite and retry (pass --overwrite 1 on the command line)",
+                destination.display(),
+                destination.display()
+            );
+        }
+        std::fs::rename(temp, destination).with_context(|| {
+            format!(
+                "无法发布 {} 到 {}；原产物未改动 / cannot publish {} as {}; previous output was left unchanged",
+                temp.display(),
+                destination.display(),
+                temp.display(),
+                destination.display()
+            )
+        })
+    })();
+    let _ = std::fs::remove_file(&lock_path);
+    result
 }
 
 fn inferred_choices(table: &Table) -> Vec<VariableChoice> {
@@ -672,6 +838,76 @@ mod tests {
     }
 
     #[test]
+    fn unique_temp_names_never_collide() {
+        let destination = Path::new("/tmp/colm/A_Flux.nc");
+        let first = unique_tmp_path(destination);
+        let second = unique_tmp_path(destination);
+        assert_ne!(first, second, "并发转换不能共用同一个暂存文件名");
+        assert_ne!(first, destination);
+        assert_eq!(
+            first.parent(),
+            destination.parent(),
+            "暂存要与产物同目录才能原子发布"
+        );
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with(".tmp"), "{name}");
+        assert!(name.contains(&std::process::id().to_string()), "{name}");
+    }
+
+    #[test]
+    fn concurrent_publish_allows_exactly_one_writer_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("colm_obs_race_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("A_Flux.nc");
+        let writers = (0..8)
+            .map(|index| {
+                let temp = dir.join(format!("writer-{index}.tmp"));
+                fs::write(&temp, format!("writer {index}")).unwrap();
+                temp
+            })
+            .collect::<Vec<_>>();
+        let barrier = std::sync::Barrier::new(writers.len());
+        let outcomes = std::thread::scope(|scope| {
+            let handles = writers
+                .iter()
+                .map(|temp| {
+                    let barrier = &barrier;
+                    let destination = &destination;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        PendingOutput::new(temp.clone()).install(destination, false)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            outcomes.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "并发“禁止覆盖”发布只能有一个成功者：{outcomes:?}"
+        );
+        let published = fs::read(&destination).unwrap();
+        assert!(
+            (0..writers.len()).any(|index| published == format!("writer {index}").as_bytes()),
+            "产物必须完整来自某个写入者，不能是混合/半截内容"
+        );
+        for message in outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().err().map(|error| error.to_string()))
+        {
+            assert!(message.contains("Output already exists"), "{message}");
+        }
+        for temp in &writers {
+            assert!(!temp.exists(), "暂存文件必须被清掉：{}", temp.display());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn probes_and_converts_multisite_observation_csv() {
         let _netcdf_guard = crate::netcdf_test_guard();
         let dir = std::env::temp_dir().join(format!("colm_obs_{}", std::process::id()));
@@ -909,6 +1145,95 @@ mod tests {
                 .unwrap(),
             vec![0.0, 1.0]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_existing_observation_outputs_until_overwrite() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let dir = convert_one(
+            "overwrite",
+            "time,site,Qle\n2020-01-01 00:00:00,A,10\n2020-01-01 00:30:00,A,11\n",
+        );
+        let src = dir.join("obs.csv");
+        let options = ConvertOptions {
+            time_column: "time".into(),
+            site_column: Some("site".into()),
+            site_name: None,
+            variables: vec![],
+        };
+        let error = convert(&src, &dir.join("Observation"), &options)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Output already exists"),
+            "已有观测产物必须默认拒绝：{error}"
+        );
+        // 明确 overwrite 才替换；成功后产物仍可读。
+        convert_checked(&src, &dir.join("Observation"), &options, true).unwrap();
+        assert!(netcdf::open(dir.join("Observation/A_Flux.nc")).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 无硬链接文件系统（exFAT/SMB）走发布锁回退：正确发布、清理锁、绝不覆盖已有目标。
+    #[test]
+    fn publish_lock_fallback_installs_without_clobbering() {
+        let dir =
+            std::env::temp_dir().join(format!("colm_obs_publish_lock_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("A_Flux.nc");
+        let temp = dir.join("A_Flux.nc.tmp");
+        fs::write(&temp, b"new output").unwrap();
+        install_with_publish_lock(&temp, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new output");
+        assert!(!temp.exists(), "rename 后暂存不应残留");
+        assert!(!publish_lock_path(&destination).exists(), "发布锁要清理");
+        // 目标已存在：再次发布必须拒绝且不改内容。
+        fs::write(&temp, b"second output").unwrap();
+        let error = install_with_publish_lock(&temp, &destination)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Output already exists"), "{error}");
+        assert_eq!(fs::read(&destination).unwrap(), b"new output");
+        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_lock_fallback_refuses_an_abandoned_lock_instead_of_stealing_it() {
+        let dir =
+            std::env::temp_dir().join(format!("colm_obs_publish_stale_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("B_Flux.nc");
+        let temp = dir.join("B_Flux.nc.tmp");
+        fs::write(&temp, b"output").unwrap();
+        let lock = publish_lock_path(&destination);
+        // 崩溃遗留的锁：即使很旧也不自动删除（按年龄删会引入双删竞态，复核发现）。
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(file);
+        let error = install_with_publish_lock(&temp, &destination)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("另一个转换"), "{error}");
+        assert!(
+            error.contains(lock.to_str().unwrap()),
+            "错误要给出锁路径：{error}"
+        );
+        assert!(temp.exists(), "失败时暂存要留给调用方清理");
+        // 人工确认后删除锁，才能继续发布。
+        fs::remove_file(&lock).unwrap();
+        install_with_publish_lock(&temp, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"output");
+        assert!(!lock.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

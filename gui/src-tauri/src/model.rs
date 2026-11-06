@@ -163,13 +163,13 @@ fn delete_revision(
         .map_err(|e| e.to_string())
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct DeleteFailure {
     version: VersionRef,
     reason: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct DeleteReport {
     deleted: Vec<VersionRef>,
     failed: Vec<DeleteFailure>,
@@ -225,8 +225,17 @@ pub async fn model_delete(
         let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
         let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
         while_idle(&processes, &creations, || {
-            // 在空闲锁里重新数绑定：算例创建与运行都停着，数完到删完之间不会有新绑定落到它上面。
-            let bound = uses(&ledger, &roots)?;
+            // 扫描绑定到删除结束期间独占绑定活动：算例迁移/缓存整理看到它会按"忙"退出，
+            // 不会出现"扫描时看不到、删除前刚绑上"的窗口（GUI 审查 F-V-06）。
+            let _delete_guard = BindingDeleteGuard::begin()?;
+            // 项目目录不可读时绑定扫描会静默漏报（同条故障注入：chmod 000 后 cases 2→0）。
+            // 先 fail-closed 地确认"每个已知项目根都能核对"，再在空闲锁里重新数绑定。
+            let scan_roots = roots.clone();
+            let bound = bounded_scan(PRUNE_SCAN_TIMEOUT, DELETE_SCAN_CONTEXT, move || {
+                let scan_ledger =
+                    colm_history::History::open_default().map_err(|e| e.to_string())?;
+                uses_checked(&scan_ledger, &scan_roots, true)
+            })?;
             Ok(delete_revisions(
                 &registry,
                 &ledger,
@@ -298,7 +307,9 @@ pub async fn model_usage(app: tauri::AppHandle) -> Result<Vec<RevisionUsage>, St
     tauri::async_runtime::spawn_blocking(move || {
         let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
         let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
-        let found = uses(&ledger, &roots)?;
+        // 严格扫描：项目目录不可读时报错，而不是把绑定漏成 0 条（F-V-06：漏成 0 会让
+        // "清理没用的版本"把仍在用的修订列成可清理）。
+        let found = uses_checked(&ledger, &roots, true)?;
         registry
             .list()
             .map_err(|e| e.to_string())?
@@ -335,8 +346,22 @@ pub(crate) fn known_project_roots(
             .map_err(|e| format!("recent project list is unreadable: {e}"))?;
         roots.extend(list.into_iter().map(PathBuf::from));
     }
-    if let Ok(mirrors) = std::fs::read_dir(data_dir.join("remote-projects")) {
-        roots.extend(mirrors.flatten().map(|entry| entry.path()));
+    match std::fs::read_dir(data_dir.join("remote-projects")) {
+        Ok(mirrors) => {
+            for entry in mirrors {
+                roots.push(
+                    entry
+                        .map_err(|error| format!("无法读取服务器项目列表 / Server project list is unreadable: {error}"))?
+                        .path(),
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "无法读取服务器项目列表 / Server project list is unreadable: {error}"
+            ))
+        }
     }
     roots.retain(|root| !root.as_os_str().is_empty());
     roots.dedup();
@@ -375,7 +400,20 @@ impl Uses {
     }
 }
 
+/// 非严格扫描只留给测试做"漏报行为"对照；生产路径（清理/用途统计）一律走严格扫描。
+#[cfg(test)]
 fn uses(ledger: &colm_history::History, roots: &[PathBuf]) -> Result<Uses, String> {
+    uses_checked(ledger, roots, false)
+}
+
+fn uses_checked(
+    ledger: &colm_history::History,
+    roots: &[PathBuf],
+    strict: bool,
+) -> Result<Uses, String> {
+    if strict {
+        ensure_project_roots_known(roots)?;
+    }
     let mut found = Uses::default();
     let mut dirs = Vec::new();
     let mut offset = 0;
@@ -408,34 +446,87 @@ fn uses(ledger: &colm_history::History, roots: &[PathBuf]) -> Result<Uses, Strin
             break;
         }
     }
-    let children = |dir: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default()
+    let children = |dir: &Path| -> Result<Vec<PathBuf>, String> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| match entry {
+                    Ok(entry) => Some(Ok(entry.path())),
+                    Err(error) if strict => Some(Err(format!("{}: {error}", dir.display()))),
+                    Err(_) => None,
+                })
+                .collect(),
+            Err(error) if strict && error.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("{}: {error}", dir.display()))
+            }
+            Err(_) => Ok(Vec::new()),
+        }
     };
     for root in roots {
         dirs.push(root.clone());
-        dirs.extend(children(root));
-        for study in children(&root.join(".colm").join("studies")) {
-            dirs.extend(children(&study.join("members")));
+        dirs.extend(children(root)?);
+        for study in children(&root.join(".colm").join("studies"))? {
+            dirs.extend(children(&study.join("members"))?);
             dirs.push(study);
         }
     }
     // 历史里同一个算例目录出现成百上千次（每次运行、迁移一条），读一次就够。
     let mut seen = std::collections::HashSet::new();
     dirs.retain(|dir| seen.insert(dir.clone()));
-    let read = |path: PathBuf| -> Option<Value> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let read = |path: PathBuf| -> Result<Option<VersionRef>, String> {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if strict
+                    && !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+            {
+                return Err(format!("{}: {error}", path.display()))
+            }
+            Err(_) => return Ok(None),
+        };
+        let parse = || -> Result<Option<VersionRef>, serde_json::Error> {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            let version = if path
+                .file_name()
+                .is_some_and(|name| name == colm_model::BINDING_FILE)
+            {
+                value["version"].clone()
+            } else {
+                // CLI study_version::Pinned also represents legacy workspace snapshots.
+                // Their optional model_revision is null/absent: validate that legacy
+                // record before concluding it references no registry revision.
+                if value.get("model_revision").is_none_or(Value::is_null)
+                    && ["name", "head", "base_commit", "cli", "kernel"]
+                        .iter()
+                        .all(|key| value[*key].is_string())
+                    && value["pinned_unix"].is_i64()
+                    && ["engine", "kernel"]
+                        .iter()
+                        .all(|key| value["touches"][*key].is_boolean())
+                    && value.get("note").is_none_or(Value::is_string)
+                    && ["based_on", "model_root"].iter().all(|key| {
+                        value
+                            .get(*key)
+                            .is_none_or(|field| field.is_null() || field.is_string())
+                    })
+                {
+                    return Ok(None);
+                }
+                value["model_revision"]["version"].clone()
+            };
+            serde_json::from_value(version).map(Some)
+        };
+        match parse() {
+            Ok(version) => Ok(version),
+            Err(error) if strict => Err(format!("{}: {error}", path.display())),
+            Err(_) => Ok(None),
+        }
     };
     for dir in dirs {
-        // A binding that cannot be read cannot start a run either; it keeps nothing.
-        let named = [
-            read(dir.join(colm_model::BINDING_FILE)).map(|b| b["version"].clone()),
-            read(dir.join("model-version.json"))
-                .map(|pin| pin["model_revision"]["version"].clone()),
-        ];
-        for version in named.into_iter().flatten() {
-            if let Ok(version) = serde_json::from_value(version) {
+        for name in [colm_model::BINDING_FILE, "model-version.json"] {
+            if let Some(version) = read(dir.join(name))? {
                 Uses::add(&mut found.bound, version);
             }
         }
@@ -446,8 +537,9 @@ fn uses(ledger: &colm_history::History, roots: &[PathBuf]) -> Result<Uses, Strin
 fn revisions_in_use(
     ledger: &colm_history::History,
     roots: &[PathBuf],
+    strict: bool,
 ) -> Result<Vec<VersionRef>, String> {
-    let found = uses(ledger, roots)?;
+    let found = uses_checked(ledger, roots, strict)?;
     let mut used = Vec::new();
     for (version, _) in found.history.into_iter().chain(found.bound) {
         remember(&mut used, version);
@@ -466,6 +558,134 @@ pub(crate) fn while_idle<T>(
     action: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     runs.with_idle_because(TIDY_BUSY, || creations.with_idle_because(TIDY_BUSY, action))
+}
+
+#[derive(Default)]
+struct BindingActivity {
+    generation: u64,
+    active: usize,
+    /// 版本清理（会真正删修订）进行中；其它绑定变更看到它就按"忙"退出。
+    deleting: bool,
+}
+impl BindingActivity {
+    fn ensure_idle_since(&self, generation: u64) -> Result<(), String> {
+        if self.active != 0 || self.deleting || self.generation != generation {
+            return Err("项目绑定已变化，本次未清理模型缓存 / Project bindings changed; model cache was not cleaned".into());
+        }
+        Ok(())
+    }
+}
+static BINDING_ACTIVITY: std::sync::Mutex<BindingActivity> =
+    std::sync::Mutex::new(BindingActivity {
+        generation: 0,
+        active: 0,
+        deleting: false,
+    });
+
+const DELETE_BUSY: &str = "有算例正在变更模型版本或正在整理模型缓存，稍后再清理版本 / A case is changing model versions or the model cache is being tidied; retry the cleanup later";
+
+struct BindingChange;
+impl BindingChange {
+    fn begin() -> Result<Self, String> {
+        let mut state = BINDING_ACTIVITY
+            .lock()
+            .map_err(|_| "绑定活动状态不可用 / Binding activity state is unavailable")?;
+        // 清理正在扫描/删除：这次绑定变更会让扫描结论作废，直接按"忙"拒绝，由用户重试。
+        if state.deleting {
+            return Err(DELETE_BUSY.into());
+        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("绑定变更计数已耗尽 / Binding generation exhausted")?;
+        state.active += 1;
+        Ok(Self)
+    }
+}
+impl Drop for BindingChange {
+    fn drop(&mut self) {
+        if let Ok(mut state) = BINDING_ACTIVITY.lock() {
+            state.active -= 1;
+        }
+    }
+}
+
+/// 版本清理期间独占绑定活动：算例迁移（`model_migrate_case`）与缓存整理（`model_prune`）
+/// 不能插进"扫描绑定 → 删除修订"之间，否则扫描结论可能在删除前失效。
+/// 反过来，已有绑定变更在进行时清理会拒绝开始，由用户重试（GUI 审查 F-V-06）。
+struct BindingDeleteGuard;
+impl BindingDeleteGuard {
+    fn begin() -> Result<Self, String> {
+        let mut state = BINDING_ACTIVITY
+            .lock()
+            .map_err(|_| "绑定活动状态不可用 / Binding activity state is unavailable")?;
+        if state.active != 0 || state.deleting {
+            return Err(DELETE_BUSY.into());
+        }
+        state.deleting = true;
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("绑定变更计数已耗尽 / Binding generation exhausted")?;
+        Ok(Self)
+    }
+}
+impl Drop for BindingDeleteGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = BINDING_ACTIVITY.lock() {
+            state.deleting = false;
+        }
+    }
+}
+
+const PRUNE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const PRUNE_SCAN_CONTEXT: &str = "未清理模型缓存 / Model cache was not cleaned";
+const DELETE_SCAN_CONTEXT: &str = "模型版本未删除 / Revisions were not deleted";
+
+/// 缺失或空的已知项目根可能是离线卷；删除和自动整理共用严格扫描，拒绝猜测绑定已消失。
+/// 真正删掉或清空项目后，需要用户移除对应最近项目记录才能恢复清理。
+fn ensure_project_roots_known(roots: &[PathBuf]) -> Result<(), String> {
+    for path in roots {
+        let available = std::fs::read_dir(path).and_then(|mut entries| match entries.next() {
+            Some(entry) => entry.map(|_| ()),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "empty project folder",
+            )),
+        });
+        if let Err(error) = available {
+            return Err(format!(
+                "无法确认项目目录 {}：{error}。目录缺失、为空或不可读，磁盘或网络卷可能未挂载；清理已取消。请恢复项目或移除对应的最近项目记录后重试 / Cannot verify project folder {}: {error}. It is missing, empty or unreadable; a volume may be offline. Cleanup was cancelled; restore the project or remove its recent project entry before retrying",
+                path.display(), path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A disconnected project mount may block an OS read indefinitely. Only this
+/// read-only worker may outlive the deadline; it never owns a launch lock or deletes.
+fn bounded_scan<T: Send + 'static>(
+    timeout: std::time::Duration,
+    context: &str,
+    scan: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("model-binding-scan".into())
+        .spawn(move || {
+            let _ = send.send(scan());
+        })
+        .map_err(|error| {
+            format!(
+                "{context}：无法启动项目绑定检查 / cannot start project binding inspection: {error}"
+            )
+        })?;
+    receive.recv_timeout(timeout).map_err(|error| {
+        format!(
+            "{context}：项目绑定检查未完成 / project binding inspection did not finish: {error}"
+        )
+    })?
 }
 
 fn prune_args(keep: &[VersionRef], dry_run: bool) -> Vec<String> {
@@ -487,29 +707,68 @@ pub async fn model_prune(
     dry_run: bool,
 ) -> Result<colm_model::PruneReport, String> {
     use tauri::Manager;
-    let recent = crate::recent::load_recent_strict(&app)?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let roots = known_project_roots(&recent, &data_dir)?;
     let processes = processes.inner().clone();
     let creations = creations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let prune = || {
-            let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
-            let keep = revisions_in_use(&ledger, &roots)?;
-            drop(ledger);
-            let output = crate::sidecar::capture(&prune_args(&keep, dry_run))?;
-            serde_json::from_str(output.trim())
-                .map_err(|e| format!("invalid model prune response: {e}"))
+        let run_generation = processes.idle_generation(TIDY_BUSY)?;
+        let creation_generation = creations.idle_generation(TIDY_BUSY)?;
+        let binding_generation = {
+            let state = BINDING_ACTIVITY
+                .lock()
+                .map_err(|_| "绑定活动状态不可用 / Binding activity state is unavailable")?;
+            if state.active != 0 || state.deleting {
+                return Err(TIDY_BUSY.into());
+            }
+            state.generation
         };
-        if dry_run {
-            prune()
-        } else {
-            while_idle(&processes, &creations, prune)
-        }
+        let deadline = std::time::Instant::now() + PRUNE_SCAN_TIMEOUT;
+        let scan_app = app.clone();
+        let (keep, history_before, recent_before) =
+            bounded_scan(PRUNE_SCAN_TIMEOUT, PRUNE_SCAN_CONTEXT, move || {
+                let recent = crate::recent::load_recent_strict(&scan_app)?;
+                let roots = known_project_roots(&recent, &data_dir)?;
+                let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+                let history = ledger
+                    .export_json(&Default::default())
+                    .map_err(|e| e.to_string())?;
+                let keep = revisions_in_use(&ledger, &roots, true)?;
+                Ok((keep, history, recent))
+            })?;
+        processes.with_idle_generation(TIDY_BUSY, Some(run_generation), |_| {
+            creations.with_idle_generation(TIDY_BUSY, creation_generation, || {
+                let state = BINDING_ACTIVITY
+                    .lock()
+                    .map_err(|_| "绑定活动状态不可用 / Binding activity state is unavailable")?;
+                state.ensure_idle_since(binding_generation)?;
+                // Only local bookkeeping is rechecked here, never project files. This
+                // worker also has a deadline, so a failed DB read cannot strand launch locks.
+                bounded_scan(
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                    PRUNE_SCAN_CONTEXT,
+                    move || {
+                        let recent = crate::recent::load_recent_strict(&app)?;
+                        let ledger =
+                            colm_history::History::open_default().map_err(|e| e.to_string())?;
+                        let history = ledger
+                            .export_json(&Default::default())
+                            .map_err(|e| e.to_string())?;
+                        if recent != recent_before || history != history_before {
+                            return Err("项目历史已变化，本次未清理模型缓存 / Project history changed; model cache was not cleaned".into());
+                        }
+                        Ok(())
+                    },
+                )?;
+                let output = crate::sidecar::capture(&prune_args(&keep, dry_run))?;
+                serde_json::from_str(output.trim())
+                    .map_err(|e| format!("invalid model prune response: {e}"))
+            })
+        })
     })
     .await
     .map_err(|e| e.to_string())?
 }
+
 #[tauri::command]
 pub fn model_get(id: String, revision: u64) -> Result<FrozenRevision, String> {
     Registry::open(root()?)
@@ -637,6 +896,7 @@ pub async fn model_migrate_case(
     dir: String,
     target: Option<VersionRef>,
 ) -> Result<CaseBinding, String> {
+    let _binding_change = BindingChange::begin()?;
     let mut args = vec!["model-migrate-case".to_string(), dir.clone()];
     if let Some(target) = target {
         args.extend([
@@ -1373,6 +1633,315 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delete_revisions_actually_removes_an_unbound_revision() {
+        // F-V-06 的实际删除步骤：在临时注册表里冻结/安装一个没有被算例绑定的修订，从
+        // `delete_revisions` 删除后注册表与源码快照都必须消失（此前只做过代码链确认）。
+        use colm_model::{CodeKind, CodeRef};
+        let dir = std::env::temp_dir().join(format!(
+            "colm-delete-{}-{}",
+            std::process::id(),
+            colm_history::Event::start("test").operation_id
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Registry::open(dir.join("registry")).unwrap();
+        let code = |sha: char| CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: sha.to_string().repeat(64),
+        };
+        let first = registry.install_official(code('a')).unwrap();
+        let latest = registry.install_official(code('b')).unwrap();
+        assert_ne!(first.version, latest.version);
+        let history = colm_history::History::open(dir.join("history.db")).unwrap();
+        let report = delete_revisions(
+            &registry,
+            &history,
+            vec![first.version.clone()],
+            &Uses {
+                history: Vec::new(),
+                bound: Vec::new(),
+            },
+            true,
+        );
+        assert_eq!(report.deleted, vec![first.version.clone()], "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(
+            registry.get(&first.version).is_err(),
+            "the unbound revision is gone from the registry"
+        );
+        assert!(
+            registry.get(&latest.version).is_ok(),
+            "the latest official baseline stays"
+        );
+        for path in &report.removed {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "removed path still exists: {path}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_rejects_active_or_completed_binding_changes() {
+        let mut state = BindingActivity {
+            generation: 1,
+            active: 1,
+            deleting: false,
+        };
+        assert!(state.ensure_idle_since(1).is_err());
+        state.active = 0;
+        assert!(state.ensure_idle_since(0).is_err());
+        assert!(state.ensure_idle_since(1).is_ok());
+    }
+
+    #[test]
+    fn prune_scan_timeout_leaves_launches_free_and_never_deletes() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let runs = crate::sidecar::RunProcesses::default();
+        let creations = crate::sidecar::CaseCreations::default();
+        let cleanup = std::thread::spawn(move || {
+            let deleted = std::cell::Cell::new(false);
+            let result = (|| {
+                bounded_scan(Duration::from_millis(100), PRUNE_SCAN_CONTEXT, move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    done_tx.send(()).unwrap();
+                    Ok(())
+                })?;
+                deleted.set(true);
+                Ok::<_, String>(())
+            })();
+            assert!(result.unwrap_err().contains("未清理"));
+            assert!(!deleted.get());
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(runs.with_idle(|| Ok(())).is_ok());
+        let dir = std::env::temp_dir().join(preview_id(99881));
+        let creation = crate::sidecar::CaseCreation::begin(
+            &creations,
+            dir.to_str().unwrap(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        creation.finish(Ok(String::new())).unwrap();
+        drop(creation);
+        cleanup.join().unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn prune_rejects_completed_creation_after_its_snapshot() {
+        let creations = crate::sidecar::CaseCreations::default();
+        let generation = creations.idle_generation(TIDY_BUSY).unwrap();
+        let dir = std::env::temp_dir().join(preview_id(99882));
+        let creation = crate::sidecar::CaseCreation::begin(
+            &creations,
+            dir.to_str().unwrap(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        creation.finish(Ok(String::new())).unwrap();
+        drop(creation);
+        let mut deleted = false;
+        assert!(creations
+            .with_idle_generation(TIDY_BUSY, generation, || {
+                deleted = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!deleted);
+        let current = creations.idle_generation(TIDY_BUSY).unwrap();
+        assert!(creations
+            .with_idle_generation(TIDY_BUSY, current, || Ok(()))
+            .is_ok());
+    }
+
+    #[test]
+    fn prune_accepts_legacy_study_pins_but_rejects_malformed_revisions() {
+        let root = std::env::temp_dir().join(preview_id(99884));
+        let study = root.join(".colm/studies/legacy");
+        std::fs::create_dir_all(&study).unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        // Matches the legacy Pinned written by colm-cli/src/study_version.rs::pin.
+        let mut pin = json!({
+            "name": "legacy-workspace", "head": "abc123", "base_commit": "def456",
+            "note": "", "based_on": null, "touches": {"engine": true, "kernel": false},
+            "cli": "version/bin/colm-cli", "kernel": "kernels/default",
+            "pinned_unix": 1704067200, "model_revision": null, "model_root": null,
+        });
+        let path = study.join("model-version.json");
+        for explicit_null in [true, false] {
+            if !explicit_null {
+                pin.as_object_mut().unwrap().remove("model_revision");
+            }
+            std::fs::write(&path, pin.to_string()).unwrap();
+            assert!(revisions_in_use(&ledger, std::slice::from_ref(&root), true)
+                .unwrap()
+                .is_empty());
+        }
+        for revision in [
+            json!({}),
+            json!({"version": null}),
+            json!({"version": {"id": "official", "revision": "bad"}}),
+        ] {
+            pin["model_revision"] = revision;
+            std::fs::write(&path, pin.to_string()).unwrap();
+            assert!(revisions_in_use(&ledger, std::slice::from_ref(&root), true).is_err());
+        }
+        pin["model_revision"] = json!({"version": {"id": "official", "revision": 42}});
+        std::fs::write(&path, pin.to_string()).unwrap();
+        assert_eq!(
+            revisions_in_use(&ledger, std::slice::from_ref(&root), true).unwrap(),
+            vec![VersionRef {
+                id: "official".into(),
+                revision: 42
+            }]
+        );
+        std::fs::write(&path, "{\"model_revision\":null}").unwrap();
+        assert!(revisions_in_use(&ledger, std::slice::from_ref(&root), true).is_err());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_rejects_unreadable_binding_instead_of_dropping_its_reference() {
+        let root = std::env::temp_dir().join(preview_id(99883));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(colm_model::BINDING_FILE), "{").unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        let error = uses_checked(&ledger, std::slice::from_ref(&root), true)
+            .err()
+            .unwrap();
+        assert!(error.contains(colm_model::BINDING_FILE));
+        assert!(uses(&ledger, std::slice::from_ref(&root)).is_ok());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_requires_readable_project_roots_before_deleting() {
+        let root = std::env::temp_dir().join(preview_id(99890));
+        std::fs::create_dir_all(&root).unwrap();
+        // 空目录可能是断开的挂载点，不能把它当作没有绑定。
+        assert!(ensure_project_roots_known(std::slice::from_ref(&root)).is_err());
+        std::fs::write(root.join("project.prj"), "project").unwrap();
+        assert!(ensure_project_roots_known(std::slice::from_ref(&root)).is_ok());
+        // 父目录存在也不能证明缺失项目已被用户删除。
+        assert!(ensure_project_roots_known(&[root.join("removed-project")]).is_err());
+        // 上级也不存在（卷未挂载的形态）：拒绝清理并点名路径。
+        let unmounted = root.join("missing-volume").join("project");
+        let error = ensure_project_roots_known(std::slice::from_ref(&unmounted)).unwrap_err();
+        assert!(error.contains("missing-volume"), "{error}");
+        // 存在但不可读：拒绝清理并点名路径（F-V-06：这里漏掉就会静默删掉仍绑定的修订）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked-project");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let error = ensure_project_roots_known(std::slice::from_ref(&locked)).unwrap_err();
+            assert!(error.contains("locked-project"), "{error}");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn delete_and_prune_scans_reject_unavailable_project_roots() {
+        let root = std::env::temp_dir().join(preview_id(99891));
+        std::fs::create_dir_all(&root).unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        let project = root.join("project");
+        for empty_mount in [false, true] {
+            if empty_mount {
+                std::fs::create_dir(&project).unwrap();
+            }
+            assert!(uses_checked(&ledger, std::slice::from_ref(&project), true).is_err());
+            assert!(revisions_in_use(&ledger, std::slice::from_ref(&project), true).is_err());
+        }
+        std::fs::write(project.join("project.prj"), "project").unwrap();
+        assert!(uses_checked(&ledger, std::slice::from_ref(&project), true).is_ok());
+        assert!(revisions_in_use(&ledger, std::slice::from_ref(&project), true).is_ok());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_guard_excludes_binding_changes_and_other_cleanups() {
+        let delete = BindingDeleteGuard::begin().unwrap();
+        assert!(
+            BindingChange::begin().is_err(),
+            "清理期间不允许算例迁移开始"
+        );
+        assert!(
+            BindingDeleteGuard::begin().is_err(),
+            "同一时刻只允许一次清理"
+        );
+        drop(delete);
+        let change = BindingChange::begin().unwrap();
+        assert!(
+            BindingDeleteGuard::begin().is_err(),
+            "算例迁移进行中清理必须按忙拒绝"
+        );
+        drop(change);
+        let delete = BindingDeleteGuard::begin().unwrap();
+        drop(delete);
+        // 释放后绑定变更恢复可用。
+        drop(BindingChange::begin().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn strict_binding_scan_sees_unreadable_case_binding() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(preview_id(99891));
+        let case = root.join("case");
+        std::fs::create_dir_all(&case).unwrap();
+        let version = VersionRef {
+            id: "official".into(),
+            revision: 7,
+        };
+        std::fs::write(
+            case.join(colm_model::BINDING_FILE),
+            json!({"schema":1,"version":version}).to_string(),
+        )
+        .unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        assert_eq!(
+            Uses::count(
+                &uses_checked(&ledger, std::slice::from_ref(&root), true)
+                    .unwrap()
+                    .bound,
+                &version
+            ),
+            1
+        );
+        std::fs::set_permissions(&case, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // 非严格扫描静默漏报（故障注入复现的正是这个行为）；严格扫描必须报错而不是返回 0 条。
+        assert_eq!(
+            uses_checked(&ledger, std::slice::from_ref(&root), false)
+                .unwrap()
+                .bound
+                .len(),
+            0
+        );
+        let error = uses_checked(&ledger, std::slice::from_ref(&root), true)
+            .err()
+            .unwrap();
+        assert!(error.contains("case"), "{error}");
+        std::fs::set_permissions(&case, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn preview_lease_releases_only_registered_owned_directories() {
         let root = std::env::temp_dir().join(preview_id(114433));
         let parent = root.join("previews");
@@ -1809,7 +2378,8 @@ mod tests {
         ledger.append(&run).unwrap();
         let end = run.next(colm_history::EventPhase::Finished, "succeeded");
         ledger.append(&end).unwrap();
-        let mut used = revisions_in_use(&ledger, &[project.clone(), root.join("gone")]).unwrap();
+        let mut used =
+            revisions_in_use(&ledger, &[project.clone(), root.join("gone")], false).unwrap();
         used.sort_by_key(|v| v.revision);
         assert_eq!(
             used,
@@ -1823,7 +2393,7 @@ mod tests {
         );
         // A history record the user removed no longer keeps its revision.
         ledger.remove_operation(&end.operation_id).unwrap();
-        let used = revisions_in_use(&ledger, &[project]).unwrap();
+        let used = revisions_in_use(&ledger, &[project], false).unwrap();
         assert!(!used.contains(&official(6)) && !used.contains(&official(68)));
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
@@ -1841,7 +2411,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(app.join("recent.json")).unwrap()).unwrap();
         let roots = known_project_roots(&recent, &app).unwrap();
         let ledger = colm_history::History::open(var("COLM_TIDY_AUDIT_HISTORY")).unwrap();
-        let keep = revisions_in_use(&ledger, &roots).unwrap();
+        let keep = revisions_in_use(&ledger, &roots, false).unwrap();
         let registry = Registry::open(var("COLM_TIDY_AUDIT_MODELS")).unwrap();
         let report = registry.prune_official(&keep, true).unwrap();
         println!("roots: {}", roots.len());
@@ -2136,6 +2706,55 @@ mod tests {
         assert!(args.contains(&"--history-db".into()));
         assert!(args.contains(&"--model-root".into()));
     }
+
+    #[test]
+    fn study_members_list_sorts_and_ignores_hidden_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-members-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let members = root.join("members");
+        std::fs::create_dir_all(members.join("m000002")).unwrap();
+        std::fs::create_dir_all(members.join("m000001")).unwrap();
+        std::fs::create_dir_all(members.join(".hidden")).unwrap();
+        std::fs::write(members.join("m000003"), "not a dir").unwrap();
+        let listed = super::study_member_names(&members).unwrap();
+        assert_eq!(listed.members, ["m000001", "m000002"]);
+        assert!(!listed.truncated);
+        assert_eq!(listed.total, 2);
+        let missing = super::study_member_names(&root.join("missing")).unwrap();
+        assert!(missing.members.is_empty());
+        assert!(!missing.truncated);
+        assert_eq!(missing.total, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn study_members_report_truncation_instead_of_losing_names_silently() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-study-members-truncated-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let members = root.join("members");
+        let total = super::STUDY_MEMBER_LIMIT + 2;
+        for index in 0..total {
+            std::fs::create_dir_all(members.join(format!("m{index:06}"))).unwrap();
+        }
+        let listed = super::study_member_names(&members).unwrap();
+        assert_eq!(listed.members.len(), super::STUDY_MEMBER_LIMIT);
+        assert_eq!(listed.total, total);
+        assert!(listed.truncated, "静默截断会让界面以为已经列全");
+        assert_eq!(listed.members[0], "m000000");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[tauri::command]
@@ -2243,6 +2862,65 @@ pub async fn model_import_study(
         ]);
     }
     cli(args).await
+}
+
+/// 研究成员列表。超过上限时 `members` 只放前 `STUDY_MEMBER_LIMIT` 个，且 `truncated` 明确为真：
+/// 旧版只返回数组、静默截断，界面无法知道还漏了成员（GUI 审查 V-02 后续）。
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StudyMemberList {
+    pub members: Vec<String>,
+    pub truncated: bool,
+    pub total: usize,
+}
+
+/// 列出一个研究当前可选的成员目录（`<study>/members/*`）。只列目录名，供“从研究导入”让用户
+/// 选成员；成员是否完整/有结果仍由 `model_import_study` 的核验负责（GUI 审查 V-02）。
+#[tauri::command]
+pub async fn model_study_members(study_dir: String) -> Result<StudyMemberList, String> {
+    if study_dir.contains('\0') || !std::path::Path::new(&study_dir).is_absolute() {
+        return Err("研究目录须为绝对路径".into());
+    }
+    study_member_names(&std::path::Path::new(&study_dir).join("members"))
+}
+
+/// 一次最多列出的成员数；超过时把总数与截断标志一起回传，界面据此提示。
+const STUDY_MEMBER_LIMIT: usize = 200;
+
+/// 列出成员目录名（排序、忽略隐藏项）；不负责验证成员是否完整。
+fn study_member_names(dir: &std::path::Path) -> Result<StudyMemberList, String> {
+    if !dir.is_dir() {
+        return Ok(StudyMemberList {
+            members: Vec::new(),
+            truncated: false,
+            total: 0,
+        });
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|error| format!("无法读取研究成员目录 {}：{error}", dir.display()))?
+    {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                if !name.starts_with('.') {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+    }
+    names.sort();
+    let total = names.len();
+    names.truncate(STUDY_MEMBER_LIMIT);
+    Ok(StudyMemberList {
+        truncated: total > names.len(),
+        total,
+        members: names,
+    })
 }
 
 #[tauri::command]

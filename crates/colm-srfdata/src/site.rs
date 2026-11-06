@@ -1633,6 +1633,7 @@ pub fn fill(
         from_raster: Vec::new(),
         from_default: Vec::new(),
         from_lookup: Vec::new(),
+        warnings: Vec::new(),
     };
 
     // --- 四个土壤反照率：站点侧没有对应值，所以只有栅格与标称档两级 ---
@@ -1815,6 +1816,11 @@ pub fn fill(
 
     f.close()
         .with_context(|| format!("cannot close {}", dst.display()))?;
+    if rawdata.is_some() && report.from_raster.is_empty() {
+        report.warnings.push(
+            "rawdata 目录可读，但这份站点文件没有取到任何栅格字段：目录内容可能不是 CoLM rawdata 根（至少需要 soil/、topography.nc 等），其余字段按标称默认值写入 / the rawdata directory is readable but no raster fields were used; its contents may not be a CoLM rawdata root, so the remaining fields fall back to nominal defaults".into(),
+        );
+    }
     Ok(report)
 }
 
@@ -4628,6 +4634,9 @@ pub struct Report {
     pub from_site: Vec<String>,
     pub from_raster: Vec<String>,
     pub from_default: Vec<String>,
+    /// rawdata 目录存在但没有任何字段取自栅格时的显式警告：多半是目录内容不是
+    /// CoLM rawdata 根，不能让界面只看到"0 项"而以为一切正常（D-07）。
+    pub warnings: Vec<String>,
     /// 走 CoLM 自己的 IGBP 查表补上的字段（目前只有 `canopy_height`）。
     ///
     /// **单独一个列表，不并进 `from_default`。** 这些字段不在

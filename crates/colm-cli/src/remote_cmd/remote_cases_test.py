@@ -2,6 +2,7 @@
 import fcntl
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,15 @@ if args[0] == 'scan':
  print(json.dumps({'sites': [{'path': get('--dir')+'/site.nc'}]}))
 elif args[0] == 'new':
  out = pathlib.Path(get('--out'))
+ if '--mode' in args and get('--mode') == 'interrupt-output-once':
+  # Real `new` creates its output directory before completing configuration.
+  (out/'out').mkdir(exist_ok=True)
+  sentinel = pathlib.Path(sys.argv[0]).with_name('interrupted-once')
+  if not sentinel.exists():
+   import os, signal
+   sentinel.write_text('interrupted after mkdir')
+   os.kill(os.getppid(), signal.SIGKILL)
+   sys.exit(0)
  if get('--site') == 'fail': raise RuntimeError('bad station')
  (out/'case.nml').write_text("&nl_colm\\n DEF_file_site = '/data/site.nc'\\n DEF_forcing = '"+str(out/"forcing.nml")+"'\\n/\\n")
  (out/'forcing.nml').write_text("&forcing\\n path = '/data/met'\\n/\\n")
@@ -91,6 +101,128 @@ if args[0] == 'new' and '--mode' in args and get('--mode') == 'urban':
         self.assertEqual(json.loads((out/'.colm-desktop-server.json').read_text())['remote_directory'],str(out))
         self.run_action('abort',{'out':str(out),'token':result['token']},False)
         self.assertTrue(out.is_dir())
+
+    def test_lost_publish_response_recovers_only_identical_creation(self):
+        out = self.root/'published'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        publish = {'out':str(out),'token':request['token'],'files':dict(generated['files'])}
+        # GUI applies fields/model binding between generation and publication.
+        publish['files']['case.nml'] += '! configured locally before publication\n'
+        self.run_action('publish', publish)
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        self.assertEqual(self.run_action('create', request), generated)
+        self.run_action('publish', publish)
+        self.run_action('create', dict(request, site='/changed.nc'), False)
+        self.run_action('create', dict(request, token='b'*64), False)
+        self.run_action('publish', dict(publish, files={'case.nml':'changed'}), False)
+        self.assertTrue(self.run_action('abort', dict(publish, incomplete_only=True))['directory_retained'])
+        self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+        (out/'case.nml').write_text('edited after publish')
+        self.run_action('create', request, False)
+        self.assertEqual((out/'case.nml').read_text(), 'edited after publish')
+
+    def test_publication_receipt_cannot_authorize_a_copied_directory_or_symlink(self):
+        out = self.root/'original'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        self.run_action('publish', {'out':str(out),'token':request['token'],'files':generated['files']})
+        moved = self.root/'moved'
+        out.rename(moved)
+        shutil.copytree(moved, out)
+        self.run_action('create', request, False)
+        shutil.rmtree(out)
+        moved.rename(out)
+        self.assertEqual(self.run_action('create', request), generated)
+        receipt = out/'.colm-desktop-publication.json'
+        external = self.root/'external-receipt'
+        receipt.rename(external)
+        receipt.symlink_to(external)
+        self.run_action('create', request, False)
+        self.run_action('abort', dict(request, incomplete_only=True), False)
+        self.assertTrue(receipt.is_symlink())
+        self.assertEqual((out/'case.nml').read_text(), generated['files']['case.nml'])
+
+    def test_incomplete_retry_rejects_changed_settings_with_same_token(self):
+        out = self.root/'generated'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        self.run_action('create', dict(request, site='/changed.nc'), False)
+        self.assertEqual(self.run_action('create', request), generated)
+
+    def test_stale_abort_preserves_foreign_data_and_allows_corrected_retry(self):
+        out = self.root/'foreign-input'
+        out.mkdir()
+        (out/'data.nc').write_bytes(b'keep input')
+        self.run_action('abort', {'out':str(out),'token':'a'*64,'incomplete_only':True})
+        self.assertEqual(list(out.iterdir()), [out/'data.nc'])
+        self.run_action('create', {'out':str(out),'kind':'site','site':'/corrected.nc','token':'b'*64})
+        self.assertEqual((out/'data.nc').read_bytes(), b'keep input')
+        foreign = self.root/'foreign-case'
+        foreign.mkdir()
+        (foreign/'case.nml').write_text('foreign case')
+        self.run_action('abort', {'out':str(foreign),'token':'a'*64,'incomplete_only':True})
+        self.run_action('create', {'out':str(foreign),'kind':'site','site':'/corrected.nc'}, False)
+        self.assertEqual(list(foreign.iterdir()), [foreign/'case.nml'])
+        self.assertEqual((foreign/'case.nml').read_text(), 'foreign case')
+
+    def test_orphan_outputs_are_not_adopted(self):
+        out = self.root/'orphan'
+        (out/'out').mkdir(parents=True)
+        (out/'out'/'old-result.nc').write_bytes(b'old result')
+        self.run_action('create', {'out':str(out),'kind':'site','site':'/data/site.nc'}, False)
+        self.assertEqual(list(out.iterdir()), [out/'out'])
+        self.assertEqual((out/'out'/'old-result.nc').read_bytes(), b'old result')
+
+    def test_stale_pending_can_be_released_without_claiming_published_case(self):
+        out = self.root/'published-pending'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        self.run_action('publish', dict(request, files=generated['files']))
+        before = {p.name:p.read_bytes() for p in out.iterdir()}
+        result = self.run_action('abort', dict(request, token='b'*64, incomplete_only=True))
+        self.assertTrue(result['directory_retained'])
+        error = self.run_action('create', dict(request, token='b'*64), False)
+        self.assertNotIn('Traceback', error)
+        self.assertIn('already published', error)
+        self.assertEqual({p.name:p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_sync_invalidates_old_creation_replay_but_pending_can_be_released(self):
+        out = self.root/'synced'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        self.run_action('publish', dict(request, files=generated['files']))
+        current = dict(generated['files'], **{'case.nml':'new configuration'})
+        self.run_action('sync', dict(request, files=current))
+        before = {p.name:p.read_bytes() for p in out.iterdir()}
+        error = self.run_action('create', request, False)
+        self.assertIn('published configuration changed', error)
+        self.assertTrue(self.run_action('abort', dict(request, incomplete_only=True))['directory_retained'])
+        self.assertEqual({p.name:p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_published_receipt_takes_precedence_over_crash_marker(self):
+        out = self.root/'published-crash'
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc'}
+        generated = self.run_action('create', request)
+        marker = out/'.colm-desktop-creation.json'
+        claim = marker.read_bytes()
+        self.run_action('publish', dict(request, files=generated['files']))
+        # Simulate death after durable receipt replacement, before marker unlink.
+        marker.write_bytes(claim)
+        before = {p.name:p.read_bytes() for p in out.iterdir()}
+        self.assertEqual(self.run_action('create', request), generated)
+        self.assertTrue(self.run_action('abort', dict(request, incomplete_only=True))['directory_retained'])
+        self.run_action('abort', request, False)
+        self.assertEqual({p.name:p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_orphan_runs_are_not_adopted(self):
+        out = self.root/'old-runs'
+        (out/'runs'/'run-1').mkdir(parents=True)
+        (out/'runs'/'run-1'/'result.nc').write_bytes(b'keep result')
+        error = self.run_action('create', {'out':str(out),'kind':'site','site':'/data/site.nc'}, False)
+        self.assertNotIn('Traceback', error)
+        self.assertEqual(list(out.iterdir()), [out/'runs'])
+        self.assertEqual((out/'runs'/'run-1'/'result.nc').read_bytes(), b'keep result')
 
     def test_failure_removes_only_owned_destination(self):
         out = self.root/'project'/'bad'
@@ -155,6 +287,52 @@ if args[0] == 'new' and '--mode' in args and get('--mode') == 'urban':
         self.assertEqual((out/'data.nc').read_bytes(), b'keep input')
         self.assertEqual(self.run_action('create',request), result)
         self.assertTrue(json.loads((out/'.colm-desktop-creation.json').read_text())['adopted'])
+
+    def test_owned_empty_output_directory_resumes_after_real_cli_interruption(self):
+        out = self.root/'adopted-interrupted-output'
+        out.mkdir()
+        (out/'data.nc').write_bytes(b'keep input')
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc',
+                   'mode':'interrupt-output-once'}
+        self.run_action('create', request, False)
+        claim = json.loads((out/'.colm-desktop-creation.json').read_text())
+        self.assertTrue(claim['adopted'])
+        self.assertTrue(claim['outputs_owned'])
+        self.assertNotIn('files', claim)
+        self.assertEqual(list((out/'out').iterdir()), [])
+        result = self.run_action('create', request)
+        self.assertIn('case.nml', result['files'])
+        self.assertEqual((out/'data.nc').read_bytes(), b'keep input')
+        self.assertEqual(list((out/'out').iterdir()), [])
+
+    def test_owned_output_directory_still_rejects_results_and_symlinks(self):
+        for kind in ('nonempty', 'symlink', 'file'):
+            with self.subTest(kind=kind):
+                out = self.root/kind
+                out.mkdir()
+                target = out/'out'
+                if kind == 'symlink':
+                    external = self.root/'external-output'
+                    external.mkdir()
+                    target.symlink_to(external)
+                elif kind == 'file':
+                    target.write_bytes(b'keep file')
+                else:
+                    target.mkdir()
+                    (target/'result.nc').write_bytes(b'keep result')
+                marker = out/'.colm-desktop-creation.json'
+                marker.write_text(json.dumps({'token':'a'*64, 'adopted':True, 'outputs_owned':True}))
+                before = marker.read_bytes()
+                self.run_action('create', {'out':str(out),'kind':'site','site':'/data/site.nc'}, False)
+                self.assertEqual(marker.read_bytes(), before)
+                self.assertFalse((out/'case.nml').exists())
+                if kind == 'nonempty':
+                    self.assertEqual((target/'result.nc').read_bytes(), b'keep result')
+                elif kind == 'symlink':
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(list(external.iterdir()), [])
+                else:
+                    self.assertEqual(target.read_bytes(), b'keep file')
 
     def test_locked_claim_cannot_be_taken_over(self):
         out = self.root/'locked'
@@ -294,7 +472,8 @@ if args[0] == 'new' and '--mode' in args and get('--mode') == 'urban':
                 target.parent.mkdir(parents=True)
                 target.write_bytes(b'original urban data')
                 before = sorted(str(p.relative_to(out)) for p in out.rglob('*'))
-                self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','mode':'urban'},False)
+                error = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc','mode':'urban'},False)
+                self.assertNotIn('existing case output', error)
                 self.assertEqual(target.read_bytes(), b'original urban data')
                 self.assertEqual(sorted(str(p.relative_to(out)) for p in out.rglob('*')), before)
 

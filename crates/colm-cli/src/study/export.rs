@@ -63,6 +63,13 @@ pub fn export(study_dir: &Path, output_dir: &Path) -> Result<()> {
 }
 
 fn prepare_output_dir(manifest: &Manifest, output_dir: &Path) -> Result<PathBuf> {
+    // 相对路径会按 sidecar 的 CWD（应用启动目录）解析，用户以为导到所选目录、实际落在别处（GUI 审查 V-04）。
+    if !output_dir.is_absolute() {
+        bail!(
+            "Study export destination must be an absolute path: {}",
+            output_dir.display()
+        );
+    }
     let created = !output_dir.exists();
     fs::create_dir_all(output_dir)?;
     let study_dir = colm_kernel::manifest::absolute(Path::new(&manifest.root))?;

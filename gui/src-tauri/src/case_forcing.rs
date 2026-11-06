@@ -34,6 +34,15 @@ pub(super) fn forcing_path(dir: &Path, doc: &colm_namelist::Document) -> Result<
     if let Some((_, remote)) = crate::remote::server_case_owner(&dir.to_string_lossy())? {
         if let Ok(relative) = path.strip_prefix(&remote) {
             path = dir.join(relative);
+        } else if (path.is_absolute() && !path.starts_with(dir))
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "服务器共享强迫头文件未缓存：{}；请复制到服务器算例目录后重新导入并修改引用 / Remote forcing header is not cached; copy it into the server case directory, re-import, and update its reference: {}",
+                path.display(), path.display()
+            ));
         }
     }
     if !path.is_absolute() {

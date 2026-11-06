@@ -20,6 +20,7 @@ import {
   endedRun,
   restoredRuns,
   runCountsText,
+  submittedRanks,
 } from './run-model';
 const run: RunState = {
   run_id: 'new',
@@ -414,4 +415,75 @@ test('remote budgets reject missing, fractional, unsafe and out-of-range capacit
   const maximum = parallelBudgetPlan('rust', 4096, 4096)!;
   assert.equal(maximum.ranks * maximum.cpus, 4096 * 4096);
   assert.ok(maximum.threads <= 256);
+});
+
+test('submitted ranks follow the automatic plan first', () => {
+  assert.equal(
+    submittedRanks({
+      planRanks: 4608,
+      siteBatch: true,
+      engine: 'fortran',
+      host: 'A',
+      siteCasesOnly: false,
+      manualRanks: '8',
+    }),
+    4608,
+  );
+});
+
+test('station batches always submit one rank per station for both engines', () => {
+  for (const engine of ['rust', 'fortran']) {
+    // 站点批量按 pack "1 站点 1 slot"：界面残留的 ranks 不能带进去（F-R-09）。
+    assert.equal(
+      submittedRanks({
+        planRanks: null,
+        siteBatch: true,
+        engine,
+        host: 'A',
+        siteCasesOnly: true,
+        manualRanks: '8',
+      }),
+      1,
+      engine,
+    );
+  }
+});
+
+test('manual ranks only apply to spatial cases that really run MPI', () => {
+  for (const engine of ['rust', 'fortran']) {
+    assert.equal(
+      submittedRanks({
+        planRanks: null,
+        siteBatch: false,
+        engine,
+        host: 'A',
+        siteCasesOnly: false,
+        manualRanks: '8',
+      }),
+      8,
+    );
+  }
+  // 本机 Rust 只能单进程；Rust 站点算例即使选了服务器也只跑 1 进程（F-R-03）。
+  assert.equal(
+    submittedRanks({
+      planRanks: null,
+      siteBatch: false,
+      engine: 'rust',
+      host: '',
+      siteCasesOnly: false,
+      manualRanks: '8',
+    }),
+    1,
+  );
+  assert.equal(
+    submittedRanks({
+      planRanks: null,
+      siteBatch: false,
+      engine: 'rust',
+      host: 'A',
+      siteCasesOnly: true,
+      manualRanks: '8',
+    }),
+    1,
+  );
 });

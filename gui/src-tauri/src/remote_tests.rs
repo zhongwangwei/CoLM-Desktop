@@ -140,6 +140,12 @@ fn scheduler_settings_are_validated() {
     assert!(check(&|s| s.partition = "a b".into()).is_err());
     assert!(check(&|s| s.account = "x;rm".into()).is_err());
     assert!(check(&|s| s.walltime = "soon".into()).is_err());
+    // 与 CLI 的 parse_walltime 同口径：`8`、`0:00` 保存时就拒绝，不等远程提交（F-C-03）。
+    assert!(check(&|s| s.walltime = "8".into()).is_err());
+    assert!(check(&|s| s.walltime = "0:00".into()).is_err());
+    assert!(check(&|s| s.walltime = "08:00".into()).is_ok());
+    assert!(check(&|s| s.walltime = "1-02:00".into()).is_ok());
+    assert!(check(&|s| s.walltime = "1-02:00:30".into()).is_ok());
     assert!(check(&|s| s.directives = vec!["no-dash".into()]).is_err());
     assert!(check(&|s| s.env_script = "cat <<COLM_JOB_EOF".into()).is_err());
 }
@@ -594,6 +600,8 @@ fn a_source_pending_run_outranks_old_records_and_exposes_only_status_recovery() 
     assert_eq!(record["job"], "new-uncertain");
     assert_eq!(record["pending"], true);
     assert_eq!(record["operation_id"], "original-op");
+    // 重开运行页要读回 parallel_plan（F-R-05）。
+    assert_eq!(record["provenance"]["operation_id"], "original-op");
     assert!(record.get("ssh_auth").is_none());
     let recovered = command_server(&config, &["remote-status".into(), case.clone()])
         .unwrap()

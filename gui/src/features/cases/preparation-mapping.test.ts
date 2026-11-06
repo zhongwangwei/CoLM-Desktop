@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { EMPTY_PREP_FORM } from './preparation-draft';
+import {
+  preparedDatasetDestinations,
+  preparedSiteDestination,
+  preparedSiteNameValid,
+} from './case-model';
 import ts from 'typescript';
 import { ActionButtonStub, treeActions, treeReact } from '../../lib/rendered-tree';
 
@@ -8,11 +14,48 @@ type Contract = {
   fields: { id: string; value: unknown; set: (v: string) => void }[];
   actions: { id: string; run: () => Promise<unknown> }[];
 };
+type RenderedSelect = {
+  value: string;
+  options: string[];
+  change: (value: string) => void;
+};
+/** 从假 React 的树里收集真正渲染出来的 `Select`（不是 page contract 里声明的字段）。 */
+function treeSelects(node: unknown): RenderedSelect[] {
+  if (!node || typeof node !== 'object') return [];
+  if (Array.isArray(node)) return node.flatMap(treeSelects);
+  const element = node as { type: unknown; props: Record<string, unknown> };
+  const own =
+    element.type === 'Select'
+      ? [
+          {
+            value: String(element.props.value),
+            options: (() => {
+              const found: string[] = [];
+              const visit = (value: unknown) => {
+                if (!value || typeof value !== 'object') return;
+                if (Array.isArray(value)) return value.forEach(visit);
+                const child = value as { type: unknown; props?: Record<string, unknown> };
+                if (child.type === 'option') found.push(String(child.props?.value));
+                visit(child.props?.children);
+              };
+              visit(element.props.children);
+              return found;
+            })(),
+            change: (value: string) =>
+              (element.props.onChange as (event: { target: { value: string } }) => void)({
+                target: { value },
+              }),
+          },
+        ]
+      : [];
+  return [...own, ...treeSelects(element.props?.children)];
+}
 function page(total = false, snow = true) {
   const values: unknown[] = [],
     calls: { name: string; args: Record<string, unknown> }[] = [];
   let cursor = 0,
-    contract: Contract;
+    contract: Contract,
+    navigationGuard: (() => string | null) | null = null;
   const names = [
     'Tair',
     'Qair',
@@ -50,6 +93,9 @@ function page(total = false, snow = true) {
     usePageContract: (value: Contract) => {
       contract = value;
     },
+    useNavigationGuard: (guard: () => string | null) => {
+      navigationGuard = guard;
+    },
     invoke: async (name: string, args: Record<string, unknown>) => {
       calls.push({ name, args });
       if (name.startsWith('probe_'))
@@ -72,7 +118,20 @@ function page(total = false, snow = true) {
     },
     requiredNumber: (v: string) => Number(v),
     preparedDestination: () => '/output',
-    casePreparationOptions: () => ({ classification: 'IGBP' }),
+    casePreparationOptions: () => ({ classification: 'IGBP', mode: 'igbp', crop: false }),
+    // 准备页从准备草稿模块导入的纯函数（D-05）；测试里不恢复草稿、不写存储。
+    EMPTY_PREP_FORM,
+    readPrepDraft: () => null,
+    prepDraftHasInput: () => false,
+    writePrepDraft: () => {},
+    clearPrepDraft: () => {},
+    preparedSiteNameValid,
+    preparedSiteDestination,
+    preparedDatasetDestinations,
+    preparationSiteModes: (crop: boolean) =>
+      crop
+        ? ['pft', 'pc', 'urban-pft', 'urban-pc']
+        : ['igbp', 'usgs', 'pft', 'pc', 'urban-igbp', 'urban-usgs', 'urban-pft', 'urban-pc'],
   };
   for (const name of ['Button', 'Card', 'Input', 'Select', 'Field', 'Advanced', 'Notice'])
     context[name] = name;
@@ -85,14 +144,24 @@ function page(total = false, snow = true) {
   const component = new Function(...Object.keys(context), `${js};return PreparationPage;`)(
     ...Object.values(context),
   );
+  let tree: unknown = null;
   const render = () => {
     cursor = 0;
-    const tree = component();
+    tree = component();
     return { ...contract, actions: [...contract.actions, ...treeActions(tree)] };
   };
   return {
     render,
     calls,
+    navigationReason: () => {
+      render();
+      return navigationGuard ? navigationGuard() : null;
+    },
+    /** 真正渲染到 DOM 的可选框（区别于 page contract 里只声明、JSX 被过滤掉的字段）。 */
+    selects: () => {
+      render();
+      return treeSelects(tree);
+    },
     set: (id: string, value: string) => {
       const f = render().fields.find((f) => f.id === id);
       assert.ok(f, id);
@@ -169,4 +238,56 @@ test('rainfall without detected snow stays unchanged', async () => {
   p.set('prep-src', '/input');
   await p.run('prep-inspect');
   assert.equal(p.render().fields.find((f) => f.id === 'prep-slot-4-also_add')?.value, '');
+});
+
+test('pending preparation input blocks navigation until it is generated', async () => {
+  const p = page();
+  assert.equal(p.navigationReason(), null);
+  p.set('prep-src', '/input');
+  assert.match(p.navigationReason() ?? '', /未生成|not been generated/);
+  await p.run('prep-inspect');
+  // 检查输入只是把探测结果写回 result，不算"已生成"：还没写出产物时离页仍要拦。
+  assert.match(
+    p.navigationReason() ?? '',
+    /未生成|not been generated/,
+    'inspecting alone must not release the navigation guard',
+  );
+  // 被拦下时必须有明确出口：放弃未生成的输入后允许离开（不能只能生成一次或重启应用）。
+  await p.run('prep-discard-unfinished');
+  assert.equal(p.navigationReason(), null, 'discarding unfinished input releases the guard');
+  // 重新改一次并生成：产物已生成，用户的目的已达到，不再拦截“用于新算例”。
+  p.set('prep-src', '/input2');
+  await p.run('prep-inspect');
+  await p.run('prep-execute');
+  assert.equal(p.navigationReason(), null);
+});
+
+test('flag-like free text and out-of-range coordinates are rejected with field names', async () => {
+  const p = page();
+  p.set('prep-src', '--oops');
+  p.set('prep-dst', '/out');
+  await assert.rejects(p.run('prep-execute'), /不能以 -- 开头|must not start with --/);
+  const site = page();
+  site.set('prep-mode', 'site');
+  site.set('prep-dst', '/out/CN-Cng_site.nc');
+  site.set('prep-lon', '999');
+  await assert.rejects(site.run('prep-execute'), /经度|Longitude/);
+});
+
+test('site generation exposes and forwards the land-cover/vegetation scheme', async () => {
+  const p = page();
+  p.set('prep-mode', 'site');
+  // 方案选择必须是**真正渲染出来的**控件，不能只注册在 page contract 里（GUI 复核 D-04）。
+  const scheme = p.selects().find((select) => select.options.includes('usgs'));
+  assert.ok(scheme, 'the land-cover/vegetation scheme select is rendered for site creation');
+  assert.equal(scheme.value, 'igbp', 'defaults to the page profile when no case is open');
+  scheme.change('usgs');
+  assert.equal(p.render().fields.find((f) => f.id === 'prep-site-mode')?.value, 'usgs');
+  p.set('prep-dst', '/out/CN-Cng_site.nc');
+  p.set('prep-lon', '10');
+  p.set('prep-lat', '20');
+  await p.run('prep-execute');
+  const call = p.calls.find((c) => c.name === 'make_site');
+  assert.ok(call, 'make_site was invoked');
+  assert.equal(call.args.mode, 'usgs');
 });

@@ -130,6 +130,20 @@ pub(crate) fn cancel_creations(
 }
 
 impl CaseCreations {
+    pub(crate) fn idle_generation(&self, busy: &str) -> Result<u64, String> {
+        self.0.idle_generation(busy)
+    }
+
+    pub(crate) fn with_idle_generation<T>(
+        &self,
+        busy: &str,
+        expected: u64,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.0
+            .with_idle_generation(busy, Some(expected), |_| action())
+    }
+
     pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
         self.0.cancel(None)
     }
@@ -195,13 +209,14 @@ impl CaseCreation {
         let path = std::path::Path::new(&self.0.key);
         if require_fresh && !self.0.fresh {
             return Err(format!(
-                "case directory already exists; choose a new case name: {}",
+                "算例目录已存在，换一个算例名或根目录再建 / case directory already exists; choose a new case name: {}",
                 path.display()
             ));
         }
         if path.join("case.nml").exists() {
             return Err(format!(
-                "{} 里已经有一个算例，换一个算例名或根目录再建",
+                "{} 里已经有一个算例，换一个算例名或根目录再建 / {} already contains a case; choose another case name or root",
+                path.display(),
                 path.display()
             ));
         }
@@ -356,6 +371,7 @@ impl CaseCreation {
 
 #[derive(Default)]
 struct RunProcessState {
+    generation: u64,
     pids: HashMap<String, u32>,
     pending: HashSet<String>,
     cancelled: HashSet<String>,
@@ -403,14 +419,30 @@ impl RunProcesses {
         busy: &str,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_idle_generation(busy, None, |_| action())
+    }
+
+    pub(crate) fn idle_generation(&self, busy: &str) -> Result<u64, String> {
+        self.with_idle_generation(busy, None, Ok)
+    }
+
+    pub(crate) fn with_idle_generation<T>(
+        &self,
+        busy: &str,
+        expected: Option<u64>,
+        action: impl FnOnce(u64) -> Result<T, String>,
+    ) -> Result<T, String> {
         let state = self
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
-        if !state.pids.is_empty() || !state.pending.is_empty() {
+        if !state.pids.is_empty()
+            || !state.pending.is_empty()
+            || expected.is_some_and(|generation| generation != state.generation)
+        {
             return Err(busy.into());
         }
-        action()
+        action(state.generation)
     }
 
     /// Reject a second live process for the same key before starting a run.
@@ -433,6 +465,10 @@ impl RunProcesses {
         {
             return Err(format!("{key} is already running"));
         }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("运行变更计数已耗尽 / Run generation exhausted")?;
         state.pending.extend(keys.iter().cloned());
         Ok(())
     }
@@ -1910,8 +1946,8 @@ fn run_args(
     validate_run_stage(stage)?;
     validate_engine(engine)?;
     validate_model_version(model_version)?;
-    if mpi_ranks == 0 {
-        return Err("mpiRanks must be at least 1".into());
+    if mpi_ranks == 0 || mpi_ranks > 4096 {
+        return Err("mpiRanks must be between 1 and 4096".into());
     }
     let mut args = vec![
         "run".to_string(),
@@ -2335,11 +2371,11 @@ fn run_batch_blocking(
     validate_run_stage(stage.as_deref())?;
     validate_engine(engine.as_deref())?;
     validate_model_version(model_version.as_deref())?;
-    if mpi_ranks == 0 {
-        return Err("mpiRanks must be at least 1".into());
+    if mpi_ranks == 0 || mpi_ranks > 4096 {
+        return Err("mpiRanks must be between 1 and 4096".into());
     }
-    if threads == Some(0) {
-        return Err("threads must be at least 1".into());
+    if threads.is_some_and(|threads| threads == 0 || threads > 4096) {
+        return Err("threads must be between 1 and 4096".into());
     }
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -2480,8 +2516,8 @@ fn run_case_blocking(
     preprocessors: Option<String>,
     record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
-    if threads == Some(0) {
-        return Err("threads must be at least 1".into());
+    if threads.is_some_and(|threads| threads == 0 || threads > 4096) {
+        return Err("threads must be between 1 and 4096".into());
     }
     processes.prepare(std::slice::from_ref(&case))?;
     run_one(
@@ -2797,7 +2833,10 @@ pub fn forcing_datasets() -> Vec<String> {
 
 /// 重定向算例的输出目录至外部自定义路径（通过软链接连接 `<case>/out`）。
 #[tauri::command]
-pub fn redirect_output_dir(case_dir: String, target_dir: String) -> Result<(), String> {
+pub fn redirect_output_dir(
+    case_dir: String,
+    target_dir: String,
+) -> Result<serde_json::Value, String> {
     let case_path = PathBuf::from(&case_dir);
     let out_link = case_path.join("out");
     let target_path = PathBuf::from(&target_dir);
@@ -2807,11 +2846,19 @@ pub fn redirect_output_dir(case_dir: String, target_dir: String) -> Result<(), S
         .canonicalize()
         .unwrap_or_else(|_| target_path.clone());
     if out_canonical == target_canonical {
-        return Ok(());
+        return Ok(serde_json::json!({
+            "out": out_link.display().to_string(),
+            "target": target_path.display().to_string(),
+        }));
     }
 
-    std::fs::create_dir_all(&target_path)
-        .map_err(|e| format!("无法创建输出目录 {}: {e}", target_path.display()))?;
+    std::fs::create_dir_all(&target_path).map_err(|e| {
+        format!(
+            "无法创建输出目录 {}：{e} / cannot create output folder {}: {e}",
+            target_path.display(),
+            target_path.display()
+        )
+    })?;
 
     if out_link.is_symlink() {
         #[cfg(unix)]
@@ -2826,20 +2873,34 @@ pub fn redirect_output_dir(case_dir: String, target_dir: String) -> Result<(), S
             let _ = std::fs::remove_dir(&out_link);
         } else {
             return Err(format!(
-                "默认输出目录 {} 已存在且非空，未做链接",
+                "默认输出目录 {} 已存在且非空，未做链接 / the default output folder {} exists and is not empty; no link was made",
+                out_link.display(),
                 out_link.display()
             ));
         }
     }
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&target_path, &out_link)
-        .map_err(|e| format!("无法创建输出目录软链接至 {}: {e}", target_path.display()))?;
+    std::os::unix::fs::symlink(&target_path, &out_link).map_err(|e| {
+        format!(
+            "无法创建输出目录软链接至 {}：{e} / cannot link the output folder to {}: {e}",
+            target_path.display(),
+            target_path.display()
+        )
+    })?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&target_path, &out_link)
-        .map_err(|e| format!("无法创建输出目录软链接至 {}: {e}", target_path.display()))?;
+    std::os::windows::fs::symlink_dir(&target_path, &out_link).map_err(|e| {
+        format!(
+            "无法创建输出目录软链接至 {}：{e} / cannot link the output folder to {}: {e}",
+            target_path.display(),
+            target_path.display()
+        )
+    })?;
 
-    Ok(())
+    Ok(serde_json::json!({
+        "out": out_link.display().to_string(),
+        "target": target_path.display().to_string(),
+    }))
 }
 
 #[tauri::command]
@@ -2903,26 +2964,31 @@ pub async fn new_spatial_case(
     };
     validate_bgc_runtime(Some(&request.runtime), &request.fields)?;
     if !matches!(request.domain.as_str(), "watershed" | "region" | "global") {
-        return Err("domain must be watershed, region, or global".into());
+        return Err("domain 只能是 watershed、region 或 global / domain must be watershed, region, or global".into());
     }
     if !matches!(
         request.grid_kind.as_str(),
         "latlon" | "unstructured" | "catchment"
     ) {
-        return Err("gridKind must be latlon, unstructured, or catchment".into());
+        return Err("gridKind 只能是 latlon、unstructured 或 catchment / gridKind must be latlon, unstructured, or catchment".into());
     }
     let case_dir = PathBuf::from(&request.out);
     if case_dir.exists() {
         return Err(format!(
-            "case directory already exists; choose a new case name: {}",
+            "算例目录已存在，换一个算例名或根目录再建 / case directory already exists; choose a new case name: {}",
             case_dir.display()
         ));
     }
     let creation = CaseCreation::begin(&creations, &request.out, CASE_CREATION_TIMEOUT)?;
     let result = async {
         creation.validate_destination(true)?;
-        std::fs::create_dir_all(&case_dir)
-            .map_err(|e| format!("cannot create {}: {e}", case_dir.display()))?;
+        std::fs::create_dir_all(&case_dir).map_err(|e| {
+            format!(
+                "无法创建 {}：{e} / cannot create {}: {e}",
+                case_dir.display(),
+                case_dir.display()
+            )
+        })?;
         let cleanup = |error: String| creation.failure(error);
         let existing_mesh =
             existing_unstructured_mesh(&request.grid_kind, request.mesh_file.clone())
@@ -5061,6 +5127,22 @@ pub(crate) fn add_preprocessors(args: &mut Vec<String>, value: Option<&str>) -> 
 #[cfg(test)]
 mod deletion_guard_tests {
     use super::*;
+
+    #[test]
+    fn idle_generation_rejects_a_run_that_started_and_finished_during_scan() {
+        let processes = RunProcesses::default();
+        let generation = processes.idle_generation("busy").unwrap();
+        processes.prepare(&["case".into()]).unwrap();
+        processes.forget("case").unwrap();
+        let mut deleted = false;
+        assert!(processes
+            .with_idle_generation("changed", Some(generation), |_| {
+                deleted = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!deleted);
+    }
 
     #[test]
     fn deletion_requires_no_pending_or_running_process() {

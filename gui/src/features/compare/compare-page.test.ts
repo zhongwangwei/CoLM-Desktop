@@ -929,3 +929,12 @@ test('the simulation form rejects an empty profile or an unsafe station ID', () 
   );
   assert.equal(badStation.issues[0]?.field, 'stationId');
 });
+
+test('remote run history fetches the run instead of treating a server path as local', () => {
+  // F-C-01：历史运行行的「查看这次报告」在服务器模式下必须先按 run_id 取回镜像，不能把
+  // 服务器绝对路径直接交给本机 bench_report（projects/ 守卫会拒绝）。
+  assert.match(
+    pageSource,
+    /host\s*\?\s*fetchReport\(host, p\.name, run\.run_id\)\s*:\s*view\(run\.report!\)/s,
+  );
+});

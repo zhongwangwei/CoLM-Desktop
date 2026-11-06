@@ -104,6 +104,16 @@ fn remote_knowledge_does_not_require_a_local_workspace_or_job() {
     let request = serde_json::json!({"source":"/data/source with spaces","query":"water","paths":["crates/core/src/lib.rs"]});
     let args = remote_args("", "knowledge", None, Some(&request)).unwrap();
     assert_eq!(args.last().unwrap(), &request.to_string());
+    // knowledge 不传只被 submit 读取的 `--name`（F-L-05/L-02 同族假参数）。
+    assert!(!args.iter().any(|arg| arg == "--name"), "{args:?}");
+    let submit = remote_args(
+        "ws",
+        "submit",
+        None,
+        Some(&serde_json::json!({"action":"test","target":{"kind":"engine"},"budget":{"threads":1,"jobs":1}})),
+    )
+    .unwrap();
+    assert!(submit.iter().any(|arg| arg == "--name"), "{submit:?}");
     assert!(remote_args("", "knowledge", None, None).is_err());
     assert!(remote_args("../escape", "knowledge", None, Some(&request)).is_err());
     assert!(remote_args("", "submit", None, Some(&request)).is_err());
@@ -346,4 +356,38 @@ fn adding_local_files_can_refuse_to_replace_an_existing_name() {
     assert!(put_args("demo", "vendor/main", "/tmp/main", true, "x", true).is_err());
     assert!(put_args("demo", "../x", "/tmp/x", false, "x", false).is_err());
     assert!(put_args("demo", "x", "/tmp/x", false, "", false).is_err());
+}
+
+#[test]
+fn cli_option_like_free_text_is_rejected_at_the_gui_boundary() {
+    // 实测：`colm-cli ws-create --name x --from app --note --example` 会被全局参数解析当成
+    // 「--note 缺值」，退出 1；在 Tauri 边界挡住并说清原因（不改全局解析）。
+    let error = reject_option_like("--example", "目的", "Purpose").unwrap_err();
+    assert!(error.contains("目的不能以 -- 开头"), "{error}");
+    assert!(
+        error.contains("Purpose must not start with --"),
+        "错误要双语：{error}"
+    );
+    // 单个 `-` 不会被 CLI 当成选项；中间出现 `--` 也不是问题。
+    assert!(reject_option_like("-x", "目的", "Purpose").is_ok());
+    assert!(reject_option_like("调整 a--b 的参数", "目的", "Purpose").is_ok());
+
+    for error in [
+        version_create_args("snow", None, Some("--example"), None, None).unwrap_err(),
+        version_create_args("snow", None, Some("  --example"), None, None).unwrap_err(),
+        write_file_args("demo", "a.F90", "--example", None, true).unwrap_err(),
+        put_args("demo", "a.F90", "/tmp/a.F90", false, "--example", false).unwrap_err(),
+        file_args("demo", "a.F90", Some("--example")).unwrap_err(),
+        file_args("demo", "--example", None).unwrap_err(),
+        put_args("demo", "--example", "/tmp/a", false, "x", false).unwrap_err(),
+    ] {
+        assert!(error.contains("不能以 -- 开头"), "{error}");
+        assert!(
+            error.contains("must not start with --"),
+            "错误要双语：{error}"
+        );
+    }
+    // 正常文本/路径照旧通过。
+    assert!(version_create_args("snow", None, Some("改用新的参数"), None, None).is_ok());
+    assert!(write_file_args("demo", "a.F90", "fix k", None, true).is_ok());
 }

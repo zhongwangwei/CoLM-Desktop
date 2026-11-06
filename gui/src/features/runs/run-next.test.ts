@@ -241,8 +241,13 @@ test('batch Back preserves run resources and cannot leave while another local me
     ranks: '1',
     threads: '1',
     workers: '1',
+    autoWorkers: true,
     scheduler: 'auto',
     cpus: '',
+    stage: '',
+    force: false,
+    preprocessors: 'rust',
+    recordInputFingerprints: false,
   });
   const active = render(
     { ...success, status: 'failed' },
@@ -788,15 +793,14 @@ test('multi-site review hides engine/stage overrides even in expert mode', () =>
         (el) => el.type === 'section' && el.props['aria-label'] === '引擎与计算阶段',
       ),
     );
-    for (const id of [
-      'run-advanced',
-      'run-kernel',
-      'run-engine',
-      'run-preprocessors',
-      'run-stage',
-      'run-force',
-    ])
+    // 引擎/编译配置/前处理仍按算例各自决定；阶段与强制重跑对批量同样生效（R-04）。
+    for (const id of ['run-advanced', 'run-kernel', 'run-engine', 'run-preprocessors'])
       assert.ok(!contract.fields.some((field) => field.id === id), id);
+    for (const id of ['run-stage', 'run-force'])
+      assert.ok(
+        contract.fields.some((field) => field.id === id),
+        id,
+      );
     assert.ok(contract.fields.some((field) => field.id === 'run-workers'));
   }
   const single = render();
@@ -812,7 +816,12 @@ test('single-case stages are visible exclusive buttons without enabling advanced
   const buttons = page.elements.filter((el) => el.type === 'Button' && 'aria-pressed' in el.props);
   assert.deepEqual(
     buttons.map((el) => el.children[0]),
-    ['全部', 'mksrfdata', 'mkinidata', 'colm'],
+    [
+      '全部（地表 → 初始化 → 主模拟）',
+      '地表准备 (mksrfdata)',
+      '初始化 (mkinidata)',
+      '主模拟 (colm)',
+    ],
   );
   assert.deepEqual(
     buttons.map((el) => el.props['aria-pressed']),

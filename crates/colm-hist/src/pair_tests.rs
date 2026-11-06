@@ -192,7 +192,7 @@ fn nonfinite_observations_never_enter_metrics() {
 }
 
 #[test]
-fn window_keeps_from_and_excludes_to() {
+fn window_keeps_both_endpoints_including_to() {
     let (ms, mv) = model();
     let (os, ov, oq) = obs_all_good();
     let s = Series {
@@ -210,7 +210,8 @@ fn window_keeps_from_and_excludes_to() {
             to: 9000.0,
         }),
     );
-    assert_eq!(p, vec![(5400.0, 20.0, 3.5)]);
+    // 闭区间：label 9000 的记录也属于窗口（与 series/诊断一致）。
+    assert_eq!(p, vec![(5400.0, 20.0, 3.5), (9000.0, 30.0, 5.5)]);
 }
 
 #[test]

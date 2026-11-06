@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { EMPTY_PREP_FORM } from './preparation-draft';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -22,6 +23,12 @@ type Summary = {
   converted: number | null;
   warnings: string[];
   readiness: string | null;
+  fromSite?: number;
+  fromRaster?: number;
+  fromDefault?: number;
+  fromLookup?: number;
+  siteKind?: string;
+  siteMode?: string;
   slots: number | null;
   fields: number | null;
 };
@@ -183,6 +190,28 @@ test('summary reads only fields the backend actually returns', () => {
   assert.equal(unknown?.missing, null);
   assert.equal(summarizePreparationResult(null, 'netcdf'), null);
   assert.equal(summarizePreparationResult('', 'netcdf'), null);
+});
+
+test('site results surface kind, mode, lookup provenance and rawdata warnings', () => {
+  const summary = summarizePreparationResult(
+    {
+      path: '/out/site.nc',
+      readiness: 'self_contained',
+      from_site: ['soil_vf_clay'],
+      from_raster: [],
+      from_default: ['soil_texture'],
+      from_lookup: ['canopy_height'],
+      warnings: ['rawdata 目录可读，但这份站点文件没有取到任何栅格字段'],
+      site_kind: 'single',
+      mode: 'igbp',
+      needs_external: [],
+    },
+    'site',
+  )!;
+  assert.equal(summary.fromLookup, 1);
+  assert.equal(summary.siteKind, 'single');
+  assert.equal(summary.siteMode, 'igbp');
+  assert.deepEqual(summary.warnings, ['rawdata 目录可读，但这份站点文件没有取到任何栅格字段']);
 });
 
 test('arrays are distinguished between split tables and converted observations', () => {
@@ -410,10 +439,20 @@ test('starting a new operation clears the stale success card and keeps retry pos
 
 test('editing a field clears the previous result so no stale success remains', () => {
   const shown: unknown[] = [];
+  const produced: unknown[] = [];
+  const imported: unknown[] = [];
+  const edited: boolean[] = [];
+  const consumed: boolean[] = [];
   const form: Record<string, string> = { dst: '/a.nc', src: '/in.nc' };
   const set = pageCallback('set', {
     form,
+    rememberForm: () => {},
     setResult: (value: unknown) => shown.push(value),
+    setProduced: (value: unknown) => produced.push(value),
+    setImported: (value: unknown) => imported.push(value),
+    setDeclined: () => {},
+    setEdited: (value: boolean) => edited.push(value),
+    setInputsConsumed: (value: boolean) => consumed.push(value),
     setProbe: () => {},
     setSlots: () => {},
     // 像真实 state setter 一样把更新写回 form，这样"同一个值再设一次"才是无变化的。
@@ -422,8 +461,59 @@ test('editing a field clears the previous result so no stale success remains', (
   });
   void set('dst', '/b.nc');
   assert.deepEqual(shown, [null], 'a changed field invalidates the previous result');
+  assert.deepEqual(produced, [{}], 'a changed field invalidates the produced artifacts');
+  assert.deepEqual(imported, [[]], 'staged table items also belong to the old inputs');
+  assert.deepEqual(edited, [true]);
+  assert.deepEqual(consumed, [false]);
   void set('dst', '/b.nc');
   assert.deepEqual(shown, [null], 're-entering the same value does not add another clear');
+  assert.deepEqual(produced, [{}], 're-entering the same value keeps the artifacts untouched');
+  assert.deepEqual(imported, [[]], 're-entering the same value keeps the staged list untouched');
+  // 修复参数（ERA5 辅助文件/缺测阈值）只影响逐站 finish，不影响已经拆分好的暂存文件：
+  // 输入它们不能清掉"表格已拆分"待办列表（GUI 审查 F-D-01 回归）。
+  for (const [key, value] of [
+    ['era5', '/era5.nc'],
+    ['short_gap', '3'],
+    ['min_overlap', '8'],
+  ] as const) {
+    void set(key, value);
+    assert.deepEqual(
+      imported,
+      [[]],
+      `changing ${key} keeps the split table list so per-site finish stays reachable`,
+    );
+  }
+  assert.deepEqual(produced, [{}, {}, {}, {}], 'stale artifacts are still invalidated');
+  // 影响拆分结果的字段仍然清空待办列表。
+  void set('time_column', 'TIME');
+  assert.deepEqual(imported, [[], []], 'a field that shapes the split still clears the list');
+});
+
+test('a cancelled observation overwrite reads as a decision, not a red error', async () => {
+  const errors: string[] = [],
+    declined: string[] = [],
+    notices: [string, boolean | undefined][] = [];
+  const work = pageCallback('work', {
+    registerCloseGuard: () => () => {},
+    lock: { current: false },
+    setBusy: () => {},
+    setResult: () => {},
+    setError: (value: string) => errors.push(value),
+    setDeclined: (value: string) => declined.push(value),
+    notify: (message: string, error?: boolean) => notices.push([message, error]),
+    t: (zh: string) => zh,
+  });
+  const cancelled = Object.assign(new Error('已取消：保留已有观测文件。'), {
+    name: 'CancelledError',
+  });
+  await assert.rejects(
+    work(async () => {
+      throw cancelled;
+    }),
+  );
+  assert.deepEqual(notices, [], 'no global red banner for a deliberate cancellation');
+  assert.equal(errors.at(-1), '');
+  assert.equal(declined.at(-1), '已取消：保留已有观测文件。');
 });
 
 test('table finalization uses staged UTC metadata despite source and raw repair offsets', async () => {
@@ -441,6 +531,8 @@ test('table finalization uses staged UTC metadata despite source and raw repair 
       },
       setImported: () => {},
       setProduced: () => {},
+      setInputsConsumed: () => {},
+      imported: [],
     });
     await finish({
       staged_path: '/stage.nc',
@@ -475,4 +567,196 @@ test('raw gap repair keeps its explicit manual timezone override', async () => {
     longitude: 120,
     era5: '/era5.nc',
   });
+});
+
+test('changing preparation task clears its destination and obsolete artifacts', async () => {
+  const form: Record<string, string> = {
+    dst: '/old/site.nc',
+    src: '/input.nc',
+    site_mode: 'usgs',
+  };
+  let produced: unknown = { site: '/old/site.nc', met: '/old/met.nc' };
+  const consumed: boolean[] = [];
+  const autoDst = { current: '/old/site.nc' };
+  const change = pageCallback('changeMode', {
+    mode: 'site',
+    setMode: () => {},
+    clearPrepDraft: () => {},
+    dirtyNow: { current: true },
+    EMPTY_PREP_FORM,
+    setForm: (update: ((old: typeof form) => typeof form) | Record<string, string>) =>
+      Object.assign(form, typeof update === 'function' ? update(form) : update),
+    autoDst,
+    setProduced: (value: unknown) => {
+      produced = value;
+    },
+    setEdited: () => {},
+    setImported: () => {},
+    setProbe: () => {},
+    setSlots: () => {},
+    setResult: () => {},
+    setInputsConsumed: (value: boolean) => consumed.push(value),
+    setError: () => {},
+    setDeclined: () => {},
+  });
+  await change('site');
+  assert.equal(form.dst, '/old/site.nc', 'same task retains the user destination');
+  await change('netcdf');
+  assert.equal(form.dst, '', 'another task must choose its own output');
+  // 切任务后残留输入必须清空，否则 edited=false/consumed=true 会把上一条任务的残留
+  // 输入误判成"干净的新任务"（D-05 残留）。
+  assert.equal(form.src, '');
+  assert.equal(form.site_mode, '');
+  assert.equal(form.lon, '', 'coordinates from the previous task are cleared too');
+  assert.equal(autoDst.current, '');
+  assert.deepEqual(produced, {}, 'old artifacts cannot be applied to a new case');
+  assert.deepEqual(consumed, [true], 'a new task starts from a clean, non-dirty state');
+});
+
+test('site generation retries an existing destination only after overwrite confirmation', async () => {
+  for (const accepted of [false, true]) {
+    const writes: boolean[] = [];
+    const consumed: boolean[] = [];
+    let confirmations = 0;
+    let produced: unknown = null;
+    const form = { dst: '/existing/site.nc', rawdata: '' };
+    const confirmOverwrite = pageCallback('confirmOverwrite', {
+      form,
+      t: (_zh: string, en: string) => en,
+      askConfirm: async () => {
+        confirmations++;
+        return accepted;
+      },
+    });
+    const execute = pageCallback('execute', {
+      preparedSiteNameValid: () => true,
+      preparedSiteDestination: (_directory: string, current: string) => current,
+      rememberForm: () => {},
+      form,
+      mode: 'site',
+      preparation: { mode: 'igbp', crop: false },
+      num: () => 1,
+      optional: () => null,
+      work: (fn: () => unknown) => fn(),
+      confirmOverwrite,
+      invoke: async (command: string, args: { overwrite?: boolean }) => {
+        assert.equal(command, 'make_site');
+        writes.push(args.overwrite === true);
+        if (args.overwrite === false) throw new Error('产物已存在，未覆盖');
+        return SITE_REPORT;
+      },
+      setProduced: (update: (old: object) => unknown) => {
+        produced = update({});
+      },
+      setInputsConsumed: (value: boolean) => consumed.push(value),
+    });
+    if (accepted) {
+      assert.equal(await execute(), SITE_REPORT);
+      assert.deepEqual(writes, [false, true]);
+      assert.deepEqual(produced, { site: form.dst });
+      assert.deepEqual(consumed, [true], 'a written product consumes the pending input');
+    } else {
+      await assert.rejects(execute(), /Cancelled/);
+      assert.deepEqual(writes, [false], 'no destructive request after cancellation');
+      assert.equal(produced, null);
+      assert.deepEqual(consumed, [], 'a cancelled write leaves the input pending');
+    }
+    assert.equal(confirmations, 1);
+  }
+});
+
+test('use for new case asks before discarding unfinished table sites', async () => {
+  const updates: unknown[] = [];
+  const navigations: string[] = [];
+  const cleared: unknown[] = [];
+  const asked: string[] = [];
+  const run = pageCallback('useForNewCase', {
+    canUse: true,
+    produced: { met: '/out/CN-Cng_Met.nc' },
+    imported: [{ site: 'a' }, { site: 'b' }],
+    update: (patch: unknown) => updates.push(patch),
+    dirtyNow: { current: false },
+    navigate: (route: string) => (navigations.push(route), true),
+    askConfirm: async (message: string) => (asked.push(message), true),
+    setImported: (value: unknown) => cleared.push(value),
+    setEdited: () => {},
+    setInputsConsumed: () => {},
+    t: (zh: string) => zh,
+  });
+  assert.equal(await run(), true);
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /2 个站点/);
+  assert.deepEqual(cleared, [[]], 'unfinished per-site work is discarded only after confirmation');
+  assert.equal(updates.length, 1, 'the new-case seed is written once');
+  assert.deepEqual(navigations, ['new-case']);
+});
+
+test('discarding unfinished sites lets navigation run in the same tick', async () => {
+  // 本次验收 P2：setEdited/setInputsConsumed 是异步的，守卫闭包会读到上一轮 dirty；
+  // 确认后必须同步把守卫状态置为可离开，否则 navigate 仍被拦下且 seed 已写入。
+  const dirtyNow = { current: true };
+  const navigations: string[] = [];
+  const run = pageCallback('useForNewCase', {
+    canUse: true,
+    produced: { met: '/out/CN-Cng_Met.nc' },
+    imported: [{ site: 'a' }],
+    dirtyNow,
+    update: () => {},
+    navigate: (route: string) => {
+      if (dirtyNow.current) return false;
+      navigations.push(route);
+      return true;
+    },
+    askConfirm: async () => true,
+    setImported: () => {},
+    setEdited: () => {},
+    setInputsConsumed: () => {},
+    t: (zh: string) => zh,
+  });
+  assert.equal(await run(), true);
+  assert.equal(dirtyNow.current, false);
+  assert.deepEqual(navigations, ['new-case']);
+});
+
+test('declining to discard unfinished table sites keeps them and stays', async () => {
+  const updates: unknown[] = [];
+  const navigations: string[] = [];
+  const cleared: unknown[] = [];
+  const run = pageCallback('useForNewCase', {
+    canUse: true,
+    produced: { met: '/out/CN-Cng_Met.nc' },
+    imported: [{ site: 'a' }],
+    update: (patch: unknown) => updates.push(patch),
+    dirtyNow: { current: false },
+    navigate: (route: string) => (navigations.push(route), true),
+    askConfirm: async () => false,
+    setImported: (value: unknown) => cleared.push(value),
+    setEdited: () => {},
+    setInputsConsumed: () => {},
+    t: (zh: string) => zh,
+  });
+  assert.equal(await run(), false);
+  assert.deepEqual(cleared, []);
+  assert.deepEqual(updates, []);
+  assert.deepEqual(navigations, []);
+});
+
+test('short-gap and min-overlap must be whole numbers before submit', () => {
+  const form: Record<string, string> = { short_gap: '3.5', min_overlap: '8' };
+  const num = pageCallback('num', {
+    numericLabels: { short_gap: '短缺测最大步数', min_overlap: '最少重叠步数' },
+    form,
+    t: (zh: string) => zh,
+    requiredNumber: (value: string, label: string) => {
+      if (!value.trim() || !Number.isFinite(Number(value)))
+        throw new Error(`${label}: 请输入有效数字 / enter a number`);
+      return Number(value);
+    },
+  });
+  assert.throws(() => num('short_gap'), /必须是整数/);
+  assert.equal(num('min_overlap'), 8);
+  form.min_overlap = '3.5';
+  assert.throws(() => num('min_overlap'), /必须是整数/);
+  form.min_overlap = '2000000';
+  assert.throws(() => num('min_overlap'), /须在 0 到 1000000 之间/);
 });

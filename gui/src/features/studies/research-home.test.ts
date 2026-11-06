@@ -48,6 +48,7 @@ import {
   remoteStudyReply,
   studyModelRevision,
   studyExecutionIssue,
+  hybridStudyModelRevision,
 } from './remote-study';
 import {
   clearParameterContextMarker,
@@ -855,6 +856,7 @@ function researchPage(
     shownResultFiles,
     studyModelRevision,
     studyExecutionIssue,
+    hybridStudyModelRevision,
     studyPermissions,
     calibrationSeed,
     deriveStudyDesign,
@@ -1827,7 +1829,7 @@ it('prefilled windows follow each case spin-up and are recomputed when the cases
   await prefill(timing('2012-12-31'))(['2002-01-01', '2012-12-31'], () => true);
   assert.deepEqual(filled, {
     from: '2003-01-01T00:00',
-    to: '2010-01-01T00:00',
+    to: '2009-12-31T00:00',
     valFrom: '2010-01-01T00:00',
     valTo: '2012-12-31T00:00',
   });
@@ -1837,7 +1839,7 @@ it('prefilled windows follow each case spin-up and are recomputed when the cases
   await prefill(timing('2006-12-31'))(['2002-01-01', '2006-12-31'], () => true);
   assert.deepEqual(filled, {
     from: '2004-06-01T00:00',
-    to: '2006-01-01T00:00',
+    to: '2005-12-31T00:00',
     valFrom: '2006-01-01T00:00',
     valTo: '2006-12-31T00:00',
   });
@@ -3668,4 +3670,91 @@ it('an unidentified legacy study offers a new study and cannot run', async () =>
   page.press('study-new-from-legacy');
   assert.equal(page.requests.filter((r) => r.command === 'study_run').length, 0);
   assert.ok(page.ids().includes('research-step-2'));
+});
+
+function fitFixture() {
+  return {
+    model: '/models/net.json',
+    networkSpec: {
+      slot: 'soil_stress',
+      features: 'f1,f2',
+      outputs: [{ name: 'DEF_X', range: [0, 1], transform: 'linear' }],
+      normalize: true,
+    },
+    report_file: '/study/report.json',
+    report: { validation: { passed: true } },
+    network: { slot: 'soil_stress', weights: 12 },
+    studyDirs: ['/study'],
+    sourceCase: '/case',
+    parent: { id: 'official', revision: 1 },
+  };
+}
+
+it('a saved study version keeps its success state and warning when the version refresh fails', async () => {
+  const notes: { message: string; error: boolean }[] = [];
+  const saved: unknown[] = [];
+  const calls: string[] = [];
+  const save = pageCallback('saveFitVersion', {
+    fit: fitFixture(),
+    name: 'fit-1',
+    tr: (zh: string) => zh,
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    fitValidation,
+    notify: (message: string, error = false) => notes.push({ message, error }),
+    invokeJson: async (command: string) => {
+      calls.push(command);
+      if (command === 'model_create') return { id: 'draft-1' };
+      if (command === 'model_attach_network')
+        return { draft: { id: 'draft-1' }, assetRoot: '/assets' };
+      if (command === 'model_freeze') return { version: { id: 'v2', revision: 2 } };
+      throw new Error(command);
+    },
+    refreshVersions: async () => {
+      throw new Error('reload failed');
+    },
+    setFit: (value: unknown) => saved.push(value),
+  });
+  const version = (await save()) as { version: { id: string; revision: number } };
+  assert.deepEqual(version, { version: { id: 'v2', revision: 2 } });
+  assert.ok(calls.includes('model_freeze'));
+  assert.equal(saved.length, 1, '冻结成功后先提交成功状态，刷新失败不能回退它');
+  assert.ok(
+    notes.some((note) => /已保存 AI 模型版本/.test(note.message)),
+    '保存成功提示不能因刷新失败而丢失',
+  );
+  const warning = notes.find((note) => /版本列表刷新失败/.test(note.message));
+  assert.ok(warning, '刷新失败单独给一条 warning');
+  assert.equal(warning.error, true);
+  assert.ok(
+    !notes.some((note) => /保留可恢复草稿/.test(note.message)),
+    'finish:true 已冻结并删除草稿，不能再声称保留可恢复草稿',
+  );
+});
+
+it('a failure before freezing still reports the recoverable draft', async () => {
+  const notes: { message: string; error: boolean }[] = [];
+  const saved: unknown[] = [];
+  const save = pageCallback('saveFitVersion', {
+    fit: fitFixture(),
+    name: 'fit-1',
+    tr: (zh: string) => zh,
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    fitValidation,
+    notify: (message: string, error = false) => notes.push({ message, error }),
+    invokeJson: async (command: string) => {
+      if (command === 'model_create') return { id: 'draft-1' };
+      if (command === 'model_attach_network')
+        return { draft: { id: 'draft-1' }, assetRoot: '/assets' };
+      if (command === 'model_freeze') throw new Error('freeze failed');
+      throw new Error(command);
+    },
+    refreshVersions: async () => {},
+    setFit: (value: unknown) => saved.push(value),
+  });
+  await assert.rejects(save(), /freeze failed/);
+  assert.equal(saved.length, 0, '没有冻结成功就不能提交成功状态');
+  assert.ok(
+    notes.some((note) => /保留可恢复草稿/.test(note.message)),
+    '冻结前失败时草稿仍在，提示可恢复是正确的',
+  );
 });

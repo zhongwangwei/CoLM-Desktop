@@ -41,6 +41,7 @@ const schema = [
   ...Object.entries(initialValues).map(([name, value]) =>
     field(name, name.startsWith('DEF_simulation_time%') ? '时间与预热' : '输出与重启', value),
   ),
+  { ...field('USE_srfdata_from_larger_region', '地表数据', '.false.'), kind: 'Logical' },
   field('DEF_dir_existing_srfdata', '地表数据', '/existing/surface'),
   { ...field('DEF_simulation_time%greenwich', '时间与预热', '.false.'), kind: 'Logical' },
 ];
@@ -57,7 +58,13 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
-    profile?: { grid?: string; domain_kind?: string; run_host?: string; remote_directory?: string };
+    profile?: {
+      grid?: string;
+      domain_kind?: string;
+      run_host?: string;
+      remote_directory?: string;
+      spatial?: boolean;
+    };
     servers?: (Pick<Server, 'host' | 'root' | 'maps'> & Partial<Server>)[];
     histories?: { name: string; on: boolean; writable: boolean | null; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
@@ -67,6 +74,7 @@ function page(
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     saveDraft?: (args: Record<string, unknown>) => Promise<string>;
+    saveCase?: (args: Record<string, unknown>) => Promise<unknown>;
     draftTimers?: {
       setTimeout: (fn: () => void, delay: number) => number;
       clearTimeout: (id: number) => void;
@@ -80,6 +88,7 @@ function page(
     context?: () => Promise<unknown>;
     describeFields?: () => Promise<unknown>;
     readNml?: (args: Record<string, unknown>) => Promise<unknown>;
+    readCase?: (args: Record<string, unknown>) => Promise<unknown>;
     forcingProbe?: (args: Record<string, unknown>) => Promise<unknown>;
     pickFolder?: string;
     forcingInput?: () => Promise<{ directory: string; dataset: string }>;
@@ -326,6 +335,7 @@ function page(
         case 'read_case_nml':
           return options.readNml ? options.readNml(args) : '';
         case 'read_case':
+          if (options.readCase) return options.readCase(args);
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));
         case 'remote_create_cases': {
           const outcomes = [];
@@ -369,6 +379,7 @@ function page(
         case 'case_creation_cancel':
           return options.cancelCreation?.(args) ?? 0;
         case 'case_data_save':
+          if (options.saveCase) return options.saveCase(args);
           if (failCreate) throw new Error('save failed');
           return {};
         case 'new_simulation_draft_save':
@@ -928,8 +939,26 @@ test('dirty case options disable model adjustment and running until saved or dis
   assert.equal(p.guard(), null);
 });
 
+test('history output disabled explains that no variables will be written', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.goto('case-step-5');
+  p.set('case-DEF_HIST_FREQ', 'none');
+  p.render();
+  const notices = p.elements
+    .filter((element) => element.type === 'Notice')
+    .flatMap((element) => element.children)
+    .map(String)
+    .join(' ');
+  assert.match(notices, /不写历史文件|No history output/);
+});
+
 test('data options exposed to the assistant are rendered and editable in the data step', async () => {
-  const p = page('NewCasePage', { form, sites: [site], step: 3 });
+  const p = page('NewCasePage', {
+    form: { ...form, kind: 'region', grid: 'latlon' },
+    sites: [site],
+    step: 3,
+  });
   const c = await p.mount();
   assert.ok(c.fields.some((f) => f.id === 'new-option-DEF_dir_existing_srfdata'));
   const wrapper = p.elements.find(
@@ -1010,7 +1039,31 @@ function guideFor(p: ReturnType<typeof page>) {
 }
 for (const name of ['NewCasePage', 'CasesPage'] as const)
   test(`${name} accepts assistant text and numeric edits, and restricts logical values through the real guide driver`, async () => {
-    const p = page(name, name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined);
+    const p = page(
+      name,
+      name === 'NewCasePage'
+        ? {
+            form: {
+              ...form,
+              kind: 'region',
+              grid: 'latlon',
+              west: '100',
+              east: '110',
+              south: '20',
+              north: '30',
+              dlon: '1',
+              dlat: '1',
+              forcing_mode: 'config',
+              forcing: '/forcing.nml',
+            },
+            sites: [site],
+            step: 3,
+          }
+        : undefined,
+      [site],
+      initialValues,
+      { profile: { grid: 'latlon' } },
+    );
     await p.mount();
     if (name === 'CasesPage') await p.goto('case-step-3');
     const guide = guideFor(p),
@@ -1260,7 +1313,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: draft } : undefined,
       [site],
       { ...initialValues, ...draft },
-      { schema: processSchema },
+      { schema: processSchema, profile: { grid: 'latlon' } },
     );
     await p.mount();
     if (name === 'CasesPage') {
@@ -2864,6 +2917,21 @@ const multiSeed = {
   multiSiteRepeat: '3',
   siteDrafts: multiSites.map(multiSiteModel.siteDraft),
 };
+
+test('reopening an existing project skips site drafts whose cases already exist', async () => {
+  const seed = { ...multiSeed, recordDraft: false };
+  const existing = `/project/multi-project/${multiSites[0].name}`;
+  const p = page('NewCasePage', seed, multiSites, undefined, {
+    listCases: async () => [{ dir: existing }],
+  });
+  await p.mount();
+  await p.click('new-create');
+  assert.equal(
+    p.calls.filter((call) => call.command === 'new_case').length,
+    1,
+    'already-created site must not be created again',
+  );
+});
 
 test('custom multi-site creation uses each station inputs and independently calculated spinup', async () => {
   const p = page('NewCasePage', multiSeed, multiSites);
@@ -5301,4 +5369,344 @@ test('failed parallel case reads finish before their preview is released', async
   await p.settle();
   assert.equal(p.calls.filter((call) => call.command === 'model_case_context_release').length, 1);
   p.unmount();
+});
+
+test('existing forcing fields read the source directory and retain quoted array slots', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon' },
+    schema: [
+      ...schema,
+      {
+        ...field('DEF_forcing%vname', '强迫场'),
+        group: 'nl_colm_forcing',
+        kind: 'Character',
+        arity: 8,
+      },
+    ],
+    readCase: async (args) => {
+      assert.equal(args.dir, '/project/site');
+      return [{ path: 'DEF_FORCING%VNAME', value: "'a' 'b' 'c' 'd' 'e' 'f' 'g' 'h'" }];
+    },
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-advanced', 'true');
+  assert.equal(
+    p.render().fields.find((f) => f.id === 'case-DEF_forcing%vname')?.value,
+    "'a' 'b' 'c' 'd' 'e' 'f' 'g' 'h'",
+  );
+});
+
+test('unavailable forcing header blanks and disables its defaults while preserving repair reference', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon' },
+    schema: [
+      ...schema,
+      { ...field('DEF_forcing_namelist', '强迫场'), kind: 'Character' },
+      {
+        ...field('DEF_forcing%dataset', '强迫场', 'CRUNCEP'),
+        group: 'nl_colm_forcing',
+        kind: 'Character',
+      },
+    ],
+    forcingInput: async () => {
+      throw new Error('missing header');
+    },
+    readCase: async (args) => {
+      if (args.dir) throw new Error('missing header');
+      return [{ path: 'DEF_forcing_namelist', value: "'/missing.nml'" }];
+    },
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-advanced', 'true');
+  const fields = p.render().fields;
+  assert.equal(fields.find((f) => f.id === 'case-DEF_forcing%dataset')?.value, '');
+  assert.equal(fields.find((f) => f.id === 'case-DEF_forcing%dataset')?.disabled, true);
+  assert.equal(fields.find((f) => f.id === 'case-DEF_forcing_namelist')?.disabled, false);
+});
+
+test('indexed forcing arrays show original assignments instead of fabricated defaults', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon' },
+    schema: [
+      ...schema,
+      { ...field('DEF_forcing%dtime', '强迫场', '21600'), group: 'nl_colm_forcing', arity: 8 },
+    ],
+    readCase: async () => [{ path: 'DEF_forcing%dtime(1)', value: '1800' }],
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-advanced', 'true');
+  const control = p.render().fields.find((f) => f.id === 'case-DEF_forcing%dtime');
+  assert.equal(control?.value, 'DEF_forcing%dtime(1)=1800');
+  assert.equal(control?.disabled, true);
+  await p.goto('case-step-4');
+  const environment = p.element('ModelSettings').props.setupEnvironment as {
+    caseValues: Record<string, string>;
+  };
+  assert.equal(
+    environment.caseValues['DEF_forcing%dtime'],
+    undefined,
+    'read-only assignment display must not enter typed configuration',
+  );
+  for (const call of p.calls.filter((c) => c.command === 'model_configuration'))
+    assert.equal(
+      (call.args.caseValues as Record<string, string>)?.['DEF_forcing%dtime'],
+      undefined,
+    );
+});
+
+test('surface crop switch is visible and editable in both data-step pages', async () => {
+  for (const name of ['NewCasePage', 'CasesPage'] as const) {
+    const p = page(
+      name,
+      { form: { ...form, kind: 'region', grid: 'latlon' }, sites: [site], step: 3 },
+      [site],
+      initialValues,
+      { profile: { grid: 'latlon' } },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    const id =
+      name === 'NewCasePage'
+        ? 'new-option-USE_srfdata_from_larger_region'
+        : 'case-USE_srfdata_from_larger_region';
+    const field = p.render().fields.find((f) => f.id === id);
+    assert.ok(field, name);
+    assert.equal(field.label, '从已有大区域地表资料裁取');
+    p.set(id, '.true.');
+    assert.equal(p.render().fields.find((f) => f.id === id)?.value, '.true.');
+  }
+});
+
+test('surface summary reports explicit configuration and does not invent defaults', () => {
+  assert.equal(simulation.surfacePreparation({}), undefined);
+  assert.deepEqual(
+    simulation.surfacePreparation({
+      USE_srfdata_from_larger_region: '.true.',
+      DEF_dir_existing_srfdata: '/surface',
+    }),
+    {
+      mode: '从已有大区域地表资料裁取',
+      source: '/surface',
+    },
+  );
+  assert.match(
+    simulation.surfacePreparation({ USE_srfdata_from_larger_region: '.false.' }, true)!.mode,
+    /Generate from raw/,
+  );
+  assert.match(
+    simulation.surfacePreparation({
+      USE_srfdata_from_larger_region: '.false.',
+      USE_srfdata_from_3D_gridded_data: '.true.',
+    })!.mode,
+    /三维网格/,
+  );
+});
+
+test('review receives the spatial surface mode and source without changing the case', async () => {
+  const p = page(
+    'CasesPage',
+    undefined,
+    [site],
+    {
+      ...initialValues,
+      USE_srfdata_from_larger_region: '.true.',
+      DEF_dir_existing_srfdata: '/large/surface',
+    },
+    { profile: { grid: 'latlon' } },
+  );
+  Object.assign(p.state.selectedCase.entry, { spatial: true });
+  await p.mount();
+  const summary = p.element('RunPanel').props.summary as {
+    surface?: { mode: string; source?: string };
+  };
+  assert.deepEqual(summary.surface, { mode: '从已有大区域地表资料裁取', source: '/large/surface' });
+  assert.ok(!p.calls.some((call) => call.command === 'case_data_save'));
+  Object.assign(p.state.selectedCase.entry, { spatial: false });
+  p.render();
+  assert.equal((p.element('RunPanel').props.summary as typeof summary).surface, undefined);
+});
+
+test('failed context with unreadable forcing header exposes a constrained reference repair and reloads after save', async () => {
+  let repaired = false;
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    context: async () => {
+      if (!repaired) throw new Error('materialize: broken header');
+      return { entry: { dir: '/preview/site' }, profile: {} };
+    },
+    readCase: async (args) => {
+      if (args.dir && !repaired) throw new Error('invalid forcing header');
+      return [
+        ...Object.entries(initialValues).map(([path, value]) => ({ path, value })),
+        { path: 'DEF_forcing_namelist', value: repaired ? "'fixed.nml'" : "'broken.nml'" },
+      ];
+    },
+    saveCase: async (args) => {
+      assert.deepEqual(args.fields, [{ path: 'DEF_forcing_namelist', value: 'fixed.nml' }]);
+      assert.deepEqual(args.dirs, ['/project/site']);
+      repaired = true;
+    },
+  });
+  await p.mount();
+  assert.equal(p.render().fields.find((f) => f.id === 'case-forcing-repair')?.value, 'broken.nml');
+  assert.equal(p.element('RunPanel').props.disabled, true);
+  assert.ok(
+    p.elements.some(
+      (el) => el.type === 'Input' && el.props.readOnly && el.props.value === 'broken.nml',
+    ),
+  );
+  p.set('case-forcing-repair', 'fixed.nml');
+  await p.click('case-forcing-repair-save');
+  await p.settle();
+  assert.ok(repaired);
+  assert.ok(p.calls.filter((call) => call.command === 'model_case_context').length >= 2);
+  assert.ok(!p.render().fields.some((f) => f.id === 'case-forcing-repair'));
+});
+
+test('reference repair retains invalid replacement and stays disabled while case runs', async () => {
+  let saved = 0;
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    context: async () => {
+      throw new Error('broken header');
+    },
+    readCase: async (args) => {
+      if (args.dir) throw new Error('bad forcing');
+      return [{ path: 'DEF_forcing_namelist', value: "'bad.nml'" }];
+    },
+    saveCase: async () => {
+      saved++;
+      throw new Error('replacement header also invalid');
+    },
+  });
+  await p.mount();
+  p.set('case-forcing-repair', 'also-bad.nml');
+  await assert.rejects(p.click('case-forcing-repair-save'), /replacement header/);
+  assert.equal(
+    p.render().fields.find((f) => f.id === 'case-forcing-repair')?.value,
+    'also-bad.nml',
+  );
+  Object.assign(p.state.running, { '/project/site': { running: true } });
+  p.render();
+  assert.equal(p.render().fields.find((f) => f.id === 'case-forcing-repair')?.disabled, true);
+  const action = p.render().actions.find((a) => a.id === 'case-forcing-repair-save')!;
+  assert.equal(action.enabled, false);
+  await action.run();
+  assert.equal(saved, 1);
+});
+
+test('unrelated context errors and unreadable main case do not offer invented reference repair', async () => {
+  for (const mainBroken of [false, true]) {
+    const p = page('CasesPage', undefined, [site], initialValues, {
+      context: async () => {
+        throw new Error('context unavailable');
+      },
+      readCase: async () => {
+        if (mainBroken) throw new Error('main case invalid');
+        return [{ path: 'DEF_forcing_namelist', value: "'valid.nml'" }];
+      },
+    });
+    await p.mount();
+    assert.ok(!p.render().fields.some((f) => f.id === 'case-forcing-repair'));
+    assert.equal(p.element('RunPanel').props.disabled, true);
+  }
+});
+
+test('spatial range fields are disabled in the assistant contract on the review step', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon', domain_kind: 'region', spatial: true },
+    schema: [
+      ...schema,
+      field('DEF_GRIDBASED_lon_res', '网格与并行', '0.1'),
+      field('DEF_GRIDBASED_lat_res', '网格与并行', '0.1'),
+    ],
+  });
+  await p.mount();
+  await p.goto('case-step-2');
+  for (const name of ['DEF_GRIDBASED_lon_res', 'DEF_GRIDBASED_lat_res']) {
+    const control = p.render().fields.find((f) => f.id === `case-${name}`);
+    assert.ok(control, `${name} is present for review`);
+    assert.equal(
+      control.disabled,
+      true,
+      `${name} must be disabled for the assistant too, not just the DOM`,
+    );
+  }
+});
+
+test('single-site data steps mark regional surface controls unavailable without changing stored values', async () => {
+  for (const name of ['NewCasePage', 'CasesPage'] as const) {
+    const p = page(name, { form, sites: [site], step: 3 });
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    for (const key of ['USE_srfdata_from_larger_region', 'DEF_dir_existing_srfdata']) {
+      const control = p
+        .render()
+        .fields.find((f) => f.id === `${name === 'NewCasePage' ? 'new-option-' : 'case-'}${key}`);
+      assert.ok(control);
+      assert.equal(control.disabled, true);
+      const wrapper = p.elements.find(
+        (el) => el.type === 'Field' && el.props.label === control.label,
+      );
+      assert.match(String(wrapper?.props.hint), /仅空间算例使用/);
+    }
+    assert.ok(!p.calls.some((call) => call.command === 'case_data_save'));
+  }
+});
+
+test('spatial step 2 locks range fields in the assistant contract too', async () => {
+  const rangeKeys = simulation.caseRangeKeys('latlon');
+  assert.ok(rangeKeys.length > 0);
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { spatial: true, grid: 'latlon' },
+    schema: rangeKeys.map((name) => field(name, '范围与网格')),
+  });
+  await p.mount();
+  await p.goto('case-step-2');
+  const contractFields = p.render().fields;
+  for (const key of rangeKeys) {
+    const field = contractFields.find((f) => f.id === `case-${key}`);
+    assert.ok(field, `${key} is in the contract`);
+    // ui_set+ui_commit 也不能改边界/分辨率：DOM 锁 + 契约 disabled 必须一致（F-S-09）。
+    assert.equal(field.disabled, true, `${key} must be disabled at step 2 for a spatial case`);
+  }
+});
+
+test('single-site creation drops regional surface residue left by a spatial draft', async () => {
+  const p = page('NewCasePage', {
+    form,
+    sites: [site],
+    step: 3,
+    caseValues: {
+      USE_srfdata_from_larger_region: '.true.',
+      DEF_dir_existing_srfdata: '/surface',
+      USE_srfdata_from_3D_gridded_data: '.true.',
+    },
+  });
+  await p.mount();
+  // 单点算例的这两个控件仍可见但禁用（只能查看/不能再用），残留值不参与创建。
+  for (const key of ['USE_srfdata_from_larger_region', 'DEF_dir_existing_srfdata']) {
+    const control = p.render().fields.find((f) => f.id === `new-option-${key}`);
+    assert.ok(control, `${key} is present for single-site review`);
+    assert.equal(control.disabled, true);
+  }
+  await p.click('new-next');
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('IGBP');
+  p.render();
+  await p.click('new-next');
+  await p.click('new-create');
+  const request = p.calls.find((call) => call.command === 'new_case');
+  assert.ok(request);
+  const paths = (request.args.fields as { path: string }[]).map((f) => f.path);
+  for (const key of [
+    'USE_srfdata_from_larger_region',
+    'DEF_dir_existing_srfdata',
+    'USE_srfdata_from_3D_gridded_data',
+  ]) {
+    assert.ok(
+      !paths.some((path) => path.toLowerCase() === key.toLowerCase()),
+      `${key} residue is not written into a single-site case`,
+    );
+  }
 });

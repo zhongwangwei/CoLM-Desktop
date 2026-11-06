@@ -58,6 +58,7 @@ import {
   remoteStudyReply,
   studyModelRevision,
   studyExecutionIssue,
+  hybridStudyModelRevision,
   type StudyModelPin,
   type RemoteStudyRecord,
   type RemoteStudyReply,
@@ -261,6 +262,9 @@ function withSuggestedRange(row: ParameterContext, p: ParameterDraft): Parameter
   const [min, max] = suggestedRange(row, p.scale);
   return { ...p, min, max };
 }
+const absoluteDestination = (text: string) =>
+  /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(text) && ![...text].some((char) => char.charCodeAt(0) < 0x20);
+
 export default function ResearchPage({ active = true }: { active?: boolean }) {
   const { state, notify, refreshVersions, navigate, update } = useApp();
   const en = state.language === 'en';
@@ -1172,7 +1176,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     typeof frozenKernel === 'string' && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(frozenKernel)
       ? frozenKernel
       : kernel;
-  const executionIssue = envelope ? studyExecutionIssue(envelope.model_version, !!host) : null;
+  const executionIssue = envelope
+    ? studyExecutionIssue(envelope.model_version, !!host, {
+        exists: remotePermissions.exists,
+        closable: remotePermissions.close,
+        fetched: remotePermissions.fetched,
+      })
+    : null;
   const start = async () => {
     if (runLock.current || lock.current || statusPending === studyDir)
       throw new Error(
@@ -1196,7 +1206,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'This study has a server submission; inspect or fetch it instead of starting another run',
         ),
       );
-    const issue = studyExecutionIssue(envelope.model_version, !!host);
+    const issue = studyExecutionIssue(envelope.model_version, !!host, {
+      exists: remotePermissions.exists,
+      closable: remotePermissions.close,
+      fetched: remotePermissions.fetched,
+    });
     if (issue) throw new Error(tr(...issue));
     const concurrency = Number(jobs);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
@@ -1315,7 +1329,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         ),
       );
     if (command === 'study_resume' || command === 'study_retry') {
-      const issue = studyExecutionIssue(envelope?.model_version, !!host);
+      const issue = studyExecutionIssue(envelope?.model_version, !!host, {
+        exists: remotePermissions.exists,
+        closable: remotePermissions.close,
+        fetched: remotePermissions.fetched,
+      });
       if (issue) throw new Error(tr(...issue));
     }
     // "待复核"的任务是进程身份核对不上的（多是软件中途被关）：原来重试固定不带它们，按了等于没按
@@ -1655,7 +1673,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const previews: string[] = [];
       try {
         const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
-          case: await effectiveCase(aiCase, studyModel, previews),
+          case: await effectiveCase(
+            aiCase,
+            hybridStudyModelRevision(executionIssue, studyModel),
+            previews,
+          ),
         });
         if (current()) setHybridInfo(data);
         return data;
@@ -1675,7 +1697,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const data = await invokeJson('hybrid_check', {
         case: aiCase,
         kernelDir: kernel,
-        modelRevision: studyModel,
+        modelRevision: hybridStudyModelRevision(executionIssue, studyModel),
         preprocessors,
       });
       if (current()) setResult(JSON.stringify(data, null, 2));
@@ -1732,7 +1754,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           networkSpec: net,
           studyDirs: [...chosenStudies],
           sourceCase: aiCase,
-          parent: studyModel,
+          parent: hybridStudyModelRevision(executionIssue, studyModel),
         });
       return data;
     });
@@ -1759,6 +1781,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         }),
         parent: fit.parent,
       });
+      let version: { version: { id: string; revision: number } };
       try {
         const attached = await invokeJson<{ draft: { id: string }; assetRoot: string }>(
           'model_attach_network',
@@ -1776,22 +1799,33 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             studyDirs: fit.studyDirs,
           },
         );
-        const version = await invokeJson<{ version: { id: string; revision: number } }>(
-          'model_freeze',
-          { id: attached.draft.id, assetRoot: attached.assetRoot },
-        );
-        await refreshVersions();
-        notify(
-          unvalidated
-            ? `${tr('已保存为未验证实验版本', 'Saved as an unvalidated experimental version')}: ${version.version.id}@${version.version.revision}${tr('（没有做留一研究交叉验证，不能当作已验证结论）', ' (no leave-one-study-out validation, so treat it as unverified)')}`
-            : `${tr('已保存 AI 模型版本', 'Saved AI model version')}: ${version.version.id}@${version.version.revision}`,
-        );
-        if (current()) setFit({ ...fit, savedVersion: version.version });
-        return version;
+        version = await invokeJson<{ version: { id: string; revision: number } }>('model_freeze', {
+          id: attached.draft.id,
+          assetRoot: attached.assetRoot,
+          finish: true,
+        });
       } catch (error) {
+        // 冻结成功之前失败：draft 还在，可以继续编辑/恢复；只有这种情况才说“保留可恢复草稿”。
         notify(`${tr('保留可恢复草稿', 'Recoverable draft retained')}: ${draft.id}`, true);
         throw error;
       }
+      // 冻结成功就已经保存好了：先提交成功状态与提示。`finish: true` 已冻结版本并删除草稿，
+      // 之后再刷新失败也不能说“保留可恢复草稿”，也不能把保存成功状态一起丢掉。
+      if (current()) setFit({ ...fit, savedVersion: version.version });
+      notify(
+        unvalidated
+          ? `${tr('已保存为未验证实验版本', 'Saved as an unvalidated experimental version')}: ${version.version.id}@${version.version.revision}${tr('（没有做留一研究交叉验证，不能当作已验证结论）', ' (no leave-one-study-out validation, so treat it as unverified)')}`
+          : `${tr('已保存 AI 模型版本', 'Saved AI model version')}: ${version.version.id}@${version.version.revision}`,
+      );
+      try {
+        await refreshVersions();
+      } catch (error) {
+        notify(
+          `${tr('版本已保存，但版本列表刷新失败；重新打开版本页即可看到', 'Version saved, but the version list could not refresh; reopen the versions page to see it')}: ${String(error)}`,
+          true,
+        );
+      }
+      return version;
     });
   const status = envelope?.state?.status || 'Draft';
   // 打开的研究以它记下的版本为准（可能不是当前选给模拟用的那个）。
@@ -2612,7 +2646,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             'study-pause',
             tr('暂停', 'Pause'),
             () => control('study_pause'),
-            permissions.pause,
+            // 旧研究没有可核对的模型身份时 pause/resume 是同一条执行链，别只拦后两个（V 区边角 1）。
+            permissions.pause && !executionIssue,
             true,
           ),
           action(
@@ -2674,13 +2709,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       tr('导出研究', 'Export study'),
       () =>
         task(async (current) => {
-          const value = await invoke('study_export', { studyDir, out: exportDir });
+          const destination = exportDir.trim();
+          if (!absoluteDestination(destination))
+            throw new Error(
+              tr(
+                '导出目录必须是绝对路径（以 /、盘符或 \\\\ 开头），且不能含控制字符。',
+                'Export directory must be an absolute path (starting with /, a drive letter, or \\\\) and contain no control characters.',
+              ),
+            );
+          const value = await invoke('study_export', { studyDir, out: destination });
           if (current()) setResult(String(value));
           // 原来导出成功没有任何提示（GUI 审查 A-06）。
           notify(tr(`研究已导出到 ${exportDir}`, `Study exported to ${exportDir}`));
           return value;
         }),
-      !!studyDir && !!exportDir && !launching && !unresolvedRemote,
+      !!studyDir && absoluteDestination(exportDir.trim()) && !launching && !unresolvedRemote,
       true,
     ),
     action(
@@ -2707,7 +2750,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   ];
   const aiActions = ai
     ? [
-        action('hybrid-info', tr('检查适用性', 'Inspect applicability'), inspectHybrid, !!aiCase),
+        action(
+          'hybrid-info',
+          tr('检查适用性', 'Inspect applicability'),
+          inspectHybrid,
+          !!aiCase && !executionIssue,
+        ),
         action(
           'hybrid-climate',
           tr('生成气候特征', 'Generate climate features'),
@@ -2719,7 +2767,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'hybrid-check',
           tr('在所选算例上检查网络', 'Check the network on the chosen case'),
           checkHybrid,
-          !!aiCase && !!kernel,
+          !!aiCase && !!kernel && !executionIssue,
         ),
         action(
           'hybrid-studies',
@@ -2731,7 +2779,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'hybrid-fit',
           tr('拟合特征到参数', 'Fit features to parameters'),
           fitNetwork,
-          chosenStudies.length > 0 && !!out && !!kernel,
+          chosenStudies.length > 0 && !!out && !!kernel && !executionIssue,
           true,
         ),
         action(
@@ -2740,7 +2788,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             ? tr('保存为未验证实验版本', 'Save as an unvalidated experimental version')
             : tr('保存 AI 为新模型版本', 'Save AI as a new model version'),
           saveFitVersion,
-          !!fit && !fit.savedVersion && fitValidation(fit.report) !== false,
+          !!fit && !fit.savedVersion && fitValidation(fit.report) !== false && !executionIssue,
           true,
         ),
       ]
@@ -5601,7 +5649,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               {result && <StudyResult text={result} theme={state.theme} en={en} />}
               {/* 导出按钮在这个折叠区里：标题本身登记为动作，助手先展开才能按到"导出研究"。 */}
               <Advanced action="research-export-panel" title={tr('导出研究', 'Export the study')}>
-                <Field label={tr('导出到哪个目录', 'Export to')}>
+                <Field
+                  label={tr('导出到哪个目录', 'Export to')}
+                  hint={
+                    exportDir.trim() && !absoluteDestination(exportDir.trim())
+                      ? tr(
+                          '导出目录必须是绝对路径（以 /、盘符或 \\\\ 开头）；否则「导出研究」按钮会保持不可用。',
+                          'The export directory must be absolute (starting with /, a drive letter, or \\\\); otherwise “Export study” stays disabled.',
+                        )
+                      : undefined
+                  }
+                >
                   <div className="study-path">
                     <Input value={exportDir} onChange={(e) => setExportDir(e.target.value)} />
                     <ActionButton

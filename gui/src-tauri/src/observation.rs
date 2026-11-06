@@ -84,6 +84,7 @@ pub async fn convert_observation_table(
     src: String,
     dst_dir: String,
     options: ObservationConvertOptions,
+    overwrite: Option<bool>,
 ) -> Result<Vec<ConvertedObservationSite>, String> {
     std::fs::create_dir_all(&dst_dir)
         .map_err(|error| format!("验证数据目录 {dst_dir} 无法创建：{error}"))?;
@@ -94,6 +95,10 @@ pub async fn convert_observation_table(
         "--time-column".into(),
         options.time_column,
     ];
+    if overwrite == Some(true) {
+        args.push("--overwrite".into());
+        args.push("1".into());
+    }
     if let Some(site_column) = options.site_column.filter(|v| !v.trim().is_empty()) {
         args.push("--site-column".into());
         args.push(site_column);

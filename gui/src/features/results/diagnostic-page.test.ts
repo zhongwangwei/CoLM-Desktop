@@ -86,6 +86,8 @@ function harness(
     seriesData?: seriesHelpers.SeriesData;
     diagnosticSeries?: seriesHelpers.SeriesData;
     running?: Record<string, { status: string; run_case: string }>;
+    /** 后端自动探测到的观测文件；给值时页面会像真实打开算例一样自动评估一次。 */
+    autoObservation?: string;
   } = {},
 ) {
   let selectedCase = initialCase;
@@ -264,7 +266,7 @@ function harness(
     // 页面源码里的报错/失败原因走 bilingual（import 被剥掉）；测试按中文返回。
     bilingual: (zh: string) => zh,
     utcSeconds: (value: string) => Date.parse(value) / 1000,
-    defaultObservation: async () => '',
+    defaultObservation: async () => options.autoObservation ?? '',
     timeTicks: () => [],
     modelClockIso,
     uPlot: () => {},
@@ -953,7 +955,7 @@ test('multi-station comparison exports the metrics with their conditions', async
   assert.match(csv, /f_lfevpa/);
   assert.match(csv, /\/obs\/compare\.nc/);
   // 条件列来自比较时的快照（空窗口、跳过 0 条、未订正），不是导出时界面上的新输入。
-  assert.match(csv, /\/obs\/compare\.nc,,,0,0,f_lfevpa/);
+  assert.match(csv, /\/obs\/compare\.nc,,,0,0,model_clock,f_lfevpa/);
 });
 
 test('a run from another project joins the comparison without scanning the project', async () => {
@@ -1469,4 +1471,56 @@ test('a selected composite reevaluates after its conditions change instead of lo
     h.requests.filter((request) => request.command === 'metrics').at(-1)?.args.obs,
     '/obs/replaced.nc',
   );
+});
+
+test('composite selections cannot export or refresh a native series', async () => {
+  const h = harness(false, undefined, '', '/case', {
+    metricsRows: [
+      {
+        name: 'Resp',
+        model_var: 'f_ar + f_hr',
+        n: 2,
+        rmse: 1,
+        mae: 1,
+        bias: 1,
+        r2: 1,
+        nse: 1,
+        kge: 1,
+        time: [1, 2],
+        model: [3, 4],
+        obs: [2, 3],
+      },
+    ],
+  });
+  await h.render();
+  await h.action('result-settings');
+  h.field('result-observation')!.set!('/obs/single.nc');
+  await h.render();
+  await h.action('evaluate-observations');
+  h.field('result-variable')!.set!('Resp');
+  await h.render();
+  assert.equal(actionById(h, 'export-full-series-csv')?.enabled, false);
+  assert.match(
+    JSON.stringify(h.tree()),
+    /复合|Composite evaluation quantities have no single native series/,
+  );
+  const requestsBefore = h.requests.filter((request) => request.command === 'series').length;
+  h.field('result-variable')!.set!('f_lfevpa');
+  await h.render();
+  assert.equal(h.requests.filter((request) => request.command === 'series').length, requestsBefore);
+  assert.equal(actionById(h, 'export-full-series-csv')?.enabled, true);
+});
+
+test('automatic evaluation keeps the settings dialog the user is editing open', async () => {
+  const h = harness(false, undefined, '', '/case', { autoObservation: '/obs/auto.nc' });
+  await h.render();
+  const evaluations = () => h.requests.filter((request) => request.command === 'metrics').length;
+  assert.ok(evaluations() >= 1, '后端自动探测到观测后会先评估一次');
+  await h.action('result-settings');
+  await h.action('result-advanced-settings');
+  h.field('result-spinup')!.set!('1');
+  await h.render();
+  assert.ok(h.field('result-observation'), '自动重算完成后设置对话框仍然打开');
+  assert.ok(h.field('result-advanced'), '高级设置折叠区也保持打开');
+  assert.ok(evaluations() >= 2, '改条件触发了自动重算');
 });
