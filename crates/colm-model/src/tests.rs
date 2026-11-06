@@ -1840,7 +1840,11 @@ fn isotope_scalar_override_targets_owned_parameter_file() {
         let Some(colm_namelist::Value::Str(path)) = remote_doc.get("DEF_ISOTOPE_PARAM_FILE") else {
             panic!()
         };
-        assert!(Path::new(path).starts_with(&remote.run_case));
+        // Fortran 路径去掉 Windows verbatim 前缀，比较实际目标而非两种路径表示。
+        assert!(Path::new(path)
+            .canonicalize()
+            .unwrap()
+            .starts_with(remote.run_case.canonicalize().unwrap()));
         let remote_params = colm_namelist::parse(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(remote_params.get(key).unwrap().to_string(), "0.01");
         assert_eq!(

@@ -1033,7 +1033,11 @@ mod tests {
             .env("STUB_ARGS", jobdir.join("args"))
             .status()
             .unwrap();
-        assert!(status.success());
+        assert_eq!(
+            status.code(),
+            Some(23),
+            "sandbox failure must reach the scheduler"
+        );
         assert_eq!(
             std::fs::read_to_string(jobdir.join("exit_code"))
                 .unwrap()

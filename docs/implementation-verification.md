@@ -45742,6 +45742,21 @@ GUI `config::config_tests` **157/157**、`history::` 24/24；GUI `--lib` 全量 
 
 边界：不支持硬链接的卷会明确拒绝默认的无覆盖安装；未做真实 SMB/exFAT、集群调度或外部 LLM 全链验收。已有用户生成的手册、图片、运行输出不纳入本次源码提交。
 
-远程完整复核结果：workspace Clippy、fmt、四张生成表 drift、namelist roundtrip、histmap 和 remote Python 全部通过。初次完整测试 3566 通过/56 失败/16 ignored；失败进一步定位为 36 项长 TMPDIR 触发原有 Fortran 256 字节保护、14 项继承的 Conda libtinfo 警告扰动模拟调度器输出、6 项外层沙箱禁止嵌套 bubblewrap。没有据此删除或放宽源码保护。
+远程完整复核结果：workspace Clippy、fmt、四张生成表 drift、namelist roundtrip、histmap 和 remote Python 全部通过。初次完整测试 3566 通过/56 失败/16 ignored；失败进一步定位为 36 项长 TMPDIR 触发原有 Fortran 256 字节保护、14 项继承的 Conda libtinfo 警告扰动模拟调度器输出、6 项沙箱相关失败（后续 CI 进一步区分为 5 项嵌套 bubblewrap 限制和 1 项旧退出码断言）。没有据此删除或放宽源码保护。
 
-在任务 `codex-639b7235d3714419ba58f889a2d1cfa5` 重跑三个失败目标：复用同一源码已编译的测试二进制，清除 LD_LIBRARY_PATH/LD_PRELOAD，使用 runner 已隔离的 /tmp tmpfs 放小测试夹具（内存盘，不写服务器根磁盘；源码、编译产物、日志与取回结果仍在 data01）。CLI 869 通过/1 项嵌套沙箱失败；remote 全部通过；workspace 75 通过/5 项嵌套沙箱失败。其余原失败项均消失，6 项嵌套沙箱限制保留为验证缺口，由后续 GitHub 原生 runner 验证。本轮没有修改测试来隐藏它们，也没有降低生产沙箱限制。
+在任务 `codex-639b7235d3714419ba58f889a2d1cfa5` 重跑三个失败目标：复用同一源码已编译的测试二进制，清除 LD_LIBRARY_PATH/LD_PRELOAD，使用 runner 已隔离的 /tmp tmpfs 放小测试夹具（内存盘，不写服务器根磁盘；源码、编译产物、日志与取回结果仍在 data01）。CLI 869 通过/1 项退出码断言失败；remote 全部通过；workspace 75 通过/5 项嵌套沙箱失败。其余原失败项均消失，5 项嵌套沙箱限制和 1 项待 CI 定位的退出码断言保留为验证缺口，由后续 GitHub 原生 runner 验证。本轮没有修改测试来隐藏它们，也没有降低生产沙箱限制。
+
+
+#### beta.6 首次 GitHub CI 的退出码断言修正
+
+GitHub Ubuntu 原生 runner 在 `remote_workspace_cmd::tests::sandbox_failure_stops_job_and_exit_code_is_preserved` 同样失败，证明该 CLI 失败不是 T7920 嵌套沙箱限制。读取测试发现它使用始终退出 23 的 bwrap stub；本轮生产 job wrapper 已正确将失败状态传播给调用者，旧测试却仍断言 `status.success()`。修正为 `status.code() == Some(23)`，保留 exit_code 文件为 23、phase 为 execute 和调用参数的断言；不回退生产退出码逻辑。抽取当前 wrapper 的独立脚本验证状态、文件、阶段和参数均正确。
+
+首次 CI 的 GUI Ubuntu 完整 Rust 测试已为 672 通过/1 ignored，Windows GUI 也通过；引擎与 GUI MSRV、Python tooling 通过。此次修正后继续跑同版本完整 CI，不把失败测试改为忽略。
+
+
+#### beta.6 Windows 路径断言修正
+
+首次 Windows 引擎 CI 在 `isotope_scalar_override_targets_owned_parameter_file` 失败：物化返回 canonical verbatim 路径（如 Windows 的长路径前缀），Fortran namelist 路径则有意移除此表示前缀，原始 `Path::starts_with` 因表示不同误判。测试现先 canonicalize 两边再比较归属，仍读取真实参数文件并断言 0.01；不修改生产 namelist 路径转换。`cargo test -p colm-model --lib isotope_scalar_override_targets_owned_parameter_file --offline --locked` 本地 1/1 通过。退出码断言的实际定向 cargo 测试也已 1/1 通过。
+
+
+已直接核对首次 Ubuntu CI 完整日志：五项 workspace 构建/配对/沙箱测试均在 CLI 旧断言失败前通过（该 job 先跑排除 CLI 的 workspace，再单独跑 CLI）。不能把它们记为“尚未执行”。三平台引擎失败日志只有上述两个旧测试预期，无第三个根因。两项补修后重新打包 beta.6 并再次用完整应用路径重启，首页官方模型加载完成、操作按钮可用。
