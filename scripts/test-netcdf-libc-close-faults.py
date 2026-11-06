@@ -37,19 +37,47 @@ def main():
     checks = []
     with tempfile.TemporaryDirectory(prefix="colm-close-fault-") as temporary:
         temp = Path(temporary).resolve()
+        # Guard the injection boundary independently of the actual NetCDF writer.
+        target_check = temp / "target-check.c"
+        target_check.write_text(r'''
+#include <assert.h>
+#include "netcdf_fault_target.h"
+int main(void) {
+    const char *target = "/private/fixture/Observation/A_Flux.nc";
+    unsetenv("COLM_TEST_IO_TARGET_MODE");
+    assert(colm_fault_target_matches(target, target));
+    assert(!colm_fault_target_matches("/private/fixture/Observation/.A_Flux.nc.1-2-3.tmp", target));
+    setenv("COLM_TEST_IO_TARGET_MODE", "observation-temp", 1);
+    setenv("COLM_TEST_IO_ROOT", "/private/fixture", 1);
+    assert(colm_fault_target_matches("/private/fixture/Observation/.A_Flux.nc.1-2-3.tmp", target));
+    const char *bad[] = {target, "/private/fixture-other/Observation/.A_Flux.nc.1-2-3.tmp", "/private/fixture/Elsewhere/.A_Flux.nc.1-2-3.tmp", "/private/fixture/Observation/.B_Flux.nc.1-2-3.tmp", "/private/fixture/Observation/.A_Flux.nc.-2-3.tmp", "/private/fixture/Observation/.A_Flux.nc.1-2-3.tmp.extra", "/private/fixture/Observation/.A_Flux.nc.1-2.tmp", "/private/fixture/Observation/.A_Flux.nc.1-2-3-4.tmp", ""};
+    for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) assert(!colm_fault_target_matches(bad[i],target));
+    setenv("COLM_TEST_IO_ROOT", "/private/other", 1);
+    assert(!colm_fault_target_matches("/private/fixture/Observation/.A_Flux.nc.1-2-3.tmp", target));
+    unsetenv("COLM_TEST_IO_ROOT");
+    assert(!colm_fault_target_matches("/private/fixture/Observation/.A_Flux.nc.1-2-3.tmp", target));
+}
+''', encoding="utf-8")
+        target_binary = temp / "target-check"
+        subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-I",
+                        str(root / "scripts/fixtures"), str(target_check), "-o", str(target_binary)],
+                       check=True, timeout=30)
+        subprocess.run([str(target_binary)], check=True, timeout=10)
+        checks.append("fault target matching accepts only the private exact or unique staging path")
         library = temp / "close-fault.so"
         subprocess.run(["cc", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
                         str(root / "scripts/fixtures/netcdf_close_fault.c"), "-o", str(library)],
                        check=True, timeout=30)
 
-        def run(command, target, injected=None, final_only=True):
+        def run(command, target, injected=None, final_only=True, observation_temp=False):
             trace = temp / "fault.log"
             trace.unlink(missing_ok=True)
             phase = temp / "inside-nc-close"
             phase.unlink(missing_ok=True)
             env = os.environ.copy()
             for name in ("LD_PRELOAD", "COLM_TEST_IO_TARGET", "COLM_TEST_IO_TRACE", "COLM_TEST_IO_ERRNO",
-                         "COLM_TEST_IO_CLOSE_PHASE", "COLM_TEST_IO_ONLY_FINAL_CLOSE"):
+                         "COLM_TEST_IO_CLOSE_PHASE", "COLM_TEST_IO_ONLY_FINAL_CLOSE",
+                         "COLM_TEST_IO_TARGET_MODE", "COLM_TEST_IO_ROOT"):
                 env.pop(name, None)
             if injected:
                 env.update(LD_PRELOAD=str(library), COLM_TEST_IO_TARGET=str(target.resolve()),
@@ -57,6 +85,9 @@ def main():
                            COLM_TEST_IO_CLOSE_PHASE=str(phase))
                 if final_only:
                     env["COLM_TEST_IO_ONLY_FINAL_CLOSE"] = "1"
+            if injected and observation_temp:
+                assert target.resolve().is_relative_to(temp)
+                env.update(COLM_TEST_IO_TARGET_MODE="observation-temp", COLM_TEST_IO_ROOT=str(temp))
             result = subprocess.run([str(part) for part in command], env=env,
                                     capture_output=True, text=True, timeout=30)
             evidence = trace.read_text() if trace.exists() else ""
@@ -76,8 +107,8 @@ def main():
                           encoding="utf-8")
         output = temp / "Observation"
         command = [cli, "observation-table-convert", source, output, "--time-column", "time",
-                   "--site-column", "site", "--variable", "Qle=Qle", "--json", "1"]
-        result, _ = run(command, output / "A_Flux.nc.tmp")
+                   "--site-column", "site", "--variable", "Qle=Qle", "--json", "1", "--overwrite", "1"]
+        result, _ = run([opts.plain_cli.resolve(), *command[1:]], output / "A_Flux.nc")
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)[0]["rows"] == 2
         destination = output / "A_Flux.nc"
@@ -88,28 +119,21 @@ def main():
         source.write_text("time,site,Qle [W/m2]\n2020-01-01 00:00:00,A,20\n2020-01-01 00:30:00,A,21\n",
                           encoding="utf-8")
         for injected in ("ENOSPC", "EIO"):
-            # H5Fcreate probes an existing pathname before truncation. A leftover
-            # large temporary file makes its earlier libc close fault eligible.
-            # Prove that distinct phase and preserve its graceful-failure control.
-            for early_cli, label in ((cli, "phase-marked"), (opts.plain_cli.resolve(), "normal")):
-                early_output = temp / f"early-{injected}-{label}"
-                early_output.mkdir()
-                early_tmp = early_output / "A_Flux.nc.tmp"
-                early_tmp.write_bytes(destination.read_bytes())
-                early_destination = early_output / "A_Flux.nc"
-                early_destination.write_bytes(destination.read_bytes())
-                early_command = [early_cli, *command[1:]]
-                early_command[3] = early_output
-                result, evidence = run(early_command, early_tmp, injected, final_only=False)
-                assert result.returncode > 0, (result.returncode, result.stderr, evidence)
-                assert "netcdf error(13): Permission denied" in result.stderr, result.stderr
-                assert not result.stdout.strip(), result.stdout
-                fault_index = evidence.index(f"close errno={getattr(errno, injected)} ")
-                assert "nc_close enter" not in evidence[:fault_index], evidence
-                assert "phase=outside" in evidence, evidence
-                assert hashlib.sha256(early_destination.read_bytes()).hexdigest() == previous
-                checks.append(f"{label} early {injected}: H5Fcreate fails before final nc_close and keeps old output ({evidence.strip()})")
-            result, evidence = run(command, output / "A_Flux.nc.tmp", injected)
+            # A dedicated direct-create probe exercises H5Fcreate's earlier close.
+            # Production conversion uses unique staging names and never reuses this file.
+            early_tmp = temp / f"early-{injected}.nc"
+            early_tmp.write_bytes(destination.read_bytes())
+            result, evidence = run([probe, "unchecked", early_tmp], early_tmp,
+                                   injected, final_only=False)
+            assert result.returncode > 0, (result.returncode, result.stderr, evidence)
+            assert "netcdf error(13): Permission denied" in result.stderr, result.stderr
+            assert not result.stdout.strip(), result.stdout
+            fault_index = evidence.index(f"close errno={getattr(errno, injected)} ")
+            assert "nc_close enter" not in evidence[:fault_index], evidence
+            assert "phase=outside" in evidence, evidence
+            assert hashlib.sha256(destination.read_bytes()).hexdigest() == previous
+            checks.append(f"direct-create probe early {injected}: H5Fcreate fails before final nc_close ({evidence.strip()})")
+            result, evidence = run(command, output / "A_Flux.nc", injected, observation_temp=True)
             assert result.returncode != 0, "close failure was reported as conversion success"
             assert "cannot close" in result.stderr, result.stderr
             assert not result.stdout.strip(), result.stdout
@@ -129,7 +153,7 @@ def main():
             result, evidence = run([probe, "unchecked", unchecked], unchecked, injected)
             assert result.returncode == 0 and "writer returned success" in result.stdout, result.stderr
             checks.append(f"negative control {injected}: Drop alone silently swallows the injected close failure ({evidence.strip()})")
-        result, _ = run(command, output / "A_Flux.nc.tmp")
+        result, _ = run(command, output / "A_Flux.nc")
         assert result.returncode == 0, result.stderr
         assert hashlib.sha256(destination.read_bytes()).hexdigest() != previous
         verified, _ = run([probe, "observation-updated", destination], destination)

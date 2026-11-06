@@ -45765,3 +45765,14 @@ GitHub Ubuntu 原生 runner 在 `remote_workspace_cmd::tests::sandbox_failure_st
 #### beta.6 CLI 集成夹具同步闭区间规则
 
 补查集成调用发现 `study_cli_tuning.rs` 的两个 JSON 夹具仍让率定终点等于验证起点。率定终点各减 1 秒、验证起点不变，使日内采样分区保持原先半开窗口的样本集合，并满足新的严格分离校验；没有放宽生产校验或忽略失败测试。指定验证期测试、公共预检和多站点率定/应用三个定向测试先通过；随后 `cargo test -p colm-cli --test study_cli_tuning --offline --locked -- --test-threads=1` 整份 24/24 通过（140.10 秒）。只改集成测试数据和说明，不改生产逻辑；后续同等规模长测应继续优先远程执行。源码包随之重新打包，保持本地 beta.6 预览与交付测试一致。
+
+
+#### beta.6 关闭故障注入与参数目录门禁同步
+
+`44f81145` 的 GitHub 三平台完整 Rust Test 与三平台 GUI 均通过。Linux 后续关闭故障门禁仍按旧的固定 `A_Flux.nc.tmp` 路径注入，且重试没有显式覆盖；Windows/macOS 后续参数目录一致性门禁发现逻辑默认值已改为 Fortran `.true.`/`.false.`、入库目录仍为旧文本。
+
+故障工具现显式传 `--overwrite 1`，并仅在测试私有根内、同目录同 basename 的 `.name.<pid>-<nanos>-<seq>.tmp` 严格匹配唯一暂存文件；默认模式仍为精确路径匹配。新增匹配边界正反断言，早期 H5Fcreate 故障由已有直接创建探针覆盖。保留实际 close/nc_close、ENOSPC/EIO、final 阶段、错误返回、旧产物 SHA-256 不变和 Drop 负控制断言；不修改生产写出逻辑。独立代码复审 APPROVE。
+
+T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码快照实际编译 CLI/runtime 探针，终态 succeeded：libc close 故障 11/11、NetCDF API close 故障 8/8。原始 close 最终阶段返回 -101，旧输出不变，去掉故障后重试生成可读的新数据。取回证据在本机 `/tmp/colm-beta6-fault-verification/results/`。
+
+参数目录通过 `cargo run -q -p xtask -- parameter-audit` 生成；第二次生成 8 个产物的 SHA-256 完全相同。逐项比较证明 1369 个描述符中仅 715 个布尔默认值从 true/false 变为 Fortran 文本，其他字段不变；不手改生成表。Python 编译检查与 git diff 检查通过。本地 beta.6 源码包也已重新打包，包含新故障工具与生成目录；原生构建成功后已通过完整应用路径重启，确认 beta.6 首页官方模型加载完成、操作按钮可用。

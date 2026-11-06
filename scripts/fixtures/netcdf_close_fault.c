@@ -8,8 +8,9 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include "netcdf_fault_target.h"
 
-/* Test-only delayed I/O failure, limited to the exact private fixture pathname. */
+/* Test-only delayed I/O failure, limited to a private fixture or its unique observation staging file. */
 int close(int fd) {
     static _Thread_local int inside;
     if (inside) return (int)syscall(SYS_close, fd);
@@ -26,7 +27,7 @@ int close(int fd) {
     ssize_t length = readlink(link, path, sizeof(path) - 1);
     if (length >= 0) path[length] = '\0';
     int inject = (!only_final || in_final_close) && target && trace && error
-        && length >= 0 && !strcmp(path, target)
+        && length >= 0 && colm_fault_target_matches(path, target)
         && fstat(fd, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 4096;
     int result = (int)syscall(SYS_close, fd);
     int saved_errno = errno;

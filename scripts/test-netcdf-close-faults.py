@@ -6,7 +6,8 @@
       --runtime-probe /private/output/netcdf-close-probe
 
 The target-only linker wrapper performs the actual nc_close (including real file
-I/O), then reports the injected close error for one exact private fixture path.
+I/O), then reports the injected close error for a private fixture path or its
+strictly matched unique observation staging file.
 This tests checked-close propagation, not filesystem capacity exhaustion. The
 separate test-netcdf-libc-close-faults.py verifies raw POSIX close errors and the
 vendored netCDF fix that avoids inspecting HDF5 state after failed close.
@@ -36,16 +37,20 @@ def main():
     with tempfile.TemporaryDirectory(prefix="colm-close-fault-") as temporary:
         temp = Path(temporary).resolve()
 
-        def run(command, target, injected=None):
+        def run(command, target, injected=None, observation_temp=False):
             trace = temp / "fault.log"
             trace.unlink(missing_ok=True)
             env = os.environ.copy()
             for name in ("LD_PRELOAD", "COLM_TEST_IO_TARGET", "COLM_TEST_IO_TRACE", "COLM_TEST_IO_ERRNO",
-                         "COLM_TEST_IO_CLOSE_PHASE", "COLM_TEST_IO_ONLY_FINAL_CLOSE"):
+                         "COLM_TEST_IO_CLOSE_PHASE", "COLM_TEST_IO_ONLY_FINAL_CLOSE",
+                         "COLM_TEST_IO_TARGET_MODE", "COLM_TEST_IO_ROOT"):
                 env.pop(name, None)
             if injected:
                 env.update(COLM_TEST_IO_TARGET=str(target.resolve()),
                            COLM_TEST_IO_TRACE=str(trace), COLM_TEST_IO_ERRNO=injected)
+            if injected and observation_temp:
+                assert target.resolve().is_relative_to(temp)
+                env.update(COLM_TEST_IO_TARGET_MODE="observation-temp", COLM_TEST_IO_ROOT=str(temp))
             result = subprocess.run([str(part) for part in command], env=env,
                                     capture_output=True, text=True, timeout=30)
             evidence = trace.read_text() if trace.exists() else ""
@@ -60,8 +65,8 @@ def main():
                           encoding="utf-8")
         output = temp / "Observation"
         command = [cli, "observation-table-convert", source, output, "--time-column", "time",
-                   "--site-column", "site", "--variable", "Qle=Qle", "--json", "1"]
-        result, _ = run(command, output / "A_Flux.nc.tmp")
+                   "--site-column", "site", "--variable", "Qle=Qle", "--json", "1", "--overwrite", "1"]
+        result, _ = run(command, output / "A_Flux.nc")
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)[0]["rows"] == 2
         destination = output / "A_Flux.nc"
@@ -72,7 +77,7 @@ def main():
         source.write_text("time,site,Qle [W/m2]\n2020-01-01 00:00:00,A,20\n2020-01-01 00:30:00,A,21\n",
                           encoding="utf-8")
         for injected in ("ENOSPC", "EIO"):
-            result, evidence = run(command, output / "A_Flux.nc.tmp", injected)
+            result, evidence = run(command, output / "A_Flux.nc", injected, observation_temp=True)
             assert result.returncode != 0, "close failure was reported as conversion success"
             assert "cannot close" in result.stderr, result.stderr
             assert not result.stdout.strip(), result.stdout
@@ -92,7 +97,7 @@ def main():
             result, evidence = run([probe, "unchecked", unchecked], unchecked, injected)
             assert result.returncode == 0 and "writer returned success" in result.stdout, result.stderr
             checks.append(f"negative control {injected}: Drop alone silently swallows the injected close failure ({evidence.strip()})")
-        result, _ = run(command, output / "A_Flux.nc.tmp")
+        result, _ = run(command, output / "A_Flux.nc")
         assert result.returncode == 0, result.stderr
         assert hashlib.sha256(destination.read_bytes()).hexdigest() != previous
         verified, _ = run([probe, "observation-updated", destination], destination)

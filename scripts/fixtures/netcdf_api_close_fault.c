@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "netcdf_fault_target.h"
 
 extern int nc_inq_path(int, size_t *, char *);
 extern int __real_nc_close(int);
@@ -20,7 +21,7 @@ int __wrap_nc_close(int ncid) {
     char path[PATH_MAX + 1];
     int inject = target && trace && error && nc_inq_path(ncid, &length, NULL) == 0
         && length < sizeof(path) && nc_inq_path(ncid, NULL, path) == 0
-        && !strcmp(path, target);
+        && colm_fault_target_matches(path, target);
     /* Raw-libc mode only marks the boundary; never changes nc_close's result. */
     const char *phase = getenv("COLM_TEST_IO_CLOSE_PHASE");
     if (inject && phase) {
