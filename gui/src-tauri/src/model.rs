@@ -1828,15 +1828,10 @@ mod tests {
     #[test]
     fn model_worker_lease_survives_cancellation_and_releases_after_failure() {
         use std::future::Future;
-        use std::sync::{mpsc, Arc};
-        use std::task::{Context, Poll, Wake, Waker};
+        use std::sync::mpsc;
+        use std::task::{Context, Poll, Waker};
         use std::time::Duration;
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let deleting = BindingDeleteGuard::begin().unwrap();
         let denied =
             tauri::async_runtime::block_on(with_model_activity(|| -> Result<(), String> {

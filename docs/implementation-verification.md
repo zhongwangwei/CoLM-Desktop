@@ -45816,3 +45816,9 @@ T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码�
 远程互斥补丁完成后再次构建原生应用并通过同一完整路径重启，设置页与强制清理按钮正常；独立复审 CLEAR，未发现取消回归。该补丁只改 GUI 后端，引擎源码快照保持 `00e1fffc2d9d5473`。
 
 此前 `3b1e76fa` 的主 CI `42304219220` 与 Windows 内核 `42304218939` 均成功；其 release `42304219209` 已取消，避免发布缺少本次用户要求的旧安装包。beta.6 尚未发布，后续以本节补丁提交重新运行完整 CI 与安装包发布。
+
+#### beta.6 取消回归测试的新版 Clippy 兼容
+
+`8fc266fa` 的 CI `42322035644` 在 Ubuntu/macOS GUI 实测 **674 通过 / 1 ignored**，随后新版 Clippy 以 `manual_noop_waker` 拒绝测试手写的空 `Wake` 实现。改为标准库 `Waker::noop()`，移除手写结构和不再使用的导入，不修改生产代码或取消测试断言。[官方文档](https://doc.rust-lang.org/std/task/struct.Waker.html#method.noop) 标明自 Rust 1.85.0 稳定，满足现有最低版本。定向取消回归 **1/1**，GUI `cargo clippy --lib --tests --offline --locked -- -D warnings` 通过（7.53秒）。
+
+测试修正后原生应用再次构建成功，并通过完整路径重启；设置页和强制清理入口正常。引擎源码快照仍为 `00e1fffc2d9d5473`。
